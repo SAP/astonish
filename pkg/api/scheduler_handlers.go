@@ -40,8 +40,8 @@ func GetExecutor() *scheduler.Executor {
 // Used by the RunJobFunc in chat_handlers.go to construct a local executor on
 // API pods that don't have the global scheduler Executor.
 var (
-	runHeadlessMu   sync.RWMutex
-	runHeadlessFn   scheduler.RunHeadlessFunc
+	runHeadlessMu sync.RWMutex
+	runHeadlessFn scheduler.RunHeadlessFunc
 )
 
 // SetRunHeadlessFunc registers the headless runner function.

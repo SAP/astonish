@@ -490,8 +490,8 @@ func (s *stubCredStore) Count(context.Context) int                            { 
 func (s *stubCredStore) Resolve(context.Context, string) (string, string, error) {
 	return "", "", nil
 }
-func (s *stubCredStore) InvalidateToken(context.Context, string)              {}
-func (s *stubCredStore) SetSecret(context.Context, string, string) error      { return nil }
+func (s *stubCredStore) InvalidateToken(context.Context, string)         {}
+func (s *stubCredStore) SetSecret(context.Context, string, string) error { return nil }
 func (s *stubCredStore) SetSecretBatch(context.Context, map[string]string) error {
 	return nil
 }
@@ -499,8 +499,8 @@ func (s *stubCredStore) GetSecret(context.Context, string) string { return "" }
 func (s *stubCredStore) RemoveSecret(context.Context, string) error {
 	return nil
 }
-func (s *stubCredStore) HasSecrets(context.Context) bool  { return false }
-func (s *stubCredStore) SecretCount(context.Context) int  { return 0 }
+func (s *stubCredStore) HasSecrets(context.Context) bool { return false }
+func (s *stubCredStore) SecretCount(context.Context) int { return 0 }
 func (s *stubCredStore) ListSecrets(context.Context) []string {
 	return nil
 }

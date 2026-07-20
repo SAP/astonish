@@ -174,12 +174,12 @@ func (s *Store) SetSecret(context.Context, string, string) error { return nil }
 func (s *Store) SetSecretBatch(context.Context, map[string]string) error {
 	return nil
 }
-func (s *Store) GetSecret(context.Context, string) string      { return "" }
-func (s *Store) RemoveSecret(context.Context, string) error    { return nil }
-func (s *Store) HasSecrets(context.Context) bool               { return false }
-func (s *Store) SecretCount(context.Context) int               { return 0 }
-func (s *Store) ListSecrets(context.Context) []string          { return nil }
-func (s *Store) Reload(context.Context) error                  { return nil }
+func (s *Store) GetSecret(context.Context, string) string   { return "" }
+func (s *Store) RemoveSecret(context.Context, string) error { return nil }
+func (s *Store) HasSecrets(context.Context) bool            { return false }
+func (s *Store) SecretCount(context.Context) int            { return 0 }
+func (s *Store) ListSecrets(context.Context) []string       { return nil }
+func (s *Store) Reload(context.Context) error               { return nil }
 
 func (s *Store) tokenFetcher(name string) store.OAuthTokenFetcher {
 	return func(cred *store.Credential) (string, error) {

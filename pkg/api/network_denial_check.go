@@ -18,11 +18,11 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/gorilla/mux"
 	"github.com/SAP/astonish/pkg/sandbox"
 	"github.com/SAP/astonish/pkg/sandbox/netpolicy"
 	"github.com/SAP/astonish/pkg/sandbox/openshell"
 	"github.com/SAP/astonish/pkg/store"
+	"github.com/gorilla/mux"
 )
 
 // NetworkDenialCheckHandler returns pending network denial proposals for a sandbox

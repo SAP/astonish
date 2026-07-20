@@ -509,4 +509,3 @@ func TestBackendPool_RemoveDropsClientWithoutDestroy(t *testing.T) {
 		t.Fatalf("CreateSessionCalls = %d, want 2 (second client provisions)", n)
 	}
 }
-

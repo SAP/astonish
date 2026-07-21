@@ -71,18 +71,18 @@ const backendExecTimeout = 5 * time.Minute
 // triggers the first network round-trip. Safe for concurrent Call().
 type backendNodeClient struct {
 	backend    Backend
-	sessionID  string // set by BindSession; stable after first call
-	templateID string // may be empty → backend default
+	sessionID  string   // set by BindSession; stable after first call
+	templateID string   // may be empty → backend default
 	layerChain []string // pre-resolved chain (K8s); nil → derive from templateID
-	image      string // per-template container image (OpenShell); empty → backend default
+	image      string   // per-template container image (OpenShell); empty → backend default
 	limits     ResourceLimits
 	sessionEnv map[string]string
 
-	mu         sync.Mutex
-	bound      bool          // BindSession has run
-	bindDone   chan struct{} // closed once the create/start round-trip finishes
-	bindErr    error         // captured on bindDone close
-	closed     bool          // Cleanup has run
+	mu       sync.Mutex
+	bound    bool          // BindSession has run
+	bindDone chan struct{} // closed once the create/start round-trip finishes
+	bindErr  error         // captured on bindDone close
+	closed   bool          // Cleanup has run
 	// networkAllowEndpoints are baked into OpenShell CreateSession when set
 	// before BindSession completes provisioning (see SetNetworkAllowEndpoints).
 	networkAllowEndpoints []NetworkAllowEndpoint

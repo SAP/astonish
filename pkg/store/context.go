@@ -230,6 +230,8 @@ func MCPServerStoresFromContext(ctx context.Context) *MCPServerStores {
 
 const fleetTemplateStoreKey contextKey = "astonish_fleet_template_store"
 const fleetPlanStoreKey contextKey = "astonish_fleet_plan_store"
+const fleetSetupProfileStoreKey contextKey = "astonish_fleet_setup_profile_store"
+const fleetSetupDraftStoreKey contextKey = "astonish_fleet_setup_draft_store"
 const fleetRunStateStoreKey contextKey = "astonish_fleet_run_state_store"
 const fleetMailboxStoreKey contextKey = "astonish_fleet_mailbox_store"
 const fleetTaskBoardStoreKey contextKey = "astonish_fleet_task_board_store"
@@ -283,6 +285,38 @@ func FleetPlanStoreFromContext(ctx context.Context) FleetPlanStore {
 		return nil
 	}
 	fs, _ := ctx.Value(fleetPlanStoreKey).(FleetPlanStore)
+	return fs
+}
+
+// WithFleetSetupProfileStore returns a new context containing a tenant-scoped FleetSetupProfileStore.
+// Used to propagate setup profile stores into ADK tool contexts during fleet plan setup.
+func WithFleetSetupProfileStore(ctx context.Context, fs FleetSetupProfileStore) context.Context {
+	return context.WithValue(ctx, fleetSetupProfileStoreKey, fs)
+}
+
+// FleetSetupProfileStoreFromContext retrieves the FleetSetupProfileStore from a context.
+// Returns nil if no FleetSetupProfileStore is present.
+func FleetSetupProfileStoreFromContext(ctx context.Context) FleetSetupProfileStore {
+	if ctx == nil {
+		return nil
+	}
+	fs, _ := ctx.Value(fleetSetupProfileStoreKey).(FleetSetupProfileStore)
+	return fs
+}
+
+// WithFleetSetupDraftStore returns a new context containing a tenant-scoped FleetSetupDraftStore.
+// Used to propagate setup draft stores into ADK tool contexts during fleet plan setup.
+func WithFleetSetupDraftStore(ctx context.Context, fs FleetSetupDraftStore) context.Context {
+	return context.WithValue(ctx, fleetSetupDraftStoreKey, fs)
+}
+
+// FleetSetupDraftStoreFromContext retrieves the FleetSetupDraftStore from a context.
+// Returns nil if no FleetSetupDraftStore is present.
+func FleetSetupDraftStoreFromContext(ctx context.Context) FleetSetupDraftStore {
+	if ctx == nil {
+		return nil
+	}
+	fs, _ := ctx.Value(fleetSetupDraftStoreKey).(FleetSetupDraftStore)
 	return fs
 }
 

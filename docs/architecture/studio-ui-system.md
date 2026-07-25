@@ -111,7 +111,7 @@ Studio separates **mode** and **brand pack**:
 | Light / dark | `html.dark` | `useTheme().theme` / `toggleTheme()` |
 | Brand pack | `html[data-theme="nova"]` | `useTheme().brandTheme` / `setBrandTheme()` |
 
-Nova is the only shipped pack today. Packs live as CSS variable dictionaries (`:root` / `html[data-theme="nova"]` and `.dark` / `html[data-theme="nova"].dark`). Adding Ember/Amethyst later means another dictionary with the **same token names** — see `web/src/themes/README.md` and `REQUIRED_THEME_TOKENS` in `web/src/themes/brandTheme.ts`.
+Shipped packs: **Nova** (pink/amber) and **Aster** (bold purple). Packs live as CSS variable dictionaries (`html[data-theme="nova"|"aster"]` and matching `.dark` selectors). Switch in Settings → General → Brand theme. Adding Ember/Amethyst later means another dictionary with the **same token names** — see `web/src/themes/README.md` and `REQUIRED_THEME_TOKENS` in `web/src/themes/brandTheme.ts`.
 
 Do not rebuild components per theme. Keep using semantic Tailwind (`bg-primary`) and product tokens (`var(--work-sidebar)`).
 

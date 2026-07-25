@@ -22,7 +22,7 @@ export const BRAND_THEME_META: Record<BrandTheme, { label: string; tone: string;
   ember: { label: 'Ember', tone: 'safe · warm', shipped: false },
   amethyst: { label: 'Amethyst', tone: 'safe · purple', shipped: false },
   sage: { label: 'Sage', tone: 'mid · fresh', shipped: false },
-  aster: { label: 'Aster', tone: 'bold · purple', shipped: false },
+  aster: { label: 'Aster', tone: 'bold · purple', shipped: true },
 }
 
 export function isBrandTheme(value: string | null | undefined): value is BrandTheme {

@@ -10,6 +10,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Switch } from '@/components/ui/switch'
 import { cn } from '@/lib/utils'
 
+import { useTheme } from '../../hooks/useTheme'
+import { BRAND_THEME_META } from '../../themes/brandTheme'
+import type { BrandTheme } from '../../themes/brandTheme'
 import type { SettingsData, WebCapableTools, StandardServer } from './settingsApi'
 import * as adminApi from '../../api/platformAdmin'
 
@@ -49,6 +52,8 @@ export default function GeneralSettings({
   return (
     <div className="max-w-2xl space-y-6">
       {isPlatform && <EnvironmentSection />}
+
+      <BrandThemeSection />
 
       <Card className="border-border bg-card shadow-sm">
         <CardHeader>
@@ -261,6 +266,46 @@ function EnvironmentSection() {
             />
           </div>
         )}
+      </CardContent>
+    </Card>
+  )
+}
+
+/** Brand pack switcher — tests multi-theme (Nova, Aster, …). Light/dark stays in TopBar. */
+function BrandThemeSection() {
+  const { brandTheme, setBrandTheme, availableBrandThemes } = useTheme()
+
+  return (
+    <Card className="border-border bg-card shadow-sm">
+      <CardHeader>
+        <CardTitle className="text-base">Brand theme</CardTitle>
+        <CardDescription>
+          Color pack for Studio chrome and generated apps. Layout stays the same — only colors change.
+          Light/dark mode is separate (header toggle).
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-2">
+        <Label htmlFor="brand-theme">Pack</Label>
+        <Select
+          value={brandTheme}
+          onValueChange={(value) => setBrandTheme(value as BrandTheme)}
+        >
+          <SelectTrigger id="brand-theme" className="w-full bg-background" data-testid="brand-theme-select">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {availableBrandThemes.map((id) => (
+              <SelectItem key={id} value={id}>
+                {BRAND_THEME_META[id].label}
+                <span className="ml-2 text-muted-foreground">· {BRAND_THEME_META[id].tone}</span>
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <p className="text-xs text-muted-foreground">
+          Active: <span className="font-medium text-foreground">{BRAND_THEME_META[brandTheme].label}</span>
+          {' '}({BRAND_THEME_META[brandTheme].tone})
+        </p>
       </CardContent>
     </Card>
   )

@@ -5,7 +5,7 @@
 | Axis | Mechanism | Values |
 |------|-----------|--------|
 | **Mode** | `html` class `dark` | light (default) / dark |
-| **Brand pack** | `html[data-theme="…"]` | `nova` (shipped), future `ember`, `amethyst`, `sage`, `aster` |
+| **Brand pack** | `html[data-theme="…"]` | `nova`, `aster` (shipped); future `ember`, `amethyst`, `sage` |
 
 Do not collapse brand + mode into one enum. They compose:
 

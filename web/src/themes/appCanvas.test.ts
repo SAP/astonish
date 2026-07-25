@@ -54,9 +54,7 @@ describe('appCanvas', () => {
     expect(brands.size).toBe(BRAND_THEMES.length)
   })
 
-  it('defaults to nova canvas when theme unset', () => {
-    delete document.documentElement.dataset.theme
-    // getStoredBrandTheme may still return stored pack; force nova via explicit arg
-    expect(getAppCanvasTokens(DEFAULT_BRAND_THEME).canvas).toBe(APP_CANVAS_BY_BRAND.nova.canvas)
+  it('defaults to product default (aster) canvas for DEFAULT_BRAND_THEME', () => {
+    expect(getAppCanvasTokens(DEFAULT_BRAND_THEME).canvas).toBe(APP_CANVAS_BY_BRAND.aster.canvas)
   })
 })

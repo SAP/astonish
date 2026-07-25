@@ -57,7 +57,7 @@ const DrillView = lazy(() => import('./components/DrillView'))
 const AppsView = lazy(() => import('./components/AppsView'))
 
 function App() {
-  const { theme, toggleTheme } = useTheme()
+  const { theme, toggleTheme, refreshBrandTheme } = useTheme()
   const { path, navigate, replaceHash } = useHashRouter()
   const pathRef = useRef(path)
   useEffect(() => { pathRef.current = path }, [path])
@@ -93,6 +93,13 @@ function App() {
 
   // Auth hook (only active in platform mode)
   const auth = useAuth(isPlatformMode && isPlatformChecked ? true : false)
+
+  // Re-resolve brand theme after login (user preference) or personal-mode boot.
+  useEffect(() => {
+    if (!isPlatformChecked) return
+    if (isPlatformMode && !auth.isAuthenticated) return
+    void refreshBrandTheme()
+  }, [isPlatformChecked, isPlatformMode, auth.isAuthenticated, refreshBrandTheme])
 
   // Platform team list — loaded once after authentication
   const [platformTeams, setPlatformTeams] = useState<{ slug: string; name: string }[] | null>(null)

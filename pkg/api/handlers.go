@@ -1050,6 +1050,10 @@ func RegisterRoutes(router *mux.Router, svc *store.Services, backend store.Platf
 
 	router.HandleFunc("/api/user-settings/default-model", GetUserDefaultModelHandler).Methods("GET")
 	router.HandleFunc("/api/user-settings/default-model", PatchUserDefaultModelHandler).Methods("PATCH")
+	router.HandleFunc("/api/user-settings/brand-theme", GetUserBrandThemeHandler).Methods("GET")
+	router.HandleFunc("/api/user-settings/brand-theme", PatchUserBrandThemeHandler).Methods("PATCH")
+	// Public brand theme (login / pre-auth) — also listed in isAuthExemptPath.
+	router.HandleFunc("/api/brand-theme", GetPublicBrandThemeHandler).Methods("GET")
 
 	// Provider settings endpoints (cascading: platform → org → team)
 	router.HandleFunc("/api/settings/platform/providers", GetPlatformProvidersHandler).Methods("GET")
@@ -1387,6 +1391,8 @@ func RegisterRoutes(router *mux.Router, svc *store.Services, backend store.Platf
 		// Auth policy settings (superadmin only)
 		router.HandleFunc("/api/platform/admin/auth-settings", PlatformAdminGetAuthSettingsHandler).Methods("GET")
 		router.HandleFunc("/api/platform/admin/auth-settings", PlatformAdminSaveAuthSettingsHandler).Methods("PUT")
+		router.HandleFunc("/api/platform/admin/brand-theme", GetPlatformBrandThemeHandler).Methods("GET")
+		router.HandleFunc("/api/platform/admin/brand-theme", PatchPlatformBrandThemeHandler).Methods("PATCH")
 
 		// Channel adapter management (superadmin only)
 		router.HandleFunc("/api/platform/admin/channels", PlatformAdminListChannelsHandler).Methods("GET")

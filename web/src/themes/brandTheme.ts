@@ -12,9 +12,17 @@ export const BRAND_THEMES = ['nova', 'ember', 'amethyst', 'sage', 'aster'] as co
 
 export type BrandTheme = (typeof BRAND_THEMES)[number]
 
-export const DEFAULT_BRAND_THEME: BrandTheme = 'nova'
+/** Product default for fresh installs and unresolved cascade. */
+export const DEFAULT_BRAND_THEME: BrandTheme = 'aster'
+
+/**
+ * Combobox / display order — Aster first, then Nova, then future packs.
+ * Filter with shipped meta before rendering.
+ */
+export const BRAND_THEME_SELECT_ORDER: BrandTheme[] = ['aster', 'nova', 'ember', 'amethyst', 'sage']
 
 export const BRAND_THEME_STORAGE_KEY = 'astonish-brand-theme'
+export const PLATFORM_BRAND_THEME_STORAGE_KEY = 'astonish-platform-brand-theme'
 
 /** Human labels for settings / switchers (not all packs may ship yet). */
 export const BRAND_THEME_META: Record<BrandTheme, { label: string; tone: string; shipped: boolean }> = {
@@ -29,17 +37,40 @@ export function isBrandTheme(value: string | null | undefined): value is BrandTh
   return !!value && (BRAND_THEMES as readonly string[]).includes(value)
 }
 
+/** True if value is a shipped brand pack. */
+export function isShippedBrandTheme(value: string | null | undefined): value is BrandTheme {
+  return isBrandTheme(value) && BRAND_THEME_META[value].shipped
+}
+
+/** Shipped packs in select order. */
+export function shippedBrandThemes(): BrandTheme[] {
+  return BRAND_THEME_SELECT_ORDER.filter((id) => BRAND_THEME_META[id].shipped)
+}
+
+/**
+ * Cascade: user preference → platform default → product default (aster).
+ * Empty / unshipped values are skipped.
+ */
+export function resolveBrandTheme(
+  userTheme?: string | null,
+  platformDefault?: string | null,
+): BrandTheme {
+  if (isShippedBrandTheme(userTheme)) return userTheme
+  if (isShippedBrandTheme(platformDefault)) return platformDefault
+  return DEFAULT_BRAND_THEME
+}
+
 export function getStoredBrandTheme(): BrandTheme {
   if (typeof localStorage === 'undefined') return DEFAULT_BRAND_THEME
   const stored = localStorage.getItem(BRAND_THEME_STORAGE_KEY)
-  if (isBrandTheme(stored) && BRAND_THEME_META[stored].shipped) return stored
+  if (isShippedBrandTheme(stored)) return stored
   return DEFAULT_BRAND_THEME
 }
 
 /** Apply brand pack on <html data-theme="…">. Safe to call before React mounts. */
 export function applyBrandTheme(brand: BrandTheme = getStoredBrandTheme()): BrandTheme {
   const root = document.documentElement
-  const next = BRAND_THEME_META[brand]?.shipped ? brand : DEFAULT_BRAND_THEME
+  const next = isShippedBrandTheme(brand) ? brand : DEFAULT_BRAND_THEME
   root.dataset.theme = next
   localStorage.setItem(BRAND_THEME_STORAGE_KEY, next)
   return next

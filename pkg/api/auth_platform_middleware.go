@@ -89,6 +89,10 @@ func isAuthExemptPath(path string) bool {
 	if path == "/api/healthz" || path == "/api/readyz" {
 		return true
 	}
+	// Brand theme for login / first paint (no secrets).
+	if path == "/api/brand-theme" {
+		return true
+	}
 	// Auth endpoints (register, login, refresh, setup-status, etc.)
 	if strings.HasPrefix(path, "/api/auth/") {
 		return true

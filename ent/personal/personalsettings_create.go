@@ -64,6 +64,20 @@ func (_c *PersonalSettingsCreate) SetNillableDefaultModel(v *string) *PersonalSe
 	return _c
 }
 
+// SetBrandTheme sets the "brand_theme" field.
+func (_c *PersonalSettingsCreate) SetBrandTheme(v string) *PersonalSettingsCreate {
+	_c.mutation.SetBrandTheme(v)
+	return _c
+}
+
+// SetNillableBrandTheme sets the "brand_theme" field if the given value is not nil.
+func (_c *PersonalSettingsCreate) SetNillableBrandTheme(v *string) *PersonalSettingsCreate {
+	if v != nil {
+		_c.SetBrandTheme(*v)
+	}
+	return _c
+}
+
 // SetCreatedAt sets the "created_at" field.
 func (_c *PersonalSettingsCreate) SetCreatedAt(v time.Time) *PersonalSettingsCreate {
 	_c.mutation.SetCreatedAt(v)
@@ -139,6 +153,10 @@ func (_c *PersonalSettingsCreate) defaults() {
 		v := personalsettings.DefaultDefaultModel
 		_c.mutation.SetDefaultModel(v)
 	}
+	if _, ok := _c.mutation.BrandTheme(); !ok {
+		v := personalsettings.DefaultBrandTheme
+		_c.mutation.SetBrandTheme(v)
+	}
 	if _, ok := _c.mutation.CreatedAt(); !ok {
 		v := personalsettings.DefaultCreatedAt()
 		_c.mutation.SetCreatedAt(v)
@@ -159,6 +177,9 @@ func (_c *PersonalSettingsCreate) check() error {
 	}
 	if _, ok := _c.mutation.DefaultModel(); !ok {
 		return &ValidationError{Name: "default_model", err: errors.New(`personal: missing required field "PersonalSettings.default_model"`)}
+	}
+	if _, ok := _c.mutation.BrandTheme(); !ok {
+		return &ValidationError{Name: "brand_theme", err: errors.New(`personal: missing required field "PersonalSettings.brand_theme"`)}
 	}
 	switch _c.driver.Dialect() {
 	case dialect.MySQL, dialect.SQLite:
@@ -209,6 +230,10 @@ func (_c *PersonalSettingsCreate) createSpec() (*PersonalSettings, *sqlgraph.Cre
 	if value, ok := _c.mutation.DefaultModel(); ok {
 		_spec.SetField(personalsettings.FieldDefaultModel, field.TypeString, value)
 		_node.DefaultModel = value
+	}
+	if value, ok := _c.mutation.BrandTheme(); ok {
+		_spec.SetField(personalsettings.FieldBrandTheme, field.TypeString, value)
+		_node.BrandTheme = value
 	}
 	if value, ok := _c.mutation.CreatedAt(); ok {
 		_spec.SetField(personalsettings.FieldCreatedAt, field.TypeTime, value)

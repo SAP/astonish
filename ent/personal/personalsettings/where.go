@@ -70,6 +70,11 @@ func DefaultModel(v string) predicate.PersonalSettings {
 	return predicate.PersonalSettings(sql.FieldEQ(FieldDefaultModel, v))
 }
 
+// BrandTheme applies equality check predicate on the "brand_theme" field. It's identical to BrandThemeEQ.
+func BrandTheme(v string) predicate.PersonalSettings {
+	return predicate.PersonalSettings(sql.FieldEQ(FieldBrandTheme, v))
+}
+
 // CreatedAt applies equality check predicate on the "created_at" field. It's identical to CreatedAtEQ.
 func CreatedAt(v time.Time) predicate.PersonalSettings {
 	return predicate.PersonalSettings(sql.FieldEQ(FieldCreatedAt, v))
@@ -248,6 +253,71 @@ func DefaultModelEqualFold(v string) predicate.PersonalSettings {
 // DefaultModelContainsFold applies the ContainsFold predicate on the "default_model" field.
 func DefaultModelContainsFold(v string) predicate.PersonalSettings {
 	return predicate.PersonalSettings(sql.FieldContainsFold(FieldDefaultModel, v))
+}
+
+// BrandThemeEQ applies the EQ predicate on the "brand_theme" field.
+func BrandThemeEQ(v string) predicate.PersonalSettings {
+	return predicate.PersonalSettings(sql.FieldEQ(FieldBrandTheme, v))
+}
+
+// BrandThemeNEQ applies the NEQ predicate on the "brand_theme" field.
+func BrandThemeNEQ(v string) predicate.PersonalSettings {
+	return predicate.PersonalSettings(sql.FieldNEQ(FieldBrandTheme, v))
+}
+
+// BrandThemeIn applies the In predicate on the "brand_theme" field.
+func BrandThemeIn(vs ...string) predicate.PersonalSettings {
+	return predicate.PersonalSettings(sql.FieldIn(FieldBrandTheme, vs...))
+}
+
+// BrandThemeNotIn applies the NotIn predicate on the "brand_theme" field.
+func BrandThemeNotIn(vs ...string) predicate.PersonalSettings {
+	return predicate.PersonalSettings(sql.FieldNotIn(FieldBrandTheme, vs...))
+}
+
+// BrandThemeGT applies the GT predicate on the "brand_theme" field.
+func BrandThemeGT(v string) predicate.PersonalSettings {
+	return predicate.PersonalSettings(sql.FieldGT(FieldBrandTheme, v))
+}
+
+// BrandThemeGTE applies the GTE predicate on the "brand_theme" field.
+func BrandThemeGTE(v string) predicate.PersonalSettings {
+	return predicate.PersonalSettings(sql.FieldGTE(FieldBrandTheme, v))
+}
+
+// BrandThemeLT applies the LT predicate on the "brand_theme" field.
+func BrandThemeLT(v string) predicate.PersonalSettings {
+	return predicate.PersonalSettings(sql.FieldLT(FieldBrandTheme, v))
+}
+
+// BrandThemeLTE applies the LTE predicate on the "brand_theme" field.
+func BrandThemeLTE(v string) predicate.PersonalSettings {
+	return predicate.PersonalSettings(sql.FieldLTE(FieldBrandTheme, v))
+}
+
+// BrandThemeContains applies the Contains predicate on the "brand_theme" field.
+func BrandThemeContains(v string) predicate.PersonalSettings {
+	return predicate.PersonalSettings(sql.FieldContains(FieldBrandTheme, v))
+}
+
+// BrandThemeHasPrefix applies the HasPrefix predicate on the "brand_theme" field.
+func BrandThemeHasPrefix(v string) predicate.PersonalSettings {
+	return predicate.PersonalSettings(sql.FieldHasPrefix(FieldBrandTheme, v))
+}
+
+// BrandThemeHasSuffix applies the HasSuffix predicate on the "brand_theme" field.
+func BrandThemeHasSuffix(v string) predicate.PersonalSettings {
+	return predicate.PersonalSettings(sql.FieldHasSuffix(FieldBrandTheme, v))
+}
+
+// BrandThemeEqualFold applies the EqualFold predicate on the "brand_theme" field.
+func BrandThemeEqualFold(v string) predicate.PersonalSettings {
+	return predicate.PersonalSettings(sql.FieldEqualFold(FieldBrandTheme, v))
+}
+
+// BrandThemeContainsFold applies the ContainsFold predicate on the "brand_theme" field.
+func BrandThemeContainsFold(v string) predicate.PersonalSettings {
+	return predicate.PersonalSettings(sql.FieldContainsFold(FieldBrandTheme, v))
 }
 
 // CreatedAtEQ applies the EQ predicate on the "created_at" field.

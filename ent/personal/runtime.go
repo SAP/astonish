@@ -154,12 +154,16 @@ func init() {
 	personalsettingsDescDefaultModel := personalsettingsFields[2].Descriptor()
 	// personalsettings.DefaultDefaultModel holds the default value on creation for the default_model field.
 	personalsettings.DefaultDefaultModel = personalsettingsDescDefaultModel.Default.(string)
+	// personalsettingsDescBrandTheme is the schema descriptor for brand_theme field.
+	personalsettingsDescBrandTheme := personalsettingsFields[3].Descriptor()
+	// personalsettings.DefaultBrandTheme holds the default value on creation for the brand_theme field.
+	personalsettings.DefaultBrandTheme = personalsettingsDescBrandTheme.Default.(string)
 	// personalsettingsDescCreatedAt is the schema descriptor for created_at field.
-	personalsettingsDescCreatedAt := personalsettingsFields[3].Descriptor()
+	personalsettingsDescCreatedAt := personalsettingsFields[4].Descriptor()
 	// personalsettings.DefaultCreatedAt holds the default value on creation for the created_at field.
 	personalsettings.DefaultCreatedAt = personalsettingsDescCreatedAt.Default.(func() time.Time)
 	// personalsettingsDescUpdatedAt is the schema descriptor for updated_at field.
-	personalsettingsDescUpdatedAt := personalsettingsFields[4].Descriptor()
+	personalsettingsDescUpdatedAt := personalsettingsFields[5].Descriptor()
 	// personalsettings.DefaultUpdatedAt holds the default value on creation for the updated_at field.
 	personalsettings.DefaultUpdatedAt = personalsettingsDescUpdatedAt.Default.(func() time.Time)
 	// personalsettings.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.

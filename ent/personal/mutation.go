@@ -3778,6 +3778,7 @@ type PersonalSettingsMutation struct {
 	user_id          *uuid.UUID
 	default_provider *string
 	default_model    *string
+	brand_theme      *string
 	created_at       *time.Time
 	updated_at       *time.Time
 	clearedFields    map[string]struct{}
@@ -3992,6 +3993,42 @@ func (m *PersonalSettingsMutation) ResetDefaultModel() {
 	m.default_model = nil
 }
 
+// SetBrandTheme sets the "brand_theme" field.
+func (m *PersonalSettingsMutation) SetBrandTheme(s string) {
+	m.brand_theme = &s
+}
+
+// BrandTheme returns the value of the "brand_theme" field in the mutation.
+func (m *PersonalSettingsMutation) BrandTheme() (r string, exists bool) {
+	v := m.brand_theme
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldBrandTheme returns the old "brand_theme" field's value of the PersonalSettings entity.
+// If the PersonalSettings object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *PersonalSettingsMutation) OldBrandTheme(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldBrandTheme is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldBrandTheme requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldBrandTheme: %w", err)
+	}
+	return oldValue.BrandTheme, nil
+}
+
+// ResetBrandTheme resets all changes to the "brand_theme" field.
+func (m *PersonalSettingsMutation) ResetBrandTheme() {
+	m.brand_theme = nil
+}
+
 // SetCreatedAt sets the "created_at" field.
 func (m *PersonalSettingsMutation) SetCreatedAt(t time.Time) {
 	m.created_at = &t
@@ -4098,7 +4135,7 @@ func (m *PersonalSettingsMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *PersonalSettingsMutation) Fields() []string {
-	fields := make([]string, 0, 5)
+	fields := make([]string, 0, 6)
 	if m.user_id != nil {
 		fields = append(fields, personalsettings.FieldUserID)
 	}
@@ -4107,6 +4144,9 @@ func (m *PersonalSettingsMutation) Fields() []string {
 	}
 	if m.default_model != nil {
 		fields = append(fields, personalsettings.FieldDefaultModel)
+	}
+	if m.brand_theme != nil {
+		fields = append(fields, personalsettings.FieldBrandTheme)
 	}
 	if m.created_at != nil {
 		fields = append(fields, personalsettings.FieldCreatedAt)
@@ -4128,6 +4168,8 @@ func (m *PersonalSettingsMutation) Field(name string) (ent.Value, bool) {
 		return m.DefaultProvider()
 	case personalsettings.FieldDefaultModel:
 		return m.DefaultModel()
+	case personalsettings.FieldBrandTheme:
+		return m.BrandTheme()
 	case personalsettings.FieldCreatedAt:
 		return m.CreatedAt()
 	case personalsettings.FieldUpdatedAt:
@@ -4147,6 +4189,8 @@ func (m *PersonalSettingsMutation) OldField(ctx context.Context, name string) (e
 		return m.OldDefaultProvider(ctx)
 	case personalsettings.FieldDefaultModel:
 		return m.OldDefaultModel(ctx)
+	case personalsettings.FieldBrandTheme:
+		return m.OldBrandTheme(ctx)
 	case personalsettings.FieldCreatedAt:
 		return m.OldCreatedAt(ctx)
 	case personalsettings.FieldUpdatedAt:
@@ -4180,6 +4224,13 @@ func (m *PersonalSettingsMutation) SetField(name string, value ent.Value) error 
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetDefaultModel(v)
+		return nil
+	case personalsettings.FieldBrandTheme:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetBrandTheme(v)
 		return nil
 	case personalsettings.FieldCreatedAt:
 		v, ok := value.(time.Time)
@@ -4252,6 +4303,9 @@ func (m *PersonalSettingsMutation) ResetField(name string) error {
 		return nil
 	case personalsettings.FieldDefaultModel:
 		m.ResetDefaultModel()
+		return nil
+	case personalsettings.FieldBrandTheme:
+		m.ResetBrandTheme()
 		return nil
 	case personalsettings.FieldCreatedAt:
 		m.ResetCreatedAt()

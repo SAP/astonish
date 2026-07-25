@@ -111,7 +111,15 @@ Studio separates **mode** and **brand pack**:
 | Light / dark | `html.dark` | `useTheme().theme` / `toggleTheme()` |
 | Brand pack | `html[data-theme="nova"]` | `useTheme().brandTheme` / `setBrandTheme()` |
 
-Shipped packs: **Nova** (pink/amber) and **Aster** (bold purple). Packs live as CSS variable dictionaries (`html[data-theme="nova"|"aster"]` and matching `.dark` selectors). Switch in Settings → General → Brand theme. Adding Ember/Amethyst later means another dictionary with the **same token names** — see `web/src/themes/README.md` and `REQUIRED_THEME_TOKENS` in `web/src/themes/brandTheme.ts`.
+Shipped packs: **Aster** (bold purple, **product default**) and **Nova** (pink/amber). Packs live as CSS variable dictionaries (`html[data-theme="aster"|"nova"]` and matching `.dark` selectors).
+
+| Layer | Where | Purpose |
+|-------|--------|---------|
+| Platform default | Platform → General → Default brand theme | Login screen + fallback for users without a preference |
+| User preference | Personal → General → Brand theme | Per-user override (`""` = inherit platform) |
+| Product fallback | code / `DEFAULT_BRAND_THEME` | **aster** when neither is set |
+
+Adding Ember/Amethyst later means another dictionary with the **same token names** — see `web/src/themes/README.md` and `REQUIRED_THEME_TOKENS` in `web/src/themes/brandTheme.ts`.
 
 Do not rebuild components per theme. Keep using semantic Tailwind (`bg-primary`) and product tokens (`var(--work-sidebar)`).
 

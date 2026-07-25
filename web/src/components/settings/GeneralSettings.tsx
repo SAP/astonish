@@ -271,26 +271,53 @@ function EnvironmentSection() {
   )
 }
 
-/** Brand pack switcher — tests multi-theme (Nova, Aster, …). Light/dark stays in TopBar. */
+/**
+ * Platform default brand pack (superadmin / Platform → General).
+ * Used at login and when users choose “Use platform default”.
+ */
 function BrandThemeSection() {
-  const { brandTheme, setBrandTheme, availableBrandThemes } = useTheme()
+  const {
+    platformBrandDefault,
+    setPlatformBrandTheme,
+    availableBrandThemes,
+    brandTheme,
+  } = useTheme()
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const value = (platformBrandDefault || brandTheme) as BrandTheme
+
+  const onChange = async (next: string) => {
+    if (!next || next === value) return
+    setSaving(true)
+    setError('')
+    try {
+      await setPlatformBrandTheme(next as BrandTheme)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to save')
+    } finally {
+      setSaving(false)
+    }
+  }
 
   return (
     <Card className="border-border bg-card shadow-sm">
       <CardHeader>
-        <CardTitle className="text-base">Brand theme</CardTitle>
+        <CardTitle className="text-base">Default brand theme</CardTitle>
         <CardDescription>
-          Color pack for Studio chrome and generated apps. Layout stays the same — only colors change.
-          Light/dark mode is separate (header toggle).
+          Instance-wide color pack for the login screen and for users who have not chosen a personal theme.
+          Each user can override this under Personal → General. Light/dark mode is separate (header toggle).
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-2">
-        <Label htmlFor="brand-theme">Pack</Label>
-        <Select
-          value={brandTheme}
-          onValueChange={(value) => setBrandTheme(value as BrandTheme)}
-        >
-          <SelectTrigger id="brand-theme" className="w-full bg-background" data-testid="brand-theme-select">
+        {error && (
+          <Alert variant="destructive">
+            <AlertTriangle />
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        )}
+        <Label htmlFor="platform-brand-theme">Pack</Label>
+        <Select value={value} onValueChange={onChange} disabled={saving}>
+          <SelectTrigger id="platform-brand-theme" className="w-full bg-background" data-testid="platform-brand-theme-select">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -303,8 +330,8 @@ function BrandThemeSection() {
           </SelectContent>
         </Select>
         <p className="text-xs text-muted-foreground">
-          Active: <span className="font-medium text-foreground">{BRAND_THEME_META[brandTheme].label}</span>
-          {' '}({BRAND_THEME_META[brandTheme].tone})
+          Default: <span className="font-medium text-foreground">{BRAND_THEME_META[value]?.label ?? value}</span>
+          {saving ? ' · Saving…' : ''}
         </p>
       </CardContent>
     </Card>

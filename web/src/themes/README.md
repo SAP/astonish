@@ -5,7 +5,10 @@
 | Axis | Mechanism | Values |
 |------|-----------|--------|
 | **Mode** | `html` class `dark` | light (default) / dark |
-| **Brand pack** | `html[data-theme="…"]` | `nova`, `aster` (shipped); future `ember`, `amethyst`, `sage` |
+| **Brand pack** | `html[data-theme="…"]` | `aster` (default), `nova` (shipped); future `ember`, `amethyst`, `sage` |
+
+**Cascade:** user preference → platform default → `aster`.  
+**UI:** Personal → General (user) · Platform → General (instance default). Combobox order: Aster first.
 
 Do not collapse brand + mode into one enum. They compose:
 

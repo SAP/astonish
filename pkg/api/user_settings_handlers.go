@@ -46,10 +46,16 @@ func PatchUserDefaultModelHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := svc.PersonalSettings.Save(r.Context(), &store.PersonalSettings{
-		DefaultProvider: body.DefaultProvider,
-		DefaultModel:    body.DefaultModel,
-	}); err != nil {
+	// Merge so brand_theme (and other fields) are not wiped.
+	existing, err := svc.PersonalSettings.Get(r.Context())
+	if err != nil {
+		http.Error(w, "failed to load user settings: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	existing.DefaultProvider = body.DefaultProvider
+	existing.DefaultModel = body.DefaultModel
+
+	if err := svc.PersonalSettings.Save(r.Context(), existing); err != nil {
 		http.Error(w, "failed to save user settings: "+err.Error(), http.StatusInternalServerError)
 		return
 	}

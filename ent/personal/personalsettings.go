@@ -24,6 +24,8 @@ type PersonalSettings struct {
 	DefaultProvider string `json:"default_provider,omitempty"`
 	// DefaultModel holds the value of the "default_model" field.
 	DefaultModel string `json:"default_model,omitempty"`
+	// BrandTheme holds the value of the "brand_theme" field.
+	BrandTheme string `json:"brand_theme,omitempty"`
 	// CreatedAt holds the value of the "created_at" field.
 	CreatedAt time.Time `json:"created_at,omitempty"`
 	// UpdatedAt holds the value of the "updated_at" field.
@@ -38,7 +40,7 @@ func (*PersonalSettings) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case personalsettings.FieldID:
 			values[i] = new(sql.NullInt64)
-		case personalsettings.FieldDefaultProvider, personalsettings.FieldDefaultModel:
+		case personalsettings.FieldDefaultProvider, personalsettings.FieldDefaultModel, personalsettings.FieldBrandTheme:
 			values[i] = new(sql.NullString)
 		case personalsettings.FieldCreatedAt, personalsettings.FieldUpdatedAt:
 			values[i] = new(sql.NullTime)
@@ -82,6 +84,12 @@ func (_m *PersonalSettings) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field default_model", values[i])
 			} else if value.Valid {
 				_m.DefaultModel = value.String
+			}
+		case personalsettings.FieldBrandTheme:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field brand_theme", values[i])
+			} else if value.Valid {
+				_m.BrandTheme = value.String
 			}
 		case personalsettings.FieldCreatedAt:
 			if value, ok := values[i].(*sql.NullTime); !ok {
@@ -139,6 +147,9 @@ func (_m *PersonalSettings) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("default_model=")
 	builder.WriteString(_m.DefaultModel)
+	builder.WriteString(", ")
+	builder.WriteString("brand_theme=")
+	builder.WriteString(_m.BrandTheme)
 	builder.WriteString(", ")
 	builder.WriteString("created_at=")
 	builder.WriteString(_m.CreatedAt.Format(time.ANSIC))

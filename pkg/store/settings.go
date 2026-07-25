@@ -20,6 +20,11 @@ type PlatformSettings struct {
 	// DefaultModel is the platform-wide default model ID.
 	DefaultModel string `json:"default_model,omitempty"`
 
+	// DefaultBrandTheme is the instance-wide Studio brand pack (nova, aster, …).
+	// Used on the login screen and as the fallback when a user has no preference.
+	// Empty string means product default (aster).
+	DefaultBrandTheme string `json:"default_brand_theme,omitempty"`
+
 	// Channels holds per-channel-type configuration (non-secret fields).
 	// Secrets (tokens, passwords) are stored separately in platform_secrets.
 	Channels *PlatformChannelSettings `json:"channels,omitempty"`
@@ -180,6 +185,10 @@ type PersonalSettings struct {
 	// DefaultModel is the user-preferred model ID.
 	// Empty string means "inherit from the enclosing scope".
 	DefaultModel string `json:"default_model,omitempty"`
+
+	// BrandTheme is the user's Studio brand pack preference (nova, aster, …).
+	// Empty string means inherit platform DefaultBrandTheme (then product default).
+	BrandTheme string `json:"brand_theme,omitempty"`
 }
 
 // GetDefaultProvider implements provider.UserDefaultSettings.

@@ -56,6 +56,20 @@ func (_u *PersonalSettingsUpdate) SetNillableDefaultModel(v *string) *PersonalSe
 	return _u
 }
 
+// SetBrandTheme sets the "brand_theme" field.
+func (_u *PersonalSettingsUpdate) SetBrandTheme(v string) *PersonalSettingsUpdate {
+	_u.mutation.SetBrandTheme(v)
+	return _u
+}
+
+// SetNillableBrandTheme sets the "brand_theme" field if the given value is not nil.
+func (_u *PersonalSettingsUpdate) SetNillableBrandTheme(v *string) *PersonalSettingsUpdate {
+	if v != nil {
+		_u.SetBrandTheme(*v)
+	}
+	return _u
+}
+
 // SetUpdatedAt sets the "updated_at" field.
 func (_u *PersonalSettingsUpdate) SetUpdatedAt(v time.Time) *PersonalSettingsUpdate {
 	_u.mutation.SetUpdatedAt(v)
@@ -118,6 +132,9 @@ func (_u *PersonalSettingsUpdate) sqlSave(ctx context.Context) (_node int, err e
 	if value, ok := _u.mutation.DefaultModel(); ok {
 		_spec.SetField(personalsettings.FieldDefaultModel, field.TypeString, value)
 	}
+	if value, ok := _u.mutation.BrandTheme(); ok {
+		_spec.SetField(personalsettings.FieldBrandTheme, field.TypeString, value)
+	}
 	if value, ok := _u.mutation.UpdatedAt(); ok {
 		_spec.SetField(personalsettings.FieldUpdatedAt, field.TypeTime, value)
 	}
@@ -165,6 +182,20 @@ func (_u *PersonalSettingsUpdateOne) SetDefaultModel(v string) *PersonalSettings
 func (_u *PersonalSettingsUpdateOne) SetNillableDefaultModel(v *string) *PersonalSettingsUpdateOne {
 	if v != nil {
 		_u.SetDefaultModel(*v)
+	}
+	return _u
+}
+
+// SetBrandTheme sets the "brand_theme" field.
+func (_u *PersonalSettingsUpdateOne) SetBrandTheme(v string) *PersonalSettingsUpdateOne {
+	_u.mutation.SetBrandTheme(v)
+	return _u
+}
+
+// SetNillableBrandTheme sets the "brand_theme" field if the given value is not nil.
+func (_u *PersonalSettingsUpdateOne) SetNillableBrandTheme(v *string) *PersonalSettingsUpdateOne {
+	if v != nil {
+		_u.SetBrandTheme(*v)
 	}
 	return _u
 }
@@ -260,6 +291,9 @@ func (_u *PersonalSettingsUpdateOne) sqlSave(ctx context.Context) (_node *Person
 	}
 	if value, ok := _u.mutation.DefaultModel(); ok {
 		_spec.SetField(personalsettings.FieldDefaultModel, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.BrandTheme(); ok {
+		_spec.SetField(personalsettings.FieldBrandTheme, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.UpdatedAt(); ok {
 		_spec.SetField(personalsettings.FieldUpdatedAt, field.TypeTime, value)

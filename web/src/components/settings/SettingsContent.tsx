@@ -17,6 +17,7 @@ import IdentitySettings from './IdentitySettings'
 import CredentialsSettings from './CredentialsSettings'
 import SandboxSettings from './SandboxSettings'
 import GeneralSettings from './GeneralSettings'
+import UserGeneralSettings from './UserGeneralSettings'
 import ProvidersSettings from './ProvidersSettings'
 import UserDefaultModelSettings from './UserDefaultModelSettings'
 import MCPServersSettings from './MCPServersSettings'
@@ -161,6 +162,9 @@ export default function SettingsContent({
           isPlatform={isPlatformMode}
         />
       )}
+
+      {/* Personal → General: per-user brand theme (and future user prefs) */}
+      {activeSection === 'user-general' && <UserGeneralSettings />}
 
       {activeSection === 'providers' && (
         <ProvidersSettings

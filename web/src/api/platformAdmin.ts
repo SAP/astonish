@@ -494,3 +494,25 @@ export async function savePlatformAuthSettings(
   await throwIfNotOk(res, 'Failed to save auth settings')
   return res.json()
 }
+
+// --- Brand theme (platform default for login + user inherit) ---
+
+export interface PlatformBrandTheme {
+  default_brand_theme: string
+}
+
+export async function getPlatformBrandTheme(): Promise<PlatformBrandTheme> {
+  const res = await adminFetch(`${ADMIN_BASE}/brand-theme`)
+  await throwIfNotOk(res, 'Failed to load platform brand theme')
+  return res.json()
+}
+
+export async function savePlatformBrandTheme(defaultBrandTheme: string): Promise<PlatformBrandTheme> {
+  const res = await adminFetch(`${ADMIN_BASE}/brand-theme`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ default_brand_theme: defaultBrandTheme }),
+  })
+  await throwIfNotOk(res, 'Failed to save platform brand theme')
+  return res.json()
+}

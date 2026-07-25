@@ -65,7 +65,7 @@ describe('StudioChat', () => {
 
   it('renders the message input area', async () => {
     render(<StudioChat {...defaultProps} />)
-    const textarea = screen.getByPlaceholderText(/type.*message|ask.*anything/i)
+    const textarea = screen.getByTestId('chat-input')
     expect(textarea).toBeInTheDocument()
     await act(async () => {
       await new Promise(resolve => setTimeout(resolve, 0))

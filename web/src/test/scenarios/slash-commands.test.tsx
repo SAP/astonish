@@ -31,7 +31,7 @@ describe('Slash Command Scenarios', () => {
       })
 
       // Find the textarea and type "/"
-      const textarea = screen.getByPlaceholderText(/type.*message|ask.*anything/i)
+      const textarea = screen.getByTestId('chat-input')
       await result.user.type(textarea, '/')
 
       // The popup should show slash command entries
@@ -52,7 +52,7 @@ describe('Slash Command Scenarios', () => {
         scenarioEvents: simpleQa.events as FixtureEvent[],
       })
 
-      const textarea = screen.getByPlaceholderText(/type.*message|ask.*anything/i)
+      const textarea = screen.getByTestId('chat-input')
       await result.user.type(textarea, '/')
 
       // Descriptions should appear alongside commands
@@ -69,7 +69,7 @@ describe('Slash Command Scenarios', () => {
         scenarioEvents: simpleQa.events as FixtureEvent[],
       })
 
-      const textarea = screen.getByPlaceholderText(/type.*message|ask.*anything/i)
+      const textarea = screen.getByTestId('chat-input')
 
       // Type "/he" to filter to /help
       await result.user.type(textarea, '/he')

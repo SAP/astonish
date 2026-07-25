@@ -100,7 +100,7 @@ npm test
 - **Language**: The web app is **mixed TS and JSX**. New UI files should be **`.tsx`** unless they mirror an existing `.jsx` neighbor. The Vite/Vitest configs handle both; ESLint has separate blocks for `{js,jsx}` and `{ts,tsx}` in `web/eslint.config.js`.
 - **Components**: Functional with hooks, single per file, `export default` for the main component (named exports for helpers).
 - **Imports**: External first, local second. Named exports preferred for utilities. The web app supports the `@/*` alias for imports from `web/src`.
-- **Styling**: Tailwind CSS v4 with semantic tokens in `web/src/index.css`. Standard application UI should prefer source-owned shadcn/ui primitives in `web/src/components/ui/*`; custom product surfaces such as Flow Canvas, Studio Chat rendering, embedded viewers, terminal, and the Apps iframe sandbox should be tokenized and restyled rather than blindly rewritten as generic shadcn UI.
+- **Styling**: Tailwind CSS v4 with semantic tokens in `web/src/index.css`. Standard application UI should prefer source-owned shadcn/ui primitives in `web/src/components/ui/*`; custom product surfaces (Flow Canvas, Studio Chat rendering, embedded viewers, terminal, Apps iframe) should be tokenized rather than rewritten as generic shadcn UI. Dual-axis theming (mode × brand pack), token rules, and no hard-coded brand colors: **`docs/architecture/studio-ui-system.md`** and **`web/src/AGENTS.md`**.
 - **State**: React hooks only — **no Redux/Zustand/Jotai/etc.** Props drilling is acceptable. Cross-cutting state uses React Context sparingly.
 - **Handlers**: CamelCase, prevent default on forms, cleanup in `useEffect`.
 - **Linting**: ESLint config in `web/eslint.config.js`; `varsIgnorePattern: '^[A-Z_]'` allows unused component-name imports.
@@ -243,6 +243,7 @@ Authoritative docs: `docs/architecture/chat-rendering-pipeline.md` ("The Report 
 The `docs/architecture/` directory is the authoritative reference for cross-cutting design. Read the relevant file **before** modifying the corresponding subsystem:
 
 - `docs/architecture/chat-rendering-pipeline.md` — Studio Chat SSE transport, event types, message-to-component mapping, report/app/artifact pipelines, export pipeline. **Read this before modifying `web/src/components/StudioChat.tsx` or adding new SSE event types.**
+- `docs/architecture/studio-ui-system.md` — Studio design system: dual-axis brand packs, shadcn vs custom surfaces, token rules. **Read before UI styling, theme, or shared-component work under `web/`.**
 - `docs/architecture/testing-chat-scenarios.md` — Scenario test infrastructure, fixture authoring.
 - `docs/architecture/generative-ui.md` — App preview (Generative UI) pipeline.
 - `docs/architecture/api-studio.md` — REST API and SSE streaming surface.
@@ -273,7 +274,7 @@ When you edit files under one of these subtrees, read the local AGENTS.md first 
 - `pkg/session/AGENTS.md` — Session index, transcripts, compaction.
 - `pkg/skills/AGENTS.md` — Skill loader, validator, ClawHub.
 - `pkg/browser/AGENTS.md` — Browser manager, handoff, CAPTCHA, accounts.
-- `web/src/AGENTS.md` — React/TS+JSX conventions, StudioChat invariants, App preview pipeline.
+- `web/src/AGENTS.md` — React/TS+JSX conventions, Studio UI system (themes/shadcn/tokens), StudioChat invariants, App preview pipeline.
 - `tests/AGENTS.md` — e2eboot harness, `ASTONISH_TEST_DSN`, provider keys, inspector, scenarios.
 - `docs/architecture/AGENTS.md` — Architecture doc index + invariant registry.
 

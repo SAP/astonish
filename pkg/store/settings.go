@@ -22,7 +22,7 @@ type PlatformSettings struct {
 
 	// DefaultBrandTheme is the instance-wide Studio brand pack (nova, aster, …).
 	// Used on the login screen and as the fallback when a user has no preference.
-	// Empty string means product default (aster).
+	// Empty string means product default (classic).
 	DefaultBrandTheme string `json:"default_brand_theme,omitempty"`
 
 	// Channels holds per-channel-type configuration (non-secret fields).

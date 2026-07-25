@@ -210,7 +210,7 @@ function SourceCitations({ urls }: { urls: string[] }) {
                 target="_blank"
                 rel="noopener noreferrer"
                 className="truncate hover:underline"
-                style={{ color: 'var(--accent)' }}
+                style={{ color: 'var(--brand)' }}
               >
                 {getDomain(url)}
               </a>
@@ -2781,7 +2781,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
         <div ref={scrollRef} data-testid="message-area" className="absolute inset-0 overflow-y-auto p-4 space-y-4">
           {isLoadingHistory ? (
             <div className="flex items-center justify-center py-16">
-              <Loader size={24} className="animate-spin text-purple-400" />
+              <Loader size={24} className="animate-spin text-primary" />
             </div>
           ) : messages.length === 0 ? (
             <HomePage
@@ -2861,7 +2861,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
                           className="p-1 rounded hover:bg-white/10 transition-colors"
                           title={rawViewIndices.has(index) ? 'Show formatted' : 'Show raw markdown'}
                         >
-                          <Code size={14} className={rawViewIndices.has(index) ? 'text-purple-400' : 'text-gray-500'} />
+                          <Code size={14} className={rawViewIndices.has(index) ? 'text-primary' : 'text-gray-500'} />
                         </button>
                         <button
                           onClick={() => copyToClipboard(msg.content, index)}
@@ -3185,8 +3185,8 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
               if (msg.type === 'system') {
                 return (
                   <div key={index} className="my-2 p-4 rounded-lg" style={{
-                    background: 'rgba(99, 102, 241, 0.08)',
-                    border: '1px solid rgba(99, 102, 241, 0.2)',
+                    background: 'color-mix(in oklab, var(--brand) 8%, transparent)',
+                    border: '1px solid color-mix(in oklab, var(--brand) 20%, transparent)',
                   }}>
                     <div className="flex items-center gap-2 mb-2">
                       <Info size={14} style={{ color: 'rgba(129, 140, 248, 0.9)' }} />
@@ -3339,7 +3339,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
                         <span className="text-sm font-semibold" style={{ color: 'var(--success)' }}>Flow Saved</span>
                       </div>
                       <div className="text-xs mb-2" style={{ color: 'var(--text-secondary)' }}>
-                        Saved to: <code className="px-1.5 py-0.5 rounded" style={{ background: 'var(--bg-tertiary)', color: 'var(--accent)' }}>{savedMsg.filePath}</code>
+                        Saved to: <code className="px-1.5 py-0.5 rounded" style={{ background: 'var(--bg-tertiary)', color: 'var(--brand)' }}>{savedMsg.filePath}</code>
                       </div>
                       <div className="text-xs mb-2" style={{ color: 'var(--text-muted)' }}>Run with:</div>
                       <div className="flex items-center gap-2">
@@ -3349,7 +3349,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
                         <button
                           onClick={() => navigator.clipboard.writeText(savedMsg.runCommand)}
                           className="flex-shrink-0 p-1.5 rounded transition-colors cursor-pointer"
-                          style={{ color: 'var(--accent)' }}
+                          style={{ color: 'var(--brand)' }}
                           title="Copy command"
                         >
                           <Copy size={13} />
@@ -3371,7 +3371,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
                         <span className="text-sm font-semibold" style={{ color: 'var(--success)' }}>App Saved</span>
                       </div>
                       <div className="text-xs" style={{ color: 'var(--text-secondary)' }}>
-                        Saved as <code className="px-1.5 py-0.5 rounded" style={{ background: 'var(--bg-tertiary)', color: 'var(--accent)' }}>{savedMsg.name}</code> — view it in the Apps tab.
+                        Saved as <code className="px-1.5 py-0.5 rounded" style={{ background: 'var(--bg-tertiary)', color: 'var(--brand)' }}>{savedMsg.name}</code> — view it in the Apps tab.
                       </div>
                     </div>
                   </div>
@@ -3384,9 +3384,9 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
 
           {/* Streaming indicator */}
           {isStreaming && !isFleetMode && messages.length > 0 && messages[messages.length - 1]?.type !== 'fleet_execution' && (
-            <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-purple-500/10 border border-purple-500/20 w-fit max-w-full">
-              <Loader size={14} className="text-purple-400 animate-spin shrink-0" />
-              <span className="text-xs text-purple-300 truncate">{liveStreamStatus || 'Thinking…'}</span>
+            <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-primary/10 border border-primary/20 w-fit max-w-full">
+              <Loader size={14} className="text-primary animate-spin shrink-0" />
+              <span className="text-xs text-primary truncate">{liveStreamStatus || 'Thinking…'}</span>
             </div>
           )}
         </div>

@@ -184,7 +184,7 @@ export default function EdgeEditor({
         <div className="flex items-center gap-3">
           <div 
             className="w-8 h-8 rounded-lg flex items-center justify-center"
-            style={{ background: 'linear-gradient(135deg, #7c3aed 0%, #4f46e5 100%)' }}
+            style={{ background: 'linear-gradient(135deg, var(--brand) 0%, var(--brand-strong) 100%)' }}
           >
             <GitBranch size={16} className="text-white" />
           </div>
@@ -221,7 +221,7 @@ export default function EdgeEditor({
                 setMode('visual')
               }}
               className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-                mode === 'visual' ? 'bg-purple-600 text-white' : ''
+                mode === 'visual' ? 'bg-primary text-white' : ''
               }`}
               style={mode !== 'visual' ? { color: 'var(--text-muted)' } : {}}
               disabled={readOnly}
@@ -241,7 +241,7 @@ export default function EdgeEditor({
                 setMode('advanced')
               }}
               className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-                mode === 'advanced' ? 'bg-purple-600 text-white' : ''
+                mode === 'advanced' ? 'bg-primary text-white' : ''
               }`}
               style={mode !== 'advanced' ? { color: 'var(--text-muted)' } : {}}
               disabled={readOnly}
@@ -262,7 +262,7 @@ export default function EdgeEditor({
             )}
             <button
               onClick={handleClose}
-              className="px-3 py-1.5 rounded text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 transition-colors"
+              className="px-3 py-1.5 rounded text-sm font-medium text-white bg-primary hover:bg-primary/90 transition-colors"
             >
               Done
             </button>
@@ -301,7 +301,7 @@ export default function EdgeEditor({
                     </p>
                     <code 
                       className="text-xs font-mono block p-2 rounded overflow-x-auto"
-                      style={{ background: 'var(--bg-secondary)', color: '#a855f7' }}
+                      style={{ background: 'var(--bg-secondary)', color: 'var(--brand)' }}
                     >
                       {rawCondition}
                     </code>
@@ -412,7 +412,7 @@ export default function EdgeEditor({
             {!readOnly && (
               <button
                 onClick={handleAddRule}
-                className="flex items-center gap-2 px-4 py-2 rounded-lg border border-dashed transition-colors hover:border-purple-500/50 hover:bg-purple-500/5"
+                className="flex items-center gap-2 px-4 py-2 rounded-lg border border-dashed transition-colors hover:border-primary/50 hover:bg-primary/5"
                 style={{ 
                   borderColor: 'var(--border-color)', 
                   color: 'var(--text-muted)' 
@@ -466,7 +466,7 @@ export default function EdgeEditor({
             </div>
             <code 
               className="text-xs font-mono block overflow-x-auto"
-              style={{ color: '#a855f7' }}
+              style={{ color: 'var(--brand)' }}
             >
               {preview}
             </code>

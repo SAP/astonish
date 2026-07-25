@@ -639,8 +639,8 @@ function TraceEntryRow({ entry, index, expanded, onToggle }: TraceEntryRowProps)
           <span className="text-[10px] px-1.5 py-0.5 rounded flex-shrink-0 min-w-[60px] text-center font-medium" style={{ background: roleColor.bg, color: roleColor.text }}>
             {roleLabel}
           </span>
-          <Wrench size={10} className="text-purple-400 flex-shrink-0 mt-0.5" />
-          <span className="font-medium" style={{ color: '#c084fc' }}>{entry.tool_name}</span>
+          <Wrench size={10} className="text-primary flex-shrink-0 mt-0.5" />
+          <span className="font-medium" style={{ color: 'var(--brand)' }}>{entry.tool_name}</span>
           {expanded ? (
             <div className="flex-1 min-w-0">
               <pre className="text-[11px] font-mono p-2 rounded whitespace-pre-wrap break-words" style={{ background: 'rgba(0,0,0,0.3)', color: 'var(--text-muted)' }}>

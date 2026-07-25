@@ -253,7 +253,7 @@ const TYPE_COLORS: Record<string, string> = {
 }
 
 const SCOPE_COLORS: Record<string, string> = {
-  personal: '#8b5cf6',
+  personal: 'var(--brand)',
   team: '#3b82f6',
 }
 
@@ -693,7 +693,7 @@ export default function CredentialsSettings({ isPlatform: isPlatformProp }: { is
   if (loading) {
     return (
       <div className="flex items-center justify-center py-12">
-        <Loader2 size={24} className="animate-spin" style={{ color: 'var(--accent)' }} />
+        <Loader2 size={24} className="animate-spin" style={{ color: 'var(--brand)' }} />
         <span className="ml-2 text-sm" style={{ color: 'var(--text-muted)' }}>Loading credentials...</span>
       </div>
     )
@@ -763,7 +763,7 @@ export default function CredentialsSettings({ isPlatform: isPlatformProp }: { is
                 disabled={isRevealing}
               >
                 {isRevealing ? <Loader2 size={14} className="animate-spin" style={{ color: 'var(--text-muted)' }} /> :
-                  revealed ? <EyeOff size={14} style={{ color: 'var(--accent)' }} /> : <Eye size={14} style={{ color: 'var(--text-muted)' }} />}
+                  revealed ? <EyeOff size={14} style={{ color: 'var(--brand)' }} /> : <Eye size={14} style={{ color: 'var(--text-muted)' }} />}
               </button>
             )}
             {/* Edit: in platform mode always show (blind overwrite); in personal mode only when revealed */}
@@ -883,7 +883,7 @@ export default function CredentialsSettings({ isPlatform: isPlatformProp }: { is
               disabled={isRevealing}
             >
               {isRevealing ? <Loader2 size={14} className="animate-spin" style={{ color: 'var(--text-muted)' }} /> :
-                revealed !== undefined ? <EyeOff size={14} style={{ color: 'var(--accent)' }} /> : <Eye size={14} style={{ color: 'var(--text-muted)' }} />}
+                revealed !== undefined ? <EyeOff size={14} style={{ color: 'var(--brand)' }} /> : <Eye size={14} style={{ color: 'var(--text-muted)' }} />}
             </button>
           )}
           {/* Delete (admin only for team secrets) */}

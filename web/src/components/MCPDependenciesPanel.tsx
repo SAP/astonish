@@ -118,12 +118,12 @@ export default function MCPDependenciesPanel({
                       className="text-xs px-1.5 py-0.5 rounded"
                       style={{ 
                         background: dep.source === 'store' 
-                          ? 'rgba(168, 85, 247, 0.15)' 
+                          ? 'var(--brand-muted)' 
                           : dep.source === 'tap' 
                             ? 'rgba(59, 130, 246, 0.15)'
                             : 'rgba(107, 114, 128, 0.15)',
                         color: dep.source === 'store' 
-                          ? '#a855f7' 
+                          ? 'var(--brand)' 
                           : dep.source === 'tap' 
                             ? '#3b82f6'
                             : '#6b7280'
@@ -153,7 +153,7 @@ export default function MCPDependenciesPanel({
                     disabled={isInstalling === dep.server}
                     className="flex items-center gap-1 px-3 py-1.5 rounded text-xs font-medium transition-all hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed"
                     style={{ 
-                      background: 'linear-gradient(135deg, #a855f7 0%, #7c3aed 100%)',
+                      background: 'linear-gradient(135deg, var(--brand) 0%, var(--brand-strong) 100%)',
                       color: 'white'
                     }}
                   >

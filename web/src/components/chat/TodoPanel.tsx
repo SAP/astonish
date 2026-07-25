@@ -24,7 +24,7 @@ export default function TodoPanel({ messages, onClose }: TodoPanelProps) {
   const statusIcon = (status: PlanStepInfo['status']) => {
     switch (status) {
       case 'running':
-        return <Loader size={14} className="animate-spin shrink-0" style={{ color: 'var(--accent)' }} />
+        return <Loader size={14} className="animate-spin shrink-0" style={{ color: 'var(--brand)' }} />
       case 'complete':
         return <Check size={14} className="text-green-400 shrink-0" />
       case 'failed':
@@ -70,11 +70,11 @@ export default function TodoPanel({ messages, onClose }: TodoPanelProps) {
             <div className="px-4 py-2 mb-1">
               <div className="flex items-center gap-2">
                 {hasRunning && !allDone ? (
-                  <Loader size={14} className="animate-spin shrink-0" style={{ color: 'var(--accent)' }} />
+                  <Loader size={14} className="animate-spin shrink-0" style={{ color: 'var(--brand)' }} />
                 ) : allDone ? (
                   <Check size={14} className="text-green-400 shrink-0" />
                 ) : (
-                  <ListChecks size={14} className="shrink-0" style={{ color: 'var(--accent)' }} />
+                  <ListChecks size={14} className="shrink-0" style={{ color: 'var(--brand)' }} />
                 )}
                 <span className="text-xs font-bold" style={{ color: 'var(--text-primary)' }}>
                   {plan.goal}
@@ -125,12 +125,12 @@ export default function TodoPanel({ messages, onClose }: TodoPanelProps) {
                     background: allDone
                       ? (failedCount > 0 ? 'rgba(234, 179, 8, 0.15)' : 'rgba(34, 197, 94, 0.15)')
                       : hasRunning
-                        ? 'rgba(95, 79, 178, 0.15)'
+                        ? 'var(--brand-muted)'
                         : 'rgba(107, 114, 128, 0.15)',
                     color: allDone
                       ? (failedCount > 0 ? '#e49425' : '#149647')
                       : hasRunning
-                        ? 'var(--accent, #5f4fb2)'
+                        ? 'var(--brand)'
                         : 'var(--text-muted)',
                   }}
                 >

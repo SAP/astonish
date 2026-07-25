@@ -89,7 +89,7 @@ export function VariablePanel({ variableGroups, activeTextareaRef, getValue, set
             {filterNode === 'all' && (
               <button
                 onClick={() => toggleCollapse(group.nodeName)}
-                className="w-full flex items-center gap-1 text-xs font-medium py-1 hover:bg-purple-500/10 rounded transition-colors"
+                className="w-full flex items-center gap-1 text-xs font-medium py-1 hover:bg-primary/10 rounded transition-colors"
                 style={{ color: 'var(--text-secondary)' }}
               >
                 {collapsed[group.nodeName] ? (
@@ -112,11 +112,11 @@ export function VariablePanel({ variableGroups, activeTextareaRef, getValue, set
                     key={v}
                     type="button"
                     onClick={() => onVariableClick ? onVariableClick(v) : insertVariable(v)}
-                    className="px-2 py-0.5 text-xs font-mono rounded transition-all hover:scale-105 hover:bg-purple-500/30"
+                    className="px-2 py-0.5 text-xs font-mono rounded transition-all hover:scale-105 hover:bg-primary/30"
                     style={{ 
-                      background: 'rgba(168, 85, 247, 0.15)', 
-                      color: '#c084fc',
-                      border: '1px solid rgba(168, 85, 247, 0.25)'
+                      background: 'var(--brand-muted)', 
+                      color: 'var(--brand)',
+                      border: '1px solid color-mix(in oklab, var(--brand) 25%, transparent)'
                     }}
                     title={onVariableClick ? `Add {${v}} as new item` : `Insert {${v}} at cursor`}
                   >
@@ -170,8 +170,8 @@ export const HighlightedTextarea = React.forwardRef<HTMLTextAreaElement, Highlig
             <span 
               key={i}
               style={{ 
-                background: 'rgba(168, 85, 247, 0.3)',
-                color: '#c084fc',
+                background: 'color-mix(in oklab, var(--brand) 30%, transparent)',
+                color: 'var(--brand)',
                 borderRadius: '2px',
               }}
             >
@@ -211,11 +211,11 @@ export const HighlightedTextarea = React.forwardRef<HTMLTextAreaElement, Highlig
     >
       {/* Highlighted background layer */}
       <div
-        className={`absolute inset-0 overflow-hidden pointer-events-none ${isActive ? 'ring-1 ring-purple-500' : ''}`}
+        className={`absolute inset-0 overflow-hidden pointer-events-none ${isActive ? 'ring-1 ring-primary' : ''}`}
         style={{ 
           ...commonStyles,
           background: 'var(--bg-primary)', 
-          borderColor: isActive ? '#7c3aed' : 'var(--border-color)', 
+          borderColor: isActive ? 'var(--brand-strong)' : 'var(--border-color)', 
           color: 'var(--text-primary)',
         } as CSSProperties}
       >

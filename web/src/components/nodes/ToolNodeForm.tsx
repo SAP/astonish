@@ -61,7 +61,7 @@ export function ToolNodeForm({ data, onChange, theme, availableTools = [] }: Too
             type="checkbox"
             checked={data.tools_auto_approval === true}
             onChange={(e) => onChange({ ...data, tools_auto_approval: e.target.checked || undefined })}
-            className="w-4 h-4 accent-purple-600"
+            className="w-4 h-4 accent-primary"
           />
         </div>
         
@@ -78,7 +78,7 @@ export function ToolNodeForm({ data, onChange, theme, availableTools = [] }: Too
             type="checkbox"
             checked={data.continue_on_error === true}
             onChange={(e) => onChange({ ...data, continue_on_error: e.target.checked || undefined })}
-            className="w-4 h-4 accent-purple-600"
+            className="w-4 h-4 accent-primary"
           />
         </div>
         
@@ -91,7 +91,7 @@ export function ToolNodeForm({ data, onChange, theme, availableTools = [] }: Too
             type="checkbox"
             checked={data.silent || false}
             onChange={(e) => onChange({ ...data, silent: e.target.checked })}
-            className="w-4 h-4 accent-purple-600"
+            className="w-4 h-4 accent-primary"
           />
         </div>
 
@@ -113,7 +113,7 @@ export function ToolNodeForm({ data, onChange, theme, availableTools = [] }: Too
               const newKey = `arg_${Object.keys(data.args || {}).length + 1}`
               onChange({ ...data, args: { ...(data.args || {}), [newKey]: '{variable}' } })
             }}
-            className="flex items-center gap-1 px-2.5 py-1 text-xs rounded bg-purple-600 hover:bg-purple-500 text-white transition-colors"
+            className="flex items-center gap-1 px-2.5 py-1 text-xs rounded bg-primary hover:bg-primary/90 text-white transition-colors"
           >
             <Plus size={12} />
             Add

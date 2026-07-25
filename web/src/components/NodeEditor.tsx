@@ -44,7 +44,7 @@ export default function NodeEditor({ node, onSave, onClose, theme, availableTool
   const nodeType = node.data?.nodeType || node.type
   const Icon = NODE_ICONS[nodeType || ''] || Brain
   // Enforce stable purple color for all nodes as requested
-  const color = '#7c3aed'
+  const color = 'var(--brand-strong)'
   
   // Render type-specific form
   const renderForm = () => {

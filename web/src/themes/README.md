@@ -1,5 +1,7 @@
 # Studio brand themes
 
+Authoritative product rules (invariants, cascade, what agents must not hard-code): **`docs/architecture/studio-ui-system.md`**. This file is the **pack authoring cookbook**.
+
 ## Model
 
 | Axis | Mechanism | Values |
@@ -46,25 +48,25 @@ const { theme, toggleTheme, brandTheme, setBrandTheme, availableBrandThemes } = 
 1. **shadcn semantic** — `--background`, `--primary`, `--border`, … (controls)
 2. **Product** — `--brand`, `--accent2`, `--bg-grad`, `--work-sidebar`, chat/node tokens
 3. **Compat** — `--bg-primary`, `--text-primary` (legacy maps; prefer semantic)
-4. **App Canvas** (generated apps iframe) — always-dark pack dictionary in `appCanvas.ts`
+4. **App Canvas** (generated apps iframe) — light + dark pack dictionary in `appCanvas.ts`
 
 Components that only touch these layers retheme when the pack changes. Hard-coded hex (e.g. hero tile gradients) must be moved into tokens to follow new packs.
 
 ## App Canvas (generated apps)
 
-Apps render in a sandboxed iframe with a **fixed dark** canvas. They do **not** follow Studio light mode.
+Apps render in a sandboxed iframe and follow Studio **light/dark** and **brand pack** via postMessage tokens.
 
 | Piece | Location |
 |-------|----------|
-| Token dictionaries per pack | `web/src/themes/appCanvas.ts` → `APP_CANVAS_BY_BRAND` |
+| Token dictionaries per pack | `web/src/themes/appCanvas.ts` → `APP_CANVAS_BY_BRAND[pack].light` / `.dark` |
 | Parent → iframe | `buildAppCanvasThemeMessage()` via `AppPreview` postMessage |
-| Sandbox apply | `applyAppCanvas(pack, tokens)` in `pkg/api/app_preview_sandbox.go` |
-| LLM guidance | `pkg/skills/builtin_content.go` — use `bg-surface`, `bg-brand`, `text-app`, … |
+| Sandbox apply | `applyAppCanvas(pack, tokens, mode)` in `pkg/api/app_preview_sandbox.go` |
+| LLM guidance | `pkg/skills/builtin_content.go` — use `bg-surface`, `bg-brand`, `text-app`, `text-danger` / `bg-danger-soft`, … |
 
 When you add a brand pack:
 
 1. Shell CSS in `index.css` (light + dark).
-2. **Also** fill `APP_CANVAS_BY_BRAND.ember` (dark only) if not already stubbed.
+2. **Also** fill `APP_CANVAS_BY_BRAND.ember.light` and `.dark` if not already stubbed.
 3. Flip `shipped: true`.
 
-Token-based apps retheme automatically when `html[data-theme]` changes. Apps with hard-coded `bg-gray-900` do not.
+Token-based apps retheme when `html[data-theme]` or `html.dark` changes. Apps with hard-coded `bg-gray-900` do not.

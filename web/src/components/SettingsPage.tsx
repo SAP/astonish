@@ -214,7 +214,7 @@ function MembersPanel({ user, team, canManageTeam }: MembersPanelProps) {
                         <option value="admin">admin</option>
                       </select>
                     ) : (
-                      <span className="px-2 py-0.5 rounded text-xs" style={{ background: 'var(--accent-soft)', color: 'var(--accent)' }}>{m.role}</span>
+                      <span className="px-2 py-0.5 rounded text-xs" style={{ background: 'var(--accent-soft)', color: 'var(--brand)' }}>{m.role}</span>
                     )}
                   </td>
                   <td className="py-2.5 px-3" style={{ color: 'var(--text-muted)' }}>{new Date(m.joined_at).toLocaleDateString()}</td>
@@ -879,7 +879,7 @@ function OrgProvidersTab() {
               >
                 <div className="flex items-center gap-3 min-w-0">
                   <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0"
-                    style={{ background: 'rgba(168, 85, 247, 0.15)', border: '1px solid rgba(168, 85, 247, 0.2)' }}>
+                    style={{ background: 'var(--brand-muted)', border: '1px solid color-mix(in oklab, var(--brand) 20%, transparent)' }}>
                     <Key size={14} style={{ color: 'var(--brand)' }} />
                   </div>
                   <div className="min-w-0">
@@ -1361,7 +1361,7 @@ function TeamProvidersTab({ teamSlug }: { teamSlug: string }) {
               >
                 <div className="flex items-center gap-3 min-w-0">
                   <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0"
-                    style={{ background: 'rgba(168, 85, 247, 0.15)', border: '1px solid rgba(168, 85, 247, 0.2)' }}>
+                    style={{ background: 'var(--brand-muted)', border: '1px solid color-mix(in oklab, var(--brand) 20%, transparent)' }}>
                     <Key size={14} style={{ color: 'var(--brand)' }} />
                   </div>
                   <div className="min-w-0">
@@ -1479,7 +1479,7 @@ function TeamContent({ tabId, teamSlug, theme, user, canManageTeam, team }: Team
   if (tabId === 'knowledge') {
     return (
       <div className="flex-1 overflow-hidden p-6 flex flex-col">
-        <Suspense fallback={<div className="flex items-center justify-center py-12"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--accent)' }} /></div>}>
+        <Suspense fallback={<div className="flex items-center justify-center py-12"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--brand)' }} /></div>}>
           <KnowledgeBrowser theme={theme as 'dark' | 'light'} user={user} activeTeam={teamSlug} />
         </Suspense>
       </div>
@@ -1489,7 +1489,7 @@ function TeamContent({ tabId, teamSlug, theme, user, canManageTeam, team }: Team
   if (tabId === 'container') {
     return (
       <div className="flex-1 overflow-hidden p-6 flex flex-col">
-        <Suspense fallback={<div className="flex items-center justify-center py-12"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--accent)' }} /></div>}>
+        <Suspense fallback={<div className="flex items-center justify-center py-12"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--brand)' }} /></div>}>
           <TeamContainerTab teamSlug={teamSlug} theme={theme as 'dark' | 'light'} canManage={canManageTeam} />
         </Suspense>
       </div>
@@ -1499,7 +1499,7 @@ function TeamContent({ tabId, teamSlug, theme, user, canManageTeam, team }: Team
   if (fullConfigLoading) {
     return (
       <div className="flex items-center justify-center py-12">
-        <Loader2 size={24} className="animate-spin" style={{ color: 'var(--accent)' }} />
+        <Loader2 size={24} className="animate-spin" style={{ color: 'var(--brand)' }} />
         <span className="ml-2 text-sm" style={{ color: 'var(--text-muted)' }}>Loading...</span>
       </div>
     )
@@ -1509,7 +1509,7 @@ function TeamContent({ tabId, teamSlug, theme, user, canManageTeam, team }: Team
   if (tabId === 'skills') {
     return (
       <div className="flex-1 overflow-hidden p-6 flex flex-col">
-        <Suspense fallback={<div className="flex items-center justify-center py-12"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--accent)' }} /></div>}>
+        <Suspense fallback={<div className="flex items-center justify-center py-12"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--brand)' }} /></div>}>
           <SkillsSettings config={fullConfig?.skills || null} onSaved={handleSaved} theme={theme} isPlatform canManage={canManageTeam} teamSlug={teamSlug} />
         </Suspense>
       </div>
@@ -1518,7 +1518,7 @@ function TeamContent({ tabId, teamSlug, theme, user, canManageTeam, team }: Team
 
   return (
     <div className="flex-1 overflow-y-auto p-6">
-      <Suspense fallback={<div className="flex items-center justify-center py-12"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--accent)' }} /></div>}>
+      <Suspense fallback={<div className="flex items-center justify-center py-12"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--brand)' }} /></div>}>
         {tabId === 'providers' && <TeamProvidersTab teamSlug={teamSlug} />}
         {tabId === 'mcp' && <TeamMCPServersTab teamSlug={teamSlug} theme={theme} />}
         {tabId === 'network' && <TeamNetworkPolicyTab teamSlug={teamSlug} />}
@@ -1728,8 +1728,8 @@ export default function SettingsPage({
               onClick={onUpdateClick}
               className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all hover:scale-[1.02]"
               style={{
-                background: 'linear-gradient(135deg, rgba(168, 85, 247, 0.2) 0%, rgba(124, 58, 237, 0.2) 100%)',
-                border: '1px solid rgba(168, 85, 247, 0.3)'
+                background: 'linear-gradient(135deg, var(--brand-muted) 0%, color-mix(in oklab, var(--brand) 20%, transparent) 100%)',
+                border: '1px solid color-mix(in oklab, var(--brand) 30%, transparent)'
               }}
             >
               <Download size={18} style={{ color: 'var(--brand)' }} />
@@ -1781,7 +1781,7 @@ export default function SettingsPage({
 
           {activeSection.startsWith('team-') && teamsLoading && (
             <div className="flex items-center justify-center py-12">
-              <Loader2 size={24} className="animate-spin" style={{ color: 'var(--accent)' }} />
+              <Loader2 size={24} className="animate-spin" style={{ color: 'var(--brand)' }} />
             </div>
           )}
 
@@ -1795,19 +1795,19 @@ export default function SettingsPage({
           )}
 
           {activeSection === 'org-users' && user && org && (
-            <Suspense fallback={<div className="flex items-center justify-center h-full"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--accent)' }} /></div>}>
+            <Suspense fallback={<div className="flex items-center justify-center h-full"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--brand)' }} /></div>}>
               <UserManagement theme={theme as 'dark' | 'light'} user={user} org={org} />
             </Suspense>
           )}
 
           {activeSection === 'org-audit' && (
-            <Suspense fallback={<div className="flex items-center justify-center h-full"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--accent)' }} /></div>}>
+            <Suspense fallback={<div className="flex items-center justify-center h-full"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--brand)' }} /></div>}>
               <AuditViewer theme={theme as 'dark' | 'light'} />
             </Suspense>
           )}
 
           {activeSection === 'org-skills' && (
-            <Suspense fallback={<div className="flex items-center justify-center h-full"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--accent)' }} /></div>}>
+            <Suspense fallback={<div className="flex items-center justify-center h-full"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--brand)' }} /></div>}>
               <div className="flex-1 overflow-hidden p-6 flex flex-col h-full">
                 <SkillsSettings config={null} onSaved={() => {}} theme={theme} scope="org" isPlatform canManage={isAdmin} teamSlug={resolvedTeamSlug} />
               </div>
@@ -1815,7 +1815,7 @@ export default function SettingsPage({
           )}
 
           {activeSection === 'org-mcp' && (
-            <Suspense fallback={<div className="flex items-center justify-center h-full"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--accent)' }} /></div>}>
+            <Suspense fallback={<div className="flex items-center justify-center h-full"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--brand)' }} /></div>}>
               <div className="p-6 h-full">
                 <OrgMCPServersTab theme={theme} />
               </div>
@@ -1823,7 +1823,7 @@ export default function SettingsPage({
           )}
 
           {activeSection === 'org-network' && (
-            <Suspense fallback={<div className="flex items-center justify-center h-full"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--accent)' }} /></div>}>
+            <Suspense fallback={<div className="flex items-center justify-center h-full"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--brand)' }} /></div>}>
               <div className="p-6">
                 <OrgNetworkPolicyTab />
               </div>
@@ -1831,7 +1831,7 @@ export default function SettingsPage({
           )}
 
           {activeSection === 'org-providers' && (
-            <Suspense fallback={<div className="flex items-center justify-center h-full"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--accent)' }} /></div>}>
+            <Suspense fallback={<div className="flex items-center justify-center h-full"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--brand)' }} /></div>}>
               <div className="p-6">
                 <OrgProvidersTab />
               </div>
@@ -1840,33 +1840,33 @@ export default function SettingsPage({
 
           {/* Platform sections */}
           {activeSection === 'platform-providers' && isSuperadmin && (
-            <Suspense fallback={<div className="flex items-center justify-center h-full"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--accent)' }} /></div>}>
+            <Suspense fallback={<div className="flex items-center justify-center h-full"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--brand)' }} /></div>}>
               <div className="p-6">
                 <PlatformProvidersTab />
               </div>
             </Suspense>
           )}
           {activeSection === 'platform-mcp' && isSuperadmin && (
-            <Suspense fallback={<div className="flex items-center justify-center h-full"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--accent)' }} /></div>}>
+            <Suspense fallback={<div className="flex items-center justify-center h-full"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--brand)' }} /></div>}>
               <PlatformMCPServersTab theme={theme as string} />
             </Suspense>
           )}
           {activeSection === 'platform-network' && isSuperadmin && (
-            <Suspense fallback={<div className="flex items-center justify-center h-full"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--accent)' }} /></div>}>
+            <Suspense fallback={<div className="flex items-center justify-center h-full"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--brand)' }} /></div>}>
               <div className="p-6">
                 <PlatformNetworkPolicyTab />
               </div>
             </Suspense>
           )}
           {activeSection === 'platform-skills' && isSuperadmin && (
-            <Suspense fallback={<div className="flex items-center justify-center h-full"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--accent)' }} /></div>}>
+            <Suspense fallback={<div className="flex items-center justify-center h-full"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--brand)' }} /></div>}>
               <div className="flex-1 overflow-hidden p-6 flex flex-col h-full">
                 <SkillsSettings config={null} onSaved={() => {}} theme={theme} scope="platform" isPlatform canManage={true} />
               </div>
             </Suspense>
           )}
           {activeSection.startsWith('platform-') && activeSection !== 'platform-providers' && activeSection !== 'platform-mcp' && activeSection !== 'platform-network' && activeSection !== 'platform-skills' && !PLATFORM_SYSTEM_SECTIONS[activeSection] && isSuperadmin && (
-            <Suspense fallback={<div className="flex items-center justify-center h-full"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--accent)' }} /></div>}>
+            <Suspense fallback={<div className="flex items-center justify-center h-full"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--brand)' }} /></div>}>
               <PlatformAdminPanel theme={theme as 'dark' | 'light'} activeTab={activeSection.replace('platform-', '')} />
             </Suspense>
           )}

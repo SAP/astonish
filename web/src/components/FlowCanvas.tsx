@@ -510,7 +510,7 @@ function FlowCanvasInner({
   }, [getViewport, setViewport, setContextMenu])
 
   const defaultEdgeOptions = useMemo(() => ({
-    style: { stroke: '#805AD5', strokeWidth: 2 },
+    style: { stroke: 'var(--brand)', strokeWidth: 2 },
     type: 'editable',  // Use custom editable edge with inline waypoints
   }), [])
 

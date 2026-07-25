@@ -554,7 +554,7 @@ function Artifacts({ artifacts }: { artifacts: [string, FleetArtifactDef][] }) {
             <GitBranch size={14} className="text-cyan-400" />
             <span className="font-medium" style={{ color: 'var(--text-secondary)' }}>{key}</span>
             <span style={{ color: 'var(--text-muted)' }}>{artifact.type === 'git_repo' ? artifact.repo : artifact.path}</span>
-            {artifact.auto_pr && <span className="px-1.5 py-0.5 rounded text-[10px] bg-purple-500/20 text-purple-300">auto-PR</span>}
+            {artifact.auto_pr && <span className="px-1.5 py-0.5 rounded text-[10px] bg-primary/20 text-primary">auto-PR</span>}
           </div>
         ))}
       </div>

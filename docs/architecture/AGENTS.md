@@ -19,7 +19,7 @@ This directory is the **authoritative reference** for cross-cutting design decis
 ### API + Generative UI
 - `api-studio.md` — REST + SSE surface reference.
 - `generative-ui.md` — App preview pipeline, iframe sandbox, `useAppData` / `useAppAI` / `useAppState`, SSRF-protected proxy.
-- `studio-ui-system.md` — Studio design system, shadcn/ui usage, theme tokens, and custom-surface boundaries for Flow Canvas, Studio Chat, embedded viewers, terminal, and app sandbox.
+- `studio-ui-system.md` — Studio design system: dual-axis brand packs (mode × `data-theme`), shadcn vs custom surfaces, token rules (no hard-coded brand colors), preference cascade, App Canvas, and Flow/Chat/terminal boundaries.
 
 ### Code Intelligence
 - `code-intelligence.md` - Tree-sitter-first structural code intelligence. Scope graphs, reference graph, PageRank, sandbox-native execution. LSP is deferred pending observed need. **Status: implemented** (`pkg/codeintel`, sandbox packaging per backend).

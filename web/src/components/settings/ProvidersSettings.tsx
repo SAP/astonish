@@ -481,7 +481,7 @@ export default function ProvidersSettings({
                           </select>
                           {loadingModels && (
                             <div className="absolute right-8 top-1/2 -translate-y-1/2">
-                              <Loader2 size={14} className="animate-spin" style={{ color: 'var(--accent)' }} />
+                              <Loader2 size={14} className="animate-spin" style={{ color: 'var(--brand)' }} />
                             </div>
                           )}
                         </div>
@@ -568,8 +568,8 @@ export default function ProvidersSettings({
             <div
               key={provider.name}
               className={`rounded-lg border transition-all ${
-                isExpanded ? 'border-purple-500 ring-1 ring-purple-500/30' : 
-                'hover:border-purple-500/50'
+                isExpanded ? 'border-primary ring-1 ring-primary/30' : 
+                'hover:border-primary/50'
               }`}
               style={{ background: 'var(--bg-secondary)', borderColor: isExpanded ? undefined : 'var(--border-color)' }}
             >
@@ -583,8 +583,8 @@ export default function ProvidersSettings({
                     <div 
                       className="w-10 h-10 rounded-lg flex items-center justify-center"
                       style={{ 
-                        background: 'linear-gradient(135deg, var(--brand-muted) 0%, rgba(124, 58, 237, 0.2) 100%)',
-                        border: '1px solid rgba(168, 85, 247, 0.3)'
+                        background: 'linear-gradient(135deg, var(--brand-muted) 0%, color-mix(in oklab, var(--brand) 20%, transparent) 100%)',
+                        border: '1px solid color-mix(in oklab, var(--brand) 30%, transparent)'
                       }}
                     >
                       <Key size={18} style={{ color: 'var(--brand)' }} />

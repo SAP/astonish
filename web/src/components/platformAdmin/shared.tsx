@@ -42,7 +42,7 @@ export function StatusBadge({ status }: StatusBadgeProps) {
 export function RoleBadge({ role }: RoleBadgeProps) {
   const colors: Record<string, { bg: string; fg: string }> = {
     superadmin: { bg: 'rgba(234, 179, 8, 0.15)', fg: '#eab308' },
-    owner: { bg: 'rgba(168, 85, 247, 0.15)', fg: '#a855f7' },
+    owner: { bg: 'var(--brand-muted)', fg: 'var(--brand)' },
     admin: { bg: 'rgba(59, 130, 246, 0.15)', fg: '#3b82f6' },
     member: { bg: 'rgba(107, 114, 128, 0.15)', fg: '#6b7280' },
   }

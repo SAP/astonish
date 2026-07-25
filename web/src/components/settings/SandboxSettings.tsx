@@ -898,7 +898,7 @@ export default function SandboxSettings({ config, onSaved }: SandboxSettingsProp
                 <div key={t.name} className="rounded-lg border transition-all"
                   style={{
                     background: 'var(--bg-secondary)',
-                    borderColor: isExpanded ? 'rgba(168, 85, 247, 0.4)' : 'var(--border-color)'
+                    borderColor: isExpanded ? 'color-mix(in oklab, var(--brand) 40%, transparent)' : 'var(--border-color)'
                   }}>
                   {/* Header */}
                   <div className="px-3 py-2 flex items-center gap-3">

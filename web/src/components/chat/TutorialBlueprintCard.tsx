@@ -38,7 +38,7 @@ interface TutorialBlueprintCardProps {
 function kindMeta(kind: string): { label: string; icon: typeof User; color: string } {
   switch (kind) {
     case 'avatar':
-      return { label: 'A Roll', icon: User, color: 'var(--accent)' }
+      return { label: 'A Roll', icon: User, color: 'var(--brand)' }
     case 'broll':
       return { label: 'B Roll', icon: Film, color: 'rgb(234, 179, 8)' }
     case 'screen':
@@ -63,7 +63,7 @@ export default function TutorialBlueprintCard({
       style={{ border: '1px solid var(--border-color)', background: 'var(--bg-secondary)', boxShadow: 'var(--shadow-soft)' }}
     >
       <div className="px-4 py-3 flex items-center gap-2" style={{ borderBottom: '1px solid var(--border-color)' }}>
-        <Clapperboard size={16} style={{ color: 'var(--accent)' }} />
+        <Clapperboard size={16} style={{ color: 'var(--brand)' }} />
         <div className="min-w-0">
           <div className="text-sm font-semibold truncate" style={{ color: 'var(--text-primary)' }}>
             {data.title || 'Tutorial blueprint'}
@@ -123,7 +123,7 @@ export default function TutorialBlueprintCard({
             <button
               onClick={onApprove}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
-              style={{ background: 'var(--accent)', border: '1px solid var(--accent)', color: 'var(--accent-contrast, #fff)' }}
+              style={{ background: 'var(--brand)', border: '1px solid var(--accent)', color: 'var(--accent-contrast, #fff)' }}
             >
               <Check size={13} />
               Approve &amp; generate
@@ -131,7 +131,7 @@ export default function TutorialBlueprintCard({
             <button
               onClick={onRequestChanges}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
-              style={{ background: 'var(--accent-soft)', border: '1px solid var(--border-color)', color: 'var(--accent)' }}
+              style={{ background: 'var(--accent-soft)', border: '1px solid var(--border-color)', color: 'var(--brand)' }}
             >
               <RefreshCw size={13} />
               Request changes

@@ -73,7 +73,7 @@ export default function OrgDetailView({ orgSlug, onBack }: OrgDetailViewProps) {
     return (
       <div className="px-6 py-4">
         <InlineError msg={error || 'Organization not found'} />
-        <button onClick={onBack} className="mt-4 flex items-center gap-2 text-sm" style={{ color: 'var(--accent)' }}>
+        <button onClick={onBack} className="mt-4 flex items-center gap-2 text-sm" style={{ color: 'var(--brand)' }}>
           <ArrowLeft size={14} /> Back to Organizations
         </button>
       </div>
@@ -321,7 +321,7 @@ function TeamRow({ team, orgSlug, isExpanded, isLastTeam, onToggle, onDelete, on
             <button
               onClick={() => setShowAddMember(true)}
               className="flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-medium transition-colors hover:opacity-80"
-              style={{ background: 'var(--accent-soft)', color: 'var(--accent)' }}
+              style={{ background: 'var(--accent-soft)', color: 'var(--brand)' }}
             >
               <Plus size={11} /> Add Member
             </button>

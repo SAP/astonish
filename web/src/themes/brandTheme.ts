@@ -56,7 +56,7 @@ export function shippedBrandThemes(): BrandTheme[] {
 }
 
 /**
- * Cascade: user preference → platform default → product default (aster).
+ * Cascade: user preference → platform default → product default (classic).
  * Empty / unshipped values are skipped.
  */
 export function resolveBrandTheme(
@@ -139,6 +139,6 @@ export const REQUIRED_THEME_TOKENS = [
 ] as const
 
 /**
- * App Canvas (generated apps) is a separate always-dark dictionary per pack.
+ * App Canvas (generated apps) is a separate light+dark dictionary per pack.
  * See `appCanvas.ts` / `APP_CANVAS_BY_BRAND` — required when shipping a new brand.
  */

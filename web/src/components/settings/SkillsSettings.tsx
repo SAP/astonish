@@ -727,7 +727,7 @@ export default function SkillsSettings({ config, onSaved, theme = 'dark', scope,
         <div
           key={`${f.path}/${f.filename}`}
           onClick={() => switchToFile(f.path, f.filename)}
-          className={`group flex items-center justify-between px-2 py-1 rounded cursor-pointer text-sm ${isActive ? 'bg-purple-600 text-white' : 'hover:bg-gray-800/60'}`}
+          className={`group flex items-center justify-between px-2 py-1 rounded cursor-pointer text-sm ${isActive ? 'bg-primary text-white' : 'hover:bg-gray-800/60'}`}
         >
           <div className="flex items-center gap-1.5 min-w-0">
             <FileText size={14} className="flex-shrink-0" />
@@ -888,7 +888,7 @@ export default function SkillsSettings({ config, onSaved, theme = 'dark', scope,
                       {issue.suggestion && !matchingAck && (
                         <button
                           onClick={() => handleApplyFix(issue.suggestion)}
-                          className="text-xs px-2 py-1 rounded transition-colors bg-purple-600/80 hover:bg-purple-600 text-white font-medium"
+                          className="text-xs px-2 py-1 rounded transition-colors bg-primary/80 hover:bg-primary text-white font-medium"
                         >
                           Apply Fix
                         </button>
@@ -967,7 +967,7 @@ export default function SkillsSettings({ config, onSaved, theme = 'dark', scope,
                      }
                    }
                  }}
-                 className={`group flex items-center gap-1.5 px-2 py-1 rounded cursor-pointer ${currentFilename === 'SKILL.md' ? 'bg-purple-600 text-white' : 'hover:bg-gray-800/60'}`}
+                 className={`group flex items-center gap-1.5 px-2 py-1 rounded cursor-pointer ${currentFilename === 'SKILL.md' ? 'bg-primary text-white' : 'hover:bg-gray-800/60'}`}
                >
                  <FileText size={14} />
                  <span className="font-medium">SKILL.md</span>
@@ -1005,7 +1005,7 @@ export default function SkillsSettings({ config, onSaved, theme = 'dark', scope,
           <div className="flex-1 flex flex-col overflow-hidden">
             {editorLoading ? (
               <div className="flex items-center justify-center h-full">
-                <Loader2 size={24} className="animate-spin" style={{ color: 'var(--accent)' }} />
+                <Loader2 size={24} className="animate-spin" style={{ color: 'var(--brand)' }} />
               </div>
             ) : (
               <CodeMirror
@@ -1154,7 +1154,7 @@ export default function SkillsSettings({ config, onSaved, theme = 'dark', scope,
 
             {skillsLoading && (
               <div className="flex items-center gap-2 py-4">
-                <Loader2 size={16} className="animate-spin" style={{ color: 'var(--accent)' }} />
+                <Loader2 size={16} className="animate-spin" style={{ color: 'var(--brand)' }} />
                 <span className="text-sm" style={hintStyle}>Loading skills...</span>
               </div>
             )}

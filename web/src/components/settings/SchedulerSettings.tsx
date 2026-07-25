@@ -183,7 +183,7 @@ function ModeBadge({ mode }: { mode: string }) {
 }
 
 const SCOPE_COLORS: Record<string, string> = {
-  personal: '#8b5cf6',
+  personal: 'var(--brand)',
   team: '#3b82f6',
 }
 
@@ -208,7 +208,7 @@ const deliveryModeLabels: Record<string, string> = {
 }
 
 const deliveryModeColors: Record<string, string> = {
-  owner: '#8b5cf6',
+  owner: 'var(--brand)',
   team: '#3b82f6',
   members: '#f59e0b',
   target: '#6b7280',
@@ -488,7 +488,7 @@ export default function SchedulerSettings({ config, onSaved, teamSlug, isPlatfor
                 className="rounded-lg border transition-all"
                 style={{
                   background: 'var(--bg-secondary)',
-                  borderColor: isExpanded ? 'rgba(168, 85, 247, 0.4)' : 'var(--border-color)'
+                  borderColor: isExpanded ? 'color-mix(in oklab, var(--brand) 40%, transparent)' : 'var(--border-color)'
                 }}
               >
                 {/* Job Header */}
@@ -545,7 +545,7 @@ export default function SchedulerSettings({ config, onSaved, teamSlug, isPlatfor
                       onClick={() => handleRunJob(job)}
                       disabled={isRunning}
                       className="p-1.5 rounded-lg transition-colors hover:bg-gray-600/30 disabled:opacity-50"
-                      style={{ color: 'var(--accent)' }}
+                      style={{ color: 'var(--brand)' }}
                       title="Run now"
                     >
                       {isRunning ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
@@ -752,7 +752,7 @@ export default function SchedulerSettings({ config, onSaved, teamSlug, isPlatfor
                           </div>
                           {membersLoading ? (
                             <div className="flex items-center gap-2 py-2">
-                              <Loader2 size={12} className="animate-spin" style={{ color: 'var(--accent)' }} />
+                              <Loader2 size={12} className="animate-spin" style={{ color: 'var(--brand)' }} />
                               <span className="text-xs" style={hintStyle}>Loading team members...</span>
                             </div>
                           ) : teamMembers.length === 0 ? (
@@ -764,8 +764,8 @@ export default function SchedulerSettings({ config, onSaved, teamSlug, isPlatfor
                                 const memberChannelOverrides = job.delivery?.member_channels?.[member.user_id] || []
                                 return (
                                   <div key={member.user_id} className="rounded-lg p-2" style={{
-                                    background: isSelected ? 'rgba(168, 85, 247, 0.08)' : 'transparent',
-                                    border: `1px solid ${isSelected ? 'rgba(168, 85, 247, 0.3)' : 'var(--border-color)'}`,
+                                    background: isSelected ? 'color-mix(in oklab, var(--brand) 8%, transparent)' : 'transparent',
+                                    border: `1px solid ${isSelected ? 'color-mix(in oklab, var(--brand) 30%, transparent)' : 'var(--border-color)'}`,
                                   }}>
                                     <div className="flex items-center gap-2">
                                       <button
@@ -907,7 +907,7 @@ export default function SchedulerSettings({ config, onSaved, teamSlug, isPlatfor
 
       {jobsLoading && (
         <div className="flex items-center gap-2 py-4">
-          <Loader2 size={16} className="animate-spin" style={{ color: 'var(--accent)' }} />
+          <Loader2 size={16} className="animate-spin" style={{ color: 'var(--brand)' }} />
           <span className="text-sm" style={hintStyle}>Loading jobs...</span>
         </div>
       )}

@@ -423,7 +423,7 @@ export default function ConnectedChannelsSettings({ isAdmin = false }: { isAdmin
       {/* Loading */}
       {loading && (
         <div className="flex items-center gap-2 py-6">
-          <Loader2 size={16} className="animate-spin" style={{ color: 'var(--accent)' }} />
+          <Loader2 size={16} className="animate-spin" style={{ color: 'var(--brand)' }} />
           <span className="text-sm" style={hintStyle}>Loading connected channels...</span>
         </div>
       )}
@@ -517,7 +517,7 @@ export default function ConnectedChannelsSettings({ isAdmin = false }: { isAdmin
           {/* Bot identity — prominent */}
           <div className="text-center">
             <p className="text-sm font-medium mb-1" style={{ color: 'var(--text-primary)' }}>
-              Send this command to <span style={{ color: 'var(--accent)' }}>@{botUsername}</span>:
+              Send this command to <span style={{ color: 'var(--brand)' }}>@{botUsername}</span>:
             </p>
           </div>
 
@@ -573,7 +573,7 @@ export default function ConnectedChannelsSettings({ isAdmin = false }: { isAdmin
 
             {/* Polling indicator */}
             <div className="flex items-center justify-center gap-2 pt-2">
-              <Loader2 size={12} className="animate-spin" style={{ color: 'var(--accent)' }} />
+              <Loader2 size={12} className="animate-spin" style={{ color: 'var(--brand)' }} />
               <span className="text-xs" style={hintStyle}>Waiting for verification...</span>
             </div>
           </div>
@@ -638,7 +638,7 @@ export default function ConnectedChannelsSettings({ isAdmin = false }: { isAdmin
 
           <div className="text-center">
             <p className="text-sm" style={{ color: 'var(--text-primary)' }}>
-              A verification code was sent to <span className="font-medium" style={{ color: 'var(--accent)' }}>{emailLinkEmail}</span>
+              A verification code was sent to <span className="font-medium" style={{ color: 'var(--brand)' }}>{emailLinkEmail}</span>
             </p>
             <p className="text-xs mt-1" style={hintStyle}>Check your inbox and enter the 6-character code below.</p>
           </div>
@@ -659,7 +659,7 @@ export default function ConnectedChannelsSettings({ isAdmin = false }: { isAdmin
                 onClick={handleEmailVerifyCode}
                 disabled={emailLinkLoading || emailCodeInput.length < 6}
                 className="flex items-center gap-2 px-4 py-2 rounded-lg text-white text-sm font-medium transition-all disabled:opacity-50"
-                style={{ background: 'var(--accent)', border: 'none' }}
+                style={{ background: 'var(--brand)', border: 'none' }}
               >
                 {emailLinkLoading ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
                 Verify
@@ -716,7 +716,7 @@ export default function ConnectedChannelsSettings({ isAdmin = false }: { isAdmin
               onClick={handleEmailSendCode}
               disabled={emailLinkLoading || !emailInput.includes('@')}
               className="flex items-center gap-2 px-4 py-2 rounded-lg text-white text-sm font-medium transition-all disabled:opacity-50"
-              style={{ background: 'var(--accent)', border: 'none' }}
+              style={{ background: 'var(--brand)', border: 'none' }}
             >
               {emailLinkLoading ? <Loader2 size={14} className="animate-spin" /> : null}
               Send Code
@@ -822,7 +822,7 @@ export default function ConnectedChannelsSettings({ isAdmin = false }: { isAdmin
 
             {/* Polling indicator */}
             <div className="flex items-center justify-center gap-2 pt-2">
-              <Loader2 size={12} className="animate-spin" style={{ color: 'var(--accent)' }} />
+              <Loader2 size={12} className="animate-spin" style={{ color: 'var(--brand)' }} />
               <span className="text-xs" style={hintStyle}>Waiting for verification...</span>
             </div>
           </div>

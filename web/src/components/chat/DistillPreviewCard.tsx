@@ -110,15 +110,15 @@ export default function DistillPreviewCard({ data, isActive = false, fillWidth =
       <div className="px-4 py-3 flex items-center justify-between" style={{ borderBottom: '1px solid var(--border-color)' }}>
         <div className="flex flex-col gap-0.5">
           <div className="flex items-center gap-2">
-            <span className="text-sm font-semibold" style={{ color: 'var(--accent)' }}>{data.flowName || 'Distilled Flow'}</span>
+            <span className="text-sm font-semibold" style={{ color: 'var(--brand)' }}>{data.flowName || 'Distilled Flow'}</span>
           </div>
           <span className="text-xs" style={{ color: 'var(--text-secondary)' }}>{data.description}</span>
         </div>
         {data.tags && data.tags.length > 0 && (
           <div className="flex items-center gap-1 flex-shrink-0">
-            <Tag size={11} style={{ color: 'var(--accent)' }} />
+            <Tag size={11} style={{ color: 'var(--brand)' }} />
             {data.tags.map((tag, i) => (
-              <span key={i} className="text-[10px] px-1.5 py-0.5 rounded" style={{ background: 'var(--accent-soft)', color: 'var(--accent)' }}>{tag}</span>
+              <span key={i} className="text-[10px] px-1.5 py-0.5 rounded" style={{ background: 'var(--accent-soft)', color: 'var(--brand)' }}>{tag}</span>
             ))}
           </div>
         )}
@@ -135,7 +135,7 @@ export default function DistillPreviewCard({ data, isActive = false, fillWidth =
           <button
             onClick={() => setExplanationExpanded(!explanationExpanded)}
             className="flex items-center gap-1.5 w-full px-4 py-2.5 text-xs transition-colors cursor-pointer"
-            style={{ color: 'var(--accent)' }}
+            style={{ color: 'var(--brand)' }}
           >
             {explanationExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
             <span className="font-medium">Explanation</span>
@@ -251,7 +251,7 @@ export default function DistillPreviewCard({ data, isActive = false, fillWidth =
               {/* Notes */}
               {explanation.notes && (
                 <div className="flex items-start gap-2 rounded-lg px-3 py-2" style={{ background: 'var(--accent-soft)' }}>
-                  <Lightbulb size={12} className="flex-shrink-0 mt-0.5" style={{ color: 'var(--accent)' }} />
+                  <Lightbulb size={12} className="flex-shrink-0 mt-0.5" style={{ color: 'var(--brand)' }} />
                   <p className="text-[11px] leading-relaxed" style={{ color: 'var(--text-secondary)' }}>
                     {explanation.notes}
                   </p>
@@ -267,7 +267,7 @@ export default function DistillPreviewCard({ data, isActive = false, fillWidth =
         <button
           onClick={() => setShowYaml(!showYaml)}
           className="flex items-center gap-1.5 w-full px-4 py-2.5 text-xs transition-colors cursor-pointer"
-          style={{ color: 'var(--accent)' }}
+          style={{ color: 'var(--brand)' }}
         >
           {showYaml ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
           <span className="font-medium">View YAML</span>
@@ -288,7 +288,7 @@ export default function DistillPreviewCard({ data, isActive = false, fillWidth =
             <button
               onClick={onSave}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-white transition-colors cursor-pointer"
-              style={{ background: 'var(--accent)', border: '1px solid var(--accent-strong)' }}
+              style={{ background: 'var(--brand)', border: '1px solid var(--accent-strong)' }}
             >
               <Save size={13} />
               Save Flow
@@ -296,7 +296,7 @@ export default function DistillPreviewCard({ data, isActive = false, fillWidth =
             <button
               onClick={onRequestChanges}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
-              style={{ background: 'var(--accent-soft)', border: '1px solid var(--border-color)', color: 'var(--accent)' }}
+              style={{ background: 'var(--accent-soft)', border: '1px solid var(--border-color)', color: 'var(--brand)' }}
             >
               <RefreshCw size={13} />
               Request Changes

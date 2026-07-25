@@ -1080,7 +1080,7 @@ button, input, select, textarea {
 }
 
 .react-flow__node.selected > div {
-  box-shadow: 0 0 0 3px rgba(95, 79, 178, 0.28), var(--shadow-soft) !important;
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--brand) 28%, transparent), var(--shadow-soft) !important;
 }
 
 .react-flow__edge-path {
@@ -1109,19 +1109,19 @@ button, input, select, textarea {
 }
 
 .node-llm {
-  background: linear-gradient(135deg, #5f4fb2 0%, #4b3f9c 100%);
+  background: linear-gradient(135deg, var(--node-llm) 0%, color-mix(in oklab, var(--node-llm) 75%, black) 100%);
   color: white;
   border: none;
 }
 
 .node-tool {
-  background: linear-gradient(135deg, #6a3fb0 0%, #523295 100%);
+  background: linear-gradient(135deg, var(--node-tool) 0%, color-mix(in oklab, var(--node-tool) 75%, black) 100%);
   color: white;
   border: none;
 }
 
 .node-output {
-  background: linear-gradient(135deg, #8f7edb 0%, #6f5fc7 100%);
+  background: linear-gradient(135deg, var(--node-output) 0%, color-mix(in oklab, var(--node-output) 75%, black) 100%);
   color: white;
   border: none;
 }
@@ -1139,13 +1139,13 @@ button, input, select, textarea {
 }
 
 .node-active {
-  box-shadow: 0 0 0 2px rgba(95, 79, 178, 0.3), 0 0 16px rgba(95, 79, 178, 0.28);
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--brand) 30%, transparent), 0 0 16px color-mix(in oklab, var(--brand) 28%, transparent);
   animation: pulse 2s infinite;
 }
 
 @keyframes pulse {
-  0%, 100% { box-shadow: 0 0 0 2px rgba(95, 79, 178, 0.35), 0 0 16px rgba(95, 79, 178, 0.24); }
-  50% { box-shadow: 0 0 0 4px rgba(95, 79, 178, 0.48), 0 0 24px rgba(95, 79, 178, 0.36); }
+  0%, 100% { box-shadow: 0 0 0 2px color-mix(in oklab, var(--brand) 35%, transparent), 0 0 16px color-mix(in oklab, var(--brand) 24%, transparent); }
+  50% { box-shadow: 0 0 0 4px color-mix(in oklab, var(--brand) 48%, transparent), 0 0 24px color-mix(in oklab, var(--brand) 36%, transparent); }
 }
 
 /* Spinning border animation for running nodes */
@@ -1161,11 +1161,11 @@ button, input, select, textarea {
   padding: 3px;
   background: conic-gradient(
     from var(--spin-angle, 0deg),
-    #8b5cf6 0deg,
-    #6366f1 90deg,
+    var(--brand) 0deg,
+    var(--brand-strong) 90deg,
     transparent 180deg,
     transparent 270deg,
-    #8b5cf6 360deg
+    var(--brand) 360deg
   );
   -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
   -webkit-mask-composite: xor;

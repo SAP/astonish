@@ -225,7 +225,7 @@ export default function TaskPlanPanel({ data, sessionId }: { data: SubTaskExecut
               <button
                 onClick={() => toggleContent(eventKey)}
                 className="text-[10px] hover:opacity-80 px-2 py-0.5 mb-1 rounded bg-black/50 cursor-pointer"
-                style={{ color: 'var(--accent)' }}
+                style={{ color: 'var(--brand)' }}
               >
                 Show more ({Math.ceil(text.length / 1000)}k chars)
               </button>
@@ -236,7 +236,7 @@ export default function TaskPlanPanel({ data, sessionId }: { data: SubTaskExecut
               <button
                 onClick={() => toggleContent(eventKey)}
                 className="text-[10px] hover:opacity-80 px-2 py-0.5 rounded bg-black/30 cursor-pointer"
-                style={{ color: 'var(--accent)' }}
+                style={{ color: 'var(--brand)' }}
               >
                 Show less
               </button>
@@ -259,9 +259,9 @@ export default function TaskPlanPanel({ data, sessionId }: { data: SubTaskExecut
         style={{ border: '1px solid var(--border-color)', background: 'rgba(255,255,255,0.03)' }}
       >
         <div className="flex items-center gap-2 px-3 py-1.5">
-          <Wrench size={12} className={isCall ? 'text-purple-400' : 'text-green-400'} />
+          <Wrench size={12} className={isCall ? 'text-primary' : 'text-green-400'} />
           <span className="text-xs font-medium" style={{ color: 'var(--text-primary)' }}>
-            {isCall ? 'Tool Call' : 'Tool Result'}: <code className="bg-purple-500/15 text-purple-300 px-1 py-0.5 rounded text-[11px]">{name}</code>
+            {isCall ? 'Tool Call' : 'Tool Result'}: <code className="bg-primary/15 text-primary px-1 py-0.5 rounded text-[11px]">{name}</code>
           </span>
         </div>
         {renderCardContent(cardData, eventKey)}
@@ -315,7 +315,7 @@ export default function TaskPlanPanel({ data, sessionId }: { data: SubTaskExecut
     >
       {/* Header */}
       <div className="flex items-center gap-2.5 px-4 py-2.5">
-        {data.status === 'running' && <Loader size={15} className="animate-spin shrink-0" style={{ color: 'var(--accent)' }} />}
+        {data.status === 'running' && <Loader size={15} className="animate-spin shrink-0" style={{ color: 'var(--brand)' }} />}
         {(data.status === 'complete' || data.status === 'partial') && <Check size={15} className="text-green-400 shrink-0" />}
         {data.status === 'error' && <span className="text-red-400 font-bold shrink-0">!</span>}
         <GitFork size={15} className="shrink-0" style={{ color: 'var(--text-muted)' }} />
@@ -386,7 +386,7 @@ export default function TaskPlanPanel({ data, sessionId }: { data: SubTaskExecut
                 {/* Right side: status/timestamp/duration (show on hover) */}
                 <span className="flex items-center gap-2 shrink-0">
                   {task.status === 'running' && (
-                    <span className="text-[11px] flex items-center gap-1" style={{ color: 'var(--accent)' }}>
+                    <span className="text-[11px] flex items-center gap-1" style={{ color: 'var(--brand)' }}>
                       {task.retrying && <RotateCcw size={10} />}
                       {task.retrying ? 'retrying' : 'running'}
                     </span>

@@ -31,7 +31,7 @@ func (PersonalSettings) Fields() []ent.Field {
 		field.String("default_model").
 			Default(""),
 		// BrandTheme is the user's Studio brand pack preference (nova, aster, …).
-		// Empty string means inherit platform default (then product default aster).
+		// Empty string means inherit platform default (then product default classic).
 		field.String("brand_theme").
 			Default(""),
 		field.Time("created_at").

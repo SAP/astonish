@@ -206,7 +206,7 @@ export function parseEdges(yamlData: YamlData, _nodePositions: Record<string, Po
           source: from,
           target: flowItem.to as string,
           animated: true,
-          style: { stroke: '#805AD5', strokeWidth: 2 },
+          style: { stroke: 'var(--brand)', strokeWidth: 2 },
           type: 'editable',
           data: { points: savedEdges[`${from}->${flowItem.to}`] }
         })
@@ -232,7 +232,7 @@ export function parseEdges(yamlData: YamlData, _nodePositions: Record<string, Po
             source: from,
             target: edge.to as string,
             animated: true,
-            style: { stroke: '#805AD5', strokeWidth: 2 },
+            style: { stroke: 'var(--brand)', strokeWidth: 2 },
             type: 'editable',
             label: label,
             labelStyle: { fill: '#9CA3AF', fontSize: 10 },

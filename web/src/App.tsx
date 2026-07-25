@@ -1533,7 +1533,7 @@ layout:
           className="flex flex-col h-screen items-center justify-center"
           style={{ background: 'var(--bg-primary)' }}
         >
-          <div className="animate-pulse text-purple-400 text-lg">Loading...</div>
+          <div className="animate-pulse text-primary text-lg">Loading...</div>
         </div>
       )}
 
@@ -1555,7 +1555,7 @@ layout:
           className="flex flex-col h-screen items-center justify-center"
           style={{ background: 'var(--bg-primary)' }}
         >
-          <div className="animate-pulse text-purple-400 text-lg">Loading...</div>
+          <div className="animate-pulse text-primary text-lg">Loading...</div>
         </div>
       )}
 

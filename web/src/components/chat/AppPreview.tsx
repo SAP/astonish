@@ -41,10 +41,20 @@ export default function AppPreview({ code, maxHeight = 500, appName = '', stateI
     sendToIframe({ type: 'render', code: codeToSend })
   }, [sendToIframe])
 
-  /** Push active brand pack's dark App Canvas tokens into the sandbox. */
+  /** Push active brand pack + light/dark App Canvas tokens into the sandbox. */
   const sendTheme = useCallback(() => {
     sendToIframe(buildAppCanvasThemeMessage())
   }, [sendToIframe])
+
+  // Retheme when Studio light/dark (class) or brand pack (data-theme) changes on <html>
+  useEffect(() => {
+    if (!ready) return
+    sendTheme()
+    const root = document.documentElement
+    const obs = new MutationObserver(() => sendTheme())
+    obs.observe(root, { attributes: true, attributeFilter: ['class', 'data-theme'] })
+    return () => obs.disconnect()
+  }, [ready, sendTheme])
 
   // Clean up polling intervals on unmount
   useEffect(() => {

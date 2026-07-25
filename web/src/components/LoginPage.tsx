@@ -155,7 +155,7 @@ export default function LoginPage({ onLogin, onRegister, pendingVerificationEmai
             <div
               className="inline-flex items-center justify-center w-16 h-16 rounded-2xl mb-4"
               style={{
-                background: 'linear-gradient(135deg, #a855f7 0%, #7c3aed 100%)',
+                background: 'linear-gradient(135deg, var(--brand) 0%, var(--brand-strong) 100%)',
               }}
             >
               <Mail size={28} className="text-white" />
@@ -233,7 +233,7 @@ export default function LoginPage({ onLogin, onRegister, pendingVerificationEmai
               disabled={loading || verificationCode.length !== 6}
               className="w-full py-3 rounded-xl text-white font-medium text-sm flex items-center justify-center gap-2 transition-all hover:opacity-90 disabled:opacity-50"
               style={{
-                background: 'linear-gradient(135deg, #a855f7 0%, #7c3aed 100%)',
+                background: 'linear-gradient(135deg, var(--brand) 0%, var(--brand-strong) 100%)',
               }}
             >
               {loading ? (
@@ -252,7 +252,7 @@ export default function LoginPage({ onLogin, onRegister, pendingVerificationEmai
               onClick={handleResendCode}
               disabled={resendCooldown > 0}
               className="text-sm font-medium hover:underline disabled:opacity-50 disabled:no-underline"
-              style={{ color: '#a855f7' }}
+              style={{ color: 'var(--brand)' }}
             >
               {resendCooldown > 0
                 ? `Resend code in ${resendCooldown}s`
@@ -369,7 +369,7 @@ export default function LoginPage({ onLogin, onRegister, pendingVerificationEmai
           <div
             className="inline-flex items-center justify-center w-16 h-16 rounded-2xl mb-4"
             style={{
-              background: 'linear-gradient(135deg, #a855f7 0%, #7c3aed 100%)',
+              background: 'linear-gradient(135deg, var(--brand) 0%, var(--brand-strong) 100%)',
             }}
           >
             <span className="text-3xl text-white font-bold">A</span>
@@ -497,7 +497,7 @@ export default function LoginPage({ onLogin, onRegister, pendingVerificationEmai
             disabled={loading}
             className="w-full py-3 rounded-xl text-white font-medium text-sm flex items-center justify-center gap-2 transition-all hover:opacity-90 disabled:opacity-50"
             style={{
-              background: 'linear-gradient(135deg, #a855f7 0%, #7c3aed 100%)',
+              background: 'linear-gradient(135deg, var(--brand) 0%, var(--brand-strong) 100%)',
             }}
           >
             {loading ? (
@@ -531,7 +531,7 @@ export default function LoginPage({ onLogin, onRegister, pendingVerificationEmai
                 setError('')
               }}
               className="text-sm font-medium hover:underline"
-              style={{ color: '#a855f7' }}
+              style={{ color: 'var(--brand)' }}
             >
               {mode === 'login' ? 'Sign up' : 'Sign in'}
             </button>

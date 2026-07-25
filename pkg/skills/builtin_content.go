@@ -82,13 +82,13 @@ There is NO component library. The following DO NOT EXIST in the sandbox:
 
 ## How to Build UI Without a Component Library
 
-Use native HTML elements styled with Tailwind. Follow the **Astonish App Canvas** design system so apps match Studio (Nova night).
+Use native HTML elements styled with Tailwind. Follow the **Astonish App Canvas** design system so apps match Studio (brand pack + light/dark).
 
-### App Canvas (always dark, brand-pack aware)
+### App Canvas (light/dark + brand-pack aware)
 
-The sandbox provides a fixed **dark** canvas for the active brand pack (Nova today; Ember/Amethyst/… later). Studio light/dark only affects the chrome *around* the iframe — **never** generate light-theme variants for app content.
+The sandbox receives **light or dark** tokens for the active brand pack from Studio (same dual axis as the shell). Apps that use token classes retheme when the user toggles light/dark or switches brand packs.
 
-Use **token classes** (` + "`bg-surface`" + `, ` + "`bg-brand`" + `, ` + "`text-app`" + `) so apps retheme automatically when the brand pack changes. Do **not** hard-code hex colors for surfaces or primary actions.
+Use **token classes** (` + "`bg-surface`" + `, ` + "`bg-brand`" + `, ` + "`text-app`" + `) so apps retheme automatically. Do **not** hard-code hex colors, gray backgrounds, or black/white text for surfaces. Do **not** implement your own theme toggle — the parent pushes mode.
 
 ### Color Palette (prefer these token classes)
 
@@ -98,12 +98,15 @@ Sandbox Tailwind tokens (use these instead of raw slate ` + "`bg-gray-900`" + `)
 - **Page/section cards:** ` + "`bg-surface border border-app-border rounded-xl`" + `
 - **Inner elements (keys, inputs, nested):** ` + "`bg-surface-2 border border-app-border rounded-lg`" + `
 - **Text hierarchy:** ` + "`text-app`" + ` (primary), ` + "`text-app-muted`" + ` (secondary/labels)
-- **Primary actions:** ` + "`bg-brand text-white`" + ` (Nova pink)
-- **Warm highlight:** ` + "`text-brand-strong`" + ` / amber accents
-- **Lilac accent:** ` + "`text-accent3`" + ` for secondary metrics
-- **Semantic accents (still fine):** emerald success, rose danger, amber warning
+- **Primary actions:** ` + "`bg-brand text-white`" + ` (pack brand accent)
+- **Secondary highlight:** ` + "`text-brand-strong`" + `
+- **Tertiary accent:** ` + "`text-accent3`" + ` for secondary metrics
+- **Error banner:** ` + "`bg-danger-soft border border-danger-border text-danger`" + ` (readable in light and dark)
+- **Warning banner:** ` + "`bg-warning-soft border border-warning-border text-warning`" + `
+- **Success / positive:** ` + "`bg-success-soft border border-success-border text-success`" + ` or ` + "`text-success`" + `
 
 Avoid raw slate (` + "`bg-gray-900`" + `, ` + "`bg-gray-800`" + `, ` + "`text-gray-*`" + `) and default blue CTAs when brand tokens fit.
+**Do not** use pastel status text alone on light backgrounds (` + "`text-red-400`" + `, ` + "`text-yellow-300`" + `, ` + "`text-amber-300`" + `) — they fail contrast in Studio light mode. Prefer the danger/warning/success tokens above.
 
 ### Standard Component Patterns
 
@@ -153,7 +156,7 @@ Use brand / accent3 / emerald / amber per card to distinguish metrics.
   <tbody>
     <tr className="border-b border-app-border/50 hover:bg-surface-2/50">
       <td className="py-2 px-3 text-app">Row label</td>
-      <td className="py-2 px-3 text-right text-emerald-400 font-medium">$1,234</td>
+      <td className="py-2 px-3 text-right text-success font-medium">$1,234</td>
     </tr>
   </tbody>
 </table>
@@ -214,7 +217,7 @@ const [tab, setTab] = useState('overview');
 **If you need a reusable component, define it as a top-level function ABOVE the main export (NEVER nested inside):**
 ` + "```" + `jsx
 function Badge({ children, variant = 'default' }) {
-  const colors = { default: 'bg-surface-2 text-app-muted', success: 'bg-emerald-500/20 text-emerald-400' };
+  const colors = { default: 'bg-surface-2 text-app-muted', success: 'bg-success-soft text-success border border-success-border' };
   return <span className={` + "`px-2 py-0.5 text-xs rounded-full ${colors[variant]}`" + `}>{children}</span>;
 }
 
@@ -231,7 +234,7 @@ export default function App() {
 4. **Single file** — Everything must be in one file. Helper components and utility functions go at the top, the main ` + "`export default function`" + ` goes at the bottom.
 5. **Self-contained** — Include all data, state, and logic within the component. Use hardcoded sample data for static apps; use ` + "`useAppData`" + ` for live data (see below).
 6. **NEVER use fetch(), XMLHttpRequest, or axios** — The sandbox blocks direct network access. ALL external data MUST go through ` + "`useAppData('http:GET:<url>')`" + ` or ` + "`useAppData('mcp:<server>/<tool>')`" + `. This is the ONLY way to get external data. If the user gives you a URL or API endpoint, put it in the useAppData sourceId, e.g. ` + "`useAppData('http:GET:https://api.example.com/data')`" + `.
-7. **App Canvas is always dark** — **Do NOT set any background class (bg-*) on the outermost container** — it must be transparent so the Nova night canvas shows through. Use App Canvas tokens (` + "`bg-surface`" + `, ` + "`bg-surface-2`" + `, ` + "`text-app`" + `, ` + "`bg-brand`" + `). Never generate a light-theme variant for apps.
+7. **App Canvas tokens** — **Do NOT set any background class (bg-*) on the outermost container** — it must be transparent so the Studio canvas shows through. Use App Canvas tokens (` + "`bg-surface`" + `, ` + "`bg-surface-2`" + `, ` + "`text-app`" + `, ` + "`bg-brand`" + `). Do not hard-code light-only or dark-only colors; one set of token classes works for both modes.
 8. **Make it interactive** — Use ` + "`useState`" + ` for buttons, toggles, tabs, filters.
 9. **Responsive** — Use responsive Tailwind classes (` + "`md:`" + `, ` + "`lg:`" + `) where appropriate.
 
@@ -262,7 +265,7 @@ export default function SalesTable() {
   });
 
   if (loading) return <div className="p-4 text-app-muted">Loading...</div>;
-  if (error) return <div className="p-4 text-red-400">Error: {error}</div>;
+  if (error) return <div className="p-3 rounded-lg border border-danger-border bg-danger-soft text-danger text-sm">Error: {error}</div>;
 
   return (
     <table className="w-full text-sm text-app">
@@ -295,7 +298,7 @@ export default function WeatherApp() {
         </button>
       </div>
       {loading && <p className="text-app-muted">Loading...</p>}
-      {error && <p className="text-red-400">{error}</p>}
+      {error && <p className="p-2 rounded-lg border border-danger-border bg-danger-soft text-danger text-sm">{error}</p>}
       {data && <p className="text-2xl text-white">{data?.current_condition?.[0]?.temp_C}°C</p>}
     </div>
   );
@@ -308,7 +311,7 @@ export default function GitHubRepos() {
   const { data, loading, error } = useAppData('http:GET:https://api.github.com/user/repos@github-token');
 
   if (loading) return <div className="p-4 text-app-muted">Loading...</div>;
-  if (error) return <div className="p-4 text-red-400">Error: {error}</div>;
+  if (error) return <div className="p-3 rounded-lg border border-danger-border bg-danger-soft text-danger text-sm">Error: {error}</div>;
 
   return (
     <div className="p-4 space-y-2">
@@ -331,7 +334,7 @@ export default function AIDeployments() {
   );
 
   if (loading) return <div className="p-4 text-app-muted">Loading...</div>;
-  if (error) return <div className="p-4 text-red-400">Error: {error}</div>;
+  if (error) return <div className="p-3 rounded-lg border border-danger-border bg-danger-soft text-danger text-sm">Error: {error}</div>;
 
   return (
     <div className="p-4 space-y-2">
@@ -578,7 +581,7 @@ export default function TodoApp() {
         <div key={todo.id} className="flex items-center gap-3 p-3 bg-surface rounded-lg border border-app-border">
           <input type="checkbox" checked={!!todo.done} onChange={() => toggleDone(todo.id, todo.done)} />
           <span className={todo.done ? 'line-through text-app-muted' : 'text-app'}>{todo.text}</span>
-          <button onClick={() => deleteTodo(todo.id)} className="ml-auto text-red-400 text-sm">Delete</button>
+          <button onClick={() => deleteTodo(todo.id)} className="ml-auto text-danger text-sm">Delete</button>
         </div>
       ))}
     </div>

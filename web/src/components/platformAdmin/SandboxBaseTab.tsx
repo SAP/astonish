@@ -164,7 +164,7 @@ export default function SandboxBaseTab() {
   if (loading) {
     return (
       <div className="flex items-center justify-center py-12">
-        <Loader2 size={24} className="animate-spin" style={{ color: 'var(--accent)' }} />
+        <Loader2 size={24} className="animate-spin" style={{ color: 'var(--brand)' }} />
       </div>
     )
   }
@@ -176,7 +176,7 @@ export default function SandboxBaseTab() {
           <h3 className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>Base Sandbox Configuration</h3>
         </div>
         <div className="flex items-start gap-3 p-4 rounded-lg" style={{ backgroundColor: 'var(--bg-secondary)', border: '1px solid var(--border)' }}>
-          <Info size={18} className="mt-0.5 shrink-0" style={{ color: 'var(--accent)' }} />
+          <Info size={18} className="mt-0.5 shrink-0" style={{ color: 'var(--brand)' }} />
           <div className="space-y-2">
             <p className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>
               Not available with the {unsupported.backend} backend
@@ -263,7 +263,7 @@ export default function SandboxBaseTab() {
               onClick={handleSaveImage}
               disabled={savingImage || imageInput === (openshell.sandbox_image || '')}
               className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-medium text-white transition-opacity"
-              style={{ background: 'var(--accent)', opacity: (savingImage || imageInput === (openshell.sandbox_image || '')) ? 0.5 : 1 }}
+              style={{ background: 'var(--brand)', opacity: (savingImage || imageInput === (openshell.sandbox_image || '')) ? 0.5 : 1 }}
             >
               {savingImage ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
               {savingImage ? 'Saving...' : 'Save Image'}
@@ -399,7 +399,7 @@ export default function SandboxBaseTab() {
               }}
               disabled={building || !dockerfileBody.trim()}
               className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-medium text-white transition-opacity"
-              style={{ background: 'var(--accent)', opacity: (building || !dockerfileBody.trim()) ? 0.5 : 1 }}
+              style={{ background: 'var(--brand)', opacity: (building || !dockerfileBody.trim()) ? 0.5 : 1 }}
             >
               {building ? <Loader2 size={12} className="animate-spin" /> : <Play size={12} />}
               {building ? 'Building...' : 'Build Image'}
@@ -615,7 +615,7 @@ export default function SandboxBaseTab() {
             onClick={handleBuild}
             disabled={building}
             className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-medium text-white transition-opacity"
-            style={{ background: 'var(--accent)', opacity: building ? 0.5 : 1 }}
+            style={{ background: 'var(--brand)', opacity: building ? 0.5 : 1 }}
           >
             {building ? <Loader2 size={12} className="animate-spin" /> : <Play size={12} />}
             {building ? 'Building...' : 'Build Base Layer'}

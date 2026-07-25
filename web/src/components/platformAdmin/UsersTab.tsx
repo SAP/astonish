@@ -158,7 +158,7 @@ export default function UsersTab() {
                   </td>
                   <td className="py-3 px-3">
                     <div className="flex items-center justify-end gap-1">
-                      <button onClick={() => setEditingUser(u)} className="p-1.5 rounded-lg transition-opacity hover:opacity-80" style={{ color: 'var(--accent)' }} title="Edit">
+                      <button onClick={() => setEditingUser(u)} className="p-1.5 rounded-lg transition-opacity hover:opacity-80" style={{ color: 'var(--brand)' }} title="Edit">
                         <Edit2 size={14} />
                       </button>
                       <button onClick={() => handleToggleSuperadmin(u)} className="p-1.5 rounded-lg transition-opacity hover:opacity-80" style={{ color: u.platform_role === 'superadmin' ? '#eab308' : 'var(--text-muted)' }} title={u.platform_role === 'superadmin' ? 'Demote from Superadmin' : 'Promote to Superadmin'}>

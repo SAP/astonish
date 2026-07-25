@@ -134,7 +134,7 @@ The `AppPreview` component creates an iframe pointing to `/api/app-preview/sandb
 <script src="/api/app-preview/runtime.js"></script>
 <script src="/api/app-preview/tailwind.js"></script>
 <style type="text/tailwindcss">
-  /* App Canvas tokens (always dark Nova night) — see @theme in app_preview_sandbox.go */
+  /* App Canvas tokens — defaults = Nova dark; parent overrides via theme postMessage */
   @theme {
     --color-surface: #1d0f28;
     --color-surface-2: #100816;
@@ -145,7 +145,7 @@ The `AppPreview` component creates an iframe pointing to `/api/app-preview/sandb
   }
 </style>
 <style>
-  html { background: #160b1f !important; } /* fixed App Canvas */
+  html { background: var(--color-app-canvas, #160b1f) !important; }
   /* Force transparent root so App Canvas shows through */
   #root > *:first-child { background-color: transparent !important; min-height: auto !important; }
 </style>
@@ -163,25 +163,25 @@ The `AppPreview` component creates an iframe pointing to `/api/app-preview/sandb
 
 ### App Canvas contract
 
-Generated apps render inside a **fixed dark “App Canvas”** for the **active brand pack**, independent of Studio light/dark:
+Generated apps render inside an **App Canvas** that follows Studio **light/dark** and **brand pack** (same dual axis as the shell):
 
 | Concern | Behavior |
 |---------|----------|
-| Iframe canvas | Always dark; colors come from the active brand pack’s App Canvas dictionary |
+| Iframe canvas | Light or dark tokens for the active brand pack (`APP_CANVAS_BY_BRAND[pack][mode]`) |
 | Studio shell (Apps panel chrome, chat) | Follows Studio tokens / light-dark as usual |
-| Brand pack switch | Parent posts `{ type: 'theme', pack, tokens }`; sandbox sets `--color-surface`, `--color-brand`, … |
-| LLM design system | Prefer tokens: `bg-surface`, `bg-surface-2`, `text-app`, `text-app-muted`, `border-app-border`, `bg-brand` |
+| Theme switch | Parent posts `{ type: 'theme', mode, pack, tokens }` when pack or light/dark changes; sandbox sets `--color-surface`, `--color-brand`, … |
+| LLM design system | Prefer tokens: `bg-surface`, `text-app`, `bg-brand`, plus status banners `text-danger` / `bg-danger-soft`, `text-warning` / `bg-warning-soft`, `text-success` / `bg-success-soft` |
 | Outermost root | Must stay transparent (no `bg-*`) so canvas shows through |
-| Dual light/dark app UIs | **Do not generate** — one canvas, brand via tokens |
+| App-local theme toggle | **Do not generate** — one token system; parent pushes mode |
 
 | Source of truth | Path |
 |-----------------|------|
-| Per-pack dark token dictionaries | `web/src/themes/appCanvas.ts` (`APP_CANVAS_BY_BRAND`) |
+| Per-pack light + dark token dictionaries | `web/src/themes/appCanvas.ts` (`APP_CANVAS_BY_BRAND`) |
 | postMessage builder | `buildAppCanvasThemeMessage()` |
-| Sandbox apply | `applyAppCanvas` in `pkg/api/app_preview_sandbox.go` |
+| Sandbox apply | `applyAppCanvas(pack, tokens, mode)` in `pkg/api/app_preview_sandbox.go` |
 | LLM skill | `pkg/skills/builtin_content.go` |
 
-Adding Ember/Amethyst: fill shell CSS **and** `APP_CANVAS_BY_BRAND[pack]` (stubs already exist). Token-based apps retheme without regeneration.
+Adding a pack: fill shell CSS **and** `APP_CANVAS_BY_BRAND[pack].light` + `.dark`. Token-based apps retheme without regeneration.
 
 The `runtime.js` bundle is a single IIFE built by Vite (`vite.config.sandbox.js`) that contains React 19, ReactDOM, Sucrase, Recharts, and Lucide React icons. The `tailwind.js` file is the `@tailwindcss/browser` runtime (~271KB) that provides Tailwind CSS v4 processing directly in the browser.
 
@@ -584,7 +584,7 @@ Messages between the iframe and parent page use a typed protocol:
 | Message Type | Fields | Purpose |
 |---|---|---|
 | `render` | `code` | Send JSX source to compile and render |
-| `theme` | `mode`, `pack`, `tokens` | App Canvas: always `mode: 'dark'`; `pack` + `tokens` from `appCanvas.ts` retheme `--color-*` for the active brand |
+| `theme` | `mode`, `pack`, `tokens` | App Canvas: `mode` is `'light'` or `'dark'`; `pack` + `tokens` from `appCanvas.ts` retheme `--color-*` |
 | `data_response` | `requestId`, `data`, `error` | Response to a data request |
 | `action_response` | `requestId`, `data`, `error` | Response to an action request |
 | `ai_response` | `requestId`, `text`, `error` | Response to an AI request |

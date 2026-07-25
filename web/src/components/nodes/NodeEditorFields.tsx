@@ -38,7 +38,7 @@ export function RawToolOutputEditor({ value, onChange }: RawToolOutputEditorProp
           checked={isEnabled}
           onChange={handleToggle}
           id="raw-tool-output-toggle"
-          className="w-4 h-4 accent-purple-600 rounded"
+          className="w-4 h-4 accent-primary rounded"
         />
         <label 
           htmlFor="raw-tool-output-toggle" 
@@ -142,7 +142,7 @@ export function OutputModelEditor({ value, onChange, theme, hideLabel = false, s
           {!singleField && (
             <button
               onClick={handleAdd}
-              className="flex items-center gap-1 text-xs px-2 py-1 rounded bg-purple-600 text-white hover:bg-purple-700"
+              className="flex items-center gap-1 text-xs px-2 py-1 rounded bg-primary text-white hover:bg-primary/90"
             >
               <Plus size={12} /> Add
             </button>

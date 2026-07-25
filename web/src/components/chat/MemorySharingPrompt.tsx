@@ -59,9 +59,9 @@ export default function MemorySharingPrompt({ snippet, category, isPlatformMode 
         disabled={state === 'sharing'}
         className="flex items-center gap-1 px-2 py-0.5 rounded-md transition-colors"
         style={{
-          background: 'rgba(168, 85, 247, 0.1)',
-          color: '#a855f7',
-          border: '1px solid rgba(168, 85, 247, 0.2)',
+          background: 'color-mix(in oklab, var(--brand) 10%, transparent)',
+          color: 'var(--brand)',
+          border: '1px solid color-mix(in oklab, var(--brand) 20%, transparent)',
           cursor: state === 'sharing' ? 'wait' : 'pointer',
         }}
       >

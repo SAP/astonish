@@ -32,7 +32,7 @@ export default function ChannelsTab() {
   useEffect(() => { load() }, [load])
 
   if (loading) {
-    return <div className="flex items-center justify-center py-12"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--accent)' }} /></div>
+    return <div className="flex items-center justify-center py-12"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--brand)' }} /></div>
   }
 
   return (
@@ -263,7 +263,7 @@ function ChannelCard({ channel, expanded, onToggle, onSaved, onError, onDeleted 
                   {testing ? 'Testing...' : 'Test Connection'}
                 </button>
               )}
-              <button onClick={handleSave} disabled={saving} className="px-4 py-2 rounded-lg text-xs font-medium text-white" style={{ background: 'var(--accent)' }}>
+              <button onClick={handleSave} disabled={saving} className="px-4 py-2 rounded-lg text-xs font-medium text-white" style={{ background: 'var(--brand)' }}>
                 {saving ? <Loader2 size={12} className="animate-spin inline mr-1" /> : null}
                 Save & Apply
               </button>

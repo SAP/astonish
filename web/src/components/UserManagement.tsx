@@ -54,7 +54,7 @@ function StatusBadge({ status }: { status: string }) {
 function RoleBadge({ role }: { role: string }) {
   const colors: Record<string, { bg: string; fg: string }> = {
     owner: { bg: 'rgba(234, 179, 8, 0.15)', fg: '#eab308' },
-    admin: { bg: 'rgba(168, 85, 247, 0.15)', fg: '#a855f7' },
+    admin: { bg: 'var(--brand-muted)', fg: 'var(--brand)' },
     member: { bg: 'rgba(59, 130, 246, 0.15)', fg: '#3b82f6' },
   }
   const c = colors[role] || colors.member
@@ -284,7 +284,7 @@ export default function UserManagement({ user, org }: UserManagementProps) {
                         <button
                           onClick={() => setResetTarget(u)}
                           className="p-1.5 rounded-lg transition-opacity hover:opacity-80"
-                          style={{ color: 'var(--accent)' }}
+                          style={{ color: 'var(--brand)' }}
                           title="Reset password"
                         >
                           <KeyRound size={14} />

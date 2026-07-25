@@ -31,8 +31,8 @@ window.onerror = function(msg, src, line, col, err) {
 // It contains the styles, DOM, and the application bootstrap script.
 const sandboxHTMLBody = `
 <style type="text/tailwindcss">
-  /* Astonish App Canvas — always dark. Defaults = Nova; parent postMessage
-     { type:'theme', pack, tokens } overrides CSS vars when brand packs change.
+  /* Astonish App Canvas — light + dark × brand pack. Defaults = Nova dark;
+     parent postMessage { type:'theme', mode, pack, tokens } overrides CSS vars.
      Generated apps use: bg-surface, text-app, border-app-border, bg-brand, … */
   @theme {
     --color-app-canvas: #160b1f;
@@ -45,14 +45,22 @@ const sandboxHTMLBody = `
     --color-brand-strong: #ffb86b;
     --color-accent3: #b478ff;
     --color-chart-grid: #3d2450;
+    --color-danger: #fca5a5;
+    --color-danger-soft: rgba(239, 68, 68, 0.15);
+    --color-danger-border: rgba(248, 113, 113, 0.35);
+    --color-warning: #fcd34d;
+    --color-warning-soft: rgba(251, 191, 36, 0.15);
+    --color-warning-border: rgba(252, 211, 77, 0.35);
+    --color-success: #6ee7b7;
+    --color-success-soft: rgba(16, 185, 129, 0.15);
+    --color-success-border: rgba(52, 211, 153, 0.35);
   }
 </style>
 <style>
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; font-family: system-ui, -apple-system, sans-serif; }
   body { padding: 16px; color: var(--color-app, #fceef7); }
-  /* App Canvas is always dark — Studio light mode does not flip app interior.
-     Background color is overridden by applyAppCanvas() when tokens arrive. */
+  /* Canvas color comes from tokens (applyAppCanvas). Defaults match Nova dark. */
   html { background: var(--color-app-canvas, #160b1f) !important; }
   #root { min-height: 20px; }
   /* Force the component's outermost element to be transparent so the App Canvas
@@ -66,10 +74,25 @@ const sandboxHTMLBody = `
   }
   #error-display {
     padding: 12px 16px; margin: 8px; border-radius: 8px;
-    background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3);
-    color: #ef4444; font-size: 13px; font-family: monospace; white-space: pre-wrap;
+    background: var(--color-danger-soft, rgba(239, 68, 68, 0.1));
+    border: 1px solid var(--color-danger-border, rgba(239, 68, 68, 0.3));
+    color: var(--color-danger, #b91c1c); font-size: 13px; font-family: monospace; white-space: pre-wrap;
     display: none;
   }
+  /* Existing LLM apps often use dark-mode pastels (text-red-400, text-yellow-300)
+     that fail contrast on light canvas. Remap those utilities when mode is light. */
+  html:not(.dark) .text-red-300,
+  html:not(.dark) .text-red-400,
+  html:not(.dark) .text-red-500,
+  html:not(.dark) .text-rose-300,
+  html:not(.dark) .text-rose-400 { color: var(--color-danger, #b91c1c) !important; }
+  html:not(.dark) .text-yellow-300,
+  html:not(.dark) .text-yellow-400,
+  html:not(.dark) .text-amber-300,
+  html:not(.dark) .text-amber-400 { color: var(--color-warning, #a16207) !important; }
+  html:not(.dark) .text-emerald-300,
+  html:not(.dark) .text-emerald-400,
+  html:not(.dark) .text-green-400 { color: var(--color-success, #047857) !important; }
 </style>
 </head>
 <body class="dark" style="background: transparent;">
@@ -113,15 +136,20 @@ const sandboxHTMLBody = `
   var errorEl = document.getElementById('error-display');
 
   /**
-   * Apply brand pack App Canvas tokens (always dark).
-   * tokens keys: canvas, surface, surface2, app, appMuted, appBorder,
-   *              brand, brandStrong, accent3, chartGrid
+   * Apply App Canvas tokens for brand pack + light/dark mode.
+   * Brand keys: canvas, surface, surface2, app, appMuted, appBorder,
+   *             brand, brandStrong, accent3, chartGrid
+   * Semantic: danger, dangerSoft, dangerBorder, warning*, success*
    * Maps onto --color-* vars used by Tailwind @theme utilities.
    */
-  function applyAppCanvas(pack, tokens) {
-    document.body.className = 'dark';
+  function applyAppCanvas(pack, tokens, mode) {
+    var isDark = mode !== 'light';
+    document.body.className = isDark ? 'dark' : '';
     var root = document.documentElement;
+    if (isDark) root.classList.add('dark');
+    else root.classList.remove('dark');
     if (pack) root.setAttribute('data-theme', pack);
+    if (mode) root.setAttribute('data-mode', mode);
     var t = tokens || {};
     var map = {
       canvas: '--color-app-canvas',
@@ -133,7 +161,16 @@ const sandboxHTMLBody = `
       brand: '--color-brand',
       brandStrong: '--color-brand-strong',
       accent3: '--color-accent3',
-      chartGrid: '--color-chart-grid'
+      chartGrid: '--color-chart-grid',
+      danger: '--color-danger',
+      dangerSoft: '--color-danger-soft',
+      dangerBorder: '--color-danger-border',
+      warning: '--color-warning',
+      warningSoft: '--color-warning-soft',
+      warningBorder: '--color-warning-border',
+      success: '--color-success',
+      successSoft: '--color-success-soft',
+      successBorder: '--color-success-border'
     };
     Object.keys(map).forEach(function(key) {
       if (t[key]) root.style.setProperty(map[key], t[key]);
@@ -615,9 +652,8 @@ const sandboxHTMLBody = `
     }
 
     if (msg.type === 'theme') {
-      // App Canvas is always dark. Brand pack + tokens come from parent
-      // (web/src/themes/appCanvas.ts). Ignore light mode for app interior.
-      applyAppCanvas(msg.pack, msg.tokens);
+      // Brand pack + light/dark mode + tokens from parent (web/src/themes/appCanvas.ts).
+      applyAppCanvas(msg.pack, msg.tokens, msg.mode);
     }
 
     if (msg.type === 'set_context') {

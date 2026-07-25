@@ -31,7 +31,7 @@ const nodeTypes = {
 }
 
 const edgeStyle = {
-  stroke: '#805AD5',
+  stroke: 'var(--brand)',
   strokeWidth: 2,
 }
 
@@ -70,7 +70,7 @@ function FullscreenFlowView({ nodes, edges, onClose }: { nodes: Node[]; edges: E
     >
       {/* Toolbar */}
       <div className="flex items-center justify-between px-4 py-2" style={{ borderBottom: '1px solid var(--border-color)', background: 'var(--bg-secondary)' }}>
-        <span className="text-sm font-medium" style={{ color: 'var(--accent)' }}>Flow Preview</span>
+        <span className="text-sm font-medium" style={{ color: 'var(--brand)' }}>Flow Preview</span>
         <div className="flex items-center gap-3">
           <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>Scroll to zoom &middot; Drag to pan &middot; Esc to close</span>
           <button
@@ -189,7 +189,7 @@ function FlowPreviewInner({ yamlContent, height = 350 }: FlowPreviewProps) {
         <button
           onClick={() => setExpanded(true)}
           className="absolute top-2 right-2 flex items-center gap-1 px-2 py-1 rounded-md text-[10px] transition-all cursor-pointer z-10"
-          style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-color)', color: 'var(--accent)' }}
+          style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-color)', color: 'var(--brand)' }}
           title="Expand to fullscreen"
         >
           <Maximize2 size={11} />

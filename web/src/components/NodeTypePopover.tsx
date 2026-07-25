@@ -81,13 +81,13 @@ export default function NodeTypePopover({
             <button
               key={type}
               onClick={() => onSelect(type)}
-              className="w-full flex items-center gap-3 px-3 py-2 hover:bg-purple-500/10 transition-colors text-left"
+              className="w-full flex items-center gap-3 px-3 py-2 hover:bg-primary/10 transition-colors text-left"
             >
               <div 
                 className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0"
                 style={{ background: 'var(--bg-primary)' }}
               >
-                <Icon size={16} style={{ color: '#8b5cf6' }} />
+                <Icon size={16} style={{ color: 'var(--brand)' }} />
               </div>
               <div className="min-w-0">
                 <div 

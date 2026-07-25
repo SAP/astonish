@@ -62,7 +62,7 @@ export function UpdateStateForm({ data, onChange, theme }: UpdateStateFormProps)
             id="silent"
             checked={data.silent || false}
             onChange={(e) => onChange({ ...data, silent: e.target.checked })}
-            className="w-4 h-4 rounded border accent-purple-500"
+            className="w-4 h-4 rounded border accent-primary"
           />
           <label htmlFor="silent" className="text-sm" style={{ color: 'var(--text-secondary)' }}>
             Silent mode

@@ -356,7 +356,7 @@ export default function FlowStorePanel({ teamSlug, canManage = true }: { teamSlu
                               onClick={() => handleInstall(flow)}
                               disabled={installing === flow.fullName}
                               className="px-3 py-1.5 rounded-lg text-sm font-medium transition-all shadow-md hover:shadow-lg hover:scale-[1.02] active:scale-95 text-white disabled:opacity-50"
-                              style={{ background: 'linear-gradient(135deg, #a855f7 0%, #7c3aed 100%)' }}
+                              style={{ background: 'linear-gradient(135deg, var(--brand) 0%, var(--brand-strong) 100%)' }}
                             >
                               {installing === flow.fullName ? (
                                 <Loader2 size={14} className="animate-spin" />

@@ -13,7 +13,7 @@ interface TutorialSceneSlideshowCardProps {
 function kindMeta(kind: string): { label: string; icon: typeof User; color: string } {
   switch (kind) {
     case 'avatar':
-      return { label: 'A-Roll Scene', icon: User, color: 'var(--accent)' }
+      return { label: 'A-Roll Scene', icon: User, color: 'var(--brand)' }
     case 'broll':
       return { label: 'B-Roll Scene', icon: Film, color: 'rgb(234, 179, 8)' }
     case 'screen':
@@ -69,7 +69,7 @@ export default function TutorialSceneSlideshowCard({
       style={{ border: '1px solid var(--border-color)', background: 'var(--bg-secondary)', boxShadow: 'var(--shadow-soft)' }}
     >
       <div className="px-4 py-3 flex items-center gap-2" style={{ borderBottom: '1px solid var(--border-color)' }}>
-        <Clapperboard size={16} style={{ color: 'var(--accent)' }} />
+        <Clapperboard size={16} style={{ color: 'var(--brand)' }} />
         <div className="min-w-0 flex-1">
           <div className="text-sm font-semibold truncate" style={{ color: 'var(--text-primary)' }}>
             {data.title || data.drill || 'Tutorial scenes'}

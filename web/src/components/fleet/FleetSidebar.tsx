@@ -40,7 +40,7 @@ interface SetupProfileDialogState {
 
 export default function FleetSidebar({
   plans, sessions, templates, setupProfiles, selectedItem, onSelect, onDeleteSession, onSearch, searchQuery,
-  isLoading, theme, onRefresh,
+  isLoading, theme: _theme, onRefresh,
 }: FleetSidebarProps) {
   const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>({})
   const [dialog, setDialog] = useState<TemplateDialogState | null>(null)
@@ -60,13 +60,16 @@ export default function FleetSidebar({
       <div key={type}>
         <button
           onClick={() => toggleSection(type)}
-          className="w-full flex items-center gap-2 px-4 py-2 text-xs font-semibold uppercase tracking-wider hover:bg-white/5 transition-colors"
-          style={{ color: 'var(--text-muted)' }}
+          className="flex w-full items-center gap-2 px-4 py-2 text-xs font-semibold tracking-wider uppercase transition-colors hover:bg-[color:var(--item-hover)]"
+          style={{ color: 'var(--text-faint, var(--text-muted))' }}
         >
           {isCollapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
           {icon}
           <span>{title}</span>
-          <span className="ml-auto text-[10px] font-normal px-1.5 py-0.5 rounded-full" style={{ background: 'var(--bg-tertiary)' }}>
+          <span
+            className="ml-auto rounded-full px-1.5 py-0.5 text-[10px] font-normal"
+            style={{ background: 'var(--bg-tertiary)', color: 'var(--text-faint, var(--text-muted))' }}
+          >
             {items.length}
           </span>
         </button>
@@ -83,29 +86,40 @@ export default function FleetSidebar({
                 <button
                   key={`${type}-${item.key}`}
                   onClick={() => onSelect({ type: selectType, key: item.key })}
-                  className={`group w-full text-left px-4 py-2.5 transition-colors ${
-                    isSelected ? 'bg-cyan-500/15 border-l-2 border-cyan-400' : 'hover:bg-white/5 border-l-2 border-transparent'
+                  className={`group mx-2 w-[calc(100%-1rem)] rounded-[var(--radius-md)] px-3 py-2.5 text-left transition-colors ${
+                    isSelected
+                      ? 'bg-[color:var(--item-active)]'
+                      : 'hover:bg-[color:var(--item-hover)]'
                   }`}
+                  style={isSelected ? {
+                    border: '1px solid color-mix(in oklab, var(--brand) 28%, transparent)',
+                  } : {
+                    border: '1px solid transparent',
+                  }}
                 >
                   <div className="flex items-center gap-2">
                     {type === 'plan' && item.activated && (
-                      <div className="w-2 h-2 rounded-full bg-green-400 flex-shrink-0" title="Active" />
+                      <div className="h-2 w-2 shrink-0 rounded-full bg-green-400" title="Active" />
                     )}
-                    <span
-                      className="text-sm font-medium truncate flex-1"
-                      style={{ color: isSelected ? '#22d3ee' : 'var(--text-primary)' }}
-                    >
+                    <span className="flex-1 truncate text-sm font-medium" style={{ color: 'var(--text-primary)' }}>
                       {item.name}
                     </span>
                     {badgeColor && item.badge && (
-                      <span className="text-[10px] px-1.5 py-0.5 rounded" style={{ background: badgeColor, color: '#fff' }}>
+                      <span
+                        className="rounded px-1.5 py-0.5 text-[10px] font-medium"
+                        style={{
+                          background: 'var(--item-active)',
+                          color: 'var(--brand)',
+                          border: '1px solid color-mix(in oklab, var(--brand) 30%, transparent)',
+                        }}
+                      >
                         {item.badge}
                       </span>
                     )}
                     {item.onDelete && (
                       <button
                         onClick={(e: React.MouseEvent) => { e.stopPropagation(); item.onDelete!() }}
-                        className="p-1 rounded opacity-0 group-hover:opacity-100 hover:bg-red-500/20 transition-all shrink-0"
+                        className="shrink-0 rounded p-1 opacity-0 transition-all group-hover:opacity-100 hover:bg-red-500/20"
                         title="Delete"
                       >
                         <Trash2 size={12} className="text-red-400" />
@@ -114,28 +128,28 @@ export default function FleetSidebar({
                     {item.onClone && (
                       <button
                         onClick={(e: React.MouseEvent) => { e.stopPropagation(); item.onClone!() }}
-                        className="p-1 rounded opacity-0 group-hover:opacity-100 hover:bg-cyan-500/20 transition-all shrink-0"
+                        className="shrink-0 rounded p-1 opacity-0 transition-all group-hover:opacity-100 hover:bg-[color:var(--item-active)]"
                         title="Clone template"
                       >
-                        <Copy size={12} className="text-cyan-400" />
+                        <Copy size={12} className="text-primary" />
                       </button>
                     )}
                     {item.onExportYaml && (
                       <button
                         onClick={(e: React.MouseEvent) => { e.stopPropagation(); item.onExportYaml!() }}
-                        className="p-1 rounded opacity-0 group-hover:opacity-100 hover:bg-white/10 transition-all shrink-0"
+                        className="shrink-0 rounded p-1 opacity-0 transition-all group-hover:opacity-100 hover:bg-[color:var(--item-hover)]"
                         title="Export YAML"
                       >
-                        <FileText size={12} className="text-cyan-400" />
+                        <FileText size={12} className="text-primary" />
                       </button>
                     )}
                     {item.onImportYaml && (
                       <button
                         onClick={(e: React.MouseEvent) => { e.stopPropagation(); item.onImportYaml!() }}
-                        className="p-1 rounded opacity-0 group-hover:opacity-100 hover:bg-white/10 transition-all shrink-0"
+                        className="shrink-0 rounded p-1 opacity-0 transition-all group-hover:opacity-100 hover:bg-[color:var(--item-hover)]"
                         title="Import YAML"
                       >
-                        <Plus size={12} className="text-cyan-400" />
+                        <Plus size={12} className="text-primary" />
                       </button>
                     )}
                   </div>
@@ -329,40 +343,40 @@ export default function FleetSidebar({
 
   return (
     <div
-      className="flex flex-col h-full"
+      className="flex h-full flex-col"
       style={{
         width: '288px',
         minWidth: '288px',
         borderRight: '1px solid var(--border-color)',
-        background: theme === 'dark' ? 'rgba(15, 23, 42, 0.5)' : 'var(--bg-secondary)',
+        background: 'var(--work-sidebar, var(--sidebar-background))',
       }}
     >
       <div className="px-3 py-3" style={{ borderBottom: '1px solid var(--border-color)' }}>
         <button
           onClick={openCreateDialog}
-          className="w-full mb-2 flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white transition-colors"
+          className="mb-2 flex w-full items-center justify-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90"
         >
           <Plus size={12} /> New Template
         </button>
         <button
           onClick={openCreateProfileDialog}
-          className="w-full mb-2 flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors hover:bg-cyan-500/10"
-          style={{ borderColor: 'var(--border-color)', color: 'var(--text-secondary)' }}
+          className="mb-2 flex w-full items-center justify-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors hover:bg-[color:var(--item-active)]"
+          style={{ borderColor: 'var(--border-soft, var(--border-color))', color: 'var(--text-secondary)' }}
         >
-          <Plus size={12} className="text-cyan-400" /> New Setup Profile
+          <Plus size={12} className="text-primary" /> New Setup Profile
         </button>
         <div className="relative">
-          <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2" style={{ color: 'var(--text-muted)' }} />
+          <Search size={14} className="absolute top-1/2 left-2.5 -translate-y-1/2" style={{ color: 'var(--text-faint, var(--text-muted))' }} />
           <input
             type="text"
             value={searchQuery}
             onChange={(e: React.ChangeEvent<HTMLInputElement>) => onSearch(e.target.value)}
             placeholder="Search fleet..."
-            className="w-full pl-8 pr-3 py-1.5 text-xs rounded-lg focus:outline-none focus:ring-1 focus:ring-cyan-500"
+            className="w-full rounded-lg py-1.5 pr-3 pl-8 text-xs focus:outline-none focus:ring-1 focus:ring-primary"
             style={{
-              background: 'var(--bg-tertiary)',
+              background: 'var(--search-bg, var(--bg-tertiary))',
               color: 'var(--text-primary)',
-              border: '1px solid var(--border-color)',
+              border: '1px solid var(--border-soft, var(--border-color))',
             }}
           />
         </div>
@@ -371,16 +385,16 @@ export default function FleetSidebar({
       <div className="flex-1 overflow-y-auto">
         {isLoading ? (
           <div className="flex items-center justify-center py-12">
-            <Loader size={18} className="animate-spin text-cyan-400" />
+            <Loader size={18} className="animate-spin text-primary" />
           </div>
         ) : (
           <>
-            {renderSection('Fleet Plans', <FileText size={12} />, planItems, 'plan', 'rgba(6, 182, 212, 0.6)')}
-            {renderSection('Active Sessions', <Radio size={12} />, sessionItems, 'session', null)}
-            {renderSection('Astonish Templates', <Eye size={12} />, bundledItems, 'template-bundled', 'rgba(6, 182, 212, 0.7)')}
-            {renderSection('Your Templates', <Eye size={12} />, customItems, 'template-custom', null)}
-            {renderSection('Bundled Setup Profiles', <Settings2 size={12} />, bundledSetupItems, 'setup-profile-bundled', 'rgba(6, 182, 212, 0.5)')}
-            {renderSection('Your Setup Profiles', <Settings2 size={12} />, customSetupItems, 'setup-profile-custom', null)}
+            {renderSection('Fleet Plans', <FileText size={12} className="text-primary" />, planItems, 'plan', 'brand')}
+            {renderSection('Active Sessions', <Radio size={12} className="text-primary" />, sessionItems, 'session', null)}
+            {renderSection('Astonish Templates', <Eye size={12} className="text-primary" />, bundledItems, 'template-bundled', 'brand')}
+            {renderSection('Your Templates', <Eye size={12} className="text-primary" />, customItems, 'template-custom', null)}
+            {renderSection('Bundled Setup Profiles', <Settings2 size={12} className="text-primary" />, bundledSetupItems, 'setup-profile-bundled', 'brand')}
+            {renderSection('Your Setup Profiles', <Settings2 size={12} className="text-primary" />, customSetupItems, 'setup-profile-custom', null)}
           </>
         )}
       </div>

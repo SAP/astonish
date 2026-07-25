@@ -130,7 +130,7 @@ export default function NodeEditor({ node, onSave, onClose, theme, availableTool
           {onAIAssist && !readOnly && (
             <button
               onClick={() => onAIAssist(node, nodeName, editedData)}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded text-sm font-medium bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-500 hover:to-blue-500 text-white transition-all"
+              className="send-gradient flex items-center gap-1.5 rounded px-3 py-1.5 text-sm font-medium text-white transition-all hover:opacity-90"
               title="Get AI suggestions for this node"
             >
               <Sparkles size={14} />
@@ -139,7 +139,7 @@ export default function NodeEditor({ node, onSave, onClose, theme, availableTool
           )}
           <button
             onClick={handleClose}
-            className="px-3 py-1.5 rounded text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 transition-colors"
+            className="rounded bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
           >
             Done
           </button>

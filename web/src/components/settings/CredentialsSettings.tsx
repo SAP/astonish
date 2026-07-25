@@ -242,7 +242,7 @@ const TYPE_LABELS: Record<string, string> = {
 }
 
 const TYPE_COLORS: Record<string, string> = {
-  api_key: '#a855f7',
+  api_key: 'var(--brand)',
   bearer: '#3b82f6',
   basic: '#f59e0b',
   password: '#ef4444',
@@ -1022,7 +1022,7 @@ export default function CredentialsSettings({ isPlatform: isPlatformProp }: { is
       {isPlatform ? (
         <>
           {/* Personal Credentials Section */}
-          <div className="rounded-xl p-4" style={{ background: 'var(--bg-primary)', border: '1px solid var(--border-color)' }}>
+          <div className="rounded-xl p-4" style={{ background: 'var(--card)', border: '1px solid var(--border-color)' }}>
             <div className="mb-3">
               <p className="text-xs" style={hintStyle}>
                 Your private credentials. Only you can see and use these. Credentials saved from chat go here by default.
@@ -1032,7 +1032,7 @@ export default function CredentialsSettings({ isPlatform: isPlatformProp }: { is
           </div>
 
           {/* Team Credentials Section */}
-          <div className="rounded-xl p-4" style={{ background: 'var(--bg-primary)', border: '1px solid var(--border-color)' }}>
+          <div className="rounded-xl p-4" style={{ background: 'var(--card)', border: '1px solid var(--border-color)' }}>
             <div className="mb-3">
               <p className="text-xs" style={hintStyle}>
                 Shared team credentials for app-to-app integrations. All members can use these; only admins can view values or edit.
@@ -1377,7 +1377,7 @@ function FieldRow({ label, value, secret, multiline }: { label: string; value: s
 function Modal({ children, onClose, title }: { children: React.ReactNode; onClose: () => void; title: string }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: 'rgba(0,0,0,0.5)' }} onClick={onClose}>
-      <div className="rounded-xl shadow-2xl p-6 w-full max-w-md max-h-[80vh] overflow-y-auto" style={{ background: 'var(--bg-primary)', border: '1px solid var(--border-color)' }} onClick={(e: React.MouseEvent) => e.stopPropagation()}>
+      <div className="rounded-xl shadow-2xl p-6 w-full max-w-md max-h-[80vh] overflow-y-auto" style={{ background: 'var(--card)', border: '1px solid var(--border-color)' }} onClick={(e: React.MouseEvent) => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-base font-medium" style={{ color: 'var(--text-primary)' }}>{title}</h3>
           <button onClick={onClose} className="p-1 rounded hover:bg-white/10"><X size={16} style={{ color: 'var(--text-muted)' }} /></button>

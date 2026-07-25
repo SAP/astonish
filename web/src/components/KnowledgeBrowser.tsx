@@ -14,15 +14,25 @@ interface KnowledgeBrowserProps {
   activeTeam?: string | null
 }
 type Tab = 'personal' | 'team' | 'org' | 'add'
-const SCOPE_COLORS: Record<string, string> = { personal: '#3b82f6', team: '#a855f7', org: '#10b981' }
+const SCOPE_COLORS: Record<string, string> = {
+  personal: 'var(--info)',
+  team: 'var(--brand)',
+  org: 'var(--success)',
+}
 
 function ScopeBadge({ scope }: { scope: string }) {
   const label = scope || 'unknown'
-  const color = SCOPE_COLORS[label] || '#6b7280'
+  const color = SCOPE_COLORS[label] || 'var(--muted-foreground)'
   return (
-    <span className="px-2 py-0.5 rounded-full text-xs font-medium"
-      style={{ background: `${color}22`, color, border: `1px solid ${color}44` }}>
-      {label.charAt(0).toUpperCase() + label.slice(1)}
+    <span
+      className="rounded-full border px-2 py-0.5 text-xs font-medium capitalize"
+      style={{
+        background: `color-mix(in oklab, ${color} 14%, transparent)`,
+        color,
+        borderColor: `color-mix(in oklab, ${color} 28%, transparent)`,
+      }}
+    >
+      {label}
     </span>
   )
 }
@@ -68,8 +78,7 @@ function MemoryCard({ entry, userId, isAdmin, currentTab, onDelete, onPromote, o
   const displayText = expanded || editing ? entry.snippet : (isLong ? entry.snippet.slice(0, 200) + '...' : entry.snippet)
 
   return (
-    <div className="p-4 rounded-lg border transition-all"
-      style={{ background: 'var(--bg-secondary)', borderColor: 'var(--border-color)' }}>
+    <div className="rounded-lg border border-border bg-card p-4 shadow-[var(--shadow-soft)] transition-all">
 
       {/* Content area */}
       {editing ? (

@@ -1,7 +1,14 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Plus, Trash2, Shield, ShieldOff } from 'lucide-react'
+import { Loader2, Plus, Shield, ShieldOff, Trash2 } from 'lucide-react'
+
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Card } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+
 import { teamFetch } from '../../api/teamContext'
-import { inputStyle, saveButtonStyle } from './settingsApi'
 
 interface NetworkPolicyRule {
   id: string
@@ -52,7 +59,7 @@ export default function NetworkPolicySettings({ scope, teamSlug, readOnly = fals
   }, [scope, teamSlug, externalRules])
 
   useEffect(() => {
-    fetchRules()
+    void fetchRules()
   }, [fetchRules])
 
   const handleAdd = async (e: React.FormEvent) => {
@@ -73,7 +80,7 @@ export default function NetworkPolicySettings({ scope, teamSlug, readOnly = fals
         setNewPort('')
         setNewAction('allow')
         setShowAddForm(false)
-        fetchRules()
+        void fetchRules()
         onRulesChange?.()
       }
     } catch (err) {
@@ -86,7 +93,7 @@ export default function NetworkPolicySettings({ scope, teamSlug, readOnly = fals
       const url = `/api/network-policies/${id}?scope=${scope}`
       const res = await teamFetch(url, { method: 'DELETE' }, scope === 'platform' ? undefined : teamSlug)
       if (res.ok) {
-        fetchRules()
+        void fetchRules()
         onRulesChange?.()
       }
     } catch (err) {
@@ -94,155 +101,118 @@ export default function NetworkPolicySettings({ scope, teamSlug, readOnly = fals
     }
   }
 
-  const scopeBadgeStyle = (s: string) => {
-    switch (s) {
-      case 'platform':
-        return { background: 'rgba(168, 85, 247, 0.15)', color: '#a855f7' }
-      case 'org':
-        return { background: 'rgba(59, 130, 246, 0.15)', color: '#3b82f6' }
-      case 'team':
-        return { background: 'rgba(34, 197, 94, 0.15)', color: '#22c55e' }
-      default:
-        return { background: 'rgba(100, 116, 139, 0.15)', color: '#64748b' }
-    }
-  }
-
   if (loading && !externalRules) {
-    return <div className="text-sm opacity-60">Loading...</div>
+    return (
+      <div className="flex items-center gap-2 rounded-lg border bg-card p-4 text-sm text-muted-foreground">
+        <Loader2 className="size-4 animate-spin text-primary" />
+        Loading network policies...
+      </div>
+    )
   }
 
   return (
     <div className="space-y-3">
-      {/* Rules list */}
       {rules.length === 0 && !showAddForm && (
-        <div className="text-sm opacity-50 py-4 text-center">
+        <div className="rounded-lg border border-dashed bg-card/50 py-6 text-center text-sm text-muted-foreground">
           No network policy rules configured.
         </div>
       )}
 
       {rules.map((rule) => (
-        <div
-          key={rule.id}
-          className="flex items-center gap-3 p-3 rounded-lg border"
-          style={{
-            borderColor: 'var(--border-color)',
-            background: 'var(--bg-secondary)',
-          }}
-        >
-          {/* Action icon */}
+        <Card key={rule.id} className="flex-row items-center gap-3 border-border bg-card p-3 shadow-none">
           {rule.action === 'allow' ? (
-            <Shield size={16} className="text-green-500 flex-shrink-0" />
+            <Shield className="size-4 shrink-0 text-[color:var(--success)]" />
           ) : (
-            <ShieldOff size={16} className="text-red-500 flex-shrink-0" />
+            <ShieldOff className="size-4 shrink-0 text-destructive" />
           )}
 
-          {/* Host:Port */}
-          <div className="flex-1 min-w-0">
-            <div className="text-sm font-mono truncate">
+          <div className="min-w-0 flex-1">
+            <div className="truncate font-mono text-sm text-foreground">
               {rule.host}{rule.port > 0 ? `:${rule.port}` : ''}
             </div>
           </div>
 
-          {/* Action badge */}
-          <span
-            className="text-xs px-2 py-0.5 rounded-full font-medium"
-            style={rule.action === 'allow'
-              ? { background: 'rgba(34, 197, 94, 0.15)', color: '#22c55e' }
-              : { background: 'rgba(239, 68, 68, 0.15)', color: '#ef4444' }
-            }
-          >
+          <Badge variant={rule.action === 'allow' ? 'secondary' : 'destructive'}>
             {rule.action}
-          </span>
+          </Badge>
 
-          {/* Scope badge (for merged views) */}
           {rule.scope && rule.scope !== scope && (
-            <span
-              className="text-xs px-2 py-0.5 rounded-full font-medium"
-              style={scopeBadgeStyle(rule.scope)}
-            >
+            <Badge variant="outline" className="capitalize">
               {rule.scope}
-            </span>
+            </Badge>
           )}
 
-          {/* Delete button (only for own-scope, non-readOnly) */}
           {!readOnly && (
-            <button
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
               onClick={() => handleDelete(rule.id)}
-              className="p-1 rounded hover:bg-red-500/10 text-red-400 hover:text-red-500 transition-colors"
+              className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+              aria-label={`Delete ${rule.host}`}
               title="Delete rule"
             >
-              <Trash2 size={14} />
-            </button>
+              <Trash2 />
+            </Button>
           )}
-        </div>
+        </Card>
       ))}
 
-      {/* Add form */}
       {!readOnly && showAddForm && (
-        <form onSubmit={handleAdd} className="flex items-end gap-2 p-3 rounded-lg border" style={{ borderColor: 'var(--border-color)', background: 'var(--bg-secondary)' }}>
-          <div className="flex-1">
-            <label className="text-xs block mb-1" style={{ color: 'var(--text-muted)' }}>Host pattern</label>
-            <input
-              type="text"
-              value={newHost}
-              onChange={(e) => setNewHost(e.target.value)}
-              placeholder="e.g., *.example.com"
-              className="w-full px-3 py-1.5 text-sm rounded-lg border"
-              style={inputStyle}
-              autoFocus
-            />
-          </div>
-          <div className="w-20">
-            <label className="text-xs block mb-1" style={{ color: 'var(--text-muted)' }}>Port</label>
-            <input
-              type="number"
-              value={newPort}
-              onChange={(e) => setNewPort(e.target.value)}
-              placeholder="any"
-              min="0"
-              max="65535"
-              className="w-full px-3 py-1.5 text-sm rounded-lg border"
-              style={inputStyle}
-            />
-          </div>
-          <div className="w-24">
-            <label className="text-xs block mb-1" style={{ color: 'var(--text-muted)' }}>Action</label>
-            <select
-              value={newAction}
-              onChange={(e) => setNewAction(e.target.value)}
-              className="w-full px-3 py-1.5 text-sm rounded-lg border"
-              style={inputStyle}
-            >
-              <option value="allow">Allow</option>
-              <option value="deny">Deny</option>
-            </select>
-          </div>
-          <button
-            type="submit"
-            className="px-3 py-1.5 text-sm rounded-lg font-medium"
-            style={{ ...saveButtonStyle, color: 'white' }}
-          >
-            Add
-          </button>
-          <button
-            type="button"
-            onClick={() => setShowAddForm(false)}
-            className="px-3 py-1.5 text-sm rounded-lg opacity-60 hover:opacity-100"
-          >
-            Cancel
-          </button>
-        </form>
+        <Card className="border-border bg-card p-3 shadow-none">
+          <form onSubmit={handleAdd} className="grid gap-3 sm:grid-cols-[1fr_7rem_8rem_auto_auto] sm:items-end">
+            <div className="space-y-2">
+              <Label htmlFor={`network-host-${scope}`}>Host pattern</Label>
+              <Input
+                id={`network-host-${scope}`}
+                type="text"
+                value={newHost}
+                onChange={(e) => setNewHost(e.target.value)}
+                placeholder="e.g., *.example.com"
+                className="bg-background"
+                autoFocus
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor={`network-port-${scope}`}>Port</Label>
+              <Input
+                id={`network-port-${scope}`}
+                type="number"
+                value={newPort}
+                onChange={(e) => setNewPort(e.target.value)}
+                placeholder="any"
+                min="0"
+                max="65535"
+                className="bg-background"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor={`network-action-${scope}`}>Action</Label>
+              <Select value={newAction} onValueChange={setNewAction}>
+                <SelectTrigger id={`network-action-${scope}`} className="bg-background">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="allow">Allow</SelectItem>
+                  <SelectItem value="deny">Deny</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <Button type="submit" disabled={!newHost.trim()}>
+              Add
+            </Button>
+            <Button type="button" variant="secondary" onClick={() => setShowAddForm(false)}>
+              Cancel
+            </Button>
+          </form>
+        </Card>
       )}
 
-      {/* Add button */}
       {!readOnly && !showAddForm && (
-        <button
-          onClick={() => setShowAddForm(true)}
-          className="flex items-center gap-2 text-sm opacity-60 hover:opacity-100 transition-opacity py-2"
-        >
-          <Plus size={14} />
+        <Button type="button" variant="ghost" size="sm" onClick={() => setShowAddForm(true)}>
+          <Plus />
           Add rule
-        </button>
+        </Button>
       )}
     </div>
   )

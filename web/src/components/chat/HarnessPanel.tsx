@@ -1,5 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { X, GripVertical } from 'lucide-react'
+
+import { Button } from '@/components/ui/button'
+import { cn } from '@/lib/utils'
 import AppPreviewCard from './AppPreviewCard'
 import DistillPreviewCard from './DistillPreviewCard'
 import TutorialBlueprintCard from './TutorialBlueprintCard'
@@ -75,7 +78,6 @@ export default function HarnessPanel({
   const [handleHovered, setHandleHovered] = useState(false)
   const panelRef = useRef<HTMLDivElement>(null)
   const preferredWidthRef = useRef(preferredWidth)
-  preferredWidthRef.current = preferredWidth
 
   const appId = focus.kind === 'app' ? focus.appId : ''
   const appVersions =
@@ -84,6 +86,10 @@ export default function HarnessPanel({
   const width = containerWidth > 0
     ? clampHarnessWidth(preferredWidth, containerWidth, sidebarWidth)
     : preferredWidth
+
+  useEffect(() => {
+    preferredWidthRef.current = preferredWidth
+  }, [preferredWidth])
 
   // Always land on the latest version when the focused app gains a new revision.
   useEffect(() => {
@@ -180,13 +186,11 @@ export default function HarnessPanel({
       ref={panelRef}
       data-testid="harness-panel"
       data-harness-kind={focus.kind}
-      className="relative flex flex-col overflow-hidden flex-shrink-0"
-      style={{
-        width: `${width}px`,
-        borderLeft: '1px solid var(--border-color)',
-        background: 'var(--bg-primary)',
-        userSelect: dragging ? 'none' : undefined,
-      }}
+      className={cn(
+        'relative flex flex-shrink-0 flex-col overflow-hidden border-l border-border bg-background',
+        dragging && 'select-none'
+      )}
+      style={{ width: `${width}px` }}
     >
       {/* Left-edge resize handle — full-height hit target + mid-edge visual grip */}
       <div
@@ -199,52 +203,43 @@ export default function HarnessPanel({
         onDoubleClick={handleResizeDoubleClick}
         onPointerEnter={() => setHandleHovered(true)}
         onPointerLeave={() => { if (!dragging) setHandleHovered(false) }}
-        className="absolute left-0 top-0 bottom-0 z-10 flex items-center justify-center"
-        style={{
-          width: '12px',
-          marginLeft: '-6px',
-          cursor: 'col-resize',
-          touchAction: 'none',
-        }}
+        className="absolute top-0 bottom-0 left-0 z-10 ml-[-6px] flex w-3 cursor-col-resize items-center justify-center touch-none"
       >
         <div
           data-testid="harness-resize-grip"
-          className="pointer-events-none flex items-center justify-center rounded-full transition-colors"
-          style={{
-            width: '18px',
-            height: '40px',
-            background: 'var(--bg-secondary)',
-            border: `1px solid ${dragging || handleHovered ? 'var(--accent)' : 'var(--border-color)'}`,
-            color: dragging || handleHovered ? 'var(--accent)' : 'var(--text-muted)',
-            boxShadow: 'var(--shadow-soft)',
-          }}
+          className={cn(
+            'pointer-events-none flex h-10 w-[18px] items-center justify-center rounded-full border bg-card shadow-[var(--shadow-soft)] transition-colors',
+            dragging || handleHovered
+              ? 'border-primary text-primary'
+              : 'border-border text-muted-foreground'
+          )}
         >
-          <GripVertical size={14} style={{ color: 'inherit' }} />
+          <GripVertical size={14} />
         </div>
       </div>
 
-      <div
-        className="flex items-center justify-between px-4 py-3 flex-shrink-0"
-        style={{ borderBottom: '1px solid var(--border-color)', background: 'var(--bg-secondary)' }}
-      >
+      {/* Elevated chrome bar (card, not near-black panel-background) so it reads on bg-background */}
+      <div className="flex shrink-0 items-center justify-between border-b border-border bg-card px-4 py-3">
         <div className="min-w-0">
-          <div className="text-[10px] font-medium uppercase tracking-wide" style={{ color: 'var(--text-muted)' }}>
+          <div className="text-[10px] font-medium tracking-wide text-muted-foreground uppercase">
             {harnessKindLabel(focus.kind)}
           </div>
-          <div className="text-sm font-semibold truncate" style={{ color: 'var(--text-primary)' }}>
+          <div className="truncate text-sm font-semibold text-foreground">
             {title}
           </div>
         </div>
-        <button
+        <Button
           type="button"
+          variant="ghost"
+          size="icon"
           onClick={onClose}
-          className="p-1.5 rounded transition-colors cursor-pointer"
-          style={{ color: 'var(--text-muted)' }}
+          className="size-8"
           title="Close panel"
           data-testid="harness-panel-close"
+          aria-label="Close panel"
         >
-          <X size={16} />
-        </button>
+          <X />
+        </Button>
       </div>
 
       <div
@@ -277,7 +272,7 @@ export default function HarnessPanel({
           const artifact = sessionArtifacts.find(a => a.path === focus.path)
           if (!artifact) {
             return (
-              <p className="text-sm" style={{ color: 'var(--text-muted)' }}>
+              <p className="text-sm text-muted-foreground">
                 {focus.kind === 'video' ? 'Video' : 'Report'} not available.
               </p>
             )

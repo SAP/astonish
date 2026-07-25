@@ -1,5 +1,13 @@
 import { useState } from 'react'
 import { Key, ChevronRight, Save, Plus, Trash2, X, AlertCircle, Loader2, Search, Settings2, Zap } from 'lucide-react'
+
+import { Alert, AlertDescription } from '@/components/ui/alert'
+import { Button } from '@/components/ui/button'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+
 import { saveSettings, replaceAllProviders, savePlatformProviders, saveOrgProviders, deleteProviderAtLevel, fetchProviderModels, testProviderConnection } from './settingsApi'
 import type { SettingsData, ProviderFieldDef, ProviderTestResult } from './settingsApi'
 import ProviderModelSelector from '../ProviderModelSelector'
@@ -357,7 +365,7 @@ export default function ProvidersSettings({
         {onSaveDefault && (
           <div className="rounded-lg border p-4" style={{ borderColor: 'var(--border-color)', background: 'var(--bg-secondary)' }}>
             <div className="flex items-center gap-2 mb-4">
-              <Settings2 size={16} style={{ color: '#a855f7' }} />
+              <Settings2 size={16} style={{ color: 'var(--brand)' }} />
               <h3 className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
                 Default Configuration
               </h3>
@@ -517,7 +525,7 @@ export default function ProvidersSettings({
                   onClick={handleSaveDefault}
                   disabled={savingDefault}
                   className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-white text-sm font-medium transition-all shadow-sm hover:shadow-md hover:scale-[1.02] active:scale-95 disabled:opacity-50"
-                  style={{ background: 'linear-gradient(135deg, #a855f7 0%, #7c3aed 100%)' }}
+                  style={{ background: 'var(--brand)' }}
                 >
                   <Save size={14} />
                   {savingDefault ? 'Saving...' : 'Save Default'}
@@ -540,7 +548,7 @@ export default function ProvidersSettings({
           <button
             onClick={() => setShowAddProvider(true)}
             className="flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-all shadow-md hover:shadow-lg hover:scale-[1.02] active:scale-95"
-            style={{ background: 'linear-gradient(135deg, #a855f7 0%, #7c3aed 100%)', color: '#fff' }}
+            style={{ background: 'var(--brand)', color: '#fff' }}
           >
             <Plus size={16} />
             Add Provider Instance
@@ -575,11 +583,11 @@ export default function ProvidersSettings({
                     <div 
                       className="w-10 h-10 rounded-lg flex items-center justify-center"
                       style={{ 
-                        background: 'linear-gradient(135deg, rgba(168, 85, 247, 0.2) 0%, rgba(124, 58, 237, 0.2) 100%)',
+                        background: 'linear-gradient(135deg, var(--brand-muted) 0%, rgba(124, 58, 237, 0.2) 100%)',
                         border: '1px solid rgba(168, 85, 247, 0.3)'
                       }}
                     >
-                      <Key size={18} style={{ color: '#a855f7' }} />
+                      <Key size={18} style={{ color: 'var(--brand)' }} />
                     </div>
                     <div>
                       <div className="flex items-center gap-2">
@@ -606,7 +614,7 @@ export default function ProvidersSettings({
                   <div className="flex items-center gap-2">
                     {generalForm.default_provider === provider.name && (
                       <span className="px-2 py-0.5 text-xs rounded"
-                        style={{ background: 'rgba(168, 85, 247, 0.2)', color: '#a855f7' }}>
+                        style={{ background: 'var(--brand-muted)', color: 'var(--brand)' }}>
                         Default
                       </span>
                     )}
@@ -681,7 +689,7 @@ export default function ProvidersSettings({
                         onClick={() => handleSaveProvider(provider.name)}
                         disabled={saving}
                         className="flex items-center gap-2 px-4 py-2 rounded-lg text-white font-medium transition-all shadow-md hover:shadow-lg hover:scale-[1.02] active:scale-95 disabled:opacity-50"
-                        style={{ background: 'linear-gradient(135deg, #a855f7 0%, #7c3aed 100%)' }}
+                        style={{ background: 'var(--brand)' }}
                       >
                         <Save size={16} />
                         {saving ? 'Saving...' : 'Save'}
@@ -733,174 +741,114 @@ export default function ProvidersSettings({
         })}
 
         {(!settings?.providers || settings.providers.length === 0) && (
-          <div className="text-center py-12 rounded-lg border border-dashed"
-            style={{ borderColor: 'var(--border-color)', color: 'var(--text-muted)' }}>
-            <Key size={48} className="mx-auto mb-3 opacity-30" />
-            <p className="text-lg font-medium mb-2">No providers configured</p>
-            <p className="text-sm mb-4">Add your first provider instance to get started</p>
-            <button
-              onClick={() => setShowAddProvider(true)}
-              className="flex items-center gap-2 px-4 py-2 rounded-lg font-medium mx-auto transition-all hover:scale-[1.02]"
-              style={{ background: 'linear-gradient(135deg, #a855f7 0%, #7c3aed 100%)', color: '#fff' }}
-            >
-              <Plus size={16} />
+          <div className="rounded-lg border border-dashed py-12 text-center text-muted-foreground">
+            <Key className="mx-auto mb-3 size-12 opacity-30" />
+            <p className="mb-2 text-lg font-medium text-foreground">No providers configured</p>
+            <p className="mb-4 text-sm">Add your first provider instance to get started</p>
+            <Button onClick={() => setShowAddProvider(true)} className="mx-auto">
+              <Plus />
               Add Provider
-            </button>
+            </Button>
           </div>
         )}
       </div>
 
-      {/* Add Provider Modal */}
-      {showAddProvider && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: 'rgba(0,0,0,0.7)' }}>
-          <div 
-            className="rounded-xl w-full max-w-md p-6 shadow-2xl"
-            style={{ background: 'var(--bg-secondary)', borderColor: 'var(--border-color)', border: '1px solid var(--border-color)' }}
-          >
-            <div className="flex items-center justify-between mb-6">
-              <h2 className="text-xl font-semibold" style={{ color: 'var(--text-primary)' }}>
-                Add Provider Instance
-              </h2>
-              <button
-                onClick={() => {
-                  setShowAddProvider(false)
-                  setNewProviderName('')
-                  setNewProviderType('openai')
-                  setError(null)
-                }}
-                className="p-1.5 rounded-lg hover:bg-gray-600/30 transition-colors"
-                style={{ color: 'var(--text-muted)' }}
-              >
-                <X size={20} />
-              </button>
+      <Dialog open={showAddProvider} onOpenChange={(open) => {
+        setShowAddProvider(open)
+        if (!open) {
+          setNewProviderName('')
+          setNewProviderType('openai')
+          setError(null)
+        }
+      }}>
+        <DialogContent className="max-w-md border-border bg-card shadow-[var(--shadow-elevated)]">
+          <DialogHeader>
+            <DialogTitle>Add Provider Instance</DialogTitle>
+            <DialogDescription>
+              Create a named provider configuration for this scope.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="provider-instance-name">Instance Name</Label>
+              <Input
+                id="provider-instance-name"
+                type="text"
+                value={newProviderName}
+                onChange={(e) => setNewProviderName(e.target.value)}
+                placeholder="e.g., openai-prod, anthropic-dev"
+                className="bg-background font-mono"
+                autoFocus
+              />
+              <p className="text-xs text-muted-foreground">
+                Unique identifier for this provider instance.
+              </p>
             </div>
 
-            <div className="space-y-4">
-              {/* Instance Name */}
-              <div>
-                <label className="block text-sm font-medium mb-2" style={{ color: 'var(--text-secondary)' }}>
-                  Instance Name
-                </label>
-                <input
-                  type="text"
-                  value={newProviderName}
-                  onChange={(e) => setNewProviderName(e.target.value)}
-                  placeholder="e.g., openai-prod, anthropic-dev"
-                  className="w-full px-4 py-2.5 rounded-lg border text-sm font-mono"
-                  style={{ 
-                    background: 'var(--bg-primary)', 
-                    borderColor: 'var(--border-color)', 
-                    color: 'var(--text-primary)' 
-                  }}
-                  autoFocus
-                />
-                <p className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
-                  Unique identifier for this provider instance
-                </p>
-              </div>
-
-              {/* Provider Type */}
-              <div>
-                <label className="block text-sm font-medium mb-2" style={{ color: 'var(--text-secondary)' }}>
-                  Provider Type
-                </label>
-                <div className="relative">
-                  <select
-                    value={newProviderType}
-                    onChange={(e) => setNewProviderType(e.target.value)}
-                    className="w-full px-4 py-2.5 rounded-lg border text-sm appearance-none cursor-pointer"
-                    style={{ 
-                      background: 'var(--bg-primary)', 
-                      borderColor: 'var(--border-color)', 
-                      color: 'var(--text-primary)' 
-                    }}
-                  >
-                    {providerTypeOptions.map(opt => (
-                      <option key={opt.value} value={opt.value}>
-                        {opt.label}
-                      </option>
-                    ))}
-                  </select>
-                  <ChevronRight 
-                    size={16} 
-                    className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none rotate-90"
-                    style={{ color: 'var(--text-muted)' }}
-                  />
-                </div>
-              </div>
-
-              {/* Preview of fields */}
-              <div className="p-3 rounded-lg" style={{ background: 'var(--bg-primary)' }}>
-                <div className="text-xs font-medium mb-2" style={{ color: 'var(--text-muted)' }}>
-                  This provider type requires:
-                </div>
-                <div className="space-y-1">
-                  {getProviderFields(newProviderType).map(field => (
-                    <div key={field.key} className="text-sm flex items-center gap-2" style={{ color: 'var(--text-secondary)' }}>
-                      <Key size={14} style={{ color: 'var(--accent)' }} />
-                      {field.label}
-                    </div>
+            <div className="space-y-2">
+              <Label htmlFor="provider-type">Provider Type</Label>
+              <Select value={newProviderType} onValueChange={setNewProviderType}>
+                <SelectTrigger id="provider-type" className="w-full bg-background">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {providerTypeOptions.map(opt => (
+                    <SelectItem key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </SelectItem>
                   ))}
-                  {getProviderFields(newProviderType).length === 0 && (
-                    <div className="text-sm" style={{ color: 'var(--text-muted)' }}>
-                      No required fields - just the type
-                    </div>
-                  )}
-                </div>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="rounded-lg border bg-background p-3">
+              <div className="mb-2 text-xs font-medium text-muted-foreground">
+                This provider type requires:
               </div>
-
-              {error && (
-                <div className="flex items-center gap-2 p-3 rounded-lg text-sm" 
-                  style={{ background: 'rgba(239, 68, 68, 0.1)', color: '#f87171' }}>
-                  <AlertCircle size={16} />
-                  {error}
-                </div>
-              )}
-
-              {/* Actions */}
-              <div className="flex items-center justify-end gap-3 pt-2">
-                <button
-                  onClick={() => {
-                    setShowAddProvider(false)
-                    setNewProviderName('')
-                    setNewProviderType('openai')
-                    setError(null)
-                  }}
-                  className="px-4 py-2 rounded-lg text-sm font-medium transition-colors"
-                  style={{ 
-                    color: 'var(--text-secondary)',
-                    background: 'var(--bg-tertiary)',
-                    border: '1px solid var(--border-color)'
-                  }}
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={handleAddProvider}
-                  disabled={saving || !newProviderName.trim()}
-                  className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all shadow-md hover:shadow-lg hover:scale-[1.02] active:scale-95 disabled:opacity-50 disabled:hover:scale-100"
-                  style={{ 
-                    background: 'linear-gradient(135deg, #a855f7 0%, #7c3aed 100%)', 
-                    color: '#fff' 
-                  }}
-                >
-                  {saving ? (
-                    <>
-                      <Loader2 size={16} className="animate-spin" />
-                      Creating...
-                    </>
-                  ) : (
-                    <>
-                      <Plus size={16} />
-                      Add Provider
-                    </>
-                  )}
-                </button>
+              <div className="space-y-1">
+                {getProviderFields(newProviderType).map(field => (
+                  <div key={field.key} className="flex items-center gap-2 text-sm text-secondary-foreground">
+                    <Key className="size-4 text-primary" />
+                    {field.label}
+                  </div>
+                ))}
+                {getProviderFields(newProviderType).length === 0 && (
+                  <div className="text-sm text-muted-foreground">
+                    No required fields — just the type.
+                  </div>
+                )}
               </div>
             </div>
+
+            {error && (
+              <Alert variant="destructive">
+                <AlertCircle />
+                <AlertDescription>{error}</AlertDescription>
+              </Alert>
+            )}
           </div>
-        </div>
-      )}
+
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => {
+                setShowAddProvider(false)
+                setNewProviderName('')
+                setNewProviderType('openai')
+                setError(null)
+              }}
+            >
+              Cancel
+            </Button>
+            <Button onClick={handleAddProvider} disabled={saving || !newProviderName.trim()}>
+              {saving ? <Loader2 className="animate-spin" /> : <Plus />}
+              {saving ? 'Creating...' : 'Add Provider'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Model Selector Modal for Default Configuration */}
       <ProviderModelSelector

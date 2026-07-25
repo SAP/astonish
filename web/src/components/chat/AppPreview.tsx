@@ -1,5 +1,6 @@
 import { useRef, useEffect, useCallback, useState } from 'react'
 import { fetchAppData, fetchAppAction, fetchAppAI, fetchAppStateQuery, fetchAppStateExec } from '../../api/apps'
+import { buildAppCanvasThemeMessage } from '../../themes/appCanvas'
 
 // The sandbox HTML is served directly by the backend with its own permissive
 // CSP (allowing inline scripts/eval). Origin isolation is enforced by the
@@ -18,10 +19,6 @@ interface AppPreviewProps {
   stateId?: string
   /** Stretch the iframe to fill the parent instead of auto-sizing to content (capped by maxHeight). */
   fillHeight?: boolean
-}
-
-function detectTheme(): 'dark' | 'light' {
-  return document.documentElement.classList.contains('dark') ? 'dark' : 'light'
 }
 
 export default function AppPreview({ code, maxHeight = 500, appName = '', stateId = '', fillHeight = false }: AppPreviewProps) {
@@ -44,8 +41,9 @@ export default function AppPreview({ code, maxHeight = 500, appName = '', stateI
     sendToIframe({ type: 'render', code: codeToSend })
   }, [sendToIframe])
 
+  /** Push active brand pack's dark App Canvas tokens into the sandbox. */
   const sendTheme = useCallback(() => {
-    sendToIframe({ type: 'theme', mode: detectTheme() })
+    sendToIframe(buildAppCanvasThemeMessage())
   }, [sendToIframe])
 
   // Clean up polling intervals on unmount
@@ -304,12 +302,17 @@ export default function AppPreview({ code, maxHeight = 500, appName = '', stateI
     return () => window.removeEventListener('message', handleMessage)
   }, [maxHeight, fillHeight, sendCode, sendTheme, sendToIframe, appName, stateId])
 
-  // Watch for theme changes on the document element and forward to sandbox
+  // Re-push App Canvas when brand pack changes (data-theme). Ignore light/dark class.
   useEffect(() => {
-    const observer = new MutationObserver(() => {
-      sendTheme()
+    const observer = new MutationObserver((mutations) => {
+      for (const m of mutations) {
+        if (m.attributeName === 'data-theme') {
+          sendTheme()
+          break
+        }
+      }
     })
-    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] })
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] })
     return () => observer.disconnect()
   }, [sendTheme])
 
@@ -334,7 +337,7 @@ export default function AppPreview({ code, maxHeight = 500, appName = '', stateI
           border: 'none',
           borderRadius: '8px',
           overflow: 'hidden',
-          background: 'var(--bg-primary)',
+          background: 'var(--card)',
           transition: fillHeight ? undefined : 'height 0.2s ease',
         }}
         title="App Preview"

@@ -157,7 +157,7 @@ function ScopeBadge({ scope }: { scope: string }) {
   const colors: Record<string, { bg: string, fg: string }> = {
     team: { bg: 'rgba(34, 197, 94, 0.15)', fg: '#22c55e' },
     org: { bg: 'rgba(59, 130, 246, 0.15)', fg: '#3b82f6' },
-    platform: { bg: 'rgba(168, 85, 247, 0.15)', fg: '#a855f7' },
+    platform: { bg: 'var(--brand-muted)', fg: 'var(--brand)' },
     custom: { bg: 'rgba(34, 197, 94, 0.15)', fg: '#22c55e' },
   }
   const c = colors[scope] || colors.custom
@@ -770,8 +770,8 @@ export default function SkillsSettings({ config, onSaved, theme = 'dark', scope,
                 {activeSkill?.scope && <ScopeBadge scope={activeSkill.scope} />}
                 {!activeSkill?.scope && (
                   <span className="text-xs px-2 py-0.5 rounded flex-shrink-0" style={{
-                    background: activeSkill?.source === 'platform' ? 'rgba(168, 85, 247, 0.15)' : 'rgba(34, 197, 94, 0.15)',
-                    color: activeSkill?.source === 'platform' ? '#a855f7' : '#22c55e'
+                    background: activeSkill?.source === 'platform' ? 'var(--brand-muted)' : 'rgba(34, 197, 94, 0.15)',
+                    color: activeSkill?.source === 'platform' ? 'var(--brand)' : '#22c55e'
                   }}>
                     {activeSkill?.source}
                   </span>
@@ -1116,8 +1116,8 @@ export default function SkillsSettings({ config, onSaved, theme = 'dark', scope,
             onClick={() => setForm({ ...form, enabled: !form.enabled })}
             className="relative w-11 h-6 rounded-full transition-colors"
             style={{
-              background: form.enabled ? '#a855f7' : 'var(--bg-tertiary)',
-              border: `1px solid ${form.enabled ? '#a855f7' : 'var(--border-color)'}`
+              background: form.enabled ? 'var(--brand)' : 'var(--bg-tertiary)',
+              border: `1px solid ${form.enabled ? 'var(--brand)' : 'var(--border-color)'}`
             }}
           >
             <span
@@ -1145,7 +1145,7 @@ export default function SkillsSettings({ config, onSaved, theme = 'dark', scope,
                 <button
                   onClick={() => { setShowCreate(true); setNewSkillName(''); setCreateError(null) }}
                   className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-all shadow-md hover:shadow-lg hover:scale-[1.02] active:scale-95"
-                  style={{ background: 'linear-gradient(135deg, #a855f7 0%, #7c3aed 100%)', color: '#fff' }}
+                  style={{ background: 'var(--brand)', color: '#fff' }}
                 >
                   <Plus size={14} /> New Skill
                 </button>

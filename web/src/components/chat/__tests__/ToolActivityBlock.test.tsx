@@ -32,7 +32,10 @@ describe('ToolActivityBlock', () => {
     )
     expect(screen.getByTestId('tool-activity-block')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /1 search, 1 request/ })).toBeInTheDocument()
-    expect(screen.getByTestId('activity-badge')).toHaveTextContent('2')
+    const badge = screen.getByTestId('activity-badge')
+    expect(badge).toHaveTextContent('2')
+    // Solid brand text (not translucent --accent) so light + dark stay readable.
+    expect(badge).toHaveStyle({ color: 'var(--brand)' })
     expect(screen.queryByText('Arguments')).not.toBeInTheDocument()
   })
 

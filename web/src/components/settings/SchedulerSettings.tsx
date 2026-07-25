@@ -174,8 +174,8 @@ function ModeBadge({ mode }: { mode: string }) {
   const isAdaptive = mode === 'adaptive'
   return (
     <span className="text-xs px-1.5 py-0.5 rounded" style={{
-      background: isAdaptive ? 'rgba(168, 85, 247, 0.15)' : 'rgba(59, 130, 246, 0.15)',
-      color: isAdaptive ? '#a855f7' : '#3b82f6'
+      background: isAdaptive ? 'var(--brand-muted)' : 'rgba(59, 130, 246, 0.15)',
+      color: isAdaptive ? 'var(--brand)' : '#3b82f6'
     }}>
       {mode}
     </span>
@@ -772,8 +772,8 @@ export default function SchedulerSettings({ config, onSaved, teamSlug, isPlatfor
                                         onClick={() => handleToggleMember(job, member.user_id)}
                                         className="flex-shrink-0 w-4 h-4 rounded border flex items-center justify-center"
                                         style={{
-                                          borderColor: isSelected ? '#a855f7' : 'var(--border-color)',
-                                          background: isSelected ? '#a855f7' : 'transparent',
+                                          borderColor: isSelected ? 'var(--brand)' : 'var(--border-color)',
+                                          background: isSelected ? 'var(--brand)' : 'transparent',
                                         }}
                                       >
                                         {isSelected && <Check size={10} color="white" />}
@@ -863,8 +863,8 @@ export default function SchedulerSettings({ config, onSaved, teamSlug, isPlatfor
           onClick={() => setEnabled(!enabled)}
           className="relative w-11 h-6 rounded-full transition-colors"
           style={{
-            background: enabled ? '#a855f7' : 'var(--bg-tertiary)',
-            border: `1px solid ${enabled ? '#a855f7' : 'var(--border-color)'}`
+            background: enabled ? 'var(--brand)' : 'var(--bg-tertiary)',
+            border: `1px solid ${enabled ? 'var(--brand)' : 'var(--border-color)'}`
           }}
         >
           <span

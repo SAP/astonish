@@ -14,11 +14,11 @@ import DrillDetailView from './drill/DrillDetailView'
 
 function EmptyState() {
   return (
-    <div className="flex-1 flex items-center justify-center">
+    <div className="flex flex-1 items-center justify-center">
       <div className="text-center">
-        <Crosshair size={48} className="mx-auto mb-4" style={{ color: 'rgba(245, 158, 11, 0.3)' }} />
-        <h2 className="text-lg font-semibold mb-2" style={{ color: 'var(--text-primary)' }}>Drill Management</h2>
-        <p className="text-sm max-w-md" style={{ color: 'var(--text-muted)' }}>
+        <Crosshair size={48} className="mx-auto mb-4 text-[color:var(--warning)]/30" />
+        <h2 className="mb-2 text-lg font-semibold text-foreground">Drill Management</h2>
+        <p className="max-w-md text-sm text-muted-foreground">
           Select a drill suite from the sidebar to get started.
           Drills are AI-composed, mechanically-replayed sequences of tool calls
           with assertions and reporting — perfect for health checks, deployment

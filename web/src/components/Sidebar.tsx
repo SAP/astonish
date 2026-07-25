@@ -1,5 +1,11 @@
 import { useState, useMemo, type ReactNode } from 'react'
 import { Plus, Trash2, Store, Search, ChevronDown, ChevronRight, FolderOpen, Upload, GitFork, User, Users } from 'lucide-react'
+
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Skeleton } from '@/components/ui/skeleton'
+import { cn } from '@/lib/utils'
 import { snakeToTitleCase } from '../utils/formatters'
 
 interface Agent {
@@ -38,16 +44,14 @@ export default function Sidebar({
   onDeleteAgent,
   onPublishFlow,
   onForkFlow,
-  isLoading
+  isLoading,
 }: SidebarProps) {
   const [searchQuery, setSearchQuery] = useState('')
   const [sourceFilter, setSourceFilter] = useState('all') // 'all', 'local', 'official', or tap name
   const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>({})
 
-  // Detect if we're in platform mode (agents have scope annotations)
   const isPlatformMode = useMemo(() => agents.some(a => a.scope), [agents])
 
-  // Get unique sources for filter dropdown
   const sources = useMemo(() => {
     const srcSet = new Set<string>()
     agents.forEach(a => {
@@ -59,15 +63,12 @@ export default function Sidebar({
     return Array.from(srcSet)
   }, [agents])
 
-  // Filter and group agents
   const groupedAgents = useMemo((): GroupedAgents => {
-    // First filter by search
-    let filtered = agents.filter(a => 
+    let filtered = agents.filter(a =>
       a.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
       (a.description && a.description.toLowerCase().includes(searchQuery.toLowerCase()))
     )
 
-    // Then filter by source
     if (sourceFilter !== 'all') {
       filtered = filtered.filter(a => {
         if (sourceFilter === 'personal') return a.scope === 'personal'
@@ -78,13 +79,12 @@ export default function Sidebar({
       })
     }
 
-    // Group by source
     const groups: GroupedAgents = {
       personal: [],
       team: [],
       local: [],
       official: [],
-      taps: {}
+      taps: {},
     }
 
     filtered.forEach(a => {
@@ -109,108 +109,105 @@ export default function Sidebar({
   const toggleSection = (section: string) => {
     setCollapsedSections(prev => ({
       ...prev,
-      [section]: !prev[section]
+      [section]: !prev[section],
     }))
   }
 
   const renderAgentList = (agentList: Agent[]): ReactNode => (
-    <div className="space-y-0.5">
-      {agentList.map((agent) => (
-        <div
-          key={agent.id}
-          className={`group flex items-center gap-1 px-3 py-2 rounded-lg transition-colors ${
-            selectedAgent?.id === agent.id
-              ? 'bg-purple-500/20 border-l-4 border-[#6B46C1]'
-              : 'hover:bg-purple-500/10'
-          }`}
-        >
-          <button
-            onClick={() => onAgentSelect(agent)}
-            className="flex-1 text-left min-w-0"
-            style={{ color: selectedAgent?.id === agent.id ? '#9F7AEA' : 'var(--text-secondary)' }}
-            title={agent.description || ''}
-          >
-            <div className="font-medium text-sm truncate">
-              {/* For store flows with tap prefix, show just the flow name since it's already under the tap section */}
-              {snakeToTitleCase(agent.name.includes('/') ? agent.name.split('/').pop()! : agent.name)}
-            </div>
-            {agent.description && (
-              <div 
-                className="text-xs mt-0.5 truncate" 
-                style={{ color: 'var(--text-muted)', maxWidth: '160px' }}
-              >
-                {agent.description}
-              </div>
+    <div className="space-y-1">
+      {agentList.map((agent) => {
+        const isSelected = selectedAgent?.id === agent.id
+        return (
+          <div
+            key={agent.id}
+            className={cn(
+              'group flex items-center gap-1 rounded-[var(--radius-md)] border px-2 py-2 transition-colors',
+              isSelected
+                ? 'bg-[color:var(--item-active)]'
+                : 'border-transparent hover:bg-[color:var(--item-hover)]'
             )}
-          </button>
-          {/* Scope action buttons (platform mode) */}
-          {agent.scope === 'personal' && onPublishFlow && (
+            style={isSelected ? {
+              borderColor: 'color-mix(in oklab, var(--brand) 28%, transparent)',
+            } : undefined}
+          >
             <button
-              onClick={(e: React.MouseEvent) => {
-                e.stopPropagation()
-                onPublishFlow(agent)
-              }}
-              className="p-1 rounded opacity-0 group-hover:opacity-100 hover:bg-blue-500/20 transition-all shrink-0"
-              title="Publish to Team"
+              onClick={() => onAgentSelect(agent)}
+              className="min-w-0 flex-1 text-left"
+              title={agent.description || ''}
             >
-              <Upload size={14} className="text-blue-400" />
+              <div className="truncate text-sm font-medium text-foreground">
+                {snakeToTitleCase(agent.name.includes('/') ? agent.name.split('/').pop()! : agent.name)}
+              </div>
+              {agent.description && (
+                <div className="mt-0.5 max-w-40 truncate text-xs text-[color:var(--text-faint,var(--text-muted))]">
+                  {agent.description}
+                </div>
+              )}
             </button>
-          )}
-          {agent.scope === 'team' && onForkFlow && (
-            <button
-              onClick={(e: React.MouseEvent) => {
-                e.stopPropagation()
-                onForkFlow(agent)
-              }}
-              className="p-1 rounded opacity-0 group-hover:opacity-100 hover:bg-green-500/20 transition-all shrink-0"
-              title="Fork to Personal"
-            >
-              <GitFork size={14} className="text-green-400" />
-            </button>
-          )}
-          {agent.source === 'store' ? (
-            <button
-              onClick={(e: React.MouseEvent) => {
-                e.stopPropagation()
-                if (onDeleteAgent) onDeleteAgent(agent)
-              }}
-              className="p-1 rounded opacity-0 group-hover:opacity-100 hover:bg-red-500/20 transition-all shrink-0"
-              title="Uninstall flow"
-            >
-              <Trash2 size={14} className="text-red-400" />
-            </button>
-          ) : (
-            <button
+
+            {agent.scope === 'personal' && onPublishFlow && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                onClick={(e: React.MouseEvent) => {
+                  e.stopPropagation()
+                  onPublishFlow(agent)
+                }}
+                className="size-7 shrink-0 text-primary opacity-0 transition-all hover:bg-[color:var(--item-active)] group-hover:opacity-100"
+                title="Publish to Team"
+              >
+                <Upload size={14} />
+              </Button>
+            )}
+            {agent.scope === 'team' && onForkFlow && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                onClick={(e: React.MouseEvent) => {
+                  e.stopPropagation()
+                  onForkFlow(agent)
+                }}
+                className="size-7 shrink-0 text-[color:var(--success,#22c55e)] opacity-0 transition-all hover:bg-green-500/10 group-hover:opacity-100"
+                title="Fork to Personal"
+              >
+                <GitFork size={14} />
+              </Button>
+            )}
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
               onClick={(e: React.MouseEvent) => {
                 e.stopPropagation()
                 onDeleteAgent(agent)
               }}
-              className="p-1 rounded opacity-0 group-hover:opacity-100 hover:bg-red-500/20 transition-all shrink-0"
-              title="Delete agent"
+              className="size-7 shrink-0 text-destructive opacity-0 transition-all hover:bg-destructive/10 hover:text-destructive group-hover:opacity-100"
+              title={agent.source === 'store' ? 'Uninstall flow' : 'Delete agent'}
             >
-              <Trash2 size={14} className="text-red-400" />
-            </button>
-          )}
-        </div>
-      ))}
+              <Trash2 size={14} />
+            </Button>
+          </div>
+        )
+      })}
     </div>
   )
 
-  const renderSection = (title: string, agents: Agent[], icon: ReactNode, sectionKey: string, color: string = 'var(--text-muted)'): ReactNode => {
+  const renderSection = (title: string, agents: Agent[], icon: ReactNode, sectionKey: string, colorClass = 'text-muted-foreground'): ReactNode => {
     if (agents.length === 0) return null
     const isCollapsed = collapsedSections[sectionKey]
-    
+
     return (
       <div className="mb-2">
         <button
           onClick={() => toggleSection(sectionKey)}
-          className="w-full flex items-center gap-2 px-3 py-1.5 text-xs font-semibold uppercase tracking-wide hover:bg-white/5 rounded transition-colors"
-          style={{ color }}
+          className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-xs font-semibold tracking-wide text-[color:var(--text-faint,var(--text-muted))] uppercase transition-colors hover:bg-[color:var(--item-hover)] hover:text-foreground"
         >
           {isCollapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
-          {icon}
+          <span className={colorClass}>{icon}</span>
           <span>{title}</span>
-          <span className="ml-auto text-[10px] opacity-60">{agents.length}</span>
+          <span className="ml-auto rounded-full bg-[color:var(--bg-tertiary)] px-1.5 py-0.5 text-[10px] text-[color:var(--text-faint,var(--text-muted))]">{agents.length}</span>
         </button>
         {!isCollapsed && renderAgentList(agents)}
       </div>
@@ -218,119 +215,70 @@ export default function Sidebar({
   }
 
   return (
-    <div className="w-64 flex flex-col" style={{ background: 'var(--bg-secondary)', borderRight: '1px solid var(--border-color)' }}>
-      {/* Create New Agent Button */}
-      <div className="p-3" style={{ borderBottom: '1px solid var(--border-color)' }}>
-        <button
-          onClick={onCreateNew}
-          className="w-full flex items-center justify-center gap-2 py-2.5 px-4 text-white font-semibold rounded-lg transition-all shadow-md hover:shadow-lg hover:scale-[1.02]"
-          style={{ background: 'linear-gradient(135deg, #a855f7 0%, #7c3aed 100%)' }}
-        >
+    <div className="flex w-64 flex-col border-r border-border bg-[color:var(--work-sidebar,var(--sidebar-background))]">
+      <div className="border-b border-border p-3">
+        <Button onClick={onCreateNew} className="h-10 w-full gap-2 rounded-xl font-semibold shadow-none">
           <Plus size={18} />
           New Flow
-        </button>
+        </Button>
       </div>
 
-      {/* Search and Filter */}
-      <div className="p-2 space-y-2" style={{ borderBottom: '1px solid var(--border-color)' }}>
-        {/* Search */}
+      <div className="space-y-2 border-b border-border p-2">
         <div className="relative">
-          <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
-          <input
+          <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[color:var(--text-faint,var(--text-muted))]" />
+          <Input
             type="text"
             placeholder="Search flows"
             value={searchQuery}
             onChange={(e: React.ChangeEvent<HTMLInputElement>) => setSearchQuery(e.target.value)}
-            className="w-full pl-8 pr-3 py-2 rounded-lg bg-transparent text-sm outline-none"
-            style={{ border: '1px solid var(--border-color)', color: 'var(--text-primary)' }}
+            className="border-[color:var(--border-soft,var(--border))] bg-[color:var(--search-bg,var(--bg-tertiary))] pl-8 text-sm shadow-none"
           />
         </div>
 
-        {/* Filter */}
-        <select
-          value={sourceFilter}
-          onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setSourceFilter(e.target.value)}
-          className="w-full px-2.5 py-2 rounded-lg text-sm bg-transparent outline-none cursor-pointer"
-          style={{ border: '1px solid var(--border-color)', color: 'var(--text-secondary)' }}
-        >
-          <option value="all">All Sources</option>
-          {isPlatformMode && <option value="personal">Personal</option>}
-          {isPlatformMode && <option value="team">Team</option>}
-          {!isPlatformMode && <option value="local">Local</option>}
-          <option value="official">Official Store</option>
-          {sources.filter(s => !['local', 'official', 'personal', 'team'].includes(s)).map(tap => (
-            <option key={tap} value={tap}>{tap}</option>
-          ))}
-        </select>
+        <Select value={sourceFilter} onValueChange={setSourceFilter}>
+          <SelectTrigger className="w-full border-[color:var(--border-soft,var(--border))] bg-[color:var(--search-bg,var(--bg-tertiary))] text-sm text-foreground shadow-none">
+            <SelectValue placeholder="All Sources" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All Sources</SelectItem>
+            {isPlatformMode && <SelectItem value="personal">Personal</SelectItem>}
+            {isPlatformMode && <SelectItem value="team">Team</SelectItem>}
+            {!isPlatformMode && <SelectItem value="local">Local</SelectItem>}
+            <SelectItem value="official">Official Store</SelectItem>
+            {sources.filter(s => !['local', 'official', 'personal', 'team'].includes(s)).map(tap => (
+              <SelectItem key={tap} value={tap}>{tap}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       </div>
 
-      {/* Agent List */}
-      <div className="flex-1 overflow-y-auto p-2 space-y-3">
+      <div className="flex-1 space-y-3 overflow-y-auto p-2">
         {isLoading ? (
-          <div className="text-center py-8" style={{ color: 'var(--text-muted)' }}>
-            <span className="text-sm">Loading flows...</span>
+          <div className="space-y-2 py-4">
+            <Skeleton className="h-8 w-full" />
+            <Skeleton className="h-8 w-11/12" />
+            <Skeleton className="h-8 w-10/12" />
           </div>
         ) : (
           <>
-            {/* Platform mode: Personal Section */}
-            {isPlatformMode && renderSection(
-              'Personal',
-              groupedAgents.personal,
-              <User size={12} />,
-              'personal',
-              '#a855f7'
-            )}
+            {isPlatformMode && renderSection('Personal', groupedAgents.personal, <User size={12} />, 'personal', 'text-primary')}
+            {isPlatformMode && renderSection('Team', groupedAgents.team, <Users size={12} />, 'team', 'text-primary')}
+            {!isPlatformMode && renderSection('Local', groupedAgents.local, <FolderOpen size={12} />, 'local', 'text-primary')}
+            {renderSection('Official Store', groupedAgents.official, <Store size={12} />, 'official', 'text-primary')}
 
-            {/* Platform mode: Team Section */}
-            {isPlatformMode && renderSection(
-              'Team',
-              groupedAgents.team,
-              <Users size={12} />,
-              'team',
-              '#3B82F6'
-            )}
-
-            {/* Local Section (personal mode only) */}
-            {!isPlatformMode && renderSection(
-              'Local',
-              groupedAgents.local,
-              <FolderOpen size={12} />,
-              'local',
-              'var(--text-secondary)'
-            )}
-
-            {/* Official Store Section */}
-            {renderSection(
-              'Official Store',
-              groupedAgents.official,
-              <Store size={12} />,
-              'official',
-              '#3B82F6'
-            )}
-
-            {/* Custom Taps */}
             {Object.entries(groupedAgents.taps).map(([tapName, tapAgents]) => (
               <div key={`tap-${tapName}`}>
-                {renderSection(
-                  tapName,
-                  tapAgents,
-                  <Store size={12} />,
-                  `tap-${tapName}`,
-                  'var(--text-secondary)'
-                )}
+                {renderSection(tapName, tapAgents, <Store size={12} />, `tap-${tapName}`)}
               </div>
             ))}
 
-            {/* Empty state */}
             {groupedAgents.personal.length === 0 &&
              groupedAgents.team.length === 0 &&
              groupedAgents.local.length === 0 &&
              groupedAgents.official.length === 0 &&
              Object.keys(groupedAgents.taps).length === 0 && (
-              <div className="text-center py-8" style={{ color: 'var(--text-muted)' }}>
-                <span className="text-sm">
-                  {searchQuery ? 'No flows match your search' : 'No flows available'}
-                </span>
+              <div className="rounded-lg border border-dashed border-border px-3 py-8 text-center text-sm text-muted-foreground">
+                {searchQuery ? 'No flows match your search' : 'No flows available'}
               </div>
             )}
           </>

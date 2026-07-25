@@ -1,6 +1,14 @@
 import { useState, useEffect } from 'react'
-import { Save, AlertCircle, Check, AlertTriangle } from 'lucide-react'
-import { saveFullConfigSection, inputClass, inputStyle, labelStyle, hintStyle, sectionBorderStyle, saveButtonStyle } from './settingsApi'
+import { AlertCircle, AlertTriangle, Check, Loader2, Save } from 'lucide-react'
+
+import { Alert, AlertDescription } from '@/components/ui/alert'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Switch } from '@/components/ui/switch'
+
+import { saveFullConfigSection } from './settingsApi'
 
 export default function DaemonSettings({ config, onSaved }: { config: Record<string, any>; onSaved?: () => void }) {
   const [form, setForm] = useState({
@@ -50,123 +58,112 @@ export default function DaemonSettings({ config, onSaved }: { config: Record<str
   }
 
   return (
-    <div className="max-w-xl space-y-6">
-      {/* Restart Warning */}
+    <div className="max-w-2xl space-y-6">
       {restartRequired && (
-        <div className="flex items-start gap-2 p-3 rounded-lg text-sm"
-          style={{ background: 'rgba(234, 179, 8, 0.1)', border: '1px solid rgba(234, 179, 8, 0.3)' }}>
-          <AlertTriangle size={16} className="mt-0.5 flex-shrink-0" style={{ color: '#eab308' }} />
-          <span style={{ color: '#eab308' }}>
+        <Alert className="border-[color:var(--warning)]/30 bg-[color:var(--warning)]/10 text-foreground">
+          <AlertTriangle className="text-[color:var(--warning)]" />
+          <AlertDescription>
             Settings saved. Restart the daemon for port or authentication changes to take effect.
-          </span>
-        </div>
+          </AlertDescription>
+        </Alert>
       )}
 
-      {/* Port */}
-      <div>
-        <label className="block text-sm font-medium mb-2" style={labelStyle}>
-          HTTP Port
-        </label>
-        <input
-          type="number"
-          value={form.port}
-          onChange={(e) => setForm({ ...form, port: parseInt(e.target.value) || 9393 })}
-          min="1024"
-          max="65535"
-          className={inputClass}
-          style={inputStyle}
-        />
-        <p className="text-xs mt-1" style={hintStyle}>
-          Port for the Astonish daemon HTTP server. Requires restart to take effect.
-        </p>
-      </div>
+      <Card className="border-border bg-card shadow-sm">
+        <CardHeader>
+          <CardTitle className="text-base">HTTP Server</CardTitle>
+          <CardDescription>
+            Configure the Studio daemon network port and log location.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="daemon-port">HTTP Port</Label>
+            <Input
+              id="daemon-port"
+              type="number"
+              value={form.port}
+              onChange={(e) => setForm({ ...form, port: parseInt(e.target.value) || 9393 })}
+              min="1024"
+              max="65535"
+              className="max-w-40 bg-background"
+            />
+            <p className="text-xs text-muted-foreground">
+              Port for the Astonish daemon HTTP server. Requires restart to take effect.
+            </p>
+          </div>
 
-      {/* Log Directory */}
-      <div>
-        <label className="block text-sm font-medium mb-2" style={labelStyle}>
-          Log Directory
-        </label>
-        <input
-          type="text"
-          value={form.log_dir}
-          onChange={(e) => setForm({ ...form, log_dir: e.target.value })}
-          placeholder="~/.config/astonish/logs/ (default)"
-          className={inputClass + ' font-mono'}
-          style={inputStyle}
-        />
-      </div>
+          <div className="space-y-2">
+            <Label htmlFor="daemon-log-directory">Log Directory</Label>
+            <Input
+              id="daemon-log-directory"
+              type="text"
+              value={form.log_dir}
+              onChange={(e) => setForm({ ...form, log_dir: e.target.value })}
+              placeholder="~/.config/astonish/logs/ (default)"
+              className="bg-background font-mono"
+            />
+          </div>
+        </CardContent>
+      </Card>
 
-      {/* Authentication */}
-      <div className="pt-4 border-t" style={sectionBorderStyle}>
-        <h4 className="text-sm font-medium mb-4" style={{ color: 'var(--text-primary)' }}>
-          Studio Authentication
-        </h4>
-        <div className="space-y-4">
-          <div className="flex items-center justify-between">
+      <Card className="border-border bg-card shadow-sm">
+        <CardHeader>
+          <CardTitle className="text-base">Studio Authentication</CardTitle>
+          <CardDescription>
+            Manage local Studio authentication and authorized-session lifetime.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex items-start justify-between gap-4 rounded-xl border border-border bg-background p-4">
             <div>
-              <label className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>
-                Disable Authentication
-              </label>
-              <p className="text-xs mt-0.5" style={hintStyle}>
+              <Label htmlFor="disable-studio-auth">Disable Authentication</Label>
+              <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
                 Turn off device-based authentication for the Studio web UI. Not recommended for remote access.
               </p>
             </div>
-            <button
-              onClick={() => setForm({ ...form, auth: { ...form.auth, disabled: !form.auth.disabled } })}
-              className="relative w-11 h-6 rounded-full transition-colors"
-              style={{
-                background: form.auth.disabled ? '#ef4444' : 'var(--bg-tertiary)',
-                border: `1px solid ${form.auth.disabled ? '#ef4444' : 'var(--border-color)'}`
-              }}
-            >
-              <span
-                className="absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-transform bg-white"
-                style={{ transform: form.auth.disabled ? 'translateX(20px)' : 'translateX(0)' }}
-              />
-            </button>
+            <Switch
+              id="disable-studio-auth"
+              checked={form.auth.disabled}
+              onCheckedChange={(checked) => setForm({ ...form, auth: { ...form.auth, disabled: checked } })}
+              aria-label="Toggle Studio authentication"
+            />
           </div>
+
           {!form.auth.disabled && (
-            <div>
-              <label className="block text-sm font-medium mb-2" style={labelStyle}>
-                Session TTL (days)
-              </label>
-              <input
+            <div className="space-y-2">
+              <Label htmlFor="session-ttl-days">Session TTL (days)</Label>
+              <Input
+                id="session-ttl-days"
                 type="number"
                 value={form.auth.session_ttl_days}
                 onChange={(e) => setForm({ ...form, auth: { ...form.auth, session_ttl_days: parseInt(e.target.value) || 90 } })}
                 min="1"
                 max="365"
-                className={inputClass}
-                style={inputStyle}
+                className="max-w-40 bg-background"
               />
-              <p className="text-xs mt-1" style={hintStyle}>
+              <p className="text-xs text-muted-foreground">
                 How many days an authorized session remains valid before re-authorization.
               </p>
             </div>
           )}
-        </div>
-      </div>
+        </CardContent>
+      </Card>
 
-      {/* Save */}
-      <div className="flex items-center gap-3">
-        <button
-          onClick={handleSave}
-          disabled={saving}
-          className="flex items-center gap-2 px-4 py-2 rounded-lg text-white font-medium transition-all shadow-md hover:shadow-lg hover:scale-[1.02] active:scale-95 disabled:opacity-50"
-          style={saveButtonStyle}
-        >
-          <Save size={16} />
+      <div className="flex flex-wrap items-center gap-3">
+        <Button onClick={handleSave} disabled={saving} className="shadow-sm">
+          {saving ? <Loader2 className="animate-spin" /> : <Save />}
           {saving ? 'Saving...' : 'Save Changes'}
-        </button>
+        </Button>
         {saveSuccess && (
-          <span className="flex items-center gap-1 text-green-400 text-sm">
-            <Check size={16} /> Saved
+          <span className="flex items-center gap-1 text-sm text-[color:var(--success)]">
+            <Check className="size-4" /> Saved
           </span>
         )}
         {error && (
-          <span className="flex items-center gap-1 text-sm" style={{ color: 'var(--danger)' }}>
-            <AlertCircle size={16} /> {error}
-          </span>
+          <Alert variant="destructive" className="w-auto py-2">
+            <AlertCircle />
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
         )}
       </div>
     </div>

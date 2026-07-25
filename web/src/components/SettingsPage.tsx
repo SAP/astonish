@@ -71,7 +71,7 @@ interface MenuCategory {
 
 const slugify = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
 const errMsg = (err: unknown, fallback: string) => err instanceof Error ? err.message : fallback
-const gradientPurple = { background: 'linear-gradient(135deg, #a855f7 0%, #7c3aed 100%)' }
+const gradientPurple = { background: 'var(--brand)' }
 const inputStyle = { background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border-color)' }
 const errorBg = { background: 'rgba(239, 68, 68, 0.1)', color: 'var(--danger)', border: '1px solid rgba(239, 68, 68, 0.2)' }
 
@@ -310,7 +310,7 @@ function TeamMCPServersTab({ teamSlug, theme }: { teamSlug: string; theme: strin
               <div
                 key={name}
                 className="flex items-center justify-between p-3 rounded-lg"
-                style={{ background: 'var(--bg-tertiary)', border: '1px solid var(--border-color)', opacity: 0.85 }}
+                style={{ background: 'var(--card)', border: '1px solid var(--border-color)' }}
               >
                 <div className="flex items-center gap-3 min-w-0">
                   <div
@@ -324,7 +324,7 @@ function TeamMCPServersTab({ teamSlug, theme }: { teamSlug: string; theme: strin
                     </div>
                   </div>
                 </div>
-                <span className="text-[10px] px-2 py-0.5 rounded-full shrink-0" style={{ background: 'rgba(168, 85, 247, 0.15)', color: '#a855f7' }}>
+                <span className="text-[10px] px-2 py-0.5 rounded-full shrink-0" style={{ background: 'var(--brand-muted)', color: 'var(--brand)' }}>
                   platform
                 </span>
               </div>
@@ -344,7 +344,7 @@ function TeamMCPServersTab({ teamSlug, theme }: { teamSlug: string; theme: strin
               <div
                 key={name}
                 className="flex items-center justify-between p-3 rounded-lg"
-                style={{ background: 'var(--bg-tertiary)', border: '1px solid var(--border-color)', opacity: 0.85 }}
+                style={{ background: 'var(--card)', border: '1px solid var(--border-color)' }}
               >
                 <div className="flex items-center gap-3 min-w-0">
                   <div
@@ -457,7 +457,7 @@ function OrgMCPServersTab({ theme }: { theme: string }) {
               <div
                 key={name}
                 className="flex items-center justify-between p-3 rounded-lg"
-                style={{ background: 'var(--bg-tertiary)', border: '1px solid var(--border-color)', opacity: 0.85 }}
+                style={{ background: 'var(--card)', border: '1px solid var(--border-color)' }}
               >
                 <div className="flex items-center gap-3 min-w-0">
                   <div
@@ -471,7 +471,7 @@ function OrgMCPServersTab({ theme }: { theme: string }) {
                     </div>
                   </div>
                 </div>
-                <span className="text-[10px] px-2 py-0.5 rounded-full shrink-0" style={{ background: 'rgba(168, 85, 247, 0.15)', color: '#a855f7' }}>
+                <span className="text-[10px] px-2 py-0.5 rounded-full shrink-0" style={{ background: 'var(--brand-muted)', color: 'var(--brand)' }}>
                   platform
                 </span>
               </div>
@@ -875,12 +875,12 @@ function OrgProvidersTab() {
               <div
                 key={p.name}
                 className="flex items-center justify-between p-3 rounded-lg"
-                style={{ background: 'var(--bg-tertiary)', border: '1px solid var(--border-color)', opacity: 0.85 }}
+                style={{ background: 'var(--card)', border: '1px solid var(--border-color)' }}
               >
                 <div className="flex items-center gap-3 min-w-0">
                   <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0"
                     style={{ background: 'rgba(168, 85, 247, 0.15)', border: '1px solid rgba(168, 85, 247, 0.2)' }}>
-                    <Key size={14} style={{ color: '#a855f7' }} />
+                    <Key size={14} style={{ color: 'var(--brand)' }} />
                   </div>
                   <div className="min-w-0">
                     <div className="text-sm font-medium truncate" style={{ color: 'var(--text-primary)' }}>{p.name}</div>
@@ -890,7 +890,7 @@ function OrgProvidersTab() {
                 <div className="flex items-center gap-2 shrink-0">
                   {generalForm.default_provider === p.name && (
                     <span className="text-[10px] px-2 py-0.5 rounded-full"
-                      style={{ background: 'rgba(168, 85, 247, 0.2)', color: '#a855f7' }}>
+                      style={{ background: 'var(--brand-muted)', color: 'var(--brand)' }}>
                       default
                     </span>
                   )}
@@ -1357,12 +1357,12 @@ function TeamProvidersTab({ teamSlug }: { teamSlug: string }) {
               <div
                 key={p.name}
                 className="flex items-center justify-between p-3 rounded-lg"
-                style={{ background: 'var(--bg-tertiary)', border: '1px solid var(--border-color)', opacity: 0.85 }}
+                style={{ background: 'var(--card)', border: '1px solid var(--border-color)' }}
               >
                 <div className="flex items-center gap-3 min-w-0">
                   <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0"
                     style={{ background: 'rgba(168, 85, 247, 0.15)', border: '1px solid rgba(168, 85, 247, 0.2)' }}>
-                    <Key size={14} style={{ color: '#a855f7' }} />
+                    <Key size={14} style={{ color: 'var(--brand)' }} />
                   </div>
                   <div className="min-w-0">
                     <div className="text-sm font-medium truncate" style={{ color: 'var(--text-primary)' }}>{p.name}</div>
@@ -1372,7 +1372,7 @@ function TeamProvidersTab({ teamSlug }: { teamSlug: string }) {
                 <div className="flex items-center gap-2 shrink-0">
                   {generalForm.default_provider === p.name && (
                     <span className="text-[10px] px-2 py-0.5 rounded-full"
-                      style={{ background: 'rgba(168, 85, 247, 0.2)', color: '#a855f7' }}>
+                      style={{ background: 'var(--brand-muted)', color: 'var(--brand)' }}>
                       default
                     </span>
                   )}
@@ -1659,16 +1659,16 @@ export default function SettingsPage({
   // --- Loading state ---
   if (isSystemSection && data.loading) {
     return (
-      <div className="flex h-full items-center justify-center" style={{ background: 'var(--bg-primary)' }}>
+      <div className="flex h-full items-center justify-center" style={{ background: 'var(--work-background, var(--bg-primary))' }}>
         <div style={{ color: 'var(--text-muted)' }}>Loading settings...</div>
       </div>
     )
   }
 
   return (
-    <div className="flex h-full" style={{ background: 'var(--bg-primary)' }}>
-      {/* Left Sidebar */}
-      <div className="w-64 border-r flex flex-col shrink-0" style={{ background: 'var(--bg-secondary)', borderColor: 'var(--border-color)' }}>
+    <div className="flex h-full" style={{ background: 'var(--work-background, var(--bg-primary))' }}>
+      {/* Left Sidebar — same dark rail language as Chat */}
+      <div className="w-64 border-r flex flex-col shrink-0" style={{ background: 'var(--work-sidebar, var(--sidebar-background))', borderColor: 'var(--border-color)' }}>
         {/* Header */}
         <div className="p-4 border-b flex items-center justify-between" style={{ borderColor: 'var(--border-color)' }}>
           <h2 className="text-lg font-semibold" style={{ color: 'var(--text-primary)' }}>Settings</h2>
@@ -1680,7 +1680,7 @@ export default function SettingsPage({
             <div key={catIdx}>
               {category.label && (
                 <div className="px-3 pt-4 pb-1.5 flex items-center justify-between">
-                  <span className="text-[11px] font-semibold uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>
+                  <span className="text-[11px] font-semibold uppercase tracking-wider" style={{ color: 'var(--text-faint, var(--text-muted))' }}>
                     {category.label}
                   </span>
                 </div>
@@ -1704,16 +1704,16 @@ export default function SettingsPage({
                         if (onSectionChange) onSectionChange(item.id)
                       }
                     }}
-                    className="w-full flex items-center gap-3 px-3 py-2 rounded-lg transition-all"
+                    className="w-full flex items-center gap-3 px-3 py-2 rounded-[var(--radius-md)] transition-all"
                     style={{
-                      background: isActive ? 'var(--accent-soft)' : 'transparent',
-                      color: isActive ? 'var(--accent)' : 'var(--text-secondary)',
-                      border: `1px solid ${isActive ? 'rgba(95, 79, 178, 0.25)' : 'transparent'}`
+                      background: isActive ? 'var(--item-active)' : 'transparent',
+                      color: isActive ? 'var(--text-primary)' : 'var(--text-secondary)',
+                      border: `1px solid ${isActive ? 'color-mix(in oklab, var(--brand) 28%, transparent)' : 'transparent'}`,
                     }}
                   >
-                    <Icon size={18} />
+                    <Icon size={18} style={{ color: isActive ? 'var(--brand)' : undefined }} />
                     <span className="font-medium text-sm">{item.label}</span>
-                    {isActive && <ChevronRight size={16} className="ml-auto" />}
+                    {isActive && <ChevronRight size={16} className="ml-auto" style={{ color: 'var(--brand)' }} />}
                   </button>
                 )
               })}
@@ -1732,7 +1732,7 @@ export default function SettingsPage({
                 border: '1px solid rgba(168, 85, 247, 0.3)'
               }}
             >
-              <Download size={18} style={{ color: '#a855f7' }} />
+              <Download size={18} style={{ color: 'var(--brand)' }} />
               <div className="flex-1 text-left">
                 <div className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>Update Available</div>
                 <div className="text-xs" style={{ color: 'var(--text-muted)' }}>{updateAvailable.version}</div>
@@ -1748,10 +1748,10 @@ export default function SettingsPage({
         </div>
       </div>
 
-      {/* Right Content */}
-      <div className="flex-1 flex flex-col overflow-hidden">
+      {/* Right Content — solid work canvas (no ambient glow) */}
+      <div className="flex-1 flex flex-col overflow-hidden" style={{ background: 'var(--work-background, var(--bg-primary))' }}>
         {/* Header */}
-        <div className="p-4 border-b flex items-center justify-between" style={{ borderColor: 'var(--border-color)', background: 'var(--bg-secondary)' }}>
+        <div className="p-4 border-b flex items-center justify-between" style={{ borderColor: 'var(--border-color)', background: 'var(--work-background, var(--bg-primary))' }}>
           <h3 className="text-xl font-semibold" style={{ color: 'var(--text-primary)' }}>
             {activeLabel}
           </h3>

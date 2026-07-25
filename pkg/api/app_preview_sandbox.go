@@ -31,21 +31,35 @@ window.onerror = function(msg, src, line, col, err) {
 // It contains the styles, DOM, and the application bootstrap script.
 const sandboxHTMLBody = `
 <style type="text/tailwindcss">
+  /* Astonish App Canvas — always dark. Defaults = Nova; parent postMessage
+     { type:'theme', pack, tokens } overrides CSS vars when brand packs change.
+     Generated apps use: bg-surface, text-app, border-app-border, bg-brand, … */
   @theme {
-    --color-bg-app: #0b1222;
+    --color-app-canvas: #160b1f;
+    --color-surface: #1d0f28;
+    --color-surface-2: #100816;
+    --color-app: #fceef7;
+    --color-app-muted: #b49bc3;
+    --color-app-border: rgba(240, 220, 255, 0.10);
+    --color-brand: #ff6b9d;
+    --color-brand-strong: #ffb86b;
+    --color-accent3: #b478ff;
+    --color-chart-grid: #3d2450;
   }
 </style>
 <style>
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; font-family: system-ui, -apple-system, sans-serif; }
-  body { padding: 16px; color: #e5e5e5; }
-  html { background: #0b1222 !important; }
+  body { padding: 16px; color: var(--color-app, #fceef7); }
+  /* App Canvas is always dark — Studio light mode does not flip app interior.
+     Background color is overridden by applyAppCanvas() when tokens arrive. */
+  html { background: var(--color-app-canvas, #160b1f) !important; }
   #root { min-height: 20px; }
-  /* Force the component's outermost element to be transparent so the sandbox
-     themed background (#0b1222 dark / #fafbfe light) shows through. LLMs
-     frequently generate bg-gray-950, bg-black, min-h-screen etc. on the root
-     container. CSS !important beats Tailwind utilities (which don't use
-     !important), and unlike DOM manipulation this survives React re-renders. */
+  /* Force the component's outermost element to be transparent so the App Canvas
+     background shows through. LLMs frequently generate bg-gray-950, bg-black,
+     min-h-screen etc. on the root container. CSS !important beats Tailwind
+     utilities (which don't use !important), and unlike DOM manipulation this
+     survives React re-renders. */
   #root > *:first-child {
     background-color: transparent !important;
     min-height: auto !important;
@@ -97,6 +111,37 @@ const sandboxHTMLBody = `
 
   var rootInstance = null;
   var errorEl = document.getElementById('error-display');
+
+  /**
+   * Apply brand pack App Canvas tokens (always dark).
+   * tokens keys: canvas, surface, surface2, app, appMuted, appBorder,
+   *              brand, brandStrong, accent3, chartGrid
+   * Maps onto --color-* vars used by Tailwind @theme utilities.
+   */
+  function applyAppCanvas(pack, tokens) {
+    document.body.className = 'dark';
+    var root = document.documentElement;
+    if (pack) root.setAttribute('data-theme', pack);
+    var t = tokens || {};
+    var map = {
+      canvas: '--color-app-canvas',
+      surface: '--color-surface',
+      surface2: '--color-surface-2',
+      app: '--color-app',
+      appMuted: '--color-app-muted',
+      appBorder: '--color-app-border',
+      brand: '--color-brand',
+      brandStrong: '--color-brand-strong',
+      accent3: '--color-accent3',
+      chartGrid: '--color-chart-grid'
+    };
+    Object.keys(map).forEach(function(key) {
+      if (t[key]) root.style.setProperty(map[key], t[key]);
+    });
+    // Force paint even if var() resolution lags in some browsers
+    if (t.canvas) root.style.background = t.canvas;
+    if (t.app) document.body.style.color = t.app;
+  }
 
   function showError(msg, stack) {
     errorEl.style.display = 'block';
@@ -570,10 +615,9 @@ const sandboxHTMLBody = `
     }
 
     if (msg.type === 'theme') {
-      var isLight = msg.mode === 'light';
-      document.body.className = isLight ? 'light' : 'dark';
-      document.documentElement.style.background = isLight ? '#fafbfe' : '#0b1222';
-      document.body.style.color = isLight ? '#1a1a1a' : '#e5e5e5';
+      // App Canvas is always dark. Brand pack + tokens come from parent
+      // (web/src/themes/appCanvas.ts). Ignore light mode for app interior.
+      applyAppCanvas(msg.pack, msg.tokens);
     }
 
     if (msg.type === 'set_context') {

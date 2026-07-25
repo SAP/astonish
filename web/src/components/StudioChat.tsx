@@ -2,6 +2,11 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { Send, Plus, Trash2, MessageSquare, ChevronRight, ChevronDown, Loader, Square, Copy, Check, Code, RotateCcw, Clock, Search, Users, Info, FileText, Globe, ListChecks, AppWindow, Brain, Paperclip, X } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+
+import { Button } from '@/components/ui/button'
+import { Textarea } from '@/components/ui/textarea'
+import { cn } from '@/lib/utils'
+
 import { markdownComponents } from './chat/markdownComponents'
 import { fetchSessions, fetchSessionHistory, deleteSession, connectChat, stopChat, fetchSessionStatus, connectChatStream, fetchNetworkDenials, fetchSessionModelStatus, patchSessionModel, fetchAvailableProviders } from '../api/studioChat'
 import type { ChatSession, AttachmentPayload, SessionModelStatus } from '../api/studioChat'
@@ -236,7 +241,7 @@ interface PendingAttachment {
   name: string
 }
 
-export default function StudioChat({ theme, initialSessionId, pendingChatMessage, onPendingChatMessageConsumed, onSessionChange }: { theme: string; initialSessionId?: string | null; pendingChatMessage?: { message: string; systemContext?: string } | null; onPendingChatMessageConsumed?: () => void; onSessionChange?: (sessionId: string | null) => void }) {
+export default function StudioChat({ theme, initialSessionId, pendingChatMessage, onPendingChatMessageConsumed, onSessionChange, userDisplayName }: { theme: string; initialSessionId?: string | null; pendingChatMessage?: { message: string; systemContext?: string } | null; onPendingChatMessageConsumed?: () => void; onSessionChange?: (sessionId: string | null) => void; /** Shown on empty-chat hero as "Hello, {firstName}" */ userDisplayName?: string | null }) {
   // Session state
   const [sessions, setSessions] = useState<SidebarSession[]>([])
   const [activeSessionId, setActiveSessionId] = useState<string | null>(initialSessionId || null)
@@ -2583,8 +2588,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
     <>
     <div
       ref={chatLayoutRef}
-      className="flex flex-1 overflow-hidden"
-      style={{ background: 'var(--bg-primary)' }}
+      className="bg-grad-app flex flex-1 overflow-hidden"
     >
       {/* Session Sidebar */}
       <SessionSidebar
@@ -2606,8 +2610,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
       <div className="flex-1 flex flex-col overflow-hidden min-w-0">
         {/* Toolbar bar — always visible */}
         <div
-          className="flex items-center justify-between px-3 py-1.5 shrink-0"
-          style={{ borderBottom: '1px solid var(--border-color)' }}
+          className="flex shrink-0 items-center justify-between border-b border-border bg-transparent px-3 py-1.5"
         >
           {/* Left side — pre-chat model picker */}
           <div className="flex items-center gap-1.5">
@@ -2781,7 +2784,10 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
               <Loader size={24} className="animate-spin text-purple-400" />
             </div>
           ) : messages.length === 0 ? (
-            <HomePage onSuggestionClick={(text) => { setInput(text); inputRef.current?.focus() }} />
+            <HomePage
+              userDisplayName={userDisplayName || undefined}
+              onSuggestionClick={(text) => { setInput(text); inputRef.current?.focus() }}
+            />
           ) : (
             messages.map((msg, index) => {
               // Turn-level activity fold: render block at segment start; skip covered indices.
@@ -3403,17 +3409,15 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
 
         {/* Input Area */}
         <div
-          className="relative"
-          style={{ borderTop: '1px solid var(--border-color)' }}
+          className="relative border-t border-border bg-transparent"
           onDragOver={handleDragOver}
           onDragLeave={handleDragLeave}
           onDrop={handleDrop}
         >
           {/* Drag overlay */}
           {isDragOver && (
-            <div className="absolute inset-0 z-50 flex items-center justify-center rounded-lg"
-              style={{ background: 'rgba(128, 90, 213, 0.15)', border: '2px dashed var(--accent, #805AD5)' }}>
-              <div className="text-sm font-medium" style={{ color: 'var(--accent, #805AD5)' }}>
+            <div className="absolute inset-0 z-50 flex items-center justify-center rounded-lg border-2 border-dashed border-primary bg-primary/10">
+              <div className="text-sm font-medium text-primary">
                 Drop files here
               </div>
             </div>
@@ -3421,24 +3425,19 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
 
           {/* Slash command popup */}
           {showSlashPopup && filteredSlashCommands.length > 0 && (
-            <div
-              className="absolute bottom-full left-4 right-4 mb-1 rounded-lg shadow-xl overflow-hidden"
-              style={{
-                background: 'var(--bg-secondary)',
-                border: '1px solid var(--border-color)',
-                zIndex: 50,
-              }}
-            >
+            <div className="absolute bottom-full right-4 left-4 z-50 mb-1 overflow-hidden rounded-lg border border-border bg-card shadow-[var(--shadow-elevated)]">
               {filteredSlashCommands.map(({ cmd, desc }, i) => (
                 <button
                   key={cmd}
+                  type="button"
                   onClick={() => handleSlashSelect(cmd)}
-                  className={`w-full flex items-center gap-3 px-4 py-2.5 text-left transition-colors ${
-                    i === slashIndex ? 'bg-purple-500/15' : 'hover:bg-purple-500/10'
-                  }`}
+                  className={cn(
+                    'flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors',
+                    i === slashIndex ? 'bg-primary/15' : 'hover:bg-primary/10'
+                  )}
                 >
-                  <code className="text-sm font-mono text-purple-400">{cmd}</code>
-                  <span className="text-xs" style={{ color: 'var(--text-muted)' }}>{desc}</span>
+                  <code className="font-mono text-sm text-primary">{cmd}</code>
+                  <span className="text-xs text-muted-foreground">{desc}</span>
                 </button>
               ))}
             </div>
@@ -3446,26 +3445,25 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
 
           {/* Attachment preview strip */}
           {attachments.length > 0 && (
-            <div className="flex items-center gap-2 px-4 pt-3 pb-1 overflow-x-auto">
+            <div className="flex items-center gap-2 overflow-x-auto px-4 pt-3 pb-1">
               {attachments.map(att => (
                 <div
                   key={att.id}
-                  className="relative flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs shrink-0"
-                  style={{ background: 'var(--bg-tertiary)', border: '1px solid var(--border-color)' }}
+                  className="relative flex shrink-0 items-center gap-2 rounded-lg border border-border bg-secondary px-2 py-1.5 text-xs"
                 >
                   {att.preview ? (
-                    <img src={att.preview} alt={att.name} className="w-8 h-8 rounded object-cover" />
+                    <img src={att.preview} alt={att.name} className="size-8 rounded object-cover" />
                   ) : (
-                    <FileText size={16} style={{ color: 'var(--text-muted)' }} />
+                    <FileText size={16} className="text-muted-foreground" />
                   )}
-                  <span className="max-w-[120px] truncate" style={{ color: 'var(--text-secondary)' }}>{att.name}</span>
+                  <span className="max-w-[120px] truncate text-secondary-foreground">{att.name}</span>
                   <button
                     type="button"
                     onClick={() => removeAttachment(att.id)}
-                    className="p-0.5 rounded hover:bg-red-500/20 transition-colors"
+                    className="rounded p-0.5 text-muted-foreground transition-colors hover:bg-destructive/20 hover:text-destructive"
                     title="Remove"
                   >
-                    <X size={12} style={{ color: 'var(--text-muted)' }} />
+                    <X size={12} />
                   </button>
                 </div>
               ))}
@@ -3473,8 +3471,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
                 <button
                   type="button"
                   onClick={clearAttachments}
-                  className="text-xs px-2 py-1 rounded hover:bg-red-500/20 transition-colors shrink-0"
-                  style={{ color: 'var(--text-muted)' }}
+                  className="shrink-0 rounded px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-destructive/20 hover:text-destructive"
                 >
                   Clear all
                 </button>
@@ -3492,114 +3489,109 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
             className="hidden"
           />
 
-
-
-          <form onSubmit={handleSubmit} className="flex items-end gap-3 p-4">
+          <form
+            onSubmit={handleSubmit}
+            className="mx-4 mb-4 flex items-end gap-2.5 rounded-[var(--radius-lg)] border border-[color:var(--border-soft)] bg-[color:var(--input-bg)] p-2.5 pl-3.5 shadow-[var(--input-shadow)] sm:mx-6"
+          >
             {isStreaming && (
-              <button
+              <Button
                 type="button"
+                variant="destructive"
                 onClick={handleStop}
-                className="h-[42px] px-3 bg-red-500 hover:bg-red-600 text-white rounded-lg transition-colors flex items-center justify-center gap-2"
+                className="size-8 shrink-0 rounded-[10px] p-0"
                 title="Stop"
               >
-                <Square size={16} />
-              </button>
+                <Square size={14} />
+              </Button>
             )}
             {hasSessionMemories && (
-              <button
+              <Button
                 type="button"
-                className="h-[42px] px-3 rounded-lg cursor-pointer hover:opacity-80 transition-opacity flex items-center justify-center"
-                style={{ background: 'var(--bg-tertiary)', border: '1px solid var(--border-color)' }}
+                variant="ghost"
+                className="size-8 shrink-0 rounded-[10px] p-0"
                 title="View session memories — click to review and edit"
                 onClick={() => setShowMemoryPanel(true)}
               >
-                <Brain size={16} className="text-purple-400" />
-              </button>
+                <Brain size={16} className="text-primary" />
+              </Button>
             )}
-            {/* Attach file button */}
-            <button
+            <Button
               type="button"
+              variant="ghost"
               onClick={() => fileInputRef.current?.click()}
               disabled={isStreaming && !isFleetMode}
-              className="h-[42px] px-3 rounded-lg cursor-pointer hover:opacity-80 transition-opacity flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed"
-              style={{ background: 'var(--bg-tertiary)', border: '1px solid var(--border-color)' }}
+              className="size-8 shrink-0 rounded-[10px] p-0"
               title="Attach files (images, PDFs, text files)"
             >
-              <Paperclip size={16} style={{ color: attachments.length > 0 ? 'var(--accent, #805AD5)' : 'var(--text-muted)' }} />
-            </button>
-            <textarea
-                data-testid="chat-input"
-                ref={inputRef}
-                value={input}
-                onChange={handleInputChange}
-                onKeyDown={(e) => {
-                  // Enter without Shift submits the form
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault()
-                    if (showSlashPopup && filteredSlashCommands.length > 0) {
-                      const selected = filteredSlashCommands[slashIndex] || filteredSlashCommands[0]
-                      handleSlashSelect(selected.cmd)
-                    } else if (isFleetMode && input.trim()) {
-                      sendFleetHumanMessage(input)
-                    } else if (!isStreaming && (input.trim() || attachments.length > 0)) {
-                      // Reuse slash validation from handleSubmit
-                      if (input.startsWith('/') && !input.includes(' ')) return
-                      sendMessage(input)
-                    }
-                    return
+              <Paperclip size={16} className={attachments.length > 0 ? 'text-primary' : 'text-muted-foreground'} />
+            </Button>
+            <Textarea
+              data-testid="chat-input"
+              ref={inputRef}
+              value={input}
+              onChange={handleInputChange}
+              onKeyDown={(e) => {
+                // Enter without Shift submits the form
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault()
+                  if (showSlashPopup && filteredSlashCommands.length > 0) {
+                    const selected = filteredSlashCommands[slashIndex] || filteredSlashCommands[0]
+                    handleSlashSelect(selected.cmd)
+                  } else if (isFleetMode && input.trim()) {
+                    sendFleetHumanMessage(input)
+                  } else if (!isStreaming && (input.trim() || attachments.length > 0)) {
+                    // Reuse slash validation from handleSubmit
+                    if (input.startsWith('/') && !input.includes(' ')) return
+                    sendMessage(input)
                   }
-                  handleKeyDown(e)
-                }}
-                onPaste={(e) => {
-                  // Handle pasted files (e.g., screenshots from clipboard)
-                  const items = e.clipboardData?.items
-                  if (items) {
-                    const files: File[] = []
-                    for (let i = 0; i < items.length; i++) {
-                      const item = items[i]
-                      if (item.kind === 'file') {
-                        const file = item.getAsFile()
-                        if (file) files.push(file)
-                      }
-                    }
-                    if (files.length > 0) {
-                      e.preventDefault()
-                      validateAndAddFiles(files)
-                    }
-                  }
-                }}
-                disabled={isStreaming && !isFleetMode}
-                placeholder={
-                  isFleetMode
-                    ? fleetState?.state === 'waiting_for_customer'
-                      ? `${fleetState.active_agent || 'An agent'} is waiting for your response...`
-                      : fleetState?.state === 'processing'
-                        ? `${fleetState.active_agent || 'Agent'} is working... You can still type.`
-                        : 'Type a message to the team...'
-                    : isStreaming
-                      ? 'Agent is responding...'
-                      : attachments.length > 0
-                        ? 'Add a message or press Enter to send attachments...'
-                        : 'Type a message or / for commands...'
+                  return
                 }
-                rows={1}
-                className="flex-1 px-4 py-2.5 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-60 disabled:cursor-not-allowed transition-all text-sm resize-none overflow-hidden"
-                style={{
-                  background: 'var(--bg-tertiary)',
-                  color: 'var(--text-primary)',
-                  border: '1px solid var(--border-color)',
-                  maxHeight: '200px',
-                  overflowY: 'auto',
-                }}
-              />
-            <button
+                handleKeyDown(e)
+              }}
+              onPaste={(e) => {
+                // Handle pasted files (e.g., screenshots from clipboard)
+                const items = e.clipboardData?.items
+                if (items) {
+                  const files: File[] = []
+                  for (let i = 0; i < items.length; i++) {
+                    const item = items[i]
+                    if (item.kind === 'file') {
+                      const file = item.getAsFile()
+                      if (file) files.push(file)
+                    }
+                  }
+                  if (files.length > 0) {
+                    e.preventDefault()
+                    validateAndAddFiles(files)
+                  }
+                }
+              }}
+              disabled={isStreaming && !isFleetMode}
+              placeholder={
+                isFleetMode
+                  ? fleetState?.state === 'waiting_for_customer'
+                    ? `${fleetState.active_agent || 'An agent'} is waiting for your response...`
+                    : fleetState?.state === 'processing'
+                      ? `${fleetState.active_agent || 'Agent'} is working... You can still type.`
+                      : 'Type a message to the team...'
+                  : isStreaming
+                    ? 'Agent is responding...'
+                    : attachments.length > 0
+                      ? 'Add a message or press Enter to send attachments...'
+                      : 'Say hi, or drop a task in here…'
+              }
+              rows={1}
+              className="min-h-8 max-h-[200px] flex-1 resize-none overflow-y-auto border-0 bg-transparent px-1 py-1.5 text-[13.5px] shadow-none focus-visible:ring-0"
+            />
+            <Button
               data-testid="send-button"
               type="submit"
               disabled={(isStreaming && !isFleetMode) || (!input.trim() && attachments.length === 0)}
-              className="h-[42px] px-4 bg-[#805AD5] hover:bg-[#6B46C1] text-white rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center"
+              className="send-gradient size-8 shrink-0 rounded-[10px] p-0 text-white hover:opacity-90"
+              aria-label="Send message"
             >
-              <Send size={18} />
-            </button>
+              <Send size={15} />
+            </Button>
           </form>
         </div>
       </div>

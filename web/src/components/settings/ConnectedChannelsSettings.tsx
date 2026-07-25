@@ -902,8 +902,8 @@ export default function ConnectedChannelsSettings({ isAdmin = false }: { isAdmin
                   onClick={() => setEditForm({ ...editForm, enabled: !editForm.enabled })}
                   className="relative w-11 h-6 rounded-full transition-colors"
                   style={{
-                    background: editForm.enabled ? '#a855f7' : 'var(--bg-tertiary)',
-                    border: `1px solid ${editForm.enabled ? '#a855f7' : 'var(--border-color)'}`
+                    background: editForm.enabled ? 'var(--brand)' : 'var(--bg-tertiary)',
+                    border: `1px solid ${editForm.enabled ? 'var(--brand)' : 'var(--border-color)'}`
                   }}
                 >
                   <span

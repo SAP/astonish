@@ -110,11 +110,11 @@ const edgeTypes = {
 
 // Node type definitions for toolbar - matches Overflow node styling
 const NODE_TYPES: NodeTypeDefinition[] = [
-  { type: 'input', label: 'Input', icon: Edit3, iconColor: '#a78bfa' },
-  { type: 'llm', label: 'LLM', icon: Brain, iconColor: '#8b5cf6' },
-  { type: 'tool', label: 'Tool', icon: Wrench, iconColor: '#7c3aed' },
-  { type: 'updateState', label: 'State', icon: Settings, iconColor: '#8b5cf6' },
-  { type: 'output', label: 'Output', icon: MessageSquare, iconColor: '#9f7aea' },
+  { type: 'input', label: 'Input', icon: Edit3, iconColor: 'var(--node-input)' },
+  { type: 'llm', label: 'LLM', icon: Brain, iconColor: 'var(--node-llm)' },
+  { type: 'tool', label: 'Tool', icon: Wrench, iconColor: 'var(--node-tool)' },
+  { type: 'updateState', label: 'State', icon: Settings, iconColor: 'var(--node-llm)' },
+  { type: 'output', label: 'Output', icon: MessageSquare, iconColor: 'var(--node-output)' },
 ]
 
 function FlowCanvasInner({ 
@@ -586,7 +586,7 @@ function FlowCanvasInner({
   }, [onLayoutSave, edges, getNodes])
 
   return (
-    <div ref={containerRef} className="w-full h-full" style={{ background: theme === 'dark' ? '#0d121f' : '#F7F5FB' }}>
+    <div ref={containerRef} className="h-full w-full bg-[var(--work-background,var(--canvas-background))]">
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -622,23 +622,23 @@ function FlowCanvasInner({
         onNodeDrag={handleNodeDrag}
         onNodeDragStop={handleNodeDragStop}
       >
-        <Background color={theme === 'dark' ? '#374151' : '#E2E8F0'} gap={20} />
-        <Controls className="rounded-lg shadow-md" style={{ background: 'var(--bg-secondary)', borderColor: 'var(--border-color)' }} />
+        <Background color="var(--border)" gap={20} />
+        <Controls className="rounded-lg shadow-md" style={{ background: 'var(--panel-background)', borderColor: 'var(--panel-border)' }} />
         <MiniMap
           nodeColor={(node: Node) => {
             switch (node.type) {
-              case 'start': return '#38A169'
-              case 'end': return '#E53E3E'
-              case 'input': return theme === 'dark' ? '#3B2667' : '#DDD6FE'
-              case 'llm': return '#6B46C1'
-              case 'tool': return '#805AD5'
-              case 'output': return '#9F7AEA'
-              case 'updateState': return '#4A5568'
-              default: return '#CBD5E0'
+              case 'start': return 'var(--node-start)'
+              case 'end': return 'var(--node-end)'
+              case 'input': return 'var(--node-input)'
+              case 'llm': return 'var(--node-llm)'
+              case 'tool': return 'var(--node-tool)'
+              case 'output': return 'var(--node-output)'
+              case 'updateState': return 'var(--muted-foreground)'
+              default: return 'var(--border)'
             }
           }}
           className="rounded-lg shadow-md"
-          style={{ background: 'var(--bg-secondary)' }}
+          style={{ background: 'var(--panel-background)' }}
           maskColor={theme === 'dark' ? 'rgba(0, 0, 0, 0.5)' : 'rgba(255, 255, 255, 0.5)'}
         />
         
@@ -647,9 +647,9 @@ function FlowCanvasInner({
           <Panel position="top-right" className="m-2">
             <div 
               className="flex flex-col gap-2 p-2 rounded-xl shadow-lg"
-              style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-color)' }}
+              style={{ background: 'var(--panel-background)', border: '1px solid var(--panel-border)' }}
             >
-              <div className="text-xs text-center mb-1" style={{ color: 'var(--text-muted)' }}>
+              <div className="mb-1 text-center text-xs text-muted-foreground">
                 Add Node
               </div>
               {NODE_TYPES.map(({ type, label, icon: Icon, iconColor }) => (
@@ -708,9 +708,9 @@ function FlowCanvasInner({
               
               <button
                 onClick={() => onOpenAIChat()}
-                className="flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-500 hover:to-blue-500 text-white font-medium rounded-xl shadow-lg transition-all hover:scale-105"
+                className="send-gradient flex items-center gap-2 rounded-xl px-6 py-3 font-medium text-white shadow-none transition-all hover:scale-105 hover:opacity-90"
               >
-                <Sparkles className="w-5 h-5" />
+                <Sparkles className="h-5 w-5" />
                 Create with AI
               </button>
               
@@ -738,11 +738,7 @@ function FlowCanvasInner({
           <Panel position="bottom-center" className="mb-4">
             <button
               onClick={() => onOpenAIChat({ context: 'multi_node', nodeIds: selectedRealNodes })}
-              className="flex items-center gap-2 px-4 py-2.5 rounded-lg shadow-lg text-white font-medium transition-all hover:scale-105"
-              style={{ 
-                background: 'linear-gradient(135deg, #6B46C1 0%, #4F46E5 100%)',
-                border: '1px solid rgba(255,255,255,0.2)'
-              }}
+              className="send-gradient flex items-center gap-2 rounded-lg px-4 py-2.5 font-medium text-white shadow-none transition-all hover:scale-105 hover:opacity-90"
             >
               <Sparkles size={18} />
               AI Assist ({selectedRealNodes.length} nodes)
@@ -765,18 +761,18 @@ function FlowCanvasInner({
         >
           <button
             onClick={handleAutoLayout}
-            className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-purple-500/15 transition-colors"
+            className="flex w-full items-center gap-2 px-3 py-2 text-sm transition-colors hover:bg-[color:var(--item-active)]"
             style={{ color: 'var(--text-primary)' }}
           >
-            <LayoutDashboard size={16} className="text-purple-400" />
+            <LayoutDashboard size={16} className="text-primary" />
             Auto Layout
           </button>
           <button
             onClick={handleResetZoom}
-            className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-purple-500/15 transition-colors"
+            className="flex w-full items-center gap-2 px-3 py-2 text-sm transition-colors hover:bg-[color:var(--item-active)]"
             style={{ color: 'var(--text-primary)' }}
           >
-            <Maximize size={16} className="text-purple-400" />
+            <Maximize size={16} className="text-primary" />
             Reset Zoom
           </button>
         </div>

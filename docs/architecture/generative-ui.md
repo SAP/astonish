@@ -134,10 +134,19 @@ The `AppPreview` component creates an iframe pointing to `/api/app-preview/sandb
 <script src="/api/app-preview/runtime.js"></script>
 <script src="/api/app-preview/tailwind.js"></script>
 <style type="text/tailwindcss">
-  @theme { --color-bg-app: #0b1222; }
+  /* App Canvas tokens (always dark Nova night) — see @theme in app_preview_sandbox.go */
+  @theme {
+    --color-surface: #1d0f28;
+    --color-surface-2: #100816;
+    --color-app: #fceef7;
+    --color-app-muted: #b49bc3;
+    --color-app-border: rgba(240, 220, 255, 0.10);
+    --color-brand: #ff6b9d;
+  }
 </style>
 <style>
-  /* Force transparent root to prevent LLM-generated dark backgrounds from covering the themed sandbox background */
+  html { background: #160b1f !important; } /* fixed App Canvas */
+  /* Force transparent root so App Canvas shows through */
   #root > *:first-child { background-color: transparent !important; min-height: auto !important; }
 </style>
 </head>
@@ -151,6 +160,28 @@ The `AppPreview` component creates an iframe pointing to `/api/app-preview/sandb
 </body>
 </html>
 ```
+
+### App Canvas contract
+
+Generated apps render inside a **fixed dark “App Canvas”** for the **active brand pack**, independent of Studio light/dark:
+
+| Concern | Behavior |
+|---------|----------|
+| Iframe canvas | Always dark; colors come from the active brand pack’s App Canvas dictionary |
+| Studio shell (Apps panel chrome, chat) | Follows Studio tokens / light-dark as usual |
+| Brand pack switch | Parent posts `{ type: 'theme', pack, tokens }`; sandbox sets `--color-surface`, `--color-brand`, … |
+| LLM design system | Prefer tokens: `bg-surface`, `bg-surface-2`, `text-app`, `text-app-muted`, `border-app-border`, `bg-brand` |
+| Outermost root | Must stay transparent (no `bg-*`) so canvas shows through |
+| Dual light/dark app UIs | **Do not generate** — one canvas, brand via tokens |
+
+| Source of truth | Path |
+|-----------------|------|
+| Per-pack dark token dictionaries | `web/src/themes/appCanvas.ts` (`APP_CANVAS_BY_BRAND`) |
+| postMessage builder | `buildAppCanvasThemeMessage()` |
+| Sandbox apply | `applyAppCanvas` in `pkg/api/app_preview_sandbox.go` |
+| LLM skill | `pkg/skills/builtin_content.go` |
+
+Adding Ember/Amethyst: fill shell CSS **and** `APP_CANVAS_BY_BRAND[pack]` (stubs already exist). Token-based apps retheme without regeneration.
 
 The `runtime.js` bundle is a single IIFE built by Vite (`vite.config.sandbox.js`) that contains React 19, ReactDOM, Sucrase, Recharts, and Lucide React icons. The `tailwind.js` file is the `@tailwindcss/browser` runtime (~271KB) that provides Tailwind CSS v4 processing directly in the browser.
 
@@ -553,7 +584,7 @@ Messages between the iframe and parent page use a typed protocol:
 | Message Type | Fields | Purpose |
 |---|---|---|
 | `render` | `code` | Send JSX source to compile and render |
-| `theme` | `mode` | Light/dark theme sync (`'light'` or `'dark'`) |
+| `theme` | `mode`, `pack`, `tokens` | App Canvas: always `mode: 'dark'`; `pack` + `tokens` from `appCanvas.ts` retheme `--color-*` for the active brand |
 | `data_response` | `requestId`, `data`, `error` | Response to a data request |
 | `action_response` | `requestId`, `data`, `error` | Response to an action request |
 | `ai_response` | `requestId`, `text`, `error` | Response to an AI request |

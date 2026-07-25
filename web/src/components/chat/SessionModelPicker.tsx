@@ -1,17 +1,24 @@
-import { useState, useEffect, useRef, useMemo } from 'react';
-import { AlertTriangle, ChevronDown, RotateCcw, Search } from 'lucide-react';
-import { patchSessionModel } from '../../api/studioChat';
-import type { SessionModelStatus } from '../../api/studioChat';
-import ProviderModelSelector from '../ProviderModelSelector';
+import { useState, useEffect, useRef, useMemo } from 'react'
+import { AlertTriangle, ChevronDown, RotateCcw, Search } from 'lucide-react'
+
+import { Button } from '@/components/ui/button'
+import { Label } from '@/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+
+import { patchSessionModel } from '../../api/studioChat'
+import type { SessionModelStatus } from '../../api/studioChat'
+import ProviderModelSelector from '../ProviderModelSelector'
+
+const DEFAULT_PROVIDER_VALUE = '__default__'
 
 interface SessionModelPickerProps {
-  sessionId: string;
-  modelStatus: SessionModelStatus;
+  sessionId: string
+  modelStatus: SessionModelStatus
   /** Extra provider names to union with modelStatus.availableProviders (e.g. pre-chat list). */
-  availableProviders?: string[];
+  availableProviders?: string[]
   /** Increment to force-open the popover (e.g. from ModelCredentialBanner). */
-  openSignal?: number;
-  onUpdate: (status: SessionModelStatus) => void;
+  openSignal?: number
+  onUpdate: (status: SessionModelStatus) => void
 }
 
 /**
@@ -26,168 +33,166 @@ export default function SessionModelPicker({
   openSignal,
   onUpdate,
 }: SessionModelPickerProps) {
-  const wrapperRef = useRef<HTMLDivElement>(null);
-  const [open, setOpen] = useState(false);
-  const [provider, setProvider] = useState(modelStatus.pinnedProvider || '');
-  const [model, setModel] = useState(modelStatus.pinnedModel || '');
-  const [error, setError] = useState<string | null>(null);
-  const [showModelSelector, setShowModelSelector] = useState(false);
+  const wrapperRef = useRef<HTMLDivElement>(null)
+  const [open, setOpen] = useState(false)
+  const [provider, setProvider] = useState(modelStatus.pinnedProvider || '')
+  const [model, setModel] = useState(modelStatus.pinnedModel || '')
+  const [error, setError] = useState<string | null>(null)
+  const [showModelSelector, setShowModelSelector] = useState(false)
 
   useEffect(() => {
-    if (openSignal) setOpen(true);
-  }, [openSignal]);
+    if (openSignal) setOpen(true)
+  }, [openSignal])
 
   const providers = useMemo(() => {
     const set = new Set<string>([
       ...(modelStatus.availableProviders || []),
       ...(availableProviders || []),
-    ]);
-    if (modelStatus.pinnedProvider) set.add(modelStatus.pinnedProvider);
-    return Array.from(set).sort();
-  }, [modelStatus.availableProviders, modelStatus.pinnedProvider, availableProviders]);
+    ])
+    if (modelStatus.pinnedProvider) set.add(modelStatus.pinnedProvider)
+    return Array.from(set).sort()
+  }, [modelStatus.availableProviders, modelStatus.pinnedProvider, availableProviders])
 
   useEffect(() => {
-    setProvider(modelStatus.pinnedProvider || '');
-    setModel(modelStatus.pinnedModel || '');
-  }, [modelStatus.pinnedProvider, modelStatus.pinnedModel]);
+    setProvider(modelStatus.pinnedProvider || '')
+    setModel(modelStatus.pinnedModel || '')
+  }, [modelStatus.pinnedProvider, modelStatus.pinnedModel])
 
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
-      if (wrapperRef.current && !wrapperRef.current.contains(e.target as Node)) {
-        setProvider(modelStatus.pinnedProvider || '');
-        setModel(modelStatus.pinnedModel || '');
-        setError(null);
-        setShowModelSelector(false);
-        setOpen(false);
+      const target = e.target as HTMLElement | null
+      if (!target) return
+      // Radix Select content is portaled outside the wrapper; keep the popover open.
+      if (target.closest('[data-slot="select-content"], [data-radix-select-content], [role="listbox"]')) return
+      if (wrapperRef.current && !wrapperRef.current.contains(target)) {
+        setProvider(modelStatus.pinnedProvider || '')
+        setModel(modelStatus.pinnedModel || '')
+        setError(null)
+        setShowModelSelector(false)
+        setOpen(false)
       }
     }
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, [modelStatus.pinnedProvider, modelStatus.pinnedModel]);
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [modelStatus.pinnedProvider, modelStatus.pinnedModel])
 
   const handleSave = async () => {
-    setError(null);
+    setError(null)
     try {
-      const patched = await patchSessionModel(sessionId, provider, model);
+      const patched = await patchSessionModel(sessionId, provider, model)
       onUpdate({
         ...modelStatus,
         ...patched,
         availableProviders: modelStatus.availableProviders,
-      });
-      setOpen(false);
+      })
+      setOpen(false)
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to save');
-      setTimeout(() => setError(null), 4000);
+      setError(e instanceof Error ? e.message : 'Failed to save')
+      setTimeout(() => setError(null), 4000)
     }
-  };
+  }
 
   const handleReset = async () => {
-    setError(null);
+    setError(null)
     try {
-      const patched = await patchSessionModel(sessionId, '', '');
+      const patched = await patchSessionModel(sessionId, '', '')
       onUpdate({
         ...modelStatus,
         ...patched,
         availableProviders: modelStatus.availableProviders,
-      });
-      setOpen(false);
+      })
+      setOpen(false)
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to reset');
-      setTimeout(() => setError(null), 4000);
+      setError(e instanceof Error ? e.message : 'Failed to reset')
+      setTimeout(() => setError(null), 4000)
     }
-  };
+  }
 
   const handleModelSelected = (modelId: string) => {
-    setModel(modelId);
-    setShowModelSelector(false);
-  };
+    setModel(modelId)
+    setShowModelSelector(false)
+  }
 
   const displayLabel = modelStatus.pinnedProvider
     ? `${modelStatus.pinnedProvider}${modelStatus.pinnedModel ? '/' + modelStatus.pinnedModel : ''}`
-    : 'default';
+    : 'default'
 
-  const noProviders = providers.length === 0;
+  const noProviders = providers.length === 0
 
   return (
     <div ref={wrapperRef} className="relative inline-block">
-      <button
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
         onClick={() => setOpen(!open)}
-        className="flex items-center gap-1 px-2 py-1 text-xs rounded"
-        style={{ color: 'var(--text-muted)', border: '1px solid var(--border-color)' }}
+        className="h-7 gap-1 px-2 text-xs text-muted-foreground"
         title={`Model: ${modelStatus.effectiveProvider}/${modelStatus.effectiveModel}${modelStatus.pinnedProvider ? ' (pinned)' : ''}`}
       >
         Model: {displayLabel}
-        <ChevronDown size={12} />
-      </button>
+        <ChevronDown className="size-3" />
+      </Button>
       {open && (
-        <div
-          className="absolute left-0 top-full mt-1 min-w-72 w-max max-w-md rounded-lg shadow-xl p-3 z-50"
-          style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-color)' }}
-        >
-          <p className="text-[10px] mb-2" style={{ color: 'var(--text-muted)' }}>
+        <div className="absolute top-full left-0 z-50 mt-1 w-max min-w-72 max-w-md rounded-lg border border-border bg-popover p-3 text-popover-foreground shadow-[var(--shadow-elevated)]">
+          <p className="mb-2 text-[10px] text-muted-foreground">
             Currently: {modelStatus.effectiveProvider}/{modelStatus.effectiveModel}
           </p>
-          <label className="block text-xs mb-1" style={{ color: 'var(--text-primary)' }}>
-            Provider
-          </label>
-          <select
-            value={provider}
-            onChange={(e) => { setProvider(e.target.value); setModel(''); }}
-            role="combobox"
-            className="w-full rounded px-2 py-1 text-sm mb-2"
-            style={{
-              background: 'var(--bg-primary, #1a1a2e)',
-              border: '1px solid var(--border-color)',
-              color: 'var(--text-primary)',
-            }}
-          >
-            <option value="">(default — cascade)</option>
-            {providers.map((p) => (
-              <option key={p} value={p}>{p}</option>
-            ))}
-          </select>
-          <label className="block text-xs mb-1" style={{ color: 'var(--text-primary)' }}>
-            Model
-          </label>
-          <button
-            onClick={() => provider && setShowModelSelector(true)}
-            disabled={!provider}
-            className="w-full rounded px-2 py-1 text-sm mb-2 text-left flex items-center justify-between gap-2 disabled:opacity-50"
-            style={{
-              background: 'var(--bg-primary, #1a1a2e)',
-              border: '1px solid var(--border-color)',
-              color: model ? 'var(--text-primary)' : 'var(--text-muted)',
-            }}
-            title={!provider ? 'Select a provider first' : 'Browse models'}
-          >
-            <span className="break-all">{model || (provider ? 'Click to browse models…' : 'Select provider first')}</span>
-            <Search size={12} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
-          </button>
+          <div className="mb-2 space-y-1.5">
+            <Label className="text-xs">Provider</Label>
+            <Select
+              value={provider || DEFAULT_PROVIDER_VALUE}
+              onValueChange={(value) => {
+                setProvider(value === DEFAULT_PROVIDER_VALUE ? '' : value)
+                setModel('')
+              }}
+            >
+              <SelectTrigger role="combobox" className="h-8 w-full bg-background text-sm">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={DEFAULT_PROVIDER_VALUE}>(default — cascade)</SelectItem>
+                {providers.map((p) => (
+                  <SelectItem key={p} value={p}>{p}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="mb-2 space-y-1.5">
+            <Label className="text-xs">Model</Label>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => provider && setShowModelSelector(true)}
+              disabled={!provider}
+              className="h-8 w-full justify-between gap-2 bg-background font-normal"
+              title={!provider ? 'Select a provider first' : 'Browse models'}
+            >
+              <span className="break-all text-left">{model || (provider ? 'Click to browse models…' : 'Select provider first')}</span>
+              <Search className="size-3 shrink-0 text-muted-foreground" />
+            </Button>
+          </div>
           <div className="flex items-center justify-between">
             {modelStatus.pinnedProvider ? (
-              <button
-                onClick={handleReset}
-                className="flex items-center gap-1 text-xs"
-                style={{ color: 'var(--text-muted)' }}
-              >
-                <RotateCcw size={12} /> Reset
-              </button>
+              <Button type="button" variant="ghost" size="sm" onClick={handleReset} className="h-7 px-2 text-xs">
+                <RotateCcw className="size-3" /> Reset
+              </Button>
             ) : (
               <span />
             )}
-            <button
+            <Button
+              type="button"
+              size="sm"
               onClick={handleSave}
               disabled={noProviders}
               title={noProviders ? 'No providers configured' : undefined}
-              className="px-3 py-1 text-xs rounded text-white disabled:opacity-50 ml-auto"
-              style={{ background: 'var(--accent-color, #3b82f6)' }}
+              className="ml-auto h-7 px-3 text-xs"
             >
               Save
-            </button>
+            </Button>
           </div>
           {error && (
-            <div className="mt-2 text-xs flex items-center gap-1.5" style={{ color: 'var(--danger-color, #ef4444)' }}>
-              <AlertTriangle size={12} />
+            <div className="mt-2 flex items-center gap-1.5 text-xs text-destructive">
+              <AlertTriangle className="size-3" />
               <span>{error}</span>
             </div>
           )}
@@ -201,5 +206,5 @@ export default function SessionModelPicker({
         provider={provider}
       />
     </div>
-  );
+  )
 }

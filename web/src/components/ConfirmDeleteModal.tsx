@@ -1,5 +1,7 @@
-import { useEffect, useRef } from 'react'
-import { X, AlertTriangle } from 'lucide-react'
+import { AlertTriangle } from 'lucide-react'
+
+import { Button } from '@/components/ui/button'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 
 interface ConfirmDeleteModalProps {
   isOpen: boolean
@@ -10,108 +12,51 @@ interface ConfirmDeleteModalProps {
 }
 
 /**
- * Confirmation dialog for deleting an agent or uninstalling a store flow
+ * Confirmation dialog for deleting an agent or uninstalling a store flow.
  */
 export default function ConfirmDeleteModal({ isOpen, onClose, onConfirm, agentName, isStoreFlow }: ConfirmDeleteModalProps) {
-  const cancelRef = useRef<HTMLButtonElement>(null)
-
-  // Focus cancel button when modal opens
-  useEffect(() => {
-    if (isOpen && cancelRef.current) {
-      cancelRef.current.focus()
-    }
-  }, [isOpen])
-
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
-    if (e.key === 'Escape') {
-      onClose()
-    }
-  }
-
-  if (!isOpen) return null
-
   const title = isStoreFlow ? 'Uninstall Flow' : 'Delete Agent'
   const actionText = isStoreFlow ? 'Uninstall Flow' : 'Delete Agent'
-  const description = isStoreFlow 
+  const description = isStoreFlow
     ? 'This will remove the flow from your installed store flows.'
     : 'This will permanently remove the agent file from your system.'
 
   return (
-    <div 
-      className="fixed inset-0 z-50 flex items-center justify-center"
-      onKeyDown={handleKeyDown}
-    >
-      {/* Backdrop */}
-      <div 
-        className="absolute inset-0 bg-black/60 backdrop-blur-sm"
-        onClick={onClose}
-      />
-      
-      {/* Modal */}
-      <div 
-        className="relative w-full max-w-md mx-4 rounded-2xl shadow-2xl overflow-hidden"
-        style={{ background: 'var(--bg-secondary)' }}
-      >
-        {/* Header */}
-        <div 
-          className="px-6 py-5"
-          style={{ 
-            background: 'linear-gradient(135deg, #DC2626 0%, #EF4444 50%, #F87171 100%)'
-          }}
-        >
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-white/20 flex items-center justify-center">
-                <AlertTriangle size={20} className="text-white" />
-              </div>
-              <div>
-                <h2 className="text-lg font-semibold text-white">{title}</h2>
-                <p className="text-sm text-white/70">This action cannot be undone</p>
-              </div>
+    <Dialog open={isOpen} onOpenChange={(open) => { if (!open) onClose() }}>
+      <DialogContent className="max-w-md overflow-hidden p-0 shadow-[var(--shadow-elevated)]" showCloseButton={false}>
+        <div className="bg-destructive px-6 py-5 text-destructive-foreground">
+          <DialogHeader className="flex-row items-center gap-3 space-y-0 text-left">
+            <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-white/20">
+              <AlertTriangle size={20} />
             </div>
-            <button
-              onClick={onClose}
-              className="p-2 rounded-lg hover:bg-white/10 transition-colors"
-            >
-              <X size={20} className="text-white" />
-            </button>
-          </div>
+            <div>
+              <DialogTitle className="text-destructive-foreground">{title}</DialogTitle>
+              <DialogDescription className="text-destructive-foreground/75">
+                This action cannot be undone.
+              </DialogDescription>
+            </div>
+          </DialogHeader>
         </div>
 
-        {/* Content */}
-        <div className="p-6">
-          <p style={{ color: 'var(--text-secondary)' }}>
-            Are you sure you want to {isStoreFlow ? 'uninstall' : 'delete'} <strong style={{ color: 'var(--text-primary)' }}>{agentName}</strong>?
-          </p>
-          <p className="text-sm mt-2" style={{ color: 'var(--text-muted)' }}>
-            {description}
-          </p>
+        <div className="space-y-6 p-6">
+          <div className="space-y-2">
+            <p className="text-secondary-foreground">
+              Are you sure you want to {isStoreFlow ? 'uninstall' : 'delete'}{' '}
+              <strong className="text-foreground">{agentName}</strong>?
+            </p>
+            <p className="text-sm text-muted-foreground">{description}</p>
+          </div>
 
-          {/* Actions */}
-          <div className="flex gap-3 mt-6">
-            <button
-              ref={cancelRef}
-              onClick={onClose}
-              className="flex-1 px-4 py-3 rounded-xl text-sm font-medium transition-colors"
-              style={{ 
-                background: 'var(--bg-tertiary)', 
-                color: 'var(--text-secondary)' 
-              }}
-            >
+          <DialogFooter className="grid grid-cols-2 gap-3 sm:grid-cols-2">
+            <Button type="button" variant="secondary" onClick={onClose}>
               Cancel
-            </button>
-            <button
-              onClick={onConfirm}
-              className="flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-xl text-sm font-medium text-white transition-colors hover:opacity-90"
-              style={{ 
-                background: 'linear-gradient(135deg, #DC2626 0%, #EF4444 100%)'
-              }}
-            >
+            </Button>
+            <Button type="button" variant="destructive" onClick={onConfirm}>
               {actionText}
-            </button>
-          </div>
+            </Button>
+          </DialogFooter>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   )
 }

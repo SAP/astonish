@@ -1,51 +1,39 @@
 import { useState, useEffect } from 'react'
-import { Save, AlertCircle, Check, ChevronDown, ChevronRight } from 'lucide-react'
-import { saveFullConfigSection, inputClass, inputStyle, labelStyle, hintStyle, sectionBorderStyle, saveButtonStyle } from './settingsApi'
+import { AlertCircle, Check, ChevronDown, ChevronRight, Loader2, Save } from 'lucide-react'
 
-function ToggleSwitch({ value, onChange }: { value: boolean; onChange: (v: boolean) => void }) {
-  return (
-    <button
-      onClick={() => onChange(!value)}
-      className="relative w-11 h-6 rounded-full transition-colors"
-      style={{
-        background: value ? '#a855f7' : 'var(--bg-tertiary)',
-        border: `1px solid ${value ? '#a855f7' : 'var(--border-color)'}`
-      }}
-    >
-      <span
-        className="absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-transform bg-white"
-        style={{ transform: value ? 'translateX(20px)' : 'translateX(0)' }}
-      />
-    </button>
-  )
-}
+import { Alert, AlertDescription } from '@/components/ui/alert'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Switch } from '@/components/ui/switch'
+
+import { saveFullConfigSection } from './settingsApi'
 
 function CollapsibleSection({ title, description, enabled, onToggle, expanded, onExpand, children }: { title: string; description: string; enabled: boolean; onToggle: (v: boolean) => void; expanded: boolean; onExpand: () => void; children: React.ReactNode }) {
   return (
-    <div className="rounded-lg border" style={{ borderColor: 'var(--border-color)', background: 'var(--bg-secondary)' }}>
-      <div
-        className="p-4 cursor-pointer flex items-center justify-between"
+    <Card className="border-border bg-card shadow-sm">
+      <CardHeader
+        className="cursor-pointer gap-3 sm:flex sm:flex-row sm:items-start sm:justify-between"
         onClick={onExpand}
       >
-        <div className="flex items-center gap-3">
-          {expanded ? <ChevronDown size={16} style={{ color: 'var(--text-muted)' }} /> : <ChevronRight size={16} style={{ color: 'var(--text-muted)' }} />}
+        <div className="flex items-start gap-3">
+          {expanded ? <ChevronDown className="mt-0.5 size-4 text-muted-foreground" /> : <ChevronRight className="mt-0.5 size-4 text-muted-foreground" />}
           <div>
-            <div className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>{title}</div>
-            <div className="text-xs" style={hintStyle}>{description}</div>
+            <CardTitle className="text-base">{title}</CardTitle>
+            <CardDescription>{description}</CardDescription>
           </div>
         </div>
         <div onClick={(e) => e.stopPropagation()}>
-          <ToggleSwitch value={enabled} onChange={onToggle} />
+          <Switch checked={enabled} onCheckedChange={onToggle} aria-label={`Enable ${title}`} />
         </div>
-      </div>
+      </CardHeader>
       {expanded && (
-        <div className="px-4 pb-4 space-y-4 border-t" style={sectionBorderStyle}>
-          <div className="pt-4">
-            {children}
-          </div>
-        </div>
+        <CardContent className="border-t pt-4">
+          {children}
+        </CardContent>
       )}
-    </div>
+    </Card>
   )
 }
 
@@ -55,7 +43,7 @@ export default function ChannelsSettings({ config, onSaved }: { config: Record<s
     telegram: {
       enabled: false,
       bot_token: '',
-      allow_from: []
+      allow_from: [] as string[]
     },
     email: {
       enabled: false,
@@ -66,7 +54,7 @@ export default function ChannelsSettings({ config, onSaved }: { config: Record<s
       username: '',
       password: '',
       poll_interval: 30,
-      allow_from: [],
+      allow_from: [] as string[],
       folder: 'INBOX',
       mark_read: true,
       max_body_chars: 50000
@@ -108,7 +96,6 @@ export default function ChannelsSettings({ config, onSaved }: { config: Record<s
       })
       setTgAllowFromText((tg.allow_from || []).join(', '))
       setEmailAllowFromText((em.allow_from || []).join(', '))
-      // Auto-expand configured sections
       if (tg.enabled) setTgExpanded(true)
       if (em.enabled) setEmailExpanded(true)
     }
@@ -119,7 +106,6 @@ export default function ChannelsSettings({ config, onSaved }: { config: Record<s
     setSaveSuccess(false)
     setError(null)
     try {
-      // Parse allow_from text fields into arrays
       const saveData = {
         ...form,
         telegram: {
@@ -151,238 +137,147 @@ export default function ChannelsSettings({ config, onSaved }: { config: Record<s
   }
 
   return (
-    <div className="max-w-xl space-y-6">
-      {/* Master Toggle */}
-      <div className="flex items-center justify-between">
-        <div>
-          <label className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>
-            Enable Channels
-          </label>
-          <p className="text-xs mt-0.5" style={hintStyle}>
-            Master switch for all communication channels (Telegram, Email).
-          </p>
-        </div>
-        <ToggleSwitch value={form.enabled} onChange={(v) => setForm({ ...form, enabled: v })} />
-      </div>
+    <div className="max-w-2xl space-y-6">
+      <Card className="border-border bg-card shadow-sm">
+        <CardHeader>
+          <CardTitle className="text-base">Channels</CardTitle>
+          <CardDescription>Master switch for all communication channels, including Telegram and Email.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="flex items-start justify-between gap-4 rounded-xl border border-border bg-background p-4">
+            <div>
+              <Label htmlFor="channels-enabled">Enable Channels</Label>
+              <p className="mt-1 text-xs text-muted-foreground">Disable this to pause all external channel listeners.</p>
+            </div>
+            <Switch
+              id="channels-enabled"
+              checked={form.enabled}
+              onCheckedChange={(checked) => setForm({ ...form, enabled: checked })}
+              aria-label="Enable channels"
+            />
+          </div>
+        </CardContent>
+      </Card>
 
-      {/* Telegram */}
       <CollapsibleSection
         title="Telegram"
-        description="Receive and respond to messages via Telegram bot"
+        description="Receive and respond to messages via Telegram bot."
         enabled={form.telegram.enabled}
         onToggle={(v) => updateTelegram({ enabled: v })}
         expanded={tgExpanded}
         onExpand={() => setTgExpanded(!tgExpanded)}
       >
         <div className="space-y-4">
-          <div>
-            <label className="block text-sm font-medium mb-2" style={labelStyle}>
-              Bot Token
-            </label>
-            <input
+          <div className="space-y-2">
+            <Label htmlFor="telegram-bot-token">Bot Token</Label>
+            <Input
+              id="telegram-bot-token"
               type="password"
               value={form.telegram.bot_token}
               onChange={(e) => updateTelegram({ bot_token: e.target.value })}
               placeholder="Paste your BotFather token"
-              className={inputClass + ' font-mono'}
-              style={inputStyle}
+              className="bg-background font-mono"
             />
-            <p className="text-xs mt-1" style={hintStyle}>
-              Get a token from <a href="https://t.me/BotFather" target="_blank" rel="noreferrer" className="underline" style={{ color: 'var(--accent)' }}>@BotFather</a> on Telegram.
+            <p className="text-xs text-muted-foreground">
+              Get a token from <a href="https://t.me/BotFather" target="_blank" rel="noreferrer" className="text-primary underline">@BotFather</a> on Telegram.
             </p>
           </div>
-          <div>
-            <label className="block text-sm font-medium mb-2" style={labelStyle}>
-              Allowed User IDs
-            </label>
-            <input
+          <div className="space-y-2">
+            <Label htmlFor="telegram-allowed-users">Allowed User IDs</Label>
+            <Input
+              id="telegram-allowed-users"
               type="text"
               value={tgAllowFromText}
               onChange={(e) => setTgAllowFromText(e.target.value)}
               placeholder="123456789, 987654321"
-              className={inputClass + ' font-mono'}
-              style={inputStyle}
+              className="bg-background font-mono"
             />
-            <p className="text-xs mt-1" style={hintStyle}>
-              Comma-separated Telegram user IDs allowed to interact with the bot. Required for security.
-            </p>
+            <p className="text-xs text-muted-foreground">Comma-separated Telegram user IDs allowed to interact with the bot. Required for security.</p>
           </div>
         </div>
       </CollapsibleSection>
 
-      {/* Email */}
       <CollapsibleSection
         title="Email"
-        description="Monitor an inbox and respond to emails"
+        description="Monitor an inbox and respond to emails."
         enabled={form.email.enabled}
         onToggle={(v) => updateEmail({ enabled: v })}
         expanded={emailExpanded}
         onExpand={() => setEmailExpanded(!emailExpanded)}
       >
         <div className="space-y-4">
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium mb-2" style={labelStyle}>
-                IMAP Server
-              </label>
-              <input
-                type="text"
-                value={form.email.imap_server}
-                onChange={(e) => updateEmail({ imap_server: e.target.value })}
-                placeholder="imap.gmail.com:993"
-                className={inputClass + ' font-mono'}
-                style={inputStyle}
-              />
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="space-y-2">
+              <Label htmlFor="email-imap-server">IMAP Server</Label>
+              <Input id="email-imap-server" type="text" value={form.email.imap_server} onChange={(e) => updateEmail({ imap_server: e.target.value })} placeholder="imap.gmail.com:993" className="bg-background font-mono" />
             </div>
-            <div>
-              <label className="block text-sm font-medium mb-2" style={labelStyle}>
-                SMTP Server
-              </label>
-              <input
-                type="text"
-                value={form.email.smtp_server}
-                onChange={(e) => updateEmail({ smtp_server: e.target.value })}
-                placeholder="smtp.gmail.com:587"
-                className={inputClass + ' font-mono'}
-                style={inputStyle}
-              />
+            <div className="space-y-2">
+              <Label htmlFor="email-smtp-server">SMTP Server</Label>
+              <Input id="email-smtp-server" type="text" value={form.email.smtp_server} onChange={(e) => updateEmail({ smtp_server: e.target.value })} placeholder="smtp.gmail.com:587" className="bg-background font-mono" />
             </div>
           </div>
 
-          <div>
-            <label className="block text-sm font-medium mb-2" style={labelStyle}>
-              Email Address
-            </label>
-            <input
-              type="email"
-              value={form.email.address}
-              onChange={(e) => updateEmail({ address: e.target.value })}
-              placeholder="agent@example.com"
-              className={inputClass}
-              style={inputStyle}
-            />
+          <div className="space-y-2">
+            <Label htmlFor="channel-email-address">Email Address</Label>
+            <Input id="channel-email-address" type="email" value={form.email.address} onChange={(e) => updateEmail({ address: e.target.value })} placeholder="agent@example.com" className="bg-background" />
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium mb-2" style={labelStyle}>
-                Username
-              </label>
-              <input
-                type="text"
-                value={form.email.username}
-                onChange={(e) => updateEmail({ username: e.target.value })}
-                placeholder="Same as email (default)"
-                className={inputClass}
-                style={inputStyle}
-              />
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="space-y-2">
+              <Label htmlFor="channel-email-username">Username</Label>
+              <Input id="channel-email-username" type="text" value={form.email.username} onChange={(e) => updateEmail({ username: e.target.value })} placeholder="Same as email (default)" className="bg-background" />
             </div>
-            <div>
-              <label className="block text-sm font-medium mb-2" style={labelStyle}>
-                Password
-              </label>
-              <input
-                type="password"
-                value={form.email.password}
-                onChange={(e) => updateEmail({ password: e.target.value })}
-                placeholder="App password"
-                className={inputClass}
-                style={inputStyle}
-              />
+            <div className="space-y-2">
+              <Label htmlFor="channel-email-password">Password</Label>
+              <Input id="channel-email-password" type="password" value={form.email.password} onChange={(e) => updateEmail({ password: e.target.value })} placeholder="App password" className="bg-background" />
             </div>
           </div>
 
-          <div>
-            <label className="block text-sm font-medium mb-2" style={labelStyle}>
-              Allowed Senders
-            </label>
-            <input
-              type="text"
-              value={emailAllowFromText}
-              onChange={(e) => setEmailAllowFromText(e.target.value)}
-              placeholder="user@example.com, * for anyone"
-              className={inputClass}
-              style={inputStyle}
-            />
-            <p className="text-xs mt-1" style={hintStyle}>
-              Comma-separated email addresses. Use * to allow anyone.
-            </p>
+          <div className="space-y-2">
+            <Label htmlFor="email-allowed-senders">Allowed Senders</Label>
+            <Input id="email-allowed-senders" type="text" value={emailAllowFromText} onChange={(e) => setEmailAllowFromText(e.target.value)} placeholder="user@example.com, * for anyone" className="bg-background" />
+            <p className="text-xs text-muted-foreground">Comma-separated email addresses. Use * to allow anyone.</p>
           </div>
 
-          {/* Advanced email options */}
-          <div className="pt-3 border-t space-y-4" style={sectionBorderStyle}>
-            <div className="grid grid-cols-3 gap-4">
-              <div>
-                <label className="block text-sm font-medium mb-2" style={labelStyle}>
-                  Poll Interval (sec)
-                </label>
-                <input
-                  type="number"
-                  value={form.email.poll_interval}
-                  onChange={(e) => updateEmail({ poll_interval: parseInt(e.target.value) || 30 })}
-                  min="5"
-                  className={inputClass}
-                  style={inputStyle}
-                />
+          <div className="space-y-4 border-t pt-4">
+            <div className="grid gap-4 sm:grid-cols-3">
+              <div className="space-y-2">
+                <Label htmlFor="email-poll-interval">Poll Interval (sec)</Label>
+                <Input id="email-poll-interval" type="number" value={form.email.poll_interval} onChange={(e) => updateEmail({ poll_interval: parseInt(e.target.value) || 30 })} min="5" className="bg-background" />
               </div>
-              <div>
-                <label className="block text-sm font-medium mb-2" style={labelStyle}>
-                  Folder
-                </label>
-                <input
-                  type="text"
-                  value={form.email.folder}
-                  onChange={(e) => updateEmail({ folder: e.target.value })}
-                  placeholder="INBOX"
-                  className={inputClass}
-                  style={inputStyle}
-                />
+              <div className="space-y-2">
+                <Label htmlFor="email-folder">Folder</Label>
+                <Input id="email-folder" type="text" value={form.email.folder} onChange={(e) => updateEmail({ folder: e.target.value })} placeholder="INBOX" className="bg-background" />
               </div>
-              <div>
-                <label className="block text-sm font-medium mb-2" style={labelStyle}>
-                  Max Body (chars)
-                </label>
-                <input
-                  type="number"
-                  value={form.email.max_body_chars}
-                  onChange={(e) => updateEmail({ max_body_chars: parseInt(e.target.value) || 50000 })}
-                  min="1000"
-                  className={inputClass}
-                  style={inputStyle}
-                />
+              <div className="space-y-2">
+                <Label htmlFor="email-max-body">Max Body (chars)</Label>
+                <Input id="email-max-body" type="number" value={form.email.max_body_chars} onChange={(e) => updateEmail({ max_body_chars: parseInt(e.target.value) || 50000 })} min="1000" className="bg-background" />
               </div>
             </div>
-            <div className="flex items-center justify-between">
+            <div className="flex items-start justify-between gap-4 rounded-xl border border-border bg-background p-4">
               <div>
-                <label className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>Mark as Read</label>
-                <p className="text-xs" style={hintStyle}>Mark processed emails as read.</p>
+                <Label htmlFor="email-mark-read">Mark as Read</Label>
+                <p className="mt-1 text-xs text-muted-foreground">Mark processed emails as read.</p>
               </div>
-              <ToggleSwitch value={form.email.mark_read} onChange={(v) => updateEmail({ mark_read: v })} />
+              <Switch id="email-mark-read" checked={form.email.mark_read} onCheckedChange={(checked) => updateEmail({ mark_read: checked })} aria-label="Mark as read" />
             </div>
           </div>
         </div>
       </CollapsibleSection>
 
-      {/* Save */}
-      <div className="flex items-center gap-3">
-        <button
-          onClick={handleSave}
-          disabled={saving}
-          className="flex items-center gap-2 px-4 py-2 rounded-lg text-white font-medium transition-all shadow-md hover:shadow-lg hover:scale-[1.02] active:scale-95 disabled:opacity-50"
-          style={saveButtonStyle}
-        >
-          <Save size={16} />
+      <div className="flex flex-wrap items-center gap-3">
+        <Button onClick={handleSave} disabled={saving}>
+          {saving ? <Loader2 className="animate-spin" /> : <Save />}
           {saving ? 'Saving...' : 'Save Changes'}
-        </button>
+        </Button>
         {saveSuccess && (
-          <span className="flex items-center gap-1 text-green-400 text-sm">
-            <Check size={16} /> Saved
-          </span>
+          <span className="flex items-center gap-1 text-sm text-[color:var(--success)]"><Check className="size-4" /> Saved</span>
         )}
         {error && (
-          <span className="flex items-center gap-1 text-sm" style={{ color: 'var(--danger)' }}>
-            <AlertCircle size={16} /> {error}
-          </span>
+          <Alert variant="destructive" className="w-auto py-2">
+            <AlertCircle />
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
         )}
       </div>
     </div>

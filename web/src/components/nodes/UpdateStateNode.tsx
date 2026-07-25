@@ -12,7 +12,7 @@ export default function UpdateStateNode({ id, data, selected }: NodeProps<Update
       selected={selected}
       icon={Settings} 
       nodeType="State"
-      iconColor="#8b5cf6"
+      iconColor="var(--node-llm)"
     />
   )
 }

@@ -323,18 +323,38 @@ export const testProviderConnection = async (type: string, params: Record<string
 }
 
 // --- Common Styles ---
+// Surface hierarchy (match Credentials / Image #1):
+//   page → work-background
+//   section card → bg-card / --bg-secondary (elevated)
+//   nested row / tile → --bg-tertiary or inset bg-background
+//   primary CTA → --brand / primary
 
-export const inputClass: string = 'w-full px-4 py-2.5 rounded-lg border text-sm'
-export const inputStyle: CSSProperties = {
-  background: 'var(--bg-secondary)',
-  borderColor: 'var(--border-color)',
-  color: 'var(--text-primary)'
+/** Section cards in Settings (Chat, Memory, MCP wrappers, …). */
+export const settingsCardClass =
+  'border-border bg-card text-card-foreground shadow-sm'
+
+/** Nested rows / tiles inside a settings card (toggle rows, list items). */
+export const settingsNestedClass =
+  'rounded-xl border border-border bg-background'
+
+/** Inherited / read-only rows (platform MCP, etc.) — visible, not dimmed black. */
+export const settingsInheritedStyle: CSSProperties = {
+  background: 'var(--card)',
+  border: '1px solid var(--border)',
 }
 
-export const labelStyle: CSSProperties = { color: 'var(--text-secondary)' }
-export const hintStyle: CSSProperties = { color: 'var(--text-muted)' }
-export const sectionBorderStyle: CSSProperties = { borderColor: 'var(--border-color)' }
+export const inputClass: string = 'w-full rounded-md border px-3 py-2 text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50'
+export const inputStyle: CSSProperties = {
+  background: 'var(--input-bg, var(--background))',
+  borderColor: 'var(--border)',
+  color: 'var(--foreground)'
+}
+
+export const labelStyle: CSSProperties = { color: 'var(--foreground)' }
+export const hintStyle: CSSProperties = { color: 'var(--muted-foreground)' }
+export const sectionBorderStyle: CSSProperties = { borderColor: 'var(--border)' }
 
 export const saveButtonStyle: CSSProperties = {
-  background: 'linear-gradient(135deg, #a855f7 0%, #7c3aed 100%)'
+  background: 'var(--brand, var(--primary))',
+  color: 'var(--brand-foreground, var(--primary-foreground))'
 }

@@ -99,8 +99,8 @@ npm test
 
 - **Language**: The web app is **mixed TS and JSX**. New UI files should be **`.tsx`** unless they mirror an existing `.jsx` neighbor. The Vite/Vitest configs handle both; ESLint has separate blocks for `{js,jsx}` and `{ts,tsx}` in `web/eslint.config.js`.
 - **Components**: Functional with hooks, single per file, `export default` for the main component (named exports for helpers).
-- **Imports**: External first, local second. Named exports preferred for utilities.
-- **Styling**: Tailwind CSS v4 with `var(--variable-name)` for theming (see `web/src/index.css`).
+- **Imports**: External first, local second. Named exports preferred for utilities. The web app supports the `@/*` alias for imports from `web/src`.
+- **Styling**: Tailwind CSS v4 with semantic tokens in `web/src/index.css`. Standard application UI should prefer source-owned shadcn/ui primitives in `web/src/components/ui/*`; custom product surfaces such as Flow Canvas, Studio Chat rendering, embedded viewers, terminal, and the Apps iframe sandbox should be tokenized and restyled rather than blindly rewritten as generic shadcn UI.
 - **State**: React hooks only — **no Redux/Zustand/Jotai/etc.** Props drilling is acceptable. Cross-cutting state uses React Context sparingly.
 - **Handlers**: CamelCase, prevent default on forms, cleanup in `useEffect`.
 - **Linting**: ESLint config in `web/eslint.config.js`; `varsIgnorePattern: '^[A-Z_]'` allows unused component-name imports.

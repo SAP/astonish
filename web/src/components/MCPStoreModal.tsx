@@ -1,5 +1,15 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { X, Search, Star, ExternalLink, Download, Check, AlertCircle, Loader2, Tag, Package } from 'lucide-react'
+import { AlertCircle, Check, Download, ExternalLink, Loader2, Package, Search, Star } from 'lucide-react'
+
+import { Alert, AlertDescription } from '@/components/ui/alert'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { cn } from '@/lib/utils'
+
 import { teamFetch } from '../api/teamContext'
 
 // --- Types ---
@@ -29,14 +39,6 @@ interface MCPStoreModalProps {
   scope?: string  // 'team' | 'platform' | undefined (org default)
 }
 
-// API functions for MCP Store
-const _fetchMCPStore = async (query = ''): Promise<{ servers: MCPServer[]; sources: string[] }> => {
-  const url = query ? `/api/mcp-store?q=${encodeURIComponent(query)}` : '/api/mcp-store'
-  const res = await teamFetch(url)
-  if (!res.ok) throw new Error('Failed to fetch MCP store')
-  return res.json()
-}
-
 const installMCPServer = async (mcpId: string, env: Record<string, string> = {}, teamSlug?: string, scope?: string): Promise<Record<string, unknown>> => {
   const encodedId = encodeURIComponent(mcpId).replace(/%2F/g, '/')
   const scopeParam = scope || (teamSlug ? 'team' : '')
@@ -49,7 +51,6 @@ const installMCPServer = async (mcpId: string, env: Record<string, string> = {},
     body: JSON.stringify({ env })
   }, teamSlug)
   if (!res.ok) {
-    // Try to get error message from response body
     const errorText = await res.text()
     throw new Error(errorText || `Failed to install MCP server (${res.status})`)
   }
@@ -58,8 +59,8 @@ const installMCPServer = async (mcpId: string, env: Record<string, string> = {},
 
 export default function MCPStoreModal({ isOpen, onClose, onInstall, teamSlug, scope }: MCPStoreModalProps) {
   const [servers, setServers] = useState<MCPServer[]>([])
-  const [sources, setSources] = useState<string[]>([]) // Available sources for dropdown
-  const [selectedSource, setSelectedSource] = useState('all') // Current source filter
+  const [sources, setSources] = useState<string[]>([])
+  const [selectedSource, setSelectedSource] = useState('all')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
@@ -73,16 +74,15 @@ export default function MCPStoreModal({ isOpen, onClose, onInstall, teamSlug, sc
     setLoading(true)
     setError(null)
     try {
-      // Build URL with optional params
       const params = new URLSearchParams()
       if (query) params.set('q', query)
       if (source && source !== 'all') params.set('source', source)
       const url = params.toString() ? `/api/mcp-store?${params}` : '/api/mcp-store'
-      
+
       const res = await teamFetch(url)
       if (!res.ok) throw new Error('Failed to fetch MCP store')
       const data = await res.json()
-      
+
       setServers(data.servers || [])
       setSources(data.sources || [])
     } catch (err) {
@@ -94,23 +94,25 @@ export default function MCPStoreModal({ isOpen, onClose, onInstall, teamSlug, sc
 
   useEffect(() => {
     if (isOpen) {
-      // Reset filters to defaults when modal opens
       setSearchQuery('')
       setSelectedSource('all')
-      loadServers()
+      setSelectedServer(null)
+      setEnvOverrides({})
+      void loadServers()
     }
   }, [isOpen, loadServers])
 
   useEffect(() => {
+    if (!isOpen) return
     if (searchDebounceRef.current) {
       clearTimeout(searchDebounceRef.current)
     }
     const timeout = setTimeout(() => {
-      loadServers(searchQuery, selectedSource)
+      void loadServers(searchQuery, selectedSource)
     }, 300)
     searchDebounceRef.current = timeout
     return () => clearTimeout(timeout)
-  }, [searchQuery, selectedSource, loadServers])
+  }, [searchQuery, selectedSource, loadServers, isOpen])
 
   const handleInstall = async (server: MCPServer) => {
     setInstalling(server.mcpId)
@@ -129,111 +131,89 @@ export default function MCPStoreModal({ isOpen, onClose, onInstall, teamSlug, sc
     }
   }
 
-  if (!isOpen) return null
-
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center" style={{ background: 'rgba(0,0,0,0.8)' }}>
-      <div 
-        className="w-full max-w-5xl h-[85vh] rounded-xl border overflow-hidden flex flex-col"
-        style={{ background: 'var(--bg-primary)', borderColor: 'var(--border-color)' }}
+    <Dialog open={isOpen} onOpenChange={(open) => { if (!open) onClose() }}>
+      <DialogContent
+        className="flex h-[85vh] w-full max-w-5xl flex-col gap-0 overflow-hidden border-panel-border bg-panel-background p-0 shadow-[var(--shadow-elevated)] sm:max-w-5xl"
+        showCloseButton
       >
-        {/* Header */}
-        <div className="p-4 border-b flex items-center justify-between" style={{ borderColor: 'var(--border-color)' }}>
+        <DialogHeader className="border-b px-4 py-4 text-left">
           <div className="flex items-center gap-3">
-            <Package size={24} className="text-purple-400" />
-            <h2 className="text-xl font-semibold" style={{ color: 'var(--text-primary)' }}>MCP Store</h2>
-            <span className="text-sm px-2 py-0.5 rounded-full bg-purple-500/20 text-purple-400">
-              {servers.length} servers
-            </span>
+            <Package className="size-5 text-primary" />
+            <div>
+              <DialogTitle>MCP Store</DialogTitle>
+              <DialogDescription>
+                Browse and install MCP servers for this scope.
+              </DialogDescription>
+            </div>
+            <Badge variant="secondary">{servers.length} servers</Badge>
           </div>
-          <button
-            onClick={onClose}
-            className="p-2 rounded-lg hover:bg-gray-600/30 transition-colors"
-            style={{ color: 'var(--text-muted)' }}
-          >
-            <X size={20} />
-          </button>
-        </div>
+        </DialogHeader>
 
-        {/* Search Bar and Source Filter */}
-        <div className="p-4 border-b" style={{ borderColor: 'var(--border-color)' }}>
-          <div className="flex gap-3">
+        <div className="border-b p-4">
+          <div className="flex flex-col gap-3 sm:flex-row">
             <div className="relative flex-1">
-              <Search size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
-              <input
+              <Search className="absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
                 type="text"
                 value={searchQuery}
                 onChange={(e: React.ChangeEvent<HTMLInputElement>) => setSearchQuery(e.target.value)}
                 placeholder="Search MCP servers..."
-                className="w-full pl-10 pr-4 py-2.5 rounded-lg border text-sm"
-                style={{ 
-                  background: 'var(--bg-secondary)', 
-                  borderColor: 'var(--border-color)', 
-                  color: 'var(--text-primary)' 
-                }}
+                className="bg-background pl-10"
               />
             </div>
-            <select
-              value={selectedSource}
-              onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setSelectedSource(e.target.value)}
-              className="px-3 py-2.5 rounded-lg border text-sm"
-              style={{ 
-                background: 'var(--bg-secondary)', 
-                borderColor: 'var(--border-color)', 
-                color: 'var(--text-primary)',
-                minWidth: '140px'
-              }}
-            >
-              <option value="all">All Sources</option>
-              {sources.map(source => (
-                <option key={source} value={source}>{source}</option>
-              ))}
-            </select>
+            <Select value={selectedSource} onValueChange={setSelectedSource}>
+              <SelectTrigger className="w-full bg-background sm:w-40">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Sources</SelectItem>
+                {sources.map(source => (
+                  <SelectItem key={source} value={source}>{source}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
         </div>
 
-        {/* Content */}
-        <div className="flex-1 overflow-y-auto p-4">
+        <div className="min-h-0 flex-1 overflow-y-auto p-4">
           {loading && (
-            <div className="flex items-center justify-center h-full">
-              <Loader2 size={32} className="animate-spin text-purple-400" />
+            <div className="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="size-6 animate-spin text-primary" />
+              Loading MCP store...
             </div>
           )}
 
           {error && (
-            <div className="flex items-center justify-center gap-2 text-red-400 p-4">
-              <AlertCircle size={20} />
-              <span>{error}</span>
-            </div>
+            <Alert variant="destructive" className="mb-4">
+              <AlertCircle />
+              <AlertDescription>{error}</AlertDescription>
+            </Alert>
           )}
 
           {!loading && !error && servers.length === 0 && (
-            <div className="flex flex-col items-center justify-center h-full" style={{ color: 'var(--text-muted)' }}>
-              <Package size={48} className="opacity-30 mb-4" />
+            <div className="flex h-full flex-col items-center justify-center text-muted-foreground">
+              <Package className="mb-4 size-12 opacity-30" />
               <p>No MCP servers found</p>
-              {searchQuery && <p className="text-sm mt-1">Try a different search term</p>}
+              {searchQuery && <p className="mt-1 text-sm">Try a different search term</p>}
             </div>
           )}
 
           {!loading && !error && servers.length > 0 && (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
               {servers.map(server => (
                 <div
                   key={server.mcpId}
-                  className={`p-4 rounded-lg border cursor-pointer transition-all hover:border-purple-500/50 ${
-                    selectedServer?.mcpId === server.mcpId ? 'border-purple-500 ring-1 ring-purple-500/30' : ''
-                  }`}
-                  style={{ 
-                    background: 'var(--bg-secondary)', 
-                    borderColor: selectedServer?.mcpId === server.mcpId ? undefined : 'var(--border-color)' 
-                  }}
+                  className={cn(
+                    'cursor-pointer rounded-lg border bg-background p-4 transition-all hover:border-primary/50',
+                    selectedServer?.mcpId === server.mcpId && 'border-primary ring-1 ring-primary/30'
+                  )}
                   onClick={() => {
                     if (selectedServer?.mcpId === server.mcpId) {
                       setSelectedServer(null)
                       setEnvOverrides({})
                     } else {
                       setSelectedServer(server)
-                      // Pre-populate env values with defaults from store (curated real values)
                       if (server.config?.env) {
                         const defaults: Record<string, string> = {}
                         Object.entries(server.config.env).forEach(([key, defaultValue]) => {
@@ -246,93 +226,66 @@ export default function MCPStoreModal({ isOpen, onClose, onInstall, teamSlug, sc
                     }
                   }}
                 >
-                  <div className="flex items-start justify-between mb-2">
-                    <div className="flex-1 min-w-0">
-                      <h3 className="font-semibold truncate" style={{ color: 'var(--text-primary)' }}>
-                        {server.name}
-                      </h3>
-                      <div className="flex items-center gap-2 text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
+                  <div className="mb-2 flex items-start justify-between">
+                    <div className="min-w-0 flex-1">
+                      <h3 className="truncate font-semibold text-foreground">{server.name}</h3>
+                      <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
                         <span>by {server.author}</span>
                         {server.githubStars > 0 && (
                           <span className="flex items-center gap-1">
-                            <Star size={12} className="text-yellow-400 fill-yellow-400" />
+                            <Star className="size-3 fill-amber-400 text-amber-400" />
                             {server.githubStars.toLocaleString()}
                           </span>
                         )}
                       </div>
                     </div>
-                    <span className="shrink-0 ml-2 text-xs font-mono px-2 py-0.5 rounded" 
-                          style={{ background: 'var(--bg-primary)', color: 'var(--text-muted)' }}>
-                      {server.config?.command}
-                    </span>
+                    {server.config?.command && (
+                      <Badge variant="outline" className="ml-2 shrink-0 font-mono">
+                        {server.config.command}
+                      </Badge>
+                    )}
                   </div>
 
-                  <p className="text-sm line-clamp-2 mb-3" style={{ color: 'var(--text-secondary)' }}>
+                  <p className="mb-3 line-clamp-2 text-sm text-muted-foreground">
                     {server.description}
                   </p>
 
-                  {/* Tags */}
                   {server.tags && server.tags.length > 0 && (
-                    <div className="flex flex-wrap gap-1 mb-3">
+                    <div className="mb-3 flex flex-wrap gap-1">
                       {server.tags.slice(0, 4).map(tag => (
-                        <span 
-                          key={tag} 
-                          className="px-2 py-0.5 text-xs rounded-full"
-                          style={{ background: 'var(--bg-primary)', color: 'var(--text-muted)' }}
-                        >
-                          {tag}
-                        </span>
+                        <Badge key={tag} variant="secondary">{tag}</Badge>
                       ))}
                       {server.tags.length > 4 && (
-                        <span className="text-xs" style={{ color: 'var(--text-muted)' }}>
-                          +{server.tags.length - 4}
-                        </span>
+                        <span className="text-xs text-muted-foreground">+{server.tags.length - 4}</span>
                       )}
                     </div>
                   )}
 
-                  {/* Expanded details */}
                   {selectedServer?.mcpId === server.mcpId && (
-                    <div className="mt-4 pt-4 border-t" style={{ borderColor: 'var(--border-color)' }}>
-                      {/* Config preview */}
+                    <div className="mt-4 space-y-4 border-t pt-4" onClick={(e) => e.stopPropagation()}>
                       {server.config && (
-                        <div className="mb-4">
-                          <h4 className="text-xs font-medium mb-2" style={{ color: 'var(--text-muted)' }}>
-                            Configuration
-                          </h4>
-                          <pre 
-                            className="p-3 rounded text-xs overflow-x-auto"
-                            style={{ background: 'var(--bg-primary)', color: 'var(--text-secondary)' }}
-                          >
+                        <div>
+                          <h4 className="mb-2 text-xs font-medium text-muted-foreground">Configuration</h4>
+                          <pre className="overflow-x-auto rounded-md border bg-card p-3 text-xs text-muted-foreground">
                             {JSON.stringify(server.config, null, 2)}
                           </pre>
                         </div>
                       )}
 
-                      {/* Environment variable inputs */}
                       {server.config?.env && Object.keys(server.config.env).length > 0 && (
-                        <div className="mb-4">
-                          <h4 className="text-xs font-medium mb-2" style={{ color: 'var(--text-muted)' }}>
-                            Environment Variables
-                          </h4>
+                        <div>
+                          <h4 className="mb-2 text-xs font-medium text-muted-foreground">Environment Variables</h4>
                           <div className="space-y-2">
                             {Object.entries(server.config.env).map(([key, defaultValue]) => (
-                              <div key={key}>
-                                <label className="block text-xs mb-1" style={{ color: 'var(--text-muted)' }}>
-                                  {key}
-                                </label>
-                                <input
+                              <div key={key} className="space-y-1">
+                                <Label htmlFor={`mcp-env-${server.mcpId}-${key}`} className="text-xs">{key}</Label>
+                                <Input
+                                  id={`mcp-env-${server.mcpId}-${key}`}
                                   type="text"
                                   value={envOverrides[key] ?? defaultValue}
                                   onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEnvOverrides({ ...envOverrides, [key]: e.target.value })}
                                   placeholder={defaultValue || 'Enter value...'}
-                                  onClick={(e: React.MouseEvent<HTMLInputElement>) => e.stopPropagation()}
-                                  className="w-full px-3 py-1.5 rounded border text-xs font-mono"
-                                  style={{ 
-                                    background: 'var(--bg-primary)', 
-                                    borderColor: 'var(--border-color)', 
-                                    color: 'var(--text-primary)' 
-                                  }}
+                                  className="bg-card font-mono text-xs"
                                 />
                               </div>
                             ))}
@@ -340,45 +293,36 @@ export default function MCPStoreModal({ isOpen, onClose, onInstall, teamSlug, sc
                         </div>
                       )}
 
-                      {/* Actions */}
                       <div className="flex items-center gap-2">
-                        <button
-                          onClick={(e: React.MouseEvent<HTMLButtonElement>) => {
-                            e.stopPropagation()
-                            handleInstall(server)
-                          }}
+                        <Button
+                          onClick={() => handleInstall(server)}
                           disabled={installing === server.mcpId}
-                          className="flex items-center gap-2 px-4 py-2 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-sm font-medium transition-colors disabled:opacity-50"
+                          size="sm"
                         >
                           {installing === server.mcpId ? (
-                            <>
-                              <Loader2 size={14} className="animate-spin" />
-                              Installing...
-                            </>
+                            <Loader2 className="animate-spin" />
                           ) : installSuccess === server.mcpId ? (
-                            <>
-                              <Check size={14} />
-                              Installed!
-                            </>
+                            <Check />
                           ) : (
-                            <>
-                              <Download size={14} />
-                              Install
-                            </>
+                            <Download />
                           )}
-                        </button>
-                        
-                        <a
-                          href={server.githubUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          onClick={(e: React.MouseEvent<HTMLAnchorElement>) => e.stopPropagation()}
-                          className="flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-gray-600/20 text-sm transition-colors"
-                          style={{ color: 'var(--text-secondary)' }}
-                        >
-                          <ExternalLink size={14} />
-                          Docs
-                        </a>
+                          {installing === server.mcpId
+                            ? 'Installing...'
+                            : installSuccess === server.mcpId
+                              ? 'Installed!'
+                              : 'Install'}
+                        </Button>
+
+                        <Button variant="outline" size="sm" asChild>
+                          <a
+                            href={server.githubUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                          >
+                            <ExternalLink />
+                            Docs
+                          </a>
+                        </Button>
                       </div>
                     </div>
                   )}
@@ -387,7 +331,7 @@ export default function MCPStoreModal({ isOpen, onClose, onInstall, teamSlug, sc
             </div>
           )}
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   )
 }

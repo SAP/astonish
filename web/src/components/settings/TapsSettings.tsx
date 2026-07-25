@@ -1,5 +1,13 @@
 import { useState, useEffect } from 'react'
-import { Plus, Trash2, Check, AlertCircle, Loader2, RefreshCw } from 'lucide-react'
+import { AlertCircle, Check, Loader2, Plus, RefreshCw, Trash2 } from 'lucide-react'
+
+import { Alert, AlertDescription } from '@/components/ui/alert'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+
 import { fetchTaps, addTap, removeTap } from './settingsApi'
 import type { TapEntry } from './settingsApi'
 import { teamFetch } from '../../api/teamContext'
@@ -12,6 +20,11 @@ export default function TapsSettings({ teamSlug }: { teamSlug?: string }) {
   const [newTapAlias, setNewTapAlias] = useState('')
   const [tapsError, setTapsError] = useState<string | null>(null)
 
+  const loadTaps = async () => {
+    const data = await fetchTaps(teamSlug)
+    setTaps(data.taps || [])
+  }
+
   useEffect(() => {
     setTapsLoading(true)
     fetchTaps(teamSlug)
@@ -20,152 +33,165 @@ export default function TapsSettings({ teamSlug }: { teamSlug?: string }) {
       .finally(() => setTapsLoading(false))
   }, [teamSlug])
 
-  return (
-    <div className="max-w-2xl space-y-6">
-      <p style={{ color: 'var(--text-muted)' }}>
-        Manage extension repositories (taps) that provide flows and MCP servers.
-      </p>
+  const handleAddTap = async () => {
+    if (!newTapUrl) return
+    setTapsError(null)
+    setTapsLoading(true)
+    try {
+      await addTap(newTapUrl, newTapAlias, teamSlug)
+      setNewTapUrl('')
+      setNewTapAlias('')
+      await loadTaps()
+    } catch (err: any) {
+      setTapsError(err.message)
+    } finally {
+      setTapsLoading(false)
+    }
+  }
 
-      {/* Add Tap Form */}
-      <div className="p-4 rounded-lg border" style={{ background: 'var(--bg-secondary)', borderColor: 'var(--border-color)' }}>
-        <h4 className="font-medium mb-3" style={{ color: 'var(--text-primary)' }}>Add Repository</h4>
-        <div className="space-y-3">
-          <div>
-            <label className="block text-sm mb-1" style={{ color: 'var(--text-secondary)' }}>Repository URL or owner/repo</label>
-            <input
+  const handleRefreshTaps = async () => {
+    setTapsLoading(true)
+    setTapsError(null)
+    setTapsSuccess(null)
+    try {
+      await teamFetch('/api/taps/update', { method: 'POST' }, teamSlug)
+      await loadTaps()
+      setTapsSuccess('Updated!')
+      setTimeout(() => setTapsSuccess(null), 3000)
+    } catch (err: any) {
+      setTapsError(err.message)
+    } finally {
+      setTapsLoading(false)
+    }
+  }
+
+  const handleRemoveTap = async (name: string) => {
+    setTapsError(null)
+    try {
+      await removeTap(name, teamSlug)
+      await loadTaps()
+    } catch (err: any) {
+      setTapsError(err.message)
+    }
+  }
+
+  return (
+    <div className="max-w-3xl space-y-6">
+      <div>
+        <h3 className="text-lg font-semibold text-foreground">Extension Repositories</h3>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Manage extension repositories, or taps, that provide flows and MCP servers.
+        </p>
+      </div>
+
+      <Card className="border-border bg-card shadow-sm">
+        <CardHeader>
+          <CardTitle className="text-base">Add Repository</CardTitle>
+          <CardDescription>
+            Add a GitHub owner/repo shorthand or a full repository URL.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="tap-url">Repository URL or owner/repo</Label>
+            <Input
+              id="tap-url"
               type="text"
               value={newTapUrl}
               onChange={(e) => setNewTapUrl(e.target.value)}
               placeholder="SAP/astonish-flows"
-              className="w-full px-3 py-2 rounded border"
-              style={{ background: 'var(--bg-tertiary)', borderColor: 'var(--border-color)', color: 'var(--text-primary)' }}
+              className="bg-background"
             />
           </div>
-          <div>
-            <label className="block text-sm mb-1" style={{ color: 'var(--text-secondary)' }}>Alias (optional)</label>
-            <input
+          <div className="space-y-2">
+            <Label htmlFor="tap-alias">Alias (optional)</Label>
+            <Input
+              id="tap-alias"
               type="text"
               value={newTapAlias}
               onChange={(e) => setNewTapAlias(e.target.value)}
               placeholder="my-flows"
-              className="w-full px-3 py-2 rounded border"
-              style={{ background: 'var(--bg-tertiary)', borderColor: 'var(--border-color)', color: 'var(--text-primary)' }}
+              className="bg-background"
             />
           </div>
           {tapsError && (
-            <div className="text-red-400 text-sm flex items-center gap-2">
-              <AlertCircle size={14} />
-              {tapsError}
-            </div>
+            <Alert variant="destructive">
+              <AlertCircle />
+              <AlertDescription>{tapsError}</AlertDescription>
+            </Alert>
           )}
-          <button
-            onClick={async () => {
-              if (!newTapUrl) return
-              setTapsError(null)
-              setTapsLoading(true)
-              try {
-                await addTap(newTapUrl, newTapAlias, teamSlug)
-                setNewTapUrl('')
-                setNewTapAlias('')
-                const data = await fetchTaps(teamSlug)
-                setTaps(data.taps || [])
-              } catch (err: any) {
-                setTapsError(err.message)
-              } finally {
-                setTapsLoading(false)
-              }
-            }}
-            disabled={tapsLoading || !newTapUrl}
-            className="flex items-center gap-2 px-4 py-2 rounded-lg transition-all shadow-md hover:shadow-lg hover:scale-[1.02] active:scale-95 disabled:opacity-50"
-            style={{ background: 'linear-gradient(135deg, #a855f7 0%, #7c3aed 100%)', color: '#fff' }}
-          >
-            {tapsLoading ? <Loader2 size={16} className="animate-spin" /> : <Plus size={16} />}
+          <Button onClick={handleAddTap} disabled={tapsLoading || !newTapUrl}>
+            {tapsLoading ? <Loader2 className="animate-spin" /> : <Plus />}
             Add Repository
-          </button>
-        </div>
-      </div>
+          </Button>
+        </CardContent>
+      </Card>
 
-      {/* Tap List */}
-      <div className="space-y-2">
-        <div className="flex items-center justify-between">
-          <h4 className="font-medium" style={{ color: 'var(--text-primary)' }}>Configured Repositories</h4>
+      <Card className="border-border bg-card shadow-sm">
+        <CardHeader className="gap-3 sm:flex sm:flex-row sm:items-start sm:justify-between">
+          <div className="space-y-1.5">
+            <CardTitle className="text-base">Configured Repositories</CardTitle>
+            <CardDescription>
+              Refresh manifests from remote or remove custom repositories.
+            </CardDescription>
+          </div>
           <div className="flex items-center gap-2">
             {tapsSuccess && (
-              <span className="flex items-center gap-1 text-sm text-green-400">
-                <Check size={14} />
+              <span className="flex items-center gap-1 text-sm text-[color:var(--success)]">
+                <Check className="size-4" />
                 {tapsSuccess}
               </span>
             )}
-            <button
-              onClick={async () => {
-                setTapsLoading(true)
-                setTapsError(null)
-                setTapsSuccess(null)
-                try {
-                  // First refresh manifests from remote
-                  await teamFetch('/api/taps/update', { method: 'POST' }, teamSlug)
-                  // Then fetch updated taps list
-                  const data = await fetchTaps(teamSlug)
-                  setTaps(data.taps || [])
-                  setTapsSuccess('Updated!')
-                  setTimeout(() => setTapsSuccess(null), 3000)
-                } catch (err: any) {
-                  setTapsError(err.message)
-                } finally {
-                  setTapsLoading(false)
-                }
-              }}
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={handleRefreshTaps}
               disabled={tapsLoading}
-              className="flex items-center gap-1.5 px-2 py-1 rounded text-sm hover:bg-gray-600/30 transition-colors disabled:opacity-50"
-              style={{ color: 'var(--text-muted)' }}
               title="Refresh manifests from remote"
             >
-              <RefreshCw size={14} className={tapsLoading ? 'animate-spin' : ''} />
+              <RefreshCw className={tapsLoading ? 'animate-spin' : ''} />
               {tapsLoading ? 'Refreshing...' : 'Refresh'}
-            </button>
+            </Button>
           </div>
-        </div>
-        {taps.length === 0 ? (
-          <div className="text-sm p-4 rounded border border-dashed" 
-               style={{ borderColor: 'var(--border-color)', color: 'var(--text-muted)' }}>
-            No repositories configured. Add one above or click refresh.
-          </div>
-        ) : (
-          taps.map((tap) => (
-            <div 
-              key={tap.name} 
-              className="flex items-center justify-between p-3 rounded-lg border"
-              style={{ background: 'var(--bg-secondary)', borderColor: 'var(--border-color)' }}
-            >
-              <div className="flex-1">
-                <div className="flex items-center gap-2">
-                  <span className="font-medium" style={{ color: 'var(--text-primary)' }}>{tap.name}</span>
-                  {tap.name === 'official' && (
-                    <span className="text-xs px-2 py-0.5 rounded bg-purple-600/20 text-purple-400">official</span>
+        </CardHeader>
+        <CardContent>
+          {taps.length === 0 ? (
+            <div className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
+              No repositories configured. Add one above or click refresh.
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {taps.map((tap) => (
+                <div
+                  key={tap.name}
+                  className="flex items-center justify-between gap-4 rounded-lg border bg-background p-3"
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium text-foreground">{tap.name}</span>
+                      {tap.name === 'official' && <Badge variant="secondary">official</Badge>}
+                    </div>
+                    <div className="truncate text-sm text-muted-foreground">{tap.url}</div>
+                  </div>
+                  {tap.name !== 'official' && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => handleRemoveTap(tap.name)}
+                      className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                      aria-label={`Remove ${tap.name}`}
+                    >
+                      <Trash2 />
+                    </Button>
                   )}
                 </div>
-                <div className="text-sm" style={{ color: 'var(--text-muted)' }}>{tap.url}</div>
-              </div>
-              {tap.name !== 'official' && (
-                <button
-                  onClick={async () => {
-                    try {
-                      await removeTap(tap.name, teamSlug)
-                      const data = await fetchTaps(teamSlug)
-                      setTaps(data.taps || [])
-                    } catch (err: any) {
-                      setTapsError(err.message)
-                    }
-                  }}
-                  className="p-2 text-red-400 hover:bg-red-600/20 rounded"
-                >
-                  <Trash2 size={16} />
-                </button>
-              )}
+              ))}
             </div>
-          ))
-        )}
-      </div>
+          )}
+        </CardContent>
+      </Card>
     </div>
   )
 }

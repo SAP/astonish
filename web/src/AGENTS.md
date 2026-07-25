@@ -12,8 +12,8 @@ React 19 SPA for Astonish Studio. Mixed **TypeScript (`.ts`/`.tsx`)** and **lega
 - **Language**: `.tsx` for new UI files unless mirroring an existing `.jsx` neighbor. `npm run build` runs `tsc --noEmit` — do not commit code that fails it.
 - **Components**: functional + hooks, single per file, `export default` for the main component.
 - **State**: React hooks only. **No Redux/Zustand/Jotai/etc.** Cross-cutting state uses React Context sparingly.
-- **Styling**: Tailwind CSS v4 with `var(--variable-name)` theming (`index.css`).
-- **Imports**: external first, local second. Named exports preferred for utilities.
+- **Styling**: Tailwind CSS v4 with semantic tokens in `index.css`. Standard UI should prefer local shadcn primitives in `components/ui/*`; custom product surfaces should consume tokens rather than duplicate hard-coded styles.
+- **Imports**: external first, local second. Named exports preferred for utilities. The `@/*` alias points to `web/src` and is preferred for shared UI-system imports.
 - **Handlers**: CamelCase, prevent default on forms, cleanup in `useEffect`.
 - **Lint**: `npm run lint` bootstraps an isolated ESLint toolchain in `web/lint-tool/` so TypeScript ESLint can use the TS 6 compatibility shim while the app uses TypeScript 7. The active flat config lives in `web/lint-tool/eslint.config.js`; `web/eslint.config.js` re-exports it for editor discovery. Separate blocks for `{js,jsx}` and `{ts,tsx}` — do not merge them.
 - **Testing**: Vitest (`npm test`).
@@ -34,6 +34,13 @@ The chat stream shows a compact `HarnessPlaceholder` for gated reports, Apps, Fl
 Last-turn **Video** artifacts (e.g. `browser_stop_recording`) open in the harness via `EmbeddedFileViewer` with `fillHeight` — separate from the markdown report contract. Slideshow-owned tutorial MP4s stay inside `TutorialSceneSlideshowCard` (also harnessed). FilePanel / EmbeddedFileViewer must not fetch video as text; use `fetchArtifactBlob` + `<video>`.
 
 Authoritative reference: `docs/architecture/chat-rendering-pipeline.md`, "The Report Pipeline" section.
+
+### Studio UI system
+Shared application UI uses source-owned shadcn/ui primitives under `components/ui/*` plus the `cn()` helper in `lib/utils.ts`. These files are local source and may be edited intentionally for product-wide behavior or styling. Prefer shadcn primitives for standard controls, dialogs, menus, sheets, cards, badges, alerts, tabs, tables, and form elements.
+
+Do **not** blindly rewrite specialized surfaces as shadcn-only UI. Flow Canvas/node/edge rendering, Studio Chat SSE/rendering logic, embedded viewers, terminal, browser handoff, and the Apps iframe sandbox remain custom surfaces. Tokenize and restyle those surfaces through `index.css` tokens and use shadcn only for standard subpanels/forms/menus inside them.
+
+Authoritative reference: `docs/architecture/studio-ui-system.md`.
 
 ### Generative UI (Apps) sandbox
 The Apps runtime runs user-described React apps in a sandboxed iframe with an opaque origin, communicating with the parent via `postMessage` and a SSRF-protected server-side proxy. Do not remove the iframe boundary or the origin isolation.

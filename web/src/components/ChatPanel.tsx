@@ -89,7 +89,7 @@ export default function ChatPanel({ messages, onSendMessage, onStartRun, onStop,
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--border-color)] bg-[var(--bg-tertiary)]">
         <div className="flex items-center gap-2">
-           <Brain size={18} className="text-[var(--accent)]" />
+           <Brain size={18} style={{ color: 'var(--brand)' }} />
            <span className="font-semibold text-[var(--text-primary)]">Agent Chat</span>
         </div>
         <label className={`flex items-center gap-2 px-2 py-1 rounded transition-colors select-none ${hasActiveSession ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer hover:bg-[var(--bg-secondary)]'}`}>
@@ -248,9 +248,9 @@ export default function ChatPanel({ messages, onSendMessage, onStartRun, onStop,
               </div>
             )}
             {message.type === 'thinking' && (
-              <div className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm w-fit bg-yellow-500/20 text-yellow-400 border border-yellow-500/30">
-                <Brain size={16} />
-                <span>Thinking...</span>
+              <div className="thinking-indicator flex items-center gap-2 px-3 py-2 text-sm w-fit">
+                <Brain size={16} style={{ color: 'var(--brand)' }} />
+                <span style={{ color: 'var(--brand)' }}>Thinking...</span>
               </div>
             )}
             {message.type === 'input_request' && message.options && (
@@ -272,9 +272,9 @@ export default function ChatPanel({ messages, onSendMessage, onStartRun, onStop,
         
         {/* Thinking Indicator - shows when agent is running but not waiting for input */}
         {hasActiveSession && !isWaitingForInput && messages.length > 0 && messages[messages.length - 1].type !== 'flow_complete' && (
-          <div className="flex items-center gap-3 px-4 py-3 rounded-lg bg-primary/10 border border-primary/20 animate-pulse">
-            <Loader size={18} className="text-primary animate-spin" />
-            <span className="text-sm text-primary">Thinking...</span>
+          <div className="thinking-indicator flex items-center gap-3 px-4 py-3 animate-pulse">
+            <Loader size={18} className="animate-spin" style={{ color: 'var(--brand)' }} />
+            <span className="text-sm" style={{ color: 'var(--brand)' }}>Thinking...</span>
           </div>
         )}
         

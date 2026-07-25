@@ -156,7 +156,7 @@ export default function TutorialSceneSlideshowCard({
               style={{
                 width: i === clampedIndex ? 10 : 8,
                 height: i === clampedIndex ? 10 : 8,
-                background: i === clampedIndex ? 'var(--accent)' : 'var(--border-color)',
+                background: i === clampedIndex ? 'var(--brand)' : 'var(--border-color)',
               }}
               aria-label={`Scene ${i + 1}`}
             />

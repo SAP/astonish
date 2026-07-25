@@ -3382,11 +3382,14 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
             })
           )}
 
-          {/* Streaming indicator */}
+          {/* Streaming indicator — brand tokens so pack switch updates color */}
           {isStreaming && !isFleetMode && messages.length > 0 && messages[messages.length - 1]?.type !== 'fleet_execution' && (
-            <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-primary/10 border border-primary/20 w-fit max-w-full">
-              <Loader size={14} className="text-primary animate-spin shrink-0" />
-              <span className="text-xs text-primary truncate">{liveStreamStatus || 'Thinking…'}</span>
+            <div
+              className="thinking-indicator flex items-center gap-2 px-3 py-2 w-fit max-w-full"
+              data-testid="thinking-indicator"
+            >
+              <Loader size={14} className="animate-spin shrink-0" style={{ color: 'var(--brand)' }} />
+              <span className="text-xs truncate" style={{ color: 'var(--brand)' }}>{liveStreamStatus || 'Thinking…'}</span>
             </div>
           )}
         </div>

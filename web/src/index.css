@@ -119,7 +119,7 @@ html[data-theme="nova"] {
   --chat-user-border: color-mix(in oklab, var(--brand) 28%, transparent);
   --chat-user-foreground: var(--foreground);
   --chat-agent-background: var(--card);
-  --chat-thinking-background: rgba(228, 148, 37, 0.15);
+  --chat-thinking-background: var(--brand-muted);
   --tool-background: rgba(148, 87, 230, 0.1);
   --node-input: #f5d0e8;
   --node-llm: var(--accent3);
@@ -217,7 +217,7 @@ html[data-theme="nova"].dark {
   --chat-user-border: color-mix(in oklab, var(--brand) 35%, transparent);
   --chat-user-foreground: var(--foreground);
   --chat-agent-background: var(--card);
-  --chat-thinking-background: rgba(228, 148, 37, 0.15);
+  --chat-thinking-background: var(--brand-muted);
   --tool-background: rgba(180, 120, 255, 0.12);
   --node-input: #3d2450;
   --node-llm: var(--accent3);
@@ -314,7 +314,7 @@ html[data-theme="aster"] {
   --chat-user-border: color-mix(in oklab, var(--brand) 28%, transparent);
   --chat-user-foreground: var(--foreground);
   --chat-agent-background: var(--card);
-  --chat-thinking-background: rgba(228, 148, 37, 0.15);
+  --chat-thinking-background: var(--brand-muted);
   --tool-background: rgba(106, 92, 255, 0.12);
   --node-input: #e0d0f8;
   --node-llm: var(--accent3);
@@ -408,7 +408,7 @@ html[data-theme="aster"].dark {
   --chat-user-border: color-mix(in oklab, var(--brand) 35%, transparent);
   --chat-user-foreground: var(--foreground);
   --chat-agent-background: var(--card);
-  --chat-thinking-background: rgba(228, 148, 37, 0.15);
+  --chat-thinking-background: var(--brand-muted);
   --tool-background: rgba(136, 102, 255, 0.14);
   --node-input: #3a2060;
   --node-llm: var(--accent3);
@@ -505,7 +505,7 @@ html[data-theme="sage"] {
   --chat-user-border: color-mix(in oklab, var(--brand) 24%, transparent);
   --chat-user-foreground: var(--foreground);
   --chat-agent-background: var(--card);
-  --chat-thinking-background: rgba(228, 148, 37, 0.12);
+  --chat-thinking-background: var(--brand-muted);
   --tool-background: rgba(90, 143, 158, 0.10);
   --node-input: #d0e4da;
   --node-llm: var(--accent3);
@@ -599,7 +599,7 @@ html[data-theme="sage"].dark {
   --chat-user-border: color-mix(in oklab, var(--brand) 28%, transparent);
   --chat-user-foreground: var(--foreground);
   --chat-agent-background: var(--card);
-  --chat-thinking-background: rgba(228, 148, 37, 0.12);
+  --chat-thinking-background: var(--brand-muted);
   --tool-background: rgba(122, 175, 188, 0.10);
   --node-input: #1e4034;
   --node-llm: var(--accent3);
@@ -696,7 +696,7 @@ html[data-theme="ember"] {
   --chat-user-border: color-mix(in oklab, var(--brand) 24%, transparent);
   --chat-user-foreground: var(--foreground);
   --chat-agent-background: var(--card);
-  --chat-thinking-background: rgba(228, 148, 37, 0.12);
+  --chat-thinking-background: var(--brand-muted);
   --tool-background: rgba(168, 136, 120, 0.10);
   --node-input: #e8d4c8;
   --node-llm: var(--accent3);
@@ -790,7 +790,7 @@ html[data-theme="ember"].dark {
   --chat-user-border: color-mix(in oklab, var(--brand) 28%, transparent);
   --chat-user-foreground: var(--foreground);
   --chat-agent-background: var(--card);
-  --chat-thinking-background: rgba(228, 148, 37, 0.12);
+  --chat-thinking-background: var(--brand-muted);
   --tool-background: rgba(196, 168, 152, 0.10);
   --node-input: #4a3020;
   --node-llm: var(--accent3);
@@ -887,7 +887,7 @@ html[data-theme="classic"] {
   --chat-user-border: color-mix(in oklab, var(--brand) 26%, transparent);
   --chat-user-foreground: var(--foreground);
   --chat-agent-background: var(--card);
-  --chat-thinking-background: rgba(228, 148, 37, 0.15);
+  --chat-thinking-background: var(--brand-muted);
   --tool-background: rgba(95, 79, 178, 0.10);
   --node-input: #dfe5ff;
   --node-llm: #5f4fb2;
@@ -981,7 +981,7 @@ html[data-theme="classic"].dark {
   --chat-user-border: color-mix(in oklab, var(--brand) 32%, transparent);
   --chat-user-foreground: var(--foreground);
   --chat-agent-background: var(--card);
-  --chat-thinking-background: rgba(228, 148, 37, 0.15);
+  --chat-thinking-background: var(--brand-muted);
   --tool-background: rgba(141, 122, 224, 0.12);
   --node-input: #35448f;
   --node-llm: #8d7ae0;
@@ -1220,10 +1220,11 @@ button, input, select, textarea {
   box-shadow: none;
 }
 
+/* Streaming "Thinking…" pill — follows brand pack (not fixed purple/amber) */
 .thinking-indicator {
-  background: var(--chat-thinking-background);
-  border: 1px solid color-mix(in oklab, var(--warning) 35%, transparent);
-  color: var(--warning);
+  background: var(--brand-muted, var(--chat-thinking-background));
+  border: 1px solid color-mix(in oklab, var(--brand) 28%, transparent);
+  color: var(--brand);
   border-radius: var(--radius-sm);
 }
 
@@ -1422,8 +1423,9 @@ button, input, select, textarea {
 }
 
 .timeline-dot--running {
-  border-color: var(--accent);
-  color: var(--accent);
+  /* --accent is a translucent fill — never use it as text/border color alone */
+  border-color: var(--brand);
+  color: var(--brand);
   background: var(--bg-primary);
 }
 

@@ -185,11 +185,16 @@ function FlowPreviewInner({ yamlContent, height = 350 }: FlowPreviewProps) {
           <Background color="var(--canvas-dot, rgba(128,90,213,0.15))" gap={20} size={1} />
         </ReactFlow>
 
-        {/* Expand button */}
+        {/* Expand button — elevated surface so it stays readable on the dark canvas */}
         <button
           onClick={() => setExpanded(true)}
-          className="absolute top-2 right-2 flex items-center gap-1 px-2 py-1 rounded-md text-[10px] transition-all cursor-pointer z-10"
-          style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-color)', color: 'var(--brand)' }}
+          className="absolute top-2 right-2 flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium transition-all cursor-pointer z-10 hover:opacity-90"
+          style={{
+            background: 'var(--card)',
+            border: '1px solid var(--border-color)',
+            color: 'var(--text-primary)',
+            boxShadow: 'var(--shadow-soft)',
+          }}
           title="Expand to fullscreen"
         >
           <Maximize2 size={11} />

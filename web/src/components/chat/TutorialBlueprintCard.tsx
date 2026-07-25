@@ -123,7 +123,7 @@ export default function TutorialBlueprintCard({
             <button
               onClick={onApprove}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
-              style={{ background: 'var(--brand)', border: '1px solid var(--accent)', color: 'var(--accent-contrast, #fff)' }}
+              style={{ background: 'var(--brand)', border: '1px solid var(--brand-strong)', color: 'var(--brand-foreground, #fff)' }}
             >
               <Check size={13} />
               Approve &amp; generate

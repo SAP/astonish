@@ -76,18 +76,24 @@ function parseExplanation(text: string): ExplanationData {
   return result
 }
 
-// Color map for node types
+// Node type badges — solid text colors only (never var(--accent): it's a translucent fill).
 const nodeTypeColors: Record<string, { bg: string; text: string; border: string }> = {
-  agent: { bg: 'var(--accent-soft)', text: 'var(--accent)', border: 'var(--accent)' },
-  input: { bg: 'rgba(59, 130, 246, 0.1)', text: 'rgb(59, 130, 246)', border: 'rgb(59, 130, 246)' },
-  output: { bg: 'rgba(16, 185, 129, 0.1)', text: 'rgb(16, 185, 129)', border: 'rgb(16, 185, 129)' },
-  conditional: { bg: 'rgba(245, 158, 11, 0.1)', text: 'rgb(245, 158, 11)', border: 'rgb(245, 158, 11)' },
-  loop: { bg: 'rgba(236, 72, 153, 0.1)', text: 'rgb(236, 72, 153)', border: 'rgb(236, 72, 153)' },
+  agent: { bg: 'var(--brand-muted)', text: 'var(--brand)', border: 'color-mix(in oklab, var(--brand) 35%, transparent)' },
+  llm: { bg: 'var(--brand-muted)', text: 'var(--brand)', border: 'color-mix(in oklab, var(--brand) 35%, transparent)' },
+  input: { bg: 'rgba(37, 99, 235, 0.15)', text: '#60a5fa', border: 'rgba(37, 99, 235, 0.35)' },
+  output: { bg: 'rgba(16, 185, 129, 0.15)', text: '#34d399', border: 'rgba(16, 185, 129, 0.35)' },
+  tool: { bg: 'rgba(245, 158, 11, 0.15)', text: '#fbbf24', border: 'rgba(245, 158, 11, 0.35)' },
+  conditional: { bg: 'rgba(245, 158, 11, 0.15)', text: '#fbbf24', border: 'rgba(245, 158, 11, 0.35)' },
+  loop: { bg: 'rgba(236, 72, 153, 0.15)', text: '#f472b6', border: 'rgba(236, 72, 153, 0.35)' },
 }
 
 function getTypeStyle(type: string) {
   const lower = type.toLowerCase()
-  return nodeTypeColors[lower] || { bg: 'var(--surface-muted)', text: 'var(--text-secondary)', border: 'var(--border-color)' }
+  return nodeTypeColors[lower] || {
+    bg: 'var(--bg-tertiary)',
+    text: 'var(--text-primary)',
+    border: 'var(--border-color)',
+  }
 }
 
 export default function DistillPreviewCard({ data, isActive = false, fillWidth = false, onSave, onRequestChanges, onCancel }: DistillPreviewCardProps) {
@@ -106,19 +112,31 @@ export default function DistillPreviewCard({ data, isActive = false, fillWidth =
         boxShadow: 'var(--shadow-soft)',
       }}
     >
-      {/* Header */}
-      <div className="px-4 py-3 flex items-center justify-between" style={{ borderBottom: '1px solid var(--border-color)' }}>
-        <div className="flex flex-col gap-0.5">
-          <div className="flex items-center gap-2">
-            <span className="text-sm font-semibold" style={{ color: 'var(--brand)' }}>{data.flowName || 'Distilled Flow'}</span>
+      {/* Header — titles use text-primary for contrast; brand only for accents */}
+      <div className="px-4 py-3 flex items-center justify-between gap-3" style={{ borderBottom: '1px solid var(--border-color)' }}>
+        <div className="flex flex-col gap-0.5 min-w-0">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="text-sm font-semibold truncate" style={{ color: 'var(--text-primary)' }}>{data.flowName || 'Distilled Flow'}</span>
           </div>
-          <span className="text-xs" style={{ color: 'var(--text-secondary)' }}>{data.description}</span>
+          {data.description && (
+            <span className="text-xs" style={{ color: 'var(--text-secondary)' }}>{data.description}</span>
+          )}
         </div>
         {data.tags && data.tags.length > 0 && (
-          <div className="flex items-center gap-1 flex-shrink-0">
-            <Tag size={11} style={{ color: 'var(--brand)' }} />
+          <div className="flex items-center gap-1 flex-shrink-0 flex-wrap justify-end">
+            <Tag size={11} style={{ color: 'var(--text-muted)' }} />
             {data.tags.map((tag, i) => (
-              <span key={i} className="text-[10px] px-1.5 py-0.5 rounded" style={{ background: 'var(--accent-soft)', color: 'var(--brand)' }}>{tag}</span>
+              <span
+                key={i}
+                className="text-[10px] px-1.5 py-0.5 rounded"
+                style={{
+                  background: 'var(--bg-tertiary)',
+                  color: 'var(--text-secondary)',
+                  border: '1px solid var(--border-color)',
+                }}
+              >
+                {tag}
+              </span>
             ))}
           </div>
         )}
@@ -134,8 +152,8 @@ export default function DistillPreviewCard({ data, isActive = false, fillWidth =
         <div style={{ borderTop: '1px solid var(--border-color)' }}>
           <button
             onClick={() => setExplanationExpanded(!explanationExpanded)}
-            className="flex items-center gap-1.5 w-full px-4 py-2.5 text-xs transition-colors cursor-pointer"
-            style={{ color: 'var(--brand)' }}
+            className="flex items-center gap-1.5 w-full px-4 py-2.5 text-xs transition-colors cursor-pointer hover:opacity-90"
+            style={{ color: 'var(--text-primary)' }}
           >
             {explanationExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
             <span className="font-medium">Explanation</span>
@@ -154,8 +172,8 @@ export default function DistillPreviewCard({ data, isActive = false, fillWidth =
               {explanation.nodes.length > 0 && (
                 <div>
                   <div className="flex items-center gap-1.5 mb-2">
-                    <Workflow size={12} style={{ color: 'var(--text-muted)' }} />
-                    <span className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: 'var(--text-muted)' }}>Nodes</span>
+                    <Workflow size={12} style={{ color: 'var(--text-secondary)' }} />
+                    <span className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: 'var(--text-secondary)' }}>Nodes</span>
                   </div>
                   <div
                     className="rounded-lg overflow-hidden"
@@ -183,8 +201,7 @@ export default function DistillPreviewCard({ data, isActive = false, fillWidth =
                           <span
                             className="text-[10px] px-2 py-1.5 whitespace-nowrap"
                             style={{
-                              color: typeStyle.text,
-                              opacity: 0.8,
+                              color: 'var(--text-muted)',
                               borderTop: i > 0 ? '1px solid var(--border-color)' : undefined,
                             }}
                           >
@@ -193,7 +210,7 @@ export default function DistillPreviewCard({ data, isActive = false, fillWidth =
                           <span
                             className="text-[11px] leading-relaxed py-1.5 pr-2.5"
                             style={{
-                              color: 'var(--text-secondary)',
+                              color: 'var(--text-primary)',
                               borderTop: i > 0 ? '1px solid var(--border-color)' : undefined,
                             }}
                           >
@@ -210,8 +227,8 @@ export default function DistillPreviewCard({ data, isActive = false, fillWidth =
               {explanation.params.length > 0 && (
                 <div>
                   <div className="flex items-center gap-1.5 mb-2">
-                    <TerminalSquare size={12} style={{ color: 'var(--text-muted)' }} />
-                    <span className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: 'var(--text-muted)' }}>Input Parameters</span>
+                    <TerminalSquare size={12} style={{ color: 'var(--text-secondary)' }} />
+                    <span className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: 'var(--text-secondary)' }}>Input Parameters</span>
                   </div>
                   <div
                     className="rounded-lg overflow-hidden"
@@ -226,8 +243,8 @@ export default function DistillPreviewCard({ data, isActive = false, fillWidth =
                         <code
                           className="text-[11px] font-semibold px-2.5 py-1.5 whitespace-nowrap"
                           style={{
-                            background: 'rgba(59, 130, 246, 0.1)',
-                            color: 'rgb(59, 130, 246)',
+                            background: 'var(--brand-muted)',
+                            color: 'var(--brand)',
                             borderTop: i > 0 ? '1px solid var(--border-color)' : undefined,
                           }}
                         >
@@ -236,7 +253,7 @@ export default function DistillPreviewCard({ data, isActive = false, fillWidth =
                         <span
                           className="text-[11px] leading-relaxed px-2.5 py-1.5"
                           style={{
-                            color: 'var(--text-secondary)',
+                            color: 'var(--text-primary)',
                             borderTop: i > 0 ? '1px solid var(--border-color)' : undefined,
                           }}
                         >
@@ -252,7 +269,7 @@ export default function DistillPreviewCard({ data, isActive = false, fillWidth =
               {explanation.notes && (
                 <div className="flex items-start gap-2 rounded-lg px-3 py-2" style={{ background: 'var(--accent-soft)' }}>
                   <Lightbulb size={12} className="flex-shrink-0 mt-0.5" style={{ color: 'var(--brand)' }} />
-                  <p className="text-[11px] leading-relaxed" style={{ color: 'var(--text-secondary)' }}>
+                  <p className="text-[11px] leading-relaxed" style={{ color: 'var(--text-primary)' }}>
                     {explanation.notes}
                   </p>
                 </div>
@@ -266,15 +283,15 @@ export default function DistillPreviewCard({ data, isActive = false, fillWidth =
       <div style={{ borderTop: '1px solid var(--border-color)' }}>
         <button
           onClick={() => setShowYaml(!showYaml)}
-          className="flex items-center gap-1.5 w-full px-4 py-2.5 text-xs transition-colors cursor-pointer"
-          style={{ color: 'var(--brand)' }}
+          className="flex items-center gap-1.5 w-full px-4 py-2.5 text-xs transition-colors cursor-pointer hover:opacity-90"
+          style={{ color: 'var(--text-primary)' }}
         >
           {showYaml ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
           <span className="font-medium">View YAML</span>
         </button>
         {showYaml && (
           <div className="px-4 pb-3">
-            <pre className="p-3 rounded-lg text-[11px] overflow-x-auto max-h-64 overflow-y-auto" style={{ background: 'var(--bg-tertiary)', color: 'var(--text-secondary)' }}>
+            <pre className="p-3 rounded-lg text-[11px] overflow-x-auto max-h-64 overflow-y-auto" style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border-color)' }}>
               <code>{data.yaml}</code>
             </pre>
           </div>
@@ -304,7 +321,7 @@ export default function DistillPreviewCard({ data, isActive = false, fillWidth =
             <button
               onClick={onCancel}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer ml-auto"
-              style={{ background: 'var(--surface-muted)', border: '1px solid var(--border-color)', color: 'var(--text-muted)' }}
+              style={{ background: 'var(--bg-tertiary)', border: '1px solid var(--border-color)', color: 'var(--text-secondary)' }}
             >
               <X size={13} />
               Cancel

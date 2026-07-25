@@ -30,7 +30,7 @@ export default function SetupCredentialsPanel({ fields, stepId, collected, onFie
   }, [])
 
   if (loading) {
-    return <Loader size={16} className="animate-spin text-cyan-400" />
+    return <Loader size={16} className="animate-spin text-primary" />
   }
 
   return (
@@ -47,7 +47,7 @@ export default function SetupCredentialsPanel({ fields, stepId, collected, onFie
                   const field = fields.find(f => f.type === 'credential_ref')
                   if (field) onFieldChange(field.id, c.name)
                 }}
-                className="text-xs px-2 py-1 rounded-lg hover:bg-cyan-500/10"
+                className="text-xs px-2 py-1 rounded-lg hover:bg-primary/10"
                 style={{ background: 'var(--bg-tertiary)', color: 'var(--text-secondary)', border: '1px solid var(--border-color)' }}
               >
                 {c.logical_name || c.name}

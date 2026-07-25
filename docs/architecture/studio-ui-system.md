@@ -193,6 +193,7 @@ Migration is incremental and opportunistic:
 1. Foundation (primitives, tokens, dual-axis packs) is in place.
 2. Shell, chat chrome, flow nodes, and high-traffic settings use tokens.
 3. Remaining work: replace leftover hard-coded brand literals as files are touched; prefer tokens on every new control.
+4. Fleet chrome (tabs, badges, setup chips, CTAs) uses brand tokens — not fixed cyan (`#22d3ee` / `bg-cyan-*`). Agent role identity colors in `fleetUtils` may stay multi-hue.
 
 Do not treat visual work as a license to restructure SSE, report gates, or React Flow interaction models.
 

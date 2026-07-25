@@ -227,7 +227,7 @@ export default function PlanDetail({ planKey, onNavigate, onRefresh, theme }: Pl
   if (isLoading) {
     return (
       <div className="flex-1 flex items-center justify-center">
-        <Loader size={24} className="animate-spin text-cyan-400" />
+        <Loader size={24} className="animate-spin text-primary" />
       </div>
     )
   }
@@ -260,7 +260,7 @@ export default function PlanDetail({ planKey, onNavigate, onRefresh, theme }: Pl
               {plan.description && <p className="text-sm mt-1" style={{ color: 'var(--text-secondary)' }}>{plan.description}</p>}
               <div className="flex items-center gap-3 mt-2">
                 {plan.created_from && <span className="text-xs px-2 py-0.5 rounded" style={{ background: 'var(--bg-tertiary)', color: 'var(--text-muted)' }}>Base: {plan.created_from}</span>}
-                <span className="text-xs px-2 py-0.5 rounded" style={{ background: 'rgba(6, 182, 212, 0.15)', color: '#22d3ee' }}>{plan.channel?.type || 'chat'}</span>
+                <span className="text-xs px-2 py-0.5 rounded" style={{ background: 'var(--brand-muted)', color: 'var(--brand)' }}>{plan.channel?.type || 'chat'}</span>
                 <span className="text-xs" style={{ color: 'var(--text-muted)' }}>{agents.length} agent{agents.length !== 1 ? 's' : ''}</span>
               </div>
             </div>
@@ -371,10 +371,10 @@ export default function PlanDetail({ planKey, onNavigate, onRefresh, theme }: Pl
 function PlanActions({ showYaml, isDuplicating, isDeleting, onToggleYaml, onLaunch, onDuplicate, onDelete }: { showYaml: boolean; isDuplicating: boolean; isDeleting: boolean; onToggleYaml: () => void; onLaunch: () => void; onDuplicate: () => void; onDelete: () => void }) {
   return (
     <div className="flex items-center gap-2 flex-wrap justify-end">
-      <button onClick={onToggleYaml} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors" style={{ background: showYaml ? 'rgba(6, 182, 212, 0.15)' : 'var(--bg-tertiary)', color: showYaml ? '#22d3ee' : 'var(--text-secondary)' }}>
+      <button onClick={onToggleYaml} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors" style={{ background: showYaml ? 'var(--brand-muted)' : 'var(--bg-tertiary)', color: showYaml ? 'var(--brand)' : 'var(--text-secondary)' }}>
         <Code size={12} /> {showYaml ? 'Hide Source' : 'Import/Export YAML'}
       </button>
-      <button onClick={onLaunch} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white transition-colors">
+      <button onClick={onLaunch} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-primary hover:bg-primary/90 text-white transition-colors">
         <Play size={12} /> Launch
       </button>
       <button onClick={onDuplicate} disabled={isDuplicating} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg hover:bg-white/10 transition-colors disabled:opacity-50" style={{ color: 'var(--text-secondary)', border: '1px solid var(--border-color)' }}>
@@ -473,7 +473,7 @@ function FailedSessions({ status, retryingIssue, onRetry, onNavigate }: { status
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2 mb-1">
                 <span className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>Issue #{issue.issue_number}</span>
-                {issue.session_id && <button onClick={() => onNavigate(buildPath('fleet', { subView: 'session', subKey: issue.session_id! }))} className="text-[10px] px-1.5 py-0.5 rounded hover:bg-white/10" style={{ color: '#22d3ee', background: 'rgba(6, 182, 212, 0.1)' }}>trace {issue.session_id.slice(0, 8)}</button>}
+                {issue.session_id && <button onClick={() => onNavigate(buildPath('fleet', { subView: 'session', subKey: issue.session_id! }))} className="text-[10px] px-1.5 py-0.5 rounded hover:bg-white/10" style={{ color: 'var(--brand)', background: 'var(--brand-muted)' }}>trace {issue.session_id.slice(0, 8)}</button>}
                 {issue.failed_at && <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>{formatTimeAgo(issue.failed_at)}</span>}
               </div>
               <p className="text-xs truncate" style={{ color: 'var(--text-muted)' }}>{issue.error || 'Unknown error'}</p>
@@ -551,7 +551,7 @@ function Artifacts({ artifacts }: { artifacts: [string, FleetArtifactDef][] }) {
       <div className="space-y-2">
         {artifacts.map(([key, artifact]) => (
           <div key={key} className="flex items-center gap-3 text-xs">
-            <GitBranch size={14} className="text-cyan-400" />
+            <GitBranch size={14} className="text-primary" />
             <span className="font-medium" style={{ color: 'var(--text-secondary)' }}>{key}</span>
             <span style={{ color: 'var(--text-muted)' }}>{artifact.type === 'git_repo' ? artifact.repo : artifact.path}</span>
             {artifact.auto_pr && <span className="px-1.5 py-0.5 rounded text-[10px] bg-primary/20 text-primary">auto-PR</span>}
@@ -585,7 +585,7 @@ function LaunchDialog({ planName, message, isLaunching, onMessage, onCancel, onL
       <div className="w-full max-w-md rounded-xl shadow-2xl" style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-color)' }}>
         <div className="px-6 py-4" style={{ borderBottom: '1px solid var(--border-color)' }}>
           <h2 className="text-lg font-semibold flex items-center gap-2" style={{ color: 'var(--text-primary)' }}>
-            <Rocket size={20} className="text-cyan-400" />
+            <Rocket size={20} className="text-primary" />
             Launch Fleet Session
           </h2>
           <p className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>Launch "{planName}" with an optional initial task</p>
@@ -598,13 +598,13 @@ function LaunchDialog({ planName, message, isLaunching, onMessage, onCancel, onL
               onChange={e => onMessage(e.target.value)}
               placeholder="Describe what you want the team to work on..."
               rows={3}
-              className="w-full px-3 py-2 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-cyan-500 resize-none"
+              className="w-full px-3 py-2 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary resize-none"
               style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border-color)' }}
             />
           </label>
           <div className="flex justify-end gap-2 pt-2">
             <button onClick={onCancel} className="px-4 py-2 text-sm rounded-lg hover:bg-white/5" style={{ color: 'var(--text-secondary)' }}>Cancel</button>
-            <button onClick={onLaunch} disabled={isLaunching} className="px-4 py-2 text-sm bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg disabled:opacity-50">{isLaunching ? 'Launching...' : 'Launch'}</button>
+            <button onClick={onLaunch} disabled={isLaunching} className="px-4 py-2 text-sm bg-primary hover:bg-primary/90 text-white rounded-lg disabled:opacity-50">{isLaunching ? 'Launching...' : 'Launch'}</button>
           </div>
         </div>
       </div>

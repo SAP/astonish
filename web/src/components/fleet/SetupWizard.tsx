@@ -166,7 +166,7 @@ export default function SetupWizard({ templateKey, templateName, onClose, onComp
     return (
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
         <div className="rounded-lg p-6 flex items-center gap-2" style={{ background: 'var(--bg-secondary)' }}>
-          <Loader size={18} className="animate-spin text-cyan-400" />
+          <Loader size={18} className="animate-spin text-primary" />
           <span className="text-sm" style={{ color: 'var(--text-secondary)' }}>Loading setup profile...</span>
         </div>
       </div>
@@ -178,7 +178,7 @@ export default function SetupWizard({ templateKey, templateName, onClose, onComp
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
         <div className="rounded-lg p-6 max-w-md" style={{ background: 'var(--bg-secondary)' }}>
           <p className="text-sm text-red-400 mb-4">{error}</p>
-          <button onClick={onClose} className="text-sm px-3 py-1.5 rounded bg-cyan-600 text-white">Close</button>
+          <button onClick={onClose} className="text-sm px-3 py-1.5 rounded bg-primary text-white">Close</button>
         </div>
       </div>
     )
@@ -251,7 +251,7 @@ export default function SetupWizard({ templateKey, templateName, onClose, onComp
                             const next = e.target.checked ? [...new Set([...current, key])] : current.filter(k => k !== key)
                             updateField('agents', 'include_agents', next)
                           }}
-                          className="accent-cyan-500"
+                          className="accent-primary"
                         />
                         {key}
                       </label>
@@ -318,7 +318,7 @@ export default function SetupWizard({ templateKey, templateName, onClose, onComp
             <button
               onClick={goNext}
               disabled={busy}
-              className="flex items-center gap-1 px-3 py-1.5 text-xs rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white disabled:opacity-50"
+              className="flex items-center gap-1 px-3 py-1.5 text-xs rounded-lg bg-primary hover:bg-primary/90 text-white disabled:opacity-50"
             >
               {busy ? <Loader size={14} className="animate-spin" /> : stepType === 'review' ? 'Save Plan' : <>Next <ChevronRight size={14} /></>}
             </button>

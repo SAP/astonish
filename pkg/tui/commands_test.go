@@ -28,6 +28,13 @@ func TestFilterSlashCommands_Prefix(t *testing.T) {
 	}
 }
 
+func TestFilterSlashCommands_IncludesPlan(t *testing.T) {
+	got := filterSlashCommands("pl")
+	if len(got) != 1 || got[0].Name != "plan" {
+		t.Fatalf("expected plan command, got %#v", got)
+	}
+}
+
 func TestFilterSlashCommands_Alias(t *testing.T) {
 	got := filterSlashCommands("q")
 	// exit has alias q; also nothing that starts with q alone except quit path

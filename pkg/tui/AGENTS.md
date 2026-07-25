@@ -7,7 +7,7 @@ Fullscreen terminal chat app for Astonish (Claude Code / OpenCode–style).
 - `app.go` — bubbletea root model (header, transcript viewport, status, input)
 - `approval.go` — tool approval overlay (`y`/`n`/options)
 - `sessions.go` — sessions picker + resume/new session
-- `commands.go` — slash command palette definitions and filtering
+- `commands.go` — slash command palette definitions and filtering (`/plan`, `/files`, `/sessions`, …)
 - `file_completion.go` — local `@file` completion and bounded inline context expansion
 - `theme.go` — lipgloss theme tokens (numbers, +/−, brand, NO_COLOR)
 - `wrap.go` — content margins, line truncation, padding
@@ -21,6 +21,7 @@ Fullscreen terminal chat app for Astonish (Claude Code / OpenCode–style).
 2. **TUI never imports `pkg/daemon` or agent wiring.** It only consumes `backend.Backend` and reduces `events.Event`.
 3. **cmd stays thin** — no bubbletea models under `cmd/astonish`.
 4. Soft-degrade Studio-only SSE events (`app_preview`, browser handoff, …) to system notices.
+5. Plan mode is a TUI toggle that uses `backend.TurnOptions.SystemContext`; do not fork the agent/runtime path.
 
 ## Entry points
 

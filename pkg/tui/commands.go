@@ -19,6 +19,7 @@ var builtInSlashCommands = []slashCommand{
 	{Name: "sessions", Aliases: []string{"session"}, Description: "Browse and resume sessions"},
 	{Name: "new", Description: "Start a fresh conversation"},
 	{Name: "files", Description: "Show @file context help"},
+	{Name: "plan", Description: "Toggle plan-only responses"},
 	{Name: "exit", Aliases: []string{"quit", "q"}, Description: "Quit the terminal app"},
 }
 

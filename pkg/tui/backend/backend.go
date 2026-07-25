@@ -38,12 +38,19 @@ type SessionSummary struct {
 // HistoryEntry is one message loaded when resuming a session.
 type HistoryEntry struct {
 	// Kind: user | agent | tool_call | tool_result | system | thinking
-	Kind       string
-	Text       string
-	ToolName   string
-	ToolID     string
-	Args       map[string]any
-	Result     any
+	Kind     string
+	Text     string
+	ToolName string
+	ToolID   string
+	Args     map[string]any
+	Result   any
+}
+
+// TurnOptions configures per-turn behavior for the platform request.
+type TurnOptions struct {
+	// SystemContext is a per-turn hidden instruction sent to Studio chat. It is
+	// not persisted as a visible user message.
+	SystemContext string
 }
 
 // Backend drives one interactive chat session against the platform.
@@ -66,7 +73,7 @@ type Backend interface {
 	// RunTurn sends a user message (or approval response) and returns a
 	// channel of events. The channel is closed when the turn is finished
 	// (after KindDone or a terminal error event). The caller must drain it.
-	RunTurn(ctx context.Context, message string) (<-chan events.Event, error)
+	RunTurn(ctx context.Context, message string, opts TurnOptions) (<-chan events.Event, error)
 
 	// ListSessions returns recent chat sessions for the picker.
 	ListSessions(ctx context.Context) ([]SessionSummary, error)

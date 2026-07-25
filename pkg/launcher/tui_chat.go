@@ -215,7 +215,7 @@ func studioMessagesToHistory(msgs []client.StudioMessage) []backend.HistoryEntry
 	return out
 }
 
-func (b *platformBackend) RunTurn(ctx context.Context, message string) (<-chan events.Event, error) {
+func (b *platformBackend) RunTurn(ctx context.Context, message string, opts backend.TurnOptions) (<-chan events.Event, error) {
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
@@ -228,10 +228,11 @@ func (b *platformBackend) RunTurn(ctx context.Context, message string) (<-chan e
 	b.mu.Unlock()
 
 	req := &client.ChatRequest{
-		SessionID:   sessionID,
-		Message:     message,
-		AutoApprove: autoApprove,
-		Debug:       debug,
+		SessionID:     sessionID,
+		Message:       message,
+		AutoApprove:   autoApprove,
+		Debug:         debug,
+		SystemContext: opts.SystemContext,
 	}
 
 	stream, err := c.SendChatMessage(req)

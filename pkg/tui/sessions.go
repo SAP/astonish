@@ -110,6 +110,7 @@ func (m model) startNewSession() (tea.Model, tea.Cmd) {
 	if m.tr.Streaming && !m.tr.Awaiting {
 		return m, nil
 	}
+	m.planMode = false
 	m.backend.NewSession()
 	m.info = m.backend.Info()
 	m.tr.Reset()
@@ -136,6 +137,7 @@ func (m model) applyHistory(msg historyLoadedMsg) (tea.Model, tea.Cmd) {
 			Result:   e.Result,
 		})
 	}
+	m.planMode = false
 	m.tr.LoadHistory(entries)
 	m.info = m.backend.Info()
 	if msg.sessionID != "" {
@@ -218,7 +220,7 @@ func (m model) renderSessionsOverlay() string {
 	}
 
 	box := th.InputBorderFocus.
-		Width(w - 2).
+		Width(w-2).
 		MaxHeight(h).
 		Padding(1, 2).
 		Render(body.String())

@@ -112,7 +112,8 @@ During a turn with tools, there is **one** agent bubble:
 | Done | Composer, markdown/code/tables, sticky Thinking, activity + diffs |
 | Done | Approval overlay (`y`/`n`), sessions picker (`/sessions`, `ctrl+l`), resume history, `/new` |
 | Done | Bare `astonish` TTY entry and local `@file` mention completion/context injection |
-| Later | Plan mode and deeper reconnect polish |
+| Done | Terminal plan mode (`/plan`, `shift+tab`) via per-turn `systemContext` |
+| Later | Deeper reconnect polish |
 
 ### Approvals
 
@@ -129,6 +130,10 @@ follow-up `RunTurn` message (same as Studio).
 ### `@file` mentions
 
 Typing `@` plus part of a local relative path opens a fuzzy file picker above the composer. Selecting a file inserts `@path/to/file`. On submit, the terminal app reads each mentioned file from the current working directory and appends a bounded `<context from @file mentions>` section to the message sent to the platform, while the transcript keeps showing the user's original text. Absolute paths, directory mentions, workspace escapes, and oversized files are rejected before the turn is sent.
+
+### Plan mode
+
+`/plan` or `shift+tab` toggles a terminal-only plan mode, matching the convention used by coding-agent CLIs. While enabled, the footer shows `plan` and each normal user turn carries a hidden per-turn `systemContext` instructing the platform agent to produce a concise plan without executing tools or making changes. Approval responses deliberately do **not** inherit this context because they are part of an already-running approval protocol. Starting or resuming a session clears the toggle so mode does not leak across conversations. The mode label is intentionally minimal for now; future modes can make this more meaningful (for example deep research, report, or build-oriented modes).
 
 ### Reconnect behavior
 

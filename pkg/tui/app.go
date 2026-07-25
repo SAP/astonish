@@ -88,6 +88,8 @@ type model struct {
 	slash slashCompletion
 	// @file completion popup (active while typing a trailing @token)
 	files fileCompletion
+	// planMode asks the platform agent for plans only, without execution.
+	planMode bool
 }
 
 func newModel(parent context.Context, cfg Config) model {
@@ -245,6 +247,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if next, cmd, handled := m.handleFileCompletionKey(msg); handled {
 				return next, cmd
 			}
+		}
+
+		if msg.String() == "shift+tab" {
+			m.togglePlanMode()
+			m.refreshViewport()
+			return m, nil
 		}
 
 		// Enter sends; Shift+Enter / Alt+Enter / Ctrl+J insert a newline.
@@ -499,6 +507,25 @@ func (m model) insertNewline() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+const planModeSystemContext = `You are in Astonish terminal plan mode.
+Respond with a concise implementation plan only. Do not execute tools, edit files, run commands, or make external changes. If the user asks for action, describe the steps you would take and ask for confirmation to proceed outside plan mode.`
+
+func (m *model) togglePlanMode() {
+	m.planMode = !m.planMode
+	if m.planMode {
+		m.tr.Apply(events.NewSystem("Plan mode enabled. I will propose steps without executing tools."))
+	} else {
+		m.tr.Apply(events.NewSystem("Plan mode disabled. I can execute normally again."))
+	}
+}
+
+func (m model) turnOptions() backend.TurnOptions {
+	if m.planMode {
+		return backend.TurnOptions{SystemContext: planModeSystemContext}
+	}
+	return backend.TurnOptions{}
+}
+
 func (m model) submit() (tea.Model, tea.Cmd) {
 	text := strings.TrimSpace(m.ta.Value())
 	if text == "" {
@@ -544,7 +571,7 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 	turnCtx, cancel := context.WithCancel(m.ctx)
 	m.turnCancel = cancel
 
-	ch, err := m.backend.RunTurn(turnCtx, message)
+	ch, err := m.backend.RunTurn(turnCtx, message, m.turnOptions())
 	if err != nil {
 		cancel()
 		m.turnCancel = nil
@@ -564,6 +591,8 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 	case text == "/files":
 		cwd, _ := os.Getwd()
 		m.tr.Apply(events.NewSystem("Type `@` plus part of a local path to attach file context from " + cwd + "."))
+	case text == "/plan":
+		m.togglePlanMode()
 	case text == "/status":
 		m.tr.Apply(events.NewSystem(m.statusText()))
 	case text == "/exit" || text == "/quit" || text == "/q":
@@ -571,6 +600,7 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		m.cancel()
 		return m, tea.Quit
 	case text == "/new":
+		m.planMode = false
 		return m.startNewSession()
 	case text == "/sessions" || text == "/session":
 		return m.openSessionsPicker()
@@ -581,7 +611,7 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		m.refreshViewport()
 		turnCtx, cancel := context.WithCancel(m.ctx)
 		m.turnCancel = cancel
-		ch, err := m.backend.RunTurn(turnCtx, text)
+		ch, err := m.backend.RunTurn(turnCtx, text, m.turnOptions())
 		if err != nil {
 			cancel()
 			m.turnCancel = nil
@@ -604,6 +634,7 @@ Commands:
   /sessions      Open sessions picker (also ctrl+l)
   /new           Start a new session (also ctrl+n)
   /files         Show @file context help
+  /plan          Toggle plan-only mode (also shift+tab)
   /exit          Quit (/quit, /q)
 
 Type / to open command completion (filters as you type).
@@ -619,6 +650,7 @@ Keys:
   ctrl+o         Expand/collapse last tool activity
   ctrl+l         Sessions picker
   ctrl+n         New session
+  shift+tab      Toggle plan-only mode
   ctrl+c         Cancel turn or quit
 `)
 }
@@ -635,6 +667,11 @@ func (m model) statusText() string {
 	}
 	fmt.Fprintf(&b, "Session: %s\n", first(info.SessionID, "(none)"))
 	fmt.Fprintf(&b, "Provider: %s  Model: %s\n", first(info.Provider, "-"), first(info.Model, "-"))
+	if m.planMode {
+		fmt.Fprintln(&b, "Plan mode: on")
+	} else {
+		fmt.Fprintln(&b, "Plan mode: off")
+	}
 	if m.tr.LastUsage != nil {
 		fmt.Fprintf(&b, "Tokens: in=%d out=%d total=%d\n", m.tr.LastUsage.Input, m.tr.LastUsage.Output, m.tr.LastUsage.Total)
 	}
@@ -1193,6 +1230,9 @@ func (m model) renderFooterMeta() string {
 	if m.info.AutoApprove {
 		right = "auto-approve"
 	}
+	if m.planMode {
+		right = "plan"
+	}
 	leftR := th.FooterMeta.Render(left)
 	rightR := th.FooterMeta.Render(right)
 	gap := m.width - lipgloss.Width(leftR) - lipgloss.Width(rightR)
@@ -1214,8 +1254,8 @@ func (m model) renderHints() string {
 	if m.files.active {
 		return th.Hint.Render("↑↓ select  ·  enter attach file  ·  tab next  ·  esc close")
 	}
-	full := "Enter send  ·  / commands  ·  @ files  ·  shift+enter newline  ·  ctrl+l sessions  ·  ctrl+c quit"
-	short := "Enter send  ·  / commands  ·  @ files  ·  ctrl+l sessions"
+	full := "Enter send  ·  / commands  ·  @ files  ·  shift+tab plan  ·  shift+enter newline  ·  ctrl+l sessions  ·  ctrl+c quit"
+	short := "Enter send  ·  / commands  ·  @ files  ·  shift+tab plan"
 	line := full
 	if m.width > 0 && lipgloss.Width(full) > m.width {
 		line = short

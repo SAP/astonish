@@ -8,6 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
 )
 
@@ -100,7 +101,9 @@ func (m model) submitApproval(choice string) (tea.Model, tea.Cmd) {
 
 	turnCtx, cancel := context.WithCancel(m.ctx)
 	m.turnCancel = cancel
-	ch, err := m.backend.RunTurn(turnCtx, choice)
+	// Approval responses must not inherit plan-mode instructions; they are part
+	// of the already-running tool approval protocol.
+	ch, err := m.backend.RunTurn(turnCtx, choice, backend.TurnOptions{})
 	if err != nil {
 		cancel()
 		m.turnCancel = nil

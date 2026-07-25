@@ -174,10 +174,11 @@ func (c *Client) SendFlowMessage(req *FlowChatRequest) (*SSEStream, error) {
 
 // ChatRequest represents a message to send to the chat.
 type ChatRequest struct {
-	SessionID   string `json:"sessionId,omitempty"`
-	Message     string `json:"message"`
-	AutoApprove bool   `json:"autoApprove,omitempty"`
-	Debug       bool   `json:"debug,omitempty"`
+	SessionID     string `json:"sessionId,omitempty"`
+	Message       string `json:"message"`
+	AutoApprove   bool   `json:"autoApprove,omitempty"`
+	Debug         bool   `json:"debug,omitempty"`
+	SystemContext string `json:"systemContext,omitempty"`
 }
 
 // SendChatMessage sends a chat message and returns an SSE stream of events.

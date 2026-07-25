@@ -18,8 +18,8 @@ interface HomePageProps {
 const suggestions = [
   'What can you help me with?',
   'Review my GitHub PR',
-  'Automate a deploy',
-  'Track team goals',
+  'Create an App',
+  'Generate a Report',
 ]
 
 const tiles: { title: string; description: string; Icon: LucideIcon; gradient: string }[] = [

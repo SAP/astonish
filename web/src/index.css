@@ -437,12 +437,13 @@ html[data-theme="aster"].dark {
 /* Sage brand pack — light (calm · fresh) */
 html[data-theme="sage"] {
   --brand: #4a8f7a;
-  --brand-strong: #6ba890;
+  --brand-strong: #8faf5a;
   --brand-muted: rgba(74, 143, 122, 0.14);
   --brand-foreground: #ffffff;
-  --accent2: #6ba890;
-  --accent3: #5a8f9e;
-  --accent-glow: rgba(74, 143, 122, 0.18);
+  /* Warm chartreuse + cool teal so gradients read (not monochrome green) */
+  --accent2: #b4c45c;
+  --accent3: #3d8fa8;
+  --accent-glow: rgba(74, 143, 122, 0.22);
 
   --background: #f4f7f5;
   --foreground: #1a2822;
@@ -468,9 +469,9 @@ html[data-theme="sage"] {
   --bg-primary: var(--background);
   --bg-secondary: var(--card);
   --bg-tertiary: var(--secondary);
-  --bg-grad: radial-gradient(900px 500px at 20% -10%, rgba(74, 143, 122, 0.10), transparent 60%),
-    radial-gradient(900px 500px at 90% 10%, rgba(90, 143, 158, 0.08), transparent 60%),
-    radial-gradient(700px 400px at 50% 110%, rgba(107, 168, 144, 0.08), transparent 60%),
+  --bg-grad: radial-gradient(900px 500px at 20% -10%, rgba(74, 143, 122, 0.16), transparent 60%),
+    radial-gradient(900px 500px at 90% 10%, rgba(61, 143, 168, 0.12), transparent 60%),
+    radial-gradient(700px 400px at 50% 110%, rgba(180, 196, 92, 0.10), transparent 60%),
     #f4f7f5;
   --surface-muted: #e8f0ec;
   --text-primary: var(--foreground);
@@ -534,12 +535,12 @@ html[data-theme="sage"] {
 /* Sage brand pack — dark */
 html[data-theme="sage"].dark {
   --brand: #6aaf96;
-  --brand-strong: #8bc4ad;
+  --brand-strong: #b5d46a;
   --brand-muted: rgba(106, 175, 150, 0.14);
   --brand-foreground: #0c1210;
-  --accent2: #8bc4ad;
-  --accent3: #7aafbc;
-  --accent-glow: rgba(106, 175, 150, 0.22);
+  --accent2: #c5e070;
+  --accent3: #5ec8e0;
+  --accent-glow: rgba(106, 175, 150, 0.28);
 
   --background: #0c1210;
   --foreground: #e8f2ed;
@@ -564,9 +565,9 @@ html[data-theme="sage"].dark {
   --bg-primary: var(--background);
   --bg-secondary: var(--card);
   --bg-tertiary: #101814;
-  --bg-grad: radial-gradient(900px 500px at 20% -10%, rgba(106, 175, 150, 0.10), transparent 60%),
-    radial-gradient(900px 500px at 90% 10%, rgba(122, 175, 188, 0.06), transparent 60%),
-    radial-gradient(700px 400px at 50% 110%, rgba(139, 196, 173, 0.06), transparent 60%),
+  --bg-grad: radial-gradient(900px 500px at 20% -10%, rgba(106, 175, 150, 0.16), transparent 60%),
+    radial-gradient(900px 500px at 90% 10%, rgba(94, 200, 224, 0.12), transparent 60%),
+    radial-gradient(700px 400px at 50% 110%, rgba(197, 224, 112, 0.10), transparent 60%),
     #0c1210;
   --surface-muted: #101814;
   --text-primary: var(--foreground);
@@ -628,12 +629,13 @@ html[data-theme="sage"].dark {
 /* Ember brand pack — light (calm · warm) */
 html[data-theme="ember"] {
   --brand: #c4785a;
-  --brand-strong: #d4a06a;
+  --brand-strong: #e0a84a;
   --brand-muted: rgba(196, 120, 90, 0.14);
   --brand-foreground: #ffffff;
-  --accent2: #d4a06a;
-  --accent3: #a88878;
-  --accent-glow: rgba(196, 120, 90, 0.18);
+  /* Bright gold + dusty rose so warm packs still gradient */
+  --accent2: #e8bc5c;
+  --accent3: #a87898;
+  --accent-glow: rgba(196, 120, 90, 0.22);
 
   --background: #faf6f3;
   --foreground: #2a2018;
@@ -659,9 +661,9 @@ html[data-theme="ember"] {
   --bg-primary: var(--background);
   --bg-secondary: var(--card);
   --bg-tertiary: var(--secondary);
-  --bg-grad: radial-gradient(900px 500px at 20% -10%, rgba(196, 120, 90, 0.10), transparent 60%),
-    radial-gradient(900px 500px at 90% 10%, rgba(212, 160, 106, 0.08), transparent 60%),
-    radial-gradient(700px 400px at 50% 110%, rgba(168, 136, 120, 0.08), transparent 60%),
+  --bg-grad: radial-gradient(900px 500px at 20% -10%, rgba(196, 120, 90, 0.16), transparent 60%),
+    radial-gradient(900px 500px at 90% 10%, rgba(232, 188, 92, 0.12), transparent 60%),
+    radial-gradient(700px 400px at 50% 110%, rgba(168, 120, 152, 0.10), transparent 60%),
     #faf6f3;
   --surface-muted: #f3ebe4;
   --text-primary: var(--foreground);
@@ -725,12 +727,12 @@ html[data-theme="ember"] {
 /* Ember brand pack — dark */
 html[data-theme="ember"].dark {
   --brand: #d49278;
-  --brand-strong: #e0b888;
+  --brand-strong: #e8c070;
   --brand-muted: rgba(212, 146, 120, 0.14);
   --brand-foreground: #14100e;
-  --accent2: #e0b888;
-  --accent3: #c4a898;
-  --accent-glow: rgba(212, 146, 120, 0.22);
+  --accent2: #f0d080;
+  --accent3: #d4a0b8;
+  --accent-glow: rgba(212, 146, 120, 0.28);
 
   --background: #14100e;
   --foreground: #f5ebe4;
@@ -755,9 +757,9 @@ html[data-theme="ember"].dark {
   --bg-primary: var(--background);
   --bg-secondary: var(--card);
   --bg-tertiary: #161210;
-  --bg-grad: radial-gradient(900px 500px at 20% -10%, rgba(212, 146, 120, 0.10), transparent 60%),
-    radial-gradient(900px 500px at 90% 10%, rgba(224, 184, 136, 0.06), transparent 60%),
-    radial-gradient(700px 400px at 50% 110%, rgba(196, 168, 152, 0.06), transparent 60%),
+  --bg-grad: radial-gradient(900px 500px at 20% -10%, rgba(212, 146, 120, 0.16), transparent 60%),
+    radial-gradient(900px 500px at 90% 10%, rgba(240, 208, 128, 0.12), transparent 60%),
+    radial-gradient(700px 400px at 50% 110%, rgba(212, 160, 184, 0.10), transparent 60%),
     #14100e;
   --surface-muted: #161210;
   --text-primary: var(--foreground);
@@ -819,11 +821,12 @@ html[data-theme="ember"].dark {
 /* Classic brand pack — light (pre-rebrand indigo / cool slate) */
 html[data-theme="classic"] {
   --brand: #5f4fb2;
-  --brand-strong: #4b3f9c;
+  --brand-strong: #3d3580;
   --brand-muted: rgba(95, 79, 178, 0.14);
   --brand-foreground: #ffffff;
-  --accent2: #4b3f9c;
-  --accent3: #8f7edb;
+  /* Deep indigo + periwinkle for multi-stop gradients */
+  --accent2: #4338ca;
+  --accent3: #818cf8;
   --accent-glow: rgba(95, 79, 178, 0.28);
 
   --background: #fafbfe;
@@ -916,11 +919,11 @@ html[data-theme="classic"] {
 /* Classic brand pack — dark (pre-rebrand slate navy + indigo) */
 html[data-theme="classic"].dark {
   --brand: #8d7ae0;
-  --brand-strong: #7262ce;
+  --brand-strong: #a5b4fc;
   --brand-muted: rgba(141, 122, 224, 0.14);
   --brand-foreground: #ffffff;
-  --accent2: #7262ce;
-  --accent3: #a998ef;
+  --accent2: #6366f1;
+  --accent3: #c4b5fd;
   --accent-glow: rgba(141, 122, 224, 0.32);
 
   --background: #0b1222;
@@ -1041,8 +1044,14 @@ body {
   box-shadow: 0 4px 14px -4px var(--accent-glow);
 }
 
+/* Empty-chat hero — multi-stop wash from pack accents (brand → accent2 → accent3) */
 .hero-card-nova {
-  background: linear-gradient(135deg, rgba(255, 107, 157, 0.15), rgba(180, 120, 255, 0.12) 60%, rgba(255, 184, 107, 0.10));
+  background: linear-gradient(
+    135deg,
+    color-mix(in oklab, var(--brand) 26%, transparent),
+    color-mix(in oklab, var(--accent2) 20%, transparent) 48%,
+    color-mix(in oklab, var(--accent3) 18%, transparent)
+  );
   border: 1px solid var(--card-border, var(--border));
   border-radius: var(--radius-xl, 28px);
 }

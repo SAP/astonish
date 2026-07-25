@@ -289,6 +289,18 @@ func (cr *ChatRunner) InjectFleetStores(templates store.FleetTemplateStore, plan
 	}
 }
 
+// InjectFleetSetupStores adds tenant-scoped fleet setup stores to the runner's
+// context so setup tools can update the same drafts created by the Studio API.
+// Must be called before Run().
+func (cr *ChatRunner) InjectFleetSetupStores(profiles store.FleetSetupProfileStore, drafts store.FleetSetupDraftStore) {
+	if profiles != nil {
+		cr.ctx = store.WithFleetSetupProfileStore(cr.ctx, profiles)
+	}
+	if drafts != nil {
+		cr.ctx = store.WithFleetSetupDraftStore(cr.ctx, drafts)
+	}
+}
+
 // InjectSandboxTemplate adds the team's custom sandbox template name to the
 // runner's context. NodeTool reads this at container creation time so that chat
 // sessions use the team's pre-configured container image rather than @base.

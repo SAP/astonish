@@ -1078,6 +1078,12 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 		runner.InjectFleetStores(svc.FleetTemplates, svc.FleetPlans)
 	}
 
+	// Inject setup stores, including API fallback stores when DB-backed stores
+	// are unavailable, so setup tools update the same drafts created by handlers.
+	if svc := store.FromRequest(r); svc != nil {
+		runner.InjectFleetSetupStores(getSetupProfileStore(svc), getSetupDraftStore(svc))
+	}
+
 	// Inject the team's custom sandbox template so that chat containers use
 	// the team's pre-configured image rather than always falling back to @base.
 	if svc := store.FromRequest(r); svc != nil && svc.Settings != nil {

@@ -6,18 +6,18 @@ import (
 	"net/http"
 	"sort"
 
-	"github.com/gorilla/mux"
 	"github.com/SAP/astonish/pkg/store"
+	"github.com/gorilla/mux"
 )
 
 // --- Credential API types ---
 
 // credentialListItem represents a single credential in the list response.
 type credentialListItem struct {
-	Name     string              `json:"name"`
+	Name     string               `json:"name"`
 	Type     store.CredentialType `json:"type"`
-	Scope    string              `json:"scope,omitempty"`    // "personal" or "team" (platform mode only)
-	Shadowed bool                `json:"shadowed,omitempty"` // true if personal overrides this team credential
+	Scope    string               `json:"scope,omitempty"`    // "personal" or "team" (platform mode only)
+	Shadowed bool                 `json:"shadowed,omitempty"` // true if personal overrides this team credential
 }
 
 // credentialListResponse is the response for GET /api/credentials.
@@ -58,6 +58,8 @@ type credentialDetailResponse struct {
 	ProjectDomain               string               `json:"project_domain,omitempty"`
 	ApplicationCredentialID     string               `json:"application_credential_id,omitempty"`
 	ApplicationCredentialSecret string               `json:"application_credential_secret,omitempty"`
+	Content                     string               `json:"content,omitempty"`
+	ContentType                 string               `json:"content_type,omitempty"`
 }
 
 // credentialSaveRequest is the body for POST /api/credentials.
@@ -291,6 +293,8 @@ func GetCredentialHandler(w http.ResponseWriter, r *http.Request) {
 		ProjectDomain:               cred.ProjectDomain,
 		ApplicationCredentialID:     cred.ApplicationCredentialID,
 		ApplicationCredentialSecret: cred.ApplicationCredentialSecret,
+		Content:                     cred.Content,
+		ContentType:                 cred.ContentType,
 	}
 
 	respondJSON(w, http.StatusOK, resp)

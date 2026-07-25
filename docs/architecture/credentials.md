@@ -106,8 +106,9 @@ Minimum signature length is 8 characters to avoid false positives with short val
 | `oauth_client_credentials` | Machine-to-machine OAuth2 | `client_secret` | `client_id`, `auth_url`, `scope` |
 | `oauth_authorization_code` | User-consent OAuth2 (Google, GitHub) | `client_secret`, `access_token`, `refresh_token` | `client_id`, `token_url`, `scope` |
 | `openstack_keystone` | OpenStack Keystone v3 | `password` or `application_credential_secret` | `auth_url`, `username` / `application_credential_id`, project/domain fields |
+| `raw_content` | Arbitrary JSON/YAML/dotenv/text payloads for sandbox file materialization | `content` | `content_type` |
 
-Non-secret fields are returned as plaintext because the LLM needs them for decision-making (e.g., knowing which header name to use, which auth URL to call).
+Non-secret fields are returned as plaintext because the LLM needs them for decision-making (e.g., knowing which header name to use, which auth URL to call). `raw_content` is intentionally not an HTTP credential: `Resolve()` rejects it, and fleet/drill file injection should reference `field: content`. The `content` value is not normalized or trimmed because exact file bytes, whitespace, and trailing punctuation can be meaningful.
 
 ### OAuth Token Management
 
@@ -203,5 +204,5 @@ Do **not** publish a personal OAuth/API credential to the team just to schedule 
 - **Tools**: `resolve_credential` returns placeholders. `http_request` accepts credential names and resolves internally. `save_credential` triggers retroactive redaction.
 - **API/SSE**: The SSE streaming handler applies Redactor to all text events before sending to the browser.
 - **Channels**: Telegram and email adapters receive already-redacted text.
-- **Sandbox**: Credential resolution happens on the host side (in callbacks), before tool args reach the container. Raw secrets are never stored in container state.
+- **Sandbox**: Credential resolution happens on the host side (in callbacks), before tool args reach the container. Raw secrets are never stored in container state. Fleet/drill file injection uses the same store for `raw_content` credentials and materializes the `content` field into the sandbox only when the run starts.
 - **Scheduler**: Personal jobs use merged credentials; team jobs and fleet use team-only. See daemon-scheduler.md.

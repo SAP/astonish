@@ -454,6 +454,14 @@ func resolveField(resolver CredentialResolver, name, field, fallback string) str
 		if cred.AuthURL != "" {
 			return cred.AuthURL
 		}
+	case "content":
+		if cred.Content != "" {
+			return cred.Content
+		}
+	case "content_type":
+		if cred.ContentType != "" {
+			return cred.ContentType
+		}
 	}
 
 	return fallback

@@ -10,13 +10,14 @@ import (
 type CredentialType = string
 
 const (
-	CredAPIKey           CredentialType = "api_key"
-	CredBearer           CredentialType = "bearer"
-	CredBasic            CredentialType = "basic"
+	CredAPIKey            CredentialType = "api_key"
+	CredBearer            CredentialType = "bearer"
+	CredBasic             CredentialType = "basic"
 	CredOAuthClientCreds  CredentialType = "oauth_client_credentials"
 	CredPassword          CredentialType = "password"
 	CredOAuthAuthCode     CredentialType = "oauth_authorization_code"
 	CredOpenStackKeystone CredentialType = "openstack_keystone"
+	CredRawContent        CredentialType = "raw_content"
 )
 
 // Credential represents a stored credential entry.
@@ -41,6 +42,8 @@ type Credential struct {
 	ProjectDomain               string         `json:"project_domain,omitempty"`
 	ApplicationCredentialID     string         `json:"application_credential_id,omitempty"`
 	ApplicationCredentialSecret string         `json:"application_credential_secret,omitempty"`
+	Content                     string         `json:"content,omitempty"`
+	ContentType                 string         `json:"content_type,omitempty"`
 }
 
 // OAuthTokenFetcher fetches an OAuth access token for a credential.
@@ -109,6 +112,9 @@ func ResolveCredentialHeader(name string, cred *Credential, oauthFetcher OAuthTo
 
 	case CredPassword:
 		return "", "", fmt.Errorf("credential %q is a password credential (for SSH/FTP/etc.), not an HTTP credential — use resolve_credential to access its fields", name)
+
+	case CredRawContent:
+		return "", "", fmt.Errorf("credential %q is raw content for file materialization, not an HTTP credential — use resolve_credential to access its content field", name)
 
 	default:
 		return "", "", fmt.Errorf("credential %q: unsupported type %q", name, cred.Type)

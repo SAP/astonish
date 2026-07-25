@@ -137,14 +137,14 @@ steps:
     \ env vars and/or files into\n   the sandbox at session start — secrets are NEVER baked into templates.\n\n\
     **Sub-steps:**\n\n**2a. Check for existing credentials.**\nCall `list_credentials` to see what's already in the credential\
     \ store.\n\n**2b. Collect and save credentials.**\nFor each required integration:\n- Ask the user for the secret value.\n\
-    - Use `save_credential` to store it (bearer for tokens; api_key with field\n  `value` for YAML/JSON config file contents).\n\
+    - Use `save_credential` to store it (bearer for tokens; raw_content with field\n  `content` for YAML/JSON/dotenv/text file contents).\n\
     - Record the mapping: logical name → store entry name.\n\nFor GitHub (github_issues or private repos):\n- PAT with `repo`\
     \ scope; logical name `github`.\n- Validate: `test_credential` or `GH_TOKEN=... gh auth status`.\n\nFor config-file apps\
-    \ (e.g., trading providers YAML):\n- Save full file content as api_key type, logical name e.g. `trading`.\n- Declare file\
+    \ (e.g., trading providers YAML):\n- Save full file content as raw_content type, logical name e.g. `trading`.\n- Declare file\
     \ injection in `credential_injection` (see 2c).\n\n**2c. Wire credential_injection.**\nCall `update_setup_draft` with\
     \ a `credential_injection` object describing how\nsecrets reach the container at session start:\n\n```yaml\ncredential_injection:\n\
     \  env:\n    - credential: github\n      var: GH_TOKEN\n      field: token\n  files:\n    - credential: trading\n\
-    \      path: /root/<app>/config/credentials.yaml\n      field: value\n      format: yaml\n      mode: \"0600\"\n```\n\n\
+    \      path: /root/<app>/config/credentials.yaml\n      field: content\n      format: yaml\n      mode: \"0600\"\n```\n\n\
     GitHub-only plans: if you omit `credential_injection`, Fleet defaults to\nGH_TOKEN from the `github` credential.\n\n\
     **2d. Persist mappings in the draft.**\nUse `update_setup_draft` step_id=credentials with:\n- github: <store-name> (when\
     \ applicable)\n- any other logical names as additional fields\n- credential_injection: { env: [...], files: [...] }\n\n\

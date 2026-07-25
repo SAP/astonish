@@ -51,6 +51,11 @@ const (
 	// (password or application_credential) and produces X-Auth-Token: <token>.
 	// Resolve() auto-fetches and caches tokens until near expiry.
 	CredOpenStackKeystone CredentialType = "openstack_keystone"
+
+	// CredRawContent stores arbitrary encrypted file content for sandbox
+	// materialization. It is not an HTTP credential; use the content field via
+	// resolve_credential or fleet credential_injection files.
+	CredRawContent CredentialType = "raw_content"
 )
 
 // Credential holds authentication data for a single named credential.
@@ -87,6 +92,10 @@ type Credential struct {
 	ProjectDomain               string `json:"project_domain,omitempty"`
 	ApplicationCredentialID     string `json:"application_credential_id,omitempty"`
 	ApplicationCredentialSecret string `json:"application_credential_secret,omitempty"`
+
+	// raw_content fields
+	Content     string `json:"content,omitempty"`
+	ContentType string `json:"content_type,omitempty"`
 }
 
 // storeData is the JSON structure inside the encrypted file.
@@ -207,7 +216,9 @@ func sanitizeCredential(cred *Credential) {
 	cred.TokenURL = cleanFieldValue(cred.TokenURL)
 	cred.AccessToken = cleanFieldValue(cred.AccessToken)
 	cred.RefreshToken = cleanFieldValue(cred.RefreshToken)
-	// Note: TokenExpiry is an RFC3339 timestamp, skip sanitization
+	cred.ContentType = cleanFieldValue(cred.ContentType)
+	// Note: TokenExpiry is an RFC3339 timestamp, skip sanitization.
+	// Note: Content is arbitrary file payload and must remain byte-for-byte intact.
 }
 
 // sanitizeSecretValue strips common copy-paste artifacts from a secret value.
@@ -352,6 +363,9 @@ func (s *Store) Resolve(name string) (headerKey, headerValue string, err error) 
 
 	case CredPassword:
 		return "", "", fmt.Errorf("credential %q is a password credential (for SSH/FTP/etc.), not an HTTP credential — use resolve_credential to access its fields", name)
+
+	case CredRawContent:
+		return "", "", fmt.Errorf("credential %q is raw content for file materialization, not an HTTP credential — use resolve_credential to access its content field", name)
 
 	case CredOAuthAuthCode:
 		token, err := s.resolveAuthCode(name, &credCopy)

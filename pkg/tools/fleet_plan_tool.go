@@ -155,7 +155,7 @@ type SaveFleetPlanArgs struct {
 	// Credentials maps logical names to credential store entry names.
 	Credentials map[string]string `json:"credentials,omitempty" jsonschema:"Credential mappings for external service authentication. Key is a logical name agents use (e.g., 'github', 'trading'). Value is the credential name in the encrypted store. IMPORTANT: For github_issues channel plans, include a 'github' entry so the GitHub token is auto-injected into gh CLI commands. If credentials were validated with validate_fleet_plan, include the same mappings here."`
 	// CredentialInjection declares how credentials are injected into fleet sandbox containers at session start (env vars and files).
-	CredentialInjection *SaveFleetPlanCredentialInjection `json:"credential_injection,omitempty" jsonschema:"How plan credentials are injected at fleet session start. env: map logical credentials to container environment variables. files: materialize credential fields to absolute paths inside the container (e.g., /root/app/config/credentials.yaml). Required for apps that read config files — store the file content via save_credential (type api_key, field value) and reference it here. GitHub-only plans get GH_TOKEN by default when omitted."`
+	CredentialInjection *SaveFleetPlanCredentialInjection `json:"credential_injection,omitempty" jsonschema:"How plan credentials are injected at fleet session start. env: map logical credentials to container environment variables. files: materialize credential fields to absolute paths inside the container (e.g., /root/app/config/credentials.yaml). Required for apps that read config files — store file payloads via save_credential (type raw_content, field content) and reference them here. Existing api_key/value mappings remain supported for old plans. GitHub-only plans get GH_TOKEN by default when omitted."`
 	// WorkspaceBaseDir overrides the base directory where project files are stored.
 	// The final workspace path will be <workspace_base_dir>/<repo-name or plan-key>.
 	// If omitted, the template's default is used (typically ~/astonish_projects).
@@ -564,8 +564,9 @@ func GetFleetPlanTools() ([]tool.Tool, error) {
 			"injection into fleet sandbox containers. " +
 			"IMPORTANT: If credentials were validated with validate_fleet_plan, pass the same " +
 			"credentials map and credential_injection here. Use save_credential during setup to store " +
-			"secrets in the encrypted store, then reference store entry names in credentials and declare " +
-			"how they are injected (env vars and/or file paths) in credential_injection. " +
+			"secrets in the encrypted store. For file payloads, use type raw_content and inject field content. " +
+			"Then reference store entry names in credentials and declare how they are injected " +
+			"(env vars and/or file paths) in credential_injection. " +
 			"Use include_agents to select a subset of agents from the template (e.g., only ['dev']). " +
 			"The plan is stored as a YAML file and can be launched from the Studio UI.",
 	}, saveFleetPlan)

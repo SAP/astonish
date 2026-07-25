@@ -220,6 +220,8 @@ func (r *Redactor) addSecretFieldsLocked(name string, cred *Credential) {
 			r.addVariantsLocked(name, "password", cred.Password)
 			r.addVariantsLocked(name, "username", cred.Username)
 		}
+	case CredRawContent:
+		r.addVariantsLocked(name, "content", cred.Content)
 	}
 }
 

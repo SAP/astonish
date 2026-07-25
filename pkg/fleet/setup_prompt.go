@@ -110,6 +110,11 @@ func (e *SetupEngine) composeStrictRules(profile *SetupProfile, stepID string, c
 	b.WriteString("STRICT RULES:\n")
 	b.WriteString("- Focus ONLY on the current step. Do not collect data for future steps.\n")
 	b.WriteString("- When all required fields for this step are gathered, call update_setup_draft with step_id and values.\n")
+	if profile != nil {
+		if step, ok := profile.StepByID(stepID); ok && step.EffectiveType() == "info" {
+			b.WriteString("- For this info step, after the user confirms, call update_setup_draft with values {\"_ack\": true}. No other acknowledgement key completes the step.\n")
+		}
+	}
 	b.WriteString("- If validation fails or information is missing, ask follow-up questions. Do not advance.\n")
 	b.WriteString("- Call get_setup_profile with draft_id to check completion state.\n")
 	if stepID == "review" || profile != nil {

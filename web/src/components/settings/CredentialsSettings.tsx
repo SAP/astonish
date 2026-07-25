@@ -40,6 +40,8 @@ interface RevealedCredential {
   project_domain?: string
   application_credential_id?: string
   application_credential_secret?: string
+  content?: string
+  content_type?: string
   [key: string]: unknown
 }
 
@@ -72,6 +74,8 @@ interface CredForm {
   project_domain: string
   application_credential_id: string
   application_credential_secret: string
+  content: string
+  content_type: string
 }
 
 const emptyCredForm = (): CredForm => ({
@@ -95,7 +99,9 @@ const emptyCredForm = (): CredForm => ({
   project_name: '',
   project_domain: 'Default',
   application_credential_id: '',
-  application_credential_secret: ''
+  application_credential_secret: '',
+  content: '',
+  content_type: 'text/plain'
 })
 
 interface SecretForm {
@@ -231,7 +237,8 @@ const TYPE_LABELS: Record<string, string> = {
   password: 'Password',
   oauth_client_credentials: 'OAuth Client Credentials',
   oauth_authorization_code: 'OAuth Auth Code',
-  openstack_keystone: 'OpenStack Keystone'
+  openstack_keystone: 'OpenStack Keystone',
+  raw_content: 'Raw Content'
 }
 
 const TYPE_COLORS: Record<string, string> = {
@@ -241,7 +248,8 @@ const TYPE_COLORS: Record<string, string> = {
   password: '#ef4444',
   oauth_client_credentials: '#10b981',
   oauth_authorization_code: '#06b6d4',
-  openstack_keystone: '#f97316'
+  openstack_keystone: '#f97316',
+  raw_content: '#14b8a6'
 }
 
 const SCOPE_COLORS: Record<string, string> = {
@@ -529,7 +537,9 @@ export default function CredentialsSettings({ isPlatform: isPlatformProp }: { is
       project_name: revealed.project_name || '',
       project_domain: revealed.project_domain || 'Default',
       application_credential_id: revealed.application_credential_id || '',
-      application_credential_secret: revealed.application_credential_secret || ''
+      application_credential_secret: revealed.application_credential_secret || '',
+      content: revealed.content || '',
+      content_type: revealed.content_type || 'text/plain'
     })
     setCredFormError('')
     setShowCredModal(true)
@@ -556,6 +566,7 @@ export default function CredentialsSettings({ isPlatform: isPlatformProp }: { is
         case 'basic': case 'password': cred.username = credForm.username; cred.password = credForm.password; break
         case 'oauth_client_credentials': cred.auth_url = credForm.auth_url; cred.client_id = credForm.client_id; cred.client_secret = credForm.client_secret; cred.scope = credForm.scope; break
         case 'oauth_authorization_code': cred.token_url = credForm.token_url; cred.client_id = credForm.client_id; cred.client_secret = credForm.client_secret; cred.access_token = credForm.access_token; cred.refresh_token = credForm.refresh_token; cred.scope = credForm.scope; break
+        case 'raw_content': cred.content = credForm.content; cred.content_type = credForm.content_type; break
         case 'openstack_keystone':
           cred.auth_url = credForm.auth_url
           if (credForm.keystone_method === 'application_credential') {
@@ -787,6 +798,12 @@ export default function CredentialsSettings({ isPlatform: isPlatformProp }: { is
               </>
             )}
             {revealed.type === 'bearer' && <FieldRow label="Token" value={revealed.token} secret />}
+            {revealed.type === 'raw_content' && (
+              <>
+                {revealed.content_type && <FieldRow label="Content Type" value={revealed.content_type} />}
+                <FieldRow label="Content" value={revealed.content} secret multiline />
+              </>
+            )}
             {(revealed.type === 'basic' || revealed.type === 'password') && (
               <>
                 <FieldRow label="Username" value={revealed.username} />
@@ -890,7 +907,7 @@ export default function CredentialsSettings({ isPlatform: isPlatformProp }: { is
     const canManage = !isTeamScope || isAdmin
     return (
       <div>
-        {/* HTTP Credentials */}
+        {/* Named Credentials */}
         <div>
           <div className="flex items-center justify-between mb-3">
             <h3 className="text-sm font-medium flex items-center gap-2" style={{ color: 'var(--text-primary)' }}>
@@ -1026,7 +1043,7 @@ export default function CredentialsSettings({ isPlatform: isPlatformProp }: { is
         </>
       ) : (
         // Personal mode: single section (no scope labels)
-        renderCredentialSection('HTTP Credentials', personalCreds, personalSecrets)
+        renderCredentialSection('Credentials', personalCreds, personalSecrets)
       )}
 
       {/* Master Key Prompt Modal */}
@@ -1115,6 +1132,7 @@ export default function CredentialsSettings({ isPlatform: isPlatformProp }: { is
                 <option value="oauth_client_credentials">OAuth Client Credentials</option>
                 <option value="oauth_authorization_code">OAuth Authorization Code</option>
                 <option value="openstack_keystone">OpenStack Keystone</option>
+                <option value="raw_content">Raw Content (JSON/YAML/text file)</option>
               </select>
             </div>
 
@@ -1136,6 +1154,19 @@ export default function CredentialsSettings({ isPlatform: isPlatformProp }: { is
                 <label className="block text-sm font-medium mb-2" style={labelStyle}>Token</label>
                 <input type="password" value={credForm.token} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCredForm({ ...credForm, token: e.target.value })} className={inputClass + ' font-mono'} style={inputStyle} />
               </div>
+            )}
+            {credForm.type === 'raw_content' && (
+              <>
+                <div>
+                  <label className="block text-sm font-medium mb-2" style={labelStyle}>Content Type <span className="font-normal" style={hintStyle}>(optional)</span></label>
+                  <input type="text" value={credForm.content_type} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCredForm({ ...credForm, content_type: e.target.value })} placeholder="text/plain, application/json, application/yaml" className={inputClass + ' font-mono'} style={inputStyle} />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium mb-2" style={labelStyle}>Raw Content</label>
+                  <textarea value={credForm.content} onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setCredForm({ ...credForm, content: e.target.value })} placeholder="Paste JSON, YAML, dotenv, or text content" className={inputClass + ' font-mono min-h-32'} style={inputStyle} />
+                  <p className="text-xs mt-1" style={hintStyle}>Stored encrypted and used via resolve_credential field content or fleet credential_injection field content.</p>
+                </div>
+              </>
             )}
             {(credForm.type === 'basic' || credForm.type === 'password') && (
               <>
@@ -1315,20 +1346,29 @@ export default function CredentialsSettings({ isPlatform: isPlatformProp }: { is
 }
 
 // Reusable field row for revealed credentials
-function FieldRow({ label, value, secret }: { label: string; value: string | undefined; secret?: boolean }) {
+function FieldRow({ label, value, secret, multiline }: { label: string; value: string | undefined; secret?: boolean; multiline?: boolean }) {
   const [show, setShow] = useState(!secret)
+  const displayValue = show ? value : '*'.repeat(Math.min(value?.length || 8, 32))
   return (
-    <div className="flex items-center gap-2">
+    <div className={multiline ? 'space-y-1.5' : 'flex items-center gap-2'}>
       <span className="text-xs w-28 flex-shrink-0" style={hintStyle}>{label}</span>
-      <span className="font-mono text-xs break-all flex-1" style={{ color: 'var(--text-primary)' }}>
-        {show ? value : '*'.repeat(Math.min(value?.length || 8, 32))}
-      </span>
-      {secret && (
-        <button onClick={() => setShow(!show)} className="p-0.5 flex-shrink-0">
-          {show ? <EyeOff size={12} style={{ color: 'var(--text-muted)' }} /> : <Eye size={12} style={{ color: 'var(--text-muted)' }} />}
-        </button>
+      {multiline ? (
+        <pre className="font-mono text-xs whitespace-pre-wrap break-all rounded p-2 max-h-48 overflow-auto" style={{ color: 'var(--text-primary)', background: 'var(--bg-tertiary)', border: '1px solid var(--border-color)' }}>
+          {displayValue}
+        </pre>
+      ) : (
+        <span className="font-mono text-xs break-all flex-1" style={{ color: 'var(--text-primary)' }}>
+          {displayValue}
+        </span>
       )}
-      {show && <CopyButton text={value} />}
+      <div className={multiline ? 'flex items-center gap-1' : 'contents'}>
+        {secret && (
+          <button onClick={() => setShow(!show)} className="p-0.5 flex-shrink-0">
+            {show ? <EyeOff size={12} style={{ color: 'var(--text-muted)' }} /> : <Eye size={12} style={{ color: 'var(--text-muted)' }} />}
+          </button>
+        )}
+        {show && <CopyButton text={value} />}
+      </div>
     </div>
   )
 }

@@ -14,7 +14,7 @@ import (
 type UpdateSetupDraftArgs struct {
 	DraftID  string         `json:"draft_id" jsonschema:"Setup draft UUID from the fleet setup wizard"`
 	StepID   string         `json:"step_id" jsonschema:"Step ID being updated (e.g., provisioning, channel)"`
-	Values   map[string]any `json:"values" jsonschema:"Field values for this step"`
+	Values   map[string]any `json:"values" jsonschema:"Field values for this step. Info steps are acknowledged with {\"_ack\": true}."`
 	MarkStep string         `json:"current_step,omitempty" jsonschema:"Optional current step pointer after update"`
 }
 
@@ -67,6 +67,7 @@ func updateSetupDraft(tc tool.Context, args UpdateSetupDraftArgs) (UpdateSetupDr
 	if err != nil {
 		return UpdateSetupDraftResult{Status: "error", Message: err.Error()}, nil
 	}
+	normalizeInfoStepAck(profile, stepID, existing)
 	engine := fleet.NewSetupEngine(nil)
 	collected := fleet.ParseSetupCollected(draft.Collected)
 	if valErr := engine.ValidateStep(profile, stepID, collected); valErr != nil {
@@ -154,7 +155,54 @@ func getSetupProfile(tc tool.Context, args GetSetupProfileArgs) (GetSetupProfile
 	return result, nil
 }
 
+func normalizeInfoStepAck(profile *fleet.SetupProfile, stepID string, values map[string]any) {
+	if profile == nil || values == nil {
+		return
+	}
+	step, ok := profile.StepByID(stepID)
+	if !ok || step.EffectiveType() != "info" {
+		return
+	}
+	if isTruthyAck(values["_ack"]) {
+		values["_ack"] = true
+		return
+	}
+	for _, key := range []string{
+		"ack",
+		"acknowledged",
+		"acknowledge",
+		"confirmed",
+		"user_confirmed",
+		"overview_acknowledged",
+		"overview_ack",
+		"proceed",
+	} {
+		if isTruthyAck(values[key]) {
+			values["_ack"] = true
+			return
+		}
+	}
+	if status, ok := values["status"].(string); ok && strings.EqualFold(strings.TrimSpace(status), "acknowledged") {
+		values["_ack"] = true
+	}
+}
+
+func isTruthyAck(v any) bool {
+	switch x := v.(type) {
+	case bool:
+		return x
+	case string:
+		s := strings.TrimSpace(strings.ToLower(x))
+		return s == "true" || s == "yes" || s == "y" || s == "acknowledged" || s == "confirmed"
+	default:
+		return false
+	}
+}
+
 func setupDraftStoreFromContext(tc tool.Context) store.FleetSetupDraftStore {
+	if fs := store.FleetSetupDraftStoreFromContext(tc); fs != nil {
+		return fs
+	}
 	if svc := store.FromContext(tc); svc != nil && svc.FleetSetupDrafts != nil {
 		return svc.FleetSetupDrafts
 	}
@@ -162,6 +210,9 @@ func setupDraftStoreFromContext(tc tool.Context) store.FleetSetupDraftStore {
 }
 
 func setupProfileStoreFromContext(tc tool.Context) store.FleetSetupProfileStore {
+	if fs := store.FleetSetupProfileStoreFromContext(tc); fs != nil {
+		return fs
+	}
 	if svc := store.FromContext(tc); svc != nil && svc.FleetSetupProfiles != nil {
 		return svc.FleetSetupProfiles
 	}
@@ -173,14 +224,15 @@ func GetFleetSetupTools() ([]tool.Tool, error) {
 	updateTool, err := functiontool.New(functiontool.Config{
 		Name: "update_setup_draft",
 		Description: "Merge collected setup values into an in-progress fleet setup draft. " +
-			"Validates the step before saving. Returns next_step when the step is complete. " +
+			"Validates the step before saving. For info steps, acknowledge with values {\"_ack\": true}. " +
+			"Returns next_step when the step is complete. " +
 			"Use during plan creation to persist step outputs, especially provisioning (template, container_workspace_dir).",
 	}, updateSetupDraft)
 	if err != nil {
 		return nil, fmt.Errorf("update_setup_draft: %w", err)
 	}
 	getTool, err := functiontool.New(functiontool.Config{
-		Name: "get_setup_profile",
+		Name:        "get_setup_profile",
 		Description: "Load a fleet setup profile definition, current step prompt, tools, and draft completion status.",
 	}, getSetupProfile)
 	if err != nil {

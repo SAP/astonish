@@ -26,6 +26,8 @@ type ResolvedCredential struct {
 	Username string
 	// Password holds the password for basic/password credentials.
 	Password string
+	// Content holds arbitrary raw content for file materialization credentials.
+	Content string
 }
 
 // ResolveCredentials resolves all credential references in a fleet plan from the
@@ -132,6 +134,8 @@ func resolveOne(credStore *credentials.Store, logicalName, storeName string) *Re
 			if rc.Token == "" {
 				rc.Token = cred.Token
 			}
+		case credentials.CredRawContent:
+			rc.Content = cred.Content
 		}
 
 		return rc
@@ -180,6 +184,8 @@ func resolveOnePlatform(ctx context.Context, cs store.CredentialStore, logicalNa
 			if rc.Token == "" {
 				rc.Token = cred.Token
 			}
+		case store.CredRawContent:
+			rc.Content = cred.Content
 		}
 
 		return rc

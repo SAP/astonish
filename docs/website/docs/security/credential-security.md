@@ -21,6 +21,10 @@ Credentials are stored encrypted using [envelope encryption](./envelope-encrypti
 | `password` | Username + password for SSH, FTP, SMTP, databases |
 | `oauth_client_credentials` | OAuth2 client credentials with automatic token refresh |
 | `oauth_authorization_code` | User-authorized OAuth2 with refresh token |
+| `openstack_keystone` | OpenStack Keystone v3 token authentication |
+| `raw_content` | Encrypted JSON, YAML, dotenv, or text payload for sandbox file injection; not HTTP auth |
+
+Use `raw_content` when a fleet or drill needs to materialize a configuration file in the sandbox at run time. The content stays encrypted in the credential store and is injected as `field: content` only when needed.
 
 ## Output Redaction
 
@@ -42,9 +46,9 @@ When an agent invokes a tool that requires credentials:
 
 1. The credential is resolved (personal-first, team fallback).
 2. The encrypted ciphertext is decrypted in memory using the org's DEK.
-3. The plaintext is injected as an **environment variable** into the sandbox container.
-4. The tool reads the credential from its environment.
-5. After execution, the environment is destroyed with the container.
+3. The plaintext is injected as an **environment variable** or, for `raw_content`, materialized as a sandbox file requested by the fleet/drill configuration.
+4. The tool reads the credential from its environment or file path.
+5. After execution, the environment/container state is destroyed.
 
 At no point does the LLM see the credential value. The model only knows that a credential named (e.g.) `GITHUB_TOKEN` is available — never its contents.
 

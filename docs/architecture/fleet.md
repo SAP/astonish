@@ -187,6 +187,6 @@ The fleet plan wizard (700+ line system prompt) guides users through configuring
 - **Sandbox**: Each fleet agent gets its own sandbox container with a workspace. Tools are sandbox-wrapped per-agent.
 - **Channels**: Chat channel for Studio UI; GitHub Issues channel for automated workflows.
 - **Scheduler**: PlanActivator creates scheduler jobs for GitHub issue polling.
-- **Credentials**: Fleet plans declare required credentials, resolved from the encrypted store.
+- **Credentials**: Fleet plans declare required credentials, resolved from the encrypted store. Environment injection uses type-specific fields such as `token` or `password`; file injection should use `raw_content` credentials with `field: content` for JSON/YAML/dotenv/text payloads. Older plans that stored file payloads as `api_key.value` continue to work for compatibility.
 - **Memory**: Agent context uses memory-scoped messages, not the general memory store.
 - **API/Studio**: Fleet view in Studio shows session status, message stream, and controls.

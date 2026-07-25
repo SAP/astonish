@@ -427,6 +427,53 @@ func TestStoreEncryptedOnDisk(t *testing.T) {
 	}
 }
 
+func TestStoreRawContentRoundTripPreservesFormatting(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	content := "  {\n  \"token\": \"abc12345\",\n  \"trailing\": \"keep ,;\"\n}\n  "
+	if err := store.Set("providers-file", &Credential{
+		Type:        CredRawContent,
+		Content:     content,
+		ContentType: " application/json ",
+	}); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+
+	got := store.Get("providers-file")
+	if got == nil {
+		t.Fatal("Get returned nil")
+	}
+	if got.Type != CredRawContent {
+		t.Fatalf("Type = %q, want %q", got.Type, CredRawContent)
+	}
+	if got.Content != content {
+		t.Fatalf("Content was sanitized or changed: got %q want %q", got.Content, content)
+	}
+	if got.ContentType != "application/json" {
+		t.Fatalf("ContentType = %q, want application/json", got.ContentType)
+	}
+}
+
+func TestStoreResolveRawContentRejectedForHTTP(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := Open(dir)
+	if err := store.Set("config-file", &Credential{Type: CredRawContent, Content: "secret-content-12345"}); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+
+	_, _, err := store.Resolve("config-file")
+	if err == nil {
+		t.Fatal("expected Resolve to reject raw_content")
+	}
+	if !strings.Contains(err.Error(), "raw content") {
+		t.Fatalf("Resolve error = %v, want raw content message", err)
+	}
+}
+
 func TestStoreResolveAPIKey(t *testing.T) {
 	dir := t.TempDir()
 	store, _ := Open(dir)
@@ -1316,14 +1363,14 @@ func TestSanitizeCredential(t *testing.T) {
 		{
 			name: "surrounding single quotes",
 			input: &Credential{
-				Type:  CredAPIKey,
+				Type:   CredAPIKey,
 				Header: "X-API-Key",
-				Value: `'my-api-key'`,
+				Value:  `'my-api-key'`,
 			},
 			expected: &Credential{
-				Type:  CredAPIKey,
+				Type:   CredAPIKey,
 				Header: "X-API-Key",
-				Value: "my-api-key",
+				Value:  "my-api-key",
 			},
 		},
 		{

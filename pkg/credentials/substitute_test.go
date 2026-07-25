@@ -76,6 +76,27 @@ func TestSubstituteMap_NoPlaceholders(t *testing.T) {
 	}
 }
 
+type testCredentialResolver struct {
+	creds map[string]*Credential
+}
+
+func (r *testCredentialResolver) Get(name string) *Credential            { return r.creds[name] }
+func (r *testCredentialResolver) Resolve(string) (string, string, error) { return "", "", nil }
+func (r *testCredentialResolver) Reload() error                          { return nil }
+
+func TestSubstitutePlaceholders_RawContent(t *testing.T) {
+	content := "providers:\n  alpaca:\n    key: abc12345\n"
+	resolver := &testCredentialResolver{creds: map[string]*Credential{
+		"providers-file": {Type: CredRawContent, Content: content},
+	}}
+
+	got := SubstitutePlaceholders("file={{CREDENTIAL:providers-file:content}}", resolver)
+	want := "file=" + content
+	if got != want {
+		t.Fatalf("SubstitutePlaceholders = %q, want %q", got, want)
+	}
+}
+
 func TestResolveField_UnknownCredential(t *testing.T) {
 	// resolveField with unknown credential should return fallback
 	fallback := "{{CREDENTIAL:nonexistent:password}}"

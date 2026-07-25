@@ -66,6 +66,8 @@ func storeCredToInternal(sc *store.Credential) *Credential {
 		ProjectDomain:               sc.ProjectDomain,
 		ApplicationCredentialID:     sc.ApplicationCredentialID,
 		ApplicationCredentialSecret: sc.ApplicationCredentialSecret,
+		Content:                     sc.Content,
+		ContentType:                 sc.ContentType,
 	}
 }
 

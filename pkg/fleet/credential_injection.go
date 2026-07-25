@@ -343,6 +343,10 @@ func extractCredentialField(ctx context.Context, cs store.CredentialStore, store
 			if resolved.Username != "" {
 				return resolved.Username, nil
 			}
+		case "content":
+			if resolved.Content != "" {
+				return resolved.Content, nil
+			}
 		}
 	}
 	return "", fmt.Errorf("credential %q field %q not found", storeName, field)

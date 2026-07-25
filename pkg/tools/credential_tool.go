@@ -136,6 +136,8 @@ func credToStoreCred(c *credentials.Credential) *store.Credential {
 		AccessToken:  c.AccessToken,
 		RefreshToken: c.RefreshToken,
 		TokenExpiry:  c.TokenExpiry,
+		Content:      c.Content,
+		ContentType:  c.ContentType,
 	}
 }
 
@@ -156,6 +158,8 @@ func storeCredToCred(c *store.Credential) *credentials.Credential {
 		AccessToken:  c.AccessToken,
 		RefreshToken: c.RefreshToken,
 		TokenExpiry:  c.TokenExpiry,
+		Content:      c.Content,
+		ContentType:  c.ContentType,
 	}
 }
 
@@ -163,7 +167,7 @@ func storeCredToCred(c *store.Credential) *credentials.Credential {
 
 type SaveCredentialArgs struct {
 	Name                        string `json:"name" jsonschema:"Short identifier for this credential (e.g., 'my-api', 'proxmox', 'google-calendar')"`
-	Type                        string `json:"type" jsonschema:"Credential type: 'api_key' (custom header+value), 'bearer' (Authorization: Bearer token), 'basic' (HTTP Basic Auth), 'password' (plain username+password for SSH/FTP/SMTP/databases), 'oauth_client_credentials' (auto-refreshing OAuth2 server-to-server), 'oauth_authorization_code' (user-authorized OAuth2 with refresh token — Google, GitHub, etc.), 'openstack_keystone' (OpenStack Keystone v3 token auth — password or application credential)"`
+	Type                        string `json:"type" jsonschema:"Credential type: 'api_key' (custom header+value), 'bearer' (Authorization: Bearer token), 'basic' (HTTP Basic Auth), 'password' (plain username+password for SSH/FTP/SMTP/databases), 'oauth_client_credentials' (auto-refreshing OAuth2 server-to-server), 'oauth_authorization_code' (user-authorized OAuth2 with refresh token — Google, GitHub, etc.), 'openstack_keystone' (OpenStack Keystone v3 token auth — password or application credential), 'raw_content' (arbitrary JSON/YAML/text file content for sandbox file injection; not HTTP auth)"`
 	Header                      string `json:"header,omitempty" jsonschema:"Header name for api_key type (e.g., 'X-API-Key', 'Authorization'). Required for api_key type."`
 	Value                       string `json:"value,omitempty" jsonschema:"The API key value. Required for api_key type."`
 	Token                       string `json:"token,omitempty" jsonschema:"The bearer token. Required for bearer type."`
@@ -182,6 +186,8 @@ type SaveCredentialArgs struct {
 	ProjectDomain               string `json:"project_domain,omitempty" jsonschema:"Keystone project domain name (openstack_keystone password auth). Defaults to 'Default'."`
 	ApplicationCredentialID     string `json:"application_credential_id,omitempty" jsonschema:"Keystone application credential ID (openstack_keystone). Prefer over password auth when available."`
 	ApplicationCredentialSecret string `json:"application_credential_secret,omitempty" jsonschema:"Keystone application credential secret (openstack_keystone)."`
+	Content                     string `json:"content,omitempty" jsonschema:"Raw JSON, YAML, dotenv, or text content. Required for raw_content type. Preserve exact newlines and formatting."`
+	ContentType                 string `json:"content_type,omitempty" jsonschema:"Optional MIME/content hint for raw_content, e.g. text/plain, application/json, application/yaml, text/x-dotenv."`
 }
 
 type SaveCredentialResult struct {
@@ -288,6 +294,16 @@ func saveCredential(ctx tool.Context, args SaveCredentialArgs) (SaveCredentialRe
 			Scope:        args.Scope,
 		}
 
+	case store.CredRawContent:
+		if args.Content == "" {
+			return SaveCredentialResult{ToolResult: toolError("content is required for raw_content type")}, nil
+		}
+		storeCred = &store.Credential{
+			Type:        store.CredRawContent,
+			Content:     args.Content,
+			ContentType: args.ContentType,
+		}
+
 	case store.CredOpenStackKeystone:
 		if args.AuthURL == "" {
 			return SaveCredentialResult{ToolResult: toolError("auth_url is required for openstack_keystone type (e.g., https://identity.example.com/v3/auth/tokens)")}, nil
@@ -317,7 +333,7 @@ func saveCredential(ctx tool.Context, args SaveCredentialArgs) (SaveCredentialRe
 
 	default:
 		return SaveCredentialResult{
-			ToolResult: toolError("Unknown type %q. Use: api_key, bearer, basic, password, oauth_client_credentials, oauth_authorization_code, or openstack_keystone", args.Type),
+			ToolResult: toolError("Unknown type %q. Use: api_key, bearer, basic, password, oauth_client_credentials, oauth_authorization_code, openstack_keystone, or raw_content", args.Type),
 		}, nil
 	}
 
@@ -333,11 +349,15 @@ func saveCredential(ctx tool.Context, args SaveCredentialArgs) (SaveCredentialRe
 		r.HydrateFromStore(cs)
 	}
 
+	message := fmt.Sprintf("Credential %q saved (%s). The value is encrypted and will not appear in conversation history.", args.Name, args.Type)
+	if credType == store.CredRawContent {
+		message += fmt.Sprintf(" Use it with resolve_credential field content or fleet credential_injection files using field content. IMPORTANT: Now save a memory note documenting credential name %q, the intended file path/use, and content type only. Do NOT include the actual content in the memory note.", args.Name)
+	} else {
+		message += fmt.Sprintf(" IMPORTANT: Now save a memory note documenting: (1) credential name %q, (2) what format/prefix is already included in the stored value (so you never double-prefix it), (3) the header name and how to use it with api_call, (4) the target API base URL. Do NOT include the actual secret value in the memory note — reference it by name only.", args.Name)
+	}
+
 	return SaveCredentialResult{
-		ToolResult: ToolResult{Status: "saved", Message: fmt.Sprintf("Credential %q saved (%s). The value is encrypted and will not appear in conversation history. "+
-			"IMPORTANT: Now save a memory note documenting: (1) credential name %q, (2) what format/prefix is already included in the stored value "+
-			"(so you never double-prefix it), (3) the header name and how to use it with api_call, (4) the target API base URL. "+
-			"Do NOT include the actual secret value in the memory note — reference it by name only.", args.Name, args.Type, args.Name)},
+		ToolResult: ToolResult{Status: "saved", Message: message},
 	}, nil
 }
 
@@ -474,14 +494,14 @@ func listCredentials(ctx tool.Context, args ListCredentialsArgs) (ListCredential
 	var msg string
 	if total == 0 {
 		if args.Filter != "" {
-			msg = fmt.Sprintf("Nothing matching %q. Use save_credential for HTTP credentials or the setup commands for provider keys.", args.Filter)
+			msg = fmt.Sprintf("Nothing matching %q. Use save_credential for credentials or raw file content, or the setup commands for provider keys.", args.Filter)
 		} else {
 			msg = "No stored credentials or secrets."
 		}
 	} else {
 		parts := make([]string, 0, 2)
 		if len(credSummaries) > 0 {
-			parts = append(parts, fmt.Sprintf("%d HTTP credential(s)", len(credSummaries)))
+			parts = append(parts, fmt.Sprintf("%d credential(s)", len(credSummaries)))
 		}
 		if len(secretSummaries) > 0 {
 			parts = append(parts, fmt.Sprintf("%d secret(s)", len(secretSummaries)))
@@ -596,6 +616,11 @@ func testCredential(ctx tool.Context, args TestCredentialArgs) (TestCredentialRe
 			ToolResult: ToolResult{Status: "ok", Message: fmt.Sprintf("Credential %q configured (%s, user: %s). Use resolve_credential to retrieve the username and password for SSH/FTP/database connections.", args.Name, cred.Type, cred.Username)},
 		}, nil
 
+	case store.CredRawContent:
+		return TestCredentialResult{
+			ToolResult: ToolResult{Status: "ok", Message: fmt.Sprintf("Credential %q configured (raw_content, %d bytes). Use resolve_credential field content or fleet credential_injection field content.", args.Name, len(cred.Content))},
+		}, nil
+
 	default:
 		return TestCredentialResult{
 			ToolResult: ToolResult{Status: "ok", Message: fmt.Sprintf("Credential %q configured (%s). Use http_request with credential=%q to test connectivity.", args.Name, cred.Type, args.Name)},
@@ -610,16 +635,18 @@ type ResolveCredentialArgs struct {
 }
 
 type ResolveCredentialResult struct {
-	Status   string `json:"status"`
-	Message  string `json:"message,omitempty"`
-	Type     string `json:"type,omitempty"`
-	Username string `json:"username,omitempty"`
-	Password string `json:"password,omitempty"`
-	Token    string `json:"token,omitempty"`
-	Header   string `json:"header,omitempty"`
-	Value    string `json:"value,omitempty"`
-	AuthURL  string `json:"auth_url,omitempty"`
-	ClientID string `json:"client_id,omitempty"`
+	Status      string `json:"status"`
+	Message     string `json:"message,omitempty"`
+	Type        string `json:"type,omitempty"`
+	Username    string `json:"username,omitempty"`
+	Password    string `json:"password,omitempty"`
+	Token       string `json:"token,omitempty"`
+	Header      string `json:"header,omitempty"`
+	Value       string `json:"value,omitempty"`
+	AuthURL     string `json:"auth_url,omitempty"`
+	ClientID    string `json:"client_id,omitempty"`
+	Content     string `json:"content,omitempty"`
+	ContentType string `json:"content_type,omitempty"`
 }
 
 func resolveCredential(ctx tool.Context, args ResolveCredentialArgs) (ResolveCredentialResult, error) {
@@ -672,6 +699,10 @@ func resolveCredential(ctx tool.Context, args ResolveCredentialArgs) (ResolveCre
 		result.AuthURL = cred.AuthURL
 		result.Token = credentials.FormatPlaceholder(args.Name, "token")
 		result.Message = "Use http_request with credential parameter for Keystone — X-Auth-Token is injected automatically."
+	case store.CredRawContent:
+		result.Content = credentials.FormatPlaceholder(args.Name, "content")
+		result.ContentType = cred.ContentType
+		result.Message = "Raw content credential. Use the content placeholder directly where file content is needed, or configure fleet credential_injection files with field=content."
 	}
 
 	return result, nil
@@ -681,15 +712,15 @@ func resolveCredential(ctx tool.Context, args ResolveCredentialArgs) (ResolveCre
 
 func NewSaveCredentialTool() (tool.Tool, error) {
 	return functiontool.New(functiontool.Config{
-		Name: "save_credential",
-		Description: `Save a credential to the encrypted store. Credentials saved here are PERSONAL (only you can see/use them). To share with the team, use the Settings UI 'Publish to Team'. Use IMMEDIATELY when the user provides any secret. Types: api_key, bearer, basic, password, oauth_client_credentials, oauth_authorization_code, openstack_keystone. HTTP credentials work with http_request; password credentials with resolve_credential. After saving, ALWAYS use memory_save to document: credential name, what format/prefix is already in the stored value, the header name, and the target API base URL — but NEVER include the actual secret value in the memory note.`,
+		Name:        "save_credential",
+		Description: `Save a credential to the encrypted store. Credentials saved here are PERSONAL (only you can see/use them). To share with the team, use the Settings UI 'Publish to Team'. Use IMMEDIATELY when the user provides any secret. Types: api_key, bearer, basic, password, oauth_client_credentials, oauth_authorization_code, openstack_keystone, raw_content. HTTP credentials work with http_request; password and raw_content credentials with resolve_credential. Use raw_content for JSON/YAML/dotenv/text files that will be injected into sandboxes; store payload in content and inject field content. After saving, ALWAYS use memory_save to document safe metadata such as credential name, required prefix/header or target file path, and API base URL/content type — but NEVER include the actual secret value/content in the memory note.`,
 	}, saveCredential)
 }
 
 func NewListCredentialsTool() (tool.Tool, error) {
 	return functiontool.New(functiontool.Config{
 		Name:        "list_credentials",
-		Description: "List all stored credentials and secrets. Shows HTTP credentials (name + type) and provider/channel/MCP secrets (dot-notation keys like 'provider.anthropic.api_key'). Secret values are never exposed. Optionally filter by name or key.",
+		Description: "List all stored credentials and secrets. Shows named credentials (name + type, including HTTP auth and raw_content) and provider/channel/MCP secrets (dot-notation keys like 'provider.anthropic.api_key'). Secret values are never exposed. Optionally filter by name or key.",
 	}, listCredentials)
 }
 
@@ -710,7 +741,7 @@ func NewTestCredentialTool() (tool.Tool, error) {
 func NewResolveCredentialTool() (tool.Tool, error) {
 	return functiontool.New(functiontool.Config{
 		Name:        "resolve_credential",
-		Description: `Retrieve fields of a stored credential by name. Use for non-HTTP auth (SSH, FTP, databases). Returns type-specific fields: non-secret fields (username, header) as plaintext, secret fields (password, token, value) as {{CREDENTIAL:name:field}} placeholders. Pass placeholders directly to process_write, shell_command, browser_type, etc. — the system substitutes real values at execution time. The real secrets never appear in your context.`,
+		Description: `Retrieve fields of a stored credential by name. Use for non-HTTP auth (SSH, FTP, databases) and raw_content file payloads. Returns type-specific fields: non-secret fields (username, header, content_type) as plaintext, secret fields (password, token, value, content) as {{CREDENTIAL:name:field}} placeholders. Pass placeholders directly to process_write, shell_command, browser_type, etc. — the system substitutes real values at execution time. The real secrets never appear in your context.`,
 	}, resolveCredential)
 }
 

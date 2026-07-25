@@ -161,6 +161,24 @@ func TestSetupEngine_CurrentStep_SoftwareDevelopment(t *testing.T) {
 	if !strings.Contains(prompt, "Overview") && !strings.Contains(prompt, "Communication channel") {
 		t.Fatalf("prompt should focus on early steps, got head: %s", prompt[:min(250, len(prompt))])
 	}
+	if !strings.Contains(prompt, `"_ack": true`) {
+		t.Fatalf("overview prompt should document info-step acknowledgement payload, got head: %s", prompt[:min(500, len(prompt))])
+	}
+}
+
+func TestSetupEngine_ValidateStep_InfoAckErrorNamesField(t *testing.T) {
+	profile, ok := GetBundledSetupProfile("software-development")
+	if !ok {
+		t.Fatal("profile not found")
+	}
+	engine := NewSetupEngine(nil)
+	err := engine.ValidateStep(profile, "overview", SetupCollected{"overview": {"acknowledged": true}})
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	if !strings.Contains(err.Error(), `"_ack": true`) {
+		t.Fatalf("expected error to mention _ack payload, got %q", err.Error())
+	}
 }
 
 func TestSetupEngine_ComposeWizardPrompt(t *testing.T) {

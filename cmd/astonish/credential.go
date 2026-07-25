@@ -7,9 +7,9 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/charmbracelet/huh"
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/credentials"
+	"github.com/charmbracelet/huh"
 )
 
 // printSecretField writes a labeled credential field to stdout.
@@ -96,7 +96,7 @@ func handleCredentialList() error {
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 
 	if len(creds) > 0 {
-		fmt.Println("HTTP Credentials:")
+		fmt.Println("Credentials:")
 		fmt.Fprintf(w, "  NAME\tTYPE\n")
 		fmt.Fprintf(w, "  ----\t----\n")
 		for name, credType := range creds {
@@ -114,7 +114,7 @@ func handleCredentialList() error {
 		fmt.Println()
 	}
 
-	fmt.Printf("%d HTTP credential(s), %d secret(s)\n", len(creds), len(secrets))
+	fmt.Printf("%d credential(s), %d secret(s)\n", len(creds), len(secrets))
 	return nil
 }
 
@@ -157,6 +157,7 @@ func handleCredentialAdd(name string) error {
 					huh.NewOption("OAuth Client Credentials (auto token refresh)", "oauth_client_credentials"),
 					huh.NewOption("OAuth Authorization Code (user-authorized, with refresh token)", "oauth_authorization_code"),
 					huh.NewOption("OpenStack Keystone (auto X-Auth-Token)", "openstack_keystone"),
+					huh.NewOption("Raw Content (JSON/YAML/text file payload)", "raw_content"),
 				).
 				Value(&credType),
 		),
@@ -182,6 +183,8 @@ func handleCredentialAdd(name string) error {
 		cred, err = collectOAuthAuthCodeCred()
 	case credentials.CredOpenStackKeystone:
 		cred, err = collectKeystoneCred()
+	case credentials.CredRawContent:
+		cred, err = collectRawContentCred()
 	default:
 		return fmt.Errorf("unknown credential type: %s", credType)
 	}
@@ -203,7 +206,7 @@ func handleCredentialRemove(name string) error {
 		return err
 	}
 
-	// Try HTTP credentials first
+	// Try named credentials first
 	if store.Get(name) != nil {
 		if err := store.Remove(name); err != nil {
 			return fmt.Errorf("failed to remove: %w", err)
@@ -281,6 +284,10 @@ func handleCredentialTest(name string) error {
 	case credentials.CredPassword:
 		fmt.Printf("Credential %q configured (password, user: %s)\n", name, cred.Username)
 		fmt.Println("Use resolve_credential in chat to retrieve username/password for SSH/FTP/database connections.")
+
+	case credentials.CredRawContent:
+		fmt.Printf("Credential %q configured (raw_content, %d bytes)\n", name, len(cred.Content))
+		fmt.Println("Use resolve_credential field content or fleet credential_injection field content.")
 
 	default:
 		fmt.Printf("Credential %q configured (type: %s)\n", name, cred.Type)
@@ -521,6 +528,36 @@ func collectOAuthAuthCodeCred() (*credentials.Credential, error) {
 	}, nil
 }
 
+func collectRawContentCred() (*credentials.Credential, error) {
+	contentType := "text/plain"
+	content := ""
+
+	err := huh.NewForm(
+		huh.NewGroup(
+			huh.NewInput().
+				Title("Content type (optional)").
+				Description("e.g., text/plain, application/json, application/yaml, text/x-dotenv").
+				Value(&contentType),
+			huh.NewText().
+				Title("Raw content").
+				Description("Paste the exact JSON, YAML, dotenv, or text content to store encrypted.").
+				Value(&content),
+		),
+	).Run()
+	if err != nil {
+		return nil, err
+	}
+	if content == "" {
+		return nil, fmt.Errorf("content is required")
+	}
+
+	return &credentials.Credential{
+		Type:        credentials.CredRawContent,
+		Content:     content,
+		ContentType: contentType,
+	}, nil
+}
+
 func collectKeystoneCred() (*credentials.Credential, error) {
 	var method string
 	err := huh.NewForm(
@@ -655,7 +692,7 @@ func handleCredentialShow(name string) error {
 		}
 	}
 
-	// Try HTTP credential first
+	// Try named credential first
 	cred := store.Get(name)
 	if cred != nil {
 		fmt.Printf("Credential: %s\n", name)
@@ -688,6 +725,11 @@ func handleCredentialShow(name string) error {
 			if cred.Scope != "" {
 				fmt.Printf("Scope:         %s\n", cred.Scope)
 			}
+		case credentials.CredRawContent:
+			if cred.ContentType != "" {
+				fmt.Printf("Content Type:  %s\n", cred.ContentType)
+			}
+			printSecretField("Content:\n", cred.Content)
 		case credentials.CredOpenStackKeystone:
 			fmt.Printf("Auth URL:      %s\n", cred.AuthURL)
 			if cred.ApplicationCredentialID != "" {

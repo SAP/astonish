@@ -295,6 +295,33 @@ func TestCredential_BackwardCompat_OldPgstoreEncrypted(t *testing.T) {
 
 // TestCredential_NoMasterKey verifies graceful degradation when no master key
 // is configured: data is stored as plain JSON and can be read back.
+func TestCredential_RawContentRoundTrip(t *testing.T) {
+	cs, _ := setupPersonalStore(t)
+	ctx := context.Background()
+
+	content := "providers:\n  alpaca:\n    key: raw-secret-12345\n"
+	cred := &store.Credential{
+		Type:        store.CredRawContent,
+		Content:     content,
+		ContentType: "application/yaml",
+	}
+	if err := cs.Set(ctx, "providers-file", cred); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+
+	got := cs.Get(ctx, "providers-file")
+	if got == nil {
+		t.Fatal("Get returned nil")
+	}
+	if got.Type != store.CredRawContent || got.Content != content || got.ContentType != "application/yaml" {
+		t.Fatalf("Get = %#v", got)
+	}
+	_, _, err := cs.Resolve(ctx, "providers-file")
+	if err == nil || !strings.Contains(err.Error(), "raw content") {
+		t.Fatalf("Resolve error = %v, want raw content rejection", err)
+	}
+}
+
 func TestCredential_NoMasterKey(t *testing.T) {
 	// Ensure no master key is available via env or file.
 	t.Setenv("ASTONISH_MASTER_KEY", "")

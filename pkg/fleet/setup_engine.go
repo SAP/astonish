@@ -82,7 +82,7 @@ func (e *SetupEngine) ValidateStep(profile *SetupProfile, stepID string, collect
 				return nil
 			}
 		}
-		return fmt.Errorf("step %q: acknowledge before continuing", stepID)
+		return fmt.Errorf("step %q: acknowledge before continuing with values {\"_ack\": true}", stepID)
 	}
 	if step.EffectiveType() == "review" {
 		return nil
@@ -143,11 +143,11 @@ func (e *SetupEngine) BuildPlanArgs(profile *SetupProfile, templateKey string, c
 	}
 
 	build := &SetupPlanBuild{
-		BaseFleetKey:    templateKey,
-		SetupProfileKey: profile.Key,
-		ChannelConfig:   map[string]any{},
-		Artifacts:       map[string]PlanArtifactConfig{},
-		Credentials:     map[string]string{},
+		BaseFleetKey:      templateKey,
+		SetupProfileKey:   profile.Key,
+		ChannelConfig:     map[string]any{},
+		Artifacts:         map[string]PlanArtifactConfig{},
+		Credentials:       map[string]string{},
 		BehaviorOverrides: map[string]string{},
 	}
 

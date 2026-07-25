@@ -34,15 +34,15 @@ func (m *memCredStore) Count(_ context.Context) int { return len(m.creds) }
 func (m *memCredStore) Resolve(_ context.Context, name string) (string, string, error) {
 	return store.ResolveCredentialHeader(name, m.Get(context.Background(), name), nil)
 }
-func (m *memCredStore) InvalidateToken(_ context.Context, _ string) {}
-func (m *memCredStore) SetSecret(_ context.Context, _, _ string) error { return nil }
+func (m *memCredStore) InvalidateToken(_ context.Context, _ string)                 {}
+func (m *memCredStore) SetSecret(_ context.Context, _, _ string) error              { return nil }
 func (m *memCredStore) SetSecretBatch(_ context.Context, _ map[string]string) error { return nil }
-func (m *memCredStore) GetSecret(_ context.Context, _ string) string { return "" }
-func (m *memCredStore) RemoveSecret(_ context.Context, _ string) error { return nil }
-func (m *memCredStore) HasSecrets(_ context.Context) bool { return false }
-func (m *memCredStore) SecretCount(_ context.Context) int { return 0 }
-func (m *memCredStore) ListSecrets(_ context.Context) []string { return nil }
-func (m *memCredStore) Reload(_ context.Context) error { return nil }
+func (m *memCredStore) GetSecret(_ context.Context, _ string) string                { return "" }
+func (m *memCredStore) RemoveSecret(_ context.Context, _ string) error              { return nil }
+func (m *memCredStore) HasSecrets(_ context.Context) bool                           { return false }
+func (m *memCredStore) SecretCount(_ context.Context) int                           { return 0 }
+func (m *memCredStore) ListSecrets(_ context.Context) []string                      { return nil }
+func (m *memCredStore) Reload(_ context.Context) error                              { return nil }
 
 func TestPlanBoundCredentialStore_Allowlist(t *testing.T) {
 	inner := &memCredStore{creds: map[string]*store.Credential{
@@ -129,6 +129,35 @@ func TestBuildInjectionEnv_FileField(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = credentials.ResolveField(credentials.NewStoreAdapter(cs), "juicytrade-providers", "value")
+}
+
+func TestBuildInjectionEnv_RawContentField(t *testing.T) {
+	yamlContent := "providers:\n  alpaca:\n    key: raw-secret-12345\n"
+	plan := &FleetPlan{
+		Key: "p1",
+		Credentials: map[string]string{
+			"providers": "providers-file",
+		},
+		CredentialInjection: &CredentialInjection{
+			Files: []FileInjection{
+				{Credential: "providers", Path: "/root/app/config/providers.yaml", Field: "content", Format: "yaml"},
+			},
+		},
+	}
+	cs := &memCredStore{creds: map[string]*store.Credential{
+		"providers-file": {Type: store.CredRawContent, Content: yamlContent, ContentType: "application/yaml"},
+	}}
+	resolved, err := ResolveCredentialsPlatform(context.Background(), plan, cs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved["providers"].Content != yamlContent {
+		t.Fatalf("resolved content mismatch")
+	}
+	val, err := extractCredentialField(context.Background(), cs, "providers-file", "content", resolved["providers"])
+	if err != nil || val != yamlContent {
+		t.Fatalf("extract content: %v %q", err, val)
+	}
 }
 
 func TestValidateFileInjectionPaths_RejectsRelative(t *testing.T) {

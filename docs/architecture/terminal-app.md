@@ -6,14 +6,14 @@ Astonish ships a **fullscreen terminal chat app** comparable to Claude Code, Ope
 
 **Chat is always platform-backed.** Even a local installation requires authentication against the platform (`astonish login <url>`). There is **no** in-process / personal-mode CLI chat path.
 
-**Entry:** `astonish chat` (requires login).  
-**Future:** bare `astonish` on a TTY may open the same app.
+**Entry:** `astonish chat` (requires login). On an interactive TTY with an existing login, bare `astonish` opens the same app.
 
 ## Architecture
 
 ```mermaid
 flowchart TB
   subgraph cmd [cmd/astonish]
+    bare[bare astonish TTY entry]
     chat[chat command]
     login[login]
   end
@@ -30,6 +30,7 @@ flowchart TB
     Agent[ChatAgent / tools / sandbox]
   end
   login --> chat
+  bare --> chat
   chat --> RunTUI
   RunTUI --> PlatformBE
   RunTUI --> App
@@ -51,7 +52,7 @@ flowchart TB
 
 ### Auth requirement
 
-If `client.IsRemoteMode()` is false (no `~/.config/astonish/remote.yaml` / login), `astonish chat` exits with instructions to run `astonish login <url>`.
+If `client.IsRemoteMode()` is false (no `~/.config/astonish/remote.yaml` / login), `astonish chat` exits with instructions to run `astonish login <url>`. Bare `astonish` only launches the TUI when both stdin/stdout are TTYs and the CLI is already logged in; otherwise it keeps normal help/error behavior for scripts.
 
 ### Event model
 
@@ -110,7 +111,8 @@ During a turn with tools, there is **one** agent bubble:
 |-------|---------|
 | Done | Composer, markdown/code/tables, sticky Thinking, activity + diffs |
 | Done | Approval overlay (`y`/`n`), sessions picker (`/sessions`, `ctrl+l`), resume history, `/new` |
-| Later | `@file`, plan mode, reconnect polish, bare `astonish` entry |
+| Done | Bare `astonish` TTY entry and local `@file` mention completion/context injection |
+| Later | Plan mode and deeper reconnect polish |
 
 ### Approvals
 
@@ -124,15 +126,24 @@ follow-up `RunTurn` message (same as Studio).
 - `ctrl+n` or `/new` — clear local session id; next message creates a new server session
 - `astonish chat --resume <id>` — loads history via `GET /api/studio/sessions/{id}` on open
 
+### `@file` mentions
+
+Typing `@` plus part of a local relative path opens a fuzzy file picker above the composer. Selecting a file inserts `@path/to/file`. On submit, the terminal app reads each mentioned file from the current working directory and appends a bounded `<context from @file mentions>` section to the message sent to the platform, while the transcript keeps showing the user's original text. Absolute paths, directory mentions, workspace escapes, and oversized files are rejected before the turn is sent.
+
+### Reconnect behavior
+
+If the Studio SSE connection returns a read error after a session id is known, the platform backend checks `GET /api/studio/sessions/{id}/status`. If the server still has an active runner, the TUI reconnects to `GET /api/studio/sessions/{id}/stream` and continues mapping SSE events into the same transcript. A completed stream (`io.EOF`) remains the normal end-of-turn path.
+
 ## CLI behavior
 
 | Invocation | Behavior |
 |------------|----------|
 | `astonish login <url>` | Authenticate to platform |
+| `astonish` | TUI against platform when stdin/stdout are TTYs and login exists |
 | `astonish chat` | TUI against platform |
 | `astonish chat --resume ID` | Resume session |
 | `astonish chat model provider:model` | Pin model via platform API |
-| Without login | Error: run `astonish login` |
+| Without login | Error: run `astonish login` for `chat`; bare `astonish` prints normal usage |
 
 ## Invariants
 

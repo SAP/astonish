@@ -7,6 +7,8 @@ Fullscreen terminal chat app for Astonish (Claude Code / OpenCode–style).
 - `app.go` — bubbletea root model (header, transcript viewport, status, input)
 - `approval.go` — tool approval overlay (`y`/`n`/options)
 - `sessions.go` — sessions picker + resume/new session
+- `commands.go` — slash command palette definitions and filtering
+- `file_completion.go` — local `@file` completion and bounded inline context expansion
 - `theme.go` — lipgloss theme tokens (numbers, +/−, brand, NO_COLOR)
 - `wrap.go` — content margins, line truncation, padding
 - `events/` — event types + transcript reducer (+ `LoadHistory`)
@@ -23,6 +25,7 @@ Fullscreen terminal chat app for Astonish (Claude Code / OpenCode–style).
 ## Entry points
 
 - `astonish chat` → `launcher.RunChatTUI` → `tui.Run`
+- bare `astonish` → same path when stdin/stdout are TTYs and login exists
 
 ## When editing
 

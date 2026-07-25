@@ -13,15 +13,21 @@ import (
 
 	"github.com/SAP/astonish/pkg/client"
 	"github.com/SAP/astonish/pkg/version"
+	"golang.org/x/term"
 )
 
 // Execute is the main entry point for the CLI
 func Execute() error {
-	if len(os.Args) < 2 || os.Args[1] == "-h" || os.Args[1] == "--help" {
-		printUsage()
-		if len(os.Args) < 2 {
-			return fmt.Errorf("no command provided")
+	if len(os.Args) < 2 {
+		if shouldLaunchBareChat() {
+			checkForUpdates()
+			return handleChatCommand(nil)
 		}
+		printUsage()
+		return fmt.Errorf("no command provided")
+	}
+	if os.Args[1] == "-h" || os.Args[1] == "--help" {
+		printUsage()
 		return nil
 	}
 
@@ -102,6 +108,18 @@ func Execute() error {
 		printUsage()
 		return fmt.Errorf("unknown command: %s", command)
 	}
+}
+
+func shouldLaunchBareChat() bool {
+	return shouldLaunchBareChatWith(
+		client.IsRemoteMode(),
+		term.IsTerminal(int(os.Stdin.Fd())),
+		term.IsTerminal(int(os.Stdout.Fd())),
+	)
+}
+
+func shouldLaunchBareChatWith(remoteMode, stdinTTY, stdoutTTY bool) bool {
+	return remoteMode && stdinTTY && stdoutTTY
 }
 
 func printUsage() {

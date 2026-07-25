@@ -242,7 +242,7 @@ func (b *platformBackend) RunTurn(ctx context.Context, message string) (<-chan e
 	out := make(chan events.Event, 64)
 	go func() {
 		defer close(out)
-		defer stream.Close()
+		defer func() { _ = stream.Close() }()
 
 		out <- events.NewStatus("Thinking…")
 
@@ -256,6 +256,13 @@ func (b *platformBackend) RunTurn(ctx context.Context, message string) (<-chan e
 
 			sev, err := stream.Next()
 			if err != nil {
+				if err != io.EOF && sessionID != "" {
+					if reconnected, ok := b.tryReconnectStream(ctx, out, sessionID, debug, err); ok {
+						_ = stream.Close()
+						stream = reconnected
+						continue
+					}
+				}
 				if err != io.EOF {
 					out <- events.NewError(err.Error())
 				}
@@ -269,6 +276,7 @@ func (b *platformBackend) RunTurn(ctx context.Context, message string) (<-chan e
 					b.mu.Lock()
 					b.sessionID = ev.SessionID
 					b.mu.Unlock()
+					sessionID = ev.SessionID
 				}
 				select {
 				case out <- ev:
@@ -282,6 +290,29 @@ func (b *platformBackend) RunTurn(ctx context.Context, message string) (<-chan e
 	}()
 
 	return out, nil
+}
+
+func (b *platformBackend) tryReconnectStream(ctx context.Context, out chan<- events.Event, sessionID string, debug bool, cause error) (*client.SSEStream, bool) {
+	select {
+	case <-ctx.Done():
+		return nil, false
+	default:
+	}
+
+	running, statusErr := b.client.GetSessionStatus(sessionID)
+	if statusErr != nil || !running {
+		return nil, false
+	}
+	out <- events.NewStatus("Connection dropped; reconnecting…")
+	stream, err := b.client.ReconnectSession(sessionID)
+	if err != nil {
+		if debug {
+			out <- events.NewSystem(fmt.Sprintf("Reconnect failed after stream error %q: %v", cause, err))
+		}
+		return nil, false
+	}
+	out <- events.NewStatus("Reconnected…")
+	return stream, true
 }
 
 // mapSSEToEvents converts one Studio SSE frame into zero or more TUI events.

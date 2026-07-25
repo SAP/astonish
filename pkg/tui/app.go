@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -85,6 +86,8 @@ type model struct {
 	sessions sessionsState
 	// slash command completion popup (active when composer starts with /)
 	slash slashCompletion
+	// @file completion popup (active while typing a trailing @token)
+	files fileCompletion
 }
 
 func newModel(parent context.Context, cfg Config) model {
@@ -231,48 +234,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		// Slash completion navigation (before enter-to-send).
+		// Completion navigation (before enter-to-send). Slash wins at start of input;
+		// @file wins everywhere else while typing a trailing @token.
 		if m.slash.active && len(m.slash.matches) > 0 {
-			switch msg.String() {
-			case "up":
-				if m.slash.cursor > 0 {
-					m.slash.cursor--
-				}
-				return m, nil
-			case "down", "tab":
-				if m.slash.cursor < len(m.slash.matches)-1 {
-					m.slash.cursor++
-				} else if msg.String() == "tab" {
-					// wrap tab
-					m.slash.cursor = 0
-				}
-				return m, nil
-			case "shift+tab":
-				if m.slash.cursor > 0 {
-					m.slash.cursor--
-				} else {
-					m.slash.cursor = len(m.slash.matches) - 1
-				}
-				return m, nil
-			case "esc":
-				m.slash = slashCompletion{}
-				return m, nil
-			case "enter":
-				// Accept highlighted command into the input, then run it.
-				if cmd, ok := m.slash.selectedCommand(); ok {
-					m.ta.SetValue(completionValue(cmd))
-					m.ta.CursorEnd()
-					m.slash = slashCompletion{}
-					return m.submit()
-				}
-			case "ctrl+y":
-				// Complete into input without submitting.
-				if cmd, ok := m.slash.selectedCommand(); ok {
-					m.ta.SetValue(completionValue(cmd))
-					m.ta.CursorEnd()
-					m.syncSlashCompletion()
-				}
-				return m, nil
+			if next, cmd, handled := m.handleSlashCompletionKey(msg); handled {
+				return next, cmd
+			}
+		}
+		if m.files.active && len(m.files.matches) > 0 {
+			if next, cmd, handled := m.handleFileCompletionKey(msg); handled {
+				return next, cmd
 			}
 		}
 
@@ -365,8 +336,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.layout()
 			m.refreshViewport()
 		}
-		// Keep slash completion in sync with composer value after typing.
+		// Keep completion popups in sync with composer value after typing.
 		m.syncSlashCompletion()
+		m.syncFileCompletion()
 	}
 	return m, tea.Batch(cmds...)
 }
@@ -399,6 +371,118 @@ func (m *model) syncSlashCompletion() {
 		matches: matches,
 		cursor:  cursor,
 	}
+	if m.slash.active {
+		m.files = fileCompletion{}
+	}
+}
+
+func (m *model) syncFileCompletion() {
+	if m.slash.active {
+		m.files = fileCompletion{}
+		return
+	}
+	ok, query := parseFileMentionInput(m.ta.Value())
+	if !ok {
+		m.files = fileCompletion{}
+		return
+	}
+	matches := listFileCandidates(".", query)
+	cursor := m.files.cursor
+	if cursor >= len(matches) {
+		cursor = len(matches) - 1
+	}
+	if cursor < 0 {
+		cursor = 0
+	}
+	m.files = fileCompletion{
+		active:  len(matches) > 0,
+		query:   query,
+		matches: matches,
+		cursor:  cursor,
+	}
+}
+
+func (m model) handleSlashCompletionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
+	switch msg.String() {
+	case "up":
+		if m.slash.cursor > 0 {
+			m.slash.cursor--
+		}
+		return m, nil, true
+	case "down", "tab":
+		if m.slash.cursor < len(m.slash.matches)-1 {
+			m.slash.cursor++
+		} else if msg.String() == "tab" {
+			m.slash.cursor = 0
+		}
+		return m, nil, true
+	case "shift+tab":
+		if m.slash.cursor > 0 {
+			m.slash.cursor--
+		} else {
+			m.slash.cursor = len(m.slash.matches) - 1
+		}
+		return m, nil, true
+	case "esc":
+		m.slash = slashCompletion{}
+		return m, nil, true
+	case "enter":
+		if cmd, ok := m.slash.selectedCommand(); ok {
+			m.ta.SetValue(completionValue(cmd))
+			m.ta.CursorEnd()
+			m.slash = slashCompletion{}
+			next, teaCmd := m.submit()
+			return next, teaCmd, true
+		}
+	case "ctrl+y":
+		if cmd, ok := m.slash.selectedCommand(); ok {
+			m.ta.SetValue(completionValue(cmd))
+			m.ta.CursorEnd()
+			m.syncSlashCompletion()
+		}
+		return m, nil, true
+	}
+	return m, nil, false
+}
+
+func (m model) handleFileCompletionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
+	switch msg.String() {
+	case "up":
+		if m.files.cursor > 0 {
+			m.files.cursor--
+		}
+		return m, nil, true
+	case "down", "tab":
+		if m.files.cursor < len(m.files.matches)-1 {
+			m.files.cursor++
+		} else if msg.String() == "tab" {
+			m.files.cursor = 0
+		}
+		return m, nil, true
+	case "shift+tab":
+		if m.files.cursor > 0 {
+			m.files.cursor--
+		} else {
+			m.files.cursor = len(m.files.matches) - 1
+		}
+		return m, nil, true
+	case "esc":
+		m.files = fileCompletion{}
+		return m, nil, true
+	case "enter", "ctrl+y":
+		if file, ok := m.files.selectedFile(); ok {
+			prevH := m.composerTextHeight()
+			m.ta.SetValue(replaceActiveFileMention(m.ta.Value(), file.Path))
+			m.ta.CursorEnd()
+			m.files = fileCompletion{}
+			if m.ready && m.composerTextHeight() != prevH {
+				m.layout()
+				m.refreshViewport()
+			}
+		}
+		return m, nil, true
+	}
+	return m, nil, false
 }
 
 // insertNewline inserts a line break in the composer (Shift+Enter / Ctrl+J).
@@ -424,6 +508,9 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	m.slash = slashCompletion{}
+	m.files = fileCompletion{}
+
 	// Local slash commands (minimal set for PR1).
 	if strings.HasPrefix(text, "/") {
 		return m.handleSlash(text)
@@ -440,13 +527,24 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 		m.tr.ClearApproval()
 	}
 
+	message := text
+	if !m.tr.Awaiting {
+		expanded, err := expandFileMentions(text, ".")
+		if err != nil {
+			m.tr.Apply(events.NewError(err.Error()))
+			m.refreshViewport()
+			return m, nil
+		}
+		message = expanded
+	}
+
 	m.tr.Apply(events.NewUser(text))
 	m.refreshViewport()
 
 	turnCtx, cancel := context.WithCancel(m.ctx)
 	m.turnCancel = cancel
 
-	ch, err := m.backend.RunTurn(turnCtx, text)
+	ch, err := m.backend.RunTurn(turnCtx, message)
 	if err != nil {
 		cancel()
 		m.turnCancel = nil
@@ -463,6 +561,9 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 	switch {
 	case text == "/help" || text == "/?":
 		m.tr.Apply(events.NewSystem(helpText()))
+	case text == "/files":
+		cwd, _ := os.Getwd()
+		m.tr.Apply(events.NewSystem("Type `@` plus part of a local path to attach file context from " + cwd + "."))
 	case text == "/status":
 		m.tr.Apply(events.NewSystem(m.statusText()))
 	case text == "/exit" || text == "/quit" || text == "/q":
@@ -502,9 +603,11 @@ Commands:
   /status        Show session / provider / model
   /sessions      Open sessions picker (also ctrl+l)
   /new           Start a new session (also ctrl+n)
+  /files         Show @file context help
   /exit          Quit (/quit, /q)
 
 Type / to open command completion (filters as you type).
+Type @ plus part of a local path to attach file context.
   ↑↓ / tab       Move selection
   enter          Run selected command
   esc            Close completion
@@ -778,7 +881,7 @@ func (m model) renderActivity(it events.Item, width int) string {
 	if it.Expanded {
 		lead = "▾ "
 	}
-	head := th.Activity.Render(lead+summary)
+	head := th.Activity.Render(lead + summary)
 	if statsStr != "" {
 		// Right-align metrics on the same row when width allows.
 		pad := width - lipgloss.Width(head) - lipgloss.Width(statsStr) - 1
@@ -878,13 +981,21 @@ func (m model) View() string {
 	th := m.theme
 	sep := th.Border.Render(strings.Repeat("─", max(1, m.width)))
 
-	// Slash completion sits just above the composer (filter-as-you-type).
+	// Completion popups sit just above the composer (filter-as-you-type).
 	composerBlock := m.renderComposer()
-	if m.slash.active && len(m.slash.matches) > 0 && !m.tr.Awaiting && !m.sessions.open {
-		composerBlock = lipgloss.JoinVertical(lipgloss.Left,
-			m.renderSlashCompletion(),
-			composerBlock,
-		)
+	if !m.tr.Awaiting && !m.sessions.open {
+		switch {
+		case m.slash.active && len(m.slash.matches) > 0:
+			composerBlock = lipgloss.JoinVertical(lipgloss.Left,
+				m.renderSlashCompletion(),
+				composerBlock,
+			)
+		case m.files.active && len(m.files.matches) > 0:
+			composerBlock = lipgloss.JoinVertical(lipgloss.Left,
+				m.renderFileCompletion(),
+				composerBlock,
+			)
+		}
 	}
 
 	main := lipgloss.JoinVertical(lipgloss.Left,
@@ -972,6 +1083,47 @@ func (m model) renderSlashCompletion() string {
 		Render(body)
 }
 
+// renderFileCompletion draws the filterable @file candidate list above the input.
+func (m model) renderFileCompletion() string {
+	th := m.theme
+	w := m.width - 2
+	if w < 24 {
+		w = 24
+	}
+
+	var b strings.Builder
+	b.WriteString(th.Muted.Render("Files") + th.Muted.Render("  ↑↓  tab  enter attach  esc") + "\n")
+	maxShow := 8
+	start := 0
+	if m.files.cursor >= maxShow {
+		start = m.files.cursor - maxShow + 1
+	}
+	end := start + maxShow
+	if end > len(m.files.matches) {
+		end = len(m.files.matches)
+	}
+	for i := start; i < end; i++ {
+		line := "@" + m.files.matches[i].Path
+		if lipgloss.Width(line) > w-4 {
+			runes := []rune(line)
+			if len(runes) > w-5 {
+				line = string(runes[:w-5]) + "…"
+			}
+		}
+		if i == m.files.cursor {
+			b.WriteString(th.Brand.Render("› " + line))
+		} else {
+			b.WriteString(th.Text.Render("  " + line))
+		}
+		b.WriteByte('\n')
+	}
+	body := strings.TrimRight(b.String(), "\n")
+	return th.InputBorder.
+		Width(w).
+		Padding(0, 1).
+		Render(body)
+}
+
 func (m model) renderHeader() string {
 	th := m.theme
 	mode := first(m.info.Mode, "platform")
@@ -981,7 +1133,7 @@ func (m model) renderHeader() string {
 	}
 	left := th.Header.Render("Astonish") + th.Muted.Render(" · "+mode)
 	if sid != "" {
-		left += th.Muted.Render(" · "+sid)
+		left += th.Muted.Render(" · " + sid)
 	}
 	// URL only in header; model lives in footer meta (Grok-style).
 	right := ""
@@ -1059,8 +1211,11 @@ func (m model) renderHints() string {
 	if m.slash.active {
 		return th.Hint.Render("↑↓ select  ·  enter run  ·  tab next  ·  esc close")
 	}
-	full := "Enter send  ·  / commands  ·  shift+enter newline  ·  ctrl+l sessions  ·  ctrl+c quit"
-	short := "Enter send  ·  / commands  ·  ctrl+l sessions"
+	if m.files.active {
+		return th.Hint.Render("↑↓ select  ·  enter attach file  ·  tab next  ·  esc close")
+	}
+	full := "Enter send  ·  / commands  ·  @ files  ·  shift+enter newline  ·  ctrl+l sessions  ·  ctrl+c quit"
+	short := "Enter send  ·  / commands  ·  @ files  ·  ctrl+l sessions"
 	line := full
 	if m.width > 0 && lipgloss.Width(full) > m.width {
 		line = short

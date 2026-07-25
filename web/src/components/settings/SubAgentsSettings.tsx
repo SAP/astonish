@@ -1,6 +1,14 @@
 import { useState, useEffect } from 'react'
-import { Save, AlertCircle, Check } from 'lucide-react'
-import { saveFullConfigSection, inputClass, inputStyle, labelStyle, hintStyle, sectionBorderStyle, saveButtonStyle } from './settingsApi'
+import { AlertCircle, Check, Loader2, Save } from 'lucide-react'
+
+import { Alert, AlertDescription } from '@/components/ui/alert'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Switch } from '@/components/ui/switch'
+
+import { saveFullConfigSection } from './settingsApi'
 
 export default function SubAgentsSettings({ config, onSaved }: { config: Record<string, any>; onSaved?: () => void }) {
   const [form, setForm] = useState({
@@ -41,108 +49,89 @@ export default function SubAgentsSettings({ config, onSaved }: { config: Record<
   }
 
   return (
-    <div className="max-w-xl space-y-6">
-      {/* Master Toggle */}
-      <div className="flex items-center justify-between">
-        <div>
-          <label className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>
-            Enable Sub-Agents
-          </label>
-          <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>
+    <div className="max-w-2xl space-y-6">
+      <Card className="border-border bg-card shadow-sm">
+        <CardHeader>
+          <CardTitle className="text-base">Sub-Agents</CardTitle>
+          <CardDescription>
             Allow the AI to delegate subtasks to specialized sub-agents for parallel execution.
-          </p>
-        </div>
-        <button
-          onClick={() => setForm({ ...form, enabled: !form.enabled })}
-          className="relative w-11 h-6 rounded-full transition-colors"
-          style={{
-            background: form.enabled ? '#a855f7' : 'var(--bg-tertiary)',
-            border: `1px solid ${form.enabled ? '#a855f7' : 'var(--border-color)'}`
-          }}
-        >
-          <span
-            className="absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-transform bg-white"
-            style={{ transform: form.enabled ? 'translateX(20px)' : 'translateX(0)' }}
-          />
-        </button>
-      </div>
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex items-start justify-between gap-4 rounded-xl border border-border bg-background p-4">
+            <div>
+              <Label htmlFor="sub-agents-enabled">Enable Sub-Agents</Label>
+              <p className="mt-1 text-xs text-muted-foreground">Delegation can improve throughput on complex tasks.</p>
+            </div>
+            <Switch
+              id="sub-agents-enabled"
+              checked={form.enabled}
+              onCheckedChange={(checked) => setForm({ ...form, enabled: checked })}
+              aria-label="Enable sub-agents"
+            />
+          </div>
 
-      {form.enabled && (
-        <div className="pt-4 border-t space-y-4" style={sectionBorderStyle}>
-          <div>
-            <label className="block text-sm font-medium mb-2" style={labelStyle}>
-              Max Delegation Depth
-            </label>
-            <input
-              type="number"
-              value={form.max_depth}
-              onChange={(e) => setForm({ ...form, max_depth: parseInt(e.target.value) || 2 })}
-              min="1"
-              max="10"
-              className={inputClass}
-              style={inputStyle}
-            />
-            <p className="text-xs mt-1" style={hintStyle}>
-              Maximum nesting depth for sub-agent delegation chains.
-            </p>
-          </div>
-          <div>
-            <label className="block text-sm font-medium mb-2" style={labelStyle}>
-              Max Concurrent
-            </label>
-            <input
-              type="number"
-              value={form.max_concurrent}
-              onChange={(e) => setForm({ ...form, max_concurrent: parseInt(e.target.value) || 5 })}
-              min="1"
-              max="20"
-              className={inputClass}
-              style={inputStyle}
-            />
-            <p className="text-xs mt-1" style={hintStyle}>
-              Maximum number of sub-agents running in parallel.
-            </p>
-          </div>
-          <div>
-            <label className="block text-sm font-medium mb-2" style={labelStyle}>
-              Task Timeout (seconds)
-            </label>
-            <input
-              type="number"
-              value={form.task_timeout_sec}
-              onChange={(e) => setForm({ ...form, task_timeout_sec: parseInt(e.target.value) || 300 })}
-              min="30"
-              max="3600"
-              className={inputClass}
-              style={inputStyle}
-            />
-            <p className="text-xs mt-1" style={hintStyle}>
-              Maximum time per sub-agent task before it is cancelled.
-            </p>
-          </div>
-        </div>
-      )}
+          {form.enabled && (
+            <div className="grid gap-4 border-t pt-4 sm:grid-cols-3">
+              <div className="space-y-2">
+                <Label htmlFor="sub-agent-depth">Max Delegation Depth</Label>
+                <Input
+                  id="sub-agent-depth"
+                  type="number"
+                  value={form.max_depth}
+                  onChange={(e) => setForm({ ...form, max_depth: parseInt(e.target.value) || 2 })}
+                  min="1"
+                  max="10"
+                  className="bg-background"
+                />
+                <p className="text-xs text-muted-foreground">Maximum nesting depth for delegation chains.</p>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="sub-agent-concurrent">Max Concurrent</Label>
+                <Input
+                  id="sub-agent-concurrent"
+                  type="number"
+                  value={form.max_concurrent}
+                  onChange={(e) => setForm({ ...form, max_concurrent: parseInt(e.target.value) || 5 })}
+                  min="1"
+                  max="20"
+                  className="bg-background"
+                />
+                <p className="text-xs text-muted-foreground">Maximum sub-agents running in parallel.</p>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="sub-agent-timeout">Task Timeout (seconds)</Label>
+                <Input
+                  id="sub-agent-timeout"
+                  type="number"
+                  value={form.task_timeout_sec}
+                  onChange={(e) => setForm({ ...form, task_timeout_sec: parseInt(e.target.value) || 300 })}
+                  min="30"
+                  max="3600"
+                  className="bg-background"
+                />
+                <p className="text-xs text-muted-foreground">Maximum time before a sub-agent task is cancelled.</p>
+              </div>
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
-      {/* Save */}
-      <div className="flex items-center gap-3">
-        <button
-          onClick={handleSave}
-          disabled={saving}
-          className="flex items-center gap-2 px-4 py-2 rounded-lg text-white font-medium transition-all shadow-md hover:shadow-lg hover:scale-[1.02] active:scale-95 disabled:opacity-50"
-          style={saveButtonStyle}
-        >
-          <Save size={16} />
+      <div className="flex flex-wrap items-center gap-3">
+        <Button onClick={handleSave} disabled={saving}>
+          {saving ? <Loader2 className="animate-spin" /> : <Save />}
           {saving ? 'Saving...' : 'Save Changes'}
-        </button>
+        </Button>
         {saveSuccess && (
-          <span className="flex items-center gap-1 text-green-400 text-sm">
-            <Check size={16} /> Saved
+          <span className="flex items-center gap-1 text-sm text-[color:var(--success)]">
+            <Check className="size-4" /> Saved
           </span>
         )}
         {error && (
-          <span className="flex items-center gap-1 text-sm" style={{ color: 'var(--danger)' }}>
-            <AlertCircle size={16} /> {error}
-          </span>
+          <Alert variant="destructive" className="w-auto py-2">
+            <AlertCircle />
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
         )}
       </div>
     </div>

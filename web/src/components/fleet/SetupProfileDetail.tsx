@@ -156,7 +156,7 @@ export default function SetupProfileDetail({
   if (!profile) {
     return (
       <div className="flex-1 flex items-center justify-center">
-        <Loader size={24} className="animate-spin text-cyan-400" />
+        <Loader size={24} className="animate-spin text-primary" />
       </div>
     )
   }
@@ -171,18 +171,18 @@ export default function SetupProfileDetail({
           )}
           <div className="flex gap-2 mt-2">
             <span className="text-xs px-2 py-0.5 rounded font-mono" style={{ background: 'var(--bg-tertiary)', color: 'var(--text-muted)' }}>{profile.key}</span>
-            {profile.domain && <span className="text-xs px-2 py-0.5 rounded" style={{ background: 'rgba(6, 182, 212, 0.15)', color: '#22d3ee' }}>{profile.domain}</span>}
-            {isBundled && <span className="text-xs px-2 py-0.5 rounded" style={{ background: 'rgba(6, 182, 212, 0.25)', color: '#67e8f9' }}>Bundled</span>}
+            {profile.domain && <span className="text-xs px-2 py-0.5 rounded" style={{ background: 'var(--brand-muted)', color: 'var(--brand)' }}>{profile.domain}</span>}
+            {isBundled && <span className="text-xs px-2 py-0.5 rounded" style={{ background: 'color-mix(in oklab, var(--brand) 25%, transparent)', color: 'var(--brand)' }}>Bundled</span>}
           </div>
         </div>
         <div className="flex items-center gap-2 shrink-0">
           <button
             type="button"
             onClick={() => setCloneOpen(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors hover:bg-cyan-500/10"
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors hover:bg-primary/10"
             style={{ borderColor: 'var(--border-color)', color: 'var(--text-secondary)' }}
           >
-            <Copy size={12} className="text-cyan-400" /> Clone
+            <Copy size={12} className="text-primary" /> Clone
           </button>
           {!isBundled && (
             <button
@@ -204,7 +204,7 @@ export default function SetupProfileDetail({
             type="button"
             onClick={() => setTab(t)}
             className={`px-4 py-2.5 text-xs font-medium capitalize transition-colors border-b-2 -mb-px ${
-              tab === t ? 'border-cyan-400 text-cyan-400' : 'border-transparent hover:text-cyan-300'
+              tab === t ? 'border-primary text-primary' : 'border-transparent hover:text-primary'
             }`}
             style={{ color: tab === t ? undefined : 'var(--text-muted)' }}
           >
@@ -214,8 +214,8 @@ export default function SetupProfileDetail({
       </div>
 
       {isBundled && (
-        <div className="mx-6 mt-4 flex items-start gap-2 rounded-lg px-3 py-2 text-xs" style={{ background: 'rgba(6, 182, 212, 0.08)', color: 'var(--text-secondary)' }}>
-          <AlertCircle size={14} className="text-cyan-400 shrink-0 mt-0.5" />
+        <div className="mx-6 mt-4 flex items-start gap-2 rounded-lg px-3 py-2 text-xs" style={{ background: 'var(--brand-muted)', color: 'var(--text-secondary)' }}>
+          <AlertCircle size={14} className="text-primary shrink-0 mt-0.5" />
           Bundled profiles are read-only. Clone to create an editable copy you can customize and reference from your templates.
         </div>
       )}
@@ -235,7 +235,7 @@ export default function SetupProfileDetail({
                   type="button"
                   onClick={handleSaveProfile}
                   disabled={profileSaving}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white disabled:opacity-50"
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-primary hover:bg-primary/90 text-white disabled:opacity-50"
                 >
                   {profileSaving ? <Loader size={12} className="animate-spin" /> : <Save size={12} />}
                   Save steps
@@ -262,7 +262,7 @@ export default function SetupProfileDetail({
                 type="button"
                 onClick={handleSaveYaml}
                 disabled={saving || yamlLoading || !yamlDirty}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white transition-colors disabled:opacity-50"
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-primary hover:bg-primary/90 text-white transition-colors disabled:opacity-50"
               >
                 {saving ? <Loader size={12} className="animate-spin" /> : <Save size={12} />}
                 {saving ? 'Saving…' : 'Save YAML'}
@@ -272,7 +272,7 @@ export default function SetupProfileDetail({
           <div className="flex-1 overflow-hidden px-6 pb-6">
             {yamlLoading ? (
               <div className="flex items-center justify-center h-full">
-                <Loader size={24} className="animate-spin text-cyan-400" />
+                <Loader size={24} className="animate-spin text-primary" />
               </div>
             ) : (
               <div className="h-full rounded-lg overflow-hidden border" style={{ borderColor: 'var(--border-color)' }}>

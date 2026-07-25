@@ -12,7 +12,7 @@ export default function StartNode({ id, data, selected }: NodeProps<StartNodeTyp
       selected={selected}
       icon={Play} 
       nodeType="Start"
-      iconColor="#22c55e"
+      iconColor="var(--node-start)"
       hasTopHandle={false}
     />
   )

@@ -11,7 +11,7 @@ export default function EndNode({ data, selected }: NodeProps<EndNodeType>) {
       selected={selected}
       icon={Square} 
       nodeType="End"
-      iconColor="#ef4444"
+      iconColor="var(--node-end)"
       hasBottomHandle={false}
     />
   )

@@ -21,13 +21,13 @@ export default function PlanPanel({ data }: { data: PlanMessage }) {
   const statusColor = allDone
     ? (failedCount > 0 ? 'var(--warning, #e49425)' : 'var(--success, #149647)')
     : hasRunning
-      ? 'var(--accent, #5f4fb2)'
+      ? 'var(--brand)'
       : 'var(--text-muted)'
 
   const statusIcon = (status: string) => {
     switch (status) {
       case 'running':
-        return <Loader size={14} className="animate-spin shrink-0" style={{ color: 'var(--accent)' }} />
+        return <Loader size={14} className="animate-spin shrink-0" style={{ color: 'var(--brand)' }} />
       case 'complete':
         return <Check size={14} className="text-green-400 shrink-0" />
       case 'failed':
@@ -49,11 +49,11 @@ export default function PlanPanel({ data }: { data: PlanMessage }) {
       {/* Header */}
       <div className="flex items-center gap-2.5 px-4 py-3">
         {hasRunning && !allDone ? (
-          <Loader size={16} className="animate-spin shrink-0" style={{ color: 'var(--accent)' }} />
+          <Loader size={16} className="animate-spin shrink-0" style={{ color: 'var(--brand)' }} />
         ) : allDone ? (
           <Check size={16} className="text-green-400 shrink-0" />
         ) : (
-          <ListChecks size={16} className="shrink-0" style={{ color: 'var(--accent)' }} />
+          <ListChecks size={16} className="shrink-0" style={{ color: 'var(--brand)' }} />
         )}
         <span className="font-bold text-sm" style={{ color: 'var(--text-primary)' }}>
           {data.goal}

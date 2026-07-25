@@ -19,11 +19,11 @@ interface AppsViewProps {
 
 function EmptyState() {
   return (
-    <div className="flex-1 flex items-center justify-center">
+    <div className="flex flex-1 items-center justify-center">
       <div className="text-center">
-        <AppWindow size={48} className="mx-auto mb-4" style={{ color: 'rgba(16, 185, 129, 0.3)' }} />
-        <h2 className="text-lg font-semibold mb-2" style={{ color: 'var(--text-primary)' }}>Visual Apps</h2>
-        <p className="text-sm max-w-md" style={{ color: 'var(--text-muted)' }}>
+        <AppWindow size={48} className="mx-auto mb-4 text-[color:var(--success)]/30" />
+        <h2 className="mb-2 text-lg font-semibold text-foreground">Visual Apps</h2>
+        <p className="max-w-md text-sm text-muted-foreground">
           No apps saved yet. Generate a visual app in Chat by asking to build a
           dashboard, calculator, form, or any interactive UI — then click Save to
           keep it here.

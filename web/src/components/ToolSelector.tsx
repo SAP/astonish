@@ -127,10 +127,10 @@ export default function ToolSelector({
       <button
         type="button"
         onClick={() => setIsOpen(!isOpen)}
-        className="w-full px-3 py-2 rounded border text-sm text-left flex items-start justify-between transition-colors hover:border-purple-500/50 min-h-[38px]"
+        className="w-full px-3 py-2 rounded border text-sm text-left flex items-start justify-between transition-colors hover:border-primary/50 min-h-[38px]"
         style={{ 
           background: 'var(--bg-primary)', 
-          borderColor: isOpen ? 'rgba(124, 58, 237, 0.5)' : 'var(--border-color)', 
+          borderColor: isOpen ? 'color-mix(in oklab, var(--brand) 50%, transparent)' : 'var(--border-color)', 
           color: 'var(--text-primary)' 
         }}
       >
@@ -144,9 +144,9 @@ export default function ToolSelector({
                   key={tool}
                   className="inline-flex items-center gap-1 text-xs px-1.5 py-0.5 rounded border max-w-[150px] group"
                   style={{ 
-                    background: 'rgba(124, 58, 237, 0.1)', 
-                    color: '#a855f7',
-                    borderColor: 'rgba(124, 58, 237, 0.2)'
+                    background: 'var(--brand-muted)', 
+                    color: 'var(--brand)',
+                    borderColor: 'color-mix(in oklab, var(--brand-strong) 20%, transparent)'
                   }}
                   title={tool}
                 >
@@ -157,7 +157,7 @@ export default function ToolSelector({
                       e.stopPropagation()
                       onRemoveTool(tool)
                     }}
-                    className="flex-shrink-0 hover:bg-purple-500/30 rounded p-0.5 transition-colors"
+                    className="flex-shrink-0 hover:bg-primary/30 rounded p-0.5 transition-colors"
                     title={`Remove ${tool}`}
                   >
                     <X size={10} />
@@ -242,7 +242,7 @@ export default function ToolSelector({
                     {/* Group Header */}
                     <button
                       onClick={() => toggleGroup(source)}
-                      className="w-full px-3 py-2 flex items-center justify-between hover:bg-purple-500/10 transition-colors"
+                      className="w-full px-3 py-2 flex items-center justify-between hover:bg-primary/10 transition-colors"
                       style={{ background: 'var(--bg-tertiary)' }}
                     >
                       <div className="flex items-center gap-2">
@@ -251,7 +251,7 @@ export default function ToolSelector({
                         ) : (
                           <ChevronRight size={14} style={{ color: 'var(--text-muted)' }} />
                         )}
-                        <Server size={14} style={{ color: '#a855f7' }} />
+                        <Server size={14} style={{ color: 'var(--brand)' }} />
                         <span className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>
                           {source}
                         </span>
@@ -265,7 +265,7 @@ export default function ToolSelector({
                       {selectedInGroup > 0 && (
                         <span 
                           className="text-xs px-1.5 py-0.5 rounded"
-                          style={{ background: 'rgba(124, 58, 237, 0.2)', color: '#a855f7' }}
+                          style={{ background: 'color-mix(in oklab, var(--brand-strong) 20%, transparent)', color: 'var(--brand)' }}
                         >
                           {selectedInGroup} selected
                         </span>
@@ -282,14 +282,14 @@ export default function ToolSelector({
                             <button
                               key={tool.name}
                               onClick={() => handleToolClick(tool)}
-                              className={`w-full px-3 py-2 pl-9 text-left hover:bg-purple-500/10 transition-colors ${
-                                isSelected ? 'bg-purple-500/5' : ''
+                              className={`w-full px-3 py-2 pl-9 text-left hover:bg-primary/10 transition-colors ${
+                                isSelected ? 'bg-primary/5' : ''
                               }`}
                             >
                               <div className="flex items-start gap-2">
                                 <div 
                                   className={`w-4 h-4 rounded border flex-shrink-0 mt-0.5 flex items-center justify-center ${
-                                    isSelected ? 'bg-purple-600 border-purple-600' : ''
+                                    isSelected ? 'bg-primary border-primary' : ''
                                   }`}
                                   style={!isSelected ? { borderColor: 'var(--border-color)' } : {}}
                                 >

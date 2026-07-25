@@ -36,36 +36,35 @@ describe('Tool Execution Scenarios', () => {
 
       await result.sendMessage('Search for Go testing best practices')
 
-      // Tool activity block should appear (interstitial "Let me search" is folded as process text)
+      // Tool activity block should appear (one fold for the tool run)
       await waitFor(() => {
         expect(result.container.querySelector('[data-testid="tool-activity-block"]')).toBeTruthy()
         const text = result.container.textContent || ''
-        expect(text).toMatch(/1 search|Searching|web_search|1 note/i)
+        expect(text).toMatch(/1 search|Searching|web_search/i)
       }, { timeout: 5000 })
 
-      // Dimmed process narration is visible without expanding
-      await waitFor(() => {
-        expect(result.container.querySelector('[data-testid="activity-process-text"]')?.textContent)
-          .toMatch(/Let me search for that/)
-      }, { timeout: 5000 })
-
-      // Final user-facing text should appear outside the fold as an Agent bubble
+      // Sticky agent bubble shows only the latest agent text (mid-turn narration is superseded)
       await waitFor(() => {
         expect(screen.getByText(/best practices for Go testing/)).toBeInTheDocument()
       }, { timeout: 5000 })
 
-      // Interstitial is not labeled as a separate Agent bubble — only the final answer is
+      // Only one Agent bubble label — earlier agent chunks were replaced, not a second bubble
       const agentLabels = Array.from(result.container.querySelectorAll('div'))
         .filter(el => el.children.length === 0 && el.textContent === 'Agent')
       expect(agentLabels.length).toBe(1)
 
-      // Expand to confirm interstitial note was preserved in notes list
+      // Pre-tool narration is not kept as process text under the fold (sticky bubble model)
+      expect(result.container.querySelector('[data-testid="activity-process-text"]')).toBeNull()
+
+      // Expand to confirm the tool name is listed
       const activityBtn = result.container.querySelector(
         '[data-testid="tool-activity-block"] > button',
       ) as HTMLElement
       await result.user.click(activityBtn)
       await waitFor(() => {
-        expect(screen.getByTestId('activity-notes')).toBeInTheDocument()
+        const codeElements = result.container.querySelectorAll('code')
+        const names = Array.from(codeElements).map(el => el.textContent)
+        expect(names.some(n => n?.includes('web_search'))).toBe(true)
       }, { timeout: 5000 })
     })
   })
@@ -114,16 +113,16 @@ describe('Tool Execution Scenarios', () => {
 
       await result.sendMessage('Search for something')
 
-      // Final answer remains a visible Agent bubble after the fold
+      // Final answer is the sticky Agent bubble after the fold (replaces pre-tool narration)
       await waitFor(() => {
         expect(screen.getByText(/best practices for Go testing/)).toBeInTheDocument()
       }, { timeout: 5000 })
 
-      // Pre-tool narration is visible as dimmed process text (not lost / not a second Agent bubble)
-      await waitFor(() => {
-        expect(result.container.querySelector('[data-testid="activity-process-text"]')?.textContent)
-          .toMatch(/Let me search for that/)
-      }, { timeout: 5000 })
+      // Only one Agent bubble — mid-turn text was superseded, not a second bubble or process note
+      const agentLabels = Array.from(result.container.querySelectorAll('div'))
+        .filter(el => el.children.length === 0 && el.textContent === 'Agent')
+      expect(agentLabels.length).toBe(1)
+      expect(result.container.querySelector('[data-testid="activity-process-text"]')).toBeNull()
     })
   })
 

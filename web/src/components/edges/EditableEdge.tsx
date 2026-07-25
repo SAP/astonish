@@ -339,7 +339,7 @@ export default function EditableEdge({
         style={{
           ...style,
           strokeWidth: selected ? 3 : 2,
-          stroke: selected ? '#5b21b6' : (style as CSSProperties)?.stroke as string || '#805AD5'
+          stroke: selected ? 'var(--brand-strong)' : (style as CSSProperties)?.stroke as string || 'var(--brand)'
         }}
         interactionWidth={20}
         label={label}
@@ -371,7 +371,7 @@ export default function EditableEdge({
                  transform: `translate(-50%, -50%) translate(${handle.x}px, ${handle.y}px)`,
                  width: 12,
                  height: 12,
-                 backgroundColor: '#3b82f6',
+                 backgroundColor: 'var(--brand)',
                  border: '2px solid white',
                  borderRadius: 2,
                  cursor: 'grab',

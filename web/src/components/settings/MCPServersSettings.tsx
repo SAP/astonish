@@ -210,7 +210,7 @@ export default function MCPServersSettings({
                   : 'hover:bg-gray-600/20'
               }`}
               style={{
-                background: mcpViewMode === 'editor' ? 'linear-gradient(135deg, #a855f7 0%, #7c3aed 100%)' : 'transparent',
+                background: mcpViewMode === 'editor' ? 'var(--brand)' : 'transparent',
                 color: mcpViewMode !== 'editor' ? 'var(--text-secondary)' : undefined
               }}
             >
@@ -229,7 +229,7 @@ export default function MCPServersSettings({
                   : 'hover:bg-gray-600/20'
               }`}
               style={{
-                background: mcpViewMode === 'source' ? 'linear-gradient(135deg, #a855f7 0%, #7c3aed 100%)' : undefined,
+                background: mcpViewMode === 'source' ? 'var(--brand)' : undefined,
                 color: mcpViewMode !== 'source' ? 'var(--text-secondary)' : undefined
               }}
             >
@@ -244,9 +244,9 @@ export default function MCPServersSettings({
           <>
             {/* Standard Web Servers Section */}
             {standardServers.length > 0 && (
-              <div className="mb-4 p-4 rounded-lg border" style={{ borderColor: 'var(--border-color)', background: 'var(--bg-secondary)' }}>
+              <div className="mb-4 p-4 rounded-xl border" style={{ borderColor: 'var(--border-color)', background: 'var(--card)' }}>
                 <h4 className="text-sm font-medium mb-2 flex items-center gap-2" style={{ color: 'var(--text-primary)' }}>
-                  <Search size={14} style={{ color: '#a855f7' }} />
+                  <Search size={14} style={{ color: 'var(--brand)' }} />
                   Web Search Providers
                 </h4>
                 <p className="text-xs mb-3" style={{ color: 'var(--text-muted)' }}>
@@ -255,19 +255,21 @@ export default function MCPServersSettings({
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                   {standardServers.map(srv => (
                     <div key={srv.id} className="p-3 rounded-lg border transition-all" style={{ 
-                      borderColor: srv.installed ? 'rgba(34, 197, 94, 0.3)' : 'var(--border-color)',
-                      background: srv.installed ? 'rgba(34, 197, 94, 0.05)' : 'var(--bg-tertiary)'
+                      borderColor: srv.installed ? 'color-mix(in oklab, var(--success, #22c55e) 40%, transparent)' : 'var(--border-color)',
+                      background: srv.installed
+                        ? 'color-mix(in oklab, var(--success, #22c55e) 8%, var(--card))'
+                        : 'var(--bg-secondary)',
                     }}>
                       <div className="flex items-center justify-between mb-1">
                         <span className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>
                           {srv.displayName}
                           {srv.isDefault && !srv.installed && (
-                            <span className="ml-1 text-xs px-1.5 py-0.5 rounded-full" style={{ background: 'rgba(168, 85, 247, 0.15)', color: '#a855f7' }}>
+                            <span className="ml-1 text-xs px-1.5 py-0.5 rounded-full" style={{ background: 'var(--brand-muted)', color: 'var(--brand)' }}>
                               recommended
                             </span>
                           )}
                         </span>
-                        {srv.installed && <Check size={14} style={{ color: '#22c55e' }} />}
+                        {srv.installed && <Check size={14} style={{ color: 'var(--success, #22c55e)' }} />}
                       </div>
                       <p className="text-xs mb-2" style={{ color: 'var(--text-muted)' }}>
                         {srv.envVars?.length === 0 ? 'Browser Automation' : srv.capabilities.webSearch && srv.capabilities.webExtract ? 'Search + Extract' : 'Search only'}
@@ -331,7 +333,7 @@ export default function MCPServersSettings({
                               }}
                               disabled={setupLoading || srv.envVars.some(ev => ev.required && !setupEnv[ev.name])}
                               className="flex items-center gap-1 px-2 py-1 rounded text-xs font-medium text-white disabled:opacity-50"
-                              style={{ background: 'linear-gradient(135deg, #a855f7 0%, #7c3aed 100%)' }}
+                              style={{ background: 'var(--brand)' }}
                             >
                               {setupLoading ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />}
                               {srv.installed ? 'Reconfigure' : 'Install'}
@@ -379,7 +381,7 @@ export default function MCPServersSettings({
                         <button
                           onClick={() => { setSetupServer(srv.id); setSetupEnv({}); setSetupError(null) }}
                           className="text-xs font-medium px-2 py-1 rounded transition-colors"
-                          style={{ color: '#a855f7', background: 'rgba(168, 85, 247, 0.1)' }}
+                          style={{ color: 'var(--brand)', background: 'var(--brand-muted)' }}
                         >
                           Setup
                         </button>
@@ -394,7 +396,7 @@ export default function MCPServersSettings({
               <button
                 onClick={() => setShowMCPStore(true)}
                 className="flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-all shadow-md hover:shadow-lg hover:scale-[1.02] active:scale-95"
-                style={{ background: 'linear-gradient(135deg, #a855f7 0%, #7c3aed 100%)', color: '#fff' }}
+                style={{ background: 'var(--brand)', color: '#fff' }}
               >
                 <Package size={16} />
                 Browse Store
@@ -425,8 +427,8 @@ export default function MCPServersSettings({
                   <div
                     key={name}
                     className={`rounded-lg border cursor-pointer transition-all ${
-                      isExpanded ? 'border-purple-500 ring-1 ring-purple-500/30 md:col-span-2' : 
-                      hasError ? 'border-red-500/50' : 'hover:border-purple-500/50'
+                      isExpanded ? 'border-primary ring-1 ring-primary/30 md:col-span-2' : 
+                      hasError ? 'border-red-500/50' : 'hover:border-primary/50'
                     }`}
                     style={{ 
                       background: 'var(--bg-secondary)', 
@@ -449,15 +451,15 @@ export default function MCPServersSettings({
                                 ? 'linear-gradient(135deg, rgba(239, 68, 68, 0.2) 0%, rgba(220, 38, 38, 0.2) 100%)'
                                 : !isEnabled
                                   ? 'rgba(107, 114, 128, 0.15)'
-                                  : 'linear-gradient(135deg, rgba(168, 85, 247, 0.2) 0%, rgba(124, 58, 237, 0.2) 100%)',
+                                  : 'linear-gradient(135deg, var(--brand-muted) 0%, var(--brand-muted) 100%)',
                               border: hasError 
                                 ? '1px solid rgba(239, 68, 68, 0.3)'
                                 : !isEnabled
                                   ? '1px solid var(--border-color)'
-                                  : '1px solid rgba(168, 85, 247, 0.3)'
+                                  : '1px solid color-mix(in oklab, var(--brand) 35%, transparent)'
                             }}
                           >
-                            <Server size={18} style={{ color: hasError ? '#ef4444' : !isEnabled ? 'var(--text-muted)' : '#a855f7' }} />
+                            <Server size={18} style={{ color: hasError ? '#ef4444' : !isEnabled ? 'var(--text-muted)' : 'var(--brand)' }} />
                           </div>
                           {/* Status dot */}
                           {serverStatus && isEnabled && (
@@ -492,9 +494,9 @@ export default function MCPServersSettings({
                             }}
                             className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all hover:scale-[1.02]"
                             style={{ 
-                              background: 'linear-gradient(135deg, rgba(168, 85, 247, 0.15) 0%, rgba(124, 58, 237, 0.15) 100%)',
-                              color: '#a855f7',
-                              border: '1px solid rgba(168, 85, 247, 0.3)',
+                              background: 'linear-gradient(135deg, var(--brand-muted) 0%, var(--brand-muted) 100%)',
+                              color: 'var(--brand)',
+                              border: '1px solid color-mix(in oklab, var(--brand) 35%, transparent)',
                               opacity: isEnabled ? 1 : 0.4
                             }}
                             title="Test tools from this server"
@@ -513,7 +515,7 @@ export default function MCPServersSettings({
                             className="relative inline-flex h-5 w-9 items-center rounded-full transition-colors focus:outline-none"
                             style={{ 
                               background: isEnabled 
-                                ? 'linear-gradient(135deg, #a855f7 0%, #7c3aed 100%)' 
+                                ? 'var(--brand)' 
                                 : 'var(--bg-tertiary)',
                               border: isEnabled ? 'none' : '1px solid var(--border-color)'
                             }}
@@ -578,9 +580,9 @@ export default function MCPServersSettings({
                                   key={key}
                                   className="text-xs px-1.5 py-0.5 rounded"
                                   style={{ 
-                                    background: 'rgba(168, 85, 247, 0.1)', 
+                                    background: 'var(--brand-muted)', 
                                     color: 'var(--text-muted)',
-                                    border: '1px solid rgba(168, 85, 247, 0.2)'
+                                    border: '1px solid var(--brand-muted)'
                                   }}
                                 >
                                   {key}
@@ -770,7 +772,7 @@ export default function MCPServersSettings({
                               }}
                               disabled={isSaving}
                               className="flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-all shadow-md hover:shadow-lg hover:scale-[1.02] active:scale-95 disabled:opacity-50"
-                              style={{ background: 'linear-gradient(135deg, #a855f7 0%, #7c3aed 100%)', color: '#fff' }}
+                              style={{ background: 'var(--brand)', color: '#fff' }}
                             >
                               {isSaving ? (
                                 <>
@@ -879,7 +881,7 @@ export default function MCPServersSettings({
                 }}
                 disabled={saving}
                 className="flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-all shadow-md hover:shadow-lg hover:scale-[1.02] active:scale-95 disabled:opacity-50"
-                style={{ background: 'linear-gradient(135deg, #a855f7 0%, #7c3aed 100%)', color: '#fff' }}
+                style={{ background: 'var(--brand)', color: '#fff' }}
               >
                 <Save size={16} />
                 {saving ? 'Saving...' : 'Apply & Save'}

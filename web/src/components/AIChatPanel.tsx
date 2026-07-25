@@ -917,13 +917,13 @@ export default function AIChatPanel({
   return (
     <div className={`fixed bottom-4 right-4 bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-lg shadow-2xl flex flex-col z-50 transition-all duration-200 ${isExpanded ? 'w-[600px] h-[80vh]' : 'w-96 h-[500px]'}`}>
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--border-color)] bg-gradient-to-r from-purple-600/20 to-blue-600/20">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--border-color)] bg-gradient-to-r from-primary/20 to-[var(--accent3)]/20">
         <div className="flex items-center gap-2 flex-1 min-w-0">
-          <Sparkles size={18} className="text-purple-400 flex-shrink-0" />
+          <Sparkles size={18} className="text-primary flex-shrink-0" />
           <span className="font-semibold text-[var(--text-primary)] truncate">{getContextTitle()}</span>
           {/* Show focused node badge */}
           {focusedNode && (
-            <span className="ml-2 px-2 py-0.5 text-xs rounded bg-purple-600/30 text-purple-300 truncate">
+            <span className="ml-2 px-2 py-0.5 text-xs rounded bg-primary/30 text-primary truncate">
               {focusedNode.name} ({focusedNode.type})
             </span>
           )}
@@ -959,13 +959,13 @@ export default function AIChatPanel({
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
         {messages.length === 0 && (
           <div className="text-center py-4">
-            <Sparkles size={32} className="mx-auto mb-3 text-purple-400 opacity-50" />
+            <Sparkles size={32} className="mx-auto mb-3 text-primary opacity-50" />
             
             {context === 'node_config' && focusedNode ? (
               <>
                 <p className="text-[var(--text-primary)] font-medium mb-1">Node Refiner</p>
                 <p className="text-[var(--text-secondary)] text-sm mb-4">
-                  Let me help you improve <span className="text-purple-400 font-medium">{focusedNode.name}</span>
+                  Let me help you improve <span className="text-primary font-medium">{focusedNode.name}</span>
                 </p>
                 
                 {/* Node-specific suggestions */}
@@ -980,7 +980,7 @@ export default function AIChatPanel({
                     <button
                       key={idx}
                       onClick={() => setInput(example)}
-                      className="block w-full text-left px-3 py-2 text-xs bg-[var(--bg-primary)] hover:bg-purple-600/20 rounded-lg transition-colors text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                      className="block w-full text-left px-3 py-2 text-xs bg-[var(--bg-primary)] hover:bg-primary/20 rounded-lg transition-colors text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
                     >
                       → {example}
                     </button>
@@ -993,7 +993,7 @@ export default function AIChatPanel({
                     <button
                       key={idx}
                       onClick={() => setInput(example)}
-                      className="block w-full text-left px-3 py-2 text-xs bg-[var(--bg-primary)] hover:bg-purple-600/20 rounded-lg transition-colors text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                      className="block w-full text-left px-3 py-2 text-xs bg-[var(--bg-primary)] hover:bg-primary/20 rounded-lg transition-colors text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
                     >
                       → {example}
                     </button>
@@ -1006,7 +1006,7 @@ export default function AIChatPanel({
                     <button
                       key={idx}
                       onClick={() => setInput(example)}
-                      className="block w-full text-left px-3 py-2 text-xs bg-[var(--bg-primary)] hover:bg-purple-600/20 rounded-lg transition-colors text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                      className="block w-full text-left px-3 py-2 text-xs bg-[var(--bg-primary)] hover:bg-primary/20 rounded-lg transition-colors text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
                     >
                       → {example}
                     </button>
@@ -1033,7 +1033,7 @@ export default function AIChatPanel({
                     <button
                       key={idx}
                       onClick={() => setInput(example)}
-                      className="block w-full text-left px-3 py-2 text-xs bg-[var(--bg-primary)] hover:bg-purple-600/20 rounded-lg transition-colors text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                      className="block w-full text-left px-3 py-2 text-xs bg-[var(--bg-primary)] hover:bg-primary/20 rounded-lg transition-colors text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
                     >
                       → {example}
                     </button>
@@ -1046,7 +1046,7 @@ export default function AIChatPanel({
                     <button
                       key={idx}
                       onClick={() => setInput(example)}
-                      className="block w-full text-left px-3 py-2 text-xs bg-[var(--bg-primary)] hover:bg-purple-600/20 rounded-lg transition-colors text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                      className="block w-full text-left px-3 py-2 text-xs bg-[var(--bg-primary)] hover:bg-primary/20 rounded-lg transition-colors text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
                     >
                       → {example}
                     </button>
@@ -1091,7 +1091,7 @@ export default function AIChatPanel({
             <div 
               className={`max-w-[85%] px-3 py-2 rounded-lg text-sm ${
                 msg.role === 'user' 
-                  ? 'bg-purple-600 text-white' 
+                  ? 'bg-primary text-white' 
                   : msg.role === 'system'
                   ? 'bg-green-600/20 text-green-400 text-center w-full'
                   : msg.isError
@@ -1106,7 +1106,7 @@ export default function AIChatPanel({
               
               {/* Show YAML indicator if present */}
               {msg.proposedYaml && (
-                <div className="mt-2 pt-2 border-t border-white/10 text-xs flex items-center gap-1 text-purple-300">
+                <div className="mt-2 pt-2 border-t border-white/10 text-xs flex items-center gap-1 text-primary">
                   <Check size={12} />
                   YAML generated
                 </div>
@@ -1119,7 +1119,7 @@ export default function AIChatPanel({
         {isLoading && (
           <div className="flex justify-start">
             <div className="bg-[var(--bg-primary)] px-3 py-2 rounded-lg">
-              <Loader2 size={16} className="animate-spin text-purple-400" />
+              <Loader2 size={16} className="animate-spin text-primary" />
             </div>
           </div>
         )}
@@ -1139,13 +1139,13 @@ export default function AIChatPanel({
             onKeyDown={handleKeyDown}
             placeholder={getPlaceholder()}
             rows={isExpanded ? 6 : 1}
-            className={`flex-1 px-3 py-2 bg-[var(--bg-primary)] border border-[var(--border-color)] rounded-lg text-sm text-[var(--text-primary)] placeholder:text-[var(--text-secondary)] focus:outline-none focus:ring-2 focus:ring-purple-500/50 ${isExpanded ? 'resize-y min-h-[120px]' : 'resize-none'}`}
+            className={`flex-1 px-3 py-2 bg-[var(--bg-primary)] border border-[var(--border-color)] rounded-lg text-sm text-[var(--text-primary)] placeholder:text-[var(--text-secondary)] focus:outline-none focus:ring-2 focus:ring-primary/50 ${isExpanded ? 'resize-y min-h-[120px]' : 'resize-none'}`}
             disabled={isLoading}
           />
           <button
             onClick={handleSend}
             disabled={!input.trim() || isLoading}
-            className="px-3 py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors"
+            className="px-3 py-2 bg-primary hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors"
           >
             <Send size={16} className="text-white" />
           </button>

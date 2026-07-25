@@ -278,7 +278,7 @@ export default function SessionTrace({ sessionId, onRefresh, onNavigate }: Sessi
   if (isLoading && !trace) {
     return (
       <div className="flex-1 flex items-center justify-center">
-        <Loader size={24} className="animate-spin text-cyan-400" />
+        <Loader size={24} className="animate-spin text-primary" />
       </div>
     )
   }
@@ -329,7 +329,7 @@ export default function SessionTrace({ sessionId, onRefresh, onNavigate }: Sessi
                 type="checkbox"
                 checked={toolsOnly}
                 onChange={(e: React.ChangeEvent<HTMLInputElement>) => setToolsOnly(e.target.checked)}
-                className="accent-cyan-500"
+                className="accent-primary"
               />
               Tools only
             </label>
@@ -338,7 +338,7 @@ export default function SessionTrace({ sessionId, onRefresh, onNavigate }: Sessi
             <button
               onClick={() => onNavigate(buildPath('chat', { sessionId }))}
               className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors"
-              style={{ background: 'rgba(6, 182, 212, 0.15)', color: '#22d3ee' }}
+              style={{ background: 'var(--brand-muted)', color: 'var(--brand)' }}
               title="Open in Chat to send messages"
             >
               <ExternalLink size={12} /> Open in Chat
@@ -363,7 +363,7 @@ export default function SessionTrace({ sessionId, onRefresh, onNavigate }: Sessi
             onClick={() => setActiveTraceTab(tab)}
             className="px-3 py-1 text-xs font-medium rounded-full capitalize transition-colors"
             style={activeTraceTab === tab
-              ? { background: 'rgba(6, 182, 212, 0.2)', color: '#22d3ee', border: '1px solid rgba(6, 182, 212, 0.4)' }
+              ? { background: 'color-mix(in oklab, var(--brand) 20%, transparent)', color: 'var(--brand)', border: '1px solid color-mix(in oklab, var(--brand) 40%, transparent)' }
               : { background: 'rgba(255,255,255,0.04)', color: 'var(--text-secondary)', border: '1px solid var(--border-color)' }}
           >
             {tab}
@@ -380,7 +380,7 @@ export default function SessionTrace({ sessionId, onRefresh, onNavigate }: Sessi
             onClick={() => setSelectedThread(null)}
             className="flex items-center gap-1.5 px-3 py-1 text-xs font-medium rounded-full transition-colors whitespace-nowrap"
             style={selectedThread === null
-              ? { background: 'rgba(6, 182, 212, 0.2)', color: '#22d3ee', border: '1px solid rgba(6, 182, 212, 0.4)' }
+              ? { background: 'color-mix(in oklab, var(--brand) 20%, transparent)', color: 'var(--brand)', border: '1px solid color-mix(in oklab, var(--brand) 40%, transparent)' }
               : { background: 'rgba(255,255,255,0.04)', color: 'var(--text-secondary)', border: '1px solid var(--border-color)' }
             }
           >
@@ -431,7 +431,7 @@ export default function SessionTrace({ sessionId, onRefresh, onNavigate }: Sessi
         {activeTraceTab === 'tasks' ? (
           auxLoading ? (
             <div className="flex items-center justify-center py-12">
-              <Loader size={20} className="animate-spin text-cyan-400" />
+              <Loader size={20} className="animate-spin text-primary" />
             </div>
           ) : tasks.length === 0 ? (
             <EmptyAux message="No task board entries" />
@@ -441,7 +441,7 @@ export default function SessionTrace({ sessionId, onRefresh, onNavigate }: Sessi
         ) : activeTraceTab === 'mailbox' ? (
           auxLoading ? (
             <div className="flex items-center justify-center py-12">
-              <Loader size={20} className="animate-spin text-cyan-400" />
+              <Loader size={20} className="animate-spin text-primary" />
             </div>
           ) : mailbox.length === 0 ? (
             <EmptyAux message="No mailbox messages" />
@@ -452,7 +452,7 @@ export default function SessionTrace({ sessionId, onRefresh, onNavigate }: Sessi
           /* Agent trace view (with tool calls) */
           agentTraceLoading && !agentTrace ? (
             <div className="flex items-center justify-center py-12">
-              <Loader size={20} className="animate-spin text-cyan-400" />
+              <Loader size={20} className="animate-spin text-primary" />
             </div>
           ) : (!agentTrace || ((agentTrace.events || []) as TraceEvent[]).length === 0) ? (
             <div className="text-center py-12">
@@ -468,7 +468,7 @@ export default function SessionTrace({ sessionId, onRefresh, onNavigate }: Sessi
           /* System messages view */
           threadMsgsLoading && threadMessages.length === 0 ? (
             <div className="flex items-center justify-center py-12">
-              <Loader size={20} className="animate-spin text-cyan-400" />
+              <Loader size={20} className="animate-spin text-primary" />
             </div>
           ) : threadMessages.length === 0 ? (
             <div className="text-center py-12">
@@ -496,7 +496,7 @@ export default function SessionTrace({ sessionId, onRefresh, onNavigate }: Sessi
 
         {isActive && (
           <div className="flex items-center gap-2 py-3 text-xs" style={{ color: 'var(--text-muted)' }}>
-            <Loader size={12} className="animate-spin text-cyan-400" />
+            <Loader size={12} className="animate-spin text-primary" />
             <span>Session is active{selectedThread !== null ? ', thread updates every 5s...' : ', trace updates every 5s...'}</span>
           </div>
         )}
@@ -524,7 +524,7 @@ function TaskRow({ task }: { task: FleetTask }) {
     <div className="rounded-lg p-3 mb-2 text-xs" style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid var(--border-color)' }}>
       <div className="flex items-center gap-2">
         <span className="font-medium" style={{ color: 'var(--text-primary)' }}>{title}</span>
-        <span className="px-1.5 py-0.5 rounded text-[10px]" style={{ background: 'rgba(6, 182, 212, 0.12)', color: '#22d3ee' }}>{status}</span>
+        <span className="px-1.5 py-0.5 rounded text-[10px]" style={{ background: 'var(--brand-muted)', color: 'var(--brand)' }}>{status}</span>
         {claimedBy && <span style={{ color: getAgentColor(claimedBy).text }}>@{claimedBy}</span>}
       </div>
       {description && <p className="mt-1" style={{ color: 'var(--text-secondary)' }}>{description}</p>}
@@ -617,7 +617,7 @@ function TraceEntryRow({ entry, index, expanded, onToggle }: TraceEntryRowProps)
               </button>
             )}
             {expanded && (
-              <button onClick={() => onToggle(index)} className="text-[10px] text-cyan-400 hover:text-cyan-300 mt-1 cursor-pointer">
+              <button onClick={() => onToggle(index)} className="text-[10px] text-primary hover:text-primary mt-1 cursor-pointer">
                 Collapse
               </button>
             )}
@@ -639,14 +639,14 @@ function TraceEntryRow({ entry, index, expanded, onToggle }: TraceEntryRowProps)
           <span className="text-[10px] px-1.5 py-0.5 rounded flex-shrink-0 min-w-[60px] text-center font-medium" style={{ background: roleColor.bg, color: roleColor.text }}>
             {roleLabel}
           </span>
-          <Wrench size={10} className="text-purple-400 flex-shrink-0 mt-0.5" />
-          <span className="font-medium" style={{ color: '#c084fc' }}>{entry.tool_name}</span>
+          <Wrench size={10} className="text-primary flex-shrink-0 mt-0.5" />
+          <span className="font-medium" style={{ color: 'var(--brand)' }}>{entry.tool_name}</span>
           {expanded ? (
             <div className="flex-1 min-w-0">
               <pre className="text-[11px] font-mono p-2 rounded whitespace-pre-wrap break-words" style={{ background: 'rgba(0,0,0,0.3)', color: 'var(--text-muted)' }}>
                 {JSON.stringify(entry.args, null, 2)}
               </pre>
-              <button onClick={() => onToggle(index)} className="text-[10px] text-cyan-400 hover:text-cyan-300 mt-1 cursor-pointer">Collapse</button>
+              <button onClick={() => onToggle(index)} className="text-[10px] text-primary hover:text-primary mt-1 cursor-pointer">Collapse</button>
             </div>
           ) : (
             <button
@@ -693,7 +693,7 @@ function TraceEntryRow({ entry, index, expanded, onToggle }: TraceEntryRowProps)
               <pre className="text-[11px] font-mono p-2 rounded whitespace-pre-wrap break-words" style={{ background: 'rgba(0,0,0,0.3)', color: isError ? '#fca5a5' : 'var(--text-muted)' }}>
                 {isError ? entry.error : JSON.stringify(entry.result, null, 2)}
               </pre>
-              <button onClick={() => onToggle(index)} className="text-[10px] text-cyan-400 hover:text-cyan-300 mt-1 cursor-pointer">Collapse</button>
+              <button onClick={() => onToggle(index)} className="text-[10px] text-primary hover:text-primary mt-1 cursor-pointer">Collapse</button>
             </div>
           ) : (
             <button
@@ -754,7 +754,7 @@ function ThreadMessageRow({ msg, index, expanded, onToggle }: ThreadMessageRowPr
                 <div className="mt-2 pt-2" style={{ borderTop: '1px solid var(--border-color)' }}>
                   <span className="text-[10px] font-medium" style={{ color: 'var(--text-muted)' }}>Artifacts: </span>
                   {Object.entries(msg.artifacts).map(([name, path]) => (
-                    <span key={name} className="text-[10px] ml-1" style={{ color: '#22d3ee' }}>
+                    <span key={name} className="text-[10px] ml-1" style={{ color: 'var(--brand)' }}>
                       {name} &rarr; <code>{String(path)}</code>
                     </span>
                   ))}
@@ -778,7 +778,7 @@ function ThreadMessageRow({ msg, index, expanded, onToggle }: ThreadMessageRowPr
             </button>
           )}
           {expanded && (
-            <button onClick={() => onToggle(index)} className="text-[10px] text-cyan-400 hover:text-cyan-300 mt-1 cursor-pointer">
+            <button onClick={() => onToggle(index)} className="text-[10px] text-primary hover:text-primary mt-1 cursor-pointer">
               Collapse
             </button>
           )}

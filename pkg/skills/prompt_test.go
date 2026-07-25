@@ -19,6 +19,39 @@ func TestBuildSkillIndexEmpty(t *testing.T) {
 	}
 }
 
+func TestBuiltinGenerativeUI_AppCanvasConvention(t *testing.T) {
+	// LLM guidance must teach App Canvas tokens (light/dark + brand pack), not slate gray.
+	for _, want := range []string{
+		"App Canvas",
+		"bg-surface",
+		"bg-surface-2",
+		"text-app",
+		"bg-brand",
+		"light/dark",
+		"text-danger",
+		"bg-danger-soft",
+		"text-warning",
+		"bg-warning-soft",
+	} {
+		if !strings.Contains(BuiltinGenerativeUI, want) {
+			t.Errorf("BuiltinGenerativeUI missing App Canvas guidance %q", want)
+		}
+	}
+	// Should not claim apps are fixed dark-only.
+	if strings.Contains(BuiltinGenerativeUI, "always dark") {
+		t.Error("BuiltinGenerativeUI still says App Canvas is always dark")
+	}
+	// Should not teach low-contrast dark-mode pastels as error/class recipes.
+	if strings.Contains(BuiltinGenerativeUI, `className="p-4 text-red-400"`) ||
+		strings.Contains(BuiltinGenerativeUI, "text-red-400\">Error") {
+		t.Error("BuiltinGenerativeUI still uses text-red-400 as the error recipe (fails light-mode contrast)")
+	}
+	// Should not primarily teach the old slate card recipe as the default card pattern.
+	if strings.Contains(BuiltinGenerativeUI, "bg-gray-900 border border-gray-800 rounded-xl") {
+		t.Error("BuiltinGenerativeUI still teaches legacy slate card as the default pattern")
+	}
+}
+
 func TestBuildSkillIndexNoEligible(t *testing.T) {
 	allSkills := []Skill{
 		{Name: "missing", Description: "Missing", RequireBins: []string{"nonexistent_xyz123"}},

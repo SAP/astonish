@@ -20,6 +20,8 @@ const (
 	FieldDefaultProvider = "default_provider"
 	// FieldDefaultModel holds the string denoting the default_model field in the database.
 	FieldDefaultModel = "default_model"
+	// FieldBrandTheme holds the string denoting the brand_theme field in the database.
+	FieldBrandTheme = "brand_theme"
 	// FieldCreatedAt holds the string denoting the created_at field in the database.
 	FieldCreatedAt = "created_at"
 	// FieldUpdatedAt holds the string denoting the updated_at field in the database.
@@ -34,6 +36,7 @@ var Columns = []string{
 	FieldUserID,
 	FieldDefaultProvider,
 	FieldDefaultModel,
+	FieldBrandTheme,
 	FieldCreatedAt,
 	FieldUpdatedAt,
 }
@@ -55,6 +58,8 @@ var (
 	DefaultDefaultProvider string
 	// DefaultDefaultModel holds the default value on creation for the "default_model" field.
 	DefaultDefaultModel string
+	// DefaultBrandTheme holds the default value on creation for the "brand_theme" field.
+	DefaultBrandTheme string
 	// DefaultCreatedAt holds the default value on creation for the "created_at" field.
 	DefaultCreatedAt func() time.Time
 	// DefaultUpdatedAt holds the default value on creation for the "updated_at" field.
@@ -84,6 +89,11 @@ func ByDefaultProvider(opts ...sql.OrderTermOption) OrderOption {
 // ByDefaultModel orders the results by the default_model field.
 func ByDefaultModel(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldDefaultModel, opts...).ToFunc()
+}
+
+// ByBrandTheme orders the results by the brand_theme field.
+func ByBrandTheme(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldBrandTheme, opts...).ToFunc()
 }
 
 // ByCreatedAt orders the results by the created_at field.

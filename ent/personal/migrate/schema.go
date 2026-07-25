@@ -148,6 +148,7 @@ var (
 		{Name: "user_id", Type: field.TypeUUID},
 		{Name: "default_provider", Type: field.TypeString, Default: ""},
 		{Name: "default_model", Type: field.TypeString, Default: ""},
+		{Name: "brand_theme", Type: field.TypeString, Default: ""},
 		{Name: "created_at", Type: field.TypeTime, Default: map[string]schema.Expr{"postgres": "now()", "sqlite3": "(datetime('now'))"}},
 		{Name: "updated_at", Type: field.TypeTime, Default: map[string]schema.Expr{"postgres": "now()", "sqlite3": "(datetime('now'))"}},
 	}

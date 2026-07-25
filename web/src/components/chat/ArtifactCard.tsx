@@ -1,4 +1,8 @@
-import { FileText, Download, Edit3, FilePlus, ExternalLink, Film } from 'lucide-react'
+import { Download, Edit3, ExternalLink, FilePlus, FileText, Film } from 'lucide-react'
+
+import { Button } from '@/components/ui/button'
+import { cn } from '@/lib/utils'
+
 import type { ArtifactMessage } from './chatTypes'
 import { getArtifactDownloadUrl } from '../../api/studioChat'
 
@@ -44,48 +48,57 @@ export default function ArtifactCard({ data, sessionId, onOpenInPanel }: Artifac
 
   return (
     <div
-      className="my-1.5 rounded-lg overflow-hidden inline-flex items-center gap-3 px-3 py-2 max-w-md"
-      style={{
-        border: isVideo ? '1px solid rgba(244, 63, 94, 0.35)' : '1px solid rgba(34, 197, 94, 0.3)',
-        background: isVideo ? 'rgba(244, 63, 94, 0.06)' : 'rgba(34, 197, 94, 0.05)',
-      }}
+      className={cn(
+        'my-1.5 inline-flex max-w-md items-center gap-3 overflow-hidden rounded-lg border px-3 py-2',
+        isVideo
+          ? 'border-rose-500/35 bg-rose-500/10'
+          : 'border-[color:var(--success)]/30 bg-[color:var(--success)]/10'
+      )}
     >
-      <div className={`flex items-center justify-center w-8 h-8 rounded ${isVideo ? 'bg-rose-500/15' : 'bg-green-500/15'}`}>
+      <div className={cn('flex size-8 items-center justify-center rounded', isVideo ? 'bg-rose-500/15' : 'bg-[color:var(--success)]/15')}>
         {isVideo ? (
           <Film size={16} className="text-rose-400" />
         ) : isEdit ? (
-          <Edit3 size={16} className="text-green-400" />
+          <Edit3 size={16} className="text-[color:var(--success)]" />
         ) : (
-          <FilePlus size={16} className="text-green-400" />
+          <FilePlus size={16} className="text-[color:var(--success)]" />
         )}
       </div>
-      <div className="flex flex-col min-w-0 flex-1">
+      <div className="flex min-w-0 flex-1 flex-col">
         <div className="flex items-center gap-1.5">
           {isVideo
-            ? <Film size={12} className="text-rose-400 flex-shrink-0" />
-            : <FileText size={12} className="text-green-400 flex-shrink-0" />
+            ? <Film size={12} className="shrink-0 text-rose-400" />
+            : <FileText size={12} className="shrink-0 text-[color:var(--success)]" />
           }
-          <span className="text-xs font-medium text-gray-200 truncate">{fileName}</span>
-          <span className="text-[10px] text-gray-500 flex-shrink-0">{fileType}</span>
+          <span className="truncate text-xs font-medium text-foreground">{fileName}</span>
+          <span className="shrink-0 text-[10px] text-muted-foreground">{fileType}</span>
         </div>
-        <span className="text-[10px] text-gray-500 truncate" title={data.path}>{data.path}</span>
+        <span className="truncate text-[10px] text-muted-foreground" title={data.path}>{data.path}</span>
       </div>
       {onOpenInPanel && (
-        <button
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
           onClick={() => onOpenInPanel(data.path)}
-          className="flex items-center justify-center w-7 h-7 rounded hover:bg-green-500/15 transition-colors cursor-pointer flex-shrink-0"
+          className="size-7 shrink-0 text-[color:var(--success)] hover:bg-[color:var(--success)]/15 hover:text-[color:var(--success)]"
           title="Open in Files panel"
+          aria-label="Open in Files panel"
         >
-          <ExternalLink size={14} className="text-green-400" />
-        </button>
+          <ExternalLink />
+        </Button>
       )}
-      <button
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
         onClick={handleDownload}
-        className="flex items-center justify-center w-7 h-7 rounded hover:bg-green-500/15 transition-colors cursor-pointer flex-shrink-0"
+        className="size-7 shrink-0 text-[color:var(--success)] hover:bg-[color:var(--success)]/15 hover:text-[color:var(--success)]"
         title="Download file"
+        aria-label="Download file"
       >
-        <Download size={14} className="text-green-400" />
-      </button>
+        <Download />
+      </Button>
     </div>
   )
 }

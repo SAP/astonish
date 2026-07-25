@@ -54,7 +54,7 @@ export function LlmNodeForm({ data, onChange, theme, availableTools = [], availa
             key={tab.id}
             onClick={() => setActiveTab(tab.id)}
             className={`px-3 py-1.5 text-sm font-medium rounded-t transition-colors ${
-              activeTab === tab.id ? 'bg-purple-600 text-white' : 'bg-gray-600/30'
+              activeTab === tab.id ? 'bg-primary text-white' : 'bg-gray-600/30'
             }`}
             style={{ color: activeTab !== tab.id ? 'var(--text-muted)' : undefined }}
           >
@@ -130,7 +130,7 @@ export function LlmNodeForm({ data, onChange, theme, availableTools = [], availa
                     const newKey = `field_${Object.keys(data.output_model || {}).length + 1}`
                     onChange({ ...data, output_model: { ...(data.output_model || {}), [newKey]: 'str' } })
                   }}
-                  className="flex items-center gap-1 px-2.5 py-1 text-xs rounded bg-purple-600 hover:bg-purple-500 text-white transition-colors"
+                  className="flex items-center gap-1 px-2.5 py-1 text-xs rounded bg-primary hover:bg-primary/90 text-white transition-colors"
                 >
                   <Plus size={12} />
                   Add
@@ -166,7 +166,7 @@ export function LlmNodeForm({ data, onChange, theme, availableTools = [], availa
                     const newItems = [...(data.user_message || []), '']
                     onChange({ ...data, user_message: newItems })
                   }}
-                  className="flex items-center gap-1 px-2.5 py-1 text-xs rounded bg-purple-600 hover:bg-purple-500 text-white transition-colors"
+                  className="flex items-center gap-1 px-2.5 py-1 text-xs rounded bg-primary hover:bg-primary/90 text-white transition-colors"
                 >
                   <Plus size={12} />
                   Add
@@ -220,7 +220,7 @@ export function LlmNodeForm({ data, onChange, theme, availableTools = [], availa
                 type="checkbox"
                 checked={data.tools === true}
                 onChange={(e) => onChange({ ...data, tools: e.target.checked || undefined })}
-                className="w-4 h-4 accent-purple-600"
+                className="w-4 h-4 accent-primary"
               />
             </div>
 
@@ -258,7 +258,7 @@ export function LlmNodeForm({ data, onChange, theme, availableTools = [], availa
                         type="checkbox"
                         checked={data.tools_auto_approval === true}
                         onChange={(e) => onChange({ ...data, tools_auto_approval: e.target.checked || undefined })}
-                        className="w-4 h-4 accent-purple-600"
+                        className="w-4 h-4 accent-primary"
                       />
                     </div>
                   </div>
@@ -315,7 +315,7 @@ export function LlmNodeForm({ data, onChange, theme, availableTools = [], availa
                 id="llm-silent"
                 checked={data.silent || false}
                 onChange={(e) => onChange({ ...data, silent: e.target.checked })}
-                className="w-4 h-4 rounded border accent-purple-500"
+                className="w-4 h-4 rounded border accent-primary"
               />
               <label htmlFor="llm-silent" className="text-sm" style={{ color: 'var(--text-secondary)' }}>
                 Silent mode

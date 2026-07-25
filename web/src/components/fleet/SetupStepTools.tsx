@@ -13,7 +13,7 @@ export default function SetupStepTools({ step }: SetupStepToolsProps) {
         <span
           key={tool}
           className="text-[10px] px-2 py-0.5 rounded-full font-mono"
-          style={{ background: 'rgba(6, 182, 212, 0.12)', color: '#67e8f9', border: '1px solid rgba(6, 182, 212, 0.25)' }}
+          style={{ background: 'var(--brand-muted)', color: 'var(--brand)', border: '1px solid color-mix(in oklab, var(--brand) 25%, transparent)' }}
         >
           {tool}
         </span>

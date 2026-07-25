@@ -16,7 +16,7 @@ export default function ToastNotification({ toast, onDismiss }: ToastNotificatio
           toast.type === 'error' 
             ? 'bg-red-500/90 text-white' 
             : toast.type === 'info'
-              ? 'bg-gradient-to-r from-purple-600 to-blue-600 text-white'
+              ? 'bg-gradient-to-r from-primary to-[var(--brand-strong)] text-primary-foreground'
               : 'bg-gradient-to-r from-emerald-500/90 to-teal-500/90 text-white'
         } ${toast.persistent ? 'cursor-pointer hover:scale-[1.02] transition-transform' : ''}`}
         style={{ minWidth: '280px' }}

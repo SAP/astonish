@@ -12,7 +12,7 @@ export default function InputNode({ id, data, selected }: NodeProps<InputNodeTyp
       selected={selected}
       icon={Edit3} 
       nodeType="Input"
-      iconColor="#a78bfa"
+      iconColor="var(--node-input)"
     />
   )
 }

@@ -89,7 +89,7 @@ export default function ChatPanel({ messages, onSendMessage, onStartRun, onStop,
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--border-color)] bg-[var(--bg-tertiary)]">
         <div className="flex items-center gap-2">
-           <Brain size={18} className="text-[var(--accent)]" />
+           <Brain size={18} style={{ color: 'var(--brand)' }} />
            <span className="font-semibold text-[var(--text-primary)]">Agent Chat</span>
         </div>
         <label className={`flex items-center gap-2 px-2 py-1 rounded transition-colors select-none ${hasActiveSession ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer hover:bg-[var(--bg-secondary)]'}`}>
@@ -98,7 +98,7 @@ export default function ChatPanel({ messages, onSendMessage, onStartRun, onStop,
                checked={autoApprove} 
                onChange={(e) => onToggleAutoApprove(e.target.checked)}
                disabled={hasActiveSession}
-               className="w-3.5 h-3.5 rounded border-gray-600 text-purple-600 focus:ring-purple-500 bg-gray-700 disabled:opacity-50"
+               className="w-3.5 h-3.5 rounded border-gray-600 text-primary focus:ring-primary bg-gray-700 disabled:opacity-50"
              />
              <span className="text-xs font-medium text-[var(--text-secondary)]">Auto-Approve</span>
            </label>
@@ -108,8 +108,8 @@ export default function ChatPanel({ messages, onSendMessage, onStartRun, onStop,
       <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-4">
         {messages.length === 0 && onStartRun && (
           <div className="h-full flex flex-col items-center justify-center gap-4 text-center">
-            <div className="p-4 rounded-full bg-purple-500/10 mb-2">
-              <Brain size={32} className="text-purple-400" />
+            <div className="p-4 rounded-full bg-primary/10 mb-2">
+              <Brain size={32} className="text-primary" />
             </div>
             <h3 className="text-lg font-medium" style={{ color: 'var(--text-primary)' }}>
               Ready to Run
@@ -119,7 +119,7 @@ export default function ChatPanel({ messages, onSendMessage, onStartRun, onStop,
             </p>
             <button
               onClick={onStartRun}
-              className="px-6 py-3 bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-500 hover:to-blue-500 text-white font-medium rounded-xl shadow-lg transition-all hover:scale-105 flex items-center gap-2"
+              className="px-6 py-3 bg-gradient-to-r from-primary to-[var(--brand-strong)] hover:opacity-90 text-primary-foreground font-medium rounded-xl shadow-lg transition-all hover:scale-105 flex items-center gap-2"
             >
               <Send size={18} />
               Start Execution
@@ -138,7 +138,7 @@ export default function ChatPanel({ messages, onSendMessage, onStartRun, onStop,
                       className="p-1 rounded hover:bg-white/10 transition-colors"
                       title={rawViewIndices.has(index) ? "Show formatted" : "Show raw markdown"}
                     >
-                      <Code size={14} className={rawViewIndices.has(index) ? "text-purple-400" : "text-gray-500"} />
+                      <Code size={14} className={rawViewIndices.has(index) ? "text-primary" : "text-gray-500"} />
                     </button>
                     <button
                       onClick={() => copyToClipboard(message.content ?? '', index)}
@@ -195,7 +195,7 @@ export default function ChatPanel({ messages, onSendMessage, onStartRun, onStop,
             )}
             {message.type === 'node' && (
               <div className="flex items-center justify-center my-2">
-                <div className="px-3 py-1 rounded-full text-xs font-medium bg-purple-500/10 text-purple-400 border border-purple-500/20">
+                <div className="px-3 py-1 rounded-full text-xs font-medium bg-primary/10 text-primary border border-primary/20">
                   ⚡ Executing Node: {message.nodeName}
                 </div>
               </div>
@@ -248,9 +248,9 @@ export default function ChatPanel({ messages, onSendMessage, onStartRun, onStop,
               </div>
             )}
             {message.type === 'thinking' && (
-              <div className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm w-fit bg-yellow-500/20 text-yellow-400 border border-yellow-500/30">
-                <Brain size={16} />
-                <span>Thinking...</span>
+              <div className="thinking-indicator flex items-center gap-2 px-3 py-2 text-sm w-fit">
+                <Brain size={16} style={{ color: 'var(--brand)' }} />
+                <span style={{ color: 'var(--brand)' }}>Thinking...</span>
               </div>
             )}
             {message.type === 'input_request' && message.options && (
@@ -260,7 +260,7 @@ export default function ChatPanel({ messages, onSendMessage, onStartRun, onStop,
                      key={i}
                      onClick={() => onSendMessage(opt)}
                      disabled={!isWaitingForInput || index !== messages.length - 1}
-                     className="px-3 py-2 text-sm bg-purple-500/20 hover:bg-purple-500/30 text-purple-300 border border-purple-500/30 rounded transition-colors text-left truncate disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-purple-500/20"
+                     className="px-3 py-2 text-sm bg-primary/20 hover:bg-primary/30 text-primary border border-primary/30 rounded transition-colors text-left truncate disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-primary/20"
                    >
                      {opt}
                    </button>
@@ -272,9 +272,9 @@ export default function ChatPanel({ messages, onSendMessage, onStartRun, onStop,
         
         {/* Thinking Indicator - shows when agent is running but not waiting for input */}
         {hasActiveSession && !isWaitingForInput && messages.length > 0 && messages[messages.length - 1].type !== 'flow_complete' && (
-          <div className="flex items-center gap-3 px-4 py-3 rounded-lg bg-purple-500/10 border border-purple-500/20 animate-pulse">
-            <Loader size={18} className="text-purple-400 animate-spin" />
-            <span className="text-sm text-purple-300">Thinking...</span>
+          <div className="thinking-indicator flex items-center gap-3 px-4 py-3 animate-pulse">
+            <Loader size={18} className="animate-spin" style={{ color: 'var(--brand)' }} />
+            <span className="text-sm" style={{ color: 'var(--brand)' }}>Thinking...</span>
           </div>
         )}
         
@@ -283,7 +283,7 @@ export default function ChatPanel({ messages, onSendMessage, onStartRun, onStop,
           <div className="flex justify-center mt-6 mb-4">
             <button
               onClick={onStartRun}
-              className="flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-500 hover:to-blue-500 text-white font-medium rounded-xl shadow-lg transition-all hover:scale-105"
+              className="flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-primary to-[var(--brand-strong)] hover:opacity-90 text-primary-foreground font-medium rounded-xl shadow-lg transition-all hover:scale-105"
             >
               <RotateCcw size={18} />
               Start Again
@@ -321,7 +321,7 @@ export default function ChatPanel({ messages, onSendMessage, onStartRun, onStop,
                   onChange={(e) => setInput(e.target.value)}
                   disabled={!canType}
                   placeholder={hasSelectionOptions ? "Click an option above" : (isWaitingForInput ? "Type your response..." : "Agent is thinking...")}
-                  className="w-full px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-70 disabled:cursor-not-allowed transition-all"
+                  className="w-full px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary disabled:opacity-70 disabled:cursor-not-allowed transition-all"
                   style={{ 
                     background: 'var(--bg-tertiary)', 
                     color: 'var(--text-primary)',
@@ -332,7 +332,7 @@ export default function ChatPanel({ messages, onSendMessage, onStartRun, onStop,
               <button
                 type="submit"
                 disabled={!canType || !input.trim()}
-                className="px-4 py-3 bg-[#805AD5] hover:bg-[#6B46C1] text-white rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                className="px-4 py-3 bg-primary hover:bg-primary/90 text-primary-foreground rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <Send size={20} />
               </button>

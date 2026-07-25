@@ -116,7 +116,7 @@ export default function FleetTemplateDialog({
       >
         <div
           className="px-6 py-5"
-          style={{ background: 'linear-gradient(135deg, #0891b2 0%, #0e7490 50%, #155e75 100%)' }}
+          style={{ background: 'linear-gradient(135deg, var(--brand) 0%, var(--brand-strong) 100%)' }}
         >
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
@@ -151,7 +151,7 @@ export default function FleetTemplateDialog({
               disabled={submitting}
               onChange={(e) => handleNameChange(e.target.value)}
               placeholder={mode === 'clone' ? 'e.g. Software Dev — Acme' : 'e.g. Incident Response'}
-              className="w-full px-4 py-3 rounded-xl border text-base transition-all focus:outline-none focus:ring-2 focus:ring-cyan-500 disabled:opacity-60"
+              className="w-full px-4 py-3 rounded-xl border text-base transition-all focus:outline-none focus:ring-2 focus:ring-primary disabled:opacity-60"
               style={{
                 background: 'var(--bg-primary)',
                 borderColor: displayError ? '#EF4444' : 'var(--border-color)',
@@ -174,7 +174,7 @@ export default function FleetTemplateDialog({
                 setLocalError('')
               }}
               placeholder="e.g. software-dev-acme"
-              className="w-full px-4 py-3 rounded-xl border text-base font-mono transition-all focus:outline-none focus:ring-2 focus:ring-cyan-500 disabled:opacity-60"
+              className="w-full px-4 py-3 rounded-xl border text-base font-mono transition-all focus:outline-none focus:ring-2 focus:ring-primary disabled:opacity-60"
               style={{
                 background: 'var(--bg-primary)',
                 borderColor: displayError ? '#EF4444' : 'var(--border-color)',
@@ -182,7 +182,7 @@ export default function FleetTemplateDialog({
               }}
             />
             <p className="text-xs mt-1.5" style={{ color: 'var(--text-muted)' }}>
-              Stored as key <code className="px-1 py-0.5 rounded bg-cyan-500/15 text-cyan-400">{key || '…'}</code>
+              Stored as key <code className="px-1 py-0.5 rounded bg-primary/15 text-primary">{key || '…'}</code>
               {' '}— this is the stable ID used by plans and APIs.
             </p>
             {displayError && (
@@ -204,7 +204,7 @@ export default function FleetTemplateDialog({
               type="submit"
               disabled={submitting}
               className="flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-xl text-sm font-medium text-white transition-colors disabled:opacity-50"
-              style={{ background: 'linear-gradient(135deg, #0891b2 0%, #0e7490 100%)' }}
+              style={{ background: 'linear-gradient(135deg, var(--brand) 0%, var(--brand-strong) 100%)' }}
             >
               {submitting ? <Loader size={18} className="animate-spin" /> : <SubmitIcon size={18} />}
               {submitting ? 'Working…' : submitLabel}

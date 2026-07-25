@@ -1,4 +1,8 @@
-import { AppWindow, FileText, Workflow, Clapperboard, Film, Monitor, ChevronRight } from 'lucide-react'
+import { AppWindow, ChevronRight, Clapperboard, FileText, Film, Monitor, Workflow } from 'lucide-react'
+import type { LucideIcon } from 'lucide-react'
+
+import { cn } from '@/lib/utils'
+
 import type { HarnessFocus } from './chatHarness'
 
 interface HarnessPlaceholderProps {
@@ -9,22 +13,14 @@ interface HarnessPlaceholderProps {
   onOpen: (focus: HarnessFocus) => void
 }
 
-function iconFor(kind: HarnessFocus['kind']) {
-  switch (kind) {
-    case 'app':
-      return AppWindow
-    case 'report':
-      return FileText
-    case 'video':
-      return Film
-    case 'distill':
-      return Workflow
-    case 'tutorial_blueprint':
-    case 'tutorial_slideshow':
-      return Clapperboard
-    case 'browser_handoff':
-      return Monitor
-  }
+const ICONS: Record<HarnessFocus['kind'], LucideIcon> = {
+  app: AppWindow,
+  report: FileText,
+  video: Film,
+  distill: Workflow,
+  tutorial_blueprint: Clapperboard,
+  tutorial_slideshow: Clapperboard,
+  browser_handoff: Monitor,
 }
 
 function kindPrefix(kind: HarnessFocus['kind']): string {
@@ -53,7 +49,7 @@ export default function HarnessPlaceholder({
   isFocused = false,
   onOpen,
 }: HarnessPlaceholderProps) {
-  const Icon = iconFor(focus.kind)
+  const Icon = ICONS[focus.kind]
 
   return (
     <button
@@ -61,38 +57,27 @@ export default function HarnessPlaceholder({
       data-testid="harness-placeholder"
       data-harness-kind={focus.kind}
       onClick={() => onOpen(focus)}
-      className="my-2 w-full max-w-xl flex items-center gap-3 px-3 py-2.5 rounded-xl text-left transition-colors cursor-pointer"
-      style={{
-        border: `1px solid ${isFocused ? 'var(--accent)' : 'var(--border-color)'}`,
-        background: isFocused
-          ? 'var(--accent-soft, rgba(59, 130, 246, 0.1))'
-          : 'var(--bg-secondary)',
-        boxShadow: 'var(--shadow-soft)',
-      }}
+      className={cn(
+        'my-2 flex w-full max-w-xl cursor-pointer items-center gap-3 rounded-xl border px-3 py-2.5 text-left shadow-[var(--shadow-soft)] transition-colors',
+        isFocused
+          ? 'border-primary bg-primary/10'
+          : 'border-border bg-card hover:border-primary/40'
+      )}
     >
-      <div
-        className="flex items-center justify-center w-8 h-8 rounded-lg flex-shrink-0"
-        style={{
-          background: 'var(--accent-soft, rgba(59, 130, 246, 0.12))',
-          color: 'var(--accent)',
-        }}
-      >
+      <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/12 text-primary">
         <Icon size={16} />
       </div>
-      <div className="flex-1 min-w-0">
-        <div className="text-sm font-medium truncate" style={{ color: 'var(--text-primary)' }}>
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-sm font-medium text-foreground">
           {kindPrefix(focus.kind)}: {title}
         </div>
         {subtitle && (
-          <div className="text-xs truncate mt-0.5" style={{ color: 'var(--text-muted)' }}>
+          <div className="mt-0.5 truncate text-xs text-muted-foreground">
             {subtitle}
           </div>
         )}
       </div>
-      <span
-        className="flex items-center gap-0.5 text-xs font-medium flex-shrink-0"
-        style={{ color: 'var(--accent)' }}
-      >
+      <span className="flex shrink-0 items-center gap-0.5 text-xs font-medium text-primary">
         Open
         <ChevronRight size={14} />
       </span>

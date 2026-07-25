@@ -12,6 +12,7 @@ export interface SettingsMenuItem {
 
 // Personal — visible to every user regardless of role
 export const PERSONAL_ITEMS: SettingsMenuItem[] = [
+  { id: 'user-general', label: 'General', icon: Settings },
   { id: 'user-default-model', label: 'Default Model', icon: Key },
   { id: 'channels', label: 'Channels', icon: Radio },
   { id: 'knowledge', label: 'Knowledge', icon: BookOpen },

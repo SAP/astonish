@@ -21,6 +21,7 @@ interface ModeInfo {
   text: string
   icon: LucideIcon
   color: string
+  bg: string
 }
 
 export default function Header({
@@ -35,24 +36,45 @@ export default function Header({
     displayName = snakeToTitleCase(agentName) || agentName
   }
 
-  // Determine mode text and styling
   const getModeInfo = (): ModeInfo => {
-    if (isRunning) return { text: 'Run mode', icon: CircleDot, color: 'var(--accent)' }
-    if (readOnly) return { text: 'Read Only', icon: Lock, color: '#f59e0b' }
-    return { text: 'Design mode', icon: CircleDot, color: 'var(--accent)' }
+    if (isRunning) {
+      return {
+        text: 'Run mode',
+        icon: CircleDot,
+        color: 'var(--brand)',
+        bg: 'var(--item-active)',
+      }
+    }
+    if (readOnly) {
+      return {
+        text: 'Read Only',
+        icon: Lock,
+        color: 'var(--warning)',
+        bg: 'color-mix(in oklab, var(--warning) 18%, transparent)',
+      }
+    }
+    return {
+      text: 'Design mode',
+      icon: CircleDot,
+      color: 'var(--brand)',
+      bg: 'var(--item-active)',
+    }
   }
   const modeInfo = getModeInfo()
   const ModeIcon = modeInfo.icon
 
   return (
-    <div className="h-14 flex items-center justify-between px-5" style={{ background: 'var(--bg-secondary)', borderBottom: '1px solid var(--border-color)' }}>
+    <div
+      className="flex h-14 items-center justify-between px-5"
+      style={{
+        background: 'var(--work-background, var(--bg-primary))',
+        borderBottom: '1px solid var(--border-color)',
+      }}
+    >
       <div className="flex items-center gap-3">
-        <div 
-          className="px-3 py-1 rounded-full text-xs font-semibold flex items-center gap-2" 
-          style={{ 
-            background: readOnly ? 'rgba(245, 158, 11, 0.15)' : 'var(--accent-soft)', 
-            color: modeInfo.color 
-          }}
+        <div
+          className="flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold"
+          style={{ background: modeInfo.bg, color: modeInfo.color }}
         >
           <ModeIcon size={14} />
           {modeInfo.text}
@@ -61,7 +83,10 @@ export default function Header({
           <span className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
             {displayName}
           </span>
-          <span className="text-xs px-2 py-1 rounded-full" style={{ background: 'var(--bg-tertiary)', color: 'var(--text-secondary)' }}>
+          <span
+            className="rounded-full px-2 py-1 text-xs"
+            style={{ background: 'var(--bg-tertiary)', color: 'var(--text-secondary)' }}
+          >
             {agentSource === 'store' ? 'Store' : 'Local'}
           </span>
         </div>
@@ -69,11 +94,11 @@ export default function Header({
 
       <div className="flex items-center gap-2">
         {!isRunning && (
-          <div className="flex items-center gap-1 mr-2">
+          <div className="mr-2 flex items-center gap-1">
             <button
               onClick={onUndo}
               disabled={!canUndo}
-              className="p-2 rounded-full transition-colors disabled:opacity-30"
+              className="rounded-full p-2 transition-colors disabled:opacity-30 hover:bg-[color:var(--item-hover)]"
               style={{ background: 'var(--bg-tertiary)', color: 'var(--text-secondary)' }}
               title="Undo"
             >
@@ -82,7 +107,7 @@ export default function Header({
             <button
               onClick={onRedo}
               disabled={!canRedo}
-              className="p-2 rounded-full transition-colors disabled:opacity-30"
+              className="rounded-full p-2 transition-colors disabled:opacity-30 hover:bg-[color:var(--item-hover)]"
               style={{ background: 'var(--bg-tertiary)', color: 'var(--text-secondary)' }}
               title="Redo"
             >
@@ -94,33 +119,33 @@ export default function Header({
         {!isRunning && (
           <button
             onClick={onToggleYaml}
-            className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors"
-            style={{ background: showYaml ? 'var(--accent-soft)' : 'var(--bg-tertiary)', color: showYaml ? 'var(--accent)' : 'var(--text-secondary)' }}
+            className="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-colors"
+            style={{
+              background: showYaml ? 'var(--item-active)' : 'var(--bg-tertiary)',
+              color: showYaml ? 'var(--brand)' : 'var(--text-secondary)',
+              border: showYaml ? '1px solid color-mix(in oklab, var(--brand) 28%, transparent)' : '1px solid transparent',
+            }}
           >
             <Code size={18} />
             {showYaml ? 'Hide Source' : 'View Source'}
           </button>
         )}
 
-
-
         {!isRunning && (
           <button
             onClick={onRun}
-            className="flex items-center gap-2 px-5 py-2 text-white font-semibold rounded-lg transition-all shadow-md hover:shadow-lg hover:scale-[1.02]"
-            style={{ background: 'linear-gradient(135deg, #a855f7 0%, #7c3aed 100%)' }}
+            className="send-gradient flex items-center gap-2 rounded-lg px-5 py-2 font-semibold text-white shadow-none transition-all hover:opacity-90 hover:scale-[1.02]"
           >
             <Play size={18} />
             Run
           </button>
         )}
 
-        {/* Copy to Local button for read-only store flows */}
         {!isRunning && readOnly && onCopyToLocal && (
           <button
             onClick={onCopyToLocal}
-            className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors text-white"
-            style={{ background: 'linear-gradient(135deg, #3b82f6 0%, #10b981 100%)' }}
+            className="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-white transition-colors"
+            style={{ background: 'linear-gradient(135deg, var(--brand) 0%, var(--accent3) 100%)' }}
           >
             <Copy size={16} />
             Copy to Local
@@ -130,7 +155,7 @@ export default function Header({
         {isRunning && (
           <button
             onClick={onExit}
-            className="p-2 rounded-full transition-colors"
+            className="rounded-full p-2 transition-colors hover:bg-[color:var(--item-hover)]"
             style={{ color: 'var(--text-muted)', border: '1px solid var(--border-color)' }}
             title="Exit Run Mode"
           >

@@ -17,6 +17,7 @@ import IdentitySettings from './IdentitySettings'
 import CredentialsSettings from './CredentialsSettings'
 import SandboxSettings from './SandboxSettings'
 import GeneralSettings from './GeneralSettings'
+import UserGeneralSettings from './UserGeneralSettings'
 import ProvidersSettings from './ProvidersSettings'
 import UserDefaultModelSettings from './UserDefaultModelSettings'
 import MCPServersSettings from './MCPServersSettings'
@@ -162,6 +163,9 @@ export default function SettingsContent({
         />
       )}
 
+      {/* Personal → General: per-user brand theme (and future user prefs) */}
+      {activeSection === 'user-general' && <UserGeneralSettings />}
+
       {activeSection === 'providers' && (
         <ProvidersSettings
           settings={settings}
@@ -209,9 +213,9 @@ export default function SettingsContent({
       {activeSection === 'flows' && <FlowStorePanel />}
 
       {FULL_CONFIG_SECTIONS.includes(activeSection) && fullConfigLoading && (
-        <div className="flex items-center justify-center py-12">
-          <Loader2 size={24} className="animate-spin" style={{ color: 'var(--accent)' }} />
-          <span className="ml-2 text-sm" style={{ color: 'var(--text-muted)' }}>Loading settings...</span>
+        <div className="flex items-center justify-center gap-2 rounded-xl border bg-card py-12 text-sm text-muted-foreground shadow-sm">
+          <Loader2 className="size-5 animate-spin text-primary" />
+          <span>Loading settings...</span>
         </div>
       )}
 
@@ -260,7 +264,7 @@ export default function SettingsContent({
         <IdentitySettings config={fullConfig.agent_identity} onSaved={onSaved} />
       )}
       {activeSection === 'knowledge' && user && (
-        <Suspense fallback={<div className="flex items-center justify-center py-12"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--accent)' }} /></div>}>
+        <Suspense fallback={<div className="flex items-center justify-center rounded-xl border bg-card py-12 text-primary"><Loader2 className="size-5 animate-spin" /></div>}>
           <div className="flex-1 overflow-hidden p-6 flex flex-col">
             <KnowledgeBrowser theme={theme as 'dark' | 'light'} user={user} activeTeam={activeTeam} />
           </div>

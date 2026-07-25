@@ -150,12 +150,12 @@ export default function AppsPanel({ messages, activeAppId, onClose }: AppsPanelP
                 className="flex items-center justify-center w-8 h-8 rounded shrink-0"
                 style={{
                   background: app.isActive
-                    ? 'rgba(168, 85, 247, 0.12)'
+                    ? 'var(--brand-muted)'
                     : 'rgba(59, 130, 246, 0.1)',
                 }}
               >
                 <AppWindow size={15} style={{
-                  color: app.isActive ? '#c084fc' : '#60a5fa',
+                  color: app.isActive ? 'var(--brand)' : '#60a5fa',
                 }} />
               </div>
 
@@ -176,7 +176,7 @@ export default function AppsPanel({ messages, activeAppId, onClose }: AppsPanelP
                   </span>
                 </div>
                 {app.isActive && (
-                  <span className="flex items-center gap-1 text-[10px]" style={{ color: '#c084fc' }}>
+                  <span className="flex items-center gap-1 text-[10px]" style={{ color: 'var(--brand)' }}>
                     <Zap size={9} />
                     Refining
                   </span>
@@ -239,7 +239,7 @@ export default function AppsPanel({ messages, activeAppId, onClose }: AppsPanelP
                   {overlayApp.isActive && (
                     <span
                       className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full font-medium"
-                      style={{ background: 'rgba(168, 85, 247, 0.15)', color: '#c084fc' }}
+                      style={{ background: 'var(--brand-muted)', color: 'var(--brand)' }}
                     >
                       <Zap size={9} />
                       Refining

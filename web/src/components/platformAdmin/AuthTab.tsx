@@ -279,7 +279,7 @@ export default function AuthTab() {
                     <button
                       onClick={() => setEditingProvider(provider)}
                       className="p-1.5 rounded-lg transition-opacity hover:opacity-80"
-                      style={{ color: 'var(--accent)' }}
+                      style={{ color: 'var(--brand)' }}
                       title="Edit"
                     >
                       <Edit2 size={14} />

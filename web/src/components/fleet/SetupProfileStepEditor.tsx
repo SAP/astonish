@@ -81,13 +81,13 @@ export default function SetupProfileStepEditor({ profile, readOnly = false, onPr
               key={step.id}
               type="button"
               onClick={() => { setSelectedId(step.id); setTab('overview') }}
-              className={`w-full text-left px-2 py-2 rounded-lg text-xs transition-colors ${active ? 'bg-cyan-500/15 border border-cyan-500/30' : 'hover:bg-white/5'}`}
+              className={`w-full text-left px-2 py-2 rounded-lg text-xs transition-colors ${active ? 'bg-primary/15 border border-primary/30' : 'hover:bg-white/5'}`}
             >
               <div className="flex items-center gap-2">
                 <span className="w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-mono shrink-0 bg-white/5" style={{ color: 'var(--text-muted)' }}>
                   {i + 1}
                 </span>
-                <span className="font-medium truncate" style={{ color: active ? '#22d3ee' : 'var(--text-secondary)' }}>
+                <span className="font-medium truncate" style={{ color: active ? 'var(--brand)' : 'var(--text-secondary)' }}>
                   {step.title}
                 </span>
               </div>
@@ -105,7 +105,7 @@ export default function SetupProfileStepEditor({ profile, readOnly = false, onPr
               type="button"
               onClick={() => setTab(t)}
               className={`px-3 py-2 text-xs font-medium capitalize border-b-2 -mb-px transition-colors ${
-                tab === t ? 'border-cyan-400 text-cyan-400' : 'border-transparent'
+                tab === t ? 'border-primary text-primary' : 'border-transparent'
               }`}
               style={{ color: tab === t ? undefined : 'var(--text-muted)' }}
             >
@@ -250,7 +250,7 @@ export default function SetupProfileStepEditor({ profile, readOnly = false, onPr
           {tab === 'tools' && (
             <>
               {catalogLoading ? (
-                <Loader size={16} className="animate-spin text-cyan-400" />
+                <Loader size={16} className="animate-spin text-primary" />
               ) : (
                 <div className="space-y-2">
                   <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
@@ -267,7 +267,7 @@ export default function SetupProfileStepEditor({ profile, readOnly = false, onPr
                           onClick={() => toggleTool(tool.name)}
                           title={tool.description}
                           className={`text-[10px] px-2 py-1 rounded-full font-mono transition-colors disabled:opacity-70 ${
-                            selectedTool ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40' : 'bg-white/5 text-gray-400 border border-transparent hover:border-white/10'
+                            selectedTool ? 'bg-primary/20 text-primary border border-primary/40' : 'bg-white/5 text-gray-400 border border-transparent hover:border-white/10'
                           }`}
                         >
                           {tool.name}

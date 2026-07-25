@@ -48,7 +48,7 @@ export default function PlatformAdminPanel({ theme, activeTab: externalTab, onTa
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors"
             style={{
               background: activeTab === 'orgs' ? 'var(--accent-soft)' : 'transparent',
-              color: activeTab === 'orgs' ? 'var(--accent)' : 'var(--text-muted)',
+              color: activeTab === 'orgs' ? 'var(--brand)' : 'var(--text-muted)',
             }}
           >
             <Building2 size={13} /> Organizations
@@ -58,7 +58,7 @@ export default function PlatformAdminPanel({ theme, activeTab: externalTab, onTa
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors"
             style={{
               background: activeTab === 'users' ? 'var(--accent-soft)' : 'transparent',
-              color: activeTab === 'users' ? 'var(--accent)' : 'var(--text-muted)',
+              color: activeTab === 'users' ? 'var(--brand)' : 'var(--text-muted)',
             }}
           >
             <Users size={13} /> Users
@@ -68,7 +68,7 @@ export default function PlatformAdminPanel({ theme, activeTab: externalTab, onTa
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors"
             style={{
               background: activeTab === 'auth' ? 'var(--accent-soft)' : 'transparent',
-              color: activeTab === 'auth' ? 'var(--accent)' : 'var(--text-muted)',
+              color: activeTab === 'auth' ? 'var(--brand)' : 'var(--text-muted)',
             }}
           >
             <Shield size={13} /> Authentication
@@ -78,7 +78,7 @@ export default function PlatformAdminPanel({ theme, activeTab: externalTab, onTa
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors"
             style={{
               background: activeTab === 'channels' ? 'var(--accent-soft)' : 'transparent',
-              color: activeTab === 'channels' ? 'var(--accent)' : 'var(--text-muted)',
+              color: activeTab === 'channels' ? 'var(--brand)' : 'var(--text-muted)',
             }}
           >
             <Globe size={13} /> Channels
@@ -88,7 +88,7 @@ export default function PlatformAdminPanel({ theme, activeTab: externalTab, onTa
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors"
             style={{
               background: activeTab === 'sandbox' ? 'var(--accent-soft)' : 'transparent',
-              color: activeTab === 'sandbox' ? 'var(--accent)' : 'var(--text-muted)',
+              color: activeTab === 'sandbox' ? 'var(--brand)' : 'var(--text-muted)',
             }}
           >
             <Box size={13} /> Base Sandbox

@@ -93,7 +93,7 @@ export default function CreateAgentModal({ isOpen, onClose, onCreate }: CreateAg
         <div 
           className="px-6 py-5"
           style={{ 
-            background: 'linear-gradient(135deg, #6B46C1 0%, #805AD5 50%, #9F7AEA 100%)'
+            background: 'linear-gradient(135deg, var(--brand) 0%, var(--brand-strong) 50%, var(--accent3) 100%)'
           }}
         >
           <div className="flex items-center justify-between">
@@ -134,7 +134,7 @@ export default function CreateAgentModal({ isOpen, onClose, onCreate }: CreateAg
                 setError('')
               }}
               placeholder="e.g. GitHub PR Reviewer"
-              className="w-full px-4 py-3 rounded-xl border text-base transition-all focus:outline-none focus:ring-2 focus:ring-purple-500"
+              className="w-full px-4 py-3 rounded-xl border text-base transition-all focus:outline-none focus:ring-2 focus:ring-primary"
               style={{ 
                 background: 'var(--bg-primary)', 
                 borderColor: error ? '#EF4444' : 'var(--border-color)',
@@ -143,7 +143,7 @@ export default function CreateAgentModal({ isOpen, onClose, onCreate }: CreateAg
             />
             {name && (
               <p className="text-xs mt-1.5" style={{ color: 'var(--text-muted)' }}>
-                Will be saved as: <code className="px-1 py-0.5 rounded bg-purple-500/20 text-purple-400">
+                Will be saved as: <code className="px-1 py-0.5 rounded bg-primary/20 text-primary">
                   {name.trim().toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, '_') || '...'}.yaml
                 </code>
               </p>
@@ -166,7 +166,7 @@ export default function CreateAgentModal({ isOpen, onClose, onCreate }: CreateAg
               onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setDescription(e.target.value)}
               placeholder="What does this agent do?"
               rows={3}
-              className="w-full px-4 py-3 rounded-xl border text-base resize-none transition-all focus:outline-none focus:ring-2 focus:ring-purple-500"
+              className="w-full px-4 py-3 rounded-xl border text-base resize-none transition-all focus:outline-none focus:ring-2 focus:ring-primary"
               style={{ 
                 background: 'var(--bg-primary)', 
                 borderColor: 'var(--border-color)',
@@ -192,7 +192,7 @@ export default function CreateAgentModal({ isOpen, onClose, onCreate }: CreateAg
               type="submit"
               className="flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-xl text-sm font-medium text-white transition-colors"
               style={{ 
-                background: 'linear-gradient(135deg, #6B46C1 0%, #805AD5 100%)'
+                background: 'linear-gradient(135deg, var(--brand) 0%, var(--brand-strong) 100%)'
               }}
             >
               <Plus size={18} />

@@ -10,6 +10,11 @@ const version = pkg.version || '0.0.0'
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  resolve: {
+    alias: {
+      '@': resolve(__dirname, './src')
+    }
+  },
   define: {
     // Expose UI version as a global constant
     __UI_VERSION__: JSON.stringify(version)

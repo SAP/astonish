@@ -34,7 +34,7 @@ export default function OverflowNode({
   nodeType,  // e.g. "LLM", "Start", etc.
   hasTopHandle = true,
   hasBottomHandle = true,
-  iconColor = '#8b5cf6'  // Purple accent (can be overridden per node type)
+  iconColor = 'var(--node-llm)'  // Brand accent (can be overridden per node type)
 }: OverflowNodeProps) {
   const [isHovered, setIsHovered] = useState(false)
   const hasError = data.hasError
@@ -43,7 +43,7 @@ export default function OverflowNode({
   // Determine which icon to show
   const renderIcon = () => {
     if (hasError) {
-      return <AlertTriangle size={20} style={{ color: '#ef4444' }} />
+      return <AlertTriangle size={20} style={{ color: 'var(--danger)' }} />
     }
     // Always show the normal icon - running state is indicated by the spinning border
     return <Icon size={20} style={{ color: iconColor }} />
@@ -72,19 +72,19 @@ export default function OverflowNode({
         background: 'var(--overflow-node-bg)',
         borderRadius: '12px',
         border: hasError 
-          ? '2px solid #ef4444' 
+          ? '2px solid var(--danger)' 
           : selected 
-            ? '2px solid var(--accent)'
+            ? '2px solid var(--primary)'
             : isActive
               ? '2px solid transparent'  // Border handled by pseudo-element
               : '1px solid var(--overflow-node-border)',
         boxShadow: hasError 
-          ? '0 0 10px rgba(239, 68, 68, 0.4)' 
+          ? '0 0 10px color-mix(in oklab, var(--danger) 40%, transparent)' 
           : selected 
-            ? '0 0 0 2px var(--accent-soft), 0 4px 12px rgba(0,0,0,0.15)' 
+            ? '0 0 0 2px var(--brand-muted), var(--shadow-soft)' 
             : isActive
-              ? '0 0 20px rgba(139, 92, 246, 0.4)'
-              : '0 4px 12px rgba(0,0,0,0.1)',
+              ? '0 0 20px color-mix(in oklab, var(--brand) 40%, transparent)'
+              : 'var(--shadow-soft)',
         width: '180px',  // Fixed width for consistent ELK layout alignment
         padding: '14px 16px',
         position: 'relative',
@@ -153,7 +153,7 @@ export default function OverflowNode({
         <p 
           className="truncate mt-2"
           style={{ 
-            color: '#f87171', 
+            color: 'var(--danger)', 
             fontSize: '11px',
             maxWidth: '180px',
           }}
@@ -178,10 +178,10 @@ export default function OverflowNode({
               width: showExpanded ? '22px' : '10px',
               height: showExpanded ? '22px' : '10px',
               background: showExpanded 
-                ? 'linear-gradient(135deg, #7c3aed 0%, #6366f1 100%)' 
+                ? 'linear-gradient(135deg, var(--brand-strong) 0%, var(--brand) 100%)' 
                 : 'var(--overflow-handle-bg)',
               border: showExpanded 
-                ? '2px solid var(--bg-secondary)' 
+                ? '2px solid var(--panel-background)' 
                 : '2px solid var(--overflow-handle-border)',
               borderRadius: '50%',
               transition: 'all 0.15s ease',

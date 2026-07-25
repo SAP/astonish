@@ -26,7 +26,19 @@ vi.mock('../UpgradeDialog', () => ({ default: () => null }))
 
 // Mock hooks
 vi.mock('../../hooks/useTheme', () => ({
-  useTheme: () => ({ theme: 'dark', setTheme: vi.fn(), toggleTheme: vi.fn() }),
+  useTheme: () => ({
+    theme: 'dark',
+    setTheme: vi.fn(),
+    toggleTheme: vi.fn(),
+    brandTheme: 'classic',
+    setBrandTheme: vi.fn(),
+    setUserBrandTheme: vi.fn().mockResolvedValue(undefined),
+    setPlatformBrandTheme: vi.fn().mockResolvedValue(undefined),
+    userBrandPreference: '',
+    platformBrandDefault: '',
+    availableBrandThemes: ['classic', 'aster', 'nova', 'sage', 'ember'],
+    refreshBrandTheme: vi.fn().mockResolvedValue(undefined),
+  }),
 }))
 vi.mock('../../hooks/useHashRouter', () => ({
   useHashRouter: () => ({
@@ -76,12 +88,15 @@ vi.mock('../../utils/formatters', () => ({
   snakeToTitleCase: (s: string) => s,
 }))
 
-vi.mock('js-yaml', () => ({
-  default: {
-    load: vi.fn().mockReturnValue({}),
-    dump: vi.fn().mockReturnValue(''),
-  },
-}))
+vi.mock('js-yaml', () => {
+  const load = vi.fn().mockReturnValue({})
+  const dump = vi.fn().mockReturnValue('')
+  return {
+    default: { load, dump },
+    load,
+    dump,
+  }
+})
 
 beforeEach(() => {
   // Mock fetch for setup status check and other API calls

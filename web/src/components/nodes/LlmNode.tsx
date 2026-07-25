@@ -12,7 +12,7 @@ export default function LlmNode({ id, data, selected }: NodeProps<LlmNodeType>) 
       selected={selected}
       icon={Brain} 
       nodeType="LLM"
-      iconColor="#8b5cf6"
+      iconColor="var(--node-llm)"
     />
   )
 }

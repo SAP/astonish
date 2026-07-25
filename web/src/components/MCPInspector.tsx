@@ -1,5 +1,15 @@
 import React, { useState, useEffect, useMemo } from 'react'
-import { X, Play, Search, ChevronRight, Loader2, AlertCircle, CheckCircle, Clock } from 'lucide-react'
+import { AlertCircle, CheckCircle, ChevronRight, Clock, Loader2, Play, Search } from 'lucide-react'
+
+import { Alert, AlertDescription } from '@/components/ui/alert'
+import { Button } from '@/components/ui/button'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Textarea } from '@/components/ui/textarea'
+import { cn } from '@/lib/utils'
+
 import { teamFetch } from '../api/teamContext'
 
 // --- Types ---
@@ -66,7 +76,6 @@ export default function MCPInspector({ serverName, teamSlug, scope, onClose }: M
   const [result, setResult] = useState<ToolRunResult | null>(null)
   const [resultError, setResultError] = useState<string | null>(null)
 
-  // Load tools when component mounts
   useEffect(() => {
     setLoading(true)
     setError(null)
@@ -85,24 +94,21 @@ export default function MCPInspector({ serverName, teamSlug, scope, onClose }: M
       .finally(() => setLoading(false))
   }, [serverName, teamSlug, scope])
 
-  // Filter tools based on search
   const filteredTools = useMemo(() => {
     if (!searchQuery) return tools
     const query = searchQuery.toLowerCase()
-    return tools.filter(t => 
-      t.name.toLowerCase().includes(query) || 
+    return tools.filter(t =>
+      t.name.toLowerCase().includes(query) ||
       (t.description && t.description.toLowerCase().includes(query))
     )
   }, [tools, searchQuery])
 
-  // Reset params when tool changes
   useEffect(() => {
     setParams({})
     setResult(null)
     setResultError(null)
   }, [selectedTool])
 
-  // Handle running the tool
   const handleRun = async () => {
     if (!selectedTool) return
     setRunning(true)
@@ -123,38 +129,35 @@ export default function MCPInspector({ serverName, teamSlug, scope, onClose }: M
     }
   }
 
-  // Render a parameter field based on its type
   const renderParamField = (name: string, schema: ParamSchema = {}) => {
     const type = schema.type || 'string'
     const value = params[name] ?? ''
 
     return (
-      <div key={name} className="space-y-1">
-        <label className="block text-sm font-medium" style={{ color: 'var(--text-secondary)' }}>
+      <div key={name} className="space-y-2">
+        <Label htmlFor={`mcp-param-${name}`}>
           {name}
           {schema.description && (
-            <span className="font-normal ml-1" style={{ color: 'var(--text-muted)' }}>
-              - {schema.description}
-            </span>
+            <span className="ml-1 font-normal text-muted-foreground">- {schema.description}</span>
           )}
-        </label>
+        </Label>
         {type === 'boolean' ? (
-          <select
-            value={value === true ? 'true' : value === false ? 'false' : ''}
-            onChange={(e) => setParams({ ...params, [name]: e.target.value === 'true' })}
-            className="w-full px-3 py-2 rounded-lg border text-sm"
-            style={{ 
-              background: 'var(--bg-primary)', 
-              borderColor: 'var(--border-color)', 
-              color: 'var(--text-primary)' 
-            }}
+          <Select
+            value={value === true ? 'true' : value === false ? 'false' : '__unset__'}
+            onValueChange={(next) => setParams({ ...params, [name]: next === 'true' })}
           >
-            <option value="">Select...</option>
-            <option value="true">true</option>
-            <option value="false">false</option>
-          </select>
+            <SelectTrigger id={`mcp-param-${name}`} className="bg-background">
+              <SelectValue placeholder="Select..." />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__unset__">Select...</SelectItem>
+              <SelectItem value="true">true</SelectItem>
+              <SelectItem value="false">false</SelectItem>
+            </SelectContent>
+          </Select>
         ) : type === 'array' || type === 'object' ? (
-          <textarea
+          <Textarea
+            id={`mcp-param-${name}`}
             value={typeof value === 'object' ? JSON.stringify(value, null, 2) : value}
             onChange={(e) => {
               try {
@@ -165,45 +168,31 @@ export default function MCPInspector({ serverName, teamSlug, scope, onClose }: M
             }}
             placeholder={`Enter ${type === 'array' ? 'array' : 'object'} as JSON...`}
             rows={3}
-            className="w-full px-3 py-2 rounded-lg border text-sm font-mono resize-y"
-            style={{ 
-              background: 'var(--bg-primary)', 
-              borderColor: 'var(--border-color)', 
-              color: 'var(--text-primary)' 
-            }}
+            className="bg-background font-mono"
           />
         ) : type === 'number' || type === 'integer' ? (
-          <input
+          <Input
+            id={`mcp-param-${name}`}
             type="number"
             value={value}
             onChange={(e) => setParams({ ...params, [name]: e.target.valueAsNumber || '' })}
             placeholder={`Enter ${name}...`}
-            className="w-full px-3 py-2 rounded-lg border text-sm"
-            style={{ 
-              background: 'var(--bg-primary)', 
-              borderColor: 'var(--border-color)', 
-              color: 'var(--text-primary)' 
-            }}
+            className="bg-background"
           />
         ) : (
-          <input
+          <Input
+            id={`mcp-param-${name}`}
             type="text"
             value={value}
             onChange={(e) => setParams({ ...params, [name]: e.target.value })}
             placeholder={`Enter ${name}...`}
-            className="w-full px-3 py-2 rounded-lg border text-sm"
-            style={{ 
-              background: 'var(--bg-primary)', 
-              borderColor: 'var(--border-color)', 
-              color: 'var(--text-primary)' 
-            }}
+            className="bg-background"
           />
         )}
       </div>
     )
   }
 
-  // Extract parameters from tool schema
   const getToolParams = (tool: MCPTool | null): Record<string, ParamSchema> => {
     if (!tool?.parameters) return {}
     const params = tool.parameters
@@ -213,191 +202,130 @@ export default function MCPInspector({ serverName, teamSlug, scope, onClose }: M
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-8" style={{ background: 'rgba(0,0,0,0.8)' }}>
-      <div 
-        className="w-full max-w-6xl h-[80vh] rounded-xl flex flex-col overflow-hidden shadow-2xl"
-        style={{ background: 'var(--bg-primary)', border: '1px solid var(--border-color)' }}
+    <Dialog open onOpenChange={(open) => { if (!open) onClose() }}>
+      <DialogContent
+        className="flex h-[80vh] w-full max-w-6xl flex-col gap-0 overflow-hidden border-panel-border bg-panel-background p-0 shadow-[var(--shadow-elevated)] sm:max-w-6xl"
+        showCloseButton
       >
-        {/* Header */}
-        <div className="flex items-center justify-between p-4 border-b" style={{ borderColor: 'var(--border-color)', background: 'var(--bg-secondary)' }}>
-          <div>
-            <h2 className="text-lg font-semibold" style={{ color: 'var(--text-primary)' }}>
-              Tool Inspector
-            </h2>
-            <p className="text-sm" style={{ color: 'var(--text-muted)' }}>
-              {serverName}
-            </p>
-          </div>
-          <button
-            onClick={onClose}
-            className="p-2 rounded-lg transition-colors hover:bg-gray-600/20"
-            style={{ color: 'var(--text-muted)' }}
-          >
-            <X size={20} />
-          </button>
-        </div>
+        <DialogHeader className="border-b px-4 py-4 text-left">
+          <DialogTitle>Tool Inspector</DialogTitle>
+          <DialogDescription>{serverName}</DialogDescription>
+        </DialogHeader>
 
         {loading ? (
-          <div className="flex-1 flex items-center justify-center p-8">
-            <Loader2 className="animate-spin" size={32} style={{ color: 'var(--accent)' }} />
+          <div className="flex flex-1 items-center justify-center gap-2 p-8 text-sm text-muted-foreground">
+            <Loader2 className="size-6 animate-spin text-primary" />
+            Loading tools...
           </div>
         ) : error ? (
-          <div className="flex-1 flex items-center justify-center p-8">
-            <div className="text-center">
-              <AlertCircle size={48} className="mx-auto mb-4" style={{ color: 'var(--danger)' }} />
-              <p className="text-lg font-medium" style={{ color: 'var(--text-primary)' }}>Failed to load tools</p>
-              <p className="text-sm mt-2" style={{ color: 'var(--text-muted)' }}>{error}</p>
+          <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center">
+            <AlertCircle className="size-12 text-destructive" />
+            <div>
+              <p className="text-lg font-medium text-foreground">Failed to load tools</p>
+              <p className="mt-2 text-sm text-muted-foreground">{error}</p>
             </div>
           </div>
         ) : (
-          <div className="flex-1 flex overflow-hidden">
-            {/* Tool list */}
-            <div className="w-72 shrink-0 border-r flex flex-col" style={{ borderColor: 'var(--border-color)', background: 'var(--bg-secondary)' }}>
-              {/* Search */}
-              <div className="p-3 border-b" style={{ borderColor: 'var(--border-color)' }}>
+          <div className="flex min-h-0 flex-1 overflow-hidden">
+            <div className="flex w-72 shrink-0 flex-col border-r bg-background/40">
+              <div className="border-b p-3">
                 <div className="relative">
-                  <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: 'var(--text-muted)' }} />
-                  <input
+                  <Search className="absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
+                  <Input
                     type="text"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
                     placeholder="Search tools..."
-                    className="w-full pl-9 pr-3 py-2 rounded-lg border text-sm"
-                    style={{ 
-                      background: 'var(--bg-primary)', 
-                      borderColor: 'var(--border-color)', 
-                      color: 'var(--text-primary)' 
-                    }}
+                    className="bg-background pl-9"
                   />
                 </div>
               </div>
-              
-              {/* Tool list */}
-              <div className="flex-1 overflow-y-auto p-2 space-y-1">
+
+              <div className="min-h-0 flex-1 space-y-1 overflow-y-auto p-2">
                 {filteredTools.length === 0 ? (
-                  <p className="text-sm text-center p-4" style={{ color: 'var(--text-muted)' }}>
+                  <p className="p-4 text-center text-sm text-muted-foreground">
                     {searchQuery ? 'No tools match your search' : 'No tools available'}
                   </p>
                 ) : (
                   filteredTools.map(tool => (
                     <button
                       key={tool.name}
+                      type="button"
                       onClick={() => setSelectedTool(tool)}
-                      className={`w-full text-left px-3 py-2 rounded-lg transition-all ${
-                        selectedTool?.name === tool.name ? 'ring-1 ring-purple-500/30' : ''
-                      }`}
-                      style={{ 
-                        background: selectedTool?.name === tool.name ? 'var(--accent-soft)' : 'transparent',
-                        color: selectedTool?.name === tool.name ? 'var(--accent)' : 'var(--text-secondary)'
-                      }}
+                      className={cn(
+                        'w-full rounded-lg px-3 py-2 text-left transition-all',
+                        selectedTool?.name === tool.name
+                          ? 'bg-primary/10 text-primary ring-1 ring-primary/30'
+                          : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground'
+                      )}
                     >
                       <div className="flex items-center gap-2">
-                        <ChevronRight size={14} className={selectedTool?.name === tool.name ? 'opacity-100' : 'opacity-0'} />
-                        <span className="text-sm font-medium truncate">{tool.name}</span>
+                        <ChevronRight className={cn('size-3.5', selectedTool?.name === tool.name ? 'opacity-100' : 'opacity-0')} />
+                        <span className="truncate text-sm font-medium">{tool.name}</span>
                       </div>
                     </button>
                   ))
                 )}
               </div>
-              
-              <div className="p-2 border-t text-xs text-center" style={{ borderColor: 'var(--border-color)', color: 'var(--text-muted)' }}>
+
+              <div className="border-t p-2 text-center text-xs text-muted-foreground">
                 {tools.length} tools available
               </div>
             </div>
 
-            {/* Tool details and execution */}
-            <div className="flex-1 flex flex-col overflow-hidden">
+            <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
               {selectedTool ? (
                 <>
-                  {/* Tool info */}
-                  <div className="p-4 border-b" style={{ borderColor: 'var(--border-color)' }}>
-                    <h3 className="text-lg font-semibold" style={{ color: 'var(--text-primary)' }}>
-                      {selectedTool.name}
-                    </h3>
+                  <div className="border-b p-4">
+                    <h3 className="text-lg font-semibold text-foreground">{selectedTool.name}</h3>
                     {selectedTool.description && (
-                      <p className="text-sm mt-1" style={{ color: 'var(--text-muted)' }}>
-                        {selectedTool.description}
-                      </p>
+                      <p className="mt-1 text-sm text-muted-foreground">{selectedTool.description}</p>
                     )}
                   </div>
 
-                  {/* Parameters form */}
-                  <div className="flex-1 overflow-y-auto p-4 space-y-4">
-                    <h4 className="text-sm font-medium" style={{ color: 'var(--text-secondary)' }}>
-                      Parameters
-                    </h4>
+                  <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4">
+                    <h4 className="text-sm font-medium text-foreground">Parameters</h4>
                     {Object.keys(getToolParams(selectedTool)).length === 0 ? (
-                      <p className="text-sm" style={{ color: 'var(--text-muted)' }}>
-                        This tool has no parameters
-                      </p>
+                      <p className="text-sm text-muted-foreground">This tool has no parameters</p>
                     ) : (
-                      Object.entries(getToolParams(selectedTool)).map(([name, schema]) => 
+                      Object.entries(getToolParams(selectedTool)).map(([name, schema]) =>
                         renderParamField(name, schema)
                       )
                     )}
 
-                    {/* Run button */}
-                    <button
-                      onClick={handleRun}
-                      disabled={running}
-                      className="flex items-center gap-2 px-4 py-2 rounded-lg text-white font-medium transition-all shadow-md hover:shadow-lg hover:scale-[1.02] active:scale-95 disabled:opacity-50"
-                      style={{ background: 'linear-gradient(135deg, #a855f7 0%, #7c3aed 100%)' }}
-                    >
-                      {running ? (
-                        <>
-                          <Loader2 size={16} className="animate-spin" />
-                          Running...
-                        </>
-                      ) : (
-                        <>
-                          <Play size={16} />
-                          Run Tool
-                        </>
-                      )}
-                    </button>
+                    <Button onClick={handleRun} disabled={running}>
+                      {running ? <Loader2 className="animate-spin" /> : <Play />}
+                      {running ? 'Running...' : 'Run Tool'}
+                    </Button>
 
-                    {/* Result display */}
                     {result && (
                       <div className="mt-4 space-y-2">
                         <div className="flex items-center gap-2">
                           {result.success ? (
-                            <CheckCircle size={16} style={{ color: '#22c55e' }} />
+                            <CheckCircle className="size-4 text-[color:var(--success)]" />
                           ) : (
-                            <AlertCircle size={16} style={{ color: '#ef4444' }} />
+                            <AlertCircle className="size-4 text-destructive" />
                           )}
-                          <span className="text-sm font-medium" style={{ color: result.success ? '#22c55e' : '#ef4444' }}>
+                          <span className={cn('text-sm font-medium', result.success ? 'text-[color:var(--success)]' : 'text-destructive')}>
                             {result.success ? 'Success' : 'Error'}
                           </span>
                           {result.time_taken && (
-                            <span className="flex items-center gap-1 text-xs" style={{ color: 'var(--text-muted)' }}>
-                              <Clock size={12} />
+                            <span className="flex items-center gap-1 text-xs text-muted-foreground">
+                              <Clock className="size-3" />
                               {result.time_taken}
                             </span>
                           )}
                         </div>
-                        
+
                         {resultError && (
-                          <div 
-                            className="p-3 rounded-lg text-sm"
-                            style={{ 
-                              background: 'rgba(239, 68, 68, 0.1)', 
-                              border: '1px solid rgba(239, 68, 68, 0.2)',
-                              color: '#f87171'
-                            }}
-                          >
-                            {resultError}
-                          </div>
+                          <Alert variant="destructive">
+                            <AlertCircle />
+                            <AlertDescription>{resultError}</AlertDescription>
+                          </Alert>
                         )}
 
                         {result.result && (
-                          <pre 
-                            className="p-3 rounded-lg text-sm font-mono overflow-x-auto"
-                            style={{ 
-                              background: 'var(--bg-secondary)', 
-                              border: '1px solid var(--border-color)',
-                              color: 'var(--text-primary)'
-                            }}
-                          >
+                          <pre className="overflow-x-auto rounded-lg border bg-background p-3 font-mono text-sm text-foreground">
                             {JSON.stringify(result.result, null, 2)}
                           </pre>
                         )}
@@ -406,14 +334,14 @@ export default function MCPInspector({ serverName, teamSlug, scope, onClose }: M
                   </div>
                 </>
               ) : (
-                <div className="flex-1 flex items-center justify-center">
-                  <p style={{ color: 'var(--text-muted)' }}>Select a tool to inspect</p>
+                <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
+                  Select a tool to inspect
                 </div>
               )}
             </div>
           </div>
         )}
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   )
 }

@@ -138,7 +138,7 @@ export default function SessionMemoryPanel({ sessionId, isConsolidating = false,
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-4" style={{ borderBottom: '1px solid var(--border-color)' }}>
           <div className="flex items-center gap-2">
-            <Brain size={18} className="text-purple-400" />
+            <Brain size={18} className="text-primary" />
             <h2 className="text-lg font-semibold" style={{ color: 'var(--text-primary)' }}>
               Session Memories
             </h2>
@@ -173,14 +173,14 @@ export default function SessionMemoryPanel({ sessionId, isConsolidating = false,
               className="flex items-center gap-2 px-4 py-3 rounded-lg"
               style={{ background: 'rgba(128, 90, 213, 0.1)', border: '1px solid rgba(128, 90, 213, 0.3)' }}
             >
-              <Loader size={14} className="animate-spin text-purple-400" />
-              <span className="text-sm text-purple-300">Organizing memories...</span>
+              <Loader size={14} className="animate-spin text-primary" />
+              <span className="text-sm text-primary">Organizing memories...</span>
             </div>
           )}
 
           {loading && !isConsolidating && (
             <div className="flex items-center justify-center py-8">
-              <Loader size={20} className="animate-spin text-purple-400" />
+              <Loader size={20} className="animate-spin text-primary" />
             </div>
           )}
 
@@ -193,9 +193,9 @@ export default function SessionMemoryPanel({ sessionId, isConsolidating = false,
 
           {/* Extraction Preview */}
           {extractionPreview && (
-            <div className="rounded-lg p-4 space-y-3" style={{ background: 'var(--bg-secondary)', border: '1px solid #805AD5' }}>
+            <div className="rounded-lg p-4 space-y-3" style={{ background: 'var(--bg-secondary)', border: '1px solid var(--brand)' }}>
               <div className="flex items-center justify-between">
-                <span className="text-sm font-medium text-purple-400">Extraction Preview</span>
+                <span className="text-sm font-medium text-primary">Extraction Preview</span>
                 <div className="flex items-center gap-2">
                   <button
                     onClick={() => setExtractionPreview(null)}
@@ -207,7 +207,7 @@ export default function SessionMemoryPanel({ sessionId, isConsolidating = false,
                   <button
                     onClick={applyExtraction}
                     disabled={applyingExtraction}
-                    className="text-xs px-3 py-1 rounded-lg bg-purple-600 hover:bg-purple-700 text-white transition-colors disabled:opacity-50"
+                    className="text-xs px-3 py-1 rounded-lg bg-primary hover:bg-primary/90 text-white transition-colors disabled:opacity-50"
                   >
                     {applyingExtraction ? 'Applying...' : 'Apply'}
                   </button>
@@ -215,7 +215,7 @@ export default function SessionMemoryPanel({ sessionId, isConsolidating = false,
               </div>
               {extractionPreview.map((entry, i) => (
                 <div key={i} className="rounded-md p-3" style={{ background: 'var(--bg-tertiary)' }}>
-                  <div className="text-xs font-medium text-purple-300 mb-1">{entry.category}</div>
+                  <div className="text-xs font-medium text-primary mb-1">{entry.category}</div>
                   <pre className="text-xs whitespace-pre-wrap" style={{ color: 'var(--text-primary)' }}>{entry.content}</pre>
                 </div>
               ))}
@@ -265,7 +265,7 @@ export default function SessionMemoryPanel({ sessionId, isConsolidating = false,
                 <>
                   <div className="flex items-center justify-between mb-1">
                     <div className="flex items-center gap-2">
-                      <span className="text-xs font-medium text-purple-400">{memory.category}</span>
+                      <span className="text-xs font-medium text-primary">{memory.category}</span>
                       <span className="text-xs px-1.5 py-0.5 rounded" style={{ background: 'var(--bg-tertiary)', color: 'var(--text-muted)' }}>
                         {memory.scope}
                       </span>

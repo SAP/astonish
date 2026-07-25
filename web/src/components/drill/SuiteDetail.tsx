@@ -429,10 +429,10 @@ export default function SuiteDetail({ suiteKey, onNavigate, onRunSuite, onAddDri
                           )}
 
                           {triage && (
-                            <div className="p-3 rounded-lg" style={{ background: 'rgba(168, 85, 247, 0.06)', border: '1px solid rgba(168, 85, 247, 0.2)' }}>
+                            <div className="p-3 rounded-lg" style={{ background: 'color-mix(in oklab, var(--brand) 6%, transparent)', border: '1px solid color-mix(in oklab, var(--brand) 20%, transparent)' }}>
                               <div className="flex items-center gap-2 mb-2">
-                                <Zap size={12} style={{ color: '#a855f7' }} />
-                                <span className="text-[10px] font-semibold uppercase" style={{ color: '#c084fc' }}>AI Triage</span>
+                                <Zap size={12} style={{ color: 'var(--brand)' }} />
+                                <span className="text-[10px] font-semibold uppercase" style={{ color: 'var(--brand)' }}>AI Triage</span>
                                 {triage.verdict && <StatusBadge status={triage.verdict} />}
                               </div>
                               {triage.summary && (

@@ -48,7 +48,8 @@ function TrailingMetric({ stats }: { stats: ActivityStats }) {
       className="shrink-0 text-[10px] font-medium px-1.5 py-0.5 rounded tabular-nums"
       data-testid="activity-badge"
       style={{
-        color: 'var(--accent)',
+        // --brand is solid text; --accent is a translucent surface tint (unreadable as color).
+        color: 'var(--brand)',
         background: 'var(--accent-soft)',
       }}
     >
@@ -58,8 +59,9 @@ function TrailingMetric({ stats }: { stats: ActivityStats }) {
 }
 
 /**
- * Cursor-style tool activity line with accent lead, muted rest, and trailing metric.
+ * Cursor-style tool activity line with brand lead, secondary rest, and trailing metric.
  * Collapsed by default; expands to paired call/result steps.
+ * Uses --brand (not --accent) for lead text so light and dark stay readable.
  */
 export default function ToolActivityBlock({ steps, notes = [], streaming = false, blockId }: ToolActivityBlockProps) {
   const [expanded, setExpanded] = useState(false)
@@ -99,17 +101,18 @@ export default function ToolActivityBlock({ steps, notes = [], streaming = false
         aria-label={summary.text}
       >
         {showSpinner && (
-          <Loader size={12} className="animate-spin shrink-0" style={{ color: 'var(--accent)' }} />
+          <Loader size={12} className="animate-spin shrink-0" style={{ color: 'var(--brand)' }} />
         )}
         {summary.variant === 'error' && !showSpinner && (
           <AlertCircle size={12} className="shrink-0" style={{ color: 'var(--danger)' }} />
         )}
         <span className="text-xs truncate min-w-0">
-          <span style={{ color: 'var(--accent)', fontWeight: 500 }}>
+          {/* --brand works in light + dark; --accent is only a soft fill, not text */}
+          <span style={{ color: 'var(--brand)', fontWeight: 500 }}>
             {summary.lead}
           </span>
           {summary.rest && (
-            <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>
+            <span style={{ color: 'var(--text-secondary)', fontWeight: 400 }}>
               {summary.rest}
             </span>
           )}

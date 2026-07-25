@@ -133,7 +133,7 @@ function StepIndicator({ step, totalSteps }: { step: number; totalSteps: number 
   return (
     <div className="flex items-center justify-center gap-2 mb-8">
       {Array.from({ length: totalSteps }, (_, i) => (
-        <div key={i} className={`w-2 h-2 rounded-full transition-all ${i === step ? 'w-8 bg-purple-500' : i < step ? 'bg-purple-400' : 'bg-gray-600'}`} />
+        <div key={i} className={`w-2 h-2 rounded-full transition-all ${i === step ? 'w-8 bg-primary' : i < step ? 'bg-primary' : 'bg-gray-600'}`} />
       ))}
     </div>
   )
@@ -475,13 +475,13 @@ export default function SetupWizard({ onComplete }: { onComplete: () => void }) 
       case 0:
         return (
           <div className="text-center">
-            <div className="inline-flex items-center justify-center w-20 h-20 rounded-full bg-gradient-to-br from-purple-500 to-blue-500 mb-6"><Sparkles size={40} className="text-white" /></div>
+            <div className="inline-flex items-center justify-center w-20 h-20 rounded-full bg-gradient-to-br from-primary to-[var(--accent3)] mb-6"><Sparkles size={40} className="text-white" /></div>
             <h1 className="text-3xl font-bold mb-4" style={{ color: 'var(--text-primary)' }}>Welcome to Astonish Studio</h1>
             <p className="text-lg mb-6 max-w-md mx-auto" style={{ color: 'var(--text-muted)' }}>Build powerful AI agents visually. Let's get you set up in just a few steps.</p>
             <div className="flex flex-col gap-3 max-w-sm mx-auto text-left p-4 rounded-lg" style={{ background: 'var(--bg-tertiary)' }}>
-              <div className="flex items-center gap-3"><div className="w-6 h-6 rounded-full bg-purple-500/20 flex items-center justify-center text-purple-400 text-sm">1</div><span style={{ color: 'var(--text-secondary)' }}>Choose deployment mode</span></div>
-              <div className="flex items-center gap-3"><div className="w-6 h-6 rounded-full bg-purple-500/20 flex items-center justify-center text-purple-400 text-sm">2</div><span style={{ color: 'var(--text-secondary)' }}>Connect an AI provider</span></div>
-              <div className="flex items-center gap-3"><div className="w-6 h-6 rounded-full bg-purple-500/20 flex items-center justify-center text-purple-400 text-sm">3</div><span style={{ color: 'var(--text-secondary)' }}>Configure web search & tools</span></div>
+              <div className="flex items-center gap-3"><div className="w-6 h-6 rounded-full bg-primary/20 flex items-center justify-center text-primary text-sm">1</div><span style={{ color: 'var(--text-secondary)' }}>Choose deployment mode</span></div>
+              <div className="flex items-center gap-3"><div className="w-6 h-6 rounded-full bg-primary/20 flex items-center justify-center text-primary text-sm">2</div><span style={{ color: 'var(--text-secondary)' }}>Connect an AI provider</span></div>
+              <div className="flex items-center gap-3"><div className="w-6 h-6 rounded-full bg-primary/20 flex items-center justify-center text-primary text-sm">3</div><span style={{ color: 'var(--text-secondary)' }}>Configure web search & tools</span></div>
             </div>
           </div>
         )
@@ -496,7 +496,7 @@ export default function SetupWizard({ onComplete }: { onComplete: () => void }) 
             <div className="grid grid-cols-2 gap-4 max-w-2xl mx-auto mb-6">
               <button
                 onClick={() => { setDeploymentMode('sqlite'); setPlatformError(null) }}
-                className={`p-5 rounded-xl border-2 text-left transition-all hover:scale-[1.02] ${deploymentMode === 'sqlite' ? 'border-purple-500 bg-purple-500/10' : 'border-transparent hover:border-gray-600'}`}
+                className={`p-5 rounded-xl border-2 text-left transition-all hover:scale-[1.02] ${deploymentMode === 'sqlite' ? 'border-primary bg-primary/10' : 'border-transparent hover:border-gray-600'}`}
                 style={{ background: deploymentMode === 'sqlite' ? undefined : 'var(--bg-tertiary)' }}
               >
                 <div className="flex items-center gap-3 mb-3">
@@ -510,7 +510,7 @@ export default function SetupWizard({ onComplete }: { onComplete: () => void }) 
 
               <button
                 onClick={() => { setDeploymentMode('platform'); setPlatformError(null) }}
-                className={`p-5 rounded-xl border-2 text-left transition-all hover:scale-[1.02] ${deploymentMode === 'platform' ? 'border-purple-500 bg-purple-500/10' : 'border-transparent hover:border-gray-600'}`}
+                className={`p-5 rounded-xl border-2 text-left transition-all hover:scale-[1.02] ${deploymentMode === 'platform' ? 'border-primary bg-primary/10' : 'border-transparent hover:border-gray-600'}`}
                 style={{ background: deploymentMode === 'platform' ? undefined : 'var(--bg-tertiary)' }}
               >
                 <div className="flex items-center gap-3 mb-3">
@@ -603,7 +603,7 @@ export default function SetupWizard({ onComplete }: { onComplete: () => void }) 
             {deploymentMode === 'platform' && !platformInitDone && !restartRequired && (
               <div className="max-w-xl mx-auto mt-4 p-6 rounded-xl" style={{ background: 'var(--bg-tertiary)', border: '1px solid var(--border-color)' }}>
                 <h3 className="text-lg font-semibold mb-4 flex items-center gap-2" style={{ color: 'var(--text-primary)' }}>
-                  <Server size={18} className="text-purple-400" />
+                  <Server size={18} className="text-primary" />
                   PostgreSQL Connection
                 </h3>
                 <div className="grid grid-cols-2 gap-4 mb-4">
@@ -678,7 +678,7 @@ export default function SetupWizard({ onComplete }: { onComplete: () => void }) 
                   }}
                   disabled={platformInitializing || !pgUser || !pgPassword}
                   className="w-full py-3 rounded-lg font-medium flex items-center justify-center gap-2 transition-all disabled:opacity-50"
-                  style={{ background: 'linear-gradient(to right, #9333ea, #3b82f6)', color: 'white' }}
+                  style={{ background: 'linear-gradient(to right, var(--brand), var(--brand-strong))', color: 'white' }}
                 >
                   {platformInitializing ? (
                     <><Loader2 size={18} className="animate-spin" />Initializing Platform...</>
@@ -730,7 +730,7 @@ export default function SetupWizard({ onComplete }: { onComplete: () => void }) 
               <p className="text-sm font-medium mb-3" style={{ color: 'var(--text-secondary)' }}>{settings?.providers && settings.providers.length > 0 ? 'Or add a new provider' : 'Add Your First Provider'}</p>
               <div className="grid grid-cols-4 gap-3 max-w-2xl mx-auto">
                 {PROVIDERS.map(p => (
-                  <button key={p.id} onClick={() => handleProviderTypeSelect(p.id)} className={`p-3 rounded-xl border-2 text-left transition-all hover:scale-[1.02] ${selectedProvider === p.id ? 'border-purple-500 bg-purple-500/10' : 'border-transparent hover:border-gray-600'}`} style={{ background: selectedProvider === p.id ? undefined : 'var(--bg-tertiary)' }}>
+                  <button key={p.id} onClick={() => handleProviderTypeSelect(p.id)} className={`p-3 rounded-xl border-2 text-left transition-all hover:scale-[1.02] ${selectedProvider === p.id ? 'border-primary bg-primary/10' : 'border-transparent hover:border-gray-600'}`} style={{ background: selectedProvider === p.id ? undefined : 'var(--bg-tertiary)' }}>
                     <div className="flex items-center gap-2 mb-1"><span className="text-xl">{p.icon}</span><span className="font-semibold text-sm" style={{ color: 'var(--text-primary)' }}>{p.name}</span></div>
                     <p className="text-xs" style={{ color: 'var(--text-muted)' }}>{p.description}</p>
                   </button>
@@ -751,13 +751,13 @@ export default function SetupWizard({ onComplete }: { onComplete: () => void }) 
                   <label className="block text-sm font-medium mb-2" style={{ color: 'var(--text-secondary)' }}>{field.label}{field.key === 'resource_group' ? ' (optional)' : ''}</label>
                   <div className="relative">
                     <Key size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
-                    <input type={field.key.includes('secret') || field.key === 'client_secret' ? 'password' : 'text'} value={credentials[field.key] || ''} onChange={e => setCredentials(prev => ({ ...prev, [field.key]: e.target.value }))} onFocus={(e) => { if (isSensitiveField(field.key) && credentials[field.key]?.startsWith('••')) e.target.value = '' }} placeholder={field.placeholder} className="w-full pl-10 pr-4 py-3 rounded-lg border focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all" style={{ background: 'var(--bg-tertiary)', borderColor: 'var(--border-color)', color: 'var(--text-primary)' }} />
+                    <input type={field.key.includes('secret') || field.key === 'client_secret' ? 'password' : 'text'} value={credentials[field.key] || ''} onChange={e => setCredentials(prev => ({ ...prev, [field.key]: e.target.value }))} onFocus={(e) => { if (isSensitiveField(field.key) && credentials[field.key]?.startsWith('••')) e.target.value = '' }} placeholder={field.placeholder} className="w-full pl-10 pr-4 py-3 rounded-lg border focus:ring-2 focus:ring-primary focus:border-transparent transition-all" style={{ background: 'var(--bg-tertiary)', borderColor: 'var(--border-color)', color: 'var(--text-primary)' }} />
                   </div>
                 </div>
               ))}
             </div>
             {error && <div className="mt-4 p-3 rounded-lg bg-red-500/10 border border-red-500/30 flex items-center gap-2"><AlertCircle size={18} className="text-red-400" /><span className="text-sm text-red-400">{error}</span></div>}
-            <button onClick={handleTestConnection} disabled={isLoading || !Object.values(credentials).some(v => v)} className="mt-6 w-full py-3 rounded-lg font-medium flex items-center justify-center gap-2 transition-all disabled:opacity-50" style={{ background: testSuccess ? 'var(--bg-tertiary)' : 'linear-gradient(to right, #9333ea, #3b82f6)', color: testSuccess ? 'var(--text-secondary)' : 'white' }}>
+            <button onClick={handleTestConnection} disabled={isLoading || !Object.values(credentials).some(v => v)} className="mt-6 w-full py-3 rounded-lg font-medium flex items-center justify-center gap-2 transition-all disabled:opacity-50" style={{ background: testSuccess ? 'var(--bg-tertiary)' : 'linear-gradient(to right, var(--brand), var(--brand-strong))', color: testSuccess ? 'var(--text-secondary)' : 'white' }}>
               {isLoading ? <><Loader2 size={18} className="animate-spin" />Testing Connection...</> : testSuccess ? <><Check size={18} />Connection Verified</> : <><Zap size={18} />Test Connection</>}
             </button>
           </div>
@@ -770,10 +770,10 @@ export default function SetupWizard({ onComplete }: { onComplete: () => void }) 
             <p className="text-center mb-6" style={{ color: 'var(--text-muted)' }}>Give this provider instance a unique name.</p>
             <div className="relative">
               <Folder size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
-              <input type="text" value={instanceName} onChange={e => setInstanceName(e.target.value)} placeholder="e.g., openai-prod, anthropic-dev" className="w-full pl-10 pr-4 py-3 rounded-lg border focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all" style={{ background: 'var(--bg-tertiary)', borderColor: 'var(--border-color)', color: 'var(--text-primary)' }} autoFocus />
+              <input type="text" value={instanceName} onChange={e => setInstanceName(e.target.value)} placeholder="e.g., openai-prod, anthropic-dev" className="w-full pl-10 pr-4 py-3 rounded-lg border focus:ring-2 focus:ring-primary focus:border-transparent transition-all" style={{ background: 'var(--bg-tertiary)', borderColor: 'var(--border-color)', color: 'var(--text-primary)' }} autoFocus />
             </div>
             {error && <div className="mt-4 p-3 rounded-lg bg-red-500/10 border border-red-500/30 flex items-center gap-2"><AlertCircle size={18} className="text-red-400" /><span className="text-sm text-red-400">{error}</span></div>}
-            <button onClick={handleSaveProvider} disabled={isLoading || !instanceName.trim()} className="mt-6 w-full py-3 rounded-lg font-medium flex items-center justify-center gap-2 transition-all disabled:opacity-50" style={{ background: 'linear-gradient(to right, #9333ea, #3b82f6)', color: 'white' }}>
+            <button onClick={handleSaveProvider} disabled={isLoading || !instanceName.trim()} className="mt-6 w-full py-3 rounded-lg font-medium flex items-center justify-center gap-2 transition-all disabled:opacity-50" style={{ background: 'linear-gradient(to right, var(--brand), var(--brand-strong))', color: 'white' }}>
               {isLoading ? <><Loader2 size={18} className="animate-spin" />Saving...</> : <><Check size={18} />Save Provider</>}
             </button>
           </div>
@@ -785,7 +785,7 @@ export default function SetupWizard({ onComplete }: { onComplete: () => void }) 
             <p className="text-center mb-6" style={{ color: 'var(--text-muted)' }}>Choose the model to use by default. You can change this anytime.</p>
             <div className="space-y-2 max-h-80 overflow-y-auto">
               {availableModels.map(model => (
-                <button key={model} onClick={() => setSelectedModel(model)} className={`w-full p-3 rounded-lg text-left transition-all ${selectedModel === model ? 'bg-purple-500/20 border-purple-500' : 'hover:bg-gray-700/50'}`} style={{ background: selectedModel === model ? undefined : 'var(--bg-tertiary)', border: `2px solid ${selectedModel === model ? '#9333ea' : 'transparent'}` }}>
+                <button key={model} onClick={() => setSelectedModel(model)} className={`w-full p-3 rounded-lg text-left transition-all ${selectedModel === model ? 'bg-primary/20 border-primary' : 'hover:bg-gray-700/50'}`} style={{ background: selectedModel === model ? undefined : 'var(--bg-tertiary)', border: `2px solid ${selectedModel === model ? 'var(--brand)' : 'transparent'}` }}>
                   <span style={{ color: 'var(--text-primary)' }}>{model}</span>
                 </button>
               ))}
@@ -807,7 +807,7 @@ export default function SetupWizard({ onComplete }: { onComplete: () => void }) 
                 <p className="text-sm" style={{ color: 'var(--text-muted)' }}>Web search and content extraction are ready.</p>
               </div>
             ) : isLoading && standardServers.length === 0 ? (
-              <div className="text-center py-8"><Loader2 size={24} className="animate-spin mx-auto mb-2 text-purple-400" /><p style={{ color: 'var(--text-muted)' }}>Loading providers...</p></div>
+              <div className="text-center py-8"><Loader2 size={24} className="animate-spin mx-auto mb-2 text-primary" /><p style={{ color: 'var(--text-muted)' }}>Loading providers...</p></div>
             ) : (
               <>
                 <div className="grid grid-cols-3 gap-3 mb-6">
@@ -815,13 +815,13 @@ export default function SetupWizard({ onComplete }: { onComplete: () => void }) 
                     <button
                       key={srv.id}
                       onClick={() => { setSelectedWebServer(srv.id); setWebApiKey(''); setError(null) }}
-                      className={`p-4 rounded-xl border-2 text-left transition-all hover:scale-[1.02] ${selectedWebServer === srv.id ? 'border-purple-500 bg-purple-500/10' : srv.installed ? 'border-green-500/50' : 'border-transparent hover:border-gray-600'}`}
+                      className={`p-4 rounded-xl border-2 text-left transition-all hover:scale-[1.02] ${selectedWebServer === srv.id ? 'border-primary bg-primary/10' : srv.installed ? 'border-green-500/50' : 'border-transparent hover:border-gray-600'}`}
                       style={{ background: selectedWebServer === srv.id ? undefined : 'var(--bg-tertiary)' }}
                     >
                       <div className="flex items-center gap-2 mb-2">
-                        <Search size={18} className="text-purple-400" />
+                        <Search size={18} className="text-primary" />
                         <span className="font-semibold text-sm" style={{ color: 'var(--text-primary)' }}>{srv.displayName || srv.name}</span>
-                        {srv.isDefault && !srv.installed && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-purple-500/20 text-purple-400">recommended</span>}
+                        {srv.isDefault && !srv.installed && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-primary/20 text-primary">recommended</span>}
                         {srv.installed && <Check size={14} className="text-green-400" />}
                       </div>
                       <p className="text-xs mb-1" style={{ color: 'var(--text-muted)' }}>{srv.description?.slice(0, 80)}</p>
@@ -847,14 +847,14 @@ export default function SetupWizard({ onComplete }: { onComplete: () => void }) 
                               value={webApiKey}
                               onChange={e => setWebApiKey(e.target.value)}
                               placeholder={srv.envVars![0].description || 'Enter API key'}
-                              className="flex-1 px-4 py-2.5 rounded-lg border text-sm focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                              className="flex-1 px-4 py-2.5 rounded-lg border text-sm focus:ring-2 focus:ring-primary focus:border-transparent"
                               style={{ background: 'var(--bg-secondary)', borderColor: 'var(--border-color)', color: 'var(--text-primary)' }}
                             />
                             <button
                               onClick={handleInstallWebServer}
                               disabled={isLoading || !webApiKey}
                               className="px-4 py-2 rounded-lg font-medium text-sm transition-all disabled:opacity-50"
-                              style={{ background: 'linear-gradient(to right, #9333ea, #3b82f6)', color: 'white' }}
+                              style={{ background: 'linear-gradient(to right, var(--brand), var(--brand-strong))', color: 'white' }}
                             >
                               {isLoading ? <Loader2 size={16} className="animate-spin" /> : 'Install'}
                             </button>
@@ -867,7 +867,7 @@ export default function SetupWizard({ onComplete }: { onComplete: () => void }) 
                             onClick={handleInstallWebServer}
                             disabled={isLoading}
                             className="px-4 py-2 rounded-lg font-medium text-sm transition-all disabled:opacity-50"
-                            style={{ background: 'linear-gradient(to right, #9333ea, #3b82f6)', color: 'white' }}
+                            style={{ background: 'linear-gradient(to right, var(--brand), var(--brand-strong))', color: 'white' }}
                           >
                             {isLoading ? <Loader2 size={16} className="animate-spin" /> : 'Install'}
                           </button>
@@ -901,13 +901,13 @@ export default function SetupWizard({ onComplete }: { onComplete: () => void }) 
                 <button
                   key={eng.id}
                   onClick={() => { setBrowserEngine(eng.id); setBrowserSaved(false); setError(null) }}
-                  className={`p-4 rounded-xl border-2 text-left transition-all hover:scale-[1.02] ${browserEngine === eng.id ? 'border-purple-500 bg-purple-500/10' : 'border-transparent hover:border-gray-600'}`}
+                  className={`p-4 rounded-xl border-2 text-left transition-all hover:scale-[1.02] ${browserEngine === eng.id ? 'border-primary bg-primary/10' : 'border-transparent hover:border-gray-600'}`}
                   style={{ background: browserEngine === eng.id ? undefined : 'var(--bg-tertiary)' }}
                 >
                   <div className="flex items-center gap-2 mb-1">
-                    <Monitor size={18} className="text-purple-400" />
+                    <Monitor size={18} className="text-primary" />
                     <span className="font-semibold text-sm" style={{ color: 'var(--text-primary)' }}>{eng.name}</span>
-                    {eng.recommended && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-purple-500/20 text-purple-400">recommended</span>}
+                    {eng.recommended && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-primary/20 text-primary">recommended</span>}
                   </div>
                   <p className="text-xs" style={{ color: 'var(--text-muted)' }}>{eng.description}</p>
                 </button>
@@ -923,7 +923,7 @@ export default function SetupWizard({ onComplete }: { onComplete: () => void }) 
                   value={browserCustomPath}
                   onChange={e => { setBrowserCustomPath(e.target.value); setBrowserSaved(false) }}
                   placeholder="/usr/bin/google-chrome"
-                  className="w-full px-4 py-2.5 rounded-lg border text-sm font-mono focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                  className="w-full px-4 py-2.5 rounded-lg border text-sm font-mono focus:ring-2 focus:ring-primary focus:border-transparent"
                   style={{ background: 'var(--bg-secondary)', borderColor: 'var(--border-color)', color: 'var(--text-primary)' }}
                 />
               </div>
@@ -940,7 +940,7 @@ export default function SetupWizard({ onComplete }: { onComplete: () => void }) 
                       value={browserRemoteHost}
                       onChange={e => { setBrowserRemoteHost(e.target.value); setBrowserSaved(false) }}
                       placeholder="192.168.1.100"
-                      className="w-full px-4 py-2.5 rounded-lg border text-sm font-mono focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                      className="w-full px-4 py-2.5 rounded-lg border text-sm font-mono focus:ring-2 focus:ring-primary focus:border-transparent"
                       style={{ background: 'var(--bg-secondary)', borderColor: 'var(--border-color)', color: 'var(--text-primary)' }}
                     />
                   </div>
@@ -951,7 +951,7 @@ export default function SetupWizard({ onComplete }: { onComplete: () => void }) 
                       value={browserRemotePort}
                       onChange={e => { setBrowserRemotePort(e.target.value); setBrowserSaved(false) }}
                       placeholder="9222"
-                      className="w-full px-4 py-2.5 rounded-lg border text-sm font-mono focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                      className="w-full px-4 py-2.5 rounded-lg border text-sm font-mono focus:ring-2 focus:ring-primary focus:border-transparent"
                       style={{ background: 'var(--bg-secondary)', borderColor: 'var(--border-color)', color: 'var(--text-primary)' }}
                     />
                   </div>
@@ -960,10 +960,10 @@ export default function SetupWizard({ onComplete }: { onComplete: () => void }) 
             )}
 
             {browserEngine === 'cloakbrowser' && (
-              <div className="p-4 rounded-lg mb-4 bg-purple-500/5 border border-purple-500/20">
+              <div className="p-4 rounded-lg mb-4 bg-primary/5 border border-primary/20">
                 <p className="text-sm" style={{ color: 'var(--text-secondary)' }}>
                   CloakBrowser requires dependency installation via the CLI.
-                  Run <code className="text-purple-400">astonish config browser</code> to set it up.
+                  Run <code className="text-primary">astonish config browser</code> to set it up.
                 </p>
               </div>
             )}
@@ -975,7 +975,7 @@ export default function SetupWizard({ onComplete }: { onComplete: () => void }) 
                 onClick={handleSaveBrowser}
                 disabled={isLoading || (browserEngine === 'custom' && !browserCustomPath) || (browserEngine === 'remote' && !browserRemoteHost)}
                 className="w-full py-3 rounded-lg font-medium flex items-center justify-center gap-2 transition-all disabled:opacity-50"
-                style={{ background: browserSaved ? 'var(--bg-tertiary)' : 'linear-gradient(to right, #9333ea, #3b82f6)', color: browserSaved ? 'var(--text-secondary)' : 'white' }}
+                style={{ background: browserSaved ? 'var(--bg-tertiary)' : 'linear-gradient(to right, var(--brand), var(--brand-strong))', color: browserSaved ? 'var(--text-secondary)' : 'white' }}
               >
                 {isLoading ? <><Loader2 size={18} className="animate-spin" />Saving...</> : browserSaved ? <><Check size={18} />Saved</> : <><Check size={18} />Save Browser Config</>}
               </button>
@@ -991,7 +991,7 @@ export default function SetupWizard({ onComplete }: { onComplete: () => void }) 
             <p className="text-center mb-6" style={{ color: 'var(--text-muted)' }}>Container isolation for AI tool execution. Prevents tools from accessing your host system directly.</p>
 
             {isLoading && !sandboxStatus ? (
-              <div className="text-center py-8"><Loader2 size={24} className="animate-spin mx-auto mb-2 text-purple-400" /><p style={{ color: 'var(--text-muted)' }}>Detecting sandbox environment...</p></div>
+              <div className="text-center py-8"><Loader2 size={24} className="animate-spin mx-auto mb-2 text-primary" /><p style={{ color: 'var(--text-muted)' }}>Detecting sandbox environment...</p></div>
             ) : (sandboxStatus as any)?.baseTemplateExists ? (
               <div className="text-center">
                 <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-green-500/10 mb-4"><Shield size={32} className="text-green-400" /></div>
@@ -1011,22 +1011,22 @@ export default function SetupWizard({ onComplete }: { onComplete: () => void }) 
                             <button
                               key={tool.id}
                               onClick={() => setSelectedTools(prev => ({ ...prev, [tool.id]: !prev[tool.id] }))}
-                              className={`w-full p-4 rounded-xl border-2 text-left transition-all ${selectedTools[tool.id] ? 'border-purple-500 bg-purple-500/10' : 'border-transparent hover:border-gray-600'}`}
+                              className={`w-full p-4 rounded-xl border-2 text-left transition-all ${selectedTools[tool.id] ? 'border-primary bg-primary/10' : 'border-transparent hover:border-gray-600'}`}
                               style={{ background: selectedTools[tool.id] ? undefined : 'var(--bg-tertiary)' }}
                             >
                               <div className="flex items-center justify-between">
                                 <div className="flex items-center gap-3">
-                                  <div className={`w-5 h-5 rounded border-2 flex items-center justify-center transition-all ${selectedTools[tool.id] ? 'bg-purple-500 border-purple-500' : 'border-gray-500'}`}>
+                                  <div className={`w-5 h-5 rounded border-2 flex items-center justify-center transition-all ${selectedTools[tool.id] ? 'bg-primary border-primary' : 'border-gray-500'}`}>
                                     {selectedTools[tool.id] && <Check size={12} className="text-white" />}
                                   </div>
                                   <div>
                                     <span className="font-semibold text-sm" style={{ color: 'var(--text-primary)' }}>{tool.name}</span>
-                                    {(tool as any).recommended && <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded-full bg-purple-500/20 text-purple-400">recommended</span>}
+                                    {(tool as any).recommended && <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded-full bg-primary/20 text-primary">recommended</span>}
                                     {(tool as any).requiresNesting && <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded-full bg-yellow-500/20 text-yellow-400">needs nesting</span>}
                                   </div>
                                 </div>
                                 {(tool as any).url && (
-                                  <a href={(tool as any).url} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} className="text-purple-400 hover:text-purple-300">
+                                  <a href={(tool as any).url} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} className="text-primary hover:text-primary">
                                     <ExternalLink size={14} />
                                   </a>
                                 )}
@@ -1041,7 +1041,7 @@ export default function SetupWizard({ onComplete }: { onComplete: () => void }) 
                     <button
                       onClick={handleSandboxInit}
                       className="w-full py-3 rounded-lg font-medium flex items-center justify-center gap-2 transition-all"
-                      style={{ background: 'linear-gradient(to right, #9333ea, #3b82f6)', color: 'white' }}
+                      style={{ background: 'linear-gradient(to right, var(--brand), var(--brand-strong))', color: 'white' }}
                     >
                       <Shield size={18} />Initialize Sandbox
                     </button>
@@ -1058,7 +1058,7 @@ export default function SetupWizard({ onComplete }: { onComplete: () => void }) 
                       </div>
                     ) : (
                       <div className="flex items-center gap-2 mb-4">
-                        <Loader2 size={18} className="animate-spin text-purple-400" />
+                        <Loader2 size={18} className="animate-spin text-primary" />
                         <span className="text-sm font-medium" style={{ color: 'var(--text-secondary)' }}>Initializing sandbox...</span>
                       </div>
                     )}
@@ -1077,7 +1077,7 @@ export default function SetupWizard({ onComplete }: { onComplete: () => void }) 
                     <button
                       onClick={handleSandboxInit}
                       className="w-full py-2 rounded-lg font-medium text-sm transition-all"
-                      style={{ background: 'linear-gradient(to right, #9333ea, #3b82f6)', color: 'white' }}
+                      style={{ background: 'linear-gradient(to right, var(--brand), var(--brand-strong))', color: 'white' }}
                     >
                       Retry
                     </button>
@@ -1105,7 +1105,7 @@ export default function SetupWizard({ onComplete }: { onComplete: () => void }) 
                   <button
                     onClick={loadSandboxStatus}
                     className="flex-1 py-2.5 rounded-lg font-medium text-sm flex items-center justify-center gap-2 transition-all"
-                    style={{ background: 'linear-gradient(to right, #9333ea, #3b82f6)', color: 'white' }}
+                    style={{ background: 'linear-gradient(to right, var(--brand), var(--brand-strong))', color: 'white' }}
                   >
                     {isLoading ? <Loader2 size={16} className="animate-spin" /> : null}
                     I've installed Incus — Retry
@@ -1173,7 +1173,7 @@ export default function SetupWizard({ onComplete }: { onComplete: () => void }) 
                   <span style={{ color: 'var(--text-muted)' }}>{webInstalled ? webInstalledName : 'Not configured'}</span>
                 </div>
                 <div className="flex items-center gap-2 text-xs">
-                  <Monitor size={14} className="text-purple-400" />
+                  <Monitor size={14} className="text-primary" />
                   <span style={{ color: 'var(--text-secondary)' }}>Browser:</span>
                   <span style={{ color: 'var(--text-muted)' }}>{BROWSER_ENGINES.find(e => e.id === browserEngine)?.name || 'Default'}</span>
                 </div>
@@ -1206,11 +1206,11 @@ export default function SetupWizard({ onComplete }: { onComplete: () => void }) 
         <div className="flex justify-between mt-8 pt-6" style={{ borderTop: '1px solid var(--border-color)' }}>
           <button onClick={goBack} disabled={step === 0 || sandboxInitializing} className="flex items-center gap-2 px-4 py-2 rounded-lg transition-all disabled:opacity-30" style={{ color: 'var(--text-secondary)' }}><ChevronLeft size={18} />Back</button>
           {isLastStep ? (
-            <button onClick={handleComplete} disabled={isLoading} className="flex items-center gap-2 px-6 py-2 rounded-lg font-medium transition-all" style={{ background: 'linear-gradient(to right, #9333ea, #3b82f6)', color: 'white' }}>
+            <button onClick={handleComplete} disabled={isLoading} className="flex items-center gap-2 px-6 py-2 rounded-lg font-medium transition-all" style={{ background: 'linear-gradient(to right, var(--brand), var(--brand-strong))', color: 'white' }}>
               {isLoading ? <><Loader2 size={18} className="animate-spin" />Saving...</> : <><Sparkles size={18} />Get Started</>}
             </button>
           ) : (
-            <button onClick={goNext} disabled={!canProceed() || sandboxInitializing} className="flex items-center gap-2 px-6 py-2 rounded-lg font-medium transition-all disabled:opacity-50" style={{ background: canProceed() && !sandboxInitializing ? 'linear-gradient(to right, #9333ea, #3b82f6)' : 'var(--bg-tertiary)', color: canProceed() && !sandboxInitializing ? 'white' : 'var(--text-muted)' }}>
+            <button onClick={goNext} disabled={!canProceed() || sandboxInitializing} className="flex items-center gap-2 px-6 py-2 rounded-lg font-medium transition-all disabled:opacity-50" style={{ background: canProceed() && !sandboxInitializing ? 'linear-gradient(to right, var(--brand), var(--brand-strong))' : 'var(--bg-tertiary)', color: canProceed() && !sandboxInitializing ? 'white' : 'var(--text-muted)' }}>
               Continue<ChevronRight size={18} />
             </button>
           )}

@@ -219,23 +219,26 @@ function noteKindFromMessage(msg: ChatMsg): ActivityNote['kind'] {
 
 export interface GroupToolActivityOptions {
   /**
-   * When true (active stream), soft notes after the last tool are also absorbed
-   * as provisional process text so they never flash as Agent bubbles.
-   * When false (history / turn complete), those notes stay passthrough (final answer).
+   * @deprecated Unused. Agent text is never absorbed into activity notes; a sticky
+   * latest-agent bubble per run is selected at render time.
    */
   absorbTrailingSoft?: boolean
 }
 
+/** Soft notes that fold into activity process lines (not user-facing bubbles). */
+function isAbsorbableProcessNote(msg: ChatMsg): boolean {
+  return msg.type === 'thinking' || msg.type === 'auto_approved' || msg.type === 'retry'
+}
+
 /**
- * Fold tools + interstitial soft notes into activity segments.
+ * Fold tools + process notes into **one** activity segment per soft+tool run.
+ * Agent messages are never absorbed (they use a sticky bubble — see isStickyAgentBubble).
  * Hard-break types always passthrough and split folds.
- * Agent text after the last tool stays passthrough unless absorbTrailingSoft.
  */
 export function groupToolActivity(
   messages: ChatMsg[],
-  opts: GroupToolActivityOptions = {},
+  _opts: GroupToolActivityOptions = {},
 ): MessageSegment[] {
-  const absorbTrailingSoft = opts.absorbTrailingSoft === true
   const segments: MessageSegment[] = []
   let i = 0
   while (i < messages.length) {
@@ -246,7 +249,7 @@ export function groupToolActivity(
       continue
     }
 
-    // Collect contiguous soft notes + tools until a hard break.
+    // Collect contiguous soft notes + tools until a hard break (single fold).
     const runStart = i
     while (i < messages.length && !isHardBreak(messages[i])) {
       i += 1
@@ -259,7 +262,7 @@ export function groupToolActivity(
     }
 
     if (toolIndices.length === 0) {
-      // Soft-only run with no tools → all passthrough
+      // Soft-only run with no tools → all passthrough (sticky agent picks latest)
       for (let j = runStart; j <= runEnd; j++) {
         segments.push({ kind: 'passthrough', index: j })
       }
@@ -274,11 +277,9 @@ export function groupToolActivity(
 
     for (let j = runStart; j <= runEnd; j++) {
       const m = messages[j]
-      if (!isSoftNote(m)) continue
-      // Keep astonish-app progress UI outside the fold (AppCodeIndicator).
-      if (isAppProgressAgent(m)) continue
-      const absorb = j <= lastToolIndex || absorbTrailingSoft
-      if (!absorb) continue
+      // Never absorb agent text into process notes (sticky bubble instead).
+      if (!isAbsorbableProcessNote(m)) continue
+      if (j > lastToolIndex) continue
       const text = noteTextFromMessage(m).trim()
       if (text) {
         notes.push({ index: j, kind: noteKindFromMessage(m), text })
@@ -299,15 +300,73 @@ export function groupToolActivity(
       coveredIndices,
     })
 
-    // Emit passthrough for soft notes after last tool when not absorbed
-    // (includes astonish-app progress agents that must host AppCodeIndicator).
-    for (let j = lastToolIndex + 1; j <= runEnd; j++) {
-      if (!covered.has(j)) {
+    // Agents and other non-covered soft notes → passthrough (sticky filter at render)
+    for (let j = runStart; j <= runEnd; j++) {
+      if (!covered.has(j) && isSoftNote(messages[j])) {
         segments.push({ kind: 'passthrough', index: j })
       }
     }
   }
   return segments
+}
+
+/**
+ * Soft+tool run bounds containing index (exclusive of hard breaks).
+ * Returns [runStart, runEnd] inclusive.
+ */
+export function softRunBounds(messages: ChatMsg[], index: number): [number, number] {
+  let runStart = index
+  while (runStart > 0 && !isHardBreak(messages[runStart - 1])) {
+    runStart -= 1
+  }
+  let runEnd = index
+  while (runEnd < messages.length - 1 && !isHardBreak(messages[runEnd + 1])) {
+    runEnd += 1
+  }
+  return [runStart, runEnd]
+}
+
+/**
+ * Within each soft+tool run, only the latest agent message is shown as a bubble.
+ * Earlier agents are "replaced" (not rendered) so mid-turn tools never remove the bubble.
+ */
+export function supersededAgentIndices(messages: ChatMsg[]): Set<number> {
+  const skip = new Set<number>()
+  let i = 0
+  while (i < messages.length) {
+    if (isHardBreak(messages[i])) {
+      i += 1
+      continue
+    }
+    const runStart = i
+    while (i < messages.length && !isHardBreak(messages[i])) {
+      i += 1
+    }
+    const runEnd = i - 1
+    let lastAgent = -1
+    for (let j = runStart; j <= runEnd; j++) {
+      if (messages[j].type === 'agent') lastAgent = j
+    }
+    if (lastAgent < 0) continue
+    for (let j = runStart; j <= runEnd; j++) {
+      if (messages[j].type === 'agent' && j !== lastAgent) {
+        skip.add(j)
+      }
+    }
+  }
+  return skip
+}
+
+/** True if this agent index is the sticky bubble for its soft+tool run. */
+export function isStickyAgentBubble(messages: ChatMsg[], index: number): boolean {
+  if (messages[index]?.type !== 'agent') return false
+  return !supersededAgentIndices(messages).has(index)
+}
+
+/** Stable React key for the sticky agent bubble in a run (avoids remount on replace). */
+export function stickyAgentBubbleKey(messages: ChatMsg[], index: number): string {
+  const [runStart] = softRunBounds(messages, index)
+  return `agent-sticky-${runStart}`
 }
 
 /** Latest agent/thinking note text for the always-visible process line. */
@@ -556,10 +615,14 @@ export function liveActivityHint(step: ToolActivityStep): string {
  * Status for the bottom streaming pill: live tool hint, or Thinking… when idle between tools.
  */
 export function deriveLiveStreamStatus(messages: ChatMsg[]): string {
-  // Streaming pill always absorbs trailing soft notes so coverage matches live UI.
-  const segs = groupToolActivity(messages, { absorbTrailingSoft: true })
+  const segs = groupToolActivity(messages)
   if (messages.length === 0) return 'Thinking…'
   const last = messages.length - 1
+  // Final answer streaming in an Agent bubble — not a tool status line.
+  const lastMsg = messages[last]
+  if (lastMsg?.type === 'agent' && (lastMsg as { _streaming?: boolean })._streaming) {
+    return 'Thinking…'
+  }
   for (let i = segs.length - 1; i >= 0; i--) {
     const seg = segs[i]
     if (seg.kind !== 'activity') continue
@@ -729,6 +792,10 @@ export function buildActivityRenderIndex(
     for (const idx of seg.coveredIndices) {
       if (idx !== seg.start) skipIndices.add(idx)
     }
+  }
+  // Superseded agents in a run: only the latest agent bubble is sticky.
+  for (const idx of supersededAgentIndices(messages)) {
+    skipIndices.add(idx)
   }
   return { activityByStart, skipIndices, lastActivityStart }
 }

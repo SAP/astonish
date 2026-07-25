@@ -186,7 +186,7 @@ export default function TeamContainerTab({ teamSlug, theme, canManage }: TeamCon
   if (loading) {
     return (
       <div className="flex items-center justify-center py-12">
-        <Loader2 size={24} className="animate-spin" style={{ color: 'var(--accent)' }} />
+        <Loader2 size={24} className="animate-spin" style={{ color: 'var(--brand)' }} />
         <span className="ml-2 text-sm" style={{ color: 'var(--text-muted)' }}>Loading container status...</span>
       </div>
     )
@@ -214,7 +214,7 @@ export default function TeamContainerTab({ teamSlug, theme, canManage }: TeamCon
         {/* Header */}
         <div>
           <h3 className="text-sm font-semibold flex items-center gap-2" style={{ color: 'var(--text-primary)' }}>
-            <Box size={16} style={{ color: 'var(--accent)' }} />
+            <Box size={16} style={{ color: 'var(--brand)' }} />
             Team Sandbox Image
           </h3>
           <p className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
@@ -249,7 +249,7 @@ export default function TeamContainerTab({ teamSlug, theme, canManage }: TeamCon
           <div className="flex items-center justify-between">
             <span className="text-xs font-medium" style={{ color: 'var(--text-secondary)' }}>Current Image</span>
             {status.sandboxImage ? (
-              <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: 'rgba(168, 85, 247, 0.1)', color: '#a855f7' }}>
+              <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: 'color-mix(in oklab, var(--brand) 10%, transparent)', color: 'var(--brand)' }}>
                 Custom
               </span>
             ) : (
@@ -298,7 +298,7 @@ export default function TeamContainerTab({ teamSlug, theme, canManage }: TeamCon
                 onClick={handleSaveImage}
                 disabled={savingImage || imageInput === (status.sandboxImage || '')}
                 className={btnBase}
-                style={{ background: 'var(--accent)', color: '#fff', opacity: (savingImage || imageInput === (status.sandboxImage || '')) ? 0.5 : 1 }}
+                style={{ background: 'var(--brand)', color: '#fff', opacity: (savingImage || imageInput === (status.sandboxImage || '')) ? 0.5 : 1 }}
               >
                 {savingImage ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
                 Save Image
@@ -437,7 +437,7 @@ export default function TeamContainerTab({ teamSlug, theme, canManage }: TeamCon
                 }}
                 disabled={buildingImage || !dockerfileBody.trim()}
                 className={btnBase}
-                style={{ background: 'var(--accent)', color: '#fff', opacity: (buildingImage || !dockerfileBody.trim()) ? 0.5 : 1 }}
+                style={{ background: 'var(--brand)', color: '#fff', opacity: (buildingImage || !dockerfileBody.trim()) ? 0.5 : 1 }}
               >
                 {buildingImage ? <Loader2 size={12} className="animate-spin" /> : <Play size={12} />}
                 {buildingImage ? 'Building...' : 'Build Image'}
@@ -455,7 +455,7 @@ export default function TeamContainerTab({ teamSlug, theme, canManage }: TeamCon
       <div className="flex items-center justify-between">
         <div>
           <h3 className="text-sm font-semibold flex items-center gap-2" style={{ color: 'var(--text-primary)' }}>
-            <Box size={16} style={{ color: 'var(--accent)' }} />
+            <Box size={16} style={{ color: 'var(--brand)' }} />
             Team Container Environment
           </h3>
           <p className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
@@ -486,9 +486,9 @@ export default function TeamContainerTab({ teamSlug, theme, canManage }: TeamCon
             )}
             {status.saved && (
               <span className="flex items-center gap-1 px-2 py-1 text-xs rounded-full" style={{
-                background: 'rgba(168, 85, 247, 0.1)',
-                color: '#a855f7',
-                border: '1px solid rgba(168, 85, 247, 0.3)',
+                background: 'color-mix(in oklab, var(--brand) 10%, transparent)',
+                color: 'var(--brand)',
+                border: '1px solid color-mix(in oklab, var(--brand) 30%, transparent)',
               }}>
                 <CheckCircle2 size={10} />
                 Active
@@ -528,7 +528,7 @@ export default function TeamContainerTab({ teamSlug, theme, canManage }: TeamCon
               onClick={handleCreate}
               disabled={!!actionLoading}
               className={btnBase}
-              style={{ background: 'var(--accent)', color: '#fff' }}
+              style={{ background: 'var(--brand)', color: '#fff' }}
             >
               {actionLoading === 'create' ? <Loader2 size={12} className="animate-spin" /> : <Play size={12} />}
               Create & Start
@@ -540,7 +540,7 @@ export default function TeamContainerTab({ teamSlug, theme, canManage }: TeamCon
               onClick={handleStart}
               disabled={!!actionLoading}
               className={btnBase}
-              style={{ background: 'var(--accent)', color: '#fff' }}
+              style={{ background: 'var(--brand)', color: '#fff' }}
             >
               {actionLoading === 'start' ? <Loader2 size={12} className="animate-spin" /> : <Play size={12} />}
               Start
@@ -588,7 +588,7 @@ export default function TeamContainerTab({ teamSlug, theme, canManage }: TeamCon
       {showTerminal && status?.exists && !status.running && (
         <div className="flex-1 min-h-0 rounded-lg overflow-hidden flex items-center justify-center" style={{ border: '1px solid var(--border-color)', background: theme === 'dark' ? '#1a1a2e' : '#ffffff' }}>
           <div className="text-center">
-            <Loader2 size={24} className="animate-spin mx-auto mb-2" style={{ color: 'var(--accent)' }} />
+            <Loader2 size={24} className="animate-spin mx-auto mb-2" style={{ color: 'var(--brand)' }} />
             <p className="text-xs" style={{ color: 'var(--text-muted)' }}>Starting container...</p>
           </div>
         </div>
@@ -599,7 +599,7 @@ export default function TeamContainerTab({ teamSlug, theme, canManage }: TeamCon
         <div className="flex-1 min-h-0 rounded-lg overflow-hidden" style={{ border: '1px solid var(--border-color)' }}>
           <Suspense fallback={
             <div className="flex items-center justify-center h-full py-12">
-              <Loader2 size={24} className="animate-spin" style={{ color: 'var(--accent)' }} />
+              <Loader2 size={24} className="animate-spin" style={{ color: 'var(--brand)' }} />
             </div>
           }>
             <TeamContainerTerminal

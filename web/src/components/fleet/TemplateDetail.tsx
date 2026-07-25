@@ -162,8 +162,8 @@ export default function TemplateDetail({ templateKey, templates, setupProfiles =
                 <span
                   className="text-xs px-2 py-0.5 rounded"
                   style={{
-                    background: isBundled ? 'rgba(6, 182, 212, 0.15)' : 'var(--bg-tertiary)',
-                    color: isBundled ? '#22d3ee' : 'var(--text-muted)',
+                    background: isBundled ? 'var(--brand-muted)' : 'var(--bg-tertiary)',
+                    color: isBundled ? 'var(--brand)' : 'var(--text-muted)',
                   }}
                 >
                   {isBundled ? 'Astonish template' : 'Your template'}
@@ -178,8 +178,8 @@ export default function TemplateDetail({ templateKey, templates, setupProfiles =
                   <button
                     type="button"
                     onClick={() => onNavigateToSetupProfile?.(setupProfileKey)}
-                    className="flex items-center gap-1 text-xs px-2 py-0.5 rounded transition-colors hover:bg-cyan-500/10"
-                    style={{ background: 'rgba(6, 182, 212, 0.12)', color: '#67e8f9', border: '1px solid rgba(6, 182, 212, 0.25)' }}
+                    className="flex items-center gap-1 text-xs px-2 py-0.5 rounded transition-colors hover:bg-primary/10"
+                    style={{ background: 'var(--brand-muted)', color: 'var(--brand)', border: '1px solid color-mix(in oklab, var(--brand) 25%, transparent)' }}
                     title={`Setup profile: ${setupProfileKey}`}
                   >
                     <Settings2 size={10} />
@@ -200,7 +200,7 @@ export default function TemplateDetail({ templateKey, templates, setupProfiles =
               </button>
               <button
                 onClick={() => setSetupOpen(true)}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white transition-colors"
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-primary hover:bg-primary/90 text-white transition-colors"
               >
                 <Users size={12} /> Create Plan
               </button>
@@ -215,7 +215,7 @@ export default function TemplateDetail({ templateKey, templates, setupProfiles =
           </div>
 
           {isBundled && (
-            <div className="rounded-lg p-3 text-xs" style={{ background: 'rgba(6, 182, 212, 0.08)', border: '1px solid rgba(6, 182, 212, 0.25)', color: 'var(--text-secondary)' }}>
+            <div className="rounded-lg p-3 text-xs" style={{ background: 'var(--brand-muted)', border: '1px solid color-mix(in oklab, var(--brand) 25%, transparent)', color: 'var(--text-secondary)' }}>
               This template ships with Astonish and cannot be edited. Clone it to create a customizable copy stored in your team database.
             </div>
           )}
@@ -249,7 +249,7 @@ export default function TemplateDetail({ templateKey, templates, setupProfiles =
                 onOpen={() => onNavigateToSetupProfile?.(setupProfileKey)}
               />
               <CommunicationFlow flow={fullConfig?.communication?.flow || []} />
-              <div className="rounded-lg p-4" style={{ background: 'rgba(6, 182, 212, 0.05)', border: '1px solid rgba(6, 182, 212, 0.2)' }}>
+              <div className="rounded-lg p-4" style={{ background: 'var(--brand-muted)', border: '1px solid color-mix(in oklab, var(--brand) 20%, transparent)' }}>
                 <p className="text-xs" style={{ color: 'var(--text-secondary)' }}>
                   Templates are base fleet configurations. Create a fleet plan from this template to add environment-specific channel and artifact settings.
                 </p>
@@ -368,7 +368,7 @@ function SetupProfileCard({
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex items-center gap-2 mb-1">
-            <Settings2 size={14} className="text-cyan-400 shrink-0" />
+            <Settings2 size={14} className="text-primary shrink-0" />
             <h3 className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>Setup Profile</h3>
           </div>
           <p className="text-xs mb-2" style={{ color: 'var(--text-secondary)' }}>
@@ -376,7 +376,7 @@ function SetupProfileCard({
             {!explicit && ' This template has no explicit setup_profile; the default generic profile applies.'}
           </p>
           <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-sm font-medium" style={{ color: '#22d3ee' }}>{profileName}</span>
+            <span className="text-sm font-medium" style={{ color: 'var(--brand)' }}>{profileName}</span>
             <span className="text-xs font-mono px-1.5 py-0.5 rounded" style={{ background: 'var(--bg-tertiary)', color: 'var(--text-muted)' }}>
               {profileKey}
             </span>
@@ -394,10 +394,10 @@ function SetupProfileCard({
           <button
             type="button"
             onClick={onOpen}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg shrink-0 transition-colors hover:bg-cyan-500/10"
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg shrink-0 transition-colors hover:bg-primary/10"
             style={{ background: 'var(--bg-tertiary)', color: 'var(--text-secondary)', border: '1px solid var(--border-color)' }}
           >
-            View profile <ExternalLink size={12} className="text-cyan-400" />
+            View profile <ExternalLink size={12} className="text-primary" />
           </button>
         )}
       </div>

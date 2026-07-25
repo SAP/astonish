@@ -12,7 +12,7 @@ export default function ToolNode({ id, data, selected }: NodeProps<ToolNodeType>
       selected={selected}
       icon={Wrench} 
       nodeType="Tool"
-      iconColor="#7c3aed"
+      iconColor="var(--node-tool)"
     />
   )
 }

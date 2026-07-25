@@ -14,15 +14,25 @@ interface KnowledgeBrowserProps {
   activeTeam?: string | null
 }
 type Tab = 'personal' | 'team' | 'org' | 'add'
-const SCOPE_COLORS: Record<string, string> = { personal: '#3b82f6', team: '#a855f7', org: '#10b981' }
+const SCOPE_COLORS: Record<string, string> = {
+  personal: 'var(--info)',
+  team: 'var(--brand)',
+  org: 'var(--success)',
+}
 
 function ScopeBadge({ scope }: { scope: string }) {
   const label = scope || 'unknown'
-  const color = SCOPE_COLORS[label] || '#6b7280'
+  const color = SCOPE_COLORS[label] || 'var(--muted-foreground)'
   return (
-    <span className="px-2 py-0.5 rounded-full text-xs font-medium"
-      style={{ background: `${color}22`, color, border: `1px solid ${color}44` }}>
-      {label.charAt(0).toUpperCase() + label.slice(1)}
+    <span
+      className="rounded-full border px-2 py-0.5 text-xs font-medium capitalize"
+      style={{
+        background: `color-mix(in oklab, ${color} 14%, transparent)`,
+        color,
+        borderColor: `color-mix(in oklab, ${color} 28%, transparent)`,
+      }}
+    >
+      {label}
     </span>
   )
 }
@@ -68,8 +78,7 @@ function MemoryCard({ entry, userId, isAdmin, currentTab, onDelete, onPromote, o
   const displayText = expanded || editing ? entry.snippet : (isLong ? entry.snippet.slice(0, 200) + '...' : entry.snippet)
 
   return (
-    <div className="p-4 rounded-lg border transition-all"
-      style={{ background: 'var(--bg-secondary)', borderColor: 'var(--border-color)' }}>
+    <div className="rounded-lg border border-border bg-card p-4 shadow-[var(--shadow-soft)] transition-all">
 
       {/* Content area */}
       {editing ? (
@@ -90,7 +99,7 @@ function MemoryCard({ entry, userId, isAdmin, currentTab, onDelete, onPromote, o
             style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border-color)' }}
           />
           <div className="flex gap-2">
-            <button onClick={handleSaveEdit} className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-medium text-white" style={{ background: 'var(--accent, #a855f7)' }}>
+            <button onClick={handleSaveEdit} className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-medium text-white" style={{ background: 'var(--brand)' }}>
               <Check size={12} /> Save
             </button>
             <button onClick={handleCancelEdit} className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs" style={{ color: 'var(--text-muted)' }}>
@@ -105,7 +114,7 @@ function MemoryCard({ entry, userId, isAdmin, currentTab, onDelete, onPromote, o
             <button
               onClick={() => setExpanded(true)}
               className="flex items-center gap-1 mt-2 text-xs font-medium transition-colors hover:opacity-80"
-              style={{ color: 'var(--accent, #a855f7)' }}
+              style={{ color: 'var(--brand)' }}
             >
               <ChevronDown size={14} /> Show more
             </button>
@@ -114,7 +123,7 @@ function MemoryCard({ entry, userId, isAdmin, currentTab, onDelete, onPromote, o
             <button
               onClick={() => setExpanded(false)}
               className="flex items-center gap-1 mt-2 text-xs font-medium transition-colors hover:opacity-80"
-              style={{ color: 'var(--accent, #a855f7)' }}
+              style={{ color: 'var(--brand)' }}
             >
               <ChevronUp size={14} /> Show less
             </button>
@@ -393,7 +402,7 @@ export default function KnowledgeBrowser({ theme, user, activeTeam }: KnowledgeB
                 className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors"
                 style={{
                   background: active
-                    ? 'linear-gradient(135deg, #a855f7 0%, #7c3aed 100%)'
+                    ? 'linear-gradient(135deg, var(--brand) 0%, var(--brand-strong) 100%)'
                     : 'var(--bg-secondary)',
                   color: active ? '#fff' : 'var(--text-secondary)',
                   border: `1px solid ${active ? 'transparent' : 'var(--border-color)'}`,
@@ -412,7 +421,7 @@ export default function KnowledgeBrowser({ theme, user, activeTeam }: KnowledgeB
         {/* Loading indicator */}
         {loading && (
           <div className="flex items-center justify-center py-12">
-            <Loader2 size={24} className="animate-spin" style={{ color: 'var(--accent)' }} />
+            <Loader2 size={24} className="animate-spin" style={{ color: 'var(--brand)' }} />
             <span className="ml-2 text-sm" style={{ color: 'var(--text-muted)' }}>Loading...</span>
           </div>
         )}
@@ -544,7 +553,7 @@ export default function KnowledgeBrowser({ theme, user, activeTeam }: KnowledgeB
               onClick={handleSave}
               disabled={!snippet.trim() || saving}
               className="flex items-center justify-center gap-2 w-full py-2.5 rounded-lg text-sm font-medium text-white transition-opacity disabled:opacity-40"
-              style={{ background: 'linear-gradient(135deg, #a855f7 0%, #7c3aed 100%)' }}
+              style={{ background: 'linear-gradient(135deg, var(--brand) 0%, var(--brand-strong) 100%)' }}
             >
               {saving ? <Loader2 size={16} className="animate-spin" /> : <Plus size={16} />}
               {saving ? 'Saving...' : 'Save Memory'}

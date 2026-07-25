@@ -15,7 +15,7 @@ function fileTypeBadgeStyle(fileType: string) {
   const colors: Record<string, { bg: string; text: string }> = {
     Markdown: { bg: 'rgba(59, 130, 246, 0.15)', text: '#60a5fa' },
     Python: { bg: 'rgba(234, 179, 8, 0.15)', text: '#facc15' },
-    JSON: { bg: 'rgba(168, 85, 247, 0.15)', text: '#c084fc' },
+    JSON: { bg: 'var(--brand-muted)', text: 'var(--brand)' },
     Go: { bg: 'rgba(6, 182, 212, 0.15)', text: '#22d3ee' },
     HTML: { bg: 'rgba(249, 115, 22, 0.15)', text: '#fb923c' },
     CSS: { bg: 'rgba(59, 130, 246, 0.15)', text: '#60a5fa' },

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import SessionModelPicker from './SessionModelPicker'
 import type { SessionModelStatus } from '../../api/studioChat'
 import { patchSessionModel } from '../../api/studioChat'
@@ -45,6 +46,11 @@ function openPicker(statusOverrides?: Partial<SessionModelStatus>, availableProv
   return { onUpdate }
 }
 
+async function chooseProvider(user: ReturnType<typeof userEvent.setup>, name: string) {
+  await user.click(screen.getByRole('combobox'))
+  await user.click(await screen.findByRole('option', { name }))
+}
+
 describe('SessionModelPicker', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -55,6 +61,15 @@ describe('SessionModelPicker', () => {
       <SessionModelPicker sessionId="ses-1" modelStatus={baseStatus} onUpdate={vi.fn()} />
     )
     expect(screen.getByRole('button', { name: /Model: default/ })).toBeInTheDocument()
+  })
+
+  it('opens an opaque popover panel (bg-popover) so chat content does not bleed through', () => {
+    openPicker()
+    const currently = screen.getByText(/Currently:/)
+    const panel = currently.closest('div.absolute')
+    expect(panel).toBeTruthy()
+    expect(panel?.className).toMatch(/bg-popover/)
+    expect(panel?.className).toMatch(/text-popover-foreground/)
   })
 
   it('renders trigger with pinned provider/model label', () => {
@@ -68,28 +83,27 @@ describe('SessionModelPicker', () => {
     expect(screen.getByRole('button', { name: /Model: anthropic\/claude-4/ })).toBeInTheDocument()
   })
 
-  it('lists availableProviders in the select', () => {
+  it('lists availableProviders in the select', async () => {
+    const user = userEvent.setup()
     openPicker()
-    const select = screen.getByRole('combobox') as HTMLSelectElement
-    const values = Array.from(select.options).map((o) => o.value)
-    expect(values).toContain('openai')
-    expect(values).toContain('anthropic')
-    expect(values).toContain('google')
+    await user.click(screen.getByRole('combobox'))
+    expect(await screen.findByRole('option', { name: 'openai' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'anthropic' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'google' })).toBeInTheDocument()
   })
 
-  it('unions extra availableProviders prop with modelStatus list', () => {
+  it('unions extra availableProviders prop with modelStatus list', async () => {
+    const user = userEvent.setup()
     openPicker({ availableProviders: ['openai'] }, ['anthropic', 'custom-llm'])
-    const select = screen.getByRole('combobox') as HTMLSelectElement
-    const values = Array.from(select.options).map((o) => o.value)
-    expect(values).toContain('openai')
-    expect(values).toContain('anthropic')
-    expect(values).toContain('custom-llm')
+    await user.click(screen.getByRole('combobox'))
+    expect(await screen.findByRole('option', { name: 'openai' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'anthropic' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'custom-llm' })).toBeInTheDocument()
   })
 
   it('shows pinned provider as selected in the combobox', () => {
     openPicker({ pinnedProvider: 'anthropic', pinnedModel: 'claude-4' })
-    const select = screen.getByRole('combobox') as HTMLSelectElement
-    expect(select.value).toBe('anthropic')
+    expect(screen.getByRole('combobox')).toHaveTextContent('anthropic')
   })
 
   it('shows current effective model at top', () => {
@@ -98,6 +112,7 @@ describe('SessionModelPicker', () => {
   })
 
   it('calls patchSessionModel with selected provider+model on Save', async () => {
+    const user = userEvent.setup()
     vi.mocked(patchSessionModel).mockResolvedValue({
       pinnedProvider: 'anthropic',
       pinnedModel: 'claude-4',
@@ -107,14 +122,15 @@ describe('SessionModelPicker', () => {
       availableProviders: [],
     })
     openPicker()
-    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'anthropic' } })
-    fireEvent.click(screen.getByTitle('Browse models'))
-    fireEvent.click(screen.getByText('Select claude-4'))
-    fireEvent.click(screen.getByRole('button', { name: /save/i }))
+    await chooseProvider(user, 'anthropic')
+    await user.click(screen.getByTitle('Browse models'))
+    await user.click(screen.getByText('Select claude-4'))
+    await user.click(screen.getByRole('button', { name: /save/i }))
     await waitFor(() => expect(patchSessionModel).toHaveBeenCalledWith('ses-1', 'anthropic', 'claude-4'))
   })
 
   it('merges response preserving availableProviders (D5)', async () => {
+    const user = userEvent.setup()
     vi.mocked(patchSessionModel).mockResolvedValue({
       pinnedProvider: 'anthropic',
       pinnedModel: 'claude-4',
@@ -123,8 +139,8 @@ describe('SessionModelPicker', () => {
       credentialsAvailable: true,
     } as unknown as SessionModelStatus)
     const { onUpdate } = openPicker()
-    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'anthropic' } })
-    fireEvent.click(screen.getByRole('button', { name: /save/i }))
+    await chooseProvider(user, 'anthropic')
+    await user.click(screen.getByRole('button', { name: /save/i }))
     await waitFor(() =>
       expect(onUpdate).toHaveBeenCalledWith(
         expect.objectContaining({ availableProviders: ['openai', 'anthropic', 'google'] })

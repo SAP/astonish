@@ -18,17 +18,17 @@ export default function SetupStepper({ steps, currentIndex, collected, stepActiv
         return (
           <div
             key={step.id}
-            className={`px-2 py-2 rounded-lg text-xs ${isCurrent ? 'bg-cyan-500/15 border border-cyan-500/30' : ''}`}
+            className={`px-2 py-2 rounded-lg text-xs ${isCurrent ? 'bg-primary/15 border border-primary/30' : ''}`}
           >
             <div className="flex items-center gap-2">
               <span
                 className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-mono shrink-0 ${
-                  isComplete && !isCurrent ? 'bg-green-500/20 text-green-400' : isCurrent ? 'bg-cyan-500/30 text-cyan-300' : 'bg-white/5 text-gray-500'
+                  isComplete && !isCurrent ? 'bg-green-500/20 text-green-400' : isCurrent ? 'bg-primary/30 text-primary' : 'bg-white/5 text-gray-500'
                 }`}
               >
                 {isComplete && !isCurrent ? '✓' : i + 1}
               </span>
-              <span style={{ color: isCurrent ? '#22d3ee' : 'var(--text-secondary)' }} className="font-medium truncate">
+              <span style={{ color: isCurrent ? 'var(--brand)' : 'var(--text-secondary)' }} className="font-medium truncate">
                 {step.title}
               </span>
             </div>

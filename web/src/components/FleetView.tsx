@@ -20,11 +20,11 @@ import SetupProfileDetail from './fleet/SetupProfileDetail'
 
 function EmptyState() {
   return (
-    <div className="flex-1 flex items-center justify-center">
+    <div className="flex flex-1 items-center justify-center bg-[color:var(--work-background,var(--background))]">
       <div className="text-center">
-        <Rocket size={48} className="mx-auto mb-4 text-cyan-400/30" />
-        <h2 className="text-lg font-semibold mb-2" style={{ color: 'var(--text-primary)' }}>Fleet Management</h2>
-        <p className="text-sm max-w-md" style={{ color: 'var(--text-muted)' }}>
+        <Rocket size={48} className="mx-auto mb-4 text-primary/35" />
+        <h2 className="mb-2 text-lg font-semibold text-foreground">Fleet Management</h2>
+        <p className="max-w-md text-sm text-muted-foreground">
           Select a fleet plan, session, or template from the sidebar to get started.
           Fleet plans define autonomous agent teams that can be launched manually or
           activated to monitor external channels like GitHub Issues.
@@ -202,7 +202,7 @@ export default function FleetView({ theme, path, onNavigate, onCreatePlan }: Fle
   }
 
   return (
-    <div className="flex flex-1 overflow-hidden">
+    <div className="flex flex-1 overflow-hidden bg-[color:var(--work-background,var(--background))]">
       <FleetSidebar
         plans={filteredPlans}
         sessions={filteredSessions}

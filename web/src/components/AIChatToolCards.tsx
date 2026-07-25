@@ -105,7 +105,7 @@ export function ToolInstallCard({ tool, installingTool, onInstall }: ToolInstall
           <div className="text-xs text-[var(--text-secondary)] mt-0.5">
             {tool.description}
           </div>
-          <div className="text-xs text-purple-400 mt-0.5">
+          <div className="text-xs text-primary mt-0.5">
             Source: {tool.source}
           </div>
         </div>
@@ -114,7 +114,7 @@ export function ToolInstallCard({ tool, installingTool, onInstall }: ToolInstall
           <button
             onClick={handleInstallClick}
             disabled={isInstalling}
-            className="flex items-center gap-1 px-3 py-1.5 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white text-xs font-medium rounded-lg transition-colors whitespace-nowrap"
+            className="flex items-center gap-1 px-3 py-1.5 bg-primary hover:bg-primary/90 disabled:opacity-50 text-white text-xs font-medium rounded-lg transition-colors whitespace-nowrap"
           >
             {isInstalling ? (
               <>
@@ -162,7 +162,7 @@ export function ToolInstallCard({ tool, installingTool, onInstall }: ToolInstall
             <button
               onClick={handleInstallClick}
               disabled={isInstalling}
-              className="flex-1 flex items-center justify-center gap-1 px-3 py-1.5 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white text-xs font-medium rounded-lg transition-colors"
+              className="flex-1 flex items-center justify-center gap-1 px-3 py-1.5 bg-primary hover:bg-primary/90 disabled:opacity-50 text-white text-xs font-medium rounded-lg transition-colors"
             >
               {isInstalling ? (
                 <>
@@ -192,8 +192,8 @@ export function StoreResultsPanel({ storeResults, installingTool, onInstall, onS
   const hasMore = storeResults.length > INITIAL_COUNT
   
   return (
-    <div className="bg-gradient-to-r from-purple-600/20 to-blue-600/20 border border-purple-500/30 rounded-lg p-3 space-y-3">
-      <div className="flex items-center gap-2 text-sm font-medium text-purple-300">
+    <div className="bg-gradient-to-r from-primary/20 to-[var(--accent3)]/20 border border-primary/30 rounded-lg p-3 space-y-3">
+      <div className="flex items-center gap-2 text-sm font-medium text-primary">
         <Package size={16} />
         <span>Found {storeResults.length} matching tools in store:</span>
       </div>
@@ -210,7 +210,7 @@ export function StoreResultsPanel({ storeResults, installingTool, onInstall, onS
       {hasMore && (
         <button
           onClick={() => setIsExpanded(!isExpanded)}
-          className="w-full text-xs text-purple-400 hover:text-purple-300 transition-colors py-1"
+          className="w-full text-xs text-primary hover:text-primary transition-colors py-1"
         >
           {isExpanded ? (
             <>▲ Show less</>
@@ -222,7 +222,7 @@ export function StoreResultsPanel({ storeResults, installingTool, onInstall, onS
       
       {/* Always offer internet search as fallback */}
       {onSearchOnline && (
-        <div className="border-t border-purple-500/20 pt-2 mt-2">
+        <div className="border-t border-primary/20 pt-2 mt-2">
           <button
             onClick={onSearchOnline}
             className="w-full text-xs text-blue-400 hover:text-blue-300 transition-colors flex items-center justify-center gap-1"

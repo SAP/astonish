@@ -24,7 +24,7 @@ export default function SetupProvisionPanel({
   const repo = String(collected.project_source?.repo || collected.channel?.repo || '')
 
   return (
-    <div className="space-y-4 rounded-lg p-4" style={{ background: 'rgba(6, 182, 212, 0.06)', border: '1px solid rgba(6, 182, 212, 0.2)' }}>
+    <div className="space-y-4 rounded-lg p-4" style={{ background: 'var(--brand-muted)', border: '1px solid color-mix(in oklab, var(--brand) 20%, transparent)' }}>
       <div>
         <h3 className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>{step.title}</h3>
         <p className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
@@ -32,12 +32,12 @@ export default function SetupProvisionPanel({
         </p>
       </div>
       {repo && (
-        <p className="text-xs" style={{ color: 'var(--text-secondary)' }}>Repository: <span className="font-mono text-cyan-400">{repo}</span></p>
+        <p className="text-xs" style={{ color: 'var(--text-secondary)' }}>Repository: <span className="font-mono text-primary">{repo}</span></p>
       )}
       {onOpenChat && (
         <button
           onClick={onOpenChat}
-          className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white"
+          className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg bg-primary hover:bg-primary/90 text-white"
         >
           <ExternalLink size={12} /> Continue in guided setup (chat)
         </button>

@@ -101,19 +101,22 @@ export default function AppPreviewCard({
             : 'my-3 rounded-xl overflow-hidden w-full'
       }
       style={fullscreen ? {} : {
-        border: `1px solid ${isActive ? 'var(--accent)' : 'var(--border-color)'}`,
-        background: 'var(--bg-secondary)',
+        border: `1px solid ${isActive ? 'var(--brand)' : 'var(--card-border, var(--border-color))'}`,
+        background: 'var(--card)',
         boxShadow: 'var(--shadow-soft)',
       }}
     >
-      {/* Header */}
+      {/* Toolbar — lifted surface so it doesn't disappear into the harness body */}
       <div
         className="px-4 py-3 flex items-center justify-between"
-        style={{ borderBottom: '1px solid var(--border-color)' }}
+        style={{
+          borderBottom: '1px solid var(--border-color)',
+          background: 'color-mix(in oklab, var(--brand) 10%, var(--card))',
+        }}
       >
         <div className="flex items-center gap-2 min-w-0">
-          <AppWindow size={16} style={{ color: 'var(--accent)' }} className="flex-shrink-0" />
-          <span className="text-sm font-semibold truncate" style={{ color: 'var(--accent)' }}>
+          <AppWindow size={16} style={{ color: 'var(--brand)' }} className="flex-shrink-0" />
+          <span className="text-sm font-semibold truncate" style={{ color: 'var(--foreground)' }}>
             {displayedData.title || 'App Preview'}
           </span>
           {displayedData.description && (
@@ -131,19 +134,19 @@ export default function AppPreviewCard({
                 onClick={() => canGoPrev && onNavigateVersion?.(versionIndex - 1)}
                 disabled={!canGoPrev}
                 className="p-1 rounded transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-default"
-                style={{ color: 'var(--text-muted)' }}
+                style={{ color: 'var(--text-secondary)' }}
                 title="Previous version"
               >
                 <ChevronLeft size={14} />
               </button>
-              <span className="text-[10px] tabular-nums" style={{ color: 'var(--text-muted)' }}>
+              <span className="text-[10px] tabular-nums" style={{ color: 'var(--text-secondary)' }}>
                 v{displayedData.version}
               </span>
               <button
                 onClick={() => canGoNext && onNavigateVersion?.(versionIndex + 1)}
                 disabled={!canGoNext}
                 className="p-1 rounded transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-default"
-                style={{ color: 'var(--text-muted)' }}
+                style={{ color: 'var(--text-secondary)' }}
                 title="Next version"
               >
                 <ChevronRight size={14} />
@@ -157,8 +160,8 @@ export default function AppPreviewCard({
               onClick={handleSaveClick}
               className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium transition-colors cursor-pointer mr-1"
               style={{
-                color: 'var(--text-on-accent)',
-                background: 'var(--accent)',
+                color: 'var(--brand-foreground, #ffffff)',
+                background: 'var(--brand)',
               }}
               title="Save this app"
             >
@@ -172,8 +175,8 @@ export default function AppPreviewCard({
             onClick={() => setShowCode(!showCode)}
             className="p-1.5 rounded transition-colors cursor-pointer"
             style={{
-              color: showCode ? 'var(--accent)' : 'var(--text-muted)',
-              background: showCode ? 'var(--accent-soft)' : 'transparent',
+              color: showCode ? 'var(--brand)' : 'var(--text-secondary)',
+              background: showCode ? 'var(--brand-muted)' : 'transparent',
             }}
             title={showCode ? 'Hide code' : 'View code'}
           >
@@ -224,11 +227,11 @@ export default function AppPreviewCard({
             }}
             className="flex-1 px-2.5 py-1 rounded-lg text-sm border focus:outline-none focus:ring-1"
             style={{
-              background: 'var(--bg-primary)',
+              background: 'var(--input-bg, var(--bg-primary))',
               borderColor: 'var(--border-color)',
               color: 'var(--text-primary)',
               // @ts-expect-error CSS custom property for focus ring
-              '--tw-ring-color': 'var(--accent)',
+              '--tw-ring-color': 'var(--brand)',
             }}
             placeholder="Enter app name..."
           />
@@ -237,8 +240,8 @@ export default function AppPreviewCard({
             disabled={!saveName.trim()}
             className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-default"
             style={{
-              color: 'var(--text-on-accent)',
-              background: 'var(--accent)',
+              color: 'var(--brand-foreground, #ffffff)',
+              background: 'var(--brand)',
             }}
           >
             <Save size={12} />
@@ -265,7 +268,7 @@ export default function AppPreviewCard({
             <button
               onClick={handleCopyCode}
               className="text-[10px] px-2 py-0.5 rounded transition-colors cursor-pointer"
-              style={{ color: 'var(--accent)', background: 'var(--accent-soft)' }}
+              style={{ color: 'var(--brand)', background: 'var(--brand-muted)' }}
             >
               Copy
             </button>

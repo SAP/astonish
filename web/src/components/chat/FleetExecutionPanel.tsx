@@ -148,7 +148,7 @@ export default function FleetExecutionPanel({ data }: { data: FleetExecutionMess
               <button
                 onClick={() => toggleContent(eventKey)}
                 className="text-[10px] hover:opacity-80 px-2 py-0.5 mb-1 rounded bg-black/50 cursor-pointer"
-                style={{ color: 'var(--accent)' }}
+                style={{ color: 'var(--brand)' }}
               >
                 Show more ({Math.ceil(text.length / 1000)}k chars)
               </button>
@@ -159,7 +159,7 @@ export default function FleetExecutionPanel({ data }: { data: FleetExecutionMess
               <button
                 onClick={() => toggleContent(eventKey)}
                 className="text-[10px] hover:opacity-80 px-2 py-0.5 rounded bg-black/30 cursor-pointer"
-                style={{ color: 'var(--accent)' }}
+                style={{ color: 'var(--brand)' }}
               >
                 Show less
               </button>
@@ -182,9 +182,9 @@ export default function FleetExecutionPanel({ data }: { data: FleetExecutionMess
         style={{ border: '1px solid var(--border-color)', background: 'rgba(255,255,255,0.03)' }}
       >
         <div className="flex items-center gap-2 px-3 py-1.5">
-          <Wrench size={12} className={isCall ? 'text-purple-400' : 'text-green-400'} />
+          <Wrench size={12} className={isCall ? 'text-primary' : 'text-green-400'} />
           <span className="text-xs font-medium" style={{ color: 'var(--text-primary)' }}>
-            {isCall ? 'Tool Call' : 'Tool Result'}: <code className="bg-purple-500/15 text-purple-300 px-1 py-0.5 rounded text-[11px]">{name}</code>
+            {isCall ? 'Tool Call' : 'Tool Result'}: <code className="bg-primary/15 text-primary px-1 py-0.5 rounded text-[11px]">{name}</code>
           </span>
         </div>
         {renderCardContent(cardData, eventKey)}
@@ -223,8 +223,8 @@ export default function FleetExecutionPanel({ data }: { data: FleetExecutionMess
         <div
           className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs"
           style={{
-            background: isFailed ? 'rgba(239,68,68,0.1)' : 'rgba(139,92,246,0.1)',
-            border: `1px solid ${isFailed ? 'rgba(239,68,68,0.3)' : 'rgba(139,92,246,0.2)'}`,
+            background: isFailed ? 'rgba(239,68,68,0.1)' : 'var(--brand-muted)',
+            border: `1px solid ${isFailed ? 'rgba(239,68,68,0.3)' : 'color-mix(in oklab, var(--brand) 20%, transparent)'}`,
           }}
         >
           {isComplete ? (
@@ -232,9 +232,9 @@ export default function FleetExecutionPanel({ data }: { data: FleetExecutionMess
           ) : isFailed ? (
             <span className="text-red-400 text-xs font-bold">!</span>
           ) : (
-            <Loader size={12} className="animate-spin text-purple-400" />
+            <Loader size={12} className="animate-spin text-primary" />
           )}
-          <span className="text-purple-300 font-medium">{evt.agent || 'agent'}</span>
+          <span className="text-primary font-medium">{evt.agent || 'agent'}</span>
           <span className="text-gray-400">({role})</span>
           {isComplete && evt.text && (
             <span className="text-gray-500 ml-2 truncate max-w-[300px]">{evt.text}</span>
@@ -340,7 +340,7 @@ export default function FleetExecutionPanel({ data }: { data: FleetExecutionMess
         }}
       >
         <div className="flex items-center gap-2.5 px-4 py-2.5">
-          {data.status === 'running' && <Loader size={15} className="animate-spin shrink-0" style={{ color: 'var(--accent)' }} />}
+          {data.status === 'running' && <Loader size={15} className="animate-spin shrink-0" style={{ color: 'var(--brand)' }} />}
           {data.status === 'complete' && <Check size={15} className="text-green-400 shrink-0" />}
           <Users size={15} className="shrink-0" style={{ color: 'var(--text-muted)' }} />
           <span className="font-semibold text-sm" style={{ color: 'var(--text-primary)' }}>Fleet Execution</span>
@@ -386,7 +386,7 @@ export default function FleetExecutionPanel({ data }: { data: FleetExecutionMess
     >
       {/* Header */}
       <div className="flex items-center gap-2.5 px-4 py-2.5">
-        {data.status === 'running' && <Loader size={15} className="animate-spin shrink-0" style={{ color: 'var(--accent)' }} />}
+        {data.status === 'running' && <Loader size={15} className="animate-spin shrink-0" style={{ color: 'var(--brand)' }} />}
         {data.status === 'complete' && <Check size={15} className="text-green-400 shrink-0" />}
         <Users size={15} className="shrink-0" style={{ color: 'var(--text-muted)' }} />
         <span className="font-semibold text-sm" style={{ color: 'var(--text-primary)' }}>Fleet Execution</span>
@@ -465,7 +465,7 @@ export default function FleetExecutionPanel({ data }: { data: FleetExecutionMess
                 {/* Right side: timestamp on hover */}
                 <span className="flex items-center gap-2 shrink-0">
                   {phase.status === 'running' && (
-                    <span className="text-[11px]" style={{ color: 'var(--accent)' }}>running</span>
+                    <span className="text-[11px]" style={{ color: 'var(--brand)' }}>running</span>
                   )}
                   {phase.startTimestamp && (
                     <span

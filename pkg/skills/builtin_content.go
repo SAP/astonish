@@ -32,26 +32,26 @@ export default function Dashboard() {
   return (
     <div className="p-6 space-y-4">
       <div className="flex items-center gap-2">
-        <TrendingUp className="w-5 h-5 text-blue-400" />
-        <h1 className="text-xl font-bold text-white">Weekly Stats</h1>
+        <TrendingUp className="w-5 h-5 text-brand" />
+        <h1 className="text-xl font-bold text-app">Weekly Stats</h1>
       </div>
       <div className="flex gap-2">
         <button
           onClick={() => setPeriod('week')}
-          className={` + "`px-3 py-1 rounded text-sm ${period === 'week' ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`" + `}
+          className={` + "`px-3 py-1 rounded text-sm ${period === 'week' ? 'bg-brand text-white' : 'bg-surface-2 text-app-muted hover:text-app border border-app-border'}`" + `}
         >Week</button>
         <button
           onClick={() => setPeriod('month')}
-          className={` + "`px-3 py-1 rounded text-sm ${period === 'month' ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`" + `}
+          className={` + "`px-3 py-1 rounded text-sm ${period === 'month' ? 'bg-brand text-white' : 'bg-surface-2 text-app-muted hover:text-app border border-app-border'}`" + `}
         >Month</button>
       </div>
       <ResponsiveContainer width="100%" height={200}>
         <BarChart data={data}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-          <XAxis dataKey="name" stroke="#9ca3af" />
-          <YAxis stroke="#9ca3af" />
-          <Tooltip contentStyle={{ background: '#1f2937', border: '1px solid #374151', borderRadius: '8px' }} />
-          <Bar dataKey="value" fill="#3b82f6" radius={[4,4,0,0]} />
+          <CartesianGrid strokeDasharray="3 3" stroke="#3d2450" />
+          <XAxis dataKey="name" stroke="#b49bc3" />
+          <YAxis stroke="#b49bc3" />
+          <Tooltip contentStyle={{ background: '#1d0f28', border: '1px solid rgba(240,220,255,0.1)', borderRadius: '8px' }} />
+          <Bar dataKey="value" fill="#ff6b9d" radius={[4,4,0,0]} />
         </BarChart>
       </ResponsiveContainer>
     </div>
@@ -82,85 +82,96 @@ There is NO component library. The following DO NOT EXIST in the sandbox:
 
 ## How to Build UI Without a Component Library
 
-Use native HTML elements styled with Tailwind. Follow this design system for polished, consistent results.
+Use native HTML elements styled with Tailwind. Follow the **Astonish App Canvas** design system so apps match Studio (brand pack + light/dark).
 
-### Color Palette
+### App Canvas (light/dark + brand-pack aware)
 
-- **Outermost container:** transparent (NO bg-* class) — the sandbox provides the themed background
-- **Cards/panels:** ` + "`bg-gray-900 border border-gray-800 rounded-xl`" + `
-- **Inner elements (inputs, nested containers):** ` + "`bg-gray-800 border border-gray-700 rounded-lg`" + `
-- **Text hierarchy:** ` + "`text-white`" + ` (headings/primary), ` + "`text-gray-300`" + ` (body), ` + "`text-gray-400`" + ` (secondary), ` + "`text-gray-500`" + ` (labels/muted)
-- **Accent colors (use semantically):**
-  - **Emerald/green** — positive values, success, growth, money
-  - **Blue** — informational, links, secondary metrics
-  - **Purple** — totals, aggregates, net worth
-  - **Amber/yellow** — warnings, counts, neutral highlights
-  - **Red/rose** — errors, negative values, destructive actions
+The sandbox receives **light or dark** tokens for the active brand pack from Studio (same dual axis as the shell). Apps that use token classes retheme when the user toggles light/dark or switches brand packs.
+
+Use **token classes** (` + "`bg-surface`" + `, ` + "`bg-brand`" + `, ` + "`text-app`" + `) so apps retheme automatically. Do **not** hard-code hex colors, gray backgrounds, or black/white text for surfaces. Do **not** implement your own theme toggle — the parent pushes mode.
+
+### Color Palette (prefer these token classes)
+
+Sandbox Tailwind tokens (use these instead of raw slate ` + "`bg-gray-900`" + `):
+
+- **Outermost container:** transparent (NO bg-* class) — canvas shows through
+- **Page/section cards:** ` + "`bg-surface border border-app-border rounded-xl`" + `
+- **Inner elements (keys, inputs, nested):** ` + "`bg-surface-2 border border-app-border rounded-lg`" + `
+- **Text hierarchy:** ` + "`text-app`" + ` (primary), ` + "`text-app-muted`" + ` (secondary/labels)
+- **Primary actions:** ` + "`bg-brand text-white`" + ` (pack brand accent)
+- **Secondary highlight:** ` + "`text-brand-strong`" + `
+- **Tertiary accent:** ` + "`text-accent3`" + ` for secondary metrics
+- **Error banner:** ` + "`bg-danger-soft border border-danger-border text-danger`" + ` (readable in light and dark)
+- **Warning banner:** ` + "`bg-warning-soft border border-warning-border text-warning`" + `
+- **Success / positive:** ` + "`bg-success-soft border border-success-border text-success`" + ` or ` + "`text-success`" + `
+
+Avoid raw slate (` + "`bg-gray-900`" + `, ` + "`bg-gray-800`" + `, ` + "`text-gray-*`" + `) and default blue CTAs when brand tokens fit.
+**Do not** use pastel status text alone on light backgrounds (` + "`text-red-400`" + `, ` + "`text-yellow-300`" + `, ` + "`text-amber-300`" + `) — they fail contrast in Studio light mode. Prefer the danger/warning/success tokens above.
 
 ### Standard Component Patterns
 
 **Card:**
-` + "`<div className=\"bg-gray-900 rounded-xl p-4 border border-gray-800\">...</div>`" + `
+` + "`<div className=\"bg-surface rounded-xl p-4 border border-app-border\">...</div>`" + `
 
 **Color-coded KPI / summary card:**
 ` + "```" + `jsx
-<div className="bg-gradient-to-br from-emerald-900/40 to-emerald-950/40 rounded-xl p-4 border border-emerald-800/50">
-  <p className="text-xs text-emerald-400 mb-1">Label</p>
-  <p className="text-2xl font-bold text-emerald-300">$12,500</p>
-  <p className="text-xs text-gray-500 mt-1">Supporting text</p>
+<div className="bg-gradient-to-br from-brand/20 to-surface rounded-xl p-4 border border-brand/30">
+  <p className="text-xs text-brand mb-1">Label</p>
+  <p className="text-2xl font-bold text-app">$12,500</p>
+  <p className="text-xs text-app-muted mt-1">Supporting text</p>
 </div>
 ` + "```" + `
-Use different accent colors per card (emerald, blue, purple, amber) to distinguish metrics.
+Use brand / accent3 / emerald / amber per card to distinguish metrics.
 
 **Input with label (inside a card):**
 ` + "```" + `jsx
-<div className="bg-gray-900 rounded-xl p-3 border border-gray-800">
-  <label className="text-xs text-gray-500 flex items-center gap-1 mb-1">
+<div className="bg-surface rounded-xl p-3 border border-app-border">
+  <label className="text-xs text-app-muted flex items-center gap-1 mb-1">
     <DollarSign className="w-3 h-3" /> Label
   </label>
   <input
     type="number"
-    className="w-full bg-gray-800 text-white rounded-lg px-3 py-2 text-sm border border-gray-700 focus:border-emerald-500 focus:outline-none"
+    className="w-full bg-surface-2 text-app rounded-lg px-3 py-2 text-sm border border-app-border focus:border-brand focus:outline-none"
   />
 </div>
 ` + "```" + `
 
-**Button:** ` + "`<button className=\"px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm\">Click me</button>`" + `
+**Button:** ` + "`<button className=\"px-4 py-2 bg-brand text-white rounded-lg hover:opacity-90 transition-opacity text-sm\">Click me</button>`" + `
 
-**Subtle/secondary button:** ` + "`<button className=\"px-3 py-1.5 rounded-lg text-xs bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-white border border-gray-700 transition-colors\">Option</button>`" + `
+**Subtle/secondary button:** ` + "`<button className=\"px-3 py-1.5 rounded-lg text-xs bg-surface-2 text-app-muted hover:text-app border border-app-border transition-colors\">Option</button>`" + `
 
-**Badge:** ` + "`<span className=\"inline-flex items-center rounded-full border border-white/15 bg-white/5 px-2 py-0.5 text-xs text-white/80\">Status</span>`" + `
+**Badge:** ` + "`<span className=\"inline-flex items-center rounded-full border border-app-border bg-surface-2 px-2 py-0.5 text-xs text-app-muted\">Status</span>`" + `
 
-**Select:** ` + "`<select className=\"px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm focus:border-emerald-500 focus:outline-none\"><option>...</option></select>`" + `
+**Select:** ` + "`<select className=\"px-3 py-2 bg-surface-2 border border-app-border rounded-lg text-app text-sm focus:border-brand focus:outline-none\"><option>...</option></select>`" + `
 
 **Table:**
 ` + "```" + `jsx
 <table className="w-full text-sm">
   <thead>
-    <tr className="text-gray-500 text-xs border-b border-gray-800">
+    <tr className="text-app-muted text-xs border-b border-app-border">
       <th className="text-left py-2 px-3">Name</th>
       <th className="text-right py-2 px-3">Amount</th>
     </tr>
   </thead>
   <tbody>
-    <tr className="border-b border-gray-800/50 hover:bg-gray-800/30">
-      <td className="py-2 px-3 text-white">Row label</td>
-      <td className="py-2 px-3 text-right text-emerald-400 font-medium">$1,234</td>
+    <tr className="border-b border-app-border/50 hover:bg-surface-2/50">
+      <td className="py-2 px-3 text-app">Row label</td>
+      <td className="py-2 px-3 text-right text-success font-medium">$1,234</td>
     </tr>
   </tbody>
 </table>
 ` + "```" + `
-Right-align numeric columns. Use colored text (` + "`text-emerald-400`" + `, ` + "`text-blue-400`" + `) for values and ` + "`font-medium`" + ` for emphasis.
+Right-align numeric columns. Use colored text for values and ` + "`font-medium`" + ` for emphasis.
 
 **Header with icon:**
 ` + "```" + `jsx
 <div className="flex items-center gap-3">
-  <div className="p-2 bg-emerald-600/20 rounded-lg">
-    <Calculator className="w-6 h-6 text-emerald-400" />
+  <div className="p-2 bg-brand/20 rounded-lg">
+    <Calculator className="w-6 h-6 text-brand" />
   </div>
   <div>
-    <h1 className="text-2xl font-bold text-white">Title</h1>
-    <p className="text-gray-500 text-sm">Description text</p>
+    <h1 className="text-2xl font-bold text-app">Title</h1>
+    <p className="text-app-muted text-sm">Description text</p>
   </div>
 </div>
 ` + "```" + `
@@ -168,17 +179,29 @@ Right-align numeric columns. Use colored text (` + "`text-emerald-400`" + `, ` +
 **Tabs:**
 ` + "```" + `jsx
 const [tab, setTab] = useState('overview');
-<div className="flex border-b border-gray-700">
+<div className="flex border-b border-app-border">
   {['overview', 'details'].map(t => (
     <button key={t} onClick={() => setTab(t)}
-      className={` + "`px-4 py-2 text-sm ${tab === t ? 'border-b-2 border-blue-500 text-white' : 'text-gray-400 hover:text-white'}`" + `}
+      className={` + "`px-4 py-2 text-sm ${tab === t ? 'border-b-2 border-brand text-app' : 'text-app-muted hover:text-app'}`" + `}
     >{t}</button>
   ))}
 </div>
 ` + "```" + `
 
 **Info/explanation block:**
-` + "`<div className=\"bg-gray-900/50 rounded-xl p-4 border border-gray-800 text-sm text-gray-400\">...</div>`" + `
+` + "`<div className=\"bg-surface/50 rounded-xl p-4 border border-app-border text-sm text-app-muted\">...</div>`" + `
+
+**Calculator / keypad pattern (example):**
+` + "```" + `jsx
+<div className="max-w-xs mx-auto space-y-3">
+  <div className="bg-surface rounded-xl p-4 border border-app-border text-right text-3xl tabular-nums text-app">0</div>
+  <div className="grid grid-cols-4 gap-2">
+    <button className="bg-surface-2 text-app rounded-xl py-3 border border-app-border">7</button>
+    {/* … */}
+    <button className="bg-brand text-white rounded-xl py-3">=</button>
+  </div>
+</div>
+` + "```" + `
 
 ### Layout Principles
 
@@ -189,12 +212,12 @@ const [tab, setTab] = useState('overview');
 - Wrap control inputs in a ` + "`grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3`" + `
 - Use ` + "`tabular-nums`" + ` for numbers that change dynamically (counters, financial data)
 - Typical page structure: header → controls → summary cards → charts → tables (adapt to the content; not all sections are needed)
-- **Always include a Recharts visualization** (AreaChart, LineChart, BarChart, etc.) when the app involves numerical data, time series, growth projections, financial calculations, comparisons, or any data that benefits from a visual representation. Charts are a key strength of the sandbox — use them proactively.
+- **Always include a Recharts visualization** (AreaChart, LineChart, BarChart, etc.) when the app involves numerical data, time series, growth projections, financial calculations, comparisons, or any data that benefits from a visual representation. Charts are a key strength of the sandbox — use them proactively. Chart strokes/fills: prefer brand pink ` + "`#ff6b9d`" + `, amber ` + "`#ffb86b`" + `, lilac ` + "`#b478ff`" + `; grid ` + "`#3d2450`" + `.
 
 **If you need a reusable component, define it as a top-level function ABOVE the main export (NEVER nested inside):**
 ` + "```" + `jsx
 function Badge({ children, variant = 'default' }) {
-  const colors = { default: 'bg-gray-700 text-gray-300', success: 'bg-green-500/20 text-green-400' };
+  const colors = { default: 'bg-surface-2 text-app-muted', success: 'bg-success-soft text-success border border-success-border' };
   return <span className={` + "`px-2 py-0.5 text-xs rounded-full ${colors[variant]}`" + `}>{children}</span>;
 }
 
@@ -211,7 +234,7 @@ export default function App() {
 4. **Single file** — Everything must be in one file. Helper components and utility functions go at the top, the main ` + "`export default function`" + ` goes at the bottom.
 5. **Self-contained** — Include all data, state, and logic within the component. Use hardcoded sample data for static apps; use ` + "`useAppData`" + ` for live data (see below).
 6. **NEVER use fetch(), XMLHttpRequest, or axios** — The sandbox blocks direct network access. ALL external data MUST go through ` + "`useAppData('http:GET:<url>')`" + ` or ` + "`useAppData('mcp:<server>/<tool>')`" + `. This is the ONLY way to get external data. If the user gives you a URL or API endpoint, put it in the useAppData sourceId, e.g. ` + "`useAppData('http:GET:https://api.example.com/data')`" + `.
-7. **Dark-mode aware** — The preview renders on a themed background. **Do NOT set any background class (bg-*) on the outermost container element** — it must be transparent so the sandbox theme shows through. Follow the Visual Design System above: ` + "`bg-gray-900`" + ` for cards, ` + "`bg-gray-800`" + ` for inputs/inner elements, semantic accent colors for data.
+7. **App Canvas tokens** — **Do NOT set any background class (bg-*) on the outermost container** — it must be transparent so the Studio canvas shows through. Use App Canvas tokens (` + "`bg-surface`" + `, ` + "`bg-surface-2`" + `, ` + "`text-app`" + `, ` + "`bg-brand`" + `). Do not hard-code light-only or dark-only colors; one set of token classes works for both modes.
 8. **Make it interactive** — Use ` + "`useState`" + ` for buttons, toggles, tabs, filters.
 9. **Responsive** — Use responsive Tailwind classes (` + "`md:`" + `, ` + "`lg:`" + `) where appropriate.
 
@@ -241,12 +264,12 @@ export default function SalesTable() {
     args: { query: 'SELECT * FROM sales ORDER BY date DESC LIMIT 20' }
   });
 
-  if (loading) return <div className="p-4 text-gray-400">Loading...</div>;
-  if (error) return <div className="p-4 text-red-400">Error: {error}</div>;
+  if (loading) return <div className="p-4 text-app-muted">Loading...</div>;
+  if (error) return <div className="p-3 rounded-lg border border-danger-border bg-danger-soft text-danger text-sm">Error: {error}</div>;
 
   return (
-    <table className="w-full text-sm text-gray-300">
-      <thead><tr className="border-b border-gray-700">{/* ... */}</tr></thead>
+    <table className="w-full text-sm text-app">
+      <thead><tr className="border-b border-app-border">{/* ... */}</tr></thead>
       <tbody>{data?.rows?.map((row, i) => <tr key={i}>{/* ... */}</tr>)}</tbody>
     </table>
   );
@@ -267,15 +290,15 @@ export default function WeatherApp() {
     <div className="p-6 space-y-4">
       <div className="flex gap-2">
         <input value={city} onChange={e => setCity(e.target.value)}
-          className="flex-1 px-3 py-2 bg-gray-800 border border-gray-600 rounded-lg text-white"
+          className="flex-1 px-3 py-2 bg-surface-2 border border-app-border rounded-lg text-white"
           placeholder="Enter city..." />
         <button onClick={() => setQuery(city)}
-          className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
+          className="px-4 py-2 bg-brand text-white rounded-lg hover:opacity-90">
           Search
         </button>
       </div>
-      {loading && <p className="text-gray-400">Loading...</p>}
-      {error && <p className="text-red-400">{error}</p>}
+      {loading && <p className="text-app-muted">Loading...</p>}
+      {error && <p className="p-2 rounded-lg border border-danger-border bg-danger-soft text-danger text-sm">{error}</p>}
       {data && <p className="text-2xl text-white">{data?.current_condition?.[0]?.temp_C}°C</p>}
     </div>
   );
@@ -287,14 +310,14 @@ export default function WeatherApp() {
 export default function GitHubRepos() {
   const { data, loading, error } = useAppData('http:GET:https://api.github.com/user/repos@github-token');
 
-  if (loading) return <div className="p-4 text-gray-400">Loading...</div>;
-  if (error) return <div className="p-4 text-red-400">Error: {error}</div>;
+  if (loading) return <div className="p-4 text-app-muted">Loading...</div>;
+  if (error) return <div className="p-3 rounded-lg border border-danger-border bg-danger-soft text-danger text-sm">Error: {error}</div>;
 
   return (
     <div className="p-4 space-y-2">
       <h2 className="text-lg font-bold text-white">My Repos</h2>
       {data?.map(repo => (
-        <div key={repo.id} className="p-2 bg-gray-800 rounded text-gray-300">{repo.full_name}</div>
+        <div key={repo.id} className="p-2 bg-surface-2 rounded text-app">{repo.full_name}</div>
       ))}
     </div>
   );
@@ -310,14 +333,14 @@ export default function AIDeployments() {
     { args: { headers: { "AI-Resource-Group": resourceGroup } } }
   );
 
-  if (loading) return <div className="p-4 text-gray-400">Loading...</div>;
-  if (error) return <div className="p-4 text-red-400">Error: {error}</div>;
+  if (loading) return <div className="p-4 text-app-muted">Loading...</div>;
+  if (error) return <div className="p-3 rounded-lg border border-danger-border bg-danger-soft text-danger text-sm">Error: {error}</div>;
 
   return (
     <div className="p-4 space-y-2">
       <h2 className="text-lg font-bold text-white">Deployments</h2>
       {data?.resources?.map(d => (
-        <div key={d.id} className="p-2 bg-gray-800 rounded text-gray-300">{d.name} — {d.status}</div>
+        <div key={d.id} className="p-2 bg-surface-2 rounded text-app">{d.name} — {d.status}</div>
       ))}
     </div>
   );
@@ -347,11 +370,11 @@ export default function TaskManager() {
     refetch();
   }
 
-  if (loading) return <div className="p-4 text-gray-400">Loading...</div>;
+  if (loading) return <div className="p-4 text-app-muted">Loading...</div>;
   return (
     <div className="p-4 space-y-2">
       {data?.rows?.map(task => (
-        <div key={task.id} className="flex justify-between items-center p-2 bg-gray-800 rounded">
+        <div key={task.id} className="flex justify-between items-center p-2 bg-surface-2 rounded">
           <span className="text-white">{task.title}</span>
           <button onClick={() => handleComplete(task.id)} className="px-2 py-1 text-xs bg-green-600 text-white rounded">Done</button>
         </div>
@@ -424,12 +447,12 @@ export default function ArticleViewer() {
 
   return (
     <div className="p-4">
-      <p className="text-gray-300">{article}</p>
+      <p className="text-app">{article}</p>
       <button onClick={handleSummarize} disabled={loading}
-        className="mt-4 px-4 py-2 bg-blue-600 text-white rounded-lg disabled:opacity-50">
+        className="mt-4 px-4 py-2 bg-brand text-white rounded-lg disabled:opacity-50">
         {loading ? 'Summarizing...' : 'Summarize'}
       </button>
-      {summary && <div className="mt-4 p-3 bg-gray-800 rounded-lg text-gray-200">{summary}</div>}
+      {summary && <div className="mt-4 p-3 bg-surface-2 rounded-lg text-app">{summary}</div>}
     </div>
   );
 }
@@ -467,7 +490,7 @@ export default function SmartDashboard() {
         className="px-4 py-2 bg-purple-600 text-white rounded-lg">
         {analyzing ? 'Analyzing...' : 'AI Analysis'}
       </button>
-      {analysis && <div className="mt-4 p-3 bg-gray-800 rounded-lg whitespace-pre-wrap">{analysis}</div>}
+      {analysis && <div className="mt-4 p-3 bg-surface-2 rounded-lg whitespace-pre-wrap">{analysis}</div>}
     </div>
   );
 }
@@ -543,22 +566,22 @@ export default function TodoApp() {
     await db.exec('DELETE FROM todos WHERE id = ?', [id]);
   };
 
-  if (todos.loading) return <div className="p-4 text-gray-400">Loading...</div>;
+  if (todos.loading) return <div className="p-4 text-app-muted">Loading...</div>;
 
   return (
     <div className="p-4 space-y-4">
       <div className="flex gap-2">
         <input value={newTodo} onChange={e => setNewTodo(e.target.value)}
           onKeyDown={e => e.key === 'Enter' && addTodo()}
-          className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-gray-200"
+          className="flex-1 bg-surface-2 border border-app-border rounded-lg px-3 py-2 text-app"
           placeholder="Add a todo..." />
-        <button onClick={addTodo} className="px-4 py-2 bg-blue-600 text-white rounded-lg">Add</button>
+        <button onClick={addTodo} className="px-4 py-2 bg-brand text-white rounded-lg">Add</button>
       </div>
       {todos.map(todo => (
-        <div key={todo.id} className="flex items-center gap-3 p-3 bg-gray-900 rounded-lg border border-gray-800">
+        <div key={todo.id} className="flex items-center gap-3 p-3 bg-surface rounded-lg border border-app-border">
           <input type="checkbox" checked={!!todo.done} onChange={() => toggleDone(todo.id, todo.done)} />
-          <span className={todo.done ? 'line-through text-gray-500' : 'text-gray-200'}>{todo.text}</span>
-          <button onClick={() => deleteTodo(todo.id)} className="ml-auto text-red-400 text-sm">Delete</button>
+          <span className={todo.done ? 'line-through text-app-muted' : 'text-app'}>{todo.text}</span>
+          <button onClick={() => deleteTodo(todo.id)} className="ml-auto text-danger text-sm">Delete</button>
         </div>
       ))}
     </div>
@@ -603,21 +626,21 @@ export default function InventoryTracker() {
     <div className="p-4 space-y-4">
       <div className="flex gap-2">
         <input value={name} onChange={e => setName(e.target.value)} placeholder="Item name"
-          className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-gray-200" />
+          className="flex-1 bg-surface-2 border border-app-border rounded-lg px-3 py-2 text-app" />
         <input value={category} onChange={e => setCategory(e.target.value)} placeholder="Category"
-          className="w-32 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-gray-200" />
+          className="w-32 bg-surface-2 border border-app-border rounded-lg px-3 py-2 text-app" />
         <input type="number" value={quantity} onChange={e => setQuantity(+e.target.value)} min={1}
-          className="w-20 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-gray-200" />
+          className="w-20 bg-surface-2 border border-app-border rounded-lg px-3 py-2 text-app" />
         <button onClick={addItem} className="px-4 py-2 bg-emerald-600 text-white rounded-lg">Add</button>
       </div>
       {items.map(item => (
-        <div key={item.id} className="flex items-center gap-3 p-3 bg-gray-900 rounded-lg border border-gray-800">
-          <span className="text-gray-400 text-sm">{item.category}</span>
-          <span className="text-gray-200">{item.name}</span>
+        <div key={item.id} className="flex items-center gap-3 p-3 bg-surface rounded-lg border border-app-border">
+          <span className="text-app-muted text-sm">{item.category}</span>
+          <span className="text-app">{item.name}</span>
           <div className="ml-auto flex items-center gap-2">
-            <button onClick={() => updateQuantity(item.id, item.quantity - 1)} className="px-2 py-1 bg-gray-800 rounded text-gray-300">-</button>
-            <span className="text-gray-200 w-8 text-center">{item.quantity}</span>
-            <button onClick={() => updateQuantity(item.id, item.quantity + 1)} className="px-2 py-1 bg-gray-800 rounded text-gray-300">+</button>
+            <button onClick={() => updateQuantity(item.id, item.quantity - 1)} className="px-2 py-1 bg-surface-2 rounded text-app">-</button>
+            <span className="text-app w-8 text-center">{item.quantity}</span>
+            <button onClick={() => updateQuantity(item.id, item.quantity + 1)} className="px-2 py-1 bg-surface-2 rounded text-app">+</button>
           </div>
         </div>
       ))}

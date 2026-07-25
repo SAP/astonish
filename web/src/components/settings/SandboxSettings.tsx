@@ -119,8 +119,8 @@ function TemplateBadge({ name }: TemplateBadgeProps) {
   return (
     <span className="text-xs px-1.5 py-0.5 rounded"
       style={{
-        background: isBase ? 'rgba(168, 85, 247, 0.15)' : 'rgba(59, 130, 246, 0.15)',
-        color: isBase ? '#a855f7' : '#3b82f6'
+        background: isBase ? 'var(--brand-muted)' : 'rgba(59, 130, 246, 0.15)',
+        color: isBase ? 'var(--brand)' : '#3b82f6'
       }}>
       @{name}
     </span>
@@ -898,7 +898,7 @@ export default function SandboxSettings({ config, onSaved }: SandboxSettingsProp
                 <div key={t.name} className="rounded-lg border transition-all"
                   style={{
                     background: 'var(--bg-secondary)',
-                    borderColor: isExpanded ? 'rgba(168, 85, 247, 0.4)' : 'var(--border-color)'
+                    borderColor: isExpanded ? 'color-mix(in oklab, var(--brand) 40%, transparent)' : 'var(--border-color)'
                   }}>
                   {/* Header */}
                   <div className="px-3 py-2 flex items-center gap-3">
@@ -909,7 +909,7 @@ export default function SandboxSettings({ config, onSaved }: SandboxSettingsProp
                         </span>
                         {isBase && (
                           <span className="text-xs px-1.5 py-0.5 rounded"
-                            style={{ background: 'rgba(168, 85, 247, 0.15)', color: '#a855f7' }}>
+                            style={{ background: 'var(--brand-muted)', color: 'var(--brand)' }}>
                             default
                           </span>
                         )}
@@ -931,7 +931,7 @@ export default function SandboxSettings({ config, onSaved }: SandboxSettingsProp
                       <button onClick={() => handleExpandTemplate(t.name)}
                         className="p-1.5 rounded transition-colors hover:bg-white/10"
                         title="Details">
-                        {isExpanded ? <ChevronDown size={14} style={{ color: '#a855f7' }} /> : <Eye size={14} style={{ color: 'var(--text-muted)' }} />}
+                        {isExpanded ? <ChevronDown size={14} style={{ color: 'var(--brand)' }} /> : <Eye size={14} style={{ color: 'var(--text-muted)' }} />}
                       </button>
                       <button onClick={() => handleSnapshot(t.name)}
                         disabled={!!templateActionLoading}
@@ -1021,8 +1021,8 @@ export default function SandboxSettings({ config, onSaved }: SandboxSettingsProp
           onClick={() => setForm({ ...form, enabled: !form.enabled })}
           className="relative w-11 h-6 rounded-full transition-colors"
           style={{
-            background: form.enabled ? '#a855f7' : 'var(--bg-tertiary)',
-            border: `1px solid ${form.enabled ? '#a855f7' : 'var(--border-color)'}`
+            background: form.enabled ? 'var(--brand)' : 'var(--bg-tertiary)',
+            border: `1px solid ${form.enabled ? 'var(--brand)' : 'var(--border-color)'}`
           }}
         >
           <span

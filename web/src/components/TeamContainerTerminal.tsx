@@ -45,13 +45,13 @@ export default function TeamContainerTerminal({ teamSlug, theme, onDisconnect }:
       theme: theme === 'dark' ? {
         background: '#1a1a2e',
         foreground: '#e4e4e7',
-        cursor: '#a855f7',
-        selectionBackground: 'rgba(168, 85, 247, 0.3)',
+        cursor: 'var(--brand)',
+        selectionBackground: 'color-mix(in oklab, var(--brand) 30%, transparent)',
       } : {
         background: '#ffffff',
         foreground: '#1f2937',
-        cursor: '#7c3aed',
-        selectionBackground: 'rgba(124, 58, 237, 0.2)',
+        cursor: 'var(--brand-strong)',
+        selectionBackground: 'color-mix(in oklab, var(--brand-strong) 20%, transparent)',
       },
       allowProposedApi: true,
     })

@@ -83,7 +83,7 @@ export function OutputNodeForm({ data, onChange, theme, availableVariables = [] 
                     className="w-full px-3 py-2 rounded border text-sm resize-none font-mono"
                     style={{ 
                       background: 'var(--bg-primary)', 
-                      borderColor: isVariable(item) ? '#a855f7' : 'var(--border-color)', 
+                      borderColor: isVariable(item) ? 'var(--brand)' : 'var(--border-color)', 
                       color: 'var(--text-primary)',
                       minHeight: '60px'
                     }}
@@ -95,9 +95,9 @@ export function OutputNodeForm({ data, onChange, theme, availableVariables = [] 
                     <span 
                       className="absolute top-1 right-1 text-xs px-1.5 py-0.5 rounded"
                       style={{ 
-                        background: isVariable(item) ? 'rgba(168, 85, 247, 0.2)' : 'rgba(100, 100, 100, 0.2)',
-                        color: isVariable(item) ? '#c084fc' : 'var(--text-muted)',
-                        border: isVariable(item) ? '1px solid rgba(168, 85, 247, 0.3)' : '1px solid transparent'
+                        background: isVariable(item) ? 'color-mix(in oklab, var(--brand) 20%, transparent)' : 'rgba(100, 100, 100, 0.2)',
+                        color: isVariable(item) ? 'var(--brand)' : 'var(--text-muted)',
+                        border: isVariable(item) ? '1px solid color-mix(in oklab, var(--brand) 30%, transparent)' : '1px solid transparent'
                       }}
                     >
                       {isVariable(item) ? '📌 Variable' : '📝 Literal'}

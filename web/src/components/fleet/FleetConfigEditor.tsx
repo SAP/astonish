@@ -28,7 +28,7 @@ export function FleetDetailTabs({ activeTab, onChange }: { activeTab: FleetDetai
           onClick={() => onChange(tab)}
           className="px-3 py-1.5 text-xs font-medium rounded-md capitalize transition-colors"
           style={activeTab === tab
-            ? { background: 'rgba(6, 182, 212, 0.18)', color: '#22d3ee' }
+            ? { background: 'var(--brand-muted)', color: 'var(--brand)' }
             : { color: 'var(--text-secondary)' }}
         >
           {tab}
@@ -94,7 +94,7 @@ export function FleetSettingsEditor({ settings, setupProfileKey, setupProfiles, 
           <button
             onClick={save}
             disabled={status === 'saving'}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white disabled:opacity-50"
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-primary hover:bg-primary/90 text-white disabled:opacity-50"
           >
             {status === 'saving' ? <Loader size={12} className="animate-spin" /> : status === 'saved' ? <Check size={12} /> : null}
             {status === 'saving' ? 'Saving...' : status === 'saved' ? 'Saved' : 'Save Settings'}
@@ -108,7 +108,7 @@ export function FleetSettingsEditor({ settings, setupProfileKey, setupProfiles, 
       )}
       {status === 'error' && <p className="text-xs text-red-400">Save failed. Check validation and try again.</p>}
       {setupProfiles && setupProfiles.length > 0 && (
-        <div className="rounded-lg p-3 space-y-2" style={{ background: 'rgba(6, 182, 212, 0.06)', border: '1px solid rgba(6, 182, 212, 0.2)' }}>
+        <div className="rounded-lg p-3 space-y-2" style={{ background: 'var(--brand-muted)', border: '1px solid color-mix(in oklab, var(--brand) 20%, transparent)' }}>
           <SetupProfileSelectField
             label="Setup profile"
             value={draftSetupProfileKey}
@@ -167,7 +167,7 @@ function NumberField({ label, value, onChange, disabled }: { label: string; valu
         value={value ?? ''}
         disabled={disabled}
         onChange={e => onChange(e.target.value === '' ? undefined : Number(e.target.value))}
-        className="w-full px-3 py-2 rounded-lg focus:outline-none focus:ring-1 focus:ring-cyan-500 disabled:opacity-60"
+        className="w-full px-3 py-2 rounded-lg focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-60"
         style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border-color)' }}
       />
     </label>
@@ -198,7 +198,7 @@ function SetupProfileSelectField({
         value={value}
         disabled={disabled}
         onChange={e => onChange(e.target.value)}
-        className="w-full px-3 py-2 rounded-lg focus:outline-none focus:ring-1 focus:ring-cyan-500 disabled:opacity-60"
+        className="w-full px-3 py-2 rounded-lg focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-60"
         style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border-color)' }}
       >
         {!knownKeys.has(value) && value && (
@@ -238,7 +238,7 @@ function SelectField({ label, value, options, onChange, disabled }: { label: str
         value={value}
         disabled={disabled}
         onChange={e => onChange(e.target.value)}
-        className="w-full px-3 py-2 rounded-lg focus:outline-none focus:ring-1 focus:ring-cyan-500 disabled:opacity-60"
+        className="w-full px-3 py-2 rounded-lg focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-60"
         style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border-color)' }}
       >
         {options.map(option => <option key={option} value={option}>{option}</option>)}
@@ -307,7 +307,7 @@ export function FleetAgentsEditor({
           {!readOnly && onAddAgent && (
             <button
               onClick={() => { setListError(null); setAddOpen(true) }}
-              className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white transition-colors"
+              className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg bg-primary hover:bg-primary/90 text-white transition-colors"
             >
               <Plus size={12} /> Add Agent
             </button>
@@ -455,7 +455,7 @@ function AddAgentDialog({
     <div className="fixed inset-0 z-50 flex items-center justify-center" onKeyDown={(e) => { if (e.key === 'Escape' && !submitting) onClose() }}>
       <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => { if (!submitting) onClose() }} />
       <div className="relative w-full max-w-md mx-4 rounded-2xl shadow-2xl overflow-hidden" style={{ background: 'var(--bg-secondary)' }}>
-        <div className="px-6 py-5" style={{ background: 'linear-gradient(135deg, #0891b2 0%, #0e7490 50%, #155e75 100%)' }}>
+        <div className="px-6 py-5" style={{ background: 'linear-gradient(135deg, var(--brand) 0%, var(--brand-strong) 100%)' }}>
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 rounded-xl bg-white/20 flex items-center justify-center">
@@ -487,7 +487,7 @@ function AddAgentDialog({
                 if (!keyTouched) setKey(slugifyAgentKey(e.target.value))
               }}
               placeholder="e.g. Product Owner"
-              className="w-full px-4 py-3 rounded-xl border text-base transition-all focus:outline-none focus:ring-2 focus:ring-cyan-500 disabled:opacity-60"
+              className="w-full px-4 py-3 rounded-xl border text-base transition-all focus:outline-none focus:ring-2 focus:ring-primary disabled:opacity-60"
               style={{ background: 'var(--bg-primary)', borderColor: error ? '#EF4444' : 'var(--border-color)', color: 'var(--text-primary)' }}
             />
           </div>
@@ -505,11 +505,11 @@ function AddAgentDialog({
                 setError('')
               }}
               placeholder="e.g. po"
-              className="w-full px-4 py-3 rounded-xl border text-base font-mono transition-all focus:outline-none focus:ring-2 focus:ring-cyan-500 disabled:opacity-60"
+              className="w-full px-4 py-3 rounded-xl border text-base font-mono transition-all focus:outline-none focus:ring-2 focus:ring-primary disabled:opacity-60"
               style={{ background: 'var(--bg-primary)', borderColor: error ? '#EF4444' : 'var(--border-color)', color: 'var(--text-primary)' }}
             />
             <p className="text-xs mt-1.5" style={{ color: 'var(--text-muted)' }}>
-              Used in mentions as <code className="px-1 py-0.5 rounded bg-cyan-500/15 text-cyan-400">@{key || '…'}</code>
+              Used in mentions as <code className="px-1 py-0.5 rounded bg-primary/15 text-primary">@{key || '…'}</code>
             </p>
             {error && <p className="text-xs mt-1.5 text-red-400">{error}</p>}
           </div>
@@ -517,7 +517,7 @@ function AddAgentDialog({
             <button type="button" onClick={onClose} disabled={submitting} className="flex-1 px-4 py-3 rounded-xl text-sm font-medium transition-colors disabled:opacity-50" style={{ background: 'var(--bg-tertiary)', color: 'var(--text-secondary)' }}>
               Cancel
             </button>
-            <button type="submit" disabled={submitting} className="flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-xl text-sm font-medium text-white transition-colors disabled:opacity-50" style={{ background: 'linear-gradient(135deg, #0891b2 0%, #0e7490 100%)' }}>
+            <button type="submit" disabled={submitting} className="flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-xl text-sm font-medium text-white transition-colors disabled:opacity-50" style={{ background: 'linear-gradient(135deg, var(--brand) 0%, var(--brand-strong) 100%)' }}>
               {submitting ? <Loader size={18} className="animate-spin" /> : <Plus size={18} />}
               {submitting ? 'Adding…' : 'Create Agent'}
             </button>
@@ -680,7 +680,7 @@ export function AgentEditorPanel({
             type="button"
             onClick={() => setTab(t.id)}
             className={`px-3 py-2 text-xs font-medium capitalize border-b-2 -mb-px transition-colors ${
-              tab === t.id ? 'border-cyan-400 text-cyan-400' : 'border-transparent'
+              tab === t.id ? 'border-primary text-primary' : 'border-transparent'
             }`}
             style={{ color: tab === t.id ? undefined : 'var(--text-muted)' }}
           >
@@ -728,7 +728,7 @@ export function AgentEditorPanel({
                 checked={draft.execution?.parallelizable || false}
                 disabled={readOnly}
                 onChange={e => update('execution', { ...(draft.execution || {}), parallelizable: e.target.checked })}
-                className="accent-cyan-500"
+                className="accent-primary"
               />
               Parallelizable
             </label>
@@ -753,7 +753,7 @@ export function AgentEditorPanel({
                 checked={draft.memory?.private_work || false}
                 disabled={readOnly}
                 onChange={e => update('memory', { ...(draft.memory || {}), private_work: e.target.checked })}
-                className="accent-cyan-500"
+                className="accent-primary"
               />
               Private work
             </label>
@@ -778,7 +778,7 @@ export function AgentEditorPanel({
                   rows={4}
                   onChange={e => onCapsTextChange(e.target.value)}
                   placeholder={"code.write, research\nanalysis"}
-                  className="w-full px-3 py-2 rounded-lg text-xs font-mono resize-y overflow-auto focus:outline-none focus:ring-1 focus:ring-cyan-500 disabled:opacity-60"
+                  className="w-full px-3 py-2 rounded-lg text-xs font-mono resize-y overflow-auto focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-60"
                   style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border-color)', minHeight: '5.5rem' }}
                 />
                 <p className="text-[11px] leading-snug" style={{ color: 'var(--text-muted)' }}>
@@ -797,7 +797,7 @@ export function AgentEditorPanel({
                   rows={4}
                   onChange={e => onClaimsTextChange(e.target.value)}
                   placeholder="code.write"
-                  className="w-full px-3 py-2 rounded-lg text-xs font-mono resize-y overflow-auto focus:outline-none focus:ring-1 focus:ring-cyan-500 disabled:opacity-60"
+                  className="w-full px-3 py-2 rounded-lg text-xs font-mono resize-y overflow-auto focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-60"
                   style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border-color)', minHeight: '5.5rem' }}
                 />
                 <p className="text-[11px] leading-snug" style={{ color: 'var(--text-muted)' }}>
@@ -830,7 +830,7 @@ export function AgentEditorPanel({
         <div className="flex gap-2">
           <button onClick={onClose} className="px-4 py-2 text-sm rounded-lg hover:bg-white/5" style={{ color: 'var(--text-secondary)' }}>Cancel</button>
           {!readOnly && (
-            <button onClick={save} disabled={saving} className="px-4 py-2 text-sm bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg disabled:opacity-50">
+            <button onClick={save} disabled={saving} className="px-4 py-2 text-sm bg-primary hover:bg-primary/90 text-white rounded-lg disabled:opacity-50">
               {saving ? 'Saving...' : 'Save Agent'}
             </button>
           )}
@@ -881,7 +881,7 @@ function CheckboxMultiSelectField({
                 type="checkbox"
                 checked={selected.includes(option)}
                 onChange={() => toggle(option)}
-                className="accent-cyan-500"
+                className="accent-primary"
               />
               <span style={{ color: 'var(--text-primary)' }}>{option}</span>
             </label>
@@ -915,7 +915,7 @@ function TextField({
         disabled={disabled}
         placeholder={placeholder}
         onChange={e => onChange(e.target.value)}
-        className="w-full px-3 py-2 rounded-lg focus:outline-none focus:ring-1 focus:ring-cyan-500 disabled:opacity-60"
+        className="w-full px-3 py-2 rounded-lg focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-60"
         style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border-color)' }}
       />
       {hint && <span className="block text-[11px]" style={{ color: 'var(--text-muted)' }}>{hint}</span>}
@@ -932,7 +932,7 @@ function TextareaField({ label, value, rows, onChange, disabled }: { label: stri
         rows={rows}
         disabled={disabled}
         onChange={e => onChange(e.target.value)}
-        className="w-full px-3 py-2 rounded-lg resize-y focus:outline-none focus:ring-1 focus:ring-cyan-500 disabled:opacity-60"
+        className="w-full px-3 py-2 rounded-lg resize-y focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-60"
         style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border-color)' }}
       />
     </label>

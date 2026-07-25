@@ -12,7 +12,7 @@ export default function OutputNode({ id, data, selected }: NodeProps<OutputNodeT
       selected={selected}
       icon={MessageSquare} 
       nodeType="Output"
-      iconColor="#9f7aea"
+      iconColor="var(--node-output)"
     />
   )
 }

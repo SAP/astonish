@@ -36,14 +36,14 @@ export const NODE_ICONS: Record<string, React.ComponentType<any>> = {
   output: MessageSquare,
 }
 
-// Node type colors
+// Node type colors — CSS vars follow the active brand pack
 export const NODE_COLORS: Record<string, string> = {
-  input: '#E9D5FF',
-  llm: '#6B46C1',
-  tool: '#805AD5',
+  input: 'var(--brand-muted)',
+  llm: 'var(--node-llm)',
+  tool: 'var(--node-tool)',
   updateState: '#4A5568',
   update_state: '#4A5568',
-  output: '#9F7AEA',
+  output: 'var(--node-output)',
 }
 
 export interface VariablePanelProps {

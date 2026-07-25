@@ -1,6 +1,38 @@
 import { useState, useEffect } from 'react'
-import { Save, AlertCircle, Check } from 'lucide-react'
-import { saveFullConfigSection, inputClass, inputStyle, labelStyle, hintStyle, saveButtonStyle } from './settingsApi'
+import { AlertCircle, Check, Loader2, Save } from 'lucide-react'
+
+import { Alert, AlertDescription } from '@/components/ui/alert'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Textarea } from '@/components/ui/textarea'
+
+import { saveFullConfigSection } from './settingsApi'
+
+const NOT_SET_VALUE = '__not_set__'
+
+const locales = [
+  ['en-US', 'English (US)'],
+  ['en-GB', 'English (UK)'],
+  ['es-ES', 'Spanish (Spain)'],
+  ['fr-FR', 'French (France)'],
+  ['de-DE', 'German (Germany)'],
+  ['it-IT', 'Italian (Italy)'],
+  ['pt-BR', 'Portuguese (Brazil)'],
+  ['ja-JP', 'Japanese'],
+  ['ko-KR', 'Korean'],
+  ['zh-CN', 'Chinese (Simplified)'],
+  ['zh-TW', 'Chinese (Traditional)'],
+  ['ru-RU', 'Russian'],
+  ['ar-SA', 'Arabic'],
+  ['hi-IN', 'Hindi'],
+  ['nl-NL', 'Dutch'],
+  ['sv-SE', 'Swedish'],
+  ['pl-PL', 'Polish'],
+  ['tr-TR', 'Turkish'],
+]
 
 export default function IdentitySettings({ config, onSaved }: { config: Record<string, any>; onSaved?: () => void }) {
   const [form, setForm] = useState({
@@ -47,164 +79,127 @@ export default function IdentitySettings({ config, onSaved }: { config: Record<s
   }
 
   return (
-    <div className="max-w-xl space-y-6">
-      <p className="text-sm" style={hintStyle}>
-        Configure the agent persona used for web portal registrations and profile information. 
-        The agent uses these details to fill registration forms and maintain a consistent identity.
-      </p>
+    <div className="max-w-2xl space-y-6">
+      <Card className="border-border bg-card shadow-sm">
+        <CardHeader>
+          <CardTitle className="text-base">Agent Identity</CardTitle>
+          <CardDescription>
+            Configure the agent persona used for web portal registrations and profile information.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="space-y-2">
+              <Label htmlFor="identity-display-name">Display Name</Label>
+              <Input
+                id="identity-display-name"
+                type="text"
+                value={form.name}
+                onChange={(e) => setForm({ ...form, name: e.target.value })}
+                placeholder="Agent Name"
+                className="bg-background"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="identity-username">Username</Label>
+              <Input
+                id="identity-username"
+                type="text"
+                value={form.username}
+                onChange={(e) => setForm({ ...form, username: e.target.value })}
+                placeholder="agentuser"
+                className="bg-background font-mono"
+              />
+              <p className="text-xs text-muted-foreground">Base username for registrations.</p>
+            </div>
+          </div>
 
-      {/* Name & Username */}
-      <div className="grid grid-cols-2 gap-4">
-        <div>
-          <label className="block text-sm font-medium mb-2" style={labelStyle}>
-            Display Name
-          </label>
-          <input
-            type="text"
-            value={form.name}
-            onChange={(e) => setForm({ ...form, name: e.target.value })}
-            placeholder="Agent Name"
-            className={inputClass}
-            style={inputStyle}
-          />
-        </div>
-        <div>
-          <label className="block text-sm font-medium mb-2" style={labelStyle}>
-            Username
-          </label>
-          <input
-            type="text"
-            value={form.username}
-            onChange={(e) => setForm({ ...form, username: e.target.value })}
-            placeholder="agentuser"
-            className={inputClass + ' font-mono'}
-            style={inputStyle}
-          />
-          <p className="text-xs mt-1" style={hintStyle}>
-            Base username for registrations.
-          </p>
-        </div>
-      </div>
+          <div className="space-y-2">
+            <Label htmlFor="identity-email">Email</Label>
+            <Input
+              id="identity-email"
+              type="email"
+              value={form.email}
+              onChange={(e) => setForm({ ...form, email: e.target.value })}
+              placeholder="agent@example.com"
+              className="bg-background"
+            />
+            <p className="text-xs text-muted-foreground">Should match the email channel config if using email integration.</p>
+          </div>
 
-      {/* Email */}
-      <div>
-        <label className="block text-sm font-medium mb-2" style={labelStyle}>
-          Email
-        </label>
-        <input
-          type="email"
-          value={form.email}
-          onChange={(e) => setForm({ ...form, email: e.target.value })}
-          placeholder="agent@example.com"
-          className={inputClass}
-          style={inputStyle}
-        />
-        <p className="text-xs mt-1" style={hintStyle}>
-          Should match the email channel config if using email integration.
-        </p>
-      </div>
+          <div className="space-y-2">
+            <Label htmlFor="identity-bio">Bio</Label>
+            <Textarea
+              id="identity-bio"
+              value={form.bio}
+              onChange={(e) => setForm({ ...form, bio: e.target.value })}
+              placeholder="A short description for profile fields..."
+              rows={3}
+              className="bg-background"
+            />
+          </div>
 
-      {/* Bio */}
-      <div>
-        <label className="block text-sm font-medium mb-2" style={labelStyle}>
-          Bio
-        </label>
-        <textarea
-          value={form.bio}
-          onChange={(e) => setForm({ ...form, bio: e.target.value })}
-          placeholder="A short description for profile fields..."
-          rows={3}
-          className={inputClass}
-          style={{ ...inputStyle, resize: 'vertical' }}
-        />
-      </div>
+          <div className="space-y-2">
+            <Label htmlFor="identity-website">Website</Label>
+            <Input
+              id="identity-website"
+              type="url"
+              value={form.website}
+              onChange={(e) => setForm({ ...form, website: e.target.value })}
+              placeholder="https://example.com"
+              className="bg-background font-mono"
+            />
+          </div>
 
-      {/* Website */}
-      <div>
-        <label className="block text-sm font-medium mb-2" style={labelStyle}>
-          Website
-        </label>
-        <input
-          type="url"
-          value={form.website}
-          onChange={(e) => setForm({ ...form, website: e.target.value })}
-          placeholder="https://example.com"
-          className={inputClass + ' font-mono'}
-          style={inputStyle}
-        />
-      </div>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="space-y-2">
+              <Label htmlFor="identity-locale">Locale</Label>
+              <Select
+                value={form.locale || NOT_SET_VALUE}
+                onValueChange={(value) => setForm({ ...form, locale: value === NOT_SET_VALUE ? '' : value })}
+              >
+                <SelectTrigger id="identity-locale" className="bg-background">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={NOT_SET_VALUE}>Not set</SelectItem>
+                  {locales.map(([value, label]) => (
+                    <SelectItem key={value} value={value}>{label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="identity-timezone">Timezone</Label>
+              <Input
+                id="identity-timezone"
+                type="text"
+                value={form.timezone}
+                onChange={(e) => setForm({ ...form, timezone: e.target.value })}
+                placeholder="America/New_York"
+                className="bg-background font-mono"
+              />
+              <p className="text-xs text-muted-foreground">IANA timezone identifier.</p>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
 
-      {/* Locale & Timezone */}
-      <div className="grid grid-cols-2 gap-4">
-        <div>
-          <label className="block text-sm font-medium mb-2" style={labelStyle}>
-            Locale
-          </label>
-          <select
-            value={form.locale}
-            onChange={(e) => setForm({ ...form, locale: e.target.value })}
-            className={inputClass}
-            style={inputStyle}
-          >
-            <option value="">Not set</option>
-            <option value="en-US">English (US)</option>
-            <option value="en-GB">English (UK)</option>
-            <option value="es-ES">Spanish (Spain)</option>
-            <option value="fr-FR">French (France)</option>
-            <option value="de-DE">German (Germany)</option>
-            <option value="it-IT">Italian (Italy)</option>
-            <option value="pt-BR">Portuguese (Brazil)</option>
-            <option value="ja-JP">Japanese</option>
-            <option value="ko-KR">Korean</option>
-            <option value="zh-CN">Chinese (Simplified)</option>
-            <option value="zh-TW">Chinese (Traditional)</option>
-            <option value="ru-RU">Russian</option>
-            <option value="ar-SA">Arabic</option>
-            <option value="hi-IN">Hindi</option>
-            <option value="nl-NL">Dutch</option>
-            <option value="sv-SE">Swedish</option>
-            <option value="pl-PL">Polish</option>
-            <option value="tr-TR">Turkish</option>
-          </select>
-        </div>
-        <div>
-          <label className="block text-sm font-medium mb-2" style={labelStyle}>
-            Timezone
-          </label>
-          <input
-            type="text"
-            value={form.timezone}
-            onChange={(e) => setForm({ ...form, timezone: e.target.value })}
-            placeholder="America/New_York"
-            className={inputClass + ' font-mono'}
-            style={inputStyle}
-          />
-          <p className="text-xs mt-1" style={hintStyle}>
-            IANA timezone identifier.
-          </p>
-        </div>
-      </div>
-
-      {/* Save */}
-      <div className="flex items-center gap-3">
-        <button
-          onClick={handleSave}
-          disabled={saving}
-          className="flex items-center gap-2 px-4 py-2 rounded-lg text-white font-medium transition-all shadow-md hover:shadow-lg hover:scale-[1.02] active:scale-95 disabled:opacity-50"
-          style={saveButtonStyle}
-        >
-          <Save size={16} />
+      <div className="flex flex-wrap items-center gap-3">
+        <Button onClick={handleSave} disabled={saving}>
+          {saving ? <Loader2 className="animate-spin" /> : <Save />}
           {saving ? 'Saving...' : 'Save Changes'}
-        </button>
+        </Button>
         {saveSuccess && (
-          <span className="flex items-center gap-1 text-green-400 text-sm">
-            <Check size={16} /> Saved
+          <span className="flex items-center gap-1 text-sm text-[color:var(--success)]">
+            <Check className="size-4" /> Saved
           </span>
         )}
         {error && (
-          <span className="flex items-center gap-1 text-sm" style={{ color: 'var(--danger)' }}>
-            <AlertCircle size={16} /> {error}
-          </span>
+          <Alert variant="destructive" className="w-auto py-2">
+            <AlertCircle />
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
         )}
       </div>
     </div>

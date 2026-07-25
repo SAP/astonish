@@ -1,26 +1,904 @@
 @import "tailwindcss";
+@import "tw-animate-css";
 
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  /* Product shell tokens — needed so bg-panel-background / border-panel-border resolve */
+  --color-panel-background: var(--panel-background);
+  --color-panel-border: var(--panel-border);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+/*
+ * Brand packs: set html[data-theme="nova"|"ember"|…] plus class "dark" for mode.
+ * Nova is the default pack. Add new packs as:
+ *   html[data-theme="ember"] { …light… }
+ *   html[data-theme="ember"].dark { …dark… }
+ * Keep the same CSS variable names so components retheme automatically.
+ */
+
+/* Shared structural defaults (overridden by brand packs) */
 :root {
-  --bg-primary: #fafbfe;
-  --bg-secondary: #ffffff;
+  --radius: 0.875rem;
+  --success: #149647;
+  --warning: #e49425;
+}
+
+/* Nova brand pack — light (also default when data-theme is unset) */
+:root,
+html[data-theme="nova"] {
+  --brand: #e14c82;
+  --brand-strong: #f09144;
+  --brand-muted: rgba(225, 76, 130, 0.15);
+  --brand-foreground: #ffffff;
+  --accent2: #f09144;
+  --accent3: #9457e6;
+  --accent-glow: rgba(225, 76, 130, 0.30);
+
+  --background: #fdf4f7;
+  --foreground: #2a0f1f;
+  --card: #ffffff;
+  --card-foreground: #2a0f1f;
+  --popover: #ffffff;
+  --popover-foreground: #2a0f1f;
+  --primary: var(--brand);
+  --primary-foreground: #ffffff;
+  --secondary: #f7e9f0;
+  --secondary-foreground: #6e4a5d;
+  --muted: #f7e9f0;
+  --muted-foreground: #6e4a5d;
+  --accent: rgba(225, 76, 130, 0.12);
+  --accent-foreground: #2a0f1f;
+  --destructive: #dc2626;
+  --destructive-foreground: #ffffff;
+  --border: rgba(80, 30, 60, 0.08);
+  --input: rgba(80, 30, 60, 0.10);
+  --ring: var(--brand);
+  --radius: 0.875rem;
+
+  --bg-primary: var(--background);
+  --bg-secondary: var(--card);
+  --bg-tertiary: var(--secondary);
+  --bg-grad: radial-gradient(900px 500px at 20% -10%, rgba(255, 107, 157, 0.20), transparent 60%),
+    radial-gradient(900px 500px at 90% 10%, rgba(255, 184, 107, 0.20), transparent 60%),
+    radial-gradient(700px 400px at 50% 110%, rgba(180, 120, 255, 0.18), transparent 60%),
+    #fdf4f7;
+  --surface-muted: #f7e9f0;
+  --text-primary: var(--foreground);
+  --text-secondary: #6e4a5d;
+  --text-muted: #a88999;
+  --text-faint: #a88999;
+  --border-color: var(--border);
+  --border-soft: rgba(80, 30, 60, 0.10);
+  --accent-strong: var(--brand-strong);
+  --accent-soft: var(--brand-muted);
+  --success: #149647;
+  --warning: #e49425;
+  --danger: var(--destructive);
+  --info: #9457e6;
+  --shell-background: rgba(253, 244, 247, 0.85);
+  --panel-background: #f7e9f0;
+  --panel-border: var(--border);
+  --sidebar-background: #f7e9f0;
+  /* Admin/settings work-mode: quieter than ambient home */
+  --work-background: #faf7f9;
+  --work-sidebar: var(--sidebar-background);
+  --work-panel: #ffffff;
+  --canvas-background: #fdf4f7;
+  --item-active: rgba(255, 107, 157, 0.15);
+  --item-hover: rgba(80, 30, 60, 0.04);
+  --search-bg: rgba(255, 255, 255, 0.7);
+  --pill-bg: rgba(255, 255, 255, 0.7);
+  --input-bg: #ffffff;
+  --input-shadow: 0 8px 24px -12px rgba(255, 107, 157, 0.30);
+  --card-surface: linear-gradient(180deg, #ffffff, #fdf4f7);
+  --card-border: rgba(80, 30, 60, 0.08);
+  --chat-user-background: color-mix(in oklab, var(--brand) 14%, var(--card));
+  --chat-user-border: color-mix(in oklab, var(--brand) 28%, transparent);
+  --chat-user-foreground: var(--foreground);
+  --chat-agent-background: var(--card);
+  --chat-thinking-background: var(--brand-muted);
+  --tool-background: rgba(148, 87, 230, 0.1);
+  --node-input: #f5d0e8;
+  --node-llm: var(--accent3);
+  --node-tool: var(--brand);
+  --node-output: var(--accent2);
+  --node-start: #22c55e;
+  --node-end: var(--destructive);
+
+  --overflow-node-bg: #ffffff;
+  --overflow-node-border: rgba(80, 30, 60, 0.08);
+  --overflow-icon-bg: #fdf4f7;
+  --overflow-node-title: #2a0f1f;
+  --overflow-node-subtitle: #6e4a5d;
+  --overflow-handle-bg: #a88999;
+  --overflow-handle-border: #ffffff;
+
+  --shadow-soft: 0 10px 32px rgba(80, 30, 60, 0.08);
+  --shadow-elevated: 0 20px 40px -20px var(--accent-glow);
+  --font-ui: 'Geist', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-display: 'Fraunces', Georgia, 'Times New Roman', serif;
+  --radius-lg: 18px;
+  --radius-md: 14px;
+  --radius-sm: 10px;
+}
+
+/* Nova brand pack — dark (do not use bare .dark — would override other packs) */
+html.dark:not([data-theme]),
+html[data-theme="nova"].dark {
+  --brand: #ff6b9d;
+  --brand-strong: #ffb86b;
+  --brand-muted: rgba(255, 107, 157, 0.15);
+  --brand-foreground: #ffffff;
+  --accent2: #ffb86b;
+  --accent3: #b478ff;
+  --accent-glow: rgba(255, 107, 157, 0.40);
+
+  --background: #160b1f;
+  --foreground: #fceef7;
+  --card: #1d0f28;
+  --card-foreground: #fceef7;
+  --popover: #1d0f28;
+  --popover-foreground: #fceef7;
+  --primary: var(--brand);
+  --primary-foreground: #ffffff;
+  --secondary: #1a1024;
+  --secondary-foreground: #b49bc3;
+  --muted: #1a1024;
+  --muted-foreground: #b49bc3;
+  --accent: rgba(255, 107, 157, 0.15);
+  --accent-foreground: #fceef7;
+  --destructive: #f05252;
+  --destructive-foreground: #ffffff;
+  --border: rgba(240, 220, 255, 0.06);
+  --input: rgba(240, 220, 255, 0.10);
+  --ring: var(--brand);
+
+  --bg-primary: var(--background);
+  --bg-secondary: var(--card);
+  /* Secondary chrome (chips, secondary buttons, MCP tiles) — above page, below card */
+  --bg-tertiary: #1a1024;
+  --bg-grad: radial-gradient(900px 500px at 20% -10%, rgba(255, 107, 157, 0.15), transparent 60%),
+    radial-gradient(900px 500px at 90% 10%, rgba(255, 184, 107, 0.10), transparent 60%),
+    radial-gradient(700px 400px at 50% 110%, rgba(180, 120, 255, 0.12), transparent 60%),
+    #160b1f;
+  --surface-muted: #1a1024;
+  --text-primary: var(--foreground);
+  --text-secondary: #b49bc3;
+  --text-muted: #b49bc3;
+  --text-faint: #7a6088;
+  --border-color: var(--border);
+  --border-soft: rgba(240, 220, 255, 0.10);
+  --accent-strong: var(--brand-strong);
+  --accent-soft: var(--brand-muted);
+  --danger: var(--destructive);
+  --info: #b478ff;
+  --shell-background: rgba(22, 11, 31, 0.85);
+  /* Elevated surface (settings cards, dialogs) — not darker than the page */
+  --panel-background: #1d0f28;
+  --panel-border: var(--border);
+  --sidebar-background: #100816;
+  /* Admin/settings work-mode: same dark rail as Chat, calmer solid canvas */
+  --work-background: #12091a;
+  --work-sidebar: var(--sidebar-background);
+  --work-panel: #1a1024;
+  --canvas-background: #160b1f;
+  --item-active: rgba(255, 107, 157, 0.12);
+  --item-hover: rgba(240, 220, 255, 0.04);
+  --search-bg: rgba(240, 220, 255, 0.03);
+  --pill-bg: rgba(240, 220, 255, 0.05);
+  --input-bg: #1d0f28;
+  --input-shadow: 0 8px 30px -12px rgba(255, 107, 157, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  --card-surface: linear-gradient(180deg, rgba(240, 220, 255, 0.05), rgba(240, 220, 255, 0.02));
+  --card-border: rgba(240, 220, 255, 0.08);
+  --chat-user-background: color-mix(in oklab, var(--brand) 18%, var(--card));
+  --chat-user-border: color-mix(in oklab, var(--brand) 35%, transparent);
+  --chat-user-foreground: var(--foreground);
+  --chat-agent-background: var(--card);
+  --chat-thinking-background: var(--brand-muted);
+  --tool-background: rgba(180, 120, 255, 0.12);
+  --node-input: #3d2450;
+  --node-llm: var(--accent3);
+  --node-tool: var(--brand);
+  --node-output: var(--accent2);
+  --node-start: #22c55e;
+  --node-end: var(--destructive);
+
+  --overflow-node-bg: #1d0f28;
+  --overflow-node-border: rgba(240, 220, 255, 0.08);
+  --overflow-icon-bg: #100816;
+  --overflow-node-title: #fceef7;
+  --overflow-node-subtitle: #b49bc3;
+  --overflow-handle-bg: #7a6088;
+  --overflow-handle-border: #1d0f28;
+
+  --shadow-soft: 0 10px 28px rgba(0, 0, 0, 0.45);
+  --shadow-elevated: 0 20px 40px -20px var(--accent-glow);
+  --font-ui: 'Geist', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-display: 'Fraunces', Georgia, 'Times New Roman', serif;
+  --radius-lg: 18px;
+  --radius-md: 14px;
+  --radius-sm: 10px;
+}
+
+/* Aster brand pack — light (bold purple) */
+html[data-theme="aster"] {
+  --brand: #9b4dff;
+  --brand-strong: #d070ff;
+  --brand-muted: rgba(155, 77, 255, 0.15);
+  --brand-foreground: #ffffff;
+  --accent2: #d070ff;
+  --accent3: #6a5cff;
+  --accent-glow: rgba(155, 77, 255, 0.32);
+
+  --background: #f5f0fc;
+  --foreground: #1a0a2e;
+  --card: #ffffff;
+  --card-foreground: #1a0a2e;
+  --popover: #ffffff;
+  --popover-foreground: #1a0a2e;
+  --primary: var(--brand);
+  --primary-foreground: #ffffff;
+  --secondary: #efe6fa;
+  --secondary-foreground: #5a4a78;
+  --muted: #efe6fa;
+  --muted-foreground: #5a4a78;
+  --accent: rgba(155, 77, 255, 0.12);
+  --accent-foreground: #1a0a2e;
+  --destructive: #dc2626;
+  --destructive-foreground: #ffffff;
+  --border: rgba(60, 30, 100, 0.10);
+  --input: rgba(60, 30, 100, 0.12);
+  --ring: var(--brand);
+  --radius: 0.875rem;
+
+  --bg-primary: var(--background);
+  --bg-secondary: var(--card);
+  --bg-tertiary: var(--secondary);
+  --bg-grad: radial-gradient(900px 500px at 20% -10%, rgba(155, 77, 255, 0.18), transparent 60%),
+    radial-gradient(900px 500px at 90% 10%, rgba(208, 112, 255, 0.16), transparent 60%),
+    radial-gradient(700px 400px at 50% 110%, rgba(106, 92, 255, 0.14), transparent 60%),
+    #f5f0fc;
+  --surface-muted: #efe6fa;
+  --text-primary: var(--foreground);
+  --text-secondary: #5a4a78;
+  --text-muted: #7a6a94;
+  --text-faint: #7a6a94;
+  --border-color: var(--border);
+  --border-soft: rgba(60, 30, 100, 0.12);
+  --accent-strong: var(--brand-strong);
+  --accent-soft: var(--brand-muted);
+  --success: #149647;
+  --warning: #e49425;
+  --danger: var(--destructive);
+  --info: #6a5cff;
+  --shell-background: rgba(245, 240, 252, 0.88);
+  --panel-background: #efe6fa;
+  --panel-border: var(--border);
+  --sidebar-background: #efe6fa;
+  --work-background: #faf8fd;
+  --work-sidebar: var(--sidebar-background);
+  --work-panel: #ffffff;
+  --canvas-background: #f5f0fc;
+  --item-active: rgba(155, 77, 255, 0.14);
+  --item-hover: rgba(60, 30, 100, 0.05);
+  --search-bg: rgba(255, 255, 255, 0.75);
+  --pill-bg: rgba(255, 255, 255, 0.75);
+  --input-bg: #ffffff;
+  --input-shadow: 0 8px 24px -12px rgba(155, 77, 255, 0.28);
+  --card-surface: linear-gradient(180deg, #ffffff, #f5f0fc);
+  --card-border: rgba(60, 30, 100, 0.10);
+  --chat-user-background: color-mix(in oklab, var(--brand) 14%, var(--card));
+  --chat-user-border: color-mix(in oklab, var(--brand) 28%, transparent);
+  --chat-user-foreground: var(--foreground);
+  --chat-agent-background: var(--card);
+  --chat-thinking-background: var(--brand-muted);
+  --tool-background: rgba(106, 92, 255, 0.12);
+  --node-input: #e0d0f8;
+  --node-llm: var(--accent3);
+  --node-tool: var(--brand);
+  --node-output: var(--accent2);
+  --node-start: #22c55e;
+  --node-end: var(--destructive);
+
+  --overflow-node-bg: #ffffff;
+  --overflow-node-border: rgba(60, 30, 100, 0.10);
+  --overflow-icon-bg: #f5f0fc;
+  --overflow-node-title: #1a0a2e;
+  --overflow-node-subtitle: #5a4a78;
+  --overflow-handle-bg: #7a6a94;
+  --overflow-handle-border: #ffffff;
+
+  --shadow-soft: 0 10px 32px rgba(40, 20, 80, 0.10);
+  --shadow-elevated: 0 20px 40px -20px var(--accent-glow);
+  --font-ui: 'Geist', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-display: 'Fraunces', Georgia, 'Times New Roman', serif;
+  --radius-lg: 18px;
+  --radius-md: 14px;
+  --radius-sm: 10px;
+}
+
+/* Aster brand pack — dark */
+html[data-theme="aster"].dark {
+  --brand: #c44dff;
+  --brand-strong: #e080ff;
+  --brand-muted: rgba(196, 77, 255, 0.16);
+  --brand-foreground: #ffffff;
+  --accent2: #e080ff;
+  --accent3: #8866ff;
+  --accent-glow: rgba(196, 77, 255, 0.42);
+
+  --background: #10081a;
+  --foreground: #f6eefc;
+  --card: #1a1028;
+  --card-foreground: #f6eefc;
+  --popover: #1a1028;
+  --popover-foreground: #f6eefc;
+  --primary: var(--brand);
+  --primary-foreground: #ffffff;
+  --secondary: #140c20;
+  --secondary-foreground: #b0a0c8;
+  --muted: #140c20;
+  --muted-foreground: #b0a0c8;
+  --accent: rgba(196, 77, 255, 0.15);
+  --accent-foreground: #f6eefc;
+  --destructive: #f05252;
+  --destructive-foreground: #ffffff;
+  --border: rgba(230, 200, 255, 0.08);
+  --input: rgba(230, 200, 255, 0.12);
+  --ring: var(--brand);
+
+  --bg-primary: var(--background);
+  --bg-secondary: var(--card);
+  --bg-tertiary: #140c20;
+  --bg-grad: radial-gradient(900px 500px at 20% -10%, rgba(196, 77, 255, 0.16), transparent 60%),
+    radial-gradient(900px 500px at 90% 10%, rgba(224, 128, 255, 0.10), transparent 60%),
+    radial-gradient(700px 400px at 50% 110%, rgba(136, 102, 255, 0.12), transparent 60%),
+    #10081a;
+  --surface-muted: #140c20;
+  --text-primary: var(--foreground);
+  --text-secondary: #b0a0c8;
+  --text-muted: #b0a0c8;
+  --text-faint: #7a6a98;
+  --border-color: var(--border);
+  --border-soft: rgba(230, 200, 255, 0.12);
+  --accent-strong: var(--brand-strong);
+  --accent-soft: var(--brand-muted);
+  --danger: var(--destructive);
+  --info: #8866ff;
+  --shell-background: rgba(16, 8, 26, 0.88);
+  --panel-background: #1a1028;
+  --panel-border: var(--border);
+  --sidebar-background: #0c0614;
+  --work-background: #0e0718;
+  --work-sidebar: var(--sidebar-background);
+  --work-panel: #160e24;
+  --canvas-background: #10081a;
+  --item-active: rgba(196, 77, 255, 0.14);
+  --item-hover: rgba(230, 200, 255, 0.05);
+  --search-bg: rgba(230, 200, 255, 0.04);
+  --pill-bg: rgba(230, 200, 255, 0.06);
+  --input-bg: #1a1028;
+  --input-shadow: 0 8px 30px -12px rgba(196, 77, 255, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  --card-surface: linear-gradient(180deg, rgba(230, 200, 255, 0.06), rgba(230, 200, 255, 0.02));
+  --card-border: rgba(230, 200, 255, 0.10);
+  --chat-user-background: color-mix(in oklab, var(--brand) 18%, var(--card));
+  --chat-user-border: color-mix(in oklab, var(--brand) 35%, transparent);
+  --chat-user-foreground: var(--foreground);
+  --chat-agent-background: var(--card);
+  --chat-thinking-background: var(--brand-muted);
+  --tool-background: rgba(136, 102, 255, 0.14);
+  --node-input: #3a2060;
+  --node-llm: var(--accent3);
+  --node-tool: var(--brand);
+  --node-output: var(--accent2);
+  --node-start: #22c55e;
+  --node-end: var(--destructive);
+
+  --overflow-node-bg: #1a1028;
+  --overflow-node-border: rgba(230, 200, 255, 0.10);
+  --overflow-icon-bg: #0c0614;
+  --overflow-node-title: #f6eefc;
+  --overflow-node-subtitle: #b0a0c8;
+  --overflow-handle-bg: #7a6a98;
+  --overflow-handle-border: #1a1028;
+
+  --shadow-soft: 0 10px 28px rgba(0, 0, 0, 0.48);
+  --shadow-elevated: 0 20px 40px -20px var(--accent-glow);
+  --font-ui: 'Geist', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-display: 'Fraunces', Georgia, 'Times New Roman', serif;
+  --radius-lg: 18px;
+  --radius-md: 14px;
+  --radius-sm: 10px;
+}
+
+/* Sage brand pack — light (calm · fresh) */
+html[data-theme="sage"] {
+  --brand: #4a8f7a;
+  --brand-strong: #8faf5a;
+  --brand-muted: rgba(74, 143, 122, 0.14);
+  --brand-foreground: #ffffff;
+  /* Warm chartreuse + cool teal so gradients read (not monochrome green) */
+  --accent2: #b4c45c;
+  --accent3: #3d8fa8;
+  --accent-glow: rgba(74, 143, 122, 0.22);
+
+  --background: #f4f7f5;
+  --foreground: #1a2822;
+  --card: #ffffff;
+  --card-foreground: #1a2822;
+  --popover: #ffffff;
+  --popover-foreground: #1a2822;
+  --primary: var(--brand);
+  --primary-foreground: #ffffff;
+  --secondary: #e8f0ec;
+  --secondary-foreground: #5a7068;
+  --muted: #e8f0ec;
+  --muted-foreground: #5a7068;
+  --accent: rgba(74, 143, 122, 0.10);
+  --accent-foreground: #1a2822;
+  --destructive: #dc2626;
+  --destructive-foreground: #ffffff;
+  --border: rgba(40, 70, 55, 0.10);
+  --input: rgba(40, 70, 55, 0.12);
+  --ring: var(--brand);
+  --radius: 0.875rem;
+
+  --bg-primary: var(--background);
+  --bg-secondary: var(--card);
+  --bg-tertiary: var(--secondary);
+  --bg-grad: radial-gradient(900px 500px at 20% -10%, rgba(74, 143, 122, 0.16), transparent 60%),
+    radial-gradient(900px 500px at 90% 10%, rgba(61, 143, 168, 0.12), transparent 60%),
+    radial-gradient(700px 400px at 50% 110%, rgba(180, 196, 92, 0.10), transparent 60%),
+    #f4f7f5;
+  --surface-muted: #e8f0ec;
+  --text-primary: var(--foreground);
+  --text-secondary: #5a7068;
+  --text-muted: #5a7068;
+  --text-faint: #7a9088;
+  --border-color: var(--border);
+  --border-soft: rgba(40, 70, 55, 0.12);
+  --accent-strong: var(--brand-strong);
+  --accent-soft: var(--brand-muted);
+  --success: #149647;
+  --warning: #e49425;
+  --danger: var(--destructive);
+  --info: #5a8f9e;
+  --shell-background: rgba(244, 247, 245, 0.90);
+  --panel-background: #e8f0ec;
+  --panel-border: var(--border);
+  --sidebar-background: #e8f0ec;
+  --work-background: #f7faf8;
+  --work-sidebar: var(--sidebar-background);
+  --work-panel: #ffffff;
+  --canvas-background: #f4f7f5;
+  --item-active: rgba(74, 143, 122, 0.12);
+  --item-hover: rgba(40, 70, 55, 0.04);
+  --search-bg: rgba(255, 255, 255, 0.78);
+  --pill-bg: rgba(255, 255, 255, 0.78);
+  --input-bg: #ffffff;
+  --input-shadow: 0 8px 24px -12px rgba(74, 143, 122, 0.18);
+  --card-surface: linear-gradient(180deg, #ffffff, #f4f7f5);
+  --card-border: rgba(40, 70, 55, 0.10);
+  --chat-user-background: color-mix(in oklab, var(--brand) 12%, var(--card));
+  --chat-user-border: color-mix(in oklab, var(--brand) 24%, transparent);
+  --chat-user-foreground: var(--foreground);
+  --chat-agent-background: var(--card);
+  --chat-thinking-background: var(--brand-muted);
+  --tool-background: rgba(90, 143, 158, 0.10);
+  --node-input: #d0e4da;
+  --node-llm: var(--accent3);
+  --node-tool: var(--brand);
+  --node-output: var(--accent2);
+  --node-start: #22c55e;
+  --node-end: var(--destructive);
+
+  --overflow-node-bg: #ffffff;
+  --overflow-node-border: rgba(40, 70, 55, 0.10);
+  --overflow-icon-bg: #f4f7f5;
+  --overflow-node-title: #1a2822;
+  --overflow-node-subtitle: #5a7068;
+  --overflow-handle-bg: #7a9088;
+  --overflow-handle-border: #ffffff;
+
+  --shadow-soft: 0 10px 28px rgba(30, 50, 40, 0.08);
+  --shadow-elevated: 0 20px 40px -20px var(--accent-glow);
+  --font-ui: 'Geist', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-display: 'Fraunces', Georgia, 'Times New Roman', serif;
+  --radius-lg: 18px;
+  --radius-md: 14px;
+  --radius-sm: 10px;
+}
+
+/* Sage brand pack — dark */
+html[data-theme="sage"].dark {
+  --brand: #6aaf96;
+  --brand-strong: #b5d46a;
+  --brand-muted: rgba(106, 175, 150, 0.14);
+  --brand-foreground: #0c1210;
+  --accent2: #c5e070;
+  --accent3: #5ec8e0;
+  --accent-glow: rgba(106, 175, 150, 0.28);
+
+  --background: #0c1210;
+  --foreground: #e8f2ed;
+  --card: #141c18;
+  --card-foreground: #e8f2ed;
+  --popover: #141c18;
+  --popover-foreground: #e8f2ed;
+  --primary: var(--brand);
+  --primary-foreground: #0c1210;
+  --secondary: #101814;
+  --secondary-foreground: #8aa098;
+  --muted: #101814;
+  --muted-foreground: #8aa098;
+  --accent: rgba(106, 175, 150, 0.12);
+  --accent-foreground: #e8f2ed;
+  --destructive: #f05252;
+  --destructive-foreground: #ffffff;
+  --border: rgba(180, 210, 195, 0.08);
+  --input: rgba(180, 210, 195, 0.10);
+  --ring: var(--brand);
+
+  --bg-primary: var(--background);
+  --bg-secondary: var(--card);
+  --bg-tertiary: #101814;
+  --bg-grad: radial-gradient(900px 500px at 20% -10%, rgba(106, 175, 150, 0.16), transparent 60%),
+    radial-gradient(900px 500px at 90% 10%, rgba(94, 200, 224, 0.12), transparent 60%),
+    radial-gradient(700px 400px at 50% 110%, rgba(197, 224, 112, 0.10), transparent 60%),
+    #0c1210;
+  --surface-muted: #101814;
+  --text-primary: var(--foreground);
+  --text-secondary: #8aa098;
+  --text-muted: #8aa098;
+  --text-faint: #5a7068;
+  --border-color: var(--border);
+  --border-soft: rgba(180, 210, 195, 0.10);
+  --accent-strong: var(--brand-strong);
+  --accent-soft: var(--brand-muted);
+  --danger: var(--destructive);
+  --info: #7aafbc;
+  --shell-background: rgba(12, 18, 16, 0.90);
+  --panel-background: #141c18;
+  --panel-border: var(--border);
+  --sidebar-background: #0a100e;
+  --work-background: #0a100e;
+  --work-sidebar: var(--sidebar-background);
+  --work-panel: #121a16;
+  --canvas-background: #0c1210;
+  --item-active: rgba(106, 175, 150, 0.12);
+  --item-hover: rgba(180, 210, 195, 0.04);
+  --search-bg: rgba(180, 210, 195, 0.04);
+  --pill-bg: rgba(180, 210, 195, 0.05);
+  --input-bg: #141c18;
+  --input-shadow: 0 8px 28px -12px rgba(106, 175, 150, 0.20), inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  --card-surface: linear-gradient(180deg, rgba(180, 210, 195, 0.04), rgba(180, 210, 195, 0.015));
+  --card-border: rgba(180, 210, 195, 0.08);
+  --chat-user-background: color-mix(in oklab, var(--brand) 14%, var(--card));
+  --chat-user-border: color-mix(in oklab, var(--brand) 28%, transparent);
+  --chat-user-foreground: var(--foreground);
+  --chat-agent-background: var(--card);
+  --chat-thinking-background: var(--brand-muted);
+  --tool-background: rgba(122, 175, 188, 0.10);
+  --node-input: #1e4034;
+  --node-llm: var(--accent3);
+  --node-tool: var(--brand);
+  --node-output: var(--accent2);
+  --node-start: #22c55e;
+  --node-end: var(--destructive);
+
+  --overflow-node-bg: #141c18;
+  --overflow-node-border: rgba(180, 210, 195, 0.08);
+  --overflow-icon-bg: #0a100e;
+  --overflow-node-title: #e8f2ed;
+  --overflow-node-subtitle: #8aa098;
+  --overflow-handle-bg: #5a7068;
+  --overflow-handle-border: #141c18;
+
+  --shadow-soft: 0 10px 28px rgba(0, 0, 0, 0.42);
+  --shadow-elevated: 0 20px 40px -20px var(--accent-glow);
+  --font-ui: 'Geist', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-display: 'Fraunces', Georgia, 'Times New Roman', serif;
+  --radius-lg: 18px;
+  --radius-md: 14px;
+  --radius-sm: 10px;
+}
+
+/* Ember brand pack — light (calm · warm) */
+html[data-theme="ember"] {
+  --brand: #c4785a;
+  --brand-strong: #e0a84a;
+  --brand-muted: rgba(196, 120, 90, 0.14);
+  --brand-foreground: #ffffff;
+  /* Bright gold + dusty rose so warm packs still gradient */
+  --accent2: #e8bc5c;
+  --accent3: #a87898;
+  --accent-glow: rgba(196, 120, 90, 0.22);
+
+  --background: #faf6f3;
+  --foreground: #2a2018;
+  --card: #ffffff;
+  --card-foreground: #2a2018;
+  --popover: #ffffff;
+  --popover-foreground: #2a2018;
+  --primary: var(--brand);
+  --primary-foreground: #ffffff;
+  --secondary: #f3ebe4;
+  --secondary-foreground: #7a6a5c;
+  --muted: #f3ebe4;
+  --muted-foreground: #7a6a5c;
+  --accent: rgba(196, 120, 90, 0.10);
+  --accent-foreground: #2a2018;
+  --destructive: #dc2626;
+  --destructive-foreground: #ffffff;
+  --border: rgba(80, 50, 35, 0.10);
+  --input: rgba(80, 50, 35, 0.12);
+  --ring: var(--brand);
+  --radius: 0.875rem;
+
+  --bg-primary: var(--background);
+  --bg-secondary: var(--card);
+  --bg-tertiary: var(--secondary);
+  --bg-grad: radial-gradient(900px 500px at 20% -10%, rgba(196, 120, 90, 0.16), transparent 60%),
+    radial-gradient(900px 500px at 90% 10%, rgba(232, 188, 92, 0.12), transparent 60%),
+    radial-gradient(700px 400px at 50% 110%, rgba(168, 120, 152, 0.10), transparent 60%),
+    #faf6f3;
+  --surface-muted: #f3ebe4;
+  --text-primary: var(--foreground);
+  --text-secondary: #7a6a5c;
+  --text-muted: #7a6a5c;
+  --text-faint: #9a8a7c;
+  --border-color: var(--border);
+  --border-soft: rgba(80, 50, 35, 0.12);
+  --accent-strong: var(--brand-strong);
+  --accent-soft: var(--brand-muted);
+  --success: #149647;
+  --warning: #e49425;
+  --danger: var(--destructive);
+  --info: #a88878;
+  --shell-background: rgba(250, 246, 243, 0.90);
+  --panel-background: #f3ebe4;
+  --panel-border: var(--border);
+  --sidebar-background: #f3ebe4;
+  --work-background: #fcf9f6;
+  --work-sidebar: var(--sidebar-background);
+  --work-panel: #ffffff;
+  --canvas-background: #faf6f3;
+  --item-active: rgba(196, 120, 90, 0.12);
+  --item-hover: rgba(80, 50, 35, 0.04);
+  --search-bg: rgba(255, 255, 255, 0.78);
+  --pill-bg: rgba(255, 255, 255, 0.78);
+  --input-bg: #ffffff;
+  --input-shadow: 0 8px 24px -12px rgba(196, 120, 90, 0.18);
+  --card-surface: linear-gradient(180deg, #ffffff, #faf6f3);
+  --card-border: rgba(80, 50, 35, 0.10);
+  --chat-user-background: color-mix(in oklab, var(--brand) 12%, var(--card));
+  --chat-user-border: color-mix(in oklab, var(--brand) 24%, transparent);
+  --chat-user-foreground: var(--foreground);
+  --chat-agent-background: var(--card);
+  --chat-thinking-background: var(--brand-muted);
+  --tool-background: rgba(168, 136, 120, 0.10);
+  --node-input: #e8d4c8;
+  --node-llm: var(--accent3);
+  --node-tool: var(--brand);
+  --node-output: var(--accent2);
+  --node-start: #22c55e;
+  --node-end: var(--destructive);
+
+  --overflow-node-bg: #ffffff;
+  --overflow-node-border: rgba(80, 50, 35, 0.10);
+  --overflow-icon-bg: #faf6f3;
+  --overflow-node-title: #2a2018;
+  --overflow-node-subtitle: #7a6a5c;
+  --overflow-handle-bg: #9a8a7c;
+  --overflow-handle-border: #ffffff;
+
+  --shadow-soft: 0 10px 28px rgba(50, 35, 25, 0.08);
+  --shadow-elevated: 0 20px 40px -20px var(--accent-glow);
+  --font-ui: 'Geist', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-display: 'Fraunces', Georgia, 'Times New Roman', serif;
+  --radius-lg: 18px;
+  --radius-md: 14px;
+  --radius-sm: 10px;
+}
+
+/* Ember brand pack — dark */
+html[data-theme="ember"].dark {
+  --brand: #d49278;
+  --brand-strong: #e8c070;
+  --brand-muted: rgba(212, 146, 120, 0.14);
+  --brand-foreground: #14100e;
+  --accent2: #f0d080;
+  --accent3: #d4a0b8;
+  --accent-glow: rgba(212, 146, 120, 0.28);
+
+  --background: #14100e;
+  --foreground: #f5ebe4;
+  --card: #1c1714;
+  --card-foreground: #f5ebe4;
+  --popover: #1c1714;
+  --popover-foreground: #f5ebe4;
+  --primary: var(--brand);
+  --primary-foreground: #14100e;
+  --secondary: #161210;
+  --secondary-foreground: #b0a090;
+  --muted: #161210;
+  --muted-foreground: #b0a090;
+  --accent: rgba(212, 146, 120, 0.12);
+  --accent-foreground: #f5ebe4;
+  --destructive: #f05252;
+  --destructive-foreground: #ffffff;
+  --border: rgba(230, 210, 190, 0.08);
+  --input: rgba(230, 210, 190, 0.10);
+  --ring: var(--brand);
+
+  --bg-primary: var(--background);
+  --bg-secondary: var(--card);
+  --bg-tertiary: #161210;
+  --bg-grad: radial-gradient(900px 500px at 20% -10%, rgba(212, 146, 120, 0.16), transparent 60%),
+    radial-gradient(900px 500px at 90% 10%, rgba(240, 208, 128, 0.12), transparent 60%),
+    radial-gradient(700px 400px at 50% 110%, rgba(212, 160, 184, 0.10), transparent 60%),
+    #14100e;
+  --surface-muted: #161210;
+  --text-primary: var(--foreground);
+  --text-secondary: #b0a090;
+  --text-muted: #b0a090;
+  --text-faint: #7a6a5c;
+  --border-color: var(--border);
+  --border-soft: rgba(230, 210, 190, 0.10);
+  --accent-strong: var(--brand-strong);
+  --accent-soft: var(--brand-muted);
+  --danger: var(--destructive);
+  --info: #c4a898;
+  --shell-background: rgba(20, 16, 14, 0.90);
+  --panel-background: #1c1714;
+  --panel-border: var(--border);
+  --sidebar-background: #100c0a;
+  --work-background: #100c0a;
+  --work-sidebar: var(--sidebar-background);
+  --work-panel: #181410;
+  --canvas-background: #14100e;
+  --item-active: rgba(212, 146, 120, 0.12);
+  --item-hover: rgba(230, 210, 190, 0.04);
+  --search-bg: rgba(230, 210, 190, 0.04);
+  --pill-bg: rgba(230, 210, 190, 0.05);
+  --input-bg: #1c1714;
+  --input-shadow: 0 8px 28px -12px rgba(212, 146, 120, 0.20), inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  --card-surface: linear-gradient(180deg, rgba(230, 210, 190, 0.04), rgba(230, 210, 190, 0.015));
+  --card-border: rgba(230, 210, 190, 0.08);
+  --chat-user-background: color-mix(in oklab, var(--brand) 14%, var(--card));
+  --chat-user-border: color-mix(in oklab, var(--brand) 28%, transparent);
+  --chat-user-foreground: var(--foreground);
+  --chat-agent-background: var(--card);
+  --chat-thinking-background: var(--brand-muted);
+  --tool-background: rgba(196, 168, 152, 0.10);
+  --node-input: #4a3020;
+  --node-llm: var(--accent3);
+  --node-tool: var(--brand);
+  --node-output: var(--accent2);
+  --node-start: #22c55e;
+  --node-end: var(--destructive);
+
+  --overflow-node-bg: #1c1714;
+  --overflow-node-border: rgba(230, 210, 190, 0.08);
+  --overflow-icon-bg: #100c0a;
+  --overflow-node-title: #f5ebe4;
+  --overflow-node-subtitle: #b0a090;
+  --overflow-handle-bg: #7a6a5c;
+  --overflow-handle-border: #1c1714;
+
+  --shadow-soft: 0 10px 28px rgba(0, 0, 0, 0.42);
+  --shadow-elevated: 0 20px 40px -20px var(--accent-glow);
+  --font-ui: 'Geist', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-display: 'Fraunces', Georgia, 'Times New Roman', serif;
+  --radius-lg: 18px;
+  --radius-md: 14px;
+  --radius-sm: 10px;
+}
+
+/* Classic brand pack — light (pre-rebrand indigo / cool slate) */
+html[data-theme="classic"] {
+  --brand: #5f4fb2;
+  --brand-strong: #3d3580;
+  --brand-muted: rgba(95, 79, 178, 0.14);
+  --brand-foreground: #ffffff;
+  /* Deep indigo + periwinkle for multi-stop gradients */
+  --accent2: #4338ca;
+  --accent3: #818cf8;
+  --accent-glow: rgba(95, 79, 178, 0.28);
+
+  --background: #fafbfe;
+  --foreground: #0b1222;
+  --card: #ffffff;
+  --card-foreground: #0b1222;
+  --popover: #ffffff;
+  --popover-foreground: #0b1222;
+  --primary: var(--brand);
+  --primary-foreground: #ffffff;
+  --secondary: #f1f3f9;
+  --secondary-foreground: #3e4655;
+  --muted: #f1f3f9;
+  --muted-foreground: #6b7280;
+  --accent: rgba(95, 79, 178, 0.12);
+  --accent-foreground: #0b1222;
+  --destructive: #e74c3c;
+  --destructive-foreground: #ffffff;
+  --border: #e5e8f0;
+  --input: #e5e8f0;
+  --ring: var(--brand);
+  --radius: 0.875rem;
+
+  --bg-primary: var(--background);
+  --bg-secondary: var(--card);
   --bg-tertiary: #f1f3f9;
+  --bg-grad: radial-gradient(900px 500px at 20% -10%, rgba(95, 79, 178, 0.10), transparent 60%),
+    radial-gradient(900px 500px at 90% 10%, rgba(143, 126, 219, 0.08), transparent 60%),
+    radial-gradient(700px 400px at 50% 110%, rgba(99, 102, 241, 0.06), transparent 60%),
+    #fafbfe;
   --surface-muted: #e5e9f2;
-  --text-primary: #0b1222;
+  --text-primary: var(--foreground);
   --text-secondary: #3e4655;
   --text-muted: #6b7280;
-  --border-color: #e5e8f0;
-  --accent: #5f4fb2;
-  --accent-strong: #4b3f9c;
+  --text-faint: #6b7280;
+  --border-color: var(--border);
+  --border-soft: #e5e8f0;
+  --accent-strong: var(--brand-strong);
   --accent-soft: #eeebff;
   --success: #149647;
   --warning: #e49425;
-  --danger: #e74c3c;
+  --danger: var(--destructive);
+  --info: #5f4fb2;
+  --shell-background: rgba(250, 251, 254, 0.90);
+  --panel-background: #f1f3f9;
+  --panel-border: var(--border);
+  --sidebar-background: #f1f3f9;
+  --work-background: #f6f7fb;
+  --work-sidebar: var(--sidebar-background);
+  --work-panel: #ffffff;
+  --canvas-background: #fafbfe;
+  --item-active: rgba(95, 79, 178, 0.12);
+  --item-hover: rgba(15, 23, 42, 0.04);
+  --search-bg: rgba(255, 255, 255, 0.80);
+  --pill-bg: rgba(255, 255, 255, 0.80);
+  --input-bg: #ffffff;
+  --input-shadow: 0 8px 24px -12px rgba(95, 79, 178, 0.22);
+  --card-surface: linear-gradient(180deg, #ffffff, #fafbfe);
+  --card-border: #e5e8f0;
+  --chat-user-background: color-mix(in oklab, var(--brand) 12%, var(--card));
+  --chat-user-border: color-mix(in oklab, var(--brand) 26%, transparent);
+  --chat-user-foreground: var(--foreground);
+  --chat-agent-background: var(--card);
+  --chat-thinking-background: var(--brand-muted);
+  --tool-background: rgba(95, 79, 178, 0.10);
   --node-input: #dfe5ff;
   --node-llm: #5f4fb2;
   --node-tool: #6a3fb0;
   --node-output: #8f7edb;
+  --node-start: #22c55e;
+  --node-end: var(--destructive);
 
-  /* Overflow-style node colors - Light Mode */
   --overflow-node-bg: #f8f7fc;
   --overflow-node-border: rgba(0, 0, 0, 0.08);
   --overflow-icon-bg: #ede9fe;
@@ -29,47 +907,153 @@
   --overflow-handle-bg: #9ca3af;
   --overflow-handle-border: #f8f7fc;
 
-  --shadow-soft: 0 8px 28px rgba(15, 23, 42, 0.1);
-  --radius-lg: 14px;
-  --radius-md: 10px;
-  --radius-sm: 8px;
+  --shadow-soft: 0 8px 28px rgba(15, 23, 42, 0.10);
+  --shadow-elevated: 0 20px 40px -20px var(--accent-glow);
+  --font-ui: 'Geist', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-display: 'Fraunces', Georgia, 'Times New Roman', serif;
+  --radius-lg: 18px;
+  --radius-md: 14px;
+  --radius-sm: 10px;
 }
 
-.dark {
-  --bg-primary: #0b1222;
-  --bg-secondary: #0f172a;
+/* Classic brand pack — dark (pre-rebrand slate navy + indigo) */
+html[data-theme="classic"].dark {
+  --brand: #8d7ae0;
+  --brand-strong: #a5b4fc;
+  --brand-muted: rgba(141, 122, 224, 0.14);
+  --brand-foreground: #ffffff;
+  --accent2: #6366f1;
+  --accent3: #c4b5fd;
+  --accent-glow: rgba(141, 122, 224, 0.32);
+
+  --background: #0b1222;
+  --foreground: #f6f7fb;
+  --card: #0f172a;
+  --card-foreground: #f6f7fb;
+  --popover: #0f172a;
+  --popover-foreground: #f6f7fb;
+  --primary: var(--brand);
+  --primary-foreground: #ffffff;
+  --secondary: #111b30;
+  --secondary-foreground: #d3d7e3;
+  --muted: #111b30;
+  --muted-foreground: #9ca3af;
+  --accent: rgba(141, 122, 224, 0.12);
+  --accent-foreground: #f6f7fb;
+  --destructive: #e74c3c;
+  --destructive-foreground: #ffffff;
+  --border: rgba(255, 255, 255, 0.08);
+  --input: rgba(255, 255, 255, 0.10);
+  --ring: var(--brand);
+
+  --bg-primary: var(--background);
+  --bg-secondary: var(--card);
   --bg-tertiary: #111b30;
+  --bg-grad: radial-gradient(900px 500px at 20% -10%, rgba(141, 122, 224, 0.12), transparent 60%),
+    radial-gradient(900px 500px at 90% 10%, rgba(99, 102, 241, 0.08), transparent 60%),
+    radial-gradient(700px 400px at 50% 110%, rgba(169, 152, 239, 0.08), transparent 60%),
+    #0b1222;
   --surface-muted: #1f2937;
-  --text-primary: #f6f7fb;
+  --text-primary: var(--foreground);
   --text-secondary: #d3d7e3;
   --text-muted: #9ca3af;
-  --border-color: rgba(255, 255, 255, 0.08);
-  --accent: #8d7ae0;
-  --accent-strong: #7262ce;
-  --accent-soft: rgba(141, 122, 224, 0.12);
+  --text-faint: #6b7280;
+  --border-color: var(--border);
+  --border-soft: rgba(255, 255, 255, 0.10);
+  --accent-strong: var(--brand-strong);
+  --accent-soft: var(--brand-muted);
+  --danger: var(--destructive);
+  --info: #8d7ae0;
+  --shell-background: rgba(11, 18, 34, 0.90);
+  --panel-background: #0f172a;
+  --panel-border: var(--border);
+  --sidebar-background: #0a101c;
+  --work-background: #0a101c;
+  --work-sidebar: var(--sidebar-background);
+  --work-panel: #111b30;
+  --canvas-background: #0b1222;
+  --item-active: rgba(141, 122, 224, 0.14);
+  --item-hover: rgba(255, 255, 255, 0.04);
+  --search-bg: rgba(255, 255, 255, 0.04);
+  --pill-bg: rgba(255, 255, 255, 0.05);
+  --input-bg: #0f172a;
+  --input-shadow: 0 8px 28px -12px rgba(141, 122, 224, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  --card-surface: linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.015));
+  --card-border: rgba(255, 255, 255, 0.08);
+  --chat-user-background: color-mix(in oklab, var(--brand) 16%, var(--card));
+  --chat-user-border: color-mix(in oklab, var(--brand) 32%, transparent);
+  --chat-user-foreground: var(--foreground);
+  --chat-agent-background: var(--card);
+  --chat-thinking-background: var(--brand-muted);
+  --tool-background: rgba(141, 122, 224, 0.12);
   --node-input: #35448f;
   --node-llm: #8d7ae0;
   --node-tool: #7b66d1;
   --node-output: #a998ef;
+  --node-start: #22c55e;
+  --node-end: var(--destructive);
 
-  /* Overflow-style node colors - Dark Mode */
-  --overflow-node-bg: #2A2A34;
+  --overflow-node-bg: #2a2a34;
   --overflow-node-border: rgba(255, 255, 255, 0.08);
   --overflow-icon-bg: #1e1e28;
   --overflow-node-title: #ffffff;
   --overflow-node-subtitle: #9ca3af;
   --overflow-handle-bg: #6b7280;
-  --overflow-handle-border: #2A2A34;
+  --overflow-handle-border: #2a2a34;
 
   --shadow-soft: 0 10px 32px rgba(0, 0, 0, 0.42);
+  --shadow-elevated: 0 20px 40px -20px var(--accent-glow);
+  --font-ui: 'Geist', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-display: 'Fraunces', Georgia, 'Times New Roman', serif;
+  --radius-lg: 18px;
+  --radius-md: 14px;
+  --radius-sm: 10px;
+}
+
+* {
+  border-color: var(--border);
+  outline-color: color-mix(in srgb, var(--ring) 50%, transparent);
 }
 
 body {
   margin: 0;
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-  background: var(--bg-primary);
+  font-family: var(--font-ui, 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
+  background: var(--bg-grad, var(--bg-primary));
   color: var(--text-primary);
   transition: background-color 0.25s ease, color 0.25s ease;
+}
+
+.font-display {
+  font-family: var(--font-display);
+}
+
+.text-gradient-nova {
+  background: linear-gradient(135deg, var(--brand), var(--accent2) 50%, var(--accent3));
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+}
+
+.bg-grad-app {
+  background: var(--bg-grad, var(--background));
+}
+
+.send-gradient {
+  background: linear-gradient(135deg, var(--brand), var(--accent2));
+  box-shadow: 0 4px 14px -4px var(--accent-glow);
+}
+
+/* Empty-chat hero — multi-stop wash from pack accents (brand → accent2 → accent3) */
+.hero-card-nova {
+  background: linear-gradient(
+    135deg,
+    color-mix(in oklab, var(--brand) 26%, transparent),
+    color-mix(in oklab, var(--accent2) 20%, transparent) 48%,
+    color-mix(in oklab, var(--accent3) 18%, transparent)
+  );
+  border: 1px solid var(--card-border, var(--border));
+  border-radius: var(--radius-xl, 28px);
 }
 
 button, input, select, textarea {
@@ -88,15 +1072,15 @@ button, input, select, textarea {
 .dark .react-flow__pane,
 .dark .react-flow__renderer,
 .dark .react-flow {
-  background-color: #0b1222 !important;
+  background-color: var(--canvas-background) !important;
 }
 
 .dark .react-flow__background {
-  background-color: #0b1222 !important;
+  background-color: var(--canvas-background) !important;
 }
 
 .dark .react-flow__background pattern rect {
-  fill: #0b1222 !important;
+  fill: var(--canvas-background) !important;
 }
 
 .react-flow__node.selected,
@@ -105,7 +1089,7 @@ button, input, select, textarea {
 }
 
 .react-flow__node.selected > div {
-  box-shadow: 0 0 0 3px rgba(95, 79, 178, 0.28), var(--shadow-soft) !important;
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--brand) 28%, transparent), var(--shadow-soft) !important;
 }
 
 .react-flow__edge-path {
@@ -134,19 +1118,19 @@ button, input, select, textarea {
 }
 
 .node-llm {
-  background: linear-gradient(135deg, #5f4fb2 0%, #4b3f9c 100%);
+  background: linear-gradient(135deg, var(--node-llm) 0%, color-mix(in oklab, var(--node-llm) 75%, black) 100%);
   color: white;
   border: none;
 }
 
 .node-tool {
-  background: linear-gradient(135deg, #6a3fb0 0%, #523295 100%);
+  background: linear-gradient(135deg, var(--node-tool) 0%, color-mix(in oklab, var(--node-tool) 75%, black) 100%);
   color: white;
   border: none;
 }
 
 .node-output {
-  background: linear-gradient(135deg, #8f7edb 0%, #6f5fc7 100%);
+  background: linear-gradient(135deg, var(--node-output) 0%, color-mix(in oklab, var(--node-output) 75%, black) 100%);
   color: white;
   border: none;
 }
@@ -164,13 +1148,13 @@ button, input, select, textarea {
 }
 
 .node-active {
-  box-shadow: 0 0 0 2px rgba(95, 79, 178, 0.3), 0 0 16px rgba(95, 79, 178, 0.28);
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--brand) 30%, transparent), 0 0 16px color-mix(in oklab, var(--brand) 28%, transparent);
   animation: pulse 2s infinite;
 }
 
 @keyframes pulse {
-  0%, 100% { box-shadow: 0 0 0 2px rgba(95, 79, 178, 0.35), 0 0 16px rgba(95, 79, 178, 0.24); }
-  50% { box-shadow: 0 0 0 4px rgba(95, 79, 178, 0.48), 0 0 24px rgba(95, 79, 178, 0.36); }
+  0%, 100% { box-shadow: 0 0 0 2px color-mix(in oklab, var(--brand) 35%, transparent), 0 0 16px color-mix(in oklab, var(--brand) 24%, transparent); }
+  50% { box-shadow: 0 0 0 4px color-mix(in oklab, var(--brand) 48%, transparent), 0 0 24px color-mix(in oklab, var(--brand) 36%, transparent); }
 }
 
 /* Spinning border animation for running nodes */
@@ -186,11 +1170,11 @@ button, input, select, textarea {
   padding: 3px;
   background: conic-gradient(
     from var(--spin-angle, 0deg),
-    #8b5cf6 0deg,
-    #6366f1 90deg,
+    var(--brand) 0deg,
+    var(--brand-strong) 90deg,
     transparent 180deg,
     transparent 270deg,
-    #8b5cf6 360deg
+    var(--brand) 360deg
   );
   -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
   -webkit-mask-composite: xor;
@@ -226,28 +1210,37 @@ button, input, select, textarea {
 }
 
 .chat-bubble-user {
-  background: linear-gradient(135deg, var(--accent) 0%, var(--accent-strong) 100%);
-  color: white;
-  border-radius: var(--radius-md);
+  background: var(--chat-user-background);
+  color: var(--chat-user-foreground, var(--foreground));
+  border: 1px solid var(--chat-user-border, color-mix(in oklab, var(--brand) 28%, transparent));
+  border-radius: calc(var(--radius-md) + 2px);
+  box-shadow: none;
+}
+
+.chat-bubble-user pre,
+.chat-bubble-user code {
+  color: inherit;
 }
 
 .chat-bubble-agent {
-  background: var(--bg-secondary);
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-md);
+  background: var(--chat-agent-background);
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius-md) + 2px);
+  box-shadow: none;
 }
 
+/* Streaming "Thinking…" pill — follows brand pack (not fixed purple/amber) */
 .thinking-indicator {
-  background: rgba(228, 148, 37, 0.15);
-  border: 1px solid rgba(228, 148, 37, 0.35);
-  color: #e49425;
+  background: var(--brand-muted, var(--chat-thinking-background));
+  border: 1px solid color-mix(in oklab, var(--brand) 28%, transparent);
+  color: var(--brand);
   border-radius: var(--radius-sm);
 }
 
 .tool-indicator {
-  background: rgba(59, 130, 246, 0.12);
-  border: 1px solid rgba(59, 130, 246, 0.28);
-  color: #2563eb;
+  background: var(--tool-background);
+  border: 1px solid color-mix(in oklab, var(--info) 28%, transparent);
+  color: var(--info);
   border-radius: var(--radius-sm);
 }
 
@@ -439,8 +1432,9 @@ button, input, select, textarea {
 }
 
 .timeline-dot--running {
-  border-color: var(--accent);
-  color: var(--accent);
+  /* --accent is a translucent fill — never use it as text/border color alone */
+  border-color: var(--brand);
+  color: var(--brand);
   background: var(--bg-primary);
 }
 

@@ -38,7 +38,7 @@ export default function YamlDrawer({ content, onChange, onClose, theme, subtitle
               <button
                 onClick={onSave}
                 disabled={isSaving}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white transition-colors disabled:opacity-50"
+                className="flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
               >
                 <Save size={12} /> {isSaving ? 'Saving...' : 'Save'}
               </button>
@@ -46,7 +46,7 @@ export default function YamlDrawer({ content, onChange, onClose, theme, subtitle
           )}
           <button
             onClick={() => setIsFullscreen(!isFullscreen)}
-            className="p-2 rounded-lg transition-colors hover:bg-purple-500/20"
+            className="rounded-lg p-2 transition-colors hover:bg-[color:var(--item-active)]"
             title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
           >
             {isFullscreen ? (
@@ -57,7 +57,7 @@ export default function YamlDrawer({ content, onChange, onClose, theme, subtitle
           </button>
           <button
             onClick={onClose}
-            className="p-2 rounded-lg transition-colors hover:bg-purple-500/20"
+            className="rounded-lg p-2 transition-colors hover:bg-[color:var(--item-active)]"
           >
             <X size={20} style={{ color: 'var(--text-muted)' }} />
           </button>

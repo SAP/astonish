@@ -1,0 +1,72 @@
+# Studio brand themes
+
+Authoritative product rules (invariants, cascade, what agents must not hard-code): **`docs/architecture/studio-ui-system.md`**. This file is the **pack authoring cookbook**.
+
+## Model
+
+| Axis | Mechanism | Values |
+|------|-----------|--------|
+| **Mode** | `html` class `dark` | light (default) / dark |
+| **Brand pack** | `html[data-theme="…"]` | `classic` (default), `aster`, `nova`, `sage`, `ember` (shipped); `amethyst` reserved |
+
+**Cascade:** user preference → platform default → `classic`.  
+**UI:** Personal → General (user) · Platform → General (instance default).  
+**Combobox order:** Classic, Aster, Nova, Sage, Ember.  
+**Classic** is the pre-rebrand indigo/slate palette (`#0b1222` / `#5f4fb2` family).
+
+Do not collapse brand + mode into one enum. They compose:
+
+```html
+<html data-theme="nova" class="dark">
+```
+
+## API
+
+```ts
+import { applyBrandTheme, getStoredBrandTheme, REQUIRED_THEME_TOKENS } from '@/themes/brandTheme'
+import { useTheme } from '@/hooks/useTheme'
+
+// Imperative (early boot)
+applyBrandTheme('nova')
+
+// In React
+const { theme, toggleTheme, brandTheme, setBrandTheme, availableBrandThemes } = useTheme()
+```
+
+## Adding a pack (e.g. Ember)
+
+1. Copy the Nova token blocks in `web/src/index.css` (or add `web/src/themes/ember.css` and import it).
+2. Define **both**:
+   - `html[data-theme="ember"] { … light tokens … }`
+   - `html[data-theme="ember"].dark { … dark tokens … }`
+3. Use the **same variable names** listed in `REQUIRED_THEME_TOKENS` (`brandTheme.ts`).
+4. Set `BRAND_THEME_META.ember.shipped = true` when ready for the UI switcher.
+5. Prefer tokens in components; avoid hard-coded hex in chrome.
+
+## Token layers
+
+1. **shadcn semantic** — `--background`, `--primary`, `--border`, … (controls)
+2. **Product** — `--brand`, `--accent2`, `--bg-grad`, `--work-sidebar`, chat/node tokens
+3. **Compat** — `--bg-primary`, `--text-primary` (legacy maps; prefer semantic)
+4. **App Canvas** (generated apps iframe) — light + dark pack dictionary in `appCanvas.ts`
+
+Components that only touch these layers retheme when the pack changes. Hard-coded hex (e.g. hero tile gradients) must be moved into tokens to follow new packs.
+
+## App Canvas (generated apps)
+
+Apps render in a sandboxed iframe and follow Studio **light/dark** and **brand pack** via postMessage tokens.
+
+| Piece | Location |
+|-------|----------|
+| Token dictionaries per pack | `web/src/themes/appCanvas.ts` → `APP_CANVAS_BY_BRAND[pack].light` / `.dark` |
+| Parent → iframe | `buildAppCanvasThemeMessage()` via `AppPreview` postMessage |
+| Sandbox apply | `applyAppCanvas(pack, tokens, mode)` in `pkg/api/app_preview_sandbox.go` |
+| LLM guidance | `pkg/skills/builtin_content.go` — use `bg-surface`, `bg-brand`, `text-app`, `text-danger` / `bg-danger-soft`, … |
+
+When you add a brand pack:
+
+1. Shell CSS in `index.css` (light + dark).
+2. **Also** fill `APP_CANVAS_BY_BRAND.ember.light` and `.dark` if not already stubbed.
+3. Flip `shipped: true`.
+
+Token-based apps retheme when `html[data-theme]` or `html.dark` changes. Apps with hard-coded `bg-gray-900` do not.

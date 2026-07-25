@@ -70,21 +70,17 @@ export default function UsagePopover({ usage, isStreaming, sessionStartTime }: U
       <button
         ref={buttonRef}
         onClick={() => setOpen(!open)}
-        className="flex items-center gap-1.5 px-2 py-1 rounded text-xs transition-colors"
-        style={{
-          background: open ? 'var(--accent-bg, rgba(59, 130, 246, 0.15))' : 'transparent',
-          color: open ? 'var(--accent-color, #60a5fa)' : 'var(--text-secondary)',
-          border: open ? '1px solid var(--accent-border, rgba(59, 130, 246, 0.3))' : '1px solid transparent',
-        }}
+        className={`flex items-center gap-1.5 rounded border px-2 py-1 text-xs transition-colors ${
+          open
+            ? 'border-primary/30 bg-primary/15 text-primary'
+            : 'border-transparent text-muted-foreground hover:bg-secondary hover:text-foreground'
+        }`}
         title="Token usage"
       >
         <Zap size={13} />
         <span>Usage</span>
         {hasUsage && (
-          <span className="px-1 py-0 rounded text-[10px] font-medium" style={{
-            background: 'var(--accent-bg, rgba(59, 130, 246, 0.15))',
-            color: 'var(--accent-color, #60a5fa)',
-          }}>
+          <span className="rounded bg-primary/15 px-1 py-0 text-[10px] font-medium text-primary">
             {formatTokenCount(usage.totalTokens)}
           </span>
         )}

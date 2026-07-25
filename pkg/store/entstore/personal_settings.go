@@ -50,6 +50,7 @@ func (ps *personalSettingsStore) Get(ctx context.Context) (*store.PersonalSettin
 	return &store.PersonalSettings{
 		DefaultProvider: ent.DefaultProvider,
 		DefaultModel:    ent.DefaultModel,
+		BrandTheme:      ent.BrandTheme,
 	}, nil
 }
 
@@ -70,6 +71,7 @@ func (ps *personalSettingsStore) Save(ctx context.Context, settings *store.Perso
 		return existing.Update().
 			SetDefaultProvider(settings.DefaultProvider).
 			SetDefaultModel(settings.DefaultModel).
+			SetBrandTheme(settings.BrandTheme).
 			Exec(ctx)
 	}
 
@@ -77,6 +79,7 @@ func (ps *personalSettingsStore) Save(ctx context.Context, settings *store.Perso
 		SetUserID(uid).
 		SetDefaultProvider(settings.DefaultProvider).
 		SetDefaultModel(settings.DefaultModel).
+		SetBrandTheme(settings.BrandTheme).
 		Save(ctx)
 	if err != nil {
 		return fmt.Errorf("save personal settings: create: %w", err)

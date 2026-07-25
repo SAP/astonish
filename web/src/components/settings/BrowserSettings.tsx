@@ -1,6 +1,15 @@
 import { useState, useEffect } from 'react'
-import { Save, AlertCircle, Check, Info } from 'lucide-react'
-import { saveFullConfigSection, inputClass, inputStyle, labelStyle, hintStyle, sectionBorderStyle, saveButtonStyle } from './settingsApi'
+import { AlertCircle, Check, Info, Loader2, Save } from 'lucide-react'
+
+import { Alert, AlertDescription } from '@/components/ui/alert'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Switch } from '@/components/ui/switch'
+
+import { saveFullConfigSection } from './settingsApi'
 
 interface BrowserForm {
   headless: boolean | null
@@ -109,337 +118,287 @@ export default function BrowserSettings({ config, onSaved }: BrowserSettingsProp
   const isNoSandbox = form.no_sandbox === true
 
   return (
-    <div className="max-w-xl space-y-6">
-      {/* Engine Selection */}
-      <div>
-        <label className="block text-sm font-medium mb-2" style={labelStyle}>
-          Browser Engine
-        </label>
-        <select
-          value={engineType}
-          onChange={(e) => handleEngineChange(e.target.value)}
-          className={inputClass}
-          style={inputStyle}
-        >
-          <option value="default">Default (Chromium, auto-downloaded by Astonish)</option>
-          <option value="cloakbrowser">CloakBrowser (anti-detect Chromium with stealth patches)</option>
-          <option value="custom">Custom Chrome/Chromium path</option>
-          <option value="remote">Remote browser (connect via CDP)</option>
-        </select>
-        <p className="text-xs mt-1" style={hintStyle}>
-          {engineType === 'default' && 'Astonish will automatically download and manage a Chromium binary.'}
-          {engineType === 'cloakbrowser' && 'CloakBrowser provides advanced fingerprint spoofing at the binary level. Install via CLI: astonish config browser'}
-          {engineType === 'custom' && 'Point to an existing Chrome or Chromium installation on your system.'}
-          {engineType === 'remote' && 'Connect to a remote browser instance (Chrome, anti-detect browsers, Browserless, etc.) via Chrome DevTools Protocol.'}
-        </p>
-      </div>
-
-      {/* Engine-specific fields */}
-      {engineType === 'custom' && (
-        <div>
-          <label className="block text-sm font-medium mb-2" style={labelStyle}>
-            Chrome Binary Path
-          </label>
-          <input
-            type="text"
-            value={form.chrome_path}
-            onChange={(e) => setForm({ ...form, chrome_path: e.target.value })}
-            placeholder="/usr/bin/google-chrome"
-            className={inputClass + ' font-mono'}
-            style={inputStyle}
-          />
-        </div>
-      )}
-
-      {engineType === 'cloakbrowser' && (
-        <>
-          <div>
-            <label className="block text-sm font-medium mb-2" style={labelStyle}>
-              Chrome Binary Path
-            </label>
-            <input
-              type="text"
-              value={form.chrome_path}
-              onChange={(e) => setForm({ ...form, chrome_path: e.target.value })}
-              placeholder="~/.cloakbrowser/chromium-.../chrome"
-              className={inputClass + ' font-mono'}
-              style={inputStyle}
-            />
-            <p className="text-xs mt-1" style={hintStyle}>
-              Path to the CloakBrowser binary. Use the CLI to auto-install: <code>astonish config browser</code>
+    <div className="max-w-2xl space-y-6">
+      <Card className="border-border bg-card shadow-sm">
+        <CardHeader>
+          <CardTitle className="text-base">Browser Engine</CardTitle>
+          <CardDescription>
+            Choose the Chromium runtime Astonish uses for browser automation and human handoff.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="browser-engine">Browser Engine</Label>
+            <Select value={engineType} onValueChange={handleEngineChange}>
+              <SelectTrigger id="browser-engine" className="w-full bg-background">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="default">Default (Chromium, auto-downloaded by Astonish)</SelectItem>
+                <SelectItem value="cloakbrowser">CloakBrowser (anti-detect Chromium with stealth patches)</SelectItem>
+                <SelectItem value="custom">Custom Chrome/Chromium path</SelectItem>
+                <SelectItem value="remote">Remote browser (connect via CDP)</SelectItem>
+              </SelectContent>
+            </Select>
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              {engineType === 'default' && 'Astonish will automatically download and manage a Chromium binary.'}
+              {engineType === 'cloakbrowser' && 'CloakBrowser provides advanced fingerprint spoofing at the binary level. Install via CLI: astonish config browser.'}
+              {engineType === 'custom' && 'Point to an existing Chrome or Chromium installation on your system.'}
+              {engineType === 'remote' && 'Connect to a remote browser instance via Chrome DevTools Protocol.'}
             </p>
           </div>
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium mb-2" style={labelStyle}>
-                Fingerprint Platform
-              </label>
-              <select
-                value={form.fingerprint_platform || 'windows'}
-                onChange={(e) => setForm({ ...form, fingerprint_platform: e.target.value })}
-                className={inputClass}
-                style={inputStyle}
-              >
-                <option value="windows">Windows (recommended)</option>
-                <option value="macos">macOS</option>
-                <option value="linux">Linux</option>
-              </select>
-            </div>
-            <div>
-              <label className="block text-sm font-medium mb-2" style={labelStyle}>
-                Fingerprint Seed
-              </label>
-              <input
+
+          {engineType === 'custom' && (
+            <div className="space-y-2">
+              <Label htmlFor="chrome-binary-path">Chrome Binary Path</Label>
+              <Input
+                id="chrome-binary-path"
                 type="text"
-                value={form.fingerprint_seed}
-                onChange={(e) => setForm({ ...form, fingerprint_seed: e.target.value })}
-                placeholder="e.g. 42000"
-                className={inputClass + ' font-mono'}
-                style={inputStyle}
+                value={form.chrome_path}
+                onChange={(e) => setForm({ ...form, chrome_path: e.target.value })}
+                placeholder="/usr/bin/google-chrome"
+                className="bg-background font-mono"
               />
-              <p className="text-xs mt-1" style={hintStyle}>
-                Unique seed for consistent fingerprint generation.
+            </div>
+          )}
+
+          {engineType === 'cloakbrowser' && (
+            <>
+              <div className="space-y-2">
+                <Label htmlFor="cloakbrowser-binary-path">Chrome Binary Path</Label>
+                <Input
+                  id="cloakbrowser-binary-path"
+                  type="text"
+                  value={form.chrome_path}
+                  onChange={(e) => setForm({ ...form, chrome_path: e.target.value })}
+                  placeholder="~/.cloakbrowser/chromium-.../chrome"
+                  className="bg-background font-mono"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Path to the CloakBrowser binary. Use the CLI to auto-install: <code>astonish config browser</code>.
+                </p>
+              </div>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div className="space-y-2">
+                  <Label htmlFor="fingerprint-platform">Fingerprint Platform</Label>
+                  <Select
+                    value={form.fingerprint_platform || 'windows'}
+                    onValueChange={(value) => setForm({ ...form, fingerprint_platform: value })}
+                  >
+                    <SelectTrigger id="fingerprint-platform" className="bg-background">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="windows">Windows (recommended)</SelectItem>
+                      <SelectItem value="macos">macOS</SelectItem>
+                      <SelectItem value="linux">Linux</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="fingerprint-seed">Fingerprint Seed</Label>
+                  <Input
+                    id="fingerprint-seed"
+                    type="text"
+                    value={form.fingerprint_seed}
+                    onChange={(e) => setForm({ ...form, fingerprint_seed: e.target.value })}
+                    placeholder="e.g. 42000"
+                    className="bg-background font-mono"
+                  />
+                  <p className="text-xs text-muted-foreground">Unique seed for consistent fingerprint generation.</p>
+                </div>
+              </div>
+            </>
+          )}
+
+          {engineType === 'remote' && (
+            <div className="space-y-2">
+              <Label htmlFor="remote-cdp-url">Remote CDP URL</Label>
+              <Input
+                id="remote-cdp-url"
+                type="text"
+                value={form.remote_cdp_url}
+                onChange={(e) => setForm({ ...form, remote_cdp_url: e.target.value })}
+                placeholder="ws://192.168.1.100:9222/devtools/browser/..."
+                className="bg-background font-mono"
+              />
+              <p className="text-xs text-muted-foreground">
+                WebSocket URL of the Chrome DevTools Protocol endpoint. Use the CLI for auto-discovery: <code>astonish config browser</code>.
               </p>
             </div>
-          </div>
-        </>
-      )}
+          )}
+        </CardContent>
+      </Card>
 
-      {engineType === 'remote' && (
-        <div>
-          <label className="block text-sm font-medium mb-2" style={labelStyle}>
-            Remote CDP URL
-          </label>
-          <input
-            type="text"
-            value={form.remote_cdp_url}
-            onChange={(e) => setForm({ ...form, remote_cdp_url: e.target.value })}
-            placeholder="ws://192.168.1.100:9222/devtools/browser/..."
-            className={inputClass + ' font-mono'}
-            style={inputStyle}
-          />
-          <p className="text-xs mt-1" style={hintStyle}>
-            WebSocket URL of the Chrome DevTools Protocol endpoint. Use the CLI for auto-discovery: <code>astonish config browser</code>
-          </p>
-        </div>
-      )}
-
-      {/* Viewport & Display */}
-      <div className="pt-4 border-t" style={sectionBorderStyle}>
-        <h4 className="text-sm font-medium mb-3" style={{ color: 'var(--text-primary)' }}>
-          Display
-        </h4>
-        <div className="space-y-4">
-          <div className="flex items-center justify-between">
+      <Card className="border-border bg-card shadow-sm">
+        <CardHeader>
+          <CardTitle className="text-base">Display</CardTitle>
+          <CardDescription>Configure viewport size and whether the browser runs visibly.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex items-start justify-between gap-4 rounded-xl border border-border bg-background p-4">
             <div>
-              <label className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>
-                Headless Mode
-              </label>
-              <p className="text-xs mt-0.5" style={hintStyle}>
-                Run browser without a visible window. Headed mode (with Xvfb) produces more realistic fingerprints.
+              <Label htmlFor="browser-headless">Headless Mode</Label>
+              <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                Run browser without a visible window. Headed mode with Xvfb produces more realistic fingerprints.
               </p>
             </div>
-            <button
-              onClick={() => setForm({ ...form, headless: !isHeadless ? true : null })}
-              className="relative w-11 h-6 rounded-full transition-colors"
-              style={{
-                background: isHeadless ? '#a855f7' : 'var(--bg-tertiary)',
-                border: `1px solid ${isHeadless ? '#a855f7' : 'var(--border-color)'}`
-              }}
-            >
-              <span
-                className="absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-transform bg-white"
-                style={{ transform: isHeadless ? 'translateX(20px)' : 'translateX(0)' }}
-              />
-            </button>
+            <Switch
+              id="browser-headless"
+              checked={isHeadless}
+              onCheckedChange={(checked) => setForm({ ...form, headless: checked ? true : null })}
+              aria-label="Headless mode"
+            />
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium mb-2" style={labelStyle}>
-                Viewport Width
-              </label>
-              <input
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="space-y-2">
+              <Label htmlFor="viewport-width">Viewport Width</Label>
+              <Input
+                id="viewport-width"
                 type="number"
                 value={form.viewport_width}
                 onChange={(e) => setForm({ ...form, viewport_width: parseInt(e.target.value) || 1920 })}
                 min="320"
                 max="3840"
-                className={inputClass}
-                style={inputStyle}
+                className="bg-background"
               />
             </div>
-            <div>
-              <label className="block text-sm font-medium mb-2" style={labelStyle}>
-                Viewport Height
-              </label>
-              <input
+            <div className="space-y-2">
+              <Label htmlFor="viewport-height">Viewport Height</Label>
+              <Input
+                id="viewport-height"
                 type="number"
                 value={form.viewport_height}
                 onChange={(e) => setForm({ ...form, viewport_height: parseInt(e.target.value) || 1080 })}
                 min="240"
                 max="2160"
-                className={inputClass}
-                style={inputStyle}
+                className="bg-background"
               />
             </div>
           </div>
-        </div>
-      </div>
+        </CardContent>
+      </Card>
 
-      {/* Network */}
-      <div className="pt-4 border-t" style={sectionBorderStyle}>
-        <h4 className="text-sm font-medium mb-3" style={{ color: 'var(--text-primary)' }}>
-          Network
-        </h4>
-        <div className="space-y-4">
-          <div>
-            <label className="block text-sm font-medium mb-2" style={labelStyle}>
-              Proxy
-            </label>
-            <input
+      <Card className="border-border bg-card shadow-sm">
+        <CardHeader>
+          <CardTitle className="text-base">Network</CardTitle>
+          <CardDescription>Route browser traffic and tune navigation waits.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="browser-proxy">Proxy</Label>
+            <Input
+              id="browser-proxy"
               type="text"
               value={form.proxy}
               onChange={(e) => setForm({ ...form, proxy: e.target.value })}
               placeholder="http://user:pass@host:port or socks5://host:port"
-              className={inputClass + ' font-mono'}
-              style={inputStyle}
+              className="bg-background font-mono"
             />
-            <p className="text-xs mt-1" style={hintStyle}>
-              Route browser traffic through an HTTP or SOCKS proxy.
-            </p>
+            <p className="text-xs text-muted-foreground">Route browser traffic through an HTTP or SOCKS proxy.</p>
           </div>
-          <div>
-            <label className="block text-sm font-medium mb-2" style={labelStyle}>
-              Navigation Timeout (seconds)
-            </label>
-            <input
+          <div className="space-y-2">
+            <Label htmlFor="navigation-timeout">Navigation Timeout (seconds)</Label>
+            <Input
+              id="navigation-timeout"
               type="number"
               value={form.navigation_timeout}
               onChange={(e) => setForm({ ...form, navigation_timeout: parseInt(e.target.value) || 30 })}
               min="5"
               max="300"
-              className={inputClass}
-              style={inputStyle}
+              className="max-w-40 bg-background"
             />
           </div>
-        </div>
-      </div>
+        </CardContent>
+      </Card>
 
-      {/* Advanced */}
-      <div className="pt-4 border-t" style={sectionBorderStyle}>
-        <h4 className="text-sm font-medium mb-3" style={{ color: 'var(--text-primary)' }}>
-          Advanced
-        </h4>
-        <div className="space-y-4">
-          <div>
-            <label className="block text-sm font-medium mb-2" style={labelStyle}>
-              User Data Directory
-            </label>
-            <input
+      <Card className="border-border bg-card shadow-sm">
+        <CardHeader>
+          <CardTitle className="text-base">Advanced</CardTitle>
+          <CardDescription>Configure persistent profiles, Chrome sandbox behavior, and CDP handoff.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="user-data-directory">User Data Directory</Label>
+            <Input
+              id="user-data-directory"
               type="text"
               value={form.user_data_dir}
               onChange={(e) => setForm({ ...form, user_data_dir: e.target.value })}
               placeholder="~/.config/astonish/browser/ (default)"
-              className={inputClass + ' font-mono'}
-              style={inputStyle}
+              className="bg-background font-mono"
             />
-            <p className="text-xs mt-1" style={hintStyle}>
-              Persistent browser profile directory. Stores cookies, localStorage, etc.
-            </p>
+            <p className="text-xs text-muted-foreground">Persistent browser profile directory. Stores cookies, localStorage, etc.</p>
           </div>
 
-          <div className="flex items-center justify-between">
+          <div className="flex items-start justify-between gap-4 rounded-xl border border-border bg-background p-4">
             <div>
-              <label className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>
-                No Sandbox
-              </label>
-              <p className="text-xs mt-0.5" style={hintStyle}>
-                Disable Chrome sandbox. Auto-enabled when running as root.
-              </p>
+              <Label htmlFor="browser-no-sandbox">No Sandbox</Label>
+              <p className="mt-1 text-xs text-muted-foreground">Disable Chrome sandbox. Auto-enabled when running as root.</p>
             </div>
-            <button
-              onClick={() => setForm({ ...form, no_sandbox: !isNoSandbox ? true : null })}
-              className="relative w-11 h-6 rounded-full transition-colors"
-              style={{
-                background: isNoSandbox ? '#a855f7' : 'var(--bg-tertiary)',
-                border: `1px solid ${isNoSandbox ? '#a855f7' : 'var(--border-color)'}`
-              }}
-            >
-              <span
-                className="absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-transform bg-white"
-                style={{ transform: isNoSandbox ? 'translateX(20px)' : 'translateX(0)' }}
-              />
-            </button>
+            <Switch
+              id="browser-no-sandbox"
+              checked={isNoSandbox}
+              onCheckedChange={(checked) => setForm({ ...form, no_sandbox: checked ? true : null })}
+              aria-label="No sandbox"
+            />
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium mb-2" style={labelStyle}>
-                Handoff Bind Address
-              </label>
-              <input
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="space-y-2">
+              <Label htmlFor="handoff-bind-address">Handoff Bind Address</Label>
+              <Input
+                id="handoff-bind-address"
                 type="text"
                 value={form.handoff_bind_address}
                 onChange={(e) => setForm({ ...form, handoff_bind_address: e.target.value })}
                 placeholder="0.0.0.0 (default)"
-                className={inputClass + ' font-mono'}
-                style={inputStyle}
+                className="bg-background font-mono"
               />
-              <p className="text-xs mt-1" style={hintStyle}>
-                CDP handoff proxy bind address for human-in-the-loop.
-              </p>
+              <p className="text-xs text-muted-foreground">CDP handoff proxy bind address for human-in-the-loop.</p>
             </div>
-            <div>
-              <label className="block text-sm font-medium mb-2" style={labelStyle}>
-                Handoff Port
-              </label>
-              <input
+            <div className="space-y-2">
+              <Label htmlFor="handoff-port">Handoff Port</Label>
+              <Input
+                id="handoff-port"
                 type="number"
                 value={form.handoff_port}
                 onChange={(e) => setForm({ ...form, handoff_port: parseInt(e.target.value) || 9222 })}
                 min="1024"
                 max="65535"
-                className={inputClass}
-                style={inputStyle}
+                className="bg-background"
               />
             </div>
           </div>
-        </div>
-      </div>
+        </CardContent>
+      </Card>
 
-      {/* Info banner for CloakBrowser */}
       {engineType === 'cloakbrowser' && (
-        <div className="flex items-start gap-2 p-3 rounded-lg text-sm"
-          style={{ background: 'rgba(168, 85, 247, 0.1)', border: '1px solid rgba(168, 85, 247, 0.2)' }}>
-          <Info size={16} className="mt-0.5 flex-shrink-0" style={{ color: '#a855f7' }} />
-          <span style={hintStyle}>
-            CloakBrowser dependency installation (Python, pip, Xvfb) is only available through the CLI.
-            Run <code style={{ color: 'var(--text-primary)' }}>astonish config browser</code> for guided setup.
-          </span>
-        </div>
+        <Alert className="border-primary/30 bg-primary/10 text-foreground">
+          <Info className="text-primary" />
+          <AlertDescription>
+            CloakBrowser dependency installation (Python, pip, Xvfb) is only available through the CLI. Run{' '}
+            <code className="rounded bg-background px-1 py-0.5">astonish config browser</code> for guided setup.
+          </AlertDescription>
+        </Alert>
       )}
 
-      {/* Save */}
-      <div className="flex items-center gap-3">
-        <button
-          onClick={handleSave}
-          disabled={saving}
-          className="flex items-center gap-2 px-4 py-2 rounded-lg text-white font-medium transition-all shadow-md hover:shadow-lg hover:scale-[1.02] active:scale-95 disabled:opacity-50"
-          style={saveButtonStyle}
-        >
-          <Save size={16} />
+      <div className="flex flex-wrap items-center gap-3">
+        <Button onClick={handleSave} disabled={saving}>
+          {saving ? <Loader2 className="animate-spin" /> : <Save />}
           {saving ? 'Saving...' : 'Save Changes'}
-        </button>
+        </Button>
         {saveSuccess && (
-          <span className="flex items-center gap-1 text-green-400 text-sm">
-            <Check size={16} /> Saved
+          <span className="flex items-center gap-1 text-sm text-[color:var(--success)]">
+            <Check className="size-4" /> Saved
           </span>
         )}
         {error && (
-          <span className="flex items-center gap-1 text-sm" style={{ color: 'var(--danger)' }}>
-            <AlertCircle size={16} /> {error}
-          </span>
+          <Alert variant="destructive" className="w-auto py-2">
+            <AlertCircle />
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
         )}
       </div>
     </div>

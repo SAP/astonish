@@ -14,7 +14,7 @@ import { startFleetSession, connectFleetStream, sendFleetMessage, stopFleetSessi
 import type { FleetSession } from '../api/fleetChat'
 import HomePage from './HomePage'
 import type { FleetMessageItem, ChatMsg, FleetInfo, FleetStateInfo, DeferredPrompt, FleetExecutionMessage, FleetEvent, AgentMessage, ToolResultMessage, BrowserHandoffMessage, SubTaskExecutionMessage, SubTaskEvent, SubTaskInfo, PlanMessage, PlanStepInfo, SessionArtifact, ArtifactMessage, AppPreviewMessage, AppSavedMessage, DistillPreviewMessage, DistillSavedMessage, TutorialBlueprintPreviewMessage, TutorialBlueprintApprovedMessage, TutorialSceneSlideshowMessage, UserMessage, AttachmentInfo, NetworkDenialMessage, ImageMessage } from './chat/chatTypes'
-import { buildActivityRenderIndex, deriveLiveStreamStatus } from './chat/toolActivity'
+import { buildActivityRenderIndex, deriveLiveStreamStatus, stickyAgentBubbleKey } from './chat/toolActivity'
 import ToolActivityBlock from './chat/ToolActivityBlock'
 import { getAgentColor } from './chat/chatTypes'
 import FleetStartDialog from './chat/FleetStartDialog'
@@ -2574,9 +2574,11 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
     return sessions.filter(s => (s.title || s.id).toLowerCase().includes(q))
   }, [sessions, sessionFilter])
 
+  // One activity fold per tool run (process notes only). Sticky latest agent per
+  // run streams/replaces in a single bubble; superseded agents are skipped.
   const { activityByStart, skipIndices: toolActivitySkipIndices, lastActivityStart } = useMemo(
-    () => buildActivityRenderIndex(messages, { absorbTrailingSoft: isStreaming }),
-    [messages, isStreaming],
+    () => buildActivityRenderIndex(messages),
+    [messages],
   )
 
   const liveStreamStatus = useMemo(
@@ -2793,9 +2795,15 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
               // Turn-level activity fold: render block at segment start; skip covered indices.
               const activityAt = activityByStart.get(index)
               if (activityAt) {
-                // Trailing activity stays "live" for the whole open stream (including
-                // provisional process text after the last tool), not only while a tool runs.
-                const streamingActivity = isStreaming && activityAt.start === lastActivityStart
+                // Live while this is the latest activity and tools are still running
+                // (or stream open before any trailing agent bubble after the fold).
+                const hasTrailingAgent = messages
+                  .slice(activityAt.end + 1)
+                  .some(m => m.type === 'agent')
+                const streamingActivity =
+                  isStreaming &&
+                  activityAt.start === lastActivityStart &&
+                  (activityAt.steps.some(s => s.status === 'running') || !hasTrailingAgent)
                 return (
                   <ToolActivityBlock
                     key={`activity-${activityAt.start}`}
@@ -2851,8 +2859,9 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
                   !messages.slice(index + 1).some(m => m.type === 'agent') &&
                   embeddedArtifactPaths.size > 0
 
+                // Stable key per soft+tool run so content replace doesn't remount chrome
                 return (
-                  <div key={index} className="space-y-1">
+                  <div key={stickyAgentBubbleKey(messages, index)} className="space-y-1">
                     <div className="flex items-center justify-between">
                       <div className="text-xs font-medium" style={{ color: 'var(--text-muted)' }}>Agent</div>
                       <div className="flex gap-1">

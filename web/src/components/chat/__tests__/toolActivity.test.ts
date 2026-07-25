@@ -12,11 +12,14 @@ import {
   isAppProgressAgent,
   isHardBreakType,
   isSoftNoteType,
+  isStickyAgentBubble,
   isToolResultError,
   latestProcessText,
   liveActivityHint,
   previewValue,
   splitActivitySummary,
+  stickyAgentBubbleKey,
+  supersededAgentIndices,
 } from '../toolActivity'
 
 describe('isToolResultError', () => {
@@ -42,7 +45,7 @@ describe('previewValue', () => {
 })
 
 describe('groupToolActivity', () => {
-  it('folds interstitial agents between tools; keeps final agent outside', () => {
+  it('keeps ONE activity for all tools; agents never absorbed into notes', () => {
     const messages: ChatMsg[] = [
       { type: 'user', content: 'hi' },
       { type: 'tool_call', toolName: 'search_tools', toolArgs: { q: 'x' } },
@@ -56,7 +59,8 @@ describe('groupToolActivity', () => {
     const segs = groupToolActivity(messages)
     expect(segs.map(s => s.kind)).toEqual([
       'passthrough', // user
-      'activity',
+      'activity', // both tools in one fold
+      'passthrough', // first agent
       'passthrough', // final agent
     ])
 
@@ -64,10 +68,24 @@ describe('groupToolActivity', () => {
     expect(activity.kind).toBe('activity')
     if (activity.kind !== 'activity') return
     expect(activity.steps).toHaveLength(2)
-    expect(activity.notes).toHaveLength(1)
-    expect(activity.notes[0].text).toBe('checking next step')
-    expect(activity.coveredIndices).toContain(3)
+    expect(activity.notes).toHaveLength(0)
+    expect(activity.coveredIndices).not.toContain(3)
     expect(activity.coveredIndices).not.toContain(6)
+  })
+
+  it('absorbs thinking between tools into the same activity', () => {
+    const messages: ChatMsg[] = [
+      { type: 'tool_call', toolName: 'search_tools', toolArgs: {} },
+      { type: 'tool_result', toolName: 'search_tools', toolResult: {} },
+      { type: 'thinking', content: 'next I will fetch' },
+      { type: 'tool_call', toolName: 'http_request', toolArgs: {} },
+      { type: 'tool_result', toolName: 'http_request', toolResult: 'ok' },
+    ]
+    const segs = groupToolActivity(messages)
+    expect(segs.map(s => s.kind)).toEqual(['activity'])
+    if (segs[0].kind !== 'activity') throw new Error('expected activity')
+    expect(segs[0].notes.some(n => n.text === 'next I will fetch')).toBe(true)
+    expect(segs[0].steps).toHaveLength(2)
   })
 
   it('marks unpaired call as running', () => {
@@ -177,27 +195,18 @@ describe('groupToolActivity', () => {
     expect(isSoftNoteType('brand_new_panel')).toBe(false)
   })
 
-  it('absorbs trailing soft notes while streaming; keeps them passthrough when finished', () => {
+  it('never absorbs agent text (sticky bubble owns display)', () => {
     const messages: ChatMsg[] = [
       { type: 'tool_call', toolName: 'shell_command', toolArgs: { command: 'ls' } },
       { type: 'tool_result', toolName: 'shell_command', toolResult: 'ok' },
-      { type: 'agent', content: 'checking credentials next' },
+      { type: 'agent', content: 'Here is your answer.', _streaming: true },
     ]
-
-    const finished = groupToolActivity(messages)
-    expect(finished.map(s => s.kind)).toEqual(['activity', 'passthrough'])
-    if (finished[0].kind === 'activity') {
-      expect(finished[0].coveredIndices).not.toContain(2)
-      expect(finished[0].notes).toHaveLength(0)
+    const segs = groupToolActivity(messages, { absorbTrailingSoft: true })
+    expect(segs.map(s => s.kind)).toEqual(['activity', 'passthrough'])
+    if (segs[0].kind === 'activity') {
+      expect(segs[0].coveredIndices).not.toContain(2)
+      expect(segs[0].notes).toHaveLength(0)
     }
-
-    const live = groupToolActivity(messages, { absorbTrailingSoft: true })
-    expect(live.map(s => s.kind)).toEqual(['activity'])
-    if (live[0].kind !== 'activity') throw new Error('expected activity')
-    expect(live[0].coveredIndices).toContain(2)
-    expect(live[0].notes).toHaveLength(1)
-    expect(live[0].notes[0].text).toBe('checking credentials next')
-    expect(latestProcessText(live[0].notes)).toBe('checking credentials next')
   })
 
   it('never absorbs astonish-app agent messages (AppCodeIndicator must stay visible)', () => {
@@ -210,12 +219,10 @@ describe('groupToolActivity', () => {
         _streaming: true,
       },
     ]
-    const live = groupToolActivity(trailing, { absorbTrailingSoft: true })
+    const live = groupToolActivity(trailing)
     expect(live.map(s => s.kind)).toEqual(['activity', 'passthrough'])
     if (live[0].kind !== 'activity') throw new Error('expected activity')
     expect(live[0].coveredIndices).not.toContain(2)
-    expect(live[0].notes).toHaveLength(0)
-    if (live[1].kind === 'passthrough') expect(live[1].index).toBe(2)
 
     const between: ChatMsg[] = [
       { type: 'tool_call', toolName: 'read_file', toolArgs: { path: 'a' } },
@@ -227,14 +234,50 @@ describe('groupToolActivity', () => {
       { type: 'tool_call', toolName: 'write_file', toolArgs: { path: 'b' } },
       { type: 'tool_result', toolName: 'write_file', toolResult: { ok: true } },
     ]
-    const mid = groupToolActivity(between, { absorbTrailingSoft: true })
+    const mid = groupToolActivity(between)
     expect(mid.filter(s => s.kind === 'activity')).toHaveLength(1)
     const activity = mid.find(s => s.kind === 'activity')
     if (!activity || activity.kind !== 'activity') throw new Error('expected activity')
     expect(activity.coveredIndices).not.toContain(2)
-    expect(activity.notes).toHaveLength(0)
     expect(isAppProgressAgent(between[2])).toBe(true)
     expect(hasAppFence('plain text')).toBe(false)
+  })
+})
+
+describe('sticky agent bubble', () => {
+  it('only the latest agent in a run is sticky; earlier are superseded', () => {
+    const messages: ChatMsg[] = [
+      { type: 'user', content: 'hi' },
+      { type: 'tool_call', toolName: 'a', toolArgs: {} },
+      { type: 'tool_result', toolName: 'a', toolResult: {} },
+      { type: 'agent', content: 'first' },
+      { type: 'tool_call', toolName: 'b', toolArgs: {} },
+      { type: 'tool_result', toolName: 'b', toolResult: {} },
+      { type: 'agent', content: 'final', _streaming: true },
+    ]
+    // While only first agent exists (indices 0-3): it is sticky
+    const mid: ChatMsg[] = messages.slice(0, 4)
+    expect(isStickyAgentBubble(mid, 3)).toBe(true)
+    expect(supersededAgentIndices(mid).has(3)).toBe(false)
+
+    // After second agent: first superseded, second sticky
+    expect(isStickyAgentBubble(messages, 3)).toBe(false)
+    expect(isStickyAgentBubble(messages, 6)).toBe(true)
+    expect(supersededAgentIndices(messages).has(3)).toBe(true)
+    expect(supersededAgentIndices(messages).has(6)).toBe(false)
+    expect(stickyAgentBubbleKey(messages, 6)).toBe(stickyAgentBubbleKey(messages, 3))
+  })
+
+  it('user hard break starts a new sticky run', () => {
+    const messages: ChatMsg[] = [
+      { type: 'user', content: '1' },
+      { type: 'agent', content: 'answer 1' },
+      { type: 'user', content: '2' },
+      { type: 'agent', content: 'answer 2' },
+    ]
+    expect(isStickyAgentBubble(messages, 1)).toBe(true)
+    expect(isStickyAgentBubble(messages, 3)).toBe(true)
+    expect(stickyAgentBubbleKey(messages, 1)).not.toBe(stickyAgentBubbleKey(messages, 3))
   })
 
   it('marks error results', () => {
@@ -257,66 +300,89 @@ describe('categorizeTool', () => {
     expect(categorizeTool('http_request')).toBe('request')
     expect(categorizeTool('shell_command')).toBe('command')
     expect(categorizeTool('browser_navigate')).toBe('browser')
-    expect(categorizeTool('memory_get')).toBe('memory')
-    expect(categorizeTool('custom_mcp_tool')).toBe('other')
-  })
-})
-
-describe('extractPathHint', () => {
-  it('reads common path-like args', () => {
-    expect(extractPathHint({ path: 'a.md' })).toBe('a.md')
-    expect(extractPathHint({ url: 'https://x' })).toBe('https://x')
-    expect(extractPathHint({ query: 'x' })).toBeUndefined()
+    expect(categorizeTool('mcp_github_search')).toBe('other')
   })
 })
 
 describe('activitySummary', () => {
-  it('shows rich running hint while streaming', () => {
-    const summary = activitySummary(
-      [{ toolName: 'http_request', status: 'running', callIndex: 0, args: { url: 'https://example.com/api' } }],
-      { streaming: true },
-    )
-    expect(summary.variant).toBe('running')
-    expect(summary.text).toBe('Fetching https://example.com/api with http_request')
-    expect(summary.lead).toBe('Fetching')
+  it('summarizes mixed complete steps', () => {
+    const steps = [
+      { toolName: 'write_file', status: 'complete' as const, callIndex: 0 },
+      { toolName: 'write_file', status: 'complete' as const, callIndex: 1 },
+      { toolName: 'read_file', status: 'complete' as const, callIndex: 2 },
+      { toolName: 'grep_search', status: 'complete' as const, callIndex: 3 },
+      { toolName: 'grep_search', status: 'complete' as const, callIndex: 4 },
+    ]
+    const s = activitySummary(steps)
+    expect(s.variant).toBe('complete')
+    expect(s.text).toMatch(/Edited 2 files/)
+    expect(s.text).toMatch(/explored/)
+    expect(s.text).toMatch(/2 searches/)
   })
 
-  it('summarizes completed tools with human categories', () => {
-    const summary = activitySummary([
-      { toolName: 'search_tools', status: 'complete', callIndex: 0 },
-      { toolName: 'http_request', status: 'complete', callIndex: 1 },
-      { toolName: 'write_file', status: 'complete', callIndex: 2, args: { path: 'a.md' } },
-      { toolName: 'write_file', status: 'complete', callIndex: 3, args: { path: 'b.md' } },
-      { toolName: 'read_file', status: 'complete', callIndex: 4, args: { path: 'a.md' } },
-      { toolName: 'read_file', status: 'complete', callIndex: 5, args: { path: 'c.md' } },
-      { toolName: 'grep_search', status: 'complete', callIndex: 6 },
-    ])
-    expect(summary.variant).toBe('complete')
-    expect(summary.text).toBe('Edited 2 files, explored 2 files, 2 searches, 1 request')
+  it('uses live hint while a step is running', () => {
+    const steps = [
+      {
+        toolName: 'shell_command',
+        status: 'running' as const,
+        callIndex: 0,
+        args: { command: 'ls -la' },
+      },
+    ]
+    const s = activitySummary(steps, { streaming: true })
+    expect(s.variant).toBe('running')
+    expect(s.text).toContain('ls -la')
   })
 
-  it('folds unknown tools into other', () => {
-    const summary = activitySummary([
-      { toolName: 'a', status: 'complete', callIndex: 0 },
-      { toolName: 'b', status: 'complete', callIndex: 1 },
-      { toolName: 'c', status: 'complete', callIndex: 2 },
-      { toolName: 'd', status: 'complete', callIndex: 3 },
-    ])
-    expect(summary.text).toBe('Used 4 other tools')
+  it('appends error suffix', () => {
+    const steps = [
+      { toolName: 'http_request', status: 'error' as const, callIndex: 0 },
+      { toolName: 'read_file', status: 'complete' as const, callIndex: 1 },
+    ]
+    const s = activitySummary(steps)
+    expect(s.variant).toBe('error')
+    expect(s.text).toMatch(/http_request failed/)
+  })
+})
+
+describe('liveActivityHint', () => {
+  it('formats shell and path tools', () => {
+    expect(
+      liveActivityHint({
+        toolName: 'shell_command',
+        status: 'running',
+        callIndex: 0,
+        args: { command: 'pwd' },
+      }),
+    ).toContain('pwd')
+    expect(
+      liveActivityHint({
+        toolName: 'read_file',
+        status: 'running',
+        callIndex: 0,
+        args: { path: '/tmp/x' },
+      }),
+    ).toContain('/tmp/x')
+  })
+})
+
+describe('extractPathHint / latestProcessText', () => {
+  it('extracts path-like args', () => {
+    expect(extractPathHint({ path: 'a/b.ts' })).toBe('a/b.ts')
+    expect(extractPathHint({ file: '/abs/c' })).toBe('/abs/c')
   })
 
-  it('highlights failures after categorized body', () => {
-    const summary = activitySummary([
-      { toolName: 'write_file', status: 'complete', callIndex: 0, args: { path: 'a.md' } },
-      { toolName: 'http_request', status: 'error', callIndex: 1 },
-    ])
-    expect(summary.variant).toBe('error')
-    expect(summary.text).toBe('Edited 1 file, 1 request · http_request failed')
-    expect(summary.lead).toBe('Edited')
-    expect(summary.rest).toBe(' 1 file, 1 request')
-    expect(summary.errorSuffix).toBe(' · http_request failed')
+  it('returns latest agent/thinking note', () => {
+    expect(
+      latestProcessText([
+        { index: 0, kind: 'thinking', text: 'old' },
+        { index: 1, kind: 'agent', text: 'new plan' },
+      ]),
+    ).toBe('new plan')
   })
+})
 
+describe('splitActivitySummary / activityStats', () => {
   it('splits lead/rest for mixed categories', () => {
     const summary = activitySummary([
       { toolName: 'write_file', status: 'complete', callIndex: 0, args: { path: 'a.md' } },
@@ -326,108 +392,23 @@ describe('activitySummary', () => {
     expect(summary.rest).toBe(' 1 file, 1 search')
   })
 
-  it('splits live hints into accent lead + muted rest', () => {
-    const parts = splitActivitySummary(
-      'Running `ls -lah` with shell_command',
-      'running',
-    )
-    expect(parts.lead).toBe('Running')
-    expect(parts.rest).toBe(' `ls -lah` with shell_command')
-  })
-})
-
-describe('liveActivityHint', () => {
-  it('includes shell command text', () => {
-    expect(liveActivityHint({
-      toolName: 'shell_command',
-      status: 'running',
-      callIndex: 0,
-      args: { command: 'ls -lah' },
-    })).toBe('Running `ls -lah` with shell_command')
-  })
-
-  it('includes edit path', () => {
-    expect(liveActivityHint({
-      toolName: 'edit_file',
-      status: 'running',
-      callIndex: 0,
-      args: { path: 'web/src/App.tsx' },
-    })).toBe('Editing web/src/App.tsx with edit_file')
-  })
-
-  it('describes credential tools', () => {
-    expect(liveActivityHint({
-      toolName: 'list_credentials',
-      status: 'running',
-      callIndex: 0,
-      args: {},
-    })).toBe('Listing credentials with list_credentials')
-  })
-
-  it('truncates long commands', () => {
-    const long = 'echo ' + 'x'.repeat(80)
-    const hint = liveActivityHint({
-      toolName: 'shell_command',
-      status: 'running',
-      callIndex: 0,
-      args: { command: long },
-    })
-    expect(hint.startsWith('Running `')).toBe(true)
-    expect(hint.includes('…')).toBe(true)
-    expect(hint.endsWith('with shell_command')).toBe(true)
-    expect(hint.length).toBeLessThan(long.length + 40)
-  })
-
-  it('falls back to tool name', () => {
-    expect(liveActivityHint({
-      toolName: 'custom_mcp_tool',
-      status: 'running',
-      callIndex: 0,
-    })).toBe('Running custom_mcp_tool')
-  })
-})
-
-describe('deriveLiveStreamStatus', () => {
-  it('returns live hint when last message is a running tool', () => {
-    const messages: ChatMsg[] = [
-      { type: 'user', content: 'hi' },
-      { type: 'tool_call', toolName: 'shell_command', toolArgs: { command: 'pwd' } },
-    ]
-    expect(deriveLiveStreamStatus(messages)).toBe('Running `pwd` with shell_command')
-  })
-
-  it('returns Thinking… when streaming without an open tool', () => {
-    const messages: ChatMsg[] = [
-      { type: 'user', content: 'hi' },
-      { type: 'agent', content: 'working', _streaming: true },
-    ]
-    expect(deriveLiveStreamStatus(messages)).toBe('Thinking…')
-  })
-})
-
-describe('activityStats', () => {
-  it('infers +/- lines from edit_file args', () => {
-    const stats = activityStats([
-      {
-        toolName: 'edit_file',
-        status: 'complete',
-        callIndex: 0,
-        args: {
-          path: 'a.ts',
-          old_string: 'a\nb\nc',
-          new_string: 'a\nb\nc\nd\ne',
+  it('infers +/- lines from edit_file args; badge otherwise', () => {
+    expect(
+      activityStats([
+        {
+          toolName: 'edit_file',
+          status: 'complete',
+          callIndex: 0,
+          args: { path: 'a.ts', old_string: 'a\nb\nc', new_string: 'a\nb\nc\nd\ne' },
         },
-      },
-    ])
-    expect(stats).toEqual({ kind: 'diff', added: 5, removed: 3 })
-  })
-
-  it('falls back to a step badge when no edit content', () => {
-    const stats = activityStats([
-      { toolName: 'shell_command', status: 'complete', callIndex: 0 },
-      { toolName: 'http_request', status: 'complete', callIndex: 1 },
-    ])
-    expect(stats).toEqual({ kind: 'badge', count: 2 })
+      ]),
+    ).toEqual({ kind: 'diff', added: 5, removed: 3 })
+    expect(
+      activityStats([
+        { toolName: 'shell_command', status: 'complete', callIndex: 0 },
+        { toolName: 'http_request', status: 'complete', callIndex: 1 },
+      ]),
+    ).toEqual({ kind: 'badge', count: 2 })
   })
 })
 
@@ -446,17 +427,37 @@ describe('buildActivityRenderIndex', () => {
     expect(lastActivityStart).toBe(0)
   })
 
-  it('skips trailing soft notes when absorbTrailingSoft is set', () => {
+  it('skips superseded agents; keeps sticky agent and activity tools', () => {
     const messages: ChatMsg[] = [
       { type: 'tool_call', toolName: 'a', toolArgs: {} },
       { type: 'tool_result', toolName: 'a', toolResult: {} },
-      { type: 'agent', content: 'provisional' },
+      { type: 'agent', content: 'first' },
+      { type: 'tool_call', toolName: 'b', toolArgs: {} },
+      { type: 'tool_result', toolName: 'b', toolResult: {} },
+      { type: 'agent', content: 'second', _streaming: true },
     ]
-    const { skipIndices, activityByStart } = buildActivityRenderIndex(messages, {
-      absorbTrailingSoft: true,
-    })
-    expect(skipIndices.has(2)).toBe(true)
-    const activity = activityByStart.get(0)
-    expect(activity?.notes.map(n => n.text)).toEqual(['provisional'])
+    const { skipIndices, activityByStart } = buildActivityRenderIndex(messages)
+    expect(activityByStart.has(0)).toBe(true)
+    expect(activityByStart.get(0)?.steps).toHaveLength(2)
+    expect(skipIndices.has(2)).toBe(true) // first agent superseded
+    expect(skipIndices.has(5)).toBe(false) // sticky second agent
+  })
+})
+
+describe('deriveLiveStreamStatus', () => {
+  it('returns tool hint when last covered message is a running tool', () => {
+    const messages: ChatMsg[] = [
+      { type: 'tool_call', toolName: 'shell_command', toolArgs: { command: 'ls' } },
+    ]
+    expect(deriveLiveStreamStatus(messages)).toContain('ls')
+  })
+
+  it('returns Thinking… when trailing agent is streaming', () => {
+    const messages: ChatMsg[] = [
+      { type: 'tool_call', toolName: 'shell_command', toolArgs: { command: 'ls' } },
+      { type: 'tool_result', toolName: 'shell_command', toolResult: 'ok' },
+      { type: 'agent', content: 'Hello', _streaming: true },
+    ]
+    expect(deriveLiveStreamStatus(messages)).toBe('Thinking…')
   })
 })

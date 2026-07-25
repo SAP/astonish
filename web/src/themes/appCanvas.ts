@@ -75,20 +75,20 @@ export const APP_CANVAS_BY_BRAND: Record<BrandTheme, AppCanvasTokens> = {
     accent3: '#b478ff',
     chartGrid: '#3d2450',
   },
-  // Warm night — ready when Ember shell ships
+  // Calm warm night (Ember)
   ember: {
-    canvas: '#1a0f0a',
-    surface: '#241510',
-    surface2: '#140c08',
-    app: '#fff5eb',
-    appMuted: '#c4a090',
-    appBorder: 'rgba(255, 220, 190, 0.12)',
-    brand: '#f07040',
-    brandStrong: '#f0a050',
-    accent3: '#e8b060',
+    canvas: '#14100e',
+    surface: '#1c1714',
+    surface2: '#100c0a',
+    app: '#f5ebe4',
+    appMuted: '#b0a090',
+    appBorder: 'rgba(230, 210, 190, 0.10)',
+    brand: '#d49278',
+    brandStrong: '#e0b888',
+    accent3: '#c4a898',
     chartGrid: '#4a3020',
   },
-  // Cool purple night
+  // Cool purple night (reserved — not shipped yet)
   amethyst: {
     canvas: '#120a1c',
     surface: '#1a1028',
@@ -101,17 +101,17 @@ export const APP_CANVAS_BY_BRAND: Record<BrandTheme, AppCanvasTokens> = {
     accent3: '#7b8cff',
     chartGrid: '#352450',
   },
-  // Fresh green night
+  // Calm fresh night (Sage)
   sage: {
-    canvas: '#0a1410',
-    surface: '#101c18',
-    surface2: '#08100c',
-    app: '#eef8f2',
-    appMuted: '#90b0a0',
-    appBorder: 'rgba(180, 230, 200, 0.12)',
-    brand: '#3dba7a',
-    brandStrong: '#6fd4a0',
-    accent3: '#50c8c0',
+    canvas: '#0c1210',
+    surface: '#141c18',
+    surface2: '#0a100e',
+    app: '#e8f2ed',
+    appMuted: '#8aa098',
+    appBorder: 'rgba(180, 210, 195, 0.10)',
+    brand: '#6aaf96',
+    brandStrong: '#8bc4ad',
+    accent3: '#7aafbc',
     chartGrid: '#1e4034',
   },
   // Bold violet night
@@ -126,6 +126,19 @@ export const APP_CANVAS_BY_BRAND: Record<BrandTheme, AppCanvasTokens> = {
     brandStrong: '#e080ff',
     accent3: '#8866ff',
     chartGrid: '#3a2060',
+  },
+  // Pre-rebrand slate navy + indigo (matches classic dark shell)
+  classic: {
+    canvas: '#0b1222',
+    surface: '#0f172a',
+    surface2: '#111b30',
+    app: '#f6f7fb',
+    appMuted: '#9ca3af',
+    appBorder: 'rgba(255, 255, 255, 0.10)',
+    brand: '#8d7ae0',
+    brandStrong: '#7262ce',
+    accent3: '#a998ef',
+    chartGrid: '#35448f',
   },
 }
 

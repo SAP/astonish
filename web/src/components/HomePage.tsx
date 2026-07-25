@@ -8,6 +8,8 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 
+import AstonishLogo from './AstonishLogo'
+
 interface HomePageProps {
   onSuggestionClick?: (text: string) => void
   userDisplayName?: string
@@ -34,49 +36,6 @@ function firstName(displayName?: string): string {
   return displayName.trim().split(/\s+/)[0]
 }
 
-/**
- * Theme-aware logo: CSS mask recolors the body only; white eyes are a separate
- * layer (a single mask can't spare white — it only sees alpha).
- */
-function ThemedLogo() {
-  return (
-    <div
-      className="mx-auto flex size-[4.5rem] items-center justify-center rounded-[1.25rem] sm:size-24 sm:rounded-[1.5rem]"
-      style={{
-        background: 'color-mix(in oklab, var(--brand) 16%, var(--card))',
-        boxShadow: '0 14px 36px -14px var(--accent-glow)',
-        border: '1px solid color-mix(in oklab, var(--brand) 28%, transparent)',
-      }}
-      aria-hidden
-    >
-      <div className="relative size-12 sm:size-16">
-        {/* Body — brand gradient via mask (body asset has no eyes) */}
-        <span
-          className="absolute inset-0"
-          style={{
-            background: 'linear-gradient(135deg, var(--brand), var(--accent2) 55%, var(--accent3))',
-            WebkitMaskImage: 'url(/astonish-logo-body.svg)',
-            maskImage: 'url(/astonish-logo-body.svg)',
-            WebkitMaskSize: 'contain',
-            maskSize: 'contain',
-            WebkitMaskRepeat: 'no-repeat',
-            maskRepeat: 'no-repeat',
-            WebkitMaskPosition: 'center',
-            maskPosition: 'center',
-          }}
-        />
-        {/* Eyes — pure white layer on top (mask cannot spare white by color) */}
-        <img
-          src="/astonish-logo-eyes.svg"
-          alt=""
-          className="absolute inset-0 size-full object-contain"
-          draggable={false}
-        />
-      </div>
-    </div>
-  )
-}
-
 export default function HomePage({ onSuggestionClick, userDisplayName }: HomePageProps) {
   const name = firstName(userDisplayName)
 
@@ -84,7 +43,7 @@ export default function HomePage({ onSuggestionClick, userDisplayName }: HomePag
     <div className="flex flex-1 flex-col items-center justify-center overflow-y-auto px-6 py-6">
       <div className="flex w-full max-w-[900px] flex-col items-center gap-5">
         <div className="hero-card-nova w-full px-6 py-5 text-center shadow-none sm:px-8 sm:py-6">
-          <ThemedLogo />
+          <AstonishLogo size="lg" className="mx-auto" />
           <h1 className="font-display mt-3 text-[26px] leading-snug tracking-[-0.03em] text-[color:var(--text-primary)] sm:text-[32px]">
             Hello, {name}.{' '}
             <em className="text-gradient-nova not-italic" style={{ fontStyle: 'italic' }}>

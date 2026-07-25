@@ -111,15 +111,25 @@ Studio separates **mode** and **brand pack**:
 | Light / dark | `html.dark` | `useTheme().theme` / `toggleTheme()` |
 | Brand pack | `html[data-theme="nova"]` | `useTheme().brandTheme` / `setBrandTheme()` |
 
-Shipped packs: **Aster** (bold purple, **product default**) and **Nova** (pink/amber). Packs live as CSS variable dictionaries (`html[data-theme="aster"|"nova"]` and matching `.dark` selectors).
+Shipped packs (same layout; colors only):
+
+| Pack | Family | Notes |
+|------|--------|--------|
+| **Classic** | classic · indigo | Pre-rebrand slate navy + indigo violet (**product default**) |
+| **Aster** | bold · purple | Bold violet |
+| **Nova** | bold · playful | Hot pink / amber |
+| **Sage** | calm · fresh | Soft sage / teal |
+| **Ember** | calm · warm | Dusty clay / sand |
+
+Reserved (not shipped): Amethyst. Packs are CSS variable dictionaries (`html[data-theme="…"]` + `.dark`).
 
 | Layer | Where | Purpose |
 |-------|--------|---------|
 | Platform default | Platform → General → Default brand theme | Login screen + fallback for users without a preference |
 | User preference | Personal → General → Brand theme | Per-user override (`""` = inherit platform) |
-| Product fallback | code / `DEFAULT_BRAND_THEME` | **aster** when neither is set |
+| Product fallback | code / `DEFAULT_BRAND_THEME` | **classic** when neither is set |
 
-Adding Ember/Amethyst later means another dictionary with the **same token names** — see `web/src/themes/README.md` and `REQUIRED_THEME_TOKENS` in `web/src/themes/brandTheme.ts`.
+Adding a new pack means another dictionary with the **same token names** — see `web/src/themes/README.md` and `REQUIRED_THEME_TOKENS` in `web/src/themes/brandTheme.ts`.
 
 Do not rebuild components per theme. Keep using semantic Tailwind (`bg-primary`) and product tokens (`var(--work-sidebar)`).
 

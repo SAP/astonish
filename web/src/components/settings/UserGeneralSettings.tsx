@@ -7,7 +7,7 @@ import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 
 import { useTheme } from '../../hooks/useTheme'
-import { BRAND_THEME_META, type BrandTheme } from '../../themes/brandTheme'
+import { BRAND_THEME_META, DEFAULT_BRAND_THEME, type BrandTheme } from '../../themes/brandTheme'
 
 const INHERIT_VALUE = '__platform_default__'
 
@@ -28,7 +28,7 @@ export default function UserGeneralSettings() {
   const selectValue = userBrandPreference ? userBrandPreference : INHERIT_VALUE
   const platformLabel = platformBrandDefault
     ? BRAND_THEME_META[platformBrandDefault as BrandTheme]?.label || platformBrandDefault
-    : BRAND_THEME_META.aster.label
+    : BRAND_THEME_META[DEFAULT_BRAND_THEME].label
 
   const onChange = async (value: string) => {
     setSaving(true)

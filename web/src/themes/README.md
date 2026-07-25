@@ -5,10 +5,12 @@
 | Axis | Mechanism | Values |
 |------|-----------|--------|
 | **Mode** | `html` class `dark` | light (default) / dark |
-| **Brand pack** | `html[data-theme="…"]` | `aster` (default), `nova` (shipped); future `ember`, `amethyst`, `sage` |
+| **Brand pack** | `html[data-theme="…"]` | `classic` (default), `aster`, `nova`, `sage`, `ember` (shipped); `amethyst` reserved |
 
-**Cascade:** user preference → platform default → `aster`.  
-**UI:** Personal → General (user) · Platform → General (instance default). Combobox order: Aster first.
+**Cascade:** user preference → platform default → `classic`.  
+**UI:** Personal → General (user) · Platform → General (instance default).  
+**Combobox order:** Classic, Aster, Nova, Sage, Ember.  
+**Classic** is the pre-rebrand indigo/slate palette (`#0b1222` / `#5f4fb2` family).
 
 Do not collapse brand + mode into one enum. They compose:
 

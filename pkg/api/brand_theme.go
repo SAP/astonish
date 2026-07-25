@@ -9,12 +9,15 @@ import (
 )
 
 // Product default brand pack for fresh installs and unresolved cascade.
-const defaultBrandTheme = "aster"
+const defaultBrandTheme = "classic"
 
 // shippedBrandThemes is the server allowlist (must stay in sync with web brandTheme.ts shipped packs).
 var shippedBrandThemes = map[string]bool{
-	"nova":  true,
-	"aster": true,
+	"nova":    true,
+	"aster":   true,
+	"sage":    true,
+	"ember":   true,
+	"classic": true,
 }
 
 // NormalizeBrandTheme returns theme if shipped, otherwise empty string.
@@ -26,7 +29,7 @@ func NormalizeBrandTheme(theme string) string {
 	return ""
 }
 
-// ResolveBrandTheme cascades user → platform → product default (aster).
+// ResolveBrandTheme cascades user → platform → product default (classic).
 func ResolveBrandTheme(userTheme, platformDefault string) string {
 	if t := NormalizeBrandTheme(userTheme); t != "" {
 		return t
@@ -208,7 +211,7 @@ func PatchPlatformBrandThemeHandler(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, "unknown or unshipped brand theme")
 		return
 	}
-	// Empty body → product default aster stored explicitly for clarity.
+	// Empty body → product default (classic) stored explicitly for clarity.
 	if next == "" {
 		next = defaultBrandTheme
 	}

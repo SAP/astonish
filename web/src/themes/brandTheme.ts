@@ -8,18 +8,25 @@
  * packs only requires adding a token dictionary in index.css (or themes/*.css).
  */
 
-export const BRAND_THEMES = ['nova', 'ember', 'amethyst', 'sage', 'aster'] as const
+export const BRAND_THEMES = ['nova', 'ember', 'amethyst', 'sage', 'aster', 'classic'] as const
 
 export type BrandTheme = (typeof BRAND_THEMES)[number]
 
 /** Product default for fresh installs and unresolved cascade. */
-export const DEFAULT_BRAND_THEME: BrandTheme = 'aster'
+export const DEFAULT_BRAND_THEME: BrandTheme = 'classic'
 
 /**
- * Combobox / display order — Aster first, then Nova, then future packs.
+ * Combobox / display order — Classic first (default), then bold, then calm.
  * Filter with shipped meta before rendering.
  */
-export const BRAND_THEME_SELECT_ORDER: BrandTheme[] = ['aster', 'nova', 'ember', 'amethyst', 'sage']
+export const BRAND_THEME_SELECT_ORDER: BrandTheme[] = [
+  'classic',
+  'aster',
+  'nova',
+  'sage',
+  'ember',
+  'amethyst',
+]
 
 export const BRAND_THEME_STORAGE_KEY = 'astonish-brand-theme'
 export const PLATFORM_BRAND_THEME_STORAGE_KEY = 'astonish-platform-brand-theme'
@@ -27,10 +34,11 @@ export const PLATFORM_BRAND_THEME_STORAGE_KEY = 'astonish-platform-brand-theme'
 /** Human labels for settings / switchers (not all packs may ship yet). */
 export const BRAND_THEME_META: Record<BrandTheme, { label: string; tone: string; shipped: boolean }> = {
   nova: { label: 'Nova', tone: 'bold · playful', shipped: true },
-  ember: { label: 'Ember', tone: 'safe · warm', shipped: false },
+  ember: { label: 'Ember', tone: 'calm · warm', shipped: true },
   amethyst: { label: 'Amethyst', tone: 'safe · purple', shipped: false },
-  sage: { label: 'Sage', tone: 'mid · fresh', shipped: false },
+  sage: { label: 'Sage', tone: 'calm · fresh', shipped: true },
   aster: { label: 'Aster', tone: 'bold · purple', shipped: true },
+  classic: { label: 'Classic', tone: 'classic · indigo', shipped: true },
 }
 
 export function isBrandTheme(value: string | null | undefined): value is BrandTheme {

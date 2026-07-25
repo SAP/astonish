@@ -54,7 +54,7 @@ describe('appCanvas', () => {
     expect(brands.size).toBe(BRAND_THEMES.length)
   })
 
-  it('defaults to product default (aster) canvas for DEFAULT_BRAND_THEME', () => {
-    expect(getAppCanvasTokens(DEFAULT_BRAND_THEME).canvas).toBe(APP_CANVAS_BY_BRAND.aster.canvas)
+  it('defaults to product default (classic) canvas for DEFAULT_BRAND_THEME', () => {
+    expect(getAppCanvasTokens(DEFAULT_BRAND_THEME).canvas).toBe(APP_CANVAS_BY_BRAND.classic.canvas)
   })
 })

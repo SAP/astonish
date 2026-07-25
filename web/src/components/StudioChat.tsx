@@ -3407,9 +3407,9 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
         )}
         </div>
 
-        {/* Input Area */}
+        {/* Input Area — equal padding above/below the pill; border sits outside that space */}
         <div
-          className="relative border-t border-border bg-transparent"
+          className="relative border-t border-border bg-transparent px-4 pt-4 pb-4 sm:px-6"
           onDragOver={handleDragOver}
           onDragLeave={handleDragLeave}
           onDrop={handleDrop}
@@ -3445,7 +3445,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
 
           {/* Attachment preview strip */}
           {attachments.length > 0 && (
-            <div className="flex items-center gap-2 overflow-x-auto px-4 pt-3 pb-1">
+            <div className="flex items-center gap-2 overflow-x-auto pb-2">
               {attachments.map(att => (
                 <div
                   key={att.id}
@@ -3491,7 +3491,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
 
           <form
             onSubmit={handleSubmit}
-            className="mx-4 mb-4 flex items-end gap-2.5 rounded-[var(--radius-lg)] border border-[color:var(--border-soft)] bg-[color:var(--input-bg)] p-2.5 pl-3.5 shadow-[var(--input-shadow)] sm:mx-6"
+            className="flex items-end gap-2.5 rounded-[var(--radius-lg)] border border-[color:var(--border-soft)] bg-[color:var(--input-bg)] p-2.5 pl-3.5 shadow-[var(--input-shadow)]"
           >
             {isStreaming && (
               <Button
@@ -3581,7 +3581,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
                       : 'Say hi, or drop a task in here…'
               }
               rows={1}
-              className="min-h-8 max-h-[200px] flex-1 resize-none overflow-y-auto border-0 bg-transparent px-1 py-1.5 text-[13.5px] shadow-none focus-visible:ring-0"
+              className="min-h-8 max-h-[200px] flex-1 resize-none overflow-y-auto border-0 bg-transparent px-1 py-1.5 text-[13.5px] shadow-none focus-visible:border-0 focus-visible:ring-0 dark:bg-transparent dark:shadow-none"
             />
             <Button
               data-testid="send-button"

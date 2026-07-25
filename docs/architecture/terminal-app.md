@@ -108,9 +108,21 @@ During a turn with tools, there is **one** agent bubble:
 
 | Phase | Surface |
 |-------|---------|
-| Done | Composer chrome, markdown/code, activity + diffs (v1), approvals (type Yes/No) |
-| Next | In-TUI approval overlay, sessions picker, resume history |
-| Later | `@file`, plan mode, reconnect polish |
+| Done | Composer, markdown/code/tables, sticky Thinking, activity + diffs |
+| Done | Approval overlay (`y`/`n`), sessions picker (`/sessions`, `ctrl+l`), resume history, `/new` |
+| Later | `@file`, plan mode, reconnect polish, bare `astonish` entry |
+
+### Approvals
+
+When SSE emits `approval`, the TUI shows a focused card (tool name + args preview).
+Keys: `y` / `enter` approve, `n` / `esc` deny, `1`–`9` pick option. Response is sent as a
+follow-up `RunTurn` message (same as Studio).
+
+### Sessions
+
+- `ctrl+l` or `/sessions` — list sessions, `enter` resume, `n` new, `esc` close
+- `ctrl+n` or `/new` — clear local session id; next message creates a new server session
+- `astonish chat --resume <id>` — loads history via `GET /api/studio/sessions/{id}` on open
 
 ## CLI behavior
 

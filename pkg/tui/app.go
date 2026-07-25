@@ -80,6 +80,11 @@ type model struct {
 	lastClickAt time.Time
 	lastClickY  int
 	lastClickX  int
+
+	// overlays
+	sessions sessionsState
+	// slash command completion popup (active when composer starts with /)
+	slash slashCompletion
 }
 
 func newModel(parent context.Context, cfg Config) model {
@@ -118,11 +123,10 @@ func newModel(parent context.Context, cfg Config) model {
 	for _, n := range info.Notices {
 		tr.Apply(events.NewSystem(n))
 	}
-	if info.IsResumed {
-		tr.Apply(events.NewSystem("Welcome back — session resumed."))
-	} else {
+	if !info.IsResumed {
 		tr.Apply(events.NewSystem("Hey! I'm Astonish, your AI assistant. What can I help you with today?"))
 	}
+	// Resumed sessions load history asynchronously in Init (historyLoadedMsg).
 
 	m := model{
 		ctx:        ctx,
@@ -146,7 +150,11 @@ type turnDoneMsg struct{}
 type turnErrMsg struct{ err error }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(textarea.Blink, m.spin.Tick)
+	cmds := []tea.Cmd{textarea.Blink, m.spin.Tick}
+	if m.info.IsResumed && m.info.SessionID != "" {
+		cmds = append(cmds, m.loadInitialHistoryCmd())
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -165,6 +173,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleMouse(msg)
 
 	case tea.KeyMsg:
+		// Sessions overlay captures keys first.
+		if m.sessions.open {
+			return m.handleSessionsKey(msg)
+		}
+
+		// Approval overlay: y/n before other handling.
+		if m.tr.Awaiting {
+			if next, cmd, handled := m.handleApprovalKey(msg); handled {
+				return next, cmd
+			}
+		}
+
 		// Global keys
 		switch msg.String() {
 		case "ctrl+c":
@@ -191,16 +211,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refreshViewport()
 			return m, nil
 		case "ctrl+l":
-			// Sessions overlay — phase 5; show system hint for now.
-			m.tr.Apply(events.NewSystem("Sessions picker coming soon. Use: astonish chat --resume <id>"))
-			m.refreshViewport()
-			return m, nil
+			return m.openSessionsPicker()
 		case "ctrl+n":
-			if !m.tr.Streaming {
-				m.tr.Apply(events.NewSystem("Use /new for a fresh session (slash commands expand in a later PR)."))
-				m.refreshViewport()
-			}
-			return m, nil
+			return m.startNewSession()
 		}
 
 		// While streaming, only allow cancel / scroll keys through textarea limited.
@@ -211,10 +224,55 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.vp, cmd = m.vp.Update(msg)
 				return m, cmd
 			default:
-				// Block sending new messages mid-turn except approval path handled below.
+				// Block sending new messages mid-turn except approval path (handled above).
 				if !m.tr.Awaiting {
 					return m, nil
 				}
+			}
+		}
+
+		// Slash completion navigation (before enter-to-send).
+		if m.slash.active && len(m.slash.matches) > 0 {
+			switch msg.String() {
+			case "up":
+				if m.slash.cursor > 0 {
+					m.slash.cursor--
+				}
+				return m, nil
+			case "down", "tab":
+				if m.slash.cursor < len(m.slash.matches)-1 {
+					m.slash.cursor++
+				} else if msg.String() == "tab" {
+					// wrap tab
+					m.slash.cursor = 0
+				}
+				return m, nil
+			case "shift+tab":
+				if m.slash.cursor > 0 {
+					m.slash.cursor--
+				} else {
+					m.slash.cursor = len(m.slash.matches) - 1
+				}
+				return m, nil
+			case "esc":
+				m.slash = slashCompletion{}
+				return m, nil
+			case "enter":
+				// Accept highlighted command into the input, then run it.
+				if cmd, ok := m.slash.selectedCommand(); ok {
+					m.ta.SetValue(completionValue(cmd))
+					m.ta.CursorEnd()
+					m.slash = slashCompletion{}
+					return m.submit()
+				}
+			case "ctrl+y":
+				// Complete into input without submitting.
+				if cmd, ok := m.slash.selectedCommand(); ok {
+					m.ta.SetValue(completionValue(cmd))
+					m.ta.CursorEnd()
+					m.syncSlashCompletion()
+				}
+				return m, nil
 			}
 		}
 
@@ -226,6 +284,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "shift+enter", "alt+enter", "ctrl+j", "ctrl+m":
 			return m.insertNewline()
 		}
+
+	case sessionsLoadedMsg:
+		m.sessions.loading = false
+		if msg.err != nil {
+			m.sessions.err = msg.err.Error()
+		} else {
+			m.sessions.items = msg.items
+			m.sessions.cursor = 0
+			// Highlight current session if present.
+			for i, s := range msg.items {
+				if s.ID == m.info.SessionID {
+					m.sessions.cursor = i
+					break
+				}
+			}
+		}
+		return m, nil
+
+	case historyLoadedMsg:
+		return m.applyHistory(msg)
 
 	case eventMsg:
 		ev := events.Event(msg)
@@ -287,8 +365,40 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.layout()
 			m.refreshViewport()
 		}
+		// Keep slash completion in sync with composer value after typing.
+		m.syncSlashCompletion()
 	}
 	return m, tea.Batch(cmds...)
+}
+
+// syncSlashCompletion opens/filters/closes the / command palette from the input.
+func (m *model) syncSlashCompletion() {
+	val := m.ta.Value()
+	ok, query := parseSlashInput(val)
+	if !ok {
+		m.slash = slashCompletion{}
+		return
+	}
+	// If user already typed past the command name with a space, hide popup
+	// (arguments mode) — still allow exact bare command completion.
+	if strings.Contains(query, " ") {
+		m.slash = slashCompletion{}
+		return
+	}
+	matches := filterSlashCommands(query)
+	cursor := m.slash.cursor
+	if cursor >= len(matches) {
+		cursor = len(matches) - 1
+	}
+	if cursor < 0 {
+		cursor = 0
+	}
+	m.slash = slashCompletion{
+		active:  len(matches) > 0,
+		query:   query,
+		matches: matches,
+		cursor:  cursor,
+	}
 }
 
 // insertNewline inserts a line break in the composer (Shift+Enter / Ctrl+J).
@@ -360,7 +470,9 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		m.cancel()
 		return m, tea.Quit
 	case text == "/new":
-		m.tr.Apply(events.NewSystem("Fresh session requires restart for now: exit and run astonish chat again. Full /new lands in a later PR."))
+		return m.startNewSession()
+	case text == "/sessions" || text == "/session":
+		return m.openSessionsPicker()
 	default:
 		// Pass through to backend as a normal message so server/local slash handlers can run later.
 		m.history = append(m.history, text)
@@ -386,14 +498,25 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 func helpText() string {
 	return strings.TrimSpace(`
 Commands:
-  /help       Show this help
-  /status     Show session / provider / model
-  /new        New session (partial in PR1)
-  /exit       Quit (/quit, /q)
-  ctrl+c      Cancel turn or quit
-  ctrl+o      Expand/collapse last tool activity
-  Enter       Send message
-  shift+enter Newline in input (also ctrl+j / alt+enter)
+  /help          Show this help
+  /status        Show session / provider / model
+  /sessions      Open sessions picker (also ctrl+l)
+  /new           Start a new session (also ctrl+n)
+  /exit          Quit (/quit, /q)
+
+Type / to open command completion (filters as you type).
+  ↑↓ / tab       Move selection
+  enter          Run selected command
+  esc            Close completion
+
+Keys:
+  enter          Send message
+  shift+enter    Newline (also ctrl+j / alt+enter)
+  y / n          Approve / deny tool (when prompted)
+  ctrl+o         Expand/collapse last tool activity
+  ctrl+l         Sessions picker
+  ctrl+n         New session
+  ctrl+c         Cancel turn or quit
 `)
 }
 
@@ -755,16 +878,98 @@ func (m model) View() string {
 	th := m.theme
 	sep := th.Border.Render(strings.Repeat("─", max(1, m.width)))
 
-	return lipgloss.JoinVertical(lipgloss.Left,
+	// Slash completion sits just above the composer (filter-as-you-type).
+	composerBlock := m.renderComposer()
+	if m.slash.active && len(m.slash.matches) > 0 && !m.tr.Awaiting && !m.sessions.open {
+		composerBlock = lipgloss.JoinVertical(lipgloss.Left,
+			m.renderSlashCompletion(),
+			composerBlock,
+		)
+	}
+
+	main := lipgloss.JoinVertical(lipgloss.Left,
 		m.renderHeader(),
 		sep,
 		m.vp.View(),
 		sep,
 		m.renderLiveStatus(),
-		m.renderComposer(),
+		composerBlock,
 		m.renderFooterMeta(),
 		m.renderHints(),
 	)
+
+	// Overlays: sessions picker or approval card on top of the main chrome.
+	if m.sessions.open {
+		overlay := m.renderSessionsOverlay()
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, overlay,
+			lipgloss.WithWhitespaceChars(" "),
+			lipgloss.WithWhitespaceForeground(lipgloss.Color("236")),
+		)
+	}
+	if m.tr.Awaiting {
+		// Stack approval card above composer area by replacing bottom of view.
+		overlay := m.renderApprovalOverlay()
+		return lipgloss.JoinVertical(lipgloss.Left,
+			m.renderHeader(),
+			sep,
+			m.vp.View(),
+			sep,
+			overlay,
+			m.renderHints(),
+		)
+	}
+	_ = th
+	return main
+}
+
+// renderSlashCompletion draws the filterable / command list above the input.
+func (m model) renderSlashCompletion() string {
+	th := m.theme
+	w := m.width - 2
+	if w < 24 {
+		w = 24
+	}
+
+	var b strings.Builder
+	b.WriteString(th.Muted.Render("Commands") + th.Muted.Render("  ↑↓  tab  enter run  esc") + "\n")
+	maxShow := 8
+	start := 0
+	if m.slash.cursor >= maxShow {
+		start = m.slash.cursor - maxShow + 1
+	}
+	end := start + maxShow
+	if end > len(m.slash.matches) {
+		end = len(m.slash.matches)
+	}
+	for i := start; i < end; i++ {
+		cmd := m.slash.matches[i]
+		name := "/" + cmd.Name
+		desc := cmd.Description
+		line := name
+		// pad name column
+		pad := 14 - lipgloss.Width(name)
+		if pad < 1 {
+			pad = 1
+		}
+		line += strings.Repeat(" ", pad) + desc
+		if lipgloss.Width(line) > w-4 {
+			runes := []rune(line)
+			if len(runes) > w-5 {
+				line = string(runes[:w-5]) + "…"
+			}
+		}
+		if i == m.slash.cursor {
+			b.WriteString(th.Brand.Render("› " + line))
+		} else {
+			b.WriteString(th.Text.Render("  " + line))
+		}
+		b.WriteByte('\n')
+	}
+	body := strings.TrimRight(b.String(), "\n")
+	return th.InputBorder.
+		Width(w).
+		Padding(0, 1).
+		Render(body)
 }
 
 func (m model) renderHeader() string {
@@ -848,8 +1053,14 @@ func (m model) renderFooterMeta() string {
 // renderHints is the keybinding help line under the composer.
 func (m model) renderHints() string {
 	th := m.theme
-	full := "Enter send  ·  shift+enter newline  ·  ctrl+o tools  ·  /help  ·  ctrl+c quit"
-	short := "Enter send  ·  shift+enter ↵  ·  /help  ·  ctrl+c quit"
+	if m.tr.Awaiting {
+		return th.Hint.Render("y approve  ·  n deny  ·  1/2 select  ·  esc deny")
+	}
+	if m.slash.active {
+		return th.Hint.Render("↑↓ select  ·  enter run  ·  tab next  ·  esc close")
+	}
+	full := "Enter send  ·  / commands  ·  shift+enter newline  ·  ctrl+l sessions  ·  ctrl+c quit"
+	short := "Enter send  ·  / commands  ·  ctrl+l sessions"
 	line := full
 	if m.width > 0 && lipgloss.Width(full) > m.width {
 		line = short

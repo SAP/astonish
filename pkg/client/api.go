@@ -29,13 +29,45 @@ func (c *Client) ListSessions() ([]SessionMeta, error) {
 	return sessions, nil
 }
 
-// GetSession returns the details of a single session.
+// GetSession returns the details of a single session (untyped map).
 func (c *Client) GetSession(id string) (map[string]any, error) {
 	var detail map[string]any
 	if err := c.DoJSON("GET", fmt.Sprintf("/api/studio/sessions/%s", id), nil, &detail); err != nil {
 		return nil, err
 	}
 	return detail, nil
+}
+
+// StudioMessage is a simplified chat message from GET /api/studio/sessions/{id}.
+// Mirrors pkg/api.StudioMessage fields needed by the terminal app.
+type StudioMessage struct {
+	Type       string `json:"type"`
+	Content    string `json:"content,omitempty"`
+	ToolName   string `json:"toolName,omitempty"`
+	ToolArgs   any    `json:"toolArgs,omitempty"`
+	ToolResult any    `json:"toolResult,omitempty"`
+}
+
+// SessionDetail is the typed session payload used by the TUI resume path.
+type SessionDetail struct {
+	ID           string          `json:"id"`
+	Title        string          `json:"title"`
+	MessageCount int             `json:"messageCount"`
+	CreatedAt    string          `json:"createdAt"`
+	UpdatedAt    string          `json:"updatedAt"`
+	Messages     []StudioMessage `json:"messages"`
+}
+
+// GetSessionDetail returns typed session history for the terminal chat app.
+func (c *Client) GetSessionDetail(id string) (*SessionDetail, error) {
+	var detail SessionDetail
+	if err := c.DoJSON("GET", fmt.Sprintf("/api/studio/sessions/%s", id), nil, &detail); err != nil {
+		return nil, err
+	}
+	if detail.ID == "" {
+		detail.ID = id
+	}
+	return &detail, nil
 }
 
 // TraceOpts holds query parameters for the session trace endpoint.

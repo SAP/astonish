@@ -5,9 +5,11 @@ Fullscreen terminal chat app for Astonish (Claude Code / OpenCode–style).
 ## Scope
 
 - `app.go` — bubbletea root model (header, transcript viewport, status, input)
+- `approval.go` — tool approval overlay (`y`/`n`/options)
+- `sessions.go` — sessions picker + resume/new session
 - `theme.go` — lipgloss theme tokens (numbers, +/−, brand, NO_COLOR)
 - `wrap.go` — content margins, line truncation, padding
-- `events/` — event types + transcript reducer
+- `events/` — event types + transcript reducer (+ `LoadHistory`)
 - `backend/` — `Backend` interface; platform impl is `pkg/launcher.platformBackend`
 - `render/` — pure markdown/code/diff/activity renderers (unit-test heavy)
 

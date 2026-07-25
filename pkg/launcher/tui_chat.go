@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 
 	"github.com/SAP/astonish/pkg/client"
@@ -100,6 +101,118 @@ func (b *platformBackend) Close() error {
 	defer b.mu.Unlock()
 	b.closed = true
 	return nil
+}
+
+func (b *platformBackend) ListSessions(ctx context.Context) ([]backend.SessionSummary, error) {
+	_ = ctx
+	list, err := b.client.ListSessions()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]backend.SessionSummary, 0, len(list))
+	for _, s := range list {
+		// Skip sub-agent / child sessions in the picker.
+		if s.ParentID != "" {
+			continue
+		}
+		title := s.Title
+		if title == "" {
+			title = "(untitled)"
+		}
+		out = append(out, backend.SessionSummary{
+			ID:           s.ID,
+			Title:        title,
+			UpdatedAt:    s.UpdatedAt,
+			MessageCount: s.MessageCount,
+		})
+	}
+	return out, nil
+}
+
+func (b *platformBackend) LoadHistory(ctx context.Context) ([]backend.HistoryEntry, error) {
+	b.mu.Lock()
+	id := b.sessionID
+	b.mu.Unlock()
+	if id == "" {
+		return nil, nil
+	}
+	return b.loadHistory(ctx, id)
+}
+
+func (b *platformBackend) ResumeSession(ctx context.Context, sessionID string) ([]backend.HistoryEntry, error) {
+	if sessionID == "" {
+		return nil, fmt.Errorf("session id required")
+	}
+	hist, err := b.loadHistory(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	b.mu.Lock()
+	b.sessionID = sessionID
+	b.resumed = true
+	b.mu.Unlock()
+	return hist, nil
+}
+
+func (b *platformBackend) NewSession() {
+	b.mu.Lock()
+	b.sessionID = ""
+	b.resumed = false
+	b.mu.Unlock()
+}
+
+func (b *platformBackend) loadHistory(ctx context.Context, id string) ([]backend.HistoryEntry, error) {
+	_ = ctx
+	detail, err := b.client.GetSessionDetail(id)
+	if err != nil {
+		return nil, err
+	}
+	b.mu.Lock()
+	// Keep title available via Info if we stash it — optional.
+	_ = detail.Title
+	b.mu.Unlock()
+	return studioMessagesToHistory(detail.Messages), nil
+}
+
+func studioMessagesToHistory(msgs []client.StudioMessage) []backend.HistoryEntry {
+	out := make([]backend.HistoryEntry, 0, len(msgs))
+	for _, m := range msgs {
+		switch m.Type {
+		case "user", "agent", "system", "thinking":
+			if strings.TrimSpace(m.Content) == "" && m.Type != "thinking" {
+				continue
+			}
+			out = append(out, backend.HistoryEntry{
+				Kind: m.Type,
+				Text: m.Content,
+			})
+		case "tool_call":
+			args, _ := m.ToolArgs.(map[string]any)
+			if args == nil {
+				// JSON may decode as map[string]interface{} already; try generic convert.
+				if raw, ok := m.ToolArgs.(map[string]interface{}); ok {
+					args = raw
+				}
+			}
+			out = append(out, backend.HistoryEntry{
+				Kind:     "tool_call",
+				ToolName: m.ToolName,
+				Args:     args,
+			})
+		case "tool_result":
+			out = append(out, backend.HistoryEntry{
+				Kind:     "tool_result",
+				ToolName: m.ToolName,
+				Result:   m.ToolResult,
+			})
+		default:
+			// Soft-degrade unknown history types.
+			if m.Content != "" {
+				out = append(out, backend.HistoryEntry{Kind: "system", Text: m.Content})
+			}
+		}
+	}
+	return out
 }
 
 func (b *platformBackend) RunTurn(ctx context.Context, message string) (<-chan events.Event, error) {

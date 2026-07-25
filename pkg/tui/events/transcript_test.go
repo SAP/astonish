@@ -193,6 +193,29 @@ func TestIsResultError(t *testing.T) {
 	}
 }
 
+func TestTranscript_LoadHistory_Sticky(t *testing.T) {
+	tr := NewTranscript()
+	tr.LoadHistory([]HistoryMsg{
+		{Kind: "user", Text: "hi"},
+		{Kind: "agent", Text: "thinking out loud"},
+		{Kind: "tool_call", ToolName: "read_file", ToolID: "1"},
+		{Kind: "tool_result", ToolName: "read_file", ToolID: "1", Result: "ok"},
+		{Kind: "agent", Text: "final answer"},
+	})
+	if itemKinds(tr) != "user,activity,agent" {
+		t.Fatalf("kinds=%s", itemKinds(tr))
+	}
+	if tr.Items[2].Content != "final answer" {
+		t.Fatalf("agent=%q", tr.Items[2].Content)
+	}
+	if tr.Items[2].Provisional {
+		t.Fatal("history agent should not be provisional")
+	}
+	if tr.Streaming {
+		t.Fatal("not streaming after load")
+	}
+}
+
 func itemKinds(tr *Transcript) string {
 	var b strings.Builder
 	for i, it := range tr.Items {

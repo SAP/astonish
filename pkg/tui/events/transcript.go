@@ -443,6 +443,57 @@ func (t *Transcript) ClearApproval() {
 	t.ApprovalIdx = -1
 }
 
+// Reset clears transcript items and turn state (used for /new and session switch).
+func (t *Transcript) Reset() {
+	t.Items = nil
+	t.Title = ""
+	t.Status = ""
+	t.Streaming = false
+	t.LastUsage = nil
+	t.Awaiting = false
+	t.ApprovalIdx = -1
+	t.nextTextReplaces = false
+}
+
+// HistoryMsg is a finalized transcript entry loaded when resuming a session.
+type HistoryMsg struct {
+	Kind     string // user | agent | tool_call | tool_result | system | thinking
+	Text     string
+	ToolName string
+	ToolID   string
+	Args     map[string]any
+	Result   any
+}
+
+// LoadHistory applies session history using the same sticky-agent / tool-fold
+// rules as live events, then freezes everything as non-provisional.
+func (t *Transcript) LoadHistory(entries []HistoryMsg) {
+	t.Reset()
+	for _, e := range entries {
+		switch e.Kind {
+		case "user":
+			t.Apply(NewUser(e.Text))
+		case "agent":
+			// Full historical agent messages replace sticky content within a turn.
+			t.nextTextReplaces = true
+			t.Apply(NewText(e.Text))
+		case "thinking":
+			t.Apply(Event{Kind: KindThinking, Text: e.Text})
+		case "system":
+			t.Apply(NewSystem(e.Text))
+		case "tool_call":
+			t.Apply(NewToolCall(e.ToolName, e.ToolID, e.Args))
+		case "tool_result":
+			t.Apply(NewToolResult(e.ToolName, e.ToolID, e.Result))
+		}
+	}
+	t.finalizeRunningSteps()
+	t.finalizeProvisionalAgents()
+	t.Streaming = false
+	t.Status = ""
+	t.nextTextReplaces = false
+}
+
 func summarizeSteps(steps []ToolStep) string {
 	if len(steps) == 0 {
 		return "Tools"

@@ -23,6 +23,27 @@ type Info struct {
 	AutoApprove bool
 	// Notices are shown once at startup (startup warnings, etc.).
 	Notices []string
+	// Title is the human session title when known.
+	Title string
+}
+
+// SessionSummary is one row in the sessions picker.
+type SessionSummary struct {
+	ID           string
+	Title        string
+	UpdatedAt    string
+	MessageCount int
+}
+
+// HistoryEntry is one message loaded when resuming a session.
+type HistoryEntry struct {
+	// Kind: user | agent | tool_call | tool_result | system | thinking
+	Kind       string
+	Text       string
+	ToolName   string
+	ToolID     string
+	Args       map[string]any
+	Result     any
 }
 
 // Backend drives one interactive chat session against the platform.
@@ -35,16 +56,30 @@ type Info struct {
 // collects a Yes/No (or option) response and calls RunTurn again with that
 // text as the message — same protocol as Studio chat.
 type Backend interface {
-	// Info returns header metadata (may be called after Open).
+	// Info returns header metadata (may be called after Open / Resume).
 	Info() Info
 
-	// Open prepares the session (create or resume). Emits no chat events.
+	// Open prepares the connection. If a session was configured for resume,
+	// LoadHistory should still be called by the TUI to populate the transcript.
 	Open(ctx context.Context) error
 
 	// RunTurn sends a user message (or approval response) and returns a
 	// channel of events. The channel is closed when the turn is finished
 	// (after KindDone or a terminal error event). The caller must drain it.
 	RunTurn(ctx context.Context, message string) (<-chan events.Event, error)
+
+	// ListSessions returns recent chat sessions for the picker.
+	ListSessions(ctx context.Context) ([]SessionSummary, error)
+
+	// LoadHistory returns prior messages for the current session ID (if any).
+	// Empty slice if new session / no history.
+	LoadHistory(ctx context.Context) ([]HistoryEntry, error)
+
+	// ResumeSession switches the backend to sessionID and returns its history.
+	ResumeSession(ctx context.Context, sessionID string) ([]HistoryEntry, error)
+
+	// NewSession clears the active session so the next RunTurn creates a new one.
+	NewSession()
 
 	// Close releases resources (sandbox cleanup, HTTP clients, etc.).
 	Close() error

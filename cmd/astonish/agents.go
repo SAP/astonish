@@ -1178,7 +1178,7 @@ func handleFlowsRunRemote(args []string) error {
 	// Track current node for param injection
 	var currentNode string
 
-	// Spinner management (same pattern as chat_remote.go)
+	// Spinner management (line-oriented flow runner)
 	var spinnerProgram *tea.Program
 	var spinnerDone chan struct{}
 	lineHasContent := false

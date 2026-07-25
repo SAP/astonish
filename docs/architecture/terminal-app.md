@@ -1,0 +1,137 @@
+# Terminal App (TUI)
+
+## Overview
+
+Astonish ships a **fullscreen terminal chat app** comparable to Claude Code, OpenCode, and Grok Build CLI.
+
+**Chat is always platform-backed.** Even a local installation requires authentication against the platform (`astonish login <url>`). There is **no** in-process / personal-mode CLI chat path.
+
+**Entry:** `astonish chat` (requires login).  
+**Future:** bare `astonish` on a TTY may open the same app.
+
+## Architecture
+
+```mermaid
+flowchart TB
+  subgraph cmd [cmd/astonish]
+    chat[chat command]
+    login[login]
+  end
+  subgraph launcher [pkg/launcher]
+    RunTUI[RunChatTUI]
+    PlatformBE[platformBackend]
+  end
+  subgraph tui [pkg/tui]
+    App[bubbletea App]
+    Events[events.Transcript]
+  end
+  subgraph platform [Astonish platform]
+    API["/api/studio/chat SSE"]
+    Agent[ChatAgent / tools / sandbox]
+  end
+  login --> chat
+  chat --> RunTUI
+  RunTUI --> PlatformBE
+  RunTUI --> App
+  PlatformBE -->|HTTP + SSE| API
+  API --> Agent
+  PlatformBE -->|events.Event| App
+  App --> Events
+```
+
+### Packages
+
+| Package | Role |
+|---------|------|
+| `pkg/tui` | bubbletea UI (header, viewport, input, status, theme) |
+| `pkg/tui/events` | `Event` kinds + pure `Transcript` reducer |
+| `pkg/tui/backend` | `Backend` interface |
+| `pkg/launcher/tui_chat.go` | `RunChatTUI`, `platformBackend` (SSE → events) |
+| `pkg/client` | Authenticated HTTP + SSE client |
+
+### Auth requirement
+
+If `client.IsRemoteMode()` is false (no `~/.config/astonish/remote.yaml` / login), `astonish chat` exits with instructions to run `astonish login <url>`.
+
+### Event model
+
+All UI state is driven by `events.Event`. The platform backend maps Studio SSE types (`text`, `tool_call`, `tool_result`, `approval`, …) into the same kinds. Unknown / Studio-only events soft-degrade to `system` notices.
+
+### Transcript reducer
+
+`Transcript.Apply(Event)`:
+
+- Sticky agent bubble for streaming text
+- Tool activity folds for call/result pairs
+- Approval sets `Awaiting`; next user message is the approval response
+
+## UI chrome
+
+```
+header: Astonish · platform · session          https://…
+────────────────────────────────────────────────────────
+transcript viewport
+────────────────────────────────────────────────────────
+[live status / spinner]
+╭──────────────────────────────────────────────────────╮
+│ ❯  Message Astonish…                                 │  ← bordered composer
+╰──────────────────────────────────────────────────────╯
+provider / model                         auto-approve|normal
+Enter send · ctrl+j newline · /help · ctrl+c quit
+```
+
+Composer styles live in `theme.go` (`ApplyTextareaStyles` clears default
+AdaptiveColor cursor-line backgrounds that break dark alt-screen UIs).
+
+## Rendering
+
+| Surface | Implementation |
+|---------|----------------|
+| Agent markdown | `pkg/tui/render.Markdown` — headings, lists, inline code/bold |
+| Code fences | `pkg/tui/render.CodeBlock` — chroma highlight + numeric gutter |
+| Tool activity | `pkg/tui/render.ActivitySummary` + `StatsFromSteps` (`+N/−M`) |
+| File diffs | `pkg/tui/render.FileDiff` / `DiffFromToolArgs` from `edit_file`/`write_file` args |
+
+Streaming: unclosed fences render as incomplete code blocks (header shows `…`).
+
+### Sticky agent (Studio parity)
+
+During a turn with tools, there is **one** agent bubble:
+
+1. Interstitial text between tools **replaces** the previous text (not stacked).
+2. While `Provisional`, it renders as **Thinking** (muted), not the final response style.
+3. All tools fold into **one** activity block for the turn.
+4. Layout order: `user → activity → agent`.
+5. On `done`, provisional is cleared and the last text is rendered as the full agent response (markdown/code).
+
+## Rendering roadmap
+
+| Phase | Surface |
+|-------|---------|
+| Done | Composer chrome, markdown/code, activity + diffs (v1), approvals (type Yes/No) |
+| Next | In-TUI approval overlay, sessions picker, resume history |
+| Later | `@file`, plan mode, reconnect polish |
+
+## CLI behavior
+
+| Invocation | Behavior |
+|------------|----------|
+| `astonish login <url>` | Authenticate to platform |
+| `astonish chat` | TUI against platform |
+| `astonish chat --resume ID` | Resume session |
+| `astonish chat model provider:model` | Pin model via platform API |
+| Without login | Error: run `astonish login` |
+
+## Invariants
+
+1. TUI does not reimplement agent logic — platform runs the agent.
+2. No in-process CLI chat backend.
+3. Report three-signal gate remains Studio SPA concern.
+4. `cmd/astonish` stays thin — no bubbletea models there.
+5. Single binary.
+
+## Related docs
+
+- `docs/architecture/remote-cli-client.md` — login, tokens, remote command routing
+- `docs/architecture/chat-rendering-pipeline.md` — Studio SPA pipeline (UX reference)
+- `pkg/tui/AGENTS.md`

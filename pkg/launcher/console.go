@@ -524,7 +524,7 @@ func RunConsole(ctx context.Context, cfg *ConsoleConfig) error {
 		var userMessageFields []string
 
 		// seenPartialText filters out aggregated text events that duplicate
-		// already-streamed partial chunks (same fix as chat_console.go).
+		// already-streamed partial chunks (ADK partial vs aggregate dedup).
 		seenPartialText := false
 		nodeJustChanged := false          // Flag to skip userMessage processing on initial node change event
 		turnHadUserMessageFields := false // Track if any node in this turn had userMessageFields (persists across node changes)

@@ -19,6 +19,7 @@ import (
 	"net/http"
 
 	"github.com/gorilla/mux"
+
 	"github.com/SAP/astonish/pkg/sandbox"
 	"github.com/SAP/astonish/pkg/sandbox/netpolicy"
 	"github.com/SAP/astonish/pkg/sandbox/openshell"
@@ -114,6 +115,14 @@ func extractDenialsFromOutput(stdout string) []map[string]any {
 	return netpolicy.ExtractDenialsFromOutput(stdout)
 }
 
+func looksLikeShellNetworkFailure(resp map[string]any) bool {
+	return netpolicy.LooksLikeShellNetworkFailure(resp)
+}
+
+func extractDenialsFromShellCommand(command string) []map[string]any {
+	return netpolicy.ExtractDenialsFromShellCommand(command)
+}
+
 func isNetworkTool(name string) bool {
 	return netpolicy.IsNetworkTool(name)
 }
@@ -128,6 +137,18 @@ func extractDenialFromToolError(resp map[string]any, fallbackURL string) []map[s
 
 func hostPortFromURL(rawURL string) (string, int) {
 	return netpolicy.HostPortFromURL(rawURL)
+}
+
+func (cr *ChatRunner) pendingShellCommand(callID, toolName string) string {
+	if callID != "" {
+		if command := cr.pendingShellCommands[callID]; command != "" {
+			return command
+		}
+	}
+	if toolName != "" {
+		return cr.pendingShellCommands[toolName]
+	}
+	return ""
 }
 
 // filterDenialsByPolicy auto-approves PolicyAllow denials and returns unknowns for UI.

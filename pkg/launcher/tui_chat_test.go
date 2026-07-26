@@ -103,3 +103,36 @@ func TestMapSSEToEvents_Usage(t *testing.T) {
 		t.Fatalf("usage: %+v", evs)
 	}
 }
+
+func TestMapSSEToEvents_UsageTokenFields(t *testing.T) {
+	evs := mapSSEToEvents(&client.SSEEvent{
+		Type: "usage",
+		Data: `{"input_tokens":100,"output_tokens":50,"total_tokens":150}`,
+	}, false)
+	if len(evs) != 1 || evs[0].Usage == nil {
+		t.Fatalf("usage: %+v", evs)
+	}
+	if evs[0].Usage.Input != 100 || evs[0].Usage.Output != 50 || evs[0].Usage.Total != 150 {
+		t.Fatalf("usage fields: %+v", evs[0].Usage)
+	}
+}
+
+func TestMapSSEToEvents_NetworkDenialHint(t *testing.T) {
+	evs := mapSSEToEvents(&client.SSEEvent{
+		Type: "network_denial_hint",
+		Data: `{"session_id":"sess-1","sandbox_name":"sandbox-1","denials":[{"chunk_id":"chunk-1","host":"api.example.com","port":443,"binary":"/usr/bin/curl","rationale":"blocked","security_notes":"external","broader_pattern":"*.example.com"}]}`,
+	}, false)
+	if len(evs) != 1 || evs[0].Kind != events.KindNetworkDenial {
+		t.Fatalf("network_denial_hint: %+v", evs)
+	}
+	if evs[0].SessionID != "sess-1" || evs[0].SandboxName != "sandbox-1" {
+		t.Fatalf("metadata: %+v", evs[0])
+	}
+	if len(evs[0].NetworkDenials) != 1 {
+		t.Fatalf("denials: %+v", evs[0].NetworkDenials)
+	}
+	d := evs[0].NetworkDenials[0]
+	if d.ChunkID != "chunk-1" || d.Host != "api.example.com" || d.Port != 443 || d.BroaderPattern != "*.example.com" {
+		t.Fatalf("denial: %+v", d)
+	}
+}

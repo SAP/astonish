@@ -8,24 +8,25 @@ package events
 type Kind string
 
 const (
-	KindSession      Kind = "session"
-	KindText         Kind = "text"
-	KindThinking     Kind = "thinking"
-	KindToolCall     Kind = "tool_call"
-	KindToolResult   Kind = "tool_result"
-	KindApproval     Kind = "approval"
-	KindAutoApproved Kind = "auto_approved"
-	KindArtifact     Kind = "artifact"
-	KindUsage        Kind = "usage"
-	KindError        Kind = "error"
-	KindErrorInfo    Kind = "error_info"
-	KindDone         Kind = "done"
-	KindSystem       Kind = "system"
-	KindSubagent     Kind = "subagent"
-	KindSessionTitle Kind = "session_title"
-	KindModelChanged Kind = "model_changed"
-	KindStatus       Kind = "status" // spinner / live status text
-	KindUser         Kind = "user"   // local echo of user message
+	KindSession       Kind = "session"
+	KindText          Kind = "text"
+	KindThinking      Kind = "thinking"
+	KindToolCall      Kind = "tool_call"
+	KindToolResult    Kind = "tool_result"
+	KindApproval      Kind = "approval"
+	KindNetworkDenial Kind = "network_denial"
+	KindAutoApproved  Kind = "auto_approved"
+	KindArtifact      Kind = "artifact"
+	KindUsage         Kind = "usage"
+	KindError         Kind = "error"
+	KindErrorInfo     Kind = "error_info"
+	KindDone          Kind = "done"
+	KindSystem        Kind = "system"
+	KindSubagent      Kind = "subagent"
+	KindSessionTitle  Kind = "session_title"
+	KindModelChanged  Kind = "model_changed"
+	KindStatus        Kind = "status" // spinner / live status text
+	KindUser          Kind = "user"   // local echo of user message
 )
 
 // Usage holds token accounting for a turn.
@@ -33,6 +34,17 @@ type Usage struct {
 	Input  int64
 	Output int64
 	Total  int64
+}
+
+// NetworkDenial describes one outbound connection blocked by the sandbox proxy.
+type NetworkDenial struct {
+	ChunkID        string
+	Host           string
+	Port           uint32
+	Binary         string
+	Rationale      string
+	SecurityNotes  string
+	BroaderPattern string
 }
 
 // Event is one unit of chat progress. Fields are optional by Kind.
@@ -55,6 +67,10 @@ type Event struct {
 
 	// Usage for KindUsage.
 	Usage *Usage
+
+	// Network denial fields for KindNetworkDenial.
+	NetworkDenials []NetworkDenial
+	SandboxName    string
 
 	// Structured error (KindErrorInfo).
 	ErrorTitle      string
@@ -112,4 +128,9 @@ func NewToolResult(name, id string, result any) Event {
 // NewApproval returns a tool approval request.
 func NewApproval(name string, args map[string]any, options []string) Event {
 	return Event{Kind: KindApproval, ToolName: name, Args: args, Options: options}
+}
+
+// NewNetworkDenial returns a network authorization request.
+func NewNetworkDenial(sessionID, sandboxName string, denials []NetworkDenial) Event {
+	return Event{Kind: KindNetworkDenial, SessionID: sessionID, SandboxName: sandboxName, NetworkDenials: denials}
 }

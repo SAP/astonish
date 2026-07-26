@@ -83,6 +83,11 @@ type ChatRunner struct {
 	// Used to extract the denied host when Chrome returns a generic error
 	// like net::ERR_TUNNEL_CONNECTION_FAILED that doesn't include the URL.
 	pendingNetworkToolURLs map[string]string
+
+	// pendingShellCommands tracks shell_command text by FunctionCall.ID and by
+	// tool name fallback. It lets network denial detection extract generic
+	// http/https endpoints when curl fails without proxy details in stdout.
+	pendingShellCommands map[string]string
 }
 
 // newChatRunner creates a new ChatRunner with a background context.
@@ -103,6 +108,7 @@ func newChatRunner(sessionID, userID string, isNew bool) *ChatRunner {
 		subscribers:            make(map[string]chan ChatEvent),
 		titleDone:              make(chan struct{}),
 		pendingNetworkToolURLs: make(map[string]string),
+		pendingShellCommands:   make(map[string]string),
 	}
 }
 
@@ -699,6 +705,14 @@ runLoop:
 							cr.pendingNetworkToolURLs[part.FunctionCall.Name] = urlArg
 						}
 					}
+					if part.FunctionCall.Name == "shell_command" {
+						if command, ok := part.FunctionCall.Args["command"].(string); ok && command != "" {
+							if part.FunctionCall.ID != "" {
+								cr.pendingShellCommands[part.FunctionCall.ID] = command
+							}
+							cr.pendingShellCommands[part.FunctionCall.Name] = command
+						}
+					}
 				}
 				if part.FunctionResponse != nil {
 					hasContent = true
@@ -754,9 +768,12 @@ runLoop:
 					// - PolicyDeny → suppress entirely (no dialog)
 					// - PolicyUnknown → show approval dialog (current behavior)
 					if part.FunctionResponse.Name == "shell_command" && resp != nil {
-						if looksLikeNetworkDenial(resp) {
+						if looksLikeNetworkDenial(resp) || looksLikeShellNetworkFailure(resp) {
 							stdout, _ := resp["stdout"].(string)
 							denials := extractDenialsFromOutput(stdout)
+							if len(denials) == 0 {
+								denials = extractDenialsFromShellCommand(cr.pendingShellCommand(part.FunctionResponse.ID, part.FunctionResponse.Name))
+							}
 							if len(denials) > 0 {
 								denials = cr.filterDenialsByPolicy(denials)
 								if len(denials) > 0 {

@@ -146,6 +146,25 @@ func TestTranscript_Approval(t *testing.T) {
 	}
 }
 
+func TestTranscript_NetworkDenial(t *testing.T) {
+	tr := NewTranscript()
+	denials := []NetworkDenial{{Host: "api.example.com", Port: 443, ChunkID: "chunk-1"}}
+	tr.Apply(NewNetworkDenial("sess-1", "sandbox-1", denials))
+	if !tr.Awaiting {
+		t.Fatal("expected awaiting network authorization")
+	}
+	if tr.ApprovalIdx < 0 {
+		t.Fatal("expected approval idx")
+	}
+	item := tr.Items[tr.ApprovalIdx]
+	if item.Kind != ItemNetworkDenial || item.SessionID != "sess-1" || item.SandboxName != "sandbox-1" {
+		t.Fatalf("network denial item: %+v", item)
+	}
+	if len(item.NetworkDenials) != 1 || item.NetworkDenials[0].Host != "api.example.com" {
+		t.Fatalf("denials: %+v", item.NetworkDenials)
+	}
+}
+
 func TestTranscript_PartialTextDedupPattern(t *testing.T) {
 	// Simulates backend only emitting partial chunks (no aggregate).
 	tr := NewTranscript()
@@ -153,6 +172,18 @@ func TestTranscript_PartialTextDedupPattern(t *testing.T) {
 	tr.Apply(NewText("lo"))
 	if got := tr.Items[0].Content; got != "Hello" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+func TestTranscript_UsageAccumulates(t *testing.T) {
+	tr := NewTranscript()
+	tr.Apply(Event{Kind: KindUsage, Usage: &Usage{Input: 100, Output: 50, Total: 150}})
+	tr.Apply(Event{Kind: KindUsage, Usage: &Usage{Input: 200, Output: 100, Total: 300}})
+	if tr.LastUsage == nil {
+		t.Fatal("expected usage")
+	}
+	if tr.LastUsage.Input != 300 || tr.LastUsage.Output != 150 || tr.LastUsage.Total != 450 {
+		t.Fatalf("usage=%+v", tr.LastUsage)
 	}
 }
 

@@ -152,6 +152,44 @@ func TestLooksLikeNetworkDenial(t *testing.T) {
 	}
 }
 
+func TestLooksLikeShellNetworkFailure(t *testing.T) {
+	tests := []struct {
+		name string
+		resp map[string]any
+		want bool
+	}{
+		{
+			name: "nonzero exit with HTTP status zero",
+			resp: map[string]any{"exit_code": 7, "stdout": "\nHTTP_STATUS: 000\n"},
+			want: true,
+		},
+		{
+			name: "zero exit with HTTP status zero is not enough",
+			resp: map[string]any{"exit_code": 0, "stdout": "\nHTTP_STATUS: 000\n"},
+			want: false,
+		},
+		{
+			name: "nonzero exit with curl failed to connect",
+			resp: map[string]any{"exit_code": 7, "stderr": "curl: (7) Failed to connect to example.com port 443"},
+			want: true,
+		},
+		{
+			name: "nonzero exit with unrelated output",
+			resp: map[string]any{"exit_code": 1, "stdout": "file not found"},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := looksLikeShellNetworkFailure(tt.resp)
+			if got != tt.want {
+				t.Fatalf("looksLikeShellNetworkFailure() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestIsNetworkTool(t *testing.T) {
 	yes := []string{"browser_navigate", "browser_tabs", "web_fetch", "http_request", "read_pdf"}
 	no := []string{"shell_command", "write_file", "read_file", "grep_search", "memory_save", ""}
@@ -437,6 +475,66 @@ func TestHostPortFromURL(t *testing.T) {
 			if host != tt.wantHost || port != tt.wantPort {
 				t.Errorf("hostPortFromURL(%q) = (%q, %d), want (%q, %d)",
 					tt.url, host, port, tt.wantHost, tt.wantPort)
+			}
+		})
+	}
+}
+
+func TestExtractDenialsFromShellCommand(t *testing.T) {
+	tests := []struct {
+		name      string
+		command   string
+		wantHosts []string
+	}{
+		{
+			name:      "quoted https URL",
+			command:   `curl -s "https://api.example.com/v1/resources"`,
+			wantHosts: []string{"api.example.com:443"},
+		},
+		{
+			name:      "multiple generic https URLs",
+			command:   `curl -s "https://clusters.example.net/api"; curl -s 'https://identity.example.org/v3/auth/tokens'`,
+			wantHosts: []string{"clusters.example.net:443", "identity.example.org:443"},
+		},
+		{
+			name:      "http URL defaults to port 80",
+			command:   `curl http://metadata.example.internal/latest`,
+			wantHosts: []string{"metadata.example.internal:80"},
+		},
+		{
+			name:      "custom port and trailing punctuation",
+			command:   `python -c 'fetch("https://internal.example.com:8443/api");'`,
+			wantHosts: []string{"internal.example.com:8443"},
+		},
+		{
+			name:      "deduplicates repeated URL",
+			command:   `curl https://api.example.com/a && curl https://api.example.com/b`,
+			wantHosts: []string{"api.example.com:443"},
+		},
+		{
+			name:      "non URL command ignored",
+			command:   `curl api.example.com/path`,
+			wantHosts: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			denials := extractDenialsFromShellCommand(tt.command)
+			if len(tt.wantHosts) == 0 {
+				if len(denials) != 0 {
+					t.Fatalf("expected no denials, got %v", denials)
+				}
+				return
+			}
+			if len(denials) != len(tt.wantHosts) {
+				t.Fatalf("expected %d denials, got %d: %v", len(tt.wantHosts), len(denials), denials)
+			}
+			for i, want := range tt.wantHosts {
+				got := denials[i]["host"].(string) + ":" + fmt.Sprint(denials[i]["port"])
+				if got != want {
+					t.Fatalf("denial[%d] = %q, want %q", i, got, want)
+				}
 			}
 		})
 	}

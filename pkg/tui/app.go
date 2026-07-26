@@ -142,11 +142,11 @@ func newModel(parent context.Context, cfg Config) model {
 	tr.SessionID = info.SessionID
 	tr.Provider = info.Provider
 	tr.Model = info.Model
+	if info.Usage != nil {
+		tr.LastUsage = &events.Usage{Input: info.Usage.Input, Output: info.Usage.Output, Total: info.Usage.Total}
+	}
 	for _, n := range info.Notices {
 		tr.Apply(events.NewSystem(n))
-	}
-	if !info.IsResumed {
-		tr.Apply(events.NewSystem("Hey! I'm Astonish, your AI assistant. What can I help you with today?"))
 	}
 	// Resumed sessions load history asynchronously in Init (historyLoadedMsg).
 
@@ -529,11 +529,6 @@ Respond with a concise implementation plan only. Do not execute tools, edit file
 
 func (m *model) togglePlanMode() {
 	m.planMode = !m.planMode
-	if m.planMode {
-		m.tr.Apply(events.NewSystem("Plan mode enabled. I will propose steps without executing tools."))
-	} else {
-		m.tr.Apply(events.NewSystem("Plan mode disabled. I can execute normally again."))
-	}
 }
 
 func (m model) turnOptions() backend.TurnOptions {
@@ -706,7 +701,11 @@ func waitEvent(ch <-chan events.Event) tea.Cmd {
 }
 
 func (m *model) layout() {
-	// Chrome: header(1) + sep + status(1) + composer(border+ta) + meta(1) + hints(1) + seps
+	// Chrome: header(1) + sep + status(1) + composer(border+ta) + meta(1) + hints(1) + seps.
+	// Use a conservative screen height because some terminal panes report a
+	// height a couple of rows larger than the visible alternate screen, which
+	// causes the top rows (the header) to scroll out of view.
+	screenH := m.screenHeight()
 	headerH := 1
 	statusH := 1
 	metaH := 1
@@ -716,13 +715,13 @@ func (m *model) layout() {
 	taH := m.composerTextHeight()
 	composerH := taH + 2 // rounded border top/bottom
 	chrome := headerH + statusH + composerH + metaH + hintsH + seps
-	vh := m.height - chrome
+	vh := screenH - chrome
 	if vh < 5 {
 		vh = 5
 	}
 	m.vp = viewport.New(m.width, vh)
 	m.vp.Style = m.theme.Background
-	content, hits := m.renderTranscript()
+	content, hits := m.viewportContent()
 	m.hitRegions = hits
 	m.vp.SetContent(content)
 
@@ -733,6 +732,16 @@ func (m *model) layout() {
 	}
 	m.ta.SetWidth(innerW)
 	m.ta.SetHeight(taH)
+}
+
+func (m model) screenHeight() int {
+	// Bubble Tea's WindowSizeMsg can be a little optimistic in nested panes or
+	// terminals with extra prompt/status rows. Rendering one row shorter keeps
+	// the alternate-screen frame from scrolling and hiding the top header.
+	if m.height > 1 {
+		return m.height - 1
+	}
+	return m.height
 }
 
 // composerTextHeight returns the textarea height: 1 by default, up to 4 when
@@ -753,20 +762,89 @@ func (m *model) refreshViewport() {
 		return
 	}
 	atBottom := m.vp.AtBottom()
-	content, hits := m.renderTranscript()
+	content, hits := m.viewportContent()
 	m.hitRegions = hits
 	m.vp.SetContent(content)
-	if atBottom || m.tr.Streaming {
+	if atBottom || m.tr.Streaming || m.isEmptyConversation() {
 		m.vp.GotoBottom()
+	}
+}
+
+func (m *model) viewportContent() (string, []hitRegion) {
+	if m.isEmptyConversation() {
+		m.transcriptPlainLines = nil
+		return m.renderWelcome(), nil
+	}
+	return m.renderTranscript()
+}
+
+func (m model) isEmptyConversation() bool {
+	return m.tr == nil || len(m.tr.Items) == 0
+}
+
+func (m model) renderWelcome() string {
+	if m.vp.Width <= 0 || m.vp.Height <= 0 {
+		return ""
+	}
+
+	boxW := m.vp.Width - 8
+	if boxW > 88 {
+		boxW = 88
+	}
+	if boxW < 56 {
+		boxW = max(32, m.vp.Width-2)
+	}
+	contentW := boxW - 6 // border(2) + horizontal padding(4)
+	if contentW < 24 {
+		contentW = 24
+	}
+
+	lines := m.welcomeLines(contentW)
+
+	body := lipgloss.NewStyle().
+		Width(contentW).
+		Padding(1, 2).
+		Border(lipgloss.NormalBorder()).
+		BorderForeground(lipgloss.Color("238")).
+		Background(lipgloss.Color("#000000")).
+		Render(strings.Join(lines, "\n"))
+
+	return lipgloss.Place(
+		m.vp.Width,
+		m.vp.Height,
+		lipgloss.Center,
+		lipgloss.Center,
+		body,
+		lipgloss.WithWhitespaceChars(" "),
+		lipgloss.WithWhitespaceBackground(lipgloss.Color("#000000")),
+	)
+}
+
+func (m model) welcomeLines(width int) []string {
+	th := m.theme
+	title := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("208")).
+		Background(lipgloss.Color("#000000")).
+		Bold(true).
+		Align(lipgloss.Center).
+		Width(width).
+		Render("✦ Astonish")
+
+	return []string{
+		title,
+		"",
+		th.Text.Width(width).Align(lipgloss.Center).Render("Build, investigate, and operate with Astonish agents."),
+		th.Muted.Width(width).Align(lipgloss.Center).Render("Ask questions, plan work, run tasks, or attach @files."),
+		th.Muted.Width(width).Align(lipgloss.Center).Render("Connected to your platform. Ready when you are."),
+		"",
+		th.Hint.Width(width).Align(lipgloss.Center).Render("/ commands  ·  @ files  ·  shift+tab plan  ·  shift+enter newline"),
 	}
 }
 
 // viewportTopY is the screen row where the transcript viewport starts.
 func (m model) viewportTopY() int {
-	// Bubble Tea mouse rows in alt-screen land one row lower than the visual
-	// transcript origin for our header/separator stack. Use the calibrated
-	// content origin so drag selection starts on the row under the cursor.
-	return 1
+	// The transcript viewport starts after the one-line header and separator.
+	return 2
 }
 
 func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
@@ -979,6 +1057,8 @@ func (m *model) renderTranscript() (string, []hitRegion) {
 			ab.WriteByte('\n')
 			ab.WriteString(th.Muted.Width(cw).Render("Type Yes or No (or an option) and press Enter."))
 			appendBlock(i, it.Kind, ab.String())
+		case events.ItemNetworkDenial:
+			appendBlock(i, it.Kind, m.renderNetworkDenialTranscript(it, cw))
 		case events.ItemArtifact:
 			appendBlock(i, it.Kind, th.Muted.Width(cw).Render("📄 "+first(it.Path, it.Content)))
 		}
@@ -1043,28 +1123,45 @@ func (m model) renderActivityCollapsedPreview(steps []events.ToolStep, width int
 	if len(steps) == 0 {
 		return ""
 	}
-	limit := 2
-	if len(steps) < limit {
-		limit = len(steps)
-	}
 	var b strings.Builder
-	for i := 0; i < limit; i++ {
+	for i := 0; i < len(steps); i++ {
 		step := render.ToolStep{Name: steps[i].Name, Args: steps[i].Args, Result: steps[i].Result, Status: steps[i].Status}
 		b.WriteByte('\n')
-		line := "  " + render.ToolDetailLine(step)
+		line := collapsedToolLine("  "+render.ToolDetailLine(step), width)
 		if steps[i].Status == "error" {
 			b.WriteString(m.theme.Error.Width(width).Render(line))
 			continue
 		}
 		b.WriteString(m.theme.Muted.Width(width).Render(line))
 	}
-	if omitted := len(steps) - limit; omitted > 0 {
-		b.WriteByte('\n')
-		b.WriteString(m.theme.Hint.Width(width).Render(fmt.Sprintf("  … %d more; click to expand", omitted)))
-	} else {
-		b.WriteByte('\n')
-		b.WriteString(m.theme.Hint.Width(width).Render("  click to expand"))
+	b.WriteByte('\n')
+	b.WriteString(m.theme.Hint.Width(width).Render("  click to expand details"))
+	return b.String()
+}
+
+func collapsedToolLine(line string, width int) string {
+	line = strings.Join(strings.Fields(stripANSI(line)), " ")
+	if width > 0 && lipgloss.Width(line) > width {
+		line = truncateToWidth(line, width)
 	}
+	return line
+}
+
+func (m model) renderNetworkDenialTranscript(it events.Item, width int) string {
+	th := m.theme
+	denial, ok := firstNetworkDenial(&it)
+	var b strings.Builder
+	b.WriteString(th.Approval.Width(width).Render("⚠ Network access blocked"))
+	if ok {
+		b.WriteByte('\n')
+		line := "Endpoint: " + endpointLabel(denial.Host, denial.Port)
+		if denial.Binary != "" {
+			line += " via " + denial.Binary
+		}
+		b.WriteString(th.Muted.Width(width).Render(line))
+	}
+	b.WriteByte('\n')
+	b.WriteString(th.Muted.Width(width).Render("Choose in the authorization prompt below."))
 	return b.String()
 }
 
@@ -1283,7 +1380,7 @@ func (m model) View() string {
 	// Overlays: sessions picker or approval card on top of the main chrome.
 	if m.sessions.open {
 		overlay := m.renderSessionsOverlay()
-		return m.paintBackground(lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, overlay,
+		return m.paintBackground(lipgloss.Place(m.width, m.screenHeight(), lipgloss.Center, lipgloss.Center, overlay,
 			lipgloss.WithWhitespaceChars(" "),
 			lipgloss.WithWhitespaceBackground(lipgloss.Color("#000000")),
 		))
@@ -1304,12 +1401,12 @@ func (m model) View() string {
 }
 
 func (m model) paintBackground(s string) string {
-	if m.theme.NoColor || m.width <= 0 || m.height <= 0 {
+	if m.theme.NoColor || m.width <= 0 || m.screenHeight() <= 0 {
 		return s
 	}
 	placed := lipgloss.Place(
 		m.width,
-		m.height,
+		m.screenHeight(),
 		lipgloss.Left,
 		lipgloss.Top,
 		forceTrueBlackAfterReset(s),
@@ -1412,28 +1509,90 @@ func (m model) renderFileCompletion() string {
 
 func (m model) renderHeader() string {
 	th := m.theme
-	mode := first(m.info.Mode, "platform")
-	sid := m.info.SessionID
-	if len(sid) > 12 {
-		sid = sid[:12]
+	width := m.width
+	if width < 1 {
+		width = 80
 	}
-	left := th.Header.Render("Astonish") + th.Muted.Render(" · "+mode)
-	if sid != "" {
-		left += th.Muted.Render(" · " + sid)
+
+	leftPlain := m.headerConnectionText()
+	rightPlain := m.headerUsageText()
+	leftW := lipgloss.Width(leftPlain)
+	rightW := lipgloss.Width(rightPlain)
+
+	if rightPlain != "" && leftW+rightW+1 > width {
+		leftMax := width - rightW - 1
+		if leftMax < 8 {
+			rightPlain = truncateToWidth(rightPlain, max(0, width-9))
+			rightW = lipgloss.Width(rightPlain)
+			leftMax = width - rightW - 1
+		}
+		leftPlain = truncateToWidth(leftPlain, leftMax)
+		leftW = lipgloss.Width(leftPlain)
 	}
-	// URL only in header; model lives in footer meta (Grok-style).
-	right := ""
+
+	left := m.renderHeaderLeft(leftPlain)
+	right := th.Muted.Render(rightPlain)
+	gap := width - leftW - rightW
+	if rightPlain != "" {
+		if gap < 1 {
+			gap = 1
+		}
+		return m.paintRow(left+strings.Repeat(" ", gap)+right, width)
+	}
+	return m.paintRow(left, width)
+}
+
+func (m model) headerConnectionText() string {
+	parts := []string{"Astonish"}
 	if m.info.ServerURL != "" {
-		right = th.Muted.Render(m.info.ServerURL)
+		parts = append(parts, m.info.ServerURL)
 	}
-	if right == "" {
-		return left
+	if m.info.User != "" {
+		parts = append(parts, m.info.User)
 	}
-	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right)
-	if gap < 1 {
-		gap = 1
+	if m.info.ServerURL == "" && m.info.User == "" {
+		parts = append(parts, first(m.info.Mode, "platform"))
 	}
-	return m.paintRow(left+strings.Repeat(" ", gap)+right, m.width)
+	return strings.Join(parts, " · ")
+}
+
+func (m model) renderHeaderLeft(text string) string {
+	if text == "" {
+		return ""
+	}
+	if text == "Astonish" {
+		return m.theme.Header.Render(text)
+	}
+	if strings.HasPrefix(text, "Astonish") {
+		return m.theme.Header.Render("Astonish") + m.theme.Muted.Render(strings.TrimPrefix(text, "Astonish"))
+	}
+	return m.theme.Muted.Render(text)
+}
+
+func (m model) headerUsageText() string {
+	usage := &events.Usage{}
+	if m.tr != nil && m.tr.LastUsage != nil {
+		usage = m.tr.LastUsage
+	}
+	if usage.Total <= 0 {
+		return "Usage 0"
+	}
+	return fmt.Sprintf("Usage %s · in %s · out %s",
+		formatTokenCount(usage.Total),
+		formatTokenCount(usage.Input),
+		formatTokenCount(usage.Output),
+	)
+}
+
+func formatTokenCount(n int64) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fk", float64(n)/1_000)
+	default:
+		return fmt.Sprintf("%d", n)
+	}
 }
 
 // renderLiveStatus shows spinner text while a turn is active; otherwise a blank
@@ -1453,20 +1612,83 @@ func (m model) renderLiveStatus() string {
 	return m.paintRow("", m.width)
 }
 
-// renderComposer draws the bordered input box (Grok-style).
+// renderComposer draws the bordered input box (Grok-style), with the current
+// mode embedded in the bottom border.
 func (m model) renderComposer() string {
 	th := m.theme
-	box := th.InputBorderFocus
-	if !m.ta.Focused() {
-		box = th.InputBorder
+	w := m.width
+	if w < 12 {
+		w = 12
 	}
-	// lipgloss Width is the content width; border adds 2 columns outside.
-	// Pad content so total ≈ terminal width.
-	w := m.width - 2
-	if w < 10 {
-		w = 10
+	innerW := w - 2
+	contentW := innerW - 2 // one-space padding on each side
+	if contentW < 8 {
+		contentW = 8
 	}
-	return box.Width(w).Render(th.Background.Width(w).Render(m.ta.View()))
+
+	border := m.composerBorderStyle()
+	label := "Normal"
+	if m.planMode {
+		label = "Plan"
+	}
+
+	var b strings.Builder
+	b.WriteString(border.Render("╭" + strings.Repeat("─", innerW) + "╮"))
+	for _, line := range strings.Split(strings.TrimRight(m.ta.View(), "\n"), "\n") {
+		plainW := lipgloss.Width(stripANSI(line))
+		if plainW > contentW {
+			line = truncateToWidth(stripANSI(line), contentW)
+			plainW = lipgloss.Width(line)
+		}
+		pad := contentW - plainW
+		if pad < 0 {
+			pad = 0
+		}
+		b.WriteByte('\n')
+		b.WriteString(border.Render("│"))
+		b.WriteString(th.Background.Render(" "))
+		b.WriteString(line)
+		b.WriteString(th.Background.Render(strings.Repeat(" ", pad+1)))
+		b.WriteString(border.Render("│"))
+	}
+	b.WriteByte('\n')
+	b.WriteString(m.renderComposerBottomBorder(w, label, border, th.Background))
+	return b.String()
+}
+
+func (m model) composerBorderStyle() lipgloss.Style {
+	if m.theme.NoColor {
+		return lipgloss.NewStyle()
+	}
+	color := lipgloss.Color("255")
+	if m.planMode {
+		color = lipgloss.Color("214")
+	}
+	return lipgloss.NewStyle().Foreground(color).Background(lipgloss.Color("#000000"))
+}
+
+func (m model) renderComposerBottomBorder(width int, label string, border lipgloss.Style, bg lipgloss.Style) string {
+	if label == "" || width < 18 {
+		return border.Render("╰" + strings.Repeat("─", max(0, width-2)) + "╯")
+	}
+	text := " " + label + " "
+	textW := lipgloss.Width(text)
+	inner := width - 2
+	left := inner - textW - 2
+	if left < 1 {
+		left = 1
+	}
+	right := inner - left - textW
+	if right < 1 {
+		right = 1
+		left = inner - textW - right
+		if left < 1 {
+			left = 1
+		}
+	}
+	return border.Render("╰"+strings.Repeat("─", left)) +
+		bg.Render(text) +
+		border.Render(strings.Repeat("─", right)+"╯")
 }
 
 // renderFooterMeta shows provider/model and approval mode (Grok footer strip).
@@ -1478,14 +1700,14 @@ func (m model) renderFooterMeta() string {
 	if provider != "" || modelName != "" {
 		left = fmt.Sprintf("%s / %s", first(provider, "—"), first(modelName, "—"))
 	}
-	right := "normal"
+	right := ""
 	if m.info.AutoApprove {
 		right = "auto-approve"
 	}
-	if m.planMode {
-		right = "plan"
-	}
 	leftR := th.FooterMeta.Render(left)
+	if right == "" {
+		return m.paintRow(leftR, m.width)
+	}
 	rightR := th.FooterMeta.Render(right)
 	gap := m.width - lipgloss.Width(leftR) - lipgloss.Width(rightR)
 	if gap < 1 {

@@ -97,7 +97,10 @@ The backend emits **27 distinct event types** across `chat_runner.go` and `chat_
 | `tool_call` | `{name, args, id}` | Append `tool_call` message; render via grouped `ToolActivityBlock` |
 | `tool_result` | `{name, result, id}` | Append `tool_result` message; paired into the same `ToolActivityBlock` |
 | `approval` | `{name, args, options}` | Show approval card with Approve/Deny buttons |
+| `network_denial_hint` | `{session_id, denials[]}` | Show `NetworkDenialPrompt` so the user can approve or deny blocked sandbox egress |
 | `auto_approved` | `{name}` | Show auto-approved badge |
+
+For OpenShell network policy failures, `chat_runner.go` emits `network_denial_hint` as the single UI contract for both Studio and terminal clients. Network-aware tools (`http_request`, `web_fetch`, browser tools) use their URL argument or error body to identify the blocked endpoint. `shell_command` also has a generic fallback: if a non-zero shell/curl result looks like a network failure but stdout lacks explicit proxy details, the backend extracts any `http://` or `https://` URLs from the original shell command and prompts for those host/port pairs after applying the effective network policy.
 
 Tool messages stay separate in React state (and on the wire). At render time, `groupToolActivity` / `buildActivityRenderIndex` (`web/src/components/chat/toolActivity.ts`) fold **work segments** into one compact `ToolActivityBlock` (`web/src/components/chat/ToolActivityBlock.tsx`):
 

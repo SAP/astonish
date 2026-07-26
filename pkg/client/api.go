@@ -48,6 +48,13 @@ type StudioMessage struct {
 	ToolResult any    `json:"toolResult,omitempty"`
 }
 
+// UsageSummary is cumulative token usage from a Studio session detail response.
+type UsageSummary struct {
+	InputTokens  int64 `json:"inputTokens"`
+	OutputTokens int64 `json:"outputTokens"`
+	TotalTokens  int64 `json:"totalTokens"`
+}
+
 // SessionDetail is the typed session payload used by the TUI resume path.
 type SessionDetail struct {
 	ID           string          `json:"id"`
@@ -56,6 +63,7 @@ type SessionDetail struct {
 	CreatedAt    string          `json:"createdAt"`
 	UpdatedAt    string          `json:"updatedAt"`
 	Messages     []StudioMessage `json:"messages"`
+	TotalUsage   *UsageSummary   `json:"totalUsage,omitempty"`
 }
 
 // GetSessionDetail returns typed session history for the terminal chat app.
@@ -184,6 +192,59 @@ type ChatRequest struct {
 // SendChatMessage sends a chat message and returns an SSE stream of events.
 func (c *Client) SendChatMessage(req *ChatRequest) (*SSEStream, error) {
 	return c.SSE("POST", "/api/studio/chat", req)
+}
+
+// NetworkDenial describes a blocked outbound connection returned by Studio.
+type NetworkDenial struct {
+	ChunkID        string `json:"chunk_id"`
+	Host           string `json:"host"`
+	Port           uint32 `json:"port"`
+	Binary         string `json:"binary,omitempty"`
+	Rationale      string `json:"rationale,omitempty"`
+	SecurityNotes  string `json:"security_notes,omitempty"`
+	BroaderPattern string `json:"broader_pattern,omitempty"`
+}
+
+// NetworkDenialsResponse is returned by the network-denials polling endpoint.
+type NetworkDenialsResponse struct {
+	Denials     []NetworkDenial `json:"denials"`
+	SandboxName string          `json:"sandbox_name"`
+	Error       string          `json:"error,omitempty"`
+}
+
+// GetNetworkDenials returns pending network grants for a session.
+func (c *Client) GetNetworkDenials(sessionID string) (*NetworkDenialsResponse, error) {
+	var resp NetworkDenialsResponse
+	path := fmt.Sprintf("/api/studio/sessions/%s/network-denials", url.PathEscape(sessionID))
+	if err := c.DoJSON("GET", path, nil, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// ApproveNetworkGrant approves a specific draft policy chunk.
+func (c *Client) ApproveNetworkGrant(sessionID, chunkID, sandboxName string) error {
+	body := map[string]string{"chunk_id": chunkID, "sandbox_name": sandboxName}
+	path := fmt.Sprintf("/api/studio/sessions/%s/network-grants/approve", url.PathEscape(sessionID))
+	return c.DoJSON("POST", path, body, nil)
+}
+
+// ApproveNetworkGrantBroader approves a host/port pattern for the session sandbox.
+func (c *Client) ApproveNetworkGrantBroader(sessionID, host string, port uint32, sandboxName string) error {
+	body := map[string]any{"host": host, "port": port, "sandbox_name": sandboxName}
+	path := fmt.Sprintf("/api/studio/sessions/%s/network-grants/approve-broader", url.PathEscape(sessionID))
+	return c.DoJSON("POST", path, body, nil)
+}
+
+// DenyNetworkGrant rejects a draft policy chunk. Empty chunk IDs are accepted
+// by the server for stdout-derived denials and simply acknowledge the prompt.
+func (c *Client) DenyNetworkGrant(sessionID, chunkID, sandboxName, reason string) error {
+	body := map[string]string{"chunk_id": chunkID, "sandbox_name": sandboxName}
+	if reason != "" {
+		body["reason"] = reason
+	}
+	path := fmt.Sprintf("/api/studio/sessions/%s/network-grants/deny", url.PathEscape(sessionID))
+	return c.DoJSON("POST", path, body, nil)
 }
 
 // GetSessionStatus checks if a session has an active runner.

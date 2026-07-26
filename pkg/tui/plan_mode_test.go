@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -20,21 +21,45 @@ func TestTurnOptionsPlanMode(t *testing.T) {
 	}
 }
 
-func TestTogglePlanMode(t *testing.T) {
+func TestTogglePlanModeDoesNotWriteTranscriptMessages(t *testing.T) {
 	m := model{tr: events.NewTranscript()}
 	m.togglePlanMode()
 	if !m.planMode {
 		t.Fatal("expected plan mode enabled")
 	}
-	if len(m.tr.Items) == 0 || !strings.Contains(m.tr.Items[len(m.tr.Items)-1].Content, "Plan mode enabled") {
-		t.Fatalf("expected enabled system notice, got %#v", m.tr.Items)
+	if len(m.tr.Items) != 0 {
+		t.Fatalf("mode toggle should not write transcript messages, got %#v", m.tr.Items)
 	}
 
 	m.togglePlanMode()
 	if m.planMode {
 		t.Fatal("expected plan mode disabled")
 	}
-	if !strings.Contains(m.tr.Items[len(m.tr.Items)-1].Content, "Plan mode disabled") {
-		t.Fatalf("expected disabled system notice, got %#v", m.tr.Items[len(m.tr.Items)-1])
+	if len(m.tr.Items) != 0 {
+		t.Fatalf("mode toggle should stay silent, got %#v", m.tr.Items)
 	}
+}
+
+func TestRenderComposerShowsModeInBottomBorder(t *testing.T) {
+	m := newTestComposerModel(80)
+	out := stripANSI(m.renderComposer())
+	if !strings.Contains(out, " Normal ") {
+		t.Fatalf("normal composer should show Normal mode label:\n%s", out)
+	}
+	if strings.Contains(out, " Plan ") {
+		t.Fatalf("normal composer should not show Plan mode label:\n%s", out)
+	}
+
+	m.planMode = true
+	out = stripANSI(m.renderComposer())
+	if !strings.Contains(out, " Plan ") {
+		t.Fatalf("plan composer should show Plan mode label:\n%s", out)
+	}
+}
+
+func newTestComposerModel(width int) model {
+	m := newModel(context.Background(), Config{Backend: staticBackend{}, Width: width, Height: 24})
+	m.ready = true
+	m.layout()
+	return m
 }

@@ -6,14 +6,15 @@ import "strings"
 type ItemKind string
 
 const (
-	ItemUser     ItemKind = "user"
-	ItemAgent    ItemKind = "agent"
-	ItemThinking ItemKind = "thinking"
-	ItemActivity ItemKind = "activity"
-	ItemSystem   ItemKind = "system"
-	ItemError    ItemKind = "error"
-	ItemApproval ItemKind = "approval"
-	ItemArtifact ItemKind = "artifact"
+	ItemUser          ItemKind = "user"
+	ItemAgent         ItemKind = "agent"
+	ItemThinking      ItemKind = "thinking"
+	ItemActivity      ItemKind = "activity"
+	ItemSystem        ItemKind = "system"
+	ItemError         ItemKind = "error"
+	ItemApproval      ItemKind = "approval"
+	ItemNetworkDenial ItemKind = "network_denial"
+	ItemArtifact      ItemKind = "artifact"
 )
 
 // ToolStep is one paired tool call/result inside an activity fold.
@@ -46,6 +47,11 @@ type Item struct {
 	ToolName string
 	Args     map[string]any
 	Options  []string
+
+	// Network denial fields.
+	NetworkDenials []NetworkDenial
+	SandboxName    string
+	SessionID      string
 
 	// Artifact path.
 	Path string
@@ -126,6 +132,17 @@ func (t *Transcript) Apply(ev Event) {
 		})
 		t.ApprovalIdx = len(t.Items) - 1
 		t.Status = "Waiting for approval…"
+	case KindNetworkDenial:
+		t.Awaiting = true
+		t.Items = append(t.Items, Item{
+			Kind:           ItemNetworkDenial,
+			Content:        "Network access blocked",
+			NetworkDenials: ev.NetworkDenials,
+			SandboxName:    ev.SandboxName,
+			SessionID:      ev.SessionID,
+		})
+		t.ApprovalIdx = len(t.Items) - 1
+		t.Status = "Waiting for network authorization…"
 	case KindAutoApproved:
 		// Soft process note — status only, no extra transcript clutter.
 		t.Status = "Auto-approved " + firstNonEmpty(ev.ToolName, "tool")
@@ -138,7 +155,7 @@ func (t *Transcript) Apply(ev Event) {
 		}
 		t.Items = append(t.Items, Item{Kind: ItemArtifact, Path: path, Content: path})
 	case KindUsage:
-		t.LastUsage = ev.Usage
+		t.addUsage(ev.Usage)
 	case KindError:
 		t.Items = append(t.Items, Item{Kind: ItemError, Content: ev.Text})
 		t.Streaming = false
@@ -184,12 +201,24 @@ func (t *Transcript) Apply(ev Event) {
 	}
 }
 
+func (t *Transcript) addUsage(usage *Usage) {
+	if usage == nil {
+		return
+	}
+	if t.LastUsage == nil {
+		t.LastUsage = &Usage{}
+	}
+	t.LastUsage.Input += usage.Input
+	t.LastUsage.Output += usage.Output
+	t.LastUsage.Total += usage.Total
+}
+
 // turnStart returns the index of the first item in the current soft run
-// (after the last hard-break item). Hard breaks: user, error, approval, artifact, system.
+// (after the last hard-break item). Hard breaks: user, error, approval, network denial, artifact, system.
 func (t *Transcript) turnStart() int {
 	for i := len(t.Items) - 1; i >= 0; i-- {
 		switch t.Items[i].Kind {
-		case ItemUser, ItemError, ItemApproval, ItemArtifact, ItemSystem:
+		case ItemUser, ItemError, ItemApproval, ItemNetworkDenial, ItemArtifact, ItemSystem:
 			return i + 1
 		}
 	}

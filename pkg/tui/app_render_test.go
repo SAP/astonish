@@ -65,14 +65,47 @@ func TestRenderActivityCollapsedPreviewShowsToolRows(t *testing.T) {
 		},
 	}
 	out := stripANSI(m.renderActivity(item, 80))
-	if !strings.Contains(out, "✓  Search  kubernetes") {
+	if !strings.Contains(out, "✓ Search kubernetes") {
 		t.Fatalf("missing search preview row: %q", out)
 	}
-	if !strings.Contains(out, "✓  Run command  `kubectl get clusters`") {
+	if !strings.Contains(out, "✓ Run command `kubectl get clusters`") {
 		t.Fatalf("missing command preview row: %q", out)
 	}
-	if !strings.Contains(out, "… 1 more; click to expand") {
-		t.Fatalf("missing click-to-expand hint: %q", out)
+	if !strings.Contains(out, "✓ Read file README.md") {
+		t.Fatalf("collapsed activity should show every tool row: %q", out)
+	}
+	if strings.Contains(out, "… 1 more") {
+		t.Fatalf("collapsed activity should not hide extra tools: %q", out)
+	}
+	if !strings.Contains(out, "click to expand details") {
+		t.Fatalf("missing click-to-expand details hint: %q", out)
+	}
+}
+
+func TestRenderActivityCollapsedCommandRowsStaySingleLine(t *testing.T) {
+	m := model{theme: DefaultTheme(), width: 100}
+	item := events.Item{
+		Kind: events.ItemActivity,
+		Steps: []events.ToolStep{
+			{Name: "run_terminal_command", Args: map[string]any{"command": "# Step 1: Assign credentials to variables\nAPP_CREDENTIAL=$(cat /tmp/very-long-file-name.json)\necho done"}, Status: "complete"},
+		},
+	}
+	out := stripANSI(m.renderActivity(item, 56))
+	lines := strings.Split(out, "\n")
+	toolRows := 0
+	for _, line := range lines {
+		if strings.Contains(line, "Run command") {
+			toolRows++
+			if strings.Contains(line, "APP_CREDENTIAL") {
+				t.Fatalf("collapsed command row should truncate before wrapping command continuation: %q", line)
+			}
+			if got := lipgloss.Width(line); got > 56 {
+				t.Fatalf("collapsed command row width=%d want <=56: %q", got, line)
+			}
+		}
+	}
+	if toolRows != 1 {
+		t.Fatalf("expected one single-line command row, got %d in %q", toolRows, out)
 	}
 }
 

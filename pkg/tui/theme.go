@@ -35,6 +35,7 @@ type Theme struct {
 	// Composer / footer chrome
 	InputBorder      lipgloss.Style
 	InputBorderFocus lipgloss.Style
+	InputBorderPlan  lipgloss.Style
 	InputPrompt      lipgloss.Style
 	InputPlaceholder lipgloss.Style
 	FooterMeta       lipgloss.Style
@@ -109,6 +110,11 @@ func DefaultTheme() Theme {
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(white).
 			Padding(0, 1),
+		InputBorderPlan: lipgloss.NewStyle().
+			Background(bg).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("214")).
+			Padding(0, 1),
 		InputPrompt:      lipgloss.NewStyle().Foreground(brand).Background(bg).Bold(true),
 		InputPlaceholder: lipgloss.NewStyle().Foreground(dim).Background(bg).Italic(true),
 		FooterMeta:       lipgloss.NewStyle().Foreground(muted).Background(bg),
@@ -129,7 +135,7 @@ func plainTheme() Theme {
 		Error: s, Success: s, Danger: s, Number: s, Border: s,
 		Header: s, Status: s, Input: s, Activity: s, Approval: s,
 		CodeGutter:  s,
-		InputBorder: box, InputBorderFocus: box,
+		InputBorder: box, InputBorderFocus: box, InputBorderPlan: box,
 		InputPrompt: s, InputPlaceholder: s, FooterMeta: s, Hint: s,
 		NoColor: true,
 	}

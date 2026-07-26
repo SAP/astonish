@@ -67,6 +67,7 @@ type platformBackend struct {
 	org         string
 	team        string
 	user        string
+	usage       *events.Usage
 	resumed     bool
 
 	mu     sync.Mutex
@@ -82,6 +83,8 @@ func (b *platformBackend) Info() backend.Info {
 		ServerURL:   b.serverURL,
 		Org:         b.org,
 		Team:        b.team,
+		User:        b.user,
+		Usage:       cloneUsage(b.usage),
 		IsResumed:   b.resumed,
 		AutoApprove: b.autoApprove,
 		Notices:     nil,
@@ -157,8 +160,45 @@ func (b *platformBackend) ResumeSession(ctx context.Context, sessionID string) (
 func (b *platformBackend) NewSession() {
 	b.mu.Lock()
 	b.sessionID = ""
+	b.usage = nil
 	b.resumed = false
 	b.mu.Unlock()
+}
+
+func (b *platformBackend) ApproveNetworkGrant(ctx context.Context, sessionID string, denial events.NetworkDenial, broader bool, sandboxName string) error {
+	_ = ctx
+	if sessionID == "" {
+		b.mu.Lock()
+		sessionID = b.sessionID
+		b.mu.Unlock()
+	}
+	if sessionID == "" {
+		return fmt.Errorf("session id required for network approval")
+	}
+	if broader || denial.ChunkID == "" {
+		host := denial.Host
+		if broader && denial.BroaderPattern != "" {
+			host = denial.BroaderPattern
+		}
+		if host == "" {
+			return fmt.Errorf("host required for network approval")
+		}
+		return b.client.ApproveNetworkGrantBroader(sessionID, host, denial.Port, sandboxName)
+	}
+	return b.client.ApproveNetworkGrant(sessionID, denial.ChunkID, sandboxName)
+}
+
+func (b *platformBackend) DenyNetworkGrant(ctx context.Context, sessionID string, denial events.NetworkDenial, sandboxName string) error {
+	_ = ctx
+	if sessionID == "" {
+		b.mu.Lock()
+		sessionID = b.sessionID
+		b.mu.Unlock()
+	}
+	if sessionID == "" {
+		return fmt.Errorf("session id required for network denial")
+	}
+	return b.client.DenyNetworkGrant(sessionID, denial.ChunkID, sandboxName, "denied from terminal")
 }
 
 func (b *platformBackend) loadHistory(ctx context.Context, id string) ([]backend.HistoryEntry, error) {
@@ -170,8 +210,54 @@ func (b *platformBackend) loadHistory(ctx context.Context, id string) ([]backend
 	b.mu.Lock()
 	// Keep title available via Info if we stash it — optional.
 	_ = detail.Title
+	b.usage = usageFromSessionDetail(detail)
 	b.mu.Unlock()
 	return studioMessagesToHistory(detail.Messages), nil
+}
+
+func usageFromSessionDetail(detail *client.SessionDetail) *events.Usage {
+	if detail == nil || detail.TotalUsage == nil {
+		return nil
+	}
+	return &events.Usage{
+		Input:  detail.TotalUsage.InputTokens,
+		Output: detail.TotalUsage.OutputTokens,
+		Total:  detail.TotalUsage.TotalTokens,
+	}
+}
+
+func networkDenialFromClient(d client.NetworkDenial) events.NetworkDenial {
+	return events.NetworkDenial{
+		ChunkID:        d.ChunkID,
+		Host:           d.Host,
+		Port:           d.Port,
+		Binary:         d.Binary,
+		Rationale:      d.Rationale,
+		SecurityNotes:  d.SecurityNotes,
+		BroaderPattern: d.BroaderPattern,
+	}
+}
+
+func cloneUsage(usage *events.Usage) *events.Usage {
+	if usage == nil {
+		return nil
+	}
+	return &events.Usage{Input: usage.Input, Output: usage.Output, Total: usage.Total}
+}
+
+func addUsage(total, delta *events.Usage) *events.Usage {
+	if delta == nil {
+		return cloneUsage(total)
+	}
+	if total == nil {
+		total = &events.Usage{}
+	} else {
+		total = cloneUsage(total)
+	}
+	total.Input += delta.Input
+	total.Output += delta.Output
+	total.Total += delta.Total
+	return total
 }
 
 func studioMessagesToHistory(msgs []client.StudioMessage) []backend.HistoryEntry {
@@ -272,12 +358,20 @@ func (b *platformBackend) RunTurn(ctx context.Context, message string, opts back
 			}
 
 			for _, ev := range mapSSEToEvents(sev, debug) {
+				if ev.Kind == events.KindNetworkDenial && len(ev.NetworkDenials) == 0 {
+					ev = b.hydrateNetworkDenialEvent(ev, sessionID)
+				}
 				// Keep session id in sync for subsequent turns.
 				if ev.Kind == events.KindSession && ev.SessionID != "" {
 					b.mu.Lock()
 					b.sessionID = ev.SessionID
 					b.mu.Unlock()
 					sessionID = ev.SessionID
+				}
+				if ev.Kind == events.KindUsage && ev.Usage != nil {
+					b.mu.Lock()
+					b.usage = addUsage(b.usage, ev.Usage)
+					b.mu.Unlock()
 				}
 				select {
 				case out <- ev:
@@ -291,6 +385,30 @@ func (b *platformBackend) RunTurn(ctx context.Context, message string, opts back
 	}()
 
 	return out, nil
+}
+
+func (b *platformBackend) hydrateNetworkDenialEvent(ev events.Event, fallbackSessionID string) events.Event {
+	sessionID := ev.SessionID
+	if sessionID == "" {
+		sessionID = fallbackSessionID
+	}
+	if sessionID == "" {
+		return ev
+	}
+	resp, err := b.client.GetNetworkDenials(sessionID)
+	if err != nil || resp == nil || len(resp.Denials) == 0 {
+		return ev
+	}
+	denials := make([]events.NetworkDenial, 0, len(resp.Denials))
+	for _, d := range resp.Denials {
+		denials = append(denials, networkDenialFromClient(d))
+	}
+	ev.SessionID = sessionID
+	if ev.SandboxName == "" {
+		ev.SandboxName = resp.SandboxName
+	}
+	ev.NetworkDenials = denials
+	return ev
 }
 
 func (b *platformBackend) tryReconnectStream(ctx context.Context, out chan<- events.Event, sessionID string, debug bool, cause error) (*client.SSEStream, bool) {
@@ -402,6 +520,29 @@ func mapSSEToEvents(sev *client.SSEEvent, debug bool) []events.Event {
 			}
 			return []events.Event{{Kind: events.KindAutoApproved, ToolName: tool}}
 		}
+	case "network_denial_hint":
+		var payload struct {
+			SessionID   string                 `json:"session_id"`
+			SessionID2  string                 `json:"sessionId"`
+			SandboxName string                 `json:"sandbox_name"`
+			Denials     []client.NetworkDenial `json:"denials"`
+		}
+		if json.Unmarshal(data, &payload) == nil {
+			sessionID := payload.SessionID
+			if sessionID == "" {
+				sessionID = payload.SessionID2
+			}
+			denials := make([]events.NetworkDenial, 0, len(payload.Denials))
+			for _, d := range payload.Denials {
+				denials = append(denials, networkDenialFromClient(d))
+			}
+			if len(denials) > 0 {
+				return []events.Event{events.NewNetworkDenial(sessionID, payload.SandboxName, denials)}
+			}
+			if sessionID != "" {
+				return []events.Event{events.NewNetworkDenial(sessionID, payload.SandboxName, nil)}
+			}
+		}
 	case "thinking":
 		var payload struct {
 			Text string `json:"text"`
@@ -472,17 +613,26 @@ func mapSSEToEvents(sev *client.SSEEvent, debug bool) []events.Event {
 		}
 	case "usage":
 		var payload struct {
-			Input  int64 `json:"input"`
-			Output int64 `json:"output"`
-			Total  int64 `json:"total"`
+			Input        int64 `json:"input"`
+			Output       int64 `json:"output"`
+			Total        int64 `json:"total"`
+			InputTokens  int64 `json:"input_tokens"`
+			OutputTokens int64 `json:"output_tokens"`
+			TotalTokens  int64 `json:"total_tokens"`
 		}
 		if json.Unmarshal(data, &payload) == nil {
+			input := firstNonZero(payload.Input, payload.InputTokens)
+			output := firstNonZero(payload.Output, payload.OutputTokens)
+			total := firstNonZero(payload.Total, payload.TotalTokens)
+			if total == 0 && (input != 0 || output != 0) {
+				total = input + output
+			}
 			return []events.Event{{
 				Kind: events.KindUsage,
 				Usage: &events.Usage{
-					Input:  payload.Input,
-					Output: payload.Output,
-					Total:  payload.Total,
+					Input:  input,
+					Output: output,
+					Total:  total,
 				},
 			}}
 		}
@@ -572,4 +722,13 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+func firstNonZero(vals ...int64) int64 {
+	for _, v := range vals {
+		if v != 0 {
+			return v
+		}
+	}
+	return 0
 }

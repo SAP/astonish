@@ -114,7 +114,6 @@ func (m model) startNewSession() (tea.Model, tea.Cmd) {
 	m.backend.NewSession()
 	m.info = m.backend.Info()
 	m.tr.Reset()
-	m.tr.Apply(events.NewSystem("New session — send a message to begin."))
 	m.refreshViewport()
 	return m, nil
 }
@@ -140,15 +139,15 @@ func (m model) applyHistory(msg historyLoadedMsg) (tea.Model, tea.Cmd) {
 	m.planMode = false
 	m.tr.LoadHistory(entries)
 	m.info = m.backend.Info()
+	if m.info.Usage != nil {
+		m.tr.LastUsage = &events.Usage{Input: m.info.Usage.Input, Output: m.info.Usage.Output, Total: m.info.Usage.Total}
+	}
 	if msg.sessionID != "" {
 		m.info.SessionID = msg.sessionID
 	}
 	m.info.IsResumed = true
-	if msg.notice != "" {
+	if msg.notice != "" && len(entries) > 0 {
 		m.tr.Apply(events.NewSystem(msg.notice))
-	}
-	if len(entries) == 0 {
-		m.tr.Apply(events.NewSystem("Empty session — send a message to continue."))
 	}
 	m.sessions = sessionsState{}
 	m.refreshViewport()

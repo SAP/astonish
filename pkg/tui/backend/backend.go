@@ -18,6 +18,9 @@ type Info struct {
 	ServerURL string
 	Org       string
 	Team      string
+	User      string
+	// Usage is cumulative token usage known when opening/resuming a session.
+	Usage     *events.Usage
 	IsResumed bool
 	// AutoApprove reflects the session tool-approval mode for footer chrome.
 	AutoApprove bool
@@ -51,6 +54,13 @@ type TurnOptions struct {
 	// SystemContext is a per-turn hidden instruction sent to Studio chat. It is
 	// not persisted as a visible user message.
 	SystemContext string
+}
+
+// NetworkGrantBackend is implemented by platform backends that can resolve
+// sandbox network-denial prompts without sending a normal chat approval message.
+type NetworkGrantBackend interface {
+	ApproveNetworkGrant(ctx context.Context, sessionID string, denial events.NetworkDenial, broader bool, sandboxName string) error
+	DenyNetworkGrant(ctx context.Context, sessionID string, denial events.NetworkDenial, sandboxName string) error
 }
 
 // Backend drives one interactive chat session against the platform.

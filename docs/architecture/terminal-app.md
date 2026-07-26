@@ -27,6 +27,7 @@ flowchart TB
   end
   subgraph platform [Astonish platform]
     API["/api/studio/chat SSE"]
+    Grants["/api/studio/sessions/{id}/network-grants/*"]
     Agent[ChatAgent / tools / sandbox]
   end
   login --> chat
@@ -35,7 +36,9 @@ flowchart TB
   RunTUI --> PlatformBE
   RunTUI --> App
   PlatformBE -->|HTTP + SSE| API
+  PlatformBE -->|approve / deny grants| Grants
   API --> Agent
+  Grants --> Agent
   PlatformBE -->|events.Event| App
   App --> Events
 ```
@@ -56,7 +59,7 @@ If `client.IsRemoteMode()` is false (no `~/.config/astonish/remote.yaml` / login
 
 ### Event model
 
-All UI state is driven by `events.Event`. The platform backend maps Studio SSE types (`text`, `tool_call`, `tool_result`, `approval`, …) into the same kinds. Unknown / Studio-only events soft-degrade to `system` notices.
+All UI state is driven by `events.Event`. The platform backend maps Studio SSE types (`text`, `tool_call`, `tool_result`, `approval`, `network_denial_hint`, …) into the same kinds. Unknown / Studio-only events soft-degrade to `system` notices.
 
 ### Transcript reducer
 
@@ -65,21 +68,24 @@ All UI state is driven by `events.Event`. The platform backend maps Studio SSE t
 - Sticky agent bubble for streaming text
 - Tool activity folds for call/result pairs
 - Approval sets `Awaiting`; next user message is the approval response
+- Network denial prompts set `Awaiting`; the selected allow/deny key calls the Studio network-grant API directly
 
 ## UI chrome
 
 ```
-header: Astonish · platform · session          https://…
+Astonish · https://… · user@example.com          Usage 4.6k · in 1.2k · out 3.4k
 ────────────────────────────────────────────────────────
 transcript viewport
 ────────────────────────────────────────────────────────
 [live status / spinner]
 ╭──────────────────────────────────────────────────────╮
 │ ❯  Message Astonish…                                 │  ← bordered composer
-╰──────────────────────────────────────────────────────╯
-provider / model                         auto-approve|normal
+╰──────────────────────────────────────────── Normal ──╯
+provider / model                         auto-approve
 Enter send · ctrl+j newline · /help · ctrl+c quit
 ```
+
+The header intentionally stays a single row: the left side identifies the connected Astonish platform URL and logged-in user from the remote login config; the right side mirrors Studio Chat's Usage control with cumulative token usage (`total`, `input`, `output`) from live `usage` SSE events and from resumed session `totalUsage` metadata. The layout renders against a conservative safe height (one row shorter than the raw terminal report) because some nested panes report a height slightly larger than the visible alternate screen; without that guard, the top header can scroll out of view.
 
 Composer styles live in `theme.go` (`ApplyTextareaStyles` clears default
 AdaptiveColor cursor-line backgrounds that break dark alt-screen UIs).
@@ -88,10 +94,12 @@ AdaptiveColor cursor-line backgrounds that break dark alt-screen UIs).
 
 | Surface | Implementation |
 |---------|----------------|
+| Empty state | Centered welcome card inside the viewport for new/empty chats, with an orange centered title and concise onboarding copy; it is not a transcript item and disappears as soon as the first user message starts the conversation |
 | User messages | Full-width orange outline bubble; long prompts are height-capped and use a bottom-border `double-click to expand/collapse` affordance |
 | Agent markdown | `pkg/tui/render.Markdown` — headings, lists, inline code/bold |
 | Code fences | `pkg/tui/render.CodeBlock` — chroma highlight + numeric gutter |
-| Tool activity | `pkg/tui/render.ActivitySummary` + `StatsFromSteps` (`+N/−M`), with categorized collapsed summaries, always-visible tool previews, and click-to-expand per-tool details |
+| Tool activity | `pkg/tui/render.ActivitySummary` + `StatsFromSteps` (`+N/−M`), with categorized collapsed summaries that list every tool row as a single-line preview; click-to-expand reveals full parameters, diffs, and result previews |
+| Network authorization | Inline transcript notice plus a focused approval card for OpenShell proxy denials; `enter`/`y` allows the blocked host, `b` allows the suggested broader pattern, and `n`/`esc` denies |
 | File diffs | `pkg/tui/render.FileDiff` / `DiffFromToolArgs` from `edit_file`/`write_file` args |
 
 Streaming: unclosed fences render as incomplete code blocks (header shows `…`).
@@ -122,6 +130,18 @@ When SSE emits `approval`, the TUI shows a focused card (tool name + args previe
 Keys: `y` / `enter` approve, `n` / `esc` deny, `1`–`9` pick option. Response is sent as a
 follow-up `RunTurn` message (same as Studio).
 
+### Network authorization prompts
+
+When OpenShell blocks outbound network access, Studio emits `network_denial_hint`. The terminal backend maps that into `KindNetworkDenial`, preserving the session id, sandbox name, blocked host/port, binary, rationale, security notes, and suggested broader pattern. If the SSE hint carries only a session id, the backend polls `GET /api/studio/sessions/{id}/network-denials` to hydrate pending draft-policy details before rendering the prompt. The event is emitted generically for any blocked `http://` or `https://` endpoint the backend can identify, including shell-command/curl failures where the failed output is generic but the original command contains URLs.
+
+The UI mirrors Studio Chat’s `NetworkDenialPrompt` in terminal form:
+
+- `enter` / `y` approves the specific chunk when a `chunk_id` exists; stdout-derived denials without a chunk use the broader host/port approval endpoint.
+- `b` approves `broader_pattern` when the backend suggested one.
+- `n` / `esc` denies or acknowledges the pending denial.
+
+Approvals and denials call the network-grant REST endpoints directly instead of sending a normal chat message. After a successful approval, the terminal sends the same retry instruction Studio uses: “I just approved network access to <host>. Please retry the previous command that was blocked by the proxy.”
+
 ### Sessions
 
 - `ctrl+l` or `/sessions` — list sessions, `enter` resume, `n` new, `esc` close
@@ -136,7 +156,7 @@ Typing `@` plus part of a local relative path opens a fuzzy file picker above th
 
 ### Plan mode
 
-`/plan` or `shift+tab` toggles a terminal-only plan mode, matching the convention used by coding-agent CLIs. While enabled, the footer shows `plan` and each normal user turn carries a hidden per-turn `systemContext` instructing the platform agent to produce a concise plan without executing tools or making changes. Approval responses deliberately do **not** inherit this context because they are part of an already-running approval protocol. Starting or resuming a session clears the toggle so mode does not leak across conversations. The mode label is intentionally minimal for now; future modes can make this more meaningful (for example deep research, report, or build-oriented modes).
+`/plan` or `shift+tab` toggles a terminal-only plan mode, matching the convention used by coding-agent CLIs. Mode changes are UI state only: they do not append system messages to the transcript. The current mode is embedded in the composer bottom border (`Normal` on the standard white border, `Plan` on a light-orange border). While enabled, each normal user turn carries a hidden per-turn `systemContext` instructing the platform agent to produce a concise plan without executing tools or making changes. Approval responses deliberately do **not** inherit this context because they are part of an already-running approval protocol. Starting or resuming a session clears the toggle so mode does not leak across conversations. Future modes can reuse the same composer-border affordance (for example deep research, report, or build-oriented modes).
 
 ### Reconnect behavior
 

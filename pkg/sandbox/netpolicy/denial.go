@@ -72,6 +72,58 @@ var networkErrorIndicators = []string{
 	"failed to connect",
 }
 
+var shellNetworkFailureIndicators = []string{
+	"http_status: 000",
+	"curl: (5)",
+	"curl: (6)",
+	"curl: (7)",
+	"curl: (28)",
+	"curl: (35)",
+	"curl: (52)",
+	"curl: (56)",
+	"failed to connect",
+	"connection timed out",
+	"could not resolve host",
+	"connect tunnel failed",
+	"proxy returned 403",
+	"proxy refused connection",
+}
+
+// LooksLikeShellNetworkFailure checks generic shell/curl failures that may not
+// include proxy details but can be mapped from URLs in the original command.
+func LooksLikeShellNetworkFailure(resp map[string]any) bool {
+	if resp == nil || !hasNonZeroExitCode(resp) {
+		return false
+	}
+	text := responseText(resp)
+	if text == "" {
+		return false
+	}
+	lower := strings.ToLower(text)
+	for _, indicator := range shellNetworkFailureIndicators {
+		if strings.Contains(lower, indicator) {
+			return true
+		}
+	}
+	return false
+}
+
+func responseText(resp map[string]any) string {
+	if resp == nil {
+		return ""
+	}
+	var parts []string
+	for _, key := range []string{"stdout", "stderr", "error"} {
+		switch v := resp[key].(type) {
+		case string:
+			parts = append(parts, v)
+		case error:
+			parts = append(parts, v.Error())
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
 // ExtractDenialsFromOutput parses tool stdout for denied host:port pairs.
 func ExtractDenialsFromOutput(stdout string) []map[string]any {
 	seen := make(map[string]bool)
@@ -120,6 +172,7 @@ var (
 	resolveFailPattern = regexp.MustCompile(`(?i)could not resolve host:\s*([a-zA-Z0-9._-]+)`)
 	goHTTPHostPattern  = regexp.MustCompile(`dial tcp ([a-zA-Z0-9._-]+):(\d+)`)
 	urlInErrorPattern  = regexp.MustCompile(`"(https?://[^"]+)"`)
+	shellURLPattern    = regexp.MustCompile(`https?://[^\s"'<>\\]+`)
 )
 
 var networkToolNames = map[string]bool{
@@ -192,6 +245,38 @@ var goHTTPProxyDenialIndicators = []string{
 	"\": proxy authentication required",
 	"\": service unavailable",
 	"\": bad gateway",
+}
+
+// ExtractDenialsFromShellCommand extracts denied hosts from URLs embedded in a
+// shell command. It intentionally handles only explicit http/https URLs to
+// avoid false positives from arbitrary command arguments or filenames.
+func ExtractDenialsFromShellCommand(command string) []map[string]any {
+	seen := make(map[string]bool)
+	var denials []map[string]any
+
+	add := func(host string, port int) {
+		if host == "" {
+			return
+		}
+		key := fmt.Sprintf("%s:%d", host, port)
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		denials = append(denials, map[string]any{
+			"host":            host,
+			"port":            port,
+			"broader_pattern": openshell.SuggestBroaderPattern(host),
+		})
+	}
+
+	for _, raw := range shellURLPattern.FindAllString(command, -1) {
+		urlStr := strings.TrimRight(raw, ".,;:)]}")
+		if host, port := HostPortFromURL(urlStr); host != "" {
+			add(host, port)
+		}
+	}
+	return denials
 }
 
 // ExtractDenialFromToolError extracts denied hosts from a network tool response.

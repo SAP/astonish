@@ -27,6 +27,11 @@ type hitRegion struct {
 	kind    events.ItemKind
 }
 
+type selectionPoint struct {
+	line int
+	col  int
+}
+
 // Config configures the terminal chat app.
 type Config struct {
 	Backend backend.Backend
@@ -77,10 +82,22 @@ type model struct {
 
 	// hitRegions maps rendered transcript lines → items (for mouse expand).
 	hitRegions []hitRegion
+	// transcriptPlainLines is the visible transcript without ANSI styling; used
+	// for drag-to-copy selection in Bubble Tea mouse mode.
+	transcriptPlainLines []string
 	// double-click detection for expanding user bubbles.
 	lastClickAt time.Time
 	lastClickY  int
 	lastClickX  int
+	// drag selection state. Native terminal selection is unavailable while mouse
+	// reporting is enabled, so the app copies selected transcript text itself.
+	selecting      bool
+	selectionStart selectionPoint
+	selectionEnd   selectionPoint
+	selectionMoved bool
+	copyStatus     string
+	copiedUntil    time.Time
+	clickIsDouble  bool
 
 	// overlays
 	sessions sessionsState
@@ -746,8 +763,10 @@ func (m *model) refreshViewport() {
 
 // viewportTopY is the screen row where the transcript viewport starts.
 func (m model) viewportTopY() int {
-	// header (1) + separator (1)
-	return 2
+	// Bubble Tea mouse rows in alt-screen land one row lower than the visual
+	// transcript origin for our header/separator stack. Use the calibrated
+	// content origin so drag selection starts on the row under the cursor.
+	return 1
 }
 
 func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
@@ -758,40 +777,120 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
-	if msg.Button != tea.MouseButtonLeft || msg.Action != tea.MouseActionPress {
+	if msg.Button != tea.MouseButtonLeft {
 		return m, nil
 	}
 
-	// Double-click detection.
+	switch msg.Action {
+	case tea.MouseActionPress:
+		return m.handleMousePress(msg)
+	case tea.MouseActionMotion:
+		return m.handleMouseMotion(msg)
+	case tea.MouseActionRelease:
+		return m.handleMouseRelease(msg)
+	default:
+		return m, nil
+	}
+}
+
+func (m model) handleMousePress(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	p, ok := m.selectionPointForMouse(msg)
+	if !ok {
+		m.selecting = false
+		return m, nil
+	}
+	m.selecting = true
+	m.selectionMoved = false
+	m.selectionStart = p
+	m.selectionEnd = p
+
+	// Double-click detection. The action itself is handled on release, so a
+	// click can still become a drag selection without triggering expansion.
 	now := time.Now()
-	isDouble := now.Sub(m.lastClickAt) < doubleClickWindowMS*time.Millisecond &&
+	m.clickIsDouble = now.Sub(m.lastClickAt) < doubleClickWindowMS*time.Millisecond &&
 		abs(msg.Y-m.lastClickY) <= 1 &&
 		abs(msg.X-m.lastClickX) <= 2
 	m.lastClickAt = now
 	m.lastClickY = msg.Y
 	m.lastClickX = msg.X
+	return m, nil
+}
 
-	if !isDouble {
+func (m model) handleMouseMotion(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if !m.selecting {
+		return m, nil
+	}
+	p, ok := m.selectionPointForMouse(msg)
+	if !ok {
+		return m, nil
+	}
+	if p != m.selectionStart {
+		m.selectionMoved = true
+	}
+	m.selectionEnd = p
+	m.refreshViewport()
+	return m, nil
+}
+
+func (m model) handleMouseRelease(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if !m.selecting {
+		return m, nil
+	}
+	if p, ok := m.selectionPointForMouse(msg); ok {
+		if p != m.selectionStart {
+			m.selectionMoved = true
+		}
+		m.selectionEnd = p
+	}
+	text := ""
+	if m.selectionMoved {
+		text = selectionText(m.transcriptPlainLines, m.selectionStart, m.selectionEnd)
+	}
+	m.selecting = false
+	m.selectionMoved = false
+	m.refreshViewport()
+	if strings.TrimSpace(text) != "" {
+		if err := writeClipboard(text); err != nil {
+			m.err = "Copy failed: " + err.Error()
+		} else {
+			m.copyStatus = fmt.Sprintf("Copied %d characters", len([]rune(text)))
+			m.copiedUntil = time.Now().Add(2 * time.Second)
+		}
 		return m, nil
 	}
 
-	// Map screen Y → content line inside viewport.
-	top := m.viewportTopY()
-	if msg.Y < top || msg.Y >= top+m.vp.Height {
-		return m, nil
-	}
-	contentLine := m.vp.YOffset + (msg.Y - top)
-	idx, ok := m.itemAtLine(contentLine)
+	idx, ok := m.itemAtLine(m.selectionStart.line)
 	if !ok {
 		return m, nil
 	}
 	it := m.tr.Items[idx]
-	if it.Kind != events.ItemUser && it.Kind != events.ItemActivity {
+	if it.Kind == events.ItemActivity && !m.clickIsDouble {
+		m.tr.ToggleExpand(idx)
+		m.refreshViewport()
 		return m, nil
 	}
-	m.tr.ToggleExpand(idx)
-	m.refreshViewport()
+	if it.Kind == events.ItemUser && m.clickIsDouble {
+		m.tr.ToggleExpand(idx)
+		m.refreshViewport()
+		return m, nil
+	}
 	return m, nil
+}
+
+func (m model) selectionPointForMouse(msg tea.MouseMsg) (selectionPoint, bool) {
+	top := m.viewportTopY()
+	if msg.Y < top || msg.Y >= top+m.vp.Height {
+		return selectionPoint{}, false
+	}
+	line := m.vp.YOffset + (msg.Y - top)
+	if line < 0 || line >= len(m.transcriptPlainLines) {
+		return selectionPoint{}, false
+	}
+	col := msg.X
+	if col < 0 {
+		col = 0
+	}
+	return selectionPoint{line: line, col: col}, true
 }
 
 func (m model) itemAtLine(line int) (int, bool) {
@@ -806,9 +905,19 @@ func (m model) itemAtLine(line int) (int, bool) {
 func (m *model) renderTranscript() (string, []hitRegion) {
 	var b strings.Builder
 	var hits []hitRegion
+	var plainLines []string
 	th := m.theme
 	cw := contentWidth(m.width)
 	lineNo := 0
+
+	appendPlain := func(block string) {
+		if block == "" {
+			return
+		}
+		for _, line := range strings.Split(block, "\n") {
+			plainLines = append(plainLines, stripANSI(line))
+		}
+	}
 
 	appendBlock := func(itemIdx int, kind events.ItemKind, block string) {
 		if block == "" {
@@ -816,14 +925,19 @@ func (m *model) renderTranscript() (string, []hitRegion) {
 		}
 		// Trailing newline normalization: count lines before padding.
 		block = strings.TrimRight(block, "\n")
-		padded := m.paintTranscriptBlock(padBlock(block))
+		rawPadded := padBlock(block)
+		rawPadded = m.applySelectionToBlock(rawPadded, lineNo)
+		padded := m.paintTranscriptBlock(rawPadded)
 		start := lineNo
-		n := lineCount(padded)
+		n := lineCount(rawPadded)
 		b.WriteString(padded)
 		b.WriteString("\n")
-		b.WriteString(m.paintRow("", m.width))
+		appendPlain(rawPadded)
+		gap := m.paintRow("", m.width)
+		b.WriteString(gap)
 		b.WriteString("\n") // vertical gap between messages
-		lineNo += n + 2     // block lines + blank separator line
+		plainLines = append(plainLines, "")
+		lineNo += n + 1 // block lines + one blank separator row
 		hits = append(hits, hitRegion{start: start, end: start + n, itemIdx: itemIdx, kind: kind})
 	}
 
@@ -869,6 +983,7 @@ func (m *model) renderTranscript() (string, []hitRegion) {
 			appendBlock(i, it.Kind, th.Muted.Width(cw).Render("📄 "+first(it.Path, it.Content)))
 		}
 	}
+	m.transcriptPlainLines = plainLines
 	return b.String(), hits
 }
 
@@ -924,6 +1039,35 @@ func (m model) renderThinkingBubble(content string, width int) string {
 }
 
 // renderActivity builds collapsed summary (+N/−M) and expanded tool/diff detail.
+func (m model) renderActivityCollapsedPreview(steps []events.ToolStep, width int) string {
+	if len(steps) == 0 {
+		return ""
+	}
+	limit := 2
+	if len(steps) < limit {
+		limit = len(steps)
+	}
+	var b strings.Builder
+	for i := 0; i < limit; i++ {
+		step := render.ToolStep{Name: steps[i].Name, Args: steps[i].Args, Result: steps[i].Result, Status: steps[i].Status}
+		b.WriteByte('\n')
+		line := "  " + render.ToolDetailLine(step)
+		if steps[i].Status == "error" {
+			b.WriteString(m.theme.Error.Width(width).Render(line))
+			continue
+		}
+		b.WriteString(m.theme.Muted.Width(width).Render(line))
+	}
+	if omitted := len(steps) - limit; omitted > 0 {
+		b.WriteByte('\n')
+		b.WriteString(m.theme.Hint.Width(width).Render(fmt.Sprintf("  … %d more; click to expand", omitted)))
+	} else {
+		b.WriteByte('\n')
+		b.WriteString(m.theme.Hint.Width(width).Render("  click to expand"))
+	}
+	return b.String()
+}
+
 func (m model) renderActivity(it events.Item, width int) string {
 	th := m.theme
 	rs := th.RenderStyles()
@@ -964,24 +1108,46 @@ func (m model) renderActivity(it events.Item, width int) string {
 		if pad < 1 {
 			pad = 1
 		}
-		head = head + strings.Repeat(" ", pad) + statsStr
+		head = head + th.Background.Render(strings.Repeat(" ", pad)) + statsStr
 	}
 
 	if !it.Expanded {
-		return head
+		return head + m.renderActivityCollapsedPreview(it.Steps, width)
 	}
 
 	var b strings.Builder
 	b.WriteString(head)
-	for _, s := range it.Steps {
+	for idx, s := range it.Steps {
 		b.WriteByte('\n')
-		status := s.Status
-		line := fmt.Sprintf("  %s  [%s]", s.Name, status)
-		b.WriteString(th.Muted.Width(width).Render(line))
+		line := render.ToolStatusLabel(s.Status) + "  " + render.ToolDisplayName(s.Name)
+		if idx == len(it.Steps)-1 && s.Status == "running" {
+			b.WriteString(th.Activity.Width(width).Render("  " + line))
+		} else if s.Status == "error" {
+			b.WriteString(th.Error.Width(width).Render("  " + line))
+		} else {
+			b.WriteString(th.Muted.Width(width).Render("  " + line))
+		}
+
+		step := render.ToolStep{Name: s.Name, Args: s.Args, Result: s.Result, Status: s.Status}
+		if detail := render.ToolDetailBody(step, width-4); detail != "" {
+			b.WriteByte('\n')
+			b.WriteString(th.Muted.Width(width).Render("    " + detail))
+		}
 		// Show file diffs for edit/write tools.
 		if d := render.DiffFromToolArgs(s.Name, s.Args, width, true, rs); d != "" {
 			b.WriteByte('\n')
 			b.WriteString(d)
+			continue
+		}
+		if preview := render.ToolResultPreview(step, width-6); preview != "" {
+			for _, line := range strings.Split(preview, "\n") {
+				b.WriteByte('\n')
+				style := th.Muted
+				if s.Status == "error" {
+					style = th.Error
+				}
+				b.WriteString(style.Width(width).Render("    " + line))
+			}
 		}
 	}
 	return b.String()
@@ -1279,6 +1445,9 @@ func (m model) renderLiveStatus() string {
 	}
 	if m.tr.Status != "" || m.tr.Streaming {
 		return m.paintRow(th.Status.Render(m.spin.View()+" "+first(m.tr.Status, "Working…")), m.width)
+	}
+	if m.copyStatus != "" && time.Now().Before(m.copiedUntil) {
+		return m.paintRow(th.Success.Render(m.copyStatus), m.width)
 	}
 	// Keep one row so chrome height is stable and painted with the app background.
 	return m.paintRow("", m.width)

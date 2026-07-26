@@ -1,6 +1,7 @@
 package render
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -100,29 +101,28 @@ func FormatStats(st ActivityStats, styles Styles) string {
 }
 
 func liveHint(s ToolStep) string {
-	name := s.Name
-	if name == "" {
-		name = "tool"
-	}
+	label := ToolDisplayName(s.Name)
 	path := pathHint(s.Args)
-	switch strings.ToLower(name) {
-	case "edit_file", "write_file":
+	switch categorize(s.Name) {
+	case catEdit:
 		if path != "" {
-			return fmt.Sprintf("Editing %s with %s", truncate(path, 40), name)
+			return fmt.Sprintf("Editing %s", truncate(path, 40))
 		}
-		return "Editing with " + name
-	case "read_file":
+		return "Editing files"
+	case catExplore:
 		if path != "" {
 			return fmt.Sprintf("Reading %s", truncate(path, 40))
 		}
-		return "Reading"
-	case "shell_command":
+		return "Reading files"
+	case catSearch:
+		return "Searching"
+	case catCmd:
 		if cmd, ok := s.Args["command"].(string); ok && cmd != "" {
 			return fmt.Sprintf("Running `%s`", truncate(cmd, 40))
 		}
 		return "Running command"
 	default:
-		return "Running " + name + "…"
+		return "Running " + label + "…"
 	}
 }
 
@@ -184,13 +184,13 @@ func categorizedBody(steps []ToolStep) string {
 func categorize(name string) toolCat {
 	key := strings.ToLower(name)
 	switch key {
-	case "write_file", "edit_file":
+	case "write_file", "edit_file", "search_replace":
 		return catEdit
-	case "read_file", "file_tree", "find_files", "repo_map", "read_pdf":
+	case "read_file", "file_tree", "find_files", "repo_map", "read_pdf", "list_dir":
 		return catExplore
-	case "grep_search", "search_tools", "web_search":
+	case "grep_search", "grep", "search_tools", "web_search", "web_fetch":
 		return catSearch
-	case "shell_command", "process_read", "process_write", "process_list", "process_kill":
+	case "shell_command", "run_terminal_command", "process_read", "process_write", "process_list", "process_kill":
 		return catCmd
 	default:
 		return catOther
@@ -201,7 +201,7 @@ func pathHint(args map[string]any) string {
 	if args == nil {
 		return ""
 	}
-	for _, k := range []string{"path", "file_path", "file", "filename"} {
+	for _, k := range []string{"path", "file_path", "target_file", "target_directory", "file", "filename"} {
 		if v, ok := args[k].(string); ok && strings.TrimSpace(v) != "" {
 			return v
 		}
@@ -221,6 +221,221 @@ func countLines(s string) int {
 		return 1
 	}
 	return n
+}
+
+// ToolDetailLine returns the primary expanded-row label for one tool step.
+func ToolDetailLine(s ToolStep) string {
+	label := ToolDisplayName(s.Name)
+	status := ToolStatusLabel(s.Status)
+	if subject := ToolSubject(s); subject != "" {
+		return fmt.Sprintf("%s  %s  %s", status, label, subject)
+	}
+	return fmt.Sprintf("%s  %s", status, label)
+}
+
+// ToolDetailBody returns secondary detail lines for expanded tool details.
+func ToolDetailBody(s ToolStep, width int) string {
+	if width < 20 {
+		width = 20
+	}
+	switch categorize(s.Name) {
+	case catCmd:
+		if cmd, ok := s.Args["command"].(string); ok && strings.TrimSpace(cmd) != "" {
+			return wrapKeyValue("command", strings.TrimSpace(cmd), width)
+		}
+	case catSearch:
+		if q := firstArg(s.Args, "query", "pattern"); q != "" {
+			return wrapKeyValue("query", q, width)
+		}
+	case catEdit, catExplore:
+		if p := pathHint(s.Args); p != "" {
+			return wrapKeyValue("path", p, width)
+		}
+	}
+	if s.Status == "error" {
+		if msg := resultErrorMessage(s.Result); msg != "" {
+			return wrapKeyValue("error", msg, width)
+		}
+	}
+	return ""
+}
+
+// ToolResultPreview returns a wrapped result preview for expanded non-diff tools.
+func ToolResultPreview(s ToolStep, width int) string {
+	if s.Result == nil || s.Status == "running" {
+		return ""
+	}
+	if s.Status == "error" {
+		if msg := resultErrorMessage(s.Result); msg != "" {
+			return wrapMultiline(msg, 8, width)
+		}
+	}
+	text := resultText(s.Result)
+	if strings.TrimSpace(text) == "" {
+		return ""
+	}
+	return wrapMultiline(text, 8, width)
+}
+
+// ToolDisplayName maps low-level tool names to short labels for terminal UI.
+func ToolDisplayName(name string) string {
+	switch strings.ToLower(name) {
+	case "read_file":
+		return "Read file"
+	case "list_dir", "file_tree":
+		return "List files"
+	case "find_files":
+		return "Find files"
+	case "grep", "grep_search":
+		return "Search"
+	case "web_search":
+		return "Web search"
+	case "web_fetch":
+		return "Fetch page"
+	case "edit_file", "search_replace":
+		return "Edit file"
+	case "write_file":
+		return "Write file"
+	case "run_terminal_command", "shell_command":
+		return "Run command"
+	case "process_read":
+		return "Read process"
+	case "process_write":
+		return "Write process"
+	case "process_list":
+		return "List processes"
+	case "process_kill":
+		return "Kill process"
+	case "":
+		return "Tool"
+	default:
+		return strings.ReplaceAll(name, "_", " ")
+	}
+}
+
+func ToolStatusLabel(status string) string {
+	switch status {
+	case "running":
+		return "⏳"
+	case "error":
+		return "✖"
+	default:
+		return "✓"
+	}
+}
+
+func ToolSubject(s ToolStep) string {
+	if p := pathHint(s.Args); p != "" {
+		return truncate(p, 48)
+	}
+	if cmd, ok := s.Args["command"].(string); ok && strings.TrimSpace(cmd) != "" {
+		return "`" + truncate(strings.TrimSpace(cmd), 48) + "`"
+	}
+	if q := firstArg(s.Args, "query", "pattern"); q != "" {
+		return truncate(q, 48)
+	}
+	return ""
+}
+
+func firstArg(args map[string]any, keys ...string) string {
+	for _, k := range keys {
+		if v, ok := args[k].(string); ok && strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+func resultErrorMessage(result any) string {
+	switch v := result.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case map[string]any:
+		if e, ok := v["error"].(string); ok {
+			return strings.TrimSpace(e)
+		}
+		if msg, ok := v["message"].(string); ok {
+			return strings.TrimSpace(msg)
+		}
+	}
+	return ""
+}
+
+func resultText(result any) string {
+	switch v := result.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case map[string]any:
+		for _, k := range []string{"output", "stdout", "text", "content", "message"} {
+			if s, ok := v[k].(string); ok && strings.TrimSpace(s) != "" {
+				return strings.TrimSpace(s)
+			}
+		}
+	}
+	b, err := json.Marshal(result)
+	if err != nil {
+		return fmt.Sprint(result)
+	}
+	return string(b)
+}
+
+func wrapKeyValue(key, value string, width int) string {
+	prefix := key + ": "
+	bodyWidth := width - len(prefix)
+	if bodyWidth < 10 {
+		bodyWidth = width
+		prefix = ""
+	}
+	wrapped := wrapMultiline(value, 8, bodyWidth)
+	lines := strings.Split(wrapped, "\n")
+	for i, line := range lines {
+		if i == 0 {
+			lines[i] = prefix + line
+			continue
+		}
+		lines[i] = strings.Repeat(" ", len(prefix)) + line
+	}
+	return strings.Join(lines, "\n")
+}
+
+func wrapMultiline(s string, maxLines, width int) string {
+	if maxLines < 1 {
+		maxLines = 1
+	}
+	if width < 1 {
+		width = 1
+	}
+	var out []string
+	for _, raw := range strings.Split(strings.TrimSpace(s), "\n") {
+		for _, line := range wrapLine(raw, width) {
+			out = append(out, line)
+			if len(out) >= maxLines {
+				out = append(out, "…")
+				return strings.Join(out, "\n")
+			}
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+func wrapLine(s string, width int) []string {
+	s = strings.TrimRight(s, "\r")
+	if s == "" {
+		return []string{""}
+	}
+	var lines []string
+	for len([]rune(s)) > width {
+		cut := width
+		prefix := string([]rune(s)[:cut])
+		if idx := strings.LastIndexAny(prefix, " \t-/"); idx > 0 {
+			cut = len([]rune(prefix[:idx+1]))
+		}
+		runes := []rune(s)
+		lines = append(lines, strings.TrimRight(string(runes[:cut]), " \t"))
+		s = strings.TrimLeft(string(runes[cut:]), " \t")
+	}
+	lines = append(lines, s)
+	return lines
 }
 
 func plural(n int, one, many string) string {

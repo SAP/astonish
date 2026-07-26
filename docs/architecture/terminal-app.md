@@ -91,7 +91,7 @@ AdaptiveColor cursor-line backgrounds that break dark alt-screen UIs).
 | User messages | Full-width orange outline bubble; long prompts are height-capped and use a bottom-border `double-click to expand/collapse` affordance |
 | Agent markdown | `pkg/tui/render.Markdown` — headings, lists, inline code/bold |
 | Code fences | `pkg/tui/render.CodeBlock` — chroma highlight + numeric gutter |
-| Tool activity | `pkg/tui/render.ActivitySummary` + `StatsFromSteps` (`+N/−M`) |
+| Tool activity | `pkg/tui/render.ActivitySummary` + `StatsFromSteps` (`+N/−M`), with categorized collapsed summaries, always-visible tool previews, and click-to-expand per-tool details |
 | File diffs | `pkg/tui/render.FileDiff` / `DiffFromToolArgs` from `edit_file`/`write_file` args |
 
 Streaming: unclosed fences render as incomplete code blocks (header shows `…`).
@@ -126,6 +126,8 @@ follow-up `RunTurn` message (same as Studio).
 
 - `ctrl+l` or `/sessions` — list sessions, `enter` resume, `n` new, `esc` close
 - `ctrl+n` or `/new` — clear local session id; next message creates a new server session
+- Click a tool activity block to expand/collapse detailed execution rows; `ctrl+o` toggles the latest activity
+- Drag across transcript text to select it; releasing the mouse automatically copies the selected plain text to the system clipboard
 - `astonish chat --resume <id>` — loads history via `GET /api/studio/sessions/{id}` on open
 
 ### `@file` mentions

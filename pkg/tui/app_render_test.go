@@ -4,7 +4,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/bubbles/viewport"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/SAP/astonish/pkg/tui/events"
 )
 
 func TestRenderUserBubbleUsesFullWidthRectangleBorder(t *testing.T) {
@@ -50,27 +54,82 @@ func TestRenderUserBubbleEmbedsExpandHintInBottomBorder(t *testing.T) {
 	}
 }
 
-func stripANSI(s string) string {
-	var b strings.Builder
-	for i := 0; i < len(s); i++ {
-		if s[i] != '\x1b' {
-			b.WriteByte(s[i])
-			continue
-		}
-		if i+1 >= len(s) {
-			break
-		}
-		if s[i+1] != '[' {
-			i++
-			continue
-		}
-		i += 2
-		for i < len(s) {
-			if s[i] >= '@' && s[i] <= '~' {
-				break
-			}
-			i++
-		}
+func TestRenderActivityCollapsedPreviewShowsToolRows(t *testing.T) {
+	m := model{theme: DefaultTheme(), width: 100}
+	item := events.Item{
+		Kind: events.ItemActivity,
+		Steps: []events.ToolStep{
+			{Name: "grep", Args: map[string]any{"pattern": "kubernetes"}, Status: "complete"},
+			{Name: "run_terminal_command", Args: map[string]any{"command": "kubectl get clusters"}, Status: "complete"},
+			{Name: "read_file", Args: map[string]any{"target_file": "README.md"}, Status: "complete"},
+		},
 	}
-	return b.String()
+	out := stripANSI(m.renderActivity(item, 80))
+	if !strings.Contains(out, "✓  Search  kubernetes") {
+		t.Fatalf("missing search preview row: %q", out)
+	}
+	if !strings.Contains(out, "✓  Run command  `kubectl get clusters`") {
+		t.Fatalf("missing command preview row: %q", out)
+	}
+	if !strings.Contains(out, "… 1 more; click to expand") {
+		t.Fatalf("missing click-to-expand hint: %q", out)
+	}
+}
+
+func TestRenderActivityExpandedShowsFullToolDetails(t *testing.T) {
+	m := model{theme: DefaultTheme(), width: 100}
+	item := events.Item{
+		Kind:     events.ItemActivity,
+		Expanded: true,
+		Steps: []events.ToolStep{
+			{Name: "grep", Args: map[string]any{"pattern": "kubernetes"}, Result: "match 1\nmatch 2", Status: "complete"},
+			{Name: "run_terminal_command", Args: map[string]any{"command": "kubectl get clusters"}, Result: map[string]any{"stdout": "cluster-a\ncluster-b"}, Status: "complete"},
+		},
+	}
+	out := stripANSI(m.renderActivity(item, 80))
+	if !strings.Contains(out, "▾") {
+		t.Fatalf("expanded activity should use expanded marker: %q", out)
+	}
+	if !strings.Contains(out, "query: kubernetes") {
+		t.Fatalf("missing search detail: %q", out)
+	}
+	if !strings.Contains(out, "command: kubectl get clusters") {
+		t.Fatalf("missing command detail: %q", out)
+	}
+	if !strings.Contains(out, "cluster-a") {
+		t.Fatalf("missing result preview: %q", out)
+	}
+}
+
+func TestHandleMouseSingleClickTogglesActivity(t *testing.T) {
+	tr := events.NewTranscript()
+	tr.Items = []events.Item{{
+		Kind: events.ItemActivity,
+		Steps: []events.ToolStep{
+			{Name: "grep", Args: map[string]any{"pattern": "kubernetes"}, Status: "complete"},
+		},
+	}}
+	m := model{
+		theme:                DefaultTheme(),
+		tr:                   tr,
+		vp:                   viewport.New(80, 10),
+		width:                80,
+		height:               24,
+		ready:                true,
+		transcriptPlainLines: []string{"activity", "detail"},
+		hitRegions: []hitRegion{{
+			start:   0,
+			end:     2,
+			itemIdx: 0,
+			kind:    events.ItemActivity,
+		}},
+	}
+
+	next, _ := m.handleMouse(tea.MouseMsg{X: 3, Y: m.viewportTopY(), Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = next.(model)
+	next, _ = m.handleMouse(tea.MouseMsg{X: 3, Y: m.viewportTopY(), Button: tea.MouseButtonLeft, Action: tea.MouseActionRelease})
+	got := next.(model)
+	if !got.tr.Items[0].Expanded {
+		t.Fatal("single-click should expand activity blocks")
+	}
 }

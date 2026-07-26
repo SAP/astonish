@@ -8,9 +8,9 @@ import (
 
 // Layout margins (cells) for transcript content relative to the terminal edge.
 const (
-	contentMarginX       = 2
-	userBubbleMaxLines   = 4 // collapsed height (including "… expand" line when truncated)
-	doubleClickWindowMS  = 400
+	contentMarginX      = 2
+	userBubbleMaxLines  = 4 // collapsed height (including "… expand" line when truncated)
+	doubleClickWindowMS = 400
 )
 
 // contentWidth returns the max text width for transcript bodies.
@@ -77,4 +77,28 @@ func truncateVisualLines(s string, maxLines int, moreSuffix string) (out string,
 		return strings.Join(kept, "\n"), true
 	}
 	return strings.Join(lines[:maxLines], "\n"), true
+}
+
+// truncateToWidth shortens s to the requested terminal cell width, using an
+// ellipsis when truncation is required. It is intended for plain display text.
+func truncateToWidth(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if lipgloss.Width(s) <= width {
+		return s
+	}
+	if width == 1 {
+		return "…"
+	}
+
+	var b strings.Builder
+	for _, r := range s {
+		next := b.String() + string(r) + "…"
+		if lipgloss.Width(next) > width {
+			break
+		}
+		b.WriteRune(r)
+	}
+	return b.String() + "…"
 }

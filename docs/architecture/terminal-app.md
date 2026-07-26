@@ -88,6 +88,7 @@ AdaptiveColor cursor-line backgrounds that break dark alt-screen UIs).
 
 | Surface | Implementation |
 |---------|----------------|
+| User messages | Full-width orange outline bubble; long prompts are height-capped and use a bottom-border `double-click to expand/collapse` affordance |
 | Agent markdown | `pkg/tui/render.Markdown` — headings, lists, inline code/bold |
 | Code fences | `pkg/tui/render.CodeBlock` — chroma highlight + numeric gutter |
 | Tool activity | `pkg/tui/render.ActivitySummary` + `StatsFromSteps` (`+N/−M`) |

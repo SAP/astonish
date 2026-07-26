@@ -704,6 +704,7 @@ func (m *model) layout() {
 		vh = 5
 	}
 	m.vp = viewport.New(m.width, vh)
+	m.vp.Style = m.theme.Background
 	content, hits := m.renderTranscript()
 	m.hitRegions = hits
 	m.vp.SetContent(content)
@@ -815,12 +816,14 @@ func (m *model) renderTranscript() (string, []hitRegion) {
 		}
 		// Trailing newline normalization: count lines before padding.
 		block = strings.TrimRight(block, "\n")
-		padded := padBlock(block)
+		padded := m.paintTranscriptBlock(padBlock(block))
 		start := lineNo
 		n := lineCount(padded)
 		b.WriteString(padded)
-		b.WriteString("\n\n") // vertical gap between messages
-		lineNo += n + 2       // block lines + blank separator line
+		b.WriteString("\n")
+		b.WriteString(m.paintRow("", m.width))
+		b.WriteString("\n") // vertical gap between messages
+		lineNo += n + 2     // block lines + blank separator line
 		hits = append(hits, hitRegion{start: start, end: start + n, itemIdx: itemIdx, kind: kind})
 	}
 
@@ -867,6 +870,42 @@ func (m *model) renderTranscript() (string, []hitRegion) {
 		}
 	}
 	return b.String(), hits
+}
+
+const (
+	ansiReset       = "\x1b[0m"
+	ansiTrueBlackBG = "\x1b[48;2;0;0;0m"
+	ansiDefaultBG   = "\x1b[49m"
+)
+
+func (m model) paintTranscriptBlock(block string) string {
+	if m.theme.NoColor || block == "" {
+		return block
+	}
+	lines := strings.Split(block, "\n")
+	for i, line := range lines {
+		lines[i] = m.paintRow(line, m.width)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m model) paintRow(line string, width int) string {
+	if m.theme.NoColor {
+		return line
+	}
+	if width < 1 {
+		width = m.width
+	}
+	line = forceTrueBlackAfterReset(line)
+	w := lipgloss.Width(line)
+	if w < width {
+		line += ansiTrueBlackBG + strings.Repeat(" ", width-w)
+	}
+	return ansiTrueBlackBG + line + ansiDefaultBG
+}
+
+func forceTrueBlackAfterReset(s string) string {
+	return strings.ReplaceAll(s, ansiReset, ansiReset+ansiTrueBlackBG)
 }
 
 // renderThinkingBubble is the mid-turn sticky agent slot (replaces between tools).
@@ -948,56 +987,85 @@ func (m model) renderActivity(it events.Item, width int) string {
 	return b.String()
 }
 
-// renderUserBubble paints a soft gray user band with vertical breathing room,
-// height-capped unless expanded. Expand/collapse cue is right-aligned + brand-colored.
+// renderUserBubble paints a full-width orange rectangle around the user
+// message. The interior stays black, not filled gray. Long messages remain
+// height-capped unless expanded; the expand/collapse cue is embedded in the
+// bottom border near the bottom-right.
 func (m model) renderUserBubble(content string, expanded bool, width int) string {
 	content = strings.TrimSpace(content)
 	if content == "" {
 		return ""
 	}
-	th := m.theme
-	// Horizontal pad is 2+2 inside the bubble; wrap body to the inner text width.
-	inner := width - 4
+	if width < 18 {
+		width = 18
+	}
+	inner := width - 6 // left/right border + two-space horizontal padding
 	if inner < 8 {
-		inner = width
-		if inner < 8 {
-			inner = 8
-		}
+		inner = 8
 	}
 
-	bodyStyle := th.UserBubble.Width(width)
-	// Empty line with the same background = top/bottom padding inside the band.
-	padLine := lipgloss.NewStyle().
-		Background(th.UserBubble.GetBackground()).
-		Width(width).
-		Render(" ")
-
-	// How many body lines would the full message use?
 	fullBody := wrapPlain(content, inner)
 	fullBodyLines := lineCount(fullBody)
 
-	var body string
+	body := fullBody
 	var hint string
 	switch {
 	case !expanded && fullBodyLines > userBubbleMaxLines:
-		// Cap body lines; expand cue is a separate right-aligned row (not mixed into body).
 		cut, _ := truncateVisualLines(fullBody, userBubbleMaxLines, "")
-		cut = strings.TrimRight(cut, "\n")
-		body = bodyStyle.Render(cut)
-		hint = th.UserExpandHint.Width(width).Render("… double-click to expand")
+		body = strings.TrimRight(cut, "\n")
+		hint = "… double-click to expand"
 	case expanded && fullBodyLines > userBubbleMaxLines:
-		body = bodyStyle.Render(content)
-		hint = th.UserExpandHint.Width(width).Render("… double-click to collapse")
-	default:
-		body = bodyStyle.Render(content)
+		body = fullBody
+		hint = "… double-click to collapse"
 	}
 
-	parts := []string{padLine, body}
-	if hint != "" {
-		parts = append(parts, hint)
+	border := m.theme.Number
+	text := m.theme.Text
+	bg := m.theme.Background
+
+	var b strings.Builder
+	b.WriteString(border.Render("┌" + strings.Repeat("─", width-2) + "┐"))
+	for _, line := range strings.Split(strings.TrimRight(body, "\n"), "\n") {
+		b.WriteByte('\n')
+		lineW := lipgloss.Width(line)
+		if lineW > inner {
+			line = truncateToWidth(line, inner)
+			lineW = lipgloss.Width(line)
+		}
+		pad := inner - lineW
+		if pad < 0 {
+			pad = 0
+		}
+		b.WriteString(border.Render("│"))
+		b.WriteString(bg.Render("  "))
+		b.WriteString(text.Render(line))
+		b.WriteString(bg.Render(strings.Repeat(" ", pad+2)))
+		b.WriteString(border.Render("│"))
 	}
-	parts = append(parts, padLine)
-	return strings.Join(parts, "\n")
+	b.WriteByte('\n')
+	b.WriteString(m.renderUserBubbleBottomBorder(width, hint, border, bg))
+	return b.String()
+}
+
+func (m model) renderUserBubbleBottomBorder(width int, hint string, border lipgloss.Style, bg lipgloss.Style) string {
+	if hint == "" || width < 32 {
+		return border.Render("└" + strings.Repeat("─", width-2) + "┘")
+	}
+	hint = " " + hint + " "
+	maxHint := width - 8
+	if lipgloss.Width(hint) > maxHint {
+		hint = truncateToWidth(hint, maxHint)
+	}
+	hintW := lipgloss.Width(hint)
+	lineW := width - 2 - hintW
+	if lineW < 2 {
+		lineW = 2
+	}
+	leftW := lineW - 1
+	rightW := 1
+	return border.Render("└"+strings.Repeat("─", leftW)) +
+		bg.Render(m.theme.UserExpandHint.Render(hint)) +
+		border.Render(strings.Repeat("─", rightW)+"┘")
 }
 
 func abs(n int) int {
@@ -1012,11 +1080,11 @@ func (m model) View() string {
 		return ""
 	}
 	if !m.ready {
-		return "\n  Initializing Astonish…\n"
+		return m.paintBackground("\n  Initializing Astonish…\n")
 	}
 
 	th := m.theme
-	sep := th.Border.Render(strings.Repeat("─", max(1, m.width)))
+	sep := th.Border.Width(m.width).Render(strings.Repeat("─", max(1, m.width)))
 
 	// Completion popups sit just above the composer (filter-as-you-type).
 	composerBlock := m.renderComposer()
@@ -1049,25 +1117,40 @@ func (m model) View() string {
 	// Overlays: sessions picker or approval card on top of the main chrome.
 	if m.sessions.open {
 		overlay := m.renderSessionsOverlay()
-		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, overlay,
+		return m.paintBackground(lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, overlay,
 			lipgloss.WithWhitespaceChars(" "),
-			lipgloss.WithWhitespaceForeground(lipgloss.Color("236")),
-		)
+			lipgloss.WithWhitespaceBackground(lipgloss.Color("#000000")),
+		))
 	}
 	if m.tr.Awaiting {
 		// Stack approval card above composer area by replacing bottom of view.
 		overlay := m.renderApprovalOverlay()
-		return lipgloss.JoinVertical(lipgloss.Left,
+		return m.paintBackground(lipgloss.JoinVertical(lipgloss.Left,
 			m.renderHeader(),
 			sep,
 			m.vp.View(),
 			sep,
 			overlay,
 			m.renderHints(),
-		)
+		))
 	}
-	_ = th
-	return main
+	return m.paintBackground(main)
+}
+
+func (m model) paintBackground(s string) string {
+	if m.theme.NoColor || m.width <= 0 || m.height <= 0 {
+		return s
+	}
+	placed := lipgloss.Place(
+		m.width,
+		m.height,
+		lipgloss.Left,
+		lipgloss.Top,
+		forceTrueBlackAfterReset(s),
+		lipgloss.WithWhitespaceChars(" "),
+		lipgloss.WithWhitespaceBackground(lipgloss.Color("#000000")),
+	)
+	return ansiTrueBlackBG + placed + ansiDefaultBG
 }
 
 // renderSlashCompletion draws the filterable / command list above the input.
@@ -1184,7 +1267,7 @@ func (m model) renderHeader() string {
 	if gap < 1 {
 		gap = 1
 	}
-	return left + strings.Repeat(" ", gap) + right
+	return m.paintRow(left+strings.Repeat(" ", gap)+right, m.width)
 }
 
 // renderLiveStatus shows spinner text while a turn is active; otherwise a blank
@@ -1192,13 +1275,13 @@ func (m model) renderHeader() string {
 func (m model) renderLiveStatus() string {
 	th := m.theme
 	if m.err != "" {
-		return th.Error.Render(m.err)
+		return m.paintRow(th.Error.Render(m.err), m.width)
 	}
 	if m.tr.Status != "" || m.tr.Streaming {
-		return th.Status.Render(m.spin.View() + " " + first(m.tr.Status, "Working…"))
+		return m.paintRow(th.Status.Render(m.spin.View()+" "+first(m.tr.Status, "Working…")), m.width)
 	}
-	// Keep one row so chrome height is stable.
-	return " "
+	// Keep one row so chrome height is stable and painted with the app background.
+	return m.paintRow("", m.width)
 }
 
 // renderComposer draws the bordered input box (Grok-style).
@@ -1214,7 +1297,7 @@ func (m model) renderComposer() string {
 	if w < 10 {
 		w = 10
 	}
-	return box.Width(w).Render(m.ta.View())
+	return box.Width(w).Render(th.Background.Width(w).Render(m.ta.View()))
 }
 
 // renderFooterMeta shows provider/model and approval mode (Grok footer strip).
@@ -1239,7 +1322,7 @@ func (m model) renderFooterMeta() string {
 	if gap < 1 {
 		gap = 1
 	}
-	return leftR + strings.Repeat(" ", gap) + rightR
+	return m.paintRow(leftR+strings.Repeat(" ", gap)+rightR, m.width)
 }
 
 // renderHints is the keybinding help line under the composer.
@@ -1267,7 +1350,7 @@ func (m model) renderHints() string {
 			line = string(runes[:m.width-1]) + "…"
 		}
 	}
-	return th.Hint.Render(line)
+	return m.paintRow(th.Hint.Render(line), m.width)
 }
 
 func first(vals ...string) string {

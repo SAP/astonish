@@ -3,6 +3,8 @@ package tui
 import (
 	"strings"
 	"testing"
+
+	"github.com/charmbracelet/lipgloss"
 )
 
 func TestContentWidth(t *testing.T) {
@@ -45,5 +47,18 @@ func TestPadBlock(t *testing.T) {
 	lines := strings.Split(out, "\n")
 	if !strings.HasPrefix(lines[0], "  ") || !strings.HasPrefix(lines[1], "  ") {
 		t.Fatalf("expected margin: %q", out)
+	}
+}
+
+func TestTruncateToWidth(t *testing.T) {
+	if got := truncateToWidth("hello", 10); got != "hello" {
+		t.Fatalf("truncateToWidth without truncation = %q", got)
+	}
+	got := truncateToWidth("hello world", 6)
+	if lipgloss.Width(got) > 6 {
+		t.Fatalf("truncateToWidth width=%d want <=6: %q", lipgloss.Width(got), got)
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Fatalf("truncateToWidth should add ellipsis: %q", got)
 	}
 }

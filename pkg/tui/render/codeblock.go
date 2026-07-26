@@ -60,7 +60,7 @@ func CodeBlock(body, lang string, width int, st Styles, streaming bool) string {
 		num := fmt.Sprintf("%*d", gutterW, i+1)
 		gutter := st.CodeGutter.Render(num) + st.CodeGutter.Render(" │ ")
 		// Soft-wrap long code lines with continuation gutters.
-		wrapped := wrapCodeLine(hl, codeW)
+		wrapped := wrapCodeLine(hl, codeW, st)
 		for j, part := range wrapped {
 			if j == 0 {
 				b.WriteString(gutter)
@@ -110,15 +110,15 @@ func highlightCode(src, lang string, noColor bool) string {
 }
 
 // wrapCodeLine wraps a possibly ANSI-colored line to width by visible cells.
-func wrapCodeLine(line string, width int) []string {
+func wrapCodeLine(line string, width int, st Styles) []string {
 	if width < 1 {
 		return []string{line}
 	}
 	if lipgloss.Width(line) <= width {
 		return []string{line}
 	}
-	// lipgloss Width-based wrap.
-	wrapped := lipgloss.NewStyle().Width(width).Render(line)
+	// lipgloss Width-based wrap with explicit background for any inserted fill.
+	wrapped := st.Background.Width(width).Render(line)
 	return strings.Split(wrapped, "\n")
 }
 

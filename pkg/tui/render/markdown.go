@@ -12,6 +12,7 @@ import (
 
 // Styles carries lipgloss colors used by renderers (subset of tui.Theme).
 type Styles struct {
+	Background lipgloss.Style
 	Text       lipgloss.Style
 	Muted      lipgloss.Style
 	Brand      lipgloss.Style
@@ -35,17 +36,18 @@ func DefaultStyles() Styles {
 	red := lipgloss.Color("203")
 	orange := lipgloss.Color("208")
 	return Styles{
-		Text:       lipgloss.NewStyle().Foreground(text),
-		Muted:      lipgloss.NewStyle().Foreground(muted),
-		Brand:      lipgloss.NewStyle().Foreground(brand).Bold(true),
-		Success:    lipgloss.NewStyle().Foreground(green),
-		Danger:     lipgloss.NewStyle().Foreground(red),
-		Number:     lipgloss.NewStyle().Foreground(orange),
-		CodeGutter: lipgloss.NewStyle().Foreground(muted),
-		CodeHeader: lipgloss.NewStyle().Foreground(brand),
-		Heading:    lipgloss.NewStyle().Foreground(brand).Bold(true),
-		Bold:       lipgloss.NewStyle().Foreground(text).Bold(true),
-		Italic:     lipgloss.NewStyle().Foreground(text).Italic(true),
+		Background: lipgloss.NewStyle().Background(lipgloss.Color("#000000")),
+		Text:       lipgloss.NewStyle().Foreground(text).Background(lipgloss.Color("#000000")),
+		Muted:      lipgloss.NewStyle().Foreground(muted).Background(lipgloss.Color("#000000")),
+		Brand:      lipgloss.NewStyle().Foreground(brand).Background(lipgloss.Color("#000000")).Bold(true),
+		Success:    lipgloss.NewStyle().Foreground(green).Background(lipgloss.Color("#000000")),
+		Danger:     lipgloss.NewStyle().Foreground(red).Background(lipgloss.Color("#000000")),
+		Number:     lipgloss.NewStyle().Foreground(orange).Background(lipgloss.Color("#000000")),
+		CodeGutter: lipgloss.NewStyle().Foreground(muted).Background(lipgloss.Color("#000000")),
+		CodeHeader: lipgloss.NewStyle().Foreground(brand).Background(lipgloss.Color("#000000")),
+		Heading:    lipgloss.NewStyle().Foreground(brand).Background(lipgloss.Color("#000000")).Bold(true),
+		Bold:       lipgloss.NewStyle().Foreground(text).Background(lipgloss.Color("#000000")).Bold(true),
+		Italic:     lipgloss.NewStyle().Foreground(text).Background(lipgloss.Color("#000000")).Italic(true),
 	}
 }
 
@@ -182,25 +184,25 @@ func prose(src string, width int, st Styles) string {
 
 		switch {
 		case strings.HasPrefix(line, "###### "):
-			out = append(out, wrapStyled(st.Heading.Render(strings.TrimPrefix(line, "###### ")), width))
+			out = append(out, wrapStyledPlain(strings.TrimPrefix(line, "###### "), width, st.Heading, st, false))
 		case strings.HasPrefix(line, "##### "):
-			out = append(out, wrapStyled(st.Heading.Render(strings.TrimPrefix(line, "##### ")), width))
+			out = append(out, wrapStyledPlain(strings.TrimPrefix(line, "##### "), width, st.Heading, st, false))
 		case strings.HasPrefix(line, "#### "):
-			out = append(out, wrapStyled(st.Heading.Render(strings.TrimPrefix(line, "#### ")), width))
+			out = append(out, wrapStyledPlain(strings.TrimPrefix(line, "#### "), width, st.Heading, st, false))
 		case strings.HasPrefix(line, "### "):
-			out = append(out, wrapStyled(st.Heading.Render(strings.TrimPrefix(line, "### ")), width))
+			out = append(out, wrapStyledPlain(strings.TrimPrefix(line, "### "), width, st.Heading, st, false))
 		case strings.HasPrefix(line, "## "):
-			out = append(out, wrapStyled(st.Heading.Render(strings.TrimPrefix(line, "## ")), width))
+			out = append(out, wrapStyledPlain(strings.TrimPrefix(line, "## "), width, st.Heading, st, false))
 		case strings.HasPrefix(line, "# "):
-			out = append(out, wrapStyled(st.Heading.Render(strings.TrimPrefix(line, "# ")), width))
+			out = append(out, wrapStyledPlain(strings.TrimPrefix(line, "# "), width, st.Heading, st, false))
 		case strings.HasPrefix(line, "- "):
-			out = append(out, wrapStyled(st.Text.Render("• "+inlineMarkdown(strings.TrimPrefix(line, "- "), st)), width))
+			out = append(out, wrapStyledPlain("• "+strings.TrimPrefix(line, "- "), width, st.Text, st, true))
 		case strings.HasPrefix(line, "* ") && !strings.HasPrefix(line, "**"):
-			out = append(out, wrapStyled(st.Text.Render("• "+inlineMarkdown(strings.TrimPrefix(line, "* "), st)), width))
+			out = append(out, wrapStyledPlain("• "+strings.TrimPrefix(line, "* "), width, st.Text, st, true))
 		case strings.HasPrefix(line, "> "):
-			out = append(out, wrapStyled(st.Muted.Italic(true).Render("│ "+inlineMarkdown(strings.TrimPrefix(line, "> "), st)), width))
+			out = append(out, wrapStyledPlain("│ "+strings.TrimPrefix(line, "> "), width, st.Muted.Italic(true), st, true))
 		default:
-			out = append(out, wrapStyled(st.Text.Render(inlineMarkdown(line, st)), width))
+			out = append(out, wrapStyledPlain(line, width, st.Text, st, true))
 		}
 		i++
 	}
@@ -406,7 +408,7 @@ func renderTable(rows []string, width int, st Styles) string {
 			if pad < 0 {
 				pad = 0
 			}
-			cells = append(cells, inner+strings.Repeat(" ", pad))
+			cells = append(cells, inner+st.Background.Render(strings.Repeat(" ", pad)))
 		}
 		b.WriteString(strings.Join(cells, st.Muted.Render(" │ ")))
 		b.WriteByte('\n')
@@ -460,7 +462,7 @@ func renderTableWithAutoSep(parsed [][]string, colW []int, width int, st Styles)
 					if pad < 0 {
 						pad = 0
 					}
-					inner += strings.Repeat(" ", pad)
+					inner += st.Background.Render(strings.Repeat(" ", pad))
 				}
 				styled = inner
 			}
@@ -469,7 +471,7 @@ func renderTableWithAutoSep(parsed [][]string, colW []int, width int, st Styles)
 				// already padded via padRightRunes inside Brand — Brand may change width
 				pad := colW[c] - lipgloss.Width(styled)
 				if pad > 0 {
-					styled += strings.Repeat(" ", pad)
+					styled += st.Background.Render(strings.Repeat(" ", pad))
 				}
 			}
 			cells = append(cells, styled)
@@ -530,12 +532,26 @@ func inlineMarkdown(s string, st Styles) string {
 	return s
 }
 
-// wrapStyled wraps a string that may contain ANSI sequences by visible width.
-func wrapStyled(s string, width int) string {
+// wrapStyledPlain wraps plain markdown text before styling. Styling after wrap
+// avoids lipgloss filling soft-wrap padding with the terminal's default
+// background, which can leak as blue bars in some terminals.
+func wrapStyledPlain(s string, width int, base lipgloss.Style, st Styles, inline bool) string {
 	if width < 1 {
-		return s
+		if inline {
+			return base.Render(inlineMarkdown(s, st))
+		}
+		return base.Render(s)
 	}
-	return lipgloss.NewStyle().Width(width).Render(s)
+	wrapped := lipgloss.NewStyle().Width(width).Render(s)
+	lines := strings.Split(wrapped, "\n")
+	for i, line := range lines {
+		line = strings.TrimRight(line, " ")
+		if inline {
+			line = inlineMarkdown(line, st)
+		}
+		lines[i] = base.Render(line)
+	}
+	return strings.Join(lines, "\n")
 }
 
 // RuneLen is a tiny helper for tests.

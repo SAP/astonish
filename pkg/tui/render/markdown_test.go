@@ -3,6 +3,8 @@ package render
 import (
 	"strings"
 	"testing"
+
+	"github.com/charmbracelet/lipgloss"
 )
 
 func TestSplitFences(t *testing.T) {
@@ -53,14 +55,51 @@ func TestMarkdown_WrapsProse(t *testing.T) {
 	long := strings.Repeat("word ", 50)
 	out := Markdown(long, 40, st)
 	for _, line := range strings.Split(out, "\n") {
-		// strip might still be long with styles; NoColor path
-		if lipglossWidth(line) > 45 {
-			t.Fatalf("line too wide (%d): %q", lipglossWidth(line), line)
+		if got := lipgloss.Width(line); got > 40 {
+			t.Fatalf("line too wide (%d): %q", got, line)
 		}
 	}
 }
 
-func lipglossWidth(s string) int {
-	// simple: count non-ansi roughly using visible - use lipgloss in real test via import
-	return len([]rune(s))
+func TestMarkdown_DoesNotPadWrappedProseLines(t *testing.T) {
+	st := DefaultStyles()
+	out := prose("porta-copos", 8, st)
+	plain := stripANSI(out)
+	lines := strings.Split(plain, "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected hyphenated text to wrap into two lines, got %d: %q", len(lines), plain)
+	}
+	if lines[0] != "porta-" || lines[1] != "copos" {
+		t.Fatalf("unexpected wrap: %#v", lines)
+	}
+	for _, line := range lines {
+		if strings.HasSuffix(line, " ") {
+			t.Fatalf("wrapped prose line should not be padded with spaces: %q", line)
+		}
+	}
+}
+
+func stripANSI(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] != '\x1b' {
+			b.WriteByte(s[i])
+			continue
+		}
+		if i+1 >= len(s) {
+			break
+		}
+		if s[i+1] != '[' {
+			i++
+			continue
+		}
+		i += 2
+		for i < len(s) {
+			if s[i] >= '@' && s[i] <= '~' {
+				break
+			}
+			i++
+		}
+	}
+	return b.String()
 }

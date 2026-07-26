@@ -72,8 +72,12 @@ var networkErrorIndicators = []string{
 	"failed to connect",
 }
 
-var shellNetworkFailureIndicators = []string{
+var shellStatusZeroIndicators = []string{
 	"http_status: 000",
+	"http status: 000",
+}
+
+var shellNetworkFailureIndicators = []string{
 	"curl: (5)",
 	"curl: (6)",
 	"curl: (7)",
@@ -92,7 +96,7 @@ var shellNetworkFailureIndicators = []string{
 // LooksLikeShellNetworkFailure checks generic shell/curl failures that may not
 // include proxy details but can be mapped from URLs in the original command.
 func LooksLikeShellNetworkFailure(resp map[string]any) bool {
-	if resp == nil || !hasNonZeroExitCode(resp) {
+	if resp == nil {
 		return false
 	}
 	text := responseText(resp)
@@ -100,6 +104,14 @@ func LooksLikeShellNetworkFailure(resp map[string]any) bool {
 		return false
 	}
 	lower := strings.ToLower(text)
+	for _, indicator := range shellStatusZeroIndicators {
+		if strings.Contains(lower, indicator) {
+			return true
+		}
+	}
+	if !hasNonZeroExitCode(resp) {
+		return false
+	}
 	for _, indicator := range shellNetworkFailureIndicators {
 		if strings.Contains(lower, indicator) {
 			return true

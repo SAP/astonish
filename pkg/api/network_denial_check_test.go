@@ -164,9 +164,14 @@ func TestLooksLikeShellNetworkFailure(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "zero exit with HTTP status zero is not enough",
+			name: "zero exit with HTTP status zero is still a network candidate",
 			resp: map[string]any{"exit_code": 0, "stdout": "\nHTTP_STATUS: 000\n"},
-			want: false,
+			want: true,
+		},
+		{
+			name: "zero exit with display label HTTP Status zero is a network candidate",
+			resp: map[string]any{"exit_code": 0, "stdout": "HTTP Status: 000\nTime: 0.95"},
+			want: true,
 		},
 		{
 			name: "nonzero exit with curl failed to connect",

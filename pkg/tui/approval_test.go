@@ -17,3 +17,10 @@ func TestPickYesNo(t *testing.T) {
 		t.Fatal("deny")
 	}
 }
+
+func TestRenderApprovalHintsFormatsKeysAndLabels(t *testing.T) {
+	out := renderApprovalHints(DefaultTheme(), []approvalHint{{Keys: "enter/y", Label: "allow host"}, {Keys: "n/esc", Label: "deny"}})
+	if plain := stripANSI(out); plain != "enter/y=allow host  ·  n/esc=deny" {
+		t.Fatalf("plain hints = %q", plain)
+	}
+}

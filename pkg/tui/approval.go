@@ -152,39 +152,26 @@ func (m model) submitNetworkGrant(broader bool) (tea.Model, tea.Cmd, bool) {
 
 	sessionID := first(it.SessionID, m.tr.SessionID, m.info.SessionID)
 	sandboxName := it.SandboxName
-	if err := grantBackend.ApproveNetworkGrant(m.ctx, sessionID, denial, broader, sandboxName); err != nil {
-		m.tr.Apply(events.NewError("Network approval failed: " + err.Error()))
-		m.refreshViewport()
-		return m, nil, true
-	}
-
 	host := denial.Host
 	if broader && denial.BroaderPattern != "" {
 		host = denial.BroaderPattern
 	}
+	label := endpointLabel(host, denial.Port)
+
 	m.tr.ClearApproval()
 	m.ta.Reset()
 	if m.ready {
 		m.layout()
 	}
-	m.tr.Apply(events.NewSystem("Network access granted for " + endpointLabel(host, denial.Port) + ". Retrying blocked command…"))
+	m.tr.Apply(events.NewSystem("Approving network access for " + label + "…"))
 	m.tr.Streaming = true
-	m.tr.Status = "Thinking…"
+	m.tr.Status = "Approving network access…"
 	m.refreshViewport()
 
 	turnCtx, cancel := context.WithCancel(m.ctx)
 	m.turnCancel = cancel
-	msg := fmt.Sprintf("I just approved network access to %s. Please retry the previous command that was blocked by the proxy.", host)
-	ch, err := m.backend.RunTurn(turnCtx, msg, backend.TurnOptions{})
-	if err != nil {
-		cancel()
-		m.turnCancel = nil
-		m.tr.Apply(events.NewError(err.Error()))
-		m.refreshViewport()
-		return m, nil, true
-	}
-	m.eventCh = ch
-	return m, waitEvent(ch), true
+	cmd := approveNetworkGrantCmd(turnCtx, grantBackend, m.backend, sessionID, sandboxName, denial, broader, host, label)
+	return m, cmd, true
 }
 
 func (m model) submitNetworkDeny() (tea.Model, tea.Cmd, bool) {
@@ -195,20 +182,49 @@ func (m model) submitNetworkDeny() (tea.Model, tea.Cmd, bool) {
 		m.refreshViewport()
 		return m, nil, true
 	}
-	if grantBackend, ok := m.backend.(backend.NetworkGrantBackend); ok {
-		sessionID := first(it.SessionID, m.tr.SessionID, m.info.SessionID)
-		if err := grantBackend.DenyNetworkGrant(m.ctx, sessionID, denial, it.SandboxName); err != nil {
-			m.tr.Apply(events.NewError("Network denial failed: " + err.Error()))
-			m.refreshViewport()
-			return m, nil, true
-		}
-	}
+	grantBackend, _ := m.backend.(backend.NetworkGrantBackend)
+	sessionID := first(it.SessionID, m.tr.SessionID, m.info.SessionID)
+	sandboxName := it.SandboxName
+	label := endpointLabel(denial.Host, denial.Port)
+
 	m.tr.ClearApproval()
-	m.tr.Apply(events.NewSystem("Network access denied for " + endpointLabel(denial.Host, denial.Port) + "."))
+	m.tr.Apply(events.NewSystem("Network access denied for " + label + "."))
 	m.tr.Streaming = false
 	m.tr.Status = ""
 	m.refreshViewport()
-	return m, nil, true
+
+	if grantBackend == nil {
+		return m, nil, true
+	}
+	return m, denyNetworkGrantCmd(m.ctx, grantBackend, sessionID, sandboxName, denial), true
+}
+
+type networkGrantApprovedMsg struct {
+	label string
+	host  string
+	ch    <-chan events.Event
+	err   error
+}
+
+type networkGrantDeniedMsg struct {
+	err error
+}
+
+func approveNetworkGrantCmd(ctx context.Context, grantBackend backend.NetworkGrantBackend, chatBackend backend.Backend, sessionID, sandboxName string, denial events.NetworkDenial, broader bool, host, label string) tea.Cmd {
+	return func() tea.Msg {
+		if err := grantBackend.ApproveNetworkGrant(ctx, sessionID, denial, broader, sandboxName); err != nil {
+			return networkGrantApprovedMsg{label: label, host: host, err: err}
+		}
+		msg := fmt.Sprintf("I just approved network access to %s. Please retry the previous command that was blocked by the proxy.", host)
+		ch, err := chatBackend.RunTurn(ctx, msg, backend.TurnOptions{})
+		return networkGrantApprovedMsg{label: label, host: host, ch: ch, err: err}
+	}
+}
+
+func denyNetworkGrantCmd(ctx context.Context, grantBackend backend.NetworkGrantBackend, sessionID, sandboxName string, denial events.NetworkDenial) tea.Cmd {
+	return func() tea.Msg {
+		return networkGrantDeniedMsg{err: grantBackend.DenyNetworkGrant(ctx, sessionID, denial, sandboxName)}
+	}
 }
 
 func firstNetworkDenial(it *events.Item) (events.NetworkDenial, bool) {
@@ -267,12 +283,16 @@ func (m model) renderApprovalOverlay() string {
 		}
 	}
 	b.WriteString("\n")
-	var hints []string
+	var hints []approvalHint
 	for i, o := range opts {
-		hints = append(hints, fmt.Sprintf("%d=%s", i+1, o))
+		hints = append(hints, approvalHint{Keys: fmt.Sprintf("%d", i+1), Label: o})
 	}
-	hints = append(hints, "y=yes", "n=no", "esc=deny")
-	b.WriteString(th.Hint.Render(strings.Join(hints, "  ·  ")))
+	hints = append(hints,
+		approvalHint{Keys: "y", Label: "yes"},
+		approvalHint{Keys: "n", Label: "no"},
+		approvalHint{Keys: "esc", Label: "deny"},
+	)
+	b.WriteString(renderApprovalHints(th, hints))
 
 	w := m.width - 4
 	if w < 30 {
@@ -314,12 +334,12 @@ func (m model) renderNetworkDenialOverlay(it *events.Item) string {
 	}
 	b.WriteString("\n")
 
-	hints := []string{"enter/y=allow host"}
+	hints := []approvalHint{{Keys: "enter/y", Label: "allow host"}}
 	if ok && denial.BroaderPattern != "" {
-		hints = append(hints, "b=allow "+denial.BroaderPattern)
+		hints = append(hints, approvalHint{Keys: "b", Label: "allow " + denial.BroaderPattern})
 	}
-	hints = append(hints, "n/esc=deny")
-	b.WriteString(th.Hint.Render(strings.Join(hints, "  ·  ")))
+	hints = append(hints, approvalHint{Keys: "n/esc", Label: "deny"})
+	b.WriteString(renderApprovalHints(th, hints))
 
 	w := m.width - 4
 	if w < 30 {
@@ -330,6 +350,23 @@ func (m model) renderNetworkDenialOverlay(it *events.Item) string {
 		Width(w).
 		Padding(1, 2).
 		Render(b.String())
+}
+
+type approvalHint struct {
+	Keys  string
+	Label string
+}
+
+func renderApprovalHints(th Theme, hints []approvalHint) string {
+	parts := make([]string, 0, len(hints))
+	for _, hint := range hints {
+		if hint.Label == "" {
+			parts = append(parts, th.Approval.Render(hint.Keys))
+			continue
+		}
+		parts = append(parts, th.Approval.Render(hint.Keys)+th.Hint.Render("="+hint.Label))
+	}
+	return strings.Join(parts, th.Hint.Render("  ·  "))
 }
 
 func compactLine(s string, maxRunes int) string {

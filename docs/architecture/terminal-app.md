@@ -140,7 +140,7 @@ The UI mirrors Studio Chat’s `NetworkDenialPrompt` in terminal form:
 - `b` approves `broader_pattern` when the backend suggested one.
 - `n` / `esc` denies or acknowledges the pending denial.
 
-Approvals and denials call the network-grant REST endpoints directly instead of sending a normal chat message. After a successful approval, the terminal sends the same retry instruction Studio uses: “I just approved network access to <host>. Please retry the previous command that was blocked by the proxy.”
+Approvals and denials call the network-grant REST endpoints directly instead of sending a normal chat message. The prompt is dismissed immediately when the user presses an allow/deny key; the REST call and optional retry run asynchronously so the UI can repaint with an “Approving network access…” progress state instead of leaving the dialog visible. After a successful approval, the terminal sends the same retry instruction Studio uses: “I just approved network access to <host>. Please retry the previous command that was blocked by the proxy.”
 
 ### Sessions
 

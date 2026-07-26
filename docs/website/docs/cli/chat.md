@@ -95,4 +95,8 @@ While in an active chat session, type `/` to access these commands:
 | `/drill-add` | Add new drills to an existing suite |
 | `/authorize <code>` | Authorize a device to access Studio |
 
+## Network authorization prompts
+
+When a sandboxed command tries to reach a network endpoint that is not yet allowed by policy, the terminal shows a focused network authorization prompt. Press `Enter` or `y` to allow the specific endpoint, `b` to allow the suggested broader pattern when one is shown, or `n`/`Esc` to deny. The prompt closes immediately after your key press and the terminal shows progress while Astonish records the decision and, for approvals, asks the agent to retry the blocked command.
+
 Type `exit` or `quit` to end the session.

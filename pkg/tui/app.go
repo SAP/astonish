@@ -325,6 +325,35 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(cmds...)
 
+	case networkGrantApprovedMsg:
+		if msg.err != nil {
+			if m.turnCancel != nil {
+				m.turnCancel()
+			}
+			m.turnCancel = nil
+			m.tr.Streaming = false
+			m.tr.Status = ""
+			m.tr.Apply(events.NewError("Network approval failed: " + msg.err.Error()))
+			m.refreshViewport()
+			return m, nil
+		}
+		m.tr.Apply(events.NewSystem("Network access granted for " + msg.label + ". Retrying blocked command…"))
+		m.tr.Streaming = true
+		m.tr.Status = "Thinking…"
+		m.eventCh = msg.ch
+		m.refreshViewport()
+		if msg.ch == nil {
+			return m, nil
+		}
+		return m, waitEvent(msg.ch)
+
+	case networkGrantDeniedMsg:
+		if msg.err != nil {
+			m.tr.Apply(events.NewError("Network denial failed: " + msg.err.Error()))
+			m.refreshViewport()
+		}
+		return m, nil
+
 	case turnDoneMsg:
 		m.eventCh = nil
 		m.turnCancel = nil

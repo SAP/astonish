@@ -100,9 +100,20 @@ func (r *channelPlatformResolver) ResolveChannelUserWithHint(
 	// Get the team data store
 	teamStore := orgStore.ForTeam(teamSlug)
 
-	// Inject team-scoped stores into the context
+	var personalStore store.PersonalDataStore
+	if link.UserID != "" {
+		personalStore = orgStore.ForUser(link.UserID)
+	}
+
+	var personalCredentials store.CredentialStore
+	if personalStore != nil {
+		personalCredentials = personalStore.Credentials()
+	}
+
+	// Inject team-scoped stores into the context. Credentials are personal-first
+	// with team fallback, matching Studio chat for linked channel users.
 	enrichedCtx := ctx
-	enrichedCtx = store.WithCredentialStore(enrichedCtx, teamStore.Credentials())
+	enrichedCtx = store.WithCredentialStore(enrichedCtx, store.NewMergedCredentialStore(personalCredentials, teamStore.Credentials()))
 	enrichedCtx = store.WithFlowStore(enrichedCtx, teamStore.Flows())
 	enrichedCtx = store.WithSkillStores(enrichedCtx, &store.SkillStores{
 		Platform: r.backend.PlatformSkills(),

@@ -217,6 +217,8 @@ Microsoft Graph secrets (Tenant ID, Client ID, Client Secret, Refresh Token) are
 
 Email threads (based on `In-Reply-To`/`References` headers) maintain the same agent session.
 
+In PostgreSQL platform deployments, a verified email channel identity is resolved to the linked Astonish user. Agent tools invoked from that email can read that user's personal credentials first, then fall back to the routed team's credentials. This matches Studio chat behavior, so credentials saved privately in **Settings → Credentials** are available when the same user interacts by email.
+
 ## Plus-Addressing Routing (PostgreSQL)
 
 In PostgreSQL deployments, the email channel supports plus-addressing to route messages to specific organizations:

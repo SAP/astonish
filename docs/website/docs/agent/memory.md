@@ -81,8 +81,8 @@ Studio provides a visual interface for memory management. The main organization 
 - View memory content, tags, and metadata
 - Use **Memory Health** to review suggested organization improvements
 - Reanalyze memory on demand; otherwise fresh evaluations are reused for five days
-- Draft and save scenario cards from recommendations
-- Open the advanced **Memory Map** only when you need low-level diagnostics
+- Draft and save scenario cards from actionable recommendations
+- Open the advanced **Memory Map** only when you need low-level diagnostics; it may still show provenance flags after Memory Health suggestions are applied
 - Publish personal memories to your team by merging them into scenario cards when possible
 - Promote team memories to org level (admin) by merging them into org scenario cards when possible
 - Delete or edit memory entries

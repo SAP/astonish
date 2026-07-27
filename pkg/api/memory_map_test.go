@@ -162,6 +162,30 @@ func TestBuildMemoryHealthRecommendsExistingCardUpdate(t *testing.T) {
 	}
 }
 
+func TestBuildMemoryHealthDoesNotRepeatReviewForIncorporatedScenarioCard(t *testing.T) {
+	card := memory.ScenarioCard{
+		CanonicalKey:                  "proxmox-console-access",
+		Scope:                         "team",
+		Title:                         "Proxmox Console Access",
+		RecommendedRecipe:             []string{"Use the noVNC ticket endpoint."},
+		CautionsOrConditionalFailures: []string{"Temporary 503 outages should be rechecked before changing the path."},
+		Status:                        memory.ScenarioCardStatusDraft,
+		SourceMemoryIDs:               []string{"raw-1", "raw-2"},
+	}
+	report := BuildMemoryMap([]store.MemorySearchResult{
+		{ID: "card-1", Snippet: memory.RenderScenarioCard(card), Category: memory.ScenarioCardCategory, Scope: "team"},
+		{ID: "raw-1", Snippet: "Use the noVNC ticket endpoint.", Category: "proxmox-console-access", Scope: "team"},
+		{ID: "raw-2", Snippet: "Earlier trial and error failed during a transient outage, but final path uses noVNC.", Category: "proxmox-console-access", Scope: "team"},
+	})
+	health := BuildMemoryHealth(report, true, mustParseTime(t, "2026-07-27T12:00:00Z"))
+	if health.RecommendationCount != 0 {
+		t.Fatalf("RecommendationCount = %d, want 0 for already incorporated source memories: %#v", health.RecommendationCount, health.Recommendations)
+	}
+	if report.Stats.TrialErrorRiskCount == 0 || report.Stats.TransientRiskCount == 0 {
+		t.Fatalf("advanced map should still expose diagnostic risk flags: %#v", report.Stats)
+	}
+}
+
 func TestBuildMemoryMapUsesFallbackForEmptyContent(t *testing.T) {
 	report := BuildMemoryMap([]store.MemorySearchResult{{ID: "m1", Scope: "personal"}})
 	if len(report.Groups) != 1 {

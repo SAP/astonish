@@ -131,7 +131,7 @@ func BuildMemoryHealth(report MemoryMapResponse, canManageOrg bool, now time.Tim
 func memoryRecommendationForGroup(group MemoryMapGroup, canManageOrg bool) (MemoryRecommendation, bool) {
 	rawMemories := nonScenarioMemories(group.Memories)
 	if group.HasScenarioCard {
-		cardResult, card, ok := scenarioCardInGroup(group.Memories)
+		_, card, ok := scenarioCardInGroup(group.Memories)
 		if !ok {
 			return MemoryRecommendation{}, false
 		}
@@ -150,20 +150,6 @@ func memoryRecommendationForGroup(group MemoryMapGroup, canManageOrg bool) (Memo
 				MemoryIDs:   memoryIDs(newRaw),
 				Flags:       group.Flags,
 				Card:        merged,
-			}, true
-		}
-		if groupHasRiskFlags(group) {
-			return MemoryRecommendation{
-				ID:          "review-" + group.Key,
-				Type:        "review_scenario_card",
-				Severity:    "low",
-				Title:       fmt.Sprintf("Review %s", group.Title),
-				Description: "This scenario card or its provenance contains temporary-failure or trial/error wording. Verify it remains conditional.",
-				TargetScope: firstNonEmptyString(card.Scope, preferredTargetScope(group, canManageOrg)),
-				GroupKey:    group.Key,
-				MemoryIDs:   []string{cardResult.ID},
-				Flags:       group.Flags,
-				Card:        card,
 			}, true
 		}
 		return MemoryRecommendation{}, false

@@ -97,7 +97,7 @@ AdaptiveColor cursor-line backgrounds that break dark alt-screen UIs).
 | Surface | Implementation |
 |---------|----------------|
 | Empty state | Centered welcome card inside the viewport for new/empty chats, with an orange centered title and concise onboarding copy; it is not a transcript item and disappears as soon as the first user message starts the conversation |
-| User messages | Full-width orange outline bubble; long prompts are height-capped and use a bottom-border `double-click to expand/collapse` affordance |
+| User messages | Full-width warm-accent outline bubble; long prompts are height-capped and use a bottom-border `double-click to expand/collapse` affordance |
 | Agent markdown | `pkg/tui/render.Markdown` — headings, lists, inline code/bold |
 | Code fences | `pkg/tui/render.CodeBlock` — chroma highlight + numeric gutter |
 | Tool activity | `pkg/tui/render.ActivitySummary` + `StatsFromSteps` (`+N/−M`), with categorized collapsed summaries that list every tool row as a single-line preview; click-to-expand reveals full parameters, diffs, and result previews |
@@ -158,7 +158,7 @@ Typing `@` plus part of a local relative path opens a fuzzy file picker above th
 
 ### Plan mode
 
-`/plan` or `shift+tab` toggles a terminal-only plan mode, matching the convention used by coding-agent CLIs. Mode changes are UI state only: they do not append system messages to the transcript. The current mode is embedded in the composer bottom border (`Normal` on the standard white border, `Plan` on a light-orange border). While enabled, each normal user turn carries a hidden per-turn `systemContext` instructing the platform agent to produce a concise plan without executing tools or making changes. Approval responses deliberately do **not** inherit this context because they are part of an already-running approval protocol. Starting or resuming a session clears the toggle so mode does not leak across conversations. Future modes can reuse the same composer-border affordance (for example deep research, report, or build-oriented modes).
+`/plan` or `shift+tab` toggles a terminal-only plan mode, matching the convention used by coding-agent CLIs. Mode changes are UI state only: they do not append system messages to the transcript. The current mode is embedded in the composer bottom border (`Normal` on a softened gray border, `Plan` on a warm-accent border). While enabled, each normal user turn carries a hidden per-turn `systemContext` instructing the platform agent to produce a concise plan without executing tools or making changes. Approval responses deliberately do **not** inherit this context because they are part of an already-running approval protocol. Starting or resuming a session clears the toggle so mode does not leak across conversations. Future modes can reuse the same composer-border affordance (for example deep research, report, or build-oriented modes).
 
 ### Reconnect behavior
 

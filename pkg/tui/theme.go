@@ -51,18 +51,19 @@ func DefaultTheme() Theme {
 		return plainTheme()
 	}
 
-	bg := lipgloss.Color("#000000") // true black terminal background
-	brand := lipgloss.Color("250")  // light gray accent (formerly purple)
-	muted := lipgloss.Color("245")  // gray
-	dim := lipgloss.Color("240")    // dimmer gray (hints)
-	text := lipgloss.Color("252")   // near white
-	white := lipgloss.Color("255")  // composer border
-	cyan := brand                   // user accent (legacy)
-	green := lipgloss.Color("78")   // agent / success
-	red := lipgloss.Color("203")    // error / danger
-	orange := lipgloss.Color("208") // numbers
-	yellow := lipgloss.Color("221") // approval
-	border := lipgloss.Color("238") // subtle separator border
+	bg := lipgloss.Color("#000000")         // true black terminal background
+	brand := lipgloss.Color("250")          // light gray accent (formerly purple)
+	muted := lipgloss.Color("245")          // gray
+	dim := lipgloss.Color("240")            // dimmer gray (hints)
+	text := lipgloss.Color("252")           // near white
+	composerBorder := lipgloss.Color("246") // softened composer border
+	cyan := brand                           // user accent (legacy)
+	green := lipgloss.Color("78")           // agent / success
+	red := lipgloss.Color("203")            // error / danger
+	orange := lipgloss.Color("208")         // numbers
+	softOrange := lipgloss.Color("172")     // comfortable user-message outline
+	yellow := lipgloss.Color("221")         // approval
+	border := lipgloss.Color("238")         // subtle separator border
 
 	return Theme{
 		Background: lipgloss.NewStyle().Background(bg),
@@ -76,11 +77,11 @@ func DefaultTheme() Theme {
 			Foreground(text).
 			Background(bg).
 			Border(lipgloss.NormalBorder()).
-			BorderForeground(orange).
+			BorderForeground(softOrange).
 			Padding(0, 2),
 		// Expand/collapse cue: orange-tinted, right-aligned inside the outlined bubble.
 		UserExpandHint: lipgloss.NewStyle().
-			Foreground(orange).
+			Foreground(softOrange).
 			Background(bg).
 			Italic(true).
 			Align(lipgloss.Right),
@@ -103,12 +104,12 @@ func DefaultTheme() Theme {
 		InputBorder: lipgloss.NewStyle().
 			Background(bg).
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(white).
+			BorderForeground(composerBorder).
 			Padding(0, 1),
 		InputBorderFocus: lipgloss.NewStyle().
 			Background(bg).
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(white).
+			BorderForeground(composerBorder).
 			Padding(0, 1),
 		InputBorderPlan: lipgloss.NewStyle().
 			Background(bg).

@@ -1280,7 +1280,7 @@ func (m model) renderActivity(it events.Item, width int) string {
 	return b.String()
 }
 
-// renderUserBubble paints a full-width orange rectangle around the user
+// renderUserBubble paints a full-width warm accent rectangle around the user
 // message. The interior stays black, not filled gray. Long messages remain
 // height-capped unless expanded; the expand/collapse cue is embedded in the
 // bottom border near the bottom-right.
@@ -1509,10 +1509,10 @@ func (m model) renderSlashCompletion() string {
 		b.WriteByte('\n')
 	}
 	body := strings.TrimRight(b.String(), "\n")
-	return th.InputBorder.
+	return m.paintCompletionPopup(th.InputBorder.
 		Width(w).
 		Padding(0, 1).
-		Render(body)
+		Render(body), w)
 }
 
 // renderFileCompletion draws the filterable @file candidate list above the input.
@@ -1550,10 +1550,21 @@ func (m model) renderFileCompletion() string {
 		b.WriteByte('\n')
 	}
 	body := strings.TrimRight(b.String(), "\n")
-	return th.InputBorder.
+	return m.paintCompletionPopup(th.InputBorder.
 		Width(w).
 		Padding(0, 1).
-		Render(body)
+		Render(body), w)
+}
+
+func (m model) paintCompletionPopup(s string, width int) string {
+	if m.theme.NoColor {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		lines[i] = m.paintRow(line, width)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m model) renderHeader() string {
@@ -1709,9 +1720,9 @@ func (m model) composerBorderStyle() lipgloss.Style {
 	if m.theme.NoColor {
 		return lipgloss.NewStyle()
 	}
-	color := lipgloss.Color("255")
+	color := lipgloss.Color("246")
 	if m.planMode {
-		color = lipgloss.Color("214")
+		color = lipgloss.Color("172")
 	}
 	return lipgloss.NewStyle().Foreground(color).Background(lipgloss.Color("#000000"))
 }

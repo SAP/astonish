@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -73,6 +74,29 @@ func TestSessionsPickerDeleteRequiresConfirmation(t *testing.T) {
 	}
 	if m.sessions.cursor != 0 {
 		t.Fatalf("cursor=%d want 0", m.sessions.cursor)
+	}
+}
+
+func TestRenderSessionsOverlayPaintsEveryRowBlack(t *testing.T) {
+	m := newModel(context.Background(), Config{Backend: staticBackend{}, Width: 100, Height: 30})
+	m.theme.NoColor = false
+	m.sessions = sessionsState{
+		open: true,
+		items: []backend.SessionSummary{
+			{ID: "sess-1", Title: "First", MessageCount: 2},
+			{ID: "sess-2", Title: "Second", MessageCount: 3},
+		},
+	}
+
+	out := m.renderSessionsOverlay()
+	lines := strings.Split(out, "\n")
+	if len(lines) < 3 {
+		t.Fatalf("expected overlay with multiple lines, got %d: %q", len(lines), stripANSI(out))
+	}
+	for i, line := range lines {
+		if !strings.HasPrefix(line, ansiTrueBlackBG) {
+			t.Fatalf("line %d is not explicitly painted black: %q", i, line)
+		}
 	}
 }
 

@@ -301,5 +301,5 @@ func (m model) renderSessionsOverlay() string {
 		MaxHeight(h).
 		Padding(1, 2).
 		Render(body.String())
-	return box
+	return m.paintCompletionPopup(box, w-2)
 }

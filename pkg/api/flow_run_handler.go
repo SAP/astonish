@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -223,6 +224,11 @@ func FlowRunHandler(w http.ResponseWriter, r *http.Request) {
 	if svc := store.FromRequest(r); svc != nil && (svc.PersonalCredentials != nil || svc.Credentials != nil) {
 		merged := store.NewMergedCredentialStore(svc.PersonalCredentials, svc.Credentials)
 		ctx = store.WithCredentialStore(ctx, merged)
+		if tc := store.TenantContextFrom(ctx); tc != nil {
+			slog.Debug("flow credential store injected", "agent", agentName, "org", tc.OrgSlug, "team", tc.TeamSlug, "has_user", tc.UserID != "", "has_personal_credentials", svc.PersonalCredentials != nil, "has_team_credentials", svc.Credentials != nil)
+		} else {
+			slog.Debug("flow credential store injected", "agent", agentName, "has_personal_credentials", svc.PersonalCredentials != nil, "has_team_credentials", svc.Credentials != nil)
+		}
 		// Wire agent-level resolver as fallback
 		astonishAgent.CredentialStore = credentials.NewStoreAdapter(merged)
 		if astonishAgent.PendingSecrets == nil {

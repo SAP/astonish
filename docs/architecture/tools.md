@@ -106,10 +106,11 @@ The `shell_command` tool is one of the most complex:
 
 The `http_request` tool accepts an optional `credential` parameter (credential name, not value). When provided:
 
-1. `credentialStoreVar.Resolve(name)` returns `(headerKey, headerValue)` -- e.g., `("Authorization", "Bearer sk-abc123")`.
-2. The resolved header is set on the outgoing HTTP request.
-3. For OAuth credentials, `Resolve()` handles automatic token refresh.
-4. The credential value never appears in the tool args or LLM-visible output.
+1. The request-scoped credential store resolves the exact credential name. In platform mode this is a merged store: personal first, then team fallback. In console/personal mode it falls back to `credentialStoreVar`.
+2. `Resolve(name)` returns `(headerKey, headerValue)` -- e.g., `("Authorization", "Bearer sk-abc123")`.
+3. The resolved header is set on the outgoing HTTP request.
+4. For OAuth credentials, `Resolve()` handles automatic token refresh.
+5. The credential value never appears in the tool args or LLM-visible output.
 
 ### Semantic Tool Discovery
 

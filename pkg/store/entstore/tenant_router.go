@@ -1100,7 +1100,13 @@ func (t *teamDataStore) Memories() store.MemoryStore {
 	return ms
 }
 func (t *teamDataStore) Credentials() store.CredentialStore {
-	return &teamCredentialStore{client: t.client, credKey: t.parentOrg.getOrCreateCredentialKey()}
+	return &teamCredentialStore{
+		client:  t.client,
+		credKey: t.parentOrg.getOrCreateCredentialKey(),
+		repairSchema: func(ctx context.Context) error {
+			return t.client.Schema.Create(ctx, entschema.WithSkipChanges(entschema.ModifyColumn))
+		},
+	}
 }
 func (t *teamDataStore) Apps() store.AppStore          { return &teamAppStore{client: t.client} }
 func (t *teamDataStore) AppState() store.AppStateStore { return &teamAppStateStore{client: t.client} }
@@ -1197,7 +1203,13 @@ func (p *personalDataStore) AppState() store.AppStateStore {
 }
 func (p *personalDataStore) Flows() store.FlowStore { return &personalFlowStore{client: p.client} }
 func (p *personalDataStore) Credentials() store.CredentialStore {
-	return &personalCredentialStore{client: p.client, credKey: p.credKey}
+	return &personalCredentialStore{
+		client:  p.client,
+		credKey: p.credKey,
+		repairSchema: func(ctx context.Context) error {
+			return p.client.Schema.Create(ctx, entschema.WithSkipChanges(entschema.ModifyColumn))
+		},
+	}
 }
 func (p *personalDataStore) ScheduledJobs() store.SchedulerStore {
 	return &personalSchedulerStore{client: p.client}

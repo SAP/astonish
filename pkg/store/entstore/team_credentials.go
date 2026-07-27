@@ -16,8 +16,9 @@ const secretPrefix = "secret:"
 
 // teamCredentialStore implements store.CredentialStore using the Ent team client.
 type teamCredentialStore struct {
-	client  *teament.Client
-	credKey []byte // per-org DEK for envelope encryption
+	client       *teament.Client
+	credKey      []byte // per-org DEK for envelope encryption
+	repairSchema func(context.Context) error
 }
 
 var _ store.CredentialStore = (*teamCredentialStore)(nil)
@@ -26,6 +27,11 @@ func (s *teamCredentialStore) Get(ctx context.Context, name string) *store.Crede
 	ent, err := s.client.Credential.Query().
 		Where(credential.NameEQ(name)).
 		Only(ctx)
+	if err != nil && isMissingCredentialTableError(err) && s.repairCredentialsSchema(ctx, "get", err) == nil {
+		ent, err = s.client.Credential.Query().
+			Where(credential.NameEQ(name)).
+			Only(ctx)
+	}
 	if err != nil {
 		slog.Warn("team credential query failed", "name", name, "error", err)
 		return nil
@@ -63,6 +69,10 @@ func (s *teamCredentialStore) Set(ctx context.Context, name string, cred *store.
 		credType = "unknown"
 	}
 
+	return s.setEncrypted(ctx, name, credType, encrypted, true)
+}
+
+func (s *teamCredentialStore) setEncrypted(ctx context.Context, name, credType string, encrypted []byte, allowRepair bool) error {
 	// Try update first.
 	n, updateErr := s.client.Credential.Update().
 		Where(credential.NameEQ(name)).
@@ -70,15 +80,27 @@ func (s *teamCredentialStore) Set(ctx context.Context, name string, cred *store.
 		SetEncrypted(encrypted).
 		Save(ctx)
 	if updateErr != nil {
+		if allowRepair && isMissingCredentialTableError(updateErr) {
+			if repairErr := s.repairCredentialsSchema(ctx, "set-update", updateErr); repairErr != nil {
+				return fmt.Errorf("entstore: CredentialStore.Set: update: %w", updateErr)
+			}
+			return s.setEncrypted(ctx, name, credType, encrypted, false)
+		}
 		return fmt.Errorf("entstore: CredentialStore.Set: update: %w", updateErr)
 	}
 	if n == 0 {
-		_, err = s.client.Credential.Create().
+		_, err := s.client.Credential.Create().
 			SetName(name).
 			SetCredType(credType).
 			SetEncrypted(encrypted).
 			Save(ctx)
 		if err != nil {
+			if allowRepair && isMissingCredentialTableError(err) {
+				if repairErr := s.repairCredentialsSchema(ctx, "set-create", err); repairErr != nil {
+					return fmt.Errorf("entstore: CredentialStore.Set: create: %w", err)
+				}
+				return s.setEncrypted(ctx, name, credType, encrypted, false)
+			}
 			return fmt.Errorf("entstore: CredentialStore.Set: create: %w", err)
 		}
 	}
@@ -89,6 +111,11 @@ func (s *teamCredentialStore) Remove(ctx context.Context, name string) error {
 	_, err := s.client.Credential.Delete().
 		Where(credential.NameEQ(name)).
 		Exec(ctx)
+	if err != nil && isMissingCredentialTableError(err) && s.repairCredentialsSchema(ctx, "remove", err) == nil {
+		_, err = s.client.Credential.Delete().
+			Where(credential.NameEQ(name)).
+			Exec(ctx)
+	}
 	if err != nil {
 		return fmt.Errorf("entstore: CredentialStore.Remove: %w", err)
 	}
@@ -98,7 +125,12 @@ func (s *teamCredentialStore) Remove(ctx context.Context, name string) error {
 func (s *teamCredentialStore) List(ctx context.Context) map[string]store.CredentialType {
 	creds, err := s.client.Credential.Query().
 		All(ctx)
+	if err != nil && isMissingCredentialTableError(err) && s.repairCredentialsSchema(ctx, "list", err) == nil {
+		creds, err = s.client.Credential.Query().
+			All(ctx)
+	}
 	if err != nil {
+		slog.Warn("team credential list failed", "error", err)
 		return nil
 	}
 
@@ -116,7 +148,12 @@ func (s *teamCredentialStore) List(ctx context.Context) map[string]store.Credent
 func (s *teamCredentialStore) Count(ctx context.Context) int {
 	count, err := s.client.Credential.Query().
 		Count(ctx)
+	if err != nil && isMissingCredentialTableError(err) && s.repairCredentialsSchema(ctx, "count", err) == nil {
+		count, err = s.client.Credential.Query().
+			Count(ctx)
+	}
 	if err != nil {
+		slog.Warn("team credential count failed", "error", err)
 		return 0
 	}
 	return count
@@ -166,7 +203,13 @@ func (s *teamCredentialStore) HasSecrets(ctx context.Context) bool {
 	count, err := s.client.Credential.Query().
 		Where(credential.NameHasPrefix(secretPrefix)).
 		Count(ctx)
+	if err != nil && isMissingCredentialTableError(err) && s.repairCredentialsSchema(ctx, "has-secrets", err) == nil {
+		count, err = s.client.Credential.Query().
+			Where(credential.NameHasPrefix(secretPrefix)).
+			Count(ctx)
+	}
 	if err != nil {
+		slog.Warn("team credential secret count failed", "error", err)
 		return false
 	}
 	return count > 0
@@ -176,7 +219,13 @@ func (s *teamCredentialStore) SecretCount(ctx context.Context) int {
 	count, err := s.client.Credential.Query().
 		Where(credential.NameHasPrefix(secretPrefix)).
 		Count(ctx)
+	if err != nil && isMissingCredentialTableError(err) && s.repairCredentialsSchema(ctx, "secret-count", err) == nil {
+		count, err = s.client.Credential.Query().
+			Where(credential.NameHasPrefix(secretPrefix)).
+			Count(ctx)
+	}
 	if err != nil {
+		slog.Warn("team credential secret count failed", "error", err)
 		return 0
 	}
 	return count
@@ -186,7 +235,13 @@ func (s *teamCredentialStore) ListSecrets(ctx context.Context) []string {
 	creds, err := s.client.Credential.Query().
 		Where(credential.NameHasPrefix(secretPrefix)).
 		All(ctx)
+	if err != nil && isMissingCredentialTableError(err) && s.repairCredentialsSchema(ctx, "list-secrets", err) == nil {
+		creds, err = s.client.Credential.Query().
+			Where(credential.NameHasPrefix(secretPrefix)).
+			All(ctx)
+	}
 	if err != nil {
+		slog.Warn("team credential list secrets failed", "error", err)
 		return nil
 	}
 
@@ -197,7 +252,22 @@ func (s *teamCredentialStore) ListSecrets(ctx context.Context) []string {
 	return keys
 }
 
-func (s *teamCredentialStore) Reload(_ context.Context) error {
-	// No-op for DB-backed store.
+func (s *teamCredentialStore) Reload(ctx context.Context) error {
+	return s.repairCredentialsSchema(ctx, "reload", nil)
+}
+
+func (s *teamCredentialStore) repairCredentialsSchema(ctx context.Context, operation string, cause error) error {
+	if s.repairSchema == nil {
+		return cause
+	}
+	if cause != nil {
+		slog.Warn("team credential table missing; attempting schema repair", "operation", operation, "error", cause)
+	} else {
+		slog.Debug("checking team credential schema", "operation", operation)
+	}
+	if err := s.repairSchema(ctx); err != nil {
+		slog.Warn("team credential schema repair failed", "operation", operation, "error", err)
+		return err
+	}
 	return nil
 }

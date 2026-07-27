@@ -219,7 +219,7 @@ Flows often feel slower than Chat for the same `shell_command` / OpenStack curl 
 
 - **Agent Engine**: ChatAgent invokes flows via `run_flow` tool. AstonishAgent IS the flow executor.
 - **Sandbox**: Tool nodes and LLM nodes with tools enabled execute inside sandbox containers via the same node protocol.
-- **Credentials**: Flow tool args containing `{{CREDENTIAL:...}}` placeholders are substituted by the same BeforeToolCallback used in ChatAgent.
+- **Credentials**: Flow tool args containing `{{CREDENTIAL:...}}` placeholders are substituted by the same BeforeToolCallback used in ChatAgent. Flow `http_request(credential: ...)` resolves against the request-scoped merged credential store: personal credentials are checked first, then team credentials. Credential names are exact identifiers, not display labels, so `openstack_keystone` and `openstack-keystone` are distinct.
 - **Drill**: Drill test suites are a specialized flow type (`type: drill_suite`) with assertions, ready checks, and visual regression.
 - **Studio**: The flow canvas provides a visual editor that reads/writes the same YAML format.
 - **Memory**: Distilled flows generate knowledge documents indexed in the vector store for future retrieval.

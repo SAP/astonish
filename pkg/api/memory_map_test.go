@@ -2,6 +2,7 @@ package api
 
 import (
 	"testing"
+	"time"
 
 	"github.com/SAP/astonish/pkg/memory"
 	"github.com/SAP/astonish/pkg/store"
@@ -116,6 +117,51 @@ func TestBuildMemoryMapGroupsScenarioCardWithSourceMemories(t *testing.T) {
 	}
 }
 
+func TestBuildMemoryHealthRecommendsScenarioCardCreation(t *testing.T) {
+	report := BuildMemoryMap([]store.MemorySearchResult{
+		{ID: "m1", Snippet: "Use the noVNC ticket endpoint for Proxmox console access.", Category: "proxmox-console-access", Scope: "team"},
+		{ID: "m2", Snippet: "Earlier trial and error tried scraping but final path uses noVNC.", Category: "proxmox-console-access", Scope: "personal"},
+	})
+	health := BuildMemoryHealth(report, true, mustParseTime(t, "2026-07-27T12:00:00Z"))
+	if health.RecommendationCount != 1 {
+		t.Fatalf("RecommendationCount = %d, want 1: %#v", health.RecommendationCount, health.Recommendations)
+	}
+	rec := health.Recommendations[0]
+	if rec.Type != "create_scenario_card" || rec.TargetScope != "team" {
+		t.Fatalf("unexpected recommendation: %#v", rec)
+	}
+	if rec.Card.CanonicalKey != "proxmox-console-access" || len(rec.Card.RecommendedRecipe) == 0 {
+		t.Fatalf("invalid draft card: %#v", rec.Card)
+	}
+}
+
+func TestBuildMemoryHealthRecommendsExistingCardUpdate(t *testing.T) {
+	card := memory.ScenarioCard{
+		CanonicalKey:      "proxmox-console-access",
+		Scope:             "team",
+		Title:             "Proxmox Console Access",
+		RecommendedRecipe: []string{"Use the noVNC ticket endpoint."},
+		Status:            memory.ScenarioCardStatusDraft,
+		SourceMemoryIDs:   []string{"raw-1"},
+	}
+	report := BuildMemoryMap([]store.MemorySearchResult{
+		{ID: "card-1", Snippet: memory.RenderScenarioCard(card), Category: memory.ScenarioCardCategory, Scope: "team"},
+		{ID: "raw-1", Snippet: "Use the noVNC ticket endpoint.", Category: "proxmox-console-access", Scope: "team"},
+		{ID: "raw-2", Snippet: "Open the websocket with the returned ticket.", Category: "proxmox-console-access", Scope: "team"},
+	})
+	health := BuildMemoryHealth(report, true, mustParseTime(t, "2026-07-27T12:00:00Z"))
+	if health.RecommendationCount != 1 {
+		t.Fatalf("RecommendationCount = %d, want 1: %#v", health.RecommendationCount, health.Recommendations)
+	}
+	rec := health.Recommendations[0]
+	if rec.Type != "update_scenario_card" || len(rec.MemoryIDs) != 1 || rec.MemoryIDs[0] != "raw-2" {
+		t.Fatalf("unexpected recommendation: %#v", rec)
+	}
+	if len(rec.Card.SourceMemoryIDs) != 2 {
+		t.Fatalf("merged card sources = %#v, want raw-1 and raw-2", rec.Card.SourceMemoryIDs)
+	}
+}
+
 func TestBuildMemoryMapUsesFallbackForEmptyContent(t *testing.T) {
 	report := BuildMemoryMap([]store.MemorySearchResult{{ID: "m1", Scope: "personal"}})
 	if len(report.Groups) != 1 {
@@ -124,4 +170,13 @@ func TestBuildMemoryMapUsesFallbackForEmptyContent(t *testing.T) {
 	if report.Groups[0].Key != "uncategorized" {
 		t.Fatalf("key = %q, want uncategorized", report.Groups[0].Key)
 	}
+}
+
+func mustParseTime(t *testing.T, value string) time.Time {
+	t.Helper()
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		t.Fatalf("failed to parse time: %v", err)
+	}
+	return parsed
 }

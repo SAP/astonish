@@ -1,20 +1,20 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { Search, Brain, Plus, Trash2, ArrowUpRight, Loader2, AlertCircle, BookOpen, User, ChevronDown, ChevronUp, Pencil, X, Check, Map, AlertTriangle, RefreshCw, Wand2 } from 'lucide-react'
+import { Search, Brain, Plus, Trash2, ArrowUpRight, Loader2, AlertCircle, BookOpen, User, ChevronDown, ChevronUp, Pencil, X, Check, Map, AlertTriangle, RefreshCw, Wand2, HeartPulse } from 'lucide-react'
 import {
   searchMemories, listTeamMemories, listOrgMemories, listPersonalMemories,
   saveTeamMemory, savePersonalMemory, saveOrgMemory,
   deleteTeamMemory, deleteOrgMemory, deletePersonalMemory,
-  promoteMemoryToOrg, promotePersonalToTeam, updateMemory, fetchMemoryMap,
-  previewMemoryConsolidation, applyMemoryConsolidation,
+  promoteMemoryToOrg, promotePersonalToTeam, updateMemory,
+  previewMemoryConsolidation, applyMemoryConsolidation, fetchMemoryHealth,
 } from '../api/platform'
-import type { MemoryEntry, MemoryMapGroup, MemoryMapResponse, ScenarioCard } from '../api/platform'
+import type { MemoryEntry, MemoryMapGroup, MemoryMapResponse, ScenarioCard, MemoryHealthResponse, MemoryRecommendation } from '../api/platform'
 
 interface KnowledgeBrowserProps {
   theme: 'dark' | 'light'
   user: { id: string; email: string; display_name: string; role: string }
   activeTeam?: string | null
 }
-type Tab = 'personal' | 'team' | 'org' | 'map' | 'add'
+type Tab = 'personal' | 'team' | 'org' | 'health' | 'add'
 const SCOPE_COLORS: Record<string, string> = {
   personal: 'var(--info)',
   team: 'var(--brand)',
@@ -327,6 +327,103 @@ function ScenarioCardPreview({ card, onChange }: { card: ScenarioCard; onChange:
   )
 }
 
+function MemoryRecommendationCard({ recommendation, onReview }: { recommendation: MemoryRecommendation; onReview: (recommendation: MemoryRecommendation) => void }) {
+  const severityColor = recommendation.severity === 'high' ? 'var(--warning)' : recommendation.severity === 'medium' ? 'var(--info)' : 'var(--muted-foreground)'
+  return (
+    <div className="rounded-xl border border-border bg-card p-4 shadow-[var(--shadow-soft)]">
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0 flex-1">
+          <div className="mb-2 flex flex-wrap items-center gap-2">
+            <span className="rounded-full border px-2 py-0.5 text-xs font-medium capitalize" style={{ background: `color-mix(in oklab, ${severityColor} 12%, transparent)`, color: severityColor, borderColor: `color-mix(in oklab, ${severityColor} 30%, transparent)` }}>
+              {recommendation.severity}
+            </span>
+            <ScopeBadge scope={recommendation.target_scope} />
+            <span className="text-xs" style={{ color: 'var(--text-muted)' }}>{recommendation.memory_ids.length} source memor{recommendation.memory_ids.length === 1 ? 'y' : 'ies'}</span>
+          </div>
+          <h3 className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>{recommendation.title}</h3>
+          <p className="mt-1 text-sm" style={{ color: 'var(--text-secondary)' }}>{recommendation.description}</p>
+          {recommendation.flags && recommendation.flags.length > 0 && (
+            <div className="mt-3 flex flex-wrap gap-2">
+              {recommendation.flags.map(flag => <MemoryMapFlagBadge key={flag.type} type={flag.type} />)}
+            </div>
+          )}
+        </div>
+        <button onClick={() => onReview(recommendation)} className="flex shrink-0 items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-white" style={{ background: 'var(--brand)' }}>
+          <Wand2 size={14} /> Review
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function MemoryHealthPanel({ health, onRefresh, onReview, showAdvancedMap, onToggleAdvancedMap, onDraftFromMap }: { health: MemoryHealthResponse | null; onRefresh: () => void; onReview: (recommendation: MemoryRecommendation) => void; showAdvancedMap: boolean; onToggleAdvancedMap: () => void; onDraftFromMap: (group: MemoryMapGroup) => void }) {
+  if (!health) {
+    return (
+      <div className="text-center py-12" style={{ color: 'var(--text-muted)' }}>
+        <HeartPulse size={40} className="mx-auto mb-3 opacity-30" />
+        <p className="text-sm">No memory health evaluation loaded yet.</p>
+      </div>
+    )
+  }
+  const evaluated = new Date(health.evaluated_at).toLocaleString()
+  const expires = new Date(health.expires_at).toLocaleDateString()
+
+  return (
+    <div className="space-y-4">
+      <div className="rounded-xl border p-4" style={{ background: 'var(--bg-secondary)', borderColor: 'var(--border-color)' }}>
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h2 className="text-lg font-semibold" style={{ color: 'var(--text-primary)' }}>Memory Health</h2>
+            <p className="text-sm mt-1" style={{ color: 'var(--text-muted)' }}>
+              Astonish checks for memory improvements lazily when this page is opened. Fresh evaluations are reused for five days.
+            </p>
+            <p className="text-xs mt-2" style={{ color: 'var(--text-muted)' }}>
+              Last analyzed: {evaluated} · Next refresh after: {expires} · {health.generated ? 'Generated now' : 'Using recent evaluation'}
+            </p>
+          </div>
+          <button onClick={onRefresh} className="flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-medium transition-colors hover:opacity-80" style={{ background: 'var(--bg-tertiary)', color: 'var(--text-secondary)', borderColor: 'var(--border-color)' }}>
+            <RefreshCw size={14} /> Reanalyze
+          </button>
+        </div>
+        <div className="mt-4 grid gap-3 sm:grid-cols-3">
+          <div className="rounded-lg border p-3" style={{ background: 'var(--bg-primary)', borderColor: 'var(--border-color)' }}>
+            <div className="text-xs" style={{ color: 'var(--text-muted)' }}>Suggestions</div>
+            <div className="mt-1 text-xl font-semibold" style={{ color: 'var(--text-primary)' }}>{health.recommendation_count}</div>
+          </div>
+          <div className="rounded-lg border p-3" style={{ background: 'var(--bg-primary)', borderColor: 'var(--border-color)' }}>
+            <div className="text-xs" style={{ color: 'var(--text-muted)' }}>Memory groups</div>
+            <div className="mt-1 text-xl font-semibold" style={{ color: 'var(--text-primary)' }}>{health.map.stats.group_count}</div>
+          </div>
+          <div className="rounded-lg border p-3" style={{ background: 'var(--bg-primary)', borderColor: 'var(--border-color)' }}>
+            <div className="text-xs" style={{ color: 'var(--text-muted)' }}>Duplicate risks</div>
+            <div className="mt-1 text-xl font-semibold" style={{ color: 'var(--text-primary)' }}>{health.map.stats.duplicate_risk_count}</div>
+          </div>
+        </div>
+      </div>
+
+      {health.recommendations.length === 0 ? (
+        <div className="rounded-xl border p-8 text-center" style={{ background: 'var(--bg-secondary)', borderColor: 'var(--border-color)', color: 'var(--text-muted)' }}>
+          <Check size={36} className="mx-auto mb-3 opacity-40" />
+          <p className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>No suggested improvements right now.</p>
+          <p className="mt-1 text-sm">Memory already looks organized enough for the current heuristic check.</p>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {health.recommendations.map(recommendation => <MemoryRecommendationCard key={recommendation.id} recommendation={recommendation} onReview={onReview} />)}
+        </div>
+      )}
+
+      <div className="rounded-xl border p-4" style={{ background: 'var(--bg-secondary)', borderColor: 'var(--border-color)' }}>
+        <button onClick={onToggleAdvancedMap} className="flex items-center gap-2 text-sm font-medium" style={{ color: 'var(--brand)' }}>
+          {showAdvancedMap ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+          {showAdvancedMap ? 'Hide advanced Memory Map' : 'Show advanced Memory Map'}
+        </button>
+        {showAdvancedMap && <div className="mt-4"><MemoryMapPanel report={health.map} onRefresh={onRefresh} onDraft={onDraftFromMap} /></div>}
+      </div>
+    </div>
+  )
+}
+
 function MemoryMapPanel({ report, onRefresh, onDraft }: { report: MemoryMapResponse | null; onRefresh: () => void; onDraft: (group: MemoryMapGroup) => void }) {
   if (!report) {
     return (
@@ -397,7 +494,8 @@ export default function KnowledgeBrowser({ theme, user, activeTeam }: KnowledgeB
   const [personalEntries, setPersonalEntries] = useState<MemoryEntry[]>([])
   const [teamEntries, setTeamEntries] = useState<MemoryEntry[]>([])
   const [orgEntries, setOrgEntries] = useState<MemoryEntry[]>([])
-  const [memoryMap, setMemoryMap] = useState<MemoryMapResponse | null>(null)
+  const [memoryHealth, setMemoryHealth] = useState<MemoryHealthResponse | null>(null)
+  const [showAdvancedMap, setShowAdvancedMap] = useState(false)
   const [draftCard, setDraftCard] = useState<ScenarioCard | null>(null)
   const [draftScope, setDraftScope] = useState<'personal' | 'team' | 'org'>('team')
   const [drafting, setDrafting] = useState(false)
@@ -422,7 +520,7 @@ export default function KnowledgeBrowser({ theme, user, activeTeam }: KnowledgeB
       if (t === 'personal') setPersonalEntries(await listPersonalMemories(teamSlug))
       else if (t === 'team') setTeamEntries(await listTeamMemories(teamSlug))
       else if (t === 'org') setOrgEntries(await listOrgMemories(teamSlug))
-      else if (t === 'map') setMemoryMap(await fetchMemoryMap(500, teamSlug))
+      else if (t === 'health') setMemoryHealth(await fetchMemoryHealth(500, false, teamSlug))
     } catch (err: any) {
       setError(err.message)
     } finally {
@@ -522,6 +620,25 @@ export default function KnowledgeBrowser({ theme, user, activeTeam }: KnowledgeB
     }
   }, [activeTeam, draftScope])
 
+  const handleReviewRecommendation = useCallback((recommendation: MemoryRecommendation) => {
+    setDraftCard(recommendation.card)
+    setDraftScope(recommendation.target_scope)
+    setError(null)
+    setSuccess(null)
+  }, [])
+
+  const handleRefreshHealth = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      setMemoryHealth(await fetchMemoryHealth(500, true, activeTeam || undefined))
+    } catch (err: any) {
+      setError(err.message)
+    } finally {
+      setLoading(false)
+    }
+  }, [activeTeam])
+
   const handleApplyScenarioCard = useCallback(async () => {
     if (!draftCard) return
     setApplyingDraft(true)
@@ -530,13 +647,17 @@ export default function KnowledgeBrowser({ theme, user, activeTeam }: KnowledgeB
       const saved = await applyMemoryConsolidation({ ...draftCard, scope: draftScope }, draftScope, activeTeam || undefined)
       setSuccess(`Scenario card ${saved.action}`)
       setDraftCard(null)
-      loadTab('map')
+      if (tab === 'health') {
+        setMemoryHealth(await fetchMemoryHealth(500, true, activeTeam || undefined))
+      } else {
+        loadTab(tab)
+      }
     } catch (err: any) {
       setError(err.message)
     } finally {
       setApplyingDraft(false)
     }
-  }, [activeTeam, draftCard, draftScope, loadTab])
+  }, [activeTeam, draftCard, draftScope, loadTab, tab])
 
   const handleSave = useCallback(async () => {
     if (!snippet.trim()) return
@@ -566,7 +687,7 @@ export default function KnowledgeBrowser({ theme, user, activeTeam }: KnowledgeB
     { key: 'personal', label: 'Personal', icon: User },
     { key: 'team', label: 'Team', icon: Brain },
     { key: 'org', label: 'Organization', icon: BookOpen },
-    { key: 'map', label: 'Memory Map', icon: Map },
+    { key: 'health', label: 'Memory Health', icon: HeartPulse },
     { key: 'add', label: 'Add New', icon: Plus },
   ]
 
@@ -669,7 +790,7 @@ export default function KnowledgeBrowser({ theme, user, activeTeam }: KnowledgeB
         )}
 
         {/* Memory list (search results or browse tab) */}
-        {(searchResults || (tab !== 'add' && tab !== 'map')) && !loading && (
+        {(searchResults || (tab !== 'add' && tab !== 'health')) && !loading && (
           <div className="flex flex-col gap-3">
             {displayList.length === 0 && (
               <div className="text-center py-12" style={{ color: 'var(--text-muted)' }}>
@@ -692,7 +813,7 @@ export default function KnowledgeBrowser({ theme, user, activeTeam }: KnowledgeB
           </div>
         )}
 
-        {!searchResults && tab === 'map' && !loading && (
+        {!searchResults && tab === 'health' && !loading && (
           <div className="space-y-4">
             {drafting && (
               <div className="flex items-center gap-2 rounded-lg border px-4 py-3 text-sm" style={{ background: 'var(--bg-secondary)', color: 'var(--text-muted)', borderColor: 'var(--border-color)' }}>
@@ -713,14 +834,21 @@ export default function KnowledgeBrowser({ theme, user, activeTeam }: KnowledgeB
                     <button onClick={() => setDraftCard(null)} className="rounded-lg px-3 py-2 text-sm" style={{ color: 'var(--text-muted)' }}>Cancel</button>
                     <button onClick={handleApplyScenarioCard} disabled={applyingDraft} className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-white disabled:opacity-50" style={{ background: 'var(--brand)' }}>
                       {applyingDraft ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
-                      Save scenario card
+                      Apply recommendation
                     </button>
                   </div>
                 </div>
                 <ScenarioCardPreview card={draftCard} onChange={setDraftCard} />
               </div>
             )}
-            <MemoryMapPanel report={memoryMap} onRefresh={() => loadTab('map')} onDraft={handleDraftScenarioCard} />
+            <MemoryHealthPanel
+              health={memoryHealth}
+              onRefresh={handleRefreshHealth}
+              onReview={handleReviewRecommendation}
+              showAdvancedMap={showAdvancedMap}
+              onToggleAdvancedMap={() => setShowAdvancedMap(v => !v)}
+              onDraftFromMap={handleDraftScenarioCard}
+            />
           </div>
         )}
 

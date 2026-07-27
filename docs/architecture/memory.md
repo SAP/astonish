@@ -197,11 +197,19 @@ Implementation details:
 
 The key invariant is that Astonish should save **how to do the thing efficiently**, not a transcript of exploratory dead ends. Temporary outages, timeouts, rate limits, and “X did not work” observations may appear only as conditional cautions that require re-verification before they change behavior.
 
-### Memory Map Diagnostics and Consolidation
+### Memory Health Recommendations and Advanced Map
 
-Platform mode exposes `GET /api/memories/map` as a diagnostic report over the current user's visible personal, team, and org memories. The Studio Knowledge Browser surfaces this as the **Memory Map** tab.
+Platform mode exposes `GET /api/memories/health` as the product-facing memory organization surface. It evaluates the current user's visible personal, team, and org memories lazily when the Knowledge Browser's **Memory Health** tab is opened. There is no background schedule: a cached evaluation is reused for five days when the memory snapshot has not changed, and the next UI visit after the TTL triggers a fresh evaluation. Users can also force a refresh with **Reanalyze**.
 
-The report groups likely related memory chunks by a canonical topic key and flags conditions that make memory feel scattered or unsafe:
+Memory Health returns reviewable recommendations, not automatic writes:
+
+- create a scenario card from related raw memories
+- update an existing scenario card with new raw source memories
+- review a card that still carries temporary-failure or trial/error wording
+
+Each recommendation contains the proposed card, target scope, source memory IDs, and the diagnostic flags that explain why it was suggested. Applying a recommendation uses the same scenario-card upsert endpoint as manual consolidation; source memories are retained as provenance.
+
+`GET /api/memories/map` remains available as the advanced diagnostic report behind the Memory Health UI. It groups likely related memory chunks by a canonical topic key and flags conditions that make memory feel scattered or unsafe:
 
 - duplicate risk: multiple memories appear to cover the same topic
 - scattered topic: related memories are spread across scopes or categories
@@ -209,12 +217,12 @@ The report groups likely related memory chunks by a canonical topic key and flag
 - trial/error risk: a memory appears to preserve exploratory failed attempts instead of the shortest successful path
 - scenario card: the group already contains a structured card, so raw rows should be treated as provenance or incremental evidence
 
-The Memory Map also provides controlled consolidation endpoints:
+The consolidation endpoints remain the write boundary:
 
 - `POST /api/memories/consolidate/preview` drafts a scenario card from a selected group without saving.
 - `POST /api/memories/consolidate/apply` saves or merges the edited card into the selected personal, team, or org scope.
 
-Both endpoints resolve stores through the tenant router and current authenticated context. They do not connect directly to tenant databases and they do not delete raw memories.
+Both endpoints resolve stores through the tenant router and current authenticated context. They do not connect directly to tenant databases and they do not delete raw memories. Memory Health recommendations are operational metadata, not agent knowledge, and are not stored as retrievable memories.
 
 ### BM25 Implementation
 

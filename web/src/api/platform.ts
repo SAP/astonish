@@ -294,6 +294,28 @@ export interface MemoryConsolidationApplyResponse {
   card: ScenarioCard
 }
 
+export interface MemoryRecommendation {
+  id: string
+  type: string
+  severity: string
+  title: string
+  description: string
+  target_scope: 'personal' | 'team' | 'org'
+  group_key: string
+  memory_ids: string[]
+  flags?: MemoryMapFlag[]
+  card: ScenarioCard
+}
+
+export interface MemoryHealthResponse {
+  evaluated_at: string
+  expires_at: string
+  generated: boolean
+  recommendation_count: number
+  recommendations: MemoryRecommendation[]
+  map: MemoryMapResponse
+}
+
 export interface MemoryMapResponse {
   groups: MemoryMapGroup[]
   stats: {
@@ -321,6 +343,16 @@ export async function fetchMemoryMap(limit?: number, teamSlug?: string): Promise
   const suffix = limit ? `?limit=${encodeURIComponent(String(limit))}` : ''
   const res = await teamFetch(`/api/memories/map${suffix}`, undefined, teamSlug)
   if (!res.ok) await throwBackendError(res, 'Failed to fetch memory map')
+  return res.json()
+}
+
+export async function fetchMemoryHealth(limit?: number, refresh?: boolean, teamSlug?: string): Promise<MemoryHealthResponse> {
+  const params = new URLSearchParams()
+  if (limit) params.set('limit', String(limit))
+  if (refresh) params.set('refresh', 'true')
+  const suffix = params.toString() ? `?${params.toString()}` : ''
+  const res = await teamFetch(`/api/memories/health${suffix}`, undefined, teamSlug)
+  if (!res.ok) await throwBackendError(res, 'Failed to analyze memory health')
   return res.json()
 }
 

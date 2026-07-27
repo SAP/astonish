@@ -75,12 +75,14 @@ This helps the agent reuse the efficient path it learned instead of replaying tr
 
 ## Managing Memory in Studio
 
-Studio provides a visual interface for memory management:
+Studio provides a visual interface for memory management. The main organization surface is **Memory Health**: when opened, Astonish checks whether the visible memories need consolidation, deduplication, or review. The check is lazy and on demand — there is no scheduled background job. If a recent evaluation is still fresh, Studio reuses it; after five days, the next visit runs a new evaluation.
 
 - Browse all memory entries with search and filtering
 - View memory content, tags, and metadata
-- Use **Memory Map** to identify duplicate, scattered, or risky memories
-- Draft and save scenario cards from Memory Map groups
+- Use **Memory Health** to review suggested organization improvements
+- Reanalyze memory on demand; otherwise fresh evaluations are reused for five days
+- Draft and save scenario cards from recommendations
+- Open the advanced **Memory Map** only when you need low-level diagnostics
 - Publish personal memories to your team by merging them into scenario cards when possible
 - Promote team memories to org level (admin) by merging them into org scenario cards when possible
 - Delete or edit memory entries

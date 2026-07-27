@@ -1325,6 +1325,8 @@ func RegisterRoutes(router *mux.Router, svc *store.Services, backend store.Platf
 
 	// Memory sharing endpoints (platform mode)
 	router.HandleFunc("/api/memories/map", MemoryMapHandler).Methods("GET")
+	router.HandleFunc("/api/memories/consolidate/preview", MemoryConsolidationPreviewHandler).Methods("POST")
+	router.HandleFunc("/api/memories/consolidate/apply", MemoryConsolidationApplyHandler).Methods("POST")
 	router.HandleFunc("/api/memories/search", MemorySearchCrossTierHandler).Methods("POST")
 	router.HandleFunc("/api/memories/team", MemoryShareToTeamHandler).Methods("POST")
 	router.HandleFunc("/api/memories/team", MemoryListTeamHandler).Methods("GET")

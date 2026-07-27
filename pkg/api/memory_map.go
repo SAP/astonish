@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/SAP/astonish/pkg/memory"
 	"github.com/SAP/astonish/pkg/store"
 )
 
@@ -25,16 +26,18 @@ type MemoryMapStats struct {
 }
 
 type MemoryMapGroup struct {
-	Key            string                     `json:"key"`
-	Title          string                     `json:"title"`
-	MemoryCount    int                        `json:"memory_count"`
-	Scopes         []string                   `json:"scopes"`
-	Categories     []string                   `json:"categories"`
-	SessionIDs     []string                   `json:"session_ids,omitempty"`
-	CreatedBy      []string                   `json:"created_by,omitempty"`
-	Flags          []MemoryMapFlag            `json:"flags,omitempty"`
-	Representative store.MemorySearchResult   `json:"representative"`
-	Memories       []store.MemorySearchResult `json:"memories"`
+	Key             string                     `json:"key"`
+	Title           string                     `json:"title"`
+	MemoryCount     int                        `json:"memory_count"`
+	Scopes          []string                   `json:"scopes"`
+	Categories      []string                   `json:"categories"`
+	SessionIDs      []string                   `json:"session_ids,omitempty"`
+	CreatedBy       []string                   `json:"created_by,omitempty"`
+	Flags           []MemoryMapFlag            `json:"flags,omitempty"`
+	HasScenarioCard bool                       `json:"has_scenario_card"`
+	ScenarioCardID  string                     `json:"scenario_card_id,omitempty"`
+	Representative  store.MemorySearchResult   `json:"representative"`
+	Memories        []store.MemorySearchResult `json:"memories"`
 }
 
 type MemoryMapFlag struct {
@@ -48,8 +51,8 @@ type MemoryMapFlag struct {
 //	GET /api/memories/map?limit=500
 //
 // The report groups likely related memories by a simple canonical topic key and
-// flags duplicate/scattering risks. It does not change memory retrieval or write
-// semantics.
+// flags duplicate/scattering risks. The report itself is read-only; separate
+// consolidation endpoints perform explicit scenario-card writes.
 func MemoryMapHandler(w http.ResponseWriter, r *http.Request) {
 	svc := RequirePlatformServices(w, r)
 	if svc == nil {
@@ -120,9 +123,9 @@ func ensureMemoryScope(results []store.MemorySearchResult, scope string) []store
 // tests can exercise the report without tenant store setup.
 func BuildMemoryMap(memories []store.MemorySearchResult) MemoryMapResponse {
 	groupsByKey := make(map[string][]store.MemorySearchResult)
-	for _, memory := range memories {
-		key := canonicalMemoryTopic(memory)
-		groupsByKey[key] = append(groupsByKey[key], memory)
+	for _, memoryResult := range memories {
+		key := canonicalMemoryTopic(memoryResult)
+		groupsByKey[key] = append(groupsByKey[key], memoryResult)
 	}
 
 	groups := make([]MemoryMapGroup, 0, len(groupsByKey))
@@ -131,16 +134,19 @@ func BuildMemoryMap(memories []store.MemorySearchResult) MemoryMapResponse {
 		sort.SliceStable(entries, func(i, j int) bool {
 			return entries[i].CreatedAt > entries[j].CreatedAt
 		})
+		hasScenarioCard, scenarioCardID := groupScenarioCard(entries)
 		group := MemoryMapGroup{
-			Key:            key,
-			Title:          memoryMapTitle(key, entries),
-			MemoryCount:    len(entries),
-			Scopes:         uniqueMemoryStrings(entries, func(m store.MemorySearchResult) string { return m.Scope }),
-			Categories:     uniqueMemoryStrings(entries, func(m store.MemorySearchResult) string { return m.Category }),
-			SessionIDs:     uniqueMemoryStrings(entries, func(m store.MemorySearchResult) string { return m.SessionID }),
-			CreatedBy:      uniqueMemoryStrings(entries, func(m store.MemorySearchResult) string { return m.CreatedBy }),
-			Representative: entries[0],
-			Memories:       entries,
+			Key:             key,
+			Title:           memoryMapTitle(key, entries),
+			MemoryCount:     len(entries),
+			Scopes:          uniqueMemoryStrings(entries, func(m store.MemorySearchResult) string { return m.Scope }),
+			Categories:      uniqueMemoryStrings(entries, func(m store.MemorySearchResult) string { return m.Category }),
+			SessionIDs:      uniqueMemoryStrings(entries, func(m store.MemorySearchResult) string { return m.SessionID }),
+			CreatedBy:       uniqueMemoryStrings(entries, func(m store.MemorySearchResult) string { return m.CreatedBy }),
+			HasScenarioCard: hasScenarioCard,
+			ScenarioCardID:  scenarioCardID,
+			Representative:  entries[0],
+			Memories:        entries,
 		}
 		group.Flags = memoryMapFlags(group)
 		for _, flag := range group.Flags {
@@ -170,6 +176,13 @@ func BuildMemoryMap(memories []store.MemorySearchResult) MemoryMapResponse {
 
 func memoryMapFlags(group MemoryMapGroup) []MemoryMapFlag {
 	var flags []MemoryMapFlag
+	if group.HasScenarioCard {
+		flags = append(flags, MemoryMapFlag{
+			Type:        "scenario_card",
+			Severity:    "info",
+			Description: "This topic already has a structured scenario card; raw memories should be treated as provenance or incremental updates.",
+		})
+	}
 	if group.MemoryCount > 1 {
 		flags = append(flags, MemoryMapFlag{
 			Type:        "duplicate_risk",
@@ -201,6 +214,15 @@ func memoryMapFlags(group MemoryMapGroup) []MemoryMapFlag {
 	return flags
 }
 
+func groupScenarioCard(entries []store.MemorySearchResult) (bool, string) {
+	for _, entry := range entries {
+		if memory.IsScenarioCard(entry) {
+			return true, entry.ID
+		}
+	}
+	return false, ""
+}
+
 func groupContains(group MemoryMapGroup, pattern *regexp.Regexp) bool {
 	for _, memory := range group.Memories {
 		if pattern.MatchString(memory.Snippet) || pattern.MatchString(memory.Category) || pattern.MatchString(memory.Path) {
@@ -221,8 +243,11 @@ var memoryTopicStopWords = map[string]bool{
 	"the": true, "this": true, "to": true, "use": true, "using": true, "when": true, "with": true,
 }
 
-func canonicalMemoryTopic(memory store.MemorySearchResult) string {
-	text := strings.ToLower(strings.Join([]string{memory.Category, memory.Path, memory.Snippet}, " "))
+func canonicalMemoryTopic(memoryResult store.MemorySearchResult) string {
+	if card, ok := memory.ParseScenarioCard(memoryResult.Snippet); ok && card.CanonicalKey != "" {
+		return card.CanonicalKey
+	}
+	text := strings.ToLower(strings.Join([]string{memoryResult.Category, memoryResult.Path, memoryResult.Snippet}, " "))
 	words := memoryWordPattern.FindAllString(text, -1)
 	selected := make([]string, 0, 4)
 	seen := make(map[string]bool)

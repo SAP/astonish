@@ -8,6 +8,8 @@ import {
   listPersonalMemories,
   listTeamMemories,
   listOrgMemories,
+  previewMemoryConsolidation,
+  applyMemoryConsolidation,
 } from '../../api/platform'
 
 vi.mock('../../api/platform', () => ({
@@ -25,6 +27,8 @@ vi.mock('../../api/platform', () => ({
   promotePersonalToTeam: vi.fn(),
   updateMemory: vi.fn(),
   fetchMemoryMap: vi.fn(),
+  previewMemoryConsolidation: vi.fn(),
+  applyMemoryConsolidation: vi.fn(),
 }))
 
 describe('KnowledgeBrowser Memory Map', () => {
@@ -83,9 +87,36 @@ describe('KnowledgeBrowser Memory Map', () => {
         },
       ],
     })
+    vi.mocked(previewMemoryConsolidation).mockResolvedValue({
+      card: {
+        canonical_key: 'proxmox-console-access',
+        scope: 'team',
+        title: 'Proxmox Console Access',
+        recommended_recipe: ['Use the noVNC ticket endpoint for Proxmox console access.'],
+        conditions: ['Requires Proxmox console permission.'],
+        cautions_or_conditional_failures: ['Treat scraping attempts as historical only.'],
+        verification: ['Drafted from existing memories; verify on next successful run.'],
+        source_memory_ids: ['m1', 'm2'],
+        status: 'draft',
+      },
+      content: '---\nastonish_memory_type: scenario_card\n---\n',
+      sources: ['m1', 'm2'],
+    })
+    vi.mocked(applyMemoryConsolidation).mockResolvedValue({
+      applied: true,
+      scope: 'team',
+      action: 'created',
+      card: {
+        canonical_key: 'proxmox-console-access',
+        scope: 'team',
+        title: 'Proxmox Console Access',
+        recommended_recipe: ['Use the noVNC ticket endpoint for Proxmox console access.'],
+        status: 'draft',
+      },
+    })
   })
 
-  it('loads and renders the read-only memory map diagnostics tab', async () => {
+  it('loads and renders the memory map diagnostics tab', async () => {
     const actor = userEvent.setup()
 
     render(<KnowledgeBrowser theme="light" user={user} activeTeam="core" />)
@@ -102,5 +133,44 @@ describe('KnowledgeBrowser Memory Map', () => {
     expect(screen.getByText('Scattered topic')).toBeInTheDocument()
     expect(screen.getAllByText('Trial/error wording').length).toBeGreaterThan(0)
     expect(screen.getAllByText(/noVNC ticket endpoint/i).length).toBeGreaterThan(0)
+  })
+
+  it('drafts, edits, and saves a scenario card from a memory map group', async () => {
+    const actor = userEvent.setup()
+
+    render(<KnowledgeBrowser theme="light" user={user} activeTeam="core" />)
+
+    await actor.click(await screen.findByRole('button', { name: /memory map/i }))
+    await actor.click(await screen.findByRole('button', { name: /draft card/i }))
+
+    await waitFor(() => {
+      expect(previewMemoryConsolidation).toHaveBeenCalledWith(
+        'proxmox-console-access',
+        'team',
+        ['m1', 'm2'],
+        'core',
+      )
+    })
+    expect(await screen.findByText(/consolidated scenario card preview/i)).toBeInTheDocument()
+
+    const title = screen.getByLabelText(/title/i)
+    await actor.clear(title)
+    await actor.type(title, 'Fast Proxmox Console Access')
+
+    await actor.click(screen.getByRole('button', { name: /save scenario card/i }))
+
+    await waitFor(() => {
+      expect(applyMemoryConsolidation).toHaveBeenCalledWith(
+        expect.objectContaining({
+          canonical_key: 'proxmox-console-access',
+          scope: 'team',
+          title: 'Fast Proxmox Console Access',
+          recommended_recipe: ['Use the noVNC ticket endpoint for Proxmox console access.'],
+        }),
+        'team',
+        'core',
+      )
+    })
+    expect(await screen.findByText(/scenario card created/i)).toBeInTheDocument()
   })
 })

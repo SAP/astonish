@@ -19,6 +19,7 @@ import (
 	adrill "github.com/SAP/astonish/pkg/drill"
 	emailpkg "github.com/SAP/astonish/pkg/email"
 	"github.com/SAP/astonish/pkg/flowstore"
+	"github.com/SAP/astonish/pkg/memory"
 	"github.com/SAP/astonish/pkg/provider"
 	"github.com/SAP/astonish/pkg/sandbox"
 	incus "github.com/SAP/astonish/pkg/sandbox/incus"
@@ -1527,9 +1528,13 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			if bm25Query != "" {
 				searchQuery = bm25Query
 			}
-			pgResults, err := searcher.SearchAllTiers(ctx, searchQuery, maxResults, minScore)
+			pgResults, err := searcher.SearchAllTiers(ctx, searchQuery, maxResults*2, minScore)
 			if err != nil {
 				return nil, err
+			}
+			pgResults = memory.FilterPreferredScenarioResults(pgResults)
+			if len(pgResults) > maxResults {
+				pgResults = pgResults[:maxResults]
 			}
 			var knowledgeResults []agent.KnowledgeSearchResult
 			for _, r := range pgResults {
@@ -1557,9 +1562,13 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			if bm25Query != "" {
 				searchQuery = bm25Query
 			}
-			pgResults, err := searcher.SearchAllTiersByCategory(ctx, searchQuery, maxResults, minScore, category)
+			pgResults, err := searcher.SearchAllTiersByCategory(ctx, searchQuery, maxResults*2, minScore, category)
 			if err != nil {
 				return nil, err
+			}
+			pgResults = memory.FilterPreferredScenarioResults(pgResults)
+			if len(pgResults) > maxResults {
+				pgResults = pgResults[:maxResults]
 			}
 			var knowledgeResults []agent.KnowledgeSearchResult
 			for _, r := range pgResults {

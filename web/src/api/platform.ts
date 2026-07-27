@@ -256,8 +256,42 @@ export interface MemoryMapGroup {
   session_ids?: string[]
   created_by?: string[]
   flags?: MemoryMapFlag[]
+  has_scenario_card?: boolean
+  scenario_card_id?: string
   representative: MemoryEntry
   memories: MemoryEntry[]
+}
+
+export interface ScenarioCard {
+  canonical_key: string
+  scope?: string
+  title: string
+  aliases?: string[]
+  category?: string
+  facts?: string[]
+  recommended_recipe: string[]
+  conditions?: string[]
+  cautions_or_conditional_failures?: string[]
+  verification?: string[]
+  source_memory_ids?: string[]
+  source_session_ids?: string[]
+  status: string
+  confidence?: number
+  last_verified_at?: string
+}
+
+export interface MemoryConsolidationPreview {
+  card: ScenarioCard
+  content: string
+  sources: string[]
+}
+
+export interface MemoryConsolidationApplyResponse {
+  applied: boolean
+  scope: string
+  action: string
+  existing_id?: string
+  card: ScenarioCard
 }
 
 export interface MemoryMapResponse {
@@ -287,6 +321,26 @@ export async function fetchMemoryMap(limit?: number, teamSlug?: string): Promise
   const suffix = limit ? `?limit=${encodeURIComponent(String(limit))}` : ''
   const res = await teamFetch(`/api/memories/map${suffix}`, undefined, teamSlug)
   if (!res.ok) await throwBackendError(res, 'Failed to fetch memory map')
+  return res.json()
+}
+
+export async function previewMemoryConsolidation(key: string, targetScope: string, memoryIds?: string[], teamSlug?: string): Promise<MemoryConsolidationPreview> {
+  const res = await teamFetch('/api/memories/consolidate/preview', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key, target_scope: targetScope, memory_ids: memoryIds || [] }),
+  }, teamSlug)
+  if (!res.ok) await throwBackendError(res, 'Failed to draft consolidated memory')
+  return res.json()
+}
+
+export async function applyMemoryConsolidation(card: ScenarioCard, targetScope: string, teamSlug?: string): Promise<MemoryConsolidationApplyResponse> {
+  const res = await teamFetch('/api/memories/consolidate/apply', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ card, target_scope: targetScope }),
+  }, teamSlug)
+  if (!res.ok) await throwBackendError(res, 'Failed to save consolidated memory')
   return res.json()
 }
 

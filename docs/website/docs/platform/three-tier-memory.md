@@ -59,7 +59,7 @@ Personal  ──publish──▶  Team  ──promote──▶  Org
 
 The agent can also save knowledge directly during conversations using the `memory_save` tool. The tier is determined by the current context.
 
-Promotion copies the entry (with provenance metadata) — the original remains in its source tier.
+Promotion now prefers a scenario-card upsert. When possible, the selected memory is distilled into an efficient successful-path card in the target tier and merged with an existing card for the same scenario. The original source memory remains in its source tier as provenance rather than being deleted.
 
 ## The Learning Loop
 
@@ -67,8 +67,8 @@ Here is how knowledge compounds in practice:
 
 1. **Alice** debugs a tricky Kubernetes networking issue. The agent saves the resolution to her personal memory via `memory_save`.
 2. Alice publishes the resolution to the **Backend team** via Studio. Now when any backend engineer hits a similar issue, the agent surfaces Alice's solution.
-3. The team admin notices this resolution is relevant org-wide and **promotes it to org level** via Studio.
-4. **Dave** on the Frontend team later encounters the same networking issue. The agent finds the org-level memory and guides him through the fix — even though Dave never interacted with Alice.
+3. The team admin notices this resolution is relevant org-wide and **promotes it to org level** via Studio. If an org scenario card already exists, the new evidence is merged into that card instead of creating another duplicate memory.
+4. **Dave** on the Frontend team later encounters the same networking issue. The agent finds the org-level scenario card and guides him through the efficient path — even though Dave never interacted with Alice.
 
 Each step is explicit. Knowledge does not leak upward automatically.
 

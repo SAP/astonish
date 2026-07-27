@@ -3,6 +3,7 @@ package api
 import (
 	"testing"
 
+	"github.com/SAP/astonish/pkg/memory"
 	"github.com/SAP/astonish/pkg/store"
 )
 
@@ -71,6 +72,47 @@ func TestBuildMemoryMapFlagsScatteredTransientAndTrialErrorRisks(t *testing.T) {
 	}
 	if report.Stats.DuplicateRiskCount != 1 || report.Stats.ScatteredTopicCount != 1 || report.Stats.TransientRiskCount != 1 || report.Stats.TrialErrorRiskCount != 1 {
 		t.Fatalf("unexpected stats: %#v", report.Stats)
+	}
+}
+
+func TestBuildMemoryMapGroupsScenarioCardWithSourceMemories(t *testing.T) {
+	card := memory.ScenarioCard{
+		CanonicalKey:      "proxmox-console-access",
+		Scope:             "team",
+		Title:             "Proxmox Console Access",
+		RecommendedRecipe: []string{"Use the noVNC ticket endpoint."},
+		Status:            memory.ScenarioCardStatusVerified,
+		SourceMemoryIDs:   []string{"raw-1"},
+	}
+	report := BuildMemoryMap([]store.MemorySearchResult{
+		{
+			ID:       "card-1",
+			Snippet:  memory.RenderScenarioCard(card),
+			Category: memory.ScenarioCardCategory,
+			Scope:    "team",
+		},
+		{
+			ID:       "raw-1",
+			Snippet:  "Proxmox console access uses the noVNC ticket endpoint.",
+			Category: "proxmox-console-access",
+			Scope:    "personal",
+		},
+	})
+	if len(report.Groups) != 1 {
+		t.Fatalf("groups = %d, want 1", len(report.Groups))
+	}
+	group := report.Groups[0]
+	if !group.HasScenarioCard || group.ScenarioCardID != "card-1" {
+		t.Fatalf("scenario card metadata not set: %#v", group)
+	}
+	foundScenarioFlag := false
+	for _, flag := range group.Flags {
+		if flag.Type == "scenario_card" {
+			foundScenarioFlag = true
+		}
+	}
+	if !foundScenarioFlag {
+		t.Fatalf("missing scenario_card flag: %#v", group.Flags)
 	}
 }
 

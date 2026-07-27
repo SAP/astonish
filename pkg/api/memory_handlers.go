@@ -3,11 +3,11 @@ package api
 import (
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"net/http"
 
 	"github.com/gorilla/mux"
 
+	"github.com/SAP/astonish/pkg/memory"
 	"github.com/SAP/astonish/pkg/store"
 )
 
@@ -214,33 +214,19 @@ func MemoryPromoteToOrgHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Copy to org store
 	orgMem := orgStore.OrgMemories()
-	entry := store.MemoryEntry{
-		Content:    source.Snippet,
-		Category:   source.Category,
-		SourcePath: source.Path,
-		CreatedBy:  pu.ID,
-		Metadata: map[string]any{
-			"promoted_from_team": req.TeamSlug,
-		},
-	}
-
-	if err := orgMem.Add(r.Context(), entry); err != nil {
-		respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to promote memory to org: %v", err))
+	card := memory.DraftScenarioCardFromMemories("", "org", []store.MemorySearchResult{*source})
+	result, err := memory.UpsertScenarioCard(r.Context(), orgMem, card)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to promote memory to org scenario card: %v", err))
 		return
-	}
-
-	// Delete from team store (move semantics)
-	if err := teamMem.Delete(r.Context(), req.MemoryID); err != nil {
-		// Non-fatal: memory was already promoted to org
-		slog.Warn("failed to delete team memory after promotion", "error", err)
 	}
 
 	respondJSON(w, http.StatusOK, map[string]any{
 		"promoted": true,
 		"scope":    "org",
-		"message":  fmt.Sprintf("Memory promoted from team '%s' to org", req.TeamSlug),
+		"action":   result.Action,
+		"message":  fmt.Sprintf("Memory promoted from team '%s' into org scenario card", req.TeamSlug),
 	})
 }
 
@@ -646,28 +632,18 @@ func MemoryPromotePersonalToTeamHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Copy to team store with created_by
-	teamEntry := store.MemoryEntry{
-		Content:   entry.Snippet,
-		Category:  entry.Category,
-		CreatedBy: pu.ID,
-	}
-	if err := svc.Memory.Add(r.Context(), teamEntry); err != nil {
-		respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to promote memory to team: %v", err))
+	card := memory.DraftScenarioCardFromMemories("", "team", []store.MemorySearchResult{*entry})
+	result, err := memory.UpsertScenarioCard(r.Context(), svc.Memory, card)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to promote memory to team scenario card: %v", err))
 		return
-	}
-
-	// Delete from personal store (move semantics)
-	if err := personalMem.Delete(r.Context(), req.MemoryID); err != nil {
-		// Non-fatal: the memory was already copied to team
-		// Log but don't fail the response
-		slog.Warn("failed to delete personal memory after promotion", "error", err)
 	}
 
 	respondJSON(w, http.StatusOK, map[string]any{
 		"promoted": true,
 		"scope":    "team",
-		"message":  "Memory promoted from personal to team",
+		"action":   result.Action,
+		"message":  "Memory promoted into team scenario card",
 	})
 }
 

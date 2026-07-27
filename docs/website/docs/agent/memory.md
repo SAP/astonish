@@ -61,14 +61,28 @@ Results from both methods are merged using Reciprocal Rank Fusion (RRF).
 
 See [Three-Tier Memory](../platform/three-tier-memory.md) for details on how memory spans the org hierarchy.
 
+## Scenario Cards
+
+For repeatable operational tasks, Astonish can consolidate memory into **scenario cards**. A scenario card is still stored as normal embedded memory and still participates in semantic search, but it has a structured shape:
+
+- the shortest recommended successful path
+- the conditions where that path applies
+- verification notes
+- conditional cautions for temporary failures or outages
+- provenance back to source memories and sessions
+
+This helps the agent reuse the efficient path it learned instead of replaying trial-and-error steps. Temporary failures should be treated as cautions to re-check, not permanent “never use this” rules.
+
 ## Managing Memory in Studio
 
 Studio provides a visual interface for memory management:
 
 - Browse all memory entries with search and filtering
 - View memory content, tags, and metadata
-- Publish personal memories to your team
-- Promote team memories to org level (admin)
+- Use **Memory Map** to identify duplicate, scattered, or risky memories
+- Draft and save scenario cards from Memory Map groups
+- Publish personal memories to your team by merging them into scenario cards when possible
+- Promote team memories to org level (admin) by merging them into org scenario cards when possible
 - Delete or edit memory entries
 
 ## Memory Configuration

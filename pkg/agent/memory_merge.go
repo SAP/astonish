@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	mem "github.com/SAP/astonish/pkg/memory"
 	"github.com/SAP/astonish/pkg/store"
 	"google.golang.org/adk/model"
 	"google.golang.org/genai"
@@ -63,6 +64,16 @@ type MergeResult struct {
 func (mm *MemoryMerger) SaveOrMerge(ctx context.Context, memStore store.MemoryStore, entry store.MemoryEntry) (MergeResult, error) {
 	if memStore == nil {
 		return MergeResult{}, fmt.Errorf("memory store is nil")
+	}
+	if !mem.IsScenarioCard(store.MemorySearchResult{Snippet: entry.Content, Category: entry.Category}) {
+		card := mem.DraftScenarioCardFromMemoryEntry("team", entry)
+		result, err := mem.UpsertScenarioCard(ctx, memStore, card)
+		if err == nil {
+			return MergeResult{Action: result.Action, ExistingID: result.ExistingID}, nil
+		}
+		if mm.DebugMode {
+			slog.Debug("scenario card upsert failed, falling back to legacy memory merge", "component", "memory-merger", "error", err)
+		}
 	}
 
 	// Search for existing memories with a matching or related category.

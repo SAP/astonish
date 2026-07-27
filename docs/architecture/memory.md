@@ -175,9 +175,31 @@ Example: after discovering how to list Kubernetes clusters in SAP Converged Clou
 
 The Studio memory icon appears immediately for in-band `memory_save` tool calls. For post-turn reflector saves, the SPA polls the session-memory endpoint for a bounded period after `done`, because the reflector may finish after the SSE response text has completed. For newly-created chats, this polling uses the session ID emitted by the chat stream's `session` event rather than relying only on React's active-session state, which may still be stale when `done` arrives.
 
-### Read-Only Memory Map Diagnostics
+### Scenario Cards: Efficient Successful Paths
 
-Platform mode exposes `GET /api/memories/map` as a diagnostic report over the current user's visible personal, team, and org memories. The Studio Knowledge Browser surfaces this as the **Memory Map** tab. The endpoint and UI are read-only and intentionally do not change save, merge, or retrieval behavior.
+Platform mode now treats durable operational memory as a **scenario card** when possible. A scenario card is still a normal memory row: it is stored in the existing personal/team/org memory store, embedded, and returned by the same semantic + BM25 search pipeline. The difference is the content contract. The row category is `scenario_card/efficient_successful_path`, and the markdown body contains frontmatter plus sections for:
+
+- `canonical_key`: stable topic key used for merge/upsert
+- `Recommended path`: the shortest known successful recipe
+- `Conditions`: when the recipe applies
+- `Verification`: how the path was or should be checked
+- `Cautions or conditional failures`: conditional notes only, not broad permanent failure rules
+- `source_memory_ids` / `source_session_ids`: provenance back to raw memories and turns
+
+This makes scenario cards behave like self-managed operational skills: they are generated from verified experience, searched semantically like any other memory, and improved over time by merging new evidence into the same card. They are not human-authored skills from `memory/skills`, and they do not replace explicit skills or flows.
+
+Implementation details:
+
+- `pkg/memory/scenario_card.go` owns rendering, parsing, canonical-key normalization, draft generation, merge, upsert, and retrieval filtering.
+- `MemoryMerger.SaveOrMerge` drafts/upserts a scenario card for platform memory saves before falling back to legacy raw-memory merging. This biases new memory toward reusable recipes rather than scattered notes.
+- Promotion is upsert-based. Personal → team and team → org promotion draft a scenario card in the target scope and merge it with any existing card for the same `canonical_key`; source memories are kept as provenance instead of being deleted.
+- Retrieval asks the underlying search for extra candidates, runs `memory.FilterPreferredScenarioResults`, prefers scenario cards, and suppresses raw memories that are explicitly listed as `source_memory_ids` or match an already-returned card key.
+
+The key invariant is that Astonish should save **how to do the thing efficiently**, not a transcript of exploratory dead ends. Temporary outages, timeouts, rate limits, and “X did not work” observations may appear only as conditional cautions that require re-verification before they change behavior.
+
+### Memory Map Diagnostics and Consolidation
+
+Platform mode exposes `GET /api/memories/map` as a diagnostic report over the current user's visible personal, team, and org memories. The Studio Knowledge Browser surfaces this as the **Memory Map** tab.
 
 The report groups likely related memory chunks by a canonical topic key and flags conditions that make memory feel scattered or unsafe:
 
@@ -185,8 +207,14 @@ The report groups likely related memory chunks by a canonical topic key and flag
 - scattered topic: related memories are spread across scopes or categories
 - transient failure risk: a memory uses outage/timeout/flaky language that should not become a permanent avoidance rule
 - trial/error risk: a memory appears to preserve exploratory failed attempts instead of the shortest successful path
+- scenario card: the group already contains a structured card, so raw rows should be treated as provenance or incremental evidence
 
-This report is a triage tool for consolidating memories into future scenario cards. It should guide humans and later consolidation jobs toward saving efficient successful paths, not broad “this failed once” rules.
+The Memory Map also provides controlled consolidation endpoints:
+
+- `POST /api/memories/consolidate/preview` drafts a scenario card from a selected group without saving.
+- `POST /api/memories/consolidate/apply` saves or merges the edited card into the selected personal, team, or org scope.
+
+Both endpoints resolve stores through the tenant router and current authenticated context. They do not connect directly to tenant databases and they do not delete raw memories.
 
 ### BM25 Implementation
 

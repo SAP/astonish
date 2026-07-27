@@ -56,6 +56,9 @@ The API is organized by domain:
 | **Settings** | `GET /settings`, `PUT /settings` | `settings_handlers.go` |
 | **Tools** | `GET /tools`, `GET /tools/cache` | `tools_handlers.go` |
 | **AI Chat** | `POST /ai-chat`, `GET /ai-chat/stream` | `ai_chat_handlers.go` |
+| **Memory diagnostics** | `GET /memories/map`, `POST /memories/consolidate/preview`, `POST /memories/consolidate/apply` | `memory_map.go`, `memory_consolidation.go` |
+
+The memory consolidation endpoints are platform-only and tenant-scoped. They draft and upsert structured scenario cards through the existing memory stores; they do not connect directly to tenant databases and they do not delete source memories.
 
 ### SSE Chat Streaming
 
@@ -121,6 +124,8 @@ MCP tools are cached with background refresh to avoid slow MCP server queries on
 | `pkg/api/mcp_handlers.go` | MCP server management and inspector |
 | `pkg/api/sandbox_handlers.go` | Sandbox initialization, templates, proxy |
 | `pkg/api/ai_chat_handlers.go` | Dedicated AI assistant for Studio UI |
+| `pkg/api/memory_map.go` | Memory Map diagnostics for duplicate/scattered/risky memories |
+| `pkg/api/memory_consolidation.go` | Scenario-card preview/apply endpoints for controlled consolidation |
 | `web/src/components/` | React components (37+ files) |
 | `web/src/api/` | API client functions for the frontend |
 

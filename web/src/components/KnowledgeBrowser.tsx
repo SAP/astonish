@@ -1,12 +1,13 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { Search, Brain, Plus, Trash2, ArrowUpRight, Loader2, AlertCircle, BookOpen, User, ChevronDown, ChevronUp, Pencil, X, Check, Map, AlertTriangle, RefreshCw } from 'lucide-react'
+import { Search, Brain, Plus, Trash2, ArrowUpRight, Loader2, AlertCircle, BookOpen, User, ChevronDown, ChevronUp, Pencil, X, Check, Map, AlertTriangle, RefreshCw, Wand2 } from 'lucide-react'
 import {
   searchMemories, listTeamMemories, listOrgMemories, listPersonalMemories,
   saveTeamMemory, savePersonalMemory, saveOrgMemory,
   deleteTeamMemory, deleteOrgMemory, deletePersonalMemory,
   promoteMemoryToOrg, promotePersonalToTeam, updateMemory, fetchMemoryMap,
+  previewMemoryConsolidation, applyMemoryConsolidation,
 } from '../api/platform'
-import type { MemoryEntry, MemoryMapGroup, MemoryMapResponse } from '../api/platform'
+import type { MemoryEntry, MemoryMapGroup, MemoryMapResponse, ScenarioCard } from '../api/platform'
 
 interface KnowledgeBrowserProps {
   theme: 'dark' | 'light'
@@ -204,6 +205,7 @@ const FLAG_STYLES: Record<string, { label: string; color: string }> = {
   scattered_topic: { label: 'Scattered topic', color: 'var(--warning)' },
   transient_failure_risk: { label: 'Transient failure wording', color: 'var(--warning)' },
   trial_error_risk: { label: 'Trial/error wording', color: 'var(--info)' },
+  scenario_card: { label: 'Scenario card', color: 'var(--success)' },
 }
 
 function MemoryMapFlagBadge({ type }: { type: string }) {
@@ -223,7 +225,7 @@ function MemoryMapFlagBadge({ type }: { type: string }) {
   )
 }
 
-function MemoryMapGroupCard({ group }: { group: MemoryMapGroup }) {
+function MemoryMapGroupCard({ group, onDraft }: { group: MemoryMapGroup; onDraft: (group: MemoryMapGroup) => void }) {
   const [expanded, setExpanded] = useState(false)
   const preview = group.representative?.snippet || 'No representative memory content available.'
   const visibleMemories = expanded ? group.memories : group.memories.slice(0, 3)
@@ -231,7 +233,7 @@ function MemoryMapGroupCard({ group }: { group: MemoryMapGroup }) {
   return (
     <div className="rounded-xl border border-border bg-card p-4 shadow-[var(--shadow-soft)]">
       <div className="flex items-start justify-between gap-4">
-        <div className="min-w-0">
+        <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2 mb-2">
             <h3 className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>{group.title}</h3>
             <span className="rounded-full px-2 py-0.5 text-xs" style={{ background: 'var(--bg-tertiary)', color: 'var(--text-muted)' }}>
@@ -245,6 +247,16 @@ function MemoryMapGroupCard({ group }: { group: MemoryMapGroup }) {
             {preview.length > 260 ? `${preview.slice(0, 260)}...` : preview}
           </p>
         </div>
+        <button
+          onClick={() => onDraft(group)}
+          className="flex shrink-0 items-center gap-2 rounded-lg border px-3 py-2 text-xs font-medium transition-colors hover:opacity-80"
+          style={{ background: 'var(--bg-tertiary)', color: 'var(--brand)', borderColor: 'var(--border-color)' }}
+          disabled={group.has_scenario_card}
+          title={group.has_scenario_card ? 'This group already has a scenario card' : 'Draft an efficient successful path card'}
+        >
+          <Wand2 size={14} />
+          {group.has_scenario_card ? 'Card exists' : 'Draft card'}
+        </button>
       </div>
 
       <div className="flex flex-wrap gap-2 mt-4">
@@ -293,7 +305,29 @@ function MemoryMapGroupCard({ group }: { group: MemoryMapGroup }) {
   )
 }
 
-function MemoryMapPanel({ report, onRefresh }: { report: MemoryMapResponse | null; onRefresh: () => void }) {
+function ScenarioCardPreview({ card, onChange }: { card: ScenarioCard; onChange: (card: ScenarioCard) => void }) {
+  const setField = (field: keyof ScenarioCard, value: any) => onChange({ ...card, [field]: value })
+  const setLines = (field: keyof ScenarioCard, value: string) => setField(field, value.split('\n').map(v => v.trim()).filter(Boolean))
+  const lines = (values?: string[]) => (values || []).join('\n')
+
+  return (
+    <div className="rounded-xl border p-4" style={{ background: 'var(--bg-secondary)', borderColor: 'var(--border-color)' }}>
+      <h3 className="text-sm font-semibold mb-3" style={{ color: 'var(--text-primary)' }}>Consolidated scenario card preview</h3>
+      <label className="block text-xs font-medium mb-1" style={{ color: 'var(--text-muted)' }}>Title</label>
+      <input aria-label="Title" value={card.title} onChange={e => setField('title', e.target.value)} className="mb-3 w-full rounded-lg px-3 py-2 text-sm outline-none" style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border-color)' }} />
+      <label className="block text-xs font-medium mb-1" style={{ color: 'var(--text-muted)' }}>Recommended path</label>
+      <textarea aria-label="Recommended path" value={lines(card.recommended_recipe)} onChange={e => setLines('recommended_recipe', e.target.value)} rows={5} className="mb-3 w-full rounded-lg px-3 py-2 text-sm outline-none" style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border-color)' }} />
+      <label className="block text-xs font-medium mb-1" style={{ color: 'var(--text-muted)' }}>Conditions</label>
+      <textarea aria-label="Conditions" value={lines(card.conditions)} onChange={e => setLines('conditions', e.target.value)} rows={3} className="mb-3 w-full rounded-lg px-3 py-2 text-sm outline-none" style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border-color)' }} />
+      <label className="block text-xs font-medium mb-1" style={{ color: 'var(--text-muted)' }}>Cautions or conditional failures</label>
+      <textarea aria-label="Cautions or conditional failures" value={lines(card.cautions_or_conditional_failures)} onChange={e => setLines('cautions_or_conditional_failures', e.target.value)} rows={3} className="mb-3 w-full rounded-lg px-3 py-2 text-sm outline-none" style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border-color)' }} />
+      <label className="block text-xs font-medium mb-1" style={{ color: 'var(--text-muted)' }}>Verification</label>
+      <textarea aria-label="Verification" value={lines(card.verification)} onChange={e => setLines('verification', e.target.value)} rows={2} className="w-full rounded-lg px-3 py-2 text-sm outline-none" style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border-color)' }} />
+    </div>
+  )
+}
+
+function MemoryMapPanel({ report, onRefresh, onDraft }: { report: MemoryMapResponse | null; onRefresh: () => void; onDraft: (group: MemoryMapGroup) => void }) {
   if (!report) {
     return (
       <div className="text-center py-12" style={{ color: 'var(--text-muted)' }}>
@@ -347,7 +381,7 @@ function MemoryMapPanel({ report, onRefresh }: { report: MemoryMapResponse | nul
         </div>
       ) : (
         <div className="flex flex-col gap-3">
-          {report.groups.map(group => <MemoryMapGroupCard key={group.key} group={group} />)}
+          {report.groups.map(group => <MemoryMapGroupCard key={group.key} group={group} onDraft={onDraft} />)}
         </div>
       )}
     </div>
@@ -364,6 +398,10 @@ export default function KnowledgeBrowser({ theme, user, activeTeam }: KnowledgeB
   const [teamEntries, setTeamEntries] = useState<MemoryEntry[]>([])
   const [orgEntries, setOrgEntries] = useState<MemoryEntry[]>([])
   const [memoryMap, setMemoryMap] = useState<MemoryMapResponse | null>(null)
+  const [draftCard, setDraftCard] = useState<ScenarioCard | null>(null)
+  const [draftScope, setDraftScope] = useState<'personal' | 'team' | 'org'>('team')
+  const [drafting, setDrafting] = useState(false)
+  const [applyingDraft, setApplyingDraft] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
@@ -446,7 +484,7 @@ export default function KnowledgeBrowser({ theme, user, activeTeam }: KnowledgeB
 
   const handlePromote = useCallback(async (id: string, direction: 'to-team' | 'to-org') => {
     const label = direction === 'to-team' ? 'team' : 'organization'
-    if (!confirm(`Promote this memory to ${label}? It will be moved (removed from the current level).`)) return
+    if (!confirm(`Promote this memory to ${label}? It will be merged into a scenario card when possible. The source memory is kept as provenance.`)) return
     setError(null)
     try {
       const teamSlug = activeTeam || undefined
@@ -469,6 +507,36 @@ export default function KnowledgeBrowser({ theme, user, activeTeam }: KnowledgeB
       setError(err.message)
     }
   }, [tab, loadTab, activeTeam])
+
+  const handleDraftScenarioCard = useCallback(async (group: MemoryMapGroup) => {
+    setDrafting(true)
+    setError(null)
+    try {
+      const preview = await previewMemoryConsolidation(group.key, draftScope, group.memories.map(m => m.id).filter(Boolean), activeTeam || undefined)
+      setDraftCard(preview.card)
+      setDraftScope((preview.card.scope as 'personal' | 'team' | 'org') || draftScope)
+    } catch (err: any) {
+      setError(err.message)
+    } finally {
+      setDrafting(false)
+    }
+  }, [activeTeam, draftScope])
+
+  const handleApplyScenarioCard = useCallback(async () => {
+    if (!draftCard) return
+    setApplyingDraft(true)
+    setError(null)
+    try {
+      const saved = await applyMemoryConsolidation({ ...draftCard, scope: draftScope }, draftScope, activeTeam || undefined)
+      setSuccess(`Scenario card ${saved.action}`)
+      setDraftCard(null)
+      loadTab('map')
+    } catch (err: any) {
+      setError(err.message)
+    } finally {
+      setApplyingDraft(false)
+    }
+  }, [activeTeam, draftCard, draftScope, loadTab])
 
   const handleSave = useCallback(async () => {
     if (!snippet.trim()) return
@@ -625,7 +693,35 @@ export default function KnowledgeBrowser({ theme, user, activeTeam }: KnowledgeB
         )}
 
         {!searchResults && tab === 'map' && !loading && (
-          <MemoryMapPanel report={memoryMap} onRefresh={() => loadTab('map')} />
+          <div className="space-y-4">
+            {drafting && (
+              <div className="flex items-center gap-2 rounded-lg border px-4 py-3 text-sm" style={{ background: 'var(--bg-secondary)', color: 'var(--text-muted)', borderColor: 'var(--border-color)' }}>
+                <Loader2 size={16} className="animate-spin" /> Drafting scenario card...
+              </div>
+            )}
+            {draftCard && (
+              <div className="space-y-3">
+                <div className="flex flex-wrap items-center gap-3 rounded-xl border p-4" style={{ background: 'var(--bg-secondary)', borderColor: 'var(--border-color)' }}>
+                  <span className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>Save card as</span>
+                  {(['personal', 'team', 'org'] as const).map(scope => (
+                    <label key={scope} className={`flex items-center gap-2 text-sm ${scope === 'org' && !isAdmin ? 'opacity-40 pointer-events-none' : ''}`} style={{ color: 'var(--text-secondary)' }}>
+                      <input type="radio" checked={draftScope === scope} disabled={scope === 'org' && !isAdmin} onChange={() => setDraftScope(scope)} style={{ accentColor: SCOPE_COLORS[scope] }} />
+                      <ScopeBadge scope={scope} />
+                    </label>
+                  ))}
+                  <div className="ml-auto flex gap-2">
+                    <button onClick={() => setDraftCard(null)} className="rounded-lg px-3 py-2 text-sm" style={{ color: 'var(--text-muted)' }}>Cancel</button>
+                    <button onClick={handleApplyScenarioCard} disabled={applyingDraft} className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-white disabled:opacity-50" style={{ background: 'var(--brand)' }}>
+                      {applyingDraft ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
+                      Save scenario card
+                    </button>
+                  </div>
+                </div>
+                <ScenarioCardPreview card={draftCard} onChange={setDraftCard} />
+              </div>
+            )}
+            <MemoryMapPanel report={memoryMap} onRefresh={() => loadTab('map')} onDraft={handleDraftScenarioCard} />
+          </div>
         )}
 
         {/* Add New tab form */}

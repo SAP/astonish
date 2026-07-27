@@ -31,7 +31,9 @@ func TestRenderTranscriptPlainLinesAlignWithRenderedLines(t *testing.T) {
 		{Kind: events.ItemSystem, Content: "second"},
 		{Kind: events.ItemSystem, Content: "third"},
 	}
-	m := model{theme: DefaultTheme(), tr: tr, width: 80, height: 24, ready: true}
+	th := DefaultTheme()
+	th.NoColor = false
+	m := model{theme: th, tr: tr, width: 80, height: 24, ready: true}
 	rendered, _ := m.renderTranscript()
 	renderedLines := strings.Split(rendered, "\n")
 	if len(renderedLines) > 0 && renderedLines[len(renderedLines)-1] == "" {

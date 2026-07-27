@@ -1039,11 +1039,11 @@ func (m *model) renderTranscript() (string, []hitRegion) {
 		n := lineCount(rawPadded)
 		b.WriteString(padded)
 		b.WriteString("\n")
-		appendPlain(rawPadded)
+		appendPlain(padded)
 		gap := m.paintRow("", m.width)
 		b.WriteString(gap)
 		b.WriteString("\n") // vertical gap between messages
-		plainLines = append(plainLines, "")
+		plainLines = append(plainLines, stripANSI(gap))
 		lineNo += n + 1 // block lines + one blank separator row
 		hits = append(hits, hitRegion{start: start, end: start + n, itemIdx: itemIdx, kind: kind})
 	}

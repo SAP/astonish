@@ -191,7 +191,7 @@ This makes scenario cards behave like self-managed operational skills: they are 
 Implementation details:
 
 - `pkg/memory/scenario_card.go` owns rendering, parsing, canonical-key normalization, draft generation, merge, upsert, and retrieval filtering.
-- `MemoryMerger.SaveOrMerge` drafts/upserts a scenario card for platform memory saves before falling back to legacy raw-memory merging. This biases new memory toward reusable recipes rather than scattered notes.
+- `MemoryMerger.SaveOrMerge` drafts/upserts a scenario card for platform memory saves and fails closed if the card cannot be saved. It must not fall back to raw-memory insertion because that would reintroduce scattered notes.
 - Promotion is upsert-based. Personal → team and team → org promotion draft a scenario card in the target scope and merge it with any existing card for the same `canonical_key`; source memories are kept as provenance instead of being deleted.
 - Retrieval asks the underlying search for extra candidates, runs `memory.FilterPreferredScenarioResults`, prefers scenario cards, and suppresses raw memories that are explicitly listed as `source_memory_ids` or match an already-returned card key.
 

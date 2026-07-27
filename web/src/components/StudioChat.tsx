@@ -323,6 +323,41 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const memoryPollRunRef = useRef(0)
 
+  const startSessionMemoryPolling = useCallback((sessionId: string | null | undefined) => {
+    if (!sessionId) {
+      setIsConsolidatingMemories(false)
+      return
+    }
+    const pollRun = memoryPollRunRef.current + 1
+    memoryPollRunRef.current = pollRun
+    const startedAt = Date.now()
+    const pollIntervalMs = 3000
+    const maxPollMs = 120000
+
+    setIsConsolidatingMemories(true)
+
+    const pollForMemories = async () => {
+      if (memoryPollRunRef.current !== pollRun) return
+      try {
+        const res = await listSessionMemories(sessionId)
+        if (memoryPollRunRef.current !== pollRun) return
+        if (res.memories && res.memories.length > 0) {
+          setHasSessionMemories(true)
+          setIsConsolidatingMemories(false)
+          return
+        }
+      } catch { /* ignore — session may have been deleted */ }
+      if (memoryPollRunRef.current !== pollRun) return
+      if (Date.now() - startedAt >= maxPollMs) {
+        setIsConsolidatingMemories(false)
+        return
+      }
+      setTimeout(pollForMemories, pollIntervalMs)
+    }
+
+    setTimeout(pollForMemories, pollIntervalMs)
+  }, [])
+
   // Attachment state
   const [attachments, setAttachments] = useState<PendingAttachment[]>([])
   const [isDragOver, setIsDragOver] = useState(false)
@@ -1192,17 +1227,8 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
               })
             }
             setIsStreaming(false)
-            // After done, check for session memories (reflector may still be running)
-            setIsConsolidatingMemories(true)
-            setTimeout(async () => {
-              try {
-                const res = await listSessionMemories(sessionId)
-                if (res.memories && res.memories.length > 0) {
-                  setHasSessionMemories(true)
-                }
-              } catch { /* ignore */ }
-              setIsConsolidatingMemories(false)
-            }, 8000)
+            // After done, poll the known stream session for async reflector saves.
+            startSessionMemoryPolling(sessionId)
             break
 
           case 'subtask_progress': {
@@ -1699,8 +1725,10 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
     // Clear attachments after capturing payloads
     clearAttachments()
 
+    let streamSessionId = activeSessionId || ''
+
     const controller = connectChat({
-      sessionId: activeSessionId || '',
+      sessionId: streamSessionId,
       message: userMsg,
       attachments: attachmentPayloads.length > 0 ? attachmentPayloads : undefined,
       systemContext: options.systemContext || activeWizardContext || undefined,
@@ -1712,6 +1740,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
           case 'session':
             if (data.sessionId) {
               const sid = data.sessionId as string
+              streamSessionId = sid
               const shouldPin = !!(data.isNew && (preChatProvider || preChatModel))
               const pinProvider = preChatProvider
               const pinModel = preChatModel
@@ -2354,39 +2383,9 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
               })
             }
             setIsStreaming(false)
-            // After done, the platform reflector runs async (reflection + extraction).
-            // Poll for a bounded window so late reflector saves still reveal the
-            // session-memory icon; the backend can take up to two minutes here.
-            setIsConsolidatingMemories(true)
-            if (activeSessionId) {
-              const sid = activeSessionId
-              const pollRun = memoryPollRunRef.current + 1
-              memoryPollRunRef.current = pollRun
-              const startedAt = Date.now()
-              const pollIntervalMs = 3000
-              const maxPollMs = 120000
-              const pollForMemories = async () => {
-                if (memoryPollRunRef.current !== pollRun) return
-                try {
-                  const res = await listSessionMemories(sid)
-                  if (memoryPollRunRef.current !== pollRun) return
-                  if (res.memories && res.memories.length > 0) {
-                    setHasSessionMemories(true)
-                    setIsConsolidatingMemories(false)
-                    return
-                  }
-                } catch { /* ignore — session may have been deleted */ }
-                if (memoryPollRunRef.current !== pollRun) return
-                if (Date.now() - startedAt >= maxPollMs) {
-                  setIsConsolidatingMemories(false)
-                  return
-                }
-                setTimeout(pollForMemories, pollIntervalMs)
-              }
-              setTimeout(pollForMemories, pollIntervalMs)
-            } else {
-              setIsConsolidatingMemories(false)
-            }
+            // After done, poll the stream-emitted session ID for async reflector
+            // saves. React activeSessionId may still be stale for newly-created chats.
+            startSessionMemoryPolling(streamSessionId || activeSessionId)
             break
 
           case 'usage': {
@@ -2436,7 +2435,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
     })
 
     abortRef.current = controller
-  }, [activeSessionId, activeWizardContext, activePinnedToolGroups, attachments, prepareAttachmentPayloads, clearAttachments, preChatProvider, preChatModel, preChatProviders, changeSession])
+  }, [activeSessionId, activeWizardContext, activePinnedToolGroups, attachments, prepareAttachmentPayloads, clearAttachments, preChatProvider, preChatModel, preChatProviders, changeSession, startSessionMemoryPolling])
 
   // Process deferred fleet plan prompt (set by fleet_plan_redirect SSE event)
   useEffect(() => {

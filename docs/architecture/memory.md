@@ -162,7 +162,7 @@ In platform mode, there is also a post-turn `PlatformReflector`. It runs asynchr
 
 Example: after discovering how to list Kubernetes clusters in SAP Converged Cloud QA-DE-1, memory should capture that the reusable route is Kubernikus via the `openstack-keystone` Keystone token credential and `GET $KUBERNIKUS_URL/api/v1/clusters` with `X-Auth-Token`. It should not capture that a particular cluster currently has 13 healthy nodes, because that is live inventory that must be fetched again.
 
-The Studio memory icon appears immediately for in-band `memory_save` tool calls. For post-turn reflector saves, the SPA polls the session-memory endpoint for a bounded period after `done`, because the reflector may finish after the SSE response text has completed.
+The Studio memory icon appears immediately for in-band `memory_save` tool calls. For post-turn reflector saves, the SPA polls the session-memory endpoint for a bounded period after `done`, because the reflector may finish after the SSE response text has completed. For newly-created chats, this polling uses the session ID emitted by the chat stream's `session` event rather than relying only on React's active-session state, which may still be stale when `done` arrives.
 
 ### BM25 Implementation
 

@@ -109,7 +109,12 @@ func parseModelPin(arg string) (provider, model string, err error) {
 	if idx < 0 {
 		return "", "", fmt.Errorf("expected provider:model, got %q", arg)
 	}
-	return arg[:idx], arg[idx+1:], nil
+	provider = arg[:idx]
+	model = arg[idx+1:]
+	if provider == "" || model == "" {
+		return "", "", fmt.Errorf("expected provider:model with both provider and model set, or an empty string to clear")
+	}
+	return provider, model, nil
 }
 
 // resolveLastRemoteSessionID returns the most-recently-updated session ID

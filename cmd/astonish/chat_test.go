@@ -40,8 +40,8 @@ func TestParseModelPin(t *testing.T) {
 		{"empty clears", "", "", "", false},
 		{"simple", "openai:gpt-4o", "openai", "gpt-4o", false},
 		{"model with colon", "openai:gpt-4o:2024-08-06", "openai", "gpt-4o:2024-08-06", false},
-		{"empty model after colon", "openai:", "openai", "", false},
-		{"empty provider before colon", ":gpt-4o", "", "gpt-4o", false},
+		{"empty model after colon errors", "openai:", "", "", true},
+		{"empty provider before colon errors", ":gpt-4o", "", "", true},
 		{"no colon errors", "invalid", "", "", true},
 	}
 	for _, tc := range cases {

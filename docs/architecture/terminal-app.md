@@ -174,6 +174,7 @@ If the Studio SSE connection returns a read error after a session id is known, t
 | `astonish chat --resume ID` | Resume session |
 | `astonish chat model provider:model` | Pin model via platform API |
 | Without login | Error: run `astonish login` for `chat`; bare `astonish` prints normal usage |
+| Bare `astonish` with piped stdin or redirected stdout | Prints normal usage plus a hint that interactive chat requires a TTY |
 
 ## Invariants
 

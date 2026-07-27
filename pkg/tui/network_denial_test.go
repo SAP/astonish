@@ -13,10 +13,16 @@ import (
 
 type networkGrantTestBackend struct {
 	staticBackend
-	approved bool
-	broader  bool
-	denied   bool
-	runMsg   string
+	approved          bool
+	approvedSessionID string
+	approvedHost      string
+	approvedSandbox   string
+	broader           bool
+	denied            bool
+	deniedSessionID   string
+	deniedHost        string
+	deniedSandbox     string
+	runMsg            string
 }
 
 func (b *networkGrantTestBackend) RunTurn(_ context.Context, message string, _ backend.TurnOptions) (<-chan events.Event, error) {
@@ -27,14 +33,55 @@ func (b *networkGrantTestBackend) RunTurn(_ context.Context, message string, _ b
 }
 
 func (b *networkGrantTestBackend) ApproveNetworkGrant(_ context.Context, sessionID string, denial events.NetworkDenial, broader bool, sandboxName string) error {
-	b.approved = sessionID == "sess-1" && denial.Host == "api.example.com" && sandboxName == "sandbox-1"
+	b.approved = true
+	b.approvedSessionID = sessionID
+	b.approvedHost = denial.Host
+	b.approvedSandbox = sandboxName
 	b.broader = broader
 	return nil
 }
 
 func (b *networkGrantTestBackend) DenyNetworkGrant(_ context.Context, sessionID string, denial events.NetworkDenial, sandboxName string) error {
-	b.denied = sessionID == "sess-1" && denial.Host == "api.example.com" && sandboxName == "sandbox-1"
+	b.denied = true
+	b.deniedSessionID = sessionID
+	b.deniedHost = denial.Host
+	b.deniedSandbox = sandboxName
 	return nil
+}
+
+func assertApprovedGrant(t *testing.T, b *networkGrantTestBackend, broader bool) {
+	t.Helper()
+	if !b.approved {
+		t.Fatal("expected approve backend call")
+	}
+	if b.approvedSessionID != "sess-1" {
+		t.Fatalf("approvedSessionID=%q want sess-1", b.approvedSessionID)
+	}
+	if b.approvedHost != "api.example.com" {
+		t.Fatalf("approvedHost=%q want api.example.com", b.approvedHost)
+	}
+	if b.approvedSandbox != "sandbox-1" {
+		t.Fatalf("approvedSandbox=%q want sandbox-1", b.approvedSandbox)
+	}
+	if b.broader != broader {
+		t.Fatalf("broader=%v want %v", b.broader, broader)
+	}
+}
+
+func assertDeniedGrant(t *testing.T, b *networkGrantTestBackend) {
+	t.Helper()
+	if !b.denied {
+		t.Fatal("expected deny backend call")
+	}
+	if b.deniedSessionID != "sess-1" {
+		t.Fatalf("deniedSessionID=%q want sess-1", b.deniedSessionID)
+	}
+	if b.deniedHost != "api.example.com" {
+		t.Fatalf("deniedHost=%q want api.example.com", b.deniedHost)
+	}
+	if b.deniedSandbox != "sandbox-1" {
+		t.Fatalf("deniedSandbox=%q want sandbox-1", b.deniedSandbox)
+	}
 }
 
 func TestRenderNetworkDenialOverlay(t *testing.T) {
@@ -94,9 +141,7 @@ func TestNetworkDenialApproveClearsPromptBeforeGrantAndRetries(t *testing.T) {
 	if approvedMsg.err != nil {
 		t.Fatalf("approval command returned error: %v", approvedMsg.err)
 	}
-	if !b.approved || b.broader {
-		t.Fatalf("approval flags approved=%v broader=%v", b.approved, b.broader)
-	}
+	assertApprovedGrant(t, b, false)
 	if !strings.Contains(b.runMsg, "I just approved network access to api.example.com") {
 		t.Fatalf("retry message = %q", b.runMsg)
 	}
@@ -142,9 +187,7 @@ func TestNetworkDenialBroaderApprove(t *testing.T) {
 	if approvedMsg.err != nil {
 		t.Fatalf("approval command returned error: %v", approvedMsg.err)
 	}
-	if !b.approved || !b.broader {
-		t.Fatalf("approval flags approved=%v broader=%v", b.approved, b.broader)
-	}
+	assertApprovedGrant(t, b, true)
 	if !strings.Contains(b.runMsg, "*.example.com") {
 		t.Fatalf("retry message should mention broader pattern, got %q", b.runMsg)
 	}
@@ -181,7 +224,5 @@ func TestNetworkDenialDenyClearsPromptBeforeGrantBackend(t *testing.T) {
 	if deniedMsg.err != nil {
 		t.Fatalf("deny command returned error: %v", deniedMsg.err)
 	}
-	if !b.denied {
-		t.Fatal("expected deny backend call")
-	}
+	assertDeniedGrant(t, b)
 }

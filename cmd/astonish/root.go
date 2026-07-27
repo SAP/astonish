@@ -19,11 +19,15 @@ import (
 // Execute is the main entry point for the CLI
 func Execute() error {
 	if len(os.Args) < 2 {
-		if shouldLaunchBareChat() {
+		remoteMode, stdinTTY, stdoutTTY := bareChatTTYStatus()
+		if shouldLaunchBareChatWith(remoteMode, stdinTTY, stdoutTTY) {
 			checkForUpdates()
 			return handleChatCommand(nil)
 		}
 		printUsage()
+		if hint := bareChatUnavailableHint(remoteMode, stdinTTY, stdoutTTY); hint != "" {
+			fmt.Fprintln(os.Stderr, hint)
+		}
 		return fmt.Errorf("no command provided")
 	}
 	if os.Args[1] == "-h" || os.Args[1] == "--help" {
@@ -110,16 +114,21 @@ func Execute() error {
 	}
 }
 
-func shouldLaunchBareChat() bool {
-	return shouldLaunchBareChatWith(
-		client.IsRemoteMode(),
+func bareChatTTYStatus() (remoteMode, stdinTTY, stdoutTTY bool) {
+	return client.IsRemoteMode(),
 		term.IsTerminal(int(os.Stdin.Fd())),
-		term.IsTerminal(int(os.Stdout.Fd())),
-	)
+		term.IsTerminal(int(os.Stdout.Fd()))
 }
 
 func shouldLaunchBareChatWith(remoteMode, stdinTTY, stdoutTTY bool) bool {
 	return remoteMode && stdinTTY && stdoutTTY
+}
+
+func bareChatUnavailableHint(remoteMode, stdinTTY, stdoutTTY bool) string {
+	if !remoteMode || (stdinTTY && stdoutTTY) {
+		return ""
+	}
+	return "hint: interactive chat requires a terminal. Run 'astonish chat' from an interactive TTY."
 }
 
 func printUsage() {

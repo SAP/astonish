@@ -24,3 +24,26 @@ func TestShouldLaunchBareChatWith(t *testing.T) {
 		})
 	}
 }
+
+func TestBareChatUnavailableHint(t *testing.T) {
+	tests := []struct {
+		name      string
+		remote    bool
+		stdinTTY  bool
+		stdoutTTY bool
+		wantHint  bool
+	}{
+		{name: "remote piped stdin", remote: true, stdinTTY: false, stdoutTTY: true, wantHint: true},
+		{name: "remote redirected stdout", remote: true, stdinTTY: true, stdoutTTY: false, wantHint: true},
+		{name: "remote interactive", remote: true, stdinTTY: true, stdoutTTY: true, wantHint: false},
+		{name: "not remote", remote: false, stdinTTY: false, stdoutTTY: false, wantHint: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := bareChatUnavailableHint(tt.remote, tt.stdinTTY, tt.stdoutTTY)
+			if (got != "") != tt.wantHint {
+				t.Fatalf("bareChatUnavailableHint() = %q, wantHint=%v", got, tt.wantHint)
+			}
+		})
+	}
+}

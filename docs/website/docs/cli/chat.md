@@ -68,7 +68,7 @@ astonish chat model ""
 astonish chat model anthropic:claude-sonnet-4 --session abc123
 ```
 
-The argument uses a first-colon split, so model names containing colons (e.g., `openai:gpt-4o:2024-08-06`) are handled correctly.
+The argument uses a first-colon split, so model names containing colons (e.g., `openai:gpt-4o:2024-08-06`) are handled correctly. Both sides must be present; use an empty string (`astonish chat model ""`) only when clearing the pin.
 
 ## Model Pin Behavior
 

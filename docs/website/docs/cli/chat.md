@@ -68,7 +68,7 @@ astonish chat model ""
 astonish chat model anthropic:claude-sonnet-4 --session abc123
 ```
 
-The argument uses a first-colon split, so model names containing colons (e.g., `openai:gpt-4o:2024-08-06`) are handled correctly.
+The argument uses a first-colon split, so model names containing colons (e.g., `openai:gpt-4o:2024-08-06`) are handled correctly. Both sides must be present; use an empty string (`astonish chat model ""`) only when clearing the pin.
 
 ## Model Pin Behavior
 
@@ -77,6 +77,8 @@ When `-p` or `-m` is provided on a **new session** (no `--resume`), the choice i
 When `-p` or `-m` is provided on a **resumed session** (`--resume`), the override is ephemeral — it applies to this invocation only and does NOT rewrite the stored pin. Use `--clear-model` to explicitly remove a pin.
 
 If the pinned provider's credential is revoked or unavailable, the session still opens using the cascade default. A warning is printed to stderr; the pin is never auto-cleared.
+
+The terminal footer shows the active provider and the resolved concrete model when the platform reports them. It does not show `default` as the model name; while the cascade is still resolving, it shows the provider with `model resolving…` instead.
 
 ## In-Session Commands
 
@@ -87,6 +89,7 @@ While in an active chat session, type `/` to access these commands:
 | `/help` | Show available commands |
 | `/status` | Show this session's provider, model (including pin), context, tools, and session info |
 | `/new` | Start a fresh conversation |
+| `/sessions` | Open the session picker. Use `Enter` to resume, `d` to delete with confirmation, `n` for a new session, and `Esc` to close. |
 | `/compact` | Show context window usage and compaction status |
 | `/distill` | Distill the current session into a reusable flow |
 | `/fleet` | Show available fleets and fleet commands |
@@ -94,5 +97,9 @@ While in an active chat session, type `/` to access these commands:
 | `/drill` | Create a drill suite with guided wizard |
 | `/drill-add` | Add new drills to an existing suite |
 | `/authorize <code>` | Authorize a device to access Studio |
+
+## Network authorization prompts
+
+When a sandboxed command tries to reach a network endpoint that is not yet allowed by policy, the terminal shows a focused network authorization prompt. Press `Enter` or `y` to allow the specific endpoint, `b` to allow the suggested broader pattern when one is shown, or `n`/`Esc` to deny. The prompt closes immediately after your key press and the terminal shows progress while Astonish records the decision and, for approvals, asks the agent to retry the blocked command.
 
 Type `exit` or `quit` to end the session.

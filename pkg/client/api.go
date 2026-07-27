@@ -29,13 +29,53 @@ func (c *Client) ListSessions() ([]SessionMeta, error) {
 	return sessions, nil
 }
 
-// GetSession returns the details of a single session.
+// GetSession returns the details of a single session (untyped map).
 func (c *Client) GetSession(id string) (map[string]any, error) {
 	var detail map[string]any
 	if err := c.DoJSON("GET", fmt.Sprintf("/api/studio/sessions/%s", id), nil, &detail); err != nil {
 		return nil, err
 	}
 	return detail, nil
+}
+
+// StudioMessage is a simplified chat message from GET /api/studio/sessions/{id}.
+// Mirrors pkg/api.StudioMessage fields needed by the terminal app.
+type StudioMessage struct {
+	Type       string `json:"type"`
+	Content    string `json:"content,omitempty"`
+	ToolName   string `json:"toolName,omitempty"`
+	ToolArgs   any    `json:"toolArgs,omitempty"`
+	ToolResult any    `json:"toolResult,omitempty"`
+}
+
+// UsageSummary is cumulative token usage from a Studio session detail response.
+type UsageSummary struct {
+	InputTokens  int64 `json:"inputTokens"`
+	OutputTokens int64 `json:"outputTokens"`
+	TotalTokens  int64 `json:"totalTokens"`
+}
+
+// SessionDetail is the typed session payload used by the TUI resume path.
+type SessionDetail struct {
+	ID           string          `json:"id"`
+	Title        string          `json:"title"`
+	MessageCount int             `json:"messageCount"`
+	CreatedAt    string          `json:"createdAt"`
+	UpdatedAt    string          `json:"updatedAt"`
+	Messages     []StudioMessage `json:"messages"`
+	TotalUsage   *UsageSummary   `json:"totalUsage,omitempty"`
+}
+
+// GetSessionDetail returns typed session history for the terminal chat app.
+func (c *Client) GetSessionDetail(id string) (*SessionDetail, error) {
+	var detail SessionDetail
+	if err := c.DoJSON("GET", fmt.Sprintf("/api/studio/sessions/%s", id), nil, &detail); err != nil {
+		return nil, err
+	}
+	if detail.ID == "" {
+		detail.ID = id
+	}
+	return &detail, nil
 }
 
 // TraceOpts holds query parameters for the session trace endpoint.
@@ -140,17 +180,87 @@ func (c *Client) SendFlowMessage(req *FlowChatRequest) (*SSEStream, error) {
 
 // --- Chat API ---
 
+// EffectiveProvidersResponse contains the merged provider defaults used by Studio.
+type EffectiveProvidersResponse struct {
+	DefaultProvider string `json:"default_provider"`
+	DefaultModel    string `json:"default_model"`
+}
+
+// GetEffectiveProviders returns the platform-resolved provider defaults for the
+// current org/team context.
+func (c *Client) GetEffectiveProviders() (*EffectiveProvidersResponse, error) {
+	var resp EffectiveProvidersResponse
+	if err := c.DoJSON("GET", "/api/settings/providers/effective", nil, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
 // ChatRequest represents a message to send to the chat.
 type ChatRequest struct {
-	SessionID   string `json:"sessionId,omitempty"`
-	Message     string `json:"message"`
-	AutoApprove bool   `json:"autoApprove,omitempty"`
-	Debug       bool   `json:"debug,omitempty"`
+	SessionID     string `json:"sessionId,omitempty"`
+	Message       string `json:"message"`
+	AutoApprove   bool   `json:"autoApprove,omitempty"`
+	Debug         bool   `json:"debug,omitempty"`
+	SystemContext string `json:"systemContext,omitempty"`
 }
 
 // SendChatMessage sends a chat message and returns an SSE stream of events.
 func (c *Client) SendChatMessage(req *ChatRequest) (*SSEStream, error) {
 	return c.SSE("POST", "/api/studio/chat", req)
+}
+
+// NetworkDenial describes a blocked outbound connection returned by Studio.
+type NetworkDenial struct {
+	ChunkID        string `json:"chunk_id"`
+	Host           string `json:"host"`
+	Port           uint32 `json:"port"`
+	Binary         string `json:"binary,omitempty"`
+	Rationale      string `json:"rationale,omitempty"`
+	SecurityNotes  string `json:"security_notes,omitempty"`
+	BroaderPattern string `json:"broader_pattern,omitempty"`
+}
+
+// NetworkDenialsResponse is returned by the network-denials polling endpoint.
+type NetworkDenialsResponse struct {
+	Denials     []NetworkDenial `json:"denials"`
+	SandboxName string          `json:"sandbox_name"`
+	Error       string          `json:"error,omitempty"`
+}
+
+// GetNetworkDenials returns pending network grants for a session.
+func (c *Client) GetNetworkDenials(sessionID string) (*NetworkDenialsResponse, error) {
+	var resp NetworkDenialsResponse
+	path := fmt.Sprintf("/api/studio/sessions/%s/network-denials", url.PathEscape(sessionID))
+	if err := c.DoJSON("GET", path, nil, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// ApproveNetworkGrant approves a specific draft policy chunk.
+func (c *Client) ApproveNetworkGrant(sessionID, chunkID, sandboxName string) error {
+	body := map[string]string{"chunk_id": chunkID, "sandbox_name": sandboxName}
+	path := fmt.Sprintf("/api/studio/sessions/%s/network-grants/approve", url.PathEscape(sessionID))
+	return c.DoJSON("POST", path, body, nil)
+}
+
+// ApproveNetworkGrantBroader approves a host/port pattern for the session sandbox.
+func (c *Client) ApproveNetworkGrantBroader(sessionID, host string, port uint32, sandboxName string) error {
+	body := map[string]any{"host": host, "port": port, "sandbox_name": sandboxName}
+	path := fmt.Sprintf("/api/studio/sessions/%s/network-grants/approve-broader", url.PathEscape(sessionID))
+	return c.DoJSON("POST", path, body, nil)
+}
+
+// DenyNetworkGrant rejects a draft policy chunk. Empty chunk IDs are accepted
+// by the server for stdout-derived denials and simply acknowledge the prompt.
+func (c *Client) DenyNetworkGrant(sessionID, chunkID, sandboxName, reason string) error {
+	body := map[string]string{"chunk_id": chunkID, "sandbox_name": sandboxName}
+	if reason != "" {
+		body["reason"] = reason
+	}
+	path := fmt.Sprintf("/api/studio/sessions/%s/network-grants/deny", url.PathEscape(sessionID))
+	return c.DoJSON("POST", path, body, nil)
 }
 
 // GetSessionStatus checks if a session has an active runner.
@@ -169,6 +279,17 @@ func (c *Client) ReconnectSession(sessionID string) (*SSEStream, error) {
 	return c.SSE("GET", fmt.Sprintf("/api/studio/sessions/%s/stream", sessionID), nil)
 }
 
+// SessionModelStatusResponse mirrors the server response for
+// GET /api/studio/sessions/{id}/model-status.
+type SessionModelStatusResponse struct {
+	PinnedProvider       string   `json:"pinnedProvider"`
+	PinnedModel          string   `json:"pinnedModel"`
+	EffectiveProvider    string   `json:"effectiveProvider"`
+	EffectiveModel       string   `json:"effectiveModel"`
+	CredentialsAvailable bool     `json:"credentialsAvailable"`
+	AvailableProviders   []string `json:"availableProviders,omitempty"`
+}
+
 // PatchSessionModelResponse mirrors the server response for
 // PATCH /api/studio/sessions/{id}/model.
 type PatchSessionModelResponse struct {
@@ -177,6 +298,17 @@ type PatchSessionModelResponse struct {
 	EffectiveProvider    string `json:"effectiveProvider"`
 	EffectiveModel       string `json:"effectiveModel"`
 	CredentialsAvailable bool   `json:"credentialsAvailable"`
+}
+
+// GetSessionModelStatus reads the resolved provider/model for a session,
+// including cascade defaults when no explicit pin is set.
+func (c *Client) GetSessionModelStatus(sessionID string) (*SessionModelStatusResponse, error) {
+	var resp SessionModelStatusResponse
+	path := fmt.Sprintf("/api/studio/sessions/%s/model-status", url.PathEscape(sessionID))
+	if err := c.DoJSON("GET", path, nil, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
 }
 
 // PatchSessionModel sets or clears the per-session model pin on the remote

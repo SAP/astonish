@@ -29,6 +29,7 @@ import (
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
+	"google.golang.org/genai"
 )
 
 // ChatFactoryConfig holds all inputs needed to build a fully-wired ChatAgent.
@@ -1711,6 +1712,44 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		ShutdownSandbox:       shutdownSandbox,
 		SandboxPool:           resultPool,
 	}, nil
+}
+
+// makeLLMFunc creates a simple LLM call function suitable for FlowDistiller /
+// Compactor. Prefer per-request LLM override (team-specific model in platform
+// mode) over the factory-time default.
+func makeLLMFunc(llm model.LLM) func(ctx context.Context, prompt string) (string, error) {
+	return func(ctx context.Context, prompt string) (string, error) {
+		effectiveLLM := agent.LLMFromContext(ctx)
+		if effectiveLLM == nil {
+			effectiveLLM = llm
+		}
+
+		req := &model.LLMRequest{
+			Contents: []*genai.Content{
+				{
+					Parts: []*genai.Part{{Text: prompt}},
+					Role:  "user",
+				},
+			},
+		}
+		var text string
+		for resp, err := range effectiveLLM.GenerateContent(ctx, req, false) {
+			if err != nil {
+				return text, err
+			}
+			if resp.Content != nil {
+				for _, p := range resp.Content.Parts {
+					if p.Text != "" {
+						text += p.Text
+					}
+				}
+			}
+		}
+		if text == "" {
+			return "", fmt.Errorf("empty response from LLM")
+		}
+		return text, nil
+	}
 }
 
 // MakeLLMFunc creates a simple prompt->response function from an LLM.

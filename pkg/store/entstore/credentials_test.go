@@ -89,6 +89,102 @@ func setupTeamStore(t *testing.T) (*teamCredentialStore, *teament.Client) {
 	return &teamCredentialStore{client: client}, client
 }
 
+func setupUnmigratedTeamStore(t *testing.T) (*teamCredentialStore, *teament.Client) {
+	t.Helper()
+
+	dbPath := filepath.Join(t.TempDir(), "team-unmigrated.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	for _, pragma := range []string{
+		"PRAGMA journal_mode=WAL",
+		"PRAGMA foreign_keys=ON",
+	} {
+		if _, err := db.Exec(pragma); err != nil {
+			t.Fatalf("pragma: %v", err)
+		}
+	}
+
+	drv := entsql.OpenDB(dialect.SQLite, db)
+	client := teament.NewClient(teament.Driver(drv))
+	t.Cleanup(func() { client.Close() })
+
+	cs := &teamCredentialStore{client: client}
+	cs.repairSchema = func(ctx context.Context) error { return client.Schema.Create(ctx) }
+	return cs, client
+}
+
+func setupUnmigratedPersonalStore(t *testing.T) (*personalCredentialStore, *personalent.Client) {
+	t.Helper()
+
+	dbPath := filepath.Join(t.TempDir(), "personal-unmigrated.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	for _, pragma := range []string{
+		"PRAGMA journal_mode=WAL",
+		"PRAGMA foreign_keys=ON",
+	} {
+		if _, err := db.Exec(pragma); err != nil {
+			t.Fatalf("pragma: %v", err)
+		}
+	}
+
+	drv := entsql.OpenDB(dialect.SQLite, db)
+	client := personalent.NewClient(personalent.Driver(drv))
+	t.Cleanup(func() { client.Close() })
+
+	cs := &personalCredentialStore{client: client}
+	cs.repairSchema = func(ctx context.Context) error { return client.Schema.Create(ctx) }
+	return cs, client
+}
+
+func TestTeamCredential_SetRepairsMissingCredentialsTable(t *testing.T) {
+	cs, client := setupUnmigratedTeamStore(t)
+	ctx := context.Background()
+
+	if err := cs.Set(ctx, "openstack_keystone", &store.Credential{Type: store.CredBearer, Token: "team-token"}); err != nil {
+		t.Fatalf("Set should repair missing credentials table: %v", err)
+	}
+
+	if _, err := client.Credential.Query().Where(teamcredential.NameEQ("openstack_keystone")).Only(ctx); err != nil {
+		t.Fatalf("credential row after repair: %v", err)
+	}
+	key, val, err := cs.Resolve(ctx, "openstack_keystone")
+	if err != nil {
+		t.Fatalf("Resolve after repair: %v", err)
+	}
+	if key != "Authorization" || val != "Bearer team-token" {
+		t.Fatalf("Resolve = %q, %q; want Authorization, Bearer team-token", key, val)
+	}
+}
+
+func TestPersonalCredential_SetRepairsMissingCredentialsTable(t *testing.T) {
+	cs, client := setupUnmigratedPersonalStore(t)
+	ctx := context.Background()
+
+	if err := cs.Set(ctx, "openstack_keystone", &store.Credential{Type: store.CredBearer, Token: "personal-token"}); err != nil {
+		t.Fatalf("Set should repair missing credentials table: %v", err)
+	}
+
+	if _, err := client.Credential.Query().Where(credential.NameEQ("openstack_keystone")).Only(ctx); err != nil {
+		t.Fatalf("credential row after repair: %v", err)
+	}
+	key, val, err := cs.Resolve(ctx, "openstack_keystone")
+	if err != nil {
+		t.Fatalf("Resolve after repair: %v", err)
+	}
+	if key != "Authorization" || val != "Bearer personal-token" {
+		t.Fatalf("Resolve = %q, %q; want Authorization, Bearer personal-token", key, val)
+	}
+}
+
 // TestPersonalCredential_SetGet_Encrypted verifies that Set() encrypts data
 // in the DB and Get() decrypts it correctly.
 func TestPersonalCredential_SetGet_Encrypted(t *testing.T) {

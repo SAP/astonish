@@ -171,18 +171,19 @@ Legacy installations may have provider API keys in `config.yaml`. The credential
 
 ### Personal vs Team Credentials (Platform Mode)
 
-Interactive Studio chat injects `MergedCredentialStore(personal, team)` — personal-first reads, personal writes, team fallback.
+Interactive Studio chat and linked user channels inject `MergedCredentialStore(personal, team)` — personal-first reads, personal writes, team fallback. Channel enrichment includes email, Telegram, and Slack messages resolved through `channelPlatformResolver`; if the channel identity is linked to a platform user, tools invoked from that message can read that user's personal credentials before falling back to team credentials. Linked channel contexts also carry the platform/org/team network policy stores and OpenShell gateway configuration so sandbox sessions inherit the same allow rules and pre-seed behavior as Studio chat.
 
 Headless paths diverge by design:
 
 | Path | Credential store |
 |------|------------------|
 | Studio chat | Merged (personal → team) |
+| Linked user channels (email/Telegram/Slack) | Merged (personal → team) |
 | **Personal scheduled job** | Merged (personal → team), same as chat |
 | **Team scheduled job** | Team only |
-| Fleet / channel enrichment | Team only |
+| Fleet / unowned headless automation | Team only |
 
-Do **not** publish a personal OAuth/API credential to the team just to schedule automation — create a personal-scope job instead. Publish to team only for shared service credentials used by team jobs, fleet, or other members. See `docs/architecture/daemon-scheduler.md` ("Why Dual-Scope Jobs").
+Do **not** publish a personal OAuth/API credential to the team just to schedule automation — create a personal-scope job or invoke Astonish through a linked user channel instead. Publish to team only for shared service credentials used by team jobs, fleet, or other members. See `docs/architecture/daemon-scheduler.md` ("Why Dual-Scope Jobs").
 
 ## Key Files
 

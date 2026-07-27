@@ -43,9 +43,12 @@ func (b *SessionBridge) OnToolResult(ctx context.Context, toolName string, resp 
 	ep := LoadFromStores(ctx, b.Stores)
 	var denials []map[string]any
 	switch {
-	case toolName == "shell_command" && LooksLikeNetworkDenial(resp):
+	case toolName == "shell_command" && (LooksLikeNetworkDenial(resp) || LooksLikeShellNetworkFailure(resp)):
 		stdout, _ := resp["stdout"].(string)
 		denials = ExtractDenialsFromOutput(stdout)
+		if len(denials) == 0 {
+			denials = ExtractDenialsFromShellCommand(fallbackURL)
+		}
 	case IsNetworkTool(toolName) && LooksLikeNetworkToolDenial(resp):
 		denials = ExtractDenialFromToolError(resp, fallbackURL)
 	}

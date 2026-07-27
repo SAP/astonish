@@ -10,7 +10,7 @@ Core `ChatAgent` runtime — the tool-use loop that drives Astonish's autonomous
 
 ## Interactions
 - Wired by `pkg/launcher/chat_factory.go:NewWiredChatAgent` — this is where the full agent (LLM, tools, sandbox, memory, tool index, prompt builder) is assembled.
-- Wrapped in an ADK agent by `pkg/launcher/chat_console.go:RunChatConsole` for the CLI, and by `pkg/api` chat handlers for Studio.
+- Invoked by Studio via `pkg/api` chat handlers (SSE). The CLI TUI does not run the agent in-process; it streams Studio SSE through `pkg/launcher.RunChatTUI`.
 - Runs tools via `RunnableTool.Run` (see `pkg/tools/AGENTS.md`); tools that hit the shell/network/filesystem are wrapped by `pkg/sandbox` (see `pkg/sandbox/AGENTS.md`).
 
 ## Key rules
@@ -20,5 +20,5 @@ Core `ChatAgent` runtime — the tool-use loop that drives Astonish's autonomous
 4. **Sub-agent budget**: max 10 concurrent sub-agents by design (see the README and `docs/architecture/`). Do not raise this without discussion — it bounds fan-out cost.
 
 ## When editing
-- Changing the tool-call loop? Update both the CLI console (`chat_console.go`) and the Studio SSE runner (`pkg/api/chat_runner.go`) — they consume the same agent but present different sinks.
+- Changing the tool-call loop? Update the Studio SSE runner (`pkg/api/chat_runner.go`). CLI chat consumes the same SSE events via `pkg/launcher/tui_chat.go` → `pkg/tui`.
 - Changing prompt construction? Coordinate with the system-prompt contract tests (they enforce the two-step artifact/report protocol).

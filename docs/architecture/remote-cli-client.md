@@ -1,21 +1,21 @@
 # Remote CLI Client Architecture
 
-This document describes the architecture for making the Astonish CLI a thin client to a remote Astonish platform server, enabling the same CLI experience for both personal (local) and platform (remote) deployments.
+This document describes the architecture for making the Astonish CLI a thin client to an Astonish platform server (local install or cloud). User-facing commands that need a running platform require `astonish login`.
 
 ## Overview
 
-Single binary (`astonish`), dual mode:
+Single binary (`astonish`):
 
-- **Personal mode** (default): CLI runs everything in-process or talks to a local daemon on `localhost`. No auth required. Current behavior, unchanged.
-- **Remote mode** (after `astonish login`): CLI becomes an HTTP client to a remote Astonish server, using the same REST/SSE APIs that the Studio web UI uses.
+- **Platform client mode** (after `astonish login`): CLI is an HTTP client to the platform, using the same REST/SSE APIs as Studio. **Chat always requires this mode** — there is no in-process personal chat.
+- **Infrastructure mode** (no login / after logout): Commands such as `daemon`, `platform`, `sandbox` run against local machine/config. These error if used while logged into a remote platform where they do not apply.
 
-When `~/.config/astonish/remote.yaml` exists and has a URL configured, all user-facing commands route through the remote HTTP client. Infrastructure commands (`daemon`, `studio`) emit a hard error.
+When `~/.config/astonish/remote.yaml` exists and has a URL configured, user-facing commands route through the platform HTTP client.
 
 ## Design Principles
 
-- **Same UX**: The chat experience, tool approval flow, flow execution output, and session management are identical regardless of mode.
-- **Progressive complexity**: Users start personal, then `astonish login <url>` switches them to remote. `astonish logout` switches back.
-- **No local daemon in remote mode**: The CLI talks directly to the remote server. Running `daemon start` or `studio` in remote mode is an error.
+- **Chat is platform-only**: `astonish chat` requires login; agent execution happens on the platform, not inside the CLI process.
+- **Same UX for local install and cloud**: both are “the platform” behind `login <url>`.
+- **No local daemon in remote-client mode**: The CLI talks to the logged-in server. Running `daemon start` while pointed at a remote platform is an error.
 - **Encrypted credential storage**: JWT tokens are stored locally using the same AES-256-GCM mechanism as the credential store.
 - **Auto-refresh**: Access tokens (15 min TTL) are refreshed transparently. Expired refresh tokens (90 days) prompt re-login.
 
@@ -25,7 +25,7 @@ When `~/.config/astonish/remote.yaml` exists and has a URL configured, all user-
 
 | Command | Remote Behavior |
 |---------|----------------|
-| `chat` | POST /api/studio/chat + SSE streaming |
+| `chat` | **Requires login.** Fullscreen TUI → POST /api/studio/chat + SSE (`RunChatTUI`) |
 | `sessions list/show/delete` | GET/DELETE /api/studio/sessions |
 | `flows run` | POST /api/run + SSE streaming |
 | `flows list/show` | GET /api/flows |
@@ -278,64 +278,10 @@ If the CLI disconnects mid-stream (network issue):
 3. Continue from there with new POST
 ```
 
-## TUI Refactoring for Dual Mode
+## Terminal chat (platform-only)
 
-The current chat TUI in `pkg/launcher/chat_console.go` is tightly coupled to the ADK event iterator. For remote mode, the same rendering must be driven by SSE events.
-
-### Strategy: Event Abstraction Layer
-
-```go
-// pkg/ui/events.go — Abstract chat events (mode-agnostic)
-type ChatEvent struct {
-    Type    ChatEventType
-    Text    string          // for Text events
-    Tool    string          // for ToolCall/ToolResult/Approval
-    Args    map[string]any  // for ToolCall
-    Result  string          // for ToolResult
-    Options []string        // for Approval
-    Error   string          // for Error events
-    Session string          // for Session event
-}
-
-type ChatEventType int
-const (
-    EventSession ChatEventType = iota
-    EventText
-    EventToolCall
-    EventToolResult
-    EventApproval
-    EventAutoApproved
-    EventArtifact
-    EventUsage
-    EventError
-    EventDone
-)
-```
-
-### Two Backends
-
-```go
-// Local backend (current code, refactored)
-func RunLocalChat(ctx context.Context, cfg ChatConfig) <-chan ChatEvent
-
-// Remote backend (new)
-func RunRemoteChat(ctx context.Context, client *client.Client, sessionID, message string) <-chan ChatEvent
-```
-
-### Shared Presenter
-
-```go
-// Drives the TUI regardless of source
-func RunChatPresenter(events <-chan ChatEvent, approvalFn func(tool string, options []string) string)
-```
-
-The presenter handles:
-- Starting/stopping spinners
-- Streaming text to terminal
-- Rendering tool boxes
-- Showing approval prompts (calls `approvalFn`)
-- Displaying errors
-- Managing the input prompt loop
+> **See [`terminal-app.md`](./terminal-app.md).**  
+> CLI chat always uses the authenticated platform client (`pkg/client`) and Studio SSE. There is no in-process personal chat backend. `pkg/launcher.RunChatTUI` + `platformBackend` map SSE → `events.Event` → `pkg/tui`.
 
 ## Implementation Phases
 
@@ -373,13 +319,10 @@ The presenter handles:
 - Add auth headers to existing HTTP calls
 - `drill list/report` via API
 
-### Phase 7: Remote Chat
-- Refactor TUI into event abstraction + presenter
-- Implement SSE chat client in `pkg/client/chat.go`
-- Wire remote backend into `chat_console.go`
-- Handle approval flow over SSE
-- Handle reconnection on network failure
-- `--resume` flag in remote mode
+### Phase 7: Platform Chat TUI
+- Done: `RunChatTUI` + `platformBackend` (SSE → events → `pkg/tui`)
+- Chat requires login; no local in-process path
+- Remaining: reconnection polish, markdown/diff rendering (see terminal-app.md)
 
 ## Error Messages
 

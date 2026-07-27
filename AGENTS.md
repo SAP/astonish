@@ -125,7 +125,7 @@ astonish/
 │   ├── daemon/           # Platform bootstrap: wires stores, scheduler, channels, fleet, Studio
 │   ├── drill/            # Test/drill suite runner (SuiteRunner, TriageAgent, ArtifactManager)
 │   ├── fleet/            # Multi-agent orchestration (FleetConfig, PlanRegistry, PlanActivator)
-│   ├── launcher/         # Console + Studio entrypoints (RunChatConsole, NewStudioServer)
+│   ├── launcher/         # Studio + platform chat TUI entrypoints (RunChatTUI, NewStudioServer)
 │   ├── mcp/              # MCP client and server management
 │   ├── mcpstore/         # Tapped MCP server catalog
 │   ├── memory/           # Three-tier memory (personal / team / org) + embeddings
@@ -261,7 +261,7 @@ When you edit files under one of these subtrees, read the local AGENTS.md first 
 
 - `cmd/astonish/AGENTS.md` — CLI dispatch (Cobra), local vs. remote gating, `mustBeRemote` / `mustNotBeRemote`.
 - `pkg/api/AGENTS.md` — HTTP/SSE, chat runner, tenant middleware, image build handlers, report marker plumbing.
-- `pkg/agent/AGENTS.md` + `pkg/launcher/AGENTS.md` — ChatAgent, `RunChatConsole`, `NewWiredChatAgent`, `NewStudioServer`.
+- `pkg/agent/AGENTS.md` + `pkg/launcher/AGENTS.md` — ChatAgent, `RunChatTUI` (platform SSE), `NewWiredChatAgent`, `NewStudioServer`.
 - `pkg/sandbox/AGENTS.md` — Backend interface, backend selection, gRPC contract, image build, entrypoint, isolation model.
 - `pkg/store/entstore/AGENTS.md` — Multi-tenant DB router, migration policy.
 - `ent/AGENTS.md` — Schema hand-edit rules, four tenant scopes, regeneration flow.

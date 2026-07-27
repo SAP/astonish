@@ -14,9 +14,10 @@ import (
 
 // personalCredentialStore implements store.CredentialStore for personal scope.
 type personalCredentialStore struct {
-	client  *personalent.Client
-	credKey []byte // per-org DEK for envelope encryption
-	mu      sync.RWMutex
+	client       *personalent.Client
+	credKey      []byte // per-org DEK for envelope encryption
+	repairSchema func(context.Context) error
+	mu           sync.RWMutex
 }
 
 var _ store.CredentialStore = (*personalCredentialStore)(nil)
@@ -25,6 +26,11 @@ func (cs *personalCredentialStore) Get(ctx context.Context, name string) *store.
 	ent, err := cs.client.Credential.Query().
 		Where(credential.NameEQ(name)).
 		Only(ctx)
+	if err != nil && isMissingCredentialTableError(err) && cs.repairCredentialsSchema(ctx, "get", err) == nil {
+		ent, err = cs.client.Credential.Query().
+			Where(credential.NameEQ(name)).
+			Only(ctx)
+	}
 	if err != nil {
 		slog.Warn("personal credential query failed", "name", name, "error", err)
 		return nil
@@ -61,26 +67,49 @@ func (cs *personalCredentialStore) Set(ctx context.Context, name string, cred *s
 		return fmt.Errorf("encrypt credential: %w", err)
 	}
 
+	return cs.setEncryptedLocked(ctx, name, cred.Type, encrypted, true)
+}
+
+func (cs *personalCredentialStore) setEncryptedLocked(ctx context.Context, name string, credType store.CredentialType, encrypted []byte, allowRepair bool) error {
 	// Check if exists.
 	existing, err := cs.client.Credential.Query().
 		Where(credential.NameEQ(name)).
 		Only(ctx)
+	if err != nil && isMissingCredentialTableError(err) && allowRepair {
+		if repairErr := cs.repairCredentialsSchema(ctx, "set-query", err); repairErr != nil {
+			return err
+		}
+		return cs.setEncryptedLocked(ctx, name, credType, encrypted, false)
+	}
 	if err != nil && !personalent.IsNotFound(err) {
 		return err
 	}
 
 	if existing != nil {
-		return existing.Update().
-			SetCredType(cred.Type).
+		err := existing.Update().
+			SetCredType(credType).
 			SetEncrypted(encrypted).
 			Exec(ctx)
+		if err != nil && isMissingCredentialTableError(err) && allowRepair {
+			if repairErr := cs.repairCredentialsSchema(ctx, "set-update", err); repairErr != nil {
+				return err
+			}
+			return cs.setEncryptedLocked(ctx, name, credType, encrypted, false)
+		}
+		return err
 	}
 
 	_, err = cs.client.Credential.Create().
 		SetName(name).
-		SetCredType(cred.Type).
+		SetCredType(credType).
 		SetEncrypted(encrypted).
 		Save(ctx)
+	if err != nil && isMissingCredentialTableError(err) && allowRepair {
+		if repairErr := cs.repairCredentialsSchema(ctx, "set-create", err); repairErr != nil {
+			return err
+		}
+		return cs.setEncryptedLocked(ctx, name, credType, encrypted, false)
+	}
 	return err
 }
 
@@ -91,6 +120,11 @@ func (cs *personalCredentialStore) Remove(ctx context.Context, name string) erro
 	_, err := cs.client.Credential.Delete().
 		Where(credential.NameEQ(name)).
 		Exec(ctx)
+	if err != nil && isMissingCredentialTableError(err) && cs.repairCredentialsSchema(ctx, "remove", err) == nil {
+		_, err = cs.client.Credential.Delete().
+			Where(credential.NameEQ(name)).
+			Exec(ctx)
+	}
 	return err
 }
 
@@ -98,7 +132,13 @@ func (cs *personalCredentialStore) List(ctx context.Context) map[string]store.Cr
 	ents, err := cs.client.Credential.Query().
 		Order(credential.ByName()).
 		All(ctx)
+	if err != nil && isMissingCredentialTableError(err) && cs.repairCredentialsSchema(ctx, "list", err) == nil {
+		ents, err = cs.client.Credential.Query().
+			Order(credential.ByName()).
+			All(ctx)
+	}
 	if err != nil {
+		slog.Warn("personal credential list failed", "error", err)
 		return nil
 	}
 
@@ -110,7 +150,14 @@ func (cs *personalCredentialStore) List(ctx context.Context) map[string]store.Cr
 }
 
 func (cs *personalCredentialStore) Count(ctx context.Context) int {
-	count, _ := cs.client.Credential.Query().Count(ctx)
+	count, err := cs.client.Credential.Query().Count(ctx)
+	if err != nil && isMissingCredentialTableError(err) && cs.repairCredentialsSchema(ctx, "count", err) == nil {
+		count, err = cs.client.Credential.Query().Count(ctx)
+	}
+	if err != nil {
+		slog.Warn("personal credential count failed", "error", err)
+		return 0
+	}
 	return count
 }
 
@@ -158,9 +205,18 @@ func (cs *personalCredentialStore) HasSecrets(ctx context.Context) bool {
 }
 
 func (cs *personalCredentialStore) SecretCount(ctx context.Context) int {
-	count, _ := cs.client.Credential.Query().
+	count, err := cs.client.Credential.Query().
 		Where(credential.CredTypeEQ(secretCredType)).
 		Count(ctx)
+	if err != nil && isMissingCredentialTableError(err) && cs.repairCredentialsSchema(ctx, "secret-count", err) == nil {
+		count, err = cs.client.Credential.Query().
+			Where(credential.CredTypeEQ(secretCredType)).
+			Count(ctx)
+	}
+	if err != nil {
+		slog.Warn("personal credential secret count failed", "error", err)
+		return 0
+	}
 	return count
 }
 
@@ -168,7 +224,13 @@ func (cs *personalCredentialStore) ListSecrets(ctx context.Context) []string {
 	ents, err := cs.client.Credential.Query().
 		Where(credential.CredTypeEQ(secretCredType)).
 		All(ctx)
+	if err != nil && isMissingCredentialTableError(err) && cs.repairCredentialsSchema(ctx, "list-secrets", err) == nil {
+		ents, err = cs.client.Credential.Query().
+			Where(credential.CredTypeEQ(secretCredType)).
+			All(ctx)
+	}
 	if err != nil {
+		slog.Warn("personal credential list secrets failed", "error", err)
 		return nil
 	}
 
@@ -183,6 +245,21 @@ func (cs *personalCredentialStore) ListSecrets(ctx context.Context) []string {
 }
 
 func (cs *personalCredentialStore) Reload(ctx context.Context) error {
-	// No caching, always reads from DB.
+	return cs.repairCredentialsSchema(ctx, "reload", nil)
+}
+
+func (cs *personalCredentialStore) repairCredentialsSchema(ctx context.Context, operation string, cause error) error {
+	if cs.repairSchema == nil {
+		return cause
+	}
+	if cause != nil {
+		slog.Warn("personal credential table missing; attempting schema repair", "operation", operation, "error", cause)
+	} else {
+		slog.Debug("checking personal credential schema", "operation", operation)
+	}
+	if err := cs.repairSchema(ctx); err != nil {
+		slog.Warn("personal credential schema repair failed", "operation", operation, "error", err)
+		return err
+	}
 	return nil
 }

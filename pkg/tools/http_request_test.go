@@ -260,6 +260,26 @@ func TestHttpRequest_CredentialResolution(t *testing.T) {
 			t.Errorf("expected Authorization: Bearer vault-token, got %s: %s", receivedAuthKey, receivedAuthValue)
 		}
 	})
+
+	t.Run("merged context credential store resolves personal-first", func(t *testing.T) {
+		credentialStoreVar = nil
+		defer func() { credentialStoreVar = store }()
+
+		personal := sessioncreds.NewStore(map[string]*storepkg.Credential{
+			"openstack_keystone": {Type: storepkg.CredBearer, Token: "personal-token"},
+		})
+		team := sessioncreds.NewStore(map[string]*storepkg.Credential{
+			"openstack_keystone": {Type: storepkg.CredBearer, Token: "team-token"},
+		})
+		ctx := storepkg.WithCredentialStore(context.Background(), storepkg.NewMergedCredentialStore(personal, team))
+		_, err := httpRequest(ctx, HttpRequestArgs{URL: srv.URL, Credential: "openstack_keystone"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if receivedAuthKey != "Authorization" || receivedAuthValue != "Bearer personal-token" {
+			t.Errorf("expected Authorization: Bearer personal-token, got %s: %s", receivedAuthKey, receivedAuthValue)
+		}
+	})
 }
 
 // --- Timeout bounds tests ---

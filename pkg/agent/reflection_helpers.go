@@ -13,6 +13,9 @@ import (
 // AND very short output (e.g., "OK", "Done") are trivial acknowledgments.
 const minOutputForReflection = 50
 
+const maxReflectionToolResultLen = 1200
+const maxReflectionShellStreamLen = 900
+
 // countToolCallsRecursive returns the total number of tool calls in the trace,
 // including any sub-agent traces attached to delegate_tasks steps.
 func countToolCallsRecursive(trace *ExecutionTrace) int {
@@ -127,6 +130,9 @@ func writeTraceSteps(sb *strings.Builder, steps []TraceStep, depth int) {
 		}
 
 		sb.WriteString(fmt.Sprintf("%s%d. **%s** [%s] %s\n", indent, i+1, step.ToolName, status, argsSummary))
+		if resultSummary := summarizeReflectionToolResult(step); resultSummary != "" {
+			sb.WriteString(fmt.Sprintf("%s   Result: %s\n", indent, resultSummary))
+		}
 
 		// Recurse into sub-agent traces
 		for _, child := range step.SubAgentTraces {
@@ -159,6 +165,53 @@ func writeTraceSteps(sb *strings.Builder, steps []TraceStep, depth int) {
 			}
 		}
 	}
+}
+
+func summarizeReflectionToolResult(step TraceStep) string {
+	if len(step.ToolResult) == 0 {
+		return ""
+	}
+
+	if step.ToolName == "shell_command" {
+		return summarizeReflectionShellResult(step.ToolResult)
+	}
+
+	resultBytes, err := json.Marshal(step.ToolResult)
+	if err != nil {
+		return ""
+	}
+	return truncateReflectionText(string(resultBytes), maxReflectionToolResultLen)
+}
+
+func summarizeReflectionShellResult(result map[string]any) string {
+	summary := make(map[string]any, len(result))
+	for k, v := range result {
+		switch k {
+		case "stdout", "stderr":
+			if s, ok := v.(string); ok {
+				summary[k] = truncateReflectionText(s, maxReflectionShellStreamLen)
+			} else {
+				summary[k] = v
+			}
+		default:
+			summary[k] = v
+		}
+	}
+	resultBytes, err := json.Marshal(summary)
+	if err != nil {
+		return ""
+	}
+	return truncateReflectionText(string(resultBytes), maxReflectionToolResultLen)
+}
+
+func truncateReflectionText(s string, maxLen int) string {
+	if maxLen <= 0 || len(s) <= maxLen {
+		return s
+	}
+	if maxLen <= 3 {
+		return s[:maxLen]
+	}
+	return s[:maxLen-3] + "..."
 }
 
 // extractCurrentTurnConversation extracts the user message(s) and model text

@@ -321,6 +321,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
   const isNearBottomRef = useRef(true)
   const [showScrollButton, setShowScrollButton] = useState(false)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const memoryPollRunRef = useRef(0)
 
   // Attachment state
   const [attachments, setAttachments] = useState<PendingAttachment[]>([])
@@ -463,6 +464,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
     setHarnessOpen(false)
     setManualHarnessFocus(null)
     harnessAutoCollapsedRef.current = false
+    memoryPollRunRef.current += 1
   }, [activeSessionId])
 
   // Measure the StudioChat flex row for harness width clamping.
@@ -2353,19 +2355,35 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
             }
             setIsStreaming(false)
             // After done, the platform reflector runs async (reflection + extraction).
-            // Mark as consolidating so the memory panel shows a loading state.
+            // Poll for a bounded window so late reflector saves still reveal the
+            // session-memory icon; the backend can take up to two minutes here.
             setIsConsolidatingMemories(true)
             if (activeSessionId) {
               const sid = activeSessionId
-              setTimeout(async () => {
+              const pollRun = memoryPollRunRef.current + 1
+              memoryPollRunRef.current = pollRun
+              const startedAt = Date.now()
+              const pollIntervalMs = 3000
+              const maxPollMs = 120000
+              const pollForMemories = async () => {
+                if (memoryPollRunRef.current !== pollRun) return
                 try {
                   const res = await listSessionMemories(sid)
+                  if (memoryPollRunRef.current !== pollRun) return
                   if (res.memories && res.memories.length > 0) {
                     setHasSessionMemories(true)
+                    setIsConsolidatingMemories(false)
+                    return
                   }
                 } catch { /* ignore — session may have been deleted */ }
-                setIsConsolidatingMemories(false)
-              }, 8000) // 8s delay to give reflector + extraction time to finish
+                if (memoryPollRunRef.current !== pollRun) return
+                if (Date.now() - startedAt >= maxPollMs) {
+                  setIsConsolidatingMemories(false)
+                  return
+                }
+                setTimeout(pollForMemories, pollIntervalMs)
+              }
+              setTimeout(pollForMemories, pollIntervalMs)
             } else {
               setIsConsolidatingMemories(false)
             }

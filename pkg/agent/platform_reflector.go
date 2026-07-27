@@ -64,6 +64,7 @@ CRITICAL: If the "ALREADY SAVED IN TEAM MEMORY" section below contains informati
 
 Durable knowledge includes:
 - Connection details, configuration parameters, or environment-specific information (hostnames, API base URLs, auth methods, credential names, ports)
+- Discovered access recipes: the credential name/type that worked, the service catalog type, base URL, HTTP method/path, required safe headers/placeholders, and failed assumptions that should not be repeated
 - Workarounds discovered after initial failures (what failed, why, what worked)
 - Non-obvious file paths, API endpoints, configuration patterns
 - Shell command quirks, syntax gotchas, tool-specific behaviors
@@ -79,6 +80,8 @@ NOT durable knowledge — NEVER save, even if they appear in tool results:
 - Secret values (passwords, tokens, API keys) — NEVER include actual secret values
 
 IMPORTANT: Connection details (hostnames, API base URLs, auth methods, credential names) ARE durable knowledge — save them even if the user provided them. However, the actual CONTENTS retrieved from those connections (resource lists, statuses, query results) are NOT durable and must NOT be saved.
+
+Example: if a task discovers that Kubernetes clusters in SAP Converged Cloud QA-DE-1 are listed through Kubernikus rather than Magnum, save the access recipe: use the openstack-keystone Keystone token credential, discover/use the kubernikus public endpoint from the Keystone catalog, and call GET $KUBERNIKUS_URL/api/v1/clusters with X-Auth-Token: {{CREDENTIAL:openstack-keystone:token}}. Do NOT save the current cluster list, node counts, health, or phase.
 
 If you find durable knowledge worth saving, call memory_save with:
 - category: a descriptive heading using "kind/topic" format (e.g., "infrastructure/Proxmox API", "tools/SSH Patterns", "workarounds/Docker DNS")

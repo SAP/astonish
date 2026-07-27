@@ -8,6 +8,8 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/SAP/astonish/pkg/sandbox/netpolicy"
+	"github.com/SAP/astonish/pkg/sandbox/openshell"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/store/entstore"
 )
@@ -161,6 +163,74 @@ func TestResolveChannelUser_InjectsPersonalFirstCredentialsForEmail(t *testing.T
 	}
 	if header != "Authorization" || value != "Bearer personal-github-token" {
 		t.Fatalf("resolved GitHub credential = %q %q, want personal bearer token", header, value)
+	}
+}
+
+func TestResolveChannelUser_InjectsNetworkPolicyStoresForEmail(t *testing.T) {
+	esStore, _ := setupChannelResolverFixture(t, "netorg", "netteam", "email", "net@example.com")
+	ctx := context.Background()
+
+	orgStore, err := esStore.ForOrg("netorg")
+	if err != nil {
+		t.Fatalf("ForOrg: %v", err)
+	}
+	teamStore := orgStore.ForTeam("netteam")
+	if err := teamStore.NetworkPolicies().Save(ctx, &store.NetworkPolicyRule{
+		ID:        "allow-sap-ghe",
+		Host:      "github.wdf.sap.corp",
+		Port:      443,
+		Action:    store.NetworkPolicyAllow,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("save team network policy: %v", err)
+	}
+
+	resolver := &channelPlatformResolver{backend: esStore}
+	enrichedCtx, _, _, resolveErr := resolver.ResolveChannelUser(ctx, "email", "net@example.com")
+	if resolveErr != nil {
+		t.Fatalf("ResolveChannelUser: %v", resolveErr)
+	}
+
+	nps := store.NetworkPolicyStoresFromContext(enrichedCtx)
+	if nps == nil {
+		t.Fatal("NetworkPolicyStores not found in context")
+	}
+	if nps.Platform == nil {
+		t.Fatal("NetworkPolicyStores.Platform is nil")
+	}
+	if nps.Org == nil {
+		t.Fatal("NetworkPolicyStores.Org is nil")
+	}
+	if nps.Team == nil {
+		t.Fatal("NetworkPolicyStores.Team is nil")
+	}
+
+	endpoints := netpolicy.CollectAllowEndpoints(enrichedCtx, nps)
+	for _, endpoint := range endpoints {
+		if endpoint.Host == "github.wdf.sap.corp" && endpoint.Port == 443 {
+			return
+		}
+	}
+	t.Fatalf("allow endpoint github.wdf.sap.corp:443 not collected from channel context: %+v", endpoints)
+}
+
+func TestResolveChannelUser_InjectsGatewayConfigForEmail(t *testing.T) {
+	esStore, _ := setupChannelResolverFixture(t, "gworg", "gwteam", "email", "gw@example.com")
+	cfg := &openshell.GRPCClientConfig{Addr: "openshell-gateway.example:443", TLS: true}
+
+	resolver := &channelPlatformResolver{backend: esStore, gatewayConfig: cfg}
+	enrichedCtx, _, _, resolveErr := resolver.ResolveChannelUser(context.Background(), "email", "gw@example.com")
+	if resolveErr != nil {
+		t.Fatalf("ResolveChannelUser: %v", resolveErr)
+	}
+
+	got := netpolicy.GatewayConfigFromContext(enrichedCtx)
+	if got == nil {
+		t.Fatal("gateway config not found in context")
+	}
+	if got.Addr != cfg.Addr || got.TLS != cfg.TLS {
+		t.Fatalf("gateway config = %+v, want %+v", got, cfg)
 	}
 }
 

@@ -766,15 +766,26 @@ func Run(cfg RunConfig) error {
 	}
 	_ = refreshAllowlistStop // used at shutdown
 
-	// Set platform resolver for inbound channel messages (platform mode only).
-	// This enables team-scoped context injection when users message via Telegram.
-	if backend != nil && channelMgr != nil {
+	newChannelPlatformResolver := func(currentCfg *config.AppConfig) *channelPlatformResolver {
 		resolver := &channelPlatformResolver{backend: backend}
+		if currentCfg != nil && currentCfg.Sandbox.OpenShell.GatewayAddr != "" {
+			gatewayConfig := openshell.GRPCClientConfig{
+				Addr: currentCfg.Sandbox.OpenShell.GatewayAddr,
+				TLS:  currentCfg.Sandbox.OpenShell.OpenShellGatewayTLS(),
+			}
+			resolver.gatewayConfig = &gatewayConfig
+		}
 		// Wire the cross-session memory merge function if PlatformReflector is available.
 		if factoryResult != nil && factoryResult.ChatAgent != nil && factoryResult.ChatAgent.PlatformReflector != nil {
 			resolver.memorySaveOrMerge = factoryResult.ChatAgent.PlatformReflector.MemorySaveOrMergeFunc()
 		}
-		channelMgr.SetPlatformResolver(resolver)
+		return resolver
+	}
+
+	// Set platform resolver for inbound channel messages (platform mode only).
+	// This enables user/channel-scoped context injection for linked channel users.
+	if backend != nil && channelMgr != nil {
+		channelMgr.SetPlatformResolver(newChannelPlatformResolver(appCfg))
 	}
 
 	// --- Link code store for code-based channel linking (platform mode) ---
@@ -908,11 +919,7 @@ func Run(cfg RunConfig) error {
 
 		// Re-attach platform resolver after reload
 		if backend != nil && channelMgr != nil {
-			resolver := &channelPlatformResolver{backend: backend}
-			if factoryResult != nil && factoryResult.ChatAgent != nil && factoryResult.ChatAgent.PlatformReflector != nil {
-				resolver.memorySaveOrMerge = factoryResult.ChatAgent.PlatformReflector.MemorySaveOrMergeFunc()
-			}
-			channelMgr.SetPlatformResolver(resolver)
+			channelMgr.SetPlatformResolver(newChannelPlatformResolver(freshCfg))
 		}
 
 		// Initialize link code store if not yet created.

@@ -171,7 +171,7 @@ Legacy installations may have provider API keys in `config.yaml`. The credential
 
 ### Personal vs Team Credentials (Platform Mode)
 
-Interactive Studio chat and linked user channels inject `MergedCredentialStore(personal, team)` — personal-first reads, personal writes, team fallback. Channel enrichment includes email, Telegram, and Slack messages resolved through `channelPlatformResolver`; if the channel identity is linked to a platform user, tools invoked from that message can read that user's personal credentials before falling back to team credentials.
+Interactive Studio chat and linked user channels inject `MergedCredentialStore(personal, team)` — personal-first reads, personal writes, team fallback. Channel enrichment includes email, Telegram, and Slack messages resolved through `channelPlatformResolver`; if the channel identity is linked to a platform user, tools invoked from that message can read that user's personal credentials before falling back to team credentials. Linked channel contexts also carry the platform/org/team network policy stores and OpenShell gateway configuration so sandbox sessions inherit the same allow rules and pre-seed behavior as Studio chat.
 
 Headless paths diverge by design:
 

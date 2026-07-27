@@ -6,13 +6,17 @@ import (
 	"sync"
 
 	"github.com/SAP/astonish/pkg/channels"
+	"github.com/SAP/astonish/pkg/sandbox/netpolicy"
+	"github.com/SAP/astonish/pkg/sandbox/openshell"
 	"github.com/SAP/astonish/pkg/store"
 )
 
 // channelPlatformResolver implements channels.PlatformResolver using the
-// platform store to look up user-channel links and inject team-scoped context.
+// platform store to look up user-channel links and inject channel-scoped context.
 type channelPlatformResolver struct {
 	backend store.PlatformBackend
+
+	gatewayConfig *openshell.GRPCClientConfig
 
 	// memorySaveOrMerge is the cross-session memory merge function.
 	// Injected at construction time from the ChatAgent's PlatformReflector.
@@ -47,7 +51,7 @@ func (r *channelPlatformResolver) GetRoutingPref(channelType, externalID string)
 }
 
 // ResolveChannelUser looks up the external channel identity in user_channels,
-// determines the org/team to use, and returns a context enriched with team-scoped stores.
+// determines the org/team to use, and returns a context enriched with channel-scoped stores.
 func (r *channelPlatformResolver) ResolveChannelUser(
 	ctx context.Context,
 	channelType, externalID string,
@@ -110,7 +114,7 @@ func (r *channelPlatformResolver) ResolveChannelUserWithHint(
 		personalCredentials = personalStore.Credentials()
 	}
 
-	// Inject team-scoped stores into the context. Credentials are personal-first
+	// Inject channel-scoped stores into the context. Credentials are personal-first
 	// with team fallback, matching Studio chat for linked channel users.
 	enrichedCtx := ctx
 	enrichedCtx = store.WithCredentialStore(enrichedCtx, store.NewMergedCredentialStore(personalCredentials, teamStore.Credentials()))
@@ -130,6 +134,10 @@ func (r *channelPlatformResolver) ResolveChannelUserWithHint(
 	enrichedCtx = store.WithFleetPlanStore(enrichedCtx, teamStore.FleetPlans())
 	enrichedCtx = store.WithSessionService(enrichedCtx, teamStore.Sessions())
 	enrichedCtx = store.WithTeamDataStore(enrichedCtx, teamStore)
+	enrichedCtx = r.withNetworkPolicyStores(enrichedCtx, orgStore, teamStore)
+	if r.gatewayConfig != nil {
+		enrichedCtx = netpolicy.WithGatewayConfig(enrichedCtx, r.gatewayConfig)
+	}
 
 	// Inject cross-session memory merge function for channel interactions.
 	if r.memorySaveOrMerge != nil {
@@ -146,6 +154,21 @@ func (r *channelPlatformResolver) ResolveChannelUserWithHint(
 	})
 
 	return enrichedCtx, link.UserID, user.DisplayName, nil
+}
+
+func (r *channelPlatformResolver) withNetworkPolicyStores(
+	ctx context.Context,
+	orgStore store.OrgDataStore,
+	teamStore store.TeamDataStore,
+) context.Context {
+	nps := &store.NetworkPolicyStores{
+		Org:  orgStore.OrgNetworkPolicies(),
+		Team: teamStore.NetworkPolicies(),
+	}
+	if p, ok := r.backend.(platformNetworkPolicyProvider); ok {
+		nps.Platform = p.PlatformNetworkPolicies()
+	}
+	return store.WithNetworkPolicyStores(ctx, nps)
 }
 
 // resolveRouting determines the org/team to use for this message.

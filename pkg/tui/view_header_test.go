@@ -39,10 +39,11 @@ func TestViewIncludesHeaderAsFirstLine(t *testing.T) {
 		Height: 30,
 	})
 	m.ready = true
+	m.theme.NoColor = false
 	m.layout()
 	m.refreshViewport()
 
-	out := strings.TrimRight(stripANSI(m.View()), "\n")
+	out := stripANSI(m.View())
 	lines := strings.Split(out, "\n")
 	firstLine := lines[0]
 	if !strings.Contains(firstLine, "Astonish · https://astonish.example.com · user@example.com") {
@@ -51,7 +52,10 @@ func TestViewIncludesHeaderAsFirstLine(t *testing.T) {
 	if !strings.Contains(firstLine, "Usage 4.6k") {
 		t.Fatalf("first line does not contain usage: %q\nfull view:\n%s", firstLine, out)
 	}
-	if len(lines) > m.screenHeight() {
-		t.Fatalf("view has %d lines, safe screen height is %d", len(lines), m.screenHeight())
+	if m.screenHeight() != m.height {
+		t.Fatalf("layout height = %d, want %d", m.screenHeight(), m.height)
+	}
+	if len(lines) != m.paintHeight() {
+		t.Fatalf("view paints %d lines, want full terminal height %d", len(lines), m.paintHeight())
 	}
 }

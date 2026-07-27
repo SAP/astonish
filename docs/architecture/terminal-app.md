@@ -81,11 +81,13 @@ transcript viewport
 ╭──────────────────────────────────────────────────────╮
 │ ❯  Message Astonish…                                 │  ← bordered composer
 ╰──────────────────────────────────────────── Normal ──╯
-provider / model                         auto-approve
+provider / concrete-model                auto-approve
 Enter send · ctrl+j newline · /help · ctrl+c quit
 ```
 
-The header intentionally stays a single row: the left side identifies the connected Astonish platform URL and logged-in user from the remote login config; the right side mirrors Studio Chat's Usage control with cumulative token usage (`total`, `input`, `output`) from live `usage` SSE events and from resumed session `totalUsage` metadata. The layout renders against a conservative safe height (one row shorter than the raw terminal report) because some nested panes report a height slightly larger than the visible alternate screen; without that guard, the top header can scroll out of view.
+The header intentionally stays a single row: the left side identifies the connected Astonish platform URL and logged-in user from the remote login config; the right side mirrors Studio Chat's Usage control with cumulative token usage (`total`, `input`, `output`) from live `usage` SSE events and from resumed session `totalUsage` metadata. The layout consumes the full reported terminal height so the footer help line lands on the final row instead of leaving a blank strip below the TUI.
+
+The footer metadata shows the active provider and resolved concrete model when the platform reports them through model-status or `model_changed` events. It deliberately avoids displaying the raw model label `default`, because that is a cascade placeholder rather than useful runtime context; until a concrete model is known, the footer shows the provider with `model resolving…`.
 
 Composer styles live in `theme.go` (`ApplyTextareaStyles` clears default
 AdaptiveColor cursor-line backgrounds that break dark alt-screen UIs).

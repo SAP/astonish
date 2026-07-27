@@ -180,6 +180,22 @@ func (c *Client) SendFlowMessage(req *FlowChatRequest) (*SSEStream, error) {
 
 // --- Chat API ---
 
+// EffectiveProvidersResponse contains the merged provider defaults used by Studio.
+type EffectiveProvidersResponse struct {
+	DefaultProvider string `json:"default_provider"`
+	DefaultModel    string `json:"default_model"`
+}
+
+// GetEffectiveProviders returns the platform-resolved provider defaults for the
+// current org/team context.
+func (c *Client) GetEffectiveProviders() (*EffectiveProvidersResponse, error) {
+	var resp EffectiveProvidersResponse
+	if err := c.DoJSON("GET", "/api/settings/providers/effective", nil, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
 // ChatRequest represents a message to send to the chat.
 type ChatRequest struct {
 	SessionID     string `json:"sessionId,omitempty"`
@@ -263,6 +279,17 @@ func (c *Client) ReconnectSession(sessionID string) (*SSEStream, error) {
 	return c.SSE("GET", fmt.Sprintf("/api/studio/sessions/%s/stream", sessionID), nil)
 }
 
+// SessionModelStatusResponse mirrors the server response for
+// GET /api/studio/sessions/{id}/model-status.
+type SessionModelStatusResponse struct {
+	PinnedProvider       string   `json:"pinnedProvider"`
+	PinnedModel          string   `json:"pinnedModel"`
+	EffectiveProvider    string   `json:"effectiveProvider"`
+	EffectiveModel       string   `json:"effectiveModel"`
+	CredentialsAvailable bool     `json:"credentialsAvailable"`
+	AvailableProviders   []string `json:"availableProviders,omitempty"`
+}
+
 // PatchSessionModelResponse mirrors the server response for
 // PATCH /api/studio/sessions/{id}/model.
 type PatchSessionModelResponse struct {
@@ -271,6 +298,17 @@ type PatchSessionModelResponse struct {
 	EffectiveProvider    string `json:"effectiveProvider"`
 	EffectiveModel       string `json:"effectiveModel"`
 	CredentialsAvailable bool   `json:"credentialsAvailable"`
+}
+
+// GetSessionModelStatus reads the resolved provider/model for a session,
+// including cascade defaults when no explicit pin is set.
+func (c *Client) GetSessionModelStatus(sessionID string) (*SessionModelStatusResponse, error) {
+	var resp SessionModelStatusResponse
+	path := fmt.Sprintf("/api/studio/sessions/%s/model-status", url.PathEscape(sessionID))
+	if err := c.DoJSON("GET", path, nil, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
 }
 
 // PatchSessionModel sets or clears the per-session model pin on the remote

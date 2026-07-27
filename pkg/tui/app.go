@@ -764,13 +764,11 @@ func (m *model) layout() {
 }
 
 func (m model) screenHeight() int {
-	// Bubble Tea's WindowSizeMsg can be a little optimistic in nested panes or
-	// terminals with extra prompt/status rows. Rendering one row shorter keeps
-	// the alternate-screen frame from scrolling and hiding the top header.
-	if m.height > 1 {
-		return m.height - 1
-	}
 	return m.height
+}
+
+func (m model) paintHeight() int {
+	return m.screenHeight()
 }
 
 // composerTextHeight returns the textarea height: 1 by default, up to 4 when
@@ -1430,19 +1428,38 @@ func (m model) View() string {
 }
 
 func (m model) paintBackground(s string) string {
-	if m.theme.NoColor || m.width <= 0 || m.screenHeight() <= 0 {
+	paintH := m.paintHeight()
+	if m.theme.NoColor || m.width <= 0 || paintH <= 0 {
 		return s
 	}
 	placed := lipgloss.Place(
 		m.width,
-		m.screenHeight(),
+		paintH,
 		lipgloss.Left,
 		lipgloss.Top,
 		forceTrueBlackAfterReset(s),
 		lipgloss.WithWhitespaceChars(" "),
 		lipgloss.WithWhitespaceBackground(lipgloss.Color("#000000")),
 	)
+	placed = m.padPaintedHeight(placed, paintH)
 	return ansiTrueBlackBG + placed + ansiDefaultBG
+}
+
+func (m model) padPaintedHeight(s string, height int) string {
+	for renderedLineCount(s) < height {
+		if s != "" {
+			s += "\n"
+		}
+		s += ansiTrueBlackBG + strings.Repeat(" ", m.width)
+	}
+	return s
+}
+
+func renderedLineCount(s string) int {
+	if s == "" {
+		return 0
+	}
+	return strings.Count(s, "\n") + 1
 }
 
 // renderSlashCompletion draws the filterable / command list above the input.
@@ -1725,10 +1742,7 @@ func (m model) renderFooterMeta() string {
 	th := m.theme
 	provider := first(m.info.Provider, m.tr.Provider)
 	modelName := first(m.info.Model, m.tr.Model)
-	left := "default model"
-	if provider != "" || modelName != "" {
-		left = fmt.Sprintf("%s / %s", first(provider, "—"), first(modelName, "—"))
-	}
+	left := modelFooterText(provider, modelName)
 	right := ""
 	if m.info.AutoApprove {
 		right = "auto-approve"
@@ -1746,6 +1760,28 @@ func (m model) renderFooterMeta() string {
 }
 
 // renderHints is the keybinding help line under the composer.
+func modelFooterText(provider, modelName string) string {
+	provider = strings.TrimSpace(provider)
+	modelName = strings.TrimSpace(modelName)
+	if isAmbiguousModelLabel(modelName) {
+		modelName = ""
+	}
+	if provider == "" && modelName == "" {
+		return "Provider/model loading…"
+	}
+	if provider == "" {
+		return "Provider resolving… / " + modelName
+	}
+	if modelName == "" {
+		return provider + " / model resolving…"
+	}
+	return provider + " / " + modelName
+}
+
+func isAmbiguousModelLabel(modelName string) bool {
+	return strings.EqualFold(strings.TrimSpace(modelName), "default")
+}
+
 func (m model) renderHints() string {
 	th := m.theme
 	if m.tr.Awaiting {

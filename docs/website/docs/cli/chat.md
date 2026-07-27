@@ -78,6 +78,8 @@ When `-p` or `-m` is provided on a **resumed session** (`--resume`), the overrid
 
 If the pinned provider's credential is revoked or unavailable, the session still opens using the cascade default. A warning is printed to stderr; the pin is never auto-cleared.
 
+The terminal footer shows the active provider and the resolved concrete model when the platform reports them. It does not show `default` as the model name; while the cascade is still resolving, it shows the provider with `model resolving…` instead.
+
 ## In-Session Commands
 
 While in an active chat session, type `/` to access these commands:

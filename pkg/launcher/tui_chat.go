@@ -68,6 +68,8 @@ type platformBackend struct {
 	team        string
 	user        string
 	usage       *events.Usage
+	provider    string
+	model       string
 	resumed     bool
 
 	mu     sync.Mutex
@@ -79,6 +81,8 @@ func (b *platformBackend) Info() backend.Info {
 	defer b.mu.Unlock()
 	return backend.Info{
 		SessionID:   b.sessionID,
+		Provider:    b.provider,
+		Model:       b.model,
 		Mode:        "platform",
 		ServerURL:   b.serverURL,
 		Org:         b.org,
@@ -96,6 +100,7 @@ func (b *platformBackend) Open(ctx context.Context) error {
 	if err := b.client.Ping(); err != nil {
 		return fmt.Errorf("platform unreachable (%s): %w\nRun: astonish login <url>", b.serverURL, err)
 	}
+	b.loadInitialModelStatus(ctx)
 	return nil
 }
 
@@ -104,6 +109,48 @@ func (b *platformBackend) Close() error {
 	defer b.mu.Unlock()
 	b.closed = true
 	return nil
+}
+
+func (b *platformBackend) loadInitialModelStatus(ctx context.Context) {
+	_ = ctx
+	b.mu.Lock()
+	sessionID := b.sessionID
+	b.mu.Unlock()
+
+	if sessionID == "" {
+		providers, err := b.client.GetEffectiveProviders()
+		if err == nil && providers != nil {
+			b.setModel(providers.DefaultProvider, providers.DefaultModel)
+		}
+		return
+	}
+	status, err := b.client.GetSessionModelStatus(sessionID)
+	if err != nil || status == nil {
+		return
+	}
+	b.setModel(status.EffectiveProvider, status.EffectiveModel)
+}
+
+func (b *platformBackend) setModel(provider, modelName string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if provider != "" {
+		b.provider = provider
+	}
+	if modelName != "" {
+		b.model = modelName
+	}
+}
+
+func (b *platformBackend) refreshSessionModelStatus(sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	status, err := b.client.GetSessionModelStatus(sessionID)
+	if err != nil || status == nil {
+		return
+	}
+	b.setModel(status.EffectiveProvider, status.EffectiveModel)
 }
 
 func (b *platformBackend) ListSessions(ctx context.Context) ([]backend.SessionSummary, error) {
@@ -367,6 +414,10 @@ func (b *platformBackend) RunTurn(ctx context.Context, message string, opts back
 					b.sessionID = ev.SessionID
 					b.mu.Unlock()
 					sessionID = ev.SessionID
+					b.refreshSessionModelStatus(sessionID)
+				}
+				if ev.Kind == events.KindModelChanged {
+					b.setModel(ev.Provider, ev.Model)
 				}
 				if ev.Kind == events.KindUsage && ev.Usage != nil {
 					b.mu.Lock()

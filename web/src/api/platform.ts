@@ -238,6 +238,38 @@ export interface MemoryEntry {
   score?: number
   created_at?: string
   created_by?: string
+  session_id?: string
+}
+
+export interface MemoryMapFlag {
+  type: string
+  severity: string
+  description: string
+}
+
+export interface MemoryMapGroup {
+  key: string
+  title: string
+  memory_count: number
+  scopes: string[]
+  categories: string[]
+  session_ids?: string[]
+  created_by?: string[]
+  flags?: MemoryMapFlag[]
+  representative: MemoryEntry
+  memories: MemoryEntry[]
+}
+
+export interface MemoryMapResponse {
+  groups: MemoryMapGroup[]
+  stats: {
+    total_memories: number
+    group_count: number
+    duplicate_risk_count: number
+    scattered_topic_count: number
+    transient_risk_count: number
+    trial_error_risk_count: number
+  }
 }
 
 export async function searchMemories(query: string, limit?: number, teamSlug?: string): Promise<MemoryEntry[]> {
@@ -249,6 +281,13 @@ export async function searchMemories(query: string, limit?: number, teamSlug?: s
   if (!res.ok) await throwBackendError(res, 'Failed to search memories')
   const data = await res.json()
   return data.results || []
+}
+
+export async function fetchMemoryMap(limit?: number, teamSlug?: string): Promise<MemoryMapResponse> {
+  const suffix = limit ? `?limit=${encodeURIComponent(String(limit))}` : ''
+  const res = await teamFetch(`/api/memories/map${suffix}`, undefined, teamSlug)
+  if (!res.ok) await throwBackendError(res, 'Failed to fetch memory map')
+  return res.json()
 }
 
 export async function saveTeamMemory(snippet: string, category?: string, teamSlug?: string): Promise<{ id: string }> {

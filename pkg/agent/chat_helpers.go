@@ -241,17 +241,34 @@ func deduplicateSearchResults(results []KnowledgeSearchResult) []KnowledgeSearch
 // to the session .jsonl file, making it available for diagnostic inspection.
 func yieldKnowledgeTrackingEvent(
 	yield func(*session.Event, error) bool,
+	query, bm25Query string,
 	relevantKnowledge, executionPlan string,
 	results []KnowledgeSearchResult,
 ) {
 	// Build result summaries for the tracking payload.
 	resultEntries := make([]map[string]any, 0, len(results))
 	for _, r := range results {
-		resultEntries = append(resultEntries, map[string]any{
+		entry := map[string]any{
 			"path":     r.Path,
 			"score":    r.Score,
 			"category": r.Category,
-		})
+		}
+		if r.ID != "" {
+			entry["id"] = r.ID
+		}
+		if r.Scope != "" {
+			entry["scope"] = r.Scope
+		}
+		if r.CreatedBy != "" {
+			entry["created_by"] = r.CreatedBy
+		}
+		if r.CreatedAt != "" {
+			entry["created_at"] = r.CreatedAt
+		}
+		if r.SessionID != "" {
+			entry["session_id"] = r.SessionID
+		}
+		resultEntries = append(resultEntries, entry)
 	}
 
 	// Determine injection type.
@@ -275,7 +292,10 @@ func yieldKnowledgeTrackingEvent(
 			StateDelta: map[string]any{
 				"_knowledge_injection": map[string]any{
 					"type":             injectionType,
+					"query":            query,
+					"bm25_query_len":   len(bm25Query),
 					"results":          resultEntries,
+					"result_count":     len(resultEntries),
 					"estimated_tokens": estimatedTokens,
 				},
 			},

@@ -54,6 +54,11 @@ Three auto-managed markdown files serve specific purposes:
 
 ## Architecture
 
+Astonish currently has two persistence shapes:
+
+- **Personal / local mode** uses the file-backed markdown knowledge base described below.
+- **Platform mode** stores personal, team, and org memories in tenant-scoped database stores behind `entstore`, while still using the same agent-facing `MemoryStore` and `ThreeTierSearcher` interfaces. Platform code must resolve stores through request context and the tenant router; it must not open raw tenant connections.
+
 ### Knowledge Retrieval Per Turn
 
 ```
@@ -77,9 +82,15 @@ ChatAgent.Run():
   6. Set SystemPromptBuilder.RelevantKnowledge
     |
     v
-  7. System prompt appends knowledge at the end (Tier 3)
+  7. Emit a content-less `_knowledge_injection` session diagnostic event
+     containing query metadata plus result id/scope/session provenance
+    |
+    v
+  8. System prompt appends knowledge at the end (Tier 3)
      (static prefix remains cacheable for KV-cache)
 ```
+
+The `_knowledge_injection` event is persisted but not sent to the LLM or rendered as a chat message. It records the cleaned semantic query, BM25 context length, injection type, result count, estimated injected tokens, and each result's path, score, category, scope, id, creator, creation time, and source session when available. This is the first diagnostic surface to inspect when memory appears unstable: it shows whether retrieval was disabled, which tier answered, and which exact memory chunk was injected.
 
 ### Indexing Pipeline
 
@@ -163,6 +174,19 @@ In platform mode, there is also a post-turn `PlatformReflector`. It runs asynchr
 Example: after discovering how to list Kubernetes clusters in SAP Converged Cloud QA-DE-1, memory should capture that the reusable route is Kubernikus via the `openstack-keystone` Keystone token credential and `GET $KUBERNIKUS_URL/api/v1/clusters` with `X-Auth-Token`. It should not capture that a particular cluster currently has 13 healthy nodes, because that is live inventory that must be fetched again.
 
 The Studio memory icon appears immediately for in-band `memory_save` tool calls. For post-turn reflector saves, the SPA polls the session-memory endpoint for a bounded period after `done`, because the reflector may finish after the SSE response text has completed. For newly-created chats, this polling uses the session ID emitted by the chat stream's `session` event rather than relying only on React's active-session state, which may still be stale when `done` arrives.
+
+### Read-Only Memory Map Diagnostics
+
+Platform mode exposes `GET /api/memories/map` as a diagnostic report over the current user's visible personal, team, and org memories. The Studio Knowledge Browser surfaces this as the **Memory Map** tab. The endpoint and UI are read-only and intentionally do not change save, merge, or retrieval behavior.
+
+The report groups likely related memory chunks by a canonical topic key and flags conditions that make memory feel scattered or unsafe:
+
+- duplicate risk: multiple memories appear to cover the same topic
+- scattered topic: related memories are spread across scopes or categories
+- transient failure risk: a memory uses outage/timeout/flaky language that should not become a permanent avoidance rule
+- trial/error risk: a memory appears to preserve exploratory failed attempts instead of the shortest successful path
+
+This report is a triage tool for consolidating memories into future scenario cards. It should guide humans and later consolidation jobs toward saving efficient successful paths, not broad “this failed once” rules.
 
 ### BM25 Implementation
 

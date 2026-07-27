@@ -448,7 +448,7 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 	// container. Container creation is lazy — the first tool call triggers
 	// cloning from the template and starting the node process.
 	var sandboxNodePool *sandbox.NodeClientPool      // hoisted for save_sandbox_template tool (Incus only)
-	var sandboxIncusClient *incus.IncusClient       // hoisted for save_sandbox_template tool (Incus only)
+	var sandboxIncusClient *incus.IncusClient        // hoisted for save_sandbox_template tool (Incus only)
 	var sandboxTplRegistry *sandbox.TemplateRegistry // hoisted for save_sandbox_template tool (Incus only)
 	var sandboxSessRegistry *sandbox.SessionRegistry // hoisted for save_sandbox_template tool (Incus only)
 	var backendSandboxPool sandbox.ToolNodePool      // hoisted for sub-agent alias (K8s/OpenShell)
@@ -1084,17 +1084,17 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		useTplTool, useErr := tools.NewUseSandboxTemplateTool(sandboxNodePool, sandboxTplRegistry)
 		if useErr != nil {
 			if cfg.DebugMode {
-					slog.Warn("failed to create use_sandbox_template tool", "error", useErr)
-				}
-			} else {
-				sandboxTplTools = append(sandboxTplTools, useTplTool)
+				slog.Warn("failed to create use_sandbox_template tool", "error", useErr)
 			}
+		} else {
+			sandboxTplTools = append(sandboxTplTools, useTplTool)
+		}
 
-			if len(sandboxTplTools) > 0 {
-				toolGroups["sandbox_templates"] = &agent.ToolGroup{
-					Name:        "sandbox_templates",
-					Description: "Save, list, and use sandbox container templates",
-					Tools:       sandboxTplTools,
+		if len(sandboxTplTools) > 0 {
+			toolGroups["sandbox_templates"] = &agent.ToolGroup{
+				Name:        "sandbox_templates",
+				Description: "Save, list, and use sandbox container templates",
+				Tools:       sandboxTplTools,
 			}
 		}
 	}
@@ -1534,10 +1534,15 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			var knowledgeResults []agent.KnowledgeSearchResult
 			for _, r := range pgResults {
 				knowledgeResults = append(knowledgeResults, agent.KnowledgeSearchResult{
-					Path:     r.Path,
-					Score:    r.Score,
-					Snippet:  r.Snippet,
-					Category: r.Category,
+					ID:        r.ID,
+					Path:      r.Path,
+					Score:     r.Score,
+					Snippet:   r.Snippet,
+					Category:  r.Category,
+					Scope:     r.Scope,
+					CreatedBy: r.CreatedBy,
+					CreatedAt: r.CreatedAt,
+					SessionID: r.SessionID,
 				})
 			}
 			return knowledgeResults, nil
@@ -1559,10 +1564,15 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			var knowledgeResults []agent.KnowledgeSearchResult
 			for _, r := range pgResults {
 				knowledgeResults = append(knowledgeResults, agent.KnowledgeSearchResult{
-					Path:     r.Path,
-					Score:    r.Score,
-					Snippet:  r.Snippet,
-					Category: r.Category,
+					ID:        r.ID,
+					Path:      r.Path,
+					Score:     r.Score,
+					Snippet:   r.Snippet,
+					Category:  r.Category,
+					Scope:     r.Scope,
+					CreatedBy: r.CreatedBy,
+					CreatedAt: r.CreatedAt,
+					SessionID: r.SessionID,
 				})
 			}
 			return knowledgeResults, nil

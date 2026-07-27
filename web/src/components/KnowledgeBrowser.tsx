@@ -1,19 +1,19 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { Search, Brain, Plus, Trash2, ArrowUpRight, Loader2, AlertCircle, BookOpen, User, ChevronDown, ChevronUp, Pencil, X, Check } from 'lucide-react'
+import { Search, Brain, Plus, Trash2, ArrowUpRight, Loader2, AlertCircle, BookOpen, User, ChevronDown, ChevronUp, Pencil, X, Check, Map, AlertTriangle, RefreshCw } from 'lucide-react'
 import {
   searchMemories, listTeamMemories, listOrgMemories, listPersonalMemories,
   saveTeamMemory, savePersonalMemory, saveOrgMemory,
   deleteTeamMemory, deleteOrgMemory, deletePersonalMemory,
-  promoteMemoryToOrg, promotePersonalToTeam, updateMemory,
+  promoteMemoryToOrg, promotePersonalToTeam, updateMemory, fetchMemoryMap,
 } from '../api/platform'
-import type { MemoryEntry } from '../api/platform'
+import type { MemoryEntry, MemoryMapGroup, MemoryMapResponse } from '../api/platform'
 
 interface KnowledgeBrowserProps {
   theme: 'dark' | 'light'
   user: { id: string; email: string; display_name: string; role: string }
   activeTeam?: string | null
 }
-type Tab = 'personal' | 'team' | 'org' | 'add'
+type Tab = 'personal' | 'team' | 'org' | 'map' | 'add'
 const SCOPE_COLORS: Record<string, string> = {
   personal: 'var(--info)',
   team: 'var(--brand)',
@@ -199,6 +199,161 @@ function MemoryCard({ entry, userId, isAdmin, currentTab, onDelete, onPromote, o
   )
 }
 
+const FLAG_STYLES: Record<string, { label: string; color: string }> = {
+  duplicate_risk: { label: 'Duplicate risk', color: 'var(--info)' },
+  scattered_topic: { label: 'Scattered topic', color: 'var(--warning)' },
+  transient_failure_risk: { label: 'Transient failure wording', color: 'var(--warning)' },
+  trial_error_risk: { label: 'Trial/error wording', color: 'var(--info)' },
+}
+
+function MemoryMapFlagBadge({ type }: { type: string }) {
+  const style = FLAG_STYLES[type] || { label: type.replace(/_/g, ' '), color: 'var(--muted-foreground)' }
+  return (
+    <span
+      className="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium"
+      style={{
+        background: `color-mix(in oklab, ${style.color} 12%, transparent)`,
+        color: style.color,
+        borderColor: `color-mix(in oklab, ${style.color} 30%, transparent)`,
+      }}
+    >
+      <AlertTriangle size={12} />
+      {style.label}
+    </span>
+  )
+}
+
+function MemoryMapGroupCard({ group }: { group: MemoryMapGroup }) {
+  const [expanded, setExpanded] = useState(false)
+  const preview = group.representative?.snippet || 'No representative memory content available.'
+  const visibleMemories = expanded ? group.memories : group.memories.slice(0, 3)
+
+  return (
+    <div className="rounded-xl border border-border bg-card p-4 shadow-[var(--shadow-soft)]">
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2 mb-2">
+            <h3 className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>{group.title}</h3>
+            <span className="rounded-full px-2 py-0.5 text-xs" style={{ background: 'var(--bg-tertiary)', color: 'var(--text-muted)' }}>
+              {group.memory_count} memor{group.memory_count === 1 ? 'y' : 'ies'}
+            </span>
+          </div>
+          <p className="text-xs mb-3" style={{ color: 'var(--text-muted)' }}>
+            Key: <code>{group.key}</code>
+          </p>
+          <p className="text-sm leading-relaxed whitespace-pre-wrap" style={{ color: 'var(--text-secondary)' }}>
+            {preview.length > 260 ? `${preview.slice(0, 260)}...` : preview}
+          </p>
+        </div>
+      </div>
+
+      <div className="flex flex-wrap gap-2 mt-4">
+        {group.scopes.map(scope => <ScopeBadge key={scope} scope={scope} />)}
+        {group.categories.map(category => (
+          <span key={category} className="rounded-full px-2 py-0.5 text-xs" style={{ background: 'var(--bg-tertiary)', color: 'var(--text-muted)', border: '1px solid var(--border-color)' }}>
+            {category}
+          </span>
+        ))}
+      </div>
+
+      {group.flags && group.flags.length > 0 && (
+        <div className="flex flex-wrap gap-2 mt-3">
+          {group.flags.map(flag => <MemoryMapFlagBadge key={flag.type} type={flag.type} />)}
+        </div>
+      )}
+
+      {visibleMemories.length > 0 && (
+        <div className="mt-4 space-y-2">
+          {visibleMemories.map(memory => (
+            <div key={memory.id || `${memory.scope}-${memory.created_at}-${memory.snippet.slice(0, 20)}`} className="rounded-lg border p-3" style={{ background: 'var(--bg-secondary)', borderColor: 'var(--border-color)' }}>
+              <div className="mb-2 flex flex-wrap items-center gap-2">
+                <ScopeBadge scope={memory.scope} />
+                {memory.category && <span className="text-xs" style={{ color: 'var(--text-muted)' }}>{memory.category}</span>}
+                {memory.session_id && <span className="text-xs" style={{ color: 'var(--text-muted)' }}>session {memory.session_id}</span>}
+              </div>
+              <p className="text-xs leading-relaxed whitespace-pre-wrap" style={{ color: 'var(--text-secondary)' }}>
+                {memory.snippet.length > 220 ? `${memory.snippet.slice(0, 220)}...` : memory.snippet}
+              </p>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {group.memories.length > 3 && (
+        <button
+          onClick={() => setExpanded(v => !v)}
+          className="mt-3 flex items-center gap-1 text-xs font-medium transition-colors hover:opacity-80"
+          style={{ color: 'var(--brand)' }}
+        >
+          {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+          {expanded ? 'Show fewer memories' : `Show all ${group.memories.length} memories`}
+        </button>
+      )}
+    </div>
+  )
+}
+
+function MemoryMapPanel({ report, onRefresh }: { report: MemoryMapResponse | null; onRefresh: () => void }) {
+  if (!report) {
+    return (
+      <div className="text-center py-12" style={{ color: 'var(--text-muted)' }}>
+        <Map size={40} className="mx-auto mb-3 opacity-30" />
+        <p className="text-sm">No memory map loaded yet.</p>
+      </div>
+    )
+  }
+
+  const statCards = [
+    ['Total memories', report.stats.total_memories],
+    ['Groups', report.stats.group_count],
+    ['Duplicate risks', report.stats.duplicate_risk_count],
+    ['Scattered topics', report.stats.scattered_topic_count],
+    ['Transient wording', report.stats.transient_risk_count],
+    ['Trial/error wording', report.stats.trial_error_risk_count],
+  ] as const
+
+  return (
+    <div className="space-y-4">
+      <div className="rounded-xl border p-4" style={{ background: 'var(--bg-secondary)', borderColor: 'var(--border-color)' }}>
+        <div className="flex items-start justify-between gap-4 mb-4">
+          <div>
+            <h2 className="text-lg font-semibold" style={{ color: 'var(--text-primary)' }}>Memory Map</h2>
+            <p className="text-sm mt-1" style={{ color: 'var(--text-muted)' }}>
+              Read-only diagnostics for scattered, duplicated, or risky memory wording. Use this to decide what should be consolidated into efficient successful paths.
+            </p>
+          </div>
+          <button
+            onClick={onRefresh}
+            className="flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-medium transition-colors hover:opacity-80"
+            style={{ background: 'var(--bg-tertiary)', color: 'var(--text-secondary)', borderColor: 'var(--border-color)' }}
+          >
+            <RefreshCw size={14} /> Refresh
+          </button>
+        </div>
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {statCards.map(([label, value]) => (
+            <div key={label} className="rounded-lg border p-3" style={{ background: 'var(--bg-primary)', borderColor: 'var(--border-color)' }}>
+              <div className="text-xs" style={{ color: 'var(--text-muted)' }}>{label}</div>
+              <div className="mt-1 text-xl font-semibold" style={{ color: 'var(--text-primary)' }}>{value}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {report.groups.length === 0 ? (
+        <div className="text-center py-12" style={{ color: 'var(--text-muted)' }}>
+          <Brain size={40} className="mx-auto mb-3 opacity-30" />
+          <p className="text-sm">No memory groups found.</p>
+        </div>
+      ) : (
+        <div className="flex flex-col gap-3">
+          {report.groups.map(group => <MemoryMapGroupCard key={group.key} group={group} />)}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // Main Component
 export default function KnowledgeBrowser({ theme, user, activeTeam }: KnowledgeBrowserProps) {
   const isAdmin = user.role === 'admin' || user.role === 'owner'
@@ -208,6 +363,7 @@ export default function KnowledgeBrowser({ theme, user, activeTeam }: KnowledgeB
   const [personalEntries, setPersonalEntries] = useState<MemoryEntry[]>([])
   const [teamEntries, setTeamEntries] = useState<MemoryEntry[]>([])
   const [orgEntries, setOrgEntries] = useState<MemoryEntry[]>([])
+  const [memoryMap, setMemoryMap] = useState<MemoryMapResponse | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
@@ -227,7 +383,8 @@ export default function KnowledgeBrowser({ theme, user, activeTeam }: KnowledgeB
       const teamSlug = activeTeam || undefined
       if (t === 'personal') setPersonalEntries(await listPersonalMemories(teamSlug))
       else if (t === 'team') setTeamEntries(await listTeamMemories(teamSlug))
-      else setOrgEntries(await listOrgMemories(teamSlug))
+      else if (t === 'org') setOrgEntries(await listOrgMemories(teamSlug))
+      else if (t === 'map') setMemoryMap(await fetchMemoryMap(500, teamSlug))
     } catch (err: any) {
       setError(err.message)
     } finally {
@@ -334,13 +491,14 @@ export default function KnowledgeBrowser({ theme, user, activeTeam }: KnowledgeB
     }
   }, [snippet, category, saveScope, switchTab, activeTeam])
 
-  const entries = tab === 'personal' ? personalEntries : tab === 'team' ? teamEntries : orgEntries
+  const entries = tab === 'personal' ? personalEntries : tab === 'team' ? teamEntries : tab === 'org' ? orgEntries : []
   const displayList = searchResults ?? entries
 
   const tabDefs: { key: Tab; label: string; icon: typeof Brain }[] = [
     { key: 'personal', label: 'Personal', icon: User },
     { key: 'team', label: 'Team', icon: Brain },
     { key: 'org', label: 'Organization', icon: BookOpen },
+    { key: 'map', label: 'Memory Map', icon: Map },
     { key: 'add', label: 'Add New', icon: Plus },
   ]
 
@@ -443,7 +601,7 @@ export default function KnowledgeBrowser({ theme, user, activeTeam }: KnowledgeB
         )}
 
         {/* Memory list (search results or browse tab) */}
-        {(searchResults || tab !== 'add') && !loading && (
+        {(searchResults || (tab !== 'add' && tab !== 'map')) && !loading && (
           <div className="flex flex-col gap-3">
             {displayList.length === 0 && (
               <div className="text-center py-12" style={{ color: 'var(--text-muted)' }}>
@@ -464,6 +622,10 @@ export default function KnowledgeBrowser({ theme, user, activeTeam }: KnowledgeB
               />
             ))}
           </div>
+        )}
+
+        {!searchResults && tab === 'map' && !loading && (
+          <MemoryMapPanel report={memoryMap} onRefresh={() => loadTab('map')} />
         )}
 
         {/* Add New tab form */}

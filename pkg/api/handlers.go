@@ -1324,6 +1324,7 @@ func RegisterRoutes(router *mux.Router, svc *store.Services, backend store.Platf
 	router.HandleFunc("/api/drill-reports/{suite}", GetDrillReportHandler).Methods("GET")
 
 	// Memory sharing endpoints (platform mode)
+	router.HandleFunc("/api/memories/map", MemoryMapHandler).Methods("GET")
 	router.HandleFunc("/api/memories/search", MemorySearchCrossTierHandler).Methods("POST")
 	router.HandleFunc("/api/memories/team", MemoryShareToTeamHandler).Methods("POST")
 	router.HandleFunc("/api/memories/team", MemoryListTeamHandler).Methods("GET")

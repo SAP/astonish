@@ -14,16 +14,23 @@ import (
 
 // sessionsState holds the sessions picker overlay.
 type sessionsState struct {
-	open    bool
-	loading bool
-	err     string
-	items   []backend.SessionSummary
-	cursor  int
+	open          bool
+	loading       bool
+	confirmDelete bool
+	err           string
+	notice        string
+	items         []backend.SessionSummary
+	cursor        int
 }
 
 type sessionsLoadedMsg struct {
 	items []backend.SessionSummary
 	err   error
+}
+
+type sessionDeletedMsg struct {
+	id  string
+	err error
 }
 
 type historyLoadedMsg struct {
@@ -55,6 +62,12 @@ func (m model) resumeSessionCmd(id string) tea.Cmd {
 	}
 }
 
+func (m model) deleteSessionCmd(id string) tea.Cmd {
+	return func() tea.Msg {
+		return sessionDeletedMsg{id: id, err: m.backend.DeleteSession(m.ctx, id)}
+	}
+}
+
 func (m model) loadInitialHistoryCmd() tea.Cmd {
 	return func() tea.Msg {
 		entries, err := m.backend.LoadHistory(context.Background())
@@ -69,14 +82,35 @@ func (m model) loadInitialHistoryCmd() tea.Cmd {
 }
 
 func (m model) handleSessionsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	key := msg.String()
 	if m.sessions.loading {
-		if msg.String() == "esc" || msg.String() == "ctrl+c" {
+		if key == "esc" || key == "ctrl+c" {
 			m.sessions = sessionsState{}
 			return m, nil
 		}
 		return m, nil
 	}
-	switch msg.String() {
+	if m.sessions.confirmDelete {
+		switch key {
+		case "esc", "q", "n", "ctrl+c":
+			m.sessions.confirmDelete = false
+			m.sessions.notice = ""
+			return m, nil
+		case "y", "enter":
+			if len(m.sessions.items) == 0 {
+				m.sessions.confirmDelete = false
+				return m, nil
+			}
+			id := m.sessions.items[m.sessions.cursor].ID
+			m.sessions.loading = true
+			m.sessions.confirmDelete = false
+			m.sessions.err = ""
+			m.sessions.notice = "Deleting session…"
+			return m, m.deleteSessionCmd(id)
+		}
+		return m, nil
+	}
+	switch key {
 	case "esc", "q", "ctrl+c":
 		m.sessions = sessionsState{}
 		return m, nil
@@ -98,6 +132,14 @@ func (m model) handleSessionsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		id := m.sessions.items[m.sessions.cursor].ID
 		m.sessions = sessionsState{loading: true, open: true}
 		return m, m.resumeSessionCmd(id)
+	case "d", "backspace", "delete":
+		if len(m.sessions.items) == 0 {
+			return m, nil
+		}
+		m.sessions.confirmDelete = true
+		m.sessions.err = ""
+		m.sessions.notice = ""
+		return m, nil
 	case "n":
 		// New session from picker
 		m.sessions = sessionsState{}
@@ -115,6 +157,34 @@ func (m model) startNewSession() (tea.Model, tea.Cmd) {
 	m.info = m.backend.Info()
 	m.tr.Reset()
 	m.refreshViewport()
+	return m, nil
+}
+
+func (m model) applySessionDeleted(msg sessionDeletedMsg) (tea.Model, tea.Cmd) {
+	m.sessions.loading = false
+	if msg.err != nil {
+		m.sessions.err = "Failed to delete session: " + msg.err.Error()
+		m.sessions.notice = ""
+		return m, nil
+	}
+	m.sessions.notice = "Session deleted."
+	m.sessions.err = ""
+	for i, s := range m.sessions.items {
+		if s.ID == msg.id {
+			m.sessions.items = append(m.sessions.items[:i], m.sessions.items[i+1:]...)
+			break
+		}
+	}
+	if m.sessions.cursor >= len(m.sessions.items) && m.sessions.cursor > 0 {
+		m.sessions.cursor--
+	}
+	if msg.id == m.info.SessionID || msg.id == m.tr.SessionID {
+		m.planMode = false
+		m.backend.NewSession()
+		m.info = m.backend.Info()
+		m.tr.Reset()
+		m.refreshViewport()
+	}
 	return m, nil
 }
 
@@ -169,12 +239,20 @@ func (m model) renderSessionsOverlay() string {
 	}
 
 	var body strings.Builder
-	body.WriteString(th.Header.Render("Sessions") + th.Muted.Render("  ↑↓ move  enter open  n new  esc close") + "\n\n")
+	help := "  ↑↓ move  enter open  d delete  n new  esc close"
+	if m.sessions.confirmDelete {
+		help = "  y delete  n/esc cancel"
+	}
+	body.WriteString(th.Header.Render("Sessions") + th.Muted.Render(help) + "\n\n")
 
 	if m.sessions.loading {
-		body.WriteString(th.Muted.Render("Loading…"))
+		body.WriteString(th.Muted.Render(first(m.sessions.notice, "Loading…")))
 	} else if m.sessions.err != "" {
 		body.WriteString(th.Error.Render(m.sessions.err))
+	} else if m.sessions.confirmDelete && len(m.sessions.items) > 0 {
+		s := m.sessions.items[m.sessions.cursor]
+		body.WriteString(th.Danger.Render("Delete this session? ") + th.Text.Render(first(s.Title, "(untitled)")) + "\n")
+		body.WriteString(th.Muted.Render("This removes the saved transcript. Press y to delete or Esc to cancel."))
 	} else if len(m.sessions.items) == 0 {
 		body.WriteString(th.Muted.Render("No sessions yet. Press n for a new one."))
 	} else {

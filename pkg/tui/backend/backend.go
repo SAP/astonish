@@ -95,6 +95,9 @@ type Backend interface {
 	// ResumeSession switches the backend to sessionID and returns its history.
 	ResumeSession(ctx context.Context, sessionID string) ([]HistoryEntry, error)
 
+	// DeleteSession deletes a saved session by ID.
+	DeleteSession(ctx context.Context, sessionID string) error
+
 	// NewSession clears the active session so the next RunTurn creates a new one.
 	NewSession()
 

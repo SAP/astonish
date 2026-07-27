@@ -146,7 +146,7 @@ Approvals and denials call the network-grant REST endpoints directly instead of 
 
 ### Sessions
 
-- `ctrl+l` or `/sessions` — list sessions, `enter` resume, `n` new, `esc` close
+- `ctrl+l` or `/sessions` — list sessions, `enter` resume, `d` delete with confirmation, `n` new, `esc` close
 - `ctrl+n` or `/new` — clear local session id; next message creates a new server session
 - Click a tool activity block to expand/collapse detailed execution rows; `ctrl+o` toggles the latest activity
 - Drag across transcript text to select it; releasing the mouse automatically copies the selected plain text to the system clipboard

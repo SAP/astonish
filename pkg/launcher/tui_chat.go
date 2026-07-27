@@ -204,6 +204,24 @@ func (b *platformBackend) ResumeSession(ctx context.Context, sessionID string) (
 	return hist, nil
 }
 
+func (b *platformBackend) DeleteSession(ctx context.Context, sessionID string) error {
+	_ = ctx
+	if sessionID == "" {
+		return fmt.Errorf("session id required")
+	}
+	if err := b.client.DeleteSession(sessionID); err != nil {
+		return err
+	}
+	b.mu.Lock()
+	if b.sessionID == sessionID {
+		b.sessionID = ""
+		b.usage = nil
+		b.resumed = false
+	}
+	b.mu.Unlock()
+	return nil
+}
+
 func (b *platformBackend) NewSession() {
 	b.mu.Lock()
 	b.sessionID = ""

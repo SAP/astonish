@@ -25,8 +25,9 @@ func (b staticBackend) LoadHistory(context.Context) ([]backend.HistoryEntry, err
 func (b staticBackend) ResumeSession(context.Context, string) ([]backend.HistoryEntry, error) {
 	return nil, nil
 }
-func (b staticBackend) NewSession()  {}
-func (b staticBackend) Close() error { return nil }
+func (b staticBackend) DeleteSession(context.Context, string) error { return nil }
+func (b staticBackend) NewSession()                                 {}
+func (b staticBackend) Close() error                                { return nil }
 
 func TestViewIncludesHeaderAsFirstLine(t *testing.T) {
 	m := newModel(context.Background(), Config{

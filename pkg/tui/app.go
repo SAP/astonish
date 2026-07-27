@@ -301,6 +301,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case historyLoadedMsg:
 		return m.applyHistory(msg)
 
+	case sessionDeletedMsg:
+		return m.applySessionDeleted(msg)
+
 	case eventMsg:
 		ev := events.Event(msg)
 		m.tr.Apply(ev)

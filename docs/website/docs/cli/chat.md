@@ -89,6 +89,7 @@ While in an active chat session, type `/` to access these commands:
 | `/help` | Show available commands |
 | `/status` | Show this session's provider, model (including pin), context, tools, and session info |
 | `/new` | Start a fresh conversation |
+| `/sessions` | Open the session picker. Use `Enter` to resume, `d` to delete with confirmation, `n` for a new session, and `Esc` to close. |
 | `/compact` | Show context window usage and compaction status |
 | `/distill` | Distill the current session into a reusable flow |
 | `/fleet` | Show available fleets and fleet commands |

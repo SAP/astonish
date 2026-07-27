@@ -206,7 +206,7 @@ In platform mode, `PlatformReflector` in `pkg/agent/platform_reflector.go` runs 
 4. The platform memory merger first tries to upsert that knowledge into a structured scenario card (`scenario_card/efficient_successful_path`) so future turns retrieve the efficient successful path rather than scattered raw notes.
 5. This is the "insurance" layer -- the system prompt already instructs the LLM to save knowledge during execution, but the reflector catches anything it missed.
 
-Scenario-card saves preserve source memories as provenance and treat transient failures as conditional cautions. The invariant is to store the shortest reusable successful recipe, not a broad “this failed once, never use it” rule.
+Scenario-card saves keep source IDs/session IDs as lineage in the card, then delete or discard the raw source memory rows. The invariant is to store the shortest reusable successful recipe, not a broad “this failed once, never use it” rule. If a raw memory cannot form a usable card, it is not kept as durable memory.
 
 ### Execution Tracing
 

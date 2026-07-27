@@ -9,6 +9,7 @@ import (
 
 	"github.com/gorilla/mux"
 
+	"github.com/SAP/astonish/pkg/memory"
 	"github.com/SAP/astonish/pkg/store"
 	"google.golang.org/adk/model"
 	"google.golang.org/genai"
@@ -19,19 +20,18 @@ import (
 // --------------------------------------------------------------------------
 
 // extractionSystemPrompt instructs the LLM on how to consolidate session memories.
-const extractionSystemPrompt = `You are a memory consolidation assistant. You receive a list of memories that were saved during a single session. Your job is to reorganize and consolidate them into well-structured, deduplicated entries grouped by topic or subject.
+const extractionSystemPrompt = `You are a memory consolidation assistant. You receive a list of memories that were saved during a single session. Your job is to convert useful durable knowledge into efficient scenario-card material.
 
 Rules:
-1. Group related memories by topic/subject (e.g., all Kubernetes facts together, all API patterns together)
-2. Deduplicate: if the same fact appears in multiple entries, keep it only once
-3. Preserve ALL factual content — never discard information, only reorganize it
-4. Each output entry must have a clear, descriptive category name
-5. Content should be concise bullet points
-6. If memories are already well-organized (single topic, no duplicates), return them as-is
-7. NEVER add information that wasn't in the original memories
-8. NEVER save secret values (passwords, tokens, API keys)
+1. Group related memories by repeatable task or scenario.
+2. Keep the shortest successful path and durable conditions.
+3. Treat temporary failures, outages, and trial/error as conditional cautions only.
+4. Do not preserve raw scattered notes just because they exist.
+5. If a memory cannot be turned into a useful repeatable scenario card, omit it; the system can learn it again later.
+6. NEVER add information that wasn't in the original memories.
+7. NEVER save secret values (passwords, tokens, API keys).
 
-Output format: Call consolidate_memories with an array of consolidated entries. Each entry has a "category" (short heading) and "content" (bullet-point facts).`
+Output format: Call consolidate_memories with an array of consolidated entries. Each entry has a "category" (short scenario heading) and "content" (bullet-point successful path, conditions, and conditional cautions).`
 
 // MemoryExtractionRequest is the request body for POST /api/memories/session/{id}/extract.
 type MemoryExtractionRequest struct {
@@ -47,10 +47,10 @@ type MemoryExtractionEntry struct {
 
 // MemoryExtractionResponse is the response from the extraction endpoint.
 type MemoryExtractionResponse struct {
-	SessionID    string                  `json:"session_id"`
-	OriginalCount int                   `json:"original_count"`
-	Entries      []MemoryExtractionEntry `json:"entries"`
-	Applied      bool                    `json:"applied"`
+	SessionID     string                  `json:"session_id"`
+	OriginalCount int                     `json:"original_count"`
+	Entries       []MemoryExtractionEntry `json:"entries"`
+	Applied       bool                    `json:"applied"`
 }
 
 // MemoryExtractHandler consolidates session memories using LLM.
@@ -268,7 +268,7 @@ func parseExtractionResponse(resp *model.LLMResponse) []MemoryExtractionEntry {
 	return nil
 }
 
-// applyExtraction deletes original session memories and writes consolidated entries.
+// applyExtraction deletes original session memories and writes scenario cards.
 // Returns true if the operation succeeded.
 func applyExtraction(r *http.Request, svc *store.Services, pu *PlatformUser, sessionID string,
 	originals []store.MemorySearchResult, entries []MemoryExtractionEntry,
@@ -276,7 +276,35 @@ func applyExtraction(r *http.Request, svc *store.Services, pu *PlatformUser, ses
 
 	ctx := r.Context()
 
-	// Delete originals
+	// Determine target store — use team store if available (extracted memories are team-level)
+	targetStore := teamStore
+	targetScope := "team"
+	if targetStore == nil {
+		targetStore = personalStore
+		targetScope = "personal"
+	}
+	if targetStore == nil {
+		slog.Error("extraction: no target store available")
+		return false
+	}
+
+	for _, entry := range entries {
+		memEntry := store.MemoryEntry{
+			Content:   entry.Content,
+			Category:  entry.Category,
+			SessionID: sessionID,
+			CreatedBy: pu.ID,
+		}
+		card := memory.DraftScenarioCardFromMemoryEntry(targetScope, memEntry)
+		if !memory.HasUsableScenarioRecipe(card) {
+			continue
+		}
+		if _, err := memory.UpsertScenarioCard(ctx, targetStore, card); err != nil {
+			slog.Warn("extraction: failed to save scenario card", "category", entry.Category, "error", err)
+			return false
+		}
+	}
+
 	for _, m := range originals {
 		switch m.Scope {
 		case "team":
@@ -291,29 +319,6 @@ func applyExtraction(r *http.Request, svc *store.Services, pu *PlatformUser, ses
 					slog.Warn("extraction: failed to delete original memory", "id", m.ID, "error", err)
 				}
 			}
-		}
-	}
-
-	// Determine target store — use team store if available (extracted memories are team-level)
-	targetStore := teamStore
-	if targetStore == nil {
-		targetStore = personalStore
-	}
-	if targetStore == nil {
-		slog.Error("extraction: no target store available")
-		return false
-	}
-
-	// Insert consolidated entries
-	for _, entry := range entries {
-		memEntry := store.MemoryEntry{
-			Content:   entry.Content,
-			Category:  entry.Category,
-			SessionID: sessionID,
-			CreatedBy: pu.ID,
-		}
-		if err := targetStore.Add(ctx, memEntry); err != nil {
-			slog.Warn("extraction: failed to save consolidated memory", "category", entry.Category, "error", err)
 		}
 	}
 

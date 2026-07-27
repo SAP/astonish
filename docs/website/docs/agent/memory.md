@@ -69,9 +69,9 @@ For repeatable operational tasks, Astonish can consolidate memory into **scenari
 - the conditions where that path applies
 - verification notes
 - conditional cautions for temporary failures or outages
-- provenance back to source memories and sessions
+- lineage back to the source memory IDs and sessions that produced the card
 
-This helps the agent reuse the efficient path it learned instead of replaying trial-and-error steps. Temporary failures should be treated as cautions to re-check, not permanent “never use this” rules.
+This helps the agent reuse the efficient path it learned instead of replaying trial-and-error steps. Temporary failures should be treated as cautions to re-check, not permanent “never use this” rules. Raw memory rows are temporary staging inputs: once they are incorporated into a card, or if they cannot form a useful card, they are deleted or discarded instead of staying as long-term scattered memory.
 
 ## Managing Memory in Studio
 
@@ -82,7 +82,7 @@ Studio provides a visual interface for memory management. The main organization 
 - Use **Memory Health** to review suggested organization improvements
 - Reanalyze memory on demand; otherwise fresh evaluations are reused for five days
 - Draft and save scenario cards from actionable recommendations
-- Open the advanced **Memory Map** only when you need low-level diagnostics; it may still show provenance flags after Memory Health suggestions are applied
+- Open the advanced **Memory Map** only when you need low-level diagnostics for transitional raw memories
 - Publish personal memories to your team by merging them into scenario cards when possible
 - Promote team memories to org level (admin) by merging them into org scenario cards when possible
 - Delete or edit memory entries

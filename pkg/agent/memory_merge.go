@@ -17,7 +17,7 @@ type MemoryMerger struct {
 
 // MergeResult describes the outcome of a scenario-card upsert.
 type MergeResult struct {
-	// Action is one of: "created" or "merged".
+	// Action is one of: "created", "merged", or "discarded".
 	Action string
 
 	// ExistingID is the ID of the entry that was updated (only set when Action="merged").
@@ -41,6 +41,9 @@ func (mm *MemoryMerger) SaveOrMerge(ctx context.Context, memStore store.MemorySt
 		}
 	} else {
 		card = mem.DraftScenarioCardFromMemoryEntry("team", entry)
+	}
+	if !mem.HasUsableScenarioRecipe(card) {
+		return MergeResult{Action: "discarded"}, nil
 	}
 	result, err := mem.UpsertScenarioCard(ctx, memStore, card)
 	if err != nil {

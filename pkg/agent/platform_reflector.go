@@ -424,9 +424,34 @@ func parseConsolidateResponse(resp *model.LLMResponse) []extractionEntry {
 	return nil
 }
 
-// applyExtraction deletes original session memories and inserts consolidated entries.
+// applyExtraction converts consolidated session memories into scenario cards and
+// deletes the raw originals only after card upsert/discard processing succeeds.
 func (r *PlatformReflector) applyExtraction(ctx context.Context, memStore store.MemoryStore, sessionID string, originals []store.MemorySearchResult, entries []extractionEntry) {
-	// Delete originals
+	userID := store.UserIDFromContext(ctx)
+	cardCount := 0
+	discardCount := 0
+	for _, entry := range entries {
+		memEntry := store.MemoryEntry{
+			Content:   entry.Content,
+			Category:  entry.Category,
+			SessionID: sessionID,
+			CreatedBy: userID,
+		}
+		result, err := r.merger().SaveOrMerge(ctx, memStore, memEntry)
+		if err != nil {
+			slog.Warn("platform extraction: failed to save scenario card",
+				"component", "platform-reflector",
+				"category", entry.Category,
+				"error", err)
+			return
+		}
+		if result.Action == "discarded" {
+			discardCount++
+		} else {
+			cardCount++
+		}
+	}
+
 	deleteCount := 0
 	for _, m := range originals {
 		if err := memStore.Delete(ctx, m.ID); err != nil {
@@ -439,31 +464,12 @@ func (r *PlatformReflector) applyExtraction(ctx context.Context, memStore store.
 		}
 	}
 
-	// Insert consolidated entries
-	insertCount := 0
-	userID := store.UserIDFromContext(ctx)
-	for _, entry := range entries {
-		memEntry := store.MemoryEntry{
-			Content:   entry.Content,
-			Category:  entry.Category,
-			SessionID: sessionID,
-			CreatedBy: userID,
-		}
-		if err := memStore.Add(ctx, memEntry); err != nil {
-			slog.Warn("platform extraction: failed to save consolidated memory",
-				"component", "platform-reflector",
-				"category", entry.Category,
-				"error", err)
-		} else {
-			insertCount++
-		}
-	}
-
 	slog.Debug("platform extraction completed",
 		"component", "platform-reflector",
 		"sessionID", sessionID,
 		"deleted", deleteCount,
-		"inserted", insertCount,
+		"cards", cardCount,
+		"discarded", discardCount,
 		"originalCount", len(originals))
 }
 

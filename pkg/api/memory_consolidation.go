@@ -27,12 +27,13 @@ type MemoryConsolidationApplyRequest struct {
 }
 
 type MemoryConsolidationApplyResponse struct {
-	Applied    bool                        `json:"applied"`
-	Scope      string                      `json:"scope"`
-	Action     string                      `json:"action"`
-	ExistingID string                      `json:"existing_id,omitempty"`
-	Card       memory.ScenarioCard         `json:"card"`
-	Result     memory.ScenarioUpsertResult `json:"result"`
+	Applied        bool                        `json:"applied"`
+	Scope          string                      `json:"scope"`
+	Action         string                      `json:"action"`
+	ExistingID     string                      `json:"existing_id,omitempty"`
+	Card           memory.ScenarioCard         `json:"card"`
+	Result         memory.ScenarioUpsertResult `json:"result"`
+	DeletedSources int                         `json:"deleted_sources"`
 }
 
 // MemoryConsolidationPreviewHandler drafts a structured scenario card from a
@@ -82,8 +83,8 @@ func MemoryConsolidationPreviewHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // MemoryConsolidationApplyHandler saves or merges a scenario card into the
-// requested target scope. Existing raw memories are not deleted; the card keeps
-// their IDs as provenance so retrieval can prefer the card.
+// requested target scope. Raw source memories referenced by the card are deleted
+// after a successful upsert; the card is the durable memory.
 //
 //	POST /api/memories/consolidate/apply
 func MemoryConsolidationApplyHandler(w http.ResponseWriter, r *http.Request) {
@@ -115,6 +116,17 @@ func MemoryConsolidationApplyHandler(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, "card canonical_key and recommended_recipe are required")
 		return
 	}
+	if !memory.HasUsableScenarioRecipe(req.Card) {
+		deletedSources := deleteConsolidatedSources(r, svc, pu, req.Card.SourceMemoryIDs)
+		respondJSON(w, http.StatusOK, MemoryConsolidationApplyResponse{
+			Applied:        true,
+			Scope:          req.TargetScope,
+			Action:         "discarded",
+			Card:           req.Card,
+			DeletedSources: deletedSources,
+		})
+		return
+	}
 
 	memStore, err := resolveMemoryStoreForScope(r, svc, pu, req.TargetScope)
 	if err != nil {
@@ -127,14 +139,16 @@ func MemoryConsolidationApplyHandler(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to save scenario card: %v", err))
 		return
 	}
+	deletedSources := deleteConsolidatedSources(r, svc, pu, req.Card.SourceMemoryIDs)
 
 	respondJSON(w, http.StatusOK, MemoryConsolidationApplyResponse{
-		Applied:    true,
-		Scope:      req.TargetScope,
-		Action:     result.Action,
-		ExistingID: result.ExistingID,
-		Card:       req.Card,
-		Result:     result,
+		Applied:        true,
+		Scope:          req.TargetScope,
+		Action:         result.Action,
+		ExistingID:     result.ExistingID,
+		Card:           req.Card,
+		Result:         result,
+		DeletedSources: deletedSources,
 	})
 }
 

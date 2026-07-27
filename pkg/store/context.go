@@ -591,10 +591,9 @@ func SessionIDFromContext(ctx context.Context) string {
 
 // --- Memory Merge Function (cross-session dedup) ---
 
-// MemorySaveOrMergeFunc is a function that saves a memory entry, performing
-// cross-session deduplication and LLM-based merge when an existing entry with
-// a related category already exists. If no merge function is in context,
-// callers should fall back to a raw memStore.Add().
+// MemorySaveOrMergeFunc is a function that saves a memory entry as structured
+// card memory. If no merge function is in context, callers must fail closed
+// rather than inserting raw durable memory.
 type MemorySaveOrMergeFunc func(ctx context.Context, memStore MemoryStore, entry MemoryEntry) error
 
 type memorySaveOrMergeKey struct{}

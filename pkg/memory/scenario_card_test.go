@@ -129,6 +129,15 @@ func TestFilterPreferredScenarioResultsSuppressesSupersededRawMemories(t *testin
 	}
 }
 
+func TestHasUsableScenarioRecipeRejectsPlaceholderOnlyCard(t *testing.T) {
+	if HasUsableScenarioRecipe(ScenarioCard{RecommendedRecipe: []string{ScenarioCardPlaceholderRecipe}}) {
+		t.Fatal("placeholder-only scenario card should not be usable durable memory")
+	}
+	if !HasUsableScenarioRecipe(ScenarioCard{RecommendedRecipe: []string{"Use the noVNC ticket endpoint."}}) {
+		t.Fatal("real recommended recipe should be usable durable memory")
+	}
+}
+
 type fakeMemoryStore struct {
 	entries []store.MemorySearchResult
 }

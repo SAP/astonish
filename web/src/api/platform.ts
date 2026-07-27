@@ -292,6 +292,7 @@ export interface MemoryConsolidationApplyResponse {
   action: string
   existing_id?: string
   card: ScenarioCard
+  deleted_sources?: number
 }
 
 export interface MemoryRecommendation {

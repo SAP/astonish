@@ -59,7 +59,7 @@ Personal  ──publish──▶  Team  ──promote──▶  Org
 
 The agent can also save knowledge directly during conversations using the `memory_save` tool. The tier is determined by the current context.
 
-Promotion now prefers a scenario-card upsert. When possible, the selected memory is distilled into an efficient successful-path card in the target tier and merged with an existing card for the same scenario. The original source memory remains in its source tier as provenance rather than being deleted.
+Promotion now performs a scenario-card upsert. When possible, the selected memory is distilled into an efficient successful-path card in the target tier and merged with an existing card for the same scenario. After the card is saved, the original raw source memory is deleted; if it cannot form a useful card, it is discarded rather than kept as durable memory.
 
 ## The Learning Loop
 

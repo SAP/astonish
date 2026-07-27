@@ -12,10 +12,11 @@ import (
 )
 
 const (
-	ScenarioCardCategory       = "scenario_card/efficient_successful_path"
-	ScenarioCardType           = "efficient_successful_path"
-	ScenarioCardStatusDraft    = "draft"
-	ScenarioCardStatusVerified = "verified"
+	ScenarioCardCategory          = "scenario_card/efficient_successful_path"
+	ScenarioCardType              = "efficient_successful_path"
+	ScenarioCardStatusDraft       = "draft"
+	ScenarioCardStatusVerified    = "verified"
+	ScenarioCardPlaceholderRecipe = "Review the source memories and replace this draft with the shortest verified successful path."
 )
 
 type ScenarioCard struct {
@@ -103,7 +104,7 @@ func DraftScenarioCardFromMemories(key, targetScope string, memories []store.Mem
 		}
 	}
 	if len(card.RecommendedRecipe) == 0 && len(memories) > 0 {
-		card.RecommendedRecipe = []string{"Review the source memories and replace this draft with the shortest verified successful path."}
+		card.RecommendedRecipe = []string{ScenarioCardPlaceholderRecipe}
 	}
 	if len(card.Conditions) == 0 {
 		card.Conditions = []string{"Applies when the request matches this scenario and the referenced environment, credentials, and permissions are available."}
@@ -112,6 +113,15 @@ func DraftScenarioCardFromMemories(key, targetScope string, memories []store.Mem
 		card.Verification = []string{"Drafted from existing memories; verify on the next successful run before marking verified."}
 	}
 	return card
+}
+
+func HasUsableScenarioRecipe(card ScenarioCard) bool {
+	for _, step := range card.RecommendedRecipe {
+		if strings.TrimSpace(step) != "" && !strings.EqualFold(strings.TrimSpace(step), ScenarioCardPlaceholderRecipe) {
+			return true
+		}
+	}
+	return false
 }
 
 func RenderScenarioCard(card ScenarioCard) string {

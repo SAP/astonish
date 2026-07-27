@@ -184,18 +184,18 @@ Platform mode now treats durable operational memory as a **scenario card** when 
 - `Conditions`: when the recipe applies
 - `Verification`: how the path was or should be checked
 - `Cautions or conditional failures`: conditional notes only, not broad permanent failure rules
-- `source_memory_ids` / `source_session_ids`: provenance back to raw memories and turns
+- `source_memory_ids` / `source_session_ids`: lineage back to the raw extraction inputs and turns that produced the card
 
-This makes scenario cards behave like self-managed operational skills: they are generated from verified experience, searched semantically like any other memory, and improved over time by merging new evidence into the same card. They are not human-authored skills from `memory/skills`, and they do not replace explicit skills or flows.
+This makes scenario cards behave like self-managed operational skills: they are generated from verified experience, searched semantically like any other memory, and improved over time by merging new evidence into the same card. They are not human-authored skills from `memory/skills`, and they do not replace explicit skills or flows. Raw memory rows are staging inputs only; after they are incorporated into a scenario card, or if they cannot form a useful card, they are deleted or discarded rather than kept as durable memory.
 
 Implementation details:
 
 - `pkg/memory/scenario_card.go` owns rendering, parsing, canonical-key normalization, draft generation, merge, upsert, and retrieval filtering.
 - `MemoryMerger.SaveOrMerge` drafts/upserts a scenario card for platform memory saves and fails closed if the card cannot be saved. It must not fall back to raw-memory insertion because that would reintroduce scattered notes.
-- Promotion is upsert-based. Personal → team and team → org promotion draft a scenario card in the target scope and merge it with any existing card for the same `canonical_key`; source memories are kept as provenance instead of being deleted.
-- Retrieval asks the underlying search for extra candidates, runs `memory.FilterPreferredScenarioResults`, prefers scenario cards, and suppresses raw memories that are explicitly listed as `source_memory_ids` or match an already-returned card key.
+- Promotion is upsert-based. Personal → team and team → org promotion draft a scenario card in the target scope and merge it with any existing card for the same `canonical_key`; after a successful upsert, the source raw memory is deleted.
+- Retrieval asks the underlying search for extra candidates, runs `memory.FilterPreferredScenarioResults`, prefers scenario cards, and suppresses any transitional raw memories that are explicitly listed as `source_memory_ids` or match an already-returned card key.
 
-The key invariant is that Astonish should save **how to do the thing efficiently**, not a transcript of exploratory dead ends. Temporary outages, timeouts, rate limits, and “X did not work” observations may appear only as conditional cautions that require re-verification before they change behavior.
+The key invariant is that Astonish should save **how to do the thing efficiently**, not a transcript of exploratory dead ends. Temporary outages, timeouts, rate limits, and “X did not work” observations may appear only as conditional cautions that require re-verification before they change behavior. If a raw memory cannot produce a usable recommended path, it is not durable memory; the system can learn it again later and create a proper card.
 
 ### Memory Health Recommendations and Advanced Map
 
@@ -206,7 +206,7 @@ Memory Health returns reviewable, actionable recommendations, not automatic writ
 - create a scenario card from related raw memories when no card exists yet
 - update an existing scenario card when new raw source memories are not yet incorporated
 
-Each recommendation contains the proposed card, target scope, source memory IDs, and the diagnostic flags that explain why it was suggested. Applying a recommendation uses the same scenario-card upsert endpoint as manual consolidation; source memories are retained as provenance. Once all source memories in a group are already referenced by the scenario card, Memory Health must not keep emitting a review suggestion only because retained provenance still has duplicate, scattered, transient, or trial/error flags; those flags remain visible only in the advanced Memory Map.
+Each recommendation contains the proposed card, target scope, source memory IDs, and the diagnostic flags that explain why it was suggested. Applying a recommendation uses the same scenario-card upsert endpoint as manual consolidation; after the card is saved, incorporated raw source memories are deleted. If the proposed card contains only the placeholder recipe, the raw inputs are discarded and no placeholder card is saved.
 
 `GET /api/memories/map` remains available as the advanced diagnostic report behind the Memory Health UI. It groups likely related memory chunks by a canonical topic key and flags conditions that make memory feel scattered or unsafe:
 
@@ -214,14 +214,14 @@ Each recommendation contains the proposed card, target scope, source memory IDs,
 - scattered topic: related memories are spread across scopes or categories
 - transient failure risk: a memory uses outage/timeout/flaky language that should not become a permanent avoidance rule
 - trial/error risk: a memory appears to preserve exploratory failed attempts instead of the shortest successful path
-- scenario card: the group already contains a structured card, so raw rows should be treated as provenance or incremental evidence
+- scenario card: the group already contains a structured card; any raw rows in the group are transitional evidence that should be incorporated or discarded
 
 The consolidation endpoints remain the write boundary:
 
 - `POST /api/memories/consolidate/preview` drafts a scenario card from a selected group without saving.
 - `POST /api/memories/consolidate/apply` saves or merges the edited card into the selected personal, team, or org scope.
 
-Both endpoints resolve stores through the tenant router and current authenticated context. They do not connect directly to tenant databases and they do not delete raw memories. Memory Health recommendations are operational metadata, not agent knowledge, and are not stored as retrievable memories.
+Both endpoints resolve stores through the tenant router and current authenticated context. They do not connect directly to tenant databases. Memory Health recommendations are operational metadata, not agent knowledge, and are not stored as retrievable memories.
 
 ### BM25 Implementation
 

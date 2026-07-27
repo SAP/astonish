@@ -24,6 +24,25 @@ func TestMemoryMergerFailsClosedWhenScenarioUpsertFails(t *testing.T) {
 	}
 }
 
+func TestMemoryMergerDiscardsUncardableMemory(t *testing.T) {
+	memStore := &failingScenarioUpsertStore{}
+	merger := &MemoryMerger{}
+
+	result, err := merger.SaveOrMerge(context.Background(), memStore, store.MemoryEntry{
+		Content:  "A temporary outage did not work during a failed attempt.",
+		Category: "temporary-outage",
+	})
+	if err != nil {
+		t.Fatalf("SaveOrMerge returned error: %v", err)
+	}
+	if result.Action != "discarded" {
+		t.Fatalf("Action = %q, want discarded", result.Action)
+	}
+	if memStore.addCalled {
+		t.Fatal("SaveOrMerge inserted raw memory for uncardable input")
+	}
+}
+
 type failingScenarioUpsertStore struct {
 	listErr   error
 	addCalled bool

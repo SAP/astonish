@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -186,6 +187,53 @@ func TestBuildMemoryHealthDoesNotRepeatReviewForIncorporatedScenarioCard(t *test
 	}
 }
 
+func TestScenarioCardUpdateContentConvertsRawEditAndDiscardsUncardableEdit(t *testing.T) {
+	content, category, ok := scenarioCardUpdateContent("team", store.MemoryEntry{
+		Content:  "Use the noVNC ticket endpoint for Proxmox console access.",
+		Category: "proxmox-console-access",
+	})
+	if !ok {
+		t.Fatal("expected raw edit with a successful path to become a scenario card")
+	}
+	if category != memory.ScenarioCardCategory || !memory.IsScenarioCard(store.MemorySearchResult{Snippet: content, Category: category}) {
+		t.Fatalf("update did not produce a scenario card: category=%q content=%q", category, content)
+	}
+
+	_, _, ok = scenarioCardUpdateContent("team", store.MemoryEntry{
+		Content:  "A temporary outage did not work during a failed attempt.",
+		Category: "temporary-outage",
+	})
+	if ok {
+		t.Fatal("expected uncardable edit to be discarded")
+	}
+}
+
+func TestDeleteSourceIDsFromStoresDeletesOnlyRawSources(t *testing.T) {
+	ctx := context.Background()
+	personal := &deletingMemoryStore{entries: map[string]store.MemorySearchResult{
+		"raw-personal": {ID: "raw-personal", Snippet: "Use the noVNC ticket endpoint.", Category: "proxmox", Scope: "personal"},
+	}}
+	team := &deletingMemoryStore{entries: map[string]store.MemorySearchResult{
+		"card-team": {ID: "card-team", Snippet: memory.RenderScenarioCard(memory.ScenarioCard{
+			CanonicalKey:      "proxmox-console-access",
+			Title:             "Proxmox Console Access",
+			RecommendedRecipe: []string{"Use the noVNC ticket endpoint."},
+			Status:            memory.ScenarioCardStatusDraft,
+		}), Category: memory.ScenarioCardCategory, Scope: "team"},
+		"raw-team": {ID: "raw-team", Snippet: "Open the websocket with the returned ticket.", Category: "proxmox", Scope: "team"},
+	}}
+	deleted := deleteSourceIDsFromStores(ctx, []string{"raw-personal", "card-team", "raw-team", "raw-team"}, []store.MemoryStore{personal, team})
+	if deleted != 2 {
+		t.Fatalf("deleted = %d, want 2 raw sources", deleted)
+	}
+	if !personal.deleted["raw-personal"] || !team.deleted["raw-team"] {
+		t.Fatalf("raw source memories were not deleted: personal=%#v team=%#v", personal.deleted, team.deleted)
+	}
+	if team.deleted["card-team"] {
+		t.Fatal("scenario card source was deleted")
+	}
+}
+
 func TestBuildMemoryMapUsesFallbackForEmptyContent(t *testing.T) {
 	report := BuildMemoryMap([]store.MemorySearchResult{{ID: "m1", Scope: "personal"}})
 	if len(report.Groups) != 1 {
@@ -204,3 +252,49 @@ func mustParseTime(t *testing.T, value string) time.Time {
 	}
 	return parsed
 }
+
+type deletingMemoryStore struct {
+	entries map[string]store.MemorySearchResult
+	deleted map[string]bool
+}
+
+func (d *deletingMemoryStore) Search(context.Context, string, int, float64) ([]store.MemorySearchResult, error) {
+	return nil, nil
+}
+
+func (d *deletingMemoryStore) SearchByCategory(context.Context, string, int, float64, string) ([]store.MemorySearchResult, error) {
+	return nil, nil
+}
+
+func (d *deletingMemoryStore) Add(context.Context, store.MemoryEntry) error { return nil }
+
+func (d *deletingMemoryStore) Get(_ context.Context, id string) (*store.MemorySearchResult, error) {
+	entry, ok := d.entries[id]
+	if !ok {
+		return nil, nil
+	}
+	return &entry, nil
+}
+
+func (d *deletingMemoryStore) Update(context.Context, string, string, string) error { return nil }
+
+func (d *deletingMemoryStore) Delete(_ context.Context, id string) error {
+	if d.deleted == nil {
+		d.deleted = make(map[string]bool)
+	}
+	d.deleted[id] = true
+	delete(d.entries, id)
+	return nil
+}
+
+func (d *deletingMemoryStore) List(context.Context, string, int, int) ([]store.MemorySearchResult, error) {
+	return nil, nil
+}
+
+func (d *deletingMemoryStore) ListBySession(context.Context, string) ([]store.MemorySearchResult, error) {
+	return nil, nil
+}
+
+func (d *deletingMemoryStore) Count() int { return len(d.entries) }
+
+func (d *deletingMemoryStore) Close() error { return nil }

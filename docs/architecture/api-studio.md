@@ -58,7 +58,7 @@ The API is organized by domain:
 | **AI Chat** | `POST /ai-chat`, `GET /ai-chat/stream` | `ai_chat_handlers.go` |
 | **Memory health** | `GET /memories/health`, `GET /memories/map`, `POST /memories/consolidate/preview`, `POST /memories/consolidate/apply` | `memory_health.go`, `memory_map.go`, `memory_consolidation.go` |
 
-The memory health and consolidation endpoints are platform-only and tenant-scoped. `GET /memories/health` evaluates recommendations lazily when the UI is opened and reuses fresh results for five days; it does not run on a scheduler. Consolidation drafts and upserts structured scenario cards through the existing memory stores; it does not connect directly to tenant databases and it does not delete source memories.
+The memory health and consolidation endpoints are platform-only and tenant-scoped. `GET /memories/health` evaluates recommendations lazily when the UI is opened and reuses fresh results for five days; it does not run on a scheduler. Consolidation drafts and upserts structured scenario cards through the existing memory stores; it does not connect directly to tenant databases. After successful card processing, incorporated raw source memories are deleted or discarded so cards remain the durable memory format.
 
 ### SSE Chat Streaming
 

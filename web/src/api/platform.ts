@@ -262,8 +262,40 @@ export interface MemoryMapGroup {
   memories: MemoryEntry[]
 }
 
+export interface ScenarioIdentity {
+  intent?: string
+  domain?: string
+  system?: string
+  service?: string
+  resource_type?: string
+  operation?: string
+  environment?: string
+  credentials?: string[]
+  endpoint_hosts?: string[]
+  api_families?: string[]
+  http_methods?: string[]
+  url_paths?: string[]
+  tools?: string[]
+  anchor_terms?: string[]
+}
+
+export interface ScenarioSupersededItem {
+  value: string
+  superseded_by?: string
+  reason?: string
+}
+
+export interface ScenarioMatchScore {
+  score?: number
+  decision?: string
+  positive_signals?: string[]
+  negative_signals?: string[]
+  extraction_warnings?: string[]
+}
+
 export interface ScenarioCard {
   canonical_key: string
+  scenario_id?: string
   scope?: string
   title: string
   aliases?: string[]
@@ -275,6 +307,9 @@ export interface ScenarioCard {
   verification?: string[]
   source_memory_ids?: string[]
   source_session_ids?: string[]
+  related_scenario_ids?: string[]
+  superseded?: ScenarioSupersededItem[]
+  identity?: ScenarioIdentity
   status: string
   confidence?: number
   last_verified_at?: string
@@ -293,6 +328,7 @@ export interface MemoryConsolidationApplyResponse {
   existing_id?: string
   card: ScenarioCard
   deleted_sources?: number
+  deleted_duplicate_cards?: number
 }
 
 export interface MemoryRecommendation {
@@ -304,8 +340,11 @@ export interface MemoryRecommendation {
   target_scope: 'personal' | 'team' | 'org'
   group_key: string
   memory_ids: string[]
+  duplicate_card_ids?: string[]
+  resolver_signals?: string[]
   flags?: MemoryMapFlag[]
   card: ScenarioCard
+  match_score?: ScenarioMatchScore
 }
 
 export interface MemoryHealthResponse {
@@ -356,6 +395,19 @@ function normalizeScenarioCard(card: Partial<ScenarioCard> | null | undefined): 
     verification: asArray(card?.verification),
     source_memory_ids: asArray(card?.source_memory_ids),
     source_session_ids: asArray(card?.source_session_ids),
+    related_scenario_ids: asArray(card?.related_scenario_ids),
+    superseded: asArray(card?.superseded),
+    identity: card?.identity ? {
+      ...card.identity,
+      credentials: asArray(card.identity.credentials),
+      endpoint_hosts: asArray(card.identity.endpoint_hosts),
+      api_families: asArray(card.identity.api_families),
+      http_methods: asArray(card.identity.http_methods),
+      url_paths: asArray(card.identity.url_paths),
+      tools: asArray(card.identity.tools),
+      anchor_terms: asArray(card.identity.anchor_terms),
+    } : undefined,
+    scenario_id: card?.scenario_id,
     status: card?.status || 'draft',
     confidence: card?.confidence,
     last_verified_at: card?.last_verified_at,
@@ -397,7 +449,15 @@ function normalizeMemoryHealthResponse(data: Partial<MemoryHealthResponse> | nul
     target_scope: recommendation.target_scope || 'team',
     group_key: recommendation.group_key || '',
     memory_ids: asArray(recommendation.memory_ids),
+    duplicate_card_ids: asArray(recommendation.duplicate_card_ids),
+    resolver_signals: asArray(recommendation.resolver_signals),
     flags: asArray(recommendation.flags),
+    match_score: recommendation.match_score ? {
+      ...recommendation.match_score,
+      positive_signals: asArray(recommendation.match_score.positive_signals),
+      negative_signals: asArray(recommendation.match_score.negative_signals),
+      extraction_warnings: asArray(recommendation.match_score.extraction_warnings),
+    } : undefined,
     card: normalizeScenarioCard(recommendation.card),
   }))
   return {
@@ -448,11 +508,11 @@ export async function previewMemoryConsolidation(key: string, targetScope: strin
   return res.json()
 }
 
-export async function applyMemoryConsolidation(card: ScenarioCard, targetScope: string, teamSlug?: string): Promise<MemoryConsolidationApplyResponse> {
+export async function applyMemoryConsolidation(card: ScenarioCard, targetScope: string, teamSlug?: string, duplicateCardIds?: string[]): Promise<MemoryConsolidationApplyResponse> {
   const res = await teamFetch('/api/memories/consolidate/apply', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ card, target_scope: targetScope }),
+    body: JSON.stringify({ card, target_scope: targetScope, duplicate_card_ids: duplicateCardIds || [] }),
   }, teamSlug)
   if (!res.ok) await throwBackendError(res, 'Failed to save consolidated memory')
   return res.json()

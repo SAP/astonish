@@ -179,7 +179,10 @@ The Studio memory icon appears immediately for in-band `memory_save` tool calls.
 
 Platform mode now treats durable operational memory as a **scenario card** when possible. A scenario card is still a normal memory row: it is stored in the existing personal/team/org memory store, embedded, and returned by the same semantic + BM25 search pipeline. The difference is the content contract. The row category is `scenario_card/efficient_successful_path`, and the markdown body contains frontmatter plus sections for:
 
-- `canonical_key`: stable topic key used for merge/upsert
+- `canonical_key`: a human-readable alias/label for the scenario, not the durable identity boundary
+- `scenario_id`, `aliases`, `related_scenario_ids`: optional entity metadata for card evolution
+- `identity_json`: deterministic scenario anchors such as domain, system, service family, resource type, operation, environment, credentials, endpoint host family, API family, HTTP method, and URL path
+- `superseded_json`: explicit temporal/supersedes notes when an old value or path has been replaced
 - `Recommended path`: the shortest known successful recipe
 - `Conditions`: when the recipe applies
 - `Verification`: how the path was or should be checked
@@ -188,12 +191,15 @@ Platform mode now treats durable operational memory as a **scenario card** when 
 
 This makes scenario cards behave like self-managed operational skills: they are generated from verified experience, searched semantically like any other memory, and improved over time by merging new evidence into the same card. They are not human-authored skills from `memory/skills`, and they do not replace explicit skills or flows. Raw memory rows are staging inputs only; after they are incorporated into a scenario card, or if they cannot form a useful card, they are deleted or discarded rather than kept as durable memory.
 
+Scenario-card upsert uses **scenario identity resolution**, not only canonical-key equality. `pkg/memory/scenario_identity.go` extracts deterministic anchors and scores candidate pairs with rarity-aware weights. A card is auto-merged only when the score crosses `DefaultScenarioAutoMergeThreshold`, there are no negative signals, and the best candidate is not ambiguous. Scores below the auto-merge threshold are not sent to an LLM on the write path; ambiguous duplicate work belongs in Memory Health, where a user can review the proposed merge. The resolver deliberately separates alias resolution from deduplication: aliases like “LBaaS” and “Octavia” can map to the same service family, but conflicting resource types, environments, or write/read operations prevent silent merges.
+
 Implementation details:
 
-- `pkg/memory/scenario_card.go` owns rendering, parsing, canonical-key normalization, draft generation, merge, upsert, and retrieval filtering.
+- `pkg/memory/scenario_card.go` owns rendering, parsing, draft generation, merge, upsert, and retrieval filtering.
+- `pkg/memory/scenario_identity.go` owns deterministic extraction, corpus statistics, pair scoring, and conservative candidate choice.
 - `MemoryMerger.SaveOrMerge` drafts/upserts a scenario card for platform memory saves and fails closed if the card cannot be saved. It must not fall back to raw-memory insertion because that would reintroduce scattered notes.
-- Promotion is upsert-based. Personal → team and team → org promotion draft a scenario card in the target scope and merge it with any existing card for the same `canonical_key`; after a successful upsert, the source raw memory is deleted.
-- Retrieval asks the underlying search for extra candidates, runs `memory.FilterPreferredScenarioResults`, prefers scenario cards, and suppresses any transitional raw memories that are explicitly listed as `source_memory_ids` or match an already-returned card key.
+- Promotion is upsert-based. Personal → team and team → org promotion draft a scenario card in the target scope and merge it with any existing card that resolves to the same scenario; after a successful upsert, the source raw memory is deleted.
+- Retrieval asks the underlying search for extra candidates, runs `memory.FilterPreferredScenarioResults`, prefers scenario cards, suppresses any transitional raw memories that are explicitly listed as `source_memory_ids`, and de-duplicates equivalent scenario cards as a safety net.
 
 The key invariant is that Astonish should save **how to do the thing efficiently**, not a transcript of exploratory dead ends. Temporary outages, timeouts, rate limits, and “X did not work” observations may appear only as conditional cautions that require re-verification before they change behavior. If a raw memory cannot produce a usable recommended path, it is not durable memory; the system can learn it again later and create a proper card.
 
@@ -206,8 +212,9 @@ Memory Health returns reviewable, actionable recommendations, not automatic writ
 - create a scenario card from any remaining raw memory when no card exists yet
 - update an existing scenario card when new raw source memories are not yet incorporated
 - clean up raw source memories that are already represented by an existing scenario card
+- merge duplicate scenario cards that deterministic identity resolution considers the same operational scenario
 
-Each recommendation contains the proposed card, target scope, source memory IDs, and the diagnostic flags that explain why it was suggested. Applying a recommendation uses the same scenario-card upsert endpoint as manual consolidation; after the card is saved or merged, incorporated raw source memories are deleted. Cleanup recommendations re-save the existing card metadata and delete the still-visible raw source rows. If the proposed card contains only the placeholder recipe, the raw inputs are discarded and no placeholder card is saved.
+Each recommendation contains the proposed card, target scope, source memory IDs, and the diagnostic flags that explain why it was suggested. Duplicate-card recommendations also include `duplicate_card_ids`, `resolver_signals`, and a `match_score`; applying one first upserts the merged card and then deletes only those explicit duplicate scenario-card rows. Applying any recommendation uses the same scenario-card upsert endpoint as manual consolidation; after the card is saved or merged, incorporated raw source memories are deleted. Cleanup recommendations re-save the existing card metadata and delete the still-visible raw source rows. If the proposed card contains only the placeholder recipe, the raw inputs are discarded and no placeholder card is saved.
 
 `GET /api/memories/map` remains available as the advanced diagnostic report behind the Memory Health UI. It groups likely related memory chunks by a canonical topic key and flags conditions that make memory feel scattered or unsafe:
 

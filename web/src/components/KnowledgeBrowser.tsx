@@ -333,6 +333,7 @@ function ScenarioCardPreview({ card, onChange }: { card: ScenarioCard; onChange:
 function MemoryRecommendationCard({ recommendation, onReview }: { recommendation: MemoryRecommendation; onReview: (recommendation: MemoryRecommendation) => void }) {
   const severityColor = recommendation.severity === 'high' ? 'var(--warning)' : recommendation.severity === 'medium' ? 'var(--info)' : 'var(--muted-foreground)'
   const isCleanup = recommendation.type === 'cleanup_raw_sources'
+  const isDuplicateMerge = recommendation.type === 'merge_duplicate_scenario_cards'
   return (
     <div className="rounded-xl border border-border bg-card p-4 shadow-[var(--shadow-soft)]">
       <div className="flex items-start justify-between gap-4">
@@ -343,9 +344,19 @@ function MemoryRecommendationCard({ recommendation, onReview }: { recommendation
             </span>
             <ScopeBadge scope={recommendation.target_scope} />
             <span className="text-xs" style={{ color: 'var(--text-muted)' }}>{(recommendation.memory_ids || []).length} source memor{(recommendation.memory_ids || []).length === 1 ? 'y' : 'ies'}</span>
+            {isDuplicateMerge && <span className="text-xs" style={{ color: 'var(--text-muted)' }}>{(recommendation.duplicate_card_ids || []).length} duplicate card{(recommendation.duplicate_card_ids || []).length === 1 ? '' : 's'}</span>}
           </div>
           <h3 className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>{recommendation.title}</h3>
           <p className="mt-1 text-sm" style={{ color: 'var(--text-secondary)' }}>{recommendation.description}</p>
+          {recommendation.resolver_signals && recommendation.resolver_signals.length > 0 && (
+            <div className="mt-3 flex flex-wrap gap-2">
+              {recommendation.resolver_signals.slice(0, 4).map(signal => (
+                <span key={signal} className="rounded-full border px-2 py-0.5 text-xs" style={{ background: 'var(--bg-tertiary)', color: 'var(--text-muted)', borderColor: 'var(--border-color)' }}>
+                  {signal}
+                </span>
+              ))}
+            </div>
+          )}
           {recommendation.flags && recommendation.flags.length > 0 && (
             <div className="mt-3 flex flex-wrap gap-2">
               {recommendation.flags.map(flag => <MemoryMapFlagBadge key={flag.type} type={flag.type} />)}
@@ -353,7 +364,7 @@ function MemoryRecommendationCard({ recommendation, onReview }: { recommendation
           )}
         </div>
         <button onClick={() => onReview(recommendation)} className="flex shrink-0 items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-white" style={{ background: 'var(--brand)' }}>
-          <Wand2 size={14} /> {isCleanup ? 'Clean up' : 'Review'}
+          <Wand2 size={14} /> {isCleanup ? 'Clean up' : isDuplicateMerge ? 'Merge cards' : 'Review'}
         </button>
       </div>
     </div>
@@ -504,6 +515,7 @@ export default function KnowledgeBrowser({ theme, user, activeTeam }: KnowledgeB
   const [showAdvancedMap, setShowAdvancedMap] = useState(false)
   const [draftCard, setDraftCard] = useState<ScenarioCard | null>(null)
   const [draftScope, setDraftScope] = useState<'personal' | 'team' | 'org'>('team')
+  const [draftDuplicateCardIDs, setDraftDuplicateCardIDs] = useState<string[]>([])
   const [drafting, setDrafting] = useState(false)
   const [applyingDraft, setApplyingDraft] = useState(false)
   const [loading, setLoading] = useState(false)
@@ -619,6 +631,7 @@ export default function KnowledgeBrowser({ theme, user, activeTeam }: KnowledgeB
       const preview = await previewMemoryConsolidation(group.key, draftScope, (group.memories || []).map(m => m.id).filter(Boolean), activeTeam || undefined)
       setDraftCard(preview.card)
       setDraftScope((preview.card.scope as 'personal' | 'team' | 'org') || draftScope)
+      setDraftDuplicateCardIDs([])
     } catch (err: any) {
       setError(err.message)
     } finally {
@@ -629,6 +642,7 @@ export default function KnowledgeBrowser({ theme, user, activeTeam }: KnowledgeB
   const handleReviewRecommendation = useCallback((recommendation: MemoryRecommendation) => {
     setDraftCard(recommendation.card)
     setDraftScope(recommendation.target_scope)
+    setDraftDuplicateCardIDs(recommendation.duplicate_card_ids || [])
     setError(null)
     setSuccess(null)
   }, [])
@@ -650,10 +664,13 @@ export default function KnowledgeBrowser({ theme, user, activeTeam }: KnowledgeB
     setApplyingDraft(true)
     setError(null)
     try {
-      const saved = await applyMemoryConsolidation({ ...draftCard, scope: draftScope }, draftScope, activeTeam || undefined)
-      const deletedText = saved.deleted_sources ? ` and deleted ${saved.deleted_sources} raw source memor${saved.deleted_sources === 1 ? 'y' : 'ies'}` : ''
-      setSuccess(`Scenario card ${saved.action}${deletedText}`)
+      const saved = await applyMemoryConsolidation({ ...draftCard, scope: draftScope }, draftScope, activeTeam || undefined, draftDuplicateCardIDs)
+      const deletedText = saved.deleted_sources ? ` and deleted ${saved.deleted_sources} source memor${saved.deleted_sources === 1 ? 'y' : 'ies'}` : ''
+      const removedDuplicateCount = saved.deleted_duplicate_cards ?? draftDuplicateCardIDs.length
+      const duplicateText = removedDuplicateCount ? ` and removed ${removedDuplicateCount} duplicate card${removedDuplicateCount === 1 ? '' : 's'}` : ''
+      setSuccess(`Scenario card ${saved.action}${deletedText}${duplicateText}`)
       setDraftCard(null)
+      setDraftDuplicateCardIDs([])
       if (tab === 'health') {
         setMemoryHealth(await fetchMemoryHealth(500, true, activeTeam || undefined))
       } else {
@@ -664,7 +681,7 @@ export default function KnowledgeBrowser({ theme, user, activeTeam }: KnowledgeB
     } finally {
       setApplyingDraft(false)
     }
-  }, [activeTeam, draftCard, draftScope, loadTab, tab])
+  }, [activeTeam, draftCard, draftScope, draftDuplicateCardIDs, loadTab, tab])
 
   const handleSave = useCallback(async () => {
     if (!snippet.trim()) return
@@ -838,13 +855,18 @@ export default function KnowledgeBrowser({ theme, user, activeTeam }: KnowledgeB
                     </label>
                   ))}
                   <div className="ml-auto flex gap-2">
-                    <button onClick={() => setDraftCard(null)} className="rounded-lg px-3 py-2 text-sm" style={{ color: 'var(--text-muted)' }}>Cancel</button>
+                    <button onClick={() => { setDraftCard(null); setDraftDuplicateCardIDs([]) }} className="rounded-lg px-3 py-2 text-sm" style={{ color: 'var(--text-muted)' }}>Cancel</button>
                     <button onClick={handleApplyScenarioCard} disabled={applyingDraft} className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-white disabled:opacity-50" style={{ background: 'var(--brand)' }}>
                       {applyingDraft ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
                       Apply recommendation
                     </button>
                   </div>
                 </div>
+                {draftDuplicateCardIDs.length > 0 && (
+                  <div className="rounded-lg border px-4 py-3 text-sm" style={{ background: 'var(--bg-secondary)', borderColor: 'var(--border-color)', color: 'var(--text-secondary)' }}>
+                    This will remove {draftDuplicateCardIDs.length} duplicate scenario card{draftDuplicateCardIDs.length === 1 ? '' : 's'} after the merged card is saved.
+                  </div>
+                )}
                 <ScenarioCardPreview card={draftCard} onChange={setDraftCard} />
               </div>
             )}

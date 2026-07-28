@@ -73,6 +73,8 @@ For repeatable operational tasks, Astonish can consolidate memory into **scenari
 
 This helps the agent reuse the efficient path it learned instead of replaying trial-and-error steps. Temporary failures should be treated as cautions to re-check, not permanent “never use this” rules. Raw memory rows are temporary staging inputs: once they are incorporated into a card, or if they cannot form a useful card, they are deleted or discarded instead of staying as long-term scattered memory.
 
+Scenario cards are matched by scenario identity, not only by title or canonical key. Astonish extracts stable anchors such as system, service family, resource type, operation, environment, credential name, endpoint host family, API family, HTTP method, and URL path. This lets related labels such as “LBaaS” and “Octavia” merge into one OpenStack load-balancer card when the anchors agree, while still keeping different resources or environments separate.
+
 ## Managing Memory in Studio
 
 Studio provides a visual interface for memory management. The main organization surface is **Memory Health**: when opened, Astonish checks whether the visible memories need consolidation, deduplication, or review. The check is lazy and on demand — there is no scheduled background job. If a recent evaluation is still fresh, Studio reuses it; after five days, the next visit runs a new evaluation.
@@ -82,6 +84,7 @@ Studio provides a visual interface for memory management. The main organization 
 - Use **Memory Health** to review suggested organization improvements
 - Reanalyze memory on demand; otherwise fresh evaluations are reused for five days
 - Draft and save scenario cards from actionable recommendations
+- Merge duplicate scenario cards when Memory Health identifies two cards as the same scenario; Studio shows the resolver signals and deletes only the explicit duplicate card rows after the merged card is saved
 - Open the advanced **Memory Map** only when you need low-level diagnostics for transitional raw memories
 - Publish personal memories to your team by merging them into scenario cards when possible
 - Promote team memories to org level (admin) by merging them into org scenario cards when possible

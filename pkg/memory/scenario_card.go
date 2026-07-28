@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"sort"
@@ -20,21 +21,25 @@ const (
 )
 
 type ScenarioCard struct {
-	CanonicalKey                  string   `json:"canonical_key"`
-	Scope                         string   `json:"scope,omitempty"`
-	Title                         string   `json:"title"`
-	Aliases                       []string `json:"aliases,omitempty"`
-	Category                      string   `json:"category,omitempty"`
-	Facts                         []string `json:"facts,omitempty"`
-	RecommendedRecipe             []string `json:"recommended_recipe"`
-	Conditions                    []string `json:"conditions,omitempty"`
-	CautionsOrConditionalFailures []string `json:"cautions_or_conditional_failures,omitempty"`
-	Verification                  []string `json:"verification,omitempty"`
-	SourceMemoryIDs               []string `json:"source_memory_ids,omitempty"`
-	SourceSessionIDs              []string `json:"source_session_ids,omitempty"`
-	Status                        string   `json:"status"`
-	Confidence                    float64  `json:"confidence,omitempty"`
-	LastVerifiedAt                string   `json:"last_verified_at,omitempty"`
+	CanonicalKey                  string                   `json:"canonical_key"`
+	ScenarioID                    string                   `json:"scenario_id,omitempty"`
+	Scope                         string                   `json:"scope,omitempty"`
+	Title                         string                   `json:"title"`
+	Aliases                       []string                 `json:"aliases,omitempty"`
+	Category                      string                   `json:"category,omitempty"`
+	Facts                         []string                 `json:"facts,omitempty"`
+	RecommendedRecipe             []string                 `json:"recommended_recipe"`
+	Conditions                    []string                 `json:"conditions,omitempty"`
+	CautionsOrConditionalFailures []string                 `json:"cautions_or_conditional_failures,omitempty"`
+	Verification                  []string                 `json:"verification,omitempty"`
+	SourceMemoryIDs               []string                 `json:"source_memory_ids,omitempty"`
+	SourceSessionIDs              []string                 `json:"source_session_ids,omitempty"`
+	RelatedScenarioIDs            []string                 `json:"related_scenario_ids,omitempty"`
+	Superseded                    []ScenarioSupersededItem `json:"superseded,omitempty"`
+	Identity                      ScenarioIdentity         `json:"identity,omitempty"`
+	Status                        string                   `json:"status"`
+	Confidence                    float64                  `json:"confidence,omitempty"`
+	LastVerifiedAt                string                   `json:"last_verified_at,omitempty"`
 }
 
 func IsScenarioCard(result store.MemorySearchResult) bool {
@@ -144,8 +149,13 @@ func RenderScenarioCard(card ScenarioCard) string {
 	if card.LastVerifiedAt != "" {
 		writeYAMLScalar(&b, "last_verified_at", card.LastVerifiedAt)
 	}
+	writeYAMLScalar(&b, "scenario_id", card.ScenarioID)
+	writeYAMLList(&b, "aliases", card.Aliases)
 	writeYAMLList(&b, "source_memory_ids", card.SourceMemoryIDs)
 	writeYAMLList(&b, "source_session_ids", card.SourceSessionIDs)
+	writeYAMLList(&b, "related_scenario_ids", card.RelatedScenarioIDs)
+	writeYAMLJSON(&b, "identity_json", card.Identity)
+	writeYAMLJSON(&b, "superseded_json", card.Superseded)
 	b.WriteString("---\n\n")
 	b.WriteString("# ")
 	b.WriteString(strings.TrimSpace(card.Title))
@@ -178,24 +188,38 @@ func ParseScenarioCard(content string) (ScenarioCard, bool) {
 		if strings.HasPrefix(line, "- ") {
 			value := strings.TrimSpace(strings.TrimPrefix(line, "- "))
 			switch listKey {
+			case "aliases":
+				card.Aliases = appendUnique(card.Aliases, value)
 			case "source_memory_ids":
 				card.SourceMemoryIDs = appendUnique(card.SourceMemoryIDs, value)
 			case "source_session_ids":
 				card.SourceSessionIDs = appendUnique(card.SourceSessionIDs, value)
+			case "related_scenario_ids":
+				card.RelatedScenarioIDs = appendUnique(card.RelatedScenarioIDs, value)
 			}
 			continue
 		}
 		listKey = ""
 		if strings.HasPrefix(line, "canonical_key:") {
 			card.CanonicalKey = strings.TrimSpace(strings.TrimPrefix(line, "canonical_key:"))
+		} else if strings.HasPrefix(line, "scenario_id:") {
+			card.ScenarioID = strings.TrimSpace(strings.TrimPrefix(line, "scenario_id:"))
 		} else if strings.HasPrefix(line, "status:") {
 			card.Status = strings.TrimSpace(strings.TrimPrefix(line, "status:"))
 		} else if strings.HasPrefix(line, "scope:") {
 			card.Scope = strings.TrimSpace(strings.TrimPrefix(line, "scope:"))
+		} else if strings.HasPrefix(line, "aliases:") {
+			listKey = "aliases"
 		} else if strings.HasPrefix(line, "source_memory_ids:") {
 			listKey = "source_memory_ids"
 		} else if strings.HasPrefix(line, "source_session_ids:") {
 			listKey = "source_session_ids"
+		} else if strings.HasPrefix(line, "related_scenario_ids:") {
+			listKey = "related_scenario_ids"
+		} else if strings.HasPrefix(line, "identity_json:") {
+			_ = json.Unmarshal([]byte(strings.TrimSpace(strings.TrimPrefix(line, "identity_json:"))), &card.Identity)
+		} else if strings.HasPrefix(line, "superseded_json:") {
+			_ = json.Unmarshal([]byte(strings.TrimSpace(strings.TrimPrefix(line, "superseded_json:"))), &card.Superseded)
 		}
 	}
 	card.Title = extractMarkdownTitle(body)
@@ -222,7 +246,16 @@ func MergeScenarioCards(existing, incoming ScenarioCard) ScenarioCard {
 	merged.Category = ScenarioCardCategory
 	merged.Status = strongerStatus(existing.Status, incoming.Status)
 	merged.Confidence = max(existing.Confidence, incoming.Confidence)
+	if merged.ScenarioID == "" {
+		merged.ScenarioID = incoming.ScenarioID
+	}
+	if incoming.CanonicalKey != "" && !strings.EqualFold(incoming.CanonicalKey, merged.CanonicalKey) {
+		merged.Aliases = appendUnique(merged.Aliases, incoming.CanonicalKey)
+	}
 	merged.Aliases = appendUniqueMany(merged.Aliases, incoming.Aliases)
+	merged.RelatedScenarioIDs = appendUniqueMany(merged.RelatedScenarioIDs, incoming.RelatedScenarioIDs)
+	merged.Superseded = appendScenarioSuperseded(merged.Superseded, incoming.Superseded)
+	merged.Identity = mergeScenarioIdentity(ExtractScenarioIdentity(merged), ExtractScenarioIdentity(incoming))
 	merged.Facts = appendUniqueMany(merged.Facts, incoming.Facts)
 	merged.RecommendedRecipe = appendUniqueMany(merged.RecommendedRecipe, incoming.RecommendedRecipe)
 	merged.Conditions = appendUniqueMany(merged.Conditions, incoming.Conditions)
@@ -254,20 +287,35 @@ func UpsertScenarioCard(ctx context.Context, memStore store.MemoryStore, card Sc
 	if card.Status == "" {
 		card.Status = ScenarioCardStatusDraft
 	}
+	card.Identity = ExtractScenarioIdentity(card)
 	existingCards, err := memStore.List(ctx, ScenarioCardCategory, 1000, 0)
 	if err != nil {
 		return ScenarioUpsertResult{}, fmt.Errorf("failed to list scenario cards: %w", err)
 	}
+	parsedCards := make([]ScenarioCard, 0, len(existingCards))
+	for _, existing := range existingCards {
+		if existingCard, ok := ParseScenarioCard(existing.Snippet); ok {
+			parsedCards = append(parsedCards, existingCard)
+		}
+	}
+	stats := BuildScenarioCorpusStats(append(parsedCards, card))
+	var candidates []ScenarioCandidate
 	for _, existing := range existingCards {
 		existingCard, ok := ParseScenarioCard(existing.Snippet)
-		if !ok || existingCard.CanonicalKey != card.CanonicalKey {
+		if !ok {
 			continue
 		}
-		merged := MergeScenarioCards(existingCard, card)
-		if err := memStore.Update(ctx, existing.ID, RenderScenarioCard(merged), ScenarioCardCategory); err != nil {
+		score := ScoreScenarioPair(existingCard, card, stats)
+		if score.Decision == "merge" || score.Decision == "review" {
+			candidates = append(candidates, ScenarioCandidate{ID: existing.ID, Card: existingCard, Score: score})
+		}
+	}
+	if best, ok := FindBestScenarioCandidate(candidates); ok {
+		merged := MergeScenarioCards(best.Card, card)
+		if err := memStore.Update(ctx, best.ID, RenderScenarioCard(merged), ScenarioCardCategory); err != nil {
 			return ScenarioUpsertResult{}, fmt.Errorf("failed to update scenario card: %w", err)
 		}
-		return ScenarioUpsertResult{Action: "merged", ExistingID: existing.ID}, nil
+		return ScenarioUpsertResult{Action: "merged", ExistingID: best.ID}, nil
 	}
 	if err := memStore.Add(ctx, store.MemoryEntry{
 		Content:  RenderScenarioCard(card),
@@ -285,16 +333,19 @@ func FilterPreferredScenarioResults(results []store.MemorySearchResult) []store.
 	superseded := make(map[string]bool)
 	cardsByKey := make(map[string]bool)
 	var cards []store.MemorySearchResult
+	var parsedCards []ScenarioCard
 	for _, r := range results {
 		if !IsScenarioCard(r) {
 			continue
 		}
-		cards = append(cards, r)
 		card, ok := ParseScenarioCard(r.Snippet)
 		if !ok {
+			cards = append(cards, r)
 			continue
 		}
 		cardsByKey[card.CanonicalKey] = true
+		parsedCards = append(parsedCards, card)
+		cards = append(cards, r)
 		for _, id := range card.SourceMemoryIDs {
 			superseded[id] = true
 		}
@@ -302,10 +353,38 @@ func FilterPreferredScenarioResults(results []store.MemorySearchResult) []store.
 	if len(cards) == 0 {
 		return results
 	}
+	stats := BuildScenarioCorpusStats(parsedCards)
+	keptCardIDs := make(map[string]bool)
+	for _, r := range cards {
+		card, ok := ParseScenarioCard(r.Snippet)
+		if !ok {
+			keptCardIDs[r.ID] = true
+			continue
+		}
+		duplicate := false
+		for keptID := range keptCardIDs {
+			var keptCard ScenarioCard
+			for _, candidate := range cards {
+				if candidate.ID == keptID {
+					keptCard, _ = ParseScenarioCard(candidate.Snippet)
+					break
+				}
+			}
+			if ScoreScenarioPair(keptCard, card, stats).Decision == "merge" {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			keptCardIDs[r.ID] = true
+		}
+	}
 	var filtered []store.MemorySearchResult
 	for _, r := range results {
 		if IsScenarioCard(r) {
-			filtered = append(filtered, r)
+			if keptCardIDs[r.ID] || r.ID == "" {
+				filtered = append(filtered, r)
+			}
 			continue
 		}
 		if r.ID != "" && superseded[r.ID] {
@@ -351,6 +430,17 @@ func writeYAMLList(b *strings.Builder, key string, values []string) {
 		b.WriteString(strings.TrimSpace(value))
 		b.WriteString("\n")
 	}
+}
+
+func writeYAMLJSON(b *strings.Builder, key string, value any) {
+	encoded, err := json.Marshal(value)
+	if err != nil || string(encoded) == "null" || string(encoded) == "{}" || string(encoded) == "[]" {
+		return
+	}
+	b.WriteString(key)
+	b.WriteString(": ")
+	b.Write(encoded)
+	b.WriteString("\n")
 }
 
 func writeSection(b *strings.Builder, title string, items []string) {
@@ -467,6 +557,26 @@ func appendUnique(values []string, value string) []string {
 func appendUniqueMany(values []string, more []string) []string {
 	for _, value := range more {
 		values = appendUnique(values, value)
+	}
+	return values
+}
+
+func appendScenarioSuperseded(values []ScenarioSupersededItem, more []ScenarioSupersededItem) []ScenarioSupersededItem {
+	for _, item := range more {
+		item.Value = strings.TrimSpace(item.Value)
+		if item.Value == "" {
+			continue
+		}
+		duplicate := false
+		for _, existing := range values {
+			if strings.EqualFold(existing.Value, item.Value) && strings.EqualFold(existing.SupersededBy, item.SupersededBy) {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			values = append(values, item)
+		}
 	}
 	return values
 }

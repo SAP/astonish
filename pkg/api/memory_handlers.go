@@ -375,6 +375,7 @@ func MemorySearchCrossTierHandler(w http.ResponseWriter, r *http.Request) {
 			respondError(w, http.StatusInternalServerError, fmt.Sprintf("cross-tier search failed: %v", err))
 			return
 		}
+		results = memory.FilterPreferredScenarioResults(results)
 		respondJSON(w, http.StatusOK, MemoryListResponse{Results: results, Count: len(results)})
 		return
 	}
@@ -392,6 +393,7 @@ func MemorySearchCrossTierHandler(w http.ResponseWriter, r *http.Request) {
 			respondError(w, http.StatusInternalServerError, fmt.Sprintf("memory search failed: %v", err))
 			return
 		}
+		results = memory.FilterPreferredScenarioResults(results)
 		respondJSON(w, http.StatusOK, MemoryListResponse{Results: results, Count: len(results)})
 		return
 	}
@@ -925,6 +927,34 @@ func deleteSourceIDsFromStores(ctx context.Context, sourceIDs []string, stores [
 				continue
 			}
 			if err := memStore.Delete(ctx, id); err == nil {
+				deleted++
+			}
+			break
+		}
+	}
+	return deleted
+}
+
+func deleteDuplicateScenarioCards(r *http.Request, svc *store.Services, pu *PlatformUser, duplicateIDs []string, preservedID string) int {
+	if len(duplicateIDs) == 0 || svc == nil || pu == nil {
+		return 0
+	}
+	deleted := 0
+	seen := make(map[string]bool)
+	for _, id := range duplicateIDs {
+		if id == "" || id == preservedID || seen[id] {
+			continue
+		}
+		seen[id] = true
+		for _, memStore := range memoryStoresForVisibleScopes(r, svc, pu) {
+			if memStore == nil {
+				continue
+			}
+			existing, err := memStore.Get(r.Context(), id)
+			if err != nil || existing == nil || !memory.IsScenarioCard(*existing) {
+				continue
+			}
+			if err := memStore.Delete(r.Context(), id); err == nil {
 				deleted++
 			}
 			break

@@ -40,25 +40,140 @@ func TestScenarioCardDraftSeparatesRecommendedPathFromTransientFailures(t *testi
 
 func TestScenarioCardRenderParseRoundTrip(t *testing.T) {
 	original := ScenarioCard{
-		CanonicalKey:      "proxmox-console-access",
-		Scope:             "team",
-		Title:             "Proxmox Console Access",
-		RecommendedRecipe: []string{"Use noVNC ticket endpoint.", "Open websocket with ticket."},
-		Conditions:        []string{"Requires console permission."},
-		Verification:      []string{"Console opened successfully."},
-		Status:            ScenarioCardStatusVerified,
-		SourceMemoryIDs:   []string{"m1"},
+		CanonicalKey:       "proxmox-console-access",
+		ScenarioID:         "scenario-proxmox-console",
+		Scope:              "team",
+		Title:              "Proxmox Console Access",
+		Aliases:            []string{"novnc-console"},
+		RecommendedRecipe:  []string{"Use noVNC ticket endpoint.", "Open websocket with ticket."},
+		Conditions:         []string{"Requires console permission."},
+		Verification:       []string{"Console opened successfully."},
+		Status:             ScenarioCardStatusVerified,
+		SourceMemoryIDs:    []string{"m1"},
+		RelatedScenarioIDs: []string{"scenario-proxmox-auth"},
+		Identity:           ScenarioIdentity{Domain: "infrastructure", ResourceType: "vm-console", Credentials: []string{"proxmox-token"}},
+		Superseded:         []ScenarioSupersededItem{{Value: "old console route", SupersededBy: "noVNC ticket endpoint", Reason: "verified path changed"}},
 	}
 
 	parsed, ok := ParseScenarioCard(RenderScenarioCard(original))
 	if !ok {
 		t.Fatal("expected scenario card to parse")
 	}
-	if parsed.CanonicalKey != original.CanonicalKey || parsed.Title != original.Title || parsed.Status != original.Status {
+	if parsed.CanonicalKey != original.CanonicalKey || parsed.Title != original.Title || parsed.Status != original.Status || parsed.ScenarioID != original.ScenarioID {
 		t.Fatalf("parsed card mismatch: %#v", parsed)
 	}
 	if len(parsed.RecommendedRecipe) != 2 {
 		t.Fatalf("RecommendedRecipe = %#v", parsed.RecommendedRecipe)
+	}
+	if len(parsed.Aliases) != 1 || parsed.Aliases[0] != "novnc-console" {
+		t.Fatalf("Aliases = %#v", parsed.Aliases)
+	}
+	if parsed.Identity.ResourceType != "vm-console" || len(parsed.Identity.Credentials) != 1 || parsed.Identity.Credentials[0] != "proxmox-token" {
+		t.Fatalf("Identity = %#v", parsed.Identity)
+	}
+	if len(parsed.Superseded) != 1 || parsed.Superseded[0].SupersededBy != "noVNC ticket endpoint" {
+		t.Fatalf("Superseded = %#v", parsed.Superseded)
+	}
+}
+
+func TestScenarioIdentityScoresOpenStackOctaviaAndLBaaSAsSameScenario(t *testing.T) {
+	existing := ScenarioCard{
+		CanonicalKey:      "infrastructure-openstack-lbaas-load",
+		Scope:             "personal",
+		Title:             "OpenStack LBaaS load balancer list in QA-DE-1",
+		RecommendedRecipe: []string{"Use the openstack-keystone credential and GET https://loadbalancer.qa-de-1.cloud.sap/v2/lbaas/loadbalancers."},
+		Conditions:        []string{"Applies in qa-de-1."},
+		Status:            ScenarioCardStatusVerified,
+	}
+	incoming := ScenarioCard{
+		CanonicalKey:      "infrastructure-openstack-octavia-load",
+		Scope:             "personal",
+		Title:             "OpenStack Octavia load balancer lookup",
+		RecommendedRecipe: []string{"List load balancers through Octavia using the openstack-keystone token at https://octavia.qa-de-1.cloud.sap/v2.0/lbaas/loadbalancers."},
+		Conditions:        []string{"Use qa-de-1 OpenStack."},
+		Status:            ScenarioCardStatusDraft,
+	}
+
+	stats := BuildScenarioCorpusStats([]ScenarioCard{existing, incoming})
+	score := ScoreScenarioPair(existing, incoming, stats)
+	if score.Decision != "merge" {
+		t.Fatalf("Decision = %q score %.2f positives=%#v negatives=%#v, want merge", score.Decision, score.Score, score.PositiveSignals, score.NegativeSignals)
+	}
+	if len(score.NegativeSignals) != 0 {
+		t.Fatalf("NegativeSignals = %#v", score.NegativeSignals)
+	}
+}
+
+func TestScenarioIdentitySeparatesDifferentOpenStackResources(t *testing.T) {
+	loadBalancer := ScenarioCard{
+		CanonicalKey:      "infrastructure-openstack-lbaas-load",
+		Title:             "OpenStack load balancers in QA-DE-1",
+		RecommendedRecipe: []string{"Use openstack-keystone and GET https://octavia.qa-de-1.cloud.sap/v2.0/lbaas/loadbalancers."},
+	}
+	compute := ScenarioCard{
+		CanonicalKey:      "infrastructure-openstack-nova-servers",
+		Title:             "OpenStack compute servers in QA-DE-1",
+		RecommendedRecipe: []string{"Use openstack-keystone and GET https://compute.qa-de-1.cloud.sap/v2.1/servers."},
+	}
+
+	stats := BuildScenarioCorpusStats([]ScenarioCard{loadBalancer, compute})
+	score := ScoreScenarioPair(loadBalancer, compute, stats)
+	if score.Decision == "merge" {
+		t.Fatalf("Decision = merge score %.2f positives=%#v negatives=%#v, want non-merge", score.Score, score.PositiveSignals, score.NegativeSignals)
+	}
+	if len(score.NegativeSignals) == 0 {
+		t.Fatalf("expected negative signals for different resource types: %#v", score)
+	}
+}
+
+func TestUpsertScenarioCardMergesOpenStackAliasScenario(t *testing.T) {
+	ctx := context.Background()
+	store := &fakeMemoryStore{}
+	first := ScenarioCard{
+		CanonicalKey:      "infrastructure-openstack-lbaas-load",
+		Scope:             "personal",
+		Title:             "OpenStack LBaaS load balancer list in QA-DE-1",
+		RecommendedRecipe: []string{"Use the openstack-keystone credential and GET https://loadbalancer.qa-de-1.cloud.sap/v2/lbaas/loadbalancers."},
+		Conditions:        []string{"Applies in qa-de-1."},
+		Status:            ScenarioCardStatusVerified,
+		SourceMemoryIDs:   []string{"m1"},
+	}
+	result, err := UpsertScenarioCard(ctx, store, first)
+	if err != nil {
+		t.Fatalf("first upsert failed: %v", err)
+	}
+	if result.Action != "created" {
+		t.Fatalf("first action = %q", result.Action)
+	}
+
+	second := ScenarioCard{
+		CanonicalKey:      "infrastructure-openstack-octavia-load",
+		Scope:             "personal",
+		Title:             "OpenStack Octavia load balancer lookup",
+		RecommendedRecipe: []string{"List load balancers through Octavia using the openstack-keystone token at https://octavia.qa-de-1.cloud.sap/v2.0/lbaas/loadbalancers."},
+		Conditions:        []string{"Use qa-de-1 OpenStack."},
+		Status:            ScenarioCardStatusDraft,
+		SourceMemoryIDs:   []string{"m2"},
+	}
+	result, err = UpsertScenarioCard(ctx, store, second)
+	if err != nil {
+		t.Fatalf("second upsert failed: %v", err)
+	}
+	if result.Action != "merged" {
+		t.Fatalf("second action = %q", result.Action)
+	}
+	if len(store.entries) != 1 {
+		t.Fatalf("entries = %d, want one merged scenario card", len(store.entries))
+	}
+	merged, ok := ParseScenarioCard(store.entries[0].Snippet)
+	if !ok {
+		t.Fatal("merged entry did not parse as scenario card")
+	}
+	if len(merged.SourceMemoryIDs) != 2 {
+		t.Fatalf("SourceMemoryIDs = %#v, want both sources", merged.SourceMemoryIDs)
+	}
+	if len(merged.Aliases) == 0 || merged.Aliases[0] != "infrastructure-openstack-octavia-load" {
+		t.Fatalf("Aliases = %#v, want incoming canonical key retained as alias", merged.Aliases)
 	}
 }
 
@@ -108,6 +223,32 @@ func TestUpsertScenarioCardMergesExistingCard(t *testing.T) {
 	}
 	if len(merged.RecommendedRecipe) != 2 || len(merged.SourceMemoryIDs) != 2 {
 		t.Fatalf("merged card did not combine fields: %#v", merged)
+	}
+}
+
+func TestFilterPreferredScenarioResultsSuppressesDuplicateScenarioCards(t *testing.T) {
+	lbaas := ScenarioCard{
+		CanonicalKey:      "infrastructure-openstack-lbaas-load",
+		Title:             "OpenStack LBaaS load balancer list in QA-DE-1",
+		RecommendedRecipe: []string{"Use openstack-keystone and GET https://loadbalancer.qa-de-1.cloud.sap/v2/lbaas/loadbalancers."},
+		Conditions:        []string{"Applies in qa-de-1."},
+		Status:            ScenarioCardStatusVerified,
+	}
+	octavia := ScenarioCard{
+		CanonicalKey:      "infrastructure-openstack-octavia-load",
+		Title:             "OpenStack Octavia load balancer lookup",
+		RecommendedRecipe: []string{"Use openstack-keystone and GET https://octavia.qa-de-1.cloud.sap/v2.0/lbaas/loadbalancers."},
+		Conditions:        []string{"Applies in qa-de-1."},
+		Status:            ScenarioCardStatusDraft,
+	}
+	results := []store.MemorySearchResult{
+		{ID: "card-1", Snippet: RenderScenarioCard(lbaas), Category: ScenarioCardCategory, Score: 0.95},
+		{ID: "card-2", Snippet: RenderScenarioCard(octavia), Category: ScenarioCardCategory, Score: 0.94},
+	}
+
+	filtered := FilterPreferredScenarioResults(results)
+	if len(filtered) != 1 || filtered[0].ID != "card-1" {
+		t.Fatalf("filtered = %#v, want only the first equivalent scenario card", filtered)
 	}
 }
 

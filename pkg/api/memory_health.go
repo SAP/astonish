@@ -26,16 +26,19 @@ type MemoryHealthResponse struct {
 }
 
 type MemoryRecommendation struct {
-	ID          string              `json:"id"`
-	Type        string              `json:"type"`
-	Severity    string              `json:"severity"`
-	Title       string              `json:"title"`
-	Description string              `json:"description"`
-	TargetScope string              `json:"target_scope"`
-	GroupKey    string              `json:"group_key"`
-	MemoryIDs   []string            `json:"memory_ids"`
-	Flags       []MemoryMapFlag     `json:"flags,omitempty"`
-	Card        memory.ScenarioCard `json:"card"`
+	ID               string                    `json:"id"`
+	Type             string                    `json:"type"`
+	Severity         string                    `json:"severity"`
+	Title            string                    `json:"title"`
+	Description      string                    `json:"description"`
+	TargetScope      string                    `json:"target_scope"`
+	GroupKey         string                    `json:"group_key"`
+	MemoryIDs        []string                  `json:"memory_ids"`
+	DuplicateCardIDs []string                  `json:"duplicate_card_ids,omitempty"`
+	ResolverSignals  []string                  `json:"resolver_signals,omitempty"`
+	Flags            []MemoryMapFlag           `json:"flags,omitempty"`
+	Card             memory.ScenarioCard       `json:"card"`
+	MatchScore       memory.ScenarioMatchScore `json:"match_score,omitempty"`
 }
 
 type memoryHealthCacheEntry struct {
@@ -107,6 +110,7 @@ func MemoryHealthHandler(w http.ResponseWriter, r *http.Request) {
 
 func BuildMemoryHealth(report MemoryMapResponse, canManageOrg bool, now time.Time) MemoryHealthResponse {
 	recommendations := make([]MemoryRecommendation, 0)
+	recommendations = append(recommendations, duplicateScenarioCardRecommendations(report, canManageOrg)...)
 	for _, group := range report.Groups {
 		if rec, ok := memoryRecommendationForGroup(group, canManageOrg); ok {
 			recommendations = append(recommendations, rec)
@@ -191,6 +195,136 @@ func memoryRecommendationForGroup(group MemoryMapGroup, canManageOrg bool) (Memo
 		Flags:       group.Flags,
 		Card:        card,
 	}, true
+}
+
+func duplicateScenarioCardRecommendations(report MemoryMapResponse, canManageOrg bool) []MemoryRecommendation {
+	var cardMemories []store.MemorySearchResult
+	var cards []memory.ScenarioCard
+	for _, group := range report.Groups {
+		for _, m := range group.Memories {
+			card, ok := memory.ParseScenarioCard(m.Snippet)
+			if !ok {
+				continue
+			}
+			cardMemories = append(cardMemories, m)
+			cards = append(cards, card)
+		}
+	}
+	if len(cards) < 2 {
+		return nil
+	}
+	stats := memory.BuildScenarioCorpusStats(cards)
+	used := make(map[int]bool)
+	var recs []MemoryRecommendation
+	for i := range cards {
+		if used[i] {
+			continue
+		}
+		cluster := []int{i}
+		var bestScore memory.ScenarioMatchScore
+		for j := i + 1; j < len(cards); j++ {
+			if used[j] {
+				continue
+			}
+			score := memory.ScoreScenarioPair(cards[i], cards[j], stats)
+			if score.Decision == "merge" {
+				cluster = append(cluster, j)
+				if score.Score > bestScore.Score {
+					bestScore = score
+				}
+			}
+		}
+		if len(cluster) < 2 || !safeScenarioCluster(cluster, cards, stats) {
+			continue
+		}
+		for _, idx := range cluster {
+			used[idx] = true
+		}
+		targetIdx := bestScenarioCardTarget(cluster, cards)
+		merged := cards[targetIdx]
+		var duplicateIDs []string
+		var sourceIDs []string
+		var signals []string
+		for _, idx := range cluster {
+			if idx == targetIdx {
+				continue
+			}
+			merged = memory.MergeScenarioCards(merged, cards[idx])
+			if cardMemories[idx].ID != "" {
+				duplicateIDs = append(duplicateIDs, cardMemories[idx].ID)
+			}
+		}
+		sourceIDs = append(sourceIDs, duplicateIDs...)
+		signals = append(signals, bestScore.PositiveSignals...)
+		groupKey := firstNonEmptyString(merged.CanonicalKey, fmt.Sprintf("duplicate-scenario-%d", len(recs)+1))
+		recs = append(recs, MemoryRecommendation{
+			ID:               "merge-duplicate-cards-" + groupKey,
+			Type:             "merge_duplicate_scenario_cards",
+			Severity:         "high",
+			Title:            "Merge duplicate scenario cards for " + merged.Title,
+			Description:      fmt.Sprintf("Merge %d duplicate scenario card%s into one resolved card, then delete the duplicate card row%s.", len(cluster), pluralS(len(cluster)), pluralS(len(duplicateIDs))),
+			TargetScope:      firstNonEmptyString(merged.Scope, preferredScopeFromCardMemories(cluster, cardMemories, canManageOrg)),
+			GroupKey:         groupKey,
+			MemoryIDs:        sourceIDs,
+			DuplicateCardIDs: duplicateIDs,
+			ResolverSignals:  signals,
+			Flags: []MemoryMapFlag{{
+				Type:        "duplicate_risk",
+				Severity:    "warning",
+				Description: "Multiple scenario cards resolve to the same operational scenario entity.",
+			}},
+			Card:       merged,
+			MatchScore: bestScore,
+		})
+	}
+	return recs
+}
+
+func safeScenarioCluster(cluster []int, cards []memory.ScenarioCard, stats memory.ScenarioCorpusStats) bool {
+	if len(cluster) > 3 {
+		return false
+	}
+	for i := 0; i < len(cluster); i++ {
+		for j := i + 1; j < len(cluster); j++ {
+			score := memory.ScoreScenarioPair(cards[cluster[i]], cards[cluster[j]], stats)
+			if score.Decision != "merge" || len(score.NegativeSignals) > 0 {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func bestScenarioCardTarget(cluster []int, cards []memory.ScenarioCard) int {
+	best := cluster[0]
+	for _, idx := range cluster[1:] {
+		idxVerified := cards[idx].Status == memory.ScenarioCardStatusVerified
+		bestVerified := cards[best].Status == memory.ScenarioCardStatusVerified
+		if idxVerified != bestVerified {
+			if idxVerified {
+				best = idx
+			}
+			continue
+		}
+		if len(cards[idx].RecommendedRecipe)+len(cards[idx].Facts)+len(cards[idx].SourceMemoryIDs) > len(cards[best].RecommendedRecipe)+len(cards[best].Facts)+len(cards[best].SourceMemoryIDs) {
+			best = idx
+		}
+	}
+	return best
+}
+
+func preferredScopeFromCardMemories(cluster []int, memories []store.MemorySearchResult, canManageOrg bool) string {
+	var scopes []string
+	for _, idx := range cluster {
+		scopes = append(scopes, memories[idx].Scope)
+	}
+	if hasString(scopes, string(store.MemoryScopeOrg)) && canManageOrg {
+		return string(store.MemoryScopeOrg)
+	}
+	if hasString(scopes, string(store.MemoryScopeTeam)) || len(scopes) > 1 {
+		return string(store.MemoryScopeTeam)
+	}
+	return string(store.MemoryScopePersonal)
 }
 
 func memoryHealthSnapshot(memories []store.MemorySearchResult) string {
@@ -320,6 +454,13 @@ func pluralY(count int) string {
 		return "y"
 	}
 	return "ies"
+}
+
+func pluralS(count int) string {
+	if count == 1 {
+		return ""
+	}
+	return "s"
 }
 
 func recommendationSeverityRank(severity string) int {

@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"net/http"
 	"testing"
 	"time"
 
@@ -191,6 +192,75 @@ func TestBuildMemoryHealthRecommendsCleanupForIncorporatedRawScenarioCardSources
 	}
 }
 
+func TestBuildMemoryHealthRecommendsDuplicateScenarioCardMergeAcrossCanonicalKeys(t *testing.T) {
+	lbaas := memory.ScenarioCard{
+		CanonicalKey:      "infrastructure-openstack-lbaas-load",
+		Scope:             "personal",
+		Title:             "OpenStack LBaaS load balancer list in QA-DE-1",
+		RecommendedRecipe: []string{"Use the openstack-keystone credential and GET https://loadbalancer.qa-de-1.cloud.sap/v2/lbaas/loadbalancers."},
+		Conditions:        []string{"Applies in qa-de-1."},
+		Status:            memory.ScenarioCardStatusVerified,
+		SourceMemoryIDs:   []string{"raw-1"},
+	}
+	octavia := memory.ScenarioCard{
+		CanonicalKey:      "infrastructure-openstack-octavia-load",
+		Scope:             "personal",
+		Title:             "OpenStack Octavia load balancer lookup",
+		RecommendedRecipe: []string{"List load balancers through Octavia using the openstack-keystone token at https://octavia.qa-de-1.cloud.sap/v2.0/lbaas/loadbalancers."},
+		Conditions:        []string{"Use qa-de-1 OpenStack."},
+		Status:            memory.ScenarioCardStatusDraft,
+		SourceMemoryIDs:   []string{"raw-2"},
+	}
+	report := BuildMemoryMap([]store.MemorySearchResult{
+		{ID: "card-1", Snippet: memory.RenderScenarioCard(lbaas), Category: memory.ScenarioCardCategory, Scope: "personal"},
+		{ID: "card-2", Snippet: memory.RenderScenarioCard(octavia), Category: memory.ScenarioCardCategory, Scope: "personal"},
+	})
+	health := BuildMemoryHealth(report, false, mustParseTime(t, "2026-07-27T12:00:00Z"))
+	if health.RecommendationCount != 1 {
+		t.Fatalf("RecommendationCount = %d, want 1 duplicate-card recommendation: %#v", health.RecommendationCount, health.Recommendations)
+	}
+	rec := health.Recommendations[0]
+	if rec.Type != "merge_duplicate_scenario_cards" {
+		t.Fatalf("Type = %q, want merge_duplicate_scenario_cards: %#v", rec.Type, rec)
+	}
+	if len(rec.DuplicateCardIDs) != 1 || rec.DuplicateCardIDs[0] != "card-2" {
+		t.Fatalf("DuplicateCardIDs = %#v, want card-2", rec.DuplicateCardIDs)
+	}
+	if rec.Card.Status != memory.ScenarioCardStatusVerified {
+		t.Fatalf("merged card status = %q, want verified", rec.Card.Status)
+	}
+	if len(rec.ResolverSignals) == 0 || rec.MatchScore.Decision != "merge" {
+		t.Fatalf("resolver metadata missing: signals=%#v match=%#v", rec.ResolverSignals, rec.MatchScore)
+	}
+}
+
+func TestBuildMemoryHealthDoesNotMergeDifferentOpenStackResources(t *testing.T) {
+	loadBalancer := memory.ScenarioCard{
+		CanonicalKey:      "infrastructure-openstack-lbaas-load",
+		Scope:             "personal",
+		Title:             "OpenStack load balancers in QA-DE-1",
+		RecommendedRecipe: []string{"Use openstack-keystone and GET https://octavia.qa-de-1.cloud.sap/v2.0/lbaas/loadbalancers."},
+		Status:            memory.ScenarioCardStatusVerified,
+	}
+	compute := memory.ScenarioCard{
+		CanonicalKey:      "infrastructure-openstack-nova-servers",
+		Scope:             "personal",
+		Title:             "OpenStack compute servers in QA-DE-1",
+		RecommendedRecipe: []string{"Use openstack-keystone and GET https://compute.qa-de-1.cloud.sap/v2.1/servers."},
+		Status:            memory.ScenarioCardStatusVerified,
+	}
+	report := BuildMemoryMap([]store.MemorySearchResult{
+		{ID: "card-1", Snippet: memory.RenderScenarioCard(loadBalancer), Category: memory.ScenarioCardCategory, Scope: "personal"},
+		{ID: "card-2", Snippet: memory.RenderScenarioCard(compute), Category: memory.ScenarioCardCategory, Scope: "personal"},
+	})
+	health := BuildMemoryHealth(report, false, mustParseTime(t, "2026-07-27T12:00:00Z"))
+	for _, rec := range health.Recommendations {
+		if rec.Type == "merge_duplicate_scenario_cards" {
+			t.Fatalf("unexpected duplicate-card recommendation for distinct resources: %#v", rec)
+		}
+	}
+}
+
 func TestBuildMemoryHealthRecommendsSingleRawMemoryCardOnlyAction(t *testing.T) {
 	report := BuildMemoryMap([]store.MemorySearchResult{
 		{ID: "raw-1", Snippet: "Use the noVNC ticket endpoint for Proxmox console access.", Category: "proxmox-console-access", Scope: "team"},
@@ -222,6 +292,34 @@ func TestScenarioCardUpdateContentConvertsRawEditAndDiscardsUncardableEdit(t *te
 	})
 	if ok {
 		t.Fatal("expected uncardable edit to be discarded")
+	}
+}
+
+func TestDeleteDuplicateScenarioCardsDeletesOnlyExplicitScenarioCards(t *testing.T) {
+	duplicate := memory.ScenarioCard{
+		CanonicalKey:      "infrastructure-openstack-octavia-load",
+		Title:             "OpenStack Octavia load balancer lookup",
+		RecommendedRecipe: []string{"Use openstack-keystone and GET https://octavia.qa-de-1.cloud.sap/v2.0/lbaas/loadbalancers."},
+		Status:            memory.ScenarioCardStatusDraft,
+	}
+	team := &deletingMemoryStore{entries: map[string]store.MemorySearchResult{
+		"card-delete": {ID: "card-delete", Snippet: memory.RenderScenarioCard(duplicate), Category: memory.ScenarioCardCategory, Scope: "team"},
+		"card-keep":   {ID: "card-keep", Snippet: memory.RenderScenarioCard(duplicate), Category: memory.ScenarioCardCategory, Scope: "team"},
+		"raw-team":    {ID: "raw-team", Snippet: "raw memory", Category: "openstack", Scope: "team"},
+	}}
+	req, err := http.NewRequest(http.MethodPost, "/", nil)
+	if err != nil {
+		t.Fatalf("failed to build request: %v", err)
+	}
+	deleted := deleteDuplicateScenarioCards(req, &store.Services{Memory: team}, &PlatformUser{ID: "user-1"}, []string{"card-delete", "raw-team", "card-keep", "card-delete"}, "card-keep")
+	if deleted != 1 {
+		t.Fatalf("deleted = %d, want one explicit duplicate scenario card", deleted)
+	}
+	if !team.deleted["card-delete"] {
+		t.Fatalf("duplicate card was not deleted: %#v", team.deleted)
+	}
+	if team.deleted["raw-team"] || team.deleted["card-keep"] {
+		t.Fatalf("deleted protected/non-card memory: %#v", team.deleted)
 	}
 }
 

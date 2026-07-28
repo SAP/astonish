@@ -131,6 +131,8 @@ describe('KnowledgeBrowser Memory Health', () => {
         recommended_recipe: ['Use the noVNC ticket endpoint for Proxmox console access.'],
         status: 'draft',
       },
+      deleted_sources: 0,
+      deleted_duplicate_cards: 0,
     })
   })
 
@@ -205,8 +207,85 @@ describe('KnowledgeBrowser Memory Health', () => {
         }),
         'team',
         'core',
+        [],
       )
     })
     expect(await screen.findByText(/scenario card created/i)).toBeInTheDocument()
+  })
+
+  it('passes duplicate scenario card ids when applying a duplicate-card recommendation', async () => {
+    const actor = userEvent.setup()
+    vi.mocked(applyMemoryConsolidation).mockResolvedValueOnce({
+      applied: true,
+      scope: 'personal',
+      action: 'merged',
+      card: {
+        canonical_key: 'infrastructure-openstack-lbaas-load',
+        scope: 'personal',
+        title: 'OpenStack Load Balancer Access',
+        recommended_recipe: ['Use the Octavia endpoint with the Keystone token.'],
+        status: 'draft',
+      },
+      deleted_sources: 0,
+      deleted_duplicate_cards: 1,
+    })
+    vi.mocked(fetchMemoryHealth).mockResolvedValueOnce({
+      evaluated_at: '2026-07-27T12:00:00Z',
+      expires_at: '2026-08-01T12:00:00Z',
+      generated: true,
+      recommendation_count: 1,
+      recommendations: [
+        {
+          id: 'merge-duplicate-cards-openstack-load-balancer',
+          type: 'merge_duplicate_scenario_cards',
+          severity: 'high',
+          title: 'Merge duplicate scenario cards for OpenStack Load Balancer',
+          description: 'Merge duplicate scenario cards into one resolved card.',
+          target_scope: 'personal',
+          group_key: 'openstack-load-balancer',
+          memory_ids: ['card-2'],
+          duplicate_card_ids: ['card-2'],
+          resolver_signals: ['same environment qa-de-1', 'shared credential openstack-keystone'],
+          card: {
+            canonical_key: 'infrastructure-openstack-lbaas-load',
+            scope: 'personal',
+            title: 'OpenStack Load Balancer Access',
+            recommended_recipe: ['Use the Octavia endpoint with the Keystone token.'],
+            status: 'draft',
+          },
+        },
+      ],
+      map: {
+        stats: {
+          total_memories: 2,
+          group_count: 2,
+          duplicate_risk_count: 1,
+          scattered_topic_count: 0,
+          transient_risk_count: 0,
+          trial_error_risk_count: 0,
+        },
+        groups: [],
+      },
+    } as any)
+
+    render(<KnowledgeBrowser theme="light" user={user} activeTeam="core" />)
+
+    await actor.click(await screen.findByRole('button', { name: /memory health/i }))
+    expect(await screen.findByRole('heading', { name: /merge duplicate scenario cards for openstack load balancer/i })).toBeInTheDocument()
+    expect(screen.getByText(/shared credential openstack-keystone/i)).toBeInTheDocument()
+
+    await actor.click(await screen.findByRole('button', { name: /merge cards/i }))
+    expect(await screen.findByText(/remove 1 duplicate scenario card/i)).toBeInTheDocument()
+    await actor.click(screen.getByRole('button', { name: /apply recommendation/i }))
+
+    expect(await screen.findByText(/scenario card merged and removed 1 duplicate card/i)).toBeInTheDocument()
+    await waitFor(() => {
+      expect(applyMemoryConsolidation).toHaveBeenCalledWith(
+        expect.objectContaining({ canonical_key: 'infrastructure-openstack-lbaas-load' }),
+        'personal',
+        'core',
+        ['card-2'],
+      )
+    })
   })
 })

@@ -22,18 +22,20 @@ type MemoryConsolidationPreviewResponse struct {
 }
 
 type MemoryConsolidationApplyRequest struct {
-	Card        memory.ScenarioCard `json:"card"`
-	TargetScope string              `json:"target_scope"`
+	Card             memory.ScenarioCard `json:"card"`
+	TargetScope      string              `json:"target_scope"`
+	DuplicateCardIDs []string            `json:"duplicate_card_ids,omitempty"`
 }
 
 type MemoryConsolidationApplyResponse struct {
-	Applied        bool                        `json:"applied"`
-	Scope          string                      `json:"scope"`
-	Action         string                      `json:"action"`
-	ExistingID     string                      `json:"existing_id,omitempty"`
-	Card           memory.ScenarioCard         `json:"card"`
-	Result         memory.ScenarioUpsertResult `json:"result"`
-	DeletedSources int                         `json:"deleted_sources"`
+	Applied               bool                        `json:"applied"`
+	Scope                 string                      `json:"scope"`
+	Action                string                      `json:"action"`
+	ExistingID            string                      `json:"existing_id,omitempty"`
+	Card                  memory.ScenarioCard         `json:"card"`
+	Result                memory.ScenarioUpsertResult `json:"result"`
+	DeletedSources        int                         `json:"deleted_sources"`
+	DeletedDuplicateCards int                         `json:"deleted_duplicate_cards"`
 }
 
 // MemoryConsolidationPreviewHandler drafts a structured scenario card from a
@@ -140,15 +142,17 @@ func MemoryConsolidationApplyHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	deletedSources := deleteConsolidatedSources(r, svc, pu, req.Card.SourceMemoryIDs)
+	deletedDuplicateCards := deleteDuplicateScenarioCards(r, svc, pu, req.DuplicateCardIDs, result.ExistingID)
 
 	respondJSON(w, http.StatusOK, MemoryConsolidationApplyResponse{
-		Applied:        true,
-		Scope:          req.TargetScope,
-		Action:         result.Action,
-		ExistingID:     result.ExistingID,
-		Card:           req.Card,
-		Result:         result,
-		DeletedSources: deletedSources,
+		Applied:               true,
+		Scope:                 req.TargetScope,
+		Action:                result.Action,
+		ExistingID:            result.ExistingID,
+		Card:                  req.Card,
+		Result:                result,
+		DeletedSources:        deletedSources,
+		DeletedDuplicateCards: deletedDuplicateCards,
 	})
 }
 

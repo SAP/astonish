@@ -79,11 +79,16 @@ func platformMemorySave(ctx context.Context, args MemorySaveArgs, content string
 	}
 
 	// Save to the team memory store (PG)
+	metadata := map[string]any{}
+	if scope := store.MemoryScopeFromContext(ctx); scope != "" {
+		metadata["scope"] = string(scope)
+	}
 	entry := store.MemoryEntry{
 		Content:   content,
 		Category:  dbCategory,
 		SessionID: store.SessionIDFromContext(ctx),
 		CreatedBy: store.UserIDFromContext(ctx),
+		Metadata:  metadata,
 	}
 
 	mergeFunc := store.MemorySaveOrMergeFromContext(ctx)

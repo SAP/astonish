@@ -10,6 +10,7 @@ type contextKey string
 const servicesKey contextKey = "astonish_services"
 const credStoreKey contextKey = "astonish_credential_store"
 const memoryStoreKey contextKey = "astonish_memory_store"
+const memoryScopeKey contextKey = "astonish_memory_scope"
 const memorySearcherKey contextKey = "astonish_memory_searcher"
 const flowStoreKey contextKey = "astonish_flow_store"
 const teamFlowStoreKey contextKey = "astonish_team_flow_store"
@@ -74,6 +75,22 @@ func WithMemoryStore(ctx context.Context, ms MemoryStore) context.Context {
 func MemoryStoreFromContext(ctx context.Context) MemoryStore {
 	ms, _ := ctx.Value(memoryStoreKey).(MemoryStore)
 	return ms
+}
+
+// WithMemoryScope returns a new context containing the scope of the injected
+// MemoryStore. This keeps generated scenario-card frontmatter aligned with the
+// actual tier where the row is written.
+func WithMemoryScope(ctx context.Context, scope MemoryScope) context.Context {
+	return context.WithValue(ctx, memoryScopeKey, string(scope))
+}
+
+// MemoryScopeFromContext retrieves the scope of the injected MemoryStore.
+func MemoryScopeFromContext(ctx context.Context) MemoryScope {
+	if ctx == nil {
+		return ""
+	}
+	scope, _ := ctx.Value(memoryScopeKey).(string)
+	return MemoryScope(scope)
 }
 
 // WithThreeTierSearcher returns a new context containing a ThreeTierSearcher.

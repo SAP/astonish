@@ -165,8 +165,15 @@ func (cr *ChatRunner) InjectCredentialStore(cs store.CredentialStore) {
 // Tool functions and knowledge callbacks retrieve these via store.*FromContext.
 // Must be called before Run().
 func (cr *ChatRunner) InjectMemoryStores(memStore store.MemoryStore, searcher store.ThreeTierSearcher) {
+	cr.InjectMemoryStoresWithScope(memStore, "", searcher)
+}
+
+func (cr *ChatRunner) InjectMemoryStoresWithScope(memStore store.MemoryStore, scope store.MemoryScope, searcher store.ThreeTierSearcher) {
 	if memStore != nil {
 		cr.ctx = store.WithMemoryStore(cr.ctx, memStore)
+	}
+	if scope != "" {
+		cr.ctx = store.WithMemoryScope(cr.ctx, scope)
 	}
 	if searcher != nil {
 		cr.ctx = store.WithThreeTierSearcher(cr.ctx, searcher)

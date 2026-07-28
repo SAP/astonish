@@ -1532,7 +1532,7 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			if err != nil {
 				return nil, err
 			}
-			pgResults = memory.FilterPreferredScenarioResults(pgResults)
+			pgResults = memory.FilterPreferredScenarioResultsForQuery(query, pgResults)
 			if len(pgResults) > maxResults {
 				pgResults = pgResults[:maxResults]
 			}
@@ -1566,7 +1566,7 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			if err != nil {
 				return nil, err
 			}
-			pgResults = memory.FilterPreferredScenarioResults(pgResults)
+			pgResults = memory.FilterPreferredScenarioResultsForQuery(query, pgResults)
 			if len(pgResults) > maxResults {
 				pgResults = pgResults[:maxResults]
 			}

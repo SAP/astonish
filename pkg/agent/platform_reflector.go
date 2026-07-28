@@ -284,11 +284,16 @@ func (r *PlatformReflector) executePlatformSave(ctx context.Context, fc *genai.F
 		return
 	}
 
+	metadata := map[string]any{}
+	if scope := store.MemoryScopeFromContext(ctx); scope != "" {
+		metadata["scope"] = string(scope)
+	}
 	entry := store.MemoryEntry{
 		Content:   content,
 		Category:  category,
 		SessionID: sessionID,
 		CreatedBy: store.UserIDFromContext(ctx),
+		Metadata:  metadata,
 	}
 
 	result, err := r.merger().SaveOrMergeWithStatus(ctx, memStore, entry, scenarioStatus)
@@ -470,11 +475,16 @@ func (r *PlatformReflector) applyExtraction(ctx context.Context, memStore store.
 	cardCount := 0
 	discardCount := 0
 	for _, entry := range entries {
+		metadata := map[string]any{}
+		if scope := store.MemoryScopeFromContext(ctx); scope != "" {
+			metadata["scope"] = string(scope)
+		}
 		memEntry := store.MemoryEntry{
 			Content:   entry.Content,
 			Category:  entry.Category,
 			SessionID: sessionID,
 			CreatedBy: userID,
+			Metadata:  metadata,
 		}
 		result, err := r.merger().SaveOrMergeWithStatus(ctx, memStore, memEntry, scenarioStatus)
 		if err != nil {

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	mem "github.com/SAP/astonish/pkg/memory"
 	"github.com/SAP/astonish/pkg/store"
@@ -37,14 +38,23 @@ func (mm *MemoryMerger) SaveOrMergeWithStatus(ctx context.Context, memStore stor
 	if memStore == nil {
 		return MergeResult{}, fmt.Errorf("memory store is nil")
 	}
+	targetScope := ""
+	if entry.Metadata != nil {
+		targetScope, _ = entry.Metadata["scope"].(string)
+		targetScope = strings.TrimSpace(targetScope)
+	}
+	if targetScope == "" {
+		targetScope = strings.TrimSpace(string(store.MemoryScopeFromContext(ctx)))
+	}
+	if targetScope == "" {
+		targetScope = string(store.MemoryScopeTeam)
+	}
 	var card mem.ScenarioCard
 	if parsed, ok := mem.ParseScenarioCard(entry.Content); ok {
 		card = parsed
-		if card.Scope == "" {
-			card.Scope = "team"
-		}
+		card.Scope = targetScope
 	} else {
-		card = mem.DraftScenarioCardFromMemoryEntry("team", entry)
+		card = mem.DraftScenarioCardFromMemoryEntry(targetScope, entry)
 	}
 	if status != "" {
 		card.Status = status

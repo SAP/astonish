@@ -68,7 +68,18 @@ func ExtractScenarioIdentity(card ScenarioCard) ScenarioIdentity {
 func ExtractScenarioIdentityFromText(text string) ScenarioIdentity {
 	lower := strings.ToLower(text)
 	identity := ScenarioIdentity{}
-	if strings.Contains(lower, "openstack") || strings.Contains(lower, "keystone") || strings.Contains(lower, "octavia") || strings.Contains(lower, "lbaas") {
+	if strings.Contains(lower, "github") || strings.Contains(lower, "ghe") {
+		identity.Domain = "development"
+		identity.System = "github"
+		identity.APIFamilies = appendUnique(identity.APIFamilies, "github-rest")
+		if strings.Contains(lower, "enterprise") || strings.Contains(lower, "github.wdf.sap.corp") {
+			identity.Service = "github-enterprise"
+		}
+		if hasAny(lower, "issue", "issues") {
+			identity.ResourceType = "issue"
+		}
+	}
+	if identity.System == "" && (strings.Contains(lower, "openstack") || strings.Contains(lower, "keystone") || strings.Contains(lower, "octavia") || strings.Contains(lower, "lbaas")) {
 		identity.Domain = "infrastructure"
 		identity.System = "openstack"
 	}
@@ -85,14 +96,14 @@ func ExtractScenarioIdentityFromText(text string) ScenarioIdentity {
 			identity.ResourceType = "kubernetes-cluster"
 		}
 	}
-	if hasAny(lower, "octavia", "lbaas", "load balancer", "load-balancer", "loadbalancer", "load balancing", "loadbalancing") {
+	if identity.System == "openstack" && hasAny(lower, "octavia", "lbaas", "load balancer", "load-balancer", "loadbalancer", "load balancing", "loadbalancing") {
 		identity.Domain = firstNonEmpty(identity.Domain, "infrastructure")
 		identity.Service = "openstack-load-balancing"
 		identity.ResourceType = "load-balancer"
 		identity.APIFamilies = appendUnique(identity.APIFamilies, "openstack-octavia")
 		identity.APIFamilies = appendUnique(identity.APIFamilies, "openstack-lbaas")
 	}
-	if hasAny(lower, "server", "compute", "nova instance", "instance list", "instances") && identity.ResourceType == "" {
+	if identity.System == "openstack" && hasAny(lower, "server", "compute", "nova instance", "instance list", "instances") && identity.ResourceType == "" {
 		identity.Domain = firstNonEmpty(identity.Domain, "infrastructure")
 		identity.Service = "openstack-compute"
 		identity.ResourceType = "compute-server"
@@ -104,6 +115,9 @@ func ExtractScenarioIdentityFromText(text string) ScenarioIdentity {
 	identity.EndpointHosts = appendUniqueMany(identity.EndpointHosts, extractEndpointHosts(text))
 	identity.HTTPMethods = appendUniqueMany(identity.HTTPMethods, httpMethodPattern.FindAllString(strings.ToUpper(text), -1))
 	identity.URLPaths = appendUniqueMany(identity.URLPaths, extractURLPathAnchors(text))
+	if identity.System == "github" {
+		identity.URLPaths = filterGitHubURLPaths(identity.URLPaths)
+	}
 	if env := extractEnvironment(lower); env != "" {
 		identity.Environment = env
 	}
@@ -434,6 +448,19 @@ func ignoredURLPathAnchor(path string) bool {
 		return true
 	}
 	return strings.Contains(path, "astonish") || strings.Contains(path, "password")
+}
+
+func filterGitHubURLPaths(paths []string) []string {
+	var out []string
+	for _, path := range paths {
+		if strings.Contains(path, "issues") || strings.HasPrefix(path, "/api/v3") {
+			out = appendUnique(out, path)
+		}
+	}
+	if len(out) == 0 {
+		return paths
+	}
+	return out
 }
 
 func aliasOverlap(a, b ScenarioCard) bool {

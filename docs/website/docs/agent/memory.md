@@ -45,7 +45,7 @@ Memory search combines two methods for best results:
 - **Vector similarity** — Semantic search via embeddings (finds conceptually related content)
 - **Full-text search** — Keyword matching (finds exact terms and phrases)
 
-Results from both methods are merged using Reciprocal Rank Fusion (RRF).
+Results from both methods are merged using Reciprocal Rank Fusion (RRF). In platform mode, scenario-card results are also filtered against the actual query so a card that only shares generic terms such as “API” is not returned for an unrelated operational scenario. The direct `memory_search` tool, automatic knowledge retrieval, and Studio memory search use the same filtering.
 
 ### SQLite Backend
 

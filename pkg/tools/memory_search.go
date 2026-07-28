@@ -3,6 +3,7 @@ package tools
 import (
 	"fmt"
 
+	"github.com/SAP/astonish/pkg/memory"
 	"github.com/SAP/astonish/pkg/store"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
@@ -54,14 +55,18 @@ func platformMemorySearch(ctx tool.Context, args MemorySearchArgs, searcher stor
 	if maxResults <= 0 {
 		maxResults = 6
 	}
+	searchLimit := maxResults * 3
+	if searchLimit < 20 {
+		searchLimit = 20
+	}
 
 	var results []store.MemorySearchResult
 	var err error
 
 	if searcher != nil {
-		results, err = searcher.SearchAllTiers(ctx, args.Query, maxResults, 0)
+		results, err = searcher.SearchAllTiers(ctx, args.Query, searchLimit, 0)
 	} else if fallback != nil {
-		results, err = fallback.Search(ctx, args.Query, maxResults, 0)
+		results, err = fallback.Search(ctx, args.Query, searchLimit, 0)
 	} else {
 		return PlatformMemorySearchResult{
 			Results: []store.MemorySearchResult{},
@@ -74,12 +79,17 @@ func platformMemorySearch(ctx tool.Context, args MemorySearchArgs, searcher stor
 		return PlatformMemorySearchResult{}, fmt.Errorf("memory search failed: %w", err)
 	}
 
+	results = memory.FilterPreferredScenarioResultsForQuery(args.Query, results)
+
 	if len(results) == 0 {
 		return PlatformMemorySearchResult{
 			Results: []store.MemorySearchResult{},
 			Count:   0,
 			Message: "No matching results found in memory.",
 		}, nil
+	}
+	if len(results) > maxResults {
+		results = results[:maxResults]
 	}
 
 	return PlatformMemorySearchResult{

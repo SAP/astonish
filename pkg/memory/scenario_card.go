@@ -327,6 +327,14 @@ func UpsertScenarioCard(ctx context.Context, memStore store.MemoryStore, card Sc
 }
 
 func FilterPreferredScenarioResults(results []store.MemorySearchResult) []store.MemorySearchResult {
+	return filterPreferredScenarioResults("", results)
+}
+
+func FilterPreferredScenarioResultsForQuery(query string, results []store.MemorySearchResult) []store.MemorySearchResult {
+	return filterPreferredScenarioResults(query, results)
+}
+
+func filterPreferredScenarioResults(query string, results []store.MemorySearchResult) []store.MemorySearchResult {
 	if len(results) == 0 {
 		return results
 	}
@@ -380,9 +388,10 @@ func FilterPreferredScenarioResults(results []store.MemorySearchResult) []store.
 		}
 	}
 	var filtered []store.MemorySearchResult
+	queryTokens := distinctiveScenarioSearchTokens(query)
 	for _, r := range results {
 		if IsScenarioCard(r) {
-			if keptCardIDs[r.ID] || r.ID == "" {
+			if (keptCardIDs[r.ID] || r.ID == "") && scenarioResultMatchesQuery(queryTokens, r) {
 				filtered = append(filtered, r)
 			}
 			continue
@@ -404,6 +413,47 @@ func FilterPreferredScenarioResults(results []store.MemorySearchResult) []store.
 		return filtered[i].Score > filtered[j].Score
 	})
 	return filtered
+}
+
+func distinctiveScenarioSearchTokens(query string) []string {
+	words := regexp.MustCompile(`[a-z0-9]+`).FindAllString(strings.ToLower(query), -1)
+	var tokens []string
+	seen := make(map[string]bool)
+	for _, word := range words {
+		if len(word) < 3 || scenarioStopWords[word] || scenarioSearchStopWords[word] || seen[word] {
+			continue
+		}
+		tokens = append(tokens, word)
+		seen[word] = true
+	}
+	return tokens
+}
+
+func scenarioResultMatchesQuery(queryTokens []string, result store.MemorySearchResult) bool {
+	if len(queryTokens) == 0 {
+		return true
+	}
+	card, ok := ParseScenarioCard(result.Snippet)
+	if !ok {
+		return true
+	}
+	searchText := strings.ToLower(strings.Join([]string{
+		card.CanonicalKey,
+		card.Title,
+		card.Category,
+		strings.Join(card.Aliases, " "),
+		strings.Join(card.Facts, " "),
+		strings.Join(card.RecommendedRecipe, " "),
+		strings.Join(card.Conditions, " "),
+		strings.Join(card.Verification, " "),
+		strings.Join(card.Identity.AnchorTerms, " "),
+	}, "\n"))
+	for _, token := range queryTokens {
+		if strings.Contains(searchText, token) {
+			return true
+		}
+	}
+	return false
 }
 
 func writeYAMLScalar(b *strings.Builder, key, value string) {
@@ -613,4 +663,8 @@ func max(a, b float64) float64 {
 var scenarioStopWords = map[string]bool{
 	"and": true, "are": true, "but": true, "for": true, "from": true, "how": true, "memory": true,
 	"not": true, "the": true, "this": true, "that": true, "use": true, "using": true, "with": true,
+}
+
+var scenarioSearchStopWords = map[string]bool{
+	"api": true,
 }

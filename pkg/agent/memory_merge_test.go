@@ -64,6 +64,27 @@ func TestMemoryMergerCanMarkTraceBackedScenarioCardsVerified(t *testing.T) {
 	}
 }
 
+func TestMemoryMergerUsesTargetMemoryScope(t *testing.T) {
+	memStore := &failingScenarioUpsertStore{}
+	merger := &MemoryMerger{}
+	ctx := store.WithMemoryScope(context.Background(), store.MemoryScopePersonal)
+
+	_, err := merger.SaveOrMerge(ctx, memStore, store.MemoryEntry{
+		Content:  "Use GET https://github.wdf.sap.corp/api/v3/issues for assigned GitHub Enterprise issues.",
+		Category: "infrastructure-sap-github-enterprise",
+	})
+	if err != nil {
+		t.Fatalf("SaveOrMerge returned error: %v", err)
+	}
+	card, ok := mem.ParseScenarioCard(memStore.added.Content)
+	if !ok {
+		t.Fatalf("saved content is not a scenario card: %s", memStore.added.Content)
+	}
+	if card.Scope != string(store.MemoryScopePersonal) {
+		t.Fatalf("Scope = %q, want personal", card.Scope)
+	}
+}
+
 func TestPlatformReflectorMarksExistingSessionCardsVerified(t *testing.T) {
 	card := mem.ScenarioCard{
 		CanonicalKey:      "proxmox-console-access",

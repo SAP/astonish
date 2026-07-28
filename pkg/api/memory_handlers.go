@@ -375,7 +375,7 @@ func MemorySearchCrossTierHandler(w http.ResponseWriter, r *http.Request) {
 			respondError(w, http.StatusInternalServerError, fmt.Sprintf("cross-tier search failed: %v", err))
 			return
 		}
-		results = memory.FilterPreferredScenarioResults(results)
+		results = memory.FilterPreferredScenarioResultsForQuery(req.Query, results)
 		respondJSON(w, http.StatusOK, MemoryListResponse{Results: results, Count: len(results)})
 		return
 	}
@@ -393,7 +393,7 @@ func MemorySearchCrossTierHandler(w http.ResponseWriter, r *http.Request) {
 			respondError(w, http.StatusInternalServerError, fmt.Sprintf("memory search failed: %v", err))
 			return
 		}
-		results = memory.FilterPreferredScenarioResults(results)
+		results = memory.FilterPreferredScenarioResultsForQuery(req.Query, results)
 		respondJSON(w, http.StatusOK, MemoryListResponse{Results: results, Count: len(results)})
 		return
 	}

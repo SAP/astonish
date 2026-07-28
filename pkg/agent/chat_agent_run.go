@@ -798,6 +798,9 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			// so the goroutine survives after the ADK Run returns.
 			reflectCtx := context.Background()
 			reflectCtx = store.WithMemoryStore(reflectCtx, store.MemoryStoreFromContext(ctx))
+			if scope := store.MemoryScopeFromContext(ctx); scope != "" {
+				reflectCtx = store.WithMemoryScope(reflectCtx, scope)
+			}
 			reflectCtx = store.WithSessionID(reflectCtx, store.SessionIDFromContext(ctx))
 			reflectCtx = store.WithUserID(reflectCtx, store.UserIDFromContext(ctx))
 			// Propagate per-request LLM override so the reflector uses the

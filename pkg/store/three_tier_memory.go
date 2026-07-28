@@ -119,9 +119,20 @@ func (t *threeTierMemoryStore) searchAllTiers(ctx context.Context, query string,
 	// Deduplicate by snippet (prefer higher score)
 	seen := make(map[string]int) // snippet -> index in deduped
 	var deduped []MemorySearchResult
-	// Sort by score DESC first so the higher-score version wins
-	sort.Slice(allResults, func(i, j int) bool {
-		return allResults[i].Score > allResults[j].Score
+	// Sort by score DESC first so the higher-score version wins. Use stable
+	// tie-breakers so equivalent scores do not depend on goroutine completion
+	// order, which made identical memory_search calls appear inconsistent.
+	sort.SliceStable(allResults, func(i, j int) bool {
+		if allResults[i].Score != allResults[j].Score {
+			return allResults[i].Score > allResults[j].Score
+		}
+		if allResults[i].Scope != allResults[j].Scope {
+			return tierSortRank(allResults[i].Scope) < tierSortRank(allResults[j].Scope)
+		}
+		if allResults[i].CreatedAt != allResults[j].CreatedAt {
+			return allResults[i].CreatedAt > allResults[j].CreatedAt
+		}
+		return allResults[i].ID < allResults[j].ID
 	})
 	for _, r := range allResults {
 		if _, exists := seen[r.Snippet]; !exists {
@@ -144,4 +155,17 @@ func (t *threeTierMemoryStore) searchAllTiers(ctx context.Context, query string,
 	}
 
 	return filtered, nil
+}
+
+func tierSortRank(scope string) int {
+	switch scope {
+	case string(MemoryScopePersonal):
+		return 0
+	case string(MemoryScopeTeam):
+		return 1
+	case string(MemoryScopeOrg):
+		return 2
+	default:
+		return 3
+	}
 }

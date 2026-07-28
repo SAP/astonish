@@ -313,6 +313,30 @@ func TestFilterPreferredScenarioResultsSuppressesSupersededRawMemories(t *testin
 	}
 }
 
+func TestFilterPreferredScenarioResultsForQuerySuppressesUnrelatedScenarioCards(t *testing.T) {
+	github := ScenarioCard{
+		CanonicalKey:      "infrastructure-sap-github-enterprise",
+		Title:             "SAP GitHub Enterprise issues API",
+		RecommendedRecipe: []string{"Use GET https://github.wdf.sap.corp/api/v3/issues?filter=assigned&state=open&per_page=50."},
+		Status:            ScenarioCardStatusVerified,
+	}
+	openstack := ScenarioCard{
+		CanonicalKey:      "infrastructure-openstack-service-endpoints",
+		Title:             "OpenStack Octavia load balancer list",
+		RecommendedRecipe: []string{"Use openstack-keystone and GET https://loadbalancer-3.qa-de-1.cloud.sap/v2/lbaas/loadbalancers."},
+		Status:            ScenarioCardStatusVerified,
+	}
+	results := []store.MemorySearchResult{
+		{ID: "github-card", Snippet: RenderScenarioCard(github), Category: ScenarioCardCategory, Score: 0.60},
+		{ID: "openstack-card", Snippet: RenderScenarioCard(openstack), Category: ScenarioCardCategory, Score: 0.60},
+	}
+
+	filtered := FilterPreferredScenarioResultsForQuery("github enterprise issues API", results)
+	if len(filtered) != 1 || filtered[0].ID != "github-card" {
+		t.Fatalf("filtered = %#v, want only the GitHub scenario card", filtered)
+	}
+}
+
 func TestHasUsableScenarioRecipeRejectsPlaceholderOnlyCard(t *testing.T) {
 	if HasUsableScenarioRecipe(ScenarioCard{RecommendedRecipe: []string{ScenarioCardPlaceholderRecipe}}) {
 		t.Fatal("placeholder-only scenario card should not be usable durable memory")

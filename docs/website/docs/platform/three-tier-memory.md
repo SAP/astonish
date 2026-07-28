@@ -44,7 +44,7 @@ Each tier uses hybrid search combining two capabilities:
 - **Vector similarity** — semantic search via embedding cosine distance (pgvector for PostgreSQL, built-in for SQLite)
 - **Full-text search** — keyword matching via PostgreSQL tsvector or SQLite FTS5
 
-Results from both methods are fused per-tier, then cross-tier RRF produces the final ranked list.
+Results from both methods are fused per-tier, then cross-tier RRF produces the final ranked list. Ties are sorted deterministically by tier, creation time, and ID so identical searches do not change order because of parallel tier timing. Scenario cards receive an additional query-aware filter to suppress unrelated cards that only matched generic words.
 
 ## Knowledge Promotion Chain
 

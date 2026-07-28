@@ -988,6 +988,7 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 	// use the PG-backed stores (team + three-tier) in platform mode.
 	if svc := store.FromRequest(r); svc != nil {
 		memStore := svc.Memory
+		memoryScope := store.MemoryScopeTeam
 		// If personal memory mode is active, the memory_save tool should
 		// write to the user's personal store instead of team.
 		// The ThreeTierSearcher remains unchanged (always searches all tiers).
@@ -995,10 +996,11 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 			if pu := GetPlatformUser(r); pu != nil {
 				if orgStore, err := svc.TenantRouter.ForOrg(pu.OrgSlug); err == nil {
 					memStore = orgStore.ForUser(pu.ID).Memories()
+					memoryScope = store.MemoryScopePersonal
 				}
 			}
 		}
-		runner.InjectMemoryStores(memStore, svc.MemorySearcher)
+		runner.InjectMemoryStoresWithScope(memStore, memoryScope, svc.MemorySearcher)
 
 		// Inject the cross-session memory merge function so that memory_save
 		// performs dedup/merge instead of blind inserts. This requires the

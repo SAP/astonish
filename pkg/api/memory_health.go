@@ -130,6 +130,9 @@ func BuildMemoryHealth(report MemoryMapResponse, canManageOrg bool, now time.Tim
 
 func memoryRecommendationForGroup(group MemoryMapGroup, canManageOrg bool) (MemoryRecommendation, bool) {
 	rawMemories := nonScenarioMemories(group.Memories)
+	if len(rawMemories) == 0 {
+		return MemoryRecommendation{}, false
+	}
 	if group.HasScenarioCard {
 		_, card, ok := scenarioCardInGroup(group.Memories)
 		if !ok {
@@ -144,18 +147,27 @@ func memoryRecommendationForGroup(group MemoryMapGroup, canManageOrg bool) (Memo
 				Type:        "update_scenario_card",
 				Severity:    "medium",
 				Title:       fmt.Sprintf("Update %s", group.Title),
-				Description: fmt.Sprintf("Add %d newer source memor%s to the existing scenario card.", len(newRaw), pluralY(len(newRaw))),
+				Description: fmt.Sprintf("Add %d newer source memor%s to the existing scenario card, then delete the raw source memor%s.", len(newRaw), pluralY(len(newRaw)), pluralY(len(newRaw))),
 				TargetScope: firstNonEmptyString(merged.Scope, preferredTargetScope(group, canManageOrg)),
 				GroupKey:    group.Key,
-				MemoryIDs:   memoryIDs(newRaw),
+				MemoryIDs:   memoryIDs(rawMemories),
 				Flags:       group.Flags,
 				Card:        merged,
 			}, true
 		}
-		return MemoryRecommendation{}, false
-	}
-	if group.MemoryCount < 2 && !groupHasRiskFlags(group) {
-		return MemoryRecommendation{}, false
+		card.SourceMemoryIDs = appendMissingMemoryIDs(card.SourceMemoryIDs, rawMemories)
+		return MemoryRecommendation{
+			ID:          "cleanup-" + group.Key,
+			Type:        "cleanup_raw_sources",
+			Severity:    "medium",
+			Title:       fmt.Sprintf("Clean up raw memories for %s", group.Title),
+			Description: fmt.Sprintf("Delete %d raw source memor%s already represented by the scenario card.", len(rawMemories), pluralY(len(rawMemories))),
+			TargetScope: firstNonEmptyString(card.Scope, preferredTargetScope(group, canManageOrg)),
+			GroupKey:    group.Key,
+			MemoryIDs:   memoryIDs(rawMemories),
+			Flags:       group.Flags,
+			Card:        card,
+		}, true
 	}
 	targetScope := preferredTargetScope(group, canManageOrg)
 	card := memory.DraftScenarioCardFromMemories(group.Key, targetScope, rawMemories)
@@ -163,12 +175,16 @@ func memoryRecommendationForGroup(group MemoryMapGroup, canManageOrg bool) (Memo
 	if groupHasRiskFlags(group) || len(group.Scopes) > 1 {
 		severity = "high"
 	}
+	description := fmt.Sprintf("Consolidate %d related memor%s into one efficient successful path.", len(rawMemories), pluralY(len(rawMemories)))
+	if !memory.HasUsableScenarioRecipe(card) {
+		description = fmt.Sprintf("Discard %d raw memor%s because they do not form a usable scenario card.", len(rawMemories), pluralY(len(rawMemories)))
+	}
 	return MemoryRecommendation{
 		ID:          "create-" + group.Key,
 		Type:        "create_scenario_card",
 		Severity:    severity,
 		Title:       fmt.Sprintf("Create scenario card for %s", group.Title),
-		Description: fmt.Sprintf("Consolidate %d related memor%s into one efficient successful path.", len(rawMemories), pluralY(len(rawMemories))),
+		Description: description,
 		TargetScope: targetScope,
 		GroupKey:    group.Key,
 		MemoryIDs:   memoryIDs(rawMemories),
@@ -262,6 +278,20 @@ func memoryIDs(memories []store.MemorySearchResult) []string {
 	for _, m := range memories {
 		if m.ID != "" {
 			ids = append(ids, m.ID)
+		}
+	}
+	return ids
+}
+
+func appendMissingMemoryIDs(ids []string, memories []store.MemorySearchResult) []string {
+	seen := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		seen[id] = true
+	}
+	for _, m := range memories {
+		if m.ID != "" && !seen[m.ID] {
+			ids = append(ids, m.ID)
+			seen[m.ID] = true
 		}
 	}
 	return ids

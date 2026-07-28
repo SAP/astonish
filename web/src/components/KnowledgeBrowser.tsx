@@ -332,6 +332,7 @@ function ScenarioCardPreview({ card, onChange }: { card: ScenarioCard; onChange:
 
 function MemoryRecommendationCard({ recommendation, onReview }: { recommendation: MemoryRecommendation; onReview: (recommendation: MemoryRecommendation) => void }) {
   const severityColor = recommendation.severity === 'high' ? 'var(--warning)' : recommendation.severity === 'medium' ? 'var(--info)' : 'var(--muted-foreground)'
+  const isCleanup = recommendation.type === 'cleanup_raw_sources'
   return (
     <div className="rounded-xl border border-border bg-card p-4 shadow-[var(--shadow-soft)]">
       <div className="flex items-start justify-between gap-4">
@@ -352,7 +353,7 @@ function MemoryRecommendationCard({ recommendation, onReview }: { recommendation
           )}
         </div>
         <button onClick={() => onReview(recommendation)} className="flex shrink-0 items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-white" style={{ background: 'var(--brand)' }}>
-          <Wand2 size={14} /> Review
+          <Wand2 size={14} /> {isCleanup ? 'Clean up' : 'Review'}
         </button>
       </div>
     </div>
@@ -650,7 +651,8 @@ export default function KnowledgeBrowser({ theme, user, activeTeam }: KnowledgeB
     setError(null)
     try {
       const saved = await applyMemoryConsolidation({ ...draftCard, scope: draftScope }, draftScope, activeTeam || undefined)
-      setSuccess(`Scenario card ${saved.action}`)
+      const deletedText = saved.deleted_sources ? ` and deleted ${saved.deleted_sources} raw source memor${saved.deleted_sources === 1 ? 'y' : 'ies'}` : ''
+      setSuccess(`Scenario card ${saved.action}${deletedText}`)
       setDraftCard(null)
       if (tab === 'health') {
         setMemoryHealth(await fetchMemoryHealth(500, true, activeTeam || undefined))

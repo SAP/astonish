@@ -203,10 +203,11 @@ Platform mode exposes `GET /api/memories/health` as the product-facing memory or
 
 Memory Health returns reviewable, actionable recommendations, not automatic writes:
 
-- create a scenario card from related raw memories when no card exists yet
+- create a scenario card from any remaining raw memory when no card exists yet
 - update an existing scenario card when new raw source memories are not yet incorporated
+- clean up raw source memories that are already represented by an existing scenario card
 
-Each recommendation contains the proposed card, target scope, source memory IDs, and the diagnostic flags that explain why it was suggested. Applying a recommendation uses the same scenario-card upsert endpoint as manual consolidation; after the card is saved, incorporated raw source memories are deleted. If the proposed card contains only the placeholder recipe, the raw inputs are discarded and no placeholder card is saved.
+Each recommendation contains the proposed card, target scope, source memory IDs, and the diagnostic flags that explain why it was suggested. Applying a recommendation uses the same scenario-card upsert endpoint as manual consolidation; after the card is saved or merged, incorporated raw source memories are deleted. Cleanup recommendations re-save the existing card metadata and delete the still-visible raw source rows. If the proposed card contains only the placeholder recipe, the raw inputs are discarded and no placeholder card is saved.
 
 `GET /api/memories/map` remains available as the advanced diagnostic report behind the Memory Health UI. It groups likely related memory chunks by a canonical topic key and flags conditions that make memory feel scattered or unsafe:
 

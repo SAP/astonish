@@ -155,7 +155,7 @@ func TestBuildMemoryHealthRecommendsExistingCardUpdate(t *testing.T) {
 		t.Fatalf("RecommendationCount = %d, want 1: %#v", health.RecommendationCount, health.Recommendations)
 	}
 	rec := health.Recommendations[0]
-	if rec.Type != "update_scenario_card" || len(rec.MemoryIDs) != 1 || rec.MemoryIDs[0] != "raw-2" {
+	if rec.Type != "update_scenario_card" || len(rec.MemoryIDs) != 2 {
 		t.Fatalf("unexpected recommendation: %#v", rec)
 	}
 	if len(rec.Card.SourceMemoryIDs) != 2 {
@@ -163,7 +163,7 @@ func TestBuildMemoryHealthRecommendsExistingCardUpdate(t *testing.T) {
 	}
 }
 
-func TestBuildMemoryHealthDoesNotRepeatReviewForIncorporatedScenarioCard(t *testing.T) {
+func TestBuildMemoryHealthRecommendsCleanupForIncorporatedRawScenarioCardSources(t *testing.T) {
 	card := memory.ScenarioCard{
 		CanonicalKey:                  "proxmox-console-access",
 		Scope:                         "team",
@@ -179,14 +179,28 @@ func TestBuildMemoryHealthDoesNotRepeatReviewForIncorporatedScenarioCard(t *test
 		{ID: "raw-2", Snippet: "Earlier trial and error failed during a transient outage, but final path uses noVNC.", Category: "proxmox-console-access", Scope: "team"},
 	})
 	health := BuildMemoryHealth(report, true, mustParseTime(t, "2026-07-27T12:00:00Z"))
-	if health.RecommendationCount != 0 {
-		t.Fatalf("RecommendationCount = %d, want 0 for already incorporated source memories: %#v", health.RecommendationCount, health.Recommendations)
+	if health.RecommendationCount != 1 {
+		t.Fatalf("RecommendationCount = %d, want 1 cleanup recommendation for remaining raw source memories: %#v", health.RecommendationCount, health.Recommendations)
 	}
-	if health.Recommendations == nil {
-		t.Fatal("Recommendations should encode as [] instead of null")
+	rec := health.Recommendations[0]
+	if rec.Type != "cleanup_raw_sources" || len(rec.MemoryIDs) != 2 {
+		t.Fatalf("unexpected cleanup recommendation: %#v", rec)
 	}
 	if report.Stats.TrialErrorRiskCount == 0 || report.Stats.TransientRiskCount == 0 {
 		t.Fatalf("advanced map should still expose diagnostic risk flags: %#v", report.Stats)
+	}
+}
+
+func TestBuildMemoryHealthRecommendsSingleRawMemoryCardOnlyAction(t *testing.T) {
+	report := BuildMemoryMap([]store.MemorySearchResult{
+		{ID: "raw-1", Snippet: "Use the noVNC ticket endpoint for Proxmox console access.", Category: "proxmox-console-access", Scope: "team"},
+	})
+	health := BuildMemoryHealth(report, true, mustParseTime(t, "2026-07-27T12:00:00Z"))
+	if health.RecommendationCount != 1 {
+		t.Fatalf("RecommendationCount = %d, want 1 card-only recommendation for single raw memory: %#v", health.RecommendationCount, health.Recommendations)
+	}
+	if health.Recommendations[0].Type != "create_scenario_card" || health.Recommendations[0].MemoryIDs[0] != "raw-1" {
+		t.Fatalf("unexpected recommendation: %#v", health.Recommendations[0])
 	}
 }
 

@@ -205,7 +205,7 @@ The key invariant is that Astonish should save **how to do the thing efficiently
 
 ### Memory Health Recommendations and Advanced Map
 
-Platform mode exposes `GET /api/memories/health` as the product-facing memory organization surface. It evaluates the current user's visible personal, team, and org memories lazily when the Knowledge Browser's **Memory Health** tab is opened. There is no background schedule: a cached evaluation is reused for five days when the memory snapshot has not changed, and the next UI visit after the TTL triggers a fresh evaluation. Users can also force a refresh with **Reanalyze**.
+Platform mode exposes `GET /api/memories/health` as the product-facing memory organization surface. It evaluates the current user's visible personal, team, and org memories lazily when the Knowledge Browser's **Memory Health** tab is opened. There is no background schedule: a cached evaluation is reused for five days only when the visible memory snapshot has not changed. Successful memory mutations explicitly clear the health cache, and users can also force a refresh with **Reanalyze**.
 
 Memory Health returns reviewable, actionable recommendations, not automatic writes:
 

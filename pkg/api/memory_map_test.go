@@ -10,6 +10,20 @@ import (
 	"github.com/SAP/astonish/pkg/store"
 )
 
+func TestInvalidateMemoryHealthCacheClearsEntries(t *testing.T) {
+	memoryHealthCache.Lock()
+	memoryHealthCache.entries = map[string]memoryHealthCacheEntry{
+		"org:team:user": {snapshot: "old"},
+	}
+	memoryHealthCache.Unlock()
+
+	invalidateMemoryHealthCache()
+
+	if size := memoryHealthCacheSize(); size != 0 {
+		t.Fatalf("memory health cache size = %d, want 0", size)
+	}
+}
+
 func TestBuildMemoryMapFlagsScatteredTransientAndTrialErrorRisks(t *testing.T) {
 	memories := []store.MemorySearchResult{
 		{

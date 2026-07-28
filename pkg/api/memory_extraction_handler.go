@@ -205,6 +205,9 @@ func MemoryExtractHandler(w http.ResponseWriter, r *http.Request) {
 	if !dryRun && len(entries) > 0 {
 		// Apply: delete old session memories and insert consolidated ones
 		applied = applyExtraction(r, svc, pu, sessionID, allMemories, entries, teamStore, personalStore)
+		if applied {
+			invalidateMemoryHealthCache()
+		}
 	}
 
 	respondJSON(w, http.StatusOK, MemoryExtractionResponse{

@@ -93,6 +93,7 @@ func MemoryShareToTeamHandler(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to save team scenario card: %v", err))
 		return
 	}
+	invalidateMemoryHealthCache()
 
 	respondJSON(w, http.StatusOK, map[string]any{
 		"saved":   true,
@@ -160,6 +161,7 @@ func MemorySavePersonalHandler(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to save personal scenario card: %v", err))
 		return
 	}
+	invalidateMemoryHealthCache()
 
 	respondJSON(w, http.StatusOK, map[string]any{
 		"saved":   true,
@@ -245,6 +247,7 @@ func MemoryPromoteToOrgHandler(w http.ResponseWriter, r *http.Request) {
 			respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to delete uncardable team memory: %v", err))
 			return
 		}
+		invalidateMemoryHealthCache()
 		respondJSON(w, http.StatusOK, map[string]any{
 			"promoted": false,
 			"scope":    "org",
@@ -258,6 +261,7 @@ func MemoryPromoteToOrgHandler(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to promote memory to org scenario card: %v", err))
 		return
 	}
+	invalidateMemoryHealthCache()
 	if err := teamMem.Delete(r.Context(), req.MemoryID); err != nil {
 		respondError(w, http.StatusInternalServerError, fmt.Sprintf("promoted memory but failed to delete team source memory: %v", err))
 		return
@@ -445,6 +449,7 @@ func MemoryDeleteTeamHandler(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to delete team memory: %v", err))
 		return
 	}
+	invalidateMemoryHealthCache()
 
 	respondJSON(w, http.StatusOK, map[string]any{
 		"deleted": true,
@@ -500,6 +505,7 @@ func MemoryDeleteOrgHandler(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to delete org memory: %v", err))
 		return
 	}
+	invalidateMemoryHealthCache()
 
 	respondJSON(w, http.StatusOK, map[string]any{
 		"deleted": true,
@@ -606,6 +612,7 @@ func MemoryDeletePersonalHandler(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to delete personal memory: %v", err))
 		return
 	}
+	invalidateMemoryHealthCache()
 
 	respondJSON(w, http.StatusOK, map[string]any{
 		"deleted": true,
@@ -681,6 +688,7 @@ func MemoryPromotePersonalToTeamHandler(w http.ResponseWriter, r *http.Request) 
 			respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to delete uncardable personal memory: %v", err))
 			return
 		}
+		invalidateMemoryHealthCache()
 		respondJSON(w, http.StatusOK, map[string]any{
 			"promoted": false,
 			"scope":    "team",
@@ -694,6 +702,7 @@ func MemoryPromotePersonalToTeamHandler(w http.ResponseWriter, r *http.Request) 
 		respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to promote memory to team scenario card: %v", err))
 		return
 	}
+	invalidateMemoryHealthCache()
 	if err := personalMem.Delete(r.Context(), req.MemoryID); err != nil {
 		respondError(w, http.StatusInternalServerError, fmt.Sprintf("promoted memory but failed to delete personal source memory: %v", err))
 		return
@@ -785,6 +794,7 @@ func MemoryUpdateHandler(w http.ResponseWriter, r *http.Request) {
 			respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to delete uncardable memory: %v", err))
 			return
 		}
+		invalidateMemoryHealthCache()
 		respondJSON(w, http.StatusOK, map[string]any{
 			"updated": false,
 			"deleted": true,
@@ -800,6 +810,7 @@ func MemoryUpdateHandler(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to update memory: %v", err))
 		return
 	}
+	invalidateMemoryHealthCache()
 
 	respondJSON(w, http.StatusOK, map[string]any{
 		"updated": true,
@@ -873,6 +884,7 @@ func MemorySaveOrgHandler(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to save org scenario card: %v", err))
 		return
 	}
+	invalidateMemoryHealthCache()
 
 	respondJSON(w, http.StatusOK, map[string]any{
 		"saved":   true,

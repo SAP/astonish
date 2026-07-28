@@ -10,8 +10,16 @@ import (
 )
 
 const (
+	// DefaultScenarioAutoMergeThreshold is intentionally conservative: automatic
+	// merge requires multiple matching identity anchors and no negative signals.
+	// Lower scores are review-only so production false positives fail into Memory
+	// Health instead of silently combining distinct operational scenarios.
 	DefaultScenarioAutoMergeThreshold = 0.82
-	DefaultScenarioReviewThreshold    = 0.55
+
+	// DefaultScenarioReviewThreshold is the lower bound for surfacing likely
+	// related cards to Memory Health. It should catch plausible duplicates without
+	// granting write-path authority to ambiguous matches.
+	DefaultScenarioReviewThreshold = 0.55
 )
 
 type ScenarioIdentity struct {

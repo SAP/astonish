@@ -55,6 +55,11 @@ func platformMemorySearch(ctx tool.Context, args MemorySearchArgs, searcher stor
 	if maxResults <= 0 {
 		maxResults = 6
 	}
+	// Fetch extra candidates before scenario-card de-duplication and query
+	// filtering; otherwise a valid search can shrink below maxResults after
+	// duplicate/unrelated cards are removed. The small fixed multiplier keeps the
+	// direct tool aligned with automatic knowledge retrieval without making every
+	// query a broad memory scan.
 	searchLimit := maxResults * 3
 	if searchLimit < 20 {
 		searchLimit = 20

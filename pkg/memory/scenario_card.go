@@ -330,6 +330,11 @@ func FilterPreferredScenarioResults(results []store.MemorySearchResult) []store.
 	return filterPreferredScenarioResults("", results)
 }
 
+// FilterPreferredScenarioResultsForQuery applies a precision guard after the
+// underlying hybrid/vector search has supplied recall. The token overlap check
+// is deliberately BM25-style and conservative: it suppresses scenario cards that
+// only matched generic terms such as "API", while anchor terms and card content
+// preserve recall for real scenario-specific matches.
 func FilterPreferredScenarioResultsForQuery(query string, results []store.MemorySearchResult) []store.MemorySearchResult {
 	return filterPreferredScenarioResults(query, results)
 }

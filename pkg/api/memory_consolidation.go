@@ -120,6 +120,7 @@ func MemoryConsolidationApplyHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if !memory.HasUsableScenarioRecipe(req.Card) {
 		deletedSources := deleteConsolidatedSources(r, svc, pu, req.Card.SourceMemoryIDs)
+		invalidateMemoryHealthCache()
 		respondJSON(w, http.StatusOK, MemoryConsolidationApplyResponse{
 			Applied:        true,
 			Scope:          req.TargetScope,
@@ -154,6 +155,7 @@ func MemoryConsolidationApplyHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	deletedSources := deleteConsolidatedSources(r, svc, pu, req.Card.SourceMemoryIDs)
 	deletedDuplicateCards := deleteDuplicateScenarioCards(r, svc, pu, req.DuplicateCardIDs, result.ExistingID)
+	invalidateMemoryHealthCache()
 
 	respondJSON(w, http.StatusOK, MemoryConsolidationApplyResponse{
 		Applied:               true,

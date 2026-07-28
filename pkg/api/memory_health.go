@@ -51,6 +51,18 @@ var memoryHealthCache = struct {
 	entries map[string]memoryHealthCacheEntry
 }{entries: make(map[string]memoryHealthCacheEntry)}
 
+func invalidateMemoryHealthCache() {
+	memoryHealthCache.Lock()
+	memoryHealthCache.entries = make(map[string]memoryHealthCacheEntry)
+	memoryHealthCache.Unlock()
+}
+
+func memoryHealthCacheSize() int {
+	memoryHealthCache.Lock()
+	defer memoryHealthCache.Unlock()
+	return len(memoryHealthCache.entries)
+}
+
 // MemoryHealthHandler returns product-facing memory reorganization suggestions.
 // It refreshes lazily: no background schedule runs, and a cached evaluation is
 // reused for five days unless the caller explicitly asks for a refresh.

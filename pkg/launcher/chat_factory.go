@@ -1528,6 +1528,8 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			if bm25Query != "" {
 				searchQuery = bm25Query
 			}
+			// Fetch extra candidates before scenario-card de-duplication and query
+			// filtering so duplicate/unrelated cards do not starve the final context.
 			pgResults, err := searcher.SearchAllTiers(ctx, searchQuery, maxResults*2, minScore)
 			if err != nil {
 				return nil, err
@@ -1562,6 +1564,8 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			if bm25Query != "" {
 				searchQuery = bm25Query
 			}
+			// Fetch extra candidates before scenario-card de-duplication and query
+			// filtering so duplicate/unrelated cards do not starve the final context.
 			pgResults, err := searcher.SearchAllTiersByCategory(ctx, searchQuery, maxResults*2, minScore, category)
 			if err != nil {
 				return nil, err

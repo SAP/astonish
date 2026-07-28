@@ -82,7 +82,7 @@ Studio provides a visual interface for memory management. The main organization 
 - Browse all memory entries with search and filtering
 - View memory content, tags, and metadata
 - Use **Memory Health** to review suggested organization improvements
-- Reanalyze memory on demand; otherwise fresh evaluations are reused for five days
+- Reanalyze memory on demand; otherwise unchanged evaluations are reused for five days and automatically cleared after memory changes
 - Draft and save scenario cards from actionable recommendations
 - Merge duplicate scenario cards when Memory Health identifies two cards as the same scenario; Studio shows the resolver signals and deletes only the explicit duplicate card rows after the merged card is saved
 - Open the advanced **Memory Map** only when you need low-level diagnostics for transitional raw memories

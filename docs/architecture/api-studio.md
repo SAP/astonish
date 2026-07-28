@@ -103,7 +103,7 @@ The Studio UI is built with React 19, Vite 7, and Tailwind CSS 4. Key components
 ### Rate Limiting and Security
 
 - **Rate limiting**: Applied to API endpoints to prevent abuse.
-- **CSP headers**: Content Security Policy headers prevent XSS.
+- **CSP headers**: Content Security Policy headers prevent XSS while allowing the production font stylesheet from Google Fonts and the client-side GitHub release check.
 - **Device authorization**: Protects Studio access.
 - **Credential redaction**: All API responses pass through the Redactor.
 

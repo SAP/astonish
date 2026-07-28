@@ -150,6 +150,35 @@ describe('KnowledgeBrowser Memory Health', () => {
     expect(screen.getAllByText('Trial/error wording').length).toBeGreaterThan(0)
   })
 
+  it('renders empty memory health when backend returns null arrays', async () => {
+    const actor = userEvent.setup()
+    vi.mocked(fetchMemoryHealth).mockResolvedValueOnce({
+      evaluated_at: '2026-07-27T12:00:00Z',
+      expires_at: '2026-08-01T12:00:00Z',
+      generated: true,
+      recommendation_count: 0,
+      recommendations: null,
+      map: {
+        stats: {
+          total_memories: 0,
+          group_count: 0,
+          duplicate_risk_count: 0,
+          scattered_topic_count: 0,
+          transient_risk_count: 0,
+          trial_error_risk_count: 0,
+        },
+        groups: null,
+      },
+    } as any)
+
+    render(<KnowledgeBrowser theme="light" user={user} activeTeam="core" />)
+
+    await actor.click(await screen.findByRole('button', { name: /memory health/i }))
+
+    expect(await screen.findByText(/no suggested improvements right now/i)).toBeInTheDocument()
+    expect(screen.getByText('Memory groups')).toBeInTheDocument()
+  })
+
   it('reviews, edits, and applies a memory health recommendation', async () => {
     const actor = userEvent.setup()
 

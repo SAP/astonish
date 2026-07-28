@@ -22,13 +22,16 @@ import (
 // media-src allows blob: so Studio can play video/audio artifacts (e.g.
 // browser session recordings) loaded via createObjectURL after a credentialed
 // fetch — a bare <video src="/api/..."> cannot send team auth headers.
+//
+// fonts.googleapis.com/fonts.gstatic.com are used by the production index.html
+// font link. api.github.com is used by the client-side release update check.
 const cspPolicy = "default-src 'self'; " +
 	"script-src 'self' 'sha256-QPIelXUbpkDESZsTgggSaMGNOA/Le9qMm+4Wa+lXIvs='; " +
-	"style-src 'self' 'unsafe-inline'; " +
+	"style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
 	"img-src 'self' data: blob:; " +
 	"media-src 'self' blob:; " +
-	"font-src 'self'; " +
-	"connect-src 'self' ws: wss:; " +
+	"font-src 'self' https://fonts.gstatic.com; " +
+	"connect-src 'self' ws: wss: https://api.github.com; " +
 	"frame-src 'self'; " +
 	"object-src 'none'; " +
 	"base-uri 'self'; " +

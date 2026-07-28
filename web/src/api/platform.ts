@@ -329,6 +329,87 @@ export interface MemoryMapResponse {
   }
 }
 
+const emptyMemoryMapStats = {
+  total_memories: 0,
+  group_count: 0,
+  duplicate_risk_count: 0,
+  scattered_topic_count: 0,
+  transient_risk_count: 0,
+  trial_error_risk_count: 0,
+}
+
+function asArray<T>(value: T[] | null | undefined): T[] {
+  return Array.isArray(value) ? value : []
+}
+
+function normalizeScenarioCard(card: Partial<ScenarioCard> | null | undefined): ScenarioCard {
+  return {
+    canonical_key: card?.canonical_key || '',
+    scope: card?.scope,
+    title: card?.title || '',
+    aliases: asArray(card?.aliases),
+    category: card?.category,
+    facts: asArray(card?.facts),
+    recommended_recipe: asArray(card?.recommended_recipe),
+    conditions: asArray(card?.conditions),
+    cautions_or_conditional_failures: asArray(card?.cautions_or_conditional_failures),
+    verification: asArray(card?.verification),
+    source_memory_ids: asArray(card?.source_memory_ids),
+    source_session_ids: asArray(card?.source_session_ids),
+    status: card?.status || 'draft',
+    confidence: card?.confidence,
+    last_verified_at: card?.last_verified_at,
+  }
+}
+
+function normalizeMemoryMapResponse(data: Partial<MemoryMapResponse> | null | undefined): MemoryMapResponse {
+  const stats = data?.stats || emptyMemoryMapStats
+  return {
+    groups: asArray(data?.groups).map(group => ({
+      ...group,
+      scopes: asArray(group.scopes),
+      categories: asArray(group.categories),
+      session_ids: asArray(group.session_ids),
+      created_by: asArray(group.created_by),
+      flags: asArray(group.flags),
+      representative: group.representative || { id: '', snippet: '', category: '', scope: '' },
+      memories: asArray(group.memories),
+    })),
+    stats: {
+      total_memories: stats.total_memories || 0,
+      group_count: stats.group_count || 0,
+      duplicate_risk_count: stats.duplicate_risk_count || 0,
+      scattered_topic_count: stats.scattered_topic_count || 0,
+      transient_risk_count: stats.transient_risk_count || 0,
+      trial_error_risk_count: stats.trial_error_risk_count || 0,
+    },
+  }
+}
+
+function normalizeMemoryHealthResponse(data: Partial<MemoryHealthResponse> | null | undefined): MemoryHealthResponse {
+  const recommendations = asArray(data?.recommendations).map(recommendation => ({
+    ...recommendation,
+    id: recommendation.id || '',
+    type: recommendation.type || '',
+    severity: recommendation.severity || 'medium',
+    title: recommendation.title || 'Memory recommendation',
+    description: recommendation.description || '',
+    target_scope: recommendation.target_scope || 'team',
+    group_key: recommendation.group_key || '',
+    memory_ids: asArray(recommendation.memory_ids),
+    flags: asArray(recommendation.flags),
+    card: normalizeScenarioCard(recommendation.card),
+  }))
+  return {
+    evaluated_at: data?.evaluated_at || new Date(0).toISOString(),
+    expires_at: data?.expires_at || new Date(0).toISOString(),
+    generated: Boolean(data?.generated),
+    recommendation_count: data?.recommendation_count ?? recommendations.length,
+    recommendations,
+    map: normalizeMemoryMapResponse(data?.map),
+  }
+}
+
 export async function searchMemories(query: string, limit?: number, teamSlug?: string): Promise<MemoryEntry[]> {
   const res = await teamFetch('/api/memories/search', {
     method: 'POST',
@@ -344,7 +425,7 @@ export async function fetchMemoryMap(limit?: number, teamSlug?: string): Promise
   const suffix = limit ? `?limit=${encodeURIComponent(String(limit))}` : ''
   const res = await teamFetch(`/api/memories/map${suffix}`, undefined, teamSlug)
   if (!res.ok) await throwBackendError(res, 'Failed to fetch memory map')
-  return res.json()
+  return normalizeMemoryMapResponse(await res.json())
 }
 
 export async function fetchMemoryHealth(limit?: number, refresh?: boolean, teamSlug?: string): Promise<MemoryHealthResponse> {
@@ -354,7 +435,7 @@ export async function fetchMemoryHealth(limit?: number, refresh?: boolean, teamS
   const suffix = params.toString() ? `?${params.toString()}` : ''
   const res = await teamFetch(`/api/memories/health${suffix}`, undefined, teamSlug)
   if (!res.ok) await throwBackendError(res, 'Failed to analyze memory health')
-  return res.json()
+  return normalizeMemoryHealthResponse(await res.json())
 }
 
 export async function previewMemoryConsolidation(key: string, targetScope: string, memoryIds?: string[], teamSlug?: string): Promise<MemoryConsolidationPreview> {

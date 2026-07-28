@@ -106,7 +106,7 @@ func MemoryHealthHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func BuildMemoryHealth(report MemoryMapResponse, canManageOrg bool, now time.Time) MemoryHealthResponse {
-	var recommendations []MemoryRecommendation
+	recommendations := make([]MemoryRecommendation, 0)
 	for _, group := range report.Groups {
 		if rec, ok := memoryRecommendationForGroup(group, canManageOrg); ok {
 			recommendations = append(recommendations, rec)

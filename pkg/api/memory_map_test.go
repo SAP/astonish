@@ -182,6 +182,9 @@ func TestBuildMemoryHealthDoesNotRepeatReviewForIncorporatedScenarioCard(t *test
 	if health.RecommendationCount != 0 {
 		t.Fatalf("RecommendationCount = %d, want 0 for already incorporated source memories: %#v", health.RecommendationCount, health.Recommendations)
 	}
+	if health.Recommendations == nil {
+		t.Fatal("Recommendations should encode as [] instead of null")
+	}
 	if report.Stats.TrialErrorRiskCount == 0 || report.Stats.TransientRiskCount == 0 {
 		t.Fatalf("advanced map should still expose diagnostic risk flags: %#v", report.Stats)
 	}

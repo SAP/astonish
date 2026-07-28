@@ -228,7 +228,10 @@ function MemoryMapFlagBadge({ type }: { type: string }) {
 function MemoryMapGroupCard({ group, onDraft }: { group: MemoryMapGroup; onDraft: (group: MemoryMapGroup) => void }) {
   const [expanded, setExpanded] = useState(false)
   const preview = group.representative?.snippet || 'No representative memory content available.'
-  const visibleMemories = expanded ? group.memories : group.memories.slice(0, 3)
+  const memories = group.memories || []
+  const scopes = group.scopes || []
+  const categories = group.categories || []
+  const visibleMemories = expanded ? memories : memories.slice(0, 3)
 
   return (
     <div className="rounded-xl border border-border bg-card p-4 shadow-[var(--shadow-soft)]">
@@ -260,8 +263,8 @@ function MemoryMapGroupCard({ group, onDraft }: { group: MemoryMapGroup; onDraft
       </div>
 
       <div className="flex flex-wrap gap-2 mt-4">
-        {group.scopes.map(scope => <ScopeBadge key={scope} scope={scope} />)}
-        {group.categories.map(category => (
+        {scopes.map(scope => <ScopeBadge key={scope} scope={scope} />)}
+        {categories.map(category => (
           <span key={category} className="rounded-full px-2 py-0.5 text-xs" style={{ background: 'var(--bg-tertiary)', color: 'var(--text-muted)', border: '1px solid var(--border-color)' }}>
             {category}
           </span>
@@ -291,14 +294,14 @@ function MemoryMapGroupCard({ group, onDraft }: { group: MemoryMapGroup; onDraft
         </div>
       )}
 
-      {group.memories.length > 3 && (
+      {memories.length > 3 && (
         <button
           onClick={() => setExpanded(v => !v)}
           className="mt-3 flex items-center gap-1 text-xs font-medium transition-colors hover:opacity-80"
           style={{ color: 'var(--brand)' }}
         >
           {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-          {expanded ? 'Show fewer memories' : `Show all ${group.memories.length} memories`}
+          {expanded ? 'Show fewer memories' : `Show all ${memories.length} memories`}
         </button>
       )}
     </div>
@@ -338,7 +341,7 @@ function MemoryRecommendationCard({ recommendation, onReview }: { recommendation
               {recommendation.severity}
             </span>
             <ScopeBadge scope={recommendation.target_scope} />
-            <span className="text-xs" style={{ color: 'var(--text-muted)' }}>{recommendation.memory_ids.length} source memor{recommendation.memory_ids.length === 1 ? 'y' : 'ies'}</span>
+            <span className="text-xs" style={{ color: 'var(--text-muted)' }}>{(recommendation.memory_ids || []).length} source memor{(recommendation.memory_ids || []).length === 1 ? 'y' : 'ies'}</span>
           </div>
           <h3 className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>{recommendation.title}</h3>
           <p className="mt-1 text-sm" style={{ color: 'var(--text-secondary)' }}>{recommendation.description}</p>
@@ -365,6 +368,8 @@ function MemoryHealthPanel({ health, onRefresh, onReview, showAdvancedMap, onTog
       </div>
     )
   }
+  const recommendations = health.recommendations || []
+  const map = health.map || { groups: [], stats: { total_memories: 0, group_count: 0, duplicate_risk_count: 0, scattered_topic_count: 0, transient_risk_count: 0, trial_error_risk_count: 0 } }
   const evaluated = new Date(health.evaluated_at).toLocaleString()
   const expires = new Date(health.expires_at).toLocaleDateString()
 
@@ -392,16 +397,16 @@ function MemoryHealthPanel({ health, onRefresh, onReview, showAdvancedMap, onTog
           </div>
           <div className="rounded-lg border p-3" style={{ background: 'var(--bg-primary)', borderColor: 'var(--border-color)' }}>
             <div className="text-xs" style={{ color: 'var(--text-muted)' }}>Memory groups</div>
-            <div className="mt-1 text-xl font-semibold" style={{ color: 'var(--text-primary)' }}>{health.map.stats.group_count}</div>
+            <div className="mt-1 text-xl font-semibold" style={{ color: 'var(--text-primary)' }}>{map.stats.group_count}</div>
           </div>
           <div className="rounded-lg border p-3" style={{ background: 'var(--bg-primary)', borderColor: 'var(--border-color)' }}>
             <div className="text-xs" style={{ color: 'var(--text-muted)' }}>Duplicate risks</div>
-            <div className="mt-1 text-xl font-semibold" style={{ color: 'var(--text-primary)' }}>{health.map.stats.duplicate_risk_count}</div>
+            <div className="mt-1 text-xl font-semibold" style={{ color: 'var(--text-primary)' }}>{map.stats.duplicate_risk_count}</div>
           </div>
         </div>
       </div>
 
-      {health.recommendations.length === 0 ? (
+      {recommendations.length === 0 ? (
         <div className="rounded-xl border p-8 text-center" style={{ background: 'var(--bg-secondary)', borderColor: 'var(--border-color)', color: 'var(--text-muted)' }}>
           <Check size={36} className="mx-auto mb-3 opacity-40" />
           <p className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>No suggested improvements right now.</p>
@@ -409,7 +414,7 @@ function MemoryHealthPanel({ health, onRefresh, onReview, showAdvancedMap, onTog
         </div>
       ) : (
         <div className="space-y-3">
-          {health.recommendations.map(recommendation => <MemoryRecommendationCard key={recommendation.id} recommendation={recommendation} onReview={onReview} />)}
+          {recommendations.map(recommendation => <MemoryRecommendationCard key={recommendation.id} recommendation={recommendation} onReview={onReview} />)}
         </div>
       )}
 
@@ -418,7 +423,7 @@ function MemoryHealthPanel({ health, onRefresh, onReview, showAdvancedMap, onTog
           {showAdvancedMap ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
           {showAdvancedMap ? 'Hide advanced Memory Map' : 'Show advanced Memory Map'}
         </button>
-        {showAdvancedMap && <div className="mt-4"><MemoryMapPanel report={health.map} onRefresh={onRefresh} onDraft={onDraftFromMap} /></div>}
+        {showAdvancedMap && <div className="mt-4"><MemoryMapPanel report={map} onRefresh={onRefresh} onDraft={onDraftFromMap} /></div>}
       </div>
     </div>
   )
@@ -610,7 +615,7 @@ export default function KnowledgeBrowser({ theme, user, activeTeam }: KnowledgeB
     setDrafting(true)
     setError(null)
     try {
-      const preview = await previewMemoryConsolidation(group.key, draftScope, group.memories.map(m => m.id).filter(Boolean), activeTeam || undefined)
+      const preview = await previewMemoryConsolidation(group.key, draftScope, (group.memories || []).map(m => m.id).filter(Boolean), activeTeam || undefined)
       setDraftCard(preview.card)
       setDraftScope((preview.card.scope as 'personal' | 'team' | 'org') || draftScope)
     } catch (err: any) {

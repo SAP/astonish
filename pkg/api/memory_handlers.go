@@ -1,13 +1,14 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"net/http"
 
 	"github.com/gorilla/mux"
 
+	"github.com/SAP/astonish/pkg/memory"
 	"github.com/SAP/astonish/pkg/store"
 )
 
@@ -77,16 +78,28 @@ func MemoryShareToTeamHandler(w http.ResponseWriter, r *http.Request) {
 		SourcePath: req.SourcePath,
 		CreatedBy:  effectiveUserID(r),
 	}
-
-	if err := svc.Memory.Add(r.Context(), entry); err != nil {
-		respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to save team memory: %v", err))
+	card := memory.DraftScenarioCardFromMemoryEntry("team", entry)
+	if !memory.HasUsableScenarioRecipe(card) {
+		respondJSON(w, http.StatusOK, map[string]any{
+			"saved":   false,
+			"scope":   "team",
+			"action":  "discarded",
+			"message": "Memory was not saved because it did not form a usable scenario card",
+		})
 		return
 	}
+	result, err := memory.UpsertScenarioCard(r.Context(), svc.Memory, card)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to save team scenario card: %v", err))
+		return
+	}
+	invalidateMemoryHealthCache()
 
 	respondJSON(w, http.StatusOK, map[string]any{
 		"saved":   true,
 		"scope":   "team",
-		"message": "Memory saved to team",
+		"action":  result.Action,
+		"message": "Scenario card saved to team",
 	})
 }
 
@@ -131,17 +144,30 @@ func MemorySavePersonalHandler(w http.ResponseWriter, r *http.Request) {
 		Content:    req.Content,
 		Category:   req.Category,
 		SourcePath: req.SourcePath,
+		CreatedBy:  pu.ID,
 	}
-
-	if err := personalMem.Add(r.Context(), entry); err != nil {
-		respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to save personal memory: %v", err))
+	card := memory.DraftScenarioCardFromMemoryEntry("personal", entry)
+	if !memory.HasUsableScenarioRecipe(card) {
+		respondJSON(w, http.StatusOK, map[string]any{
+			"saved":   false,
+			"scope":   "personal",
+			"action":  "discarded",
+			"message": "Memory was not saved because it did not form a usable scenario card",
+		})
 		return
 	}
+	result, err := memory.UpsertScenarioCard(r.Context(), personalMem, card)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to save personal scenario card: %v", err))
+		return
+	}
+	invalidateMemoryHealthCache()
 
 	respondJSON(w, http.StatusOK, map[string]any{
 		"saved":   true,
 		"scope":   "personal",
-		"message": "Memory saved to personal store",
+		"action":  result.Action,
+		"message": "Scenario card saved to personal store",
 	})
 }
 
@@ -214,33 +240,38 @@ func MemoryPromoteToOrgHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Copy to org store
 	orgMem := orgStore.OrgMemories()
-	entry := store.MemoryEntry{
-		Content:    source.Snippet,
-		Category:   source.Category,
-		SourcePath: source.Path,
-		CreatedBy:  pu.ID,
-		Metadata: map[string]any{
-			"promoted_from_team": req.TeamSlug,
-		},
-	}
-
-	if err := orgMem.Add(r.Context(), entry); err != nil {
-		respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to promote memory to org: %v", err))
+	card := memory.DraftScenarioCardFromMemories("", "org", []store.MemorySearchResult{*source})
+	if !memory.HasUsableScenarioRecipe(card) {
+		if err := teamMem.Delete(r.Context(), req.MemoryID); err != nil {
+			respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to delete uncardable team memory: %v", err))
+			return
+		}
+		invalidateMemoryHealthCache()
+		respondJSON(w, http.StatusOK, map[string]any{
+			"promoted": false,
+			"scope":    "org",
+			"action":   "discarded",
+			"message":  fmt.Sprintf("Memory from team '%s' was discarded because it did not form a usable scenario card", req.TeamSlug),
+		})
 		return
 	}
-
-	// Delete from team store (move semantics)
+	result, err := memory.UpsertScenarioCard(r.Context(), orgMem, card)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to promote memory to org scenario card: %v", err))
+		return
+	}
+	invalidateMemoryHealthCache()
 	if err := teamMem.Delete(r.Context(), req.MemoryID); err != nil {
-		// Non-fatal: memory was already promoted to org
-		slog.Warn("failed to delete team memory after promotion", "error", err)
+		respondError(w, http.StatusInternalServerError, fmt.Sprintf("promoted memory but failed to delete team source memory: %v", err))
+		return
 	}
 
 	respondJSON(w, http.StatusOK, map[string]any{
 		"promoted": true,
 		"scope":    "org",
-		"message":  fmt.Sprintf("Memory promoted from team '%s' to org", req.TeamSlug),
+		"action":   result.Action,
+		"message":  fmt.Sprintf("Memory promoted from team '%s' into org scenario card", req.TeamSlug),
 	})
 }
 
@@ -348,6 +379,7 @@ func MemorySearchCrossTierHandler(w http.ResponseWriter, r *http.Request) {
 			respondError(w, http.StatusInternalServerError, fmt.Sprintf("cross-tier search failed: %v", err))
 			return
 		}
+		results = memory.FilterPreferredScenarioResultsForQuery(req.Query, results)
 		respondJSON(w, http.StatusOK, MemoryListResponse{Results: results, Count: len(results)})
 		return
 	}
@@ -365,6 +397,7 @@ func MemorySearchCrossTierHandler(w http.ResponseWriter, r *http.Request) {
 			respondError(w, http.StatusInternalServerError, fmt.Sprintf("memory search failed: %v", err))
 			return
 		}
+		results = memory.FilterPreferredScenarioResultsForQuery(req.Query, results)
 		respondJSON(w, http.StatusOK, MemoryListResponse{Results: results, Count: len(results)})
 		return
 	}
@@ -416,6 +449,7 @@ func MemoryDeleteTeamHandler(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to delete team memory: %v", err))
 		return
 	}
+	invalidateMemoryHealthCache()
 
 	respondJSON(w, http.StatusOK, map[string]any{
 		"deleted": true,
@@ -471,6 +505,7 @@ func MemoryDeleteOrgHandler(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to delete org memory: %v", err))
 		return
 	}
+	invalidateMemoryHealthCache()
 
 	respondJSON(w, http.StatusOK, map[string]any{
 		"deleted": true,
@@ -577,6 +612,7 @@ func MemoryDeletePersonalHandler(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to delete personal memory: %v", err))
 		return
 	}
+	invalidateMemoryHealthCache()
 
 	respondJSON(w, http.StatusOK, map[string]any{
 		"deleted": true,
@@ -646,28 +682,37 @@ func MemoryPromotePersonalToTeamHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Copy to team store with created_by
-	teamEntry := store.MemoryEntry{
-		Content:   entry.Snippet,
-		Category:  entry.Category,
-		CreatedBy: pu.ID,
-	}
-	if err := svc.Memory.Add(r.Context(), teamEntry); err != nil {
-		respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to promote memory to team: %v", err))
+	card := memory.DraftScenarioCardFromMemories("", "team", []store.MemorySearchResult{*entry})
+	if !memory.HasUsableScenarioRecipe(card) {
+		if err := personalMem.Delete(r.Context(), req.MemoryID); err != nil {
+			respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to delete uncardable personal memory: %v", err))
+			return
+		}
+		invalidateMemoryHealthCache()
+		respondJSON(w, http.StatusOK, map[string]any{
+			"promoted": false,
+			"scope":    "team",
+			"action":   "discarded",
+			"message":  "Memory was discarded because it did not form a usable scenario card",
+		})
 		return
 	}
-
-	// Delete from personal store (move semantics)
+	result, err := memory.UpsertScenarioCard(r.Context(), svc.Memory, card)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to promote memory to team scenario card: %v", err))
+		return
+	}
+	invalidateMemoryHealthCache()
 	if err := personalMem.Delete(r.Context(), req.MemoryID); err != nil {
-		// Non-fatal: the memory was already copied to team
-		// Log but don't fail the response
-		slog.Warn("failed to delete personal memory after promotion", "error", err)
+		respondError(w, http.StatusInternalServerError, fmt.Sprintf("promoted memory but failed to delete personal source memory: %v", err))
+		return
 	}
 
 	respondJSON(w, http.StatusOK, map[string]any{
 		"promoted": true,
 		"scope":    "team",
-		"message":  "Memory promoted from personal to team",
+		"action":   result.Action,
+		"message":  "Memory promoted into team scenario card",
 	})
 }
 
@@ -738,16 +783,40 @@ func MemoryUpdateHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Perform the update
-	if err := memStore.Update(r.Context(), id, req.Content, req.Category); err != nil {
+	content, category, usable := scenarioCardUpdateContent(scope, store.MemoryEntry{
+		Content:   req.Content,
+		Category:  req.Category,
+		CreatedBy: pu.ID,
+		SessionID: existing.SessionID,
+	})
+	if !usable {
+		if err := memStore.Delete(r.Context(), id); err != nil {
+			respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to delete uncardable memory: %v", err))
+			return
+		}
+		invalidateMemoryHealthCache()
+		respondJSON(w, http.StatusOK, map[string]any{
+			"updated": false,
+			"deleted": true,
+			"id":      id,
+			"scope":   scope,
+			"action":  "discarded",
+		})
+		return
+	}
+
+	// Perform the update as a scenario card. Raw edits are staging inputs only.
+	if err := memStore.Update(r.Context(), id, content, category); err != nil {
 		respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to update memory: %v", err))
 		return
 	}
+	invalidateMemoryHealthCache()
 
 	respondJSON(w, http.StatusOK, map[string]any{
 		"updated": true,
 		"id":      id,
 		"scope":   scope,
+		"action":  "updated_scenario_card",
 	})
 }
 
@@ -800,21 +869,170 @@ func MemorySaveOrgHandler(w http.ResponseWriter, r *http.Request) {
 		Category:  req.Category,
 		CreatedBy: pu.ID,
 	}
-	if err := orgMem.Add(r.Context(), entry); err != nil {
-		respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to save org memory: %v", err))
+	card := memory.DraftScenarioCardFromMemoryEntry("org", entry)
+	if !memory.HasUsableScenarioRecipe(card) {
+		respondJSON(w, http.StatusOK, map[string]any{
+			"saved":   false,
+			"scope":   "org",
+			"action":  "discarded",
+			"message": "Memory was not saved because it did not form a usable scenario card",
+		})
 		return
 	}
+	result, err := memory.UpsertScenarioCard(r.Context(), orgMem, card)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to save org scenario card: %v", err))
+		return
+	}
+	invalidateMemoryHealthCache()
 
 	respondJSON(w, http.StatusOK, map[string]any{
 		"saved":   true,
 		"scope":   "org",
-		"message": "Memory saved to organization",
+		"action":  result.Action,
+		"message": "Scenario card saved to organization",
 	})
 }
 
 // --------------------------------------------------------------------------
 // Helpers (memory-specific)
 // --------------------------------------------------------------------------
+
+func scenarioCardUpdateContent(scope string, entry store.MemoryEntry) (string, string, bool) {
+	if card, ok := memory.ParseScenarioCard(entry.Content); ok {
+		if card.Scope == "" {
+			card.Scope = scope
+		}
+		if !memory.HasUsableScenarioRecipe(card) {
+			return "", "", false
+		}
+		return memory.RenderScenarioCard(card), memory.ScenarioCardCategory, true
+	}
+	card := memory.DraftScenarioCardFromMemoryEntry(scope, entry)
+	if !memory.HasUsableScenarioRecipe(card) {
+		return "", "", false
+	}
+	return memory.RenderScenarioCard(card), memory.ScenarioCardCategory, true
+}
+
+func deleteConsolidatedSources(r *http.Request, svc *store.Services, pu *PlatformUser, sourceIDs []string) int {
+	if len(sourceIDs) == 0 || svc == nil || pu == nil {
+		return 0
+	}
+	return deleteSourceIDsFromStores(r.Context(), sourceIDs, memoryStoresForVisibleScopes(r, svc, pu))
+}
+
+func deleteSourceIDsFromStores(ctx context.Context, sourceIDs []string, stores []store.MemoryStore) int {
+	deleted := 0
+	seen := make(map[string]bool)
+	for _, id := range sourceIDs {
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		for _, memStore := range stores {
+			if memStore == nil {
+				continue
+			}
+			existing, err := memStore.Get(ctx, id)
+			if err != nil || existing == nil || memory.IsScenarioCard(*existing) {
+				continue
+			}
+			if err := memStore.Delete(ctx, id); err == nil {
+				deleted++
+			}
+			break
+		}
+	}
+	return deleted
+}
+
+func preferredPreservedScenarioCardID(ctx context.Context, memStore store.MemoryStore, duplicateIDs []string, card memory.ScenarioCard) string {
+	if memStore == nil {
+		return ""
+	}
+	duplicateSet := make(map[string]bool, len(duplicateIDs))
+	for _, id := range duplicateIDs {
+		if id != "" {
+			duplicateSet[id] = true
+		}
+	}
+	existingCards, err := memStore.List(ctx, memory.ScenarioCardCategory, 1000, 0)
+	if err != nil {
+		return ""
+	}
+	statsCards := make([]memory.ScenarioCard, 0, len(existingCards)+1)
+	for _, existing := range existingCards {
+		if existingCard, ok := memory.ParseScenarioCard(existing.Snippet); ok {
+			statsCards = append(statsCards, existingCard)
+		}
+	}
+	stats := memory.BuildScenarioCorpusStats(append(statsCards, card))
+	for _, existing := range existingCards {
+		if existing.ID == "" || duplicateSet[existing.ID] {
+			continue
+		}
+		existingCard, ok := memory.ParseScenarioCard(existing.Snippet)
+		if !ok {
+			continue
+		}
+		if memory.ScoreScenarioPair(existingCard, card, stats).Decision == "merge" {
+			return existing.ID
+		}
+	}
+	return ""
+}
+
+func deleteDuplicateScenarioCards(r *http.Request, svc *store.Services, pu *PlatformUser, duplicateIDs []string, preservedID string) int {
+	if len(duplicateIDs) == 0 || svc == nil || pu == nil {
+		return 0
+	}
+	deleted := 0
+	seen := make(map[string]bool)
+	for _, id := range duplicateIDs {
+		if id == "" || id == preservedID || seen[id] {
+			continue
+		}
+		seen[id] = true
+		for _, memStore := range memoryStoresForVisibleScopes(r, svc, pu) {
+			if memStore == nil {
+				continue
+			}
+			existing, err := memStore.Get(r.Context(), id)
+			if err != nil || existing == nil || !memory.IsScenarioCard(*existing) {
+				continue
+			}
+			if err := memStore.Delete(r.Context(), id); err == nil {
+				deleted++
+			}
+			break
+		}
+	}
+	return deleted
+}
+
+func memoryStoresForVisibleScopes(r *http.Request, svc *store.Services, pu *PlatformUser) []store.MemoryStore {
+	stores := make([]store.MemoryStore, 0, 3)
+	if svc.TenantRouter != nil {
+		if orgStore, err := svc.TenantRouter.ForOrg(pu.OrgSlug); err == nil {
+			if personal := orgStore.ForUser(pu.ID).Memories(); personal != nil {
+				stores = append(stores, personal)
+			}
+			teamSlug := activeTeamSlug(r, pu)
+			if team := orgStore.ForTeam(teamSlug).Memories(); team != nil {
+				stores = append(stores, team)
+			}
+			if orgMem := orgStore.OrgMemories(); orgMem != nil {
+				stores = append(stores, orgMem)
+			}
+			return stores
+		}
+	}
+	if svc.Memory != nil {
+		stores = append(stores, svc.Memory)
+	}
+	return stores
+}
 
 // resolveMemoryStoreForScope returns the appropriate MemoryStore for a given scope.
 func resolveMemoryStoreForScope(r *http.Request, svc *store.Services, pu *PlatformUser, scope string) (store.MemoryStore, error) {

@@ -58,6 +58,9 @@ User Message
    - Guidance docs (max 3, min score 0.3) -- how-to instructions
    - General knowledge (max 5, min score 0.3) -- memory, skills, flows
    Results injected into SystemPromptBuilder.RelevantKnowledge
+   A content-less `_knowledge_injection` diagnostic event records the query,
+   BM25 context length, result count, token estimate, and result provenance
+   (id, scope, creator, created_at, session_id when available).
     |
     v
 3. Tool Discovery: Hybrid search on ToolIndex
@@ -195,12 +198,15 @@ When the conversation approaches 80% of the context window, the `Compactor` (fro
 
 ### Memory Reflection
 
-After each turn with 3+ tool calls, the `MemoryReflector` runs a silent post-task LLM call:
+In platform mode, `PlatformReflector` in `pkg/agent/platform_reflector.go` runs a silent post-task LLM call after non-trivial turns:
 
 1. Feeds the execution trace (tool calls, results, errors) to a specialized prompt.
 2. The LLM decides whether durable knowledge was discovered (workarounds, non-obvious patterns, API quirks).
 3. If yes, it calls `memory_save` to persist the knowledge.
-4. This is the "insurance" layer -- the system prompt already instructs the LLM to save knowledge during execution, but the reflector catches anything it missed.
+4. The platform memory merger first tries to upsert that knowledge into a structured scenario card (`scenario_card/efficient_successful_path`) so future turns retrieve the efficient successful path rather than scattered raw notes.
+5. This is the "insurance" layer -- the system prompt already instructs the LLM to save knowledge during execution, but the reflector catches anything it missed.
+
+Scenario-card saves keep source IDs/session IDs as lineage in the card, then delete or discard the raw source memory rows. The invariant is to store the shortest reusable successful recipe, not a broad “this failed once, never use it” rule. If a raw memory cannot form a usable card, it is not kept as durable memory.
 
 ### Execution Tracing
 
@@ -248,7 +254,7 @@ CLI flags `-p`/`-m` pin by default onto new sessions. Use `--no-pin` to restore 
 | `pkg/agent/execution_trace.go` | Execution trace recording for distillation and reflection |
 | `pkg/agent/chat_distill.go` | Trace reconstruction from session events, distill preview/confirm |
 | `pkg/agent/flow_distiller.go` | LLM-powered trace-to-YAML flow conversion |
-| `pkg/agent/memory_reflection.go` | Post-task knowledge extraction via silent LLM call |
+| `pkg/agent/platform_reflector.go` | Platform post-task knowledge extraction via silent LLM call |
 | `pkg/agent/think_filter.go` | Streaming chain-of-thought tag stripping |
 | `pkg/agent/error_recovery.go` | LLM-powered error analysis and retry decisions (flows) |
 | `pkg/agent/ephemeral_knowledge.go` | BeforeModelCallback for non-persisted knowledge injection |

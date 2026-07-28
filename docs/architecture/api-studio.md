@@ -56,6 +56,9 @@ The API is organized by domain:
 | **Settings** | `GET /settings`, `PUT /settings` | `settings_handlers.go` |
 | **Tools** | `GET /tools`, `GET /tools/cache` | `tools_handlers.go` |
 | **AI Chat** | `POST /ai-chat`, `GET /ai-chat/stream` | `ai_chat_handlers.go` |
+| **Memory health** | `GET /memories/health`, `GET /memories/map`, `POST /memories/consolidate/preview`, `POST /memories/consolidate/apply` | `memory_health.go`, `memory_map.go`, `memory_consolidation.go` |
+
+The memory health and consolidation endpoints are platform-only and tenant-scoped. `GET /memories/health` evaluates recommendations lazily when the UI is opened and reuses fresh results for five days; it does not run on a scheduler. Consolidation drafts and upserts structured scenario cards through the existing memory stores; it does not connect directly to tenant databases. After successful card processing, incorporated raw source memories are deleted or discarded so cards remain the durable memory format.
 
 ### SSE Chat Streaming
 
@@ -100,7 +103,7 @@ The Studio UI is built with React 19, Vite 7, and Tailwind CSS 4. Key components
 ### Rate Limiting and Security
 
 - **Rate limiting**: Applied to API endpoints to prevent abuse.
-- **CSP headers**: Content Security Policy headers prevent XSS.
+- **CSP headers**: Content Security Policy headers prevent XSS while allowing the production font stylesheet from Google Fonts and the client-side GitHub release check.
 - **Device authorization**: Protects Studio access.
 - **Credential redaction**: All API responses pass through the Redactor.
 
@@ -121,6 +124,9 @@ MCP tools are cached with background refresh to avoid slow MCP server queries on
 | `pkg/api/mcp_handlers.go` | MCP server management and inspector |
 | `pkg/api/sandbox_handlers.go` | Sandbox initialization, templates, proxy |
 | `pkg/api/ai_chat_handlers.go` | Dedicated AI assistant for Studio UI |
+| `pkg/api/memory_health.go` | Lazy Memory Health recommendations with a five-day freshness window |
+| `pkg/api/memory_map.go` | Advanced Memory Map diagnostics for duplicate/scattered/risky memories |
+| `pkg/api/memory_consolidation.go` | Scenario-card preview/apply endpoints for controlled consolidation |
 | `web/src/components/` | React components (37+ files) |
 | `web/src/api/` | API client functions for the frontend |
 

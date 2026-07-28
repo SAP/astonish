@@ -79,23 +79,24 @@ func platformMemorySave(ctx context.Context, args MemorySaveArgs, content string
 	}
 
 	// Save to the team memory store (PG)
+	metadata := map[string]any{}
+	if scope := store.MemoryScopeFromContext(ctx); scope != "" {
+		metadata["scope"] = string(scope)
+	}
 	entry := store.MemoryEntry{
 		Content:   content,
 		Category:  dbCategory,
 		SessionID: store.SessionIDFromContext(ctx),
 		CreatedBy: store.UserIDFromContext(ctx),
+		Metadata:  metadata,
 	}
 
-	// Use cross-session merge if available (platform mode with LLM merger)
-	if mergeFunc := store.MemorySaveOrMergeFromContext(ctx); mergeFunc != nil {
-		if err := mergeFunc(ctx, pgMem, entry); err != nil {
-			return MemorySaveResult{}, fmt.Errorf("failed to save memory: %w", err)
-		}
-	} else {
-		// Fallback: raw insert (no merge capability available)
-		if err := pgMem.Add(ctx, entry); err != nil {
-			return MemorySaveResult{}, fmt.Errorf("failed to save memory: %w", err)
-		}
+	mergeFunc := store.MemorySaveOrMergeFromContext(ctx)
+	if mergeFunc == nil {
+		return MemorySaveResult{}, fmt.Errorf("failed to save memory: scenario-card merger is not available")
+	}
+	if err := mergeFunc(ctx, pgMem, entry); err != nil {
+		return MemorySaveResult{}, fmt.Errorf("failed to save memory: %w", err)
 	}
 
 	msg := fmt.Sprintf("Saved to team memory under '%s'", dbCategory)

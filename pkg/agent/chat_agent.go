@@ -22,10 +22,15 @@ import (
 
 // KnowledgeSearchResult holds a single result from the knowledge vector search.
 type KnowledgeSearchResult struct {
-	Path     string
-	Score    float64
-	Snippet  string
-	Category string // e.g. "guidance", "skill", "flow", "knowledge"
+	ID        string
+	Path      string
+	Score     float64
+	Snippet   string
+	Category  string // e.g. "guidance", "skill", "flow", "knowledge"
+	Scope     string // e.g. "personal", "team", "org" in platform mode
+	CreatedBy string
+	CreatedAt string
+	SessionID string
 }
 
 // KnowledgeSearchFunc performs a hybrid search and returns matching results.

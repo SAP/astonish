@@ -238,6 +238,236 @@ export interface MemoryEntry {
   score?: number
   created_at?: string
   created_by?: string
+  session_id?: string
+}
+
+export interface MemoryMapFlag {
+  type: string
+  severity: string
+  description: string
+}
+
+export interface MemoryMapGroup {
+  key: string
+  title: string
+  memory_count: number
+  scopes: string[]
+  categories: string[]
+  session_ids?: string[]
+  created_by?: string[]
+  flags?: MemoryMapFlag[]
+  has_scenario_card?: boolean
+  scenario_card_id?: string
+  representative: MemoryEntry
+  memories: MemoryEntry[]
+}
+
+export interface ScenarioIdentity {
+  intent?: string
+  domain?: string
+  system?: string
+  service?: string
+  resource_type?: string
+  operation?: string
+  environment?: string
+  credentials?: string[]
+  endpoint_hosts?: string[]
+  api_families?: string[]
+  http_methods?: string[]
+  url_paths?: string[]
+  tools?: string[]
+  anchor_terms?: string[]
+}
+
+export interface ScenarioSupersededItem {
+  value: string
+  superseded_by?: string
+  reason?: string
+}
+
+export interface ScenarioMatchScore {
+  score?: number
+  decision?: string
+  positive_signals?: string[]
+  negative_signals?: string[]
+  extraction_warnings?: string[]
+}
+
+export interface ScenarioCard {
+  canonical_key: string
+  scenario_id?: string
+  scope?: string
+  title: string
+  aliases?: string[]
+  category?: string
+  facts?: string[]
+  recommended_recipe: string[]
+  conditions?: string[]
+  cautions_or_conditional_failures?: string[]
+  verification?: string[]
+  source_memory_ids?: string[]
+  source_session_ids?: string[]
+  related_scenario_ids?: string[]
+  superseded?: ScenarioSupersededItem[]
+  identity?: ScenarioIdentity
+  status: string
+  confidence?: number
+  last_verified_at?: string
+}
+
+export interface MemoryConsolidationPreview {
+  card: ScenarioCard
+  content: string
+  sources: string[]
+}
+
+export interface MemoryConsolidationApplyResponse {
+  applied: boolean
+  scope: string
+  action: string
+  existing_id?: string
+  card: ScenarioCard
+  deleted_sources?: number
+  deleted_duplicate_cards?: number
+}
+
+export interface MemoryRecommendation {
+  id: string
+  type: string
+  severity: string
+  title: string
+  description: string
+  target_scope: 'personal' | 'team' | 'org'
+  group_key: string
+  memory_ids: string[]
+  duplicate_card_ids?: string[]
+  resolver_signals?: string[]
+  flags?: MemoryMapFlag[]
+  card: ScenarioCard
+  match_score?: ScenarioMatchScore
+}
+
+export interface MemoryHealthResponse {
+  evaluated_at: string
+  expires_at: string
+  generated: boolean
+  recommendation_count: number
+  recommendations: MemoryRecommendation[]
+  map: MemoryMapResponse
+}
+
+export interface MemoryMapResponse {
+  groups: MemoryMapGroup[]
+  stats: {
+    total_memories: number
+    group_count: number
+    duplicate_risk_count: number
+    scattered_topic_count: number
+    transient_risk_count: number
+    trial_error_risk_count: number
+  }
+}
+
+const emptyMemoryMapStats = {
+  total_memories: 0,
+  group_count: 0,
+  duplicate_risk_count: 0,
+  scattered_topic_count: 0,
+  transient_risk_count: 0,
+  trial_error_risk_count: 0,
+}
+
+function asArray<T>(value: T[] | null | undefined): T[] {
+  return Array.isArray(value) ? value : []
+}
+
+function normalizeScenarioCard(card: Partial<ScenarioCard> | null | undefined): ScenarioCard {
+  return {
+    canonical_key: card?.canonical_key || '',
+    scope: card?.scope,
+    title: card?.title || '',
+    aliases: asArray(card?.aliases),
+    category: card?.category,
+    facts: asArray(card?.facts),
+    recommended_recipe: asArray(card?.recommended_recipe),
+    conditions: asArray(card?.conditions),
+    cautions_or_conditional_failures: asArray(card?.cautions_or_conditional_failures),
+    verification: asArray(card?.verification),
+    source_memory_ids: asArray(card?.source_memory_ids),
+    source_session_ids: asArray(card?.source_session_ids),
+    related_scenario_ids: asArray(card?.related_scenario_ids),
+    superseded: asArray(card?.superseded),
+    identity: card?.identity ? {
+      ...card.identity,
+      credentials: asArray(card.identity.credentials),
+      endpoint_hosts: asArray(card.identity.endpoint_hosts),
+      api_families: asArray(card.identity.api_families),
+      http_methods: asArray(card.identity.http_methods),
+      url_paths: asArray(card.identity.url_paths),
+      tools: asArray(card.identity.tools),
+      anchor_terms: asArray(card.identity.anchor_terms),
+    } : undefined,
+    scenario_id: card?.scenario_id,
+    status: card?.status || 'draft',
+    confidence: card?.confidence,
+    last_verified_at: card?.last_verified_at,
+  }
+}
+
+function normalizeMemoryMapResponse(data: Partial<MemoryMapResponse> | null | undefined): MemoryMapResponse {
+  const stats = data?.stats || emptyMemoryMapStats
+  return {
+    groups: asArray(data?.groups).map(group => ({
+      ...group,
+      scopes: asArray(group.scopes),
+      categories: asArray(group.categories),
+      session_ids: asArray(group.session_ids),
+      created_by: asArray(group.created_by),
+      flags: asArray(group.flags),
+      representative: group.representative || { id: '', snippet: '', category: '', scope: '' },
+      memories: asArray(group.memories),
+    })),
+    stats: {
+      total_memories: stats.total_memories || 0,
+      group_count: stats.group_count || 0,
+      duplicate_risk_count: stats.duplicate_risk_count || 0,
+      scattered_topic_count: stats.scattered_topic_count || 0,
+      transient_risk_count: stats.transient_risk_count || 0,
+      trial_error_risk_count: stats.trial_error_risk_count || 0,
+    },
+  }
+}
+
+function normalizeMemoryHealthResponse(data: Partial<MemoryHealthResponse> | null | undefined): MemoryHealthResponse {
+  const recommendations = asArray(data?.recommendations).map(recommendation => ({
+    ...recommendation,
+    id: recommendation.id || '',
+    type: recommendation.type || '',
+    severity: recommendation.severity || 'medium',
+    title: recommendation.title || 'Memory recommendation',
+    description: recommendation.description || '',
+    target_scope: recommendation.target_scope || 'team',
+    group_key: recommendation.group_key || '',
+    memory_ids: asArray(recommendation.memory_ids),
+    duplicate_card_ids: asArray(recommendation.duplicate_card_ids),
+    resolver_signals: asArray(recommendation.resolver_signals),
+    flags: asArray(recommendation.flags),
+    match_score: recommendation.match_score ? {
+      ...recommendation.match_score,
+      positive_signals: asArray(recommendation.match_score.positive_signals),
+      negative_signals: asArray(recommendation.match_score.negative_signals),
+      extraction_warnings: asArray(recommendation.match_score.extraction_warnings),
+    } : undefined,
+    card: normalizeScenarioCard(recommendation.card),
+  }))
+  return {
+    evaluated_at: data?.evaluated_at || new Date(0).toISOString(),
+    expires_at: data?.expires_at || new Date(0).toISOString(),
+    generated: Boolean(data?.generated),
+    recommendation_count: data?.recommendation_count ?? recommendations.length,
+    recommendations,
+    map: normalizeMemoryMapResponse(data?.map),
+  }
 }
 
 export async function searchMemories(query: string, limit?: number, teamSlug?: string): Promise<MemoryEntry[]> {
@@ -249,6 +479,43 @@ export async function searchMemories(query: string, limit?: number, teamSlug?: s
   if (!res.ok) await throwBackendError(res, 'Failed to search memories')
   const data = await res.json()
   return data.results || []
+}
+
+export async function fetchMemoryMap(limit?: number, teamSlug?: string): Promise<MemoryMapResponse> {
+  const suffix = limit ? `?limit=${encodeURIComponent(String(limit))}` : ''
+  const res = await teamFetch(`/api/memories/map${suffix}`, undefined, teamSlug)
+  if (!res.ok) await throwBackendError(res, 'Failed to fetch memory map')
+  return normalizeMemoryMapResponse(await res.json())
+}
+
+export async function fetchMemoryHealth(limit?: number, refresh?: boolean, teamSlug?: string): Promise<MemoryHealthResponse> {
+  const params = new URLSearchParams()
+  if (limit) params.set('limit', String(limit))
+  if (refresh) params.set('refresh', 'true')
+  const suffix = params.toString() ? `?${params.toString()}` : ''
+  const res = await teamFetch(`/api/memories/health${suffix}`, undefined, teamSlug)
+  if (!res.ok) await throwBackendError(res, 'Failed to analyze memory health')
+  return normalizeMemoryHealthResponse(await res.json())
+}
+
+export async function previewMemoryConsolidation(key: string, targetScope: string, memoryIds?: string[], teamSlug?: string): Promise<MemoryConsolidationPreview> {
+  const res = await teamFetch('/api/memories/consolidate/preview', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key, target_scope: targetScope, memory_ids: memoryIds || [] }),
+  }, teamSlug)
+  if (!res.ok) await throwBackendError(res, 'Failed to draft consolidated memory')
+  return res.json()
+}
+
+export async function applyMemoryConsolidation(card: ScenarioCard, targetScope: string, teamSlug?: string, duplicateCardIds?: string[]): Promise<MemoryConsolidationApplyResponse> {
+  const res = await teamFetch('/api/memories/consolidate/apply', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ card, target_scope: targetScope, duplicate_card_ids: duplicateCardIds || [] }),
+  }, teamSlug)
+  if (!res.ok) await throwBackendError(res, 'Failed to save consolidated memory')
+  return res.json()
 }
 
 export async function saveTeamMemory(snippet: string, category?: string, teamSlug?: string): Promise<{ id: string }> {

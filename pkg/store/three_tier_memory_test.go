@@ -429,6 +429,38 @@ func TestThreeTierSearcher_DeduplicatesSnippets(t *testing.T) {
 	}
 }
 
+func TestThreeTierSearcher_TieOrderIsStable(t *testing.T) {
+	personal := newMockMemoryStore("personal")
+	team := newMockMemoryStore("team")
+
+	personal.Add(context.Background(), MemoryEntry{Content: "github enterprise issues api", Category: "memory"})
+	team.Add(context.Background(), MemoryEntry{Content: "github enterprise issues api team", Category: "memory"})
+
+	searcher := NewThreeTierSearcher(ThreeTierMemoryStoreConfig{
+		Personal: personal,
+		Team:     team,
+	})
+
+	var firstOrder []string
+	for i := 0; i < 20; i++ {
+		results, err := searcher.SearchAllTiers(context.Background(), "github enterprise issues api", 10, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(results) != 2 {
+			t.Fatalf("expected 2 results, got %d", len(results))
+		}
+		order := []string{results[0].ID, results[1].ID}
+		if i == 0 {
+			firstOrder = order
+			continue
+		}
+		if order[0] != firstOrder[0] || order[1] != firstOrder[1] {
+			t.Fatalf("unstable order: first=%v current=%v", firstOrder, order)
+		}
+	}
+}
+
 func TestThreeTierSearcher_MinScoreFilter(t *testing.T) {
 	personal := newMockMemoryStore("personal")
 	// score will be 0.8 * 1.2 = 0.96

@@ -27,4 +27,13 @@ func TestCSPMiddleware_AllowsBlobMedia(t *testing.T) {
 	if !strings.Contains(csp, "img-src 'self' data: blob:") {
 		t.Fatalf("CSP missing img-src blob: allowance, got %q", csp)
 	}
+	if !strings.Contains(csp, "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com") {
+		t.Fatalf("CSP missing Google Fonts stylesheet allowance, got %q", csp)
+	}
+	if !strings.Contains(csp, "font-src 'self' https://fonts.gstatic.com") {
+		t.Fatalf("CSP missing Google Fonts font allowance, got %q", csp)
+	}
+	if !strings.Contains(csp, "connect-src 'self' ws: wss: https://api.github.com") {
+		t.Fatalf("CSP missing GitHub release-check allowance, got %q", csp)
+	}
 }

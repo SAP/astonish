@@ -64,6 +64,8 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		// SystemPromptBuilder.RelevantKnowledge field,
 		// so it carries system-level authority for instruction following.
 		var relevantKnowledge string
+		var knowledgeTrackingQuery string
+		var knowledgeTrackingBM25Query string
 		var knowledgeTrackingResults []KnowledgeSearchResult // for session tracking event
 
 		// Auto-retrieve relevant knowledge from vector store.
@@ -78,6 +80,7 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 					slog.Debug("auto knowledge search skipped: query too short", "component", "chat", "query", searchQuery)
 				}
 			} else {
+				knowledgeTrackingQuery = searchQuery
 				// Build an augmented BM25 query that includes conversational
 				// context from the last model response. This helps follow-up
 				// queries like "show me per VM" find relevant docs by matching
@@ -87,6 +90,7 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 				bm25Query := ""
 				if tail := lastModelResponseTail(ctx.Session().Events(), 300); tail != "" {
 					bm25Query = tail + " " + searchQuery
+					knowledgeTrackingBM25Query = bm25Query
 					if c.DebugMode {
 						slog.Debug("augmented BM25 query with conversation context",
 							"component", "chat",
@@ -148,7 +152,7 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		// Content is nil so ADK's ContentsRequestProcessor skips it (never
 		// sent to the LLM) and eventsToMessages() skips it (never shown in UI).
 		// The event is still written to the session .jsonl file for diagnostics.
-		yieldKnowledgeTrackingEvent(yield, relevantKnowledge, "", knowledgeTrackingResults)
+		yieldKnowledgeTrackingEvent(yield, knowledgeTrackingQuery, knowledgeTrackingBM25Query, relevantKnowledge, "", knowledgeTrackingResults)
 
 		// Auto-retrieve relevant tools from the tool index.
 		// Matches drive two things: (1) prompt text listing relevant tools,
@@ -794,6 +798,9 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			// so the goroutine survives after the ADK Run returns.
 			reflectCtx := context.Background()
 			reflectCtx = store.WithMemoryStore(reflectCtx, store.MemoryStoreFromContext(ctx))
+			if scope := store.MemoryScopeFromContext(ctx); scope != "" {
+				reflectCtx = store.WithMemoryScope(reflectCtx, scope)
+			}
 			reflectCtx = store.WithSessionID(reflectCtx, store.SessionIDFromContext(ctx))
 			reflectCtx = store.WithUserID(reflectCtx, store.UserIDFromContext(ctx))
 			// Propagate per-request LLM override so the reflector uses the

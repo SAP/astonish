@@ -54,6 +54,11 @@ Three auto-managed markdown files serve specific purposes:
 
 ## Architecture
 
+Astonish currently has two persistence shapes:
+
+- **Personal / local mode** uses the file-backed markdown knowledge base described below.
+- **Platform mode** stores personal, team, and org memories in tenant-scoped database stores behind `entstore`, while still using the same agent-facing `MemoryStore` and `ThreeTierSearcher` interfaces. Platform code must resolve stores through request context and the tenant router; it must not open raw tenant connections.
+
 ### Knowledge Retrieval Per Turn
 
 ```
@@ -77,9 +82,15 @@ ChatAgent.Run():
   6. Set SystemPromptBuilder.RelevantKnowledge
     |
     v
-  7. System prompt appends knowledge at the end (Tier 3)
+  7. Emit a content-less `_knowledge_injection` session diagnostic event
+     containing query metadata plus result id/scope/session provenance
+    |
+    v
+  8. System prompt appends knowledge at the end (Tier 3)
      (static prefix remains cacheable for KV-cache)
 ```
+
+The `_knowledge_injection` event is persisted but not sent to the LLM or rendered as a chat message. It records the cleaned semantic query, BM25 context length, injection type, result count, estimated injected tokens, and each result's path, score, category, scope, id, creator, creation time, and source session when available. This is the first diagnostic surface to inspect when memory appears unstable: it shows whether retrieval was disabled, which tier answered, and which exact memory chunk was injected.
 
 ### Indexing Pipeline
 
@@ -163,6 +174,62 @@ In platform mode, there is also a post-turn `PlatformReflector`. It runs asynchr
 Example: after discovering how to list Kubernetes clusters in SAP Converged Cloud QA-DE-1, memory should capture that the reusable route is Kubernikus via the `openstack-keystone` Keystone token credential and `GET $KUBERNIKUS_URL/api/v1/clusters` with `X-Auth-Token`. It should not capture that a particular cluster currently has 13 healthy nodes, because that is live inventory that must be fetched again.
 
 The Studio memory icon appears immediately for in-band `memory_save` tool calls. For post-turn reflector saves, the SPA polls the session-memory endpoint for a bounded period after `done`, because the reflector may finish after the SSE response text has completed. For newly-created chats, this polling uses the session ID emitted by the chat stream's `session` event rather than relying only on React's active-session state, which may still be stale when `done` arrives.
+
+### Scenario Cards: Efficient Successful Paths
+
+Platform mode now treats durable operational memory as a **scenario card** when possible. A scenario card is still a normal memory row: it is stored in the existing personal/team/org memory store, embedded, and returned by the same semantic + BM25 search pipeline. The difference is the content contract. The row category is `scenario_card/efficient_successful_path`, and the markdown body contains frontmatter plus sections for:
+
+- `canonical_key`: a human-readable alias/label for the scenario, not the durable identity boundary
+- `scenario_id`, `aliases`, `related_scenario_ids`: optional entity metadata for card evolution
+- `identity_json`: deterministic scenario anchors such as domain, system, service family, resource type, operation, environment, credentials, endpoint host family, API family, HTTP method, and URL path
+- `superseded_json`: explicit temporal/supersedes notes when an old value or path has been replaced
+- `Recommended path`: the shortest known successful recipe
+- `Conditions`: when the recipe applies
+- `Verification`: how the path was or should be checked
+- `Cautions or conditional failures`: conditional notes only, not broad permanent failure rules
+- `source_memory_ids` / `source_session_ids`: lineage back to the raw extraction inputs and turns that produced the card
+
+This makes scenario cards behave like self-managed operational skills: they are generated from verified experience, searched semantically like any other memory, and improved over time by merging new evidence into the same card. They are not human-authored skills from `memory/skills`, and they do not replace explicit skills or flows. Raw memory rows are staging inputs only; after they are incorporated into a scenario card, or if they cannot form a useful card, they are deleted or discarded rather than kept as durable memory.
+
+Scenario-card upsert uses **scenario identity resolution**, not only canonical-key equality. `pkg/memory/scenario_identity.go` extracts deterministic anchors and scores candidate pairs with rarity-aware weights. A card is auto-merged only when the score crosses `DefaultScenarioAutoMergeThreshold`, there are no negative signals, and the best candidate is not ambiguous. Scores below the auto-merge threshold are not sent to an LLM on the write path; ambiguous duplicate work belongs in Memory Health, where a user can review the proposed merge. The resolver deliberately separates alias resolution from deduplication: aliases like “LBaaS” and “Octavia” can map to the same service family, but conflicting resource types, environments, or write/read operations prevent silent merges.
+
+Implementation details:
+
+- `pkg/memory/scenario_card.go` owns rendering, parsing, draft generation, merge, upsert, and retrieval filtering.
+- `pkg/memory/scenario_identity.go` owns deterministic extraction, corpus statistics, pair scoring, and conservative candidate choice.
+- `MemoryMerger.SaveOrMerge` drafts/upserts a scenario card for platform memory saves and fails closed if the card cannot be saved. It must not fall back to raw-memory insertion because that would reintroduce scattered notes. Post-turn reflector saves created from a trace with successful non-memory/non-knowledge tool calls are marked `verified`; saves without execution evidence remain `draft` until a later successful run confirms them.
+- Promotion is upsert-based. Personal → team and team → org promotion draft a scenario card in the target scope and merge it with any existing card that resolves to the same scenario; after a successful upsert, the source raw memory is deleted.
+- Retrieval asks the underlying search for extra candidates, runs query-aware scenario-card filtering, prefers scenario cards, suppresses any transitional raw memories that are explicitly listed as `source_memory_ids`, de-duplicates equivalent scenario cards as a safety net, and drops scenario cards that share only generic words with the query. This same filtering is used by automatic knowledge injection, the direct `memory_search` tool, and the Studio memory search endpoint so manual and automatic searches are consistent.
+
+The key invariant is that Astonish should save **how to do the thing efficiently**, not a transcript of exploratory dead ends. Temporary outages, timeouts, rate limits, and “X did not work” observations may appear only as conditional cautions that require re-verification before they change behavior. If a raw memory cannot produce a usable recommended path, it is not durable memory; the system can learn it again later and create a proper card. The card frontmatter `scope` must match the store tier where the row is written (`personal`, `team`, or `org`); this prevents confusing diagnostics where a personal row contains team metadata.
+
+### Memory Health Recommendations and Advanced Map
+
+Platform mode exposes `GET /api/memories/health` as the product-facing memory organization surface. It evaluates the current user's visible personal, team, and org memories lazily when the Knowledge Browser's **Memory Health** tab is opened. There is no background schedule: a cached evaluation is reused for five days only when the visible memory snapshot has not changed. Successful memory mutations explicitly clear the health cache, and users can also force a refresh with **Reanalyze**.
+
+Memory Health returns reviewable, actionable recommendations, not automatic writes:
+
+- create a scenario card from any remaining raw memory when no card exists yet
+- update an existing scenario card when new raw source memories are not yet incorporated
+- clean up raw source memories that are already represented by an existing scenario card
+- merge duplicate scenario cards that deterministic identity resolution considers the same operational scenario
+
+Each recommendation contains the proposed card, target scope, source memory IDs, and the diagnostic flags that explain why it was suggested. Duplicate-card recommendations also include `duplicate_card_ids`, `resolver_signals`, and a `match_score`; applying one saves the merged content in the target scope, preserves any existing non-duplicate card for the same resolved scenario, and then deletes only the explicit duplicate scenario-card rows. Applying any recommendation uses the same scenario-card upsert endpoint as manual consolidation; after the card is saved or merged, incorporated raw source memories are deleted. Cleanup recommendations re-save the existing card metadata and delete the still-visible raw source rows. If the proposed card contains only the placeholder recipe, the raw inputs are discarded and no placeholder card is saved.
+
+`GET /api/memories/map` remains available as the advanced diagnostic report behind the Memory Health UI. It groups likely related memory chunks by a canonical topic key and flags conditions that make memory feel scattered or unsafe:
+
+- duplicate risk: multiple memories appear to cover the same topic
+- scattered topic: related memories are spread across scopes or categories
+- transient failure risk: a memory uses outage/timeout/flaky language that should not become a permanent avoidance rule
+- trial/error risk: a memory appears to preserve exploratory failed attempts instead of the shortest successful path
+- scenario card: the group already contains a structured card; any raw rows in the group are transitional evidence that should be incorporated or discarded
+
+The consolidation endpoints remain the write boundary:
+
+- `POST /api/memories/consolidate/preview` drafts a scenario card from a selected group without saving.
+- `POST /api/memories/consolidate/apply` saves or merges the edited card into the selected personal, team, or org scope.
+
+Both endpoints resolve stores through the tenant router and current authenticated context. They do not connect directly to tenant databases. Memory Health recommendations are operational metadata, not agent knowledge, and are not stored as retrievable memories.
 
 ### BM25 Implementation
 

@@ -30,7 +30,7 @@ type FleetStores struct {
 	TaskBoard      store.FleetTaskBoardStore
 
 	// MemorySaveOrMerge is the cross-session memory merge function.
-	// When set, memory_save operations use LLM-based dedup/merge instead of raw inserts.
+	// When set, memory_save operations upsert structured cards instead of raw memories.
 	MemorySaveOrMerge store.MemorySaveOrMergeFunc
 }
 

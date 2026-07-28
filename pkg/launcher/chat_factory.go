@@ -19,6 +19,7 @@ import (
 	adrill "github.com/SAP/astonish/pkg/drill"
 	emailpkg "github.com/SAP/astonish/pkg/email"
 	"github.com/SAP/astonish/pkg/flowstore"
+	"github.com/SAP/astonish/pkg/memory"
 	"github.com/SAP/astonish/pkg/provider"
 	"github.com/SAP/astonish/pkg/sandbox"
 	incus "github.com/SAP/astonish/pkg/sandbox/incus"
@@ -448,7 +449,7 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 	// container. Container creation is lazy — the first tool call triggers
 	// cloning from the template and starting the node process.
 	var sandboxNodePool *sandbox.NodeClientPool      // hoisted for save_sandbox_template tool (Incus only)
-	var sandboxIncusClient *incus.IncusClient       // hoisted for save_sandbox_template tool (Incus only)
+	var sandboxIncusClient *incus.IncusClient        // hoisted for save_sandbox_template tool (Incus only)
 	var sandboxTplRegistry *sandbox.TemplateRegistry // hoisted for save_sandbox_template tool (Incus only)
 	var sandboxSessRegistry *sandbox.SessionRegistry // hoisted for save_sandbox_template tool (Incus only)
 	var backendSandboxPool sandbox.ToolNodePool      // hoisted for sub-agent alias (K8s/OpenShell)
@@ -1084,17 +1085,17 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		useTplTool, useErr := tools.NewUseSandboxTemplateTool(sandboxNodePool, sandboxTplRegistry)
 		if useErr != nil {
 			if cfg.DebugMode {
-					slog.Warn("failed to create use_sandbox_template tool", "error", useErr)
-				}
-			} else {
-				sandboxTplTools = append(sandboxTplTools, useTplTool)
+				slog.Warn("failed to create use_sandbox_template tool", "error", useErr)
 			}
+		} else {
+			sandboxTplTools = append(sandboxTplTools, useTplTool)
+		}
 
-			if len(sandboxTplTools) > 0 {
-				toolGroups["sandbox_templates"] = &agent.ToolGroup{
-					Name:        "sandbox_templates",
-					Description: "Save, list, and use sandbox container templates",
-					Tools:       sandboxTplTools,
+		if len(sandboxTplTools) > 0 {
+			toolGroups["sandbox_templates"] = &agent.ToolGroup{
+				Name:        "sandbox_templates",
+				Description: "Save, list, and use sandbox container templates",
+				Tools:       sandboxTplTools,
 			}
 		}
 	}
@@ -1527,17 +1528,28 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			if bm25Query != "" {
 				searchQuery = bm25Query
 			}
-			pgResults, err := searcher.SearchAllTiers(ctx, searchQuery, maxResults, minScore)
+			// Fetch extra candidates before scenario-card de-duplication and query
+			// filtering so duplicate/unrelated cards do not starve the final context.
+			pgResults, err := searcher.SearchAllTiers(ctx, searchQuery, maxResults*2, minScore)
 			if err != nil {
 				return nil, err
+			}
+			pgResults = memory.FilterPreferredScenarioResultsForQuery(query, pgResults)
+			if len(pgResults) > maxResults {
+				pgResults = pgResults[:maxResults]
 			}
 			var knowledgeResults []agent.KnowledgeSearchResult
 			for _, r := range pgResults {
 				knowledgeResults = append(knowledgeResults, agent.KnowledgeSearchResult{
-					Path:     r.Path,
-					Score:    r.Score,
-					Snippet:  r.Snippet,
-					Category: r.Category,
+					ID:        r.ID,
+					Path:      r.Path,
+					Score:     r.Score,
+					Snippet:   r.Snippet,
+					Category:  r.Category,
+					Scope:     r.Scope,
+					CreatedBy: r.CreatedBy,
+					CreatedAt: r.CreatedAt,
+					SessionID: r.SessionID,
 				})
 			}
 			return knowledgeResults, nil
@@ -1552,17 +1564,28 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			if bm25Query != "" {
 				searchQuery = bm25Query
 			}
-			pgResults, err := searcher.SearchAllTiersByCategory(ctx, searchQuery, maxResults, minScore, category)
+			// Fetch extra candidates before scenario-card de-duplication and query
+			// filtering so duplicate/unrelated cards do not starve the final context.
+			pgResults, err := searcher.SearchAllTiersByCategory(ctx, searchQuery, maxResults*2, minScore, category)
 			if err != nil {
 				return nil, err
+			}
+			pgResults = memory.FilterPreferredScenarioResultsForQuery(query, pgResults)
+			if len(pgResults) > maxResults {
+				pgResults = pgResults[:maxResults]
 			}
 			var knowledgeResults []agent.KnowledgeSearchResult
 			for _, r := range pgResults {
 				knowledgeResults = append(knowledgeResults, agent.KnowledgeSearchResult{
-					Path:     r.Path,
-					Score:    r.Score,
-					Snippet:  r.Snippet,
-					Category: r.Category,
+					ID:        r.ID,
+					Path:      r.Path,
+					Score:     r.Score,
+					Snippet:   r.Snippet,
+					Category:  r.Category,
+					Scope:     r.Scope,
+					CreatedBy: r.CreatedBy,
+					CreatedAt: r.CreatedAt,
+					SessionID: r.SessionID,
 				})
 			}
 			return knowledgeResults, nil

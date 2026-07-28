@@ -36,6 +36,35 @@ func countToolCallsRecursive(trace *ExecutionTrace) int {
 	return count
 }
 
+func countSuccessfulScenarioEvidenceToolCallsRecursive(trace *ExecutionTrace) int {
+	if trace == nil {
+		return 0
+	}
+	trace.mu.Lock()
+	steps := make([]TraceStep, len(trace.Steps))
+	copy(steps, trace.Steps)
+	trace.mu.Unlock()
+
+	count := 0
+	for _, step := range steps {
+		if step.Success && scenarioEvidenceTool(step.ToolName) {
+			count++
+		}
+		for _, child := range step.SubAgentTraces {
+			count += countSuccessfulScenarioEvidenceToolCallsRecursive(child)
+		}
+	}
+	return count
+}
+
+func scenarioEvidenceTool(toolName string) bool {
+	name := strings.ToLower(strings.TrimSpace(toolName))
+	if name == "" || name == "delegate_tasks" || strings.HasPrefix(name, "memory_") || strings.HasPrefix(name, "knowledge_") {
+		return false
+	}
+	return true
+}
+
 // traceContainsMemorySave checks whether memory_save was called in the trace
 // or in any sub-agent traces (recursively).
 func traceContainsMemorySave(trace *ExecutionTrace) bool {

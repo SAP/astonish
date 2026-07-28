@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	mem "github.com/SAP/astonish/pkg/memory"
 	"github.com/SAP/astonish/pkg/store"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
@@ -64,8 +65,8 @@ CRITICAL: If the "ALREADY SAVED IN TEAM MEMORY" section below contains informati
 
 Durable knowledge includes:
 - Connection details, configuration parameters, or environment-specific information (hostnames, API base URLs, auth methods, credential names, ports)
-- Discovered access recipes: the credential name/type that worked, the service catalog type, base URL, HTTP method/path, required safe headers/placeholders, and failed assumptions that should not be repeated
-- Workarounds discovered after initial failures (what failed, why, what worked)
+- Discovered access recipes: the credential name/type that worked, the service catalog type, base URL, HTTP method/path, and required safe headers/placeholders
+- Workarounds discovered after initial failures, but phrase them as conditional cautions separate from the shortest successful path
 - Non-obvious file paths, API endpoints, configuration patterns
 - Shell command quirks, syntax gotchas, tool-specific behaviors
 - Integration details (auth flows, required headers, API schemas, credential names)
@@ -84,8 +85,8 @@ IMPORTANT: Connection details (hostnames, API base URLs, auth methods, credentia
 Example: if a task discovers that Kubernetes clusters in SAP Converged Cloud QA-DE-1 are listed through Kubernikus rather than Magnum, save the access recipe: use the openstack-keystone Keystone token credential, discover/use the kubernikus public endpoint from the Keystone catalog, and call GET $KUBERNIKUS_URL/api/v1/clusters with X-Auth-Token: {{CREDENTIAL:openstack-keystone:token}}. Do NOT save the current cluster list, node counts, health, or phase.
 
 If you find durable knowledge worth saving, call memory_save with:
-- category: a descriptive heading using "kind/topic" format (e.g., "infrastructure/Proxmox API", "tools/SSH Patterns", "workarounds/Docker DNS")
-- content: the knowledge as concise bullet points
+- category: a descriptive scenario heading using "kind/topic" format (e.g., "infrastructure/Proxmox API", "tools/SSH Patterns", "workarounds/Docker DNS")
+- content: concise bullet points. Put the positive successful path first. If you include failed assumptions, prefix them as "Caution:" so the scenario-card generator keeps them out of the recommended path.
 
 If there is nothing worth saving, respond with exactly: "No durable knowledge to save."
 
@@ -126,8 +127,9 @@ func (r *PlatformReflector) Reflect(ctx context.Context, trace *ExecutionTrace, 
 	memorySaveCalled := traceContainsMemorySave(trace)
 
 	// Only run reflection if memory_save was NOT called (same as file-based)
+	scenarioStatus := scenarioStatusFromTrace(trace)
 	if !memorySaveCalled {
-		r.runReflection(ctx, trace, events, memStore, sessionID)
+		r.runReflection(ctx, trace, events, memStore, sessionID, scenarioStatus)
 	} else {
 		slog.Debug("platform reflector: skipping reflection (memory_save already called), will run extraction",
 			"component", "platform-reflector")
@@ -135,11 +137,48 @@ func (r *PlatformReflector) Reflect(ctx context.Context, trace *ExecutionTrace, 
 
 	// After reflection (or skip), run extraction/consolidation on session memories.
 	// Gate: only extract if there are 2+ memories in this session.
-	r.runExtraction(ctx, memStore, sessionID)
+	r.runExtraction(ctx, memStore, sessionID, scenarioStatus)
+	if scenarioStatus == mem.ScenarioCardStatusVerified {
+		r.markScenarioCardsVerifiedForSession(ctx, memStore, sessionID)
+	}
+}
+
+func scenarioStatusFromTrace(trace *ExecutionTrace) string {
+	if countSuccessfulScenarioEvidenceToolCallsRecursive(trace) == 0 {
+		return ""
+	}
+	return mem.ScenarioCardStatusVerified
+}
+
+func (r *PlatformReflector) markScenarioCardsVerifiedForSession(ctx context.Context, memStore store.MemoryStore, sessionID string) {
+	memories, err := memStore.ListBySession(ctx, sessionID)
+	if err != nil {
+		slog.Debug("platform reflector: failed to list session cards for verification",
+			"component", "platform-reflector",
+			"sessionID", sessionID,
+			"error", err)
+		return
+	}
+	for _, entry := range memories {
+		card, ok := mem.ParseScenarioCard(entry.Snippet)
+		if !ok || card.Status == mem.ScenarioCardStatusVerified {
+			continue
+		}
+		card.Status = mem.ScenarioCardStatusVerified
+		if card.Confidence < 0.8 {
+			card.Confidence = 0.8
+		}
+		if err := memStore.Update(ctx, entry.ID, mem.RenderScenarioCard(card), mem.ScenarioCardCategory); err != nil {
+			slog.Debug("platform reflector: failed to mark scenario card verified",
+				"component", "platform-reflector",
+				"id", entry.ID,
+				"error", err)
+		}
+	}
 }
 
 // runReflection performs the LLM call to identify and save missed knowledge.
-func (r *PlatformReflector) runReflection(ctx context.Context, trace *ExecutionTrace, events session.Events, memStore store.MemoryStore, sessionID string) {
+func (r *PlatformReflector) runReflection(ctx context.Context, trace *ExecutionTrace, events session.Events, memStore store.MemoryStore, sessionID string, scenarioStatus string) {
 	// Build rich context for the reflection LLM
 	reflectionContext := buildReflectionContext(trace, events)
 
@@ -215,7 +254,7 @@ func (r *PlatformReflector) runReflection(ctx context.Context, trace *ExecutionT
 	saveCount := 0
 	for _, part := range lastResp.Content.Parts {
 		if part.FunctionCall != nil && part.FunctionCall.Name == "memory_save" {
-			r.executePlatformSave(ctx, part.FunctionCall, memStore, sessionID)
+			r.executePlatformSave(ctx, part.FunctionCall, memStore, sessionID, scenarioStatus)
 			saveCount++
 		}
 	}
@@ -230,7 +269,7 @@ func (r *PlatformReflector) runReflection(ctx context.Context, trace *ExecutionT
 // executePlatformSave saves a single memory entry to the PG team store.
 // Uses cross-session dedup/merge: if a related memory already exists in any
 // session, the content is merged via an LLM call rather than creating a duplicate.
-func (r *PlatformReflector) executePlatformSave(ctx context.Context, fc *genai.FunctionCall, memStore store.MemoryStore, sessionID string) {
+func (r *PlatformReflector) executePlatformSave(ctx context.Context, fc *genai.FunctionCall, memStore store.MemoryStore, sessionID string, scenarioStatus string) {
 	args := fc.Args
 	if args == nil {
 		return
@@ -245,14 +284,19 @@ func (r *PlatformReflector) executePlatformSave(ctx context.Context, fc *genai.F
 		return
 	}
 
+	metadata := map[string]any{}
+	if scope := store.MemoryScopeFromContext(ctx); scope != "" {
+		metadata["scope"] = string(scope)
+	}
 	entry := store.MemoryEntry{
 		Content:   content,
 		Category:  category,
 		SessionID: sessionID,
 		CreatedBy: store.UserIDFromContext(ctx),
+		Metadata:  metadata,
 	}
 
-	result, err := r.merger().SaveOrMerge(ctx, memStore, entry)
+	result, err := r.merger().SaveOrMergeWithStatus(ctx, memStore, entry, scenarioStatus)
 	if err != nil {
 		slog.Debug("platform reflection failed to save/merge",
 			"component", "platform-reflector",
@@ -270,7 +314,7 @@ func (r *PlatformReflector) executePlatformSave(ctx context.Context, fc *genai.F
 
 // runExtraction consolidates all memories from the current session.
 // Only runs if there are 2+ memories (nothing to consolidate with 0 or 1).
-func (r *PlatformReflector) runExtraction(ctx context.Context, memStore store.MemoryStore, sessionID string) {
+func (r *PlatformReflector) runExtraction(ctx context.Context, memStore store.MemoryStore, sessionID string, scenarioStatus string) {
 	memories, err := memStore.ListBySession(ctx, sessionID)
 	if err != nil {
 		slog.Debug("platform reflector extraction: failed to list session memories",
@@ -375,7 +419,7 @@ func (r *PlatformReflector) runExtraction(ctx context.Context, memStore store.Me
 	}
 
 	// Apply: delete originals and insert consolidated entries
-	r.applyExtraction(ctx, memStore, sessionID, memories, entries)
+	r.applyExtraction(ctx, memStore, sessionID, memories, entries, scenarioStatus)
 }
 
 // extractionEntry represents a single consolidated memory entry.
@@ -424,9 +468,39 @@ func parseConsolidateResponse(resp *model.LLMResponse) []extractionEntry {
 	return nil
 }
 
-// applyExtraction deletes original session memories and inserts consolidated entries.
-func (r *PlatformReflector) applyExtraction(ctx context.Context, memStore store.MemoryStore, sessionID string, originals []store.MemorySearchResult, entries []extractionEntry) {
-	// Delete originals
+// applyExtraction converts consolidated session memories into scenario cards and
+// deletes the raw originals only after card upsert/discard processing succeeds.
+func (r *PlatformReflector) applyExtraction(ctx context.Context, memStore store.MemoryStore, sessionID string, originals []store.MemorySearchResult, entries []extractionEntry, scenarioStatus string) {
+	userID := store.UserIDFromContext(ctx)
+	cardCount := 0
+	discardCount := 0
+	for _, entry := range entries {
+		metadata := map[string]any{}
+		if scope := store.MemoryScopeFromContext(ctx); scope != "" {
+			metadata["scope"] = string(scope)
+		}
+		memEntry := store.MemoryEntry{
+			Content:   entry.Content,
+			Category:  entry.Category,
+			SessionID: sessionID,
+			CreatedBy: userID,
+			Metadata:  metadata,
+		}
+		result, err := r.merger().SaveOrMergeWithStatus(ctx, memStore, memEntry, scenarioStatus)
+		if err != nil {
+			slog.Warn("platform extraction: failed to save scenario card",
+				"component", "platform-reflector",
+				"category", entry.Category,
+				"error", err)
+			return
+		}
+		if result.Action == "discarded" {
+			discardCount++
+		} else {
+			cardCount++
+		}
+	}
+
 	deleteCount := 0
 	for _, m := range originals {
 		if err := memStore.Delete(ctx, m.ID); err != nil {
@@ -439,31 +513,12 @@ func (r *PlatformReflector) applyExtraction(ctx context.Context, memStore store.
 		}
 	}
 
-	// Insert consolidated entries
-	insertCount := 0
-	userID := store.UserIDFromContext(ctx)
-	for _, entry := range entries {
-		memEntry := store.MemoryEntry{
-			Content:   entry.Content,
-			Category:  entry.Category,
-			SessionID: sessionID,
-			CreatedBy: userID,
-		}
-		if err := memStore.Add(ctx, memEntry); err != nil {
-			slog.Warn("platform extraction: failed to save consolidated memory",
-				"component", "platform-reflector",
-				"category", entry.Category,
-				"error", err)
-		} else {
-			insertCount++
-		}
-	}
-
 	slog.Debug("platform extraction completed",
 		"component", "platform-reflector",
 		"sessionID", sessionID,
 		"deleted", deleteCount,
-		"inserted", insertCount,
+		"cards", cardCount,
+		"discarded", discardCount,
 		"originalCount", len(originals))
 }
 
@@ -503,13 +558,14 @@ func truncateForSummary(s string, maxLen int) string {
 const platformExtractionSystemPrompt = `You are a memory consolidation assistant. You receive a list of memories that were saved during a single session. Your job is to reorganize and consolidate them into well-structured, deduplicated entries grouped by topic or subject.
 
 Rules:
-1. Group related memories by topic/subject (e.g., all Kubernetes facts together, all API patterns together)
-2. Deduplicate: if the same fact appears in multiple entries, keep it only once
-3. Preserve ALL factual content — never discard information, only reorganize it
-4. Each output entry must have a clear, descriptive category name
-5. Content should be concise bullet points
-6. If memories are already well-organized (single topic, no duplicates), return them as-is
-7. NEVER add information that wasn't in the original memories
-8. NEVER save secret values (passwords, tokens, API keys)
+1. Group memories by operational scenario, not by every shared word. A prerequisite credential/tooling lesson may be its own card; a concrete workflow such as listing OpenStack Octavia load balancers should be its own focused card.
+2. Deduplicate: if the same fact appears in multiple entries, keep it only once.
+3. Keep each entry focused. Do not mix unrelated service endpoints into a narrow workflow card unless the scenario is explicitly service discovery.
+4. Preserve factual content, but separate positive steps from failed assumptions. Prefix failures, wrong credentials, placeholder issues, and "do not use" notes as "Caution:" so they do not become the recommended path.
+5. Each output entry must have a clear, descriptive category name.
+6. Content should be concise bullet points with the shortest successful path first.
+7. If memories are already well-organized (single topic, no duplicates), return them as-is.
+8. NEVER add information that wasn't in the original memories.
+9. NEVER save secret values (passwords, tokens, API keys).
 
-Output format: Call consolidate_memories with an array of consolidated entries. Each entry has a "category" (short heading) and "content" (bullet-point facts).`
+Output format: Call consolidate_memories with an array of consolidated entries. Each entry has a "category" (short scenario heading) and "content" (bullet-point successful path plus any Caution bullets).`

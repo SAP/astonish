@@ -44,7 +44,7 @@ Each tier uses hybrid search combining two capabilities:
 - **Vector similarity** — semantic search via embedding cosine distance (pgvector for PostgreSQL, built-in for SQLite)
 - **Full-text search** — keyword matching via PostgreSQL tsvector or SQLite FTS5
 
-Results from both methods are fused per-tier, then cross-tier RRF produces the final ranked list.
+Results from both methods are fused per-tier, then cross-tier RRF produces the final ranked list. Ties are sorted deterministically by tier, creation time, and ID so identical searches do not change order because of parallel tier timing. Scenario cards receive an additional query-aware filter to suppress unrelated cards that only matched generic words.
 
 ## Knowledge Promotion Chain
 
@@ -57,9 +57,9 @@ Personal  ──publish──▶  Team  ──promote──▶  Org
 1. **Personal → Team**: any team member can publish a memory entry to their team via Studio. This makes it searchable by all team members.
 2. **Team → Org**: a team admin or org admin promotes team knowledge to org level via Studio, making it available to every team in the organization.
 
-The agent can also save knowledge directly during conversations using the `memory_save` tool. The tier is determined by the current context.
+The agent can also save knowledge directly during conversations using the `memory_save` tool. The tier is determined by the current context. In platform mode, operational knowledge is stored as scenario cards when possible: trace-backed saves with successful external tool evidence are marked verified, while saves without execution evidence stay draft until a later successful run confirms them.
 
-Promotion copies the entry (with provenance metadata) — the original remains in its source tier.
+Promotion now performs a scenario-card upsert. When possible, the selected memory is distilled into an efficient successful-path card in the target tier and merged with an existing card for the same scenario. Scenario matching uses deterministic identity anchors such as system, service family, resource type, operation, environment, credential, endpoint host family, API family, HTTP method, and URL path; the canonical key is treated as an alias, not the only identity. After the card is saved, the original raw source memory is deleted; if it cannot form a useful card, it is discarded rather than kept as durable memory.
 
 ## The Learning Loop
 
@@ -67,8 +67,9 @@ Here is how knowledge compounds in practice:
 
 1. **Alice** debugs a tricky Kubernetes networking issue. The agent saves the resolution to her personal memory via `memory_save`.
 2. Alice publishes the resolution to the **Backend team** via Studio. Now when any backend engineer hits a similar issue, the agent surfaces Alice's solution.
-3. The team admin notices this resolution is relevant org-wide and **promotes it to org level** via Studio.
-4. **Dave** on the Frontend team later encounters the same networking issue. The agent finds the org-level memory and guides him through the fix — even though Dave never interacted with Alice.
+3. The team admin notices this resolution is relevant org-wide and **promotes it to org level** via Studio. If an org scenario card already exists for the same scenario identity, the new evidence is merged into that card instead of creating another duplicate memory.
+4. If two cards were already created with different labels for the same scenario, **Memory Health** can recommend a duplicate-card merge, show the resolver signals, save the merged card into the target tier, preserve any existing non-duplicate card for that resolved scenario, and delete only the explicit duplicate card rows.
+5. **Dave** on the Frontend team later encounters the same networking issue. The agent finds the org-level scenario card and guides him through the efficient path — even though Dave never interacted with Alice.
 
 Each step is explicit. Knowledge does not leak upward automatically.
 

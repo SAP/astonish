@@ -165,8 +165,15 @@ func (cr *ChatRunner) InjectCredentialStore(cs store.CredentialStore) {
 // Tool functions and knowledge callbacks retrieve these via store.*FromContext.
 // Must be called before Run().
 func (cr *ChatRunner) InjectMemoryStores(memStore store.MemoryStore, searcher store.ThreeTierSearcher) {
+	cr.InjectMemoryStoresWithScope(memStore, "", searcher)
+}
+
+func (cr *ChatRunner) InjectMemoryStoresWithScope(memStore store.MemoryStore, scope store.MemoryScope, searcher store.ThreeTierSearcher) {
 	if memStore != nil {
 		cr.ctx = store.WithMemoryStore(cr.ctx, memStore)
+	}
+	if scope != "" {
+		cr.ctx = store.WithMemoryScope(cr.ctx, scope)
 	}
 	if searcher != nil {
 		cr.ctx = store.WithThreeTierSearcher(cr.ctx, searcher)
@@ -174,8 +181,8 @@ func (cr *ChatRunner) InjectMemoryStores(memStore store.MemoryStore, searcher st
 }
 
 // InjectMemorySaveOrMerge adds a cross-session memory merge function to the
-// runner's context. When set, the memory_save tool will use this function
-// instead of a raw insert, enabling deduplication across sessions via LLM merge.
+// runner's context. The memory_save tool requires this function in platform
+// mode so saves become structured cards instead of raw durable memories.
 // Must be called before Run().
 func (cr *ChatRunner) InjectMemorySaveOrMerge(fn store.MemorySaveOrMergeFunc) {
 	if fn != nil {

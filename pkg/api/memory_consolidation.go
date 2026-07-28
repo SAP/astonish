@@ -136,10 +136,21 @@ func MemoryConsolidationApplyHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Card.Scope = req.TargetScope
-	result, err := memory.UpsertScenarioCard(r.Context(), memStore, req.Card)
-	if err != nil {
-		respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to save scenario card: %v", err))
-		return
+	preservedID := preferredPreservedScenarioCardID(r.Context(), memStore, req.DuplicateCardIDs, req.Card)
+	var result memory.ScenarioUpsertResult
+	if preservedID != "" {
+		if err := memStore.Update(r.Context(), preservedID, memory.RenderScenarioCard(req.Card), memory.ScenarioCardCategory); err != nil {
+			respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to update scenario card: %v", err))
+			return
+		}
+		result = memory.ScenarioUpsertResult{Action: "merged", ExistingID: preservedID}
+	} else {
+		var err error
+		result, err = memory.UpsertScenarioCard(r.Context(), memStore, req.Card)
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to save scenario card: %v", err))
+			return
+		}
 	}
 	deletedSources := deleteConsolidatedSources(r, svc, pu, req.Card.SourceMemoryIDs)
 	deletedDuplicateCards := deleteDuplicateScenarioCards(r, svc, pu, req.DuplicateCardIDs, result.ExistingID)

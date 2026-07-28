@@ -30,6 +30,10 @@ type MergeResult struct {
 //
 // Returns the merge result indicating what action was taken.
 func (mm *MemoryMerger) SaveOrMerge(ctx context.Context, memStore store.MemoryStore, entry store.MemoryEntry) (MergeResult, error) {
+	return mm.SaveOrMergeWithStatus(ctx, memStore, entry, "")
+}
+
+func (mm *MemoryMerger) SaveOrMergeWithStatus(ctx context.Context, memStore store.MemoryStore, entry store.MemoryEntry, status string) (MergeResult, error) {
 	if memStore == nil {
 		return MergeResult{}, fmt.Errorf("memory store is nil")
 	}
@@ -41,6 +45,12 @@ func (mm *MemoryMerger) SaveOrMerge(ctx context.Context, memStore store.MemorySt
 		}
 	} else {
 		card = mem.DraftScenarioCardFromMemoryEntry("team", entry)
+	}
+	if status != "" {
+		card.Status = status
+		if status == mem.ScenarioCardStatusVerified && card.Confidence < 0.8 {
+			card.Confidence = 0.8
+		}
 	}
 	if !mem.HasUsableScenarioRecipe(card) {
 		return MergeResult{Action: "discarded"}, nil

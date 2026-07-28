@@ -109,5 +109,6 @@ memory:
 - Use categories for organization (the agent does this automatically)
 - In team deployments, publish useful memories to your team via Studio so colleagues benefit
 - The agent automatically searches memory before responding — no manual retrieval needed
+- In platform mode, durable operational knowledge is organized into scenario cards. Successful trace-backed recipes can be marked verified; unsupported notes remain draft until a later successful run confirms them.
 
 See [Sessions](./sessions.md) for how session history differs from memory, and [Three-Tier Memory](../platform/three-tier-memory.md) for the full multi-tier system.

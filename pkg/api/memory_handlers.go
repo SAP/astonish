@@ -935,6 +935,42 @@ func deleteSourceIDsFromStores(ctx context.Context, sourceIDs []string, stores [
 	return deleted
 }
 
+func preferredPreservedScenarioCardID(ctx context.Context, memStore store.MemoryStore, duplicateIDs []string, card memory.ScenarioCard) string {
+	if memStore == nil {
+		return ""
+	}
+	duplicateSet := make(map[string]bool, len(duplicateIDs))
+	for _, id := range duplicateIDs {
+		if id != "" {
+			duplicateSet[id] = true
+		}
+	}
+	existingCards, err := memStore.List(ctx, memory.ScenarioCardCategory, 1000, 0)
+	if err != nil {
+		return ""
+	}
+	statsCards := make([]memory.ScenarioCard, 0, len(existingCards)+1)
+	for _, existing := range existingCards {
+		if existingCard, ok := memory.ParseScenarioCard(existing.Snippet); ok {
+			statsCards = append(statsCards, existingCard)
+		}
+	}
+	stats := memory.BuildScenarioCorpusStats(append(statsCards, card))
+	for _, existing := range existingCards {
+		if existing.ID == "" || duplicateSet[existing.ID] {
+			continue
+		}
+		existingCard, ok := memory.ParseScenarioCard(existing.Snippet)
+		if !ok {
+			continue
+		}
+		if memory.ScoreScenarioPair(existingCard, card, stats).Decision == "merge" {
+			return existing.ID
+		}
+	}
+	return ""
+}
+
 func deleteDuplicateScenarioCards(r *http.Request, svc *store.Services, pu *PlatformUser, duplicateIDs []string, preservedID string) int {
 	if len(duplicateIDs) == 0 || svc == nil || pu == nil {
 		return 0

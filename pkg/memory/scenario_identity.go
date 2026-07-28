@@ -3,6 +3,7 @@ package memory
 import (
 	"fmt"
 	"math"
+	"net/url"
 	"regexp"
 	"sort"
 	"strings"
@@ -99,10 +100,10 @@ func ExtractScenarioIdentityFromText(text string) ScenarioIdentity {
 	}
 	identity.Operation = extractScenarioOperation(lower)
 	identity.Intent = identity.Operation
-	identity.Credentials = appendUniqueMany(identity.Credentials, credentialPattern.FindAllString(lower, -1))
-	identity.EndpointHosts = appendUniqueMany(identity.EndpointHosts, endpointHostPattern.FindAllString(lower, -1))
+	identity.Credentials = appendUniqueMany(identity.Credentials, extractCredentialAnchors(lower))
+	identity.EndpointHosts = appendUniqueMany(identity.EndpointHosts, extractEndpointHosts(text))
 	identity.HTTPMethods = appendUniqueMany(identity.HTTPMethods, httpMethodPattern.FindAllString(strings.ToUpper(text), -1))
-	identity.URLPaths = appendUniqueMany(identity.URLPaths, urlPathPattern.FindAllString(text, -1))
+	identity.URLPaths = appendUniqueMany(identity.URLPaths, extractURLPathAnchors(text))
 	if env := extractEnvironment(lower); env != "" {
 		identity.Environment = env
 	}
@@ -132,7 +133,7 @@ func ScoreScenarioPair(a, b ScenarioCard, stats ScenarioCorpusStats) ScenarioMat
 	var positives []string
 	var negatives []string
 	if a.CanonicalKey != "" && b.CanonicalKey != "" && strings.EqualFold(a.CanonicalKey, b.CanonicalKey) {
-		score += 0.46
+		score += 0.50
 		positives = append(positives, "same canonical key alias")
 	}
 	if aliasOverlap(a, b) {
@@ -165,7 +166,7 @@ func ScoreScenarioPair(a, b ScenarioCard, stats ScenarioCorpusStats) ScenarioMat
 		score += 0.14
 		positives = append(positives, "same operation "+a.Identity.Operation)
 	} else if a.CanonicalKey != "" && b.CanonicalKey != "" && strings.EqualFold(a.CanonicalKey, b.CanonicalKey) {
-		score += 0.18
+		score += 0.20
 		positives = append(positives, "same scenario alias without conflicting operation")
 	} else if a.Identity.Operation != "" && b.Identity.Operation != "" && incompatibleOperations(a.Identity.Operation, b.Identity.Operation) {
 		score -= 0.30
@@ -348,6 +349,93 @@ func extractEnvironment(lower string) string {
 	return ""
 }
 
+func extractCredentialAnchors(lower string) []string {
+	var credentials []string
+	for _, value := range credentialPattern.FindAllString(lower, -1) {
+		value = strings.TrimSpace(value)
+		if ignoredCredentialAnchor(value) {
+			continue
+		}
+		credentials = appendUnique(credentials, value)
+	}
+	return credentials
+}
+
+func ignoredCredentialAnchor(value string) bool {
+	switch normalizeAnchor(value) {
+	case "resolve-credential", "x-auth-token", "auth-token", "keystone-token", "credential", "credentials":
+		return true
+	}
+	return false
+}
+
+func extractEndpointHosts(text string) []string {
+	var hosts []string
+	for _, raw := range urlPattern.FindAllString(text, -1) {
+		parsed, err := url.Parse(raw)
+		if err == nil && parsed.Hostname() != "" {
+			hosts = appendUnique(hosts, parsed.Hostname())
+		}
+	}
+	for _, host := range endpointHostPattern.FindAllString(strings.ToLower(text), -1) {
+		if strings.Contains(host, "astonish") {
+			continue
+		}
+		hosts = appendUnique(hosts, host)
+	}
+	return hosts
+}
+
+func extractURLPathAnchors(text string) []string {
+	var paths []string
+	urlRanges := urlMatchRanges(text)
+	for _, raw := range urlPattern.FindAllString(text, -1) {
+		parsed, err := url.Parse(raw)
+		if err != nil || parsed.Path == "" || ignoredURLPathAnchor(parsed.Path) {
+			continue
+		}
+		paths = appendUnique(paths, parsed.Path)
+	}
+	for _, match := range urlPathPattern.FindAllStringIndex(text, -1) {
+		if matchInsideAnyRange(match, urlRanges) {
+			continue
+		}
+		path := text[match[0]:match[1]]
+		if strings.HasPrefix(path, "//") || ignoredURLPathAnchor(path) {
+			continue
+		}
+		paths = appendUnique(paths, path)
+	}
+	return paths
+}
+
+func urlMatchRanges(text string) [][2]int {
+	matches := urlPattern.FindAllStringIndex(text, -1)
+	ranges := make([][2]int, 0, len(matches))
+	for _, match := range matches {
+		ranges = append(ranges, [2]int{match[0], match[1]})
+	}
+	return ranges
+}
+
+func matchInsideAnyRange(match []int, ranges [][2]int) bool {
+	for _, r := range ranges {
+		if match[0] >= r[0] && match[1] <= r[1] {
+			return true
+		}
+	}
+	return false
+}
+
+func ignoredURLPathAnchor(path string) bool {
+	path = normalizeAnchor(strings.TrimSpace(path))
+	switch path {
+	case "", "/", "/efficient-successful-path", "/password":
+		return true
+	}
+	return strings.Contains(path, "astonish") || strings.Contains(path, "password")
+}
+
 func aliasOverlap(a, b ScenarioCard) bool {
 	left := scenarioAliasSet(a)
 	for alias := range scenarioAliasSet(b) {
@@ -461,5 +549,6 @@ var (
 	endpointHostPattern = regexp.MustCompile(`\b[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*){2,}\b`)
 	environmentPattern  = regexp.MustCompile(`\b(?:qa|dev|prod|stage|staging|test|sandbox|eu|us|ap)-[a-z]{2,}-?\d*\b`)
 	httpMethodPattern   = regexp.MustCompile(`\b(GET|POST|PUT|PATCH|DELETE|HEAD)\b`)
+	urlPattern          = regexp.MustCompile(`https?://[^\s)\]}>"']+`)
 	urlPathPattern      = regexp.MustCompile(`/[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+`)
 )

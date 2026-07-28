@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/SAP/astonish/pkg/store"
@@ -73,6 +74,48 @@ func TestScenarioCardRenderParseRoundTrip(t *testing.T) {
 	}
 	if len(parsed.Superseded) != 1 || parsed.Superseded[0].SupersededBy != "noVNC ticket endpoint" {
 		t.Fatalf("Superseded = %#v", parsed.Superseded)
+	}
+}
+
+func TestDraftScenarioCardSeparatesCredentialFailuresFromRecommendedPath(t *testing.T) {
+	card := DraftScenarioCardFromMemories("infrastructure-openstack-credential-access", "team", []store.MemorySearchResult{{
+		Snippet: strings.Join([]string{
+			"- The credential name is `openstack-keystone` (type: `openstack_keystone`)",
+			"- `resolve_credential(\"openstack\")` returns not found — must use `openstack-keystone`",
+			"- Using `{{CREDENTIAL:openstack:username}}` in shell commands does NOT work — placeholders are not substituted in shell",
+			"- Correct approach: use `http_request` tool with `credential=\"openstack-keystone\"` — X-Auth-Token is injected automatically",
+		}, "\n"),
+		Category: "infrastructure/openstack credential access",
+		Scope:    "team",
+	}})
+	for _, step := range card.RecommendedRecipe {
+		if strings.Contains(strings.ToLower(step), "not found") || strings.Contains(strings.ToLower(step), "does not work") || strings.Contains(strings.ToLower(step), "not substituted") {
+			t.Fatalf("failure/caution leaked into recommended path: %#v", card.RecommendedRecipe)
+		}
+	}
+	if len(card.CautionsOrConditionalFailures) < 2 {
+		t.Fatalf("CautionsOrConditionalFailures = %#v, want credential failure notes", card.CautionsOrConditionalFailures)
+	}
+}
+
+func TestScenarioIdentityFiltersInternalAndToolAnchors(t *testing.T) {
+	identity := ExtractScenarioIdentityFromText(strings.Join([]string{
+		"category scenario_card/efficient_successful_path",
+		"Use resolve_credential before calling GET https://identity-3.qa-de-1.cloud.sap/v3/auth/catalog/password",
+		"Use credential openstack-keystone and X-Auth-Token with https://loadbalancer-3.qa-de-1.cloud.sap/v2/lbaas/loadbalancers",
+	}, "\n"))
+	for _, credential := range identity.Credentials {
+		if credential == "resolve-credential" || credential == "x-auth-token" {
+			t.Fatalf("tool/header anchor leaked into credentials: %#v", identity.Credentials)
+		}
+	}
+	for _, path := range identity.URLPaths {
+		if path == "/efficient-successful-path" || strings.HasPrefix(path, "//") || path == "/password" {
+			t.Fatalf("internal or malformed path leaked into URL paths: %#v", identity.URLPaths)
+		}
+	}
+	if len(identity.EndpointHosts) == 0 || len(identity.URLPaths) == 0 {
+		t.Fatalf("expected real host/path anchors: %#v", identity)
 	}
 }
 

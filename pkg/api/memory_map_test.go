@@ -295,6 +295,39 @@ func TestScenarioCardUpdateContentConvertsRawEditAndDiscardsUncardableEdit(t *te
 	}
 }
 
+func TestPreferredPreservedScenarioCardIDSkipsDuplicateIDs(t *testing.T) {
+	kept := memory.ScenarioCard{
+		CanonicalKey:      "infrastructure-openstack-lbaas-load",
+		Title:             "OpenStack LBaaS load balancer list in QA-DE-1",
+		RecommendedRecipe: []string{"Use openstack-keystone and GET https://loadbalancer.qa-de-1.cloud.sap/v2/lbaas/loadbalancers."},
+		Conditions:        []string{"Applies in qa-de-1."},
+		Status:            memory.ScenarioCardStatusVerified,
+	}
+	duplicate := memory.ScenarioCard{
+		CanonicalKey:      "infrastructure-openstack-octavia-load",
+		Title:             "OpenStack Octavia load balancer lookup",
+		RecommendedRecipe: []string{"Use openstack-keystone and GET https://octavia.qa-de-1.cloud.sap/v2.0/lbaas/loadbalancers."},
+		Conditions:        []string{"Applies in qa-de-1."},
+		Status:            memory.ScenarioCardStatusDraft,
+	}
+	team := &deletingMemoryStore{entries: map[string]store.MemorySearchResult{
+		"card-keep":   {ID: "card-keep", Snippet: memory.RenderScenarioCard(kept), Category: memory.ScenarioCardCategory, Scope: "team"},
+		"card-delete": {ID: "card-delete", Snippet: memory.RenderScenarioCard(duplicate), Category: memory.ScenarioCardCategory, Scope: "team"},
+	}}
+	req, err := http.NewRequest(http.MethodPost, "/", nil)
+	if err != nil {
+		t.Fatalf("failed to build request: %v", err)
+	}
+	merged := memory.MergeScenarioCards(kept, duplicate)
+	merged.CanonicalKey = kept.CanonicalKey
+	merged.Title = kept.Title
+	merged.RecommendedRecipe = []string{"Use openstack-keystone and GET https://loadbalancer.qa-de-1.cloud.sap/v2/lbaas/loadbalancers."}
+	preserved := preferredPreservedScenarioCardID(req.Context(), team, []string{"card-delete"}, merged)
+	if preserved != "card-keep" {
+		t.Fatalf("preserved = %q, want card-keep", preserved)
+	}
+}
+
 func TestDeleteDuplicateScenarioCardsDeletesOnlyExplicitScenarioCards(t *testing.T) {
 	duplicate := memory.ScenarioCard{
 		CanonicalKey:      "infrastructure-openstack-octavia-load",
@@ -402,8 +435,14 @@ func (d *deletingMemoryStore) Delete(_ context.Context, id string) error {
 	return nil
 }
 
-func (d *deletingMemoryStore) List(context.Context, string, int, int) ([]store.MemorySearchResult, error) {
-	return nil, nil
+func (d *deletingMemoryStore) List(_ context.Context, category string, _, _ int) ([]store.MemorySearchResult, error) {
+	var out []store.MemorySearchResult
+	for _, entry := range d.entries {
+		if category == "" || entry.Category == category {
+			out = append(out, entry)
+		}
+	}
+	return out, nil
 }
 
 func (d *deletingMemoryStore) ListBySession(context.Context, string) ([]store.MemorySearchResult, error) {

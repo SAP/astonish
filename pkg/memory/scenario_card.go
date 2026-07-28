@@ -101,7 +101,7 @@ func DraftScenarioCardFromMemories(key, targetScope string, memories []store.Mem
 			card.SourceSessionIDs = appendUnique(card.SourceSessionIDs, m.SessionID)
 		}
 		for _, bullet := range extractReusableBullets(m.Snippet) {
-			if transientOrFailureLine(bullet) {
+			if cautionLine(bullet) {
 				card.CautionsOrConditionalFailures = appendUnique(card.CautionsOrConditionalFailures, softenCaution(bullet))
 				continue
 			}
@@ -482,9 +482,14 @@ func extractReusableBullets(content string) []string {
 	return out
 }
 
-func transientOrFailureLine(line string) bool {
+func cautionLine(line string) bool {
 	lower := strings.ToLower(line)
-	markers := []string{"temporary", "temporarily", "outage", "timeout", "timed out", "503", "502", "failed attempt", "trial and error", "did not work", "doesn't work", "do not use", "avoid"}
+	markers := []string{
+		"caution:", "temporary", "temporarily", "outage", "timeout", "timed out", "503", "502",
+		"failed attempt", "trial and error", "did not work", "doesn't work", "does not work",
+		"do not use", "don't use", "avoid", "not found", "does not exist", "is not substituted", "are not substituted",
+		"not substituted", "wrong", "incorrect", "manual authenticate", "manually authenticate",
+	}
 	for _, marker := range markers {
 		if strings.Contains(lower, marker) {
 			return true
@@ -495,8 +500,9 @@ func transientOrFailureLine(line string) bool {
 
 func softenCaution(line string) string {
 	line = strings.TrimSpace(line)
-	if strings.Contains(strings.ToLower(line), "do not use") || strings.Contains(strings.ToLower(line), "avoid") {
-		return "Treat as conditional only; verify current service status before avoiding this path: " + line
+	lower := strings.ToLower(line)
+	if strings.Contains(lower, "temporary") || strings.Contains(lower, "outage") || strings.Contains(lower, "timeout") || strings.Contains(lower, "503") || strings.Contains(lower, "502") {
+		return "Treat as conditional only; verify current service status before changing the path: " + line
 	}
 	return line
 }

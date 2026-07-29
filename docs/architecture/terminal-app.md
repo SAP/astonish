@@ -158,7 +158,13 @@ Pastes of up to three lines are inserted into the composer as-is and the compose
 
 ### Image paste
 
-Pasting an image from the system clipboard (macOS `Ctrl+V` / Super+V, and empty text pastes that only contain image data) inserts an atomic placeholder such as `[image #1]`. Multiple images increment the index (`#2`, `#3`, …). Image tokens share the same atomic navigation/delete behavior as text-paste placeholders. On submit, remaining image tokens are sent to Studio as multimodal `attachments` (base64 PNG/JPEG/GIF) while the user transcript keeps the `[image #N]` markers.
+Pasting an image from the system clipboard (`Ctrl+V` / Super+V, and empty text pastes that only contain image data) inserts an atomic placeholder such as `[image #1]`. Multiple images increment the index (`#2`, `#3`, …). Image tokens share the same atomic navigation/delete behavior as text-paste placeholders. On submit, remaining image tokens are sent to Studio as multimodal `attachments` (base64 PNG/JPEG/GIF) while the user transcript keeps the `[image #N]` markers.
+
+Clipboard image reads are platform-specific:
+
+- **macOS**: `osascript` pasteboard (`PNGf`, with TIFF→PNG via `sips`)
+- **Linux**: Wayland `wl-paste --type image/*` first, then X11 `xclip -t image/*`
+- Other platforms: image clipboard read is unavailable (text paste still works)
 
 ### `@file` mentions
 

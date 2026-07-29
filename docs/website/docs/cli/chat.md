@@ -86,6 +86,8 @@ Pasting up to three lines inserts the text directly into the composer. Pasting f
 
 Pasting an image from the clipboard inserts `[image #1]` (then `#2`, `#3`, …). Image placeholders are also atomic tokens. When you press `Enter`, Astonish sends the images to the platform as chat attachments so multimodal models can see them, while the chat history keeps the `[image #N]` markers.
 
+On Linux, image paste requires `wl-paste` (Wayland) or `xclip` (X11) on `PATH`. On macOS, the system pasteboard is used directly.
+
 ## In-Session Commands
 
 While in an active chat session, type `/` to access these commands:

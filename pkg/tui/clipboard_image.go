@@ -6,6 +6,7 @@ import (
 	_ "image/gif"
 	_ "image/jpeg"
 	_ "image/png"
+	"strings"
 )
 
 // clipboardImageReader reads an image from the system clipboard when supported.
@@ -45,4 +46,29 @@ func sniffImageMIME(data []byte) (string, bool) {
 		return "image/gif", true
 	}
 	return "", false
+}
+
+func containsMIMETarget(list []string, want string) bool {
+	want = strings.ToLower(want)
+	for _, item := range list {
+		item = strings.ToLower(strings.TrimSpace(item))
+		if item == want || strings.HasPrefix(item, want+";") {
+			return true
+		}
+	}
+	return false
+}
+
+func parseCommandLines(out []byte) []string {
+	if len(out) == 0 {
+		return nil
+	}
+	var lines []string
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			lines = append(lines, line)
+		}
+	}
+	return lines
 }

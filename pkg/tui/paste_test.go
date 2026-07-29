@@ -987,3 +987,23 @@ func minimalPNG() []byte {
 		0x42, 0x60, 0x82,
 	}
 }
+
+func TestContainsMIMETarget(t *testing.T) {
+	targets := []string{"text/plain", "image/png", "image/jpeg;charset=utf-8"}
+	if !containsMIMETarget(targets, "image/png") {
+		t.Fatal("expected image/png match")
+	}
+	if !containsMIMETarget(targets, "image/jpeg") {
+		t.Fatal("expected image/jpeg prefix match")
+	}
+	if containsMIMETarget(targets, "image/gif") {
+		t.Fatal("did not expect image/gif")
+	}
+}
+
+func TestParseCommandLines(t *testing.T) {
+	got := parseCommandLines([]byte("image/png\n\ntext/plain\n"))
+	if len(got) != 2 || got[0] != "image/png" || got[1] != "text/plain" {
+		t.Fatalf("parseCommandLines = %#v", got)
+	}
+}

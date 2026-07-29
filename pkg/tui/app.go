@@ -114,7 +114,8 @@ type model struct {
 	clickIsDouble  bool
 
 	// overlays
-	sessions sessionsState
+	sessions    sessionsState
+	modelPicker modelPickerState
 	// slash command completion popup (active when composer starts with /)
 	slash slashCompletion
 	// @file completion popup (active while typing a trailing @token)
@@ -239,6 +240,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleMouse(msg)
 
 	case tea.KeyMsg:
+		// Sessions / model picker overlays capture keys first.
+		if m.sessions.open {
+			return m.handleSessionsKey(msg)
+		}
+		if m.modelPicker.open {
+			return m.handleModelPickerKey(msg)
+		}
+
 		// Explicit paste bindings (Ctrl+V / Super+V) prefer clipboard images.
 		if isClipboardPasteKey(msg) {
 			if next, cmd, handled := m.tryPasteImage(); handled {
@@ -257,11 +266,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m.handlePaste(text)
 			}
-		}
-
-		// Sessions overlay captures keys first.
-		if m.sessions.open {
-			return m.handleSessionsKey(msg)
 		}
 
 		// Approval overlay: y/n before other handling.
@@ -415,6 +419,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case sessionDeletedMsg:
 		return m.applySessionDeleted(msg)
+
+	case modelProvidersLoadedMsg:
+		return m.applyModelProvidersLoaded(msg)
+
+	case modelModelsLoadedMsg:
+		return m.applyModelModelsLoaded(msg)
+
+	case modelPinAppliedMsg:
+		return m.applyModelPinApplied(msg)
 
 	case eventMsg:
 		ev := events.Event(msg)
@@ -717,7 +730,7 @@ func isClipboardPasteKey(msg tea.KeyMsg) bool {
 }
 
 func (m model) tryPasteImage() (tea.Model, tea.Cmd, bool) {
-	if m.sessions.open {
+	if m.sessions.open || m.modelPicker.open {
 		return m, nil, false
 	}
 	if m.tr.Streaming && !m.tr.Awaiting {
@@ -739,6 +752,9 @@ func (m model) tryPasteImage() (tea.Model, tea.Cmd, bool) {
 }
 
 func (m model) insertPastedImage(data []byte, mimeType string) (tea.Model, tea.Cmd) {
+	if m.sessions.open || m.modelPicker.open {
+		return m, nil
+	}
 	prevH := m.composerTextHeight()
 	m.nextImageNum++
 	num := m.nextImageNum
@@ -760,7 +776,7 @@ func (m model) insertPastedImage(data []byte, mimeType string) (tea.Model, tea.C
 }
 
 func (m model) handlePaste(text string) (tea.Model, tea.Cmd) {
-	if m.sessions.open {
+	if m.sessions.open || m.modelPicker.open {
 		return m, nil
 	}
 	if m.tr.Streaming && !m.tr.Awaiting {
@@ -1438,6 +1454,8 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		return m.startNewSession()
 	case text == "/sessions" || text == "/session":
 		return m.openSessionsPicker()
+	case text == "/model" || text == "/models":
+		return m.openModelPicker()
 	default:
 		// Pass through to backend as a normal message so server/local slash handlers can run later.
 		m.history = append(m.history, text)
@@ -1466,6 +1484,7 @@ Commands:
   /help          Show this help
   /status        Show session / provider / model
   /sessions      Open sessions picker (also ctrl+l)
+  /model         Choose provider and model
   /new           Start a new session (also ctrl+n)
   /files         Show @file context help
   /plan          Toggle plan-only mode (also shift+tab)
@@ -2175,7 +2194,7 @@ func (m model) View() string {
 
 	// Completion popups sit just above the composer (filter-as-you-type).
 	composerBlock := m.renderComposer()
-	if !m.tr.Awaiting && !m.sessions.open {
+	if !m.tr.Awaiting && !m.sessions.open && !m.modelPicker.open {
 		switch {
 		case m.slash.active && len(m.slash.matches) > 0:
 			composerBlock = lipgloss.JoinVertical(lipgloss.Left,
@@ -2201,9 +2220,16 @@ func (m model) View() string {
 		m.renderHints(),
 	)
 
-	// Overlays: sessions picker or approval card on top of the main chrome.
+	// Overlays: sessions / model picker or approval card on top of the main chrome.
 	if m.sessions.open {
 		overlay := m.renderSessionsOverlay()
+		return m.paintBackground(lipgloss.Place(m.width, m.screenHeight(), lipgloss.Center, lipgloss.Center, overlay,
+			lipgloss.WithWhitespaceChars(" "),
+			lipgloss.WithWhitespaceBackground(lipgloss.Color("#000000")),
+		))
+	}
+	if m.modelPicker.open {
+		overlay := m.renderModelPickerOverlay()
 		return m.paintBackground(lipgloss.Place(m.width, m.screenHeight(), lipgloss.Center, lipgloss.Center, overlay,
 			lipgloss.WithWhitespaceChars(" "),
 			lipgloss.WithWhitespaceBackground(lipgloss.Color("#000000")),

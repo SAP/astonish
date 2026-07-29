@@ -14,6 +14,8 @@ WEB_DIR = web
 VERSION ?= dev
 DOCKER_REGISTRY ?= ghcr.io/sap
 DEV_TAG ?= dev
+# Host arch mapped to Docker/Go arch (x86_64→amd64, aarch64/arm64→arm64).
+DEV_ARCH ?= $(shell uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/')
 
 # Default target
 all: build-all
@@ -60,7 +62,7 @@ help:
 	@echo "Sandbox (Docker+Incus for macOS/Windows):"
 	@echo "  make build-linux       - Cross-compile Linux amd64 binary"
 	@echo "  make build-linux-arm64 - Cross-compile Linux arm64 binary"
-	@echo "  make docker-incus      - Build the Incus Docker image (for CI release)"
+	@echo "  make docker-incus      - Build+LOAD local Incus image (native arch; tags :$(VERSION) and :latest when VERSION=dev)"
 	@echo ""
 	@echo "OpenShell Sandbox:"
 	@echo "  make docker-sandbox-openshell - Build the OpenShell sandbox image"
@@ -631,12 +633,39 @@ helm-deps:
 	helm dependency update deploy/helm/astonish
 	@echo "Helm dependencies updated (Chart.lock + charts/ archive)"
 
-# Build the Incus Docker image (for CI release pipeline)
-# Requires: astonish-linux-amd64 binary to exist (run build-linux first)
-docker-incus: build-linux
-	@echo "Building Incus Docker image..."
-	docker build -f docker/incus/Dockerfile -t ghcr.io/sap/astonish-incus:$(VERSION) .
-	@echo "Image built: ghcr.io/sap/astonish-incus:$(VERSION)"
+# Build the Incus Docker image for local use (macOS/Windows Docker+Incus).
+#
+# Pitfalls this target avoids:
+#   1. docker-container buildx driver discards the result unless --load is set
+#      (plain `docker build` can leave the image only in build cache).
+#   2. Dockerfile COPYs astonish-linux-${TARGETARCH}; on Apple Silicon that is
+#      arm64, so we must build that binary — not only amd64.
+#   3. Runtime DockerImageTag() uses :latest when host version is "dev", not :dev.
+#      When VERSION=dev we dual-tag so EnsureIncusDockerContainer can find it.
+#
+# After this: docker rm -f astonish-incus && astonish sandbox refresh --force
+# and start a new chat session (existing session containers keep the old binary).
+docker-incus:
+	@if [ "$(DEV_ARCH)" = "arm64" ]; then \
+		$(MAKE) build-linux-arm64; \
+	else \
+		$(MAKE) build-linux; \
+	fi
+	@echo "Building Incus Docker image (linux/$(DEV_ARCH)) and loading into local Docker..."
+	# Single -t with --load: multi-tag --load is unreliable on docker-container
+	# buildx (only the first tag may stick). Retag explicitly afterward.
+	docker buildx build \
+		--platform linux/$(DEV_ARCH) \
+		-f docker/incus/Dockerfile \
+		-t $(DOCKER_REGISTRY)/astonish-incus:$(VERSION) \
+		--load \
+		.
+	@echo "Image loaded: $(DOCKER_REGISTRY)/astonish-incus:$(VERSION)"
+	@if [ "$(VERSION)" = "dev" ]; then \
+		docker tag $(DOCKER_REGISTRY)/astonish-incus:dev $(DOCKER_REGISTRY)/astonish-incus:latest; \
+		echo "Also tagged: $(DOCKER_REGISTRY)/astonish-incus:latest (runtime looks for this when host version is dev)"; \
+	fi
+	@echo "Next: docker rm -f astonish-incus && ./astonish sandbox refresh --force  (then new chat session)"
 
 # Build the OpenShell sandbox image (NVIDIA sandbox base + Astonish agent tools)
 docker-sandbox-openshell: build-linux
@@ -697,10 +726,8 @@ push-all-dev: push-dev push-incus-dev push-sandbox-base-dev push-sandbox-openshe
 	@echo "All dev images pushed successfully!"
 
 # --- Fast single-arch dev builds (native architecture only) ---
-# These skip arm64 cross-compilation for faster iteration during development.
-# They detect the host architecture automatically.
-
-DEV_ARCH ?= $(shell uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/')
+# These skip multi-arch cross-compilation for faster iteration during development.
+# DEV_ARCH is defined near the top of this Makefile.
 
 # Fast: build and push main Astonish API image (single arch)
 push-dev-fast: ensure-builder build-linux build-linux-arm64
@@ -720,8 +747,14 @@ push-sandbox-base-dev-fast: ensure-builder
 		--push .
 	@echo "Pushed: $(DOCKER_REGISTRY)/astonish-sandbox-base:$(DEV_TAG)"
 
-# Fast: build and push Incus image (single arch)
-push-incus-dev-fast: ensure-builder build-linux
+# Fast: build and push Incus image (single arch). Build the binary for DEV_ARCH
+# (arm64 on Apple Silicon), not only amd64.
+push-incus-dev-fast: ensure-builder
+	@if [ "$(DEV_ARCH)" = "arm64" ]; then \
+		$(MAKE) build-linux-arm64; \
+	else \
+		$(MAKE) build-linux; \
+	fi
 	@echo "Building and pushing $(DOCKER_REGISTRY)/astonish-incus:$(DEV_TAG) (linux/$(DEV_ARCH) only)..."
 	docker buildx build --platform linux/$(DEV_ARCH) \
 		-f docker/incus/Dockerfile \

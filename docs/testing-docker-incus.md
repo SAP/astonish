@@ -45,21 +45,38 @@ layer is transparent on Linux.
 You can test the Docker+Incus path on any machine with Docker,
 including Linux (useful for development before testing on a real Mac).
 
-### Step 1: Build the Linux binary
+### Step 1–2: Build Linux binary + load Incus image (one target)
 
 ```bash
-# Cross-compile the astonish binary for linux/amd64
-# This is the binary that goes inside Incus containers
-make build-linux
+# Preferred: native-arch binary, buildx --load into local Docker,
+# tags :dev and :latest (runtime looks for :latest when host version is "dev").
+make docker-incus
 ```
 
-This creates `astonish-linux-amd64` in the project root.
+Do **not** rely on a plain `docker build` with the `docker-container` buildx
+driver — without `--load` the result stays only in the build cache and never
+appears in `docker images`. On Apple Silicon the Dockerfile COPYs
+`astonish-linux-arm64` (`TARGETARCH`); building only amd64 leaves a stale arm64
+binary in the image.
 
-### Step 2: Build the Docker image locally
+After a tool-code change, also recreate the running runtime container and
+refresh templates (existing session containers keep the old binary):
 
 ```bash
-# Build the Incus Docker image (uses docker/incus/Dockerfile)
-docker build -f docker/incus/Dockerfile -t ghcr.io/sap/astonish-incus:latest .
+docker rm -f astonish-incus
+./astonish sandbox refresh --force
+# then start a NEW chat session
+```
+
+Manual equivalent of `make docker-incus` (Apple Silicon):
+
+```bash
+make build-linux-arm64
+docker buildx build --platform linux/arm64 \
+  -f docker/incus/Dockerfile \
+  -t ghcr.io/sap/astonish-incus:dev \
+  -t ghcr.io/sap/astonish-incus:latest \
+  --load .
 ```
 
 This builds the image with:

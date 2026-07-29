@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -147,23 +148,38 @@ func TestEditFile_VerificationContext(t *testing.T) {
 	if !result.Success {
 		t.Fatal("Success = false, want true")
 	}
-	if result.VerificationContext == "" {
-		t.Fatal("VerificationContext is empty, expected surrounding lines")
+	ctx := result.VerificationContext
+	if ctx == "" {
+		t.Fatal("VerificationContext is empty, expected unified hunk")
 	}
-	// Should contain the replaced text
-	if !strings.Contains(result.VerificationContext, "REPLACED_LINE_FIFTEEN") {
-		t.Errorf("verification_context should contain new text, got: %s", result.VerificationContext)
+	if !strings.Contains(ctx, "@@ test.txt:15") {
+		t.Errorf("verification_context header want @@ test.txt:15, got:\n%s", ctx)
 	}
-	// Should have line numbers
-	if !strings.Contains(result.VerificationContext, "15: ") {
-		t.Errorf("verification_context should have line numbers, got: %s", result.VerificationContext)
+	if !strings.Contains(ctx, "- 15| line_aaaaaaaaaaaaaaa_end") {
+		t.Errorf("verification_context should show removed line, got:\n%s", ctx)
+	}
+	if !strings.Contains(ctx, "+ 15| REPLACED_LINE_FIFTEEN") {
+		t.Errorf("verification_context should show added line, got:\n%s", ctx)
+	}
+	// Surrounding context lines present
+	if !strings.Contains(ctx, "  14|") || !strings.Contains(ctx, "  16|") {
+		t.Errorf("verification_context should include surrounding context, got:\n%s", ctx)
+	}
+	if !strings.Contains(result.Message, "(line 15)") {
+		t.Errorf("message should include line number, got: %s", result.Message)
 	}
 }
 
 func TestEditFile_VerificationContextDeletion(t *testing.T) {
 	resetTestCache(t)
 	dir := t.TempDir()
-	content := "keep this\nremove this\nkeep this too\n"
+	// Pad the file so the deletion is well below the start — catches the old
+	// bug that always centered verification context on line 1 for deletions.
+	var prefix []string
+	for i := 1; i <= 20; i++ {
+		prefix = append(prefix, fmt.Sprintf("pad_%d", i))
+	}
+	content := strings.Join(prefix, "\n") + "\nkeep this\nremove this\nkeep this too\n"
 	path := writeTestFile(t, dir, "test.txt", content)
 
 	result, err := EditFile(nil, EditFileArgs{
@@ -177,9 +193,252 @@ func TestEditFile_VerificationContextDeletion(t *testing.T) {
 	if !result.Success {
 		t.Fatal("Success = false")
 	}
-	// Verification context should still be present (showing surrounding area)
-	if result.VerificationContext == "" {
+	ctx := result.VerificationContext
+	if ctx == "" {
 		t.Fatal("VerificationContext is empty for deletion")
+	}
+	// Line 22 = 20 pad lines + "keep this" + "remove this"
+	if !strings.Contains(ctx, "@@ test.txt:22") {
+		t.Errorf("deletion hunk should target line 22, not file start, got:\n%s", ctx)
+	}
+	if !strings.Contains(ctx, "- 22| remove this") {
+		t.Errorf("deletion hunk should show removed line, got:\n%s", ctx)
+	}
+	if !strings.Contains(ctx, "keep this") {
+		t.Errorf("deletion hunk should show surrounding context, got:\n%s", ctx)
+	}
+	// Must not dump the beginning of the file as if the edit were there.
+	if strings.Contains(ctx, "| pad_1\n") || strings.HasSuffix(ctx, "| pad_1") {
+		t.Errorf("deletion hunk must not fall back to file start, got:\n%s", ctx)
+	}
+	// Pure deletion: no + lines for the removed content
+	if strings.Contains(ctx, "+ 22|") {
+		t.Errorf("pure deletion should not emit + line for removed content, got:\n%s", ctx)
+	}
+}
+
+func TestEditFile_VerificationContextMultiLine(t *testing.T) {
+	resetTestCache(t)
+	dir := t.TempDir()
+	content := "before\nold one\nold two\nafter\n"
+	path := writeTestFile(t, dir, "multi.txt", content)
+
+	result, err := EditFile(nil, EditFileArgs{
+		Path:      path,
+		OldString: "old one\nold two",
+		NewString: "new one\nnew two\nnew three",
+	})
+	if err != nil {
+		t.Fatalf("EditFile() error = %v", err)
+	}
+	ctx := result.VerificationContext
+	if !strings.Contains(ctx, "@@ multi.txt:2") {
+		t.Errorf("want multi-line header at line 2, got:\n%s", ctx)
+	}
+	if !strings.Contains(ctx, "- 2| old one") || !strings.Contains(ctx, "- 3| old two") {
+		t.Errorf("want removed multi-line block, got:\n%s", ctx)
+	}
+	if !strings.Contains(ctx, "+ 2| new one") || !strings.Contains(ctx, "+ 4| new three") {
+		t.Errorf("want added multi-line block, got:\n%s", ctx)
+	}
+	if !strings.Contains(ctx, "  1| before") || !strings.Contains(ctx, "after") {
+		t.Errorf("want surrounding context, got:\n%s", ctx)
+	}
+}
+
+func TestEditFile_VerificationContextRegex(t *testing.T) {
+	resetTestCache(t)
+	dir := t.TempDir()
+	content := "alpha\nversion: 1.2.3\nomega\n"
+	path := writeTestFile(t, dir, "ver.txt", content)
+
+	result, err := EditFile(nil, EditFileArgs{
+		Path:      path,
+		OldString: `version: (\d+\.\d+\.\d+)`,
+		NewString: "version: $1-rc1",
+		Regex:     true,
+	})
+	if err != nil {
+		t.Fatalf("EditFile() error = %v", err)
+	}
+	ctx := result.VerificationContext
+	if !strings.Contains(ctx, "@@ ver.txt:2") {
+		t.Errorf("want regex edit at line 2, got:\n%s", ctx)
+	}
+	if !strings.Contains(ctx, "- 2| version: 1.2.3") {
+		t.Errorf("want actual matched text removed, got:\n%s", ctx)
+	}
+	if !strings.Contains(ctx, "+ 2| version: 1.2.3-rc1") {
+		t.Errorf("want expanded replacement added, got:\n%s", ctx)
+	}
+}
+
+func TestEditFile_VerificationContextReplaceAll(t *testing.T) {
+	resetTestCache(t)
+	dir := t.TempDir()
+	content := "aaa\nfoo\nbbb\nfoo\nccc\n"
+	path := writeTestFile(t, dir, "all.txt", content)
+
+	result, err := EditFile(nil, EditFileArgs{
+		Path:       path,
+		OldString:  "foo",
+		NewString:  "bar",
+		ReplaceAll: true,
+	})
+	if err != nil {
+		t.Fatalf("EditFile() error = %v", err)
+	}
+	if result.Replacements != 2 {
+		t.Fatalf("replacements = %d, want 2", result.Replacements)
+	}
+	// Hunk shows first occurrence only; message reports full count.
+	ctx := result.VerificationContext
+	if !strings.Contains(ctx, "@@ all.txt:2") {
+		t.Errorf("want first-occurrence hunk at line 2, got:\n%s", ctx)
+	}
+	if !strings.Contains(result.Message, "Replaced 2 occurrence") {
+		t.Errorf("message should report full count, got: %s", result.Message)
+	}
+}
+
+func TestEditFile_VerificationContextInsert(t *testing.T) {
+	resetTestCache(t)
+	dir := t.TempDir()
+	path := writeTestFile(t, dir, "ins.go", "func main() {\n\tsetup()\n}\n")
+
+	// Insert by expanding an anchor line into anchor + new lines.
+	result, err := EditFile(nil, EditFileArgs{
+		Path:      path,
+		OldString: "\tsetup()",
+		NewString: "\tsetup()\n\trun()",
+	})
+	if err != nil {
+		t.Fatalf("EditFile() error = %v", err)
+	}
+	ctx := result.VerificationContext
+	if !strings.Contains(ctx, "@@ ins.go:2") {
+		t.Errorf("want insert at line 2, got:\n%s", ctx)
+	}
+	if !strings.Contains(ctx, "- 2| \tsetup()") {
+		t.Errorf("want removed anchor, got:\n%s", ctx)
+	}
+	if !strings.Contains(ctx, "+ 2| \tsetup()") || !strings.Contains(ctx, "+ 3| \trun()") {
+		t.Errorf("want inserted lines, got:\n%s", ctx)
+	}
+}
+
+func TestEditFile_VerificationContextShrink(t *testing.T) {
+	resetTestCache(t)
+	dir := t.TempDir()
+	path := writeTestFile(t, dir, "shrink.txt", "keep\none\ntwo\nthree\nend\n")
+
+	result, err := EditFile(nil, EditFileArgs{
+		Path:      path,
+		OldString: "one\ntwo\nthree",
+		NewString: "only",
+	})
+	if err != nil {
+		t.Fatalf("EditFile() error = %v", err)
+	}
+	ctx := result.VerificationContext
+	if !strings.Contains(ctx, "- 2| one") || !strings.Contains(ctx, "- 4| three") {
+		t.Errorf("want multi-line removal, got:\n%s", ctx)
+	}
+	if !strings.Contains(ctx, "+ 2| only") {
+		t.Errorf("want single added line, got:\n%s", ctx)
+	}
+	if strings.Contains(ctx, "+ 3|") {
+		t.Errorf("shrink should not emit extra + lines, got:\n%s", ctx)
+	}
+}
+
+// --- write_file verification context ---
+
+func TestWriteFile_VerificationContextCreate(t *testing.T) {
+	resetTestCache(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "new.txt")
+
+	result, err := WriteFile(nil, WriteFileArgs{
+		FilePath: path,
+		Content:  "hello\nworld\n",
+	})
+	if err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if !result.Created {
+		t.Error("Created = false, want true for new file")
+	}
+	if !strings.Contains(result.Message, "Created") {
+		t.Errorf("message should say Created, got: %s", result.Message)
+	}
+	ctx := result.VerificationContext
+	if !strings.Contains(ctx, "@@ new.txt:1 (created)") {
+		t.Errorf("want created header, got:\n%s", ctx)
+	}
+	if !strings.Contains(ctx, "+ 1| hello") || !strings.Contains(ctx, "+ 2| world") {
+		t.Errorf("want + lines for new content, got:\n%s", ctx)
+	}
+	if strings.Contains(ctx, "- ") {
+		t.Errorf("create should not emit - lines, got:\n%s", ctx)
+	}
+}
+
+func TestWriteFile_VerificationContextOverwrite(t *testing.T) {
+	resetTestCache(t)
+	dir := t.TempDir()
+	path := writeTestFile(t, dir, "old.txt", "alpha\nbeta\n")
+
+	result, err := WriteFile(nil, WriteFileArgs{
+		FilePath: path,
+		Content:  "gamma\ndelta\nepsilon\n",
+	})
+	if err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if result.Created {
+		t.Error("Created = true, want false for overwrite")
+	}
+	if !strings.Contains(result.Message, "Overwrote") {
+		t.Errorf("message should say Overwrote, got: %s", result.Message)
+	}
+	ctx := result.VerificationContext
+	if !strings.Contains(ctx, "@@ old.txt:1 (overwritten, 2→3 lines)") {
+		t.Errorf("want overwrite header with line counts, got:\n%s", ctx)
+	}
+	if !strings.Contains(ctx, "- 1| alpha") || !strings.Contains(ctx, "- 2| beta") {
+		t.Errorf("want - lines for old content, got:\n%s", ctx)
+	}
+	if !strings.Contains(ctx, "+ 1| gamma") || !strings.Contains(ctx, "+ 3| epsilon") {
+		t.Errorf("want + lines for new content, got:\n%s", ctx)
+	}
+}
+
+func TestWriteFile_VerificationContextTruncate(t *testing.T) {
+	resetTestCache(t)
+	dir := t.TempDir()
+	// Build content well over the 30-line body budget so the hunk truncates.
+	var b strings.Builder
+	for i := 1; i <= 50; i++ {
+		fmt.Fprintf(&b, "line_%d\n", i)
+	}
+	path := filepath.Join(dir, "big.txt")
+
+	result, err := WriteFile(nil, WriteFileArgs{
+		FilePath: path,
+		Content:  b.String(),
+	})
+	if err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	ctx := result.VerificationContext
+	if !strings.Contains(ctx, "…") {
+		t.Errorf("large create should truncate with …, got:\n%s", ctx)
+	}
+	// Should not dump all 50 + lines
+	plusCount := strings.Count(ctx, "+ ")
+	if plusCount > 35 {
+		t.Errorf("expected truncated + lines, got %d in:\n%s", plusCount, ctx)
 	}
 }
 

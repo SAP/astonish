@@ -17,6 +17,7 @@ var builtInSlashCommands = []slashCommand{
 	{Name: "help", Aliases: []string{"?"}, Description: "Show available commands and keys"},
 	{Name: "status", Description: "Show session, server, provider, and model"},
 	{Name: "sessions", Aliases: []string{"session"}, Description: "Browse and resume sessions"},
+	{Name: "model", Aliases: []string{"models"}, Description: "Choose provider and model"},
 	{Name: "new", Description: "Start a fresh conversation"},
 	{Name: "files", Description: "Show @file context help"},
 	{Name: "plan", Description: "Toggle plan-only responses"},

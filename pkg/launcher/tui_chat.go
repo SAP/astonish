@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"sort"
 	"strings"
 	"sync"
 
@@ -73,6 +74,10 @@ type platformBackend struct {
 	provider    string
 	model       string
 	resumed     bool
+	// pendingProvider/Model are applied on the next new-session turn when no
+	// session id exists yet (pre-chat model pick).
+	pendingProvider string
+	pendingModel    string
 
 	mu     sync.Mutex
 	closed bool
@@ -120,32 +125,24 @@ func (b *platformBackend) loadInitialModelStatus(ctx context.Context) {
 	b.mu.Unlock()
 
 	if sessionID == "" {
-		providers, err := b.client.GetEffectiveProviders()
-		if err == nil && providers != nil {
-			b.setModel(providers.DefaultProvider, providers.DefaultModel)
-		}
+		b.loadCascadeModelStatus()
 		return
 	}
-	status, err := b.client.GetSessionModelStatus(sessionID)
-	if err != nil || status == nil {
-		return
-	}
-	b.setModel(status.EffectiveProvider, status.EffectiveModel)
+	b.refreshSessionModelStatus(sessionID)
 }
 
 func (b *platformBackend) setModel(provider, modelName string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if provider != "" {
-		b.provider = provider
-	}
-	if modelName != "" {
-		b.model = modelName
-	}
+	// Always overwrite so session switches replace a previous pin instead of
+	// leaving a stale provider/model in the footer.
+	b.provider = provider
+	b.model = modelName
 }
 
 func (b *platformBackend) refreshSessionModelStatus(sessionID string) {
 	if sessionID == "" {
+		b.loadCascadeModelStatus()
 		return
 	}
 	status, err := b.client.GetSessionModelStatus(sessionID)
@@ -153,6 +150,17 @@ func (b *platformBackend) refreshSessionModelStatus(sessionID string) {
 		return
 	}
 	b.setModel(status.EffectiveProvider, status.EffectiveModel)
+}
+
+// loadCascadeModelStatus sets the footer to the platform cascade defaults used
+// for a brand-new session (no pin).
+func (b *platformBackend) loadCascadeModelStatus() {
+	providers, err := b.client.GetEffectiveProviders()
+	if err != nil || providers == nil {
+		b.setModel("", "")
+		return
+	}
+	b.setModel(providers.DefaultProvider, providers.DefaultModel)
 }
 
 func (b *platformBackend) ListSessions(ctx context.Context) ([]backend.SessionSummary, error) {
@@ -202,7 +210,12 @@ func (b *platformBackend) ResumeSession(ctx context.Context, sessionID string) (
 	b.mu.Lock()
 	b.sessionID = sessionID
 	b.resumed = true
+	// Drop any pending pre-chat pin; resumed session has its own pin/cascade.
+	b.pendingProvider = ""
+	b.pendingModel = ""
 	b.mu.Unlock()
+	// Always refresh so the footer shows this session's effective model.
+	b.refreshSessionModelStatus(sessionID)
 	return hist, nil
 }
 
@@ -215,13 +228,98 @@ func (b *platformBackend) DeleteSession(ctx context.Context, sessionID string) e
 		return err
 	}
 	b.mu.Lock()
-	if b.sessionID == sessionID {
+	wasActive := b.sessionID == sessionID
+	if wasActive {
 		b.sessionID = ""
 		b.usage = nil
 		b.resumed = false
+		b.pendingProvider = ""
+		b.pendingModel = ""
 	}
 	b.mu.Unlock()
+	if wasActive {
+		// Active session deleted → new blank chat uses cascade defaults.
+		b.loadCascadeModelStatus()
+	}
 	return nil
+}
+
+func (b *platformBackend) ListProviders(ctx context.Context) ([]string, error) {
+	_ = ctx
+	resp, err := b.client.GetEffectiveProviders()
+	if err != nil {
+		return nil, err
+	}
+	if resp == nil {
+		return nil, nil
+	}
+	out := make([]string, 0, len(resp.Providers))
+	for name := range resp.Providers {
+		if name == "" || strings.HasPrefix(name, "__") {
+			continue
+		}
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+func (b *platformBackend) ListModels(ctx context.Context, provider string) ([]string, error) {
+	_ = ctx
+	provider = strings.TrimSpace(provider)
+	if provider == "" {
+		return nil, fmt.Errorf("provider required")
+	}
+	models, err := b.client.ListProviderModels(provider)
+	if err != nil {
+		return nil, err
+	}
+	return models, nil
+}
+
+func (b *platformBackend) SetModelPin(ctx context.Context, provider, model string) (string, string, error) {
+	_ = ctx
+	provider = strings.TrimSpace(provider)
+	model = strings.TrimSpace(model)
+
+	b.mu.Lock()
+	sessionID := b.sessionID
+	b.mu.Unlock()
+
+	if sessionID == "" {
+		// No session yet: keep a pending pin for the first chat turn.
+		b.mu.Lock()
+		b.pendingProvider = provider
+		b.pendingModel = model
+		b.mu.Unlock()
+		if provider == "" && model == "" {
+			b.loadCascadeModelStatus()
+			info := b.Info()
+			return info.Provider, info.Model, nil
+		}
+		b.setModel(provider, model)
+		return provider, model, nil
+	}
+
+	resp, err := b.client.PatchSessionModel(sessionID, provider, model)
+	if err != nil {
+		return "", "", err
+	}
+	effP, effM := provider, model
+	if resp != nil {
+		if resp.EffectiveProvider != "" {
+			effP = resp.EffectiveProvider
+		}
+		if resp.EffectiveModel != "" {
+			effM = resp.EffectiveModel
+		}
+	}
+	b.setModel(effP, effM)
+	b.mu.Lock()
+	b.pendingProvider = ""
+	b.pendingModel = ""
+	b.mu.Unlock()
+	return effP, effM, nil
 }
 
 func (b *platformBackend) NewSession() {
@@ -229,7 +327,12 @@ func (b *platformBackend) NewSession() {
 	b.sessionID = ""
 	b.usage = nil
 	b.resumed = false
+	// A brand-new session should not inherit a previous session pin or a
+	// pending pin from an earlier picker selection on another conversation.
+	b.pendingProvider = ""
+	b.pendingModel = ""
 	b.mu.Unlock()
+	b.loadCascadeModelStatus()
 }
 
 func (b *platformBackend) ApproveNetworkGrant(ctx context.Context, sessionID string, denial events.NetworkDenial, broader bool, sandboxName string) error {
@@ -378,6 +481,8 @@ func (b *platformBackend) RunTurn(ctx context.Context, message string, opts back
 	autoApprove := b.autoApprove
 	debug := b.debug
 	c := b.client
+	pendingProvider := b.pendingProvider
+	pendingModel := b.pendingModel
 	b.mu.Unlock()
 
 	req := &client.ChatRequest{
@@ -387,6 +492,11 @@ func (b *platformBackend) RunTurn(ctx context.Context, message string, opts back
 		Debug:         debug,
 		SystemContext: opts.SystemContext,
 		Attachments:   chatAttachmentsFromBackend(opts.Attachments),
+	}
+	// Apply pre-session model pin on the first turn of a new session.
+	if sessionID == "" && (pendingProvider != "" || pendingModel != "") {
+		req.Provider = pendingProvider
+		req.Model = pendingModel
 	}
 
 	stream, err := c.SendChatMessage(req)
@@ -433,6 +543,9 @@ func (b *platformBackend) RunTurn(ctx context.Context, message string, opts back
 				if ev.Kind == events.KindSession && ev.SessionID != "" {
 					b.mu.Lock()
 					b.sessionID = ev.SessionID
+					// Pending pin was sent on this first turn; clear local pending state.
+					b.pendingProvider = ""
+					b.pendingModel = ""
 					b.mu.Unlock()
 					sessionID = ev.SessionID
 					b.refreshSessionModelStatus(sessionID)

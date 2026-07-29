@@ -111,6 +111,17 @@ type Backend interface {
 	// NewSession clears the active session so the next RunTurn creates a new one.
 	NewSession()
 
+	// ListProviders returns configured provider instance names for model selection.
+	ListProviders(ctx context.Context) ([]string, error)
+
+	// ListModels returns model IDs available for a provider instance.
+	ListModels(ctx context.Context, provider string) ([]string, error)
+
+	// SetModelPin pins provider/model on the active session (or stores a pending
+	// pin for the next new session). Empty provider and model clear the pin.
+	// Returns the effective provider/model after the change.
+	SetModelPin(ctx context.Context, provider, model string) (effectiveProvider, effectiveModel string, err error)
+
 	// Close releases resources (sandbox cleanup, HTTP clients, etc.).
 	Close() error
 }

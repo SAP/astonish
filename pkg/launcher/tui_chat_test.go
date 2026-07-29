@@ -1,6 +1,10 @@
 package launcher
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/SAP/astonish/pkg/client"
@@ -134,5 +138,154 @@ func TestMapSSEToEvents_NetworkDenialHint(t *testing.T) {
 	d := evs[0].NetworkDenials[0]
 	if d.ChunkID != "chunk-1" || d.Host != "api.example.com" || d.Port != 443 || d.BroaderPattern != "*.example.com" {
 		t.Fatalf("denial: %+v", d)
+	}
+}
+
+func TestPlatformBackendNewSessionResetsModelToCascadeDefault(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/settings/providers/effective":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"default_provider": "cascade-provider",
+				"default_model":    "cascade-model",
+				"providers":        map[string]any{},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	b := &platformBackend{
+		client:          client.NewWithConfig(srv.URL),
+		sessionID:       "sess-custom",
+		provider:        "openai",
+		model:           "gpt-4o",
+		pendingProvider: "openai",
+		pendingModel:    "gpt-4o",
+		resumed:         true,
+	}
+
+	b.NewSession()
+
+	info := b.Info()
+	if info.SessionID != "" {
+		t.Fatalf("sessionID=%q, want empty", info.SessionID)
+	}
+	if info.Provider != "cascade-provider" || info.Model != "cascade-model" {
+		t.Fatalf("model after /new = %s/%s, want cascade-provider/cascade-model", info.Provider, info.Model)
+	}
+	b.mu.Lock()
+	pendingP, pendingM := b.pendingProvider, b.pendingModel
+	b.mu.Unlock()
+	if pendingP != "" || pendingM != "" {
+		t.Fatalf("pending pin should be cleared, got %q/%q", pendingP, pendingM)
+	}
+}
+
+func TestPlatformBackendResumeSessionLoadsSessionModel(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/studio/sessions/sess-a":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id":       "sess-a",
+				"title":    "A",
+				"messages": []any{},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/studio/sessions/sess-a/model-status":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"pinnedProvider":    "openai",
+				"pinnedModel":       "gpt-4o",
+				"effectiveProvider": "openai",
+				"effectiveModel":    "gpt-4o",
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/studio/sessions/sess-b":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id":       "sess-b",
+				"title":    "B",
+				"messages": []any{},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/studio/sessions/sess-b/model-status":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"pinnedProvider":    "",
+				"pinnedModel":       "",
+				"effectiveProvider": "cascade-provider",
+				"effectiveModel":    "cascade-model",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	b := &platformBackend{
+		client:   client.NewWithConfig(srv.URL),
+		provider: "stale-provider",
+		model:    "stale-model",
+	}
+
+	if _, err := b.ResumeSession(context.Background(), "sess-a"); err != nil {
+		t.Fatalf("resume A: %v", err)
+	}
+	info := b.Info()
+	if info.SessionID != "sess-a" {
+		t.Fatalf("sessionID=%q", info.SessionID)
+	}
+	if info.Provider != "openai" || info.Model != "gpt-4o" {
+		t.Fatalf("after resume A = %s/%s, want openai/gpt-4o", info.Provider, info.Model)
+	}
+
+	if _, err := b.ResumeSession(context.Background(), "sess-b"); err != nil {
+		t.Fatalf("resume B: %v", err)
+	}
+	info = b.Info()
+	if info.SessionID != "sess-b" {
+		t.Fatalf("sessionID=%q", info.SessionID)
+	}
+	if info.Provider != "cascade-provider" || info.Model != "cascade-model" {
+		t.Fatalf("after resume B = %s/%s, want cascade-provider/cascade-model", info.Provider, info.Model)
+	}
+
+	// Switching back to the custom-model session must restore its pin.
+	if _, err := b.ResumeSession(context.Background(), "sess-a"); err != nil {
+		t.Fatalf("resume A again: %v", err)
+	}
+	info = b.Info()
+	if info.Provider != "openai" || info.Model != "gpt-4o" {
+		t.Fatalf("after resume A again = %s/%s, want openai/gpt-4o", info.Provider, info.Model)
+	}
+}
+
+func TestPlatformBackendDeleteActiveSessionResetsModelToCascade(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/studio/sessions/sess-custom":
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/settings/providers/effective":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"default_provider": "cascade-provider",
+				"default_model":    "cascade-model",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	b := &platformBackend{
+		client:    client.NewWithConfig(srv.URL),
+		sessionID: "sess-custom",
+		provider:  "openai",
+		model:     "gpt-4o",
+	}
+	if err := b.DeleteSession(context.Background(), "sess-custom"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	info := b.Info()
+	if info.SessionID != "" {
+		t.Fatalf("sessionID=%q", info.SessionID)
+	}
+	if info.Provider != "cascade-provider" || info.Model != "cascade-model" {
+		t.Fatalf("after delete active = %s/%s", info.Provider, info.Model)
 	}
 }

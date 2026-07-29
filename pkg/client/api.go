@@ -182,8 +182,9 @@ func (c *Client) SendFlowMessage(req *FlowChatRequest) (*SSEStream, error) {
 
 // EffectiveProvidersResponse contains the merged provider defaults used by Studio.
 type EffectiveProvidersResponse struct {
-	DefaultProvider string `json:"default_provider"`
-	DefaultModel    string `json:"default_model"`
+	DefaultProvider string                       `json:"default_provider"`
+	DefaultModel    string                       `json:"default_model"`
+	Providers       map[string]map[string]string `json:"providers,omitempty"`
 }
 
 // GetEffectiveProviders returns the platform-resolved provider defaults for the
@@ -194,6 +195,22 @@ func (c *Client) GetEffectiveProviders() (*EffectiveProvidersResponse, error) {
 		return nil, err
 	}
 	return &resp, nil
+}
+
+// ProviderModelsResponse is returned by GET /api/providers/{id}/models.
+type ProviderModelsResponse struct {
+	Provider string   `json:"provider"`
+	Models   []string `json:"models"`
+}
+
+// ListProviderModels returns model IDs available for a configured provider instance.
+func (c *Client) ListProviderModels(providerID string) ([]string, error) {
+	var resp ProviderModelsResponse
+	path := fmt.Sprintf("/api/providers/%s/models", url.PathEscape(providerID))
+	if err := c.DoJSON("GET", path, nil, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Models, nil
 }
 
 // ChatAttachment is a base64 file payload for multimodal chat turns.
@@ -211,6 +228,9 @@ type ChatRequest struct {
 	Debug         bool             `json:"debug,omitempty"`
 	SystemContext string           `json:"systemContext,omitempty"`
 	Attachments   []ChatAttachment `json:"attachments,omitempty"`
+	// Provider/Model pin a model for this turn (and new sessions).
+	Provider string `json:"provider,omitempty"`
+	Model    string `json:"model,omitempty"`
 }
 
 // SendChatMessage sends a chat message and returns an SSE stream of events.

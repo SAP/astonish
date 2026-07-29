@@ -118,3 +118,92 @@ func TestSessionsPickerDeleteActiveSessionStartsNewSession(t *testing.T) {
 		t.Fatalf("expected deleted session removed, got %#v", m.sessions.items)
 	}
 }
+
+// modelAwareBackend updates Info().Provider/Model on NewSession and ResumeSession
+// the way platformBackend does after model-status refresh.
+type modelAwareBackend struct {
+	staticBackend
+	bySession map[string]backend.Info
+	cascade   backend.Info
+}
+
+func (b *modelAwareBackend) NewSession() {
+	b.info = b.cascade
+	b.info.SessionID = ""
+	b.info.IsResumed = false
+}
+
+func (b *modelAwareBackend) ResumeSession(_ context.Context, sessionID string) ([]backend.HistoryEntry, error) {
+	if info, ok := b.bySession[sessionID]; ok {
+		b.info = info
+		b.info.SessionID = sessionID
+		b.info.IsResumed = true
+	}
+	return []backend.HistoryEntry{{Kind: "user", Text: "hi"}}, nil
+}
+
+func TestStartNewSessionRefreshesFooterModelToCascade(t *testing.T) {
+	b := &modelAwareBackend{
+		staticBackend: staticBackend{info: backend.Info{
+			SessionID: "sess-custom",
+			Provider:  "openai",
+			Model:     "gpt-4o",
+		}},
+		cascade: backend.Info{Provider: "cascade-provider", Model: "cascade-model"},
+	}
+	m := newModel(context.Background(), Config{Backend: b, Width: 100, Height: 30})
+	m.info = b.info
+
+	next, _ := m.startNewSession()
+	m = next.(model)
+	if m.info.Provider != "cascade-provider" || m.info.Model != "cascade-model" {
+		t.Fatalf("footer after /new = %s/%s, want cascade-provider/cascade-model", m.info.Provider, m.info.Model)
+	}
+	if m.info.SessionID != "" {
+		t.Fatalf("sessionID after /new = %q", m.info.SessionID)
+	}
+}
+
+func TestApplyHistoryUsesBackendInfoModelAfterResume(t *testing.T) {
+	b := &modelAwareBackend{
+		staticBackend: staticBackend{info: backend.Info{Provider: "cascade-provider", Model: "cascade-model"}},
+		bySession: map[string]backend.Info{
+			"sess-a": {Provider: "openai", Model: "gpt-4o"},
+			"sess-b": {Provider: "anthropic", Model: "claude-sonnet-4"},
+		},
+	}
+
+	m := newModel(context.Background(), Config{Backend: b, Width: 100, Height: 30})
+	// Stale footer from cascade/default session.
+	m.info = backend.Info{Provider: "cascade-provider", Model: "cascade-model"}
+
+	// ResumeSession (as the sessions picker cmd does) refreshes backend model first.
+	cmd := m.resumeSessionCmd("sess-a")
+	msg := cmd()
+	next, _ := m.Update(msg)
+	m = next.(model)
+	if m.info.Provider != "openai" || m.info.Model != "gpt-4o" {
+		t.Fatalf("footer after resume A = %s/%s, want openai/gpt-4o", m.info.Provider, m.info.Model)
+	}
+	if m.info.SessionID != "sess-a" {
+		t.Fatalf("sessionID=%q", m.info.SessionID)
+	}
+
+	// Switch to another session with a different pin.
+	cmd = m.resumeSessionCmd("sess-b")
+	msg = cmd()
+	next, _ = m.Update(msg)
+	m = next.(model)
+	if m.info.Provider != "anthropic" || m.info.Model != "claude-sonnet-4" {
+		t.Fatalf("footer after resume B = %s/%s, want anthropic/claude-sonnet-4", m.info.Provider, m.info.Model)
+	}
+
+	// Back to the custom-model session must not keep B's model.
+	cmd = m.resumeSessionCmd("sess-a")
+	msg = cmd()
+	next, _ = m.Update(msg)
+	m = next.(model)
+	if m.info.Provider != "openai" || m.info.Model != "gpt-4o" {
+		t.Fatalf("footer after resume A again = %s/%s, want openai/gpt-4o", m.info.Provider, m.info.Model)
+	}
+}

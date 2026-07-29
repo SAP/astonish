@@ -1886,6 +1886,8 @@ func (m *model) renderTranscript() (string, []hitRegion) {
 			appendBlock(i, it.Kind, m.renderThinkingBubble(it.Content, cw))
 		case events.ItemActivity:
 			appendBlock(i, it.Kind, m.renderActivity(it, cw))
+		case events.ItemFileDiff:
+			appendBlock(i, it.Kind, m.renderFileDiff(it, cw))
 		case events.ItemSystem:
 			appendBlock(i, it.Kind, th.System.Width(cw).Render(it.Content))
 		case events.ItemError:
@@ -1961,7 +1963,26 @@ func (m model) renderThinkingBubble(content string, width int) string {
 	return label + "\n" + wrapped
 }
 
-// renderActivity builds collapsed summary (+N/−M) and expanded tool/diff detail.
+// renderFileDiff paints a main-thread dual-gutter editor-style file change.
+// Diffs live outside the tool activity fold so they stay visible while tools
+// stay collapsed; the fold holds raw request/response only.
+func (m model) renderFileDiff(it events.Item, width int) string {
+	rs := m.theme.RenderStyles()
+	name := it.ToolName
+	if name == "" {
+		name = "edit_file"
+	}
+	// Prefer verification_context from the tool (stored on the item).
+	if it.DiffVerification != "" {
+		if out := render.RenderVerificationDiff(it.DiffVerification, it.Path, width, true, rs); out != "" {
+			return out
+		}
+	}
+	// Fallback: build from args (old_string/new_string/content).
+	return render.DiffFromToolArgs(name, it.Args, width, true, rs)
+}
+
+// renderActivity builds collapsed summary (+N/−M) and expanded raw tool detail.
 func (m model) renderActivityCollapsedPreview(steps []events.ToolStep, width int) string {
 	if len(steps) == 0 {
 		return ""
@@ -2073,22 +2094,26 @@ func (m model) renderActivity(it events.Item, width int) string {
 			b.WriteByte('\n')
 			b.WriteString(th.Muted.Width(width).Render("    " + detail))
 		}
-		// Classic unified diffs for edit/write tools. Prefer verification_context
-		// from the tool result (real line numbers + surrounding context); fall
-		// back to args while the tool is still running.
-		if d := render.DiffFromToolStep(s.Name, s.Args, s.Result, width, true, rs); d != "" {
+		// Raw request (args) — file diffs are main-thread ItemFileDiff, not here.
+		if argsPreview := render.ToolArgsPreview(step, width-6); argsPreview != "" {
 			b.WriteByte('\n')
-			b.WriteString(d)
-			continue
+			b.WriteString(th.Muted.Width(width).Render("    request:"))
+			for _, ln := range strings.Split(argsPreview, "\n") {
+				b.WriteByte('\n')
+				b.WriteString(th.Muted.Width(width).Render("    " + ln))
+			}
 		}
+		// Raw response (result JSON / text).
 		if preview := render.ToolResultPreview(step, width-6); preview != "" {
-			for _, line := range strings.Split(preview, "\n") {
+			b.WriteByte('\n')
+			b.WriteString(th.Muted.Width(width).Render("    response:"))
+			for _, ln := range strings.Split(preview, "\n") {
 				b.WriteByte('\n')
 				style := th.Muted
 				if s.Status == "error" {
 					style = th.Error
 				}
-				b.WriteString(style.Width(width).Render("    " + line))
+				b.WriteString(style.Width(width).Render("    " + ln))
 			}
 		}
 	}

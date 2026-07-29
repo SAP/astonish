@@ -43,15 +43,18 @@ func TestTranscript_ToolActivityFold(t *testing.T) {
 		"old_string": "x",
 		"new_string": "y",
 	}))
-	tr.Apply(NewToolResult("edit_file", "1", map[string]any{"success": true}))
+	tr.Apply(NewToolResult("edit_file", "1", map[string]any{
+		"success":              true,
+		"verification_context": "@@ a.go:1\n- 1| x\n+ 1| y\n",
+	}))
 	tr.Apply(NewToolCall("read_file", "2", map[string]any{"path": "a.go"}))
 	tr.Apply(NewToolResult("read_file", "2", "ok"))
 	tr.Apply(NewText("Done."))
 	tr.Apply(NewDone())
 
-	// user, activity (2 steps), agent
-	if len(tr.Items) != 3 {
-		t.Fatalf("items=%d want 3: %#v", len(tr.Items), itemKinds(tr))
+	// user, activity (2 steps), file_diff (from edit), agent
+	if len(tr.Items) != 4 {
+		t.Fatalf("items=%d want 4: %#v", len(tr.Items), itemKinds(tr))
 	}
 	act := tr.Items[1]
 	if act.Kind != ItemActivity {
@@ -62,6 +65,46 @@ func TestTranscript_ToolActivityFold(t *testing.T) {
 	}
 	if act.Steps[0].Status != "complete" || act.Steps[1].Status != "complete" {
 		t.Fatalf("step status: %+v", act.Steps)
+	}
+	diff := tr.Items[2]
+	if diff.Kind != ItemFileDiff {
+		t.Fatalf("want file_diff at [2], got %s", diff.Kind)
+	}
+	if diff.Path != "a.go" {
+		t.Fatalf("file_diff path=%q", diff.Path)
+	}
+	if diff.DiffVerification == "" {
+		t.Fatal("file_diff missing DiffVerification")
+	}
+	if tr.Items[3].Kind != ItemAgent {
+		t.Fatalf("want agent last, got %s", tr.Items[3].Kind)
+	}
+}
+
+func TestTranscript_FileDiffMainThread(t *testing.T) {
+	tr := NewTranscript()
+	tr.Apply(NewUser("patch"))
+	tr.Apply(NewToolCall("edit_file", "1", map[string]any{
+		"path":       "/root/README.md",
+		"old_string": "old",
+		"new_string": "",
+	}))
+	tr.Apply(NewToolResult("edit_file", "1", map[string]any{
+		"success":              true,
+		"path":                 "/root/README.md",
+		"verification_context": "@@ README.md:10\n- 10| old\n",
+	}))
+	tr.Apply(NewDone())
+
+	kinds := itemKinds(tr)
+	// user, activity, file_diff
+	wantPrefix := string(ItemUser) + "," + string(ItemActivity) + "," + string(ItemFileDiff)
+	if !strings.HasPrefix(kinds, wantPrefix) {
+		t.Fatalf("kinds=%q want prefix %q", kinds, wantPrefix)
+	}
+	diffCount := strings.Count(kinds, string(ItemFileDiff))
+	if diffCount != 1 {
+		t.Fatalf("file_diff count=%d want 1 in %q", diffCount, kinds)
 	}
 }
 

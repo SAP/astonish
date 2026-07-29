@@ -1,6 +1,8 @@
 package events
 
-import "strings"
+import (
+	"strings"
+)
 
 // ItemKind classifies a rendered transcript item.
 type ItemKind string
@@ -10,6 +12,7 @@ const (
 	ItemAgent         ItemKind = "agent"
 	ItemThinking      ItemKind = "thinking"
 	ItemActivity      ItemKind = "activity"
+	ItemFileDiff      ItemKind = "file_diff" // main-thread editor-style file change
 	ItemSystem        ItemKind = "system"
 	ItemError         ItemKind = "error"
 	ItemApproval      ItemKind = "approval"
@@ -53,8 +56,14 @@ type Item struct {
 	SandboxName    string
 	SessionID      string
 
-	// Artifact path.
+	// Artifact / file-diff path.
 	Path string
+
+	// FileDiff fields (ItemFileDiff) — dual-gutter editor view on the main thread.
+	// DiffVerification is preferred (tool verification_context). Args hold
+	// old_string/new_string/content for fallback while streaming or if context is empty.
+	DiffVerification string
+	// ToolName identifies edit_file vs write_file for fallback rendering.
 }
 
 // Transcript is the reduced UI state built from a stream of Events.
@@ -215,6 +224,7 @@ func (t *Transcript) addUsage(usage *Usage) {
 
 // turnStart returns the index of the first item in the current soft run
 // (after the last hard-break item). Hard breaks: user, error, approval, network denial, artifact, system.
+// File diffs stay inside the soft turn (do not hard-break).
 func (t *Transcript) turnStart() int {
 	for i := len(t.Items) - 1; i >= 0; i-- {
 		switch t.Items[i].Kind {
@@ -303,26 +313,52 @@ func (t *Transcript) appendAgentText(text string) {
 	t.ensureAgentAfterActivity()
 }
 
-// ensureAgentAfterActivity keeps layout: … → activity → sticky agent (Studio order).
+// ensureAgentAfterActivity keeps layout: … → activity → file_diff(s) → sticky agent.
 func (t *Transcript) ensureAgentAfterActivity() {
 	agentIdx := t.lastAgentInTurn()
 	actIdx := t.lastActivityInTurn()
 	if agentIdx < 0 || actIdx < 0 {
 		return
 	}
-	if agentIdx > actIdx {
-		return // already after activity
-	}
-	// Move agent to end of turn (after activity).
-	agent := t.Items[agentIdx]
-	// Remove agentIdx
-	t.Items = append(t.Items[:agentIdx], t.Items[agentIdx+1:]...)
-	// actIdx may have shifted if agent was before it
-	if agentIdx < actIdx {
-		actIdx--
-	}
-	// Insert after activity
+	// Target: immediately after the last file_diff in the turn, else after activity.
 	insertAt := actIdx + 1
+	start := t.turnStart()
+	for i := start; i < len(t.Items); i++ {
+		if t.Items[i].Kind == ItemFileDiff {
+			insertAt = i + 1
+		}
+	}
+	if agentIdx >= insertAt {
+		// Agent is already after activity / file diffs (or is the insert point).
+		// If agentIdx == insertAt-1 only when insertAt points past agent wrongly —
+		// require agent strictly after the last non-agent tool surface.
+		if agentIdx > actIdx {
+			// Still may sit between activity and a later file_diff; fix if any
+			// file_diff is after the agent.
+			for i := agentIdx + 1; i < len(t.Items); i++ {
+				if t.Items[i].Kind == ItemFileDiff || t.Items[i].Kind == ItemActivity {
+					goto move
+				}
+			}
+			return
+		}
+	}
+move:
+	// Move agent after activity and any file diffs.
+	agent := t.Items[agentIdx]
+	t.Items = append(t.Items[:agentIdx], t.Items[agentIdx+1:]...)
+	// Recompute insert after removal.
+	insertAt = 0
+	actIdx = t.lastActivityInTurn()
+	if actIdx >= 0 {
+		insertAt = actIdx + 1
+	}
+	start = t.turnStart()
+	for i := start; i < len(t.Items); i++ {
+		if t.Items[i].Kind == ItemFileDiff {
+			insertAt = i + 1
+		}
+	}
 	if insertAt > len(t.Items) {
 		insertAt = len(t.Items)
 	}
@@ -391,6 +427,7 @@ func (t *Transcript) appendToolResult(ev Event) {
 			}
 			t.Items[i].Steps = steps
 			t.Items[i].Summary = summarizeSteps(steps)
+			t.maybeAppendFileDiff(steps[j].Name, steps[j].Args, steps[j].Result)
 			return
 		}
 	}
@@ -399,10 +436,11 @@ func (t *Transcript) appendToolResult(ev Event) {
 	if isResultError(ev.Result) {
 		status = "error"
 	}
-	step := ToolStep{Name: ev.ToolName, ID: ev.ToolID, Result: ev.Result, Status: status}
+	step := ToolStep{Name: ev.ToolName, ID: ev.ToolID, Args: ev.Args, Result: ev.Result, Status: status}
 	if actIdx := t.lastActivityInTurn(); actIdx >= 0 {
 		t.Items[actIdx].Steps = append(t.Items[actIdx].Steps, step)
 		t.Items[actIdx].Summary = summarizeSteps(t.Items[actIdx].Steps)
+		t.maybeAppendFileDiff(step.Name, step.Args, step.Result)
 		return
 	}
 	t.Items = append(t.Items, Item{
@@ -410,6 +448,116 @@ func (t *Transcript) appendToolResult(ev Event) {
 		Steps:   []ToolStep{step},
 		Summary: summarizeSteps([]ToolStep{step}),
 	})
+	t.maybeAppendFileDiff(step.Name, step.Args, step.Result)
+}
+
+// maybeAppendFileDiff promotes successful edit_file/write_file results to a
+// main-thread ItemFileDiff (dual-gutter editor view). The activity fold keeps
+// the raw tool args/result; the diff is a sibling transcript item.
+func (t *Transcript) maybeAppendFileDiff(toolName string, args map[string]any, result any) {
+	name := strings.ToLower(strings.TrimSpace(toolName))
+	if name != "edit_file" && name != "write_file" {
+		return
+	}
+	if isResultError(result) {
+		return
+	}
+	// Need something to render: verification_context and/or args.
+	vc := toolResultString(result, "verification_context")
+	if vc == "" && !hasFileDiffArgs(name, args) {
+		return
+	}
+	path := pathFromToolArgs(args)
+	if path == "" {
+		path = toolResultString(result, "path")
+	}
+	item := Item{
+		Kind:             ItemFileDiff,
+		Path:             path,
+		ToolName:         name,
+		Args:             args,
+		DiffVerification: vc,
+	}
+	// Insert after the last file_diff in the turn, else after activity, else before agent.
+	insertAt := t.fileDiffInsertIndex()
+	if insertAt >= len(t.Items) {
+		t.Items = append(t.Items, item)
+		return
+	}
+	t.Items = append(t.Items[:insertAt], append([]Item{item}, t.Items[insertAt:]...)...)
+}
+
+// fileDiffInsertIndex returns where a new ItemFileDiff should land: after the
+// last file_diff in the turn, otherwise after the turn activity, otherwise at end
+// (but before a trailing sticky agent when present).
+func (t *Transcript) fileDiffInsertIndex() int {
+	start := t.turnStart()
+	lastDiff := -1
+	actIdx := -1
+	agentIdx := -1
+	for i := start; i < len(t.Items); i++ {
+		switch t.Items[i].Kind {
+		case ItemFileDiff:
+			lastDiff = i
+		case ItemActivity:
+			actIdx = i
+		case ItemAgent:
+			agentIdx = i
+		}
+	}
+	if lastDiff >= 0 {
+		return lastDiff + 1
+	}
+	if actIdx >= 0 {
+		// Place after activity; if agent immediately follows, still after activity
+		// (agent shifts right).
+		return actIdx + 1
+	}
+	if agentIdx >= 0 {
+		return agentIdx // insert before agent
+	}
+	return len(t.Items)
+}
+
+func pathFromToolArgs(args map[string]any) string {
+	if args == nil {
+		return ""
+	}
+	for _, k := range []string{"path", "file_path"} {
+		if v, ok := args[k].(string); ok && strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func toolResultString(result any, key string) string {
+	if result == nil {
+		return ""
+	}
+	m, ok := result.(map[string]any)
+	if !ok {
+		return ""
+	}
+	s, _ := m[key].(string)
+	return strings.TrimSpace(s)
+}
+
+func hasFileDiffArgs(toolName string, args map[string]any) bool {
+	if args == nil {
+		return false
+	}
+	switch toolName {
+	case "edit_file":
+		oldS, _ := args["old_string"].(string)
+		newS, _ := args["new_string"].(string)
+		return oldS != "" || newS != ""
+	case "write_file":
+		c, _ := args["content"].(string)
+		return c != ""
+	default:
+		return false
+	}
 }
 
 func (t *Transcript) finalizeRunningSteps() {

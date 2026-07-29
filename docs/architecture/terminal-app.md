@@ -100,9 +100,9 @@ AdaptiveColor cursor-line backgrounds that break dark alt-screen UIs).
 | User messages | Full-width warm-accent outline bubble; long prompts are height-capped and use a bottom-border `double-click to expand/collapse` affordance |
 | Agent markdown | `pkg/tui/render.Markdown` — headings, lists, inline code/bold |
 | Code fences | `pkg/tui/render.CodeBlock` — chroma highlight + numeric gutter |
-| Tool activity | `pkg/tui/render.ActivitySummary` + `StatsFromSteps` (`+N/−M`), with categorized collapsed summaries that list every tool row as a single-line preview; click-to-expand reveals full parameters, diffs, and result previews |
+| Tool activity | `pkg/tui/render.ActivitySummary` + `StatsFromSteps` (`+N/−M`); click-to-expand reveals **raw request args and response JSON** (not file diffs) |
 | Network authorization | Inline transcript notice plus a focused approval card for OpenShell proxy denials; `enter`/`y` allows the blocked host, `b` allows the suggested broader pattern, and `n`/`esc` denies |
-| File diffs | Classic unified diff via `DiffFromToolStep`: prefers `verification_context` from the tool result (real line numbers + context); falls back to `DiffFromToolArgs` / `FileDiff` from `edit_file`/`write_file` args while running |
+| File diffs | **Main-thread** `ItemFileDiff` dual-gutter editor view (`old`/`new` line numbers + ± content) on successful `edit_file`/`write_file`. Prefers `verification_context`; falls back to args |
 
 Streaming: unclosed fences render as incomplete code blocks (header shows `…`).
 
@@ -113,7 +113,7 @@ During a turn with tools, there is **one** agent bubble:
 1. Interstitial text between tools **replaces** the previous text (not stacked).
 2. While `Provisional`, it renders as **Thinking** (muted), not the final response style.
 3. All tools fold into **one** activity block for the turn.
-4. Layout order: `user → activity → agent`.
+4. Layout order: `user → activity → file_diff(s) → agent`.
 5. On `done`, provisional is cleared and the last text is rendered as the full agent response (markdown/code).
 
 ## Rendering roadmap

@@ -49,11 +49,21 @@ type HistoryEntry struct {
 	Result   any
 }
 
+// Attachment is a file/image payload to send with a chat turn.
+type Attachment struct {
+	Filename string
+	MimeType string
+	// Data is raw file bytes (not base64).
+	Data []byte
+}
+
 // TurnOptions configures per-turn behavior for the platform request.
 type TurnOptions struct {
 	// SystemContext is a per-turn hidden instruction sent to Studio chat. It is
 	// not persisted as a visible user message.
 	SystemContext string
+	// Attachments are optional multimodal file/image payloads for this turn.
+	Attachments []Attachment
 }
 
 // NetworkGrantBackend is implemented by platform backends that can resolve

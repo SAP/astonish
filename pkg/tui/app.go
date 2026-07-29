@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/spinner"
@@ -30,6 +31,19 @@ type hitRegion struct {
 type selectionPoint struct {
 	line int
 	col  int
+}
+
+type pastedBlock struct {
+	placeholder string
+	content     string
+}
+
+// pastedImage is a clipboard/image attachment shown as an atomic [image #N] token.
+type pastedImage struct {
+	placeholder string
+	mimeType    string
+	data        []byte
+	number      int
 }
 
 // Config configures the terminal chat app.
@@ -107,6 +121,22 @@ type model struct {
 	files fileCompletion
 	// planMode asks the platform agent for plans only, without execution.
 	planMode bool
+	// Pasted blocks keep the composer compact while preserving submitted content.
+	pastedBlocks []pastedBlock
+	// Pasted images from the clipboard, shown as atomic [image #N] tokens.
+	pastedImages []pastedImage
+	nextImageNum int
+	// intentionalMultiline is set when the user presses Shift+Enter / Alt+Enter /
+	// Ctrl+J. While true, the composer may keep 4+ visible lines. Command+V and
+	// other terminal-injected multi-line pastes leave this false, so they collapse.
+	intentionalMultiline bool
+	// pasteStreamUntil marks a short window after a collapse where trailing
+	// terminal-injected paste characters are merged into the same paste block.
+	pasteStreamUntil time.Time
+	pasteIdleSeq     int
+	// composerWatching keeps a short tick loop alive so Command+V collapse does
+	// not wait for the next keypress to re-enter Update.
+	composerWatching bool
 }
 
 func newModel(parent context.Context, cfg Config) model {
@@ -129,6 +159,11 @@ func newModel(parent context.Context, cfg Config) model {
 	ta.KeyMap.InsertNewline = key.NewBinding(
 		key.WithKeys("shift+enter", "ctrl+j", "alt+enter", "ctrl+m"),
 		key.WithHelp("shift+enter", "newline"),
+	)
+	// Prefer explicit clipboard paste when the terminal reports super/cmd.
+	ta.KeyMap.Paste = key.NewBinding(
+		key.WithKeys("ctrl+v", "super+v"),
+		key.WithHelp("ctrl+v", "paste"),
 	)
 	ta.SetHeight(1)
 	th.ApplyTextareaStyles(&ta)
@@ -170,9 +205,11 @@ func newModel(parent context.Context, cfg Config) model {
 type eventMsg events.Event
 type turnDoneMsg struct{}
 type turnErrMsg struct{ err error }
+type pasteIdleMsg struct{ seq int }
+type composerWatchMsg struct{}
 
 func (m model) Init() tea.Cmd {
-	cmds := []tea.Cmd{textarea.Blink, m.spin.Tick}
+	cmds := []tea.Cmd{textarea.Blink, m.spin.Tick, tea.EnableBracketedPaste}
 	if m.info.IsResumed && m.info.SessionID != "" {
 		cmds = append(cmds, m.loadInitialHistoryCmd())
 	}
@@ -181,6 +218,13 @@ func (m model) Init() tea.Cmd {
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
+
+	if text, ok := textareaPasteText(msg); ok {
+		if next, cmd, handled := m.tryPasteImage(); handled {
+			return next, cmd
+		}
+		return m.handlePaste(text)
+	}
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -195,6 +239,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleMouse(msg)
 
 	case tea.KeyMsg:
+		// Explicit paste bindings (Ctrl+V / Super+V) prefer clipboard images.
+		if isClipboardPasteKey(msg) {
+			if next, cmd, handled := m.tryPasteImage(); handled {
+				return next, cmd
+			}
+		}
+		if msg.Type == tea.KeyRunes {
+			text := normalizePasteText(string(msg.Runes))
+			// Real paste events and multi-line rune bursts (common for terminal
+			// Command+V without bracketed-paste markers) go through handlePaste.
+			if msg.Paste || strings.Contains(text, "\n") {
+				if msg.Paste && text == "" {
+					if next, cmd, handled := m.tryPasteImage(); handled {
+						return next, cmd
+					}
+				}
+				return m.handlePaste(text)
+			}
+		}
+
 		// Sessions overlay captures keys first.
 		if m.sessions.open {
 			return m.handleSessionsKey(msg)
@@ -274,12 +338,60 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Enter sends; Shift+Enter / Alt+Enter / Ctrl+J insert a newline.
 		// Match on String() so "shift+enter" is not treated as plain send.
+		// Note: KeyCtrlM and KeyEnter share the same code, so "ctrl+m" is "enter".
 		switch msg.String() {
 		case "enter":
 			return m.submit()
-		case "shift+enter", "alt+enter", "ctrl+j", "ctrl+m":
-			return m.insertNewline()
+		case "shift+enter", "alt+enter", "ctrl+j":
+			return m.insertNewline(true)
+		case "left", "ctrl+b":
+			if m.jumpPastePlaceholder(-1) {
+				return m, nil
+			}
+		case "right", "ctrl+f":
+			if m.jumpPastePlaceholder(1) {
+				return m, nil
+			}
+		case "alt+left", "alt+b", "ctrl+left":
+			if m.jumpPastePlaceholder(-1) {
+				return m, nil
+			}
+		case "alt+right", "alt+f", "ctrl+right":
+			if m.jumpPastePlaceholder(1) {
+				return m, nil
+			}
+		case "backspace", "ctrl+h", "ctrl+w", "alt+backspace", "delete", "ctrl+d":
+			// Treat paste placeholders as a single token for delete operations.
+			if next, cmd, handled := m.handlePastePlaceholderDelete(msg.String()); handled {
+				return next, cmd
+			}
 		}
+
+	case pasteIdleMsg:
+		if msg.seq != m.pasteIdleSeq {
+			return m, nil
+		}
+		// Backup path: collapse any remaining multi-line terminal paste once the
+		// stream has been idle. Primary collapse usually happens immediately.
+		if m.forceCollapseInjectedPaste("") {
+			m.syncSlashCompletion()
+			m.syncFileCompletion()
+		}
+		return m, m.ensureComposerWatch()
+
+	case composerWatchMsg:
+		// Independent of keypresses: keep collapsing terminal-injected multi-line
+		// paste as soon as the composer has 4+ content lines.
+		changed := m.forceCollapseInjectedPaste("")
+		if changed {
+			m.syncSlashCompletion()
+			m.syncFileCompletion()
+		}
+		if m.shouldWatchComposer() {
+			return m, m.composerWatchCmd()
+		}
+		m.composerWatching = false
+		return m, nil
 
 	case sessionsLoadedMsg:
 		m.sessions.loading = false
@@ -384,18 +496,36 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Delegate to textarea / viewport when ready.
 	if m.ready {
+		// Never insert text inside a paste placeholder — treat it as one cell.
+		if keyMsg, ok := msg.(tea.KeyMsg); ok && keyMsg.Type == tea.KeyRunes && !keyMsg.Paste {
+			m.escapePastePlaceholderForInsert()
+		}
+		prevValue := m.ta.Value()
 		prevH := m.composerTextHeight()
 		var cmd tea.Cmd
 		m.ta, cmd = m.ta.Update(msg)
 		cmds = append(cmds, cmd)
+		// If navigation landed inside a placeholder, snap out.
+		if keyMsg, ok := msg.(tea.KeyMsg); ok {
+			m.snapOutOfPastePlaceholder(pasteNavDir(keyMsg.String()))
+		}
+		// If typing somehow mutated a placeholder token, restore atomic tokens.
+		m.repairBrokenPastePlaceholders(prevValue)
+		if pasteCmd := m.afterComposerChange(prevValue); pasteCmd != nil {
+			cmds = append(cmds, pasteCmd)
+		}
 		// Grow/shrink composer when the user adds or removes newlines.
 		if m.composerTextHeight() != prevH {
 			m.layout()
 			m.refreshViewport()
 		}
+		m.prunePastedBlocks()
 		// Keep completion popups in sync with composer value after typing.
 		m.syncSlashCompletion()
 		m.syncFileCompletion()
+		if watch := m.ensureComposerWatch(); watch != nil {
+			cmds = append(cmds, watch)
+		}
 	}
 	return m, tea.Batch(cmds...)
 }
@@ -543,17 +673,24 @@ func (m model) handleFileCompletionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool
 }
 
 // insertNewline inserts a line break in the composer (Shift+Enter / Ctrl+J).
-func (m model) insertNewline() (tea.Model, tea.Cmd) {
+// intentional marks user-authored multi-line editing so Command+V paste collapse
+// does not rewrite deliberately multi-line prompts.
+func (m model) insertNewline(intentional bool) (tea.Model, tea.Cmd) {
 	if m.tr.Streaming && !m.tr.Awaiting {
 		return m, nil
 	}
+	if intentional {
+		m.intentionalMultiline = true
+	}
+	prevValue := m.ta.Value()
 	prevH := m.composerTextHeight()
 	m.ta.InsertString("\n")
+	cmd := m.afterComposerChange(prevValue)
 	if m.ready && m.composerTextHeight() != prevH {
 		m.layout()
 		m.refreshViewport()
 	}
-	return m, nil
+	return m, cmd
 }
 
 const planModeSystemContext = `You are in Astonish terminal plan mode.
@@ -570,10 +707,629 @@ func (m model) turnOptions() backend.TurnOptions {
 	return backend.TurnOptions{}
 }
 
-func (m model) submit() (tea.Model, tea.Cmd) {
-	text := strings.TrimSpace(m.ta.Value())
-	if text == "" {
+func isClipboardPasteKey(msg tea.KeyMsg) bool {
+	switch msg.String() {
+	case "ctrl+v", "super+v", "cmd+v":
+		return true
+	default:
+		return false
+	}
+}
+
+func (m model) tryPasteImage() (tea.Model, tea.Cmd, bool) {
+	if m.sessions.open {
+		return m, nil, false
+	}
+	if m.tr.Streaming && !m.tr.Awaiting {
+		return m, nil, false
+	}
+	data, mime, ok := clipboardImageReader()
+	if !ok || len(data) == 0 {
+		return m, nil, false
+	}
+	if mime == "" {
+		if sniffed, ok := sniffImageMIME(data); ok {
+			mime = sniffed
+		} else {
+			mime = "image/png"
+		}
+	}
+	next, cmd := m.insertPastedImage(data, mime)
+	return next, cmd, true
+}
+
+func (m model) insertPastedImage(data []byte, mimeType string) (tea.Model, tea.Cmd) {
+	prevH := m.composerTextHeight()
+	m.nextImageNum++
+	num := m.nextImageNum
+	placeholder := fmt.Sprintf("[image #%d]", num)
+	m.ta.InsertString(placeholder)
+	m.pastedImages = append(m.pastedImages, pastedImage{
+		placeholder: placeholder,
+		mimeType:    mimeType,
+		data:        data,
+		number:      num,
+	})
+	if m.ready && m.composerTextHeight() != prevH {
+		m.layout()
+		m.refreshViewport()
+	}
+	m.syncSlashCompletion()
+	m.syncFileCompletion()
+	return m, nil
+}
+
+func (m model) handlePaste(text string) (tea.Model, tea.Cmd) {
+	if m.sessions.open {
 		return m, nil
+	}
+	if m.tr.Streaming && !m.tr.Awaiting {
+		return m, nil
+	}
+	text = normalizePasteText(text)
+	// Truly empty paste (no runes) often means an image-only clipboard on macOS.
+	// Do not treat pure newlines as empty — Command+V line streams use "\n" runes.
+	if text == "" {
+		if next, cmd, handled := m.tryPasteImage(); handled {
+			return next, cmd
+		}
+		return m, nil
+	}
+	m.intentionalMultiline = false
+	prevH := m.composerTextHeight()
+	if pasteCollapseLineCount(text) < 4 {
+		m.ta.InsertString(text)
+	} else {
+		m.insertPastedBlock(text)
+	}
+	// Always re-check the full composer value in case paste was appended.
+	m.forceCollapseInjectedPaste("")
+	if m.ready && m.composerTextHeight() != prevH {
+		m.layout()
+		m.refreshViewport()
+	}
+	m.syncSlashCompletion()
+	m.syncFileCompletion()
+	return m, m.ensureComposerWatch()
+}
+
+// afterComposerChange reacts to composer mutations that were not explicit paste
+// events. Terminal-injected multi-line content (Command+V) collapses as soon as
+// it reaches 4 lines. Trailing characters that arrive in the same paste stream
+// are merged into the existing paste block. Shift+Enter multi-line editing sets
+// intentionalMultiline and is left expanded.
+func (m *model) afterComposerChange(previous string) tea.Cmd {
+	current := m.ta.Value()
+	if current == previous {
+		return m.ensureComposerWatch()
+	}
+	if m.intentionalMultiline {
+		return nil
+	}
+
+	// Mid-stream paste after an early collapse: only merge when additional
+	// lines arrive (terminal still injecting). Same-line typing after the
+	// placeholder stays visible as normal composition.
+	if m.pasteStreamActive() && len(m.pastedBlocks) > 0 && pasteLineCount(current) > 1 {
+		expanded := m.expandPastedBlocks(current)
+		prevContentLines := 0
+		for _, block := range m.pastedBlocks {
+			if n := pasteCollapseLineCount(block.content); n > prevContentLines {
+				prevContentLines = n
+			}
+		}
+		if expanded != current && pasteCollapseLineCount(expanded) > prevContentLines {
+			prevH := m.composerTextHeight()
+			m.replaceComposerPaste("", expanded, "")
+			m.touchPasteStream()
+			if m.ready && m.composerTextHeight() != prevH {
+				m.layout()
+				m.refreshViewport()
+			}
+			return m.ensureComposerWatch()
+		}
+	}
+
+	// 4+ significant lines without intentional multi-line editing → collapse now.
+	m.forceCollapseInjectedPaste(previous)
+	return m.ensureComposerWatch()
+}
+
+func (m *model) pasteStreamActive() bool {
+	return !m.pasteStreamUntil.IsZero() && time.Now().Before(m.pasteStreamUntil)
+}
+
+func (m *model) touchPasteStream() {
+	m.pasteStreamUntil = time.Now().Add(200 * time.Millisecond)
+}
+
+func (m *model) shouldWatchComposer() bool {
+	if m.intentionalMultiline {
+		return false
+	}
+	if m.pasteStreamActive() {
+		return true
+	}
+	return composerShouldCollapseValue(m.ta.Value())
+}
+
+func (m *model) composerWatchCmd() tea.Cmd {
+	return tea.Tick(16*time.Millisecond, func(time.Time) tea.Msg {
+		return composerWatchMsg{}
+	})
+}
+
+func (m *model) ensureComposerWatch() tea.Cmd {
+	if !m.shouldWatchComposer() {
+		m.composerWatching = false
+		return nil
+	}
+	if m.composerWatching {
+		return nil
+	}
+	m.composerWatching = true
+	return m.composerWatchCmd()
+}
+
+// forceCollapseInjectedPaste collapses multi-line composer content when the
+// user did not author it via Shift+Enter. If previous is provided, only the
+// newly inserted span is collapsed so surrounding typed text can remain.
+func (m *model) forceCollapseInjectedPaste(previous string) bool {
+	if m.intentionalMultiline {
+		return false
+	}
+	value := m.ta.Value()
+	if !composerShouldCollapseValue(value) {
+		return false
+	}
+	prevH := m.composerTextHeight()
+	if previous != "" && previous != value {
+		if prefix, inserted, suffix, ok := findInsertedText(previous, value); ok && pasteCollapseLineCount(inserted) >= 4 {
+			m.replaceComposerPaste(prefix, inserted, suffix)
+		} else {
+			m.collapseWholeComposerPaste()
+		}
+	} else {
+		m.collapseWholeComposerPaste()
+	}
+	m.touchPasteStream()
+	if m.ready && m.composerTextHeight() != prevH {
+		m.layout()
+		m.refreshViewport()
+	}
+	return m.ta.Value() != value
+}
+
+func (m *model) collapseWholeComposerPaste() {
+	value := m.ta.Value()
+	if !composerShouldCollapseValue(value) {
+		return
+	}
+	m.replaceComposerPaste("", value, "")
+}
+
+func (m *model) insertPastedBlock(content string) {
+	placeholder := pastePlaceholder(content)
+	m.ta.InsertString(placeholder)
+	m.pastedBlocks = append(m.pastedBlocks, pastedBlock{placeholder: placeholder, content: content})
+	m.touchPasteStream()
+}
+
+func (m *model) replaceComposerPaste(prefix, content, suffix string) {
+	// Replace any prior blocks for this composer value with a single mapping.
+	m.pastedBlocks = nil
+	placeholder := pastePlaceholder(content)
+	m.ta.SetValue(prefix + placeholder + suffix)
+	m.ta.CursorEnd()
+	m.pastedBlocks = append(m.pastedBlocks, pastedBlock{placeholder: placeholder, content: content})
+	m.touchPasteStream()
+}
+
+func pastePlaceholder(content string) string {
+	n := pasteCollapseLineCount(content)
+	if n < 1 {
+		n = pasteLineCount(content)
+	}
+	return fmt.Sprintf("[Pasted: %d lines]", n)
+}
+
+func findInsertedText(previous, current string) (prefix, inserted, suffix string, ok bool) {
+	if len(current) <= len(previous) {
+		return "", "", "", false
+	}
+	start := 0
+	for start < len(previous) && start < len(current) && previous[start] == current[start] {
+		start++
+	}
+	prevEnd := len(previous)
+	currentEnd := len(current)
+	for prevEnd > start && currentEnd > start && previous[prevEnd-1] == current[currentEnd-1] {
+		prevEnd--
+		currentEnd--
+	}
+	if previous[:start]+current[currentEnd:] != previous {
+		return "", "", "", false
+	}
+	return current[:start], current[start:currentEnd], current[currentEnd:], true
+}
+
+type pastePlaceholderSpan struct {
+	start       int // rune offset in Value()
+	end         int // rune offset exclusive
+	placeholder string
+	line        int // hard line index
+	lineStart   int // rune offset of placeholder start within the hard line
+	lineEnd     int // rune offset exclusive within the hard line
+}
+
+func pasteNavDir(key string) int {
+	switch key {
+	case "left", "ctrl+b", "alt+left", "alt+b", "ctrl+left", "up", "ctrl+p", "home", "ctrl+a":
+		return -1
+	case "right", "ctrl+f", "alt+right", "alt+f", "ctrl+right", "down", "ctrl+n", "end", "ctrl+e":
+		return 1
+	default:
+		return 0
+	}
+}
+
+func (m model) pastePlaceholderSpans() []pastePlaceholderSpan {
+	value := m.ta.Value()
+	if value == "" {
+		return nil
+	}
+	valueRunes := []rune(value)
+	used := make([]bool, len(valueRunes))
+	var spans []pastePlaceholderSpan
+
+	add := func(placeholder string) {
+		if placeholder == "" {
+			return
+		}
+		phRunes := []rune(placeholder)
+		for i := 0; i+len(phRunes) <= len(valueRunes); i++ {
+			match := true
+			for j := 0; j < len(phRunes); j++ {
+				if used[i+j] || valueRunes[i+j] != phRunes[j] {
+					match = false
+					break
+				}
+			}
+			if !match {
+				continue
+			}
+			for j := 0; j < len(phRunes); j++ {
+				used[i+j] = true
+			}
+			line, lineStart := runeOffsetToLineCol(value, i)
+			spans = append(spans, pastePlaceholderSpan{
+				start:       i,
+				end:         i + len(phRunes),
+				placeholder: placeholder,
+				line:        line,
+				lineStart:   lineStart,
+				lineEnd:     lineStart + len(phRunes),
+			})
+			return
+		}
+	}
+
+	for _, block := range m.pastedBlocks {
+		add(block.placeholder)
+	}
+	for _, img := range m.pastedImages {
+		add(img.placeholder)
+	}
+	return spans
+}
+
+func runeOffsetToLineCol(value string, offset int) (line, col int) {
+	runes := []rune(value)
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > len(runes) {
+		offset = len(runes)
+	}
+	for i := 0; i < offset; i++ {
+		if runes[i] == '\n' {
+			line++
+			col = 0
+		} else {
+			col++
+		}
+	}
+	return line, col
+}
+
+func (m model) composerLineCol() (line, col int) {
+	line = m.ta.Line()
+	li := m.ta.LineInfo()
+	col = li.StartColumn + li.ColumnOffset
+	if col < 0 {
+		col = 0
+	}
+	return line, col
+}
+
+func (m *model) setComposerCursorRuneOffset(offset int) {
+	value := m.ta.Value()
+	runes := []rune(value)
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > len(runes) {
+		offset = len(runes)
+	}
+	line, col := runeOffsetToLineCol(value, offset)
+	// Walk to the target hard line from the top. Soft-wrap can make this imperfect,
+	// but paste placeholders are single-line ASCII tokens and this is good enough.
+	for m.ta.Line() > 0 {
+		m.ta.CursorUp()
+	}
+	m.ta.CursorStart()
+	for m.ta.Line() < line {
+		prev := m.ta.Line()
+		m.ta.CursorDown()
+		if m.ta.Line() == prev {
+			break
+		}
+	}
+	m.ta.SetCursor(col)
+}
+
+// jumpPastePlaceholder makes left/right treat a paste token as one cell.
+func (m *model) jumpPastePlaceholder(dir int) bool {
+	if dir == 0 || (len(m.pastedBlocks) == 0 && len(m.pastedImages) == 0) {
+		return false
+	}
+	line, col := m.composerLineCol()
+	for _, span := range m.pastePlaceholderSpans() {
+		if span.line != line {
+			continue
+		}
+		if dir < 0 {
+			// At end of token or inside it → jump to start.
+			if col == span.lineEnd || (col > span.lineStart && col < span.lineEnd) {
+				m.ta.SetCursor(span.lineStart)
+				return true
+			}
+		}
+		if dir > 0 {
+			// At start of token or inside it → jump to end.
+			if col == span.lineStart || (col > span.lineStart && col < span.lineEnd) {
+				m.ta.SetCursor(span.lineEnd)
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// escapePastePlaceholderForInsert moves the caret out of a paste token before typing.
+func (m *model) escapePastePlaceholderForInsert() {
+	line, col := m.composerLineCol()
+	for _, span := range m.pastePlaceholderSpans() {
+		if span.line != line {
+			continue
+		}
+		if col > span.lineStart && col < span.lineEnd {
+			// Prefer inserting after the token.
+			m.ta.SetCursor(span.lineEnd)
+			return
+		}
+	}
+}
+
+// snapOutOfPastePlaceholder moves the caret out if it landed inside a paste token.
+func (m *model) snapOutOfPastePlaceholder(dir int) {
+	line, col := m.composerLineCol()
+	for _, span := range m.pastePlaceholderSpans() {
+		if span.line != line {
+			continue
+		}
+		if col > span.lineStart && col < span.lineEnd {
+			if dir < 0 {
+				m.ta.SetCursor(span.lineStart)
+			} else {
+				m.ta.SetCursor(span.lineEnd)
+			}
+			return
+		}
+	}
+}
+
+func (m model) handlePastePlaceholderDelete(key string) (tea.Model, tea.Cmd, bool) {
+	if len(m.pastedBlocks) == 0 && len(m.pastedImages) == 0 {
+		return m, nil, false
+	}
+	line, col := m.composerLineCol()
+	forward := key == "delete" || key == "ctrl+d"
+	for _, span := range m.pastePlaceholderSpans() {
+		if span.line != line {
+			continue
+		}
+		// Treat the whole token as one cell: delete if caret is on the token
+		// (start/inside) or at its trailing edge (end).
+		onToken := col >= span.lineStart && col <= span.lineEnd
+		if !onToken {
+			continue
+		}
+		// Avoid stealing backspace when caret is at token start and there is
+		// text before it that the user intends to delete (except ctrl+w which
+		// should still remove the token when on its leading edge).
+		if !forward && col == span.lineStart && key != "ctrl+w" && key != "alt+backspace" {
+			continue
+		}
+		// Avoid stealing forward-delete when caret is past the token end.
+		if forward && col == span.lineEnd {
+			continue
+		}
+		return m.removePastePlaceholderSpan(span)
+	}
+	return m, nil, false
+}
+
+func (m model) removePastePlaceholderSpan(span pastePlaceholderSpan) (tea.Model, tea.Cmd, bool) {
+	value := m.ta.Value()
+	runes := []rune(value)
+	if span.start < 0 || span.end > len(runes) || span.start >= span.end {
+		return m, nil, false
+	}
+	prevH := m.composerTextHeight()
+	newRunes := append(append([]rune{}, runes[:span.start]...), runes[span.end:]...)
+	m.ta.SetValue(string(newRunes))
+	m.setComposerCursorRuneOffset(span.start)
+	m.removeLastPastedBlock(span.placeholder)
+	if m.ready && m.composerTextHeight() != prevH {
+		m.layout()
+		m.refreshViewport()
+	}
+	m.syncSlashCompletion()
+	m.syncFileCompletion()
+	return m, nil, true
+}
+
+// repairBrokenPastePlaceholders restores paste tokens if typing split one.
+func (m *model) repairBrokenPastePlaceholders(previous string) {
+	if len(m.pastedBlocks) == 0 && len(m.pastedImages) == 0 {
+		return
+	}
+	current := m.ta.Value()
+	if current == previous {
+		return
+	}
+	check := func(placeholder string) bool {
+		if placeholder == "" || strings.Contains(current, placeholder) {
+			return false
+		}
+		if !strings.Contains(previous, placeholder) {
+			return false
+		}
+		// Placeholder text was modified. Revert to previous atomic value and
+		// place the caret after the token so typing continues outside it.
+		m.ta.SetValue(previous)
+		if idx := strings.Index(previous, placeholder); idx >= 0 {
+			m.setComposerCursorRuneOffset(utf8.RuneCountInString(previous[:idx]) + utf8.RuneCountInString(placeholder))
+		}
+		return true
+	}
+	for _, block := range m.pastedBlocks {
+		if check(block.placeholder) {
+			return
+		}
+	}
+	for _, img := range m.pastedImages {
+		if check(img.placeholder) {
+			return
+		}
+	}
+}
+
+func (m *model) removeLastPastedBlock(placeholder string) {
+	for i := len(m.pastedBlocks) - 1; i >= 0; i-- {
+		if m.pastedBlocks[i].placeholder == placeholder {
+			m.pastedBlocks = append(m.pastedBlocks[:i], m.pastedBlocks[i+1:]...)
+			return
+		}
+	}
+	for i := len(m.pastedImages) - 1; i >= 0; i-- {
+		if m.pastedImages[i].placeholder == placeholder {
+			m.pastedImages = append(m.pastedImages[:i], m.pastedImages[i+1:]...)
+			return
+		}
+	}
+}
+
+func (m *model) prunePastedBlocks() {
+	value := m.ta.Value()
+	if len(m.pastedBlocks) > 0 {
+		kept := m.pastedBlocks[:0]
+		for _, block := range m.pastedBlocks {
+			if strings.Contains(value, block.placeholder) {
+				kept = append(kept, block)
+			}
+		}
+		m.pastedBlocks = kept
+	}
+	if len(m.pastedImages) > 0 {
+		keptImg := m.pastedImages[:0]
+		for _, img := range m.pastedImages {
+			if strings.Contains(value, img.placeholder) {
+				keptImg = append(keptImg, img)
+			}
+		}
+		m.pastedImages = keptImg
+	}
+}
+
+func (m model) expandPastedBlocks(text string) string {
+	for _, block := range m.pastedBlocks {
+		text = strings.Replace(text, block.placeholder, block.content, 1)
+	}
+	return text
+}
+
+func composerShouldCollapseValue(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	if strings.HasPrefix(trimmed, "[Pasted: ") && strings.HasSuffix(trimmed, " lines]") && !strings.Contains(trimmed, "\n") {
+		return false
+	}
+	// Ignore a trailing empty line so Command+V does not collapse on the
+	// newline before the final content line has arrived.
+	return pasteCollapseLineCount(text) >= 4
+}
+
+func textareaPasteText(msg tea.Msg) (string, bool) {
+	if msg == nil {
+		return "", false
+	}
+	typeName := fmt.Sprintf("%T", msg)
+	if typeName != "textarea.pasteMsg" {
+		return "", false
+	}
+	text := fmt.Sprint(msg)
+	return text, text != ""
+}
+
+func normalizePasteText(text string) string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+	return text
+}
+
+func pasteLineCount(text string) int {
+	if text == "" {
+		return 0
+	}
+	return strings.Count(normalizePasteText(text), "\n") + 1
+}
+
+// pasteCollapseLineCount counts content lines for paste collapse, ignoring a
+// single trailing newline so a paste stream is not collapsed before the final
+// line body has been inserted.
+func pasteCollapseLineCount(text string) int {
+	if text == "" {
+		return 0
+	}
+	text = normalizePasteText(text)
+	text = strings.TrimSuffix(text, "\n")
+	if text == "" {
+		return 0
+	}
+	return strings.Count(text, "\n") + 1
+}
+
+func (m model) submit() (tea.Model, tea.Cmd) {
+	rawValue := m.ta.Value()
+	attachments := m.collectSubmitAttachments(rawValue)
+	text := strings.TrimSpace(m.expandPastedBlocks(rawValue))
+	if text == "" && len(attachments) == 0 {
+		return m, nil
+	}
+	if text == "" && len(attachments) > 0 {
+		// Image-only turn still needs a visible/user message marker.
+		text = strings.TrimSpace(rawValue)
 	}
 	if m.tr.Streaming && !m.tr.Awaiting {
 		return m, nil
@@ -584,12 +1340,17 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 
 	// Local slash commands (minimal set for PR1).
 	if strings.HasPrefix(text, "/") {
+		m.pastedBlocks = nil
+		m.pastedImages = nil
 		return m.handleSlash(text)
 	}
 
 	m.history = append(m.history, text)
 	m.historyIdx = -1
 	m.ta.Reset()
+	m.pastedBlocks = nil
+	m.pastedImages = nil
+	m.intentionalMultiline = false
 	if m.ready {
 		m.layout()
 	}
@@ -615,7 +1376,9 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 	turnCtx, cancel := context.WithCancel(m.ctx)
 	m.turnCancel = cancel
 
-	ch, err := m.backend.RunTurn(turnCtx, message, m.turnOptions())
+	opts := m.turnOptions()
+	opts.Attachments = attachments
+	ch, err := m.backend.RunTurn(turnCtx, message, opts)
 	if err != nil {
 		cancel()
 		m.turnCancel = nil
@@ -625,6 +1388,33 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 	}
 	m.eventCh = ch
 	return m, waitEvent(ch)
+}
+
+func (m model) collectSubmitAttachments(composerValue string) []backend.Attachment {
+	if len(m.pastedImages) == 0 {
+		return nil
+	}
+	var out []backend.Attachment
+	for _, img := range m.pastedImages {
+		if !strings.Contains(composerValue, img.placeholder) {
+			continue
+		}
+		ext := "png"
+		switch img.mimeType {
+		case "image/jpeg":
+			ext = "jpg"
+		case "image/gif":
+			ext = "gif"
+		case "image/webp":
+			ext = "webp"
+		}
+		out = append(out, backend.Attachment{
+			Filename: fmt.Sprintf("image-%d.%s", img.number, ext),
+			MimeType: img.mimeType,
+			Data:     img.data,
+		})
+	}
+	return out
 }
 
 func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
@@ -683,6 +1473,8 @@ Commands:
 
 Type / to open command completion (filters as you type).
 Type @ plus part of a local path to attach file context.
+Paste multi-line text (4+ lines) to insert [Pasted: N lines].
+Paste an image from the clipboard to insert [image #N].
   ↑↓ / tab       Move selection
   enter          Run selected command
   esc            Close completion
@@ -690,6 +1482,7 @@ Type @ plus part of a local path to attach file context.
 Keys:
   enter          Send message
   shift+enter    Newline (also ctrl+j / alt+enter)
+  ctrl+v         Paste text or image from clipboard
   y / n          Approve / deny tool (when prompted)
   ctrl+o         Expand/collapse last tool activity
   ctrl+l         Sessions picker
@@ -775,9 +1568,10 @@ func (m model) paintHeight() int {
 }
 
 // composerTextHeight returns the textarea height: 1 by default, up to 4 when
-// the user has entered multiple lines.
+// the user has entered multiple lines. Uses the real textarea value so typed
+// multi-line content expands; collapsed paste placeholders stay one line.
 func (m model) composerTextHeight() int {
-	lines := strings.Count(m.ta.Value(), "\n") + 1
+	lines := pasteLineCount(m.ta.Value())
 	if lines < 1 {
 		lines = 1
 	}

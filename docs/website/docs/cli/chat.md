@@ -80,6 +80,14 @@ If the pinned provider's credential is revoked or unavailable, the session still
 
 The terminal footer shows the active provider and the resolved concrete model when the platform reports them. It does not show `default` as the model name; while the cascade is still resolving, it shows the provider with `model resolving…` instead.
 
+## Paste behavior
+
+Pasting up to three lines inserts the text directly into the composer. Pasting four or more lines keeps the composer compact by showing a placeholder like `[Pasted: 8 lines]`. The full pasted content is restored when you press `Enter`, so the conversation history and the agent both receive the complete text. The placeholder is atomic: arrow keys jump over it, you cannot type inside it, and Backspace / `Ctrl+W` / `Alt+Backspace` remove the whole block at once.
+
+Pasting an image from the clipboard inserts `[image #1]` (then `#2`, `#3`, …). Image placeholders are also atomic tokens. When you press `Enter`, Astonish sends the images to the platform as chat attachments so multimodal models can see them, while the chat history keeps the `[image #N]` markers.
+
+On Linux, image paste requires `wl-paste` (Wayland) or `xclip` (X11) on `PATH`. On macOS, the system pasteboard is used directly.
+
 ## In-Session Commands
 
 While in an active chat session, type `/` to access these commands:

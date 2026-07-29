@@ -2,9 +2,11 @@ package launcher
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
+	"path"
 	"strings"
 	"sync"
 
@@ -384,6 +386,7 @@ func (b *platformBackend) RunTurn(ctx context.Context, message string, opts back
 		AutoApprove:   autoApprove,
 		Debug:         debug,
 		SystemContext: opts.SystemContext,
+		Attachments:   chatAttachmentsFromBackend(opts.Attachments),
 	}
 
 	stream, err := c.SendChatMessage(req)
@@ -782,6 +785,42 @@ func containsRune(s string, r rune) bool {
 		}
 	}
 	return false
+}
+
+func chatAttachmentsFromBackend(atts []backend.Attachment) []client.ChatAttachment {
+	if len(atts) == 0 {
+		return nil
+	}
+	out := make([]client.ChatAttachment, 0, len(atts))
+	for _, a := range atts {
+		if len(a.Data) == 0 {
+			continue
+		}
+		filename := a.Filename
+		if filename == "" {
+			ext := "bin"
+			switch a.MimeType {
+			case "image/png":
+				ext = "png"
+			case "image/jpeg":
+				ext = "jpg"
+			case "image/gif":
+				ext = "gif"
+			case "image/webp":
+				ext = "webp"
+			}
+			filename = path.Base("attachment." + ext)
+		}
+		out = append(out, client.ChatAttachment{
+			Filename: filename,
+			MimeType: a.MimeType,
+			Data:     base64.StdEncoding.EncodeToString(a.Data),
+		})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func firstNonEmpty(vals ...string) string {

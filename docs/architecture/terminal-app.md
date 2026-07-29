@@ -152,6 +152,10 @@ Approvals and denials call the network-grant REST endpoints directly instead of 
 - Drag across transcript text to select it; releasing the mouse automatically copies the selected plain text to the system clipboard
 - `astonish chat --resume <id>` — loads history via `GET /api/studio/sessions/{id}` on open
 
+### Paste handling
+
+Pastes of up to three lines are inserted into the composer as-is and the composer grows vertically for multi-line typed input (up to four visible rows). Pasting four or more lines replaces the composer value with a compact placeholder such as `[Pasted: 8 lines]`, storing the full content for submit. Explicit paste events (`Ctrl+V`, bracketed paste, clipboard paste bindings) collapse immediately. macOS `Command+V` is usually injected by the terminal as ordinary input rather than a paste event; that path collapses as soon as the composer reaches four lines (without waiting for a later keystroke). Any trailing characters that still arrive in the same short paste stream are merged into the same paste block and the placeholder line count is updated. Explicit multi-line editing with `Shift+Enter` / `Alt+Enter` / `Ctrl+J` is left expanded. Pressing enter expands the placeholder back to the full pasted content for history, transcript, `@file` expansion, and the platform turn. Each `[Pasted: N lines]` token is atomic: left/right (and word-motion) keys jump over the whole token, typing cannot insert inside it, and Backspace / `Ctrl+W` / `Alt+Backspace` / Delete remove the entire token in one step.
+
 ### `@file` mentions
 
 Typing `@` plus part of a local relative path opens a fuzzy file picker above the composer. Selecting a file inserts `@path/to/file`. On submit, the terminal app reads each mentioned file from the current working directory and appends a bounded `<context from @file mentions>` section to the message sent to the platform, while the transcript keeps showing the user's original text. Absolute paths, directory mentions, workspace escapes, and oversized files are rejected before the turn is sent.

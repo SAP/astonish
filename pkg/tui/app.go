@@ -375,22 +375,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.seq != m.pasteIdleSeq {
 			return m, nil
 		}
-		// Backup path: collapse any remaining multi-line terminal paste once the
-		// stream has been idle. Primary collapse usually happens immediately.
-		if m.forceCollapseInjectedPaste("") {
-			m.syncSlashCompletion()
-			m.syncFileCompletion()
-		}
+		// Idle only keeps an in-flight multi-line paste stream watch alive; it
+		// must not collapse based on total composer line count.
 		return m, m.ensureComposerWatch()
 
 	case composerWatchMsg:
-		// Independent of keypresses: keep collapsing terminal-injected multi-line
-		// paste as soon as the composer has 4+ content lines.
-		changed := m.forceCollapseInjectedPaste("")
-		if changed {
-			m.syncSlashCompletion()
-			m.syncFileCompletion()
-		}
+		// Watch loop is only for finishing a multi-line paste stream that already
+		// produced a placeholder (trailing injection). Never collapse plain typing.
 		if m.shouldWatchComposer() {
 			return m, m.composerWatchCmd()
 		}
@@ -793,39 +784,37 @@ func (m model) handlePaste(text string) (tea.Model, tea.Cmd) {
 	}
 	m.intentionalMultiline = false
 	prevH := m.composerTextHeight()
+	// Collapse only when THIS paste payload itself has 4+ lines — never based on
+	// how many lines already exist in the composer.
 	if pasteCollapseLineCount(text) < 4 {
 		m.ta.InsertString(text)
 	} else {
 		m.insertPastedBlock(text)
 	}
-	// Always re-check the full composer value in case paste was appended.
-	m.forceCollapseInjectedPaste("")
 	if m.ready && m.composerTextHeight() != prevH {
 		m.layout()
 		m.refreshViewport()
 	}
 	m.syncSlashCompletion()
 	m.syncFileCompletion()
-	return m, m.ensureComposerWatch()
+	return m, nil
 }
 
 // afterComposerChange reacts to composer mutations that were not explicit paste
-// events. Terminal-injected multi-line content (Command+V) collapses as soon as
-// it reaches 4 lines. Trailing characters that arrive in the same paste stream
-// are merged into the existing paste block. Shift+Enter multi-line editing sets
-// intentionalMultiline and is left expanded.
+// events. Collapse only when the newly inserted span itself is 4+ lines (a true
+// multi-line paste burst). Existing composer lines are ignored. Shift+Enter
+// multi-line editing sets intentionalMultiline and is left expanded.
 func (m *model) afterComposerChange(previous string) tea.Cmd {
 	current := m.ta.Value()
 	if current == previous {
-		return m.ensureComposerWatch()
+		return nil
 	}
 	if m.intentionalMultiline {
 		return nil
 	}
 
-	// Mid-stream paste after an early collapse: only merge when additional
-	// lines arrive (terminal still injecting). Same-line typing after the
-	// placeholder stays visible as normal composition.
+	// Mid-stream continuation after a multi-line paste already collapsed: merge
+	// only additional lines that arrive while the paste stream window is open.
 	if m.pasteStreamActive() && len(m.pastedBlocks) > 0 && pasteLineCount(current) > 1 {
 		expanded := m.expandPastedBlocks(current)
 		prevContentLines := 0
@@ -836,6 +825,15 @@ func (m *model) afterComposerChange(previous string) tea.Cmd {
 		}
 		if expanded != current && pasteCollapseLineCount(expanded) > prevContentLines {
 			prevH := m.composerTextHeight()
+			// Re-collapse using the expanded full paste content only for the
+			// active placeholder region (prefix/suffix outside placeholders stay).
+			if prefix, _, suffix, ok := findInsertedText(previous, current); ok {
+				// Prefer keeping surrounding typed text; expand placeholders first.
+				_ = prefix
+				_ = suffix
+			}
+			// Whole-value re-collapse of expanded paste content when the composer
+			// is only the placeholder plus trailing paste stream chars.
 			m.replaceComposerPaste("", expanded, "")
 			m.touchPasteStream()
 			if m.ready && m.composerTextHeight() != prevH {
@@ -846,8 +844,8 @@ func (m *model) afterComposerChange(previous string) tea.Cmd {
 		}
 	}
 
-	// 4+ significant lines without intentional multi-line editing → collapse now.
-	m.forceCollapseInjectedPaste(previous)
+	// Collapse only the inserted delta when that delta itself is 4+ lines.
+	m.collapseInsertedPasteIfLarge(previous)
 	return m.ensureComposerWatch()
 }
 
@@ -860,13 +858,10 @@ func (m *model) touchPasteStream() {
 }
 
 func (m *model) shouldWatchComposer() bool {
-	if m.intentionalMultiline {
-		return false
-	}
-	if m.pasteStreamActive() {
-		return true
-	}
-	return composerShouldCollapseValue(m.ta.Value())
+	// Only keep the watch alive to finish an in-flight multi-line paste stream
+	// that already produced a placeholder. Do not watch merely because the
+	// composer has many lines of normal typing/single-line pastes.
+	return !m.intentionalMultiline && m.pasteStreamActive() && len(m.pastedBlocks) > 0
 }
 
 func (m *model) composerWatchCmd() tea.Cmd {
@@ -887,41 +882,35 @@ func (m *model) ensureComposerWatch() tea.Cmd {
 	return m.composerWatchCmd()
 }
 
-// forceCollapseInjectedPaste collapses multi-line composer content when the
-// user did not author it via Shift+Enter. If previous is provided, only the
-// newly inserted span is collapsed so surrounding typed text can remain.
-func (m *model) forceCollapseInjectedPaste(previous string) bool {
+// collapseInsertedPasteIfLarge collapses only when the newly inserted span
+// itself has 4+ content lines. Existing composer lines are never counted.
+func (m *model) collapseInsertedPasteIfLarge(previous string) bool {
 	if m.intentionalMultiline {
 		return false
 	}
-	value := m.ta.Value()
-	if !composerShouldCollapseValue(value) {
+	current := m.ta.Value()
+	if current == previous {
+		return false
+	}
+	var prefix, inserted, suffix string
+	var ok bool
+	if previous == "" {
+		// Composer was empty: the whole value is the insertion.
+		prefix, inserted, suffix, ok = "", current, "", true
+	} else {
+		prefix, inserted, suffix, ok = findInsertedText(previous, current)
+	}
+	if !ok || pasteCollapseLineCount(inserted) < 4 {
 		return false
 	}
 	prevH := m.composerTextHeight()
-	if previous != "" && previous != value {
-		if prefix, inserted, suffix, ok := findInsertedText(previous, value); ok && pasteCollapseLineCount(inserted) >= 4 {
-			m.replaceComposerPaste(prefix, inserted, suffix)
-		} else {
-			m.collapseWholeComposerPaste()
-		}
-	} else {
-		m.collapseWholeComposerPaste()
-	}
+	m.replaceComposerPaste(prefix, inserted, suffix)
 	m.touchPasteStream()
 	if m.ready && m.composerTextHeight() != prevH {
 		m.layout()
 		m.refreshViewport()
 	}
-	return m.ta.Value() != value
-}
-
-func (m *model) collapseWholeComposerPaste() {
-	value := m.ta.Value()
-	if !composerShouldCollapseValue(value) {
-		return
-	}
-	m.replaceComposerPaste("", value, "")
+	return true
 }
 
 func (m *model) insertPastedBlock(content string) {

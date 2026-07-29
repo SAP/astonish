@@ -2073,8 +2073,10 @@ func (m model) renderActivity(it events.Item, width int) string {
 			b.WriteByte('\n')
 			b.WriteString(th.Muted.Width(width).Render("    " + detail))
 		}
-		// Show file diffs for edit/write tools.
-		if d := render.DiffFromToolArgs(s.Name, s.Args, width, true, rs); d != "" {
+		// Classic unified diffs for edit/write tools. Prefer verification_context
+		// from the tool result (real line numbers + surrounding context); fall
+		// back to args while the tool is still running.
+		if d := render.DiffFromToolStep(s.Name, s.Args, s.Result, width, true, rs); d != "" {
 			b.WriteByte('\n')
 			b.WriteString(d)
 			continue

@@ -102,7 +102,7 @@ AdaptiveColor cursor-line backgrounds that break dark alt-screen UIs).
 | Code fences | `pkg/tui/render.CodeBlock` — chroma highlight + numeric gutter |
 | Tool activity | `pkg/tui/render.ActivitySummary` + `StatsFromSteps` (`+N/−M`), with categorized collapsed summaries that list every tool row as a single-line preview; click-to-expand reveals full parameters, diffs, and result previews |
 | Network authorization | Inline transcript notice plus a focused approval card for OpenShell proxy denials; `enter`/`y` allows the blocked host, `b` allows the suggested broader pattern, and `n`/`esc` denies |
-| File diffs | `pkg/tui/render.FileDiff` / `DiffFromToolArgs` from `edit_file`/`write_file` args |
+| File diffs | Classic unified diff via `DiffFromToolStep`: prefers `verification_context` from the tool result (real line numbers + context); falls back to `DiffFromToolArgs` / `FileDiff` from `edit_file`/`write_file` args while running |
 
 Streaming: unclosed fences render as incomplete code blocks (header shows `…`).
 

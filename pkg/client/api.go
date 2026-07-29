@@ -196,13 +196,21 @@ func (c *Client) GetEffectiveProviders() (*EffectiveProvidersResponse, error) {
 	return &resp, nil
 }
 
+// ChatAttachment is a base64 file payload for multimodal chat turns.
+type ChatAttachment struct {
+	Filename string `json:"filename"`
+	MimeType string `json:"mimeType"`
+	Data     string `json:"data"` // base64-encoded file content
+}
+
 // ChatRequest represents a message to send to the chat.
 type ChatRequest struct {
-	SessionID     string `json:"sessionId,omitempty"`
-	Message       string `json:"message"`
-	AutoApprove   bool   `json:"autoApprove,omitempty"`
-	Debug         bool   `json:"debug,omitempty"`
-	SystemContext string `json:"systemContext,omitempty"`
+	SessionID     string           `json:"sessionId,omitempty"`
+	Message       string           `json:"message"`
+	AutoApprove   bool             `json:"autoApprove,omitempty"`
+	Debug         bool             `json:"debug,omitempty"`
+	SystemContext string           `json:"systemContext,omitempty"`
+	Attachments   []ChatAttachment `json:"attachments,omitempty"`
 }
 
 // SendChatMessage sends a chat message and returns an SSE stream of events.

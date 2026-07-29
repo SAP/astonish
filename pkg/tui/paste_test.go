@@ -801,12 +801,189 @@ func TestPastePlaceholderSpansFindsToken(t *testing.T) {
 
 type recordingBackend struct {
 	staticBackend
-	message string
+	message     string
+	attachments []backend.Attachment
 }
 
-func (b *recordingBackend) RunTurn(_ context.Context, message string, _ backend.TurnOptions) (<-chan events.Event, error) {
+func (b *recordingBackend) RunTurn(_ context.Context, message string, opts backend.TurnOptions) (<-chan events.Event, error) {
 	b.message = message
+	b.attachments = append([]backend.Attachment(nil), opts.Attachments...)
 	ch := make(chan events.Event)
 	close(ch)
 	return ch, nil
+}
+
+// ── image paste ──────────────────────────────────────────────────────────
+
+func TestImagePasteInsertsAtomicPlaceholder(t *testing.T) {
+	m := newPasteTestModel(t)
+	png := minimalPNG()
+	orig := clipboardImageReader
+	clipboardImageReader = func() ([]byte, string, bool) {
+		return png, "image/png", true
+	}
+	t.Cleanup(func() { clipboardImageReader = orig })
+
+	m = applyKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlV})
+	if got := m.ta.Value(); got != "[image #1]" {
+		t.Fatalf("value = %q, want [image #1]", got)
+	}
+	if len(m.pastedImages) != 1 {
+		t.Fatalf("pastedImages = %+v", m.pastedImages)
+	}
+	if m.pastedImages[0].mimeType != "image/png" || len(m.pastedImages[0].data) == 0 {
+		t.Fatalf("image payload missing: %+v", m.pastedImages[0])
+	}
+}
+
+func TestImagePasteIncrementsIndex(t *testing.T) {
+	m := newPasteTestModel(t)
+	png := minimalPNG()
+	orig := clipboardImageReader
+	clipboardImageReader = func() ([]byte, string, bool) {
+		return png, "image/png", true
+	}
+	t.Cleanup(func() { clipboardImageReader = orig })
+
+	m = applyKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlV})
+	m = applyKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlV})
+	if got := m.ta.Value(); got != "[image #1][image #2]" {
+		t.Fatalf("value = %q", got)
+	}
+	if len(m.pastedImages) != 2 {
+		t.Fatalf("pastedImages len = %d", len(m.pastedImages))
+	}
+}
+
+func TestImagePasteIsAtomicForNavigationAndDelete(t *testing.T) {
+	m := newPasteTestModel(t)
+	png := minimalPNG()
+	m.pastedImages = []pastedImage{{
+		placeholder: "[image #1]",
+		mimeType:    "image/png",
+		data:        png,
+		number:      1,
+	}}
+	m.ta.SetValue("ab[image #1]cd")
+	m.ta.SetCursor(len("ab") + len("[image #1]"))
+
+	m = applyKey(t, m, tea.KeyMsg{Type: tea.KeyLeft})
+	_, col := m.composerLineCol()
+	if col != len("ab") {
+		t.Fatalf("left jump col = %d, want %d", col, len("ab"))
+	}
+	m = applyKey(t, m, tea.KeyMsg{Type: tea.KeyRight})
+	_, col = m.composerLineCol()
+	if col != len("ab")+len("[image #1]") {
+		t.Fatalf("right jump col = %d", col)
+	}
+
+	m = applyKey(t, m, tea.KeyMsg{Type: tea.KeyBackspace})
+	if got := m.ta.Value(); got != "abcd" {
+		t.Fatalf("backspace value = %q", got)
+	}
+	if len(m.pastedImages) != 0 {
+		t.Fatalf("pastedImages after delete = %+v", m.pastedImages)
+	}
+}
+
+func TestImagePasteSubmitSendsAttachments(t *testing.T) {
+	b := &recordingBackend{}
+	m := newPasteTestModelWithBackend(t, b)
+	png := minimalPNG()
+	m.pastedImages = []pastedImage{{
+		placeholder: "[image #1]",
+		mimeType:    "image/png",
+		data:        png,
+		number:      1,
+	}}
+	m.ta.SetValue("look [image #1]")
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("expected submit command")
+	}
+	m = next.(model)
+
+	if b.message != "look [image #1]" {
+		t.Fatalf("message = %q", b.message)
+	}
+	if len(b.attachments) != 1 {
+		t.Fatalf("attachments = %+v", b.attachments)
+	}
+	if b.attachments[0].MimeType != "image/png" || len(b.attachments[0].Data) == 0 {
+		t.Fatalf("attachment payload = %+v", b.attachments[0])
+	}
+	if b.attachments[0].Filename == "" {
+		t.Fatal("expected attachment filename")
+	}
+	if len(m.pastedImages) != 0 {
+		t.Fatalf("pastedImages should clear after submit")
+	}
+}
+
+func TestImageOnlySubmitUsesPlaceholderText(t *testing.T) {
+	b := &recordingBackend{}
+	m := newPasteTestModelWithBackend(t, b)
+	png := minimalPNG()
+	m.pastedImages = []pastedImage{{
+		placeholder: "[image #1]",
+		mimeType:    "image/png",
+		data:        png,
+		number:      1,
+	}}
+	m.ta.SetValue("[image #1]")
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("expected submit command")
+	}
+	_ = next
+	if b.message != "[image #1]" {
+		t.Fatalf("message = %q", b.message)
+	}
+	if len(b.attachments) != 1 {
+		t.Fatalf("attachments = %+v", b.attachments)
+	}
+}
+
+func TestEmptyPasteWithImageUsesClipboardImage(t *testing.T) {
+	m := newPasteTestModel(t)
+	png := minimalPNG()
+	orig := clipboardImageReader
+	clipboardImageReader = func() ([]byte, string, bool) {
+		return png, "image/png", true
+	}
+	t.Cleanup(func() { clipboardImageReader = orig })
+
+	m = applyKey(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(""), Paste: true})
+	if got := m.ta.Value(); got != "[image #1]" {
+		t.Fatalf("value = %q", got)
+	}
+}
+
+func TestSniffImageMIME(t *testing.T) {
+	png := minimalPNG()
+	mime, ok := sniffImageMIME(png)
+	if !ok || mime != "image/png" {
+		t.Fatalf("sniff png = %q ok=%v", mime, ok)
+	}
+	if _, ok := sniffImageMIME([]byte("not-an-image")); ok {
+		t.Fatal("expected non-image to fail sniff")
+	}
+}
+
+// minimalPNG is a 1x1 transparent PNG.
+func minimalPNG() []byte {
+	return []byte{
+		0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+		0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+		0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+		0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+		0x89, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41,
+		0x54, 0x78, 0x9c, 0x63, 0x00, 0x01, 0x00, 0x00,
+		0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00,
+		0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae,
+		0x42, 0x60, 0x82,
+	}
 }

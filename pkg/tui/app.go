@@ -38,6 +38,14 @@ type pastedBlock struct {
 	content     string
 }
 
+// pastedImage is a clipboard/image attachment shown as an atomic [image #N] token.
+type pastedImage struct {
+	placeholder string
+	mimeType    string
+	data        []byte
+	number      int
+}
+
 // Config configures the terminal chat app.
 type Config struct {
 	Backend backend.Backend
@@ -115,6 +123,9 @@ type model struct {
 	planMode bool
 	// Pasted blocks keep the composer compact while preserving submitted content.
 	pastedBlocks []pastedBlock
+	// Pasted images from the clipboard, shown as atomic [image #N] tokens.
+	pastedImages []pastedImage
+	nextImageNum int
 	// intentionalMultiline is set when the user presses Shift+Enter / Alt+Enter /
 	// Ctrl+J. While true, the composer may keep 4+ visible lines. Command+V and
 	// other terminal-injected multi-line pastes leave this false, so they collapse.
@@ -209,6 +220,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	if text, ok := textareaPasteText(msg); ok {
+		if next, cmd, handled := m.tryPasteImage(); handled {
+			return next, cmd
+		}
 		return m.handlePaste(text)
 	}
 
@@ -225,11 +239,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleMouse(msg)
 
 	case tea.KeyMsg:
+		// Explicit paste bindings (Ctrl+V / Super+V) prefer clipboard images.
+		if isClipboardPasteKey(msg) {
+			if next, cmd, handled := m.tryPasteImage(); handled {
+				return next, cmd
+			}
+		}
 		if msg.Type == tea.KeyRunes {
 			text := normalizePasteText(string(msg.Runes))
 			// Real paste events and multi-line rune bursts (common for terminal
 			// Command+V without bracketed-paste markers) go through handlePaste.
 			if msg.Paste || strings.Contains(text, "\n") {
+				if msg.Paste && text == "" {
+					if next, cmd, handled := m.tryPasteImage(); handled {
+						return next, cmd
+					}
+				}
 				return m.handlePaste(text)
 			}
 		}
@@ -682,6 +707,58 @@ func (m model) turnOptions() backend.TurnOptions {
 	return backend.TurnOptions{}
 }
 
+func isClipboardPasteKey(msg tea.KeyMsg) bool {
+	switch msg.String() {
+	case "ctrl+v", "super+v", "cmd+v":
+		return true
+	default:
+		return false
+	}
+}
+
+func (m model) tryPasteImage() (tea.Model, tea.Cmd, bool) {
+	if m.sessions.open {
+		return m, nil, false
+	}
+	if m.tr.Streaming && !m.tr.Awaiting {
+		return m, nil, false
+	}
+	data, mime, ok := clipboardImageReader()
+	if !ok || len(data) == 0 {
+		return m, nil, false
+	}
+	if mime == "" {
+		if sniffed, ok := sniffImageMIME(data); ok {
+			mime = sniffed
+		} else {
+			mime = "image/png"
+		}
+	}
+	next, cmd := m.insertPastedImage(data, mime)
+	return next, cmd, true
+}
+
+func (m model) insertPastedImage(data []byte, mimeType string) (tea.Model, tea.Cmd) {
+	prevH := m.composerTextHeight()
+	m.nextImageNum++
+	num := m.nextImageNum
+	placeholder := fmt.Sprintf("[image #%d]", num)
+	m.ta.InsertString(placeholder)
+	m.pastedImages = append(m.pastedImages, pastedImage{
+		placeholder: placeholder,
+		mimeType:    mimeType,
+		data:        data,
+		number:      num,
+	})
+	if m.ready && m.composerTextHeight() != prevH {
+		m.layout()
+		m.refreshViewport()
+	}
+	m.syncSlashCompletion()
+	m.syncFileCompletion()
+	return m, nil
+}
+
 func (m model) handlePaste(text string) (tea.Model, tea.Cmd) {
 	if m.sessions.open {
 		return m, nil
@@ -690,6 +767,14 @@ func (m model) handlePaste(text string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	text = normalizePasteText(text)
+	// Truly empty paste (no runes) often means an image-only clipboard on macOS.
+	// Do not treat pure newlines as empty — Command+V line streams use "\n" runes.
+	if text == "" {
+		if next, cmd, handled := m.tryPasteImage(); handled {
+			return next, cmd
+		}
+		return m, nil
+	}
 	m.intentionalMultiline = false
 	prevH := m.composerTextHeight()
 	if pasteCollapseLineCount(text) < 4 {
@@ -889,9 +974,6 @@ func pasteNavDir(key string) int {
 }
 
 func (m model) pastePlaceholderSpans() []pastePlaceholderSpan {
-	if len(m.pastedBlocks) == 0 {
-		return nil
-	}
 	value := m.ta.Value()
 	if value == "" {
 		return nil
@@ -899,12 +981,12 @@ func (m model) pastePlaceholderSpans() []pastePlaceholderSpan {
 	valueRunes := []rune(value)
 	used := make([]bool, len(valueRunes))
 	var spans []pastePlaceholderSpan
-	for _, block := range m.pastedBlocks {
-		if block.placeholder == "" {
-			continue
+
+	add := func(placeholder string) {
+		if placeholder == "" {
+			return
 		}
-		phRunes := []rune(block.placeholder)
-		// Search for an unused occurrence of this placeholder.
+		phRunes := []rune(placeholder)
 		for i := 0; i+len(phRunes) <= len(valueRunes); i++ {
 			match := true
 			for j := 0; j < len(phRunes); j++ {
@@ -923,13 +1005,20 @@ func (m model) pastePlaceholderSpans() []pastePlaceholderSpan {
 			spans = append(spans, pastePlaceholderSpan{
 				start:       i,
 				end:         i + len(phRunes),
-				placeholder: block.placeholder,
+				placeholder: placeholder,
 				line:        line,
 				lineStart:   lineStart,
 				lineEnd:     lineStart + len(phRunes),
 			})
-			break
+			return
 		}
+	}
+
+	for _, block := range m.pastedBlocks {
+		add(block.placeholder)
+	}
+	for _, img := range m.pastedImages {
+		add(img.placeholder)
 	}
 	return spans
 }
@@ -991,7 +1080,7 @@ func (m *model) setComposerCursorRuneOffset(offset int) {
 
 // jumpPastePlaceholder makes left/right treat a paste token as one cell.
 func (m *model) jumpPastePlaceholder(dir int) bool {
-	if dir == 0 || len(m.pastedBlocks) == 0 {
+	if dir == 0 || (len(m.pastedBlocks) == 0 && len(m.pastedImages) == 0) {
 		return false
 	}
 	line, col := m.composerLineCol()
@@ -1051,7 +1140,7 @@ func (m *model) snapOutOfPastePlaceholder(dir int) {
 }
 
 func (m model) handlePastePlaceholderDelete(key string) (tea.Model, tea.Cmd, bool) {
-	if len(m.pastedBlocks) == 0 {
+	if len(m.pastedBlocks) == 0 && len(m.pastedImages) == 0 {
 		return m, nil, false
 	}
 	line, col := m.composerLineCol()
@@ -1060,15 +1149,20 @@ func (m model) handlePastePlaceholderDelete(key string) (tea.Model, tea.Cmd, boo
 		if span.line != line {
 			continue
 		}
-		remove := false
-		if forward {
-			// Delete forward when at start or inside the token.
-			remove = col == span.lineStart || (col > span.lineStart && col < span.lineEnd)
-		} else {
-			// Backspace / ctrl+w when at end or inside the token.
-			remove = col == span.lineEnd || (col > span.lineStart && col < span.lineEnd)
+		// Treat the whole token as one cell: delete if caret is on the token
+		// (start/inside) or at its trailing edge (end).
+		onToken := col >= span.lineStart && col <= span.lineEnd
+		if !onToken {
+			continue
 		}
-		if !remove {
+		// Avoid stealing backspace when caret is at token start and there is
+		// text before it that the user intends to delete (except ctrl+w which
+		// should still remove the token when on its leading edge).
+		if !forward && col == span.lineStart && key != "ctrl+w" && key != "alt+backspace" {
+			continue
+		}
+		// Avoid stealing forward-delete when caret is past the token end.
+		if forward && col == span.lineEnd {
 			continue
 		}
 		return m.removePastePlaceholderSpan(span)
@@ -1098,25 +1192,35 @@ func (m model) removePastePlaceholderSpan(span pastePlaceholderSpan) (tea.Model,
 
 // repairBrokenPastePlaceholders restores paste tokens if typing split one.
 func (m *model) repairBrokenPastePlaceholders(previous string) {
-	if len(m.pastedBlocks) == 0 {
+	if len(m.pastedBlocks) == 0 && len(m.pastedImages) == 0 {
 		return
 	}
 	current := m.ta.Value()
 	if current == previous {
 		return
 	}
-	for _, block := range m.pastedBlocks {
-		if strings.Contains(current, block.placeholder) {
-			continue
+	check := func(placeholder string) bool {
+		if placeholder == "" || strings.Contains(current, placeholder) {
+			return false
+		}
+		if !strings.Contains(previous, placeholder) {
+			return false
 		}
 		// Placeholder text was modified. Revert to previous atomic value and
 		// place the caret after the token so typing continues outside it.
-		if strings.Contains(previous, block.placeholder) {
-			m.ta.SetValue(previous)
-			// Put caret after the restored placeholder.
-			if idx := strings.Index(previous, block.placeholder); idx >= 0 {
-				m.setComposerCursorRuneOffset(utf8.RuneCountInString(previous[:idx]) + utf8.RuneCountInString(block.placeholder))
-			}
+		m.ta.SetValue(previous)
+		if idx := strings.Index(previous, placeholder); idx >= 0 {
+			m.setComposerCursorRuneOffset(utf8.RuneCountInString(previous[:idx]) + utf8.RuneCountInString(placeholder))
+		}
+		return true
+	}
+	for _, block := range m.pastedBlocks {
+		if check(block.placeholder) {
+			return
+		}
+	}
+	for _, img := range m.pastedImages {
+		if check(img.placeholder) {
 			return
 		}
 	}
@@ -1129,20 +1233,34 @@ func (m *model) removeLastPastedBlock(placeholder string) {
 			return
 		}
 	}
+	for i := len(m.pastedImages) - 1; i >= 0; i-- {
+		if m.pastedImages[i].placeholder == placeholder {
+			m.pastedImages = append(m.pastedImages[:i], m.pastedImages[i+1:]...)
+			return
+		}
+	}
 }
 
 func (m *model) prunePastedBlocks() {
-	if len(m.pastedBlocks) == 0 {
-		return
-	}
 	value := m.ta.Value()
-	kept := m.pastedBlocks[:0]
-	for _, block := range m.pastedBlocks {
-		if strings.Contains(value, block.placeholder) {
-			kept = append(kept, block)
+	if len(m.pastedBlocks) > 0 {
+		kept := m.pastedBlocks[:0]
+		for _, block := range m.pastedBlocks {
+			if strings.Contains(value, block.placeholder) {
+				kept = append(kept, block)
+			}
 		}
+		m.pastedBlocks = kept
 	}
-	m.pastedBlocks = kept
+	if len(m.pastedImages) > 0 {
+		keptImg := m.pastedImages[:0]
+		for _, img := range m.pastedImages {
+			if strings.Contains(value, img.placeholder) {
+				keptImg = append(keptImg, img)
+			}
+		}
+		m.pastedImages = keptImg
+	}
 }
 
 func (m model) expandPastedBlocks(text string) string {
@@ -1203,9 +1321,15 @@ func pasteCollapseLineCount(text string) int {
 }
 
 func (m model) submit() (tea.Model, tea.Cmd) {
-	text := strings.TrimSpace(m.expandPastedBlocks(m.ta.Value()))
-	if text == "" {
+	rawValue := m.ta.Value()
+	attachments := m.collectSubmitAttachments(rawValue)
+	text := strings.TrimSpace(m.expandPastedBlocks(rawValue))
+	if text == "" && len(attachments) == 0 {
 		return m, nil
+	}
+	if text == "" && len(attachments) > 0 {
+		// Image-only turn still needs a visible/user message marker.
+		text = strings.TrimSpace(rawValue)
 	}
 	if m.tr.Streaming && !m.tr.Awaiting {
 		return m, nil
@@ -1217,6 +1341,7 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 	// Local slash commands (minimal set for PR1).
 	if strings.HasPrefix(text, "/") {
 		m.pastedBlocks = nil
+		m.pastedImages = nil
 		return m.handleSlash(text)
 	}
 
@@ -1224,6 +1349,7 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 	m.historyIdx = -1
 	m.ta.Reset()
 	m.pastedBlocks = nil
+	m.pastedImages = nil
 	m.intentionalMultiline = false
 	if m.ready {
 		m.layout()
@@ -1250,7 +1376,9 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 	turnCtx, cancel := context.WithCancel(m.ctx)
 	m.turnCancel = cancel
 
-	ch, err := m.backend.RunTurn(turnCtx, message, m.turnOptions())
+	opts := m.turnOptions()
+	opts.Attachments = attachments
+	ch, err := m.backend.RunTurn(turnCtx, message, opts)
 	if err != nil {
 		cancel()
 		m.turnCancel = nil
@@ -1260,6 +1388,33 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 	}
 	m.eventCh = ch
 	return m, waitEvent(ch)
+}
+
+func (m model) collectSubmitAttachments(composerValue string) []backend.Attachment {
+	if len(m.pastedImages) == 0 {
+		return nil
+	}
+	var out []backend.Attachment
+	for _, img := range m.pastedImages {
+		if !strings.Contains(composerValue, img.placeholder) {
+			continue
+		}
+		ext := "png"
+		switch img.mimeType {
+		case "image/jpeg":
+			ext = "jpg"
+		case "image/gif":
+			ext = "gif"
+		case "image/webp":
+			ext = "webp"
+		}
+		out = append(out, backend.Attachment{
+			Filename: fmt.Sprintf("image-%d.%s", img.number, ext),
+			MimeType: img.mimeType,
+			Data:     img.data,
+		})
+	}
+	return out
 }
 
 func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
@@ -1318,6 +1473,8 @@ Commands:
 
 Type / to open command completion (filters as you type).
 Type @ plus part of a local path to attach file context.
+Paste multi-line text (4+ lines) to insert [Pasted: N lines].
+Paste an image from the clipboard to insert [image #N].
   ↑↓ / tab       Move selection
   enter          Run selected command
   esc            Close completion
@@ -1325,6 +1482,7 @@ Type @ plus part of a local path to attach file context.
 Keys:
   enter          Send message
   shift+enter    Newline (also ctrl+j / alt+enter)
+  ctrl+v         Paste text or image from clipboard
   y / n          Approve / deny tool (when prompted)
   ctrl+o         Expand/collapse last tool activity
   ctrl+l         Sessions picker

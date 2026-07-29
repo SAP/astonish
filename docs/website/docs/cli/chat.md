@@ -84,6 +84,8 @@ The terminal footer shows the active provider and the resolved concrete model wh
 
 Pasting up to three lines inserts the text directly into the composer. Pasting four or more lines keeps the composer compact by showing a placeholder like `[Pasted: 8 lines]`. The full pasted content is restored when you press `Enter`, so the conversation history and the agent both receive the complete text. The placeholder is atomic: arrow keys jump over it, you cannot type inside it, and Backspace / `Ctrl+W` / `Alt+Backspace` remove the whole block at once.
 
+Pasting an image from the clipboard inserts `[image #1]` (then `#2`, `#3`, …). Image placeholders are also atomic tokens. When you press `Enter`, Astonish sends the images to the platform as chat attachments so multimodal models can see them, while the chat history keeps the `[image #N]` markers.
+
 ## In-Session Commands
 
 While in an active chat session, type `/` to access these commands:

@@ -10,7 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gorilla/mux"
 	"github.com/SAP/astonish/pkg/cache"
 	"github.com/SAP/astonish/pkg/common"
 	"github.com/SAP/astonish/pkg/config"
@@ -18,6 +17,7 @@ import (
 	"github.com/SAP/astonish/pkg/sandbox"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/tools"
+	"github.com/gorilla/mux"
 	"google.golang.org/adk/tool/mcptoolset"
 )
 
@@ -61,7 +61,7 @@ func asyncDiscoverAndCacheTools(mcpStore store.MCPServerStore, serverName string
 		servers := map[string]config.MCPServerConfig{serverName: serverCfg}
 		discoveredTools := discoverMCPToolsForPlatform(ctx, serverName, servers, sessRegistry)
 		if discoveredTools == nil {
-			slog.Warn("async MCP discovery: no tools discovered", "server", serverName)
+			slog.Warn("async MCP discovery: no tools discovered", mcp.ServerConfigLogAttrs(serverName, serverCfg)...)
 			return
 		}
 
@@ -243,7 +243,7 @@ func checkStdioMCPInstallable(transport string) error {
 func discoverMCPToolsForPlatform(ctx context.Context, serverName string, servers map[string]config.MCPServerConfig, sessRegistry *sandbox.SessionRegistry) json.RawMessage {
 	serverCfg, ok := servers[serverName]
 	if !ok {
-		slog.Warn("MCP discovery: server config not found", "server", serverName)
+		slog.Warn("MCP discovery: server config not found", "component", "mcp", "server", serverName)
 		return nil
 	}
 
@@ -256,7 +256,7 @@ func discoverMCPToolsForPlatform(ctx context.Context, serverName string, servers
 	// Stdio servers: must run in sandbox
 	data, err := discoverMCPToolsInSandbox(ctx, serverName, serverCfg, sessRegistry)
 	if err != nil {
-		slog.Warn("MCP sandbox discovery failed", "server", serverName, "error", err)
+		slog.Warn("MCP sandbox discovery failed", mcp.FailureLogAttrs(serverName, serverCfg, err, nil)...)
 		return nil
 	}
 	return data
@@ -391,7 +391,7 @@ func discoverMCPToolsOnHost(ctx context.Context, serverName string, servers map[
 	defer mgr.Cleanup()
 
 	if err := mgr.InitializeToolsets(ctx); err != nil {
-		slog.Warn("platform MCP refresh: failed to initialize", "server", serverName, "error", err)
+		slog.Warn("platform MCP refresh: failed to initialize", mcp.FailureLogAttrs(serverName, servers[serverName], err, nil)...)
 		return nil
 	}
 
@@ -410,7 +410,7 @@ func discoverMCPToolsOnHost(ctx context.Context, serverName string, servers map[
 		}
 		mcpTools, err := namedToolset.Toolset.Tools(minimalCtx)
 		if err != nil {
-			slog.Warn("platform MCP refresh: failed to get tools", "server", serverName, "error", err)
+			slog.Warn("platform MCP refresh: failed to get tools", mcp.FailureLogAttrs(serverName, servers[serverName], err, namedToolset.Stderr)...)
 			return nil
 		}
 		for _, t := range mcpTools {

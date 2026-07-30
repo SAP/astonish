@@ -24,6 +24,8 @@ The `ContainerMCPTransport` implements the MCP SDK's `Transport` interface by st
 
 MCP uses JSON-RPC over stdout. If an MCP server writes log messages to stdout (a common mistake), it corrupts the JSON-RPC stream. The `ExecNonInteractive` call uses `SeparateStderr: true` to keep stderr separate, and the captured stderr is available for diagnostics.
 
+MCP startup and discovery failures must be logged with enough context to diagnose cloud deployments from container logs alone: server name, transport, command and args for stdio servers, URL scheme/host/path for remote servers, env var names, the underlying error, and captured stderr. Env var values and URL credentials/query strings are intentionally omitted from logs.
+
 ### Why Tool Caching
 
 Querying MCP servers for their tool definitions involves starting the server process, performing the JSON-RPC handshake, and listing tools. This can take seconds. The tool cache:

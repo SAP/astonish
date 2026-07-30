@@ -167,6 +167,21 @@ Consider a scenario where MCP servers are defined at multiple tiers:
 - `jira` → Inherited from Org (no team override)
 - `figma` → Team-specific (only exists at team level)
 
+## Debugging startup failures
+
+When an MCP server fails during discovery or first tool use, check the daemon logs:
+
+```bash
+# Local service/default mode
+astonish daemon logs -f
+
+# Kubernetes
+kubectl logs -n astonish -l app.kubernetes.io/component=api --tail=100
+kubectl logs -n astonish -l app.kubernetes.io/component=worker --tail=100
+```
+
+Failure logs include the server name, transport, stdio command and args, remote URL scheme/host/path, env var names, the underlying error, and captured stderr. Secret env values and URL credentials/query strings are not printed.
+
 ## Best Practices
 
 - Use **stdio** transport for development and local tools

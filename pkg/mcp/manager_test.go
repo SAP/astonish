@@ -2,6 +2,8 @@ package mcp
 
 import (
 	"bytes"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/SAP/astonish/pkg/config"
@@ -127,6 +129,59 @@ func TestNamedToolset_Fields(t *testing.T) {
 	}
 	if nt.Stderr.String() != "stderr output" {
 		t.Errorf("Stderr = %q, want 'stderr output'", nt.Stderr.String())
+	}
+}
+
+func TestServerConfigLogAttrs_RedactsEnvValues(t *testing.T) {
+	t.Parallel()
+	cfg := config.MCPServerConfig{
+		Command: "npx",
+		Args:    []string{"-y", "@example/server"},
+		Env: map[string]string{
+			"API_TOKEN": "super-secret-token",
+			"BASE_URL":  "https://api.example.test",
+		},
+	}
+
+	attrs := ServerConfigLogAttrs("example", cfg)
+	joined := fmt.Sprint(attrs...)
+	if strings.Contains(joined, "super-secret-token") {
+		t.Fatalf("diagnostic attributes leaked env value: %s", joined)
+	}
+	if !strings.Contains(joined, "API_TOKEN") || !strings.Contains(joined, "BASE_URL") {
+		t.Fatalf("diagnostic attributes should include env keys: %s", joined)
+	}
+	if !strings.Contains(joined, "npx") || !strings.Contains(joined, "@example/server") {
+		t.Fatalf("diagnostic attributes should include command and args: %s", joined)
+	}
+}
+
+func TestServerConfigLogAttrs_RedactsURLCredentials(t *testing.T) {
+	t.Parallel()
+	cfg := config.MCPServerConfig{
+		Transport: "sse",
+		URL:       "https://user:secret@example.test/sse?token=hidden",
+	}
+
+	attrs := ServerConfigLogAttrs("remote", cfg)
+	joined := fmt.Sprint(attrs...)
+	if strings.Contains(joined, "secret") || strings.Contains(joined, "token=hidden") {
+		t.Fatalf("diagnostic attributes leaked URL credentials or query: %s", joined)
+	}
+	if !strings.Contains(joined, "example.test") || !strings.Contains(joined, "/sse") {
+		t.Fatalf("diagnostic attributes should include URL host and path: %s", joined)
+	}
+}
+
+func TestDiagnosticStderr_TruncatesLongOutput(t *testing.T) {
+	t.Parallel()
+	buf := bytes.NewBufferString(strings.Repeat("x", maxDiagnosticOutputLen+10))
+	got := DiagnosticStderr(buf)
+	if len(got) <= maxDiagnosticOutputLen {
+		t.Fatalf("expected truncated output to include suffix, got length %d", len(got))
+	}
+	if !strings.Contains(got, "[truncated]") {
+		t.Fatalf("expected truncation marker, got %q", got)
 	}
 }
 

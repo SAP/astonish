@@ -7,8 +7,8 @@ import (
 	"log/slog"
 	"os/exec"
 
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/SAP/astonish/pkg/config"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/mcptoolset"
 )
@@ -86,8 +86,8 @@ func (m *Manager) InitializeToolsets(ctx context.Context) error {
 
 		transport, stderrBuf, err := createTransport(serverConfig)
 		if err != nil {
-			errMsg := fmt.Sprintf("Failed to create transport: %v (Stderr: %s)", err, GetStderr(stderrBuf))
-			slog.Warn("failed to create transport for MCP server", "component", "mcp", "server", serverName, "error", err)
+			errMsg := fmt.Sprintf("Failed to create transport: %v (Stderr: %s)", err, DiagnosticStderr(stderrBuf))
+			slog.Warn("failed to create transport for MCP server", FailureLogAttrs(serverName, serverConfig, err, stderrBuf)...)
 			m.initResults = append(m.initResults, InitResult{
 				Name:    serverName,
 				Success: false,
@@ -102,8 +102,8 @@ func (m *Manager) InitializeToolsets(ctx context.Context) error {
 			// ToolFilter can be added here if needed to filter specific tools
 		})
 		if err != nil {
-			errMsg := fmt.Sprintf("Failed to create toolset: %v (Stderr: %s)", err, GetStderr(stderrBuf))
-			slog.Warn("failed to create toolset for MCP server", "component", "mcp", "server", serverName, "error", err)
+			errMsg := fmt.Sprintf("Failed to create toolset: %v (Stderr: %s)", err, DiagnosticStderr(stderrBuf))
+			slog.Warn("failed to create toolset for MCP server", FailureLogAttrs(serverName, serverConfig, err, stderrBuf)...)
 			m.initResults = append(m.initResults, InitResult{
 				Name:    serverName,
 				Success: false,
@@ -144,7 +144,8 @@ func (m *Manager) InitializeSingleToolset(ctx context.Context, serverName string
 
 	transport, stderrBuf, err := createTransport(serverConfig)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create transport: %w (Stderr: %s)", err, GetStderr(stderrBuf))
+		slog.Warn("failed to create transport for MCP server", FailureLogAttrs(serverName, serverConfig, err, stderrBuf)...)
+		return nil, fmt.Errorf("failed to create transport: %w (Stderr: %s)", err, DiagnosticStderr(stderrBuf))
 	}
 
 	// Create ADK mcptoolset
@@ -152,7 +153,8 @@ func (m *Manager) InitializeSingleToolset(ctx context.Context, serverName string
 		Transport: transport,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to create toolset: %w (Stderr: %s)", err, GetStderr(stderrBuf))
+		slog.Warn("failed to create toolset for MCP server", FailureLogAttrs(serverName, serverConfig, err, stderrBuf)...)
+		return nil, fmt.Errorf("failed to create toolset: %w (Stderr: %s)", err, DiagnosticStderr(stderrBuf))
 	}
 
 	namedToolset := &NamedToolset{
@@ -210,7 +212,7 @@ func (m *Manager) InitializeSelectiveToolsets(ctx context.Context, serverNames [
 
 		transport, stderrBuf, err := createTransport(serverConfig)
 		if err != nil {
-			slog.Warn("failed to create transport for selective server", "component", "mcp", "server", serverName, "error", err, "stderr", GetStderr(stderrBuf))
+			slog.Warn("failed to create transport for selective MCP server", FailureLogAttrs(serverName, serverConfig, err, stderrBuf)...)
 			continue
 		}
 
@@ -218,7 +220,7 @@ func (m *Manager) InitializeSelectiveToolsets(ctx context.Context, serverNames [
 			Transport: transport,
 		})
 		if err != nil {
-			slog.Warn("failed to create toolset for selective server", "component", "mcp", "server", serverName, "error", err, "stderr", GetStderr(stderrBuf))
+			slog.Warn("failed to create toolset for selective MCP server", FailureLogAttrs(serverName, serverConfig, err, stderrBuf)...)
 			continue
 		}
 
@@ -226,6 +228,7 @@ func (m *Manager) InitializeSelectiveToolsets(ctx context.Context, serverNames [
 		m.namedToolsets = append(m.namedToolsets, NamedToolset{
 			Name:    serverName,
 			Toolset: toolset,
+			Stderr:  stderrBuf,
 		})
 		m.transports = append(m.transports, transport)
 		slog.Info("initialized MCP server for flow", "component", "mcp", "server", serverName)

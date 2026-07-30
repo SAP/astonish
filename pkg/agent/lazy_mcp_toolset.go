@@ -217,6 +217,7 @@ func (l *LazyMCPToolset) startOnHost(ctx context.Context) error {
 	if err != nil {
 		mgr.Cleanup()
 		l.startErr = fmt.Errorf("failed to start MCP server '%s': %w", l.serverName, err)
+		slog.Warn("lazy MCP server startup failed", mcp.FailureLogAttrs(l.serverName, l.serverCfg, l.startErr, nil)...)
 		l.started = true
 		return l.startErr
 	}
@@ -227,6 +228,7 @@ func (l *LazyMCPToolset) startOnHost(ctx context.Context) error {
 	if err != nil {
 		mgr.Cleanup()
 		l.startErr = fmt.Errorf("failed to get tools from MCP server '%s': %w", l.serverName, err)
+		slog.Warn("lazy MCP server tool listing failed", mcp.FailureLogAttrs(l.serverName, l.serverCfg, l.startErr, namedToolset.Stderr)...)
 		l.started = true
 		return l.startErr
 	}
@@ -293,11 +295,9 @@ func (l *LazyMCPToolset) startInSandbox(ctx context.Context, sessionID string) e
 	})
 	if err != nil {
 		transport.Close()
-		stderrStr := stderrBuf.String()
-		if stderrStr == "" {
-			stderrStr = "no stderr output"
-		}
-		return l.setSessionError(sessionID, fmt.Errorf("failed to create toolset for MCP server '%s' in sandbox: %w (stderr: %s)", l.serverName, err, stderrStr))
+		startErr := fmt.Errorf("failed to create toolset for MCP server '%s' in sandbox: %w (stderr: %s)", l.serverName, err, mcp.DiagnosticStderr(stderrBuf))
+		slog.Warn("sandbox MCP server startup failed", mcp.FailureLogAttrs(l.serverName, l.serverCfg, startErr, stderrBuf)...)
+		return l.setSessionError(sessionID, startErr)
 	}
 
 	// Resolve all tools from the live server
@@ -305,7 +305,9 @@ func (l *LazyMCPToolset) startInSandbox(ctx context.Context, sessionID string) e
 	liveToolList, err := toolset.Tools(minCtx)
 	if err != nil {
 		transport.Close()
-		return l.setSessionError(sessionID, fmt.Errorf("failed to get tools from MCP server '%s' in sandbox: %w", l.serverName, err))
+		toolsErr := fmt.Errorf("failed to get tools from MCP server '%s' in sandbox: %w", l.serverName, err)
+		slog.Warn("sandbox MCP server tool listing failed", mcp.FailureLogAttrs(l.serverName, l.serverCfg, toolsErr, stderrBuf)...)
+		return l.setSessionError(sessionID, toolsErr)
 	}
 
 	liveTools := make(map[string]tool.Tool, len(liveToolList))

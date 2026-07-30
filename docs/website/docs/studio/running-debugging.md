@@ -59,11 +59,13 @@ For deeper debugging, check the daemon logs:
 astonish daemon logs -f
 ```
 
-Or run the daemon in foreground mode for direct stdout output:
+Or run the daemon in foreground mode and force logs to stdout:
 
 ```bash
-astonish daemon run
+ASTONISH_LOG_DEST=stdout astonish daemon run
 ```
+
+Local/default daemon mode remains file-based unless `ASTONISH_LOG_DEST=stdout` is set. Kubernetes API and worker pods use stdout by default.
 
 ### Common Issues
 

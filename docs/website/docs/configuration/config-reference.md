@@ -101,7 +101,9 @@ storage:
 # Daemon (Studio web server)
 daemon:
   port: 9393
-  log_dir: ""                  # Default: ~/.config/astonish/logs/
+  log_dir: ""                  # Default: ~/.config/astonish/logs/ when logging to files
+  # Log destination is selected by ASTONISH_LOG_DEST=file|stdout.
+  # Default: file in local/default mode, stdout in ASTONISH_MODE=api|worker.
   auth:
     disabled: false
     session_ttl_days: 90

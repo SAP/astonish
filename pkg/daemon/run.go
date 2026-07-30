@@ -77,30 +77,18 @@ func Run(cfg RunConfig) error {
 		}
 	}
 
-	// Set up logging
-	// In api/worker modes, fall back to stdout if file logging is unavailable
-	// (stateless containers may not have a writable config directory).
-	logDir := appCfg.Daemon.GetLogDir()
-	var logger *Logger
-	if daemonMode != config.DaemonModeDefault {
-		var logErr error
-		logger, logErr = NewLogger(logDir + "/daemon.log")
-		if logErr != nil {
-			// Container mode: fall back to stdout (captured by orchestrator)
-			logger = NewStdoutLogger()
-		}
-	} else {
-		var logErr error
-		logger, logErr = NewLogger(logDir + "/daemon.log")
-		if logErr != nil {
-			return fmt.Errorf("failed to initialize logger: %w", logErr)
-		}
+	// Set up logging. Container-oriented modes log to stdout by default so
+	// Kubernetes and other orchestrators can collect logs from the standard
+	// stream. Local/default mode remains file-based for daemon logs compatibility.
+	logger, err := newLoggerForMode(daemonMode, appCfg.Daemon.GetLogDir())
+	if err != nil {
+		return fmt.Errorf("failed to initialize logger: %w", err)
 	}
 	defer logger.Close()
 
-	// Redirect standard log to file
 	log.SetOutput(logger)
-	log.SetFlags(0) // Logger adds its own timestamps
+	log.SetFlags(0) // Logger adds its own timestamps.
+	slog.SetDefault(slog.New(slog.NewTextHandler(logger, nil)))
 
 	// Back-compat for users upgrading from v2 (personal mode).
 	// "file" and empty backend are no longer supported; default to sqlite (zero-config).
@@ -1552,7 +1540,11 @@ func Run(cfg RunConfig) error {
 
 	// Print to stdout for foreground mode
 	fmt.Printf("Astonish daemon running (pid: %d, port: %d)\n", os.Getpid(), port)
-	fmt.Printf("Log: %s/daemon.log\n", logDir)
+	if logger.filePath == "" {
+		fmt.Printf("Log: stdout\n")
+	} else {
+		fmt.Printf("Log: %s\n", logger.filePath)
+	}
 
 	// Wait for signal or server error
 	select {

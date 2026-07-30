@@ -1,6 +1,7 @@
 package events
 
 import (
+	"path/filepath"
 	"strings"
 )
 
@@ -58,6 +59,8 @@ type Item struct {
 
 	// Artifact / file-diff path.
 	Path string
+	// Artifacts holds one or more generated files shown as a compact file list.
+	Artifacts []Artifact
 
 	// FileDiff fields (ItemFileDiff) — dual-gutter editor view on the main thread.
 	// DiffVerification is preferred (tool verification_context). Args hold
@@ -155,14 +158,36 @@ func (t *Transcript) Apply(ev Event) {
 	case KindAutoApproved:
 		// Soft process note — status only, no extra transcript clutter.
 		t.Status = "Auto-approved " + firstNonEmpty(ev.ToolName, "tool")
+	case KindReportMarker:
+		t.markArtifactReport(ev)
 	case KindArtifact:
-		path := ev.Text
-		if path == "" && ev.Meta != nil {
+		artifact := Artifact{}
+		if ev.Artifact != nil {
+			artifact = *ev.Artifact
+		}
+		if artifact.Path == "" {
+			artifact.Path = ev.Text
+		}
+		if artifact.Path == "" && ev.Meta != nil {
 			if p, ok := ev.Meta["path"].(string); ok {
-				path = p
+				artifact.Path = p
 			}
 		}
-		t.Items = append(t.Items, Item{Kind: ItemArtifact, Path: path, Content: path})
+		if artifact.ToolName == "" && ev.Meta != nil {
+			if tool, ok := ev.Meta["tool"].(string); ok {
+				artifact.ToolName = tool
+			}
+		}
+		if artifact.FileName == "" {
+			artifact.FileName = artifactBaseName(artifact.Path)
+		}
+		if artifact.FileType == "" {
+			artifact.FileType = artifactTypeFromPath(artifact.Path)
+		}
+		if artifact.Path == "" {
+			return
+		}
+		t.appendArtifact(artifact)
 	case KindUsage:
 		t.addUsage(ev.Usage)
 	case KindError:
@@ -365,6 +390,118 @@ move:
 	t.Items = append(t.Items[:insertAt], append([]Item{agent}, t.Items[insertAt:]...)...)
 }
 
+func (t *Transcript) markArtifactReport(ev Event) {
+	path := ev.Text
+	if path == "" && ev.Artifact != nil {
+		path = ev.Artifact.Path
+	}
+	if path == "" && ev.Meta != nil {
+		if p, ok := ev.Meta["path"].(string); ok {
+			path = p
+		}
+	}
+	if path == "" {
+		return
+	}
+	title := ""
+	if ev.Artifact != nil {
+		title = ev.Artifact.ReportTitle
+	}
+	if title == "" && ev.Meta != nil {
+		if s, ok := ev.Meta["title"].(string); ok {
+			title = s
+		}
+	}
+	for i := range t.Items {
+		if t.Items[i].Kind != ItemArtifact {
+			continue
+		}
+		changed := false
+		for j := range t.Items[i].Artifacts {
+			if filepath.Clean(t.Items[i].Artifacts[j].Path) != filepath.Clean(path) {
+				continue
+			}
+			t.Items[i].Artifacts[j].IsReport = true
+			if title != "" {
+				t.Items[i].Artifacts[j].ReportTitle = title
+			}
+			changed = true
+		}
+		if changed {
+			t.Items[i].Content = artifactListContent(t.Items[i].Artifacts)
+		}
+	}
+}
+
+func (t *Transcript) appendArtifact(artifact Artifact) {
+	if artifact.Path == "" {
+		return
+	}
+	// Consecutive artifact events in the same turn render as one file list.
+	if n := len(t.Items); n > 0 && t.Items[n-1].Kind == ItemArtifact {
+		for _, existing := range t.Items[n-1].Artifacts {
+			if existing.Path == artifact.Path {
+				return
+			}
+		}
+		t.Items[n-1].Artifacts = append(t.Items[n-1].Artifacts, artifact)
+		t.Items[n-1].Path = t.Items[n-1].Artifacts[0].Path
+		t.Items[n-1].Content = artifactListContent(t.Items[n-1].Artifacts)
+		return
+	}
+	t.Items = append(t.Items, Item{
+		Kind:      ItemArtifact,
+		Path:      artifact.Path,
+		Content:   artifactListContent([]Artifact{artifact}),
+		Artifacts: []Artifact{artifact},
+	})
+}
+
+func artifactListContent(artifacts []Artifact) string {
+	paths := make([]string, 0, len(artifacts))
+	for _, a := range artifacts {
+		if a.Path != "" {
+			paths = append(paths, a.Path)
+		}
+	}
+	return strings.Join(paths, "\n")
+}
+
+func artifactBaseName(path string) string {
+	base := filepath.Base(path)
+	if base == "." || base == string(filepath.Separator) {
+		return path
+	}
+	return base
+}
+
+func artifactTypeFromPath(path string) string {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".md", ".markdown", ".mdown", ".mkd":
+		return "Markdown"
+	case ".go":
+		return "Go"
+	case ".js", ".jsx":
+		return "JavaScript"
+	case ".ts", ".tsx":
+		return "TypeScript"
+	case ".py":
+		return "Python"
+	case ".json":
+		return "JSON"
+	case ".yaml", ".yml":
+		return "YAML"
+	case ".html", ".htm":
+		return "HTML"
+	case ".css":
+		return "CSS"
+	case ".txt", ".log":
+		return "Text"
+	default:
+		return "File"
+	}
+}
+
 func (t *Transcript) appendToolCall(ev Event) {
 	t.nextTextReplaces = true
 	step := ToolStep{
@@ -427,7 +564,7 @@ func (t *Transcript) appendToolResult(ev Event) {
 			}
 			t.Items[i].Steps = steps
 			t.Items[i].Summary = summarizeSteps(steps)
-			t.maybeAppendFileDiff(steps[j].Name, steps[j].Args, steps[j].Result)
+			t.maybeAppendFileDiff(steps[j].Name, steps[j].Args, steps[j].Result, steps[j].Status)
 			return
 		}
 	}
@@ -440,7 +577,7 @@ func (t *Transcript) appendToolResult(ev Event) {
 	if actIdx := t.lastActivityInTurn(); actIdx >= 0 {
 		t.Items[actIdx].Steps = append(t.Items[actIdx].Steps, step)
 		t.Items[actIdx].Summary = summarizeSteps(t.Items[actIdx].Steps)
-		t.maybeAppendFileDiff(step.Name, step.Args, step.Result)
+		t.maybeAppendFileDiff(step.Name, step.Args, step.Result, step.Status)
 		return
 	}
 	t.Items = append(t.Items, Item{
@@ -448,24 +585,33 @@ func (t *Transcript) appendToolResult(ev Event) {
 		Steps:   []ToolStep{step},
 		Summary: summarizeSteps([]ToolStep{step}),
 	})
-	t.maybeAppendFileDiff(step.Name, step.Args, step.Result)
+	t.maybeAppendFileDiff(step.Name, step.Args, step.Result, step.Status)
 }
 
 // maybeAppendFileDiff promotes successful edit_file/write_file results to a
-// main-thread ItemFileDiff (dual-gutter editor view). The activity fold keeps
-// the raw tool args/result; the diff is a sibling transcript item.
-func (t *Transcript) maybeAppendFileDiff(toolName string, args map[string]any, result any) {
+// main-thread ItemFileDiff (dual-gutter editor view). Failed writes/edits never
+// produce a main-thread diff — only results that include verification_context
+// (set only after a successful apply) are shown.
+func (t *Transcript) maybeAppendFileDiff(toolName string, args map[string]any, result any, status string) {
 	name := strings.ToLower(strings.TrimSpace(toolName))
 	if name != "edit_file" && name != "write_file" {
 		return
 	}
-	if isResultError(result) {
+	if status == "error" || isResultError(result) {
 		return
 	}
-	// Need something to render: verification_context and/or args.
+	// verification_context is only present after a successful disk write/edit.
+	// Do not fall back to args alone — that would show a diff for failed tools
+	// that still carry old_string/new_string/content in the call args.
 	vc := toolResultString(result, "verification_context")
-	if vc == "" && !hasFileDiffArgs(name, args) {
+	if vc == "" {
 		return
+	}
+	// edit_file also sets success=true; respect an explicit false.
+	if m, ok := result.(map[string]any); ok {
+		if v, ok := m["success"].(bool); ok && !v {
+			return
+		}
 	}
 	path := pathFromToolArgs(args)
 	if path == "" {
@@ -543,22 +689,6 @@ func toolResultString(result any, key string) string {
 	return strings.TrimSpace(s)
 }
 
-func hasFileDiffArgs(toolName string, args map[string]any) bool {
-	if args == nil {
-		return false
-	}
-	switch toolName {
-	case "edit_file":
-		oldS, _ := args["old_string"].(string)
-		newS, _ := args["new_string"].(string)
-		return oldS != "" || newS != ""
-	case "write_file":
-		c, _ := args["content"].(string)
-		return c != ""
-	default:
-		return false
-	}
-}
 
 func (t *Transcript) finalizeRunningSteps() {
 	for i := range t.Items {
@@ -634,12 +764,13 @@ func (t *Transcript) Reset() {
 
 // HistoryMsg is a finalized transcript entry loaded when resuming a session.
 type HistoryMsg struct {
-	Kind     string // user | agent | tool_call | tool_result | system | thinking
+	Kind     string // user | agent | tool_call | tool_result | system | thinking | artifact
 	Text     string
 	ToolName string
 	ToolID   string
 	Args     map[string]any
 	Result   any
+	Artifact *Artifact
 }
 
 // LoadHistory applies session history using the same sticky-agent / tool-fold
@@ -662,6 +793,8 @@ func (t *Transcript) LoadHistory(entries []HistoryMsg) {
 			t.Apply(NewToolCall(e.ToolName, e.ToolID, e.Args))
 		case "tool_result":
 			t.Apply(NewToolResult(e.ToolName, e.ToolID, e.Result))
+		case "artifact":
+			t.Apply(Event{Kind: KindArtifact, Text: e.Text, Artifact: e.Artifact})
 		}
 	}
 	t.finalizeRunningSteps()
@@ -712,12 +845,19 @@ func isResultError(result any) bool {
 		return false
 	}
 	if s, ok := result.(string); ok {
-		head := strings.ToLower(s)
+		head := strings.ToLower(strings.TrimSpace(s))
 		if len(head) > 300 {
 			head = head[:300]
 		}
-		return strings.HasPrefix(head, "error:") || strings.HasPrefix(head, "error ") ||
-			strings.Contains(head, "\nerror:")
+		// Tool errors often surface as plain Go error strings, not "Error: …".
+		return strings.HasPrefix(head, "error:") ||
+			strings.HasPrefix(head, "error ") ||
+			strings.Contains(head, "\nerror:") ||
+			strings.HasPrefix(head, "failed ") ||
+			strings.HasPrefix(head, "failed:") ||
+			strings.Contains(head, "permission denied") ||
+			strings.Contains(head, "access denied") ||
+			strings.Contains(head, "not found") && strings.Contains(head, "failed")
 	}
 	if m, ok := result.(map[string]any); ok {
 		if v, ok := m["success"].(bool); ok && !v {

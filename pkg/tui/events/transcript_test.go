@@ -43,15 +43,18 @@ func TestTranscript_ToolActivityFold(t *testing.T) {
 		"old_string": "x",
 		"new_string": "y",
 	}))
-	tr.Apply(NewToolResult("edit_file", "1", map[string]any{"success": true}))
+	tr.Apply(NewToolResult("edit_file", "1", map[string]any{
+		"success":              true,
+		"verification_context": "@@ a.go:1\n- 1| x\n+ 1| y\n",
+	}))
 	tr.Apply(NewToolCall("read_file", "2", map[string]any{"path": "a.go"}))
 	tr.Apply(NewToolResult("read_file", "2", "ok"))
 	tr.Apply(NewText("Done."))
 	tr.Apply(NewDone())
 
-	// user, activity (2 steps), agent
-	if len(tr.Items) != 3 {
-		t.Fatalf("items=%d want 3: %#v", len(tr.Items), itemKinds(tr))
+	// user, activity (2 steps), file_diff (from edit), agent
+	if len(tr.Items) != 4 {
+		t.Fatalf("items=%d want 4: %#v", len(tr.Items), itemKinds(tr))
 	}
 	act := tr.Items[1]
 	if act.Kind != ItemActivity {
@@ -62,6 +65,46 @@ func TestTranscript_ToolActivityFold(t *testing.T) {
 	}
 	if act.Steps[0].Status != "complete" || act.Steps[1].Status != "complete" {
 		t.Fatalf("step status: %+v", act.Steps)
+	}
+	diff := tr.Items[2]
+	if diff.Kind != ItemFileDiff {
+		t.Fatalf("want file_diff at [2], got %s", diff.Kind)
+	}
+	if diff.Path != "a.go" {
+		t.Fatalf("file_diff path=%q", diff.Path)
+	}
+	if diff.DiffVerification == "" {
+		t.Fatal("file_diff missing DiffVerification")
+	}
+	if tr.Items[3].Kind != ItemAgent {
+		t.Fatalf("want agent last, got %s", tr.Items[3].Kind)
+	}
+}
+
+func TestTranscript_FileDiffMainThread(t *testing.T) {
+	tr := NewTranscript()
+	tr.Apply(NewUser("patch"))
+	tr.Apply(NewToolCall("edit_file", "1", map[string]any{
+		"path":       "/root/README.md",
+		"old_string": "old",
+		"new_string": "",
+	}))
+	tr.Apply(NewToolResult("edit_file", "1", map[string]any{
+		"success":              true,
+		"path":                 "/root/README.md",
+		"verification_context": "@@ README.md:10\n- 10| old\n",
+	}))
+	tr.Apply(NewDone())
+
+	kinds := itemKinds(tr)
+	// user, activity, file_diff
+	wantPrefix := string(ItemUser) + "," + string(ItemActivity) + "," + string(ItemFileDiff)
+	if !strings.HasPrefix(kinds, wantPrefix) {
+		t.Fatalf("kinds=%q want prefix %q", kinds, wantPrefix)
+	}
+	diffCount := strings.Count(kinds, string(ItemFileDiff))
+	if diffCount != 1 {
+		t.Fatalf("file_diff count=%d want 1 in %q", diffCount, kinds)
 	}
 }
 
@@ -216,11 +259,89 @@ func TestIsResultError(t *testing.T) {
 	if !isResultError("Error: failed") {
 		t.Fatal("string error")
 	}
+	if !isResultError("failed to write to file /tmp/x: permission denied") {
+		t.Fatal("failed to write string")
+	}
 	if !isResultError(map[string]any{"success": false}) {
 		t.Fatal("success false")
 	}
 	if isResultError(map[string]any{"success": true}) {
 		t.Fatal("success true")
+	}
+}
+
+func TestTranscript_FailedWriteNoFileDiff(t *testing.T) {
+	tr := NewTranscript()
+	tr.Apply(NewUser("save it"))
+	// Failed write: error result, but args still carry the intended content.
+	tr.Apply(NewToolCall("write_file", "1", map[string]any{
+		"file_path": "/root/forbidden/out.md",
+		"content":   "# Should not appear as main-thread diff\n",
+	}))
+	tr.Apply(NewToolResult("write_file", "1",
+		"failed to write to file /root/forbidden/out.md: permission denied"))
+	// Successful write to a different path.
+	tr.Apply(NewToolCall("write_file", "2", map[string]any{
+		"file_path": "/root/ok/out.md",
+		"content":   "# real content\n",
+	}))
+	tr.Apply(NewToolResult("write_file", "2", map[string]any{
+		"message":              "Created /root/ok/out.md",
+		"path":                 "/root/ok/out.md",
+		"created":              true,
+		"verification_context": "@@ out.md:1 (created)\n+ 1| # real content\n",
+	}))
+	tr.Apply(NewDone())
+
+	diffCount := 0
+	var paths []string
+	for _, it := range tr.Items {
+		if it.Kind == ItemFileDiff {
+			diffCount++
+			paths = append(paths, it.Path)
+		}
+	}
+	if diffCount != 1 {
+		t.Fatalf("file_diff count=%d want 1 (failed write must not emit), kinds=%s paths=%v",
+			diffCount, itemKinds(tr), paths)
+	}
+	if paths[0] != "/root/ok/out.md" {
+		t.Fatalf("path=%q want successful path", paths[0])
+	}
+	// Activity step for the failure is still present with error status.
+	var act *Item
+	for i := range tr.Items {
+		if tr.Items[i].Kind == ItemActivity {
+			act = &tr.Items[i]
+			break
+		}
+	}
+	if act == nil || len(act.Steps) < 2 {
+		t.Fatalf("want activity with 2 steps, got %#v", act)
+	}
+	if act.Steps[0].Status != "error" {
+		t.Fatalf("first write status=%q want error", act.Steps[0].Status)
+	}
+}
+
+func TestTranscript_NoDiffWithoutVerificationContext(t *testing.T) {
+	tr := NewTranscript()
+	tr.Apply(NewUser("edit"))
+	// Complete-looking result but no verification_context (and no success field).
+	// Must not invent a main-thread diff from args alone.
+	tr.Apply(NewToolCall("edit_file", "1", map[string]any{
+		"path":       "a.go",
+		"old_string": "x",
+		"new_string": "y",
+	}))
+	tr.Apply(NewToolResult("edit_file", "1", map[string]any{
+		"message": "ok",
+	}))
+	tr.Apply(NewDone())
+	for _, it := range tr.Items {
+		if it.Kind == ItemFileDiff {
+			t.Fatalf("unexpected file_diff without verification_context: %#v", it)
+		}
 	}
 }
 

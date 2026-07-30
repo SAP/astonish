@@ -82,11 +82,15 @@ The terminal footer shows the active provider and the resolved concrete model wh
 
 ## Paste behavior
 
-Pasting up to three lines inserts the text directly into the composer. Pasting four or more lines keeps the composer compact by showing a placeholder like `[Pasted: 8 lines]`. The full pasted content is restored when you press `Enter`, so the conversation history and the agent both receive the complete text. The placeholder is atomic: arrow keys jump over it, you cannot type inside it, and Backspace / `Ctrl+W` / `Alt+Backspace` remove the whole block at once.
+Pasting up to three lines inserts the text directly into the composer. A paste becomes `[Pasted: N lines]` only when that paste itself has four or more lines — existing composer lines do not count, so pasting one line at a time never collapses. The full pasted content is restored when you press `Enter`. The placeholder is atomic: arrow keys jump over it, you cannot type inside it, and Backspace / `Ctrl+W` / `Alt+Backspace` remove the whole block at once.
 
 Pasting an image from the clipboard inserts `[image #1]` (then `#2`, `#3`, …). Image placeholders are also atomic tokens. When you press `Enter`, Astonish sends the images to the platform as chat attachments so multimodal models can see them, while the chat history keeps the `[image #N]` markers.
 
 On Linux, image paste requires `wl-paste` (Wayland) or `xclip` (X11) on `PATH`. On macOS, the system pasteboard is used directly.
+
+## Generated files and reports
+
+When an agent creates files, the terminal transcript shows a compact **Files generated** list. Click a file row to open it in a full-screen viewer; press `Esc` to return to the main chat thread. Markdown files and reports render with formatted headings, lists, tables, and code blocks. Other file types open as scrollable raw/code content with line numbers.
 
 ## In-Session Commands
 
@@ -98,6 +102,7 @@ While in an active chat session, type `/` to access these commands:
 | `/status` | Show this session's provider, model (including pin), context, tools, and session info |
 | `/new` | Start a fresh conversation |
 | `/sessions` | Open the session picker. Use `Enter` to resume, `d` to delete with confirmation, `n` for a new session, and `Esc` to close. |
+| `/model` | Choose provider and model. Select a provider, then a model. `(cascade default)` clears the session pin. |
 | `/compact` | Show context window usage and compaction status |
 | `/distill` | Distill the current session into a reusable flow |
 | `/fleet` | Show available fleets and fleet commands |

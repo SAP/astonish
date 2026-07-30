@@ -1,6 +1,9 @@
 package events
 
-import "strings"
+import (
+	"path/filepath"
+	"strings"
+)
 
 // ItemKind classifies a rendered transcript item.
 type ItemKind string
@@ -10,6 +13,7 @@ const (
 	ItemAgent         ItemKind = "agent"
 	ItemThinking      ItemKind = "thinking"
 	ItemActivity      ItemKind = "activity"
+	ItemFileDiff      ItemKind = "file_diff" // main-thread editor-style file change
 	ItemSystem        ItemKind = "system"
 	ItemError         ItemKind = "error"
 	ItemApproval      ItemKind = "approval"
@@ -53,8 +57,16 @@ type Item struct {
 	SandboxName    string
 	SessionID      string
 
-	// Artifact path.
+	// Artifact / file-diff path.
 	Path string
+	// Artifacts holds one or more generated files shown as a compact file list.
+	Artifacts []Artifact
+
+	// FileDiff fields (ItemFileDiff) — dual-gutter editor view on the main thread.
+	// DiffVerification is preferred (tool verification_context). Args hold
+	// old_string/new_string/content for fallback while streaming or if context is empty.
+	DiffVerification string
+	// ToolName identifies edit_file vs write_file for fallback rendering.
 }
 
 // Transcript is the reduced UI state built from a stream of Events.
@@ -146,14 +158,36 @@ func (t *Transcript) Apply(ev Event) {
 	case KindAutoApproved:
 		// Soft process note — status only, no extra transcript clutter.
 		t.Status = "Auto-approved " + firstNonEmpty(ev.ToolName, "tool")
+	case KindReportMarker:
+		t.markArtifactReport(ev)
 	case KindArtifact:
-		path := ev.Text
-		if path == "" && ev.Meta != nil {
+		artifact := Artifact{}
+		if ev.Artifact != nil {
+			artifact = *ev.Artifact
+		}
+		if artifact.Path == "" {
+			artifact.Path = ev.Text
+		}
+		if artifact.Path == "" && ev.Meta != nil {
 			if p, ok := ev.Meta["path"].(string); ok {
-				path = p
+				artifact.Path = p
 			}
 		}
-		t.Items = append(t.Items, Item{Kind: ItemArtifact, Path: path, Content: path})
+		if artifact.ToolName == "" && ev.Meta != nil {
+			if tool, ok := ev.Meta["tool"].(string); ok {
+				artifact.ToolName = tool
+			}
+		}
+		if artifact.FileName == "" {
+			artifact.FileName = artifactBaseName(artifact.Path)
+		}
+		if artifact.FileType == "" {
+			artifact.FileType = artifactTypeFromPath(artifact.Path)
+		}
+		if artifact.Path == "" {
+			return
+		}
+		t.appendArtifact(artifact)
 	case KindUsage:
 		t.addUsage(ev.Usage)
 	case KindError:
@@ -215,6 +249,7 @@ func (t *Transcript) addUsage(usage *Usage) {
 
 // turnStart returns the index of the first item in the current soft run
 // (after the last hard-break item). Hard breaks: user, error, approval, network denial, artifact, system.
+// File diffs stay inside the soft turn (do not hard-break).
 func (t *Transcript) turnStart() int {
 	for i := len(t.Items) - 1; i >= 0; i-- {
 		switch t.Items[i].Kind {
@@ -303,30 +338,168 @@ func (t *Transcript) appendAgentText(text string) {
 	t.ensureAgentAfterActivity()
 }
 
-// ensureAgentAfterActivity keeps layout: … → activity → sticky agent (Studio order).
+// ensureAgentAfterActivity keeps layout: … → activity → file_diff(s) → sticky agent.
 func (t *Transcript) ensureAgentAfterActivity() {
 	agentIdx := t.lastAgentInTurn()
 	actIdx := t.lastActivityInTurn()
 	if agentIdx < 0 || actIdx < 0 {
 		return
 	}
-	if agentIdx > actIdx {
-		return // already after activity
-	}
-	// Move agent to end of turn (after activity).
-	agent := t.Items[agentIdx]
-	// Remove agentIdx
-	t.Items = append(t.Items[:agentIdx], t.Items[agentIdx+1:]...)
-	// actIdx may have shifted if agent was before it
-	if agentIdx < actIdx {
-		actIdx--
-	}
-	// Insert after activity
+	// Target: immediately after the last file_diff in the turn, else after activity.
 	insertAt := actIdx + 1
+	start := t.turnStart()
+	for i := start; i < len(t.Items); i++ {
+		if t.Items[i].Kind == ItemFileDiff {
+			insertAt = i + 1
+		}
+	}
+	if agentIdx >= insertAt {
+		// Agent is already after activity / file diffs (or is the insert point).
+		// If agentIdx == insertAt-1 only when insertAt points past agent wrongly —
+		// require agent strictly after the last non-agent tool surface.
+		if agentIdx > actIdx {
+			// Still may sit between activity and a later file_diff; fix if any
+			// file_diff is after the agent.
+			for i := agentIdx + 1; i < len(t.Items); i++ {
+				if t.Items[i].Kind == ItemFileDiff || t.Items[i].Kind == ItemActivity {
+					goto move
+				}
+			}
+			return
+		}
+	}
+move:
+	// Move agent after activity and any file diffs.
+	agent := t.Items[agentIdx]
+	t.Items = append(t.Items[:agentIdx], t.Items[agentIdx+1:]...)
+	// Recompute insert after removal.
+	insertAt = 0
+	actIdx = t.lastActivityInTurn()
+	if actIdx >= 0 {
+		insertAt = actIdx + 1
+	}
+	start = t.turnStart()
+	for i := start; i < len(t.Items); i++ {
+		if t.Items[i].Kind == ItemFileDiff {
+			insertAt = i + 1
+		}
+	}
 	if insertAt > len(t.Items) {
 		insertAt = len(t.Items)
 	}
 	t.Items = append(t.Items[:insertAt], append([]Item{agent}, t.Items[insertAt:]...)...)
+}
+
+func (t *Transcript) markArtifactReport(ev Event) {
+	path := ev.Text
+	if path == "" && ev.Artifact != nil {
+		path = ev.Artifact.Path
+	}
+	if path == "" && ev.Meta != nil {
+		if p, ok := ev.Meta["path"].(string); ok {
+			path = p
+		}
+	}
+	if path == "" {
+		return
+	}
+	title := ""
+	if ev.Artifact != nil {
+		title = ev.Artifact.ReportTitle
+	}
+	if title == "" && ev.Meta != nil {
+		if s, ok := ev.Meta["title"].(string); ok {
+			title = s
+		}
+	}
+	for i := range t.Items {
+		if t.Items[i].Kind != ItemArtifact {
+			continue
+		}
+		changed := false
+		for j := range t.Items[i].Artifacts {
+			if filepath.Clean(t.Items[i].Artifacts[j].Path) != filepath.Clean(path) {
+				continue
+			}
+			t.Items[i].Artifacts[j].IsReport = true
+			if title != "" {
+				t.Items[i].Artifacts[j].ReportTitle = title
+			}
+			changed = true
+		}
+		if changed {
+			t.Items[i].Content = artifactListContent(t.Items[i].Artifacts)
+		}
+	}
+}
+
+func (t *Transcript) appendArtifact(artifact Artifact) {
+	if artifact.Path == "" {
+		return
+	}
+	// Consecutive artifact events in the same turn render as one file list.
+	if n := len(t.Items); n > 0 && t.Items[n-1].Kind == ItemArtifact {
+		for _, existing := range t.Items[n-1].Artifacts {
+			if existing.Path == artifact.Path {
+				return
+			}
+		}
+		t.Items[n-1].Artifacts = append(t.Items[n-1].Artifacts, artifact)
+		t.Items[n-1].Path = t.Items[n-1].Artifacts[0].Path
+		t.Items[n-1].Content = artifactListContent(t.Items[n-1].Artifacts)
+		return
+	}
+	t.Items = append(t.Items, Item{
+		Kind:      ItemArtifact,
+		Path:      artifact.Path,
+		Content:   artifactListContent([]Artifact{artifact}),
+		Artifacts: []Artifact{artifact},
+	})
+}
+
+func artifactListContent(artifacts []Artifact) string {
+	paths := make([]string, 0, len(artifacts))
+	for _, a := range artifacts {
+		if a.Path != "" {
+			paths = append(paths, a.Path)
+		}
+	}
+	return strings.Join(paths, "\n")
+}
+
+func artifactBaseName(path string) string {
+	base := filepath.Base(path)
+	if base == "." || base == string(filepath.Separator) {
+		return path
+	}
+	return base
+}
+
+func artifactTypeFromPath(path string) string {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".md", ".markdown", ".mdown", ".mkd":
+		return "Markdown"
+	case ".go":
+		return "Go"
+	case ".js", ".jsx":
+		return "JavaScript"
+	case ".ts", ".tsx":
+		return "TypeScript"
+	case ".py":
+		return "Python"
+	case ".json":
+		return "JSON"
+	case ".yaml", ".yml":
+		return "YAML"
+	case ".html", ".htm":
+		return "HTML"
+	case ".css":
+		return "CSS"
+	case ".txt", ".log":
+		return "Text"
+	default:
+		return "File"
+	}
 }
 
 func (t *Transcript) appendToolCall(ev Event) {
@@ -391,6 +564,7 @@ func (t *Transcript) appendToolResult(ev Event) {
 			}
 			t.Items[i].Steps = steps
 			t.Items[i].Summary = summarizeSteps(steps)
+			t.maybeAppendFileDiff(steps[j].Name, steps[j].Args, steps[j].Result, steps[j].Status)
 			return
 		}
 	}
@@ -399,10 +573,11 @@ func (t *Transcript) appendToolResult(ev Event) {
 	if isResultError(ev.Result) {
 		status = "error"
 	}
-	step := ToolStep{Name: ev.ToolName, ID: ev.ToolID, Result: ev.Result, Status: status}
+	step := ToolStep{Name: ev.ToolName, ID: ev.ToolID, Args: ev.Args, Result: ev.Result, Status: status}
 	if actIdx := t.lastActivityInTurn(); actIdx >= 0 {
 		t.Items[actIdx].Steps = append(t.Items[actIdx].Steps, step)
 		t.Items[actIdx].Summary = summarizeSteps(t.Items[actIdx].Steps)
+		t.maybeAppendFileDiff(step.Name, step.Args, step.Result, step.Status)
 		return
 	}
 	t.Items = append(t.Items, Item{
@@ -410,7 +585,110 @@ func (t *Transcript) appendToolResult(ev Event) {
 		Steps:   []ToolStep{step},
 		Summary: summarizeSteps([]ToolStep{step}),
 	})
+	t.maybeAppendFileDiff(step.Name, step.Args, step.Result, step.Status)
 }
+
+// maybeAppendFileDiff promotes successful edit_file/write_file results to a
+// main-thread ItemFileDiff (dual-gutter editor view). Failed writes/edits never
+// produce a main-thread diff — only results that include verification_context
+// (set only after a successful apply) are shown.
+func (t *Transcript) maybeAppendFileDiff(toolName string, args map[string]any, result any, status string) {
+	name := strings.ToLower(strings.TrimSpace(toolName))
+	if name != "edit_file" && name != "write_file" {
+		return
+	}
+	if status == "error" || isResultError(result) {
+		return
+	}
+	// verification_context is only present after a successful disk write/edit.
+	// Do not fall back to args alone — that would show a diff for failed tools
+	// that still carry old_string/new_string/content in the call args.
+	vc := toolResultString(result, "verification_context")
+	if vc == "" {
+		return
+	}
+	// edit_file also sets success=true; respect an explicit false.
+	if m, ok := result.(map[string]any); ok {
+		if v, ok := m["success"].(bool); ok && !v {
+			return
+		}
+	}
+	path := pathFromToolArgs(args)
+	if path == "" {
+		path = toolResultString(result, "path")
+	}
+	item := Item{
+		Kind:             ItemFileDiff,
+		Path:             path,
+		ToolName:         name,
+		Args:             args,
+		DiffVerification: vc,
+	}
+	// Insert after the last file_diff in the turn, else after activity, else before agent.
+	insertAt := t.fileDiffInsertIndex()
+	if insertAt >= len(t.Items) {
+		t.Items = append(t.Items, item)
+		return
+	}
+	t.Items = append(t.Items[:insertAt], append([]Item{item}, t.Items[insertAt:]...)...)
+}
+
+// fileDiffInsertIndex returns where a new ItemFileDiff should land: after the
+// last file_diff in the turn, otherwise after the turn activity, otherwise at end
+// (but before a trailing sticky agent when present).
+func (t *Transcript) fileDiffInsertIndex() int {
+	start := t.turnStart()
+	lastDiff := -1
+	actIdx := -1
+	agentIdx := -1
+	for i := start; i < len(t.Items); i++ {
+		switch t.Items[i].Kind {
+		case ItemFileDiff:
+			lastDiff = i
+		case ItemActivity:
+			actIdx = i
+		case ItemAgent:
+			agentIdx = i
+		}
+	}
+	if lastDiff >= 0 {
+		return lastDiff + 1
+	}
+	if actIdx >= 0 {
+		// Place after activity; if agent immediately follows, still after activity
+		// (agent shifts right).
+		return actIdx + 1
+	}
+	if agentIdx >= 0 {
+		return agentIdx // insert before agent
+	}
+	return len(t.Items)
+}
+
+func pathFromToolArgs(args map[string]any) string {
+	if args == nil {
+		return ""
+	}
+	for _, k := range []string{"path", "file_path"} {
+		if v, ok := args[k].(string); ok && strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func toolResultString(result any, key string) string {
+	if result == nil {
+		return ""
+	}
+	m, ok := result.(map[string]any)
+	if !ok {
+		return ""
+	}
+	s, _ := m[key].(string)
+	return strings.TrimSpace(s)
+}
+
 
 func (t *Transcript) finalizeRunningSteps() {
 	for i := range t.Items {
@@ -486,12 +764,13 @@ func (t *Transcript) Reset() {
 
 // HistoryMsg is a finalized transcript entry loaded when resuming a session.
 type HistoryMsg struct {
-	Kind     string // user | agent | tool_call | tool_result | system | thinking
+	Kind     string // user | agent | tool_call | tool_result | system | thinking | artifact
 	Text     string
 	ToolName string
 	ToolID   string
 	Args     map[string]any
 	Result   any
+	Artifact *Artifact
 }
 
 // LoadHistory applies session history using the same sticky-agent / tool-fold
@@ -514,6 +793,8 @@ func (t *Transcript) LoadHistory(entries []HistoryMsg) {
 			t.Apply(NewToolCall(e.ToolName, e.ToolID, e.Args))
 		case "tool_result":
 			t.Apply(NewToolResult(e.ToolName, e.ToolID, e.Result))
+		case "artifact":
+			t.Apply(Event{Kind: KindArtifact, Text: e.Text, Artifact: e.Artifact})
 		}
 	}
 	t.finalizeRunningSteps()
@@ -564,12 +845,19 @@ func isResultError(result any) bool {
 		return false
 	}
 	if s, ok := result.(string); ok {
-		head := strings.ToLower(s)
+		head := strings.ToLower(strings.TrimSpace(s))
 		if len(head) > 300 {
 			head = head[:300]
 		}
-		return strings.HasPrefix(head, "error:") || strings.HasPrefix(head, "error ") ||
-			strings.Contains(head, "\nerror:")
+		// Tool errors often surface as plain Go error strings, not "Error: …".
+		return strings.HasPrefix(head, "error:") ||
+			strings.HasPrefix(head, "error ") ||
+			strings.Contains(head, "\nerror:") ||
+			strings.HasPrefix(head, "failed ") ||
+			strings.HasPrefix(head, "failed:") ||
+			strings.Contains(head, "permission denied") ||
+			strings.Contains(head, "access denied") ||
+			strings.Contains(head, "not found") && strings.Contains(head, "failed")
 	}
 	if m, ok := result.(map[string]any); ok {
 		if v, ok := m["success"].(bool); ok && !v {

@@ -3,6 +3,7 @@ package tools
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -80,8 +81,10 @@ func EditFile(ctx tool.Context, args EditFileArgs) (EditFileResult, error) {
 		return EditFileResult{}, fmt.Errorf("failed to write file: %w", err)
 	}
 
-	// Build verification context: ±10 lines around the edit point
-	verificationCtx := buildVerificationContext(newContent, args.OldString, args.NewString, args.ReplaceAll)
+	// Build a unified-style hunk around the first edit site (pre-edit location).
+	verificationCtx, editLine := buildVerificationContext(
+		args.Path, content, newContent, args.OldString, args.NewString, args.Regex,
+	)
 
 	// Invalidate cache entries for this path
 	if cache != nil {
@@ -110,6 +113,9 @@ func EditFile(ctx tool.Context, args EditFileArgs) (EditFileResult, error) {
 	}
 
 	msg := fmt.Sprintf("Replaced %d occurrence(s) in %s", replacements, args.Path)
+	if editLine > 0 {
+		msg = fmt.Sprintf("Replaced %d occurrence(s) in %s (line %d)", replacements, args.Path, editLine)
+	}
 	return EditFileResult{
 		Success:             true,
 		Path:                args.Path,
@@ -119,80 +125,238 @@ func EditFile(ctx tool.Context, args EditFileArgs) (EditFileResult, error) {
 	}, nil
 }
 
-// buildVerificationContext extracts ±10 lines around the edit point with line numbers.
-func buildVerificationContext(newContent, oldString, newString string, replaceAll bool) string {
-	// For deletions (empty newString), find where the old content was (use surrounding context)
-	searchStr := newString
-	if searchStr == "" {
-		// For deletions, we need to find the context around where old_string was removed.
-		// Find a line that would be adjacent to the deletion point.
-		// Use the content before oldString would have been to locate the edit region.
-		// Approximate: search for lines adjacent to where old content existed.
-		// Since old_string is gone, use a heuristic: find the first line in newContent
-		// that differs from what would exist with old_string inserted back.
-		// Simpler approach: just show the first 20 lines of the file as context.
-		searchStr = ""
+// buildVerificationContext builds a compact unified-style hunk around the first
+// replacement site. Location is always derived from the pre-edit file so
+// deletions (empty newString) and short replacements that also appear earlier
+// in the file still point at the correct region.
+//
+// Returns the hunk text and the 1-based start line of the edit (0 if unknown).
+func buildVerificationContext(path, oldContent, newContent, oldString, newString string, isRegex bool) (string, int) {
+	matchStart, removedText, addedText, ok := locateFirstEdit(oldContent, oldString, newString, isRegex)
+	if !ok {
+		return "", 0
 	}
 
-	lines := strings.Split(newContent, "\n")
-	totalLines := len(lines)
-	if totalLines > 0 && lines[totalLines-1] == "" {
-		totalLines--
-		lines = lines[:totalLines]
+	oldLines := splitFileLines(oldContent)
+	newLines := splitFileLines(newContent)
+	removedLines := splitMatchLines(removedText)
+	addedLines := splitMatchLines(addedText)
+
+	// 0-based line index of the first character of the match.
+	startLine0 := 0
+	if matchStart > 0 {
+		startLine0 = strings.Count(oldContent[:matchStart], "\n")
+	}
+	startLine1 := startLine0 + 1 // 1-based for display / header
+
+	const contextRadius = 3
+	const maxBodyLines = 30
+
+	beforeStart := startLine0 - contextRadius
+	if beforeStart < 0 {
+		beforeStart = 0
+	}
+	// After-context in the new file begins just past the inserted lines.
+	afterStartNew := startLine0 + len(addedLines)
+	afterEndNew := afterStartNew + contextRadius
+	if afterEndNew > len(newLines) {
+		afterEndNew = len(newLines)
 	}
 
-	// Find the line where the edit landed
-	editLine := 0
-	if searchStr != "" {
-		// Find byte offset of newString in newContent
-		idx := strings.Index(newContent, searchStr)
-		if idx >= 0 {
-			// Count newlines before this position to get line number
-			editLine = strings.Count(newContent[:idx], "\n")
+	// Budget: prefer showing the change itself; trim context if needed.
+	changeLines := len(removedLines) + len(addedLines)
+	beforeBudget := contextRadius
+	afterBudget := contextRadius
+	if changeLines+beforeBudget+afterBudget > maxBodyLines {
+		// Give leftover to context evenly; always keep the change when possible.
+		remaining := maxBodyLines - changeLines
+		if remaining < 0 {
+			// Extremely large replacement: truncate change blocks below.
+			beforeBudget = 0
+			afterBudget = 0
+		} else {
+			beforeBudget = remaining / 2
+			afterBudget = remaining - beforeBudget
 		}
-	} else {
-		// Deletion: find approximate location by looking for where old_string would have been
-		// Use the byte position approach: find the first difference between old and new content
-		// Since we don't have the old content here, just center on the middle of the file
-		// Actually, for deletions we can search for surrounding context of old_string
-		// Simple heuristic: use line 0 (show first 20 lines)
-		editLine = 0
+	}
+	if startLine0-beforeStart > beforeBudget {
+		beforeStart = startLine0 - beforeBudget
+	}
+	if afterEndNew-afterStartNew > afterBudget {
+		afterEndNew = afterStartNew + afterBudget
 	}
 
-	// Extract window: ±10 lines around editLine, capped at 30 total
-	const contextRadius = 10
-	const maxContextLines = 30
-	startLine := editLine - contextRadius
-	if startLine < 0 {
-		startLine = 0
-	}
-	endLine := editLine + contextRadius + 1
-	if searchStr != "" {
-		// Account for multi-line replacements
-		newStringLines := strings.Count(searchStr, "\n") + 1
-		endLine = editLine + newStringLines + contextRadius
-	}
-	if endLine > totalLines {
-		endLine = totalLines
-	}
-	if endLine-startLine > maxContextLines {
-		endLine = startLine + maxContextLines
-	}
-
-	if startLine >= totalLines {
-		return ""
+	name := filepath.Base(path)
+	if name == "" || name == "." {
+		name = path
 	}
 
 	var sb strings.Builder
-	for i := startLine; i < endLine; i++ {
-		if i > startLine {
-			sb.WriteByte('\n')
-		}
-		sb.WriteString(strconv.Itoa(i + 1)) // 1-indexed
-		sb.WriteString(": ")
-		sb.WriteString(lines[i])
+	sb.WriteString("@@ ")
+	sb.WriteString(name)
+	sb.WriteByte(':')
+	sb.WriteString(strconv.Itoa(startLine1))
+	sb.WriteByte('\n')
+
+	// Context before (old line numbers; unchanged lines share the same numbers).
+	for i := beforeStart; i < startLine0 && i < len(oldLines); i++ {
+		writeHunkLine(&sb, ' ', i+1, oldLines[i])
 	}
-	return sb.String()
+
+	// Removed lines (old numbering).
+	removedShown := removedLines
+	addedShown := addedLines
+	if changeLines > maxBodyLines {
+		// Truncate large removals/additions while keeping a balanced sample.
+		maxEach := maxBodyLines / 2
+		if maxEach < 1 {
+			maxEach = 1
+		}
+		if len(removedShown) > maxEach {
+			removedShown = append(append([]string{}, removedShown[:maxEach]...), "…")
+		}
+		if len(addedShown) > maxEach {
+			addedShown = append(append([]string{}, addedShown[:maxEach]...), "…")
+		}
+	}
+	for i, line := range removedShown {
+		if line == "…" {
+			sb.WriteString("  …\n")
+			continue
+		}
+		writeHunkLine(&sb, '-', startLine1+i, line)
+	}
+
+	// Added lines (new numbering starts at the same line).
+	for i, line := range addedShown {
+		if line == "…" {
+			sb.WriteString("  …\n")
+			continue
+		}
+		writeHunkLine(&sb, '+', startLine1+i, line)
+	}
+
+	// Context after (new line numbers post-edit).
+	for i := afterStartNew; i < afterEndNew; i++ {
+		writeHunkLine(&sb, ' ', i+1, newLines[i])
+	}
+
+	return strings.TrimRight(sb.String(), "\n"), startLine1
+}
+
+// locateFirstEdit finds the first replacement site in oldContent and returns
+// the byte offset, the removed text, and the text that replaces it.
+func locateFirstEdit(oldContent, oldString, newString string, isRegex bool) (matchStart int, removed, added string, ok bool) {
+	if isRegex {
+		re, err := regexp.Compile(oldString)
+		if err != nil {
+			return 0, "", "", false
+		}
+		loc := re.FindStringIndex(oldContent)
+		if loc == nil {
+			return 0, "", "", false
+		}
+		matched := oldContent[loc[0]:loc[1]]
+		return loc[0], matched, re.ReplaceAllString(matched, newString), true
+	}
+	idx := strings.Index(oldContent, oldString)
+	if idx < 0 {
+		return 0, "", "", false
+	}
+	return idx, oldString, newString, true
+}
+
+func splitFileLines(content string) []string {
+	if content == "" {
+		return nil
+	}
+	lines := strings.Split(content, "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return lines
+}
+
+// splitMatchLines splits a match/replacement fragment into display lines.
+// An empty string means no lines (pure insertion or pure deletion).
+func splitMatchLines(s string) []string {
+	if s == "" {
+		return nil
+	}
+	lines := strings.Split(s, "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return lines
+}
+
+func writeHunkLine(sb *strings.Builder, marker rune, lineNum int, text string) {
+	sb.WriteRune(marker)
+	sb.WriteByte(' ')
+	sb.WriteString(strconv.Itoa(lineNum))
+	sb.WriteString("| ")
+	sb.WriteString(text)
+	sb.WriteByte('\n')
+}
+
+const verificationMaxBodyLines = 30
+
+// buildWriteVerificationContext builds a compact unified-style hunk for write_file.
+// Create: all '+' lines. Overwrite: '-' old lines then '+' new lines (both capped).
+func buildWriteVerificationContext(path, oldContent, newContent string, existed bool) string {
+	name := filepath.Base(path)
+	if name == "" || name == "." {
+		name = path
+	}
+	oldLines := splitFileLines(oldContent)
+	newLines := splitFileLines(newContent)
+
+	var sb strings.Builder
+	if !existed || len(oldLines) == 0 {
+		sb.WriteString("@@ ")
+		sb.WriteString(name)
+		sb.WriteString(":1 (created)\n")
+		writeTruncatedHunkLines(&sb, '+', newLines, verificationMaxBodyLines)
+		return strings.TrimRight(sb.String(), "\n")
+	}
+
+	sb.WriteString("@@ ")
+	sb.WriteString(name)
+	sb.WriteString(":1 (overwritten, ")
+	sb.WriteString(strconv.Itoa(len(oldLines)))
+	sb.WriteString("→")
+	sb.WriteString(strconv.Itoa(len(newLines)))
+	sb.WriteString(" lines)\n")
+
+	// Split budget evenly between removals and additions.
+	maxEach := verificationMaxBodyLines / 2
+	if maxEach < 1 {
+		maxEach = 1
+	}
+	writeTruncatedHunkLines(&sb, '-', oldLines, maxEach)
+	writeTruncatedHunkLines(&sb, '+', newLines, maxEach)
+	return strings.TrimRight(sb.String(), "\n")
+}
+
+// writeTruncatedHunkLines emits marker lines with 1-based numbering, appending
+// a "…" row when lines exceeds maxLines.
+func writeTruncatedHunkLines(sb *strings.Builder, marker rune, lines []string, maxLines int) {
+	if maxLines < 1 {
+		maxLines = 1
+	}
+	n := len(lines)
+	show := n
+	truncated := false
+	if show > maxLines {
+		show = maxLines
+		truncated = true
+	}
+	for i := 0; i < show; i++ {
+		writeHunkLine(sb, marker, i+1, lines[i])
+	}
+	if truncated {
+		sb.WriteString("  …\n")
+	}
 }
 
 // editFileExact performs exact string matching and replacement.

@@ -55,11 +55,17 @@ func ActivitySummary(steps []ToolStep, streaming bool) string {
 }
 
 // StatsFromSteps computes +added/−removed for edit tools, else a badge count.
+// Prefers counting from verification_context in the tool result when present.
 func StatsFromSteps(steps []ToolStep) ActivityStats {
 	added, removed := 0, 0
 	for _, s := range steps {
 		name := strings.ToLower(s.Name)
 		if name != "write_file" && name != "edit_file" {
+			continue
+		}
+		if a, r, ok := statsFromVerification(s.Result); ok {
+			added += a
+			removed += r
 			continue
 		}
 		if s.Args == nil {
@@ -83,6 +89,29 @@ func StatsFromSteps(steps []ToolStep) ActivityStats {
 		n = 1
 	}
 	return ActivityStats{Kind: "badge", Count: n}
+}
+
+// statsFromVerification counts +/− body lines in a verification_context string.
+func statsFromVerification(result any) (added, removed int, ok bool) {
+	vc := extractVerificationContext(result)
+	if vc == "" {
+		return 0, 0, false
+	}
+	for _, line := range strings.Split(vc, "\n") {
+		m := verificationLineRe.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		switch m[1] {
+		case "+":
+			added++
+			ok = true
+		case "-":
+			removed++
+			ok = true
+		}
+	}
+	return added, removed, ok
 }
 
 // FormatStats renders +N −M or a count badge using styles.
@@ -260,7 +289,21 @@ func ToolDetailBody(s ToolStep, width int) string {
 	return ""
 }
 
-// ToolResultPreview returns a wrapped result preview for expanded non-diff tools.
+// ToolArgsPreview returns a compact JSON/text view of the tool request args.
+func ToolArgsPreview(s ToolStep, width int) string {
+	if s.Args == nil || len(s.Args) == 0 {
+		return ""
+	}
+	text := compactJSON(s.Args)
+	if strings.TrimSpace(text) == "" {
+		return ""
+	}
+	return wrapMultiline(text, 12, width)
+}
+
+// ToolResultPreview returns a wrapped result preview for expanded tool details
+// (raw response). File diffs are rendered as main-thread ItemFileDiff items;
+// for edit/write we show structured result fields without verification_context.
 func ToolResultPreview(s ToolStep, width int) string {
 	if s.Result == nil || s.Status == "running" {
 		return ""
@@ -270,11 +313,46 @@ func ToolResultPreview(s ToolStep, width int) string {
 			return wrapMultiline(msg, 8, width)
 		}
 	}
-	text := resultText(s.Result)
+	var text string
+	switch strings.ToLower(s.Name) {
+	case "edit_file", "write_file":
+		text = compactJSON(stripVerificationContext(s.Result))
+	default:
+		text = resultText(s.Result)
+	}
 	if strings.TrimSpace(text) == "" {
 		return ""
 	}
 	return wrapMultiline(text, 8, width)
+}
+
+func compactJSON(v any) string {
+	if v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return strings.TrimSpace(s)
+	}
+	b, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return fmt.Sprint(v)
+	}
+	return string(b)
+}
+
+func stripVerificationContext(result any) any {
+	m, ok := result.(map[string]any)
+	if !ok {
+		return result
+	}
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		if k == "verification_context" {
+			continue
+		}
+		out[k] = v
+	}
+	return out
 }
 
 // ToolDisplayName maps low-level tool names to short labels for terminal UI.

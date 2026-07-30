@@ -40,13 +40,14 @@ type SessionSummary struct {
 
 // HistoryEntry is one message loaded when resuming a session.
 type HistoryEntry struct {
-	// Kind: user | agent | tool_call | tool_result | system | thinking
+	// Kind: user | agent | tool_call | tool_result | system | thinking | artifact
 	Kind     string
 	Text     string
 	ToolName string
 	ToolID   string
 	Args     map[string]any
 	Result   any
+	Artifact *events.Artifact
 }
 
 // Attachment is a file/image payload to send with a chat turn.
@@ -55,6 +56,12 @@ type Attachment struct {
 	MimeType string
 	// Data is raw file bytes (not base64).
 	Data []byte
+}
+
+// ArtifactContent is file content loaded for the terminal artifact viewer.
+type ArtifactContent struct {
+	Path    string
+	Content string
 }
 
 // TurnOptions configures per-turn behavior for the platform request.
@@ -110,6 +117,20 @@ type Backend interface {
 
 	// NewSession clears the active session so the next RunTurn creates a new one.
 	NewSession()
+
+	// ListProviders returns configured provider instance names for model selection.
+	ListProviders(ctx context.Context) ([]string, error)
+
+	// ListModels returns model IDs available for a provider instance.
+	ListModels(ctx context.Context, provider string) ([]string, error)
+
+	// SetModelPin pins provider/model on the active session (or stores a pending
+	// pin for the next new session). Empty provider and model clear the pin.
+	// Returns the effective provider/model after the change.
+	SetModelPin(ctx context.Context, provider, model string) (effectiveProvider, effectiveModel string, err error)
+
+	// ReadArtifactContent loads generated file content for the artifact viewer.
+	ReadArtifactContent(ctx context.Context, sessionID, path string) (ArtifactContent, error)
 
 	// Close releases resources (sandbox cleanup, HTTP clients, etc.).
 	Close() error

@@ -256,7 +256,10 @@ type WriteFileArgs struct {
 }
 
 type WriteFileResult struct {
-	Message string `json:"message"`
+	Message             string `json:"message"`
+	Path                string `json:"path,omitempty"`
+	Created             bool   `json:"created,omitempty"`
+	VerificationContext string `json:"verification_context,omitempty"`
 }
 
 // tryExtractStdout attempts to extract content from an 'stdout' key if the input
@@ -301,6 +304,17 @@ func WriteFile(ctx tool.Context, args WriteFileArgs) (WriteFileResult, error) {
 		finalContent = args.Content
 	}
 
+	// Capture pre-write content so overwrite can return a unified-style hunk.
+	var oldContent string
+	existed := false
+	if data, err := os.ReadFile(args.FilePath); err == nil {
+		existed = true
+		oldContent = string(data)
+	} else if !os.IsNotExist(err) {
+		// Permission or other read errors: still allow write, but treat as create for the hunk.
+		existed = false
+	}
+
 	// Ensure parent directories exist
 	if dir := filepath.Dir(args.FilePath); dir != "" {
 		if err := os.MkdirAll(dir, 0755); err != nil {
@@ -339,7 +353,18 @@ func WriteFile(ctx tool.Context, args WriteFileArgs) (WriteFileResult, error) {
 		codeintel.Invalidate(root)
 	}
 
-	return WriteFileResult{Message: fmt.Sprintf("Content successfully written to %s", args.FilePath)}, nil
+	created := !existed
+	verificationCtx := buildWriteVerificationContext(args.FilePath, oldContent, finalContent, existed)
+	msg := fmt.Sprintf("Overwrote %s", args.FilePath)
+	if created {
+		msg = fmt.Sprintf("Created %s", args.FilePath)
+	}
+	return WriteFileResult{
+		Message:             msg,
+		Path:                args.FilePath,
+		Created:             created,
+		VerificationContext: verificationCtx,
+	}, nil
 }
 
 type ShellCommandArgs struct {

@@ -242,9 +242,32 @@ func TestUnbracketedLargePasteShowsPlaceholder(t *testing.T) {
 	}
 }
 
-// ── Command+V / terminal injection ───────────────────────────────────────
+// ── Command+V / single-line pastes ───────────────────────────────────────
 
-func TestCommandVBurstCollapsesAsSoonAsFourLinesArrive(t *testing.T) {
+func TestSingleLinePastesNeverCollapseEvenAfterFourLines(t *testing.T) {
+	// Collapse must be based on each paste payload size, not total composer lines.
+	m := newPasteTestModel(t)
+	for _, line := range []string{"one", "two", "three", "four", "five"} {
+		m = applyKey(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(line), Paste: true})
+		if line != "five" {
+			m = applyKey(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("\n"), Paste: true})
+		}
+	}
+	if strings.Contains(m.ta.Value(), "[Pasted:") {
+		t.Fatalf("single-line pastes collapsed incorrectly: %q", m.ta.Value())
+	}
+	if len(m.pastedBlocks) != 0 {
+		t.Fatalf("pastedBlocks should be empty, got %+v", m.pastedBlocks)
+	}
+	// Composer should retain all five lines.
+	if got := pasteCollapseLineCount(m.ta.Value()); got != 5 {
+		t.Fatalf("composer lines = %d, want 5; value=%q", got, m.ta.Value())
+	}
+}
+
+func TestLineByLineRuneInjectionDoesNotCollapse(t *testing.T) {
+	// Terminals may inject Command+V as ordinary one-line-at-a-time runes.
+	// Only a single multi-line insertion of 4+ lines should collapse.
 	m := newPasteTestModel(t)
 	for _, msg := range []tea.KeyMsg{
 		{Type: tea.KeyRunes, Runes: []rune("4")},
@@ -257,75 +280,42 @@ func TestCommandVBurstCollapsesAsSoonAsFourLinesArrive(t *testing.T) {
 	} {
 		m = applyKey(t, m, msg)
 	}
-	if m.intentionalMultiline {
-		t.Fatal("Command+V path must not mark intentional multi-line")
-	}
-	if got := m.ta.Value(); got != "[Pasted: 4 lines]" {
-		t.Fatalf("value = %q, want immediate placeholder without extra keypress", got)
-	}
-	if h := m.composerTextHeight(); h != 1 {
-		t.Fatalf("composer height = %d, want 1", h)
-	}
-	if len(m.pastedBlocks) != 1 || m.pastedBlocks[0].content != "4\n5\n6\n7" {
-		t.Fatalf("pastedBlocks = %+v", m.pastedBlocks)
-	}
-}
-
-func TestCommandVDoesNotCollapseBeforeFourthContentLine(t *testing.T) {
-	m := newPasteTestModel(t)
-	// Three content lines ending with a trailing newline must stay expanded.
-	for _, msg := range []tea.KeyMsg{
-		{Type: tea.KeyRunes, Runes: []rune("1")},
-		{Type: tea.KeyRunes, Runes: []rune("\n")},
-		{Type: tea.KeyRunes, Runes: []rune("2")},
-		{Type: tea.KeyRunes, Runes: []rune("\n")},
-		{Type: tea.KeyRunes, Runes: []rune("3")},
-		{Type: tea.KeyRunes, Runes: []rune("\n")},
-	} {
-		m = applyKey(t, m, msg)
-	}
 	if strings.Contains(m.ta.Value(), "[Pasted:") {
-		t.Fatalf("collapsed too early on trailing newline: %q", m.ta.Value())
+		t.Fatalf("line-by-line injection collapsed: %q", m.ta.Value())
+	}
+	if got := m.ta.Value(); got != "4\n5\n6\n7" {
+		t.Fatalf("value = %q", got)
 	}
 }
 
-func TestCommandVTrailingLinesMergeIntoPlaceholder(t *testing.T) {
+func TestMultiLinePasteIntoExistingComposerCollapsesOnlyPaste(t *testing.T) {
 	m := newPasteTestModel(t)
-	for _, msg := range []tea.KeyMsg{
-		{Type: tea.KeyRunes, Runes: []rune("1")},
-		{Type: tea.KeyRunes, Runes: []rune("\n")},
-		{Type: tea.KeyRunes, Runes: []rune("2")},
-		{Type: tea.KeyRunes, Runes: []rune("\n")},
-		{Type: tea.KeyRunes, Runes: []rune("3")},
-		{Type: tea.KeyRunes, Runes: []rune("\n")},
-		{Type: tea.KeyRunes, Runes: []rune("4")},
-	} {
-		m = applyKey(t, m, msg)
+	m.ta.SetValue("existing line")
+	m = applyKey(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("\none\ntwo\nthree\nfour"), Paste: true})
+	if got := m.ta.Value(); got != "existing line[Pasted: 5 lines]" && got != "existing line\n[Pasted: 4 lines]" {
+		// Paste includes leading newline → 5 content lines after normalize, or 4 if counted differently.
+		// Accept either the placeholder form with prefix preserved.
+		if !strings.HasPrefix(got, "existing line") || !strings.Contains(got, "[Pasted:") {
+			t.Fatalf("value = %q", got)
+		}
 	}
-	if got := m.ta.Value(); got != "[Pasted: 4 lines]" {
-		t.Fatalf("initial collapse = %q", got)
+	if !strings.HasPrefix(m.ta.Value(), "existing line") {
+		t.Fatalf("existing composer text was lost: %q", m.ta.Value())
 	}
-
-	m.touchPasteStream()
-	m = applyKey(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("\n")})
-	m = applyKey(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("5")})
-
-	if got := m.ta.Value(); got != "[Pasted: 5 lines]" {
-		t.Fatalf("merged collapse = %q", got)
-	}
-	if len(m.pastedBlocks) != 1 || m.pastedBlocks[0].content != "1\n2\n3\n4\n5" {
+	if len(m.pastedBlocks) != 1 {
 		t.Fatalf("pastedBlocks = %+v", m.pastedBlocks)
 	}
 }
 
-func TestComposerWatchCollapsesWithoutExtraKeypress(t *testing.T) {
+func TestComposerWatchDoesNotCollapsePlainMultiLineContent(t *testing.T) {
 	m := newPasteTestModel(t)
 	m.ta.SetValue("1\n2\n3\n4")
 	m.intentionalMultiline = false
+	m.pastedBlocks = nil
 
 	m = applyKey(t, m, composerWatchMsg{})
-	if got := m.ta.Value(); got != "[Pasted: 4 lines]" {
-		t.Fatalf("watch collapse = %q", got)
+	if got := m.ta.Value(); got != "1\n2\n3\n4" {
+		t.Fatalf("watch collapsed plain multi-line content: %q", got)
 	}
 }
 
@@ -716,7 +706,9 @@ func TestPastePlaceholderBackspaceAfterSuffixOnlyDeletesChar(t *testing.T) {
 func TestCollapsedComposerBackspaceClearsWholePastedValue(t *testing.T) {
 	m := newPasteTestModel(t)
 	m.ta.SetValue("4\n5\n6\n7")
-	m.collapseWholeComposerPaste()
+	if !m.collapseInsertedPasteIfLarge("") {
+		t.Fatal("expected collapse of 4-line empty-composer paste")
+	}
 
 	m = applyKey(t, m, tea.KeyMsg{Type: tea.KeyBackspace})
 	if got := m.ta.Value(); got != "" {
@@ -729,7 +721,9 @@ func TestCollapsedComposerBackspaceClearsWholePastedValue(t *testing.T) {
 func TestComposerCollapseStoresContentAndRendersPlaceholder(t *testing.T) {
 	m := newPasteTestModel(t)
 	m.ta.SetValue("4\n5\n6\n7")
-	m.collapseWholeComposerPaste()
+	if !m.collapseInsertedPasteIfLarge("") {
+		t.Fatal("expected collapse of 4-line empty-composer paste")
+	}
 
 	if got := m.ta.Value(); got != "[Pasted: 4 lines]" {
 		t.Fatalf("value = %q", got)

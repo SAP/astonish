@@ -2,6 +2,7 @@ package client
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 )
@@ -63,7 +64,18 @@ type SessionDetail struct {
 	CreatedAt    string          `json:"createdAt"`
 	UpdatedAt    string          `json:"updatedAt"`
 	Messages     []StudioMessage `json:"messages"`
+	Artifacts    []ArtifactInfo  `json:"artifacts,omitempty"`
 	TotalUsage   *UsageSummary   `json:"totalUsage,omitempty"`
+}
+
+// ArtifactInfo describes a generated file returned by the Studio session API.
+type ArtifactInfo struct {
+	Path        string `json:"path"`
+	FileName    string `json:"fileName"`
+	FileType    string `json:"fileType"`
+	ToolName    string `json:"toolName"`
+	IsReport    bool   `json:"isReport,omitempty"`
+	ReportTitle string `json:"reportTitle,omitempty"`
 }
 
 // GetSessionDetail returns typed session history for the terminal chat app.
@@ -182,8 +194,9 @@ func (c *Client) SendFlowMessage(req *FlowChatRequest) (*SSEStream, error) {
 
 // EffectiveProvidersResponse contains the merged provider defaults used by Studio.
 type EffectiveProvidersResponse struct {
-	DefaultProvider string `json:"default_provider"`
-	DefaultModel    string `json:"default_model"`
+	DefaultProvider string                       `json:"default_provider"`
+	DefaultModel    string                       `json:"default_model"`
+	Providers       map[string]map[string]string `json:"providers,omitempty"`
 }
 
 // GetEffectiveProviders returns the platform-resolved provider defaults for the
@@ -194,6 +207,22 @@ func (c *Client) GetEffectiveProviders() (*EffectiveProvidersResponse, error) {
 		return nil, err
 	}
 	return &resp, nil
+}
+
+// ProviderModelsResponse is returned by GET /api/providers/{id}/models.
+type ProviderModelsResponse struct {
+	Provider string   `json:"provider"`
+	Models   []string `json:"models"`
+}
+
+// ListProviderModels returns model IDs available for a configured provider instance.
+func (c *Client) ListProviderModels(providerID string) ([]string, error) {
+	var resp ProviderModelsResponse
+	path := fmt.Sprintf("/api/providers/%s/models", url.PathEscape(providerID))
+	if err := c.DoJSON("GET", path, nil, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Models, nil
 }
 
 // ChatAttachment is a base64 file payload for multimodal chat turns.
@@ -211,11 +240,36 @@ type ChatRequest struct {
 	Debug         bool             `json:"debug,omitempty"`
 	SystemContext string           `json:"systemContext,omitempty"`
 	Attachments   []ChatAttachment `json:"attachments,omitempty"`
+	// Provider/Model pin a model for this turn (and new sessions).
+	Provider string `json:"provider,omitempty"`
+	Model    string `json:"model,omitempty"`
 }
 
 // SendChatMessage sends a chat message and returns an SSE stream of events.
 func (c *Client) SendChatMessage(req *ChatRequest) (*SSEStream, error) {
 	return c.SSE("POST", "/api/studio/chat", req)
+}
+
+// GetArtifactContent returns the plain-text content for a generated file artifact.
+func (c *Client) GetArtifactContent(path, sessionID string) (string, error) {
+	params := url.Values{}
+	params.Set("path", path)
+	if sessionID != "" {
+		params.Set("session", sessionID)
+	}
+	resp, err := c.Do("GET", "/api/studio/artifacts/content?"+params.Encode(), nil)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return "", parseErrorResponse(resp)
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read artifact content: %w", err)
+	}
+	return string(data), nil
 }
 
 // NetworkDenial describes a blocked outbound connection returned by Studio.

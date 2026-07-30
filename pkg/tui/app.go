@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -44,6 +45,22 @@ type pastedImage struct {
 	mimeType    string
 	data        []byte
 	number      int
+}
+
+type artifactHit struct {
+	start       int
+	end         int
+	itemIdx     int
+	artifactIdx int
+}
+
+type fileViewerState struct {
+	open     bool
+	loading  bool
+	err      string
+	artifact events.Artifact
+	content  string
+	vp       viewport.Model
 }
 
 // Config configures the terminal chat app.
@@ -96,6 +113,8 @@ type model struct {
 
 	// hitRegions maps rendered transcript lines → items (for mouse expand).
 	hitRegions []hitRegion
+	// artifactHits maps individual rendered file rows to generated artifacts.
+	artifactHits []artifactHit
 	// transcriptPlainLines is the visible transcript without ANSI styling; used
 	// for drag-to-copy selection in Bubble Tea mouse mode.
 	transcriptPlainLines []string
@@ -114,7 +133,9 @@ type model struct {
 	clickIsDouble  bool
 
 	// overlays
-	sessions sessionsState
+	sessions    sessionsState
+	modelPicker modelPickerState
+	fileViewer  fileViewerState
 	// slash command completion popup (active when composer starts with /)
 	slash slashCompletion
 	// @file completion popup (active while typing a trailing @token)
@@ -207,6 +228,11 @@ type turnDoneMsg struct{}
 type turnErrMsg struct{ err error }
 type pasteIdleMsg struct{ seq int }
 type composerWatchMsg struct{}
+type artifactContentLoadedMsg struct {
+	path    string
+	content string
+	err     error
+}
 
 func (m model) Init() tea.Cmd {
 	cmds := []tea.Cmd{textarea.Blink, m.spin.Tick, tea.EnableBracketedPaste}
@@ -236,9 +262,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseMsg:
+		if m.fileViewer.open {
+			return m.handleFileViewerMouse(msg)
+		}
 		return m.handleMouse(msg)
 
 	case tea.KeyMsg:
+		if m.fileViewer.open {
+			return m.handleFileViewerKey(msg)
+		}
+		// Sessions / model picker overlays capture keys first.
+		if m.sessions.open {
+			return m.handleSessionsKey(msg)
+		}
+		if m.modelPicker.open {
+			return m.handleModelPickerKey(msg)
+		}
+
 		// Explicit paste bindings (Ctrl+V / Super+V) prefer clipboard images.
 		if isClipboardPasteKey(msg) {
 			if next, cmd, handled := m.tryPasteImage(); handled {
@@ -257,11 +297,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m.handlePaste(text)
 			}
-		}
-
-		// Sessions overlay captures keys first.
-		if m.sessions.open {
-			return m.handleSessionsKey(msg)
 		}
 
 		// Approval overlay: y/n before other handling.
@@ -371,22 +406,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.seq != m.pasteIdleSeq {
 			return m, nil
 		}
-		// Backup path: collapse any remaining multi-line terminal paste once the
-		// stream has been idle. Primary collapse usually happens immediately.
-		if m.forceCollapseInjectedPaste("") {
-			m.syncSlashCompletion()
-			m.syncFileCompletion()
-		}
+		// Idle only keeps an in-flight multi-line paste stream watch alive; it
+		// must not collapse based on total composer line count.
 		return m, m.ensureComposerWatch()
 
 	case composerWatchMsg:
-		// Independent of keypresses: keep collapsing terminal-injected multi-line
-		// paste as soon as the composer has 4+ content lines.
-		changed := m.forceCollapseInjectedPaste("")
-		if changed {
-			m.syncSlashCompletion()
-			m.syncFileCompletion()
-		}
+		// Watch loop is only for finishing a multi-line paste stream that already
+		// produced a placeholder (trailing injection). Never collapse plain typing.
 		if m.shouldWatchComposer() {
 			return m, m.composerWatchCmd()
 		}
@@ -415,6 +441,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case sessionDeletedMsg:
 		return m.applySessionDeleted(msg)
+
+	case modelProvidersLoadedMsg:
+		return m.applyModelProvidersLoaded(msg)
+
+	case modelModelsLoadedMsg:
+		return m.applyModelModelsLoaded(msg)
+
+	case modelPinAppliedMsg:
+		return m.applyModelPinApplied(msg)
+
+	case artifactContentLoadedMsg:
+		return m.applyArtifactContentLoaded(msg)
 
 	case eventMsg:
 		ev := events.Event(msg)
@@ -717,7 +755,7 @@ func isClipboardPasteKey(msg tea.KeyMsg) bool {
 }
 
 func (m model) tryPasteImage() (tea.Model, tea.Cmd, bool) {
-	if m.sessions.open {
+	if m.sessions.open || m.modelPicker.open || m.fileViewer.open {
 		return m, nil, false
 	}
 	if m.tr.Streaming && !m.tr.Awaiting {
@@ -739,6 +777,9 @@ func (m model) tryPasteImage() (tea.Model, tea.Cmd, bool) {
 }
 
 func (m model) insertPastedImage(data []byte, mimeType string) (tea.Model, tea.Cmd) {
+	if m.sessions.open || m.modelPicker.open || m.fileViewer.open {
+		return m, nil
+	}
 	prevH := m.composerTextHeight()
 	m.nextImageNum++
 	num := m.nextImageNum
@@ -760,7 +801,7 @@ func (m model) insertPastedImage(data []byte, mimeType string) (tea.Model, tea.C
 }
 
 func (m model) handlePaste(text string) (tea.Model, tea.Cmd) {
-	if m.sessions.open {
+	if m.sessions.open || m.modelPicker.open || m.fileViewer.open {
 		return m, nil
 	}
 	if m.tr.Streaming && !m.tr.Awaiting {
@@ -777,39 +818,37 @@ func (m model) handlePaste(text string) (tea.Model, tea.Cmd) {
 	}
 	m.intentionalMultiline = false
 	prevH := m.composerTextHeight()
+	// Collapse only when THIS paste payload itself has 4+ lines — never based on
+	// how many lines already exist in the composer.
 	if pasteCollapseLineCount(text) < 4 {
 		m.ta.InsertString(text)
 	} else {
 		m.insertPastedBlock(text)
 	}
-	// Always re-check the full composer value in case paste was appended.
-	m.forceCollapseInjectedPaste("")
 	if m.ready && m.composerTextHeight() != prevH {
 		m.layout()
 		m.refreshViewport()
 	}
 	m.syncSlashCompletion()
 	m.syncFileCompletion()
-	return m, m.ensureComposerWatch()
+	return m, nil
 }
 
 // afterComposerChange reacts to composer mutations that were not explicit paste
-// events. Terminal-injected multi-line content (Command+V) collapses as soon as
-// it reaches 4 lines. Trailing characters that arrive in the same paste stream
-// are merged into the existing paste block. Shift+Enter multi-line editing sets
-// intentionalMultiline and is left expanded.
+// events. Collapse only when the newly inserted span itself is 4+ lines (a true
+// multi-line paste burst). Existing composer lines are ignored. Shift+Enter
+// multi-line editing sets intentionalMultiline and is left expanded.
 func (m *model) afterComposerChange(previous string) tea.Cmd {
 	current := m.ta.Value()
 	if current == previous {
-		return m.ensureComposerWatch()
+		return nil
 	}
 	if m.intentionalMultiline {
 		return nil
 	}
 
-	// Mid-stream paste after an early collapse: only merge when additional
-	// lines arrive (terminal still injecting). Same-line typing after the
-	// placeholder stays visible as normal composition.
+	// Mid-stream continuation after a multi-line paste already collapsed: merge
+	// only additional lines that arrive while the paste stream window is open.
 	if m.pasteStreamActive() && len(m.pastedBlocks) > 0 && pasteLineCount(current) > 1 {
 		expanded := m.expandPastedBlocks(current)
 		prevContentLines := 0
@@ -820,6 +859,15 @@ func (m *model) afterComposerChange(previous string) tea.Cmd {
 		}
 		if expanded != current && pasteCollapseLineCount(expanded) > prevContentLines {
 			prevH := m.composerTextHeight()
+			// Re-collapse using the expanded full paste content only for the
+			// active placeholder region (prefix/suffix outside placeholders stay).
+			if prefix, _, suffix, ok := findInsertedText(previous, current); ok {
+				// Prefer keeping surrounding typed text; expand placeholders first.
+				_ = prefix
+				_ = suffix
+			}
+			// Whole-value re-collapse of expanded paste content when the composer
+			// is only the placeholder plus trailing paste stream chars.
 			m.replaceComposerPaste("", expanded, "")
 			m.touchPasteStream()
 			if m.ready && m.composerTextHeight() != prevH {
@@ -830,8 +878,8 @@ func (m *model) afterComposerChange(previous string) tea.Cmd {
 		}
 	}
 
-	// 4+ significant lines without intentional multi-line editing → collapse now.
-	m.forceCollapseInjectedPaste(previous)
+	// Collapse only the inserted delta when that delta itself is 4+ lines.
+	m.collapseInsertedPasteIfLarge(previous)
 	return m.ensureComposerWatch()
 }
 
@@ -844,13 +892,10 @@ func (m *model) touchPasteStream() {
 }
 
 func (m *model) shouldWatchComposer() bool {
-	if m.intentionalMultiline {
-		return false
-	}
-	if m.pasteStreamActive() {
-		return true
-	}
-	return composerShouldCollapseValue(m.ta.Value())
+	// Only keep the watch alive to finish an in-flight multi-line paste stream
+	// that already produced a placeholder. Do not watch merely because the
+	// composer has many lines of normal typing/single-line pastes.
+	return !m.intentionalMultiline && m.pasteStreamActive() && len(m.pastedBlocks) > 0
 }
 
 func (m *model) composerWatchCmd() tea.Cmd {
@@ -871,41 +916,35 @@ func (m *model) ensureComposerWatch() tea.Cmd {
 	return m.composerWatchCmd()
 }
 
-// forceCollapseInjectedPaste collapses multi-line composer content when the
-// user did not author it via Shift+Enter. If previous is provided, only the
-// newly inserted span is collapsed so surrounding typed text can remain.
-func (m *model) forceCollapseInjectedPaste(previous string) bool {
+// collapseInsertedPasteIfLarge collapses only when the newly inserted span
+// itself has 4+ content lines. Existing composer lines are never counted.
+func (m *model) collapseInsertedPasteIfLarge(previous string) bool {
 	if m.intentionalMultiline {
 		return false
 	}
-	value := m.ta.Value()
-	if !composerShouldCollapseValue(value) {
+	current := m.ta.Value()
+	if current == previous {
+		return false
+	}
+	var prefix, inserted, suffix string
+	var ok bool
+	if previous == "" {
+		// Composer was empty: the whole value is the insertion.
+		prefix, inserted, suffix, ok = "", current, "", true
+	} else {
+		prefix, inserted, suffix, ok = findInsertedText(previous, current)
+	}
+	if !ok || pasteCollapseLineCount(inserted) < 4 {
 		return false
 	}
 	prevH := m.composerTextHeight()
-	if previous != "" && previous != value {
-		if prefix, inserted, suffix, ok := findInsertedText(previous, value); ok && pasteCollapseLineCount(inserted) >= 4 {
-			m.replaceComposerPaste(prefix, inserted, suffix)
-		} else {
-			m.collapseWholeComposerPaste()
-		}
-	} else {
-		m.collapseWholeComposerPaste()
-	}
+	m.replaceComposerPaste(prefix, inserted, suffix)
 	m.touchPasteStream()
 	if m.ready && m.composerTextHeight() != prevH {
 		m.layout()
 		m.refreshViewport()
 	}
-	return m.ta.Value() != value
-}
-
-func (m *model) collapseWholeComposerPaste() {
-	value := m.ta.Value()
-	if !composerShouldCollapseValue(value) {
-		return
-	}
-	m.replaceComposerPaste("", value, "")
+	return true
 }
 
 func (m *model) insertPastedBlock(content string) {
@@ -1438,6 +1477,8 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		return m.startNewSession()
 	case text == "/sessions" || text == "/session":
 		return m.openSessionsPicker()
+	case text == "/model" || text == "/models":
+		return m.openModelPicker()
 	default:
 		// Pass through to backend as a normal message so server/local slash handlers can run later.
 		m.history = append(m.history, text)
@@ -1466,6 +1507,7 @@ Commands:
   /help          Show this help
   /status        Show session / provider / model
   /sessions      Open sessions picker (also ctrl+l)
+  /model         Choose provider and model
   /new           Start a new session (also ctrl+n)
   /files         Show @file context help
   /plan          Toggle plan-only mode (also shift+tab)
@@ -1544,11 +1586,18 @@ func (m *model) layout() {
 	if vh < 5 {
 		vh = 5
 	}
+	oldOffset := 0
+	if m.vp.Height > 0 {
+		oldOffset = m.vp.YOffset
+	}
 	m.vp = viewport.New(m.width, vh)
 	m.vp.Style = m.theme.Background
-	content, hits := m.viewportContent()
+	content, hits, artifactHits := m.viewportContent()
 	m.hitRegions = hits
+	m.artifactHits = artifactHits
 	m.vp.SetContent(content)
+	m.vp.SetYOffset(oldOffset)
+	m.layoutFileViewer()
 
 	// Composer width: terminal width minus border (2) and padding (2).
 	innerW := m.width - 4
@@ -1586,18 +1635,19 @@ func (m *model) refreshViewport() {
 		return
 	}
 	atBottom := m.vp.AtBottom()
-	content, hits := m.viewportContent()
+	content, hits, artifactHits := m.viewportContent()
 	m.hitRegions = hits
+	m.artifactHits = artifactHits
 	m.vp.SetContent(content)
 	if atBottom || m.tr.Streaming || m.isEmptyConversation() {
 		m.vp.GotoBottom()
 	}
 }
 
-func (m *model) viewportContent() (string, []hitRegion) {
+func (m *model) viewportContent() (string, []hitRegion, []artifactHit) {
 	if m.isEmptyConversation() {
 		m.transcriptPlainLines = nil
-		return m.renderWelcome(), nil
+		return m.renderWelcome(), nil, nil
 	}
 	return m.renderTranscript()
 }
@@ -1761,6 +1811,10 @@ func (m model) handleMouseRelease(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	if artifact, ok := m.artifactAtLine(m.selectionStart.line); ok {
+		return m.openArtifactViewer(artifact)
+	}
+
 	idx, ok := m.itemAtLine(m.selectionStart.line)
 	if !ok {
 		return m, nil
@@ -1804,9 +1858,107 @@ func (m model) itemAtLine(line int) (int, bool) {
 	return -1, false
 }
 
-func (m *model) renderTranscript() (string, []hitRegion) {
+func (m model) artifactAtLine(line int) (events.Artifact, bool) {
+	for _, r := range m.artifactHits {
+		if line < r.start || line >= r.end {
+			continue
+		}
+		if r.itemIdx < 0 || r.itemIdx >= len(m.tr.Items) {
+			return events.Artifact{}, false
+		}
+		artifacts := m.tr.Items[r.itemIdx].Artifacts
+		if r.artifactIdx < 0 || r.artifactIdx >= len(artifacts) {
+			return events.Artifact{}, false
+		}
+		return artifacts[r.artifactIdx], true
+	}
+	return events.Artifact{}, false
+}
+
+func (m model) openArtifactViewer(artifact events.Artifact) (tea.Model, tea.Cmd) {
+	if artifact.Path == "" {
+		return m, nil
+	}
+	m.fileViewer = fileViewerState{
+		open:     true,
+		loading:  true,
+		artifact: artifact,
+		vp:       viewport.New(max(20, m.width-4), max(5, m.screenHeight()-4)),
+	}
+	return m, m.loadArtifactContentCmd(artifact.Path)
+}
+
+func (m model) loadArtifactContentCmd(path string) tea.Cmd {
+	sessionID := first(m.info.SessionID, m.tr.SessionID)
+	return func() tea.Msg {
+		content, err := m.backend.ReadArtifactContent(m.ctx, sessionID, path)
+		if err != nil {
+			return artifactContentLoadedMsg{path: path, err: err}
+		}
+		if content.Path == "" {
+			content.Path = path
+		}
+		return artifactContentLoadedMsg{path: content.Path, content: content.Content}
+	}
+}
+
+func (m model) applyArtifactContentLoaded(msg artifactContentLoadedMsg) (tea.Model, tea.Cmd) {
+	if msg.path == "" {
+		msg.path = m.fileViewer.artifact.Path
+	}
+	if !m.fileViewer.open || msg.path != m.fileViewer.artifact.Path {
+		return m, nil
+	}
+	m.fileViewer.loading = false
+	if msg.err != nil {
+		m.fileViewer.err = msg.err.Error()
+	} else {
+		m.fileViewer.content = msg.content
+		m.fileViewer.err = ""
+	}
+	m.layoutFileViewer()
+	return m, nil
+}
+
+func (m *model) layoutFileViewer() {
+	if !m.fileViewer.open {
+		return
+	}
+	w := max(20, m.width-4)
+	h := max(5, m.screenHeight()-4)
+	m.fileViewer.vp.Width = w
+	m.fileViewer.vp.Height = h
+	m.fileViewer.vp.SetContent(m.renderFileViewerContent(w))
+}
+
+func (m model) handleFileViewerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "q":
+		m.fileViewer = fileViewerState{}
+		return m, nil
+	case "ctrl+c":
+		m.quitting = true
+		m.cancel()
+		return m, tea.Quit
+	}
+	var cmd tea.Cmd
+	m.fileViewer.vp, cmd = m.fileViewer.vp.Update(msg)
+	return m, cmd
+}
+
+func (m model) handleFileViewerMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if msg.Button != tea.MouseButtonWheelUp && msg.Button != tea.MouseButtonWheelDown {
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.fileViewer.vp, cmd = m.fileViewer.vp.Update(msg)
+	return m, cmd
+}
+
+func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 	var b strings.Builder
 	var hits []hitRegion
+	var artifactHits []artifactHit
 	var plainLines []string
 	th := m.theme
 	cw := contentWidth(m.width)
@@ -1821,9 +1973,9 @@ func (m *model) renderTranscript() (string, []hitRegion) {
 		}
 	}
 
-	appendBlock := func(itemIdx int, kind events.ItemKind, block string) {
+	appendBlock := func(itemIdx int, kind events.ItemKind, block string) int {
 		if block == "" {
-			return
+			return lineNo
 		}
 		// Trailing newline normalization: count lines before padding.
 		block = strings.TrimRight(block, "\n")
@@ -1841,6 +1993,7 @@ func (m *model) renderTranscript() (string, []hitRegion) {
 		plainLines = append(plainLines, stripANSI(gap))
 		lineNo += n + 1 // block lines + one blank separator row
 		hits = append(hits, hitRegion{start: start, end: start + n, itemIdx: itemIdx, kind: kind})
+		return start
 	}
 
 	for i, it := range m.tr.Items {
@@ -1867,6 +2020,8 @@ func (m *model) renderTranscript() (string, []hitRegion) {
 			appendBlock(i, it.Kind, m.renderThinkingBubble(it.Content, cw))
 		case events.ItemActivity:
 			appendBlock(i, it.Kind, m.renderActivity(it, cw))
+		case events.ItemFileDiff:
+			appendBlock(i, it.Kind, m.renderFileDiff(it, cw))
 		case events.ItemSystem:
 			appendBlock(i, it.Kind, th.System.Width(cw).Render(it.Content))
 		case events.ItemError:
@@ -1884,11 +2039,20 @@ func (m *model) renderTranscript() (string, []hitRegion) {
 		case events.ItemNetworkDenial:
 			appendBlock(i, it.Kind, m.renderNetworkDenialTranscript(it, cw))
 		case events.ItemArtifact:
-			appendBlock(i, it.Kind, th.Muted.Width(cw).Render("📄 "+first(it.Path, it.Content)))
+			block, rows := m.renderArtifactList(it, cw)
+			start := appendBlock(i, it.Kind, block)
+			for _, row := range rows {
+				artifactHits = append(artifactHits, artifactHit{
+					start:       start + row.line,
+					end:         start + row.line + 1,
+					itemIdx:     i,
+					artifactIdx: row.artifactIdx,
+				})
+			}
 		}
 	}
 	m.transcriptPlainLines = plainLines
-	return b.String(), hits
+	return b.String(), hits, artifactHits
 }
 
 const (
@@ -1942,7 +2106,183 @@ func (m model) renderThinkingBubble(content string, width int) string {
 	return label + "\n" + wrapped
 }
 
-// renderActivity builds collapsed summary (+N/−M) and expanded tool/diff detail.
+type artifactRow struct {
+	line        int
+	artifactIdx int
+}
+
+func (m model) renderArtifactList(it events.Item, width int) (string, []artifactRow) {
+	th := m.theme
+	artifacts := it.Artifacts
+	if len(artifacts) == 0 && it.Path != "" {
+		artifacts = []events.Artifact{{Path: it.Path, FileName: artifactDisplayName(events.Artifact{Path: it.Path})}}
+	}
+	if len(artifacts) == 0 {
+		return "", nil
+	}
+
+	var b strings.Builder
+	rows := make([]artifactRow, 0, len(artifacts))
+	header := fmt.Sprintf("Files generated (%d)", len(artifacts))
+	b.WriteString(th.Header.Render(header))
+	b.WriteString(th.Muted.Render("  click to open · esc closes viewer"))
+	for i, artifact := range artifacts {
+		b.WriteByte('\n')
+		line := fmt.Sprintf("  📄 %s", artifactDisplayName(artifact))
+		meta := artifactMeta(artifact)
+		if meta != "" {
+			line += "  · " + meta
+		}
+		if artifact.IsReport {
+			line += "  report"
+		}
+		if lipgloss.Width(line) > width {
+			line = truncateToWidth(line, width)
+		}
+		b.WriteString(th.Text.Render(line))
+		rows = append(rows, artifactRow{line: i + 1, artifactIdx: i})
+	}
+	return b.String(), rows
+}
+
+func artifactDisplayName(artifact events.Artifact) string {
+	if artifact.ReportTitle != "" {
+		return artifact.ReportTitle
+	}
+	if artifact.FileName != "" {
+		return artifact.FileName
+	}
+	base := filepath.Base(artifact.Path)
+	if base == "." || base == string(filepath.Separator) || base == "" {
+		return artifact.Path
+	}
+	return base
+}
+
+func artifactMeta(artifact events.Artifact) string {
+	parts := make([]string, 0, 3)
+	if artifact.FileType != "" && artifact.FileType != "File" {
+		parts = append(parts, artifact.FileType)
+	}
+	if artifact.ToolName != "" {
+		parts = append(parts, artifact.ToolName)
+	}
+	if artifact.Path != "" {
+		parts = append(parts, artifact.Path)
+	}
+	return strings.Join(parts, " · ")
+}
+
+func artifactIsMarkdown(artifact events.Artifact) bool {
+	if strings.EqualFold(artifact.FileType, "Markdown") {
+		return true
+	}
+	switch strings.ToLower(filepath.Ext(artifact.Path)) {
+	case ".md", ".markdown", ".mdown", ".mkd":
+		return true
+	default:
+		return false
+	}
+}
+
+func artifactLanguage(artifact events.Artifact) string {
+	switch strings.ToLower(filepath.Ext(artifact.Path)) {
+	case ".go":
+		return "go"
+	case ".js", ".jsx":
+		return "javascript"
+	case ".ts", ".tsx":
+		return "typescript"
+	case ".py":
+		return "python"
+	case ".json":
+		return "json"
+	case ".yaml", ".yml":
+		return "yaml"
+	case ".html", ".htm":
+		return "html"
+	case ".css":
+		return "css"
+	case ".sh", ".bash", ".zsh":
+		return "bash"
+	case ".sql":
+		return "sql"
+	default:
+		return strings.TrimPrefix(strings.ToLower(filepath.Ext(artifact.Path)), ".")
+	}
+}
+
+func (m model) renderFileViewer() string {
+	if !m.fileViewer.open {
+		return ""
+	}
+	return lipgloss.JoinVertical(lipgloss.Left,
+		m.renderFileViewerHeader(),
+		m.fileViewer.vp.View(),
+	)
+}
+
+func (m model) renderFileViewerHeader() string {
+	th := m.theme
+	w := max(20, m.width)
+	artifact := m.fileViewer.artifact
+	left := "File · " + artifactDisplayName(artifact)
+	if artifact.IsReport {
+		left = "Report · " + artifactDisplayName(artifact)
+	}
+	left = truncateToWidth(left, max(8, w-32))
+	right := "esc back · ↑↓ scroll"
+	gap := w - lipgloss.Width(left) - lipgloss.Width(right)
+	if gap < 1 {
+		gap = 1
+	}
+	return m.paintRow(th.Header.Render(left)+strings.Repeat(" ", gap)+th.Muted.Render(right), w)
+}
+
+func (m model) renderFileViewerContent(width int) string {
+	th := m.theme
+	artifact := m.fileViewer.artifact
+	bodyWidth := width - 4
+	if bodyWidth < 20 {
+		bodyWidth = width
+	}
+	var content string
+	switch {
+	case m.fileViewer.loading:
+		content = th.Muted.Width(bodyWidth).Render("Loading file…")
+	case m.fileViewer.err != "":
+		content = th.Error.Width(bodyWidth).Render("Failed to load file: " + m.fileViewer.err)
+	case artifactIsMarkdown(artifact):
+		content = render.Markdown(m.fileViewer.content, bodyWidth, th.RenderStyles())
+		if content == "" {
+			content = th.Text.Width(bodyWidth).Render(m.fileViewer.content)
+		}
+	default:
+		content = render.CodeBlock(m.fileViewer.content, artifactLanguage(artifact), bodyWidth, th.RenderStyles(), false)
+	}
+	return padBlock(content)
+}
+
+// renderFileDiff paints a main-thread dual-gutter editor-style file change.
+// Diffs live outside the tool activity fold so they stay visible while tools
+// stay collapsed; the fold holds raw request/response only.
+func (m model) renderFileDiff(it events.Item, width int) string {
+	rs := m.theme.RenderStyles()
+	name := it.ToolName
+	if name == "" {
+		name = "edit_file"
+	}
+	// Prefer verification_context from the tool (stored on the item).
+	if it.DiffVerification != "" {
+		if out := render.RenderVerificationDiff(it.DiffVerification, it.Path, width, true, rs); out != "" {
+			return out
+		}
+	}
+	// Fallback: build from args (old_string/new_string/content).
+	return render.DiffFromToolArgs(name, it.Args, width, true, rs)
+}
+
+// renderActivity builds collapsed summary (+N/−M) and expanded raw tool detail.
 func (m model) renderActivityCollapsedPreview(steps []events.ToolStep, width int) string {
 	if len(steps) == 0 {
 		return ""
@@ -2054,20 +2394,26 @@ func (m model) renderActivity(it events.Item, width int) string {
 			b.WriteByte('\n')
 			b.WriteString(th.Muted.Width(width).Render("    " + detail))
 		}
-		// Show file diffs for edit/write tools.
-		if d := render.DiffFromToolArgs(s.Name, s.Args, width, true, rs); d != "" {
+		// Raw request (args) — file diffs are main-thread ItemFileDiff, not here.
+		if argsPreview := render.ToolArgsPreview(step, width-6); argsPreview != "" {
 			b.WriteByte('\n')
-			b.WriteString(d)
-			continue
+			b.WriteString(th.Muted.Width(width).Render("    request:"))
+			for _, ln := range strings.Split(argsPreview, "\n") {
+				b.WriteByte('\n')
+				b.WriteString(th.Muted.Width(width).Render("    " + ln))
+			}
 		}
+		// Raw response (result JSON / text).
 		if preview := render.ToolResultPreview(step, width-6); preview != "" {
-			for _, line := range strings.Split(preview, "\n") {
+			b.WriteByte('\n')
+			b.WriteString(th.Muted.Width(width).Render("    response:"))
+			for _, ln := range strings.Split(preview, "\n") {
 				b.WriteByte('\n')
 				style := th.Muted
 				if s.Status == "error" {
 					style = th.Error
 				}
-				b.WriteString(style.Width(width).Render("    " + line))
+				b.WriteString(style.Width(width).Render("    " + ln))
 			}
 		}
 	}
@@ -2106,7 +2452,7 @@ func (m model) renderUserBubble(content string, expanded bool, width int) string
 		hint = "… double-click to collapse"
 	}
 
-	border := m.theme.Number
+	border := m.theme.UserBorder
 	text := m.theme.Text
 	bg := m.theme.Background
 
@@ -2175,7 +2521,7 @@ func (m model) View() string {
 
 	// Completion popups sit just above the composer (filter-as-you-type).
 	composerBlock := m.renderComposer()
-	if !m.tr.Awaiting && !m.sessions.open {
+	if !m.tr.Awaiting && !m.sessions.open && !m.modelPicker.open {
 		switch {
 		case m.slash.active && len(m.slash.matches) > 0:
 			composerBlock = lipgloss.JoinVertical(lipgloss.Left,
@@ -2201,9 +2547,20 @@ func (m model) View() string {
 		m.renderHints(),
 	)
 
-	// Overlays: sessions picker or approval card on top of the main chrome.
+	// Overlays: sessions / model picker or approval card on top of the main chrome.
+	if m.fileViewer.open {
+		m.layoutFileViewer()
+		return m.paintBackground(m.renderFileViewer())
+	}
 	if m.sessions.open {
 		overlay := m.renderSessionsOverlay()
+		return m.paintBackground(lipgloss.Place(m.width, m.screenHeight(), lipgloss.Center, lipgloss.Center, overlay,
+			lipgloss.WithWhitespaceChars(" "),
+			lipgloss.WithWhitespaceBackground(lipgloss.Color("#000000")),
+		))
+	}
+	if m.modelPicker.open {
+		overlay := m.renderModelPickerOverlay()
 		return m.paintBackground(lipgloss.Place(m.width, m.screenHeight(), lipgloss.Center, lipgloss.Center, overlay,
 			lipgloss.WithWhitespaceChars(" "),
 			lipgloss.WithWhitespaceBackground(lipgloss.Color("#000000")),

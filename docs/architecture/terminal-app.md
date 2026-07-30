@@ -100,9 +100,10 @@ AdaptiveColor cursor-line backgrounds that break dark alt-screen UIs).
 | User messages | Full-width warm-accent outline bubble; long prompts are height-capped and use a bottom-border `double-click to expand/collapse` affordance |
 | Agent markdown | `pkg/tui/render.Markdown` — headings, lists, inline code/bold |
 | Code fences | `pkg/tui/render.CodeBlock` — chroma highlight + numeric gutter |
-| Tool activity | `pkg/tui/render.ActivitySummary` + `StatsFromSteps` (`+N/−M`), with categorized collapsed summaries that list every tool row as a single-line preview; click-to-expand reveals full parameters, diffs, and result previews |
+| Tool activity | `pkg/tui/render.ActivitySummary` + `StatsFromSteps` (`+N/−M`); click-to-expand reveals **raw request args and response JSON** (not file diffs) |
 | Network authorization | Inline transcript notice plus a focused approval card for OpenShell proxy denials; `enter`/`y` allows the blocked host, `b` allows the suggested broader pattern, and `n`/`esc` denies |
-| File diffs | `pkg/tui/render.FileDiff` / `DiffFromToolArgs` from `edit_file`/`write_file` args |
+| File diffs | **Main-thread** `ItemFileDiff` dual-gutter editor view (`old`/`new` line numbers + ± content) on successful `edit_file`/`write_file`. Prefers `verification_context`; falls back to args |
+| Generated files / reports | `artifact` SSE events render as a compact “Files generated” list in the transcript. Clicking a file opens a full-screen file viewer; `Esc` returns to the main chat. Markdown artifacts render through the same terminal markdown renderer as agent responses, while other extensions render as scrollable raw/code content with line numbers. |
 
 Streaming: unclosed fences render as incomplete code blocks (header shows `…`).
 
@@ -113,7 +114,7 @@ During a turn with tools, there is **one** agent bubble:
 1. Interstitial text between tools **replaces** the previous text (not stacked).
 2. While `Provisional`, it renders as **Thinking** (muted), not the final response style.
 3. All tools fold into **one** activity block for the turn.
-4. Layout order: `user → activity → agent`.
+4. Layout order: `user → activity → file_diff(s) → agent`.
 5. On `done`, provisional is cleared and the last text is rendered as the full agent response (markdown/code).
 
 ## Rendering roadmap
@@ -149,12 +150,13 @@ Approvals and denials call the network-grant REST endpoints directly instead of 
 - `ctrl+l` or `/sessions` — list sessions, `enter` resume, `d` delete with confirmation, `n` new, `esc` close
 - `ctrl+n` or `/new` — clear local session id; next message creates a new server session
 - Click a tool activity block to expand/collapse detailed execution rows; `ctrl+o` toggles the latest activity
+- Click a generated file row to open it in the terminal file viewer; `Esc` returns to the chat thread
 - Drag across transcript text to select it; releasing the mouse automatically copies the selected plain text to the system clipboard
 - `astonish chat --resume <id>` — loads history via `GET /api/studio/sessions/{id}` on open
 
 ### Paste handling
 
-Pastes of up to three lines are inserted into the composer as-is and the composer grows vertically for multi-line typed input (up to four visible rows). Pasting four or more lines replaces the composer value with a compact placeholder such as `[Pasted: 8 lines]`, storing the full content for submit. Explicit paste events (`Ctrl+V`, bracketed paste, clipboard paste bindings) collapse immediately. macOS `Command+V` is usually injected by the terminal as ordinary input rather than a paste event; that path collapses as soon as the composer reaches four lines (without waiting for a later keystroke). Any trailing characters that still arrive in the same short paste stream are merged into the same paste block and the placeholder line count is updated. Explicit multi-line editing with `Shift+Enter` / `Alt+Enter` / `Ctrl+J` is left expanded. Pressing enter expands the placeholder back to the full pasted content for history, transcript, `@file` expansion, and the platform turn. Each `[Pasted: N lines]` token is atomic: left/right (and word-motion) keys jump over the whole token, typing cannot insert inside it, and Backspace / `Ctrl+W` / `Alt+Backspace` / Delete remove the entire token in one step.
+Pastes of up to three lines are inserted into the composer as-is and the composer grows vertically for multi-line typed input (up to four visible rows). A paste is collapsed to `[Pasted: N lines]` only when **that paste payload itself** contains four or more content lines; lines already in the composer are never counted. Pasting one line at a time (even until the composer has many lines) therefore stays expanded. When a multi-line paste collapses, only the newly inserted span becomes a placeholder, so surrounding typed text is preserved. Explicit multi-line editing with `Shift+Enter` / `Alt+Enter` / `Ctrl+J` is left expanded. Pressing enter expands the placeholder back to the full pasted content for history, transcript, `@file` expansion, and the platform turn. Each `[Pasted: N lines]` token is atomic: left/right (and word-motion) keys jump over the whole token, typing cannot insert inside it, and Backspace / `Ctrl+W` / `Alt+Backspace` / Delete remove the entire token in one step.
 
 ### Image paste
 
@@ -169,6 +171,17 @@ Clipboard image reads are platform-specific:
 ### `@file` mentions
 
 Typing `@` plus part of a local relative path opens a fuzzy file picker above the composer. Selecting a file inserts `@path/to/file`. On submit, the terminal app reads each mentioned file from the current working directory and appends a bounded `<context from @file mentions>` section to the message sent to the platform, while the transcript keeps showing the user's original text. Absolute paths, directory mentions, workspace escapes, and oversized files are rejected before the turn is sent.
+
+### Model selection
+
+`/model` (alias `/models`) opens a two-step picker overlay:
+
+1. **Provider** — lists configured provider instances from `GET /api/settings/providers/effective`, plus a `(cascade default)` option that clears the session pin.
+2. **Model** — lists models for the selected provider via `GET /api/providers/{id}/models`.
+
+↑↓ move, type to filter, Enter selects, Esc goes back/closes. Applying a model calls `PATCH /api/studio/sessions/{id}/model` when a session exists, or stores a pending pin applied on the first chat turn (via `provider`/`model` on the Studio chat request) when the session has not been created yet. The footer updates to the effective provider/model after the pin is applied.
+
+Starting a new chat (`/new`, `ctrl+n`, or deleting the active session) clears any session/pending pin display and reloads cascade defaults into the footer. Resuming a session always reloads that session's model-status so switching between pinned and default sessions keeps the footer accurate.
 
 ### Plan mode
 

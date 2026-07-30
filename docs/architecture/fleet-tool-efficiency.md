@@ -60,7 +60,7 @@ Key insight from their telemetry: *"~18% of Read calls are same-file collisions 
 
 ### Layer 1: `edit_file` Auto-Verify Response
 
-After a successful edit, `edit_file` returns the edited region with surrounding context so the agent never needs a follow-up `read_file` to verify.
+After a successful edit, `edit_file` returns a **compact unified-style hunk** around the edit site so the agent never needs a follow-up `read_file` to verify what changed.
 
 #### Changes
 
@@ -77,32 +77,55 @@ type EditFileResult struct {
 ```
 
 After `os.WriteFile` succeeds:
-1. Find the byte offset of `NewString` in `newContent` (first occurrence).
-2. Convert to line number via newline counting.
-3. Extract lines `[matchLine-10 .. matchLine+len(newStringLines)+10]`, clamped to file bounds.
-4. Prefix each line with its 1-indexed line number: `"360: const positionsMap = ..."`.
-5. Return as `VerificationContext`.
+1. Locate the **first** match in the **pre-edit** content (`oldString` exact match, or first regex match). Never search for `newString` in the post-edit file — that fails for deletions and short strings that appear earlier.
+2. Derive the removed text (matched span) and added text (replacement, with regex expansion when needed).
+3. Build a mini hunk: header `@@ basename:startLine`, ~3 context lines before, `-` removed lines, `+` added lines, ~3 context lines after. Cap body at ~30 lines.
+4. Message includes the 1-based start line: `"Replaced N occurrence(s) in PATH (line L)"`.
 
 **Edge cases:**
-- **`replace_all=true`**: Show context for the first replacement only. Set message to "Replaced N occurrence(s)..." so the LLM knows all N were applied.
-- **Deletion (empty `NewString`)**: Show context centered on where `OldString` was removed — the lines immediately before and after the gap.
-- **Very long `NewString`**: Cap the context window at 30 lines total (±15 from center of replacement). Prevents the response from exploding on large insertions.
+- **`replace_all=true`**: Hunk shows the **first** replacement only. Message still reports full count `"Replaced N occurrence(s)..."`.
+- **Deletion (empty `NewString`)**: Locate via `oldString` / regex in pre-edit content; emit `-` lines and surrounding context (not the top of the file).
+- **Very long replacement**: Cap the hunk body at 30 lines; truncate large remove/add blocks with `…`.
 
 #### Response example
 
 ```json
 {
     "success": true,
-    "path": "/root/project/src/Component.vue",
+    "path": "/root/project/src/handler.go",
     "replacements": 1,
-    "message": "Replaced 1 occurrence(s) in /root/project/src/Component.vue",
-    "verification_context": "360: const positionsMap = computed(() => {\n361:   const map = new Map();\n362:   const data = positionsComputed.value;\n363:   if (!data?.positions) return map;\n364:   if (!Array.isArray(data.positions)) return map;\n365:   for (const leg of data.positions) {\n366:     if (!leg || !leg.symbol) continue;\n..."
+    "message": "Replaced 1 occurrence(s) in /root/project/src/handler.go (line 42)",
+    "verification_context": "@@ handler.go:42\n  40| // handle requests\n  41| \n- 42| func handler(w http.ResponseWriter) {\n+ 42| func handler(w http.ResponseWriter, r *http.Request) {\n  43|     ..."
 }
 ```
 
 #### Impact
 
-Eliminates the "did my edit work?" re-read pattern. Estimated: **~50% reduction** in post-edit reads.
+Eliminates the "did my edit work?" re-read pattern and makes deletions/replacements obvious (same shape as OpenCode / Grok Build diffs). Estimated: **~50% reduction** in post-edit reads.
+
+### Layer 1b: `write_file` Auto-Verify Response
+
+`write_file` returns the same style of compact hunk so create/overwrite are verifiable without a follow-up `read_file`.
+
+**File:** `pkg/tools/internal.go` (`WriteFileResult` + `buildWriteVerificationContext` in `edit_file.go`)
+
+```go
+type WriteFileResult struct {
+    Message             string `json:"message"`
+    Path                string `json:"path,omitempty"`
+    Created             bool   `json:"created,omitempty"`
+    VerificationContext string `json:"verification_context,omitempty"`
+}
+```
+
+Before `os.WriteFile`, read existing content if present:
+
+| Case | Header | Body |
+|------|--------|------|
+| **Create** (file did not exist) | `@@ basename:1 (created)` | `+` lines only (cap ~30, then `…`) |
+| **Overwrite** | `@@ basename:1 (overwritten, N→M lines)` | `-` old lines then `+` new lines (budget split, capped) |
+
+Message: `"Created PATH"` or `"Overwrote PATH"`.
 
 ---
 

@@ -4,17 +4,27 @@
 # Linux container isolation on non-Linux hosts. Astonish on the host
 # connects to this container's Incus API via TCP (localhost:8443).
 #
-# Build (single-arch, local dev):
-#   GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o astonish-linux-amd64 .
-#   docker build -f docker/incus/Dockerfile -t ghcr.io/sap/astonish-incus:dev .
+# Build (single-arch, local dev — preferred via Makefile):
+#   make docker-incus
+#   # Builds astonish-linux-$(arch), docker buildx --load, tags :dev and :latest.
+#
+# Manual equivalent (Apple Silicon example):
+#   GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o astonish-linux-arm64 .
+#   docker buildx build --platform linux/arm64 -f docker/incus/Dockerfile \
+#     -t ghcr.io/sap/astonish-incus:dev -t ghcr.io/sap/astonish-incus:latest --load .
 #
 # Build (multi-arch, CI):
 #   # Pre-build both binaries, then:
 #   docker buildx build --platform linux/amd64,linux/arm64 \
 #     -f docker/incus/Dockerfile -t ghcr.io/sap/astonish-incus:v1.2.3 --push .
 #
+# Runtime (EnsureIncusDockerContainer) selects the tag from host version:
+#   version "dev" → ghcr.io/sap/astonish-incus:latest
+#   version "vX.Y.Z" → ghcr.io/sap/astonish-incus:vX.Y.Z
+# A plain :dev tag is NOT selected unless you retag or set VERSION accordingly.
+#
 # The image is published to ghcr.io by the docker-images GitHub Action.
-# Users never build this image — astonish pulls it automatically.
+# Local `make docker-incus` is required for macOS/Windows sandbox tool updates.
 
 # ---------------------------------------------------------------------------
 # Native tree-sitter shared library used by pkg/codeintel. Docker-backed Incus

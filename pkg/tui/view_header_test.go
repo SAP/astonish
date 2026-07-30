@@ -27,7 +27,19 @@ func (b staticBackend) ResumeSession(context.Context, string) ([]backend.History
 }
 func (b staticBackend) DeleteSession(context.Context, string) error { return nil }
 func (b staticBackend) NewSession()                                 {}
-func (b staticBackend) Close() error                                { return nil }
+func (b staticBackend) ListProviders(context.Context) ([]string, error) {
+	return nil, nil
+}
+func (b staticBackend) ListModels(context.Context, string) ([]string, error) {
+	return nil, nil
+}
+func (b staticBackend) SetModelPin(_ context.Context, provider, model string) (string, string, error) {
+	return provider, model, nil
+}
+func (b staticBackend) ReadArtifactContent(_ context.Context, _, path string) (backend.ArtifactContent, error) {
+	return backend.ArtifactContent{Path: path, Content: ""}, nil
+}
+func (b staticBackend) Close() error { return nil }
 
 func TestViewIncludesHeaderAsFirstLine(t *testing.T) {
 	m := newModel(context.Background(), Config{

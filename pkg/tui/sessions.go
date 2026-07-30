@@ -204,6 +204,7 @@ func (m model) applyHistory(msg historyLoadedMsg) (tea.Model, tea.Cmd) {
 			ToolID:   e.ToolID,
 			Args:     e.Args,
 			Result:   e.Result,
+			Artifact: e.Artifact,
 		})
 	}
 	m.planMode = false

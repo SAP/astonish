@@ -322,6 +322,24 @@ func (b *platformBackend) SetModelPin(ctx context.Context, provider, model strin
 	return effP, effM, nil
 }
 
+func (b *platformBackend) ReadArtifactContent(ctx context.Context, sessionID, path string) (backend.ArtifactContent, error) {
+	_ = ctx
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return backend.ArtifactContent{}, fmt.Errorf("artifact path required")
+	}
+	if sessionID == "" {
+		b.mu.Lock()
+		sessionID = b.sessionID
+		b.mu.Unlock()
+	}
+	content, err := b.client.GetArtifactContent(path, sessionID)
+	if err != nil {
+		return backend.ArtifactContent{}, err
+	}
+	return backend.ArtifactContent{Path: path, Content: content}, nil
+}
+
 func (b *platformBackend) NewSession() {
 	b.mu.Lock()
 	b.sessionID = ""
@@ -382,7 +400,7 @@ func (b *platformBackend) loadHistory(ctx context.Context, id string) ([]backend
 	_ = detail.Title
 	b.usage = usageFromSessionDetail(detail)
 	b.mu.Unlock()
-	return studioMessagesToHistory(detail.Messages), nil
+	return studioDetailToHistory(detail), nil
 }
 
 func usageFromSessionDetail(detail *client.SessionDetail) *events.Usage {
@@ -430,6 +448,21 @@ func addUsage(total, delta *events.Usage) *events.Usage {
 	return total
 }
 
+func studioDetailToHistory(detail *client.SessionDetail) []backend.HistoryEntry {
+	if detail == nil {
+		return nil
+	}
+	out := studioMessagesToHistory(detail.Messages)
+	for _, a := range detail.Artifacts {
+		artifact := artifactFromClient(a)
+		if artifact.Path == "" {
+			continue
+		}
+		out = append(out, backend.HistoryEntry{Kind: "artifact", Text: artifact.Path, Artifact: &artifact})
+	}
+	return out
+}
+
 func studioMessagesToHistory(msgs []client.StudioMessage) []backend.HistoryEntry {
 	out := make([]backend.HistoryEntry, 0, len(msgs))
 	for _, m := range msgs {
@@ -469,6 +502,17 @@ func studioMessagesToHistory(msgs []client.StudioMessage) []backend.HistoryEntry
 		}
 	}
 	return out
+}
+
+func artifactFromClient(a client.ArtifactInfo) events.Artifact {
+	return events.Artifact{
+		Path:        a.Path,
+		FileName:    a.FileName,
+		FileType:    a.FileType,
+		ToolName:    a.ToolName,
+		IsReport:    a.IsReport,
+		ReportTitle: a.ReportTitle,
+	}
 }
 
 func (b *platformBackend) RunTurn(ctx context.Context, message string, opts backend.TurnOptions) (<-chan events.Event, error) {
@@ -752,21 +796,52 @@ func mapSSEToEvents(sev *client.SSEEvent, debug bool) []events.Event {
 				}
 			}
 		}
+	case "report_marker":
+		var payload struct {
+			Path  string `json:"path"`
+			Title string `json:"title"`
+		}
+		if json.Unmarshal(data, &payload) == nil && payload.Path != "" {
+			artifact := events.Artifact{Path: payload.Path, IsReport: true, ReportTitle: payload.Title}
+			return []events.Event{{
+				Kind:     events.KindReportMarker,
+				Text:     payload.Path,
+				Artifact: &artifact,
+				Meta:     map[string]any{"path": payload.Path, "title": payload.Title},
+			}}
+		}
 	case "artifact":
 		var payload struct {
-			Path     string `json:"path"`
-			ToolName string `json:"tool_name"`
-			FileName string `json:"fileName"`
+			Path        string `json:"path"`
+			ToolName    string `json:"tool_name"`
+			ToolName2   string `json:"toolName"`
+			FileName    string `json:"fileName"`
+			FileType    string `json:"fileType"`
+			IsReport    bool   `json:"isReport"`
+			ReportTitle string `json:"reportTitle"`
 		}
 		if json.Unmarshal(data, &payload) == nil {
 			path := payload.Path
 			if path == "" {
 				path = payload.FileName
 			}
+			toolName := payload.ToolName
+			if toolName == "" {
+				toolName = payload.ToolName2
+			}
+			artifact := events.Artifact{
+				Path:        path,
+				FileName:    payload.FileName,
+				FileType:    payload.FileType,
+				ToolName:    toolName,
+				IsReport:    payload.IsReport,
+				ReportTitle: payload.ReportTitle,
+			}
 			return []events.Event{{
-				Kind: events.KindArtifact,
-				Text: path,
-				Meta: map[string]any{"path": path, "tool": payload.ToolName},
+				Kind:     events.KindArtifact,
+				Text:     path,
+				Artifact: &artifact,
+				Meta:     map[string]any{"path": path, "tool": toolName},
 			}}
 		}
 	case "error":

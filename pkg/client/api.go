@@ -2,6 +2,7 @@ package client
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 )
@@ -63,7 +64,18 @@ type SessionDetail struct {
 	CreatedAt    string          `json:"createdAt"`
 	UpdatedAt    string          `json:"updatedAt"`
 	Messages     []StudioMessage `json:"messages"`
+	Artifacts    []ArtifactInfo  `json:"artifacts,omitempty"`
 	TotalUsage   *UsageSummary   `json:"totalUsage,omitempty"`
+}
+
+// ArtifactInfo describes a generated file returned by the Studio session API.
+type ArtifactInfo struct {
+	Path        string `json:"path"`
+	FileName    string `json:"fileName"`
+	FileType    string `json:"fileType"`
+	ToolName    string `json:"toolName"`
+	IsReport    bool   `json:"isReport,omitempty"`
+	ReportTitle string `json:"reportTitle,omitempty"`
 }
 
 // GetSessionDetail returns typed session history for the terminal chat app.
@@ -236,6 +248,28 @@ type ChatRequest struct {
 // SendChatMessage sends a chat message and returns an SSE stream of events.
 func (c *Client) SendChatMessage(req *ChatRequest) (*SSEStream, error) {
 	return c.SSE("POST", "/api/studio/chat", req)
+}
+
+// GetArtifactContent returns the plain-text content for a generated file artifact.
+func (c *Client) GetArtifactContent(path, sessionID string) (string, error) {
+	params := url.Values{}
+	params.Set("path", path)
+	if sessionID != "" {
+		params.Set("session", sessionID)
+	}
+	resp, err := c.Do("GET", "/api/studio/artifacts/content?"+params.Encode(), nil)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return "", parseErrorResponse(resp)
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read artifact content: %w", err)
+	}
+	return string(data), nil
 }
 
 // NetworkDenial describes a blocked outbound connection returned by Studio.

@@ -103,6 +103,7 @@ AdaptiveColor cursor-line backgrounds that break dark alt-screen UIs).
 | Tool activity | `pkg/tui/render.ActivitySummary` + `StatsFromSteps` (`+N/−M`); click-to-expand reveals **raw request args and response JSON** (not file diffs) |
 | Network authorization | Inline transcript notice plus a focused approval card for OpenShell proxy denials; `enter`/`y` allows the blocked host, `b` allows the suggested broader pattern, and `n`/`esc` denies |
 | File diffs | **Main-thread** `ItemFileDiff` dual-gutter editor view (`old`/`new` line numbers + ± content) on successful `edit_file`/`write_file`. Prefers `verification_context`; falls back to args |
+| Generated files / reports | `artifact` SSE events render as a compact “Files generated” list in the transcript. Clicking a file opens a full-screen file viewer; `Esc` returns to the main chat. Markdown artifacts render through the same terminal markdown renderer as agent responses, while other extensions render as scrollable raw/code content with line numbers. |
 
 Streaming: unclosed fences render as incomplete code blocks (header shows `…`).
 
@@ -149,6 +150,7 @@ Approvals and denials call the network-grant REST endpoints directly instead of 
 - `ctrl+l` or `/sessions` — list sessions, `enter` resume, `d` delete with confirmation, `n` new, `esc` close
 - `ctrl+n` or `/new` — clear local session id; next message creates a new server session
 - Click a tool activity block to expand/collapse detailed execution rows; `ctrl+o` toggles the latest activity
+- Click a generated file row to open it in the terminal file viewer; `Esc` returns to the chat thread
 - Drag across transcript text to select it; releasing the mouse automatically copies the selected plain text to the system clipboard
 - `astonish chat --resume <id>` — loads history via `GET /api/studio/sessions/{id}` on open
 

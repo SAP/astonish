@@ -88,6 +88,10 @@ Pasting an image from the clipboard inserts `[image #1]` (then `#2`, `#3`, …).
 
 On Linux, image paste requires `wl-paste` (Wayland) or `xclip` (X11) on `PATH`. On macOS, the system pasteboard is used directly.
 
+## Generated files and reports
+
+When an agent creates files, the terminal transcript shows a compact **Files generated** list. Click a file row to open it in a full-screen viewer; press `Esc` to return to the main chat thread. Markdown files and reports render with formatted headings, lists, tables, and code blocks. Other file types open as scrollable raw/code content with line numbers.
+
 ## In-Session Commands
 
 While in an active chat session, type `/` to access these commands:

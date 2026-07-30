@@ -36,6 +36,9 @@ func (b staticBackend) ListModels(context.Context, string) ([]string, error) {
 func (b staticBackend) SetModelPin(_ context.Context, provider, model string) (string, string, error) {
 	return provider, model, nil
 }
+func (b staticBackend) ReadArtifactContent(_ context.Context, _, path string) (backend.ArtifactContent, error) {
+	return backend.ArtifactContent{Path: path, Content: ""}, nil
+}
 func (b staticBackend) Close() error { return nil }
 
 func TestViewIncludesHeaderAsFirstLine(t *testing.T) {

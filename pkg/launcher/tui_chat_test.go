@@ -88,6 +88,46 @@ func TestMapSSEToEvents_SoftDegrade(t *testing.T) {
 	}
 }
 
+func TestMapSSEToEvents_ArtifactMetadata(t *testing.T) {
+	evs := mapSSEToEvents(&client.SSEEvent{
+		Type: "artifact",
+		Data: `{"path":"/tmp/report.md","fileName":"report.md","fileType":"Markdown","toolName":"write_file","isReport":true,"reportTitle":"Quarterly Report"}`,
+	}, false)
+	if len(evs) != 1 || evs[0].Kind != events.KindArtifact || evs[0].Artifact == nil {
+		t.Fatalf("artifact: %+v", evs)
+	}
+	artifact := evs[0].Artifact
+	if artifact.Path != "/tmp/report.md" || artifact.FileName != "report.md" || artifact.FileType != "Markdown" || !artifact.IsReport || artifact.ReportTitle != "Quarterly Report" {
+		t.Fatalf("artifact metadata: %+v", artifact)
+	}
+}
+
+func TestMapSSEToEvents_ReportMarker(t *testing.T) {
+	evs := mapSSEToEvents(&client.SSEEvent{
+		Type: "report_marker",
+		Data: `{"path":"/tmp/report.md","title":"Quarterly Report"}`,
+	}, false)
+	if len(evs) != 1 || evs[0].Kind != events.KindReportMarker || evs[0].Artifact == nil {
+		t.Fatalf("report marker: %+v", evs)
+	}
+	if evs[0].Artifact.Path != "/tmp/report.md" || !evs[0].Artifact.IsReport || evs[0].Artifact.ReportTitle != "Quarterly Report" {
+		t.Fatalf("report marker artifact: %+v", evs[0].Artifact)
+	}
+}
+
+func TestStudioDetailToHistoryIncludesArtifacts(t *testing.T) {
+	hist := studioDetailToHistory(&client.SessionDetail{
+		Messages:  []client.StudioMessage{{Type: "agent", Content: "done"}},
+		Artifacts: []client.ArtifactInfo{{Path: "/tmp/report.md", FileName: "report.md", FileType: "Markdown", IsReport: true}},
+	})
+	if len(hist) != 2 {
+		t.Fatalf("history len=%d want 2: %+v", len(hist), hist)
+	}
+	if hist[1].Kind != "artifact" || hist[1].Artifact == nil || hist[1].Artifact.Path != "/tmp/report.md" {
+		t.Fatalf("artifact history entry: %+v", hist[1])
+	}
+}
+
 func TestMapSSEToEvents_SkipToolBoxFrame(t *testing.T) {
 	evs := mapSSEToEvents(&client.SSEEvent{
 		Type: "text",

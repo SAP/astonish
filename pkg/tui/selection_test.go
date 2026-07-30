@@ -34,7 +34,7 @@ func TestRenderTranscriptPlainLinesAlignWithRenderedLines(t *testing.T) {
 	th := DefaultTheme()
 	th.NoColor = false
 	m := model{theme: th, tr: tr, width: 80, height: 24, ready: true}
-	rendered, _ := m.renderTranscript()
+	rendered, _, _ := m.renderTranscript()
 	renderedLines := strings.Split(rendered, "\n")
 	if len(renderedLines) > 0 && renderedLines[len(renderedLines)-1] == "" {
 		renderedLines = renderedLines[:len(renderedLines)-1]
@@ -71,7 +71,7 @@ func TestSelectionHighlightUsesSameLineAsSelection(t *testing.T) {
 		selectionStart: selectionPoint{line: 4, col: 2},
 		selectionEnd:   selectionPoint{line: 4, col: 8},
 	}
-	rendered, _ := m.renderTranscript()
+	rendered, _, _ := m.renderTranscript()
 	lines := strings.Split(strings.TrimRight(rendered, "\n"), "\n")
 	if !strings.Contains(lines[4], "\x1b[7m") && !strings.Contains(lines[4], "48;5;252") {
 		t.Fatalf("expected selection highlight on selected line 4, got %q", lines[4])

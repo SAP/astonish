@@ -16,7 +16,8 @@ type Theme struct {
 	Text           lipgloss.Style
 	Muted          lipgloss.Style
 	User           lipgloss.Style // legacy accent; prefer UserBubble for transcript
-	UserBubble     lipgloss.Style // user message surface (orange outline, no "You" label)
+	UserBorder     lipgloss.Style // manually drawn user-message border
+	UserBubble     lipgloss.Style // user message surface (muted bronze outline, no "You" label)
 	UserExpandHint lipgloss.Style // right-aligned expand/collapse cue inside user bubble
 	Agent          lipgloss.Style // agent body text (no bg, no "Agent" label)
 	System         lipgloss.Style
@@ -61,7 +62,7 @@ func DefaultTheme() Theme {
 	green := lipgloss.Color("78")           // agent / success
 	red := lipgloss.Color("203")            // error / danger
 	orange := lipgloss.Color("208")         // numbers
-	softOrange := lipgloss.Color("172")     // comfortable user-message outline
+	userAccent := lipgloss.Color("#75633F") // muted bronze user-message outline
 	yellow := lipgloss.Color("221")         // approval
 	border := lipgloss.Color("238")         // subtle separator border
 
@@ -71,17 +72,18 @@ func DefaultTheme() Theme {
 		Text:       lipgloss.NewStyle().Foreground(text).Background(bg),
 		Muted:      lipgloss.NewStyle().Foreground(muted).Background(bg),
 		User:       lipgloss.NewStyle().Foreground(cyan).Background(bg).Bold(true),
-		// User bubble: orange outline, black interior.
+		UserBorder: lipgloss.NewStyle().Foreground(userAccent).Background(bg),
+		// User bubble: muted bronze outline, black interior.
 		// Width is applied at render time for wrapping.
 		UserBubble: lipgloss.NewStyle().
 			Foreground(text).
 			Background(bg).
 			Border(lipgloss.NormalBorder()).
-			BorderForeground(softOrange).
+			BorderForeground(userAccent).
 			Padding(0, 2),
-		// Expand/collapse cue: orange-tinted, right-aligned inside the outlined bubble.
+		// Expand/collapse cue: bronze-tinted, right-aligned inside the outlined bubble.
 		UserExpandHint: lipgloss.NewStyle().
-			Foreground(softOrange).
+			Foreground(userAccent).
 			Background(bg).
 			Italic(true).
 			Align(lipgloss.Right),
@@ -132,7 +134,7 @@ func plainTheme() Theme {
 	userHint := lipgloss.NewStyle().Italic(true).Align(lipgloss.Right)
 	return Theme{
 		Background: s,
-		Brand:      s, Text: s, Muted: s, User: s, UserBubble: userBubble, UserExpandHint: userHint, Agent: s, System: s,
+		Brand:      s, Text: s, Muted: s, User: s, UserBorder: s, UserBubble: userBubble, UserExpandHint: userHint, Agent: s, System: s,
 		Error: s, Success: s, Danger: s, Number: s, Border: s,
 		Header: s, Status: s, Input: s, Activity: s, Approval: s,
 		CodeGutter:  s,

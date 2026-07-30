@@ -2452,7 +2452,7 @@ func (m model) renderUserBubble(content string, expanded bool, width int) string
 		hint = "… double-click to collapse"
 	}
 
-	border := m.theme.Number
+	border := m.theme.UserBorder
 	text := m.theme.Text
 	bg := m.theme.Background
 

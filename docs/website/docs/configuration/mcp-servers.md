@@ -67,7 +67,7 @@ The server runs as a child process. Astonish communicates via stdin/stdout. Best
 ```
 
 ::: warning Stdio + Sandbox
-Stdio-based MCP servers require the sandbox to be enabled, since the child process runs inside the sandbox container.
+Stdio-based MCP servers require the sandbox to be enabled, since the child process runs inside the sandbox container. The Studio **Test connection** action follows the same rule: it creates a disposable sandbox session/pod for stdio servers instead of running the command on the Astonish host.
 :::
 
 ### SSE (Server-Sent Events)

@@ -1,38 +1,140 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
-	"github.com/gorilla/mux"
 	"github.com/SAP/astonish/pkg/common"
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/mcp"
+	"github.com/gorilla/mux"
+	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"google.golang.org/adk/tool"
+	"google.golang.org/adk/tool/mcptoolset"
 	"google.golang.org/genai"
 )
 
 // mcpManagerForRequest creates an MCP Manager from the DB store (platform mode)
 // or from the filesystem config (personal mode). This ensures the inspector
 // can find servers regardless of where they were saved.
-func mcpManagerForRequest(r *http.Request, serverName string) (*mcp.Manager, error) {
+func mcpManagerForRequest(r *http.Request, serverName string) (*mcp.Manager, config.MCPServerConfig, error) {
 	if mcpStore := effectiveMCPStore(r); mcpStore != nil {
 		srv, err := mcpStore.Get(r.Context(), serverName)
 		if err != nil || srv == nil {
-			return nil, fmt.Errorf("server '%s' not found in config", serverName)
+			return nil, config.MCPServerConfig{}, fmt.Errorf("server '%s' not found in config", serverName)
 		}
+		serverCfg := mcpServerToConfig(srv)
 		cfg := &config.MCPConfig{
 			MCPServers: map[string]config.MCPServerConfig{
-				serverName: mcpServerToConfig(srv),
+				serverName: serverCfg,
 			},
 		}
-		return mcp.NewManagerFromConfig(cfg), nil
+		return mcp.NewManagerFromConfig(cfg), serverCfg, nil
 	}
-	return nil, fmt.Errorf("MCP server store not available")
+	return nil, config.MCPServerConfig{}, fmt.Errorf("MCP server store not available")
+}
+
+func mcpServerConfigForRequest(r *http.Request, serverName string) (config.MCPServerConfig, bool) {
+	if mcpStore := effectiveMCPStore(r); mcpStore != nil {
+		srv, err := mcpStore.Get(r.Context(), serverName)
+		if err == nil && srv != nil {
+			return mcpServerToConfig(srv), true
+		}
+	}
+	return config.MCPServerConfig{}, false
+}
+
+func logMCPInspectorFailure(message, serverName string, serverCfg config.MCPServerConfig, err error, stderr *bytes.Buffer, extra ...any) {
+	attrs := mcp.FailureLogAttrs(serverName, serverCfg, err, stderr)
+	attrs = append(attrs, extra...)
+	slog.Warn(message, attrs...)
+}
+
+func mcpInspectorUsesSandbox(serverCfg config.MCPServerConfig) bool {
+	transport := strings.ToLower(strings.TrimSpace(serverCfg.Transport))
+	return transport != "sse" && transport != "streamable-http" && serverCfg.URL == ""
+}
+
+func listMCPToolsForInspector(ctx context.Context, r *http.Request, serverName string, serverCfg config.MCPServerConfig) ([]ToolSchema, error) {
+	if mcpInspectorUsesSandbox(serverCfg) {
+		data, err := discoverMCPToolsInSandbox(ctx, serverName, serverCfg, buildPGSessionRegistry(r.Context()))
+		if err != nil {
+			return nil, err
+		}
+		return decodeMCPToolSchemas(data)
+	}
+
+	transport := &mcpsdk.SSEClientTransport{Endpoint: serverCfg.URL}
+	toolset, err := mcptoolset.New(mcptoolset.Config{Transport: transport})
+	if err != nil {
+		return nil, err
+	}
+	minimalCtx := &minimalReadonlyContext{Context: ctx}
+	toolsList, err := toolset.Tools(minimalCtx)
+	if err != nil {
+		return nil, err
+	}
+	return toolSchemasFromTools(toolsList), nil
+}
+
+func decodeMCPToolSchemas(data json.RawMessage) ([]ToolSchema, error) {
+	var entries []struct {
+		Name        string          `json:"name"`
+		Description string          `json:"description"`
+		InputSchema json.RawMessage `json:"inputSchema,omitempty"`
+	}
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return nil, fmt.Errorf("failed to parse MCP tool discovery result: %w", err)
+	}
+
+	tools := make([]ToolSchema, 0, len(entries))
+	for _, entry := range entries {
+		schema := ToolSchema{
+			Name:        entry.Name,
+			Description: entry.Description,
+		}
+		if len(entry.InputSchema) > 0 {
+			var params any
+			if err := json.Unmarshal(entry.InputSchema, &params); err != nil {
+				return nil, fmt.Errorf("failed to parse MCP tool schema for %q: %w", entry.Name, err)
+			}
+			schema.Parameters = params
+		}
+		tools = append(tools, schema)
+	}
+	return tools, nil
+}
+
+func toolSchemasFromTools(toolsList []tool.Tool) []ToolSchema {
+	tools := make([]ToolSchema, 0, len(toolsList))
+	for _, t := range toolsList {
+		schema := ToolSchema{
+			Name:        t.Name(),
+			Description: t.Description(),
+		}
+
+		if declTool, ok := t.(common.ToolWithDeclaration); ok {
+			decl := declTool.Declaration()
+			if decl != nil && decl.ParametersJsonSchema != nil {
+				if genaiSchema, ok := decl.ParametersJsonSchema.(*genai.Schema); ok {
+					schema.Parameters = convertGenaiSchemaToMap(genaiSchema)
+				} else if mapSchema, ok := decl.ParametersJsonSchema.(map[string]interface{}); ok {
+					schema.Parameters = mapSchema
+				} else {
+					schema.Parameters = decl.ParametersJsonSchema
+				}
+			}
+		}
+
+		tools = append(tools, schema)
+	}
+	return tools
 }
 
 // ToolSchema represents a tool's parameter schema
@@ -67,67 +169,31 @@ func ListServerToolsHandler(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	serverName := vars["serverName"]
 
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), mcpDiscoveryTimeout)
 	defer cancel()
 
-	// Create a manager (platform-aware: DB store or filesystem)
-	mcpManager, err := mcpManagerForRequest(r, serverName)
+	_, serverCfg, err := mcpManagerForRequest(r, serverName)
 	if err != nil {
+		if cfg, ok := mcpServerConfigForRequest(r, serverName); ok {
+			logMCPInspectorFailure("MCP inspector failed to load server tools", serverName, cfg, err, nil, "phase", "load_config")
+		} else {
+			slog.Warn("MCP inspector failed to load server tools", "component", "mcp", "server", serverName, "phase", "load_config", "error", err)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(ListServerToolsResponse{
 			Error: fmt.Sprintf("Failed to load tools, %v", err),
 		})
 		return
 	}
-	defer mcpManager.Cleanup()
 
-	namedToolset, err := mcpManager.InitializeSingleToolset(ctx, serverName)
+	tools, err := listMCPToolsForInspector(ctx, r, serverName, serverCfg)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(ListServerToolsResponse{
-			Error: err.Error(),
-		})
-		return
-	}
-
-	// Get tools from the toolset
-	minimalCtx := &minimalReadonlyContext{Context: ctx}
-	toolsList, err := namedToolset.Toolset.Tools(minimalCtx)
-	if err != nil {
+		logMCPInspectorFailure("MCP inspector failed to list tools", serverName, serverCfg, err, nil, "phase", "list_tools", "sandbox", mcpInspectorUsesSandbox(serverCfg))
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(ListServerToolsResponse{
 			Error: fmt.Sprintf("Failed to list tools: %v", err),
 		})
 		return
-	}
-
-	// Convert to our response format
-	var tools []ToolSchema
-
-	// Interface for tools that have declarations
-	for _, t := range toolsList {
-		schema := ToolSchema{
-			Name:        t.Name(),
-			Description: t.Description(),
-		}
-
-		// Try to get the parameter schema from Declaration
-		if declTool, ok := t.(common.ToolWithDeclaration); ok {
-			decl := declTool.Declaration()
-			if decl != nil && decl.ParametersJsonSchema != nil {
-				// Convert genai.Schema to a map for JSON serialization
-				if genaiSchema, ok := decl.ParametersJsonSchema.(*genai.Schema); ok {
-					schema.Parameters = convertGenaiSchemaToMap(genaiSchema)
-				} else if mapSchema, ok := decl.ParametersJsonSchema.(map[string]interface{}); ok {
-					schema.Parameters = mapSchema
-				} else {
-					// Try to use it directly
-					schema.Parameters = decl.ParametersJsonSchema
-				}
-			}
-		}
-
-		tools = append(tools, schema)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -160,9 +226,13 @@ func RunServerToolHandler(w http.ResponseWriter, r *http.Request) {
 
 	startTime := time.Now()
 
-	// Create a manager (platform-aware: DB store or filesystem)
-	mcpManager, err := mcpManagerForRequest(r, serverName)
+	_, serverCfg, err := mcpManagerForRequest(r, serverName)
 	if err != nil {
+		if cfg, ok := mcpServerConfigForRequest(r, serverName); ok {
+			logMCPInspectorFailure("MCP inspector failed to load tool runner", serverName, cfg, err, nil, "phase", "load_config", "tool", toolName)
+		} else {
+			slog.Warn("MCP inspector failed to load tool runner", "component", "mcp", "server", serverName, "phase", "load_config", "tool", toolName, "error", err)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(ToolRunResponse{
 			Success:   false,
@@ -171,73 +241,19 @@ func RunServerToolHandler(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	defer mcpManager.Cleanup()
 
-	namedToolset, err := mcpManager.InitializeSingleToolset(ctx, serverName)
+	var result any
+	if mcpInspectorUsesSandbox(serverCfg) {
+		result, err = invokeMCPToolInContainer(r.WithContext(ctx), effectiveUserID(r), serverName, toolName, serverCfg, req.Params)
+	} else {
+		result, err = invokeMCPToolSSE(ctx, serverName, toolName, serverCfg, req.Params)
+	}
 	if err != nil {
+		logMCPInspectorFailure("MCP inspector failed to run tool", serverName, serverCfg, err, nil, "phase", "run_tool", "tool", toolName, "sandbox", mcpInspectorUsesSandbox(serverCfg))
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(ToolRunResponse{
 			Success:   false,
 			Error:     err.Error(),
-			TimeTaken: time.Since(startTime).String(),
-		})
-		return
-	}
-
-	// Get the specific tool
-	minimalCtx := &minimalReadonlyContext{Context: ctx}
-	toolsList, err := namedToolset.Toolset.Tools(minimalCtx)
-	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(ToolRunResponse{
-			Success:   false,
-			Error:     fmt.Sprintf("Failed to list tools: %v", err),
-			TimeTaken: time.Since(startTime).String(),
-		})
-		return
-	}
-
-	// Find the requested tool and execute it
-	var result map[string]any
-	var runErr error
-	toolFound := false
-
-	for _, t := range toolsList {
-		if t.Name() == toolName {
-			toolFound = true
-
-			// Try to call Run using the runnableTool interface
-			type runnableTool interface {
-				Run(tool.Context, any) (map[string]any, error)
-			}
-
-			if runnable, ok := t.(runnableTool); ok {
-				// Create a minimal tool context for execution
-				toolCtx := &minimalToolContext{Context: ctx}
-				result, runErr = runnable.Run(toolCtx, req.Params)
-			} else {
-				runErr = fmt.Errorf("tool '%s' does not implement Run method", toolName)
-			}
-			break
-		}
-	}
-
-	if !toolFound {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(ToolRunResponse{
-			Success:   false,
-			Error:     fmt.Sprintf("Tool '%s' not found in server '%s'", toolName, serverName),
-			TimeTaken: time.Since(startTime).String(),
-		})
-		return
-	}
-
-	if runErr != nil {
-		slog.Error("tool execution error", "server", serverName, "tool", toolName, "error", runErr)
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(ToolRunResponse{
-			Success:   false,
-			Error:     runErr.Error(),
 			TimeTaken: time.Since(startTime).String(),
 		})
 		return

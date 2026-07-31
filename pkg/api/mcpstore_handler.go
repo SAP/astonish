@@ -6,11 +6,11 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/gorilla/mux"
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/flowstore"
 	"github.com/SAP/astonish/pkg/mcpstore"
 	"github.com/SAP/astonish/pkg/store"
+	"github.com/gorilla/mux"
 )
 
 // MCPStoreListResponse is the response for GET /api/mcp-store
@@ -269,7 +269,8 @@ func installMCPStoreServerPlatform(w http.ResponseWriter, r *http.Request, mcpSt
 	}
 
 	// Discover tools asynchronously — sandbox discovery can take 30-120s.
-	asyncDiscoverAndCacheTools(mcpStore, serverName, newConfig, buildPGSessionRegistry(r.Context()))
+	runtimeCtx := detachedRuntimeNetworkPolicyContext(r, effectiveAppConfig(r))
+	asyncDiscoverAndCacheTools(runtimeCtx, mcpStore, serverName, newConfig, buildPGSessionRegistry(r.Context()))
 
 	// Reset the Studio chat agent so the next request picks up the new MCP server.
 	GetChatManager().Reset()

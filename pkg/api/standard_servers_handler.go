@@ -5,9 +5,9 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/gorilla/mux"
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/store"
+	"github.com/gorilla/mux"
 )
 
 // StandardServerResponse represents a standard server in the API response.
@@ -166,7 +166,8 @@ func installStandardServerPlatform(w http.ResponseWriter, r *http.Request, mcpSt
 	// MCP server startup + tool listing) can take 30-120s. Running this on the
 	// HTTP request path caused timeouts and context-cancellation failures.
 	// Tools appear in cached_tools within seconds to minutes after install.
-	asyncDiscoverAndCacheTools(mcpStore, srv.ID, newConfig, buildPGSessionRegistry(r.Context()))
+	runtimeCtx := detachedRuntimeNetworkPolicyContext(r, effectiveAppConfig(r))
+	asyncDiscoverAndCacheTools(runtimeCtx, mcpStore, srv.ID, newConfig, buildPGSessionRegistry(r.Context()))
 
 	GetChatManager().Reset()
 

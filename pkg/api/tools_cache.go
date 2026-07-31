@@ -15,6 +15,7 @@ import (
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/mcp"
 	"github.com/SAP/astonish/pkg/sandbox"
+	"github.com/SAP/astonish/pkg/sandbox/netpolicy"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/tools"
 	"github.com/gorilla/mux"
@@ -47,7 +48,11 @@ var discoveryInFlight sync.Map
 // cross-replica session consistency (platform mode with PG-backed store).
 // Callers should build it from the HTTP request context BEFORE spawning the
 // goroutine (the request context is unavailable inside the goroutine).
-func asyncDiscoverAndCacheTools(mcpStore store.MCPServerStore, serverName string, serverCfg config.MCPServerConfig, sessRegistry *sandbox.SessionRegistry) {
+//
+// runtimeCtx must not be the request context. It should be a detached context
+// carrying only runtime values needed by discovery, such as Network Policy
+// stores and the OpenShell gateway config.
+func asyncDiscoverAndCacheTools(runtimeCtx context.Context, mcpStore store.MCPServerStore, serverName string, serverCfg config.MCPServerConfig, sessRegistry *sandbox.SessionRegistry) {
 	if _, loaded := discoveryInFlight.LoadOrStore(serverName, struct{}{}); loaded {
 		slog.Info("MCP discovery already in progress, skipping duplicate", "server", serverName)
 		return
@@ -55,7 +60,10 @@ func asyncDiscoverAndCacheTools(mcpStore store.MCPServerStore, serverName string
 	go func() {
 		defer discoveryInFlight.Delete(serverName)
 
-		ctx, cancel := context.WithTimeout(context.Background(), mcpDiscoveryTimeout)
+		if runtimeCtx == nil {
+			runtimeCtx = context.Background()
+		}
+		ctx, cancel := context.WithTimeout(runtimeCtx, mcpDiscoveryTimeout)
 		defer cancel()
 
 		servers := map[string]config.MCPServerConfig{serverName: serverCfg}
@@ -189,8 +197,9 @@ func RefreshMCPServerHandler(w http.ResponseWriter, r *http.Request) {
 			Enabled:   server.Enabled,
 		}
 
-		// Run tool discovery asynchronously with a dedicated timeout
-		asyncDiscoverAndCacheTools(mcpStore, serverName, serverCfg, buildPGSessionRegistry(r.Context()))
+		// Run tool discovery asynchronously with a dedicated timeout.
+		runtimeCtx := detachedRuntimeNetworkPolicyContext(r, effectiveAppConfig(r))
+		asyncDiscoverAndCacheTools(runtimeCtx, mcpStore, serverName, serverCfg, buildPGSessionRegistry(r.Context()))
 
 		respondJSON(w, http.StatusOK, map[string]interface{}{"success": true})
 		return
@@ -337,6 +346,10 @@ func discoverMCPToolsInSandbox(ctx context.Context, serverName string, serverCfg
 	if err := backend.WaitForSessionReady(ctx, sessionID); err != nil {
 		return nil, fmt.Errorf("discovery session not ready: %w", err)
 	}
+
+	// Apply persisted network allow rules before stdio package managers such as
+	// npx/uvx try to install or start the MCP server.
+	netpolicy.EnsurePreSeedFromContext(ctx, sessionID)
 
 	// Create the backend-agnostic MCP transport
 	transport, stderrBuf := sandbox.NewBackendMCPTransport(backend, sessionID, serverCfg)

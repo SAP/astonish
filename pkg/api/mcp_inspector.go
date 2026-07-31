@@ -72,7 +72,8 @@ func mcpInspectorUsesSandbox(serverCfg config.MCPServerConfig) bool {
 
 func listMCPToolsForInspector(ctx context.Context, r *http.Request, serverName string, serverCfg config.MCPServerConfig) ([]ToolSchema, error) {
 	if mcpInspectorUsesSandbox(serverCfg) {
-		data, err := discoverMCPToolsInSandbox(ctx, serverName, serverCfg, buildPGSessionRegistry(r.Context()))
+		discoveryCtx := withRuntimeNetworkPolicyContext(ctx, r, effectiveAppConfig(r))
+		data, err := discoverMCPToolsInSandbox(discoveryCtx, serverName, serverCfg, buildPGSessionRegistry(r.Context()))
 		if err != nil {
 			return nil, err
 		}
@@ -155,8 +156,9 @@ type ToolSchema struct {
 
 // ListServerToolsResponse is the response for GET /api/mcp/{serverName}/tools
 type ListServerToolsResponse struct {
-	Tools []ToolSchema `json:"tools"`
-	Error string       `json:"error,omitempty"`
+	Tools                []ToolSchema             `json:"tools"`
+	Error                string                   `json:"error,omitempty"`
+	NetworkAuthorization *MCPNetworkAuthorization `json:"network_authorization,omitempty"`
 }
 
 // ToolRunRequest is the request for POST /api/mcp/{serverName}/tools/{toolName}/run
@@ -166,10 +168,11 @@ type ToolRunRequest struct {
 
 // ToolRunResponse is the response for POST /api/mcp/{serverName}/tools/{toolName}/run
 type ToolRunResponse struct {
-	Success   bool        `json:"success"`
-	Result    interface{} `json:"result,omitempty"`
-	Error     string      `json:"error,omitempty"`
-	TimeTaken string      `json:"time_taken"`
+	Success              bool                     `json:"success"`
+	Result               interface{}              `json:"result,omitempty"`
+	Error                string                   `json:"error,omitempty"`
+	TimeTaken            string                   `json:"time_taken"`
+	NetworkAuthorization *MCPNetworkAuthorization `json:"network_authorization,omitempty"`
 }
 
 // ListServerToolsHandler handles GET /api/mcp/{serverName}/tools
@@ -200,7 +203,8 @@ func ListServerToolsHandler(w http.ResponseWriter, r *http.Request) {
 		logMCPInspectorFailure("MCP inspector failed to list tools", serverName, serverCfg, err, nil, "phase", "list_tools", "sandbox", mcpInspectorUsesSandbox(serverCfg))
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(ListServerToolsResponse{
-			Error: fmt.Sprintf("Failed to list tools: %v", err),
+			Error:                fmt.Sprintf("Failed to list tools: %v", err),
+			NetworkAuthorization: networkAuthorizationFromMCPError(err, serverCfg),
 		})
 		return
 	}
@@ -261,9 +265,10 @@ func RunServerToolHandler(w http.ResponseWriter, r *http.Request) {
 		logMCPInspectorFailure("MCP inspector failed to run tool", serverName, serverCfg, err, nil, "phase", "run_tool", "tool", toolName, "sandbox", mcpInspectorUsesSandbox(serverCfg))
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(ToolRunResponse{
-			Success:   false,
-			Error:     err.Error(),
-			TimeTaken: time.Since(startTime).String(),
+			Success:              false,
+			Error:                err.Error(),
+			TimeTaken:            time.Since(startTime).String(),
+			NetworkAuthorization: networkAuthorizationFromMCPError(err, serverCfg),
 		})
 		return
 	}

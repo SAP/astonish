@@ -71,7 +71,8 @@ func TestMCPInspectorUsesSandbox(t *testing.T) {
 		{"explicit stdio uses sandbox", config.MCPServerConfig{Transport: "stdio", Command: "npx"}, true},
 		{"sse stays remote", config.MCPServerConfig{Transport: "sse", URL: "https://example.test/sse"}, false},
 		{"streamable http stays remote", config.MCPServerConfig{Transport: "streamable-http", URL: "https://example.test/mcp"}, false},
-		{"url without transport stays remote", config.MCPServerConfig{URL: "https://example.test/sse"}, false},
+		{"url without transport still uses sandbox", config.MCPServerConfig{URL: "https://example.test/sse"}, true},
+		{"stdio with url still uses sandbox", config.MCPServerConfig{Transport: "stdio", Command: "npx", URL: "https://example.test/sse"}, true},
 	}
 
 	for _, tt := range tests {

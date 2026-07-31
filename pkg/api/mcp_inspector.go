@@ -58,7 +58,7 @@ func logMCPInspectorFailure(message, serverName string, serverCfg config.MCPServ
 
 func mcpInspectorUsesSandbox(serverCfg config.MCPServerConfig) bool {
 	transport := strings.ToLower(strings.TrimSpace(serverCfg.Transport))
-	return transport != "sse" && transport != "streamable-http" && serverCfg.URL == ""
+	return transport != "sse" && transport != "streamable-http"
 }
 
 func listMCPToolsForInspector(ctx context.Context, r *http.Request, serverName string, serverCfg config.MCPServerConfig) ([]ToolSchema, error) {

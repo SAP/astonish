@@ -24,7 +24,7 @@ The `ContainerMCPTransport` implements the MCP SDK's `Transport` interface by st
 
 MCP uses JSON-RPC over stdout. If an MCP server writes log messages to stdout (a common mistake), it corrupts the JSON-RPC stream. The `ExecNonInteractive` call uses `SeparateStderr: true` to keep stderr separate, and the captured stderr is available for diagnostics.
 
-MCP startup and discovery failures must be logged with enough context to diagnose cloud deployments from container logs alone: server name, transport, command and args for stdio servers, URL scheme/host/path for remote servers, env var names, the underlying error, and captured stderr. Env var values and URL credentials/query strings are intentionally omitted from logs.
+MCP startup and discovery failures must be logged with enough context to diagnose cloud deployments from container logs alone: server name, transport, command and args for stdio servers, URL scheme/host/path for remote servers, env var names, the underlying error, and captured stderr. The sandbox stdio transport also captures the non-JSON stdout lines it discards before forwarding the stream to the MCP SDK. That keeps JSON-RPC messages private to the protocol while still exposing package-manager or runtime failures that incorrectly print to stdout before an `initialize` EOF. Env var values and URL credentials/query strings are intentionally omitted from logs.
 
 ### Why Tool Caching
 
@@ -83,8 +83,9 @@ Host:
 Container:
   ContainerMCPTransport.Connect():
     1. ExecNonInteractive(command, args, env, SeparateStderr=true)
-    2. Bridge stdin/stdout to mcp.IOTransport
-    3. Return mcp.Connection
+    2. Filter stdout so only JSON-RPC lines reach mcp.IOTransport
+    3. Capture discarded non-JSON stdout for diagnostics
+    4. Return mcp.Connection
     |
     v
   JSON-RPC over stdio:

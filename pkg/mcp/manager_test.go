@@ -185,6 +185,32 @@ func TestDiagnosticStderr_TruncatesLongOutput(t *testing.T) {
 	}
 }
 
+func TestDiagnosticOutput_EmptyAndTruncation(t *testing.T) {
+	t.Parallel()
+	if got := DiagnosticOutput(nil); got != "" {
+		t.Fatalf("nil diagnostic output = %q, want empty", got)
+	}
+	if got := DiagnosticOutput(bytes.NewBuffer(nil)); got != "" {
+		t.Fatalf("empty diagnostic output = %q, want empty", got)
+	}
+	got := DiagnosticOutput(bytes.NewBufferString(strings.Repeat("x", maxDiagnosticOutputLen+10)))
+	if len(got) <= maxDiagnosticOutputLen || !strings.Contains(got, "[truncated]") {
+		t.Fatalf("expected truncated diagnostic output, got length=%d value=%q", len(got), got)
+	}
+}
+
+func TestDiagnosticOutputForServer_RedactsEnvValues(t *testing.T) {
+	t.Parallel()
+	cfg := config.MCPServerConfig{Env: map[string]string{"API_TOKEN": "secret-token-value"}}
+	got := DiagnosticOutputForServer(bytes.NewBufferString("failed with secret-token-value"), cfg)
+	if strings.Contains(got, "secret-token-value") {
+		t.Fatalf("diagnostic output leaked env value: %q", got)
+	}
+	if !strings.Contains(got, "[redacted]") {
+		t.Fatalf("expected redaction marker, got %q", got)
+	}
+}
+
 func TestCreateTransport_UnsupportedType(t *testing.T) {
 	t.Parallel()
 	cfg := config.MCPServerConfig{

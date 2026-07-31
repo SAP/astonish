@@ -117,11 +117,13 @@ func TestLogMCPInspectorFailure_IncludesListToolsDiagnostics(t *testing.T) {
 		},
 	}
 	stderr := bytes.NewBufferString("server exited during initialize")
+	cause := errors.New("calling initialize: EOF")
+	err := newMCPSandboxDiagnosticsError("failed to list tools", cause, stderr, bytes.NewBufferString("npm ERR! network timeout secret-value"), cfg)
 
-	logMCPInspectorFailure("MCP inspector failed to list tools", "context7", cfg, errors.New("calling initialize: EOF"), stderr, "phase", "list_tools")
+	logMCPInspectorFailure("MCP inspector failed to list tools", "context7", cfg, err, stderr, "phase", "list_tools")
 
 	out := buf.String()
-	for _, want := range []string{"MCP inspector failed to list tools", "server=context7", "phase=list_tools", "command=npx", "@upstash/context7-mcp", "CONTEXT7_API_KEY", "calling initialize: EOF", "server exited during initialize"} {
+	for _, want := range []string{"MCP inspector failed to list tools", "server=context7", "phase=list_tools", "command=npx", "@upstash/context7-mcp", "CONTEXT7_API_KEY", "calling initialize: EOF", "server exited during initialize", "npm ERR! network timeout"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected log output to contain %q, got %s", want, out)
 		}

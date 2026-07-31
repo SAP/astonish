@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/SAP/astonish/pkg/config"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // BackendMCPTransport implements mcp.Transport by running the MCP server
@@ -30,6 +30,10 @@ type BackendMCPTransport struct {
 	// Stderr captures the MCP server's stderr output for diagnostics.
 	Stderr *bytes.Buffer
 
+	// StdoutDiagnostics captures non-JSON stdout lines discarded by the protocol
+	// filter. Valid JSON-RPC messages are never captured here.
+	StdoutDiagnostics *bytes.Buffer
+
 	mu     sync.Mutex
 	stream ExecStream
 }
@@ -45,12 +49,14 @@ func NewBackendMCPTransport(backend Backend, sessionID string, cfg config.MCPSer
 	}
 
 	var stderr bytes.Buffer
+	var stdoutDiagnostics bytes.Buffer
 	return &BackendMCPTransport{
-		backend:   backend,
-		sessionID: sessionID,
-		command:   cmd,
-		env:       env,
-		Stderr:    &stderr,
+		backend:           backend,
+		sessionID:         sessionID,
+		command:           cmd,
+		env:               env,
+		Stderr:            &stderr,
+		StdoutDiagnostics: &stdoutDiagnostics,
 	}, &stderr
 }
 
@@ -106,9 +112,11 @@ func (t *BackendMCPTransport) Connect(ctx context.Context) (mcp.Connection, erro
 	// ExecStream implements io.Reader (stdout) and io.Writer (stdin).
 	// The jsonLineFilterReader discards any non-JSON lines (ANSI escapes,
 	// spinners, banners) that PTY contamination injects into the stream.
+	// Discarded lines are captured separately for diagnostics so startup EOFs
+	// do not hide npm/node/package-manager failures printed on stdout.
 	// Every line is checked — only lines starting with '{"' pass through.
 	rwc := &backendStreamRWC{stream: stream}
-	filteredReader := newJSONLineFilterReader(rwc)
+	filteredReader := newJSONLineFilterReaderWithDiagnostics(rwc, t.StdoutDiagnostics)
 
 	inner := &mcp.IOTransport{
 		Reader: filteredReader,
@@ -353,6 +361,8 @@ func extractBinaryName(packageSpec string) string {
 	return name
 }
 
+const maxCapturedMCPStdoutDiagnosticsLen = 4096
+
 // jsonLineFilterReader wraps an io.Reader and only passes through lines that
 // begin with '{"' (a JSON-RPC message). All other lines are discarded. This
 // provides robust protection against PTY contamination from any source:
@@ -371,14 +381,19 @@ func extractBinaryName(packageSpec string) string {
 // This ensures interleaved contamination (e.g., spinner frames between
 // JSON responses) is always caught.
 type jsonLineFilterReader struct {
-	inner    io.ReadCloser
-	lineBuf  []byte // accumulates bytes until \n
-	passData []byte // current JSON line being served to caller
-	passOff  int    // read offset into passData
+	inner       io.ReadCloser
+	diagnostics *bytes.Buffer
+	lineBuf     []byte // accumulates bytes until \n
+	passData    []byte // current JSON line being served to caller
+	passOff     int    // read offset into passData
 }
 
 func newJSONLineFilterReader(r io.ReadCloser) *jsonLineFilterReader {
-	return &jsonLineFilterReader{inner: r}
+	return newJSONLineFilterReaderWithDiagnostics(r, nil)
+}
+
+func newJSONLineFilterReaderWithDiagnostics(r io.ReadCloser, diagnostics *bytes.Buffer) *jsonLineFilterReader {
+	return &jsonLineFilterReader{inner: r, diagnostics: diagnostics}
 }
 
 func (f *jsonLineFilterReader) Read(p []byte) (int, error) {
@@ -414,6 +429,7 @@ func (f *jsonLineFilterReader) Read(p []byte) (int, error) {
 				}
 				return n, nil
 			}
+			f.captureDiagnostic(line)
 			// Non-JSON line — discard and continue processing lineBuf.
 		}
 
@@ -439,6 +455,10 @@ func (f *jsonLineFilterReader) Read(p []byte) (int, error) {
 				}
 				return n, nil
 			}
+			if len(f.lineBuf) > 0 {
+				f.captureDiagnostic(f.lineBuf)
+				f.lineBuf = nil
+			}
 			return 0, readErr
 		}
 	}
@@ -452,6 +472,18 @@ func (f *jsonLineFilterReader) Read(p []byte) (int, error) {
 func isJSONRPCLine(line []byte) bool {
 	b := bytes.TrimLeft(line, "\r")
 	return len(b) >= 2 && b[0] == '{' && b[1] == '"'
+}
+
+func (f *jsonLineFilterReader) captureDiagnostic(line []byte) {
+	if f.diagnostics == nil || len(line) == 0 || f.diagnostics.Len() >= maxCapturedMCPStdoutDiagnosticsLen {
+		return
+	}
+	remaining := maxCapturedMCPStdoutDiagnosticsLen - f.diagnostics.Len()
+	if len(line) <= remaining {
+		f.diagnostics.Write(line)
+		return
+	}
+	f.diagnostics.Write(line[:remaining])
 }
 
 func (f *jsonLineFilterReader) Close() error {

@@ -163,8 +163,9 @@ All filesystem operations that touch the overlay system (mount, chown, stat, rsy
 MCP (Model Context Protocol) servers run inside containers via `ContainerMCPTransport`. This implements the `mcp.Transport` interface by:
 
 1. Starting the MCP server process via `ExecNonInteractive` with `SeparateStderr` (critical -- stderr would corrupt JSON-RPC on stdout).
-2. Bridging the container process's stdin/stdout to the MCP SDK's `IOTransport`.
-3. Providing a default `PATH` that includes `/root/.local/bin` (where uv/npm install tools).
+2. Filtering stdout so only JSON-RPC lines reach the MCP SDK's `IOTransport`.
+3. Capturing discarded non-JSON stdout separately for bounded diagnostics when package managers or runtimes print failures before an `initialize` EOF.
+4. Providing a default `PATH` that includes `/root/.local/bin` (where uv/npm install tools).
 
 ### Security Configuration
 

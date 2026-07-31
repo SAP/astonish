@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -52,13 +53,21 @@ func mcpServerConfigForRequest(r *http.Request, serverName string) (config.MCPSe
 
 func logMCPInspectorFailure(message, serverName string, serverCfg config.MCPServerConfig, err error, stderr *bytes.Buffer, extra ...any) {
 	attrs := mcp.FailureLogAttrs(serverName, serverCfg, err, stderr)
+	var diagErr *mcpSandboxDiagnosticsError
+	if errors.As(err, &diagErr) && diagErr.stdout != "" {
+		attrs = append(attrs, "stdout", diagErr.stdout)
+	}
 	attrs = append(attrs, extra...)
 	slog.Warn(message, attrs...)
 }
 
-func mcpInspectorUsesSandbox(serverCfg config.MCPServerConfig) bool {
+func mcpServerUsesSandbox(serverCfg config.MCPServerConfig) bool {
 	transport := strings.ToLower(strings.TrimSpace(serverCfg.Transport))
 	return transport != "sse" && transport != "streamable-http"
+}
+
+func mcpInspectorUsesSandbox(serverCfg config.MCPServerConfig) bool {
+	return mcpServerUsesSandbox(serverCfg)
 }
 
 func listMCPToolsForInspector(ctx context.Context, r *http.Request, serverName string, serverCfg config.MCPServerConfig) ([]ToolSchema, error) {

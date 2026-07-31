@@ -295,8 +295,12 @@ func (l *LazyMCPToolset) startInSandbox(ctx context.Context, sessionID string) e
 	})
 	if err != nil {
 		transport.Close()
-		startErr := fmt.Errorf("failed to create toolset for MCP server '%s' in sandbox: %w (stderr: %s)", l.serverName, err, mcp.DiagnosticStderr(stderrBuf))
-		slog.Warn("sandbox MCP server startup failed", mcp.FailureLogAttrs(l.serverName, l.serverCfg, startErr, stderrBuf)...)
+		stderr := mcp.DiagnosticStderrForServer(stderrBuf, l.serverCfg)
+		stdout := mcp.DiagnosticOutputForServer(transport.StdoutDiagnostics, l.serverCfg)
+		startErr := fmt.Errorf("failed to create toolset for MCP server '%s' in sandbox: %w (stderr: %s, stdout: %s)", l.serverName, err, stderr, stdout)
+		attrs := mcp.FailureLogAttrs(l.serverName, l.serverCfg, startErr, stderrBuf)
+		attrs = append(attrs, "stdout", stdout)
+		slog.Warn("sandbox MCP server startup failed", attrs...)
 		return l.setSessionError(sessionID, startErr)
 	}
 
@@ -305,8 +309,12 @@ func (l *LazyMCPToolset) startInSandbox(ctx context.Context, sessionID string) e
 	liveToolList, err := toolset.Tools(minCtx)
 	if err != nil {
 		transport.Close()
-		toolsErr := fmt.Errorf("failed to get tools from MCP server '%s' in sandbox: %w", l.serverName, err)
-		slog.Warn("sandbox MCP server tool listing failed", mcp.FailureLogAttrs(l.serverName, l.serverCfg, toolsErr, stderrBuf)...)
+		stderr := mcp.DiagnosticStderrForServer(stderrBuf, l.serverCfg)
+		stdout := mcp.DiagnosticOutputForServer(transport.StdoutDiagnostics, l.serverCfg)
+		toolsErr := fmt.Errorf("failed to get tools from MCP server '%s' in sandbox: %w (stderr: %s, stdout: %s)", l.serverName, err, stderr, stdout)
+		attrs := mcp.FailureLogAttrs(l.serverName, l.serverCfg, toolsErr, stderrBuf)
+		attrs = append(attrs, "stdout", stdout)
+		slog.Warn("sandbox MCP server tool listing failed", attrs...)
 		return l.setSessionError(sessionID, toolsErr)
 	}
 

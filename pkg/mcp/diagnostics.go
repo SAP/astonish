@@ -54,14 +54,46 @@ func ServerConfigLogAttrs(serverName string, cfg config.MCPServerConfig) []any {
 // FailureLogAttrs adds failure-specific fields to ServerConfigLogAttrs.
 func FailureLogAttrs(serverName string, cfg config.MCPServerConfig, err error, stderr *bytes.Buffer) []any {
 	attrs := ServerConfigLogAttrs(serverName, cfg)
-	attrs = append(attrs, "error", err, "stderr", DiagnosticStderr(stderr))
+	attrs = append(attrs, "error", err, "stderr", DiagnosticStderrForServer(stderr, cfg))
 	return attrs
 }
 
 // DiagnosticStderr returns stderr output suitable for logs, bounded to avoid
 // flooding container logs with very large process output.
 func DiagnosticStderr(buf *bytes.Buffer) string {
-	out := GetStderr(buf)
+	return diagnosticOutput(GetStderr(buf))
+}
+
+// DiagnosticStderrForServer returns stderr output with known MCP env values redacted.
+func DiagnosticStderrForServer(buf *bytes.Buffer, cfg config.MCPServerConfig) string {
+	return RedactKnownSecrets(DiagnosticStderr(buf), cfg)
+}
+
+// DiagnosticOutput returns arbitrary process output suitable for logs, bounded
+// to avoid flooding container logs with very large stdout/stderr content.
+func DiagnosticOutput(buf *bytes.Buffer) string {
+	if buf == nil || buf.Len() == 0 {
+		return ""
+	}
+	return diagnosticOutput(buf.String())
+}
+
+// DiagnosticOutputForServer returns process output with known MCP env values redacted.
+func DiagnosticOutputForServer(buf *bytes.Buffer, cfg config.MCPServerConfig) string {
+	return RedactKnownSecrets(DiagnosticOutput(buf), cfg)
+}
+
+// RedactKnownSecrets removes configured MCP env values from diagnostic output.
+func RedactKnownSecrets(out string, cfg config.MCPServerConfig) string {
+	for _, value := range cfg.Env {
+		if len(value) >= 4 {
+			out = strings.ReplaceAll(out, value, "[redacted]")
+		}
+	}
+	return out
+}
+
+func diagnosticOutput(out string) string {
 	if len(out) <= maxDiagnosticOutputLen {
 		return out
 	}

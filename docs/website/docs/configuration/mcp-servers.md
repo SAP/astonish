@@ -180,7 +180,7 @@ kubectl logs -n astonish -l app.kubernetes.io/component=api --tail=100
 kubectl logs -n astonish -l app.kubernetes.io/component=worker --tail=100
 ```
 
-Failure logs include the server name, transport, stdio command and args, remote URL scheme/host/path, env var names, the underlying error, and captured stderr. Secret env values and URL credentials/query strings are not printed.
+Failure logs include the server name, transport, stdio command and args, remote URL scheme/host/path, env var names, the underlying error, captured stderr, and non-JSON stdout that was discarded from the MCP protocol stream. This makes `initialize: EOF` failures actionable when npm/node/package-manager output was printed to stdout instead of stderr. Secret env values, URL credentials, URL query strings, and JSON-RPC protocol messages are not printed.
 
 ## Best Practices
 

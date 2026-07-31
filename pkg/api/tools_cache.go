@@ -347,16 +347,16 @@ func discoverMCPToolsInSandbox(ctx context.Context, serverName string, serverCfg
 		Transport: transport,
 	})
 	if err != nil {
-		stderrStr := stderrBuf.String()
-		return nil, fmt.Errorf("failed to start MCP server %q in sandbox: %w (stderr: %s)", serverName, err, stderrStr)
+		msg := fmt.Sprintf("failed to start MCP server %q in sandbox", serverName)
+		return nil, newMCPSandboxDiagnosticsError(msg, err, stderrBuf, transport.StdoutDiagnostics, serverCfg)
 	}
 
 	// List tools
 	toolCtx := &minimalReadonlyContext{Context: ctx}
 	mcpTools, err := toolset.Tools(toolCtx)
 	if err != nil {
-		stderrStr := stderrBuf.String()
-		return nil, fmt.Errorf("failed to list tools from MCP server %q: %w (stderr: %s)", serverName, err, stderrStr)
+		msg := fmt.Sprintf("failed to list tools from MCP server %q", serverName)
+		return nil, newMCPSandboxDiagnosticsError(msg, err, stderrBuf, transport.StdoutDiagnostics, serverCfg)
 	}
 
 	// Marshal tool declarations to JSON (same format as discoverMCPToolsOnHost)

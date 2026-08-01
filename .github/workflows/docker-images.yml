@@ -132,7 +132,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Generate artifact attestation
-        uses: actions/attest-build-provenance@v1
+        uses: actions/attest-build-provenance@v4
         with:
           subject-name: ghcr.io/sap/astonish
           subject-digest: ${{ steps.push.outputs.digest }}
@@ -226,7 +226,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Generate artifact attestation
-        uses: actions/attest-build-provenance@v1
+        uses: actions/attest-build-provenance@v4
         with:
           subject-name: ghcr.io/sap/astonish-incus
           subject-digest: ${{ steps.push.outputs.digest }}
@@ -302,7 +302,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Generate artifact attestation
-        uses: actions/attest-build-provenance@v1
+        uses: actions/attest-build-provenance@v4
         with:
           subject-name: ghcr.io/sap/astonish-sandbox-base
           subject-digest: ${{ steps.push.outputs.digest }}
@@ -392,7 +392,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Generate artifact attestation
-        uses: actions/attest-build-provenance@v1
+        uses: actions/attest-build-provenance@v4
         with:
           subject-name: ghcr.io/sap/astonish-sandbox-openshell
           subject-digest: ${{ steps.push.outputs.digest }}

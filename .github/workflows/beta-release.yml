@@ -86,7 +86,7 @@ jobs:
           npm run build
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version-file: 'go.mod'
           cache: false
@@ -198,7 +198,7 @@ jobs:
       # Dockerfile COPYs pre-built astonish-linux-${TARGETARCH}; compile on the
       # runner (same as docker-images.yml) to avoid QEMU Go builds.
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version-file: 'go.mod'
 
@@ -285,7 +285,7 @@ jobs:
           npm run build
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version-file: 'go.mod'
 
@@ -440,7 +440,7 @@ jobs:
       # Dockerfile COPYs astonish-linux-${TARGETARCH}; compile on the runner
       # (same as docker-images.yml build-sandbox-openshell).
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version-file: 'go.mod'
 

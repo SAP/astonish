@@ -10,14 +10,15 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gorilla/mux"
 	"github.com/SAP/astonish/pkg/cache"
 	"github.com/SAP/astonish/pkg/common"
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/mcp"
 	"github.com/SAP/astonish/pkg/sandbox"
+	"github.com/SAP/astonish/pkg/sandbox/netpolicy"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/tools"
+	"github.com/gorilla/mux"
 	"google.golang.org/adk/tool/mcptoolset"
 )
 
@@ -47,7 +48,11 @@ var discoveryInFlight sync.Map
 // cross-replica session consistency (platform mode with PG-backed store).
 // Callers should build it from the HTTP request context BEFORE spawning the
 // goroutine (the request context is unavailable inside the goroutine).
-func asyncDiscoverAndCacheTools(mcpStore store.MCPServerStore, serverName string, serverCfg config.MCPServerConfig, sessRegistry *sandbox.SessionRegistry) {
+//
+// runtimeCtx must not be the request context. It should be a detached context
+// carrying only runtime values needed by discovery, such as Network Policy
+// stores and the OpenShell gateway config.
+func asyncDiscoverAndCacheTools(runtimeCtx context.Context, mcpStore store.MCPServerStore, serverName string, serverCfg config.MCPServerConfig, sessRegistry *sandbox.SessionRegistry) {
 	if _, loaded := discoveryInFlight.LoadOrStore(serverName, struct{}{}); loaded {
 		slog.Info("MCP discovery already in progress, skipping duplicate", "server", serverName)
 		return
@@ -55,13 +60,16 @@ func asyncDiscoverAndCacheTools(mcpStore store.MCPServerStore, serverName string
 	go func() {
 		defer discoveryInFlight.Delete(serverName)
 
-		ctx, cancel := context.WithTimeout(context.Background(), mcpDiscoveryTimeout)
+		if runtimeCtx == nil {
+			runtimeCtx = context.Background()
+		}
+		ctx, cancel := context.WithTimeout(runtimeCtx, mcpDiscoveryTimeout)
 		defer cancel()
 
 		servers := map[string]config.MCPServerConfig{serverName: serverCfg}
 		discoveredTools := discoverMCPToolsForPlatform(ctx, serverName, servers, sessRegistry)
 		if discoveredTools == nil {
-			slog.Warn("async MCP discovery: no tools discovered", "server", serverName)
+			slog.Warn("async MCP discovery: no tools discovered", mcp.ServerConfigLogAttrs(serverName, serverCfg)...)
 			return
 		}
 
@@ -189,8 +197,9 @@ func RefreshMCPServerHandler(w http.ResponseWriter, r *http.Request) {
 			Enabled:   server.Enabled,
 		}
 
-		// Run tool discovery asynchronously with a dedicated timeout
-		asyncDiscoverAndCacheTools(mcpStore, serverName, serverCfg, buildPGSessionRegistry(r.Context()))
+		// Run tool discovery asynchronously with a dedicated timeout.
+		runtimeCtx := detachedRuntimeNetworkPolicyContext(r, effectiveAppConfig(r))
+		asyncDiscoverAndCacheTools(runtimeCtx, mcpStore, serverName, serverCfg, buildPGSessionRegistry(r.Context()))
 
 		respondJSON(w, http.StatusOK, map[string]interface{}{"success": true})
 		return
@@ -243,7 +252,7 @@ func checkStdioMCPInstallable(transport string) error {
 func discoverMCPToolsForPlatform(ctx context.Context, serverName string, servers map[string]config.MCPServerConfig, sessRegistry *sandbox.SessionRegistry) json.RawMessage {
 	serverCfg, ok := servers[serverName]
 	if !ok {
-		slog.Warn("MCP discovery: server config not found", "server", serverName)
+		slog.Warn("MCP discovery: server config not found", "component", "mcp", "server", serverName)
 		return nil
 	}
 
@@ -256,7 +265,7 @@ func discoverMCPToolsForPlatform(ctx context.Context, serverName string, servers
 	// Stdio servers: must run in sandbox
 	data, err := discoverMCPToolsInSandbox(ctx, serverName, serverCfg, sessRegistry)
 	if err != nil {
-		slog.Warn("MCP sandbox discovery failed", "server", serverName, "error", err)
+		slog.Warn("MCP sandbox discovery failed", mcp.FailureLogAttrs(serverName, serverCfg, err, nil)...)
 		return nil
 	}
 	return data
@@ -338,6 +347,10 @@ func discoverMCPToolsInSandbox(ctx context.Context, serverName string, serverCfg
 		return nil, fmt.Errorf("discovery session not ready: %w", err)
 	}
 
+	// Apply persisted network allow rules before stdio package managers such as
+	// npx/uvx try to install or start the MCP server.
+	netpolicy.EnsurePreSeedFromContext(ctx, sessionID)
+
 	// Create the backend-agnostic MCP transport
 	transport, stderrBuf := sandbox.NewBackendMCPTransport(backend, sessionID, serverCfg)
 	defer transport.Close()
@@ -347,16 +360,16 @@ func discoverMCPToolsInSandbox(ctx context.Context, serverName string, serverCfg
 		Transport: transport,
 	})
 	if err != nil {
-		stderrStr := stderrBuf.String()
-		return nil, fmt.Errorf("failed to start MCP server %q in sandbox: %w (stderr: %s)", serverName, err, stderrStr)
+		msg := fmt.Sprintf("failed to start MCP server %q in sandbox", serverName)
+		return nil, newMCPSandboxDiagnosticsError(msg, err, stderrBuf, transport.StdoutDiagnostics, serverCfg)
 	}
 
 	// List tools
 	toolCtx := &minimalReadonlyContext{Context: ctx}
 	mcpTools, err := toolset.Tools(toolCtx)
 	if err != nil {
-		stderrStr := stderrBuf.String()
-		return nil, fmt.Errorf("failed to list tools from MCP server %q: %w (stderr: %s)", serverName, err, stderrStr)
+		msg := fmt.Sprintf("failed to list tools from MCP server %q", serverName)
+		return nil, newMCPSandboxDiagnosticsError(msg, err, stderrBuf, transport.StdoutDiagnostics, serverCfg)
 	}
 
 	// Marshal tool declarations to JSON (same format as discoverMCPToolsOnHost)
@@ -391,7 +404,7 @@ func discoverMCPToolsOnHost(ctx context.Context, serverName string, servers map[
 	defer mgr.Cleanup()
 
 	if err := mgr.InitializeToolsets(ctx); err != nil {
-		slog.Warn("platform MCP refresh: failed to initialize", "server", serverName, "error", err)
+		slog.Warn("platform MCP refresh: failed to initialize", mcp.FailureLogAttrs(serverName, servers[serverName], err, nil)...)
 		return nil
 	}
 
@@ -410,7 +423,7 @@ func discoverMCPToolsOnHost(ctx context.Context, serverName string, servers map[
 		}
 		mcpTools, err := namedToolset.Toolset.Tools(minimalCtx)
 		if err != nil {
-			slog.Warn("platform MCP refresh: failed to get tools", "server", serverName, "error", err)
+			slog.Warn("platform MCP refresh: failed to get tools", mcp.FailureLogAttrs(serverName, servers[serverName], err, namedToolset.Stderr)...)
 			return nil
 		}
 		for _, t := range mcpTools {

@@ -29,11 +29,34 @@ interface ParamSchema {
   [key: string]: any
 }
 
+interface MCPNetworkDenial {
+  chunk_id?: string
+  host: string
+  port: number
+  broader_pattern?: string
+  rationale?: string
+  security_notes?: string
+}
+
+interface MCPNetworkPreflightGrant {
+  host: string
+  port: number
+  reason?: string
+}
+
+interface MCPNetworkAuthorization {
+  required?: boolean
+  message?: string
+  denials?: MCPNetworkDenial[]
+  hints?: MCPNetworkPreflightGrant[]
+}
+
 interface ToolRunResult {
   success: boolean
   error?: string
   result?: any
   time_taken?: string
+  network_authorization?: MCPNetworkAuthorization
 }
 
 interface MCPInspectorProps {
@@ -44,7 +67,7 @@ interface MCPInspectorProps {
 }
 
 // Fetch tools for a specific MCP server
-const fetchServerTools = async (serverName: string, teamSlug?: string, scope?: string): Promise<{ tools?: MCPTool[]; error?: string }> => {
+const fetchServerTools = async (serverName: string, teamSlug?: string, scope?: string): Promise<{ tools?: MCPTool[]; error?: string; network_authorization?: MCPNetworkAuthorization }> => {
   const scopeParam = scope || (teamSlug ? 'team' : '')
   const scopeQuery = scopeParam ? `?scope=${scopeParam}` : ''
   const res = await teamFetch(`/api/mcp/${encodeURIComponent(serverName)}/tools${scopeQuery}`, undefined, teamSlug)
@@ -65,10 +88,26 @@ const runServerTool = async (serverName: string, toolName: string, params: Recor
   return res.json()
 }
 
+const grantMCPNetworkAccess = async (serverName: string, denial: { host: string; port?: number }, teamSlug?: string, scope?: string): Promise<void> => {
+  const scopeParam = scope || (teamSlug ? 'team' : '')
+  const scopeQuery = scopeParam ? `?scope=${scopeParam}` : ''
+  const res = await teamFetch(`/api/mcp/${encodeURIComponent(serverName)}/network-grants${scopeQuery}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ host: denial.host, port: denial.port || 443 })
+  }, teamSlug)
+  if (!res.ok) {
+    const text = await res.text()
+    throw new Error(text || 'Failed to grant network access')
+  }
+}
+
 export default function MCPInspector({ serverName, teamSlug, scope, onClose }: MCPInspectorProps) {
   const [tools, setTools] = useState<MCPTool[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [networkAuthorization, setNetworkAuthorization] = useState<MCPNetworkAuthorization | null>(null)
+  const [grantingNetwork, setGrantingNetwork] = useState<string | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
   const [selectedTool, setSelectedTool] = useState<MCPTool | null>(null)
   const [params, setParams] = useState<Record<string, any>>({})
@@ -76,22 +115,30 @@ export default function MCPInspector({ serverName, teamSlug, scope, onClose }: M
   const [result, setResult] = useState<ToolRunResult | null>(null)
   const [resultError, setResultError] = useState<string | null>(null)
 
-  useEffect(() => {
+  const loadTools = async () => {
     setLoading(true)
     setError(null)
-    fetchServerTools(serverName, teamSlug, scope)
-      .then(data => {
-        if (data.error) {
-          setError(data.error)
-        } else {
-          setTools(data.tools || [])
-          if (data.tools?.length && data.tools.length > 0) {
-            setSelectedTool(data.tools[0])
-          }
+    setNetworkAuthorization(null)
+    try {
+      const data = await fetchServerTools(serverName, teamSlug, scope)
+      if (data.error) {
+        setError(data.error)
+        setNetworkAuthorization(data.network_authorization || null)
+      } else {
+        setTools(data.tools || [])
+        if (data.tools?.length && data.tools.length > 0) {
+          setSelectedTool(data.tools[0])
         }
-      })
-      .catch(err => setError(err.message))
-      .finally(() => setLoading(false))
+      }
+    } catch (err: any) {
+      setError(err.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void loadTools()
   }, [serverName, teamSlug, scope])
 
   const filteredTools = useMemo(() => {
@@ -114,12 +161,14 @@ export default function MCPInspector({ serverName, teamSlug, scope, onClose }: M
     setRunning(true)
     setResult(null)
     setResultError(null)
+    setNetworkAuthorization(null)
     try {
       const res = await runServerTool(serverName, selectedTool.name, params, teamSlug, scope)
       if (res.success) {
         setResult(res)
       } else {
         setResultError(res.error || 'Unknown error')
+        setNetworkAuthorization(res.network_authorization || null)
         setResult(res)
       }
     } catch (err: any) {
@@ -127,6 +176,91 @@ export default function MCPInspector({ serverName, teamSlug, scope, onClose }: M
     } finally {
       setRunning(false)
     }
+  }
+
+  const handleGrantAndRetry = async (denial: { host: string; port?: number }, retry: 'load-tools' | 'run-tool') => {
+    const key = `${denial.host}:${denial.port || 443}`
+    setGrantingNetwork(key)
+    try {
+      await grantMCPNetworkAccess(serverName, denial, teamSlug, scope)
+      if (retry === 'run-tool') {
+        await handleRun()
+      } else {
+        await loadTools()
+      }
+    } catch (err: any) {
+      if (retry === 'run-tool') {
+        setResultError(err.message || 'Failed to grant network access')
+      } else {
+        setError(err.message || 'Failed to grant network access')
+      }
+    } finally {
+      setGrantingNetwork(null)
+    }
+  }
+
+  const networkTargets = useMemo(() => {
+    if (!networkAuthorization?.required) return []
+    const seen = new Set<string>()
+    const targets: Array<{ host: string; port: number; reason?: string; broader_pattern?: string }> = []
+    for (const denial of networkAuthorization.denials || []) {
+      if (!denial.host) continue
+      const port = denial.port || 443
+      const key = `${denial.host}:${port}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      targets.push({ host: denial.host, port, broader_pattern: denial.broader_pattern })
+    }
+    for (const hint of networkAuthorization.hints || []) {
+      if (!hint.host) continue
+      const port = hint.port || 443
+      const key = `${hint.host}:${port}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      targets.push({ host: hint.host, port, reason: hint.reason })
+    }
+    return targets
+  }, [networkAuthorization])
+
+  const renderNetworkAuthorization = (retry: 'load-tools' | 'run-tool') => {
+    if (!networkAuthorization?.required || networkTargets.length === 0) return null
+    return (
+      <Alert className="max-w-3xl border-amber-200 bg-amber-50 text-amber-950 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-100">
+        <AlertCircle className="text-amber-600 dark:text-amber-400" />
+        <AlertDescription className="space-y-3">
+          <div>
+            <p className="font-medium">Outbound network access is required</p>
+            <p className="mt-1 text-sm">
+              {networkAuthorization.message || 'This MCP server needs permission to reach external hosts before Astonish can install or start it.'}
+            </p>
+          </div>
+          <div className="space-y-2">
+            {networkTargets.map((target) => {
+              const key = `${target.host}:${target.port || 443}`
+              const isGranting = grantingNetwork === key
+              return (
+                <div key={key} className="flex flex-col gap-2 rounded-lg border border-amber-200/80 bg-background/80 p-3 text-left dark:border-amber-900/60 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="min-w-0">
+                    <p className="break-all font-mono text-sm text-foreground">{target.host}:{target.port || 443}</p>
+                    {target.reason && <p className="mt-1 text-xs text-muted-foreground">{target.reason}</p>}
+                    {target.broader_pattern && target.broader_pattern !== target.host && (
+                      <p className="mt-1 text-xs text-muted-foreground">Suggested broader pattern: <span className="font-mono">{target.broader_pattern}</span></p>
+                    )}
+                  </div>
+                  <Button size="sm" onClick={() => handleGrantAndRetry(target, retry)} disabled={Boolean(grantingNetwork)}>
+                    {isGranting && <Loader2 className="animate-spin" />}
+                    {isGranting ? 'Granting...' : 'Grant access and retry'}
+                  </Button>
+                </div>
+              )
+            })}
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Astonish saves this as a durable allow rule for the selected MCP scope, then retries in a fresh sandbox.
+          </p>
+        </AlertDescription>
+      </Alert>
+    )
   }
 
   const renderParamField = (name: string, schema: ParamSchema = {}) => {
@@ -218,12 +352,13 @@ export default function MCPInspector({ serverName, teamSlug, scope, onClose }: M
             Loading tools...
           </div>
         ) : error ? (
-          <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center">
+          <div className="flex flex-1 flex-col items-center justify-center gap-4 overflow-y-auto p-8 text-center">
             <AlertCircle className="size-12 text-destructive" />
             <div>
               <p className="text-lg font-medium text-foreground">Failed to load tools</p>
-              <p className="mt-2 text-sm text-muted-foreground">{error}</p>
+              <p className="mt-2 max-w-3xl text-sm text-muted-foreground">{error}</p>
             </div>
+            {renderNetworkAuthorization('load-tools')}
           </div>
         ) : (
           <div className="flex min-h-0 flex-1 overflow-hidden">
@@ -323,6 +458,8 @@ export default function MCPInspector({ serverName, teamSlug, scope, onClose }: M
                             <AlertDescription>{resultError}</AlertDescription>
                           </Alert>
                         )}
+
+                        {renderNetworkAuthorization('run-tool')}
 
                         {result.result && (
                           <pre className="overflow-x-auto rounded-lg border bg-background p-3 font-mono text-sm text-foreground">

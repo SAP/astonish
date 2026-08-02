@@ -67,7 +67,7 @@ The server runs as a child process. Astonish communicates via stdin/stdout. Best
 ```
 
 ::: warning Stdio + Sandbox
-Stdio-based MCP servers require the sandbox to be enabled, since the child process runs inside the sandbox container.
+Stdio-based MCP servers require the sandbox to be enabled, since the child process runs inside the sandbox container. The Studio **Test connection** action follows the same rule: it creates a disposable sandbox session/pod for stdio servers instead of running the command on the Astonish host.
 :::
 
 ### SSE (Server-Sent Events)
@@ -166,6 +166,31 @@ Consider a scenario where MCP servers are defined at multiple tiers:
 - `slack` → Inherited from Platform (no override)
 - `jira` → Inherited from Org (no team override)
 - `figma` → Team-specific (only exists at team level)
+
+## Debugging startup failures
+
+When an MCP server fails during discovery or first tool use, check the daemon logs:
+
+```bash
+# Local service/default mode
+astonish daemon logs -f
+
+# Kubernetes
+kubectl logs -n astonish -l app.kubernetes.io/component=api --tail=100
+kubectl logs -n astonish -l app.kubernetes.io/component=worker --tail=100
+```
+
+Failure logs include the server name, transport, stdio command and args, remote URL scheme/host/path, env var names, the underlying error, captured stderr, and non-JSON stdout that was discarded from the MCP protocol stream. This makes `initialize: EOF` failures actionable when npm/node/package-manager output was printed to stdout instead of stderr. Secret env values, URL credentials, URL query strings, and JSON-RPC protocol messages are not printed.
+
+### Network authorization for stdio servers
+
+Stdio servers often download their package the first time they start. For example, `npx -y @upstash/context7-mcp` needs access to `registry.npmjs.org:443`. In sandboxed cloud deployments, that egress may be blocked by network policy.
+
+When **Test connection** detects a network-looking MCP startup failure, Studio shows an **Outbound network access is required** prompt with the host and port that appear to be needed. Click **Grant access and retry** to save a durable allow rule for the selected MCP scope, then retry discovery in a fresh sandbox. The approval is explicit; Astonish does not automatically whitelist hosts.
+
+The same Settings network policy rules are also applied to background MCP discovery jobs started by install, refresh, Standard Web Servers, and MCP Store installs. Those jobs run after the HTTP response, but Astonish carries a detached runtime policy context so the disposable `mcp-discover-*` sandbox receives the saved OpenShell allow rules before `npx`, `uvx`, or another package manager starts.
+
+If no host can be parsed from the process output, Astonish may still show package-manager hints such as npm or PyPI registry endpoints so an admin can approve the expected dependency source.
 
 ## Best Practices
 

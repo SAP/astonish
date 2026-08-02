@@ -1070,6 +1070,7 @@ func RegisterRoutes(router *mux.Router, svc *store.Services, backend store.Platf
 	router.HandleFunc("/api/mcp/servers/{name}", UpdateMCPServerHandler).Methods("PATCH")
 	router.HandleFunc("/api/mcp/{serverName}/tools", ListServerToolsHandler).Methods("GET")
 	router.HandleFunc("/api/mcp/{serverName}/tools/{toolName}/run", RunServerToolHandler).Methods("POST")
+	router.HandleFunc("/api/mcp/{serverName}/network-grants", MCPNetworkGrantHandler).Methods("POST")
 	router.HandleFunc("/api/mcp/{name}/refresh", RefreshMCPServerHandler).Methods("POST")
 	router.HandleFunc("/api/settings/status", GetSetupStatusHandler).Methods("GET")
 	router.HandleFunc("/api/version", GetVersionHandler).Methods("GET")

@@ -50,7 +50,13 @@ For debugging, run the daemon in the foreground instead of as a background servi
 astonish daemon run
 ```
 
-This starts the server in the current terminal session with logs printed to stdout. Press `Ctrl+C` to stop.
+This starts the server in the current terminal session. Local/default daemon mode writes application logs to the daemon log file so `astonish daemon logs` behaves the same as an installed service. To force logs to the terminal, set `ASTONISH_LOG_DEST=stdout`:
+
+```bash
+ASTONISH_LOG_DEST=stdout astonish daemon run
+```
+
+Container roles (`ASTONISH_MODE=api` or `ASTONISH_MODE=worker`) use stdout by default for Kubernetes and other orchestrators. Press `Ctrl+C` to stop a foreground run.
 
 | Flag | Default | Description |
 |------|---------|-------------|

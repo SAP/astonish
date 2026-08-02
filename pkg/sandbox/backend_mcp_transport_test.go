@@ -49,6 +49,51 @@ func TestJSONLineFilterReader_DiscardsANSI(t *testing.T) {
 	}
 }
 
+func TestJSONLineFilterReader_CapturesDiscardedStdoutDiagnostics(t *testing.T) {
+	input := "npm ERR! network timeout\n" +
+		`{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}` + "\n" +
+		"server exited before initialize"
+
+	var diagnostics bytes.Buffer
+	r := newJSONLineFilterReaderWithDiagnostics(nopCloser{strings.NewReader(input)}, &diagnostics)
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	expected := `{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}` + "\n"
+	if string(out) != expected {
+		t.Fatalf("JSON protocol output changed\ngot:  %q\nwant: %q", string(out), expected)
+	}
+	gotDiagnostics := diagnostics.String()
+	if !strings.Contains(gotDiagnostics, "npm ERR! network timeout") {
+		t.Fatalf("expected npm diagnostic in discarded stdout, got %q", gotDiagnostics)
+	}
+	if !strings.Contains(gotDiagnostics, "server exited before initialize") {
+		t.Fatalf("expected unterminated diagnostic in discarded stdout, got %q", gotDiagnostics)
+	}
+	if strings.Contains(gotDiagnostics, "jsonrpc") {
+		t.Fatalf("protocol JSON must not be captured as diagnostics: %q", gotDiagnostics)
+	}
+}
+
+func TestJSONLineFilterReader_BoundsDiscardedStdoutDiagnostics(t *testing.T) {
+	input := strings.Repeat("x", maxCapturedMCPStdoutDiagnosticsLen+100) + "\n"
+
+	var diagnostics bytes.Buffer
+	r := newJSONLineFilterReaderWithDiagnostics(nopCloser{strings.NewReader(input)}, &diagnostics)
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(out) != 0 {
+		t.Fatalf("expected no protocol output, got %q", string(out))
+	}
+	if diagnostics.Len() != maxCapturedMCPStdoutDiagnosticsLen {
+		t.Fatalf("diagnostics length = %d, want %d", diagnostics.Len(), maxCapturedMCPStdoutDiagnosticsLen)
+	}
+}
+
 func TestJSONLineFilterReader_DiscardsBanner(t *testing.T) {
 	// MCP server startup banner followed by JSON.
 	input := "Tavily MCP server running on stdio\n" +
@@ -197,10 +242,10 @@ func TestIsJSONRPCLine(t *testing.T) {
 		{"\r" + `{"jsonrpc":"2.0"}` + "\r\n", true}, // leading \r stripped
 		{`{not-a-quote}` + "\n", false},             // { not followed by "
 		{"\x1b[1G\x1b[0K\n", false},                 // ANSI
-		{"hello\n", false},                           // plain text
-		{"{", false},                                 // too short
-		{"{\n", false},                               // { followed by \n, not "
-		{`{""}` + "\n", true},                        // minimal valid prefix
+		{"hello\n", false},                          // plain text
+		{"{", false},                                // too short
+		{"{\n", false},                              // { followed by \n, not "
+		{`{""}` + "\n", true},                       // minimal valid prefix
 	}
 	for _, tt := range tests {
 		got := isJSONRPCLine([]byte(tt.input))

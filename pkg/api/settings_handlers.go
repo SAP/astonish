@@ -8,7 +8,6 @@ import (
 	"os"
 	"sync"
 
-	"github.com/gorilla/mux"
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/credentials"
 	"github.com/SAP/astonish/pkg/provider"
@@ -25,6 +24,7 @@ import (
 	"github.com/SAP/astonish/pkg/provider/xai"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/version"
+	"github.com/gorilla/mux"
 )
 
 // --- Package-level credential store for API handlers ---
@@ -437,11 +437,13 @@ func updateMCPSettingsPlatform(w http.ResponseWriter, r *http.Request, mcpStore 
 			return
 		}
 
-		// Trigger async tool discovery for new or changed servers
-		// (skip if the server already has cached_tools and config hasn't changed)
+		// Trigger async tool discovery for new or changed servers.
+		// The detached runtime context carries Astonish Network Policy stores so
+		// disposable MCP discovery sandboxes receive Settings allow rules.
 		existing := existingMap[name]
 		if existing == nil || !mcpServerConfigUnchanged(existing, s) {
-			refreshMCPPlatformServer(mcpStore, s, buildPGSessionRegistry(r.Context()))
+			runtimeCtx := detachedRuntimeNetworkPolicyContext(r, effectiveAppConfig(r))
+			refreshMCPPlatformServer(runtimeCtx, mcpStore, s, buildPGSessionRegistry(r.Context()))
 		}
 	}
 
@@ -514,8 +516,9 @@ func InstallInlineMCPServerHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Discover tools asynchronously with timeout
-		asyncDiscoverAndCacheTools(mcpStore, req.ServerName, req.Config, buildPGSessionRegistry(r.Context()))
+		// Discover tools asynchronously with timeout.
+		runtimeCtx := detachedRuntimeNetworkPolicyContext(r, effectiveAppConfig(r))
+		asyncDiscoverAndCacheTools(runtimeCtx, mcpStore, req.ServerName, req.Config, buildPGSessionRegistry(r.Context()))
 
 		GetChatManager().Reset()
 
@@ -542,7 +545,6 @@ func ListProviderModelsHandler(w http.ResponseWriter, r *http.Request) {
 	providerID := vars["providerId"]
 
 	cfg := effectiveAppConfig(r)
-
 
 	// Resolve secrets from credential store into the provider config so that
 	// ListModelsForProvider sees the actual API key (secrets are scrubbed from
@@ -583,7 +585,6 @@ type SetupStatusResponse struct {
 // GetSetupStatusHandler handles GET /api/settings/status
 func GetSetupStatusHandler(w http.ResponseWriter, r *http.Request) {
 	cfg := effectiveAppConfig(r)
-
 
 	// Check for configured providers
 	// For multi-instance support, check all provider instances in config
@@ -636,7 +637,6 @@ func ListProviderModelsWithMetadataHandler(w http.ResponseWriter, r *http.Reques
 	providerID := vars["providerId"]
 
 	cfg := effectiveAppConfig(r)
-
 
 	// Resolve provider instance config and type. The providerID is the instance
 	// name (e.g. "SAP AI Core"), not necessarily the type slug ("sap_ai_core").

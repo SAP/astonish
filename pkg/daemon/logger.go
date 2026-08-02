@@ -5,14 +5,22 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/SAP/astonish/pkg/config"
 )
 
 const (
 	maxLogSize     = 10 * 1024 * 1024 // 10MB
 	maxLogBackups  = 3
 	logPermissions = 0644
+
+	logDestinationFile   = "file"
+	logDestinationStdout = "stdout"
+
+	logDestinationEnv = "ASTONISH_LOG_DEST"
 )
 
 // Logger provides file-based logging with size-based rotation.
@@ -56,6 +64,42 @@ func NewStdoutLogger() *Logger {
 		file:     os.Stdout,
 		filePath: "", // no file rotation for stdout
 	}
+}
+
+func newLoggerForMode(daemonMode, logDir string) (*Logger, error) {
+	destination, explicit := daemonLogDestination(daemonMode)
+	if destination == logDestinationStdout {
+		return NewStdoutLogger(), nil
+	}
+
+	logger, err := NewLogger(filepath.Join(logDir, "daemon.log"))
+	if err != nil {
+		if daemonMode != config.DaemonModeDefault {
+			fallback := NewStdoutLogger()
+			if explicit {
+				fallback.Printf("Warning: failed to initialize file logger requested by %s=%s: %v; falling back to stdout", logDestinationEnv, destination, err)
+			}
+			return fallback, nil
+		}
+		return nil, err
+	}
+	return logger, nil
+}
+
+func daemonLogDestination(daemonMode string) (string, bool) {
+	if raw := strings.TrimSpace(os.Getenv(logDestinationEnv)); raw != "" {
+		switch strings.ToLower(raw) {
+		case logDestinationFile:
+			return logDestinationFile, true
+		case logDestinationStdout:
+			return logDestinationStdout, true
+		}
+	}
+
+	if daemonMode == config.DaemonModeAPI || daemonMode == config.DaemonModeWorker {
+		return logDestinationStdout, false
+	}
+	return logDestinationFile, false
 }
 
 // Write implements io.Writer for use with log.SetOutput or as stdout/stderr redirect.

@@ -108,6 +108,13 @@ func withRuntimeNetworkPolicyContext(ctx context.Context, r *http.Request, appCf
 	return ctx
 }
 
+// detachedRuntimeNetworkPolicyContext carries only long-lived runtime values
+// needed by background sandbox work. It deliberately does not inherit
+// r.Context(), because async MCP discovery continues after the HTTP response.
+func detachedRuntimeNetworkPolicyContext(r *http.Request, appCfg *config.AppConfig) context.Context {
+	return withRuntimeNetworkPolicyContext(context.Background(), r, appCfg)
+}
+
 // --- App sandbox idle management (shared by MCP + HTTP) ---
 
 var appMCPIdleTracker = &appMCPTracker{

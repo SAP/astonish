@@ -177,6 +177,89 @@ func TestLoggerRotation(t *testing.T) {
 	}
 }
 
+func TestDaemonLogDestination(t *testing.T) {
+	tests := []struct {
+		name         string
+		daemonMode   string
+		envValue     string
+		want         string
+		wantExplicit bool
+	}{
+		{"default mode uses file", "default", "", logDestinationFile, false},
+		{"api mode uses stdout", "api", "", logDestinationStdout, false},
+		{"worker mode uses stdout", "worker", "", logDestinationStdout, false},
+		{"env file overrides api", "api", "file", logDestinationFile, true},
+		{"env stdout overrides default", "default", "stdout", logDestinationStdout, true},
+		{"env is case insensitive", "default", "STDOUT", logDestinationStdout, true},
+		{"invalid env falls back to mode default", "api", "syslog", logDestinationStdout, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(logDestinationEnv, tt.envValue)
+			got, explicit := daemonLogDestination(tt.daemonMode)
+			if got != tt.want {
+				t.Fatalf("destination = %q, want %q", got, tt.want)
+			}
+			if explicit != tt.wantExplicit {
+				t.Fatalf("explicit = %v, want %v", explicit, tt.wantExplicit)
+			}
+		})
+	}
+}
+
+func TestNewLoggerForMode(t *testing.T) {
+	t.Run("api mode returns stdout logger without creating files", func(t *testing.T) {
+		dir := t.TempDir()
+		logger, err := newLoggerForMode("api", dir)
+		if err != nil {
+			t.Fatalf("newLoggerForMode failed: %v", err)
+		}
+		defer logger.Close()
+
+		if logger.file != os.Stdout {
+			t.Fatal("expected api mode to use stdout logger")
+		}
+		if logger.filePath != "" {
+			t.Fatalf("stdout logger should not have filePath, got %q", logger.filePath)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "daemon.log")); !os.IsNotExist(err) {
+			t.Fatalf("api mode should not create daemon.log, stat err = %v", err)
+		}
+	})
+
+	t.Run("default mode returns file logger", func(t *testing.T) {
+		dir := t.TempDir()
+		logger, err := newLoggerForMode("default", dir)
+		if err != nil {
+			t.Fatalf("newLoggerForMode failed: %v", err)
+		}
+		defer logger.Close()
+
+		wantPath := filepath.Join(dir, "daemon.log")
+		if logger.filePath != wantPath {
+			t.Fatalf("filePath = %q, want %q", logger.filePath, wantPath)
+		}
+		if _, err := os.Stat(wantPath); err != nil {
+			t.Fatalf("expected daemon.log to exist: %v", err)
+		}
+	})
+
+	t.Run("stdout env overrides default mode", func(t *testing.T) {
+		t.Setenv(logDestinationEnv, logDestinationStdout)
+		dir := t.TempDir()
+		logger, err := newLoggerForMode("default", dir)
+		if err != nil {
+			t.Fatalf("newLoggerForMode failed: %v", err)
+		}
+		defer logger.Close()
+
+		if logger.file != os.Stdout {
+			t.Fatal("expected stdout override to use stdout logger")
+		}
+	})
+}
+
 func TestTailLog(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "test.log")

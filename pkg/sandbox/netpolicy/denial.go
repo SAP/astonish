@@ -62,6 +62,8 @@ var proxyDenialIndicators = []string{
 var networkErrorIndicators = []string{
 	"connection refused",
 	"connection reset",
+	"econnreset",
+	"socket hang up",
 	"connection timed out",
 	"network is unreachable",
 	"no route to host",
@@ -187,6 +189,32 @@ var (
 	shellURLPattern    = regexp.MustCompile(`https?://[^\s"'<>\\]+`)
 )
 
+// LooksLikeNetworkFailureText checks arbitrary process output for network or
+// proxy failure indicators. It is used outside shell_command result handling,
+// where there may be no exit code but the process already failed.
+func LooksLikeNetworkFailureText(text string) bool {
+	if text == "" {
+		return false
+	}
+	lower := strings.ToLower(text)
+	for _, indicator := range proxyDenialIndicators {
+		if strings.Contains(lower, indicator) {
+			return true
+		}
+	}
+	for _, indicator := range networkErrorIndicators {
+		if strings.Contains(lower, indicator) {
+			return true
+		}
+	}
+	for _, indicator := range shellNetworkFailureIndicators {
+		if strings.Contains(lower, indicator) {
+			return true
+		}
+	}
+	return false
+}
+
 var networkToolNames = map[string]bool{
 	"browser_navigate": true,
 	"browser_tabs":     true,
@@ -257,6 +285,58 @@ var goHTTPProxyDenialIndicators = []string{
 	"\": proxy authentication required",
 	"\": service unavailable",
 	"\": bad gateway",
+}
+
+// ExtractDenialsFromText extracts host:port suggestions from URLs and common
+// network error forms embedded in arbitrary process output.
+func ExtractDenialsFromText(text string) []map[string]any {
+	seen := make(map[string]bool)
+	var denials []map[string]any
+
+	add := func(host string, port int) {
+		if host == "" {
+			return
+		}
+		key := fmt.Sprintf("%s:%d", host, port)
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		denials = append(denials, map[string]any{
+			"host":            host,
+			"port":            port,
+			"broader_pattern": openshell.SuggestBroaderPattern(host),
+		})
+	}
+
+	for _, raw := range shellURLPattern.FindAllString(text, -1) {
+		urlStr := strings.TrimRight(raw, ".,;:)]}")
+		if host, port := HostPortFromURL(urlStr); host != "" {
+			add(host, port)
+		}
+	}
+	for _, match := range goHTTPHostPattern.FindAllStringSubmatch(text, -1) {
+		port := 443
+		if match[2] != "" {
+			if p, err := strconv.Atoi(match[2]); err == nil {
+				port = p
+			}
+		}
+		add(match[1], port)
+	}
+	for _, match := range connectHostPattern.FindAllStringSubmatch(text, -1) {
+		port := 443
+		if match[2] != "" {
+			if p, err := strconv.Atoi(match[2]); err == nil {
+				port = p
+			}
+		}
+		add(match[1], port)
+	}
+	for _, match := range resolveFailPattern.FindAllStringSubmatch(text, -1) {
+		add(match[1], 443)
+	}
+	return denials
 }
 
 // ExtractDenialsFromShellCommand extracts denied hosts from URLs embedded in a

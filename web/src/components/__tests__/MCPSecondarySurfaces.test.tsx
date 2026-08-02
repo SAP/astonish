@@ -156,4 +156,55 @@ describe('MCPInspector', () => {
     expect(await screen.findByText('Success')).toBeInTheDocument()
     expect(screen.getByText(/"ok": true/)).toBeInTheDocument()
   })
+
+  it('shows MCP network grant prompt and retries after approval', async () => {
+    const user = userEvent.setup()
+    let toolFetches = 0
+    vi.mocked(teamFetch).mockImplementation(async (url, init) => {
+      const urlText = String(url)
+      if (urlText.includes('/network-grants')) {
+        return { ok: true, json: async () => ({ approved: true }) } as Response
+      }
+      if (urlText.includes('/tools') && !init) {
+        toolFetches += 1
+        if (toolFetches === 1) {
+          return {
+            ok: true,
+            json: async () => ({
+              error: 'Failed to list tools: npm ECONNRESET',
+              network_authorization: {
+                required: true,
+                message: 'This MCP server needs outbound network access before Astonish can install or start it.',
+                denials: [{ host: 'registry.npmjs.org', port: 443, broader_pattern: '*.npmjs.org' }],
+              },
+            }),
+          } as Response
+        }
+        return {
+          ok: true,
+          json: async () => ({ tools: [{ name: 'echo', description: 'Echo a message' }] }),
+        } as Response
+      }
+      return { ok: true, json: async () => ({}) } as Response
+    })
+
+    render(<MCPInspector serverName="context7" teamSlug="core" scope="team" onClose={vi.fn()} />)
+
+    expect(await screen.findByText('Outbound network access is required')).toBeInTheDocument()
+    expect(screen.getByText('registry.npmjs.org:443')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: /grant access and retry/i }))
+
+    await waitFor(() => {
+      expect(teamFetch).toHaveBeenCalledWith(
+        '/api/mcp/context7/network-grants?scope=team',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ host: 'registry.npmjs.org', port: 443 }),
+        }),
+        'core'
+      )
+    })
+    expect(await screen.findByText('Echo a message')).toBeInTheDocument()
+  })
 })

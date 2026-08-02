@@ -34,6 +34,12 @@ All configuration lives under `~/.config/astonish/`:
 
 This provides a single location for all Astonish state, making backup and migration straightforward.
 
+### Daemon Log Destination
+
+The daemon supports two application log destinations: `file` and `stdout`. Local/default mode writes to `~/.config/astonish/logs/daemon.log` so `astonish daemon logs` and service-managed installs keep their existing behavior. Container roles selected with `ASTONISH_MODE=api` or `ASTONISH_MODE=worker` write to stdout by default, which is the cloud invariant for Kubernetes: `kubectl logs` and cluster log collectors must see application logs without reading files inside the container filesystem.
+
+Operators can override the default with `ASTONISH_LOG_DEST=file` or `ASTONISH_LOG_DEST=stdout`. `daemon.log_dir` only affects the `file` destination.
+
 ### Why Config-Driven Provider Setup
 
 Provider API keys can come from three sources (in priority order):

@@ -7,9 +7,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/gorilla/mux"
 	"github.com/SAP/astonish/pkg/cache"
 	"github.com/SAP/astonish/pkg/store"
+	"github.com/gorilla/mux"
 )
 
 // --- Mock MCPServerStore ---
@@ -227,14 +227,17 @@ func TestMCPManagerForRequest_PlatformScope(t *testing.T) {
 		Command: "npx",
 		Args:    []string{"-y", "@upstash/context7-mcp"},
 	})
-	orgStore := newMockMCPStore() // empty
+	orgStore := newMockMCPStore()  // empty
 	teamStore := newMockMCPStore() // empty
 
 	r := platformRequestWithScopes(t, "GET", "/api/mcp/context7/tools?scope=platform", orgStore, teamStore, platformStore)
 
-	mgr, err := mcpManagerForRequest(r, "context7")
+	mgr, cfg, err := mcpManagerForRequest(r, "context7")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Command != "npx" {
+		t.Fatalf("expected config command npx, got %q", cfg.Command)
 	}
 	if mgr == nil {
 		t.Fatal("expected non-nil manager")
@@ -252,9 +255,12 @@ func TestMCPManagerForRequest_TeamScope(t *testing.T) {
 
 	r := platformRequestWithScopes(t, "GET", "/api/mcp/team-server/tools?scope=team", orgStore, teamStore, platformStore)
 
-	mgr, err := mcpManagerForRequest(r, "team-server")
+	mgr, cfg, err := mcpManagerForRequest(r, "team-server")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Command != "node" {
+		t.Fatalf("expected config command node, got %q", cfg.Command)
 	}
 	if mgr == nil {
 		t.Fatal("expected non-nil manager")
@@ -273,9 +279,12 @@ func TestMCPManagerForRequest_OrgDefault(t *testing.T) {
 	// No scope param → defaults to org
 	r := platformRequestWithScopes(t, "GET", "/api/mcp/org-server/tools", orgStore, teamStore, platformStore)
 
-	mgr, err := mcpManagerForRequest(r, "org-server")
+	mgr, cfg, err := mcpManagerForRequest(r, "org-server")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Command != "python" {
+		t.Fatalf("expected config command python, got %q", cfg.Command)
 	}
 	if mgr == nil {
 		t.Fatal("expected non-nil manager")
@@ -293,7 +302,7 @@ func TestMCPManagerForRequest_NotFoundInScope(t *testing.T) {
 
 	r := platformRequestWithScopes(t, "GET", "/api/mcp/context7/tools", orgStore, newMockMCPStore(), platformStore)
 
-	_, err := mcpManagerForRequest(r, "context7")
+	_, _, err := mcpManagerForRequest(r, "context7")
 	if err == nil {
 		t.Fatal("expected error when server not in the scoped store")
 	}
@@ -308,7 +317,7 @@ func TestMCPManagerForRequest_NoStore(t *testing.T) {
 	r := httptest.NewRequest("GET", "/api/mcp/context7/tools", nil)
 	r = mux.SetURLVars(r, map[string]string{"serverName": "context7"})
 
-	_, err := mcpManagerForRequest(r, "context7")
+	_, _, err := mcpManagerForRequest(r, "context7")
 	if err == nil {
 		t.Fatal("expected error when no store available")
 	}

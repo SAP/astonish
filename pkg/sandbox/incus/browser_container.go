@@ -93,6 +93,7 @@ const (
 // browser container install.
 type browserDeps struct {
 	libasound     string // ALSA library package name
+	libglib       string // GLib/GObject package name
 	libjpegTurbo  string // libjpeg-turbo package name (KasmVNC dep)
 	kasmVNCSuffix string // distro suffix in KasmVNC .deb filename
 	useXtradebPPA bool   // whether to use xtradeb PPA for Chromium
@@ -104,6 +105,7 @@ func depsFor(distro LinuxDistro) browserDeps {
 	case DistroDebianBookworm:
 		return browserDeps{
 			libasound:     "libasound2",
+			libglib:       "libglib2.0-0",
 			libjpegTurbo:  "libjpeg62-turbo",
 			kasmVNCSuffix: "bookworm",
 			useXtradebPPA: false, // Debian ships native chromium .debs
@@ -111,6 +113,7 @@ func depsFor(distro LinuxDistro) browserDeps {
 	default: // DistroUbuntuNoble
 		return browserDeps{
 			libasound:     "libasound2t64",
+			libglib:       "libglib2.0-0t64",
 			libjpegTurbo:  "libjpeg-turbo8",
 			kasmVNCSuffix: "noble",
 			useXtradebPPA: true, // Ubuntu 24.04 chromium is snap-only
@@ -176,6 +179,7 @@ func IsContainerCompatibleEngine(engine string) bool {
 // configuration. Incus containers use DistroUbuntuNoble; K8s sandbox-base
 // uses DistroDebianBookworm. Key differences:
 //   - ALSA library: libasound2t64 (noble) vs libasound2 (bookworm)
+//   - GLib/GObject: libglib2.0-0t64 (noble) vs libglib2.0-0 (bookworm)
 //   - libjpeg-turbo: libjpeg-turbo8 (noble) vs libjpeg62-turbo (bookworm)
 //   - KasmVNC .deb: kasmvncserver_noble_*.deb vs kasmvncserver_bookworm_*.deb
 //   - Chromium source: xtradeb PPA (noble) vs native apt (bookworm)
@@ -205,7 +209,7 @@ func BrowserContainerInstallCommands(engine, arch string, distro LinuxDistro) []
 			// These must be listed explicitly because the binary is not
 			// installed via apt and has no automatic dependency resolution.
 			"fonts-liberation", "fonts-noto-color-emoji",
-			"xdg-utils", "libnss3", "libatk-bridge2.0-0",
+			"xdg-utils", deps.libglib, "libnss3", "libatk-bridge2.0-0",
 			"libx11-xcb1", "libxcomposite1", "libxrandr2",
 			"libgbm1", deps.libasound,
 			"libcups2",            // CUPS printing (required by Chromium's print subsystem)
@@ -263,7 +267,7 @@ func BrowserContainerInstallCommands(engine, arch string, distro LinuxDistro) []
 					"software-properties-common",
 					// Chromium shared deps
 					"fonts-liberation", "fonts-noto-color-emoji",
-					"xdg-utils", "libnss3", "libatk-bridge2.0-0",
+					"xdg-utils", deps.libglib, "libnss3", "libatk-bridge2.0-0",
 					"libx11-xcb1", "libxcomposite1", "libxrandr2",
 					"libgbm1", deps.libasound,
 					// KasmVNC dependencies
@@ -302,7 +306,7 @@ func BrowserContainerInstallCommands(engine, arch string, distro LinuxDistro) []
 					// Chromium shared deps (listed explicitly for consistency
 					// with the Ubuntu path, even though apt would pull most in)
 					"fonts-liberation", "fonts-noto-color-emoji",
-					"xdg-utils", "libnss3", "libatk-bridge2.0-0",
+					"xdg-utils", deps.libglib, "libnss3", "libatk-bridge2.0-0",
 					"libx11-xcb1", "libxcomposite1", "libxrandr2",
 					"libgbm1", deps.libasound,
 					// KasmVNC dependencies

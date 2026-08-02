@@ -19,10 +19,10 @@ import (
 
 func TestCredentialSuffixParsing(t *testing.T) {
 	tests := []struct {
-		name       string
-		url        string
-		wantURL    string
-		wantCred   string
+		name     string
+		url      string
+		wantURL  string
+		wantCred string
 	}{
 		{
 			name:     "no credential",
@@ -465,6 +465,36 @@ func TestWithRuntimeNetworkPolicyContext_AttachesStoresAndGateway(t *testing.T) 
 	}
 }
 
+func TestDetachedRuntimeNetworkPolicyContext_DoesNotInheritRequestCancellation(t *testing.T) {
+	teamStore := &stubNetworkPolicyStore{rules: []store.NetworkPolicyRule{{
+		Host:   "registry.npmjs.org",
+		Port:   443,
+		Action: store.NetworkPolicyAllow,
+	}}}
+	svc := &store.Services{TeamNetworkPolicies: teamStore}
+	reqCtx, cancel := context.WithCancel(context.Background())
+	r := httptest.NewRequest(http.MethodPost, "/api/mcp/context7/refresh", nil).WithContext(reqCtx)
+	r = r.WithContext(store.WithServices(r.Context(), svc))
+
+	appCfg := &config.AppConfig{}
+	appCfg.Sandbox.OpenShell.GatewayAddr = "openshell.example:8443"
+
+	ctx := detachedRuntimeNetworkPolicyContext(r, appCfg)
+	cancel()
+
+	select {
+	case <-ctx.Done():
+		t.Fatal("detached runtime context should outlive request cancellation")
+	default:
+	}
+	if nps := store.NetworkPolicyStoresFromContext(ctx); nps == nil || nps.Team != teamStore {
+		t.Fatalf("expected detached context to carry team network policy store, got %+v", nps)
+	}
+	if gw := netpolicy.GatewayConfigFromContext(ctx); gw == nil || gw.Addr != "openshell.example:8443" {
+		t.Fatalf("expected detached context to carry gateway config, got %+v", gw)
+	}
+}
+
 type stubNetworkPolicyStore struct {
 	rules []store.NetworkPolicyRule
 	err   error
@@ -656,7 +686,7 @@ func (s *oauthRetryCredentialStore) SetSecret(_ context.Context, _, _ string) er
 func (s *oauthRetryCredentialStore) SetSecretBatch(_ context.Context, _ map[string]string) error {
 	return nil
 }
-func (s *oauthRetryCredentialStore) GetSecret(_ context.Context, _ string) string  { return "" }
+func (s *oauthRetryCredentialStore) GetSecret(_ context.Context, _ string) string   { return "" }
 func (s *oauthRetryCredentialStore) RemoveSecret(_ context.Context, _ string) error { return nil }
 func (s *oauthRetryCredentialStore) HasSecrets(_ context.Context) bool              { return false }
 func (s *oauthRetryCredentialStore) SecretCount(_ context.Context) int              { return 0 }

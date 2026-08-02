@@ -32,10 +32,24 @@ func TestTreeSitterLibraryPathContract(t *testing.T) {
 	if !strings.Contains(dockerfile, "libc6-dev") {
 		t.Fatal("sandbox-base Dockerfile treesitter-builder must apt-install libc6-dev")
 	}
+	// BuildKit already runs normal FROM stages for the target platform in
+	// multi-platform builds. Repeating --platform=$TARGETPLATFORM emits the
+	// RedundantTargetPlatform Dockerfile check warning in CI.
+	if strings.Contains(dockerfile, "FROM --platform=$TARGETPLATFORM debian:bookworm-slim AS treesitter-builder") {
+		t.Fatal("sandbox-base treesitter-builder must not set --platform=$TARGETPLATFORM redundantly")
+	}
 	// Guard against accidental apt install of ripgrep in the pod image
 	// (invisible after overlay chroot; belongs in @base / OpenShell).
 	if strings.Contains(dockerfile, "\tripgrep") || strings.Contains(dockerfile, " ripgrep \\\n") || strings.Contains(dockerfile, " ripgrep\n") {
 		t.Fatal("sandbox-base Dockerfile must not apt-install ripgrep; install via CoreToolInstallCommands into @base")
+	}
+}
+
+func TestSandboxBaseDockerfileIncludesMuslLoaderCompatLink(t *testing.T) {
+	dockerfile := readSandboxBaseDockerfile(t)
+	want := "ln -sf x86_64-linux-gnu/ld-linux-x86-64.so.2 /lib/ld-musl-x86_64.so.1"
+	if !strings.Contains(dockerfile, want) {
+		t.Fatalf("sandbox-base Dockerfile must create musl loader compatibility link; missing:\n%s", want)
 	}
 }
 

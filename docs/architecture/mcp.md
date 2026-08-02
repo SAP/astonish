@@ -24,6 +24,8 @@ The `ContainerMCPTransport` implements the MCP SDK's `Transport` interface by st
 
 MCP uses JSON-RPC over stdout. If an MCP server writes log messages to stdout (a common mistake), it corrupts the JSON-RPC stream. The `ExecNonInteractive` call uses `SeparateStderr: true` to keep stderr separate, and the captured stderr is available for diagnostics.
 
+MCP startup and discovery failures must be logged with enough context to diagnose cloud deployments from container logs alone: server name, transport, command and args for stdio servers, URL scheme/host/path for remote servers, env var names, the underlying error, and captured stderr. The sandbox stdio transport also captures the non-JSON stdout lines it discards before forwarding the stream to the MCP SDK. That keeps JSON-RPC messages private to the protocol while still exposing package-manager or runtime failures that incorrectly print to stdout before an `initialize` EOF. Env var values and URL credentials/query strings are intentionally omitted from logs.
+
 ### Why Tool Caching
 
 Querying MCP servers for their tool definitions involves starting the server process, performing the JSON-RPC handshake, and listing tools. This can take seconds. The tool cache:
@@ -81,8 +83,9 @@ Host:
 Container:
   ContainerMCPTransport.Connect():
     1. ExecNonInteractive(command, args, env, SeparateStderr=true)
-    2. Bridge stdin/stdout to mcp.IOTransport
-    3. Return mcp.Connection
+    2. Filter stdout so only JSON-RPC lines reach mcp.IOTransport
+    3. Capture discarded non-JSON stdout for diagnostics
+    4. Return mcp.Connection
     |
     v
   JSON-RPC over stdio:
@@ -107,6 +110,12 @@ Studio provides an MCP Inspector that allows:
 - Testing individual tools with custom inputs.
 - Viewing server logs and errors.
 
+For stdio servers, the inspector uses the same sandbox rule as chat and app data: the server process never runs on the Astonish host. Tool listing uses a disposable `mcp-discover-*` sandbox; tool invocation uses the per-user app sandbox. Before a stdio package manager such as `npx` or `uvx` starts, persisted Astonish Network Policy allow rules are pre-seeded into the OpenShell sandbox policy.
+
+The same pre-seeding requirement applies to background MCP discovery after install, refresh, standard-server install, and MCP Store install. Those jobs intentionally detach from the HTTP request context so they can continue after the response, but they must carry a detached runtime context containing the Network Policy stores and OpenShell gateway config. Without that detached runtime context, a Settings allow rule can exist in the database but never reach the disposable `mcp-discover-*` sandbox.
+
+If sandboxed MCP startup fails with network-looking diagnostics, the inspector response includes `network_authorization`. The payload contains parsed denied endpoints from the MCP process output and package-manager preflight hints such as `registry.npmjs.org:443` for npm-based servers. The Studio UI shows these endpoints and lets an admin explicitly approve a durable network policy rule for the selected MCP scope. The retry then creates or reuses a fresh sandbox with the persisted allow rule pre-seeded. Astonish does not silently whitelist hosts.
+
 ## Key Files
 
 | File | Purpose |
@@ -119,6 +128,9 @@ Studio provides an MCP Inspector that allows:
 | `pkg/config/standard_servers.go` | Standard MCP server definitions |
 | `pkg/mcpstore/` | MCP server catalog with embedded data |
 | `pkg/api/mcp_handlers.go` | MCP management API endpoints |
+| `pkg/api/mcp_inspector.go` | Studio MCP Inspector tool-list and run handlers |
+| `pkg/api/mcp_network_grants.go` | Durable MCP network allow-rule approval endpoint |
+| `pkg/api/mcp_diagnostics.go` | Secret-safe MCP diagnostics and network authorization payloads |
 
 ## Interactions
 

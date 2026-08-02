@@ -11,12 +11,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gorilla/mux"
-	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/SAP/astonish/pkg/apps"
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/sandbox"
 	"github.com/SAP/astonish/pkg/store"
+	"github.com/gorilla/mux"
+	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/session"
@@ -353,8 +353,9 @@ func resolveMCPSource(r *http.Request, serverTool string, args map[string]any) (
 		return nil, fmt.Errorf("MCP server %q not configured", serverName)
 	}
 
-	// SSE/remote servers: direct network connection (no local exec)
-	if serverCfg.Transport == "sse" || serverCfg.URL != "" {
+	// SSE/streamable-http servers: direct network connection (no local exec).
+	// Stdio servers must stay sandboxed even if a stale URL field is present.
+	if !mcpServerUsesSandbox(serverCfg) {
 		return invokeMCPToolSSE(r.Context(), serverName, toolName, serverCfg, args)
 	}
 
@@ -387,15 +388,16 @@ func invokeMCPToolInContainer(r *http.Request, userID, serverName, toolName stri
 	})
 	if err != nil {
 		transport.Close()
-		stderrStr := stderrBuf.String()
-		return nil, fmt.Errorf("failed to start MCP server %q in sandbox: %w (stderr: %s)", serverName, err, stderrStr)
+		msg := fmt.Sprintf("failed to start MCP server %q in sandbox", serverName)
+		return nil, newMCPSandboxDiagnosticsError(msg, err, stderrBuf, transport.StdoutDiagnostics, serverCfg)
 	}
 
 	toolCtx := &appMCPToolContext{Context: ctx}
 	tools, err := toolset.Tools(toolCtx)
 	if err != nil {
 		transport.Close()
-		return nil, fmt.Errorf("failed to list tools from MCP server %q: %w", serverName, err)
+		msg := fmt.Sprintf("failed to list tools from MCP server %q", serverName)
+		return nil, newMCPSandboxDiagnosticsError(msg, err, stderrBuf, transport.StdoutDiagnostics, serverCfg)
 	}
 
 	var targetTool tool.Tool
@@ -522,7 +524,7 @@ func (c *appMCPToolContext) State() session.State                 { return nil }
 func (c *appMCPToolContext) SearchMemory(_ context.Context, _ string) (*memory.SearchResponse, error) {
 	return nil, nil
 }
-func (c *appMCPToolContext) RequestConfirmation(_ string, _ any) error   { return nil }
+func (c *appMCPToolContext) RequestConfirmation(_ string, _ any) error            { return nil }
 func (c *appMCPToolContext) ToolConfirmation() *toolconfirmation.ToolConfirmation { return nil }
 
 // credentialSuffixRe matches a @credential-name suffix at the end of a URL.

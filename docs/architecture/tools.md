@@ -66,7 +66,7 @@ Both `http_request` and `web_fetch` check resolved DNS addresses against private
 | **Git** | `git_diff_add_line_numbers` | `pkg/tools/` |
 | **HTTP** | `http_request`, `web_fetch` | `pkg/tools/` |
 | **Credentials** | `save_credential`, `list_credentials`, `remove_credential`, `test_credential`, `resolve_credential` | `pkg/tools/credential_tool.go` |
-| **Memory** | `memory_save`, `memory_search`, `memory_get` | `pkg/tools/memory_*.go` |
+| **Memory** | `memory_save`, `memory_search`, `memory_get`, `memory_delete` | `pkg/tools/memory_*.go` |
 | **Delegation** | `delegate_tasks` | `pkg/tools/delegate_tool.go` |
 | **Flows** | `search_flows`, `run_flow`, `distill_flow` | `pkg/tools/` |
 | **Scheduler** | `schedule_job`, `list_scheduled_jobs`, `remove_scheduled_job`, `update_scheduled_job` | `pkg/tools/scheduler_tool.go` |
@@ -142,6 +142,6 @@ The `search_tools` tool and the `ToolIndex` provide dynamic tool discovery:
 - **Sandbox**: `WrapToolsWithNode()` transparently proxies container tools. `ProcessRequest()` eagerly warms containers.
 - **Credentials**: `resolve_credential` returns placeholders. `http_request` uses `Resolve()` for header injection. All tool outputs pass through the Redactor.
 - **Agent Engine**: Tools are registered via `llmagent.Config.Tools`. Dynamic tool injection adds tools per-turn. BeforeToolCallback/AfterToolCallback wrap every tool call.
-- **Memory**: `memory_save/search/get` tools provide direct memory access. Tool descriptions are indexed in the ToolIndex for semantic discovery.
+- **Memory**: `memory_save/search/get/delete` tools provide direct memory access. `memory_delete` deletes by exact ID and scope through tenant-scoped stores, using the same ownership/admin authorization as Studio memory management. Tool descriptions are indexed in the ToolIndex for semantic discovery.
 - **Browser**: Browser tools run in the host process and manage a shared go-rod session. With sandbox enabled they launch Chromium+KasmVNC inside the session container and connect over CDP; sandboxed drills refuse host Chrome.
 - **Drills**: The drill runner uses a composite executor that routes different tool categories to different backends.

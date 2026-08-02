@@ -44,7 +44,7 @@ func GetAllFlowToolDeclarations() []ToolDeclaration {
 	// Fleet tools (2)
 	decls = append(decls, fleetToolDeclarations()...)
 
-	// Memory tools (3)
+	// Memory tools (4)
 	decls = append(decls, memoryToolDeclarations()...)
 
 	// Skill lookup tool (1)
@@ -210,6 +210,7 @@ func memoryToolDeclarations() []ToolDeclaration {
 		{Name: "memory_save", Description: "Save durable facts to persistent memory", Category: "memory"},
 		{Name: "memory_search", Description: "Search memory for relevant knowledge", Category: "memory"},
 		{Name: "memory_get", Description: "Read full memory file content by path", Category: "memory"},
+		{Name: "memory_delete", Description: "Delete an existing memory by exact ID", Category: "memory"},
 	}
 }
 

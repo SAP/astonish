@@ -80,8 +80,9 @@ The agent interacts with memory through built-in tools:
 - **`memory_save`** — saves facts to the user's personal memory tier
 - **`memory_search`** — searches across all three tiers with RRF fusion
 - **`memory_get`** — retrieves full context around a specific memory entry
+- **`memory_delete`** — deletes a specific memory by ID from its tier when the user asks to remove obsolete or incorrect knowledge
 
-These tools are always available during chat sessions and sub-agent delegation.
+These tools are always available during chat sessions. Sub-agents can search and retrieve memory, but only the main chat agent can save or delete memories.
 
 ## Configuring Memory
 

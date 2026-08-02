@@ -12,6 +12,8 @@ const credStoreKey contextKey = "astonish_credential_store"
 const memoryStoreKey contextKey = "astonish_memory_store"
 const memoryScopeKey contextKey = "astonish_memory_scope"
 const memorySearcherKey contextKey = "astonish_memory_searcher"
+const memoryStoresByScopeKey contextKey = "astonish_memory_stores_by_scope"
+const memoryDeleteAuthorizerKey contextKey = "astonish_memory_delete_authorizer"
 const flowStoreKey contextKey = "astonish_flow_store"
 const teamFlowStoreKey contextKey = "astonish_team_flow_store"
 const drillReportStoreKey contextKey = "astonish_drill_report_store"
@@ -104,6 +106,47 @@ func WithThreeTierSearcher(ctx context.Context, ts ThreeTierSearcher) context.Co
 func ThreeTierSearcherFromContext(ctx context.Context) ThreeTierSearcher {
 	ts, _ := ctx.Value(memorySearcherKey).(ThreeTierSearcher)
 	return ts
+}
+
+// MemoryStoresByScope groups the writable memory stores available to the
+// current tenant context. Tools use this to target a specific memory tier by ID
+// without bypassing tenant routing.
+type MemoryStoresByScope struct {
+	Personal MemoryStore
+	Team     MemoryStore
+	Org      MemoryStore
+}
+
+// WithMemoryStoresByScope returns a new context containing per-scope memory stores.
+func WithMemoryStoresByScope(ctx context.Context, stores MemoryStoresByScope) context.Context {
+	return context.WithValue(ctx, memoryStoresByScopeKey, stores)
+}
+
+// MemoryStoresByScopeFromContext retrieves per-scope memory stores from context.
+func MemoryStoresByScopeFromContext(ctx context.Context) (MemoryStoresByScope, bool) {
+	if ctx == nil {
+		return MemoryStoresByScope{}, false
+	}
+	stores, ok := ctx.Value(memoryStoresByScopeKey).(MemoryStoresByScope)
+	return stores, ok
+}
+
+// MemoryDeleteAuthorizer checks whether the current caller may delete a memory
+// from the requested scope.
+type MemoryDeleteAuthorizer func(ctx context.Context, entry *MemorySearchResult, scope string) error
+
+// WithMemoryDeleteAuthorizer returns a new context containing a memory delete authorization function.
+func WithMemoryDeleteAuthorizer(ctx context.Context, fn MemoryDeleteAuthorizer) context.Context {
+	return context.WithValue(ctx, memoryDeleteAuthorizerKey, fn)
+}
+
+// MemoryDeleteAuthorizerFromContext retrieves the memory delete authorizer from context.
+func MemoryDeleteAuthorizerFromContext(ctx context.Context) MemoryDeleteAuthorizer {
+	if ctx == nil {
+		return nil
+	}
+	fn, _ := ctx.Value(memoryDeleteAuthorizerKey).(MemoryDeleteAuthorizer)
+	return fn
 }
 
 // WithFlowStore returns a new context containing a tenant-scoped FlowStore.

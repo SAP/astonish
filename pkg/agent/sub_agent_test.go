@@ -388,6 +388,7 @@ func TestSubAgentManager_DepthCheck(t *testing.T) {
 func TestExcludedChildTools(t *testing.T) {
 	expected := map[string]bool{
 		"memory_save":       true,
+		"memory_delete":     true,
 		"delegate_tasks":    true,
 		"schedule_job":      true,
 		"save_credential":   true,

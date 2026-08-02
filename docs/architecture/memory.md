@@ -260,6 +260,6 @@ The BM25 index is a pure Go implementation:
 - **Agent Engine**: Auto-knowledge retrieval queries the store before each LLM turn. Memory reflector saves knowledge after turns. ToolIndex shares the same chromem-go DB for tool discovery.
 - **Skills**: Skill documents are indexed alongside memory documents for retrieval.
 - **Flows**: Flow knowledge documents (generated during distillation) are indexed for discovery.
-- **Tools**: `memory_save`, `memory_get`, `memory_search` tools provide direct agent access to the memory system.
+- **Tools**: `memory_save`, `memory_get`, `memory_search`, and `memory_delete` tools provide direct agent access to the memory system. Deletes require an exact memory ID, target the result's tenant-scoped memory tier, and use the same creator/admin authorization path as Studio memory management.
 - **Configuration**: Embedding provider and memory directory are configured in app config.
 - **Daemon**: Memory indexer is initialized during daemon startup with fsnotify watcher for live updates.

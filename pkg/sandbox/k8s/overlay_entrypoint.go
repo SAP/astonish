@@ -21,13 +21,14 @@
 // deployment.
 //
 // This file owns the **source of truth** for the entrypoint script.
-// The script is copied into the astonish-sandbox-base image at build
-// time (typically `go run ./cmd/astonish-sandbox-entrypoint-script >
-// /tmp/entrypoint.sh && COPY /tmp/entrypoint.sh /usr/local/bin/` in the
-// Dockerfile, or an equivalent build step). Keeping it in Go lets us
-// unit-test its shape without a CI shell harness and lets Astonish
-// evolve the runtime contract (env var names, mount paths, resume
-// semantics) in lockstep with the backend that produces those inputs.
+// Host builds emit it via `make sandbox-entrypoint` (wrapper around
+// `go run ./cmd/astonish-sandbox-entrypoint-script`); the
+// docker/sandbox-base image then COPYs the file to
+// /usr/local/bin/astonish-sandbox-entrypoint. Keeping the generator in
+// Go lets us unit-test its shape without a CI shell harness and lets
+// Astonish evolve the runtime contract (env var names, mount paths,
+// resume semantics) in lockstep with the backend that produces those
+// inputs.
 //
 // Design invariants enforced by the script:
 //

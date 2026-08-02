@@ -62,7 +62,9 @@ help:
 	@echo "Sandbox (Docker+Incus for macOS/Windows):"
 	@echo "  make build-linux       - Cross-compile Linux amd64 binary"
 	@echo "  make build-linux-arm64 - Cross-compile Linux arm64 binary"
+	@echo "  make sandbox-entrypoint - Generate astonish-sandbox-entrypoint script (host)"
 	@echo "  make docker-incus      - Build+LOAD local Incus image (native arch; tags :$(VERSION) and :latest when VERSION=dev)"
+	@echo "  make docker-sandbox-base - Build+LOAD local sandbox-base image (native arch)"
 	@echo ""
 	@echo "OpenShell Sandbox:"
 	@echo "  make docker-sandbox-openshell - Build the OpenShell sandbox image"
@@ -534,7 +536,7 @@ install: build-all
 clean:
 	@echo "Cleaning up build artifacts..."
 	rm -rf $(BINARY_NAME)
-	rm -f astonish-linux-amd64 astonish-linux-arm64
+	rm -f astonish-linux-amd64 astonish-linux-arm64 astonish-sandbox-entrypoint
 	rm -rf $(WEB_DIR)/dist
 	rm -rf $(WEB_DIR)/node_modules
 	@echo "Cleanup complete!"
@@ -545,7 +547,7 @@ update-mcp-stars:
 	GITHUB_TOKEN=$$(gh auth token) python3 scripts/update-mcp-stars.py
 	@echo "Star counts updated!"
 
-.PHONY: all help build build-ui build-all run studio studio-dev test test-unit test-integration test-e2e test-e2e-sqlite test-e2e-inspect test-e2e-inspect-stop e2e-k8s-up e2e-k8s-down install clean update-mcp-stars setup-hooks platform-init create-secrets e2e-env-up e2e-env-down e2e-env-rebuild docker-up docker-down docker-rebuild build-linux build-linux-arm64 docker-incus docker-sandbox-openshell ensure-builder push-dev push-incus-dev push-sandbox-base-dev push-sandbox-openshell-dev push-all-dev push-dev-fast push-sandbox-base-dev-fast push-incus-dev-fast push-sandbox-openshell-dev-fast push-all-dev-fast ent-generate proto-gen
+.PHONY: all help build build-ui build-all run studio studio-dev test test-unit test-integration test-e2e test-e2e-sqlite test-e2e-inspect test-e2e-inspect-stop e2e-k8s-up e2e-k8s-down install clean update-mcp-stars setup-hooks platform-init create-secrets e2e-env-up e2e-env-down e2e-env-rebuild docker-up docker-down docker-rebuild build-linux build-linux-arm64 sandbox-entrypoint docker-incus docker-sandbox-base docker-sandbox-openshell ensure-builder push-dev push-incus-dev push-sandbox-base-dev push-sandbox-openshell-dev push-all-dev push-dev-fast push-sandbox-base-dev-fast push-incus-dev-fast push-sandbox-openshell-dev-fast push-all-dev-fast ent-generate proto-gen
 
 # Docker Test Environment - isolated environment for running integration/E2E tests
 e2e-env-up:
@@ -614,13 +616,25 @@ endif
 # Cross-compile Linux binary (for macOS/Windows dev pushing into sandbox containers)
 build-linux:
 	@echo "Cross-compiling Linux amd64 binary..."
+	@# go:embed requires web/dist; create a placeholder tree if the UI has not been built.
+	@mkdir -p $(WEB_DIR)/dist
 	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-s -w -X github.com/SAP/astonish/cmd/astonish.Version=$(VERSION)" -o astonish-linux-amd64 .
 	@echo "Linux binary built: astonish-linux-amd64"
 
 build-linux-arm64:
 	@echo "Cross-compiling Linux arm64 binary..."
+	@mkdir -p $(WEB_DIR)/dist
 	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="-s -w -X github.com/SAP/astonish/cmd/astonish.Version=$(VERSION)" -o astonish-linux-arm64 .
 	@echo "Linux binary built: astonish-linux-arm64"
+
+# Emit the K8s sandbox PID-1 entrypoint script to the repo root for COPY into
+# docker/sandbox-base. Host-side so the image build does not run a Go toolchain.
+sandbox-entrypoint:
+	@echo "Generating astonish-sandbox-entrypoint..."
+	go run ./cmd/astonish-sandbox-entrypoint-script > astonish-sandbox-entrypoint
+	@chmod +x astonish-sandbox-entrypoint
+	@head -1 astonish-sandbox-entrypoint | grep -q '^#!/bin/sh'
+	@echo "Wrote astonish-sandbox-entrypoint"
 
 # Generate Go gRPC stubs from vendored NVIDIA OpenShell proto files
 proto-gen:
@@ -667,6 +681,22 @@ docker-incus:
 	fi
 	@echo "Next: docker rm -f astonish-incus && ./astonish sandbox refresh --force  (then new chat session)"
 
+# Build the K8s sandbox-base image locally (native arch). Host-builds the
+# binary + entrypoint so Docker only layers apt/treesitter + COPY.
+docker-sandbox-base: sandbox-entrypoint
+	@if [ "$(DEV_ARCH)" = "arm64" ]; then \
+		$(MAKE) build-linux-arm64; \
+	else \
+		$(MAKE) build-linux; \
+	fi
+	@echo "Building sandbox-base image (linux/$(DEV_ARCH))..."
+	docker buildx build \
+		--platform linux/$(DEV_ARCH) \
+		-f docker/sandbox-base/Dockerfile \
+		-t $(DOCKER_REGISTRY)/astonish-sandbox-base:$(VERSION) \
+		--load .
+	@echo "Image built: $(DOCKER_REGISTRY)/astonish-sandbox-base:$(VERSION)"
+
 # Build the OpenShell sandbox image (NVIDIA sandbox base + Astonish agent tools)
 docker-sandbox-openshell: build-linux
 	@echo "Building OpenShell sandbox image..."
@@ -702,13 +732,17 @@ push-incus-dev: ensure-builder build-linux build-linux-arm64
 	@echo "Pushed: $(DOCKER_REGISTRY)/astonish-incus:$(DEV_TAG)"
 
 # Build and push the sandbox base image (multi-arch).
-# Cross-compiles Go inside the Dockerfile on $BUILDPLATFORM (avoids QEMU Go 1.26 panics).
-# Requires web/dist/ for go:embed (run `make build-ui` first if missing).
-push-sandbox-base-dev: ensure-builder
+# Host-cross-compiles both arches + generates the entrypoint, then Docker only
+# runs apt + treesitter + COPY (stable layers cache across code edits).
+# Requires web/dist/ for go:embed (mkdir placeholder is enough for sandbox; full UI optional).
+push-sandbox-base-dev: ensure-builder build-linux build-linux-arm64 sandbox-entrypoint
 	@echo "Building and pushing $(DOCKER_REGISTRY)/astonish-sandbox-base:$(DEV_TAG) (linux/amd64,linux/arm64)..."
+	@mkdir -p .buildx-cache/sandbox-base
 	docker buildx build --platform linux/amd64,linux/arm64 \
 		-f docker/sandbox-base/Dockerfile \
 		-t $(DOCKER_REGISTRY)/astonish-sandbox-base:$(DEV_TAG) \
+		--cache-from type=local,src=.buildx-cache/sandbox-base \
+		--cache-to type=local,dest=.buildx-cache/sandbox-base,mode=max \
 		--push .
 	@echo "Pushed: $(DOCKER_REGISTRY)/astonish-sandbox-base:$(DEV_TAG)"
 
@@ -739,11 +773,19 @@ push-dev-fast: ensure-builder build-linux build-linux-arm64
 	@echo "Pushed: $(DOCKER_REGISTRY)/astonish:$(DEV_TAG)"
 
 # Fast: build and push sandbox base image (single arch)
-push-sandbox-base-dev-fast: ensure-builder
+push-sandbox-base-dev-fast: ensure-builder sandbox-entrypoint
+	@if [ "$(DEV_ARCH)" = "arm64" ]; then \
+		$(MAKE) build-linux-arm64; \
+	else \
+		$(MAKE) build-linux; \
+	fi
 	@echo "Building and pushing $(DOCKER_REGISTRY)/astonish-sandbox-base:$(DEV_TAG) (linux/$(DEV_ARCH) only)..."
+	@mkdir -p .buildx-cache/sandbox-base
 	docker buildx build --platform linux/$(DEV_ARCH) \
 		-f docker/sandbox-base/Dockerfile \
 		-t $(DOCKER_REGISTRY)/astonish-sandbox-base:$(DEV_TAG) \
+		--cache-from type=local,src=.buildx-cache/sandbox-base \
+		--cache-to type=local,dest=.buildx-cache/sandbox-base,mode=max \
 		--push .
 	@echo "Pushed: $(DOCKER_REGISTRY)/astonish-sandbox-base:$(DEV_TAG)"
 

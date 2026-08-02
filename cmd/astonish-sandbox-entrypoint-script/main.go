@@ -3,15 +3,16 @@
 //
 // The script is the PID-1 entrypoint for sandbox pods in the K8s+Sysbox
 // backend. Its source of truth lives in pkg/sandbox/k8s.EntrypointScript;
-// this command exists so image builders (docker/sandbox-base/Dockerfile
-// and CI) can generate the script deterministically without invoking
-// the main astonish binary, which would pull in the full server + UI.
+// this command exists so image builders can generate the script
+// deterministically without invoking the main astonish binary, which
+// would pull in the full server + UI.
 //
-// Usage (Dockerfile):
+// Usage (host / Makefile — preferred; keeps Docker layers cacheable):
 //
-//	RUN go run ./cmd/astonish-sandbox-entrypoint-script \
-//	    > /usr/local/bin/astonish-sandbox-entrypoint && \
-//	    chmod +x /usr/local/bin/astonish-sandbox-entrypoint
+//	make sandbox-entrypoint
+//	# writes ./astonish-sandbox-entrypoint for COPY into docker/sandbox-base
+//
+//	go run ./cmd/astonish-sandbox-entrypoint-script > astonish-sandbox-entrypoint
 //
 // The emitted script is parameterised ONLY by the defaults baked into
 // EntrypointScriptOptions.applyDefaults; re-running with a different

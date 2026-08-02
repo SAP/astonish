@@ -1435,12 +1435,17 @@ artefacts:
   dev-cluster example. In-process validation lives at
   `pkg/sandbox/k8s/manifest_deploy_test.go`; an opt-in integration
   test (`-tags integration`) shells out to `kubectl apply --dry-run=server`.
-- `docker/sandbox-base/Dockerfile`: two-stage build of the
-  `astonish-sandbox-base` image, baking the generated PID-1 overlay
-  composer at `/usr/local/bin/astonish-sandbox-entrypoint`.
+- `docker/sandbox-base/Dockerfile`: cache-friendly runtime image for
+  `astonish-sandbox-base`. Host-cross-compiles the agent binary
+  (`make build-linux` / `build-linux-arm64`) and generates the PID-1
+  entrypoint (`make sandbox-entrypoint`); Docker only installs apt
+  packages, builds the treesitter `.so`, and `COPY`s those artifacts.
+  Layer order is stable→volatile (apt → treesitter → wrappers →
+  entrypoint → binary) so routine code edits only rebuild the last
+  COPY layers.
 - `cmd/astonish-sandbox-entrypoint-script`: standalone Go helper that
-  emits `pkg/sandbox/k8s.EntrypointScript` to stdout (used by the
-  Dockerfile).
+  emits `pkg/sandbox/k8s.EntrypointScript` to stdout (used by
+  `make sandbox-entrypoint` and CI before the image build).
 - `astonish sandbox k8s-smoke` subcommand: end-to-end probe that runs
   CreateSession → Exec → PushFile → PullFile → SessionState → Stop →
   Destroy against the cluster pointed at by the operator's kubeconfig.
@@ -1458,12 +1463,12 @@ artefacts:
   build the backend through `BackendFromAppConfig` and wrap the
   tool set with `WrapToolsWithPool`. Chat and fleet keep the
   concrete Incus pool verbatim (out of scope for this pass).
-- `docker/sandbox-base/Dockerfile` bakes a statically-linked
-  `astonish` binary into the base image and installs a chroot
-  wrapper at `/usr/local/bin/astonish`; the entrypoint bind-mounts
-  the host-layer binary over the overlay's wrapper before PID-1
-  handoff so both the chroot entry and subsequent `Backend.Exec`
-  tool calls resolve to the same trusted build.
+- `docker/sandbox-base/Dockerfile` installs the host-built binary at
+  `/usr/local/bin/astonish-host` and a chroot wrapper at
+  `/usr/local/bin/astonish`; the entrypoint bind-mounts the host-layer
+  binary over the overlay's wrapper before PID-1 handoff so both the
+  chroot entry and subsequent `Backend.Exec` tool calls resolve to the
+  same trusted build.
 
 Deferred to Phase E (intentionally out of scope for Phase D):
 

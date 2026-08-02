@@ -369,6 +369,30 @@ jobs:
           npm ci
           npm run build
 
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Cross-compile Linux binaries and entrypoint
+        env:
+          VERSION_TAG: ${{ needs.prepare.outputs.version_tag }}
+        run: |
+          LDFLAGS="-s -w -X github.com/SAP/astonish/cmd/astonish.Version=${VERSION_TAG}"
+
+          echo "Building linux/amd64..."
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="$LDFLAGS" -o astonish-linux-amd64 .
+
+          echo "Building linux/arm64..."
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="$LDFLAGS" -o astonish-linux-arm64 .
+
+          echo "Generating sandbox entrypoint..."
+          go run ./cmd/astonish-sandbox-entrypoint-script > astonish-sandbox-entrypoint
+          chmod +x astonish-sandbox-entrypoint
+          head -1 astonish-sandbox-entrypoint | grep -q '^#!/bin/sh'
+
+          ls -la astonish-linux-* astonish-sandbox-entrypoint
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
 

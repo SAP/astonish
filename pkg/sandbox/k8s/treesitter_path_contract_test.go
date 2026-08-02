@@ -39,6 +39,14 @@ func TestTreeSitterLibraryPathContract(t *testing.T) {
 	}
 }
 
+func TestSandboxBaseDockerfileIncludesMuslLoaderCompatLink(t *testing.T) {
+	dockerfile := readSandboxBaseDockerfile(t)
+	want := "ln -sf x86_64-linux-gnu/ld-linux-x86-64.so.2 /lib/ld-musl-x86_64.so.1"
+	if !strings.Contains(dockerfile, want) {
+		t.Fatalf("sandbox-base Dockerfile must create musl loader compatibility link; missing:\n%s", want)
+	}
+}
+
 func readSandboxBaseDockerfile(t *testing.T) string {
 	t.Helper()
 	_, thisFile, _, ok := runtime.Caller(0)

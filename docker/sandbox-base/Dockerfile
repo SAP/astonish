@@ -192,6 +192,15 @@ RUN apt-get update && \
 RUN mkdir -p /usr/lib/astonish
 COPY --from=treesitter-builder /tmp/libastonish-treesitter.so /usr/lib/astonish/libastonish-treesitter.so
 
+# Compatibility guard for sandbox astonish-host binaries whose ELF
+# interpreter is /lib/ld-musl-x86_64.so.1. The intended build is static
+# (CGO_ENABLED=0), but some Go/toolchain combinations still produce a
+# dynamic musl-linked binary when built from the Alpine toolchain stage.
+# The entrypoint bind-mounts astonish-host into the chroot at
+# /usr/local/bin/astonish; without this loader path, backend Exec sees
+# exit=127 and no node handshake even though the file exists.
+RUN ln -sf x86_64-linux-gnu/ld-linux-x86-64.so.2 /lib/ld-musl-x86_64.so.1
+
 # Disable apt's privilege-drop sandbox. In the Astonish sandbox chroot,
 # everything runs as root under squash_to_root semantics, so the _apt
 # user cannot access partial-download directories. This suppresses the

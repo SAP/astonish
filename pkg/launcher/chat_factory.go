@@ -495,6 +495,14 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 				}
 			}
 
+			if sessRegistry == nil {
+				var regErr error
+				sessRegistry, regErr = sandbox.NewSessionRegistry()
+				if regErr != nil {
+					return nil, fmt.Errorf("sandbox is enabled but session registry failed: %w", regErr)
+				}
+			}
+
 			b, backendCleanup, berr := sandbox.BackendFromAppConfigWithSessions(cfg.AppConfig, sessRegistry)
 			if berr != nil {
 				return nil, fmt.Errorf("sandbox is enabled but the %s backend is not available: %w\n\nTo disable sandbox, set 'sandbox.enabled: false' in ~/.config/astonish/config.yaml", kind, berr)
@@ -504,7 +512,9 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			pool := sandbox.NewBackendPool(b, sandbox.ToResourceLimits(limits))
 
 			// Wrap all tool category slices with pool-backed proxies.
-			// Browser tools are NOT wrapped — they run on the host.
+			// Browser tools are NOT wrapped as Node tools; they call the
+			// Manager directly, and the Manager is wired below to launch
+			// Chromium/CloakBrowser inside the sandbox when supported.
 			coreTools = sandbox.WrapToolsWithPool(coreTools, pool)
 			if len(credToolsSlice) > 0 {
 				credToolsSlice = sandbox.WrapToolsWithPool(credToolsSlice, pool)
@@ -583,6 +593,14 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 						slog.Info("browser-in-sandbox enabled for OpenShell",
 							"component", "chat-factory")
 					}
+				}
+			}
+
+			if kind == sandbox.BackendKindK8s {
+				if sandbox.WireBackendBrowserManager(browserMgr, b, sessRegistry, sessRegistry.TouchActivity) {
+					api.SetVNCContainerDialFunc(browserMgr.ContainerDialFunc)
+					slog.Info("browser-in-sandbox enabled for K8s",
+						"component", "chat-factory")
 				}
 			}
 

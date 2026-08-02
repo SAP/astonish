@@ -242,6 +242,7 @@ func TestCloakBrowserInstallCommands_RequiredSharedLibs(t *testing.T) {
 		{"libgtk-3-0", "GTK3 (Chromium UI toolkit)"},
 		{"libgdk-pixbuf-2.0-0", "GDK-Pixbuf image loading"},
 		{"libnspr4", "Netscape Portable Runtime (NSS dependency)"},
+		{"libglib2.0-0t64", "GLib/GObject (libgobject-2.0.so.0)"},
 		{"libnss3", "Network Security Services"},
 		{"libatk-bridge2.0-0", "ATK-Bridge accessibility"},
 		{"libx11-xcb1", "X11-XCB bridge"},
@@ -590,6 +591,10 @@ func TestBrowserContainerInstallCommands_DebianBookworm_DefaultEngine(t *testing
 	if strings.Contains(flat, "libasound2t64") {
 		t.Error("Debian bookworm should use libasound2, not libasound2t64")
 	}
+	assertContainsStr(t, flat, "libglib2.0-0", "Debian GLib/GObject package for libgobject-2.0.so.0")
+	if strings.Contains(flat, "libglib2.0-0t64") {
+		t.Error("Debian bookworm should use libglib2.0-0, not libglib2.0-0t64")
+	}
 	assertContainsStr(t, flat, "libjpeg62-turbo", "Debian libjpeg62-turbo (not libjpeg-turbo8)")
 	if strings.Contains(flat, "libjpeg-turbo8") {
 		t.Error("Debian bookworm should use libjpeg62-turbo, not libjpeg-turbo8")
@@ -613,6 +618,10 @@ func TestBrowserContainerInstallCommands_DebianBookworm_CloakBrowserEngine(t *te
 	assertContainsStr(t, flat, "libasound2", "Debian libasound2")
 	if strings.Contains(flat, "libasound2t64") {
 		t.Error("Debian bookworm CloakBrowser should use libasound2, not libasound2t64")
+	}
+	assertContainsStr(t, flat, "libglib2.0-0", "Debian GLib/GObject package for libgobject-2.0.so.0")
+	if strings.Contains(flat, "libglib2.0-0t64") {
+		t.Error("Debian bookworm CloakBrowser should use libglib2.0-0, not libglib2.0-0t64")
 	}
 	assertContainsStr(t, flat, "libjpeg62-turbo", "Debian libjpeg62-turbo")
 	if strings.Contains(flat, "libjpeg-turbo8") {

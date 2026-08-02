@@ -793,6 +793,10 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		"announce_plan":      true,
 		"resolve_credential": true,
 		"skill_lookup":       true,
+		// Platform web search must be main-thread always-on. If it only lives in
+		// the "web" group, ToolIndex may never inject it and the agent claims
+		// "no web search tools" even when General selects Perplexity.
+		"perplexity_web_search": true,
 	}
 
 	var mainThreadTools []tool.Tool

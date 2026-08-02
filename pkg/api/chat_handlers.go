@@ -1076,6 +1076,13 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 		runner.InjectMCPServerStores(svc.PlatformMCPServers, svc.MCPServers, svc.TeamMCPServers)
 	}
 
+	// Per-request web search: platform General/WebSearchTool must apply to every
+	// user, not only the browser session that first pre-warmed the singleton agent.
+	// Also late-bind the Perplexity tool if it was configured after agent init.
+	if appCfg := effectiveAppConfig(r); appCfg != nil {
+		applyPerRequestWebSearch(runner, chatAgent, appCfg)
+	}
+
 	// Inject tenant-scoped network policy stores into the runner context so that
 	// denial detection can auto-approve/deny based on configured rules rather
 	// than always prompting the user.
@@ -1825,6 +1832,58 @@ func sessionProviderHasCredential(ctx context.Context, svc *store.Services, name
 		}
 	}
 	return false
+}
+
+// applyPerRequestWebSearch publishes the cascade-selected web tools into the
+// runner prompt and ensures the Perplexity tool is registered when selected.
+// This closes the gap where a singleton ChatAgent pre-warmed before platform
+// web settings were saved (or with a different tenant context) would leave
+// some browser sessions without web search while others worked.
+func applyPerRequestWebSearch(runner *ChatRunner, chatAgent *agent.ChatAgent, appCfg *config.AppConfig) {
+	if runner == nil || appCfg == nil {
+		return
+	}
+
+	searchOK, searchServer, searchTool := IsWebSearchConfiguredWith(appCfg)
+	extractOK, extractServer, extractTool := IsWebExtractConfiguredWith(appCfg)
+
+	searchName := ""
+	searchAvailable := false
+	if searchOK && searchTool != "" {
+		searchTool = strings.ReplaceAll(searchTool, "-", "_")
+		if searchServer == "perplexity" {
+			if appCfg.PerplexityWebSearch.Provider != "" && appCfg.PerplexityWebSearch.Model != "" {
+				searchAvailable = true
+				searchName = searchTool
+			}
+		} else if searchServer != "" {
+			// MCP standard web search (Tavily/Brave/Firecrawl): advertise when
+			// selected. Tool presence is handled by MCP merge/filter + ToolIndex.
+			searchAvailable = true
+			searchName = searchTool
+		}
+	}
+
+	extractName := ""
+	extractAvailable := false
+	if extractOK && extractTool != "" {
+		extractAvailable = true
+		extractName = strings.ReplaceAll(extractTool, "-", "_")
+		_ = extractServer
+	}
+
+	runner.InjectWebSearchPrompt(searchAvailable, searchName, extractAvailable, extractName)
+
+	// Late-bind Perplexity onto the main thread if selected but missing from the
+	// singleton agent (common after config change without a full process restart).
+	if searchAvailable && searchServer == "perplexity" && chatAgent != nil && !chatAgent.HasMainThreadTool("perplexity_web_search") {
+		if t, err := tools.NewPerplexityWebSearchTool(appCfg, provider.GetProvider); err != nil {
+			slog.Warn("failed to late-bind perplexity_web_search tool", "error", err)
+		} else {
+			chatAgent.EnsureMainThreadTool(t)
+			slog.Info("late-bound perplexity_web_search onto chat agent for platform web search")
+		}
+	}
 }
 
 // resolveSessionEffectiveModel returns the effective provider/model for a

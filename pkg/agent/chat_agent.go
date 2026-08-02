@@ -80,6 +80,10 @@ type ChatAgent struct {
 	searchToolsResults []string    // tool names found via search_tools calls within current turn
 	searchToolsMu      sync.Mutex  // protects searchToolsResults
 
+	// toolsMu protects Tools / SystemPrompt.Tools when a late-configured
+	// platform tool (e.g. perplexity_web_search) is added after init.
+	toolsMu sync.Mutex
+
 	// Self-management callbacks
 	SelfMDRefresher func() // Called after config changes to regenerate SELF.md
 
@@ -237,6 +241,48 @@ func (c *ChatAgent) RegisterSearchToolsResults(toolNames []string) {
 	c.searchToolsMu.Lock()
 	defer c.searchToolsMu.Unlock()
 	c.searchToolsResults = append(c.searchToolsResults, toolNames...)
+}
+
+// EnsureMainThreadTool adds t to the agent's static tool list if missing.
+// Used when platform web search is configured after the singleton agent was
+// first initialized (or pre-warmed without tenant web settings).
+func (c *ChatAgent) EnsureMainThreadTool(t tool.Tool) {
+	if c == nil || t == nil {
+		return
+	}
+	name := t.Name()
+	c.toolsMu.Lock()
+	defer c.toolsMu.Unlock()
+	for _, existing := range c.Tools {
+		if existing != nil && existing.Name() == name {
+			return
+		}
+	}
+	c.Tools = append(c.Tools, t)
+	if c.SystemPrompt != nil {
+		for _, existing := range c.SystemPrompt.Tools {
+			if existing != nil && existing.Name() == name {
+				return
+			}
+		}
+		c.SystemPrompt.Tools = append(c.SystemPrompt.Tools, t)
+	}
+}
+
+// HasMainThreadTool reports whether a tool with the given name is already
+// registered on the agent.
+func (c *ChatAgent) HasMainThreadTool(name string) bool {
+	if c == nil || name == "" {
+		return false
+	}
+	c.toolsMu.Lock()
+	defer c.toolsMu.Unlock()
+	for _, existing := range c.Tools {
+		if existing != nil && existing.Name() == name {
+			return true
+		}
+	}
+	return false
 }
 
 // AutoInjectMissingToolCallback returns an OnToolErrorCallback that recovers

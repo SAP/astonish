@@ -226,6 +226,17 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			if po.SkillIndex != "" {
 				promptBuilder.SkillIndex = po.SkillIndex
 			}
+			// Platform/team web tools: always take the per-request values when set
+			// so every user sees the platform-selected search tool, not whatever
+			// was baked into the singleton agent at first init/pre-warm.
+			if po.WebSearchAvailable != nil {
+				promptBuilder.WebSearchAvailable = *po.WebSearchAvailable
+				promptBuilder.WebSearchToolName = po.WebSearchToolName
+			}
+			if po.WebExtractAvailable != nil {
+				promptBuilder.WebExtractAvailable = *po.WebExtractAvailable
+				promptBuilder.WebExtractToolName = po.WebExtractToolName
+			}
 		}
 
 		// Per-team tool restrictions: filter disabled tools from the prompt builder

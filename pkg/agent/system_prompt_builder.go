@@ -92,6 +92,14 @@ type PromptOverrides struct {
 	// sessions to ensure critical tools (e.g., save_sandbox_template, save_fleet_plan)
 	// remain available across all turns of a multi-turn guided conversation.
 	PinnedToolGroups []string
+
+	// Web search/extract are resolved per request from the platform→team cascade
+	// so a singleton ChatAgent re-inited without tenant context still advertises
+	// the platform-selected tools for every user. Nil pointers mean "leave builder as-is".
+	WebSearchAvailable  *bool
+	WebSearchToolName   string
+	WebExtractAvailable *bool
+	WebExtractToolName  string
 }
 
 type promptOverridesKey struct{}

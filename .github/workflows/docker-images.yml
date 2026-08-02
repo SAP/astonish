@@ -42,8 +42,9 @@ jobs:
           fi
 
   # --------------------------------------------------------------------------
-  # Build and push ghcr.io/sap/astonish (multi-arch)
-  # Uses the multi-stage Dockerfile which handles cross-compilation internally
+  # Build and push ghcr.io/sap/astonish (multi-arch).
+  # Host-cross-compiles Go binaries on the runner; Dockerfile only installs
+  # slim runtime deps (Node/uv via multi-stage COPY) and COPYs the binary.
   # --------------------------------------------------------------------------
   build-astonish:
     name: Build and push astonish
@@ -128,8 +129,12 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             VERSION=${{ needs.prepare.outputs.version_tag }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: |
+            type=gha
+            type=registry,ref=ghcr.io/sap/astonish:buildcache
+          cache-to: |
+            type=gha,mode=max
+            type=registry,ref=ghcr.io/sap/astonish:buildcache,mode=max
 
       - name: Generate artifact attestation
         uses: actions/attest-build-provenance@v4
@@ -233,10 +238,10 @@ jobs:
           push-to-registry: true
 
   # --------------------------------------------------------------------------
-  # Build and push ghcr.io/sap/astonish-sandbox-base (multi-arch)
-  # Uses the multi-stage docker/sandbox-base/Dockerfile which compiles the
-  # entrypoint script generator and astonish binary internally, then produces
-  # a minimal Debian-slim runtime image with fuse-overlayfs.
+  # Build and push ghcr.io/sap/astonish-sandbox-base (multi-arch).
+  # Host-cross-compiles the agent binary + generates the entrypoint script;
+  # the Dockerfile only installs apt packages, builds treesitter, and COPY
+  # those artifacts — so apt/treesitter layers stay cached across code edits.
   # --------------------------------------------------------------------------
   build-sandbox-base:
     name: Build and push astonish-sandbox-base
@@ -265,6 +270,30 @@ jobs:
           cd web
           npm ci
           npm run build
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Cross-compile Linux binaries and entrypoint
+        env:
+          VERSION_TAG: ${{ needs.prepare.outputs.version_tag }}
+        run: |
+          LDFLAGS="-s -w -X github.com/SAP/astonish/cmd/astonish.Version=${VERSION_TAG}"
+
+          echo "Building linux/amd64..."
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="$LDFLAGS" -o astonish-linux-amd64 .
+
+          echo "Building linux/arm64..."
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="$LDFLAGS" -o astonish-linux-arm64 .
+
+          echo "Generating sandbox entrypoint..."
+          go run ./cmd/astonish-sandbox-entrypoint-script > astonish-sandbox-entrypoint
+          chmod +x astonish-sandbox-entrypoint
+          head -1 astonish-sandbox-entrypoint | grep -q '^#!/bin/sh'
+
+          ls -la astonish-linux-* astonish-sandbox-entrypoint
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4

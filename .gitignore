@@ -21,6 +21,8 @@ go.work
 ./test_bin
 bin/
 astonish-linux-*
+astonish-sandbox-entrypoint
+.buildx-cache/
 
 # macOS specific files
 .DS_Store

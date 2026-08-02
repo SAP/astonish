@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	"github.com/SAP/astonish/pkg/config"
+	"github.com/SAP/astonish/pkg/provider"
+	"github.com/SAP/astonish/pkg/store"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
@@ -54,8 +56,40 @@ func NewPerplexityWebSearchTool(appCfg *config.AppConfig, llmFactory LLMFactory)
 // functionToolNewPerplexity is isolated to keep tests focused on RunPerplexityWebSearch.
 func functionToolNewPerplexity(appCfg *config.AppConfig, llmFactory LLMFactory) (tool.Tool, error) {
 	return newFunctionTool("perplexity_web_search", "Search the web using the configured Perplexity/Sonar model and return a concise sourced answer with citations.", func(ctx tool.Context, args PerplexityWebSearchArgs) (PerplexityWebSearchResult, error) {
-		return RunPerplexityWebSearch(ctx, args, appCfg, llmFactory)
+		// Prefer per-request platform cascade so every user sees the same
+		// platform Perplexity config, not a stale singleton-init snapshot.
+		return RunPerplexityWebSearch(ctx, args, resolvePerplexityAppConfig(ctx, appCfg), llmFactory)
 	})
+}
+
+// resolvePerplexityAppConfig overlays platform→team web search settings onto
+// the factory fallback config when Services are present on the tool context.
+func resolvePerplexityAppConfig(ctx context.Context, fallback *config.AppConfig) *config.AppConfig {
+	if ctx == nil {
+		return fallback
+	}
+	svc := store.FromContext(ctx)
+	if svc == nil || svc.Mode != store.ModePlatform || svc.PlatformSettings == nil {
+		return fallback
+	}
+	resolved := provider.ResolveEffectiveConfig(ctx, svc.PlatformSettings, svc.OrgSettings, svc.Settings)
+	if resolved == nil {
+		return fallback
+	}
+	if fallback == nil {
+		return resolved
+	}
+	out := *fallback
+	if resolved.General.WebSearchTool != "" {
+		out.General.WebSearchTool = resolved.General.WebSearchTool
+	}
+	if resolved.PerplexityWebSearch.Provider != "" {
+		out.PerplexityWebSearch = resolved.PerplexityWebSearch
+	}
+	if len(resolved.Providers) > 0 {
+		out.Providers = resolved.Providers
+	}
+	return &out
 }
 
 // RunPerplexityWebSearch calls the configured Perplexity/Sonar model and normalizes the result.

@@ -248,6 +248,25 @@ func (cr *ChatRunner) InjectSkillIndex(index string) {
 	}
 }
 
+// InjectWebSearchPrompt sets per-request web search/extract availability from the
+// effective platform→team cascade. The singleton ChatAgent may have been
+// pre-warmed without the latest platform WebSearchTool; this keeps every user's
+// prompt honest about which search tool is selected.
+func (cr *ChatRunner) InjectWebSearchPrompt(searchAvailable bool, searchToolName string, extractAvailable bool, extractToolName string) {
+	po := agent.PromptOverridesFromContext(cr.ctx)
+	var newPO agent.PromptOverrides
+	if po != nil {
+		newPO = *po
+	}
+	searchAvail := searchAvailable
+	extractAvail := extractAvailable
+	newPO.WebSearchAvailable = &searchAvail
+	newPO.WebSearchToolName = searchToolName
+	newPO.WebExtractAvailable = &extractAvail
+	newPO.WebExtractToolName = extractToolName
+	cr.ctx = agent.WithPromptOverrides(cr.ctx, &newPO)
+}
+
 // InjectSchedulerStore adds a team-scoped scheduler store to the runner's context
 // so that the schedule_job and list_scheduled_jobs tools can operate on team jobs.
 // Must be called before Run().

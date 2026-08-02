@@ -59,7 +59,9 @@ The k8s/OpenShell sandbox images (`docker/sandbox-base/Dockerfile`, `docker/sand
 - `/usr/local/bin/astonish-host` — the real binary copied into the base image.
 - `/usr/local/bin/astonish` — a wrapper that chroots into the composed overlay before exec'ing the real binary. **All Exec calls (from Astonish and kubectl exec both) rely on this wrapper.**
 - `/usr/local/bin/astonish-shell` — interactive wrapper for team-admin interactive shells.
-- The pod entrypoint (generated at build time via `cmd/astonish-sandbox-entrypoint-script`) composes the overlay (overlayfs / fuse-overlayfs / tar-resume depending on node capabilities) at `/sandbox/rootfs` and keeps PID 1 running.
+- The pod entrypoint (generated on the host via `make sandbox-entrypoint` / `cmd/astonish-sandbox-entrypoint-script`, then `COPY`ed into the image) composes the overlay (overlayfs / fuse-overlayfs / tar-resume depending on node capabilities) at `/sandbox/rootfs` and keeps PID 1 running.
+
+**sandbox-base image build (cache contract):** Go is **not** compiled inside Docker. Prerequisites: `make build-linux` (and `build-linux-arm64` for multi-arch) + `make sandbox-entrypoint`. The Dockerfile keeps apt + treesitter + shell wrappers above the volatile `COPY` of entrypoint/binary so routine agent code changes only invalidate the last layers. Local rebuilds use BuildKit local cache under `.buildx-cache/sandbox-base`. Prefer `make push-sandbox-base-dev-fast` / `make docker-sandbox-base` for iteration.
 
 If you change the entrypoint, update the generator in `cmd/astonish-sandbox-entrypoint-script/` and the wrapper section of both Dockerfiles together.
 

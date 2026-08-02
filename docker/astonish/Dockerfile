@@ -1,34 +1,67 @@
-# Astonish Docker image
+# Astonish Docker image (API / Studio daemon)
 #
-# Go binaries are cross-compiled on the host (no QEMU needed) and copied in.
+# Go binaries are cross-compiled on the host (or CI runner) and copied in.
 # This avoids Go 1.26 segfaults when running `go mod download` under QEMU
-# user-mode emulation on Apple Silicon Macs.
+# user-mode emulation on multi-arch buildx (arm64 on amd64 runners and vice
+# versa).
 #
 # Base must be glibc (Debian), not Alpine/musl: pkg/codeintel uses purego.Dlopen,
 # which produces a dynamically linked binary needing /lib64/ld-linux-*.so.2.
 #
-# Build (multi-arch, from Makefile):
+# Runtime tooling for host-side MCP (npx / uvx when no sandbox is wired):
+#   - Node.js + npx: copied from the official multi-arch Node image (prebuilt
+#     layers — no apt install of nodejs/npm under QEMU on arm64 CI builds).
+#   - uv + uvx: copied from the official astral-sh/uv multi-arch image.
+#   - git + ca-certificates: minimal apt (small under QEMU).
+#
+# Layer order (stable → volatile) so code-only rebuilds cache deps:
+#   1. minimal apt
+#   2. node + uv binaries
+#   3. COPY astonish-linux-${TARGETARCH}
+#
+# Pins — bump intentionally; changing them invalidates the deps layers.
+#   NODE_IMAGE  node:22-bookworm-slim
+#   UV_VERSION  0.12.1  (ghcr.io/astral-sh/uv tag)
+#
+# Build (multi-arch, from Makefile / CI):
 #   make push-dev   # cross-compiles both arch binaries, then buildx pushes
 #
 # Build (single-arch, local dev):
 #   make push-dev-fast
 
+# Global build args used by FROM lines (must appear before the first FROM).
+# Buildx multi-arch builds select the matching platform variant of each image
+# automatically (no need for explicit --platform=$TARGETPLATFORM on FROM).
+ARG NODE_IMAGE=node:22-bookworm-slim
+ARG UV_VERSION=0.12.1
+
+# Prebuilt Node toolchain (multi-arch official image).
+FROM ${NODE_IMAGE} AS node
+
+# Prebuilt uv/uvx binaries (multi-arch official image).
+FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
+
 FROM debian:bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install certificates, Node.js (includes npx), Python3, uv (includes uvx), and git
+# Minimal system packages only — avoid apt nodejs/npm/python3-pip (slow under
+# QEMU on GitHub Actions multi-arch arm64 and inflate the image).
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         ca-certificates \
-        nodejs \
-        npm \
-        python3 \
-        python3-pip \
         git \
-    && pip3 install uv --break-system-packages \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
+
+# Official Node layout: binaries and npm/npx under /usr/local.
+COPY --from=node /usr/local /usr/local
+
+# Official uv distroless image ships /uv and /uvx at the image root.
+COPY --from=uv /uv /uvx /usr/local/bin/
+
+# Fail the build early if a platform mismatch shipped the wrong arch binary.
+RUN node --version && npx --version && uv --version && uvx --version && git --version
 
 WORKDIR /app
 
@@ -40,9 +73,7 @@ ARG TARGETARCH
 COPY astonish-linux-${TARGETARCH} /usr/local/bin/astonish
 RUN chmod +x /usr/local/bin/astonish
 
-# Expose default port
 EXPOSE 9393
 
-# Set default entrypoint
 ENTRYPOINT ["astonish"]
 CMD ["daemon", "run"]

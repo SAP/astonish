@@ -18,8 +18,9 @@ docs/website/build
 docs/website/.docusaurus
 
 # Local binaries and test artifacts.
-# Keep astonish-linux-* in context: docker/incus, docker/astonish, and
-# docker/sandbox-openshell COPY the host-cross-compiled binaries.
+# Keep astonish-linux-* and astonish-sandbox-entrypoint in context:
+# docker/incus, docker/astonish, docker/sandbox-base, and
+# docker/sandbox-openshell COPY the host-built artifacts.
 astonish
 astonish_bin
 test_bin
@@ -29,6 +30,7 @@ bin/
 *.out
 coverage.html
 recordings/
+.buildx-cache
 
 # Env / secrets / local state
 .env

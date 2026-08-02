@@ -715,9 +715,12 @@ ensure-builder:
 # Cross-compiles Go on the host to avoid QEMU segfaults with Go 1.26.
 push-dev: ensure-builder build-linux build-linux-arm64
 	@echo "Building and pushing $(DOCKER_REGISTRY)/astonish:$(DEV_TAG) (linux/amd64,linux/arm64)..."
+	@mkdir -p .buildx-cache/astonish
 	docker buildx build --platform linux/amd64,linux/arm64 \
 		-f docker/astonish/Dockerfile \
 		-t $(DOCKER_REGISTRY)/astonish:$(DEV_TAG) \
+		--cache-from type=local,src=.buildx-cache/astonish \
+		--cache-to type=local,dest=.buildx-cache/astonish,mode=max \
 		--push .
 	@echo "Pushed: $(DOCKER_REGISTRY)/astonish:$(DEV_TAG)"
 
@@ -764,11 +767,19 @@ push-all-dev: push-dev push-incus-dev push-sandbox-base-dev push-sandbox-openshe
 # DEV_ARCH is defined near the top of this Makefile.
 
 # Fast: build and push main Astonish API image (single arch)
-push-dev-fast: ensure-builder build-linux build-linux-arm64
+push-dev-fast: ensure-builder
+	@if [ "$(DEV_ARCH)" = "arm64" ]; then \
+		$(MAKE) build-linux-arm64; \
+	else \
+		$(MAKE) build-linux; \
+	fi
 	@echo "Building and pushing $(DOCKER_REGISTRY)/astonish:$(DEV_TAG) (linux/$(DEV_ARCH) only)..."
+	@mkdir -p .buildx-cache/astonish
 	docker buildx build --platform linux/$(DEV_ARCH) \
 		-f docker/astonish/Dockerfile \
 		-t $(DOCKER_REGISTRY)/astonish:$(DEV_TAG) \
+		--cache-from type=local,src=.buildx-cache/astonish \
+		--cache-to type=local,dest=.buildx-cache/astonish,mode=max \
 		--push .
 	@echo "Pushed: $(DOCKER_REGISTRY)/astonish:$(DEV_TAG)"
 

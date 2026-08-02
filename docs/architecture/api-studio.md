@@ -111,6 +111,18 @@ The Studio UI is built with React 19, Vite 7, and Tailwind CSS 4. Key components
 
 MCP tools are cached with background refresh to avoid slow MCP server queries on every request. The cache is warmed at startup and refreshed periodically.
 
+### API container image (`docker/astonish`)
+
+The published `ghcr.io/sap/astonish` image is the Studio/daemon runtime (not a sandbox). CI and Makefile host-cross-compile `astonish-linux-{amd64,arm64}` and only `COPY` the binary into the image.
+
+Runtime tools needed for **host-side** stdio MCP (`npx` / `uvx` when no sandbox is wired) are layered as prebuilt multi-arch artifacts rather than `apt install nodejs npm` + `pip install uv`:
+
+- Node 22 + npm/npx from the official `node:22-bookworm-slim` image
+- `uv` / `uvx` from `ghcr.io/astral-sh/uv` (pinned version in the Dockerfile)
+- Minimal apt: `ca-certificates`, `git`
+
+This avoids installing Node under QEMU on GitHub Actions multi-arch `linux/arm64` builds (the previous dominant cost in beta image jobs). Deps layers stay stable across code-only rebuilds; only the binary `COPY` invalidates. CI also uses a registry build cache at `ghcr.io/sap/astonish:buildcache`.
+
 ## Key Files
 
 | File | Purpose |

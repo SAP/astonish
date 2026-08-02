@@ -78,10 +78,15 @@ func execAppHTTPCurl(ctx context.Context, backend sandbox.Backend, sessionID, me
 		stdin = bytes.NewReader(body)
 	}
 	cmd = append(cmd, rawURL)
+	backendKind := sandbox.BackendKind("")
+	if backend != nil {
+		backendKind = backend.Kind()
+	}
+	execCmd := appHTTPCurlCommand(backendKind, cmd)
 
 	slog.Debug("app HTTP sandbox fetch", "method", method, "url", rawURL, "session", sessionID)
 	result, err := backend.Exec(ctx, sessionID, sandbox.ExecSpec{
-		Command: cmd,
+		Command: execCmd,
 		Stdin:   stdin,
 	})
 	// Refresh idle deadline even on Exec error — the session was still used.
@@ -105,6 +110,13 @@ func execAppHTTPCurl(ctx context.Context, backend sandbox.Backend, sessionID, me
 		respBody = respBody[:maxResponseBodySize]
 	}
 	return status, respBody, nil
+}
+
+func appHTTPCurlCommand(kind sandbox.BackendKind, cmd []string) []string {
+	if kind == sandbox.BackendKindK8s {
+		return append([]string{"/usr/local/bin/astonish-shell"}, cmd...)
+	}
+	return cmd
 }
 
 // newAppHTTPStatusMarker returns a per-request marker so response bodies that

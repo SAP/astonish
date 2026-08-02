@@ -316,6 +316,23 @@ func TestResolveHTTPSource_CredentialInjectedIntoFetch(t *testing.T) {
 	}
 }
 
+func TestAppHTTPCurlCommand_WrapsK8sThroughChroot(t *testing.T) {
+	cmd := []string{"curl", "-sS", "https://api.example.com/v1"}
+	got := appHTTPCurlCommand(sandbox.BackendKindK8s, cmd)
+	wantPrefix := []string{"/usr/local/bin/astonish-shell", "curl"}
+	if len(got) < len(wantPrefix) || got[0] != wantPrefix[0] || got[1] != wantPrefix[1] {
+		t.Fatalf("K8s curl command = %v, want prefix %v", got, wantPrefix)
+	}
+	if cmd[0] != "curl" {
+		t.Fatalf("appHTTPCurlCommand mutated input: %v", cmd)
+	}
+
+	got = appHTTPCurlCommand(sandbox.BackendKindMock, cmd)
+	if len(got) != len(cmd) || got[0] != "curl" {
+		t.Fatalf("non-K8s curl command = %v, want original %v", got, cmd)
+	}
+}
+
 func TestFetchHTTPViaSandbox_ExecCurl(t *testing.T) {
 	origEnsure := ensureAppSandboxSession
 	defer func() { ensureAppSandboxSession = origEnsure }()

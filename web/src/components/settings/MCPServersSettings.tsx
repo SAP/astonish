@@ -1,14 +1,33 @@
 import { useState } from 'react'
-import { Key, Server, ChevronRight, Save, Plus, Trash2, Check, AlertCircle, Code, LayoutGrid, Loader2, Package, Search, Play, Download, RefreshCw } from 'lucide-react'
+import { Key, Server, ChevronRight, Save, Plus, Trash2, Check, AlertCircle, Code, LayoutGrid, Loader2, Package, Search, Play, Download, RefreshCw, Bot, Sparkles } from 'lucide-react'
 import MCPStoreModal from '../MCPStoreModal'
 import MCPInspector from '../MCPInspector'
 import CodeMirror from '@uiw/react-codemirror'
 import { json } from '@codemirror/lang-json'
 import { search, searchKeymap, highlightSelectionMatches } from '@codemirror/search'
 import { keymap, EditorView } from '@codemirror/view'
-import { saveMCPConfig, refreshMCPServer, toggleMCPServer, fetchMCPStatus } from './settingsApi'
-import type { MCPServerConfig, MCPServerStatusEntry, StandardServer } from './settingsApi'
+import {
+  saveMCPConfig,
+  refreshMCPServer,
+  toggleMCPServer,
+  fetchMCPStatus,
+  fetchPerplexityWebSearchOptions,
+  savePerplexityWebSearchConfig,
+  clearPerplexityWebSearchConfig,
+} from './settingsApi'
+import type { MCPServerConfig, MCPServerStatusEntry, StandardServer, PerplexityProviderOption } from './settingsApi'
 import { teamFetch } from '../../api/teamContext'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import { cn } from '@/lib/utils'
 
 interface MCPServersSettingsProps {
   mcpServers: Record<string, MCPServerConfig>
@@ -69,6 +88,11 @@ export default function MCPServersSettings({
   const [setupEnv, setSetupEnv] = useState<Record<string, string>>({})
   const [setupLoading, setSetupLoading] = useState(false)
   const [setupError, setSetupError] = useState<string | null>(null)
+  const [perplexityOptions, setPerplexityOptions] = useState<PerplexityProviderOption[]>([])
+  const [perplexityProvider, setPerplexityProvider] = useState('')
+  const [perplexityModel, setPerplexityModel] = useState('')
+  const [perplexityContextSize, setPerplexityContextSize] = useState('medium')
+  const [perplexityMaxResults, setPerplexityMaxResults] = useState(5)
 
   const loadMcpServerStatus = async () => {
     try {
@@ -169,6 +193,123 @@ export default function MCPServersSettings({
     }
   }
 
+  const setupSrv = standardServers.find(s => s.id === setupServer) || null
+  const configuredCount = standardServers.filter(s => s.installed).length
+
+  const closeSetupDialog = () => {
+    setSetupServer(null)
+    setSetupEnv({})
+    setSetupError(null)
+  }
+
+  const beginSetupServer = async (srv: StandardServer) => {
+    setSetupServer(srv.id)
+    setSetupEnv({})
+    setSetupError(null)
+    if (srv.id === 'perplexity') {
+      setSetupLoading(true)
+      try {
+        const data = await fetchPerplexityWebSearchOptions(effectiveScope)
+        const options = data.options || []
+        setPerplexityOptions(options)
+        const preferredProvider = srv.details?.provider
+        const preferredModel = srv.details?.model
+        const match = options.find(o => o.provider === preferredProvider)
+        const first = match || options.find(o => o.models?.length > 0) || options[0]
+        setPerplexityProvider(first?.provider || '')
+        const models = first?.models || []
+        setPerplexityModel(
+          preferredModel && models.includes(preferredModel)
+            ? preferredModel
+            : (models[0] || '')
+        )
+      } catch (err: any) {
+        setSetupError(err.message)
+      } finally {
+        setSetupLoading(false)
+      }
+    }
+  }
+
+  const handleSavePerplexity = async (srv: StandardServer) => {
+    setSetupLoading(true)
+    setSetupError(null)
+    try {
+      const result: any = await savePerplexityWebSearchConfig({
+        provider: perplexityProvider,
+        model: perplexityModel,
+        search_context_size: perplexityContextSize,
+        max_results: perplexityMaxResults
+      }, effectiveScope)
+      closeSetupDialog()
+      await loadData()
+      if (onToolsRefresh) onToolsRefresh()
+      setGeneralForm((prev: any) => ({
+        ...prev,
+        web_search_tool: result.webSearchTool || srv.webSearchTool || 'perplexity:perplexity_web_search'
+      }))
+    } catch (err: any) {
+      setSetupError(err.message)
+    } finally {
+      setSetupLoading(false)
+    }
+  }
+
+  const handleInstallMcpStandardServer = async (srv: StandardServer) => {
+    setSetupLoading(true)
+    setSetupError(null)
+    try {
+      const url = effectiveScope
+        ? `/api/standard-servers/${srv.id}/install?scope=${effectiveScope}`
+        : `/api/standard-servers/${srv.id}/install`
+      const res = await teamFetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ env: setupEnv })
+      }, effectiveTeamSlug)
+      if (!res.ok) {
+        const text = await res.text()
+        throw new Error(text)
+      }
+      const result = await res.json()
+      closeSetupDialog()
+      await loadData()
+      if (onToolsRefresh) onToolsRefresh()
+      if (result.webSearchTool) {
+        setGeneralForm((prev: any) => ({
+          ...prev,
+          web_search_tool: result.webSearchTool,
+          web_extract_tool: result.webExtractTool || prev.web_extract_tool
+        }))
+      }
+    } catch (err: any) {
+      setSetupError(err.message)
+    } finally {
+      setSetupLoading(false)
+    }
+  }
+
+  const handleRemoveStandardServer = async (srv: StandardServer) => {
+    try {
+      if (srv.id === 'perplexity') {
+        await clearPerplexityWebSearchConfig(effectiveScope)
+      } else {
+        const res = await teamFetch(`/api/standard-servers/${srv.id}${scopeQuery}`, { method: 'DELETE' }, effectiveTeamSlug)
+        if (!res.ok) throw new Error('Failed to remove server')
+      }
+      await loadData()
+      if (onToolsRefresh) onToolsRefresh()
+    } catch (err: any) {
+      setError(err.message || 'Failed to remove web search provider')
+    }
+  }
+
+  const providerIcon = (srv: StandardServer) => {
+    if (srv.id === 'perplexity' || srv.kind === 'model') return Bot
+    if (srv.capabilities?.webExtract) return Sparkles
+    return Search
+  }
+
   const handleSaveSingleMcpServer = async (serverId: string) => {
     setSavingServer(serverId)
     try {
@@ -244,151 +385,229 @@ export default function MCPServersSettings({
           <>
             {/* Standard Web Servers Section */}
             {standardServers.length > 0 && (
-              <div className="mb-4 p-4 rounded-xl border" style={{ borderColor: 'var(--border-color)', background: 'var(--card)' }}>
-                <h4 className="text-sm font-medium mb-2 flex items-center gap-2" style={{ color: 'var(--text-primary)' }}>
-                  <Search size={14} style={{ color: 'var(--brand)' }} />
-                  Web Search Providers
-                </h4>
-                <p className="text-xs mb-3" style={{ color: 'var(--text-muted)' }}>
-                  Configure a web search provider to enable web search and content extraction.
-                </p>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                  {standardServers.map(srv => (
-                    <div key={srv.id} className="p-3 rounded-lg border transition-all" style={{ 
-                      borderColor: srv.installed ? 'color-mix(in oklab, var(--success, #22c55e) 40%, transparent)' : 'var(--border-color)',
-                      background: srv.installed
-                        ? 'color-mix(in oklab, var(--success, #22c55e) 8%, var(--card))'
-                        : 'var(--bg-secondary)',
-                    }}>
-                      <div className="flex items-center justify-between mb-1">
-                        <span className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>
-                          {srv.displayName}
-                          {srv.isDefault && !srv.installed && (
-                            <span className="ml-1 text-xs px-1.5 py-0.5 rounded-full" style={{ background: 'var(--brand-muted)', color: 'var(--brand)' }}>
-                              recommended
-                            </span>
+              <div className="mb-4 space-y-2">
+                <div className="rounded-xl border bg-card p-3">
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <h4 className="text-sm font-medium flex items-center gap-1.5 text-foreground">
+                      <Search size={13} className="text-primary" />
+                      Web Search Providers
+                    </h4>
+                    <span className="text-[11px] text-muted-foreground">
+                      {configuredCount > 0
+                        ? `${configuredCount} configured`
+                        : 'None configured yet'}
+                    </span>
+                  </div>
+                  <p className="mb-2 text-[11px] text-muted-foreground">
+                    Install credentials or Perplexity model here. Then choose which tool the agent uses in General → Web Tools.
+                  </p>
+
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                    {standardServers.map(srv => {
+                      const Icon = providerIcon(srv)
+                      const canRemove = srv.installed && (srv.id === 'perplexity' || (srv.envVars?.length || 0) > 0)
+                      const caps: string[] = []
+                      if (srv.capabilities?.webSearch) caps.push('Search')
+                      if (srv.capabilities?.webExtract) caps.push('Extract')
+                      if (srv.kind === 'model' || srv.id === 'perplexity') caps.push('Model')
+
+                      return (
+                        <div
+                          key={srv.id}
+                          className={cn(
+                            'rounded-lg border px-2.5 py-2 transition-colors',
+                            srv.installed
+                              ? 'border-emerald-500/35 bg-emerald-500/[0.06]'
+                              : 'border-border bg-muted/15'
                           )}
-                        </span>
-                        {srv.installed && <Check size={14} style={{ color: 'var(--success, #22c55e)' }} />}
-                      </div>
-                      <p className="text-xs mb-2" style={{ color: 'var(--text-muted)' }}>
-                        {srv.envVars?.length === 0 ? 'Browser Automation' : srv.capabilities.webSearch && srv.capabilities.webExtract ? 'Search + Extract' : 'Search only'}
-                      </p>
-                      {srv.envVars?.length === 0 && srv.installed ? (
-                        <div className="flex items-center gap-2">
-                          <span className="text-xs" style={{ color: '#22c55e' }}>Active</span>
-                          <span className="text-xs" style={{ color: 'var(--text-muted)' }}>No setup required</span>
-                        </div>
-                      ) : setupServer === srv.id ? (
-                        <div className="space-y-2">
-                          {srv.envVars.map(ev => (
-                            <input
-                              key={ev.name}
-                              type="password"
-                              placeholder={ev.name}
-                              value={setupEnv[ev.name] || ''}
-                              onChange={(e) => setSetupEnv({ ...setupEnv, [ev.name]: e.target.value })}
-                              className="w-full px-2 py-1.5 rounded border text-xs"
-                              style={{ background: 'var(--bg-primary)', borderColor: 'var(--border-color)', color: 'var(--text-primary)' }}
-                            />
-                          ))}
-                          {setupError && (
-                            <p className="text-xs" style={{ color: '#ef4444' }}>{setupError}</p>
-                          )}
-                          <div className="flex gap-2">
-                            <button
-                              onClick={async () => {
-                                setSetupLoading(true)
-                                setSetupError(null)
-                                try {
-                                  const url = effectiveScope
-                                    ? `/api/standard-servers/${srv.id}/install?scope=${effectiveScope}`
-                                    : `/api/standard-servers/${srv.id}/install`
-                                  const res = await teamFetch(url, {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({ env: setupEnv })
-                                  }, effectiveTeamSlug)
-                                  if (!res.ok) {
-                                    const text = await res.text()
-                                    throw new Error(text)
-                                  }
-                                  const result = await res.json()
-                                  setSetupServer(null)
-                                  setSetupEnv({})
-                                  await loadData()
-                                  if (onToolsRefresh) onToolsRefresh()
-                                  if (result.webSearchTool) {
-                                    setGeneralForm((prev: any) => ({
-                                      ...prev,
-                                      web_search_tool: result.webSearchTool,
-                                      web_extract_tool: result.webExtractTool || prev.web_extract_tool
-                                    }))
-                                  }
-                                } catch (err: any) {
-                                  setSetupError(err.message)
-                                } finally {
-                                  setSetupLoading(false)
-                                }
-                              }}
-                              disabled={setupLoading || srv.envVars.some(ev => ev.required && !setupEnv[ev.name])}
-                              className="flex items-center gap-1 px-2 py-1 rounded text-xs font-medium text-white disabled:opacity-50"
-                              style={{ background: 'var(--brand)' }}
-                            >
-                              {setupLoading ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />}
-                              {srv.installed ? 'Reconfigure' : 'Install'}
-                            </button>
-                            <button
-                              onClick={() => { setSetupServer(null); setSetupEnv({}); setSetupError(null) }}
-                              className="px-2 py-1 rounded text-xs"
-                              style={{ color: 'var(--text-muted)' }}
-                            >
-                              Cancel
-                            </button>
+                        >
+                          <div className="flex items-start gap-2">
+                            <Icon size={13} className={cn('mt-0.5 shrink-0', srv.installed ? 'text-emerald-500' : 'text-muted-foreground')} />
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-1.5 min-w-0">
+                                <span className="truncate text-xs font-medium text-foreground">{srv.displayName}</span>
+                                {srv.installed ? (
+                                  <Check size={11} className="shrink-0 text-emerald-500" />
+                                ) : srv.isDefault ? (
+                                  <Badge variant="secondary" className="h-4 px-1 text-[9px]">rec</Badge>
+                                ) : null}
+                              </div>
+                              <p className="text-[10px] text-muted-foreground truncate">
+                                {caps.join(' · ') || 'Web'}
+                                {srv.installed && srv.details?.model
+                                  ? ` · ${srv.details.model}`
+                                  : ''}
+                              </p>
+                            </div>
+                          </div>
+                          <div className="mt-1.5 flex items-center gap-1.5">
+                            {!srv.installed ? (
+                              <Button size="sm" className="h-6 px-2 text-[11px]" onClick={() => beginSetupServer(srv)}>
+                                Setup
+                              </Button>
+                            ) : (
+                              <>
+                                <span className="text-[10px] text-emerald-600 dark:text-emerald-400">Configured</span>
+                                <button
+                                  type="button"
+                                  onClick={() => beginSetupServer(srv)}
+                                  className="text-[10px] text-muted-foreground hover:text-foreground"
+                                >
+                                  Change
+                                </button>
+                                {canRemove && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleRemoveStandardServer(srv)}
+                                    className="ml-auto p-0.5 text-muted-foreground hover:text-destructive"
+                                    title="Remove configuration"
+                                  >
+                                    <Trash2 size={11} />
+                                  </button>
+                                )}
+                              </>
+                            )}
                           </div>
                         </div>
-                      ) : srv.installed ? (
-                        <div className="flex items-center gap-2">
-                          <span className="text-xs" style={{ color: '#22c55e' }}>Configured</span>
-                          <button
-                            onClick={() => { setSetupServer(srv.id); setSetupEnv({}); setSetupError(null) }}
-                            className="text-xs px-1.5 py-0.5 rounded transition-colors"
-                            style={{ color: 'var(--text-muted)' }}
+                      )
+                    })}
+                  </div>
+                </div>
+
+                <Dialog open={!!setupServer} onOpenChange={(open) => { if (!open) closeSetupDialog() }}>
+                  <DialogContent className="sm:max-w-md">
+                    <DialogHeader>
+                      <DialogTitle>
+                        {setupSrv?.installed ? 'Change' : 'Setup'} {setupSrv?.displayName || 'provider'}
+                      </DialogTitle>
+                      <DialogDescription>
+                        {setupSrv?.id === 'perplexity'
+                          ? 'Select an existing model provider and a Perplexity/Sonar model. This becomes the active web search tool.'
+                          : 'Provide the required API key to install this web search provider and make it active.'}
+                      </DialogDescription>
+                    </DialogHeader>
+
+                    {setupSrv?.id === 'perplexity' ? (
+                      <div className="space-y-3">
+                        <div className="space-y-1.5">
+                          <label className="text-xs font-medium text-foreground">Provider</label>
+                          <select
+                            value={perplexityProvider}
+                            onChange={(e) => {
+                              const provider = e.target.value
+                              const opt = perplexityOptions.find(o => o.provider === provider)
+                              setPerplexityProvider(provider)
+                              setPerplexityModel(opt?.models?.[0] || '')
+                            }}
+                            className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
                           >
-                            Reconfigure
-                          </button>
-                          {srv.envVars?.length > 0 && (
-                            <button
-                              onClick={async () => {
-                                try {
-                                  const res = await teamFetch(`/api/standard-servers/${srv.id}${scopeQuery}`, { method: 'DELETE' }, effectiveTeamSlug)
-                                  if (!res.ok) throw new Error('Failed to remove server')
-                                  await loadData()
-                                  if (onToolsRefresh) onToolsRefresh()
-                                } catch (err) {
-                                  console.error('Failed to remove standard server:', err)
-                                }
-                              }}
-                              className="p-0.5 rounded transition-colors hover:bg-red-500/10"
-                              style={{ color: 'var(--text-muted)' }}
-                              title="Remove configuration"
-                            >
-                              <Trash2 size={12} />
-                            </button>
+                            <option value="">Select provider…</option>
+                            {perplexityOptions.map(opt => (
+                              <option key={opt.provider} value={opt.provider}>
+                                {opt.provider}{opt.models?.length ? '' : ' (no matching models)'}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        <div className="space-y-1.5">
+                          <label className="text-xs font-medium text-foreground">Model</label>
+                          <select
+                            value={perplexityModel}
+                            onChange={(e) => setPerplexityModel(e.target.value)}
+                            disabled={!perplexityProvider}
+                            className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm disabled:opacity-50"
+                          >
+                            <option value="">Select model…</option>
+                            {(perplexityOptions.find(o => o.provider === perplexityProvider)?.models || []).map(model => (
+                              <option key={model} value={model}>{model}</option>
+                            ))}
+                          </select>
+                          {perplexityProvider && (perplexityOptions.find(o => o.provider === perplexityProvider)?.models || []).length === 0 && (
+                            <p className="text-xs text-muted-foreground">
+                              This provider is configured, but its model list did not include IDs containing “perplexity”, “sonar”, or “pplx”.
+                            </p>
                           )}
                         </div>
-                      ) : (
-                        <button
-                          onClick={() => { setSetupServer(srv.id); setSetupEnv({}); setSetupError(null) }}
-                          className="text-xs font-medium px-2 py-1 rounded transition-colors"
-                          style={{ color: 'var(--brand)', background: 'var(--brand-muted)' }}
+                        <div className="grid grid-cols-2 gap-3">
+                          <div className="space-y-1.5">
+                            <label className="text-xs font-medium text-foreground">Context size</label>
+                            <select
+                              value={perplexityContextSize}
+                              onChange={(e) => setPerplexityContextSize(e.target.value)}
+                              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                            >
+                              <option value="low">Low</option>
+                              <option value="medium">Medium</option>
+                              <option value="high">High</option>
+                            </select>
+                          </div>
+                          <div className="space-y-1.5">
+                            <label className="text-xs font-medium text-foreground">Max results</label>
+                            <input
+                              type="number"
+                              min={1}
+                              max={20}
+                              value={perplexityMaxResults}
+                              onChange={(e) => setPerplexityMaxResults(Number(e.target.value) || 5)}
+                              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                            />
+                          </div>
+                        </div>
+                        {perplexityOptions.length === 0 && !setupLoading && (
+                          <p className="text-xs text-muted-foreground">
+                            No configured model providers were found. Add a provider such as SAP AI Core first.
+                          </p>
+                        )}
+                      </div>
+                    ) : setupSrv ? (
+                      <div className="space-y-3">
+                        {setupSrv.envVars.map(ev => (
+                          <div key={ev.name} className="space-y-1.5">
+                            <label className="text-xs font-medium text-foreground">{ev.name}</label>
+                            <input
+                              type="password"
+                              placeholder={ev.description || ev.name}
+                              value={setupEnv[ev.name] || ''}
+                              onChange={(e) => setSetupEnv({ ...setupEnv, [ev.name]: e.target.value })}
+                              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                            />
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
+
+                    {setupError && (
+                      <p className="text-xs text-destructive">{setupError}</p>
+                    )}
+
+                    <DialogFooter>
+                      <Button variant="outline" onClick={closeSetupDialog} disabled={setupLoading}>
+                        Cancel
+                      </Button>
+                      {setupSrv?.id === 'perplexity' ? (
+                        <Button
+                          onClick={() => setupSrv && handleSavePerplexity(setupSrv)}
+                          disabled={setupLoading || !perplexityProvider || !perplexityModel}
                         >
-                          Setup
-                        </button>
+                          {setupLoading ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+                          Save & activate
+                        </Button>
+                      ) : (
+                        <Button
+                          onClick={() => setupSrv && handleInstallMcpStandardServer(setupSrv)}
+                          disabled={
+                            setupLoading ||
+                            !setupSrv ||
+                            setupSrv.envVars.some(ev => ev.required && !setupEnv[ev.name])
+                          }
+                        >
+                          {setupLoading ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+                          {setupSrv?.installed ? 'Save & activate' : 'Install & activate'}
+                        </Button>
                       )}
-                    </div>
-                  ))}
-                </div>
+                    </DialogFooter>
+                  </DialogContent>
+                </Dialog>
               </div>
             )}
 

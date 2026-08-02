@@ -75,6 +75,7 @@ func internalToolDeclarations() []ToolDeclaration {
 		{Name: "code_definition", Description: "Find structural definitions of a symbol using tree-sitter", Category: "internal"},
 		{Name: "code_references", Description: "Find structural references to a symbol using tree-sitter", Category: "internal"},
 		{Name: "web_fetch", Description: "Fetch and extract content from a URL", Category: "internal"},
+		{Name: "perplexity_web_search", Description: "Search the web using the configured Perplexity/Sonar model", Category: "internal"},
 		{Name: "read_pdf", Description: "Extract text content from a PDF file", Category: "internal"},
 		{Name: "http_request", Description: "Make an HTTP request with full control over method, headers, and body", Category: "internal"},
 	}

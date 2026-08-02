@@ -358,7 +358,7 @@ When matched, it renders an `AppCodeIndicator` (pulsing "Generating app..." with
 
 ## The Source Citations Pipeline
 
-When the agent uses web search tools during a turn, source URLs are collected and displayed as clickable citation pills below the ResultCard.
+When the agent uses web search tools during a turn, source URLs are collected and displayed as clickable citation pills below the ResultCard. This includes MCP-backed providers such as Tavily/Brave/Firecrawl and the built-in model-backed `perplexity_web_search` tool.
 
 ```mermaid
 graph LR
@@ -367,7 +367,7 @@ graph LR
     C --> D[SourceCitations component<br/>clickable URL pills]
 ```
 
-This is a **frontend heuristic** (not a backend event). The function `collectSourceUrls(messages, agentIndex)` walks backward from the agent message, finds `tool_result` messages from web search tools (matched by `WEB_SEARCH_PATTERNS`), and extracts URLs using a regex. URLs are deduplicated and filtered (no localhost, no API endpoints).
+This is a **frontend heuristic** (not a backend event). The function `collectSourceUrls(messages, agentIndex)` walks backward from the agent message, finds `tool_result` messages from web search tools (matched by `WEB_SEARCH_PATTERNS`), and extracts URLs using a regex. The Perplexity/Sonar tool returns normalized `citations` and `search_results` URLs so it participates in this same citation pipeline without adding a new SSE event. URLs are deduplicated and filtered (no localhost, no API endpoints).
 
 `SourceCitations` renders below every agent message bubble that has source URLs.
 

@@ -14,23 +14,24 @@ import (
 )
 
 type AppConfig struct {
-	General       GeneralConfig              `yaml:"general"`
-	WebServers    map[string]WebServerConfig `yaml:"web_servers,omitempty" json:"web_servers,omitempty"`
-	Providers     map[string]ProviderConfig  `yaml:"providers"`
-	Chat          ChatConfig                 `yaml:"chat,omitempty"`
-	Sessions      SessionConfig              `yaml:"sessions,omitempty"`
-	Memory        MemoryConfig               `yaml:"memory,omitempty"`
-	Storage       StorageConfig              `yaml:"storage,omitempty"`
-	Daemon        DaemonConfig               `yaml:"daemon,omitempty"`
-	Channels      ChannelsConfig             `yaml:"channels,omitempty"`
-	Scheduler     SchedulerConfig            `yaml:"scheduler,omitempty"`
-	Browser       BrowserAppConfig           `yaml:"browser,omitempty"`
-	SubAgents     SubAgentAppConfig          `yaml:"sub_agents,omitempty"`
-	Skills        SkillsConfig               `yaml:"skills,omitempty"`
-	AgentIdentity AgentIdentityConfig        `yaml:"agent_identity,omitempty"`
-	CodeIntel     CodeIntelConfig            `yaml:"codeintel,omitempty" json:"codeintel,omitempty"`
-	Sandbox       SandboxConfig              `yaml:"sandbox,omitempty"`
-	Security      SecurityConfig             `yaml:"security,omitempty"`
+	General             GeneralConfig              `yaml:"general"`
+	WebServers          map[string]WebServerConfig `yaml:"web_servers,omitempty" json:"web_servers,omitempty"`
+	PerplexityWebSearch PerplexityWebSearchConfig  `yaml:"perplexity_web_search,omitempty" json:"perplexity_web_search,omitempty"`
+	Providers           map[string]ProviderConfig  `yaml:"providers"`
+	Chat                ChatConfig                 `yaml:"chat,omitempty"`
+	Sessions            SessionConfig              `yaml:"sessions,omitempty"`
+	Memory              MemoryConfig               `yaml:"memory,omitempty"`
+	Storage             StorageConfig              `yaml:"storage,omitempty"`
+	Daemon              DaemonConfig               `yaml:"daemon,omitempty"`
+	Channels            ChannelsConfig             `yaml:"channels,omitempty"`
+	Scheduler           SchedulerConfig            `yaml:"scheduler,omitempty"`
+	Browser             BrowserAppConfig           `yaml:"browser,omitempty"`
+	SubAgents           SubAgentAppConfig          `yaml:"sub_agents,omitempty"`
+	Skills              SkillsConfig               `yaml:"skills,omitempty"`
+	AgentIdentity       AgentIdentityConfig        `yaml:"agent_identity,omitempty"`
+	CodeIntel           CodeIntelConfig            `yaml:"codeintel,omitempty" json:"codeintel,omitempty"`
+	Sandbox             SandboxConfig              `yaml:"sandbox,omitempty"`
+	Security            SecurityConfig             `yaml:"security,omitempty"`
 }
 
 type CodeIntelConfig struct {
@@ -896,6 +897,15 @@ func GetVectorDir(cfg *MemoryConfig) (string, error) {
 type WebServerConfig struct {
 	APIKey    string `yaml:"api_key,omitempty" json:"api_key,omitempty"`
 	Installed bool   `yaml:"installed,omitempty" json:"installed,omitempty"`
+}
+
+// PerplexityWebSearchConfig configures the model-backed Perplexity/Sonar web search tool.
+// Provider and Model refer to a normal configured model provider instance and model ID.
+type PerplexityWebSearchConfig struct {
+	Provider          string `yaml:"provider,omitempty" json:"provider,omitempty"`
+	Model             string `yaml:"model,omitempty" json:"model,omitempty"`
+	SearchContextSize string `yaml:"search_context_size,omitempty" json:"search_context_size,omitempty"`
+	MaxResults        int    `yaml:"max_results,omitempty" json:"max_results,omitempty"`
 }
 
 // SessionConfig controls session persistence behavior.

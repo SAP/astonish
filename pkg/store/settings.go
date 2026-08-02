@@ -25,6 +25,15 @@ type PlatformSettings struct {
 	// Empty string means product default (classic).
 	DefaultBrandTheme string `json:"default_brand_theme,omitempty"`
 
+	// WebSearchTool is the platform-wide configured web search tool.
+	WebSearchTool string `json:"web_search_tool,omitempty"`
+
+	// WebExtractTool is the platform-wide configured web extraction tool.
+	WebExtractTool string `json:"web_extract_tool,omitempty"`
+
+	// PerplexityWebSearch configures the model-backed Perplexity/Sonar search tool.
+	PerplexityWebSearch *PerplexityWebSearchSettings `json:"perplexity_web_search,omitempty"`
+
 	// Channels holds per-channel-type configuration (non-secret fields).
 	// Secrets (tokens, passwords) are stored separately in platform_secrets.
 	Channels *PlatformChannelSettings `json:"channels,omitempty"`
@@ -37,6 +46,15 @@ type PlatformSettings struct {
 // PlatformAuthSettings holds platform-wide authentication policy that can be
 // changed at runtime via the Platform Admin UI. When a field is non-nil it
 // overrides the corresponding value from the YAML config file.
+// PerplexityWebSearchSettings stores platform-wide configuration for the model-backed
+// Perplexity/Sonar web search tool.
+type PerplexityWebSearchSettings struct {
+	Provider          string `json:"provider,omitempty"`
+	Model             string `json:"model,omitempty"`
+	SearchContextSize string `json:"search_context_size,omitempty"`
+	MaxResults        int    `json:"max_results,omitempty"`
+}
+
 type PlatformAuthSettings struct {
 	// AllowRegistration controls whether new users can self-register.
 	// nil means "use YAML config default" (which itself defaults to true).
@@ -68,15 +86,15 @@ type PlatformTelegramConfig struct {
 // PlatformEmailConfig holds non-secret Email channel settings.
 type PlatformEmailConfig struct {
 	Enabled      bool   `json:"enabled"`
-	Provider     string `json:"provider,omitempty"`      // "imap" (default), "gmail", or "msgraph"
-	IMAPServer   string `json:"imap_server"`             // e.g. "imap.gmail.com:993"
-	SMTPServer   string `json:"smtp_server"`             // e.g. "smtp.gmail.com:587"
-	Address      string `json:"address"`                 // agent's email address
-	Username     string `json:"username,omitempty"`      // login username (defaults to address)
-	Credential   string `json:"credential,omitempty"`    // credential store name (for msgraph provider)
-	PollInterval int    `json:"poll_interval,omitempty"` // seconds, default 30
-	Folder       string `json:"folder,omitempty"`        // default "INBOX"
-	MarkRead     *bool  `json:"mark_read,omitempty"`     // default true
+	Provider     string `json:"provider,omitempty"`       // "imap" (default), "gmail", or "msgraph"
+	IMAPServer   string `json:"imap_server"`              // e.g. "imap.gmail.com:993"
+	SMTPServer   string `json:"smtp_server"`              // e.g. "smtp.gmail.com:587"
+	Address      string `json:"address"`                  // agent's email address
+	Username     string `json:"username,omitempty"`       // login username (defaults to address)
+	Credential   string `json:"credential,omitempty"`     // credential store name (for msgraph provider)
+	PollInterval int    `json:"poll_interval,omitempty"`  // seconds, default 30
+	Folder       string `json:"folder,omitempty"`         // default "INBOX"
+	MarkRead     *bool  `json:"mark_read,omitempty"`      // default true
 	MaxBodyChars int    `json:"max_body_chars,omitempty"` // default 50000
 }
 

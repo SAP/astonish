@@ -7,16 +7,19 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/gorilla/mux"
 	"github.com/SAP/astonish/pkg/provider"
 	"github.com/SAP/astonish/pkg/store"
+	"github.com/gorilla/mux"
 )
 
-// PlatformProvidersRequest is the request body for saving platform provider settings.
+// PlatformProvidersRequest is the request body for saving platform provider and web-search settings.
 type PlatformProvidersRequest struct {
-	Providers       map[string]map[string]string `json:"providers,omitempty"`
-	DefaultProvider string                       `json:"default_provider,omitempty"`
-	DefaultModel    string                       `json:"default_model,omitempty"`
+	Providers           map[string]map[string]string       `json:"providers,omitempty"`
+	DefaultProvider     string                             `json:"default_provider,omitempty"`
+	DefaultModel        string                             `json:"default_model,omitempty"`
+	WebSearchTool       string                             `json:"web_search_tool,omitempty"`
+	WebExtractTool      string                             `json:"web_extract_tool,omitempty"`
+	PerplexityWebSearch *store.PerplexityWebSearchSettings `json:"perplexity_web_search,omitempty"`
 }
 
 // GetPlatformProvidersHandler handles GET /api/settings/platform/providers.
@@ -39,9 +42,12 @@ func GetPlatformProvidersHandler(w http.ResponseWriter, r *http.Request) {
 	masked := maskProviderSecrets(settings.Providers)
 
 	respondJSON(w, http.StatusOK, map[string]any{
-		"providers":        masked,
-		"default_provider": settings.DefaultProvider,
-		"default_model":    settings.DefaultModel,
+		"providers":             masked,
+		"default_provider":      settings.DefaultProvider,
+		"default_model":         settings.DefaultModel,
+		"web_search_tool":       settings.WebSearchTool,
+		"web_extract_tool":      settings.WebExtractTool,
+		"perplexity_web_search": settings.PerplexityWebSearch,
 	})
 }
 
@@ -71,13 +77,32 @@ func SavePlatformProvidersHandler(w http.ResponseWriter, r *http.Request) {
 		existing = &store.PlatformSettings{}
 	}
 
+	providers := existing.Providers
+	if req.Providers != nil {
+		providers = mergeProviders(existing.Providers, req.Providers)
+	}
+
 	// Merge: update providers, preserving existing secrets for masked values
-	// and preserving channel configuration (Telegram, Email, Slack enabled state).
+	// and preserving unrelated platform configuration.
 	settings := &store.PlatformSettings{
-		DefaultProvider: req.DefaultProvider,
-		DefaultModel:    req.DefaultModel,
-		Providers:       mergeProviders(existing.Providers, req.Providers),
-		Channels:        existing.Channels,
+		DefaultProvider:     req.DefaultProvider,
+		DefaultModel:        req.DefaultModel,
+		Providers:           providers,
+		DefaultBrandTheme:   existing.DefaultBrandTheme,
+		WebSearchTool:       existing.WebSearchTool,
+		WebExtractTool:      existing.WebExtractTool,
+		PerplexityWebSearch: existing.PerplexityWebSearch,
+		Channels:            existing.Channels,
+		Auth:                existing.Auth,
+	}
+	if req.WebSearchTool != "" {
+		settings.WebSearchTool = req.WebSearchTool
+	}
+	if req.WebExtractTool != "" {
+		settings.WebExtractTool = req.WebExtractTool
+	}
+	if req.PerplexityWebSearch != nil {
+		settings.PerplexityWebSearch = req.PerplexityWebSearch
 	}
 
 	if err := svc.PlatformSettings.Save(r.Context(), settings); err != nil {
@@ -275,7 +300,6 @@ func maskValue(val string) string {
 	}
 	return "****" + val[len(val)-4:]
 }
-
 
 // GetEffectiveProvidersHandler handles GET /api/settings/providers/effective.
 // Returns the fully merged provider configuration (all 3 layers cascaded, secrets masked).
@@ -483,4 +507,3 @@ func TestProviderHandler(w http.ResponseWriter, r *http.Request) {
 		"models":      models,
 	})
 }
-

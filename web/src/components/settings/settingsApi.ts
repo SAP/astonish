@@ -60,18 +60,42 @@ export interface WebCapableTools {
 export interface StandardServerEnvVar {
   name: string
   required: boolean
+  description?: string
 }
 
 export interface StandardServer {
   id: string
   displayName: string
+  description?: string
+  kind?: 'mcp' | 'model'
   isDefault: boolean
   installed: boolean
+  active?: boolean
   envVars: StandardServerEnvVar[]
   capabilities: {
     webSearch: boolean
     webExtract: boolean
   }
+  webSearchTool?: string
+  webExtractTool?: string
+  details?: {
+    provider?: string
+    model?: string
+  }
+}
+
+export interface PerplexityProviderOption {
+  provider: string
+  type?: string
+  models: string[]
+  error?: string
+}
+
+export interface PerplexityWebSearchConfig {
+  provider: string
+  model: string
+  search_context_size?: string
+  max_results?: number
 }
 
 export interface TapEntry {
@@ -160,6 +184,56 @@ export const fetchProviderModels = async (providerId: string): Promise<{ models:
   return res.json()
 }
 
+export const fetchStandardServers = async (scope?: string): Promise<{ servers: StandardServer[]; activeWebSearch?: string }> => {
+  const url = scope ? `/api/standard-servers?scope=${encodeURIComponent(scope)}` : '/api/standard-servers'
+  const res = await teamFetch(url, undefined, scope === 'platform' ? null : undefined)
+  if (!res.ok) throw new Error('Failed to fetch standard servers')
+  return res.json()
+}
+
+export const activateStandardServer = async (id: string, scope?: string): Promise<{ webSearchTool?: string; webExtractTool?: string }> => {
+  const url = scope
+    ? `/api/standard-servers/${encodeURIComponent(id)}/activate?scope=${encodeURIComponent(scope)}`
+    : `/api/standard-servers/${encodeURIComponent(id)}/activate`
+  const res = await teamFetch(url, { method: 'POST' }, scope === 'platform' ? null : undefined)
+  if (!res.ok) {
+    const text = await res.text()
+    throw new Error(text || 'Failed to activate web search provider')
+  }
+  return res.json()
+}
+
+export const fetchPerplexityWebSearchOptions = async (scope?: string): Promise<{ options: PerplexityProviderOption[] }> => {
+  const url = scope ? `/api/web-search/perplexity/options?scope=${encodeURIComponent(scope)}` : '/api/web-search/perplexity/options'
+  const res = await teamFetch(url, undefined, scope === 'platform' ? null : undefined)
+  if (!res.ok) throw new Error('Failed to fetch Perplexity web search options')
+  return res.json()
+}
+
+export const savePerplexityWebSearchConfig = async (config: PerplexityWebSearchConfig, scope?: string): Promise<unknown> => {
+  const url = scope ? `/api/web-search/perplexity/config?scope=${encodeURIComponent(scope)}` : '/api/web-search/perplexity/config'
+  const res = await teamFetch(url, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(config)
+  }, scope === 'platform' ? null : undefined)
+  if (!res.ok) {
+    const text = await res.text()
+    throw new Error(text || 'Failed to save Perplexity web search config')
+  }
+  return res.json()
+}
+
+export const clearPerplexityWebSearchConfig = async (scope?: string): Promise<unknown> => {
+  const url = scope ? `/api/web-search/perplexity/config?scope=${encodeURIComponent(scope)}` : '/api/web-search/perplexity/config'
+  const res = await teamFetch(url, { method: 'DELETE' }, scope === 'platform' ? null : undefined)
+  if (!res.ok) {
+    const text = await res.text()
+    throw new Error(text || 'Failed to clear Perplexity web search config')
+  }
+  return res.json()
+}
+
 // Fetch tools that have 'websearch' or 'webextract' in their name
 export const fetchWebCapableTools = async (): Promise<WebCapableTools> => {
   const res = await teamFetch('/api/tools/web-capable')
@@ -243,6 +317,9 @@ export interface LevelProviderData {
   providers: Record<string, Record<string, string>> | null
   default_provider: string
   default_model: string
+  web_search_tool?: string
+  web_extract_tool?: string
+  perplexity_web_search?: PerplexityWebSearchConfig | null
 }
 
 export const fetchPlatformProviders = async (): Promise<LevelProviderData> => {

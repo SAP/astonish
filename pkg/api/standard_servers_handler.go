@@ -2,10 +2,12 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 
 	"github.com/SAP/astonish/pkg/config"
+	"github.com/SAP/astonish/pkg/provider"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/gorilla/mux"
 )
@@ -15,12 +17,15 @@ type StandardServerResponse struct {
 	ID             string                     `json:"id"`
 	DisplayName    string                     `json:"displayName"`
 	Description    string                     `json:"description"`
+	Kind           string                     `json:"kind,omitempty"`
 	Installed      bool                       `json:"installed"`
+	Active         bool                       `json:"active"`
 	IsDefault      bool                       `json:"isDefault"`
 	EnvVars        []config.StandardEnvVar    `json:"envVars"`
 	Capabilities   StandardServerCapabilities `json:"capabilities"`
 	WebSearchTool  string                     `json:"webSearchTool,omitempty"`
 	WebExtractTool string                     `json:"webExtractTool,omitempty"`
+	Details        *StandardServerDetails     `json:"details,omitempty"`
 }
 
 // StandardServerCapabilities describes what a standard server can do.
@@ -29,18 +34,44 @@ type StandardServerCapabilities struct {
 	WebExtract bool `json:"webExtract"`
 }
 
+// StandardServerDetails holds optional configured-state summary for a standard server card.
+type StandardServerDetails struct {
+	Provider string `json:"provider,omitempty"`
+	Model    string `json:"model,omitempty"`
+}
+
 // ListStandardServersHandler handles GET /api/standard-servers
 // Returns all standard servers with their install status.
+// Query scope=platform forces platform-level active/installed resolution for web tools.
 func ListStandardServersHandler(w http.ResponseWriter, r *http.Request) {
 	servers := config.GetStandardServers()
+	appCfg := standardServersAppConfig(r)
+	activeSearch := appCfg.General.WebSearchTool
 
 	response := make([]StandardServerResponse, 0, len(servers))
 	for _, srv := range servers {
+		installed := config.IsStandardServerInstalled(srv.ID)
+		var details *StandardServerDetails
+		if srv.Kind == "model" && srv.ID == "perplexity" {
+			installed = appCfg.PerplexityWebSearch.Provider != "" && appCfg.PerplexityWebSearch.Model != ""
+			if installed {
+				details = &StandardServerDetails{
+					Provider: appCfg.PerplexityWebSearch.Provider,
+					Model:    appCfg.PerplexityWebSearch.Model,
+				}
+			}
+		}
+		kind := srv.Kind
+		if kind == "" {
+			kind = "mcp"
+		}
 		response = append(response, StandardServerResponse{
 			ID:          srv.ID,
 			DisplayName: srv.DisplayName,
 			Description: srv.Description,
-			Installed:   config.IsStandardServerInstalled(srv.ID),
+			Kind:        kind,
+			Installed:   installed,
+			Active:      srv.WebSearchTool != "" && srv.WebSearchTool == activeSearch,
 			IsDefault:   srv.IsDefault,
 			EnvVars:     srv.EnvVars,
 			Capabilities: StandardServerCapabilities{
@@ -49,18 +80,125 @@ func ListStandardServersHandler(w http.ResponseWriter, r *http.Request) {
 			},
 			WebSearchTool:  srv.WebSearchTool,
 			WebExtractTool: srv.WebExtractTool,
+			Details:        details,
 		})
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"servers": response,
+		"servers":         response,
+		"activeWebSearch": activeSearch,
 	})
+}
+
+// standardServersAppConfig returns the app config used for standard server list status.
+// scope=platform reads only platform settings so the Platform MCP tab is not skewed by team overrides.
+func standardServersAppConfig(r *http.Request) *config.AppConfig {
+	if r.URL.Query().Get("scope") != "platform" {
+		return effectiveAppConfig(r)
+	}
+	svc := store.FromRequest(r)
+	if svc == nil || svc.Mode != store.ModePlatform || svc.PlatformSettings == nil {
+		return effectiveAppConfig(r)
+	}
+	return provider.ResolveEffectiveConfig(r.Context(), svc.PlatformSettings, nil, nil)
 }
 
 // InstallStandardServerRequest is the request for POST /api/standard-servers/{id}/install
 type InstallStandardServerRequest struct {
 	Env map[string]string `json:"env"`
+}
+
+// ActivateStandardServerHandler handles POST /api/standard-servers/{id}/activate
+// Marks an already-configured standard web provider as the active web search tool.
+func ActivateStandardServerHandler(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	serverID := vars["id"]
+	scope := r.URL.Query().Get("scope")
+
+	if scope == "platform" && RequirePlatformAdmin(w, r) == nil {
+		return
+	}
+
+	srv := config.GetStandardServer(serverID)
+	if srv == nil {
+		respondError(w, http.StatusNotFound, "Unknown standard server: "+serverID)
+		return
+	}
+	if srv.WebSearchTool == "" {
+		respondError(w, http.StatusBadRequest, "Server does not provide a web search tool")
+		return
+	}
+
+	appCfg := standardServersAppConfig(r)
+
+	if srv.Kind == "model" && srv.ID == "perplexity" {
+		if appCfg.PerplexityWebSearch.Provider == "" || appCfg.PerplexityWebSearch.Model == "" {
+			respondError(w, http.StatusBadRequest, "Configure a Perplexity provider and model first")
+			return
+		}
+	} else if !config.IsStandardServerInstalled(srv.ID) {
+		respondError(w, http.StatusBadRequest, "Server is not installed")
+		return
+	}
+
+	if err := persistActiveWebSearchTools(r, scope, srv.WebSearchTool, srv.WebExtractTool); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	GetChatManager().Reset()
+	respondJSON(w, http.StatusOK, map[string]any{
+		"status":         "activated",
+		"serverName":     srv.ID,
+		"webSearchTool":  srv.WebSearchTool,
+		"webExtractTool": srv.WebExtractTool,
+	})
+}
+
+// persistActiveWebSearchTools stores the active web search/extract tool refs.
+// scope=platform writes platform settings; otherwise team settings (legacy install path).
+func persistActiveWebSearchTools(r *http.Request, scope, webSearchTool, webExtractTool string) error {
+	svc := store.FromRequest(r)
+	if svc == nil {
+		return fmt.Errorf("settings not available")
+	}
+
+	if scope == "platform" {
+		if svc.PlatformSettings == nil {
+			return fmt.Errorf("Platform settings not available")
+		}
+		settings, err := svc.PlatformSettings.Get(r.Context())
+		if err != nil {
+			return fmt.Errorf("Failed to load platform settings: %w", err)
+		}
+		if settings == nil {
+			settings = &store.PlatformSettings{}
+		}
+		settings.WebSearchTool = webSearchTool
+		settings.WebExtractTool = webExtractTool
+		if err := svc.PlatformSettings.Save(r.Context(), settings); err != nil {
+			return fmt.Errorf("Failed to save platform settings: %w", err)
+		}
+		return nil
+	}
+
+	if svc.Settings == nil {
+		return fmt.Errorf("Team settings not available")
+	}
+	teamSettings, err := svc.Settings.Get(r.Context())
+	if err != nil {
+		return fmt.Errorf("Failed to load team settings: %w", err)
+	}
+	if teamSettings == nil {
+		teamSettings = &store.TeamSettings{}
+	}
+	teamSettings.WebSearchTool = webSearchTool
+	teamSettings.WebExtractTool = webExtractTool
+	if err := svc.Settings.Save(r.Context(), teamSettings); err != nil {
+		return fmt.Errorf("Failed to save team settings: %w", err)
+	}
+	return nil
 }
 
 // InstallStandardServerHandler handles POST /api/standard-servers/{id}/install
@@ -78,6 +216,11 @@ func InstallStandardServerHandler(w http.ResponseWriter, r *http.Request) {
 	var req InstallStandardServerRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid request body: "+err.Error())
+		return
+	}
+
+	if srv.Kind == "model" {
+		respondError(w, http.StatusBadRequest, "Model-backed providers are configured from the Perplexity web search settings")
 		return
 	}
 
@@ -137,28 +280,13 @@ func installStandardServerPlatform(w http.ResponseWriter, r *http.Request, mcpSt
 		}
 	}
 
-	// Persist WebSearchTool/WebExtractTool in the team settings so that
-	// effectiveAppConfig() and MergeStandardServersWithConfig() can resolve
-	// the active web tool from the database in platform mode (not config.yaml).
+	// Persist WebSearchTool/WebExtractTool so effectiveAppConfig() can resolve the
+	// active web tool from the database. Platform-scope installs write platform
+	// settings; otherwise team settings (legacy/personal platform-mode install).
 	if srv.WebSearchTool != "" || srv.WebExtractTool != "" {
-		if svc := store.FromRequest(r); svc != nil && svc.Settings != nil {
-			teamSettings, err := svc.Settings.Get(r.Context())
-			if err != nil {
-				slog.Warn("failed to read team settings for web tool update", "server", srv.ID, "error", err)
-			} else {
-				if teamSettings == nil {
-					teamSettings = &store.TeamSettings{}
-				}
-				if srv.WebSearchTool != "" {
-					teamSettings.WebSearchTool = srv.WebSearchTool
-				}
-				if srv.WebExtractTool != "" {
-					teamSettings.WebExtractTool = srv.WebExtractTool
-				}
-				if err := svc.Settings.Save(r.Context(), teamSettings); err != nil {
-					slog.Warn("failed to save team settings with web tool", "server", srv.ID, "error", err)
-				}
-			}
+		scope := r.URL.Query().Get("scope")
+		if err := persistActiveWebSearchTools(r, scope, srv.WebSearchTool, srv.WebExtractTool); err != nil {
+			slog.Warn("failed to persist web tool settings on install", "server", srv.ID, "scope", scope, "error", err)
 		}
 	}
 
@@ -196,8 +324,9 @@ func UninstallStandardServerHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Keyless servers cannot be uninstalled
-	if len(srv.EnvVars) == 0 {
+	// Keyless MCP servers cannot be uninstalled. Model-backed entries are disabled
+	// through their own configuration endpoint.
+	if len(srv.EnvVars) == 0 || srv.Kind == "model" {
 		respondError(w, http.StatusBadRequest, "Server does not require configuration")
 		return
 	}

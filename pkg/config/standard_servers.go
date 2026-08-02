@@ -20,7 +20,8 @@ type StandardMCPServer struct {
 	ID             string           `json:"id"`
 	DisplayName    string           `json:"displayName"`
 	Description    string           `json:"description"`
-	Category       string           `json:"category"` // "web" or "browser"
+	Category       string           `json:"category"`       // "web" or "browser"
+	Kind           string           `json:"kind,omitempty"` // "mcp" (default) or "model"
 	Command        string           `json:"command"`
 	Args           []string         `json:"args"`
 	EnvVars        []StandardEnvVar `json:"envVars"`
@@ -32,6 +33,16 @@ type StandardMCPServer struct {
 
 // standardServers is the hardcoded registry of supported standard MCP servers.
 var standardServers = []StandardMCPServer{
+	{
+		ID:            "perplexity",
+		DisplayName:   "Perplexity / Sonar",
+		Description:   "Model-backed web search using an existing provider model such as SAP AI Core Sonar Pro.",
+		Category:      "web",
+		Kind:          "model",
+		EnvVars:       []StandardEnvVar{},
+		WebSearchTool: "perplexity:perplexity_web_search",
+		IsDefault:     false,
+	},
 	{
 		ID:          "tavily",
 		DisplayName: "Tavily",
@@ -114,6 +125,10 @@ func IsStandardServerInstalled(id string) bool {
 	srv := GetStandardServer(id)
 	if srv != nil && len(srv.EnvVars) == 0 {
 		return true
+	}
+
+	if srv != nil && srv.Kind == "model" {
+		return false
 	}
 
 	// Check credential store via registered getter (reads from platform_secrets DB

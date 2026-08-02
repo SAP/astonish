@@ -120,7 +120,7 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build \
 # ---------------------------------------------------------------------------
 # Stage 2 — native tree-sitter shared library.
 # ---------------------------------------------------------------------------
-FROM --platform=$TARGETPLATFORM debian:bookworm-slim AS treesitter-builder
+FROM debian:bookworm-slim AS treesitter-builder
 
 WORKDIR /src
 

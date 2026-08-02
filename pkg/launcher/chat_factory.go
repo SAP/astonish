@@ -222,6 +222,10 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 	if searchErr == nil {
 		coreTools = append(coreTools, searchTool)
 	}
+	memoryDeleteTool, mdErr := tools.NewMemoryDeleteTool()
+	if mdErr == nil {
+		coreTools = append(coreTools, memoryDeleteTool)
+	}
 
 	// --- 2d. Initialize scheduler tools → deferred category ---
 	var schedToolsSlice []tool.Tool
@@ -758,7 +762,7 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 	// Split coreTools into main-thread essentials and the full "core" group
 	// for sub-agents. Main thread tools: read_file, write_file, edit_file,
 	// shell_command, grep_search, find_files, memory_save, memory_search,
-	// delegate_tasks, resolve_credential, skill_lookup.
+	// memory_delete, delegate_tasks, resolve_credential, skill_lookup.
 	mainThreadToolNames := map[string]bool{
 		"read_file":          true,
 		"write_file":         true,
@@ -768,6 +772,7 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		"find_files":         true,
 		"memory_save":        true,
 		"memory_search":      true,
+		"memory_delete":      true,
 		"delegate_tasks":     true,
 		"announce_plan":      true,
 		"resolve_credential": true,

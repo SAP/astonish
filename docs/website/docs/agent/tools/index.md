@@ -13,7 +13,7 @@ Astonish provides 90+ built-in tools across multiple categories, plus unlimited 
 | [Email](./email.md) | 8 | Inbox management, send, search, wait |
 | [Credentials](./credentials.md) | 5 | Secure secret storage and retrieval |
 | [Scheduler & Agent](./scheduler-agent.md) | 10+ | Scheduling, delegation, flows, planning |
-| Memory | 3 | Save, search, retrieve memories |
+| Memory | 4 | Save, search, retrieve, and delete memories |
 | Drill & Testing | 7 | Create, validate, run test suites |
 | Fleet | 2 | Multi-agent collaboration plans |
 | Sandbox | 3 | Sandbox template management |
@@ -27,7 +27,7 @@ Every tool has a confirmation level that determines whether user approval is nee
 Safe, read-only tools that execute immediately:
 
 - `read_file`, `file_tree`, `grep_search`, `find_files`
-- `memory_save`, `memory_search`, `memory_get`
+- `memory_search`, `memory_get`
 - `skill_lookup`, `list_drills`
 - `web_fetch`, `read_pdf`
 
@@ -36,6 +36,7 @@ Safe, read-only tools that execute immediately:
 Tools that modify state or have side effects:
 
 - `write_file`, `edit_file`, `shell_command`
+- `memory_save`, `memory_delete`
 - `http_request` (POST/PUT/DELETE)
 - `email_send`, `email_reply`
 - `schedule_job`, `distill_flow`

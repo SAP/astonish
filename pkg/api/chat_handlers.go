@@ -1001,6 +1001,34 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		runner.InjectMemoryStoresWithScope(memStore, memoryScope, svc.MemorySearcher)
+		if svc.TenantRouter != nil {
+			if pu := GetPlatformUser(r); pu != nil {
+				if orgStore, err := svc.TenantRouter.ForOrg(pu.OrgSlug); err == nil {
+					runner.InjectMemoryStoresByScope(store.MemoryStoresByScope{
+						Personal: orgStore.ForUser(pu.ID).Memories(),
+						Team:     svc.Memory,
+						Org:      orgStore.OrgMemories(),
+					})
+				}
+				canDeleteTeamMemory := CanManageTeam(r, pu)
+				canDeleteOrgMemory := CanManageOrg(pu)
+				runner.InjectMemoryDeleteAuthorizer(func(_ context.Context, entry *store.MemorySearchResult, scope string) error {
+					canDelete := false
+					switch scope {
+					case string(store.MemoryScopePersonal):
+						canDelete = true
+					case string(store.MemoryScopeTeam):
+						canDelete = entry.CreatedBy == pu.ID || canDeleteTeamMemory
+					case string(store.MemoryScopeOrg):
+						canDelete = entry.CreatedBy == pu.ID || canDeleteOrgMemory
+					}
+					if canDelete {
+						return nil
+					}
+					return fmt.Errorf("permission denied: you can only delete memories you created or that you have admin access to")
+				})
+			}
+		}
 
 		// Inject the cross-session memory merge function so that memory_save
 		// performs dedup/merge instead of blind inserts. This requires the

@@ -166,7 +166,7 @@ Delegation gives you **parallelism** and **context isolation**. Sub-agents run i
 
 **Call tools directly (no delegation) when:**
 - It's a single quick lookup or one-off fetch where you need the result immediately
-- Your main-thread tools (read_file, write_file, edit_file, shell_command, grep_search, find_files, memory_save, memory_search) are sufficient
+- Your main-thread tools (read_file, write_file, edit_file, shell_command, grep_search, find_files, memory_save, memory_search, memory_delete) are sufficient
 - You need the result to decide your next step before proceeding
 
 ## Task Decomposition Strategy
@@ -393,6 +393,10 @@ When you discover NEW durable facts during an interaction, save them using **mem
 **Behavior preferences:** If the user tells you to change how you behave (e.g., always use a certain tool, skip confirmations for certain operations), save that to INSTRUCTIONS.md rather than MEMORY.md.
 
 **Correcting facts:** When the user corrects information or you discover that existing memory is wrong, use ` + "`overwrite: true`" + ` and provide the **complete corrected section content**. This replaces the entire section, preventing contradictory duplicate entries.
+
+## Deleting from Memory
+
+When the user asks you to forget, remove, delete, or clean up stored memory, use **memory_delete**. First call ` + "`memory_search`" + ` to identify the exact entry, then call ` + "`memory_delete`" + ` with the result's ` + "`id`" + ` and ` + "`scope`" + `. Only delete memories the user explicitly asks to remove.
 
 **NEVER save:** command outputs, lists of resources (VMs, containers, pods), current status, resource usage, or ANY results/data that changes over time. Those MUST always be fetched live. Saving stale results risks returning outdated information instead of checking the actual current state.
 

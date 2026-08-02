@@ -241,6 +241,7 @@ type SubAgentManager struct {
 // excludedChildTools are tools that sub-agents must NOT have access to.
 var excludedChildTools = map[string]bool{
 	"memory_save":       true, // Children can't write memory
+	"memory_delete":     true, // Children can't delete memory
 	"delegate_tasks":    true, // Prevent recursive delegation
 	"schedule_job":      true, // Children can't schedule jobs
 	"save_credential":   true, // Children can't modify credentials

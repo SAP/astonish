@@ -180,6 +180,20 @@ func (cr *ChatRunner) InjectMemoryStoresWithScope(memStore store.MemoryStore, sc
 	}
 }
 
+// InjectMemoryStoresByScope adds all tenant-visible memory stores to the runner
+// context so memory_delete can target a result's explicit scope safely.
+func (cr *ChatRunner) InjectMemoryStoresByScope(stores store.MemoryStoresByScope) {
+	cr.ctx = store.WithMemoryStoresByScope(cr.ctx, stores)
+}
+
+// InjectMemoryDeleteAuthorizer adds a request-scoped authorization function used
+// by memory_delete before it mutates a memory store.
+func (cr *ChatRunner) InjectMemoryDeleteAuthorizer(fn store.MemoryDeleteAuthorizer) {
+	if fn != nil {
+		cr.ctx = store.WithMemoryDeleteAuthorizer(cr.ctx, fn)
+	}
+}
+
 // InjectMemorySaveOrMerge adds a cross-session memory merge function to the
 // runner's context. The memory_save tool requires this function in platform
 // mode so saves become structured cards instead of raw durable memories.

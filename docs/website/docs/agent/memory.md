@@ -9,18 +9,20 @@ Memory is curated knowledge the agent accumulates — distinct from session hist
 - **Save** facts, patterns, and solutions during conversations
 - **Search** across all accessible memory tiers before responding
 - **Retrieve** specific entries for detailed context
+- **Delete** obsolete or incorrect entries when asked
 
 Before responding, the agent automatically retrieves relevant memories based on the current conversation. This happens transparently via the knowledge retrieval system.
 
 ## Memory Tools
 
-The agent interacts with memory through three built-in tools:
+The agent interacts with memory through four built-in tools:
 
 | Tool | Description |
 |------|-------------|
 | `memory_save` | Store a new memory with content and category |
 | `memory_search` | Semantic search across stored memories |
 | `memory_get` | Retrieve full context around a specific memory entry |
+| `memory_delete` | Delete an obsolete or incorrect memory by exact ID |
 
 ### Saving Memory
 
@@ -37,6 +39,17 @@ Agent: [memory_save category="conventions" content="API uses camelCase for JSON,
 Agent: [memory_search query="API naming conventions"]
 → Returns: "API uses camelCase for JSON, snake_case for DB columns" (score: 0.92)
 ```
+
+### Deleting Memory
+
+When a memory is wrong, obsolete, or no longer wanted, the agent can search for the exact entry and delete it by ID:
+
+```
+Agent: [memory_search query="old API naming convention"]
+Agent: [memory_delete id="mem_123" scope="team"]
+```
+
+`memory_delete` targets the result's memory tier and follows the same ownership and admin permissions as Studio memory management.
 
 ## Hybrid Search
 

@@ -429,6 +429,17 @@ func IsWebSearchConfigured() (bool, string, string) {
 	return isWebSearchConfiguredWith(appCfg)
 }
 
+// IsWebSearchConfiguredWith reports web search configuration from a pre-resolved
+// AppConfig (e.g. platform DB cascade). Prefer this in platform/Studio paths.
+func IsWebSearchConfiguredWith(appCfg *config.AppConfig) (bool, string, string) {
+	return isWebSearchConfiguredWith(appCfg)
+}
+
+// IsWebExtractConfiguredWith is the AppConfig-scoped variant of IsWebExtractConfigured.
+func IsWebExtractConfiguredWith(appCfg *config.AppConfig) (bool, string, string) {
+	return isWebExtractConfiguredWith(appCfg)
+}
+
 // isWebSearchConfiguredWith checks web search config using a pre-loaded AppConfig.
 //
 // Tool names are normalized hyphen→underscore. MCP servers register their tools

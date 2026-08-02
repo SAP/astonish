@@ -203,6 +203,22 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		credToolsSlice = credTools
 	}
 
+	// Model-backed Perplexity/Sonar is registered only when General → Web Search
+	// Tool selects it (and provider/model are configured).
+	if cfg.AppConfig != nil &&
+		isSelectedWebSearchServer(cfg.AppConfig, "perplexity") &&
+		cfg.AppConfig.PerplexityWebSearch.Provider != "" &&
+		cfg.AppConfig.PerplexityWebSearch.Model != "" {
+		perplexityTool, perplexityErr := tools.NewPerplexityWebSearchTool(cfg.AppConfig, provider.GetProvider)
+		if perplexityErr != nil {
+			if cfg.DebugMode {
+				slog.Warn("failed to create perplexity web search tool", "error", perplexityErr)
+			}
+		} else {
+			coreTools = append(coreTools, perplexityTool)
+		}
+	}
+
 	// --- 2b/2c. Initialize semantic memory ---
 	// Memory is fully managed by the DB (per-team vector tables).
 	// No file-based vector store needed.
@@ -803,9 +819,10 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 
 	// Separate web-oriented tools from core into their own group
 	webToolNames := map[string]bool{
-		"web_fetch":    true,
-		"read_pdf":     true,
-		"http_request": true,
+		"web_fetch":             true,
+		"perplexity_web_search": true,
+		"read_pdf":              true,
+		"http_request":          true,
 	}
 	processToolNames := map[string]bool{
 		"process_read":  true,
@@ -956,24 +973,20 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		}
 	}
 
-	// Check web tool availability (across all MCP toolsets, not just active)
-	if webSearchConfigured, serverName, toolName := api.IsWebSearchConfigured(); webSearchConfigured {
-		for _, lt := range lazyToolsets {
-			if lt.Name() == serverName {
-				promptBuilder.WebSearchAvailable = true
-				promptBuilder.WebSearchToolName = toolName
-				break
-			}
-		}
+	// Advertise the General-selected web search/extract tools to the prompt.
+	// Use the factory AppConfig (platform cascade), not LoadAppConfig() alone —
+	// file config.yaml is empty for web tools in platform mode.
+	namedLazy := make([]namedToolset, 0, len(lazyToolsets))
+	for _, lt := range lazyToolsets {
+		namedLazy = append(namedLazy, lt)
 	}
-	if webExtractConfigured, serverName, toolName := api.IsWebExtractConfigured(); webExtractConfigured {
-		for _, lt := range lazyToolsets {
-			if lt.Name() == serverName {
-				promptBuilder.WebExtractAvailable = true
-				promptBuilder.WebExtractToolName = toolName
-				break
-			}
-		}
+	if searchName := selectedWebSearchToolName(cfg.AppConfig, namedLazy); searchName != "" {
+		promptBuilder.WebSearchAvailable = true
+		promptBuilder.WebSearchToolName = searchName
+	}
+	if extractName := selectedWebExtractToolName(cfg.AppConfig, namedLazy); extractName != "" {
+		promptBuilder.WebExtractAvailable = true
+		promptBuilder.WebExtractToolName = extractName
 	}
 
 	// Check browser availability (native browser tools)
@@ -1910,6 +1923,63 @@ func loadMCPConfig(ctx context.Context, platformMode bool) (*config.MCPConfig, e
 	config.MergeStandardServersWithConfig(cfg, api.EffectiveAppConfigFromContext(ctx, true))
 
 	return cfg, nil
+}
+
+// namedToolset is the minimal surface selectedWeb* needs from lazy MCP toolsets.
+type namedToolset interface {
+	Name() string
+}
+
+func isSelectedWebSearchServer(appCfg *config.AppConfig, serverID string) bool {
+	if appCfg == nil || appCfg.General.WebSearchTool == "" {
+		return false
+	}
+	parts := strings.SplitN(appCfg.General.WebSearchTool, ":", 2)
+	return len(parts) >= 1 && parts[0] == serverID
+}
+
+// selectedWebSearchToolName returns the General-selected web search tool name
+// when that provider is actually available (installed credentials / Perplexity config / lazy toolset).
+func selectedWebSearchToolName(appCfg *config.AppConfig, lazyToolsets []namedToolset) string {
+	ok, serverName, toolName := api.IsWebSearchConfiguredWith(appCfg)
+	if !ok || toolName == "" {
+		return ""
+	}
+	toolName = strings.ReplaceAll(toolName, "-", "_")
+
+	lazyByName := map[string]bool{}
+	for _, lt := range lazyToolsets {
+		lazyByName[lt.Name()] = true
+	}
+
+	if serverName == "perplexity" {
+		if appCfg != nil && appCfg.PerplexityWebSearch.Provider != "" && appCfg.PerplexityWebSearch.Model != "" {
+			return toolName
+		}
+		return ""
+	}
+	if config.IsStandardServerInstalled(serverName) || lazyByName[serverName] {
+		return toolName
+	}
+	return ""
+}
+
+// selectedWebExtractToolName returns the General-selected web extract tool name when available.
+func selectedWebExtractToolName(appCfg *config.AppConfig, lazyToolsets []namedToolset) string {
+	ok, serverName, toolName := api.IsWebExtractConfiguredWith(appCfg)
+	if !ok || toolName == "" {
+		return ""
+	}
+	toolName = strings.ReplaceAll(toolName, "-", "_")
+
+	lazyByName := map[string]bool{}
+	for _, lt := range lazyToolsets {
+		lazyByName[lt.Name()] = true
+	}
+	if config.IsStandardServerInstalled(serverName) || lazyByName[serverName] {
+		return toolName
+	}
+	return ""
 }
 
 // storeMCPServerToConfig converts a store.MCPServer to config.MCPServerConfig.

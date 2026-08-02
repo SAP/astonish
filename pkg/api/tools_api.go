@@ -41,7 +41,14 @@ func WebCapableToolsHandler(w http.ResponseWriter, r *http.Request) {
 	standardServers := config.GetStandardServers()
 	for _, srv := range standardServers {
 		if !config.IsStandardServerInstalled(srv.ID) {
-			continue
+			if srv.ID != "perplexity" {
+				continue
+			}
+			appCfg := effectiveAppConfig(r)
+			// Perplexity is available whenever provider+model are configured.
+			if appCfg.PerplexityWebSearch.Provider == "" || appCfg.PerplexityWebSearch.Model == "" {
+				continue
+			}
 		}
 
 		if srv.WebSearchTool != "" {

@@ -59,7 +59,7 @@ export default function GeneralSettings({
         <CardHeader>
           <CardTitle className="text-base">Web Tools</CardTitle>
           <CardDescription>
-            Choose which configured MCP tools Astonish should use for web search and URL extraction.
+            Select which installed web provider the agent should use. Install providers under MCP Servers first, then choose the active search/extract tools here.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-5">
@@ -85,7 +85,7 @@ export default function GeneralSettings({
               </SelectContent>
             </Select>
             <p className="text-xs text-muted-foreground">
-              Used for internet search when finding MCP servers online.
+              Primary tool for agent web search. Only this selected provider is exposed to chat.
             </p>
           </div>
 

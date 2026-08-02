@@ -249,6 +249,9 @@ func EffectiveAppConfigFromContext(ctx context.Context, isPlatformMode bool) *co
 	appCfg.Providers = resolved.Providers
 	appCfg.General.DefaultProvider = resolved.General.DefaultProvider
 	appCfg.General.DefaultModel = resolved.General.DefaultModel
+	appCfg.General.WebSearchTool = resolved.General.WebSearchTool
+	appCfg.General.WebExtractTool = resolved.General.WebExtractTool
+	appCfg.PerplexityWebSearch = resolved.PerplexityWebSearch
 
 	// Apply additional non-provider team settings (web tools, context length, etc.)
 	if svc.Settings != nil {
@@ -263,9 +266,10 @@ func EffectiveAppConfigFromContext(ctx context.Context, isPlatformMode bool) *co
 
 // effectiveAppConfig returns the application configuration appropriate for the request.
 // In platform mode, providers come exclusively from the database (3-tier cascade):
-//   1. Platform settings (visible to all orgs/teams)
-//   2. Org settings (visible to all teams in the org)
-//   3. Team settings (specific to this team)
+//  1. Platform settings (visible to all orgs/teams)
+//  2. Org settings (visible to all teams in the org)
+//  3. Team settings (specific to this team)
+//
 // config.yaml providers are NOT used in platform mode.
 // In personal mode, it simply returns config.LoadAppConfig().
 func effectiveAppConfig(r *http.Request) *config.AppConfig {
@@ -298,6 +302,9 @@ func effectiveAppConfig(r *http.Request) *config.AppConfig {
 	appCfg.Providers = resolved.Providers
 	appCfg.General.DefaultProvider = resolved.General.DefaultProvider
 	appCfg.General.DefaultModel = resolved.General.DefaultModel
+	appCfg.General.WebSearchTool = resolved.General.WebSearchTool
+	appCfg.General.WebExtractTool = resolved.General.WebExtractTool
+	appCfg.PerplexityWebSearch = resolved.PerplexityWebSearch
 
 	// Apply additional non-provider team settings (web tools, context length, etc.)
 	if svc.Settings != nil {

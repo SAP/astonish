@@ -300,19 +300,22 @@ func updateSettingsPlatform(w http.ResponseWriter, r *http.Request, svc *store.S
 
 	cm := GetChatManager()
 
-	// In platform mode with per-request LLM resolution, we don't need to
-	// hot-swap or reset the global singleton when a team changes its default —
-	// the next request will resolve the correct LLM from the DB automatically.
-	// We only invalidate the pool when provider configs change.
+	// Provider config changes need pool invalidation. General web search/extract
+	// selection also requires Reset so the next chat rebuilds tools/prompt with
+	// only the selected web search tool (General → Web Tools).
 	if req.Providers != nil {
 		slog.Info("[settings] team provider configs changed (platform mode), invalidating + reset")
 		cm.InvalidateLLMPool()
 		cm.Reset()
+	} else if req.General != nil {
+		slog.Info("[settings] team general settings changed (platform mode), resetting chat",
+			"web_search_tool", req.General.WebSearchTool,
+			"web_extract_tool", req.General.WebExtractTool,
+			"provider", req.General.DefaultProvider,
+			"model", req.General.DefaultModel)
+		cm.InvalidateLLMPool()
+		cm.Reset()
 	} else {
-		slog.Info("[settings] team defaults changed (platform mode), invalidating pool",
-			"provider", req.General.DefaultProvider, "model", req.General.DefaultModel)
-		// Invalidate pool in case provider configs were changed previously
-		// and cached entries are stale.
 		cm.InvalidateLLMPool()
 	}
 

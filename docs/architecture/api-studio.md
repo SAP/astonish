@@ -53,8 +53,8 @@ The API is organized by domain:
 | **Sandbox** | `POST /sandbox/init`, `GET /sandbox/templates`, `POST /sandbox/proxy` | `sandbox_handlers.go` |
 | **Scheduler** | `GET /scheduler/jobs`, `POST /scheduler/jobs`, `POST /scheduler/jobs/:id/run` | `scheduler_handlers.go` |
 | **Credentials** | `GET /credentials`, `POST /credentials`, `DELETE /credentials/:name` | `credential_handlers.go` |
-| **Settings** | `GET /settings`, `PUT /settings` | `settings_handlers.go` |
-| **Tools** | `GET /tools`, `GET /tools/cache` | `tools_handlers.go` |
+| **Settings** | `GET /settings`, `PUT /settings`, `GET/PUT /settings/platform/providers`, `GET /standard-servers`, `POST /standard-servers/{id}/install|activate`, `GET/PUT/DELETE /web-search/perplexity/*` | `settings_handlers.go`, `provider_settings_handlers.go`, `standard_servers_handler.go`, `perplexity_web_search_handler.go` |
+| **Tools** | `GET /tools`, `GET /tools/cache`, `GET /tools/web-capable` | `tools_handlers.go`, `tools_api.go` |
 | **AI Chat** | `POST /ai-chat`, `GET /ai-chat/stream` | `ai_chat_handlers.go` |
 | **Memory health** | `GET /memories/health`, `GET /memories/map`, `POST /memories/consolidate/preview`, `POST /memories/consolidate/apply` | `memory_health.go`, `memory_map.go`, `memory_consolidation.go` |
 

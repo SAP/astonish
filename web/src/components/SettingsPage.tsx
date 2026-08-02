@@ -5,7 +5,7 @@ import { PERSONAL_ITEMS, TEAM_ITEMS, ORG_ITEMS, PLATFORM_ITEMS, PLATFORM_SYSTEM_
 import type { SettingsMenuItem } from './settings/settingsMenuItems'
 import { useSettingsData } from '../hooks/useSettingsData'
 import type { UpdateInfo, MCPServerConfig, SettingsData, ProviderInfo } from './settings/settingsApi'
-import { fetchMCPConfig, fetchPlatformProviders, fetchOrgProviders, fetchTeamProviders, fetchSettings, savePlatformProviders, saveOrgProviders, saveSettings as saveTeamSettings } from './settings/settingsApi'
+import { fetchMCPConfig, fetchPlatformProviders, fetchOrgProviders, fetchTeamProviders, fetchSettings, savePlatformProviders, saveOrgProviders, saveSettings as saveTeamSettings, fetchStandardServers } from './settings/settingsApi'
 import {
   fetchTeams, createTeam, deleteTeam,
   fetchTeamMembers, addTeamMember, removeTeamMember, setTeamMemberRole,
@@ -526,7 +526,7 @@ function PlatformMCPServersTab({ theme }: { theme: string }) {
     try {
       const [data, stdServers] = await Promise.all([
         fetchMCPConfig(undefined, 'platform'),
-        fetch('/api/standard-servers').then(r => r.ok ? r.json() : { servers: [] }).catch(() => ({ servers: [] }))
+        fetchStandardServers('platform').catch(() => ({ servers: [] as any[] }))
       ])
       const servers = data.mcpServers || {}
       setMcpServers(servers)

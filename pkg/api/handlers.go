@@ -1120,7 +1120,11 @@ func RegisterRoutes(router *mux.Router, svc *store.Services, backend store.Platf
 	// Standard servers endpoints
 	router.HandleFunc("/api/standard-servers", ListStandardServersHandler).Methods("GET")
 	router.HandleFunc("/api/standard-servers/{id}/install", InstallStandardServerHandler).Methods("POST")
+	router.HandleFunc("/api/standard-servers/{id}/activate", ActivateStandardServerHandler).Methods("POST")
 	router.HandleFunc("/api/standard-servers/{id}", UninstallStandardServerHandler).Methods("DELETE")
+	router.HandleFunc("/api/web-search/perplexity/options", GetPerplexityWebSearchOptionsHandler).Methods("GET")
+	router.HandleFunc("/api/web-search/perplexity/config", SavePerplexityWebSearchConfigHandler).Methods("PUT")
+	router.HandleFunc("/api/web-search/perplexity/config", ClearPerplexityWebSearchConfigHandler).Methods("DELETE")
 
 	// Skills endpoints
 	router.HandleFunc("/api/skills", ListSkillsHandler).Methods("GET")

@@ -51,6 +51,15 @@ describe('MCPServersSettings scope forwarding', () => {
         })
       }
 
+      // Perplexity provider options
+      if (url.includes('/api/web-search/perplexity/options')) {
+        return new Response(JSON.stringify({ options: [
+          { provider: 'SAP AI Core', type: 'openai_compat', models: ['perplexity/sonar-pro'] }
+        ] }), {
+          status: 200, headers: { 'Content-Type': 'application/json' }
+        })
+      }
+
       // MCP status
       if (url.includes('/api/mcp/status')) {
         return new Response(JSON.stringify({ servers: [
@@ -140,6 +149,92 @@ describe('MCPServersSettings scope forwarding', () => {
     expect(capturedInspectorProps.scope).toBe('platform')
     expect(capturedInspectorProps.serverName).toBe('context7')
     expect(capturedInspectorProps.teamSlug).toBeUndefined()
+  })
+
+  it('loads Perplexity provider options with platform scope during initial setup', async () => {
+    const user = userEvent.setup()
+
+    render(
+      <MCPServersSettings
+        mcpServers={{}}
+        setMcpServers={() => {}}
+        mcpServerNames={{}}
+        setMcpServerNames={() => {}}
+        mcpServerArgs={{}}
+        setMcpServerArgs={() => {}}
+        setMcpHasChanges={() => {}}
+        standardServers={[
+          { id: 'perplexity', displayName: 'Perplexity / Sonar', installed: false, isDefault: false, envVars: [], capabilities: { webSearch: true, webExtract: false }, kind: 'model' }
+        ]}
+        saving={false}
+        setSaving={() => {}}
+        setSaveSuccess={() => {}}
+        setError={() => {}}
+        loadData={() => {}}
+        setGeneralForm={() => {}}
+        theme="dark"
+        scope="platform"
+      />
+    )
+
+    await user.click(await screen.findByText('Setup'))
+
+    await waitFor(() => {
+      const optionsCall = fetchCalls.find(c => c.url.includes('/api/web-search/perplexity/options'))
+      expect(optionsCall).toBeDefined()
+      expect(optionsCall!.url).toContain('?scope=platform')
+    })
+    expect(await screen.findByText(/Setup Perplexity/i)).toBeInTheDocument()
+    expect(await screen.findByDisplayValue('SAP AI Core')).toBeInTheDocument()
+    expect(screen.getByDisplayValue('perplexity/sonar-pro')).toBeInTheDocument()
+  })
+
+  it('shows multiple configured providers without forcing a single active card', async () => {
+    render(
+      <MCPServersSettings
+        mcpServers={{}}
+        setMcpServers={() => {}}
+        mcpServerNames={{}}
+        setMcpServerNames={() => {}}
+        mcpServerArgs={{}}
+        setMcpServerArgs={() => {}}
+        setMcpHasChanges={() => {}}
+        standardServers={[
+          {
+            id: 'perplexity',
+            displayName: 'Perplexity / Sonar',
+            installed: true,
+            isDefault: false,
+            envVars: [],
+            capabilities: { webSearch: true, webExtract: false },
+            kind: 'model',
+            details: { provider: 'SAP AI Core', model: 'perplexity/sonar-pro' },
+          },
+          {
+            id: 'tavily',
+            displayName: 'Tavily',
+            installed: true,
+            isDefault: true,
+            envVars: [{ name: 'TAVILY_API_KEY', required: true }],
+            capabilities: { webSearch: true, webExtract: true },
+          },
+        ]}
+        saving={false}
+        setSaving={() => {}}
+        setSaveSuccess={() => {}}
+        setError={() => {}}
+        loadData={() => {}}
+        setGeneralForm={() => {}}
+        theme="dark"
+        scope="platform"
+      />
+    )
+
+    expect(await screen.findByText(/2 configured/i)).toBeInTheDocument()
+    expect(screen.getByText(/General → Web Tools/i)).toBeInTheDocument()
+    expect(screen.getAllByText('Configured').length).toBe(2)
+    expect(screen.queryByText('Make active')).not.toBeInTheDocument()
+    expect(screen.getByText(/perplexity\/sonar-pro/i)).toBeInTheDocument()
   })
 
   it('trash button sends DELETE with ?scope=platform for platform tab', async () => {

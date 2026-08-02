@@ -103,8 +103,9 @@ func mergeStandardServersWithConfig(cfg *MCPConfig, appCfg *AppConfig) {
 
 	// First: inject key-based servers that have credentials.
 	// For web-category servers (Tavily, Brave, Firecrawl), only load the one
-	// that matches the configured web search tool. This prevents inactive web
-	// search providers from being registered, indexed, and offered to the LLM.
+	// selected in General → Web Search Tool (appCfg.General.WebSearchTool).
+	// Credentials can be stored for multiple providers; only the selected tool
+	// is registered for the agent. That is what General settings controls.
 	if appCfg != nil {
 		activeWebServerID := ""
 		if appCfg.General.WebSearchTool != "" {
@@ -114,11 +115,14 @@ func mergeStandardServersWithConfig(cfg *MCPConfig, appCfg *AppConfig) {
 		}
 
 		for _, srv := range GetStandardServers() {
+			if srv.Kind == "model" {
+				continue
+			}
 			if len(srv.EnvVars) == 0 {
 				continue // keyless handled below
 			}
 
-			// For web-category servers, only load the active one.
+			// For web-category servers, only load the General-selected provider.
 			if srv.Category == "web" && srv.ID != activeWebServerID {
 				continue
 			}
@@ -149,6 +153,9 @@ func mergeStandardServersWithConfig(cfg *MCPConfig, appCfg *AppConfig) {
 	// Second: always inject keyless servers — no config entry needed.
 	// Refresh command/args but preserve any explicit Enabled flag.
 	for _, srv := range GetStandardServers() {
+		if srv.Kind == "model" {
+			continue
+		}
 		if len(srv.EnvVars) > 0 {
 			continue // needs API key, handled above
 		}
@@ -157,6 +164,38 @@ func mergeStandardServersWithConfig(cfg *MCPConfig, appCfg *AppConfig) {
 			newCfg.Enabled = existing.Enabled
 		}
 		cfg.MCPServers[srv.ID] = newCfg
+	}
+
+	// Third: drop standard web providers that are not the General selection.
+	// Platform/team MCP stores may still hold every installed provider; only the
+	// selected WebSearchTool should be exposed to the agent.
+	filterInactiveStandardWebServers(cfg, appCfg)
+}
+
+// filterInactiveStandardWebServers removes standard web-category MCP servers that
+// are not selected via General.WebSearchTool. Credentials remain installed so the
+// user can switch providers in General without re-entering API keys.
+//
+// When WebSearchTool is empty, all standard web MCP servers are removed so the
+// agent has no web-search MCP tool (General "None").
+func filterInactiveStandardWebServers(cfg *MCPConfig, appCfg *AppConfig) {
+	if cfg == nil || cfg.MCPServers == nil {
+		return
+	}
+	activeWebServerID := ""
+	if appCfg != nil && appCfg.General.WebSearchTool != "" {
+		if parts := strings.SplitN(appCfg.General.WebSearchTool, ":", 2); len(parts) >= 1 {
+			activeWebServerID = parts[0]
+		}
+	}
+	for _, srv := range GetStandardServers() {
+		if srv.Category != "web" || srv.Kind == "model" {
+			continue
+		}
+		if activeWebServerID != "" && srv.ID == activeWebServerID {
+			continue
+		}
+		delete(cfg.MCPServers, srv.ID)
 	}
 }
 

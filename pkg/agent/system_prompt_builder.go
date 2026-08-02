@@ -252,7 +252,7 @@ func (b *SystemPromptBuilder) Build() string {
 	// 6a2. Web search/extract tool hints — tell the LLM the exact tool names
 	// so it doesn't fall back to web_fetch when a dedicated search tool is configured.
 	if b.WebSearchAvailable && b.WebSearchToolName != "" {
-		sb.WriteString(fmt.Sprintf("\n**Web search tool:** `%s` — for quick inline lookups (definitions, facts, finding URLs). For research tasks that require gathering, comparing, or analyzing information from the web, use `delegate_tasks` with appropriate tool groups (web, browser) instead. Search indexes may be stale — when you need live/current data from a specific website, delegate with browser tools to navigate the site directly.\n", b.WebSearchToolName))
+		sb.WriteString(fmt.Sprintf("\n**Web search tool:** `%s` — this is the configured search tool (General → Web Tools). Use it for internet search and quick factual lookups (definitions, facts, finding URLs). Do not substitute other tools for web search when this tool is available. For research tasks that require gathering, comparing, or analyzing information from the web, use `delegate_tasks` with appropriate tool groups (web, browser) instead. Search indexes may be stale — when you need live/current data from a specific website, delegate with browser tools to navigate the site directly.\n", b.WebSearchToolName))
 	}
 	if b.WebExtractAvailable && b.WebExtractToolName != "" {
 		sb.WriteString(fmt.Sprintf("**Web extract tool:** `%s` — use this tool to extract content from URLs when `web_fetch` fails.\n", b.WebExtractToolName))

@@ -33,6 +33,7 @@ func ResolveEffectiveConfig(
 	if platformSettings != nil {
 		if ps, err := platformSettings.Get(ctx); err == nil && ps != nil {
 			applyProviderLayer(appCfg, ps.Providers, ps.DefaultProvider, ps.DefaultModel)
+			applyPlatformWebSettings(appCfg, ps)
 		} else if err != nil {
 			slog.Warn("failed to read platform settings for provider resolution", "error", err)
 		}
@@ -118,6 +119,24 @@ func applyProviderLayer(appCfg *config.AppConfig, providers map[string]store.Pro
 		}
 		for name, provCfg := range providers {
 			appCfg.Providers[name] = config.ProviderConfig(provCfg)
+		}
+	}
+}
+
+// applyPlatformWebSettings overlays platform-level web search settings onto the app config.
+func applyPlatformWebSettings(appCfg *config.AppConfig, ps *store.PlatformSettings) {
+	if ps.WebSearchTool != "" {
+		appCfg.General.WebSearchTool = ps.WebSearchTool
+	}
+	if ps.WebExtractTool != "" {
+		appCfg.General.WebExtractTool = ps.WebExtractTool
+	}
+	if ps.PerplexityWebSearch != nil {
+		appCfg.PerplexityWebSearch = config.PerplexityWebSearchConfig{
+			Provider:          ps.PerplexityWebSearch.Provider,
+			Model:             ps.PerplexityWebSearch.Model,
+			SearchContextSize: ps.PerplexityWebSearch.SearchContextSize,
+			MaxResults:        ps.PerplexityWebSearch.MaxResults,
 		}
 	}
 }

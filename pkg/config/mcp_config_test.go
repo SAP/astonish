@@ -14,9 +14,14 @@ func boolPtr(b bool) *bool {
 // TestMergeStandardServers_PreservesDisabledKeyBased verifies that a key-based server
 // with Enabled=false keeps that flag when re-merged with a valid API key.
 func TestMergeStandardServers_PreservesDisabledKeyBased(t *testing.T) {
-	// This test relies on LoadAppConfig which reads the real config.
-	// If no config.yaml exists or no Tavily key is set, the key-based branch is skipped,
-	// so we verify the flag is preserved structurally.
+	originalGetter := getInstalledSecretGetter()
+	SetInstalledSecretGetter(func(key string) string {
+		if key == "web_servers.tavily.api_key" {
+			return "test-key"
+		}
+		return ""
+	})
+	defer SetInstalledSecretGetter(originalGetter)
 
 	cfg := &MCPConfig{
 		MCPServers: map[string]MCPServerConfig{
@@ -28,20 +33,17 @@ func TestMergeStandardServers_PreservesDisabledKeyBased(t *testing.T) {
 		},
 	}
 
-	mergeStandardServers(cfg)
+	// General selects tavily so it remains after merge; Enabled=false must be preserved.
+	mergeStandardServersWithConfig(cfg, &AppConfig{
+		General: GeneralConfig{WebSearchTool: "tavily:tavily_search"},
+	})
 
-	// If Tavily key is configured, the entry is re-injected with Enabled preserved.
-	// If not configured (CI), the entry is left as-is.
-	srv := cfg.MCPServers["tavily"]
+	srv, ok := cfg.MCPServers["tavily"]
+	if !ok {
+		t.Fatal("selected tavily should remain after merge")
+	}
 	if srv.Enabled == nil || *srv.Enabled {
-		// This is OK if LoadAppConfig() had no Tavily key — the key-based branch
-		// doesn't touch it. So Enabled should remain false from our initial setup.
-		if srv.Enabled == nil {
-			t.Fatal("Enabled flag was reset to nil (should stay false)")
-		}
-		if *srv.Enabled {
-			t.Fatal("Enabled flag was flipped to true (should stay false)")
-		}
+		t.Fatal("Enabled flag should stay false after merge")
 	}
 }
 
@@ -192,9 +194,18 @@ func TestSaveMCPConfig_StripsEnabledStandardServers(t *testing.T) {
 
 // TestSaveMCPConfig_RoundTripPreservesDisabledFlag tests the full save → load (raw) → merge cycle:
 // a disabled standard server persists through save, is present in raw load, and after merge
-// still has Enabled=false.
+// still has Enabled=false when it is the General-selected web tool.
 func TestSaveMCPConfig_RoundTripPreservesDisabledFlag(t *testing.T) {
 	setupTempConfigDir(t)
+
+	originalGetter := getInstalledSecretGetter()
+	SetInstalledSecretGetter(func(key string) string {
+		if key == "web_servers.tavily.api_key" {
+			return "test-key"
+		}
+		return ""
+	})
+	defer SetInstalledSecretGetter(originalGetter)
 
 	original := &MCPConfig{
 		MCPServers: map[string]MCPServerConfig{
@@ -217,12 +228,14 @@ func TestSaveMCPConfig_RoundTripPreservesDisabledFlag(t *testing.T) {
 		t.Fatalf("LoadMCPConfigRaw failed: %v", err)
 	}
 
-	// Merge (simulates LoadMCPConfig)
-	mergeStandardServers(raw)
+	// Merge with General selecting tavily
+	mergeStandardServersWithConfig(raw, &AppConfig{
+		General: GeneralConfig{WebSearchTool: "tavily:tavily_search"},
+	})
 
 	srv, ok := raw.MCPServers["tavily"]
 	if !ok {
-		t.Fatal("tavily should exist after merge")
+		t.Fatal("tavily should exist after merge when selected in General")
 	}
 	if srv.Enabled == nil {
 		t.Fatal("Enabled should not be nil after round-trip + merge")
@@ -299,9 +312,7 @@ func TestMergeStandardServersWithConfig_TeamWebSearchTool(t *testing.T) {
 
 // TestMergeStandardServersWithConfig_NoWebSearchTool verifies that when
 // AppConfig has no WebSearchTool set, web-category standard servers are NOT injected.
-// This is the expected behavior — avoids registering inactive providers.
 func TestMergeStandardServersWithConfig_NoWebSearchTool(t *testing.T) {
-	// Register a getter that has the key (key exists, but tool not configured).
 	originalGetter := getInstalledSecretGetter()
 	SetInstalledSecretGetter(func(key string) string {
 		if key == "web_servers.tavily.api_key" {
@@ -311,16 +322,50 @@ func TestMergeStandardServersWithConfig_NoWebSearchTool(t *testing.T) {
 	})
 	defer SetInstalledSecretGetter(originalGetter)
 
-	// Empty AppConfig — simulates K8s pod with no config.yaml web_search_tool
-	// AND no team setting (unlikely, but tests the guard).
 	appCfg := &AppConfig{}
 
 	cfg := &MCPConfig{MCPServers: make(map[string]MCPServerConfig)}
 	MergeStandardServersWithConfig(cfg, appCfg)
 
-	// Tavily should NOT be injected because WebSearchTool is empty.
 	if _, ok := cfg.MCPServers["tavily"]; ok {
 		t.Fatal("tavily should NOT be injected when WebSearchTool is empty")
+	}
+}
+
+// TestMergeStandardServersWithConfig_OnlySelectedWebProvider verifies that only the
+// General-selected web provider is exposed even when multiple API keys are installed.
+func TestMergeStandardServersWithConfig_OnlySelectedWebProvider(t *testing.T) {
+	originalGetter := getInstalledSecretGetter()
+	SetInstalledSecretGetter(func(key string) string {
+		switch key {
+		case "web_servers.tavily.api_key":
+			return "tavily-key"
+		case "web_servers.brave-search.api_key":
+			return "brave-key"
+		default:
+			return ""
+		}
+	})
+	defer SetInstalledSecretGetter(originalGetter)
+
+	appCfg := &AppConfig{
+		General: GeneralConfig{
+			WebSearchTool: "tavily:tavily_search",
+		},
+	}
+	cfg := &MCPConfig{
+		MCPServers: map[string]MCPServerConfig{
+			// Simulate a previously installed provider still present in the MCP store.
+			"brave-search": {Command: "npx", Args: []string{"brave"}},
+		},
+	}
+	MergeStandardServersWithConfig(cfg, appCfg)
+
+	if _, ok := cfg.MCPServers["tavily"]; !ok {
+		t.Fatal("expected selected tavily provider")
+	}
+	if _, ok := cfg.MCPServers["brave-search"]; ok {
+		t.Fatal("brave-search must be filtered out when General selects tavily")
 	}
 }
 

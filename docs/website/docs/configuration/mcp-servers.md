@@ -49,7 +49,15 @@ The UI provides two editing modes:
 
 ### Standard Web Servers
 
-Studio Settings also shows a "Standard Web Servers" section with one-click install for popular MCP servers (Tavily, Brave Search, etc.).
+Studio Settings has two related controls for web search:
+
+1. **MCP Servers → Web Search Providers** — install/configure providers (API keys for Tavily/Brave/Firecrawl, or provider+model for Perplexity/Sonar). Multiple providers can be configured at once.
+2. **General → Web Tools** — choose **which** installed provider the agent should use for web search and extraction. Only the selected tool is exposed to chat.
+
+- **Configured** — credentials (or Perplexity provider/model) are stored; available to select in General.
+- **Setup** — not configured yet; opens a dialog for API keys or Perplexity model selection.
+
+Supported options include Tavily, Brave Search, Firecrawl, and **Perplexity / Sonar** as a model-backed option: instead of a separate web-search API key, choose an already configured model provider (for example SAP AI Core) and a model whose ID contains `perplexity`, `sonar`, or `pplx`. When selected in General, Astonish exposes `perplexity_web_search`; the selected Sonar model performs the search and returns sourced data to the main chat model.
 
 ## Transport Types
 

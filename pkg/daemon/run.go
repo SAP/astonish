@@ -1294,16 +1294,17 @@ func Run(cfg RunConfig) error {
 					evictedRetention = 0
 				}
 				go k8sbackend.RunGCReconciler(ctx, k8sbackend.GCReconcilerConfig{
-					Interval:              appCfg.Sandbox.Kubernetes.K8sGCInterval(),
-					LayerGracePeriod:      appCfg.Sandbox.Kubernetes.K8sLayerGracePeriod(),
-					UpperGracePeriod:      appCfg.Sandbox.Kubernetes.K8sOrphanUpperGracePeriod(),
-					EvictedUpperRetention: evictedRetention,
-					Namespace:             gcNamespace,
-					LayersPVCName:         appCfg.Sandbox.Kubernetes.LayersPVCName,
-					UppersPVCName:         appCfg.Sandbox.Kubernetes.UppersPVCName,
-					Client:                cs,
-					PlatformPool:          platformPool,
-					Layers:                entStore.SandboxLayers(),
+					Interval:                 appCfg.Sandbox.Kubernetes.K8sGCInterval(),
+					LayerGracePeriod:         appCfg.Sandbox.Kubernetes.K8sLayerGracePeriod(),
+					UpperGracePeriod:         appCfg.Sandbox.Kubernetes.K8sOrphanUpperGracePeriod(),
+					EvictedUpperRetention:    evictedRetention,
+					MaxUpperReclaimsPerCycle: appCfg.Sandbox.Kubernetes.K8sMaxUpperReclaimsPerCycle(),
+					Namespace:                gcNamespace,
+					LayersPVCName:            appCfg.Sandbox.Kubernetes.LayersPVCName,
+					UppersPVCName:            appCfg.Sandbox.Kubernetes.UppersPVCName,
+					Client:                   cs,
+					PlatformPool:             platformPool,
+					Layers:                   entStore.SandboxLayers(),
 					SandboxSessionsQuerier: func(ctx context.Context) (map[string]bool, error) {
 						return entStore.AllSandboxSessionIDs(ctx)
 					},

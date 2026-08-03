@@ -299,6 +299,9 @@ func TestSandboxKubernetesConfig_GCDefaults(t *testing.T) {
 	if retention != 14*24*time.Hour {
 		t.Fatalf("K8sEvictedUpperRetention() = %s, want 336h", retention)
 	}
+	if got := cfg.K8sMaxUpperReclaimsPerCycle(); got != 500 {
+		t.Fatalf("K8sMaxUpperReclaimsPerCycle() = %d, want 500", got)
+	}
 }
 
 func TestSandboxKubernetesConfig_GCOverrides(t *testing.T) {
@@ -307,6 +310,7 @@ func TestSandboxKubernetesConfig_GCOverrides(t *testing.T) {
 		LayerGraceHours:            48,
 		OrphanUpperGraceMinutes:    30,
 		EvictedUpperRetentionHours: 24,
+		MaxUpperReclaimsPerCycle:   25,
 	}}
 	if got := cfg.K8sGCInterval(); got != 15*time.Minute {
 		t.Fatalf("K8sGCInterval() = %s, want 15m", got)
@@ -320,6 +324,9 @@ func TestSandboxKubernetesConfig_GCOverrides(t *testing.T) {
 	retention, enabled := cfg.K8sEvictedUpperRetention()
 	if !enabled || retention != 24*time.Hour {
 		t.Fatalf("K8sEvictedUpperRetention() = %s, %v; want 24h, true", retention, enabled)
+	}
+	if got := cfg.K8sMaxUpperReclaimsPerCycle(); got != 25 {
+		t.Fatalf("K8sMaxUpperReclaimsPerCycle() = %d, want 25", got)
 	}
 }
 

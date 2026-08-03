@@ -373,6 +373,10 @@ type KubernetesGCConfig struct {
 	// EvictedUpperRetentionDisabled disables stale evicted upper cleanup while
 	// leaving orphan cleanup and layer cleanup enabled.
 	EvictedUpperRetentionDisabled bool `yaml:"evicted_upper_retention_disabled,omitempty" json:"evicted_upper_retention_disabled,omitempty"`
+
+	// MaxUpperReclaimsPerCycle bounds how many upper directories one GC cycle can
+	// delete across orphan and stale-evicted cleanup. Default: 500.
+	MaxUpperReclaimsPerCycle int `yaml:"max_upper_reclaims_per_cycle,omitempty" json:"max_upper_reclaims_per_cycle,omitempty"`
 }
 
 // K8sGCInterval returns the direct K8s storage GC interval. Default: 1h.
@@ -412,6 +416,15 @@ func (c *SandboxKubernetesConfig) K8sEvictedUpperRetention() (time.Duration, boo
 		return time.Duration(c.GC.EvictedUpperRetentionHours) * time.Hour, true
 	}
 	return 14 * 24 * time.Hour, true
+}
+
+// K8sMaxUpperReclaimsPerCycle returns the maximum upper directories reclaimed
+// by one reconciler cycle. Default: 500.
+func (c *SandboxKubernetesConfig) K8sMaxUpperReclaimsPerCycle() int {
+	if c.GC.MaxUpperReclaimsPerCycle > 0 {
+		return c.GC.MaxUpperReclaimsPerCycle
+	}
+	return 500
 }
 
 // BackendKind returns the configured backend, lower-cased, with "" and

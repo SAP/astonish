@@ -85,6 +85,10 @@ type GCReconcilerConfig struct {
 	// EvictedUpperRetention controls how long evicted, unpinned K8s sessions
 	// remain resumable. A zero value disables stale evicted upper cleanup.
 	EvictedUpperRetention time.Duration
+
+	// MaxUpperReclaimsPerCycle bounds how many upper directories are reclaimed
+	// by one GC cycle. A zero value defaults to 500.
+	MaxUpperReclaimsPerCycle int
 }
 
 type gcDirInfo struct {
@@ -113,6 +117,9 @@ func RunGCReconciler(ctx context.Context, cfg GCReconcilerConfig) {
 	}
 	if cfg.UppersPVCName == "" {
 		cfg.UppersPVCName = "astonish-uppers"
+	}
+	if cfg.MaxUpperReclaimsPerCycle <= 0 {
+		cfg.MaxUpperReclaimsPerCycle = 500
 	}
 
 	// Initial delay to avoid contention at startup.
@@ -238,7 +245,7 @@ func gcReclaimUppers(ctx context.Context, cfg GCReconcilerConfig) int {
 		return 0
 	}
 
-	orphans := orphanUpperCandidates(dirs, knownSessions, time.Now(), cfg.UpperGracePeriod)
+	orphans := orphanUpperCandidates(dirs, knownSessions, time.Now(), cfg.UpperGracePeriod, cfg.MaxUpperReclaimsPerCycle)
 	if len(orphans) == 0 {
 		return 0
 	}
@@ -251,7 +258,7 @@ func gcReclaimUppers(ctx context.Context, cfg GCReconcilerConfig) int {
 	return len(orphans)
 }
 
-func orphanUpperCandidates(dirs []gcDirInfo, knownSessions map[string]bool, now time.Time, grace time.Duration) []string {
+func orphanUpperCandidates(dirs []gcDirInfo, knownSessions map[string]bool, now time.Time, grace time.Duration, limit int) []string {
 	var orphans []string
 	for _, d := range dirs {
 		if d.Name == "" || knownSessions[d.Name] {
@@ -266,6 +273,9 @@ func orphanUpperCandidates(dirs []gcDirInfo, knownSessions map[string]bool, now 
 			continue
 		}
 		orphans = append(orphans, d.Name)
+		if limit > 0 && len(orphans) >= limit {
+			break
+		}
 	}
 	return orphans
 }
@@ -285,31 +295,37 @@ func gcReclaimStaleEvictedUppers(ctx context.Context, cfg GCReconcilerConfig) in
 	}
 
 	liveSessions := gcLiveSandboxSessions(ctx, cfg)
-	candidates := staleEvictedUpperCandidates(sessions, liveSessions, time.Now(), cfg.EvictedUpperRetention)
+	candidates := staleEvictedUpperCandidates(sessions, liveSessions, time.Now(), cfg.EvictedUpperRetention, cfg.MaxUpperReclaimsPerCycle)
 	if len(candidates) == 0 {
 		return 0
 	}
 
 	reclaimed := 0
-	for _, candidate := range candidates {
+	for _, batch := range chunkSandboxSessionGCInfo(candidates, 50) {
 		if ctx.Err() != nil {
 			break
 		}
-		if err := gcDeleteDir(ctx, cfg.Client, cfg.Namespace, cfg.UppersPVCName, "/mnt/uppers", candidate.SessionID); err != nil {
-			slog.Warn("gc-reconciler: failed to delete stale evicted upper dir", "session", candidate.SessionID, "team_schema", candidate.TeamSchema, "error", err)
+		dirs := make([]string, 0, len(batch))
+		for _, candidate := range batch {
+			dirs = append(dirs, candidate.SessionID)
+		}
+		if err := gcDeleteDirs(ctx, cfg.Client, cfg.Namespace, cfg.UppersPVCName, "/mnt/uppers", dirs); err != nil {
+			slog.Warn("gc-reconciler: failed to delete stale evicted upper batch", "count", len(batch), "error", err)
 			continue
 		}
-		if err := cfg.SandboxSessionDeleter(ctx, candidate); err != nil {
-			slog.Warn("gc-reconciler: deleted stale evicted upper but failed to delete session row", "session", candidate.SessionID, "team_schema", candidate.TeamSchema, "error", err)
-			continue
+		for _, candidate := range batch {
+			if err := cfg.SandboxSessionDeleter(ctx, candidate); err != nil {
+				slog.Warn("gc-reconciler: deleted stale evicted upper but failed to delete session row", "session", candidate.SessionID, "team_schema", candidate.TeamSchema, "error", err)
+				continue
+			}
+			reclaimed++
+			slog.Info("gc-reconciler: reclaimed stale evicted upper", "session", candidate.SessionID, "team_schema", candidate.TeamSchema, "age", time.Since(sessionRetentionTime(candidate)).Round(time.Hour))
 		}
-		reclaimed++
-		slog.Info("gc-reconciler: reclaimed stale evicted upper", "session", candidate.SessionID, "team_schema", candidate.TeamSchema, "age", time.Since(sessionRetentionTime(candidate)).Round(time.Hour))
 	}
 	return reclaimed
 }
 
-func staleEvictedUpperCandidates(sessions []store.SandboxSessionGCInfo, liveSessions map[string]bool, now time.Time, retention time.Duration) []store.SandboxSessionGCInfo {
+func staleEvictedUpperCandidates(sessions []store.SandboxSessionGCInfo, liveSessions map[string]bool, now time.Time, retention time.Duration, limit int) []store.SandboxSessionGCInfo {
 	if retention <= 0 {
 		return nil
 	}
@@ -333,8 +349,26 @@ func staleEvictedUpperCandidates(sessions []store.SandboxSessionGCInfo, liveSess
 			continue
 		}
 		candidates = append(candidates, sess)
+		if limit > 0 && len(candidates) >= limit {
+			break
+		}
 	}
 	return candidates
+}
+
+func chunkSandboxSessionGCInfo(items []store.SandboxSessionGCInfo, size int) [][]store.SandboxSessionGCInfo {
+	if size <= 0 || len(items) == 0 {
+		return nil
+	}
+	chunks := make([][]store.SandboxSessionGCInfo, 0, (len(items)+size-1)/size)
+	for start := 0; start < len(items); start += size {
+		end := start + size
+		if end > len(items) {
+			end = len(items)
+		}
+		chunks = append(chunks, items[start:end])
+	}
+	return chunks
 }
 
 func sessionRetentionTime(sess store.SandboxSessionGCInfo) time.Time {
@@ -761,7 +795,7 @@ func gcDeleteDir(ctx context.Context, cs kubernetes.Interface, namespace, pvcNam
 }
 
 func safeGCDirName(dir string) bool {
-	return dir != "" && dir != "." && dir != ".." && !strings.Contains(dir, "/") && !strings.Contains(dir, "..")
+	return dir != "" && dir != "." && dir != ".." && !strings.Contains(dir, "/")
 }
 
 // gcDeleteDirs spawns a pod that deletes multiple directories from a PVC.

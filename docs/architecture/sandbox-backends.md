@@ -724,7 +724,8 @@ Some reclamation patterns benefit from background batching: orphan detection (§
 - Runs on a schedule from `sandbox.kubernetes.gc.interval_minutes` (default 60).
 - Reclaims unreferenced layer rows after `sandbox.kubernetes.gc.layer_grace_hours` (default 24).
 - Reclaims uppers-PVC directories with no matching `sandbox_sessions` row only after `sandbox.kubernetes.gc.orphan_upper_grace_minutes` (default 60), so races during session creation/eviction do not become data loss.
-- Reclaims stale evicted session uppers after `sandbox.kubernetes.gc.evicted_upper_retention_hours` (default 336 / 14 days; set `evicted_upper_retention_disabled: true` to disable this retention sweep). This policy deletes `/mnt/astonish-uppers/<session-id>/` first and deletes the owning `sandbox_sessions` row only after the directory deletion succeeds.
+- Reclaims stale evicted or terminated session uppers after `sandbox.kubernetes.gc.evicted_upper_retention_hours` (default 336 / 14 days; set `evicted_upper_retention_disabled: true` to disable this retention sweep). This policy deletes `/mnt/astonish-uppers/<session-id>/` first and deletes the owning `sandbox_sessions` row only after the directory deletion succeeds.
+- Bounds upper cleanup with `sandbox.kubernetes.gc.max_upper_reclaims_per_cycle` (default 500) and batches stale upper directory deletion so one cycle cannot spawn one pod per stale session.
 - Skips pinned sessions, active states (`creating`, `running`, `resuming`, `evicting`), rows with a pod name, rows with live Running/Pending/Unknown K8s pods, non-K8s backend rows, and unsafe session IDs.
 - Cleans crashed template-builder staging directories, orphan session/fleet pods whose registry row disappeared, and old completed GC helper pods.
 
@@ -976,6 +977,7 @@ sandbox:
     orphan_upper_grace_minutes: 60
     evicted_upper_retention_hours: 336
     evicted_upper_retention_disabled: false
+    max_upper_reclaims_per_cycle: 500
 
   # Helm post-install/post-upgrade hook that seeds @base/rootfs from the
   # sandbox image. Idempotency guard skips re-seeding when @base/rootfs

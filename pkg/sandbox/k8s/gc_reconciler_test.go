@@ -22,7 +22,7 @@ func TestOrphanUpperCandidatesHonorsGraceAndSafety(t *testing.T) {
 		{Name: "../unsafe", ModTime: now.Add(-2 * time.Hour)},
 	}
 
-	got := orphanUpperCandidates(dirs, known, now, time.Hour)
+	got := orphanUpperCandidates(dirs, known, now, time.Hour, 0)
 	if len(got) != 1 || got[0] != "old-orphan" {
 		t.Fatalf("orphanUpperCandidates() = %#v, want [old-orphan]", got)
 	}
@@ -43,7 +43,7 @@ func TestStaleEvictedUpperCandidates(t *testing.T) {
 		{SandboxSession: store.SandboxSession{SessionID: "live-pod", Backend: string(sandbox.BackendKindK8s), State: store.SandboxSessionStateEvicted, LastActiveAt: old}},
 	}
 
-	got := staleEvictedUpperCandidates(sessions, map[string]bool{"live-pod": true}, now, 14*24*time.Hour)
+	got := staleEvictedUpperCandidates(sessions, map[string]bool{"live-pod": true}, now, 14*24*time.Hour, 0)
 	if len(got) != 1 || got[0].SessionID != "old-evicted" {
 		t.Fatalf("staleEvictedUpperCandidates() = %#v, want only old-evicted", got)
 	}
@@ -55,9 +55,37 @@ func TestStaleEvictedUpperCandidatesUsesUpdatedAtFallback(t *testing.T) {
 		{SandboxSession: store.SandboxSession{SessionID: "updated-old", Backend: string(sandbox.BackendKindK8s), State: store.SandboxSessionStateEvicted, UpdatedAt: now.Add(-20 * 24 * time.Hour)}},
 	}
 
-	got := staleEvictedUpperCandidates(sessions, nil, now, 14*24*time.Hour)
+	got := staleEvictedUpperCandidates(sessions, nil, now, 14*24*time.Hour, 0)
 	if len(got) != 1 || got[0].SessionID != "updated-old" {
 		t.Fatalf("staleEvictedUpperCandidates() = %#v, want updated-old", got)
+	}
+}
+
+func TestStaleEvictedUpperCandidatesHonorsLimit(t *testing.T) {
+	now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-20 * 24 * time.Hour)
+	sessions := []store.SandboxSessionGCInfo{
+		{SandboxSession: store.SandboxSession{SessionID: "old-1", Backend: string(sandbox.BackendKindK8s), State: store.SandboxSessionStateEvicted, LastActiveAt: old}},
+		{SandboxSession: store.SandboxSession{SessionID: "old-2", Backend: string(sandbox.BackendKindK8s), State: store.SandboxSessionStateEvicted, LastActiveAt: old}},
+		{SandboxSession: store.SandboxSession{SessionID: "old-3", Backend: string(sandbox.BackendKindK8s), State: store.SandboxSessionStateEvicted, LastActiveAt: old}},
+	}
+
+	got := staleEvictedUpperCandidates(sessions, nil, now, 14*24*time.Hour, 2)
+	if len(got) != 2 || got[0].SessionID != "old-1" || got[1].SessionID != "old-2" {
+		t.Fatalf("staleEvictedUpperCandidates() = %#v, want old-1 and old-2", got)
+	}
+}
+
+func TestChunkSandboxSessionGCInfo(t *testing.T) {
+	items := []store.SandboxSessionGCInfo{
+		{SandboxSession: store.SandboxSession{SessionID: "1"}},
+		{SandboxSession: store.SandboxSession{SessionID: "2"}},
+		{SandboxSession: store.SandboxSession{SessionID: "3"}},
+	}
+
+	got := chunkSandboxSessionGCInfo(items, 2)
+	if len(got) != 2 || len(got[0]) != 2 || len(got[1]) != 1 {
+		t.Fatalf("chunkSandboxSessionGCInfo() = %#v, want chunk lengths 2 and 1", got)
 	}
 }
 

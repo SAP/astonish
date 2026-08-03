@@ -208,8 +208,12 @@ func loadMCPConfigForRequest(r *http.Request) *config.MCPConfig {
 		return cfg
 	}
 
-	// No platform context — return empty config
-	return &config.MCPConfig{MCPServers: make(map[string]config.MCPServerConfig)}
+	// No platform context (personal mode) — fall back to local mcp_config.json
+	cfg, err := config.LoadMCPConfig()
+	if err != nil || cfg == nil {
+		return &config.MCPConfig{MCPServers: make(map[string]config.MCPServerConfig)}
+	}
+	return cfg
 }
 
 // EffectiveAppConfigFromContext builds the effective application configuration using

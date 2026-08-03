@@ -22,15 +22,19 @@ package k8s
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	clientgotesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	clientgotesting "k8s.io/client-go/testing"
+	"k8s.io/client-go/tools/remotecommand"
+	k8sexec "k8s.io/client-go/util/exec"
 
 	"github.com/SAP/astonish/pkg/sandbox"
 	"github.com/SAP/astonish/pkg/store"
@@ -182,6 +186,21 @@ func TestBuildPodManifest_EnvAndMounts(t *testing.T) {
 	if !mounts[volumeLayers].ReadOnly {
 		t.Errorf("VolumeMount %q should be read-only", volumeLayers)
 	}
+	if mounts[volumeUppers].SubPath != "s1" {
+		t.Errorf("VolumeMount %q SubPath = %q, want session-specific subpath", volumeUppers, mounts[volumeUppers].SubPath)
+	}
+	if c.Lifecycle == nil || c.Lifecycle.PreStop == nil || c.Lifecycle.PreStop.Exec == nil {
+		t.Fatalf("container must have a preStop exec hook to persist the upper on manual pod deletion")
+	}
+	preStop := strings.Join(c.Lifecycle.PreStop.Exec.Command, " ")
+	for _, want := range []string{"/var/astonish/overlay/upper", "SESSION_DIR=\"/mnt/astonish-uppers\"", "upper.tar.zst", "mv \"$TMP\" \"$FINAL\""} {
+		if !strings.Contains(preStop, want) {
+			t.Errorf("preStop hook missing %q: %s", want, preStop)
+		}
+	}
+	if pod.Spec.TerminationGracePeriodSeconds == nil || *pod.Spec.TerminationGracePeriodSeconds < 90 {
+		t.Errorf("TerminationGracePeriodSeconds = %v, want at least 90s", pod.Spec.TerminationGracePeriodSeconds)
+	}
 }
 
 func TestBuildPodManifest_Rejects(t *testing.T) {
@@ -314,8 +333,8 @@ func TestBuildResourceRequirements_AutoDerive(t *testing.T) {
 func TestBuildResourceRequirements_AutoDeriveMinimums(t *testing.T) {
 	// When limits are tiny, auto-derivation applies minimums.
 	lim := sandbox.ResourceLimits{
-		CPUs:      1,    // 1*1000/20 = 50 → exactly the min
-		MemoryMiB: 512,  // 512/8 = 64 → below min 128
+		CPUs:      1,   // 1*1000/20 = 50 → exactly the min
+		MemoryMiB: 512, // 512/8 = 64 → below min 128
 	}
 	reqs := buildResourceRequirements(lim)
 
@@ -396,6 +415,9 @@ func TestCreateSession_CreatesPodAndPersistsRegistry(t *testing.T) {
 	if rec.CreatedBy != "u1" {
 		t.Errorf("registry CreatedBy = %q", rec.CreatedBy)
 	}
+	if rec.UpperLayerID != encodePersistedLayerChain("python-dev") {
+		t.Errorf("registry UpperLayerID = %q, want persisted layer chain", rec.UpperLayerID)
+	}
 }
 
 func TestCreateSession_IdempotentOnSessionID(t *testing.T) {
@@ -423,14 +445,14 @@ func TestCreateSession_IdempotentOnSessionID(t *testing.T) {
 	}
 }
 
-// TestCreateSession_RecreatesAfterPodDeleted verifies that when the
+// TestCreateSession_ResumesAfterManualPodDelete verifies that when the
 // registry holds a stale record (pod was deleted out-of-band) a subsequent
-// CreateSession call recreates the pod instead of returning the stale entry.
-func TestCreateSession_RecreatesAfterPodDeleted(t *testing.T) {
+// CreateSession call recreates the pod without deleting the registry metadata.
+func TestCreateSession_ResumesAfterManualPodDelete(t *testing.T) {
 	b, cs := newBackendWithFakeClient(t)
 	ctx := context.Background()
 
-	spec := sandbox.SessionSpec{SessionID: "s-stale", TemplateID: "t1"}
+	spec := sandbox.SessionSpec{SessionID: "s-stale", TemplateID: "t1", LayerChain: []string{"@base", "old-layer"}}
 
 	// First create — pod is created, registry populated.
 	sess1, err := b.CreateSession(ctx, spec)
@@ -440,6 +462,15 @@ func TestCreateSession_RecreatesAfterPodDeleted(t *testing.T) {
 	podName := podNameForSession("s-stale")
 	if _, getErr := cs.CoreV1().Pods("astonish-sandboxes").Get(ctx, podName, metav1.GetOptions{}); getErr != nil {
 		t.Fatalf("pod should exist after first create: %v", getErr)
+	}
+
+	rec, err := b.sessions.GetSession("s-stale")
+	if err != nil || rec == nil {
+		t.Fatalf("GetSession: rec=%+v err=%v", rec, err)
+	}
+	rec.UpperLayerID = encodePersistedLayerChain("@base,old-layer")
+	if err := b.sessions.PutSession(rec); err != nil {
+		t.Fatalf("PutSession: %v", err)
 	}
 
 	// Delete the pod out-of-band (simulates kubectl delete or node eviction).
@@ -452,8 +483,9 @@ func TestCreateSession_RecreatesAfterPodDeleted(t *testing.T) {
 		t.Fatalf("expected NotFound after delete, got: %v", getErr)
 	}
 
-	// Second CreateSession with same spec — should recreate the pod.
-	sess2, err := b.CreateSession(ctx, spec)
+	// Second CreateSession with same ID but a newer caller-supplied layer chain
+	// should still resume against the original chain recorded for this session.
+	sess2, err := b.CreateSession(ctx, sandbox.SessionSpec{SessionID: "s-stale", TemplateID: "t1", LayerChain: []string{"@base", "new-layer"}})
 	if err != nil {
 		t.Fatalf("second CreateSession after pod-deleted: %v", err)
 	}
@@ -469,9 +501,12 @@ func TestCreateSession_RecreatesAfterPodDeleted(t *testing.T) {
 	if pod.Name != podName {
 		t.Errorf("recreated pod name = %q, want %q", pod.Name, podName)
 	}
+	if got := pod.Annotations[annotationLayerChain]; got != "@base,old-layer" {
+		t.Errorf("resumed pod layer chain = %q, want original chain", got)
+	}
 
 	// Registry should reflect the new record.
-	rec, _ := b.sessions.GetSession("s-stale")
+	rec, _ = b.sessions.GetSession("s-stale")
 	if rec == nil {
 		t.Fatal("registry record missing after recreate")
 	}
@@ -585,26 +620,76 @@ func TestStartSession_IdempotentOnRunningPod(t *testing.T) {
 	}
 }
 
-func TestStartSession_FailsOnCompletedPod(t *testing.T) {
+func TestCreateSessionResumesEvictedSessionWithOriginalLayerChain(t *testing.T) {
 	b, cs := newBackendWithFakeClient(t)
 	ctx := context.Background()
 
-	_, err := b.CreateSession(ctx, sandbox.SessionSpec{SessionID: "s1", TemplateID: "t1"})
+	if _, err := b.CreateSession(ctx, sandbox.SessionSpec{SessionID: "s-evicted", TemplateID: "old-template", LayerChain: []string{"@base", "old-layer"}}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if err := cs.CoreV1().Pods(b.cfg.Namespace).Delete(ctx, podNameForSession("s-evicted"), metav1.DeleteOptions{}); err != nil {
+		t.Fatalf("delete pod: %v", err)
+	}
+	rec, err := b.sessions.GetSession("s-evicted")
+	if err != nil || rec == nil {
+		t.Fatalf("GetSession: rec=%+v err=%v", rec, err)
+	}
+	rec.State = store.SandboxSessionStateEvicted
+	rec.PodName = ""
+	rec.UpperLayerID = encodePersistedLayerChain("@base,old-layer")
+	if err := b.sessions.PutSession(rec); err != nil {
+		t.Fatalf("PutSession: %v", err)
+	}
+
+	if _, err := b.CreateSession(ctx, sandbox.SessionSpec{SessionID: "s-evicted", TemplateID: "new-template", LayerChain: []string{"@base", "new-layer"}}); err != nil {
+		t.Fatalf("CreateSession resume: %v", err)
+	}
+	pod, err := cs.CoreV1().Pods(b.cfg.Namespace).Get(ctx, podNameForSession("s-evicted"), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("pod should be recreated: %v", err)
+	}
+	if got := pod.Annotations[annotationLayerChain]; got != "@base,old-layer" {
+		t.Fatalf("resumed pod layer chain = %q, want original chain", got)
+	}
+}
+
+func TestStartSession_RecreatesCompletedPod(t *testing.T) {
+	b, cs := newBackendWithFakeClient(t)
+	ctx := context.Background()
+
+	_, err := b.CreateSession(ctx, sandbox.SessionSpec{SessionID: "s1", TemplateID: "t1", LayerChain: []string{"@base", "team-layer"}})
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
 
-	// Simulate pod exiting (Succeeded phase = SessionStateStopped).
-	pod, _ := cs.CoreV1().Pods(b.cfg.Namespace).Get(ctx, podNameForSession("s1"), metav1.GetOptions{})
+	podName := podNameForSession("s1")
+	pod, _ := cs.CoreV1().Pods(b.cfg.Namespace).Get(ctx, podName, metav1.GetOptions{})
 	pod.Status.Phase = corev1.PodSucceeded
-	cs.CoreV1().Pods(b.cfg.Namespace).Update(ctx, pod, metav1.UpdateOptions{})
-
-	err = b.StartSession(ctx, "s1")
-	if err == nil {
-		t.Fatal("StartSession on completed pod: want error, got nil")
+	if _, err := cs.CoreV1().Pods(b.cfg.Namespace).UpdateStatus(ctx, pod, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("UpdateStatus: %v", err)
 	}
-	if !errors.Is(err, ErrNotImplementedYet) {
-		t.Errorf("StartSession on completed pod: got %v, want ErrNotImplementedYet", err)
+	rec, err := b.sessions.GetSession("s1")
+	if err != nil || rec == nil {
+		t.Fatalf("GetSession: rec=%+v err=%v", rec, err)
+	}
+	rec.UpperLayerID = encodePersistedLayerChain("@base,team-layer")
+	if err := b.sessions.PutSession(rec); err != nil {
+		t.Fatalf("PutSession: %v", err)
+	}
+
+	if err := b.StartSession(ctx, "s1"); err != nil {
+		t.Fatalf("StartSession on completed/gone pod: %v", err)
+	}
+	resumedPod, err := cs.CoreV1().Pods(b.cfg.Namespace).Get(ctx, podName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("pod should be recreated: %v", err)
+	}
+	if got := resumedPod.Annotations[annotationLayerChain]; got != "@base,team-layer" {
+		t.Fatalf("resumed pod layer chain = %q, want original chain", got)
+	}
+	rec, _ = b.sessions.GetSession("s1")
+	if rec == nil || rec.PodName != podName || rec.State != store.SandboxSessionStateCreating {
+		t.Fatalf("registry after resume = %+v, want pod %q creating", rec, podName)
 	}
 }
 
@@ -618,9 +703,23 @@ func TestStopSession_DeletesPodAndMarksEvicted(t *testing.T) {
 	if _, err := b.CreateSession(ctx, sandbox.SessionSpec{SessionID: "s1", TemplateID: "t1"}); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
+	se := stubFactory(t, b, func(_ context.Context, opts remotecommand.StreamOptions) error {
+		_, _ = opts.Stdout.Write([]byte("persisted"))
+		return nil
+	})
 
 	if err := b.StopSession(ctx, "s1"); err != nil {
 		t.Fatalf("StopSession: %v", err)
+	}
+	cmds := se.url.Query()["command"]
+	if len(cmds) < 3 || cmds[0] != "/bin/sh" || cmds[1] != "-c" {
+		t.Fatalf("persist command = %v, want /bin/sh -c script", cmds)
+	}
+	script := cmds[2]
+	for _, want := range []string{"/var/astonish/overlay/upper", "SESSION_DIR=\"/mnt/astonish-uppers\"", "FINAL=\"$SESSION_DIR/upper.tar.zst\"", "upper.tar.zst.tmp", "--exclude=/var/astonish/overlay/upper/mnt/astonish-uppers", "mv \"$TMP\" \"$FINAL\""} {
+		if !strings.Contains(script, want) {
+			t.Errorf("persist script missing %q:\n%s", want, script)
+		}
 	}
 
 	// Pod should be gone.
@@ -640,6 +739,50 @@ func TestStopSession_DeletesPodAndMarksEvicted(t *testing.T) {
 	}
 	if rec.PodName != "" {
 		t.Errorf("registry PodName should be cleared, got %q", rec.PodName)
+	}
+}
+
+func TestStopSession_DoesNotDeletePodWhenPersistFails(t *testing.T) {
+	b, cs := newBackendWithFakeClient(t)
+	ctx := context.Background()
+	if _, err := b.CreateSession(ctx, sandbox.SessionSpec{SessionID: "s-persist-fail", TemplateID: "t1"}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	stubFactory(t, b, func(_ context.Context, opts remotecommand.StreamOptions) error {
+		_, _ = opts.Stderr.Write([]byte("tar failed"))
+		return k8sexec.CodeExitError{Err: fmt.Errorf("exit 2"), Code: 2}
+	})
+
+	err := b.StopSession(ctx, "s-persist-fail")
+	if err == nil || !strings.Contains(err.Error(), "persist upper exited") {
+		t.Fatalf("StopSession error = %v, want persist failure", err)
+	}
+	if _, err := cs.CoreV1().Pods(b.cfg.Namespace).Get(ctx, podNameForSession("s-persist-fail"), metav1.GetOptions{}); err != nil {
+		t.Fatalf("pod should remain after failed persist: %v", err)
+	}
+	rec, _ := b.sessions.GetSession("s-persist-fail")
+	if rec == nil || rec.State == store.SandboxSessionStateEvicted {
+		t.Fatalf("session should not be final evicted after failed persist: %+v", rec)
+	}
+}
+
+func TestUpperDirNameForSessionRejectsUnsafeIDs(t *testing.T) {
+	bad := []string{"", ".", "..", "../other", "abc;rm -rf /", "$(cat /secret)", "abc/def", "team session"}
+	for _, id := range bad {
+		if got, err := upperDirNameForSession(id); err == nil {
+			t.Fatalf("upperDirNameForSession(%q) = %q, want error", id, got)
+		}
+	}
+	if got, err := upperDirNameForSession("aa4a9422-75d1-4073-b238-b0e9f4e94462"); err != nil || got == "" {
+		t.Fatalf("valid session ID rejected: got=%q err=%v", got, err)
+	}
+}
+
+func TestCreateSessionRejectsUnsafeSessionIDForUpperIsolation(t *testing.T) {
+	b, _ := newBackendWithFakeClient(t)
+	_, err := b.CreateSession(context.Background(), sandbox.SessionSpec{SessionID: "../other", TemplateID: "t1"})
+	if err == nil || !strings.Contains(err.Error(), "not safe for upper persistence") {
+		t.Fatalf("CreateSession unsafe ID error = %v, want upper isolation validation", err)
 	}
 }
 
@@ -691,6 +834,7 @@ func TestDestroySession_CleansUpEvictedUpper(t *testing.T) {
 	if _, err := b.CreateSession(ctx, sandbox.SessionSpec{SessionID: "s-evict", TemplateID: "t1"}); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
+	stubFactory(t, b, func(_ context.Context, _ remotecommand.StreamOptions) error { return nil })
 	if err := b.StopSession(ctx, "s-evict"); err != nil {
 		t.Fatalf("StopSession: %v", err)
 	}
@@ -874,5 +1018,3 @@ func TestLabelSelector(t *testing.T) {
 		}
 	}
 }
-
-

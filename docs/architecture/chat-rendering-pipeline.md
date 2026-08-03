@@ -258,6 +258,8 @@ When the session is done streaming and has artifacts, the `embeddedArtifactPaths
 
 PDF export uses `fetch()` + blob download (not `<a>.click()` navigation) because the backend PDF generation takes 5-15 seconds. The `<a>.click()` pattern causes the browser to show "Site wasn't available" for slow responses. The `fetch()` approach shows a loading spinner on the Download button during generation.
 
+Artifact content lookup is best-effort across three sources: local host path, live sandbox backend `PullFile`, then persisted transcript `write_file` arguments. The transcript fallback is a recovery/cache path for historical artifacts; it does not prove that the file currently exists in a resumed sandbox. Direct K8s backends should read live files through the backend abstraction first so `/root/foo.md` refers to the composed sandbox rootfs, then fall back only if the live sandbox is unavailable.
+
 ## The Report Pipeline
 
 Reports use a **two-step contract** combining `write_file` (which produces the file on disk and an `artifact` SSE event) with an explicit `astonish-report` fence emitted in the agent's reply text. Both signals are required: the file is the *content*, the fence is the *intent*.

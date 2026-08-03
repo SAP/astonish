@@ -414,13 +414,16 @@ The entrypoint runs as PID 1 with the privilege path selected at chart-install t
 **Start / Stop** (decision Q1(b) — evict via tar stream to the uppers PVC):
 
 - Sessions stay running while active. On idle timeout:
-  - `StopSession` evicts: inside the pod, stream `/var/astonish/overlay/upper` to the uppers PVC via
-    `tar --numeric-owner --xattrs --acls -I "zstd --adapt -T0" -C /var/astonish/overlay/upper -cf /mnt/astonish-uppers/<session-id>/upper.tar.zst .`
-    then delete the pod.
-  - Row in `sandbox_sessions` stays; status updated to `stopped`; `upper_persisted_at` is set.
-- On next user interaction, `StartSession` recreates the pod from the template; the entrypoint resume step (above) streams the persisted upper back into the local `emptyDir` before mounting the overlay. Resume latency: 1–5 s depending on upper-layer size.
+  - Each session pod mounts only its own uppers PVC subdirectory (`subPath: <session-id>`) at `/mnt/astonish-uppers`. The full PVC root is not visible to the chrooted sandbox, so a session cannot enumerate or read another session's persisted upper directory through `/mnt/astonish-uppers`.
+  - `StopSession` first marks the row `evicting`, then persists the live pod's writable layer by streaming `/var/astonish/overlay/upper` to that mounted session subdirectory via
+    `tar --numeric-owner --xattrs --acls -I "zstd --adapt -T0" --exclude=/var/astonish/overlay/upper/mnt/astonish-uppers -C /var/astonish/overlay/upper -cf /mnt/astonish-uppers/upper.tar.zst.tmp . && mv .../upper.tar.zst.tmp .../upper.tar.zst`.
+    Only after that capture succeeds does it delete the pod. If capture fails, the pod stays running so data is not lost.
+  - The same persistence script is installed as a Kubernetes container `preStop` hook with a 90-second termination grace period. This covers manual `kubectl delete pod` and normal Kubernetes termination paths that bypass the backend's `StopSession` method.
+  - Row in `sandbox_sessions` stays; status updates `evicting` → `evicted` and clears the pod binding after deletion. At eviction time, the original resolved layer chain is retained in the registry so resume does not silently fall back to plain `@base` for configured base/team-template sessions.
+- On next tool interaction, `StartSession` recreates the pod with the same `ASTONISH_SESSION_ID`; the entrypoint resume step (above) streams `/mnt/astonish-uppers/upper.tar.zst` back into the local `emptyDir` before mounting the overlay. Resume latency: 1–5 s depending on upper-layer size.
+- Isolation invariant: the persisted-upper path is derived only from the registry row's exact session ID. API callers never provide an upper path, unsafe session IDs are rejected before any pod/tar/cleanup script is built, and cleanup deletes only the validated session subdirectory.
 
-This preserves Incus's "container exists but stopped, resume later" semantics.
+This preserves Incus's "container exists but stopped, resume later" semantics while keeping each session's upper layer isolated under its own uppers-PVC directory.
 
 **Destroy** (`DestroySession`) — the parity-critical operation:
 

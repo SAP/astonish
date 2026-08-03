@@ -16,7 +16,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gorilla/mux"
 	"github.com/SAP/astonish/pkg/apps"
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/credentials"
@@ -25,6 +24,7 @@ import (
 	"github.com/SAP/astonish/pkg/sandbox"
 	persistentsession "github.com/SAP/astonish/pkg/session"
 	"github.com/SAP/astonish/pkg/store"
+	"github.com/gorilla/mux"
 	"google.golang.org/adk/session"
 )
 
@@ -789,7 +789,7 @@ func StudioArtifactDownloadHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Tier 2: Try reading from sandbox container
 	if sessionID != "" {
-		if content, ok := readFromSandboxContainer(sessionID, cleanPath); ok {
+		if content, ok := readFromSandboxContainer(r, sessionID, cleanPath); ok {
 			serveArtifactDownload(w, fileName, content)
 			return
 		}
@@ -870,7 +870,7 @@ func StudioArtifactContentHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Tier 2: Try reading from sandbox container (if sandbox is enabled and session is provided)
 	if sessionID != "" {
-		if content, ok := readFromSandboxContainer(sessionID, cleanPath); ok {
+		if content, ok := readFromSandboxContainer(r, sessionID, cleanPath); ok {
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			w.Write(content)
 			return
@@ -904,16 +904,48 @@ func StudioArtifactContentHandler(w http.ResponseWriter, r *http.Request) {
 	respondError(w, http.StatusNotFound, "file not found")
 }
 
-// readFromSandboxContainer attempts to read a file from a sandbox container
-// using the Incus PullFile API. Returns the content and true on success.
-func readFromSandboxContainer(sessionID, filePath string) ([]byte, bool) {
-	// Check if sandbox is enabled
+// readFromSandboxContainer attempts to read a file from the configured
+// sandbox backend. For direct K8s this uses Backend.PullFile, which targets the
+// session pod through the tenant-scoped registry. The legacy Incus path remains
+// as a compatibility fallback for deployments that still use the local Incus
+// client helpers.
+func readFromSandboxContainer(r *http.Request, sessionID, filePath string) ([]byte, bool) {
+	if sessionID == "" || filePath == "" {
+		return nil, false
+	}
+
+	if backend, cleanup, err := sandboxBackendForRequest(r); err == nil && backend != nil {
+		if cleanup != nil {
+			defer cleanup()
+		}
+		state, stateErr := backend.SessionState(r.Context(), sessionID)
+		if stateErr == nil && (state == sandbox.SessionStateRunning || state == sandbox.SessionStateCreating || state == sandbox.SessionStateResuming) {
+			reader, pullErr := backend.PullFile(r.Context(), sessionID, filePath)
+			if pullErr == nil {
+				content, readErr := io.ReadAll(reader)
+				closeErr := reader.Close()
+				if readErr == nil && closeErr == nil {
+					return content, true
+				}
+				if readErr != nil {
+					slog.Debug("failed to read artifact content from sandbox backend", "session", sessionID, "path", filePath, "error", readErr)
+				}
+				if closeErr != nil {
+					slog.Debug("failed to close artifact content stream from sandbox backend", "session", sessionID, "path", filePath, "error", closeErr)
+				}
+			} else {
+				slog.Debug("failed to pull artifact from sandbox backend", "session", sessionID, "path", filePath, "error", pullErr)
+			}
+		}
+	} else if err != nil {
+		slog.Debug("sandbox backend unavailable for artifact read", "session", sessionID, "path", filePath, "error", err)
+	}
+
+	// Legacy Incus fallback.
 	appCfg, err := config.LoadAppConfig()
 	if err != nil || appCfg == nil || !sandbox.IsSandboxEnabled(&appCfg.Sandbox) {
 		return nil, false
 	}
-
-	// Look up the container name for this session
 	registry, err := sandbox.NewSessionRegistry()
 	if err != nil {
 		slog.Debug("failed to load sandbox session registry", "error", err)
@@ -923,14 +955,11 @@ func readFromSandboxContainer(sessionID, filePath string) ([]byte, bool) {
 	if entry == nil || entry.ContainerName == "" {
 		return nil, false
 	}
-
-	// Connect to Incus and pull the file
 	client, err := sandboxConnect()
 	if err != nil {
 		slog.Debug("failed to connect to sandbox for artifact read", "error", err)
 		return nil, false
 	}
-
 	reader, _, err := client.PullFile(entry.ContainerName, filePath)
 	if err != nil {
 		slog.Debug("failed to pull file from sandbox container",
@@ -938,13 +967,11 @@ func readFromSandboxContainer(sessionID, filePath string) ([]byte, bool) {
 		return nil, false
 	}
 	defer reader.Close()
-
 	content, err := io.ReadAll(reader)
 	if err != nil {
 		slog.Debug("failed to read file content from sandbox container", "error", err)
 		return nil, false
 	}
-
 	return content, true
 }
 
@@ -977,7 +1004,7 @@ func StudioArtifactPDFHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Tier 2: Try reading from sandbox container
 	if mdContent == nil && sessionID != "" {
-		if content, ok := readFromSandboxContainer(sessionID, cleanPath); ok {
+		if content, ok := readFromSandboxContainer(r, sessionID, cleanPath); ok {
 			mdContent = content
 		}
 	}

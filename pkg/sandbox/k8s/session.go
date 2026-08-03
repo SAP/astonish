@@ -37,6 +37,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -53,11 +54,11 @@ import (
 // public contract with operators (kubectl get pods -l astonish.io/...).
 // See docs/architecture/sandbox-backends.md §5.2 and §5.3.
 const (
-	labelOrg        = "astonish.io/org"
-	labelTeam       = "astonish.io/team"
-	labelSessionID  = "astonish.io/session-id"
-	labelType       = "astonish.io/type"
-	labelTemplate   = "astonish.io/template"
+	labelOrg       = "astonish.io/org"
+	labelTeam      = "astonish.io/team"
+	labelSessionID = "astonish.io/session-id"
+	labelType      = "astonish.io/type"
+	labelTemplate  = "astonish.io/template"
 
 	typeSession         = "session"
 	typeFleet           = "fleet"
@@ -105,6 +106,20 @@ const (
 // session pod. exec.go and files.go target this container via
 // PodExecOptions.Container.
 const containerName = "sandbox"
+
+var safeSessionPathRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
+
+const sessionLayerChainPrefix = "k8s-layer-chain:"
+
+func upperDirNameForSession(sessionID string) (string, error) {
+	if sessionID == "" {
+		return "", errors.New("session ID is required")
+	}
+	if sessionID == "." || sessionID == ".." || strings.Contains(sessionID, "/") || !safeSessionPathRE.MatchString(sessionID) {
+		return "", fmt.Errorf("session ID %q is not safe for upper persistence", sessionID)
+	}
+	return sessionID, nil
+}
 
 // podNameForSession returns the deterministic pod name used by the K8s
 // backend. Exposed here (rather than inlined) so that session.go,
@@ -168,6 +183,9 @@ func (b *K8sBackend) buildPodManifest(spec sandbox.SessionSpec) (*corev1.Pod, er
 	if spec.SessionID == "" {
 		return nil, errors.New("SessionSpec.SessionID is required")
 	}
+	if _, err := upperDirNameForSession(spec.SessionID); err != nil {
+		return nil, err
+	}
 	if spec.TemplateID == "" {
 		// Empty TemplateID means the canonical base layer, populated by
 		// the seed Job. Mirrors the Incus pool's "" → @base convention.
@@ -222,32 +240,38 @@ func (b *K8sBackend) buildPodManifest(spec sandbox.SessionSpec) (*corev1.Pod, er
 			Annotations: annotations,
 		},
 		Spec: corev1.PodSpec{
-			RestartPolicy: corev1.RestartPolicyNever,
+			RestartPolicy:                 corev1.RestartPolicyNever,
+			TerminationGracePeriodSeconds: int64Ptr(90),
 			Containers: []corev1.Container{
-			{
-				Name:            containerName,
-				Image:           b.cfg.SandboxImage,
-				ImagePullPolicy: imagePullPolicy(b.cfg.SandboxImage),
-				Env: []corev1.EnvVar{
-					{Name: "ASTONISH_SESSION_ID", Value: spec.SessionID},
-					{Name: "ASTONISH_LAYER_CHAIN", Value: strings.Join(spec.LayerChain, ",")},
-					{Name: "ASTONISH_UPPER_DIR", Value: mountUpper},
-					{Name: "ASTONISH_WORK_DIR", Value: mountWork},
-					{Name: "ASTONISH_LAYERS_DIR", Value: mountLayers},
-					{Name: "ASTONISH_UPPERS_DIR", Value: mountUppers},
-					// PID 1 sleeps after overlay composition; tool calls
-					// arrive via Backend.Exec ("kubectl exec -- astonish node")
-					// with proper stdin/stdout attachment per invocation.
-					{Name: "ASTONISH_HANDOFF", Value: "/bin/sleep"},
-					{Name: "ASTONISH_HANDOFF_ARGS", Value: "infinity"},
+				{
+					Name:            containerName,
+					Image:           b.cfg.SandboxImage,
+					ImagePullPolicy: imagePullPolicy(b.cfg.SandboxImage),
+					Env: []corev1.EnvVar{
+						{Name: "ASTONISH_SESSION_ID", Value: spec.SessionID},
+						{Name: "ASTONISH_LAYER_CHAIN", Value: strings.Join(spec.LayerChain, ",")},
+						{Name: "ASTONISH_UPPER_DIR", Value: mountUpper},
+						{Name: "ASTONISH_WORK_DIR", Value: mountWork},
+						{Name: "ASTONISH_LAYERS_DIR", Value: mountLayers},
+						{Name: "ASTONISH_UPPERS_DIR", Value: mountUppers},
+						// PID 1 sleeps after overlay composition; tool calls
+						// arrive via Backend.Exec ("kubectl exec -- astonish node")
+						// with proper stdin/stdout attachment per invocation.
+						{Name: "ASTONISH_HANDOFF", Value: "/bin/sleep"},
+						{Name: "ASTONISH_HANDOFF_ARGS", Value: "infinity"},
+					},
+					Lifecycle: &corev1.Lifecycle{
+						PreStop: &corev1.LifecycleHandler{
+							Exec: &corev1.ExecAction{Command: []string{"/bin/sh", "-c", buildPersistUpperScript(mountUppers, "")}},
+						},
+					},
+					VolumeMounts: []corev1.VolumeMount{
+						{Name: volumeLayers, MountPath: mountLayers, ReadOnly: spec.Labels[labelPurpose] != purposeTeamTemplateEditor},
+						{Name: volumeUppers, MountPath: mountUppers, SubPath: spec.SessionID},
+						{Name: volumeOverlay, MountPath: mountOverlay},
+					},
+					Resources: buildResourceRequirements(spec.Limits),
 				},
-				VolumeMounts: []corev1.VolumeMount{
-					{Name: volumeLayers, MountPath: mountLayers, ReadOnly: spec.Labels[labelPurpose] != purposeTeamTemplateEditor},
-					{Name: volumeUppers, MountPath: mountUppers},
-					{Name: volumeOverlay, MountPath: mountOverlay},
-				},
-				Resources: buildResourceRequirements(spec.Limits),
-			},
 			},
 			Volumes: []corev1.Volume{
 				{
@@ -267,7 +291,7 @@ func (b *K8sBackend) buildPodManifest(spec sandbox.SessionSpec) (*corev1.Pod, er
 						},
 					},
 				},
-		{Name: volumeOverlay, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+				{Name: volumeOverlay, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 			},
 		},
 	}
@@ -293,6 +317,10 @@ func (b *K8sBackend) buildPodManifest(spec sandbox.SessionSpec) (*corev1.Pod, er
 // This gives ~20:1 CPU packing ratio and ~8:1 memory packing ratio for
 // idle sessions while guaranteeing burst to the full ceiling when load
 // spikes.
+func int64Ptr(v int64) *int64 {
+	return &v
+}
+
 func buildResourceRequirements(lim sandbox.ResourceLimits) corev1.ResourceRequirements {
 	reqs := corev1.ResourceRequirements{}
 
@@ -360,11 +388,14 @@ func (b *K8sBackend) CreateSession(ctx context.Context, spec sandbox.SessionSpec
 	if b.client == nil {
 		return nil, fmt.Errorf("CreateSession: %w", ErrNotImplementedYet)
 	}
+	if spec.SessionID == "" {
+		return nil, errors.New("CreateSession: SessionSpec.SessionID is required")
+	}
 
-	// Idempotency: if we already know this session AND the pod still
-	// exists in the cluster, return the cached record. If the registry
-	// has a stale entry (pod deleted out-of-band by kubectl, eviction,
-	// or node failure) we fall through to recreate the pod.
+	// Idempotency: if the registry row exists and the pod still exists,
+	// return it. If the row represents an evicted session, preserve the row
+	// and resume instead of deleting the metadata that points to persisted
+	// upper data.
 	if existing, err := b.sessions.GetSession(spec.SessionID); err == nil && existing != nil {
 		podName := existing.PodName
 		if podName == "" {
@@ -372,19 +403,28 @@ func (b *K8sBackend) CreateSession(ctx context.Context, spec sandbox.SessionSpec
 		}
 		_, getErr := b.client.CoreV1().Pods(b.cfg.Namespace).Get(ctx, podName, metav1.GetOptions{})
 		if getErr == nil {
-			// Pod exists — session is live; return cached record.
 			return sessionFromStore(existing, spec.Type), nil
 		}
 		if !apierrors.IsNotFound(getErr) {
-			// Unexpected API error — surface it rather than silently
-			// overwriting the session.
 			return nil, fmt.Errorf("CreateSession: verify pod: %w", getErr)
 		}
-		// Pod is gone — clear stale registry entry so the fresh create
-		// below can persist the replacement atomically via PutSession.
-		_ = b.sessions.Remove(spec.SessionID)
+		if err := b.resumeSessionPod(ctx, existing, spec); err != nil {
+			return nil, fmt.Errorf("CreateSession: resume missing pod: %w", err)
+		}
+		resumed, err := b.sessions.GetSession(spec.SessionID)
+		if err != nil {
+			return nil, fmt.Errorf("CreateSession: load resumed session: %w", err)
+		}
+		return sessionFromStore(resumed, spec.Type), nil
 	}
 
+	return b.createSessionPod(ctx, spec, nil)
+}
+
+func (b *K8sBackend) createSessionPod(ctx context.Context, spec sandbox.SessionSpec, existing *store.SandboxSession) (*sandbox.Session, error) {
+	if spec.TemplateID == "" {
+		spec.TemplateID = sandbox.BaseTemplateID
+	}
 	pod, err := b.buildPodManifest(spec)
 	if err != nil {
 		return nil, fmt.Errorf("CreateSession: build manifest: %w", err)
@@ -394,8 +434,6 @@ func (b *K8sBackend) CreateSession(ctx context.Context, spec sandbox.SessionSpec
 	if err != nil && !apierrors.IsAlreadyExists(err) {
 		return nil, fmt.Errorf("CreateSession: create pod: %w", err)
 	}
-	// If the pod already existed in the cluster, fetch it so we can
-	// record its actual spec (NodeName, UID) in the registry.
 	if apierrors.IsAlreadyExists(err) {
 		created, err = b.client.CoreV1().Pods(b.cfg.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
 		if err != nil {
@@ -404,22 +442,35 @@ func (b *K8sBackend) CreateSession(ctx context.Context, spec sandbox.SessionSpec
 	}
 
 	now := time.Now().UTC()
-	rec := &store.SandboxSession{
-		SessionID:     spec.SessionID,
-		ChatSessionID: spec.SessionID,
-		Backend:       string(sandbox.BackendKindK8s),
-		TemplateID:    spec.TemplateID,
-		State:         store.SandboxSessionStateCreating,
-		PodName:       created.Name,
-		NodeName:      created.Spec.NodeName,
-		CreatedBy:     spec.UserID,
-		CreatedAt:     now,
-		UpdatedAt:     now,
-		LastActiveAt:  now,
+	rec := existing
+	if rec == nil {
+		rec = &store.SandboxSession{
+			SessionID:     spec.SessionID,
+			ChatSessionID: spec.SessionID,
+			CreatedAt:     now,
+			LastActiveAt:  now,
+		}
+	}
+	if rec.ChatSessionID == "" {
+		rec.ChatSessionID = spec.SessionID
+	}
+	if rec.TemplateID == "" {
+		rec.TemplateID = spec.TemplateID
+	}
+	if rec.CreatedBy == "" {
+		rec.CreatedBy = spec.UserID
+	}
+	rec.Backend = string(sandbox.BackendKindK8s)
+	rec.TemplateID = spec.TemplateID
+	rec.UpperLayerID = encodePersistedLayerChain(created.Annotations[annotationLayerChain])
+	rec.State = store.SandboxSessionStateCreating
+	rec.PodName = created.Name
+	rec.NodeName = created.Spec.NodeName
+	rec.UpdatedAt = now
+	if rec.LastActiveAt.IsZero() {
+		rec.LastActiveAt = now
 	}
 	if err := b.sessions.PutSession(rec); err != nil {
-		// Best-effort rollback of the pod: the session isn't visible
-		// in the registry, so leaving the pod behind would leak.
 		_ = b.client.CoreV1().Pods(b.cfg.Namespace).Delete(ctx, created.Name, metav1.DeleteOptions{})
 		return nil, fmt.Errorf("CreateSession: persist registry: %w", err)
 	}
@@ -427,11 +478,10 @@ func (b *K8sBackend) CreateSession(ctx context.Context, spec sandbox.SessionSpec
 	return sessionFromStore(rec, spec.Type), nil
 }
 
-// StartSession resumes a stopped session. In this slice, the evicted→running
-// transition (tar-streaming the upper back from the uppers PVC) is not yet
-// implemented. StartSession is idempotent for the freshly-created case:
-// if the pod is Running or still Pending (Creating), it returns nil.
-// Only genuinely stopped/evicted sessions return not-implemented.
+// StartSession resumes a stopped or evicted session by recreating the pod
+// with the same session ID and the layer-chain annotation saved at create
+// time. The sandbox entrypoint restores the persisted upper tarball for that
+// exact session before mounting the overlay.
 func (b *K8sBackend) StartSession(ctx context.Context, sessionID string) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -440,32 +490,130 @@ func (b *K8sBackend) StartSession(ctx context.Context, sessionID string) error {
 		return fmt.Errorf("StartSession: %w", ErrNotImplementedYet)
 	}
 
-	// Query live pod state rather than the registry: the registry stays
-	// at "creating" until a reconciler updates it, but the pool calls
-	// StartSession immediately after CreateSession as a defensive
-	// idempotency check. The live pod phase is the authoritative signal.
-	state, err := b.SessionState(ctx, sessionID)
+	rec, err := b.sessions.GetSession(sessionID)
 	if err != nil {
-		return fmt.Errorf("StartSession: query state: %w", err)
+		return fmt.Errorf("StartSession: lookup: %w", err)
+	}
+	if rec == nil {
+		return fmt.Errorf("StartSession: session %q not found", sessionID)
+	}
+
+	if err := b.resumeSessionPod(ctx, rec, sandbox.SessionSpec{SessionID: sessionID, Type: sandbox.SessionTypeChat}); err != nil {
+		return fmt.Errorf("StartSession: recreate pod: %w", err)
+	}
+	return nil
+}
+
+func (b *K8sBackend) resumeSessionPod(ctx context.Context, rec *store.SandboxSession, override sandbox.SessionSpec) error {
+	if rec == nil {
+		return errors.New("session record is required")
+	}
+	originalLayerChain := persistedLayerChain(rec)
+	if override.SessionID == "" {
+		override.SessionID = rec.SessionID
+	}
+	if override.SessionID == "" {
+		return errors.New("session ID is required")
+	}
+	if override.SessionID != rec.SessionID {
+		return fmt.Errorf("session ID mismatch: registry has %q, requested %q", rec.SessionID, override.SessionID)
+	}
+
+	state, err := b.SessionState(ctx, override.SessionID)
+	if err != nil {
+		return fmt.Errorf("query state: %w", err)
 	}
 	switch state {
-	case sandbox.SessionStateRunning, sandbox.SessionStateCreating:
-		// Already running or being provisioned — idempotent no-op.
+	case sandbox.SessionStateRunning, sandbox.SessionStateCreating, sandbox.SessionStateResuming:
 		return nil
-	case sandbox.SessionStateStopped, sandbox.SessionStateGone:
-		// Pod has terminated or been deleted; resume requires the
-		// eviction tar-stream round-trip (Phase G).
-		return fmt.Errorf("StartSession: resume-from-evicted %w", ErrNotImplementedYet)
+	case sandbox.SessionStateStopped:
+		name := rec.PodName
+		if name == "" {
+			name = podNameForSession(override.SessionID)
+		}
+		deleteErr := b.client.CoreV1().Pods(b.cfg.Namespace).Delete(ctx, name, metav1.DeleteOptions{})
+		if deleteErr != nil && !apierrors.IsNotFound(deleteErr) {
+			return fmt.Errorf("delete stopped pod: %w", deleteErr)
+		}
+	case sandbox.SessionStateGone:
+		// Recreate below.
 	default:
 		return nil
 	}
+
+	spec := override
+	spec.SessionID = rec.SessionID
+	if spec.Type == "" {
+		spec.Type = sandbox.SessionTypeChat
+	}
+	if spec.TemplateID == "" {
+		spec.TemplateID = rec.TemplateID
+	}
+	if spec.UserID == "" {
+		spec.UserID = rec.CreatedBy
+	}
+	// Once a session has been evicted, resume it against the exact lower
+	// chain captured at eviction time. A caller may be using a newer team or
+	// base template now; replaying the old upper onto that new lower risks an
+	// inconsistent filesystem view.
+	if originalLayerChain != "" {
+		spec.LayerChain = splitLayerChain(originalLayerChain)
+	} else if len(spec.LayerChain) == 0 {
+		spec.LayerChain = layerChainFromSessionRecord(rec)
+	}
+	if spec.TemplateID == "" {
+		spec.TemplateID = sandbox.BaseTemplateID
+	}
+
+	now := time.Now().UTC()
+	rec.State = store.SandboxSessionStateResuming
+	rec.PodName = ""
+	rec.NodeName = ""
+	rec.UpdatedAt = now
+	if err := b.sessions.PutSession(rec); err != nil {
+		return fmt.Errorf("mark resuming: %w", err)
+	}
+
+	if _, err := b.createSessionPod(ctx, spec, rec); err != nil {
+		return err
+	}
+	return nil
 }
 
-// StopSession pauses a running session. In this slice, the upper-layer
-// eviction tar-stream is not yet implemented; StopSession deletes the
-// pod and records the session as evicted without persisting the upper
-// layer.  The resume path (StartSession) will error until the matching
-// slice lands.
+func layerChainFromSessionRecord(rec *store.SandboxSession) []string {
+	return splitLayerChain(persistedLayerChain(rec))
+}
+
+func persistedLayerChain(rec *store.SandboxSession) string {
+	if rec == nil || !strings.HasPrefix(rec.UpperLayerID, sessionLayerChainPrefix) {
+		return ""
+	}
+	return strings.TrimSpace(strings.TrimPrefix(rec.UpperLayerID, sessionLayerChainPrefix))
+}
+
+func encodePersistedLayerChain(chainText string) string {
+	chainText = strings.TrimSpace(chainText)
+	if chainText == "" {
+		return ""
+	}
+	return sessionLayerChainPrefix + chainText
+}
+
+func splitLayerChain(chainText string) []string {
+	parts := strings.Split(chainText, ",")
+	chain := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			chain = append(chain, part)
+		}
+	}
+	return chain
+}
+
+// StopSession pauses a running session by first persisting its writable upper
+// layer to the session-specific directory on the uppers PVC, then deleting the
+// pod. If persistence fails, the pod is left running so data is not lost.
 func (b *K8sBackend) StopSession(ctx context.Context, sessionID string) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -483,6 +631,33 @@ func (b *K8sBackend) StopSession(ctx context.Context, sessionID string) error {
 	if rec.PodName == "" {
 		return nil
 	}
+
+	now := time.Now().UTC()
+	rec.State = store.SandboxSessionStateEvicting
+	rec.UpdatedAt = now
+	if err := b.sessions.PutSession(rec); err != nil {
+		return fmt.Errorf("StopSession: mark evicting: %w", err)
+	}
+
+	pod, err := b.client.CoreV1().Pods(b.cfg.Namespace).Get(ctx, rec.PodName, metav1.GetOptions{})
+	if err != nil && !apierrors.IsNotFound(err) {
+		rec.State = store.SandboxSessionStateRunning
+		rec.UpdatedAt = time.Now().UTC()
+		_ = b.sessions.PutSession(rec)
+		return fmt.Errorf("StopSession: get pod before persist: %w", err)
+	}
+	capturedLayerChain := rec.UpperLayerID
+	if err == nil {
+		capturedLayerChain = encodePersistedLayerChain(pod.Annotations[annotationLayerChain])
+	}
+
+	if err := b.persistUpperTarball(ctx, rec.PodName, sessionID); err != nil {
+		rec.State = store.SandboxSessionStateRunning
+		rec.UpdatedAt = time.Now().UTC()
+		_ = b.sessions.PutSession(rec)
+		return fmt.Errorf("StopSession: persist upper: %w", err)
+	}
+
 	err = b.client.CoreV1().Pods(b.cfg.Namespace).Delete(ctx, rec.PodName, metav1.DeleteOptions{})
 	if err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("StopSession: delete pod: %w", err)
@@ -490,11 +665,47 @@ func (b *K8sBackend) StopSession(ctx context.Context, sessionID string) error {
 	rec.State = store.SandboxSessionStateEvicted
 	rec.PodName = ""
 	rec.NodeName = ""
+	rec.UpperLayerID = capturedLayerChain
 	rec.UpdatedAt = time.Now().UTC()
 	if err := b.sessions.PutSession(rec); err != nil {
 		return fmt.Errorf("StopSession: persist registry: %w", err)
 	}
 	return nil
+}
+
+func (b *K8sBackend) persistUpperTarball(ctx context.Context, podName, sessionID string) error {
+	if _, err := upperDirNameForSession(sessionID); err != nil {
+		return err
+	}
+	script := buildPersistUpperScript(mountUppers, "")
+	res, err := b.execInPod(ctx, podName, sandbox.ExecSpec{Command: []string{"/bin/sh", "-c", script}})
+	if err != nil {
+		return err
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("persist upper exited %d: stderr=%s", res.ExitCode, truncate(string(res.Stderr), 512))
+	}
+	return nil
+}
+
+func buildPersistUpperScript(uppersPath, sessionDir string) string {
+	var b strings.Builder
+	b.WriteString("set -eu\n")
+	sessionPath := strings.TrimRight(uppersPath, "/")
+	if sessionDir != "" {
+		sessionPath += "/" + sessionDir
+	}
+	fmt.Fprintf(&b, "SESSION_DIR=%q\n", sessionPath)
+	b.WriteString("TMP=\"$SESSION_DIR/upper.tar.zst.tmp\"\n")
+	b.WriteString("FINAL=\"$SESSION_DIR/upper.tar.zst\"\n")
+	b.WriteString("mkdir -p \"$SESSION_DIR\"\n")
+	b.WriteString("rm -f \"$TMP\"\n")
+	b.WriteString("tar --numeric-owner --xattrs --acls -I 'zstd --adapt -T0' \\\n")
+	fmt.Fprintf(&b, "  --exclude=%s/mnt/astonish-uppers \\\n", mountUpper)
+	fmt.Fprintf(&b, "  -C %s -cf \"$TMP\" .\n", mountUpper)
+	b.WriteString("test -s \"$TMP\"\n")
+	b.WriteString("mv \"$TMP\" \"$FINAL\"\n")
+	return b.String()
 }
 
 // DestroySession permanently removes the session. Idempotent: absent
@@ -528,7 +739,7 @@ func (b *K8sBackend) DestroySession(ctx context.Context, sessionID string) error
 	}
 
 	// Reclaim evicted upper-layer tarball from the uppers PVC.
-	if rec != nil && (rec.State == store.SandboxSessionStateEvicted || rec.UpperLayerID != "") {
+	if rec != nil && (rec.State == store.SandboxSessionStateEvicted || (rec.State == store.SandboxSessionStateEvicting && rec.PodName == "")) {
 		if gcErr := b.reclaimUpperTarball(ctx, sessionID); gcErr != nil {
 			// Best-effort: log but don't fail the destroy. The deferred
 			// GC reconciler (§5.12.2) will catch it later.
@@ -544,11 +755,16 @@ func (b *K8sBackend) DestroySession(ctx context.Context, sessionID string) error
 
 // reclaimUpperTarball spawns a short-lived GC pod that removes the
 // evicted upper directory from the uppers PVC:
-//   /mnt/astonish-uppers/<sessionID>/
+//
+//	/mnt/astonish-uppers/<sessionID>/
 //
 // Uses the same pattern as DeleteTemplate's GC pod. The pod is
 // defer-deleted regardless of outcome.
 func (b *K8sBackend) reclaimUpperTarball(ctx context.Context, sessionID string) error {
+	dirName, err := upperDirNameForSession(sessionID)
+	if err != nil {
+		return err
+	}
 	podName := "astn-upper-gc-" + toDNSLabel(sessionID)
 	if len(podName) > 63 {
 		podName = podName[:63]
@@ -572,7 +788,7 @@ func (b *K8sBackend) reclaimUpperTarball(ctx context.Context, sessionID string) 
 					Name:            "gc",
 					Image:           "alpine:3.21",
 					ImagePullPolicy: corev1.PullIfNotPresent,
-					Command:         []string{"/bin/sh", "-c", fmt.Sprintf("rm -rf %s/%s", mountUppers, sessionID)},
+					Command:         []string{"/bin/sh", "-c", fmt.Sprintf("rm -rf %s/%s", mountUppers, dirName)},
 					VolumeMounts: []corev1.VolumeMount{
 						{Name: volumeUppers, MountPath: mountUppers},
 					},

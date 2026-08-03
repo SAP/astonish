@@ -3,8 +3,9 @@
 // The sandbox container runs a single PID-1 entrypoint whose job is:
 //
 //  1. Streaming the persisted upper layer back onto the local emptyDir
-//     when resuming a previously-evicted session
-//     (/mnt/astonish-uppers/<session-id>/upper.tar.zst).
+//     when resuming a previously-evicted session. Session pods mount only
+//     their own uppers PVC subdirectory, so the live path is
+//     /mnt/astonish-uppers/upper.tar.zst.
 //  2. Composing the overlay chain encoded in $ASTONISH_LAYER_CHAIN as
 //     lowerdirs (top-most first, per overlayfs syntax), with the
 //     emptyDir at /var/astonish/overlay/upper as upperdir and
@@ -306,10 +307,16 @@ fi
 
 	// Resume path.
 	b.WriteString(`# --- 1. Resume from persisted upper (if present) -----------------------
-# When a previously-evicted session is restarted, Astonish persists its
-# upper layer to $UPPERS_DIR/<session>/upper.tar.zst. Stream it back
-# onto the local emptyDir before the overlay mount.
-RESUME_TAR="$UPPERS_DIR/$ASTONISH_SESSION_ID/upper.tar.zst"
+# When a previously-evicted session is restarted, Astonish mounts only that
+# session's uppers PVC subdirectory at $UPPERS_DIR. Stream the saved upper back
+# onto the local emptyDir before the overlay mount. Older pods mounted the PVC
+# root and used $UPPERS_DIR/<session>/upper.tar.zst; the fallback keeps those
+# sessions resumable during rolling upgrades without exposing other sessions to
+# the chrooted sandbox.
+RESUME_TAR="$UPPERS_DIR/upper.tar.zst"
+if [ ! -f "$RESUME_TAR" ] && [ -f "$UPPERS_DIR/$ASTONISH_SESSION_ID/upper.tar.zst" ]; then
+  RESUME_TAR="$UPPERS_DIR/$ASTONISH_SESSION_ID/upper.tar.zst"
+fi
 if [ -f "$RESUME_TAR" ]; then
   echo "astonish-entrypoint: resuming upper from $RESUME_TAR" 1>&2
   mkdir -p "$UPPER_DIR"

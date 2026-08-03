@@ -129,10 +129,10 @@ func TestPushFile_EmitsSingleFileTarStream(t *testing.T) {
 		t.Errorf("tar should have exactly one entry, got next err %v", err)
 	}
 
-	// Validate exec'd command: tar -C /etc/astonish -xmpf -
+	// Validate exec'd command: astonish-shell tar -C /etc/astonish -xmpf -
 	q := se.url.Query()
 	cmds := q["command"]
-	want := []string{"tar", "-C", "/etc/astonish", "-xmpf", "-"}
+	want := []string{"/usr/local/bin/astonish-shell", "tar", "-C", "/etc/astonish", "-xmpf", "-"}
 	if len(cmds) != len(want) {
 		t.Fatalf("command = %v, want %v", cmds, want)
 	}
@@ -156,8 +156,8 @@ func TestPushFile_RootDirectoryPath(t *testing.T) {
 	}
 	q := se.url.Query()
 	cmds := q["command"]
-	if len(cmds) < 3 || cmds[2] != "/" {
-		t.Errorf("root dir: command[2] = %v, want /", cmds)
+	if len(cmds) < 4 || cmds[3] != "/" {
+		t.Errorf("root dir: command[3] = %v, want /", cmds)
 	}
 }
 
@@ -255,7 +255,7 @@ func TestPullFile_StreamsFileContent(t *testing.T) {
 	// Verify command shape.
 	q := se.url.Query()
 	cmds := q["command"]
-	want := []string{"tar", "-C", "/etc/astonish", "-cf", "-", "hello.txt"}
+	want := []string{"/usr/local/bin/astonish-shell", "tar", "-C", "/etc/astonish", "-cf", "-", "hello.txt"}
 	if len(cmds) != len(want) {
 		t.Fatalf("command = %v, want %v", cmds, want)
 	}
@@ -398,5 +398,6 @@ func TestPushPullFile_RoundTrip(t *testing.T) {
 
 // Sanity compile-time: pullFileReader satisfies io.ReadCloser.
 var _ io.ReadCloser = (*pullFileReader)(nil)
+
 // Use sandbox package to silence if imports shift during refactors.
 var _ sandbox.BackendKind = sandbox.BackendKindK8s

@@ -41,6 +41,10 @@ import (
 	"k8s.io/client-go/tools/remotecommand"
 )
 
+func sandboxFileCommand(cmd []string) []string {
+	return append([]string{"/usr/local/bin/astonish-shell"}, cmd...)
+}
+
 // ---------------------------------------------------------------------------
 // PushFile
 // ---------------------------------------------------------------------------
@@ -97,7 +101,7 @@ func (b *K8sBackend) PushFile(ctx context.Context, sessionID, filePath string, c
 		return fmt.Errorf("sandbox/k8s: PushFile(%s): build tar: %w", sessionID, err)
 	}
 
-	command := []string{"tar", "-C", dir, "-xmpf", "-"}
+	command := sandboxFileCommand([]string{"tar", "-C", dir, "-xmpf", "-"})
 	method, u, err := b.buildExecURL(rec.PodName, command, false /*tty*/, true /*stdin*/, true /*stdout*/, true /*stderr*/)
 	if err != nil {
 		return fmt.Errorf("sandbox/k8s: PushFile(%s): build URL: %w", sessionID, err)
@@ -192,7 +196,7 @@ func (b *K8sBackend) PullFile(ctx context.Context, sessionID, filePath string) (
 	}
 
 	// Keep PAX format so filenames up to 255 bytes work without truncation.
-	command := []string{"tar", "-C", dir, "-cf", "-", name}
+	command := sandboxFileCommand([]string{"tar", "-C", dir, "-cf", "-", name})
 	method, u, err := b.buildExecURL(rec.PodName, command, false, false /*stdin*/, true /*stdout*/, true /*stderr*/)
 	if err != nil {
 		return nil, fmt.Errorf("sandbox/k8s: PullFile(%s): build URL: %w", sessionID, err)

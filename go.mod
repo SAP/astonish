@@ -8,7 +8,7 @@ require (
 	codeberg.org/readeck/go-readability/v2 v2.1.2
 	entgo.io/ent v0.14.6
 	github.com/JohannesKaufmann/html-to-markdown/v2 v2.5.2
-	github.com/alecthomas/chroma/v2 v2.19.0
+	github.com/alecthomas/chroma/v2 v2.27.0
 	github.com/atotto/clipboard v0.1.4
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
@@ -91,7 +91,7 @@ require (
 	github.com/cyphar/filepath-securejoin v0.6.1 // indirect
 	github.com/daulet/tokenizers v1.27.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
-	github.com/dlclark/regexp2 v1.11.5 // indirect
+	github.com/dlclark/regexp2/v2 v2.2.1 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/emersion/go-message v0.18.2 // indirect

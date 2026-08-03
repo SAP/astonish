@@ -189,6 +189,18 @@ func TestBuildPodManifest_EnvAndMounts(t *testing.T) {
 	if mounts[volumeUppers].SubPath != "s1" {
 		t.Errorf("VolumeMount %q SubPath = %q, want session-specific subpath", volumeUppers, mounts[volumeUppers].SubPath)
 	}
+	if c.Lifecycle == nil || c.Lifecycle.PreStop == nil || c.Lifecycle.PreStop.Exec == nil {
+		t.Fatalf("container must have a preStop exec hook to persist the upper on manual pod deletion")
+	}
+	preStop := strings.Join(c.Lifecycle.PreStop.Exec.Command, " ")
+	for _, want := range []string{"/var/astonish/overlay/upper", "SESSION_DIR=\"/mnt/astonish-uppers\"", "upper.tar.zst", "mv \"$TMP\" \"$FINAL\""} {
+		if !strings.Contains(preStop, want) {
+			t.Errorf("preStop hook missing %q: %s", want, preStop)
+		}
+	}
+	if pod.Spec.TerminationGracePeriodSeconds == nil || *pod.Spec.TerminationGracePeriodSeconds < 90 {
+		t.Errorf("TerminationGracePeriodSeconds = %v, want at least 90s", pod.Spec.TerminationGracePeriodSeconds)
+	}
 }
 
 func TestBuildPodManifest_Rejects(t *testing.T) {
@@ -403,8 +415,8 @@ func TestCreateSession_CreatesPodAndPersistsRegistry(t *testing.T) {
 	if rec.CreatedBy != "u1" {
 		t.Errorf("registry CreatedBy = %q", rec.CreatedBy)
 	}
-	if rec.UpperLayerID != "" {
-		t.Errorf("registry UpperLayerID = %q, want empty until eviction", rec.UpperLayerID)
+	if rec.UpperLayerID != encodePersistedLayerChain("python-dev") {
+		t.Errorf("registry UpperLayerID = %q, want persisted layer chain", rec.UpperLayerID)
 	}
 }
 
@@ -433,14 +445,14 @@ func TestCreateSession_IdempotentOnSessionID(t *testing.T) {
 	}
 }
 
-// TestCreateSession_RecreatesAfterPodDeleted verifies that when the
+// TestCreateSession_ResumesAfterManualPodDelete verifies that when the
 // registry holds a stale record (pod was deleted out-of-band) a subsequent
-// CreateSession call recreates the pod instead of returning the stale entry.
-func TestCreateSession_RecreatesAfterPodDeleted(t *testing.T) {
+// CreateSession call recreates the pod without deleting the registry metadata.
+func TestCreateSession_ResumesAfterManualPodDelete(t *testing.T) {
 	b, cs := newBackendWithFakeClient(t)
 	ctx := context.Background()
 
-	spec := sandbox.SessionSpec{SessionID: "s-stale", TemplateID: "t1"}
+	spec := sandbox.SessionSpec{SessionID: "s-stale", TemplateID: "t1", LayerChain: []string{"@base", "old-layer"}}
 
 	// First create — pod is created, registry populated.
 	sess1, err := b.CreateSession(ctx, spec)
@@ -450,6 +462,15 @@ func TestCreateSession_RecreatesAfterPodDeleted(t *testing.T) {
 	podName := podNameForSession("s-stale")
 	if _, getErr := cs.CoreV1().Pods("astonish-sandboxes").Get(ctx, podName, metav1.GetOptions{}); getErr != nil {
 		t.Fatalf("pod should exist after first create: %v", getErr)
+	}
+
+	rec, err := b.sessions.GetSession("s-stale")
+	if err != nil || rec == nil {
+		t.Fatalf("GetSession: rec=%+v err=%v", rec, err)
+	}
+	rec.UpperLayerID = encodePersistedLayerChain("@base,old-layer")
+	if err := b.sessions.PutSession(rec); err != nil {
+		t.Fatalf("PutSession: %v", err)
 	}
 
 	// Delete the pod out-of-band (simulates kubectl delete or node eviction).
@@ -462,8 +483,9 @@ func TestCreateSession_RecreatesAfterPodDeleted(t *testing.T) {
 		t.Fatalf("expected NotFound after delete, got: %v", getErr)
 	}
 
-	// Second CreateSession with same spec — should recreate the pod.
-	sess2, err := b.CreateSession(ctx, spec)
+	// Second CreateSession with same ID but a newer caller-supplied layer chain
+	// should still resume against the original chain recorded for this session.
+	sess2, err := b.CreateSession(ctx, sandbox.SessionSpec{SessionID: "s-stale", TemplateID: "t1", LayerChain: []string{"@base", "new-layer"}})
 	if err != nil {
 		t.Fatalf("second CreateSession after pod-deleted: %v", err)
 	}
@@ -479,9 +501,12 @@ func TestCreateSession_RecreatesAfterPodDeleted(t *testing.T) {
 	if pod.Name != podName {
 		t.Errorf("recreated pod name = %q, want %q", pod.Name, podName)
 	}
+	if got := pod.Annotations[annotationLayerChain]; got != "@base,old-layer" {
+		t.Errorf("resumed pod layer chain = %q, want original chain", got)
+	}
 
 	// Registry should reflect the new record.
-	rec, _ := b.sessions.GetSession("s-stale")
+	rec, _ = b.sessions.GetSession("s-stale")
 	if rec == nil {
 		t.Fatal("registry record missing after recreate")
 	}

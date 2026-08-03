@@ -240,7 +240,8 @@ func (b *K8sBackend) buildPodManifest(spec sandbox.SessionSpec) (*corev1.Pod, er
 			Annotations: annotations,
 		},
 		Spec: corev1.PodSpec{
-			RestartPolicy: corev1.RestartPolicyNever,
+			RestartPolicy:                 corev1.RestartPolicyNever,
+			TerminationGracePeriodSeconds: int64Ptr(90),
 			Containers: []corev1.Container{
 				{
 					Name:            containerName,
@@ -258,6 +259,11 @@ func (b *K8sBackend) buildPodManifest(spec sandbox.SessionSpec) (*corev1.Pod, er
 						// with proper stdin/stdout attachment per invocation.
 						{Name: "ASTONISH_HANDOFF", Value: "/bin/sleep"},
 						{Name: "ASTONISH_HANDOFF_ARGS", Value: "infinity"},
+					},
+					Lifecycle: &corev1.Lifecycle{
+						PreStop: &corev1.LifecycleHandler{
+							Exec: &corev1.ExecAction{Command: []string{"/bin/sh", "-c", buildPersistUpperScript(mountUppers, "")}},
+						},
 					},
 					VolumeMounts: []corev1.VolumeMount{
 						{Name: volumeLayers, MountPath: mountLayers, ReadOnly: spec.Labels[labelPurpose] != purposeTeamTemplateEditor},
@@ -311,6 +317,10 @@ func (b *K8sBackend) buildPodManifest(spec sandbox.SessionSpec) (*corev1.Pod, er
 // This gives ~20:1 CPU packing ratio and ~8:1 memory packing ratio for
 // idle sessions while guaranteeing burst to the full ceiling when load
 // spikes.
+func int64Ptr(v int64) *int64 {
+	return &v
+}
+
 func buildResourceRequirements(lim sandbox.ResourceLimits) corev1.ResourceRequirements {
 	reqs := corev1.ResourceRequirements{}
 
@@ -398,20 +408,14 @@ func (b *K8sBackend) CreateSession(ctx context.Context, spec sandbox.SessionSpec
 		if !apierrors.IsNotFound(getErr) {
 			return nil, fmt.Errorf("CreateSession: verify pod: %w", getErr)
 		}
-		if existing.State == store.SandboxSessionStateEvicted || existing.State == store.SandboxSessionStateResuming {
-			if err := b.resumeSessionPod(ctx, existing, spec); err != nil {
-				return nil, fmt.Errorf("CreateSession: resume evicted session: %w", err)
-			}
-			resumed, err := b.sessions.GetSession(spec.SessionID)
-			if err != nil {
-				return nil, fmt.Errorf("CreateSession: load resumed session: %w", err)
-			}
-			return sessionFromStore(resumed, spec.Type), nil
+		if err := b.resumeSessionPod(ctx, existing, spec); err != nil {
+			return nil, fmt.Errorf("CreateSession: resume missing pod: %w", err)
 		}
-		// The pod is gone but the session was not cleanly evicted. Recreate
-		// from the supplied spec. This may lose volatile upper data, but it is
-		// safer than returning a dead pod binding.
-		_ = b.sessions.Remove(spec.SessionID)
+		resumed, err := b.sessions.GetSession(spec.SessionID)
+		if err != nil {
+			return nil, fmt.Errorf("CreateSession: load resumed session: %w", err)
+		}
+		return sessionFromStore(resumed, spec.Type), nil
 	}
 
 	return b.createSessionPod(ctx, spec, nil)
@@ -458,6 +462,7 @@ func (b *K8sBackend) createSessionPod(ctx context.Context, spec sandbox.SessionS
 	}
 	rec.Backend = string(sandbox.BackendKindK8s)
 	rec.TemplateID = spec.TemplateID
+	rec.UpperLayerID = encodePersistedLayerChain(created.Annotations[annotationLayerChain])
 	rec.State = store.SandboxSessionStateCreating
 	rec.PodName = created.Name
 	rec.NodeName = created.Spec.NodeName

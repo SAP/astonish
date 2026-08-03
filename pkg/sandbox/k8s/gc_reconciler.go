@@ -7,9 +7,10 @@
 //  1. Acquires a PG advisory lock so only one pod runs the reconciler.
 //  2. Reclaims orphan layer directories from the layers PVC.
 //  3. Reclaims orphan upper directories from the uppers PVC.
-//  4. Cleans up __staging-* directories from crashed template builders (skipping active ones).
-//  5. Prunes orphan session/fleet pods whose session no longer exists in any team DB.
-//  6. Cleans up stale (Succeeded/Failed) gc-ls/gc-rm pods older than 1h.
+//  4. Reclaims stale evicted session uppers after the configured retention window.
+//  5. Cleans up __staging-* directories from crashed template builders (skipping active ones).
+//  6. Prunes orphan session/fleet pods whose session no longer exists in any team DB.
+//  7. Cleans up stale (Succeeded/Failed) gc-ls/gc-rm pods older than 1h.
 //
 // The reconciler is leader-elected via pg_try_advisory_lock so it's safe
 // to run in multi-replica deployments without double-deleting.
@@ -20,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,6 +32,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/SAP/astonish/pkg/sandbox"
 	"github.com/SAP/astonish/pkg/store"
 )
 
@@ -69,6 +72,24 @@ type GCReconcilerConfig struct {
 	// If non-nil, the reconciler periodically prunes orphan session/fleet pods
 	// whose session no longer exists in any team schema.
 	SandboxSessionsQuerier func(ctx context.Context) (map[string]bool, error)
+
+	// SandboxSessionsMetadataQuerier returns all known sandbox sessions with
+	// enough metadata to make retention decisions for stale evicted uppers.
+	SandboxSessionsMetadataQuerier func(ctx context.Context) ([]store.SandboxSessionGCInfo, error)
+
+	// SandboxSessionDeleter deletes one sandbox session row from its owning team
+	// schema. It is called only after the corresponding persisted upper directory
+	// has been removed successfully.
+	SandboxSessionDeleter func(ctx context.Context, session store.SandboxSessionGCInfo) error
+
+	// EvictedUpperRetention controls how long evicted, unpinned K8s sessions
+	// remain resumable. A zero value disables stale evicted upper cleanup.
+	EvictedUpperRetention time.Duration
+}
+
+type gcDirInfo struct {
+	Name    string
+	ModTime time.Time
 }
 
 // advisoryLockID is a stable hash for the reconciler's PG advisory lock.
@@ -139,6 +160,7 @@ func runGCCycle(ctx context.Context, cfg GCReconcilerConfig) {
 
 	layersReclaimed := gcReclaimLayers(ctx, cfg)
 	uppersReclaimed := gcReclaimUppers(ctx, cfg)
+	staleEvictedUppers := gcReclaimStaleEvictedUppers(ctx, cfg)
 	stagingReclaimed := gcReclaimStaging(ctx, cfg)
 	orphanLayerDirs := gcReclaimOrphanLayerDirs(ctx, cfg)
 	orphanPodsPruned := gcPruneOrphanPods(ctx, cfg)
@@ -147,6 +169,7 @@ func runGCCycle(ctx context.Context, cfg GCReconcilerConfig) {
 	slog.Info("gc-reconciler: cycle complete",
 		"layers_reclaimed", layersReclaimed,
 		"uppers_reclaimed", uppersReclaimed,
+		"stale_evicted_uppers", staleEvictedUppers,
 		"staging_reclaimed", stagingReclaimed,
 		"orphan_layer_dirs", orphanLayerDirs,
 		"orphan_pods_pruned", orphanPodsPruned,
@@ -203,42 +226,150 @@ func gcReclaimUppers(ctx context.Context, cfg GCReconcilerConfig) int {
 		return 0
 	}
 
-	// List directories on the uppers PVC.
-	dirs, err := gcListDirs(ctx, cfg.Client, cfg.Namespace, cfg.UppersPVCName, "/mnt/uppers")
+	dirs, err := gcListDirInfos(ctx, cfg.Client, cfg.Namespace, cfg.UppersPVCName, "/mnt/uppers")
 	if err != nil {
 		slog.Warn("gc-reconciler: failed to list uppers dirs", "error", err)
 		return 0
 	}
 
-	// Get all known session IDs.
 	knownSessions, err := cfg.SandboxSessionsQuerier(ctx)
 	if err != nil {
 		slog.Warn("[gc-reconciler] failed to query sandbox sessions", "err", err)
 		return 0
 	}
 
-	// Find orphans.
-	var orphans []string
-	for _, d := range dirs {
-		if d == "" {
-			continue
-		}
-		if !knownSessions[d] {
-			orphans = append(orphans, d)
-		}
-	}
-
+	orphans := orphanUpperCandidates(dirs, knownSessions, time.Now(), cfg.UpperGracePeriod)
 	if len(orphans) == 0 {
 		return 0
 	}
 
-	// Delete orphans in a single GC pod.
 	if err := gcDeleteDirs(ctx, cfg.Client, cfg.Namespace, cfg.UppersPVCName, "/mnt/uppers", orphans); err != nil {
 		slog.Warn("gc-reconciler: failed to delete orphan upper dirs", "error", err)
 		return 0
 	}
 
 	return len(orphans)
+}
+
+func orphanUpperCandidates(dirs []gcDirInfo, knownSessions map[string]bool, now time.Time, grace time.Duration) []string {
+	var orphans []string
+	for _, d := range dirs {
+		if d.Name == "" || knownSessions[d.Name] {
+			continue
+		}
+		if _, err := upperDirNameForSession(d.Name); err != nil {
+			slog.Warn("gc-reconciler: skipping unsafe orphan upper dir", "dir", d.Name, "error", err)
+			continue
+		}
+		if grace > 0 && !d.ModTime.IsZero() && now.Sub(d.ModTime) < grace {
+			slog.Debug("gc-reconciler: retaining young orphan upper dir", "dir", d.Name, "age", now.Sub(d.ModTime).Round(time.Second), "grace", grace)
+			continue
+		}
+		orphans = append(orphans, d.Name)
+	}
+	return orphans
+}
+
+func gcReclaimStaleEvictedUppers(ctx context.Context, cfg GCReconcilerConfig) int {
+	if cfg.Client == nil || cfg.SandboxSessionsMetadataQuerier == nil || cfg.SandboxSessionDeleter == nil || cfg.EvictedUpperRetention <= 0 {
+		return 0
+	}
+
+	sessions, err := cfg.SandboxSessionsMetadataQuerier(ctx)
+	if err != nil {
+		slog.Warn("gc-reconciler: failed to query sandbox session metadata", "error", err)
+		return 0
+	}
+	if len(sessions) == 0 {
+		return 0
+	}
+
+	liveSessions := gcLiveSandboxSessions(ctx, cfg)
+	candidates := staleEvictedUpperCandidates(sessions, liveSessions, time.Now(), cfg.EvictedUpperRetention)
+	if len(candidates) == 0 {
+		return 0
+	}
+
+	reclaimed := 0
+	for _, candidate := range candidates {
+		if ctx.Err() != nil {
+			break
+		}
+		if err := gcDeleteDir(ctx, cfg.Client, cfg.Namespace, cfg.UppersPVCName, "/mnt/uppers", candidate.SessionID); err != nil {
+			slog.Warn("gc-reconciler: failed to delete stale evicted upper dir", "session", candidate.SessionID, "team_schema", candidate.TeamSchema, "error", err)
+			continue
+		}
+		if err := cfg.SandboxSessionDeleter(ctx, candidate); err != nil {
+			slog.Warn("gc-reconciler: deleted stale evicted upper but failed to delete session row", "session", candidate.SessionID, "team_schema", candidate.TeamSchema, "error", err)
+			continue
+		}
+		reclaimed++
+		slog.Info("gc-reconciler: reclaimed stale evicted upper", "session", candidate.SessionID, "team_schema", candidate.TeamSchema, "age", time.Since(sessionRetentionTime(candidate)).Round(time.Hour))
+	}
+	return reclaimed
+}
+
+func staleEvictedUpperCandidates(sessions []store.SandboxSessionGCInfo, liveSessions map[string]bool, now time.Time, retention time.Duration) []store.SandboxSessionGCInfo {
+	if retention <= 0 {
+		return nil
+	}
+	var candidates []store.SandboxSessionGCInfo
+	for _, sess := range sessions {
+		if sess.Backend != string(sandbox.BackendKindK8s) {
+			continue
+		}
+		if sess.State != store.SandboxSessionStateEvicted && sess.State != store.SandboxSessionStateTerminated {
+			continue
+		}
+		if sess.Pinned || sess.PodName != "" || liveSessions[sess.SessionID] {
+			continue
+		}
+		if _, err := upperDirNameForSession(sess.SessionID); err != nil {
+			slog.Warn("gc-reconciler: skipping stale upper candidate with unsafe session ID", "session", sess.SessionID, "error", err)
+			continue
+		}
+		basis := sessionRetentionTime(sess)
+		if basis.IsZero() || now.Sub(basis) < retention {
+			continue
+		}
+		candidates = append(candidates, sess)
+	}
+	return candidates
+}
+
+func sessionRetentionTime(sess store.SandboxSessionGCInfo) time.Time {
+	if !sess.LastActiveAt.IsZero() {
+		return sess.LastActiveAt
+	}
+	if !sess.UpdatedAt.IsZero() {
+		return sess.UpdatedAt
+	}
+	return sess.CreatedAt
+}
+
+func gcLiveSandboxSessions(ctx context.Context, cfg GCReconcilerConfig) map[string]bool {
+	live := make(map[string]bool)
+	if cfg.Client == nil {
+		return live
+	}
+	selector := labelType + " in (" + typeSession + "," + typeFleet + ")"
+	list, err := cfg.Client.CoreV1().Pods(cfg.Namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+	if err != nil {
+		slog.Warn("gc-reconciler: failed to list live sandbox pods for stale upper cleanup", "error", err)
+		return live
+	}
+	for i := range list.Items {
+		p := &list.Items[i]
+		sid := p.Labels[labelSessionID]
+		if sid == "" {
+			continue
+		}
+		switch p.Status.Phase {
+		case corev1.PodRunning, corev1.PodPending, corev1.PodUnknown:
+			live[sid] = true
+		}
+	}
+	return live
 }
 
 // gcReclaimStaging lists __staging-* directories on the layers PVC
@@ -446,6 +577,104 @@ func gcCleanupStaleGCPods(ctx context.Context, cfg GCReconcilerConfig) int {
 // Pod helpers for the GC reconciler
 // ---------------------------------------------------------------------------
 
+// gcListDirInfos spawns a read-only pod that lists top-level directories and
+// their modification times on a PVC.
+func gcListDirInfos(ctx context.Context, cs kubernetes.Interface, namespace, pvcName, mountPath string) ([]gcDirInfo, error) {
+	podName := fmt.Sprintf("astn-gc-ls-%d", time.Now().UnixNano()%1000000)
+	cmd := fmt.Sprintf(`for d in %s/*; do
+  [ -d "$d" ] || continue
+  name=${d##*/}
+  mtime=$(stat -c %%Y "$d" 2>/dev/null || stat -f %%m "$d" 2>/dev/null || echo 0)
+  printf '%%s\t%%s\n' "$name" "$mtime"
+done`, mountPath)
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      podName,
+			Namespace: namespace,
+			Labels:    map[string]string{labelType: "gc-list"},
+		},
+		Spec: corev1.PodSpec{
+			RestartPolicy: corev1.RestartPolicyNever,
+			Containers: []corev1.Container{{
+				Name:            "ls",
+				Image:           "alpine:3.21",
+				ImagePullPolicy: corev1.PullIfNotPresent,
+				Command:         []string{"/bin/sh", "-c", cmd},
+				VolumeMounts: []corev1.VolumeMount{
+					{Name: "data", MountPath: mountPath, ReadOnly: true},
+				},
+			}},
+			Volumes: []corev1.Volume{{
+				Name: "data",
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+						ClaimName: pvcName,
+						ReadOnly:  true,
+					},
+				},
+			}},
+		},
+	}
+
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = cs.CoreV1().Pods(namespace).Delete(cleanupCtx, podName, metav1.DeleteOptions{})
+	}()
+
+	_ = cs.CoreV1().Pods(namespace).Delete(ctx, podName, metav1.DeleteOptions{})
+	time.Sleep(500 * time.Millisecond)
+
+	if _, err := cs.CoreV1().Pods(namespace).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
+		return nil, fmt.Errorf("create list pod: %w", err)
+	}
+
+	if err := gcWaitForPodDone(ctx, cs, namespace, podName, 60*time.Second); err != nil {
+		return nil, err
+	}
+
+	logReq := cs.CoreV1().Pods(namespace).GetLogs(podName, &corev1.PodLogOptions{})
+	logStream, err := logReq.Stream(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("read list pod logs: %w", err)
+	}
+	defer logStream.Close()
+
+	var buf strings.Builder
+	b := make([]byte, 4096)
+	for {
+		n, readErr := logStream.Read(b)
+		if n > 0 {
+			buf.Write(b[:n])
+		}
+		if readErr != nil {
+			break
+		}
+	}
+
+	var dirs []gcDirInfo
+	for _, line := range strings.Split(buf.String(), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 2)
+		name := strings.TrimSpace(parts[0])
+		if name == "" {
+			continue
+		}
+		info := gcDirInfo{Name: name}
+		if len(parts) == 2 {
+			if sec, parseErr := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64); parseErr == nil && sec > 0 {
+				info.ModTime = time.Unix(sec, 0)
+			}
+		}
+		dirs = append(dirs, info)
+	}
+	return dirs, nil
+}
+
 // gcListDirs spawns a read-only pod that lists top-level directories on a PVC.
 func gcListDirs(ctx context.Context, cs kubernetes.Interface, namespace, pvcName, mountPath string) ([]string, error) {
 	podName := fmt.Sprintf("astn-gc-ls-%d", time.Now().UnixNano()%1000000)
@@ -531,6 +760,10 @@ func gcDeleteDir(ctx context.Context, cs kubernetes.Interface, namespace, pvcNam
 	return gcDeleteDirs(ctx, cs, namespace, pvcName, mountPath, []string{dir})
 }
 
+func safeGCDirName(dir string) bool {
+	return dir != "" && dir != "." && dir != ".." && !strings.Contains(dir, "/") && !strings.Contains(dir, "..")
+}
+
 // gcDeleteDirs spawns a pod that deletes multiple directories from a PVC.
 func gcDeleteDirs(ctx context.Context, cs kubernetes.Interface, namespace, pvcName, mountPath string, dirs []string) error {
 	if len(dirs) == 0 {
@@ -540,10 +773,10 @@ func gcDeleteDirs(ctx context.Context, cs kubernetes.Interface, namespace, pvcNa
 	var sb strings.Builder
 	sb.WriteString("#!/bin/sh\nset -e\n")
 	for _, d := range dirs {
-		if d == "" || strings.Contains(d, "/") || strings.Contains(d, "..") {
+		if !safeGCDirName(d) {
 			continue
 		}
-		sb.WriteString(fmt.Sprintf("rm -rf '%s/%s'\n", mountPath, d))
+		sb.WriteString(fmt.Sprintf("rm -rf %s/%s\n", shellQuote(mountPath), shellQuote(d)))
 	}
 
 	podName := fmt.Sprintf("astn-gc-rm-%d", time.Now().UnixNano()%1000000)

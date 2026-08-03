@@ -716,25 +716,21 @@ The primary reclamation path is the synchronous GC pod fired from `DeleteTemplat
 
 This is sufficient for the team-template editor flow (operator-driven, low frequency, immediate-feedback expectation) and for explicit `DELETE` calls.
 
-#### 5.12.2 Deferred reconciler (Status: deferred — design intact)
+#### 5.12.2 Deferred reconciler (Status: shipped for direct K8s)
 
-Some reclamation patterns benefit from background batching: orphan detection (§5.11), refcount drift recovery if the disabled trigger is ever needed, and bulk cleanup after migrations. The Round 2 design specified a single leader-elected reconciler:
+Some reclamation patterns benefit from background batching: orphan detection (§5.11), refcount drift recovery if the disabled trigger is ever needed, cleanup after migrations, and retention of old evicted session uppers. Direct K8s runs a single leader-elected reconciler in `pkg/sandbox/k8s/gc_reconciler.go` when platform mode uses PostgreSQL and `sandbox.backend: k8s`.
 
-- Runs in the `astonish` daemon, guarded by a PG advisory lock (`pg_try_advisory_lock(hashtext('astonish-layer-gc'))`) so only one pod executes at a time across the deployment.
-- Runs on a schedule (`sandbox.layers.gcInterval`, default 1h) **and** on demand via the admin API (§5.15).
-- Algorithm:
-  1. `SELECT layer_id FROM sandbox_layers WHERE ref_count = 0 AND created_at < now() - grace_period FOR UPDATE SKIP LOCKED`
-     (`grace_period` default 24h).
-  2. For each candidate:
-     - Verify `ref_count = 0` is still true (guard against races where a concurrent `RefreshTemplate` acquired the layer between selection and deletion).
-     - `rm -rf /mnt/astonish-layers/<layer_id>/`.
-     - `DELETE FROM sandbox_layers WHERE layer_id = ...`.
-     - Audit row: `layer_gc_removed`, size_bytes reclaimed.
-- Metrics: `astonish_sandbox_layer_gc_removed_total`, `astonish_sandbox_layer_gc_bytes_total`, `astonish_sandbox_layer_gc_duration_seconds`.
+- Runs in the daemon, guarded by a PG advisory lock (`pg_try_advisory_lock(1267985313)`) so only one pod executes at a time across the deployment.
+- Runs on a schedule from `sandbox.kubernetes.gc.interval_minutes` (default 60).
+- Reclaims unreferenced layer rows after `sandbox.kubernetes.gc.layer_grace_hours` (default 24).
+- Reclaims uppers-PVC directories with no matching `sandbox_sessions` row only after `sandbox.kubernetes.gc.orphan_upper_grace_minutes` (default 60), so races during session creation/eviction do not become data loss.
+- Reclaims stale evicted session uppers after `sandbox.kubernetes.gc.evicted_upper_retention_hours` (default 336 / 14 days; set `evicted_upper_retention_disabled: true` to disable this retention sweep). This policy deletes `/mnt/astonish-uppers/<session-id>/` first and deletes the owning `sandbox_sessions` row only after the directory deletion succeeds.
+- Skips pinned sessions, active states (`creating`, `running`, `resuming`, `evicting`), rows with a pod name, rows with live Running/Pending/Unknown K8s pods, non-K8s backend rows, and unsafe session IDs.
+- Cleans crashed template-builder staging directories, orphan session/fleet pods whose registry row disappeared, and old completed GC helper pods.
 
-**Grace period rationale.** Short-lived zero-ref windows happen legitimately: `RefreshTemplate` briefly drops a layer's refcount to 0 between the `DELETE` of the old template row and the subsequent `INSERT` of a redundant reference. In practice these are wrapped in a single transaction so they never appear committed as zero-ref — but the 24h grace period is a safety margin that also covers operator actions (manual PG edits, rollbacks).
+**Retention semantics.** Stale evicted upper cleanup removes sandbox resumability, not chat history. The chat transcript, artifact metadata, and transcript fallback content remain in the session store. If the user later interacts with an old chat after its upper was reclaimed, Astonish creates a fresh sandbox from the template rather than restoring the old writable filesystem.
 
-The deferred reconciler is **not currently implemented**. The synchronous path covers operator-driven deletion; orphan detection runs only when an operator triggers it manually via SQL/`kubectl`. Implementing the reconciler is a Phase E item.
+**Grace period rationale.** Short-lived zero-ref or untracked-upper windows happen legitimately during template refreshes, manual rollbacks, and eviction/create races. The layer and orphan-upper grace periods are safety margins around those windows. The evicted-upper retention period is a production storage bound for the `astonish-uppers` RWX PVC.
 
 ### 5.13 Default template resolution
 
@@ -971,6 +967,15 @@ sandbox:
       size: 50Gi
       accessMode: ReadWriteMany
       pvcName: astonish-uppers
+
+  # Deferred storage reconciler. Defaults shown here bound orphan/stale data
+  # while keeping evicted sandboxes resumable for two weeks.
+  gc:
+    interval_minutes: 60
+    layer_grace_hours: 24
+    orphan_upper_grace_minutes: 60
+    evicted_upper_retention_hours: 336
+    evicted_upper_retention_disabled: false
 
   # Helm post-install/post-upgrade hook that seeds @base/rootfs from the
   # sandbox image. Idempotency guard skips re-seeding when @base/rootfs
@@ -1523,10 +1528,10 @@ Status: shipped on `feature/sandbox-k8s-backend` (commits `4fa7ed6`, `cee00c8`, 
 **Still open (Phase F+ / E):**
 
 - Cross-replica consistency for the **fleet** session path (`pkg/api/fleet_session_handlers.go:341-357`) and the chat-session creation handler. The pattern from §5.16 applies; small follow-up.
-- Persisted upper-tarball GC under `/mnt/astonish-uppers/` (currently relies on the `DestroySession` path to clean up; orphaned tar.zst from out-of-band pod kills are not actively reclaimed).
+- Admin dry-run/preview endpoint for K8s uppers GC (the background reconciler now handles orphan and stale evicted upper cleanup; operators still need a friendly preview surface).
 - Cascading default-template resolution (§5.13 — currently resolves directly to `@base`).
 - `RefreshTemplate` implementation (§5.6 — currently returns "not yet implemented").
-- Deferred GC reconciler (§5.12.2) — synchronous reclamation covers the operator-driven path; the reconciler is the safety net for orphans and refcount drift.
+- Force-run K8s GC admin endpoint (§5.12.2) — the reconciler runs on a schedule today; an on-demand operator trigger remains useful.
 - Layer-chain flatten job (§5.11).
 - `meta.json` per-layer sidecar (§5.11).
 - Default-template setter API endpoints (§5.15 — `PUT /users/me/default-template` etc.).

@@ -1289,18 +1289,29 @@ func Run(cfg RunConfig) error {
 				if gcNamespace == "" {
 					gcNamespace = "astonish-sandbox"
 				}
+				evictedRetention, evictedRetentionEnabled := appCfg.Sandbox.Kubernetes.K8sEvictedUpperRetention()
+				if !evictedRetentionEnabled {
+					evictedRetention = 0
+				}
 				go k8sbackend.RunGCReconciler(ctx, k8sbackend.GCReconcilerConfig{
-					Interval:         time.Hour,
-					LayerGracePeriod: 24 * time.Hour,
-					UpperGracePeriod: time.Hour,
-					Namespace:        gcNamespace,
-					LayersPVCName:    appCfg.Sandbox.Kubernetes.LayersPVCName,
-					UppersPVCName:    appCfg.Sandbox.Kubernetes.UppersPVCName,
-					Client:           cs,
-					PlatformPool:     platformPool,
-					Layers:           entStore.SandboxLayers(),
+					Interval:              appCfg.Sandbox.Kubernetes.K8sGCInterval(),
+					LayerGracePeriod:      appCfg.Sandbox.Kubernetes.K8sLayerGracePeriod(),
+					UpperGracePeriod:      appCfg.Sandbox.Kubernetes.K8sOrphanUpperGracePeriod(),
+					EvictedUpperRetention: evictedRetention,
+					Namespace:             gcNamespace,
+					LayersPVCName:         appCfg.Sandbox.Kubernetes.LayersPVCName,
+					UppersPVCName:         appCfg.Sandbox.Kubernetes.UppersPVCName,
+					Client:                cs,
+					PlatformPool:          platformPool,
+					Layers:                entStore.SandboxLayers(),
 					SandboxSessionsQuerier: func(ctx context.Context) (map[string]bool, error) {
 						return entStore.AllSandboxSessionIDs(ctx)
+					},
+					SandboxSessionsMetadataQuerier: func(ctx context.Context) ([]store.SandboxSessionGCInfo, error) {
+						return entStore.AllSandboxSessions(ctx)
+					},
+					SandboxSessionDeleter: func(ctx context.Context, session store.SandboxSessionGCInfo) error {
+						return entStore.DeleteSandboxSessionInTeam(ctx, session.OrgDBName, session.TeamSchema, session.SessionID)
 					},
 				})
 			} else {

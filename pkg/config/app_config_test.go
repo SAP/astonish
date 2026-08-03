@@ -2,6 +2,7 @@ package config
 
 import (
 	"testing"
+	"time"
 )
 
 func TestGetProviderType(t *testing.T) {
@@ -277,5 +278,55 @@ func TestSandboxConfig_IsK8sBackend(t *testing.T) {
 		if got := c.IsK8sBackend(); got != tt.want {
 			t.Errorf("IsK8sBackend(%q) = %v, want %v", tt.input, got, tt.want)
 		}
+	}
+}
+
+func TestSandboxKubernetesConfig_GCDefaults(t *testing.T) {
+	cfg := SandboxKubernetesConfig{}
+	if got := cfg.K8sGCInterval(); got != time.Hour {
+		t.Fatalf("K8sGCInterval() = %s, want 1h", got)
+	}
+	if got := cfg.K8sLayerGracePeriod(); got != 24*time.Hour {
+		t.Fatalf("K8sLayerGracePeriod() = %s, want 24h", got)
+	}
+	if got := cfg.K8sOrphanUpperGracePeriod(); got != time.Hour {
+		t.Fatalf("K8sOrphanUpperGracePeriod() = %s, want 1h", got)
+	}
+	retention, enabled := cfg.K8sEvictedUpperRetention()
+	if !enabled {
+		t.Fatalf("K8sEvictedUpperRetention() enabled = false, want true")
+	}
+	if retention != 14*24*time.Hour {
+		t.Fatalf("K8sEvictedUpperRetention() = %s, want 336h", retention)
+	}
+}
+
+func TestSandboxKubernetesConfig_GCOverrides(t *testing.T) {
+	cfg := SandboxKubernetesConfig{GC: KubernetesGCConfig{
+		IntervalMinutes:            15,
+		LayerGraceHours:            48,
+		OrphanUpperGraceMinutes:    30,
+		EvictedUpperRetentionHours: 24,
+	}}
+	if got := cfg.K8sGCInterval(); got != 15*time.Minute {
+		t.Fatalf("K8sGCInterval() = %s, want 15m", got)
+	}
+	if got := cfg.K8sLayerGracePeriod(); got != 48*time.Hour {
+		t.Fatalf("K8sLayerGracePeriod() = %s, want 48h", got)
+	}
+	if got := cfg.K8sOrphanUpperGracePeriod(); got != 30*time.Minute {
+		t.Fatalf("K8sOrphanUpperGracePeriod() = %s, want 30m", got)
+	}
+	retention, enabled := cfg.K8sEvictedUpperRetention()
+	if !enabled || retention != 24*time.Hour {
+		t.Fatalf("K8sEvictedUpperRetention() = %s, %v; want 24h, true", retention, enabled)
+	}
+}
+
+func TestSandboxKubernetesConfig_GCDisableEvictedUpperRetention(t *testing.T) {
+	cfg := SandboxKubernetesConfig{GC: KubernetesGCConfig{EvictedUpperRetentionDisabled: true}}
+	retention, enabled := cfg.K8sEvictedUpperRetention()
+	if enabled || retention != 0 {
+		t.Fatalf("K8sEvictedUpperRetention() = %s, %v; want 0, false", retention, enabled)
 	}
 }

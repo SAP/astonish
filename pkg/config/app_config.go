@@ -342,10 +342,76 @@ type SandboxKubernetesConfig struct {
 	LayersPVCName string `yaml:"layers_pvc_name,omitempty" json:"layers_pvc_name,omitempty"`
 	UppersPVCName string `yaml:"uppers_pvc_name,omitempty" json:"uppers_pvc_name,omitempty"`
 
+	// GC controls the deferred K8s storage reconciler for layers, orphan
+	// upper directories, and stale evicted session uppers.
+	GC KubernetesGCConfig `yaml:"gc,omitempty" json:"gc,omitempty"`
+
 	// QPS / Burst tune the client-go rate limiter. Zero → defaults
 	// (50 / 100). Busier fleets want higher values.
 	QPS   float32 `yaml:"qps,omitempty" json:"qps,omitempty"`
 	Burst int     `yaml:"burst,omitempty" json:"burst,omitempty"`
+}
+
+// KubernetesGCConfig captures operator-tunable knobs for the direct K8s
+// storage reconciler. Zero values keep conservative production defaults.
+type KubernetesGCConfig struct {
+	// IntervalMinutes controls how often the reconciler runs. Default: 60.
+	IntervalMinutes int `yaml:"interval_minutes,omitempty" json:"interval_minutes,omitempty"`
+
+	// LayerGraceHours controls when unreferenced layer directories are eligible
+	// for cleanup. Default: 24.
+	LayerGraceHours int `yaml:"layer_grace_hours,omitempty" json:"layer_grace_hours,omitempty"`
+
+	// OrphanUpperGraceMinutes controls when upper directories with no matching
+	// sandbox session row are eligible for cleanup. Default: 60.
+	OrphanUpperGraceMinutes int `yaml:"orphan_upper_grace_minutes,omitempty" json:"orphan_upper_grace_minutes,omitempty"`
+
+	// EvictedUpperRetentionHours controls how long evicted, unpinned, inactive
+	// session uppers remain resumable. Default: 336 (14 days).
+	EvictedUpperRetentionHours int `yaml:"evicted_upper_retention_hours,omitempty" json:"evicted_upper_retention_hours,omitempty"`
+
+	// EvictedUpperRetentionDisabled disables stale evicted upper cleanup while
+	// leaving orphan cleanup and layer cleanup enabled.
+	EvictedUpperRetentionDisabled bool `yaml:"evicted_upper_retention_disabled,omitempty" json:"evicted_upper_retention_disabled,omitempty"`
+}
+
+// K8sGCInterval returns the direct K8s storage GC interval. Default: 1h.
+func (c *SandboxKubernetesConfig) K8sGCInterval() time.Duration {
+	if c.GC.IntervalMinutes > 0 {
+		return time.Duration(c.GC.IntervalMinutes) * time.Minute
+	}
+	return time.Hour
+}
+
+// K8sLayerGracePeriod returns the grace period for unreferenced layers.
+// Default: 24h.
+func (c *SandboxKubernetesConfig) K8sLayerGracePeriod() time.Duration {
+	if c.GC.LayerGraceHours > 0 {
+		return time.Duration(c.GC.LayerGraceHours) * time.Hour
+	}
+	return 24 * time.Hour
+}
+
+// K8sOrphanUpperGracePeriod returns the grace period for upper directories
+// that have no matching sandbox session row. Default: 1h.
+func (c *SandboxKubernetesConfig) K8sOrphanUpperGracePeriod() time.Duration {
+	if c.GC.OrphanUpperGraceMinutes > 0 {
+		return time.Duration(c.GC.OrphanUpperGraceMinutes) * time.Minute
+	}
+	return time.Hour
+}
+
+// K8sEvictedUpperRetention returns how long stale evicted session uppers stay
+// resumable. Default: 14 days. The second return value is false when cleanup is
+// explicitly disabled.
+func (c *SandboxKubernetesConfig) K8sEvictedUpperRetention() (time.Duration, bool) {
+	if c.GC.EvictedUpperRetentionDisabled {
+		return 0, false
+	}
+	if c.GC.EvictedUpperRetentionHours > 0 {
+		return time.Duration(c.GC.EvictedUpperRetentionHours) * time.Hour, true
+	}
+	return 14 * 24 * time.Hour, true
 }
 
 // BackendKind returns the configured backend, lower-cased, with "" and

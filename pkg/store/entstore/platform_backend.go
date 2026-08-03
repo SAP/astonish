@@ -10,9 +10,9 @@ import (
 	"entgo.io/ent/dialect"
 	entsql "entgo.io/ent/dialect/sql"
 
-	teament "github.com/SAP/astonish/ent/team"
 	"github.com/SAP/astonish/ent/platform/loginsession"
 	"github.com/SAP/astonish/ent/platform/pendinglinkcode"
+	teament "github.com/SAP/astonish/ent/team"
 	"github.com/SAP/astonish/pkg/store"
 )
 
@@ -73,12 +73,28 @@ func (s *Store) CleanupExpired(ctx context.Context) error {
 // AllSandboxSessionIDs returns all known sandbox session IDs across all teams.
 // Used by the K8s GC reconciler to detect orphan pods.
 func (s *Store) AllSandboxSessionIDs(ctx context.Context) (map[string]bool, error) {
+	sessions, err := s.AllSandboxSessions(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make(map[string]bool, len(sessions))
+	for _, sess := range sessions {
+		result[sess.SessionID] = true
+	}
+	return result, nil
+}
+
+// AllSandboxSessions returns metadata for all sandbox sessions across all team
+// schemas. This is a platform-admin/background-worker surface for GC and audit;
+// user request paths must continue to use tenant-scoped stores.
+func (s *Store) AllSandboxSessions(ctx context.Context) ([]store.SandboxSessionGCInfo, error) {
 	teamSchemas, err := s.ListTeamSchemas(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list team schemas: %w", err)
 	}
 
-	result := make(map[string]bool)
+	var result []store.SandboxSessionGCInfo
 	for _, ts := range teamSchemas {
 		sessStore := s.sandboxSessionsForSchema(ts.orgDBName, ts.schemaName)
 		if sessStore == nil {
@@ -87,14 +103,35 @@ func (s *Store) AllSandboxSessionIDs(ctx context.Context) (map[string]bool, erro
 		sessions, err := sessStore.List(ctx, store.SandboxSessionFilter{})
 		if err != nil {
 			// Non-fatal: schema might not have sandbox_sessions table yet.
-			slog.Debug("AllSandboxSessionIDs: list failed", "db", ts.orgDBName, "schema", ts.schemaName, "error", err)
+			slog.Debug("AllSandboxSessions: list failed", "db", ts.orgDBName, "schema", ts.schemaName, "error", err)
 			continue
 		}
 		for _, sess := range sessions {
-			result[sess.SessionID] = true
+			if sess == nil {
+				continue
+			}
+			result = append(result, store.SandboxSessionGCInfo{
+				SandboxSession: *sess,
+				OrgDBName:      ts.orgDBName,
+				TeamSchema:     ts.schemaName,
+			})
 		}
 	}
 	return result, nil
+}
+
+// DeleteSandboxSessionInTeam removes a sandbox session row from the exact team
+// schema that owns it. It is used by GC only after the corresponding persisted
+// upper directory has been reclaimed.
+func (s *Store) DeleteSandboxSessionInTeam(ctx context.Context, orgDBName, teamSchema, sessionID string) error {
+	if orgDBName == "" || teamSchema == "" {
+		return fmt.Errorf("DeleteSandboxSessionInTeam: org database and team schema are required")
+	}
+	sessStore := s.sandboxSessionsForSchema(orgDBName, teamSchema)
+	if sessStore == nil {
+		return fmt.Errorf("DeleteSandboxSessionInTeam: sandbox session store unavailable for %s.%s", orgDBName, teamSchema)
+	}
+	return sessStore.Delete(ctx, sessionID)
 }
 
 // SandboxSessionsForTeam returns a SandboxSessionStore for the given org and
@@ -362,5 +399,3 @@ func (s *Store) MarkSandboxSessionEvicted(ctx context.Context, sessionID string)
 	}
 	return fmt.Errorf("MarkSandboxSessionEvicted: session %q not found", sessionID)
 }
-
-

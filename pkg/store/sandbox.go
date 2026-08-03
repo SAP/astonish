@@ -66,45 +66,45 @@ type BootstrapFile struct {
 //   - TopLayerID==nil means the template is layer-less (an alias of its
 //     parent); Resolve walks to the nearest ancestor with a non-nil TopLayerID.
 type SandboxTemplate struct {
-	ID              string                 `json:"id"`
-	Slug            string                 `json:"slug"`
-	Scope           SandboxTemplateScope   `json:"scope"`
-	OwnerID         string                 `json:"owner_id,omitempty"`
-	Purpose         SandboxTemplatePurpose `json:"purpose,omitempty"`
-	Name            string                 `json:"name"`
-	Description     string                 `json:"description,omitempty"`
-	ParentTemplateID *string               `json:"parent_template_id,omitempty"`
-	TopLayerID      *string                `json:"top_layer_id,omitempty"`
+	ID               string                 `json:"id"`
+	Slug             string                 `json:"slug"`
+	Scope            SandboxTemplateScope   `json:"scope"`
+	OwnerID          string                 `json:"owner_id,omitempty"`
+	Purpose          SandboxTemplatePurpose `json:"purpose,omitempty"`
+	Name             string                 `json:"name"`
+	Description      string                 `json:"description,omitempty"`
+	ParentTemplateID *string                `json:"parent_template_id,omitempty"`
+	TopLayerID       *string                `json:"top_layer_id,omitempty"`
 	// SandboxImage holds a fully-qualified OCI image reference for backends
 	// that use per-template container images (e.g., OpenShell). When non-nil
 	// and non-empty, sandbox sessions use this image instead of the global
 	// default. Nil for templates that use the layer chain (incus/k8s).
-	SandboxImage    *string                `json:"sandbox_image,omitempty"`
+	SandboxImage *string `json:"sandbox_image,omitempty"`
 	// Packages is the list of apt packages to install when building a custom
 	// sandbox image. Stored as JSON in the database.
 	// DEPRECATED: Use DockerfileBody instead for full Dockerfile control.
-	Packages        []string               `json:"packages,omitempty"`
+	Packages []string `json:"packages,omitempty"`
 	// DockerfileBody stores the user-authored Dockerfile instructions
 	// (everything after FROM). When non-nil, it is the source of truth for
 	// image builds; Packages is ignored.
-	DockerfileBody  *string                `json:"dockerfile_body,omitempty"`
+	DockerfileBody *string `json:"dockerfile_body,omitempty"`
 	// BuildStatus tracks the image build state: "", "building", "succeeded", "failed".
-	BuildStatus     string                 `json:"build_status,omitempty"`
+	BuildStatus string `json:"build_status,omitempty"`
 	// BuildJobName is the K8s Job name of the current/last build.
-	BuildJobName    string                 `json:"build_job_name,omitempty"`
+	BuildJobName string `json:"build_job_name,omitempty"`
 	// BuildError stores the error message from the last failed build.
-	BuildError      string                 `json:"build_error,omitempty"`
+	BuildError string `json:"build_error,omitempty"`
 	// LastBuiltImage is the full image ref produced by the last successful build.
-	LastBuiltImage  string                 `json:"last_built_image,omitempty"`
+	LastBuiltImage string `json:"last_built_image,omitempty"`
 	// BuildStartedAt records when the last build was triggered.
-	BuildStartedAt  *time.Time             `json:"build_started_at,omitempty"`
+	BuildStartedAt *time.Time `json:"build_started_at,omitempty"`
 	// BootstrapFiles are injected into every container from this template
 	// at session start (mount only — callers must execute them explicitly).
-	BootstrapFiles  []BootstrapFile        `json:"bootstrap_files,omitempty"`
-	Version         int                    `json:"version"`
-	CreatedBy       string                 `json:"created_by,omitempty"`
-	CreatedAt       time.Time              `json:"created_at"`
-	UpdatedAt       time.Time              `json:"updated_at"`
+	BootstrapFiles []BootstrapFile `json:"bootstrap_files,omitempty"`
+	Version        int             `json:"version"`
+	CreatedBy      string          `json:"created_by,omitempty"`
+	CreatedAt      time.Time       `json:"created_at"`
+	UpdatedAt      time.Time       `json:"updated_at"`
 }
 
 // SandboxTemplateFilter narrows list queries. Zero-value fields are ignored.
@@ -232,13 +232,13 @@ type BaseConfigInfo struct {
 
 // SandboxLayer is a content-addressed rootfs delta.
 type SandboxLayer struct {
-	LayerID      string    `json:"layer_id"` // sha256 hex of canonical tar
-	ParentLayer  *string   `json:"parent_layer,omitempty"`
-	CephFSPath   string    `json:"cephfs_path"` // mount path on the RWX PVC (e.g. /mnt/astonish-layers/<layer_id>); field name is historical — filesystem-agnostic
-	SizeBytes    int64     `json:"size_bytes"`
-	RefCount     int       `json:"ref_count"`
-	CreatedBy    string    `json:"created_by,omitempty"`
-	AddedAt      time.Time `json:"added_at"`
+	LayerID        string    `json:"layer_id"` // sha256 hex of canonical tar
+	ParentLayer    *string   `json:"parent_layer,omitempty"`
+	CephFSPath     string    `json:"cephfs_path"` // mount path on the RWX PVC (e.g. /mnt/astonish-layers/<layer_id>); field name is historical — filesystem-agnostic
+	SizeBytes      int64     `json:"size_bytes"`
+	RefCount       int       `json:"ref_count"`
+	CreatedBy      string    `json:"created_by,omitempty"`
+	AddedAt        time.Time `json:"added_at"`
 	LastReferenced time.Time `json:"last_referenced"`
 }
 
@@ -372,25 +372,39 @@ const (
 // chat session in {team_schema}.sessions. In personal mode and in the
 // common one-chat-one-sandbox case, callers MAY set SessionID == ChatSessionID.
 type SandboxSession struct {
-	SessionID      string              `json:"session_id"`
-	ChatSessionID  string              `json:"chat_session_id"`
-	Backend        string              `json:"backend"` // "incus" | "k8s"
-	ContainerName  string              `json:"container_name,omitempty"`
-	TemplateID     string              `json:"template_id"`
-	UpperLayerID   string              `json:"upper_layer_id,omitempty"`
+	SessionID     string `json:"session_id"`
+	ChatSessionID string `json:"chat_session_id"`
+	Backend       string `json:"backend"` // "incus" | "k8s"
+	ContainerName string `json:"container_name,omitempty"`
+	TemplateID    string `json:"template_id"`
+	UpperLayerID  string `json:"upper_layer_id,omitempty"`
 	// Image is the container image used to create this session (OpenShell).
 	// Stored so that StartSession can recreate with the correct image.
-	Image          string              `json:"image,omitempty"`
-	State          SandboxSessionState `json:"state"`
-	PodName        string              `json:"pod_name,omitempty"`
-	NodeName       string              `json:"node_name,omitempty"`
-	ExposedPorts   []int               `json:"exposed_ports,omitempty"`
-	BaseDomain     string              `json:"base_domain,omitempty"`
-	Pinned         bool                `json:"pinned,omitempty"`
-	CreatedBy      string              `json:"created_by,omitempty"`
-	CreatedAt      time.Time           `json:"created_at"`
-	UpdatedAt      time.Time           `json:"updated_at"`
-	LastActiveAt   time.Time           `json:"last_active_at"`
+	Image        string              `json:"image,omitempty"`
+	State        SandboxSessionState `json:"state"`
+	PodName      string              `json:"pod_name,omitempty"`
+	NodeName     string              `json:"node_name,omitempty"`
+	ExposedPorts []int               `json:"exposed_ports,omitempty"`
+	BaseDomain   string              `json:"base_domain,omitempty"`
+	Pinned       bool                `json:"pinned,omitempty"`
+	CreatedBy    string              `json:"created_by,omitempty"`
+	CreatedAt    time.Time           `json:"created_at"`
+	UpdatedAt    time.Time           `json:"updated_at"`
+	LastActiveAt time.Time           `json:"last_active_at"`
+}
+
+// SandboxSessionGCInfo is the platform-admin view used by background GC
+// workers that need to reason across team schemas. User-facing paths must use
+// tenant-scoped SandboxSessionStore instances instead.
+type SandboxSessionGCInfo struct {
+	SandboxSession
+
+	// OrgDBName and TeamSchema identify the team-scoped store that owns this
+	// row. They are intentionally populated only by entstore platform-admin
+	// enumeration and are used to delete stale registry rows after their
+	// persisted upper data has been reclaimed.
+	OrgDBName  string `json:"org_db_name,omitempty"`
+	TeamSchema string `json:"team_schema,omitempty"`
 }
 
 // SandboxSessionFilter narrows list queries. Zero-value fields are ignored.

@@ -83,13 +83,25 @@ var (
 	registeredPDFResolve      func(sessionID string) (string, string, error)
 	registeredPDFStartBrowser func(podName string) (io.Closer, error)
 	registeredPDFDial         func(podName string, port int) (net.Conn, error)
+	registeredPDFBackend      string
 	registeredPDFMu           sync.RWMutex
 )
 
 // SetPDFBrowserCallbacks registers container callbacks for the dedicated PDF
 // browser manager. Called by the launcher (chat_factory) after wiring the
-// OpenShell browser to ensure PDF export uses the same sandbox path.
+// OpenShell/K8s browser to ensure PDF export uses the same sandbox path.
 func SetPDFBrowserCallbacks(
+	resolve func(sessionID string) (string, string, error),
+	startBrowser func(podName string) (io.Closer, error),
+	dial func(podName string, port int) (net.Conn, error),
+) {
+	SetPDFBrowserCallbacksForBackend("registered", resolve, startBrowser, dial)
+}
+
+// SetPDFBrowserCallbacksForBackend is SetPDFBrowserCallbacks with an explicit
+// backend label used only for diagnostics.
+func SetPDFBrowserCallbacksForBackend(
+	backend string,
 	resolve func(sessionID string) (string, string, error),
 	startBrowser func(podName string) (io.Closer, error),
 	dial func(podName string, port int) (net.Conn, error),
@@ -98,8 +110,9 @@ func SetPDFBrowserCallbacks(
 	registeredPDFResolve = resolve
 	registeredPDFStartBrowser = startBrowser
 	registeredPDFDial = dial
+	registeredPDFBackend = backend
 	registeredPDFMu.Unlock()
-	slog.Info("PDF browser: registered sandbox callbacks")
+	slog.Info("PDF browser: registered sandbox callbacks", "backend", backend)
 }
 
 // GetBrowserManager returns the shared browser manager for all sessions.
@@ -163,7 +176,8 @@ func GetPDFBrowserManager(sessionID string) *browser.Manager {
 		pdfBrowserMgr = browser.NewManager(cfg)
 
 		// Wire sandbox callbacks so Chrome runs inside the session container.
-		// This handles the Incus path (local LXC containers).
+		// This helper is Incus-only; OpenShell/K8s register callbacks below via
+		// SetPDFBrowserCallbacksForBackend from chat_factory.
 		wireSandboxBrowserCallbacks(pdfBrowserMgr, cfg, appCfg, cfgErr)
 
 		// Override ContainerResolveFunc: the PDF manager must ensure the
@@ -171,7 +185,7 @@ func GetPDFBrowserManager(sessionID string) *browser.Manager {
 		// or a template snapshot). The shared wireSandboxBrowserCallbacks only
 		// checks IsRunning and fails — we need EnsureSessionContainer which
 		// re-mounts the overlay and starts a stopped container.
-		if pdfBrowserMgr.SandboxEnabled {
+		if pdfBrowserMgr.SandboxEnabled && cfgErr == nil && appCfg != nil && sandbox.BackendKind(appCfg.Sandbox.BackendKind()) == sandbox.BackendKindIncus {
 			sandboxLimits := &appCfg.Sandbox.Limits
 			pdfBrowserMgr.ContainerResolveFunc = func(sessID string) (string, string, error) {
 				client, err := sandbox.SetupSandboxRuntime()
@@ -214,6 +228,7 @@ func GetPDFBrowserManager(sessionID string) *browser.Manager {
 	resolve := registeredPDFResolve
 	startBrowser := registeredPDFStartBrowser
 	dial := registeredPDFDial
+	backendLabel := registeredPDFBackend
 	registeredPDFMu.RUnlock()
 
 	if resolve != nil && dial != nil {
@@ -221,6 +236,10 @@ func GetPDFBrowserManager(sessionID string) *browser.Manager {
 		pdfBrowserMgr.ContainerResolveFunc = resolve
 		pdfBrowserMgr.ContainerStartBrowserFunc = startBrowser
 		pdfBrowserMgr.ContainerDialFunc = dial
+		if backendLabel == "" {
+			backendLabel = "registered"
+		}
+		slog.Info("PDF browser: using registered sandbox callbacks", "backend", backendLabel)
 	}
 
 	// Set the session ID so the manager knows which container to use.
@@ -234,18 +253,27 @@ func GetPDFBrowserManager(sessionID string) *browser.Manager {
 	return pdfBrowserMgr
 }
 
-// wireSandboxBrowserCallbacks wires container callbacks onto a browser.Manager
-// when sandbox mode is enabled. This is shared between GetBrowserManager and
-// GetPDFBrowserManager to avoid duplicating the sandbox wiring logic.
+// wireSandboxBrowserCallbacks wires Incus container callbacks onto a browser.Manager
+// when sandbox mode is enabled with the Incus backend. OpenShell and K8s must
+// register backend-specific callbacks through SetPDFBrowserCallbacksForBackend
+// or their launcher wiring; this helper must not silently select Incus for
+// non-Incus backends.
 func wireSandboxBrowserCallbacks(mgr *browser.Manager, cfg browser.BrowserConfig, appCfg *config.AppConfig, cfgErr error) {
+	if mgr == nil || cfgErr != nil || appCfg == nil || !sandbox.IsSandboxEnabled(&appCfg.Sandbox) {
+		return
+	}
+	if sandbox.BackendKind(appCfg.Sandbox.BackendKind()) != sandbox.BackendKindIncus {
+		return
+	}
 	engine := incus.DetectBrowserEngine(incus.BrowserContainerConfig{
 		ChromePath: cfg.ChromePath,
 	})
-	if !incus.IsContainerCompatibleEngine(engine) || cfgErr != nil || appCfg == nil || !sandbox.IsSandboxEnabled(&appCfg.Sandbox) {
+	if !incus.IsContainerCompatibleEngine(engine) {
 		return
 	}
 
 	mgr.SandboxEnabled = true
+	slog.Info("browser: wired Incus sandbox callbacks", "backend", sandbox.BackendKindIncus)
 
 	mgr.ContainerResolveFunc = func(sessionID string) (string, string, error) {
 		client, err := sandbox.SetupSandboxRuntime()
@@ -832,7 +860,7 @@ func HandleChat(w http.ResponseWriter, r *http.Request) {
 
 	// 5. Create Astonish Agent & ADK Agent
 	astonishAgent := agent.NewAstonishAgentWithToolsets(cfg, llm, internalTools, mcpToolsets)
-	astonishAgent.DebugMode = req.Debug // Enable verbose debug output when requested
+	astonishAgent.DebugMode = req.Debug    // Enable verbose debug output when requested
 	astonishAgent.IsWebMode = !req.CLIMode // CLI mode renders ANSI tool boxes; web mode uses markdown
 	astonishAgent.SessionService = sm.service
 	astonishAgent.AutoApprove = req.AutoApprove

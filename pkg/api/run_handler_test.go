@@ -1,10 +1,125 @@
 package api
 
 import (
+	"io"
+	"net"
 	"testing"
 
+	"github.com/SAP/astonish/pkg/browser"
+	"github.com/SAP/astonish/pkg/config"
+	"github.com/SAP/astonish/pkg/sandbox"
 	"google.golang.org/adk/session"
 )
+
+func TestWireSandboxBrowserCallbacks_IncusOnly(t *testing.T) {
+	enabled := true
+	tests := []struct {
+		name        string
+		backend     string
+		wantEnabled bool
+	}{
+		{name: "default backend wires Incus", backend: "", wantEnabled: true},
+		{name: "explicit Incus wires Incus", backend: "incus", wantEnabled: true},
+		{name: "K8s does not wire Incus", backend: "k8s", wantEnabled: false},
+		{name: "OpenShell does not wire Incus", backend: "openshell", wantEnabled: false},
+		{name: "mock does not wire Incus", backend: "mock", wantEnabled: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mgr := browser.NewManager(browser.DefaultConfig())
+			appCfg := &config.AppConfig{
+				Sandbox: config.SandboxConfig{
+					Enabled: &enabled,
+					Backend: tt.backend,
+				},
+			}
+
+			wireSandboxBrowserCallbacks(mgr, browser.BrowserConfig{}, appCfg, nil)
+
+			if mgr.SandboxEnabled != tt.wantEnabled {
+				t.Fatalf("SandboxEnabled = %v, want %v", mgr.SandboxEnabled, tt.wantEnabled)
+			}
+			if tt.wantEnabled {
+				if mgr.ContainerResolveFunc == nil || mgr.ContainerStartBrowserFunc == nil || mgr.ContainerDialFunc == nil {
+					t.Fatal("expected Incus browser callbacks to be wired")
+				}
+				return
+			}
+			if mgr.ContainerResolveFunc != nil || mgr.ContainerStartBrowserFunc != nil || mgr.ContainerDialFunc != nil {
+				t.Fatal("non-Incus backend should not wire Incus browser callbacks")
+			}
+		})
+	}
+}
+
+func TestWireSandboxBrowserCallbacks_DisabledSandboxDoesNotWire(t *testing.T) {
+	disabled := false
+	mgr := browser.NewManager(browser.DefaultConfig())
+	appCfg := &config.AppConfig{
+		Sandbox: config.SandboxConfig{
+			Enabled: &disabled,
+		},
+	}
+
+	wireSandboxBrowserCallbacks(mgr, browser.BrowserConfig{}, appCfg, nil)
+
+	if mgr.SandboxEnabled {
+		t.Fatal("disabled sandbox should not enable browser sandbox callbacks")
+	}
+}
+
+func TestWireSandboxBrowserCallbacks_CustomChromePathDoesNotWire(t *testing.T) {
+	enabled := true
+	mgr := browser.NewManager(browser.DefaultConfig())
+	appCfg := &config.AppConfig{
+		Sandbox: config.SandboxConfig{
+			Enabled: &enabled,
+		},
+	}
+
+	wireSandboxBrowserCallbacks(mgr, browser.BrowserConfig{ChromePath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"}, appCfg, nil)
+
+	if mgr.SandboxEnabled {
+		t.Fatal("host-only ChromePath should not enable Incus browser callbacks")
+	}
+}
+
+func TestSetPDFBrowserCallbacksForBackendStoresDiagnostics(t *testing.T) {
+	registeredPDFMu.Lock()
+	oldResolve := registeredPDFResolve
+	oldStart := registeredPDFStartBrowser
+	oldDial := registeredPDFDial
+	oldBackend := registeredPDFBackend
+	registeredPDFResolve = nil
+	registeredPDFStartBrowser = nil
+	registeredPDFDial = nil
+	registeredPDFBackend = ""
+	registeredPDFMu.Unlock()
+	defer func() {
+		registeredPDFMu.Lock()
+		registeredPDFResolve = oldResolve
+		registeredPDFStartBrowser = oldStart
+		registeredPDFDial = oldDial
+		registeredPDFBackend = oldBackend
+		registeredPDFMu.Unlock()
+	}()
+
+	resolve := func(string) (string, string, error) { return "", "", nil }
+	start := func(string) (io.Closer, error) { return nil, nil }
+	dial := func(string, int) (net.Conn, error) { return nil, nil }
+
+	SetPDFBrowserCallbacksForBackend(string(sandbox.BackendKindK8s), resolve, start, dial)
+
+	registeredPDFMu.RLock()
+	defer registeredPDFMu.RUnlock()
+	if registeredPDFBackend != string(sandbox.BackendKindK8s) {
+		t.Fatalf("registeredPDFBackend = %q, want %q", registeredPDFBackend, sandbox.BackendKindK8s)
+	}
+	if registeredPDFResolve == nil || registeredPDFStartBrowser == nil || registeredPDFDial == nil {
+		t.Fatal("PDF callbacks were not registered")
+	}
+}
 
 // TestShouldStreamInputPrompt verifies that input prompts are streamed
 // even when the node has output_model (which normally suppresses text).
@@ -102,9 +217,9 @@ func TestShouldStreamInputPrompt(t *testing.T) {
 // TestSilentModeSkipsNodeEvent verifies that node events are skipped when silent flag is true
 func TestSilentModeSkipsNodeEvent(t *testing.T) {
 	tests := []struct {
-		name               string
-		stateDelta         map[string]any
-		expectedSendEvent  bool
+		name              string
+		stateDelta        map[string]any
+		expectedSendEvent bool
 	}{
 		{
 			name: "silent true should skip node event",

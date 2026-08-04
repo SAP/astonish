@@ -397,13 +397,13 @@ The entrypoint runs as PID 1 with the privilege path selected at chart-install t
    - Walk `parent_template_id` from the chosen template up to the root (`@base`), collecting each ancestor's `top_layer_id`. Reverse to obtain bottom-up order.
    - Verify every layer exists on the layers PVC at `/mnt/astonish-layers/<layer-id>/rootfs/`.
    - Reject if chain depth > `sandbox.layers.maxChainDepth` (default 20; §5.11).
-2. Generate deterministic pod name: `astn-sess-<sessionID>` (truncated to 27 chars after the prefix; DNS-1123 sanitized; `pkg/sandbox/k8s/session.go::podNameForSession`).
+2. Generate deterministic pod name: `astn-sess-<dns-safe-prefix>-<hash>` (`pkg/sandbox/k8s/session.go::podNameForSession`). The readable prefix is DNS-1123 sanitized and the hash suffix preserves uniqueness for channel session IDs that contain characters such as `:`, `@`, or `_`.
 3. Build `PodSpec`:
    - Privilege path from §10 (FUSE plugin / userns / privileged / Sysbox), driven by `sandbox.overlay.*` Helm values.
    - `imagePullPolicy` derived by `pkg/sandbox/k8s/image.go::imagePullPolicy()` (`Always` for mutable tags such as `dev`/`latest`/`edge`/`nightly`; `IfNotPresent` for digest pins and immutable tags).
    - Namespace: configured sandbox namespace (default `astonish-sandbox`).
-   - Labels: `astonish.io/{org,team,session-id,type=session,template}`; optional `astonish.io/purpose=team-template-editor` for editor sessions.
-   - Annotations: `astonish.io/created-by`, `astonish.io/created-at`, `astonish.io/layer-chain=<comma-separated-ids>`.
+   - Labels: `astonish.io/{org,team,session-id,type=session,template}`; optional `astonish.io/purpose=team-template-editor` for editor sessions. The `session-id` label is DNS-safe and may be hashed for channel sessions.
+   - Annotations: `astonish.io/created-by`, `astonish.io/created-at`, `astonish.io/session-id=<exact chat/channel session ID>`, `astonish.io/layer-chain=<comma-separated-ids>`.
    - Volumes: `layers` (RO or RW depending on purpose), `uppers` (RW), `overlay` (`emptyDir`).
    - Main container entrypoint as above; resource requests/limits from `sandbox.requests.*` and `sandbox.limits.*` (auto-derived from limits when requests are zero — see §6).
 4. **Self-heal step (Status: shipped).** Before returning, `CreateSession` verifies the pod actually exists in the cluster — not just in any cached registry entry. This protects against stale registry rows pointing at pods that were deleted out-of-band (e.g., node failure, manual `kubectl delete`); when the verification fails, the registry entry is dropped and the create proceeds normally.
@@ -414,14 +414,14 @@ The entrypoint runs as PID 1 with the privilege path selected at chart-install t
 **Start / Stop** (decision Q1(b) — evict via tar stream to the uppers PVC):
 
 - Sessions stay running while active. On idle timeout:
-  - Each session pod mounts only its own uppers PVC subdirectory (`subPath: <session-id>`) at `/mnt/astonish-uppers`. The full PVC root is not visible to the chrooted sandbox, so a session cannot enumerate or read another session's persisted upper directory through `/mnt/astonish-uppers`.
+  - Each session pod mounts only its own uppers PVC subdirectory at `/mnt/astonish-uppers`. Filesystem-safe session IDs use the session ID directly; channel IDs with punctuation (for example email thread IDs) use a deterministic `sid-<hash>` subdirectory. The full PVC root is not visible to the chrooted sandbox, so a session cannot enumerate or read another session's persisted upper directory through `/mnt/astonish-uppers`.
   - `StopSession` first marks the row `evicting`, then persists the live pod's writable layer by streaming `/var/astonish/overlay/upper` to that mounted session subdirectory via
     `tar --numeric-owner --xattrs --acls -I "zstd --adapt -T0" --exclude=/var/astonish/overlay/upper/mnt/astonish-uppers -C /var/astonish/overlay/upper -cf /mnt/astonish-uppers/upper.tar.zst.tmp . && mv .../upper.tar.zst.tmp .../upper.tar.zst`.
     Only after that capture succeeds does it delete the pod. If capture fails, the pod stays running so data is not lost.
   - The same persistence script is installed as a Kubernetes container `preStop` hook with a 90-second termination grace period. This covers manual `kubectl delete pod` and normal Kubernetes termination paths that bypass the backend's `StopSession` method.
   - Row in `sandbox_sessions` stays; status updates `evicting` → `evicted` and clears the pod binding after deletion. At eviction time, the original resolved layer chain is retained in the registry so resume does not silently fall back to plain `@base` for configured base/team-template sessions.
 - On next tool interaction, `StartSession` recreates the pod with the same `ASTONISH_SESSION_ID`; the entrypoint resume step (above) streams `/mnt/astonish-uppers/upper.tar.zst` back into the local `emptyDir` before mounting the overlay. Resume latency: 1–5 s depending on upper-layer size.
-- Isolation invariant: the persisted-upper path is derived only from the registry row's exact session ID. API callers never provide an upper path, unsafe session IDs are rejected before any pod/tar/cleanup script is built, and cleanup deletes only the validated session subdirectory.
+- Isolation invariant: the persisted-upper path is derived only from the registry row's exact session ID. API callers never provide an upper path. Session IDs containing `/`, `.` or `..` are rejected before any pod/tar/cleanup script is built; other non-path-safe IDs are mapped through the deterministic hash described above, and cleanup deletes only that validated session subdirectory.
 
 This preserves Incus's "container exists but stopped, resume later" semantics while keeping each session's upper layer isolated under its own uppers-PVC directory.
 

@@ -766,8 +766,8 @@ func TestStopSession_DoesNotDeletePodWhenPersistFails(t *testing.T) {
 	}
 }
 
-func TestUpperDirNameForSessionRejectsUnsafeIDs(t *testing.T) {
-	bad := []string{"", ".", "..", "../other", "abc;rm -rf /", "$(cat /secret)", "abc/def", "team session"}
+func TestUpperDirNameForSessionRejectsPathTraversalIDs(t *testing.T) {
+	bad := []string{"", ".", "..", "../other", "abc/def"}
 	for _, id := range bad {
 		if got, err := upperDirNameForSession(id); err == nil {
 			t.Fatalf("upperDirNameForSession(%q) = %q, want error", id, got)
@@ -778,11 +778,45 @@ func TestUpperDirNameForSessionRejectsUnsafeIDs(t *testing.T) {
 	}
 }
 
-func TestCreateSessionRejectsUnsafeSessionIDForUpperIsolation(t *testing.T) {
+func TestUpperDirNameForSessionHashesChannelIDs(t *testing.T) {
+	sessionID := "email:direct:rafael@example.com-a1b2c3d4"
+	got, err := upperDirNameForSession(sessionID)
+	if err != nil {
+		t.Fatalf("upperDirNameForSession(%q): %v", sessionID, err)
+	}
+	if got == sessionID || !strings.HasPrefix(got, "sid-") || !safeSessionPathRE.MatchString(got) {
+		t.Fatalf("upperDirNameForSession(%q) = %q, want safe hashed directory", sessionID, got)
+	}
+}
+
+func TestCreateSessionRejectsPathTraversalSessionIDForUpperIsolation(t *testing.T) {
 	b, _ := newBackendWithFakeClient(t)
 	_, err := b.CreateSession(context.Background(), sandbox.SessionSpec{SessionID: "../other", TemplateID: "t1"})
 	if err == nil || !strings.Contains(err.Error(), "not safe for upper persistence") {
 		t.Fatalf("CreateSession unsafe ID error = %v, want upper isolation validation", err)
+	}
+}
+
+func TestCreateSessionAcceptsEmailThreadSessionID(t *testing.T) {
+	b, cs := newBackendWithFakeClient(t)
+	ctx := context.Background()
+	sessionID := "email:direct:rafael@example.com-a1b2c3d4"
+	if _, err := b.CreateSession(ctx, sandbox.SessionSpec{SessionID: sessionID, TemplateID: "t1"}); err != nil {
+		t.Fatalf("CreateSession email session ID: %v", err)
+	}
+	pod, err := cs.CoreV1().Pods(b.cfg.Namespace).Get(ctx, podNameForSession(sessionID), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get pod: %v", err)
+	}
+	upperDir, err := upperDirNameForSession(sessionID)
+	if err != nil {
+		t.Fatalf("upper dir: %v", err)
+	}
+	if got := pod.Spec.Containers[0].VolumeMounts[1].SubPath; got != upperDir {
+		t.Fatalf("uppers subPath = %q, want %q", got, upperDir)
+	}
+	if got := pod.Annotations[annotationSessionID]; got != sessionID {
+		t.Fatalf("session annotation = %q, want %q", got, sessionID)
 	}
 }
 

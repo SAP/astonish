@@ -64,7 +64,7 @@ export default function EmbeddedFileViewer({ artifact, sessionId, onOpenInPanel,
       .catch(err => { if (!cancelled) setError(err.message) })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
-  }, [artifact.path, sessionId, mediaKind])
+  }, [artifact.path, artifact.revision, sessionId, mediaKind])
 
   // Close dropdown on outside click
   useEffect(() => {

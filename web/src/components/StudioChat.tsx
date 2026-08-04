@@ -1012,15 +1012,31 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
               const fileName = (data.path as string).split('/').pop() || 'file'
               const fileType = fileTypeFromFileName(fileName)
               setSessionArtifacts(prev => {
-                if (prev.some(a => a.path === data.path)) return prev
-                return [...prev, { path: data.path as string, fileName, fileType, toolName: (data.tool_name as string) || 'write_file' }]
+                const path = data.path as string
+                const toolName = (data.tool_name as string) || 'write_file'
+                const existing = prev.find(a => a.path === path)
+                if (!existing) return [...prev, { path, fileName, fileType, toolName, revision: 1 }]
+                return prev.map(a => a.path === path
+                  ? { ...a, fileName, fileType, toolName, revision: (a.revision || 0) + 1 }
+                  : a,
+                )
               })
               // Also add inline artifact message to the chat thread
-              setMessages((prev: ChatMsg[]) => [...prev, {
-                type: 'artifact',
-                path: data.path as string,
-                toolName: (data.tool_name as string) || 'write_file',
-              } as ArtifactMessage])
+              setMessages((prev: ChatMsg[]) => {
+                const path = data.path as string
+                const toolName = (data.tool_name as string) || 'write_file'
+                const latestRevision = prev.reduce((max, m) => (
+                  m.type === 'artifact' && (m as ArtifactMessage).path === path
+                    ? Math.max(max, (m as ArtifactMessage).revision || 0)
+                    : max
+                ), 0) + 1
+                return [...prev, {
+                  type: 'artifact',
+                  path,
+                  toolName,
+                  revision: latestRevision,
+                } as ArtifactMessage]
+              })
             }
             break
 
@@ -1864,15 +1880,31 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
               const fileName = (data.path as string).split('/').pop() || 'file'
               const fileType = fileTypeFromFileName(fileName)
               setSessionArtifacts(prev => {
-                if (prev.some(a => a.path === data.path)) return prev
-                return [...prev, { path: data.path as string, fileName, fileType, toolName: (data.tool_name as string) || 'write_file' }]
+                const path = data.path as string
+                const toolName = (data.tool_name as string) || 'write_file'
+                const existing = prev.find(a => a.path === path)
+                if (!existing) return [...prev, { path, fileName, fileType, toolName, revision: 1 }]
+                return prev.map(a => a.path === path
+                  ? { ...a, fileName, fileType, toolName, revision: (a.revision || 0) + 1 }
+                  : a,
+                )
               })
               // Also add inline artifact message to the chat thread
-              setMessages((prev: ChatMsg[]) => [...prev, {
-                type: 'artifact',
-                path: data.path as string,
-                toolName: (data.tool_name as string) || 'write_file',
-              } as ArtifactMessage])
+              setMessages((prev: ChatMsg[]) => {
+                const path = data.path as string
+                const toolName = (data.tool_name as string) || 'write_file'
+                const latestRevision = prev.reduce((max, m) => (
+                  m.type === 'artifact' && (m as ArtifactMessage).path === path
+                    ? Math.max(max, (m as ArtifactMessage).revision || 0)
+                    : max
+                ), 0) + 1
+                return [...prev, {
+                  type: 'artifact',
+                  path,
+                  toolName,
+                  revision: latestRevision,
+                } as ArtifactMessage]
+              })
             }
             break
 

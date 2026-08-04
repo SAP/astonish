@@ -17,8 +17,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gorilla/mux"
 	"github.com/SAP/astonish/pkg/browser"
+	"github.com/gorilla/mux"
 )
 
 const (
@@ -262,6 +262,12 @@ func AuthMiddleware(am *AuthManager, next http.Handler) http.Handler {
 
 		// Auth endpoints are always accessible
 		if strings.HasPrefix(path, "/api/auth/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Slack webhooks are authenticated by Slack request signatures in the channel handler.
+		if path == "/api/slack/events" || path == "/api/slack/commands" {
 			next.ServeHTTP(w, r)
 			return
 		}

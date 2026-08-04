@@ -93,17 +93,16 @@ export function useChannelLinkFlow({
   // Poll for link completion when code is active
   useEffect(() => {
     if (!code) return
-    const initialCount = channels.filter(c => c.channel_type === channelType).length
 
     pollRef.current = setInterval(async () => {
       try {
         const res = await fetch('/api/user/channels', { credentials: 'include' })
         if (!res.ok) return
         const data = await res.json()
-        const channelsOfType = (data.channels || []).filter(
-          (c: UserChannel) => c.channel_type === channelType
+        const linkedChannel = (data.channels || []).find(
+          (c: UserChannel) => c.channel_type === channelType && c.verified && c.enabled
         )
-        if (channelsOfType.length > initialCount) {
+        if (linkedChannel) {
           setCode(null)
           setExpiresAt(null)
           if (pollRef.current) clearInterval(pollRef.current)
@@ -114,7 +113,7 @@ export function useChannelLinkFlow({
     }, 3000)
 
     return () => { if (pollRef.current) clearInterval(pollRef.current) }
-  }, [code, channels, channelType, onLinked, onSuccess])
+  }, [code, channelType, onLinked, onSuccess])
 
   // Cleanup on unmount
   useEffect(() => {

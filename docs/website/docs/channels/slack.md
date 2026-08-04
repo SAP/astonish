@@ -10,15 +10,23 @@ The Slack channel integrates Astonish into your Slack workspace, enabling AI age
 2. Choose **From scratch**, name it, and select your workspace
 3. Under **OAuth & Permissions**, add these bot token scopes:
    - `chat:write`
+   - `commands`
    - `app_mentions:read`
    - `im:history`
    - `im:read`
    - `im:write`
-4. Install the app to your workspace and copy the **Bot User OAuth Token** (`xoxb-...`)
-5. For Socket Mode: Under **App-Level Tokens**, create a token with `connections:write` scope (`xapp-...`)
-6. Under **Event Subscriptions**, subscribe to:
-   - `message.im`
-   - `app_mention`
+   - `users:read`
+   - Optional, if you want channel/private-channel history or App Agent features: `channels:history`, `groups:history`, `assistant:write`
+4. Under **Socket Mode**, enable Socket Mode.
+5. For Socket Mode: under **App-Level Tokens**, create a token with `connections:write` scope (`xapp-...`).
+6. Under **Event Subscriptions**:
+   - Turn **Enable Events** on.
+   - Under **Subscribe to bot events**, add:
+     - `message.im` — required for direct messages to the app.
+     - `app_mention` — required for `@Astonish` mentions in channels.
+     - Optional, for Slack App Agent features: `assistant_thread_started`, `assistant_thread_context_changed`.
+7. Under **Slash Commands**, create a `/link` command. For Socket Mode, Slack delivers this over the WebSocket. For Events API mode, set the request URL to `https://<your-astonish-host>/api/slack/commands`.
+8. Install or **reinstall** the app to your workspace after changing scopes, slash commands, or event subscriptions, then copy the **Bot User OAuth Token** (`xoxb-...`).
 
 ### 2. Configure via CLI
 
@@ -54,7 +62,7 @@ astonish daemon start
 | Mode | Transport | Use Case |
 |------|-----------|----------|
 | `socket` | WebSocket (Socket Mode) | Recommended for most setups. No public URL needed. |
-| `events` | HTTP webhook (Events API) | For environments requiring HTTP endpoints. Needs `signing_secret`. |
+| `events` | HTTP webhook (Events API) | For environments requiring HTTP endpoints. Needs `signing_secret`, `POST /api/slack/events` as the Events request URL, and `POST /api/slack/commands` as the `/link` slash-command request URL. |
 
 ## Interaction Patterns
 
@@ -62,9 +70,13 @@ astonish daemon start
 - **Mention** — `@Astonish <message>` in any channel the bot is invited to
 - **Thread** — Replies within a thread maintain session context
 
+## Message Formatting
+
+Astonish sends Slack-native replies. Regular responses are converted to Slack `mrkdwn`, and structured summaries may use Block Kit sections, fields, tables, and a compact context footer for readability. Markdown tables and grouped inventory-style lists can be rendered as Slack table blocks without relying on a specific domain or topic. Long answers, code blocks, and content that would exceed Slack block limits automatically fall back to chunked text replies.
+
 ## Available Commands
 
-Send these as messages to the bot:
+Send these as messages to the bot. Slack account linking uses Slack's configured `/link` slash command; the other commands are handled by Astonish after your Slack account is linked.
 
 | Command | Description |
 |---------|-------------|
@@ -90,8 +102,12 @@ In PostgreSQL deployments, Slack gains multi-tenant capabilities:
 
 ```
 User: /link ABC123
-Bot:  ✓ Account linked. You're now connected as alice@acme.corp (org: acme, team: backend)
+Bot:  ✓ Account linked. You're now connected as alice@acme.corp
 ```
+
+If Slack shows no response when you run `/link`, verify that the Slack app has a `/link` slash command and that Socket Mode or the `/api/slack/commands` request URL is configured. Slack slash commands are not delivered as normal DM text.
+
+If `/link` works but normal chat messages do not, verify that **Event Subscriptions** is enabled, that the bot is subscribed to `message.im` and `app_mention`, and that the app was reinstalled after those changes. OAuth scopes grant permission, but bot event subscriptions control which message events Slack delivers to Astonish.
 
 ## Managing the Channel
 

@@ -174,6 +174,20 @@ astonish/
 
 ## Key Patterns
 
+### General-Purpose Abstractions Must Stay Domain-Agnostic
+
+Astonish is a general agent platform. Most functionality is reusable across many tools, data sources, teams, and business domains. Do **not** hard-code behavior for one specific kind of result, provider, customer, resource, or answer shape inside general-purpose code.
+
+This rule applies broadly: renderers, parsers, API handlers, UI components, prompts, channel adapters, summaries, exporters, routing, tools, stores, and orchestration logic should operate on generic contracts and reusable structure rather than on domain-specific meaning. It is acceptable to recognize structural patterns such as tables, key/value pairs, grouped lists, code blocks, attachments, typed events, or explicitly modeled metadata. It is not acceptable to add one-off branches for a particular service, resource type, customer dataset, or example response when the feature is meant to work across scenarios.
+
+When richer behavior is needed, choose one of these approaches:
+
+1. Define or reuse a generic structure the producer can emit, such as a Markdown table, JSON schema, typed event, or metadata field.
+2. Add a domain-neutral parser for a reusable shape, such as grouped lists, records, key/value summaries, timelines, or tables.
+3. Introduce an explicit typed contract only after designing it as a general platform capability, not as a special case for one tool or one answer.
+
+Tests for general-purpose code should use neutral fixtures (`items`, `groups`, `records`, `resources`) unless the code is intentionally implementing a documented domain-specific integration. If you find yourself naming a specific external product, infrastructure resource, customer concept, or one-off example inside reusable code, stop and redesign the abstraction.
+
 ### Config Loading (Go)
 - User configs live in `~/.config/astonish/`.
 - YAML with `gopkg.in/yaml.v3`.

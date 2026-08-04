@@ -775,7 +775,7 @@ export default function ConnectedChannelsSettings({ isAdmin = false }: { isAdmin
           {/* Instructions */}
           <div className="text-center">
             <p className="text-sm font-medium mb-1" style={{ color: 'var(--text-primary)' }}>
-              Send this command to the bot via DM in Slack:
+              Use the configured Slack slash command:
             </p>
           </div>
 
@@ -809,9 +809,9 @@ export default function ConnectedChannelsSettings({ isAdmin = false }: { isAdmin
             <div className="space-y-1 pt-2 border-t" style={{ borderColor: 'var(--border-color)' }}>
               <p className="text-xs font-medium" style={{ color: 'var(--text-secondary)' }}>Steps:</p>
               <ol className="text-xs space-y-1 list-decimal list-inside" style={hintStyle}>
-                <li>Open your Slack workspace and find the bot in your sidebar (or Apps section)</li>
-                <li>Send a direct message: <code className="px-1 py-0.5 rounded text-xs" style={{ background: 'var(--bg-tertiary)' }}>/link {slackLink.code}</code></li>
-                <li>Wait for confirmation — this page updates automatically</li>
+                <li>Open your Slack workspace.</li>
+                <li>Run <code className="px-1 py-0.5 rounded text-xs" style={{ background: 'var(--bg-tertiary)' }}>/link {slackLink.code}</code> in any Slack channel or DM where the Astonish app is available.</li>
+                <li>Wait for Slack to show confirmation — this page updates automatically.</li>
               </ol>
               {slackBotUserID && (
                 <p className="text-xs mt-1 font-mono" style={hintStyle}>

@@ -1201,6 +1201,8 @@ func RegisterRoutes(router *mux.Router, svc *store.Services, backend store.Platf
 	// Channels endpoints
 	router.HandleFunc("/api/channels/status", ChannelsStatusHandler).Methods("GET")
 	router.HandleFunc("/api/channels/reload", ChannelsReloadHandler).Methods("POST")
+	router.HandleFunc("/api/slack/events", SlackEventsHandler).Methods("POST")
+	router.HandleFunc("/api/slack/commands", SlackSlashCommandHandler).Methods("POST")
 
 	// Browser VNC proxy endpoints (KasmVNC in container)
 	router.HandleFunc("/api/browser/vnc-info/{container}", BrowserVNCInfoHandler).Methods("GET")

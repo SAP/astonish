@@ -301,26 +301,20 @@ func (s *SlackChannel) Send(ctx context.Context, target channels.Target, msg cha
 	}
 
 	// --- Phase 1: Send text ---
-	if strings.TrimSpace(msg.Text) != "" {
-		text := msg.Text
-		if msg.Format == channels.FormatMarkdown || msg.Format == "" {
-			text = MarkdownToMrkdwn(text)
+	for _, rendered := range renderOutboundMessage(msg) {
+		opts := []slack.MsgOption{
+			slack.MsgOptionText(rendered.Text, false),
+		}
+		if len(rendered.Blocks) > 0 {
+			opts = append(opts, slack.MsgOptionBlocks(rendered.Blocks...))
+		}
+		if threadTS != "" {
+			opts = append(opts, slack.MsgOptionTS(threadTS))
 		}
 
-		chunks := splitMessage(text, maxMessageLength)
-
-		for _, chunk := range chunks {
-			opts := []slack.MsgOption{
-				slack.MsgOptionText(chunk, false),
-			}
-			if threadTS != "" {
-				opts = append(opts, slack.MsgOptionTS(threadTS))
-			}
-
-			_, _, err := api.PostMessageContext(ctx, channelID, opts...)
-			if err != nil {
-				return fmt.Errorf("slack: send failed: %w", err)
-			}
+		_, _, err := api.PostMessageContext(ctx, channelID, opts...)
+		if err != nil {
+			return fmt.Errorf("slack: send failed: %w", err)
 		}
 	}
 
@@ -337,11 +331,11 @@ func (s *SlackChannel) Send(ctx context.Context, target channels.Target, msg cha
 		}
 
 		params := slack.UploadFileParameters{
-			Channel:        channelID,
-			Reader:         strings.NewReader(string(img.Data)),
-			Filename:       filename,
-			Title:          title,
-			FileSize:       len(img.Data),
+			Channel:         channelID,
+			Reader:          strings.NewReader(string(img.Data)),
+			Filename:        filename,
+			Title:           title,
+			FileSize:        len(img.Data),
 			ThreadTimestamp: threadTS,
 		}
 
@@ -362,11 +356,11 @@ func (s *SlackChannel) Send(ctx context.Context, target channels.Target, msg cha
 		}
 
 		params := slack.UploadFileParameters{
-			Channel:        channelID,
-			Reader:         strings.NewReader(string(doc.Data)),
-			Filename:       filename,
-			Title:          doc.Caption,
-			FileSize:       len(doc.Data),
+			Channel:         channelID,
+			Reader:          strings.NewReader(string(doc.Data)),
+			Filename:        filename,
+			Title:           doc.Caption,
+			FileSize:        len(doc.Data),
 			ThreadTimestamp: threadTS,
 		}
 
@@ -428,6 +422,8 @@ func (s *SlackChannel) RefreshCommands(commands *channels.CommandRegistry) {}
 
 // handleSocketModeEvent processes a single Socket Mode event envelope.
 func (s *SlackChannel) handleSocketModeEvent(ctx context.Context, evt socketmode.Event) {
+	s.logger.Printf("[slack] Socket Mode envelope received: type=%s", evt.Type)
+
 	switch evt.Type {
 	case socketmode.EventTypeEventsAPI:
 		eventsAPIEvent, ok := evt.Data.(slackevents.EventsAPIEvent)
@@ -438,6 +434,16 @@ func (s *SlackChannel) handleSocketModeEvent(ctx context.Context, evt socketmode
 		s.smClient.Ack(*evt.Request)
 		// Process the inner event
 		s.handleEventsAPIEvent(ctx, eventsAPIEvent, "")
+
+	case socketmode.EventTypeSlashCommand:
+		cmd, ok := evt.Data.(slack.SlashCommand)
+		if !ok {
+			if evt.Request != nil {
+				s.smClient.Ack(*evt.Request)
+			}
+			return
+		}
+		s.handleSocketModeSlashCommand(ctx, evt, cmd)
 
 	case socketmode.EventTypeConnecting:
 		s.logger.Printf("[slack] Socket Mode connecting...")
@@ -463,9 +469,13 @@ func (s *SlackChannel) handleEventsAPIEvent(ctx context.Context, event slackeven
 		teamID = event.TeamID
 	}
 
+	s.logger.Printf("[slack] Events API event received: outer_type=%s inner_type=%s team=%s", event.Type, event.InnerEvent.Type, teamID)
+
 	switch event.Type {
 	case slackevents.CallbackEvent:
 		s.handleCallbackEvent(ctx, event.InnerEvent, teamID)
+	default:
+		s.logger.Printf("[slack] Ignored Events API outer event type %q", event.Type)
 	}
 }
 
@@ -476,6 +486,8 @@ func (s *SlackChannel) handleCallbackEvent(ctx context.Context, innerEvent slack
 		s.handleAppMention(ctx, ev, teamID)
 	case *slackevents.MessageEvent:
 		s.handleMessage(ctx, ev, teamID)
+	default:
+		s.logger.Printf("[slack] Ignored Events API inner event type %q (%T)", innerEvent.Type, innerEvent.Data)
 	}
 }
 
@@ -536,8 +548,10 @@ func (s *SlackChannel) handleAppMention(ctx context.Context, ev *slackevents.App
 
 // handleMessage processes a DM (message.im) event.
 func (s *SlackChannel) handleMessage(ctx context.Context, ev *slackevents.MessageEvent, teamID string) {
-	// Only handle DMs (im type) — channel messages come via app_mention
-	if ev.ChannelType != "im" {
+	// Only handle DMs — channel messages come via app_mention. Some Slack
+	// payloads omit channel_type, so accept DM channel IDs as a fallback.
+	if !isDirectMessageEvent(ev) {
+		s.logger.Printf("[slack] Ignored non-DM message event from user %s in channel %s (channel_type=%q)", ev.User, ev.Channel, ev.ChannelType)
 		return
 	}
 
@@ -549,8 +563,10 @@ func (s *SlackChannel) handleMessage(ctx context.Context, ev *slackevents.Messag
 	if ev.BotID != "" {
 		return
 	}
-	// Ignore message subtypes (edits, deletes, etc.)
-	if ev.SubType != "" {
+	// Ignore message subtypes (edits, deletes, etc.), but keep Slack App Agent
+	// assistant-thread messages: those may carry the user's normal app DM text.
+	if ev.SubType != "" && ev.SubType != slack.MsgSubTypeAssistantAppThread {
+		s.logger.Printf("[slack] Ignored DM subtype %q from user %s in channel %s", ev.SubType, ev.User, ev.Channel)
 		return
 	}
 
@@ -573,6 +589,11 @@ func (s *SlackChannel) handleMessage(ctx context.Context, ev *slackevents.Messag
 
 	s.msgCount.Add(1)
 
+	threadTS := ev.ThreadTimeStamp
+	if threadTS == "" {
+		threadTS = ev.TimeStamp
+	}
+
 	inbound := channels.InboundMessage{
 		ID:         ev.TimeStamp,
 		ChannelID:  "slack",
@@ -581,6 +602,7 @@ func (s *SlackChannel) handleMessage(ctx context.Context, ev *slackevents.Messag
 		ChatID:     ev.Channel,
 		ChatType:   channels.ChatTypeDirect,
 		Text:       text,
+		ThreadID:   threadTS,
 		Timestamp:  tsToTime(ev.TimeStamp),
 		Raw:        ev,
 	}
@@ -590,8 +612,36 @@ func (s *SlackChannel) handleMessage(ctx context.Context, ev *slackevents.Messag
 	}
 }
 
+// handleSocketModeSlashCommand processes Slack slash commands delivered over Socket Mode.
+func (s *SlackChannel) handleSocketModeSlashCommand(ctx context.Context, evt socketmode.Event, cmd slack.SlashCommand) {
+	response := s.handleSlashCommand(ctx, cmd)
+	if evt.Request != nil {
+		if err := s.smClient.Ack(*evt.Request, map[string]string{"response_type": "ephemeral", "text": response}); err != nil {
+			s.logger.Printf("[slack] Failed to acknowledge slash command %s: %v", cmd.Command, err)
+		}
+	}
+}
+
+// HandleSlashCommand processes a Slack slash-command HTTP request and returns the text
+// Slack should show to the invoking user.
+func (s *SlackChannel) HandleSlashCommand(ctx context.Context, cmd slack.SlashCommand) string {
+	return s.handleSlashCommand(ctx, cmd)
+}
+
+func (s *SlackChannel) handleSlashCommand(ctx context.Context, cmd slack.SlashCommand) string {
+	if cmd.Command != "/link" {
+		s.logger.Printf("[slack] Ignoring unsupported slash command %q from user %s", cmd.Command, cmd.UserID)
+		return "This Slack command is not handled by Astonish. Use /link CODE to connect your Astonish account."
+	}
+	return s.linkAccount(ctx, cmd.UserID, s.displayNameForSlashCommand(ctx, cmd), cmd.Text)
+}
+
 // handleLinkCommand processes a /link CODE message.
 func (s *SlackChannel) handleLinkCommand(ctx context.Context, userID, displayName, code, channelID, threadTS string) {
+	s.sendReply(ctx, channelID, threadTS, s.linkAccount(ctx, userID, displayName, code))
+}
+
+func (s *SlackChannel) linkAccount(ctx context.Context, userID, displayName, code string) string {
 	code = strings.TrimSpace(code)
 
 	s.mu.RLock()
@@ -599,17 +649,14 @@ func (s *SlackChannel) handleLinkCommand(ctx context.Context, userID, displayNam
 	s.mu.RUnlock()
 
 	if linkHandler == nil {
-		s.sendReply(ctx, channelID, threadTS, "Account linking is not available.")
-		return
+		return "Account linking is not available."
 	}
 
 	if code == "" {
-		s.sendReply(ctx, channelID, threadTS, "Usage: /link CODE\n\nGet a link code from the Astonish Settings → Channels page.")
-		return
+		return "Usage: /link CODE\n\nGet a link code from the Astonish Settings → Channels page."
 	}
 
 	success, msg := linkHandler(ctx, userID, displayName, code)
-	s.sendReply(ctx, channelID, threadTS, msg)
 
 	// If successful, add to allowlist immediately
 	if success {
@@ -617,6 +664,8 @@ func (s *SlackChannel) handleLinkCommand(ctx context.Context, userID, displayNam
 		s.allowSet[userID] = true
 		s.allowMu.Unlock()
 	}
+
+	return msg
 }
 
 // --- Helpers ---
@@ -648,12 +697,39 @@ func (s *SlackChannel) getUserDisplayName(ctx context.Context, userID, teamID st
 		return userID
 	}
 
+	return slackUserDisplayName(user, userID)
+}
+
+func (s *SlackChannel) displayNameForSlashCommand(ctx context.Context, cmd slack.SlashCommand) string {
+	if name := s.getUserDisplayName(ctx, cmd.UserID, cmd.TeamID); name != "" && name != cmd.UserID {
+		return name
+	}
+	if cmd.UserName != "" {
+		return cmd.UserName
+	}
+	return cmd.UserID
+}
+
+func isDirectMessageEvent(ev *slackevents.MessageEvent) bool {
+	if ev == nil {
+		return false
+	}
+	return ev.ChannelType == "im" || (ev.ChannelType == "" && strings.HasPrefix(ev.Channel, "D"))
+}
+
+func slackUserDisplayName(user *slack.User, fallback string) string {
+	if user == nil {
+		return fallback
+	}
 	name := user.Profile.DisplayName
 	if name == "" {
 		name = user.Profile.RealName
 	}
 	if name == "" {
 		name = user.Name
+	}
+	if name == "" {
+		name = fallback
 	}
 	return name
 }

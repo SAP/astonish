@@ -49,7 +49,7 @@ Configuration (config.yaml or Studio):
       command: npx
       args: ["-y", "@modelcontextprotocol/server-github"]
       env:
-        GITHUB_TOKEN: "{{secret:github_token}}"
+        GITHUB_TOKEN: "{{CREDENTIAL:github:token}}"
     |
     v
 Daemon startup:
@@ -137,6 +137,6 @@ If sandboxed MCP startup fails with network-looking diagnostics, the inspector r
 - **Agent Engine**: MCP tools are registered alongside built-in tools. The ToolIndex indexes MCP tool names for semantic discovery.
 - **Sandbox**: MCP servers can run inside containers via ContainerMCPTransport. The LazyNodeClient provides the container.
 - **Configuration**: MCP servers are configured in `config.yaml` or via the Studio UI.
-- **Credentials**: MCP server environment variables can reference secrets from the credential store via `{{secret:name}}` syntax.
+- **Credentials**: MCP server environment variables can reference secrets from the credential store via `{{CREDENTIAL:name:field}}` placeholders (e.g. `GITHUB_TOKEN: "{{CREDENTIAL:github:token}}"`). Placeholders are stored in config/DB and expanded only when the MCP process starts (host, sandbox, discovery, inspector). The Studio Editor binds env keys via a credential picker / create-secret flow; the Source view shows the raw placeholder form.
 - **Flows**: Flow MCP dependencies declare which MCP servers a flow requires.
 - **API/Studio**: MCP endpoints manage servers, the inspector provides debugging.

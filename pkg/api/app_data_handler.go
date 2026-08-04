@@ -13,6 +13,7 @@ import (
 
 	"github.com/SAP/astonish/pkg/apps"
 	"github.com/SAP/astonish/pkg/config"
+	"github.com/SAP/astonish/pkg/mcp"
 	"github.com/SAP/astonish/pkg/sandbox"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/gorilla/mux"
@@ -381,7 +382,12 @@ func invokeMCPToolInContainer(r *http.Request, userID, serverName, toolName stri
 		defer cleanup()
 	}
 
-	transport, stderrBuf := sandbox.NewBackendMCPTransport(backend, syntheticSessionID, serverCfg)
+	resolvedCfg, err := mcp.ResolveMCPServerConfig(serverCfg, credentialResolverForRequest(r))
+	if err != nil {
+		return nil, fmt.Errorf("MCP server %q credential resolution: %w", serverName, err)
+	}
+
+	transport, stderrBuf := sandbox.NewBackendMCPTransport(backend, syntheticSessionID, resolvedCfg)
 
 	toolset, err := mcptoolset.New(mcptoolset.Config{
 		Transport: transport,
@@ -389,7 +395,7 @@ func invokeMCPToolInContainer(r *http.Request, userID, serverName, toolName stri
 	if err != nil {
 		transport.Close()
 		msg := fmt.Sprintf("failed to start MCP server %q in sandbox", serverName)
-		return nil, newMCPSandboxDiagnosticsError(msg, err, stderrBuf, transport.StdoutDiagnostics, serverCfg)
+		return nil, newMCPSandboxDiagnosticsError(msg, err, stderrBuf, transport.StdoutDiagnostics, resolvedCfg)
 	}
 
 	toolCtx := &appMCPToolContext{Context: ctx}

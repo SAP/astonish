@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/SAP/astonish/pkg/config"
+	"github.com/SAP/astonish/pkg/credentials"
 )
 
 func TestGetStderr_NilBuffer(t *testing.T) {
@@ -222,6 +223,48 @@ func TestCreateTransport_UnsupportedType(t *testing.T) {
 	}
 	if !bytes.Contains([]byte(err.Error()), []byte("unsupported transport type")) {
 		t.Errorf("expected 'unsupported transport type' in error, got %q", err)
+	}
+}
+
+func TestCreateTransportForServer_ResolvesCredentials(t *testing.T) {
+	t.Parallel()
+	mgr := NewManagerFromConfig(&config.MCPConfig{
+		MCPServers: map[string]config.MCPServerConfig{
+			"github": {
+				Command: "echo",
+				Env:     map[string]string{"GITHUB_TOKEN": "{{CREDENTIAL:github:token}}"},
+			},
+		},
+	})
+	mgr.SetCredentialResolver(&mockResolver{
+		creds: map[string]*credentials.Credential{
+			"github": {Type: credentials.CredBearer, Token: "ghp_resolved"},
+		},
+	})
+
+	transport, _, err := mgr.createTransportForServer("github", mgr.config.MCPServers["github"])
+	if err != nil {
+		t.Fatalf("createTransportForServer: %v", err)
+	}
+	if transport == nil {
+		t.Fatal("expected transport")
+	}
+	// Stored config must still contain the placeholder.
+	if got := mgr.config.MCPServers["github"].Env["GITHUB_TOKEN"]; got != "{{CREDENTIAL:github:token}}" {
+		t.Fatalf("stored config mutated: %q", got)
+	}
+}
+
+func TestCreateTransportForServer_MissingCredential(t *testing.T) {
+	t.Parallel()
+	mgr := NewManagerFromConfig(&config.MCPConfig{})
+	mgr.SetCredentialResolver(&mockResolver{creds: map[string]*credentials.Credential{}})
+	_, _, err := mgr.createTransportForServer("svc", config.MCPServerConfig{
+		Command: "echo",
+		Env:     map[string]string{"TOKEN": "{{CREDENTIAL:missing:token}}"},
+	})
+	if err == nil {
+		t.Fatal("expected credential resolution error")
 	}
 }
 

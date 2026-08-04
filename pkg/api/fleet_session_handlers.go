@@ -1355,6 +1355,8 @@ func createFleetMCPToolsets(backend sandbox.Backend, lazyNode *sandbox.LazyNodeC
 		}
 
 		lt := agent.NewLazyMCPToolset(name, cachedTools, serverCfg, false)
+		// Credential placeholders resolve at MCP process start from the
+		// request/session context (credentials.ResolverFromContext).
 		if lazyNode != nil {
 			lt.SetSandboxClient(lazyNode, backend)
 		} else if pool != nil {

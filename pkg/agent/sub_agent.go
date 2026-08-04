@@ -828,11 +828,15 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) TaskRe
 		})
 	}
 
-	// Create child LLM agent via ADK
+	// Create child LLM agent via ADK.
+	// InstructionProvider bypasses ADK InjectSessionState (see chat_agent_run).
+	childInstr := childPrompt
 	childAgent, err := llmagent.New(llmagent.Config{
-		Name:                 task.Name,
-		Model:                m.LLM,
-		Instruction:          childPrompt,
+		Name:  task.Name,
+		Model: m.LLM,
+		InstructionProvider: func(_ adkagent.ReadonlyContext) (string, error) {
+			return childInstr, nil
+		},
 		Tools:                childTools,
 		Toolsets:             childToolsets,
 		BeforeToolCallbacks:  beforeToolCallbacks,
@@ -1064,25 +1068,76 @@ func (m *SubAgentManager) resolveTools(ctx context.Context, request []string) ([
 		return nil, nil, nil
 	}
 
-	// Separate group names from individual tool names
+	// Merge per-request MCP groups (team catalog) into the lookup map for this
+	// resolution only — do not mutate the shared SubAgentManager.ToolGroups.
+	effectiveGroups := m.ToolGroups
+	if reqGroups := RequestMCPGroupsFromContext(ctx); len(reqGroups) > 0 {
+		effectiveGroups = make(map[string]*ToolGroup, len(m.ToolGroups)+len(reqGroups))
+		for k, v := range m.ToolGroups {
+			effectiveGroups[k] = v
+		}
+		for k, v := range reqGroups {
+			effectiveGroups[k] = v // request groups win for same name
+		}
+	}
+
+	// Separate group names from individual tool names.
+	// Also accept app-style "mcp:server/tool" refs (map to bare tool + group).
 	var groupNames []string
 	individualNames := make(map[string]bool)
+	// Track original request tokens that still need resolution for warnings.
+	requestedTokens := make(map[string]string) // resolvedOrBare → original
 	var unknownGroups []string
 	for _, name := range request {
-		if _, isGroup := m.ToolGroups[name]; isGroup {
+		// App-style: mcp:email/send_email → group mcp:email + tool send_email
+		if group, toolName, isRef := parseMCPToolRef(name); isRef {
+			if toolName == "" {
+				// Whole group (mcp:email)
+				if _, isGroup := effectiveGroups[group]; isGroup {
+					groupNames = append(groupNames, group)
+					continue
+				}
+				if serverName, ok := mcpServerNameFromGroup(group); ok && m.MCPGroupResolver != nil {
+					if resolved := m.MCPGroupResolver(ctx, serverName); resolved != nil {
+						effectiveGroups[group] = resolved
+						groupNames = append(groupNames, group)
+						slog.Info("resolved MCP tool group via fallback", "group", group, "tools", len(resolved.Tools)+len(resolved.Toolsets))
+						continue
+					}
+				}
+				unknownGroups = append(unknownGroups, name)
+				continue
+			}
+			// Specific tool via mcp:server/tool — include group toolset + bare name.
+			if _, isGroup := effectiveGroups[group]; isGroup {
+				groupNames = append(groupNames, group)
+			} else if serverName, ok := mcpServerNameFromGroup(group); ok && m.MCPGroupResolver != nil {
+				if resolved := m.MCPGroupResolver(ctx, serverName); resolved != nil {
+					effectiveGroups[group] = resolved
+					groupNames = append(groupNames, group)
+				}
+			}
+			individualNames[toolName] = true
+			requestedTokens[toolName] = name
+			continue
+		}
+
+		if _, isGroup := effectiveGroups[name]; isGroup {
 			groupNames = append(groupNames, name)
 		} else if serverName, isMCP := mcpServerNameFromGroup(name); isMCP && m.MCPGroupResolver != nil {
 			// Fallback: the LLM requested an MCP group that wasn't in ToolGroups
 			// at init time (race with async discovery). Try to resolve it now.
 			if resolved := m.MCPGroupResolver(ctx, serverName); resolved != nil {
-				m.ToolGroups[name] = resolved
+				effectiveGroups[name] = resolved
 				groupNames = append(groupNames, name)
 				slog.Info("resolved MCP tool group via fallback", "group", name, "tools", len(resolved.Tools)+len(resolved.Toolsets))
 			} else {
 				individualNames[name] = true
+				requestedTokens[name] = name
 			}
 		} else {
 			individualNames[name] = true
+			requestedTokens[name] = name
 		}
 	}
 
@@ -1090,6 +1145,7 @@ func (m *SubAgentManager) resolveTools(ctx context.Context, request []string) ([
 	seen := make(map[string]bool) // dedup by tool name
 	var resultTools []tool.Tool
 	var resultToolsets []tool.Toolset
+	readCtx := &minimalReadonlyContext{Context: ctx}
 
 	for _, gName := range groupNames {
 		// MCP tool access control: skip groups for MCP servers the user
@@ -1101,7 +1157,10 @@ func (m *SubAgentManager) resolveTools(ctx context.Context, request []string) ([
 			}
 		}
 
-		g := m.ToolGroups[gName]
+		g := effectiveGroups[gName]
+		if g == nil {
+			continue
+		}
 		for _, t := range g.Tools {
 			name := t.Name()
 			if excludedChildTools[name] || seen[name] {
@@ -1113,9 +1172,11 @@ func (m *SubAgentManager) resolveTools(ctx context.Context, request []string) ([
 		resultToolsets = append(resultToolsets, g.Toolsets...)
 	}
 
-	// Resolve individual tool names by searching all groups
+	// Resolve individual tool names by searching all groups — including
+	// MCP toolsets (LazyMCP / SanitizedToolset). Previously only g.Tools
+	// was searched, so bare MCP tool names like "send_email" never resolved.
 	if len(individualNames) > 0 {
-		for _, g := range m.ToolGroups {
+		for _, g := range effectiveGroups {
 			for _, t := range g.Tools {
 				name := t.Name()
 				if !individualNames[name] || excludedChildTools[name] || seen[name] {
@@ -1123,6 +1184,23 @@ func (m *SubAgentManager) resolveTools(ctx context.Context, request []string) ([
 				}
 				seen[name] = true
 				resultTools = append(resultTools, t)
+			}
+			for _, ts := range g.Toolsets {
+				mcpTools, err := ts.Tools(readCtx)
+				if err != nil {
+					continue
+				}
+				for _, t := range mcpTools {
+					name := t.Name()
+					if !individualNames[name] || excludedChildTools[name] || seen[name] {
+						continue
+					}
+					// When only a specific MCP tool is requested, attach its
+					// toolset so the full MCP server is available to the child.
+					resultToolsets = append(resultToolsets, ts)
+					seen[name] = true
+					resultTools = append(resultTools, t)
+				}
 			}
 		}
 		// Also search FleetTools for individually requested tools
@@ -1139,7 +1217,11 @@ func (m *SubAgentManager) resolveTools(ctx context.Context, request []string) ([
 		// these are likely misspelled group names (e.g., "drills" instead of "drill").
 		for name := range individualNames {
 			if !seen[name] && !excludedChildTools[name] {
-				unknownGroups = append(unknownGroups, name)
+				if orig := requestedTokens[name]; orig != "" && orig != name {
+					unknownGroups = append(unknownGroups, orig)
+				} else {
+					unknownGroups = append(unknownGroups, name)
+				}
 			}
 		}
 	}
@@ -1148,8 +1230,8 @@ func (m *SubAgentManager) resolveTools(ctx context.Context, request []string) ([
 	var warnings []string
 	if len(unknownGroups) > 0 {
 		sort.Strings(unknownGroups)
-		available := make([]string, 0, len(m.ToolGroups))
-		for gName := range m.ToolGroups {
+		available := make([]string, 0, len(effectiveGroups))
+		for gName := range effectiveGroups {
 			available = append(available, gName)
 		}
 		sort.Strings(available)

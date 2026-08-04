@@ -1076,6 +1076,24 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 		runner.InjectMCPServerStores(svc.PlatformMCPServers, svc.MCPServers, svc.TeamMCPServers)
 	}
 
+	// Per-request MCP tool groups: the singleton agent is often pre-warmed for
+	// a default team without this team's MCP servers / cached tools. Attach
+	// LazyMCP groups from the request stores so search_tools and main-thread
+	// injection see the real catalog (e.g. mcp:email / send_email).
+	{
+		var pool sandbox.ToolNodePool
+		if cm.components != nil {
+			pool = cm.components.SandboxPool
+		}
+		debug := false
+		if chatAgent != nil {
+			debug = chatAgent.DebugMode
+		}
+		if groups := buildRequestMCPToolGroups(r, pool, debug); len(groups) > 0 {
+			runner.InjectRequestMCPGroups(groups)
+		}
+	}
+
 	// Per-request web search: platform General/WebSearchTool must apply to every
 	// user, not only the browser session that first pre-warmed the singleton agent.
 	// Also late-bind the Perplexity tool if it was configured after agent init.

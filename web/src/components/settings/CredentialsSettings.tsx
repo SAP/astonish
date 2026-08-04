@@ -2,6 +2,8 @@ import React, { useState, useEffect, useCallback } from 'react'
 import { Plus, Trash2, Eye, EyeOff, Edit2, Shield, ShieldOff, Lock, AlertCircle, Check, Loader2, KeyRound, X, Copy, Upload, Download } from 'lucide-react'
 import { inputClass, inputStyle, labelStyle, hintStyle, sectionBorderStyle, saveButtonStyle } from './settingsApi'
 import { teamFetch } from '../../api/teamContext'
+import CredentialFormDialog from '../credentials/CredentialFormDialog'
+import { emptyCredForm, type CredForm } from '../credentials/credentialForm'
 
 // --- Types ---
 
@@ -52,58 +54,6 @@ interface CredentialsData {
   is_team_admin: boolean
 }
 
-interface CredForm {
-  name: string
-  type: string
-  header: string
-  value: string
-  token: string
-  username: string
-  password: string
-  auth_url: string
-  client_id: string
-  client_secret: string
-  scope: string
-  token_url: string
-  access_token: string
-  refresh_token: string
-  keystone_method: string
-  user_domain: string
-  project_id: string
-  project_name: string
-  project_domain: string
-  application_credential_id: string
-  application_credential_secret: string
-  content: string
-  content_type: string
-}
-
-const emptyCredForm = (): CredForm => ({
-  name: '',
-  type: 'api_key',
-  header: 'Authorization',
-  value: '',
-  token: '',
-  username: '',
-  password: '',
-  auth_url: '',
-  client_id: '',
-  client_secret: '',
-  scope: '',
-  token_url: '',
-  access_token: '',
-  refresh_token: '',
-  keystone_method: 'application_credential',
-  user_domain: 'Default',
-  project_id: '',
-  project_name: '',
-  project_domain: 'Default',
-  application_credential_id: '',
-  application_credential_secret: '',
-  content: '',
-  content_type: 'text/plain'
-})
-
 interface SecretForm {
   key: string
   value: string
@@ -143,20 +93,6 @@ const revealSecret = async (key: string, masterKey: string | null, scope?: strin
     throw new Error(data.error || 'Access denied')
   }
   if (!res.ok) throw new Error('Failed to reveal secret')
-  return res.json()
-}
-
-const saveCredentialApi = async (name: string, credential: Record<string, unknown>, scope?: string): Promise<Record<string, unknown>> => {
-  const scopeParam = scope ? `?scope=${scope}` : ''
-  const res = await teamFetch(`/api/credentials${scopeParam}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, credential })
-  })
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}))
-    throw new Error(data.error || 'Failed to save credential')
-  }
   return res.json()
 }
 
@@ -341,12 +277,10 @@ export default function CredentialsSettings({ isPlatform: isPlatformProp }: { is
   const [revealingCred, setRevealingCred] = useState<string | null>(null)
   const [revealingSecret, setRevealingSecret] = useState<string | null>(null)
 
-  // Add/edit modal
+  // Add/edit modal (shared CredentialFormDialog)
   const [showCredModal, setShowCredModal] = useState(false)
   const [editingCred, setEditingCred] = useState<string | null>(null)
-  const [credForm, setCredForm] = useState<CredForm>(emptyCredForm())
-  const [credFormSaving, setCredFormSaving] = useState(false)
-  const [credFormError, setCredFormError] = useState('')
+  const [credFormInitial, setCredFormInitial] = useState<Partial<CredForm>>({})
   const [addScope, setAddScope] = useState<string | undefined>(undefined)
 
   // Add secret modal
@@ -502,8 +436,7 @@ export default function CredentialsSettings({ isPlatform: isPlatformProp }: { is
   const openAddCred = (scope?: string) => {
     setEditingCred(null)
     setAddScope(scope)
-    setCredForm(emptyCredForm())
-    setCredFormError('')
+    setCredFormInitial({})
     setShowCredModal(true)
   }
 
@@ -515,7 +448,7 @@ export default function CredentialsSettings({ isPlatform: isPlatformProp }: { is
     setEditingCred(name)
     setAddScope(scope)
     const hasAppCred = !!(revealed.application_credential_id)
-    setCredForm({
+    setCredFormInitial({
       ...emptyCredForm(),
       name,
       type: revealed.type || 'api_key',
@@ -539,9 +472,8 @@ export default function CredentialsSettings({ isPlatform: isPlatformProp }: { is
       application_credential_id: revealed.application_credential_id || '',
       application_credential_secret: revealed.application_credential_secret || '',
       content: revealed.content || '',
-      content_type: revealed.content_type || 'text/plain'
+      content_type: revealed.content_type || 'text/plain',
     })
-    setCredFormError('')
     setShowCredModal(true)
   }
 
@@ -549,49 +481,8 @@ export default function CredentialsSettings({ isPlatform: isPlatformProp }: { is
   const openBlindEditCred = (name: string, type: string, scope?: string) => {
     setEditingCred(name)
     setAddScope(scope)
-    setCredForm({ ...emptyCredForm(), name, type: type || 'api_key' })
-    setCredFormError('')
+    setCredFormInitial({ ...emptyCredForm(), name, type: type || 'api_key' })
     setShowCredModal(true)
-  }
-
-  const handleSaveCred = async () => {
-    if (!credForm.name) { setCredFormError('Name is required'); return }
-    setCredFormSaving(true)
-    setCredFormError('')
-    try {
-      const cred: Record<string, unknown> = { type: credForm.type }
-      switch (credForm.type) {
-        case 'api_key': cred.header = credForm.header; cred.value = credForm.value; break
-        case 'bearer': cred.token = credForm.token; break
-        case 'basic': case 'password': cred.username = credForm.username; cred.password = credForm.password; break
-        case 'oauth_client_credentials': cred.auth_url = credForm.auth_url; cred.client_id = credForm.client_id; cred.client_secret = credForm.client_secret; cred.scope = credForm.scope; break
-        case 'oauth_authorization_code': cred.token_url = credForm.token_url; cred.client_id = credForm.client_id; cred.client_secret = credForm.client_secret; cred.access_token = credForm.access_token; cred.refresh_token = credForm.refresh_token; cred.scope = credForm.scope; break
-        case 'raw_content': cred.content = credForm.content; cred.content_type = credForm.content_type; break
-        case 'openstack_keystone':
-          cred.auth_url = credForm.auth_url
-          if (credForm.keystone_method === 'application_credential') {
-            cred.application_credential_id = credForm.application_credential_id
-            cred.application_credential_secret = credForm.application_credential_secret
-          } else {
-            cred.username = credForm.username
-            cred.password = credForm.password
-            cred.user_domain = credForm.user_domain
-            cred.project_id = credForm.project_id
-            cred.project_name = credForm.project_name
-            cred.project_domain = credForm.project_domain
-          }
-          break
-      }
-      await saveCredentialApi(credForm.name, cred, addScope)
-      setShowCredModal(false)
-      const key = addScope ? `${addScope}:${credForm.name}` : credForm.name
-      setRevealedCreds(prev => { const n = { ...prev }; delete n[key]; return n })
-      await loadData()
-    } catch (err) {
-      setCredFormError(err instanceof Error ? err.message : 'Unknown error')
-    } finally {
-      setCredFormSaving(false)
-    }
   }
 
   // Add secret
@@ -1101,203 +992,23 @@ export default function CredentialsSettings({ isPlatform: isPlatformProp }: { is
         </Modal>
       )}
 
-      {/* Add/Edit Credential Modal */}
-      {showCredModal && (
-        <Modal onClose={() => setShowCredModal(false)} title={editingCred ? `Edit "${editingCred}"` : `Add ${addScope ? addScope.charAt(0).toUpperCase() + addScope.slice(1) + ' ' : ''}Credential`}>
-          <div className="space-y-4">
-            <div>
-              <label className="block text-sm font-medium mb-2" style={labelStyle}>Name</label>
-              <input
-                type="text"
-                value={credForm.name}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCredForm({ ...credForm, name: e.target.value })}
-                disabled={!!editingCred}
-                placeholder="my-api-key"
-                className={inputClass + ' font-mono'}
-                style={{ ...inputStyle, opacity: editingCred ? 0.6 : 1 }}
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium mb-2" style={labelStyle}>Type</label>
-              <select
-                value={credForm.type}
-                onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setCredForm({ ...credForm, type: e.target.value })}
-                className={inputClass}
-                style={inputStyle}
-              >
-                <option value="api_key">API Key (custom header + value)</option>
-                <option value="bearer">Bearer Token</option>
-                <option value="basic">Basic Auth (HTTP)</option>
-                <option value="password">Password (SSH/FTP/SMTP/database)</option>
-                <option value="oauth_client_credentials">OAuth Client Credentials</option>
-                <option value="oauth_authorization_code">OAuth Authorization Code</option>
-                <option value="openstack_keystone">OpenStack Keystone</option>
-                <option value="raw_content">Raw Content (JSON/YAML/text file)</option>
-              </select>
-            </div>
-
-            {/* Type-specific fields */}
-            {credForm.type === 'api_key' && (
-              <>
-                <div>
-                  <label className="block text-sm font-medium mb-2" style={labelStyle}>Header Name</label>
-                  <input type="text" value={credForm.header} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCredForm({ ...credForm, header: e.target.value })} placeholder="Authorization" className={inputClass} style={inputStyle} />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium mb-2" style={labelStyle}>Key Value</label>
-                  <input type="password" value={credForm.value} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCredForm({ ...credForm, value: e.target.value })} placeholder="sk-..." className={inputClass + ' font-mono'} style={inputStyle} />
-                </div>
-              </>
-            )}
-            {credForm.type === 'bearer' && (
-              <div>
-                <label className="block text-sm font-medium mb-2" style={labelStyle}>Token</label>
-                <input type="password" value={credForm.token} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCredForm({ ...credForm, token: e.target.value })} className={inputClass + ' font-mono'} style={inputStyle} />
-              </div>
-            )}
-            {credForm.type === 'raw_content' && (
-              <>
-                <div>
-                  <label className="block text-sm font-medium mb-2" style={labelStyle}>Content Type <span className="font-normal" style={hintStyle}>(optional)</span></label>
-                  <input type="text" value={credForm.content_type} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCredForm({ ...credForm, content_type: e.target.value })} placeholder="text/plain, application/json, application/yaml" className={inputClass + ' font-mono'} style={inputStyle} />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium mb-2" style={labelStyle}>Raw Content</label>
-                  <textarea value={credForm.content} onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setCredForm({ ...credForm, content: e.target.value })} placeholder="Paste JSON, YAML, dotenv, or text content" className={inputClass + ' font-mono min-h-32'} style={inputStyle} />
-                  <p className="text-xs mt-1" style={hintStyle}>Stored encrypted and used via resolve_credential field content or fleet credential_injection field content.</p>
-                </div>
-              </>
-            )}
-            {(credForm.type === 'basic' || credForm.type === 'password') && (
-              <>
-                <div>
-                  <label className="block text-sm font-medium mb-2" style={labelStyle}>Username</label>
-                  <input type="text" value={credForm.username} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCredForm({ ...credForm, username: e.target.value })} className={inputClass} style={inputStyle} />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium mb-2" style={labelStyle}>Password</label>
-                  <input type="password" value={credForm.password} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCredForm({ ...credForm, password: e.target.value })} className={inputClass + ' font-mono'} style={inputStyle} />
-                </div>
-              </>
-            )}
-            {credForm.type === 'oauth_client_credentials' && (
-              <>
-                <div>
-                  <label className="block text-sm font-medium mb-2" style={labelStyle}>Auth URL</label>
-                  <input type="url" value={credForm.auth_url} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCredForm({ ...credForm, auth_url: e.target.value })} placeholder="https://auth.example.com/oauth/token" className={inputClass + ' font-mono'} style={inputStyle} />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium mb-2" style={labelStyle}>Client ID</label>
-                  <input type="text" value={credForm.client_id} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCredForm({ ...credForm, client_id: e.target.value })} className={inputClass + ' font-mono'} style={inputStyle} />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium mb-2" style={labelStyle}>Client Secret</label>
-                  <input type="password" value={credForm.client_secret} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCredForm({ ...credForm, client_secret: e.target.value })} className={inputClass + ' font-mono'} style={inputStyle} />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium mb-2" style={labelStyle}>Scope <span className="font-normal" style={hintStyle}>(optional)</span></label>
-                  <input type="text" value={credForm.scope} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCredForm({ ...credForm, scope: e.target.value })} className={inputClass} style={inputStyle} />
-                </div>
-              </>
-            )}
-            {credForm.type === 'oauth_authorization_code' && (
-              <>
-                <div>
-                  <label className="block text-sm font-medium mb-2" style={labelStyle}>Token URL</label>
-                  <input type="url" value={credForm.token_url} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCredForm({ ...credForm, token_url: e.target.value })} placeholder="https://oauth2.googleapis.com/token" className={inputClass + ' font-mono'} style={inputStyle} />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium mb-2" style={labelStyle}>Client ID</label>
-                  <input type="text" value={credForm.client_id} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCredForm({ ...credForm, client_id: e.target.value })} className={inputClass + ' font-mono'} style={inputStyle} />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium mb-2" style={labelStyle}>Client Secret</label>
-                  <input type="password" value={credForm.client_secret} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCredForm({ ...credForm, client_secret: e.target.value })} className={inputClass + ' font-mono'} style={inputStyle} />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium mb-2" style={labelStyle}>Access Token</label>
-                  <input type="password" value={credForm.access_token} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCredForm({ ...credForm, access_token: e.target.value })} className={inputClass + ' font-mono'} style={inputStyle} />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium mb-2" style={labelStyle}>Refresh Token</label>
-                  <input type="password" value={credForm.refresh_token} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCredForm({ ...credForm, refresh_token: e.target.value })} className={inputClass + ' font-mono'} style={inputStyle} />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium mb-2" style={labelStyle}>Scope <span className="font-normal" style={hintStyle}>(optional)</span></label>
-                  <input type="text" value={credForm.scope} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCredForm({ ...credForm, scope: e.target.value })} className={inputClass} style={inputStyle} />
-                </div>
-              </>
-            )}
-            {credForm.type === 'openstack_keystone' && (
-              <>
-                <div>
-                  <label className="block text-sm font-medium mb-2" style={labelStyle}>Auth URL</label>
-                  <input type="url" value={credForm.auth_url} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCredForm({ ...credForm, auth_url: e.target.value })} placeholder="https://identity.example.com/v3/auth/tokens" className={inputClass + ' font-mono'} style={inputStyle} />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium mb-2" style={labelStyle}>Auth Method</label>
-                  <select
-                    value={credForm.keystone_method}
-                    onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setCredForm({ ...credForm, keystone_method: e.target.value })}
-                    className={inputClass}
-                    style={inputStyle}
-                  >
-                    <option value="application_credential">Application Credential</option>
-                    <option value="password">Password</option>
-                  </select>
-                </div>
-                {credForm.keystone_method === 'application_credential' ? (
-                  <>
-                    <div>
-                      <label className="block text-sm font-medium mb-2" style={labelStyle}>Application Credential ID</label>
-                      <input type="text" value={credForm.application_credential_id} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCredForm({ ...credForm, application_credential_id: e.target.value })} className={inputClass + ' font-mono'} style={inputStyle} />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium mb-2" style={labelStyle}>Application Credential Secret</label>
-                      <input type="password" value={credForm.application_credential_secret} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCredForm({ ...credForm, application_credential_secret: e.target.value })} className={inputClass + ' font-mono'} style={inputStyle} />
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <div>
-                      <label className="block text-sm font-medium mb-2" style={labelStyle}>Username</label>
-                      <input type="text" value={credForm.username} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCredForm({ ...credForm, username: e.target.value })} className={inputClass} style={inputStyle} />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium mb-2" style={labelStyle}>Password</label>
-                      <input type="password" value={credForm.password} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCredForm({ ...credForm, password: e.target.value })} className={inputClass + ' font-mono'} style={inputStyle} />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium mb-2" style={labelStyle}>User Domain</label>
-                      <input type="text" value={credForm.user_domain} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCredForm({ ...credForm, user_domain: e.target.value })} placeholder="Default" className={inputClass} style={inputStyle} />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium mb-2" style={labelStyle}>Project ID <span className="font-normal" style={hintStyle}>(or use project name below)</span></label>
-                      <input type="text" value={credForm.project_id} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCredForm({ ...credForm, project_id: e.target.value })} className={inputClass + ' font-mono'} style={inputStyle} />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium mb-2" style={labelStyle}>Project Name</label>
-                      <input type="text" value={credForm.project_name} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCredForm({ ...credForm, project_name: e.target.value })} className={inputClass} style={inputStyle} />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium mb-2" style={labelStyle}>Project Domain</label>
-                      <input type="text" value={credForm.project_domain} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCredForm({ ...credForm, project_domain: e.target.value })} placeholder="Default" className={inputClass} style={inputStyle} />
-                    </div>
-                  </>
-                )}
-              </>
-            )}
-
-            {credFormError && <p className="text-xs" style={{ color: '#ef4444' }}>{credFormError}</p>}
-            <div className="flex justify-end gap-2">
-              <button onClick={() => setShowCredModal(false)} className="px-3 py-1.5 rounded-lg text-sm" style={{ color: 'var(--text-secondary)' }}>Cancel</button>
-              <button onClick={handleSaveCred} disabled={credFormSaving} className="px-4 py-1.5 rounded-lg text-sm text-white font-medium disabled:opacity-50" style={saveButtonStyle}>
-                {credFormSaving ? 'Saving...' : 'Save'}
-              </button>
-            </div>
-          </div>
-        </Modal>
-      )}
+      {/* Add/Edit Credential Modal — shared with MCP env bind */}
+      <CredentialFormDialog
+        open={showCredModal}
+        onClose={() => setShowCredModal(false)}
+        editingName={editingCred}
+        scope={addScope}
+        initialForm={credFormInitial}
+        onSaved={async ({ name }) => {
+          const key = addScope ? `${addScope}:${name}` : name
+          setRevealedCreds((prev) => {
+            const n = { ...prev }
+            delete n[key]
+            return n
+          })
+          await loadData()
+        }}
+      />
 
       {/* Add Secret Modal */}
       {showSecretModal && (

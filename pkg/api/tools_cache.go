@@ -13,6 +13,7 @@ import (
 	"github.com/SAP/astonish/pkg/cache"
 	"github.com/SAP/astonish/pkg/common"
 	"github.com/SAP/astonish/pkg/config"
+	"github.com/SAP/astonish/pkg/credentials"
 	"github.com/SAP/astonish/pkg/mcp"
 	"github.com/SAP/astonish/pkg/sandbox"
 	"github.com/SAP/astonish/pkg/sandbox/netpolicy"
@@ -351,8 +352,16 @@ func discoverMCPToolsInSandbox(ctx context.Context, serverName string, serverCfg
 	// npx/uvx try to install or start the MCP server.
 	netpolicy.EnsurePreSeedFromContext(ctx, sessionID)
 
+	// Expand {{CREDENTIAL:...}} placeholders before process start.
+	// Callers (inspector Test, async install discovery) must put a store on
+	// ctx via withRequestCredentialStore / withRuntimeNetworkPolicyContext.
+	resolvedCfg, err := mcp.ResolveMCPServerConfig(serverCfg, credentials.ResolverFromContext(ctx))
+	if err != nil {
+		return nil, fmt.Errorf("MCP server %q credential resolution: %w", serverName, err)
+	}
+
 	// Create the backend-agnostic MCP transport
-	transport, stderrBuf := sandbox.NewBackendMCPTransport(backend, sessionID, serverCfg)
+	transport, stderrBuf := sandbox.NewBackendMCPTransport(backend, sessionID, resolvedCfg)
 	defer transport.Close()
 
 	// Connect via ADK mcptoolset (same pattern as invokeMCPToolInContainer)
@@ -399,7 +408,19 @@ func discoverMCPToolsInSandbox(ctx context.Context, serverName string, serverCfg
 // discoverMCPToolsOnHost runs MCP tool discovery on the host (no sandbox).
 // Used for SSE/streamable-http transport servers that connect over the network.
 func discoverMCPToolsOnHost(ctx context.Context, serverName string, servers map[string]config.MCPServerConfig) json.RawMessage {
-	cfg := &config.MCPConfig{MCPServers: servers}
+	// Resolve credential placeholders per server so host discovery works with store refs.
+	resolvedServers := make(map[string]config.MCPServerConfig, len(servers))
+	resolver := credentials.ResolverFromContext(ctx)
+	for name, srv := range servers {
+		resolved, err := mcp.ResolveMCPServerConfig(srv, resolver)
+		if err != nil {
+			slog.Warn("platform MCP refresh: credential resolution failed", "server", name, "error", err)
+			return nil
+		}
+		resolvedServers[name] = resolved
+	}
+
+	cfg := &config.MCPConfig{MCPServers: resolvedServers}
 	mgr := mcp.NewManagerFromConfig(cfg)
 	defer mgr.Cleanup()
 

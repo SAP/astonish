@@ -111,6 +111,72 @@ func TestEffectiveCredentialStore_FromServices(t *testing.T) {
 	}
 }
 
+// mapCredentialStore is a tiny in-memory store for resolver tests.
+type mapCredentialStore struct {
+	creds map[string]*store.Credential
+	mockCredentialStore
+}
+
+func (m *mapCredentialStore) Get(_ context.Context, name string) *store.Credential {
+	if m.creds == nil {
+		return nil
+	}
+	return m.creds[name]
+}
+
+func TestCredentialResolverForRequest_IgnoresMCPScopeUsesPersonalFirst(t *testing.T) {
+	// MCP Test UI passes ?scope=team to select the team MCP *server* config store.
+	// Credential resolution must still prefer personal over team (same as Chat).
+	r := httptest.NewRequest("GET", "/api/mcp/email/tools?scope=team", nil)
+	personal := &mapCredentialStore{
+		creds: map[string]*store.Credential{
+			"email-user": {Type: store.CredPassword, Username: "me@personal", Password: "personal-pass"},
+		},
+	}
+	team := &mapCredentialStore{
+		creds: map[string]*store.Credential{
+			"email-user": {Type: store.CredPassword, Username: "team@shared", Password: "team-pass"},
+			"team-only":  {Type: store.CredBearer, Token: "team-token"},
+		},
+	}
+	svc := &store.Services{
+		Mode:                store.ModePlatform,
+		PersonalCredentials: personal,
+		Credentials:         team,
+	}
+	r = r.WithContext(store.WithServices(r.Context(), svc))
+
+	// effectiveCredentialStore honors ?scope=team → team only (used for admin config ops).
+	scoped := effectiveCredentialStore(r)
+	if scoped == nil || scoped.Get(r.Context(), "email-user").Username != "team@shared" {
+		t.Fatalf("effectiveCredentialStore(scope=team) should be team-only, got %#v", scoped.Get(r.Context(), "email-user"))
+	}
+
+	// MCP runtime resolver must merge personal-first.
+	resolver := credentialResolverForRequest(r)
+	if resolver == nil {
+		t.Fatal("credentialResolverForRequest returned nil")
+	}
+	cred := resolver.Get("email-user")
+	if cred == nil || cred.Username != "me@personal" {
+		t.Fatalf("MCP resolver should prefer personal credential, got %#v", cred)
+	}
+	// Team-only names still resolve via fallback.
+	if teamCred := resolver.Get("team-only"); teamCred == nil || teamCred.Token != "team-token" {
+		t.Fatalf("MCP resolver should fall back to team, got %#v", teamCred)
+	}
+
+	// withRequestCredentialStore should attach the same merge policy.
+	ctx := withRequestCredentialStore(r.Context(), r)
+	cs := store.CredentialStoreFromContext(ctx)
+	if cs == nil {
+		t.Fatal("withRequestCredentialStore did not attach store")
+	}
+	if got := cs.Get(ctx, "email-user"); got == nil || got.Username != "me@personal" {
+		t.Fatalf("context store should be personal-first, got %#v", got)
+	}
+}
+
 // --- ChatRunner UserID tests ---
 
 func TestNewChatRunner_UserID(t *testing.T) {

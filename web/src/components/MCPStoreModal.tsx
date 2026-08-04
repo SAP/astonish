@@ -11,6 +11,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { cn } from '@/lib/utils'
 
 import { teamFetch } from '../api/teamContext'
+import CredentialBindControl from '@/components/credentials/CredentialBindControl'
+import { isSensitiveEnvKey } from '@/components/credentials/credentialPlaceholders'
 
 // --- Types ---
 
@@ -275,20 +277,36 @@ export default function MCPStoreModal({ isOpen, onClose, onInstall, teamSlug, sc
                       {server.config?.env && Object.keys(server.config.env).length > 0 && (
                         <div>
                           <h4 className="mb-2 text-xs font-medium text-muted-foreground">Environment Variables</h4>
-                          <div className="space-y-2">
-                            {Object.entries(server.config.env).map(([key, defaultValue]) => (
-                              <div key={key} className="space-y-1">
-                                <Label htmlFor={`mcp-env-${server.mcpId}-${key}`} className="text-xs">{key}</Label>
-                                <Input
-                                  id={`mcp-env-${server.mcpId}-${key}`}
-                                  type="text"
-                                  value={envOverrides[key] ?? defaultValue}
-                                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEnvOverrides({ ...envOverrides, [key]: e.target.value })}
-                                  placeholder={defaultValue || 'Enter value...'}
-                                  className="bg-card font-mono text-xs"
-                                />
-                              </div>
-                            ))}
+                          <p className="mb-2 text-[11px] text-muted-foreground">
+                            Bind secrets to the credential store. Values are saved as{' '}
+                            <code className="font-mono text-[10px]">{'{{CREDENTIAL:name:field}}'}</code>.
+                          </p>
+                          <div className="space-y-3">
+                            {Object.entries(server.config.env).map(([key, defaultValue]) => {
+                              const sensitive = isSensitiveEnvKey(key)
+                              const current = envOverrides[key] ?? (sensitive ? '' : (defaultValue || ''))
+                              return (
+                                <div key={key} className="space-y-1">
+                                  <Label htmlFor={`mcp-env-${server.mcpId}-${key}`} className="text-xs">{key}</Label>
+                                  {sensitive ? (
+                                    <CredentialBindControl
+                                      value={current}
+                                      envKey={key}
+                                      onChange={(value) => setEnvOverrides({ ...envOverrides, [key]: value })}
+                                    />
+                                  ) : (
+                                    <Input
+                                      id={`mcp-env-${server.mcpId}-${key}`}
+                                      type="text"
+                                      value={current}
+                                      onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEnvOverrides({ ...envOverrides, [key]: e.target.value })}
+                                      placeholder={defaultValue || 'Enter value...'}
+                                      className="bg-card font-mono text-xs"
+                                    />
+                                  )}
+                                </div>
+                              )
+                            })}
                           </div>
                         </div>
                       )}

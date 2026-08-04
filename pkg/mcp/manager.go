@@ -8,6 +8,7 @@ import (
 	"os/exec"
 
 	"github.com/SAP/astonish/pkg/config"
+	"github.com/SAP/astonish/pkg/credentials"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/mcptoolset"
@@ -20,6 +21,9 @@ type Manager struct {
 	namedToolsets []NamedToolset
 	transports    []mcp.Transport // Track transports for cleanup
 	initResults   []InitResult    // Track initialization results per server
+	// resolver expands {{CREDENTIAL:name:field}} placeholders in MCP env at
+	// process start. Nil disables resolution (plain env still works).
+	resolver credentials.CredentialResolver
 }
 
 // NamedToolset wraps an ADK toolset with its server name and stderr buffer
@@ -43,13 +47,21 @@ func NewManager() (*Manager, error) {
 		return nil, fmt.Errorf("failed to load MCP config: %w", err)
 	}
 
-	return &Manager{
+	m := &Manager{
 		config:        cfg,
 		toolsets:      make([]tool.Toolset, 0),
 		namedToolsets: make([]NamedToolset, 0),
 		transports:    make([]mcp.Transport, 0),
 		initResults:   make([]InitResult, 0),
-	}, nil
+	}
+	// Personal-mode default: file credential store so MCP env placeholders
+	// resolve without callers wiring a resolver explicitly.
+	if configDir, dirErr := config.GetConfigDir(); dirErr == nil {
+		if cs, openErr := credentials.Open(configDir); openErr == nil {
+			m.resolver = cs
+		}
+	}
+	return m, nil
 }
 
 // NewManagerFromConfig creates a new MCP manager with an explicit config.
@@ -63,6 +75,17 @@ func NewManagerFromConfig(cfg *config.MCPConfig) *Manager {
 		transports:    make([]mcp.Transport, 0),
 		initResults:   make([]InitResult, 0),
 	}
+}
+
+// SetCredentialResolver registers a credential store used to expand
+// {{CREDENTIAL:name:field}} placeholders in MCP server env values when the
+// process is started. The config itself is left unchanged (placeholders stay
+// in the stored config).
+func (m *Manager) SetCredentialResolver(resolver credentials.CredentialResolver) {
+	if m == nil {
+		return
+	}
+	m.resolver = resolver
 }
 
 // InitializeToolsets creates ADK mcptoolset instances for all configured servers
@@ -84,7 +107,7 @@ func (m *Manager) InitializeToolsets(ctx context.Context) error {
 			continue
 		}
 
-		transport, stderrBuf, err := createTransport(serverConfig)
+		transport, stderrBuf, err := m.createTransportForServer(serverName, serverConfig)
 		if err != nil {
 			errMsg := fmt.Sprintf("Failed to create transport: %v (Stderr: %s)", err, DiagnosticStderr(stderrBuf))
 			slog.Warn("failed to create transport for MCP server", FailureLogAttrs(serverName, serverConfig, err, stderrBuf)...)
@@ -142,7 +165,7 @@ func (m *Manager) InitializeSingleToolset(ctx context.Context, serverName string
 		return nil, fmt.Errorf("server '%s' is disabled", serverName)
 	}
 
-	transport, stderrBuf, err := createTransport(serverConfig)
+	transport, stderrBuf, err := m.createTransportForServer(serverName, serverConfig)
 	if err != nil {
 		slog.Warn("failed to create transport for MCP server", FailureLogAttrs(serverName, serverConfig, err, stderrBuf)...)
 		return nil, fmt.Errorf("failed to create transport: %w (Stderr: %s)", err, DiagnosticStderr(stderrBuf))
@@ -210,7 +233,7 @@ func (m *Manager) InitializeSelectiveToolsets(ctx context.Context, serverNames [
 			continue
 		}
 
-		transport, stderrBuf, err := createTransport(serverConfig)
+		transport, stderrBuf, err := m.createTransportForServer(serverName, serverConfig)
 		if err != nil {
 			slog.Warn("failed to create transport for selective MCP server", FailureLogAttrs(serverName, serverConfig, err, stderrBuf)...)
 			continue
@@ -254,7 +277,18 @@ func (m *Manager) Cleanup() {
 	slog.Info("MCP manager cleaned up", "component", "mcp")
 }
 
-// createTransport creates the appropriate MCP transport based on configuration
+// createTransportForServer resolves credential placeholders in env, then builds
+// the transport. serverName is used only in error messages.
+func (m *Manager) createTransportForServer(serverName string, cfg config.MCPServerConfig) (mcp.Transport, *bytes.Buffer, error) {
+	resolved, err := ResolveMCPServerConfig(cfg, m.resolver)
+	if err != nil {
+		return nil, nil, fmt.Errorf("MCP server %q credential resolution: %w", serverName, err)
+	}
+	return createTransport(resolved)
+}
+
+// createTransport creates the appropriate MCP transport based on configuration.
+// cfg.Env must already be resolved (no credential placeholders).
 func createTransport(cfg config.MCPServerConfig) (mcp.Transport, *bytes.Buffer, error) {
 	// Default to stdio if not specified
 	transportType := cfg.Transport

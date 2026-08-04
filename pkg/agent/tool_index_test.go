@@ -346,6 +346,42 @@ func TestToolIndex_Dedup(t *testing.T) {
 	}
 }
 
+func TestMatchMCPGroupsFromQuery(t *testing.T) {
+	idx := newTestToolIndex(t, testEmbeddingFunc())
+	if err := idx.SyncTools(context.Background(), mockTools("read_file"), []*ToolGroup{
+		{Name: "mcp:email", Tools: mockTools("send_email")},
+		{Name: "mcp:github", Tools: mockTools("create_issue")},
+		{Name: "browser", Tools: mockTools("browser_navigate")},
+	}); err != nil {
+		t.Fatalf("SyncTools: %v", err)
+	}
+
+	hits := MatchMCPGroupsFromQuery(idx, "Use the mcp server email to send a test e-mail")
+	if len(hits) != 1 || hits[0].ToolName != "send_email" {
+		t.Fatalf("MatchMCPGroupsFromQuery = %#v, want send_email", hits)
+	}
+
+	// Explicit mcp: prefix
+	hits = MatchMCPGroupsFromQuery(idx, "call mcp:github please")
+	if len(hits) != 1 || hits[0].ToolName != "create_issue" {
+		t.Fatalf("explicit mcp: ref = %#v, want create_issue", hits)
+	}
+
+	// Non-MCP mention should not match
+	if got := MatchMCPGroupsFromQuery(idx, "open the browser"); len(got) != 0 {
+		t.Fatalf("browser query should not match MCP groups, got %#v", got)
+	}
+}
+
+func TestMergeToolMatches(t *testing.T) {
+	base := []ToolMatch{{ToolName: "a", GroupName: "g"}}
+	extras := []ToolMatch{{ToolName: "a", GroupName: "g"}, {ToolName: "b", GroupName: "g"}}
+	got := MergeToolMatches(base, extras)
+	if len(got) != 2 {
+		t.Fatalf("MergeToolMatches len = %d, want 2", len(got))
+	}
+}
+
 func TestFormatToolMatchesForPrompt(t *testing.T) {
 	matches := []ToolMatch{
 		{ToolName: "browser_navigate", GroupName: "browser", Description: "Navigate to a URL", Score: 0.9},

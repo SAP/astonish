@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/SAP/astonish/pkg/agent"
 	"google.golang.org/adk/tool"
@@ -78,12 +79,32 @@ func SearchTools(toolIndex *agent.ToolIndex, onResults func([]string)) func(ctx 
 			searchCtx = context.Background()
 		}
 
-		matches, err := toolIndex.SearchHybrid(searchCtx, args.Query, maxResults, 0.005)
-		if err != nil {
-			return SearchToolsResult{}, fmt.Errorf("tool search failed: %w", err)
+		var matches []agent.ToolMatch
+		if toolIndex != nil {
+			var err error
+			matches, err = toolIndex.SearchHybrid(searchCtx, args.Query, maxResults, 0.005)
+			if err != nil {
+				return SearchToolsResult{}, fmt.Errorf("tool search failed: %w", err)
+			}
 		}
 
 		// Filter out MCP tools the user's team doesn't have access to
+		matches = agent.FilterAccessibleToolMatches(searchCtx, matches)
+
+		// Merge request-scoped MCP tools (not in pre-warmed index) that match the query.
+		if mcpHits := agent.MatchRequestMCPGroupsFromQuery(searchCtx, args.Query); len(mcpHits) > 0 {
+			mcpHits = agent.FilterAccessibleToolMatches(searchCtx, mcpHits)
+			matches = agent.MergeToolMatches(matches, mcpHits)
+		}
+		// Also keyword-match individual request MCP tools by name/description.
+		for _, m := range agent.ToolMatchesFromRequestMCP(searchCtx) {
+			ql := strings.ToLower(args.Query)
+			if strings.Contains(strings.ToLower(m.ToolName), ql) ||
+				strings.Contains(strings.ToLower(m.Description), ql) ||
+				strings.Contains(ql, strings.ToLower(m.ToolName)) {
+				matches = agent.MergeToolMatches(matches, []agent.ToolMatch{m})
+			}
+		}
 		matches = agent.FilterAccessibleToolMatches(searchCtx, matches)
 
 		if len(matches) == 0 {
@@ -96,10 +117,7 @@ func SearchTools(toolIndex *agent.ToolIndex, onResults func([]string)) func(ctx 
 
 		results := make([]SearchToolsMatchResult, len(matches))
 		for i, m := range matches {
-			access := "available (call directly)"
-			if m.IsMainTool {
-				access = "always available (main thread tool)"
-			}
+			access := toolAccessHint(m)
 			results[i] = SearchToolsMatchResult{
 				ToolName:    m.ToolName,
 				GroupName:   m.GroupName,
@@ -129,8 +147,24 @@ func SearchTools(toolIndex *agent.ToolIndex, onResults func([]string)) func(ctx 
 
 // listAllTools returns every tool in the index, grouped by group name.
 // MCP tools from servers the user doesn't have access to are excluded.
+// Also merges per-request MCP groups (team servers not present in the
+// pre-warmed singleton ToolIndex).
 func listAllTools(ctx context.Context, toolIndex *agent.ToolIndex) SearchToolsResult {
-	groups := toolIndex.ListAll()
+	var searchCtx context.Context
+	if ctx != nil {
+		searchCtx = ctx
+	} else {
+		searchCtx = context.Background()
+	}
+
+	groups := map[string][]agent.ToolMatch{}
+	if toolIndex != nil {
+		groups = toolIndex.ListAll()
+	}
+	// Merge request-scoped MCP tools (team catalog) into inventory.
+	for _, m := range agent.ToolMatchesFromRequestMCP(searchCtx) {
+		groups[m.GroupName] = append(groups[m.GroupName], m)
+	}
 
 	var results []SearchToolsMatchResult
 	// Sort group names for deterministic output
@@ -140,33 +174,58 @@ func listAllTools(ctx context.Context, toolIndex *agent.ToolIndex) SearchToolsRe
 	}
 	sort.Strings(groupNames)
 
+	// Dedup tools within a group by name (index + request may overlap).
 	for _, gName := range groupNames {
 		// Filter out MCP groups the user's team doesn't have access to
-		if agent.IsMCPGroupInaccessible(ctx, gName) {
+		if agent.IsMCPGroupInaccessible(searchCtx, gName) {
 			continue
 		}
 
+		seen := make(map[string]bool)
 		for _, m := range groups[gName] {
-			access := "available (call directly)"
-			if m.IsMainTool {
-				access = "always available (main thread tool)"
+			if seen[m.ToolName] {
+				continue
 			}
+			seen[m.ToolName] = true
 			results = append(results, SearchToolsMatchResult{
 				ToolName:    m.ToolName,
 				GroupName:   m.GroupName,
 				Description: m.Description,
 				IsMainTool:  m.IsMainTool,
 				Score:       1.0,
-				Access:      access,
+				Access:      toolAccessHint(m),
 			})
+		}
+	}
+
+	// Count distinct groups in results
+	groupCount := 0
+	seenG := map[string]bool{}
+	for _, m := range results {
+		if !seenG[m.GroupName] {
+			seenG[m.GroupName] = true
+			groupCount++
 		}
 	}
 
 	return SearchToolsResult{
 		Matches: results,
 		Count:   len(results),
-		Message: fmt.Sprintf("Complete tool inventory: %d tools across %d groups", len(results), len(groups)),
+		Message: fmt.Sprintf("Complete tool inventory: %d tools across %d groups", len(results), groupCount),
 	}
+}
+
+// toolAccessHint tells the LLM how to invoke a matched tool. MCP tools must be
+// called by bare tool_name (send_email), never as mcp:server/tool (app format).
+func toolAccessHint(m agent.ToolMatch) string {
+	if m.IsMainTool {
+		return "always available (main thread tool) — call as `" + m.ToolName + "`"
+	}
+	if strings.HasPrefix(m.GroupName, "mcp:") {
+		return "call directly as `" + m.ToolName + "` on the main thread (NOT `" + m.GroupName + "/" + m.ToolName +
+			"`; do not use delegate_tasks for a single MCP call)"
+	}
+	return "available — call directly as `" + m.ToolName + "` (group " + m.GroupName + "; do not delegate a single tool call)"
 }
 
 // NewSearchToolsTool creates the search_tools tool using the given tool index.
@@ -176,7 +235,8 @@ func NewSearchToolsTool(toolIndex *agent.ToolIndex, onResults func([]string)) (t
 	return functiontool.New(functiontool.Config{
 		Name: "search_tools",
 		Description: "Search for available tools by describing what you want to do. " +
-			"Found tools become available for you to call directly. " +
+			"Found tools become available for you to call directly by tool_name " +
+			"(e.g. send_email — never mcp:server/tool). " +
 			"Use this when you need a capability that isn't currently available. " +
 			"Use query='*' to list ALL available tools.",
 	}, SearchTools(toolIndex, onResults))

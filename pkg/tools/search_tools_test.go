@@ -1293,12 +1293,12 @@ func TestSearchTools_AccessField(t *testing.T) {
 
 	for _, m := range result.Matches {
 		if m.IsMainTool {
-			if m.Access != "always available (main thread tool)" {
+			if !strings.Contains(m.Access, "always available (main thread tool)") {
 				t.Errorf("main tool %s should have always available access, got: %s", m.ToolName, m.Access)
 			}
 		} else {
-			if m.Access == "" || m.Access == "always available (main thread tool)" {
-				t.Errorf("injected tool %s should have 'available (call directly)' access, got: %s", m.ToolName, m.Access)
+			if m.Access == "" || strings.HasPrefix(m.Access, "always available (main thread tool)") && !strings.Contains(m.Access, "call") {
+				t.Errorf("injected tool %s should instruct direct call, got: %s", m.ToolName, m.Access)
 			}
 		}
 	}
@@ -1365,7 +1365,7 @@ func TestSearchTools_ListAll(t *testing.T) {
 
 	// Verify access instructions are correct
 	for _, m := range result.Matches {
-		if m.IsMainTool && m.Access != "always available (main thread tool)" {
+		if m.IsMainTool && !strings.Contains(m.Access, "always available (main thread tool)") {
 			t.Errorf("main tool %s should have always available access, got: %s", m.ToolName, m.Access)
 		}
 		if !m.IsMainTool && m.Access == "always available (main thread tool)" {

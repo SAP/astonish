@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	adkagent "google.golang.org/adk/agent"
 	"google.golang.org/adk/tool"
 )
 
@@ -45,6 +46,17 @@ func TestNewSubAgentManager_CustomConfig(t *testing.T) {
 	}
 }
 
+// staticToolset implements tool.Toolset with a fixed tool list (for MCP group tests).
+type staticToolset struct {
+	name  string
+	tools []tool.Tool
+}
+
+func (s *staticToolset) Name() string { return s.name }
+func (s *staticToolset) Tools(_ adkagent.ReadonlyContext) ([]tool.Tool, error) {
+	return s.tools, nil
+}
+
 func TestSubAgentManager_ResolveTools(t *testing.T) {
 	mgr := NewSubAgentManager(SubAgentConfig{})
 	mgr.ToolGroups = map[string]*ToolGroup{
@@ -63,6 +75,10 @@ func TestSubAgentManager_ResolveTools(t *testing.T) {
 		"browser": {
 			Name:  "browser",
 			Tools: mockTools("browser_navigate", "browser_click"),
+		},
+		"mcp:email": {
+			Name:     "mcp:email",
+			Toolsets: []tool.Toolset{&staticToolset{name: "email", tools: mockTools("send_email")}},
 		},
 	}
 
@@ -127,6 +143,39 @@ func TestSubAgentManager_ResolveTools(t *testing.T) {
 	}
 	if len(warnings) != 1 {
 		t.Errorf("resolveTools([browser, nonexistent]) returned %d warnings, want 1", len(warnings))
+	}
+
+	// MCP group by name loads toolset
+	_, toolsets, warnings = mgr.resolveTools(context.Background(), []string{"mcp:email"})
+	if len(toolsets) != 1 {
+		t.Errorf("resolveTools([mcp:email]) returned %d toolsets, want 1", len(toolsets))
+	}
+	if len(warnings) != 0 {
+		t.Errorf("resolveTools([mcp:email]) warnings: %v", warnings)
+	}
+
+	// Bare MCP tool name from toolset (was broken — only searched g.Tools)
+	tools, toolsets, warnings = mgr.resolveTools(context.Background(), []string{"send_email"})
+	if len(tools) != 1 || tools[0].Name() != "send_email" {
+		t.Errorf("resolveTools([send_email]) tools=%v, want [send_email]", tools)
+	}
+	if len(toolsets) != 1 {
+		t.Errorf("resolveTools([send_email]) toolsets=%d, want 1", len(toolsets))
+	}
+	if len(warnings) != 0 {
+		t.Errorf("resolveTools([send_email]) warnings: %v", warnings)
+	}
+
+	// App-style mcp:server/tool alias
+	tools, toolsets, warnings = mgr.resolveTools(context.Background(), []string{"mcp:email/send_email"})
+	if len(tools) != 1 || tools[0].Name() != "send_email" {
+		t.Errorf("resolveTools([mcp:email/send_email]) tools=%v, want [send_email]", tools)
+	}
+	if len(toolsets) < 1 {
+		t.Errorf("resolveTools([mcp:email/send_email]) toolsets=%d, want >=1", len(toolsets))
+	}
+	if len(warnings) != 0 {
+		t.Errorf("resolveTools([mcp:email/send_email]) warnings: %v", warnings)
 	}
 }
 

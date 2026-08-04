@@ -441,6 +441,9 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 				continue
 			}
 			lt := agent.NewLazyMCPToolset(name, cachedTools, serverCfg, cfg.DebugMode)
+			if credStore != nil {
+				lt.SetCredentialResolver(credStore)
+			}
 			lazyToolsets = append(lazyToolsets, lt)
 		}
 
@@ -1369,6 +1372,7 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		if mcpCfg != nil {
 			capturedMCPCfg := mcpCfg
 			capturedDebugMode := cfg.DebugMode
+			capturedCredStore := credStore
 			subAgentMgr.MCPGroupResolver = func(ctx context.Context, serverName string) *agent.ToolGroup {
 				serverCfg, exists := capturedMCPCfg.MCPServers[serverName]
 				if !exists || !serverCfg.IsEnabled() {
@@ -1421,6 +1425,9 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 				}
 				// Build the ToolGroup on-the-fly
 				lt := agent.NewLazyMCPToolset(serverName, cachedTools, serverCfg, capturedDebugMode)
+				if capturedCredStore != nil {
+					lt.SetCredentialResolver(capturedCredStore)
+				}
 				sanitized := agent.NewSanitizedToolset(lt, capturedDebugMode)
 				groupName := "mcp:" + serverName
 				return &agent.ToolGroup{

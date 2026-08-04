@@ -1057,6 +1057,38 @@ func TestCanAutoInjectTool(t *testing.T) {
 			t.Fatal("expected inaccessible MCP tool to be rejected")
 		}
 	})
+
+	t.Run("mcp app-style alias", func(t *testing.T) {
+		// Visual-app form mcp:server/tool must resolve to the bare tool name.
+		if !canAutoInjectTool(context.Background(), idx, "mcp:custom-server/custom_mcp_tool") {
+			t.Fatal("expected mcp:server/tool alias to be injectable")
+		}
+		if got := resolveIndexedToolName(idx, "mcp:custom-server/custom_mcp_tool"); got != "custom_mcp_tool" {
+			t.Fatalf("resolveIndexedToolName = %q, want custom_mcp_tool", got)
+		}
+	})
+}
+
+func TestParseMCPToolRef(t *testing.T) {
+	tests := []struct {
+		in          string
+		wantGroup   string
+		wantTool    string
+		wantOK      bool
+	}{
+		{"send_email", "", "", false},
+		{"mcp:email", "mcp:email", "", true},
+		{"mcp:email/send_email", "mcp:email", "send_email", true},
+		{"mcp:", "", "", false},
+		{"mcp:/send", "", "", false},
+	}
+	for _, tt := range tests {
+		g, tool, ok := parseMCPToolRef(tt.in)
+		if ok != tt.wantOK || g != tt.wantGroup || tool != tt.wantTool {
+			t.Errorf("parseMCPToolRef(%q) = (%q,%q,%v), want (%q,%q,%v)",
+				tt.in, g, tool, ok, tt.wantGroup, tt.wantTool, tt.wantOK)
+		}
+	}
 }
 
 func TestAutoInjectMissingToolCallback_Injectable(t *testing.T) {

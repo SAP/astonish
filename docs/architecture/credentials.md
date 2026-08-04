@@ -191,6 +191,7 @@ Do **not** publish a personal OAuth/API credential to the team just to schedule 
 |---|---|
 | `pkg/credentials/store.go` | Encrypted credential store: Open, Get, Set, Resolve, token cache |
 | `pkg/credentials/substitute.go` | Placeholder substitution: SubstituteAndRestore, FormatPlaceholder |
+| `pkg/mcp/env_resolve.go` | MCP server env resolution of `{{CREDENTIAL:name:field}}` at process start |
 | `pkg/credentials/redact.go` | Multi-encoding redaction: AddSecret, Redact, RedactMap |
 | `pkg/credentials/pending_secrets.go` | PendingVault: Extract, Resolve, SubstituteAndRestore for <<<SECRET_N>>> |
 | `pkg/store/merged_credential_store.go` | Personal-first / team-fallback CredentialStore |

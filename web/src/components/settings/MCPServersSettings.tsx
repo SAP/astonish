@@ -17,6 +17,7 @@ import {
 } from './settingsApi'
 import type { MCPServerConfig, MCPServerStatusEntry, StandardServer, PerplexityProviderOption } from './settingsApi'
 import { teamFetch } from '../../api/teamContext'
+import McpEnvEditor, { McpEnvBadges } from './McpEnvEditor'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -789,33 +790,11 @@ export default function MCPServersSettings({
                           </span>
                         </div>
                         
-                        {/* Environment Variables - show as subtle tags */}
-                        {server.env && Object.keys(server.env).length > 0 && !isExpanded && (
+                        {/* Environment Variables - credential binds show name only */}
+                        {!isExpanded && server.env && Object.keys(server.env).length > 0 && (
                           <div className="flex items-center gap-1.5 mt-2">
                             <Key size={12} style={{ color: 'var(--text-muted)' }} />
-                            <div className="flex flex-wrap gap-1">
-                              {Object.keys(server.env).slice(0, 2).map(key => (
-                                <span 
-                                  key={key}
-                                  className="text-xs px-1.5 py-0.5 rounded"
-                                  style={{ 
-                                    background: 'var(--brand-muted)', 
-                                    color: 'var(--text-muted)',
-                                    border: '1px solid var(--brand-muted)'
-                                  }}
-                                >
-                                  {key}
-                                </span>
-                              ))}
-                              {Object.keys(server.env).length > 2 && (
-                                <span 
-                                  className="text-xs px-1.5 py-0.5 rounded"
-                                  style={{ color: 'var(--text-muted)' }}
-                                >
-                                  +{Object.keys(server.env).length - 2} more
-                                </span>
-                              )}
-                            </div>
+                            <McpEnvBadges env={server.env} />
                           </div>
                         )}
 
@@ -949,26 +928,17 @@ export default function MCPServersSettings({
                             </div>
                           )}
                           
-                          {/* Environment Variables */}
-                          <div>
-                            <label className="block text-sm mb-1" style={{ color: 'var(--text-muted)' }}>Environment (JSON)</label>
-                            <textarea
-                              value={Object.keys(server.env || {}).length > 0 ? JSON.stringify(server.env, null, 2) : ''}
-                              onChange={(e) => {
-                                e.stopPropagation()
-                                try {
-                                  const env = e.target.value ? JSON.parse(e.target.value) : {}
-                                  setMcpServers({
-                                    ...mcpServers,
-                                    [name]: { ...server, env }
-                                  })
-                                } catch { /* JSON parse validation — ignore malformed input */ }
+                          {/* Environment Variables — credential bind UI; Source view shows {{CREDENTIAL:...}} */}
+                          <div onClick={(e) => e.stopPropagation()}>
+                            <McpEnvEditor
+                              env={server.env}
+                              onChange={(env) => {
+                                setMcpServers({
+                                  ...mcpServers,
+                                  [name]: { ...server, env },
+                                })
+                                setMcpHasChanges(true)
                               }}
-                              onClick={(e) => e.stopPropagation()}
-                              placeholder={'{\n  "KEY": "value"\n}'}
-                              rows={4}
-                              className="w-full px-3 py-2 rounded border text-sm font-mono resize-y"
-                              style={{ background: 'var(--bg-primary)', borderColor: 'var(--border-color)', color: 'var(--text-primary)' }}
                             />
                           </div>
                           

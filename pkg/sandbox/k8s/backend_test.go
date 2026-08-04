@@ -399,10 +399,10 @@ func TestPodNameForSession(t *testing.T) {
 	cases := []struct {
 		in, want string
 	}{
-		{"00000000-0000-0000-0000-000000000001", "astn-sess-00000000-0000-0000-0000-000"},
-		{"SESSION_with_underscores", "astn-sess-session-with-underscores"},
-		{"--trim-edges--", "astn-sess-trim-edges"},
-		{"abc", "astn-sess-abc"},
+		{"00000000-0000-0000-0000-000000000001", "astn-sess-00000000-0000-0000-0000-000000000001-7ac1b8d7010b"},
+		{"SESSION_with_underscores", "astn-sess-session-with-underscores-81caeb55f834"},
+		{"--trim-edges--", "astn-sess-trim-edges-1243165d00ee"},
+		{"abc", "astn-sess-abc-ba7816bf8f01"},
 	}
 	for _, c := range cases {
 		if got := podNameForSession(c.in); got != c.want {

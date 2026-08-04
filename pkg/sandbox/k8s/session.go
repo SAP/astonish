@@ -35,6 +35,7 @@ package k8s
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"regexp"
@@ -77,6 +78,7 @@ const (
 	annotationCreatedBy  = "astonish.io/created-by"
 	annotationCreatedAt  = "astonish.io/created-at"
 	annotationLayerChain = "astonish.io/layer-chain"
+	annotationSessionID  = "astonish.io/session-id"
 )
 
 // Volume names used inside sandbox pods.
@@ -115,33 +117,46 @@ func upperDirNameForSession(sessionID string) (string, error) {
 	if sessionID == "" {
 		return "", errors.New("session ID is required")
 	}
-	if sessionID == "." || sessionID == ".." || strings.Contains(sessionID, "/") || !safeSessionPathRE.MatchString(sessionID) {
+	if sessionID == "." || sessionID == ".." || strings.Contains(sessionID, "/") {
 		return "", fmt.Errorf("session ID %q is not safe for upper persistence", sessionID)
 	}
-	return sessionID, nil
+	if safeSessionPathRE.MatchString(sessionID) {
+		return sessionID, nil
+	}
+	return upperDirHashForSession(sessionID), nil
+}
+
+func upperDirHashForSession(sessionID string) string {
+	sum := sha256.Sum256([]byte(sessionID))
+	return fmt.Sprintf("sid-%x", sum[:16])
 }
 
 // podNameForSession returns the deterministic pod name used by the K8s
 // backend. Exposed here (rather than inlined) so that session.go,
 // exec.go, files.go, and fleet.go agree on the naming scheme.
 //
-// The scheme is "astn-sess-" + the first 27 chars of the session ID
-// (lowercased, DNS-sanitised) to stay within Kubernetes' 253-char
-// DNS-1123 limit while remaining trivially reversible for operators
-// reading kubectl output. Reference:
-// docs/architecture/sandbox-backends.md §5.3 step 2.
+// The scheme is "astn-sess-" + a readable DNS-safe prefix + a short hash
+// suffix. The hash keeps non-UUID channel sessions (for example email thread
+// IDs containing ':' and '@') from colliding after DNS sanitisation/truncation.
+// Reference: docs/architecture/sandbox-backends.md §5.3 step 2.
 func podNameForSession(sessionID string) string {
 	const prefix = "astn-sess-"
-	const maxIDLen = 27
+	const hashLen = 12
+	const maxNameLen = 63
 	clean := toDNSLabel(sessionID)
-	if len(clean) > maxIDLen {
-		clean = clean[:maxIDLen]
+	sum := sha256.Sum256([]byte(sessionID))
+	suffix := fmt.Sprintf("-%x", sum[:hashLen/2])
+	maxCleanLen := maxNameLen - len(prefix) - len(suffix)
+	if len(clean) > maxCleanLen {
+		clean = clean[:maxCleanLen]
 	}
-	// Re-trim trailing '-' in case truncation left one.
 	for len(clean) > 0 && clean[len(clean)-1] == '-' {
 		clean = clean[:len(clean)-1]
 	}
-	return prefix + clean
+	if clean == "" {
+		clean = hashDNSLabel(sessionID)
+	}
+	return prefix + clean + suffix
 }
 
 // toDNSLabel lower-cases the input and replaces any character that is
@@ -168,7 +183,22 @@ func toDNSLabel(s string) string {
 	for len(out) > 0 && out[len(out)-1] == '-' {
 		out = out[:len(out)-1]
 	}
+	if len(out) == 0 {
+		return hashDNSLabel(s)
+	}
 	return string(out)
+}
+
+func hashDNSLabel(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return fmt.Sprintf("h%x", sum[:8])
+}
+
+func labelValueForSession(sessionID string) string {
+	if len(sessionID) <= 63 && toDNSLabel(sessionID) == sessionID {
+		return sessionID
+	}
+	return hashDNSLabel(sessionID)
 }
 
 // ---------------------------------------------------------------------------
@@ -183,7 +213,8 @@ func (b *K8sBackend) buildPodManifest(spec sandbox.SessionSpec) (*corev1.Pod, er
 	if spec.SessionID == "" {
 		return nil, errors.New("SessionSpec.SessionID is required")
 	}
-	if _, err := upperDirNameForSession(spec.SessionID); err != nil {
+	upperDir, err := upperDirNameForSession(spec.SessionID)
+	if err != nil {
 		return nil, err
 	}
 	if spec.TemplateID == "" {
@@ -206,7 +237,7 @@ func (b *K8sBackend) buildPodManifest(spec sandbox.SessionSpec) (*corev1.Pod, er
 
 	labels := map[string]string{
 		labelType:      typeSession,
-		labelSessionID: toDNSLabel(spec.SessionID),
+		labelSessionID: labelValueForSession(spec.SessionID),
 		labelTemplate:  toDNSLabel(spec.TemplateID),
 	}
 	if spec.OrgSlug != "" {
@@ -221,7 +252,10 @@ func (b *K8sBackend) buildPodManifest(spec sandbox.SessionSpec) (*corev1.Pod, er
 	}
 
 	annotations := map[string]string{
-		annotationCreatedAt:  time.Now().UTC().Format(time.RFC3339),
+		annotationCreatedAt: time.Now().UTC().Format(time.RFC3339),
+		// Preserve the exact chat/channel session ID for operators. Kubernetes
+		// labels are intentionally DNS-safe and may be hashed for email threads.
+		annotationSessionID:  spec.SessionID,
 		annotationLayerChain: strings.Join(spec.LayerChain, ","),
 	}
 	if spec.UserID != "" {
@@ -267,7 +301,7 @@ func (b *K8sBackend) buildPodManifest(spec sandbox.SessionSpec) (*corev1.Pod, er
 					},
 					VolumeMounts: []corev1.VolumeMount{
 						{Name: volumeLayers, MountPath: mountLayers, ReadOnly: spec.Labels[labelPurpose] != purposeTeamTemplateEditor},
-						{Name: volumeUppers, MountPath: mountUppers, SubPath: spec.SessionID},
+						{Name: volumeUppers, MountPath: mountUppers, SubPath: upperDir},
 						{Name: volumeOverlay, MountPath: mountOverlay},
 					},
 					Resources: buildResourceRequirements(spec.Limits),

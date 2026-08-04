@@ -86,3 +86,11 @@ export function guessCredentialTypeFromEnvKey(envKey: string): 'api_key' | 'bear
 export function isSensitiveEnvKey(key: string): boolean {
   return /TOKEN|KEY|SECRET|PASSWORD|PASSWD|PWD|AUTH/i.test(key)
 }
+
+/** Omit blank sensitive env values so config does not persist TOKEN="" placeholders. */
+export function omitEmptySensitiveEnv(env: Record<string, string> | undefined | null): Record<string, string> {
+  if (!env) return {}
+  return Object.fromEntries(
+    Object.entries(env).filter(([key, value]) => !(isSensitiveEnvKey(key) && value.trim() === '')),
+  )
+}

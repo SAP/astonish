@@ -104,6 +104,27 @@ describe('MCPStoreModal', () => {
     expect(onInstall).toHaveBeenCalled()
     expect(await screen.findByText(/installed!/i)).toBeInTheDocument()
   })
+
+  it('omits blank sensitive env overrides when installing an MCP server', async () => {
+    const user = userEvent.setup()
+
+    render(<MCPStoreModal isOpen onClose={vi.fn()} teamSlug="core" scope="team" />)
+
+    expect(await screen.findByText('GitHub Tools')).toBeInTheDocument()
+    await user.click(screen.getByText('GitHub Tools'))
+    await user.click(screen.getByRole('button', { name: /^install$/i }))
+
+    await waitFor(() => {
+      expect(teamFetch).toHaveBeenCalledWith(
+        '/api/mcp-store/github/server/install?scope=team',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ env: {} }),
+        }),
+        'core'
+      )
+    })
+  })
 })
 
 describe('MCPInspector', () => {

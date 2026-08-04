@@ -12,7 +12,7 @@ import { cn } from '@/lib/utils'
 
 import { teamFetch } from '../api/teamContext'
 import CredentialBindControl from '@/components/credentials/CredentialBindControl'
-import { isSensitiveEnvKey } from '@/components/credentials/credentialPlaceholders'
+import { isSensitiveEnvKey, omitEmptySensitiveEnv } from '@/components/credentials/credentialPlaceholders'
 
 // --- Types ---
 
@@ -120,7 +120,7 @@ export default function MCPStoreModal({ isOpen, onClose, onInstall, teamSlug, sc
     setInstalling(server.mcpId)
     setInstallSuccess(null)
     try {
-      const envToSend = { ...envOverrides }
+      const envToSend = omitEmptySensitiveEnv(envOverrides)
       await installMCPServer(server.mcpId, envToSend, teamSlug, scope)
       setInstallSuccess(server.mcpId)
       setEnvOverrides({})

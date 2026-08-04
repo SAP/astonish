@@ -7,7 +7,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import CredentialBindControl from '@/components/credentials/CredentialBindControl'
-import { isSensitiveEnvKey } from '@/components/credentials/credentialPlaceholders'
+import { isSensitiveEnvKey, omitEmptySensitiveEnv } from '@/components/credentials/credentialPlaceholders'
 
 interface McpServerConfig {
   env?: Record<string, string>
@@ -54,7 +54,7 @@ export default function InstallMcpModal({ isOpen, onClose, onInstall, server }: 
     setError(null)
 
     try {
-      await onInstall(envVars)
+      await onInstall(omitEmptySensitiveEnv(envVars))
       onClose()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to install server')

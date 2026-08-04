@@ -5,6 +5,7 @@ import {
   formatCredentialPlaceholder,
   guessCredentialTypeFromEnvKey,
   isSensitiveEnvKey,
+  omitEmptySensitiveEnv,
   parseCredentialPlaceholder,
 } from '../credentialPlaceholders'
 
@@ -28,5 +29,12 @@ describe('credentialPlaceholders', () => {
     expect(guessCredentialTypeFromEnvKey('API_KEY')).toBe('api_key')
     expect(isSensitiveEnvKey('GITHUB_TOKEN')).toBe(true)
     expect(isSensitiveEnvKey('DEBUG')).toBe(false)
+  })
+
+  it('omits blank sensitive env values', () => {
+    expect(omitEmptySensitiveEnv({ GITHUB_TOKEN: '', API_SECRET: '  ', LOG_LEVEL: '', API_KEY: '{{CREDENTIAL:api:value}}' })).toEqual({
+      LOG_LEVEL: '',
+      API_KEY: '{{CREDENTIAL:api:value}}',
+    })
   })
 })

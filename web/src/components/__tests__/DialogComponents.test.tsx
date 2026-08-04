@@ -46,7 +46,7 @@ describe('redesigned dialog components', () => {
     )
 
     await userEvent.type(screen.getByLabelText('GITHUB_TOKEN'), 'ghp_test')
-    await userEvent.click(screen.getByRole('button', { name: 'Install Server' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Install' }))
 
     expect(onInstall).toHaveBeenCalledWith({ GITHUB_TOKEN: 'ghp_test' })
     expect(onClose).toHaveBeenCalledOnce()

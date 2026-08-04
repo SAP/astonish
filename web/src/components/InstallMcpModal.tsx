@@ -102,6 +102,7 @@ export default function InstallMcpModal({ isOpen, onClose, onInstall, server }: 
                           </Label>
                           {isSensitive ? (
                             <CredentialBindControl
+                              id={`env-${key}`}
                               value={envVars[key] || ''}
                               envKey={key}
                               onChange={(value) => handleEnvChange(key, value)}

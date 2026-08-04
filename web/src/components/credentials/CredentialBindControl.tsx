@@ -40,6 +40,8 @@ type CredentialBindControlProps = {
   className?: string
   /** When true, hide the plain-text input path (credential-only). */
   credentialOnly?: boolean
+  /** Optional id for the plain-value input (label association). */
+  id?: string
 }
 
 async function fetchCredentialList(): Promise<CredentialSummary[]> {
@@ -61,6 +63,7 @@ export default function CredentialBindControl({
   envKey = '',
   className,
   credentialOnly = false,
+  id,
 }: CredentialBindControlProps) {
   const ref = parseCredentialPlaceholder(value)
   const [pickerOpen, setPickerOpen] = useState(false)
@@ -105,6 +108,7 @@ export default function CredentialBindControl({
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
           {!credentialOnly && (
             <Input
+              id={id}
               value={value}
               onChange={(e) => onChange(e.target.value)}
               placeholder={envKey ? `Value for ${envKey}` : 'Plain value'}

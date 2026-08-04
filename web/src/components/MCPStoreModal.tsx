@@ -290,6 +290,7 @@ export default function MCPStoreModal({ isOpen, onClose, onInstall, teamSlug, sc
                                   <Label htmlFor={`mcp-env-${server.mcpId}-${key}`} className="text-xs">{key}</Label>
                                   {sensitive ? (
                                     <CredentialBindControl
+                                      id={`mcp-env-${server.mcpId}-${key}`}
                                       value={current}
                                       envKey={key}
                                       onChange={(value) => setEnvOverrides({ ...envOverrides, [key]: value })}

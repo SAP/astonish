@@ -6,6 +6,8 @@ import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import CredentialBindControl from '@/components/credentials/CredentialBindControl'
+import { isSensitiveEnvKey, omitEmptySensitiveEnv } from '@/components/credentials/credentialPlaceholders'
 
 interface McpServerConfig {
   env?: Record<string, string>
@@ -33,10 +35,9 @@ export default function InstallMcpModal({ isOpen, onClose, onInstall, server }: 
   useEffect(() => {
     if (server?.config?.env) {
       const initial: Record<string, string> = {}
-      // The store provides env as a map of key -> description/value.
-      // Capture values for keys, but skip defaults for sensitive fields.
       Object.keys(server.config.env).forEach(key => {
-        const isSensitive = /TOKEN|KEY|SECRET|PASSWORD|PASSWD|PWD|AUTH/i.test(key)
+        const isSensitive = isSensitiveEnvKey(key)
+        // Sensitive keys start empty so the user binds a credential or creates a secret.
         initial[key] = isSensitive ? '' : (server.config!.env![key] || '')
       })
       setEnvVars(initial)
@@ -53,7 +54,7 @@ export default function InstallMcpModal({ isOpen, onClose, onInstall, server }: 
     setError(null)
 
     try {
-      await onInstall(envVars)
+      await onInstall(omitEmptySensitiveEnv(envVars))
       onClose()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to install server')
@@ -86,23 +87,36 @@ export default function InstallMcpModal({ isOpen, onClose, onInstall, server }: 
                     <Lock size={16} className="text-primary" />
                     Configuration Required
                   </div>
+                  <p className="text-xs text-muted-foreground">
+                    Bind secrets to the credential store. Config will save{' '}
+                    <code className="font-mono text-[10px]">{'{{CREDENTIAL:name:field}}'}</code>, not raw tokens.
+                  </p>
 
                   <div className="space-y-4">
                     {Object.keys(server.config.env).map(key => {
-                      const isSensitive = /TOKEN|KEY|SECRET|PASSWORD|PASSWD|PWD|AUTH/i.test(key)
+                      const isSensitive = isSensitiveEnvKey(key)
                       return (
                         <div key={key} className="space-y-2">
                           <Label htmlFor={`env-${key}`} className="text-xs uppercase tracking-wider text-muted-foreground">
                             {key}
                           </Label>
-                          <Input
-                            id={`env-${key}`}
-                            type={isSensitive ? 'password' : 'text'}
-                            value={envVars[key] || ''}
-                            onChange={(e: React.ChangeEvent<HTMLInputElement>) => handleEnvChange(key, e.target.value)}
-                            placeholder={`Enter ${key}`}
-                            className="font-mono text-sm"
-                          />
+                          {isSensitive ? (
+                            <CredentialBindControl
+                              id={`env-${key}`}
+                              value={envVars[key] || ''}
+                              envKey={key}
+                              onChange={(value) => handleEnvChange(key, value)}
+                            />
+                          ) : (
+                            <Input
+                              id={`env-${key}`}
+                              type="text"
+                              value={envVars[key] || ''}
+                              onChange={(e: React.ChangeEvent<HTMLInputElement>) => handleEnvChange(key, e.target.value)}
+                              placeholder={`Enter ${key}`}
+                              className="font-mono text-sm"
+                            />
+                          )}
                         </div>
                       )
                     })}
@@ -119,26 +133,26 @@ export default function InstallMcpModal({ isOpen, onClose, onInstall, server }: 
 
               {error && (
                 <Alert variant="destructive">
-                  <AlertCircle size={16} />
+                  <AlertCircle size={18} />
                   <AlertDescription>{error}</AlertDescription>
                 </Alert>
               )}
             </div>
 
             <DialogFooter>
-              <Button type="button" variant="secondary" onClick={onClose} disabled={isInstalling}>
+              <Button type="button" variant="outline" onClick={onClose} disabled={isInstalling}>
                 Cancel
               </Button>
               <Button type="submit" disabled={isInstalling}>
                 {isInstalling ? (
                   <>
-                    <Loader2 size={16} className="animate-spin" />
-                    Installing...
+                    <Loader2 size={16} className="mr-2 animate-spin" />
+                    Installing…
                   </>
                 ) : (
                   <>
-                    <Save size={16} />
-                    Install Server
+                    <Save size={16} className="mr-2" />
+                    Install
                   </>
                 )}
               </Button>

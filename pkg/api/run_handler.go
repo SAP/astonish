@@ -382,6 +382,9 @@ func (sm *SessionManager) GetOrCreateMCPManager(ctx context.Context, sessionID s
 	if len(validStores) > 0 {
 		mcpCfg := buildMCPConfigFromStores(validStores, requiredServers, EffectiveAppConfigFromContext(ctx, true))
 		mgr = mcp.NewManagerFromConfig(mcpCfg)
+		if resolver := credentials.ResolverFromContext(ctx); resolver != nil {
+			mgr.SetCredentialResolver(resolver)
+		}
 	} else {
 		// No platform MCP stores available — return empty
 		return nil, nil

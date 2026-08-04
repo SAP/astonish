@@ -22,6 +22,11 @@ export default defineConfig({
     testTimeout: 15000,
     setupFiles: ['./src/test/setup.ts'],
     include: ['src/**/*.{test,spec}.{ts,tsx}'],
+    // Preload before jsdom/undici so Node 20 workers get markAsUncloneable.
+    // setupFiles run too late (after the jsdom environment is constructed).
+    // Vitest 4: execArgv is a top-level test option (not poolOptions.forks).
+    pool: 'forks',
+    execArgv: ['-r', resolve(__dir, 'src/test/polyfill-worker-threads.cjs')],
     coverage: {
       provider: 'v8',
       include: ['src/**/*.{ts,tsx}'],

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/SAP/astonish/pkg/cache"
 	"github.com/SAP/astonish/pkg/common"
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/mcp"
@@ -36,7 +37,11 @@ func mcpManagerForRequest(r *http.Request, serverName string) (*mcp.Manager, con
 				serverName: serverCfg,
 			},
 		}
-		return mcp.NewManagerFromConfig(cfg), serverCfg, nil
+		mgr := mcp.NewManagerFromConfig(cfg)
+		if resolver := credentialResolverForRequest(r); resolver != nil {
+			mgr.SetCredentialResolver(resolver)
+		}
+		return mgr, serverCfg, nil
 	}
 	return nil, config.MCPServerConfig{}, fmt.Errorf("MCP server store not available")
 }
@@ -72,6 +77,7 @@ func mcpInspectorUsesSandbox(serverCfg config.MCPServerConfig) bool {
 
 func listMCPToolsForInspector(ctx context.Context, r *http.Request, serverName string, serverCfg config.MCPServerConfig) ([]ToolSchema, error) {
 	if mcpInspectorUsesSandbox(serverCfg) {
+		// Attach network policy + request credential store so env placeholders resolve.
 		discoveryCtx := withRuntimeNetworkPolicyContext(ctx, r, effectiveAppConfig(r))
 		data, err := discoverMCPToolsInSandbox(discoveryCtx, serverName, serverCfg, buildPGSessionRegistry(r.Context()))
 		if err != nil {
@@ -209,10 +215,71 @@ func ListServerToolsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Persist discovered tools so Studio chat can inject them. Chat only loads
+	// MCP tools from cached_tools / the file tools cache — listing in the
+	// inspector used to discover tools live without writing them anywhere,
+	// which left search_tools with no mcp:* groups.
+	if len(tools) > 0 {
+		persistMCPToolsFromInspector(r, serverName, serverCfg, tools)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(ListServerToolsResponse{
 		Tools: tools,
 	})
+}
+
+// persistMCPToolsFromInspector writes tool declarations discovered by the
+// inspector Test/list endpoint into the DB (platform) and/or file cache
+// (personal), matching the shape expected by parseCachedToolsJSON / cache.ToolEntry.
+func persistMCPToolsFromInspector(r *http.Request, serverName string, serverCfg config.MCPServerConfig, tools []ToolSchema) {
+	type cacheShape struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		InputSchema any    `json:"inputSchema,omitempty"`
+	}
+	entries := make([]cacheShape, 0, len(tools))
+	fileEntries := make([]cache.ToolEntry, 0, len(tools))
+	for _, t := range tools {
+		entries = append(entries, cacheShape{
+			Name:        t.Name,
+			Description: t.Description,
+			InputSchema: t.Parameters,
+		})
+		var schemaJSON json.RawMessage
+		if t.Parameters != nil {
+			if b, err := json.Marshal(t.Parameters); err == nil {
+				schemaJSON = b
+			}
+		}
+		fileEntries = append(fileEntries, cache.ToolEntry{
+			Name:        t.Name,
+			Description: t.Description,
+			Source:      serverName,
+			InputSchema: schemaJSON,
+		})
+	}
+
+	// File tools cache (personal mode + platform fallback).
+	checksum := cache.ComputeServerChecksum(serverCfg.Command, serverCfg.Args, serverCfg.Env)
+	cache.AddServerTools(serverName, fileEntries, checksum)
+	if err := cache.SaveCache(); err != nil {
+		slog.Warn("MCP inspector: failed to save file tools cache", "server", serverName, "error", err)
+	}
+
+	// DB cached_tools column (platform/team/org scopes).
+	if mcpStore := effectiveMCPStore(r); mcpStore != nil {
+		data, err := json.Marshal(entries)
+		if err != nil {
+			slog.Warn("MCP inspector: failed to marshal tools for cache", "server", serverName, "error", err)
+			return
+		}
+		if err := mcpStore.UpdateCachedTools(r.Context(), serverName, data); err != nil {
+			slog.Warn("MCP inspector: failed to update cached_tools", "server", serverName, "error", err)
+			return
+		}
+		slog.Info("MCP inspector: cached tools for chat", "server", serverName, "count", len(tools))
+	}
 }
 
 // RunServerToolHandler handles POST /api/mcp/{serverName}/tools/{toolName}/run

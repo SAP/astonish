@@ -490,6 +490,7 @@ func InstallInlineMCPServerHandler(w http.ResponseWriter, r *http.Request) {
 	if req.Config.Transport == "" {
 		req.Config.Transport = "stdio"
 	}
+	req.Config.Env = omitEmptySensitiveMCPEnv(req.Config.Env)
 
 	// Platform mode: save directly to DB store
 	if mcpStore := effectiveMCPStore(r); mcpStore != nil {

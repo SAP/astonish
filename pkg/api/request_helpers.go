@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/SAP/astonish/pkg/config"
+	"github.com/SAP/astonish/pkg/credentials"
 	"github.com/SAP/astonish/pkg/provider"
 	"github.com/SAP/astonish/pkg/store"
 )
@@ -73,6 +74,55 @@ func effectiveTeamCredentialStore(r *http.Request) store.CredentialStore {
 		return svc.Credentials
 	}
 	return nil
+}
+
+// effectiveMergedCredentialStore returns personal-first, team-fallback
+// credentials for runtime secret resolution (MCP env placeholders, tool
+// execution). This intentionally ignores the ?scope= query parameter: that
+// scope selects which *config* store to use (team/org/platform MCP servers),
+// not which secrets the user may inject. Chat and apps always resolve this way.
+func effectiveMergedCredentialStore(r *http.Request) store.CredentialStore {
+	if r == nil {
+		return nil
+	}
+	svc := store.FromRequest(r)
+	if svc == nil {
+		return nil
+	}
+	if svc.PersonalCredentials != nil || svc.Credentials != nil {
+		return store.NewMergedCredentialStore(svc.PersonalCredentials, svc.Credentials)
+	}
+	return svc.Credentials
+}
+
+// credentialResolverForRequest returns a CredentialResolver for expanding
+// {{CREDENTIAL:name:field}} placeholders (e.g. MCP server env at Test/start).
+// Always personal-first → team fallback (same as Chat), regardless of MCP
+// admin scope. Falls back to the personal-mode file store, then context.
+func credentialResolverForRequest(r *http.Request) credentials.CredentialResolver {
+	if r == nil {
+		return nil
+	}
+	if cs := effectiveMergedCredentialStore(r); cs != nil {
+		return credentials.NewStoreAdapter(cs)
+	}
+	if file := getAPICredentialStore(); file != nil {
+		return file
+	}
+	return credentials.ResolverFromContext(r.Context())
+}
+
+// withRequestCredentialStore attaches the merged (personal-first) credential
+// store to ctx so MCP discovery/Test can resolve env placeholders like Chat.
+// No-op when no store is available.
+func withRequestCredentialStore(ctx context.Context, r *http.Request) context.Context {
+	if r == nil {
+		return ctx
+	}
+	if cs := effectiveMergedCredentialStore(r); cs != nil {
+		return store.WithCredentialStore(ctx, cs)
+	}
+	return ctx
 }
 
 // isPlatformMode checks whether the current request is running in platform mode
@@ -208,8 +258,13 @@ func loadMCPConfigForRequest(r *http.Request) *config.MCPConfig {
 		return cfg
 	}
 
-	// No platform context — return empty config
-	return &config.MCPConfig{MCPServers: make(map[string]config.MCPServerConfig)}
+	// Personal / non-platform: filesystem mcp_config.json (+ standard servers).
+	cfg, err := config.LoadMCPConfig()
+	if err != nil {
+		slog.Warn("failed to load MCP config for request", "error", err)
+		return &config.MCPConfig{MCPServers: make(map[string]config.MCPServerConfig)}
+	}
+	return cfg
 }
 
 // EffectiveAppConfigFromContext builds the effective application configuration using

@@ -397,7 +397,11 @@ func FormatToolMatchesForPrompt(matches []ToolMatch) string {
 	// Dynamically injected tools (grouped by origin)
 	for _, gName := range groupOrder {
 		g := groups[gName]
-		sb.WriteString(fmt.Sprintf("**%s** group (call directly):\n", gName))
+		if strings.HasPrefix(gName, "mcp:") {
+			sb.WriteString(fmt.Sprintf("**%s** group (call bare tool names directly — NOT `%s/<tool>`):\n", gName, gName))
+		} else {
+			sb.WriteString(fmt.Sprintf("**%s** group (call directly):\n", gName))
+		}
 		for _, m := range g.tools {
 			sb.WriteString(fmt.Sprintf("  - `%s` — %s\n", m.ToolName, truncateDesc(m.Description, 120)))
 		}
@@ -493,6 +497,86 @@ func (idx *ToolIndex) GetToolsByGroup(groupName string) []ToolEntry {
 		}
 	}
 	return results
+}
+
+// MatchMCPGroupsFromQuery finds MCP tool groups mentioned in free text and
+// returns all tools in those groups. Handles phrases like "mcp server email",
+// "mcp:email", and bare server ids when preceded by "mcp".
+//
+// This is used so the main thread can inject MCP tools when the user names a
+// server even if hybrid search scores poorly.
+func MatchMCPGroupsFromQuery(idx *ToolIndex, query string) []ToolMatch {
+	if idx == nil || strings.TrimSpace(query) == "" {
+		return nil
+	}
+	q := strings.ToLower(query)
+	all := idx.ListAll()
+
+	// Collect candidate mcp group names that appear in the query.
+	var matchedGroups []string
+	for groupName := range all {
+		if !strings.HasPrefix(groupName, "mcp:") {
+			continue
+		}
+		server := strings.TrimPrefix(groupName, "mcp:")
+		if server == "" {
+			continue
+		}
+		serverLower := strings.ToLower(server)
+		// Explicit refs
+		if strings.Contains(q, "mcp:"+serverLower) ||
+			strings.Contains(q, "mcp/"+serverLower) ||
+			strings.Contains(q, groupName) {
+			matchedGroups = append(matchedGroups, groupName)
+			continue
+		}
+		// "mcp server email", "mcp email", "the email mcp"
+		if strings.Contains(q, "mcp") && (strings.Contains(q, " "+serverLower) ||
+			strings.Contains(q, serverLower+" ") ||
+			strings.HasSuffix(q, serverLower) ||
+			strings.HasPrefix(q, serverLower+" ") ||
+			strings.Contains(q, "server "+serverLower) ||
+			strings.Contains(q, serverLower+" mcp") ||
+			strings.Contains(q, "mcp "+serverLower)) {
+			matchedGroups = append(matchedGroups, groupName)
+		}
+	}
+	if len(matchedGroups) == 0 {
+		return nil
+	}
+	sort.Strings(matchedGroups)
+
+	var out []ToolMatch
+	seen := make(map[string]bool)
+	for _, g := range matchedGroups {
+		for _, m := range all[g] {
+			if seen[m.ToolName] {
+				continue
+			}
+			seen[m.ToolName] = true
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// MergeToolMatches appends extras into base without duplicating tool names.
+func MergeToolMatches(base []ToolMatch, extras []ToolMatch) []ToolMatch {
+	if len(extras) == 0 {
+		return base
+	}
+	seen := make(map[string]bool, len(base))
+	for _, m := range base {
+		seen[m.ToolName] = true
+	}
+	for _, m := range extras {
+		if seen[m.ToolName] {
+			continue
+		}
+		seen[m.ToolName] = true
+		base = append(base, m)
+	}
+	return base
 }
 
 // ---------------------------------------------------------------------------

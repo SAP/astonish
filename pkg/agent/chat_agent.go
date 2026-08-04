@@ -313,22 +313,28 @@ func autoInjectMissingToolCallback(
 		}
 
 		name := t.Name()
-		if exclude != nil && exclude[name] {
+		// Normalize app-style refs (mcp:email/send_email → send_email).
+		resolved := resolveIndexedToolName(toolIndex, name)
+		if exclude != nil && (exclude[name] || exclude[resolved]) {
 			return nil, nil
 		}
-		if !canAutoInjectTool(ctx, toolIndex, name) {
+		if !canAutoInjectTool(ctx, toolIndex, resolved) {
 			return nil, nil
 		}
 
-		register([]string{name})
+		register([]string{resolved})
 		slog.Debug("auto-injected missing tool for next LLM call",
-			"component", "chat", "tool", name)
+			"component", "chat", "tool", resolved, "requested", name)
 
+		hint := resolved
+		if resolved != name {
+			hint = fmt.Sprintf("%s (not %q — use the bare tool name)", resolved, name)
+		}
 		return map[string]any{
 			"error": fmt.Sprintf(
-				"Tool %q exists but was not loaded for this turn. "+
-					"It has been injected into the session — call it again with the same arguments.",
-				name,
+				"Tool %s exists but was not loaded for this turn. "+
+					"It has been injected into the session — call %q again with the same arguments.",
+				hint, resolved,
 			),
 		}, nil
 	}
@@ -352,17 +358,36 @@ func isToolNotFoundError(err error, toolName string) bool {
 }
 
 // canAutoInjectTool reports whether toolName may be injected from ToolIndex
-// for the current request context (MCP access + team disabled-tool list).
+// or request-scoped MCP groups (MCP access + team disabled-tool list).
+// Accepts bare names and mcp:server/tool aliases.
 func canAutoInjectTool(ctx context.Context, toolIndex *ToolIndex, toolName string) bool {
-	if toolIndex == nil || toolName == "" {
+	if toolName == "" {
 		return false
 	}
-	entry := toolIndex.GetToolEntry(toolName)
+	// Request-scoped MCP tools (team catalog) take precedence.
+	if t, gName, ok := LookupRequestMCPTool(ctx, toolName); ok && t != nil {
+		for _, disabled := range store.DisabledToolsFromContext(ctx) {
+			if disabled == t.Name() || disabled == toolName {
+				return false
+			}
+		}
+		if serverName, isMCP := mcpServerNameFromGroup(gName); isMCP {
+			if !isMCPServerAccessible(ctx, serverName) {
+				return false
+			}
+		}
+		return true
+	}
+	if toolIndex == nil {
+		return false
+	}
+	resolved := resolveIndexedToolName(toolIndex, toolName)
+	entry := toolIndex.GetToolEntry(resolved)
 	if entry == nil || entry.Tool == nil {
 		return false
 	}
 	for _, disabled := range store.DisabledToolsFromContext(ctx) {
-		if disabled == toolName {
+		if disabled == resolved || disabled == toolName {
 			return false
 		}
 	}
@@ -427,11 +452,75 @@ func (c *ChatAgent) DynamicToolInjectionCallback() llmagent.BeforeModelCallback 
 		// Inject each tool into the request.
 		injected := 0
 		for toolName := range toolsToInject {
-			if _, exists := req.Tools[toolName]; exists {
+			resolved := resolveIndexedToolName(c.ToolIndex, toolName)
+			if _, exists := req.Tools[resolved]; exists {
 				continue // already registered (static main-thread tool)
 			}
-			entry := c.ToolIndex.GetToolEntry(toolName)
+
+			// Prefer request-scoped MCP tools (team catalog) over stale index entries.
+			if t, gName, ok := LookupRequestMCPTool(cbCtx, toolName); ok && t != nil {
+				if serverName, isMCP := mcpServerNameFromGroup(gName); isMCP {
+					if !isMCPServerAccessible(cbCtx, serverName) {
+						continue
+					}
+				}
+				if _, exists := req.Tools[t.Name()]; exists {
+					continue
+				}
+				packToolIntoRequest(req, t)
+				injected++
+				continue
+			}
+
+			entry := c.ToolIndex.GetToolEntry(resolved)
 			if entry == nil || entry.Tool == nil {
+				// If the LLM/search asked for a whole MCP group (mcp:email),
+				// inject every tool in that group (index + request-scoped).
+				if group, bare, isRef := parseMCPToolRef(toolName); isRef && bare == "" {
+					if reqGroups := RequestMCPGroupsFromContext(cbCtx); reqGroups != nil {
+						if g := reqGroups[group]; g != nil {
+							if serverName, isMCP := mcpServerNameFromGroup(group); isMCP {
+								if !isMCPServerAccessible(cbCtx, serverName) {
+									continue
+								}
+							}
+							readCtx := &minimalReadonlyContext{Context: cbCtx}
+							for _, ts := range g.Toolsets {
+								tools, err := ts.Tools(readCtx)
+								if err != nil {
+									continue
+								}
+								for _, gt := range tools {
+									if gt == nil {
+										continue
+									}
+									if _, exists := req.Tools[gt.Name()]; exists {
+										continue
+									}
+									packToolIntoRequest(req, gt)
+									injected++
+								}
+							}
+						}
+					}
+					if c.ToolIndex != nil {
+						for _, ge := range c.ToolIndex.GetToolsByGroup(group) {
+							if ge.Tool == nil {
+								continue
+							}
+							if serverName, isMCP := mcpServerNameFromGroup(ge.GroupName); isMCP {
+								if !isMCPServerAccessible(cbCtx, serverName) {
+									continue
+								}
+							}
+							if _, exists := req.Tools[ge.Name]; exists {
+								continue
+							}
+							packToolIntoRequest(req, ge.Tool)
+							injected++
+						}
+					}
+				}
 				continue
 			}
 
@@ -744,6 +833,50 @@ func mcpServerNameFromGroup(groupName string) (string, bool) {
 		return strings.TrimPrefix(groupName, "mcp:"), true
 	}
 	return "", false
+}
+
+// parseMCPToolRef parses LLM/app-style MCP references:
+//
+//	"mcp:email"            → group "mcp:email", tool ""
+//	"mcp:email/send_email" → group "mcp:email", tool "send_email"
+//
+// Bare tool names (no mcp: prefix) return ok=false. The slash form is common in
+// visual apps (useAppAction) but is NOT a valid ADK tool name — chat must map
+// it to the bare tool name for injection/execution.
+func parseMCPToolRef(name string) (groupName, toolName string, ok bool) {
+	if !strings.HasPrefix(name, "mcp:") {
+		return "", "", false
+	}
+	rest := strings.TrimPrefix(name, "mcp:")
+	if rest == "" {
+		return "", "", false
+	}
+	if i := strings.IndexByte(rest, '/'); i >= 0 {
+		server := rest[:i]
+		tool := rest[i+1:]
+		if server == "" {
+			return "", "", false
+		}
+		return "mcp:" + server, tool, true
+	}
+	return "mcp:" + rest, "", true
+}
+
+// resolveIndexedToolName maps an LLM-facing name to the ToolIndex registry key.
+// Accepts bare tool names and "mcp:server/tool" aliases.
+func resolveIndexedToolName(toolIndex *ToolIndex, name string) string {
+	if toolIndex == nil || name == "" {
+		return name
+	}
+	if entry := toolIndex.GetToolEntry(name); entry != nil {
+		return name
+	}
+	if _, toolName, isRef := parseMCPToolRef(name); isRef && toolName != "" {
+		if entry := toolIndex.GetToolEntry(toolName); entry != nil {
+			return toolName
+		}
+	}
+	return name
 }
 
 // FilterAccessibleToolMatches removes ToolMatch entries for MCP servers the

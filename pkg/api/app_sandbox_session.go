@@ -87,8 +87,10 @@ func ensureAppSandboxSessionImpl(ctx context.Context, r *http.Request, userID st
 	return backend, syntheticSessionID, appCfg, cleanup, nil
 }
 
-// withRuntimeNetworkPolicyContext attaches DB Network Policy stores and OpenShell
-// gateway config so EnsurePreSeedFromContext can push allows into the sandbox.
+// withRuntimeNetworkPolicyContext attaches DB Network Policy stores, OpenShell
+// gateway config, and the request credential store so EnsurePreSeedFromContext
+// can push allows into the sandbox and MCP env {{CREDENTIAL:...}} placeholders
+// resolve during discovery/test.
 func withRuntimeNetworkPolicyContext(ctx context.Context, r *http.Request, appCfg *config.AppConfig) context.Context {
 	if r != nil {
 		if svc := store.FromRequest(r); svc != nil {
@@ -98,6 +100,7 @@ func withRuntimeNetworkPolicyContext(ctx context.Context, r *http.Request, appCf
 				Team:     svc.TeamNetworkPolicies,
 			})
 		}
+		ctx = withRequestCredentialStore(ctx, r)
 	}
 	if appCfg != nil && appCfg.Sandbox.OpenShell.GatewayAddr != "" {
 		ctx = netpolicy.WithGatewayConfig(ctx, &openshell.GRPCClientConfig{

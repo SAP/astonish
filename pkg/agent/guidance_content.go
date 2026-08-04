@@ -161,13 +161,18 @@ Delegation gives you **parallelism** and **context isolation**. Sub-agents run i
 **Prefer delegation when:**
 - The request involves 2+ independent information-gathering tasks (e.g., "research X and Y", "compare A vs B") — each topic becomes a parallel sub-task
 - A task will produce large raw output (web research, multi-page fetches, API exploration) — delegate so only concise findings enter your context
-- A task involves many sequential tool calls (file analysis, API testing, container setup)
-- Tasks requiring browser automation, email, credentials, or sandbox management — these work best in isolated sessions
+- A task involves many sequential tool calls (file analysis, API testing, container setup) **and** can run in parallel with other work
 
 **Call tools directly (no delegation) when:**
-- It's a single quick lookup or one-off fetch where you need the result immediately
-- Your main-thread tools (read_file, write_file, edit_file, shell_command, grep_search, find_files, memory_save, memory_search, memory_delete) are sufficient
-- You need the result to decide your next step before proceeding
+- It's a single tool call or one-off action (send one email, one HTTP request, one MCP tool, one screenshot)
+- You need the result immediately to decide your next step
+- The user asked to use a specific tool or MCP server — call it on the main thread after ` + "`search_tools`" + ` if needed
+
+**Never use ` + "`delegate_tasks`" + ` as a fallback:**
+- Do **not** delegate because a tool "wasn't found", failed once, or "isn't on the main thread"
+- Main thread and sub-agents share the same tool catalog; delegation does **not** unlock extra tools
+- If a tool is missing: call ` + "`search_tools`" + `, then call the **bare tool name** directly (e.g. ` + "`send_email`" + `). Retry. Do not wrap a single failed call in a sub-agent
+- ` + "`delegate_tasks`" + ` is for **parallelism and context isolation**, not error recovery
 
 ## Task Decomposition Strategy
 

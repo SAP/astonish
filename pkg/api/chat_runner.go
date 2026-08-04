@@ -302,6 +302,16 @@ func (cr *ChatRunner) InjectMCPServerStores(platform, org, team store.MCPServerS
 	})
 }
 
+// InjectRequestMCPGroups attaches per-request MCP tool groups so search_tools,
+// dynamic tool injection, and resolveTools see this team's MCP catalog even
+// when the singleton chat agent was pre-warmed without them.
+func (cr *ChatRunner) InjectRequestMCPGroups(groups map[string]*agent.ToolGroup) {
+	if len(groups) == 0 {
+		return
+	}
+	cr.ctx = agent.WithRequestMCPGroups(cr.ctx, groups)
+}
+
 // InjectNetworkPolicyStores adds the three-tier network policy stores to the
 // runner's context so that the denial detection code can check the effective
 // policy (auto-approve/deny/prompt) without hitting the HTTP handler layer.

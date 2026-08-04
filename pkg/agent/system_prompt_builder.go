@@ -278,13 +278,19 @@ func (b *SystemPromptBuilder) Build() string {
 		sb.WriteString("Benefits: parallel execution, context isolation (only concise summaries enter your context, not raw search results), and independent timeouts.\n\n")
 
 		sb.WriteString("**Prefer delegation when:**\n")
-		sb.WriteString("- The request involves 2+ independent information-gathering tasks (e.g., \"research X and Y\", \"compare A vs B\") — each topic becomes a parallel sub-task\n")
-		sb.WriteString("- A task will produce large raw output (web research, multi-page fetches, API exploration)\n")
+		sb.WriteString("- The request involves 2+ independent information-gathering tasks (e.g., \"research X and Y\", \"compare A vs B\") — each becomes a parallel sub-task\n")
+		sb.WriteString("- A task will produce large raw output (web research, multi-page fetches) and you want only a summary back\n")
 		sb.WriteString("- Tasks can meaningfully run in parallel\n\n")
 
 		sb.WriteString("**Call tools directly when:**\n")
-		sb.WriteString("- It's a single quick lookup or one-off fetch\n")
+		sb.WriteString("- It's a single action or one-off tool call (including MCP tools like send email)\n")
 		sb.WriteString("- You need the result immediately to decide your next step\n\n")
+
+		sb.WriteString("**Do NOT use `delegate_tasks` as a fallback:**\n")
+		sb.WriteString("- Never delegate because a tool seemed missing, failed once, or \"isn't on the main thread\"\n")
+		sb.WriteString("- Sub-agents do **not** have extra tools the main thread cannot get — same catalog\n")
+		sb.WriteString("- If a tool is missing: `search_tools`, then call the bare tool name (e.g. `send_email`). Retry. Do not wrap one call in a sub-agent\n")
+		sb.WriteString("- `delegate_tasks` is for **parallelism and context isolation**, not error recovery\n\n")
 
 		sb.WriteString("**Planning strategy:**\n")
 		sb.WriteString("1. For multi-step tasks, call `announce_plan` first to show the user your approach as a visible checklist.\n")
@@ -296,7 +302,7 @@ func (b *SystemPromptBuilder) Build() string {
 		sb.WriteString("7. For research, analysis, or comparison tasks, save the final deliverable as a markdown file with `write_file`. Present a summary inline.\n")
 		sb.WriteString("8. Plan steps are updated automatically as tools complete — do NOT try to update them manually.\n\n")
 
-		sb.WriteString("**Available tool groups (for delegation):**\n")
+		sb.WriteString("**Available tool groups (for parallel delegation only):**\n")
 		ctx := &minimalReadonlyContext{Context: context.Background()}
 		for _, g := range b.Catalog {
 			// MCP tool access control: skip groups for inaccessible MCP servers
@@ -314,7 +320,9 @@ func (b *SystemPromptBuilder) Build() string {
 			}
 			sb.WriteString(fmt.Sprintf("- **%s** (%d tools) — %s\n", g.Name, toolCount, g.Description))
 		}
-		sb.WriteString("\nExamples: `tools: [\"browser\"]`, `tools: [\"core\", \"web\"]`, `tools: [\"core\", \"mcp:github\"]`\n")
+		sb.WriteString("\nExamples (parallel work only): `tools: [\"browser\"]`, `tools: [\"core\", \"web\"]`\n")
+		sb.WriteString("\n**MCP tools (main thread):** After `search_tools`, call the **bare** tool name (e.g. `send_email`). ")
+		sb.WriteString("Do **not** invent `mcp:email/send_email` (app-only form). Do **not** delegate a single MCP call.\n")
 	}
 
 	// 6c2. Skill index (lightweight listing of available CLI tool skills)

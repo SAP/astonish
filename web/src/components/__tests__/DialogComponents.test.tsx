@@ -1,12 +1,21 @@
-import { describe, expect, it, vi } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { describe, expect, it, vi, beforeEach } from 'vitest'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 
 import ConfirmDeleteModal from '../ConfirmDeleteModal'
 import InstallMcpModal from '../InstallMcpModal'
 import UpgradeDialog from '../UpgradeDialog'
+import { teamFetch } from '@/api/teamContext'
+
+vi.mock('@/api/teamContext', () => ({
+  teamFetch: vi.fn(),
+}))
 
 describe('redesigned dialog components', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
   it('confirms destructive flow deletion', async () => {
     const onClose = vi.fn()
     const onConfirm = vi.fn()
@@ -28,7 +37,32 @@ describe('redesigned dialog components', () => {
     expect(onConfirm).toHaveBeenCalledOnce()
   })
 
-  it('submits MCP installation configuration', async () => {
+  it('submits non-sensitive MCP installation configuration', async () => {
+    const onClose = vi.fn()
+    const onInstall = vi.fn().mockResolvedValue(undefined)
+
+    render(
+      <InstallMcpModal
+        isOpen
+        onClose={onClose}
+        onInstall={onInstall}
+        server={{
+          name: 'Logger',
+          description: 'Logging tools',
+          config: { env: { LOG_LEVEL: 'info' } },
+        }}
+      />
+    )
+
+    await userEvent.clear(screen.getByLabelText('LOG_LEVEL'))
+    await userEvent.type(screen.getByLabelText('LOG_LEVEL'), 'debug')
+    await userEvent.click(screen.getByRole('button', { name: 'Install' }))
+
+    expect(onInstall).toHaveBeenCalledWith({ LOG_LEVEL: 'debug' })
+    expect(onClose).toHaveBeenCalledOnce()
+  })
+
+  it('omits blank sensitive MCP installation values', async () => {
     const onClose = vi.fn()
     const onInstall = vi.fn().mockResolvedValue(undefined)
 
@@ -45,10 +79,40 @@ describe('redesigned dialog components', () => {
       />
     )
 
-    await userEvent.type(screen.getByLabelText('GITHUB_TOKEN'), 'ghp_test')
-    await userEvent.click(screen.getByRole('button', { name: 'Install Server' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Install' }))
 
-    expect(onInstall).toHaveBeenCalledWith({ GITHUB_TOKEN: 'ghp_test' })
+    expect(onInstall).toHaveBeenCalledWith({})
+    expect(onClose).toHaveBeenCalledOnce()
+  })
+
+  it('submits credential-bound MCP installation configuration', async () => {
+    vi.mocked(teamFetch).mockResolvedValue({
+      ok: true,
+      json: async () => ({ credentials: [{ name: 'github', type: 'bearer', scope: 'personal' }] }),
+    } as Response)
+    const onClose = vi.fn()
+    const onInstall = vi.fn().mockResolvedValue(undefined)
+
+    render(
+      <InstallMcpModal
+        isOpen
+        onClose={onClose}
+        onInstall={onInstall}
+        server={{
+          name: 'GitHub',
+          description: 'GitHub tools',
+          config: { env: { GITHUB_TOKEN: 'token description' } },
+        }}
+      />
+    )
+
+    await userEvent.click(screen.getByRole('button', { name: 'Credential' }))
+    await userEvent.click(await screen.findByRole('button', { name: /github/i }))
+    await waitFor(() => expect(screen.getByText('{{CREDENTIAL:github:token}}')).toBeInTheDocument())
+    await userEvent.click(screen.getByRole('button', { name: 'Bind' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Install' }))
+
+    expect(onInstall).toHaveBeenCalledWith({ GITHUB_TOKEN: '{{CREDENTIAL:github:token}}' })
     expect(onClose).toHaveBeenCalledOnce()
   })
 

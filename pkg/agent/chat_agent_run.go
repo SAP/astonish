@@ -185,12 +185,25 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 					// Filter out MCP tools the user's team doesn't have access to
 					matches = FilterAccessibleToolMatches(ctx, matches)
 					toolMatches = matches
-					if len(matches) > 0 {
-						relevantTools = FormatToolMatchesForPrompt(matches)
-						if c.DebugMode {
-							slog.Debug("tool index search results", "component", "chat", "matches", len(matches), "query", truncateQuery(toolSearchQuery, 60))
-						}
-					}
+				}
+			}
+			// When the user names an MCP server (e.g. "use the mcp server email"),
+			// force-inject that group's tools even if hybrid search scored poorly.
+			// Prefer request-scoped MCP groups (this team's catalog), then index.
+			// This keeps single MCP actions on the main thread instead of
+			// falling through to delegate_tasks.
+			if mcpHits := MatchRequestMCPGroupsFromQuery(ctx, userText); len(mcpHits) > 0 {
+				mcpHits = FilterAccessibleToolMatches(ctx, mcpHits)
+				toolMatches = MergeToolMatches(toolMatches, mcpHits)
+			}
+			if mcpHits := MatchMCPGroupsFromQuery(c.ToolIndex, userText); len(mcpHits) > 0 {
+				mcpHits = FilterAccessibleToolMatches(ctx, mcpHits)
+				toolMatches = MergeToolMatches(toolMatches, mcpHits)
+			}
+			if len(toolMatches) > 0 {
+				relevantTools = FormatToolMatchesForPrompt(toolMatches)
+				if c.DebugMode {
+					slog.Debug("tool index search results", "component", "chat", "matches", len(toolMatches), "query", truncateQuery(toolSearchQuery, 60))
 				}
 			}
 		}
@@ -572,11 +585,20 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			slog.Debug("[agent] Using context-injected LLM override")
 		}
 
-		// Create llmagent with static tools
+		// Create llmagent with static tools.
+		// Use InstructionProvider (not Instruction) so ADK does NOT run
+		// InjectSessionState on the system prompt. Chat prompts and tool
+		// descriptions contain many {braces} (JSON examples, React snippets,
+		// {{CREDENTIAL:...}} docs) that ADK would treat as required session
+		// keys and fail with "state key does not exist".
+		// Same pattern as node_llm.go for flow agents.
+		instr := instruction
 		llmAgent, err := llmagent.New(llmagent.Config{
-			Name:                 "chat",
-			Model:                effectiveLLM,
-			Instruction:          instruction,
+			Name:  "chat",
+			Model: effectiveLLM,
+			InstructionProvider: func(_ agent.ReadonlyContext) (string, error) {
+				return instr, nil
+			},
 			Tools:                c.Tools,
 			Toolsets:             c.Toolsets,
 			BeforeToolCallbacks:  beforeToolCallbacks,

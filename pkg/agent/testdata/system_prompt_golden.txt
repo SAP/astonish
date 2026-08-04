@@ -80,13 +80,19 @@ Step-by-step guidance for complex capabilities (browser automation, code intelli
 `delegate_tasks` runs tasks in isolated sub-agents with their own sessions. Benefits: parallel execution, context isolation (only concise summaries enter your context, not raw search results), and independent timeouts.
 
 **Prefer delegation when:**
-- The request involves 2+ independent information-gathering tasks (e.g., "research X and Y", "compare A vs B") — each topic becomes a parallel sub-task
-- A task will produce large raw output (web research, multi-page fetches, API exploration)
+- The request involves 2+ independent information-gathering tasks (e.g., "research X and Y", "compare A vs B") — each becomes a parallel sub-task
+- A task will produce large raw output (web research, multi-page fetches) and you want only a summary back
 - Tasks can meaningfully run in parallel
 
 **Call tools directly when:**
-- It's a single quick lookup or one-off fetch
+- It's a single action or one-off tool call (including MCP tools like send email)
 - You need the result immediately to decide your next step
+
+**Do NOT use `delegate_tasks` as a fallback:**
+- Never delegate because a tool seemed missing, failed once, or "isn't on the main thread"
+- Sub-agents do **not** have extra tools the main thread cannot get — same catalog
+- If a tool is missing: `search_tools`, then call the bare tool name (e.g. `send_email`). Retry. Do not wrap one call in a sub-agent
+- `delegate_tasks` is for **parallelism and context isolation**, not error recovery
 
 **Planning strategy:**
 1. For multi-step tasks, call `announce_plan` first to show the user your approach as a visible checklist.
@@ -98,11 +104,13 @@ Step-by-step guidance for complex capabilities (browser automation, code intelli
 7. For research, analysis, or comparison tasks, save the final deliverable as a markdown file with `write_file`. Present a summary inline.
 8. Plan steps are updated automatically as tools complete — do NOT try to update them manually.
 
-**Available tool groups (for delegation):**
+**Available tool groups (for parallel delegation only):**
 - **core** (3 tools) — Core file and shell tools
 - **browser** (2 tools) — Browser automation tools
 
-Examples: `tools: ["browser"]`, `tools: ["core", "web"]`, `tools: ["core", "mcp:github"]`
+Examples (parallel work only): `tools: ["browser"]`, `tools: ["core", "web"]`
+
+**MCP tools (main thread):** After `search_tools`, call the **bare** tool name (e.g. `send_email`). Do **not** invent `mcp:email/send_email` (app-only form). Do **not** delegate a single MCP call.
 
 ## Available Skills
 

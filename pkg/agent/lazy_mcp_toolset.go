@@ -9,8 +9,10 @@ import (
 
 	"github.com/SAP/astonish/pkg/cache"
 	"github.com/SAP/astonish/pkg/config"
+	"github.com/SAP/astonish/pkg/credentials"
 	"github.com/SAP/astonish/pkg/mcp"
 	"github.com/SAP/astonish/pkg/sandbox"
+	"github.com/SAP/astonish/pkg/store"
 	adkagent "google.golang.org/adk/agent"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
@@ -62,6 +64,10 @@ type LazyMCPToolset struct {
 	// fleet session has its own dedicated container.
 	sandboxClient *sandbox.LazyNodeClient
 
+	// credentialResolver expands {{CREDENTIAL:name:field}} in MCP env at
+	// process start. Context-scoped stores take precedence when present.
+	credentialResolver credentials.CredentialResolver
+
 	// --- Host mode state (single global MCP server) ---
 	mu        sync.Mutex
 	manager   *mcp.Manager         // host-mode MCP manager
@@ -112,6 +118,16 @@ func (l *LazyMCPToolset) SetSandboxClient(client *sandbox.LazyNodeClient, backen
 	l.sandboxBackend = backend
 }
 
+// SetCredentialResolver registers a fallback credential store for expanding
+// MCP env placeholders. When a tool call has a request-scoped store on the
+// context, that store is preferred.
+func (l *LazyMCPToolset) SetCredentialResolver(resolver credentials.CredentialResolver) {
+	if l == nil {
+		return
+	}
+	l.credentialResolver = resolver
+}
+
 // CloneForFleet creates a new LazyMCPToolset with the same server config and
 // cached metadata but with a fleet-specific sandbox client. The clone is
 // independent — starting/cleaning it up doesn't affect the original.
@@ -120,7 +136,18 @@ func (l *LazyMCPToolset) SetSandboxClient(client *sandbox.LazyNodeClient, backen
 func (l *LazyMCPToolset) CloneForFleet(client *sandbox.LazyNodeClient, backend sandbox.Backend) *LazyMCPToolset {
 	clone := NewLazyMCPToolset(l.serverName, l.entries, l.serverCfg, l.debugMode)
 	clone.SetSandboxClient(client, backend)
+	clone.SetCredentialResolver(l.credentialResolver)
 	return clone
+}
+
+// resolvedServerConfig expands credential placeholders in the stored server
+// config for process start. Prefers the context credential store when set.
+func (l *LazyMCPToolset) resolvedServerConfig(ctx context.Context) (config.MCPServerConfig, error) {
+	resolver := l.credentialResolver
+	if cs := store.CredentialStoreFromContext(ctx); cs != nil {
+		resolver = credentials.NewStoreAdapter(cs)
+	}
+	return mcp.ResolveMCPServerConfig(l.serverCfg, resolver)
 }
 
 // isSandboxMode returns true if the MCP server should run inside a container/pod.
@@ -206,18 +233,28 @@ func (l *LazyMCPToolset) ensureServerStartedSandbox(ctx context.Context, session
 // Uses the config already resolved from the DB at factory time (not the filesystem).
 // Caller must hold l.mu.
 func (l *LazyMCPToolset) startOnHost(ctx context.Context) error {
+	serverCfg, err := l.resolvedServerConfig(ctx)
+	if err != nil {
+		l.startErr = fmt.Errorf("failed to resolve credentials for MCP server '%s': %w", l.serverName, err)
+		slog.Warn("lazy MCP server credential resolution failed", mcp.FailureLogAttrs(l.serverName, l.serverCfg, l.startErr, nil)...)
+		l.started = true
+		return l.startErr
+	}
+
 	cfg := &config.MCPConfig{
 		MCPServers: map[string]config.MCPServerConfig{
-			l.serverName: l.serverCfg,
+			l.serverName: serverCfg,
 		},
 	}
 	mgr := mcp.NewManagerFromConfig(cfg)
+	// Env is already resolved above; keep manager resolver nil so we do not
+	// depend on a second pass. Plain values pass through.
 
 	namedToolset, err := mgr.InitializeSingleToolset(ctx, l.serverName)
 	if err != nil {
 		mgr.Cleanup()
 		l.startErr = fmt.Errorf("failed to start MCP server '%s': %w", l.serverName, err)
-		slog.Warn("lazy MCP server startup failed", mcp.FailureLogAttrs(l.serverName, l.serverCfg, l.startErr, nil)...)
+		slog.Warn("lazy MCP server startup failed", mcp.FailureLogAttrs(l.serverName, serverCfg, l.startErr, nil)...)
 		l.started = true
 		return l.startErr
 	}
@@ -228,7 +265,7 @@ func (l *LazyMCPToolset) startOnHost(ctx context.Context) error {
 	if err != nil {
 		mgr.Cleanup()
 		l.startErr = fmt.Errorf("failed to get tools from MCP server '%s': %w", l.serverName, err)
-		slog.Warn("lazy MCP server tool listing failed", mcp.FailureLogAttrs(l.serverName, l.serverCfg, l.startErr, namedToolset.Stderr)...)
+		slog.Warn("lazy MCP server tool listing failed", mcp.FailureLogAttrs(l.serverName, serverCfg, l.startErr, namedToolset.Stderr)...)
 		l.started = true
 		return l.startErr
 	}
@@ -286,8 +323,15 @@ func (l *LazyMCPToolset) startInSandbox(ctx context.Context, sessionID string) e
 		slog.Debug("connecting MCP server in sandbox", "component", "lazy-mcp", "server", l.serverName, "session", sessionID)
 	}
 
-	// Create backend-agnostic transport (uses Backend.ExecInteractive)
-	transport, stderrBuf := sandbox.NewBackendMCPTransport(l.sandboxBackend, sessionID, l.serverCfg)
+	serverCfg, err := l.resolvedServerConfig(ctx)
+	if err != nil {
+		return l.setSessionError(sessionID, fmt.Errorf("failed to resolve credentials for MCP server '%s': %w", l.serverName, err))
+	}
+
+	// Create backend-agnostic transport (uses Backend.ExecInteractive).
+	// Diagnostics use the resolved config so real credential values emitted by
+	// child processes are scrubbed before logging.
+	transport, stderrBuf := sandbox.NewBackendMCPTransport(l.sandboxBackend, sessionID, serverCfg)
 
 	// Create ADK mcptoolset using our transport
 	toolset, err := mcptoolset.New(mcptoolset.Config{
@@ -295,10 +339,10 @@ func (l *LazyMCPToolset) startInSandbox(ctx context.Context, sessionID string) e
 	})
 	if err != nil {
 		transport.Close()
-		stderr := mcp.DiagnosticStderrForServer(stderrBuf, l.serverCfg)
-		stdout := mcp.DiagnosticOutputForServer(transport.StdoutDiagnostics, l.serverCfg)
+		stderr := mcp.DiagnosticStderrForServer(stderrBuf, serverCfg)
+		stdout := mcp.DiagnosticOutputForServer(transport.StdoutDiagnostics, serverCfg)
 		startErr := fmt.Errorf("failed to create toolset for MCP server '%s' in sandbox: %w (stderr: %s, stdout: %s)", l.serverName, err, stderr, stdout)
-		attrs := mcp.FailureLogAttrs(l.serverName, l.serverCfg, startErr, stderrBuf)
+		attrs := mcp.FailureLogAttrs(l.serverName, serverCfg, startErr, stderrBuf)
 		attrs = append(attrs, "stdout", stdout)
 		slog.Warn("sandbox MCP server startup failed", attrs...)
 		return l.setSessionError(sessionID, startErr)
@@ -309,10 +353,10 @@ func (l *LazyMCPToolset) startInSandbox(ctx context.Context, sessionID string) e
 	liveToolList, err := toolset.Tools(minCtx)
 	if err != nil {
 		transport.Close()
-		stderr := mcp.DiagnosticStderrForServer(stderrBuf, l.serverCfg)
-		stdout := mcp.DiagnosticOutputForServer(transport.StdoutDiagnostics, l.serverCfg)
+		stderr := mcp.DiagnosticStderrForServer(stderrBuf, serverCfg)
+		stdout := mcp.DiagnosticOutputForServer(transport.StdoutDiagnostics, serverCfg)
 		toolsErr := fmt.Errorf("failed to get tools from MCP server '%s' in sandbox: %w (stderr: %s, stdout: %s)", l.serverName, err, stderr, stdout)
-		attrs := mcp.FailureLogAttrs(l.serverName, l.serverCfg, toolsErr, stderrBuf)
+		attrs := mcp.FailureLogAttrs(l.serverName, serverCfg, toolsErr, stderrBuf)
 		attrs = append(attrs, "stdout", stdout)
 		slog.Warn("sandbox MCP server tool listing failed", attrs...)
 		return l.setSessionError(sessionID, toolsErr)

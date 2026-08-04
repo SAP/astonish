@@ -14,6 +14,7 @@ import SetupWizard from './components/SetupWizard'
 import LoginPage from './components/LoginPage'
 import MCPDependenciesPanel from './components/MCPDependenciesPanel'
 import InstallMcpModal from './components/InstallMcpModal'
+import { omitEmptySensitiveEnv } from './components/credentials/credentialPlaceholders'
 import { useTheme } from './hooks/useTheme'
 import { useAuth } from './hooks/useAuth'
 import { useHashRouter, buildPath } from './hooks/useHashRouter'
@@ -1835,7 +1836,7 @@ layout:
                   // For inline servers, merge env vars with the config
                   const configWithEnv = {
                     ...installModalServer!.config,
-                    env: { ...installModalServer!.config?.env, ...env }
+                    env: omitEmptySensitiveEnv({ ...installModalServer!.config?.env, ...env })
                   }
                   await installInlineMcpServer(dep.server, configWithEnv)
                 } else {

@@ -219,6 +219,8 @@ func InstallMCPStoreServerHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	newConfig.Env = omitEmptySensitiveMCPEnv(newConfig.Env)
+
 	// Handle transport
 	if server.Config.Transport != "" {
 		newConfig.Transport = server.Config.Transport

@@ -98,7 +98,7 @@ mcp_servers:
     command: npx
     args: ["-y", "@modelcontextprotocol/server-github"]
     env:
-      GITHUB_TOKEN: "{{secret:github_token}}"
+      GITHUB_TOKEN: "{{CREDENTIAL:github:token}}"
 
 # Scheduler
 scheduler:
@@ -202,7 +202,7 @@ See the [Flow System](flows.md) document for full details.
 ## Interactions
 
 - **Daemon**: Loads config at startup. Hot-reloads channel changes.
-- **Credentials**: Provider keys resolved from credential store. MCP env vars can reference secrets.
+- **Credentials**: Provider keys resolved from credential store. MCP env vars can reference credentials via `{{CREDENTIAL:name:field}}` (resolved at MCP process start).
 - **Agent Engine**: Custom prompt, auto_approve, debug_mode, identity all feed into the agent.
 - **Sandbox**: Sandbox section configures container limits, networking, pruning.
 - **Channels**: Channel section configures Telegram and email adapters.

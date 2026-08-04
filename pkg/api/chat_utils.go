@@ -547,21 +547,28 @@ func collectArtifacts(events session.Events) []ArtifactInfo {
 	}
 	pending := make(map[string]pendingWrite)
 
-	// Deduplicate by path (keep the last write to each file)
-	seen := make(map[string]bool)
+	// Deduplicate by path while keeping the most recent successful mutation for
+	// each file. Reports often get revised through edit_file after their initial
+	// write_file; the artifact metadata must point at that latest mutation.
+	artifactIndex := make(map[string]int)
 	var artifacts []ArtifactInfo
 
 	addArtifact := func(path, toolName string) {
-		if path == "" || seen[path] {
+		if path == "" {
 			return
 		}
-		seen[path] = true
-		artifacts = append(artifacts, ArtifactInfo{
+		info := ArtifactInfo{
 			Path:     path,
 			FileName: filepath.Base(path),
 			FileType: fileTypeFromExt(filepath.Ext(path)),
 			ToolName: toolName,
-		})
+		}
+		if idx, ok := artifactIndex[path]; ok {
+			artifacts[idx] = info
+			return
+		}
+		artifactIndex[path] = len(artifacts)
+		artifacts = append(artifacts, info)
 	}
 
 	for i := range events.Len() {
@@ -1118,11 +1125,10 @@ func persistSessionMessage(ctx context.Context, svc session.Service, userID, ses
 	}
 }
 
-// readArtifactContentFromSession scans a session's persisted events for a
-// write_file FunctionCall whose file_path matches the requested path, and
-// returns the content argument. This is used as a fallback when the actual
-// file no longer exists on disk (e.g., written to /tmp, or inside a sandbox
-// container that is stopped).
+// readArtifactContentFromSession scans a session's persisted events for the
+// latest write_file/edit_file mutation whose path matches the requested path,
+// and reconstructs the best-known content. This is used only as a fallback when
+// the actual file cannot be read from the host or live sandbox.
 func readArtifactContentFromSession(fs *persistentsession.FileStore, userID, sessionID, filePath string) (string, bool) {
 	if fs == nil {
 		return "", false
@@ -1137,44 +1143,13 @@ func readArtifactContentFromSession(fs *persistentsession.FileStore, userID, ses
 		return "", false
 	}
 
-	events := getResp.Session.Events()
-	cleanTarget := filepath.Clean(filePath)
-
-	// Scan from the end to find the most recent write to this path
-	for i := events.Len() - 1; i >= 0; i-- {
-		event := events.At(i)
-		if event.LLMResponse.Content == nil {
-			continue
-		}
-		for _, part := range event.LLMResponse.Content.Parts {
-			if part.FunctionCall == nil {
-				continue
-			}
-			if part.FunctionCall.Name != "write_file" {
-				continue
-			}
-			args := part.FunctionCall.Args
-			if args == nil {
-				continue
-			}
-			p, _ := args["file_path"].(string)
-			if filepath.Clean(p) != cleanTarget {
-				continue
-			}
-			content, _ := args["content"].(string)
-			if content != "" {
-				return content, true
-			}
-		}
-	}
-	return "", false
+	return readArtifactContentFromEvents(getResp.Session.Events(), filePath)
 }
 
 // readArtifactContentFromSessionStore is the platform-mode equivalent of
 // readArtifactContentFromSession. It accepts a store.SessionStore (which may
 // be backed by PostgreSQL) and uses ReadTranscriptEvents to load events, then
-// scans them for a write_file FunctionCall whose file_path matches the
-// requested path.
+// reconstructs the latest known content for the requested path.
 func readArtifactContentFromSessionStore(ss store.SessionStore, appName, userID, sessionID, filePath string) (string, bool) {
 	if ss == nil {
 		return "", false
@@ -1185,36 +1160,153 @@ func readArtifactContentFromSessionStore(ss store.SessionStore, appName, userID,
 		return "", false
 	}
 
-	cleanTarget := filepath.Clean(filePath)
+	return readArtifactContentFromEventSlice(events, filePath)
+}
 
-	// Scan from the end to find the most recent write to this path
-	for i := len(events) - 1; i >= 0; i-- {
-		event := events[i]
-		if event.LLMResponse.Content == nil {
+func readArtifactContentFromEvents(events session.Events, filePath string) (string, bool) {
+	if events == nil {
+		return "", false
+	}
+	items := make([]*session.Event, 0, events.Len())
+	for i := range events.Len() {
+		items = append(items, events.At(i))
+	}
+	return readArtifactContentFromEventSlice(items, filePath)
+}
+
+func readArtifactContentFromEventSlice(events []*session.Event, filePath string) (string, bool) {
+	cleanTarget := filepath.Clean(filePath)
+	var content string
+	var known bool
+	type pendingMutation struct {
+		previousContent string
+		previousKnown   bool
+	}
+	pending := make(map[string]pendingMutation)
+
+	for _, event := range events {
+		if event == nil || event.LLMResponse.Content == nil {
 			continue
 		}
 		for _, part := range event.LLMResponse.Content.Parts {
-			if part.FunctionCall == nil {
-				continue
+			if part.FunctionCall != nil && part.FunctionCall.Args != nil {
+				args := part.FunctionCall.Args
+				switch part.FunctionCall.Name {
+				case "write_file":
+					p, _ := args["file_path"].(string)
+					if filepath.Clean(p) != cleanTarget {
+						continue
+					}
+					previous := pendingMutation{previousContent: content, previousKnown: known}
+					newContent, _ := args["content"].(string)
+					content = normalizeWriteFileFallbackContent(newContent)
+					known = true
+					if part.FunctionCall.ID != "" {
+						pending[part.FunctionCall.ID] = previous
+					}
+				case "edit_file":
+					p, _ := args["path"].(string)
+					if !known || filepath.Clean(p) != cleanTarget {
+						continue
+					}
+					updated, ok := applyEditFileFallback(content, args)
+					if ok {
+						previous := pendingMutation{previousContent: content, previousKnown: known}
+						content = updated
+						if part.FunctionCall.ID != "" {
+							pending[part.FunctionCall.ID] = previous
+						}
+					}
+				}
 			}
-			if part.FunctionCall.Name != "write_file" {
-				continue
-			}
-			args := part.FunctionCall.Args
-			if args == nil {
-				continue
-			}
-			p, _ := args["file_path"].(string)
-			if filepath.Clean(p) != cleanTarget {
-				continue
-			}
-			content, _ := args["content"].(string)
-			if content != "" {
-				return content, true
+			if part.FunctionResponse != nil {
+				previous, ok := pending[part.FunctionResponse.ID]
+				if !ok {
+					continue
+				}
+				delete(pending, part.FunctionResponse.ID)
+				if part.FunctionResponse.Response != nil {
+					if _, hasErr := part.FunctionResponse.Response["error"]; hasErr {
+						content = previous.previousContent
+						known = previous.previousKnown
+					}
+				}
 			}
 		}
 	}
-	return "", false
+	return content, known
+}
+
+func normalizeWriteFileFallbackContent(content string) string {
+	if extracted, ok := tryExtractStdoutFallback(content); ok {
+		return extracted
+	}
+	return content
+}
+
+func tryExtractStdoutFallback(input string) (string, bool) {
+	trimmed := strings.TrimSpace(input)
+	if trimmed == "" {
+		return "", false
+	}
+
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(trimmed), &parsed); err != nil {
+		return "", false
+	}
+	stdout, ok := parsed["stdout"]
+	if !ok {
+		return "", false
+	}
+	switch v := stdout.(type) {
+	case string:
+		return v, true
+	case []any:
+		lines := make([]string, 0, len(v))
+		for _, item := range v {
+			lines = append(lines, fmt.Sprintf("%v", item))
+		}
+		return strings.Join(lines, "\n"), true
+	default:
+		return "", false
+	}
+}
+
+func applyEditFileFallback(content string, args map[string]any) (string, bool) {
+	oldString, _ := args["old_string"].(string)
+	if oldString == "" {
+		return content, false
+	}
+	newString, _ := args["new_string"].(string)
+	regexMode, _ := args["regex"].(bool)
+	replaceAll, _ := args["replace_all"].(bool)
+
+	if regexMode {
+		re, err := regexp.Compile(oldString)
+		if err != nil {
+			return content, false
+		}
+		matches := re.FindAllStringIndex(content, -1)
+		if len(matches) == 0 || (len(matches) > 1 && !replaceAll) {
+			return content, false
+		}
+		if replaceAll {
+			return re.ReplaceAllString(content, newString), true
+		}
+		match := matches[0]
+		matched := content[match[0]:match[1]]
+		replaced := re.ReplaceAllString(matched, newString)
+		return content[:match[0]] + replaced + content[match[1]:], true
+	}
+
+	count := strings.Count(content, oldString)
+	if count == 0 || (count > 1 && !replaceAll) {
+		return content, false
+	}
+	if replaceAll {
+		return strings.ReplaceAll(content, oldString, newString), true
+	}
+	return strings.Replace(content, oldString, newString, 1), true
 }
 
 // --- Distill preview/saved persistence ---
@@ -1475,11 +1567,11 @@ func buildTutorialSceneSlideshowPayload(manifestPath string) (map[string]any, er
 		scenes = append(scenes, row)
 	}
 	return map[string]any{
-		"title":          title,
-		"suite":          manifest.Suite,
-		"drill":          manifest.Drill,
-		"manifest_path":  manifestPath,
-		"scenes":         scenes,
+		"title":         title,
+		"suite":         manifest.Suite,
+		"drill":         manifest.Drill,
+		"manifest_path": manifestPath,
+		"scenes":        scenes,
 	}, nil
 }
 

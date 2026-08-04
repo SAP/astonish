@@ -90,7 +90,7 @@ export default function FilePanel({ artifacts, initialPath, sessionId, onClose }
       .catch(err => { if (!cancelled) setError(err.message) })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
-  }, [overlayPath, overlayArtifact, sessionId])
+  }, [overlayPath, overlayArtifact, overlayArtifact?.revision, sessionId])
 
   // Close download dropdown on outside click
   useEffect(() => {

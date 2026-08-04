@@ -841,10 +841,10 @@ func serveArtifactDownload(w http.ResponseWriter, fileName string, content []byt
 }
 
 // StudioArtifactContentHandler returns file content as plain text for the
-// in-browser file viewer. Uses a three-tier fallback strategy:
+// in-browser file viewer. Uses a three-tier lookup strategy:
 //  1. Read from host filesystem (works for non-sandbox sessions where file still exists)
-//  2. Read from sandbox container via Incus PullFile (works when container is running)
-//  3. Read from persisted session JSONL (works always — extracts content from write_file args)
+//  2. Read from the active sandbox backend, resuming stopped sessions before PullFile
+//  3. Reconstruct the latest known content from persisted write_file/edit_file events
 //
 // GET /api/studio/artifacts/content?path=<path>&session=<sessionID>
 func StudioArtifactContentHandler(w http.ResponseWriter, r *http.Request) {
@@ -906,9 +906,11 @@ func StudioArtifactContentHandler(w http.ResponseWriter, r *http.Request) {
 
 // readFromSandboxContainer attempts to read a file from the configured
 // sandbox backend. For direct K8s this uses Backend.PullFile, which targets the
-// session pod through the tenant-scoped registry. The legacy Incus path remains
-// as a compatibility fallback for deployments that still use the local Incus
-// client helpers.
+// session pod through the tenant-scoped registry. Stopped-but-preserved backend
+// sessions are resumed before pulling so live container data remains preferred
+// over transcript reconstruction. The legacy Incus path remains as a
+// compatibility fallback for deployments that still use the local Incus client
+// helpers.
 func readFromSandboxContainer(r *http.Request, sessionID, filePath string) ([]byte, bool) {
 	if sessionID == "" || filePath == "" {
 		return nil, false
@@ -918,24 +920,8 @@ func readFromSandboxContainer(r *http.Request, sessionID, filePath string) ([]by
 		if cleanup != nil {
 			defer cleanup()
 		}
-		state, stateErr := backend.SessionState(r.Context(), sessionID)
-		if stateErr == nil && (state == sandbox.SessionStateRunning || state == sandbox.SessionStateCreating || state == sandbox.SessionStateResuming) {
-			reader, pullErr := backend.PullFile(r.Context(), sessionID, filePath)
-			if pullErr == nil {
-				content, readErr := io.ReadAll(reader)
-				closeErr := reader.Close()
-				if readErr == nil && closeErr == nil {
-					return content, true
-				}
-				if readErr != nil {
-					slog.Debug("failed to read artifact content from sandbox backend", "session", sessionID, "path", filePath, "error", readErr)
-				}
-				if closeErr != nil {
-					slog.Debug("failed to close artifact content stream from sandbox backend", "session", sessionID, "path", filePath, "error", closeErr)
-				}
-			} else {
-				slog.Debug("failed to pull artifact from sandbox backend", "session", sessionID, "path", filePath, "error", pullErr)
-			}
+		if content, ok := pullArtifactFromSandboxBackend(r.Context(), backend, sessionID, filePath); ok {
+			return content, true
 		}
 	} else if err != nil {
 		slog.Debug("sandbox backend unavailable for artifact read", "session", sessionID, "path", filePath, "error", err)
@@ -970,6 +956,41 @@ func readFromSandboxContainer(r *http.Request, sessionID, filePath string) ([]by
 	content, err := io.ReadAll(reader)
 	if err != nil {
 		slog.Debug("failed to read file content from sandbox container", "error", err)
+		return nil, false
+	}
+	return content, true
+}
+
+func pullArtifactFromSandboxBackend(ctx context.Context, backend sandbox.Backend, sessionID, filePath string) ([]byte, bool) {
+	state, stateErr := backend.SessionState(ctx, sessionID)
+	if stateErr != nil {
+		slog.Debug("failed to query artifact sandbox state", "session", sessionID, "path", filePath, "error", stateErr)
+		return nil, false
+	}
+	if state == sandbox.SessionStateGone {
+		return nil, false
+	}
+	if state == sandbox.SessionStateStopped {
+		if err := backend.StartSession(ctx, sessionID); err != nil {
+			slog.Debug("failed to resume sandbox for artifact read", "session", sessionID, "path", filePath, "error", err)
+			return nil, false
+		}
+		if err := backend.WaitForSessionReady(ctx, sessionID); err != nil {
+			slog.Debug("sandbox did not become ready for artifact read", "session", sessionID, "path", filePath, "error", err)
+			return nil, false
+		}
+	}
+
+	reader, pullErr := backend.PullFile(ctx, sessionID, filePath)
+	if pullErr != nil {
+		slog.Debug("failed to pull artifact from sandbox backend", "session", sessionID, "path", filePath, "error", pullErr)
+		return nil, false
+	}
+	defer reader.Close()
+
+	content, readErr := io.ReadAll(reader)
+	if readErr != nil {
+		slog.Debug("failed to read artifact content from sandbox backend", "session", sessionID, "path", filePath, "error", readErr)
 		return nil, false
 	}
 	return content, true

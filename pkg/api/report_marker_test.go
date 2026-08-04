@@ -3,6 +3,10 @@ package api
 import (
 	"testing"
 	"time"
+
+	"google.golang.org/adk/model"
+	"google.golang.org/adk/session"
+	"google.golang.org/genai"
 )
 
 // These tests cover the astonish-report fence pipeline introduced to make
@@ -222,6 +226,103 @@ func TestDetectAndEmitReportMarkers_Dedup(t *testing.T) {
 // load time. Given a slice of reconstructed artifacts and a markers map,
 // only artifacts whose path is keyed in the map must be flagged
 // IsReport=true with the matching title. All others must be untouched.
+func TestCollectArtifactsKeepsLatestMutationForPath(t *testing.T) {
+	events := testEvents{
+		artifactToolCallEvent("inv-1", "call-1", "write_file", map[string]any{"file_path": "/tmp/report.md", "content": "2025"}),
+		toolResponseEvent("inv-1", "call-1", "write_file", map[string]any{"path": "/tmp/report.md"}),
+		artifactToolCallEvent("inv-2", "call-2", "edit_file", map[string]any{"path": "/tmp/report.md", "old_string": "2025", "new_string": "2026"}),
+		toolResponseEvent("inv-2", "call-2", "edit_file", map[string]any{"path": "/tmp/report.md"}),
+	}
+
+	artifacts := collectArtifacts(events)
+	if len(artifacts) != 1 {
+		t.Fatalf("len(artifacts) = %d, want 1: %+v", len(artifacts), artifacts)
+	}
+	if artifacts[0].ToolName != "edit_file" {
+		t.Fatalf("ToolName = %q, want edit_file", artifacts[0].ToolName)
+	}
+}
+
+func TestReadArtifactContentFromEventsAppliesEditFileMutations(t *testing.T) {
+	events := testEvents{
+		artifactToolCallEvent("inv-1", "call-1", "write_file", map[string]any{"file_path": "/tmp/report.md", "content": "# Report\n\nYear: 2025\nStatus: draft\n"}),
+		artifactToolCallEvent("inv-2", "call-2", "edit_file", map[string]any{"path": "/tmp/report.md", "old_string": "2025", "new_string": "2026"}),
+		artifactToolCallEvent("inv-3", "call-3", "edit_file", map[string]any{"path": "/tmp/report.md", "old_string": "draft", "new_string": "final"}),
+	}
+
+	content, ok := readArtifactContentFromEvents(events, "/tmp/report.md")
+	if !ok {
+		t.Fatal("expected fallback content")
+	}
+	want := "# Report\n\nYear: 2026\nStatus: final\n"
+	if content != want {
+		t.Fatalf("content = %q, want %q", content, want)
+	}
+}
+
+func TestReadArtifactContentFromEventsAppliesReplaceAllEdit(t *testing.T) {
+	events := testEvents{
+		artifactToolCallEvent("inv-1", "call-1", "write_file", map[string]any{"file_path": "/tmp/report.md", "content": "2025 and 2025"}),
+		artifactToolCallEvent("inv-2", "call-2", "edit_file", map[string]any{"path": "/tmp/report.md", "old_string": "2025", "new_string": "2026", "replace_all": true}),
+	}
+
+	content, ok := readArtifactContentFromEvents(events, "/tmp/report.md")
+	if !ok {
+		t.Fatal("expected fallback content")
+	}
+	if content != "2026 and 2026" {
+		t.Fatalf("content = %q, want %q", content, "2026 and 2026")
+	}
+}
+
+func TestReadArtifactContentFromEventsIgnoresFailedEdit(t *testing.T) {
+	events := testEvents{
+		artifactToolCallEvent("inv-1", "call-1", "write_file", map[string]any{"file_path": "/tmp/report.md", "content": "Year: 2025"}),
+		artifactToolCallEvent("inv-2", "call-2", "edit_file", map[string]any{"path": "/tmp/report.md", "old_string": "2025", "new_string": "2026"}),
+		toolResponseEvent("inv-2", "call-2", "edit_file", map[string]any{"error": "old_string not found"}),
+	}
+
+	content, ok := readArtifactContentFromEvents(events, "/tmp/report.md")
+	if !ok {
+		t.Fatal("expected fallback content")
+	}
+	if content != "Year: 2025" {
+		t.Fatalf("content = %q, want original content after failed edit", content)
+	}
+}
+
+func artifactToolCallEvent(invocationID, callID, name string, args map[string]any) *session.Event {
+	return &session.Event{
+		InvocationID: invocationID,
+		LLMResponse: model.LLMResponse{
+			Content: &genai.Content{
+				Role: "model",
+				Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+					ID:   callID,
+					Name: name,
+					Args: args,
+				}}},
+			},
+		},
+	}
+}
+
+func toolResponseEvent(invocationID, callID, name string, response map[string]any) *session.Event {
+	return &session.Event{
+		InvocationID: invocationID,
+		LLMResponse: model.LLMResponse{
+			Content: &genai.Content{
+				Role: "model",
+				Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{
+					ID:       callID,
+					Name:     name,
+					Response: response,
+				}}},
+			},
+		},
+	}
+}
+
 func TestJoinReportMarkers(t *testing.T) {
 	artifacts := []ArtifactInfo{
 		{Path: "/tmp/a.md", FileName: "a.md", FileType: "Markdown", ToolName: "write_file"},

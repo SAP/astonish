@@ -158,6 +158,10 @@ export interface ArtifactMessage {
   type: 'artifact'
   path: string
   toolName: string
+  // Monotonic client-side revision for repeated mutations of the same path.
+  // Embedded viewers include it in their fetch effect dependencies so a later
+  // edit_file event reloads content even when the path is unchanged.
+  revision?: number
   // Set true when the same turn also emitted a `report_marker` event whose
   // `path` matches this artifact's path. Drives the "embed inline as
   // EmbeddedFileViewer" gate in StudioChat — without it, the artifact
@@ -175,6 +179,9 @@ export interface SessionArtifact {
   fileName: string
   fileType: string
   toolName: string
+  // Monotonic client-side revision for repeated mutations of the same path.
+  // Session history responses omit this; live SSE handling populates it.
+  revision?: number
   // Same semantics as ArtifactMessage.isReport, projected onto session
   // detail by the backend's joinReportMarkers step. Persists the report
   // gate decision across server restarts and history reloads.

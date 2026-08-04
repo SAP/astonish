@@ -19,6 +19,11 @@ import (
 //
 //	printf '%s' '<script content>' | openssl dgst -sha256 -binary | base64
 //
+// wasm-unsafe-eval allows WebAssembly compilation without allowing general
+// JavaScript eval. The client-side DOCX exporter uses @m2d/remark-docx, whose
+// image preprocessing path instantiates a WASM module even for markdown reports
+// without user-authored images.
+//
 // media-src allows blob: so Studio can play video/audio artifacts (e.g.
 // browser session recordings) loaded via createObjectURL after a credentialed
 // fetch — a bare <video src="/api/..."> cannot send team auth headers.
@@ -26,7 +31,7 @@ import (
 // fonts.googleapis.com/fonts.gstatic.com are used by the production index.html
 // font link. api.github.com is used by the client-side release update check.
 const cspPolicy = "default-src 'self'; " +
-	"script-src 'self' 'sha256-QPIelXUbpkDESZsTgggSaMGNOA/Le9qMm+4Wa+lXIvs='; " +
+	"script-src 'self' 'wasm-unsafe-eval' 'sha256-QPIelXUbpkDESZsTgggSaMGNOA/Le9qMm+4Wa+lXIvs='; " +
 	"style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
 	"img-src 'self' data: blob:; " +
 	"media-src 'self' blob:; " +

@@ -27,6 +27,12 @@ func TestCSPMiddleware_AllowsBlobMedia(t *testing.T) {
 	if !strings.Contains(csp, "img-src 'self' data: blob:") {
 		t.Fatalf("CSP missing img-src blob: allowance, got %q", csp)
 	}
+	if !strings.Contains(csp, "script-src 'self' 'wasm-unsafe-eval' ") {
+		t.Fatalf("CSP must allow WebAssembly compilation for DOCX export without general unsafe-eval, got %q", csp)
+	}
+	if strings.Contains(csp, "script-src 'self' 'unsafe-eval'") || strings.Contains(csp, " 'unsafe-eval'") {
+		t.Fatalf("CSP must not allow general JavaScript unsafe-eval, got %q", csp)
+	}
 	if !strings.Contains(csp, "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com") {
 		t.Fatalf("CSP missing Google Fonts stylesheet allowance, got %q", csp)
 	}

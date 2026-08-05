@@ -14,11 +14,14 @@ type Info struct {
 	SessionID string
 	Provider  string
 	Model     string
-	Mode      string // "platform"
+	Mode      string // "platform" or "code"
 	ServerURL string
 	Org       string
 	Team      string
 	User      string
+	// WorkingDir is the host directory tools operate against. Only set in
+	// code mode (the local, unsandboxed coding tool); empty in platform mode.
+	WorkingDir string
 	// Usage is cumulative token usage known when opening/resuming a session.
 	Usage     *events.Usage
 	IsResumed bool

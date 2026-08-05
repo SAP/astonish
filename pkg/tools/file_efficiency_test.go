@@ -386,11 +386,46 @@ func TestEditFile_VerificationContextInsert(t *testing.T) {
 	if !strings.Contains(ctx, "@@ ins.go:2") {
 		t.Errorf("want insert at line 2, got:\n%s", ctx)
 	}
-	if !strings.Contains(ctx, "- 2| \tsetup()") {
-		t.Errorf("want removed anchor, got:\n%s", ctx)
+	// The anchor line is unchanged, so it renders as context (space marker),
+	// not as a churned -/+ pair. Only the genuinely new line is added.
+	if !strings.Contains(ctx, "  2| \tsetup()") {
+		t.Errorf("want unchanged anchor shown as context, got:\n%s", ctx)
 	}
-	if !strings.Contains(ctx, "+ 2| \tsetup()") || !strings.Contains(ctx, "+ 3| \trun()") {
-		t.Errorf("want inserted lines, got:\n%s", ctx)
+	if strings.Contains(ctx, "- 2| \tsetup()") || strings.Contains(ctx, "+ 2| \tsetup()") {
+		t.Errorf("unchanged anchor must not be marked -/+, got:\n%s", ctx)
+	}
+	if !strings.Contains(ctx, "+ 3| \trun()") {
+		t.Errorf("want inserted line, got:\n%s", ctx)
+	}
+}
+
+func TestEditFile_VerificationContextOnlyChangedLine(t *testing.T) {
+	// Regression: a multi-line replacement where only the first line actually
+	// differs must show the trailing identical lines as context, NOT as a
+	// churned -/+ pair. Mirrors the reported diff-display bug.
+	resetTestCache(t)
+	dir := t.TempDir()
+	path := writeTestFile(t, dir, "only.txt", "head\nalpha\nbeta\ngamma\ntail\n")
+
+	result, err := EditFile(nil, EditFileArgs{
+		Path:      path,
+		OldString: "alpha\nbeta\ngamma",
+		NewString: "ALPHA\nbeta\ngamma",
+	})
+	if err != nil {
+		t.Fatalf("EditFile() error = %v", err)
+	}
+	ctx := result.VerificationContext
+	// The first line changed.
+	if !strings.Contains(ctx, "- 2| alpha") || !strings.Contains(ctx, "+ 2| ALPHA") {
+		t.Errorf("want first line shown as changed, got:\n%s", ctx)
+	}
+	// The identical trailing lines must render as context, not -/+.
+	if !strings.Contains(ctx, "  3| beta") || !strings.Contains(ctx, "  4| gamma") {
+		t.Errorf("unchanged lines should be context, got:\n%s", ctx)
+	}
+	if strings.Contains(ctx, "- 3| beta") || strings.Contains(ctx, "+ 4| gamma") {
+		t.Errorf("unchanged lines must not be marked -/+, got:\n%s", ctx)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -931,7 +932,7 @@ func TestGoGrep_PathAndDoublestarGlobs(t *testing.T) {
 	}
 
 	t.Run("nested doublestar glob", func(t *testing.T) {
-		matches, err := goGrep("UniqueGoGrepMarker", tmpDir, []string{"src/**/*.go"}, true, false, 50)
+		matches, err := goGrep(context.Background(), "UniqueGoGrepMarker", tmpDir, []string{"src/**/*.go"}, true, false, 50)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -944,7 +945,7 @@ func TestGoGrep_PathAndDoublestarGlobs(t *testing.T) {
 	})
 
 	t.Run("basename glob", func(t *testing.T) {
-		matches, err := goGrep("UniqueGoGrepMarker", tmpDir, []string{"*.go"}, true, false, 50)
+		matches, err := goGrep(context.Background(), "UniqueGoGrepMarker", tmpDir, []string{"*.go"}, true, false, 50)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -954,7 +955,7 @@ func TestGoGrep_PathAndDoublestarGlobs(t *testing.T) {
 	})
 
 	t.Run("non matching path glob", func(t *testing.T) {
-		matches, err := goGrep("UniqueGoGrepMarker", tmpDir, []string{"lib/**/*.go"}, true, false, 50)
+		matches, err := goGrep(context.Background(), "UniqueGoGrepMarker", tmpDir, []string{"lib/**/*.go"}, true, false, 50)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -962,6 +963,34 @@ func TestGoGrep_PathAndDoublestarGlobs(t *testing.T) {
 			t.Fatalf("expected 0 matches for lib/**/*.go, got %d", len(matches))
 		}
 	})
+}
+
+// TestGoGrep_HonorsContextTimeout verifies the Go fallback aborts with the
+// timeout sentinel when its context is done, instead of walking a huge tree.
+func TestGoGrep_HonorsContextTimeout(t *testing.T) {
+	dir := t.TempDir()
+	// A few files so the walk has something to iterate.
+	for i := 0; i < 5; i++ {
+		os.WriteFile(filepath.Join(dir, fmt.Sprintf("f%d.go", i)), []byte("package x\n// marker\n"), 0644)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already expired
+
+	_, err := goGrep(ctx, "marker", dir, nil, true, false, 50)
+	if !errors.Is(err, errGrepTimeout) {
+		t.Fatalf("expected errGrepTimeout on cancelled context, got %v", err)
+	}
+}
+
+// TestGrepTimeoutError_Actionable checks the user-facing timeout message guides
+// the model to narrow its search.
+func TestGrepTimeoutError_Actionable(t *testing.T) {
+	msg := grepTimeoutError("/Users/x/go/pkg/mod").Error()
+	for _, want := range []string{"timed out", "search_path", "include_globs"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("timeout error missing %q: %s", want, msg)
+		}
+	}
 }
 
 func TestMatchDoublestar(t *testing.T) {

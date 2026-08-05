@@ -2,7 +2,9 @@ package tools
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -14,6 +16,16 @@ import (
 
 	"google.golang.org/adk/tool"
 )
+
+// grepSearchTimeout bounds how long a single grep_search may run. Without it, a
+// recursive search over a huge tree outside the working directory (e.g. the Go
+// module cache ~/go/pkg/mod, node_modules) can hang the agent turn for minutes
+// with no way to recover except a manual cancel. On timeout the search is
+// killed and a clear, actionable error is returned.
+const grepSearchTimeout = 25 * time.Second
+
+// errGrepTimeout signals that the search exceeded grepSearchTimeout.
+var errGrepTimeout = errors.New("grep_search timed out")
 
 // GrepSearchArgs defines arguments for the grep_search tool
 type GrepSearchArgs struct {
@@ -107,9 +119,17 @@ func GrepSearch(ctx tool.Context, args GrepSearchArgs) (GrepSearchResult, error)
 		}
 	}
 
+	// Bound the total search time so a runaway walk (e.g. over ~/go/pkg/mod)
+	// cannot hang the turn. Applies to both the ripgrep and Go fallback paths.
+	runCtx, cancel := context.WithTimeout(context.Background(), grepSearchTimeout)
+	defer cancel()
+
 	// Try ripgrep first, fall back to Go implementation
-	matches, truncatedReason, err := tryRipgrep(args, absPath, maxResults, headLimit)
+	matches, truncatedReason, err := tryRipgrep(runCtx, args, absPath, maxResults, headLimit)
 	if err != nil {
+		if errors.Is(err, errGrepTimeout) {
+			return GrepSearchResult{}, grepTimeoutError(absPath)
+		}
 		// Check if unsupported features were requested without ripgrep
 		unsupported := []string{}
 		if args.Multiline {
@@ -132,8 +152,11 @@ func GrepSearch(ctx tool.Context, args GrepSearchArgs) (GrepSearchResult, error)
 				strings.Join(unsupported, ", "), err)
 		}
 		// Fallback to Go implementation (supports literal, regex, case, globs, cap)
-		matches, err = goGrep(args.Pattern, absPath, mergeGlobs(args), args.CaseSensitive, args.Regex, maxResults)
+		matches, err = goGrep(runCtx, args.Pattern, absPath, mergeGlobs(args), args.CaseSensitive, args.Regex, maxResults)
 		if err != nil {
+			if errors.Is(err, errGrepTimeout) {
+				return GrepSearchResult{}, grepTimeoutError(absPath)
+			}
 			return GrepSearchResult{}, err
 		}
 		truncatedReason = ""
@@ -157,6 +180,14 @@ func GrepSearch(ctx tool.Context, args GrepSearchArgs) (GrepSearchResult, error)
 	}, nil
 }
 
+// grepTimeoutError builds an actionable error for a timed-out search.
+func grepTimeoutError(searchPath string) error {
+	return fmt.Errorf("grep_search timed out after %s while scanning %q. "+
+		"Narrow the search: set search_path to a specific directory or file, add include_globs/type to limit files, "+
+		"or avoid scanning large trees outside the project (e.g. ~/go/pkg/mod, node_modules)",
+		grepSearchTimeout, searchPath)
+}
+
 // mergeGlobs combines IncludeGlobs and the single Glob field into one slice
 func mergeGlobs(args GrepSearchArgs) []string {
 	globs := append([]string{}, args.IncludeGlobs...)
@@ -167,7 +198,7 @@ func mergeGlobs(args GrepSearchArgs) []string {
 }
 
 // tryRipgrep attempts to use ripgrep for searching
-func tryRipgrep(args GrepSearchArgs, searchPath string, maxResults, headLimit int) ([]GrepMatch, string, error) {
+func tryRipgrep(ctx context.Context, args GrepSearchArgs, searchPath string, maxResults, headLimit int) ([]GrepMatch, string, error) {
 	// Check if rg is available
 	rgPath, err := exec.LookPath("rg")
 	if err != nil {
@@ -224,7 +255,7 @@ func tryRipgrep(args GrepSearchArgs, searchPath string, maxResults, headLimit in
 	// Add pattern and path
 	rgArgs = append(rgArgs, args.Pattern, searchPath)
 
-	cmd := exec.Command(rgPath, rgArgs...)
+	cmd := exec.CommandContext(ctx, rgPath, rgArgs...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, "", fmt.Errorf("ripgrep pipe setup failed: %w", err)
@@ -247,6 +278,11 @@ func tryRipgrep(args GrepSearchArgs, searchPath string, maxResults, headLimit in
 	// We must wait for the command to finish, but we can ignore errors
 	// caused by the broken pipe from our early close
 	waitErr := cmd.Wait()
+	// If the context fired (deadline or cancel), CommandContext killed rg.
+	// Surface a clear timeout so the agent narrows its search.
+	if ctx.Err() != nil {
+		return nil, "", errGrepTimeout
+	}
 	if waitErr != nil && truncatedReason == "" {
 		if exitErr, ok := waitErr.(*exec.ExitError); ok {
 			switch exitErr.ExitCode() {
@@ -312,7 +348,7 @@ func parseRipgrepOutput(output []byte, maxResults int) ([]GrepMatch, error) {
 }
 
 // goGrep is a pure Go fallback for grep functionality
-func goGrep(pattern, searchPath string, includeGlobs []string, caseSensitive, isRegex bool, maxResults int) ([]GrepMatch, error) {
+func goGrep(ctx context.Context, pattern, searchPath string, includeGlobs []string, caseSensitive, isRegex bool, maxResults int) ([]GrepMatch, error) {
 	var matches []GrepMatch
 
 	// Prepare the matcher
@@ -346,6 +382,10 @@ func goGrep(pattern, searchPath string, includeGlobs []string, caseSensitive, is
 	err := filepath.Walk(searchPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil // Skip files we can't access
+		}
+		// Honor the overall timeout so a huge tree can't hang the turn.
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
 
 		// Skip directories
@@ -402,6 +442,9 @@ func goGrep(pattern, searchPath string, includeGlobs []string, caseSensitive, is
 	})
 
 	if err != nil && err != filepath.SkipAll {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			return nil, errGrepTimeout
+		}
 		return nil, err
 	}
 
@@ -440,8 +483,6 @@ func searchFileWithMatcher(path string, matcher func(string) bool, maxMatches in
 
 	return matches, nil
 }
-
-
 
 // isLikelyTextFile checks if a file is likely a text file based on extension
 func isLikelyTextFile(path string) bool {

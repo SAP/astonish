@@ -17,7 +17,6 @@ import {
   latestProcessText,
   liveActivityHint,
   previewValue,
-  splitActivitySummary,
   stickyAgentBubbleKey,
   supersededAgentIndices,
 } from '../toolActivity'
@@ -392,7 +391,9 @@ describe('splitActivitySummary / activityStats', () => {
     expect(summary.rest).toBe(' 1 file, 1 search')
   })
 
-  it('infers +/- lines from edit_file args; badge otherwise', () => {
+  it('infers changed +/- lines from edit_file args; badge otherwise', () => {
+    // Only the two appended lines actually change; a/b/c are unchanged and must
+    // not be counted as churn (line-level diff, not raw line totals).
     expect(
       activityStats([
         {
@@ -402,7 +403,18 @@ describe('splitActivitySummary / activityStats', () => {
           args: { path: 'a.ts', old_string: 'a\nb\nc', new_string: 'a\nb\nc\nd\ne' },
         },
       ]),
-    ).toEqual({ kind: 'diff', added: 5, removed: 3 })
+    ).toEqual({ kind: 'diff', added: 2, removed: 0 })
+    // A replacement where only one line differs counts exactly one +/-.
+    expect(
+      activityStats([
+        {
+          toolName: 'edit_file',
+          status: 'complete',
+          callIndex: 0,
+          args: { path: 'a.ts', old_string: 'a\nb\nc', new_string: 'a\nX\nc' },
+        },
+      ]),
+    ).toEqual({ kind: 'diff', added: 1, removed: 1 })
     expect(
       activityStats([
         { toolName: 'shell_command', status: 'complete', callIndex: 0 },

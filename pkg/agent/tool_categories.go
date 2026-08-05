@@ -15,7 +15,7 @@ const PlanModeSystemContext = `You are in Astonish PLAN MODE. This is a hard con
 
 RULES:
 - You MUST NOT make any changes. Mutating tools (write_file, edit_file, shell_command, and every other non-read-only tool) and delegate_tasks are DISABLED by the runtime and will be refused if you call them.
-- You MAY use read-only tools (read_file, grep_search, find_files, file_tree, memory_search, etc.) to investigate and build an accurate plan.
+- You MAY use read-only tools (read_file, grep_search, find_files, file_tree, code_definition, code_references, repo_map, memory_search, etc.) to investigate and build an accurate plan.
 - Produce a concise, concrete implementation plan: the files/commands you would touch and the order of steps.
 - Do NOT attempt to execute the plan. End by asking the user to exit Plan mode (shift+tab) to proceed with execution.`
 
@@ -33,10 +33,16 @@ func PlanModeBlockedMessage(toolName string) string {
 // SafeTools are read-only tools that auto-approve in chat mode.
 // These tools cannot modify the filesystem or execute commands.
 var SafeTools = map[string]bool{
-	"read_file":                 true,
-	"file_tree":                 true,
-	"find_files":                true,
-	"grep_search":               true,
+	"read_file":   true,
+	"file_tree":   true,
+	"find_files":  true,
+	"grep_search": true,
+	// Tree-sitter structural navigation — read-only symbol lookups. They parse
+	// source and return definition/reference locations; they never modify the
+	// filesystem, so they must be safe (auto-approve) and allowed in Plan mode.
+	"repo_map":                  true,
+	"code_definition":           true,
+	"code_references":           true,
 	"git_diff_add_line_numbers": true,
 	"filter_json":               true,
 	"web_fetch":                 true,
@@ -52,8 +58,8 @@ var SafeTools = map[string]bool{
 	"browser_console_messages": true,
 	"browser_network_requests": true,
 	// Browser navigation & interaction (operates in sandboxed browser)
-	"browser_navigate":      true,
-	"browser_navigate_back": true,
+	"browser_navigate":         true,
+	"browser_navigate_back":    true,
 	"browser_click":            true,
 	"browser_type":             true,
 	"browser_hover":            true,

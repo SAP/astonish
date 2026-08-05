@@ -35,7 +35,10 @@ if planMode:
   **not** in `agent.SafeTools` (the read-only allow-list: `write_file`, `edit_file`,
   `shell_command`, `memory_save`, …).
 - **Allowed:** read-only tools (`read_file`, `grep_search`, `find_files`, `file_tree`,
+  the tree-sitter navigation tools `repo_map` / `code_definition` / `code_references`,
   `memory_search`, …) so the agent can still investigate to produce an accurate plan.
+  Note: structural navigation is read-only (it only parses and returns locations) and
+  must never be blocked in Plan mode.
 - The block returns a **result** (not an error), so the model receives a reminder and keeps
   producing the plan rather than crashing the turn.
 

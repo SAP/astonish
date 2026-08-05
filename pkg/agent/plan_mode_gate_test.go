@@ -33,6 +33,11 @@ func TestPlanModeGate_AllowsReadOnlyTools(t *testing.T) {
 		"find_files",
 		"file_tree",
 		"memory_search",
+		// Tree-sitter structural navigation is read-only and must be usable
+		// while planning (regression: these were wrongly blocked in Plan mode).
+		"repo_map",
+		"code_definition",
+		"code_references",
 	}
 	for _, name := range allowed {
 		if planModeToolBlocked(name) {

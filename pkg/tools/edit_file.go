@@ -206,37 +206,19 @@ func buildVerificationContext(path, oldContent, newContent, oldString, newString
 		writeHunkLine(&sb, ' ', i+1, oldLines[i])
 	}
 
-	// Removed lines (old numbering).
-	removedShown := removedLines
-	addedShown := addedLines
+	// Diff the removed/added blocks line-by-line so unchanged lines within the
+	// replacement are shown as context rather than as a paired -/+ churn. Only
+	// the lines that actually differ carry a - or + marker.
+	changeRows := diffMatchLines(removedLines, addedLines, startLine1)
 	if changeLines > maxBodyLines {
-		// Truncate large removals/additions while keeping a balanced sample.
-		maxEach := maxBodyLines / 2
-		if maxEach < 1 {
-			maxEach = 1
-		}
-		if len(removedShown) > maxEach {
-			removedShown = append(append([]string{}, removedShown[:maxEach]...), "…")
-		}
-		if len(addedShown) > maxEach {
-			addedShown = append(append([]string{}, addedShown[:maxEach]...), "…")
-		}
+		changeRows = truncateChangeRows(changeRows, maxBodyLines)
 	}
-	for i, line := range removedShown {
-		if line == "…" {
+	for _, row := range changeRows {
+		if row.text == "…" {
 			sb.WriteString("  …\n")
 			continue
 		}
-		writeHunkLine(&sb, '-', startLine1+i, line)
-	}
-
-	// Added lines (new numbering starts at the same line).
-	for i, line := range addedShown {
-		if line == "…" {
-			sb.WriteString("  …\n")
-			continue
-		}
-		writeHunkLine(&sb, '+', startLine1+i, line)
+		writeHunkLine(&sb, row.marker, row.lineNum, row.text)
 	}
 
 	// Context after (new line numbers post-edit).
@@ -291,6 +273,80 @@ func splitMatchLines(s string) []string {
 		lines = lines[:len(lines)-1]
 	}
 	return lines
+}
+
+// changeRow is one line of a line-level diff between the removed and added
+// blocks of an edit. Context (unchanged) lines carry a space marker and their
+// old line number; removed lines carry '-' with old numbering; added lines
+// carry '+' with new numbering.
+type changeRow struct {
+	marker  rune
+	lineNum int
+	text    string
+}
+
+// diffMatchLines computes a line-level LCS diff of the removed vs. added blocks
+// so unchanged lines inside a replacement render as context instead of a paired
+// -/+ churn. startLine1 is the 1-based file line where the block begins; old and
+// new numbering advance independently as the diff is walked.
+func diffMatchLines(removed, added []string, startLine1 int) []changeRow {
+	m, n := len(removed), len(added)
+	// LCS length table.
+	lcs := make([][]int, m+1)
+	for i := range lcs {
+		lcs[i] = make([]int, n+1)
+	}
+	for i := m - 1; i >= 0; i-- {
+		for j := n - 1; j >= 0; j-- {
+			if removed[i] == added[j] {
+				lcs[i][j] = lcs[i+1][j+1] + 1
+			} else if lcs[i+1][j] >= lcs[i][j+1] {
+				lcs[i][j] = lcs[i+1][j]
+			} else {
+				lcs[i][j] = lcs[i][j+1]
+			}
+		}
+	}
+	var rows []changeRow
+	i, j := 0, 0
+	oldN, newN := startLine1, startLine1
+	for i < m && j < n {
+		switch {
+		case removed[i] == added[j]:
+			rows = append(rows, changeRow{marker: ' ', lineNum: oldN, text: removed[i]})
+			i, j, oldN, newN = i+1, j+1, oldN+1, newN+1
+		case lcs[i+1][j] >= lcs[i][j+1]:
+			rows = append(rows, changeRow{marker: '-', lineNum: oldN, text: removed[i]})
+			i, oldN = i+1, oldN+1
+		default:
+			rows = append(rows, changeRow{marker: '+', lineNum: newN, text: added[j]})
+			j, newN = j+1, newN+1
+		}
+	}
+	for ; i < m; i++ {
+		rows = append(rows, changeRow{marker: '-', lineNum: oldN, text: removed[i]})
+		oldN++
+	}
+	for ; j < n; j++ {
+		rows = append(rows, changeRow{marker: '+', lineNum: newN, text: added[j]})
+		newN++
+	}
+	return rows
+}
+
+// truncateChangeRows keeps a balanced sample of a large change block, inserting
+// a single "…" gap row when rows are dropped.
+func truncateChangeRows(rows []changeRow, maxRows int) []changeRow {
+	if len(rows) <= maxRows || maxRows < 2 {
+		return rows
+	}
+	head := maxRows / 2
+	tail := maxRows - head - 1 // reserve one slot for the gap marker
+	out := make([]changeRow, 0, maxRows)
+	out = append(out, rows[:head]...)
+	out = append(out, changeRow{text: "…"})
+	out = append(out, rows[len(rows)-tail:]...)
+	return out
 }
 
 func writeHunkLine(sb *strings.Builder, marker rune, lineNum int, text string) {

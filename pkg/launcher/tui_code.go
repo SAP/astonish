@@ -329,6 +329,7 @@ func (b *localAgentBackend) Info() backend.Info {
 		Provider:    b.provider,
 		Model:       b.model,
 		Mode:        "code",
+		WorkingDir:  b.workingDir,
 		Usage:       cloneUsage(b.usage),
 		IsResumed:   b.resumed,
 		AutoApprove: b.autoApprove,

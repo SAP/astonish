@@ -575,6 +575,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		prevValue := m.ta.Value()
 		prevH := m.composerTextHeight()
+		// Pre-grow the textarea to its max height before it processes the key,
+		// then let layout() below set the accurate height once the new value is
+		// known. The textarea repositions its internal viewport during Update;
+		// if it is still too short when the cursor crosses a soft-wrap boundary
+		// it scrolls the earlier rows out of view and a later SetHeight cannot
+		// bring them back (bubbles' viewport does not re-clamp YOffset when the
+		// height grows). Sizing to the cap up front keeps every row visible for
+		// any growth transition (1→2, or a wrapping paste 1→3/4).
+		if m.ta.Height() < composerMaxRows {
+			m.ta.SetHeight(composerMaxRows)
+		}
 		var cmd tea.Cmd
 		m.ta, cmd = m.ta.Update(msg)
 		cmds = append(cmds, cmd)
@@ -587,10 +598,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if pasteCmd := m.afterComposerChange(prevValue); pasteCmd != nil {
 			cmds = append(cmds, pasteCmd)
 		}
-		// Grow/shrink composer when the user adds or removes newlines.
+		// Grow/shrink composer when the visual line count changes; layout()
+		// recomputes the viewport around the new composer height.
 		if m.composerTextHeight() != prevH {
 			m.layout()
 			m.refreshViewport()
+		} else if m.ta.Height() != m.composerTextHeight() {
+			// We pre-grew the textarea above but the height did not actually
+			// change (e.g. a short keystroke) — snap it back to the accurate
+			// height so it does not stay padded at composerMaxRows.
+			m.ta.SetHeight(m.composerTextHeight())
 		}
 		m.prunePastedBlocks()
 		// Keep completion popups in sync with composer value after typing.
@@ -773,11 +790,14 @@ func (m model) insertNewline(intentional bool) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// planModeSystemContext must stay in sync with agent.PlanModeSystemContext
+// (the runtime gate's source of truth). Read-only tools listed here — including
+// the tree-sitter navigation tools — are allowed by the gate (agent.SafeTools).
 const planModeSystemContext = `You are in Astonish PLAN MODE. This is a hard constraint enforced by the runtime, not a suggestion.
 
 RULES:
 - You MUST NOT make any changes. Mutating tools (write_file, edit_file, shell_command, and every other non-read-only tool) and delegate_tasks are DISABLED by the runtime and will be refused if you call them.
-- You MAY use read-only tools (read_file, grep_search, find_files, file_tree, memory_search, etc.) to investigate and build an accurate plan.
+- You MAY use read-only tools (read_file, grep_search, find_files, file_tree, code_definition, code_references, repo_map, memory_search, etc.) to investigate and build an accurate plan.
 - Produce a concise, concrete implementation plan: the files/commands you would touch and the order of steps.
 - Do NOT attempt to execute the plan. End by asking the user to exit Plan mode (shift+tab) to proceed with execution.`
 
@@ -1675,18 +1695,46 @@ func (m model) paintHeight() int {
 	return m.screenHeight()
 }
 
+// composerMaxRows caps how many visible rows the composer textarea grows to.
+const composerMaxRows = 4
+
 // composerTextHeight returns the textarea height: 1 by default, up to 4 when
 // the user has entered multiple lines. Uses the real textarea value so typed
 // multi-line content expands; collapsed paste placeholders stay one line.
+//
+// Lines are counted visually (soft-wrapped), so a single long typed line that
+// spills onto a second display row grows the composer the same way an explicit
+// Shift+Enter newline does.
 func (m model) composerTextHeight() int {
-	lines := pasteLineCount(m.ta.Value())
+	lines := visualLineCount(m.ta.Value(), m.composerWrapWidth())
 	if lines < 1 {
 		lines = 1
 	}
-	if lines > 4 {
-		lines = 4
+	if lines > composerMaxRows {
+		lines = composerMaxRows
 	}
 	return lines
+}
+
+// composerWrapWidth returns the effective text width the composer textarea
+// soft-wraps at: the terminal width minus the border/padding (matching the
+// SetWidth call in layout) minus the 2-cell prompt reserved by
+// SetPromptFunc. Returns 0 when the terminal size is not yet known so callers
+// fall back to logical line counting.
+func (m model) composerWrapWidth() int {
+	innerW := m.width - 4
+	if innerW < 20 {
+		innerW = 20
+	}
+	// SetPromptFunc(2, …) reserves 2 cells for the "❯ " prompt.
+	wrapW := innerW - 2
+	if m.width <= 0 {
+		return 0
+	}
+	if wrapW < 1 {
+		wrapW = 1
+	}
+	return wrapW
 }
 
 func (m *model) refreshViewport() {
@@ -1754,6 +1802,10 @@ func (m model) renderWelcome() string {
 }
 
 func (m model) welcomeLines(width int) []string {
+	if m.info.Mode == "code" {
+		return m.codeWelcomeLines(width)
+	}
+
 	th := m.theme
 	title := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("208")).
@@ -1772,6 +1824,73 @@ func (m model) welcomeLines(width int) []string {
 		"",
 		th.Hint.Width(width).Align(lipgloss.Center).Render("/ commands  ·  @ files  ·  shift+tab plan  ·  shift+enter newline"),
 	}
+}
+
+// codeWelcomeLines renders the welcome card for `astonish code` — the local,
+// unsandboxed coding tool. Unlike platform chat, tools run directly on the host
+// filesystem in the working directory, so the copy makes that context clear and
+// shows the directory being operated on.
+func (m model) codeWelcomeLines(width int) []string {
+	th := m.theme
+	title := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("208")).
+		Background(lipgloss.Color("#000000")).
+		Bold(true).
+		Align(lipgloss.Center).
+		Width(width).
+		Render("✦ Astonish Code")
+
+	lines := []string{
+		title,
+		"",
+		th.Text.Width(width).Align(lipgloss.Center).Render("Your local AI coding tool — reads, writes, and runs code right here."),
+	}
+
+	if dir := abbreviateHomePath(m.info.WorkingDir); dir != "" {
+		lines = append(lines,
+			th.Muted.Width(width).Align(lipgloss.Center).Render("Working in "+dir),
+		)
+	}
+
+	lines = append(lines,
+		th.Muted.Width(width).Align(lipgloss.Center).Render(codeApprovalNotice(m.info.AutoApprove)),
+		th.Muted.Width(width).Align(lipgloss.Center).Render("Ready when you are."),
+		"",
+		th.Hint.Width(width).Align(lipgloss.Center).Render("/ commands  ·  @ files  ·  /rollback  ·  shift+tab plan  ·  shift+enter newline"),
+	)
+
+	return lines
+}
+
+// codeApprovalNotice describes code mode's tool-execution policy for the welcome
+// card. Read-only tools always run without prompting; only file-modifying and
+// command-running tools are gated — and that gate is skipped entirely under
+// --auto-approve.
+func codeApprovalNotice(autoApprove bool) string {
+	if autoApprove {
+		return "Tools run on this machine — auto-approve is on, so no prompts."
+	}
+	return "Tools run on this machine; file changes and commands ask first."
+}
+
+// abbreviateHomePath collapses the user's home directory prefix to "~" for
+// display. Returns the input unchanged when it is not under the home directory,
+// and empty for empty input.
+func abbreviateHomePath(path string) string {
+	if path == "" {
+		return ""
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return path
+	}
+	if path == home {
+		return "~"
+	}
+	if rel, err := filepath.Rel(home, path); err == nil && rel != "" && !strings.HasPrefix(rel, "..") {
+		return "~" + string(filepath.Separator) + rel
+	}
+	return path
 }
 
 // viewportTopY is the screen row where the transcript viewport starts.

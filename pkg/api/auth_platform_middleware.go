@@ -97,6 +97,10 @@ func isAuthExemptPath(path string) bool {
 	if strings.HasPrefix(path, "/api/auth/") {
 		return true
 	}
+	// Slack webhooks are authenticated by Slack request signatures in the channel handler.
+	if path == "/api/slack/events" || path == "/api/slack/commands" {
+		return true
+	}
 	// Platform setup endpoints — needed before any user has registered.
 	// NOTE: Does NOT include /api/platform/admin/* which requires superadmin auth.
 	if path == "/api/platform/mode" ||

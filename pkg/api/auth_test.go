@@ -410,6 +410,30 @@ func TestAuthMiddleware_AllowsAuthEndpoints(t *testing.T) {
 	}
 }
 
+func TestAuthMiddleware_AllowsSlackWebhookEndpoints(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := NewAuthStore(dir, 24*time.Hour)
+	am := NewAuthManager(store)
+
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+	})
+	handler := AuthMiddleware(am, inner)
+
+	for _, path := range []string{"/api/slack/events", "/api/slack/commands"} {
+		t.Run(path, func(t *testing.T) {
+			req := httptest.NewRequest("POST", path, nil)
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+
+			if w.Code != http.StatusOK {
+				t.Errorf("Slack webhook endpoint should be accessible, got status %d", w.Code)
+			}
+		})
+	}
+}
+
 func TestAuthMiddleware_BlocksAPIWithout(t *testing.T) {
 	dir := t.TempDir()
 	store, _ := NewAuthStore(dir, 24*time.Hour)

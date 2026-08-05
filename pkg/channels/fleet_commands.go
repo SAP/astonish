@@ -32,8 +32,9 @@ func registerFleetCommands(mgr *ChannelManager) {
 //	/fleet <key> <task> — Start a fleet session with an initial task
 func fleetCommand(mgr *ChannelManager) *Command {
 	return &Command{
-		Name:        "fleet",
-		Description: "Start a fleet session (autonomous agent team)",
+		Name:          "fleet",
+		Description:   "Start a fleet session (autonomous agent team)",
+		SessionScoped: true,
 		Handler: func(ctx context.Context, cc CommandContext) (string, error) {
 			if mgr.fleetDeps == nil {
 				return "Fleet system is not available.", nil
@@ -181,8 +182,9 @@ func startFleetFromTelegram(ctx context.Context, mgr *ChannelManager, cc Command
 //	/fleet_plan <template-key>  — Start a wizard conversation to create a plan
 func fleetPlanCommand(mgr *ChannelManager) *Command {
 	return &Command{
-		Name:        "fleet_plan",
-		Description: "Create a fleet plan from a template",
+		Name:          "fleet_plan",
+		Description:   "Create a fleet plan from a template",
+		SessionScoped: true,
 		Handler: func(ctx context.Context, cc CommandContext) (string, error) {
 			if mgr.fleetDeps == nil {
 				return "Fleet system is not available.", nil
@@ -279,8 +281,9 @@ func listFleetTemplates(mgr *ChannelManager) (string, error) {
 // fleetStopCommand returns the /fleet_stop command handler.
 func fleetStopCommand(mgr *ChannelManager) *Command {
 	return &Command{
-		Name:        "fleet_stop",
-		Description: "Stop the active fleet session",
+		Name:          "fleet_stop",
+		Description:   "Stop the active fleet session",
+		SessionScoped: true,
 		Handler: func(ctx context.Context, cc CommandContext) (string, error) {
 			sessionID := mgr.GetActiveFleet(cc.SessionKey)
 			if sessionID == "" {

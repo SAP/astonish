@@ -13,13 +13,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/huh"
-	"github.com/charmbracelet/lipgloss"
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/credentials"
 	"github.com/SAP/astonish/pkg/daemon"
 	emailPkg "github.com/SAP/astonish/pkg/email"
 	"github.com/SAP/astonish/pkg/store/entstore"
+	"github.com/charmbracelet/huh"
+	"github.com/charmbracelet/lipgloss"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	slackPkg "github.com/slack-go/slack"
@@ -662,6 +662,9 @@ func handleSlackSetup() error {
 	fmt.Println("     • app_mention (in bot events)")
 	fmt.Println("     • message.im (in bot events)")
 	fmt.Println()
+	fmt.Println("  8. Optional: To let Astonish register Slack slash commands automatically,")
+	fmt.Println("     note your Slack App ID and create an App Configuration Token.")
+	fmt.Println()
 
 	// Mode selection
 	mode := "socket"
@@ -761,6 +764,69 @@ func handleSlackSetup() error {
 		}
 	}
 
+	var syncCommands bool
+	var slackAppID string
+	var configToken string
+	var commandURL string
+	manifestErr := huh.NewForm(
+		huh.NewGroup(
+			huh.NewConfirm().
+				Title("Register Slack slash commands automatically?").
+				Description("Uses Slack App Manifest APIs to register /link and Slack-safe Astonish commands. You can skip this and keep managing commands manually.").
+				Affirmative("Yes, sync commands").
+				Negative("Skip").
+				Value(&syncCommands),
+		),
+	).Run()
+	if manifestErr != nil {
+		return manifestErr
+	}
+	if syncCommands {
+		manifestErr = huh.NewForm(
+			huh.NewGroup(
+				huh.NewInput().
+					Title("Slack App ID").
+					Description("Found under Basic Information → App Credentials (starts with A).").
+					Placeholder("A1234567890").
+					Value(&slackAppID),
+				huh.NewInput().
+					Title("App Configuration Token").
+					Description("Slack configuration token for App Manifest APIs. This is not the xoxb bot token or xapp Socket Mode token.").
+					EchoMode(huh.EchoModePassword).
+					Value(&configToken),
+				huh.NewInput().
+					Title("Slash Command URL").
+					Description("For Events API, use https://<host>/api/slack/commands. Optional for Socket Mode if Slack accepts omitted command URLs.").
+					Placeholder("https://example.com/api/slack/commands").
+					Value(&commandURL),
+			),
+		).Run()
+		if manifestErr != nil {
+			return manifestErr
+		}
+		slackAppID = strings.TrimSpace(slackAppID)
+		configToken = strings.TrimSpace(configToken)
+		commandURL = strings.TrimSpace(commandURL)
+		if slackAppID == "" {
+			return fmt.Errorf("Slack App ID is required for automatic command registration")
+		}
+		if configToken == "" {
+			return fmt.Errorf("App Configuration Token is required for automatic command registration")
+		}
+		if strings.HasPrefix(configToken, "xapp-") {
+			return fmt.Errorf("automatic command registration needs a Slack App Configuration Token, not an xapp App-Level Token")
+		}
+		if strings.HasPrefix(configToken, "xoxb-") {
+			return fmt.Errorf("automatic command registration needs a Slack App Configuration Token, not an xoxb Bot User OAuth Token")
+		}
+		if mode != "socket" && commandURL == "" {
+			return fmt.Errorf("Slash Command URL is required for automatic Slack command registration in Events API mode")
+		}
+		if commandURL != "" && !strings.HasPrefix(commandURL, "https://") {
+			return fmt.Errorf("Slash Command URL must be a public HTTPS URL")
+		}
+	}
+
 	// Determine if we're in platform mode
 	isPlatform := cfg.Storage.Backend == "postgres" && cfg.Storage.Postgres.PlatformDSN != ""
 
@@ -783,6 +849,8 @@ func handleSlackSetup() error {
 	cfg.Channels.Enabled = &enabled
 	cfg.Channels.Slack.Enabled = &enabled
 	cfg.Channels.Slack.Mode = mode
+	cfg.Channels.Slack.AppID = slackAppID
+	cfg.Channels.Slack.CommandURL = commandURL
 
 	// Save secrets to the appropriate store based on mode
 	if isPlatform {
@@ -804,6 +872,11 @@ func handleSlackSetup() error {
 		if mode == "events" && signingSecret != "" {
 			if setErr := es.Secrets().SetSecret("channels.slack.signing_secret", signingSecret); setErr != nil {
 				return fmt.Errorf("failed to store signing secret in platform database: %w", setErr)
+			}
+		}
+		if configToken != "" {
+			if setErr := es.Secrets().SetSecret("channels.slack.config_token", configToken); setErr != nil {
+				return fmt.Errorf("failed to store Slack app configuration token in platform database: %w", setErr)
 			}
 		}
 		fmt.Println("  Secrets stored in platform database.")
@@ -831,6 +904,12 @@ func handleSlackSetup() error {
 						cfg.Channels.Slack.SigningSecret = signingSecret // fallback
 					}
 				}
+				if configToken != "" {
+					if setErr := store.SetSecret("channels.slack.config_token", configToken); setErr != nil {
+						slog.Warn("failed to store Slack app configuration token in credential store", "error", setErr)
+						cfg.Channels.Slack.ConfigToken = configToken // fallback
+					}
+				}
 			} else {
 				// Credential store unavailable — save in config as fallback
 				cfg.Channels.Slack.BotToken = botToken
@@ -840,6 +919,7 @@ func handleSlackSetup() error {
 				if mode == "events" {
 					cfg.Channels.Slack.SigningSecret = signingSecret
 				}
+				cfg.Channels.Slack.ConfigToken = configToken
 			}
 		}
 	}
@@ -848,6 +928,7 @@ func handleSlackSetup() error {
 	cfg.Channels.Slack.BotToken = ""
 	cfg.Channels.Slack.AppToken = ""
 	cfg.Channels.Slack.SigningSecret = ""
+	cfg.Channels.Slack.ConfigToken = ""
 
 	if err := config.SaveAppConfig(cfg); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)

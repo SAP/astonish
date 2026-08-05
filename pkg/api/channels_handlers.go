@@ -157,6 +157,34 @@ func ChannelsStatusHandler(w http.ResponseWriter, r *http.Request) {
 // Response:
 //
 //	{ "status": "ok", "message": "Channels reloaded" }
+func SlackEventsHandler(w http.ResponseWriter, r *http.Request) {
+	cm := GetChannelManager()
+	if cm == nil {
+		http.Error(w, "slack channel not available", http.StatusServiceUnavailable)
+		return
+	}
+	events, _, ok := cm.GetSlackHTTPHandlers()
+	if !ok || events == nil {
+		http.Error(w, "slack channel not available", http.StatusServiceUnavailable)
+		return
+	}
+	events.ServeHTTP(w, r)
+}
+
+func SlackSlashCommandHandler(w http.ResponseWriter, r *http.Request) {
+	cm := GetChannelManager()
+	if cm == nil {
+		http.Error(w, "slack channel not available", http.StatusServiceUnavailable)
+		return
+	}
+	_, commands, ok := cm.GetSlackHTTPHandlers()
+	if !ok || commands == nil {
+		http.Error(w, "slack channel not available", http.StatusServiceUnavailable)
+		return
+	}
+	commands.ServeHTTP(w, r)
+}
+
 func ChannelsReloadHandler(w http.ResponseWriter, r *http.Request) {
 	// Only org admins can reload channel configuration.
 	if isPlatformMode(r) {

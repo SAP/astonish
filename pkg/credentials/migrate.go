@@ -82,6 +82,23 @@ func MigrateFromConfig(store *Store, appCfg *config.AppConfig, logger *log.Logge
 		secrets["channels.email.password"] = appCfg.Channels.Email.Password
 	}
 
+	// --- 2c. Slack channel tokens ---
+	if appCfg.Channels.Slack.BotToken != "" {
+		secrets["channels.slack.bot_token"] = appCfg.Channels.Slack.BotToken
+	}
+	if appCfg.Channels.Slack.AppToken != "" {
+		secrets["channels.slack.app_token"] = appCfg.Channels.Slack.AppToken
+	}
+	if appCfg.Channels.Slack.SigningSecret != "" {
+		secrets["channels.slack.signing_secret"] = appCfg.Channels.Slack.SigningSecret
+	}
+	if appCfg.Channels.Slack.ConfigToken != "" {
+		secrets["channels.slack.config_token"] = appCfg.Channels.Slack.ConfigToken
+	}
+	if appCfg.Channels.Slack.ClientSecret != "" {
+		secrets["channels.slack.client_secret"] = appCfg.Channels.Slack.ClientSecret
+	}
+
 	// --- 3. Web server API keys (Tavily, Brave, Firecrawl) ---
 	for serverID, wsCfg := range appCfg.WebServers {
 		if wsCfg.APIKey != "" {
@@ -157,6 +174,7 @@ func scrubAppConfig(appCfg *config.AppConfig) {
 	appCfg.Channels.Slack.BotToken = ""
 	appCfg.Channels.Slack.AppToken = ""
 	appCfg.Channels.Slack.SigningSecret = ""
+	appCfg.Channels.Slack.ConfigToken = ""
 	appCfg.Channels.Slack.ClientSecret = ""
 
 	// Web server API keys

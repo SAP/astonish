@@ -431,13 +431,14 @@ interface SlackConfigFieldsProps {
 }
 
 function SlackConfigFields({ form, setForm }: SlackConfigFieldsProps) {
+  const update = (key: string, value: string) => setForm({ ...form, [key]: value })
   return (
     <div className="space-y-3">
       <div>
         <label className="block text-xs font-medium mb-1" style={{ color: 'var(--text-secondary)' }}>Mode</label>
         <select
           value={form.mode || 'socket'}
-          onChange={(e: ChangeEvent<HTMLSelectElement>) => setForm({ ...form, mode: e.target.value })}
+          onChange={(e: ChangeEvent<HTMLSelectElement>) => update('mode', e.target.value)}
           className="w-full px-3 py-2 rounded-lg text-xs outline-none"
           style={inputStyle}
         >
@@ -445,9 +446,35 @@ function SlackConfigFields({ form, setForm }: SlackConfigFieldsProps) {
           <option value="events">Events API (HTTP webhooks, requires public URL)</option>
         </select>
       </div>
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <label className="block text-xs font-medium mb-1" style={{ color: 'var(--text-secondary)' }}>Slack App ID</label>
+          <input
+            type="text"
+            value={form.app_id || ''}
+            onChange={(e: ChangeEvent<HTMLInputElement>) => update('app_id', e.target.value)}
+            placeholder="A1234567890"
+            className="w-full px-3 py-2 rounded-lg text-xs outline-none font-mono"
+            style={inputStyle}
+          />
+        </div>
+        <div>
+          <label className="block text-xs font-medium mb-1" style={{ color: 'var(--text-secondary)' }}>Slash Command URL</label>
+          <input
+            type="url"
+            value={form.command_url || ''}
+            onChange={(e: ChangeEvent<HTMLInputElement>) => update('command_url', e.target.value)}
+            placeholder="https://example.com/api/slack/commands"
+            className="w-full px-3 py-2 rounded-lg text-xs outline-none font-mono"
+            style={inputStyle}
+          />
+        </div>
+      </div>
       <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
         Socket mode requires Bot Token + App-Level Token. Events mode requires Bot Token + Signing Secret.
-        OAuth fields (Client ID, Client Secret) are only needed for multi-workspace installs.
+        Add Slack App ID + a Slack App Configuration Token to sync /link and Slack-safe Astonish commands automatically.
+        Socket Mode omits slash-command URLs in the synced manifest; Events mode also needs a public HTTPS Slash Command URL.
+        The configuration token is not the xapp Socket Mode token or the xoxb bot token.
       </p>
     </div>
   )

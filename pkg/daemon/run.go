@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -513,6 +514,10 @@ func Run(cfg RunConfig) error {
 			botToken := resolveDaemonSecret(backend, factoryResult.CredentialStore, "channels.slack.bot_token")
 			appToken := resolveDaemonSecret(backend, factoryResult.CredentialStore, "channels.slack.app_token")
 			signingSecret := resolveDaemonSecret(backend, factoryResult.CredentialStore, "channels.slack.signing_secret")
+			configToken := resolveDaemonSecret(backend, factoryResult.CredentialStore, "channels.slack.config_token")
+			if configToken == "" {
+				configToken = chCfg.Slack.ConfigToken
+			}
 
 			mode := chCfg.Slack.GetMode()
 			if mode == "socket" && botToken == "" {
@@ -525,6 +530,18 @@ func Run(cfg RunConfig) error {
 				slackConfigError = "signing_secret not configured for events mode"
 				logger.Printf("Warning: Slack channel enabled (events mode) but no signing secret found")
 			} else {
+				if chCfg.Slack.AppID == "" || configToken == "" {
+					missing := []string{}
+					if chCfg.Slack.AppID == "" {
+						missing = append(missing, "app_id")
+					}
+					if configToken == "" {
+						missing = append(missing, "config_token")
+					}
+					logger.Printf("Slack slash command manifest sync disabled (missing %s)", strings.Join(missing, " and "))
+				} else {
+					logger.Printf("Slack slash command manifest sync enabled for app %s", chCfg.Slack.AppID)
+				}
 				slAllowFrom := chCfg.Slack.AllowFrom
 				if backend != nil {
 					slAllowFrom = nil
@@ -534,6 +551,9 @@ func Run(cfg RunConfig) error {
 					BotToken:      botToken,
 					AppToken:      appToken,
 					SigningSecret: signingSecret,
+					AppID:         chCfg.Slack.AppID,
+					ConfigToken:   configToken,
+					CommandURL:    chCfg.Slack.CommandURL,
 					AllowFrom:     slAllowFrom,
 					Commands:      mgr.Commands(),
 				}, log.Default())

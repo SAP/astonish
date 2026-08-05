@@ -116,6 +116,34 @@ func TestPlatformAuthMiddleware_AllowsAuthEndpoints(t *testing.T) {
 	}
 }
 
+func TestPlatformAuthMiddleware_AllowsSlackWebhookEndpoints(t *testing.T) {
+	pa := testPlatformAuth(t)
+
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+	})
+	handler := PlatformAuthMiddleware(pa, inner)
+
+	paths := []string{
+		"/api/slack/events",
+		"/api/slack/commands",
+	}
+
+	for _, path := range paths {
+		t.Run(path, func(t *testing.T) {
+			req := httptest.NewRequest("POST", path, nil)
+			req.RemoteAddr = "192.168.1.100:54321"
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+
+			if w.Code != http.StatusOK {
+				t.Errorf("Slack webhook path %q should be accessible, got status %d", path, w.Code)
+			}
+		})
+	}
+}
+
 // TestPlatformAuthMiddleware_AllowsPlatformSetupEndpoints verifies that
 // /api/platform/* endpoints pass without auth (needed before first user).
 func TestPlatformAuthMiddleware_AllowsPlatformSetupEndpoints(t *testing.T) {

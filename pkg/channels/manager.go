@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -222,8 +223,8 @@ func NewChannelManager(chatAgent *agent.ChatAgent, sessSvc session.Service, logg
 		logger = log.Default()
 	}
 	m := &ChannelManager{
-		channels:        make(map[string]Channel),
-		router:          NewRouter(),
+		channels:                make(map[string]Channel),
+		router:                  NewRouter(),
 		agent:                   chatAgent,
 		sessSvc:                 sessSvc,
 		commands:                DefaultCommands(),
@@ -341,6 +342,13 @@ type LinkHandlerSetter interface {
 	SetLinkHandler(fn func(ctx context.Context, senderID, senderUsername, code string) (bool, string))
 }
 
+// SlackHTTPHandlerProvider is implemented by Slack adapters that expose HTTP
+// endpoints for Events API and slash command requests.
+type SlackHTTPHandlerProvider interface {
+	EventsHTTPHandler() http.Handler
+	SlashCommandHTTPHandler() http.Handler
+}
+
 // GetTelegramBotUsername returns the connected Telegram bot's username, or empty
 // string if Telegram is not configured or not connected.
 func (m *ChannelManager) GetTelegramBotUsername() string {
@@ -369,6 +377,22 @@ func (m *ChannelManager) GetSlackBotUserID() string {
 		return provider.BotUsername()
 	}
 	return ""
+}
+
+// GetSlackHTTPHandlers returns Slack's external HTTP endpoints when the Slack
+// channel is registered.
+func (m *ChannelManager) GetSlackHTTPHandlers() (events http.Handler, commands http.Handler, ok bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	ch, exists := m.channels["slack"]
+	if !exists {
+		return nil, nil, false
+	}
+	provider, ok := ch.(SlackHTTPHandlerProvider)
+	if !ok {
+		return nil, nil, false
+	}
+	return provider.EventsHTTPHandler(), provider.SlashCommandHTTPHandler(), true
 }
 
 // GetEmailAddress returns the connected email channel's address, or empty
@@ -978,6 +1002,12 @@ func (m *ChannelManager) handleCommand(ctx context.Context, msg InboundMessage, 
 		}
 	}
 
+	ch := m.getChannel(msg.ChannelID)
+	var presenter CommandPresenter
+	if p, ok := ch.(CommandPresenter); ok {
+		presenter = p
+	}
+
 	cc := CommandContext{
 		ChannelID:      msg.ChannelID,
 		ChatID:         msg.ChatID,
@@ -993,9 +1023,9 @@ func (m *ChannelManager) handleCommand(ctx context.Context, msg InboundMessage, 
 		Distiller:      m.agent,
 		AuthorizeFunc:  m.authorizeFunc,
 		Manager:        m,
+		Presenter:      presenter,
 	}
 
-	ch := m.getChannel(msg.ChannelID)
 	if ch == nil {
 		return fmt.Errorf("channel %s not found", msg.ChannelID)
 	}
@@ -1233,11 +1263,11 @@ func channelHints(channelID string) string {
 - Be conversational — this is a chat, not a terminal`
 	case "slack":
 		return `You are responding via Slack.
-- Keep responses concise (under 300 words when possible)
-- Use Slack-compatible formatting: **bold**, ~~strikethrough~~, ` + "`code`" + `, and fenced code blocks
-- NEVER use markdown tables — use bullet lists instead
-- Break long responses into short paragraphs
-- Be conversational — this is a chat, not a terminal
+- Keep responses concise, scannable, and conversational
+- Use Slack-compatible Markdown/mrkdwn-friendly formatting: **bold**, ~~strikethrough~~, ` + "`code`" + `, and fenced code blocks
+- For structured records, prefer a compact Markdown table when the result set is small or medium and the columns are meaningful
+- For long result sets, summarize first and use grouped bullet lists or offer to provide more details instead of producing an oversized table
+- Avoid HTML and complex Markdown that Slack may not render well
 - Use [text](url) for links (they will be auto-converted to Slack format)`
 	case "email":
 		return `You are responding via email.

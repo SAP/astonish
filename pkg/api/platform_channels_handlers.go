@@ -7,10 +7,10 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/gorilla/mux"
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/email"
 	"github.com/SAP/astonish/pkg/store"
+	"github.com/gorilla/mux"
 )
 
 // --- Channel Configuration Types ---
@@ -20,15 +20,15 @@ type channelFullInfo struct {
 	Type        string            `json:"type"`
 	Description string            `json:"description"`
 	Enabled     bool              `json:"enabled"`
-	Config      map[string]any    `json:"config"`            // non-secret config fields
-	Secrets     []channelSecretAt `json:"secrets"`           // which secrets are set (no values)
+	Config      map[string]any    `json:"config"`             // non-secret config fields
+	Secrets     []channelSecretAt `json:"secrets"`            // which secrets are set (no values)
 	SecretsSet  bool              `json:"secrets_configured"` // all required secrets present
 }
 
 type channelSecretAt struct {
-	Key       string `json:"key"`
-	Label     string `json:"label"`
-	Configured bool  `json:"configured"`
+	Key        string `json:"key"`
+	Label      string `json:"label"`
+	Configured bool   `json:"configured"`
 }
 
 // channelSecretDef defines a single secret field for a channel.
@@ -63,6 +63,7 @@ var channelDefinitions = map[string]channelDefinition{
 			{key: "channels.slack.bot_token", label: "Bot Token (xoxb-...)"},
 			{key: "channels.slack.app_token", label: "App-Level Token (xapp-...)"},
 			{key: "channels.slack.signing_secret", label: "Signing Secret"},
+			{key: "channels.slack.config_token", label: "App Configuration Token (not xapp/xoxb)"},
 			{key: "channels.slack.client_id", label: "OAuth Client ID"},
 			{key: "channels.slack.client_secret", label: "OAuth Client Secret"},
 		},
@@ -188,10 +189,12 @@ func PlatformAdminListChannelsHandler(w http.ResponseWriter, r *http.Request) {
 		if channels.Slack != nil {
 			info.Enabled = channels.Slack.Enabled
 			info.Config["mode"] = channels.Slack.Mode
+			info.Config["app_id"] = channels.Slack.AppID
+			info.Config["command_url"] = channels.Slack.CommandURL
 		}
 		allSecretsSet := true
 		// For Slack, bot_token is always required. app_token required for socket mode,
-		// signing_secret required for events mode. client_id/client_secret are optional.
+		// signing_secret required for events mode. Manifest/OAuth secrets are optional.
 		requiredSecrets := map[string]bool{
 			"channels.slack.bot_token": true,
 		}
@@ -301,6 +304,12 @@ func PlatformAdminSaveChannelHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		if v, ok := body.Config["mode"].(string); ok {
 			cfg.Mode = v
+		}
+		if v, ok := body.Config["app_id"].(string); ok {
+			cfg.AppID = v
+		}
+		if v, ok := body.Config["command_url"].(string); ok {
+			cfg.CommandURL = v
 		}
 		settings.Channels.Slack = cfg
 	}

@@ -53,6 +53,36 @@ func TestChannelHints(t *testing.T) {
 		}
 	})
 
+	t.Run("slack encourages compact markdown tables for structured records", func(t *testing.T) {
+		t.Parallel()
+		hints := channelHints("slack")
+		if hints == "" {
+			t.Fatal("channelHints(\"slack\") should return non-empty string")
+		}
+		if !strings.Contains(hints, "Slack") {
+			t.Error("slack hints should mention Slack")
+		}
+		if !strings.Contains(hints, "structured records") || !strings.Contains(hints, "compact Markdown table") {
+			t.Errorf("slack hints should encourage compact Markdown tables for structured records, got %q", hints)
+		}
+		if strings.Contains(hints, "NEVER use markdown tables") {
+			t.Errorf("slack hints should not forbid Markdown tables, got %q", hints)
+		}
+		for _, forbidden := range []string{"OpenStack", "VM", "Kubernetes", "ticket", "invoice"} {
+			if strings.Contains(hints, forbidden) {
+				t.Errorf("slack hints should be domain-agnostic; found %q in %q", forbidden, hints)
+			}
+		}
+	})
+
+	t.Run("telegram still avoids markdown tables", func(t *testing.T) {
+		t.Parallel()
+		hints := channelHints("telegram")
+		if !strings.Contains(hints, "NEVER use markdown tables") {
+			t.Errorf("telegram hints should still forbid Markdown tables, got %q", hints)
+		}
+	})
+
 	t.Run("email returns non-empty", func(t *testing.T) {
 		t.Parallel()
 		hints := channelHints("email")

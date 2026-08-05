@@ -133,9 +133,11 @@ type model struct {
 	clickIsDouble  bool
 
 	// overlays
-	sessions    sessionsState
-	modelPicker modelPickerState
-	fileViewer  fileViewerState
+	sessions       sessionsState
+	rollback       rollbackState
+	modelPicker    modelPickerState
+	providerPicker providerPickerState
+	fileViewer     fileViewerState
 	// slash command completion popup (active when composer starts with /)
 	slash slashCompletion
 	// @file completion popup (active while typing a trailing @token)
@@ -158,6 +160,9 @@ type model struct {
 	// composerWatching keeps a short tick loop alive so Command+V collapse does
 	// not wait for the next keypress to re-enter Update.
 	composerWatching bool
+	// workDir is the workspace/project root (process CWD in code mode). Used to
+	// render project-relative file paths in diff headers.
+	workDir string
 }
 
 func newModel(parent context.Context, cfg Config) model {
@@ -218,8 +223,20 @@ func newModel(parent context.Context, cfg Config) model {
 		width:      cfg.Width,
 		height:     cfg.Height,
 		historyIdx: -1,
+		workDir:    workspaceRoot(),
 	}
 	return m
+}
+
+// workspaceRoot returns the process working directory, which in code mode is
+// the project root the agent's tools operate against. Empty on error (diff
+// headers then fall back to showing the raw path).
+func workspaceRoot() string {
+	wd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	return wd
 }
 
 // tea messages
@@ -277,6 +294,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.modelPicker.open {
 			return m.handleModelPickerKey(msg)
+		}
+		if m.providerPicker.open {
+			return m.handleProviderPickerKey(msg)
+		}
+		if m.rollback.open {
+			return m.handleRollbackKey(msg)
 		}
 
 		// Explicit paste bindings (Ctrl+V / Super+V) prefer clipboard images.
@@ -442,6 +465,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case sessionDeletedMsg:
 		return m.applySessionDeleted(msg)
 
+	case rollbackLoadedMsg:
+		return m.applyRollbackLoaded(msg)
+
+	case rolledBackMsg:
+		return m.applyRolledBack(msg)
+
 	case modelProvidersLoadedMsg:
 		return m.applyModelProvidersLoaded(msg)
 
@@ -450,6 +479,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case modelPinAppliedMsg:
 		return m.applyModelPinApplied(msg)
+
+	case providerInstancesLoadedMsg:
+		return m.applyProviderInstancesLoaded(msg)
+
+	case providerMutatedMsg:
+		return m.applyProviderMutated(msg)
 
 	case artifactContentLoadedMsg:
 		return m.applyArtifactContentLoaded(msg)
@@ -582,7 +617,14 @@ func (m *model) syncSlashCompletion() {
 		m.slash = slashCompletion{}
 		return
 	}
-	matches := filterSlashCommands(query)
+	var extra []slashCommand
+	if m.providerAdmin() != nil {
+		extra = append(extra, providerSlashCommand)
+	}
+	if m.rollbackCap() != nil {
+		extra = append(extra, rollbackSlashCommand)
+	}
+	matches := filterSlashCommands(query, extra...)
 	cursor := m.slash.cursor
 	if cursor >= len(matches) {
 		cursor = len(matches) - 1
@@ -731,8 +773,13 @@ func (m model) insertNewline(intentional bool) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-const planModeSystemContext = `You are in Astonish terminal plan mode.
-Respond with a concise implementation plan only. Do not execute tools, edit files, run commands, or make external changes. If the user asks for action, describe the steps you would take and ask for confirmation to proceed outside plan mode.`
+const planModeSystemContext = `You are in Astonish PLAN MODE. This is a hard constraint enforced by the runtime, not a suggestion.
+
+RULES:
+- You MUST NOT make any changes. Mutating tools (write_file, edit_file, shell_command, and every other non-read-only tool) and delegate_tasks are DISABLED by the runtime and will be refused if you call them.
+- You MAY use read-only tools (read_file, grep_search, find_files, file_tree, memory_search, etc.) to investigate and build an accurate plan.
+- Produce a concise, concrete implementation plan: the files/commands you would touch and the order of steps.
+- Do NOT attempt to execute the plan. End by asking the user to exit Plan mode (shift+tab) to proceed with execution.`
 
 func (m *model) togglePlanMode() {
 	m.planMode = !m.planMode
@@ -740,7 +787,7 @@ func (m *model) togglePlanMode() {
 
 func (m model) turnOptions() backend.TurnOptions {
 	if m.planMode {
-		return backend.TurnOptions{SystemContext: planModeSystemContext}
+		return backend.TurnOptions{SystemContext: planModeSystemContext, PlanMode: true}
 	}
 	return backend.TurnOptions{}
 }
@@ -755,7 +802,7 @@ func isClipboardPasteKey(msg tea.KeyMsg) bool {
 }
 
 func (m model) tryPasteImage() (tea.Model, tea.Cmd, bool) {
-	if m.sessions.open || m.modelPicker.open || m.fileViewer.open {
+	if m.sessions.open || m.rollback.open || m.modelPicker.open || m.providerPicker.open || m.fileViewer.open {
 		return m, nil, false
 	}
 	if m.tr.Streaming && !m.tr.Awaiting {
@@ -777,7 +824,7 @@ func (m model) tryPasteImage() (tea.Model, tea.Cmd, bool) {
 }
 
 func (m model) insertPastedImage(data []byte, mimeType string) (tea.Model, tea.Cmd) {
-	if m.sessions.open || m.modelPicker.open || m.fileViewer.open {
+	if m.sessions.open || m.rollback.open || m.modelPicker.open || m.providerPicker.open || m.fileViewer.open {
 		return m, nil
 	}
 	prevH := m.composerTextHeight()
@@ -801,7 +848,7 @@ func (m model) insertPastedImage(data []byte, mimeType string) (tea.Model, tea.C
 }
 
 func (m model) handlePaste(text string) (tea.Model, tea.Cmd) {
-	if m.sessions.open || m.modelPicker.open || m.fileViewer.open {
+	if m.sessions.open || m.rollback.open || m.modelPicker.open || m.providerPicker.open || m.fileViewer.open {
 		return m, nil
 	}
 	if m.tr.Streaming && !m.tr.Awaiting {
@@ -1460,7 +1507,7 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 	m.ta.Reset()
 	switch {
 	case text == "/help" || text == "/?":
-		m.tr.Apply(events.NewSystem(helpText()))
+		m.tr.Apply(events.NewSystem(helpText(m.providerAdmin() != nil, m.rollbackCap() != nil)))
 	case text == "/files":
 		cwd, _ := os.Getwd()
 		m.tr.Apply(events.NewSystem("Type `@` plus part of a local path to attach file context from " + cwd + "."))
@@ -1479,6 +1526,10 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		return m.openSessionsPicker()
 	case text == "/model" || text == "/models":
 		return m.openModelPicker()
+	case text == "/provider" || text == "/providers":
+		return m.openProviderPicker()
+	case text == "/rollback" || text == "/revert":
+		return m.openRollbackPicker()
 	default:
 		// Pass through to backend as a normal message so server/local slash handlers can run later.
 		m.history = append(m.history, text)
@@ -1501,13 +1552,21 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func helpText() string {
+func helpText(providerAdmin bool, rollback bool) string {
+	providerLine := ""
+	if providerAdmin {
+		providerLine = "\n  /provider      Manage local providers (add/remove)"
+	}
+	rollbackLine := ""
+	if rollback {
+		rollbackLine = "\n  /rollback      Revert chat and file changes to an earlier message"
+	}
 	return strings.TrimSpace(`
 Commands:
   /help          Show this help
   /status        Show session / provider / model
   /sessions      Open sessions picker (also ctrl+l)
-  /model         Choose provider and model
+  /model         Choose provider and model` + providerLine + rollbackLine + `
   /new           Start a new session (also ctrl+n)
   /files         Show @file context help
   /plan          Toggle plan-only mode (also shift+tab)
@@ -2274,12 +2333,12 @@ func (m model) renderFileDiff(it events.Item, width int) string {
 	}
 	// Prefer verification_context from the tool (stored on the item).
 	if it.DiffVerification != "" {
-		if out := render.RenderVerificationDiff(it.DiffVerification, it.Path, width, true, rs); out != "" {
+		if out := render.RenderVerificationDiff(it.DiffVerification, it.Path, width, true, m.workDir, rs); out != "" {
 			return out
 		}
 	}
 	// Fallback: build from args (old_string/new_string/content).
-	return render.DiffFromToolArgs(name, it.Args, width, true, rs)
+	return render.DiffFromToolArgs(name, it.Args, width, true, m.workDir, rs)
 }
 
 // renderActivity builds collapsed summary (+N/−M) and expanded raw tool detail.
@@ -2521,7 +2580,7 @@ func (m model) View() string {
 
 	// Completion popups sit just above the composer (filter-as-you-type).
 	composerBlock := m.renderComposer()
-	if !m.tr.Awaiting && !m.sessions.open && !m.modelPicker.open {
+	if !m.tr.Awaiting && !m.sessions.open && !m.rollback.open && !m.modelPicker.open && !m.providerPicker.open {
 		switch {
 		case m.slash.active && len(m.slash.matches) > 0:
 			composerBlock = lipgloss.JoinVertical(lipgloss.Left,
@@ -2561,6 +2620,20 @@ func (m model) View() string {
 	}
 	if m.modelPicker.open {
 		overlay := m.renderModelPickerOverlay()
+		return m.paintBackground(lipgloss.Place(m.width, m.screenHeight(), lipgloss.Center, lipgloss.Center, overlay,
+			lipgloss.WithWhitespaceChars(" "),
+			lipgloss.WithWhitespaceBackground(lipgloss.Color("#000000")),
+		))
+	}
+	if m.providerPicker.open {
+		overlay := m.renderProviderPickerOverlay()
+		return m.paintBackground(lipgloss.Place(m.width, m.screenHeight(), lipgloss.Center, lipgloss.Center, overlay,
+			lipgloss.WithWhitespaceChars(" "),
+			lipgloss.WithWhitespaceBackground(lipgloss.Color("#000000")),
+		))
+	}
+	if m.rollback.open {
+		overlay := m.renderRollbackOverlay()
 		return m.paintBackground(lipgloss.Place(m.width, m.screenHeight(), lipgloss.Center, lipgloss.Center, overlay,
 			lipgloss.WithWhitespaceChars(" "),
 			lipgloss.WithWhitespaceBackground(lipgloss.Color("#000000")),
@@ -2782,17 +2855,84 @@ func (m model) renderHeaderLeft(text string) string {
 
 func (m model) headerUsageText() string {
 	usage := &events.Usage{}
-	if m.tr != nil && m.tr.LastUsage != nil {
-		usage = m.tr.LastUsage
+	var contextTokens int64
+	if m.tr != nil {
+		if m.tr.LastUsage != nil {
+			usage = m.tr.LastUsage
+		}
+		contextTokens = m.tr.ContextTokens
 	}
+
+	// Context utilization: how full the model's context window is right now.
+	// This is the metric that matters when coding (how much room is left before
+	// compaction / truncation). Falls back to the latest turn's total tokens.
+	if contextTokens <= 0 {
+		contextTokens = usage.Total
+	}
+
+	if contextTokens <= 0 && usage.Total <= 0 {
+		return "Context 0"
+	}
+
+	ctxPart := "Context " + formatTokenCount(contextTokens)
+	if window := contextWindowFor(m.info.Model); window > 0 && contextTokens > 0 {
+		pct := int(float64(contextTokens) / float64(window) * 100)
+		if pct > 100 {
+			pct = 100
+		}
+		ctxPart = fmt.Sprintf("Context %s/%s (%d%%)",
+			formatTokenCount(contextTokens), formatTokenCount(window), pct)
+	}
+
 	if usage.Total <= 0 {
-		return "Usage 0"
+		return ctxPart
 	}
-	return fmt.Sprintf("Usage %s · in %s · out %s",
-		formatTokenCount(usage.Total),
-		formatTokenCount(usage.Input),
-		formatTokenCount(usage.Output),
-	)
+	// Cumulative session usage is appended after the context figure but kept
+	// short (total only) so the header stays on one line on narrow terminals;
+	// the context figure is the primary, coding-relevant metric.
+	return fmt.Sprintf("%s · Usage %s", ctxPart, formatTokenCount(usage.Total))
+}
+
+// contextWindowFor returns the approximate context-window size (in tokens) for a
+// model name, or 0 when unknown. Matching is domain-agnostic: it keys off common
+// family substrings in the model identifier rather than any single provider's
+// catalog, so it works for local code mode across providers.
+func contextWindowFor(model string) int64 {
+	name := strings.ToLower(strings.TrimSpace(model))
+	if name == "" {
+		return 0
+	}
+	// Ordered longest/most-specific first so e.g. "gpt-4o-mini" matches gpt-4o.
+	families := []struct {
+		match  string
+		window int64
+	}{
+		{"claude", 200_000},
+		{"gpt-5", 272_000},
+		{"gpt-4.1", 1_047_576},
+		{"gpt-4o", 128_000},
+		{"gpt-4-turbo", 128_000},
+		{"gpt-4", 128_000},
+		{"o4", 200_000},
+		{"o3", 200_000},
+		{"o1", 200_000},
+		{"gpt-3.5", 16_385},
+		{"gemini-2.5", 1_048_576},
+		{"gemini-1.5", 1_048_576},
+		{"gemini", 1_048_576},
+		{"llama-3", 128_000},
+		{"llama", 128_000},
+		{"mistral", 128_000},
+		{"mixtral", 32_768},
+		{"deepseek", 128_000},
+		{"qwen", 128_000},
+	}
+	for _, f := range families {
+		if strings.Contains(name, f.match) {
+			return f.window
+		}
+	}
+	return 0
 }
 
 func formatTokenCount(n int64) string {

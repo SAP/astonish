@@ -35,6 +35,11 @@ type Usage struct {
 	Input  int64
 	Output int64
 	Total  int64
+	// Estimated marks a usage reading derived locally (e.g. from context size)
+	// rather than reported by the provider. Estimated readings update the
+	// context-occupancy figure but are NOT accumulated into cumulative session
+	// usage, since each one represents the full current context, not a delta.
+	Estimated bool
 }
 
 // NetworkDenial describes one outbound connection blocked by the sandbox proxy.

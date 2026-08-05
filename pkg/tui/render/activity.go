@@ -74,11 +74,21 @@ func StatsFromSteps(steps []ToolStep) ActivityStats {
 		if c, ok := s.Args["content"].(string); ok {
 			added += countLines(c)
 		}
-		if c, ok := s.Args["new_string"].(string); ok {
-			added += countLines(c)
+		// edit_file: count only the changed lines (line-level diff) so the
+		// +N/−M badge matches the git-style diff shown in the transcript.
+		oldS, hasOld := s.Args["old_string"].(string)
+		newS, hasNew := s.Args["new_string"].(string)
+		if hasOld && hasNew && (oldS != "" || newS != "") {
+			a, r := diffLineStats(oldS, newS)
+			added += a
+			removed += r
+			continue
 		}
-		if c, ok := s.Args["old_string"].(string); ok {
-			removed += countLines(c)
+		if hasNew {
+			added += countLines(newS)
+		}
+		if hasOld {
+			removed += countLines(oldS)
 		}
 	}
 	if added > 0 || removed > 0 {

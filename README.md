@@ -131,6 +131,25 @@ astonish chat -p anthropic -m claude-4  # Specific provider/model
 astonish chat --resume                 # Resume last session
 ```
 
+### Local code mode
+
+`astonish code` turns the binary into a local coding tool — like Claude Code, OpenCode, or Grok CLI. It runs the agent loop **in-process** and executes its built-in tools directly on your machine, in the current directory. No daemon, no server, and no login required.
+
+```bash
+astonish code                          # Start coding in the current directory
+astonish code -m openai:gpt-4o         # Pin a provider/model
+astonish code -C ./my-project          # Operate in a specific directory
+astonish code --auto-approve           # Skip the per-tool approval prompt (a.k.a. --yolo)
+```
+
+Tools run with your own permissions (no sandbox); safety comes from the per-tool approval prompt. Use `--auto-approve` / `--yolo` to skip it.
+
+Code mode opens even if you haven't picked a model yet. Type `/model` inside the app to choose a provider and model; the selection is saved to your Astonish config (`~/.config/astonish/config.yaml`) and reused next time. If you have no providers configured, type `/provider` to add one (name, type, and API key) — code mode manages providers entirely in the config file and never needs a database.
+
+Code mode follows the [AGENTS.md](https://agents.md) convention: on startup it loads `AGENTS.md` (or `CLAUDE.md` as a fallback) from your project — walking up from the working directory to the repo root, nearest file winning — plus a global `~/.config/astonish/AGENTS.md`, and feeds them to the agent as project guidance.
+
+Your conversations are saved to disk and kept **separate per project directory** (and separate from Studio chat sessions). Each `astonish code` run starts a fresh session, but your earlier conversations in that directory are never lost — type `/sessions` to browse and resume a previous session. Sessions started in a different directory won't appear, so each project keeps its own history.
+
 ---
 
 ## Generative UI (Apps)

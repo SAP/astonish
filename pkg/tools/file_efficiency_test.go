@@ -69,6 +69,73 @@ func TestReadFile_OffsetAndLimit(t *testing.T) {
 	}
 }
 
+func TestReadFile_SoftCapsLargeUnboundedRead(t *testing.T) {
+	resetTestCache(t)
+	dir := t.TempDir()
+	var lines []string
+	for i := 1; i <= 1000; i++ {
+		lines = append(lines, "this is line number "+strings.Repeat("y", 40))
+	}
+	path := filepath.Join(dir, "large.go")
+	os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0644)
+
+	// No Offset/Limit: the read must be auto-capped, not the whole 1000 lines.
+	result, err := ReadFile(nil, ReadFileArgs{Path: path})
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if result.TotalLines != 1000 {
+		t.Errorf("total_lines = %d, want 1000", result.TotalLines)
+	}
+	got := strings.Count(result.Content, "\n") + 1
+	if got != readFileSoftCapLines {
+		t.Errorf("returned %d lines, want soft cap %d", got, readFileSoftCapLines)
+	}
+	// The range notice must guide paging.
+	if !strings.Contains(result.Range, "auto-capped") || !strings.Contains(result.Range, "offset=") {
+		t.Errorf("expected paging guidance in range, got %q", result.Range)
+	}
+}
+
+func TestReadFile_ExplicitLimitOverridesSoftCap(t *testing.T) {
+	resetTestCache(t)
+	dir := t.TempDir()
+	var lines []string
+	for i := 1; i <= 1000; i++ {
+		lines = append(lines, "line "+strings.Repeat("z", 40))
+	}
+	path := filepath.Join(dir, "large.go")
+	os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0644)
+
+	// An explicit large limit must win — the caller can still get everything.
+	limit := 1000
+	result, err := ReadFile(nil, ReadFileArgs{Path: path, Limit: &limit})
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	got := strings.Count(result.Content, "\n") + 1
+	if got != 1000 {
+		t.Errorf("explicit limit=1000 returned %d lines, want 1000", got)
+	}
+	if strings.Contains(result.Range, "auto-capped") {
+		t.Errorf("explicit limit must not be auto-capped, got range %q", result.Range)
+	}
+}
+
+func TestReadFile_SmallFileNotCapped(t *testing.T) {
+	resetTestCache(t)
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "small.go"), []byte("package main\n\nfunc main() {}\n"), 0644)
+
+	result, err := ReadFile(nil, ReadFileArgs{Path: filepath.Join(dir, "small.go")})
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if strings.Contains(result.Range, "auto-capped") {
+		t.Errorf("small file must not be auto-capped, got range %q", result.Range)
+	}
+}
+
 func TestReadFile_OffsetPastEnd(t *testing.T) {
 	resetTestCache(t)
 	dir := t.TempDir()
@@ -619,6 +686,74 @@ func TestFileReadCache_MustReadBeforeEdit(t *testing.T) {
 	}
 	if !result.Success {
 		t.Fatalf("edit after read should succeed, got: %s", result.Message)
+	}
+}
+
+// TestFileReadCache_ConsecutiveEditsNoReread reproduces the false positive that
+// forced needless re-reads: after a successful edit (or write), a second edit
+// to the SAME file must NOT be blocked with "you must read this file", because
+// the agent already knows the current content — it just wrote it.
+func TestFileReadCache_ConsecutiveEditsNoReread(t *testing.T) {
+	resetTestCache(t)
+	dir := t.TempDir()
+
+	// Activate the guard by reading some file.
+	other := filepath.Join(dir, "other.txt")
+	os.WriteFile(other, []byte("other"), 0644)
+	if _, err := ReadFile(nil, ReadFileArgs{Path: other}); err != nil {
+		t.Fatalf("read other: %v", err)
+	}
+
+	target := filepath.Join(dir, "code.txt")
+	os.WriteFile(target, []byte("alpha beta gamma\n"), 0644)
+
+	// Read once, then edit twice in a row.
+	if _, err := ReadFile(nil, ReadFileArgs{Path: target}); err != nil {
+		t.Fatalf("read target: %v", err)
+	}
+
+	r1, err := EditFile(nil, EditFileArgs{Path: target, OldString: "alpha", NewString: "ALPHA"})
+	if err != nil {
+		t.Fatalf("first edit error: %v", err)
+	}
+	if !r1.Success {
+		t.Fatalf("first edit should succeed, got: %s", r1.Message)
+	}
+
+	// Second consecutive edit — no intervening read. This previously failed.
+	r2, err := EditFile(nil, EditFileArgs{Path: target, OldString: "beta", NewString: "BETA"})
+	if err != nil {
+		t.Fatalf("second edit error: %v", err)
+	}
+	if !r2.Success {
+		t.Fatalf("second consecutive edit should succeed without re-read, got: %s", r2.Message)
+	}
+}
+
+// TestFileReadCache_EditAfterWriteNoReread verifies write_file also counts as
+// "seen": editing a file the agent just created must not be blocked.
+func TestFileReadCache_EditAfterWriteNoReread(t *testing.T) {
+	resetTestCache(t)
+	dir := t.TempDir()
+
+	// Activate the guard.
+	other := filepath.Join(dir, "other.txt")
+	os.WriteFile(other, []byte("other"), 0644)
+	if _, err := ReadFile(nil, ReadFileArgs{Path: other}); err != nil {
+		t.Fatalf("read other: %v", err)
+	}
+
+	target := filepath.Join(dir, "new.txt")
+	if _, err := WriteFile(nil, WriteFileArgs{FilePath: target, Content: "hello world\n"}); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+
+	r, err := EditFile(nil, EditFileArgs{Path: target, OldString: "hello", NewString: "HELLO"})
+	if err != nil {
+		t.Fatalf("edit after write error: %v", err)
+	}
+	if !r.Success {
+		t.Fatalf("edit after write should succeed without a read, got: %s", r.Message)
 	}
 }
 

@@ -1,9 +1,34 @@
 package agent
 
 import (
+	"fmt"
+
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 )
+
+// PlanModeSystemContext is the per-turn instruction injected when plan mode is
+// active. It is the single source of truth shared by every chat surface (code
+// mode, platform chat, Studio). The runtime gate in WrapToolsForChat enforces
+// the "no changes" rule regardless of whether the model honors this prose.
+const PlanModeSystemContext = `You are in Astonish PLAN MODE. This is a hard constraint enforced by the runtime, not a suggestion.
+
+RULES:
+- You MUST NOT make any changes. Mutating tools (write_file, edit_file, shell_command, and every other non-read-only tool) and delegate_tasks are DISABLED by the runtime and will be refused if you call them.
+- You MAY use read-only tools (read_file, grep_search, find_files, file_tree, memory_search, etc.) to investigate and build an accurate plan.
+- Produce a concise, concrete implementation plan: the files/commands you would touch and the order of steps.
+- Do NOT attempt to execute the plan. End by asking the user to exit Plan mode (shift+tab) to proceed with execution.`
+
+// PlanModeBlockedMessage is returned to the model when it calls a mutating tool
+// while plan mode is active. Returning a result (rather than an error that
+// aborts the turn) lets the model self-correct and continue producing the plan.
+func PlanModeBlockedMessage(toolName string) string {
+	return fmt.Sprintf(
+		"Blocked: `%s` cannot run in Plan mode. You are in PLAN MODE — no changes are allowed. "+
+			"Present your implementation plan instead and ask the user to exit Plan mode (shift+tab) before any execution.",
+		toolName,
+	)
+}
 
 // SafeTools are read-only tools that auto-approve in chat mode.
 // These tools cannot modify the filesystem or execute commands.

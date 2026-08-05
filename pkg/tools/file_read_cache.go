@@ -144,13 +144,20 @@ func (c *FileReadCache) Set(key string, entry CacheEntry) {
 	c.Entries[key] = entry
 }
 
-// HasReadEntry checks if any cache entry for the given path has source="read".
-// Used by the must-read-before-edit guard.
-func (c *FileReadCache) HasReadEntry(path string) bool {
+// HasSeenEntry reports whether the agent has demonstrably observed the current
+// contents of the given path this session — i.e. there is a cache entry whose
+// source is "read", "edit", or "write". Used by the must-read-before-edit
+// guard: a successful edit or write proves the agent knows the file's current
+// content just as much as a read does, so a follow-up edit must not be blocked.
+func (c *FileReadCache) HasSeenEntry(path string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for key, entry := range c.Entries {
-		if parseCacheKeyPath(key) == path && entry.Source == "read" {
+		if parseCacheKeyPath(key) != path {
+			continue
+		}
+		switch entry.Source {
+		case "read", "edit", "write":
 			return true
 		}
 	}

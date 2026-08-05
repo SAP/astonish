@@ -2,11 +2,12 @@
 
 ## Overview
 
-Astonish ships a **fullscreen terminal chat app** comparable to Claude Code, OpenCode, and Grok Build CLI.
+Astonish ships a **fullscreen terminal chat app** comparable to Claude Code, OpenCode, and Grok Build CLI. It has two entry points that share the same `pkg/tui` presentation layer:
 
-**Chat is always platform-backed.** Even a local installation requires authentication against the platform (`astonish login <url>`). There is **no** in-process / personal-mode CLI chat path.
+- **`astonish chat`** — platform-backed. Even a local installation requires authentication (`astonish login <url>`); the agent runs on the platform and the TUI streams Studio SSE.
+- **`astonish code`** — **local code mode**. The single binary runs the agent loop **in-process** and executes its compiled-in tools directly on the host filesystem in the working directory. There is no daemon, no HTTP, and no login. This is the Claude-Code-style local coding path.
 
-**Entry:** `astonish chat` (requires login). On an interactive TTY with an existing login, bare `astonish` opens the same app.
+**Entry:** `astonish chat` (requires login) or `astonish code` (no login). On an interactive TTY with an existing login, bare `astonish` opens the platform chat app.
 
 ## Architecture
 
@@ -51,11 +52,84 @@ flowchart TB
 | `pkg/tui/events` | `Event` kinds + pure `Transcript` reducer |
 | `pkg/tui/backend` | `Backend` interface |
 | `pkg/launcher/tui_chat.go` | `RunChatTUI`, `platformBackend` (SSE → events) |
+| `pkg/launcher/tui_code.go` | `RunCodeTUI`, `localAgentBackend` (in-process ADK runner → events) |
 | `pkg/client` | Authenticated HTTP + SSE client |
 
 ### Auth requirement
 
-If `client.IsRemoteMode()` is false (no `~/.config/astonish/remote.yaml` / login), `astonish chat` exits with instructions to run `astonish login <url>`. Bare `astonish` only launches the TUI when both stdin/stdout are TTYs and the CLI is already logged in; otherwise it keeps normal help/error behavior for scripts.
+If `client.IsRemoteMode()` is false (no `~/.config/astonish/remote.yaml` / login), `astonish chat` exits with instructions to run `astonish login <url>`. Bare `astonish` only launches the TUI when both stdin/stdout are TTYs and the CLI is already logged in; otherwise it keeps normal help/error behavior for scripts. **`astonish code` has no auth requirement** — it never contacts a platform.
+
+## Code mode (local, in-process)
+
+`astonish code` runs the entire agent locally in the same process, like Claude Code / OpenCode / Grok CLI. It reuses the same `pkg/tui` presentation and event model as platform chat; only the backend differs.
+
+**Flow:** `cmd/astonish/code.go:handleCodeCommand` → `launcher.RunCodeTUI` →
+
+1. `config.LoadAppConfig()`.
+2. `forceHostExecution(appConfig)` — sets `Sandbox.Enabled = false`. This is the defining line of code mode: with the sandbox off, every filesystem/shell tool resolves against the process working directory instead of a sandbox backend.
+3. Resolve the working directory (`--dir`/`-C`, else `os.Getwd()`) and `os.Chdir` into it, so tools that default to the CWD (grep, find, shell) operate there.
+4. Resolve the model: explicit `-m` flag wins, else the configured cascade default (`general.default_provider` / `default_model`).
+5. Build a per-directory persistent session store: `session.FileStore` under `<sessionsDir>/code/` (`codeSessionsDir`), passed to the factory via `ChatFactoryConfig.SessionService`.
+6. `NewWiredChatAgent(ctx, …, PlatformMode: false, AllowMissingProvider: true, SessionService: fileStore)` — the same wiring choke point Studio uses, minus sandbox wrapping.
+7. Build `localAgentBackend` (with the store and a directory-scoped `userID`) and hand it to `tui.Run`.
+
+### Starting without a model
+
+Code mode opens even when no provider/model is configured. When provider resolution yields nothing, `NewWiredChatAgent` (with `AllowMissingProvider: true`) installs a **placeholder LLM** (`provider.NewPlaceholderLLM`) so the full agent — tools, MCP, session, sandbox-off wiring — is still built, and reports `ProviderConfigured: false`.
+
+While unconfigured:
+
+- `Info().Notices` includes a hint to run `/model`.
+- `RunTurn` short-circuits with a system message ("Type /model …") instead of attempting generation.
+
+The user picks a provider/model through the existing `/model` picker (`pkg/tui/model_picker.go`). Applying a selection calls `localAgentBackend.SetModelPin`, which:
+
+1. Builds the real LLM via `provider.GetProvider` and hot-swaps it into the `SwappableLLM` (tools/MCP/session survive).
+2. Marks the backend configured and updates the footer.
+3. **Persists** the choice to `~/.config/astonish/config.yaml` (`general.default_provider` / `default_model`) via `config.SaveAppConfig`, so the next `astonish code` starts with that model. A save failure is non-fatal — the in-memory swap already took effect.
+
+The `/model` picker lists provider *instances* from `AppConfig.Providers`. When none exist yet, the user adds one with `/provider` (below) without leaving the app.
+
+### Managing providers with `/provider`
+
+Code mode is **file-only**: it reads and writes provider configuration in `~/.config/astonish/config.yaml` and never connects to a platform database. To let users configure providers without dropping to `astonish setup`, code mode adds a `/provider` overlay (`pkg/tui/provider_picker.go`) that lists, adds, and removes provider instances.
+
+This capability is exposed through an **optional** backend interface, `backend.ProviderAdminBackend` (`ListProviderInstances` / `ProviderTypes` / `AddProvider` / `RemoveProvider`), implemented only by `localAgentBackend`. The platform backend does **not** implement it — platform provider management stays in the database via Studio settings. The TUI type-asserts for the capability: `/provider` (command, help entry, and slash-completion) is only offered when the active backend implements it, so platform chat is unaffected.
+
+`AddProvider` writes the instance (`type` + fields such as `base_url`) into `AppConfig.Providers`, stores the API key directly in `config.yaml` under `providers.<name>.api_key`, and calls `config.SaveAppConfig`. Because `GetProvider` reads `api_key` straight from the instance map, the new provider is usable immediately — the user can then pick it in `/model`. `RemoveProvider` deletes the instance and clears `general.default_*` if it pointed at the removed provider.
+
+> **Config vs. database boundary.** Local `code` mode loads and persists only from the config file — it needs no database connection. Platform mode continues to use its database (and can also read config). Do not couple the code-mode provider path to `entstore` or any platform store.
+
+**Per-turn driving.** `localAgentBackend.RunTurn` builds an ADK agent + `runner.Runner` around the wired `ChatAgent` and iterates `runner.Run(...)`. It is a slim version of Studio's `ChatRunner.Run`: it handles text (with partial-streaming dedup), tool calls/results (redacted, `announce_plan` skipped), usage, and approvals via the same state-delta + turn-suspension protocol. Studio-only surfaces (network-denial prompts, tutorial blueprints, app previews) are intentionally omitted because there is no sandbox and no platform.
+
+**Event bridge (Option B).** Rather than duplicate SSE→event mapping, `RunTurn` emits the exact `(type, data)` payloads `ChatRunner.emitEvent` produces, marshals each into a `client.SSEEvent`, and feeds it through the shared `mapSSEToEvents` translator in `tui_chat.go`. There is exactly one translator; new event kinds are added there, never in a code-mode-only path.
+
+**Sessions.** Code-mode sessions are **persisted to disk** via a `session.FileStore` (wrapped by `common.NewAutoInitService`) rooted at `<sessionsDir>/code/`, under the app name `astonish_code`. They survive restarts and are isolated from Studio/chat sessions two ways: the distinct app name, and the dedicated `code/` subdirectory. Sessions are **scoped per working directory**: `RunCodeTUI` derives the session `userID` from a stable hash of the absolute working directory (`codeUserIDForDir`), and `FileStore.List` filters by `(appName, userID)`, so sessions from one project never appear in another. **Startup is always a fresh session** — code mode does not auto-resume the last conversation. `ListSessions` enumerates persisted sessions for the current directory (via `FileStore.ListSessionMetas`, newest-first, with titles and message counts) and `ResumeSession` loads a chosen transcript, powering the `/sessions` picker. A new session's title is derived from its first user message (`deriveSessionTitle` → `FileStore.SetSessionTitle`). All session-service calls route through `effectiveUserID()` (falling back to the base `local_user` when unscoped, e.g. in tests). Because the store is a `FileStore`, code-mode transcripts also get on-disk credential redaction wired by the factory.
+
+**Safety model.** Tools run unsandboxed with the user's own permissions; safety comes from the per-tool approval prompt (`--auto-approve` / `--yolo` bypasses it, matching Claude Code).
+
+**Project guidance (AGENTS.md).** Code mode follows the [agents.md](https://agents.md) convention used by Claude Code, opencode, and Codex: at startup it loads project instructions into the system prompt. `RunCodeTUI` builds the agent with `LoadProjectContext: true`, and the factory calls `agent.LoadProjectContext(workspaceDir)`, which:
+
+- walks **upward** from the working directory to the project root (the first ancestor containing `.git`), reading the nearest `AGENTS.md` at each level (falling back to `CLAUDE.md` when a directory has no `AGENTS.md`);
+- prepends the global `~/.config/astonish/AGENTS.md` (honoring `XDG_CONFIG_HOME`) at lowest precedence;
+- concatenates them **root-first so the nearest file appears last** (highest precedence), skips empty files, tags each block with a provenance comment, and caps the total at ~32 KiB.
+
+The merged Markdown is injected as a `## Project Guidance` section in `SystemPromptBuilder` (near the top, after INSTRUCTIONS.md), so conventions, build/test commands, and gotchas are always in view. Platform chat does **not** load these files — it uses per-team instructions from the database — so the behavior is gated behind `ChatFactoryConfig.LoadProjectContext`.
+
+**Log isolation.** Because code mode runs the agent in-process while the bubbletea alt-screen owns the terminal, `RunCodeTUI` redirects the standard `log` writer and slog's default handler away from the terminal for the TUI's lifetime (`redirectLogsForTUI`). This prevents background log lines — notably ADK's `runner` `log.Printf("Event from an unknown agent: …")`, emitted for every event whose author (`chat`/`system`/`knowledge`) differs from the runner's root agent name — from corrupting the display. Studio chat never hit this because its logs go to the daemon log file. In `--debug`, the logs are written to `<configDir>/code-debug.log` instead of being discarded, and the previous logging config is restored on exit.
+
+**Context usage in the header (estimated fallback).** The header shows `Context <used>/<window> (<pct>)` from `usage` events. Some providers — notably local OpenAI-compatible proxies — return no token usage metadata, which would leave the figure at `Context 0`. In that case `driveTurn` calls `emitEstimatedContext`, which estimates the current context fill from the session's accumulated contents (via `session.EstimateTokens`, the same ~3 chars/token heuristic the compactor uses) and emits a `usage` event flagged `estimated`. Estimated readings update the context-occupancy figure (`Transcript.ContextTokens`, tracked as a max) but are **not** accumulated into cumulative session usage, since each estimate represents the whole current context rather than a per-call delta.
+
+### Rollback (`/rollback`)
+
+Code mode can revert both the conversation and the working-directory file changes back to an earlier user message. Like `/provider`, this is an **optional** backend capability — `backend.RollbackBackend` (`ListRollbackPoints` / `RollbackTo`), implemented only by `localAgentBackend`. The platform backend does not implement it (there is no host filesystem to snapshot), so `/rollback` (command, help entry, and slash-completion) is only offered when the active backend advertises the capability. The picker overlay lives in `pkg/tui/rollback.go` and mirrors the `/sessions` picker, including a confirmation step because rollback is destructive.
+
+Two mechanisms combine, both keyed off **event position** so they stay consistent:
+
+- **File revert — snapshot-on-write (`session.CheckpointStore`).** Before each turn runs, `RunTurn` records the turn's checkpoint boundary as the session's current event count and calls `CheckpointStore.BeginTurn`. During the turn, `driveTurn` sees each `write_file` / `edit_file` `FunctionCall` **before** the tool executes and calls `captureToolTargets`, which snapshots the target file's current content (or records that it did not exist) via `CheckpointStore.Capture`. The first capture of a path in a turn wins, so repeated writes in one turn still restore the pre-turn content. Snapshots are stored as `<sessionsDir>/code/checkpoints/<sessionID>/turn-<NNNN>.json`. The set of mutating tools (`write_file`, `edit_file`) mirrors the transcript's file-diff detection — no domain-specific special casing. Capture is best-effort and never blocks a turn.
+- **Chat revert — transcript truncation (`FileStore.TruncateEvents`).** Rolling back to the user message at event index `P` truncates the session to its first `P` events and rewrites the on-disk transcript (via `Transcript.Rewrite`), updating the index message count. This is the one sanctioned exception to the package's "never delete a transcript entry" rule (see `pkg/session/AGENTS.md`): it is user-initiated and rewrites rather than silently dropping lines.
+
+`ListRollbackPoints` enumerates the session's user-authored text events (oldest first), annotating each with the number of files a rollback would restore (`CheckpointStore.FileCountFrom`). `RollbackTo(pointID)` restores files with a turn index `>= P` **newest-turn-first** (so the earliest pre-image for an overlapping file wins), then truncates the conversation, clears accumulated usage, and returns the rebuilt history — which the TUI applies via `Transcript.Reset` + `LoadHistory`. Deleting or resetting a session also discards its checkpoints (`CheckpointStore.DeleteSession`).
 
 ### Event model
 
@@ -73,7 +147,7 @@ All UI state is driven by `events.Event`. The platform backend maps Studio SSE t
 ## UI chrome
 
 ```
-Astonish · https://… · user@example.com          Usage 4.6k · in 1.2k · out 3.4k
+Astonish · https://… · user@example.com     Context 20.0k/200.0k (10%) · Usage 4.6k
 ────────────────────────────────────────────────────────
 transcript viewport
 ────────────────────────────────────────────────────────
@@ -85,7 +159,7 @@ provider / concrete-model                auto-approve
 Enter send · ctrl+j newline · /help · ctrl+c quit
 ```
 
-The header intentionally stays a single row: the left side identifies the connected Astonish platform URL and logged-in user from the remote login config; the right side mirrors Studio Chat's Usage control with cumulative token usage (`total`, `input`, `output`) from live `usage` SSE events and from resumed session `totalUsage` metadata. The layout consumes the full reported terminal height so the footer help line lands on the final row instead of leaving a blank strip below the TUI.
+The header intentionally stays a single row: the left side identifies the connected Astonish platform URL and logged-in user from the remote login config (in local code mode it shows `Astonish · code`); the right side shows **context utilization** — the primary metric when coding. `Transcript.ContextTokens` tracks the largest per-call token reading in the latest turn (an LLM tool loop grows the prompt each call, so the max reflects current context-window fill), fed by live `usage` SSE events (`headerUsageText` in `pkg/tui/app.go`). When the active model's context window is known (`contextWindowFor`, a domain-agnostic family-substring lookup), it renders as `Context <used>/<window> (<pct>%)`; otherwise just `Context <used>`. A compact cumulative session `Usage <total>` is appended after the context figure. Both fall back gracefully (`Context 0` before the first turn). The layout consumes the full reported terminal height so the footer help line lands on the final row instead of leaving a blank strip below the TUI.
 
 The footer metadata shows the active provider and resolved concrete model when the platform reports them through model-status or `model_changed` events. It deliberately avoids displaying the raw model label `default`, because that is a cascade placeholder rather than useful runtime context; until a concrete model is known, the footer shows the provider with `model resolving…`.
 
@@ -102,7 +176,7 @@ AdaptiveColor cursor-line backgrounds that break dark alt-screen UIs).
 | Code fences | `pkg/tui/render.CodeBlock` — chroma highlight + numeric gutter |
 | Tool activity | `pkg/tui/render.ActivitySummary` + `StatsFromSteps` (`+N/−M`); click-to-expand reveals **raw request args and response JSON** (not file diffs) |
 | Network authorization | Inline transcript notice plus a focused approval card for OpenShell proxy denials; `enter`/`y` allows the blocked host, `b` allows the suggested broader pattern, and `n`/`esc` denies |
-| File diffs | **Main-thread** `ItemFileDiff` dual-gutter editor view (`old`/`new` line numbers + ± content) on successful `edit_file`/`write_file`. Prefers `verification_context`; falls back to args |
+| File diffs | **Main-thread** `ItemFileDiff` dual-gutter editor view (`old`/`new` line numbers + ± content) on successful `edit_file`/`write_file`. Prefers `verification_context`; falls back to args. The args fallback (`edit_file` with `old_string`/`new_string`) computes a **line-level LCS diff** (`rowsFromOldNew` → `diffOps`) and shows only the changed lines as ± plus a few unchanged context lines around each hunk (git-style), collapsing longer unchanged runs to a `…` gap — it does **not** dump the whole old block as removed and the whole new block as added. The `+N/−M` badge counts only changed lines (`diffLineStats`). The header shows the file path **relative to the workspace root** (the process CWD, threaded from the model as `workDir` and passed into `render.RenderVerificationDiff`/`DiffFromToolArgs`); absolute paths outside the root or paths without a resolvable root are shown as-is |
 | Generated files / reports | `artifact` SSE events render as a compact “Files generated” list in the transcript. Clicking a file opens a full-screen file viewer; `Esc` returns to the main chat. Markdown artifacts render through the same terminal markdown renderer as agent responses, while other extensions render as scrollable raw/code content with line numbers. |
 
 Streaming: unclosed fences render as incomplete code blocks (header shows `…`).
@@ -113,8 +187,8 @@ During a turn with tools, there is **one** agent bubble:
 
 1. Interstitial text between tools **replaces** the previous text (not stacked).
 2. While `Provisional`, it renders as **Thinking** (muted), not the final response style.
-3. All tools fold into **one** activity block for the turn.
-4. Layout order: `user → activity → file_diff(s) → agent`.
+3. Tools fold into activity blocks, but a **code change closes the current fold**: any tool that runs *after* an `ItemFileDiff` starts a **new** activity fold so it renders below the change instead of merging back into the fold above the diff. Consecutive tools with no diff between them still share one fold (`reusableActivityInTurn` returns the last fold only when no `ItemFileDiff` follows it).
+4. Layout order interleaves folds and diffs chronologically, with the sticky agent last: `user → (activity → file_diff?)* → agent`. Each `ItemFileDiff` is inserted immediately after the activity fold that produced it (`fileDiffInsertIndex`), and `ensureAgentAfterActivity` keeps the agent bubble after the final tool surface.
 5. On `done`, provisional is cleared and the last text is rendered as the full agent response (markdown/code).
 
 ## Rendering roadmap
@@ -185,7 +259,7 @@ Starting a new chat (`/new`, `ctrl+n`, or deleting the active session) clears an
 
 ### Plan mode
 
-`/plan` or `shift+tab` toggles a terminal-only plan mode, matching the convention used by coding-agent CLIs. Mode changes are UI state only: they do not append system messages to the transcript. The current mode is embedded in the composer bottom border (`Normal` on a softened gray border, `Plan` on a warm-accent border). While enabled, each normal user turn carries a hidden per-turn `systemContext` instructing the platform agent to produce a concise plan without executing tools or making changes. Approval responses deliberately do **not** inherit this context because they are part of an already-running approval protocol. Starting or resuming a session clears the toggle so mode does not leak across conversations. Future modes can reuse the same composer-border affordance (for example deep research, report, or build-oriented modes).
+`/plan` or `shift+tab` toggles a terminal-only plan mode, matching the convention used by coding-agent CLIs. Mode changes are UI state only: they do not append system messages to the transcript. The current mode is embedded in the composer bottom border (`Normal` on a softened gray border, `Plan` on a warm-accent border). While enabled, each normal user turn carries **both** a hidden per-turn `systemContext` (instructing the agent to produce a concise plan) **and** a `planMode` flag that enables a **hard runtime gate**. The gate is enforced server-side in `pkg/agent/chat_agent_run.go` as a `BeforeToolCallback`: when plan mode is active, `delegate_tasks` and any tool not in `agent.SafeTools` (the read-only allow-list) are refused before execution and the model receives a `blocked_plan_mode` result (via `agent.PlanModeBlockedMessage`) reminding it that it is in Plan mode. Read-only tools (`read_file`, `grep_search`, `find_files`, `file_tree`, `memory_search`, …) still run so the agent can investigate to build an accurate plan. This means plan mode is a guarantee, not a suggestion — a model that ignores the prose still cannot write files, run commands, or spawn sub-agents. The flag threads through `backend.TurnOptions.PlanMode` → `client.ChatRequest.PlanMode` / `agent.PromptOverrides.PlanMode` for both code mode and platform chat (and the Studio SPA via `connectChat({ planMode })`). Approval responses deliberately do **not** inherit the plan-mode `systemContext` because they are part of an already-running approval protocol. Starting or resuming a session clears the toggle so mode does not leak across conversations. Future modes can reuse the same composer-border affordance (for example deep research, report, or build-oriented modes).
 
 ### Reconnect behavior
 
@@ -200,16 +274,25 @@ If the Studio SSE connection returns a read error after a session id is known, t
 | `astonish chat` | TUI against platform |
 | `astonish chat --resume ID` | Resume session |
 | `astonish chat model provider:model` | Pin model via platform API |
-| Without login | Error: run `astonish login` for `chat`; bare `astonish` prints normal usage |
+| `astonish code` | Local in-process coding TUI (no login, sandbox forced off, host CWD) |
+| `astonish code -m provider:model` | Local TUI with a pinned provider/model |
+| `astonish code -C DIR` / `--dir DIR` | Local TUI operating in DIR |
+| `astonish code --auto-approve` / `--yolo` | Local TUI, skip per-tool approval |
+| `astonish code --resume ID` | Resume a code-mode session (within a run) |
+| Without login | Error: run `astonish login` for `chat`; `code` works regardless; bare `astonish` prints normal usage |
 | Bare `astonish` with piped stdin or redirected stdout | Prints normal usage plus a hint that interactive chat requires a TTY |
 
 ## Invariants
 
-1. TUI does not reimplement agent logic — platform runs the agent.
-2. No in-process CLI chat backend.
-3. Report three-signal gate remains Studio SPA concern.
-4. `cmd/astonish` stays thin — no bubbletea models there.
-5. Single binary.
+1. TUI does not reimplement agent logic — the platform runs the agent for `chat`; `code` runs the *same* wired `ChatAgent` in-process (it does not fork a second agent implementation).
+2. Two — and only two — CLI chat surfaces: platform-backed `chat` and in-process `code`. No third backend, and no code-mode-only event mapper (both share `mapSSEToEvents`).
+3. Code mode always forces the sandbox off and runs tools on the host CWD; do not reintroduce sandbox wrapping in `RunCodeTUI`.
+4. Code mode is file-only: provider config is read/written in `~/.config/astonish/config.yaml`, never a database. `/provider` is gated behind the optional `backend.ProviderAdminBackend` so platform chat never exposes it.
+5. Code-mode sessions persist to `<sessionsDir>/code/`, scoped per working directory (`codeUserIDForDir` → session `userID`) and isolated from Studio sessions (`astonish_code` app name + `code/` subdir). Startup never auto-resumes; `/sessions` (backed by `ListSessions`/`ResumeSession`) is the only way to load a prior session.
+6. `/rollback` is code-mode-only, gated behind the optional `backend.RollbackBackend`. File revert uses snapshot-on-write (`session.CheckpointStore`); chat revert uses `FileStore.TruncateEvents` (the sanctioned transcript-rewrite exception). Both key off event position so they stay in sync. Do not widen rollback to the platform backend or wire capture into the generic tools — capture lives in the code-mode driver.
+7. Report three-signal gate remains a Studio SPA concern.
+8. `cmd/astonish` stays thin — no bubbletea models there.
+9. Single binary.
 
 ## Related docs
 

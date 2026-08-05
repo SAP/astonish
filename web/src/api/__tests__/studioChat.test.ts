@@ -203,6 +203,39 @@ describe('studioChat API', () => {
       expect(body.systemContext).toBe('context here')
       expect(body.autoApprove).toBe(true)
     })
+
+    it('includes planMode when enabled', async () => {
+      const stream = new ReadableStream({ start(c) { c.close() } })
+      globalThis.fetch = vi.fn().mockResolvedValue({ ok: true, body: stream })
+
+      connectChat({
+        sessionId: 's1',
+        message: 'hi',
+        planMode: true,
+        onEvent: vi.fn(),
+      })
+
+      await new Promise(resolve => setTimeout(resolve, 50))
+
+      const body = JSON.parse((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0][1].body)
+      expect(body.planMode).toBe(true)
+    })
+
+    it('omits planMode when disabled', async () => {
+      const stream = new ReadableStream({ start(c) { c.close() } })
+      globalThis.fetch = vi.fn().mockResolvedValue({ ok: true, body: stream })
+
+      connectChat({
+        sessionId: 's1',
+        message: 'hi',
+        onEvent: vi.fn(),
+      })
+
+      await new Promise(resolve => setTimeout(resolve, 50))
+
+      const body = JSON.parse((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0][1].body)
+      expect(body.planMode).toBeUndefined()
+    })
   })
 
   describe('stopChat', () => {

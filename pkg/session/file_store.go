@@ -350,6 +350,82 @@ func (s *FileStore) AppendEvent(ctx context.Context, curSession adksession.Sessi
 	return nil
 }
 
+// TruncateEvents rewrites a session to keep only its first keepCount events,
+// discarding the rest. It updates the in-memory session, the on-disk transcript
+// (via Transcript.Rewrite), and the index message count so a resumed session
+// reflects the truncation.
+//
+// This is the sanctioned mechanism behind code-mode /rollback: unlike the
+// package's usual "never delete a transcript entry" rule (which protects the
+// audit/resume chain during compaction), rollback is an explicit, user-driven
+// request to discard later turns. It rewrites the transcript rather than
+// silently dropping lines.
+//
+// keepCount is clamped to [0, len(events)]. Truncating to the full length is a
+// no-op. Returns the number of events retained.
+func (s *FileStore) TruncateEvents(appName, userID, sessionID string, keepCount int) (int, error) {
+	if appName == "" || userID == "" || sessionID == "" {
+		return 0, fmt.Errorf("app_name, user_id, session_id are required")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sess, ok := s.sessions[sessionID]
+	if !ok {
+		loaded, err := s.loadFromDisk(appName, userID, sessionID)
+		if err != nil {
+			return 0, fmt.Errorf("session %s not found: %w", sessionID, err)
+		}
+		s.sessions[sessionID] = loaded
+		sess = loaded
+	}
+	if sess.appName != appName || sess.userID != userID {
+		return 0, fmt.Errorf("session %s not found for app %q user %q", sessionID, appName, userID)
+	}
+
+	if keepCount < 0 {
+		keepCount = 0
+	}
+	if keepCount > len(sess.events) {
+		keepCount = len(sess.events)
+	}
+	if keepCount == len(sess.events) {
+		return keepCount, nil
+	}
+
+	kept := make([]*adksession.Event, keepCount)
+	copy(kept, sess.events[:keepCount])
+	sess.events = kept
+	if keepCount > 0 {
+		sess.updatedAt = kept[keepCount-1].Timestamp
+	} else {
+		sess.updatedAt = time.Time{}
+	}
+
+	// Rewrite the transcript on disk with the retained events, applying the
+	// configured redactor so previously redacted content stays redacted.
+	transcriptPath := filepath.Join(s.baseDir, appName, userID, sessionID+".jsonl")
+	transcript := NewTranscript(transcriptPath)
+	if err := transcript.Rewrite(sessionID, kept); err != nil {
+		return 0, fmt.Errorf("failed to rewrite transcript: %w", err)
+	}
+	if s.RedactFunc != nil {
+		if err := transcript.RedactTranscript(s.RedactFunc); err != nil {
+			return 0, fmt.Errorf("failed to redact truncated transcript: %w", err)
+		}
+	}
+
+	if err := s.index.Update(sessionID, func(meta *SessionMeta) {
+		meta.MessageCount = keepCount
+		meta.UpdatedAt = sess.updatedAt
+	}); err != nil {
+		slog.Warn("failed to update session index after truncate", "session_id", sessionID, "error", err)
+	}
+
+	return keepCount, nil
+}
+
 // ResolveSessionID resolves a partial session ID (prefix match) to a full ID.
 // Returns an error if zero or multiple sessions match.
 func (s *FileStore) ResolveSessionID(partial string) (string, error) {

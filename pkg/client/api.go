@@ -239,6 +239,7 @@ type ChatRequest struct {
 	AutoApprove   bool             `json:"autoApprove,omitempty"`
 	Debug         bool             `json:"debug,omitempty"`
 	SystemContext string           `json:"systemContext,omitempty"`
+	PlanMode      bool             `json:"planMode,omitempty"`
 	Attachments   []ChatAttachment `json:"attachments,omitempty"`
 	// Provider/Model pin a model for this turn (and new sessions).
 	Provider string `json:"provider,omitempty"`

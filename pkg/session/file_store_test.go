@@ -700,3 +700,76 @@ func TestFileStore_DeleteCascadesChildren(t *testing.T) {
 		t.Errorf("Get(unrelated) error = %v, want nil (should survive cascade)", err)
 	}
 }
+
+func TestFileStore_TruncateEvents(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	sess := createTestSession(t, store, "myapp", "user1")
+
+	for i, text := range []string{"msg0", "msg1", "msg2", "msg3"} {
+		ev := testEvent("ev"+string(rune('0'+i)), "user", text)
+		if err := store.AppendEvent(ctx, sess, ev); err != nil {
+			t.Fatalf("AppendEvent(%d) error = %v", i, err)
+		}
+	}
+
+	// Keep the first 2 events, discard the rest.
+	kept, err := store.TruncateEvents("myapp", "user1", sess.ID(), 2)
+	if err != nil {
+		t.Fatalf("TruncateEvents() error = %v", err)
+	}
+	if kept != 2 {
+		t.Errorf("TruncateEvents returned %d, want 2", kept)
+	}
+
+	getResp, err := store.Get(ctx, &adksession.GetRequest{
+		AppName:   "myapp",
+		UserID:    "user1",
+		SessionID: sess.ID(),
+	})
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if got := getResp.Session.Events().Len(); got != 2 {
+		t.Errorf("Events().Len() after truncate = %d, want 2", got)
+	}
+
+	// The persisted transcript should reflect the truncation after reload.
+	fresh, err := NewFileStore(store.BaseDir())
+	if err != nil {
+		t.Fatalf("NewFileStore() error = %v", err)
+	}
+	reloaded, err := fresh.Get(ctx, &adksession.GetRequest{
+		AppName:   "myapp",
+		UserID:    "user1",
+		SessionID: sess.ID(),
+	})
+	if err != nil {
+		t.Fatalf("Get(reloaded) error = %v", err)
+	}
+	if got := reloaded.Session.Events().Len(); got != 2 {
+		t.Errorf("reloaded Events().Len() = %d, want 2 (transcript rewrite)", got)
+	}
+
+	// Truncating to the full (already shorter) length is a no-op.
+	kept, err = store.TruncateEvents("myapp", "user1", sess.ID(), 5)
+	if err != nil {
+		t.Fatalf("TruncateEvents(over) error = %v", err)
+	}
+	if kept != 2 {
+		t.Errorf("TruncateEvents(over) returned %d, want 2 (clamped)", kept)
+	}
+
+	// Truncating to 0 clears all events.
+	if _, err := store.TruncateEvents("myapp", "user1", sess.ID(), 0); err != nil {
+		t.Fatalf("TruncateEvents(0) error = %v", err)
+	}
+	getResp, _ = store.Get(ctx, &adksession.GetRequest{
+		AppName:   "myapp",
+		UserID:    "user1",
+		SessionID: sess.ID(),
+	})
+	if got := getResp.Session.Events().Len(); got != 0 {
+		t.Errorf("Events().Len() after truncate(0) = %d, want 0", got)
+	}
+}

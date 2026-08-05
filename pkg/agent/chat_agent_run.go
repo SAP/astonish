@@ -226,7 +226,9 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		}
 
 		// Apply per-turn overrides injected by callers via context
+		planMode := false
 		if po := PromptOverridesFromContext(ctx); po != nil {
+			planMode = po.PlanMode
 			if po.ChannelHints != "" {
 				promptBuilder.ChannelHints = po.ChannelHints
 			}
@@ -512,6 +514,24 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			}
 			return nil, nil
 		})
+
+		// Plan-mode hard gate: when the turn is in plan mode, refuse any tool
+		// that is not read-only (and refuse delegate_tasks, which could bypass
+		// the gate via a sub-agent). Returning a result — rather than an error
+		// that aborts the turn — lets the model self-correct and keep building
+		// the plan. This is the runtime enforcement backing PlanModeSystemContext.
+		if planMode {
+			beforeToolCallbacks = append(beforeToolCallbacks, func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+				name := t.Name()
+				if name == "delegate_tasks" || !IsToolSafe(name) {
+					return map[string]any{
+						"status": "blocked_plan_mode",
+						"error":  PlanModeBlockedMessage(name),
+					}, nil
+				}
+				return nil, nil
+			})
+		}
 
 		// ── Auto-progress plan steps (before tool execution) ──
 		// When a plan is active, mark the first pending step as "running"

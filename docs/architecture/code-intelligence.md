@@ -384,6 +384,22 @@ type ReferenceLocation struct {
 - **Tool registration:** `repo_map`, `code_definition`, `code_references`
   are registered in `pkg/tools/internal.go` and added to the
   `containerTools` whitelist (proxied to sandbox like `grep_search`).
+- **Main-thread availability:** These three tools are in the top-level agent's
+  allowlist (`mainThreadToolAllowlist` in `pkg/launcher/chat_factory.go`), not
+  only in sub-agent groups. This is deliberate: when they were reachable only
+  via lazy `search_tools`/ToolIndex surfacing, agents fell back to broad
+  `grep_search` plus repeated full-file `read_file` — a pattern observed to
+  re-read the same large files 10-12× in one session, inflating the prompt and
+  making each inference progressively slower (10s → 170s+). Keeping structural
+  navigation on the main thread lets the model resolve a symbol in one call.
+- **Prompt enforcement:** The system prompt carries a conditional "Code
+  navigation rule (MUST)" (in `SystemPromptBuilder.Build`, gated on
+  `hasCodeIntelTools`) that instructs the model to use
+  `code_definition`/`code_references` for symbol definitions/uses and NOT
+  `grep_search`. The rule is rendered **only** when the tree-sitter tools are
+  present, so non-code agents (channels, general chat) never see it and
+  `grep_search` stays domain-agnostic — its own tool description must not carry
+  code-navigation advice.
 - **No new processes:** Everything runs in-process within `astonish node`.
   No servers to manage, no lifecycle complexity.
 

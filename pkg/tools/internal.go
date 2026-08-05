@@ -107,9 +107,16 @@ func commandReferencesProtectedFile(command string) (bool, string) {
 type ReadFileArgs struct {
 	Path   string `json:"path" jsonschema:"Absolute path to the file to read"`
 	Offset *int   `json:"offset,omitempty" jsonschema:"Line number to start reading from (1-indexed). Omit to start from line 1."`
-	Limit  *int   `json:"limit,omitempty" jsonschema:"Maximum number of lines to read. Omit to read to end of file."`
+	Limit  *int   `json:"limit,omitempty" jsonschema:"Maximum number of lines to read. Omit to read to end of file (large files are auto-capped; page with offset/limit)."`
 	Force  bool   `json:"force,omitempty" jsonschema:"Bypass the read cache and always return file content even if unchanged since last read. Use when you no longer have the file content in your conversation history."`
 }
+
+// readFileSoftCapLines bounds how many lines an unbounded read_file returns for
+// a large file. Reading whole large files repeatedly is the dominant cause of
+// context bloat (and thus slow inference) in agentic coding loops, so an
+// omitted Limit yields a paged window rather than the entire file. Callers can
+// always page with offset/limit or pass an explicit large Limit.
+const readFileSoftCapLines = 400
 
 type ReadFileResult struct {
 	Content    string `json:"content"`
@@ -132,6 +139,24 @@ func ReadFile(ctx tool.Context, args ReadFileArgs) (ReadFileResult, error) {
 	limit := 0 // 0 means "read to end"
 	if args.Limit != nil && *args.Limit > 0 {
 		limit = *args.Limit
+	}
+
+	// Soft cap: when the caller did NOT request an explicit line limit, avoid
+	// dumping an entire large file into the model's context (which bloats the
+	// prompt and slows inference). Read a bounded window instead and let the
+	// Range notice guide the model to page (offset/limit) or jump with
+	// grep_search / code_definition. An explicit Limit always wins; a caller
+	// that truly wants the whole file can pass a large Limit.
+	softCapped := false
+	if args.Limit == nil {
+		if info, statErr := os.Stat(args.Path); statErr == nil {
+			// Cheap size gate first (avoids line-counting tiny files); ~120 chars/line
+			// heuristic keeps the check O(1) before the real line count below.
+			if info.Size() > int64(readFileSoftCapLines*120) {
+				limit = readFileSoftCapLines
+				softCapped = true
+			}
+		}
 	}
 
 	// Check the read cache (mtime-based dedup)
@@ -221,6 +246,12 @@ func ReadFile(ctx tool.Context, args ReadFileArgs) (ReadFileResult, error) {
 	rangeStr := ""
 	if limit > 0 || offset > 1 {
 		rangeStr = fmt.Sprintf("lines %d-%d of %d", startIdx+1, endIdx, totalLines)
+	}
+	// When we auto-capped an unbounded read, tell the model how to get more so
+	// it pages or jumps instead of re-requesting the whole file.
+	if softCapped && endIdx < totalLines {
+		rangeStr = fmt.Sprintf("lines %d-%d of %d (auto-capped; this file is large. Read more with offset=%d, or use grep_search/code_definition to jump to the relevant lines instead of reading the whole file)",
+			startIdx+1, endIdx, totalLines, endIdx+1)
 	}
 
 	// Update cache
@@ -647,7 +678,7 @@ func FilterJson(ctx tool.Context, args FilterJsonArgs) (FilterJsonResult, error)
 func GetInternalTools() ([]tool.Tool, error) {
 	readFileTool, err := functiontool.New(functiontool.Config{
 		Name:        "read_file",
-		Description: "Read file contents with line numbers. For large files, use offset and limit to read specific sections. Use grep_search to find relevant line numbers first.",
+		Description: "Read file contents with line numbers. Large files are auto-capped to a bounded window when no limit is given — page with offset/limit, or (preferred) use grep_search/code_definition to jump straight to the relevant lines instead of reading whole files.",
 	}, ReadFile)
 	if err != nil {
 		return nil, err

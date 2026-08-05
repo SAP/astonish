@@ -42,11 +42,14 @@ func EditFile(ctx tool.Context, args EditFileArgs) (EditFileResult, error) {
 	args.Path = expandPath(args.Path)
 
 	// Must-read-before-edit guard: if the cache is active (has any read entries),
-	// verify that this specific file has been read before allowing edits.
-	// This prevents hallucinated edits where the LLM guesses file content.
-	// The guard is lenient when no cache exists (e.g., in tests or first-time use).
+	// verify that this specific file has been observed before allowing edits.
+	// This prevents hallucinated edits where the LLM guesses file content. A
+	// prior read, edit, OR write counts as "observed" — a successful edit/write
+	// leaves the agent knowing the file's current content, so consecutive edits
+	// to the same file must not be blocked (that false positive forced needless
+	// re-reads). The guard is lenient when no cache exists (tests / first use).
 	cache := LoadFileReadCache()
-	if cache != nil && cache.HasAnyReadEntries() && !cache.HasReadEntry(args.Path) {
+	if cache != nil && cache.HasAnyReadEntries() && !cache.HasSeenEntry(args.Path) {
 		return EditFileResult{
 			Success: false,
 			Path:    args.Path,

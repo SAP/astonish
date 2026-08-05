@@ -44,6 +44,7 @@ type SystemPromptBuilder struct {
 	WorkspaceDir          string
 	CustomPrompt          string
 	InstructionsContent   string                       // Contents of INSTRUCTIONS.md (behavior directives)
+	ProjectContext        string                       // Concatenated AGENTS.md/CLAUDE.md project guidance (code mode)
 	WebSearchAvailable    bool                         // Whether a web search MCP tool is configured
 	WebExtractAvailable   bool                         // Whether a web extract MCP tool is configured
 	WebSearchToolName     string                       // Name of the configured search tool (e.g. "tavily-search")
@@ -92,6 +93,14 @@ type PromptOverrides struct {
 	// sessions to ensure critical tools (e.g., save_sandbox_template, save_fleet_plan)
 	// remain available across all turns of a multi-turn guided conversation.
 	PinnedToolGroups []string
+
+	// PlanMode, when true, enables a hard runtime gate for the turn: mutating
+	// tools (anything not in SafeTools, plus delegate_tasks) are refused at
+	// execution time and the model is reminded it is in plan mode. This is a
+	// stronger guarantee than SessionContext prose alone, which the model can
+	// ignore. Callers that set PlanMode should also inject the plan-mode
+	// SessionContext so the model produces a plan rather than attempting work.
+	PlanMode bool
 
 	// Web search/extract are resolved per request from the platform→team cascade
 	// so a singleton ChatAgent re-inited without tenant context still advertises
@@ -164,6 +173,20 @@ func (b *SystemPromptBuilder) Build() string {
 		sb.WriteString("\n\n")
 	}
 
+	// 2c. Project Guidance (from AGENTS.md / CLAUDE.md — code mode). These are
+	// project-authored, checked-in instructions the model must follow, merged
+	// from the repo root down to the working directory (nearest last, highest
+	// precedence). Placed high in the prompt so conventions, build/test
+	// commands, and gotchas are always in view.
+	if b.ProjectContext != "" {
+		sb.WriteString("## Project Guidance\n\n")
+		sb.WriteString("The following instructions come from AGENTS.md files in the project. ")
+		sb.WriteString("Follow them for conventions, build/test commands, and project-specific rules. ")
+		sb.WriteString("Later sections override earlier ones; an explicit user request always wins.\n\n")
+		sb.WriteString(b.ProjectContext)
+		sb.WriteString("\n\n")
+	}
+
 	// 3. Tool Use (compact — detailed guidance is in memory/guidance/*.md)
 	sb.WriteString("## Tool Use\n\n")
 	sb.WriteString("- ALWAYS attempt tasks using tools first. Never explain how the user could do it.\n")
@@ -171,6 +194,10 @@ func (b *SystemPromptBuilder) Build() string {
 	sb.WriteString("- If a tool fails, try a different approach before giving up.\n")
 	sb.WriteString("- Prefer read_file/edit_file/write_file over shell sed/awk/echo/cat for file operations.\n")
 	sb.WriteString("- For repository navigation and source inspection, use dedicated tools: file_tree (structure), find_files (glob/discovery), grep_search (text/regex search), read_file (contents). Do NOT use shell_command with ls/find/grep/rg/cat/head/tail just to browse or search files. Reserve shell_command for executing project behavior: git, builds, tests, linters, package managers, CLIs, servers, and scripts.\n")
+	if b.hasCodeIntelTools() {
+		sb.WriteString("- **Code navigation rule (MUST):** In supported languages (Go, TS/TSX, JS/JSX, Python), to find where a symbol (function, type, method, constant, variable) is DEFINED or USED, you MUST use `code_definition` / `code_references` — do NOT use `grep_search` for this. They return exact declarations/call sites in one call, without the comment/string/unrelated-match noise that forces grep follow-up reads. Call `repo_map` once to orient in an unfamiliar repo. Fall back to `grep_search` for a symbol only when the structural tool returns nothing. Keep using `grep_search` for non-symbol text (log strings, config keys, comments, error messages, cross-language literals).\n")
+	}
+	sb.WriteString("- Do NOT re-read a file already read this session unless it changed; read only the region you need, not whole large files repeatedly.\n")
 	sb.WriteString("- http_request CANNOT reach private/RFC1918 IPs (192.168.x.x, 10.x.x.x, 172.16-31.x.x) or localhost. Use curl via shell_command for private network endpoints.\n")
 	sb.WriteString("- For multi-step tasks, execute sequentially, report progress, and search memory first for prior solutions.\n")
 	sb.WriteString("- After completing a task where you overcame obstacles or discovered non-obvious solutions, save the knowledge using memory_save. Search memory_search(\"memory usage\") first to retrieve the full saving guidelines.\n")

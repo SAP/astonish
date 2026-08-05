@@ -535,6 +535,7 @@ func (b *platformBackend) RunTurn(ctx context.Context, message string, opts back
 		AutoApprove:   autoApprove,
 		Debug:         debug,
 		SystemContext: opts.SystemContext,
+		PlanMode:      opts.PlanMode,
 		Attachments:   chatAttachmentsFromBackend(opts.Attachments),
 	}
 	// Apply pre-session model pin on the first turn of a new session.
@@ -879,6 +880,7 @@ func mapSSEToEvents(sev *client.SSEEvent, debug bool) []events.Event {
 			InputTokens  int64 `json:"input_tokens"`
 			OutputTokens int64 `json:"output_tokens"`
 			TotalTokens  int64 `json:"total_tokens"`
+			Estimated    bool  `json:"estimated"`
 		}
 		if json.Unmarshal(data, &payload) == nil {
 			input := firstNonZero(payload.Input, payload.InputTokens)
@@ -890,9 +892,10 @@ func mapSSEToEvents(sev *client.SSEEvent, debug bool) []events.Event {
 			return []events.Event{{
 				Kind: events.KindUsage,
 				Usage: &events.Usage{
-					Input:  input,
-					Output: output,
-					Total:  total,
+					Input:     input,
+					Output:    output,
+					Total:     total,
+					Estimated: payload.Estimated,
 				},
 			}}
 		}

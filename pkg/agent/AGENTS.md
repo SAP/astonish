@@ -10,8 +10,9 @@ Core `ChatAgent` runtime — the tool-use loop that drives Astonish's autonomous
 
 ## Interactions
 - Wired by `pkg/launcher/chat_factory.go:NewWiredChatAgent` — this is where the full agent (LLM, tools, sandbox, memory, tool index, prompt builder) is assembled.
-- Invoked by Studio via `pkg/api` chat handlers (SSE). The CLI TUI does not run the agent in-process; it streams Studio SSE through `pkg/launcher.RunChatTUI`.
+- Invoked by Studio via `pkg/api` chat handlers (SSE). `astonish chat` streams Studio SSE through `pkg/launcher.RunChatTUI`. **`astonish code` runs this same agent in-process** via `pkg/launcher.RunCodeTUI` (no platform).
 - Runs tools via `RunnableTool.Run` (see `pkg/tools/AGENTS.md`); tools that hit the shell/network/filesystem are wrapped by `pkg/sandbox` (see `pkg/sandbox/AGENTS.md`).
+- `project_context.go:LoadProjectContext` implements the [agents.md](https://agents.md) convention: it discovers `AGENTS.md` (fallback `CLAUDE.md`) by walking upward from the working dir to the git root, merges them nearest-last, and the factory injects the result into `SystemPromptBuilder.ProjectContext` (rendered as `## Project Guidance`). Only code mode enables this (via `ChatFactoryConfig.LoadProjectContext`); platform uses per-team DB instructions.
 
 ## Key rules
 1. **The agent must not read config directly** — it receives its configuration from the factory. Keeps testing tractable.

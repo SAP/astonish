@@ -5,21 +5,27 @@ platform-backed terminal chat app and the Studio HTTP server.
 
 ## Scope
 - `tui_chat.go:RunChatTUI` — **interactive CLI chat** (requires platform login). Studio SSE → `pkg/tui`.
-- `chat_factory.go:NewWiredChatAgent` — fully wired `ChatAgent` for Studio/daemon (not used by the CLI TUI).
+- `tui_code.go:RunCodeTUI` — **local code mode** (no login, no platform). Drives `NewWiredChatAgent` in-process with the sandbox forced off, so the compiled-in tools run directly on the host filesystem in the working directory (Claude-Code semantics). Implements `backend.Backend` as `localAgentBackend`.
+- `chat_factory.go:NewWiredChatAgent` — fully wired `ChatAgent` for Studio/daemon **and code mode**.
 - `studio.go:NewStudioServer` — HTTP server + SPA serving. Registers `/api/*` (via `pkg/api.RegisterRoutes`), platform auth, tenant middleware, CSP, rate-limit; serves the embedded SPA from `web/embed.go` (falls back to `web/dist` on disk when present).
 - `web_simple.go:RunSimpleWeb` — minimal dev-only chat web server.
 - `console.go` — flow/agent console runner (non-chat).
 
 ## Key rules
-1. **CLI chat is platform-only.** `astonish chat` always uses authenticated Studio REST/SSE (`client` package). There is no in-process personal chat path.
-2. **`NewWiredChatAgent` is the wiring choke point for Studio/daemon agents.** If you need a new dependency in the agent runtime, add it here.
-3. **Studio SPA assets**: `getWebAssets()` prefers `web/dist` on disk (dev) and falls back to the embedded FS built via `web/embed.go`. Do not add a third code path.
-4. **Middleware order in `NewStudioServer`** matters: platform auth → tenant → rate-limit → CSP → SPA/API split. Preserve this order when adding middleware.
-5. **`/api/*` vs. SPA**: everything under `/api/` is routed to the API mux; every other path serves the SPA `index.html`.
-6. **TUI presentation lives in `pkg/tui`.** Launcher implements `backend.Backend` (`platformBackend` in `tui_chat.go`) and calls `tui.Run`. See `docs/architecture/terminal-app.md`.
+1. **`astonish chat` is platform-only.** It always uses authenticated Studio REST/SSE (`client` package). **`astonish code` is the in-process path**: it runs the agent loop locally, never contacts a platform, and forces the sandbox off. These are the only two CLI chat surfaces — do not add a third.
+2. **Code mode = `NewWiredChatAgent` + ADK runner in-process.** `RunCodeTUI` loads config, calls `forceHostExecution(appConfig)` (sets `Sandbox.Enabled = false`), `os.Chdir`s into the working directory, builds the wired agent, and drives one ADK runner per turn. Do **not** reintroduce sandbox wrapping in this path — host execution is the point. Code mode passes `AllowMissingProvider: true`, so it opens even with no model configured: the factory installs a placeholder LLM, `RunTurn` short-circuits with a "/model" hint until configured, and `SetModelPin` hot-swaps the real LLM **and persists** the choice to `general.default_provider`/`default_model` via `config.SaveAppConfig`. It also passes `LoadProjectContext: true` so the factory loads `AGENTS.md`/`CLAUDE.md` (agents.md convention, via `agent.LoadProjectContext`) into the system prompt; platform mode leaves this off.
+3. **Event bridge (Option B):** `localAgentBackend` emits the exact `(type, data)` payloads `pkg/api.ChatRunner` produces, marshals them into `client.SSEEvent`, and feeds them through the shared `mapSSEToEvents` translator in `tui_chat.go`. There is **one** translator — add new event kinds there, never a code-mode-only mapper.
+4. **Code mode is file-only for provider config.** `localAgentBackend` implements the optional `backend.ProviderAdminBackend` (add/list/remove providers), persisting to `~/.config/astonish/config.yaml` via `config.SaveAppConfig`. It must **never** touch a platform database. The `/provider` TUI overlay is gated on this capability, so platform chat does not expose it. Keep the two worlds separate: code = file, platform = DB (platform may also read the file).
+5. **Code-mode sessions persist to disk, scoped per working directory.** `RunCodeTUI` builds a `session.FileStore` under `<sessionsDir>/code/` (see `codeSessionsDir`) and injects it into the factory via `ChatFactoryConfig.SessionService` (the factory falls back to `session.InMemoryService()` only when this is nil). Sessions survive restarts. They are isolated from Studio/chat sessions two ways: the ADK app name is `codeAppName` (`astonish_code`), and the store lives in a dedicated `code/` subdirectory. Per-directory isolation is achieved by deriving the session `userID` from a stable hash of the absolute working directory (`codeUserIDForDir`); `FileStore.List` filters by `(appName, userID)`, so `/sessions` only lists sessions created in the current directory. **Startup is always a clean slate** — code mode never auto-resumes the last session; `ListSessions`/`ResumeSession` (backed by `FileStore.ListSessionMetas`/`Get`) power the `/sessions` picker so the user can explicitly load a prior session. New sessions get a title derived from the first user message (`deriveSessionTitle` → `FileStore.SetSessionTitle`). All session-service calls route through `effectiveUserID()`.
+6. **`NewWiredChatAgent` is the wiring choke point for Studio/daemon/code agents.** If you need a new dependency in the agent runtime, add it here.
+7. **Studio SPA assets**: `getWebAssets()` prefers `web/dist` on disk (dev) and falls back to the embedded FS built via `web/embed.go`. Do not add a third code path.
+8. **Middleware order in `NewStudioServer`** matters: platform auth → tenant → rate-limit → CSP → SPA/API split. Preserve this order when adding middleware.
+9. **`/api/*` vs. SPA**: everything under `/api/` is routed to the API mux; every other path serves the SPA `index.html`.
+10. **TUI presentation lives in `pkg/tui`.** Launcher implements `backend.Backend` (`platformBackend` in `tui_chat.go`, `localAgentBackend` in `tui_code.go`) and calls `tui.Run`. See `docs/architecture/terminal-app.md`.
 
 ## Entry-point relationship
-- CLI chat: `astonish chat` → requires `astonish login` → `RunChatTUI` → `platformBackend` → `tui.Run`.
+- CLI chat: `astonish chat` → requires `astonish login` → `RunChatTUI` → `platformBackend` (Studio SSE) → `tui.Run`.
+- Code mode: `astonish code` → **no login** → `RunCodeTUI` → `localAgentBackend` (in-process ADK runner, sandbox off, host CWD) → `tui.Run`.
 - Studio: `astonish daemon run` → `pkg/daemon.Run` → `NewStudioServer` → `NewWiredChatAgent` per session.
 
 ## When editing

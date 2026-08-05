@@ -71,16 +71,21 @@ type Item struct {
 
 // Transcript is the reduced UI state built from a stream of Events.
 type Transcript struct {
-	Items       []Item
-	SessionID   string
-	Title       string
-	Status      string // live status line (Thinking…, Running X…)
-	Streaming   bool
-	Provider    string
-	Model       string
-	LastUsage   *Usage
-	Awaiting    bool // waiting for approval response
-	ApprovalIdx int  // index of open approval item, or -1
+	Items     []Item
+	SessionID string
+	Title     string
+	Status    string // live status line (Thinking…, Running X…)
+	Streaming bool
+	Provider  string
+	Model     string
+	LastUsage *Usage
+	// ContextTokens is the current context-window occupancy: the token count of
+	// the most recent LLM request/response in the latest turn (input + output).
+	// Unlike LastUsage (which accumulates across the whole session), this tracks
+	// "how full is the context right now" — the number that matters when coding.
+	ContextTokens int64
+	Awaiting      bool // waiting for approval response
+	ApprovalIdx   int  // index of open approval item, or -1
 
 	// nextTextReplaces: after tool call/result, the next agent text starts a new
 	// sticky utterance (replaces provisional content) instead of appending.
@@ -242,9 +247,26 @@ func (t *Transcript) addUsage(usage *Usage) {
 	if t.LastUsage == nil {
 		t.LastUsage = &Usage{}
 	}
-	t.LastUsage.Input += usage.Input
-	t.LastUsage.Output += usage.Output
-	t.LastUsage.Total += usage.Total
+	// Estimated readings represent the full current context (not a per-call
+	// delta), so accumulating them into cumulative usage would over-count.
+	// They only update the context-occupancy figure below.
+	if !usage.Estimated {
+		t.LastUsage.Input += usage.Input
+		t.LastUsage.Output += usage.Output
+		t.LastUsage.Total += usage.Total
+	}
+
+	// Context occupancy = this LLM call's input (prompt) + output tokens. In a
+	// multi-call tool loop the prompt grows each call, so the largest reading
+	// this turn reflects the current context-window fill. Tracking the max
+	// avoids brief zero-usage events resetting the displayed value.
+	ctx := usage.Total
+	if ctx == 0 {
+		ctx = usage.Input + usage.Output
+	}
+	if ctx > t.ContextTokens {
+		t.ContextTokens = ctx
+	}
 }
 
 // turnStart returns the index of the first item in the current soft run
@@ -511,31 +533,81 @@ func (t *Transcript) appendToolCall(ev Event) {
 		Status: "running",
 	}
 
-	// Prefer a single activity fold for the whole soft+tool run.
-	if actIdx := t.lastActivityInTurn(); actIdx >= 0 {
+	// Reuse the current activity fold only when no file diff has been emitted
+	// after it. Once a diff is shown, later tools must start a NEW fold so they
+	// render chronologically *after* the diff — not merged back into the fold
+	// that sits above it. Layout becomes: activity → file_diff → activity → …
+	if actIdx := t.reusableActivityInTurn(); actIdx >= 0 {
 		t.Items[actIdx].Steps = append(t.Items[actIdx].Steps, step)
 		t.Items[actIdx].Summary = summarizeSteps(t.Items[actIdx].Steps)
 		t.ensureAgentAfterActivity()
 		return
 	}
 
-	// No activity yet. If sticky agent exists, insert activity before it.
-	if agentIdx := t.lastAgentInTurn(); agentIdx >= 0 {
-		act := Item{
-			Kind:    ItemActivity,
-			Steps:   []ToolStep{step},
-			Summary: summarizeSteps([]ToolStep{step}),
-		}
-		// insert at agentIdx (push agent right)
-		t.Items = append(t.Items[:agentIdx], append([]Item{act}, t.Items[agentIdx:]...)...)
-		return
-	}
-
-	t.Items = append(t.Items, Item{
+	act := Item{
 		Kind:    ItemActivity,
 		Steps:   []ToolStep{step},
 		Summary: summarizeSteps([]ToolStep{step}),
-	})
+	}
+	// Insert the new fold after the last tool surface (file diff / activity) in
+	// the turn, but before a trailing sticky agent so the agent stays last.
+	insertAt := t.newActivityInsertIndex()
+	if insertAt >= len(t.Items) {
+		t.Items = append(t.Items, act)
+	} else {
+		t.Items = append(t.Items[:insertAt], append([]Item{act}, t.Items[insertAt:]...)...)
+	}
+	t.ensureAgentAfterActivity()
+}
+
+// reusableActivityInTurn returns the index of the current turn's last activity
+// fold, but only when no ItemFileDiff appears after it. When a diff follows the
+// last fold, -1 is returned so a fresh fold is started (keeping tools that run
+// after a code change visually below that change).
+func (t *Transcript) reusableActivityInTurn() int {
+	start := t.turnStart()
+	actIdx := -1
+	diffAfterLastAct := false
+	for i := start; i < len(t.Items); i++ {
+		switch t.Items[i].Kind {
+		case ItemActivity:
+			actIdx = i
+			// A fresh fold — any earlier diff is irrelevant now.
+			diffAfterLastAct = false
+		case ItemFileDiff:
+			if actIdx >= 0 {
+				diffAfterLastAct = true
+			}
+		}
+	}
+	if actIdx >= 0 && !diffAfterLastAct {
+		return actIdx
+	}
+	return -1
+}
+
+// newActivityInsertIndex returns where a freshly started activity fold should be
+// inserted: after the last tool surface (file diff or activity) in the turn,
+// otherwise before a trailing sticky agent, otherwise at the end.
+func (t *Transcript) newActivityInsertIndex() int {
+	start := t.turnStart()
+	lastSurface := -1
+	agentIdx := -1
+	for i := start; i < len(t.Items); i++ {
+		switch t.Items[i].Kind {
+		case ItemFileDiff, ItemActivity:
+			lastSurface = i
+		case ItemAgent:
+			agentIdx = i
+		}
+	}
+	if lastSurface >= 0 {
+		return lastSurface + 1
+	}
+	if agentIdx >= 0 {
+		return agentIdx
+	}
+	return len(t.Items)
 }
 
 func (t *Transcript) appendToolResult(ev Event) {
@@ -568,23 +640,29 @@ func (t *Transcript) appendToolResult(ev Event) {
 			return
 		}
 	}
-	// Orphan result — attach to turn activity or create one.
+	// Orphan result — attach to the reusable turn activity or create one.
 	status := "complete"
 	if isResultError(ev.Result) {
 		status = "error"
 	}
 	step := ToolStep{Name: ev.ToolName, ID: ev.ToolID, Args: ev.Args, Result: ev.Result, Status: status}
-	if actIdx := t.lastActivityInTurn(); actIdx >= 0 {
+	if actIdx := t.reusableActivityInTurn(); actIdx >= 0 {
 		t.Items[actIdx].Steps = append(t.Items[actIdx].Steps, step)
 		t.Items[actIdx].Summary = summarizeSteps(t.Items[actIdx].Steps)
 		t.maybeAppendFileDiff(step.Name, step.Args, step.Result, step.Status)
 		return
 	}
-	t.Items = append(t.Items, Item{
+	act := Item{
 		Kind:    ItemActivity,
 		Steps:   []ToolStep{step},
 		Summary: summarizeSteps([]ToolStep{step}),
-	})
+	}
+	insertAt := t.newActivityInsertIndex()
+	if insertAt >= len(t.Items) {
+		t.Items = append(t.Items, act)
+	} else {
+		t.Items = append(t.Items[:insertAt], append([]Item{act}, t.Items[insertAt:]...)...)
+	}
 	t.maybeAppendFileDiff(step.Name, step.Args, step.Result, step.Status)
 }
 
@@ -633,31 +711,25 @@ func (t *Transcript) maybeAppendFileDiff(toolName string, args map[string]any, r
 	t.Items = append(t.Items[:insertAt], append([]Item{item}, t.Items[insertAt:]...)...)
 }
 
-// fileDiffInsertIndex returns where a new ItemFileDiff should land: after the
-// last file_diff in the turn, otherwise after the turn activity, otherwise at end
-// (but before a trailing sticky agent when present).
+// fileDiffInsertIndex returns where a new ItemFileDiff should land: immediately
+// after the latest tool surface in the turn (whichever of the last activity fold
+// or last file diff comes later), so diffs interleave chronologically with the
+// activity folds that produced them. Falls back to before a trailing sticky
+// agent, otherwise the end.
 func (t *Transcript) fileDiffInsertIndex() int {
 	start := t.turnStart()
-	lastDiff := -1
-	actIdx := -1
+	lastSurface := -1 // max(lastDiff, lastActivity)
 	agentIdx := -1
 	for i := start; i < len(t.Items); i++ {
 		switch t.Items[i].Kind {
-		case ItemFileDiff:
-			lastDiff = i
-		case ItemActivity:
-			actIdx = i
+		case ItemFileDiff, ItemActivity:
+			lastSurface = i
 		case ItemAgent:
 			agentIdx = i
 		}
 	}
-	if lastDiff >= 0 {
-		return lastDiff + 1
-	}
-	if actIdx >= 0 {
-		// Place after activity; if agent immediately follows, still after activity
-		// (agent shifts right).
-		return actIdx + 1
+	if lastSurface >= 0 {
+		return lastSurface + 1
 	}
 	if agentIdx >= 0 {
 		return agentIdx // insert before agent
@@ -688,7 +760,6 @@ func toolResultString(result any, key string) string {
 	s, _ := m[key].(string)
 	return strings.TrimSpace(s)
 }
-
 
 func (t *Transcript) finalizeRunningSteps() {
 	for i := range t.Items {
@@ -757,6 +828,7 @@ func (t *Transcript) Reset() {
 	t.Status = ""
 	t.Streaming = false
 	t.LastUsage = nil
+	t.ContextTokens = 0
 	t.Awaiting = false
 	t.ApprovalIdx = -1
 	t.nextTextReplaces = false

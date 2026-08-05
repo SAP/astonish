@@ -47,6 +47,7 @@ type StudioChatRequest struct {
 	AutoApprove      bool             `json:"autoApprove,omitempty"`
 	Debug            bool             `json:"debug,omitempty"`            // reserved for future debug streaming
 	SystemContext    string           `json:"systemContext,omitempty"`    // per-turn system instructions (not shown to user)
+	PlanMode         bool             `json:"planMode,omitempty"`         // per-turn plan-mode gate: refuse mutating tools + delegate_tasks
 	PinnedToolGroups []string         `json:"pinnedToolGroups,omitempty"` // tool groups to always inject (wizard sessions)
 	Provider         string           `json:"provider,omitempty"`         // per-request provider override (pre-chat picker)
 	Model            string           `json:"model,omitempty"`            // per-request model override (pre-chat picker)
@@ -1318,7 +1319,7 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 				runner.EmitPanicError(fmt.Sprintf("Internal error: %v", r))
 			}
 		}()
-		runner.Run(chatAgent, sessionService, comp.LLM, titleSetter, userMsg, msg, req.AutoApprove, req.SystemContext, req.PinnedToolGroups)
+		runner.Run(chatAgent, sessionService, comp.LLM, titleSetter, userMsg, msg, req.AutoApprove, req.SystemContext, req.PinnedToolGroups, req.PlanMode)
 	}()
 
 	// Become an SSE viewer: subscribe to the runner and forward events to the browser.

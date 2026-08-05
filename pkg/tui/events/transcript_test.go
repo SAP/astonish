@@ -52,19 +52,24 @@ func TestTranscript_ToolActivityFold(t *testing.T) {
 	tr.Apply(NewText("Done."))
 	tr.Apply(NewDone())
 
-	// user, activity (2 steps), file_diff (from edit), agent
-	if len(tr.Items) != 4 {
-		t.Fatalf("items=%d want 4: %#v", len(tr.Items), itemKinds(tr))
+	// A tool that runs AFTER a code change starts a NEW activity fold so it
+	// renders below the diff (not merged back into the pre-diff fold):
+	//   user, activity(edit), file_diff, activity(read), agent
+	if len(tr.Items) != 5 {
+		t.Fatalf("items=%d want 5: %#v", len(tr.Items), itemKinds(tr))
 	}
-	act := tr.Items[1]
-	if act.Kind != ItemActivity {
-		t.Fatalf("want activity, got %s", act.Kind)
+	if got := itemKinds(tr); got != "user,activity,file_diff,activity,agent" {
+		t.Fatalf("kinds=%q want user,activity,file_diff,activity,agent", got)
 	}
-	if len(act.Steps) != 2 {
-		t.Fatalf("steps=%d want 2", len(act.Steps))
+	editAct := tr.Items[1]
+	if editAct.Kind != ItemActivity {
+		t.Fatalf("want activity, got %s", editAct.Kind)
 	}
-	if act.Steps[0].Status != "complete" || act.Steps[1].Status != "complete" {
-		t.Fatalf("step status: %+v", act.Steps)
+	if len(editAct.Steps) != 1 || editAct.Steps[0].Name != "edit_file" {
+		t.Fatalf("edit fold steps: %+v", editAct.Steps)
+	}
+	if editAct.Steps[0].Status != "complete" {
+		t.Fatalf("edit step status: %+v", editAct.Steps)
 	}
 	diff := tr.Items[2]
 	if diff.Kind != ItemFileDiff {
@@ -76,8 +81,18 @@ func TestTranscript_ToolActivityFold(t *testing.T) {
 	if diff.DiffVerification == "" {
 		t.Fatal("file_diff missing DiffVerification")
 	}
-	if tr.Items[3].Kind != ItemAgent {
-		t.Fatalf("want agent last, got %s", tr.Items[3].Kind)
+	readAct := tr.Items[3]
+	if readAct.Kind != ItemActivity {
+		t.Fatalf("want activity at [3], got %s", readAct.Kind)
+	}
+	if len(readAct.Steps) != 1 || readAct.Steps[0].Name != "read_file" {
+		t.Fatalf("read fold steps: %+v", readAct.Steps)
+	}
+	if readAct.Steps[0].Status != "complete" {
+		t.Fatalf("read step status: %+v", readAct.Steps)
+	}
+	if tr.Items[4].Kind != ItemAgent {
+		t.Fatalf("want agent last, got %s", tr.Items[4].Kind)
 	}
 }
 
@@ -105,6 +120,68 @@ func TestTranscript_FileDiffMainThread(t *testing.T) {
 	diffCount := strings.Count(kinds, string(ItemFileDiff))
 	if diffCount != 1 {
 		t.Fatalf("file_diff count=%d want 1 in %q", diffCount, kinds)
+	}
+}
+
+// TestTranscript_ToolsInterleaveWithDiffs verifies that each code change closes
+// the current activity fold so subsequent tools render below their diff, and a
+// second edit produces its own diff after its own fold. Layout:
+//
+//	user, activity(edit1), file_diff(1), activity(shell), activity? ...
+//
+// More precisely with edit → shell → edit:
+//
+//	user, activity(edit1), file_diff, activity(shell+edit2)…
+//
+// The key invariants: tools after a diff never merge into the pre-diff fold, and
+// each diff sits immediately after the fold that produced it, with the agent last.
+func TestTranscript_ToolsInterleaveWithDiffs(t *testing.T) {
+	tr := NewTranscript()
+	tr.Apply(NewUser("do a lot"))
+	// edit A (produces diff A)
+	tr.Apply(NewToolCall("edit_file", "1", map[string]any{"path": "a.go", "old_string": "x", "new_string": "y"}))
+	tr.Apply(NewToolResult("edit_file", "1", map[string]any{
+		"success": true, "path": "a.go", "verification_context": "@@ a.go:1\n- 1| x\n+ 1| y\n",
+	}))
+	// shell command after the diff (must start a new fold below diff A)
+	tr.Apply(NewToolCall("shell_command", "2", map[string]any{"command": "go build"}))
+	tr.Apply(NewToolResult("shell_command", "2", "ok"))
+	// edit B (produces diff B, must land after the new fold)
+	tr.Apply(NewToolCall("edit_file", "3", map[string]any{"path": "b.go", "old_string": "p", "new_string": "q"}))
+	tr.Apply(NewToolResult("edit_file", "3", map[string]any{
+		"success": true, "path": "b.go", "verification_context": "@@ b.go:1\n- 1| p\n+ 1| q\n",
+	}))
+	tr.Apply(NewText("All done."))
+	tr.Apply(NewDone())
+
+	// Expected: user, activity(edit A), file_diff(a), activity(shell + edit B),
+	// file_diff(b), agent.
+	want := "user,activity,file_diff,activity,file_diff,agent"
+	if got := itemKinds(tr); got != want {
+		t.Fatalf("kinds=%q want %q", got, want)
+	}
+	// The pre-diff fold holds only edit A (not shell / edit B).
+	if len(tr.Items[1].Steps) != 1 || tr.Items[1].Steps[0].Name != "edit_file" {
+		t.Fatalf("first fold should hold only edit A: %+v", tr.Items[1].Steps)
+	}
+	// diff A is for a.go, right after the first fold.
+	if tr.Items[2].Kind != ItemFileDiff || tr.Items[2].Path != "a.go" {
+		t.Fatalf("diff A: kind=%s path=%q", tr.Items[2].Kind, tr.Items[2].Path)
+	}
+	// The second fold holds the shell command and edit B (tools after diff A).
+	names := []string{}
+	for _, s := range tr.Items[3].Steps {
+		names = append(names, s.Name)
+	}
+	if strings.Join(names, ",") != "shell_command,edit_file" {
+		t.Fatalf("second fold steps=%v want shell_command,edit_file", names)
+	}
+	// diff B is for b.go, after the second fold.
+	if tr.Items[4].Kind != ItemFileDiff || tr.Items[4].Path != "b.go" {
+		t.Fatalf("diff B: kind=%s path=%q", tr.Items[4].Kind, tr.Items[4].Path)
+	}
+	if tr.Items[5].Kind != ItemAgent {
+		t.Fatalf("want agent last, got %s", tr.Items[5].Kind)
 	}
 }
 
@@ -227,6 +304,48 @@ func TestTranscript_UsageAccumulates(t *testing.T) {
 	}
 	if tr.LastUsage.Input != 300 || tr.LastUsage.Output != 150 || tr.LastUsage.Total != 450 {
 		t.Fatalf("usage=%+v", tr.LastUsage)
+	}
+}
+
+func TestTranscript_ContextTokensTracksMax(t *testing.T) {
+	tr := NewTranscript()
+	// A tool loop: prompt grows each call. Context occupancy is the largest.
+	tr.Apply(Event{Kind: KindUsage, Usage: &Usage{Input: 1000, Output: 200, Total: 1200}})
+	tr.Apply(Event{Kind: KindUsage, Usage: &Usage{Input: 3000, Output: 400, Total: 3400}})
+	tr.Apply(Event{Kind: KindUsage, Usage: &Usage{Input: 0, Output: 0, Total: 0}}) // stray zero
+	if tr.ContextTokens != 3400 {
+		t.Fatalf("ContextTokens=%d want 3400 (max seen)", tr.ContextTokens)
+	}
+	// Cumulative usage still accumulates independently.
+	if tr.LastUsage.Total != 4600 {
+		t.Fatalf("cumulative usage=%d want 4600", tr.LastUsage.Total)
+	}
+	// Total==0 event with input/output falls back to input+output.
+	tr.Apply(Event{Kind: KindUsage, Usage: &Usage{Input: 4000, Output: 500}})
+	if tr.ContextTokens != 4500 {
+		t.Fatalf("ContextTokens=%d want 4500", tr.ContextTokens)
+	}
+	tr.Reset()
+	if tr.ContextTokens != 0 {
+		t.Fatalf("ContextTokens after reset=%d want 0", tr.ContextTokens)
+	}
+}
+
+func TestTranscript_EstimatedUsageUpdatesContextOnly(t *testing.T) {
+	tr := NewTranscript()
+	// A real reading accumulates into cumulative usage.
+	tr.Apply(Event{Kind: KindUsage, Usage: &Usage{Input: 100, Output: 50, Total: 150}})
+	// An estimated reading (provider returned no usage) must update the context
+	// occupancy figure but NOT inflate cumulative usage — each estimate is the
+	// full current context, not a per-call delta.
+	tr.Apply(Event{Kind: KindUsage, Usage: &Usage{Input: 80000, Estimated: true}})
+	tr.Apply(Event{Kind: KindUsage, Usage: &Usage{Input: 90000, Estimated: true}})
+
+	if tr.ContextTokens != 90000 {
+		t.Fatalf("ContextTokens=%d want 90000 (max estimate)", tr.ContextTokens)
+	}
+	if tr.LastUsage.Total != 150 {
+		t.Fatalf("cumulative usage=%d want 150 (estimates must not accumulate)", tr.LastUsage.Total)
 	}
 }
 

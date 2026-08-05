@@ -57,16 +57,41 @@ type ChatFactoryConfig struct {
 	// Required when PlatformToolVectorStore is set (used to embed query strings
 	// before vector search). Typically the same Hugot-based embedder used for memory.
 	PlatformEmbedFunc agent.EmbedFunc
+
+	// AllowMissingProvider lets the agent be constructed even when no provider
+	// is configured or provider initialization fails. Instead of returning an
+	// error, the factory installs a placeholder LLM (which errors on use) and
+	// leaves ProviderName/ModelName empty. Used by code mode so the TUI can
+	// open and let the user pick a model via /model. The placeholder is meant
+	// to be replaced via result.SwappableLLM.Swap once a model is chosen.
+	AllowMissingProvider bool
+
+	// LoadProjectContext enables AGENTS.md discovery: when true, the factory
+	// walks upward from WorkspaceDir loading AGENTS.md (fallback CLAUDE.md) plus
+	// the global ~/.config/astonish/AGENTS.md, and injects the merged content
+	// into the system prompt (see agent.LoadProjectContext). Used by code mode;
+	// platform mode uses per-team DB instructions instead.
+	LoadProjectContext bool
+
+	// SessionService optionally overrides the session store the factory would
+	// otherwise create (in-memory by default). Code mode injects a persistent
+	// FileStore here so sessions survive restarts and are listable via
+	// `/sessions`. When nil, the factory falls back to an in-memory service.
+	SessionService session.Service
 }
 
 // ChatFactoryResult holds everything produced by the factory.
 // Callers (console, channel manager) unpack what they need.
 type ChatFactoryResult struct {
-	ChatAgent             *agent.ChatAgent
-	LLM                   model.LLM
-	SwappableLLM          *provider.SwappableLLM // hot-swappable LLM wrapper (nil in non-Studio callers)
-	ProviderName          string
-	ModelName             string
+	ChatAgent    *agent.ChatAgent
+	LLM          model.LLM
+	SwappableLLM *provider.SwappableLLM // hot-swappable LLM wrapper (nil in non-Studio callers)
+	ProviderName string
+	ModelName    string
+	// ProviderConfigured is false when the agent was built without a usable
+	// provider (AllowMissingProvider) and is running on the placeholder LLM.
+	// Code mode uses this to prompt the user to run /model before a turn.
+	ProviderConfigured    bool
 	Compactor             *persistentsession.Compactor
 	InternalTools         []tool.Tool
 	MCPToolsets           []tool.Toolset
@@ -90,6 +115,43 @@ type ChatFactoryResult struct {
 	// wrapping (nil when sandbox is disabled). Adaptive scheduler uses
 	// SandboxPool.Remove after DestroySandbox so the next tick rebinds.
 	SandboxPool sandbox.ToolNodePool
+}
+
+// mainThreadToolAllowlist returns the set of tool names the top-level coding
+// agent gets directly (as opposed to only through sub-agents / lazy ToolIndex
+// surfacing). Everything else stays in named groups reachable via delegate_tasks
+// or search_tools.
+//
+// The tree-sitter structural navigation tools (repo_map, code_definition,
+// code_references) are main-thread on purpose: they let the agent locate a
+// symbol's definition/references in ONE call instead of falling back to broad
+// grep_search plus repeated full-file read_file. Session analysis showed the
+// latter pattern (e.g. re-reading the same large files 10-12x) inflates the
+// prompt and makes each inference progressively slower. See
+// docs/architecture/code-intelligence.md.
+func mainThreadToolAllowlist() map[string]bool {
+	return map[string]bool{
+		"read_file":          true,
+		"write_file":         true,
+		"edit_file":          true,
+		"shell_command":      true,
+		"grep_search":        true,
+		"find_files":         true,
+		"repo_map":           true,
+		"code_definition":    true,
+		"code_references":    true,
+		"memory_save":        true,
+		"memory_search":      true,
+		"memory_delete":      true,
+		"delegate_tasks":     true,
+		"announce_plan":      true,
+		"resolve_credential": true,
+		"skill_lookup":       true,
+		// Platform web search must be main-thread always-on. If it only lives in
+		// the "web" group, ToolIndex may never inject it and the agent claims
+		// "no web search tools" even when General selects Perplexity.
+		"perplexity_web_search": true,
+	}
 }
 
 // NewWiredChatAgent creates a fully-wired ChatAgent ready for use by any caller
@@ -170,9 +232,21 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		slog.Debug("initializing LLM provider", "component", "chat-factory")
 	}
 	rawLLM, err := provider.GetProvider(ctx, cfg.ProviderName, cfg.ModelName, cfg.AppConfig)
+	providerConfigured := err == nil
 	if err != nil {
-		return nil, fmt.Errorf("failed to initialize provider '%s' with model '%s': %w",
-			cfg.ProviderName, cfg.ModelName, err)
+		if !cfg.AllowMissingProvider {
+			return nil, fmt.Errorf("failed to initialize provider '%s' with model '%s': %w",
+				cfg.ProviderName, cfg.ModelName, err)
+		}
+		// Code-mode path: no provider yet. Install a placeholder so the agent
+		// (tools, MCP, sandbox, session) can still be built; the user picks a
+		// model via /model, which swaps in the real LLM.
+		if cfg.DebugMode {
+			slog.Debug("no provider configured; using placeholder LLM (code mode)", "component", "chat-factory", "error", err)
+		}
+		rawLLM = provider.NewPlaceholderLLM()
+		cfg.ProviderName = ""
+		cfg.ModelName = ""
 	}
 	if cfg.DebugMode {
 		slog.Debug("provider initialized", "component", "chat-factory", "provider", cfg.ProviderName, "model", cfg.ModelName)
@@ -780,9 +854,16 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 	// Platform mode: sessions are persisted in the DB per-request.
 	// Use in-memory as the factory-level default; actual persistence is
 	// handled by context-injected stores at the API/channel layer.
-	sessionService := session.InMemoryService()
-	if cfg.DebugMode {
-		slog.Debug("session storage: in-memory (platform mode, DB per-request)", "component", "chat-factory")
+	// Callers may inject a session service (e.g. code mode passes a
+	// persistent FileStore) to override the in-memory default.
+	sessionService := cfg.SessionService
+	if sessionService == nil {
+		sessionService = session.InMemoryService()
+		if cfg.DebugMode {
+			slog.Debug("session storage: in-memory (platform mode, DB per-request)", "component", "chat-factory")
+		}
+	} else if cfg.DebugMode {
+		slog.Debug("session storage: caller-provided service", "component", "chat-factory")
 	}
 
 	// --- 4b. Build tool groups for sub-agent delegation ---
@@ -791,28 +872,8 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 	// available to sub-agents via named groups in the delegate_tasks tool.
 
 	// Split coreTools into main-thread essentials and the full "core" group
-	// for sub-agents. Main thread tools: read_file, write_file, edit_file,
-	// shell_command, grep_search, find_files, memory_save, memory_search,
-	// memory_delete, delegate_tasks, resolve_credential, skill_lookup.
-	mainThreadToolNames := map[string]bool{
-		"read_file":          true,
-		"write_file":         true,
-		"edit_file":          true,
-		"shell_command":      true,
-		"grep_search":        true,
-		"find_files":         true,
-		"memory_save":        true,
-		"memory_search":      true,
-		"memory_delete":      true,
-		"delegate_tasks":     true,
-		"announce_plan":      true,
-		"resolve_credential": true,
-		"skill_lookup":       true,
-		// Platform web search must be main-thread always-on. If it only lives in
-		// the "web" group, ToolIndex may never inject it and the agent claims
-		// "no web search tools" even when General selects Perplexity.
-		"perplexity_web_search": true,
-	}
+	// for sub-agents. See mainThreadToolAllowlist for the membership.
+	mainThreadToolNames := mainThreadToolAllowlist()
 
 	var mainThreadTools []tool.Tool
 	for _, t := range coreTools {
@@ -1063,6 +1124,19 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 	// Load custom prompt from app config
 	if cfg.AppConfig != nil && cfg.AppConfig.Chat.SystemPrompt != "" {
 		promptBuilder.CustomPrompt = cfg.AppConfig.Chat.SystemPrompt
+	}
+
+	// Code mode: load project guidance from AGENTS.md (fallback CLAUDE.md),
+	// discovered by walking upward from the workspace to the project root,
+	// following the agents.md convention. Platform mode uses per-team DB
+	// instructions instead, so this is gated on the caller's request.
+	if cfg.LoadProjectContext {
+		if ctxContent := agent.LoadProjectContext(workspaceDir); ctxContent != "" {
+			promptBuilder.ProjectContext = ctxContent
+			if cfg.DebugMode {
+				slog.Debug("loaded project guidance", "component", "chat-factory", "bytes", len(ctxContent))
+			}
+		}
 	}
 
 	// --- 5b. Initialize fleet registry ---
@@ -1781,6 +1855,7 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		SwappableLLM:          swappableLLM,
 		ProviderName:          cfg.ProviderName,
 		ModelName:             cfg.ModelName,
+		ProviderConfigured:    providerConfigured,
 		Compactor:             compactor,
 		InternalTools:         allToolsForPrompt,
 		MCPToolsets:           allToolsetsForPrompt,

@@ -7,7 +7,7 @@ This directory is the **authoritative reference** for cross-cutting design decis
 ### Chat rendering
 - `chat-rendering-pipeline.md` — SSE transport, event types, message-to-component mapping, report/app/artifact pipelines, export pipeline. **Owns the three-signal report gate invariant** defended by `pkg/api/chat_runner.go`, `pkg/api/chat_utils.go`, and `web/src/components/StudioChat.tsx`.
 - `testing-chat-scenarios.md` — scenario test infrastructure, fixture authoring, mapping between backend SSE events and expected UI outcomes.
-- `terminal-app.md` — fullscreen terminal chat app (`pkg/tui`): event model, backends, transcript reducer, CLI entry. Companion to Studio pipeline for CLI UX.
+- `terminal-app.md` — fullscreen terminal chat app (`pkg/tui`): event model, backends (platform `chat` and in-process `code` mode), transcript reducer, CLI entry. Companion to Studio pipeline for CLI UX.
 - `remote-cli-client.md` — remote mode auth/SSE client; TUI dual-mode section points at `terminal-app.md`.
 
 ### Multi-tenant platform

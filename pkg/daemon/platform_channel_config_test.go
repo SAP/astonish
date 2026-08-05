@@ -128,8 +128,11 @@ func TestLoadChannelsConfigFromDB_SlackEnabled(t *testing.T) {
 	settings := &store.PlatformSettings{
 		Channels: &store.PlatformChannelSettings{
 			Slack: &store.PlatformSlackConfig{
-				Enabled: true,
-				Mode:    "events",
+				Enabled:     true,
+				Mode:        "events",
+				AppID:       "A123",
+				ConfigToken: "xoxe-test",
+				CommandURL:  "https://example.com/api/slack/commands",
 			},
 		},
 	}
@@ -143,6 +146,15 @@ func TestLoadChannelsConfigFromDB_SlackEnabled(t *testing.T) {
 	}
 	if cfg.Slack.GetMode() != "events" {
 		t.Errorf("expected mode events, got %s", cfg.Slack.GetMode())
+	}
+	if cfg.Slack.AppID != "A123" {
+		t.Errorf("expected app ID A123, got %q", cfg.Slack.AppID)
+	}
+	if cfg.Slack.ConfigToken != "xoxe-test" {
+		t.Errorf("expected config token fallback to be loaded, got %q", cfg.Slack.ConfigToken)
+	}
+	if cfg.Slack.CommandURL != "https://example.com/api/slack/commands" {
+		t.Errorf("expected command URL to be loaded, got %q", cfg.Slack.CommandURL)
 	}
 	if !anyChannelEnabled(cfg) {
 		t.Error("expected anyChannelEnabled true")

@@ -152,3 +152,10 @@ type AllowlistUpdater interface {
 type CommandRefresher interface {
 	RefreshCommands(commands *CommandRegistry)
 }
+
+// CommandPresenter is an optional interface for channels whose user-facing
+// command syntax differs from the shared registry names.
+type CommandPresenter interface {
+	FormatCommandName(name string) string
+	ShouldExposeCommand(cmd *Command) bool
+}

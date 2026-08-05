@@ -1002,6 +1002,12 @@ func (m *ChannelManager) handleCommand(ctx context.Context, msg InboundMessage, 
 		}
 	}
 
+	ch := m.getChannel(msg.ChannelID)
+	var presenter CommandPresenter
+	if p, ok := ch.(CommandPresenter); ok {
+		presenter = p
+	}
+
 	cc := CommandContext{
 		ChannelID:      msg.ChannelID,
 		ChatID:         msg.ChatID,
@@ -1017,9 +1023,9 @@ func (m *ChannelManager) handleCommand(ctx context.Context, msg InboundMessage, 
 		Distiller:      m.agent,
 		AuthorizeFunc:  m.authorizeFunc,
 		Manager:        m,
+		Presenter:      presenter,
 	}
 
-	ch := m.getChannel(msg.ChannelID)
 	if ch == nil {
 		return fmt.Errorf("channel %s not found", msg.ChannelID)
 	}

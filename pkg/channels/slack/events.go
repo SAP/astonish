@@ -32,13 +32,24 @@ func (s *SlackChannel) SlashCommandHTTPHandler() http.Handler {
 			http.Error(w, "failed to parse command", http.StatusBadRequest)
 			return
 		}
+		threadTS := slashCommandThreadTSFromForm(r)
 
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{
 			"response_type": "ephemeral",
-			"text":          s.HandleSlashCommand(r.Context(), cmd),
+			"text":          s.handleSlashCommandWithThread(r.Context(), cmd, threadTS),
 		})
 	})
+}
+
+func slashCommandThreadTSFromForm(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	return slackThreadTimestamp(
+		r.PostForm.Get("thread_ts"),
+		firstNonEmpty(r.PostForm.Get("message_ts"), r.PostForm.Get("ts")),
+	)
 }
 
 func (s *SlackChannel) verifyHTTPRequest(w http.ResponseWriter, r *http.Request) bool {

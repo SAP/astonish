@@ -71,6 +71,9 @@ func loadChannelsConfigFromDB(backend platformDB, logger *Logger) config.Channel
 		enabled := ch.Slack.Enabled
 		out.Slack.Enabled = &enabled
 		out.Slack.Mode = ch.Slack.Mode
+		out.Slack.AppID = ch.Slack.AppID
+		out.Slack.ConfigToken = ch.Slack.ConfigToken
+		out.Slack.CommandURL = ch.Slack.CommandURL
 
 		if enabled && logger != nil {
 			logger.Printf("[channels] DB config: Slack enabled mode=%s", out.Slack.GetMode())
@@ -86,5 +89,3 @@ func anyChannelEnabled(ch config.ChannelsConfig) bool {
 		ch.Email.IsEmailEnabled() ||
 		ch.Slack.IsSlackEnabled()
 }
-
-

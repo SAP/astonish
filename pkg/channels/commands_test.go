@@ -227,9 +227,10 @@ func TestHelpCommand(t *testing.T) {
 		Handler:     func(ctx context.Context, cc CommandContext) (string, error) { return "", nil },
 	})
 	r.Register(&Command{
-		Name:        "bar",
-		Description: "does bar things",
-		Handler:     func(ctx context.Context, cc CommandContext) (string, error) { return "", nil },
+		Name:          "bar",
+		Description:   "does bar things",
+		SessionScoped: true,
+		Handler:       func(ctx context.Context, cc CommandContext) (string, error) { return "", nil },
 	})
 	r.Register(helpCommand(r))
 
@@ -246,3 +247,36 @@ func TestHelpCommand(t *testing.T) {
 		}
 	}
 }
+
+func TestHelpCommandUsesPresenter(t *testing.T) {
+	r := NewCommandRegistry()
+	r.Register(&Command{
+		Name:        "foo",
+		Description: "does foo things",
+		Handler:     func(ctx context.Context, cc CommandContext) (string, error) { return "", nil },
+	})
+	r.Register(&Command{
+		Name:          "bar",
+		Description:   "does bar things",
+		SessionScoped: true,
+		Handler:       func(ctx context.Context, cc CommandContext) (string, error) { return "", nil },
+	})
+	r.Register(helpCommand(r))
+
+	resp, err := r.Execute(context.Background(), "/help", CommandContext{Presenter: testPresenter{}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(resp, "/test-foo") {
+		t.Fatalf("presented command name missing from help output:\n%s", resp)
+	}
+	if strings.Contains(resp, "/test-bar") || strings.Contains(resp, "does bar things") {
+		t.Fatalf("session-scoped command should be hidden by presenter:\n%s", resp)
+	}
+}
+
+type testPresenter struct{}
+
+func (testPresenter) FormatCommandName(name string) string { return "/test-" + name }
+
+func (testPresenter) ShouldExposeCommand(cmd *Command) bool { return cmd != nil && !cmd.SessionScoped }

@@ -1440,6 +1440,14 @@ type SlackConfig struct {
 	AppToken string `yaml:"app_token,omitempty" json:"app_token,omitempty"`
 	// SigningSecret is used to verify incoming HTTP requests in Events API mode.
 	SigningSecret string `yaml:"signing_secret,omitempty" json:"signing_secret,omitempty"`
+	// AppID is the Slack App ID used for App Manifest command synchronization.
+	AppID string `yaml:"app_id,omitempty" json:"app_id,omitempty"`
+	// ConfigToken is a Slack app configuration token used for App Manifest APIs.
+	// Prefer storing it in the credential store as channels.slack.config_token.
+	ConfigToken string `yaml:"config_token,omitempty" json:"config_token,omitempty"`
+	// CommandURL is the HTTPS endpoint Slack should call for slash commands.
+	// Optional for Socket Mode; required for Events API command delivery.
+	CommandURL string `yaml:"command_url,omitempty" json:"command_url,omitempty"`
 	// ClientID is the Slack App's client ID (for OAuth multi-workspace installs).
 	ClientID string `yaml:"client_id,omitempty" json:"client_id,omitempty"`
 	// ClientSecret is the Slack App's client secret (for OAuth multi-workspace installs).

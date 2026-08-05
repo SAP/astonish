@@ -100,8 +100,11 @@ type PlatformEmailConfig struct {
 
 // PlatformSlackConfig holds non-secret Slack channel settings.
 type PlatformSlackConfig struct {
-	Enabled bool   `json:"enabled"`
-	Mode    string `json:"mode,omitempty"` // "socket" (default) or "events"
+	Enabled     bool   `json:"enabled"`
+	Mode        string `json:"mode,omitempty"`         // "socket" (default) or "events"
+	AppID       string `json:"app_id,omitempty"`       // Slack App ID for manifest updates
+	ConfigToken string `json:"config_token,omitempty"` // Deprecated plaintext fallback; prefer platform secret
+	CommandURL  string `json:"command_url,omitempty"`  // HTTPS endpoint for slash commands
 }
 
 // OrgSettings represents organization-wide configuration visible to all

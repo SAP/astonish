@@ -74,6 +74,9 @@ type CommandContext struct {
 	// Manager is the ChannelManager that processed this command.
 	// Used by fleet commands to manage fleet sessions and route messages.
 	Manager *ChannelManager
+
+	// Presenter optionally adapts command display for a specific channel.
+	Presenter CommandPresenter
 }
 
 // CommandFunc is the handler signature for a slash command.
@@ -86,6 +89,9 @@ type Command struct {
 	Name string
 	// Description is a short human-readable description for /help.
 	Description string
+	// SessionScoped marks commands whose effect depends on the current conversation session.
+	// Threaded channels should only expose these when the invocation carries thread context.
+	SessionScoped bool
 	// Handler is the function that executes the command.
 	Handler CommandFunc
 }
@@ -219,8 +225,9 @@ func statusCommand() *Command {
 
 func newSessionCommand() *Command {
 	return &Command{
-		Name:        "new",
-		Description: "Start a fresh conversation (new session)",
+		Name:          "new",
+		Description:   "Start a fresh conversation (new session)",
+		SessionScoped: true,
 		Handler: func(ctx context.Context, cc CommandContext) (string, error) {
 			if cc.SessionService == nil {
 				return welcomeMessage(cc.SenderName), nil
@@ -250,8 +257,9 @@ func welcomeMessage(name string) string {
 
 func distillCommand() *Command {
 	return &Command{
-		Name:        "distill",
-		Description: "Distill the last task into a reusable flow",
+		Name:          "distill",
+		Description:   "Distill the last task into a reusable flow",
+		SessionScoped: true,
 		Handler: func(ctx context.Context, cc CommandContext) (string, error) {
 			if cc.Distiller == nil {
 				return "Flow distillation is not available.", nil
@@ -386,7 +394,14 @@ func helpCommand(registry *CommandRegistry) *Command {
 			var b strings.Builder
 			b.WriteString("Available commands:\n")
 			for _, cmd := range registry.List() {
-				b.WriteString(fmt.Sprintf("  /%s — %s\n", cmd.Name, cmd.Description))
+				if cc.Presenter != nil && !cc.Presenter.ShouldExposeCommand(cmd) {
+					continue
+				}
+				name := "/" + cmd.Name
+				if cc.Presenter != nil {
+					name = cc.Presenter.FormatCommandName(cmd.Name)
+				}
+				b.WriteString(fmt.Sprintf("  %s — %s\n", name, cmd.Description))
 			}
 			return b.String(), nil
 		},

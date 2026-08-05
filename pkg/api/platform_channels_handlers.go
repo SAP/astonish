@@ -308,9 +308,6 @@ func PlatformAdminSaveChannelHandler(w http.ResponseWriter, r *http.Request) {
 		if v, ok := body.Config["app_id"].(string); ok {
 			cfg.AppID = v
 		}
-		if v, ok := body.Config["config_token"].(string); ok {
-			cfg.ConfigToken = v
-		}
 		if v, ok := body.Config["command_url"].(string); ok {
 			cfg.CommandURL = v
 		}

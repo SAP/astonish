@@ -702,7 +702,7 @@ func (s *SlackChannel) handleSlashCommandWithThread(ctx context.Context, cmd sla
 
 	canonicalCommand := "/" + name
 	text := strings.TrimSpace(strings.Join([]string{canonicalCommand, cmd.Text}, " "))
-	inboundID := firstNonEmpty(cmd.TriggerID, cmd.Command+":"+cmd.UserID)
+	inboundID := firstNonEmptyOrGeneratedID(cmd.TriggerID, cmd.Command+":"+cmd.UserID)
 	s.storeResponseURL(inboundID, cmd.ResponseURL)
 	inbound := channels.InboundMessage{
 		ID:         inboundID,
@@ -716,8 +716,9 @@ func (s *SlackChannel) handleSlashCommandWithThread(ctx context.Context, cmd sla
 		Timestamp:  time.Now(),
 		Raw:        cmd,
 	}
+	handlerCtx := context.WithoutCancel(ctx)
 	go func() {
-		if err := s.handler(ctx, inbound); err != nil {
+		if err := s.handler(handlerCtx, inbound); err != nil {
 			s.logger.Printf("[slack] Handler error for slash command %s from %s: %v", cmd.Command, cmd.UserID, err)
 		}
 	}()
@@ -1004,6 +1005,13 @@ func firstNonEmpty(values ...string) string {
 		if value != "" {
 			return value
 		}
+	}
+	return ""
+}
+
+func firstNonEmptyOrGeneratedID(values ...string) string {
+	if value := firstNonEmpty(values...); value != "" {
+		return value
 	}
 	return fmt.Sprintf("slack-command-%d", time.Now().UnixNano())
 }

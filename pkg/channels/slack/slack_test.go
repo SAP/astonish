@@ -109,6 +109,39 @@ func TestHandleSlashCommandWithThreadRoutesRegistryCommandToThread(t *testing.T)
 	}
 }
 
+func TestHandleSlashCommandDetachesHandlerFromCancelledRequestContext(t *testing.T) {
+	registry := channels.NewCommandRegistry()
+	registry.Register(&channels.Command{Name: "status", Description: "Show status"})
+	ch := New(&Config{AllowFrom: []string{"U123"}, Commands: registry}, log.Default())
+
+	ctxCh := make(chan context.Context, 1)
+	ch.handler = func(ctx context.Context, msg channels.InboundMessage) error {
+		ctxCh <- ctx
+		return nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	got := ch.HandleSlashCommand(ctx, slackapi.SlashCommand{
+		Command:   "/astonish-status",
+		UserID:    "U123",
+		ChannelID: "D123",
+		TriggerID: "TRIGGER123",
+	})
+	if got != "Running /astonish-status…" {
+		t.Fatalf("response = %q, want running acknowledgement", got)
+	}
+
+	select {
+	case handlerCtx := <-ctxCh:
+		if err := handlerCtx.Err(); err != nil {
+			t.Fatalf("handler context is cancelled: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected slash command to be routed to channel handler")
+	}
+}
+
 func TestHandleSlashCommandRoutesRegistryCommand(t *testing.T) {
 	registry := channels.NewCommandRegistry()
 	registry.Register(&channels.Command{Name: "status", Description: "Show status"})

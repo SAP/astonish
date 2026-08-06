@@ -203,8 +203,14 @@ func newModel(parent context.Context, cfg Config) model {
 	tr.SessionID = info.SessionID
 	tr.Provider = info.Provider
 	tr.Model = info.Model
+	// Code mode renders a linear reasoning thread (messages persist, tools
+	// group, a message breaks the group). Studio/platform keeps sticky-agent.
+	tr.LinearThread = info.Mode == "code"
 	if info.Usage != nil {
 		tr.LastUsage = &events.Usage{Input: info.Usage.Input, Output: info.Usage.Output, Total: info.Usage.Total}
+	}
+	if info.ContextTokens > 0 {
+		tr.ContextTokens = info.ContextTokens
 	}
 	for _, n := range info.Notices {
 		tr.Apply(events.NewSystem(n))

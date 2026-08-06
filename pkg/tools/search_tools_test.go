@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -915,70 +914,6 @@ func TestFindFiles_GoFallbackDoublestar(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-func TestGoGrep_PathAndDoublestarGlobs(t *testing.T) {
-	tmpDir := t.TempDir()
-	srcDir := filepath.Join(tmpDir, "src")
-	if err := os.MkdirAll(srcDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(srcDir, "foo.go"), []byte("package src\nfunc UniqueGoGrepMarker() {}\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(tmpDir, "other.go"), []byte("package main\nfunc UniqueGoGrepMarker() {}\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	t.Run("nested doublestar glob", func(t *testing.T) {
-		matches, err := goGrep(context.Background(), "UniqueGoGrepMarker", tmpDir, []string{"src/**/*.go"}, true, false, 50)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(matches) != 1 {
-			t.Fatalf("expected 1 match under src/**/*.go, got %d: %#v", len(matches), matches)
-		}
-		if !strings.Contains(matches[0].File, "src"+string(filepath.Separator)+"foo.go") {
-			t.Fatalf("unexpected file: %s", matches[0].File)
-		}
-	})
-
-	t.Run("basename glob", func(t *testing.T) {
-		matches, err := goGrep(context.Background(), "UniqueGoGrepMarker", tmpDir, []string{"*.go"}, true, false, 50)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(matches) != 2 {
-			t.Fatalf("expected 2 matches for *.go, got %d", len(matches))
-		}
-	})
-
-	t.Run("non matching path glob", func(t *testing.T) {
-		matches, err := goGrep(context.Background(), "UniqueGoGrepMarker", tmpDir, []string{"lib/**/*.go"}, true, false, 50)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(matches) != 0 {
-			t.Fatalf("expected 0 matches for lib/**/*.go, got %d", len(matches))
-		}
-	})
-}
-
-// TestGoGrep_HonorsContextTimeout verifies the Go fallback aborts with the
-// timeout sentinel when its context is done, instead of walking a huge tree.
-func TestGoGrep_HonorsContextTimeout(t *testing.T) {
-	dir := t.TempDir()
-	// A few files so the walk has something to iterate.
-	for i := 0; i < 5; i++ {
-		os.WriteFile(filepath.Join(dir, fmt.Sprintf("f%d.go", i)), []byte("package x\n// marker\n"), 0644)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // already expired
-
-	_, err := goGrep(ctx, "marker", dir, nil, true, false, 50)
-	if !errors.Is(err, errGrepTimeout) {
-		t.Fatalf("expected errGrepTimeout on cancelled context, got %v", err)
 	}
 }
 

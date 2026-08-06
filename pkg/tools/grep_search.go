@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"google.golang.org/adk/tool"
+
+	"github.com/SAP/astonish/pkg/tools/ripgrep"
 )
 
 // grepSearchTimeout bounds how long a single grep_search may run. Without it, a
@@ -77,7 +79,7 @@ type ripgrepMatch struct {
 	} `json:"data"`
 }
 
-// GrepSearch searches for text patterns in files using ripgrep or Go fallback
+// GrepSearch searches for text patterns in files using ripgrep.
 func GrepSearch(ctx tool.Context, args GrepSearchArgs) (GrepSearchResult, error) {
 	start := time.Now()
 
@@ -120,46 +122,20 @@ func GrepSearch(ctx tool.Context, args GrepSearchArgs) (GrepSearchResult, error)
 	}
 
 	// Bound the total search time so a runaway walk (e.g. over ~/go/pkg/mod)
-	// cannot hang the turn. Applies to both the ripgrep and Go fallback paths.
+	// cannot hang the turn.
 	runCtx, cancel := context.WithTimeout(context.Background(), grepSearchTimeout)
 	defer cancel()
 
-	// Try ripgrep first, fall back to Go implementation
+	// Ripgrep is the only backend: it is gitignore-aware, fast, and supports
+	// type filters, multiline, and context lines. It is guaranteed available by
+	// pkg/tools/ripgrep (system rg or the pinned auto-provisioned build), so
+	// there is no pure-Go fallback.
 	matches, truncatedReason, err := tryRipgrep(runCtx, args, absPath, maxResults, headLimit)
 	if err != nil {
 		if errors.Is(err, errGrepTimeout) {
 			return GrepSearchResult{}, grepTimeoutError(absPath)
 		}
-		// Check if unsupported features were requested without ripgrep
-		unsupported := []string{}
-		if args.Multiline {
-			unsupported = append(unsupported, "multiline")
-		}
-		if args.Type != "" {
-			unsupported = append(unsupported, "type")
-		}
-		if args.Context > 0 {
-			unsupported = append(unsupported, "context")
-		}
-		if args.BeforeContext > 0 {
-			unsupported = append(unsupported, "before_context")
-		}
-		if args.AfterContext > 0 {
-			unsupported = append(unsupported, "after_context")
-		}
-		if len(unsupported) > 0 {
-			return GrepSearchResult{}, fmt.Errorf("ripgrep required for %s but unavailable: %w",
-				strings.Join(unsupported, ", "), err)
-		}
-		// Fallback to Go implementation (supports literal, regex, case, globs, cap)
-		matches, err = goGrep(runCtx, args.Pattern, absPath, mergeGlobs(args), args.CaseSensitive, args.Regex, maxResults)
-		if err != nil {
-			if errors.Is(err, errGrepTimeout) {
-				return GrepSearchResult{}, grepTimeoutError(absPath)
-			}
-			return GrepSearchResult{}, err
-		}
-		truncatedReason = ""
+		return GrepSearchResult{}, err
 	}
 
 	capped := len(matches) >= maxResults
@@ -188,21 +164,13 @@ func grepTimeoutError(searchPath string) error {
 		grepSearchTimeout, searchPath)
 }
 
-// mergeGlobs combines IncludeGlobs and the single Glob field into one slice
-func mergeGlobs(args GrepSearchArgs) []string {
-	globs := append([]string{}, args.IncludeGlobs...)
-	if args.Glob != "" {
-		globs = append(globs, args.Glob)
-	}
-	return globs
-}
-
 // tryRipgrep attempts to use ripgrep for searching
 func tryRipgrep(ctx context.Context, args GrepSearchArgs, searchPath string, maxResults, headLimit int) ([]GrepMatch, string, error) {
-	// Check if rg is available
-	rgPath, err := exec.LookPath("rg")
+	// Resolve rg: an installed rg on PATH, else the managed (auto-provisioned)
+	// copy. This makes ripgrep effectively always available for code search.
+	rgPath, err := ripgrep.ResolvePath()
 	if err != nil {
-		return nil, "", fmt.Errorf("ripgrep not found")
+		return nil, "", fmt.Errorf("ripgrep not found: %w", err)
 	}
 
 	// Build rg command
@@ -345,168 +313,4 @@ func parseRipgrepOutput(output []byte, maxResults int) ([]GrepMatch, error) {
 	}
 
 	return matches, nil
-}
-
-// goGrep is a pure Go fallback for grep functionality
-func goGrep(ctx context.Context, pattern, searchPath string, includeGlobs []string, caseSensitive, isRegex bool, maxResults int) ([]GrepMatch, error) {
-	var matches []GrepMatch
-
-	// Prepare the matcher
-	var matcher func(line string) bool
-	if isRegex {
-		flags := ""
-		if !caseSensitive {
-			flags = "(?i)"
-		}
-		re, err := regexp.Compile(flags + pattern)
-		if err != nil {
-			return nil, fmt.Errorf("invalid regex pattern: %w", err)
-		}
-		matcher = func(line string) bool {
-			return re.MatchString(line)
-		}
-	} else {
-		searchPattern := pattern
-		if !caseSensitive {
-			searchPattern = strings.ToLower(pattern)
-		}
-		matcher = func(line string) bool {
-			searchLine := line
-			if !caseSensitive {
-				searchLine = strings.ToLower(line)
-			}
-			return strings.Contains(searchLine, searchPattern)
-		}
-	}
-
-	err := filepath.Walk(searchPath, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil // Skip files we can't access
-		}
-		// Honor the overall timeout so a huge tree can't hang the turn.
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-
-		// Skip directories
-		if info.IsDir() {
-			name := info.Name()
-			// Skip excluded directories
-			if defaultExclusions[name] {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-
-		// Check if we've hit max results
-		if len(matches) >= maxResults {
-			return filepath.SkipAll
-		}
-
-		// Check include globs (basename Match for simple patterns;
-		// doublestar against relative path when pattern has ** or /).
-		if len(includeGlobs) > 0 {
-			matched := false
-			relPath, _ := filepath.Rel(searchPath, path)
-			for _, glob := range includeGlobs {
-				if strings.Contains(glob, "**") || strings.Contains(glob, "/") {
-					if matchDoublestar(glob, relPath) {
-						matched = true
-						break
-					}
-					continue
-				}
-				if m, _ := filepath.Match(glob, info.Name()); m {
-					matched = true
-					break
-				}
-			}
-			if !matched {
-				return nil
-			}
-		}
-
-		// Skip binary files (simple heuristic: skip files without common text extensions)
-		if !isLikelyTextFile(path) {
-			return nil
-		}
-
-		// Search file
-		fileMatches, err := searchFileWithMatcher(path, matcher, maxResults-len(matches))
-		if err != nil {
-			return nil // Skip files we can't read
-		}
-
-		matches = append(matches, fileMatches...)
-		return nil
-	})
-
-	if err != nil && err != filepath.SkipAll {
-		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-			return nil, errGrepTimeout
-		}
-		return nil, err
-	}
-
-	return matches, nil
-}
-
-// searchFileWithMatcher searches for matches in a single file using a matcher function
-func searchFileWithMatcher(path string, matcher func(string) bool, maxMatches int) ([]GrepMatch, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	var matches []GrepMatch
-	scanner := bufio.NewScanner(file)
-	lineNum := 0
-
-	for scanner.Scan() {
-		lineNum++
-		line := scanner.Text()
-
-		if matcher(line) {
-			matches = append(matches, GrepMatch{
-				File:       path,
-				LineNumber: lineNum,
-				Content:    strings.TrimSpace(line),
-				Kind:       "match",
-			})
-
-			if len(matches) >= maxMatches {
-				break
-			}
-		}
-	}
-
-	return matches, nil
-}
-
-// isLikelyTextFile checks if a file is likely a text file based on extension
-func isLikelyTextFile(path string) bool {
-	textExtensions := map[string]bool{
-		".go": true, ".js": true, ".ts": true, ".jsx": true, ".tsx": true,
-		".py": true, ".rb": true, ".java": true, ".c": true, ".cpp": true,
-		".h": true, ".hpp": true, ".cs": true, ".rs": true, ".swift": true,
-		".kt": true, ".scala": true, ".php": true, ".pl": true, ".pm": true,
-		".sh": true, ".bash": true, ".zsh": true, ".fish": true,
-		".html": true, ".htm": true, ".css": true, ".scss": true, ".less": true,
-		".json": true, ".xml": true, ".yaml": true, ".yml": true, ".toml": true,
-		".md": true, ".txt": true, ".rst": true, ".adoc": true,
-		".sql": true, ".graphql": true, ".proto": true,
-		".env": true, ".gitignore": true, ".dockerignore": true,
-		".makefile": true, ".dockerfile": true,
-		".vue": true, ".svelte": true, ".astro": true,
-	}
-
-	ext := strings.ToLower(filepath.Ext(path))
-	if ext == "" {
-		// Check for common extensionless files
-		base := strings.ToLower(filepath.Base(path))
-		return base == "makefile" || base == "dockerfile" || base == "readme" || base == "license"
-	}
-
-	return textExtensions[ext]
 }

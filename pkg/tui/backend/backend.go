@@ -24,6 +24,12 @@ type Info struct {
 	WorkingDir string
 	// Usage is cumulative token usage known when opening/resuming a session.
 	Usage     *events.Usage
+	// ContextTokens is the current context-window occupancy known when
+	// opening/resuming a session (0 if unknown). Unlike Usage (which is
+	// cumulative across the whole session), this is "how full is the context
+	// right now" and drives the header's Context figure immediately on resume,
+	// before the first new turn reports usage.
+	ContextTokens int64
 	IsResumed bool
 	// AutoApprove reflects the session tool-approval mode for footer chrome.
 	AutoApprove bool

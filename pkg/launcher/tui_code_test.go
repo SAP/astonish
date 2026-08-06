@@ -512,6 +512,56 @@ func TestEmitEstimatedContext_ReportsWhenNoProviderUsage(t *testing.T) {
 	}
 }
 
+// TestResumeSession_PopulatesContextTokens verifies that resuming a session
+// estimates its context occupancy up front, so Info().ContextTokens is > 0
+// immediately — the header shows real utilization on load rather than
+// "Context 0" until the next turn.
+func TestResumeSession_PopulatesContextTokens(t *testing.T) {
+	dir := t.TempDir()
+	b := newFileStoreBackend(t, dir, codeUserID)
+	ctx := context.Background()
+	sessionID := seedSession(t, b, strings.Repeat("some project analysis text ", 200))
+
+	// Before resume, no context is known.
+	if got := b.Info().ContextTokens; got != 0 {
+		t.Fatalf("ContextTokens before resume = %d, want 0", got)
+	}
+
+	if _, err := b.ResumeSession(ctx, sessionID); err != nil {
+		t.Fatalf("ResumeSession: %v", err)
+	}
+
+	info := b.Info()
+	if info.ContextTokens <= 0 {
+		t.Fatalf("ContextTokens after resume = %d, want > 0", info.ContextTokens)
+	}
+	if !info.IsResumed {
+		t.Error("expected IsResumed=true after resume")
+	}
+}
+
+// TestResumeSession_EmptySessionNoContext verifies an empty resumed session
+// reports zero context (no phantom utilization).
+func TestResumeSession_EmptySessionNoContext(t *testing.T) {
+	dir := t.TempDir()
+	b := newFileStoreBackend(t, dir, codeUserID)
+	ctx := context.Background()
+	resp, err := b.sessionSvc.Create(ctx, &adksession.CreateRequest{
+		AppName: codeAppName,
+		UserID:  b.effectiveUserID(),
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+
+	if _, err := b.ResumeSession(ctx, resp.Session.ID()); err != nil {
+		t.Fatalf("ResumeSession: %v", err)
+	}
+	if got := b.Info().ContextTokens; got != 0 {
+		t.Fatalf("ContextTokens for empty session = %d, want 0", got)
+	}
+}
+
 // TestEmitUsage_ReportsRealMetadata verifies real provider usage is emitted and
 // signals that the estimate fallback should be skipped.
 func TestEmitUsage_ReportsRealMetadata(t *testing.T) {

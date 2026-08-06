@@ -23,6 +23,7 @@ import (
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/provider"
 	persistentsession "github.com/SAP/astonish/pkg/session"
+	"github.com/SAP/astonish/pkg/tools/ripgrep"
 	"github.com/SAP/astonish/pkg/tui"
 	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
@@ -110,6 +111,17 @@ func RunCodeTUI(ctx context.Context, cfg *CodeConfig) error {
 	// tool resolve against the process working directory (Claude-Code
 	// semantics). This is the single most important line in code mode.
 	forceHostExecution(appConfig)
+
+	// Ensure ripgrep is available for the code-search tools. ripgrep is far
+	// superior to the pure-Go fallback (gitignore-aware, faster, richer
+	// filters), so code mode provisions it: prefer a system rg, else download
+	// the pinned build once and cache it. Done in the background so startup and
+	// the first search are not blocked; ResolvePath memoizes the result.
+	go func() {
+		if _, rgErr := ripgrep.ResolvePath(); rgErr != nil {
+			slog.Debug("ripgrep provisioning failed; grep_search will use the Go fallback", "error", rgErr)
+		}
+	}()
 
 	// Resolve the LLM. Explicit CLI flags win; otherwise fall back to the
 	// configured cascade default (general.default_provider / default_model in
@@ -314,8 +326,12 @@ type localAgentBackend struct {
 	model       string
 	configured  bool
 	usage       *events.Usage
-	resumed     bool
-	closed      bool
+	// contextTokens is the current context-window occupancy (estimated from the
+	// session contents when the provider reports no usage). Set on resume so the
+	// header shows real utilization immediately, updated after each turn.
+	contextTokens int64
+	resumed       bool
+	closed        bool
 }
 
 func (b *localAgentBackend) Info() backend.Info {
@@ -326,15 +342,16 @@ func (b *localAgentBackend) Info() backend.Info {
 		notices = append(notices, "No AI model configured yet. Type /model to choose a provider and model.")
 	}
 	return backend.Info{
-		SessionID:   b.sessionID,
-		Provider:    b.provider,
-		Model:       b.model,
-		Mode:        "code",
-		WorkingDir:  b.workingDir,
-		Usage:       cloneUsage(b.usage),
-		IsResumed:   b.resumed,
-		AutoApprove: b.autoApprove,
-		Notices:     notices,
+		SessionID:     b.sessionID,
+		Provider:      b.provider,
+		Model:         b.model,
+		Mode:          "code",
+		WorkingDir:    b.workingDir,
+		Usage:         cloneUsage(b.usage),
+		ContextTokens: b.contextTokens,
+		IsResumed:     b.resumed,
+		AutoApprove:   b.autoApprove,
+		Notices:       notices,
 	}
 }
 
@@ -696,18 +713,21 @@ func (b *localAgentBackend) emitUsage(event *session.Event, emit func(string, ma
 	return true
 }
 
-// emitEstimatedContext estimates the current context-window fill from all
-// events stored in the session and emits it as a usage event. Used when the
-// provider does not report token usage. The estimate mirrors
-// session.EstimateTokens (~3 chars/token) so it aligns with the compactor.
-func (b *localAgentBackend) emitEstimatedContext(ctx context.Context, sessionID string, emit func(string, map[string]any)) {
+// estimateContextTokens estimates the current context-window fill from all
+// events stored in the session. Mirrors session.EstimateTokens (~3 chars/token)
+// so it aligns with the compactor. Returns 0 when the session cannot be read or
+// is empty.
+func (b *localAgentBackend) estimateContextTokens(ctx context.Context, sessionID string) int64 {
+	if sessionID == "" {
+		return 0
+	}
 	resp, err := b.sessionSvc.Get(ctx, &session.GetRequest{
 		AppName:   codeAppName,
 		UserID:    b.effectiveUserID(),
 		SessionID: sessionID,
 	})
 	if err != nil || resp == nil || resp.Session == nil {
-		return
+		return 0
 	}
 	var contents []*genai.Content
 	for ev := range resp.Session.Events().All() {
@@ -717,8 +737,22 @@ func (b *localAgentBackend) emitEstimatedContext(ctx context.Context, sessionID 
 	}
 	est := persistentsession.EstimateTokens(contents)
 	if est <= 0 {
+		return 0
+	}
+	return int64(est)
+}
+
+// emitEstimatedContext estimates the current context-window fill from all
+// events stored in the session and emits it as a usage event. Used when the
+// provider does not report token usage.
+func (b *localAgentBackend) emitEstimatedContext(ctx context.Context, sessionID string, emit func(string, map[string]any)) {
+	est := b.estimateContextTokens(ctx, sessionID)
+	if est <= 0 {
 		return
 	}
+	b.mu.Lock()
+	b.contextTokens = est
+	b.mu.Unlock()
 	// Report as input tokens so it drives the header's context figure without
 	// inflating cumulative "Usage" output counts. The transcript uses the max
 	// input+output as the context occupancy.
@@ -829,9 +863,13 @@ func (b *localAgentBackend) ResumeSession(ctx context.Context, sessionID string)
 	if err != nil {
 		return nil, err
 	}
+	// Estimate the resumed session's context occupancy so the header shows real
+	// utilization immediately, instead of "Context 0" until the next turn.
+	ctxTokens := b.estimateContextTokens(ctx, sessionID)
 	b.mu.Lock()
 	b.sessionID = sessionID
 	b.resumed = true
+	b.contextTokens = ctxTokens
 	b.mu.Unlock()
 	return hist, nil
 }

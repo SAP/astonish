@@ -91,6 +91,15 @@ type Transcript struct {
 	// sticky utterance (replaces provisional content) instead of appending.
 	// Matches Studio "latest agent replaces bubble" mid-run behavior.
 	nextTextReplaces bool
+
+	// LinearThread renders the conversation as a chronological thread: each run
+	// of agent text becomes its own permanent message (never provisional, never
+	// replaced), and a message between tool groups starts a fresh tool fold so
+	// the layout is message → tools → message → tools as events arrive. Used by
+	// `astonish code`, where the full reasoning trail matters. When false
+	// (Studio/platform chat), the default sticky-agent behavior applies: one
+	// agent bubble per tool run, interstitial text collapsed for a cleaner chat.
+	LinearThread bool
 }
 
 // NewTranscript returns an empty transcript ready for reduction.
@@ -324,6 +333,22 @@ func (t *Transcript) appendAgentText(text string) {
 		return
 	}
 	t.Status = "Thinking…"
+
+	// Linear thread (code mode): each run of agent text is its own permanent
+	// message. Append only while the same message is still streaming (the agent
+	// bubble is the very last item); once a tool fold or anything else follows,
+	// start a NEW message so the thread reads message → tools → message → tools
+	// chronologically. Never provisional, never reordered below tools.
+	if t.LinearThread {
+		t.nextTextReplaces = false
+		if n := len(t.Items); n > 0 && t.Items[n-1].Kind == ItemAgent {
+			t.Items[n-1].Content += text
+			return
+		}
+		t.Items = append(t.Items, Item{Kind: ItemAgent, Content: text})
+		return
+	}
+
 	replace := t.nextTextReplaces
 	t.nextTextReplaces = false
 
@@ -525,13 +550,32 @@ func artifactTypeFromPath(path string) string {
 }
 
 func (t *Transcript) appendToolCall(ev Event) {
-	t.nextTextReplaces = true
 	step := ToolStep{
 		Name:   ev.ToolName,
 		ID:     ev.ToolID,
 		Args:   ev.Args,
 		Status: "running",
 	}
+
+	// Linear thread (code mode): tools group into a fold, but a message between
+	// tool groups breaks the group — so a fold is reusable only when it is the
+	// last item in the turn (nothing, not even an agent message, after it). New
+	// folds append chronologically at the end; no reordering below the agent.
+	if t.LinearThread {
+		if actIdx := t.trailingActivityInTurn(); actIdx >= 0 {
+			t.Items[actIdx].Steps = append(t.Items[actIdx].Steps, step)
+			t.Items[actIdx].Summary = summarizeSteps(t.Items[actIdx].Steps)
+			return
+		}
+		t.Items = append(t.Items, Item{
+			Kind:    ItemActivity,
+			Steps:   []ToolStep{step},
+			Summary: summarizeSteps([]ToolStep{step}),
+		})
+		return
+	}
+
+	t.nextTextReplaces = true
 
 	// Reuse the current activity fold only when no file diff has been emitted
 	// after it. Once a diff is shown, later tools must start a NEW fold so they
@@ -558,6 +602,20 @@ func (t *Transcript) appendToolCall(ev Event) {
 		t.Items = append(t.Items[:insertAt], append([]Item{act}, t.Items[insertAt:]...)...)
 	}
 	t.ensureAgentAfterActivity()
+}
+
+// trailingActivityInTurn returns the index of the current turn's activity fold
+// only when it is the very last item in the turn — i.e. tools are still running
+// consecutively with nothing (no agent message, file diff, or other surface)
+// after them. Used by linear-thread mode so a message between tool groups
+// breaks the group and forces a fresh fold.
+func (t *Transcript) trailingActivityInTurn() int {
+	if n := len(t.Items); n > 0 && t.Items[n-1].Kind == ItemActivity {
+		if n-1 >= t.turnStart() {
+			return n - 1
+		}
+	}
+	return -1
 }
 
 // reusableActivityInTurn returns the index of the current turn's last activity
@@ -611,7 +669,9 @@ func (t *Transcript) newActivityInsertIndex() int {
 }
 
 func (t *Transcript) appendToolResult(ev Event) {
-	t.nextTextReplaces = true
+	if !t.LinearThread {
+		t.nextTextReplaces = true
+	}
 	// Find matching running step in current turn activity (by ID, then name FIFO).
 	start := t.turnStart()
 	for i := len(t.Items) - 1; i >= start; i-- {
@@ -854,8 +914,12 @@ func (t *Transcript) LoadHistory(entries []HistoryMsg) {
 		case "user":
 			t.Apply(NewUser(e.Text))
 		case "agent":
-			// Full historical agent messages replace sticky content within a turn.
-			t.nextTextReplaces = true
+			// Full historical agent messages replace sticky content within a
+			// turn (Studio). In linear mode each historical agent message stays
+			// its own bubble, matching the live thread on resume.
+			if !t.LinearThread {
+				t.nextTextReplaces = true
+			}
 			t.Apply(NewText(e.Text))
 		case "thinking":
 			t.Apply(Event{Kind: KindThinking, Text: e.Text})

@@ -94,6 +94,11 @@ build:
 build-treesitter-lib:
 	$(MAKE) -C pkg/codeintel/native
 
+# Regenerate the embedded tree-sitter C sources that local code mode compiles
+# on first run. Run after changing grammar versions, then bump embed.Version.
+treesitter-embed:
+	$(MAKE) -C pkg/codeintel/native embed
+
 # Build the React UI
 build-ui:
 	@echo "Building React UI..."

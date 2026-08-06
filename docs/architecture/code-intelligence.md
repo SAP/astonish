@@ -165,6 +165,54 @@ TSX support). Rust can be added later if demand appears.
 - Language grammars compiled into one shared object at
   `/usr/lib/astonish/libastonish-treesitter.so`, packaged per sandbox backend
 
+### Library resolution and local auto-build
+
+The shared library is resolved lazily on the first structural-tool call by
+`treesitter.DefaultLibrary()` (`pkg/codeintel/internal/treesitter/bindings.go`),
+which tries, in order:
+
+1. `$ASTONISH_TREESITTER_LIB` (explicit override — fails fast if missing, never auto-builds).
+2. Next to the executable, then the current working directory (`libastonish-treesitter.{so,dylib}`).
+3. The previously auto-built cache under `<config-dir>/astonish/lib/<version>/`.
+4. The container/system install path `/usr/lib/astonish/libastonish-treesitter.so`.
+
+If none exist — the normal case for **local code mode**, which runs in the
+user's own environment rather than a sandbox container — the library is
+**built from embedded C sources on first use**:
+`pkg/codeintel/native/embed` `go:embed`s a ~2 MB gzip tarball of the tree-sitter
+runtime plus the five grammars, and `pkg/codeintel/native/builder.go` extracts
+it to a temp dir, runs a plain `cc -shared` (matching
+`pkg/codeintel/native/Makefile`), and caches the result under the config dir.
+The compile is one-time (a few seconds); subsequent runs load the cache.
+
+This path needs a C compiler (`cc`/`clang`/`gcc`, e.g. Xcode Command Line Tools
+on macOS). When none is available the tools return an actionable
+`ErrNoCompiler` message and the agent falls back to `grep_search`/`find_files` —
+code mode remains fully functional without tree-sitter, just without structural
+navigation.
+
+### Ripgrep provisioning
+
+`grep_search` requires ripgrep (`rg`) — it is **ripgrep-only, with no pure-Go
+fallback**. The former Go walker was not gitignore-aware and lacked type
+filters, multiline, and context lines, producing materially worse results, so it
+was removed. `pkg/tools/ripgrep` (`ResolvePath`) guarantees rg is available: it
+prefers an `rg` already on `PATH` (respecting the user's install), and otherwise
+downloads the **pinned official release** for the host OS/arch, verifies its
+SHA256 against a checked-in manifest, and caches the binary under
+`<config-dir>/astonish/bin/rg`. Code mode kicks this off in the background at
+startup (`RunCodeTUI`) so the first search is not blocked; the result is
+memoized for the process. If `rg` cannot be resolved, `grep_search` errors
+rather than silently degrading. `find_files` still keeps a Go listing fallback.
+Bump `ripgrep.Version` and the target checksums together when upgrading.
+Sandboxes still apt-install `ripgrep` via `CoreToolInstallCommands()` — the
+download path is specifically for local code mode, which has no package manager
+guarantee.
+
+Regenerate the embedded tarball with `make treesitter-embed` after changing any
+grammar version, and bump `embed.Version` (which namespaces the on-disk cache so
+upgrades rebuild rather than load a stale library).
+
 ```
 pkg/codeintel/
 |-- codeintel.go          # Public API: Index, Query functions

@@ -487,6 +487,106 @@ func TestTranscript_LoadHistory_Sticky(t *testing.T) {
 	}
 }
 
+func TestLinearThread_MessageToolMessageToolOrder(t *testing.T) {
+	tr := NewTranscript()
+	tr.LinearThread = true
+	tr.Apply(NewUser("do it"))
+	tr.Apply(NewText("First, let me look."))
+	tr.Apply(NewToolCall("read_file", "1", map[string]any{"path": "a.go"}))
+	tr.Apply(NewToolResult("read_file", "1", "ok"))
+	tr.Apply(NewText("Now I'll run something."))
+	tr.Apply(NewToolCall("shell_command", "2", map[string]any{"command": "ls"}))
+	tr.Apply(NewToolResult("shell_command", "2", "ok"))
+	tr.Apply(NewDone())
+
+	// Chronological thread: user, agent, activity, agent, activity.
+	if got := itemKinds(tr); got != "user,agent,activity,agent,activity" {
+		t.Fatalf("kinds=%q want user,agent,activity,agent,activity", got)
+	}
+	if tr.Items[1].Content != "First, let me look." {
+		t.Fatalf("first agent=%q", tr.Items[1].Content)
+	}
+	if tr.Items[3].Content != "Now I'll run something." {
+		t.Fatalf("second agent=%q", tr.Items[3].Content)
+	}
+	// Messages must be permanent, never provisional/collapsed/replaced.
+	if tr.Items[1].Provisional || tr.Items[3].Provisional {
+		t.Fatal("linear agents must never be provisional")
+	}
+}
+
+func TestLinearThread_MessageBreaksToolGroup(t *testing.T) {
+	tr := NewTranscript()
+	tr.LinearThread = true
+	tr.Apply(NewUser("go"))
+	tr.Apply(NewToolCall("read_file", "1", map[string]any{"path": "a.go"}))
+	tr.Apply(NewToolResult("read_file", "1", "ok"))
+	tr.Apply(NewToolCall("read_file", "2", map[string]any{"path": "b.go"}))
+	tr.Apply(NewToolResult("read_file", "2", "ok"))
+	tr.Apply(NewText("Found the issue."))
+	tr.Apply(NewToolCall("read_file", "3", map[string]any{"path": "c.go"}))
+	tr.Apply(NewToolResult("read_file", "3", "ok"))
+	tr.Apply(NewDone())
+
+	// A message between tool groups forces a fresh fold:
+	//   user, activity(2 steps), agent, activity(1 step)
+	if got := itemKinds(tr); got != "user,activity,agent,activity" {
+		t.Fatalf("kinds=%q want user,activity,agent,activity", got)
+	}
+	if len(tr.Items[1].Steps) != 2 {
+		t.Fatalf("first fold steps=%d want 2", len(tr.Items[1].Steps))
+	}
+	if len(tr.Items[3].Steps) != 1 {
+		t.Fatalf("second fold steps=%d want 1", len(tr.Items[3].Steps))
+	}
+}
+
+func TestLinearThread_InterstitialTextNonProvisional(t *testing.T) {
+	tr := NewTranscript()
+	tr.LinearThread = true
+	tr.Apply(NewUser("go"))
+	tr.Apply(NewToolCall("read_file", "1", map[string]any{"path": "a.go"}))
+	tr.Apply(NewToolResult("read_file", "1", "ok"))
+	tr.Apply(NewText("Mid-loop thought."))
+
+	// The interstitial text is immediately its own permanent bubble.
+	if got := itemKinds(tr); got != "user,activity,agent" {
+		t.Fatalf("kinds=%q want user,activity,agent", got)
+	}
+	if tr.Items[2].Provisional {
+		t.Fatal("linear interstitial text must not be provisional")
+	}
+	if tr.Items[2].Content != "Mid-loop thought." {
+		t.Fatalf("agent=%q", tr.Items[2].Content)
+	}
+}
+
+func TestLinearThread_LoadHistoryKeepsSeparateMessages(t *testing.T) {
+	tr := NewTranscript()
+	tr.LinearThread = true
+	tr.LoadHistory([]HistoryMsg{
+		{Kind: "user", Text: "hi"},
+		{Kind: "agent", Text: "thinking out loud"},
+		{Kind: "tool_call", ToolName: "read_file", ToolID: "1"},
+		{Kind: "tool_result", ToolName: "read_file", ToolID: "1", Result: "ok"},
+		{Kind: "agent", Text: "final answer"},
+	})
+	// Each historical agent message stays its own bubble:
+	//   user, agent, activity, agent
+	if got := itemKinds(tr); got != "user,agent,activity,agent" {
+		t.Fatalf("kinds=%q want user,agent,activity,agent", got)
+	}
+	if tr.Items[1].Content != "thinking out loud" {
+		t.Fatalf("first agent=%q", tr.Items[1].Content)
+	}
+	if tr.Items[3].Content != "final answer" {
+		t.Fatalf("second agent=%q", tr.Items[3].Content)
+	}
+	if tr.Items[1].Provisional || tr.Items[3].Provisional {
+		t.Fatal("history agents should not be provisional")
+	}
+}
+
 func itemKinds(tr *Transcript) string {
 	var b strings.Builder
 	for i, it := range tr.Items {

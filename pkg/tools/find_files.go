@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"google.golang.org/adk/tool"
+
+	"github.com/SAP/astonish/pkg/tools/ripgrep"
 )
 
 // FindFilesArgs defines arguments for the find_files tool
@@ -100,9 +102,9 @@ func FindFiles(ctx tool.Context, args FindFilesArgs) (FindFilesResult, error) {
 
 // tryRipgrepFiles uses rg --files with glob filtering for fast file finding
 func tryRipgrepFiles(pattern, searchPath string, maxResults int) ([]FoundFile, error) {
-	rgPath, err := exec.LookPath("rg")
+	rgPath, err := ripgrep.ResolvePath()
 	if err != nil {
-		return nil, fmt.Errorf("ripgrep not found")
+		return nil, fmt.Errorf("ripgrep not found: %w", err)
 	}
 
 	// Build rg command: rg --files --glob <pattern> <path>

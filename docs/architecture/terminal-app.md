@@ -118,7 +118,12 @@ The merged Markdown is injected as a `## Project Guidance` section in `SystemPro
 
 **Log isolation.** Because code mode runs the agent in-process while the bubbletea alt-screen owns the terminal, `RunCodeTUI` redirects the standard `log` writer and slog's default handler away from the terminal for the TUI's lifetime (`redirectLogsForTUI`). This prevents background log lines — notably ADK's `runner` `log.Printf("Event from an unknown agent: …")`, emitted for every event whose author (`chat`/`system`/`knowledge`) differs from the runner's root agent name — from corrupting the display. Studio chat never hit this because its logs go to the daemon log file. In `--debug`, the logs are written to `<configDir>/code-debug.log` instead of being discarded, and the previous logging config is restored on exit.
 
+**Native prerequisites are self-provisioning.** Code mode runs on the user's own machine, not in a sandbox container, so the two native prerequisites are handled automatically rather than assumed pre-installed. The tree-sitter shared library (`libastonish-treesitter.{so,dylib}`) is **compiled from embedded C sources and cached on first use** when it is not already present — see [code-intelligence.md](code-intelligence.md#library-resolution-and-local-auto-build). This needs a C compiler (Xcode Command Line Tools on macOS); without one, the structural tools return an actionable error and the agent falls back to `grep_search`/`find_files`. **ripgrep is provisioned too:** `pkg/tools/ripgrep.ResolvePath` prefers an `rg` on `PATH` and otherwise downloads the pinned, SHA256-verified official release into `<config-dir>/astonish/bin/` (kicked off in the background at startup). `grep_search` is **ripgrep-only** — the naive pure-Go grep was removed, so if `rg` cannot be resolved the tool errors rather than silently returning worse results. So `astonish code` works out of the box on a stock machine, with tree-sitter navigation and full ripgrep search lighting up after the one-time setup.
+
+
 **Context usage in the header (estimated fallback).** The header shows `Context <used>/<window> (<pct>)` from `usage` events. Some providers — notably local OpenAI-compatible proxies — return no token usage metadata, which would leave the figure at `Context 0`. In that case `driveTurn` calls `emitEstimatedContext`, which estimates the current context fill from the session's accumulated contents (via `session.EstimateTokens`, the same ~3 chars/token heuristic the compactor uses) and emits a `usage` event flagged `estimated`. Estimated readings update the context-occupancy figure (`Transcript.ContextTokens`, tracked as a max) but are **not** accumulated into cumulative session usage, since each estimate represents the whole current context rather than a per-call delta.
+
+**Context on resume.** Both the estimate above and real provider usage only arrive *during a turn*, so a freshly resumed session would otherwise show `Context 0` until the next message. To avoid that, `ResumeSession` estimates the loaded session's context occupancy up front (`estimateContextTokens`, shared with `emitEstimatedContext`) and exposes it via `backend.Info().ContextTokens`. The TUI seeds `Transcript.ContextTokens` from `Info().ContextTokens` when resuming (`sessions.go`) and when opening into a resumed session (`newModel`), so the header reflects real utilization the moment the transcript loads. `Info().ContextTokens` is distinct from `Info().Usage` (which stays *cumulative* session usage); mixing the estimate into cumulative usage would over-count.
 
 ### Rollback (`/rollback`)
 
@@ -139,7 +144,7 @@ All UI state is driven by `events.Event`. The platform backend maps Studio SSE t
 
 `Transcript.Apply(Event)`:
 
-- Sticky agent bubble for streaming text
+- Sticky agent bubble for streaming text (Studio); code mode uses a linear thread (`LinearThread`, see [Linear thread (code mode)](#linear-thread-code-mode))
 - Tool activity folds for call/result pairs
 - Approval sets `Awaiting`; next user message is the approval response
 - Network denial prompts set `Awaiting`; the selected allow/deny key calls the Studio network-grant API directly
@@ -159,7 +164,7 @@ provider / concrete-model                auto-approve
 Enter send · ctrl+j newline · /help · ctrl+c quit
 ```
 
-The header intentionally stays a single row: the left side identifies the connected Astonish platform URL and logged-in user from the remote login config (in local code mode it shows `Astonish · code`); the right side shows **context utilization** — the primary metric when coding. `Transcript.ContextTokens` tracks the largest per-call token reading in the latest turn (an LLM tool loop grows the prompt each call, so the max reflects current context-window fill), fed by live `usage` SSE events (`headerUsageText` in `pkg/tui/app.go`). When the active model's context window is known (`contextWindowFor`, a domain-agnostic family-substring lookup), it renders as `Context <used>/<window> (<pct>%)`; otherwise just `Context <used>`. A compact cumulative session `Usage <total>` is appended after the context figure. Both fall back gracefully (`Context 0` before the first turn). The layout consumes the full reported terminal height so the footer help line lands on the final row instead of leaving a blank strip below the TUI.
+The header intentionally stays a single row: the left side identifies the connected Astonish platform URL and logged-in user from the remote login config (in local code mode it shows `Astonish · code`); the right side shows **context utilization** — the primary metric when coding. `Transcript.ContextTokens` tracks the largest per-call token reading in the latest turn (an LLM tool loop grows the prompt each call, so the max reflects current context-window fill), fed by live `usage` SSE events (`headerUsageText` in `pkg/tui/app.go`). When the active model's context window is known (`contextWindowFor`, a domain-agnostic family-substring lookup), it renders as `Context <used>/<window> (<pct>%)`; otherwise just `Context <used>`. A compact cumulative session `Usage <total>` is appended after the context figure. Both fall back gracefully (`Context 0` only for a brand-new session before its first turn; resumed sessions seed `ContextTokens` from `Info().ContextTokens` so they show real utilization on load). The layout consumes the full reported terminal height so the footer help line lands on the final row instead of leaving a blank strip below the TUI.
 
 The footer metadata shows the active provider and resolved concrete model when the platform reports them through model-status or `model_changed` events. It deliberately avoids displaying the raw model label `default`, because that is a cascade placeholder rather than useful runtime context; until a concrete model is known, the footer shows the provider with `model resolving…`.
 
@@ -190,6 +195,17 @@ During a turn with tools, there is **one** agent bubble:
 3. Tools fold into activity blocks, but a **code change closes the current fold**: any tool that runs *after* an `ItemFileDiff` starts a **new** activity fold so it renders below the change instead of merging back into the fold above the diff. Consecutive tools with no diff between them still share one fold (`reusableActivityInTurn` returns the last fold only when no `ItemFileDiff` follows it).
 4. Layout order interleaves folds and diffs chronologically, with the sticky agent last: `user → (activity → file_diff?)* → agent`. Each `ItemFileDiff` is inserted immediately after the activity fold that produced it (`fileDiffInsertIndex`), and `ensureAgentAfterActivity` keeps the agent bubble after the final tool surface.
 5. On `done`, provisional is cleared and the last text is rendered as the full agent response (markdown/code).
+
+### Linear thread (code mode)
+
+Code mode (`astonish code`) opts out of the sticky-agent collapse and renders a **chronological reasoning trail** instead. `Transcript.LinearThread` is set from `info.Mode == "code"` in `newModel`; Studio/platform chat leaves it `false` and keeps the sticky behavior above.
+
+When `LinearThread` is true:
+
+1. Each run of agent text becomes its **own permanent message**. Streaming text appends to the current bubble only while that bubble is still the last item; once a tool fold (or anything else) follows, the next text starts a **new** `ItemAgent`. Messages are never `Provisional` (they render as regular markdown immediately) and are never replaced or reordered below tools — `nextTextReplaces` and `ensureAgentAfterActivity` are bypassed.
+2. Tools still group into activity folds, but a **message between tool groups breaks the group**: a fold is reusable only when it is the trailing item in the turn (`trailingActivityInTurn`), so `tools → message → tools` produces two separate folds. The Studio "close the fold on a code change" rule is subsumed by this stricter check.
+3. The resulting layout is chronological: `user → agent → activity → agent → activity → …` as events arrive.
+4. `LoadHistory` mirrors the live behavior on resume: the `agent` branch skips `nextTextReplaces` when `LinearThread` is set, so each historical agent message is preserved as its own bubble rather than collapsed into one per turn.
 
 ## Rendering roadmap
 

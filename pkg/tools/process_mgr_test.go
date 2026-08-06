@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -326,5 +327,77 @@ func TestShellCommand_PTY_ExitCode(t *testing.T) {
 	_ = err // may or may not have error depending on implementation
 	if result.ExitCode != nil && *result.ExitCode != 42 {
 		t.Fatalf("expected exit code 42, got %d", *result.ExitCode)
+	}
+}
+
+// TestShellCommand_PagerDisabled verifies the child environment suppresses the
+// auto-pager (so git/less-style CLIs don't hang waiting for keypresses) while
+// keeping the PTY. We check the env is exported to the command.
+func TestShellCommand_PagerDisabled(t *testing.T) {
+	result, err := ShellCommand(nil, ShellCommandArgs{
+		Command: "echo pager=$PAGER git_pager=$GIT_PAGER prompt=$GIT_TERMINAL_PROMPT",
+	})
+	if err != nil {
+		t.Fatalf("ShellCommand error: %v", err)
+	}
+	out := result.Stdout
+	for _, want := range []string{"pager=cat", "git_pager=cat", "prompt=0"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected env %q in output, got %q", want, out)
+		}
+	}
+}
+
+// TestWaitForShellSession_CancelKillsProcess verifies that cancelling the
+// context aborts a long-running command promptly (the Esc-cancel path) instead
+// of waiting for the timeout, and kills the child process.
+func TestWaitForShellSession_CancelKillsProcess(t *testing.T) {
+	pm := NewProcessManager()
+	defer pm.Cleanup()
+
+	sess, err := pm.Start("sleep 60", "", 24, 80)
+	if err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	// Cancel shortly after we begin waiting.
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	// Large timeout so only cancellation can end this quickly.
+	result, err := waitForShellSession(ctx, pm, sess, 3600)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected a cancellation error")
+	}
+	if result.TimedOut {
+		t.Fatal("should have been cancelled, not timed out")
+	}
+	if elapsed > 3*time.Second {
+		t.Fatalf("cancellation was not prompt: took %s", elapsed)
+	}
+	// The process should have been killed.
+	time.Sleep(200 * time.Millisecond)
+	if sess.IsRunning() {
+		t.Fatal("process still running after cancellation")
+	}
+}
+
+// TestWaitForShellSession_NilContext confirms a nil context disables the cancel
+// case without panicking. The nil path is reached in practice via
+// ShellCommand(nil, ...) (a nil tool.Context), so we exercise it through the
+// public entry point rather than passing a literal nil context.Context.
+func TestWaitForShellSession_NilContext(t *testing.T) {
+	result, err := ShellCommand(nil, ShellCommandArgs{Command: "echo done"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(result.Stdout, "done") {
+		t.Fatalf("expected output 'done', got %q", result.Stdout)
 	}
 }

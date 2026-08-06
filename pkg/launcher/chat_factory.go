@@ -137,6 +137,16 @@ func mainThreadToolAllowlist() map[string]bool {
 		"shell_command":      true,
 		"grep_search":        true,
 		"find_files":         true,
+		// Interactive-terminal drive loop: shell_command runs in a PTY and can
+		// return waiting_for_input=true with a session_id; the agent responds via
+		// process_write (and inspects/ends the session with process_read/kill/list).
+		// These must be main-thread so the top-level coding agent can handle an
+		// interactive program directly — matching chat mode — instead of needing a
+		// search_tools detour to discover them.
+		"process_read":  true,
+		"process_write": true,
+		"process_kill":  true,
+		"process_list":  true,
 		"repo_map":           true,
 		"code_definition":    true,
 		"code_references":    true,

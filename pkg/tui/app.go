@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -118,6 +119,12 @@ type model struct {
 	// transcriptPlainLines is the visible transcript without ANSI styling; used
 	// for drag-to-copy selection in Bubble Tea mouse mode.
 	transcriptPlainLines []string
+	// mdCache memoizes expensive markdown rendering (goldmark + chroma) for
+	// agent message blocks, keyed by width+content. Finalized transcript items
+	// never change, so this turns per-event rendering from O(whole transcript)
+	// into O(changed item) and keeps the UI responsive under a burst of events.
+	// Cleared on resize (see layout/WindowSizeMsg) since width is part of output.
+	mdCache map[string]string
 	// double-click detection for expanding user bubbles.
 	lastClickAt time.Time
 	lastClickY  int
@@ -288,6 +295,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		// Width is part of the markdown cache key; drop stale-width entries so
+		// the cache does not accumulate one set per historical window size.
+		m.mdCache = nil
 		m.layout()
 		m.ready = true
 		m.refreshViewport()
@@ -507,18 +517,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.applyArtifactContentLoaded(msg)
 
 	case eventMsg:
-		ev := events.Event(msg)
-		m.tr.Apply(ev)
-		// Keep info in sync
-		if ev.Kind == events.KindSession && ev.SessionID != "" {
-			m.info.SessionID = ev.SessionID
-		}
-		if ev.Kind == events.KindModelChanged {
-			if ev.Provider != "" {
-				m.info.Provider = ev.Provider
-			}
-			if ev.Model != "" {
-				m.info.Model = ev.Model
+		// Apply this event plus any others already sitting in the channel, then
+		// repaint once. A burst of tool output (e.g. a large diff followed by
+		// several results) otherwise triggers one full transcript render per
+		// event and the UI falls behind — the loop can appear frozen while the
+		// backend keeps working. Coalescing bounds repaints to one per batch.
+		// The drain is bounded and non-blocking so key messages (Esc/cancel) are
+		// never starved: we take only events already buffered, then yield.
+		m.applyEvent(events.Event(msg))
+		drained := 0
+		for m.eventCh != nil && drained < maxCoalescedEvents {
+			select {
+			case ev, ok := <-m.eventCh:
+				if !ok {
+					// Channel closed mid-drain: the turn finished. Finalize now.
+					m.eventCh = nil
+					cmd := m.finishTurn()
+					m.refreshViewport()
+					return m, cmd
+				}
+				m.applyEvent(ev)
+				drained++
+			default:
+				// Nothing more buffered right now.
+				drained = maxCoalescedEvents
 			}
 		}
 		m.refreshViewport()
@@ -1657,6 +1679,10 @@ func (m model) statusText() string {
 	return strings.TrimSpace(b.String())
 }
 
+// maxCoalescedEvents bounds how many already-buffered events a single Update
+// applies before yielding, so a flood of tool output cannot starve key input.
+const maxCoalescedEvents = 256
+
 func waitEvent(ch <-chan events.Event) tea.Cmd {
 	return func() tea.Msg {
 		ev, ok := <-ch
@@ -1665,6 +1691,33 @@ func waitEvent(ch <-chan events.Event) tea.Cmd {
 		}
 		return eventMsg(ev)
 	}
+}
+
+// applyEvent applies one streamed event to the transcript and keeps the header
+// info in sync. It does NOT repaint — callers coalesce a batch and repaint once.
+func (m *model) applyEvent(ev events.Event) {
+	m.tr.Apply(ev)
+	if ev.Kind == events.KindSession && ev.SessionID != "" {
+		m.info.SessionID = ev.SessionID
+	}
+	if ev.Kind == events.KindModelChanged {
+		if ev.Provider != "" {
+			m.info.Provider = ev.Provider
+		}
+		if ev.Model != "" {
+			m.info.Model = ev.Model
+		}
+	}
+}
+
+// finishTurn finalizes a turn whose event channel has closed (mirrors the
+// turnDoneMsg handler). Returns the follow-up command (none).
+func (m *model) finishTurn() tea.Cmd {
+	m.turnCancel = nil
+	if m.tr.Streaming {
+		m.tr.Apply(events.NewDone())
+	}
+	return nil
 }
 
 func (m *model) layout() {
@@ -2154,6 +2207,29 @@ func (m model) handleFileViewerMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// renderAgentMarkdown returns the rendered markdown for an agent message block,
+// memoized by width+content. Markdown rendering (goldmark + chroma syntax
+// highlighting) is the dominant per-event cost; caching finalized blocks keeps
+// the UI loop from re-highlighting the entire transcript on every streamed
+// event. The cache is bounded implicitly by the number of distinct
+// (width, content) blocks in a session and cleared on resize.
+func (m *model) renderAgentMarkdown(content string, width int) string {
+	if m.mdCache == nil {
+		m.mdCache = make(map[string]string)
+	}
+	// Key on width + content. A NUL separator avoids collisions between the
+	// width digits and content. Streaming (last) blocks change content every
+	// event, so they naturally get a fresh entry each time; finalized blocks
+	// are stable and hit the cache.
+	key := strconv.Itoa(width) + "\x00" + content
+	if cached, ok := m.mdCache[key]; ok {
+		return cached
+	}
+	out := render.Markdown(content, width, m.theme.RenderStyles())
+	m.mdCache[key] = out
+	return out
+}
+
 func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 	var b strings.Builder
 	var hits []hitRegion
@@ -2210,7 +2286,7 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 				appendBlock(i, it.Kind, m.renderThinkingBubble(content, cw))
 				continue
 			}
-			md := render.Markdown(content, cw, th.RenderStyles())
+			md := m.renderAgentMarkdown(content, cw)
 			if md == "" {
 				md = th.Agent.Width(cw).Render(content)
 			}

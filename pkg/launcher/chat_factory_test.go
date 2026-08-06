@@ -24,3 +24,17 @@ func TestMainThreadToolAllowlist_CoreEditingTools(t *testing.T) {
 		}
 	}
 }
+
+// TestMainThreadToolAllowlist_InteractiveTerminalTools guards the fix for the
+// interactive-terminal drive loop: shell_command runs in a PTY and can return
+// waiting_for_input=true, so the top-level agent must directly hold the process_*
+// tools to respond (process_write) without a search_tools detour — matching chat
+// mode. See docs/architecture/terminal-app.md and the ff25d217 session analysis.
+func TestMainThreadToolAllowlist_InteractiveTerminalTools(t *testing.T) {
+	allow := mainThreadToolAllowlist()
+	for _, name := range []string{"process_read", "process_write", "process_kill", "process_list"} {
+		if !allow[name] {
+			t.Errorf("expected interactive-terminal tool %q in the main-thread allowlist", name)
+		}
+	}
+}

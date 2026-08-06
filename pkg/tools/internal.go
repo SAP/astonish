@@ -454,13 +454,49 @@ func ShellCommand(ctx tool.Context, args ShellCommandArgs) (ShellCommandResult, 
 		}, nil
 	}
 
-	// One-shot mode: wait for completion or interactive detection
+	// One-shot mode: wait for completion, cancellation, timeout, or interactive
+	// input detection.
+	var waitCtx context.Context
+	if ctx != nil {
+		// tool.Context embeds context.Context; carry it through for cancellation.
+		waitCtx = ctx
+	}
+	return waitForShellSession(waitCtx, pm, sess, timeout)
+}
+
+// waitForShellSession blocks until the shell session exits, the context is
+// cancelled, the timeout elapses, or the process is detected waiting for input.
+// It is separated from ShellCommand so the wait/cancel behavior is unit-testable
+// with a plain context.Context (ShellCommand's tool.Context embeds one).
+func waitForShellSession(ctx context.Context, pm *ProcessManager, sess *ProcessSession, timeout int) (ShellCommandResult, error) {
 	deadline := time.After(time.Duration(timeout) * time.Second)
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 
+	// A nil context yields a nil channel; a nil channel in select blocks forever,
+	// which correctly disables the cancellation case when no context is provided.
+	var ctxDone <-chan struct{}
+	if ctx != nil {
+		ctxDone = ctx.Done()
+	}
+
 	for {
 		select {
+		case <-ctxDone:
+			// The turn was cancelled (e.g. the user pressed Esc). Kill the child
+			// process so a stuck/long command does not keep running after the
+			// turn ends, and return promptly.
+			_ = pm.Kill(sess.ID)
+			data := sess.Output.Bytes()
+			err := context.Canceled
+			if ctx != nil && ctx.Err() != nil {
+				err = ctx.Err()
+			}
+			return ShellCommandResult{
+				Stdout:    string(data),
+				SessionID: sess.ID,
+			}, err
+
 		case <-sess.done:
 			// Process exited — return output
 			data := sess.Output.Bytes()

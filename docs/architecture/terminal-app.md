@@ -127,6 +127,21 @@ The merged Markdown is injected as a `## Project Guidance` section in `SystemPro
 
 **Context on resume.** Both the estimate above and real provider usage only arrive *during a turn*, so a freshly resumed session would otherwise show `Context 0` until the next message. To avoid that, `ResumeSession` estimates the loaded session's context occupancy up front (`estimateContextTokens`, shared with `emitEstimatedContext`) and exposes it via `backend.Info().ContextTokens`. The TUI seeds `Transcript.ContextTokens` from `Info().ContextTokens` when resuming (`sessions.go`) and when opening into a resumed session (`newModel`), so the header reflects real utilization the moment the transcript loads. `Info().ContextTokens` is distinct from `Info().Usage` (which stays *cumulative* session usage); mixing the estimate into cumulative usage would over-count.
 
+### Shell execution: interactive but non-paginating
+
+`shell_command` runs commands in a real PTY (`pkg/tools/process_mgr.go`), so interactive programs work: when a command idles on a prompt the tool returns `waiting_for_input=true` + a `session_id`, and the agent responds via `process_write` / inspects with `process_read` / ends with `process_kill`. To make this usable directly from the top-level coding agent (as in chat mode), `process_read`/`process_write`/`process_kill`/`process_list` are on `mainThreadToolAllowlist`.
+
+Because a PTY looks like a terminal, git and other CLIs would otherwise auto-launch a **pager** (`less`) that blocks forever waiting for keypresses — this hung `git diff`/`git status`/`git log` in session `ff25d217-7`. The child env therefore sets `PAGER=cat`, `GIT_PAGER=cat`, and `GIT_TERMINAL_PROMPT=0` (alongside `EDITOR/VISUAL=true`). This suppresses only the *unwanted auto-pager*; genuine interactivity is unaffected.
+
+`shell_command` is also **cancellable**: `waitForShellSession` selects on `ctx.Done()`, so pressing Esc (which cancels the turn) kills the child process and returns promptly instead of waiting out the 120s timeout.
+
+### UI never blocks on the backend
+
+The TUI event loop must stay responsive even when the backend streams a burst of large tool outputs. Two mechanisms in `pkg/tui/app.go` ensure this:
+
+- **Per-item markdown cache** (`renderAgentMarkdown`, keyed by width+content). `renderTranscript` runs on every event; without caching it re-ran goldmark + chroma syntax highlighting over the *entire* history each time, so per-event cost grew with the transcript and the loop fell behind (session `ff25d217-7`: the UI froze and stopped even accepting Esc while the backend kept committing/pushing in the background). The cache makes re-render O(changed item); it is cleared on resize because width is part of the output.
+- **Event coalescing** (the `eventMsg` handler). A single `Update` applies the delivered event plus any already-buffered events (bounded, non-blocking drain up to `maxCoalescedEvents`) and repaints once, so a flood of output produces one repaint per batch instead of one per event. The drain is bounded so key messages (Esc/cancel) are never starved.
+
 ### Rollback (`/rollback`)
 
 Code mode can revert both the conversation and the working-directory file changes back to an earlier user message. Like `/provider`, this is an **optional** backend capability — `backend.RollbackBackend` (`ListRollbackPoints` / `RollbackTo`), implemented only by `localAgentBackend`. The platform backend does not implement it (there is no host filesystem to snapshot), so `/rollback` (command, help entry, and slash-completion) is only offered when the active backend advertises the capability. The picker overlay lives in `pkg/tui/rollback.go` and mirrors the `/sessions` picker, including a confirmation step because rollback is destructive.

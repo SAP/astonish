@@ -3,6 +3,7 @@ package launcher
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -471,9 +472,19 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 		})
 	}
 
-	userMsg := &genai.Content{
-		Role:  "user",
-		Parts: []*genai.Part{{Text: message}},
+	// Build the user message. Pasted images / file attachments arrive as raw
+	// bytes on opts.Attachments; forward them as InlineData parts so multimodal
+	// models can see them (mirrors the platform backend, which routes through
+	// agent.NewTimestampedUserContentWithAttachments). Without this, code-mode
+	// paste would insert the composer placeholder but silently drop the image.
+	var userMsg *genai.Content
+	if atts := agentAttachmentsFromBackend(opts.Attachments); len(atts) > 0 {
+		userMsg = agent.NewTimestampedUserContentWithAttachments(message, atts)
+	} else {
+		userMsg = &genai.Content{
+			Role:  "user",
+			Parts: []*genai.Part{{Text: message}},
+		}
 	}
 
 	// Determine the checkpoint boundary for this turn: the number of events
@@ -507,6 +518,27 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 	}()
 
 	return out, nil
+}
+
+// agentAttachmentsFromBackend converts TUI backend attachments (raw bytes) into
+// agent.Attachment values (base64 data) for NewTimestampedUserContentWithAttachments.
+// Empty payloads are skipped so a stray placeholder never produces a broken part.
+func agentAttachmentsFromBackend(atts []backend.Attachment) []agent.Attachment {
+	if len(atts) == 0 {
+		return nil
+	}
+	out := make([]agent.Attachment, 0, len(atts))
+	for _, a := range atts {
+		if len(a.Data) == 0 {
+			continue
+		}
+		out = append(out, agent.Attachment{
+			Filename: a.Filename,
+			MimeType: a.MimeType,
+			Data:     base64.StdEncoding.EncodeToString(a.Data),
+		})
+	}
+	return out
 }
 
 // sessionEventCount returns how many events are currently persisted for the

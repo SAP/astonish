@@ -1048,6 +1048,23 @@ func TestSniffImageMIME(t *testing.T) {
 	}
 }
 
+// TestTextareaPasteMsgRejectsNonPaste ensures the paste-message detector only
+// recognizes textarea.pasteMsg values, so ordinary key/window messages are not
+// misrouted into the paste/image-paste branch.
+func TestTextareaPasteMsgRejectsNonPaste(t *testing.T) {
+	cases := []tea.Msg{
+		nil,
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")},
+		tea.WindowSizeMsg{Width: 10, Height: 10},
+		"plain string",
+	}
+	for _, msg := range cases {
+		if _, isPaste := textareaPasteMsg(msg); isPaste {
+			t.Fatalf("textareaPasteMsg(%T) reported a paste, want false", msg)
+		}
+	}
+}
+
 // minimalPNG is a 1x1 transparent PNG.
 func minimalPNG() []byte {
 	return []byte{

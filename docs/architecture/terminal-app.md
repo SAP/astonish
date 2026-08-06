@@ -240,11 +240,13 @@ Because `bubbles/textarea` repositions its **internal** viewport while it proces
 
 ### Image paste
 
-Pasting an image from the system clipboard (`Ctrl+V` / Super+V, and empty text pastes that only contain image data) inserts an atomic placeholder such as `[image #1]`. Multiple images increment the index (`#2`, `#3`, …). Image tokens share the same atomic navigation/delete behavior as text-paste placeholders. On submit, remaining image tokens are sent to Studio as multimodal `attachments` (base64 PNG/JPEG/GIF) while the user transcript keeps the `[image #N]` markers.
+Pasting an image from the system clipboard (`Ctrl+V` / Super+V, and empty text pastes that only contain image data) inserts an atomic placeholder such as `[image #1]`. Multiple images increment the index (`#2`, `#3`, …). Image tokens share the same atomic navigation/delete behavior as text-paste placeholders. On submit, remaining image tokens are sent as multimodal `attachments` (base64 PNG/JPEG/GIF) while the user transcript keeps the `[image #N]` markers.
+
+Both backends must forward these attachments to the model, or the placeholder appears but the image is silently dropped. The platform backend (`platformBackend.RunTurn`) forwards them over the HTTP chat API. Code mode (`localAgentBackend.RunTurn`) converts the raw attachment bytes to base64 and builds the user message with `agent.NewTimestampedUserContentWithAttachments`, which emits the same `InlineData` genai parts the platform path produces — so pasted images reach the LLM in local `astonish code` sessions as well. The conversion happens in `agentAttachmentsFromBackend`.
 
 Clipboard image reads are platform-specific:
 
-- **macOS**: `osascript` pasteboard (`PNGf`, with TIFF→PNG via `sips`)
+- **macOS**: `NSPasteboard` via JXA (`osascript -l JavaScript` + AppKit). Reads `public.png` directly, and re-encodes any other image representation (TIFF, etc.) to PNG via `NSBitmapImageRep`. This replaced the older `the clipboard as «class PNGf»` AppleScript coercion, which silently failed for some images (large, or lacking a `public.png` representation) — the tell-tale symptom was that resizing an image made paste start working.
 - **Linux**: Wayland `wl-paste --type image/*` first, then X11 `xclip -t image/*`
 - Other platforms: image clipboard read is unavailable (text paste still works)
 

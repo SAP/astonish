@@ -3,6 +3,7 @@ package launcher
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"log"
 	"os"
@@ -866,5 +867,40 @@ func TestRollback_NoSessionReturnsNil(t *testing.T) {
 	}
 	if _, err := b.RollbackTo(context.Background(), "0"); err == nil {
 		t.Fatal("RollbackTo with no session should error")
+	}
+}
+
+// TestAgentAttachmentsFromBackend verifies that pasted-image / file payloads
+// (raw bytes on backend.Attachment) are converted to base64 agent.Attachment
+// values so RunTurn can forward them as InlineData parts. This defends the
+// code-mode regression where pasted images were inserted into the composer but
+// silently dropped before reaching the model.
+func TestAgentAttachmentsFromBackend(t *testing.T) {
+	raw := []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a}
+	got := agentAttachmentsFromBackend([]backend.Attachment{
+		{Filename: "shot.png", MimeType: "image/png", Data: raw},
+		{Filename: "empty.png", MimeType: "image/png", Data: nil}, // skipped
+	})
+
+	if len(got) != 1 {
+		t.Fatalf("attachments = %d, want 1 (empty payload must be skipped)", len(got))
+	}
+	if got[0].Filename != "shot.png" || got[0].MimeType != "image/png" {
+		t.Fatalf("metadata not propagated: %+v", got[0])
+	}
+	decoded, err := base64.StdEncoding.DecodeString(got[0].Data)
+	if err != nil {
+		t.Fatalf("data is not valid base64: %v", err)
+	}
+	if !bytes.Equal(decoded, raw) {
+		t.Fatalf("round-trip mismatch: got %v, want %v", decoded, raw)
+	}
+}
+
+// TestAgentAttachmentsFromBackend_Empty verifies a nil/empty attachment slice
+// yields nil so RunTurn falls back to the plain text user message.
+func TestAgentAttachmentsFromBackend_Empty(t *testing.T) {
+	if got := agentAttachmentsFromBackend(nil); got != nil {
+		t.Fatalf("expected nil for no attachments, got %+v", got)
 	}
 }

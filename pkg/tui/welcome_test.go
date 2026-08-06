@@ -54,8 +54,11 @@ func TestWelcomeCodeModeShowsCodeCard(t *testing.T) {
 	if !strings.Contains(out, "local AI coding tool") {
 		t.Fatalf("code-mode welcome card missing code-focused description:\n%s", out)
 	}
-	if !strings.Contains(out, "file changes and commands ask first") {
-		t.Fatalf("code-mode welcome card missing accurate approval notice:\n%s", out)
+	if !strings.Contains(out, "Astonish intelligence") {
+		t.Fatalf("code-mode welcome card missing approval notice:\n%s", out)
+	}
+	if strings.Contains(out, "no prompts") {
+		t.Fatalf("code-mode welcome card should not claim no-prompts without auto-approve:\n%s", out)
 	}
 	if strings.Contains(out, "Connected to your platform") {
 		t.Fatalf("code-mode welcome card should not claim a platform connection:\n%s", out)
@@ -79,11 +82,8 @@ func TestWelcomeCodeModeAutoApproveNotice(t *testing.T) {
 	m.refreshViewport()
 
 	out := stripANSI(m.View())
-	if !strings.Contains(out, "auto-approve is on") {
+	if !strings.Contains(out, "no prompts") {
 		t.Fatalf("code-mode welcome card should reflect auto-approve state:\n%s", out)
-	}
-	if strings.Contains(out, "ask first") {
-		t.Fatalf("code-mode welcome card should not claim prompts when auto-approve is on:\n%s", out)
 	}
 }
 

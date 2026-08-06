@@ -262,9 +262,18 @@ func (m model) Init() tea.Cmd {
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
-	if text, ok := textareaPasteText(msg); ok {
+	// A textarea paste (Ctrl+V keybinding → clipboard read) arrives as a
+	// textarea.pasteMsg. When it carries text, insert it. When it is empty, the
+	// clipboard likely holds an image with no text representation — try an image
+	// paste instead of dropping the event.
+	if text, isPaste := textareaPasteMsg(msg); isPaste {
 		if next, cmd, handled := m.tryPasteImage(); handled {
 			return next, cmd
+		}
+		if strings.TrimSpace(text) == "" {
+			// No image and no text: nothing to insert. Swallow the empty paste
+			// so it does not fall through to the textarea as a no-op.
+			return m, nil
 		}
 		return m.handlePaste(text)
 	}
@@ -1386,16 +1395,18 @@ func composerShouldCollapseValue(text string) bool {
 	return pasteCollapseLineCount(text) >= 4
 }
 
-func textareaPasteText(msg tea.Msg) (string, bool) {
+// textareaPasteMsg reports whether msg is a textarea.pasteMsg and its (possibly
+// empty) text. bubbles emits an empty pasteMsg when the Ctrl+V keybinding reads
+// a clipboard that holds an image (no text) — callers use the empty case to try
+// an image paste instead of dropping the event silently.
+func textareaPasteMsg(msg tea.Msg) (string, bool) {
 	if msg == nil {
 		return "", false
 	}
-	typeName := fmt.Sprintf("%T", msg)
-	if typeName != "textarea.pasteMsg" {
+	if fmt.Sprintf("%T", msg) != "textarea.pasteMsg" {
 		return "", false
 	}
-	text := fmt.Sprint(msg)
-	return text, text != ""
+	return fmt.Sprint(msg), true
 }
 
 func normalizePasteText(text string) string {
@@ -1856,7 +1867,7 @@ func (m model) codeWelcomeLines(width int) []string {
 		th.Muted.Width(width).Align(lipgloss.Center).Render(codeApprovalNotice(m.info.AutoApprove)),
 		th.Muted.Width(width).Align(lipgloss.Center).Render("Ready when you are."),
 		"",
-		th.Hint.Width(width).Align(lipgloss.Center).Render("/ commands  ·  @ files  ·  /rollback  ·  shift+tab plan  ·  shift+enter newline"),
+		th.Hint.Width(width).Align(lipgloss.Center).Render("/commands · @files · /rollback · shift+tab plan · shift+enter newline"),
 	)
 
 	return lines
@@ -1868,9 +1879,9 @@ func (m model) codeWelcomeLines(width int) []string {
 // --auto-approve.
 func codeApprovalNotice(autoApprove bool) string {
 	if autoApprove {
-		return "Tools run on this machine — auto-approve is on, so no prompts."
+		return "Astonish intelligence, right where your code lives — no prompts."
 	}
-	return "Tools run on this machine; file changes and commands ask first."
+	return "Astonish intelligence, right where your code lives."
 }
 
 // abbreviateHomePath collapses the user's home directory prefix to "~" for

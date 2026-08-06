@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { Maximize2, ChevronDown, FileText, Download, Loader, FilePlus, Edit3, Film } from 'lucide-react'
+import { Maximize2, ChevronDown, FileText, Download, Loader, FilePlus, Edit3, Film, Copy, Check } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { markdownComponents } from './markdownComponents'
@@ -41,7 +41,9 @@ export default function EmbeddedFileViewer({ artifact, sessionId, onOpenInPanel,
   const [error, setError] = useState<string | null>(null)
   const [downloadOpen, setDownloadOpen] = useState(false)
   const [exporting, setExporting] = useState<string | null>(null)
+  const [copied, setCopied] = useState(false)
   const dropdownRef = useRef<HTMLDivElement>(null)
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const isMarkdown = artifact.fileType === 'Markdown'
   const mediaKind = artifactMediaKind(artifact.fileType, artifact.fileName)
@@ -72,6 +74,7 @@ export default function EmbeddedFileViewer({ artifact, sessionId, onOpenInPanel,
     const handler = (e: MouseEvent) => {
       if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
         setDownloadOpen(false)
+        setCopied(false)
       }
     }
     document.addEventListener('mousedown', handler)
@@ -126,6 +129,19 @@ export default function EmbeddedFileViewer({ artifact, sessionId, onOpenInPanel,
       setExporting(null)
     }
   }, [content, artifact.fileName])
+
+  const handleCopyContent = useCallback(() => {
+    if (!content) return
+    navigator.clipboard.writeText(content)
+    setCopied(true)
+    if (copyTimerRef.current) clearTimeout(copyTimerRef.current)
+    copyTimerRef.current = setTimeout(() => setCopied(false), 2000)
+  }, [content])
+
+  // Clear any pending copy-feedback timer on unmount.
+  useEffect(() => () => {
+    if (copyTimerRef.current) clearTimeout(copyTimerRef.current)
+  }, [])
 
   return (
     <div
@@ -205,6 +221,16 @@ export default function EmbeddedFileViewer({ artifact, sessionId, onOpenInPanel,
                 minWidth: '180px',
               }}
             >
+              {!mediaKind && !!content && (
+                <button
+                  onClick={handleCopyContent}
+                  className="w-full text-left px-3 py-1.5 hover:opacity-80 transition-opacity flex items-center gap-2"
+                  style={{ color: copied ? '#4ade80' : 'var(--text-primary)' }}
+                >
+                  {copied ? <Check size={12} /> : <Copy size={12} />}
+                  <span>{copied ? 'Copied' : 'Copy content'}</span>
+                </button>
+              )}
               <button
                 onClick={handleDownloadFile}
                 className="w-full text-left px-3 py-1.5 hover:opacity-80 transition-opacity"

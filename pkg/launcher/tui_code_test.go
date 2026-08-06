@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/SAP/astonish/pkg/client"
 	"github.com/SAP/astonish/pkg/common"
@@ -509,6 +510,70 @@ func TestEmitEstimatedContext_ReportsWhenNoProviderUsage(t *testing.T) {
 	}
 	if usageEv.Usage.Input <= 0 {
 		t.Errorf("expected a positive estimated context size, got %d", usageEv.Usage.Input)
+	}
+}
+
+// countUsageEvents returns how many KindUsage events are present in evs.
+func countUsageEvents(evs []events.Event) int {
+	n := 0
+	for i := range evs {
+		if evs[i].Kind == events.KindUsage {
+			n++
+		}
+	}
+	return n
+}
+
+// TestMaybeEmitEstimatedContext_EmitsMidTurn verifies that the throttled
+// mid-turn estimator emits an updated context reading between tool steps, so
+// the header's "Context" figure advances during a long turn instead of only at
+// turn end.
+func TestMaybeEmitEstimatedContext_EmitsMidTurn(t *testing.T) {
+	dir := t.TempDir()
+	b := newFileStoreBackend(t, dir, codeUserID)
+	ctx := context.Background()
+	sessionID := seedSession(t, b, strings.Repeat("some project analysis text ", 200))
+
+	var got []events.Event
+	emit := captureEmit(&got, b.debug)
+
+	// First call fires immediately (lastCtxEstimate is zero).
+	b.maybeEmitEstimatedContext(ctx, sessionID, emit)
+	if n := countUsageEvents(got); n != 1 {
+		t.Fatalf("first maybeEmitEstimatedContext: usage events = %d, want 1", n)
+	}
+	if !got[len(got)-1].Usage.Estimated {
+		t.Error("mid-turn estimate should be marked Estimated")
+	}
+}
+
+// TestMaybeEmitEstimatedContext_Throttles verifies that back-to-back mid-turn
+// estimates within contextEstimateInterval do not re-scan the session or emit
+// a second event — a many-tool turn stays cheap.
+func TestMaybeEmitEstimatedContext_Throttles(t *testing.T) {
+	dir := t.TempDir()
+	b := newFileStoreBackend(t, dir, codeUserID)
+	ctx := context.Background()
+	sessionID := seedSession(t, b, strings.Repeat("some project analysis text ", 200))
+
+	var got []events.Event
+	emit := captureEmit(&got, b.debug)
+
+	// Rapid successive calls: only the first should emit.
+	for i := 0; i < 5; i++ {
+		b.maybeEmitEstimatedContext(ctx, sessionID, emit)
+	}
+	if n := countUsageEvents(got); n != 1 {
+		t.Fatalf("throttled maybeEmitEstimatedContext: usage events = %d, want 1", n)
+	}
+
+	// After the interval elapses, a further call emits again.
+	b.mu.Lock()
+	b.lastCtxEstimate = time.Now().Add(-2 * contextEstimateInterval)
+	b.mu.Unlock()
+	b.maybeEmitEstimatedContext(ctx, sessionID, emit)
+	if n := countUsageEvents(got); n != 2 {
+		t.Fatalf("post-interval maybeEmitEstimatedContext: usage events = %d, want 2", n)
 	}
 }
 

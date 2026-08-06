@@ -347,18 +347,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Global keys
 		switch msg.String() {
 		case "ctrl+c":
-			if m.tr.Streaming && m.turnCancel != nil {
-				m.turnCancel()
-				m.turnCancel = nil
-				m.tr.Streaming = false
-				m.tr.Status = ""
-				m.tr.Apply(events.NewSystem("Turn cancelled."))
-				m.refreshViewport()
-				return m, nil
+			// Mid-turn: cancel the in-flight RunTurn. Idle: quit the app.
+			if next, cmd, handled := m.cancelInFlightTurn(); handled {
+				return next, cmd
 			}
 			m.quitting = true
 			m.cancel()
 			return m, tea.Quit
+		case "esc":
+			// Esc cancels an in-flight turn (Claude Code / OpenCode style) but
+			// never quits the app when idle — overlays/approvals already handled
+			// Esc above this switch.
+			if next, cmd, handled := m.cancelInFlightTurn(); handled {
+				return next, cmd
+			}
 		case "ctrl+d":
 			if m.ta.Value() == "" {
 				m.quitting = true
@@ -1600,7 +1602,7 @@ func helpText(providerAdmin bool, rollback bool) string {
 	}
 	return strings.TrimSpace(`
 Commands:
-  /help          Show this help
+  /help          Show this help (/?)
   /status        Show session / provider / model
   /sessions      Open sessions picker (also ctrl+l)
   /model         Choose provider and model` + providerLine + rollbackLine + `
@@ -1626,7 +1628,9 @@ Keys:
   ctrl+l         Sessions picker
   ctrl+n         New session
   shift+tab      Toggle plan-only mode
+  esc            Cancel the current turn
   ctrl+c         Cancel turn or quit
+  ctrl+d         Quit (when input is empty)
 `)
 }
 
@@ -3223,10 +3227,29 @@ func isAmbiguousModelLabel(modelName string) bool {
 	return strings.EqualFold(strings.TrimSpace(modelName), "default")
 }
 
+// cancelInFlightTurn aborts the active RunTurn when one is streaming. Returns
+// handled=true when a turn was cancelled. Callers that want quit-on-idle
+// (ctrl+c) check handled and fall through to quit; Esc leaves the app running.
+func (m model) cancelInFlightTurn() (tea.Model, tea.Cmd, bool) {
+	if !m.tr.Streaming || m.turnCancel == nil {
+		return m, nil, false
+	}
+	m.turnCancel()
+	m.turnCancel = nil
+	m.tr.Streaming = false
+	m.tr.Status = ""
+	m.tr.Apply(events.NewSystem("Turn cancelled."))
+	m.refreshViewport()
+	return m, nil, true
+}
+
 func (m model) renderHints() string {
 	th := m.theme
 	if m.tr.Awaiting {
 		return th.Hint.Render("y approve  ·  n deny  ·  1/2 select  ·  esc deny")
+	}
+	if m.tr.Streaming {
+		return m.paintRow(th.Hint.Render("esc cancel  ·  ↑↓ scroll  ·  ctrl+c cancel"), m.width)
 	}
 	if m.slash.active {
 		return th.Hint.Render("↑↓ select  ·  enter run  ·  tab next  ·  esc close")

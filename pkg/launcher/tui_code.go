@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/client"
@@ -330,9 +331,18 @@ type localAgentBackend struct {
 	// session contents when the provider reports no usage). Set on resume so the
 	// header shows real utilization immediately, updated after each turn.
 	contextTokens int64
-	resumed       bool
-	closed        bool
+	// lastCtxEstimate throttles the mid-turn context re-estimation so a turn
+	// with many tool calls does not reload+re-scan the whole session on every
+	// step. See maybeEmitEstimatedContext.
+	lastCtxEstimate time.Time
+	resumed         bool
+	closed          bool
 }
+
+// contextEstimateInterval is the minimum wall-clock gap between mid-turn
+// context-occupancy estimates. It keeps the header's "Context" figure moving
+// within a long turn without re-scanning the session on every tool step.
+const contextEstimateInterval = 750 * time.Millisecond
 
 func (b *localAgentBackend) Info() backend.Info {
 	b.mu.Lock()
@@ -610,7 +620,11 @@ func (b *localAgentBackend) driveTurn(
 ) {
 	seenPartialText := false
 	sawRealUsage := false
-
+	// Allow the first mid-turn estimate to fire immediately (the throttle only
+	// applies to subsequent tool steps within this turn).
+	b.mu.Lock()
+	b.lastCtxEstimate = time.Time{}
+	b.mu.Unlock()
 	for event, runErr := range rnr.Run(ctx, b.effectiveUserID(), sessionID, userMsg, adkagent.RunConfig{
 		StreamingMode: adkagent.StreamingModeSSE,
 	}) {
@@ -677,6 +691,14 @@ func (b *localAgentBackend) driveTurn(
 					"id":     part.FunctionResponse.ID,
 					"result": resp,
 				})
+				// A tool step just completed and the context has grown. Refresh
+				// the header's context figure mid-turn (throttled) so it moves
+				// during long tool loops instead of only at turn end. This is a
+				// no-op when a real provider reading already advanced the figure
+				// this iteration.
+				if !sawRealUsage {
+					b.maybeEmitEstimatedContext(ctx, sessionID, emit)
+				}
 			}
 		}
 
@@ -752,6 +774,7 @@ func (b *localAgentBackend) emitEstimatedContext(ctx context.Context, sessionID 
 	}
 	b.mu.Lock()
 	b.contextTokens = est
+	b.lastCtxEstimate = time.Now()
 	b.mu.Unlock()
 	// Report as input tokens so it drives the header's context figure without
 	// inflating cumulative "Usage" output counts. The transcript uses the max
@@ -762,6 +785,21 @@ func (b *localAgentBackend) emitEstimatedContext(ctx context.Context, sessionID 
 		"total_tokens":  0,
 		"estimated":     true,
 	})
+}
+
+// maybeEmitEstimatedContext emits an estimated context reading like
+// emitEstimatedContext, but only if at least contextEstimateInterval has
+// elapsed since the last estimate. It is called between tool steps within a
+// turn so the header's "Context" figure advances live during long tool loops,
+// while the throttle prevents re-scanning the whole session on every step.
+func (b *localAgentBackend) maybeEmitEstimatedContext(ctx context.Context, sessionID string, emit func(string, map[string]any)) {
+	b.mu.Lock()
+	throttled := !b.lastCtxEstimate.IsZero() && time.Since(b.lastCtxEstimate) < contextEstimateInterval
+	b.mu.Unlock()
+	if throttled {
+		return
+	}
+	b.emitEstimatedContext(ctx, sessionID, emit)
 }
 
 // processStateDelta mirrors ChatRunner.processStateDelta for the local driver,
@@ -1216,6 +1254,25 @@ func codeProviderTypes() []backend.ProviderTypeInfo {
 		{ID: "xai", DisplayName: provider.GetProviderDisplayName("xai"), Fields: []backend.ProviderField{apiKey}},
 		{ID: "openrouter", DisplayName: provider.GetProviderDisplayName("openrouter"), Fields: []backend.ProviderField{apiKey}},
 		{ID: "poe", DisplayName: provider.GetProviderDisplayName("poe"), Fields: []backend.ProviderField{apiKey}},
+		{
+			ID:          "sap_ai_core",
+			DisplayName: provider.GetProviderDisplayName("sap_ai_core"),
+			Fields: []backend.ProviderField{
+				{Key: "client_id", Label: "Client ID"},
+				{Key: "client_secret", Label: "Client Secret", Secret: true},
+				{Key: "auth_url", Label: "Auth URL"},
+				{Key: "base_url", Label: "Base URL"},
+				{Key: "resource_group", Label: "Resource Group", Default: "default", Optional: true},
+			},
+		},
+		{
+			ID:          "litellm",
+			DisplayName: provider.GetProviderDisplayName("litellm"),
+			Fields: []backend.ProviderField{
+				{Key: "base_url", Label: "Base URL", Default: "http://localhost:4000/v1"},
+				apiKey,
+			},
+		},
 		{
 			ID:          "openai_compat",
 			DisplayName: provider.GetProviderDisplayName("openai_compat"),

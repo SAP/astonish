@@ -96,6 +96,8 @@ Code mode is **file-only**: it reads and writes provider configuration in `~/.co
 
 This capability is exposed through an **optional** backend interface, `backend.ProviderAdminBackend` (`ListProviderInstances` / `ProviderTypes` / `AddProvider` / `RemoveProvider`), implemented only by `localAgentBackend`. The platform backend does **not** implement it — platform provider management stays in the database via Studio settings. The TUI type-asserts for the capability: `/provider` (command, help entry, and slash-completion) is only offered when the active backend implements it, so platform chat is unaffected.
 
+The catalog of provider types offered by the overlay is `codeProviderTypes()` in `pkg/launcher/tui_code.go`. It mirrors the full set of providers Astonish supports (`provider.ProviderDisplayNames`) so anything configurable from a plaintext config file can be added through `/provider`: **OpenAI, Anthropic, Google GenAI (Gemini), Groq, xAI, OpenRouter, Poe, SAP AI Core, LiteLLM, OpenAI Compatible, Ollama, and LM Studio.** Each entry declares the input fields it needs via `backend.ProviderField` (label, `Secret`, `Default`, `Optional`), and the overlay form renders those fields generically — most providers need only an `api_key`, while SAP AI Core collects OAuth credentials (`client_id`, `client_secret`, `auth_url`, `base_url`, `resource_group`) and LiteLLM/OpenAI-Compatible add a `base_url`. A drift-guard test (`TestCodeProviderTypes_CoversAllSupportedProviders`) fails if a newly-supported provider is not added to this catalog.
+
 `AddProvider` writes the instance (`type` + fields such as `base_url`) into `AppConfig.Providers`, stores the API key directly in `config.yaml` under `providers.<name>.api_key`, and calls `config.SaveAppConfig`. Because `GetProvider` reads `api_key` straight from the instance map, the new provider is usable immediately — the user can then pick it in `/model`. `RemoveProvider` deletes the instance and clears `general.default_*` if it pointed at the removed provider.
 
 > **Config vs. database boundary.** Local `code` mode loads and persists only from the config file — it needs no database connection. Platform mode continues to use its database (and can also read config). Do not couple the code-mode provider path to `entstore` or any platform store.
@@ -161,8 +163,11 @@ transcript viewport
 │ ❯  Message Astonish…                                 │  ← bordered composer
 ╰──────────────────────────────────────────── Normal ──╯
 provider / concrete-model                auto-approve
-Enter send · ctrl+j newline · /help · ctrl+c quit
+Enter send · … · ctrl+c quit            ← idle
+esc cancel · ↑↓ scroll · ctrl+c cancel  ← while a turn is streaming
 ```
+
+**Cancel keys.** While a turn is streaming, both **Esc** and **Ctrl+C** call `cancelInFlightTurn` (`pkg/tui/app.go`): they fire `turnCancel` (the per-turn context passed to `Backend.RunTurn`), clear streaming state, and append a `Turn cancelled.` system line. Esc never quits the app when idle; Ctrl+C still quits when nothing is running. Overlays (sessions, model/provider picker, rollback, file viewer) and the approval card continue to own Esc when open (close / deny).
 
 The header intentionally stays a single row: the left side identifies the connected Astonish platform URL and logged-in user from the remote login config (in local code mode it shows `Astonish · code`); the right side shows **context utilization** — the primary metric when coding. `Transcript.ContextTokens` tracks the largest per-call token reading in the latest turn (an LLM tool loop grows the prompt each call, so the max reflects current context-window fill), fed by live `usage` SSE events (`headerUsageText` in `pkg/tui/app.go`). When the active model's context window is known (`contextWindowFor`, a domain-agnostic family-substring lookup), it renders as `Context <used>/<window> (<pct>%)`; otherwise just `Context <used>`. A compact cumulative session `Usage <total>` is appended after the context figure. Both fall back gracefully (`Context 0` only for a brand-new session before its first turn; resumed sessions seed `ContextTokens` from `Info().ContextTokens` so they show real utilization on load). The layout consumes the full reported terminal height so the footer help line lands on the final row instead of leaving a blank strip below the TUI.
 

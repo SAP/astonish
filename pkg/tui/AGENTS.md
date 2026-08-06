@@ -24,6 +24,7 @@ Fullscreen terminal chat app for Astonish (Claude Code / OpenCode–style).
 4. Soft-degrade Studio-only SSE events (`app_preview`, browser handoff, …) to system notices.
 5. Plan mode is a TUI toggle that sends `backend.TurnOptions.SystemContext` **and** `backend.TurnOptions.PlanMode`; do not fork the agent/runtime path. The `PlanMode` flag threads through `client.ChatRequest.PlanMode`/`agent.PromptOverrides.PlanMode` to a hard runtime gate (`BeforeToolCallback` in `pkg/agent/chat_agent_run.go`) that refuses `delegate_tasks` and any non-`SafeTools` tool. Enforcement lives in `pkg/agent`, not the TUI — the TUI only sets the flag and mirrors the prompt text in `planModeSystemContext` (source of truth is `agent.PlanModeSystemContext`).
 6. Capability-gated commands (`/provider`, `/rollback`) are exposed only when the active backend implements the matching optional interface (`backend.ProviderAdminBackend`, `backend.RollbackBackend`), which only the code-mode `localAgentBackend` does. Gate them in three places — `handleSlash`, `syncSlashCompletion` (the `extra` slash commands), and `helpText` — via `m.providerAdmin()` / `m.rollbackCap()`. Never expose these on platform chat.
+7. **Esc cancels an in-flight turn** (`cancelInFlightTurn` via `turnCancel`) the same way Ctrl+C does while streaming. Esc must **not** quit the app when idle; Ctrl+C idle still quits. Overlays/approvals still own Esc when open.
 
 ## Entry points
 

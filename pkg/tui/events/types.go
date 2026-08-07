@@ -77,6 +77,13 @@ type Event struct {
 	Result   any
 	Options  []string // approval options
 
+	// ApprovalKind distinguishes code-mode authorization prompts:
+	// "" (generic tool approval), "tool" (not-whitelisted tool execution), or
+	// "folder" (out-of-project filesystem access). Paths holds the requested
+	// out-of-project paths for a "folder" prompt.
+	ApprovalKind string
+	Paths        []string
+
 	// SessionID for KindSession / KindSessionTitle.
 	SessionID string
 	Title     string
@@ -147,6 +154,20 @@ func NewToolResult(name, id string, result any) Event {
 // NewApproval returns a tool approval request.
 func NewApproval(name string, args map[string]any, options []string) Event {
 	return Event{Kind: KindApproval, ToolName: name, Args: args, Options: options}
+}
+
+// NewAuthorizationApproval returns a code-mode authorization request carrying
+// the approval kind ("tool" or "folder") and, for folder requests, the
+// out-of-project paths being requested.
+func NewAuthorizationApproval(name string, args map[string]any, options []string, kind string, paths []string) Event {
+	return Event{
+		Kind:         KindApproval,
+		ToolName:     name,
+		Args:         args,
+		Options:      options,
+		ApprovalKind: kind,
+		Paths:        paths,
+	}
 }
 
 // NewNetworkDenial returns a network authorization request.

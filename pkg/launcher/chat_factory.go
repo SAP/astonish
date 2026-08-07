@@ -146,30 +146,30 @@ type ChatFactoryResult struct {
 // docs/architecture/code-intelligence.md.
 func mainThreadToolAllowlist() map[string]bool {
 	return map[string]bool{
-		"read_file":          true,
-		"write_file":         true,
-		"edit_file":          true,
-		"shell_command":      true,
-		"grep_search":        true,
-		"find_files":         true,
+		"read_file":     true,
+		"write_file":    true,
+		"edit_file":     true,
+		"shell_command": true,
+		"grep_search":   true,
+		"find_files":    true,
 		// Interactive-terminal drive loop: shell_command runs in a PTY and can
 		// return waiting_for_input=true with a session_id; the agent responds via
 		// process_write (and inspects/ends the session with process_read/kill/list).
 		// These must be main-thread so the top-level coding agent can handle an
 		// interactive program directly — matching chat mode — instead of needing a
 		// search_tools detour to discover them.
-		"process_read":  true,
-		"process_write": true,
-		"process_kill":  true,
-		"process_list":  true,
-		"repo_map":           true,
-		"code_definition":    true,
-		"code_references":    true,
-		"memory_save":        true,
-		"memory_search":      true,
-		"memory_delete":      true,
-		"delegate_tasks":     true,
-		"announce_plan":      true,
+		"process_read":    true,
+		"process_write":   true,
+		"process_kill":    true,
+		"process_list":    true,
+		"repo_map":        true,
+		"code_definition": true,
+		"code_references": true,
+		"memory_save":     true,
+		"memory_search":   true,
+		"memory_delete":   true,
+		"delegate_tasks":  true,
+		"announce_plan":   true,
 		// update_plan drives main-thread plan progress (mark a phase running/
 		// complete/failed as the top-level agent works). It is the direct
 		// companion to announce_plan and MUST be main-thread — otherwise the
@@ -1113,6 +1113,13 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		promptBuilder.PlanFilePersistence = true
 	}
 
+	// Code-mode authorization guidance: tell the model that not-whitelisted
+	// tools and out-of-project paths may pause for user authorization. Matches
+	// the runtime gates wired below (CodeMode && !AutoApprove).
+	if cfg.CodeMode && !cfg.AutoApprove {
+		promptBuilder.EnforceAuthorization = true
+	}
+
 	// Code mode treats MCP servers as first-class: their tools are injected on
 	// the main thread (see section 6), so the prompt should advertise them as
 	// directly callable instead of gating them behind search_tools.
@@ -1435,6 +1442,24 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		promptBuilder, cfg.DebugMode, cfg.AutoApprove,
 	)
 	chatAgentRef = chatAgent // wire the forward reference for search_tools callback
+
+	// Code-mode authorization: gate not-whitelisted tools and out-of-project
+	// filesystem access behind per-tool / per-folder user authorization. Active
+	// only in code mode and only when the user hasn't opted into --auto-approve
+	// (--yolo), which bypasses all approval. Studio/platform mode leaves this
+	// off — those surfaces are sandboxed / tenant-scoped instead.
+	if cfg.CodeMode && !cfg.AutoApprove {
+		chatAgent.SetEnforceAuthorization(true)
+		chatAgent.SetWorkingDir(workspaceDir)
+		// NOTE: we deliberately do NOT call tools.SetScopeRoot here. In
+		// interactive code mode the folder-access gate in pkg/agent is the
+		// authoritative, GRANT-AWARE enforcer: it prompts for out-of-scope
+		// paths and, once the user approves, records a path grant so the retry
+		// succeeds. The tools.SetScopeRoot guard is grant-BLIND (a hard reject),
+		// so engaging it here would re-reject a path the user just approved.
+		// SetScopeRoot is reserved for non-interactive callers that cannot
+		// prompt (scheduler/planner auto-approve) — wired there separately.
+	}
 
 	// Wire tool index to ChatAgent for per-turn auto-discovery
 	if toolIndex != nil {

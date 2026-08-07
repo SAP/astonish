@@ -49,6 +49,15 @@ if planMode:
 The design mirrors the existing `CheckTutorialDrillToolGate` hard-block pattern — no new
 runtime path was forked.
 
+> **Related: Normal-mode authorization reuses this allow-list.** `astonish code` also adds a
+> Normal-mode (non-plan) authorization gate that reuses the **same `agent.SafeTools` list** as an
+> *auto-allow baseline* rather than a hard block: safe/read-only tools run freely, but a
+> non-whitelisted tool pauses for the user's authorization (Allow / Always Allow /
+> deny) instead of being refused outright. A companion folder-access gate scopes tools to the
+> project working directory. Both gates are code-mode only and bypassed by `--auto-approve` /
+> `--yolo`. See **[Tool & folder authorization (code mode)](architecture/terminal-app.md#tool--folder-authorization-code-mode)**
+> and `pkg/agent/tool_authorization.go`.
+
 ## Flag plumbing (end to end)
 
 ```

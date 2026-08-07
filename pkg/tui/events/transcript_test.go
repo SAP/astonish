@@ -266,6 +266,38 @@ func TestTranscript_Approval(t *testing.T) {
 	}
 }
 
+func TestTranscript_AuthorizationApproval(t *testing.T) {
+	tr := NewTranscript()
+	tr.Apply(NewAuthorizationApproval(
+		"write_file",
+		map[string]any{"file_path": "x.go"},
+		[]string{"Allow", "Always Allow", "Deny"},
+		"tool", nil,
+	))
+	if !tr.Awaiting || tr.ApprovalIdx < 0 {
+		t.Fatal("expected awaiting authorization")
+	}
+	if tr.ApprovalCursor != 0 {
+		t.Fatalf("expected default approval cursor 0, got %d", tr.ApprovalCursor)
+	}
+	item := tr.Items[tr.ApprovalIdx]
+	if item.Kind != ItemApproval || item.ApprovalKind != "tool" || len(item.Options) != 3 {
+		t.Fatalf("tool authorization item: %+v", item)
+	}
+
+	tr2 := NewTranscript()
+	tr2.Apply(NewAuthorizationApproval(
+		"read_file",
+		map[string]any{"path": "/etc/hosts"},
+		[]string{"Allow", "Always Allow", "Deny"},
+		"folder", []string{"/etc/hosts"},
+	))
+	fitem := tr2.Items[tr2.ApprovalIdx]
+	if fitem.ApprovalKind != "folder" || len(fitem.Paths) != 1 || fitem.Paths[0] != "/etc/hosts" {
+		t.Fatalf("folder authorization item: %+v", fitem)
+	}
+}
+
 func TestTranscript_NetworkDenial(t *testing.T) {
 	tr := NewTranscript()
 	denials := []NetworkDenial{{Host: "api.example.com", Port: 443, ChunkID: "chunk-1"}}

@@ -139,10 +139,10 @@ astonish chat --resume                 # Resume last session
 astonish code                          # Start coding in the current directory
 astonish code -m openai:gpt-4o         # Pin a provider/model
 astonish code -C ./my-project          # Operate in a specific directory
-astonish code --auto-approve           # Skip the per-tool approval prompt (a.k.a. --yolo)
+astonish code --auto-approve           # Bypass tool & folder authorization prompts (a.k.a. --yolo)
 ```
 
-Tools run with your own permissions (no sandbox); safety comes from the per-tool approval prompt. Use `--auto-approve` / `--yolo` to skip it.
+Tools run with your own permissions (no sandbox). Safety comes from two authorization prompts: **file-modifying / command-running tools ask before executing** (read-only inspection runs freely), and **access to paths outside the project directory asks first**. Each prompt offers **Allow**, **Always Allow** (for the rest of the turn/session), or **Deny** — use ↑/↓ and Enter, with the cursor defaulting to **Allow**. Use `--auto-approve` / `--yolo` to bypass both prompts.
 
 Code mode opens even if you haven't picked a model yet. Type `/model` inside the app to choose a provider and model; the selection is saved to your Astonish config (`~/.config/astonish/config.yaml`) and reused next time. If you have no providers configured, type `/provider` to add one (name, type, and API key) — code mode manages providers entirely in the config file and never needs a database.
 

@@ -20,6 +20,7 @@ type FindFilesArgs struct {
 	SearchPath string `json:"search_path,omitempty" jsonschema:"Directory to search from (default: current dir)"`
 	MaxResults int    `json:"max_results,omitempty" jsonschema:"Maximum results to return (default: 100)"`
 	SortBy     string `json:"sort_by,omitempty" jsonschema:"Sort order: 'path' (default) or 'mtime' (newest first)"`
+	Recursive  bool   `json:"recursive,omitempty" jsonschema:"Descend into subdirectories (default false: list only the immediate children of search_path, like 'ls'). A pattern containing '/' or '**' forces recursion regardless of this flag."`
 }
 
 // FoundFile represents a matched file
@@ -66,13 +67,30 @@ func FindFiles(ctx tool.Context, args FindFilesArgs) (FindFilesResult, error) {
 		return FindFilesResult{}, err
 	}
 
-	// Try ripgrep --files first, fall back to Go implementation
-	files, err := tryRipgrepFiles(args.Pattern, absPath, maxResults+1)
-	if err != nil {
-		// Fallback to Go implementation
-		files, err = goFindFiles(args.Pattern, absPath, maxResults+1)
+	// Determine effective recursion. Shallow (immediate-children) listing is the
+	// default so a bare "list files in DIR" call behaves like `ls` and does not
+	// flood with an entire subtree. A pattern that itself expresses depth ('/'
+	// or '**') forces recursion regardless of the flag, since a shallow walk
+	// could never satisfy it.
+	patternImpliesRecursion := strings.Contains(args.Pattern, "/") || strings.Contains(args.Pattern, "**")
+	recursive := args.Recursive || patternImpliesRecursion
+
+	var files []FoundFile
+	if !recursive {
+		// Shallow: list only the immediate children (files AND dirs) of
+		// searchPath whose basename matches the pattern.
+		files, err = goListDir(args.Pattern, absPath, maxResults+1)
 		if err != nil {
 			return FindFilesResult{}, err
+		}
+	} else {
+		// Recursive: try ripgrep --files first, fall back to the Go walk.
+		files, err = tryRipgrepFiles(args.Pattern, absPath, maxResults+1)
+		if err != nil {
+			files, err = goFindFiles(args.Pattern, absPath, maxResults+1)
+			if err != nil {
+				return FindFilesResult{}, err
+			}
 		}
 	}
 
@@ -249,7 +267,56 @@ func goFindFiles(pattern, searchPath string, maxResults int) ([]FoundFile, error
 	return files, nil
 }
 
-// matchDoublestar matches a pattern containing ** against a path.
+// goListDir lists only the immediate children (files AND directories) of dir
+// whose basename matches pattern. This backs the shallow (non-recursive)
+// default of find_files, giving it `ls`-like behavior for "what is in this
+// directory" without descending into the whole subtree. Excluded directory
+// names (defaultExclusions) are still filtered out. Matching is done against
+// the basename with filepath.Match, falling back to a case-insensitive match
+// for robustness (mirrors goFindFiles). An empty pattern matches everything.
+func goListDir(pattern, dir string, maxResults int) ([]FoundFile, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+
+	var files []FoundFile
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() && defaultExclusions[name] {
+			continue
+		}
+
+		if pattern != "" && pattern != "*" {
+			m, matchErr := filepath.Match(pattern, name)
+			if matchErr != nil {
+				m, _ = filepath.Match(strings.ToLower(pattern), strings.ToLower(name))
+			}
+			if !m {
+				continue
+			}
+		}
+
+		full := filepath.Join(dir, name)
+		var size int64
+		if info, infoErr := entry.Info(); infoErr == nil {
+			size = info.Size()
+		}
+		files = append(files, FoundFile{
+			Path:         full,
+			RelativePath: name,
+			Size:         size,
+			IsDir:        entry.IsDir(),
+		})
+
+		if len(files) >= maxResults {
+			break
+		}
+	}
+
+	return files, nil
+}
+
 // ** matches zero or more path segments. Each non-** segment is matched
 // with filepath.Match semantics against the corresponding path segment.
 func matchDoublestar(pattern, path string) bool {

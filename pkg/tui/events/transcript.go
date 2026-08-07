@@ -51,6 +51,10 @@ type Item struct {
 	ToolName string
 	Args     map[string]any
 	Options  []string
+	// ApprovalKind: "" generic, "tool", or "folder" (code-mode authorization).
+	ApprovalKind string
+	// Paths: requested out-of-project paths (folder approvals).
+	Paths []string
 
 	// Network denial fields.
 	NetworkDenials []NetworkDenial
@@ -86,6 +90,10 @@ type Transcript struct {
 	ContextTokens int64
 	Awaiting      bool // waiting for approval response
 	ApprovalIdx   int  // index of open approval item, or -1
+	// ApprovalCursor is the highlighted option index in the open approval
+	// overlay (0-based). Defaults to 0 (the first option, e.g. "Allow") when a
+	// prompt opens, so pressing Enter accepts the safe default immediately.
+	ApprovalCursor int
 
 	// nextTextReplaces: after tool call/result, the next agent text starts a new
 	// sticky utterance (replaces provisional content) instead of appending.
@@ -149,14 +157,24 @@ func (t *Transcript) Apply(ev Event) {
 		}
 	case KindApproval:
 		t.Awaiting = true
+		content := "Approve " + firstNonEmpty(ev.ToolName, "tool") + "?"
+		switch ev.ApprovalKind {
+		case "folder":
+			content = "Allow " + firstNonEmpty(ev.ToolName, "tool") + " to access files outside the project?"
+		case "tool":
+			content = "Authorize " + firstNonEmpty(ev.ToolName, "tool") + "?"
+		}
 		t.Items = append(t.Items, Item{
-			Kind:     ItemApproval,
-			ToolName: ev.ToolName,
-			Args:     ev.Args,
-			Options:  defaultOptions(ev.Options),
-			Content:  "Approve " + firstNonEmpty(ev.ToolName, "tool") + "?",
+			Kind:         ItemApproval,
+			ToolName:     ev.ToolName,
+			Args:         ev.Args,
+			Options:      defaultOptions(ev.Options),
+			ApprovalKind: ev.ApprovalKind,
+			Paths:        ev.Paths,
+			Content:      content,
 		})
 		t.ApprovalIdx = len(t.Items) - 1
+		t.ApprovalCursor = 0
 		t.Status = "Waiting for approval…"
 	case KindNetworkDenial:
 		t.Awaiting = true
@@ -888,6 +906,7 @@ func (t *Transcript) ToggleLastUser() {
 func (t *Transcript) ClearApproval() {
 	t.Awaiting = false
 	t.ApprovalIdx = -1
+	t.ApprovalCursor = 0
 }
 
 // Reset clears transcript items and turn state (used for /new and session switch).
@@ -900,6 +919,7 @@ func (t *Transcript) Reset() {
 	t.ContextTokens = 0
 	t.Awaiting = false
 	t.ApprovalIdx = -1
+	t.ApprovalCursor = 0
 	t.nextTextReplaces = false
 }
 

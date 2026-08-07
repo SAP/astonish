@@ -220,3 +220,17 @@ func (a *AstonishAgent) formatToolApprovalRequest(toolName string, args map[stri
 	// Return ANSI formatted box for CLI
 	return ui.RenderToolBox(toolName, args)
 }
+
+// formatFolderApprovalRequest formats a folder-access authorization request for
+// the code-mode gate: the tool wants to touch paths outside the project root.
+func (a *AstonishAgent) formatFolderApprovalRequest(toolName string, paths []string, root string) string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("`%s` wants to access files outside the project directory:\n", toolName))
+	for _, p := range paths {
+		sb.WriteString("  • " + p + "\n")
+	}
+	if root != "" {
+		sb.WriteString("\nProject directory: " + root + "\n")
+	}
+	return sb.String()
+}

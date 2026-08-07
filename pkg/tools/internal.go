@@ -9,10 +9,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/SAP/astonish/pkg/codeintel"
 	"github.com/SAP/astonish/pkg/config"
+	"github.com/SAP/astonish/pkg/pathscope"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
 )
@@ -22,6 +24,58 @@ import (
 // protectedFileNames are filenames within the config directory that must never
 // be accessed by LLM tools. These contain the encryption key and encrypted secrets.
 var protectedFileNames = []string{".store_key", "credentials.enc"}
+
+// --- Filesystem scope confinement (defense-in-depth) ---
+//
+// scopeRoot, when non-empty, is the absolute project root that shell_command
+// operands must stay within. It is a SECONDARY guard: the primary enforcement
+// is the code-mode folder-access gate in pkg/agent (SessionAuthPolicy), which
+// prompts the user for out-of-scope paths. This guard exists so the boundary
+// still holds on code paths that bypass the agent gate (e.g. the ReAct planner
+// or scheduler auto-approve) and cannot surface an interactive prompt: there,
+// an out-of-scope command is rejected outright rather than silently allowed.
+//
+// It is OFF by default (empty root) so personal/CLI and every existing test
+// keep their current unrestricted behavior; the code-mode launcher opts in via
+// SetScopeRoot.
+var scopeRoot = struct {
+	sync.RWMutex
+	root string
+}{}
+
+// SetScopeRoot enables (non-empty) or disables (empty) shell_command filesystem
+// confinement to the given project root. The root is normalized once.
+func SetScopeRoot(root string) {
+	scopeRoot.Lock()
+	defer scopeRoot.Unlock()
+	scopeRoot.root = pathscope.NormalizeDir(root)
+}
+
+// getScopeRoot returns the current confinement root ("" = disabled).
+func getScopeRoot() string {
+	scopeRoot.RLock()
+	defer scopeRoot.RUnlock()
+	return scopeRoot.root
+}
+
+// commandTouchesOutOfScope reports the first path operand in command that
+// resolves outside root, or ("", false) if none / confinement disabled. Reuses
+// the SAME extraction + containment logic as the agent gate (pkg/pathscope).
+func commandTouchesOutOfScope(command, root string) (string, bool) {
+	if root == "" {
+		return "", false
+	}
+	for _, tok := range pathscope.ExtractCommandPaths(command) {
+		abs := pathscope.NormalizePath(tok)
+		if abs == "" {
+			continue
+		}
+		if !pathscope.PathWithin(root, abs) {
+			return abs, true
+		}
+	}
+	return "", false
+}
 
 // isProtectedPath returns true if the given file path resolves to a protected
 // credential store file inside the config directory.
@@ -54,23 +108,11 @@ func isProtectedPath(filePath string) bool {
 	return false
 }
 
-// expandPath resolves ~ to the user's home directory. Go's os and filepath
-// packages do not expand ~ (it's a shell feature), so LLM-provided paths
-// like "~/snake/main.py" would fail without this. Only the leading "~/" or
-// bare "~" is expanded; ~user syntax is not supported.
+// expandPath resolves ~ to the user's home directory. Delegates to
+// pathscope.ExpandHome so tool path resolution and the authorization gate
+// agree on the same expansion (single source of truth).
 func expandPath(path string) string {
-	if path == "~" {
-		if home, err := os.UserHomeDir(); err == nil {
-			return home
-		}
-		return path
-	}
-	if strings.HasPrefix(path, "~/") {
-		if home, err := os.UserHomeDir(); err == nil {
-			return filepath.Join(home, path[2:])
-		}
-	}
-	return path
+	return pathscope.ExpandHome(path)
 }
 
 // commandReferencesProtectedFile checks if a shell command string references
@@ -419,6 +461,16 @@ func ShellCommand(ctx tool.Context, args ShellCommandArgs) (ShellCommandResult, 
 		return ShellCommandResult{}, fmt.Errorf("access denied: command references credential store file '%s' which cannot be accessed", fileName)
 	}
 
+	// Filesystem scope confinement (defense-in-depth). When a scope root is
+	// configured (code mode), reject a command whose operands resolve outside
+	// the project root. The interactive folder-access gate in pkg/agent
+	// normally prompts first; this catches non-interactive bypass paths.
+	if root := getScopeRoot(); root != "" {
+		if outside, blocked := commandTouchesOutOfScope(args.Command, root); blocked {
+			return ShellCommandResult{}, fmt.Errorf("access denied: command references path '%s' outside the project directory '%s'; authorization required", outside, root)
+		}
+	}
+
 	// Mark all cache entries as unverified — shell commands may modify files.
 	// The next read_file will re-stat to confirm before returning cached results.
 	if cache := LoadFileReadCache(); cache != nil {
@@ -730,7 +782,7 @@ func GetInternalTools() ([]tool.Tool, error) {
 
 	shellCommandTool, err := functiontool.New(functiontool.Config{
 		Name:        "shell_command",
-		Description: `Execute a shell command with PTY support. Use for builds, tests, linters, git, package managers, CLIs, servers, and scripts. Do NOT use for browsing or searching source code — use file_tree, find_files, grep_search, or read_file instead. Returns stdout, exit_code. If the command waits for input, returns waiting_for_input=true with a session_id — use process_write to respond. Set background=true to start without waiting.`,
+		Description: `Execute a shell command with PTY support. Use ONLY for executing project behavior: builds, tests, linters, git, package managers, CLIs, servers, and scripts. Do NOT use it to inspect the filesystem — there are dedicated tools that are faster, safer, and do not trigger folder-access prompts: to LIST a directory use find_files (lists immediate children by default, like 'ls') or file_tree; to READ a file use read_file; to SEARCH file contents use grep_search; to find a symbol definition/usages use code_definition / code_references. In particular do NOT run ls, cat, head, tail, find, grep, or rg here. Returns stdout, exit_code. If the command waits for input, returns waiting_for_input=true with a session_id — use process_write to respond. Set background=true to start without waiting.`,
 	}, ShellCommand)
 	if err != nil {
 		return nil, err
@@ -771,7 +823,7 @@ func GetInternalTools() ([]tool.Tool, error) {
 
 	findFilesTool, err := functiontool.New(functiontool.Config{
 		Name:        "find_files",
-		Description: "Find files by name/path pattern using glob matching (e.g., '*.go', 'src/**/*.ts'). Respects .gitignore when ripgrep is available. Supports sort_by='mtime' for newest-first ordering. Returns matching file paths with sizes.",
+		Description: "List or find files by name/path. By DEFAULT this lists only the immediate children (files and directories) of search_path — use it as the `ls` replacement for \"what is in this directory\". Set recursive=true (or give a pattern containing '/' or '**') to descend the whole tree. Supports glob patterns (e.g., '*.go', 'src/**/*.ts'), sort_by='mtime' for newest-first, and respects .gitignore when ripgrep is available. Returns matching paths with sizes.",
 	}, FindFiles)
 	if err != nil {
 		return nil, err

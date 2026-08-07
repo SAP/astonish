@@ -66,6 +66,7 @@ type SystemPromptBuilder struct {
 	SandboxEnabled        bool                         // Whether a sandbox backend is configured
 	SandboxWorkspaceDir   string                       // Persistent workspace dir inside sandbox (e.g. "/sandbox" or "/root")
 	PlanFilePersistence   bool                         // Whether announced plans are persisted to a session PLAN.md (code mode)
+	EnforceAuthorization  bool                         // Whether code-mode tool/folder authorization gates are active (Normal mode)
 }
 
 // Clone creates a shallow copy of the SystemPromptBuilder suitable for
@@ -242,6 +243,10 @@ func (b *SystemPromptBuilder) Build() string {
 	if b.PlanFilePersistence {
 		sb.WriteString("\n**Execution plan (PLAN.md):** When you announce a multi-phase plan (announce_plan), it is persisted to a session PLAN.md. As you work, keep it current: for main-thread phases call update_plan (running → complete/failed); delegated phases update automatically. ")
 		sb.WriteString("After a context summary, re-read PLAN.md with read_file to recover the exact plan and where you left off, then mark the next phase running and continue.\n")
+	}
+	if b.EnforceAuthorization {
+		sb.WriteString("\n**Tool & folder authorization:** You run directly on the user's machine. Read-only inspection tools run freely, but tools that modify files, run commands, or otherwise act (e.g. write_file, edit_file, shell_command) may pause for the user's authorization before executing, and accessing paths outside the working directory may also require authorization. ")
+		sb.WriteString("This is expected — proceed normally. If the user denies an action, do NOT retry it: explain what you intended and ask how they'd like to proceed. Prefer working inside the project directory.\n")
 	}
 
 	// 5. Agent Identity (for web portal interactions)

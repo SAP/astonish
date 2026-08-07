@@ -730,11 +730,16 @@ func mapSSEToEvents(sev *client.SSEEvent, debug bool) []events.Event {
 			Name    string         `json:"tool"`
 			Args    map[string]any `json:"args"`
 			Options []string       `json:"options"`
+			Kind    string         `json:"kind"`
+			Paths   []string       `json:"paths"`
 		}
 		if json.Unmarshal(data, &payload) == nil {
 			tool := payload.Tool
 			if tool == "" {
 				tool = payload.Name
+			}
+			if payload.Kind != "" {
+				return []events.Event{events.NewAuthorizationApproval(tool, payload.Args, payload.Options, payload.Kind, payload.Paths)}
 			}
 			return []events.Event{events.NewApproval(tool, payload.Args, payload.Options)}
 		}

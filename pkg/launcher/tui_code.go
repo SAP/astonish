@@ -1100,10 +1100,30 @@ func (b *localAgentBackend) processStateDelta(delta map[string]any, emit func(st
 		case []any:
 			options = v
 		}
-		emit("approval", map[string]any{
+		payload := map[string]any{
 			"tool":    toolName,
 			"options": options,
-		})
+		}
+		// Code-mode authorization prompts carry a kind ("tool"/"folder") and,
+		// for folder prompts, the requested out-of-project paths.
+		if kind, ok := delta["approval_kind"].(string); ok && kind != "" {
+			payload["kind"] = kind
+		}
+		if pathsVal, ok := delta["approval_paths"]; ok {
+			switch v := pathsVal.(type) {
+			case []string:
+				payload["paths"] = v
+			case []any:
+				var paths []string
+				for _, p := range v {
+					if s, ok := p.(string); ok {
+						paths = append(paths, s)
+					}
+				}
+				payload["paths"] = paths
+			}
+		}
+		emit("approval", payload)
 	}
 	if autoApproved, ok := delta["auto_approved"].(bool); ok && autoApproved {
 		if toolName, ok := delta["approval_tool"].(string); ok {

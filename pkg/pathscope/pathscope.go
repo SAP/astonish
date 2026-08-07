@@ -132,18 +132,31 @@ func PathWithin(root, candidate string) bool {
 // tokens embedded in a free-form shell command string. It is intentionally
 // CONSERVATIVE (default-deny biased): it recognizes tokens that reference a
 // location by absolute path (/...), home (~ or ~/...), or an explicit relative
-// escape/reference (../..., ./...). These are exactly the shapes that can point
+// escape/reference (../...). These are exactly the shapes that can point
 // OUTSIDE the project root, which is what the folder-access gate must catch.
 //
 // Shell syntax is not fully parseable in the general case (command
-// substitution, variable expansion, eval, here-docs, etc. can all hide paths),
-// so callers MUST treat a positive extraction as "these tokens need a scope
-// check" and MUST NOT treat an empty result as proof the command is in-scope.
-// The caller's policy decides what to do when the command is opaque.
+// substitution, variable expansion, eval, here-docs, nested shells like
+// `sh -c "..."`, etc. can all hide paths), so callers MUST treat a positive
+// extraction as "these tokens need a scope check" and MUST NOT treat an empty
+// result as proof the command is in-scope. The caller's policy decides what to
+// do when the command is opaque.
+//
+// The tokenizer is QUOTE-AWARE: a single- or double-quoted span is part of one
+// atomic token, so word/operator boundaries INSIDE quotes do not split it. This
+// is the key to not mis-flagging quoted LITERAL DATA — e.g. a commit message
+// `git commit -m "fixes A / B"` yields the whole message as one token, which is
+// not path-shaped (it does not start with /, ~, or ../), instead of a spurious
+// bare "/" operand. A genuinely path-shaped quoted argument such as
+// `cat "/etc/passwd"` still surfaces, because the token content ("/etc/passwd")
+// begins with an absolute-path shape. Just because a command *contains* a "/"
+// (or ~ or ..) inside quoted prose does NOT mean it accesses that location.
 //
 // The tokenizer:
-//   - splits on shell word boundaries and the common operators | & ; < > ( ),
-//   - strips surrounding single/double quotes,
+//   - splits on shell word boundaries and the common operators | & ; < > ( )
+//     but ONLY outside quotes,
+//   - treats '...' and "..." spans as literal and consumes the quote marks,
+//     joining adjacent quoted/unquoted runs into a single token (shell word-join),
 //   - drops flag tokens (those starting with '-'),
 //   - drops "key=value" env-assignment prefixes but inspects the value,
 //   - returns the raw (un-normalized) tokens; the caller normalizes + tests
@@ -157,8 +170,6 @@ func ExtractCommandPaths(command string) []string {
 	seen := make(map[string]bool)
 	add := func(tok string) {
 		tok = strings.TrimSpace(tok)
-		// Strip a single layer of matching surrounding quotes.
-		tok = trimQuotes(tok)
 		if tok == "" || seen[tok] {
 			return
 		}
@@ -176,8 +187,11 @@ func ExtractCommandPaths(command string) []string {
 		// Handle key=value env assignments and --opt=value flags: inspect the
 		// value, which may itself be a path (e.g. OUT=/etc/x, --file=../y).
 		// Checked BEFORE the flag-drop below so "--file=../y" still surfaces
-		// its value.
-		if eq := strings.IndexByte(field, '='); eq >= 0 && eq < len(field)-1 {
+		// its value. Skip this for tokens containing whitespace: those can only
+		// come from a quoted literal (env assignments and --opt=value are always
+		// single unquoted words), and a literal message may legitimately contain
+		// '=' — we must not re-split it into a fake "value".
+		if eq := strings.IndexByte(field, '='); eq >= 0 && eq < len(field)-1 && !strings.ContainsAny(field, " \t") {
 			add(field[eq+1:])
 			continue
 		}
@@ -221,24 +235,52 @@ func looksLikePathToken(tok string) bool {
 }
 
 // splitCommand splits a command line into candidate word tokens, treating shell
-// operators as separators. It is a heuristic (not a real shell lexer) but is
-// sufficient to isolate path-shaped operands from pipelines and redirections.
+// operators as separators. It is QUOTE-AWARE: characters inside single- or
+// double-quoted spans are literal and never treated as word/operator
+// boundaries, and the quote marks themselves are consumed. Adjacent
+// quoted/unquoted runs join into a single token (e.g. cat"/etc"/passwd →
+// "cat/etc/passwd"), mirroring how a real shell forms a word. This is a
+// heuristic (not a full shell lexer — it does not handle backslash escapes,
+// command substitution, or here-docs) but it is sufficient to isolate
+// path-shaped operands from pipelines/redirections WITHOUT shredding quoted
+// literal data (messages, prose, patterns) into spurious path tokens.
 func splitCommand(command string) []string {
-	return strings.FieldsFunc(command, func(r rune) bool {
-		switch r {
-		case ' ', '\t', '\n', '\r', '|', '&', ';', '<', '>', '(', ')':
-			return true
-		}
-		return false
-	})
-}
-
-// trimQuotes removes one layer of matching surrounding single or double quotes.
-func trimQuotes(s string) string {
-	if len(s) >= 2 {
-		if (s[0] == '\'' && s[len(s)-1] == '\'') || (s[0] == '"' && s[len(s)-1] == '"') {
-			return s[1 : len(s)-1]
+	var (
+		tokens  []string
+		cur     strings.Builder
+		hasTok  bool // whether cur holds an in-progress token
+		inQuote rune // 0, '\'' or '"'
+	)
+	flush := func() {
+		if hasTok {
+			tokens = append(tokens, cur.String())
+			cur.Reset()
+			hasTok = false
 		}
 	}
-	return s
+	for _, r := range command {
+		if inQuote != 0 {
+			if r == inQuote {
+				inQuote = 0 // closing quote; token continues (may join more)
+				continue
+			}
+			cur.WriteRune(r)
+			hasTok = true
+			continue
+		}
+		switch r {
+		case '\'', '"':
+			// Opening quote: begin a literal span, and mark that a token exists
+			// even if the quoted content is empty ("" is still a word).
+			inQuote = r
+			hasTok = true
+		case ' ', '\t', '\n', '\r', '|', '&', ';', '<', '>', '(', ')':
+			flush()
+		default:
+			cur.WriteRune(r)
+			hasTok = true
+		}
+	}
+	flush()
+	return tokens
 }

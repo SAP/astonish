@@ -33,6 +33,23 @@ func TestExtractCommandPaths(t *testing.T) {
 		{"mid-token escape", "cat foo/../../etc/passwd", []string{"foo/../../etc/passwd"}},
 		{"dedupe", "diff /a /a", []string{"/a"}},
 		{"multiple distinct", "cp /a /b", []string{"/a", "/b"}},
+
+		// --- Quote-aware tokenization: quoted LITERAL DATA must NOT be
+		// mis-flagged just because it contains /, ~, .., (), |, ; etc. This is
+		// the regression suite for the false-positive folder-access prompts on
+		// commands like `git commit -m "...A / B..."`.
+		{"quoted commit message with slash", `git commit -m "fixes A / B"`, nil},
+		{"quoted message parens tilde dotdot", `git commit -m "see notes (x) about ~/foo and ../bar"`, nil},
+		{"quoted message with pipe and semicolon", `git commit -m "a | b ; c"`, nil},
+		{"single-quoted literal slash", `echo 'a / b'`, nil},
+		{"quoted flag-like value", `foo --msg "-- not a flag / path"`, nil},
+		{"quoted message with equals", `git commit -m "x = y / z"`, nil},
+
+		// --- Still flag genuine path operands, quoted or not (security must
+		// not weaken).
+		{"unquoted absolute among quoted text", `sh -c "echo hi" && cat /etc/passwd`, []string{"/etc/passwd"}},
+		{"quoted absolute among quoted message", `git commit -m "note" && cat "/etc/shadow"`, []string{"/etc/shadow"}},
+		{"quoted path with spaces", `cat "/var/log/system log"`, []string{"/var/log/system log"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

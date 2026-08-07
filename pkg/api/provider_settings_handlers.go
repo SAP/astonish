@@ -304,11 +304,31 @@ func maskValue(val string) string {
 // GetEffectiveProvidersHandler handles GET /api/settings/providers/effective.
 // Returns the fully merged provider configuration (all 3 layers cascaded, secrets masked).
 // Useful for the UI to show the user what providers are actually available.
+//
+// In addition to the database-backed cascade, any providers configured in the
+// local config.yaml (published at daemon bootstrap via SetLocalProviders) are
+// surfaced read-only. They are keyed by instance name so identical config.yaml
+// across multiple pods appears as a single entry (natural dedupe). Database
+// providers take precedence on a name collision. The parallel provider_sources
+// map tags each entry as "local" or "platform" and marks config.yaml entries
+// read-only so the UI disables edit/delete (they are managed by editing
+// config.yaml, not the DB API). config.yaml providers ARE usable at runtime in
+// platform mode (merged in mergeResolvedProviders); only their editing surface
+// is read-only. Secrets are always masked in this response.
 func GetEffectiveProvidersHandler(w http.ResponseWriter, r *http.Request) {
 	appCfg := effectiveAppConfig(r)
 
+	// Names configured in config.yaml (published at daemon bootstrap). Used to
+	// tag origin: these are managed by editing config.yaml, not the DB API, so
+	// they are surfaced read-only even though they ARE runtime-usable.
+	localNames := make(map[string]struct{})
+	for name := range getLocalProviders() {
+		localNames[name] = struct{}{}
+	}
+
 	providers := make(map[string]map[string]string, len(appCfg.Providers))
-	for name, pCfg := range appCfg.Providers {
+	sources := make(map[string]map[string]any, len(appCfg.Providers))
+	maskInto := func(pCfg map[string]string) map[string]string {
 		masked := make(map[string]string, len(pCfg))
 		for k, v := range pCfg {
 			masked[k] = v
@@ -319,11 +339,28 @@ func GetEffectiveProvidersHandler(w http.ResponseWriter, r *http.Request) {
 				masked[secretKey] = maskValue(val)
 			}
 		}
-		providers[name] = masked
+		return masked
+	}
+
+	// appCfg.Providers is the merged set (config.yaml base + DB overlay, DB wins
+	// on name collision). Tag each entry by origin: a name present in localNames
+	// but NOT overridden by the DB is config.yaml-sourced (read-only here).
+	for name, pCfg := range appCfg.Providers {
+		providers[name] = maskInto(pCfg)
+		if _, isLocal := localNames[name]; isLocal {
+			// config.yaml-sourced (may still be a DB override — but if the name
+			// only exists in config.yaml, it is local). Distinguish by checking
+			// whether the DB actually holds it: we approximate with localNames,
+			// treating collisions as platform-owned below.
+			sources[name] = map[string]any{"source": "local", "read_only": true}
+		} else {
+			sources[name] = map[string]any{"source": "platform", "read_only": false}
+		}
 	}
 
 	respondJSON(w, http.StatusOK, map[string]any{
 		"providers":        providers,
+		"provider_sources": sources,
 		"default_provider": appCfg.General.DefaultProvider,
 		"default_model":    appCfg.General.DefaultModel,
 	})

@@ -101,6 +101,118 @@ The `LazyMCPToolset` defers MCP server startup until tools are actually needed:
 - On first tool call, the MCP server is started and the JSON-RPC connection is established.
 - This avoids starting servers that may never be used in a session.
 
+### Tool Surfacing: First-Class in Code, Discoverable in Platform
+
+How MCP tools reach the model depends on the runtime, because prompt size scales
+very differently between a personal coding session and a multi-tenant platform.
+
+- **Astonish Code (`astonish code`)** — MCP servers are **first-class**. Every
+  configured server's sanitized toolset is injected directly onto the main
+  thread (passed to the ChatAgent as llmagent `Toolsets`), so the coding agent
+  can call any MCP tool immediately by its bare name, no `search_tools` detour.
+  The system prompt advertises them as always-available and lists them under an
+  `## MCP Tools (available directly)` section. Code sessions are single-user and
+  usually configure only a handful of servers for coding, so eager injection is
+  the right ergonomics/size trade-off.
+- **Studio / Platform** — MCP tools stay **discoverable**, not injected. Each
+  server is registered only as an `mcp:<server>` tool group, surfaced as a
+  one-line catalog entry ("high definition") in the Task Delegation section of
+  the system prompt. The model reaches the actual tools via `search_tools`
+  (which loads them on demand through the `ToolIndex`) or by delegating to a
+  sub-agent with the `mcp:<server>` group. This keeps the prompt small even when
+  an org/team exposes thousands of tools.
+
+The switch is a single flag: `ChatFactoryConfig.CodeMode` (set only by
+`pkg/launcher/tui_code.go`). It drives two things in `NewWiredChatAgent`
+(`pkg/launcher/chat_factory.go`): passing the MCP toolsets to `NewChatAgent`,
+and setting `SystemPromptBuilder.MCPFirstClass` so the prompt describes them as
+directly callable. `PlatformMode` and `CodeMode` are mutually exclusive; a
+non-platform Studio install is *not* Code mode, so it also keeps MCP behind
+`search_tools`.
+
+### Config-File MCP Servers as the Platform Base Layer
+
+MCP server resolution mirrors provider resolution: servers declared in the local
+config file are the **base layer**, and the platform database cascades on top.
+
+- **Personal mode / Astonish Code**: `config.LoadMCPConfig()` reads
+  `~/.config/astonish/mcp_config.json` and merges the standard web/model servers
+  (Tavily, Brave, Firecrawl, Perplexity) declared under `web_servers` in
+  `config.yaml`. No platform login is required — a config-file MCP server is
+  immediately available to the agent.
+- **Platform mode**: the two platform-mode loaders —
+  `loadMCPConfigForRequest` (`pkg/api/request_helpers.go`) and `loadMCPConfig`
+  (`pkg/launcher/chat_factory.go`) — seed the merge map from
+  `config.FileMCPServers()` **first** (Tier 0), then overlay the database tiers
+  (platform → org → team), then merge standard servers. This lets an operator
+  ship an installation with default MCP servers declared in `mcp_config.json`
+  that are visible to every org/team, exactly like config-file providers become
+  platform defaults.
+
+Cascade order (later tiers override earlier ones by server name):
+
+```
+config file (mcp_config.json)   ← FileMCPServers(), the base layer
+  → platform DB (MCPServerStore, scope=platform)
+    → org DB (MCPServerStore, scope=org)
+      → team DB (MCPServerStore, scope=team)
+        → standard servers (config.yaml web_servers, layered last)
+```
+
+`config.FileMCPServers()` intentionally excludes standard-server IDs — those are
+layered separately by `MergeStandardServersWithConfig` using the effective
+(DB-resolved) `AppConfig` so team-level `WebSearchTool` selection is honored.
+
+**Tool discovery for file servers.** File-declared servers have no per-tenant
+`cached_tools` DB column, so their tool declarations live in the shared on-disk
+tools cache (`~/.config/astonish/tools_cache.json`), the same cache standard
+servers use. Discovery happens automatically — no manual "refresh" step is
+required:
+
+- **Standalone chat build (personal mode)**: when the chat factory
+  (`pkg/launcher/chat_factory.go`) finds a config-file server with no cached
+  tools, it starts the server on the host, lists its tools, and writes them to
+  the file cache (`discoverAndCacheHostMCPTools`). Subsequent launches are
+  instant.
+- **Local platform install (daemon)**: at startup the daemon calls
+  `api.DiscoverUncachedFileMCPServers`, which kicks off background discovery for
+  every enabled config-file server that is not yet cached (respecting sandbox /
+  network policy via `discoverMCPToolsForPlatform`). This is why config-file MCP
+  servers "just work" after `astonish daemon restart`.
+- **Manual refresh**: `RefreshMCPServerHandler` also handles a file server that
+  is not in any DB store (via `asyncDiscoverAndCacheFileTools`), so Settings →
+  MCP → Refresh works for config-file servers too.
+
+`cachedToolsForMCPServer` and the chat factory both fall back to this file cache
+when the DB has no `cached_tools`.
+
+**Advertised tool list.** `GetCachedToolsForRequest` (`pkg/api/tools_cache.go`)
+builds the tool list the model actually *sees* — it feeds the flow-builder AI
+system prompt and `GET /api/tools`. In platform mode it MUST also seed Tier 0
+from `config.FileMCPServers()` (reading the file server's tool declarations from
+the on-disk tools cache via `cache.GetToolsForServer`, honoring
+`config.GetExcludedTools`), with DB tiers overriding by name — otherwise a
+config-file server is connectable and shown in Settings but never advertised, so
+the agent reports it doesn't exist. This is base-layer parity with the three
+other platform-mode surfaces below.
+
+**Platform-mode surfaces that must include the file base layer (Tier 0).** All
+four seed the merge from `config.FileMCPServers()` before overlaying the DB
+tiers, so the cascade above holds uniformly:
+
+- `loadMCPConfigForRequest` (`pkg/api/request_helpers.go`) — the actual MCP
+  connection config for a request.
+- `loadMCPConfig` (`pkg/launcher/chat_factory.go`) — the chat factory MCP config.
+- `GetCachedToolsForRequest` (`pkg/api/tools_cache.go`) — the advertised tool
+  list (system prompt + `GET /api/tools`).
+- `GetMCPServersHandler` (`pkg/api/handlers.go`) — the Settings list.
+
+**Listing / UI.** `GetMCPServersHandler` seeds its list from
+`config.FileMCPServers()` and marks those entries `source: "config"`. Such
+entries are read-only defaults from the config file; an org/team can override a
+file server by installing a same-named DB entry, which takes precedence in the
+cascade above.
+
 ### MCP Inspector
 
 Studio provides an MCP Inspector that allows:
@@ -136,7 +248,7 @@ If sandboxed MCP startup fails with network-looking diagnostics, the inspector r
 
 - **Agent Engine**: MCP tools are registered alongside built-in tools. The ToolIndex indexes MCP tool names for semantic discovery.
 - **Sandbox**: MCP servers can run inside containers via ContainerMCPTransport. The LazyNodeClient provides the container.
-- **Configuration**: MCP servers are configured in `config.yaml` or via the Studio UI.
+- **Configuration**: MCP servers are configured in `config.yaml` or via the Studio UI. Servers declared in the local `mcp_config.json` file are the base layer in both personal and platform mode: in platform mode they are visible to every org/team as defaults and can be overridden by a same-named database entry (config file → platform DB → org DB → team DB → standard servers). See "Config-File MCP Servers as the Platform Base Layer" above.
 - **Credentials**: MCP server environment variables can reference secrets from the credential store via `{{CREDENTIAL:name:field}}` placeholders (e.g. `GITHUB_TOKEN: "{{CREDENTIAL:github:token}}"`). Placeholders are stored in config/DB and expanded only when the MCP process starts (host, sandbox, discovery, inspector). The Studio Editor binds env keys via a credential picker / create-secret flow; the Source view shows the raw placeholder form. Blank sensitive env values such as `TOKEN`, `KEY`, `SECRET`, `PASSWORD`, or `AUTH` keys are omitted during install so `NAME=""` does not shadow a real process environment variable.
 - **Flows**: Flow MCP dependencies declare which MCP servers a flow requires.
 - **API/Studio**: MCP endpoints manage servers, the inspector provides debugging.

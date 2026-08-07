@@ -169,6 +169,16 @@ type RollbackBackend interface {
 	RollbackTo(ctx context.Context, pointID string) ([]HistoryEntry, error)
 }
 
+// CompactionBackend is an optional capability: a backend that can compact the
+// active session's context on demand (the `/compact` command). It is only
+// offered when the active backend implements this interface (code mode).
+type CompactionBackend interface {
+	// Compact runs context compaction for the active session immediately and
+	// returns a human-readable status line (before/after tokens, or why nothing
+	// was compacted). It must not defer work to the next user message.
+	Compact(ctx context.Context) (status string, err error)
+}
+
 // Backend drives one interactive chat session against the platform.
 //
 // Implementations must be safe for:

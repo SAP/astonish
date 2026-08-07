@@ -111,6 +111,9 @@ type model struct {
 	turnCancel context.CancelFunc
 	// eventCh is drained via tea.Cmds while a turn is active.
 	eventCh <-chan events.Event
+	// compacting is true while an async /compact request is in flight. Used to
+	// show "Compacting…" immediately and reject a second /compact until done.
+	compacting bool
 
 	// hitRegions maps rendered transcript lines → items (for mouse expand).
 	hitRegions []hitRegion
@@ -119,6 +122,13 @@ type model struct {
 	// transcriptPlainLines is the visible transcript without ANSI styling; used
 	// for drag-to-copy selection in Bubble Tea mouse mode.
 	transcriptPlainLines []string
+	// transcriptContentSpans records, for each entry in transcriptPlainLines,
+	// the [start,end) rune-column range that is actual content rather than
+	// decorative chrome (box borders, padding, expand hints). Drag-to-copy
+	// clamps the selection to this span so borders/padding never reach the
+	// clipboard. A span of {0, len(line)} means the whole line is content
+	// (the default for undecorated blocks); {0,0} means a pure chrome row.
+	transcriptContentSpans [][2]int
 	// mdCache memoizes expensive markdown rendering (goldmark + chroma) for
 	// agent message blocks, keyed by width+content. Finalized transcript items
 	// never change, so this turns per-event rendering from O(whole transcript)
@@ -597,6 +607,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshViewport()
 		return m, nil
 
+	case compactDoneMsg:
+		return m.applyCompactDone(msg)
+
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spin, cmd = m.spin.Update(msg)
@@ -679,6 +692,9 @@ func (m *model) syncSlashCompletion() {
 	}
 	if m.rollbackCap() != nil {
 		extra = append(extra, rollbackSlashCommand)
+	}
+	if m.compactionCap() != nil {
+		extra = append(extra, compactSlashCommand)
 	}
 	matches := filterSlashCommands(query, extra...)
 	cursor := m.slash.cursor
@@ -837,8 +853,19 @@ const planModeSystemContext = `You are in Astonish PLAN MODE. This is a hard con
 RULES:
 - You MUST NOT make any changes. Mutating tools (write_file, edit_file, shell_command, and every other non-read-only tool) and delegate_tasks are DISABLED by the runtime and will be refused if you call them.
 - You MAY use read-only tools (read_file, grep_search, find_files, file_tree, code_definition, code_references, repo_map, memory_search, etc.) to investigate and build an accurate plan.
-- Produce a concise, concrete implementation plan: the files/commands you would touch and the order of steps.
-- Do NOT attempt to execute the plan. End by asking the user to exit Plan mode (shift+tab) to proceed with execution.`
+- Do NOT attempt to execute the plan. End by asking the user to exit Plan mode (shift+tab) to proceed with execution.
+
+Your job is to produce a COMPLETE plan the user can approve with confidence — not a partial sketch. Work through these four disciplines:
+
+1. INVESTIGATE THOROUGHLY. Understand the code you will touch before you plan it. Use repo_map once to orient in unfamiliar areas, then code_definition to read the actual declaration of each symbol you will change, and code_references to enumerate ALL its call sites. Read the real regions with read_file. Batch independent read-only lookups in the same turn so they run in parallel. Keep investigating until you are confident no affected file, caller, interface, type, test, migration, generated file, or doc remains unexamined — first-pass results routinely miss dependents.
+
+2. COVER EVERY DEPENDENCY — NO PARTIAL IMPLEMENTATIONS. A complete plan touches every layer the change reaches: the symbol itself AND all its callers, the interfaces/schemas/types it depends on, the tests that exercise it, any generated code that must be regenerated, migrations, and the docs (AGENTS.md / docs/architecture) the project requires. Order phases dependency-first: shared types and interfaces before the consumers that use them. Verify that no phase leaves orphaned or unwired code — every new symbol must be integrated by the end of the plan.
+
+3. SURFACE DECISIONS FOR THE USER. Call out anything that needs a human decision — breaking changes, meaningful alternative approaches with their trade-offs, or ambiguous requirements — explicitly in the plan so the user can decide before execution begins. If a pivotal requirement is genuinely ambiguous and you cannot resolve it by reading the code, ask ONE concise clarifying question rather than guessing.
+
+4. BE EFFICIENT — SPEND EFFORT PROPORTIONAL TO BLAST RADIUS. A one-file tweak needs a quick look; a cross-cutting change needs full tracing. Stop exploring once you can name every file you would change and why — do not read the whole repo. Prefer structural tools (code_definition/code_references) over broad grep, and never re-read a file already in your context.
+
+When your plan is finalized, record it with announce_plan (goal + ordered, dependency-first phases). For each phase, list its affected files (each marked new/modify/delete), put the concrete approach in details, and give a verify step (the build/test/lint command that proves the phase is done). This persists the plan to a session PLAN.md that survives context compaction; do NOT hand-write PLAN.md yourself. (You will drive phase status with update_plan once execution begins.)`
 
 func (m *model) togglePlanMode() {
 	m.planMode = !m.planMode
@@ -1568,7 +1595,7 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 	m.ta.Reset()
 	switch {
 	case text == "/help" || text == "/?":
-		m.tr.Apply(events.NewSystem(helpText(m.providerAdmin() != nil, m.rollbackCap() != nil)))
+		m.tr.Apply(events.NewSystem(helpText(m.providerAdmin() != nil, m.rollbackCap() != nil, m.compactionCap() != nil)))
 	case text == "/files":
 		cwd, _ := os.Getwd()
 		m.tr.Apply(events.NewSystem("Type `@` plus part of a local path to attach file context from " + cwd + "."))
@@ -1591,6 +1618,8 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		return m.openProviderPicker()
 	case text == "/rollback" || text == "/revert":
 		return m.openRollbackPicker()
+	case text == "/compact":
+		return m.runCompact()
 	default:
 		// Pass through to backend as a normal message so server/local slash handlers can run later.
 		m.history = append(m.history, text)
@@ -1613,7 +1642,7 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func helpText(providerAdmin bool, rollback bool) string {
+func helpText(providerAdmin bool, rollback bool, compaction bool) string {
 	providerLine := ""
 	if providerAdmin {
 		providerLine = "\n  /provider      Manage local providers (add/remove)"
@@ -1622,12 +1651,16 @@ func helpText(providerAdmin bool, rollback bool) string {
 	if rollback {
 		rollbackLine = "\n  /rollback      Revert chat and file changes to an earlier message"
 	}
+	compactLine := ""
+	if compaction {
+		compactLine = "\n  /compact       Compact the conversation context to free up the window"
+	}
 	return strings.TrimSpace(`
 Commands:
   /help          Show this help (/?)
   /status        Show session / provider / model
   /sessions      Open sessions picker (also ctrl+l)
-  /model         Choose provider and model` + providerLine + rollbackLine + `
+  /model         Choose provider and model` + providerLine + rollbackLine + compactLine + `
   /new           Start a new session (also ctrl+n)
   /files         Show @file context help
   /plan          Toggle plan-only mode (also shift+tab)
@@ -1828,6 +1861,7 @@ func (m *model) refreshViewport() {
 func (m *model) viewportContent() (string, []hitRegion, []artifactHit) {
 	if m.isEmptyConversation() {
 		m.transcriptPlainLines = nil
+		m.transcriptContentSpans = nil
 		return m.renderWelcome(), nil, nil
 	}
 	return m.renderTranscript()
@@ -2048,7 +2082,7 @@ func (m model) handleMouseRelease(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	}
 	text := ""
 	if m.selectionMoved {
-		text = selectionText(m.transcriptPlainLines, m.selectionStart, m.selectionEnd)
+		text = selectionText(m.transcriptPlainLines, m.transcriptContentSpans, m.selectionStart, m.selectionEnd)
 	}
 	m.selecting = false
 	m.selectionMoved = false
@@ -2235,20 +2269,42 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 	var hits []hitRegion
 	var artifactHits []artifactHit
 	var plainLines []string
+	var contentSpans [][2]int
 	th := m.theme
 	cw := contentWidth(m.width)
 	lineNo := 0
 
-	appendPlain := func(block string) {
+	// appendPlainSpanned appends the plain (ANSI-stripped) lines of block along
+	// with a content span for each line. spanFor maps a block-local line index
+	// and its plain text to the [start,end) rune-column range that is real
+	// content (excluding decorative chrome). Spans are shifted by the padBlock
+	// margin so they line up with the padded plain lines used for selection.
+	appendPlainSpanned := func(block string, spanFor func(i int, plain string) [2]int) {
 		if block == "" {
 			return
 		}
-		for _, line := range strings.Split(block, "\n") {
-			plainLines = append(plainLines, stripANSI(line))
+		for i, line := range strings.Split(block, "\n") {
+			plain := stripANSI(line)
+			plainLines = append(plainLines, plain)
+			total := len([]rune(plain))
+			span := [2]int{0, total}
+			if spanFor != nil {
+				span = spanFor(i, plain)
+			}
+			span[0] = clamp(span[0], 0, total)
+			span[1] = clamp(span[1], 0, total)
+			if span[0] > span[1] {
+				span[0], span[1] = span[1], span[0]
+			}
+			contentSpans = append(contentSpans, span)
 		}
 	}
 
-	appendBlock := func(itemIdx int, kind events.ItemKind, block string) int {
+	// appendBlockSpanned renders block into the transcript. spanFor (optional)
+	// declares per-line content spans relative to the *padded* block so
+	// drag-to-copy can exclude decorative chrome. When spanFor is nil the whole
+	// line is treated as content.
+	appendBlockSpanned := func(itemIdx int, kind events.ItemKind, block string, spanFor func(i int, plain string) [2]int) int {
 		if block == "" {
 			return lineNo
 		}
@@ -2261,20 +2317,25 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 		n := lineCount(rawPadded)
 		b.WriteString(padded)
 		b.WriteString("\n")
-		appendPlain(padded)
+		appendPlainSpanned(padded, spanFor)
 		gap := m.paintRow("", m.width)
 		b.WriteString(gap)
 		b.WriteString("\n") // vertical gap between messages
 		plainLines = append(plainLines, stripANSI(gap))
+		contentSpans = append(contentSpans, [2]int{0, 0})
 		lineNo += n + 1 // block lines + one blank separator row
 		hits = append(hits, hitRegion{start: start, end: start + n, itemIdx: itemIdx, kind: kind})
 		return start
 	}
 
+	appendBlock := func(itemIdx int, kind events.ItemKind, block string) int {
+		return appendBlockSpanned(itemIdx, kind, block, nil)
+	}
+
 	for i, it := range m.tr.Items {
 		switch it.Kind {
 		case events.ItemUser:
-			appendBlock(i, it.Kind, m.renderUserBubble(it.Content, it.Expanded, cw))
+			appendBlockSpanned(i, it.Kind, m.renderUserBubble(it.Content, it.Expanded, cw), userBubbleContentSpan)
 		case events.ItemAgent:
 			content := strings.TrimRight(it.Content, "\n")
 			if content == "" {
@@ -2327,6 +2388,7 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 		}
 	}
 	m.transcriptPlainLines = plainLines
+	m.transcriptContentSpans = contentSpans
 	return b.String(), hits, artifactHits
 }
 
@@ -2538,7 +2600,7 @@ func (m model) renderFileViewerContent(width int) string {
 	return padBlock(content)
 }
 
-// renderFileDiff paints a main-thread dual-gutter editor-style file change.
+// renderFileDiff paints a main-thread single-gutter editor-style file change.
 // Diffs live outside the tool activity fold so they stay visible while tools
 // stay collapsed; the fold holds raw request/response only.
 func (m model) renderFileDiff(it events.Item, width int) string {
@@ -2693,6 +2755,46 @@ func (m model) renderActivity(it events.Item, width int) string {
 		}
 	}
 	return b.String()
+}
+
+// userBubbleContentSpan returns the [start,end) rune-column range of real
+// content within a rendered (padded) user-bubble line, excluding the box
+// border, interior padding, and any embedded expand/collapse hint. It is used
+// so drag-to-copy yields the prompt text alone rather than the surrounding
+// chrome. Border rows (┌─┐ / └─┘) and any line without a pair of vertical
+// borders contribute no copyable content.
+//
+// A padded body line looks like: "<margin>│  <content><pad>│". We locate the
+// first and last vertical border rune, then trim the interior padding spaces
+// that the bubble adds inside the borders.
+func userBubbleContentSpan(_ int, plain string) [2]int {
+	runes := []rune(plain)
+	first := -1
+	last := -1
+	for i, r := range runes {
+		if r == '│' {
+			if first == -1 {
+				first = i
+			}
+			last = i
+		}
+	}
+	// Border/decoration rows (top/bottom) have no interior verticals, or only
+	// the corner glyphs — either way there is no body content to copy.
+	if first == -1 || last <= first {
+		return [2]int{0, 0}
+	}
+	start := first + 1
+	end := last
+	// Trim the interior padding the bubble inserts inside the borders so the
+	// copied text starts and ends at the actual content, not the spaces.
+	for start < end && runes[start] == ' ' {
+		start++
+	}
+	for end > start && runes[end-1] == ' ' {
+		end--
+	}
+	return [2]int{start, end}
 }
 
 // renderUserBubble paints a full-width warm accent rectangle around the user

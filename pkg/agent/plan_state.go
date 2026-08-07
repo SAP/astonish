@@ -25,12 +25,26 @@ type PlanState struct {
 	// completedTasks tracks which tasks have finished.
 	// Key: step name (lowercase), Value: set of completed task names (lowercase).
 	completedTasks map[string]map[string]bool
+
+	// onChange, if set, is invoked (with ps.mu held) whenever a step's status
+	// transitions. It is used to persist the plan to PLAN.md so the plan
+	// survives context compaction. Kept minimal and non-blocking by callers.
+	onChange func()
+
+	// manuallyTracked is set once the model explicitly drives the plan via
+	// update_plan (SetStepStatus). When true, the end-of-turn CompleteAll sweep
+	// is suppressed so the plan reflects the model's real reported progress
+	// instead of a bulk "everything complete" fabrication.
+	manuallyTracked bool
 }
 
 type planStep struct {
 	name        string
 	description string
-	status      string // "pending", "running", "complete", "failed"
+	details     string           // optional richer per-phase content persisted to PLAN.md
+	files       []PlanFileChange // optional affected files (path + new/modify/delete) persisted to PLAN.md
+	verify      string           // optional command that proves the phase is done, persisted to PLAN.md
+	status      string           // "pending", "running", "complete", "failed"
 }
 
 // NewPlanState creates a PlanState from an announce_plan call's step list.
@@ -45,10 +59,92 @@ func NewPlanState(goal string, steps []PlanStepInfo) *PlanState {
 		ps.steps[i] = planStep{
 			name:        s.Name,
 			description: s.Description,
+			details:     s.Details,
+			files:       s.Files,
+			verify:      s.Verify,
 			status:      "pending",
 		}
 	}
 	return ps
+}
+
+// SetOnChange registers a callback invoked whenever a step's status transitions.
+// The callback runs with the internal mutex held, so it must not call back into
+// PlanState. Used to persist the plan to PLAN.md.
+func (ps *PlanState) SetOnChange(fn func()) {
+	ps.mu.Lock()
+	ps.onChange = fn
+	ps.mu.Unlock()
+}
+
+// notifyChangeLocked invokes the onChange hook. Must be called with ps.mu held.
+func (ps *PlanState) notifyChangeLocked() {
+	if ps.onChange != nil {
+		ps.onChange()
+	}
+}
+
+// Snapshot returns the plan goal and a copy of its steps. Thread-safe.
+func (ps *PlanState) Snapshot() (string, []planStep) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	return ps.snapshotLocked()
+}
+
+// snapshotLocked returns the plan goal and a copy of its steps.
+// Must be called with ps.mu held (e.g. from within the onChange hook).
+func (ps *PlanState) snapshotLocked() (string, []planStep) {
+	steps := make([]planStep, len(ps.steps))
+	copy(steps, ps.steps)
+	return ps.goal, steps
+}
+
+// normalizePlanStatus maps caller-provided status strings to the canonical set.
+// Unknown values fall back to "pending".
+func normalizePlanStatus(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "running", "in_progress", "in-progress", "started":
+		return "running"
+	case "complete", "completed", "done", "finished":
+		return "complete"
+	case "failed", "error", "blocked":
+		return "failed"
+	default:
+		return "pending"
+	}
+}
+
+// SetStepStatus explicitly transitions a named step to the given status. This
+// is the engine behind the update_plan tool: it lets the model drive plan
+// progress for main-thread (non-delegated) work. It marks the plan as manually
+// tracked (suppressing the end-of-turn bulk sweep), fires the onChange hook so
+// PLAN.md is rewritten, and returns the canonical step name + status if a
+// transition occurred, or ("", "") when the step was not found.
+func (ps *PlanState) SetStepStatus(stepName, status string) (string, string) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+
+	idx := ps.findStepLocked(stepName)
+	if idx < 0 {
+		return "", ""
+	}
+	ps.manuallyTracked = true
+	newStatus := normalizePlanStatus(status)
+	if ps.steps[idx].status == newStatus {
+		return ps.steps[idx].name, newStatus // idempotent, no rewrite needed
+	}
+	ps.steps[idx].status = newStatus
+	ps.notifyChangeLocked()
+	return ps.steps[idx].name, newStatus
+}
+
+// IsManuallyTracked reports whether the model has explicitly driven this plan
+// via update_plan. Used to decide whether the end-of-turn CompleteAll sweep
+// should run.
+func (ps *PlanState) IsManuallyTracked() bool {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	return ps.manuallyTracked
 }
 
 // AdvanceOnToolStart is called when a non-delegate tool begins executing.
@@ -69,6 +165,7 @@ func (ps *PlanState) AdvanceOnToolStart() string {
 	for i := range ps.steps {
 		if ps.steps[i].status == "pending" {
 			ps.steps[i].status = "running"
+			ps.notifyChangeLocked()
 			return ps.steps[i].name
 		}
 	}
@@ -102,6 +199,7 @@ func (ps *PlanState) StartStep(stepName, taskName string) string {
 	// Mark step running if pending
 	if ps.steps[idx].status == "pending" {
 		ps.steps[idx].status = "running"
+		ps.notifyChangeLocked()
 		return ps.steps[idx].name
 	}
 	return "" // already running or complete — no transition to emit
@@ -145,6 +243,7 @@ func (ps *PlanState) CompleteTask(stepName, taskName string) string {
 		}
 		if allDone {
 			ps.steps[idx].status = "complete"
+			ps.notifyChangeLocked()
 			return ps.steps[idx].name
 		}
 	}
@@ -233,6 +332,9 @@ func (ps *PlanState) CompleteAll() []string {
 			completed = append(completed, ps.steps[i].name)
 		}
 	}
+	if len(completed) > 0 {
+		ps.notifyChangeLocked()
+	}
 	return completed
 }
 
@@ -243,6 +345,25 @@ func (ps *PlanState) HasPendingSteps() bool {
 
 	for _, s := range ps.steps {
 		if s.status == "pending" || s.status == "running" {
+			return true
+		}
+	}
+	return false
+}
+
+// HasStartedSteps reports whether any step has left the "pending" state — i.e.
+// whether execution actually began (a step is running/complete/failed).
+//
+// This guards the end-of-turn CompleteAll sweep: if the plan was merely
+// announced this turn and no work started (every step still pending), the sweep
+// must NOT fire — otherwise a freshly announced plan is immediately recorded as
+// fully complete before any work is done.
+func (ps *PlanState) HasStartedSteps() bool {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+
+	for _, s := range ps.steps {
+		if s.status != "pending" {
 			return true
 		}
 	}

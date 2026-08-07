@@ -36,6 +36,12 @@ var rollbackSlashCommand = slashCommand{
 	Name: "rollback", Aliases: []string{"revert"}, Description: "Revert chat and file changes to an earlier message",
 }
 
+// compactSlashCommand is offered only when the backend supports on-demand
+// compaction (code mode). It compacts the conversation context to free window.
+var compactSlashCommand = slashCommand{
+	Name: "compact", Description: "Compact the conversation context to free up the window",
+}
+
 // slashCompletion holds the active / completion popup state.
 type slashCompletion struct {
 	active  bool

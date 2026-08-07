@@ -342,7 +342,13 @@ func TestTranscript_EstimatedUsageUpdatesContextOnly(t *testing.T) {
 	tr.Apply(Event{Kind: KindUsage, Usage: &Usage{Input: 90000, Estimated: true}})
 
 	if tr.ContextTokens != 90000 {
-		t.Fatalf("ContextTokens=%d want 90000 (max estimate)", tr.ContextTokens)
+		t.Fatalf("ContextTokens=%d want 90000 (latest estimate)", tr.ContextTokens)
+	}
+	// Estimates are authoritative snapshots and must be able to move DOWN (e.g.
+	// after compaction shrinks the context), unlike provider per-call usage.
+	tr.Apply(Event{Kind: KindUsage, Usage: &Usage{Input: 30000, Estimated: true}})
+	if tr.ContextTokens != 30000 {
+		t.Fatalf("ContextTokens=%d want 30000 (estimate can decrease after compaction)", tr.ContextTokens)
 	}
 	if tr.LastUsage.Total != 150 {
 		t.Fatalf("cumulative usage=%d want 150 (estimates must not accumulate)", tr.LastUsage.Total)

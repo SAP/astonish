@@ -411,3 +411,48 @@ func TestMergeStandardServersWithConfig_NilAppCfgNoFileFallback(t *testing.T) {
 		t.Fatal("tavily (secret server) should NOT be injected when nil appCfg is passed — no file fallback")
 	}
 }
+
+// TestFileMCPServers_ReturnsFileDeclaredServers verifies that FileMCPServers
+// loads servers declared in mcp_config.json and excludes standard servers,
+// so it can serve as the platform base layer.
+func TestFileMCPServers_ReturnsFileDeclaredServers(t *testing.T) {
+	setupTempConfigDir(t)
+
+	cfg := &MCPConfig{
+		MCPServers: map[string]MCPServerConfig{
+			"custom-a": {Command: "node", Args: []string{"a.js"}},
+			"custom-b": {Transport: "sse", URL: "http://example.local/sse"},
+			// A standard-server ID must be excluded from FileMCPServers output.
+			"tavily": {Command: "npx", Args: []string{"-y", "tavily-mcp@latest"}, Enabled: boolPtr(false)},
+		},
+	}
+	if err := SaveMCPConfig(cfg); err != nil {
+		t.Fatalf("SaveMCPConfig failed: %v", err)
+	}
+
+	got := FileMCPServers()
+
+	if _, ok := got["custom-a"]; !ok {
+		t.Errorf("expected custom-a in FileMCPServers, got: %v", got)
+	}
+	if _, ok := got["custom-b"]; !ok {
+		t.Errorf("expected custom-b in FileMCPServers, got: %v", got)
+	}
+	if _, ok := got["tavily"]; ok {
+		t.Errorf("standard server 'tavily' must be excluded from FileMCPServers (it is layered by MergeStandardServersWithConfig)")
+	}
+}
+
+// TestFileMCPServers_EmptyWhenNoFile verifies FileMCPServers returns a non-nil
+// empty map when no config file exists, so callers can seed a merge map safely.
+func TestFileMCPServers_EmptyWhenNoFile(t *testing.T) {
+	setupTempConfigDir(t) // creates dir but writes no mcp_config.json
+
+	got := FileMCPServers()
+	if got == nil {
+		t.Fatal("FileMCPServers must never return nil")
+	}
+	if len(got) != 0 {
+		t.Fatalf("expected empty map when no config file exists, got: %v", got)
+	}
+}

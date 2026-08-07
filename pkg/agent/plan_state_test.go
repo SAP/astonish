@@ -229,3 +229,196 @@ func TestPlanState_MixedExplicitAndFallback(t *testing.T) {
 		t.Errorf("single task completion: got %q, want 'analyze-code'", got)
 	}
 }
+
+func TestPlanState_OnChangeFiresOnTransitions(t *testing.T) {
+	ps := NewPlanState("goal", []PlanStepInfo{
+		{Name: "a", Description: "step a"},
+		{Name: "b", Description: "step b"},
+	})
+	var calls int
+	ps.SetOnChange(func() { calls++ })
+
+	// AdvanceOnToolStart marks "a" running → 1 transition.
+	if got := ps.AdvanceOnToolStart(); got != "a" {
+		t.Fatalf("AdvanceOnToolStart = %q, want a", got)
+	}
+	if calls != 1 {
+		t.Fatalf("after advance: calls = %d, want 1", calls)
+	}
+
+	// AdvanceOnToolStart again is a no-op (a already running) → no transition.
+	ps.AdvanceOnToolStart()
+	if calls != 1 {
+		t.Fatalf("after no-op advance: calls = %d, want 1", calls)
+	}
+
+	// CompleteAll marks a+b complete → 1 more transition.
+	ps.CompleteAll()
+	if calls != 2 {
+		t.Fatalf("after CompleteAll: calls = %d, want 2", calls)
+	}
+
+	// CompleteAll again is a no-op.
+	ps.CompleteAll()
+	if calls != 2 {
+		t.Fatalf("after second CompleteAll: calls = %d, want 2", calls)
+	}
+}
+
+func TestPlanState_HasStartedSteps(t *testing.T) {
+	ps := NewPlanState("goal", []PlanStepInfo{
+		{Name: "a", Description: "step a"},
+		{Name: "b", Description: "step b"},
+	})
+
+	// A freshly announced plan (all pending) has not started.
+	if ps.HasStartedSteps() {
+		t.Fatal("freshly announced plan should report HasStartedSteps=false")
+	}
+
+	// Once any step goes running, execution has started.
+	if got := ps.AdvanceOnToolStart(); got != "a" {
+		t.Fatalf("AdvanceOnToolStart = %q, want a", got)
+	}
+	if !ps.HasStartedSteps() {
+		t.Fatal("plan with a running step should report HasStartedSteps=true")
+	}
+}
+
+// TestPlanState_AnnounceOnlyTurnDoesNotComplete guards the reported regression:
+// announcing a plan and ending the turn without any execution must NOT mark the
+// steps complete. The end-of-turn sweep is gated on HasStartedSteps() at the
+// call site (chat_agent_run.go); this test documents the underlying contract
+// that CompleteAll must only be invoked once execution has begun.
+func TestPlanState_AnnounceOnlyTurnDoesNotComplete(t *testing.T) {
+	ps := NewPlanState("goal", []PlanStepInfo{
+		{Name: "a", Description: "step a"},
+		{Name: "b", Description: "step b"},
+	})
+
+	// Simulate the postLoop guard: only sweep when execution started.
+	if ps.HasStartedSteps() {
+		ps.CompleteAll()
+	}
+
+	_, steps := ps.Snapshot()
+	for _, s := range steps {
+		if s.status != "pending" {
+			t.Errorf("announce-only turn should leave step %q pending, got %q", s.name, s.status)
+		}
+	}
+	if !ps.HasPendingSteps() {
+		t.Error("announce-only plan should still have pending steps")
+	}
+}
+
+func TestPlanState_SnapshotIsIndependentCopy(t *testing.T) {
+	ps := NewPlanState("goal", []PlanStepInfo{
+		{Name: "a", Description: "step a"},
+	})
+	goal, steps := ps.Snapshot()
+	if goal != "goal" {
+		t.Errorf("goal = %q, want goal", goal)
+	}
+	if len(steps) != 1 || steps[0].status != "pending" {
+		t.Fatalf("unexpected snapshot: %+v", steps)
+	}
+	// Mutating the returned slice must not affect internal state.
+	steps[0].status = "complete"
+	_, steps2 := ps.Snapshot()
+	if steps2[0].status != "pending" {
+		t.Errorf("snapshot mutation leaked into state: %q", steps2[0].status)
+	}
+}
+
+func TestPlanState_SetStepStatus(t *testing.T) {
+	ps := NewPlanState("goal", []PlanStepInfo{
+		{Name: "a", Description: "step a"},
+		{Name: "b", Description: "step b"},
+	})
+	var changes int
+	ps.SetOnChange(func() { changes++ })
+
+	if ps.IsManuallyTracked() {
+		t.Fatal("plan should not be manually tracked before any update_plan")
+	}
+
+	name, status := ps.SetStepStatus("a", "running")
+	if name != "a" || status != "running" {
+		t.Fatalf("SetStepStatus = (%q,%q), want (a,running)", name, status)
+	}
+	if !ps.IsManuallyTracked() {
+		t.Error("plan should be manually tracked after SetStepStatus")
+	}
+	if changes != 1 {
+		t.Errorf("onChange calls = %d, want 1", changes)
+	}
+
+	// Status normalization: "done" → "complete".
+	if _, s := ps.SetStepStatus("a", "done"); s != "complete" {
+		t.Errorf("normalized status = %q, want complete", s)
+	}
+	if changes != 2 {
+		t.Errorf("onChange calls = %d, want 2", changes)
+	}
+
+	// Idempotent: setting the same status again does not fire onChange.
+	ps.SetStepStatus("a", "complete")
+	if changes != 2 {
+		t.Errorf("idempotent set should not fire onChange, calls = %d", changes)
+	}
+
+	// Unknown step: no transition, returns empty.
+	if n, s := ps.SetStepStatus("nonexistent", "running"); n != "" || s != "" {
+		t.Errorf("unknown step should return empty, got (%q,%q)", n, s)
+	}
+}
+
+func TestPlanState_ManualTrackingSuppressesCompleteAll(t *testing.T) {
+	ps := NewPlanState("goal", []PlanStepInfo{
+		{Name: "a", Description: "step a"},
+		{Name: "b", Description: "step b"},
+	})
+	// Model reports only "a" complete; "b" was never done.
+	ps.SetStepStatus("a", "complete")
+
+	// The end-of-turn sweep must be gated on IsManuallyTracked() by the caller;
+	// here we assert the flag is set so the caller can skip CompleteAll.
+	if !ps.IsManuallyTracked() {
+		t.Fatal("expected manuallyTracked=true so CompleteAll is suppressed")
+	}
+	_, steps := ps.Snapshot()
+	if steps[0].status != "complete" || steps[1].status != "pending" {
+		t.Errorf("statuses = %q,%q; want complete,pending (no bulk sweep)", steps[0].status, steps[1].status)
+	}
+}
+
+// TestNewPlanState_CarriesFilesAndVerify guards that the richer per-phase
+// fields (affected files + verify command) survive from the PlanStepInfo input
+// into the internal plan steps, so they can be persisted to PLAN.md.
+func TestNewPlanState_CarriesFilesAndVerify(t *testing.T) {
+	ps := NewPlanState("goal", []PlanStepInfo{
+		{
+			Name:        "types",
+			Description: "add fields",
+			Files: []PlanFileChange{
+				{Path: "pkg/agent/sub_agent.go", Kind: "modify"},
+				{Path: "pkg/agent/plan_new.go", Kind: "new"},
+			},
+			Verify: "go test ./pkg/agent/...",
+		},
+	})
+	_, steps := ps.Snapshot()
+	if len(steps) != 1 {
+		t.Fatalf("snapshot steps = %d, want 1", len(steps))
+	}
+	if len(steps[0].files) != 2 {
+		t.Fatalf("step files = %d, want 2", len(steps[0].files))
+	}
+	if steps[0].files[0].Path != "pkg/agent/sub_agent.go" || steps[0].files[0].Kind != "modify" {
+		t.Errorf("file[0] = %+v", steps[0].files[0])
+	}
+	if steps[0].verify != "go test ./pkg/agent/..." {
+		t.Errorf("verify = %q", steps[0].verify)
+	}
+}

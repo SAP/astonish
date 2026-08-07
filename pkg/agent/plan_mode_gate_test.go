@@ -38,6 +38,9 @@ func TestPlanModeGate_AllowsReadOnlyTools(t *testing.T) {
 		"repo_map",
 		"code_definition",
 		"code_references",
+		// announce_plan must be allowed so the model can record its finalized
+		// plan (in-memory + session PLAN.md) while in Plan mode.
+		"announce_plan",
 	}
 	for _, name := range allowed {
 		if planModeToolBlocked(name) {

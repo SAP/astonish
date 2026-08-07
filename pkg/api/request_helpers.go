@@ -200,6 +200,14 @@ func loadMCPConfigForRequest(r *http.Request) *config.MCPConfig {
 	if svc := store.FromRequest(r); svc != nil && svc.Mode == store.ModePlatform {
 		merged := make(map[string]config.MCPServerConfig)
 
+		// Tier 0: config-file base (mcp_config.json). Servers declared in the
+		// local config file are the cascade root in platform mode, mirroring how
+		// file-based providers are the base for provider resolution. Platform/org/
+		// team DB entries below override these by name.
+		for name, s := range config.FileMCPServers() {
+			merged[name] = s
+		}
+
 		// Tier 1: Platform-level (base, inherited by all orgs/teams)
 		if svc.PlatformMCPServers != nil {
 			platformServers, err := svc.PlatformMCPServers.List(r.Context())
@@ -301,7 +309,7 @@ func EffectiveAppConfigFromContext(ctx context.Context, isPlatformMode bool) *co
 	}
 	resolved = provider.ApplyUserDefault(resolved, userDefault)
 	resolved = provider.ApplyProviderOverride(resolved, "", "")
-	appCfg.Providers = resolved.Providers
+	mergeResolvedProviders(appCfg, resolved)
 	appCfg.General.DefaultProvider = resolved.General.DefaultProvider
 	appCfg.General.DefaultModel = resolved.General.DefaultModel
 	appCfg.General.WebSearchTool = resolved.General.WebSearchTool
@@ -325,7 +333,12 @@ func EffectiveAppConfigFromContext(ctx context.Context, isPlatformMode bool) *co
 //  2. Org settings (visible to all teams in the org)
 //  3. Team settings (specific to this team)
 //
-// config.yaml providers are NOT used in platform mode.
+// config.yaml providers ARE merged into runtime resolution in platform mode
+// (see mergeResolvedProviders): config.yaml is the base layer and DB entries
+// win on a name collision. They are additionally surfaced read-only in the
+// effective-providers *listing* (see GetEffectiveProvidersHandler +
+// SetLocalProviders) so the platform UI shows them but manages them via
+// config.yaml rather than the DB API.
 // In personal mode, it simply returns config.LoadAppConfig().
 func effectiveAppConfig(r *http.Request) *config.AppConfig {
 	appCfg, err := config.LoadAppConfig()
@@ -354,7 +367,7 @@ func effectiveAppConfig(r *http.Request) *config.AppConfig {
 	}
 	resolved = provider.ApplyUserDefault(resolved, userDefault)
 	resolved = provider.ApplyProviderOverride(resolved, "", "")
-	appCfg.Providers = resolved.Providers
+	mergeResolvedProviders(appCfg, resolved)
 	appCfg.General.DefaultProvider = resolved.General.DefaultProvider
 	appCfg.General.DefaultModel = resolved.General.DefaultModel
 	appCfg.General.WebSearchTool = resolved.General.WebSearchTool
@@ -370,6 +383,24 @@ func effectiveAppConfig(r *http.Request) *config.AppConfig {
 	}
 
 	return appCfg
+}
+
+// mergeResolvedProviders overlays the DB-resolved providers onto the config.yaml
+// providers already present in appCfg (from config.LoadAppConfig). config.yaml
+// is the base layer; DB entries win on a name collision. This makes providers
+// baked into config.yaml runnable in platform mode alongside DB-configured ones.
+// Secrets stay in-process — this is the trusted server side, not the API view.
+func mergeResolvedProviders(appCfg *config.AppConfig, resolved *config.AppConfig) {
+	if len(resolved.Providers) == 0 {
+		// Keep whatever config.yaml provided (may be nil).
+		return
+	}
+	if appCfg.Providers == nil {
+		appCfg.Providers = make(map[string]config.ProviderConfig, len(resolved.Providers))
+	}
+	for name, pCfg := range resolved.Providers {
+		appCfg.Providers[name] = pCfg
+	}
 }
 
 // applyTeamNonProviderSettings overlays team-level non-provider settings from the DB

@@ -341,8 +341,14 @@ func GetMCPSettingsHandler(w http.ResponseWriter, r *http.Request) {
 			respondError(w, http.StatusInternalServerError, "Failed to load MCP servers: "+err.Error())
 			return
 		}
-		// Convert store.MCPServer list to config.MCPConfig map format for frontend
-		cfg := config.MCPConfig{MCPServers: make(map[string]config.MCPServerConfig, len(servers))}
+		// Convert store.MCPServer list to config.MCPConfig map format for frontend.
+		// Seed the config-file (mcp_config.json) base layer first so file-declared
+		// servers appear as defaults; DB entries override them by name — mirroring
+		// the provider config+DB merge and loadMCPConfigForRequest's cascade.
+		cfg := config.MCPConfig{MCPServers: make(map[string]config.MCPServerConfig)}
+		for name, s := range config.FileMCPServers() {
+			cfg.MCPServers[name] = s
+		}
 		for _, s := range servers {
 			cfg.MCPServers[s.Name] = config.MCPServerConfig{
 				Command:   s.Command,
@@ -383,9 +389,57 @@ func UpdateMCPSettingsHandler(w http.ResponseWriter, r *http.Request) {
 	respondError(w, http.StatusServiceUnavailable, "MCP server store not available")
 }
 
+// mcpServerConfigMatchesFile reports whether a config sent by the UI is
+// effectively identical to the config-file default (i.e. an unmodified echo of
+// the read-only base-layer server). Transport is normalized so a defaulted
+// "stdio" does not count as a change.
+func mcpServerConfigMatchesFile(sent, file config.MCPServerConfig) bool {
+	norm := func(t string) string {
+		if t == "" {
+			return "stdio"
+		}
+		return t
+	}
+	if sent.Command != file.Command || sent.URL != file.URL || norm(sent.Transport) != norm(file.Transport) {
+		return false
+	}
+	if len(sent.Args) != len(file.Args) {
+		return false
+	}
+	for i := range sent.Args {
+		if sent.Args[i] != file.Args[i] {
+			return false
+		}
+	}
+	if len(sent.Env) != len(file.Env) {
+		return false
+	}
+	for k, v := range sent.Env {
+		if file.Env[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
 // updateMCPSettingsPlatform handles the PUT in platform mode (DB store).
 func updateMCPSettingsPlatform(w http.ResponseWriter, r *http.Request, mcpStore store.MCPServerStore, newCfg config.MCPConfig) {
 	userID := effectiveUserID(r)
+
+	// Config-file (mcp_config.json) servers are the read-only base layer. They
+	// are surfaced by GetMCPSettingsHandler as defaults, so the UI echoes them
+	// back on PUT. They must NOT be persisted or deleted as DB rows — an org/team
+	// can only override a file server by creating a DB entry of the same name via
+	// an explicit edit (changed command/args/url/env), not by echoing the default.
+	fileServers := config.FileMCPServers()
+	for name := range fileServers {
+		if sent, ok := newCfg.MCPServers[name]; ok {
+			// Keep it only if the user actually changed it into a real override.
+			if mcpServerConfigMatchesFile(sent, fileServers[name]) {
+				delete(newCfg.MCPServers, name)
+			}
+		}
+	}
 
 	// Set default transport to "stdio" if not specified
 	for name, server := range newCfg.MCPServers {

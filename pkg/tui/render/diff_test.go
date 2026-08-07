@@ -18,9 +18,9 @@ func TestFileDiff_Edit(t *testing.T) {
 	if !strings.Contains(out, "foo.go") {
 		t.Fatalf("path: %q", out)
 	}
-	// Dual-gutter editor markers
-	if !strings.Contains(out, "old") || !strings.Contains(out, "new") {
-		t.Fatalf("expected old/new column headers: %q", out)
+	// Single-gutter editor: one line-number column with a │ separator.
+	if !strings.Contains(out, "│") {
+		t.Fatalf("expected gutter separator: %q", out)
 	}
 	if !strings.Contains(out, "return old()") || !strings.Contains(out, "return new()") {
 		t.Fatalf("expected ± body: %q", out)
@@ -40,8 +40,8 @@ func TestFileDiff_OnlyChangedLinesWithContext(t *testing.T) {
 	lines := strings.Split(out, "\n")
 	var added, removed, context int
 	for _, ln := range lines {
-		// Skip the header (◆) and column-label row.
-		if strings.Contains(ln, "◆") || strings.Contains(ln, "old") {
+		// Skip the header (◆) row.
+		if strings.Contains(ln, "◆") {
 			continue
 		}
 		switch {
@@ -154,7 +154,7 @@ func TestDiffFromToolStep_PrefersVerificationContext(t *testing.T) {
 	if !strings.Contains(out, "README.md") {
 		t.Fatalf("path header: %q", out)
 	}
-	// Dual gutter with real line numbers
+	// Single gutter with real line numbers
 	if !strings.Contains(out, "169") {
 		t.Fatalf("expected real line number 169: %q", out)
 	}
@@ -210,18 +210,24 @@ func TestStatsFromSteps_UsesVerification(t *testing.T) {
 	}
 }
 
-func TestRenderVerificationDiff_DualGutter(t *testing.T) {
+func TestRenderVerificationDiff_SingleGutter(t *testing.T) {
 	st := DefaultStyles()
 	st.NoColor = true
 	vc := "@@ f.go:10\n  9| keep\n- 10| old\n+ 10| new\n  11| after\n"
 	out := RenderVerificationDiff(vc, "f.go", 80, true, "", st)
-	// Column header
-	if !strings.Contains(out, "old") || !strings.Contains(out, "new") {
-		t.Fatalf("gutter labels: %q", out)
+	// Single line-number column with a │ separator (no old/new label row).
+	if !strings.Contains(out, "│") {
+		t.Fatalf("gutter separator: %q", out)
 	}
-	// Line numbers appear in gutters
+	// Line numbers appear in the single gutter.
 	if !strings.Contains(out, "10") || !strings.Contains(out, "9") {
 		t.Fatalf("line numbers: %q", out)
+	}
+	// No row carries two space-separated line numbers anymore.
+	for _, ln := range strings.Split(out, "\n") {
+		if strings.Contains(ln, "10 10") {
+			t.Fatalf("expected single number column, got dual: %q", ln)
+		}
 	}
 }
 

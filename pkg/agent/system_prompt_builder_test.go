@@ -3,6 +3,8 @@ package agent
 import (
 	"strings"
 	"testing"
+
+	"google.golang.org/adk/tool"
 )
 
 func TestAgentIdentity_IsConfigured(t *testing.T) {
@@ -299,6 +301,55 @@ func TestSystemPromptBuilder_RelevantToolsEmpty(t *testing.T) {
 
 	if strings.Contains(prompt, "## Relevant Tools For This Request") {
 		t.Error("Build() should NOT contain Relevant Tools section when empty")
+	}
+}
+
+func TestSystemPromptBuilder_MCPFirstClass(t *testing.T) {
+	mcpGroup := &ToolGroup{
+		Name:        "mcp:context7",
+		Description: "MCP server: context7 (2 tools)",
+		Toolsets:    []tool.Toolset{&staticToolset{name: "context7", tools: mockTools("get_library_docs", "resolve_library_id")}},
+	}
+	coreGroup := &ToolGroup{
+		Name:        "core",
+		Description: "File operations, shell commands, search, memory",
+		Tools:       mockTools("read_file", "write_file"),
+	}
+
+	// Code mode: MCP tools are advertised as directly available and listed.
+	codeBuilder := &SystemPromptBuilder{
+		Tools:         mockTools("read_file", "delegate_tasks"),
+		Catalog:       []*ToolGroup{coreGroup, mcpGroup},
+		MCPFirstClass: true,
+	}
+	codePrompt := codeBuilder.Build()
+
+	if !strings.Contains(codePrompt, "## MCP Tools (available directly)") {
+		t.Error("code mode: expected direct MCP Tools section")
+	}
+	if !strings.Contains(codePrompt, "get_library_docs") || !strings.Contains(codePrompt, "resolve_library_id") {
+		t.Error("code mode: expected MCP tool names listed by server")
+	}
+	if !strings.Contains(codePrompt, "always loaded") {
+		t.Error("code mode: expected 'always loaded' note (no search_tools gate)")
+	}
+	if strings.Contains(codePrompt, "After `search_tools`, call the **bare** tool name") {
+		t.Error("code mode: MCP note must NOT gate on search_tools")
+	}
+
+	// Platform mode: MCP tools stay behind search_tools; no direct listing.
+	platformBuilder := &SystemPromptBuilder{
+		Tools:         mockTools("read_file", "delegate_tasks"),
+		Catalog:       []*ToolGroup{coreGroup, mcpGroup},
+		MCPFirstClass: false,
+	}
+	platformPrompt := platformBuilder.Build()
+
+	if strings.Contains(platformPrompt, "## MCP Tools (available directly)") {
+		t.Error("platform mode: must NOT emit direct MCP Tools section")
+	}
+	if !strings.Contains(platformPrompt, "After `search_tools`, call the **bare** tool name") {
+		t.Error("platform mode: expected search_tools-gated MCP note")
 	}
 }
 

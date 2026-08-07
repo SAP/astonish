@@ -377,6 +377,7 @@ Beyond the golden file, targeted assertions verify ~60 specific strings that oth
 - With WebSearch/WebExtract → named tool hints appear
 - With FleetSection → fleet section appears
 - With MemorySearch → persistent memory capability listed
+- With MCPFirstClass (code mode) → MCP tools listed as directly callable (`## MCP Tools (available directly)`); without it (platform) → MCP stays gated behind `search_tools` (`TestSystemPromptBuilder_MCPFirstClass`)
 - With BrowserAvailable → browser automation capability listed
 
 ### Size regression guards

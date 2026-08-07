@@ -38,3 +38,19 @@ func TestMainThreadToolAllowlist_InteractiveTerminalTools(t *testing.T) {
 		}
 	}
 }
+
+// TestMainThreadToolAllowlist_PlanTools guards the fix for the plan-tracking
+// loop: both announce_plan and update_plan are surfaced directly to the
+// top-level agent. The system prompt instructs the agent to call update_plan as
+// it works on the main thread; if update_plan is missing from this allowlist it
+// is relegated to the deferred "core" group (reachable only via search_tools)
+// and calling it fails at runtime with "tool 'update_plan' not found" — the
+// exact asymmetry where announce_plan worked but update_plan did not.
+func TestMainThreadToolAllowlist_PlanTools(t *testing.T) {
+	allow := mainThreadToolAllowlist()
+	for _, name := range []string{"announce_plan", "update_plan"} {
+		if !allow[name] {
+			t.Errorf("expected plan tool %q in the main-thread allowlist (update_plan must be a direct companion to announce_plan)", name)
+		}
+	}
+}

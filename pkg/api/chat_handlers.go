@@ -1500,12 +1500,17 @@ func handleSlashCommand(r *http.Request, w io.Writer, flusher http.Flusher, cm *
 		if comp.Compactor == nil {
 			SendSSE(w, flusher, "system", map[string]interface{}{"content": "Compaction is disabled."})
 		} else {
+			// Studio still uses the shared BeforeModelCallback path (no
+			// child-session rewrite). Force the next model call to compact
+			// and report current window usage. Code-mode /compact runs
+			// immediately via CompactionBackend.Compact.
+			comp.Compactor.ForceNextCompaction()
 			est, win := comp.Compactor.TokenUsage()
 			pct := float64(0)
 			if win > 0 {
 				pct = float64(est) / float64(win) * 100
 			}
-			msg := fmt.Sprintf("**Context Window**\n- Tokens: %d / %d (%.0f%%)\n- Threshold: %.0f%%\n- Compactions: %d",
+			msg := fmt.Sprintf("**Context Window**\n- Tokens: %d / %d (%.0f%%)\n- Threshold: %.0f%%\n- Compactions: %d\n\nCompaction armed for the next model call in this chat.",
 				est, win, pct, comp.Compactor.Threshold*100, comp.Compactor.CompactionCount())
 			SendSSE(w, flusher, "system", map[string]interface{}{"content": msg})
 		}

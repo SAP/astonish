@@ -10,7 +10,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// DiffRow is one line in a dual-gutter diff editor view.
+// DiffRow is one line in a single-gutter diff editor view.
 type DiffRow struct {
 	Kind string // " " | "-" | "+"
 	Text string
@@ -18,7 +18,7 @@ type DiffRow struct {
 	NewN int // 0 = no new line number
 }
 
-// DiffOpts controls dual-gutter rendering from raw old/new snippets.
+// DiffOpts controls single-gutter rendering from raw old/new snippets.
 type DiffOpts struct {
 	Path string
 	Old  string
@@ -34,13 +34,14 @@ type DiffOpts struct {
 	Root string
 }
 
-// FileDiffEditor renders an editor-style dual-gutter diff:
+// FileDiffEditor renders an editor-style single-gutter diff. Each row shows one
+// line number, colored to match its content: neutral for unchanged context, red
+// for a removed line, green for an added line.
 //
 //	◆ path  +N −M
-//	 old  new
-//	 167  167 │   context
-//	 169      │ − removed
-//	      169 │ + added
+//	 167 │   context
+//	 169 │ − removed
+//	 169 │ + added
 func FileDiffEditor(opts DiffOpts, st Styles) string {
 	rows := rowsFromOldNew(opts.Old, opts.New, opts.StartLine)
 	return renderDiffEditor(displayPath(opts.Path, opts.Root), rows, opts.Note, opts.Width, opts.Expanded, opts.MaxLines, st)
@@ -51,7 +52,7 @@ func FileDiff(opts DiffOpts, st Styles) string {
 	return FileDiffEditor(opts, st)
 }
 
-// DiffFromToolStep builds a dual-gutter diff for edit_file / write_file.
+// DiffFromToolStep builds a single-gutter diff for edit_file / write_file.
 // Prefers result.verification_context; falls back to args. root is the
 // workspace root used to render project-relative file paths (may be empty).
 func DiffFromToolStep(name string, args map[string]any, result any, width int, expanded bool, root string, st Styles) string {
@@ -67,7 +68,7 @@ func DiffFromToolStep(name string, args map[string]any, result any, width int, e
 	return DiffFromToolArgs(name, args, width, expanded, root, st)
 }
 
-// DiffFromToolArgs builds a dual-gutter preview from tool args only. root is
+// DiffFromToolArgs builds a single-gutter preview from tool args only. root is
 // the workspace root used to render project-relative file paths (may be empty).
 func DiffFromToolArgs(name string, args map[string]any, width int, expanded bool, root string, st Styles) string {
 	if args == nil {
@@ -108,7 +109,7 @@ var verificationLineRe = regexp.MustCompile(`^([+\- ])\s+(\d+)\|\s?(.*)$`)
 // verificationHeaderRe matches "@@ basename:169" or "@@ basename:1 (created)".
 var verificationHeaderRe = regexp.MustCompile(`^@@\s+([^:]+)(?::(\d+))?(?:\s+\(([^)]*)\))?\s*$`)
 
-// RenderVerificationDiff colorizes verification_context as a dual-gutter editor view.
+// RenderVerificationDiff colorizes verification_context as a single-gutter editor view.
 // root is the workspace root used to render project-relative file paths (may be empty).
 func RenderVerificationDiff(vc, fallbackPath string, width int, expanded bool, root string, st Styles) string {
 	rows, path, note := parseVerificationContext(vc, fallbackPath, root)
@@ -207,7 +208,7 @@ func rowsFromOldNew(old, new string, startLine int) []DiffRow {
 const defaultDiffContext = 3
 
 // diffRowsWithContext computes a line-level diff of old→new (LCS) and returns
-// dual-gutter rows, keeping ctx unchanged lines around each change and
+// single-gutter rows, keeping ctx unchanged lines around each change and
 // collapsing longer unchanged runs into a single "…" gap row.
 func diffRowsWithContext(oldLines, newLines []string, startLine, ctx int) []DiffRow {
 	if ctx < 0 {
@@ -360,13 +361,9 @@ func renderDiffEditor(path string, rows []DiffRow, note string, width int, expan
 	}
 	b.WriteString(header)
 	b.WriteByte('\n')
-	// Column labels
-	b.WriteString(st.CodeGutter.Render(fmt.Sprintf("%*s %*s", gutterW, "old", gutterW, "new")))
-	b.WriteString(st.CodeGutter.Render(" │"))
-	b.WriteByte('\n')
 
-	// prefix: " old  new │ ± "
-	prefixW := gutterW*2 + 1 + 3 + 2 // two gutters + space + " │ " + marker + space
+	// prefix: " N │ ± "
+	prefixW := gutterW + 3 + 2 // one gutter + " │ " + marker + space
 	textW := width - prefixW
 	if textW < 10 {
 		textW = 10
@@ -374,31 +371,36 @@ func renderDiffEditor(path string, rows []DiffRow, note string, width int, expan
 
 	for _, r := range rows {
 		if r.Kind == "…" {
-			b.WriteString(st.Muted.Render(strings.Repeat(" ", gutterW*2+1) + " │ …"))
+			b.WriteString(st.Muted.Render(strings.Repeat(" ", gutterW) + " │ …"))
 			b.WriteByte('\n')
 			continue
 		}
-		oldG := strings.Repeat(" ", gutterW)
-		newG := strings.Repeat(" ", gutterW)
-		if r.OldN > 0 {
-			oldG = fmt.Sprintf("%*d", gutterW, r.OldN)
-		}
-		if r.NewN > 0 {
-			newG = fmt.Sprintf("%*d", gutterW, r.NewN)
-		}
 		marker := " "
 		var lineStyle lipgloss.Style
+		// num is the single line number shown for this row: the new number for
+		// context/added lines, the old number for removed lines.
+		num := r.NewN
 		switch r.Kind {
 		case "-":
 			marker = "−"
 			lineStyle = st.Danger
+			num = r.OldN
 		case "+":
 			marker = "+"
 			lineStyle = st.Success
 		default:
 			lineStyle = st.Text
+			if num == 0 {
+				num = r.OldN
+			}
 		}
-		gutter := st.CodeGutter.Render(oldG+" "+newG) + st.CodeGutter.Render(" │ ") + lineStyle.Render(marker) + " "
+		numCol := strings.Repeat(" ", gutterW)
+		if num > 0 {
+			numCol = fmt.Sprintf("%*d", gutterW, num)
+		}
+		// The number is colored to match the line content; the separator and
+		// marker stay in their own styles.
+		gutter := lineStyle.Render(numCol) + st.CodeGutter.Render(" │ ") + lineStyle.Render(marker) + " "
 		wrapped := lineStyle.Width(textW).Render(r.Text)
 		parts := strings.Split(wrapped, "\n")
 		for i, p := range parts {
@@ -407,7 +409,7 @@ func renderDiffEditor(path string, rows []DiffRow, note string, width int, expan
 				b.WriteString(p)
 			} else {
 				b.WriteByte('\n')
-				cont := st.CodeGutter.Render(strings.Repeat(" ", gutterW*2+1)+" │ ") + lineStyle.Render("  ")
+				cont := st.CodeGutter.Render(strings.Repeat(" ", gutterW)+" │ ") + lineStyle.Render("  ")
 				b.WriteString(cont)
 				b.WriteString(p)
 			}

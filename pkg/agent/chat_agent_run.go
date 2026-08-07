@@ -800,27 +800,41 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		}
 
 	postLoop:
-		// Auto-complete any remaining plan steps at end of turn.
-		// This handles the final step (e.g., "write report") which
-		// completes when the LLM produces its final text response.
+		// Auto-complete any remaining plan steps at end of turn — but ONLY when
+		// the model did not explicitly drive the plan via update_plan. If the
+		// model tracked progress itself, its reported statuses are authoritative
+		// and we must not fabricate a bulk "everything complete" sweep (which
+		// previously made PLAN.md show all phases done regardless of reality).
 		c.activePlanMu.Lock()
 		endPlan := c.activePlan
 		c.activePlanMu.Unlock()
 
 		if endPlan != nil {
-			for _, stepName := range endPlan.CompleteAll() {
-				if c.SubTaskProgressCallback != nil {
-					c.SubTaskProgressCallback(SubTaskProgressEvent{
-						Type:       "plan_step_update",
-						StepName:   stepName,
-						StepStatus: "complete",
-					})
+			// Only auto-complete when execution actually began this turn. A plan
+			// that was merely announced (every step still pending — e.g. the
+			// finalization turn in Plan mode, or an announce-only turn) must NOT
+			// be swept to "complete": doing so would record a freshly announced
+			// plan as fully done before any work is performed. In that case we
+			// also keep the plan active so it carries into the next turn where
+			// execution starts.
+			started := endPlan.HasStartedSteps()
+			if started {
+				if !endPlan.IsManuallyTracked() {
+					for _, stepName := range endPlan.CompleteAll() {
+						if c.SubTaskProgressCallback != nil {
+							c.SubTaskProgressCallback(SubTaskProgressEvent{
+								Type:       "plan_step_update",
+								StepName:   stepName,
+								StepStatus: "complete",
+							})
+						}
+					}
 				}
+				// Work happened this turn — the plan is done for this turn.
+				c.activePlanMu.Lock()
+				c.activePlan = nil
+				c.activePlanMu.Unlock()
 			}
-			// Clear the plan — it's done for this turn.
-			c.activePlanMu.Lock()
-			c.activePlan = nil
-			c.activePlanMu.Unlock()
 		}
 
 		// Finalize the trace

@@ -30,6 +30,7 @@ func maximalBuilder() *SystemPromptBuilder {
 		WebSearchToolName:     "tavily-search",
 		WebExtractToolName:    "tavily-extract",
 		Timezone:              "America/New_York",
+		PlanFilePersistence:   true,
 		SkillIndex:            "## Available Skills\n\n- **docker** — Docker container management\n- **git** — Git workflow helpers\n",
 		FleetSection:          "\n## Available Fleets\n\n- **infra-fleet** — Infrastructure management fleet\n",
 		ChannelHints:          "Format as plain text. No markdown.",
@@ -317,6 +318,7 @@ func TestSystemPromptContracts_Environment(t *testing.T) {
 	assertContains(t, prompt, "Working directory: /home/user/project", "workspace dir in environment")
 	assertContains(t, prompt, "Timezone: America/New_York", "timezone in environment")
 	assertContains(t, prompt, "OS:", "OS info in environment")
+	assertContains(t, prompt, "PLAN.md", "plan-file persistence guidance in environment")
 }
 
 func TestSystemPromptContracts_Capabilities(t *testing.T) {
@@ -536,13 +538,17 @@ func TestSystemPromptBuilder_MinimalSize(t *testing.T) {
 func TestSystemPromptBuilder_MaximalSize(t *testing.T) {
 	prompt := maximalBuilder().Build()
 	// Maximal prompt with all features enabled — budget ceiling reflects
-	// post-Reports-section size, the Project Guidance section (AGENTS.md), and
-	// the code-navigation MUST rule (only rendered when tree-sitter code-intel
-	// tools are present). The Reports two-step contract is static (~600 bytes)
-	// because the LLM cannot retrieve guidance it doesn't know exists. See
-	// system_prompt_builder.go "## Reports" / "## Project Guidance" / "## Tool Use".
-	if len(prompt) > 12200 {
-		t.Errorf("maximal prompt too large: %d bytes (limit 12200)", len(prompt))
+	// post-Reports-section size, the Project Guidance section (AGENTS.md), the
+	// code-navigation MUST rule (only rendered when tree-sitter code-intel tools
+	// are present), and the PLAN.md persistence guidance (code mode). The Reports
+	// two-step contract is static (~600 bytes) because the LLM cannot retrieve
+	// guidance it doesn't know exists. The ceiling was raised from 12800→13000 to
+	// admit the dependency-tracing planning-strategy line (trace callers/tests/docs
+	// before decomposing — no partial implementations) added to the always-on
+	// delegation block. See system_prompt_builder.go "## Reports" / "## Project
+	// Guidance" / "## Tool Use" / "## Environment".
+	if len(prompt) > 13000 {
+		t.Errorf("maximal prompt too large: %d bytes (limit 13000)", len(prompt))
 	}
 	if len(prompt) < 5000 {
 		t.Errorf("maximal prompt suspiciously small: %d bytes (expected > 5000)", len(prompt))

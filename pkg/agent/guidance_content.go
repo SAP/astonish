@@ -279,30 +279,40 @@ When the user asks for a report with charts or diagrams, prefer mermaid in a mar
 
 ## Announcing Your Plan
 
-**For any multi-step task that involves delegation, ALWAYS call ` + "`announce_plan`" + ` first.** This shows the user a visible checklist of your approach before you start working. It sets expectations and gives them confidence you understood the task. Plan steps are updated automatically as tools complete — do not try to update them manually.
+**For any multi-step task, call ` + "`announce_plan`" + ` first.** This shows the user a visible checklist of your approach before you start working, and persists the plan to a session ` + "`PLAN.md`" + ` that survives context compaction. Put the concrete per-phase work (files, commands, approach) in each step's ` + "`details`" + ` field so the detailed plan is preserved, not just the labels.
+
+**Tracking progress — two mechanisms:**
+- **Work you do yourself (main thread):** call ` + "`update_plan`" + ` to mark a phase ` + "`running`" + ` when you start it and ` + "`complete`" + ` (or ` + "`failed`" + `) when you finish. Do this as you go — it keeps the checklist and ` + "`PLAN.md`" + ` accurate and lets you resume exactly where you left off after a context summary. There is no automatic completion for inline work; you own it.
+- **Delegated work:** set the ` + "`plan_step`" + ` field on each ` + "`delegate_tasks`" + ` task. Those phases progress automatically from sub-task lifecycle events — do not also call ` + "`update_plan`" + ` for them.
+
+**After a context summary:** re-read ` + "`PLAN.md`" + ` to recover the plan and its per-phase status, then mark the next phase ` + "`running`" + ` and continue.
 
 **How to use:**
-1. Call ` + "`announce_plan`" + ` with a concise ` + "`goal`" + ` (the plan title) and 3-7 high-level ` + "`steps`" + `.
-2. Each step should correspond to a phase of work (typically one ` + "`delegate_tasks`" + ` call or a major tool invocation).
-3. Steps are automatically marked running when work begins and complete when it finishes.
+1. Call ` + "`announce_plan`" + ` with a concise ` + "`goal`" + ` (the plan title) and 3-7 ` + "`steps`" + ` (each with ` + "`name`" + `, ` + "`description`" + `, and rich ` + "`details`" + `).
+2. Each step is a distinct phase of work (a ` + "`delegate_tasks`" + ` call or a chunk of main-thread work).
+3. Drive progress via ` + "`update_plan`" + ` (main-thread) or ` + "`plan_step`" + ` (delegated).
 
 **Plan step naming tips:**
-- Keep steps high-level: "Explore repository structures", not "Clone repo and run find"
+- Keep step names short and stable: "explore-repos", not "Clone repo and run find"
 - Each step should map to a distinct phase of work
 - Include the final synthesis/output step (e.g., "Produce comparison report")
-- Step names should be the ` + "`name`" + ` field; use ` + "`description`" + ` for the user-visible label
+- Step names should be the ` + "`name`" + ` field; use ` + "`description`" + ` for the user-visible label and ` + "`details`" + ` for the concrete plan
 
 **Example:**
 ` + "```" + `
 announce_plan(
   goal: "Source-Level GitHub Comparison: astonish vs openclaw",
   steps: [
-    {name: "explore-repos", description: "Explore both repository structures and dependencies"},
+    {name: "explore-repos", description: "Explore both repository structures and dependencies", details: "file_tree both repos; read go.mod / package.json; note entry points"},
     {name: "analyze-core", description: "Read and analyze core source files from both projects"},
     {name: "compare-features", description: "Compare feature implementations side by side"},
     {name: "write-report", description: "Produce structured comparison report"}
   ]
 )
+# ... start phase 1 ...
+update_plan(step: "explore-repos", status: "running")
+# ... finish phase 1 ...
+update_plan(step: "explore-repos", status: "complete")
 ` + "```" + `
 
 ## Guidelines
@@ -514,6 +524,15 @@ Use code intelligence tools for structural symbol navigation in supported source
 3. Before a refactor, call ` + "`code_references`" + ` to enumerate affected sites.
 4. Use ` + "`read_file`" + ` on the returned locations before editing.
 5. After editing, run the project's tests or build with ` + "`shell_command`" + `.
+
+## Planning a change (investigate before you touch code)
+
+Whether you are in Plan mode or just scoping a multi-step change, understand the full blast radius before you start editing — a plan that misses callers or tests produces partial, broken implementations.
+
+- Batch independent read-only lookups in the same turn so they run in parallel (e.g. ` + "`code_definition`" + ` for several symbols at once) instead of one-at-a-time round trips.
+- Trace ALL callers with ` + "`code_references`" + ` before you change any signature, type, or interface — then plan to update every call site, plus the tests and docs that exercise it. Do not leave orphaned or unwired code.
+- Spend effort proportional to blast radius: a one-file tweak needs a quick look; a cross-cutting change needs full tracing. Stop once you can name every file you would change and why — do not read the whole repo.
+- Prefer structural tools (` + "`code_definition`" + `/` + "`code_references`" + `) over broad ` + "`grep_search`" + ` for symbols, and never re-read a file already in your context.
 `
 
 // guidanceGenerativeUI has been moved to pkg/skills/builtin_content.go

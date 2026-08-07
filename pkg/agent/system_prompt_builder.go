@@ -62,8 +62,10 @@ type SystemPromptBuilder struct {
 	RelevantTools         string                       // Per-turn auto-retrieved tool matches from tool index (empty = none)
 	Catalog               []*ToolGroup                 // Tool groups available for delegation via delegate_tasks (nil = no delegation)
 	MCPAccessFilter       func(serverName string) bool // Per-turn filter for MCP groups in catalog (nil = allow all)
+	MCPFirstClass         bool                         // Code mode: MCP tools are injected directly on the main thread (no search_tools gate). Renders MCP tools as always-available and lists them by name.
 	SandboxEnabled        bool                         // Whether a sandbox backend is configured
 	SandboxWorkspaceDir   string                       // Persistent workspace dir inside sandbox (e.g. "/sandbox" or "/root")
+	PlanFilePersistence   bool                         // Whether announced plans are persisted to a session PLAN.md (code mode)
 }
 
 // Clone creates a shallow copy of the SystemPromptBuilder suitable for
@@ -237,6 +239,10 @@ func (b *SystemPromptBuilder) Build() string {
 		sb.WriteString("Always clone repos and store work there (NOT /tmp). ")
 		sb.WriteString("If the sandbox was recycled (files missing), silently re-clone and continue — do not ask the user.\n")
 	}
+	if b.PlanFilePersistence {
+		sb.WriteString("\n**Execution plan (PLAN.md):** When you announce a multi-phase plan (announce_plan), it is persisted to a session PLAN.md. As you work, keep it current: for main-thread phases call update_plan (running → complete/failed); delegated phases update automatically. ")
+		sb.WriteString("After a context summary, re-read PLAN.md with read_file to recover the exact plan and where you left off, then mark the next phase running and continue.\n")
+	}
 
 	// 5. Agent Identity (for web portal interactions)
 	if b.Identity.IsConfigured() {
@@ -321,13 +327,14 @@ func (b *SystemPromptBuilder) Build() string {
 
 		sb.WriteString("**Planning strategy:**\n")
 		sb.WriteString("1. For multi-step tasks, call `announce_plan` first to show the user your approach as a visible checklist.\n")
-		sb.WriteString("2. Decompose complex goals into independent, parallelizable sub-tasks (each with a clear deliverable).\n")
-		sb.WriteString("3. Keep each sub-task focused: one research question, one file operation, one API interaction.\n")
-		sb.WriteString("4. If tasks have dependencies, run them in separate `delegate_tasks` calls (first batch completes before the second starts).\n")
-		sb.WriteString("5. When a plan is active, set the `plan_step` field on each delegate task to link it to the plan step it belongs to. Multiple tasks can share the same `plan_step` — the step completes only when all its tasks finish.\n")
-		sb.WriteString("6. After all sub-tasks complete, **synthesize** the results yourself — don't just concatenate sub-agent output.\n")
-		sb.WriteString("7. For research, analysis, or comparison tasks, save the final deliverable as a markdown file with `write_file`. Present a summary inline.\n")
-		sb.WriteString("8. Plan steps are updated automatically as tools complete — do NOT try to update them manually.\n\n")
+		sb.WriteString("2. Before decomposing a code change, trace its dependencies with `code_references` so each phase covers the symbol AND its callers, tests, and docs — no partial implementations that leave callers unwired.\n")
+		sb.WriteString("3. Decompose complex goals into independent, parallelizable sub-tasks (each with a clear deliverable).\n")
+		sb.WriteString("4. Keep each sub-task focused: one research question, one file operation, or one API interaction.\n")
+		sb.WriteString("5. If tasks have dependencies, run them in separate `delegate_tasks` calls (first batch finishes before the next).\n")
+		sb.WriteString("6. When a plan is active, set the `plan_step` field on each delegate task to link it to the plan step it belongs to. Multiple tasks can share the same `plan_step` — the step completes only when all its tasks finish.\n")
+		sb.WriteString("7. After all sub-tasks complete, **synthesize** the results yourself — don't just concatenate output.\n")
+		sb.WriteString("8. For research or comparison tasks, save the final deliverable as a markdown file with `write_file`; end code work with a verification phase (build/test/lint) so nothing ships unverified.\n")
+		sb.WriteString("9. Delegated plan steps progress automatically from sub-task events — do NOT call `update_plan` for those. For phases you execute yourself on the main thread, call `update_plan` (status running → complete/failed) as you go so the checklist and PLAN.md stay accurate.\n\n")
 
 		sb.WriteString("**Available tool groups (for parallel delegation only):**\n")
 		ctx := &minimalReadonlyContext{Context: context.Background()}
@@ -348,8 +355,50 @@ func (b *SystemPromptBuilder) Build() string {
 			sb.WriteString(fmt.Sprintf("- **%s** (%d tools) — %s\n", g.Name, toolCount, g.Description))
 		}
 		sb.WriteString("\nExamples (parallel work only): `tools: [\"browser\"]`, `tools: [\"core\", \"web\"]`\n")
-		sb.WriteString("\n**MCP tools (main thread):** After `search_tools`, call the **bare** tool name (e.g. `send_email`). ")
-		sb.WriteString("Do **not** invent `mcp:email/send_email` (app-only form). Do **not** delegate a single MCP call.\n")
+		if b.MCPFirstClass {
+			sb.WriteString("\n**MCP tools (main thread):** All configured MCP server tools are available to you directly — call the **bare** tool name (e.g. `send_email`) whenever you need one. ")
+			sb.WriteString("You do NOT need `search_tools` to reach them; they are always loaded. Do **not** invent `mcp:server/tool` (app-only form). Do **not** delegate a single MCP call.\n")
+		} else {
+			sb.WriteString("\n**MCP tools (main thread):** After `search_tools`, call the **bare** tool name (e.g. `send_email`). ")
+			sb.WriteString("Do **not** invent `mcp:email/send_email` (app-only form). Do **not** delegate a single MCP call.\n")
+		}
+	}
+
+	// 6b2. Code mode: MCP servers are first-class. List their tools by name so
+	// the model knows exactly what is available for direct invocation without a
+	// search_tools detour. In platform mode this section is omitted (MCP tools
+	// stay behind search_tools to bound prompt size).
+	if b.MCPFirstClass && len(b.Catalog) > 0 {
+		ctx := &minimalReadonlyContext{Context: context.Background()}
+		var mcpLines []string
+		for _, g := range b.Catalog {
+			serverName, isMCP := mcpServerNameFromGroup(g.Name)
+			if !isMCP {
+				continue
+			}
+			if b.MCPAccessFilter != nil && !b.MCPAccessFilter(serverName) {
+				continue
+			}
+			var toolNames []string
+			for _, ts := range g.Toolsets {
+				if mcpTools, err := ts.Tools(ctx); err == nil {
+					for _, t := range mcpTools {
+						toolNames = append(toolNames, t.Name())
+					}
+				}
+			}
+			if len(toolNames) == 0 {
+				continue
+			}
+			mcpLines = append(mcpLines, fmt.Sprintf("- **%s**: %s\n", serverName, strings.Join(toolNames, ", ")))
+		}
+		if len(mcpLines) > 0 {
+			sb.WriteString("\n## MCP Tools (available directly)\n\n")
+			sb.WriteString("These MCP server tools are loaded on the main thread and callable right now by their bare name:\n\n")
+			for _, line := range mcpLines {
+				sb.WriteString(line)
+			}
+		}
 	}
 
 	// 6c2. Skill index (lightweight listing of available CLI tool skills)

@@ -2,6 +2,8 @@ package session
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -771,5 +773,131 @@ func TestFileStore_TruncateEvents(t *testing.T) {
 	})
 	if got := getResp.Session.Events().Len(); got != 0 {
 		t.Errorf("Events().Len() after truncate(0) = %d, want 0", got)
+	}
+}
+
+func TestFileStore_LatestDescendantAndAncestorChain(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// root -> child -> tip
+	root, err := store.Create(ctx, &adksession.CreateRequest{
+		AppName: "app", UserID: "u", SessionID: "root",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Touch UpdatedAt order: create child then tip with slight delay via sequential creates.
+	_, err = store.Create(ctx, &adksession.CreateRequest{
+		AppName: "app", UserID: "u", SessionID: "child",
+		State: map[string]any{StateKeyParentID: root.Session.ID()},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.Create(ctx, &adksession.CreateRequest{
+		AppName: "app", UserID: "u", SessionID: "tip",
+		State: map[string]any{StateKeyParentID: "child"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := store.LatestDescendant("root"); got != "tip" {
+		t.Fatalf("LatestDescendant(root)=%q want tip", got)
+	}
+	if got := store.LatestDescendant("child"); got != "tip" {
+		t.Fatalf("LatestDescendant(child)=%q want tip", got)
+	}
+	if got := store.LatestDescendant("tip"); got != "tip" {
+		t.Fatalf("LatestDescendant(tip)=%q want tip", got)
+	}
+	if got := store.LatestDescendant("missing"); got != "missing" {
+		t.Fatalf("LatestDescendant(missing)=%q want missing", got)
+	}
+
+	chain := store.AncestorChain("tip")
+	if len(chain) != 3 || chain[0] != "root" || chain[1] != "child" || chain[2] != "tip" {
+		t.Fatalf("AncestorChain(tip)=%v want [root child tip]", chain)
+	}
+	chain = store.AncestorChain("root")
+	if len(chain) != 1 || chain[0] != "root" {
+		t.Fatalf("AncestorChain(root)=%v want [root]", chain)
+	}
+}
+
+func TestFileStore_ArchiveAndReplaceEvents(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	resp, err := store.Create(ctx, &adksession.CreateRequest{AppName: "app", UserID: "u", SessionID: "active"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := resp.Session
+	// Seed several events via the live session pointer (as ADK would).
+	for i := 0; i < 10; i++ {
+		ev := &adksession.Event{
+			ID:     fmt.Sprintf("e%d", i),
+			Author: "user",
+			LLMResponse: adkmodel.LLMResponse{
+				Content: genai.NewContentFromText(fmt.Sprintf("msg %d %s", i, strings.Repeat("x", 50)), genai.RoleUser),
+			},
+		}
+		if err := store.AppendEvent(ctx, sess, ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if sess.Events().Len() != 10 {
+		t.Fatalf("live events = %d want 10", sess.Events().Len())
+	}
+
+	compacted := []*adksession.Event{
+		{
+			ID:     "c0",
+			Author: "model",
+			LLMResponse: adkmodel.LLMResponse{
+				Content: genai.NewContentFromText("[Context Summary — 10 earlier messages compacted]\n\nSUMMARY", genai.RoleModel),
+			},
+		},
+		{
+			ID:     "c1",
+			Author: "user",
+			LLMResponse: adkmodel.LLMResponse{
+				Content: genai.NewContentFromText("recent", genai.RoleUser),
+			},
+		},
+	}
+	archiveID, err := store.ArchiveAndReplaceEvents("app", "u", "active", compacted)
+	if err != nil {
+		t.Fatalf("ArchiveAndReplaceEvents: %v", err)
+	}
+	if archiveID == "" || archiveID == "active" {
+		t.Fatalf("bad archive id %q", archiveID)
+	}
+
+	// Live ADK session pointer must see the rewrite immediately.
+	if sess.Events().Len() != 2 {
+		t.Fatalf("live session events after rewrite = %d want 2", sess.Events().Len())
+	}
+
+	// Archive has the full history.
+	arch, err := store.Get(ctx, &adksession.GetRequest{AppName: "app", UserID: "u", SessionID: archiveID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if arch.Session.Events().Len() != 10 {
+		t.Fatalf("archive events = %d want 10", arch.Session.Events().Len())
+	}
+
+	// Active is a child of the archive.
+	meta, err := store.GetSessionMeta("active")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.ParentID != archiveID {
+		t.Fatalf("active ParentID = %q want %q", meta.ParentID, archiveID)
+	}
+	if store.LatestDescendant(archiveID) != "active" {
+		t.Fatalf("LatestDescendant(archive)=%q want active", store.LatestDescendant(archiveID))
 	}
 }

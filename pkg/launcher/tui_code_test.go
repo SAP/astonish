@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/client"
 	"github.com/SAP/astonish/pkg/common"
 	"github.com/SAP/astonish/pkg/config"
@@ -797,6 +799,39 @@ func TestListSessions_NoAutoResumeOnStart(t *testing.T) {
 
 // TestDeleteSession_RemovesFromList verifies deletion drops the session from
 // the persisted listing.
+// TestDeleteSession_RemovesPlanFileSidecar verifies that deleting a code-mode
+// session also removes its per-session PLAN.md sidecar (see planFilePath), so
+// announced plans do not accumulate on disk after the session is gone.
+func TestDeleteSession_RemovesPlanFileSidecar(t *testing.T) {
+	dir := t.TempDir()
+	userID := codeUserIDForDir("/work/projectPlan")
+	b := newFileStoreBackend(t, dir, userID)
+
+	id := seedSession(t, b, "Session with a plan")
+
+	planPath := b.planFilePath(id)
+	if planPath == "" {
+		t.Fatalf("expected a non-empty plan file path")
+	}
+	if err := os.WriteFile(planPath, []byte("# Plan\n- [ ] step\n"), 0o644); err != nil {
+		t.Fatalf("write PLAN.md sidecar: %v", err)
+	}
+	if _, err := os.Stat(planPath); err != nil {
+		t.Fatalf("sidecar should exist before delete: %v", err)
+	}
+
+	if err := b.DeleteSession(context.Background(), id); err != nil {
+		t.Fatalf("DeleteSession: %v", err)
+	}
+
+	if _, err := os.Stat(planPath); !os.IsNotExist(err) {
+		t.Fatalf("expected PLAN.md sidecar to be removed, stat err = %v", err)
+	}
+}
+
+// TestDeleteSession_RemovesFromList covers session deletion removing the entry
+// from the list. See TestDeleteSession_RemovesPlanFileSidecar for sidecar
+// cleanup.
 func TestDeleteSession_RemovesFromList(t *testing.T) {
 	dir := t.TempDir()
 	userID := codeUserIDForDir("/work/projectA")
@@ -927,8 +962,10 @@ func TestRollback_ListAndRestore(t *testing.T) {
 	if len(points) != 2 {
 		t.Fatalf("got %d rollback points, want 2", len(points))
 	}
-	if points[0].ID != "0" || points[1].ID != "1" {
-		t.Fatalf("point IDs = %q,%q want 0,1", points[0].ID, points[1].ID)
+	want0 := sessionID + ":0"
+	want1 := sessionID + ":1"
+	if points[0].ID != want0 || points[1].ID != want1 {
+		t.Fatalf("point IDs = %q,%q want %q,%q", points[0].ID, points[1].ID, want0, want1)
 	}
 	if points[1].FileCount != 1 {
 		t.Errorf("point[1].FileCount = %d, want 1", points[1].FileCount)
@@ -938,8 +975,8 @@ func TestRollback_ListAndRestore(t *testing.T) {
 	}
 
 	// Roll back to the second user message (index 1): chat keeps only event 0,
-	// and the file returns to its pre-turn-1 content.
-	entries, err := b.RollbackTo(ctx, "1")
+	// and the file returns to its pre-turn-1 content. Use the session-scoped ID.
+	entries, err := b.RollbackTo(ctx, want1)
 	if err != nil {
 		t.Fatalf("RollbackTo: %v", err)
 	}
@@ -1017,5 +1054,185 @@ func TestAgentAttachmentsFromBackend(t *testing.T) {
 func TestAgentAttachmentsFromBackend_Empty(t *testing.T) {
 	if got := agentAttachmentsFromBackend(nil); got != nil {
 		t.Fatalf("expected nil for no attachments, got %+v", got)
+	}
+}
+
+func TestParseRollbackPointID(t *testing.T) {
+	owner, idx, err := parseRollbackPointID("abc-123:7", "active")
+	if err != nil || owner != "abc-123" || idx != 7 {
+		t.Fatalf("got owner=%q idx=%d err=%v", owner, idx, err)
+	}
+	owner, idx, err = parseRollbackPointID("3", "active")
+	if err != nil || owner != "active" || idx != 3 {
+		t.Fatalf("bare: owner=%q idx=%d err=%v", owner, idx, err)
+	}
+	if _, _, err := parseRollbackPointID("bad", "a"); err == nil {
+		t.Fatal("expected error for non-numeric bare id")
+	}
+}
+
+// TestMaybeCompactToChild_CreatesChildAndPreservesParent verifies the
+// "compaction = new session with summary" model: parent transcript intact,
+// child seeded with a shorter history, active session switched to the child.
+func TestMaybeCompactToChild_CreatesChildAndPreservesParent(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	fileStore, err := persistentsession.NewFileStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := fileStore.Create(ctx, &adksession.CreateRequest{AppName: codeAppName, UserID: codeUserID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parentID := resp.Session.ID()
+	// Seed a large history so ShouldCompact triggers on a tiny window.
+	for i := 0; i < 30; i++ {
+		seedUserEvent(t, fileStore, resp.Session, fmt.Sprintf("e%d", i), strings.Repeat("x", 200)+" msg "+fmt.Sprint(i))
+	}
+
+	// Minimal ChatAgent with a real Compactor (truncation path — no LLM).
+	comp := persistentsession.NewCompactor(100) // tiny window
+	comp.PreserveRecent = 2
+	chatAgent := &agent.ChatAgent{Compactor: comp}
+
+	b := &localAgentBackend{
+		sessionSvc: common.NewAutoInitService(fileStore),
+		fileStore:  fileStore,
+		result:     &ChatFactoryResult{ChatAgent: chatAgent},
+		sessionID:  parentID,
+		appConfig:  &config.AppConfig{},
+	}
+
+	var notices []string
+	emit := func(typ string, data map[string]any) {
+		if typ == "system" {
+			if s, ok := data["content"].(string); ok {
+				notices = append(notices, s)
+			}
+		}
+	}
+	// Active session ID stays the same; full history is archived under ParentID.
+	activeID := b.maybeCompactToChild(ctx, parentID, emit)
+	if activeID != parentID {
+		t.Fatalf("active session id should stay %q after archive-and-replace, got %q", parentID, activeID)
+	}
+	if b.sessionID != parentID {
+		t.Fatalf("backend sessionID = %q want %q", b.sessionID, parentID)
+	}
+
+	// Active (tip) is now short.
+	tipGet, err := fileStore.Get(ctx, &adksession.GetRequest{AppName: codeAppName, UserID: codeUserID, SessionID: parentID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := tipGet.Session.Events().Len(); n >= 30 {
+		t.Fatalf("tip events = %d, want compacted (< 30)", n)
+	}
+	meta, err := fileStore.GetSessionMeta(parentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.ParentID == "" {
+		t.Fatal("tip should have ParentID pointing at the archive")
+	}
+	archiveID := meta.ParentID
+
+	// Archive still has the full history.
+	archGet, err := fileStore.Get(ctx, &adksession.GetRequest{AppName: codeAppName, UserID: codeUserID, SessionID: archiveID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := archGet.Session.Events().Len(); n < 30 {
+		t.Fatalf("archive events = %d, want >= 30", n)
+	}
+	if len(notices) == 0 || !strings.Contains(notices[0], "Compacted context") {
+		t.Fatalf("expected compaction notice, got %v", notices)
+	}
+
+	// Resume from the archive root resolves to the tip (same id as parentID).
+	b2 := &localAgentBackend{
+		sessionSvc: common.NewAutoInitService(fileStore),
+		fileStore:  fileStore,
+		appConfig:  &config.AppConfig{},
+	}
+	if _, err := b2.ResumeSession(ctx, archiveID); err != nil {
+		t.Fatalf("ResumeSession: %v", err)
+	}
+	if b2.sessionID != parentID {
+		t.Fatalf("resume tip = %q want active tip %q", b2.sessionID, parentID)
+	}
+
+	// Rollback to a pre-compaction turn on the archive reactivates the archive
+	// and drops the compacted tip (option A).
+	if _, err := b2.RollbackTo(ctx, archiveID+":1"); err != nil {
+		t.Fatalf("RollbackTo archive:1: %v", err)
+	}
+	if b2.sessionID != archiveID {
+		t.Fatalf("after rollback active = %q want archive %q", b2.sessionID, archiveID)
+	}
+	if _, err := fileStore.GetSessionMeta(parentID); err == nil {
+		t.Fatal("expected compacted tip deleted after rollback to archive turn")
+	}
+	archGet, err = fileStore.Get(ctx, &adksession.GetRequest{AppName: codeAppName, UserID: codeUserID, SessionID: archiveID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := archGet.Session.Events().Len(); n != 1 {
+		t.Fatalf("archive events after rollback = %d want 1", n)
+	}
+}
+
+// TestCompact_RunsImmediately verifies /compact creates a child session now
+// rather than deferring to the next user message.
+func TestCompact_RunsImmediately(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	fileStore, err := persistentsession.NewFileStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := fileStore.Create(ctx, &adksession.CreateRequest{AppName: codeAppName, UserID: codeUserID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parentID := resp.Session.ID()
+	for i := 0; i < 30; i++ {
+		seedUserEvent(t, fileStore, resp.Session, fmt.Sprintf("e%d", i), strings.Repeat("y", 200)+" "+fmt.Sprint(i))
+	}
+
+	comp := persistentsession.NewCompactor(100)
+	comp.PreserveRecent = 2
+	b := &localAgentBackend{
+		sessionSvc: common.NewAutoInitService(fileStore),
+		fileStore:  fileStore,
+		result:     &ChatFactoryResult{ChatAgent: &agent.ChatAgent{Compactor: comp}},
+		sessionID:  parentID,
+		appConfig:  &config.AppConfig{},
+	}
+
+	status, err := b.Compact(ctx)
+	if err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	if !strings.Contains(status, "Compacted context:") {
+		t.Fatalf("expected immediate compaction status, got %q", status)
+	}
+	if strings.Contains(status, "next message") {
+		t.Fatalf("must not defer compaction: %q", status)
+	}
+	// Session id stays the same; events are rewritten and full history archived.
+	if b.sessionID != parentID {
+		t.Fatalf("active session id should stay %q, got %q", parentID, b.sessionID)
+	}
+	tip, err := fileStore.Get(ctx, &adksession.GetRequest{AppName: codeAppName, UserID: codeUserID, SessionID: parentID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := tip.Session.Events().Len(); n >= 30 {
+		t.Fatalf("after compact tip still has %d events", n)
+	}
+	if b.contextTokens <= 0 {
+		t.Fatal("contextTokens should be updated after compact")
 	}
 }

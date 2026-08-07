@@ -29,6 +29,7 @@ import (
 	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
 	adkagent "google.golang.org/adk/agent"
+	adkmodel "google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
@@ -196,6 +197,7 @@ func RunCodeTUI(ctx context.Context, cfg *CodeConfig) error {
 		AutoApprove:          cfg.AutoApprove,
 		WorkspaceDir:         workingDir,
 		PlatformMode:         false,
+		CodeMode:             true,
 		AllowMissingProvider: true,
 		LoadProjectContext:   true,
 		SessionService:       fileStore,
@@ -254,6 +256,15 @@ func forceHostExecution(appConfig *config.AppConfig) {
 	}
 	disabled := false
 	appConfig.Sandbox.Enabled = &disabled
+}
+
+// formatCodeTokens renders a token count compactly (e.g. 1523 → "1.5k") for
+// user-facing compaction notices.
+func formatCodeTokens(n int) string {
+	if n < 1000 {
+		return fmt.Sprintf("%d", n)
+	}
+	return fmt.Sprintf("%.1fk", float64(n)/1000)
 }
 
 // redirectLogsForTUI points the standard logger and slog's default handler away
@@ -387,6 +398,29 @@ func (b *localAgentBackend) effectiveUserID() string {
 	return codeUserID
 }
 
+// planFilePath returns the per-session PLAN.md sidecar path, alongside the
+// session transcript (<sessionID>.jsonl). Returns "" when the file store or
+// session ID is unavailable (e.g. chat-only test backends), which disables
+// plan-file persistence.
+func (b *localAgentBackend) planFilePath(sessionID string) string {
+	if b.fileStore == nil || sessionID == "" {
+		return ""
+	}
+	return filepath.Join(b.fileStore.BaseDir(), codeAppName, b.effectiveUserID(), sessionID+".PLAN.md")
+}
+
+// removePlanFile deletes the per-session PLAN.md sidecar for sessionID, if one
+// exists. Best-effort: a missing file (or disabled persistence) is not an error.
+func (b *localAgentBackend) removePlanFile(sessionID string) {
+	path := b.planFilePath(sessionID)
+	if path == "" {
+		return
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		slog.Debug("failed to remove PLAN.md sidecar", "component", "localAgentBackend", "path", path, "error", err)
+	}
+}
+
 // ensureSession creates a new in-process session if none is active and returns
 // its ID. Safe to call under no lock; it locks internally.
 func (b *localAgentBackend) ensureSession(ctx context.Context) (string, bool, error) {
@@ -492,6 +526,43 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 
 	chatAgent := b.result.ChatAgent
 	chatAgent.AutoApprove = autoApprove
+	// Persist any announced plan to a per-session PLAN.md sidecar so the plan
+	// survives context compaction (the model can re-read it after a summary).
+	planPath := b.planFilePath(sessionID)
+	chatAgent.SetPlanFilePath(planPath)
+	if chatAgent.Compactor != nil {
+		chatAgent.Compactor.SetPlanFilePath(planPath)
+		// Surface compaction to the user: a transcript notice plus an estimated
+		// usage reading so the context figure in the header drops to the new
+		// (post-compaction) size. Without this, compaction is invisible and the
+		// header keeps showing the pre-compaction peak.
+		chatAgent.Compactor.SetOnCompaction(func(beforeTokens, afterTokens int) {
+			emit("system", map[string]any{
+				"content": fmt.Sprintf("Compacted context: %s → %s tokens.", formatCodeTokens(beforeTokens), formatCodeTokens(afterTokens)),
+			})
+			emit("usage", map[string]any{
+				"input_tokens": afterTokens,
+				"estimated":    true,
+			})
+			b.mu.Lock()
+			b.contextTokens = int64(afterTokens)
+			b.mu.Unlock()
+		})
+		// Persist mid-turn (and any) BeforeModelCallback compaction into the
+		// session store so the next model step rebuilds from the summary — not
+		// the full pre-compaction transcript (session ecff74b2: 8k→190k loop).
+		if b.fileStore != nil {
+			userID := b.effectiveUserID()
+			chatAgent.Compactor.SetPersistCompacted(func(pctx context.Context, sid string, compacted []*genai.Content) error {
+				evs := contentsToSessionEvents(compacted)
+				if len(evs) == 0 {
+					return nil
+				}
+				_, err := b.fileStore.ArchiveAndReplaceEvents(codeAppName, userID, sid, evs)
+				return err
+			})
+		}
+	}
 	if opts.SystemContext != "" || opts.PlanMode {
 		ctx = agent.WithPromptOverrides(ctx, &agent.PromptOverrides{
 			SessionContext: agent.EscapeCurlyPlaceholders(opts.SystemContext),
@@ -514,17 +585,6 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 		}
 	}
 
-	// Determine the checkpoint boundary for this turn: the number of events
-	// already in the session. Files modified during this turn are snapshotted
-	// under this index, and rolling back to a user message at event position P
-	// restores every snapshot with index >= P. Deriving both capture and
-	// rollback from event position keeps them consistent regardless of how many
-	// approval round-trips a turn takes.
-	turnIndex := b.sessionEventCount(ctx, sessionID)
-	if b.checkpoints != nil {
-		b.checkpoints.BeginTurn(sessionID, turnIndex)
-	}
-
 	go func() {
 		defer close(out)
 
@@ -537,9 +597,23 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 				_ = b.fileStore.SetSessionTitle(ctx, sessionID, title)
 			}
 		}
+
+		// Turn-boundary compaction: if the active session is over threshold,
+		// start a child session whose first events are the summary + recent
+		// turns, then drive the turn against that child. The parent transcript
+		// is never rewritten, so /rollback can still reach pre-compaction turns.
+		effectiveID := b.maybeCompactToChild(ctx, sessionID, emit)
+
+		// File-snapshot boundary for this turn is derived from the *effective*
+		// (possibly post-compaction) session so capture/rollback stay aligned.
+		turnIndex := b.sessionEventCount(ctx, effectiveID)
+		if b.checkpoints != nil {
+			b.checkpoints.BeginTurn(effectiveID, turnIndex)
+		}
+
 		out <- events.NewStatus("Thinking…")
 
-		b.driveTurn(ctx, rnr, chatAgent, sessionID, turnIndex, userMsg, emit)
+		b.driveTurn(ctx, rnr, chatAgent, effectiveID, turnIndex, userMsg, emit)
 
 		emit("done", map[string]any{"done": true})
 	}()
@@ -584,6 +658,174 @@ func (b *localAgentBackend) sessionEventCount(ctx context.Context, sessionID str
 		return 0
 	}
 	return resp.Session.Events().Len()
+}
+
+// compactToChildResult is the outcome of compactToChild.
+type compactToChildResult struct {
+	SessionID string // active session after the call (parent if no-op)
+	Before    int
+	After     int
+	Did       bool // true when a child was created and switched to
+}
+
+// contentsToSessionEvents converts compacted genai contents into ADK events
+// suitable for seeding or rewriting a session.
+func contentsToSessionEvents(contents []*genai.Content) []*session.Event {
+	out := make([]*session.Event, 0, len(contents))
+	for i, c := range contents {
+		if c == nil {
+			continue
+		}
+		author := "model"
+		if c.Role == "user" {
+			author = "user"
+		}
+		out = append(out, &session.Event{
+			ID:          fmt.Sprintf("compact-%d", i),
+			Author:      author,
+			Timestamp:   time.Now(),
+			LLMResponse: adkmodel.LLMResponse{Content: c},
+		})
+	}
+	return out
+}
+
+// compactToChild persistently compacts the active session so subsequent model
+// calls (including mid-turn) no longer rebuild the full history.
+//
+// Preferred path (FileStore): ArchiveAndReplaceEvents — archives the full
+// history under a new parent session id, rewrites the *same* active session id
+// to the summary+recent events, and updates every live ADK session pointer.
+// That way rnr.Run(sessionID) keeps working and ContentsRequestProcessor sees
+// the compact history on the next model step (no 8k→190k thrash).
+//
+// Fallback (in-memory tests without FileStore): create a child session and
+// switch b.sessionID to it (original design).
+//
+// force=true (from /compact) always attempts compaction when there is enough
+// history; force=false only runs when the session exceeds the threshold.
+func (b *localAgentBackend) compactToChild(ctx context.Context, sessionID string, force bool) compactToChildResult {
+	out := compactToChildResult{SessionID: sessionID}
+	if sessionID == "" || b.result == nil || b.result.ChatAgent == nil || b.result.ChatAgent.Compactor == nil {
+		return out
+	}
+	comp := b.result.ChatAgent.Compactor
+
+	resp, err := b.sessionSvc.Get(ctx, &session.GetRequest{
+		AppName:   codeAppName,
+		UserID:    b.effectiveUserID(),
+		SessionID: sessionID,
+	})
+	if err != nil || resp == nil || resp.Session == nil {
+		return out
+	}
+
+	var contents []*genai.Content
+	for ev := range resp.Session.Events().All() {
+		if ev != nil && ev.LLMResponse.Content != nil {
+			contents = append(contents, ev.LLMResponse.Content)
+		}
+	}
+	if len(contents) == 0 {
+		return out
+	}
+	before := persistentsession.EstimateTokens(contents)
+	out.Before = before
+	out.After = before
+
+	if !force && !comp.ShouldCompact(contents) {
+		return out
+	}
+	if force && len(contents) <= comp.PreserveRecent {
+		return out
+	}
+
+	// Suppress the in-callback OnCompaction hook for this explicit compaction
+	// so we emit a single user-facing notice from the caller.
+	comp.SetOnCompaction(nil)
+
+	compacted, cErr := comp.CompactContents(ctx, contents)
+	if cErr != nil || len(compacted) >= len(contents) {
+		return out
+	}
+	after := persistentsession.EstimateTokens(compacted)
+	out.After = after
+	newEvents := contentsToSessionEvents(compacted)
+	if len(newEvents) == 0 {
+		return out
+	}
+
+	// Preferred: archive full history + rewrite active session in place.
+	if b.fileStore != nil {
+		if _, aErr := b.fileStore.ArchiveAndReplaceEvents(codeAppName, b.effectiveUserID(), sessionID, newEvents); aErr != nil {
+			slog.Warn("persistent compaction archive failed", "session_id", sessionID, "error", aErr)
+			return out
+		}
+		b.mu.Lock()
+		b.sessionID = sessionID // unchanged — ADK Run keeps this id
+		b.contextTokens = int64(after)
+		b.mu.Unlock()
+		out.SessionID = sessionID
+		out.Did = true
+		return out
+	}
+
+	// Fallback for pure in-memory session services (unit tests).
+	childResp, cErr := b.sessionSvc.Create(ctx, &session.CreateRequest{
+		AppName: codeAppName,
+		UserID:  b.effectiveUserID(),
+		State:   map[string]any{persistentsession.StateKeyParentID: sessionID},
+	})
+	if cErr != nil || childResp == nil || childResp.Session == nil {
+		return out
+	}
+	childID := childResp.Session.ID()
+	childSess := childResp.Session
+	for _, ev := range newEvents {
+		if aErr := b.sessionSvc.AppendEvent(ctx, childSess, ev); aErr != nil {
+			slog.Debug("compaction child seeding failed; staying on parent", "error", aErr)
+			return out
+		}
+	}
+	b.mu.Lock()
+	b.sessionID = childID
+	b.contextTokens = int64(after)
+	b.mu.Unlock()
+	out.SessionID = childID
+	out.Did = true
+	return out
+}
+
+// maybeCompactToChild runs automatic threshold-based compaction at a turn
+// boundary and surfaces a notice on the event stream when it fires.
+func (b *localAgentBackend) maybeCompactToChild(ctx context.Context, sessionID string, emit func(string, map[string]any)) string {
+	res := b.compactToChild(ctx, sessionID, false)
+	// Re-arm the UI hook for any within-turn safety-valve compactons.
+	if b.result != nil && b.result.ChatAgent != nil && b.result.ChatAgent.Compactor != nil {
+		comp := b.result.ChatAgent.Compactor
+		comp.SetOnCompaction(func(beforeTokens, afterTokens int) {
+			emit("system", map[string]any{
+				"content": fmt.Sprintf("Compacted context: %s → %s tokens.", formatCodeTokens(beforeTokens), formatCodeTokens(afterTokens)),
+			})
+			emit("usage", map[string]any{
+				"input_tokens": afterTokens,
+				"estimated":    true,
+			})
+			b.mu.Lock()
+			b.contextTokens = int64(afterTokens)
+			b.mu.Unlock()
+		})
+	}
+	if !res.Did {
+		return sessionID
+	}
+	emit("system", map[string]any{
+		"content": fmt.Sprintf("Compacted context: %s → %s tokens. Earlier turns are preserved and remain reachable via /rollback.",
+			formatCodeTokens(res.Before), formatCodeTokens(res.After)),
+	})
+	emit("usage", map[string]any{"input_tokens": res.After, "estimated": true})
+	emit("session", map[string]any{"sessionId": res.SessionID, "isNew": false})
+	return res.SessionID
 }
 
 // deriveSessionTitle produces a short, single-line title from the first user
@@ -733,6 +975,47 @@ func (b *localAgentBackend) emitUsage(event *session.Event, emit func(string, ma
 		"total_tokens":  um.TotalTokenCount,
 	})
 	return true
+}
+
+// Compact implements backend.CompactionBackend: it runs compaction **now**
+// (child-session summary), updates the active session and context estimate, and
+// returns a status line. It does not wait for the next user message.
+func (b *localAgentBackend) Compact(ctx context.Context) (string, error) {
+	if b.result == nil || b.result.ChatAgent == nil || b.result.ChatAgent.Compactor == nil {
+		return "Compaction is disabled.", nil
+	}
+	b.mu.Lock()
+	sessionID := b.sessionID
+	b.mu.Unlock()
+	if sessionID == "" {
+		return "No active session to compact.", nil
+	}
+
+	_, win := b.result.ChatAgent.Compactor.TokenUsage()
+	if win == 0 {
+		// TokenUsage may still be zero before any model call; fall back to the
+		// configured window on the compactor itself.
+		win = b.result.ChatAgent.Compactor.ContextWindow
+	}
+	res := b.compactToChild(ctx, sessionID, true /* force */)
+	if !res.Did {
+		est := res.Before
+		if est == 0 {
+			est = int(b.estimateContextTokens(ctx, sessionID))
+		}
+		pct := 0.0
+		if win > 0 {
+			pct = float64(est) / float64(win) * 100
+		}
+		return fmt.Sprintf("Context is ~%s tokens (%.0f%% of %s). Not enough older history to compact further.",
+			formatCodeTokens(est), pct, formatCodeTokens(win)), nil
+	}
+	pctAfter := 0.0
+	if win > 0 {
+		pctAfter = float64(res.After) / float64(win) * 100
+	}
+	return fmt.Sprintf("Compacted context: %s → %s tokens (now ~%.0f%% of %s). Earlier turns are preserved and remain reachable via /rollback.",
+		formatCodeTokens(res.Before), formatCodeTokens(res.After), pctAfter, formatCodeTokens(win)), nil
 }
 
 // estimateContextTokens estimates the current context-window fill from all
@@ -897,15 +1180,23 @@ func (b *localAgentBackend) ResumeSession(ctx context.Context, sessionID string)
 	if sessionID == "" {
 		return nil, fmt.Errorf("session id required")
 	}
-	hist, err := b.loadHistory(ctx, sessionID)
+	// Compaction creates a child session linked via ParentID. The session list
+	// shows roots (children are hidden); resume must open the tip of the chain
+	// so the model replays [latest summary]+tail rather than the raw parent.
+	activeID := sessionID
+	if b.fileStore != nil {
+		activeID = b.fileStore.LatestDescendant(sessionID)
+	}
+	hist, err := b.loadHistory(ctx, activeID)
 	if err != nil {
 		return nil, err
 	}
 	// Estimate the resumed session's context occupancy so the header shows real
 	// utilization immediately, instead of "Context 0" until the next turn.
-	ctxTokens := b.estimateContextTokens(ctx, sessionID)
+	// Use the active (tip) session — that is the model-facing context size.
+	ctxTokens := b.estimateContextTokens(ctx, activeID)
 	b.mu.Lock()
-	b.sessionID = sessionID
+	b.sessionID = activeID
 	b.resumed = true
 	b.contextTokens = ctxTokens
 	b.mu.Unlock()
@@ -962,6 +1253,17 @@ func (b *localAgentBackend) DeleteSession(ctx context.Context, sessionID string)
 	if sessionID == "" {
 		return fmt.Errorf("session id required")
 	}
+	// Collect child session IDs before deletion: sessionSvc.Delete cascades and
+	// removes their index entries, so the per-session PLAN.md sidecars must be
+	// resolved up front to be cleaned up alongside the parent's.
+	var childIDs []string
+	if b.fileStore != nil {
+		if children, cerr := b.fileStore.ListChildren(sessionID); cerr == nil {
+			for _, child := range children {
+				childIDs = append(childIDs, child.ID)
+			}
+		}
+	}
 	err := b.sessionSvc.Delete(ctx, &session.DeleteRequest{
 		AppName:   codeAppName,
 		UserID:    b.effectiveUserID(),
@@ -969,6 +1271,12 @@ func (b *localAgentBackend) DeleteSession(ctx context.Context, sessionID string)
 	})
 	if b.checkpoints != nil {
 		_ = b.checkpoints.DeleteSession(sessionID)
+	}
+	// Remove the per-session PLAN.md sidecar(s) written in code mode (see
+	// planFilePath). Best-effort: a missing file is not an error.
+	b.removePlanFile(sessionID)
+	for _, childID := range childIDs {
+		b.removePlanFile(childID)
 	}
 	b.mu.Lock()
 	if b.sessionID == sessionID {
@@ -1124,9 +1432,11 @@ func pathFromToolArgs(args map[string]any) string {
 	return ""
 }
 
-// ListRollbackPoints returns one revert target per user message in the active
-// session, oldest first, annotated with how many files a rollback would
-// restore. Returns nil when there is no active session or nothing to revert.
+// ListRollbackPoints returns one revert target per user message across the
+// compaction chain (root ancestor → active tip), oldest first. Point IDs are
+// "sessionID:eventIndex" so RollbackTo can re-activate the owning session even
+// after a reload. Pre-compaction turns remain reachable because parent
+// transcripts are never rewritten by compaction.
 func (b *localAgentBackend) ListRollbackPoints(ctx context.Context) ([]backend.RollbackPoint, error) {
 	b.mu.Lock()
 	sessionID := b.sessionID
@@ -1134,47 +1444,80 @@ func (b *localAgentBackend) ListRollbackPoints(ctx context.Context) ([]backend.R
 	if sessionID == "" {
 		return nil, nil
 	}
-	resp, err := b.sessionSvc.Get(ctx, &session.GetRequest{
-		AppName:   codeAppName,
-		UserID:    b.effectiveUserID(),
-		SessionID: sessionID,
-	})
-	if err != nil || resp == nil || resp.Session == nil {
-		return nil, nil
+
+	// Walk root → … → tip so the picker shows the full history across restarts.
+	chain := []string{sessionID}
+	if b.fileStore != nil {
+		chain = b.fileStore.AncestorChain(sessionID)
+		if len(chain) == 0 {
+			chain = []string{sessionID}
+		}
 	}
 
 	var points []backend.RollbackPoint
 	turnNumber := 0
-	idx := -1
-	for ev := range resp.Session.Events().All() {
-		idx++
-		if ev == nil || ev.LLMResponse.Content == nil {
-			continue
+	// Later sessions in the chain (descendants) contribute their full file
+	// snapshot counts to earlier points' "files that would be restored".
+	descendantFileTotals := make([]int, len(chain))
+	if b.checkpoints != nil {
+		for i := len(chain) - 1; i >= 0; i-- {
+			n := b.checkpoints.FileCountFrom(chain[i], 0)
+			if i+1 < len(chain) {
+				n += descendantFileTotals[i+1]
+			}
+			descendantFileTotals[i] = n
 		}
-		if ev.LLMResponse.Content.Role != "user" {
-			continue
-		}
-		text := firstUserText(ev.LLMResponse.Content.Parts)
-		if text == "" {
-			continue // skip tool-response / empty user events
-		}
-		turnNumber++
-		label := deriveSessionTitle(text)
-		ts := ""
-		if !ev.Timestamp.IsZero() {
-			ts = ev.Timestamp.Format("15:04:05")
-		}
-		fileCount := 0
-		if b.checkpoints != nil {
-			fileCount = b.checkpoints.FileCountFrom(sessionID, idx)
-		}
-		points = append(points, backend.RollbackPoint{
-			ID:         fmt.Sprintf("%d", idx),
-			Label:      label,
-			Timestamp:  ts,
-			FileCount:  fileCount,
-			TurnNumber: turnNumber,
+	}
+
+	for ci, sid := range chain {
+		resp, err := b.sessionSvc.Get(ctx, &session.GetRequest{
+			AppName:   codeAppName,
+			UserID:    b.effectiveUserID(),
+			SessionID: sid,
 		})
+		if err != nil || resp == nil || resp.Session == nil {
+			continue
+		}
+		idx := -1
+		for ev := range resp.Session.Events().All() {
+			idx++
+			if ev == nil || ev.LLMResponse.Content == nil {
+				continue
+			}
+			if ev.LLMResponse.Content.Role != "user" {
+				continue
+			}
+			text := firstUserText(ev.LLMResponse.Content.Parts)
+			if text == "" {
+				continue // skip tool-response / empty user events / summary shells
+			}
+			// Skip the synthetic compaction-summary seed at the start of a child
+			// (authored as user/model with the "[Context Summary" marker).
+			if strings.Contains(text, "[Context Summary") {
+				continue
+			}
+			turnNumber++
+			label := deriveSessionTitle(text)
+			ts := ""
+			if !ev.Timestamp.IsZero() {
+				ts = ev.Timestamp.Format("15:04:05")
+			}
+			fileCount := 0
+			if b.checkpoints != nil {
+				fileCount = b.checkpoints.FileCountFrom(sid, idx)
+				// Plus every snapshot from later sessions in the chain.
+				if ci+1 < len(chain) {
+					fileCount += descendantFileTotals[ci+1]
+				}
+			}
+			points = append(points, backend.RollbackPoint{
+				ID:         fmt.Sprintf("%s:%d", sid, idx),
+				Label:      label,
+				Timestamp:  ts,
+				FileCount:  fileCount,
+				TurnNumber: turnNumber,
+			})
+		}
 	}
 	return points, nil
 }
@@ -1194,43 +1537,113 @@ func firstUserText(parts []*genai.Part) string {
 }
 
 // RollbackTo reverts the conversation and file changes to the point identified
-// by pointID (the event index of a user message). It truncates the session to
-// the events before that message, restores every file snapshot captured at or
-// after that point, then returns the rebuilt history for the truncated session.
+// by pointID. Point IDs are "sessionID:eventIndex" (from ListRollbackPoints);
+// a bare integer is still accepted for same-session rollbacks.
+//
+// Option A (compaction chain): if the point lives in an ancestor session,
+// re-activate that ancestor (truncate it to the target), restore files for that
+// session and every later child, then delete the later child sessions. Parent
+// transcripts are never rewritten by compaction, so this works after reload.
 func (b *localAgentBackend) RollbackTo(ctx context.Context, pointID string) ([]backend.HistoryEntry, error) {
 	b.mu.Lock()
-	sessionID := b.sessionID
+	activeID := b.sessionID
 	b.mu.Unlock()
-	if sessionID == "" {
+	if activeID == "" {
 		return nil, fmt.Errorf("no active session")
 	}
-	targetIdx, err := strconv.Atoi(strings.TrimSpace(pointID))
-	if err != nil || targetIdx < 0 {
-		return nil, fmt.Errorf("invalid rollback point %q", pointID)
+
+	ownerID, targetIdx, err := parseRollbackPointID(pointID, activeID)
+	if err != nil {
+		return nil, err
 	}
 
-	// 1) Revert file changes made at or after the target message.
+	// Sessions that must be fully undone (file restore + delete): every
+	// descendant of ownerID in the current chain after ownerID itself.
+	toDrop := []string{}
+	if b.fileStore != nil {
+		chain := b.fileStore.AncestorChain(activeID)
+		// chain is root → tip; drop everything after ownerID.
+		found := false
+		for _, sid := range chain {
+			if found {
+				toDrop = append(toDrop, sid)
+			}
+			if sid == ownerID {
+				found = true
+			}
+		}
+		// If active is a descendant of owner, also walk LatestDescendant from
+		// owner and drop the tip side if AncestorChain from active missed any
+		// (defensive: linear chain is the normal case).
+		if !found && ownerID != activeID {
+			// owner is not on the active's ancestor chain — treat as invalid.
+			return nil, fmt.Errorf("rollback point session %q is not on the active chain", ownerID)
+		}
+	}
+
+	// 1) Revert file changes: full restore of every later child, then owner from targetIdx.
 	if b.checkpoints != nil {
-		if _, err := b.checkpoints.RestoreTo(sessionID, targetIdx); err != nil {
+		for _, sid := range toDrop {
+			if _, err := b.checkpoints.RestoreTo(sid, 0); err != nil {
+				return nil, fmt.Errorf("failed to restore files for compacted session %s: %w", sid, err)
+			}
+		}
+		if _, err := b.checkpoints.RestoreTo(ownerID, targetIdx); err != nil {
 			return nil, fmt.Errorf("failed to restore files: %w", err)
 		}
 	}
 
-	// 2) Truncate the conversation to the events before the target message.
+	// 2) Truncate the owning session to the events before the target message.
 	if b.fileStore != nil {
-		if _, err := b.fileStore.TruncateEvents(codeAppName, b.effectiveUserID(), sessionID, targetIdx); err != nil {
+		if _, err := b.fileStore.TruncateEvents(codeAppName, b.effectiveUserID(), ownerID, targetIdx); err != nil {
 			return nil, fmt.Errorf("failed to truncate session: %w", err)
+		}
+		// 3) Delete later children in the compaction chain (option A).
+		for _, sid := range toDrop {
+			_ = b.sessionSvc.Delete(ctx, &session.DeleteRequest{
+				AppName:   codeAppName,
+				UserID:    b.effectiveUserID(),
+				SessionID: sid,
+			})
+			if b.checkpoints != nil {
+				_ = b.checkpoints.DeleteSession(sid)
+			}
 		}
 	}
 
-	// 3) Reset accumulated usage — the token count no longer reflects the
-	// truncated context. It will be re-estimated on the next turn.
+	// 4) Re-activate the owning session and reset usage.
+	ctxTokens := b.estimateContextTokens(ctx, ownerID)
 	b.mu.Lock()
+	b.sessionID = ownerID
 	b.usage = nil
+	b.contextTokens = ctxTokens
 	b.mu.Unlock()
 
-	// 4) Return the rebuilt history for the now-shorter session.
-	return b.loadHistory(ctx, sessionID)
+	// 5) Return the rebuilt history for the re-activated session.
+	return b.loadHistory(ctx, ownerID)
+}
+
+// parseRollbackPointID parses "sessionID:eventIndex" or a bare event index
+// (legacy / same-session form). When bare, ownerID defaults to activeID.
+func parseRollbackPointID(pointID, activeID string) (ownerID string, targetIdx int, err error) {
+	pointID = strings.TrimSpace(pointID)
+	if pointID == "" {
+		return "", 0, fmt.Errorf("invalid rollback point %q", pointID)
+	}
+	if i := strings.LastIndex(pointID, ":"); i >= 0 {
+		ownerID = pointID[:i]
+		idxStr := pointID[i+1:]
+		targetIdx, err = strconv.Atoi(idxStr)
+		if err != nil || targetIdx < 0 || ownerID == "" {
+			return "", 0, fmt.Errorf("invalid rollback point %q", pointID)
+		}
+		return ownerID, targetIdx, nil
+	}
+	targetIdx, err = strconv.Atoi(pointID)
+	if err != nil || targetIdx < 0 {
+		return "", 0, fmt.Errorf("invalid rollback point %q", pointID)
+	}
+	return activeID, targetIdx, nil
 }
 
 // Verify localAgentBackend implements the optional rollback capability.
@@ -1306,19 +1719,23 @@ func (b *localAgentBackend) ListProviderInstances(ctx context.Context) ([]backen
 	_ = ctx
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.appConfig == nil {
-		return nil, nil
-	}
+	// Code mode manages ONLY the local config.yaml providers. Platform
+	// providers are intentionally never surfaced here: their credentials live
+	// on the platform and must never transit to the local surface. Platform
+	// runtime resolution stays entirely on the platform.
 	out := make([]backend.ProviderInstance, 0, len(b.appConfig.Providers))
-	for name, inst := range b.appConfig.Providers {
-		if name == "" || strings.HasPrefix(name, "__") {
-			continue
+	if b.appConfig != nil {
+		for name, inst := range b.appConfig.Providers {
+			if name == "" || strings.HasPrefix(name, "__") {
+				continue
+			}
+			out = append(out, backend.ProviderInstance{
+				Name: name,
+				Type: config.GetProviderType(name, inst),
+			})
 		}
-		out = append(out, backend.ProviderInstance{
-			Name: name,
-			Type: config.GetProviderType(name, inst),
-		})
 	}
+
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
 }

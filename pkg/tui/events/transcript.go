@@ -62,7 +62,7 @@ type Item struct {
 	// Artifacts holds one or more generated files shown as a compact file list.
 	Artifacts []Artifact
 
-	// FileDiff fields (ItemFileDiff) — dual-gutter editor view on the main thread.
+	// FileDiff fields (ItemFileDiff) — single-gutter editor view on the main thread.
 	// DiffVerification is preferred (tool verification_context). Args hold
 	// old_string/new_string/content for fallback while streaming or if context is empty.
 	DiffVerification string
@@ -265,15 +265,24 @@ func (t *Transcript) addUsage(usage *Usage) {
 		t.LastUsage.Total += usage.Total
 	}
 
-	// Context occupancy = this LLM call's input (prompt) + output tokens. In a
-	// multi-call tool loop the prompt grows each call, so the largest reading
-	// this turn reflects the current context-window fill. Tracking the max
-	// avoids brief zero-usage events resetting the displayed value.
+	// Context occupancy figure.
 	ctx := usage.Total
 	if ctx == 0 {
 		ctx = usage.Input + usage.Output
 	}
-	if ctx > t.ContextTokens {
+	if usage.Estimated {
+		// Estimated readings are authoritative snapshots of the *whole current
+		// context* (e.g. computed after compaction). They must be able to move
+		// the figure DOWN — otherwise a compaction that shrinks the context
+		// would never be reflected in the header. Take the latest non-zero
+		// estimate as-is.
+		if ctx > 0 {
+			t.ContextTokens = ctx
+		}
+	} else if ctx > t.ContextTokens {
+		// Provider per-call usage: the prompt grows across a multi-call tool
+		// loop, so the largest reading reflects current fill. Tracking the max
+		// avoids brief zero-usage events resetting the displayed value.
 		t.ContextTokens = ctx
 	}
 }
@@ -727,7 +736,7 @@ func (t *Transcript) appendToolResult(ev Event) {
 }
 
 // maybeAppendFileDiff promotes successful edit_file/write_file results to a
-// main-thread ItemFileDiff (dual-gutter editor view). Failed writes/edits never
+// main-thread ItemFileDiff (single-gutter editor view). Failed writes/edits never
 // produce a main-thread diff — only results that include verification_context
 // (set only after a successful apply) are shown.
 func (t *Transcript) maybeAppendFileDiff(toolName string, args map[string]any, result any, status string) {

@@ -12,13 +12,13 @@ import (
 
 func TestSelectionTextSingleAndMultiLine(t *testing.T) {
 	lines := []string{"hello world", "second line", "third"}
-	got := selectionText(lines, selectionPoint{line: 0, col: 6}, selectionPoint{line: 1, col: 6})
+	got := selectionText(lines, nil, selectionPoint{line: 0, col: 6}, selectionPoint{line: 1, col: 6})
 	want := "world\nsecond"
 	if got != want {
 		t.Fatalf("selectionText=%q want %q", got, want)
 	}
 
-	reverse := selectionText(lines, selectionPoint{line: 1, col: 6}, selectionPoint{line: 0, col: 6})
+	reverse := selectionText(lines, nil, selectionPoint{line: 1, col: 6}, selectionPoint{line: 0, col: 6})
 	if reverse != want {
 		t.Fatalf("reverse selectionText=%q want %q", reverse, want)
 	}
@@ -115,5 +115,118 @@ func TestHandleMouseDragCopiesSelection(t *testing.T) {
 	}
 	if !strings.Contains(m.copyStatus, "Copied") {
 		t.Fatalf("missing copy status: %q", m.copyStatus)
+	}
+}
+
+func TestSelectionTextClampsToContentSpan(t *testing.T) {
+	// A user-bubble-style line: margin + border + interior padding + content.
+	line := "  │  hello world  │"
+	span := userBubbleContentSpan(1, line)
+	lines := []string{line}
+	spans := [][2]int{span}
+	// Select the whole line width including the border columns.
+	got := selectionText(lines, spans, selectionPoint{line: 0, col: 0}, selectionPoint{line: 0, col: len([]rune(line))})
+	if got != "hello world" {
+		t.Fatalf("selectionText clamped=%q want %q", got, "hello world")
+	}
+	if strings.ContainsRune(got, '│') {
+		t.Fatalf("copied text still contains border glyph: %q", got)
+	}
+}
+
+func TestUserBubbleContentSpan(t *testing.T) {
+	tests := []struct {
+		name string
+		line string
+		want string // expected copied substring, "" for chrome rows
+	}{
+		{"top border", "  ┌────────────┐", ""},
+		{"bottom border", "  └────────────┘", ""},
+		{"body", "  │  the prompt text  │", "the prompt text"},
+		{"empty body", "  │             │", ""},
+		{"no borders", "just text", ""}, // no verticals -> treated as chrome
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			span := userBubbleContentSpan(0, tc.line)
+			runes := []rune(tc.line)
+			got := ""
+			if span[0] < span[1] {
+				got = string(runes[span[0]:span[1]])
+			}
+			if got != tc.want {
+				t.Fatalf("span content=%q want %q (span=%v line=%q)", got, tc.want, span, tc.line)
+			}
+		})
+	}
+}
+
+func TestUserBubbleDragCopyExcludesChrome(t *testing.T) {
+	old := writeClipboard
+	defer func() { writeClipboard = old }()
+	var copied string
+	writeClipboard = func(s string) error {
+		copied = s
+		return nil
+	}
+
+	tr := events.NewTranscript()
+	tr.Items = []events.Item{{Kind: events.ItemUser, Content: "the prompt text"}}
+	th := DefaultTheme()
+	th.NoColor = false
+	m := model{
+		theme:  th,
+		tr:     tr,
+		vp:     viewport.New(80, 10),
+		width:  80,
+		height: 24,
+		ready:  true,
+	}
+	m.refreshViewport()
+
+	// Locate the bubble body row (the one carrying the content).
+	bodyLine := -1
+	for i, line := range m.transcriptPlainLines {
+		if strings.Contains(line, "the prompt text") {
+			bodyLine = i
+			break
+		}
+	}
+	if bodyLine < 0 {
+		t.Fatalf("body line not found in %#v", m.transcriptPlainLines)
+	}
+	top := m.viewportTopY()
+	y := top + (bodyLine - m.vp.YOffset)
+	rowWidth := len([]rune(m.transcriptPlainLines[bodyLine]))
+
+	// Drag from the far-left border column across the whole row into the
+	// right border column — the selection spans the decorative chrome.
+	next, _ := m.handleMouse(tea.MouseMsg{X: 0, Y: y, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = next.(model)
+	next, _ = m.handleMouse(tea.MouseMsg{X: rowWidth, Y: y, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion})
+	m = next.(model)
+	next, _ = m.handleMouse(tea.MouseMsg{X: rowWidth, Y: y, Button: tea.MouseButtonLeft, Action: tea.MouseActionRelease})
+	m = next.(model)
+
+	if strings.TrimSpace(copied) != "the prompt text" {
+		t.Fatalf("copied=%q want %q", copied, "the prompt text")
+	}
+	if strings.ContainsRune(copied, '│') {
+		t.Fatalf("copied text includes border glyph: %q", copied)
+	}
+}
+
+func TestTranscriptContentSpansAlignWithPlainLines(t *testing.T) {
+	tr := events.NewTranscript()
+	tr.Items = []events.Item{
+		{Kind: events.ItemUser, Content: "hello"},
+		{Kind: events.ItemSystem, Content: "world"},
+	}
+	th := DefaultTheme()
+	th.NoColor = false
+	m := model{theme: th, tr: tr, width: 80, height: 24, ready: true}
+	m.renderTranscript()
+	if len(m.transcriptContentSpans) != len(m.transcriptPlainLines) {
+		t.Fatalf("spans=%d plainLines=%d", len(m.transcriptContentSpans), len(m.transcriptPlainLines))
 	}
 }

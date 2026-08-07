@@ -63,10 +63,33 @@ type SubTaskInfo struct {
 	PlanStep    string `json:"plan_step,omitempty"` // Which plan step this task belongs to
 }
 
+// PlanFileChange describes a single file a plan phase will touch, along with
+// the kind of change. It is persisted to PLAN.md and surfaced in the plan UI so
+// the user can see the concrete blast radius of each phase before approving.
+type PlanFileChange struct {
+	Path string `json:"path"`
+	// Kind is one of "new", "modify", "delete". An unrecognized or empty value
+	// is rendered as a plain modify entry.
+	Kind string `json:"kind,omitempty"`
+}
+
 // PlanStepInfo describes a step in the high-level execution plan.
 type PlanStepInfo struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
+	// Details is optional, richer per-phase content (concrete files, commands,
+	// approach). It is persisted to PLAN.md so the detailed plan survives
+	// context compaction, not just the one-line description.
+	Details string `json:"details,omitempty"`
+	// Files is the optional list of files this phase will create, modify, or
+	// delete. Making the blast radius explicit (dependency-first, no orphaned
+	// code) is what turns a sketch into a complete, approvable plan. Persisted
+	// to PLAN.md and rendered in the plan UI.
+	Files []PlanFileChange `json:"files,omitempty"`
+	// Verify is the optional command that proves this phase is done (build,
+	// test, or lint). It encodes the "every phase ends verified" discipline and
+	// is persisted to PLAN.md.
+	Verify string `json:"verify,omitempty"`
 }
 
 // SubAgentTask describes a single sub-agent task to execute.

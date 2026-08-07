@@ -182,6 +182,53 @@ func TestAddProvider_LiteLLM(t *testing.T) {
 	}
 }
 
+// TestListProviderInstances_LocalOnly verifies that ListProviderInstances
+// returns only config.yaml providers (hidden/empty keys filtered). Code mode
+// never surfaces platform providers.
+func TestListProviderInstances_LocalOnly(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	b := &localAgentBackend{appConfig: &config.AppConfig{
+		Providers: map[string]config.ProviderConfig{
+			"my-openai": {"type": "openai", "api_key": "sk-x"},
+			"__hidden":  {"type": "openai"},
+			"":          {"type": "openai"},
+		},
+	}}
+
+	got, err := b.ListProviderInstances(context.Background())
+	if err != nil {
+		t.Fatalf("ListProviderInstances failed: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 visible instance (hidden/empty filtered), got %d: %+v", len(got), got)
+	}
+	inst := got[0]
+	if inst.Name != "my-openai" {
+		t.Errorf("name = %q, want my-openai", inst.Name)
+	}
+	if inst.Type != "openai" {
+		t.Errorf("type = %q, want openai", inst.Type)
+	}
+}
+
+// TestRemoveProvider_NotConfigured confirms removing an unknown provider
+// returns the plain not-configured error.
+func TestRemoveProvider_NotConfigured(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	b := &localAgentBackend{appConfig: &config.AppConfig{
+		Providers: map[string]config.ProviderConfig{},
+	}}
+	err := b.RemoveProvider(context.Background(), "ghost")
+	if err == nil {
+		t.Fatal("expected error removing unknown provider")
+	}
+	if got := err.Error(); got != `provider "ghost" is not configured` {
+		t.Errorf("unexpected error: %q", got)
+	}
+}
+
 func findProviderType(t *testing.T, id string) backend.ProviderTypeInfo {
 	t.Helper()
 	for _, ti := range codeProviderTypes() {

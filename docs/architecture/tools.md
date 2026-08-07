@@ -122,6 +122,8 @@ The `search_tools` tool and the `ToolIndex` provide dynamic tool discovery:
 2. Matching tools are listed in the system prompt and dynamically injected into the LLM's available tools via `BeforeModelCallback`.
 3. The `search_tools` tool allows the LLM to explicitly search for tools mid-turn, expanding its toolset.
 
+MCP tools follow this discovery model in Studio/platform mode. **Astonish Code is the exception:** because a coding session is personal and configures only a few MCP servers, their tools are injected directly onto the main thread (no `search_tools` step) — gated by `ChatFactoryConfig.CodeMode`. See [mcp.md](mcp.md#tool-surfacing-first-class-in-code-discoverable-in-platform).
+
 ## Key Files
 
 | File | Purpose |

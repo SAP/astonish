@@ -17,6 +17,20 @@ import (
 	persistentsession "github.com/SAP/astonish/pkg/session"
 )
 
+// sessionSidecarSuffixes are the per-session sidecar file suffixes removed
+// alongside a session's transcript when it is deleted. The ".PLAN.md" sidecar
+// is written in code mode (see localAgentBackend.planFilePath); keep this list
+// in sync with any new per-session files created next to "<id>.jsonl".
+var sessionSidecarSuffixes = []string{".jsonl", ".PLAN.md"}
+
+// removeSessionFiles deletes a session's transcript and all per-session sidecar
+// files (e.g. the code-mode PLAN.md). Best-effort: missing files are ignored.
+func removeSessionFiles(sessDir, appName, userID, id string) {
+	for _, suffix := range sessionSidecarSuffixes {
+		os.Remove(fmt.Sprintf("%s/%s/%s/%s%s", sessDir, appName, userID, id, suffix))
+	}
+}
+
 func handleSessionsCommand(args []string) error {
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
 		printSessionsUsage()
@@ -310,16 +324,14 @@ func handleSessionsDelete(sessionID string) error {
 		return fmt.Errorf("session not found: %w", err)
 	}
 
-	// Cascade: remove child sub-session transcripts
+	// Cascade: remove child sub-session transcripts (and their sidecars).
 	children, _ := index.ListChildren(fullID)
 	for _, child := range children {
-		childPath := fmt.Sprintf("%s/%s/%s/%s.jsonl", sessDir, child.AppName, child.UserID, child.ID)
-		os.Remove(childPath)
+		removeSessionFiles(sessDir, child.AppName, child.UserID, child.ID)
 	}
 
-	// Remove transcript file
-	transcriptPath := fmt.Sprintf("%s/%s/%s/%s.jsonl", sessDir, meta.AppName, meta.UserID, meta.ID)
-	os.Remove(transcriptPath)
+	// Remove the parent's transcript and sidecar files.
+	removeSessionFiles(sessDir, meta.AppName, meta.UserID, meta.ID)
 
 	// Remove from index (cascades children automatically)
 	if err := index.Remove(fullID); err != nil {
@@ -381,8 +393,7 @@ func handleSessionsClear() error {
 	// Delete all transcript files
 	deleted := 0
 	for id, meta := range data.Sessions {
-		transcriptPath := fmt.Sprintf("%s/%s/%s/%s.jsonl", sessDir, meta.AppName, meta.UserID, meta.ID)
-		os.Remove(transcriptPath)
+		removeSessionFiles(sessDir, meta.AppName, meta.UserID, meta.ID)
 		// Best-effort: destroy sandbox container if one exists
 		sandbox.TryDestroySession(appCfg, id, nil)
 		deleted++

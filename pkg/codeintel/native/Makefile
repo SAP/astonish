@@ -13,7 +13,10 @@ OUT_PARENT := $(dir $(OUT))
 CC ?= cc
 CFLAGS ?= -O2 -fPIC
 
-.PHONY: all clean deps
+EMBED_DIR ?= $(CURDIR)/embed
+EMBED_TARBALL ?= $(EMBED_DIR)/treesitter-src.tar.gz
+
+.PHONY: all clean deps embed
 
 all: $(OUT)
 
@@ -49,3 +52,20 @@ deps:
 
 clean:
 	rm -rf $(BUILD_DIR) $(OUT_DIR)
+
+# Regenerate the embedded C source tarball that local code mode compiles at
+# runtime (see builder.go). Includes only the sources the compile manifest in
+# embed/embed.go needs — note tree-sitter-typescript/common is required by the
+# TS/TSX scanners. Run after bumping any grammar version above, then bump
+# embed.Version to match.
+embed: deps
+	@mkdir -p $(EMBED_DIR)
+	tar czf $(EMBED_TARBALL) -C $(BUILD_DIR) \
+		tree-sitter/lib/include tree-sitter/lib/src \
+		tree-sitter-go/src \
+		tree-sitter-typescript/common \
+		tree-sitter-typescript/typescript/src \
+		tree-sitter-typescript/tsx/src \
+		tree-sitter-javascript/src \
+		tree-sitter-python/src
+	@echo "Wrote $(EMBED_TARBALL) ($$(du -h $(EMBED_TARBALL) | cut -f1))"

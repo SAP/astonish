@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -61,5 +62,57 @@ func TestParseSlashInput(t *testing.T) {
 	ok, _ = parseSlashInput("/help\nmore")
 	if ok {
 		t.Fatal("multiline not slash complete")
+	}
+}
+
+// TestHelpText_DocumentsEscCancel guards the reported regression: /help must
+// tell the user that Esc cancels the current turn (Claude Code / OpenCode
+// style), not only ctrl+c. See cancelInFlightTurn.
+func TestHelpText_DocumentsEscCancel(t *testing.T) {
+	h := helpText(false, false, false, false)
+	if !strings.Contains(h, "esc") {
+		t.Fatalf("help text missing esc key:\n%s", h)
+	}
+	// The Keys section must document esc as a turn-cancellation key, not only
+	// the completion-popup "Close completion" usage.
+	if !strings.Contains(h, "esc            Cancel the current turn") {
+		t.Fatalf("help text does not document esc as turn cancel:\n%s", h)
+	}
+}
+
+// TestHelpText_ListsAllBuiltInCommands keeps /help in sync with the command
+// palette so no supported command is silently missing from help.
+func TestHelpText_ListsAllBuiltInCommands(t *testing.T) {
+	h := helpText(false, false, false, false)
+	for _, cmd := range builtInSlashCommands {
+		if !strings.Contains(h, "/"+cmd.Name) {
+			t.Errorf("help text missing command /%s:\n%s", cmd.Name, h)
+		}
+	}
+}
+
+// TestHelpText_CapabilityGatedCommands ensures /provider, /websearch, and /rollback appear
+// only when their backend capability is available.
+func TestHelpText_CapabilityGatedCommands(t *testing.T) {
+	off := helpText(false, false, false, false)
+	if strings.Contains(off, "/provider") || strings.Contains(off, "/rollback") || strings.Contains(off, "/websearch") {
+		t.Fatalf("gated commands should be hidden when unavailable:\n%s", off)
+	}
+	on := helpText(true, true, true, true)
+	if !strings.Contains(on, "/provider") {
+		t.Errorf("help text missing /provider when provider admin available:\n%s", on)
+	}
+	if !strings.Contains(on, "/websearch") {
+		t.Errorf("help text missing /websearch when web search admin available:\n%s", on)
+	}
+	if !strings.Contains(on, "/rollback") {
+		t.Errorf("help text missing /rollback when rollback available:\n%s", on)
+	}
+	// /compact is gated on the compaction capability (3rd arg).
+	if strings.Contains(off, "/compact") {
+		t.Fatalf("/compact should be hidden when compaction unavailable:\n%s", off)
+	}
+	if !strings.Contains(on, "/compact") {
+		t.Errorf("help text missing /compact when compaction available:\n%s", on)
 	}
 }

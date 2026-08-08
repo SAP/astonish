@@ -115,8 +115,9 @@ describe('ToolActivityBlock', () => {
     )
     expect(screen.getByRole('button', { name: /Edited 1 file/ })).toBeInTheDocument()
     const diff = screen.getByTestId('activity-diff')
-    expect(diff).toHaveTextContent('+4')
-    expect(diff).toHaveTextContent('-2')
+    // Only the two appended lines changed; a/b are unchanged (line-level diff).
+    expect(diff).toHaveTextContent('+2')
+    expect(diff).not.toHaveTextContent('-2')
   })
 
   it('keeps badge beside the summary and hides the chevron until hover', () => {

@@ -89,6 +89,89 @@ func asyncDiscoverAndCacheTools(runtimeCtx context.Context, mcpStore store.MCPSe
 	}()
 }
 
+// asyncDiscoverAndCacheFileTools discovers a config-file (mcp_config.json)
+// server's tools and writes them to the shared file-based tools cache. Unlike
+// asyncDiscoverAndCacheTools, it has no DB store to update — file-declared
+// servers are the platform base layer and their tools live in the on-disk cache
+// (the same cache personal mode and standard servers use).
+func asyncDiscoverAndCacheFileTools(runtimeCtx context.Context, serverName string, serverCfg config.MCPServerConfig, sessRegistry *sandbox.SessionRegistry) {
+	if _, loaded := discoveryInFlight.LoadOrStore(serverName, struct{}{}); loaded {
+		slog.Info("MCP discovery already in progress, skipping duplicate", "server", serverName)
+		return
+	}
+	go func() {
+		defer discoveryInFlight.Delete(serverName)
+
+		if runtimeCtx == nil {
+			runtimeCtx = context.Background()
+		}
+		ctx, cancel := context.WithTimeout(runtimeCtx, mcpDiscoveryTimeout)
+		defer cancel()
+
+		servers := map[string]config.MCPServerConfig{serverName: serverCfg}
+		discoveredTools := discoverMCPToolsForPlatform(ctx, serverName, servers, sessRegistry)
+		if discoveredTools == nil {
+			slog.Warn("async file MCP discovery: no tools discovered", mcp.ServerConfigLogAttrs(serverName, serverCfg)...)
+			return
+		}
+
+		var raw []struct {
+			Name        string          `json:"name"`
+			Description string          `json:"description"`
+			InputSchema json.RawMessage `json:"inputSchema,omitempty"`
+		}
+		if err := json.Unmarshal(discoveredTools, &raw); err != nil {
+			slog.Warn("async file MCP discovery: failed to parse discovered tools", "server", serverName, "error", err)
+			return
+		}
+		entries := make([]cache.ToolEntry, 0, len(raw))
+		for _, t := range raw {
+			entries = append(entries, cache.ToolEntry{
+				Name:        t.Name,
+				Description: t.Description,
+				Source:      serverName,
+				InputSchema: t.InputSchema,
+			})
+		}
+
+		checksum := cache.ComputeServerChecksum(serverCfg.Command, serverCfg.Args, serverCfg.Env)
+		cache.AddServerTools(serverName, entries, checksum)
+		if err := cache.SaveCache(); err != nil {
+			slog.Warn("async file MCP discovery: failed to save tools cache", "server", serverName, "error", err)
+			return
+		}
+		slog.Info("async file MCP discovery: tools cached", "server", serverName, "count", len(entries))
+
+		// Reset the chat agent so the next session picks up the newly-discovered tools.
+		GetChatManager().Reset()
+	}()
+}
+
+// DiscoverUncachedFileMCPServers kicks off background tool discovery for every
+// config-file (mcp_config.json) MCP server that does not yet have cached tools
+// in the shared file cache. It is intended to be called once at daemon startup
+// so config-file MCP servers "just work" in a local platform install without a
+// manual Settings → MCP → Refresh step.
+//
+// Discovery runs on the host or in a disposable sandbox depending on transport
+// and sandbox config (via discoverMCPToolsForPlatform) and results are written
+// to the on-disk tools cache — the same base layer loadMCPConfig reads. Standard
+// servers are skipped (they are handled by their own install/discovery path).
+func DiscoverUncachedFileMCPServers(runtimeCtx context.Context, sessRegistry *sandbox.SessionRegistry) {
+	if sessRegistry == nil {
+		sessRegistry = buildPGSessionRegistry(runtimeCtx)
+	}
+	for name, serverCfg := range config.FileMCPServers() {
+		if !serverCfg.IsEnabled() {
+			continue
+		}
+		if len(cache.GetToolsForServer(name)) > 0 {
+			continue // already discovered
+		}
+		asyncDiscoverAndCacheFileTools(runtimeCtx, name, serverCfg, sessRegistry)
+	}
+}
+
 // GetServerStatus returns the status of all MCP servers
 func GetServerStatus() []cache.ServerStatus {
 	statusesMap := cache.GetServerStatuses()
@@ -184,6 +267,12 @@ func RefreshMCPServerHandler(w http.ResponseWriter, r *http.Request) {
 	if mcpStore := effectiveMCPStore(r); mcpStore != nil {
 		server, err := mcpStore.Get(r.Context(), serverName)
 		if err != nil || server == nil {
+			// Not in the DB store — it may be a config-file (mcp_config.json)
+			// server, which is the platform base layer. Discover its tools and
+			// cache them in the shared file-based cache so the agent can use it.
+			if refreshFileMCPServer(w, r, serverName) {
+				return
+			}
 			respondError(w, http.StatusNotFound, "Server not found")
 			return
 		}
@@ -206,11 +295,36 @@ func RefreshMCPServerHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// No MCP store available — platform mode requires the DB store
+	// No MCP store available — platform mode requires the DB store, but a
+	// config-file server may still be discoverable into the file cache.
+	if refreshFileMCPServer(w, r, serverName) {
+		return
+	}
 	respondJSON(w, http.StatusServiceUnavailable, map[string]interface{}{
 		"success": false,
 		"error":   "MCP server store not available",
 	})
+}
+
+// refreshFileMCPServer discovers tools for a config-file (mcp_config.json)
+// server and caches them in the shared file-based tools cache. It returns true
+// if the named server exists in the config file (and discovery was kicked off),
+// false if there is no such file-declared server (so the caller can 404).
+//
+// This is the platform-mode discovery path for the MCP base layer: file-declared
+// servers have no DB row, so their tools are cached to disk (like standard
+// servers) rather than to a per-tenant cached_tools column.
+func refreshFileMCPServer(w http.ResponseWriter, r *http.Request, serverName string) bool {
+	fileServers := config.FileMCPServers()
+	serverCfg, ok := fileServers[serverName]
+	if !ok {
+		return false
+	}
+
+	runtimeCtx := detachedRuntimeNetworkPolicyContext(r, effectiveAppConfig(r))
+	asyncDiscoverAndCacheFileTools(runtimeCtx, serverName, serverCfg, buildPGSessionRegistry(r.Context()))
+	respondJSON(w, http.StatusOK, map[string]interface{}{"success": true})
+	return true
 }
 
 // checkStdioMCPInstallable verifies that a stdio-transport MCP server can be
@@ -487,8 +601,41 @@ func GetCachedToolsForRequest(r *http.Request) []ToolInfo {
 		Description string `json:"description"`
 	}
 
-	// Collect servers: platform → org → team
+	// Collect servers: config-file base → platform → org → team
 	serverMap := make(map[string]json.RawMessage) // name -> cachedTools
+
+	// Tier 0: config-file (mcp_config.json) servers. These are the platform
+	// base layer, mirroring loadMCPConfigForRequest / loadMCPConfig /
+	// GetMCPServersHandler. File-declared servers have no per-tenant
+	// cached_tools DB column — their tool declarations live in the shared
+	// on-disk tools cache — so we read them via cache.GetToolsForServer and
+	// serialize to the same JSON shape the DB tiers use. DB tiers below
+	// override by name (documented cascade: file → platform → org → team).
+	for name, srv := range config.FileMCPServers() {
+		if !srv.IsEnabled() {
+			continue
+		}
+		entries := cache.GetToolsForServer(name)
+		if len(entries) == 0 {
+			continue
+		}
+		if excluded := config.GetExcludedTools(name); excluded != nil {
+			filtered := make([]cache.ToolEntry, 0, len(entries))
+			for _, e := range entries {
+				if !excluded[e.Name] {
+					filtered = append(filtered, e)
+				}
+			}
+			entries = filtered
+		}
+		if len(entries) == 0 {
+			continue
+		}
+		if data, err := json.Marshal(entries); err == nil {
+			serverMap[name] = data
+		}
+	}
+
 	if svc.PlatformMCPServers != nil {
 		platformServers, err := svc.PlatformMCPServers.List(r.Context())
 		if err == nil {

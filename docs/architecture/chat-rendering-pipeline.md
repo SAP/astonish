@@ -518,7 +518,7 @@ These rules were established through bugs and fixes. Violating them will break t
 | `web/src/components/StudioChat.tsx` | Main component -- SSE handlers, state, render loop |
 | `web/src/components/chat/chatTypes.ts` | Message type interfaces and ChatMsg union type |
 | `web/src/api/studioChat.ts` | `connectChat()`, `connectChatStream()`, artifact APIs |
-| `web/src/components/chat/EmbeddedFileViewer.tsx` | File viewer with markdown rendering, download/export (harness fillHeight) |
+| `web/src/components/chat/EmbeddedFileViewer.tsx` | File viewer with markdown rendering, copy-content / download / export dropdown (harness fillHeight) |
 | `web/src/components/chat/HarnessPanel.tsx` | ~1080px preferred right panel (resizable) hosting Apps / Reports / Videos / Flow draft / Tutorial / Browser |
 | `web/src/components/chat/HarnessPlaceholder.tsx` | Compact clickable stream card that focuses the harness panel |
 | `web/src/components/chat/chatHarness.ts` | Latest-harness derivation and focus override helpers |

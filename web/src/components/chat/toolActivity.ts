@@ -733,13 +733,67 @@ export function activityStats(steps: ToolActivityStep[]): ActivityStats {
     if (!s.args || typeof s.args !== 'object') continue
     const args = s.args as Record<string, unknown>
     if (typeof args.content === 'string') added += countLines(args.content)
-    if (typeof args.new_string === 'string') added += countLines(args.new_string)
-    if (typeof args.old_string === 'string') removed += countLines(args.old_string)
+    // edit_file: count only the lines that actually changed (line-level diff),
+    // so the +N/−M badge matches the git-style diff shown in the transcript
+    // instead of counting every unchanged line in the old/new blocks.
+    const hasOld = typeof args.old_string === 'string'
+    const hasNew = typeof args.new_string === 'string'
+    if (hasOld && hasNew && ((args.old_string as string) !== '' || (args.new_string as string) !== '')) {
+      const d = diffLineStats(args.old_string as string, args.new_string as string)
+      added += d.added
+      removed += d.removed
+      continue
+    }
+    if (hasNew) added += countLines(args.new_string as string)
+    if (hasOld) removed += countLines(args.old_string as string)
   }
   if (added > 0 || removed > 0) {
     return { kind: 'diff', added, removed }
   }
   return { kind: 'badge', count: Math.max(steps.length, 1) }
+}
+
+/**
+ * Line-level LCS diff of old→new, returning only the counts of lines that
+ * actually changed (removed/added), so unchanged lines within a replacement
+ * are not counted as churn.
+ */
+function diffLineStats(oldStr: string, newStr: string): { added: number; removed: number } {
+  const split = (s: string): string[] => {
+    if (s === '') return []
+    return s.replace(/\n$/, '').split('\n')
+  }
+  const a = split(oldStr)
+  const b = split(newStr)
+  const m = a.length
+  const n = b.length
+  // LCS length table.
+  const lcs: number[][] = Array.from({ length: m + 1 }, () => new Array<number>(n + 1).fill(0))
+  for (let i = m - 1; i >= 0; i--) {
+    for (let j = n - 1; j >= 0; j--) {
+      if (a[i] === b[j]) lcs[i][j] = lcs[i + 1][j + 1] + 1
+      else lcs[i][j] = Math.max(lcs[i + 1][j], lcs[i][j + 1])
+    }
+  }
+  let added = 0
+  let removed = 0
+  let i = 0
+  let j = 0
+  while (i < m && j < n) {
+    if (a[i] === b[j]) {
+      i++
+      j++
+    } else if (lcs[i + 1][j] >= lcs[i][j + 1]) {
+      removed++
+      i++
+    } else {
+      added++
+      j++
+    }
+  }
+  removed += m - i
+  added += n - j
+  return { added, removed }
 }
 
 /** Compact header copy for a tool activity block. */

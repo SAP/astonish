@@ -22,6 +22,7 @@ func maximalBuilder() *SystemPromptBuilder {
 		WorkspaceDir:          "/home/user/project",
 		CustomPrompt:          "You are a helpful assistant.",
 		InstructionsContent:   "Always be concise.",
+		ProjectContext:        "Use tabs.",
 		BrowserAvailable:      true,
 		MemorySearchAvailable: true,
 		WebSearchAvailable:    true,
@@ -29,6 +30,7 @@ func maximalBuilder() *SystemPromptBuilder {
 		WebSearchToolName:     "tavily-search",
 		WebExtractToolName:    "tavily-extract",
 		Timezone:              "America/New_York",
+		PlanFilePersistence:   true,
 		SkillIndex:            "## Available Skills\n\n- **docker** — Docker container management\n- **git** — Git workflow helpers\n",
 		FleetSection:          "\n## Available Fleets\n\n- **infra-fleet** — Infrastructure management fleet\n",
 		ChannelHints:          "Format as plain text. No markdown.",
@@ -316,6 +318,7 @@ func TestSystemPromptContracts_Environment(t *testing.T) {
 	assertContains(t, prompt, "Working directory: /home/user/project", "workspace dir in environment")
 	assertContains(t, prompt, "Timezone: America/New_York", "timezone in environment")
 	assertContains(t, prompt, "OS:", "OS info in environment")
+	assertContains(t, prompt, "PLAN.md", "plan-file persistence guidance in environment")
 }
 
 func TestSystemPromptContracts_Capabilities(t *testing.T) {
@@ -461,6 +464,23 @@ func TestSystemPromptContracts_Conditional_SearchToolsOnly(t *testing.T) {
 	assertContains(t, prompt, `search_tools(query="*")`, "list-all guidance when search_tools present")
 }
 
+func TestSystemPromptContracts_Conditional_CodeNavigationRule(t *testing.T) {
+	// With tree-sitter code-intel tools present, the MUST rule steering the
+	// model to code_definition/code_references over grep_search must render.
+	builder := minimalBuilder()
+	builder.Tools = mockTools("read_file", "grep_search", "repo_map", "code_definition", "code_references")
+	prompt := builder.Build()
+	assertContains(t, prompt, "Code navigation rule (MUST)", "code-nav rule header when code-intel tools present")
+	assertContains(t, prompt, "code_definition", "code_definition referenced in the rule")
+	assertContains(t, prompt, "code_references", "code_references referenced in the rule")
+
+	// Without code-intel tools (e.g. a channel/non-code agent), the rule must
+	// NOT appear — grep_search stays domain-agnostic and the prompt stays lean.
+	plain := minimalBuilder()
+	plain.Tools = mockTools("read_file", "grep_search")
+	assertNotContains(t, plain.Build(), "Code navigation rule (MUST)", "no code-nav rule when tree-sitter tools absent")
+}
+
 func TestSystemPromptContracts_Conditional_WebTools(t *testing.T) {
 	builder := minimalBuilder()
 	builder.WebSearchAvailable = true
@@ -503,11 +523,11 @@ func TestSystemPromptContracts_Conditional_BrowserAvailable(t *testing.T) {
 
 func TestSystemPromptBuilder_MinimalSize(t *testing.T) {
 	prompt := minimalBuilder().Build()
-	// Minimal prompt includes always-present sections: Tool Use, Knowledge Context,
-	// Environment, Capabilities, and Visual Apps (Generative UI). Current: ~4416 bytes.
-	// Budget ceiling ~15% above current size.
-	if len(prompt) > 5100 {
-		t.Errorf("minimal prompt too large: %d bytes (limit 5100)", len(prompt))
+	// Minimal prompt includes always-present sections: Tool Use (incl.
+	// structural-navigation guidance), Knowledge Context, Environment,
+	// Capabilities, and Visual Apps (Generative UI). Budget ~15% above current.
+	if len(prompt) > 5700 {
+		t.Errorf("minimal prompt too large: %d bytes (limit 5700)", len(prompt))
 	}
 	if len(prompt) < 2000 {
 		t.Errorf("minimal prompt suspiciously small: %d bytes (expected > 2000)", len(prompt))
@@ -518,12 +538,17 @@ func TestSystemPromptBuilder_MinimalSize(t *testing.T) {
 func TestSystemPromptBuilder_MaximalSize(t *testing.T) {
 	prompt := maximalBuilder().Build()
 	// Maximal prompt with all features enabled — budget ceiling reflects
-	// post-Reports-section size. The Reports two-step contract is static
-	// (always present, ~600 bytes) because the LLM cannot retrieve
-	// guidance it doesn't know exists. See system_prompt_builder.go
-	// "## Reports" section.
-	if len(prompt) > 11000 {
-		t.Errorf("maximal prompt too large: %d bytes (limit 11000)", len(prompt))
+	// post-Reports-section size, the Project Guidance section (AGENTS.md), the
+	// code-navigation MUST rule (only rendered when tree-sitter code-intel tools
+	// are present), and the PLAN.md persistence guidance (code mode). The Reports
+	// two-step contract is static (~600 bytes) because the LLM cannot retrieve
+	// guidance it doesn't know exists. The ceiling was raised from 12800→13000 to
+	// admit the dependency-tracing planning-strategy line (trace callers/tests/docs
+	// before decomposing — no partial implementations) added to the always-on
+	// delegation block. See system_prompt_builder.go "## Reports" / "## Project
+	// Guidance" / "## Tool Use" / "## Environment".
+	if len(prompt) > 13000 {
+		t.Errorf("maximal prompt too large: %d bytes (limit 13000)", len(prompt))
 	}
 	if len(prompt) < 5000 {
 		t.Errorf("maximal prompt suspiciously small: %d bytes (expected > 5000)", len(prompt))

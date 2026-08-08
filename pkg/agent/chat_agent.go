@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 
@@ -143,11 +144,68 @@ type ChatAgent struct {
 	activePlan   *PlanState
 	activePlanMu sync.Mutex
 
+	// planFilePath, when set, is the per-session PLAN.md path. When a plan is
+	// active, it is written on announce and rewritten on every phase transition
+	// so the plan survives context compaction. Code-mode only (native FS).
+	planFilePath string
+	planFileMu   sync.Mutex
+
 	// Active app refinement: per-session state for iterative generative UI refinement.
 	// When set, the chat handler injects the current app source into SessionContext
 	// so the LLM can apply incremental changes.
 	activeApps  map[string]*ActiveApp // keyed by session ID
 	activeAppMu sync.Mutex
+
+	// Code-mode authorization (astonish code). When EnforceAuthorization is
+	// true, tools that are not in the read-only whitelist (agent.SafeTools)
+	// require explicit user authorization to run, and filesystem paths outside
+	// WorkingDir require folder-access authorization. Both are enforced by
+	// BeforeToolCallbacks in Run. Studio/platform mode leaves this false — those
+	// surfaces are already sandboxed / tenant-scoped.
+	EnforceAuthorization bool
+	// WorkingDir is the project root used for folder-access scoping (code mode).
+	WorkingDir string
+	// authPolicies holds one SessionAuthPolicy per session, keyed by session ID.
+	authPolicies sync.Map // map[string]*SessionAuthPolicy
+}
+
+// SetEnforceAuthorization toggles the code-mode tool/folder authorization gates.
+func (c *ChatAgent) SetEnforceAuthorization(enforce bool) {
+	if c == nil {
+		return
+	}
+	c.EnforceAuthorization = enforce
+}
+
+// SetWorkingDir sets the project root used for folder-access scoping.
+func (c *ChatAgent) SetWorkingDir(dir string) {
+	if c == nil {
+		return
+	}
+	c.WorkingDir = dir
+}
+
+// GetOrCreateAuthPolicy returns the per-session authorization policy, creating
+// it (scoped to WorkingDir) on first use.
+func (c *ChatAgent) GetOrCreateAuthPolicy(sessionID string) *SessionAuthPolicy {
+	if c == nil {
+		return nil
+	}
+	if existing, ok := c.authPolicies.Load(sessionID); ok {
+		return existing.(*SessionAuthPolicy)
+	}
+	// Whitelist Astonish's own state directory (session transcripts, PLAN.md,
+	// per-session workspaces, config) so routine writes there never prompt for
+	// folder access — that directory lives outside the project root but is
+	// owned by Astonish, not the user. Best-effort: if the config dir can't be
+	// resolved the policy simply omits it (no extra allowance).
+	var extraRoots []string
+	if cfgDir, err := config.GetConfigDir(); err == nil && cfgDir != "" {
+		extraRoots = append(extraRoots, cfgDir)
+	}
+	created := NewSessionAuthPolicy(c.WorkingDir, extraRoots...)
+	actual, _ := c.authPolicies.LoadOrStore(sessionID, created)
+	return actual.(*SessionAuthPolicy)
 }
 
 // ImageFromTool holds image data extracted from a tool result before the
@@ -705,10 +763,56 @@ func (c *ChatAgent) DrainFlowOutput() string {
 
 // SetActivePlan stores the plan state for auto-progression.
 // Thread-safe: called from the announce_plan tool's planStateCallback.
+//
+// When a per-session plan file path is configured (SetPlanFilePath), the plan
+// is written to PLAN.md immediately and rewritten on every phase transition so
+// it survives context compaction.
 func (c *ChatAgent) SetActivePlan(plan *PlanState) {
 	c.activePlanMu.Lock()
 	c.activePlan = plan
 	c.activePlanMu.Unlock()
+
+	if plan == nil {
+		return
+	}
+
+	c.planFileMu.Lock()
+	path := c.planFilePath
+	c.planFileMu.Unlock()
+	if path == "" {
+		return
+	}
+
+	// Persist on every phase transition, and once immediately so the file
+	// exists the moment the plan is announced.
+	plan.SetOnChange(func() {
+		goal, steps := plan.snapshotLocked()
+		c.writePlanFile(RenderPlanMarkdown(goal, steps))
+	})
+	goal, steps := plan.Snapshot()
+	c.writePlanFile(RenderPlanMarkdown(goal, steps))
+}
+
+// SetPlanFilePath configures the per-session PLAN.md path. Empty disables
+// plan-file persistence (e.g. in tests or chat-only backends).
+func (c *ChatAgent) SetPlanFilePath(path string) {
+	c.planFileMu.Lock()
+	c.planFilePath = path
+	c.planFileMu.Unlock()
+}
+
+// writePlanFile writes the rendered plan document to the configured PLAN.md
+// path. Best-effort: write failures are logged, not surfaced to the model.
+func (c *ChatAgent) writePlanFile(content string) {
+	c.planFileMu.Lock()
+	path := c.planFilePath
+	c.planFileMu.Unlock()
+	if path == "" {
+		return
+	}
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		slog.Debug("failed to write PLAN.md", "component", "chat_agent", "path", path, "error", err)
+	}
 }
 
 // GetActivePlan returns the current plan state, or nil if no plan is active.

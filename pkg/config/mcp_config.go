@@ -78,6 +78,38 @@ func LoadMCPConfigRaw() (*MCPConfig, error) {
 	return &config, nil
 }
 
+// FileMCPServers returns the MCP servers declared in the local mcp_config.json
+// file, WITHOUT the standard web/model servers that MergeStandardServers* injects.
+//
+// This is the platform-mode "base layer" for MCP servers, mirroring how
+// config.LoadAppConfig() provides the base layer for providers: servers declared
+// in the config file are available to Astonish Code (personal mode) AND become
+// the cascade root in platform mode, where platform/org/team DB entries override
+// them by name (see loadMCPConfigForRequest / loadMCPConfig).
+//
+// Standard servers are intentionally excluded here because platform-mode callers
+// layer them separately via MergeStandardServersWithConfig using the effective
+// (DB-resolved) AppConfig. Returns an empty map (never nil) on read errors so
+// callers can seed a merge map unconditionally.
+func FileMCPServers() map[string]MCPServerConfig {
+	cfg, err := LoadMCPConfigRaw()
+	if err != nil || cfg == nil || cfg.MCPServers == nil {
+		return map[string]MCPServerConfig{}
+	}
+	// Copy so callers can freely mutate their merge map without touching the
+	// loaded config. Drop any standard-server IDs — those are layered on top
+	// by MergeStandardServersWithConfig, not treated as generic file servers.
+	standardIDs := GetStandardServerIDs()
+	out := make(map[string]MCPServerConfig, len(cfg.MCPServers))
+	for name, srv := range cfg.MCPServers {
+		if standardIDs[name] {
+			continue
+		}
+		out[name] = srv
+	}
+	return out
+}
+
 // mergeStandardServers injects configured standard servers into the MCPConfig.
 // It delegates to mergeStandardServersWithConfig using the file-based AppConfig.
 func mergeStandardServers(cfg *MCPConfig) {

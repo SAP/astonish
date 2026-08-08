@@ -99,7 +99,9 @@ The `shell_command` tool is one of the most complex:
 - Uses PTY (pseudo-terminal) via `creack/pty` for realistic shell behavior.
 - Output is captured in a 64KB `RingBuffer` with ANSI escape code stripping.
 - **Idle detection**: If the command produces no output for 3 seconds and hasn't exited, it's considered idle.
-- **Prompt detection**: Heuristics detect shell prompts to determine when interactive commands are waiting for input.
+- **Prompt detection**: Heuristics detect shell prompts to determine when interactive commands are waiting for input (`waiting_for_input=true` + `session_id`; the agent responds with `process_write`).
+- **Auto-pager disabled**: because a PTY looks like a terminal, git/less/most CLIs would launch a pager and block waiting for keypresses. The child env sets `PAGER=cat`, `GIT_PAGER=cat`, `GIT_TERMINAL_PROMPT=0` (plus `EDITOR/VISUAL=true`) to suppress that without disabling genuine interactivity.
+- **Cancellable**: the wait loop (`waitForShellSession`) selects on `ctx.Done()`, so a cancelled turn (Esc in the TUI) kills the child and returns promptly rather than waiting for the timeout.
 - **Timeout**: Configurable per-command timeout (default varies by context).
 
 ### HTTP Request Credential Injection
@@ -119,6 +121,8 @@ The `search_tools` tool and the `ToolIndex` provide dynamic tool discovery:
 1. User's message triggers a hybrid search (vector + BM25) on tool names and descriptions.
 2. Matching tools are listed in the system prompt and dynamically injected into the LLM's available tools via `BeforeModelCallback`.
 3. The `search_tools` tool allows the LLM to explicitly search for tools mid-turn, expanding its toolset.
+
+MCP tools follow this discovery model in Studio/platform mode. **Astonish Code is the exception:** because a coding session is personal and configures only a few MCP servers, their tools are injected directly onto the main thread (no `search_tools` step) — gated by `ChatFactoryConfig.CodeMode`. See [mcp.md](mcp.md#tool-surfacing-first-class-in-code-discoverable-in-platform).
 
 ## Key Files
 

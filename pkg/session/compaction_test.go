@@ -3,6 +3,8 @@ package session
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -592,5 +594,134 @@ func TestSummarize_CollapsesRepetitiveToolCalls(t *testing.T) {
 	// The prompt should ask about CURRENT TASK
 	if !strings.Contains(capturedPrompt, "CURRENT TASK") {
 		t.Error("summarizer prompt should ask about CURRENT TASK")
+	}
+}
+
+func TestCompactContents_PlanFilePointer(t *testing.T) {
+	contents := []*genai.Content{
+		makeContent("user", "old message 1"),
+		makeContent("model", "old response 1"),
+		makeContent("user", "recent message"),
+	}
+
+	t.Run("pointer added when plan file exists", func(t *testing.T) {
+		dir := t.TempDir()
+		planPath := filepath.Join(dir, "sess.PLAN.md")
+		if err := os.WriteFile(planPath, []byte("# Execution Plan\n"), 0644); err != nil {
+			t.Fatalf("write plan file: %v", err)
+		}
+		c := NewCompactor(100)
+		c.PreserveRecent = 1
+		c.SetPlanFilePath(planPath)
+
+		result, err := c.CompactContents(context.Background(), contents)
+		if err != nil {
+			t.Fatalf("CompactContents error: %v", err)
+		}
+		summary := result[0].Parts[0].Text
+		if !strings.Contains(summary, "ACTIVE EXECUTION PLAN") {
+			t.Errorf("expected plan pointer in summary, got:\n%s", summary)
+		}
+		if !strings.Contains(summary, planPath) {
+			t.Errorf("expected plan path in summary, got:\n%s", summary)
+		}
+	})
+
+	t.Run("no pointer when plan file missing", func(t *testing.T) {
+		c := NewCompactor(100)
+		c.PreserveRecent = 1
+		c.SetPlanFilePath(filepath.Join(t.TempDir(), "does-not-exist.PLAN.md"))
+
+		result, err := c.CompactContents(context.Background(), contents)
+		if err != nil {
+			t.Fatalf("CompactContents error: %v", err)
+		}
+		if strings.Contains(result[0].Parts[0].Text, "ACTIVE EXECUTION PLAN") {
+			t.Error("did not expect plan pointer when file is absent")
+		}
+	})
+
+	t.Run("no pointer when path unset", func(t *testing.T) {
+		c := NewCompactor(100)
+		c.PreserveRecent = 1
+
+		result, err := c.CompactContents(context.Background(), contents)
+		if err != nil {
+			t.Fatalf("CompactContents error: %v", err)
+		}
+		if strings.Contains(result[0].Parts[0].Text, "ACTIVE EXECUTION PLAN") {
+			t.Error("did not expect plan pointer when path is unset")
+		}
+	})
+}
+
+// makeManyContents builds n simple text messages alternating user/model, large
+// enough to exceed a small context window so compaction triggers.
+func makeManyContents(n int) []*genai.Content {
+	out := make([]*genai.Content, 0, n)
+	for i := 0; i < n; i++ {
+		role := "user"
+		if i%2 == 1 {
+			role = "model"
+		}
+		// Pad text so token estimation is comfortably over threshold.
+		out = append(out, makeContent(role, fmt.Sprintf("message %d: %s", i, strings.Repeat("x", 200))))
+	}
+	return out
+}
+
+// TestCompactor_OnCompactionHookFires verifies the OnCompaction hook is invoked
+// with before/after token counts when a compaction actually reduces the context.
+func TestCompactor_OnCompactionHookFires(t *testing.T) {
+	c := NewCompactor(100) // tiny window so anything real is "over"
+	c.PreserveRecent = 2
+	// No LLM → truncation summary (deterministic, no network).
+
+	var gotBefore, gotAfter int
+	var calls int
+	c.SetOnCompaction(func(before, after int) {
+		calls++
+		gotBefore, gotAfter = before, after
+	})
+
+	contents := makeManyContents(20)
+	result, err := c.CompactContents(context.Background(), contents)
+	if err != nil {
+		t.Fatalf("CompactContents error: %v", err)
+	}
+	if len(result) >= len(contents) {
+		t.Fatalf("expected fewer messages after compaction: %d -> %d", len(contents), len(result))
+	}
+	if calls != 1 {
+		t.Fatalf("expected OnCompaction to fire once, got %d", calls)
+	}
+	if gotBefore <= gotAfter {
+		t.Fatalf("expected before(%d) > after(%d) tokens", gotBefore, gotAfter)
+	}
+}
+
+// TestCompactor_SummaryMemoized verifies that summarizing the same "old portion"
+// twice calls the summarizer LLM only once — the fix for repeated, expensive
+// re-summarization on every model call within a tool loop.
+func TestCompactor_SummaryMemoized(t *testing.T) {
+	c := NewCompactor(100)
+	c.PreserveRecent = 2
+
+	var llmCalls int
+	c.LLM = func(ctx context.Context, prompt string) (string, error) {
+		llmCalls++
+		return "SUMMARY", nil
+	}
+
+	contents := makeManyContents(20)
+
+	if _, err := c.CompactContents(context.Background(), contents); err != nil {
+		t.Fatalf("first CompactContents: %v", err)
+	}
+	if _, err := c.CompactContents(context.Background(), contents); err != nil {
+		t.Fatalf("second CompactContents: %v", err)
+	}
+	if llmCalls != 1 {
+		t.Fatalf("expected summarizer LLM called once (memoized), got %d", llmCalls)
 	}
 }

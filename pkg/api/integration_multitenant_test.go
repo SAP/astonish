@@ -68,8 +68,8 @@ func TestIntegration_MT1_TwoTeamsDifferentModels(t *testing.T) {
 		Parts: []*genai.Part{{Text: "Hello"}},
 	}
 
-	go runnerA.Run(chatAgentA, sessionService, defaultLLM, nil, userMsg, "Hello", true, "", nil)
-	go runnerB.Run(chatAgentB, sessionService, defaultLLM, nil, userMsg, "Hello", true, "", nil)
+	go runnerA.Run(chatAgentA, sessionService, defaultLLM, nil, userMsg, "Hello", true, "", nil, false)
+	go runnerB.Run(chatAgentB, sessionService, defaultLLM, nil, userMsg, "Hello", true, "", nil, false)
 
 	eventsA := collectEvents(t, chA, 10*time.Second)
 	eventsB := collectEvents(t, chB, 10*time.Second)
@@ -123,7 +123,7 @@ func TestIntegration_MT2_NoTeamOverrideFallsBackToDefault(t *testing.T) {
 		Parts: []*genai.Part{{Text: "Hello"}},
 	}
 
-	go runner.Run(chatAgent, sessionService, defaultLLM, nil, userMsg, "Hello", true, "", nil)
+	go runner.Run(chatAgent, sessionService, defaultLLM, nil, userMsg, "Hello", true, "", nil, false)
 
 	events := collectEvents(t, ch, 10*time.Second)
 	text := extractTextFromEvents(t, events)
@@ -307,7 +307,7 @@ func TestIntegration_MT5_OrgOverrideWithoutTeam(t *testing.T) {
 		Parts: []*genai.Part{{Text: "Hello"}},
 	}
 
-	go runner.Run(chatAgent, sessionService, platformLLM, nil, userMsg, "Hello", true, "", nil)
+	go runner.Run(chatAgent, sessionService, platformLLM, nil, userMsg, "Hello", true, "", nil, false)
 
 	events := collectEvents(t, ch, 10*time.Second)
 	text := extractTextFromEvents(t, events)
@@ -363,7 +363,7 @@ func TestIntegration_MT6_IsolationUnderLoad(t *testing.T) {
 					Parts: []*genai.Part{{Text: "Hello"}},
 				}
 
-				go runner.Run(localAgent, sessionService, defaultLLM, nil, userMsg, "Hello", true, "", nil)
+				go runner.Run(localAgent, sessionService, defaultLLM, nil, userMsg, "Hello", true, "", nil, false)
 
 				events := collectEventsTimeout(ch, 10*time.Second)
 				text := extractTextFromEventSlice(events)

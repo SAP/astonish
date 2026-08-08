@@ -62,6 +62,11 @@ func Execute() error {
 		return handleTeamCommand(os.Args[2:])
 	case "chat":
 		return handleChatCommand(os.Args[2:])
+	case "code":
+		// Code mode is intentionally ungated: it runs fully in-process
+		// against the host filesystem and never contacts a platform, so it
+		// works whether or not the user is logged in.
+		return handleCodeCommand(os.Args[2:])
 	case "sessions":
 		return handleSessionsCommand(os.Args[2:])
 	case "flows", "agents": // "agents" is a hidden alias for backwards compatibility
@@ -135,7 +140,7 @@ func printUsage() {
 	fmt.Println("usage: astonish [-h] [-v] {login,logout,status,org,team,chat,sessions,flows,...} ...")
 	fmt.Println("")
 	fmt.Println("positional arguments:")
-	fmt.Println("  {chat,sessions,flows,tap,daemon,channels,scheduler,fleet,credential,skills,sandbox,drill,config,setup,tools,memory,platform}")
+	fmt.Println("  {chat,sessions,flows,tap,daemon,channels,scheduler,fleet,credential,skills,sandbox,drill,config,setup,tools,memory,platform,code}")
 	fmt.Println("                        Astonish CLI commands")
 	fmt.Println("    login               Connect to a remote Astonish server")
 	fmt.Println("    logout              Disconnect from the remote server")
@@ -143,6 +148,7 @@ func printUsage() {
 	fmt.Println("    org                 Manage organizations (remote mode)")
 	fmt.Println("    team                Manage teams (remote mode)")
 	fmt.Println("    chat                Start an interactive chat session")
+	fmt.Println("    code                Local coding tool (in-process, host filesystem)")
 	fmt.Println("    sessions            Manage persistent sessions")
 	fmt.Println("    flows               Design and run AI flows")
 	fmt.Println("    tap                 Manage extension repositories")

@@ -3,15 +3,47 @@
 package tui
 
 import (
-	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 )
 
-// readClipboardImagePlatform reads a PNG (preferred) from the macOS pasteboard
-// using osascript. Terminals rarely deliver image paste events to the app, so
-// we read the system clipboard when the user triggers paste.
+// clipImageScript reads the macOS pasteboard and writes a PNG to outPath.
+//
+// It uses JavaScript for Automation (JXA) + AppKit rather than AppleScript's
+// `the clipboard as «class PNGf»` coercion. The old coercion approach was
+// unreliable for some sources (large images, or images placed on the pasteboard
+// without a public.png representation): the coercion or AppleScript's binary
+// `write` would fail, the handler fell through to "empty", and no image was
+// pasted — while re-encoding the same image (e.g. a slight resize) happened to
+// produce a clean PNG that did work. NSPasteboard + NSBitmapImageRep converts
+// any pasteboard image representation to PNG deterministically, regardless of
+// size or original format.
+const clipImageScript = `
+ObjC.import('AppKit');
+function run(argv) {
+  var out = argv[0];
+  var pb = $.NSPasteboard.generalPasteboard;
+  var data = pb.dataForType($.NSPasteboardTypePNG);
+  if (!data || data.isNil()) {
+    var img = $.NSImage.alloc.initWithPasteboard(pb);
+    if (!img || img.isNil()) { return 'empty'; }
+    var tiff = img.TIFFRepresentation;
+    if (!tiff || tiff.isNil()) { return 'empty'; }
+    var rep = $.NSBitmapImageRep.imageRepWithData(tiff);
+    if (!rep || rep.isNil()) { return 'empty'; }
+    data = rep.representationUsingTypeProperties($.NSBitmapImageFileTypePNG, $());
+  }
+  if (!data || data.isNil() || data.length === 0) { return 'empty'; }
+  if (!data.writeToFileAtomically(out, true)) { return 'empty'; }
+  return 'png';
+}
+`
+
+// readClipboardImagePlatform reads an image from the macOS pasteboard as PNG.
+// Terminals rarely deliver image paste events to the app, so we read the system
+// clipboard when the user triggers paste. Returns false when the clipboard holds
+// no image.
 func readClipboardImagePlatform() (data []byte, mimeType string, ok bool) {
 	f, err := os.CreateTemp("", "astonish-clip-*.png")
 	if err != nil {
@@ -21,58 +53,20 @@ func readClipboardImagePlatform() (data []byte, mimeType string, ok bool) {
 	_ = f.Close()
 	defer os.Remove(path)
 
-	// Prefer PNG; fall back to TIFF then convert via sips if needed.
-	script := fmt.Sprintf(`
-try
-  set pngData to (the clipboard as «class PNGf»)
-  set outFile to open for access POSIX file %q with write permission
-  set eof outFile to 0
-  write pngData to outFile
-  close access outFile
-  return "png"
-on error
-  try
-    set tiffData to (the clipboard as «class TIFF»)
-    set tiffPath to %q & ".tiff"
-    set outFile to open for access POSIX file tiffPath with write permission
-    set eof outFile to 0
-    write tiffData to outFile
-    close access outFile
-    return "tiff:" & tiffPath
-  on error
-    return "empty"
-  end try
-end try
-`, path, path)
-
-	out, err := exec.Command("osascript", "-e", script).CombinedOutput()
+	out, err := exec.Command("osascript", "-l", "JavaScript", "-e", clipImageScript, path).CombinedOutput()
 	if err != nil {
 		return nil, "", false
 	}
-	result := strings.TrimSpace(string(out))
-	switch {
-	case result == "png":
-		data, err = os.ReadFile(path)
-		if err != nil || len(data) == 0 {
-			return nil, "", false
-		}
-		if mime, ok := sniffImageMIME(data); ok {
-			return data, mime, true
-		}
-		return data, "image/png", true
-	case strings.HasPrefix(result, "tiff:"):
-		tiffPath := strings.TrimPrefix(result, "tiff:")
-		defer os.Remove(tiffPath)
-		// Convert TIFF → PNG with sips (always available on macOS).
-		if err := exec.Command("sips", "-s", "format", "png", tiffPath, "--out", path).Run(); err != nil {
-			return nil, "", false
-		}
-		data, err = os.ReadFile(path)
-		if err != nil || len(data) == 0 {
-			return nil, "", false
-		}
-		return data, "image/png", true
-	default:
+	if strings.TrimSpace(string(out)) != "png" {
 		return nil, "", false
 	}
+
+	data, err = os.ReadFile(path)
+	if err != nil || len(data) == 0 {
+		return nil, "", false
+	}
+	if mime, ok := sniffImageMIME(data); ok {
+		return data, mime, true
+	}
+	return data, "image/png", true
 }

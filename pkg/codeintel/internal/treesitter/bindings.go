@@ -10,6 +10,8 @@ import (
 	"unsafe"
 
 	"github.com/ebitengine/purego"
+
+	"github.com/SAP/astonish/pkg/codeintel/native"
 )
 
 const DefaultLibraryPath = "/usr/lib/astonish/libastonish-treesitter.so"
@@ -77,17 +79,39 @@ func DefaultLibrary() (*library, error) {
 	defaultMu.Lock()
 	defer defaultMu.Unlock()
 
-	path := os.Getenv("ASTONISH_TREESITTER_LIB")
-	if path == "" {
-		path = DefaultLibraryPath
-	}
 	if defaultLib != nil {
 		return defaultLib, nil
 	}
-	if defaultLibErr != nil && defaultLibPath == path {
+
+	// An explicit override pins the search to a single path so failures are
+	// obvious and reproducible.
+	override := os.Getenv("ASTONISH_TREESITTER_LIB")
+	if override != "" {
+		if defaultLibErr != nil && defaultLibPath == override {
+			return nil, defaultLibErr
+		}
+		lib, err := Open(override)
+		return cacheDefault(override, lib, err)
+	}
+
+	// Cache a prior failure so a missing toolchain does not retry a compile on
+	// every tool call within a session.
+	if defaultLibErr != nil {
+		return nil, defaultLibErr
+	}
+
+	path, err := resolveLibraryPath()
+	if err != nil {
+		defaultLibErr = fmt.Errorf("%w: %w", ErrLibraryUnavailable, err)
+		defaultLibPath = ""
 		return nil, defaultLibErr
 	}
 	lib, err := Open(path)
+	return cacheDefault(path, lib, err)
+}
+
+// cacheDefault memoizes the outcome of a load attempt and wraps errors.
+func cacheDefault(path string, lib *library, err error) (*library, error) {
 	if err != nil {
 		defaultLibPath = path
 		defaultLibErr = fmt.Errorf("%w: %w", ErrLibraryUnavailable, err)
@@ -97,6 +121,54 @@ func DefaultLibrary() (*library, error) {
 	defaultLibErr = nil
 	defaultLibPath = path
 	return defaultLib, nil
+}
+
+// resolveLibraryPath finds a loadable tree-sitter library. It first checks the
+// well-known install locations used by container images and portable installs,
+// then falls back to building the library from embedded sources and caching it
+// under the user's config directory (this is the path local code mode takes).
+func resolveLibraryPath() (string, error) {
+	for _, p := range candidateLibraryPaths() {
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() && fi.Size() > 0 {
+			return p, nil
+		}
+	}
+	// Nothing installed — build from the embedded C sources and cache it.
+	built, err := native.EnsureLibrary()
+	if err != nil {
+		if errors.Is(err, native.ErrNoCompiler) {
+			return "", fmt.Errorf("%w; install a C compiler (macOS: xcode-select --install) or set ASTONISH_TREESITTER_LIB, or use grep_search/find_files", err)
+		}
+		return "", err
+	}
+	return built, nil
+}
+
+// candidateLibraryPaths returns pre-built library locations to try before
+// building from source, in priority order.
+func candidateLibraryPaths() []string {
+	names := []string{"libastonish-treesitter.so", "libastonish-treesitter.dylib"}
+	var paths []string
+	// Next to the executable (portable installs ship the .so alongside).
+	if exe, err := os.Executable(); err == nil {
+		dir := filepath.Dir(exe)
+		for _, n := range names {
+			paths = append(paths, filepath.Join(dir, n))
+		}
+	}
+	// Current working directory (developer convenience).
+	if cwd, err := os.Getwd(); err == nil {
+		for _, n := range names {
+			paths = append(paths, filepath.Join(cwd, n))
+		}
+	}
+	// Previously built-and-cached library.
+	if cached, err := native.CachedLibraryPath(); err == nil {
+		paths = append(paths, cached)
+	}
+	// Container/system install path.
+	paths = append(paths, DefaultLibraryPath)
+	return paths
 }
 
 // ResetDefaultLibraryForTest clears the cached default library so tests can

@@ -197,6 +197,16 @@ type EffectiveProvidersResponse struct {
 	DefaultProvider string                       `json:"default_provider"`
 	DefaultModel    string                       `json:"default_model"`
 	Providers       map[string]map[string]string `json:"providers,omitempty"`
+	// ProviderSources tags each provider by origin ("local" for config.yaml,
+	// "platform" for the DB cascade) and whether it is read-only. Optional;
+	// absent on older servers.
+	ProviderSources map[string]ProviderSource `json:"provider_sources,omitempty"`
+}
+
+// ProviderSource describes the origin of a provider instance in the effective view.
+type ProviderSource struct {
+	Source   string `json:"source"`
+	ReadOnly bool   `json:"read_only"`
 }
 
 // GetEffectiveProviders returns the platform-resolved provider defaults for the
@@ -239,6 +249,7 @@ type ChatRequest struct {
 	AutoApprove   bool             `json:"autoApprove,omitempty"`
 	Debug         bool             `json:"debug,omitempty"`
 	SystemContext string           `json:"systemContext,omitempty"`
+	PlanMode      bool             `json:"planMode,omitempty"`
 	Attachments   []ChatAttachment `json:"attachments,omitempty"`
 	// Provider/Model pin a model for this turn (and new sessions).
 	Provider string `json:"provider,omitempty"`

@@ -19,6 +19,7 @@ import (
 	adrill "github.com/SAP/astonish/pkg/drill"
 	emailpkg "github.com/SAP/astonish/pkg/email"
 	"github.com/SAP/astonish/pkg/flowstore"
+	"github.com/SAP/astonish/pkg/mcp"
 	"github.com/SAP/astonish/pkg/memory"
 	"github.com/SAP/astonish/pkg/provider"
 	"github.com/SAP/astonish/pkg/sandbox"
@@ -48,6 +49,20 @@ type ChatFactoryConfig struct {
 	// The filesystem user skill directory is NOT read.
 	PlatformMode bool
 
+	// CodeMode indicates the local, single-user Astonish Code runtime (the
+	// `astonish code` TUI). It is mutually exclusive with PlatformMode.
+	//
+	// MCP servers are treated as first-class in Code mode: every configured
+	// MCP server's tools are injected directly onto the main thread (as
+	// llmagent Toolsets) so the coding agent can call them without a
+	// search_tools detour. This is deliberately Code-only — Studio/platform
+	// deployments can host thousands of org/team tools, so there MCP tools stay
+	// behind search_tools (a high-level catalog entry in the system prompt)
+	// to keep prompts small. Code sessions are personal and usually configure
+	// only a handful of MCP servers for coding, so eager injection is the
+	// better ergonomics/size trade-off.
+	CodeMode bool
+
 	// PlatformToolVectorStore is the vector store for tool discovery.
 	// When set, it's used for semantic tool matching via vector search.
 	// Callers should create this via backend.NewToolVectorStore().
@@ -57,16 +72,41 @@ type ChatFactoryConfig struct {
 	// Required when PlatformToolVectorStore is set (used to embed query strings
 	// before vector search). Typically the same Hugot-based embedder used for memory.
 	PlatformEmbedFunc agent.EmbedFunc
+
+	// AllowMissingProvider lets the agent be constructed even when no provider
+	// is configured or provider initialization fails. Instead of returning an
+	// error, the factory installs a placeholder LLM (which errors on use) and
+	// leaves ProviderName/ModelName empty. Used by code mode so the TUI can
+	// open and let the user pick a model via /model. The placeholder is meant
+	// to be replaced via result.SwappableLLM.Swap once a model is chosen.
+	AllowMissingProvider bool
+
+	// LoadProjectContext enables AGENTS.md discovery: when true, the factory
+	// walks upward from WorkspaceDir loading AGENTS.md (fallback CLAUDE.md) plus
+	// the global ~/.config/astonish/AGENTS.md, and injects the merged content
+	// into the system prompt (see agent.LoadProjectContext). Used by code mode;
+	// platform mode uses per-team DB instructions instead.
+	LoadProjectContext bool
+
+	// SessionService optionally overrides the session store the factory would
+	// otherwise create (in-memory by default). Code mode injects a persistent
+	// FileStore here so sessions survive restarts and are listable via
+	// `/sessions`. When nil, the factory falls back to an in-memory service.
+	SessionService session.Service
 }
 
 // ChatFactoryResult holds everything produced by the factory.
 // Callers (console, channel manager) unpack what they need.
 type ChatFactoryResult struct {
-	ChatAgent             *agent.ChatAgent
-	LLM                   model.LLM
-	SwappableLLM          *provider.SwappableLLM // hot-swappable LLM wrapper (nil in non-Studio callers)
-	ProviderName          string
-	ModelName             string
+	ChatAgent    *agent.ChatAgent
+	LLM          model.LLM
+	SwappableLLM *provider.SwappableLLM // hot-swappable LLM wrapper (nil in non-Studio callers)
+	ProviderName string
+	ModelName    string
+	// ProviderConfigured is false when the agent was built without a usable
+	// provider (AllowMissingProvider) and is running on the placeholder LLM.
+	// Code mode uses this to prompt the user to run /model before a turn.
+	ProviderConfigured    bool
 	Compactor             *persistentsession.Compactor
 	InternalTools         []tool.Tool
 	MCPToolsets           []tool.Toolset
@@ -90,6 +130,60 @@ type ChatFactoryResult struct {
 	// wrapping (nil when sandbox is disabled). Adaptive scheduler uses
 	// SandboxPool.Remove after DestroySandbox so the next tick rebinds.
 	SandboxPool sandbox.ToolNodePool
+}
+
+// mainThreadToolAllowlist returns the set of tool names the top-level coding
+// agent gets directly (as opposed to only through sub-agents / lazy ToolIndex
+// surfacing). Everything else stays in named groups reachable via delegate_tasks
+// or search_tools.
+//
+// The tree-sitter structural navigation tools (repo_map, code_definition,
+// code_references) are main-thread on purpose: they let the agent locate a
+// symbol's definition/references in ONE call instead of falling back to broad
+// grep_search plus repeated full-file read_file. Session analysis showed the
+// latter pattern (e.g. re-reading the same large files 10-12x) inflates the
+// prompt and makes each inference progressively slower. See
+// docs/architecture/code-intelligence.md.
+func mainThreadToolAllowlist() map[string]bool {
+	return map[string]bool{
+		"read_file":     true,
+		"write_file":    true,
+		"edit_file":     true,
+		"shell_command": true,
+		"grep_search":   true,
+		"find_files":    true,
+		// Interactive-terminal drive loop: shell_command runs in a PTY and can
+		// return waiting_for_input=true with a session_id; the agent responds via
+		// process_write (and inspects/ends the session with process_read/kill/list).
+		// These must be main-thread so the top-level coding agent can handle an
+		// interactive program directly — matching chat mode — instead of needing a
+		// search_tools detour to discover them.
+		"process_read":    true,
+		"process_write":   true,
+		"process_kill":    true,
+		"process_list":    true,
+		"repo_map":        true,
+		"code_definition": true,
+		"code_references": true,
+		"memory_save":     true,
+		"memory_search":   true,
+		"memory_delete":   true,
+		"delegate_tasks":  true,
+		"announce_plan":   true,
+		// update_plan drives main-thread plan progress (mark a phase running/
+		// complete/failed as the top-level agent works). It is the direct
+		// companion to announce_plan and MUST be main-thread — otherwise the
+		// agent is told to call it but it is relegated to the deferred "core"
+		// group (reachable only via search_tools), and calling it fails with
+		// "tool 'update_plan' not found".
+		"update_plan":        true,
+		"resolve_credential": true,
+		"skill_lookup":       true,
+		// Platform web search must be main-thread always-on. If it only lives in
+		// the "web" group, ToolIndex may never inject it and the agent claims
+		// "no web search tools" even when General selects Perplexity.
+		"perplexity_web_search": true,
+	}
 }
 
 // NewWiredChatAgent creates a fully-wired ChatAgent ready for use by any caller
@@ -129,6 +223,12 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			// overwrite it — otherwise IsStandardServerInstalled() will read from
 			// the file-based store and miss keys that are only in the DB.
 			// (Platform mode is always active; this getter is set by the daemon.)
+			// In non-platform (code) mode, register the credential store getter so
+			// that mergeStandardServersWithConfig can resolve API keys stored in
+			// the encrypted credential store (e.g., web_servers.tavily.api_key).
+			if !cfg.PlatformMode {
+				config.SetInstalledSecretGetter(cs.GetSecret)
+			}
 
 			// Wire credential store into API handlers
 			api.SetAPICredentialStore(cs)
@@ -170,9 +270,21 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		slog.Debug("initializing LLM provider", "component", "chat-factory")
 	}
 	rawLLM, err := provider.GetProvider(ctx, cfg.ProviderName, cfg.ModelName, cfg.AppConfig)
+	providerConfigured := err == nil
 	if err != nil {
-		return nil, fmt.Errorf("failed to initialize provider '%s' with model '%s': %w",
-			cfg.ProviderName, cfg.ModelName, err)
+		if !cfg.AllowMissingProvider {
+			return nil, fmt.Errorf("failed to initialize provider '%s' with model '%s': %w",
+				cfg.ProviderName, cfg.ModelName, err)
+		}
+		// Code-mode path: no provider yet. Install a placeholder so the agent
+		// (tools, MCP, sandbox, session) can still be built; the user picks a
+		// model via /model, which swaps in the real LLM.
+		if cfg.DebugMode {
+			slog.Debug("no provider configured; using placeholder LLM (code mode)", "component", "chat-factory", "error", err)
+		}
+		rawLLM = provider.NewPlaceholderLLM()
+		cfg.ProviderName = ""
+		cfg.ModelName = ""
 	}
 	if cfg.DebugMode {
 		slog.Debug("provider initialized", "component", "chat-factory", "provider", cfg.ProviderName, "model", cfg.ModelName)
@@ -355,11 +467,19 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			}
 
 			// announce_plan: allows the orchestrator to announce a
-			// structured plan before starting work. Plan steps are auto-
-			// progressed by AfterToolCallback (no update_plan needed).
+			// structured plan before starting work. Plan phases are
+			// auto-progressed for delegated work and explicitly updated by the
+			// model via update_plan for main-thread work.
 			announcePlanTool, apErr := tools.NewAnnouncePlanTool()
 			if apErr == nil {
 				coreTools = append(coreTools, announcePlanTool)
+			}
+			// update_plan: lets the model mark plan phases running/complete/
+			// failed as it works on the main thread, keeping the checklist and
+			// the session PLAN.md accurate (and resumable after compaction).
+			updatePlanTool, upErr := tools.NewUpdatePlanTool()
+			if upErr == nil {
+				coreTools = append(coreTools, updatePlanTool)
 			}
 
 			subAgentCfg := agent.SubAgentConfig{
@@ -396,7 +516,7 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 	}
 
 	// --- 3. Load MCP tools from cache (lazy) ---
-	mcpCfg, err := loadMCPConfig(ctx, cfg.PlatformMode)
+	mcpCfg, err := loadMCPConfig(ctx, cfg.PlatformMode, cfg.AppConfig)
 	if err != nil {
 		slog.Warn("failed to load MCP config", "error", err)
 	}
@@ -419,6 +539,17 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 				if fileTools := cache.GetToolsForServer(name); len(fileTools) > 0 {
 					cachedTools = fileTools
 					slog.Debug("MCP server: using file cache fallback", "server", name, "tools", len(cachedTools))
+				}
+			}
+
+			// Standalone (personal / Astonish Code) mode: if there is still no
+			// cache, discover tools eagerly by starting the server on the host.
+			// This makes config-file MCP servers usable without a running daemon
+			// and without any manual "refresh" step. Discovery results are
+			// persisted to the file cache so subsequent launches are instant.
+			if len(cachedTools) == 0 && !cfg.PlatformMode {
+				if discovered := discoverAndCacheHostMCPTools(ctx, name, serverCfg, credStore, cfg.DebugMode); len(discovered) > 0 {
+					cachedTools = discovered
 				}
 			}
 
@@ -461,9 +592,15 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 	var startupNotices []string
 
 	if mcpCfg != nil && len(mcpCfg.MCPServers) > 0 && len(lazyToolsets) == 0 {
-		startupNotices = append(startupNotices,
-			"MCP servers are configured but no tools are cached yet. "+
-				"Run 'astonish studio' or 'astonish tools refresh' to set them up.")
+		if cfg.PlatformMode {
+			startupNotices = append(startupNotices,
+				"MCP servers are configured but no tools are cached yet. "+
+					"Open Settings → MCP and use Refresh, or wait for background discovery to finish.")
+		} else {
+			startupNotices = append(startupNotices,
+				"MCP servers are configured but their tools could not be discovered. "+
+					"Check that the server command is installed and runnable (see logs), then retry.")
+		}
 	}
 
 	// --- 3b. Initialize sandbox (session container isolation) ---
@@ -780,9 +917,16 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 	// Platform mode: sessions are persisted in the DB per-request.
 	// Use in-memory as the factory-level default; actual persistence is
 	// handled by context-injected stores at the API/channel layer.
-	sessionService := session.InMemoryService()
-	if cfg.DebugMode {
-		slog.Debug("session storage: in-memory (platform mode, DB per-request)", "component", "chat-factory")
+	// Callers may inject a session service (e.g. code mode passes a
+	// persistent FileStore) to override the in-memory default.
+	sessionService := cfg.SessionService
+	if sessionService == nil {
+		sessionService = session.InMemoryService()
+		if cfg.DebugMode {
+			slog.Debug("session storage: in-memory (platform mode, DB per-request)", "component", "chat-factory")
+		}
+	} else if cfg.DebugMode {
+		slog.Debug("session storage: caller-provided service", "component", "chat-factory")
 	}
 
 	// --- 4b. Build tool groups for sub-agent delegation ---
@@ -791,28 +935,8 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 	// available to sub-agents via named groups in the delegate_tasks tool.
 
 	// Split coreTools into main-thread essentials and the full "core" group
-	// for sub-agents. Main thread tools: read_file, write_file, edit_file,
-	// shell_command, grep_search, find_files, memory_save, memory_search,
-	// memory_delete, delegate_tasks, resolve_credential, skill_lookup.
-	mainThreadToolNames := map[string]bool{
-		"read_file":          true,
-		"write_file":         true,
-		"edit_file":          true,
-		"shell_command":      true,
-		"grep_search":        true,
-		"find_files":         true,
-		"memory_save":        true,
-		"memory_search":      true,
-		"memory_delete":      true,
-		"delegate_tasks":     true,
-		"announce_plan":      true,
-		"resolve_credential": true,
-		"skill_lookup":       true,
-		// Platform web search must be main-thread always-on. If it only lives in
-		// the "web" group, ToolIndex may never inject it and the agent claims
-		// "no web search tools" even when General selects Perplexity.
-		"perplexity_web_search": true,
-	}
+	// for sub-agents. See mainThreadToolAllowlist for the membership.
+	mainThreadToolNames := mainThreadToolAllowlist()
 
 	var mainThreadTools []tool.Tool
 	for _, t := range coreTools {
@@ -930,6 +1054,12 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 	}
 
 	// MCP servers — each is its own group
+	//
+	// codeModeMainThreadToolsets collects the sanitized MCP toolsets so Code
+	// mode can inject them directly onto the main thread (see section 6). In
+	// platform mode this slice stays unused: MCP tools remain reachable only
+	// through search_tools / delegation to keep the prompt small.
+	var codeModeMainThreadToolsets []tool.Toolset
 	for _, lt := range lazyToolsets {
 		sanitized := agent.NewSanitizedToolset(lt, cfg.DebugMode)
 		groupName := "mcp:" + lt.Name()
@@ -939,6 +1069,7 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			Description: serverDesc,
 			Toolsets:    []tool.Toolset{sanitized},
 		}
+		codeModeMainThreadToolsets = append(codeModeMainThreadToolsets, sanitized)
 	}
 
 	if cfg.DebugMode {
@@ -979,6 +1110,27 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		Toolsets:     allToolsetsForPrompt,
 		WorkspaceDir: workspaceDir,
 		Catalog:      sortedGroups,
+	}
+
+	// Plan-file persistence is a code-mode affordance: announced plans are
+	// written to a per-session PLAN.md that survives compaction. Platform mode
+	// has no local session filesystem for this, so the guidance is code-only.
+	if !cfg.PlatformMode {
+		promptBuilder.PlanFilePersistence = true
+	}
+
+	// Code-mode authorization guidance: tell the model that not-whitelisted
+	// tools and out-of-project paths may pause for user authorization. Matches
+	// the runtime gates wired below (CodeMode && !AutoApprove).
+	if cfg.CodeMode && !cfg.AutoApprove {
+		promptBuilder.EnforceAuthorization = true
+	}
+
+	// Code mode treats MCP servers as first-class: their tools are injected on
+	// the main thread (see section 6), so the prompt should advertise them as
+	// directly callable instead of gating them behind search_tools.
+	if cfg.CodeMode {
+		promptBuilder.MCPFirstClass = true
 	}
 
 	// Sandbox workspace guidance
@@ -1063,6 +1215,19 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 	// Load custom prompt from app config
 	if cfg.AppConfig != nil && cfg.AppConfig.Chat.SystemPrompt != "" {
 		promptBuilder.CustomPrompt = cfg.AppConfig.Chat.SystemPrompt
+	}
+
+	// Code mode: load project guidance from AGENTS.md (fallback CLAUDE.md),
+	// discovered by walking upward from the workspace to the project root,
+	// following the agents.md convention. Platform mode uses per-team DB
+	// instructions instead, so this is gated on the caller's request.
+	if cfg.LoadProjectContext {
+		if ctxContent := agent.LoadProjectContext(workspaceDir); ctxContent != "" {
+			promptBuilder.ProjectContext = ctxContent
+			if cfg.DebugMode {
+				slog.Debug("loaded project guidance", "component", "chat-factory", "bytes", len(ctxContent))
+			}
+		}
 	}
 
 	// --- 5b. Initialize fleet registry ---
@@ -1264,11 +1429,43 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 	// Main thread gets essential tools (file ops, shell, search, memory,
 	// delegate). Additional tools are dynamically injected per-turn based
 	// on hybrid search relevance and search_tools discoveries.
+	//
+	// Code mode elevates MCP servers to first-class citizens: their sanitized
+	// toolsets ride along on the main thread as llmagent Toolsets, so the
+	// coding agent can call any configured MCP tool immediately without a
+	// search_tools round-trip. Platform mode intentionally leaves this nil —
+	// there MCP tools stay behind search_tools to bound prompt size.
+	var mainThreadToolsets []tool.Toolset
+	if cfg.CodeMode && len(codeModeMainThreadToolsets) > 0 {
+		mainThreadToolsets = codeModeMainThreadToolsets
+		if cfg.DebugMode {
+			slog.Debug("code mode: injecting MCP toolsets on main thread",
+				"component", "chat-factory", "toolsets", len(mainThreadToolsets))
+		}
+	}
 	chatAgent := agent.NewChatAgent(
-		llm, mainThreadTools, nil, sessionService,
+		llm, mainThreadTools, mainThreadToolsets, sessionService,
 		promptBuilder, cfg.DebugMode, cfg.AutoApprove,
 	)
 	chatAgentRef = chatAgent // wire the forward reference for search_tools callback
+
+	// Code-mode authorization: gate not-whitelisted tools and out-of-project
+	// filesystem access behind per-tool / per-folder user authorization. Active
+	// only in code mode and only when the user hasn't opted into --auto-approve
+	// (--yolo), which bypasses all approval. Studio/platform mode leaves this
+	// off — those surfaces are sandboxed / tenant-scoped instead.
+	if cfg.CodeMode && !cfg.AutoApprove {
+		chatAgent.SetEnforceAuthorization(true)
+		chatAgent.SetWorkingDir(workspaceDir)
+		// NOTE: we deliberately do NOT call tools.SetScopeRoot here. In
+		// interactive code mode the folder-access gate in pkg/agent is the
+		// authoritative, GRANT-AWARE enforcer: it prompts for out-of-scope
+		// paths and, once the user approves, records a path grant so the retry
+		// succeeds. The tools.SetScopeRoot guard is grant-BLIND (a hard reject),
+		// so engaging it here would re-reject a path the user just approved.
+		// SetScopeRoot is reserved for non-interactive callers that cannot
+		// prompt (scheduler/planner auto-approve) — wired there separately.
+	}
 
 	// Wire tool index to ChatAgent for per-turn auto-discovery
 	if toolIndex != nil {
@@ -1467,6 +1664,16 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		tools.SetPlanStateCallback(func(goal string, steps []agent.PlanStepInfo) {
 			plan := agent.NewPlanState(goal, steps)
 			chatAgent.SetActivePlan(plan)
+		})
+		// Wire explicit model-driven plan updates (update_plan tool) onto the
+		// active plan. This drives PLAN.md rewrites for main-thread work and
+		// suppresses the end-of-turn bulk-complete sweep.
+		tools.SetPlanStepUpdateCallback(func(step, status string) (string, string) {
+			plan := chatAgent.GetActivePlan()
+			if plan == nil {
+				return "", ""
+			}
+			return plan.SetStepStatus(step, status)
 		})
 		// Wire tool discovery so sub-agents can auto-discover their tools
 		if toolIndex != nil {
@@ -1781,6 +1988,7 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		SwappableLLM:          swappableLLM,
 		ProviderName:          cfg.ProviderName,
 		ModelName:             cfg.ModelName,
+		ProviderConfigured:    providerConfigured,
 		Compactor:             compactor,
 		InternalTools:         allToolsForPrompt,
 		MCPToolsets:           allToolsetsForPrompt,
@@ -1873,9 +2081,18 @@ func browserConfigFromApp(appCfg *config.AppConfig) browser.BrowserConfig {
 // platform) view. Platform-tier servers are inherited by every org/team — this
 // is the documented inheritance model for standard servers like Tavily that are
 // installed at scope=platform.
-func loadMCPConfig(ctx context.Context, platformMode bool) (*config.MCPConfig, error) {
+func loadMCPConfig(ctx context.Context, platformMode bool, appCfg *config.AppConfig) (*config.MCPConfig, error) {
 	if !platformMode {
-		return config.LoadMCPConfig()
+		// Load the raw mcp_config.json then merge standard servers using the
+		// caller's AppConfig. This ensures General.WebSearchTool from config.yaml
+		// is respected, so the selected web search provider (Tavily, Brave,
+		// Firecrawl) is injected into the MCP config for code/personal mode.
+		cfg, err := config.LoadMCPConfigRaw()
+		if err != nil {
+			return nil, err
+		}
+		config.MergeStandardServersWithConfig(cfg, appCfg)
+		return cfg, nil
 	}
 
 	// Platform mode: build MCPConfig from context stores.
@@ -1895,11 +2112,22 @@ func loadMCPConfig(ctx context.Context, platformMode bool) (*config.MCPConfig, e
 	}
 
 	if mcpStores == nil {
-		// No stores available — return empty config
-		return &config.MCPConfig{MCPServers: make(map[string]config.MCPServerConfig)}, nil
+		// No DB stores available — still expose config-file (mcp_config.json)
+		// servers plus standard servers so file-declared servers remain usable.
+		cfg := &config.MCPConfig{MCPServers: config.FileMCPServers()}
+		config.MergeStandardServersWithConfig(cfg, api.EffectiveAppConfigFromContext(ctx, true))
+		return cfg, nil
 	}
 
 	merged := make(map[string]config.MCPServerConfig)
+
+	// 0. Config-file base (mcp_config.json). Servers declared in the local config
+	//    file are the cascade root in platform mode, mirroring how file-based
+	//    providers are the base for provider resolution. DB tiers below override
+	//    these by name. This keeps parity with loadMCPConfigForRequest in pkg/api.
+	for name, s := range config.FileMCPServers() {
+		merged[name] = s
+	}
 
 	// 1. Load platform-level servers as base (cascade root).
 	if mcpStores.Platform != nil {
@@ -2015,6 +2243,80 @@ func storeMCPServerToConfig(s *store.MCPServer) config.MCPServerConfig {
 		URL:       s.URL,
 		Enabled:   s.Enabled,
 	}
+}
+
+// discoverAndCacheHostMCPTools starts an MCP server on the host, lists its
+// tools, and persists them to the file-based tools cache. It is used in
+// standalone (personal / Astonish Code) mode so config-file MCP servers are
+// usable immediately, without a running daemon and without a manual refresh.
+//
+// Returns the discovered tools (also written to the cache), or nil on failure.
+// Failures are logged, not fatal — a broken MCP server must not block chat.
+func discoverAndCacheHostMCPTools(ctx context.Context, serverName string, serverCfg config.MCPServerConfig, resolver *credentials.Store, debug bool) []cache.ToolEntry {
+	mgr := mcp.NewManagerFromConfig(&config.MCPConfig{
+		MCPServers: map[string]config.MCPServerConfig{serverName: serverCfg},
+	})
+	if resolver != nil {
+		mgr.SetCredentialResolver(resolver)
+	}
+	defer mgr.Cleanup()
+
+	named, err := mgr.InitializeSingleToolset(ctx, serverName)
+	if err != nil || named == nil {
+		slog.Warn("standalone MCP discovery failed to start server", "server", serverName, "error", err)
+		return nil
+	}
+
+	minCtx := &minimalReadonlyContext{Context: ctx}
+	liveTools, err := named.Toolset.Tools(minCtx)
+	if err != nil {
+		slog.Warn("standalone MCP discovery failed to list tools", "server", serverName, "error", err)
+		return nil
+	}
+
+	entries := make([]cache.ToolEntry, 0, len(liveTools))
+	for _, t := range liveTools {
+		var schema json.RawMessage
+		type toolWithDeclaration interface {
+			Declaration() *genai.FunctionDeclaration
+		}
+		if declTool, ok := t.(toolWithDeclaration); ok {
+			if decl := declTool.Declaration(); decl != nil {
+				// Try ParametersJsonSchema first (used by ADK MCP tools),
+				// fall back to the older typed Parameters field.
+				if decl.ParametersJsonSchema != nil {
+					if b, mErr := json.Marshal(decl.ParametersJsonSchema); mErr == nil {
+						schema = b
+					}
+				} else if decl.Parameters != nil {
+					if b, mErr := json.Marshal(decl.Parameters); mErr == nil {
+						schema = b
+					}
+				}
+			}
+		}
+		entries = append(entries, cache.ToolEntry{
+			Name:        t.Name(),
+			Description: t.Description(),
+			Source:      serverName,
+			InputSchema: schema,
+		})
+	}
+	if len(entries) == 0 {
+		return nil
+	}
+
+	checksum := cache.ComputeServerChecksum(serverCfg.Command, serverCfg.Args, serverCfg.Env)
+	cache.AddServerTools(serverName, entries, checksum)
+	if err := cache.SaveCache(); err != nil {
+		slog.Warn("standalone MCP discovery: failed to save tools cache", "server", serverName, "error", err)
+	}
+	if debug {
+		slog.Debug("standalone MCP discovery cached tools", "component", "chat-factory", "server", serverName, "tools", len(entries))
+	} else {
+		slog.Info("discovered MCP server tools", "server", serverName, "tools", len(entries))
+	}
+	return entries
 }
 
 // getPlatformCachedTools extracts cached tool declarations from the MCP server

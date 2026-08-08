@@ -213,6 +213,11 @@ func (m model) applyHistory(msg historyLoadedMsg) (tea.Model, tea.Cmd) {
 	if m.info.Usage != nil {
 		m.tr.LastUsage = &events.Usage{Input: m.info.Usage.Input, Output: m.info.Usage.Output, Total: m.info.Usage.Total}
 	}
+	// Show the resumed session's context occupancy immediately, so the header
+	// reflects real utilization instead of "Context 0" until the next turn.
+	if m.info.ContextTokens > 0 {
+		m.tr.ContextTokens = m.info.ContextTokens
+	}
 	if msg.sessionID != "" {
 		m.info.SessionID = msg.sessionID
 	}

@@ -66,6 +66,7 @@ export interface ConnectChatParams {
   message?: string
   attachments?: AttachmentPayload[]
   systemContext?: string
+  planMode?: boolean
   pinnedToolGroups?: string[]
   autoApprove?: boolean
   provider?: string
@@ -120,7 +121,7 @@ export async function fetchSubtaskEvents(sessionId: string, taskName: string): P
   return data.events || []
 }
 
-export function connectChat({ sessionId, message, attachments, systemContext, pinnedToolGroups, autoApprove, provider, model, onEvent, onError, onDone }: ConnectChatParams): AbortController {
+export function connectChat({ sessionId, message, attachments, systemContext, planMode, pinnedToolGroups, autoApprove, provider, model, onEvent, onError, onDone }: ConnectChatParams): AbortController {
   const controller = new AbortController()
 
   const run = async () => {
@@ -137,6 +138,9 @@ export function connectChat({ sessionId, message, attachments, systemContext, pi
       }
       if (systemContext) {
         body.systemContext = systemContext
+      }
+      if (planMode) {
+        body.planMode = true
       }
       if (pinnedToolGroups && pinnedToolGroups.length > 0) {
         body.pinnedToolGroups = pinnedToolGroups

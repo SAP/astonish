@@ -56,6 +56,42 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			slog.Debug("user message", "component", "chat", "text", userText)
 		}
 
+		// --- Code-mode authorization resume ---
+		// When a previous turn suspended awaiting tool/folder authorization, the
+		// user's decision arrives as this turn's message. Apply it to the
+		// per-session policy, then rewrite the message into a retry (granted) or
+		// denial (refused) instruction so the model proceeds coherently. This
+		// mirrors the flow engine's handleToolApproval, adapted to the chat loop.
+		if c.EnforceAuthorization {
+			policy := c.GetOrCreateAuthPolicy(ctx.Session().ID())
+			if policy != nil && policy.Pending() != nil {
+				decision := policy.ApplyAuthorizationDecision(userText)
+				if decision != nil {
+					if decision.Granted {
+						userText = fmt.Sprintf(
+							"The user authorized `%s`. Immediately retry the previous tool call with the exact same arguments.",
+							decision.Tool,
+						)
+					} else if decision.Kind == "folder" {
+						userText = fmt.Sprintf(
+							"The user did NOT authorize `%s` to access files outside the project directory. "+
+								"Do not retry it. Stay within the project folder or ask the user how to proceed.",
+							decision.Tool,
+						)
+					} else {
+						userText = AuthorizationDeniedMessage(decision.Tool)
+					}
+					if ctx.UserContent() != nil {
+						ctx.UserContent().Parts = []*genai.Part{{Text: userText}}
+					}
+				}
+			} else if policy != nil {
+				// Genuinely new user message: reset iteration-scoped grants so
+				// each turn re-requests authorization for not-whitelisted tools.
+				policy.ResetForNewTurn()
+			}
+		}
+
 		// --- Phase A: Dynamic Execution ---
 		trace := NewExecutionTrace(userText)
 
@@ -226,7 +262,9 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		}
 
 		// Apply per-turn overrides injected by callers via context
+		planMode := false
 		if po := PromptOverridesFromContext(ctx); po != nil {
+			planMode = po.PlanMode
 			if po.ChannelHints != "" {
 				promptBuilder.ChannelHints = po.ChannelHints
 			}
@@ -428,6 +466,12 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		// shares the same args map by reference) never persists real secrets.
 		var beforeToolCallbacks []llmagent.BeforeToolCallback
 
+		// authEventBuffer collects the authorization-prompt event emitted by the
+		// code-mode gates. ADK may invoke BeforeToolCallbacks from a goroutine
+		// where calling yield directly would panic, so the gate buffers the
+		// event and the main event loop drains it (see the llmAgent.Run range).
+		authEventBuffer := &callbackEventBuffer{}
+
 		// Always register credential substitution callback. In platform mode,
 		// the PG-backed credential store is injected into the context per-request
 		// (even if the file-based store failed to open). The callback checks both
@@ -512,6 +556,112 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			}
 			return nil, nil
 		})
+
+		// Plan-mode hard gate: when the turn is in plan mode, refuse any tool
+		// that is not read-only (and refuse delegate_tasks, which could bypass
+		// the gate via a sub-agent). Returning a result — rather than an error
+		// that aborts the turn — lets the model self-correct and keep building
+		// the plan. This is the runtime enforcement backing PlanModeSystemContext.
+		if planMode {
+			beforeToolCallbacks = append(beforeToolCallbacks, func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+				name := t.Name()
+				if name == "delegate_tasks" || !IsToolSafe(name) {
+					return map[string]any{
+						"status": "blocked_plan_mode",
+						"error":  PlanModeBlockedMessage(name),
+					}, nil
+				}
+				return nil, nil
+			})
+		}
+
+		// ── Code-mode authorization gates ──
+		// Active only in code mode (EnforceAuthorization) and Normal mode
+		// (planMode handled above). Two independent gates make `astonish code`
+		// safe-by-default despite running tools directly on the host:
+		//
+		//  1. Folder-access gate — a tool touching a path outside the project
+		//     working directory pauses for user authorization (once / session).
+		//  2. Tool-execution gate — a not-whitelisted tool (anything outside
+		//     agent.SafeTools) pauses for user authorization (once / all this
+		//     iteration).
+		//
+		// Both mirror the flow engine's approval protocol: set awaiting_approval
+		// state, buffer an approval event (drained + yielded by the main loop,
+		// which then suspends the turn), and record the pending request on the
+		// per-session policy so the resume handler at the top of Run can apply
+		// the user's decision. AutoApprove (--yolo) skips these gates entirely.
+		if c.EnforceAuthorization && !planMode && !c.AutoApprove {
+			authPolicy := c.GetOrCreateAuthPolicy(sessionID)
+
+			emitAuthPrompt := func(kind, toolName, prompt string, options []string, paths []string) map[string]any {
+				delta := map[string]any{
+					"awaiting_approval": true,
+					"approval_tool":     toolName,
+					"approval_options":  options,
+					"approval_kind":     kind,
+				}
+				if len(paths) > 0 {
+					delta["approval_paths"] = paths
+				}
+				authPolicy.SetPending(&PendingAuthorization{Kind: kind, Tool: toolName, Paths: paths})
+				authEventBuffer.append(&session.Event{
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Parts: []*genai.Part{{Text: prompt}},
+							Role:  "model",
+						},
+					},
+					Actions: session.EventActions{StateDelta: delta},
+				})
+				return map[string]any{
+					"status": "pending_authorization",
+					"info":   "Execution paused for user authorization. Do not retry until the user responds.",
+				}
+			}
+
+			// Folder-access gate (checked first: an out-of-scope path is a
+			// stronger constraint than tool category).
+			beforeToolCallbacks = append(beforeToolCallbacks, func(_ tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+				if authPolicy.Pending() != nil {
+					return map[string]any{
+						"status": "pending_authorization",
+						"info":   "Waiting for user authorization on a previous tool call.",
+					}, nil
+				}
+				outside := authPolicy.OutOfScopePaths(args)
+				if len(outside) == 0 {
+					// Allowed. Consume any one-shot ("Allow") path grant that
+					// covered this access so a later access to the same
+					// out-of-project path prompts again (an "Allow" is not an
+					// "Always Allow"). No-op for paths inside the project root or
+					// covered by a session grant.
+					authPolicy.ConsumePathGrants(args)
+					return nil, nil
+				}
+				prompt := c.approvalHelper.formatFolderApprovalRequest(t.Name(), outside, authPolicy.Root())
+				return emitAuthPrompt("folder", t.Name(), prompt, FolderApprovalOptions(), outside), nil
+			})
+
+			// Tool-execution gate (Normal-mode whitelist = agent.SafeTools).
+			beforeToolCallbacks = append(beforeToolCallbacks, func(_ tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+				name := t.Name()
+				if !RequiresToolAuthorization(name, false) {
+					return nil, nil
+				}
+				if authPolicy.Pending() != nil {
+					return map[string]any{
+						"status": "pending_authorization",
+						"info":   "Waiting for user authorization on a previous tool call.",
+					}, nil
+				}
+				if authPolicy.ToolAuthorized(name) {
+					return nil, nil // an active grant covers this execution
+				}
+				prompt := c.approvalHelper.formatToolApprovalRequest(name, args)
+				return emitAuthPrompt("tool", name, prompt, ToolApprovalOptions(), nil), nil
+			})
+		}
 
 		// ── Auto-progress plan steps (before tool execution) ──
 		// When a plan is active, mark the first pending step as "running"
@@ -750,6 +900,25 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 					}
 				}
 
+				// Drain code-mode authorization prompts buffered by the gates.
+				// A gate runs in an ADK goroutine and cannot yield directly, so
+				// it buffers its approval event here. When one carries
+				// awaiting_approval, yield it and suspend the turn (the runner
+				// re-invokes Run with the user's decision, handled at the top of
+				// Run). Drain BEFORE yielding the current tool-response event so
+				// the approval prompt reaches the UI ahead of the placeholder
+				// tool result.
+				for _, buffered := range authEventBuffer.drain() {
+					if !yield(buffered, nil) {
+						return
+					}
+					if buffered.Actions.StateDelta != nil {
+						if awaiting, ok := buffered.Actions.StateDelta["awaiting_approval"].(bool); ok && awaiting {
+							return
+						}
+					}
+				}
+
 				// Yield event to the caller (console/web)
 				if !yield(event, nil) {
 					return
@@ -780,27 +949,41 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		}
 
 	postLoop:
-		// Auto-complete any remaining plan steps at end of turn.
-		// This handles the final step (e.g., "write report") which
-		// completes when the LLM produces its final text response.
+		// Auto-complete any remaining plan steps at end of turn — but ONLY when
+		// the model did not explicitly drive the plan via update_plan. If the
+		// model tracked progress itself, its reported statuses are authoritative
+		// and we must not fabricate a bulk "everything complete" sweep (which
+		// previously made PLAN.md show all phases done regardless of reality).
 		c.activePlanMu.Lock()
 		endPlan := c.activePlan
 		c.activePlanMu.Unlock()
 
 		if endPlan != nil {
-			for _, stepName := range endPlan.CompleteAll() {
-				if c.SubTaskProgressCallback != nil {
-					c.SubTaskProgressCallback(SubTaskProgressEvent{
-						Type:       "plan_step_update",
-						StepName:   stepName,
-						StepStatus: "complete",
-					})
+			// Only auto-complete when execution actually began this turn. A plan
+			// that was merely announced (every step still pending — e.g. the
+			// finalization turn in Plan mode, or an announce-only turn) must NOT
+			// be swept to "complete": doing so would record a freshly announced
+			// plan as fully done before any work is performed. In that case we
+			// also keep the plan active so it carries into the next turn where
+			// execution starts.
+			started := endPlan.HasStartedSteps()
+			if started {
+				if !endPlan.IsManuallyTracked() {
+					for _, stepName := range endPlan.CompleteAll() {
+						if c.SubTaskProgressCallback != nil {
+							c.SubTaskProgressCallback(SubTaskProgressEvent{
+								Type:       "plan_step_update",
+								StepName:   stepName,
+								StepStatus: "complete",
+							})
+						}
+					}
 				}
+				// Work happened this turn — the plan is done for this turn.
+				c.activePlanMu.Lock()
+				c.activePlan = nil
+				c.activePlanMu.Unlock()
 			}
-			// Clear the plan — it's done for this turn.
-			c.activePlanMu.Lock()
-			c.activePlan = nil
-			c.activePlanMu.Unlock()
 		}
 
 		// Finalize the trace

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -110,6 +111,9 @@ type model struct {
 	turnCancel context.CancelFunc
 	// eventCh is drained via tea.Cmds while a turn is active.
 	eventCh <-chan events.Event
+	// compacting is true while an async /compact request is in flight. Used to
+	// show "Compacting…" immediately and reject a second /compact until done.
+	compacting bool
 
 	// hitRegions maps rendered transcript lines → items (for mouse expand).
 	hitRegions []hitRegion
@@ -118,6 +122,19 @@ type model struct {
 	// transcriptPlainLines is the visible transcript without ANSI styling; used
 	// for drag-to-copy selection in Bubble Tea mouse mode.
 	transcriptPlainLines []string
+	// transcriptContentSpans records, for each entry in transcriptPlainLines,
+	// the [start,end) rune-column range that is actual content rather than
+	// decorative chrome (box borders, padding, expand hints). Drag-to-copy
+	// clamps the selection to this span so borders/padding never reach the
+	// clipboard. A span of {0, len(line)} means the whole line is content
+	// (the default for undecorated blocks); {0,0} means a pure chrome row.
+	transcriptContentSpans [][2]int
+	// mdCache memoizes expensive markdown rendering (goldmark + chroma) for
+	// agent message blocks, keyed by width+content. Finalized transcript items
+	// never change, so this turns per-event rendering from O(whole transcript)
+	// into O(changed item) and keeps the UI responsive under a burst of events.
+	// Cleared on resize (see layout/WindowSizeMsg) since width is part of output.
+	mdCache map[string]string
 	// double-click detection for expanding user bubbles.
 	lastClickAt time.Time
 	lastClickY  int
@@ -133,9 +150,12 @@ type model struct {
 	clickIsDouble  bool
 
 	// overlays
-	sessions    sessionsState
-	modelPicker modelPickerState
-	fileViewer  fileViewerState
+	sessions       sessionsState
+	rollback       rollbackState
+	modelPicker    modelPickerState
+	providerPicker providerPickerState
+	webSearchPicker webSearchPickerState
+	fileViewer     fileViewerState
 	// slash command completion popup (active when composer starts with /)
 	slash slashCompletion
 	// @file completion popup (active while typing a trailing @token)
@@ -158,6 +178,9 @@ type model struct {
 	// composerWatching keeps a short tick loop alive so Command+V collapse does
 	// not wait for the next keypress to re-enter Update.
 	composerWatching bool
+	// workDir is the workspace/project root (process CWD in code mode). Used to
+	// render project-relative file paths in diff headers.
+	workDir string
 }
 
 func newModel(parent context.Context, cfg Config) model {
@@ -198,8 +221,14 @@ func newModel(parent context.Context, cfg Config) model {
 	tr.SessionID = info.SessionID
 	tr.Provider = info.Provider
 	tr.Model = info.Model
+	// Code mode renders a linear reasoning thread (messages persist, tools
+	// group, a message breaks the group). Studio/platform keeps sticky-agent.
+	tr.LinearThread = info.Mode == "code"
 	if info.Usage != nil {
 		tr.LastUsage = &events.Usage{Input: info.Usage.Input, Output: info.Usage.Output, Total: info.Usage.Total}
+	}
+	if info.ContextTokens > 0 {
+		tr.ContextTokens = info.ContextTokens
 	}
 	for _, n := range info.Notices {
 		tr.Apply(events.NewSystem(n))
@@ -218,8 +247,20 @@ func newModel(parent context.Context, cfg Config) model {
 		width:      cfg.Width,
 		height:     cfg.Height,
 		historyIdx: -1,
+		workDir:    workspaceRoot(),
 	}
 	return m
+}
+
+// workspaceRoot returns the process working directory, which in code mode is
+// the project root the agent's tools operate against. Empty on error (diff
+// headers then fall back to showing the raw path).
+func workspaceRoot() string {
+	wd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	return wd
 }
 
 // tea messages
@@ -245,9 +286,18 @@ func (m model) Init() tea.Cmd {
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
-	if text, ok := textareaPasteText(msg); ok {
+	// A textarea paste (Ctrl+V keybinding → clipboard read) arrives as a
+	// textarea.pasteMsg. When it carries text, insert it. When it is empty, the
+	// clipboard likely holds an image with no text representation — try an image
+	// paste instead of dropping the event.
+	if text, isPaste := textareaPasteMsg(msg); isPaste {
 		if next, cmd, handled := m.tryPasteImage(); handled {
 			return next, cmd
+		}
+		if strings.TrimSpace(text) == "" {
+			// No image and no text: nothing to insert. Swallow the empty paste
+			// so it does not fall through to the textarea as a no-op.
+			return m, nil
 		}
 		return m.handlePaste(text)
 	}
@@ -256,6 +306,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		// Width is part of the markdown cache key; drop stale-width entries so
+		// the cache does not accumulate one set per historical window size.
+		m.mdCache = nil
 		m.layout()
 		m.ready = true
 		m.refreshViewport()
@@ -277,6 +330,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.modelPicker.open {
 			return m.handleModelPickerKey(msg)
+		}
+		if m.providerPicker.open {
+			return m.handleProviderPickerKey(msg)
+		}
+		if m.webSearchPicker.open {
+			return m.handleWebSearchPickerKey(msg)
+		}
+		if m.rollback.open {
+			return m.handleRollbackKey(msg)
 		}
 
 		// Explicit paste bindings (Ctrl+V / Super+V) prefer clipboard images.
@@ -309,18 +371,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Global keys
 		switch msg.String() {
 		case "ctrl+c":
-			if m.tr.Streaming && m.turnCancel != nil {
-				m.turnCancel()
-				m.turnCancel = nil
-				m.tr.Streaming = false
-				m.tr.Status = ""
-				m.tr.Apply(events.NewSystem("Turn cancelled."))
-				m.refreshViewport()
-				return m, nil
+			// Mid-turn: cancel the in-flight RunTurn. Idle: quit the app.
+			if next, cmd, handled := m.cancelInFlightTurn(); handled {
+				return next, cmd
 			}
 			m.quitting = true
 			m.cancel()
 			return m, tea.Quit
+		case "esc":
+			// Esc cancels an in-flight turn (Claude Code / OpenCode style) but
+			// never quits the app when idle — overlays/approvals already handled
+			// Esc above this switch.
+			if next, cmd, handled := m.cancelInFlightTurn(); handled {
+				return next, cmd
+			}
 		case "ctrl+d":
 			if m.ta.Value() == "" {
 				m.quitting = true
@@ -442,6 +506,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case sessionDeletedMsg:
 		return m.applySessionDeleted(msg)
 
+	case rollbackLoadedMsg:
+		return m.applyRollbackLoaded(msg)
+
+	case rolledBackMsg:
+		return m.applyRolledBack(msg)
+
 	case modelProvidersLoadedMsg:
 		return m.applyModelProvidersLoaded(msg)
 
@@ -451,22 +521,55 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case modelPinAppliedMsg:
 		return m.applyModelPinApplied(msg)
 
+	case providerInstancesLoadedMsg:
+		return m.applyProviderInstancesLoaded(msg)
+
+	case providerMutatedMsg:
+		return m.applyProviderMutated(msg)
+
+	case webSearchProvidersLoadedMsg:
+		return m.applyWebSearchProvidersLoaded(msg)
+
+	case webSearchInstalledMsg:
+		return m.applyWebSearchInstalled(msg)
+
+	case perplexityOptionsLoadedMsg:
+		return m.applyPerplexityOptionsLoaded(msg)
+
+	case perplexityConfiguredMsg:
+		return m.applyPerplexityConfigured(msg)
+
+	case webSearchClearedMsg:
+		return m.applyWebSearchCleared(msg)
+
 	case artifactContentLoadedMsg:
 		return m.applyArtifactContentLoaded(msg)
 
 	case eventMsg:
-		ev := events.Event(msg)
-		m.tr.Apply(ev)
-		// Keep info in sync
-		if ev.Kind == events.KindSession && ev.SessionID != "" {
-			m.info.SessionID = ev.SessionID
-		}
-		if ev.Kind == events.KindModelChanged {
-			if ev.Provider != "" {
-				m.info.Provider = ev.Provider
-			}
-			if ev.Model != "" {
-				m.info.Model = ev.Model
+		// Apply this event plus any others already sitting in the channel, then
+		// repaint once. A burst of tool output (e.g. a large diff followed by
+		// several results) otherwise triggers one full transcript render per
+		// event and the UI falls behind — the loop can appear frozen while the
+		// backend keeps working. Coalescing bounds repaints to one per batch.
+		// The drain is bounded and non-blocking so key messages (Esc/cancel) are
+		// never starved: we take only events already buffered, then yield.
+		m.applyEvent(events.Event(msg))
+		drained := 0
+		for m.eventCh != nil && drained < maxCoalescedEvents {
+			select {
+			case ev, ok := <-m.eventCh:
+				if !ok {
+					// Channel closed mid-drain: the turn finished. Finalize now.
+					m.eventCh = nil
+					cmd := m.finishTurn()
+					m.refreshViewport()
+					return m, cmd
+				}
+				m.applyEvent(ev)
+				drained++
+			default:
+				// Nothing more buffered right now.
+				drained = maxCoalescedEvents
 			}
 		}
 		m.refreshViewport()
@@ -523,6 +626,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshViewport()
 		return m, nil
 
+	case compactDoneMsg:
+		return m.applyCompactDone(msg)
+
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spin, cmd = m.spin.Update(msg)
@@ -540,6 +646,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		prevValue := m.ta.Value()
 		prevH := m.composerTextHeight()
+		// Pre-grow the textarea to its max height before it processes the key,
+		// then let layout() below set the accurate height once the new value is
+		// known. The textarea repositions its internal viewport during Update;
+		// if it is still too short when the cursor crosses a soft-wrap boundary
+		// it scrolls the earlier rows out of view and a later SetHeight cannot
+		// bring them back (bubbles' viewport does not re-clamp YOffset when the
+		// height grows). Sizing to the cap up front keeps every row visible for
+		// any growth transition (1→2, or a wrapping paste 1→3/4).
+		if m.ta.Height() < composerMaxRows {
+			m.ta.SetHeight(composerMaxRows)
+		}
 		var cmd tea.Cmd
 		m.ta, cmd = m.ta.Update(msg)
 		cmds = append(cmds, cmd)
@@ -552,10 +669,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if pasteCmd := m.afterComposerChange(prevValue); pasteCmd != nil {
 			cmds = append(cmds, pasteCmd)
 		}
-		// Grow/shrink composer when the user adds or removes newlines.
+		// Grow/shrink composer when the visual line count changes; layout()
+		// recomputes the viewport around the new composer height.
 		if m.composerTextHeight() != prevH {
 			m.layout()
 			m.refreshViewport()
+		} else if m.ta.Height() != m.composerTextHeight() {
+			// We pre-grew the textarea above but the height did not actually
+			// change (e.g. a short keystroke) — snap it back to the accurate
+			// height so it does not stay padded at composerMaxRows.
+			m.ta.SetHeight(m.composerTextHeight())
 		}
 		m.prunePastedBlocks()
 		// Keep completion popups in sync with composer value after typing.
@@ -582,7 +705,20 @@ func (m *model) syncSlashCompletion() {
 		m.slash = slashCompletion{}
 		return
 	}
-	matches := filterSlashCommands(query)
+	var extra []slashCommand
+	if m.providerAdmin() != nil {
+		extra = append(extra, providerSlashCommand)
+	}
+	if m.webSearchAdmin() != nil {
+		extra = append(extra, webSearchSlashCommand)
+	}
+	if m.rollbackCap() != nil {
+		extra = append(extra, rollbackSlashCommand)
+	}
+	if m.compactionCap() != nil {
+		extra = append(extra, compactSlashCommand)
+	}
+	matches := filterSlashCommands(query, extra...)
 	cursor := m.slash.cursor
 	if cursor >= len(matches) {
 		cursor = len(matches) - 1
@@ -731,8 +867,27 @@ func (m model) insertNewline(intentional bool) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-const planModeSystemContext = `You are in Astonish terminal plan mode.
-Respond with a concise implementation plan only. Do not execute tools, edit files, run commands, or make external changes. If the user asks for action, describe the steps you would take and ask for confirmation to proceed outside plan mode.`
+// planModeSystemContext must stay in sync with agent.PlanModeSystemContext
+// (the runtime gate's source of truth). Read-only tools listed here — including
+// the tree-sitter navigation tools — are allowed by the gate (agent.SafeTools).
+const planModeSystemContext = `You are in Astonish PLAN MODE. This is a hard constraint enforced by the runtime, not a suggestion.
+
+RULES:
+- You MUST NOT make any changes. Mutating tools (write_file, edit_file, shell_command, and every other non-read-only tool) and delegate_tasks are DISABLED by the runtime and will be refused if you call them.
+- You MAY use read-only tools (read_file, grep_search, find_files, file_tree, code_definition, code_references, repo_map, memory_search, etc.) to investigate and build an accurate plan.
+- Do NOT attempt to execute the plan. End by asking the user to exit Plan mode (shift+tab) to proceed with execution.
+
+Your job is to produce a COMPLETE plan the user can approve with confidence — not a partial sketch. Work through these four disciplines:
+
+1. INVESTIGATE THOROUGHLY. Understand the code you will touch before you plan it. Use repo_map once to orient in unfamiliar areas, then code_definition to read the actual declaration of each symbol you will change, and code_references to enumerate ALL its call sites. Read the real regions with read_file. Batch independent read-only lookups in the same turn so they run in parallel. Keep investigating until you are confident no affected file, caller, interface, type, test, migration, generated file, or doc remains unexamined — first-pass results routinely miss dependents.
+
+2. COVER EVERY DEPENDENCY — NO PARTIAL IMPLEMENTATIONS. A complete plan touches every layer the change reaches: the symbol itself AND all its callers, the interfaces/schemas/types it depends on, the tests that exercise it, any generated code that must be regenerated, migrations, and the docs (AGENTS.md / docs/architecture) the project requires. Order phases dependency-first: shared types and interfaces before the consumers that use them. Verify that no phase leaves orphaned or unwired code — every new symbol must be integrated by the end of the plan.
+
+3. SURFACE DECISIONS FOR THE USER. Call out anything that needs a human decision — breaking changes, meaningful alternative approaches with their trade-offs, or ambiguous requirements — explicitly in the plan so the user can decide before execution begins. If a pivotal requirement is genuinely ambiguous and you cannot resolve it by reading the code, ask ONE concise clarifying question rather than guessing.
+
+4. BE EFFICIENT — SPEND EFFORT PROPORTIONAL TO BLAST RADIUS. A one-file tweak needs a quick look; a cross-cutting change needs full tracing. Stop exploring once you can name every file you would change and why — do not read the whole repo. Prefer structural tools (code_definition/code_references) over broad grep, and never re-read a file already in your context.
+
+When your plan is finalized, record it with announce_plan (goal + ordered, dependency-first phases). For each phase, list its affected files (each marked new/modify/delete), put the concrete approach in details, and give a verify step (the build/test/lint command that proves the phase is done). This persists the plan to a session PLAN.md that survives context compaction; do NOT hand-write PLAN.md yourself. (You will drive phase status with update_plan once execution begins.)`
 
 func (m *model) togglePlanMode() {
 	m.planMode = !m.planMode
@@ -740,7 +895,7 @@ func (m *model) togglePlanMode() {
 
 func (m model) turnOptions() backend.TurnOptions {
 	if m.planMode {
-		return backend.TurnOptions{SystemContext: planModeSystemContext}
+		return backend.TurnOptions{SystemContext: planModeSystemContext, PlanMode: true}
 	}
 	return backend.TurnOptions{}
 }
@@ -755,7 +910,7 @@ func isClipboardPasteKey(msg tea.KeyMsg) bool {
 }
 
 func (m model) tryPasteImage() (tea.Model, tea.Cmd, bool) {
-	if m.sessions.open || m.modelPicker.open || m.fileViewer.open {
+	if m.sessions.open || m.rollback.open || m.modelPicker.open || m.providerPicker.open || m.webSearchPicker.open || m.fileViewer.open {
 		return m, nil, false
 	}
 	if m.tr.Streaming && !m.tr.Awaiting {
@@ -777,7 +932,7 @@ func (m model) tryPasteImage() (tea.Model, tea.Cmd, bool) {
 }
 
 func (m model) insertPastedImage(data []byte, mimeType string) (tea.Model, tea.Cmd) {
-	if m.sessions.open || m.modelPicker.open || m.fileViewer.open {
+	if m.sessions.open || m.rollback.open || m.modelPicker.open || m.providerPicker.open || m.webSearchPicker.open || m.fileViewer.open {
 		return m, nil
 	}
 	prevH := m.composerTextHeight()
@@ -801,7 +956,7 @@ func (m model) insertPastedImage(data []byte, mimeType string) (tea.Model, tea.C
 }
 
 func (m model) handlePaste(text string) (tea.Model, tea.Cmd) {
-	if m.sessions.open || m.modelPicker.open || m.fileViewer.open {
+	if m.sessions.open || m.rollback.open || m.modelPicker.open || m.providerPicker.open || m.webSearchPicker.open || m.fileViewer.open {
 		return m, nil
 	}
 	if m.tr.Streaming && !m.tr.Awaiting {
@@ -1319,16 +1474,18 @@ func composerShouldCollapseValue(text string) bool {
 	return pasteCollapseLineCount(text) >= 4
 }
 
-func textareaPasteText(msg tea.Msg) (string, bool) {
+// textareaPasteMsg reports whether msg is a textarea.pasteMsg and its (possibly
+// empty) text. bubbles emits an empty pasteMsg when the Ctrl+V keybinding reads
+// a clipboard that holds an image (no text) — callers use the empty case to try
+// an image paste instead of dropping the event silently.
+func textareaPasteMsg(msg tea.Msg) (string, bool) {
 	if msg == nil {
 		return "", false
 	}
-	typeName := fmt.Sprintf("%T", msg)
-	if typeName != "textarea.pasteMsg" {
+	if fmt.Sprintf("%T", msg) != "textarea.pasteMsg" {
 		return "", false
 	}
-	text := fmt.Sprint(msg)
-	return text, text != ""
+	return fmt.Sprint(msg), true
 }
 
 func normalizePasteText(text string) string {
@@ -1460,7 +1617,7 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 	m.ta.Reset()
 	switch {
 	case text == "/help" || text == "/?":
-		m.tr.Apply(events.NewSystem(helpText()))
+		m.tr.Apply(events.NewSystem(helpText(m.providerAdmin() != nil, m.webSearchAdmin() != nil, m.rollbackCap() != nil, m.compactionCap() != nil)))
 	case text == "/files":
 		cwd, _ := os.Getwd()
 		m.tr.Apply(events.NewSystem("Type `@` plus part of a local path to attach file context from " + cwd + "."))
@@ -1479,6 +1636,14 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		return m.openSessionsPicker()
 	case text == "/model" || text == "/models":
 		return m.openModelPicker()
+	case text == "/provider" || text == "/providers":
+		return m.openProviderPicker()
+	case text == "/websearch" || text == "/search":
+		return m.openWebSearchPicker()
+	case text == "/rollback" || text == "/revert":
+		return m.openRollbackPicker()
+	case text == "/compact":
+		return m.runCompact()
 	default:
 		// Pass through to backend as a normal message so server/local slash handlers can run later.
 		m.history = append(m.history, text)
@@ -1501,13 +1666,29 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func helpText() string {
+func helpText(providerAdmin bool, webSearch bool, rollback bool, compaction bool) string {
+	providerLine := ""
+	if providerAdmin {
+		providerLine = "\n  /provider      Manage local providers (add/remove)"
+	}
+	webSearchLine := ""
+	if webSearch {
+		webSearchLine = "\n  /websearch     Configure web search provider"
+	}
+	rollbackLine := ""
+	if rollback {
+		rollbackLine = "\n  /rollback      Revert chat and file changes to an earlier message"
+	}
+	compactLine := ""
+	if compaction {
+		compactLine = "\n  /compact       Compact the conversation context to free up the window"
+	}
 	return strings.TrimSpace(`
 Commands:
-  /help          Show this help
+  /help          Show this help (/?)
   /status        Show session / provider / model
   /sessions      Open sessions picker (also ctrl+l)
-  /model         Choose provider and model
+  /model         Choose provider and model` + providerLine + webSearchLine + rollbackLine + compactLine + `
   /new           Start a new session (also ctrl+n)
   /files         Show @file context help
   /plan          Toggle plan-only mode (also shift+tab)
@@ -1530,7 +1711,9 @@ Keys:
   ctrl+l         Sessions picker
   ctrl+n         New session
   shift+tab      Toggle plan-only mode
+  esc            Cancel the current turn
   ctrl+c         Cancel turn or quit
+  ctrl+d         Quit (when input is empty)
 `)
 }
 
@@ -1557,6 +1740,10 @@ func (m model) statusText() string {
 	return strings.TrimSpace(b.String())
 }
 
+// maxCoalescedEvents bounds how many already-buffered events a single Update
+// applies before yielding, so a flood of tool output cannot starve key input.
+const maxCoalescedEvents = 256
+
 func waitEvent(ch <-chan events.Event) tea.Cmd {
 	return func() tea.Msg {
 		ev, ok := <-ch
@@ -1565,6 +1752,33 @@ func waitEvent(ch <-chan events.Event) tea.Cmd {
 		}
 		return eventMsg(ev)
 	}
+}
+
+// applyEvent applies one streamed event to the transcript and keeps the header
+// info in sync. It does NOT repaint — callers coalesce a batch and repaint once.
+func (m *model) applyEvent(ev events.Event) {
+	m.tr.Apply(ev)
+	if ev.Kind == events.KindSession && ev.SessionID != "" {
+		m.info.SessionID = ev.SessionID
+	}
+	if ev.Kind == events.KindModelChanged {
+		if ev.Provider != "" {
+			m.info.Provider = ev.Provider
+		}
+		if ev.Model != "" {
+			m.info.Model = ev.Model
+		}
+	}
+}
+
+// finishTurn finalizes a turn whose event channel has closed (mirrors the
+// turnDoneMsg handler). Returns the follow-up command (none).
+func (m *model) finishTurn() tea.Cmd {
+	m.turnCancel = nil
+	if m.tr.Streaming {
+		m.tr.Apply(events.NewDone())
+	}
+	return nil
 }
 
 func (m *model) layout() {
@@ -1616,18 +1830,46 @@ func (m model) paintHeight() int {
 	return m.screenHeight()
 }
 
+// composerMaxRows caps how many visible rows the composer textarea grows to.
+const composerMaxRows = 4
+
 // composerTextHeight returns the textarea height: 1 by default, up to 4 when
 // the user has entered multiple lines. Uses the real textarea value so typed
 // multi-line content expands; collapsed paste placeholders stay one line.
+//
+// Lines are counted visually (soft-wrapped), so a single long typed line that
+// spills onto a second display row grows the composer the same way an explicit
+// Shift+Enter newline does.
 func (m model) composerTextHeight() int {
-	lines := pasteLineCount(m.ta.Value())
+	lines := visualLineCount(m.ta.Value(), m.composerWrapWidth())
 	if lines < 1 {
 		lines = 1
 	}
-	if lines > 4 {
-		lines = 4
+	if lines > composerMaxRows {
+		lines = composerMaxRows
 	}
 	return lines
+}
+
+// composerWrapWidth returns the effective text width the composer textarea
+// soft-wraps at: the terminal width minus the border/padding (matching the
+// SetWidth call in layout) minus the 2-cell prompt reserved by
+// SetPromptFunc. Returns 0 when the terminal size is not yet known so callers
+// fall back to logical line counting.
+func (m model) composerWrapWidth() int {
+	innerW := m.width - 4
+	if innerW < 20 {
+		innerW = 20
+	}
+	// SetPromptFunc(2, …) reserves 2 cells for the "❯ " prompt.
+	wrapW := innerW - 2
+	if m.width <= 0 {
+		return 0
+	}
+	if wrapW < 1 {
+		wrapW = 1
+	}
+	return wrapW
 }
 
 func (m *model) refreshViewport() {
@@ -1647,6 +1889,7 @@ func (m *model) refreshViewport() {
 func (m *model) viewportContent() (string, []hitRegion, []artifactHit) {
 	if m.isEmptyConversation() {
 		m.transcriptPlainLines = nil
+		m.transcriptContentSpans = nil
 		return m.renderWelcome(), nil, nil
 	}
 	return m.renderTranscript()
@@ -1695,6 +1938,10 @@ func (m model) renderWelcome() string {
 }
 
 func (m model) welcomeLines(width int) []string {
+	if m.info.Mode == "code" {
+		return m.codeWelcomeLines(width)
+	}
+
 	th := m.theme
 	title := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("208")).
@@ -1713,6 +1960,73 @@ func (m model) welcomeLines(width int) []string {
 		"",
 		th.Hint.Width(width).Align(lipgloss.Center).Render("/ commands  ·  @ files  ·  shift+tab plan  ·  shift+enter newline"),
 	}
+}
+
+// codeWelcomeLines renders the welcome card for `astonish code` — the local,
+// unsandboxed coding tool. Unlike platform chat, tools run directly on the host
+// filesystem in the working directory, so the copy makes that context clear and
+// shows the directory being operated on.
+func (m model) codeWelcomeLines(width int) []string {
+	th := m.theme
+	title := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("208")).
+		Background(lipgloss.Color("#000000")).
+		Bold(true).
+		Align(lipgloss.Center).
+		Width(width).
+		Render("✦ Astonish Code")
+
+	lines := []string{
+		title,
+		"",
+		th.Text.Width(width).Align(lipgloss.Center).Render("Your local AI coding tool — reads, writes, and runs code right here."),
+	}
+
+	if dir := abbreviateHomePath(m.info.WorkingDir); dir != "" {
+		lines = append(lines,
+			th.Muted.Width(width).Align(lipgloss.Center).Render("Working in "+dir),
+		)
+	}
+
+	lines = append(lines,
+		th.Muted.Width(width).Align(lipgloss.Center).Render(codeApprovalNotice(m.info.AutoApprove)),
+		th.Muted.Width(width).Align(lipgloss.Center).Render("Ready when you are."),
+		"",
+		th.Hint.Width(width).Align(lipgloss.Center).Render("/commands · @files · /rollback · shift+tab plan · shift+enter newline"),
+	)
+
+	return lines
+}
+
+// codeApprovalNotice describes code mode's tool-execution policy for the welcome
+// card. Read-only tools always run without prompting; only file-modifying and
+// command-running tools are gated — and that gate is skipped entirely under
+// --auto-approve.
+func codeApprovalNotice(autoApprove bool) string {
+	if autoApprove {
+		return "Astonish intelligence, right where your code lives — no prompts."
+	}
+	return "Astonish intelligence, right where your code lives."
+}
+
+// abbreviateHomePath collapses the user's home directory prefix to "~" for
+// display. Returns the input unchanged when it is not under the home directory,
+// and empty for empty input.
+func abbreviateHomePath(path string) string {
+	if path == "" {
+		return ""
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return path
+	}
+	if path == home {
+		return "~"
+	}
+	if rel, err := filepath.Rel(home, path); err == nil && rel != "" && !strings.HasPrefix(rel, "..") {
+		return "~" + string(filepath.Separator) + rel
+	}
+	return path
 }
 
 // viewportTopY is the screen row where the transcript viewport starts.
@@ -1796,7 +2110,7 @@ func (m model) handleMouseRelease(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	}
 	text := ""
 	if m.selectionMoved {
-		text = selectionText(m.transcriptPlainLines, m.selectionStart, m.selectionEnd)
+		text = selectionText(m.transcriptPlainLines, m.transcriptContentSpans, m.selectionStart, m.selectionEnd)
 	}
 	m.selecting = false
 	m.selectionMoved = false
@@ -1955,25 +2269,70 @@ func (m model) handleFileViewerMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// renderAgentMarkdown returns the rendered markdown for an agent message block,
+// memoized by width+content. Markdown rendering (goldmark + chroma syntax
+// highlighting) is the dominant per-event cost; caching finalized blocks keeps
+// the UI loop from re-highlighting the entire transcript on every streamed
+// event. The cache is bounded implicitly by the number of distinct
+// (width, content) blocks in a session and cleared on resize.
+func (m *model) renderAgentMarkdown(content string, width int) string {
+	if m.mdCache == nil {
+		m.mdCache = make(map[string]string)
+	}
+	// Key on width + content. A NUL separator avoids collisions between the
+	// width digits and content. Streaming (last) blocks change content every
+	// event, so they naturally get a fresh entry each time; finalized blocks
+	// are stable and hit the cache.
+	key := strconv.Itoa(width) + "\x00" + content
+	if cached, ok := m.mdCache[key]; ok {
+		return cached
+	}
+	out := render.Markdown(content, width, m.theme.RenderStyles())
+	m.mdCache[key] = out
+	return out
+}
+
 func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 	var b strings.Builder
 	var hits []hitRegion
 	var artifactHits []artifactHit
 	var plainLines []string
+	var contentSpans [][2]int
 	th := m.theme
 	cw := contentWidth(m.width)
 	lineNo := 0
 
-	appendPlain := func(block string) {
+	// appendPlainSpanned appends the plain (ANSI-stripped) lines of block along
+	// with a content span for each line. spanFor maps a block-local line index
+	// and its plain text to the [start,end) rune-column range that is real
+	// content (excluding decorative chrome). Spans are shifted by the padBlock
+	// margin so they line up with the padded plain lines used for selection.
+	appendPlainSpanned := func(block string, spanFor func(i int, plain string) [2]int) {
 		if block == "" {
 			return
 		}
-		for _, line := range strings.Split(block, "\n") {
-			plainLines = append(plainLines, stripANSI(line))
+		for i, line := range strings.Split(block, "\n") {
+			plain := stripANSI(line)
+			plainLines = append(plainLines, plain)
+			total := len([]rune(plain))
+			span := [2]int{0, total}
+			if spanFor != nil {
+				span = spanFor(i, plain)
+			}
+			span[0] = clamp(span[0], 0, total)
+			span[1] = clamp(span[1], 0, total)
+			if span[0] > span[1] {
+				span[0], span[1] = span[1], span[0]
+			}
+			contentSpans = append(contentSpans, span)
 		}
 	}
 
-	appendBlock := func(itemIdx int, kind events.ItemKind, block string) int {
+	// appendBlockSpanned renders block into the transcript. spanFor (optional)
+	// declares per-line content spans relative to the *padded* block so
+	// drag-to-copy can exclude decorative chrome. When spanFor is nil the whole
+	// line is treated as content.
+	appendBlockSpanned := func(itemIdx int, kind events.ItemKind, block string, spanFor func(i int, plain string) [2]int) int {
 		if block == "" {
 			return lineNo
 		}
@@ -1986,20 +2345,25 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 		n := lineCount(rawPadded)
 		b.WriteString(padded)
 		b.WriteString("\n")
-		appendPlain(padded)
+		appendPlainSpanned(padded, spanFor)
 		gap := m.paintRow("", m.width)
 		b.WriteString(gap)
 		b.WriteString("\n") // vertical gap between messages
 		plainLines = append(plainLines, stripANSI(gap))
+		contentSpans = append(contentSpans, [2]int{0, 0})
 		lineNo += n + 1 // block lines + one blank separator row
 		hits = append(hits, hitRegion{start: start, end: start + n, itemIdx: itemIdx, kind: kind})
 		return start
 	}
 
+	appendBlock := func(itemIdx int, kind events.ItemKind, block string) int {
+		return appendBlockSpanned(itemIdx, kind, block, nil)
+	}
+
 	for i, it := range m.tr.Items {
 		switch it.Kind {
 		case events.ItemUser:
-			appendBlock(i, it.Kind, m.renderUserBubble(it.Content, it.Expanded, cw))
+			appendBlockSpanned(i, it.Kind, m.renderUserBubble(it.Content, it.Expanded, cw), userBubbleContentSpan)
 		case events.ItemAgent:
 			content := strings.TrimRight(it.Content, "\n")
 			if content == "" {
@@ -2011,7 +2375,7 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 				appendBlock(i, it.Kind, m.renderThinkingBubble(content, cw))
 				continue
 			}
-			md := render.Markdown(content, cw, th.RenderStyles())
+			md := m.renderAgentMarkdown(content, cw)
 			if md == "" {
 				md = th.Agent.Width(cw).Render(content)
 			}
@@ -2052,6 +2416,7 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 		}
 	}
 	m.transcriptPlainLines = plainLines
+	m.transcriptContentSpans = contentSpans
 	return b.String(), hits, artifactHits
 }
 
@@ -2263,7 +2628,7 @@ func (m model) renderFileViewerContent(width int) string {
 	return padBlock(content)
 }
 
-// renderFileDiff paints a main-thread dual-gutter editor-style file change.
+// renderFileDiff paints a main-thread single-gutter editor-style file change.
 // Diffs live outside the tool activity fold so they stay visible while tools
 // stay collapsed; the fold holds raw request/response only.
 func (m model) renderFileDiff(it events.Item, width int) string {
@@ -2274,12 +2639,12 @@ func (m model) renderFileDiff(it events.Item, width int) string {
 	}
 	// Prefer verification_context from the tool (stored on the item).
 	if it.DiffVerification != "" {
-		if out := render.RenderVerificationDiff(it.DiffVerification, it.Path, width, true, rs); out != "" {
+		if out := render.RenderVerificationDiff(it.DiffVerification, it.Path, width, true, m.workDir, rs); out != "" {
 			return out
 		}
 	}
 	// Fallback: build from args (old_string/new_string/content).
-	return render.DiffFromToolArgs(name, it.Args, width, true, rs)
+	return render.DiffFromToolArgs(name, it.Args, width, true, m.workDir, rs)
 }
 
 // renderActivity builds collapsed summary (+N/−M) and expanded raw tool detail.
@@ -2420,6 +2785,46 @@ func (m model) renderActivity(it events.Item, width int) string {
 	return b.String()
 }
 
+// userBubbleContentSpan returns the [start,end) rune-column range of real
+// content within a rendered (padded) user-bubble line, excluding the box
+// border, interior padding, and any embedded expand/collapse hint. It is used
+// so drag-to-copy yields the prompt text alone rather than the surrounding
+// chrome. Border rows (┌─┐ / └─┘) and any line without a pair of vertical
+// borders contribute no copyable content.
+//
+// A padded body line looks like: "<margin>│  <content><pad>│". We locate the
+// first and last vertical border rune, then trim the interior padding spaces
+// that the bubble adds inside the borders.
+func userBubbleContentSpan(_ int, plain string) [2]int {
+	runes := []rune(plain)
+	first := -1
+	last := -1
+	for i, r := range runes {
+		if r == '│' {
+			if first == -1 {
+				first = i
+			}
+			last = i
+		}
+	}
+	// Border/decoration rows (top/bottom) have no interior verticals, or only
+	// the corner glyphs — either way there is no body content to copy.
+	if first == -1 || last <= first {
+		return [2]int{0, 0}
+	}
+	start := first + 1
+	end := last
+	// Trim the interior padding the bubble inserts inside the borders so the
+	// copied text starts and ends at the actual content, not the spaces.
+	for start < end && runes[start] == ' ' {
+		start++
+	}
+	for end > start && runes[end-1] == ' ' {
+		end--
+	}
+	return [2]int{start, end}
+}
+
 // renderUserBubble paints a full-width warm accent rectangle around the user
 // message. The interior stays black, not filled gray. Long messages remain
 // height-capped unless expanded; the expand/collapse cue is embedded in the
@@ -2521,7 +2926,7 @@ func (m model) View() string {
 
 	// Completion popups sit just above the composer (filter-as-you-type).
 	composerBlock := m.renderComposer()
-	if !m.tr.Awaiting && !m.sessions.open && !m.modelPicker.open {
+	if !m.tr.Awaiting && !m.sessions.open && !m.rollback.open && !m.modelPicker.open && !m.providerPicker.open && !m.webSearchPicker.open {
 		switch {
 		case m.slash.active && len(m.slash.matches) > 0:
 			composerBlock = lipgloss.JoinVertical(lipgloss.Left,
@@ -2561,6 +2966,27 @@ func (m model) View() string {
 	}
 	if m.modelPicker.open {
 		overlay := m.renderModelPickerOverlay()
+		return m.paintBackground(lipgloss.Place(m.width, m.screenHeight(), lipgloss.Center, lipgloss.Center, overlay,
+			lipgloss.WithWhitespaceChars(" "),
+			lipgloss.WithWhitespaceBackground(lipgloss.Color("#000000")),
+		))
+	}
+	if m.providerPicker.open {
+		overlay := m.renderProviderPickerOverlay()
+		return m.paintBackground(lipgloss.Place(m.width, m.screenHeight(), lipgloss.Center, lipgloss.Center, overlay,
+			lipgloss.WithWhitespaceChars(" "),
+			lipgloss.WithWhitespaceBackground(lipgloss.Color("#000000")),
+		))
+	}
+	if m.webSearchPicker.open {
+		overlay := m.renderWebSearchPickerOverlay()
+		return m.paintBackground(lipgloss.Place(m.width, m.screenHeight(), lipgloss.Center, lipgloss.Center, overlay,
+			lipgloss.WithWhitespaceChars(" "),
+			lipgloss.WithWhitespaceBackground(lipgloss.Color("#000000")),
+		))
+	}
+	if m.rollback.open {
+		overlay := m.renderRollbackOverlay()
 		return m.paintBackground(lipgloss.Place(m.width, m.screenHeight(), lipgloss.Center, lipgloss.Center, overlay,
 			lipgloss.WithWhitespaceChars(" "),
 			lipgloss.WithWhitespaceBackground(lipgloss.Color("#000000")),
@@ -2782,17 +3208,84 @@ func (m model) renderHeaderLeft(text string) string {
 
 func (m model) headerUsageText() string {
 	usage := &events.Usage{}
-	if m.tr != nil && m.tr.LastUsage != nil {
-		usage = m.tr.LastUsage
+	var contextTokens int64
+	if m.tr != nil {
+		if m.tr.LastUsage != nil {
+			usage = m.tr.LastUsage
+		}
+		contextTokens = m.tr.ContextTokens
 	}
+
+	// Context utilization: how full the model's context window is right now.
+	// This is the metric that matters when coding (how much room is left before
+	// compaction / truncation). Falls back to the latest turn's total tokens.
+	if contextTokens <= 0 {
+		contextTokens = usage.Total
+	}
+
+	if contextTokens <= 0 && usage.Total <= 0 {
+		return "Context 0"
+	}
+
+	ctxPart := "Context " + formatTokenCount(contextTokens)
+	if window := contextWindowFor(m.info.Model); window > 0 && contextTokens > 0 {
+		pct := int(float64(contextTokens) / float64(window) * 100)
+		if pct > 100 {
+			pct = 100
+		}
+		ctxPart = fmt.Sprintf("Context %s/%s (%d%%)",
+			formatTokenCount(contextTokens), formatTokenCount(window), pct)
+	}
+
 	if usage.Total <= 0 {
-		return "Usage 0"
+		return ctxPart
 	}
-	return fmt.Sprintf("Usage %s · in %s · out %s",
-		formatTokenCount(usage.Total),
-		formatTokenCount(usage.Input),
-		formatTokenCount(usage.Output),
-	)
+	// Cumulative session usage is appended after the context figure but kept
+	// short (total only) so the header stays on one line on narrow terminals;
+	// the context figure is the primary, coding-relevant metric.
+	return fmt.Sprintf("%s · Usage %s", ctxPart, formatTokenCount(usage.Total))
+}
+
+// contextWindowFor returns the approximate context-window size (in tokens) for a
+// model name, or 0 when unknown. Matching is domain-agnostic: it keys off common
+// family substrings in the model identifier rather than any single provider's
+// catalog, so it works for local code mode across providers.
+func contextWindowFor(model string) int64 {
+	name := strings.ToLower(strings.TrimSpace(model))
+	if name == "" {
+		return 0
+	}
+	// Ordered longest/most-specific first so e.g. "gpt-4o-mini" matches gpt-4o.
+	families := []struct {
+		match  string
+		window int64
+	}{
+		{"claude", 200_000},
+		{"gpt-5", 272_000},
+		{"gpt-4.1", 1_047_576},
+		{"gpt-4o", 128_000},
+		{"gpt-4-turbo", 128_000},
+		{"gpt-4", 128_000},
+		{"o4", 200_000},
+		{"o3", 200_000},
+		{"o1", 200_000},
+		{"gpt-3.5", 16_385},
+		{"gemini-2.5", 1_048_576},
+		{"gemini-1.5", 1_048_576},
+		{"gemini", 1_048_576},
+		{"llama-3", 128_000},
+		{"llama", 128_000},
+		{"mistral", 128_000},
+		{"mixtral", 32_768},
+		{"deepseek", 128_000},
+		{"qwen", 128_000},
+	}
+	for _, f := range families {
+		if strings.Contains(name, f.match) {
+			return f.window
+		}
+	}
+	return 0
 }
 
 func formatTokenCount(n int64) string {
@@ -2947,10 +3440,29 @@ func isAmbiguousModelLabel(modelName string) bool {
 	return strings.EqualFold(strings.TrimSpace(modelName), "default")
 }
 
+// cancelInFlightTurn aborts the active RunTurn when one is streaming. Returns
+// handled=true when a turn was cancelled. Callers that want quit-on-idle
+// (ctrl+c) check handled and fall through to quit; Esc leaves the app running.
+func (m model) cancelInFlightTurn() (tea.Model, tea.Cmd, bool) {
+	if !m.tr.Streaming || m.turnCancel == nil {
+		return m, nil, false
+	}
+	m.turnCancel()
+	m.turnCancel = nil
+	m.tr.Streaming = false
+	m.tr.Status = ""
+	m.tr.Apply(events.NewSystem("Turn cancelled."))
+	m.refreshViewport()
+	return m, nil, true
+}
+
 func (m model) renderHints() string {
 	th := m.theme
 	if m.tr.Awaiting {
 		return th.Hint.Render("y approve  ·  n deny  ·  1/2 select  ·  esc deny")
+	}
+	if m.tr.Streaming {
+		return m.paintRow(th.Hint.Render("esc cancel  ·  ↑↓ scroll  ·  ctrl+c cancel"), m.width)
 	}
 	if m.slash.active {
 		return th.Hint.Render("↑↓ select  ·  enter run  ·  tab next  ·  esc close")

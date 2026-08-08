@@ -6,6 +6,8 @@ import (
 )
 
 func TestStatsFromSteps_Diff(t *testing.T) {
+	// old "a\nb" → new "a\nb\nc": only line "c" is added (a/b unchanged), so a
+	// line-level diff yields +1 −0 — not "every old line removed, every new added".
 	st := StatsFromSteps([]ToolStep{
 		{
 			Name: "edit_file",
@@ -16,8 +18,25 @@ func TestStatsFromSteps_Diff(t *testing.T) {
 			Status: "complete",
 		},
 	})
-	if st.Kind != "diff" || st.Added < 1 || st.Removed < 1 {
-		t.Fatalf("stats: %+v", st)
+	if st.Kind != "diff" || st.Added != 1 || st.Removed != 0 {
+		t.Fatalf("stats: %+v want +1 −0 (line-level diff)", st)
+	}
+}
+
+func TestStatsFromSteps_DiffReplace(t *testing.T) {
+	// Replacing one line inside an unchanged block: +1 −1.
+	st := StatsFromSteps([]ToolStep{
+		{
+			Name: "edit_file",
+			Args: map[string]any{
+				"old_string": "a\nb\nc\n",
+				"new_string": "a\nX\nc\n",
+			},
+			Status: "complete",
+		},
+	})
+	if st.Kind != "diff" || st.Added != 1 || st.Removed != 1 {
+		t.Fatalf("stats: %+v want +1 −1 (only the changed line)", st)
 	}
 }
 

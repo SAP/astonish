@@ -13,11 +13,17 @@ func TestTurnOptionsPlanMode(t *testing.T) {
 	if got := m.turnOptions(); got.SystemContext != "" {
 		t.Fatalf("plan mode off SystemContext = %q, want empty", got.SystemContext)
 	}
+	if got := m.turnOptions(); got.PlanMode {
+		t.Fatal("plan mode off should not set PlanMode flag")
+	}
 
 	m.planMode = true
 	got := m.turnOptions()
 	if got.SystemContext == "" {
 		t.Fatal("plan mode on should send system context")
+	}
+	if !got.PlanMode {
+		t.Fatal("plan mode on should set the PlanMode flag for the runtime gate")
 	}
 }
 

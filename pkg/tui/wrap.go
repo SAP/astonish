@@ -60,6 +60,91 @@ func lineCount(s string) int {
 	return strings.Count(s, "\n") + 1
 }
 
+// visualLineCount returns the number of display rows text occupies when
+// soft-wrapped to width, counting both explicit newlines and word-wrapped
+// long lines. It mirrors the bubbles/textarea word-wrap behaviour so the
+// composer can grow when a single typed line spills onto a second visual row,
+// the same way it grows for an explicit Shift+Enter newline.
+//
+// When width <= 0 (e.g. the terminal size is not yet known) it falls back to
+// counting logical lines so behaviour matches the pre-wrap-aware path.
+func visualLineCount(text string, width int) int {
+	if text == "" {
+		return 0
+	}
+	if width <= 0 {
+		return lineCount(text)
+	}
+	total := 0
+	for _, logical := range strings.Split(text, "\n") {
+		total += wrappedRows(logical, width)
+	}
+	return total
+}
+
+// wrappedRows returns how many display rows a single logical line (no newline)
+// occupies at width. An empty line still occupies one row. Word boundaries are
+// preferred, but a word longer than width is broken across rows so the count
+// tracks the textarea's actual rendering.
+func wrappedRows(line string, width int) int {
+	if width < 1 {
+		width = 1
+	}
+	if line == "" {
+		return 1
+	}
+	rows := 1
+	col := 0
+	for _, word := range splitKeepSpaces(line) {
+		wlen := lipgloss.Width(word)
+		if wlen == 0 {
+			continue
+		}
+		if col > 0 && col+wlen > width {
+			// Word does not fit on the current row: wrap to a new row.
+			rows++
+			col = 0
+		}
+		if wlen > width {
+			// Word itself is wider than the row: it spans multiple rows.
+			// The first row is the current one; each further full width adds a row.
+			extra := (col + wlen - 1) / width
+			rows += extra
+			col = (col + wlen) % width
+			if col == 0 {
+				col = width
+			}
+			continue
+		}
+		col += wlen
+	}
+	return rows
+}
+
+// splitKeepSpaces splits s into tokens, keeping runs of spaces attached to the
+// preceding word so wrap accounting matches how spaces are laid out on a row.
+func splitKeepSpaces(s string) []string {
+	var tokens []string
+	var b strings.Builder
+	inSpace := false
+	flush := func() {
+		if b.Len() > 0 {
+			tokens = append(tokens, b.String())
+			b.Reset()
+		}
+	}
+	for _, r := range s {
+		isSpace := r == ' '
+		if isSpace != inSpace && b.Len() > 0 {
+			flush()
+		}
+		inSpace = isSpace
+		b.WriteRune(r)
+	}
+	flush()
+	return tokens
+}
+
 // truncateVisualLines keeps the first maxLines of s. If truncated and
 // moreSuffix is non-empty, the last kept line is replaced by moreSuffix
 // (so total lines stay <= maxLines).

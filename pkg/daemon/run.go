@@ -62,6 +62,24 @@ func Run(cfg RunConfig) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
+	// Capture the providers declared in config.yaml *before* any platform
+	// cascade clears them (cascadePlatformProviders wipes appCfg.Providers so
+	// the DB is the sole runtime source). These are published to the API layer
+	// so the effective-providers view can surface them read-only alongside the
+	// DB-backed providers — useful for Kubernetes deploys with default providers
+	// baked into config. Runtime resolution still comes exclusively from the DB.
+	// Because every pod loads the same config.yaml, entries are keyed by name
+	// and appear once regardless of pod count.
+	configFileProviders := make(map[string]config.ProviderConfig, len(appCfg.Providers))
+	for name, pCfg := range appCfg.Providers {
+		inner := make(config.ProviderConfig, len(pCfg))
+		for k, v := range pCfg {
+			inner[k] = v
+		}
+		configFileProviders[name] = inner
+	}
+	api.SetLocalProviders(configFileProviders)
+
 	// Validate sandbox config early so invalid values are caught at startup
 	// rather than producing cryptic Incus errors during container creation.
 	if err := sandbox.ValidateSandboxConfig(&appCfg.Sandbox); err != nil {
@@ -1556,6 +1574,14 @@ func Run(cfg RunConfig) error {
 		}
 	}()
 
+	// Discover tools for config-file (mcp_config.json) MCP servers that are not
+	// yet cached, so they "just work" in a local platform install without a
+	// manual Settings → MCP → Refresh. Uses the pre-warm context so network
+	// policy stores / sandbox config are available for stdio discovery.
+	go func() {
+		api.DiscoverUncachedFileMCPServers(buildPreWarmCtx(), nil)
+	}()
+
 	// Signal handling
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
@@ -2058,11 +2084,16 @@ func runCleanupCycle(appCfg *config.AppConfig, sessionStore *persistentsession.F
 // Note: This only applies Platform + Org layers. Team-level provider overrides
 // are resolved per-message via the provider.Pool in the channel manager.
 func cascadePlatformProviders(ctx context.Context, backend store.PlatformBackend, appCfg *config.AppConfig, logger *Logger) {
-	// Platform mode: providers come exclusively from the database.
-	// Clear any config.yaml residue so the DB is the sole source of truth.
-	appCfg.Providers = nil
-	appCfg.General.DefaultProvider = ""
-	appCfg.General.DefaultModel = ""
+	// Merge config.yaml providers with the database cascade so the daemon can
+	// run BOTH: providers baked into config.yaml (useful for Kubernetes deploys
+	// with default providers) AND providers configured at runtime in the DB.
+	// The daemon is a trusted process, so real API keys stay in-process here —
+	// they never cross a client/API boundary (the effective-providers HTTP view
+	// masks secrets separately). config.yaml is the base layer; the DB cascade
+	// overlays it, so a DB entry with the same instance name wins.
+	configProviders := appCfg.Providers // captured before we rebuild the map
+	configDefaultProvider := appCfg.General.DefaultProvider
+	configDefaultModel := appCfg.General.DefaultModel
 
 	// Determine org settings store for the default org (if configured).
 	var orgSettings store.OrgSettingsStore
@@ -2078,12 +2109,30 @@ func cascadePlatformProviders(ctx context.Context, backend store.PlatformBackend
 	// overlay chain is a no-op. Keeps every ResolveEffectiveConfig call site
 	// syntactically consistent with the per-request paths.
 	resolved = provider.ApplyProviderOverride(resolved, "", "")
-	appCfg.Providers = resolved.Providers
-	appCfg.General.DefaultProvider = resolved.General.DefaultProvider
-	appCfg.General.DefaultModel = resolved.General.DefaultModel
 
-	if resolved.General.DefaultProvider != "" {
-		logger.Printf("Platform providers cascaded: default=%s model=%s (%d providers)",
-			resolved.General.DefaultProvider, resolved.General.DefaultModel, len(resolved.Providers))
+	// Build the merged provider set: config.yaml first, then DB overrides.
+	merged := make(map[string]config.ProviderConfig, len(configProviders)+len(resolved.Providers))
+	for name, pCfg := range configProviders {
+		merged[name] = pCfg
 	}
+	for name, pCfg := range resolved.Providers {
+		merged[name] = pCfg // DB wins on name collision
+	}
+	if len(merged) == 0 {
+		merged = nil
+	}
+	appCfg.Providers = merged
+
+	// Defaults: DB default wins if set; otherwise keep the config.yaml default.
+	if resolved.General.DefaultProvider != "" {
+		appCfg.General.DefaultProvider = resolved.General.DefaultProvider
+		appCfg.General.DefaultModel = resolved.General.DefaultModel
+	} else {
+		appCfg.General.DefaultProvider = configDefaultProvider
+		appCfg.General.DefaultModel = configDefaultModel
+	}
+
+	logger.Printf("Providers merged: default=%s model=%s (%d config.yaml + %d DB → %d total)",
+		appCfg.General.DefaultProvider, appCfg.General.DefaultModel,
+		len(configProviders), len(resolved.Providers), len(merged))
 }

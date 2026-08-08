@@ -180,10 +180,22 @@ func (pm *ProcessManager) Start(command, workDir string, rows, cols uint16) (*Pr
 	// interactive configs, etc.) from hanging — the agent cannot operate a text editor.
 	// TERM=xterm-256color ensures consistent terminal behavior regardless of how
 	// Astonish is launched.
+	//
+	// The command still runs in a real PTY, so genuinely interactive programs
+	// (REPLs, ssh, y/n prompts, TUIs) keep working and can be driven via the
+	// waiting_for_input + process_write loop. What we suppress is the *automatic*
+	// pager: because a PTY looks like a terminal, git/less/most CLIs launch a
+	// pager (less) that blocks waiting for keypresses the agent has no reason to
+	// send — a frequent hang (e.g. `git diff`, `git log`). GIT_PAGER/PAGER=cat
+	// make those print instead of paginating, and GIT_TERMINAL_PROMPT=0 makes git
+	// fail fast rather than block on an unanswerable credential prompt.
 	cmd.Env = append(os.Environ(),
 		"EDITOR=true",
 		"VISUAL=true",
 		"TERM=xterm-256color",
+		"PAGER=cat",
+		"GIT_PAGER=cat",
+		"GIT_TERMINAL_PROMPT=0",
 	)
 
 	// Start with PTY

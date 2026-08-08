@@ -2,6 +2,8 @@ package session
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -698,5 +700,204 @@ func TestFileStore_DeleteCascadesChildren(t *testing.T) {
 	})
 	if err != nil {
 		t.Errorf("Get(unrelated) error = %v, want nil (should survive cascade)", err)
+	}
+}
+
+func TestFileStore_TruncateEvents(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	sess := createTestSession(t, store, "myapp", "user1")
+
+	for i, text := range []string{"msg0", "msg1", "msg2", "msg3"} {
+		ev := testEvent("ev"+string(rune('0'+i)), "user", text)
+		if err := store.AppendEvent(ctx, sess, ev); err != nil {
+			t.Fatalf("AppendEvent(%d) error = %v", i, err)
+		}
+	}
+
+	// Keep the first 2 events, discard the rest.
+	kept, err := store.TruncateEvents("myapp", "user1", sess.ID(), 2)
+	if err != nil {
+		t.Fatalf("TruncateEvents() error = %v", err)
+	}
+	if kept != 2 {
+		t.Errorf("TruncateEvents returned %d, want 2", kept)
+	}
+
+	getResp, err := store.Get(ctx, &adksession.GetRequest{
+		AppName:   "myapp",
+		UserID:    "user1",
+		SessionID: sess.ID(),
+	})
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if got := getResp.Session.Events().Len(); got != 2 {
+		t.Errorf("Events().Len() after truncate = %d, want 2", got)
+	}
+
+	// The persisted transcript should reflect the truncation after reload.
+	fresh, err := NewFileStore(store.BaseDir())
+	if err != nil {
+		t.Fatalf("NewFileStore() error = %v", err)
+	}
+	reloaded, err := fresh.Get(ctx, &adksession.GetRequest{
+		AppName:   "myapp",
+		UserID:    "user1",
+		SessionID: sess.ID(),
+	})
+	if err != nil {
+		t.Fatalf("Get(reloaded) error = %v", err)
+	}
+	if got := reloaded.Session.Events().Len(); got != 2 {
+		t.Errorf("reloaded Events().Len() = %d, want 2 (transcript rewrite)", got)
+	}
+
+	// Truncating to the full (already shorter) length is a no-op.
+	kept, err = store.TruncateEvents("myapp", "user1", sess.ID(), 5)
+	if err != nil {
+		t.Fatalf("TruncateEvents(over) error = %v", err)
+	}
+	if kept != 2 {
+		t.Errorf("TruncateEvents(over) returned %d, want 2 (clamped)", kept)
+	}
+
+	// Truncating to 0 clears all events.
+	if _, err := store.TruncateEvents("myapp", "user1", sess.ID(), 0); err != nil {
+		t.Fatalf("TruncateEvents(0) error = %v", err)
+	}
+	getResp, _ = store.Get(ctx, &adksession.GetRequest{
+		AppName:   "myapp",
+		UserID:    "user1",
+		SessionID: sess.ID(),
+	})
+	if got := getResp.Session.Events().Len(); got != 0 {
+		t.Errorf("Events().Len() after truncate(0) = %d, want 0", got)
+	}
+}
+
+func TestFileStore_LatestDescendantAndAncestorChain(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// root -> child -> tip
+	root, err := store.Create(ctx, &adksession.CreateRequest{
+		AppName: "app", UserID: "u", SessionID: "root",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Touch UpdatedAt order: create child then tip with slight delay via sequential creates.
+	_, err = store.Create(ctx, &adksession.CreateRequest{
+		AppName: "app", UserID: "u", SessionID: "child",
+		State: map[string]any{StateKeyParentID: root.Session.ID()},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.Create(ctx, &adksession.CreateRequest{
+		AppName: "app", UserID: "u", SessionID: "tip",
+		State: map[string]any{StateKeyParentID: "child"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := store.LatestDescendant("root"); got != "tip" {
+		t.Fatalf("LatestDescendant(root)=%q want tip", got)
+	}
+	if got := store.LatestDescendant("child"); got != "tip" {
+		t.Fatalf("LatestDescendant(child)=%q want tip", got)
+	}
+	if got := store.LatestDescendant("tip"); got != "tip" {
+		t.Fatalf("LatestDescendant(tip)=%q want tip", got)
+	}
+	if got := store.LatestDescendant("missing"); got != "missing" {
+		t.Fatalf("LatestDescendant(missing)=%q want missing", got)
+	}
+
+	chain := store.AncestorChain("tip")
+	if len(chain) != 3 || chain[0] != "root" || chain[1] != "child" || chain[2] != "tip" {
+		t.Fatalf("AncestorChain(tip)=%v want [root child tip]", chain)
+	}
+	chain = store.AncestorChain("root")
+	if len(chain) != 1 || chain[0] != "root" {
+		t.Fatalf("AncestorChain(root)=%v want [root]", chain)
+	}
+}
+
+func TestFileStore_ArchiveAndReplaceEvents(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	resp, err := store.Create(ctx, &adksession.CreateRequest{AppName: "app", UserID: "u", SessionID: "active"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := resp.Session
+	// Seed several events via the live session pointer (as ADK would).
+	for i := 0; i < 10; i++ {
+		ev := &adksession.Event{
+			ID:     fmt.Sprintf("e%d", i),
+			Author: "user",
+			LLMResponse: adkmodel.LLMResponse{
+				Content: genai.NewContentFromText(fmt.Sprintf("msg %d %s", i, strings.Repeat("x", 50)), genai.RoleUser),
+			},
+		}
+		if err := store.AppendEvent(ctx, sess, ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if sess.Events().Len() != 10 {
+		t.Fatalf("live events = %d want 10", sess.Events().Len())
+	}
+
+	compacted := []*adksession.Event{
+		{
+			ID:     "c0",
+			Author: "model",
+			LLMResponse: adkmodel.LLMResponse{
+				Content: genai.NewContentFromText("[Context Summary — 10 earlier messages compacted]\n\nSUMMARY", genai.RoleModel),
+			},
+		},
+		{
+			ID:     "c1",
+			Author: "user",
+			LLMResponse: adkmodel.LLMResponse{
+				Content: genai.NewContentFromText("recent", genai.RoleUser),
+			},
+		},
+	}
+	archiveID, err := store.ArchiveAndReplaceEvents("app", "u", "active", compacted)
+	if err != nil {
+		t.Fatalf("ArchiveAndReplaceEvents: %v", err)
+	}
+	if archiveID == "" || archiveID == "active" {
+		t.Fatalf("bad archive id %q", archiveID)
+	}
+
+	// Live ADK session pointer must see the rewrite immediately.
+	if sess.Events().Len() != 2 {
+		t.Fatalf("live session events after rewrite = %d want 2", sess.Events().Len())
+	}
+
+	// Archive has the full history.
+	arch, err := store.Get(ctx, &adksession.GetRequest{AppName: "app", UserID: "u", SessionID: archiveID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if arch.Session.Events().Len() != 10 {
+		t.Fatalf("archive events = %d want 10", arch.Session.Events().Len())
+	}
+
+	// Active is a child of the archive.
+	meta, err := store.GetSessionMeta("active")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.ParentID != archiveID {
+		t.Fatalf("active ParentID = %q want %q", meta.ParentID, archiveID)
+	}
+	if store.LatestDescendant(archiveID) != "active" {
+		t.Fatalf("LatestDescendant(archive)=%q want active", store.LatestDescendant(archiveID))
 	}
 }

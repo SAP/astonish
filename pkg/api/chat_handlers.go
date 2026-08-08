@@ -47,6 +47,7 @@ type StudioChatRequest struct {
 	AutoApprove      bool             `json:"autoApprove,omitempty"`
 	Debug            bool             `json:"debug,omitempty"`            // reserved for future debug streaming
 	SystemContext    string           `json:"systemContext,omitempty"`    // per-turn system instructions (not shown to user)
+	PlanMode         bool             `json:"planMode,omitempty"`         // per-turn plan-mode gate: refuse mutating tools + delegate_tasks
 	PinnedToolGroups []string         `json:"pinnedToolGroups,omitempty"` // tool groups to always inject (wizard sessions)
 	Provider         string           `json:"provider,omitempty"`         // per-request provider override (pre-chat picker)
 	Model            string           `json:"model,omitempty"`            // per-request model override (pre-chat picker)
@@ -1318,7 +1319,7 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 				runner.EmitPanicError(fmt.Sprintf("Internal error: %v", r))
 			}
 		}()
-		runner.Run(chatAgent, sessionService, comp.LLM, titleSetter, userMsg, msg, req.AutoApprove, req.SystemContext, req.PinnedToolGroups)
+		runner.Run(chatAgent, sessionService, comp.LLM, titleSetter, userMsg, msg, req.AutoApprove, req.SystemContext, req.PinnedToolGroups, req.PlanMode)
 	}()
 
 	// Become an SSE viewer: subscribe to the runner and forward events to the browser.
@@ -1499,12 +1500,17 @@ func handleSlashCommand(r *http.Request, w io.Writer, flusher http.Flusher, cm *
 		if comp.Compactor == nil {
 			SendSSE(w, flusher, "system", map[string]interface{}{"content": "Compaction is disabled."})
 		} else {
+			// Studio still uses the shared BeforeModelCallback path (no
+			// child-session rewrite). Force the next model call to compact
+			// and report current window usage. Code-mode /compact runs
+			// immediately via CompactionBackend.Compact.
+			comp.Compactor.ForceNextCompaction()
 			est, win := comp.Compactor.TokenUsage()
 			pct := float64(0)
 			if win > 0 {
 				pct = float64(est) / float64(win) * 100
 			}
-			msg := fmt.Sprintf("**Context Window**\n- Tokens: %d / %d (%.0f%%)\n- Threshold: %.0f%%\n- Compactions: %d",
+			msg := fmt.Sprintf("**Context Window**\n- Tokens: %d / %d (%.0f%%)\n- Threshold: %.0f%%\n- Compactions: %d\n\nCompaction armed for the next model call in this chat.",
 				est, win, pct, comp.Compactor.Threshold*100, comp.Compactor.CompactionCount())
 			SendSSE(w, flusher, "system", map[string]interface{}{"content": msg})
 		}

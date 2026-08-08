@@ -35,6 +35,11 @@ type Usage struct {
 	Input  int64
 	Output int64
 	Total  int64
+	// Estimated marks a usage reading derived locally (e.g. from context size)
+	// rather than reported by the provider. Estimated readings update the
+	// context-occupancy figure but are NOT accumulated into cumulative session
+	// usage, since each one represents the full current context, not a delta.
+	Estimated bool
 }
 
 // NetworkDenial describes one outbound connection blocked by the sandbox proxy.
@@ -71,6 +76,13 @@ type Event struct {
 	Args     map[string]any
 	Result   any
 	Options  []string // approval options
+
+	// ApprovalKind distinguishes code-mode authorization prompts:
+	// "" (generic tool approval), "tool" (not-whitelisted tool execution), or
+	// "folder" (out-of-project filesystem access). Paths holds the requested
+	// out-of-project paths for a "folder" prompt.
+	ApprovalKind string
+	Paths        []string
 
 	// SessionID for KindSession / KindSessionTitle.
 	SessionID string
@@ -142,6 +154,20 @@ func NewToolResult(name, id string, result any) Event {
 // NewApproval returns a tool approval request.
 func NewApproval(name string, args map[string]any, options []string) Event {
 	return Event{Kind: KindApproval, ToolName: name, Args: args, Options: options}
+}
+
+// NewAuthorizationApproval returns a code-mode authorization request carrying
+// the approval kind ("tool" or "folder") and, for folder requests, the
+// out-of-project paths being requested.
+func NewAuthorizationApproval(name string, args map[string]any, options []string, kind string, paths []string) Event {
+	return Event{
+		Kind:         KindApproval,
+		ToolName:     name,
+		Args:         args,
+		Options:      options,
+		ApprovalKind: kind,
+		Paths:        paths,
+	}
 }
 
 // NewNetworkDenial returns a network authorization request.

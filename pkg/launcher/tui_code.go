@@ -348,6 +348,9 @@ type localAgentBackend struct {
 	lastCtxEstimate time.Time
 	resumed         bool
 	closed          bool
+	// needsRebuild is set when web search configuration changes. The next
+	// NewSession() call will rebuild the agent so new tools are loaded.
+	needsRebuild bool
 }
 
 // contextEstimateInterval is the minimum wall-clock gap between mid-turn
@@ -1313,6 +1316,56 @@ func (b *localAgentBackend) NewSession() {
 	b.sessionID = ""
 	b.usage = nil
 	b.resumed = false
+	rebuild := b.needsRebuild
+	b.needsRebuild = false
+	b.mu.Unlock()
+
+	if rebuild {
+		b.rebuildAgent()
+	}
+}
+
+// rebuildAgent re-runs NewWiredChatAgent with the current in-memory appConfig
+// so that tools configured after process start (e.g. web search via /websearch)
+// are loaded into the agent. Called from NewSession() when needsRebuild is set.
+func (b *localAgentBackend) rebuildAgent() {
+	ctx := context.Background()
+
+	b.mu.Lock()
+	appCfg := b.appConfig
+	providerName := b.provider
+	modelName := b.model
+	b.mu.Unlock()
+
+	result, err := NewWiredChatAgent(ctx, &ChatFactoryConfig{
+		AppConfig:            appCfg,
+		ProviderName:         providerName,
+		ModelName:            modelName,
+		DebugMode:            b.debug,
+		AutoApprove:          b.autoApprove,
+		WorkspaceDir:         b.workingDir,
+		PlatformMode:         false,
+		CodeMode:             true,
+		AllowMissingProvider: true,
+		LoadProjectContext:   true,
+		SessionService:       b.fileStore,
+	})
+	if err != nil {
+		slog.Warn("failed to rebuild agent after config change", "error", err)
+		return
+	}
+
+	// Clean up old agent resources.
+	if b.result.Cleanup != nil {
+		b.result.Cleanup()
+	}
+
+	b.mu.Lock()
+	b.result = result
+	b.sessionSvc = common.NewAutoInitService(result.SessionService)
+	b.provider = result.ProviderName
+	b.model = result.ModelName
+	b.configured = result.ProviderConfigured
 	b.mu.Unlock()
 }
 
@@ -1847,3 +1900,207 @@ func (b *localAgentBackend) RemoveProvider(ctx context.Context, name string) err
 
 // Verify localAgentBackend implements the optional provider-admin capability.
 var _ backend.ProviderAdminBackend = (*localAgentBackend)(nil)
+
+// --- WebSearchAdminBackend (code-mode local web search configuration) ---
+// These methods let the /websearch TUI overlay configure web search providers
+// and persist them to the local config file (~/.config/astonish/config.yaml).
+// After configuration, the user starts a /new session for the tools to load.
+
+// Verify localAgentBackend implements the optional web-search-admin capability.
+var _ backend.WebSearchAdminBackend = (*localAgentBackend)(nil)
+
+func (b *localAgentBackend) ListWebSearchProviders(ctx context.Context) ([]backend.WebSearchProvider, error) {
+	_ = ctx
+	b.mu.Lock()
+	activeRef := ""
+	if b.appConfig != nil {
+		activeRef = b.appConfig.General.WebSearchTool
+	}
+	perplexityConfigured := b.appConfig != nil &&
+		b.appConfig.PerplexityWebSearch.Provider != "" &&
+		b.appConfig.PerplexityWebSearch.Model != ""
+	b.mu.Unlock()
+
+	servers := config.GetStandardServers()
+	out := make([]backend.WebSearchProvider, 0, len(servers))
+	for _, srv := range servers {
+		if srv.Category != "web" {
+			continue
+		}
+		installed := false
+		if srv.Kind == "model" && srv.ID == "perplexity" {
+			installed = perplexityConfigured
+		} else {
+			installed = config.IsStandardServerInstalled(srv.ID)
+		}
+		active := activeRef != "" && strings.HasPrefix(activeRef, srv.ID+":")
+		out = append(out, backend.WebSearchProvider{
+			ID:          srv.ID,
+			DisplayName: srv.DisplayName,
+			Description: srv.Description,
+			Kind:        srv.Kind,
+			Installed:   installed,
+			Active:      active,
+			RequiresKey: len(srv.EnvVars) > 0,
+		})
+	}
+	return out, nil
+}
+
+func (b *localAgentBackend) GetActiveWebSearch(ctx context.Context) (string, error) {
+	_ = ctx
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.appConfig == nil {
+		return "", nil
+	}
+	return b.appConfig.General.WebSearchTool, nil
+}
+
+func (b *localAgentBackend) InstallWebSearch(ctx context.Context, serverID, apiKey string) error {
+	_ = ctx
+	serverID = strings.TrimSpace(serverID)
+	apiKey = strings.TrimSpace(apiKey)
+	if serverID == "" {
+		return fmt.Errorf("server ID is required")
+	}
+
+	srv := config.GetStandardServer(serverID)
+	if srv == nil {
+		return fmt.Errorf("unknown web search server: %s", serverID)
+	}
+	if srv.Kind == "model" {
+		return fmt.Errorf("use ConfigurePerplexityWebSearch for model-backed providers")
+	}
+
+	// Build env values from the API key. Standard servers have a single key env var.
+	envValues := make(map[string]string)
+	if len(srv.EnvVars) > 0 {
+		ev := srv.EnvVars[0]
+		if ev.Required && apiKey == "" {
+			return fmt.Errorf("%s is required", ev.Name)
+		}
+		envValues[ev.Name] = apiKey
+	}
+
+	// Try credential store first, fall back to config.yaml.
+	storeKeyInConfig := true
+	if b.result.CredentialStore != nil && apiKey != "" {
+		storeKey := "web_servers." + serverID + ".api_key"
+		if err := b.result.CredentialStore.SetSecret(storeKey, apiKey); err == nil {
+			storeKeyInConfig = false
+		}
+	}
+
+	if err := config.InstallStandardServer(serverID, envValues, storeKeyInConfig); err != nil {
+		return fmt.Errorf("failed to install %s: %w", srv.DisplayName, err)
+	}
+
+	// Refresh in-memory config to reflect the change.
+	b.mu.Lock()
+	if b.appConfig.WebServers == nil {
+		b.appConfig.WebServers = make(map[string]config.WebServerConfig)
+	}
+	ws := config.WebServerConfig{}
+	if storeKeyInConfig {
+		ws.APIKey = apiKey
+	}
+	b.appConfig.WebServers[serverID] = ws
+	if srv.WebSearchTool != "" {
+		b.appConfig.General.WebSearchTool = srv.WebSearchTool
+	}
+	if srv.WebExtractTool != "" {
+		b.appConfig.General.WebExtractTool = srv.WebExtractTool
+	}
+	b.needsRebuild = true
+	b.mu.Unlock()
+
+	return nil
+}
+
+func (b *localAgentBackend) ConfigurePerplexityWebSearch(ctx context.Context, providerName, modelName string) error {
+	_ = ctx
+	providerName = strings.TrimSpace(providerName)
+	modelName = strings.TrimSpace(modelName)
+	if providerName == "" || modelName == "" {
+		return fmt.Errorf("provider and model are required")
+	}
+
+	// Validate the model looks like a Perplexity/Sonar model.
+	m := strings.ToLower(modelName)
+	if !strings.Contains(m, "perplexity") && !strings.Contains(m, "sonar") && !strings.Contains(m, "pplx") {
+		return fmt.Errorf("selected model must contain perplexity, sonar, or pplx")
+	}
+
+	b.mu.Lock()
+	b.appConfig.PerplexityWebSearch = config.PerplexityWebSearchConfig{
+		Provider:          providerName,
+		Model:             modelName,
+		SearchContextSize: "medium",
+		MaxResults:        5,
+	}
+	b.appConfig.General.WebSearchTool = "perplexity:perplexity_web_search"
+	b.needsRebuild = true
+	appCfg := b.appConfig
+	b.mu.Unlock()
+
+	if err := config.SaveAppConfig(appCfg); err != nil {
+		// Roll back in-memory.
+		b.mu.Lock()
+		b.appConfig.PerplexityWebSearch = config.PerplexityWebSearchConfig{}
+		b.appConfig.General.WebSearchTool = ""
+		b.mu.Unlock()
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+	return nil
+}
+
+func (b *localAgentBackend) ListPerplexityOptions(ctx context.Context) ([]backend.PerplexityOption, error) {
+	b.mu.Lock()
+	appCfg := b.appConfig
+	b.mu.Unlock()
+
+	if appCfg == nil || len(appCfg.Providers) == 0 {
+		return nil, nil
+	}
+
+	var opts []backend.PerplexityOption
+	for name := range appCfg.Providers {
+		models, err := provider.ListModelsForProvider(ctx, name, appCfg)
+		if err != nil {
+			continue
+		}
+		var filtered []string
+		for _, model := range models {
+			ml := strings.ToLower(model)
+			if strings.Contains(ml, "perplexity") || strings.Contains(ml, "sonar") || strings.Contains(ml, "pplx") {
+				filtered = append(filtered, model)
+			}
+		}
+		if len(filtered) > 0 {
+			sort.Strings(filtered)
+			opts = append(opts, backend.PerplexityOption{
+				Provider: name,
+				Models:   filtered,
+			})
+		}
+	}
+	sort.Slice(opts, func(i, j int) bool { return opts[i].Provider < opts[j].Provider })
+	return opts, nil
+}
+
+func (b *localAgentBackend) ClearWebSearch(ctx context.Context) error {
+	_ = ctx
+	b.mu.Lock()
+	b.appConfig.General.WebSearchTool = ""
+	b.appConfig.General.WebExtractTool = ""
+	b.appConfig.PerplexityWebSearch = config.PerplexityWebSearchConfig{}
+	b.needsRebuild = true
+	appCfg := b.appConfig
+	b.mu.Unlock()
+
+	if err := config.SaveAppConfig(appCfg); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+	return nil
+}

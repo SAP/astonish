@@ -42,6 +42,12 @@ var compactSlashCommand = slashCommand{
 	Name: "compact", Description: "Compact the conversation context to free up the window",
 }
 
+// webSearchSlashCommand is offered only when the backend supports local web
+// search configuration (code mode). It opens the web search provider picker.
+var webSearchSlashCommand = slashCommand{
+	Name: "websearch", Aliases: []string{"search"}, Description: "Configure web search provider",
+}
+
 // slashCompletion holds the active / completion popup state.
 type slashCompletion struct {
 	active  bool

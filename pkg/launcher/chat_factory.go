@@ -223,6 +223,12 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			// overwrite it — otherwise IsStandardServerInstalled() will read from
 			// the file-based store and miss keys that are only in the DB.
 			// (Platform mode is always active; this getter is set by the daemon.)
+			// In non-platform (code) mode, register the credential store getter so
+			// that mergeStandardServersWithConfig can resolve API keys stored in
+			// the encrypted credential store (e.g., web_servers.tavily.api_key).
+			if !cfg.PlatformMode {
+				config.SetInstalledSecretGetter(cs.GetSecret)
+			}
 
 			// Wire credential store into API handlers
 			api.SetAPICredentialStore(cs)
@@ -510,7 +516,7 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 	}
 
 	// --- 3. Load MCP tools from cache (lazy) ---
-	mcpCfg, err := loadMCPConfig(ctx, cfg.PlatformMode)
+	mcpCfg, err := loadMCPConfig(ctx, cfg.PlatformMode, cfg.AppConfig)
 	if err != nil {
 		slog.Warn("failed to load MCP config", "error", err)
 	}
@@ -2075,9 +2081,18 @@ func browserConfigFromApp(appCfg *config.AppConfig) browser.BrowserConfig {
 // platform) view. Platform-tier servers are inherited by every org/team — this
 // is the documented inheritance model for standard servers like Tavily that are
 // installed at scope=platform.
-func loadMCPConfig(ctx context.Context, platformMode bool) (*config.MCPConfig, error) {
+func loadMCPConfig(ctx context.Context, platformMode bool, appCfg *config.AppConfig) (*config.MCPConfig, error) {
 	if !platformMode {
-		return config.LoadMCPConfig()
+		// Load the raw mcp_config.json then merge standard servers using the
+		// caller's AppConfig. This ensures General.WebSearchTool from config.yaml
+		// is respected, so the selected web search provider (Tavily, Brave,
+		// Firecrawl) is injected into the MCP config for code/personal mode.
+		cfg, err := config.LoadMCPConfigRaw()
+		if err != nil {
+			return nil, err
+		}
+		config.MergeStandardServersWithConfig(cfg, appCfg)
+		return cfg, nil
 	}
 
 	// Platform mode: build MCPConfig from context stores.
@@ -2266,9 +2281,17 @@ func discoverAndCacheHostMCPTools(ctx context.Context, serverName string, server
 			Declaration() *genai.FunctionDeclaration
 		}
 		if declTool, ok := t.(toolWithDeclaration); ok {
-			if decl := declTool.Declaration(); decl != nil && decl.Parameters != nil {
-				if b, mErr := json.Marshal(decl.Parameters); mErr == nil {
-					schema = b
+			if decl := declTool.Declaration(); decl != nil {
+				// Try ParametersJsonSchema first (used by ADK MCP tools),
+				// fall back to the older typed Parameters field.
+				if decl.ParametersJsonSchema != nil {
+					if b, mErr := json.Marshal(decl.ParametersJsonSchema); mErr == nil {
+						schema = b
+					}
+				} else if decl.Parameters != nil {
+					if b, mErr := json.Marshal(decl.Parameters); mErr == nil {
+						schema = b
+					}
 				}
 			}
 		}

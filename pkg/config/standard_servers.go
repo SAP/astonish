@@ -158,6 +158,12 @@ func getInstalledSecretGetter() SecretGetter {
 	return installedSecretGetter
 }
 
+// GetInstalledSecretGetterForTest returns the current secret getter so tests in
+// other packages can save and restore it around SetInstalledSecretGetter calls.
+func GetInstalledSecretGetterForTest() SecretGetter {
+	return installedSecretGetter
+}
+
 // InstallStandardServer stores a standard server's configuration in config.yaml
 // and configures it as the active web search/extract tool (if applicable).
 // If storeKeyInConfig is false, the API key is NOT written to config.yaml

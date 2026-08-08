@@ -139,6 +139,51 @@ type ProviderAdminBackend interface {
 	RemoveProvider(ctx context.Context, name string) error
 }
 
+// WebSearchProvider describes one available web search provider in the /websearch picker.
+type WebSearchProvider struct {
+	ID          string // standard server ID (e.g. "tavily", "brave-search", "perplexity")
+	DisplayName string // human-friendly name
+	Description string // short explanation
+	Kind        string // "mcp" (needs API key) or "model" (uses existing provider)
+	Installed   bool   // credentials present / configured
+	Active      bool   // currently selected as general.web_search_tool
+	RequiresKey bool   // true if the provider needs an API key
+}
+
+// PerplexityOption is one provider instance that exposes Perplexity/Sonar models.
+type PerplexityOption struct {
+	Provider string   // provider instance name (e.g. "sap_ai_core")
+	Models   []string // filtered Sonar/Perplexity model IDs
+}
+
+// WebSearchAdminBackend is an optional capability implemented by backends that
+// can manage web search configuration locally (code mode). It is intentionally
+// separate from Backend so the platform backend — which manages web search in
+// its database — is not required to implement it. The /websearch overlay is
+// only offered when the active backend implements this interface.
+//
+// Implementations persist to the local config file only; they must not touch
+// any platform database.
+type WebSearchAdminBackend interface {
+	// ListWebSearchProviders returns the available standard web search servers
+	// with their install and active status.
+	ListWebSearchProviders(ctx context.Context) ([]WebSearchProvider, error)
+	// GetActiveWebSearch returns the currently configured web search tool ref
+	// (e.g. "tavily:tavily_search") or empty string if none.
+	GetActiveWebSearch(ctx context.Context) (string, error)
+	// InstallWebSearch installs a key-based web search server (stores the key
+	// and sets general.web_search_tool). Requires /new for the tool to be live.
+	InstallWebSearch(ctx context.Context, serverID, apiKey string) error
+	// ConfigurePerplexityWebSearch sets up model-backed Perplexity/Sonar web
+	// search using an existing provider instance and model.
+	ConfigurePerplexityWebSearch(ctx context.Context, providerName, modelName string) error
+	// ListPerplexityOptions returns configured provider instances that expose
+	// Perplexity/Sonar models suitable for web search.
+	ListPerplexityOptions(ctx context.Context) ([]PerplexityOption, error)
+	// ClearWebSearch removes the active web search configuration.
+	ClearWebSearch(ctx context.Context) error
+}
+
 // RollbackPoint is one selectable "revert to here" target in the /rollback
 // picker. Each point corresponds to a user message (turn) in the session.
 type RollbackPoint struct {

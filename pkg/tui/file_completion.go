@@ -103,9 +103,13 @@ func listFileCandidates(root, query string) []fileCandidate {
 		}
 		name := d.Name()
 		if d.IsDir() {
-			if path != root && skippedCompletionDirs[name] {
+			if path != root && (strings.HasPrefix(name, ".") || skippedCompletionDirs[name]) {
 				return filepath.SkipDir
 			}
+			return nil
+		}
+		// Skip hidden files (e.g. .env, .DS_Store, .gitignore).
+		if strings.HasPrefix(name, ".") {
 			return nil
 		}
 		if len(out) >= maxFileCompletionCandidates {

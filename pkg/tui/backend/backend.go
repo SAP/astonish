@@ -230,6 +230,16 @@ type CompactionBackend interface {
 	Compact(ctx context.Context) (status string, err error)
 }
 
+// PlanBackend is an optional capability implemented by backends that persist an
+// announced plan to a PLAN.md sidecar (code mode only). It is intentionally
+// separate from Backend so the platform backend is not required to implement it.
+type PlanBackend interface {
+	// ActivePlanFilePath returns the absolute path of the active session's
+	// PLAN.md sidecar, or "" if plan persistence is not configured or no
+	// session is active yet.
+	ActivePlanFilePath() string
+}
+
 // Backend drives one interactive chat session against the platform.
 //
 // Implementations must be safe for:

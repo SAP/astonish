@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"strings"
 
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
@@ -28,7 +29,12 @@ Your job is to produce a COMPLETE plan the user can approve with confidence — 
 
 4. BE EFFICIENT — SPEND EFFORT PROPORTIONAL TO BLAST RADIUS. A one-file tweak needs a quick look; a cross-cutting change needs full tracing. Stop exploring once you can name every file you would change and why — do not read the whole repo. Prefer structural tools (code_definition/code_references) over broad grep, and never re-read a file already in your context.
 
-When your plan is finalized, record it with announce_plan (goal + ordered, dependency-first phases). For each phase, list its affected files (each marked new/modify/delete), put the concrete approach in details, and give a verify step (the build/test/lint command that proves the phase is done). This persists the plan to a session PLAN.md that survives context compaction; do NOT hand-write PLAN.md yourself. (You will drive phase status with update_plan once execution begins.)`
+When your plan is finalized, record it with announce_plan (goal + ordered, dependency-first phases). For each phase:
+- 'files': list every file the phase touches (marked new/modify/delete) — the symbol AND its callers, tests, generated code, migrations, docs.
+- 'details': write a concrete, self-contained description of exactly what to do in this phase — specific structs/functions to add or remove, the exact logic change, new fields, interface updates. Write enough detail that execution can proceed directly from this text without re-reading the code. This is the most important field; a vague 'details' makes the plan useless.
+- 'verify': the command that proves the phase is done (build/test/lint).
+
+Call announce_plan WITHOUT any preceding prose or summary — the plan document is shown directly to the user and speaks for itself. Do NOT write a "Here's my plan..." narration before the tool call. This persists the full plan to a session PLAN.md that survives context compaction and is shown to the user. Do NOT hand-write PLAN.md yourself. (You will drive phase status with update_plan once execution begins. When executing, treat PLAN.md as the authoritative source — do NOT re-investigate files or symbols already confirmed in the plan unless the code has changed since planning.)`
 
 // PlanModeBlockedMessage is returned to the model when it calls a mutating tool
 // while plan mode is active. Returning a result (rather than an error that
@@ -56,9 +62,46 @@ PHASE 2 — READ. ` + "`read_file`" + ` (and read_pdf/filter_json) unlock, plus 
 
 PHASE 3 — GAP (complementary). The remaining read-only tools unlock: grep_search, find_files, file_tree, repo_map, code_definition, code_references, web_fetch, memory_search, memory_get, skill_lookup — and delegate_tasks. Use these ONLY for the genuine gaps codegraph could not fill. Prefer ` + "`delegate_tasks`" + ` with read-only ` + "`tools`" + ` filters (e.g. ["grep_search","read_file","code_references"]) to fan out independent gap questions in parallel. Do not re-answer anything already established. When gaps are closed, call ` + "`gplan_finalize`" + ` to advance to the PLAN phase.
 
-PHASE 4 — PLAN. ` + "`announce_plan`" + ` unlocks. Record the finalized plan: goal + ordered, dependency-first phases. For each phase list its affected files (each marked new/modify/delete — the symbol AND its callers, tests, generated code, migrations, docs, so nothing is left unwired), put the concrete approach in details, and give a verify step (the build/test/lint command that proves the phase is done). This persists the plan to a session PLAN.md that survives compaction; do NOT hand-write PLAN.md. End by asking the user to exit to Normal mode (shift+tab) before any execution.
+PHASE 4 — PLAN. ` + "`announce_plan`" + ` unlocks. Call it WITHOUT any preceding prose — the plan document is shown directly to the user. Record the finalized plan: goal + ordered, dependency-first phases. For each phase list its affected files (each marked new/modify/delete — the symbol AND its callers, tests, generated code, migrations, docs, so nothing is left unwired); write a concrete, self-contained 'details' field describing exactly what to do (specific functions/structs to add or change, the exact logic, new fields, interface updates — enough detail that execution can proceed directly from it without re-reading the code); and give a verify step (the build/test/lint command that proves the phase is done). File paths must be confirmed: only record a file path in 'details' or 'files' if codegraph_explore, code_definition, find_files, or read_file explicitly returned that exact path this session — do NOT infer paths from symbol names or directory conventions; if a path was not confirmed, call find_files before adding it to the plan. This persists the full plan to a session PLAN.md shown to the user; do NOT hand-write PLAN.md. End by asking the user to exit to Normal mode (shift+tab) before any execution. When executing later, treat PLAN.md as authoritative — do NOT re-investigate files or symbols already confirmed in the plan.
 
 Produce a COMPLETE plan — cover every dependency the change reaches, order phases dependency-first, and surface any human decisions (breaking changes, alternatives with trade-offs, ambiguous requirements) explicitly. Spend effort proportional to blast radius.`
+
+// PlanExecutionSystemContext is injected as the per-turn SystemContext when the
+// user approves a plan and execution begins ("Approve & implement"). It gives
+// the model tight execution-discipline instructions so it follows the approved
+// PLAN.md directly instead of re-investigating confirmed things.
+//
+// The literal token "__PLAN_PATH__" is a placeholder that must be replaced with
+// the absolute session PLAN.md path before injection. Use BuildPlanExecutionSystemContext.
+const PlanExecutionSystemContext = `You are now in EXECUTION MODE — an approved plan is active.
+
+IMMEDIATE FIRST ACTION: Call read_file("__PLAN_PATH__") right now, before anything else. Load the full
+plan so you know every phase, its files, and its details.
+
+EXECUTION RULES:
+1. Follow the plan phase by phase in order. Mark each phase running with update_plan before you
+   start it, and complete/failed when you finish.
+2. DO NOT RE-INVESTIGATE. The plan's details and file paths were confirmed during planning —
+   trust them. Do NOT call code_definition, codegraph_explore, grep_search, find_files, repo_map,
+   or read a source file just to verify something the plan already established.
+3. ALLOWED READS: (a) PLAN.md itself, (b) a file you are about to edit/create (read it once
+   immediately before writing to get the exact current content), (c) files the plan's 'details'
+   explicitly instruct you to read as part of the implementation.
+4. IF A FILE PATH IN THE PLAN IS WRONG: use find_files once to locate the correct path, then
+   proceed — do not re-read the surrounding area.
+5. IF A COMPILATION ERROR requires understanding a type or import: use code_definition for that
+   one symbol, then continue.
+6. DO NOT write a preamble or summary. Start immediately with read_file("__PLAN_PATH__"), then execute.`
+
+// BuildPlanExecutionSystemContext returns PlanExecutionSystemContext with the
+// "__PLAN_PATH__" placeholder replaced by the given absolute plan file path.
+// If planPath is empty, falls back to the bare relative "PLAN.md".
+func BuildPlanExecutionSystemContext(planPath string) string {
+	if planPath == "" {
+		planPath = "PLAN.md"
+	}
+	return strings.ReplaceAll(PlanExecutionSystemContext, "__PLAN_PATH__", planPath)
+}
 
 // GraphPlanBlockedMessage is returned to the model when it calls a tool that is
 // not allowed in the current Graph-Optimized Plan phase. Returning a result

@@ -3,6 +3,7 @@ package events
 import (
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // ItemKind classifies a rendered transcript item.
@@ -13,7 +14,8 @@ const (
 	ItemAgent         ItemKind = "agent"
 	ItemThinking      ItemKind = "thinking"
 	ItemActivity      ItemKind = "activity"
-	ItemFileDiff      ItemKind = "file_diff" // main-thread editor-style file change
+	ItemFileDiff      ItemKind = "file_diff"   // main-thread editor-style file change
+	ItemDelegation    ItemKind = "delegation"   // inline sub-task delegation tracker
 	ItemSystem        ItemKind = "system"
 	ItemError         ItemKind = "error"
 	ItemApproval      ItemKind = "approval"
@@ -71,6 +73,19 @@ type Item struct {
 	// old_string/new_string/content for fallback while streaming or if context is empty.
 	DiffVerification string
 	// ToolName identifies edit_file vs write_file for fallback rendering.
+
+	// Delegation fields (ItemDelegation).
+	DelegationTasks []DelegationTaskState
+}
+
+// DelegationTaskState tracks the live status of one delegated sub-task.
+type DelegationTaskState struct {
+	Name        string
+	Description string
+	Status      string    // "running", "complete", "failed"
+	StartedAt   time.Time // when the task started (for live timer)
+	Duration    string    // set when complete/failed (from the event)
+	Error       string    // set when failed
 }
 
 // Transcript is the reduced UI state built from a stream of Events.
@@ -108,12 +123,22 @@ type Transcript struct {
 	// (Studio/platform chat), the default sticky-agent behavior applies: one
 	// agent bubble per tool run, interstitial text collapsed for a cleaner chat.
 	LinearThread bool
+
+	// Delegation state: tracks active delegated sub-tasks for the TUI panel.
+	Delegation       []DelegationTaskState
+	DelegationActive bool
+
+	// delegationItemIdx is the index in Items of the current ItemDelegation
+	// block (-1 when no delegation is active). Used by applyDelegation to
+	// update the inline item in-place as task lifecycle events arrive.
+	delegationItemIdx int
 }
 
 // NewTranscript returns an empty transcript ready for reduction.
 func NewTranscript() *Transcript {
 	return &Transcript{
-		ApprovalIdx: -1,
+		ApprovalIdx:       -1,
+		delegationItemIdx: -1,
 	}
 }
 
@@ -156,7 +181,6 @@ func (t *Transcript) Apply(ev Event) {
 			t.Status = "Thinking…"
 		}
 	case KindApproval:
-		t.Awaiting = true
 		content := "Approve " + firstNonEmpty(ev.ToolName, "tool") + "?"
 		switch ev.ApprovalKind {
 		case "folder":
@@ -173,8 +197,16 @@ func (t *Transcript) Apply(ev Event) {
 			Paths:        ev.Paths,
 			Content:      content,
 		})
-		t.ApprovalIdx = len(t.Items) - 1
-		t.ApprovalCursor = 0
+		// Only activate this approval if no other approval is already pending.
+		// When multiple approvals arrive in the same turn (e.g., edit_file auth
+		// followed by announce_plan approval), the first must be resolved before
+		// the next becomes active — otherwise the later one overwrites the
+		// overlay and the earlier one is orphaned/auto-denied.
+		if !t.Awaiting {
+			t.ApprovalIdx = len(t.Items) - 1
+			t.ApprovalCursor = 0
+		}
+		t.Awaiting = true
 		t.Status = "Waiting for approval…"
 	case KindNetworkDenial:
 		t.Awaiting = true
@@ -251,6 +283,8 @@ func (t *Transcript) Apply(ev Event) {
 		} else {
 			t.Status = "↳ " + name
 		}
+	case KindDelegation:
+		t.applyDelegation(ev)
 	case KindModelChanged:
 		if ev.Provider != "" {
 			t.Provider = ev.Provider
@@ -261,9 +295,79 @@ func (t *Transcript) Apply(ev Event) {
 	case KindDone:
 		t.Streaming = false
 		t.Status = ""
+		t.DelegationActive = false
+		t.Delegation = nil
+		t.delegationItemIdx = -1
 		t.finalizeRunningSteps()
 		// Promote sticky provisional agent text to the final response.
 		t.finalizeProvisionalAgents()
+	}
+}
+
+// applyDelegation handles KindDelegation events to maintain both the inline
+// ItemDelegation transcript block and the Transcript-level status fields.
+func (t *Transcript) applyDelegation(ev Event) {
+	switch ev.DelegationType {
+	case "start":
+		now := time.Now()
+		tasks := make([]DelegationTaskState, len(ev.DelegationTasks))
+		for i, task := range ev.DelegationTasks {
+			tasks[i] = DelegationTaskState{
+				Name:        task.Name,
+				Description: task.Description,
+				Status:      "running",
+				StartedAt:   now,
+			}
+		}
+		// Insert the inline item into the transcript thread.
+		t.Items = append(t.Items, Item{
+			Kind:            ItemDelegation,
+			DelegationTasks: tasks,
+		})
+		t.delegationItemIdx = len(t.Items) - 1
+		// Keep the Transcript-level slice for the status bar.
+		t.Delegation = tasks
+		t.DelegationActive = true
+		t.Status = "Delegating tasks…"
+	case "task_start":
+		t.updateDelegationTask(ev.DelegationTaskName, func(task *DelegationTaskState) {
+			if task.StartedAt.IsZero() {
+				task.StartedAt = time.Now()
+			}
+			task.Status = "running"
+		})
+	case "task_complete":
+		t.updateDelegationTask(ev.DelegationTaskName, func(task *DelegationTaskState) {
+			task.Status = "complete"
+			task.Duration = ev.DelegationDuration
+		})
+	case "task_failed":
+		t.updateDelegationTask(ev.DelegationTaskName, func(task *DelegationTaskState) {
+			task.Status = "failed"
+			task.Duration = ev.DelegationDuration
+			task.Error = ev.DelegationError
+		})
+	case "done":
+		t.DelegationActive = false
+	}
+}
+
+// updateDelegationTask finds a task by name in both the Transcript-level
+// Delegation slice and the inline ItemDelegation item, applying fn to each.
+func (t *Transcript) updateDelegationTask(name string, fn func(*DelegationTaskState)) {
+	for i := range t.Delegation {
+		if t.Delegation[i].Name == name {
+			fn(&t.Delegation[i])
+			break
+		}
+	}
+	if t.delegationItemIdx >= 0 && t.delegationItemIdx < len(t.Items) {
+		for i := range t.Items[t.delegationItemIdx].DelegationTasks {
+			if t.Items[t.delegationItemIdx].DelegationTasks[i].Name == name {
+				fn(&t.Items[t.delegationItemIdx].DelegationTasks[i])
+				break
+			}
+		}
 	}
 }
 
@@ -902,11 +1006,27 @@ func (t *Transcript) ToggleLastUser() {
 	}
 }
 
-// ClearApproval marks approval as resolved (caller sends the response).
+// ClearApproval marks the current approval as resolved (caller sends the
+// response). If another approval item was queued after the resolved one,
+// it becomes the new active approval so the user sees it next.
 func (t *Transcript) ClearApproval() {
+	resolvedIdx := t.ApprovalIdx
 	t.Awaiting = false
 	t.ApprovalIdx = -1
 	t.ApprovalCursor = 0
+
+	// Check for a queued approval after the one we just resolved.
+	if resolvedIdx >= 0 {
+		for i := resolvedIdx + 1; i < len(t.Items); i++ {
+			if t.Items[i].Kind == ItemApproval || t.Items[i].Kind == ItemNetworkDenial {
+				t.Awaiting = true
+				t.ApprovalIdx = i
+				t.ApprovalCursor = 0
+				t.Status = "Waiting for approval…"
+				return
+			}
+		}
+	}
 }
 
 // Reset clears transcript items and turn state (used for /new and session switch).

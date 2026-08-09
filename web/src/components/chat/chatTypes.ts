@@ -210,10 +210,18 @@ export interface PlanMessage {
   steps: PlanStepInfo[]       // Ordered list of plan steps
 }
 
+export interface PlanFileInfo {
+  path: string
+  kind: string   // 'new' | 'modify' | 'delete'
+}
+
 export interface PlanStepInfo {
   name: string
   description: string
   status: 'pending' | 'running' | 'complete' | 'failed'
+  details?: string          // Concrete per-phase approach (persisted to PLAN.md)
+  files?: PlanFileInfo[]    // Files this phase touches (blast radius)
+  verify?: string           // Command proving the phase is done
 }
 
 // ---- Generative UI app preview ----

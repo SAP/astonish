@@ -1132,25 +1132,26 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		Catalog:      sortedGroups,
 	}
 
-	// Plan-file persistence is a code-mode affordance: announced plans are
-	// written to a per-session PLAN.md that survives compaction. Platform mode
-	// has no local session filesystem for this, so the guidance is code-only.
-	if !cfg.PlatformMode {
-		promptBuilder.PlanFilePersistence = true
-	}
-
-	// Code-mode authorization guidance: tell the model that not-whitelisted
-	// tools and out-of-project paths may pause for user authorization. Matches
-	// the runtime gates wired below (CodeMode && !AutoApprove).
-	if cfg.CodeMode && !cfg.AutoApprove {
-		promptBuilder.EnforceAuthorization = true
-	}
-
-	// Code mode treats MCP servers as first-class: their tools are injected on
-	// the main thread (see section 6), so the prompt should advertise them as
-	// directly callable instead of gating them behind search_tools.
+	// Code mode: wrap the base builder with CodeSystemPromptBuilder which owns
+	// all code-specific sections (project guidance, code-nav rules, PLAN.md,
+	// authorization gates, first-class MCP listing). The base struct is kept
+	// so all subsequent per-request field mutations (sandbox, web tools, etc.)
+	// continue to work on the same pointer held by ChatAgent.SystemPrompt.
 	if cfg.CodeMode {
-		promptBuilder.MCPFirstClass = true
+		codeBuilder := agent.NewCodeSystemPromptBuilder(promptBuilder)
+		codeBuilder.MCPFirstClass = true
+		codeBuilder.PlanFilePersistence = true
+		if !cfg.AutoApprove {
+			codeBuilder.EnforceAuthorization = true
+		}
+		if cfg.LoadProjectContext {
+			if ctxContent := agent.LoadProjectContext(workspaceDir); ctxContent != "" {
+				codeBuilder.ProjectContext = ctxContent
+				if cfg.DebugMode {
+					slog.Debug("loaded project guidance", "component", "chat-factory", "bytes", len(ctxContent))
+				}
+			}
+		}
 	}
 
 	// Sandbox workspace guidance
@@ -1228,27 +1229,14 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 	// Platform mode: custom instructions are stored per-team in the DB
 	// and injected via the request context. No filesystem INSTRUCTIONS.md/SELF.md needed.
 
-	// Reconcile flow knowledge docs — disabled: flows are now executed
-	// on-demand via run_flow tool, not injected as knowledge.
-	flowsDir, _ := flowstore.GetFlowsDir()
-
 	// Load custom prompt from app config
 	if cfg.AppConfig != nil && cfg.AppConfig.Chat.SystemPrompt != "" {
 		promptBuilder.CustomPrompt = cfg.AppConfig.Chat.SystemPrompt
 	}
 
-	// Code mode: load project guidance from AGENTS.md (fallback CLAUDE.md),
-	// discovered by walking upward from the workspace to the project root,
-	// following the agents.md convention. Platform mode uses per-team DB
-	// instructions instead, so this is gated on the caller's request.
-	if cfg.LoadProjectContext {
-		if ctxContent := agent.LoadProjectContext(workspaceDir); ctxContent != "" {
-			promptBuilder.ProjectContext = ctxContent
-			if cfg.DebugMode {
-				slog.Debug("loaded project guidance", "component", "chat-factory", "bytes", len(ctxContent))
-			}
-		}
-	}
+	// Reconcile flow knowledge docs — disabled: flows are now executed
+	// on-demand via run_flow tool, not injected as knowledge.
+	flowsDir, _ := flowstore.GetFlowsDir()
 
 	// --- 5b. Initialize fleet registry ---
 	// Fleet data lives in the database (per-team).

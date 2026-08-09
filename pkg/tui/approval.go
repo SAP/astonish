@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
 )
@@ -115,6 +117,12 @@ func pickNo(opts []string) string {
 }
 
 func (m model) submitApproval(choice string) (tea.Model, tea.Cmd) {
+	// Plan approval has its own flow: approve switches to Normal mode,
+	// request changes stays in plan mode, decline aborts.
+	if it := m.approvalItem(); it != nil && it.ApprovalKind == "plan" {
+		return m.submitPlanApproval(choice)
+	}
+
 	m.tr.ClearApproval()
 	m.ta.Reset()
 	if m.ready {
@@ -138,7 +146,8 @@ func (m model) submitApproval(choice string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.eventCh = ch
-	return m, waitEvent(ch)
+	m.turnStartedAt = time.Now()
+	return m, tea.Batch(waitEvent(ch), timerTick())
 }
 
 func (m model) handleNetworkDenialKey(msg tea.KeyMsg, it *events.Item) (tea.Model, tea.Cmd, bool) {
@@ -272,6 +281,9 @@ func (m model) renderApprovalOverlay() string {
 	it := m.approvalItem()
 	if it != nil && it.Kind == events.ItemNetworkDenial {
 		return m.renderNetworkDenialOverlay(it)
+	}
+	if it != nil && it.ApprovalKind == "plan" {
+		return m.renderPlanApprovalOverlay(it)
 	}
 	if it != nil && it.ApprovalKind == "folder" {
 		return m.renderFolderApprovalOverlay(it)
@@ -460,4 +472,84 @@ func compactLine(s string, maxRunes int) string {
 		return string([]rune(s)[:maxRunes-1]) + "…"
 	}
 	return s
+}
+
+// renderPlanApprovalOverlay renders the plan approval prompt shown after
+// announce_plan completes in Plan or Graph Plan mode.
+func (m model) renderPlanApprovalOverlay(it *events.Item) string {
+	th := m.theme
+	var b strings.Builder
+	b.WriteString(th.Header.Render("✦ Plan Ready") + "\n\n")
+	b.WriteString(th.Text.Render("The plan has been announced. How would you like to proceed?") + "\n\n")
+	opts := m.approvalOptions()
+	b.WriteString(m.renderApprovalOptions(opts))
+
+	w := m.width - 4
+	if w < 30 {
+		w = 30
+	}
+	return th.InputBorderFocus.
+		BorderForeground(lipgloss.Color("39")).
+		Width(w).
+		Padding(1, 2).
+		Render(b.String())
+}
+
+// submitPlanApproval handles the user's choice in the plan approval dialog.
+// "Approve & implement" switches to Normal mode and sends a turn to begin
+// execution. "Request changes" lets the user type feedback. "Decline" aborts
+// the plan and returns to Normal mode.
+func (m model) submitPlanApproval(choice string) (tea.Model, tea.Cmd) {
+	m.tr.ClearApproval()
+	m.ta.Reset()
+	if m.ready {
+		m.layout()
+	}
+
+	switch choice {
+	case "Approve & implement":
+		// Switch to Normal mode so the execution turn has full tool access.
+		m.planMode = false
+		m.graphPlanMode = false
+		m.tr.Apply(events.NewSystem("Plan approved. Starting implementation…"))
+		m.tr.Streaming = true
+		m.tr.Status = "Thinking…"
+		m.refreshViewport()
+
+		planPath := ""
+		if pb, ok := m.backend.(backend.PlanBackend); ok {
+			planPath = pb.ActivePlanFilePath()
+		}
+
+		turnCtx, cancel := context.WithCancel(m.ctx)
+		m.turnCancel = cancel
+		// Send as a normal-mode turn (no plan gate) to begin execution.
+		ch, err := m.backend.RunTurn(turnCtx, "I approve this plan. Please start implementing it now, phase by phase.", backend.TurnOptions{SystemContext: agent.BuildPlanExecutionSystemContext(planPath)})
+		if err != nil {
+			cancel()
+			m.turnCancel = nil
+			m.tr.Apply(events.NewError(err.Error()))
+			m.refreshViewport()
+			return m, nil
+		}
+		m.eventCh = ch
+		m.turnStartedAt = time.Now()
+		return m, tea.Batch(waitEvent(ch), timerTick())
+
+	case "Request changes":
+		// Stay in plan mode so the user can describe what to change.
+		m.tr.Apply(events.NewSystem("Describe the changes you'd like to the plan:"))
+		m.refreshViewport()
+		return m, nil
+
+	case "Decline":
+		m.planMode = false
+		m.graphPlanMode = false
+		m.tr.Apply(events.NewSystem("Plan declined. Returned to Normal mode."))
+		m.refreshViewport()
+		return m, nil
+	}
+
+	m.refreshViewport()
+	return m, nil
 }

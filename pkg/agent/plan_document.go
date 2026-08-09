@@ -57,7 +57,25 @@ func planFileKindLabel(kind string) string {
 	}
 }
 
-// RenderPlanMarkdown serializes a plan (goal + ordered steps) to Markdown.
+// RenderPlanFromInfo serializes a plan from the public PlanStepInfo type used
+// by announce_plan. It is the exported counterpart of RenderPlanMarkdown for
+// callers (e.g. the TUI) that hold PlanStepInfo slices rather than planSteps.
+func RenderPlanFromInfo(goal string, steps []PlanStepInfo) string {
+	internal := make([]planStep, len(steps))
+	for i, s := range steps {
+		internal[i] = planStep{
+			name:        s.Name,
+			description: s.Description,
+			details:     s.Details,
+			files:       s.Files,
+			verify:      s.Verify,
+			status:      "pending",
+		}
+	}
+	return RenderPlanMarkdown(goal, internal)
+}
+
+
 // planClock is overridable in tests for a deterministic timestamp.
 var planClock = time.Now
 

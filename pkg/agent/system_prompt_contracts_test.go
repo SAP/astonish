@@ -15,14 +15,16 @@ var updateGolden = flag.Bool("update", false, "update golden files")
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 // maximalBuilder returns a SystemPromptBuilder with every feature enabled,
-// producing the most complete prompt possible. This is the configuration
+// producing the most complete chat-mode prompt possible. This is the configuration
 // used for golden file comparison and maximal contract assertions.
+// Note: code-mode fields (ProjectContext, MCPFirstClass, PlanFilePersistence,
+// EnforceAuthorization) are owned by CodeSystemPromptBuilder and are not
+// present here. See maximalCodeBuilder() in system_prompt_contracts_code_test.go.
 func maximalBuilder() *SystemPromptBuilder {
 	return &SystemPromptBuilder{
 		WorkspaceDir:          "/home/user/project",
 		CustomPrompt:          "You are a helpful assistant.",
 		InstructionsContent:   "Always be concise.",
-		ProjectContext:        "Use tabs.",
 		BrowserAvailable:      true,
 		MemorySearchAvailable: true,
 		WebSearchAvailable:    true,
@@ -30,7 +32,6 @@ func maximalBuilder() *SystemPromptBuilder {
 		WebSearchToolName:     "tavily-search",
 		WebExtractToolName:    "tavily-extract",
 		Timezone:              "America/New_York",
-		PlanFilePersistence:   true,
 		SkillIndex:            "## Available Skills\n\n- **docker** — Docker container management\n- **git** — Git workflow helpers\n",
 		FleetSection:          "\n## Available Fleets\n\n- **infra-fleet** — Infrastructure management fleet\n",
 		ChannelHints:          "Format as plain text. No markdown.",
@@ -64,7 +65,7 @@ func maximalBuilder() *SystemPromptBuilder {
 			"save_credential", "schedule_job", "process_read",
 			"http_request", "delegate_tasks", "email_list",
 			"browser_navigate", "browser_request_human",
-			"search_tools", "search_flows", "memory_search", "repo_map",
+			"search_tools", "search_flows", "memory_search",
 		),
 	}
 }
@@ -318,7 +319,9 @@ func TestSystemPromptContracts_Environment(t *testing.T) {
 	assertContains(t, prompt, "Working directory: /home/user/project", "workspace dir in environment")
 	assertContains(t, prompt, "Timezone: America/New_York", "timezone in environment")
 	assertContains(t, prompt, "OS:", "OS info in environment")
-	assertContains(t, prompt, "PLAN.md", "plan-file persistence guidance in environment")
+	// PLAN.md persistence guidance belongs to code mode only — the Environment
+	// section must not contain the "Execution plan (PLAN.md):" block.
+	assertNotContains(t, prompt, "Execution plan (PLAN.md):", "PLAN.md execution plan guidance must not appear in chat-mode Environment section (code mode only)")
 }
 
 func TestSystemPromptContracts_Capabilities(t *testing.T) {
@@ -338,13 +341,15 @@ func TestSystemPromptContracts_Capabilities(t *testing.T) {
 		"HTTP API requests",
 		"task delegation",
 		"flow execution",
-		"code intelligence",
 		"persistent memory",
 		"email",
 		"fleet agents",
 	} {
 		assertContains(t, prompt, cap, fmt.Sprintf("capability %q listed", cap))
 	}
+
+	// "code intelligence" is a code-mode-only capability — not in base builder
+	assertNotContains(t, prompt, "code intelligence", "code intelligence must not appear in chat-mode capabilities (code mode only)")
 
 	// Named tool references in capabilities
 	assertContains(t, prompt, "tavily-search", "web search tool name in capabilities")
@@ -464,23 +469,6 @@ func TestSystemPromptContracts_Conditional_SearchToolsOnly(t *testing.T) {
 	assertContains(t, prompt, `search_tools(query="*")`, "list-all guidance when search_tools present")
 }
 
-func TestSystemPromptContracts_Conditional_CodeNavigationRule(t *testing.T) {
-	// With tree-sitter code-intel tools present, the MUST rule steering the
-	// model to code_definition/code_references over grep_search must render.
-	builder := minimalBuilder()
-	builder.Tools = mockTools("read_file", "grep_search", "repo_map", "code_definition", "code_references")
-	prompt := builder.Build()
-	assertContains(t, prompt, "Code navigation rule (MUST)", "code-nav rule header when code-intel tools present")
-	assertContains(t, prompt, "code_definition", "code_definition referenced in the rule")
-	assertContains(t, prompt, "code_references", "code_references referenced in the rule")
-
-	// Without code-intel tools (e.g. a channel/non-code agent), the rule must
-	// NOT appear — grep_search stays domain-agnostic and the prompt stays lean.
-	plain := minimalBuilder()
-	plain.Tools = mockTools("read_file", "grep_search")
-	assertNotContains(t, plain.Build(), "Code navigation rule (MUST)", "no code-nav rule when tree-sitter tools absent")
-}
-
 func TestSystemPromptContracts_Conditional_WebTools(t *testing.T) {
 	builder := minimalBuilder()
 	builder.WebSearchAvailable = true
@@ -537,20 +525,12 @@ func TestSystemPromptBuilder_MinimalSize(t *testing.T) {
 
 func TestSystemPromptBuilder_MaximalSize(t *testing.T) {
 	prompt := maximalBuilder().Build()
-	// Maximal prompt with all features enabled — budget ceiling reflects
-	// post-Reports-section size, the Project Guidance section (AGENTS.md), the
-	// code-navigation MUST rule (only rendered when tree-sitter code-intel tools
-	// are present), and the PLAN.md persistence guidance (code mode). The Reports
-	// two-step contract is static (~600 bytes) because the LLM cannot retrieve
-	// guidance it doesn't know exists. The ceiling was raised from 12800→13000 to
-	// admit the dependency-tracing planning-strategy line (trace callers/tests/docs
-	// before decomposing — no partial implementations) added to the always-on
-	// delegation block, then raised again to 14000 to admit the codegraph-first
-	// rule and stop-exploring discipline added to the Normal mode ## Tool Use
-	// section (gated on hasCodeIntelTools). See system_prompt_builder.go
-	// "## Reports" / "## Project Guidance" / "## Tool Use" / "## Environment".
-	if len(prompt) > 14000 {
-		t.Errorf("maximal prompt too large: %d bytes (limit 14000)", len(prompt))
+	// Maximal chat-mode prompt with all features enabled. Code-mode sections
+	// (project guidance, code-nav rules, PLAN.md, auth gates, MCP listing) are
+	// no longer part of the base builder — they live in CodeSystemPromptBuilder.
+	// The ceiling is lower than before since those sections are removed.
+	if len(prompt) > 12000 {
+		t.Errorf("maximal prompt too large: %d bytes (limit 12000)", len(prompt))
 	}
 	if len(prompt) < 5000 {
 		t.Errorf("maximal prompt suspiciously small: %d bytes (expected > 5000)", len(prompt))

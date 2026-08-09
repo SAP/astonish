@@ -38,13 +38,15 @@ func (id *AgentIdentity) IsConfigured() bool {
 //   - Tier 3 (Per-Turn Dynamic): Channel hints, scheduler hints, session context,
 //     execution plans, and auto-retrieved knowledge. These are appended at the end
 //     of the system prompt so the static prefix remains cacheable by providers.
+//
+// For code mode (astonish code), use CodeSystemPromptBuilder which embeds this
+// struct and installs a BuildOverride to emit code-specific sections.
 type SystemPromptBuilder struct {
 	Tools                 []tool.Tool
 	Toolsets              []tool.Toolset
 	WorkspaceDir          string
 	CustomPrompt          string
 	InstructionsContent   string                       // Contents of INSTRUCTIONS.md (behavior directives)
-	ProjectContext        string                       // Concatenated AGENTS.md/CLAUDE.md project guidance (code mode)
 	WebSearchAvailable    bool                         // Whether a web search MCP tool is configured
 	WebExtractAvailable   bool                         // Whether a web extract MCP tool is configured
 	WebSearchToolName     string                       // Name of the configured search tool (e.g. "tavily-search")
@@ -62,11 +64,13 @@ type SystemPromptBuilder struct {
 	RelevantTools         string                       // Per-turn auto-retrieved tool matches from tool index (empty = none)
 	Catalog               []*ToolGroup                 // Tool groups available for delegation via delegate_tasks (nil = no delegation)
 	MCPAccessFilter       func(serverName string) bool // Per-turn filter for MCP groups in catalog (nil = allow all)
-	MCPFirstClass         bool                         // Code mode: MCP tools are injected directly on the main thread (no search_tools gate). Renders MCP tools as always-available and lists them by name.
 	SandboxEnabled        bool                         // Whether a sandbox backend is configured
 	SandboxWorkspaceDir   string                       // Persistent workspace dir inside sandbox (e.g. "/sandbox" or "/root")
-	PlanFilePersistence   bool                         // Whether announced plans are persisted to a session PLAN.md (code mode)
-	EnforceAuthorization  bool                         // Whether code-mode tool/folder authorization gates are active (Normal mode)
+
+	// BuildOverride, when non-nil, is called by Build() instead of the default
+	// builder logic. Installed by CodeSystemPromptBuilder to emit code-mode
+	// sections while keeping all per-turn field mutations on this base struct.
+	BuildOverride func(b *SystemPromptBuilder) string
 }
 
 // Clone creates a shallow copy of the SystemPromptBuilder suitable for
@@ -140,7 +144,13 @@ func PromptOverridesFromContext(ctx context.Context) *PromptOverrides {
 // attention budget for smaller models. Detailed guidance for complex
 // capabilities (browser, credentials, scheduling, etc.) is stored in
 // memory/guidance/*.md and delivered via auto-knowledge retrieval.
+//
+// When BuildOverride is set (installed by CodeSystemPromptBuilder), it is
+// called instead and this method returns its result directly.
 func (b *SystemPromptBuilder) Build() string {
+	if b.BuildOverride != nil {
+		return b.BuildOverride(b)
+	}
 	var sb strings.Builder
 
 	// ── Tier 1: Static Core ──────────────────────────────────────
@@ -183,20 +193,6 @@ func (b *SystemPromptBuilder) Build() string {
 		sb.WriteString("\n\n")
 	}
 
-	// 2c. Project Guidance (from AGENTS.md / CLAUDE.md — code mode). These are
-	// project-authored, checked-in instructions the model must follow, merged
-	// from the repo root down to the working directory (nearest last, highest
-	// precedence). Placed high in the prompt so conventions, build/test
-	// commands, and gotchas are always in view.
-	if b.ProjectContext != "" {
-		sb.WriteString("## Project Guidance\n\n")
-		sb.WriteString("The following instructions come from AGENTS.md files in the project. ")
-		sb.WriteString("Follow them for conventions, build/test commands, and project-specific rules. ")
-		sb.WriteString("Later sections override earlier ones; an explicit user request always wins.\n\n")
-		sb.WriteString(b.ProjectContext)
-		sb.WriteString("\n\n")
-	}
-
 	// 3. Tool Use (compact — detailed guidance is in memory/guidance/*.md)
 	sb.WriteString("## Tool Use\n\n")
 	sb.WriteString("- ALWAYS attempt tasks using tools first. Never explain how the user could do it.\n")
@@ -204,14 +200,7 @@ func (b *SystemPromptBuilder) Build() string {
 	sb.WriteString("- If a tool fails, try a different approach before giving up.\n")
 	sb.WriteString("- Prefer read_file/edit_file/write_file over shell sed/awk/echo/cat for file operations.\n")
 	sb.WriteString("- For repository navigation and source inspection, use dedicated tools: file_tree (structure), find_files (glob/discovery), grep_search (text/regex search), read_file (contents). Do NOT use shell_command with ls/find/grep/rg/cat/head/tail just to browse or search files. Reserve shell_command for executing project behavior: git, builds, tests, linters, package managers, CLIs, servers, and scripts.\n")
-	if b.hasCodeIntelTools() {
-		sb.WriteString("- **Code navigation rule (MUST):** In supported languages (Go, TS/TSX, JS/JSX, Python), to find where a symbol (function, type, method, constant, variable) is DEFINED or USED, you MUST use `code_definition` / `code_references` — do NOT use `grep_search` for this. They return exact declarations/call sites in one call, without the comment/string/unrelated-match noise that forces grep follow-up reads. Call `repo_map` once to orient in an unfamiliar repo. Fall back to `grep_search` for a symbol only when the structural tool returns nothing. Keep using `grep_search` for non-symbol text (log strings, config keys, comments, error messages, cross-language literals).\n")
-		sb.WriteString("- **Codegraph-first rule:** Before reading files or grepping to understand an unfamiliar area, call `codegraph_explore` first. It answers symbol definitions, call graphs, and cross-file dependencies in 1–4 calls and costs far fewer tokens than file reads. Once codegraph has named the relevant files, read only those — do not read files codegraph did not point you to. Fall back to grep/find only for what codegraph cannot answer (runtime strings, config keys, non-indexed paths).\n")
-	}
 	sb.WriteString("- Do NOT re-read a file already read this session unless it changed. If you need multiple regions of a file, batch them in a single `read_file` call with a wide enough range, or read the whole file once. Do not read the same file in many small sequential chunks.\n")
-	if b.hasCodeIntelTools() {
-		sb.WriteString("- **Stop exploring when the scope is clear.** Once you can name every file you will change and why, stop reading and start acting. Do not read additional files \"for context\" beyond what the change directly touches. The goal is a correct, complete change — not a codebase survey.\n")
-	}
 	sb.WriteString("- http_request CANNOT reach private/RFC1918 IPs (192.168.x.x, 10.x.x.x, 172.16-31.x.x) or localhost. Use curl via shell_command for private network endpoints.\n")
 	sb.WriteString("- For multi-step tasks, execute sequentially, report progress, and search memory first for prior solutions.\n")
 	sb.WriteString("- After completing a task where you overcame obstacles or discovered non-obvious solutions, save the knowledge using memory_save. Search memory_search(\"memory usage\") first to retrieve the full saving guidelines.\n")
@@ -250,14 +239,6 @@ func (b *SystemPromptBuilder) Build() string {
 		sb.WriteString(fmt.Sprintf("\n**Sandbox:** Commands run inside an isolated sandbox container. Persistent workspace: `%s`. ", wsDir))
 		sb.WriteString("Always clone repos and store work there (NOT /tmp). ")
 		sb.WriteString("If the sandbox was recycled (files missing), silently re-clone and continue — do not ask the user.\n")
-	}
-	if b.PlanFilePersistence {
-		sb.WriteString("\n**Execution plan (PLAN.md):** When you announce a multi-phase plan (announce_plan), it is persisted to a session PLAN.md. As you work, keep it current: for main-thread phases call update_plan (running → complete/failed); delegated phases update automatically. ")
-		sb.WriteString("After a context summary, re-read PLAN.md with read_file to recover the exact plan and where you left off, then mark the next phase running and continue.\n")
-	}
-	if b.EnforceAuthorization {
-		sb.WriteString("\n**Tool & folder authorization:** You run directly on the user's machine. Read-only inspection tools run freely, but tools that modify files, run commands, or otherwise act (e.g. write_file, edit_file, shell_command) may pause for the user's authorization before executing, and accessing paths outside the working directory may also require authorization. ")
-		sb.WriteString("This is expected — proceed normally. If the user denies an action, do NOT retry it: explain what you intended and ask how they'd like to proceed. Prefer working inside the project directory.\n")
 	}
 
 	// 5. Agent Identity (for web portal interactions)
@@ -299,9 +280,6 @@ func (b *SystemPromptBuilder) Build() string {
 	capsLine := b.buildCapabilitiesLine()
 	sb.WriteString(fmt.Sprintf("You have tools for: %s.\n", capsLine))
 	guidanceCaps := []string{"browser automation", "credential management", "job scheduling", "task delegation", "process management", "web access patterns", "memory usage"}
-	if b.hasCodeIntelTools() {
-		guidanceCaps = []string{"browser automation", "code intelligence", "credential management", "job scheduling", "task delegation", "process management", "web access patterns", "memory usage"}
-	}
 	sb.WriteString(fmt.Sprintf("Step-by-step guidance for complex capabilities (%s) is stored in memory. ", strings.Join(guidanceCaps, ", ")))
 	sb.WriteString("Use `memory_search` with the capability name (e.g., \"browser automation\", \"credential management\", ")
 	sb.WriteString("\"job scheduling\") to retrieve instructions before using a complex feature for the first time in a conversation.\n")
@@ -371,50 +349,8 @@ func (b *SystemPromptBuilder) Build() string {
 			sb.WriteString(fmt.Sprintf("- **%s** (%d tools) — %s\n", g.Name, toolCount, g.Description))
 		}
 		sb.WriteString("\nExamples (parallel work only): `tools: [\"browser\"]`, `tools: [\"core\", \"web\"]`\n")
-		if b.MCPFirstClass {
-			sb.WriteString("\n**MCP tools (main thread):** All configured MCP server tools are available to you directly — call the **bare** tool name (e.g. `send_email`) whenever you need one. ")
-			sb.WriteString("You do NOT need `search_tools` to reach them; they are always loaded. Do **not** invent `mcp:server/tool` (app-only form). Do **not** delegate a single MCP call.\n")
-		} else {
-			sb.WriteString("\n**MCP tools (main thread):** After `search_tools`, call the **bare** tool name (e.g. `send_email`). ")
-			sb.WriteString("Do **not** invent `mcp:email/send_email` (app-only form). Do **not** delegate a single MCP call.\n")
-		}
-	}
-
-	// 6b2. Code mode: MCP servers are first-class. List their tools by name so
-	// the model knows exactly what is available for direct invocation without a
-	// search_tools detour. In platform mode this section is omitted (MCP tools
-	// stay behind search_tools to bound prompt size).
-	if b.MCPFirstClass && len(b.Catalog) > 0 {
-		ctx := &minimalReadonlyContext{Context: context.Background()}
-		var mcpLines []string
-		for _, g := range b.Catalog {
-			serverName, isMCP := mcpServerNameFromGroup(g.Name)
-			if !isMCP {
-				continue
-			}
-			if b.MCPAccessFilter != nil && !b.MCPAccessFilter(serverName) {
-				continue
-			}
-			var toolNames []string
-			for _, ts := range g.Toolsets {
-				if mcpTools, err := ts.Tools(ctx); err == nil {
-					for _, t := range mcpTools {
-						toolNames = append(toolNames, t.Name())
-					}
-				}
-			}
-			if len(toolNames) == 0 {
-				continue
-			}
-			mcpLines = append(mcpLines, fmt.Sprintf("- **%s**: %s\n", serverName, strings.Join(toolNames, ", ")))
-		}
-		if len(mcpLines) > 0 {
-			sb.WriteString("\n## MCP Tools (available directly)\n\n")
-			sb.WriteString("These MCP server tools are loaded on the main thread and callable right now by their bare name:\n\n")
-			for _, line := range mcpLines {
-				sb.WriteString(line)
-			}
-		}
+		sb.WriteString("\n**MCP tools (main thread):** After `search_tools`, call the **bare** tool name (e.g. `send_email`). ")
+		sb.WriteString("Do **not** invent `mcp:email/send_email` (app-only form). Do **not** delegate a single MCP call.\n")
 	}
 
 	// 6c2. Skill index (lightweight listing of available CLI tool skills)

@@ -3,6 +3,7 @@ package tui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -164,5 +165,177 @@ func TestHandleMouseSingleClickTogglesActivity(t *testing.T) {
 	got := next.(model)
 	if !got.tr.Items[0].Expanded {
 		t.Fatal("single-click should expand activity blocks")
+	}
+}
+
+func TestFormatDuration(t *testing.T) {
+	tests := []struct {
+		d    time.Duration
+		want string
+	}{
+		{0, "0s"},
+		{5 * time.Second, "5s"},
+		{59 * time.Second, "59s"},
+		{60 * time.Second, "1m 0s"},
+		{65 * time.Second, "1m 5s"},
+		{3599 * time.Second, "59m 59s"},
+		{3600 * time.Second, "1h 0m 0s"},
+		{3661 * time.Second, "1h 1m 1s"},
+		{7384 * time.Second, "2h 3m 4s"},
+	}
+	for _, tt := range tests {
+		got := formatDuration(tt.d)
+		if got != tt.want {
+			t.Errorf("formatDuration(%v) = %q, want %q", tt.d, got, tt.want)
+		}
+	}
+}
+
+func TestLiveStatusShowsTimerWhileStreaming(t *testing.T) {
+	tr := events.NewTranscript()
+	tr.Streaming = true
+	tr.Status = "Running shell_command…"
+
+	m := model{
+		theme:         DefaultTheme(),
+		tr:            tr,
+		width:         80,
+		turnStartedAt: time.Now().Add(-23 * time.Second),
+	}
+	out := stripANSI(m.renderLiveStatus())
+	if !strings.Contains(out, "23s") {
+		t.Fatalf("status should contain elapsed time '23s': %q", out)
+	}
+	if !strings.Contains(out, "Running shell_command") {
+		t.Fatalf("status should contain the status text: %q", out)
+	}
+	// Timer should be right-aligned: status text on the left, timer on the right
+	// with spaces in between.
+	statusIdx := strings.Index(out, "Running shell_command")
+	timerIdx := strings.Index(out, "23s")
+	if timerIdx <= statusIdx {
+		t.Fatalf("timer should appear to the right of status text; statusIdx=%d timerIdx=%d in %q", statusIdx, timerIdx, out)
+	}
+	// There should be multiple spaces between status and timer (right-alignment gap).
+	between := out[statusIdx+len("Running shell_command…"):timerIdx]
+	if len(strings.TrimRight(between, " ")) == len(between) {
+		t.Fatalf("expected whitespace gap between status and timer for right-alignment: %q", out)
+	}
+}
+
+func TestLiveStatusHidesTimerWhenIdle(t *testing.T) {
+	tr := events.NewTranscript()
+	tr.Streaming = false
+	tr.Status = ""
+
+	m := model{
+		theme: DefaultTheme(),
+		tr:    tr,
+		width: 80,
+	}
+	out := stripANSI(m.renderLiveStatus())
+	if strings.Contains(out, "s") && strings.Contains(out, "(") {
+		t.Fatalf("idle status should not contain timer: %q", out)
+	}
+}
+
+func TestFinishTurnClearsTimer(t *testing.T) {
+	tr := events.NewTranscript()
+	tr.Streaming = true
+	m := model{
+		tr:            tr,
+		turnStartedAt: time.Now().Add(-10 * time.Second),
+	}
+	m.finishTurn()
+	if !m.turnStartedAt.IsZero() {
+		t.Fatal("finishTurn should clear turnStartedAt")
+	}
+	// Should emit a system message with elapsed time.
+	found := false
+	for _, item := range m.tr.Items {
+		if item.Kind == events.ItemSystem && strings.Contains(item.Content, "Completed in") {
+			found = true
+			if !strings.Contains(item.Content, "10s") {
+				t.Fatalf("completion message should contain '10s': %q", item.Content)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("finishTurn should emit a 'Completed in' system message")
+	}
+}
+
+func TestCompletionMessageNotShownForShortTurns(t *testing.T) {
+	tr := events.NewTranscript()
+	tr.Streaming = true
+	m := model{
+		tr:            tr,
+		turnStartedAt: time.Now(), // just started, <1s elapsed
+	}
+	m.finishTurn()
+	for _, item := range m.tr.Items {
+		if item.Kind == events.ItemSystem && strings.Contains(item.Content, "Completed in") {
+			t.Fatal("should not emit completion message for turns under 1 second")
+		}
+	}
+}
+
+func TestRenderDelegationPanelShowsRunningTasks(t *testing.T) {
+	item := events.Item{
+		Kind: events.ItemDelegation,
+		DelegationTasks: []events.DelegationTaskState{
+			{Name: "researcher", Description: "Research", Status: "running", StartedAt: time.Now().Add(-12 * time.Second)},
+			{Name: "code-reviewer", Description: "Review", Status: "complete", Duration: "8.1s"},
+			{Name: "api-tester", Description: "Test APIs", Status: "failed", Duration: "3s", Error: "timeout"},
+		},
+	}
+
+	m := model{
+		theme: DefaultTheme(),
+		width: 80,
+	}
+	out := stripANSI(m.renderDelegationItem(item, 80))
+	if out == "" {
+		t.Fatal("delegation item should render when tasks are present")
+	}
+	if !strings.Contains(out, "Delegating 3 tasks") {
+		t.Fatalf("should contain task count header: %q", out)
+	}
+	if !strings.Contains(out, "researcher") {
+		t.Fatalf("should contain task name 'researcher': %q", out)
+	}
+	if !strings.Contains(out, "code-reviewer") {
+		t.Fatalf("should contain task name 'code-reviewer': %q", out)
+	}
+	if !strings.Contains(out, "api-tester") {
+		t.Fatalf("should contain task name 'api-tester': %q", out)
+	}
+	if !strings.Contains(out, "complete") {
+		t.Fatalf("should show 'complete' status: %q", out)
+	}
+	if !strings.Contains(out, "failed") {
+		t.Fatalf("should show 'failed' status: %q", out)
+	}
+	if !strings.Contains(out, "12s") {
+		t.Fatalf("should show elapsed time '12s' for running task: %q", out)
+	}
+	if !strings.Contains(out, "8.1s") {
+		t.Fatalf("should show duration '8.1s' for complete task: %q", out)
+	}
+}
+
+func TestRenderDelegationItemEmptyWhenNoTasks(t *testing.T) {
+	item := events.Item{
+		Kind:            events.ItemDelegation,
+		DelegationTasks: nil,
+	}
+
+	m := model{
+		theme: DefaultTheme(),
+		width: 80,
+	}
+	out := m.renderDelegationItem(item, 80)
+	if out != "" {
+		t.Fatalf("delegation item should be empty when no tasks, got: %q", out)
 	}
 }

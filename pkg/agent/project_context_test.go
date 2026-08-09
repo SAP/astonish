@@ -135,11 +135,13 @@ func TestLoadProjectContext_NoneFound(t *testing.T) {
 	}
 }
 
-// TestSystemPromptBuilder_ProjectContextInjected verifies the loaded content is
-// rendered into the system prompt under a Project Guidance section.
-func TestSystemPromptBuilder_ProjectContextInjected(t *testing.T) {
-	b := &SystemPromptBuilder{ProjectContext: "USE TABS NOT SPACES"}
-	prompt := b.Build()
+// TestCodeSystemPromptBuilder_ProjectContextInjected verifies the loaded content
+// is rendered into the code-mode system prompt under a Project Guidance section.
+func TestCodeSystemPromptBuilder_ProjectContextInjected(t *testing.T) {
+	base := &SystemPromptBuilder{}
+	cb := NewCodeSystemPromptBuilder(base)
+	cb.ProjectContext = "USE TABS NOT SPACES"
+	prompt := base.Build()
 	if !strings.Contains(prompt, "## Project Guidance") {
 		t.Fatalf("expected Project Guidance section, got:\n%s", prompt)
 	}
@@ -151,6 +153,6 @@ func TestSystemPromptBuilder_ProjectContextInjected(t *testing.T) {
 func TestSystemPromptBuilder_NoProjectContextSection(t *testing.T) {
 	b := &SystemPromptBuilder{}
 	if strings.Contains(b.Build(), "## Project Guidance") {
-		t.Fatal("Project Guidance section must be absent when ProjectContext is empty")
+		t.Fatal("Project Guidance section must be absent for base builder (chat mode)")
 	}
 }

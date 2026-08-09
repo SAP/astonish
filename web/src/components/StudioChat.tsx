@@ -1260,10 +1260,13 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
 
             // ── Plan events ──
             if (stEventType === 'plan_announced') {
-              const steps: PlanStepInfo[] = ((data.plan_steps as Array<{ name: string; description: string }>) || []).map(s => ({
+              const steps: PlanStepInfo[] = ((data.plan_steps as Array<{ name: string; description: string; details?: string; files?: Array<{ path: string; kind: string }>; verify?: string }>) || []).map(s => ({
                 name: s.name,
                 description: s.description,
                 status: 'pending' as const,
+                details: s.details,
+                files: s.files,
+                verify: s.verify,
               }))
               setMessages((prev: ChatMsg[]) => [...prev, {
                 type: 'plan',
@@ -2177,10 +2180,13 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
 
             // ── Plan events ──
             if (eventType === 'plan_announced') {
-              const steps: PlanStepInfo[] = ((data.plan_steps as Array<{ name: string; description: string }>) || []).map(s => ({
+              const steps: PlanStepInfo[] = ((data.plan_steps as Array<{ name: string; description: string; details?: string; files?: Array<{ path: string; kind: string }>; verify?: string }>) || []).map(s => ({
                 name: s.name,
                 description: s.description,
                 status: 'pending' as const,
+                details: s.details,
+                files: s.files,
+                verify: s.verify,
               }))
               setMessages((prev: ChatMsg[]) => [...prev, {
                 type: 'plan',

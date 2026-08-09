@@ -111,6 +111,9 @@ type model struct {
 	turnCancel context.CancelFunc
 	// eventCh is drained via tea.Cmds while a turn is active.
 	eventCh <-chan events.Event
+	// turnStartedAt records when the current turn began, enabling a live
+	// elapsed-time counter in the status bar. Zero value means no turn active.
+	turnStartedAt time.Time
 	// compacting is true while an async /compact request is in flight. Used to
 	// show "Compacting…" immediately and reject a second /compact until done.
 	compacting bool
@@ -271,6 +274,7 @@ func workspaceRoot() string {
 type eventMsg events.Event
 type turnDoneMsg struct{}
 type turnErrMsg struct{ err error }
+type timerTickMsg struct{}
 type pasteIdleMsg struct{ seq int }
 type composerWatchMsg struct{}
 type artifactContentLoadedMsg struct {
@@ -576,6 +580,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				drained = maxCoalescedEvents
 			}
 		}
+		// After draining, if a plan approval just became active the approval
+		// widget replaces the composer and reduces the viewport height.
+		// Re-layout and re-scroll so the plan text above the widget is visible.
+		if m.tr.Awaiting {
+			m.layout()
+		}
 		m.refreshViewport()
 		if m.eventCh != nil {
 			cmds = append(cmds, waitEvent(m.eventCh))
@@ -591,6 +601,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.turnCancel()
 			}
 			m.turnCancel = nil
+			m.turnStartedAt = time.Time{}
 			m.tr.Streaming = false
 			m.tr.Status = ""
 			m.tr.Apply(events.NewError("Network approval failed: " + msg.err.Error()))
@@ -601,11 +612,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.tr.Streaming = true
 		m.tr.Status = "Thinking…"
 		m.eventCh = msg.ch
+		m.turnStartedAt = time.Now()
 		m.refreshViewport()
 		if msg.ch == nil {
 			return m, nil
 		}
-		return m, waitEvent(msg.ch)
+		return m, tea.Batch(waitEvent(msg.ch), timerTick())
 
 	case networkGrantDeniedMsg:
 		if msg.err != nil {
@@ -617,6 +629,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case turnDoneMsg:
 		m.eventCh = nil
 		m.turnCancel = nil
+		if !m.turnStartedAt.IsZero() {
+			d := time.Since(m.turnStartedAt).Truncate(time.Second)
+			if d >= time.Second {
+				m.tr.Apply(events.NewSystem("Completed in " + formatDuration(d)))
+			}
+			m.turnStartedAt = time.Time{}
+		}
 		if m.tr.Streaming {
 			m.tr.Apply(events.NewDone())
 		}
@@ -626,6 +645,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case turnErrMsg:
 		m.eventCh = nil
 		m.turnCancel = nil
+		m.turnStartedAt = time.Time{}
 		m.tr.Apply(events.NewError(msg.err.Error()))
 		m.refreshViewport()
 		return m, nil
@@ -638,6 +658,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.spin, cmd = m.spin.Update(msg)
 		if m.tr.Streaming || m.tr.Status != "" {
 			return m, cmd
+		}
+		return m, nil
+
+	case timerTickMsg:
+		// Re-schedule the next tick only while a turn is in progress.
+		if !m.turnStartedAt.IsZero() {
+			return m, timerTick()
 		}
 		return m, nil
 	}
@@ -891,7 +918,12 @@ Your job is to produce a COMPLETE plan the user can approve with confidence — 
 
 4. BE EFFICIENT — SPEND EFFORT PROPORTIONAL TO BLAST RADIUS. A one-file tweak needs a quick look; a cross-cutting change needs full tracing. Stop exploring once you can name every file you would change and why — do not read the whole repo. Prefer structural tools (code_definition/code_references) over broad grep, and never re-read a file already in your context.
 
-When your plan is finalized, record it with announce_plan (goal + ordered, dependency-first phases). For each phase, list its affected files (each marked new/modify/delete), put the concrete approach in details, and give a verify step (the build/test/lint command that proves the phase is done). This persists the plan to a session PLAN.md that survives context compaction; do NOT hand-write PLAN.md yourself. (You will drive phase status with update_plan once execution begins.)`
+When your plan is finalized, record it with announce_plan (goal + ordered, dependency-first phases). For each phase:
+- 'files': list every file the phase touches (marked new/modify/delete) — the symbol AND its callers, tests, generated code, migrations, docs.
+- 'details': write a concrete, self-contained description of exactly what to do in this phase — specific structs/functions to add or remove, the exact logic change, new fields, interface updates. Write enough detail that execution can proceed directly from this text without re-reading the code. This is the most important field; a vague 'details' makes the plan useless.
+- 'verify': the command that proves the phase is done (build/test/lint).
+
+Call announce_plan WITHOUT any preceding prose or summary — the plan document is shown directly to the user and speaks for itself. Do NOT write a "Here's my plan..." narration before the tool call. This persists the full plan to a session PLAN.md that survives context compaction and is shown to the user. Do NOT hand-write PLAN.md yourself. (You will drive phase status with update_plan once execution begins. When executing, treat PLAN.md as the authoritative source — do NOT re-investigate files or symbols already confirmed in the plan unless the code has changed since planning.)`
 
 // graphPlanModeSystemContext must stay in sync with
 // agent.GraphPlanModeSystemContext (the runtime gate's source of truth). It
@@ -907,7 +939,7 @@ PHASE 2 — READ. ` + "`read_file`" + ` (and read_pdf/filter_json) unlock, plus 
 
 PHASE 3 — GAP (complementary). The remaining read-only tools unlock: grep_search, find_files, file_tree, repo_map, code_definition, code_references, web_fetch, memory_search, memory_get, skill_lookup — and delegate_tasks. Use these ONLY for the genuine gaps codegraph could not fill. Prefer ` + "`delegate_tasks`" + ` with read-only ` + "`tools`" + ` filters (e.g. ["grep_search","read_file","code_references"]) to fan out independent gap questions in parallel. Do not re-answer anything already established. When gaps are closed, call ` + "`gplan_finalize`" + ` to advance to the PLAN phase.
 
-PHASE 4 — PLAN. ` + "`announce_plan`" + ` unlocks. Record the finalized plan: goal + ordered, dependency-first phases. For each phase list its affected files (each marked new/modify/delete — the symbol AND its callers, tests, generated code, migrations, docs, so nothing is left unwired), put the concrete approach in details, and give a verify step (the build/test/lint command that proves the phase is done). This persists the plan to a session PLAN.md that survives compaction; do NOT hand-write PLAN.md. End by asking the user to exit to Normal mode (shift+tab) before any execution.
+PHASE 4 — PLAN. ` + "`announce_plan`" + ` unlocks. Call it WITHOUT any preceding prose — the plan document is shown directly to the user. Record the finalized plan: goal + ordered, dependency-first phases. For each phase list its affected files (each marked new/modify/delete — the symbol AND its callers, tests, generated code, migrations, docs, so nothing is left unwired); write a concrete, self-contained 'details' field describing exactly what to do (specific functions/structs to add or change, the exact logic, new fields, interface updates — enough detail that execution can proceed directly from it without re-reading the code); and give a verify step (the build/test/lint command that proves the phase is done). File paths must be confirmed: only record a file path in 'details' or 'files' if codegraph_explore, code_definition, find_files, or read_file explicitly returned that exact path this session — do NOT infer paths from symbol names or directory conventions; if a path was not confirmed, call find_files before adding it to the plan. This persists the full plan to a session PLAN.md shown to the user; do NOT hand-write PLAN.md. End by asking the user to exit to Normal mode (shift+tab) before any execution. When executing later, treat PLAN.md as authoritative — do NOT re-investigate files or symbols already confirmed in the plan.
 
 Produce a COMPLETE plan — cover every dependency the change reaches, order phases dependency-first, and surface any human decisions (breaking changes, alternatives with trade-offs, ambiguous requirements) explicitly. Spend effort proportional to blast radius.`
 
@@ -1619,7 +1651,8 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.eventCh = ch
-	return m, waitEvent(ch)
+	m.turnStartedAt = time.Now()
+	return m, tea.Batch(waitEvent(ch), timerTick())
 }
 
 func (m model) collectSubmitAttachments(composerValue string) []backend.Attachment {
@@ -1696,7 +1729,8 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.eventCh = ch
-		return m, waitEvent(ch)
+		m.turnStartedAt = time.Now()
+		return m, tea.Batch(waitEvent(ch), timerTick())
 	}
 	m.refreshViewport()
 	return m, nil
@@ -1790,6 +1824,14 @@ func waitEvent(ch <-chan events.Event) tea.Cmd {
 	}
 }
 
+// timerTick returns a command that fires a timerTickMsg after 1 second,
+// driving the live elapsed-time counter in the status bar.
+func timerTick() tea.Cmd {
+	return tea.Tick(time.Second, func(time.Time) tea.Msg {
+		return timerTickMsg{}
+	})
+}
+
 // applyEvent applies one streamed event to the transcript and keeps the header
 // info in sync. It does NOT repaint — callers coalesce a batch and repaint once.
 func (m *model) applyEvent(ev events.Event) {
@@ -1811,6 +1853,13 @@ func (m *model) applyEvent(ev events.Event) {
 // turnDoneMsg handler). Returns the follow-up command (none).
 func (m *model) finishTurn() tea.Cmd {
 	m.turnCancel = nil
+	if !m.turnStartedAt.IsZero() {
+		d := time.Since(m.turnStartedAt).Truncate(time.Second)
+		if d >= time.Second {
+			m.tr.Apply(events.NewSystem("Completed in " + formatDuration(d)))
+		}
+		m.turnStartedAt = time.Time{}
+	}
 	if m.tr.Streaming {
 		m.tr.Apply(events.NewDone())
 	}
@@ -2449,6 +2498,8 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 					artifactIdx: row.artifactIdx,
 				})
 			}
+		case events.ItemDelegation:
+			appendBlock(i, it.Kind, m.renderDelegationItem(it, cw))
 		}
 	}
 	m.transcriptPlainLines = plainLines
@@ -3382,13 +3433,114 @@ func (m model) renderLiveStatus() string {
 		return m.paintRow(th.Error.Render(m.err), m.width)
 	}
 	if m.tr.Status != "" || m.tr.Streaming {
-		return m.paintRow(th.Status.Render(m.spin.View()+" "+first(m.tr.Status, "Working…")), m.width)
+		left := th.Status.Render(m.spin.View() + " " + first(m.tr.Status, "Working…"))
+		if !m.turnStartedAt.IsZero() {
+			d := time.Since(m.turnStartedAt).Truncate(time.Second)
+			right := th.Muted.Render(formatDuration(d))
+			gap := m.width - lipgloss.Width(left) - lipgloss.Width(right)
+			if gap < 1 {
+				gap = 1
+			}
+			return m.paintRow(left+strings.Repeat(" ", gap)+right, m.width)
+		}
+		return m.paintRow(left, m.width)
 	}
 	if m.copyStatus != "" && time.Now().Before(m.copiedUntil) {
 		return m.paintRow(th.Success.Render(m.copyStatus), m.width)
 	}
 	// Keep one row so chrome height is stable and painted with the app background.
 	return m.paintRow("", m.width)
+}
+
+// renderDelegationItem draws an inline sub-task delegation tracker showing each
+// delegated task with a status indicator, name, and elapsed/completed time.
+// Returns an empty string when there are no tasks (defensive; shouldn't happen).
+func (m model) renderDelegationItem(it events.Item, width int) string {
+	tasks := it.DelegationTasks
+	if len(tasks) == 0 {
+		return ""
+	}
+	th := m.theme
+	w := width
+	if w < 30 {
+		w = 30
+	}
+
+	// Header line.
+	header := fmt.Sprintf(" Delegating %d tasks ", len(tasks))
+
+	var lines []string
+	for _, task := range tasks {
+		var icon string
+		var nameStyle lipgloss.Style
+		var timeStr string
+
+		switch task.Status {
+		case "complete":
+			icon = th.Success.Render("✓")
+			nameStyle = th.Muted
+			timeStr = task.Duration
+		case "failed":
+			icon = th.Error.Render("✗")
+			nameStyle = th.Error
+			timeStr = task.Duration
+		default: // "running"
+			icon = th.Brand.Render("●")
+			nameStyle = th.Text
+			if !task.StartedAt.IsZero() {
+				elapsed := time.Since(task.StartedAt).Truncate(time.Second)
+				timeStr = formatDuration(elapsed)
+			}
+		}
+
+		// Truncate name to fit: icon(2) + name + status(10) + time(8) + spacing(6)
+		maxName := w - 26
+		if maxName < 8 {
+			maxName = 8
+		}
+		name := task.Name
+		if len(name) > maxName {
+			name = name[:maxName-1] + "…"
+		}
+
+		// Build the row: "  ● task-name          running   12s"
+		renderedName := nameStyle.Render(name)
+		nameWidth := lipgloss.Width(renderedName)
+		pad := maxName - nameWidth
+		if pad < 0 {
+			pad = 0
+		}
+
+		statusLabel := task.Status
+		if len(statusLabel) > 8 {
+			statusLabel = statusLabel[:8]
+		}
+		renderedStatus := th.Muted.Render(statusLabel)
+		renderedTime := th.Muted.Render(timeStr)
+
+		row := fmt.Sprintf("  %s %s%s  %s  %s",
+			icon, renderedName, strings.Repeat(" ", pad), renderedStatus, renderedTime)
+		lines = append(lines, row)
+	}
+
+	return th.Brand.Render(header) + "\n" + strings.Join(lines, "\n")
+}
+
+// formatDuration renders a duration as a compact human-readable string:
+// "3s", "1m 23s", "1h 5m 12s".
+func formatDuration(d time.Duration) string {
+	s := int(d.Seconds())
+	if s < 60 {
+		return fmt.Sprintf("%ds", s)
+	}
+	m := s / 60
+	s = s % 60
+	if m < 60 {
+		return fmt.Sprintf("%dm %ds", m, s)
+	}
+	h := m / 60
+	m = m % 60
+	return fmt.Sprintf("%dh %dm %ds", h, m, s)
 }
 
 // renderComposer draws the bordered input box (Grok-style), with the current
@@ -3528,6 +3680,7 @@ func (m model) cancelInFlightTurn() (tea.Model, tea.Cmd, bool) {
 	}
 	m.turnCancel()
 	m.turnCancel = nil
+	m.turnStartedAt = time.Time{}
 	m.tr.Streaming = false
 	m.tr.Status = ""
 	m.tr.Apply(events.NewSystem("Turn cancelled."))

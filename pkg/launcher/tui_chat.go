@@ -804,6 +804,36 @@ func mapSSEToEvents(sev *client.SSEEvent, debug bool) []events.Event {
 				}
 			}
 		}
+	case "delegation":
+		var payload struct {
+			Type     string `json:"type"`
+			TaskName string `json:"task_name"`
+			Duration string `json:"duration"`
+			Error    string `json:"error"`
+			Tasks    []struct {
+				Name        string `json:"name"`
+				Description string `json:"description"`
+				PlanStep    string `json:"plan_step"`
+			} `json:"tasks"`
+		}
+		if json.Unmarshal(data, &payload) == nil {
+			switch payload.Type {
+			case "start":
+				tasks := make([]events.DelegationTask, len(payload.Tasks))
+				for i, t := range payload.Tasks {
+					tasks[i] = events.DelegationTask{Name: t.Name, Description: t.Description, PlanStep: t.PlanStep}
+				}
+				return []events.Event{events.NewDelegationStart(tasks)}
+			case "task_start":
+				return []events.Event{events.NewDelegationTaskUpdate("task_start", payload.TaskName, "", "")}
+			case "task_complete":
+				return []events.Event{events.NewDelegationTaskUpdate("task_complete", payload.TaskName, payload.Duration, "")}
+			case "task_failed":
+				return []events.Event{events.NewDelegationTaskUpdate("task_failed", payload.TaskName, payload.Duration, payload.Error)}
+			case "done":
+				return []events.Event{events.NewDelegation("done")}
+			}
+		}
 	case "report_marker":
 		var payload struct {
 			Path  string `json:"path"`
@@ -931,6 +961,13 @@ func mapSSEToEvents(sev *client.SSEEvent, debug bool) []events.Event {
 		if json.Unmarshal(data, &payload) == nil && payload.Text != "" {
 			return []events.Event{events.NewSystem(payload.Text)}
 		}
+	case "plan_approval":
+		return []events.Event{{
+			Kind:         events.KindApproval,
+			ToolName:     "announce_plan",
+			Options:      []string{"Approve & implement", "Request changes", "Decline"},
+			ApprovalKind: "plan",
+		}}
 	case "done":
 		return []events.Event{events.NewDone()}
 	case "debug":

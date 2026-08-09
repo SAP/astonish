@@ -91,6 +91,25 @@ func (ps *PlanState) Snapshot() (string, []planStep) {
 	return ps.snapshotLocked()
 }
 
+// SnapshotInfo returns the plan goal and steps as exported PlanStepInfo values.
+// Used by the TUI to render the plan without depending on the unexported planStep type.
+func (ps *PlanState) SnapshotInfo() (string, []PlanStepInfo) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	goal, steps := ps.snapshotLocked()
+	info := make([]PlanStepInfo, len(steps))
+	for i, s := range steps {
+		info[i] = PlanStepInfo{
+			Name:        s.name,
+			Description: s.description,
+			Details:     s.details,
+			Files:       s.files,
+			Verify:      s.verify,
+		}
+	}
+	return goal, info
+}
+
 // snapshotLocked returns the plan goal and a copy of its steps.
 // Must be called with ps.mu held (e.g. from within the onChange hook).
 func (ps *PlanState) snapshotLocked() (string, []planStep) {

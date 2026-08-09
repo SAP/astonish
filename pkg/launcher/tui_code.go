@@ -434,6 +434,16 @@ func (b *localAgentBackend) removePlanFile(sessionID string) {
 	}
 }
 
+// ActivePlanFilePath implements backend.PlanBackend. It returns the absolute
+// path of the active session's PLAN.md sidecar, or "" if no session is active
+// or plan-file persistence is not configured.
+func (b *localAgentBackend) ActivePlanFilePath() string {
+	b.mu.Lock()
+	sid := b.sessionID
+	b.mu.Unlock()
+	return b.planFilePath(sid)
+}
+
 // ensureSession creates a new in-process session if none is active and returns
 // its ID. Safe to call under no lock; it locks internally.
 func (b *localAgentBackend) ensureSession(ctx context.Context) (string, bool, error) {
@@ -574,6 +584,26 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 				_, err := b.fileStore.ArchiveAndReplaceEvents(codeAppName, userID, sid, evs)
 				return err
 			})
+		}
+	}
+	// Wire structured sub-task progress so delegation events flow to the TUI.
+	// This enables the delegation panel that shows task timers and completion status.
+	chatAgent.SubTaskProgressCallback = func(evt agent.SubTaskProgressEvent) {
+		switch evt.Type {
+		case "delegation_start":
+			tasks := make([]any, len(evt.Tasks))
+			for i, t := range evt.Tasks {
+				tasks[i] = map[string]any{"name": t.Name, "description": t.Description, "plan_step": t.PlanStep}
+			}
+			emit("delegation", map[string]any{"type": "start", "tasks": tasks})
+		case "task_start":
+			emit("delegation", map[string]any{"type": "task_start", "task_name": evt.TaskName})
+		case "task_complete":
+			emit("delegation", map[string]any{"type": "task_complete", "task_name": evt.TaskName, "duration": evt.Duration})
+		case "task_failed":
+			emit("delegation", map[string]any{"type": "task_failed", "task_name": evt.TaskName, "duration": evt.Duration, "error": evt.Error})
+		case "delegation_complete":
+			emit("delegation", map[string]any{"type": "done", "status": evt.Status})
 		}
 	}
 	// Graph-Optimized Plan mode: best-effort ensure the .codegraph/ index exists
@@ -999,6 +1029,7 @@ func (b *localAgentBackend) driveTurn(
 ) {
 	seenPartialText := false
 	sawRealUsage := false
+	planAnnounced := false
 	// Allow the first mid-turn estimate to fire immediately (the throttle only
 	// applies to subsequent tool steps within this turn).
 	b.mu.Lock()
@@ -1029,6 +1060,12 @@ func (b *localAgentBackend) driveTurn(
 
 		for _, part := range event.LLMResponse.Content.Parts {
 			if part.Text != "" && !part.Thought {
+				// Suppress any model text after a plan has been announced —
+				// the plan document speaks for itself and the approval dialog
+				// will follow.
+				if planAnnounced {
+					continue
+				}
 				if event.LLMResponse.Partial {
 					seenPartialText = true
 					emit("text", map[string]any{"text": part.Text})
@@ -1059,6 +1096,18 @@ func (b *localAgentBackend) driveTurn(
 			}
 			if part.FunctionResponse != nil {
 				if part.FunctionResponse.Name == "announce_plan" {
+					// The plan was stored in chatAgent by the planStateCallback.
+					// Render it as a formatted text block so the user sees the
+					// full plan document in the terminal instead of a prose summary.
+					if plan := chatAgent.GetActivePlan(); plan != nil {
+						goal, steps := plan.SnapshotInfo()
+						rendered := agent.RenderPlanFromInfo(goal, steps)
+						// Emit a horizontal rule before the plan for clear
+						// visual separation from preceding tool activity.
+						emit("text", map[string]any{"text": "\n---\n\n"})
+						emit("text", map[string]any{"text": rendered})
+					}
+					planAnnounced = true
 					continue
 				}
 				resp := part.FunctionResponse.Response
@@ -1093,6 +1142,13 @@ func (b *localAgentBackend) driveTurn(
 	// and emit a synthetic usage event so the header reflects reality.
 	if !sawRealUsage {
 		b.emitEstimatedContext(ctx, sessionID, emit)
+	}
+
+	// If a plan was announced this turn, emit a plan_approval event so the TUI
+	// shows an approval dialog asking the user to approve, request changes, or
+	// decline the plan.
+	if planAnnounced {
+		emit("plan_approval", map[string]any{"plan_announced": true})
 	}
 }
 

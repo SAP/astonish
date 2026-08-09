@@ -635,3 +635,207 @@ func itemKinds(tr *Transcript) string {
 	}
 	return b.String()
 }
+
+func TestTranscript_ApprovalQueueing(t *testing.T) {
+	tr := NewTranscript()
+
+	// First approval arrives — should become active.
+	tr.Apply(NewAuthorizationApproval(
+		"edit_file",
+		map[string]any{"path": "app.go"},
+		[]string{"Allow", "Always Allow", "Deny"},
+		"tool", nil,
+	))
+	if !tr.Awaiting {
+		t.Fatal("expected awaiting after first approval")
+	}
+	firstIdx := tr.ApprovalIdx
+	if firstIdx < 0 {
+		t.Fatal("expected valid ApprovalIdx for first approval")
+	}
+	if tr.Items[firstIdx].ToolName != "edit_file" {
+		t.Fatalf("first active approval should be edit_file, got %q", tr.Items[firstIdx].ToolName)
+	}
+
+	// Second approval arrives while first is still pending — should NOT
+	// overwrite the active index.
+	tr.Apply(NewApproval("announce_plan", nil, []string{"Approve & implement", "Request changes", "Decline"}))
+	if tr.ApprovalIdx != firstIdx {
+		t.Fatalf("second approval should not overwrite active idx: got %d want %d", tr.ApprovalIdx, firstIdx)
+	}
+	if tr.Items[tr.ApprovalIdx].ToolName != "edit_file" {
+		t.Fatal("active approval should still be edit_file")
+	}
+
+	// Clear the first approval — the second should become active.
+	tr.ClearApproval()
+	if !tr.Awaiting {
+		t.Fatal("expected awaiting after clearing first approval (second is queued)")
+	}
+	if tr.ApprovalIdx < 0 {
+		t.Fatal("expected valid ApprovalIdx for queued approval")
+	}
+	if tr.Items[tr.ApprovalIdx].ToolName != "announce_plan" {
+		t.Fatalf("queued approval should now be active: got %q", tr.Items[tr.ApprovalIdx].ToolName)
+	}
+
+	// Clear the second — no more approvals.
+	tr.ClearApproval()
+	if tr.Awaiting {
+		t.Fatal("should not be awaiting after clearing all approvals")
+	}
+	if tr.ApprovalIdx != -1 {
+		t.Fatalf("ApprovalIdx should be -1, got %d", tr.ApprovalIdx)
+	}
+}
+
+func TestTranscriptDelegationStart(t *testing.T) {
+	tr := NewTranscript()
+	tr.Apply(NewUser("do something"))
+	tr.Apply(NewDelegationStart([]DelegationTask{
+		{Name: "researcher", Description: "Research the topic"},
+		{Name: "coder", Description: "Write the code"},
+		{Name: "reviewer", Description: "Review the output"},
+	}))
+
+	if !tr.DelegationActive {
+		t.Fatal("DelegationActive should be true after delegation start")
+	}
+	if len(tr.Delegation) != 3 {
+		t.Fatalf("expected 3 delegation tasks, got %d", len(tr.Delegation))
+	}
+	if tr.Delegation[0].Name != "researcher" {
+		t.Fatalf("first task name=%q want researcher", tr.Delegation[0].Name)
+	}
+	for i, task := range tr.Delegation {
+		if task.Status != "running" {
+			t.Fatalf("task %d status=%q want running", i, task.Status)
+		}
+		if task.StartedAt.IsZero() {
+			t.Fatalf("task %d StartedAt should be set", i)
+		}
+	}
+	if tr.Status != "Delegating tasks…" {
+		t.Fatalf("status=%q want 'Delegating tasks…'", tr.Status)
+	}
+	// Verify an ItemDelegation was inserted into Items.
+	found := false
+	for _, it := range tr.Items {
+		if it.Kind == ItemDelegation {
+			found = true
+			if len(it.DelegationTasks) != 3 {
+				t.Fatalf("ItemDelegation should have 3 tasks, got %d", len(it.DelegationTasks))
+			}
+			if it.DelegationTasks[0].Name != "researcher" {
+				t.Fatalf("ItemDelegation task[0] name=%q want researcher", it.DelegationTasks[0].Name)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected an ItemDelegation item in transcript Items")
+	}
+}
+
+func TestTranscriptDelegationTaskComplete(t *testing.T) {
+	tr := NewTranscript()
+	tr.Apply(NewDelegationStart([]DelegationTask{
+		{Name: "researcher", Description: "Research"},
+		{Name: "coder", Description: "Code"},
+	}))
+	tr.Apply(NewDelegationTaskUpdate("task_complete", "researcher", "5.2s", ""))
+
+	if tr.Delegation[0].Status != "complete" {
+		t.Fatalf("researcher status=%q want complete", tr.Delegation[0].Status)
+	}
+	if tr.Delegation[0].Duration != "5.2s" {
+		t.Fatalf("researcher duration=%q want 5.2s", tr.Delegation[0].Duration)
+	}
+	// The other task should still be running.
+	if tr.Delegation[1].Status != "running" {
+		t.Fatalf("coder status=%q want running", tr.Delegation[1].Status)
+	}
+	// Verify the inline Item is also updated.
+	for _, it := range tr.Items {
+		if it.Kind == ItemDelegation {
+			if it.DelegationTasks[0].Status != "complete" {
+				t.Fatalf("ItemDelegation task[0] status=%q want complete", it.DelegationTasks[0].Status)
+			}
+			if it.DelegationTasks[0].Duration != "5.2s" {
+				t.Fatalf("ItemDelegation task[0] duration=%q want 5.2s", it.DelegationTasks[0].Duration)
+			}
+		}
+	}
+}
+
+func TestTranscriptDelegationTaskFailed(t *testing.T) {
+	tr := NewTranscript()
+	tr.Apply(NewDelegationStart([]DelegationTask{
+		{Name: "researcher", Description: "Research"},
+	}))
+	tr.Apply(NewDelegationTaskUpdate("task_failed", "researcher", "10s", "timeout"))
+
+	if tr.Delegation[0].Status != "failed" {
+		t.Fatalf("researcher status=%q want failed", tr.Delegation[0].Status)
+	}
+	if tr.Delegation[0].Error != "timeout" {
+		t.Fatalf("researcher error=%q want timeout", tr.Delegation[0].Error)
+	}
+	// Verify the inline Item is also updated.
+	for _, it := range tr.Items {
+		if it.Kind == ItemDelegation {
+			if it.DelegationTasks[0].Status != "failed" {
+				t.Fatalf("ItemDelegation task[0] status=%q want failed", it.DelegationTasks[0].Status)
+			}
+		}
+	}
+}
+
+func TestTranscriptDelegationDone(t *testing.T) {
+	tr := NewTranscript()
+	tr.Apply(NewDelegationStart([]DelegationTask{
+		{Name: "researcher", Description: "Research"},
+	}))
+	if !tr.DelegationActive {
+		t.Fatal("DelegationActive should be true")
+	}
+
+	tr.Apply(NewDelegation("done"))
+	if tr.DelegationActive {
+		t.Fatal("DelegationActive should be false after 'done'")
+	}
+	// The ItemDelegation should remain in Items (persists in the thread).
+	found := false
+	for _, it := range tr.Items {
+		if it.Kind == ItemDelegation {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("ItemDelegation should remain in Items after 'done'")
+	}
+}
+
+func TestTranscriptKindDoneClearsDelegation(t *testing.T) {
+	tr := NewTranscript()
+	tr.Apply(NewDelegationStart([]DelegationTask{
+		{Name: "researcher", Description: "Research"},
+	}))
+	tr.Apply(NewDone())
+
+	if tr.DelegationActive {
+		t.Fatal("DelegationActive should be false after KindDone")
+	}
+	if tr.Delegation != nil {
+		t.Fatal("Delegation should be nil after KindDone")
+	}
+	// The ItemDelegation should persist in Items (visible in transcript history).
+	found := false
+	for _, it := range tr.Items {
+		if it.Kind == ItemDelegation {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("ItemDelegation should remain in Items after KindDone")
+	}
+}

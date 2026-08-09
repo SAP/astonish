@@ -26,8 +26,9 @@ const (
 	KindSubagent      Kind = "subagent"
 	KindSessionTitle  Kind = "session_title"
 	KindModelChanged  Kind = "model_changed"
-	KindStatus        Kind = "status" // spinner / live status text
-	KindUser          Kind = "user"   // local echo of user message
+	KindStatus        Kind = "status"     // spinner / live status text
+	KindUser          Kind = "user"       // local echo of user message
+	KindDelegation    Kind = "delegation" // sub-agent delegation lifecycle
 )
 
 // Usage holds token accounting for a turn.
@@ -61,6 +62,13 @@ type Artifact struct {
 	ToolName    string
 	IsReport    bool
 	ReportTitle string
+}
+
+// DelegationTask describes one sub-task in a delegation event.
+type DelegationTask struct {
+	Name        string
+	Description string
+	PlanStep    string
 }
 
 // Event is one unit of chat progress. Fields are optional by Kind.
@@ -109,6 +117,13 @@ type Event struct {
 
 	// Meta holds optional backend-specific keys without expanding the struct.
 	Meta map[string]any
+
+	// Delegation fields for KindDelegation.
+	DelegationType     string           // "start", "task_start", "task_complete", "task_failed", "done"
+	DelegationTasks    []DelegationTask // all tasks (only for "start")
+	DelegationTaskName string           // task name (for task_start/task_complete/task_failed)
+	DelegationDuration string           // human-readable duration (for task_complete/task_failed)
+	DelegationError    string           // error message (for task_failed)
 }
 
 // NewText returns a streaming agent text event.
@@ -173,4 +188,25 @@ func NewAuthorizationApproval(name string, args map[string]any, options []string
 // NewNetworkDenial returns a network authorization request.
 func NewNetworkDenial(sessionID, sandboxName string, denials []NetworkDenial) Event {
 	return Event{Kind: KindNetworkDenial, SessionID: sessionID, SandboxName: sandboxName, NetworkDenials: denials}
+}
+
+// NewDelegation returns a delegation lifecycle event.
+func NewDelegation(dtype string) Event {
+	return Event{Kind: KindDelegation, DelegationType: dtype}
+}
+
+// NewDelegationStart returns a delegation start event with the full task list.
+func NewDelegationStart(tasks []DelegationTask) Event {
+	return Event{Kind: KindDelegation, DelegationType: "start", DelegationTasks: tasks}
+}
+
+// NewDelegationTaskUpdate returns a per-task lifecycle event (task_start, task_complete, task_failed).
+func NewDelegationTaskUpdate(dtype, taskName, duration, errMsg string) Event {
+	return Event{
+		Kind:               KindDelegation,
+		DelegationType:     dtype,
+		DelegationTaskName: taskName,
+		DelegationDuration: duration,
+		DelegationError:    errMsg,
+	}
 }

@@ -176,7 +176,7 @@ func (b *CodeSystemPromptBuilder) build(base *SystemPromptBuilder) string {
 		sb.WriteString("- `context`: WHY this change is needed (motivation, problem, background). Write it when the reason isn't obvious from the goal title.\n")
 		sb.WriteString("- `what_not_to_do`: explicit scope guard — list APIs, files, behaviors, or invariants that must NOT change. Guards against accidental scope creep.\n")
 		sb.WriteString("- `verification`: end-to-end smoke test sequence for the entire plan after all phases complete.\n")
-		sb.WriteString("- `parallel_group` per step: label steps that may run concurrently with the same group name. Use for phases touching independent file subtrees (e.g. `pkg/agent/` vs `pkg/tui/` vs `web/`). Leave empty or use distinct labels when one phase's output feeds another's input.\n")
+		sb.WriteString("- `parallel_group` per step: structure the plan in execution waves. Before calling announce_plan, identify which phases have no dependency on each other's output — assign them the same wave label (e.g. `wave-1`). The next set of phases that depend only on wave-1 completing gets `wave-2`, and so on. Serial phases (one's output is another's input) get no label. Most multi-file plans have at least one wave of independent work; a plan with every phase unlabeled is a signal the plan structure needs review.\n")
 	}
 	if b.EnforceAuthorization {
 		sb.WriteString("\n**Tool & folder authorization:** You run directly on the user's machine. Read-only inspection tools run freely, but tools that modify files, run commands, or otherwise act (e.g. write_file, edit_file, shell_command) may pause for the user's authorization before executing, and accessing paths outside the working directory may also require authorization. ")

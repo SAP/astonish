@@ -7,7 +7,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/alecthomas/chroma/v2/lexers"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // DiffRow is one line in a single-gutter diff editor view.
@@ -44,7 +46,7 @@ type DiffOpts struct {
 //	 169 │ + added
 func FileDiffEditor(opts DiffOpts, st Styles) string {
 	rows := rowsFromOldNew(opts.Old, opts.New, opts.StartLine)
-	return renderDiffEditor(displayPath(opts.Path, opts.Root), rows, opts.Note, opts.Width, opts.Expanded, opts.MaxLines, st)
+	return renderDiffEditor(displayPath(opts.Path, opts.Root), opts.Path, rows, opts.Note, opts.Width, opts.Expanded, opts.MaxLines, st)
 }
 
 // FileDiff is an alias for FileDiffEditor (args-based fallback).
@@ -116,7 +118,7 @@ func RenderVerificationDiff(vc, fallbackPath string, width int, expanded bool, r
 	if len(rows) == 0 {
 		return ""
 	}
-	return renderDiffEditor(path, rows, note, width, expanded, 40, st)
+	return renderDiffEditor(path, fallbackPath, rows, note, width, expanded, 40, st)
 }
 
 // parseVerificationContext turns tool verification_context into DiffRows. The
@@ -308,7 +310,7 @@ func diffOps(oldLines, newLines []string, startLine int) []DiffRow {
 	return rows
 }
 
-func renderDiffEditor(path string, rows []DiffRow, note string, width int, expanded bool, maxLines int, st Styles) string {
+func renderDiffEditor(path, rawPath string, rows []DiffRow, note string, width int, expanded bool, maxLines int, st Styles) string {
 	if width < 20 {
 		width = 20
 	}
@@ -352,6 +354,9 @@ func renderDiffEditor(path string, rows []DiffRow, note string, width int, expan
 		gutterW = 3
 	}
 
+	// Detect language from file path for syntax highlighting.
+	lang := langFromPath(rawPath)
+
 	var b strings.Builder
 	header := st.Brand.Render("◆ "+path) + "  " + FormatStats(ActivityStats{
 		Kind: "diff", Added: added, Removed: removed,
@@ -376,20 +381,24 @@ func renderDiffEditor(path string, rows []DiffRow, note string, width int, expan
 			continue
 		}
 		marker := " "
-		var lineStyle lipgloss.Style
+		var bgStyle lipgloss.Style
+		var markerStyle lipgloss.Style
 		// num is the single line number shown for this row: the new number for
 		// context/added lines, the old number for removed lines.
 		num := r.NewN
 		switch r.Kind {
 		case "-":
 			marker = "−"
-			lineStyle = st.Danger
+			bgStyle = st.DiffRemovedBg
+			markerStyle = st.Danger
 			num = r.OldN
 		case "+":
 			marker = "+"
-			lineStyle = st.Success
+			bgStyle = st.DiffAddedBg
+			markerStyle = st.Success
 		default:
-			lineStyle = st.Text
+			bgStyle = st.Text
+			markerStyle = st.Text
 			if num == 0 {
 				num = r.OldN
 			}
@@ -398,18 +407,53 @@ func renderDiffEditor(path string, rows []DiffRow, note string, width int, expan
 		if num > 0 {
 			numCol = fmt.Sprintf("%*d", gutterW, num)
 		}
-		// The number is colored to match the line content; the separator and
-		// marker stay in their own styles.
-		gutter := lineStyle.Render(numCol) + st.CodeGutter.Render(" │ ") + lineStyle.Render(marker) + " "
-		wrapped := lineStyle.Width(textW).Render(r.Text)
-		parts := strings.Split(wrapped, "\n")
+
+		// Syntax-highlight the line content.
+		content := r.Text
+		// Expand tabs to spaces so width calculations match the terminal's
+		// rendering (lipgloss.Width counts tabs as 0, but terminals render
+		// them as multiple cells).
+		content = expandTabs(content, 4)
+		if !st.NoColor && lang != "" {
+			if hl := highlightCode(content, lang, false); hl != "" {
+				content = hl
+			}
+		}
+
+		// Truncate to textW so long lines don't overflow the terminal and
+		// cause ugly soft-wraps.
+		if lipgloss.Width(content) > textW {
+			content = ansi.Truncate(content, textW, "…")
+		}
+
+		// Build the gutter: line number (colored with background), separator,
+		// and diff marker. For changed lines the number and marker use the
+		// background band; context lines stay neutral.
+		var gutter string
+		if r.Kind == "-" || r.Kind == "+" {
+			gutter = bgStyle.Render(numCol) + st.CodeGutter.Render(" │ ") + markerStyle.Render(marker) + " "
+		} else {
+			gutter = st.CodeGutter.Render(numCol) + st.CodeGutter.Render(" │ ") + markerStyle.Render(marker) + " "
+		}
+
+		// For changed lines, render the text with the diff background band
+		// padded to full width; context lines render without padding to avoid
+		// a visible background stripe that differs from the terminal default.
+		var rendered string
+		if r.Kind == "-" || r.Kind == "+" {
+			rendered = padWithBg(content, textW, bgStyle, st.NoColor)
+		} else {
+			rendered = content
+		}
+
+		parts := strings.Split(rendered, "\n")
 		for i, p := range parts {
 			if i == 0 {
 				b.WriteString(gutter)
 				b.WriteString(p)
 			} else {
 				b.WriteByte('\n')
-				cont := st.CodeGutter.Render(strings.Repeat(" ", gutterW)+" │ ") + lineStyle.Render("  ")
+				cont := st.CodeGutter.Render(strings.Repeat(" ", gutterW)+" │ ") + markerStyle.Render("  ")
 				b.WriteString(cont)
 				b.WriteString(p)
 			}
@@ -421,6 +465,95 @@ func renderDiffEditor(path string, rows []DiffRow, note string, width int, expan
 		b.WriteByte('\n')
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// langFromPath extracts the language name from a file path for syntax
+// highlighting. Returns "" when the language cannot be determined.
+func langFromPath(path string) string {
+	if path == "" {
+		return ""
+	}
+	l := lexers.Match(filepath.Base(path))
+	if l == nil {
+		return ""
+	}
+	cfg := l.Config()
+	if cfg == nil {
+		return ""
+	}
+	return cfg.Name
+}
+
+// padWithBg renders content with a background color band, padding to width so
+// the colored band extends the full line. For syntax-highlighted content (that
+// already contains ANSI sequences with resets), it inserts the background ANSI
+// code after every reset so the background persists across tokens.
+func padWithBg(content string, width int, bg lipgloss.Style, noColor bool) string {
+	if noColor {
+		// Pad with spaces to fill the line width (no wrapping).
+		visW := lipgloss.Width(content)
+		if visW < width {
+			content += strings.Repeat(" ", width-visW)
+		}
+		return content
+	}
+	// Extract the raw background ANSI code from the style.
+	bgCode := extractBgCode(bg)
+	if bgCode == "" {
+		// Fallback: no background extractable, pad manually with the style.
+		visW := lipgloss.Width(content)
+		pad := ""
+		if visW < width {
+			pad = strings.Repeat(" ", width-visW)
+		}
+		return bg.Render(content + pad)
+	}
+	// Compute visible width of the content to determine padding needed.
+	visW := lipgloss.Width(content)
+	pad := ""
+	if visW < width {
+		pad = strings.Repeat(" ", width-visW)
+	}
+	// Insert the background code after every ANSI reset (\x1b[0m) so the
+	// background persists through syntax-highlighted token boundaries.
+	patched := strings.ReplaceAll(content, "\x1b[0m", "\x1b[0m"+bgCode)
+	return bgCode + patched + pad + "\x1b[0m"
+}
+
+// extractBgCode extracts the ANSI background escape sequence from a lipgloss
+// style. Lipgloss combines all SGR params into one sequence (e.g.,
+// \x1b[38;5;252;48;2;26;51;32m), so we search for "48;2;" or "48;5;" within
+// the rendered output and extract the background portion as a standalone
+// escape sequence.
+func extractBgCode(st lipgloss.Style) string {
+	rendered := st.Render("X")
+	return extractBgFromRendered(rendered)
+}
+
+// extractBgFromRendered parses an ANSI-formatted string and extracts the
+// background color escape sequence (48;2;R;G;B or 48;5;N) as a standalone
+// escape. Returns "" if no background is found.
+func extractBgFromRendered(rendered string) string {
+	// Look for 48;2; (true-color) or 48;5; (256-color) within the output.
+	for _, marker := range []string{"48;2;", "48;5;"} {
+		idx := strings.Index(rendered, marker)
+		if idx < 0 {
+			continue
+		}
+		// From the marker, scan forward collecting digits and semicolons to
+		// form the complete background parameter string.
+		end := idx + len(marker)
+		for end < len(rendered) && (rendered[end] >= '0' && rendered[end] <= '9' || rendered[end] == ';') {
+			end++
+		}
+		params := rendered[idx:end]
+		// Trim trailing semicolon (separating from next param in compound SGR).
+		params = strings.TrimRight(params, ";")
+		if len(params) > len(marker) {
+			return "\x1b[" + params + "m"
+		}
+	}
+	return ""
 }
 
 func pathFromArgs(args map[string]any) string {
@@ -517,6 +650,27 @@ func splitLines(s string) []string {
 	}
 	s = strings.TrimSuffix(s, "\n")
 	return strings.Split(s, "\n")
+}
+
+// expandTabs replaces each tab character with spaces to align to the given tab
+// stop width. This ensures width calculations match terminal rendering.
+func expandTabs(s string, tabWidth int) string {
+	if !strings.Contains(s, "\t") {
+		return s
+	}
+	var b strings.Builder
+	col := 0
+	for _, ch := range s {
+		if ch == '\t' {
+			spaces := tabWidth - (col % tabWidth)
+			b.WriteString(strings.Repeat(" ", spaces))
+			col += spaces
+		} else {
+			b.WriteRune(ch)
+			col++
+		}
+	}
+	return b.String()
 }
 
 // CountDiffStats returns +added/−removed from a verification_context or args-like old/new.

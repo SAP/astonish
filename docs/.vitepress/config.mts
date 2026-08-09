@@ -158,6 +158,7 @@ export default withMermaid(defineConfig({
         {
           text: 'CLI Reference',
           items: [
+            { text: 'Code Mode', link: '/docs/cli/code' },
             { text: 'Chat Commands', link: '/docs/cli/chat' },
             { text: 'Flow Commands', link: '/docs/cli/flows' },
             { text: 'Platform Commands', link: '/docs/cli/platform' },

@@ -408,4 +408,5 @@ If the Studio SSE connection returns a read error after a session id is known, t
 
 - `docs/architecture/remote-cli-client.md` — login, tokens, remote command routing
 - `docs/architecture/chat-rendering-pipeline.md` — Studio SPA pipeline (UX reference)
+- `docs/website/docs/cli/code.md` — user-facing Astonish Code documentation (VitePress)
 - `pkg/tui/AGENTS.md`

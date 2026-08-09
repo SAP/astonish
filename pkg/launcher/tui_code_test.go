@@ -472,6 +472,7 @@ func seedSession(t *testing.T, b *localAgentBackend, text string) string {
 		LLMResponse: adkmodel.LLMResponse{
 			Content: genai.NewContentFromText(text, genai.RoleUser),
 		},
+		Timestamp: time.Now(),
 	}
 	if err := b.sessionSvc.AppendEvent(ctx, sess, ev); err != nil {
 		t.Fatalf("AppendEvent: %v", err)

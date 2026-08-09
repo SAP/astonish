@@ -224,6 +224,14 @@ func RunCodeTUI(ctx context.Context, cfg *CodeConfig) error {
 		notices:     result.StartupNotices,
 	}
 
+	// If resuming an existing session, load the persisted title so the header
+	// shows it immediately.
+	if cfg.SessionID != "" && fileStore != nil {
+		if t, err := fileStore.GetSessionTitle(ctx, cfg.SessionID); err == nil && t != "" {
+			b.title = t
+		}
+	}
+
 	err = tui.Run(ctx, tui.Config{Backend: b})
 	if result.Cleanup != nil {
 		result.Cleanup()
@@ -348,6 +356,7 @@ type localAgentBackend struct {
 	lastCtxEstimate time.Time
 	resumed         bool
 	closed          bool
+	title           string
 	// needsRebuild is set when web search configuration changes. The next
 	// NewSession() call will rebuild the agent so new tools are loaded.
 	needsRebuild bool
@@ -376,6 +385,7 @@ func (b *localAgentBackend) Info() backend.Info {
 		IsResumed:     b.resumed,
 		AutoApprove:   b.autoApprove,
 		Notices:       notices,
+		Title:         b.title,
 	}
 }
 
@@ -619,10 +629,16 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 			provisional := deriveSessionTitle(message)
 			if provisional != "" {
 				_ = b.fileStore.SetSessionTitle(ctx, sessionID, provisional)
+				b.mu.Lock()
+				b.title = provisional
+				b.mu.Unlock()
 			}
 			// Best-effort LLM title refinement (non-blocking).
 			if b.result != nil && b.result.LLM != nil {
 				go generateCodeSessionTitle(b.result.LLM, b.fileStore, sessionID, message, provisional, func(title string) {
+					b.mu.Lock()
+					b.title = title
+					b.mu.Unlock()
 					emit("session_title", map[string]any{"title": title, "sessionId": sessionID})
 				})
 			}

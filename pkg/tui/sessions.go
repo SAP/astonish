@@ -210,6 +210,9 @@ func (m model) applyHistory(msg historyLoadedMsg) (tea.Model, tea.Cmd) {
 	m.planMode = false
 	m.tr.LoadHistory(entries)
 	m.info = m.backend.Info()
+	if m.info.Title != "" {
+		m.tr.Title = m.info.Title
+	}
 	if m.info.Usage != nil {
 		m.tr.LastUsage = &events.Usage{Input: m.info.Usage.Input, Output: m.info.Usage.Output, Total: m.info.Usage.Total}
 	}

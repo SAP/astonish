@@ -276,3 +276,33 @@ func TestApplyHistoryUsesBackendInfoModelAfterResume(t *testing.T) {
 		t.Fatalf("footer after resume A again = %s/%s, want openai/gpt-4o", m.info.Provider, m.info.Model)
 	}
 }
+
+func TestApplyHistorySetsTitleFromBackendInfo(t *testing.T) {
+	b := &modelAwareBackend{
+		staticBackend: staticBackend{info: backend.Info{Provider: "openai", Model: "gpt-4o"}},
+		bySession: map[string]backend.Info{
+			"sess-titled": {Provider: "openai", Model: "gpt-4o", Title: "Fix broken tests"},
+			"sess-notitle": {Provider: "anthropic", Model: "claude-sonnet-4"},
+		},
+	}
+
+	m := newModel(context.Background(), Config{Backend: b, Width: 100, Height: 30})
+
+	// Resume session with a title — header should show it.
+	cmd := m.resumeSessionCmd("sess-titled")
+	msg := cmd()
+	next, _ := m.Update(msg)
+	m = next.(model)
+	if m.tr.Title != "Fix broken tests" {
+		t.Fatalf("tr.Title after resume = %q, want %q", m.tr.Title, "Fix broken tests")
+	}
+
+	// Resume session without a title — header title should be empty.
+	cmd = m.resumeSessionCmd("sess-notitle")
+	msg = cmd()
+	next, _ = m.Update(msg)
+	m = next.(model)
+	if m.tr.Title != "" {
+		t.Fatalf("tr.Title after resume (no title) = %q, want empty", m.tr.Title)
+	}
+}

@@ -3192,12 +3192,36 @@ func (m model) renderHeader() string {
 	leftW := lipgloss.Width(leftPlain)
 	rightW := lipgloss.Width(rightPlain)
 
-	if rightPlain != "" && leftW+rightW+1 > width {
-		leftMax := width - rightW - 1
+	// Session title shown centered between left and right sections.
+	centerPlain := ""
+	if m.tr != nil && m.tr.Title != "" {
+		centerPlain = m.tr.Title
+	}
+	centerW := lipgloss.Width(centerPlain)
+
+	// Compute available space for the center title.
+	usedByEnds := leftW + rightW + 2 // minimum 1 space on each side of center
+	availCenter := width - usedByEnds
+	if availCenter < 0 {
+		availCenter = 0
+	}
+	// Truncate center if needed.
+	if centerW > availCenter {
+		centerPlain = truncateToWidth(centerPlain, availCenter)
+		centerW = lipgloss.Width(centerPlain)
+	}
+
+	// If total exceeds width, truncate left/right as before.
+	totalNeeded := leftW + centerW + rightW + 2 // +2 for min gaps
+	if totalNeeded > width {
+		leftMax := width - rightW - centerW - 2
 		if leftMax < 8 {
 			rightPlain = truncateToWidth(rightPlain, max(0, width-9))
 			rightW = lipgloss.Width(rightPlain)
-			leftMax = width - rightW - 1
+			leftMax = width - rightW - centerW - 2
+		}
+		if leftMax < 1 {
+			leftMax = 1
 		}
 		leftPlain = truncateToWidth(leftPlain, leftMax)
 		leftW = lipgloss.Width(leftPlain)
@@ -3205,14 +3229,29 @@ func (m model) renderHeader() string {
 
 	left := m.renderHeaderLeft(leftPlain)
 	right := th.Muted.Render(rightPlain)
-	gap := width - leftW - rightW
-	if rightPlain != "" {
-		if gap < 1 {
-			gap = 1
+
+	if centerPlain == "" {
+		// No title: original two-column layout.
+		gap := width - leftW - rightW
+		if rightPlain != "" {
+			if gap < 1 {
+				gap = 1
+			}
+			return m.paintRow(left+strings.Repeat(" ", gap)+right, width)
 		}
-		return m.paintRow(left+strings.Repeat(" ", gap)+right, width)
+		return m.paintRow(left, width)
 	}
-	return m.paintRow(left, width)
+
+	// Three-column layout: left ... center ... right
+	center := th.Muted.Render(centerPlain)
+	totalContent := leftW + centerW + rightW
+	totalGap := width - totalContent
+	if totalGap < 2 {
+		totalGap = 2
+	}
+	leftGap := totalGap / 2
+	rightGap := totalGap - leftGap
+	return m.paintRow(left+strings.Repeat(" ", leftGap)+center+strings.Repeat(" ", rightGap)+right, width)
 }
 
 func (m model) headerConnectionText() string {

@@ -107,7 +107,7 @@ func TestCtrlTabWithoutDualMode(t *testing.T) {
 	}
 }
 
-func TestShiftTabDisabledInPlatformMode(t *testing.T) {
+func TestShiftTabTogglesNormalPlanInPlatformMode(t *testing.T) {
 	m := newDualModeModel(t)
 
 	// Switch to platform mode.
@@ -118,17 +118,27 @@ func TestShiftTabDisabledInPlatformMode(t *testing.T) {
 		t.Fatal("expected platform mode")
 	}
 
-	// Send shift+tab — should NOT activate plan mode.
-	nm.planMode = false
-	nm.graphPlanMode = false
-
-	// Simulate the shift+tab check as done in Update.
-	if nm.info.Mode != "platform" {
-		nm.togglePlanMode()
+	// Initial state: Normal.
+	if nm.planMode || nm.graphPlanMode {
+		t.Fatal("expected Normal mode initially")
 	}
 
-	if nm.planMode || nm.graphPlanMode {
-		t.Fatal("shift+tab should not activate plan mode in platform mode")
+	// First toggle → Plan.
+	nm.togglePlanMode()
+	if !nm.planMode {
+		t.Fatal("expected planMode=true after first toggle")
+	}
+	if nm.graphPlanMode {
+		t.Fatal("graphPlanMode should never activate in platform mode")
+	}
+
+	// Second toggle → back to Normal (no Graph Plan in between).
+	nm.togglePlanMode()
+	if nm.planMode {
+		t.Fatal("expected planMode=false after second toggle")
+	}
+	if nm.graphPlanMode {
+		t.Fatal("graphPlanMode should never activate in platform mode")
 	}
 }
 
@@ -162,6 +172,13 @@ func TestComposerLabelInDualMode(t *testing.T) {
 	label = nm.composerModeLabel()
 	if label != "Platform" {
 		t.Fatalf("expected 'Platform', got %q", label)
+	}
+
+	// Platform + Plan mode.
+	nm.planMode = true
+	label = nm.composerModeLabel()
+	if label != "Platform · Plan" {
+		t.Fatalf("expected 'Platform · Plan', got %q", label)
 	}
 }
 

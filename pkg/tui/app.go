@@ -479,11 +479,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if msg.String() == "shift+tab" {
-			// Plan mode cycling is code-mode only; no-op in platform mode.
-			if m.info.Mode != "platform" {
-				m.togglePlanMode()
-				m.refreshViewport()
-			}
+			m.togglePlanMode()
+			m.refreshViewport()
 			return m, nil
 		}
 
@@ -988,7 +985,14 @@ PHASE 4 — PLAN. ` + "`announce_plan`" + ` unlocks. Call it WITHOUT any precedi
 Produce a COMPLETE plan — cover every dependency the change reaches, order phases dependency-first, and surface any human decisions (breaking changes, alternatives with trade-offs, ambiguous requirements) explicitly. Spend effort proportional to blast radius.`
 
 func (m *model) togglePlanMode() {
-	// Cycle Normal → Plan → Graph Plan → Normal.
+	// In platform mode, cycle Normal ↔ Plan only (no Graph Plan — it's
+	// code-mode-specific and relies on codegraph).
+	if m.info.Mode == "platform" {
+		m.planMode = !m.planMode
+		m.graphPlanMode = false
+		return
+	}
+	// Code mode: cycle Normal → Plan → Graph Plan → Normal.
 	switch {
 	case !m.planMode && !m.graphPlanMode:
 		m.planMode = true
@@ -3652,7 +3656,9 @@ func (m model) composerBorderStyle() lipgloss.Style {
 // plan-mode label (matching existing behavior).
 func (m model) composerModeLabel() string {
 	if m.info.Mode == "platform" {
-		// Platform mode has no plan sub-modes.
+		if m.planMode {
+			return "Platform · Plan"
+		}
 		return "Platform"
 	}
 	sub := "Normal"
@@ -3772,8 +3778,8 @@ func (m model) renderHints() string {
 	var full, short string
 	switch {
 	case m.dualMode && m.info.Mode == "platform":
-		full = "Enter send  ·  / commands  ·  ctrl+\\ code  ·  ctrl+l sessions  ·  shift+enter newline  ·  ctrl+c quit"
-		short = "Enter send  ·  / commands  ·  ctrl+\\ code"
+		full = "Enter send  ·  / commands  ·  shift+tab plan  ·  ctrl+\\ code  ·  ctrl+l sessions  ·  shift+enter newline  ·  ctrl+c quit"
+		short = "Enter send  ·  / commands  ·  shift+tab plan  ·  ctrl+\\ code"
 	case m.dualMode:
 		full = "Enter send  ·  / commands  ·  @ files  ·  shift+tab plan  ·  ctrl+\\ platform  ·  shift+enter newline  ·  ctrl+c quit"
 		short = "Enter send  ·  / commands  ·  shift+tab plan  ·  ctrl+\\ platform"

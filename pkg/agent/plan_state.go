@@ -16,6 +16,7 @@ import (
 type PlanState struct {
 	mu    sync.Mutex
 	goal  string
+	doc   PlanDocumentInfo
 	steps []planStep
 
 	// taskRegistry tracks which tasks belong to each plan step.
@@ -39,30 +40,33 @@ type PlanState struct {
 }
 
 type planStep struct {
-	name        string
-	description string
-	details     string           // optional richer per-phase content persisted to PLAN.md
-	files       []PlanFileChange // optional affected files (path + new/modify/delete) persisted to PLAN.md
-	verify      string           // optional command that proves the phase is done, persisted to PLAN.md
-	status      string           // "pending", "running", "complete", "failed"
+	name          string
+	description   string
+	details       string           // optional richer per-phase content persisted to PLAN.md
+	files         []PlanFileChange // optional affected files (path + new/modify/delete) persisted to PLAN.md
+	verify        string           // optional command that proves the phase is done, persisted to PLAN.md
+	parallelGroup string           // optional concurrency group label
+	status        string           // "pending", "running", "complete", "failed"
 }
 
 // NewPlanState creates a PlanState from an announce_plan call's step list.
-func NewPlanState(goal string, steps []PlanStepInfo) *PlanState {
+func NewPlanState(goal string, doc PlanDocumentInfo, steps []PlanStepInfo) *PlanState {
 	ps := &PlanState{
 		goal:           goal,
+		doc:            doc,
 		steps:          make([]planStep, len(steps)),
 		taskRegistry:   make(map[string]map[string]bool),
 		completedTasks: make(map[string]map[string]bool),
 	}
 	for i, s := range steps {
 		ps.steps[i] = planStep{
-			name:        s.Name,
-			description: s.Description,
-			details:     s.Details,
-			files:       s.Files,
-			verify:      s.Verify,
-			status:      "pending",
+			name:          s.Name,
+			description:   s.Description,
+			details:       s.Details,
+			files:         s.Files,
+			verify:        s.Verify,
+			parallelGroup: s.ParallelGroup,
+			status:        "pending",
 		}
 	}
 	return ps
@@ -100,14 +104,22 @@ func (ps *PlanState) SnapshotInfo() (string, []PlanStepInfo) {
 	info := make([]PlanStepInfo, len(steps))
 	for i, s := range steps {
 		info[i] = PlanStepInfo{
-			Name:        s.name,
-			Description: s.description,
-			Details:     s.details,
-			Files:       s.files,
-			Verify:      s.verify,
+			Name:          s.name,
+			Description:   s.description,
+			Details:       s.details,
+			Files:         s.files,
+			Verify:        s.verify,
+			ParallelGroup: s.parallelGroup,
 		}
 	}
 	return goal, info
+}
+
+// SnapshotDoc returns the document-level narrative sections stored in this plan.
+func (ps *PlanState) SnapshotDoc() PlanDocumentInfo {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	return ps.doc
 }
 
 // snapshotLocked returns the plan goal and a copy of its steps.

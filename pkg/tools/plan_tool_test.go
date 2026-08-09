@@ -75,7 +75,7 @@ func TestAnnouncePlanTool_PassesDetailsThrough(t *testing.T) {
 	}()
 
 	var gotSteps []agent.PlanStepInfo
-	SetPlanStateCallback(func(goal string, steps []agent.PlanStepInfo) { gotSteps = steps })
+	SetPlanStateCallback(func(goal string, doc agent.PlanDocumentInfo, steps []agent.PlanStepInfo) { gotSteps = steps })
 	SetPlanProgressCallback(func(agent.SubTaskProgressEvent) {})
 
 	_, err := announcePlan(nil, AnnouncePlanArgs{

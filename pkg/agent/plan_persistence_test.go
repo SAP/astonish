@@ -14,7 +14,7 @@ func TestChatAgent_SetActivePlanWritesPlanFile(t *testing.T) {
 	c := &ChatAgent{}
 	c.SetPlanFilePath(planPath)
 
-	plan := NewPlanState("Build feature", []PlanStepInfo{
+	plan := NewPlanState("Build feature", PlanDocumentInfo{}, []PlanStepInfo{
 		{Name: "explore", Description: "investigate"},
 		{Name: "implement", Description: "write code"},
 	})
@@ -49,7 +49,7 @@ func TestChatAgent_SetActivePlanWritesPlanFile(t *testing.T) {
 func TestChatAgent_SetActivePlanNoFileWhenPathEmpty(t *testing.T) {
 	c := &ChatAgent{}
 	// No SetPlanFilePath call → persistence disabled.
-	plan := NewPlanState("goal", []PlanStepInfo{{Name: "a", Description: "b"}})
+	plan := NewPlanState("goal", PlanDocumentInfo{}, []PlanStepInfo{{Name: "a", Description: "b"}})
 	// Must not panic and must not attempt any write.
 	c.SetActivePlan(plan)
 	plan.AdvanceOnToolStart()
@@ -64,7 +64,7 @@ func TestChatAgent_UpdatePlanRewritesPlanFile(t *testing.T) {
 
 	c := &ChatAgent{}
 	c.SetPlanFilePath(planPath)
-	plan := NewPlanState("Build", []PlanStepInfo{
+	plan := NewPlanState("Build", PlanDocumentInfo{}, []PlanStepInfo{
 		{Name: "explore", Description: "investigate", Details: "read files\ncheck deps"},
 		{Name: "implement", Description: "write code"},
 	})

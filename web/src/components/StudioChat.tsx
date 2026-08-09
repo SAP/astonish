@@ -886,7 +886,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
             return { type: 'image', data: m.data, mimeType: m.mimeType } as ImageMessage
           }
           if (m.type === 'plan') {
-            return { type: 'plan', goal: m.goal || '', steps: m.steps ?? [] } as PlanMessage
+            return { type: 'plan', goal: m.goal || '', steps: m.steps ?? [], context: m.context, whatNotToDo: m.whatNotToDo, verification: m.verification } as PlanMessage
           }
           return m as unknown as ChatMsg
         })
@@ -1260,18 +1260,22 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
 
             // ── Plan events ──
             if (stEventType === 'plan_announced') {
-              const steps: PlanStepInfo[] = ((data.plan_steps as Array<{ name: string; description: string; details?: string; files?: Array<{ path: string; kind: string }>; verify?: string }>) || []).map(s => ({
+              const steps: PlanStepInfo[] = ((data.plan_steps as Array<{ name: string; description: string; details?: string; files?: Array<{ path: string; kind: string }>; verify?: string; parallel_group?: string }>) || []).map(s => ({
                 name: s.name,
                 description: s.description,
                 status: 'pending' as const,
                 details: s.details,
                 files: s.files,
                 verify: s.verify,
+                parallelGroup: s.parallel_group,
               }))
               setMessages((prev: ChatMsg[]) => [...prev, {
                 type: 'plan',
                 goal: (data.plan_goal as string) || '',
                 steps,
+                context: (data.plan_context as string) || undefined,
+                whatNotToDo: (data.plan_what_not_to_do as string) || undefined,
+                verification: (data.plan_verification as string) || undefined,
               } as PlanMessage])
               break
             }
@@ -2180,18 +2184,22 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
 
             // ── Plan events ──
             if (eventType === 'plan_announced') {
-              const steps: PlanStepInfo[] = ((data.plan_steps as Array<{ name: string; description: string; details?: string; files?: Array<{ path: string; kind: string }>; verify?: string }>) || []).map(s => ({
+              const steps: PlanStepInfo[] = ((data.plan_steps as Array<{ name: string; description: string; details?: string; files?: Array<{ path: string; kind: string }>; verify?: string; parallel_group?: string }>) || []).map(s => ({
                 name: s.name,
                 description: s.description,
                 status: 'pending' as const,
                 details: s.details,
                 files: s.files,
                 verify: s.verify,
+                parallelGroup: s.parallel_group,
               }))
               setMessages((prev: ChatMsg[]) => [...prev, {
                 type: 'plan',
                 goal: (data.plan_goal as string) || '',
                 steps,
+                context: (data.plan_context as string) || undefined,
+                whatNotToDo: (data.plan_what_not_to_do as string) || undefined,
+                verification: (data.plan_verification as string) || undefined,
               } as PlanMessage])
               break
             }

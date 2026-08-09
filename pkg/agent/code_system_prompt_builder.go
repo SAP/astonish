@@ -172,6 +172,11 @@ func (b *CodeSystemPromptBuilder) build(base *SystemPromptBuilder) string {
 	if b.PlanFilePersistence {
 		sb.WriteString("\n**Execution plan (PLAN.md):** When you announce a multi-phase plan (announce_plan), it is persisted to a session PLAN.md at an absolute path. When you start executing (after plan approval), the execution context provides the exact path — call read_file with that path immediately. As you work, keep it current: for main-thread phases call update_plan (running → complete/failed); delegated phases update automatically. ")
 		sb.WriteString("After a context summary, re-read PLAN.md with read_file to recover the exact plan and where you left off, then mark the next phase running and continue.\n")
+		sb.WriteString("\nUse these optional announce_plan fields to make plans safe to follow:\n")
+		sb.WriteString("- `context`: WHY this change is needed (motivation, problem, background). Write it when the reason isn't obvious from the goal title.\n")
+		sb.WriteString("- `what_not_to_do`: explicit scope guard — list APIs, files, behaviors, or invariants that must NOT change. Guards against accidental scope creep.\n")
+		sb.WriteString("- `verification`: end-to-end smoke test sequence for the entire plan after all phases complete.\n")
+		sb.WriteString("- `parallel_group` per step: label steps that may run concurrently with the same group name. Use for phases touching independent file subtrees (e.g. `pkg/agent/` vs `pkg/tui/` vs `web/`). Leave empty or use distinct labels when one phase's output feeds another's input.\n")
 	}
 	if b.EnforceAuthorization {
 		sb.WriteString("\n**Tool & folder authorization:** You run directly on the user's machine. Read-only inspection tools run freely, but tools that modify files, run commands, or otherwise act (e.g. write_file, edit_file, shell_command) may pause for the user's authorization before executing, and accessing paths outside the working directory may also require authorization. ")

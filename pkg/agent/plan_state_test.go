@@ -5,7 +5,7 @@ import (
 )
 
 func TestPlanState_AdvanceOnToolStart(t *testing.T) {
-	ps := NewPlanState("test", []PlanStepInfo{
+	ps := NewPlanState("test", PlanDocumentInfo{}, []PlanStepInfo{
 		{Name: "clone-repos", Description: "Clone"},
 		{Name: "analyze", Description: "Analyze"},
 	})
@@ -22,7 +22,7 @@ func TestPlanState_AdvanceOnToolStart(t *testing.T) {
 }
 
 func TestPlanState_ExplicitPlanStep_SingleTask(t *testing.T) {
-	ps := NewPlanState("test", []PlanStepInfo{
+	ps := NewPlanState("test", PlanDocumentInfo{}, []PlanStepInfo{
 		{Name: "research-news", Description: "Search news"},
 		{Name: "write-reports", Description: "Write report files"},
 	})
@@ -54,7 +54,7 @@ func TestPlanState_ExplicitPlanStep_SingleTask(t *testing.T) {
 
 func TestPlanState_ExplicitPlanStep_MultipleTasksSameStep(t *testing.T) {
 	// Simulates the Apple/NVIDIA news session: 2 tasks both linked to "research-news"
-	ps := NewPlanState("Create News Reports", []PlanStepInfo{
+	ps := NewPlanState("Create News Reports", PlanDocumentInfo{}, []PlanStepInfo{
 		{Name: "research-news", Description: "Search for news in parallel"},
 		{Name: "write-reports", Description: "Create two report files"},
 	})
@@ -87,7 +87,7 @@ func TestPlanState_ExplicitPlanStep_MultipleTasksSameStep(t *testing.T) {
 
 func TestPlanState_FallbackPrefixMatch(t *testing.T) {
 	// When plan_step is empty, fall back to prefix matching on task name
-	ps := NewPlanState("test", []PlanStepInfo{
+	ps := NewPlanState("test", PlanDocumentInfo{}, []PlanStepInfo{
 		{Name: "analyze-astonish", Description: "Analyze Astonish"},
 		{Name: "analyze-openclaw", Description: "Analyze OpenClaw"},
 	})
@@ -111,7 +111,7 @@ func TestPlanState_FallbackPrefixMatch(t *testing.T) {
 }
 
 func TestPlanState_PrefixMatch_LongestWins(t *testing.T) {
-	ps := NewPlanState("test", []PlanStepInfo{
+	ps := NewPlanState("test", PlanDocumentInfo{}, []PlanStepInfo{
 		{Name: "analyze", Description: "Generic"},
 		{Name: "analyze-astonish", Description: "Specific"},
 	})
@@ -123,7 +123,7 @@ func TestPlanState_PrefixMatch_LongestWins(t *testing.T) {
 }
 
 func TestPlanState_CaseInsensitive(t *testing.T) {
-	ps := NewPlanState("test", []PlanStepInfo{
+	ps := NewPlanState("test", PlanDocumentInfo{}, []PlanStepInfo{
 		{Name: "Research-News", Description: "Search"},
 	})
 
@@ -141,7 +141,7 @@ func TestPlanState_CaseInsensitive(t *testing.T) {
 }
 
 func TestPlanState_CompleteAll(t *testing.T) {
-	ps := NewPlanState("test", []PlanStepInfo{
+	ps := NewPlanState("test", PlanDocumentInfo{}, []PlanStepInfo{
 		{Name: "step-1", Description: "First"},
 		{Name: "step-2", Description: "Second"},
 		{Name: "step-3", Description: "Third"},
@@ -163,7 +163,7 @@ func TestPlanState_CompleteAll(t *testing.T) {
 
 func TestPlanState_RealWorldScenario_ExplicitBinding(t *testing.T) {
 	// Simulate the improved Apple/NVIDIA news session with explicit plan_step
-	ps := NewPlanState("Create News Reports for Apple and NVIDIA", []PlanStepInfo{
+	ps := NewPlanState("Create News Reports for Apple and NVIDIA", PlanDocumentInfo{}, []PlanStepInfo{
 		{Name: "research-news", Description: "Search for latest Apple and NVIDIA news in parallel"},
 		{Name: "write-reports", Description: "Create two separate report files with findings"},
 	})
@@ -206,7 +206,7 @@ func TestPlanState_RealWorldScenario_ExplicitBinding(t *testing.T) {
 
 func TestPlanState_MixedExplicitAndFallback(t *testing.T) {
 	// Some tasks have plan_step, some don't
-	ps := NewPlanState("test", []PlanStepInfo{
+	ps := NewPlanState("test", PlanDocumentInfo{}, []PlanStepInfo{
 		{Name: "explore", Description: "Explore repos"},
 		{Name: "analyze-code", Description: "Analyze code"},
 	})
@@ -231,7 +231,7 @@ func TestPlanState_MixedExplicitAndFallback(t *testing.T) {
 }
 
 func TestPlanState_OnChangeFiresOnTransitions(t *testing.T) {
-	ps := NewPlanState("goal", []PlanStepInfo{
+	ps := NewPlanState("goal", PlanDocumentInfo{}, []PlanStepInfo{
 		{Name: "a", Description: "step a"},
 		{Name: "b", Description: "step b"},
 	})
@@ -266,7 +266,7 @@ func TestPlanState_OnChangeFiresOnTransitions(t *testing.T) {
 }
 
 func TestPlanState_HasStartedSteps(t *testing.T) {
-	ps := NewPlanState("goal", []PlanStepInfo{
+	ps := NewPlanState("goal", PlanDocumentInfo{}, []PlanStepInfo{
 		{Name: "a", Description: "step a"},
 		{Name: "b", Description: "step b"},
 	})
@@ -291,7 +291,7 @@ func TestPlanState_HasStartedSteps(t *testing.T) {
 // call site (chat_agent_run.go); this test documents the underlying contract
 // that CompleteAll must only be invoked once execution has begun.
 func TestPlanState_AnnounceOnlyTurnDoesNotComplete(t *testing.T) {
-	ps := NewPlanState("goal", []PlanStepInfo{
+	ps := NewPlanState("goal", PlanDocumentInfo{}, []PlanStepInfo{
 		{Name: "a", Description: "step a"},
 		{Name: "b", Description: "step b"},
 	})
@@ -313,7 +313,7 @@ func TestPlanState_AnnounceOnlyTurnDoesNotComplete(t *testing.T) {
 }
 
 func TestPlanState_SnapshotIsIndependentCopy(t *testing.T) {
-	ps := NewPlanState("goal", []PlanStepInfo{
+	ps := NewPlanState("goal", PlanDocumentInfo{}, []PlanStepInfo{
 		{Name: "a", Description: "step a"},
 	})
 	goal, steps := ps.Snapshot()
@@ -332,7 +332,7 @@ func TestPlanState_SnapshotIsIndependentCopy(t *testing.T) {
 }
 
 func TestPlanState_SetStepStatus(t *testing.T) {
-	ps := NewPlanState("goal", []PlanStepInfo{
+	ps := NewPlanState("goal", PlanDocumentInfo{}, []PlanStepInfo{
 		{Name: "a", Description: "step a"},
 		{Name: "b", Description: "step b"},
 	})
@@ -375,7 +375,7 @@ func TestPlanState_SetStepStatus(t *testing.T) {
 }
 
 func TestPlanState_ManualTrackingSuppressesCompleteAll(t *testing.T) {
-	ps := NewPlanState("goal", []PlanStepInfo{
+	ps := NewPlanState("goal", PlanDocumentInfo{}, []PlanStepInfo{
 		{Name: "a", Description: "step a"},
 		{Name: "b", Description: "step b"},
 	})
@@ -397,7 +397,7 @@ func TestPlanState_ManualTrackingSuppressesCompleteAll(t *testing.T) {
 // fields (affected files + verify command) survive from the PlanStepInfo input
 // into the internal plan steps, so they can be persisted to PLAN.md.
 func TestNewPlanState_CarriesFilesAndVerify(t *testing.T) {
-	ps := NewPlanState("goal", []PlanStepInfo{
+	ps := NewPlanState("goal", PlanDocumentInfo{}, []PlanStepInfo{
 		{
 			Name:        "types",
 			Description: "add fields",

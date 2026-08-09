@@ -86,11 +86,16 @@ type Event struct {
 	Options  []string // approval options
 
 	// ApprovalKind distinguishes code-mode authorization prompts:
-	// "" (generic tool approval), "tool" (not-whitelisted tool execution), or
-	// "folder" (out-of-project filesystem access). Paths holds the requested
-	// out-of-project paths for a "folder" prompt.
-	ApprovalKind string
-	Paths        []string
+	// "" (generic tool approval), "tool" (not-whitelisted tool execution),
+	// "folder" (out-of-project filesystem access), or "plan" (announce_plan
+	// approval). Paths holds the requested out-of-project paths for a "folder"
+	// prompt. PlanContext/PlanWhatNotToDo/PlanVerification carry the optional
+	// narrative sections from the plan document for "plan" approvals.
+	ApprovalKind        string
+	Paths               []string
+	PlanContext         string
+	PlanWhatNotToDo     string
+	PlanVerification    string
 
 	// SessionID for KindSession / KindSessionTitle.
 	SessionID string

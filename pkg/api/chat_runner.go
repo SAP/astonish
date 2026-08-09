@@ -650,6 +650,15 @@ func (cr *ChatRunner) Run(
 		if len(evt.PlanSteps) > 0 {
 			data["plan_steps"] = evt.PlanSteps
 		}
+		if evt.PlanContext != "" {
+			data["plan_context"] = evt.PlanContext
+		}
+		if evt.PlanWhatNotToDo != "" {
+			data["plan_what_not_to_do"] = evt.PlanWhatNotToDo
+		}
+		if evt.PlanVerification != "" {
+			data["plan_verification"] = evt.PlanVerification
+		}
 		if evt.StepName != "" {
 			data["step_name"] = evt.StepName
 		}

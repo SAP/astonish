@@ -208,6 +208,9 @@ export interface PlanMessage {
   type: 'plan'
   goal: string                // Plan title (e.g., "Source-Level GitHub Comparison")
   steps: PlanStepInfo[]       // Ordered list of plan steps
+  context?: string            // Optional WHY narrative section
+  whatNotToDo?: string        // Optional scope guard section
+  verification?: string       // Optional end-to-end smoke test section
 }
 
 export interface PlanFileInfo {
@@ -222,6 +225,7 @@ export interface PlanStepInfo {
   details?: string          // Concrete per-phase approach (persisted to PLAN.md)
   files?: PlanFileInfo[]    // Files this phase touches (blast radius)
   verify?: string           // Command proving the phase is done
+  parallelGroup?: string    // Optional concurrency group label
 }
 
 // ---- Generative UI app preview ----

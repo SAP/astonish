@@ -475,12 +475,28 @@ func compactLine(s string, maxRunes int) string {
 }
 
 // renderPlanApprovalOverlay renders the plan approval prompt shown after
-// announce_plan completes in Plan or Graph Plan mode.
+// announce_plan completes in Plan or Graph Plan mode. If the plan carries a
+// Context narrative section, the first few lines are shown below the prompt so
+// the user can see the plan's rationale without leaving the overlay.
 func (m model) renderPlanApprovalOverlay(it *events.Item) string {
 	th := m.theme
 	var b strings.Builder
 	b.WriteString(th.Header.Render("✦ Plan Ready") + "\n\n")
-	b.WriteString(th.Text.Render("The plan has been announced. How would you like to proceed?") + "\n\n")
+	b.WriteString(th.Text.Render("The plan has been announced. How would you like to proceed?") + "\n")
+	if it.PlanContext != "" {
+		// Show up to 3 lines of context (space-constrained overlay).
+		lines := strings.SplitN(strings.TrimSpace(it.PlanContext), "\n", 4)
+		if len(lines) > 3 {
+			lines = lines[:3]
+			lines[2] += " …"
+		}
+		b.WriteString("\n")
+		b.WriteString(th.Muted.Render("Context:") + "\n")
+		for _, l := range lines {
+			b.WriteString(th.Muted.Render("  "+compactLine(l, 100)) + "\n")
+		}
+	}
+	b.WriteString("\n")
 	opts := m.approvalOptions()
 	b.WriteString(m.renderApprovalOptions(opts))
 

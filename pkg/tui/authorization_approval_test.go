@@ -45,8 +45,10 @@ func TestRenderToolAuthorizationOverlay(t *testing.T) {
 		"Allow",
 		"Always Allow",
 		"Deny",
-		"move",   // cursor hint
-		"select", // enter hint
+		"move",      // cursor hint
+		"select",    // enter hint
+		"command",   // arg key shown
+		"rm -rf build", // arg value shown
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("overlay missing %q:\n%s", want, out)

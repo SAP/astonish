@@ -1101,7 +1101,8 @@ func (b *localAgentBackend) driveTurn(
 					// full plan document in the terminal instead of a prose summary.
 					if plan := chatAgent.GetActivePlan(); plan != nil {
 						goal, steps := plan.SnapshotInfo()
-						rendered := agent.RenderPlanFromInfo(goal, steps)
+						doc := plan.SnapshotDoc()
+						rendered := agent.RenderPlanFromInfoWithDoc(goal, doc, steps)
 						// Emit a horizontal rule before the plan for clear
 						// visual separation from preceding tool activity.
 						emit("text", map[string]any{"text": "\n---\n\n"})
@@ -1146,9 +1147,23 @@ func (b *localAgentBackend) driveTurn(
 
 	// If a plan was announced this turn, emit a plan_approval event so the TUI
 	// shows an approval dialog asking the user to approve, request changes, or
-	// decline the plan.
+	// decline the plan. Include doc-level narrative fields so the TUI overlay
+	// can show the plan context.
 	if planAnnounced {
-		emit("plan_approval", map[string]any{"plan_announced": true})
+		planPayload := map[string]any{"plan_announced": true}
+		if plan := chatAgent.GetActivePlan(); plan != nil {
+			doc := plan.SnapshotDoc()
+			if doc.Context != "" {
+				planPayload["plan_context"] = doc.Context
+			}
+			if doc.WhatNotToDo != "" {
+				planPayload["plan_what_not_to_do"] = doc.WhatNotToDo
+			}
+			if doc.Verification != "" {
+				planPayload["plan_verification"] = doc.Verification
+			}
+		}
+		emit("plan_approval", planPayload)
 	}
 }
 
@@ -1314,6 +1329,11 @@ func (b *localAgentBackend) processStateDelta(delta map[string]any, emit func(st
 					}
 				}
 				payload["paths"] = paths
+			}
+		}
+		if argsVal, ok := delta["approval_args"]; ok {
+			if args, ok := argsVal.(map[string]any); ok && len(args) > 0 {
+				payload["args"] = args
 			}
 		}
 		emit("approval", payload)

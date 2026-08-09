@@ -962,11 +962,20 @@ func mapSSEToEvents(sev *client.SSEEvent, debug bool) []events.Event {
 			return []events.Event{events.NewSystem(payload.Text)}
 		}
 	case "plan_approval":
+		var payload struct {
+			PlanContext      string `json:"plan_context"`
+			PlanWhatNotToDo  string `json:"plan_what_not_to_do"`
+			PlanVerification string `json:"plan_verification"`
+		}
+		_ = json.Unmarshal(data, &payload)
 		return []events.Event{{
-			Kind:         events.KindApproval,
-			ToolName:     "announce_plan",
-			Options:      []string{"Approve & implement", "Request changes", "Decline"},
-			ApprovalKind: "plan",
+			Kind:             events.KindApproval,
+			ToolName:         "announce_plan",
+			Options:          []string{"Approve & implement", "Request changes", "Decline"},
+			ApprovalKind:     "plan",
+			PlanContext:      payload.PlanContext,
+			PlanWhatNotToDo:  payload.PlanWhatNotToDo,
+			PlanVerification: payload.PlanVerification,
 		}}
 	case "done":
 		return []events.Event{events.NewDone()}

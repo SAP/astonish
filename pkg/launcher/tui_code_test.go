@@ -111,6 +111,7 @@ func TestProcessStateDelta_Approval(t *testing.T) {
 	b.processStateDelta(map[string]any{
 		"approval_options": []string{"Yes", "No"},
 		"approval_tool":    "shell_command",
+		"approval_args":    map[string]any{"command": "rm -rf /tmp/test"},
 	}, emit)
 
 	if len(got) != 1 || got[0].Kind != events.KindApproval {
@@ -118,6 +119,12 @@ func TestProcessStateDelta_Approval(t *testing.T) {
 	}
 	if got[0].ToolName != "shell_command" {
 		t.Errorf("tool name = %q", got[0].ToolName)
+	}
+	if got[0].Args == nil {
+		t.Fatal("expected Args to be non-nil")
+	}
+	if cmd, ok := got[0].Args["command"].(string); !ok || cmd != "rm -rf /tmp/test" {
+		t.Errorf("Args[command] = %v, want %q", got[0].Args["command"], "rm -rf /tmp/test")
 	}
 }
 

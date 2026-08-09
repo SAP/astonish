@@ -199,3 +199,151 @@ func TestParsePlanMarkdown_FilesAndVerifyRoundTrip(t *testing.T) {
 		t.Errorf("step 1 should have no files/verify, got files=%+v verify=%q", parsed[1].files, parsed[1].verify)
 	}
 }
+
+func TestRenderPlanMarkdown_DocumentSections(t *testing.T) {
+	orig := planClock
+	planClock = func() time.Time { return time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC) }
+	defer func() { planClock = orig }()
+
+	doc := PlanDocumentInfo{
+		Context:      "We need to improve the plan format.",
+		WhatNotToDo:  "Do not touch update_plan or PlanState runtime logic.",
+		Verification: "make test-unit\ngo test ./...",
+	}
+	steps := []planStep{
+		{name: "data", description: "extend types", status: "pending"},
+	}
+	md := renderPlanMarkdownWithDoc("My Plan", doc, steps)
+
+	wants := []string{
+		"## Context\n\nWe need to improve the plan format.",
+		"## What Not To Change\n\nDo not touch update_plan or PlanState runtime logic.",
+		"## Verification\n\nmake test-unit",
+	}
+	for _, w := range wants {
+		if !strings.Contains(md, w) {
+			t.Errorf("rendered plan missing %q\n---\n%s", w, md)
+		}
+	}
+	// Context must appear before ## Phases.
+	ctxIdx := strings.Index(md, "## Context")
+	phasesIdx := strings.Index(md, "## Phases")
+	if ctxIdx < 0 || phasesIdx < 0 || ctxIdx > phasesIdx {
+		t.Errorf("Context section must appear before Phases; ctxIdx=%d phasesIdx=%d", ctxIdx, phasesIdx)
+	}
+	// WhatNotToDo and Verification must appear after all phases.
+	wntIdx := strings.Index(md, "## What Not To Change")
+	vIdx := strings.Index(md, "## Verification")
+	if wntIdx < 0 || vIdx < 0 || wntIdx < phasesIdx || vIdx < wntIdx {
+		t.Errorf("post-phases sections in wrong order: phases=%d wnt=%d ver=%d", phasesIdx, wntIdx, vIdx)
+	}
+}
+
+func TestParsePlanMarkdown_DocumentSectionsRoundTrip(t *testing.T) {
+	orig := planClock
+	planClock = func() time.Time { return time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC) }
+	defer func() { planClock = orig }()
+
+	doc := PlanDocumentInfo{
+		Context:      "Context text here.\nLine two.",
+		WhatNotToDo:  "Leave X alone.",
+		Verification: "go test ./...",
+	}
+	steps := []planStep{
+		{name: "step-a", description: "do a", status: "pending"},
+		{name: "step-b", description: "do b", status: "complete"},
+	}
+	md := renderPlanMarkdownWithDoc("Goal", doc, steps)
+
+	parsedDoc, goal, parsed, err := parsePlanMarkdownFull(md)
+	if err != nil {
+		t.Fatalf("parsePlanMarkdownFull error: %v", err)
+	}
+	if goal != "Goal" {
+		t.Errorf("goal = %q", goal)
+	}
+	if parsedDoc.Context != doc.Context {
+		t.Errorf("Context = %q, want %q", parsedDoc.Context, doc.Context)
+	}
+	if parsedDoc.WhatNotToDo != doc.WhatNotToDo {
+		t.Errorf("WhatNotToDo = %q, want %q", parsedDoc.WhatNotToDo, doc.WhatNotToDo)
+	}
+	if parsedDoc.Verification != doc.Verification {
+		t.Errorf("Verification = %q, want %q", parsedDoc.Verification, doc.Verification)
+	}
+	if len(parsed) != 2 {
+		t.Fatalf("parsed %d steps, want 2", len(parsed))
+	}
+	if parsed[0].name != "step-a" || parsed[1].name != "step-b" {
+		t.Errorf("step names = %q, %q", parsed[0].name, parsed[1].name)
+	}
+	if parsed[1].status != "complete" {
+		t.Errorf("step-b status = %q, want complete", parsed[1].status)
+	}
+}
+
+func TestRenderPlanMarkdown_ParallelGroups(t *testing.T) {
+	steps := []planStep{
+		{name: "data-layer", description: "extend types", parallelGroup: "backend", status: "pending"},
+		{name: "system-prompt", description: "update guidance", parallelGroup: "backend", status: "pending"},
+		{name: "web-panel", description: "update UI", parallelGroup: "frontend", status: "pending"},
+		{name: "cleanup", description: "final cleanup", parallelGroup: "", status: "pending"},
+	}
+	md := RenderPlanMarkdown("Goal", steps)
+
+	wants := []string{
+		"### ⟳ Parallel group: backend",
+		"### ⟳ Parallel group: frontend",
+		"### (serial)",
+	}
+	for _, w := range wants {
+		if !strings.Contains(md, w) {
+			t.Errorf("rendered plan missing %q\n---\n%s", w, md)
+		}
+	}
+	// backend group header must precede data-layer step.
+	backendIdx := strings.Index(md, "### ⟳ Parallel group: backend")
+	dataIdx := strings.Index(md, "**data-layer**")
+	if backendIdx < 0 || dataIdx < 0 || backendIdx > dataIdx {
+		t.Errorf("backend group header must appear before data-layer step")
+	}
+	// serial header must precede cleanup step.
+	serialIdx := strings.Index(md, "### (serial)")
+	cleanupIdx := strings.Index(md, "**cleanup**")
+	if serialIdx < 0 || cleanupIdx < 0 || serialIdx > cleanupIdx {
+		t.Errorf("(serial) header must appear before cleanup step")
+	}
+}
+
+func TestParsePlanMarkdown_ParallelGroupsRoundTrip(t *testing.T) {
+	orig := planClock
+	planClock = func() time.Time { return time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC) }
+	defer func() { planClock = orig }()
+
+	steps := []planStep{
+		{name: "data-layer", description: "extend types", parallelGroup: "backend", status: "pending"},
+		{name: "system-prompt", description: "update prompt", parallelGroup: "backend", status: "complete"},
+		{name: "web-panel", description: "update UI", parallelGroup: "frontend", status: "running"},
+		{name: "cleanup", description: "cleanup", parallelGroup: "", status: "pending"},
+	}
+	md := RenderPlanMarkdown("Goal", steps)
+
+	_, goal, parsed, err := parsePlanMarkdownFull(md)
+	if err != nil {
+		t.Fatalf("parsePlanMarkdownFull error: %v", err)
+	}
+	if goal != "Goal" {
+		t.Errorf("goal = %q", goal)
+	}
+	if len(parsed) != 4 {
+		t.Fatalf("parsed %d steps, want 4", len(parsed))
+	}
+	for i, want := range steps {
+		if parsed[i].parallelGroup != want.parallelGroup {
+			t.Errorf("step %d (%q) parallelGroup = %q, want %q", i, want.name, parsed[i].parallelGroup, want.parallelGroup)
+		}
+		if parsed[i].status != want.status {
+			t.Errorf("step %d status = %q, want %q", i, parsed[i].status, want.status)
+		}
+	}
+}

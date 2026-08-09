@@ -61,72 +61,134 @@ func planFileKindLabel(kind string) string {
 // by announce_plan. It is the exported counterpart of RenderPlanMarkdown for
 // callers (e.g. the TUI) that hold PlanStepInfo slices rather than planSteps.
 func RenderPlanFromInfo(goal string, steps []PlanStepInfo) string {
+	return RenderPlanFromInfoWithDoc(goal, PlanDocumentInfo{}, steps)
+}
+
+// RenderPlanFromInfoWithDoc serializes a plan from the public PlanStepInfo type
+// and an optional PlanDocumentInfo containing narrative sections.
+func RenderPlanFromInfoWithDoc(goal string, doc PlanDocumentInfo, steps []PlanStepInfo) string {
 	internal := make([]planStep, len(steps))
 	for i, s := range steps {
 		internal[i] = planStep{
-			name:        s.Name,
-			description: s.Description,
-			details:     s.Details,
-			files:       s.Files,
-			verify:      s.Verify,
-			status:      "pending",
+			name:          s.Name,
+			description:   s.Description,
+			details:       s.Details,
+			files:         s.Files,
+			verify:        s.Verify,
+			parallelGroup: s.ParallelGroup,
+			status:        "pending",
 		}
 	}
-	return RenderPlanMarkdown(goal, internal)
+	return renderPlanMarkdownWithDoc(goal, doc, internal)
 }
-
 
 // planClock is overridable in tests for a deterministic timestamp.
 var planClock = time.Now
 
+// RenderPlanMarkdown serializes a plan to Markdown without document sections.
+// Kept for backward compatibility; prefer renderPlanMarkdownWithDoc internally.
 func RenderPlanMarkdown(goal string, steps []planStep) string {
+	return renderPlanMarkdownWithDoc(goal, PlanDocumentInfo{}, steps)
+}
+
+// renderPlanMarkdownWithDoc serializes a plan to Markdown, optionally including
+// document-level narrative sections (Context, WhatNotToDo, Verification) and
+// parallel-group headers for phase grouping.
+func renderPlanMarkdownWithDoc(goal string, doc PlanDocumentInfo, steps []planStep) string {
 	var sb strings.Builder
 	sb.WriteString("# Execution Plan\n\n")
 	if strings.TrimSpace(goal) != "" {
 		sb.WriteString(fmt.Sprintf("**Goal:** %s\n\n", goal))
 	}
 	sb.WriteString(fmt.Sprintf("_Last updated: %s_\n\n", planClock().UTC().Format(time.RFC3339)))
+
+	// Emit optional Context section before the phases list.
+	if strings.TrimSpace(doc.Context) != "" {
+		sb.WriteString("## Context\n\n")
+		sb.WriteString(strings.TrimRight(doc.Context, "\n"))
+		sb.WriteString("\n\n")
+	}
+
 	sb.WriteString("## Phases\n\n")
 	if len(steps) == 0 {
 		sb.WriteString("_(no phases)_\n")
-		return sb.String()
-	}
-	for _, s := range steps {
-		marker := planStatusMarker(s.status)
-		line := fmt.Sprintf("- [%s] **%s**", marker, s.name)
-		if strings.TrimSpace(s.description) != "" {
-			line += " — " + s.description
-		}
-		sb.WriteString(line + "\n")
-		// Emit affected files as an indented, machine-parseable sub-block so the
-		// concrete blast radius (dependency-first, no orphaned code) is recorded
-		// and can be re-hydrated after compaction.
-		for _, f := range s.files {
-			if strings.TrimSpace(f.Path) == "" {
-				continue
+	} else {
+		lastGroup := ""
+		for _, s := range steps {
+			// Emit parallel-group header when the group label changes.
+			if s.parallelGroup != lastGroup {
+				if s.parallelGroup != "" {
+					sb.WriteString(fmt.Sprintf("### ⟳ Parallel group: %s\n\n", s.parallelGroup))
+				} else {
+					sb.WriteString("### (serial)\n\n")
+				}
+				lastGroup = s.parallelGroup
 			}
-			sb.WriteString(fmt.Sprintf("  - File (%s): %s\n", planFileKindLabel(f.Kind), f.Path))
-		}
-		// Emit the optional verification command.
-		if strings.TrimSpace(s.verify) != "" {
-			sb.WriteString("  Verify: " + strings.TrimSpace(s.verify) + "\n")
-		}
-		// Emit optional richer details as an indented sub-block so the detailed
-		// plan (files/commands/approach) survives compaction, not just the label.
-		if strings.TrimSpace(s.details) != "" {
-			for _, dl := range strings.Split(strings.TrimRight(s.details, "\n"), "\n") {
-				sb.WriteString("  " + dl + "\n")
+
+			marker := planStatusMarker(s.status)
+			line := fmt.Sprintf("- [%s] **%s**", marker, s.name)
+			if strings.TrimSpace(s.description) != "" {
+				line += " — " + s.description
+			}
+			sb.WriteString(line + "\n")
+			// Emit affected files as an indented, machine-parseable sub-block so the
+			// concrete blast radius (dependency-first, no orphaned code) is recorded
+			// and can be re-hydrated after compaction.
+			for _, f := range s.files {
+				if strings.TrimSpace(f.Path) == "" {
+					continue
+				}
+				sb.WriteString(fmt.Sprintf("  - File (%s): %s\n", planFileKindLabel(f.Kind), f.Path))
+			}
+			// Emit the optional verification command.
+			if strings.TrimSpace(s.verify) != "" {
+				sb.WriteString("  Verify: " + strings.TrimSpace(s.verify) + "\n")
+			}
+			// Emit optional richer details as an indented sub-block so the detailed
+			// plan (files/commands/approach) survives compaction, not just the label.
+			if strings.TrimSpace(s.details) != "" {
+				for _, dl := range strings.Split(strings.TrimRight(s.details, "\n"), "\n") {
+					sb.WriteString("  " + dl + "\n")
+				}
 			}
 		}
+		sb.WriteString("\nLegend: `[ ]` pending · `[~]` running · `[x]` complete · `[!]` failed\n")
 	}
-	sb.WriteString("\nLegend: `[ ]` pending · `[~]` running · `[x]` complete · `[!]` failed\n")
+
+	// Emit optional post-phases narrative sections.
+	if strings.TrimSpace(doc.WhatNotToDo) != "" {
+		sb.WriteString("\n## What Not To Change\n\n")
+		sb.WriteString(strings.TrimRight(doc.WhatNotToDo, "\n"))
+		sb.WriteString("\n")
+	}
+	if strings.TrimSpace(doc.Verification) != "" {
+		sb.WriteString("\n## Verification\n\n")
+		sb.WriteString(strings.TrimRight(doc.Verification, "\n"))
+		sb.WriteString("\n")
+	}
+
 	return sb.String()
 }
 
-// ParsePlanMarkdown re-hydrates a PLAN.md document back into a goal and steps.
-// It tolerates minor formatting variance (extra whitespace) and ignores lines
-// that are not phase checkboxes. Returns an error only when no phases are found.
+// ParsePlanMarkdown re-hydrates a PLAN.md document back into a goal, document
+// info, and steps. It tolerates minor formatting variance (extra whitespace)
+// and ignores lines that are not phase checkboxes or known section headers.
+// Returns an error only when no phases are found.
+//
+// Backward-compatible: existing PLAN.md files without the new sections parse
+// correctly (new fields remain zero-valued).
 func ParsePlanMarkdown(md string) (goal string, steps []planStep, err error) {
+	_, goal, steps, err = parsePlanMarkdownFull(md)
+	return
+}
+
+// ParsePlanMarkdownFull re-hydrates a PLAN.md document including the optional
+// document-level narrative sections (Context, WhatNotToDo, Verification).
+func ParsePlanMarkdownFull(md string) (doc PlanDocumentInfo, goal string, steps []planStep, err error) {
+	return parsePlanMarkdownFull(md)
+}
+
+func parsePlanMarkdownFull(md string) (doc PlanDocumentInfo, goal string, steps []planStep, err error) {
 	scanner := bufio.NewScanner(strings.NewReader(md))
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	var detailLines []string
@@ -137,23 +199,93 @@ func ParsePlanMarkdown(md string) (goal string, steps []planStep, err error) {
 		}
 		detailLines = nil
 	}
+
+	// Section tracking for document-level narrative sections.
+	const (
+		secNone         = ""
+		secContext      = "context"
+		secPhases       = "phases"
+		secWhatNotToDo  = "whatnottodo"
+		secVerification = "verification"
+	)
+	currentSection := secNone
+	currentGroup := ""
+	var sectionLines []string
+
+	flushSection := func() {
+		content := strings.TrimSpace(strings.Join(sectionLines, "\n"))
+		switch currentSection {
+		case secContext:
+			doc.Context = content
+		case secWhatNotToDo:
+			doc.WhatNotToDo = content
+		case secVerification:
+			doc.Verification = content
+		}
+		sectionLines = nil
+	}
+
 	for scanner.Scan() {
 		raw := scanner.Text()
 		trimmed := strings.TrimSpace(raw)
+
+		// Detect top-level ## section headers.
+		if strings.HasPrefix(trimmed, "## ") {
+			flushDetails()
+			flushSection()
+			header := strings.TrimPrefix(trimmed, "## ")
+			headerLower := strings.ToLower(header)
+			switch {
+			case headerLower == "context":
+				currentSection = secContext
+			case headerLower == "phases":
+				currentSection = secPhases
+				currentGroup = ""
+			case strings.HasPrefix(headerLower, "what not to change") || strings.HasPrefix(headerLower, "what not to do"):
+				currentSection = secWhatNotToDo
+			case headerLower == "verification":
+				currentSection = secVerification
+			default:
+				currentSection = secNone
+			}
+			continue
+		}
+
+		// Detect ### sub-headers inside Phases (parallel-group markers).
+		if strings.HasPrefix(trimmed, "### ") && currentSection == secPhases {
+			flushDetails()
+			sub := strings.TrimPrefix(trimmed, "### ")
+			if strings.HasPrefix(sub, "⟳ Parallel group: ") {
+				currentGroup = strings.TrimPrefix(sub, "⟳ Parallel group: ")
+			} else if strings.TrimSpace(sub) == "(serial)" {
+				currentGroup = ""
+			}
+			continue
+		}
+
 		// Goal line: **Goal:** <text>
 		if strings.HasPrefix(trimmed, "**Goal:**") {
 			flushDetails()
 			goal = strings.TrimSpace(strings.TrimPrefix(trimmed, "**Goal:**"))
 			continue
 		}
+
 		// Phase line: - [<marker>] **<name>** — <description>
-		if strings.HasPrefix(trimmed, "- [") {
+		if strings.HasPrefix(trimmed, "- [") && currentSection == secPhases {
 			flushDetails()
 			if step, ok := parsePlanPhaseLine(trimmed); ok {
+				step.parallelGroup = currentGroup
 				steps = append(steps, step)
 			}
 			continue
 		}
+
+		// Inside narrative sections: accumulate content lines.
+		if currentSection == secContext || currentSection == secWhatNotToDo || currentSection == secVerification {
+			sectionLines = append(sectionLines, raw)
+			continue
+		}
+
 		// Indented, non-empty line following a phase = that phase's detail block.
 		// Stop collecting at the legend footer.
 		if len(steps) > 0 && strings.HasPrefix(raw, "  ") && trimmed != "" {
@@ -177,19 +309,21 @@ func ParsePlanMarkdown(md string) (goal string, steps []planStep, err error) {
 			detailLines = append(detailLines, trimmed)
 			continue
 		}
+
 		// Any other non-indented line ends the current detail block.
-		if trimmed != "" {
+		if trimmed != "" && currentSection == secPhases {
 			flushDetails()
 		}
 	}
 	flushDetails()
+	flushSection()
 	if scanErr := scanner.Err(); scanErr != nil {
-		return "", nil, fmt.Errorf("failed to scan plan document: %w", scanErr)
+		return doc, "", nil, fmt.Errorf("failed to scan plan document: %w", scanErr)
 	}
 	if len(steps) == 0 {
-		return goal, nil, fmt.Errorf("no plan phases found in document")
+		return doc, goal, nil, fmt.Errorf("no plan phases found in document")
 	}
-	return goal, steps, nil
+	return doc, goal, steps, nil
 }
 
 // parsePlanPhaseLine parses a single "- [x] **name** — description" line.

@@ -627,7 +627,7 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		if c.EnforceAuthorization && !planMode && !graphPlan && !c.AutoApprove {
 			authPolicy := c.GetOrCreateAuthPolicy(sessionID)
 
-			emitAuthPrompt := func(kind, toolName, prompt string, options []string, paths []string) map[string]any {
+			emitAuthPrompt := func(kind, toolName, prompt string, options []string, paths []string, args map[string]any) map[string]any {
 				delta := map[string]any{
 					"awaiting_approval": true,
 					"approval_tool":     toolName,
@@ -636,6 +636,9 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 				}
 				if len(paths) > 0 {
 					delta["approval_paths"] = paths
+				}
+				if len(args) > 0 {
+					delta["approval_args"] = args
 				}
 				authPolicy.SetPending(&PendingAuthorization{Kind: kind, Tool: toolName, Paths: paths})
 				authEventBuffer.append(&session.Event{
@@ -673,7 +676,7 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 					return nil, nil
 				}
 				prompt := c.approvalHelper.formatFolderApprovalRequest(t.Name(), outside, authPolicy.Root())
-				return emitAuthPrompt("folder", t.Name(), prompt, FolderApprovalOptions(), outside), nil
+				return emitAuthPrompt("folder", t.Name(), prompt, FolderApprovalOptions(), outside, args), nil
 			})
 
 			// Tool-execution gate (Normal-mode whitelist = agent.SafeTools).
@@ -692,7 +695,7 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 					return nil, nil // an active grant covers this execution
 				}
 				prompt := c.approvalHelper.formatToolApprovalRequest(name, args)
-				return emitAuthPrompt("tool", name, prompt, ToolApprovalOptions(), nil), nil
+				return emitAuthPrompt("tool", name, prompt, ToolApprovalOptions(), nil, args), nil
 			})
 		}
 

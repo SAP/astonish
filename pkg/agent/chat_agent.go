@@ -812,10 +812,10 @@ func (c *ChatAgent) SetActivePlan(plan *PlanState) {
 	// exists the moment the plan is announced.
 	plan.SetOnChange(func() {
 		goal, steps := plan.snapshotLocked()
-		c.writePlanFile(RenderPlanMarkdown(goal, steps))
+		c.writePlanFile(renderPlanMarkdownWithDoc(goal, plan.doc, steps))
 	})
 	goal, steps := plan.Snapshot()
-	c.writePlanFile(RenderPlanMarkdown(goal, steps))
+	c.writePlanFile(renderPlanMarkdownWithDoc(goal, plan.SnapshotDoc(), steps))
 }
 
 // SetPlanFilePath configures the per-session PLAN.md path. Empty disables

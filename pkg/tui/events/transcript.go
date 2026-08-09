@@ -53,10 +53,14 @@ type Item struct {
 	ToolName string
 	Args     map[string]any
 	Options  []string
-	// ApprovalKind: "" generic, "tool", or "folder" (code-mode authorization).
+	// ApprovalKind: "" generic, "tool", "folder" (code-mode authorization), or "plan".
 	ApprovalKind string
 	// Paths: requested out-of-project paths (folder approvals).
 	Paths []string
+	// Plan document narrative sections (plan approvals).
+	PlanContext      string
+	PlanWhatNotToDo  string
+	PlanVerification string
 
 	// Network denial fields.
 	NetworkDenials []NetworkDenial
@@ -189,13 +193,16 @@ func (t *Transcript) Apply(ev Event) {
 			content = "Authorize " + firstNonEmpty(ev.ToolName, "tool") + "?"
 		}
 		t.Items = append(t.Items, Item{
-			Kind:         ItemApproval,
-			ToolName:     ev.ToolName,
-			Args:         ev.Args,
-			Options:      defaultOptions(ev.Options),
-			ApprovalKind: ev.ApprovalKind,
-			Paths:        ev.Paths,
-			Content:      content,
+			Kind:             ItemApproval,
+			ToolName:         ev.ToolName,
+			Args:             ev.Args,
+			Options:          defaultOptions(ev.Options),
+			ApprovalKind:     ev.ApprovalKind,
+			Paths:            ev.Paths,
+			PlanContext:      ev.PlanContext,
+			PlanWhatNotToDo:  ev.PlanWhatNotToDo,
+			PlanVerification: ev.PlanVerification,
+			Content:          content,
 		})
 		// Only activate this approval if no other approval is already pending.
 		// When multiple approvals arrive in the same turn (e.g., edit_file auth

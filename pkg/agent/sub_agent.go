@@ -49,8 +49,11 @@ type SubTaskProgressEvent struct {
 	ToolResult any    `json:"tool_result,omitempty"` // Tool result (for task_tool_result)
 	Text       string `json:"text,omitempty"`        // Text output (for task_text)
 	// Fields for plan_announced
-	PlanGoal  string         `json:"plan_goal,omitempty"`  // Plan title (for plan_announced)
-	PlanSteps []PlanStepInfo `json:"plan_steps,omitempty"` // Plan steps (for plan_announced)
+	PlanGoal         string         `json:"plan_goal,omitempty"`          // Plan title (for plan_announced)
+	PlanSteps        []PlanStepInfo `json:"plan_steps,omitempty"`         // Plan steps (for plan_announced)
+	PlanContext      string         `json:"plan_context,omitempty"`       // Context section (for plan_announced)
+	PlanWhatNotToDo  string         `json:"plan_what_not_to_do,omitempty"` // What not to change (for plan_announced)
+	PlanVerification string         `json:"plan_verification,omitempty"`  // End-to-end smoke test (for plan_announced)
 	// Fields for plan_step_update
 	StepName   string `json:"step_name,omitempty"`   // Step name to update (for plan_step_update)
 	StepStatus string `json:"step_status,omitempty"` // New step status: running, complete, failed (for plan_step_update)
@@ -73,6 +76,15 @@ type PlanFileChange struct {
 	Kind string `json:"kind,omitempty"`
 }
 
+// PlanDocumentInfo holds optional document-level narrative sections for a plan.
+// These sections provide context, scope guards, and end-to-end verification
+// guidance that survive context compaction alongside the phase list.
+type PlanDocumentInfo struct {
+	Context      string `json:"context,omitempty"`
+	WhatNotToDo  string `json:"what_not_to_do,omitempty"`
+	Verification string `json:"verification,omitempty"`
+}
+
 // PlanStepInfo describes a step in the high-level execution plan.
 type PlanStepInfo struct {
 	Name        string `json:"name"`
@@ -90,6 +102,10 @@ type PlanStepInfo struct {
 	// test, or lint). It encodes the "every phase ends verified" discipline and
 	// is persisted to PLAN.md.
 	Verify string `json:"verify,omitempty"`
+	// ParallelGroup, when non-empty, labels this step as a member of a named
+	// concurrency group. Steps sharing the same non-empty label may execute
+	// concurrently. Steps with an empty label execute serially.
+	ParallelGroup string `json:"parallel_group,omitempty"`
 }
 
 // SubAgentTask describes a single sub-agent task to execute.

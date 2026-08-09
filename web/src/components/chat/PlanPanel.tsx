@@ -1,9 +1,11 @@
-import { Loader, Check, Circle, AlertCircle, ListChecks, File, FileEdit, Trash2, Terminal } from 'lucide-react'
+import { Loader, Check, Circle, AlertCircle, ListChecks, File, FileEdit, Trash2, Terminal, GitBranch } from 'lucide-react'
 import type { PlanMessage, PlanStepInfo } from './chatTypes'
 
 // Renders the execution plan announced by announce_plan as a human-readable
 // document: separator line, "Execution Plan" header, per-phase details with
 // files and verify commands. Status icons track live execution progress.
+// Optional document sections (context, whatNotToDo, verification) are rendered
+// above and below the phases list when present.
 export default function PlanPanel({ data }: { data: PlanMessage }) {
   const completedCount = data.steps.filter(s => s.status === 'complete').length
   const failedCount = data.steps.filter(s => s.status === 'failed').length
@@ -90,6 +92,23 @@ export default function PlanPanel({ data }: { data: PlanMessage }) {
           </span>
         </div>
 
+        {/* Optional Context section — above the phases list */}
+        {data.context && (
+          <div
+            className="px-4 py-2.5 text-[11px] leading-relaxed"
+            style={{
+              borderTop: '1px solid var(--border-color)',
+              background: 'var(--bg-tertiary, var(--bg-secondary))',
+              color: 'var(--text-muted)',
+            }}
+          >
+            <span className="font-semibold uppercase tracking-wide text-[10px]" style={{ color: 'var(--text-muted)' }}>
+              Context
+            </span>
+            <p className="mt-1 whitespace-pre-wrap">{data.context}</p>
+          </div>
+        )}
+
         {/* Steps */}
         <div style={{ borderTop: '1px solid var(--border-color)' }}>
           {data.steps.map((step, idx) => {
@@ -104,11 +123,11 @@ export default function PlanPanel({ data }: { data: PlanMessage }) {
                   opacity: isDone ? 0.6 : 1,
                 }}
               >
-                {/* Step header: status icon + number + description */}
+                {/* Step header: status icon + number + description + optional parallel badge */}
                 <div className="flex items-start gap-2.5">
                   {stepStatusIcon(step.status)}
                   <div className="flex-1 min-w-0">
-                    <div className="flex items-baseline gap-1.5">
+                    <div className="flex items-baseline gap-1.5 flex-wrap">
                       <span
                         className="text-[11px] font-semibold tabular-nums"
                         style={{ color: 'var(--text-muted)' }}
@@ -128,6 +147,19 @@ export default function PlanPanel({ data }: { data: PlanMessage }) {
                       >
                         {step.description || step.name}
                       </span>
+                      {step.parallelGroup && (
+                        <span
+                          className="inline-flex items-center gap-0.5 text-[9px] font-medium px-1.5 py-0.5 rounded-full"
+                          style={{
+                            background: 'color-mix(in srgb, var(--brand) 12%, transparent)',
+                            color: 'var(--brand)',
+                          }}
+                          title={`Parallel group: ${step.parallelGroup}`}
+                        >
+                          <GitBranch size={8} />
+                          ∥
+                        </span>
+                      )}
                     </div>
 
                     {/* Files list */}
@@ -187,6 +219,40 @@ export default function PlanPanel({ data }: { data: PlanMessage }) {
             )
           })}
         </div>
+
+        {/* Optional What Not To Change section — below phases */}
+        {data.whatNotToDo && (
+          <div
+            className="px-4 py-2.5 text-[11px] leading-relaxed"
+            style={{
+              borderTop: '1px solid var(--border-color)',
+              background: 'var(--bg-tertiary, var(--bg-secondary))',
+              color: 'var(--text-muted)',
+            }}
+          >
+            <span className="font-semibold uppercase tracking-wide text-[10px]" style={{ color: 'var(--text-muted)' }}>
+              What Not To Change
+            </span>
+            <p className="mt-1 whitespace-pre-wrap">{data.whatNotToDo}</p>
+          </div>
+        )}
+
+        {/* Optional Verification section — below phases */}
+        {data.verification && (
+          <div
+            className="px-4 py-2.5 text-[11px] leading-relaxed"
+            style={{
+              borderTop: '1px solid var(--border-color)',
+              background: 'var(--bg-tertiary, var(--bg-secondary))',
+              color: 'var(--text-muted)',
+            }}
+          >
+            <span className="font-semibold uppercase tracking-wide text-[10px]" style={{ color: 'var(--text-muted)' }}>
+              Verification
+            </span>
+            <p className="mt-1 whitespace-pre-wrap">{data.verification}</p>
+          </div>
+        )}
 
         {/* Footer */}
         {totalCount > 0 && (

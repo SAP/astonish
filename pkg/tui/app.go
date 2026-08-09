@@ -162,6 +162,10 @@ type model struct {
 	files fileCompletion
 	// planMode asks the platform agent for plans only, without execution.
 	planMode bool
+	// graphPlanMode is the stricter, phased Graph-Optimized Plan mode (code mode
+	// only). It uses codegraph as the primary driver behind a per-phase runtime
+	// tool gate. shift+tab cycles Normal → Plan → Graph Plan → Normal.
+	graphPlanMode bool
 	// Pasted blocks keep the composer compact while preserving submitted content.
 	pastedBlocks []pastedBlock
 	// Pasted images from the clipboard, shown as atomic [image #N] tokens.
@@ -889,11 +893,43 @@ Your job is to produce a COMPLETE plan the user can approve with confidence — 
 
 When your plan is finalized, record it with announce_plan (goal + ordered, dependency-first phases). For each phase, list its affected files (each marked new/modify/delete), put the concrete approach in details, and give a verify step (the build/test/lint command that proves the phase is done). This persists the plan to a session PLAN.md that survives context compaction; do NOT hand-write PLAN.md yourself. (You will drive phase status with update_plan once execution begins.)`
 
+// graphPlanModeSystemContext must stay in sync with
+// agent.GraphPlanModeSystemContext (the runtime gate's source of truth). It
+// teaches the model the phased "plan-for-the-plan" discipline enforced by the
+// staged tool gate in Graph-Optimized Plan mode.
+const graphPlanModeSystemContext = `You are in Astonish GRAPH-OPTIMIZED PLAN MODE. This is a hard constraint enforced by the runtime through a staged tool gate, not a suggestion. Like Plan mode, this is a NO-CHANGES mode: write_file, edit_file, shell_command and every other mutating tool are DISABLED in every phase and will be refused.
+
+The runtime advances through four phases. Each phase unlocks a specific set of tools; you move between phases by calling small transition tools. Do NOT try to call a tool before its phase — the gate will refuse it and tell you which phase it belongs to.
+
+PHASE 1 — GRAPH (current at turn start). Only ` + "`codegraph_explore`" + ` and ` + "`find_files`" + ` are available. codegraph is a pre-computed knowledge graph of this repo: symbols, call edges, dependencies, cross-file references, and change blast-radius. Query it FIRST to understand the code you will touch — it answers most structural questions in 1-4 calls with far fewer tokens than grep. Compound your findings as you go: never re-query the graph for something already in your context. When you have identified the exact regions you need to read, call ` + "`gplan_reads`" + ` with the synthesized read list (each entry: path + why you need it). Only include paths that ` + "`codegraph_explore`" + ` explicitly returned — do NOT guess or infer filenames; if you need a file but do not have its confirmed path, use ` + "`find_files`" + ` to locate it first. This advances you to the READ phase. If codegraph returns no coverage (language unsupported / not indexed), call ` + "`gplan_gaps`" + ` immediately to skip straight to the GAP phase.
+
+PHASE 2 — READ. ` + "`read_file`" + ` (and read_pdf/filter_json) unlock, plus codegraph_explore. Read exactly the regions you listed — do NOT re-search for information you already have. When you have read everything the graph pointed you to, decide: if genuine gaps remain that codegraph could not answer, call ` + "`gplan_gaps`" + ` with those gaps (each: the question + why codegraph was insufficient) to advance to the GAP phase. If there are no gaps, call ` + "`gplan_finalize`" + ` to skip straight to the PLAN phase.
+
+PHASE 3 — GAP (complementary). The remaining read-only tools unlock: grep_search, find_files, file_tree, repo_map, code_definition, code_references, web_fetch, memory_search, memory_get, skill_lookup — and delegate_tasks. Use these ONLY for the genuine gaps codegraph could not fill. Prefer ` + "`delegate_tasks`" + ` with read-only ` + "`tools`" + ` filters (e.g. ["grep_search","read_file","code_references"]) to fan out independent gap questions in parallel. Do not re-answer anything already established. When gaps are closed, call ` + "`gplan_finalize`" + ` to advance to the PLAN phase.
+
+PHASE 4 — PLAN. ` + "`announce_plan`" + ` unlocks. Record the finalized plan: goal + ordered, dependency-first phases. For each phase list its affected files (each marked new/modify/delete — the symbol AND its callers, tests, generated code, migrations, docs, so nothing is left unwired), put the concrete approach in details, and give a verify step (the build/test/lint command that proves the phase is done). This persists the plan to a session PLAN.md that survives compaction; do NOT hand-write PLAN.md. End by asking the user to exit to Normal mode (shift+tab) before any execution.
+
+Produce a COMPLETE plan — cover every dependency the change reaches, order phases dependency-first, and surface any human decisions (breaking changes, alternatives with trade-offs, ambiguous requirements) explicitly. Spend effort proportional to blast radius.`
+
 func (m *model) togglePlanMode() {
-	m.planMode = !m.planMode
+	// Cycle Normal → Plan → Graph Plan → Normal.
+	switch {
+	case !m.planMode && !m.graphPlanMode:
+		m.planMode = true
+		m.graphPlanMode = false
+	case m.planMode:
+		m.planMode = false
+		m.graphPlanMode = true
+	default:
+		m.planMode = false
+		m.graphPlanMode = false
+	}
 }
 
 func (m model) turnOptions() backend.TurnOptions {
+	if m.graphPlanMode {
+		return backend.TurnOptions{SystemContext: graphPlanModeSystemContext, GraphPlanMode: true}
+	}
 	if m.planMode {
 		return backend.TurnOptions{SystemContext: planModeSystemContext, PlanMode: true}
 	}
@@ -3332,7 +3368,9 @@ func (m model) renderComposer() string {
 
 	border := m.composerBorderStyle()
 	label := "Normal"
-	if m.planMode {
+	if m.graphPlanMode {
+		label = "Graph Plan"
+	} else if m.planMode {
 		label = "Plan"
 	}
 
@@ -3365,7 +3403,9 @@ func (m model) composerBorderStyle() lipgloss.Style {
 		return lipgloss.NewStyle()
 	}
 	color := lipgloss.Color("246")
-	if m.planMode {
+	if m.graphPlanMode {
+		color = lipgloss.Color("39") // cyan — distinct from Plan's amber
+	} else if m.planMode {
 		color = lipgloss.Color("172")
 	}
 	return lipgloss.NewStyle().Foreground(color).Background(lipgloss.Color("#000000"))

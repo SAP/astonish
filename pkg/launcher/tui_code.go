@@ -611,12 +611,20 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 		defer close(out)
 
 		emit("session", map[string]any{"sessionId": sessionID, "isNew": isNew})
-		// On a brand-new session, seed the index title from the first user
-		// message so `/sessions` shows a meaningful label. Best-effort: title
-		// failures never block the turn.
+		// On a brand-new session, seed the index with a provisional title from
+		// the first user message, then kick off a best-effort LLM title refine
+		// in the background. The provisional title appears immediately in
+		// `/sessions`; the LLM-refined title replaces it asynchronously.
 		if isNew && b.fileStore != nil {
-			if title := deriveSessionTitle(message); title != "" {
-				_ = b.fileStore.SetSessionTitle(ctx, sessionID, title)
+			provisional := deriveSessionTitle(message)
+			if provisional != "" {
+				_ = b.fileStore.SetSessionTitle(ctx, sessionID, provisional)
+			}
+			// Best-effort LLM title refinement (non-blocking).
+			if b.result != nil && b.result.LLM != nil {
+				go generateCodeSessionTitle(b.result.LLM, b.fileStore, sessionID, message, provisional, func(title string) {
+					emit("session_title", map[string]any{"title": title, "sessionId": sessionID})
+				})
 			}
 		}
 
@@ -863,6 +871,97 @@ func deriveSessionTitle(message string) string {
 	const maxLen = 60
 	if len(title) > maxLen {
 		title = strings.TrimSpace(title[:maxLen]) + "…"
+	}
+	return title
+}
+
+// generateCodeSessionTitle performs a best-effort LLM title generation for code
+// mode sessions. It mirrors the Studio title pipeline (pkg/api/chat_utils.go's
+// generateStudioSessionTitle) but is self-contained for code mode. On success,
+// it persists the refined title and invokes onTitle so the TUI can emit an event.
+// On any failure the provisional title already in the store is left unchanged.
+func generateCodeSessionTitle(llm adkmodel.LLM, store *persistentsession.FileStore, sessionID, userMessage, provisionalTitle string, onTitle func(string)) {
+	if llm == nil || store == nil || userMessage == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+
+	prompt := fmt.Sprintf(
+		"Generate a concise title (5-7 words max) for a conversation that starts with this message. "+
+			"Return ONLY the title text, nothing else. "+
+			"Do not include any thinking, reasoning, analysis, or explanation. "+
+			"No quotes, no markdown, no punctuation at the end.\n\nUser message: %s", userMessage)
+
+	req := &adkmodel.LLMRequest{
+		Contents: []*genai.Content{
+			genai.NewContentFromText(prompt, genai.RoleUser),
+		},
+		Config: &genai.GenerateContentConfig{
+			Temperature:     genai.Ptr(float32(0.3)),
+			MaxOutputTokens: 100,
+		},
+	}
+
+	var raw string
+	for resp, err := range llm.GenerateContent(ctx, req, false) {
+		if err != nil {
+			slog.Debug("code session title LLM error", "session_id", sessionID, "error", err)
+			return // provisional title stays
+		}
+		if resp.Content == nil {
+			continue
+		}
+		for _, part := range resp.Content.Parts {
+			if part.Text != "" && !part.Thought {
+				raw += part.Text
+			}
+		}
+	}
+
+	title := cleanCodeSessionTitle(raw)
+	if title == "" || title == provisionalTitle {
+		return
+	}
+	setCtx, setCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer setCancel()
+	if err := store.SetSessionTitle(setCtx, sessionID, title); err != nil {
+		slog.Debug("failed to set refined code session title", "session_id", sessionID, "error", err)
+		return
+	}
+	if onTitle != nil {
+		onTitle(title)
+	}
+}
+
+// cleanCodeSessionTitle strips thinking tags and truncates to a reasonable length.
+func cleanCodeSessionTitle(raw string) string {
+	title := strings.TrimSpace(raw)
+	if title == "" {
+		return ""
+	}
+	// Strip common thinking tag wrappers: <think>...</think> or <thinking>...</thinking>.
+	for _, prefix := range []string{"<think>", "<thinking>"} {
+		if idx := strings.Index(title, prefix); idx >= 0 {
+			after := title[idx+len(prefix):]
+			if closeIdx := strings.Index(after, ">"); closeIdx >= 0 {
+				// Remove everything from <prefix> through the closing >
+				title = title[:idx] + after[closeIdx+1:]
+			} else {
+				// Unclosed tag: remove from prefix to end.
+				title = title[:idx]
+			}
+		}
+	}
+	title = strings.TrimSpace(title)
+	// Remove surrounding quotes.
+	title = strings.Trim(title, "\"'`")
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return ""
+	}
+	if len(title) > 80 {
+		title = title[:77] + "..."
 	}
 	return title
 }
@@ -1187,25 +1286,48 @@ func (b *localAgentBackend) ListSessions(ctx context.Context) ([]backend.Session
 	if err != nil {
 		return nil, fmt.Errorf("failed to list code sessions: %w", err)
 	}
-	// Most-recently-updated first.
-	sort.Slice(metas, func(i, j int) bool {
-		return metas[i].UpdatedAt.After(metas[j].UpdatedAt)
-	})
-	out := make([]backend.SessionSummary, 0, len(metas))
+
+	// Resolve the effective UpdatedAt for each root session: after compaction,
+	// new messages go to the descendant tip whose UpdatedAt advances while the
+	// root's stays frozen. Walk the chain to find the most recent timestamp so
+	// a resumed-and-continued session sorts to the top.
+	type metaWithEffective struct {
+		meta       persistentsession.SessionMeta
+		effectiveT time.Time
+	}
+	enriched := make([]metaWithEffective, 0, len(metas))
 	for _, m := range metas {
-		title := m.Title
+		effective := m.UpdatedAt
+		tipID := b.fileStore.LatestDescendant(m.ID)
+		if tipID != m.ID {
+			if tipMeta, tErr := b.fileStore.GetSessionMeta(tipID); tErr == nil && tipMeta != nil {
+				if tipMeta.UpdatedAt.After(effective) {
+					effective = tipMeta.UpdatedAt
+				}
+			}
+		}
+		enriched = append(enriched, metaWithEffective{meta: m, effectiveT: effective})
+	}
+
+	// Most-recently-updated first (using effective timestamp from tip).
+	sort.Slice(enriched, func(i, j int) bool {
+		return enriched[i].effectiveT.After(enriched[j].effectiveT)
+	})
+	out := make([]backend.SessionSummary, 0, len(enriched))
+	for _, e := range enriched {
+		title := e.meta.Title
 		if title == "" {
 			title = "(untitled)"
 		}
 		updated := ""
-		if !m.UpdatedAt.IsZero() {
-			updated = m.UpdatedAt.Format("2006-01-02 15:04")
+		if !e.effectiveT.IsZero() {
+			updated = e.effectiveT.Format("2006-01-02 15:04")
 		}
 		out = append(out, backend.SessionSummary{
-			ID:           m.ID,
+			ID:           e.meta.ID,
 			Title:        title,
 			UpdatedAt:    updated,
-			MessageCount: m.MessageCount,
+			MessageCount: e.meta.MessageCount,
 		})
 	}
 	return out, nil

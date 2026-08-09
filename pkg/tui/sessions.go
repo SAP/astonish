@@ -275,19 +275,83 @@ func (m model) renderSessionsOverlay() string {
 		if end > len(m.sessions.items) {
 			end = len(m.sessions.items)
 		}
+
+		// Pre-compute column data so we can align them.
+		type rowData struct {
+			id      string
+			title   string
+			msgs    string
+			updated string
+		}
+		rows := make([]rowData, 0, end-start)
+		maxTitle := 0
+		maxMsgs := 0
 		for i := start; i < end; i++ {
 			s := m.sessions.items[i]
+			id := s.ID
+			if len(id) > 8 {
+				id = id[:8]
+			}
 			title := s.Title
 			if title == "" {
 				title = "(untitled)"
 			}
-			id := s.ID
-			if len(id) > 10 {
-				id = id[:10]
+			msgs := fmt.Sprintf("%d msgs", s.MessageCount)
+			updated := s.UpdatedAt
+
+			rows = append(rows, rowData{id: id, title: title, msgs: msgs, updated: updated})
+			if len(title) > maxTitle {
+				maxTitle = len(title)
 			}
-			line := fmt.Sprintf("%s  %s  · %d msgs", id, title, s.MessageCount)
+			if len(msgs) > maxMsgs {
+				maxMsgs = len(msgs)
+			}
+		}
+
+		// Cap title width to leave room for other columns.
+		availForTitle := w - 8 - 2 - maxMsgs - 2 - 16 - 8 // id + gaps + msgs + gap + date + margin
+		if availForTitle < 12 {
+			availForTitle = 12
+		}
+		if maxTitle > availForTitle {
+			maxTitle = availForTitle
+		}
+
+		for idx, r := range rows {
+			i := start + idx
+			// Truncate title if it exceeds the column width.
+			title := r.title
+			titleRunes := []rune(title)
+			if len(titleRunes) > maxTitle {
+				title = string(titleRunes[:maxTitle-1]) + "…"
+			}
+			// Pad title to align subsequent columns.
+			titlePad := maxTitle - len([]rune(title))
+			if titlePad < 0 {
+				titlePad = 0
+			}
+
+			// Pad msgs for alignment.
+			msgsPad := maxMsgs - len(r.msgs)
+			if msgsPad < 0 {
+				msgsPad = 0
+			}
+
+			var line string
+			if r.updated != "" {
+				line = fmt.Sprintf("%s  %s%s  %s%s  %s",
+					r.id,
+					title, strings.Repeat(" ", titlePad),
+					strings.Repeat(" ", msgsPad), r.msgs,
+					r.updated)
+			} else {
+				line = fmt.Sprintf("%s  %s%s  %s%s",
+					r.id,
+					title, strings.Repeat(" ", titlePad),
+					strings.Repeat(" ", msgsPad), r.msgs)
+			}
+
 			if lipgloss.Width(line) > w-6 {
-				// crude truncate
 				runes := []rune(line)
 				if len(runes) > w-9 {
 					line = string(runes[:w-9]) + "…"

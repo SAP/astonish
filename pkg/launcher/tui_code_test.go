@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"iter"
 	"log"
 	"os"
 	"path/filepath"
@@ -1170,7 +1171,8 @@ func TestDeleteSession_RemovesPlanFileSidecar(t *testing.T) {
 
 // TestDeleteSession_RemovesFromList covers session deletion removing the entry
 // from the list. See TestDeleteSession_RemovesPlanFileSidecar for sidecar
-// cleanup.
+// TestDeleteSession_RemovesFromList verifies that deleting a session removes it
+// from the list and performs proper cleanup.
 func TestDeleteSession_RemovesFromList(t *testing.T) {
 	dir := t.TempDir()
 	userID := codeUserIDForDir("/work/projectA")
@@ -1186,6 +1188,65 @@ func TestDeleteSession_RemovesFromList(t *testing.T) {
 	}
 	if len(sessions) != 0 {
 		t.Fatalf("expected empty list after delete, got %+v", sessions)
+	}
+}
+
+// TestListSessions_SortByLastMessageDescending verifies that a session which
+// receives a new message jumps to the top of the list regardless of its original
+// creation order. This is the core UX requirement: the session with the newest
+// activity must appear first.
+func TestListSessions_SortByLastMessageDescending(t *testing.T) {
+	dir := t.TempDir()
+	userID := codeUserIDForDir("/work/project")
+	b := newFileStoreBackend(t, dir, userID)
+	ctx := context.Background()
+
+	// Create two sessions with a small delay between them.
+	idOlder := seedSession(t, b, "Older session")
+	time.Sleep(10 * time.Millisecond) // ensure different timestamps
+	idNewer := seedSession(t, b, "Newer session")
+
+	// Initially, newer session should be first.
+	sessions, err := b.ListSessions(ctx)
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if len(sessions) != 2 {
+		t.Fatalf("expected 2 sessions, got %d", len(sessions))
+	}
+	if sessions[0].ID != idNewer {
+		t.Fatalf("expected newer session first, got %q", sessions[0].ID)
+	}
+
+	// Now send a new message to the older session — it should jump to the top.
+	time.Sleep(10 * time.Millisecond)
+	resp, gErr := b.sessionSvc.Get(ctx, &adksession.GetRequest{
+		AppName:   codeAppName,
+		UserID:    b.effectiveUserID(),
+		SessionID: idOlder,
+	})
+	if gErr != nil {
+		t.Fatalf("Get session: %v", gErr)
+	}
+	ev := &adksession.Event{
+		ID:     "e2",
+		Author: "user",
+		LLMResponse: adkmodel.LLMResponse{
+			Content: genai.NewContentFromText("new message in old session", genai.RoleUser),
+		},
+		Timestamp: time.Now(),
+	}
+	if err := b.sessionSvc.AppendEvent(ctx, resp.Session, ev); err != nil {
+		t.Fatalf("AppendEvent: %v", err)
+	}
+
+	// Re-list: older session (now with the most recent message) should be first.
+	sessions, err = b.ListSessions(ctx)
+	if err != nil {
+		t.Fatalf("ListSessions after update: %v", err)
+	}
+	if sessions[0].ID != idOlder {
+		t.Fatalf("expected older session (with latest message) to be first, got %q (wanted %q)", sessions[0].ID, idOlder)
 	}
 }
 
@@ -1205,6 +1266,104 @@ func TestDeriveSessionTitle(t *testing.T) {
 		}
 	}
 }
+
+// TestCleanCodeSessionTitle verifies thinking-tag stripping and truncation.
+func TestCleanCodeSessionTitle(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"", ""},
+		{"  Simple Title  ", "Simple Title"},
+		{"<think>reasoning here</think>Actual Title", "Actual Title"},
+		{"<thinking>some thought</thinking>Real Title", "Real Title"},
+		{"\"Quoted Title\"", "Quoted Title"},
+		{"`backtick title`", "backtick title"},
+		{strings.Repeat("a", 100), strings.Repeat("a", 77) + "..."},
+	}
+	for _, c := range cases {
+		if got := cleanCodeSessionTitle(c.in); got != c.want {
+			t.Errorf("cleanCodeSessionTitle(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestGenerateCodeSessionTitle_UpdatesTitle verifies that the LLM title
+// generation writes a refined title to the session store when the LLM succeeds.
+func TestGenerateCodeSessionTitle_UpdatesTitle(t *testing.T) {
+	dir := t.TempDir()
+	b := newFileStoreBackend(t, dir, codeUserID)
+	ctx := context.Background()
+
+	// Create a session with a provisional title.
+	sessionID := seedSession(t, b, "Fix the authentication bug in login handler")
+
+	// Verify provisional title is set.
+	title, err := b.fileStore.GetSessionTitle(ctx, sessionID)
+	if err != nil {
+		t.Fatalf("GetSessionTitle: %v", err)
+	}
+	if title != "Fix the authentication bug in login handler" {
+		t.Fatalf("expected provisional title, got %q", title)
+	}
+
+	// Call generateCodeSessionTitle with a mock LLM that returns a refined title.
+	var emittedTitle string
+	generateCodeSessionTitle(
+		&mockTitleLLM{response: "Auth Bug Fix in Login Handler"},
+		b.fileStore,
+		sessionID,
+		"Fix the authentication bug in login handler",
+		"Fix the authentication bug in login handler",
+		func(title string) { emittedTitle = title },
+	)
+
+	// Verify the refined title was persisted.
+	refined, err := b.fileStore.GetSessionTitle(ctx, sessionID)
+	if err != nil {
+		t.Fatalf("GetSessionTitle after refine: %v", err)
+	}
+	if refined != "Auth Bug Fix in Login Handler" {
+		t.Fatalf("expected refined title %q, got %q", "Auth Bug Fix in Login Handler", refined)
+	}
+	if emittedTitle != "Auth Bug Fix in Login Handler" {
+		t.Fatalf("expected emitted title %q, got %q", "Auth Bug Fix in Login Handler", emittedTitle)
+	}
+}
+
+// TestGenerateCodeSessionTitle_NoOpOnNilLLM verifies title generation does
+// nothing when no LLM is available (e.g. unconfigured provider).
+func TestGenerateCodeSessionTitle_NoOpOnNilLLM(t *testing.T) {
+	dir := t.TempDir()
+	b := newFileStoreBackend(t, dir, codeUserID)
+	ctx := context.Background()
+
+	sessionID := seedSession(t, b, "Some task message")
+	original, _ := b.fileStore.GetSessionTitle(ctx, sessionID)
+
+	// nil LLM should be a no-op.
+	generateCodeSessionTitle(nil, b.fileStore, sessionID, "Some task message", original, nil)
+
+	after, _ := b.fileStore.GetSessionTitle(ctx, sessionID)
+	if after != original {
+		t.Fatalf("title should not change with nil LLM: got %q, want %q", after, original)
+	}
+}
+
+// mockTitleLLM is a minimal LLM implementation for title generation tests.
+type mockTitleLLM struct {
+	response string
+}
+
+func (m *mockTitleLLM) GenerateContent(_ context.Context, _ *adkmodel.LLMRequest, _ bool) iter.Seq2[*adkmodel.LLMResponse, error] {
+	return func(yield func(*adkmodel.LLMResponse, error) bool) {
+		yield(&adkmodel.LLMResponse{
+			Content: &genai.Content{
+				Role:  "model",
+				Parts: []*genai.Part{{Text: m.response}},
+			},
+		}, nil)
+	}
+}
+
+func (m *mockTitleLLM) Name() string { return "mock-title" }
 
 // TestCodeSessionsDir_IsolatedFromStudio verifies code sessions live under a
 // dedicated "code" subdirectory so they never mix with Studio/chat sessions.

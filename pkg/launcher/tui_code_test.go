@@ -1691,6 +1691,371 @@ func TestMaybeCompactToChild_CreatesChildAndPreservesParent(t *testing.T) {
 
 // TestCompact_RunsImmediately verifies /compact creates a child session now
 // rather than deferring to the next user message.
+// --- Plan approval E2E ---
+
+// TestPlanApprovalE2E_EventPipelineCarriesDocFields is an end-to-end test for
+// the plan approval data pipeline:
+//
+//  1. A plan_approval payload (with context/what-not-to-do/verification fields)
+//     is emitted through the same emit→captureEmit→mapSSEToEvents path used
+//     at runtime in driveTurn.
+//  2. The resulting events.Event has Kind=KindApproval, ApprovalKind="plan",
+//     and all three doc fields populated.
+//  3. The event is applied to a Transcript: Awaiting is set and the approval
+//     Item carries the doc fields so renderPlanApprovalOverlay can show context.
+//
+// This test defends the full pipeline from the emit call in driveTurn through
+// the SSE translator to the TUI transcript — the path that was unit-tested at
+// each seam but never driven end-to-end.
+func TestPlanApprovalE2E_EventPipelineCarriesDocFields(t *testing.T) {
+	b := newTestBackend()
+	var got []events.Event
+	emit := captureEmit(&got, b.debug)
+
+	// Simulate what driveTurn emits when planAnnounced=true and the active plan
+	// carries doc-level narrative sections.
+	emit("plan_approval", map[string]any{
+		"plan_announced":    true,
+		"plan_context":      "We are migrating the auth module from JWT to OAuth2.",
+		"plan_what_not_to_do": "Do not touch the legacy session store.",
+		"plan_verification": "Run go test ./pkg/auth/...",
+	})
+
+	// Exactly one event should be produced.
+	if len(got) != 1 {
+		t.Fatalf("expected 1 event from plan_approval, got %d: %+v", len(got), got)
+	}
+	ev := got[0]
+
+	// Must be an approval event with plan kind.
+	if ev.Kind != events.KindApproval {
+		t.Fatalf("event kind = %v, want KindApproval", ev.Kind)
+	}
+	if ev.ApprovalKind != "plan" {
+		t.Fatalf("ApprovalKind = %q, want \"plan\"", ev.ApprovalKind)
+	}
+	if ev.ToolName != "announce_plan" {
+		t.Fatalf("ToolName = %q, want \"announce_plan\"", ev.ToolName)
+	}
+
+	// Doc fields must survive the emit→SSE→translate pipeline.
+	if ev.PlanContext != "We are migrating the auth module from JWT to OAuth2." {
+		t.Fatalf("PlanContext = %q", ev.PlanContext)
+	}
+	if ev.PlanWhatNotToDo != "Do not touch the legacy session store." {
+		t.Fatalf("PlanWhatNotToDo = %q", ev.PlanWhatNotToDo)
+	}
+	if ev.PlanVerification != "Run go test ./pkg/auth/..." {
+		t.Fatalf("PlanVerification = %q", ev.PlanVerification)
+	}
+
+	// Options must include the three plan choices.
+	wantOpts := []string{"Approve & implement", "Request changes", "Decline"}
+	if len(ev.Options) != len(wantOpts) {
+		t.Fatalf("Options = %v, want %v", ev.Options, wantOpts)
+	}
+	for i, want := range wantOpts {
+		if ev.Options[i] != want {
+			t.Errorf("Options[%d] = %q, want %q", i, ev.Options[i], want)
+		}
+	}
+
+	// Apply to a Transcript and verify the Item carries the doc fields so the
+	// approval overlay can render context — this is the step the TUI takes.
+	tr := events.NewTranscript()
+	tr.Apply(ev)
+
+	if !tr.Awaiting {
+		t.Fatal("Transcript should be Awaiting after plan approval event")
+	}
+	if tr.ApprovalIdx < 0 || tr.ApprovalIdx >= len(tr.Items) {
+		t.Fatalf("ApprovalIdx = %d, Items len = %d", tr.ApprovalIdx, len(tr.Items))
+	}
+	item := tr.Items[tr.ApprovalIdx]
+	if item.ApprovalKind != "plan" {
+		t.Fatalf("Item.ApprovalKind = %q, want \"plan\"", item.ApprovalKind)
+	}
+	if item.PlanContext != "We are migrating the auth module from JWT to OAuth2." {
+		t.Fatalf("Item.PlanContext = %q", item.PlanContext)
+	}
+	if item.PlanWhatNotToDo != "Do not touch the legacy session store." {
+		t.Fatalf("Item.PlanWhatNotToDo = %q", item.PlanWhatNotToDo)
+	}
+	if item.PlanVerification != "Run go test ./pkg/auth/..." {
+		t.Fatalf("Item.PlanVerification = %q", item.PlanVerification)
+	}
+}
+
+// TestPlanApprovalE2E_EmptyDocFieldsStillProducesApprovalEvent verifies that
+// a plan_approval payload without doc fields (older server / no context set)
+// still produces a valid approval event with empty doc fields — the fallback
+// path must not break.
+func TestPlanApprovalE2E_EmptyDocFieldsStillProducesApprovalEvent(t *testing.T) {
+	b := newTestBackend()
+	var got []events.Event
+	emit := captureEmit(&got, b.debug)
+
+	emit("plan_approval", map[string]any{"plan_announced": true})
+
+	if len(got) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(got))
+	}
+	ev := got[0]
+	if ev.Kind != events.KindApproval || ev.ApprovalKind != "plan" {
+		t.Fatalf("event = %+v", ev)
+	}
+	if ev.PlanContext != "" || ev.PlanWhatNotToDo != "" || ev.PlanVerification != "" {
+		t.Fatalf("expected empty doc fields for bare plan_approval: context=%q whatNotToDo=%q verification=%q",
+			ev.PlanContext, ev.PlanWhatNotToDo, ev.PlanVerification)
+	}
+}
+
+// --- Session resume E2E ---
+
+// TestSessionResumeE2E_FullHistoryToTranscript is an end-to-end test for the
+// session resume path from disk to rendered transcript items:
+//
+//  1. A session with a user message, agent response, tool call+result, and a
+//     second agent message is written to a file-backed store under a realistic
+//     working-directory-scoped user ID.
+//  2. A brand-new backend (simulating a process restart) opens the same store,
+//     calls ResumeSession, and receives the HistoryEntry slice.
+//  3. The HistoryEntry slice is fed into events.Transcript.LoadHistory (the
+//     same call the TUI makes on session resume) and the resulting Items are
+//     verified: user bubble, activity fold, final agent bubble all present.
+//  4. Backend state (sessionID, resumed flag, title, context tokens) is checked.
+//
+// This test defends the full restart → /sessions → pick → history loads path.
+func TestSessionResumeE2E_FullHistoryToTranscript(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	userID := codeUserIDForDir("/work/myproject")
+
+	// --- Phase 1: create a session and seed a realistic turn ---
+	b1 := newFileStoreBackend(t, dir, userID)
+	resp, err := b1.sessionSvc.Create(ctx, &adksession.CreateRequest{
+		AppName: codeAppName,
+		UserID:  b1.effectiveUserID(),
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	sess := resp.Session
+
+	appendEv := func(ev *adksession.Event) {
+		t.Helper()
+		if err := b1.sessionSvc.AppendEvent(ctx, sess, ev); err != nil {
+			t.Fatalf("AppendEvent %q: %v", ev.ID, err)
+		}
+	}
+
+	// User message.
+	appendEv(&adksession.Event{
+		ID:     "e1",
+		Author: "user",
+		LLMResponse: adkmodel.LLMResponse{
+			Content: genai.NewContentFromText("Add a README to the project", genai.RoleUser),
+		},
+		Timestamp: time.Now(),
+	})
+
+	// Agent interim text.
+	appendEv(&adksession.Event{
+		ID:     "e2",
+		Author: "chat",
+		LLMResponse: adkmodel.LLMResponse{
+			Content: genai.NewContentFromText("I will create a README.md for you.", genai.RoleModel),
+		},
+	})
+
+	// Tool call: write_file.
+	appendEv(&adksession.Event{
+		ID:     "e3",
+		Author: "chat",
+		LLMResponse: adkmodel.LLMResponse{
+			Content: &genai.Content{
+				Role: "model",
+				Parts: []*genai.Part{{
+					FunctionCall: &genai.FunctionCall{
+						ID:   "call_wf01",
+						Name: "write_file",
+						Args: map[string]any{"path": "README.md", "content": "# My Project\n"},
+					},
+				}},
+			},
+		},
+	})
+
+	// Tool result.
+	appendEv(&adksession.Event{
+		ID:     "e4",
+		Author: "chat",
+		LLMResponse: adkmodel.LLMResponse{
+			Content: &genai.Content{
+				Role: "user",
+				Parts: []*genai.Part{{
+					FunctionResponse: &genai.FunctionResponse{
+						ID:       "call_wf01",
+						Name:     "write_file",
+						Response: map[string]any{"success": true, "path": "README.md"},
+					},
+				}},
+			},
+		},
+	})
+
+	// Agent final text.
+	appendEv(&adksession.Event{
+		ID:     "e5",
+		Author: "chat",
+		LLMResponse: adkmodel.LLMResponse{
+			Content: genai.NewContentFromText("README.md has been created.", genai.RoleModel),
+		},
+	})
+
+	// Persist title (mirrors what RunTurn does).
+	title := "Add a README to the project"
+	if err := b1.fileStore.SetSessionTitle(ctx, sess.ID(), title); err != nil {
+		t.Fatalf("SetSessionTitle: %v", err)
+	}
+	sessionID := sess.ID()
+
+	// --- Phase 2: simulate restart — fresh backend over the same store ---
+	b2 := newFileStoreBackend(t, dir, userID)
+
+	// Verify the session is listed (what /sessions shows).
+	sessions, err := b2.ListSessions(ctx)
+	if err != nil {
+		t.Fatalf("ListSessions after restart: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 session in list, got %d", len(sessions))
+	}
+	if sessions[0].ID != sessionID {
+		t.Fatalf("listed session ID = %q, want %q", sessions[0].ID, sessionID)
+	}
+	if sessions[0].Title != title {
+		t.Fatalf("listed title = %q, want %q", sessions[0].Title, title)
+	}
+
+	// Resume (what the TUI does when the user picks a session from /sessions).
+	hist, err := b2.ResumeSession(ctx, sessionID)
+	if err != nil {
+		t.Fatalf("ResumeSession: %v", err)
+	}
+
+	// Backend state must be updated.
+	if b2.sessionID != sessionID {
+		t.Fatalf("sessionID after resume = %q, want %q", b2.sessionID, sessionID)
+	}
+	if !b2.resumed {
+		t.Fatal("resumed flag should be true after ResumeSession")
+	}
+	if b2.title != title {
+		t.Fatalf("title after resume = %q, want %q", b2.title, title)
+	}
+	if b2.contextTokens <= 0 {
+		t.Fatal("contextTokens should be > 0 after resuming a non-empty session")
+	}
+
+	// History must contain all five visible entries in order.
+	wantKinds := []string{"user", "agent", "tool_call", "tool_result", "agent"}
+	if len(hist) != len(wantKinds) {
+		t.Fatalf("history len = %d, want %d; entries = %+v", len(hist), len(wantKinds), hist)
+	}
+	for i, want := range wantKinds {
+		if hist[i].Kind != want {
+			t.Errorf("hist[%d].Kind = %q, want %q", i, hist[i].Kind, want)
+		}
+	}
+	if hist[0].Text != "Add a README to the project" {
+		t.Errorf("hist[0].Text = %q", hist[0].Text)
+	}
+	if hist[2].ToolName != "write_file" || hist[2].ToolID != "call_wf01" {
+		t.Errorf("tool_call: name=%q id=%q", hist[2].ToolName, hist[2].ToolID)
+	}
+	if hist[3].ToolName != "write_file" || hist[3].ToolID != "call_wf01" {
+		t.Errorf("tool_result: name=%q id=%q", hist[3].ToolName, hist[3].ToolID)
+	}
+	if hist[4].Text != "README.md has been created." {
+		t.Errorf("final agent text = %q", hist[4].Text)
+	}
+
+	// --- Phase 3: feed history through Transcript.LoadHistory ---
+	// This is exactly what the TUI does after ResumeSession returns.
+	tr := events.NewTranscript()
+	tr.LinearThread = true // code mode uses linear thread
+	entries := make([]events.HistoryMsg, 0, len(hist))
+	for _, h := range hist {
+		var art *events.Artifact
+		if h.Artifact != nil {
+			art = h.Artifact
+		}
+		entries = append(entries, events.HistoryMsg{
+			Kind:     h.Kind,
+			Text:     h.Text,
+			ToolName: h.ToolName,
+			ToolID:   h.ToolID,
+			Args:     h.Args,
+			Result:   h.Result,
+			Artifact: art,
+		})
+	}
+	tr.LoadHistory(entries)
+
+	// Transcript must not be streaming after history load.
+	if tr.Streaming {
+		t.Fatal("Streaming should be false after LoadHistory")
+	}
+
+	// Count item kinds.
+	kindCounts := map[events.ItemKind]int{}
+	for _, it := range tr.Items {
+		kindCounts[it.Kind]++
+	}
+
+	// Must have at least one user bubble, one activity fold, and at least one
+	// agent bubble — the three visual pillars of a resumed code session.
+	if kindCounts[events.ItemUser] == 0 {
+		t.Errorf("no user items in transcript: %v", kindCounts)
+	}
+	if kindCounts[events.ItemActivity] == 0 {
+		t.Errorf("no activity items in transcript: %v", kindCounts)
+	}
+	if kindCounts[events.ItemAgent] == 0 {
+		t.Errorf("no agent items in transcript: %v", kindCounts)
+	}
+
+	// The user bubble must contain the original message.
+	found := false
+	for _, it := range tr.Items {
+		if it.Kind == events.ItemUser && strings.Contains(it.Content, "Add a README") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("user bubble with original message not found in resumed transcript")
+	}
+
+	// The activity fold must reference write_file.
+	found = false
+	for _, it := range tr.Items {
+		if it.Kind != events.ItemActivity {
+			continue
+		}
+		for _, step := range it.Steps {
+			if step.Name == "write_file" {
+				found = true
+				break
+			}
+		}
+	}
+	if !found {
+		t.Error("write_file step not found in any activity fold of resumed transcript")
+	}
+}
+
 func TestCompact_RunsImmediately(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

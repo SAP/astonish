@@ -69,3 +69,56 @@ func newTestComposerModel(width int) model {
 	m.layout()
 	return m
 }
+
+func TestTogglePlanModeThreeWayCycle(t *testing.T) {
+	m := model{tr: events.NewTranscript()}
+
+	// Normal → Plan
+	m.togglePlanMode()
+	if !m.planMode || m.graphPlanMode {
+		t.Fatalf("first toggle should enter Plan mode, got plan=%v graph=%v", m.planMode, m.graphPlanMode)
+	}
+
+	// Plan → Graph Plan
+	m.togglePlanMode()
+	if m.planMode || !m.graphPlanMode {
+		t.Fatalf("second toggle should enter Graph Plan mode, got plan=%v graph=%v", m.planMode, m.graphPlanMode)
+	}
+
+	// Graph Plan → Normal
+	m.togglePlanMode()
+	if m.planMode || m.graphPlanMode {
+		t.Fatalf("third toggle should return to Normal, got plan=%v graph=%v", m.planMode, m.graphPlanMode)
+	}
+
+	if len(m.tr.Items) != 0 {
+		t.Fatalf("mode cycling should not write transcript messages, got %#v", m.tr.Items)
+	}
+}
+
+func TestTurnOptionsGraphPlanMode(t *testing.T) {
+	m := model{graphPlanMode: true}
+	got := m.turnOptions()
+	if !got.GraphPlanMode {
+		t.Fatal("graph plan mode should set the GraphPlanMode flag")
+	}
+	if got.PlanMode {
+		t.Fatal("graph plan mode must not set the PlanMode flag (mutually exclusive)")
+	}
+	if got.SystemContext == "" {
+		t.Fatal("graph plan mode should send the graph-plan system context")
+	}
+	if !strings.Contains(got.SystemContext, "GRAPH-OPTIMIZED PLAN MODE") {
+		t.Fatalf("graph plan system context should be the graph-plan prompt, got %q", got.SystemContext)
+	}
+}
+
+func TestRenderComposerShowsGraphPlanLabel(t *testing.T) {
+	m := newTestComposerModel(80)
+	m.graphPlanMode = true
+	out := stripANSI(m.renderComposer())
+	if !strings.Contains(out, " Graph Plan ") {
+		t.Fatalf("graph plan composer should show Graph Plan mode label:\n%s", out)
+	}
+}
+

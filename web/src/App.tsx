@@ -18,7 +18,7 @@ import { omitEmptySensitiveEnv } from './components/credentials/credentialPlaceh
 import { useTheme } from './hooks/useTheme'
 import { useAuth } from './hooks/useAuth'
 import { useHashRouter, buildPath } from './hooks/useHashRouter'
-import { setActiveTeam as setActiveTeamContext, getActiveTeam as getStoredTeam, onTeamRejected, onAuthExpired, teamFetch, setPersonalMemoryMode as setPersonalMemoryModeContext } from './api/teamContext'
+import { setActiveTeam as setActiveTeamContext, getActiveTeam as getStoredTeam, onTeamRejected, onAuthExpired, teamFetch } from './api/teamContext'
 import { yamlToFlowAsync, extractLayout } from './utils/yamlToFlow'
 import { addStandaloneNode, addConnection, removeConnection, updateNode, orderYamlKeys } from './utils/flowToYaml'
 import { fetchAgents, fetchAgent, saveAgent, deleteAgent, fetchTools, checkMcpDependencies, installMcpServer, getMcpStoreServer, installInlineMcpServer, publishFlowToTeam, forkFlowToPersonal } from './api/agents'
@@ -69,18 +69,6 @@ function App() {
   // In platform mode (postgres backend), it returns setup status.
   const [isPlatformMode, setIsPlatformMode] = useState(false)
   const [isPlatformChecked, setIsPlatformChecked] = useState(false)
-  // Personal memory mode: when true, the agent saves memories to personal scope by default
-  const [personalMemoryMode, setPersonalMemoryMode] = useState(() => {
-    try { return localStorage.getItem('astonish_personal_memory_mode') === 'true' } catch { return false }
-  })
-  const togglePersonalMemoryMode = useCallback(() => {
-    setPersonalMemoryMode(prev => {
-      const next = !prev
-      try { localStorage.setItem('astonish_personal_memory_mode', String(next)) } catch { /* ignore */ }
-      setPersonalMemoryModeContext(next)
-      return next
-    })
-  }, [])
   useEffect(() => {
     fetch('/api/auth/setup-status')
       .then(async res => {
@@ -1582,8 +1570,6 @@ layout:
           teams={platformTeams}
           onTeamChange={handleTeamChange}
           onLogout={async () => { await auth.logout(); navigate(buildPath('chat')) }}
-          personalMemoryMode={personalMemoryMode}
-          onTogglePersonalMemoryMode={togglePersonalMemoryMode}
         />
 
         {/* Main Content Area */}

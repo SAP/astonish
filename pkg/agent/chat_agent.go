@@ -144,6 +144,13 @@ type ChatAgent struct {
 	activePlan   *PlanState
 	activePlanMu sync.Mutex
 
+	// activeGraphPlan is the GraphPlanState the gplan_* transition tools drive
+	// for the current turn. Code mode sets it at turn start (to the per-session
+	// state) so the transition-tool callback and the runtime gate operate on the
+	// same object. Nil outside Graph-Optimized Plan mode.
+	activeGraphPlan   *GraphPlanState
+	activeGraphPlanMu sync.Mutex
+
 	// planFilePath, when set, is the per-session PLAN.md path. When a plan is
 	// active, it is written on announce and rewritten on every phase transition
 	// so the plan survives context compaction. Code-mode only (native FS).
@@ -167,6 +174,10 @@ type ChatAgent struct {
 	WorkingDir string
 	// authPolicies holds one SessionAuthPolicy per session, keyed by session ID.
 	authPolicies sync.Map // map[string]*SessionAuthPolicy
+	// graphPlanStates holds one GraphPlanState per session, keyed by session ID.
+	// Used by Graph-Optimized Plan mode (code mode only) to drive the phased
+	// runtime tool gate.
+	graphPlanStates sync.Map // map[string]*GraphPlanState
 }
 
 // SetEnforceAuthorization toggles the code-mode tool/folder authorization gates.
@@ -206,6 +217,20 @@ func (c *ChatAgent) GetOrCreateAuthPolicy(sessionID string) *SessionAuthPolicy {
 	created := NewSessionAuthPolicy(c.WorkingDir, extraRoots...)
 	actual, _ := c.authPolicies.LoadOrStore(sessionID, created)
 	return actual.(*SessionAuthPolicy)
+}
+
+// GetOrCreateGraphPlanState returns the per-session Graph-Optimized Plan phase
+// state machine, creating it (in the initial graph phase) on first use. Mirrors
+// GetOrCreateAuthPolicy.
+func (c *ChatAgent) GetOrCreateGraphPlanState(sessionID string) *GraphPlanState {
+	if c == nil {
+		return nil
+	}
+	if existing, ok := c.graphPlanStates.Load(sessionID); ok {
+		return existing.(*GraphPlanState)
+	}
+	actual, _ := c.graphPlanStates.LoadOrStore(sessionID, NewGraphPlanState())
+	return actual.(*GraphPlanState)
 }
 
 // ImageFromTool holds image data extracted from a tool result before the
@@ -799,6 +824,23 @@ func (c *ChatAgent) SetPlanFilePath(path string) {
 	c.planFileMu.Lock()
 	c.planFilePath = path
 	c.planFileMu.Unlock()
+}
+
+// SetActiveGraphPlan records the GraphPlanState the gplan_* transition tools
+// should drive for the current turn (Graph-Optimized Plan mode, code mode
+// only). Pass nil to clear it outside that mode.
+func (c *ChatAgent) SetActiveGraphPlan(g *GraphPlanState) {
+	c.activeGraphPlanMu.Lock()
+	c.activeGraphPlan = g
+	c.activeGraphPlanMu.Unlock()
+}
+
+// GetActiveGraphPlan returns the GraphPlanState the transition tools drive, or
+// nil if not in Graph-Optimized Plan mode.
+func (c *ChatAgent) GetActiveGraphPlan() *GraphPlanState {
+	c.activeGraphPlanMu.Lock()
+	defer c.activeGraphPlanMu.Unlock()
+	return c.activeGraphPlan
 }
 
 // writePlanFile writes the rendered plan document to the configured PLAN.md

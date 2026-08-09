@@ -51,6 +51,7 @@ type StudioChatRequest struct {
 	PinnedToolGroups []string         `json:"pinnedToolGroups,omitempty"` // tool groups to always inject (wizard sessions)
 	Provider         string           `json:"provider,omitempty"`         // per-request provider override (pre-chat picker)
 	Model            string           `json:"model,omitempty"`            // per-request model override (pre-chat picker)
+	MemoryScope      string           `json:"memoryScope,omitempty"`      // per-session memory scope: "team" (default) or "personal"
 }
 
 // StudioSessionResponse is a single session in list responses.
@@ -990,10 +991,16 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 	if svc := store.FromRequest(r); svc != nil {
 		memStore := svc.Memory
 		memoryScope := store.MemoryScopeTeam
+		// Determine memory scope: body field takes precedence, then header (deprecated fallback).
+		// Default is "team" — personal mode must be explicitly requested per-session.
+		requestedScope := req.MemoryScope
+		if requestedScope == "" {
+			requestedScope = r.Header.Get("X-Astonish-Memory-Mode") // deprecated: prefer body field
+		}
 		// If personal memory mode is active, the memory_save tool should
 		// write to the user's personal store instead of team.
 		// The ThreeTierSearcher remains unchanged (always searches all tiers).
-		if r.Header.Get("X-Astonish-Memory-Mode") == "personal" && svc.TenantRouter != nil {
+		if requestedScope == "personal" && svc.TenantRouter != nil {
 			if pu := GetPlatformUser(r); pu != nil {
 				if orgStore, err := svc.TenantRouter.ForOrg(pu.OrgSlug); err == nil {
 					memStore = orgStore.ForUser(pu.ID).Memories()

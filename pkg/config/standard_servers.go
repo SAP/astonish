@@ -20,15 +20,20 @@ type StandardMCPServer struct {
 	ID             string           `json:"id"`
 	DisplayName    string           `json:"displayName"`
 	Description    string           `json:"description"`
-	Category       string           `json:"category"`       // "web" or "browser"
+	Category       string           `json:"category"`       // "web", "browser", or "codeintel"
 	Kind           string           `json:"kind,omitempty"` // "mcp" (default) or "model"
 	Command        string           `json:"command"`
 	Args           []string         `json:"args"`
 	EnvVars        []StandardEnvVar `json:"envVars"`
-	WebSearchTool  string           `json:"webSearchTool,omitempty"`  // "serverName:toolName"
-	WebExtractTool string           `json:"webExtractTool,omitempty"` // "serverName:toolName" or empty
-	IsDefault      bool             `json:"isDefault"`
-	ExcludedTools  []string         `json:"excludedTools,omitempty"` // Tools to filter out (expensive/redundant)
+	// FixedEnv are non-secret environment variables always passed to the server
+	// (e.g. feature flags). Unlike EnvVars, these carry no user credential and
+	// are injected verbatim by BuildMCPServerConfig — used by keyless servers
+	// that need static configuration.
+	FixedEnv       map[string]string `json:"fixedEnv,omitempty"`
+	WebSearchTool  string            `json:"webSearchTool,omitempty"`  // "serverName:toolName"
+	WebExtractTool string            `json:"webExtractTool,omitempty"` // "serverName:toolName" or empty
+	IsDefault      bool              `json:"isDefault"`
+	ExcludedTools  []string          `json:"excludedTools,omitempty"` // Tools to filter out (expensive/redundant)
 }
 
 // standardServers is the hardcoded registry of supported standard MCP servers.
@@ -85,6 +90,29 @@ var standardServers = []StandardMCPServer{
 		WebSearchTool:  "firecrawl:firecrawl_search",
 		WebExtractTool: "firecrawl:firecrawl_scrape",
 		IsDefault:      false,
+	},
+	{
+		// CodeGraph is a keyless, non-web standard server exposing a pre-computed
+		// code knowledge graph over MCP. It is the primary driver of
+		// Graph-Optimized Plan mode (code mode). Because it is keyless and
+		// non-web, mergeStandardServersWithConfig always injects it and
+		// filterInactiveStandardWebServers never strips it — so codegraph_explore
+		// appears automatically in code mode's main-thread MCP injection with zero
+		// user config. The CLI + `.codegraph/` index are ensured per-session by
+		// launcher.EnsureCodegraph.
+		//
+		// Only the read-only `codegraph_explore` query tool is exposed:
+		// CODEGRAPH_MCP_TOOLS=explore restricts the server's tool list, and the
+		// graph-mutating subcommands are CLI-only (never MCP tools).
+		ID:          "codegraph",
+		DisplayName: "CodeGraph",
+		Description: "Pre-computed code knowledge graph (symbols, call edges, dependencies, blast-radius) exposed over MCP as the read-only codegraph_explore tool.",
+		Category:    "codeintel",
+		Command:     "npx",
+		Args:        []string{"--yes", "@colbymchenry/codegraph", "serve", "--mcp"},
+		EnvVars:     []StandardEnvVar{},
+		FixedEnv:    map[string]string{"CODEGRAPH_MCP_TOOLS": "explore"},
+		IsDefault:   false,
 	},
 }
 
@@ -253,6 +281,10 @@ func BuildMCPServerConfig(srv *StandardMCPServer, apiKey string) MCPServerConfig
 	env := make(map[string]string)
 	for _, ev := range srv.EnvVars {
 		env[ev.Name] = apiKey
+	}
+	// Non-secret fixed env (feature flags etc.) injected verbatim.
+	for k, v := range srv.FixedEnv {
+		env[k] = v
 	}
 	return MCPServerConfig{
 		Command:   srv.Command,

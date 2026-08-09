@@ -82,6 +82,12 @@ type TurnOptions struct {
 	// mutating tools and delegate_tasks are refused server-side. Callers should
 	// also set SystemContext to the plan-mode prompt so the model produces a plan.
 	PlanMode bool
+	// GraphPlanMode, when true, requests the phased Graph-Optimized Plan gate
+	// for this turn (code mode only): a per-session phase state machine
+	// determines the tool allow-list, driven by the gplan_* transition tools.
+	// Mutually exclusive with PlanMode. Callers should also set SystemContext to
+	// the graph-plan prompt.
+	GraphPlanMode bool
 	// Attachments are optional multimodal file/image payloads for this turn.
 	Attachments []Attachment
 }

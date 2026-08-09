@@ -263,8 +263,10 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 
 		// Apply per-turn overrides injected by callers via context
 		planMode := false
+		graphPlan := false
 		if po := PromptOverridesFromContext(ctx); po != nil {
 			planMode = po.PlanMode
+			graphPlan = po.GraphPlanMode
 			if po.ChannelHints != "" {
 				promptBuilder.ChannelHints = po.ChannelHints
 			}
@@ -562,7 +564,10 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		// the gate via a sub-agent). Returning a result — rather than an error
 		// that aborts the turn — lets the model self-correct and keep building
 		// the plan. This is the runtime enforcement backing PlanModeSystemContext.
-		if planMode {
+		//
+		// graphPlan and planMode are mutually exclusive; when graphPlan is set
+		// the phased gate below replaces the plan-mode gate.
+		if planMode && !graphPlan {
 			beforeToolCallbacks = append(beforeToolCallbacks, func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
 				name := t.Name()
 				if name == "delegate_tasks" || !IsToolSafe(name) {
@@ -572,6 +577,34 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 					}, nil
 				}
 				return nil, nil
+			})
+		}
+
+		// Graph-Optimized Plan hard gate (code mode only): a phased state machine
+		// determines the tool allow-list. The model advances phases via the
+		// gplan_* transition tools. Transition tools and announce_plan/update_plan
+		// are always allowed; every other tool must be permitted by the current
+		// phase's allow-list (GraphPlanPhaseTools). Anything else — including any
+		// non-SafeTools mutator and delegate_tasks outside the gap/plan phases —
+		// returns a blocked_graph_plan result (not an error) so the model
+		// self-corrects. This is a NO-CHANGES mode in every phase.
+		if graphPlan {
+			gpState := c.GetOrCreateGraphPlanState(sessionID)
+			beforeToolCallbacks = append(beforeToolCallbacks, func(_ tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+				name := t.Name()
+				// Transition tools + plan recording are always allowed.
+				if IsGraphPlanTransitionTool(name) || name == "announce_plan" || name == "update_plan" {
+					return nil, nil
+				}
+				phase := gpState.Phase()
+				if GraphPlanPhaseTools(phase)[name] {
+					return nil, nil
+				}
+				return map[string]any{
+					"status": "blocked_graph_plan",
+					"phase":  string(phase),
+					"error":  GraphPlanBlockedMessage(name, phase),
+				}, nil
 			})
 		}
 
@@ -591,7 +624,7 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		// which then suspends the turn), and record the pending request on the
 		// per-session policy so the resume handler at the top of Run can apply
 		// the user's decision. AutoApprove (--yolo) skips these gates entirely.
-		if c.EnforceAuthorization && !planMode && !c.AutoApprove {
+		if c.EnforceAuthorization && !planMode && !graphPlan && !c.AutoApprove {
 			authPolicy := c.GetOrCreateAuthPolicy(sessionID)
 
 			emitAuthPrompt := func(kind, toolName, prompt string, options []string, paths []string) map[string]any {

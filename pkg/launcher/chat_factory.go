@@ -176,7 +176,13 @@ func mainThreadToolAllowlist() map[string]bool {
 		// agent is told to call it but it is relegated to the deferred "core"
 		// group (reachable only via search_tools), and calling it fails with
 		// "tool 'update_plan' not found".
-		"update_plan":        true,
+		"update_plan": true,
+		// Graph-Optimized Plan mode phase transitions — MUST be main-thread:
+		// they advance the per-session GraphPlanState owned by the main ChatAgent.
+		// Sub-agents have no ActiveGraphPlan; calling these from a sub-agent would fail silently.
+		"gplan_reads":    true,
+		"gplan_gaps":     true,
+		"gplan_finalize": true,
 		"resolve_credential": true,
 		"skill_lookup":       true,
 		// Platform web search must be main-thread always-on. If it only lives in
@@ -480,6 +486,20 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			updatePlanTool, upErr := tools.NewUpdatePlanTool()
 			if upErr == nil {
 				coreTools = append(coreTools, updatePlanTool)
+			}
+
+			// Graph-Optimized Plan mode transition tools (code mode only).
+			// They advance the per-session phase state machine that drives the
+			// staged runtime tool gate. Always registered; only meaningful when
+			// the turn is in Graph-Optimized Plan mode.
+			if gpReads, e := tools.NewGraphPlanReadsTool(); e == nil {
+				coreTools = append(coreTools, gpReads)
+			}
+			if gpGaps, e := tools.NewGraphPlanGapsTool(); e == nil {
+				coreTools = append(coreTools, gpGaps)
+			}
+			if gpFinalize, e := tools.NewGraphPlanFinalizeTool(); e == nil {
+				coreTools = append(coreTools, gpFinalize)
 			}
 
 			subAgentCfg := agent.SubAgentConfig{
@@ -1674,6 +1694,17 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 				return "", ""
 			}
 			return plan.SetStepStatus(step, status)
+		})
+		// Wire Graph-Optimized Plan phase transitions (code mode only). The
+		// gplan_* tools advance the active per-session GraphPlanState, which the
+		// runtime gate consults to determine the tool allow-list for each phase.
+		tools.SetGraphPlanAdvanceCallback(func(to agent.GraphPlanPhase) error {
+			gp := chatAgent.GetActiveGraphPlan()
+			if gp == nil {
+				return fmt.Errorf("no active graph plan")
+			}
+			gp.Advance(to)
+			return nil
 		})
 		// Wire tool discovery so sub-agents can auto-discover their tools
 		if toolIndex != nil {

@@ -196,3 +196,113 @@ plan to a **per-session `PLAN.md`**.
 Plan mode remains a **terminal/code-mode affordance** — there is no Plan toggle in the Studio
 SPA yet. The API + client now fully support `planMode`, so adding a SPA toggle later is a
 UI-only change.
+
+## Graph-Optimized Plan mode (code mode only)
+
+Graph-Optimized Plan is a **third mode** alongside Normal and Plan. `shift+tab` cycles
+**Normal → Plan → Graph Plan → Normal**. Like Plan mode it is a **no-changes** mode
+(`write_file` / `edit_file` / `shell_command` are blocked in every phase), but instead of a
+free-form investigation it enforces a fixed **"plan-for-the-plan"** flow driven by
+[**codegraph**](https://github.com/colbymchenry/codegraph) — an external knowledge-graph tool
+exposed over MCP as the read-only `codegraph_explore` query tool. The goal is faster, cheaper,
+more complete plans: codegraph pre-computes symbols, call edges, dependencies and blast-radius,
+answering most structural questions in 1–4 calls instead of many broad `grep_search` / `find_files`
+passes.
+
+### Phase state machine + phased gate
+
+A **per-session phase state machine** (`pkg/agent/graph_plan_state.go`, `GraphPlanState`) tracks
+the current phase; the phase determines the runtime tool allow-list. The model advances phases via
+three small **transition tools** (`gplan_reads`, `gplan_gaps`, `gplan_finalize`) — the only
+always-allowed "write-like" tools; they only mutate phase state. Enforcement is a
+`BeforeToolCallback` in `pkg/agent/chat_agent_run.go` (the same mechanism as the Plan-mode gate),
+so the model *physically cannot* call `grep_search` in the Graph phase.
+
+Phase → additive allow-list (`GraphPlanPhaseTools`, single source of truth):
+
+| Phase   | Allowed (besides transition tools + `announce_plan` / `update_plan`) |
+|---------|----------------------------------------------------------------------|
+| `graph` | `codegraph_explore` |
+| `read`  | + `read_file`, `read_pdf`, `filter_json` |
+| `gap`   | + `grep_search`, `find_files`, `file_tree`, `repo_map`, `code_definition`, `code_references`, `web_fetch`, `memory_search`, `memory_get`, `skill_lookup`, `delegate_tasks` (read-only `tools` filters) |
+| `plan`  | + `announce_plan` |
+
+Transition semantics:
+- `gplan_reads(read_list)` — records the synthesized, non-repetitive read list and advances
+  `graph → read` (unlocks `read_file`).
+- `gplan_gaps(gaps)` — advances `read → gap` (or `graph → gap` when codegraph has no coverage).
+  An **empty** gaps list is a legitimate skip: it advances straight to `plan`.
+- `gplan_finalize(notes?)` — advances to `plan` (unlocks `announce_plan`).
+
+Blocked tools return a `blocked_graph_plan` **result** (not an error), with phase-aware guidance
+(`GraphPlanBlockedMessage`) so the model self-corrects and advances phases legitimately. `graphPlan`
+and `planMode` are **mutually exclusive**; when `graphPlan` is set the phased gate replaces the
+plan-mode gate and the code-mode folder/tool authorization gates are skipped (read-only mode).
+
+`codegraph_explore` and the three `gplan_*` transition tools are added to `agent.SafeTools`
+(read-only / phase-only, so they auto-approve). This mode remains a **no-changes** invariant: no
+mutating tool is ever allowed in any phase.
+
+### Codegraph as a native standard MCP server
+
+Rather than requiring users to hand-edit `mcp_config.json`, codegraph is registered as a
+**native "standard MCP server"** (`pkg/config/standard_servers.go`) — the same registry that ships
+Tavily / Brave / Firecrawl. It is a **keyless** entry (`EnvVars: []`) with a new non-web category
+`"codeintel"`, command `codegraph serve --mcp`, and `FixedEnv{CODEGRAPH_MCP_TOOLS: "explore"}` so
+only the read-only `codegraph_explore` tool is exposed (the graph-mutating subcommands are CLI-only,
+never MCP tools). Because it is keyless + non-web, `mergeStandardServersWithConfig` always injects it
+and `filterInactiveStandardWebServers` never strips it — so it appears automatically in code mode's
+main-thread MCP injection with **zero user config**, and `SaveMCPConfig`'s standard-ID stripping keeps
+it out of `mcp_config.json`.
+
+### Bootstrap
+
+`launcher.EnsureCodegraph` (`pkg/launcher/codegraph_bootstrap.go`) runs before each Graph-Plan turn:
+1. `exec.LookPath("codegraph")` — if missing, install **only on explicit consent**
+   (`ASTONISH_CODEGRAPH_AUTO_INSTALL=1`, since a single non-interactive turn can't round-trip a
+   prompt) via `npm i -g @colbymchenry/codegraph` (or the documented curl installer).
+2. If `<workingDir>/.codegraph/` is absent, run `codegraph init` to build the index.
+3. Returns `ready=true` once both exist.
+
+**Fallback:** if the user declines or bootstrap fails, the turn **downgrades to free-form Plan mode**
+with a one-shot system notice, so the user still gets a plan. Language coverage: if codegraph returns
+no coverage, the prompt + gate permit an immediate `graph → gap` skip so grep/tree-sitter unlock.
+
+### Flag plumbing
+
+```
+TUI toggle (m.graphPlanMode)
+  → backend.TurnOptions{SystemContext: graphPlanModeSystemContext, GraphPlanMode: true}
+    → tui_code.go: EnsureCodegraph → (ready) reset GraphPlanState + SetActiveGraphPlan
+                                     (else) downgrade to PlanMode
+    → agent.PromptOverrides{GraphPlanMode}
+  → chat_agent_run.go reads po.GraphPlanMode → registers the phased gate BeforeToolCallback
+gplan_* tools → tools.graphPlanAdvanceCallback → chatAgent.GetActiveGraphPlan().Advance(phase)
+```
+
+### Files (Graph-Optimized Plan)
+
+| File | Change |
+|------|--------|
+| `pkg/agent/graph_plan_state.go` (new) | `GraphPlanPhase`, `GraphPlanState`, `GraphPlanPhaseTools` allow-list |
+| `pkg/agent/chat_agent.go` | Per-session `graphPlanStates` + `GetOrCreateGraphPlanState`; active-graph-plan pointer |
+| `pkg/agent/chat_agent_run.go` | Threads `graphPlan`; phased gate; mutual exclusion with `planMode` |
+| `pkg/agent/tool_categories.go` | `GraphPlanModeSystemContext`, `GraphPlanBlockedMessage`; `SafeTools` += codegraph + `gplan_*` |
+| `pkg/agent/system_prompt_builder.go` | `GraphPlanMode bool` on `PromptOverrides` |
+| `pkg/tools/graph_plan_tool.go` (new) | `gplan_reads` / `gplan_gaps` / `gplan_finalize` + advance callback |
+| `pkg/launcher/chat_factory.go` | Registers the three transition tools; wires `SetGraphPlanAdvanceCallback` |
+| `pkg/launcher/codegraph_bootstrap.go` (new) | `EnsureCodegraph` CLI/index bootstrap + fallback |
+| `pkg/launcher/tui_code.go` | Bootstrap invocation, phase reset, active-graph-plan wiring, downgrade |
+| `pkg/config/standard_servers.go` | Keyless non-web `codegraph` entry + `FixedEnv` support |
+| `pkg/tui/backend/backend.go` | `GraphPlanMode bool` on `TurnOptions` |
+| `pkg/tui/app.go` | 3-way `togglePlanMode` cycle; `graphPlanModeSystemContext` mirror; "Graph Plan" label (cyan) |
+
+### Tests (Graph-Optimized Plan)
+
+- `pkg/agent/graph_plan_gate_test.go` — per-phase allow/block table, additive invariant,
+  phase-aware blocked message, prompt discipline, `SafeTools` membership.
+- `pkg/agent/graph_plan_state_test.go` — transitions incl. `graph→gap` skip, reset, per-session isolation.
+- `pkg/tools/graph_plan_tool_test.go` — transition tools advance phases; empty-gaps skip to plan.
+- `pkg/tui/plan_mode_test.go` — 3-way cycle, `turnOptions` for Graph Plan, "Graph Plan" composer label.
+- `pkg/config/mcp_config_test.go` — codegraph always injected, survives web filter, not persisted to `mcp_config.json`.
+

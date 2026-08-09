@@ -71,6 +71,7 @@ export interface ConnectChatParams {
   autoApprove?: boolean
   provider?: string
   model?: string
+  memoryScope?: 'personal' | 'team'
   onEvent: SSEEventCallback
   onError?: ErrorCallback
   onDone?: DoneCallback
@@ -121,7 +122,7 @@ export async function fetchSubtaskEvents(sessionId: string, taskName: string): P
   return data.events || []
 }
 
-export function connectChat({ sessionId, message, attachments, systemContext, planMode, pinnedToolGroups, autoApprove, provider, model, onEvent, onError, onDone }: ConnectChatParams): AbortController {
+export function connectChat({ sessionId, message, attachments, systemContext, planMode, pinnedToolGroups, autoApprove, provider, model, memoryScope, onEvent, onError, onDone }: ConnectChatParams): AbortController {
   const controller = new AbortController()
 
   const run = async () => {
@@ -132,6 +133,7 @@ export function connectChat({ sessionId, message, attachments, systemContext, pl
         autoApprove: !!autoApprove,
         ...(provider ? { provider } : {}),
         ...(model ? { model } : {}),
+        ...(memoryScope ? { memoryScope } : {}),
       }
       if (attachments && attachments.length > 0) {
         body.attachments = attachments

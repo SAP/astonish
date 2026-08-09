@@ -19,10 +19,8 @@
 import { refreshToken } from './auth'
 
 let _activeTeam: string | null = null
-let _personalMemoryMode = false
 
 const STORAGE_KEY = 'astonish_active_team'
-const MEMORY_MODE_KEY = 'astonish_personal_memory_mode'
 
 // Callback invoked when the middleware rejects a team (403).
 // App.tsx sets this to trigger a team reset + UI notification.
@@ -77,9 +75,6 @@ function isAuthApiPath(url: string): boolean {
 try {
   _activeTeam = localStorage.getItem(STORAGE_KEY)
 } catch { /* SSR or private browsing */ }
-try {
-  _personalMemoryMode = localStorage.getItem(MEMORY_MODE_KEY) === 'true'
-} catch { /* ignore */ }
 
 /** Update the active team slug. Called from App.tsx when the user switches teams. */
 export function setActiveTeam(slug: string | null) {
@@ -96,19 +91,6 @@ export function setActiveTeam(slug: string | null) {
 /** Get the current active team slug. */
 export function getActiveTeam(): string | null {
   return _activeTeam
-}
-
-/** Set the personal memory mode preference. */
-export function setPersonalMemoryMode(enabled: boolean) {
-  _personalMemoryMode = enabled
-  try {
-    localStorage.setItem(MEMORY_MODE_KEY, String(enabled))
-  } catch { /* ignore */ }
-}
-
-/** Get the personal memory mode preference. */
-export function getPersonalMemoryMode(): boolean {
-  return _personalMemoryMode
 }
 
 /**
@@ -136,11 +118,6 @@ export async function teamFetch(input: Parameters<typeof fetch>[0], init?: Param
   // this is a programmatic request, not a cross-origin form submission.
   if (!headers.has('X-Requested-With')) {
     headers.set('X-Requested-With', 'XMLHttpRequest')
-  }
-
-  // Inject personal memory mode header when active
-  if (_personalMemoryMode && !headers.has('X-Astonish-Memory-Mode')) {
-    headers.set('X-Astonish-Memory-Mode', 'personal')
   }
 
   // Only set if not already explicitly provided by the caller

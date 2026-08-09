@@ -105,6 +105,13 @@ type PromptOverrides struct {
 	// SessionContext so the model produces a plan rather than attempting work.
 	PlanMode bool
 
+	// GraphPlanMode, when true, enables the phased Graph-Optimized Plan runtime
+	// gate for the turn (code mode only): a per-session phase state machine
+	// (GraphPlanState) determines the tool allow-list, advanced by the gplan_*
+	// transition tools. Mutually exclusive with PlanMode. Callers that set this
+	// should also inject GraphPlanModeSystemContext as SessionContext.
+	GraphPlanMode bool
+
 	// Web search/extract are resolved per request from the platform→team cascade
 	// so a singleton ChatAgent re-inited without tenant context still advertises
 	// the platform-selected tools for every user. Nil pointers mean "leave builder as-is".

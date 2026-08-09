@@ -566,10 +566,29 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 			})
 		}
 	}
-	if opts.SystemContext != "" || opts.PlanMode {
+	// Graph-Optimized Plan mode: best-effort ensure the .codegraph/ index exists
+	// so the codegraph MCP server can answer queries. If unavailable, a notice
+	// tells the model to call gplan_gaps to skip the graph phase — but the gate
+	// still runs in all cases. We never downgrade to a different mode here.
+	planMode := opts.PlanMode
+	graphPlan := opts.GraphPlanMode
+	systemContext := opts.SystemContext
+	if graphPlan {
+		if notice := EnsureCodegraph(ctx, b.workingDir); notice != "" {
+			emit("system", map[string]any{"content": notice})
+		}
+		gp := chatAgent.GetOrCreateGraphPlanState(sessionID)
+		gp.Reset()
+		chatAgent.SetActiveGraphPlan(gp)
+	} else {
+		chatAgent.SetActiveGraphPlan(nil)
+	}
+
+	if systemContext != "" || planMode || graphPlan {
 		ctx = agent.WithPromptOverrides(ctx, &agent.PromptOverrides{
-			SessionContext: agent.EscapeCurlyPlaceholders(opts.SystemContext),
-			PlanMode:       opts.PlanMode,
+			SessionContext: agent.EscapeCurlyPlaceholders(systemContext),
+			PlanMode:       planMode,
+			GraphPlanMode:  graphPlan,
 		})
 	}
 

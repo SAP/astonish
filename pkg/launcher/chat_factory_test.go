@@ -54,3 +54,19 @@ func TestMainThreadToolAllowlist_PlanTools(t *testing.T) {
 		}
 	}
 }
+
+// TestMainThreadToolAllowlist_GraphPlanTransitionTools guards the fix for the
+// Graph-Optimized Plan mode phase-transition tools. The phase state machine
+// lives on the main-thread ChatAgent; advancing it from a sub-agent would
+// silently fail because sub-agents have no ActiveGraphPlan. Without this entry,
+// the model enters the GRAPH phase via codegraph_explore but then receives
+// "tool 'gplan_reads' not found" when it tries to advance — leaving it stuck
+// in the GRAPH phase with both read_file and grep_search gated out.
+func TestMainThreadToolAllowlist_GraphPlanTransitionTools(t *testing.T) {
+	allow := mainThreadToolAllowlist()
+	for _, name := range []string{"gplan_reads", "gplan_gaps", "gplan_finalize"} {
+		if !allow[name] {
+			t.Errorf("expected graph-plan transition tool %q in the main-thread allowlist (phase transitions must target the main ChatAgent)", name)
+		}
+	}
+}

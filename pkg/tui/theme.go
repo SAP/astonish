@@ -32,6 +32,8 @@ type Theme struct {
 	Activity       lipgloss.Style
 	Approval       lipgloss.Style
 	CodeGutter     lipgloss.Style
+	DiffAddedBg    lipgloss.Style // subtle green background for added diff lines
+	DiffRemovedBg  lipgloss.Style // subtle red background for removed diff lines
 
 	// Composer / footer chrome
 	InputBorder      lipgloss.Style
@@ -65,6 +67,8 @@ func DefaultTheme() Theme {
 	userAccent := lipgloss.Color("#75633F") // muted bronze user-message outline
 	yellow := lipgloss.Color("221")         // approval
 	border := lipgloss.Color("238")         // subtle separator border
+	diffAddedBg := lipgloss.Color("#1a3320")   // subtle dark green for added lines
+	diffRemovedBg := lipgloss.Color("#3d1f1f") // subtle dark red for removed lines
 
 	return Theme{
 		Background: lipgloss.NewStyle().Background(bg),
@@ -102,6 +106,8 @@ func DefaultTheme() Theme {
 		Activity:   lipgloss.NewStyle().Foreground(brand).Background(bg),
 		Approval:   lipgloss.NewStyle().Foreground(yellow).Background(bg).Bold(true),
 		CodeGutter: lipgloss.NewStyle().Foreground(muted).Background(bg),
+		DiffAddedBg:   lipgloss.NewStyle().Foreground(text).Background(diffAddedBg),
+		DiffRemovedBg: lipgloss.NewStyle().Foreground(text).Background(diffRemovedBg),
 
 		InputBorder: lipgloss.NewStyle().
 			Background(bg).
@@ -138,6 +144,7 @@ func plainTheme() Theme {
 		Error: s, Success: s, Danger: s, Number: s, Border: s,
 		Header: s, Status: s, Input: s, Activity: s, Approval: s,
 		CodeGutter:  s,
+		DiffAddedBg: s, DiffRemovedBg: s,
 		InputBorder: box, InputBorderFocus: box, InputBorderPlan: box,
 		InputPrompt: s, InputPlaceholder: s, FooterMeta: s, Hint: s,
 		NoColor: true,
@@ -173,18 +180,20 @@ func (th Theme) ApplyTextareaStyles(ta *textarea.Model) {
 // RenderStyles maps the TUI theme into pure render.Styles for markdown/diff/activity.
 func (th Theme) RenderStyles() render.Styles {
 	return render.Styles{
-		Background: th.Background,
-		Text:       th.Text,
-		Muted:      th.Muted,
-		Brand:      th.Brand,
-		Success:    th.Success,
-		Danger:     th.Danger,
-		Number:     th.Number,
-		CodeGutter: th.CodeGutter,
-		CodeHeader: th.Brand,
-		Heading:    th.Brand,
-		Bold:       th.Text.Bold(true),
-		Italic:     th.Text.Italic(true),
-		NoColor:    th.NoColor,
+		Background:    th.Background,
+		Text:          th.Text,
+		Muted:         th.Muted,
+		Brand:         th.Brand,
+		Success:       th.Success,
+		Danger:        th.Danger,
+		Number:        th.Number,
+		CodeGutter:    th.CodeGutter,
+		CodeHeader:    th.Brand,
+		Heading:       th.Brand,
+		Bold:          th.Text.Bold(true),
+		Italic:        th.Text.Italic(true),
+		DiffAddedBg:   th.DiffAddedBg,
+		DiffRemovedBg: th.DiffRemovedBg,
+		NoColor:       th.NoColor,
 	}
 }

@@ -12,19 +12,21 @@ import (
 
 // Styles carries lipgloss colors used by renderers (subset of tui.Theme).
 type Styles struct {
-	Background lipgloss.Style
-	Text       lipgloss.Style
-	Muted      lipgloss.Style
-	Brand      lipgloss.Style
-	Success    lipgloss.Style
-	Danger     lipgloss.Style
-	Number     lipgloss.Style
-	CodeGutter lipgloss.Style
-	CodeHeader lipgloss.Style
-	Heading    lipgloss.Style
-	Bold       lipgloss.Style
-	Italic     lipgloss.Style
-	NoColor    bool
+	Background    lipgloss.Style
+	Text          lipgloss.Style
+	Muted         lipgloss.Style
+	Brand         lipgloss.Style
+	Success       lipgloss.Style
+	Danger        lipgloss.Style
+	Number        lipgloss.Style
+	CodeGutter    lipgloss.Style
+	CodeHeader    lipgloss.Style
+	Heading       lipgloss.Style
+	Bold          lipgloss.Style
+	Italic        lipgloss.Style
+	DiffAddedBg   lipgloss.Style // background band for added lines in diffs
+	DiffRemovedBg lipgloss.Style // background band for removed lines in diffs
+	NoColor       bool
 }
 
 // DefaultStyles returns a dark-friendly palette matching the TUI theme.
@@ -35,19 +37,23 @@ func DefaultStyles() Styles {
 	green := lipgloss.Color("78")
 	red := lipgloss.Color("203")
 	orange := lipgloss.Color("208")
+	diffAddedBg := lipgloss.Color("#1a3320")
+	diffRemovedBg := lipgloss.Color("#3d1f1f")
 	return Styles{
-		Background: lipgloss.NewStyle().Background(lipgloss.Color("#000000")),
-		Text:       lipgloss.NewStyle().Foreground(text).Background(lipgloss.Color("#000000")),
-		Muted:      lipgloss.NewStyle().Foreground(muted).Background(lipgloss.Color("#000000")),
-		Brand:      lipgloss.NewStyle().Foreground(brand).Background(lipgloss.Color("#000000")).Bold(true),
-		Success:    lipgloss.NewStyle().Foreground(green).Background(lipgloss.Color("#000000")),
-		Danger:     lipgloss.NewStyle().Foreground(red).Background(lipgloss.Color("#000000")),
-		Number:     lipgloss.NewStyle().Foreground(orange).Background(lipgloss.Color("#000000")),
-		CodeGutter: lipgloss.NewStyle().Foreground(muted).Background(lipgloss.Color("#000000")),
-		CodeHeader: lipgloss.NewStyle().Foreground(brand).Background(lipgloss.Color("#000000")),
-		Heading:    lipgloss.NewStyle().Foreground(brand).Background(lipgloss.Color("#000000")).Bold(true),
-		Bold:       lipgloss.NewStyle().Foreground(text).Background(lipgloss.Color("#000000")).Bold(true),
-		Italic:     lipgloss.NewStyle().Foreground(text).Background(lipgloss.Color("#000000")).Italic(true),
+		Background:    lipgloss.NewStyle().Background(lipgloss.Color("#000000")),
+		Text:          lipgloss.NewStyle().Foreground(text).Background(lipgloss.Color("#000000")),
+		Muted:         lipgloss.NewStyle().Foreground(muted).Background(lipgloss.Color("#000000")),
+		Brand:         lipgloss.NewStyle().Foreground(brand).Background(lipgloss.Color("#000000")).Bold(true),
+		Success:       lipgloss.NewStyle().Foreground(green).Background(lipgloss.Color("#000000")),
+		Danger:        lipgloss.NewStyle().Foreground(red).Background(lipgloss.Color("#000000")),
+		Number:        lipgloss.NewStyle().Foreground(orange).Background(lipgloss.Color("#000000")),
+		CodeGutter:    lipgloss.NewStyle().Foreground(muted).Background(lipgloss.Color("#000000")),
+		CodeHeader:    lipgloss.NewStyle().Foreground(brand).Background(lipgloss.Color("#000000")),
+		Heading:       lipgloss.NewStyle().Foreground(brand).Background(lipgloss.Color("#000000")).Bold(true),
+		Bold:          lipgloss.NewStyle().Foreground(text).Background(lipgloss.Color("#000000")).Bold(true),
+		Italic:        lipgloss.NewStyle().Foreground(text).Background(lipgloss.Color("#000000")).Italic(true),
+		DiffAddedBg:   lipgloss.NewStyle().Foreground(text).Background(diffAddedBg),
+		DiffRemovedBg: lipgloss.NewStyle().Foreground(text).Background(diffRemovedBg),
 	}
 }
 

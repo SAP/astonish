@@ -67,6 +67,10 @@ type fileViewerState struct {
 // Config configures the terminal chat app.
 type Config struct {
 	Backend backend.Backend
+	// AltBackend enables Ctrl+Tab switching between two modes (e.g. code ↔
+	// platform). When nil, the TUI operates in single-backend mode and Ctrl+Tab
+	// is a no-op. The alt backend is lazily opened on first switch.
+	AltBackend backend.Backend
 	// Width/Height optional initial size; 0 means wait for WindowSizeMsg.
 	Width  int
 	Height int
@@ -85,6 +89,12 @@ func Run(ctx context.Context, cfg Config) error {
 	m := newModel(ctx, cfg)
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err := p.Run()
+
+	// Close alt backend if it was opened during the session.
+	if cfg.AltBackend != nil && m.backends[1].opened {
+		cfg.AltBackend.Close()
+	}
+
 	return err
 }
 
@@ -188,12 +198,19 @@ type model struct {
 	// workDir is the workspace/project root (process CWD in code mode). Used to
 	// render project-relative file paths in diff headers.
 	workDir string
+
+	// Dual-backend mode: Ctrl+Tab switches between two independent backend
+	// panels (e.g. local code ↔ platform chat). Each slot preserves its own
+	// transcript, plan mode, and theme so switching is instantaneous.
+	dualMode         bool
+	activeBackendIdx int
+	backends         [2]backendSlot
 }
 
 func newModel(parent context.Context, cfg Config) model {
 	ctx, cancel := context.WithCancel(parent)
 	info := cfg.Backend.Info()
-	th := DefaultTheme()
+	th := ThemeForMode(info.Mode)
 
 	ta := textarea.New()
 	ta.Placeholder = "Message Astonish…"
@@ -255,7 +272,27 @@ func newModel(parent context.Context, cfg Config) model {
 		height:     cfg.Height,
 		historyIdx: -1,
 		workDir:    workspaceRoot(),
+		dualMode:   cfg.AltBackend != nil,
 	}
+
+	// Initialize dual-backend slots.
+	m.backends[0] = backendSlot{
+		backend:    cfg.Backend,
+		theme:      th,
+		tr:         tr,
+		historyIdx: -1,
+		opened:     true, // primary is already opened by Run()
+	}
+	if cfg.AltBackend != nil {
+		altInfo := cfg.AltBackend.Info()
+		m.backends[1] = backendSlot{
+			backend:    cfg.AltBackend,
+			theme:      ThemeForMode(altInfo.Mode),
+			historyIdx: -1,
+			opened:     false, // lazily opened on first Ctrl+Tab
+		}
+	}
+
 	return m
 }
 
@@ -407,6 +444,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.openSessionsPicker()
 		case "ctrl+n":
 			return m.startNewSession()
+		case "ctrl+\\":
+			if m.dualMode {
+				return m.switchBackend()
+			}
 		}
 
 		// While streaming, only allow cancel / scroll keys through textarea limited.
@@ -438,8 +479,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if msg.String() == "shift+tab" {
-			m.togglePlanMode()
-			m.refreshViewport()
+			// Plan mode cycling is code-mode only; no-op in platform mode.
+			if m.info.Mode != "platform" {
+				m.togglePlanMode()
+				m.refreshViewport()
+			}
 			return m, nil
 		}
 
@@ -2029,7 +2073,7 @@ func (m model) welcomeLines(width int) []string {
 
 	th := m.theme
 	title := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("208")).
+		Foreground(m.theme.AccentColor).
 		Background(lipgloss.Color("#000000")).
 		Bold(true).
 		Align(lipgloss.Center).
@@ -2054,7 +2098,7 @@ func (m model) welcomeLines(width int) []string {
 func (m model) codeWelcomeLines(width int) []string {
 	th := m.theme
 	title := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("208")).
+		Foreground(m.theme.AccentColor).
 		Background(lipgloss.Color("#000000")).
 		Bold(true).
 		Align(lipgloss.Center).
@@ -3558,12 +3602,7 @@ func (m model) renderComposer() string {
 	}
 
 	border := m.composerBorderStyle()
-	label := "Normal"
-	if m.graphPlanMode {
-		label = "Graph Plan"
-	} else if m.planMode {
-		label = "Plan"
-	}
+	label := m.composerModeLabel()
 
 	var b strings.Builder
 	b.WriteString(border.Render("╭" + strings.Repeat("─", innerW) + "╮"))
@@ -3593,13 +3632,33 @@ func (m model) composerBorderStyle() lipgloss.Style {
 	if m.theme.NoColor {
 		return lipgloss.NewStyle()
 	}
-	color := lipgloss.Color("246")
+	color := m.theme.AccentColor
 	if m.graphPlanMode {
 		color = lipgloss.Color("39") // cyan — distinct from Plan's amber
 	} else if m.planMode {
 		color = lipgloss.Color("172")
 	}
 	return lipgloss.NewStyle().Foreground(color).Background(lipgloss.Color("#000000"))
+}
+
+// composerModeLabel returns the text shown in the composer bottom border.
+// In dual-mode it prefixes the backend type; in single mode it shows just the
+// plan-mode label (matching existing behavior).
+func (m model) composerModeLabel() string {
+	if m.info.Mode == "platform" {
+		// Platform mode has no plan sub-modes.
+		return "Platform"
+	}
+	sub := "Normal"
+	if m.graphPlanMode {
+		sub = "Graph Plan"
+	} else if m.planMode {
+		sub = "Plan"
+	}
+	if m.dualMode {
+		return "Code · " + sub
+	}
+	return sub
 }
 
 func (m model) renderComposerBottomBorder(width int, label string, border lipgloss.Style, bg lipgloss.Style) string {
@@ -3702,8 +3761,21 @@ func (m model) renderHints() string {
 	if m.files.active {
 		return th.Hint.Render("↑↓ select  ·  enter attach file  ·  tab next  ·  esc close")
 	}
-	full := "Enter send  ·  / commands  ·  @ files  ·  shift+tab plan  ·  shift+enter newline  ·  ctrl+l sessions  ·  ctrl+c quit"
-	short := "Enter send  ·  / commands  ·  @ files  ·  shift+tab plan"
+
+	// Build context-aware hints depending on mode and dual-mode availability.
+	var full, short string
+	switch {
+	case m.dualMode && m.info.Mode == "platform":
+		full = "Enter send  ·  / commands  ·  ctrl+\\ code  ·  ctrl+l sessions  ·  shift+enter newline  ·  ctrl+c quit"
+		short = "Enter send  ·  / commands  ·  ctrl+\\ code"
+	case m.dualMode:
+		full = "Enter send  ·  / commands  ·  @ files  ·  shift+tab plan  ·  ctrl+\\ platform  ·  shift+enter newline  ·  ctrl+c quit"
+		short = "Enter send  ·  / commands  ·  shift+tab plan  ·  ctrl+\\ platform"
+	default:
+		full = "Enter send  ·  / commands  ·  @ files  ·  shift+tab plan  ·  shift+enter newline  ·  ctrl+l sessions  ·  ctrl+c quit"
+		short = "Enter send  ·  / commands  ·  @ files  ·  shift+tab plan"
+	}
+
 	line := full
 	if m.width > 0 && lipgloss.Width(full) > m.width {
 		line = short

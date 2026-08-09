@@ -188,6 +188,19 @@ When richer behavior is needed, choose one of these approaches:
 
 Tests for general-purpose code should use neutral fixtures (`items`, `groups`, `records`, `resources`) unless the code is intentionally implementing a documented domain-specific integration. If you find yourself naming a specific external product, infrastructure resource, customer concept, or one-off example inside reusable code, stop and redesign the abstraction.
 
+### Unified TUI with Dual-Backend Mode Switching (Ctrl+\)
+
+The terminal TUI (`pkg/tui/app.go`) supports **dual-backend mode**: when launched from `astonish code` while logged into a platform, the user can press **Ctrl+\\** to switch between the local code agent and the platform chat — within the same bubbletea process. Each mode maintains its own session, transcript, plan-mode state, and accent theme independently.
+
+**Color-coded mode identity**: Code mode uses warm orange/amber accents (`DefaultTheme()`); Platform mode uses cool blue/cyan accents (`PlatformTheme()`). The entire UI chrome changes color on switch, providing visceral mode awareness without reading labels. The themes are defined in `pkg/tui/theme.go`; the switching logic lives in `pkg/tui/dual_backend.go`.
+
+Key implementation details:
+- `tui.Config.AltBackend` — optional second backend, lazily opened on first switch.
+- `backendSlot` — preserves per-mode state (transcript, planMode, history, theme).
+- `switchBackend()` — saves current slot, flips index, restores/opens new slot, swaps theme.
+- Platform mode disables `shift+tab` plan cycling (code-mode only feature).
+- Dual-mode is only available from `astonish code` when `client.IsRemoteMode()` is true.
+
 ### Config Loading (Go)
 - User configs live in `~/.config/astonish/`.
 - YAML with `gopkg.in/yaml.v3`.

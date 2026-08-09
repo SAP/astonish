@@ -232,7 +232,15 @@ func RunCodeTUI(ctx context.Context, cfg *CodeConfig) error {
 		}
 	}
 
-	err = tui.Run(ctx, tui.Config{Backend: b})
+	// Attempt to provide the platform backend as an alt panel (Ctrl+Tab). This
+	// is best-effort: if the user isn't logged in, altBackend is nil and the TUI
+	// operates in single-backend mode with Ctrl+Tab as a no-op.
+	var altBackend backend.Backend
+	if pb := newPlatformBackend(); pb != nil {
+		altBackend = pb
+	}
+
+	err = tui.Run(ctx, tui.Config{Backend: b, AltBackend: altBackend})
 	if result.Cleanup != nil {
 		result.Cleanup()
 	}
@@ -252,6 +260,96 @@ func codeSessionsDir(appConfig *config.AppConfig) (string, error) {
 		return "", err
 	}
 	return filepath.Join(base, "code"), nil
+}
+
+// buildCodeBackend constructs a fully-wired localAgentBackend for code mode.
+// This is the core setup shared between RunCodeTUI (primary launch) and the
+// lazyCodeBackend (alt backend from chat mode via Ctrl+\).
+func buildCodeBackend(ctx context.Context, cfg *CodeConfig) (backend.Backend, error) {
+	if cfg == nil {
+		cfg = &CodeConfig{}
+	}
+
+	appConfig, err := config.LoadAppConfig()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load config: %w", err)
+	}
+	forceHostExecution(appConfig)
+
+	// Resolve provider/model.
+	providerName := strings.TrimSpace(cfg.Provider)
+	if providerName == "" {
+		providerName = appConfig.General.DefaultProvider
+	}
+	modelName := strings.TrimSpace(cfg.Model)
+	if modelName == "" {
+		modelName = appConfig.General.DefaultModel
+	}
+
+	workingDir := strings.TrimSpace(cfg.WorkingDir)
+	if workingDir == "" {
+		wd, wdErr := os.Getwd()
+		if wdErr != nil {
+			return nil, fmt.Errorf("failed to resolve working directory: %w", wdErr)
+		}
+		workingDir = wd
+	} else {
+		abs, absErr := filepath.Abs(workingDir)
+		if absErr != nil {
+			return nil, fmt.Errorf("invalid working directory %q: %w", workingDir, absErr)
+		}
+		workingDir = abs
+	}
+
+	sessionsDir, err := codeSessionsDir(appConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve code sessions directory: %w", err)
+	}
+	fileStore, err := persistentsession.NewFileStore(sessionsDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create code session store: %w", err)
+	}
+
+	checkpointStore, err := persistentsession.NewCheckpointStore(sessionsDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create code checkpoint store: %w", err)
+	}
+
+	scopedUserID := codeUserIDForDir(workingDir)
+
+	result, err := NewWiredChatAgent(ctx, &ChatFactoryConfig{
+		AppConfig:            appConfig,
+		ProviderName:         providerName,
+		ModelName:            modelName,
+		DebugMode:            cfg.DebugMode,
+		AutoApprove:          cfg.AutoApprove,
+		WorkspaceDir:         workingDir,
+		PlatformMode:         false,
+		CodeMode:             true,
+		AllowMissingProvider: true,
+		LoadProjectContext:   true,
+		SessionService:       fileStore,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	b := &localAgentBackend{
+		result:      result,
+		sessionSvc:  common.NewAutoInitService(result.SessionService),
+		fileStore:   fileStore,
+		checkpoints: checkpointStore,
+		userID:      scopedUserID,
+		appConfig:   appConfig,
+		autoApprove: cfg.AutoApprove,
+		debug:       cfg.DebugMode,
+		workingDir:  workingDir,
+		provider:    result.ProviderName,
+		model:       result.ModelName,
+		configured:  result.ProviderConfigured,
+		notices:     result.StartupNotices,
+	}
+	return b, nil
 }
 
 // forceHostExecution disables the sandbox on the given config so code mode's

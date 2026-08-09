@@ -44,6 +44,10 @@ type Theme struct {
 	FooterMeta       lipgloss.Style
 	Hint             lipgloss.Style
 
+	// AccentColor is the mode-identifying accent used by composerBorderStyle and
+	// other ad-hoc style builders. Code mode = warm neutral (246), Platform = cyan (39).
+	AccentColor lipgloss.Color
+
 	NoColor bool
 }
 
@@ -128,8 +132,103 @@ func DefaultTheme() Theme {
 		InputPlaceholder: lipgloss.NewStyle().Foreground(dim).Background(bg).Italic(true),
 		FooterMeta:       lipgloss.NewStyle().Foreground(muted).Background(bg),
 		Hint:             lipgloss.NewStyle().Foreground(dim).Background(bg),
+		AccentColor:      orange,
 		NoColor:          false,
 	}
+}
+
+// PlatformTheme returns a theme variant for the platform/chat mode. It uses a
+// cool blue/cyan accent family instead of code mode's warm orange/amber,
+// creating an instant visual distinction: orange = local code mode,
+// blue = authenticated platform chat.
+func PlatformTheme() Theme {
+	noColor := os.Getenv("NO_COLOR") != ""
+	if noColor {
+		return plainTheme()
+	}
+
+	bg := lipgloss.Color("#000000")         // true black terminal background
+	brand := lipgloss.Color("75")           // steel blue (replaces code-mode's 250 gray)
+	muted := lipgloss.Color("245")          // gray (shared)
+	dim := lipgloss.Color("240")            // dimmer gray (hints)
+	text := lipgloss.Color("252")           // near white
+	composerBorder := lipgloss.Color("39")  // bright cyan border (key differentiator)
+	cyan := brand                           // user accent (legacy)
+	green := lipgloss.Color("78")           // agent / success
+	red := lipgloss.Color("203")            // error / danger
+	highlight := lipgloss.Color("75")       // blue for numbers (was orange 208)
+	userAccent := lipgloss.Color("#3F5A75") // muted steel-blue user outline (was bronze #75633F)
+	yellow := lipgloss.Color("221")         // approval
+	border := lipgloss.Color("238")         // subtle separator border
+	diffAddedBg := lipgloss.Color("#1a3320")   // subtle dark green for added lines
+	diffRemovedBg := lipgloss.Color("#3d1f1f") // subtle dark red for removed lines
+
+	return Theme{
+		Background: lipgloss.NewStyle().Background(bg),
+		Brand:      lipgloss.NewStyle().Foreground(brand).Background(bg).Bold(true),
+		Text:       lipgloss.NewStyle().Foreground(text).Background(bg),
+		Muted:      lipgloss.NewStyle().Foreground(muted).Background(bg),
+		User:       lipgloss.NewStyle().Foreground(cyan).Background(bg).Bold(true),
+		UserBorder: lipgloss.NewStyle().Foreground(userAccent).Background(bg),
+		// User bubble: muted steel-blue outline, black interior.
+		UserBubble: lipgloss.NewStyle().
+			Foreground(text).
+			Background(bg).
+			Border(lipgloss.NormalBorder()).
+			BorderForeground(userAccent).
+			Padding(0, 2),
+		UserExpandHint: lipgloss.NewStyle().
+			Foreground(userAccent).
+			Background(bg).
+			Italic(true).
+			Align(lipgloss.Right),
+		Agent:      lipgloss.NewStyle().Foreground(text).Background(bg),
+		System:     lipgloss.NewStyle().Foreground(muted).Background(bg).Italic(true),
+		Error:      lipgloss.NewStyle().Foreground(red).Background(bg),
+		Success:    lipgloss.NewStyle().Foreground(green).Background(bg),
+		Danger:     lipgloss.NewStyle().Foreground(red).Background(bg),
+		Number:     lipgloss.NewStyle().Foreground(highlight).Background(bg),
+		Border:     lipgloss.NewStyle().Foreground(border).Background(bg),
+		Header:     lipgloss.NewStyle().Foreground(brand).Background(bg).Bold(true),
+		Status:     lipgloss.NewStyle().Foreground(muted).Background(bg),
+		Input:      lipgloss.NewStyle().Foreground(text).Background(bg),
+		Activity:   lipgloss.NewStyle().Foreground(brand).Background(bg),
+		Approval:   lipgloss.NewStyle().Foreground(yellow).Background(bg).Bold(true),
+		CodeGutter: lipgloss.NewStyle().Foreground(muted).Background(bg),
+		DiffAddedBg:   lipgloss.NewStyle().Foreground(text).Background(diffAddedBg),
+		DiffRemovedBg: lipgloss.NewStyle().Foreground(text).Background(diffRemovedBg),
+
+		InputBorder: lipgloss.NewStyle().
+			Background(bg).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(composerBorder).
+			Padding(0, 1),
+		InputBorderFocus: lipgloss.NewStyle().
+			Background(bg).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(composerBorder).
+			Padding(0, 1),
+		InputBorderPlan: lipgloss.NewStyle().
+			Background(bg).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(composerBorder).
+			Padding(0, 1),
+		InputPrompt:      lipgloss.NewStyle().Foreground(brand).Background(bg).Bold(true),
+		InputPlaceholder: lipgloss.NewStyle().Foreground(dim).Background(bg).Italic(true),
+		FooterMeta:       lipgloss.NewStyle().Foreground(muted).Background(bg),
+		Hint:             lipgloss.NewStyle().Foreground(dim).Background(bg),
+		AccentColor:      composerBorder,
+		NoColor:          false,
+	}
+}
+
+// ThemeForMode returns the appropriate accent theme for a backend mode string.
+// "code" → warm orange/amber (DefaultTheme), "platform" → cool blue/cyan (PlatformTheme).
+func ThemeForMode(mode string) Theme {
+	if mode == "platform" {
+		return PlatformTheme()
+	}
+	return DefaultTheme()
 }
 
 func plainTheme() Theme {

@@ -19,13 +19,13 @@ import (
 // Execute is the main entry point for the CLI
 func Execute() error {
 	if len(os.Args) < 2 {
-		remoteMode, stdinTTY, stdoutTTY := bareChatTTYStatus()
-		if shouldLaunchBareChatWith(remoteMode, stdinTTY, stdoutTTY) {
+		stdinTTY, stdoutTTY := bareCodeTTYStatus()
+		if shouldLaunchBareCodeWith(stdinTTY, stdoutTTY) {
 			checkForUpdates()
-			return handleChatCommand(nil)
+			return handleCodeCommand(nil)
 		}
 		printUsage()
-		if hint := bareChatUnavailableHint(remoteMode, stdinTTY, stdoutTTY); hint != "" {
+		if hint := bareCodeUnavailableHint(stdinTTY, stdoutTTY); hint != "" {
 			fmt.Fprintln(os.Stderr, hint)
 		}
 		return fmt.Errorf("no command provided")
@@ -119,36 +119,35 @@ func Execute() error {
 	}
 }
 
-func bareChatTTYStatus() (remoteMode, stdinTTY, stdoutTTY bool) {
-	return client.IsRemoteMode(),
-		term.IsTerminal(int(os.Stdin.Fd())),
+func bareCodeTTYStatus() (stdinTTY, stdoutTTY bool) {
+	return term.IsTerminal(int(os.Stdin.Fd())),
 		term.IsTerminal(int(os.Stdout.Fd()))
 }
 
-func shouldLaunchBareChatWith(remoteMode, stdinTTY, stdoutTTY bool) bool {
-	return remoteMode && stdinTTY && stdoutTTY
+func shouldLaunchBareCodeWith(stdinTTY, stdoutTTY bool) bool {
+	return stdinTTY && stdoutTTY
 }
 
-func bareChatUnavailableHint(remoteMode, stdinTTY, stdoutTTY bool) string {
-	if !remoteMode || (stdinTTY && stdoutTTY) {
+func bareCodeUnavailableHint(stdinTTY, stdoutTTY bool) string {
+	if stdinTTY && stdoutTTY {
 		return ""
 	}
-	return "hint: interactive chat requires a terminal. Run 'astonish chat' from an interactive TTY."
+	return "hint: interactive code mode requires a terminal. Run 'astonish code' from an interactive TTY."
 }
 
 func printUsage() {
-	fmt.Println("usage: astonish [-h] [-v] {login,logout,status,org,team,chat,sessions,flows,...} ...")
+	fmt.Println("usage: astonish [-h] [-v] {code,chat,login,logout,status,org,team,sessions,flows,...} ...")
 	fmt.Println("")
 	fmt.Println("positional arguments:")
-	fmt.Println("  {chat,sessions,flows,tap,daemon,channels,scheduler,fleet,credential,skills,sandbox,drill,config,setup,tools,memory,platform,code}")
+	fmt.Println("  {code,chat,sessions,flows,tap,daemon,channels,scheduler,fleet,credential,skills,sandbox,drill,config,setup,tools,memory,platform}")
 	fmt.Println("                        Astonish CLI commands")
+	fmt.Println("    code                Local coding tool (in-process, host filesystem) [default]")
+	fmt.Println("    chat                Start an interactive chat session (requires login)")
 	fmt.Println("    login               Connect to a remote Astonish server")
 	fmt.Println("    logout              Disconnect from the remote server")
 	fmt.Println("    status              Show connection mode and status")
 	fmt.Println("    org                 Manage organizations (remote mode)")
 	fmt.Println("    team                Manage teams (remote mode)")
-	fmt.Println("    chat                Start an interactive chat session")
-	fmt.Println("    code                Local coding tool (in-process, host filesystem)")
 	fmt.Println("    sessions            Manage persistent sessions")
 	fmt.Println("    flows               Design and run AI flows")
 	fmt.Println("    tap                 Manage extension repositories")

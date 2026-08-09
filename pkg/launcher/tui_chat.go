@@ -57,7 +57,153 @@ func RunChatTUI(ctx context.Context, cfg *ChatConfig) error {
 		user:        user,
 		resumed:     cfg.SessionID != "",
 	}
-	return tui.Run(ctx, tui.Config{Backend: b})
+	// Provide local code mode as an alt backend so Ctrl+\ can switch to it.
+	// The code backend is lazily initialized on first switch.
+	var altBackend backend.Backend
+	if lb := newLazyCodeBackend(); lb != nil {
+		altBackend = lb
+	}
+	return tui.Run(ctx, tui.Config{Backend: b, AltBackend: altBackend})
+}
+
+// newPlatformBackend creates a platformBackend for use as the primary or alt
+// backend. It requires that the user is already logged in (client.IsRemoteMode).
+// Returns nil without error when not in remote mode (graceful degradation).
+func newPlatformBackend() backend.Backend {
+	if !client.IsRemoteMode() {
+		return nil
+	}
+	c, err := client.New()
+	if err != nil {
+		return nil
+	}
+	remoteCfg, _ := client.LoadRemoteConfig()
+	serverURL, org, team, user := "", "", "", ""
+	if remoteCfg != nil {
+		serverURL = remoteCfg.URL
+		org = remoteCfg.Org
+		team = remoteCfg.Team
+		user = remoteCfg.UserEmail
+	}
+	return &platformBackend{
+		client:    c,
+		serverURL: serverURL,
+		org:       org,
+		team:      team,
+		user:      user,
+	}
+}
+
+// newLazyCodeBackend returns a backend that lazily initializes the full local
+// code-mode agent on first Open(). Returns nil if code mode cannot be set up
+// (e.g. missing config). This allows `astonish chat` to offer Ctrl+\ switching
+// to code mode without paying the startup cost unless the user actually switches.
+func newLazyCodeBackend() backend.Backend {
+	return &lazyCodeBackend{}
+}
+
+// lazyCodeBackend wraps localAgentBackend with deferred initialization. All
+// backend.Backend methods delegate to the inner backend once Open() is called.
+type lazyCodeBackend struct {
+	inner backend.Backend
+}
+
+func (b *lazyCodeBackend) Info() backend.Info {
+	if b.inner != nil {
+		return b.inner.Info()
+	}
+	return backend.Info{Mode: "code"}
+}
+
+func (b *lazyCodeBackend) Open(ctx context.Context) error {
+	if b.inner != nil {
+		return nil // already opened
+	}
+	// Build the full code-mode backend. This mirrors RunCodeTUI's setup but
+	// runs lazily on first switch.
+	cfg := &CodeConfig{}
+	inner, err := buildCodeBackend(ctx, cfg)
+	if err != nil {
+		return fmt.Errorf("failed to initialize code mode: %w", err)
+	}
+	b.inner = inner
+	return b.inner.Open(ctx)
+}
+
+func (b *lazyCodeBackend) RunTurn(ctx context.Context, msg string, opts backend.TurnOptions) (<-chan events.Event, error) {
+	if b.inner == nil {
+		return nil, fmt.Errorf("code backend not opened")
+	}
+	return b.inner.RunTurn(ctx, msg, opts)
+}
+
+func (b *lazyCodeBackend) ListSessions(ctx context.Context) ([]backend.SessionSummary, error) {
+	if b.inner == nil {
+		return nil, nil
+	}
+	return b.inner.ListSessions(ctx)
+}
+
+func (b *lazyCodeBackend) LoadHistory(ctx context.Context) ([]backend.HistoryEntry, error) {
+	if b.inner == nil {
+		return nil, nil
+	}
+	return b.inner.LoadHistory(ctx)
+}
+
+func (b *lazyCodeBackend) ResumeSession(ctx context.Context, id string) ([]backend.HistoryEntry, error) {
+	if b.inner == nil {
+		return nil, fmt.Errorf("code backend not opened")
+	}
+	return b.inner.ResumeSession(ctx, id)
+}
+
+func (b *lazyCodeBackend) DeleteSession(ctx context.Context, id string) error {
+	if b.inner == nil {
+		return fmt.Errorf("code backend not opened")
+	}
+	return b.inner.DeleteSession(ctx, id)
+}
+
+func (b *lazyCodeBackend) NewSession() {
+	if b.inner != nil {
+		b.inner.NewSession()
+	}
+}
+
+func (b *lazyCodeBackend) ListProviders(ctx context.Context) ([]string, error) {
+	if b.inner == nil {
+		return nil, nil
+	}
+	return b.inner.ListProviders(ctx)
+}
+
+func (b *lazyCodeBackend) ListModels(ctx context.Context, provider string) ([]string, error) {
+	if b.inner == nil {
+		return nil, nil
+	}
+	return b.inner.ListModels(ctx, provider)
+}
+
+func (b *lazyCodeBackend) SetModelPin(ctx context.Context, provider, model string) (string, string, error) {
+	if b.inner == nil {
+		return "", "", fmt.Errorf("code backend not opened")
+	}
+	return b.inner.SetModelPin(ctx, provider, model)
+}
+
+func (b *lazyCodeBackend) ReadArtifactContent(ctx context.Context, sessionID, path string) (backend.ArtifactContent, error) {
+	if b.inner == nil {
+		return backend.ArtifactContent{}, fmt.Errorf("code backend not opened")
+	}
+	return b.inner.ReadArtifactContent(ctx, sessionID, path)
+}
+
+func (b *lazyCodeBackend) Close() error {
+	if b.inner != nil {
+		return b.inner.Close()
+	}
+	return nil
 }
 
 // platformBackend implements backend.Backend over Studio REST/SSE.

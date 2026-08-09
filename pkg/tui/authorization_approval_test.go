@@ -214,3 +214,36 @@ func TestAuthorizationKey_DenyViaEsc(t *testing.T) {
 		t.Fatalf("runMsg=%q want Deny", b.runMsg)
 	}
 }
+
+func TestApprovalOverlay_StableArgOrder(t *testing.T) {
+	m := newModel(context.Background(), Config{Backend: staticBackend{}, Width: 100, Height: 30})
+	m.ready = true
+	m.layout()
+	m.tr.Apply(events.NewAuthorizationApproval(
+		"shell_command",
+		map[string]any{"command": "echo hi", "working_dir": "/tmp", "timeout": 30},
+		[]string{"Allow", "Always Allow", "Deny"},
+		"tool", nil,
+	))
+
+	// Render multiple times and verify the output is identical each time.
+	first := m.renderApprovalOverlay()
+	for i := 0; i < 20; i++ {
+		got := m.renderApprovalOverlay()
+		if got != first {
+			t.Fatalf("render %d produced different output (parameter order instability):\nfirst:\n%s\n\ngot:\n%s", i, first, got)
+		}
+	}
+
+	// Verify sorted order: command < timeout < working_dir (alphabetical).
+	out := stripANSI(first)
+	cmdIdx := strings.Index(out, "command:")
+	timeoutIdx := strings.Index(out, "timeout:")
+	wdIdx := strings.Index(out, "working_dir:")
+	if cmdIdx < 0 || timeoutIdx < 0 || wdIdx < 0 {
+		t.Fatalf("expected all three arg keys in output:\n%s", out)
+	}
+	if !(cmdIdx < timeoutIdx && timeoutIdx < wdIdx) {
+		t.Errorf("args not in alphabetical order: command@%d, timeout@%d, working_dir@%d", cmdIdx, timeoutIdx, wdIdx)
+	}
+}

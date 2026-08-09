@@ -3632,11 +3632,17 @@ func (m model) composerBorderStyle() lipgloss.Style {
 	if m.theme.NoColor {
 		return lipgloss.NewStyle()
 	}
-	color := m.theme.AccentColor
+	var color lipgloss.Color
 	if m.graphPlanMode {
 		color = lipgloss.Color("39") // cyan — distinct from Plan's amber
 	} else if m.planMode {
 		color = lipgloss.Color("172")
+	} else {
+		// Normal mode: use the neutral composer border color, not the brand accent.
+		color = lipgloss.Color("246")
+		if m.info.Mode == "platform" {
+			color = lipgloss.Color("39") // platform uses cyan even in normal mode
+		}
 	}
 	return lipgloss.NewStyle().Foreground(color).Background(lipgloss.Color("#000000"))
 }

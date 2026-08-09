@@ -44,8 +44,9 @@ type Theme struct {
 	FooterMeta       lipgloss.Style
 	Hint             lipgloss.Style
 
-	// AccentColor is the mode-identifying accent used by composerBorderStyle and
-	// other ad-hoc style builders. Code mode = warm neutral (246), Platform = cyan (39).
+	// AccentColor is the mode-identifying brand accent used by welcome titles
+	// and other brand-identity style builders. Code mode = orange (208), Platform = cyan (39).
+	// The composer border in normal mode uses a separate neutral color (see composerBorderStyle).
 	AccentColor lipgloss.Color
 
 	NoColor bool

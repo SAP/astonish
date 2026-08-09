@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -309,12 +310,18 @@ func (m model) renderApprovalOverlay() string {
 	b.WriteString(th.Text.Render(content) + "\n")
 	b.WriteString(th.Muted.Render("Tool: ") + th.Brand.Render(tool) + "\n")
 	if it != nil && len(it.Args) > 0 {
+		keys := make([]string, 0, len(it.Args))
+		for k := range it.Args {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
 		n := 0
-		for k, raw := range it.Args {
+		for _, k := range keys {
 			if n >= 4 {
 				b.WriteString(th.Muted.Render(fmt.Sprintf("  … +%d more", len(it.Args)-4)) + "\n")
 				break
 			}
+			raw := it.Args[k]
 			v := fmt.Sprintf("%v", raw)
 			v = strings.ReplaceAll(v, "\n", " ")
 			if len(v) > 60 {

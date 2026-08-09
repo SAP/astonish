@@ -666,28 +666,120 @@ func (s *FileStore) ListChildren(parentID string) ([]SessionMeta, error) {
 // (should not happen for the linear compaction chain, but be defensive) the
 // most-recently-updated child is followed. Returns sessionID unchanged when it
 // has no children. Guards against cycles.
+//
+// Only children with the same appName and userID as the root are followed,
+// preventing cross-scope traversal (e.g. into Studio sessions linked as
+// sub-agent children of a code-mode session).
+//
+// If the tip of the chain has a missing transcript file (e.g. due to a crash
+// during compaction), the method falls back to the last ancestor whose
+// transcript exists on disk, preventing a silent empty-session load.
 func (s *FileStore) LatestDescendant(sessionID string) string {
 	if sessionID == "" {
 		return sessionID
 	}
+
+	// Resolve the root session's appName/userID to scope the walk.
+	rootMeta, err := s.index.Get(sessionID)
+	if err != nil || rootMeta == nil {
+		return sessionID
+	}
+	rootApp := rootMeta.AppName
+	rootUser := rootMeta.UserID
+
 	seen := map[string]bool{}
 	cur := sessionID
 	for !seen[cur] {
 		seen[cur] = true
 		children, err := s.index.ListChildren(cur)
 		if err != nil || len(children) == 0 {
-			return cur
+			break
 		}
-		// Follow the most-recently-updated child (the live tip).
-		next := children[0]
-		for _, c := range children[1:] {
+		// Filter to same-scope children only.
+		var scoped []SessionMeta
+		for _, c := range children {
+			if c.AppName == rootApp && c.UserID == rootUser {
+				scoped = append(scoped, c)
+			}
+		}
+		if len(scoped) == 0 {
+			break
+		}
+		// Follow the most-recently-updated same-scope child (the live tip).
+		next := scoped[0]
+		for _, c := range scoped[1:] {
 			if c.UpdatedAt.After(next.UpdatedAt) {
 				next = c
 			}
 		}
 		cur = next.ID
 	}
-	return cur
+
+	// No children — return as-is (no chain to validate).
+	if cur == sessionID {
+		return cur
+	}
+
+	// If the tip has a valid transcript, return it (the normal/fast path).
+	if s.transcriptExists(cur) {
+		return cur
+	}
+
+	// The tip's transcript is missing. Walk from root to cur, finding the
+	// deepest descendant whose transcript file is present on disk.
+	lastValid := sessionID
+	seen2 := map[string]bool{}
+	walk := sessionID
+	for !seen2[walk] {
+		seen2[walk] = true
+		if s.transcriptExists(walk) {
+			lastValid = walk
+		}
+		if walk == cur {
+			break
+		}
+		children, err := s.index.ListChildren(walk)
+		if err != nil || len(children) == 0 {
+			break
+		}
+		var scoped []SessionMeta
+		for _, c := range children {
+			if c.AppName == rootApp && c.UserID == rootUser {
+				scoped = append(scoped, c)
+			}
+		}
+		if len(scoped) == 0 {
+			break
+		}
+		next := scoped[0]
+		for _, c := range scoped[1:] {
+			if c.UpdatedAt.After(next.UpdatedAt) {
+				next = c
+			}
+		}
+		walk = next.ID
+	}
+
+	slog.Warn("compaction chain tip has missing transcript, falling back to last valid ancestor",
+		"component", "session",
+		"requested", sessionID,
+		"broken_tip", cur,
+		"fallback", lastValid,
+	)
+	return lastValid
+}
+
+// transcriptExists checks whether the transcript file for the given session ID
+// exists on disk. It looks up the session metadata from the index to determine
+// the correct appName/userID path components.
+func (s *FileStore) transcriptExists(sessionID string) bool {
+	meta, err := s.index.Get(sessionID)
+	if err != nil || meta == nil {
+		return false
+	}
+	path := filepath.Join(s.baseDir, meta.AppName, meta.UserID, sessionID+".jsonl")
+	_, err = os.Stat(path)
+	return err == nil
 }
 
 // AncestorChain returns the compaction chain from the root ancestor down to and

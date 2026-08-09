@@ -3,6 +3,8 @@ package session
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -823,6 +825,58 @@ func TestFileStore_LatestDescendantAndAncestorChain(t *testing.T) {
 	chain = store.AncestorChain("root")
 	if len(chain) != 1 || chain[0] != "root" {
 		t.Fatalf("AncestorChain(root)=%v want [root]", chain)
+	}
+}
+
+func TestFileStore_LatestDescendantMissingTranscript(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Create a chain: root -> child -> tip
+	_, err := store.Create(ctx, &adksession.CreateRequest{
+		AppName: "app", UserID: "u", SessionID: "root",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.Create(ctx, &adksession.CreateRequest{
+		AppName: "app", UserID: "u", SessionID: "child",
+		State: map[string]any{StateKeyParentID: "root"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.Create(ctx, &adksession.CreateRequest{
+		AppName: "app", UserID: "u", SessionID: "tip",
+		State: map[string]any{StateKeyParentID: "child"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Normal case: chain is intact
+	if got := store.LatestDescendant("root"); got != "tip" {
+		t.Fatalf("LatestDescendant(root)=%q want tip (chain intact)", got)
+	}
+
+	// Remove the tip's transcript file to simulate a crash during compaction
+	tipPath := filepath.Join(store.BaseDir(), "app", "u", "tip.jsonl")
+	if err := os.Remove(tipPath); err != nil {
+		t.Fatalf("failed to remove tip transcript: %v", err)
+	}
+
+	// LatestDescendant should now fall back to "child" (last valid ancestor)
+	if got := store.LatestDescendant("root"); got != "child" {
+		t.Fatalf("LatestDescendant(root)=%q want child (tip transcript missing)", got)
+	}
+
+	// Also remove child's transcript — should fall back to root
+	childPath := filepath.Join(store.BaseDir(), "app", "u", "child.jsonl")
+	if err := os.Remove(childPath); err != nil {
+		t.Fatalf("failed to remove child transcript: %v", err)
+	}
+	if got := store.LatestDescendant("root"); got != "root" {
+		t.Fatalf("LatestDescendant(root)=%q want root (child+tip transcripts missing)", got)
 	}
 }
 

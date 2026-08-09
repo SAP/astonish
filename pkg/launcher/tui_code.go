@@ -1375,10 +1375,21 @@ func (b *localAgentBackend) ResumeSession(ctx context.Context, sessionID string)
 	// utilization immediately, instead of "Context 0" until the next turn.
 	// Use the active (tip) session — that is the model-facing context size.
 	ctxTokens := b.estimateContextTokens(ctx, activeID)
+
+	// Load persisted title for the header (use root session's title since
+	// compacted children inherit the same title).
+	var title string
+	if b.fileStore != nil {
+		if t, tErr := b.fileStore.GetSessionTitle(ctx, sessionID); tErr == nil {
+			title = t
+		}
+	}
+
 	b.mu.Lock()
 	b.sessionID = activeID
 	b.resumed = true
 	b.contextTokens = ctxTokens
+	b.title = title
 	b.mu.Unlock()
 	return hist, nil
 }

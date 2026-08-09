@@ -545,10 +545,12 @@ func TestSystemPromptBuilder_MaximalSize(t *testing.T) {
 	// guidance it doesn't know exists. The ceiling was raised from 12800→13000 to
 	// admit the dependency-tracing planning-strategy line (trace callers/tests/docs
 	// before decomposing — no partial implementations) added to the always-on
-	// delegation block. See system_prompt_builder.go "## Reports" / "## Project
-	// Guidance" / "## Tool Use" / "## Environment".
-	if len(prompt) > 13000 {
-		t.Errorf("maximal prompt too large: %d bytes (limit 13000)", len(prompt))
+	// delegation block, then raised again to 14000 to admit the codegraph-first
+	// rule and stop-exploring discipline added to the Normal mode ## Tool Use
+	// section (gated on hasCodeIntelTools). See system_prompt_builder.go
+	// "## Reports" / "## Project Guidance" / "## Tool Use" / "## Environment".
+	if len(prompt) > 14000 {
+		t.Errorf("maximal prompt too large: %d bytes (limit 14000)", len(prompt))
 	}
 	if len(prompt) < 5000 {
 		t.Errorf("maximal prompt suspiciously small: %d bytes (expected > 5000)", len(prompt))

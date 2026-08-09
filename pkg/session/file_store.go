@@ -934,6 +934,10 @@ func sanitizeEventsOnLoad(events []*adksession.Event) {
 // but the FunctionResponse never arrives. Without repair, the malformed history
 // causes LLM providers (especially OpenAI) to reject the request with HTTP 400.
 //
+// FunctionCalls that were superseded by the approval flow (i.e., the tool was
+// intercepted for user approval and re-issued with a new ID) are not considered
+// orphaned — they are a normal part of the approval protocol.
+//
 // For each orphaned FunctionCall, a synthetic FunctionResponse event is appended
 // with an error message explaining the interruption.
 func repairOrphanedToolCalls(events []*adksession.Event) []*adksession.Event {
@@ -950,7 +954,43 @@ func repairOrphanedToolCalls(events []*adksession.Event) []*adksession.Event {
 		}
 	}
 
-	// Find orphaned FunctionCalls (have ID but no matching FunctionResponse)
+	// Collect FunctionCall IDs that were superseded by the approval flow.
+	// Pattern: a FunctionCall event is followed (before the next FunctionCall
+	// for the same tool) by an event whose StateDelta sets awaiting_approval=true.
+	// The approval flow re-issues the call with a new ID, so the original never
+	// gets a FunctionResponse — but this is intentional, not an interruption.
+	approvalSuperseded := make(map[string]bool)
+	for i, event := range events {
+		if event.Content == nil {
+			continue
+		}
+		for _, part := range event.Content.Parts {
+			if part.FunctionCall == nil || part.FunctionCall.ID == "" {
+				continue
+			}
+			if answeredIDs[part.FunctionCall.ID] {
+				continue // already has a response, skip
+			}
+			// Look ahead for awaiting_approval=true before the next user message
+			// or FunctionResponse for this ID.
+			for j := i + 1; j < len(events); j++ {
+				sd := events[j].Actions.StateDelta
+				if awaiting, ok := sd["awaiting_approval"]; ok {
+					if ab, isBool := awaiting.(bool); isBool && ab {
+						approvalSuperseded[part.FunctionCall.ID] = true
+						break
+					}
+				}
+				// Stop looking if we hit a user message (new turn boundary)
+				if events[j].Content != nil && events[j].Content.Role == "user" {
+					break
+				}
+			}
+		}
+	}
+
+	// Find orphaned FunctionCalls (have ID but no matching FunctionResponse
+	// and were not superseded by the approval flow)
 	var orphanParts []*genai.Part
 	for _, event := range events {
 		if event.Content == nil {
@@ -958,7 +998,7 @@ func repairOrphanedToolCalls(events []*adksession.Event) []*adksession.Event {
 		}
 		for _, part := range event.Content.Parts {
 			if part.FunctionCall != nil && part.FunctionCall.ID != "" {
-				if !answeredIDs[part.FunctionCall.ID] {
+				if !answeredIDs[part.FunctionCall.ID] && !approvalSuperseded[part.FunctionCall.ID] {
 					orphanParts = append(orphanParts, part)
 				}
 			}

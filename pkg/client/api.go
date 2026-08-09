@@ -45,6 +45,7 @@ type StudioMessage struct {
 	Type       string `json:"type"`
 	Content    string `json:"content,omitempty"`
 	ToolName   string `json:"toolName,omitempty"`
+	ToolID     string `json:"toolId,omitempty"`
 	ToolArgs   any    `json:"toolArgs,omitempty"`
 	ToolResult any    `json:"toolResult,omitempty"`
 }

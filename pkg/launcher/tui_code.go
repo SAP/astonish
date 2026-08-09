@@ -1259,8 +1259,55 @@ func (b *localAgentBackend) loadHistory(ctx context.Context, id string) ([]backe
 	if err != nil || resp == nil || resp.Session == nil {
 		return nil, nil
 	}
-	var out []backend.HistoryEntry
+
+	// Pre-scan: identify FunctionCall IDs that were superseded by the approval
+	// flow. These have no FunctionResponse because the approval protocol
+	// re-issues the call with a new ID after the user approves. Emitting them
+	// in history would show phantom "extra" tool executions.
+	answeredIDs := make(map[string]bool)
+	approvalSuperseded := make(map[string]bool)
+	var allEvents []*session.Event
 	for ev := range resp.Session.Events().All() {
+		allEvents = append(allEvents, ev)
+		if ev == nil || ev.Content == nil {
+			continue
+		}
+		for _, part := range ev.Content.Parts {
+			if part.FunctionResponse != nil && part.FunctionResponse.ID != "" {
+				answeredIDs[part.FunctionResponse.ID] = true
+			}
+		}
+	}
+	for i, ev := range allEvents {
+		if ev == nil || ev.Content == nil {
+			continue
+		}
+		for _, part := range ev.Content.Parts {
+			if part.FunctionCall == nil || part.FunctionCall.ID == "" {
+				continue
+			}
+			if answeredIDs[part.FunctionCall.ID] {
+				continue
+			}
+			// Look ahead for awaiting_approval=true
+			for j := i + 1; j < len(allEvents); j++ {
+				if allEvents[j].Actions.StateDelta != nil {
+					if awaiting, ok := allEvents[j].Actions.StateDelta["awaiting_approval"]; ok {
+						if ab, isBool := awaiting.(bool); isBool && ab {
+							approvalSuperseded[part.FunctionCall.ID] = true
+							break
+						}
+					}
+				}
+				if allEvents[j].Content != nil && allEvents[j].Content.Role == "user" {
+					break
+				}
+			}
+		}
+	}
+
+	var out []backend.HistoryEntry
+	for _, ev := range allEvents {
 		if ev == nil || ev.LLMResponse.Content == nil {
 			continue
 		}
@@ -1274,15 +1321,20 @@ func (b *localAgentBackend) loadHistory(ctx context.Context, id string) ([]backe
 				}
 				out = append(out, backend.HistoryEntry{Kind: kind, Text: part.Text})
 			case part.FunctionCall != nil:
+				if approvalSuperseded[part.FunctionCall.ID] {
+					continue
+				}
 				out = append(out, backend.HistoryEntry{
 					Kind:     "tool_call",
 					ToolName: part.FunctionCall.Name,
+					ToolID:   part.FunctionCall.ID,
 					Args:     part.FunctionCall.Args,
 				})
 			case part.FunctionResponse != nil:
 				out = append(out, backend.HistoryEntry{
 					Kind:     "tool_result",
 					ToolName: part.FunctionResponse.Name,
+					ToolID:   part.FunctionResponse.ID,
 					Result:   part.FunctionResponse.Response,
 				})
 			}

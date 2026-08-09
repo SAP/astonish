@@ -486,12 +486,14 @@ func studioMessagesToHistory(msgs []client.StudioMessage) []backend.HistoryEntry
 			out = append(out, backend.HistoryEntry{
 				Kind:     "tool_call",
 				ToolName: m.ToolName,
+				ToolID:   m.ToolID,
 				Args:     args,
 			})
 		case "tool_result":
 			out = append(out, backend.HistoryEntry{
 				Kind:     "tool_result",
 				ToolName: m.ToolName,
+				ToolID:   m.ToolID,
 				Result:   m.ToolResult,
 			})
 		default:

@@ -770,6 +770,345 @@ func TestResumeSession_LoadsHistory(t *testing.T) {
 	}
 }
 
+// TestResumeSession_ToolIDPropagation verifies that loadHistory propagates
+// FunctionCall.ID and FunctionResponse.ID into HistoryEntry.ToolID, so the TUI
+// transcript can correctly pair tool calls with their results on session resume.
+// Without this, sessions with multiple same-name tools (e.g. several shell_command
+// calls) show results as failed/mismatched after resume.
+func TestResumeSession_ToolIDPropagation(t *testing.T) {
+	dir := t.TempDir()
+	userID := codeUserIDForDir("/work/projectToolID")
+
+	b := newFileStoreBackend(t, dir, userID)
+	ctx := context.Background()
+
+	// Create a session and seed events with multiple tool calls sharing the same name.
+	resp, err := b.sessionSvc.Create(ctx, &adksession.CreateRequest{
+		AppName: codeAppName,
+		UserID:  b.effectiveUserID(),
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	sess := resp.Session
+
+	// 1. User message
+	ev1 := &adksession.Event{
+		ID:     "e1",
+		Author: "user",
+		LLMResponse: adkmodel.LLMResponse{
+			Content: genai.NewContentFromText("run git status and git log", genai.RoleUser),
+		},
+	}
+	if err := b.sessionSvc.AppendEvent(ctx, sess, ev1); err != nil {
+		t.Fatalf("AppendEvent user: %v", err)
+	}
+
+	// 2. Model response with two tool calls (same tool name, different IDs)
+	ev2 := &adksession.Event{
+		ID:     "e2",
+		Author: "model",
+		LLMResponse: adkmodel.LLMResponse{
+			Content: &genai.Content{
+				Role: "model",
+				Parts: []*genai.Part{
+					{
+						FunctionCall: &genai.FunctionCall{
+							ID:   "call_001",
+							Name: "shell_command",
+							Args: map[string]any{"command": "git status"},
+						},
+					},
+					{
+						FunctionCall: &genai.FunctionCall{
+							ID:   "call_002",
+							Name: "shell_command",
+							Args: map[string]any{"command": "git log --oneline -5"},
+						},
+					},
+				},
+			},
+		},
+	}
+	if err := b.sessionSvc.AppendEvent(ctx, sess, ev2); err != nil {
+		t.Fatalf("AppendEvent tool_calls: %v", err)
+	}
+
+	// 3. Tool results (user role, FunctionResponse parts)
+	ev3 := &adksession.Event{
+		ID:     "e3",
+		Author: "user",
+		LLMResponse: adkmodel.LLMResponse{
+			Content: &genai.Content{
+				Role: "user",
+				Parts: []*genai.Part{
+					{
+						FunctionResponse: &genai.FunctionResponse{
+							ID:       "call_001",
+							Name:     "shell_command",
+							Response: map[string]any{"stdout": "On branch main\nnothing to commit"},
+						},
+					},
+					{
+						FunctionResponse: &genai.FunctionResponse{
+							ID:       "call_002",
+							Name:     "shell_command",
+							Response: map[string]any{"stdout": "abc1234 Initial commit"},
+						},
+					},
+				},
+			},
+		},
+	}
+	if err := b.sessionSvc.AppendEvent(ctx, sess, ev3); err != nil {
+		t.Fatalf("AppendEvent tool_results: %v", err)
+	}
+
+	// 4. Model final response
+	ev4 := &adksession.Event{
+		ID:     "e4",
+		Author: "model",
+		LLMResponse: adkmodel.LLMResponse{
+			Content: genai.NewContentFromText("Here are the results.", genai.RoleModel),
+		},
+	}
+	if err := b.sessionSvc.AppendEvent(ctx, sess, ev4); err != nil {
+		t.Fatalf("AppendEvent agent: %v", err)
+	}
+
+	// Resume session and verify ToolID propagation.
+	b2 := newFileStoreBackend(t, dir, userID)
+	hist, err := b2.ResumeSession(ctx, sess.ID())
+	if err != nil {
+		t.Fatalf("ResumeSession: %v", err)
+	}
+
+	// Collect tool_call and tool_result entries.
+	var calls, results []backend.HistoryEntry
+	for _, h := range hist {
+		switch h.Kind {
+		case "tool_call":
+			calls = append(calls, h)
+		case "tool_result":
+			results = append(results, h)
+		}
+	}
+
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 tool_call entries, got %d; hist=%+v", len(calls), hist)
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected 2 tool_result entries, got %d; hist=%+v", len(results), hist)
+	}
+
+	// Verify ToolIDs are propagated on tool_call entries.
+	if calls[0].ToolID != "call_001" {
+		t.Errorf("call[0].ToolID = %q, want %q", calls[0].ToolID, "call_001")
+	}
+	if calls[1].ToolID != "call_002" {
+		t.Errorf("call[1].ToolID = %q, want %q", calls[1].ToolID, "call_002")
+	}
+
+	// Verify ToolIDs are propagated on tool_result entries.
+	if results[0].ToolID != "call_001" {
+		t.Errorf("result[0].ToolID = %q, want %q", results[0].ToolID, "call_001")
+	}
+	if results[1].ToolID != "call_002" {
+		t.Errorf("result[1].ToolID = %q, want %q", results[1].ToolID, "call_002")
+	}
+
+	// Verify tool names are still correct.
+	for i, c := range calls {
+		if c.ToolName != "shell_command" {
+			t.Errorf("call[%d].ToolName = %q, want %q", i, c.ToolName, "shell_command")
+		}
+	}
+	for i, r := range results {
+		if r.ToolName != "shell_command" {
+			t.Errorf("result[%d].ToolName = %q, want %q", i, r.ToolName, "shell_command")
+		}
+	}
+}
+
+// TestResumeSession_ApprovalSupersededToolCalls verifies that FunctionCalls
+// superseded by the approval flow (no matching FunctionResponse because the
+// tool was re-issued with a new ID after user approval) are excluded from
+// the resumed history. Without this, sessions that went through approval show
+// a phantom extra "failed" tool execution after resume.
+func TestResumeSession_ApprovalSupersededToolCalls(t *testing.T) {
+	dir := t.TempDir()
+	userID := codeUserIDForDir("/work/projectApproval")
+
+	b := newFileStoreBackend(t, dir, userID)
+	ctx := context.Background()
+
+	// Create a session simulating the approval flow:
+	// 1. User message
+	// 2. Model emits FunctionCall (pre-approval, ID="call_pre")
+	// 3. System event sets awaiting_approval=true
+	// 4. User says "Allow"
+	// 5. Model emits FunctionCall (post-approval, ID="call_post")
+	// 6. Tool result for call_post
+	// 7. Model final text
+	resp, err := b.sessionSvc.Create(ctx, &adksession.CreateRequest{
+		AppName: codeAppName,
+		UserID:  b.effectiveUserID(),
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	sess := resp.Session
+
+	// 1. User message
+	if err := b.sessionSvc.AppendEvent(ctx, sess, &adksession.Event{
+		ID:     "e1",
+		Author: "user",
+		LLMResponse: adkmodel.LLMResponse{
+			Content: genai.NewContentFromText("run ls /tmp", genai.RoleUser),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 2. Model FunctionCall (pre-approval)
+	if err := b.sessionSvc.AppendEvent(ctx, sess, &adksession.Event{
+		ID:     "e2",
+		Author: "chat",
+		LLMResponse: adkmodel.LLMResponse{
+			Content: &genai.Content{
+				Role: "model",
+				Parts: []*genai.Part{{
+					FunctionCall: &genai.FunctionCall{
+						ID:   "call_pre",
+						Name: "shell_command",
+						Args: map[string]any{"command": "ls /tmp"},
+					},
+				}},
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 3. System event with awaiting_approval=true
+	if err := b.sessionSvc.AppendEvent(ctx, sess, &adksession.Event{
+		ID:     "e3",
+		Author: "astonish_code",
+		LLMResponse: adkmodel.LLMResponse{
+			Content: genai.NewContentFromText("shell_command wants to access files outside the project", genai.RoleModel),
+		},
+		Actions: adksession.EventActions{
+			StateDelta: map[string]any{
+				"awaiting_approval": true,
+				"approval_tool":     "shell_command",
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 4. User approves
+	if err := b.sessionSvc.AppendEvent(ctx, sess, &adksession.Event{
+		ID:     "e4",
+		Author: "user",
+		LLMResponse: adkmodel.LLMResponse{
+			Content: genai.NewContentFromText("Allow", genai.RoleUser),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 5. Model FunctionCall (post-approval, new ID)
+	if err := b.sessionSvc.AppendEvent(ctx, sess, &adksession.Event{
+		ID:     "e5",
+		Author: "chat",
+		LLMResponse: adkmodel.LLMResponse{
+			Content: &genai.Content{
+				Role: "model",
+				Parts: []*genai.Part{{
+					FunctionCall: &genai.FunctionCall{
+						ID:   "call_post",
+						Name: "shell_command",
+						Args: map[string]any{"command": "ls /tmp"},
+					},
+				}},
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 6. Tool result for call_post
+	if err := b.sessionSvc.AppendEvent(ctx, sess, &adksession.Event{
+		ID:     "e6",
+		Author: "chat",
+		LLMResponse: adkmodel.LLMResponse{
+			Content: &genai.Content{
+				Role: "user",
+				Parts: []*genai.Part{{
+					FunctionResponse: &genai.FunctionResponse{
+						ID:       "call_post",
+						Name:     "shell_command",
+						Response: map[string]any{"stdout": "file1 file2"},
+					},
+				}},
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 7. Model final text
+	if err := b.sessionSvc.AppendEvent(ctx, sess, &adksession.Event{
+		ID:     "e7",
+		Author: "chat",
+		LLMResponse: adkmodel.LLMResponse{
+			Content: genai.NewContentFromText("Here are the files in /tmp.", genai.RoleModel),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Resume from a fresh backend and verify:
+	// - The pre-approval FunctionCall (call_pre) is NOT in history
+	// - Only one tool_call (call_post) and one tool_result appear
+	b2 := newFileStoreBackend(t, dir, userID)
+	hist, err := b2.ResumeSession(ctx, sess.ID())
+	if err != nil {
+		t.Fatalf("ResumeSession: %v", err)
+	}
+
+	var calls, results []backend.HistoryEntry
+	for _, h := range hist {
+		switch h.Kind {
+		case "tool_call":
+			calls = append(calls, h)
+		case "tool_result":
+			results = append(results, h)
+		}
+	}
+
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 tool_call (post-approval only), got %d; calls=%+v", len(calls), calls)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 tool_result, got %d; results=%+v", len(results), results)
+	}
+	if calls[0].ToolID != "call_post" {
+		t.Errorf("tool_call ToolID = %q, want %q", calls[0].ToolID, "call_post")
+	}
+	if results[0].ToolID != "call_post" {
+		t.Errorf("tool_result ToolID = %q, want %q", results[0].ToolID, "call_post")
+	}
+
+	// Verify no "interrupted" error in results
+	if m, ok := results[0].Result.(map[string]any); ok {
+		if _, hasErr := m["error"]; hasErr {
+			t.Errorf("tool_result should not have error, got: %v", m["error"])
+		}
+	}
+}
+
 // TestListSessions_NoAutoResumeOnStart verifies a fresh backend does not adopt
 // a prior session as active: startup is always a clean slate (sessionID empty)
 // even though prior sessions remain listable.

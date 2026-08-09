@@ -955,3 +955,154 @@ func TestFileStore_ArchiveAndReplaceEvents(t *testing.T) {
 		t.Fatalf("LatestDescendant(archive)=%q want active", store.LatestDescendant(archiveID))
 	}
 }
+
+// TestRepairOrphanedToolCalls_ApprovalSuperseded verifies that FunctionCalls
+// superseded by the approval flow are NOT marked as orphaned. The approval
+// protocol re-issues the tool call with a new ID after user approval, so the
+// original FunctionCall intentionally never gets a FunctionResponse.
+func TestRepairOrphanedToolCalls_ApprovalSuperseded(t *testing.T) {
+	events := []*adksession.Event{
+		// 1. Model emits FunctionCall (pre-approval)
+		{
+			ID:     "e1",
+			Author: "chat",
+			LLMResponse: adkmodel.LLMResponse{
+				Content: &genai.Content{
+					Role: "model",
+					Parts: []*genai.Part{{
+						FunctionCall: &genai.FunctionCall{
+							ID:   "call_pre",
+							Name: "shell_command",
+							Args: map[string]any{"command": "ls /tmp"},
+						},
+					}},
+				},
+			},
+		},
+		// 2. System event sets awaiting_approval=true
+		{
+			ID:     "e2",
+			Author: "astonish_code",
+			LLMResponse: adkmodel.LLMResponse{
+				Content: genai.NewContentFromText("Approve?", genai.RoleModel),
+			},
+			Actions: adksession.EventActions{
+				StateDelta: map[string]any{
+					"awaiting_approval": true,
+					"approval_tool":     "shell_command",
+				},
+			},
+		},
+		// 3. User approves
+		{
+			ID:     "e3",
+			Author: "user",
+			LLMResponse: adkmodel.LLMResponse{
+				Content: genai.NewContentFromText("Allow", genai.RoleUser),
+			},
+		},
+		// 4. Model re-issues with new ID (post-approval)
+		{
+			ID:     "e4",
+			Author: "chat",
+			LLMResponse: adkmodel.LLMResponse{
+				Content: &genai.Content{
+					Role: "model",
+					Parts: []*genai.Part{{
+						FunctionCall: &genai.FunctionCall{
+							ID:   "call_post",
+							Name: "shell_command",
+							Args: map[string]any{"command": "ls /tmp"},
+						},
+					}},
+				},
+			},
+		},
+		// 5. Tool result for call_post only
+		{
+			ID:     "e5",
+			Author: "chat",
+			LLMResponse: adkmodel.LLMResponse{
+				Content: &genai.Content{
+					Role: "user",
+					Parts: []*genai.Part{{
+						FunctionResponse: &genai.FunctionResponse{
+							ID:       "call_post",
+							Name:     "shell_command",
+							Response: map[string]any{"stdout": "file1"},
+						},
+					}},
+				},
+			},
+		},
+	}
+
+	repaired := repairOrphanedToolCalls(events)
+
+	// The approval-superseded call (call_pre) should NOT get a synthetic error.
+	// repairOrphanedToolCalls should return the events unchanged.
+	if len(repaired) != len(events) {
+		t.Fatalf("expected %d events (no synthetic repair), got %d", len(events), len(repaired))
+	}
+
+	// Verify no synthetic FunctionResponse was injected for call_pre.
+	for _, ev := range repaired {
+		if ev.Content == nil {
+			continue
+		}
+		for _, part := range ev.Content.Parts {
+			if part.FunctionResponse != nil && part.FunctionResponse.ID == "call_pre" {
+				t.Fatalf("should not have injected synthetic response for approval-superseded call_pre, got: %+v", part.FunctionResponse)
+			}
+		}
+	}
+}
+
+// TestRepairOrphanedToolCalls_TrueOrphan verifies that a genuinely orphaned
+// FunctionCall (daemon killed mid-execution, no approval flow) still gets a
+// synthetic error response.
+func TestRepairOrphanedToolCalls_TrueOrphan(t *testing.T) {
+	events := []*adksession.Event{
+		// 1. Model emits FunctionCall
+		{
+			ID:     "e1",
+			Author: "chat",
+			LLMResponse: adkmodel.LLMResponse{
+				Content: &genai.Content{
+					Role: "model",
+					Parts: []*genai.Part{{
+						FunctionCall: &genai.FunctionCall{
+							ID:   "call_orphan",
+							Name: "shell_command",
+							Args: map[string]any{"command": "long_running_task"},
+						},
+					}},
+				},
+			},
+		},
+		// No FunctionResponse — daemon was killed
+	}
+
+	repaired := repairOrphanedToolCalls(events)
+
+	// Should have appended a synthetic event.
+	if len(repaired) != len(events)+1 {
+		t.Fatalf("expected %d events (original + 1 synthetic), got %d", len(events)+1, len(repaired))
+	}
+
+	synth := repaired[len(repaired)-1]
+	if synth.Content == nil || len(synth.Content.Parts) == 0 {
+		t.Fatal("synthetic event has no content/parts")
+	}
+	fr := synth.Content.Parts[0].FunctionResponse
+	if fr == nil {
+		t.Fatal("synthetic event part is not a FunctionResponse")
+	}
+	if fr.ID != "call_orphan" {
+		t.Errorf("synthetic FunctionResponse.ID = %q, want %q", fr.ID, "call_orphan")
+	}
+	errMsg, _ := fr.Response["error"].(string)
+	if errMsg == "" {
+		t.Error("synthetic FunctionResponse should have an error message")
+	}
+}

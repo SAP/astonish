@@ -119,6 +119,7 @@ type StudioMessage struct {
 	Type       string      `json:"type"`                 // user, agent, tool_call, tool_result, image, subtask_execution, plan, distill_preview, distill_saved, app_preview, system
 	Content    string      `json:"content,omitempty"`    // text content
 	ToolName   string      `json:"toolName,omitempty"`   // for tool_call/tool_result
+	ToolID     string      `json:"toolId,omitempty"`     // for tool_call/tool_result (FunctionCall.ID / FunctionResponse.ID)
 	ToolArgs   interface{} `json:"toolArgs,omitempty"`   // for tool_call
 	ToolResult interface{} `json:"toolResult,omitempty"` // for tool_result
 

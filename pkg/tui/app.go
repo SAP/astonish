@@ -176,6 +176,11 @@ type model struct {
 	copyStatus     string
 	copiedUntil    time.Time
 	clickIsDouble  bool
+	// userScrolledUp is set when the user explicitly scrolls away from the
+	// bottom during streaming. While true, refreshViewport() will not force
+	// GotoBottom(), allowing the user to read earlier content. Cleared when
+	// the user scrolls back to the bottom or a new turn starts.
+	userScrolledUp bool
 
 	// overlays
 	sessions       sessionsState
@@ -483,6 +488,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "pgup", "pgdown", "up", "down":
 				var cmd tea.Cmd
 				m.vp, cmd = m.vp.Update(msg)
+				// Track whether user scrolled away from bottom during streaming.
+				if m.vp.AtBottom() {
+					m.userScrolledUp = false
+				} else {
+					m.userScrolledUp = true
+				}
 				return m, cmd
 			default:
 				// Block sending new messages mid-turn except approval path (handled above).
@@ -697,6 +708,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case turnDoneMsg:
 		m.eventCh = nil
 		m.turnCancel = nil
+		m.userScrolledUp = false
 		if m.tr.Awaiting {
 			// HITL approval pending — pause timer, don't finalize.
 			m.timerPause()
@@ -716,6 +728,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case turnErrMsg:
 		m.eventCh = nil
 		m.turnCancel = nil
+		m.userScrolledUp = false
 		m.timerReset()
 		m.tr.Apply(events.NewError(msg.err.Error()))
 		m.refreshViewport()
@@ -1732,6 +1745,7 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 		message = expanded
 	}
 
+	m.userScrolledUp = false
 	m.tr.Apply(events.NewUser(text))
 	m.refreshViewport()
 
@@ -2072,7 +2086,9 @@ func (m *model) refreshViewport() {
 	m.hitRegions = hits
 	m.artifactHits = artifactHits
 	m.vp.SetContent(content)
-	if atBottom || m.tr.Streaming || m.isEmptyConversation() {
+	if atBottom || m.isEmptyConversation() {
+		m.vp.GotoBottom()
+	} else if m.tr.Streaming && !m.userScrolledUp {
 		m.vp.GotoBottom()
 	}
 }
@@ -2175,7 +2191,7 @@ func (m model) codeWelcomeLines(width int) []string {
 
 	if dir := abbreviateHomePath(m.info.WorkingDir); dir != "" {
 		lines = append(lines,
-			th.Muted.Width(width).Align(lipgloss.Center).Render("Working in "+dir),
+			th.Muted.Width(width).Align(lipgloss.Center).Render("Working in "+strings.ReplaceAll(dir, "-", "\u2011")),
 		)
 	}
 
@@ -2231,6 +2247,14 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if msg.Button == tea.MouseButtonWheelUp || msg.Button == tea.MouseButtonWheelDown {
 		var cmd tea.Cmd
 		m.vp, cmd = m.vp.Update(msg)
+		// Track scroll position during streaming for auto-follow.
+		if m.tr != nil && m.tr.Streaming {
+			if m.vp.AtBottom() {
+				m.userScrolledUp = false
+			} else {
+				m.userScrolledUp = true
+			}
+		}
 		return m, cmd
 	}
 

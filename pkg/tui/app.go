@@ -3667,8 +3667,8 @@ func (m model) renderDelegationItem(it events.Item, width int) string {
 		th.Muted.Italic(true).Render("    click task to expand details")
 }
 
-// delegationTaskStatusLine returns a short inline status for a running task's
-// latest activity (e.g. "→ read_file" or "→ thinking about X…").
+// delegationTaskStatusLine returns a short, human-friendly inline status for a
+// running task's latest activity (e.g. "→ Reading main.go" or "→ thinking…").
 func delegationTaskStatusLine(task events.DelegationTaskState, maxWidth int) string {
 	if task.Status != "running" || len(task.Activity) == 0 {
 		return ""
@@ -3677,22 +3677,138 @@ func delegationTaskStatusLine(task events.DelegationTaskState, maxWidth int) str
 	var line string
 	switch last.Type {
 	case "tool_call":
-		line = "→ " + last.ToolName
+		line = "→ " + delegationToolHint(last.ToolName, last.Args)
 	case "tool_result":
-		line = "→ " + last.ToolName + " done"
+		line = "→ " + render.ToolDisplayName(last.ToolName) + " done"
 	case "text":
-		t := last.Text
+		t := strings.TrimSpace(last.Text)
 		if idx := strings.IndexByte(t, '\n'); idx >= 0 {
 			t = t[:idx]
+		}
+		if t == "" {
+			return ""
 		}
 		line = "→ " + t
 	default:
 		return ""
 	}
-	if maxWidth > 0 && len(line) > maxWidth {
-		line = line[:maxWidth-1] + "…"
+	if maxWidth > 0 && len([]rune(line)) > maxWidth {
+		runes := []rune(line)
+		line = string(runes[:maxWidth-1]) + "…"
 	}
 	return line
+}
+
+// delegationToolHint produces a human-friendly label for a tool call, including
+// context from the args (file path, command, query) — e.g. "Editing pkg/app.go",
+// "Running `kubectl get pods`", "Searching for kubernetes".
+func delegationToolHint(toolName string, args map[string]any) string {
+	name := strings.ToLower(toolName)
+	path := delegationArgStr(args, "path", "file_path", "target_file", "file", "filename")
+	command := delegationArgStr(args, "command", "cmd")
+	query := delegationArgStr(args, "query", "pattern", "regex", "search")
+
+	switch {
+	case name == "shell_command" || name == "run_terminal_command" || name == "process_write":
+		if command != "" {
+			return "Running `" + delegationTruncate(command, 40) + "`"
+		}
+		return "Running command"
+	case name == "edit_file" || name == "search_replace":
+		if path != "" {
+			return "Editing " + delegationTruncate(path, 48)
+		}
+		return "Editing file"
+	case name == "write_file":
+		if path != "" {
+			return "Writing " + delegationTruncate(path, 48)
+		}
+		return "Writing file"
+	case name == "read_file" || name == "read_pdf":
+		if path != "" {
+			return "Reading " + delegationTruncate(path, 48)
+		}
+		return "Reading file"
+	case name == "file_tree" || name == "find_files" || name == "repo_map" ||
+		name == "code_definition" || name == "code_references" || name == "list_dir":
+		if path != "" {
+			return "Exploring " + delegationTruncate(path, 48)
+		}
+		return "Exploring"
+	case name == "grep_search" || name == "grep" || name == "search_tools" || name == "search_flows":
+		if query != "" {
+			return "Searching for \"" + delegationTruncate(query, 36) + "\""
+		}
+		return "Searching"
+	case name == "web_search" || name == "perplexity_web_search":
+		if query != "" {
+			return "Searching web for \"" + delegationTruncate(query, 32) + "\""
+		}
+		return "Searching web"
+	case name == "web_fetch" || name == "http_request":
+		if path != "" {
+			return "Fetching " + delegationTruncate(path, 48)
+		}
+		return "Fetching"
+	case name == "browser_navigate":
+		if path != "" {
+			return "Navigating to " + delegationTruncate(path, 44)
+		}
+		return "Navigating"
+	case strings.HasPrefix(name, "browser_"):
+		return "Browsing"
+	case strings.HasPrefix(name, "memory_"):
+		if query != "" {
+			return "Looking up \"" + delegationTruncate(query, 36) + "\""
+		}
+		return "Looking up memory"
+	case name == "delegate_tasks":
+		return "Delegating sub-tasks"
+	case name == "announce_plan" || name == "update_plan":
+		return "Planning"
+	case name == "codegraph_explore":
+		if query != "" {
+			return "Exploring code for \"" + delegationTruncate(query, 32) + "\""
+		}
+		return "Exploring code graph"
+	}
+	// Fallback: use the display name with any available subject
+	display := render.ToolDisplayName(toolName)
+	if path != "" {
+		return display + " " + delegationTruncate(path, 40)
+	}
+	if command != "" {
+		return display + " `" + delegationTruncate(command, 38) + "`"
+	}
+	if query != "" {
+		return display + " \"" + delegationTruncate(query, 38) + "\""
+	}
+	return display
+}
+
+func delegationArgStr(args map[string]any, keys ...string) string {
+	if args == nil {
+		return ""
+	}
+	for _, k := range keys {
+		if v, ok := args[k].(string); ok && strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+func delegationTruncate(s string, max int) string {
+	// Collapse whitespace and take first line only.
+	s = strings.TrimSpace(s)
+	if idx := strings.IndexByte(s, '\n'); idx >= 0 {
+		s = s[:idx]
+	}
+	if len([]rune(s)) <= max {
+		return s
+	}
+	runes := []rune(s)
+	return string(runes[:max-1]) + "…"
 }
 
 // --- Delegation detail overlay ---

@@ -328,9 +328,9 @@ func TestRenderDelegationPanelShowsRunningTasks(t *testing.T) {
 	if !strings.Contains(out, "8.1s") {
 		t.Fatalf("should show duration '8.1s' for complete task: %q", out)
 	}
-	// Running task should show inline activity status line.
-	if !strings.Contains(out, "→ grep_search") {
-		t.Fatalf("running task should show inline activity status '→ grep_search': %q", out)
+	// Running task should show inline activity status line with human-friendly text.
+	if !strings.Contains(out, "→ Searching") {
+		t.Fatalf("running task should show inline activity status '→ Searching': %q", out)
 	}
 }
 
@@ -514,13 +514,13 @@ func TestRenderDelegationStatusLineOnlyForRunning(t *testing.T) {
 				Name: "active-worker", Status: "running",
 				StartedAt: time.Now().Add(-3 * time.Second),
 				Activity: []events.DelegationActivity{
-					{Type: "tool_call", ToolName: "shell_command"},
+					{Type: "tool_call", ToolName: "shell_command", Args: map[string]any{"command": "npm test"}},
 				},
 			},
 			{
 				Name: "done-worker", Status: "complete", Duration: "5s",
 				Activity: []events.DelegationActivity{
-					{Type: "tool_call", ToolName: "write_file"},
+					{Type: "tool_call", ToolName: "write_file", Args: map[string]any{"file_path": "out.txt"}},
 				},
 			},
 		},
@@ -529,13 +529,13 @@ func TestRenderDelegationStatusLineOnlyForRunning(t *testing.T) {
 	m := model{theme: DefaultTheme(), width: 80}
 	out := stripANSI(m.renderDelegationItem(item, 80))
 
-	// Running task should show its status line.
-	if !strings.Contains(out, "→ shell_command") {
-		t.Fatalf("running task should show status line '→ shell_command': %q", out)
+	// Running task should show its status line with command context.
+	if !strings.Contains(out, "→ Running `npm test`") {
+		t.Fatalf("running task should show status line '→ Running `npm test`': %q", out)
 	}
 	// Complete task should NOT show its status line (historical activity).
-	if strings.Contains(out, "→ write_file") {
-		t.Fatalf("complete task should NOT show status line, but got '→ write_file': %q", out)
+	if strings.Contains(out, "→ Writing") {
+		t.Fatalf("complete task should NOT show status line, but found '→ Writing': %q", out)
 	}
 }
 
@@ -579,9 +579,9 @@ func TestDelegationStatusLineShowsLatestActivity(t *testing.T) {
 				Name: "multi-step", Status: "running",
 				StartedAt: time.Now().Add(-10 * time.Second),
 				Activity: []events.DelegationActivity{
-					{Type: "tool_call", ToolName: "read_file"},
+					{Type: "tool_call", ToolName: "read_file", Args: map[string]any{"path": "main.go"}},
 					{Type: "tool_result", ToolName: "read_file"},
-					{Type: "tool_call", ToolName: "edit_file"},
+					{Type: "tool_call", ToolName: "edit_file", Args: map[string]any{"path": "pkg/app.go"}},
 				},
 			},
 		},
@@ -590,13 +590,13 @@ func TestDelegationStatusLineShowsLatestActivity(t *testing.T) {
 	m := model{theme: DefaultTheme(), width: 80}
 	out := stripANSI(m.renderDelegationItem(item, 80))
 
-	// Should show the LAST activity (edit_file tool_call), not earlier ones.
-	if !strings.Contains(out, "→ edit_file") {
-		t.Fatalf("should show latest activity '→ edit_file': %q", out)
+	// Should show the LAST activity (edit_file with path), not earlier ones.
+	if !strings.Contains(out, "→ Editing pkg/app.go") {
+		t.Fatalf("should show latest activity '→ Editing pkg/app.go': %q", out)
 	}
 	// Should NOT show the earlier tool_result.
-	if strings.Contains(out, "→ read_file done") {
-		t.Fatalf("should NOT show earlier activity '→ read_file done': %q", out)
+	if strings.Contains(out, "→ Read file done") {
+		t.Fatalf("should NOT show earlier activity '→ Read file done': %q", out)
 	}
 }
 

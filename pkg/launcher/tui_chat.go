@@ -206,6 +206,14 @@ func (b *lazyCodeBackend) Close() error {
 	return nil
 }
 
+// RespondSubAgentAuth delegates to the inner backend if initialized.
+func (b *lazyCodeBackend) RespondSubAgentAuth(choice string) bool {
+	if b.inner != nil {
+		return b.inner.RespondSubAgentAuth(choice)
+	}
+	return false
+}
+
 // platformBackend implements backend.Backend over Studio REST/SSE.
 type platformBackend struct {
 	client      *client.Client
@@ -263,6 +271,10 @@ func (b *platformBackend) Close() error {
 	b.closed = true
 	return nil
 }
+
+// RespondSubAgentAuth is a no-op for platform backends (sub-agent auth is
+// only enforced in code-mode TUI).
+func (b *platformBackend) RespondSubAgentAuth(choice string) bool { return false }
 
 func (b *platformBackend) loadInitialModelStatus(ctx context.Context) {
 	_ = ctx

@@ -591,6 +591,14 @@ func (p *SessionAuthPolicy) ApplyAuthorizationDecision(response string) *Authori
 	return d
 }
 
+// NormalizeAuthChoice is the exported version of normalizeChoice. It maps a
+// free-form user response to a canonical decision token: "broad2", "once",
+// "yes", or "deny". Used by the TUI backend to determine grant/deny for
+// sub-agent authorization responses without duplicating the logic.
+func NormalizeAuthChoice(response string) string {
+	return normalizeChoice(response)
+}
+
 // normalizeChoice maps a free-form user response to a canonical decision token:
 // "all", "session", "once", "yes", or "deny". Accepts the exact option labels
 // (Allow / Always Allow / Deny), numeric picks (1/2/3), and short y/n forms so

@@ -2069,10 +2069,10 @@ func TestPlanApprovalE2E_EventPipelineCarriesDocFields(t *testing.T) {
 	// Simulate what driveTurn emits when planAnnounced=true and the active plan
 	// carries doc-level narrative sections.
 	emit("plan_approval", map[string]any{
-		"plan_announced":    true,
-		"plan_context":      "We are migrating the auth module from JWT to OAuth2.",
+		"plan_announced":      true,
+		"plan_context":        "We are migrating the auth module from JWT to OAuth2.",
 		"plan_what_not_to_do": "Do not touch the legacy session store.",
-		"plan_verification": "Run go test ./pkg/auth/...",
+		"plan_verification":   "Run go test ./pkg/auth/...",
 	})
 
 	// Exactly one event should be produced.
@@ -2792,5 +2792,90 @@ func TestResumeSession_AutoApprovedPromptTextSuppressed(t *testing.T) {
 	}
 	if !foundResult {
 		t.Error("agent result text should still be present in history")
+	}
+}
+
+// TestRespondSubAgentAuth_NoPendingReturnsFalse is the regression guard for the
+// freeze reported when approving a *main-thread* tool execution. The response
+// channel is buffered (cap 1), so a naive non-blocking send would always
+// succeed and RespondSubAgentAuth would spuriously claim the approval belonged
+// to a sub-agent — causing submitApproval to skip RunTurn and freeze the turn.
+// When no sub-agent is blocked, RespondSubAgentAuth MUST return false so the
+// TUI drives the decision through RunTurn(choice).
+func TestRespondSubAgentAuth_NoPendingReturnsFalse(t *testing.T) {
+	b := &localAgentBackend{
+		subAgentAuthReqCh:  make(chan agent.SubAgentAuthRequest, 1),
+		subAgentAuthRespCh: make(chan agent.SubAgentAuthResponse, 1),
+	}
+	if b.RespondSubAgentAuth("Allow") {
+		t.Fatal("RespondSubAgentAuth must return false when no sub-agent is blocked (main-thread approval)")
+	}
+	// The response channel must be untouched so it does not carry a stale value.
+	select {
+	case v := <-b.subAgentAuthRespCh:
+		t.Fatalf("response channel should be empty; got %+v", v)
+	default:
+	}
+}
+
+// TestRespondSubAgentAuth_PendingDeliversDecision verifies the sub-agent path:
+// when a sub-agent goroutine is blocked waiting on the response channel,
+// RespondSubAgentAuth returns true and delivers the decision so the sub-agent
+// resumes.
+func TestRespondSubAgentAuth_PendingDeliversDecision(t *testing.T) {
+	b := &localAgentBackend{
+		subAgentAuthReqCh:  make(chan agent.SubAgentAuthRequest, 1),
+		subAgentAuthRespCh: make(chan agent.SubAgentAuthResponse, 1),
+	}
+
+	// Simulate a blocked sub-agent: set the pending flag and receive in a
+	// goroutine (mirrors SubAgentAuthGate blocking on subAgentAuthRespCh).
+	b.mu.Lock()
+	b.subAgentAuthPending = true
+	b.mu.Unlock()
+
+	got := make(chan agent.SubAgentAuthResponse, 1)
+	go func() { got <- <-b.subAgentAuthRespCh }()
+
+	if !b.RespondSubAgentAuth("Always Allow") {
+		t.Fatal("RespondSubAgentAuth must return true while a sub-agent is blocked")
+	}
+	select {
+	case resp := <-got:
+		if !resp.Granted {
+			t.Fatalf("expected Granted=true for %q, got %+v", "Always Allow", resp)
+		}
+		if resp.Choice != "Always Allow" {
+			t.Fatalf("Choice=%q want %q", resp.Choice, "Always Allow")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the sub-agent to receive the decision")
+	}
+}
+
+// TestRespondSubAgentAuth_DenyPropagates verifies a denial choice is delivered
+// as Granted=false.
+func TestRespondSubAgentAuth_DenyPropagates(t *testing.T) {
+	b := &localAgentBackend{
+		subAgentAuthReqCh:  make(chan agent.SubAgentAuthRequest, 1),
+		subAgentAuthRespCh: make(chan agent.SubAgentAuthResponse, 1),
+	}
+	b.mu.Lock()
+	b.subAgentAuthPending = true
+	b.mu.Unlock()
+
+	got := make(chan agent.SubAgentAuthResponse, 1)
+	go func() { got <- <-b.subAgentAuthRespCh }()
+
+	if !b.RespondSubAgentAuth("Deny") {
+		t.Fatal("RespondSubAgentAuth must return true while a sub-agent is blocked")
+	}
+	select {
+	case resp := <-got:
+		if resp.Granted {
+			t.Fatalf("expected Granted=false for Deny, got %+v", resp)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the sub-agent to receive the denial")
 	}
 }

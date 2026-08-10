@@ -172,6 +172,11 @@ type ChatAgent struct {
 	EnforceAuthorization bool
 	// WorkingDir is the project root used for folder-access scoping (code mode).
 	WorkingDir string
+	// SubAgentAuthGate, when set, is the blocking authorization gate for sub-agents.
+	// Set by the TUI backend (tui_code.go) when it starts a session. The gate
+	// blocks the sub-agent goroutine and surfaces the request to the TUI for
+	// user approval. Only used in code-mode with EnforceAuthorization=true.
+	SubAgentAuthGate func(req SubAgentAuthRequest) SubAgentAuthResponse
 	// authPolicies holds one SessionAuthPolicy per session, keyed by session ID.
 	authPolicies sync.Map // map[string]*SessionAuthPolicy
 	// graphPlanStates holds one GraphPlanState per session, keyed by session ID.

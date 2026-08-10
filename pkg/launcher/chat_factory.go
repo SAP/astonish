@@ -1762,6 +1762,19 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 				}
 			}
 		}
+		// Wire sub-agent authorization gate for code-mode HITL.
+		// When the parent ChatAgent enforces authorization (astonish code, non-yolo),
+		// sub-agents must surface tool/folder authorization requests to the parent.
+		if chatAgent.EnforceAuthorization && !chatAgent.AutoApprove {
+			subAgentMgr.GetAuthPolicy = chatAgent.GetOrCreateAuthPolicy
+			subAgentMgr.AuthorizationGate = func(req agent.SubAgentAuthRequest) agent.SubAgentAuthResponse {
+				if chatAgent.SubAgentAuthGate != nil {
+					return chatAgent.SubAgentAuthGate(req)
+				}
+				// Fallback: deny if no gate is wired (shouldn't happen in practice)
+				return agent.SubAgentAuthResponse{Granted: false, Choice: "Deny"}
+			}
+		}
 		tools.SetSubAgentManager(subAgentMgr)
 		chatAgent.SubAgentManager = subAgentMgr
 	}

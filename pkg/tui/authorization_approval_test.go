@@ -27,6 +27,89 @@ func (b *authTestBackend) RunTurn(_ context.Context, message string, _ backend.T
 	return ch, nil
 }
 
+// subAgentAuthBackend simulates a backend where the current approval overlay
+// was raised by a blocked sub-agent: RespondSubAgentAuth reports the choice was
+// consumed (returns true), so submitApproval must NOT call RunTurn.
+type subAgentAuthBackend struct {
+	authTestBackend
+	respondedWith string
+	responded     bool
+}
+
+func (b *subAgentAuthBackend) RespondSubAgentAuth(choice string) bool {
+	b.responded = true
+	b.respondedWith = choice
+	return true
+}
+
+// TestSubmitApproval_SubAgentPathDoesNotCallRunTurn is the TUI-side regression
+// guard for the freeze: when the approval belongs to a sub-agent, the decision
+// is delivered via RespondSubAgentAuth and RunTurn must NOT be invoked (the
+// sub-agent resumes the still-running parent turn on its own).
+func TestSubmitApproval_SubAgentPathDoesNotCallRunTurn(t *testing.T) {
+	b := &subAgentAuthBackend{}
+	m := newModel(context.Background(), Config{Backend: b, Width: 100, Height: 30})
+	m.ready = true
+	m.layout()
+	// Simulate an active event channel (the parent turn is still running while
+	// the sub-agent is blocked awaiting authorization).
+	live := make(chan events.Event)
+	m.eventCh = live
+	m.tr.Apply(events.NewAuthorizationApproval(
+		"shell_command",
+		map[string]any{"command": "ls"},
+		[]string{"Allow", "Always Allow", "Deny"},
+		"tool", nil,
+	))
+
+	next, cmd := m.submitApproval("Allow")
+	m2 := next.(model)
+
+	if !b.responded {
+		t.Fatal("expected RespondSubAgentAuth to be called")
+	}
+	if b.respondedWith != "Allow" {
+		t.Fatalf("respondedWith=%q want %q", b.respondedWith, "Allow")
+	}
+	if b.called {
+		t.Fatal("RunTurn must NOT be called on the sub-agent approval path (freeze regression)")
+	}
+	if m2.tr.Awaiting {
+		t.Fatal("approval overlay should be cleared after sub-agent response")
+	}
+	if cmd == nil {
+		t.Fatal("expected a command to resume listening on the existing event channel")
+	}
+}
+
+// TestSubmitApproval_MainThreadPathCallsRunTurn verifies the complementary
+// case: when no sub-agent is blocked (RespondSubAgentAuth returns false),
+// submitApproval drives the decision through RunTurn(choice) as before.
+func TestSubmitApproval_MainThreadPathCallsRunTurn(t *testing.T) {
+	b := &authTestBackend{}
+	m := newModel(context.Background(), Config{Backend: b, Width: 100, Height: 30})
+	m.ready = true
+	m.layout()
+	m.tr.Apply(events.NewAuthorizationApproval(
+		"shell_command",
+		map[string]any{"command": "ls"},
+		[]string{"Allow", "Always Allow", "Deny"},
+		"tool", nil,
+	))
+
+	_, cmd := m.submitApproval("Allow")
+	if cmd == nil {
+		t.Fatal("expected a command from submitApproval")
+	}
+	cmd()
+	if !b.called {
+		t.Fatal("RunTurn must be called on the main-thread approval path")
+	}
+	if b.runMsg != "Allow" {
+		t.Fatalf("runMsg=%q want %q", b.runMsg, "Allow")
+	}
+}
+
 func TestRenderToolAuthorizationOverlay(t *testing.T) {
 	m := newModel(context.Background(), Config{Backend: staticBackend{}, Width: 100, Height: 30})
 	m.ready = true
@@ -45,9 +128,9 @@ func TestRenderToolAuthorizationOverlay(t *testing.T) {
 		"Allow",
 		"Always Allow",
 		"Deny",
-		"move",      // cursor hint
-		"select",    // enter hint
-		"command",   // arg key shown
+		"move",         // cursor hint
+		"select",       // enter hint
+		"command",      // arg key shown
 		"rm -rf build", // arg value shown
 	} {
 		if !strings.Contains(out, want) {

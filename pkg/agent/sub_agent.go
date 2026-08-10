@@ -271,6 +271,19 @@ type SubAgentManager struct {
 	// for the remainder of this session.
 	MCPGroupResolver func(ctx context.Context, serverName string) *ToolGroup
 
+	// AuthorizationGate, when set, is called by sub-agent BeforeToolCallbacks
+	// when a tool requires authorization that the session policy has not yet
+	// granted. It blocks until the user responds. Returns the user's decision.
+	// Only set in code-mode TUI (not platform/daemon). Thread-safe: may be
+	// called from multiple sub-agent goroutines (they serialize on the TUI's
+	// single approval slot).
+	AuthorizationGate func(req SubAgentAuthRequest) SubAgentAuthResponse
+
+	// GetAuthPolicy returns the parent session's authorization policy for the
+	// given session ID. Used by sub-agent authorization gates to check/consume
+	// grants on the shared policy. Nil when authorization is not enforced.
+	GetAuthPolicy func(sessionID string) *SessionAuthPolicy
+
 	// Internal
 	sem          chan struct{}     // concurrency semaphore
 	lastTracesMu sync.Mutex        // protects lastTraces
@@ -818,6 +831,102 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) TaskRe
 	// Wire credential placeholder substitution so sub-agents can use
 	// {{CREDENTIAL:...}} tokens in tool args.
 	var beforeToolCallbacks []llmagent.BeforeToolCallback
+
+	// ── Sub-agent authorization gates ──
+	// When the parent enforces authorization (code-mode TUI, non-yolo),
+	// sub-agents must check the parent's SessionAuthPolicy before executing
+	// tools. If a tool is not yet authorized, the gate blocks and surfaces
+	// the request to the parent TUI for user approval.
+	if m.AuthorizationGate != nil && m.GetAuthPolicy != nil && task.ParentID != "" {
+		authGate := m.AuthorizationGate
+		getPolicy := m.GetAuthPolicy
+		parentSessionID := task.ParentID
+		taskName := task.Name
+
+		// Folder-access gate (checked first, same as main thread).
+		beforeToolCallbacks = append(beforeToolCallbacks, func(_ tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+			policy := getPolicy(parentSessionID)
+			if policy == nil {
+				return nil, nil // no policy = no enforcement
+			}
+			outside := policy.OutOfScopePaths(args)
+			if len(outside) == 0 {
+				// Allowed — consume any one-shot path grant.
+				policy.ConsumePathGrants(args)
+				return nil, nil
+			}
+			// Paths are out of scope — request authorization from the user.
+			resp := authGate(SubAgentAuthRequest{
+				TaskName:        taskName,
+				Kind:            "folder",
+				ToolName:        t.Name(),
+				Args:            args,
+				OutOfScopePaths: outside,
+				ParentSessionID: parentSessionID,
+			})
+			if resp.Granted {
+				// Apply the grant to the policy based on the user's choice.
+				choice := NormalizeAuthChoice(resp.Choice)
+				switch choice {
+				case "broad2": // "Always Allow" → grant paths for session
+					for _, path := range outside {
+						policy.GrantPathForSession(path)
+					}
+				default: // "Allow" → grant paths once
+					for _, path := range outside {
+						policy.GrantPathOnce(path)
+					}
+				}
+				// Subsume the tool gate for this call (same as main thread).
+				if RequiresToolAuthorization(t.Name(), false) {
+					policy.GrantToolOnce(t.Name())
+				}
+				return nil, nil
+			}
+			return map[string]any{
+				"status": "authorization_denied",
+				"error":  AuthorizationDeniedMessage(t.Name()),
+			}, nil
+		})
+
+		// Tool-execution gate (Normal-mode whitelist = agent.SafeTools).
+		beforeToolCallbacks = append(beforeToolCallbacks, func(_ tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+			name := t.Name()
+			if !RequiresToolAuthorization(name, false) {
+				return nil, nil // safe tool, no authorization needed
+			}
+			policy := getPolicy(parentSessionID)
+			if policy == nil {
+				return nil, nil // no policy = no enforcement
+			}
+			if policy.ToolAuthorized(name) {
+				return nil, nil // already authorized (e.g., "Always Allow")
+			}
+			// Tool not authorized — request authorization from the user.
+			resp := authGate(SubAgentAuthRequest{
+				TaskName:        taskName,
+				Kind:            "tool",
+				ToolName:        name,
+				Args:            args,
+				ParentSessionID: parentSessionID,
+			})
+			if resp.Granted {
+				// Apply the grant to the policy based on the user's choice.
+				choice := NormalizeAuthChoice(resp.Choice)
+				switch choice {
+				case "broad2": // "Always Allow" → grant all tools for session
+					policy.GrantAllToolsSession()
+				default: // "Allow" → grant this tool once
+					policy.GrantToolOnce(name)
+				}
+				return nil, nil
+			}
+			return map[string]any{
+				"status": "authorization_denied",
+				"error":  AuthorizationDeniedMessage(name),
+			}, nil
+		})
+	}
 	{
 		agentResolver := m.CredentialStore // may be nil if file-based store failed
 		beforeToolCallbacks = append(beforeToolCallbacks, func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {

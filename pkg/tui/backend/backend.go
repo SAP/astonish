@@ -297,6 +297,13 @@ type Backend interface {
 	// ReadArtifactContent loads generated file content for the artifact viewer.
 	ReadArtifactContent(ctx context.Context, sessionID, path string) (ArtifactContent, error)
 
+	// RespondSubAgentAuth sends the user's authorization decision back to a
+	// blocked sub-agent. Returns true if the current approval overlay was for
+	// a sub-agent (and the response was delivered). When true, the caller
+	// should NOT call RunTurn — the sub-agent resumes automatically.
+	// Backends that don't support sub-agent auth always return false.
+	RespondSubAgentAuth(choice string) bool
+
 	// Close releases resources (sandbox cleanup, HTTP clients, etc.).
 	Close() error
 }

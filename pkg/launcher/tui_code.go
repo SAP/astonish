@@ -207,21 +207,23 @@ func RunCodeTUI(ctx context.Context, cfg *CodeConfig) error {
 	}
 
 	b := &localAgentBackend{
-		result:      result,
-		sessionSvc:  common.NewAutoInitService(result.SessionService),
-		fileStore:   fileStore,
-		checkpoints: checkpointStore,
-		userID:      scopedUserID,
-		appConfig:   appConfig,
-		sessionID:   cfg.SessionID,
-		autoApprove: cfg.AutoApprove,
-		debug:       cfg.DebugMode,
-		workingDir:  workingDir,
-		provider:    result.ProviderName,
-		model:       result.ModelName,
-		configured:  result.ProviderConfigured,
-		resumed:     cfg.SessionID != "",
-		notices:     result.StartupNotices,
+		result:             result,
+		sessionSvc:         common.NewAutoInitService(result.SessionService),
+		fileStore:          fileStore,
+		checkpoints:        checkpointStore,
+		userID:             scopedUserID,
+		appConfig:          appConfig,
+		sessionID:          cfg.SessionID,
+		autoApprove:        cfg.AutoApprove,
+		debug:              cfg.DebugMode,
+		workingDir:         workingDir,
+		provider:           result.ProviderName,
+		model:              result.ModelName,
+		configured:         result.ProviderConfigured,
+		resumed:            cfg.SessionID != "",
+		notices:            result.StartupNotices,
+		subAgentAuthReqCh:  make(chan agent.SubAgentAuthRequest, 1),
+		subAgentAuthRespCh: make(chan agent.SubAgentAuthResponse, 1),
 	}
 
 	// If resuming an existing session, load the persisted title so the header
@@ -335,19 +337,21 @@ func buildCodeBackend(ctx context.Context, cfg *CodeConfig) (backend.Backend, er
 	}
 
 	b := &localAgentBackend{
-		result:      result,
-		sessionSvc:  common.NewAutoInitService(result.SessionService),
-		fileStore:   fileStore,
-		checkpoints: checkpointStore,
-		userID:      scopedUserID,
-		appConfig:   appConfig,
-		autoApprove: cfg.AutoApprove,
-		debug:       cfg.DebugMode,
-		workingDir:  workingDir,
-		provider:    result.ProviderName,
-		model:       result.ModelName,
-		configured:  result.ProviderConfigured,
-		notices:     result.StartupNotices,
+		result:             result,
+		sessionSvc:         common.NewAutoInitService(result.SessionService),
+		fileStore:          fileStore,
+		checkpoints:        checkpointStore,
+		userID:             scopedUserID,
+		appConfig:          appConfig,
+		autoApprove:        cfg.AutoApprove,
+		debug:              cfg.DebugMode,
+		workingDir:         workingDir,
+		provider:           result.ProviderName,
+		model:              result.ModelName,
+		configured:         result.ProviderConfigured,
+		notices:            result.StartupNotices,
+		subAgentAuthReqCh:  make(chan agent.SubAgentAuthRequest, 1),
+		subAgentAuthRespCh: make(chan agent.SubAgentAuthResponse, 1),
 	}
 	return b, nil
 }
@@ -458,6 +462,22 @@ type localAgentBackend struct {
 	// needsRebuild is set when web search configuration changes. The next
 	// NewSession() call will rebuild the agent so new tools are loaded.
 	needsRebuild bool
+
+	// Sub-agent authorization gate channels. When a sub-agent needs user
+	// authorization, it sends a request on subAgentAuthReqCh and blocks
+	// waiting for a response on subAgentAuthRespCh. The TUI surfaces the
+	// request as an approval overlay. These are created once at backend init
+	// and reused across turns (buffered channels, size 1).
+	subAgentAuthReqCh  chan agent.SubAgentAuthRequest
+	subAgentAuthRespCh chan agent.SubAgentAuthResponse
+	// subAgentAuthPending is true only while a sub-agent goroutine is blocked
+	// inside SubAgentAuthGate waiting on subAgentAuthRespCh. It is the sole
+	// signal RespondSubAgentAuth uses to decide whether the current approval
+	// overlay belongs to a sub-agent (deliver on the channel) or the main
+	// thread (fall through to RunTurn). Guarded by mu. Without this flag, the
+	// buffered response channel would always accept a non-blocking send, so
+	// main-thread approvals would be misrouted and the turn would freeze.
+	subAgentAuthPending bool
 }
 
 // contextEstimateInterval is the minimum wall-clock gap between mid-turn
@@ -497,6 +517,44 @@ func (b *localAgentBackend) Close() error {
 	defer b.mu.Unlock()
 	b.closed = true
 	return nil
+}
+
+// RespondSubAgentAuth sends the user's authorization decision back to a blocked
+// sub-agent. Returns true only when a sub-agent goroutine is currently blocked
+// waiting for a decision (i.e., the approval overlay was raised by a sub-agent,
+// not the main thread). When it returns true the caller must NOT call RunTurn —
+// the sub-agent resumes on its own. When it returns false the approval belongs
+// to the main thread and the caller drives the decision via RunTurn(choice).
+//
+// The pending flag (set under mu by SubAgentAuthGate before it blocks) is the
+// only reliable discriminator: the response channel is buffered, so a bare
+// non-blocking send would spuriously succeed for a main-thread approval and
+// freeze the turn (the main thread waits on RunTurn that never comes). Grant
+// bookkeeping for "Always Allow" is applied by the sub-agent gate in
+// sub_agent.go once the response is received.
+func (b *localAgentBackend) RespondSubAgentAuth(choice string) bool {
+	b.mu.Lock()
+	pending := b.subAgentAuthPending
+	b.mu.Unlock()
+	if !pending {
+		// No sub-agent is waiting; this approval is for the main thread.
+		return false
+	}
+	granted := isGrantChoice(choice)
+	// A sub-agent is blocked on the receive, so this send is guaranteed to be
+	// consumed. The gate clears subAgentAuthPending once it wakes.
+	b.subAgentAuthRespCh <- agent.SubAgentAuthResponse{
+		Granted: granted,
+		Choice:  choice,
+	}
+	return true
+}
+
+// isGrantChoice returns true if the user's choice text represents a grant
+// (Allow / Always Allow / yes / 1 / 2) rather than a denial.
+func isGrantChoice(choice string) bool {
+	norm := agent.NormalizeAuthChoice(choice)
+	return norm != "deny"
 }
 
 // effectiveUserID returns the per-directory session user ID, falling back to
@@ -720,6 +778,68 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 			})
 		case "delegation_complete":
 			emit("delegation", map[string]any{"type": "done", "status": evt.Status})
+		}
+	}
+	// Wire sub-agent authorization gate for code-mode HITL. When a sub-agent
+	// needs tool/folder authorization, it sends a request on the channel; this
+	// gate blocks the sub-agent goroutine until the TUI user responds.
+	if chatAgent.EnforceAuthorization && !autoApprove {
+		chatAgent.SubAgentAuthGate = func(req agent.SubAgentAuthRequest) agent.SubAgentAuthResponse {
+			// Determine options based on kind (same as main-thread gates).
+			var options []any
+			if req.Kind == "folder" {
+				for _, o := range agent.FolderApprovalOptions() {
+					options = append(options, o)
+				}
+			} else {
+				for _, o := range agent.ToolApprovalOptions() {
+					options = append(options, o)
+				}
+			}
+			// Mark a sub-agent as blocked BEFORE surfacing the overlay so
+			// RespondSubAgentAuth routes the user's decision here (and not to a
+			// main-thread RunTurn). Setting it before emit closes the window
+			// where a very fast approval could arrive before the flag is set.
+			// Cleared as soon as we wake, so a subsequent main-thread approval
+			// in the same turn is not misrouted.
+			b.mu.Lock()
+			// Drain any stale response left by a prior cancel/respond tie so
+			// this fresh request never consumes an old decision.
+			select {
+			case <-b.subAgentAuthRespCh:
+			default:
+			}
+			b.subAgentAuthPending = true
+			b.mu.Unlock()
+			// Emit approval event so the TUI shows the overlay.
+			payload := map[string]any{
+				"tool":      req.ToolName,
+				"options":   options,
+				"kind":      req.Kind,
+				"sub_agent": true,
+				"task_name": req.TaskName,
+			}
+			if len(req.Args) > 0 {
+				payload["args"] = req.Args
+			}
+			if len(req.OutOfScopePaths) > 0 {
+				payload["paths"] = req.OutOfScopePaths
+			}
+			emit("approval", payload)
+			// Block until the TUI user responds — or the turn is cancelled
+			// (Esc / Ctrl+C). On cancellation we deny and clear the pending
+			// flag so no sub-agent goroutine leaks and the next turn starts
+			// clean.
+			var resp agent.SubAgentAuthResponse
+			select {
+			case resp = <-b.subAgentAuthRespCh:
+			case <-ctx.Done():
+				resp = agent.SubAgentAuthResponse{Granted: false, Choice: "Deny"}
+			}
+			b.mu.Lock()
+			b.subAgentAuthPending = false
+			b.mu.Unlock()
+			return resp
 		}
 	}
 	// Graph-Optimized Plan mode: best-effort ensure the .codegraph/ index exists

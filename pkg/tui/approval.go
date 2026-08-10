@@ -123,6 +123,30 @@ func (m model) submitApproval(choice string) (tea.Model, tea.Cmd) {
 		return m.submitPlanApproval(choice)
 	}
 
+	// Sub-agent authorization: if the approval overlay was triggered by a
+	// sub-agent (delegate_tasks), send the response directly to the blocked
+	// goroutine instead of calling RunTurn. The sub-agent resumes automatically.
+	if m.backend.RespondSubAgentAuth(choice) {
+		m.tr.ClearApproval()
+		m.ta.Reset()
+		if m.ready {
+			m.layout()
+		}
+		m.tr.Apply(events.NewSystem("Approval: " + choice))
+		m.tr.Streaming = true
+		m.tr.Status = "Thinking…"
+		m.refreshViewport()
+		// The parent turn is still running (delegate_tasks hasn't returned yet).
+		// Resume listening on the existing event channel so subsequent events
+		// (tool calls, text, more approvals, turn-done) are processed.
+		var cmd tea.Cmd
+		if m.eventCh != nil {
+			cmd = tea.Batch(waitEvent(m.eventCh), timerTick())
+			m.timerResume()
+		}
+		return m, cmd
+	}
+
 	m.tr.ClearApproval()
 	m.ta.Reset()
 	if m.ready {

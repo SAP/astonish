@@ -731,7 +731,9 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 	askMode := opts.AskMode
 	systemContext := opts.SystemContext
 	if graphPlan {
-		if notice := EnsureCodegraph(ctx, b.workingDir); notice != "" {
+		if notice := EnsureCodegraph(ctx, b.workingDir, func(msg string) {
+			emit("system", map[string]any{"content": msg})
+		}); notice != "" {
 			emit("system", map[string]any{"content": notice})
 		}
 		gp := chatAgent.GetOrCreateGraphPlanState(sessionID)

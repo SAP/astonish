@@ -21,9 +21,14 @@ const codegraphInitFailedNotice = "codegraph index is not available for this pro
 // via `npx --yes @colbymchenry/codegraph init`. On failure it returns a notice
 // telling the model to call gplan_gaps to skip straight to the GAP phase.
 //
+// The optional onProgress callback (may be nil) is invoked with user-facing
+// status messages before and after the indexing operation. It is never called
+// when the index already exists (fast path) or on failure (the returned notice
+// string covers that case).
+//
 // The function never forces a mode change — callers remain in Graph-Optimized
 // Plan mode regardless of the return value.
-func EnsureCodegraph(ctx context.Context, workingDir string) (notice string) {
+func EnsureCodegraph(ctx context.Context, workingDir string, onProgress func(string)) (notice string) {
 	if workingDir == "" {
 		workingDir = "."
 	}
@@ -31,6 +36,10 @@ func EnsureCodegraph(ctx context.Context, workingDir string) (notice string) {
 	indexDir := filepath.Join(workingDir, ".codegraph")
 	if info, err := os.Stat(indexDir); err == nil && info.IsDir() {
 		return "" // index already exists
+	}
+
+	if onProgress != nil {
+		onProgress("Indexing project for code intelligence (one-time)…")
 	}
 
 	cmd := exec.CommandContext(ctx, "npx", "--yes", "@colbymchenry/codegraph", "init")
@@ -41,6 +50,10 @@ func EnsureCodegraph(ctx context.Context, workingDir string) (notice string) {
 			return codegraphInitFailedNotice + " (detail: " + detail + ")"
 		}
 		return codegraphInitFailedNotice
+	}
+
+	if onProgress != nil {
+		onProgress("Code intelligence index ready.")
 	}
 	return ""
 }

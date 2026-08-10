@@ -177,8 +177,12 @@ type model struct {
 	planMode bool
 	// graphPlanMode is the stricter, phased Graph-Optimized Plan mode (code mode
 	// only). It uses codegraph as the primary driver behind a per-phase runtime
-	// tool gate. shift+tab cycles Normal → Plan → Graph Plan → Normal.
+	// tool gate. shift+tab cycles Normal → Plan → Graph Plan → Ask → Normal.
 	graphPlanMode bool
+	// askMode is a research-only mode (code mode only). The agent can investigate
+	// with read-only tools but cannot plan or execute. shift+tab cycles
+	// Normal → Plan → Graph Plan → Ask → Normal.
+	askMode bool
 	// Pasted blocks keep the composer compact while preserving submitted content.
 	pastedBlocks []pastedBlock
 	// Pasted images from the clipboard, shown as atomic [image #N] tokens.
@@ -984,25 +988,46 @@ PHASE 4 — PLAN. ` + "`announce_plan`" + ` unlocks. Call it WITHOUT any precedi
 
 Produce a COMPLETE plan — cover every dependency the change reaches, order phases dependency-first, and surface any human decisions (breaking changes, alternatives with trade-offs, ambiguous requirements) explicitly. Spend effort proportional to blast radius.`
 
+// askModeSystemContext must stay in sync with agent.AskModeSystemContext
+// (the runtime gate's source of truth). It teaches the model it is in a
+// read-only research mode — no changes, no plans, just Q&A.
+const askModeSystemContext = `You are in Astonish ASK MODE. This is a hard constraint enforced by the runtime, not a suggestion.
+
+RULES:
+- You are in a RESEARCH-ONLY mode. Your job is to answer questions, explain architecture, discuss possible solutions, and help the user understand how things work.
+- You MUST NOT make any changes. Mutating tools (write_file, edit_file, shell_command, and every other non-read-only tool), delegate_tasks, and announce_plan are DISABLED by the runtime and will be refused if you call them.
+- You MUST NOT produce implementation plans or attempt to execute anything. This is not Plan mode — do not use announce_plan.
+- You MAY use read-only tools (read_file, grep_search, find_files, file_tree, code_definition, code_references, repo_map, codegraph_explore, memory_search, web_fetch, etc.) to investigate the codebase and gather information.
+- Focus on providing clear, accurate, well-researched answers. Cite specific files, functions, and line numbers when relevant.
+- If the user asks you to make changes or create a plan, remind them they are in Ask mode and suggest switching to Normal or Plan mode (shift+tab).`
+
 func (m *model) togglePlanMode() {
-	// In platform mode, cycle Normal ↔ Plan only (no Graph Plan — it's
-	// code-mode-specific and relies on codegraph).
+	// In platform mode, cycle Normal ↔ Plan only (no Graph Plan / Ask — they're
+	// code-mode-specific and rely on codegraph / local tools).
 	if m.info.Mode == "platform" {
 		m.planMode = !m.planMode
 		m.graphPlanMode = false
+		m.askMode = false
 		return
 	}
-	// Code mode: cycle Normal → Plan → Graph Plan → Normal.
+	// Code mode: cycle Normal → Plan → Graph Plan → Ask → Normal.
 	switch {
-	case !m.planMode && !m.graphPlanMode:
+	case !m.planMode && !m.graphPlanMode && !m.askMode:
 		m.planMode = true
 		m.graphPlanMode = false
+		m.askMode = false
 	case m.planMode:
 		m.planMode = false
 		m.graphPlanMode = true
-	default:
+		m.askMode = false
+	case m.graphPlanMode:
 		m.planMode = false
 		m.graphPlanMode = false
+		m.askMode = true
+	default: // askMode
+		m.planMode = false
+		m.graphPlanMode = false
+		m.askMode = false
 	}
 }
 
@@ -1012,6 +1037,9 @@ func (m model) turnOptions() backend.TurnOptions {
 	}
 	if m.planMode {
 		return backend.TurnOptions{SystemContext: planModeSystemContext, PlanMode: true}
+	}
+	if m.askMode {
+		return backend.TurnOptions{SystemContext: askModeSystemContext, AskMode: true}
 	}
 	return backend.TurnOptions{}
 }
@@ -2548,6 +2576,8 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 			}
 		case events.ItemDelegation:
 			appendBlock(i, it.Kind, m.renderDelegationItem(it, cw))
+		case events.ItemPlan:
+			appendBlockSpanned(i, it.Kind, m.renderPlanDocument(it.Content, cw), planDocumentContentSpan)
 		}
 	}
 	m.transcriptPlainLines = plainLines
@@ -3574,6 +3604,134 @@ func (m model) renderDelegationItem(it events.Item, width int) string {
 	return th.Brand.Render(header) + "\n" + strings.Join(lines, "\n")
 }
 
+// renderPlanDocument renders a plan document (PLAN.md content) inside a bordered
+// frame that visually distinguishes it from regular chat messages. The frame uses
+// a distinct accent color (teal/cyan in code mode, steel-blue in platform mode)
+// and replaces markdown checkboxes with colored status indicators.
+func (m model) renderPlanDocument(content string, width int) string {
+	th := m.theme
+	if width < 30 {
+		width = 30
+	}
+	inner := width - 6 // left border + 2 padding + right border + 2 padding
+	if inner < 20 {
+		inner = 20
+	}
+
+	// Extract goal from content for the header.
+	title := "Execution Plan"
+	for _, line := range strings.SplitN(content, "\n", 10) {
+		if strings.HasPrefix(line, "**Goal:**") {
+			title = strings.TrimSpace(strings.TrimPrefix(line, "**Goal:**"))
+			if len(title) > inner-10 {
+				title = title[:inner-13] + "…"
+			}
+			break
+		}
+	}
+
+	// Render the interior markdown content (skipping the "# Execution Plan" header
+	// since we show it in the frame border).
+	body := content
+	if strings.HasPrefix(body, "# Execution Plan\n") {
+		body = strings.TrimPrefix(body, "# Execution Plan\n")
+	}
+	body = strings.TrimSpace(body)
+
+	// Render interior as markdown.
+	md := render.Markdown(body, inner, th.RenderStyles())
+	if md == "" {
+		md = th.Text.Width(inner).Render(body)
+	}
+
+	// Post-process: replace checkbox markers with colored status indicators.
+	md = m.stylePlanCheckboxes(md)
+
+	// Build the bordered frame.
+	var b strings.Builder
+
+	// Top border: ┌─ ✦ Title ─────────────────┐
+	titleRendered := th.PlanHeader.Render(" ✦ " + title + " ")
+	titleW := lipgloss.Width(titleRendered)
+	topLineW := width - 2 - titleW // minus ┌ and ┐
+	leftW := 1                      // one ─ before title
+	rightW := topLineW - leftW
+	if rightW < 0 {
+		rightW = 0
+	}
+	b.WriteString(th.PlanBorder.Render("┌"+strings.Repeat("─", leftW)) +
+		titleRendered +
+		th.PlanBorder.Render(strings.Repeat("─", rightW)+"┐"))
+
+	// Body rows with side borders.
+	bodyLines := strings.Split(md, "\n")
+	for _, line := range bodyLines {
+		b.WriteByte('\n')
+		lineW := lipgloss.Width(line)
+		pad := inner - lineW
+		if pad < 0 {
+			pad = 0
+			line = truncateToWidth(line, inner)
+		}
+		b.WriteString(th.PlanBorder.Render("│"))
+		b.WriteString(th.Background.Render("  "))
+		b.WriteString(line)
+		b.WriteString(th.Background.Render(strings.Repeat(" ", pad)))
+		b.WriteString(th.Background.Render("  "))
+		b.WriteString(th.PlanBorder.Render("│"))
+	}
+
+	// Bottom border: └──────────────────────────┘
+	b.WriteByte('\n')
+	b.WriteString(th.PlanBorder.Render("└" + strings.Repeat("─", width-2) + "┘"))
+
+	return b.String()
+}
+
+// stylePlanCheckboxes replaces plain markdown checkbox markers in rendered plan
+// text with colored status indicators for visual clarity.
+func (m model) stylePlanCheckboxes(rendered string) string {
+	th := m.theme
+	// Replace status markers: [x]=complete, [~]=running, [ ]=pending, [!]=failed
+	rendered = strings.ReplaceAll(rendered, "[x]", th.Success.Render("[✓]"))
+	rendered = strings.ReplaceAll(rendered, "[X]", th.Success.Render("[✓]"))
+	rendered = strings.ReplaceAll(rendered, "[~]", th.Brand.Render("[●]"))
+	rendered = strings.ReplaceAll(rendered, "[ ]", th.PlanMuted.Render("[○]"))
+	rendered = strings.ReplaceAll(rendered, "[!]", th.Error.Render("[✗]"))
+	return rendered
+}
+
+// planDocumentContentSpan returns the [start,end) rune-column range of real
+// content within a rendered plan document line, excluding the border characters
+// and interior padding. Used for drag-to-copy selection.
+func planDocumentContentSpan(_ int, plain string) [2]int {
+	runes := []rune(plain)
+	first := -1
+	last := -1
+	for i, r := range runes {
+		if r == '│' {
+			if first == -1 {
+				first = i
+			}
+			last = i
+		}
+	}
+	// Border/decoration rows (top/bottom) have no vertical bars or only corners.
+	if first == -1 || last <= first {
+		return [2]int{0, 0}
+	}
+	start := first + 1
+	end := last
+	// Trim interior padding.
+	for start < end && runes[start] == ' ' {
+		start++
+	}
+	for end > start && runes[end-1] == ' ' {
+		end--
+	}
+	return [2]int{start, end}
+}
+
 // formatDuration renders a duration as a compact human-readable string:
 // "3s", "1m 23s", "1h 5m 12s".
 func formatDuration(d time.Duration) string {
@@ -3641,6 +3799,8 @@ func (m model) composerBorderStyle() lipgloss.Style {
 		color = lipgloss.Color("39") // cyan — distinct from Plan's amber
 	} else if m.planMode {
 		color = lipgloss.Color("172")
+	} else if m.askMode {
+		color = lipgloss.Color("114") // green/teal — research mode
 	} else {
 		// Normal mode: use the neutral composer border color, not the brand accent.
 		color = lipgloss.Color("246")
@@ -3666,6 +3826,8 @@ func (m model) composerModeLabel() string {
 		sub = "Graph Plan"
 	} else if m.planMode {
 		sub = "Plan"
+	} else if m.askMode {
+		sub = "Ask"
 	}
 	if m.dualMode {
 		return "Code · " + sub

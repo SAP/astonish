@@ -88,6 +88,11 @@ type TurnOptions struct {
 	// Mutually exclusive with PlanMode. Callers should also set SystemContext to
 	// the graph-plan prompt.
 	GraphPlanMode bool
+	// AskMode, when true, requests the runtime ask-mode gate for this turn:
+	// mutating tools, delegate_tasks, and announce_plan are refused server-side,
+	// and the model is instructed to answer questions without planning or
+	// executing. Mutually exclusive with PlanMode and GraphPlanMode.
+	AskMode bool
 	// Attachments are optional multimodal file/image payloads for this turn.
 	Attachments []Attachment
 }

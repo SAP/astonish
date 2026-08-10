@@ -839,3 +839,86 @@ func TestTranscriptKindDoneClearsDelegation(t *testing.T) {
 		t.Fatal("ItemDelegation should remain in Items after KindDone")
 	}
 }
+
+// TestTranscript_LoadHistory_ApprovalFlowRendersAsSystemMessage verifies that
+// when a resumed session includes an approval flow (tool_call → system approval
+// message → tool_call with result), the transcript renders correctly:
+// - Awaiting is false (no pending approval overlay)
+// - No ItemApproval items (approvals are historical, not pending)
+// - The approval response appears as ItemSystem
+// - All tool steps are status "complete"
+func TestTranscript_LoadHistory_ApprovalFlowRendersAsSystemMessage(t *testing.T) {
+	tr := NewTranscript()
+	tr.LinearThread = true // code mode
+
+	entries := []HistoryMsg{
+		{Kind: "user", Text: "write hello to /tmp/abc.txt"},
+		{Kind: "agent", Text: "I'll use write_file to create the file."},
+		// The superseded tool_call is NOT present (filtered by loadHistory).
+		// The approval response appears as a system entry.
+		{Kind: "system", Text: "Approval: Always Allow"},
+		// The re-issued tool_call and its result.
+		{Kind: "tool_call", ToolName: "write_file", ToolID: "call_post", Args: map[string]any{"file_path": "/tmp/abc.txt", "content": "hello"}},
+		{Kind: "tool_result", ToolName: "write_file", ToolID: "call_post", Result: map[string]any{"success": true, "path": "/tmp/abc.txt"}},
+		{Kind: "agent", Text: "Done! The file has been written."},
+	}
+
+	tr.LoadHistory(entries)
+
+	// Must not be streaming or awaiting.
+	if tr.Streaming {
+		t.Fatal("Streaming should be false after LoadHistory")
+	}
+	if tr.Awaiting {
+		t.Fatal("Awaiting should be false after LoadHistory — no pending approval")
+	}
+	if tr.ApprovalIdx != -1 {
+		t.Fatalf("ApprovalIdx should be -1, got %d", tr.ApprovalIdx)
+	}
+
+	// Count item kinds.
+	kindCounts := map[ItemKind]int{}
+	for _, it := range tr.Items {
+		kindCounts[it.Kind]++
+	}
+
+	// Must have no ItemApproval items.
+	if kindCounts[ItemApproval] != 0 {
+		t.Errorf("expected 0 ItemApproval items, got %d", kindCounts[ItemApproval])
+	}
+
+	// Must have at least one ItemSystem with approval text.
+	found := false
+	for _, it := range tr.Items {
+		if it.Kind == ItemSystem && strings.Contains(it.Content, "Approval:") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected ItemSystem with 'Approval:' text in transcript")
+	}
+
+	// Must have an activity fold with completed steps.
+	if kindCounts[ItemActivity] == 0 {
+		t.Fatal("expected at least one ItemActivity in transcript")
+	}
+	for _, it := range tr.Items {
+		if it.Kind != ItemActivity {
+			continue
+		}
+		for _, step := range it.Steps {
+			if step.Status == "running" {
+				t.Errorf("step %q should not be 'running' after LoadHistory, got status=%q", step.Name, step.Status)
+			}
+		}
+	}
+
+	// Must have user and agent items.
+	if kindCounts[ItemUser] == 0 {
+		t.Error("expected at least one ItemUser")
+	}
+	if kindCounts[ItemAgent] == 0 {
+		t.Error("expected at least one ItemAgent")
+	}
+}

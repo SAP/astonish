@@ -19,6 +19,7 @@ type backendSlot struct {
 	tr            *events.Transcript
 	planMode      bool
 	graphPlanMode bool
+	askMode       bool
 	history       []string
 	historyIdx    int
 	mdCache       map[string]string
@@ -43,6 +44,7 @@ func (m model) switchBackend() (tea.Model, tea.Cmd) {
 	cur.tr = m.tr
 	cur.planMode = m.planMode
 	cur.graphPlanMode = m.graphPlanMode
+	cur.askMode = m.askMode
 	cur.history = m.history
 	cur.historyIdx = m.historyIdx
 	cur.mdCache = m.mdCache
@@ -82,6 +84,7 @@ func (m model) switchBackend() (tea.Model, tea.Cmd) {
 	m.info = next.backend.Info()
 	m.planMode = next.planMode
 	m.graphPlanMode = next.graphPlanMode
+	m.askMode = next.askMode
 	m.history = next.history
 	m.historyIdx = next.historyIdx
 

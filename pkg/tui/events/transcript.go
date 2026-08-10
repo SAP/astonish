@@ -16,6 +16,7 @@ const (
 	ItemActivity      ItemKind = "activity"
 	ItemFileDiff      ItemKind = "file_diff"   // main-thread editor-style file change
 	ItemDelegation    ItemKind = "delegation"   // inline sub-task delegation tracker
+	ItemPlan          ItemKind = "plan"         // execution plan document (distinct visual treatment)
 	ItemSystem        ItemKind = "system"
 	ItemError         ItemKind = "error"
 	ItemApproval      ItemKind = "approval"
@@ -417,12 +418,12 @@ func (t *Transcript) addUsage(usage *Usage) {
 }
 
 // turnStart returns the index of the first item in the current soft run
-// (after the last hard-break item). Hard breaks: user, error, approval, network denial, artifact, system.
+// (after the last hard-break item). Hard breaks: user, error, approval, network denial, artifact, system, plan.
 // File diffs stay inside the soft turn (do not hard-break).
 func (t *Transcript) turnStart() int {
 	for i := len(t.Items) - 1; i >= 0; i-- {
 		switch t.Items[i].Kind {
-		case ItemUser, ItemError, ItemApproval, ItemNetworkDenial, ItemArtifact, ItemSystem:
+		case ItemUser, ItemError, ItemApproval, ItemNetworkDenial, ItemArtifact, ItemSystem, ItemPlan:
 			return i + 1
 		}
 	}
@@ -463,6 +464,12 @@ func (t *Transcript) hasRunningTools() bool {
 	return false
 }
 
+// isPlanContent returns true if content looks like a rendered PLAN.md document.
+func isPlanContent(content string) bool {
+	return strings.HasPrefix(content, "# Execution Plan\n") ||
+		strings.HasPrefix(content, "# Execution Plan\r\n")
+}
+
 // appendAgentText implements Studio sticky-agent:
 // one agent bubble per tool run; text after tools replaces prior interstitial content;
 // remains Provisional (rendered as Thinking) until KindDone.
@@ -479,11 +486,19 @@ func (t *Transcript) appendAgentText(text string) {
 	// chronologically. Never provisional, never reordered below tools.
 	if t.LinearThread {
 		t.nextTextReplaces = false
-		if n := len(t.Items); n > 0 && t.Items[n-1].Kind == ItemAgent {
+		if n := len(t.Items); n > 0 && (t.Items[n-1].Kind == ItemAgent || t.Items[n-1].Kind == ItemPlan) {
 			t.Items[n-1].Content += text
+			// Promote to ItemPlan if the accumulated content is a plan document.
+			if t.Items[n-1].Kind == ItemAgent && isPlanContent(t.Items[n-1].Content) {
+				t.Items[n-1].Kind = ItemPlan
+			}
 			return
 		}
-		t.Items = append(t.Items, Item{Kind: ItemAgent, Content: text})
+		kind := ItemAgent
+		if isPlanContent(text) {
+			kind = ItemPlan
+		}
+		t.Items = append(t.Items, Item{Kind: kind, Content: text})
 		return
 	}
 
@@ -977,6 +992,10 @@ func (t *Transcript) finalizeProvisionalAgents() {
 	for i := range t.Items {
 		if t.Items[i].Kind == ItemAgent {
 			t.Items[i].Provisional = false
+			// Promote finalized agent text to ItemPlan if it's a plan document.
+			if isPlanContent(t.Items[i].Content) {
+				t.Items[i].Kind = ItemPlan
+			}
 		}
 	}
 }

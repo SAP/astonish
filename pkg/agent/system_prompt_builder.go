@@ -116,6 +116,11 @@ type PromptOverrides struct {
 	// should also inject GraphPlanModeSystemContext as SessionContext.
 	GraphPlanMode bool
 
+	// AskMode, when true, enables the ask-mode gate: only read-only tools are
+	// allowed; the model is instructed to research and explain rather than plan
+	// or execute. Mutually exclusive with PlanMode and GraphPlanMode.
+	AskMode bool
+
 	// Web search/extract are resolved per request from the platform→team cascade
 	// so a singleton ChatAgent re-inited without tenant context still advertises
 	// the platform-selected tools for every user. Nil pointers mean "leave builder as-is".

@@ -79,7 +79,11 @@ IMMEDIATE FIRST ACTION: Call read_file("__PLAN_PATH__") right now, before anythi
 plan so you know every phase, its files, and its details.
 
 EXECUTION RULES:
-1. Follow the plan phase by phase in order. Mark each phase running with update_plan before you
+1. Follow the plan phase by phase. For each wave of phases that share the same parallel_group
+   label, dispatch ALL of them in a single delegate_tasks call — do not execute them one by one.
+   Set the plan_step field on each delegated task to the phase name so progress is tracked
+   correctly. Phases with no parallel_group label, or with a unique label, run on the main
+   thread in dependency order. Mark each main-thread phase running with update_plan before you
    start it, and complete/failed when you finish.
 2. DO NOT RE-INVESTIGATE. The plan's details and file paths were confirmed during planning —
    trust them. Do NOT call code_definition, codegraph_explore, grep_search, find_files, repo_map,
@@ -140,6 +144,31 @@ func GraphPlanBlockedMessage(toolName string, phase GraphPlanPhase) string {
 	default:
 		return fmt.Sprintf("Blocked: `%s` is not available in the current Graph-Optimized Plan phase.", toolName)
 	}
+}
+
+// AskModeSystemContext is the per-turn instruction injected when ask mode is
+// active (code mode only). The runtime gate blocks all mutating tools,
+// delegate_tasks, and announce_plan. This prompt teaches the model to research
+// and explain rather than plan or execute.
+const AskModeSystemContext = `You are in Astonish ASK MODE. This is a hard constraint enforced by the runtime, not a suggestion.
+
+RULES:
+- You are in a RESEARCH-ONLY mode. Your job is to answer questions, explain architecture, discuss possible solutions, and help the user understand how things work.
+- You MUST NOT make any changes. Mutating tools (write_file, edit_file, shell_command, and every other non-read-only tool), delegate_tasks, and announce_plan are DISABLED by the runtime and will be refused if you call them.
+- You MUST NOT produce implementation plans or attempt to execute anything. This is not Plan mode — do not use announce_plan.
+- You MAY use read-only tools (read_file, grep_search, find_files, file_tree, code_definition, code_references, repo_map, codegraph_explore, memory_search, web_fetch, etc.) to investigate the codebase and gather information.
+- Focus on providing clear, accurate, well-researched answers. Cite specific files, functions, and line numbers when relevant.
+- If the user asks you to make changes or create a plan, remind them they are in Ask mode and suggest switching to Normal or Plan mode (shift+tab).`
+
+// AskModeBlockedMessage is returned to the model when it calls a mutating tool
+// while ask mode is active. Returning a result (rather than an error that
+// aborts the turn) lets the model self-correct and continue answering.
+func AskModeBlockedMessage(toolName string) string {
+	return fmt.Sprintf(
+		"Blocked: `%s` cannot run in Ask mode. You are in ASK MODE — a research-only mode for answering questions. "+
+			"No changes, planning, or execution are allowed. Use read-only tools to investigate and provide your answer.",
+		toolName,
+	)
 }
 
 // SafeTools are read-only tools that auto-approve in chat mode.

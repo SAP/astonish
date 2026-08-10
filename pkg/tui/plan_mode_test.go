@@ -75,20 +75,26 @@ func TestTogglePlanModeThreeWayCycle(t *testing.T) {
 
 	// Normal → Plan
 	m.togglePlanMode()
-	if !m.planMode || m.graphPlanMode {
-		t.Fatalf("first toggle should enter Plan mode, got plan=%v graph=%v", m.planMode, m.graphPlanMode)
+	if !m.planMode || m.graphPlanMode || m.askMode {
+		t.Fatalf("first toggle should enter Plan mode, got plan=%v graph=%v ask=%v", m.planMode, m.graphPlanMode, m.askMode)
 	}
 
 	// Plan → Graph Plan
 	m.togglePlanMode()
-	if m.planMode || !m.graphPlanMode {
-		t.Fatalf("second toggle should enter Graph Plan mode, got plan=%v graph=%v", m.planMode, m.graphPlanMode)
+	if m.planMode || !m.graphPlanMode || m.askMode {
+		t.Fatalf("second toggle should enter Graph Plan mode, got plan=%v graph=%v ask=%v", m.planMode, m.graphPlanMode, m.askMode)
 	}
 
-	// Graph Plan → Normal
+	// Graph Plan → Ask
 	m.togglePlanMode()
-	if m.planMode || m.graphPlanMode {
-		t.Fatalf("third toggle should return to Normal, got plan=%v graph=%v", m.planMode, m.graphPlanMode)
+	if m.planMode || m.graphPlanMode || !m.askMode {
+		t.Fatalf("third toggle should enter Ask mode, got plan=%v graph=%v ask=%v", m.planMode, m.graphPlanMode, m.askMode)
+	}
+
+	// Ask → Normal
+	m.togglePlanMode()
+	if m.planMode || m.graphPlanMode || m.askMode {
+		t.Fatalf("fourth toggle should return to Normal, got plan=%v graph=%v ask=%v", m.planMode, m.graphPlanMode, m.askMode)
 	}
 
 	if len(m.tr.Items) != 0 {
@@ -219,6 +225,52 @@ func TestPlanApprovalRequestChanges(t *testing.T) {
 	// Plan mode should remain active so the user can describe changes.
 	if !nm.planMode {
 		t.Fatal("planMode should stay true after request changes")
+	}
+}
+
+func TestTurnOptionsAskMode(t *testing.T) {
+	m := model{askMode: true}
+	got := m.turnOptions()
+	if !got.AskMode {
+		t.Fatal("ask mode should set the AskMode flag")
+	}
+	if got.PlanMode {
+		t.Fatal("ask mode must not set the PlanMode flag (mutually exclusive)")
+	}
+	if got.GraphPlanMode {
+		t.Fatal("ask mode must not set the GraphPlanMode flag (mutually exclusive)")
+	}
+	if got.SystemContext == "" {
+		t.Fatal("ask mode should send the ask-mode system context")
+	}
+	if !strings.Contains(got.SystemContext, "ASK MODE") {
+		t.Fatalf("ask mode system context should be the ask-mode prompt, got %q", got.SystemContext)
+	}
+}
+
+func TestRenderComposerShowsAskLabel(t *testing.T) {
+	m := newTestComposerModel(80)
+	m.askMode = true
+	out := stripANSI(m.renderComposer())
+	if !strings.Contains(out, " Ask ") {
+		t.Fatalf("ask composer should show Ask mode label:\n%s", out)
+	}
+}
+
+func TestAskModeNotAvailableInPlatform(t *testing.T) {
+	m := model{tr: events.NewTranscript()}
+	m.info.Mode = "platform"
+
+	// Normal → Plan
+	m.togglePlanMode()
+	if !m.planMode || m.graphPlanMode || m.askMode {
+		t.Fatalf("platform first toggle should enter Plan, got plan=%v graph=%v ask=%v", m.planMode, m.graphPlanMode, m.askMode)
+	}
+
+	// Plan → Normal (no Graph Plan or Ask in platform mode)
+	m.togglePlanMode()
+	if m.planMode || m.graphPlanMode || m.askMode {
+		t.Fatalf("platform second toggle should return to Normal, got plan=%v graph=%v ask=%v", m.planMode, m.graphPlanMode, m.askMode)
 	}
 }
 

@@ -35,6 +35,11 @@ type Theme struct {
 	DiffAddedBg    lipgloss.Style // subtle green background for added diff lines
 	DiffRemovedBg  lipgloss.Style // subtle red background for removed diff lines
 
+	// Plan document chrome (bordered document rendering for announce_plan output)
+	PlanBorder lipgloss.Style // border outline for the plan document frame
+	PlanHeader lipgloss.Style // bold styled title (✦ Execution Plan)
+	PlanMuted  lipgloss.Style // muted text inside the plan (metadata, legend)
+
 	// Composer / footer chrome
 	InputBorder      lipgloss.Style
 	InputBorderFocus lipgloss.Style
@@ -113,6 +118,10 @@ func DefaultTheme() Theme {
 		CodeGutter: lipgloss.NewStyle().Foreground(muted).Background(bg),
 		DiffAddedBg:   lipgloss.NewStyle().Foreground(text).Background(diffAddedBg),
 		DiffRemovedBg: lipgloss.NewStyle().Foreground(text).Background(diffRemovedBg),
+
+		PlanBorder: lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Background(bg),
+		PlanHeader: lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Background(bg).Bold(true),
+		PlanMuted:  lipgloss.NewStyle().Foreground(muted).Background(bg),
 
 		InputBorder: lipgloss.NewStyle().
 			Background(bg).
@@ -199,6 +208,10 @@ func PlatformTheme() Theme {
 		DiffAddedBg:   lipgloss.NewStyle().Foreground(text).Background(diffAddedBg),
 		DiffRemovedBg: lipgloss.NewStyle().Foreground(text).Background(diffRemovedBg),
 
+		PlanBorder: lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Background(bg),
+		PlanHeader: lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Background(bg).Bold(true),
+		PlanMuted:  lipgloss.NewStyle().Foreground(muted).Background(bg),
+
 		InputBorder: lipgloss.NewStyle().
 			Background(bg).
 			Border(lipgloss.RoundedBorder()).
@@ -245,6 +258,7 @@ func plainTheme() Theme {
 		Header: s, Status: s, Input: s, Activity: s, Approval: s,
 		CodeGutter:  s,
 		DiffAddedBg: s, DiffRemovedBg: s,
+		PlanBorder: s, PlanHeader: s, PlanMuted: s,
 		InputBorder: box, InputBorderFocus: box, InputBorderPlan: box,
 		InputPrompt: s, InputPlaceholder: s, FooterMeta: s, Hint: s,
 		NoColor: true,

@@ -264,9 +264,11 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		// Apply per-turn overrides injected by callers via context
 		planMode := false
 		graphPlan := false
+		askMode := false
 		if po := PromptOverridesFromContext(ctx); po != nil {
 			planMode = po.PlanMode
 			graphPlan = po.GraphPlanMode
+			askMode = po.AskMode
 			if po.ChannelHints != "" {
 				promptBuilder.ChannelHints = po.ChannelHints
 			}
@@ -608,6 +610,23 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			})
 		}
 
+		// Ask-mode hard gate (code mode only): in ask mode, refuse any tool that
+		// is not read-only, plus delegate_tasks and announce_plan (which could
+		// produce plans or bypass the gate via sub-agents). This is a pure
+		// research/Q&A mode — no changes, no plans, no execution.
+		if askMode && !planMode && !graphPlan {
+			beforeToolCallbacks = append(beforeToolCallbacks, func(_ tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+				name := t.Name()
+				if name == "delegate_tasks" || name == "announce_plan" || !IsToolSafe(name) {
+					return map[string]any{
+						"status": "blocked_ask_mode",
+						"error":  AskModeBlockedMessage(name),
+					}, nil
+				}
+				return nil, nil
+			})
+		}
+
 		// ── Code-mode authorization gates ──
 		// Active only in code mode (EnforceAuthorization) and Normal mode
 		// (planMode handled above). Two independent gates make `astonish code`
@@ -624,7 +643,7 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		// which then suspends the turn), and record the pending request on the
 		// per-session policy so the resume handler at the top of Run can apply
 		// the user's decision. AutoApprove (--yolo) skips these gates entirely.
-		if c.EnforceAuthorization && !planMode && !graphPlan && !c.AutoApprove {
+		if c.EnforceAuthorization && !planMode && !graphPlan && !askMode && !c.AutoApprove {
 			authPolicy := c.GetOrCreateAuthPolicy(sessionID)
 
 			emitAuthPrompt := func(kind, toolName, prompt string, options []string, paths []string, args map[string]any) map[string]any {

@@ -68,6 +68,7 @@ export interface StandardServer {
   displayName: string
   description?: string
   kind?: 'mcp' | 'model'
+  category?: string
   isDefault: boolean
   installed: boolean
   active?: boolean

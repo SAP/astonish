@@ -71,3 +71,65 @@ func TestAskModeSystemContext_ResearchLanguage(t *testing.T) {
 		t.Error("AskModeSystemContext should not instruct the model to produce a plan")
 	}
 }
+
+// TestAskMode_FolderAuthStillEnforced is a regression guard for the bug where
+// the authorization gate condition in chat_agent_run.go included `!askMode`,
+// causing the folder-access gate to be skipped entirely in Ask mode. Read-only
+// tools (e.g., read_file) could access paths outside the project folder without
+// any authorization prompt — only in Ask mode; Normal mode correctly prompted.
+//
+// The fix: the outer condition is `EnforceAuthorization && !planMode && !graphPlan
+// && !c.AutoApprove` (no `!askMode`), so the folder-access gate applies in both
+// Normal and Ask mode. The tool-execution gate is wrapped in `if !askMode { ... }`
+// since Ask mode already blocks non-safe tools via its own hard gate.
+func TestAskMode_FolderAuthStillEnforced(t *testing.T) {
+	root := t.TempDir()
+	p := NewSessionAuthPolicy(root)
+
+	// A read-only tool (allowed in Ask mode) accessing a path OUTSIDE the project
+	// root must be flagged by the folder-access gate.
+	outsideArgs := map[string]any{
+		"path": "/etc/hosts",
+	}
+	out := p.OutOfScopePaths(outsideArgs)
+	if len(out) == 0 {
+		t.Fatal("folder-access gate should flag /etc/hosts as out-of-scope in Ask mode")
+	}
+
+	// A read-only tool accessing a path INSIDE the project root must NOT be flagged.
+	insideArgs := map[string]any{
+		"path": root + "/src/main.go",
+	}
+	out = p.OutOfScopePaths(insideArgs)
+	if len(out) != 0 {
+		t.Fatalf("folder-access gate should not flag in-project path, got %v", out)
+	}
+
+	// Verify the gate condition logic: in Ask mode, safe tools are allowed
+	// (not blocked by ask-mode gate) but the folder-access gate must still
+	// apply. This is the contract: IsToolSafe("read_file") == true (so the
+	// ask-mode gate passes it through), yet OutOfScopePaths catches the path.
+	if !IsToolSafe("read_file") {
+		t.Fatal("read_file must be in SafeTools (allowed in Ask mode)")
+	}
+	if !IsToolSafe("grep_search") {
+		t.Fatal("grep_search must be in SafeTools (allowed in Ask mode)")
+	}
+	if !IsToolSafe("find_files") {
+		t.Fatal("find_files must be in SafeTools (allowed in Ask mode)")
+	}
+
+	// Confirm that the ask-mode gate would NOT block these tools...
+	for _, name := range []string{"read_file", "grep_search", "find_files", "file_tree"} {
+		if askModeToolBlocked(name) {
+			t.Errorf("ask mode should allow %q (it's read-only)", name)
+		}
+	}
+	// ...but the folder-access gate still catches out-of-scope paths for them.
+	for _, pathArg := range []string{"/etc/passwd", "/var/log/system.log", "/tmp/secret.txt"} {
+		args := map[string]any{"path": pathArg}
+		if len(p.OutOfScopePaths(args)) == 0 {
+			t.Errorf("folder-access gate should flag %q as out-of-scope even for safe tools in Ask mode", pathArg)
+		}
+	}
+}

@@ -628,22 +628,25 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		}
 
 		// ── Code-mode authorization gates ──
-		// Active only in code mode (EnforceAuthorization) and Normal mode
-		// (planMode handled above). Two independent gates make `astonish code`
-		// safe-by-default despite running tools directly on the host:
+		// Active in code mode (EnforceAuthorization) for both Normal and Ask mode
+		// (planMode/graphPlan handled above). Two independent gates make
+		// `astonish code` safe-by-default despite running tools directly on the host:
 		//
 		//  1. Folder-access gate — a tool touching a path outside the project
 		//     working directory pauses for user authorization (once / session).
+		//     Active in BOTH Normal and Ask mode (read-only tools can still
+		//     access sensitive paths outside the project).
 		//  2. Tool-execution gate — a not-whitelisted tool (anything outside
 		//     agent.SafeTools) pauses for user authorization (once / all this
-		//     iteration).
+		//     iteration). Normal mode only — in Ask mode, non-safe tools are
+		//     already refused by the ask-mode hard gate.
 		//
 		// Both mirror the flow engine's approval protocol: set awaiting_approval
 		// state, buffer an approval event (drained + yielded by the main loop,
 		// which then suspends the turn), and record the pending request on the
 		// per-session policy so the resume handler at the top of Run can apply
 		// the user's decision. AutoApprove (--yolo) skips these gates entirely.
-		if c.EnforceAuthorization && !planMode && !graphPlan && !askMode && !c.AutoApprove {
+		if c.EnforceAuthorization && !planMode && !graphPlan && !c.AutoApprove {
 			authPolicy := c.GetOrCreateAuthPolicy(sessionID)
 
 			emitAuthPrompt := func(kind, toolName, prompt string, options []string, paths []string, args map[string]any) map[string]any {
@@ -676,7 +679,8 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			}
 
 			// Folder-access gate (checked first: an out-of-scope path is a
-			// stronger constraint than tool category).
+			// stronger constraint than tool category). Active in both Normal
+			// and Ask mode — read-only tools can still target sensitive paths.
 			beforeToolCallbacks = append(beforeToolCallbacks, func(_ tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
 				if authPolicy.Pending() != nil {
 					return map[string]any{
@@ -699,23 +703,27 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			})
 
 			// Tool-execution gate (Normal-mode whitelist = agent.SafeTools).
-			beforeToolCallbacks = append(beforeToolCallbacks, func(_ tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
-				name := t.Name()
-				if !RequiresToolAuthorization(name, false) {
-					return nil, nil
-				}
-				if authPolicy.Pending() != nil {
-					return map[string]any{
-						"status": "pending_authorization",
-						"info":   "Waiting for user authorization on a previous tool call.",
-					}, nil
-				}
-				if authPolicy.ToolAuthorized(name) {
-					return nil, nil // an active grant covers this execution
-				}
-				prompt := c.approvalHelper.formatToolApprovalRequest(name, args)
-				return emitAuthPrompt("tool", name, prompt, ToolApprovalOptions(), nil, args), nil
-			})
+			// Skipped in Ask mode: non-safe tools are already refused by the
+			// ask-mode hard gate above, making this prompt redundant.
+			if !askMode {
+				beforeToolCallbacks = append(beforeToolCallbacks, func(_ tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+					name := t.Name()
+					if !RequiresToolAuthorization(name, false) {
+						return nil, nil
+					}
+					if authPolicy.Pending() != nil {
+						return map[string]any{
+							"status": "pending_authorization",
+							"info":   "Waiting for user authorization on a previous tool call.",
+						}, nil
+					}
+					if authPolicy.ToolAuthorized(name) {
+						return nil, nil // an active grant covers this execution
+					}
+					prompt := c.approvalHelper.formatToolApprovalRequest(name, args)
+					return emitAuthPrompt("tool", name, prompt, ToolApprovalOptions(), nil, args), nil
+				})
+			}
 		}
 
 		// ── Auto-progress plan steps (before tool execution) ──

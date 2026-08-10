@@ -136,7 +136,7 @@ func DefaultTheme() Theme {
 		InputBorderPlan: lipgloss.NewStyle().
 			Background(bg).
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("214")).
+			BorderForeground(lipgloss.Color("172")).
 			Padding(0, 1),
 		InputPrompt:      lipgloss.NewStyle().Foreground(brand).Background(bg).Bold(true),
 		InputPlaceholder: lipgloss.NewStyle().Foreground(dim).Background(bg).Italic(true),

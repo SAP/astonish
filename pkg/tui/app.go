@@ -64,6 +64,15 @@ type fileViewerState struct {
 	vp       viewport.Model
 }
 
+// delegationDetailState holds the overlay state for viewing a sub-task's activity.
+type delegationDetailState struct {
+	open     bool
+	taskName string
+	taskIdx  int // index into the DelegationTasks slice
+	itemIdx  int // transcript item index of the ItemDelegation
+	vp       viewport.Model
+}
+
 // Config configures the terminal chat app.
 type Config struct {
 	Backend backend.Backend
@@ -168,20 +177,22 @@ type model struct {
 	modelPicker    modelPickerState
 	providerPicker providerPickerState
 	webSearchPicker webSearchPickerState
-	fileViewer     fileViewerState
+	fileViewer      fileViewerState
+	delegationDetail delegationDetailState
 	// slash command completion popup (active when composer starts with /)
 	slash slashCompletion
 	// @file completion popup (active while typing a trailing @token)
 	files fileCompletion
-	// planMode asks the platform agent for plans only, without execution.
+	// planMode is the platform-mode plan flag. In platform mode, shift+tab
+	// cycles Normal ↔ Plan using this bool. Not used in code mode.
 	planMode bool
-	// graphPlanMode is the stricter, phased Graph-Optimized Plan mode (code mode
-	// only). It uses codegraph as the primary driver behind a per-phase runtime
-	// tool gate. shift+tab cycles Normal → Plan → Graph Plan → Ask → Normal.
+	// graphPlanMode is the code-mode Plan mode (phased gate: graph → read →
+	// gap → plan, driven by codegraph + gplan_* transition tools). In code
+	// mode, shift+tab cycles Normal → Plan → Ask → Normal using this bool.
 	graphPlanMode bool
 	// askMode is a research-only mode (code mode only). The agent can investigate
 	// with read-only tools but cannot plan or execute. shift+tab cycles
-	// Normal → Plan → Graph Plan → Ask → Normal.
+	// Normal → Plan → Ask → Normal.
 	askMode bool
 	// Pasted blocks keep the composer compact while preserving submitted content.
 	pastedBlocks []pastedBlock
@@ -367,11 +378,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.fileViewer.open {
 			return m.handleFileViewerMouse(msg)
 		}
+		if m.delegationDetail.open {
+			return m.handleDelegationDetailMouse(msg)
+		}
 		return m.handleMouse(msg)
 
 	case tea.KeyMsg:
 		if m.fileViewer.open {
 			return m.handleFileViewerKey(msg)
+		}
+		if m.delegationDetail.open {
+			return m.handleDelegationDetailKey(msg)
 		}
 		// Sessions / model picker overlays capture keys first.
 		if m.sessions.open {
@@ -709,6 +726,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case timerTickMsg:
 		// Re-schedule the next tick only while a turn is in progress.
 		if !m.turnStartedAt.IsZero() {
+			// Refresh viewport when delegation is active so per-task
+			// elapsed timers update live (they compute time.Since on render).
+			if m.tr != nil && m.tr.DelegationActive {
+				m.refreshViewport()
+			}
 			return m, timerTick()
 		}
 		return m, nil
@@ -1010,23 +1032,14 @@ func (m *model) togglePlanMode() {
 		m.askMode = false
 		return
 	}
-	// Code mode: cycle Normal → Plan → Graph Plan → Ask → Normal.
+	// Code mode: cycle Normal → Plan → Ask → Normal.
 	switch {
 	case !m.planMode && !m.graphPlanMode && !m.askMode:
-		m.planMode = true
-		m.graphPlanMode = false
-		m.askMode = false
-	case m.planMode:
-		m.planMode = false
 		m.graphPlanMode = true
-		m.askMode = false
 	case m.graphPlanMode:
-		m.planMode = false
 		m.graphPlanMode = false
 		m.askMode = true
 	default: // askMode
-		m.planMode = false
-		m.graphPlanMode = false
 		m.askMode = false
 	}
 }
@@ -2305,6 +2318,14 @@ func (m model) handleMouseRelease(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		m.refreshViewport()
 		return m, nil
 	}
+	if it.Kind == events.ItemDelegation && !m.clickIsDouble {
+		// Find which task row was clicked based on line offset within the hit region.
+		taskIdx := m.delegationTaskAtLine(m.selectionStart.line, idx)
+		if taskIdx >= 0 {
+			return m.openDelegationDetail(idx, taskIdx)
+		}
+		return m, nil
+	}
 	return m, nil
 }
 
@@ -2552,6 +2573,9 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 		case events.ItemError:
 			appendBlock(i, it.Kind, th.Error.Width(cw).Render(it.Content))
 		case events.ItemApproval:
+			if it.ApprovalKind == "plan" {
+				continue // plan approval shown in footer, not transcript
+			}
 			var ab strings.Builder
 			ab.WriteString(th.Approval.Width(cw).Render("⚠ " + it.Content))
 			if len(it.Options) > 0 {
@@ -3122,6 +3146,10 @@ func (m model) View() string {
 		m.layoutFileViewer()
 		return m.paintBackground(m.renderFileViewer())
 	}
+	if m.delegationDetail.open {
+		m.layoutDelegationDetail()
+		return m.paintBackground(m.renderDelegationDetail())
+	}
 	if m.sessions.open {
 		overlay := m.renderSessionsOverlay()
 		return m.paintBackground(lipgloss.Place(m.width, m.screenHeight(), lipgloss.Center, lipgloss.Center, overlay,
@@ -3158,7 +3186,19 @@ func (m model) View() string {
 		))
 	}
 	if m.tr.Awaiting {
-		// Stack approval card above composer area by replacing bottom of view.
+		it := m.approvalItem()
+		if it != nil && it.ApprovalKind == "plan" {
+			// Plan approval: keep plan content visible, show compact options footer
+			return m.paintBackground(lipgloss.JoinVertical(lipgloss.Left,
+				m.renderHeader(),
+				sep,
+				m.vp.View(),
+				sep,
+				m.renderPlanApprovalFooter(),
+				m.renderHints(),
+			))
+		}
+		// Non-plan approvals keep the existing overlay behavior.
 		overlay := m.renderApprovalOverlay()
 		return m.paintBackground(lipgloss.JoinVertical(lipgloss.Left,
 			m.renderHeader(),
@@ -3601,12 +3641,232 @@ func (m model) renderDelegationItem(it events.Item, width int) string {
 		lines = append(lines, row)
 	}
 
-	return th.Brand.Render(header) + "\n" + strings.Join(lines, "\n")
+	return th.Brand.Render(header) + "\n" + strings.Join(lines, "\n") + "\n" +
+		th.Muted.Italic(true).Render("    click task to expand details")
 }
 
-// renderPlanDocument renders a plan document (PLAN.md content) inside a bordered
-// frame that visually distinguishes it from regular chat messages. The frame uses
-// a distinct accent color (teal/cyan in code mode, steel-blue in platform mode)
+// --- Delegation detail overlay ---
+
+// delegationTaskAtLine maps a content line to a task row index within the
+// delegation item. Header is line 0, each task is line 1+i. Returns -1 if the
+// click is not on a task row.
+func (m model) delegationTaskAtLine(line int, itemIdx int) int {
+	// Find the hit region for this item to get the start line.
+	for _, r := range m.hitRegions {
+		if r.itemIdx == itemIdx && r.kind == events.ItemDelegation {
+			offset := line - r.start
+			// offset 0 = header line ("Delegating N tasks")
+			// offset 1..N = task rows
+			// offset N+1 = hint line
+			tasks := m.tr.Items[itemIdx].DelegationTasks
+			if offset >= 1 && offset <= len(tasks) {
+				return offset - 1
+			}
+			return -1
+		}
+	}
+	return -1
+}
+
+func (m model) openDelegationDetail(itemIdx, taskIdx int) (tea.Model, tea.Cmd) {
+	tasks := m.tr.Items[itemIdx].DelegationTasks
+	if taskIdx < 0 || taskIdx >= len(tasks) {
+		return m, nil
+	}
+	w := max(20, m.width-4)
+	h := max(5, m.screenHeight()-4)
+	vp := viewport.New(w, h)
+	vp.SetContent(m.renderDelegationDetailContent(tasks[taskIdx], w))
+	vp.GotoBottom()
+	m.delegationDetail = delegationDetailState{
+		open:     true,
+		taskName: tasks[taskIdx].Name,
+		taskIdx:  taskIdx,
+		itemIdx:  itemIdx,
+		vp:       vp,
+	}
+	return m, nil
+}
+
+func (m *model) layoutDelegationDetail() {
+	if !m.delegationDetail.open {
+		return
+	}
+	w := max(20, m.width-4)
+	h := max(5, m.screenHeight()-4)
+	m.delegationDetail.vp.Width = w
+	m.delegationDetail.vp.Height = h
+	// Refresh content from current task state.
+	if m.delegationDetail.itemIdx >= 0 && m.delegationDetail.itemIdx < len(m.tr.Items) {
+		tasks := m.tr.Items[m.delegationDetail.itemIdx].DelegationTasks
+		if m.delegationDetail.taskIdx >= 0 && m.delegationDetail.taskIdx < len(tasks) {
+			atBottom := m.delegationDetail.vp.AtBottom()
+			m.delegationDetail.vp.SetContent(m.renderDelegationDetailContent(tasks[m.delegationDetail.taskIdx], w))
+			if atBottom {
+				m.delegationDetail.vp.GotoBottom()
+			}
+		}
+	}
+}
+
+func (m model) handleDelegationDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "q":
+		m.delegationDetail = delegationDetailState{}
+		return m, nil
+	case "ctrl+c":
+		m.quitting = true
+		m.cancel()
+		return m, tea.Quit
+	}
+	var cmd tea.Cmd
+	m.delegationDetail.vp, cmd = m.delegationDetail.vp.Update(msg)
+	return m, cmd
+}
+
+func (m model) handleDelegationDetailMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if msg.Button != tea.MouseButtonWheelUp && msg.Button != tea.MouseButtonWheelDown {
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.delegationDetail.vp, cmd = m.delegationDetail.vp.Update(msg)
+	return m, cmd
+}
+
+func (m model) renderDelegationDetail() string {
+	if !m.delegationDetail.open {
+		return ""
+	}
+	return lipgloss.JoinVertical(lipgloss.Left,
+		m.renderDelegationDetailHeader(),
+		m.delegationDetail.vp.View(),
+	)
+}
+
+func (m model) renderDelegationDetailHeader() string {
+	th := m.theme
+	w := max(20, m.width)
+	name := m.delegationDetail.taskName
+	left := "⬡ " + name
+	right := "esc back · ↑↓ scroll"
+	gap := w - lipgloss.Width(left) - lipgloss.Width(right)
+	if gap < 1 {
+		gap = 1
+	}
+	return m.paintRow(th.Header.Render(left)+strings.Repeat(" ", gap)+th.Muted.Render(right), w)
+}
+
+func (m model) renderDelegationDetailContent(task events.DelegationTaskState, width int) string {
+	th := m.theme
+	bodyWidth := width - 4
+	if bodyWidth < 20 {
+		bodyWidth = width
+	}
+
+	var b strings.Builder
+
+	// Task info header.
+	var statusIcon string
+	switch task.Status {
+	case "complete":
+		statusIcon = th.Success.Render("✓")
+	case "failed":
+		statusIcon = th.Error.Render("✗")
+	default:
+		statusIcon = th.Brand.Render("●")
+	}
+
+	var timeStr string
+	if task.Duration != "" {
+		timeStr = task.Duration
+	} else if !task.StartedAt.IsZero() {
+		timeStr = formatDuration(time.Since(task.StartedAt).Truncate(time.Second))
+	}
+
+	b.WriteString(fmt.Sprintf("  %s %s  %s  %s\n",
+		statusIcon,
+		th.Text.Bold(true).Render(task.Name),
+		th.Muted.Render(task.Status),
+		th.Muted.Render(timeStr)))
+
+	if task.Description != "" {
+		b.WriteString("  " + th.Muted.Render(task.Description) + "\n")
+	}
+	b.WriteString("\n")
+
+	// Activity log.
+	if len(task.Activity) == 0 {
+		b.WriteString("  " + th.Muted.Italic(true).Render("No activity yet…") + "\n")
+		return b.String()
+	}
+
+	for _, act := range task.Activity {
+		switch act.Type {
+		case "tool_call":
+			argSummary := summarizeToolArgs(act.Args, bodyWidth-20)
+			b.WriteString(fmt.Sprintf("  %s %s\n",
+				th.Brand.Render("●"),
+				th.Text.Render(act.ToolName+"("+argSummary+")")))
+		case "tool_result":
+			resultStr := summarizeToolResult(act.Result, bodyWidth-10)
+			b.WriteString(fmt.Sprintf("  %s %s\n",
+				th.Success.Render("✓"),
+				th.Muted.Render(act.ToolName)))
+			if resultStr != "" {
+				// Indent result preview.
+				for _, line := range strings.Split(resultStr, "\n") {
+					b.WriteString("      " + th.Muted.Render(line) + "\n")
+				}
+			}
+		case "text":
+			text := act.Text
+			if len(text) > 200 {
+				text = text[:197] + "…"
+			}
+			b.WriteString("  " + th.Text.Render(text) + "\n")
+		}
+	}
+
+	return padBlock(b.String())
+}
+
+// summarizeToolArgs produces a compact one-line summary of tool arguments.
+func summarizeToolArgs(args map[string]any, maxWidth int) string {
+	if len(args) == 0 {
+		return ""
+	}
+	var parts []string
+	for k, v := range args {
+		s := fmt.Sprintf("%v", v)
+		if len(s) > 40 {
+			s = s[:37] + "…"
+		}
+		parts = append(parts, k+": "+s)
+	}
+	result := strings.Join(parts, ", ")
+	if len(result) > maxWidth && maxWidth > 3 {
+		result = result[:maxWidth-1] + "…"
+	}
+	return result
+}
+
+// summarizeToolResult produces a compact preview of a tool result.
+func summarizeToolResult(result any, maxWidth int) string {
+	if result == nil {
+		return ""
+	}
+	s := fmt.Sprintf("%v", result)
+	lines := strings.Split(s, "\n")
+	if len(lines) > 3 {
+		lines = append(lines[:3], "…")
+	}
+	for i, line := range lines {
+		if len(line) > maxWidth && maxWidth > 3 {
+			lines[i] = line[:maxWidth-1] + "…"
+		}
+	}
+	return strings.Join(lines, "\n")
+}
 // and replaces markdown checkboxes with colored status indicators.
 func (m model) renderPlanDocument(content string, width int) string {
 	th := m.theme
@@ -3796,7 +4056,7 @@ func (m model) composerBorderStyle() lipgloss.Style {
 	}
 	var color lipgloss.Color
 	if m.graphPlanMode {
-		color = lipgloss.Color("39") // cyan — distinct from Plan's amber
+		color = lipgloss.Color("172") // amber — plan mode accent
 	} else if m.planMode {
 		color = lipgloss.Color("172")
 	} else if m.askMode {
@@ -3823,7 +4083,7 @@ func (m model) composerModeLabel() string {
 	}
 	sub := "Normal"
 	if m.graphPlanMode {
-		sub = "Graph Plan"
+		sub = "Plan"
 	} else if m.planMode {
 		sub = "Plan"
 	} else if m.askMode {

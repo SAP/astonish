@@ -616,6 +616,178 @@ func TestResumeSession_PopulatesContextTokens(t *testing.T) {
 	}
 }
 
+// appendEvent appends a single ADK event with the given content to the session.
+func appendEvent(t *testing.T, b *localAgentBackend, sess adksession.Session, author string, content *genai.Content) {
+	t.Helper()
+	ev := &adksession.Event{
+		Author:      author,
+		LLMResponse: adkmodel.LLMResponse{Content: content},
+		Timestamp:   time.Now(),
+	}
+	if err := b.sessionSvc.AppendEvent(context.Background(), sess, ev); err != nil {
+		t.Fatalf("AppendEvent: %v", err)
+	}
+}
+
+// getSession fetches the mutable session handle for appending events.
+func getSession(t *testing.T, b *localAgentBackend, id string) adksession.Session {
+	t.Helper()
+	resp, err := b.sessionSvc.Get(context.Background(), &adksession.GetRequest{
+		AppName:   codeAppName,
+		UserID:    b.effectiveUserID(),
+		SessionID: id,
+	})
+	if err != nil || resp == nil || resp.Session == nil {
+		t.Fatalf("Get session: %v", err)
+	}
+	return resp.Session
+}
+
+// TestLoadHistory_AnnouncePlanReconstructsPlanDocument verifies that an
+// announce_plan call/response pair in the session is reconstructed into a
+// rendered plan document (agent text starting with "# Execution Plan"), matching
+// the synthetic text event emitted during live execution — instead of leaking
+// the announce_plan tool into the activity fold.
+func TestLoadHistory_AnnouncePlanReconstructsPlanDocument(t *testing.T) {
+	dir := t.TempDir()
+	b := newFileStoreBackend(t, dir, codeUserID)
+	ctx := context.Background()
+
+	id := seedSession(t, b, "build a feature")
+	sess := getSession(t, b, id)
+
+	// announce_plan FunctionCall (role model).
+	callContent := &genai.Content{
+		Role: genai.RoleModel,
+		Parts: []*genai.Part{{
+			FunctionCall: &genai.FunctionCall{
+				ID:   "call-1",
+				Name: "announce_plan",
+				Args: map[string]any{
+					"goal": "Build the feature",
+					"steps": []any{
+						map[string]any{"name": "phase-one", "description": "Do the first thing"},
+						map[string]any{"name": "phase-two", "description": "Do the second thing"},
+					},
+				},
+			},
+		}},
+	}
+	appendEvent(t, b, sess, "chat", callContent)
+
+	// announce_plan FunctionResponse (role user).
+	respContent := &genai.Content{
+		Role: genai.RoleUser,
+		Parts: []*genai.Part{{
+			FunctionResponse: &genai.FunctionResponse{
+				ID:       "call-1",
+				Name:     "announce_plan",
+				Response: map[string]any{"status": "ok"},
+			},
+		}},
+	}
+	appendEvent(t, b, sess, "chat", respContent)
+
+	entries, err := b.loadHistory(ctx, id)
+	if err != nil {
+		t.Fatalf("loadHistory: %v", err)
+	}
+
+	var planText string
+	for _, e := range entries {
+		if e.Kind == "tool_call" && e.ToolName == "announce_plan" {
+			t.Errorf("announce_plan leaked as tool_call in history")
+		}
+		if e.Kind == "tool_result" && e.ToolName == "announce_plan" {
+			t.Errorf("announce_plan leaked as tool_result in history")
+		}
+		if e.Kind == "agent" && strings.HasPrefix(e.Text, "# Execution Plan") {
+			planText = e.Text
+		}
+	}
+	if planText == "" {
+		t.Fatalf("expected reconstructed plan document in history; entries: %+v", entries)
+	}
+	if !strings.Contains(planText, "Build the feature") {
+		t.Errorf("plan document missing goal; got:\n%s", planText)
+	}
+	if !strings.Contains(planText, "phase-one") || !strings.Contains(planText, "phase-two") {
+		t.Errorf("plan document missing phases; got:\n%s", planText)
+	}
+}
+
+// TestLoadHistory_EditFilePromotedToFileDiff verifies that an edit_file
+// call/response carrying verification_context is promoted to a main-thread
+// ItemFileDiff on resume (not left as a raw args key-value dump in the fold),
+// matching live-session rendering.
+func TestLoadHistory_EditFilePromotedToFileDiff(t *testing.T) {
+	dir := t.TempDir()
+	b := newFileStoreBackend(t, dir, codeUserID)
+	ctx := context.Background()
+
+	id := seedSession(t, b, "edit a file")
+	sess := getSession(t, b, id)
+
+	appendEvent(t, b, sess, "chat", &genai.Content{
+		Role: genai.RoleModel,
+		Parts: []*genai.Part{{
+			FunctionCall: &genai.FunctionCall{
+				ID:   "call-edit",
+				Name: "edit_file",
+				Args: map[string]any{
+					"path":       "main.go",
+					"old_string": "foo",
+					"new_string": "bar",
+				},
+			},
+		}},
+	})
+	appendEvent(t, b, sess, "chat", &genai.Content{
+		Role: genai.RoleUser,
+		Parts: []*genai.Part{{
+			FunctionResponse: &genai.FunctionResponse{
+				ID:   "call-edit",
+				Name: "edit_file",
+				Response: map[string]any{
+					"success":              true,
+					"path":                 "main.go",
+					"verification_context": "@@ -1 +1 @@\n-foo\n+bar",
+				},
+			},
+		}},
+	})
+
+	entries, err := b.loadHistory(ctx, id)
+	if err != nil {
+		t.Fatalf("loadHistory: %v", err)
+	}
+
+	msgs := make([]events.HistoryMsg, 0, len(entries))
+	for _, e := range entries {
+		msgs = append(msgs, events.HistoryMsg{
+			Kind: e.Kind, Text: e.Text, ToolName: e.ToolName,
+			ToolID: e.ToolID, Args: e.Args, Result: e.Result,
+		})
+	}
+	tr := events.NewTranscript()
+	tr.LinearThread = true
+	tr.LoadHistory(msgs)
+
+	foundDiff := false
+	for _, it := range tr.Items {
+		if it.Kind == events.ItemFileDiff && it.DiffVerification != "" {
+			foundDiff = true
+		}
+	}
+	if !foundDiff {
+		kinds := make([]string, len(tr.Items))
+		for i, it := range tr.Items {
+			kinds[i] = string(it.Kind)
+		}
+		t.Fatalf("expected ItemFileDiff for edit_file on resume; got kinds: %v", kinds)
+	}
+}
+
 // TestResumeSession_EmptySessionNoContext verifies an empty resumed session
 // reports zero context (no phantom utilization).
 func TestResumeSession_EmptySessionNoContext(t *testing.T) {
@@ -1114,6 +1286,188 @@ func TestResumeSession_ApprovalSupersededToolCalls(t *testing.T) {
 	if m, ok := results[0].Result.(map[string]any); ok {
 		if _, hasErr := m["error"]; hasErr {
 			t.Errorf("tool_result should not have error, got: %v", m["error"])
+		}
+	}
+}
+
+// TestResumeSession_ApprovalSupersededToolCalls_ContentField verifies the
+// approval supersession detection when FunctionCalls are stored in the Content
+// field (not LLMResponse.Content). This tests the unified field access fix.
+func TestResumeSession_ApprovalSupersededToolCalls_ContentField(t *testing.T) {
+	dir := t.TempDir()
+	userID := codeUserIDForDir("/work/projectApproval2")
+
+	b := newFileStoreBackend(t, dir, userID)
+	ctx := context.Background()
+
+	resp, err := b.sessionSvc.Create(ctx, &adksession.CreateRequest{
+		AppName: codeAppName,
+		UserID:  b.effectiveUserID(),
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	sess := resp.Session
+
+	// 1. User message
+	if err := b.sessionSvc.AppendEvent(ctx, sess, &adksession.Event{
+		ID:     "e1",
+		Author: "user",
+		LLMResponse: adkmodel.LLMResponse{
+			Content: genai.NewContentFromText("write hello to file", genai.RoleUser),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 2. Model FunctionCall (pre-approval) — stored normally
+	if err := b.sessionSvc.AppendEvent(ctx, sess, &adksession.Event{
+		ID:     "e2",
+		Author: "chat",
+		LLMResponse: adkmodel.LLMResponse{
+			Content: &genai.Content{
+				Role: "model",
+				Parts: []*genai.Part{{
+					FunctionCall: &genai.FunctionCall{
+						ID:   "call_pre",
+						Name: "write_file",
+						Args: map[string]any{"file_path": "/tmp/hello.txt", "content": "hello"},
+					},
+				}},
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 3. Approval prompt with awaiting_approval=true
+	if err := b.sessionSvc.AppendEvent(ctx, sess, &adksession.Event{
+		ID:     "e3",
+		Author: "astonish_code",
+		LLMResponse: adkmodel.LLMResponse{
+			Content: genai.NewContentFromText("write_file wants to access /tmp/hello.txt", genai.RoleModel),
+		},
+		Actions: adksession.EventActions{
+			StateDelta: map[string]any{
+				"awaiting_approval": true,
+				"approval_tool":     "write_file",
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 4. User approves ("Always Allow")
+	if err := b.sessionSvc.AppendEvent(ctx, sess, &adksession.Event{
+		ID:     "e4",
+		Author: "user",
+		LLMResponse: adkmodel.LLMResponse{
+			Content: genai.NewContentFromText("Always Allow", genai.RoleUser),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 5. Model re-issues FunctionCall (post-approval, new ID)
+	if err := b.sessionSvc.AppendEvent(ctx, sess, &adksession.Event{
+		ID:     "e5",
+		Author: "chat",
+		LLMResponse: adkmodel.LLMResponse{
+			Content: &genai.Content{
+				Role: "model",
+				Parts: []*genai.Part{{
+					FunctionCall: &genai.FunctionCall{
+						ID:   "call_post",
+						Name: "write_file",
+						Args: map[string]any{"file_path": "/tmp/hello.txt", "content": "hello"},
+					},
+				}},
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 6. Tool result for call_post
+	if err := b.sessionSvc.AppendEvent(ctx, sess, &adksession.Event{
+		ID:     "e6",
+		Author: "chat",
+		LLMResponse: adkmodel.LLMResponse{
+			Content: &genai.Content{
+				Role: "user",
+				Parts: []*genai.Part{{
+					FunctionResponse: &genai.FunctionResponse{
+						ID:       "call_post",
+						Name:     "write_file",
+						Response: map[string]any{"success": true, "path": "/tmp/hello.txt"},
+					},
+				}},
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 7. Model final text
+	if err := b.sessionSvc.AppendEvent(ctx, sess, &adksession.Event{
+		ID:     "e7",
+		Author: "chat",
+		LLMResponse: adkmodel.LLMResponse{
+			Content: genai.NewContentFromText("Done! File written.", genai.RoleModel),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Resume and verify.
+	b2 := newFileStoreBackend(t, dir, userID)
+	hist, err := b2.ResumeSession(ctx, sess.ID())
+	if err != nil {
+		t.Fatalf("ResumeSession: %v", err)
+	}
+
+	var calls, results, systems []backend.HistoryEntry
+	for _, h := range hist {
+		switch h.Kind {
+		case "tool_call":
+			calls = append(calls, h)
+		case "tool_result":
+			results = append(results, h)
+		case "system":
+			systems = append(systems, h)
+		}
+	}
+
+	// The pre-approval call must NOT appear.
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 tool_call (post-approval only), got %d; calls=%+v", len(calls), calls)
+	}
+	if calls[0].ToolID != "call_post" {
+		t.Errorf("tool_call ToolID = %q, want %q", calls[0].ToolID, "call_post")
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 tool_result, got %d; results=%+v", len(results), results)
+	}
+	if results[0].ToolID != "call_post" {
+		t.Errorf("tool_result ToolID = %q, want %q", results[0].ToolID, "call_post")
+	}
+
+	// The "Always Allow" user message should be reclassified as a system entry.
+	found := false
+	for _, s := range systems {
+		if strings.Contains(s.Text, "Approval:") && strings.Contains(s.Text, "Always Allow") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected system entry with 'Approval: Always Allow', got systems=%+v", systems)
+	}
+
+	// Ensure no user entries contain approval text.
+	for _, h := range hist {
+		if h.Kind == "user" && (h.Text == "Always Allow" || h.Text == "Allow") {
+			t.Errorf("approval response should NOT appear as user entry: %+v", h)
 		}
 	}
 }
@@ -2105,5 +2459,338 @@ func TestCompact_RunsImmediately(t *testing.T) {
 	}
 	if b.contextTokens <= 0 {
 		t.Fatal("contextTokens should be updated after compact")
+	}
+}
+
+// TestResumeSession_ApprovalPromptTextSuppressed verifies that the pre-rendered
+// ANSI tool box text stored in the approval prompt event (awaiting_approval=true)
+// is NOT emitted as inline agent text on resume. During live execution this text
+// was shown as a transient overlay; on resume it should be invisible — the tool
+// call is already represented by the activity fold from the FunctionCall event.
+func TestResumeSession_ApprovalPromptTextSuppressed(t *testing.T) {
+	dir := t.TempDir()
+	userID := codeUserIDForDir("/work/projectPromptSuppress")
+
+	b := newFileStoreBackend(t, dir, userID)
+	ctx := context.Background()
+
+	resp, err := b.sessionSvc.Create(ctx, &adksession.CreateRequest{
+		AppName: codeAppName,
+		UserID:  b.effectiveUserID(),
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	sess := resp.Session
+
+	// 1. User message
+	if err := b.sessionSvc.AppendEvent(ctx, sess, &adksession.Event{
+		ID:     "e1",
+		Author: "user",
+		LLMResponse: adkmodel.LLMResponse{
+			Content: genai.NewContentFromText("create a file", genai.RoleUser),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 2. Agent reasoning text
+	if err := b.sessionSvc.AppendEvent(ctx, sess, &adksession.Event{
+		ID:     "e2",
+		Author: "chat",
+		LLMResponse: adkmodel.LLMResponse{
+			Content: genai.NewContentFromText("I'll create the file with write_file:", genai.RoleModel),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 3. FunctionCall (pre-approval)
+	if err := b.sessionSvc.AppendEvent(ctx, sess, &adksession.Event{
+		ID:     "e3",
+		Author: "chat",
+		LLMResponse: adkmodel.LLMResponse{
+			Content: &genai.Content{
+				Role: "model",
+				Parts: []*genai.Part{{
+					FunctionCall: &genai.FunctionCall{
+						ID:   "call_pre",
+						Name: "write_file",
+						Args: map[string]any{"file_path": "/tmp/test.txt", "content": "hello"},
+					},
+				}},
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 4. Approval prompt event — this is what RenderToolBox produces. The text
+	// content is the pre-rendered ANSI purple box that must NOT appear on resume.
+	approvalPromptText := "╭──────────────────────────────────────╮\n│ 🛠  write_file                        │\n│ file_path: /tmp/test.txt             │\n│ content: hello                       │\n╰──────────────────────────────────────╯"
+	if err := b.sessionSvc.AppendEvent(ctx, sess, &adksession.Event{
+		ID:     "e4",
+		Author: "astonish_code",
+		LLMResponse: adkmodel.LLMResponse{
+			Content: &genai.Content{
+				Role:  "model",
+				Parts: []*genai.Part{{Text: approvalPromptText}},
+			},
+		},
+		Actions: adksession.EventActions{
+			StateDelta: map[string]any{
+				"awaiting_approval": true,
+				"approval_tool":     "write_file",
+				"approval_options":  []string{"Yes", "No"},
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 5. User approves
+	if err := b.sessionSvc.AppendEvent(ctx, sess, &adksession.Event{
+		ID:     "e5",
+		Author: "user",
+		LLMResponse: adkmodel.LLMResponse{
+			Content: genai.NewContentFromText("Always Allow", genai.RoleUser),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 6. FunctionCall (post-approval, new ID)
+	if err := b.sessionSvc.AppendEvent(ctx, sess, &adksession.Event{
+		ID:     "e6",
+		Author: "chat",
+		LLMResponse: adkmodel.LLMResponse{
+			Content: &genai.Content{
+				Role: "model",
+				Parts: []*genai.Part{{
+					FunctionCall: &genai.FunctionCall{
+						ID:   "call_post",
+						Name: "write_file",
+						Args: map[string]any{"file_path": "/tmp/test.txt", "content": "hello"},
+					},
+				}},
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 7. Tool result
+	if err := b.sessionSvc.AppendEvent(ctx, sess, &adksession.Event{
+		ID:     "e7",
+		Author: "chat",
+		LLMResponse: adkmodel.LLMResponse{
+			Content: &genai.Content{
+				Role: "user",
+				Parts: []*genai.Part{{
+					FunctionResponse: &genai.FunctionResponse{
+						ID:       "call_post",
+						Name:     "write_file",
+						Response: map[string]any{"status": "ok"},
+					},
+				}},
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 8. Agent final text
+	if err := b.sessionSvc.AppendEvent(ctx, sess, &adksession.Event{
+		ID:     "e8",
+		Author: "chat",
+		LLMResponse: adkmodel.LLMResponse{
+			Content: genai.NewContentFromText("Done! The file has been created.", genai.RoleModel),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Resume and verify
+	b2 := newFileStoreBackend(t, dir, userID)
+	hist, err := b2.ResumeSession(ctx, sess.ID())
+	if err != nil {
+		t.Fatalf("ResumeSession: %v", err)
+	}
+
+	// The approval prompt text must NOT appear anywhere in history
+	for i, h := range hist {
+		if strings.Contains(h.Text, "write_file") && strings.Contains(h.Text, "file_path") && h.Kind == "agent" {
+			t.Errorf("entry[%d] (kind=%q) contains approval prompt tool box text that should be suppressed:\n%s", i, h.Kind, h.Text)
+		}
+		// More specific check for the ANSI box content
+		if strings.Contains(h.Text, "╭") || strings.Contains(h.Text, "╰") {
+			t.Errorf("entry[%d] (kind=%q) contains ANSI box border chars (from RenderToolBox) that should be suppressed:\n%s", i, h.Kind, h.Text)
+		}
+	}
+
+	// The agent reasoning text SHOULD still be present
+	foundReasoning := false
+	for _, h := range hist {
+		if h.Kind == "agent" && strings.Contains(h.Text, "I'll create the file") {
+			foundReasoning = true
+			break
+		}
+	}
+	if !foundReasoning {
+		t.Error("agent reasoning text should still be present in history")
+	}
+
+	// The final agent text SHOULD still be present
+	foundFinal := false
+	for _, h := range hist {
+		if h.Kind == "agent" && strings.Contains(h.Text, "Done! The file has been created.") {
+			foundFinal = true
+			break
+		}
+	}
+	if !foundFinal {
+		t.Error("agent final text should still be present in history")
+	}
+
+	// Only one tool_call should appear (the post-approval one)
+	var calls []backend.HistoryEntry
+	for _, h := range hist {
+		if h.Kind == "tool_call" {
+			calls = append(calls, h)
+		}
+	}
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 tool_call (post-approval), got %d", len(calls))
+	}
+	if calls[0].ToolID != "call_post" {
+		t.Errorf("tool_call ToolID = %q, want %q", calls[0].ToolID, "call_post")
+	}
+}
+
+// TestResumeSession_AutoApprovedPromptTextSuppressed verifies that auto_approved
+// events (tools that bypass interactive approval) also have their RenderToolBox
+// text suppressed on resume.
+func TestResumeSession_AutoApprovedPromptTextSuppressed(t *testing.T) {
+	dir := t.TempDir()
+	userID := codeUserIDForDir("/work/projectAutoApproval")
+
+	b := newFileStoreBackend(t, dir, userID)
+	ctx := context.Background()
+
+	resp, err := b.sessionSvc.Create(ctx, &adksession.CreateRequest{
+		AppName: codeAppName,
+		UserID:  b.effectiveUserID(),
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	sess := resp.Session
+
+	// 1. User message
+	if err := b.sessionSvc.AppendEvent(ctx, sess, &adksession.Event{
+		ID:     "e1",
+		Author: "user",
+		LLMResponse: adkmodel.LLMResponse{
+			Content: genai.NewContentFromText("search for test", genai.RoleUser),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 2. Auto-approved visual event (tool box text with auto_approved=true)
+	autoApprovedText := "╭──────────────────────────────────────╮\n│ 🛠  grep_search                       │\n│ pattern: test                        │\n╰──────────────────────────────────────╯"
+	if err := b.sessionSvc.AppendEvent(ctx, sess, &adksession.Event{
+		ID:     "e2",
+		Author: "astonish_code",
+		LLMResponse: adkmodel.LLMResponse{
+			Content: &genai.Content{
+				Role:  "model",
+				Parts: []*genai.Part{{Text: autoApprovedText}},
+			},
+		},
+		Actions: adksession.EventActions{
+			StateDelta: map[string]any{
+				"auto_approved": true,
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 3. FunctionCall
+	if err := b.sessionSvc.AppendEvent(ctx, sess, &adksession.Event{
+		ID:     "e3",
+		Author: "chat",
+		LLMResponse: adkmodel.LLMResponse{
+			Content: &genai.Content{
+				Role: "model",
+				Parts: []*genai.Part{{
+					FunctionCall: &genai.FunctionCall{
+						ID:   "call_1",
+						Name: "grep_search",
+						Args: map[string]any{"pattern": "test"},
+					},
+				}},
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 4. Tool result
+	if err := b.sessionSvc.AppendEvent(ctx, sess, &adksession.Event{
+		ID:     "e4",
+		Author: "chat",
+		LLMResponse: adkmodel.LLMResponse{
+			Content: &genai.Content{
+				Role: "user",
+				Parts: []*genai.Part{{
+					FunctionResponse: &genai.FunctionResponse{
+						ID:       "call_1",
+						Name:     "grep_search",
+						Response: map[string]any{"matches": 5},
+					},
+				}},
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 5. Agent result text
+	if err := b.sessionSvc.AppendEvent(ctx, sess, &adksession.Event{
+		ID:     "e5",
+		Author: "chat",
+		LLMResponse: adkmodel.LLMResponse{
+			Content: genai.NewContentFromText("Found 5 matches.", genai.RoleModel),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Resume and verify
+	b2 := newFileStoreBackend(t, dir, userID)
+	hist, err := b2.ResumeSession(ctx, sess.ID())
+	if err != nil {
+		t.Fatalf("ResumeSession: %v", err)
+	}
+
+	// The auto_approved tool box text must NOT appear in history
+	for i, h := range hist {
+		if strings.Contains(h.Text, "╭") || strings.Contains(h.Text, "╰") {
+			t.Errorf("entry[%d] (kind=%q) contains ANSI box border chars that should be suppressed:\n%s", i, h.Kind, h.Text)
+		}
+	}
+
+	// Agent result text should be present
+	foundResult := false
+	for _, h := range hist {
+		if h.Kind == "agent" && strings.Contains(h.Text, "Found 5 matches") {
+			foundResult = true
+			break
+		}
+	}
+	if !foundResult {
+		t.Error("agent result text should still be present in history")
 	}
 }

@@ -688,6 +688,20 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 	// This enables the delegation panel that shows task timers and completion status.
 	chatAgent.SubTaskProgressCallback = func(evt agent.SubTaskProgressEvent) {
 		switch evt.Type {
+		case "plan_announced":
+			// Emit the plan document content as agent text so it renders in the
+			// transcript with the distinct plan document styling (bordered frame,
+			// colored status icons). The plan is written to PLAN.md by
+			// SetActivePlan; here we make it visible in the chat thread.
+			doc := agent.PlanDocumentInfo{
+				Context:      evt.PlanContext,
+				WhatNotToDo:  evt.PlanWhatNotToDo,
+				Verification: evt.PlanVerification,
+			}
+			planContent := agent.RenderPlanFromInfoWithDoc(evt.PlanGoal, doc, evt.PlanSteps)
+			if planContent != "" {
+				emit("text", map[string]any{"text": planContent})
+			}
 		case "delegation_start":
 			tasks := make([]any, len(evt.Tasks))
 			for i, t := range evt.Tasks {
@@ -710,6 +724,7 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 	// still runs in all cases. We never downgrade to a different mode here.
 	planMode := opts.PlanMode
 	graphPlan := opts.GraphPlanMode
+	askMode := opts.AskMode
 	systemContext := opts.SystemContext
 	if graphPlan {
 		if notice := EnsureCodegraph(ctx, b.workingDir); notice != "" {
@@ -722,11 +737,12 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 		chatAgent.SetActiveGraphPlan(nil)
 	}
 
-	if systemContext != "" || planMode || graphPlan {
+	if systemContext != "" || planMode || graphPlan || askMode {
 		ctx = agent.WithPromptOverrides(ctx, &agent.PromptOverrides{
 			SessionContext: agent.EscapeCurlyPlaceholders(systemContext),
 			PlanMode:       planMode,
 			GraphPlanMode:  graphPlan,
+			AskMode:        askMode,
 		})
 	}
 
@@ -1592,20 +1608,23 @@ func (b *localAgentBackend) loadHistory(ctx context.Context, id string) ([]backe
 	var allEvents []*session.Event
 	for ev := range resp.Session.Events().All() {
 		allEvents = append(allEvents, ev)
-		if ev == nil || ev.Content == nil {
+		if ev == nil {
 			continue
 		}
-		for _, part := range ev.Content.Parts {
+		// Collect FunctionResponse IDs from BOTH Content and LLMResponse.Content
+		// to match the main rendering loop which reads from LLMResponse.Content.
+		for _, part := range eventAllParts(ev) {
 			if part.FunctionResponse != nil && part.FunctionResponse.ID != "" {
 				answeredIDs[part.FunctionResponse.ID] = true
 			}
 		}
 	}
 	for i, ev := range allEvents {
-		if ev == nil || ev.Content == nil {
+		if ev == nil {
 			continue
 		}
-		for _, part := range ev.Content.Parts {
+		// Scan for FunctionCalls in both Content and LLMResponse.Content fields.
+		for _, part := range eventAllParts(ev) {
 			if part.FunctionCall == nil || part.FunctionCall.ID == "" {
 				continue
 			}
@@ -1614,6 +1633,9 @@ func (b *localAgentBackend) loadHistory(ctx context.Context, id string) ([]backe
 			}
 			// Look ahead for awaiting_approval=true
 			for j := i + 1; j < len(allEvents); j++ {
+				if allEvents[j] == nil {
+					continue
+				}
 				if allEvents[j].Actions.StateDelta != nil {
 					if awaiting, ok := allEvents[j].Actions.StateDelta["awaiting_approval"]; ok {
 						if ab, isBool := awaiting.(bool); isBool && ab {
@@ -1622,15 +1644,45 @@ func (b *localAgentBackend) loadHistory(ctx context.Context, id string) ([]backe
 						}
 					}
 				}
-				if allEvents[j].Content != nil && allEvents[j].Content.Role == "user" {
+				if eventHasUserRole(allEvents[j]) {
 					break
 				}
 			}
 		}
 	}
 
+	// Track which event indices carry awaiting_approval=true or auto_approved=true
+	// so we can: (1) detect and reclassify the immediately-following user approval
+	// response as a system message instead of a user bubble, and (2) suppress the
+	// pre-rendered ANSI tool box text that these events carry (it was shown as a
+	// transient overlay during live execution, not as inline agent text).
+	approvalPromptIndices := make(map[int]bool)
+	for i, ev := range allEvents {
+		if ev == nil {
+			continue
+		}
+		if ev.Actions.StateDelta != nil {
+			if awaiting, ok := ev.Actions.StateDelta["awaiting_approval"]; ok {
+				if ab, isBool := awaiting.(bool); isBool && ab {
+					approvalPromptIndices[i] = true
+				}
+			}
+			if autoApproved, ok := ev.Actions.StateDelta["auto_approved"]; ok {
+				if ab, isBool := autoApproved.(bool); isBool && ab {
+					approvalPromptIndices[i] = true
+				}
+			}
+		}
+	}
+
+	// Track announce_plan call args by call ID so we can reconstruct the plan
+	// document when the corresponding FunctionResponse is seen. During a live
+	// session the plan is rendered as synthetic agent text (not stored in the
+	// session); on resume we must recreate that text from the stored call args.
+	announcePlanArgs := make(map[string]map[string]any)
+
 	var out []backend.HistoryEntry
-	for _, ev := range allEvents {
+	for i, ev := range allEvents {
 		if ev == nil || ev.LLMResponse.Content == nil {
 			continue
 		}
@@ -1642,9 +1694,32 @@ func (b *localAgentBackend) loadHistory(ctx context.Context, id string) ([]backe
 				if role == "user" {
 					kind = "user"
 				}
+				// Skip the approval prompt event text entirely. During live
+				// execution this was rendered as a transient overlay (not inline
+				// agent text). Re-emitting the pre-rendered ANSI tool box from
+				// RenderToolBox would show a purple bordered card with tool args
+				// instead of the compact activity fold.
+				if approvalPromptIndices[i] {
+					continue
+				}
+				// Reclassify the user's approval response as a system message
+				// so it matches the live rendering ("Approval: Always Allow")
+				// instead of appearing as an orphaned user bubble.
+				if kind == "user" && isApprovalResponseEvent(i, allEvents, approvalPromptIndices, part.Text) {
+					out = append(out, backend.HistoryEntry{Kind: "system", Text: "Approval: " + extractApprovalChoice(part.Text)})
+					continue
+				}
 				out = append(out, backend.HistoryEntry{Kind: kind, Text: part.Text})
 			case part.FunctionCall != nil:
 				if approvalSuperseded[part.FunctionCall.ID] {
+					continue
+				}
+				// announce_plan is never shown in the activity fold during live
+				// execution — it is converted to a rendered plan text event.
+				// Store the args so we can reconstruct that text when the
+				// FunctionResponse arrives; do not emit a tool_call entry.
+				if part.FunctionCall.Name == "announce_plan" {
+					announcePlanArgs[part.FunctionCall.ID] = part.FunctionCall.Args
 					continue
 				}
 				out = append(out, backend.HistoryEntry{
@@ -1654,6 +1729,15 @@ func (b *localAgentBackend) loadHistory(ctx context.Context, id string) ([]backe
 					Args:     part.FunctionCall.Args,
 				})
 			case part.FunctionResponse != nil:
+				// Reconstruct the plan document text from the stored call args,
+				// mirroring the synthetic text event emitted during live execution.
+				if part.FunctionResponse.Name == "announce_plan" {
+					args := announcePlanArgs[part.FunctionResponse.ID]
+					if rendered := renderPlanFromArgs(args); rendered != "" {
+						out = append(out, backend.HistoryEntry{Kind: "agent", Text: rendered})
+					}
+					continue
+				}
 				out = append(out, backend.HistoryEntry{
 					Kind:     "tool_result",
 					ToolName: part.FunctionResponse.Name,
@@ -1664,6 +1748,133 @@ func (b *localAgentBackend) loadHistory(ctx context.Context, id string) ([]backe
 		}
 	}
 	return out, nil
+}
+
+// eventAllParts returns all genai.Parts from an event's Content (accessible
+// as both ev.Content and ev.LLMResponse.Content due to Go struct embedding —
+// they are the same field). This helper exists for clarity and nil-safety.
+func eventAllParts(ev *session.Event) []*genai.Part {
+	if ev.Content == nil {
+		return nil
+	}
+	return ev.Content.Parts
+}
+
+// eventHasUserRole returns true if the event carries a user-role message.
+// (ev.Content and ev.LLMResponse.Content are the same field via Go embedding.)
+func eventHasUserRole(ev *session.Event) bool {
+	return ev.Content != nil && ev.Content.Role == "user"
+}
+
+// isApprovalResponseEvent returns true when the user-role event at index i is
+// an approval response that should be reclassified as a system message. It
+// checks whether the preceding event (skipping nil/empty) carried an
+// awaiting_approval=true state delta, or whether the text itself matches
+// known approval response patterns.
+func isApprovalResponseEvent(i int, allEvents []*session.Event, approvalPromptIndices map[int]bool, text string) bool {
+	// Check if a preceding event is an approval prompt.
+	for prev := i - 1; prev >= 0; prev-- {
+		if allEvents[prev] == nil {
+			continue
+		}
+		if approvalPromptIndices[prev] {
+			return true
+		}
+		// Stop once we hit a non-nil event that isn't an approval prompt.
+		break
+	}
+	// Fallback: match known approval response patterns by content.
+	return isApprovalResponseText(text)
+}
+
+// isApprovalResponseText returns true if text looks like an approval decision
+// (raw short choice or rewritten authorization instruction).
+func isApprovalResponseText(text string) bool {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	switch lower {
+	case "allow", "always allow", "deny", "yes", "no", "y", "n":
+		return true
+	}
+	if strings.HasPrefix(text, "The user authorized") || strings.HasPrefix(text, "The user denied") {
+		return true
+	}
+	return false
+}
+
+// extractApprovalChoice extracts a short human-readable choice label from the
+// raw or rewritten approval response text.
+func extractApprovalChoice(text string) string {
+	trimmed := strings.TrimSpace(text)
+	lower := strings.ToLower(trimmed)
+	// Short canonical choices — use as-is.
+	switch lower {
+	case "allow", "always allow", "deny", "yes", "no", "y", "n":
+		return trimmed
+	}
+	// Rewritten authorization text: extract the choice from the prefix.
+	if strings.HasPrefix(text, "The user authorized") {
+		return "Allow"
+	}
+	if strings.HasPrefix(text, "The user denied") {
+		return "Deny"
+	}
+	// Fallback.
+	if len(trimmed) > 30 {
+		return trimmed[:30] + "…"
+	}
+	return trimmed
+}
+
+// renderPlanFromArgs reconstructs the rendered plan document from the stored
+// announce_plan FunctionCall args. This mirrors the synthetic text event that
+// is emitted during live execution but is never persisted to the session store.
+func renderPlanFromArgs(args map[string]any) string {
+	if args == nil {
+		return ""
+	}
+	goal, _ := args["goal"].(string)
+
+	var steps []agent.PlanStepInfo
+	if raw, ok := args["steps"].([]any); ok {
+		for _, item := range raw {
+			m, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			step := agent.PlanStepInfo{
+				Name:          stringField(m, "name"),
+				Description:   stringField(m, "description"),
+				Details:       stringField(m, "details"),
+				Verify:        stringField(m, "verify"),
+				ParallelGroup: stringField(m, "parallel_group"),
+			}
+			if filesRaw, ok := m["files"].([]any); ok {
+				for _, f := range filesRaw {
+					fm, ok := f.(map[string]any)
+					if !ok {
+						continue
+					}
+					step.Files = append(step.Files, agent.PlanFileChange{
+						Path: stringField(fm, "path"),
+						Kind: stringField(fm, "kind"),
+					})
+				}
+			}
+			steps = append(steps, step)
+		}
+	}
+
+	doc := agent.PlanDocumentInfo{
+		Context:      stringField(args, "context"),
+		WhatNotToDo:  stringField(args, "what_not_to_do"),
+		Verification: stringField(args, "verification"),
+	}
+	return agent.RenderPlanFromInfoWithDoc(goal, doc, steps)
+}
+
+func stringField(m map[string]any, key string) string {
+	s, _ := m[key].(string)
+	return s
 }
 
 func (b *localAgentBackend) DeleteSession(ctx context.Context, sessionID string) error {

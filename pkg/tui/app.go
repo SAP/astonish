@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -130,9 +131,14 @@ type model struct {
 	turnCancel context.CancelFunc
 	// eventCh is drained via tea.Cmds while a turn is active.
 	eventCh <-chan events.Event
-	// turnStartedAt records when the current turn began, enabling a live
-	// elapsed-time counter in the status bar. Zero value means no turn active.
+	// turnStartedAt records when the current turn began (or resumed after a
+	// HITL pause), enabling a live elapsed-time counter in the status bar.
+	// Zero value means the timer is not actively ticking (either no turn or paused).
 	turnStartedAt time.Time
+	// timerAccumulated holds elapsed execution time from previous segments of
+	// the same logical turn (before HITL pauses). The total elapsed time for
+	// the current turn is timerAccumulated + time.Since(turnStartedAt).
+	timerAccumulated time.Duration
 	// compacting is true while an async /compact request is in flight. Used to
 	// show "Compacting…" immediately and reject a second /compact until done.
 	compacting bool
@@ -663,7 +669,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.turnCancel()
 			}
 			m.turnCancel = nil
-			m.turnStartedAt = time.Time{}
+			m.timerReset()
 			m.tr.Streaming = false
 			m.tr.Status = ""
 			m.tr.Apply(events.NewError("Network approval failed: " + msg.err.Error()))
@@ -674,7 +680,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.tr.Streaming = true
 		m.tr.Status = "Thinking…"
 		m.eventCh = msg.ch
-		m.turnStartedAt = time.Now()
+		m.timerResume()
 		m.refreshViewport()
 		if msg.ch == nil {
 			return m, nil
@@ -691,14 +697,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case turnDoneMsg:
 		m.eventCh = nil
 		m.turnCancel = nil
-		if !m.turnStartedAt.IsZero() {
-			d := time.Since(m.turnStartedAt).Truncate(time.Second)
+		if m.tr.Awaiting {
+			// HITL approval pending — pause timer, don't finalize.
+			m.timerPause()
+		} else if m.timerActive() {
+			d := m.timerElapsed().Truncate(time.Second)
 			if d >= time.Second {
 				m.tr.Apply(events.NewSystem("Completed in " + formatDuration(d)))
 			}
-			m.turnStartedAt = time.Time{}
+			m.timerReset()
 		}
-		if m.tr.Streaming {
+		if m.tr.Streaming && !m.tr.Awaiting {
 			m.tr.Apply(events.NewDone())
 		}
 		m.refreshViewport()
@@ -707,7 +716,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case turnErrMsg:
 		m.eventCh = nil
 		m.turnCancel = nil
-		m.turnStartedAt = time.Time{}
+		m.timerReset()
 		m.tr.Apply(events.NewError(msg.err.Error()))
 		m.refreshViewport()
 		return m, nil
@@ -724,8 +733,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case timerTickMsg:
-		// Re-schedule the next tick only while a turn is in progress.
-		if !m.turnStartedAt.IsZero() {
+		// Re-schedule the next tick only while the timer is actively running.
+		if m.timerRunning() {
 			// Refresh viewport when delegation is active so per-task
 			// elapsed timers update live (they compute time.Since on render).
 			if m.tr != nil && m.tr.DelegationActive {
@@ -1740,7 +1749,7 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.eventCh = ch
-	m.turnStartedAt = time.Now()
+	m.timerStart()
 	return m, tea.Batch(waitEvent(ch), timerTick())
 }
 
@@ -1818,7 +1827,7 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.eventCh = ch
-		m.turnStartedAt = time.Now()
+		m.timerStart()
 		return m, tea.Batch(waitEvent(ch), timerTick())
 	}
 	m.refreshViewport()
@@ -1936,20 +1945,28 @@ func (m *model) applyEvent(ev events.Event) {
 			m.info.Model = ev.Model
 		}
 	}
+	// Pause the timer when a HITL approval suspends execution. The timer
+	// resumes when the user submits their approval choice.
+	if ev.Kind == events.KindApproval || ev.Kind == events.KindNetworkDenial {
+		m.timerPause()
+	}
 }
 
 // finishTurn finalizes a turn whose event channel has closed (mirrors the
 // turnDoneMsg handler). Returns the follow-up command (none).
 func (m *model) finishTurn() tea.Cmd {
 	m.turnCancel = nil
-	if !m.turnStartedAt.IsZero() {
-		d := time.Since(m.turnStartedAt).Truncate(time.Second)
+	if m.tr.Awaiting {
+		// HITL approval pending — pause timer, don't finalize.
+		m.timerPause()
+	} else if m.timerActive() {
+		d := m.timerElapsed().Truncate(time.Second)
 		if d >= time.Second {
 			m.tr.Apply(events.NewSystem("Completed in " + formatDuration(d)))
 		}
-		m.turnStartedAt = time.Time{}
+		m.timerReset()
 	}
-	if m.tr.Streaming {
+	if m.tr.Streaming && !m.tr.Awaiting {
 		m.tr.Apply(events.NewDone())
 	}
 	return nil
@@ -3552,8 +3569,8 @@ func (m model) renderLiveStatus() string {
 	}
 	if m.tr.Status != "" || m.tr.Streaming {
 		left := th.Status.Render(m.spin.View() + " " + first(m.tr.Status, "Working…"))
-		if !m.turnStartedAt.IsZero() {
-			d := time.Since(m.turnStartedAt).Truncate(time.Second)
+		if m.timerActive() && !m.tr.Awaiting {
+			d := m.timerElapsed().Truncate(time.Second)
 			right := th.Muted.Render(formatDuration(d))
 			gap := m.width - lipgloss.Width(left) - lipgloss.Width(right)
 			if gap < 1 {
@@ -3639,10 +3656,43 @@ func (m model) renderDelegationItem(it events.Item, width int) string {
 		row := fmt.Sprintf("  %s %s%s  %s  %s",
 			icon, renderedName, strings.Repeat(" ", pad), renderedStatus, renderedTime)
 		lines = append(lines, row)
+
+		// Show inline activity status for running tasks.
+		if statusLine := delegationTaskStatusLine(task, w-6); statusLine != "" {
+			lines = append(lines, "      "+th.Muted.Italic(true).Render(statusLine))
+		}
 	}
 
 	return th.Brand.Render(header) + "\n" + strings.Join(lines, "\n") + "\n" +
 		th.Muted.Italic(true).Render("    click task to expand details")
+}
+
+// delegationTaskStatusLine returns a short inline status for a running task's
+// latest activity (e.g. "→ read_file" or "→ thinking about X…").
+func delegationTaskStatusLine(task events.DelegationTaskState, maxWidth int) string {
+	if task.Status != "running" || len(task.Activity) == 0 {
+		return ""
+	}
+	last := task.Activity[len(task.Activity)-1]
+	var line string
+	switch last.Type {
+	case "tool_call":
+		line = "→ " + last.ToolName
+	case "tool_result":
+		line = "→ " + last.ToolName + " done"
+	case "text":
+		t := last.Text
+		if idx := strings.IndexByte(t, '\n'); idx >= 0 {
+			t = t[:idx]
+		}
+		line = "→ " + t
+	default:
+		return ""
+	}
+	if maxWidth > 0 && len(line) > maxWidth {
+		line = line[:maxWidth-1] + "…"
+	}
+	return line
 }
 
 // --- Delegation detail overlay ---
@@ -3651,16 +3701,27 @@ func (m model) renderDelegationItem(it events.Item, width int) string {
 // delegation item. Header is line 0, each task is line 1+i. Returns -1 if the
 // click is not on a task row.
 func (m model) delegationTaskAtLine(line int, itemIdx int) int {
-	// Find the hit region for this item to get the start line.
 	for _, r := range m.hitRegions {
 		if r.itemIdx == itemIdx && r.kind == events.ItemDelegation {
 			offset := line - r.start
 			// offset 0 = header line ("Delegating N tasks")
-			// offset 1..N = task rows
-			// offset N+1 = hint line
+			if offset < 1 {
+				return -1
+			}
 			tasks := m.tr.Items[itemIdx].DelegationTasks
-			if offset >= 1 && offset <= len(tasks) {
-				return offset - 1
+			currentLine := 1 // start after header
+			for i, task := range tasks {
+				if offset == currentLine {
+					return i
+				}
+				currentLine++ // task row
+				// Running tasks with activity have an extra status line
+				if task.Status == "running" && len(task.Activity) > 0 {
+					if offset == currentLine {
+						return i // clicking on status line selects the same task
+					}
+					currentLine++
+				}
 			}
 			return -1
 		}
@@ -3835,8 +3896,14 @@ func summarizeToolArgs(args map[string]any, maxWidth int) string {
 	if len(args) == 0 {
 		return ""
 	}
+	keys := make([]string, 0, len(args))
+	for k := range args {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
 	var parts []string
-	for k, v := range args {
+	for _, k := range keys {
+		v := args[k]
 		s := fmt.Sprintf("%v", v)
 		if len(s) > 40 {
 			s = s[:37] + "…"
@@ -4009,6 +4076,59 @@ func formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%dh %dm %ds", h, m, s)
 }
 
+// ---------------------------------------------------------------------------
+// Timer helpers — pause/resume across HITL approval boundaries
+// ---------------------------------------------------------------------------
+
+// timerElapsed returns the total elapsed execution time for the current logical
+// turn, combining any accumulated time from prior segments with the current
+// running segment (if the timer is actively ticking).
+func (m model) timerElapsed() time.Duration {
+	if !m.turnStartedAt.IsZero() {
+		return m.timerAccumulated + time.Since(m.turnStartedAt)
+	}
+	return m.timerAccumulated
+}
+
+// timerPause freezes the timer without losing accumulated time. Called when a
+// HITL approval suspends execution. No-op if the timer is already paused.
+func (m *model) timerPause() {
+	if !m.turnStartedAt.IsZero() {
+		m.timerAccumulated += time.Since(m.turnStartedAt)
+		m.turnStartedAt = time.Time{}
+	}
+}
+
+// timerResume restarts the clock from the paused state, preserving accumulated
+// time. Called when the user approves a HITL request and execution continues.
+func (m *model) timerResume() {
+	m.turnStartedAt = time.Now()
+}
+
+// timerReset zeros both timer fields. Used at the true end of a turn and on cancel.
+func (m *model) timerReset() {
+	m.turnStartedAt = time.Time{}
+	m.timerAccumulated = 0
+}
+
+// timerStart begins a brand-new timer for a fresh turn, clearing any prior
+// accumulated time.
+func (m *model) timerStart() {
+	m.turnStartedAt = time.Now()
+	m.timerAccumulated = 0
+}
+
+// timerRunning reports whether the timer is actively ticking (not paused).
+func (m model) timerRunning() bool {
+	return !m.turnStartedAt.IsZero()
+}
+
+// timerActive reports whether a logical turn timer is in progress — either
+// actively running or paused with accumulated time from a prior segment.
+func (m model) timerActive() bool {
+	return !m.turnStartedAt.IsZero() || m.timerAccumulated > 0
+}
+
 // renderComposer draws the bordered input box (Grok-style), with the current
 // mode embedded in the bottom border.
 func (m model) renderComposer() string {
@@ -4173,7 +4293,7 @@ func (m model) cancelInFlightTurn() (tea.Model, tea.Cmd, bool) {
 	}
 	m.turnCancel()
 	m.turnCancel = nil
-	m.turnStartedAt = time.Time{}
+	m.timerReset()
 	m.tr.Streaming = false
 	m.tr.Status = ""
 	m.tr.Apply(events.NewSystem("Turn cancelled."))

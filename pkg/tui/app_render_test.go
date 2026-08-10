@@ -284,7 +284,13 @@ func TestRenderDelegationPanelShowsRunningTasks(t *testing.T) {
 	item := events.Item{
 		Kind: events.ItemDelegation,
 		DelegationTasks: []events.DelegationTaskState{
-			{Name: "researcher", Description: "Research", Status: "running", StartedAt: time.Now().Add(-12 * time.Second)},
+			{
+				Name: "researcher", Description: "Research", Status: "running",
+				StartedAt: time.Now().Add(-12 * time.Second),
+				Activity: []events.DelegationActivity{
+					{Type: "tool_call", ToolName: "grep_search"},
+				},
+			},
 			{Name: "code-reviewer", Description: "Review", Status: "complete", Duration: "8.1s"},
 			{Name: "api-tester", Description: "Test APIs", Status: "failed", Duration: "3s", Error: "timeout"},
 		},
@@ -321,6 +327,10 @@ func TestRenderDelegationPanelShowsRunningTasks(t *testing.T) {
 	}
 	if !strings.Contains(out, "8.1s") {
 		t.Fatalf("should show duration '8.1s' for complete task: %q", out)
+	}
+	// Running task should show inline activity status line.
+	if !strings.Contains(out, "→ grep_search") {
+		t.Fatalf("running task should show inline activity status '→ grep_search': %q", out)
 	}
 }
 
@@ -382,7 +392,13 @@ func TestDelegationDetailOpensOnClick(t *testing.T) {
 	tr.Items = []events.Item{{
 		Kind: events.ItemDelegation,
 		DelegationTasks: []events.DelegationTaskState{
-			{Name: "researcher", Status: "running", StartedAt: time.Now().Add(-5 * time.Second)},
+			{
+				Name: "researcher", Status: "running",
+				StartedAt: time.Now().Add(-5 * time.Second),
+				Activity: []events.DelegationActivity{
+					{Type: "tool_call", ToolName: "read_file"},
+				},
+			},
 			{Name: "writer", Status: "complete", Duration: "10s"},
 		},
 	}}
@@ -396,7 +412,7 @@ func TestDelegationDetailOpensOnClick(t *testing.T) {
 		ready:  true,
 		hitRegions: []hitRegion{{
 			start:   0,
-			end:     4, // header + 2 tasks + hint
+			end:     5, // header + task1 + status_line + task2 + hint
 			itemIdx: 0,
 			kind:    events.ItemDelegation,
 		}},
@@ -408,8 +424,14 @@ func TestDelegationDetailOpensOnClick(t *testing.T) {
 		t.Fatalf("expected task index 0, got %d", taskIdx)
 	}
 
-	// Click on task row 2 (line offset 2 from start = second task)
+	// Click on status line of first task (line offset 2)
 	taskIdx = m.delegationTaskAtLine(2, 0)
+	if taskIdx != 0 {
+		t.Fatalf("expected task index 0 for status line click, got %d", taskIdx)
+	}
+
+	// Click on task row 2 (line offset 3 because first task has status line)
+	taskIdx = m.delegationTaskAtLine(3, 0)
 	if taskIdx != 1 {
 		t.Fatalf("expected task index 1, got %d", taskIdx)
 	}
@@ -481,5 +503,123 @@ func TestDelegationDetailClosesOnEsc(t *testing.T) {
 	got := next.(model)
 	if got.delegationDetail.open {
 		t.Fatal("Esc should close delegation detail overlay")
+	}
+}
+
+func TestRenderDelegationStatusLineOnlyForRunning(t *testing.T) {
+	item := events.Item{
+		Kind: events.ItemDelegation,
+		DelegationTasks: []events.DelegationTaskState{
+			{
+				Name: "active-worker", Status: "running",
+				StartedAt: time.Now().Add(-3 * time.Second),
+				Activity: []events.DelegationActivity{
+					{Type: "tool_call", ToolName: "shell_command"},
+				},
+			},
+			{
+				Name: "done-worker", Status: "complete", Duration: "5s",
+				Activity: []events.DelegationActivity{
+					{Type: "tool_call", ToolName: "write_file"},
+				},
+			},
+		},
+	}
+
+	m := model{theme: DefaultTheme(), width: 80}
+	out := stripANSI(m.renderDelegationItem(item, 80))
+
+	// Running task should show its status line.
+	if !strings.Contains(out, "→ shell_command") {
+		t.Fatalf("running task should show status line '→ shell_command': %q", out)
+	}
+	// Complete task should NOT show its status line (historical activity).
+	if strings.Contains(out, "→ write_file") {
+		t.Fatalf("complete task should NOT show status line, but got '→ write_file': %q", out)
+	}
+}
+
+func TestRenderDelegationStatusLineTruncatesLongText(t *testing.T) {
+	longText := strings.Repeat("analyzing the complex architecture of ", 10)
+	item := events.Item{
+		Kind: events.ItemDelegation,
+		DelegationTasks: []events.DelegationTaskState{
+			{
+				Name: "thinker", Status: "running",
+				StartedAt: time.Now().Add(-2 * time.Second),
+				Activity: []events.DelegationActivity{
+					{Type: "text", Text: longText},
+				},
+			},
+		},
+	}
+
+	m := model{theme: DefaultTheme(), width: 60}
+	out := stripANSI(m.renderDelegationItem(item, 60))
+
+	// Should contain the arrow prefix.
+	if !strings.Contains(out, "→") {
+		t.Fatalf("should contain '→' status prefix: %q", out)
+	}
+	// Should be truncated with ellipsis.
+	if !strings.Contains(out, "…") {
+		t.Fatalf("long status text should be truncated with '…': %q", out)
+	}
+	// Should NOT contain the full repeated text.
+	if strings.Contains(out, longText) {
+		t.Fatalf("should not contain the full untruncated text: %q", out)
+	}
+}
+
+func TestDelegationStatusLineShowsLatestActivity(t *testing.T) {
+	item := events.Item{
+		Kind: events.ItemDelegation,
+		DelegationTasks: []events.DelegationTaskState{
+			{
+				Name: "multi-step", Status: "running",
+				StartedAt: time.Now().Add(-10 * time.Second),
+				Activity: []events.DelegationActivity{
+					{Type: "tool_call", ToolName: "read_file"},
+					{Type: "tool_result", ToolName: "read_file"},
+					{Type: "tool_call", ToolName: "edit_file"},
+				},
+			},
+		},
+	}
+
+	m := model{theme: DefaultTheme(), width: 80}
+	out := stripANSI(m.renderDelegationItem(item, 80))
+
+	// Should show the LAST activity (edit_file tool_call), not earlier ones.
+	if !strings.Contains(out, "→ edit_file") {
+		t.Fatalf("should show latest activity '→ edit_file': %q", out)
+	}
+	// Should NOT show the earlier tool_result.
+	if strings.Contains(out, "→ read_file done") {
+		t.Fatalf("should NOT show earlier activity '→ read_file done': %q", out)
+	}
+}
+
+func TestSummarizeToolArgsStableOrder(t *testing.T) {
+	args := map[string]any{
+		"zebra":  "z",
+		"alpha":  "a",
+		"middle": "m",
+		"beta":   "b",
+	}
+
+	// Verify deterministic output across many calls.
+	first := summarizeToolArgs(args, 200)
+	for i := 0; i < 100; i++ {
+		got := summarizeToolArgs(args, 200)
+		if got != first {
+			t.Fatalf("iteration %d: output changed from %q to %q", i, first, got)
+		}
+	}
+
+	// Verify alphabetical key order.
+	want := "alpha: a, beta: b, middle: m, zebra: z"
+	if first != want {
+		t.Fatalf("summarizeToolArgs = %q, want %q", first, want)
 	}
 }

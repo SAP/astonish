@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -147,7 +146,7 @@ func (m model) submitApproval(choice string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.eventCh = ch
-	m.turnStartedAt = time.Now()
+	m.timerResume()
 	return m, tea.Batch(waitEvent(ch), timerTick())
 }
 
@@ -578,7 +577,7 @@ func (m model) submitPlanApproval(choice string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.eventCh = ch
-		m.turnStartedAt = time.Now()
+		m.timerResume()
 		return m, tea.Batch(waitEvent(ch), timerTick())
 
 	case "Request changes":

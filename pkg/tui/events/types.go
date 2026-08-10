@@ -129,6 +129,12 @@ type Event struct {
 	DelegationTaskName string           // task name (for task_start/task_complete/task_failed)
 	DelegationDuration string           // human-readable duration (for task_complete/task_failed)
 	DelegationError    string           // error message (for task_failed)
+
+	// Delegation activity fields (for task_tool_call/task_tool_result/task_text).
+	DelegationToolName   string
+	DelegationToolArgs   map[string]any
+	DelegationToolResult any
+	DelegationText       string
 }
 
 // NewText returns a streaming agent text event.
@@ -213,5 +219,18 @@ func NewDelegationTaskUpdate(dtype, taskName, duration, errMsg string) Event {
 		DelegationTaskName: taskName,
 		DelegationDuration: duration,
 		DelegationError:    errMsg,
+	}
+}
+
+// NewDelegationTaskActivity returns a per-task activity event (tool_call, tool_result, text).
+func NewDelegationTaskActivity(dtype, taskName, toolName string, args map[string]any, result any, text string) Event {
+	return Event{
+		Kind:                 KindDelegation,
+		DelegationType:       dtype,
+		DelegationTaskName:   taskName,
+		DelegationToolName:   toolName,
+		DelegationToolArgs:   args,
+		DelegationToolResult: result,
+		DelegationText:       text,
 	}
 }

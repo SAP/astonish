@@ -481,6 +481,28 @@ func compactLine(s string, maxRunes int) string {
 	return s
 }
 
+// renderPlanApprovalFooter renders a compact inline footer for plan approval,
+// replacing the large bordered overlay dialog. Options are shown horizontally
+// with the cursor-highlighted option rendered in the accent style.
+func (m model) renderPlanApprovalFooter() string {
+	th := m.theme
+	opts := m.approvalOptions()
+	cursor := m.tr.ApprovalCursor
+	if cursor < 0 || cursor >= len(opts) {
+		cursor = 0
+	}
+	var parts []string
+	for i, o := range opts {
+		if i == cursor {
+			parts = append(parts, th.Approval.Render("❯ "+o))
+		} else {
+			parts = append(parts, th.Muted.Render("  "+o))
+		}
+	}
+	line := strings.Join(parts, th.Muted.Render("  "))
+	return m.paintRow(th.Header.Render("✦ Plan Ready")+"  "+line, m.width)
+}
+
 // renderPlanApprovalOverlay renders the plan approval prompt shown after
 // announce_plan completes in Plan or Graph Plan mode. If the plan carries a
 // Context narrative section, the first few lines are shown below the prompt so

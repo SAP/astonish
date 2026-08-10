@@ -91,6 +91,17 @@ type DelegationTaskState struct {
 	StartedAt   time.Time // when the task started (for live timer)
 	Duration    string    // set when complete/failed (from the event)
 	Error       string    // set when failed
+	// Activity log: tool calls and text output from this sub-task.
+	Activity []DelegationActivity
+}
+
+// DelegationActivity is one activity entry for a delegated sub-task.
+type DelegationActivity struct {
+	Type     string         // "tool_call", "tool_result", "text"
+	ToolName string         // for tool_call/tool_result
+	Args     map[string]any // for tool_call
+	Result   any            // for tool_result
+	Text     string         // for text
 }
 
 // Transcript is the reduced UI state built from a stream of Events.
@@ -333,8 +344,11 @@ func (t *Transcript) applyDelegation(ev Event) {
 			DelegationTasks: tasks,
 		})
 		t.delegationItemIdx = len(t.Items) - 1
-		// Keep the Transcript-level slice for the status bar.
-		t.Delegation = tasks
+		// Keep the Transcript-level slice for the status bar (independent copy
+		// so updateDelegationTask doesn't double-apply mutations).
+		delegCopy := make([]DelegationTaskState, len(tasks))
+		copy(delegCopy, tasks)
+		t.Delegation = delegCopy
 		t.DelegationActive = true
 		t.Status = "Delegating tasks…"
 	case "task_start":
@@ -354,6 +368,24 @@ func (t *Transcript) applyDelegation(ev Event) {
 			task.Status = "failed"
 			task.Duration = ev.DelegationDuration
 			task.Error = ev.DelegationError
+		})
+	case "task_tool_call":
+		t.updateDelegationTask(ev.DelegationTaskName, func(task *DelegationTaskState) {
+			task.Activity = append(task.Activity, DelegationActivity{
+				Type: "tool_call", ToolName: ev.DelegationToolName, Args: ev.DelegationToolArgs,
+			})
+		})
+	case "task_tool_result":
+		t.updateDelegationTask(ev.DelegationTaskName, func(task *DelegationTaskState) {
+			task.Activity = append(task.Activity, DelegationActivity{
+				Type: "tool_result", ToolName: ev.DelegationToolName, Result: ev.DelegationToolResult,
+			})
+		})
+	case "task_text":
+		t.updateDelegationTask(ev.DelegationTaskName, func(task *DelegationTaskState) {
+			task.Activity = append(task.Activity, DelegationActivity{
+				Type: "text", Text: ev.DelegationText,
+			})
 		})
 	case "done":
 		t.DelegationActive = false

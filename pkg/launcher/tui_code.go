@@ -689,19 +689,8 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 	chatAgent.SubTaskProgressCallback = func(evt agent.SubTaskProgressEvent) {
 		switch evt.Type {
 		case "plan_announced":
-			// Emit the plan document content as agent text so it renders in the
-			// transcript with the distinct plan document styling (bordered frame,
-			// colored status icons). The plan is written to PLAN.md by
-			// SetActivePlan; here we make it visible in the chat thread.
-			doc := agent.PlanDocumentInfo{
-				Context:      evt.PlanContext,
-				WhatNotToDo:  evt.PlanWhatNotToDo,
-				Verification: evt.PlanVerification,
-			}
-			planContent := agent.RenderPlanFromInfoWithDoc(evt.PlanGoal, doc, evt.PlanSteps)
-			if planContent != "" {
-				emit("text", map[string]any{"text": planContent})
-			}
+			// Plan content is rendered by the FunctionResponse handler for
+			// announce_plan; no text emission needed here to avoid duplication.
 		case "delegation_start":
 			tasks := make([]any, len(evt.Tasks))
 			for i, t := range evt.Tasks {
@@ -714,6 +703,21 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 			emit("delegation", map[string]any{"type": "task_complete", "task_name": evt.TaskName, "duration": evt.Duration})
 		case "task_failed":
 			emit("delegation", map[string]any{"type": "task_failed", "task_name": evt.TaskName, "duration": evt.Duration, "error": evt.Error})
+		case "task_tool_call":
+			emit("delegation", map[string]any{
+				"type": "task_tool_call", "task_name": evt.TaskName,
+				"tool_name": evt.ToolName, "tool_args": evt.ToolArgs,
+			})
+		case "task_tool_result":
+			emit("delegation", map[string]any{
+				"type": "task_tool_result", "task_name": evt.TaskName,
+				"tool_name": evt.ToolName, "tool_result": evt.ToolResult,
+			})
+		case "task_text":
+			emit("delegation", map[string]any{
+				"type": "task_text", "task_name": evt.TaskName,
+				"text": evt.Text,
+			})
 		case "delegation_complete":
 			emit("delegation", map[string]any{"type": "done", "status": evt.Status})
 		}
@@ -1143,7 +1147,6 @@ func (b *localAgentBackend) driveTurn(
 ) {
 	seenPartialText := false
 	sawRealUsage := false
-	planAnnounced := false
 	// Allow the first mid-turn estimate to fire immediately (the throttle only
 	// applies to subsequent tool steps within this turn).
 	b.mu.Lock()
@@ -1174,12 +1177,6 @@ func (b *localAgentBackend) driveTurn(
 
 		for _, part := range event.LLMResponse.Content.Parts {
 			if part.Text != "" && !part.Thought {
-				// Suppress any model text after a plan has been announced —
-				// the plan document speaks for itself and the approval dialog
-				// will follow.
-				if planAnnounced {
-					continue
-				}
 				if event.LLMResponse.Partial {
 					seenPartialText = true
 					emit("text", map[string]any{"text": part.Text})
@@ -1217,13 +1214,27 @@ func (b *localAgentBackend) driveTurn(
 						goal, steps := plan.SnapshotInfo()
 						doc := plan.SnapshotDoc()
 						rendered := agent.RenderPlanFromInfoWithDoc(goal, doc, steps)
-						// Emit a horizontal rule before the plan for clear
-						// visual separation from preceding tool activity.
-						emit("text", map[string]any{"text": "\n---\n\n"})
 						emit("text", map[string]any{"text": rendered})
 					}
-					planAnnounced = true
-					continue
+					// Emit plan_approval + done immediately so the TUI shows
+					// the approval footer right below the plan content with no
+					// intermediate tool activity in between.
+					planPayload := map[string]any{"plan_announced": true}
+					if plan := chatAgent.GetActivePlan(); plan != nil {
+						doc := plan.SnapshotDoc()
+						if doc.Context != "" {
+							planPayload["plan_context"] = doc.Context
+						}
+						if doc.WhatNotToDo != "" {
+							planPayload["plan_what_not_to_do"] = doc.WhatNotToDo
+						}
+						if doc.Verification != "" {
+							planPayload["plan_verification"] = doc.Verification
+						}
+					}
+					emit("plan_approval", planPayload)
+					emit("done", nil)
+					return
 				}
 				resp := part.FunctionResponse.Response
 				if chatAgent.Redactor != nil && resp != nil {
@@ -1257,27 +1268,6 @@ func (b *localAgentBackend) driveTurn(
 	// and emit a synthetic usage event so the header reflects reality.
 	if !sawRealUsage {
 		b.emitEstimatedContext(ctx, sessionID, emit)
-	}
-
-	// If a plan was announced this turn, emit a plan_approval event so the TUI
-	// shows an approval dialog asking the user to approve, request changes, or
-	// decline the plan. Include doc-level narrative fields so the TUI overlay
-	// can show the plan context.
-	if planAnnounced {
-		planPayload := map[string]any{"plan_announced": true}
-		if plan := chatAgent.GetActivePlan(); plan != nil {
-			doc := plan.SnapshotDoc()
-			if doc.Context != "" {
-				planPayload["plan_context"] = doc.Context
-			}
-			if doc.WhatNotToDo != "" {
-				planPayload["plan_what_not_to_do"] = doc.WhatNotToDo
-			}
-			if doc.Verification != "" {
-				planPayload["plan_verification"] = doc.Verification
-			}
-		}
-		emit("plan_approval", planPayload)
 	}
 }
 

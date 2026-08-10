@@ -29,17 +29,29 @@ func TestTurnOptionsPlanMode(t *testing.T) {
 
 func TestTogglePlanModeDoesNotWriteTranscriptMessages(t *testing.T) {
 	m := model{tr: events.NewTranscript()}
+
+	// Normal → Plan (graphPlanMode=true)
 	m.togglePlanMode()
-	if !m.planMode {
-		t.Fatal("expected plan mode enabled")
+	if !m.graphPlanMode {
+		t.Fatal("expected graphPlanMode enabled after first toggle")
 	}
 	if len(m.tr.Items) != 0 {
 		t.Fatalf("mode toggle should not write transcript messages, got %#v", m.tr.Items)
 	}
 
+	// Plan → Ask
 	m.togglePlanMode()
-	if m.planMode {
-		t.Fatal("expected plan mode disabled")
+	if !m.askMode {
+		t.Fatal("expected askMode enabled after second toggle")
+	}
+	if len(m.tr.Items) != 0 {
+		t.Fatalf("mode toggle should stay silent, got %#v", m.tr.Items)
+	}
+
+	// Ask → Normal
+	m.togglePlanMode()
+	if m.graphPlanMode || m.planMode || m.askMode {
+		t.Fatal("expected all modes off after third toggle")
 	}
 	if len(m.tr.Items) != 0 {
 		t.Fatalf("mode toggle should stay silent, got %#v", m.tr.Items)
@@ -70,31 +82,25 @@ func newTestComposerModel(width int) model {
 	return m
 }
 
-func TestTogglePlanModeThreeWayCycle(t *testing.T) {
+func TestTogglePlanModeCycle(t *testing.T) {
 	m := model{tr: events.NewTranscript()}
 
 	// Normal → Plan
 	m.togglePlanMode()
-	if !m.planMode || m.graphPlanMode || m.askMode {
-		t.Fatalf("first toggle should enter Plan mode, got plan=%v graph=%v ask=%v", m.planMode, m.graphPlanMode, m.askMode)
+	if !m.graphPlanMode || m.planMode || m.askMode {
+		t.Fatalf("first toggle should enter Plan mode, got graphPlan=%v plan=%v ask=%v", m.graphPlanMode, m.planMode, m.askMode)
 	}
 
-	// Plan → Graph Plan
+	// Plan → Ask
 	m.togglePlanMode()
-	if m.planMode || !m.graphPlanMode || m.askMode {
-		t.Fatalf("second toggle should enter Graph Plan mode, got plan=%v graph=%v ask=%v", m.planMode, m.graphPlanMode, m.askMode)
-	}
-
-	// Graph Plan → Ask
-	m.togglePlanMode()
-	if m.planMode || m.graphPlanMode || !m.askMode {
-		t.Fatalf("third toggle should enter Ask mode, got plan=%v graph=%v ask=%v", m.planMode, m.graphPlanMode, m.askMode)
+	if m.graphPlanMode || m.planMode || !m.askMode {
+		t.Fatalf("second toggle should enter Ask mode, got graphPlan=%v plan=%v ask=%v", m.graphPlanMode, m.planMode, m.askMode)
 	}
 
 	// Ask → Normal
 	m.togglePlanMode()
-	if m.planMode || m.graphPlanMode || m.askMode {
-		t.Fatalf("fourth toggle should return to Normal, got plan=%v graph=%v ask=%v", m.planMode, m.graphPlanMode, m.askMode)
+	if m.graphPlanMode || m.planMode || m.askMode {
+		t.Fatalf("third toggle should return to Normal, got graphPlan=%v plan=%v ask=%v", m.graphPlanMode, m.planMode, m.askMode)
 	}
 
 	if len(m.tr.Items) != 0 {
@@ -119,12 +125,12 @@ func TestTurnOptionsGraphPlanMode(t *testing.T) {
 	}
 }
 
-func TestRenderComposerShowsGraphPlanLabel(t *testing.T) {
+func TestRenderComposerShowsPlanLabel(t *testing.T) {
 	m := newTestComposerModel(80)
 	m.graphPlanMode = true
 	out := stripANSI(m.renderComposer())
-	if !strings.Contains(out, " Graph Plan ") {
-		t.Fatalf("graph plan composer should show Graph Plan mode label:\n%s", out)
+	if !strings.Contains(out, " Plan ") {
+		t.Fatalf("plan composer should show Plan mode label:\n%s", out)
 	}
 }
 
@@ -158,8 +164,8 @@ func TestPlanApprovalOverlayRendered(t *testing.T) {
 
 func TestPlanApprovalApprove(t *testing.T) {
 	m := newTestComposerModel(80)
-	m.planMode = true
-	m.graphPlanMode = false
+	m.graphPlanMode = true
+	m.planMode = false
 	m.tr.Apply(events.Event{
 		Kind:         events.KindApproval,
 		ToolName:     "announce_plan",
@@ -181,8 +187,8 @@ func TestPlanApprovalApprove(t *testing.T) {
 
 func TestPlanApprovalDecline(t *testing.T) {
 	m := newTestComposerModel(80)
-	m.planMode = true
-	m.graphPlanMode = false
+	m.graphPlanMode = true
+	m.planMode = false
 	m.tr.Apply(events.Event{
 		Kind:         events.KindApproval,
 		ToolName:     "announce_plan",
@@ -212,8 +218,8 @@ func TestPlanApprovalDecline(t *testing.T) {
 
 func TestPlanApprovalRequestChanges(t *testing.T) {
 	m := newTestComposerModel(80)
-	m.planMode = true
-	m.graphPlanMode = false
+	m.graphPlanMode = true
+	m.planMode = false
 	m.tr.Apply(events.Event{
 		Kind:         events.KindApproval,
 		ToolName:     "announce_plan",
@@ -223,8 +229,8 @@ func TestPlanApprovalRequestChanges(t *testing.T) {
 	next, _ := m.submitPlanApproval("Request changes")
 	nm := next.(model)
 	// Plan mode should remain active so the user can describe changes.
-	if !nm.planMode {
-		t.Fatal("planMode should stay true after request changes")
+	if !nm.graphPlanMode {
+		t.Fatal("graphPlanMode should stay true after request changes")
 	}
 }
 
@@ -271,6 +277,60 @@ func TestAskModeNotAvailableInPlatform(t *testing.T) {
 	m.togglePlanMode()
 	if m.planMode || m.graphPlanMode || m.askMode {
 		t.Fatalf("platform second toggle should return to Normal, got plan=%v graph=%v ask=%v", m.planMode, m.graphPlanMode, m.askMode)
+	}
+}
+
+func TestPlanApprovalFooterRendered(t *testing.T) {
+	m := newTestComposerModel(100)
+	m.planMode = true
+	m.tr.Apply(events.Event{
+		Kind:         events.KindApproval,
+		ToolName:     "announce_plan",
+		Options:      []string{"Approve & implement", "Request changes", "Decline"},
+		ApprovalKind: "plan",
+	})
+	if !m.tr.Awaiting {
+		t.Fatal("transcript should be in Awaiting state")
+	}
+	footer := stripANSI(m.renderPlanApprovalFooter())
+	if !strings.Contains(footer, "Plan Ready") {
+		t.Fatalf("plan approval footer should contain 'Plan Ready', got:\n%s", footer)
+	}
+	if !strings.Contains(footer, "Approve & implement") {
+		t.Fatalf("plan approval footer should contain 'Approve & implement', got:\n%s", footer)
+	}
+	if !strings.Contains(footer, "Request changes") {
+		t.Fatalf("plan approval footer should contain 'Request changes', got:\n%s", footer)
+	}
+	if !strings.Contains(footer, "Decline") {
+		t.Fatalf("plan approval footer should contain 'Decline', got:\n%s", footer)
+	}
+}
+
+func TestPlanApprovalNotRenderedInTranscript(t *testing.T) {
+	m := newTestComposerModel(80)
+	m.theme = plainTheme()
+	// Add a plan item and a plan approval item.
+	m.tr.Items = append(m.tr.Items, events.Item{
+		Kind:    events.ItemPlan,
+		Content: "# Execution Plan\n\n**Goal:** Test\n\n## Phases\n\n- [ ] **step-one** — Do something\n",
+	})
+	m.tr.Items = append(m.tr.Items, events.Item{
+		Kind:         events.ItemApproval,
+		ApprovalKind: "plan",
+		ToolName:     "announce_plan",
+		Content:      "Approve announce_plan?",
+		Options:      []string{"Approve & implement", "Request changes", "Decline"},
+	})
+	out, _, _ := m.renderTranscript()
+	plain := stripANSI(out)
+	// The plan content should be rendered.
+	if !strings.Contains(plain, "Test") {
+		t.Fatalf("plan content should be rendered in transcript:\n%s", plain)
+	}
+	// The plan approval item should NOT be rendered.
+	if strings.Contains(plain, "Approve announce_plan") {
+		t.Fatalf("plan approval should NOT be rendered in transcript, got:\n%s", plain)
 	}
 }
 

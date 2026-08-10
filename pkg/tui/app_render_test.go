@@ -339,3 +339,147 @@ func TestRenderDelegationItemEmptyWhenNoTasks(t *testing.T) {
 		t.Fatalf("delegation item should be empty when no tasks, got: %q", out)
 	}
 }
+
+func TestTimerTickRefreshesDuringDelegation(t *testing.T) {
+	tr := events.NewTranscript()
+	tr.Streaming = true
+	tr.DelegationActive = true
+	tr.Items = []events.Item{{
+		Kind: events.ItemDelegation,
+		DelegationTasks: []events.DelegationTaskState{
+			{Name: "worker", Status: "running", StartedAt: time.Now().Add(-5 * time.Second)},
+		},
+	}}
+
+	m := model{
+		theme:         DefaultTheme(),
+		tr:            tr,
+		width:         80,
+		height:        24,
+		ready:         true,
+		turnStartedAt: time.Now().Add(-5 * time.Second),
+		vp:            viewport.New(80, 10),
+	}
+	m.vp.SetContent("placeholder")
+
+	// Simulate timerTickMsg
+	next, cmd := m.Update(timerTickMsg{})
+	got := next.(model)
+
+	// Timer should re-schedule (cmd is non-nil)
+	if cmd == nil {
+		t.Fatal("timerTickMsg should return a non-nil command to re-schedule the tick")
+	}
+
+	// Verify delegation is still active
+	if !got.tr.DelegationActive {
+		t.Fatal("delegation should remain active after timer tick")
+	}
+}
+
+func TestDelegationDetailOpensOnClick(t *testing.T) {
+	tr := events.NewTranscript()
+	tr.Items = []events.Item{{
+		Kind: events.ItemDelegation,
+		DelegationTasks: []events.DelegationTaskState{
+			{Name: "researcher", Status: "running", StartedAt: time.Now().Add(-5 * time.Second)},
+			{Name: "writer", Status: "complete", Duration: "10s"},
+		},
+	}}
+
+	m := model{
+		theme:  DefaultTheme(),
+		tr:     tr,
+		vp:     viewport.New(80, 20),
+		width:  80,
+		height: 24,
+		ready:  true,
+		hitRegions: []hitRegion{{
+			start:   0,
+			end:     4, // header + 2 tasks + hint
+			itemIdx: 0,
+			kind:    events.ItemDelegation,
+		}},
+	}
+
+	// Click on task row 1 (line offset 1 from start = first task)
+	taskIdx := m.delegationTaskAtLine(1, 0)
+	if taskIdx != 0 {
+		t.Fatalf("expected task index 0, got %d", taskIdx)
+	}
+
+	// Click on task row 2 (line offset 2 from start = second task)
+	taskIdx = m.delegationTaskAtLine(2, 0)
+	if taskIdx != 1 {
+		t.Fatalf("expected task index 1, got %d", taskIdx)
+	}
+
+	// Click on header (line offset 0) should return -1
+	taskIdx = m.delegationTaskAtLine(0, 0)
+	if taskIdx != -1 {
+		t.Fatalf("expected -1 for header click, got %d", taskIdx)
+	}
+
+	// Open delegation detail
+	next, _ := m.openDelegationDetail(0, 0)
+	got := next.(model)
+	if !got.delegationDetail.open {
+		t.Fatal("delegation detail should be open after openDelegationDetail")
+	}
+	if got.delegationDetail.taskName != "researcher" {
+		t.Fatalf("expected task name 'researcher', got %q", got.delegationDetail.taskName)
+	}
+}
+
+func TestDelegationDetailShowsActivity(t *testing.T) {
+	tr := events.NewTranscript()
+	tr.Items = []events.Item{{
+		Kind: events.ItemDelegation,
+		DelegationTasks: []events.DelegationTaskState{
+			{
+				Name:   "worker",
+				Status: "running",
+				Activity: []events.DelegationActivity{
+					{Type: "tool_call", ToolName: "read_file", Args: map[string]any{"path": "main.go"}},
+					{Type: "tool_result", ToolName: "read_file", Result: "package main"},
+					{Type: "text", Text: "I found the main file."},
+				},
+			},
+		},
+	}}
+
+	m := model{
+		theme: DefaultTheme(),
+		width: 80,
+	}
+
+	out := stripANSI(m.renderDelegationDetailContent(tr.Items[0].DelegationTasks[0], 80))
+	if !strings.Contains(out, "worker") {
+		t.Fatalf("should contain task name 'worker': %q", out)
+	}
+	if !strings.Contains(out, "read_file") {
+		t.Fatalf("should contain tool name 'read_file': %q", out)
+	}
+	if !strings.Contains(out, "I found the main file") {
+		t.Fatalf("should contain text output: %q", out)
+	}
+}
+
+func TestDelegationDetailClosesOnEsc(t *testing.T) {
+	m := model{
+		theme: DefaultTheme(),
+		delegationDetail: delegationDetailState{
+			open:     true,
+			taskName: "worker",
+			taskIdx:  0,
+			itemIdx:  0,
+			vp:       viewport.New(80, 10),
+		},
+	}
+
+	next, _ := m.handleDelegationDetailKey(tea.KeyMsg{Type: tea.KeyEsc})
+	got := next.(model)
+	if got.delegationDetail.open {
+		t.Fatal("Esc should close delegation detail overlay")
+	}
+}

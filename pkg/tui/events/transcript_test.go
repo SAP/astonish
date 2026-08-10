@@ -922,3 +922,70 @@ func TestTranscript_LoadHistory_ApprovalFlowRendersAsSystemMessage(t *testing.T)
 		t.Error("expected at least one ItemAgent")
 	}
 }
+
+func TestTranscriptDelegationActivity(t *testing.T) {
+	tr := NewTranscript()
+	tr.Apply(NewDelegationStart([]DelegationTask{
+		{Name: "researcher", Description: "Research the topic"},
+	}))
+
+	// Apply task_tool_call event.
+	tr.Apply(NewDelegationTaskActivity("task_tool_call", "researcher", "grep_search", map[string]any{"pattern": "foo"}, nil, ""))
+	// Apply task_tool_result event.
+	tr.Apply(NewDelegationTaskActivity("task_tool_result", "researcher", "grep_search", nil, "found 3 matches", ""))
+	// Apply task_text event.
+	tr.Apply(NewDelegationTaskActivity("task_text", "researcher", "", nil, nil, "I found the answer"))
+
+	if len(tr.Delegation) != 1 {
+		t.Fatalf("expected 1 delegation task, got %d", len(tr.Delegation))
+	}
+	task := tr.Delegation[0]
+	if len(task.Activity) != 3 {
+		t.Fatalf("expected 3 activity entries, got %d", len(task.Activity))
+	}
+
+	// Verify tool_call entry.
+	a0 := task.Activity[0]
+	if a0.Type != "tool_call" {
+		t.Fatalf("activity[0] type=%q want tool_call", a0.Type)
+	}
+	if a0.ToolName != "grep_search" {
+		t.Fatalf("activity[0] tool_name=%q want grep_search", a0.ToolName)
+	}
+	if a0.Args["pattern"] != "foo" {
+		t.Fatalf("activity[0] args[pattern]=%v want foo", a0.Args["pattern"])
+	}
+
+	// Verify tool_result entry.
+	a1 := task.Activity[1]
+	if a1.Type != "tool_result" {
+		t.Fatalf("activity[1] type=%q want tool_result", a1.Type)
+	}
+	if a1.ToolName != "grep_search" {
+		t.Fatalf("activity[1] tool_name=%q want grep_search", a1.ToolName)
+	}
+	if a1.Result != "found 3 matches" {
+		t.Fatalf("activity[1] result=%v want 'found 3 matches'", a1.Result)
+	}
+
+	// Verify text entry.
+	a2 := task.Activity[2]
+	if a2.Type != "text" {
+		t.Fatalf("activity[2] type=%q want text", a2.Type)
+	}
+	if a2.Text != "I found the answer" {
+		t.Fatalf("activity[2] text=%q want 'I found the answer'", a2.Text)
+	}
+
+	// Verify the inline ItemDelegation is also updated.
+	for _, it := range tr.Items {
+		if it.Kind == ItemDelegation {
+			if len(it.DelegationTasks) != 1 {
+				t.Fatalf("ItemDelegation should have 1 task, got %d", len(it.DelegationTasks))
+			}
+			if len(it.DelegationTasks[0].Activity) != 3 {
+				t.Fatalf("ItemDelegation task activity should have 3 entries, got %d", len(it.DelegationTasks[0].Activity))
+			}
+		}
+	}
+}

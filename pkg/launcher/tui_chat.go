@@ -961,6 +961,10 @@ func mapSSEToEvents(sev *client.SSEEvent, debug bool) []events.Event {
 				Description string `json:"description"`
 				PlanStep    string `json:"plan_step"`
 			} `json:"tasks"`
+			ToolName   string         `json:"tool_name"`
+			ToolArgs   map[string]any `json:"tool_args"`
+			ToolResult any            `json:"tool_result"`
+			Text       string         `json:"text"`
 		}
 		if json.Unmarshal(data, &payload) == nil {
 			switch payload.Type {
@@ -976,6 +980,12 @@ func mapSSEToEvents(sev *client.SSEEvent, debug bool) []events.Event {
 				return []events.Event{events.NewDelegationTaskUpdate("task_complete", payload.TaskName, payload.Duration, "")}
 			case "task_failed":
 				return []events.Event{events.NewDelegationTaskUpdate("task_failed", payload.TaskName, payload.Duration, payload.Error)}
+			case "task_tool_call":
+				return []events.Event{events.NewDelegationTaskActivity("task_tool_call", payload.TaskName, payload.ToolName, payload.ToolArgs, nil, "")}
+			case "task_tool_result":
+				return []events.Event{events.NewDelegationTaskActivity("task_tool_result", payload.TaskName, payload.ToolName, nil, payload.ToolResult, "")}
+			case "task_text":
+				return []events.Event{events.NewDelegationTaskActivity("task_text", payload.TaskName, "", nil, nil, payload.Text)}
 			case "done":
 				return []events.Event{events.NewDelegation("done")}
 			}

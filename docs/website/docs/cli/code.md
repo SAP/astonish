@@ -1,6 +1,6 @@
 # Astonish Code
 
-`astonish code` turns the Astonish binary into a **local coding tool** — like Claude Code, OpenCode, or Grok CLI. It runs the agent loop **in-process** and executes its built-in tools directly on your machine, in the current directory. No daemon, no server, no login required.
+Your AI pair programmer that understands your entire codebase before writing a single line. `astonish code` runs the full agent loop **locally and in-process** — executing tools directly on your machine, in the current directory. No daemon, no server, no login required. Think Claude Code, Codex, or Cursor, but with a pre-computed knowledge graph that makes it genuinely faster and smarter.
 
 ```bash
 astonish code                          # Start coding in the current directory
@@ -37,31 +37,29 @@ On first launch, if no model is configured, type `/provider` to add an AI provid
 
 ## Operating Modes
 
-Cycle through modes with **`shift+tab`**: Normal → Plan → Graph Plan → Normal.
+Cycle through modes with **`shift+tab`**: Normal → Plan → Ask → Normal.
 
 | Mode | Composer Border | Behavior |
 |------|----------------|----------|
-| **Normal** | gray | Full tool access with authorization prompts |
-| **Plan** | orange | Read-only investigation; produces structured plans without changing files |
-| **Graph Plan** | cyan | Codegraph-driven 4-phase planning using a pre-computed knowledge graph |
+| **Normal** | gray | Full tool access — the agent reads, writes, builds, and tests |
+| **Plan** | amber | Graph-optimized planning — investigates the codebase read-only, then produces a structured, dependency-first execution plan |
+| **Ask** | green | Research-only Q&A — explore architecture, ask questions, discuss approaches without changing anything |
 
 ### Normal Mode
 
 The default operating mode. The agent has full access to all tools — file operations, shell commands, web fetching, browser automation, memory, and more. Non-read-only tools ask for authorization before executing (see [Safety Model](#safety-model)).
 
-### Plan Mode
-
-A read-only investigation mode. The agent can explore your codebase (read files, grep, search memory) but **cannot** write files, run commands, or spawn sub-agents. The runtime gate is enforced server-side — even if the model ignores the instruction, mutating tools are physically blocked.
-
-Use Plan mode when you want the agent to analyze a problem and produce a structured plan (with file lists, blast radius, and verification commands) before making any changes.
-
-### Graph-Optimized Plan Mode
+### Plan Mode — Think Before You Act
 
 ::: tip Standout Feature
-Graph-Optimized Plan mode is Astonish Code's most distinctive capability. It produces plans that are **faster** (fewer tool calls), **cheaper** (lower token usage), and **more complete** (full blast-radius coverage) than free-form investigation.
+Plan mode is Astonish Code's most distinctive capability. It produces plans that are **faster** (fewer tool calls), **cheaper** (lower token usage), and **more complete** (full blast-radius coverage) than free-form investigation.
 :::
 
-This mode uses [codegraph](https://github.com/colbymchenry/codegraph) — a pre-computed knowledge graph of your repository containing symbols, call edges, dependencies, and blast radius — to drive a **phased planning flow**. Instead of many broad `grep_search` / `find_files` passes, most structural questions resolve in 1–4 codegraph queries.
+Plan mode uses [codegraph](https://github.com/colbymchenry/codegraph) — a pre-computed knowledge graph of your repository containing symbols, call edges, dependencies, and blast radius — to drive a **phased planning flow**. Instead of many broad `grep_search` / `find_files` passes, most structural questions resolve in 1–4 codegraph queries.
+
+The agent can explore your codebase but **cannot** write files, run commands, or spawn sub-agents. The runtime gate is enforced server-side — even if the model ignores the instruction, mutating tools are physically blocked.
+
+Use Plan mode when you want the agent to map out the full blast radius of a change and produce a structured plan (with file lists, dependencies, and verification commands) before touching a single file.
 
 #### The Four Phases
 
@@ -91,7 +89,7 @@ Traditional code investigation follows a pattern like:
 4. `read_file` on 2–3 locations to confirm
 5. Repeat for each symbol...
 
-With Graph-Optimized Plan mode:
+With Plan mode:
 1. `codegraph_explore("AuthService loginUser session-manager")` → exact definitions, call graph, and blast radius in one call
 2. `gplan_reads` → read only the identified regions
 3. `announce_plan` → complete dependency-first plan
@@ -100,7 +98,7 @@ That's **3 calls instead of 15+** per symbol. Across a planning session resolvin
 
 #### Setup
 
-Graph-Optimized Plan mode requires [codegraph](https://github.com/colbymchenry/codegraph) to be installed:
+Plan mode requires [codegraph](https://github.com/colbymchenry/codegraph) to be installed for graph-powered planning:
 
 ```bash
 # Install codegraph (indexes your repository)
@@ -111,7 +109,7 @@ cd your-project
 codegraph init
 ```
 
-Codegraph is registered as a standard MCP server in Astonish — zero configuration needed. If codegraph is not installed or the project isn't indexed, Graph Plan mode gracefully **downgrades to free-form Plan mode** with a notice.
+Codegraph is registered as a standard MCP server in Astonish — zero configuration needed. If codegraph is not installed or the project isn't indexed, Plan mode gracefully **falls back to free-form planning** (read-only investigation without the phased graph flow).
 
 #### Plan Persistence
 
@@ -119,6 +117,18 @@ Plans created via `announce_plan` are written to a per-session `PLAN.md` file th
 - Survives **context compaction** — when the context window fills and old messages are summarized, the plan file persists and the agent can re-read it to resume exactly where it left off.
 - Contains a **checkbox per phase** with status (pending/running/complete/failed).
 - Records the **concrete blast radius** (affected files marked new/modify/delete), verification commands, and execution details per phase.
+
+### Ask Mode — Understand Before You Decide
+
+Sometimes you need answers, not changes. Ask mode gives the agent full read-only access to your codebase — files, search, codegraph, memory — but **disables all mutating tools**. The runtime gate is enforced server-side, just like Plan mode.
+
+Use Ask mode to:
+- **Understand architecture** — "How does the authentication flow work?"
+- **Trace data flows** — "Where does this config value get consumed?"
+- **Discuss tradeoffs** — "What are the implications of switching from REST to gRPC here?"
+- **Explore before committing** — investigate a problem space without the agent jumping into edits
+
+If you ask the agent to make changes while in Ask mode, it will remind you to switch to Normal or Plan mode (`shift+tab`).
 
 ## Safety Model
 
@@ -295,7 +305,8 @@ astonish code --debug
 
 ## Tips
 
-- Use **Graph Plan mode** (`shift+tab` twice) before large refactors — it produces complete, dependency-aware plans with blast-radius coverage.
+- Use **Plan mode** (`shift+tab`) before large refactors — it produces complete, dependency-aware plans with blast-radius coverage.
+- Use **Ask mode** (`shift+tab` twice) to explore and understand before committing to an approach.
 - Use **`@filename`** in the composer to attach file content to your message without manually pasting.
 - Press **`ctrl+o`** to expand/collapse the latest tool activity block.
 - **Drag to select** text in the transcript and it's automatically copied to your clipboard.

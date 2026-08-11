@@ -2,7 +2,7 @@
 
 ## Overview
 
-Astonish ships a **fullscreen terminal chat app** comparable to Claude Code, OpenCode, and Grok Build CLI. It has two entry points that share the same `pkg/tui` presentation layer:
+Astonish ships a **fullscreen terminal chat app** comparable to Claude Code, Codex, OpenCode, and Grok Build. It has two entry points that share the same `pkg/tui` presentation layer:
 
 - **`astonish chat`** — platform-backed. Even a local installation requires authentication (`astonish login <url>`); the agent runs on the platform and the TUI streams Studio SSE.
 - **`astonish code`** — **local code mode**. The single binary runs the agent loop **in-process** and executes its compiled-in tools directly on the host filesystem in the working directory. There is no daemon, no HTTP, and no login. This is the Claude-Code-style local coding path.
@@ -61,7 +61,7 @@ If `client.IsRemoteMode()` is false (no `~/.config/astonish/remote.yaml` / login
 
 ## Code mode (local, in-process)
 
-`astonish code` runs the entire agent locally in the same process, like Claude Code / OpenCode / Grok CLI. It reuses the same `pkg/tui` presentation and event model as platform chat; only the backend differs.
+`astonish code` runs the entire agent locally in the same process, like Claude Code / Codex / OpenCode / Grok Build. It reuses the same `pkg/tui` presentation and event model as platform chat; only the backend differs.
 
 **Flow:** `cmd/astonish/code.go:handleCodeCommand` → `launcher.RunCodeTUI` →
 
@@ -356,7 +356,7 @@ Starting a new chat (`/new`, `ctrl+n`, or deleting the active session) clears an
 
 ### Graph-Optimized Plan mode (code mode only)
 
-`shift+tab` cycles a **third** mode after Plan: **Normal → Plan → Graph Plan → Normal** (composer border cyan, label `Graph Plan`). Like Plan mode it is a **no-changes** mode — `write_file` / `edit_file` / `shell_command` are blocked in every phase — but instead of free-form investigation it enforces a fixed **"plan-for-the-plan"** flow driven by [codegraph](https://github.com/colbymchenry/codegraph), an external knowledge-graph tool exposed over MCP as the read-only `codegraph_explore` query tool. Codegraph pre-computes symbols, call edges, dependencies and blast-radius, so most structural questions resolve in 1–4 calls instead of many broad `grep_search` / `find_files` passes — faster, cheaper, more complete plans.
+`shift+tab` cycles through three modes: **Normal → Plan → Ask → Normal** (Plan mode: composer border amber, label `Plan`; Ask mode: composer border green, label `Ask`). Plan mode is a **no-changes** mode — `write_file` / `edit_file` / `shell_command` are blocked in every phase — and it enforces a fixed **"plan-for-the-plan"** flow driven by [codegraph](https://github.com/colbymchenry/codegraph), an external knowledge-graph tool exposed over MCP as the read-only `codegraph_explore` query tool. Codegraph pre-computes symbols, call edges, dependencies and blast-radius, so most structural questions resolve in 1–4 calls instead of many broad `grep_search` / `find_files` passes — faster, cheaper, more complete plans. Ask mode is a **research-only** mode — all mutating tools are disabled and the agent answers questions using read-only tools only.
 
 **Phased gate.** A per-session phase state machine (`pkg/agent/graph_plan_state.go`, `GraphPlanState`) tracks the current phase; the phase determines the runtime allow-list. The model advances phases via three always-allowed **transition tools** (`gplan_reads`, `gplan_gaps`, `gplan_finalize`) that only mutate phase state. Enforcement is a `BeforeToolCallback` in `pkg/agent/chat_agent_run.go` (the same mechanism as the Plan-mode gate), so the model *physically cannot* call `grep_search` in the Graph phase. Blocked tools return a `blocked_graph_plan` **result** (not an error), with phase-aware guidance (`GraphPlanBlockedMessage`) so the model self-corrects and advances phases legitimately.
 

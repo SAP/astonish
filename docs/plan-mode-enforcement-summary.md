@@ -199,8 +199,8 @@ UI-only change.
 
 ## Graph-Optimized Plan mode (code mode only)
 
-Graph-Optimized Plan is a **third mode** alongside Normal and Plan. `shift+tab` cycles
-**Normal → Plan → Graph Plan → Normal**. Like Plan mode it is a **no-changes** mode
+Graph-Optimized Plan is now simply called **Plan mode** in the UI. `shift+tab` cycles
+**Normal → Plan → Ask → Normal**. Like the old Plan mode it is a **no-changes** mode
 (`write_file` / `edit_file` / `shell_command` are blocked in every phase), but instead of a
 free-form investigation it enforces a fixed **"plan-for-the-plan"** flow driven by
 [**codegraph**](https://github.com/colbymchenry/codegraph) — an external knowledge-graph tool
@@ -295,7 +295,7 @@ gplan_* tools → tools.graphPlanAdvanceCallback → chatAgent.GetActiveGraphPla
 | `pkg/launcher/tui_code.go` | Bootstrap invocation, phase reset, active-graph-plan wiring, downgrade |
 | `pkg/config/standard_servers.go` | Keyless non-web `codegraph` entry + `FixedEnv` support |
 | `pkg/tui/backend/backend.go` | `GraphPlanMode bool` on `TurnOptions` |
-| `pkg/tui/app.go` | 3-way `togglePlanMode` cycle; `graphPlanModeSystemContext` mirror; "Graph Plan" label (cyan) |
+| `pkg/tui/app.go` | 3-way `togglePlanMode` cycle; `graphPlanModeSystemContext` mirror; "Plan" label (amber) |
 
 ### Tests (Graph-Optimized Plan)
 
@@ -303,6 +303,6 @@ gplan_* tools → tools.graphPlanAdvanceCallback → chatAgent.GetActiveGraphPla
   phase-aware blocked message, prompt discipline, `SafeTools` membership.
 - `pkg/agent/graph_plan_state_test.go` — transitions incl. `graph→gap` skip, reset, per-session isolation.
 - `pkg/tools/graph_plan_tool_test.go` — transition tools advance phases; empty-gaps skip to plan.
-- `pkg/tui/plan_mode_test.go` — 3-way cycle, `turnOptions` for Graph Plan, "Graph Plan" composer label.
+- `pkg/tui/plan_mode_test.go` — 3-way cycle (Normal → Plan → Ask → Normal), `turnOptions` for Plan/Ask, composer labels.
 - `pkg/config/mcp_config_test.go` — codegraph always injected, survives web filter, not persisted to `mcp_config.json`.
 

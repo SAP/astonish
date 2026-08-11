@@ -269,7 +269,7 @@ func checkForUpdates() {
 	}
 
 	// Use semantic version comparison
-	if !versionsEqual(current, latest) {
+	if isNewerVersion(latest, current) {
 		fmt.Fprintln(os.Stderr)
 		fmt.Fprintf(os.Stderr, "\033[93mA new version of Astonish is available: %s\033[0m\n", result.TagName)
 		fmt.Fprintf(os.Stderr, "\033[93mRun \033[1mbrew upgrade SAP/astonish/astonish\033[0m\033[93m to update.\033[0m\n")
@@ -277,38 +277,62 @@ func checkForUpdates() {
 	}
 }
 
-// versionsEqual compares two version strings semantically
-// Returns true if versions are equal, false otherwise
-func versionsEqual(v1, v2 string) bool {
-	parseVersion := func(v string) (major, minor, patch int, rest string) {
-		v = strings.ReplaceAll(v, " ", "")
-		parts := strings.Split(v, ".")
+// isNewerVersion returns true when latest is a strictly greater semver than
+// current. Pre-release suffixes (e.g. "-beta.1") on current are handled:
+// a pre-release is considered older than the same base version without a
+// suffix, but newer than any version with a smaller base.
+func isNewerVersion(latest, current string) bool {
+	// Non-semver current (e.g. "dev", "") — never suggest an update.
+	c0 := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(current), "v"))
+	if c0 == "" || (c0[0] < '0' || c0[0] > '9') {
+		return false
+	}
+	// Beta builds — never suggest an update to avoid noise.
+	if strings.Contains(strings.ToLower(c0), "beta") {
+		return false
+	}
+
+	type semver struct {
+		major, minor, patch int
+		pre                 string
+	}
+	parse := func(v string) semver {
+		v = strings.TrimSpace(v)
+		v = strings.TrimPrefix(v, "v")
+		var s semver
+		parts := strings.SplitN(v, ".", 3)
 		if len(parts) > 0 {
-			major, _ = strconv.Atoi(parts[0])
+			s.major, _ = strconv.Atoi(parts[0])
 		}
 		if len(parts) > 1 {
-			minor, _ = strconv.Atoi(parts[1])
+			s.minor, _ = strconv.Atoi(parts[1])
 		}
 		if len(parts) > 2 {
-			patch, _ = strconv.Atoi(parts[2])
+			patchStr := parts[2]
+			if idx := strings.Index(patchStr, "-"); idx >= 0 {
+				s.pre = patchStr[idx+1:]
+				patchStr = patchStr[:idx]
+			}
+			s.patch, _ = strconv.Atoi(patchStr)
 		}
-		if len(parts) > 3 {
-			rest = strings.Join(parts[3:], ".")
-		}
-		return
+		return s
 	}
 
-	m1, n1, p1, r1 := parseVersion(v1)
-	m2, n2, p2, r2 := parseVersion(v2)
+	l := parse(latest)
+	c := parse(current)
 
-	if m1 != m2 {
-		return m1 == m2
+	if l.major != c.major {
+		return l.major > c.major
 	}
-	if n1 != n2 {
-		return n1 == n2
+	if l.minor != c.minor {
+		return l.minor > c.minor
 	}
-	if p1 != p2 {
-		return p1 == p2
+	if l.patch != c.patch {
+		return l.patch > c.patch
 	}
-	return r1 == r2
+	// Same base version: stable (no pre-release) is newer than pre-release.
+	if c.pre != "" && l.pre == "" {
+		return true
+	}
+	return false
 }

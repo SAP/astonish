@@ -333,4 +333,4 @@ git commit --no-verify
 CRITICAL: Whenever you process a request that involves writing or modifying code, you must execute the following steps before considering the task complete:
 
 1. **Unit Testing:** Always analyze the changes you made and create or modify the corresponding unit tests to ensure the new code is fully covered.
-2. **Documentation Review:** Always check the `docs/` folder. You **MUST update the architecture documentation and user documentation** if they are relevant to the changes you just implemented.
+2. **Documentation Review:** Always check the `docs/` folder. You **MUST update the architecture documentation and the vitepress user documentation** if they are relevant to the changes you just implemented.

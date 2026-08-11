@@ -129,10 +129,10 @@ func TestPushFile_EmitsSingleFileTarStream(t *testing.T) {
 		t.Errorf("tar should have exactly one entry, got next err %v", err)
 	}
 
-	// Validate exec'd command: astonish-shell tar -C /etc/astonish -xmpf -
+	// Validate exec'd command: astonish-shell sh -c "mkdir -p '/etc/astonish' && tar -C '/etc/astonish' -xmpf -"
 	q := se.url.Query()
 	cmds := q["command"]
-	want := []string{"/usr/local/bin/astonish-shell", "tar", "-C", "/etc/astonish", "-xmpf", "-"}
+	want := []string{"/usr/local/bin/astonish-shell", "sh", "-c", "mkdir -p '/etc/astonish' && tar -C '/etc/astonish' -xmpf -"}
 	if len(cmds) != len(want) {
 		t.Fatalf("command = %v, want %v", cmds, want)
 	}
@@ -156,8 +156,14 @@ func TestPushFile_RootDirectoryPath(t *testing.T) {
 	}
 	q := se.url.Query()
 	cmds := q["command"]
-	if len(cmds) < 4 || cmds[3] != "/" {
-		t.Errorf("root dir: command[3] = %v, want /", cmds)
+	want := []string{"/usr/local/bin/astonish-shell", "sh", "-c", "mkdir -p '/' && tar -C '/' -xmpf -"}
+	if len(cmds) != len(want) {
+		t.Fatalf("root dir: command = %v, want %v", cmds, want)
+	}
+	for i := range want {
+		if cmds[i] != want[i] {
+			t.Errorf("root dir: command[%d] = %q, want %q", i, cmds[i], want[i])
+		}
 	}
 }
 
@@ -188,6 +194,32 @@ func TestPushFile_TransportErrorWrapped(t *testing.T) {
 	err := b.PushFile(context.Background(), "s1", "/tmp/x", strings.NewReader("x"), 0o644)
 	if err == nil || !errors.Is(err, boom) {
 		t.Errorf("PushFile transport err: got %v, want wraps %v", err, boom)
+	}
+}
+
+func TestPushFile_CreatesParentDirectory(t *testing.T) {
+	b, _ := newBackendWithFakeClient(t)
+	seedSession(t, b, "s1", "astn-sess-s1")
+	se := stubFactory(t, b, func(_ context.Context, opts remotecommand.StreamOptions) error {
+		_, _ = io.Copy(io.Discard, opts.Stdin)
+		return nil
+	})
+
+	// Push to the exact path that triggered the original bug.
+	if err := b.PushFile(context.Background(), "s1", "/tmp/astonish/session-credentials.json", strings.NewReader("{}"), 0o600); err != nil {
+		t.Fatalf("PushFile: %v", err)
+	}
+
+	q := se.url.Query()
+	cmds := q["command"]
+	want := []string{"/usr/local/bin/astonish-shell", "sh", "-c", "mkdir -p '/tmp/astonish' && tar -C '/tmp/astonish' -xmpf -"}
+	if len(cmds) != len(want) {
+		t.Fatalf("command = %v, want %v", cmds, want)
+	}
+	for i := range want {
+		if cmds[i] != want[i] {
+			t.Errorf("command[%d] = %q, want %q", i, cmds[i], want[i])
+		}
 	}
 }
 

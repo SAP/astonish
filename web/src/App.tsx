@@ -57,6 +57,25 @@ const FleetView = lazy(() => import('./components/FleetView'))
 const DrillView = lazy(() => import('./components/DrillView'))
 const AppsView = lazy(() => import('./components/AppsView'))
 
+/** Returns true if `latest` is a strictly newer semver than `current`. */
+function isNewerVersion(latest: string, current: string): boolean {
+  // Beta builds — never suggest an update to avoid noise.
+  if (current.toLowerCase().includes('beta')) return false
+  const parse = (v: string) => {
+    const [base] = v.split('-') // strip pre-release suffix
+    const parts = base.split('.').map(Number)
+    return { major: parts[0] || 0, minor: parts[1] || 0, patch: parts[2] || 0, prerelease: v.includes('-') }
+  }
+  const l = parse(latest)
+  const c = parse(current)
+  if (l.major !== c.major) return l.major > c.major
+  if (l.minor !== c.minor) return l.minor > c.minor
+  if (l.patch !== c.patch) return l.patch > c.patch
+  // Same base version: stable (no prerelease) is newer than prerelease
+  if (c.prerelease && !l.prerelease) return true
+  return false
+}
+
 function App() {
   const { theme, toggleTheme, refreshBrandTheme } = useTheme()
   const { path, navigate, replaceHash } = useHashRouter()
@@ -369,7 +388,7 @@ function App() {
       const savedUpdate = localStorage.getItem('astonish_update_available')
 
       // Simple string comparison (both versions normalized without 'v' prefix)
-      if (currentVersion !== latestVersion) {
+      if (isNewerVersion(latestVersion, currentVersion)) {
         const updateInfo: UpdateInfo = { version: releaseData.tag_name, url: releaseData.html_url }
         setUpdateAvailable(updateInfo)
 
@@ -420,8 +439,8 @@ function App() {
           const updateInfo = JSON.parse(savedUpdate)
           // Check if saved update matches current version (user updated since last check)
           const savedVersion = (updateInfo.version || '').replace(/^v/, '').trim()
-          if (savedVersion === currentVersion) {
-            // Version matches - user updated, clear old update notification
+          if (!isNewerVersion(savedVersion, currentVersion)) {
+            // User has updated to or past the saved version — clear notification
             localStorage.removeItem('astonish_update_available')
             setUpdateAvailable(null)
           } else {

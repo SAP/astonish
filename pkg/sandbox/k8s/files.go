@@ -101,7 +101,7 @@ func (b *K8sBackend) PushFile(ctx context.Context, sessionID, filePath string, c
 		return fmt.Errorf("sandbox/k8s: PushFile(%s): build tar: %w", sessionID, err)
 	}
 
-	command := sandboxFileCommand([]string{"tar", "-C", dir, "-xmpf", "-"})
+	command := sandboxFileCommand([]string{"sh", "-c", fmt.Sprintf("mkdir -p %s && tar -C %s -xmpf -", shellQuote(dir), shellQuote(dir))})
 	method, u, err := b.buildExecURL(rec.PodName, command, false /*tty*/, true /*stdin*/, true /*stdout*/, true /*stderr*/)
 	if err != nil {
 		return fmt.Errorf("sandbox/k8s: PushFile(%s): build URL: %w", sessionID, err)

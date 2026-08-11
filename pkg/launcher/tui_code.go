@@ -842,36 +842,6 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 			return resp
 		}
 	}
-	// Graph-Optimized Plan mode: best-effort ensure the .codegraph/ index exists
-	// so the codegraph MCP server can answer queries. If unavailable, a notice
-	// tells the model to call gplan_gaps to skip the graph phase — but the gate
-	// still runs in all cases. We never downgrade to a different mode here.
-	planMode := opts.PlanMode
-	graphPlan := opts.GraphPlanMode
-	askMode := opts.AskMode
-	systemContext := opts.SystemContext
-	if graphPlan {
-		if notice := EnsureCodegraph(ctx, b.workingDir, func(msg string) {
-			emit("system", map[string]any{"content": msg})
-		}); notice != "" {
-			emit("system", map[string]any{"content": notice})
-		}
-		gp := chatAgent.GetOrCreateGraphPlanState(sessionID)
-		gp.Reset()
-		chatAgent.SetActiveGraphPlan(gp)
-	} else {
-		chatAgent.SetActiveGraphPlan(nil)
-	}
-
-	if systemContext != "" || planMode || graphPlan || askMode {
-		ctx = agent.WithPromptOverrides(ctx, &agent.PromptOverrides{
-			SessionContext: agent.EscapeCurlyPlaceholders(systemContext),
-			PlanMode:       planMode,
-			GraphPlanMode:  graphPlan,
-			AskMode:        askMode,
-		})
-	}
-
 	// Build the user message. Pasted images / file attachments arrive as raw
 	// bytes on opts.Attachments; forward them as InlineData parts so multimodal
 	// models can see them (mirrors the platform backend, which routes through
@@ -912,6 +882,36 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 					emit("session_title", map[string]any{"title": title, "sessionId": sessionID})
 				})
 			}
+		}
+
+		// Graph-Optimized Plan mode: best-effort ensure the .codegraph/ index exists
+		// so the codegraph MCP server can answer queries. If unavailable, a notice
+		// tells the model to call gplan_gaps to skip the graph phase — but the gate
+		// still runs in all cases. We never downgrade to a different mode here.
+		planMode := opts.PlanMode
+		graphPlan := opts.GraphPlanMode
+		askMode := opts.AskMode
+		systemContext := opts.SystemContext
+		if graphPlan {
+			if notice := EnsureCodegraph(ctx, b.workingDir, func(msg string) {
+				emit("system", map[string]any{"content": msg})
+			}); notice != "" {
+				emit("system", map[string]any{"content": notice})
+			}
+			gp := chatAgent.GetOrCreateGraphPlanState(sessionID)
+			gp.Reset()
+			chatAgent.SetActiveGraphPlan(gp)
+		} else {
+			chatAgent.SetActiveGraphPlan(nil)
+		}
+
+		if systemContext != "" || planMode || graphPlan || askMode {
+			ctx = agent.WithPromptOverrides(ctx, &agent.PromptOverrides{
+				SessionContext: agent.EscapeCurlyPlaceholders(systemContext),
+				PlanMode:       planMode,
+				GraphPlanMode:  graphPlan,
+				AskMode:        askMode,
+			})
 		}
 
 		// Turn-boundary compaction: if the active session is over threshold,

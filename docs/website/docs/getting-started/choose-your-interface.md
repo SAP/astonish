@@ -10,7 +10,7 @@ New to Astonish? Start with **Studio** for the full visual experience, or **Asto
 
 ### Astonish Code (Local Coding Tool)
 
-A fully local, in-process coding agent — like Claude Code or OpenCode. Runs directly in your project directory with no daemon, no platform, and no login required. Tools execute with your own permissions on the host filesystem.
+A fully local, in-process coding agent — like Claude Code, Codex, or OpenCode. Runs directly in your project directory with no daemon, no platform, and no login required. Tools execute with your own permissions on the host filesystem.
 
 ```bash
 astonish code                          # Start coding in current directory
@@ -20,7 +20,8 @@ astonish code --auto-approve           # Bypass authorization prompts
 ```
 
 Features unique to code mode:
-- **Graph-Optimized Plan mode** — uses a pre-computed code knowledge graph for highly efficient, dependency-aware planning in a fraction of the tool calls
+- **Plan mode** — codegraph-powered planning that uses a pre-computed knowledge graph for highly efficient, dependency-aware plans in a fraction of the tool calls
+- **Ask mode** — research-only Q&A to explore architecture and discuss approaches without changing files
 - **Rollback** — revert both conversation and file changes to any earlier point
 - **Dual-backend switching** (`Ctrl+\`) — switch to platform chat without leaving the TUI
 - **AGENTS.md project guidance** — loads project conventions automatically

@@ -112,6 +112,10 @@ func RunCodeTUI(ctx context.Context, cfg *CodeConfig) error {
 	// machine in the CWD. Disabling the sandbox makes every filesystem/shell
 	// tool resolve against the process working directory (Claude-Code
 	// semantics). This is the single most important line in code mode.
+	// Preserve the original sandbox.enabled value before overriding — it must
+	// be restored when saving config to disk so the platform daemon (which
+	// reads the same config.yaml) does not see sandbox as disabled.
+	originalSandboxEnabled := appConfig.Sandbox.Enabled
 	forceHostExecution(appConfig)
 
 	// Ensure ripgrep is available for the code-search tools. ripgrep is far
@@ -207,23 +211,24 @@ func RunCodeTUI(ctx context.Context, cfg *CodeConfig) error {
 	}
 
 	b := &localAgentBackend{
-		result:             result,
-		sessionSvc:         common.NewAutoInitService(result.SessionService),
-		fileStore:          fileStore,
-		checkpoints:        checkpointStore,
-		userID:             scopedUserID,
-		appConfig:          appConfig,
-		sessionID:          cfg.SessionID,
-		autoApprove:        cfg.AutoApprove,
-		debug:              cfg.DebugMode,
-		workingDir:         workingDir,
-		provider:           result.ProviderName,
-		model:              result.ModelName,
-		configured:         result.ProviderConfigured,
-		resumed:            cfg.SessionID != "",
-		notices:            result.StartupNotices,
-		subAgentAuthReqCh:  make(chan agent.SubAgentAuthRequest, 1),
-		subAgentAuthRespCh: make(chan agent.SubAgentAuthResponse, 1),
+		result:                 result,
+		sessionSvc:             common.NewAutoInitService(result.SessionService),
+		fileStore:              fileStore,
+		checkpoints:            checkpointStore,
+		userID:                 scopedUserID,
+		appConfig:              appConfig,
+		originalSandboxEnabled: originalSandboxEnabled,
+		sessionID:              cfg.SessionID,
+		autoApprove:            cfg.AutoApprove,
+		debug:                  cfg.DebugMode,
+		workingDir:             workingDir,
+		provider:               result.ProviderName,
+		model:                  result.ModelName,
+		configured:             result.ProviderConfigured,
+		resumed:                cfg.SessionID != "",
+		notices:                result.StartupNotices,
+		subAgentAuthReqCh:      make(chan agent.SubAgentAuthRequest, 1),
+		subAgentAuthRespCh:     make(chan agent.SubAgentAuthResponse, 1),
 	}
 
 	// If resuming an existing session, load the persisted title so the header
@@ -276,6 +281,7 @@ func buildCodeBackend(ctx context.Context, cfg *CodeConfig) (backend.Backend, er
 	if err != nil {
 		return nil, fmt.Errorf("failed to load config: %w", err)
 	}
+	originalSandboxEnabled := appConfig.Sandbox.Enabled
 	forceHostExecution(appConfig)
 
 	// Resolve provider/model.
@@ -337,21 +343,22 @@ func buildCodeBackend(ctx context.Context, cfg *CodeConfig) (backend.Backend, er
 	}
 
 	b := &localAgentBackend{
-		result:             result,
-		sessionSvc:         common.NewAutoInitService(result.SessionService),
-		fileStore:          fileStore,
-		checkpoints:        checkpointStore,
-		userID:             scopedUserID,
-		appConfig:          appConfig,
-		autoApprove:        cfg.AutoApprove,
-		debug:              cfg.DebugMode,
-		workingDir:         workingDir,
-		provider:           result.ProviderName,
-		model:              result.ModelName,
-		configured:         result.ProviderConfigured,
-		notices:            result.StartupNotices,
-		subAgentAuthReqCh:  make(chan agent.SubAgentAuthRequest, 1),
-		subAgentAuthRespCh: make(chan agent.SubAgentAuthResponse, 1),
+		result:                 result,
+		sessionSvc:             common.NewAutoInitService(result.SessionService),
+		fileStore:              fileStore,
+		checkpoints:            checkpointStore,
+		userID:                 scopedUserID,
+		appConfig:              appConfig,
+		originalSandboxEnabled: originalSandboxEnabled,
+		autoApprove:            cfg.AutoApprove,
+		debug:                  cfg.DebugMode,
+		workingDir:             workingDir,
+		provider:               result.ProviderName,
+		model:                  result.ModelName,
+		configured:             result.ProviderConfigured,
+		notices:                result.StartupNotices,
+		subAgentAuthReqCh:      make(chan agent.SubAgentAuthRequest, 1),
+		subAgentAuthRespCh:     make(chan agent.SubAgentAuthResponse, 1),
 	}
 	return b, nil
 }
@@ -366,6 +373,21 @@ func forceHostExecution(appConfig *config.AppConfig) {
 	}
 	disabled := false
 	appConfig.Sandbox.Enabled = &disabled
+}
+
+// saveAppConfig persists the in-memory AppConfig to disk while preserving the
+// user's original sandbox.enabled preference. Code mode sets sandbox.enabled=false
+// in-memory (via forceHostExecution) so tools run on the host, but this override
+// must NOT leak to the config file — other processes (the platform daemon) share
+// the same config.yaml and would incorrectly see sandbox as disabled.
+func (b *localAgentBackend) saveAppConfig() error {
+	// Temporarily restore the original sandbox.enabled value for serialization.
+	b.appConfig.Sandbox.Enabled = b.originalSandboxEnabled
+	err := config.SaveAppConfig(b.appConfig)
+	// Re-apply the code-mode override so the in-memory config stays correct.
+	disabled := false
+	b.appConfig.Sandbox.Enabled = &disabled
+	return err
 }
 
 // formatCodeTokens renders a token count compactly (e.g. 1523 → "1.5k") for
@@ -436,6 +458,12 @@ type localAgentBackend struct {
 	// only lists sessions created in this directory.
 	userID    string
 	appConfig *config.AppConfig
+	// originalSandboxEnabled preserves the user's sandbox.enabled preference
+	// from config.yaml before forceHostExecution() overrides it to &false for
+	// code mode. When saving config to disk, we restore this value so the
+	// persisted file does not leak the code-mode override to other processes
+	// (e.g., the platform daemon) that share the same config file.
+	originalSandboxEnabled *bool
 
 	debug      bool
 	workingDir string
@@ -2145,7 +2173,7 @@ func (b *localAgentBackend) SetModelPin(ctx context.Context, providerName, model
 	if b.appConfig != nil {
 		b.appConfig.General.DefaultProvider = providerName
 		b.appConfig.General.DefaultModel = modelName
-		if saveErr := config.SaveAppConfig(b.appConfig); saveErr != nil && b.debug {
+		if saveErr := b.saveAppConfig(); saveErr != nil && b.debug {
 			slog.Warn("failed to persist model selection to config", "component", "code-mode", "error", saveErr)
 		}
 	}
@@ -2572,10 +2600,9 @@ func (b *localAgentBackend) AddProvider(ctx context.Context, name, typeID string
 		b.appConfig.Providers = make(map[string]config.ProviderConfig)
 	}
 	b.appConfig.Providers[name] = inst
-	appCfg := b.appConfig
 	b.mu.Unlock()
 
-	if err := config.SaveAppConfig(appCfg); err != nil {
+	if err := b.saveAppConfig(); err != nil {
 		// Roll back the in-memory change so state matches disk.
 		b.mu.Lock()
 		delete(b.appConfig.Providers, name)
@@ -2605,10 +2632,9 @@ func (b *localAgentBackend) RemoveProvider(ctx context.Context, name string) err
 		b.appConfig.General.DefaultProvider = ""
 		b.appConfig.General.DefaultModel = ""
 	}
-	appCfg := b.appConfig
 	b.mu.Unlock()
 
-	if err := config.SaveAppConfig(appCfg); err != nil {
+	if err := b.saveAppConfig(); err != nil {
 		b.mu.Lock()
 		b.appConfig.Providers[name] = removed
 		b.mu.Unlock()
@@ -2760,10 +2786,9 @@ func (b *localAgentBackend) ConfigurePerplexityWebSearch(ctx context.Context, pr
 	}
 	b.appConfig.General.WebSearchTool = "perplexity:perplexity_web_search"
 	b.needsRebuild = true
-	appCfg := b.appConfig
 	b.mu.Unlock()
 
-	if err := config.SaveAppConfig(appCfg); err != nil {
+	if err := b.saveAppConfig(); err != nil {
 		// Roll back in-memory.
 		b.mu.Lock()
 		b.appConfig.PerplexityWebSearch = config.PerplexityWebSearchConfig{}
@@ -2815,10 +2840,9 @@ func (b *localAgentBackend) ClearWebSearch(ctx context.Context) error {
 	b.appConfig.General.WebExtractTool = ""
 	b.appConfig.PerplexityWebSearch = config.PerplexityWebSearchConfig{}
 	b.needsRebuild = true
-	appCfg := b.appConfig
 	b.mu.Unlock()
 
-	if err := config.SaveAppConfig(appCfg); err != nil {
+	if err := b.saveAppConfig(); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 	return nil

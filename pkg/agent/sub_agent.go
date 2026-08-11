@@ -37,6 +37,11 @@ type SubTaskProgressEvent struct {
 	Type     string `json:"type"`                // "delegation_start", "task_start", "task_complete", "task_failed", "task_retry", "task_tool_call", "task_tool_result", "task_text", "plan_announced", "plan_step_update"
 	TaskName string `json:"task_name,omitempty"` // Name of the sub-task (matches SubAgentTask.Name)
 	PlanStep string `json:"plan_step,omitempty"` // Plan step this task belongs to (for progress tracking)
+	// SessionID identifies the parent session that owns this delegation.
+	// Populated by RunTask from the context so that the progress callback
+	// can route events to the correct session when multiple sessions share
+	// the same singleton ChatAgent.
+	SessionID string `json:"-"`
 	// Fields for delegation_start
 	Tasks []SubTaskInfo `json:"tasks,omitempty"` // All tasks in the delegation (only for delegation_start)
 	// Fields for task_complete / task_failed
@@ -201,7 +206,8 @@ type SubAgentManager struct {
 	// events stream to the UI in real-time while the main LLM only receives
 	// a compact summary. Set by the launcher to ChatAgent.ForwardSubTaskEvent.
 	// Thread-safe: may be called from multiple sub-agent goroutines.
-	EventForwarder func(event *adksession.Event)
+	// The sessionID parameter identifies which parent session initiated the delegation.
+	EventForwarder func(sessionID string, event *adksession.Event)
 
 	// SubTaskProgress, when set, is called for structured sub-task lifecycle
 	// events (task_start, task_complete, task_failed) and tagged sub-agent
@@ -384,10 +390,11 @@ func (m *SubAgentManager) RunTasks(ctx context.Context, tasks []SubAgentTask) []
 				// Emit task_retry event so the UI knows
 				if m.SubTaskProgress != nil {
 					m.SubTaskProgress(SubTaskProgressEvent{
-						Type:     "task_retry",
-						TaskName: t.Name,
-						PlanStep: t.PlanStep,
-						Error:    result.Error,
+						Type:      "task_retry",
+						TaskName:  t.Name,
+						PlanStep:  t.PlanStep,
+						Error:     result.Error,
+						SessionID: store.SessionIDFromContext(ctx),
 					})
 				}
 
@@ -504,33 +511,38 @@ func buildRetryPrompt(originalDescription string, firstAttempt TaskResult) strin
 // agent loop, collects the output and trace, then returns the result.
 func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) TaskResult {
 	start := time.Now()
+	parentSessionID := store.SessionIDFromContext(ctx)
+
+	// Helper to emit progress events with the parent session ID attached.
+	emitProgress := func(evt SubTaskProgressEvent) {
+		if m.SubTaskProgress != nil {
+			evt.SessionID = parentSessionID
+			m.SubTaskProgress(evt)
+		}
+	}
 
 	// Emit task_start progress event
-	if m.SubTaskProgress != nil {
-		m.SubTaskProgress(SubTaskProgressEvent{
-			Type:     "task_start",
-			TaskName: task.Name,
-			PlanStep: task.PlanStep,
-		})
-	}
+	emitProgress(SubTaskProgressEvent{
+		Type:     "task_start",
+		TaskName: task.Name,
+		PlanStep: task.PlanStep,
+	})
 
 	// Emit task_complete or task_failed on every exit path
 	var result TaskResult
 	defer func() {
-		if m.SubTaskProgress != nil {
-			evtType := "task_complete"
-			if result.Status != "success" {
-				evtType = "task_failed"
-			}
-			m.SubTaskProgress(SubTaskProgressEvent{
-				Type:     evtType,
-				TaskName: task.Name,
-				PlanStep: task.PlanStep,
-				Status:   result.Status,
-				Duration: result.Duration.Round(100 * 1e6).String(),
-				Error:    result.Error,
-			})
+		evtType := "task_complete"
+		if result.Status != "success" {
+			evtType = "task_failed"
 		}
+		emitProgress(SubTaskProgressEvent{
+			Type:     evtType,
+			TaskName: task.Name,
+			PlanStep: task.PlanStep,
+			Status:   result.Status,
+			Duration: result.Duration.Round(100 * 1e6).String(),
+			Error:    result.Error,
+		})
 	}()
 
 	// Apply task timeout (use override if set)
@@ -1115,13 +1127,11 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) TaskRe
 					if part.Text != "" && !part.Thought {
 						outputParts = append(outputParts, part.Text)
 						// Emit task_text progress event
-						if m.SubTaskProgress != nil {
-							m.SubTaskProgress(SubTaskProgressEvent{
-								Type:     "task_text",
-								TaskName: task.Name,
-								Text:     part.Text,
-							})
-						}
+						emitProgress(SubTaskProgressEvent{
+							Type:     "task_text",
+							TaskName: task.Name,
+							Text:     part.Text,
+						})
 					}
 					// Record tool calls in trace
 					if part.FunctionCall != nil {
@@ -1134,14 +1144,12 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) TaskRe
 						}
 						trace.RecordStep(part.FunctionCall.Name, args, nil, nil)
 						// Emit task_tool_call progress event
-						if m.SubTaskProgress != nil {
-							m.SubTaskProgress(SubTaskProgressEvent{
-								Type:     "task_tool_call",
-								TaskName: task.Name,
-								ToolName: part.FunctionCall.Name,
-								ToolArgs: args,
-							})
-						}
+						emitProgress(SubTaskProgressEvent{
+							Type:     "task_tool_call",
+							TaskName: task.Name,
+							ToolName: part.FunctionCall.Name,
+							ToolArgs: args,
+						})
 					}
 					// Record tool results in trace
 					if part.FunctionResponse != nil {
@@ -1156,14 +1164,12 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) TaskRe
 						}
 						trace.mu.Unlock()
 						// Emit task_tool_result progress event
-						if m.SubTaskProgress != nil {
-							m.SubTaskProgress(SubTaskProgressEvent{
-								Type:       "task_tool_result",
-								TaskName:   task.Name,
-								ToolName:   part.FunctionResponse.Name,
-								ToolResult: part.FunctionResponse.Response,
-							})
-						}
+						emitProgress(SubTaskProgressEvent{
+							Type:       "task_tool_result",
+							TaskName:   task.Name,
+							ToolName:   part.FunctionResponse.Name,
+							ToolResult: part.FunctionResponse.Response,
+						})
 					}
 				}
 			}

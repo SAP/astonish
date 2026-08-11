@@ -111,6 +111,22 @@ type ChatAgent struct {
 	// Thread-safe: may be called concurrently from multiple sub-agent goroutines.
 	SubTaskProgressCallback func(event SubTaskProgressEvent)
 
+	// subTaskProgressBySession holds per-session SubTaskProgressCallback
+	// registrations. When multiple sessions run concurrently on the same
+	// singleton ChatAgent, each runner registers its own callback keyed by
+	// session ID. The SubAgentRunner's SubTaskProgress closure (set in
+	// chat_factory.go) calls EmitSubTaskProgress which routes to the correct
+	// session's callback. This prevents delegate_tasks events from leaking
+	// across sessions.
+	subTaskProgressBySession map[string]func(SubTaskProgressEvent)
+	subTaskProgressMu        sync.RWMutex
+
+	// uiEventBySession holds per-session UIEventCallback registrations.
+	// Same pattern as subTaskProgressBySession — prevents sub-agent events
+	// (tool_call, tool_result, text) from leaking across concurrent sessions.
+	uiEventBySession map[string]func(*session.Event)
+	uiEventMu        sync.RWMutex
+
 	// Internal: reuse AstonishAgent for approval formatting
 	approvalHelper *AstonishAgent
 
@@ -683,10 +699,11 @@ func packToolIntoRequest(req *model.LLMRequest, t tool.Tool) {
 
 // ForwardSubTaskEvent processes a sub-agent event for transparent delegation.
 // It extracts images from FunctionResponse parts (stashing them in pendingImages
-// so DrainImages can deliver them to the UI), then forwards the event to
-// UIEventCallback for real-time display. Thread-safe: may be called concurrently
-// from multiple sub-agent goroutines.
-func (c *ChatAgent) ForwardSubTaskEvent(event *session.Event) {
+// so DrainImages can deliver them to the UI), then routes the event to the
+// correct session's UIEventCallback via EmitUIEvent. Thread-safe: may be called
+// concurrently from multiple sub-agent goroutines.
+// The sessionID identifies which parent session initiated the delegation.
+func (c *ChatAgent) ForwardSubTaskEvent(sessionID string, event *session.Event) {
 	if event == nil {
 		return
 	}
@@ -703,10 +720,8 @@ func (c *ChatAgent) ForwardSubTaskEvent(event *session.Event) {
 		}
 	}
 
-	// Forward to the UI callback for real-time rendering
-	if c.UIEventCallback != nil {
-		c.UIEventCallback(event)
-	}
+	// Forward to the correct session's UI callback for real-time rendering
+	c.EmitUIEvent(sessionID, event)
 }
 
 // EnqueueImagesFromContent extracts image/* InlineData parts from model (or
@@ -1062,4 +1077,84 @@ func IsMCPGroupInaccessible(ctx context.Context, groupName string) bool {
 		return false // not an MCP group — always accessible
 	}
 	return !isMCPServerAccessible(ctx, serverName)
+}
+
+// RegisterSubTaskProgress registers a per-session SubTaskProgressCallback.
+// This allows multiple concurrent sessions on the same singleton ChatAgent to
+// each receive only their own delegate_tasks events without cross-session leakage.
+func (c *ChatAgent) RegisterSubTaskProgress(sessionID string, cb func(SubTaskProgressEvent)) {
+	c.subTaskProgressMu.Lock()
+	defer c.subTaskProgressMu.Unlock()
+	if c.subTaskProgressBySession == nil {
+		c.subTaskProgressBySession = make(map[string]func(SubTaskProgressEvent))
+	}
+	c.subTaskProgressBySession[sessionID] = cb
+}
+
+// UnregisterSubTaskProgress removes the per-session callback registration.
+func (c *ChatAgent) UnregisterSubTaskProgress(sessionID string) {
+	c.subTaskProgressMu.Lock()
+	defer c.subTaskProgressMu.Unlock()
+	delete(c.subTaskProgressBySession, sessionID)
+}
+
+// EmitSubTaskProgress routes a sub-task progress event to the correct session's
+// callback. It first checks the per-session map (preferred for concurrent
+// sessions), then falls back to the legacy SubTaskProgressCallback field for
+// backwards compatibility with single-session modes (CLI, tests).
+func (c *ChatAgent) EmitSubTaskProgress(sessionID string, evt SubTaskProgressEvent) {
+	c.subTaskProgressMu.RLock()
+	cb := c.subTaskProgressBySession[sessionID]
+	c.subTaskProgressMu.RUnlock()
+	if cb != nil {
+		cb(evt)
+		return
+	}
+	// Fallback: legacy single-callback path (CLI / tests)
+	if c.SubTaskProgressCallback != nil {
+		c.SubTaskProgressCallback(evt)
+	}
+}
+
+// RegisterUIEvent registers a per-session UIEventCallback.
+func (c *ChatAgent) RegisterUIEvent(sessionID string, cb func(*session.Event)) {
+	c.uiEventMu.Lock()
+	defer c.uiEventMu.Unlock()
+	if c.uiEventBySession == nil {
+		c.uiEventBySession = make(map[string]func(*session.Event))
+	}
+	c.uiEventBySession[sessionID] = cb
+}
+
+// UnregisterUIEvent removes the per-session UIEventCallback registration.
+func (c *ChatAgent) UnregisterUIEvent(sessionID string) {
+	c.uiEventMu.Lock()
+	defer c.uiEventMu.Unlock()
+	delete(c.uiEventBySession, sessionID)
+}
+
+// EmitUIEvent routes a UI event to the correct session's callback.
+// Falls back to the legacy UIEventCallback field for single-session modes.
+func (c *ChatAgent) EmitUIEvent(sessionID string, event *session.Event) {
+	c.uiEventMu.RLock()
+	cb := c.uiEventBySession[sessionID]
+	c.uiEventMu.RUnlock()
+	if cb != nil {
+		cb(event)
+		return
+	}
+	// Fallback: legacy single-callback path (CLI / tests)
+	if c.UIEventCallback != nil {
+		c.UIEventCallback(event)
+	}
+}
+
+// HasSubTaskProgressForSession returns true if a per-session SubTaskProgress
+// callback is registered for the given session. Used to decide whether to
+// suppress flat tool_call/tool_result emission in favour of TaskPlanPanel.
+func (c *ChatAgent) HasSubTaskProgressForSession(sessionID string) bool {
+	c.subTaskProgressMu.RLock()
+	defer c.subTaskProgressMu.RUnlock()
+	_, ok := c.subTaskProgressBySession[sessionID]
+	return ok
 }

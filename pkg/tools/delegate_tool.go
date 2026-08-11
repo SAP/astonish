@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/SAP/astonish/pkg/agent"
+	adksession "google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
 )
@@ -88,15 +89,25 @@ func delegateTasks(ctx tool.Context, args DelegateTasksArgs) (DelegateTasksResul
 		safeTask := agent.EscapeCurlyPlaceholders(input.Task)
 		safeInstructions := agent.EscapeCurlyPlaceholders(input.Instructions)
 
+		// Capture the parent session ID for event routing — ensures sub-agent
+		// events are forwarded only to the session that initiated the delegation.
+		parentSessionID := ctx.SessionID()
+		var onEvent func(event *adksession.Event)
+		if subAgentManagerVar.EventForwarder != nil {
+			onEvent = func(event *adksession.Event) {
+				subAgentManagerVar.EventForwarder(parentSessionID, event)
+			}
+		}
+
 		tasks[i] = agent.SubAgentTask{
 			Name:         input.Name,
 			Description:  safeTask,
 			Instructions: safeInstructions,
 			ToolFilter:   input.Tools,
 			PlanStep:     input.PlanStep,
-			ParentID:     ctx.SessionID(),
-			ParentDepth:  0,                                 // delegate_tasks creates top-level sub-agents
-			OnEvent:      subAgentManagerVar.EventForwarder, // transparent streaming to UI
+			ParentID:     parentSessionID,
+			ParentDepth:  0,       // delegate_tasks creates top-level sub-agents
+			OnEvent:      onEvent, // transparent streaming to UI (session-scoped)
 		}
 	}
 

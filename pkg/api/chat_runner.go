@@ -536,8 +536,10 @@ func (cr *ChatRunner) Run(
 		})
 	}
 
-	// Wire transparent sub-agent streaming
-	chatAgent.UIEventCallback = func(event *session.Event) {
+	// Wire transparent sub-agent streaming.
+	// Register per-session so concurrent sessions on the same singleton
+	// ChatAgent don't leak events across sessions.
+	chatAgent.RegisterUIEvent(cr.SessionID, func(event *session.Event) {
 		if event == nil || event.LLMResponse.Content == nil {
 			return
 		}
@@ -547,7 +549,7 @@ func (cr *ChatRunner) Run(
 		// text/tool_call/tool_result emission to avoid duplicate rendering.
 		// Still drain images and flow output — these are side-channel data that
 		// must be emitted regardless of which rendering path is active.
-		if chatAgent.SubTaskProgressCallback != nil {
+		if chatAgent.HasSubTaskProgressForSession(cr.SessionID) {
 			for _, part := range event.LLMResponse.Content.Parts {
 				if part.FunctionResponse != nil {
 					cr.drainImagesAndFlowOutput(chatAgent, sessionService)
@@ -592,8 +594,8 @@ func (cr *ChatRunner) Run(
 			chatAgent.EnqueueImagesFromContent(event.LLMResponse.Content)
 			cr.drainImagesAndFlowOutput(chatAgent, sessionService)
 		}
-	}
-	defer func() { chatAgent.UIEventCallback = nil }()
+	})
+	defer chatAgent.UnregisterUIEvent(cr.SessionID)
 
 	// Wire structured sub-task progress events for task plan visualization.
 	// These are emitted as `subtask_progress` SSE events, carrying lifecycle
@@ -601,7 +603,10 @@ func (cr *ChatRunner) Run(
 	// (task_tool_call, task_tool_result, task_text) with the task name.
 	// Also carries plan events (plan_announced, plan_step_update) from the
 	// announce_plan tool.
-	chatAgent.SubTaskProgressCallback = func(evt agent.SubTaskProgressEvent) {
+	//
+	// Register per-session so concurrent sessions on the same singleton
+	// ChatAgent don't leak events across sessions.
+	chatAgent.RegisterSubTaskProgress(cr.SessionID, func(evt agent.SubTaskProgressEvent) {
 		data := map[string]any{
 			"event_type": evt.Type,
 			"task_name":  evt.TaskName,
@@ -693,8 +698,8 @@ func (cr *ChatRunner) Run(
 				}
 			}
 		}
-	}
-	defer func() { chatAgent.SubTaskProgressCallback = nil }()
+	})
+	defer chatAgent.UnregisterSubTaskProgress(cr.SessionID)
 
 	// Run the agent and emit events.
 	// Track whether the run produced a proper completion or was truncated.

@@ -1547,34 +1547,30 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 					stepName := plan.ResolveStepName(evt.PlanStep, evt.TaskName)
 					if stepName != "" {
 						if emittedStep := plan.StartStep(stepName, evt.TaskName); emittedStep != "" {
-							if chatAgent.SubTaskProgressCallback != nil {
-								chatAgent.SubTaskProgressCallback(agent.SubTaskProgressEvent{
-									Type:       "plan_step_update",
-									StepName:   emittedStep,
-									StepStatus: "running",
-								})
-							}
+							chatAgent.EmitSubTaskProgress(evt.SessionID, agent.SubTaskProgressEvent{
+								Type:       "plan_step_update",
+								StepName:   emittedStep,
+								StepStatus: "running",
+								SessionID:  evt.SessionID,
+							})
 						}
 					}
 				case "task_complete":
 					stepName := plan.ResolveStepName(evt.PlanStep, evt.TaskName)
 					if stepName != "" {
 						if completedStep := plan.CompleteTask(stepName, evt.TaskName); completedStep != "" {
-							if chatAgent.SubTaskProgressCallback != nil {
-								chatAgent.SubTaskProgressCallback(agent.SubTaskProgressEvent{
-									Type:       "plan_step_update",
-									StepName:   completedStep,
-									StepStatus: "complete",
-								})
-							}
+							chatAgent.EmitSubTaskProgress(evt.SessionID, agent.SubTaskProgressEvent{
+								Type:       "plan_step_update",
+								StepName:   completedStep,
+								StepStatus: "complete",
+								SessionID:  evt.SessionID,
+							})
 						}
 					}
 				}
 			}
-			// Forward the original event to the UI as before.
-			if chatAgent.SubTaskProgressCallback != nil {
-				chatAgent.SubTaskProgressCallback(evt)
-			}
+			// Forward the original event to the correct session's callback.
+			chatAgent.EmitSubTaskProgress(evt.SessionID, evt)
 		}
 		// Wire file artifact capture so sub-agent write_file/edit_file calls
 		// propagate file artifacts to the parent ChatAgent for channel delivery

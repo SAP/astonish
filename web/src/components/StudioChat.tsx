@@ -326,6 +326,11 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
   const [showScrollButton, setShowScrollButton] = useState(false)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const memoryPollRunRef = useRef(0)
+  // Stream generation counter: incremented each time a new SSE stream starts.
+  // Captured in the onEvent closure — if streamGenRef.current has advanced past
+  // the captured value, the event belongs to a stale stream and is discarded.
+  // This prevents delegate_tasks (and all other) events from leaking across sessions.
+  const streamGenRef = useRef(0)
 
   const startSessionMemoryPolling = useCallback((sessionId: string | null | undefined) => {
     if (!sessionId) {
@@ -560,9 +565,12 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
   }, [onSessionChange])
 
   const connectToFleetStream = useCallback((sessionId: string) => {
+    const streamGen = ++streamGenRef.current
     const controller = connectFleetStream({
       sessionId,
       onEvent: (eventType, data) => {
+        // Discard events from a stale stream (session was switched)
+        if (streamGenRef.current !== streamGen) return
         switch (eventType) {
           case 'fleet_session':
             setFleetInfo({ fleet_key: data.fleet_key as string, fleet_name: data.fleet_name as string, agents: data.agents })
@@ -927,10 +935,13 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
     setIsStreaming(true)
     setSessionStartTime(Date.now())
     streamingTextRef.current = ''
+    const streamGen = ++streamGenRef.current
 
     const controller = connectChatStream({
       sessionId,
       onEvent: (eventType, data) => {
+        // Discard events from a stale stream (session was switched)
+        if (streamGenRef.current !== streamGen) return
         // Reuse the exact same event handling as sendMessage's onEvent
         switch (eventType) {
           case 'session':
@@ -1757,6 +1768,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
     clearAttachments()
 
     let streamSessionId = activeSessionId || ''
+    const streamGen = ++streamGenRef.current
 
     const controller = connectChat({
       sessionId: streamSessionId,
@@ -1768,6 +1780,8 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
       model: preChatModel || undefined,
       memoryScope,
       onEvent: (eventType, data) => {
+        // Discard events from a stale stream (session was switched)
+        if (streamGenRef.current !== streamGen) return
         switch (eventType) {
           case 'session':
             if (data.sessionId) {

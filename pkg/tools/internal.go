@@ -9,10 +9,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/SAP/astonish/pkg/codeintel"
 	"github.com/SAP/astonish/pkg/config"
+	"github.com/SAP/astonish/pkg/pathscope"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
 )
@@ -22,6 +24,58 @@ import (
 // protectedFileNames are filenames within the config directory that must never
 // be accessed by LLM tools. These contain the encryption key and encrypted secrets.
 var protectedFileNames = []string{".store_key", "credentials.enc"}
+
+// --- Filesystem scope confinement (defense-in-depth) ---
+//
+// scopeRoot, when non-empty, is the absolute project root that shell_command
+// operands must stay within. It is a SECONDARY guard: the primary enforcement
+// is the code-mode folder-access gate in pkg/agent (SessionAuthPolicy), which
+// prompts the user for out-of-scope paths. This guard exists so the boundary
+// still holds on code paths that bypass the agent gate (e.g. the ReAct planner
+// or scheduler auto-approve) and cannot surface an interactive prompt: there,
+// an out-of-scope command is rejected outright rather than silently allowed.
+//
+// It is OFF by default (empty root) so personal/CLI and every existing test
+// keep their current unrestricted behavior; the code-mode launcher opts in via
+// SetScopeRoot.
+var scopeRoot = struct {
+	sync.RWMutex
+	root string
+}{}
+
+// SetScopeRoot enables (non-empty) or disables (empty) shell_command filesystem
+// confinement to the given project root. The root is normalized once.
+func SetScopeRoot(root string) {
+	scopeRoot.Lock()
+	defer scopeRoot.Unlock()
+	scopeRoot.root = pathscope.NormalizeDir(root)
+}
+
+// getScopeRoot returns the current confinement root ("" = disabled).
+func getScopeRoot() string {
+	scopeRoot.RLock()
+	defer scopeRoot.RUnlock()
+	return scopeRoot.root
+}
+
+// commandTouchesOutOfScope reports the first path operand in command that
+// resolves outside root, or ("", false) if none / confinement disabled. Reuses
+// the SAME extraction + containment logic as the agent gate (pkg/pathscope).
+func commandTouchesOutOfScope(command, root string) (string, bool) {
+	if root == "" {
+		return "", false
+	}
+	for _, tok := range pathscope.ExtractCommandPaths(command) {
+		abs := pathscope.NormalizePath(tok)
+		if abs == "" {
+			continue
+		}
+		if !pathscope.PathWithin(root, abs) {
+			return abs, true
+		}
+	}
+	return "", false
+}
 
 // isProtectedPath returns true if the given file path resolves to a protected
 // credential store file inside the config directory.
@@ -54,23 +108,11 @@ func isProtectedPath(filePath string) bool {
 	return false
 }
 
-// expandPath resolves ~ to the user's home directory. Go's os and filepath
-// packages do not expand ~ (it's a shell feature), so LLM-provided paths
-// like "~/snake/main.py" would fail without this. Only the leading "~/" or
-// bare "~" is expanded; ~user syntax is not supported.
+// expandPath resolves ~ to the user's home directory. Delegates to
+// pathscope.ExpandHome so tool path resolution and the authorization gate
+// agree on the same expansion (single source of truth).
 func expandPath(path string) string {
-	if path == "~" {
-		if home, err := os.UserHomeDir(); err == nil {
-			return home
-		}
-		return path
-	}
-	if strings.HasPrefix(path, "~/") {
-		if home, err := os.UserHomeDir(); err == nil {
-			return filepath.Join(home, path[2:])
-		}
-	}
-	return path
+	return pathscope.ExpandHome(path)
 }
 
 // commandReferencesProtectedFile checks if a shell command string references
@@ -107,9 +149,16 @@ func commandReferencesProtectedFile(command string) (bool, string) {
 type ReadFileArgs struct {
 	Path   string `json:"path" jsonschema:"Absolute path to the file to read"`
 	Offset *int   `json:"offset,omitempty" jsonschema:"Line number to start reading from (1-indexed). Omit to start from line 1."`
-	Limit  *int   `json:"limit,omitempty" jsonschema:"Maximum number of lines to read. Omit to read to end of file."`
+	Limit  *int   `json:"limit,omitempty" jsonschema:"Maximum number of lines to read. Omit to read to end of file (large files are auto-capped; page with offset/limit)."`
 	Force  bool   `json:"force,omitempty" jsonschema:"Bypass the read cache and always return file content even if unchanged since last read. Use when you no longer have the file content in your conversation history."`
 }
+
+// readFileSoftCapLines bounds how many lines an unbounded read_file returns for
+// a large file. Reading whole large files repeatedly is the dominant cause of
+// context bloat (and thus slow inference) in agentic coding loops, so an
+// omitted Limit yields a paged window rather than the entire file. Callers can
+// always page with offset/limit or pass an explicit large Limit.
+const readFileSoftCapLines = 400
 
 type ReadFileResult struct {
 	Content    string `json:"content"`
@@ -132,6 +181,24 @@ func ReadFile(ctx tool.Context, args ReadFileArgs) (ReadFileResult, error) {
 	limit := 0 // 0 means "read to end"
 	if args.Limit != nil && *args.Limit > 0 {
 		limit = *args.Limit
+	}
+
+	// Soft cap: when the caller did NOT request an explicit line limit, avoid
+	// dumping an entire large file into the model's context (which bloats the
+	// prompt and slows inference). Read a bounded window instead and let the
+	// Range notice guide the model to page (offset/limit) or jump with
+	// grep_search / code_definition. An explicit Limit always wins; a caller
+	// that truly wants the whole file can pass a large Limit.
+	softCapped := false
+	if args.Limit == nil {
+		if info, statErr := os.Stat(args.Path); statErr == nil {
+			// Cheap size gate first (avoids line-counting tiny files); ~120 chars/line
+			// heuristic keeps the check O(1) before the real line count below.
+			if info.Size() > int64(readFileSoftCapLines*120) {
+				limit = readFileSoftCapLines
+				softCapped = true
+			}
+		}
 	}
 
 	// Check the read cache (mtime-based dedup)
@@ -221,6 +288,12 @@ func ReadFile(ctx tool.Context, args ReadFileArgs) (ReadFileResult, error) {
 	rangeStr := ""
 	if limit > 0 || offset > 1 {
 		rangeStr = fmt.Sprintf("lines %d-%d of %d", startIdx+1, endIdx, totalLines)
+	}
+	// When we auto-capped an unbounded read, tell the model how to get more so
+	// it pages or jumps instead of re-requesting the whole file.
+	if softCapped && endIdx < totalLines {
+		rangeStr = fmt.Sprintf("lines %d-%d of %d (auto-capped; this file is large. Read more with offset=%d, or use grep_search/code_definition to jump to the relevant lines instead of reading the whole file)",
+			startIdx+1, endIdx, totalLines, endIdx+1)
 	}
 
 	// Update cache
@@ -388,6 +461,16 @@ func ShellCommand(ctx tool.Context, args ShellCommandArgs) (ShellCommandResult, 
 		return ShellCommandResult{}, fmt.Errorf("access denied: command references credential store file '%s' which cannot be accessed", fileName)
 	}
 
+	// Filesystem scope confinement (defense-in-depth). When a scope root is
+	// configured (code mode), reject a command whose operands resolve outside
+	// the project root. The interactive folder-access gate in pkg/agent
+	// normally prompts first; this catches non-interactive bypass paths.
+	if root := getScopeRoot(); root != "" {
+		if outside, blocked := commandTouchesOutOfScope(args.Command, root); blocked {
+			return ShellCommandResult{}, fmt.Errorf("access denied: command references path '%s' outside the project directory '%s'; authorization required", outside, root)
+		}
+	}
+
 	// Mark all cache entries as unverified — shell commands may modify files.
 	// The next read_file will re-stat to confirm before returning cached results.
 	if cache := LoadFileReadCache(); cache != nil {
@@ -423,13 +506,49 @@ func ShellCommand(ctx tool.Context, args ShellCommandArgs) (ShellCommandResult, 
 		}, nil
 	}
 
-	// One-shot mode: wait for completion or interactive detection
+	// One-shot mode: wait for completion, cancellation, timeout, or interactive
+	// input detection.
+	var waitCtx context.Context
+	if ctx != nil {
+		// tool.Context embeds context.Context; carry it through for cancellation.
+		waitCtx = ctx
+	}
+	return waitForShellSession(waitCtx, pm, sess, timeout)
+}
+
+// waitForShellSession blocks until the shell session exits, the context is
+// cancelled, the timeout elapses, or the process is detected waiting for input.
+// It is separated from ShellCommand so the wait/cancel behavior is unit-testable
+// with a plain context.Context (ShellCommand's tool.Context embeds one).
+func waitForShellSession(ctx context.Context, pm *ProcessManager, sess *ProcessSession, timeout int) (ShellCommandResult, error) {
 	deadline := time.After(time.Duration(timeout) * time.Second)
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 
+	// A nil context yields a nil channel; a nil channel in select blocks forever,
+	// which correctly disables the cancellation case when no context is provided.
+	var ctxDone <-chan struct{}
+	if ctx != nil {
+		ctxDone = ctx.Done()
+	}
+
 	for {
 		select {
+		case <-ctxDone:
+			// The turn was cancelled (e.g. the user pressed Esc). Kill the child
+			// process so a stuck/long command does not keep running after the
+			// turn ends, and return promptly.
+			_ = pm.Kill(sess.ID)
+			data := sess.Output.Bytes()
+			err := context.Canceled
+			if ctx != nil && ctx.Err() != nil {
+				err = ctx.Err()
+			}
+			return ShellCommandResult{
+				Stdout:    string(data),
+				SessionID: sess.ID,
+			}, err
+
 		case <-sess.done:
 			// Process exited — return output
 			data := sess.Output.Bytes()
@@ -647,7 +766,7 @@ func FilterJson(ctx tool.Context, args FilterJsonArgs) (FilterJsonResult, error)
 func GetInternalTools() ([]tool.Tool, error) {
 	readFileTool, err := functiontool.New(functiontool.Config{
 		Name:        "read_file",
-		Description: "Read file contents with line numbers. For large files, use offset and limit to read specific sections. Use grep_search to find relevant line numbers first.",
+		Description: "Read file contents with line numbers. Large files are auto-capped to a bounded window when no limit is given — page with offset/limit, or (preferred) use grep_search/code_definition to jump straight to the relevant lines instead of reading whole files.",
 	}, ReadFile)
 	if err != nil {
 		return nil, err
@@ -663,7 +782,7 @@ func GetInternalTools() ([]tool.Tool, error) {
 
 	shellCommandTool, err := functiontool.New(functiontool.Config{
 		Name:        "shell_command",
-		Description: `Execute a shell command with PTY support. Use for builds, tests, linters, git, package managers, CLIs, servers, and scripts. Do NOT use for browsing or searching source code — use file_tree, find_files, grep_search, or read_file instead. Returns stdout, exit_code. If the command waits for input, returns waiting_for_input=true with a session_id — use process_write to respond. Set background=true to start without waiting.`,
+		Description: `Execute a shell command with PTY support. Use ONLY for executing project behavior: builds, tests, linters, git, package managers, CLIs, servers, and scripts. Do NOT use it to inspect the filesystem — there are dedicated tools that are faster, safer, and do not trigger folder-access prompts: to LIST a directory use find_files (lists immediate children by default, like 'ls') or file_tree; to READ a file use read_file; to SEARCH file contents use grep_search; to find a symbol definition/usages use code_definition / code_references. In particular do NOT run ls, cat, head, tail, find, grep, or rg here. Returns stdout, exit_code. If the command waits for input, returns waiting_for_input=true with a session_id — use process_write to respond. Set background=true to start without waiting.`,
 	}, ShellCommand)
 	if err != nil {
 		return nil, err
@@ -704,7 +823,7 @@ func GetInternalTools() ([]tool.Tool, error) {
 
 	findFilesTool, err := functiontool.New(functiontool.Config{
 		Name:        "find_files",
-		Description: "Find files by name/path pattern using glob matching (e.g., '*.go', 'src/**/*.ts'). Respects .gitignore when ripgrep is available. Supports sort_by='mtime' for newest-first ordering. Returns matching file paths with sizes.",
+		Description: "List or find files by name/path. By DEFAULT this lists only the immediate children (files and directories) of search_path — use it as the `ls` replacement for \"what is in this directory\". Set recursive=true (or give a pattern containing '/' or '**') to descend the whole tree. Supports glob patterns (e.g., '*.go', 'src/**/*.ts'), sort_by='mtime' for newest-first, and respects .gitignore when ripgrep is available. Returns matching paths with sizes.",
 	}, FindFiles)
 	if err != nil {
 		return nil, err

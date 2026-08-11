@@ -68,6 +68,7 @@ export interface StandardServer {
   displayName: string
   description?: string
   kind?: 'mcp' | 'model'
+  category?: string
   isDefault: boolean
   installed: boolean
   active?: boolean
@@ -320,6 +321,11 @@ export interface LevelProviderData {
   web_search_tool?: string
   web_extract_tool?: string
   perplexity_web_search?: PerplexityWebSearchConfig | null
+  /** Per-provider origin metadata (present on the effective endpoint):
+   *  name -> { source: 'local' | 'platform', read_only: boolean }.
+   *  'local' entries come from config.yaml: usable at runtime, but managed by
+   *  editing config.yaml (read-only in the UI). Secrets are always masked. */
+  provider_sources?: Record<string, { source: string; read_only: boolean }> | null
 }
 
 export const fetchPlatformProviders = async (): Promise<LevelProviderData> => {

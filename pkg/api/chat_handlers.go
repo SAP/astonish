@@ -47,9 +47,11 @@ type StudioChatRequest struct {
 	AutoApprove      bool             `json:"autoApprove,omitempty"`
 	Debug            bool             `json:"debug,omitempty"`            // reserved for future debug streaming
 	SystemContext    string           `json:"systemContext,omitempty"`    // per-turn system instructions (not shown to user)
+	PlanMode         bool             `json:"planMode,omitempty"`         // per-turn plan-mode gate: refuse mutating tools + delegate_tasks
 	PinnedToolGroups []string         `json:"pinnedToolGroups,omitempty"` // tool groups to always inject (wizard sessions)
 	Provider         string           `json:"provider,omitempty"`         // per-request provider override (pre-chat picker)
 	Model            string           `json:"model,omitempty"`            // per-request model override (pre-chat picker)
+	MemoryScope      string           `json:"memoryScope,omitempty"`      // per-session memory scope: "team" (default) or "personal"
 }
 
 // StudioSessionResponse is a single session in list responses.
@@ -117,6 +119,7 @@ type StudioMessage struct {
 	Type       string      `json:"type"`                 // user, agent, tool_call, tool_result, image, subtask_execution, plan, distill_preview, distill_saved, app_preview, system
 	Content    string      `json:"content,omitempty"`    // text content
 	ToolName   string      `json:"toolName,omitempty"`   // for tool_call/tool_result
+	ToolID     string      `json:"toolId,omitempty"`     // for tool_call/tool_result (FunctionCall.ID / FunctionResponse.ID)
 	ToolArgs   interface{} `json:"toolArgs,omitempty"`   // for tool_call
 	ToolResult interface{} `json:"toolResult,omitempty"` // for tool_result
 
@@ -989,10 +992,16 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 	if svc := store.FromRequest(r); svc != nil {
 		memStore := svc.Memory
 		memoryScope := store.MemoryScopeTeam
+		// Determine memory scope: body field takes precedence, then header (deprecated fallback).
+		// Default is "team" — personal mode must be explicitly requested per-session.
+		requestedScope := req.MemoryScope
+		if requestedScope == "" {
+			requestedScope = r.Header.Get("X-Astonish-Memory-Mode") // deprecated: prefer body field
+		}
 		// If personal memory mode is active, the memory_save tool should
 		// write to the user's personal store instead of team.
 		// The ThreeTierSearcher remains unchanged (always searches all tiers).
-		if r.Header.Get("X-Astonish-Memory-Mode") == "personal" && svc.TenantRouter != nil {
+		if requestedScope == "personal" && svc.TenantRouter != nil {
 			if pu := GetPlatformUser(r); pu != nil {
 				if orgStore, err := svc.TenantRouter.ForOrg(pu.OrgSlug); err == nil {
 					memStore = orgStore.ForUser(pu.ID).Memories()
@@ -1318,7 +1327,7 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 				runner.EmitPanicError(fmt.Sprintf("Internal error: %v", r))
 			}
 		}()
-		runner.Run(chatAgent, sessionService, comp.LLM, titleSetter, userMsg, msg, req.AutoApprove, req.SystemContext, req.PinnedToolGroups)
+		runner.Run(chatAgent, sessionService, comp.LLM, titleSetter, userMsg, msg, req.AutoApprove, req.SystemContext, req.PinnedToolGroups, req.PlanMode)
 	}()
 
 	// Become an SSE viewer: subscribe to the runner and forward events to the browser.
@@ -1499,12 +1508,17 @@ func handleSlashCommand(r *http.Request, w io.Writer, flusher http.Flusher, cm *
 		if comp.Compactor == nil {
 			SendSSE(w, flusher, "system", map[string]interface{}{"content": "Compaction is disabled."})
 		} else {
+			// Studio still uses the shared BeforeModelCallback path (no
+			// child-session rewrite). Force the next model call to compact
+			// and report current window usage. Code-mode /compact runs
+			// immediately via CompactionBackend.Compact.
+			comp.Compactor.ForceNextCompaction()
 			est, win := comp.Compactor.TokenUsage()
 			pct := float64(0)
 			if win > 0 {
 				pct = float64(est) / float64(win) * 100
 			}
-			msg := fmt.Sprintf("**Context Window**\n- Tokens: %d / %d (%.0f%%)\n- Threshold: %.0f%%\n- Compactions: %d",
+			msg := fmt.Sprintf("**Context Window**\n- Tokens: %d / %d (%.0f%%)\n- Threshold: %.0f%%\n- Compactions: %d\n\nCompaction armed for the next model call in this chat.",
 				est, win, pct, comp.Compactor.Threshold*100, comp.Compactor.CompactionCount())
 			SendSSE(w, flusher, "system", map[string]interface{}{"content": msg})
 		}

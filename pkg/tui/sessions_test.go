@@ -100,6 +100,75 @@ func TestRenderSessionsOverlayPaintsEveryRowBlack(t *testing.T) {
 	}
 }
 
+func TestRenderSessionsOverlayShowsTitleAndTime(t *testing.T) {
+	m := newModel(context.Background(), Config{Backend: staticBackend{}, Width: 120, Height: 30})
+	m.theme.NoColor = true // disable ANSI so we can inspect plain text
+	m.sessions = sessionsState{
+		open: true,
+		items: []backend.SessionSummary{
+			{ID: "abcd1234-full-id", Title: "Refactor auth module", MessageCount: 5, UpdatedAt: "2025-01-15 10:30"},
+			{ID: "efgh5678-full-id", Title: "Fix login bug", MessageCount: 12, UpdatedAt: "2025-01-14 09:15"},
+		},
+	}
+
+	out := m.renderSessionsOverlay()
+	plain := stripANSI(out)
+
+	// Verify title is rendered (not the raw message).
+	if !strings.Contains(plain, "Refactor auth module") {
+		t.Errorf("expected title 'Refactor auth module' in output:\n%s", plain)
+	}
+	// Verify timestamp is rendered.
+	if !strings.Contains(plain, "2025-01-15 10:30") {
+		t.Errorf("expected timestamp '2025-01-15 10:30' in output:\n%s", plain)
+	}
+	// Verify message count is rendered.
+	if !strings.Contains(plain, "5 msgs") {
+		t.Errorf("expected '5 msgs' in output:\n%s", plain)
+	}
+	// Verify session ID is truncated (8 chars).
+	if !strings.Contains(plain, "abcd1234") {
+		t.Errorf("expected truncated session ID 'abcd1234' in output:\n%s", plain)
+	}
+	if strings.Contains(plain, "abcd1234-full-id") {
+		t.Errorf("session ID should be truncated, but found full ID in output:\n%s", plain)
+	}
+
+	// Verify column alignment: both rows' message count and date columns
+	// should start at the same visual position (rune offset, not byte offset).
+	lines := strings.Split(plain, "\n")
+	var dataLines []string
+	for _, l := range lines {
+		if strings.Contains(l, "msgs") {
+			dataLines = append(dataLines, l)
+		}
+	}
+	if len(dataLines) < 2 {
+		t.Fatalf("expected at least 2 data lines with 'msgs', got %d in:\n%s", len(dataLines), plain)
+	}
+	// The "msgs" column should end at the same rune offset in both lines.
+	runeIndex := func(s, sub string) int {
+		byteIdx := strings.Index(s, sub)
+		if byteIdx < 0 {
+			return -1
+		}
+		return len([]rune(s[:byteIdx]))
+	}
+	pos0 := runeIndex(dataLines[0], "msgs")
+	pos1 := runeIndex(dataLines[1], "msgs")
+	if pos0 != pos1 {
+		t.Errorf("column misalignment: 'msgs' at rune position %d in row 0 vs %d in row 1:\n  %s\n  %s",
+			pos0, pos1, dataLines[0], dataLines[1])
+	}
+	// The date column should also be aligned.
+	datePos0 := runeIndex(dataLines[0], "2025-01-1")
+	datePos1 := runeIndex(dataLines[1], "2025-01-1")
+	if datePos0 != datePos1 {
+		t.Errorf("column misalignment: date at rune position %d in row 0 vs %d in row 1:\n  %s\n  %s",
+			datePos0, datePos1, dataLines[0], dataLines[1])
+	}
+}
+
 func TestSessionsPickerDeleteActiveSessionStartsNewSession(t *testing.T) {
 	b := &sessionDeleteBackend{staticBackend: staticBackend{info: backend.Info{SessionID: "sess-1"}}}
 	m := newModel(context.Background(), Config{Backend: b, Width: 100, Height: 30})
@@ -205,5 +274,35 @@ func TestApplyHistoryUsesBackendInfoModelAfterResume(t *testing.T) {
 	m = next.(model)
 	if m.info.Provider != "openai" || m.info.Model != "gpt-4o" {
 		t.Fatalf("footer after resume A again = %s/%s, want openai/gpt-4o", m.info.Provider, m.info.Model)
+	}
+}
+
+func TestApplyHistorySetsTitleFromBackendInfo(t *testing.T) {
+	b := &modelAwareBackend{
+		staticBackend: staticBackend{info: backend.Info{Provider: "openai", Model: "gpt-4o"}},
+		bySession: map[string]backend.Info{
+			"sess-titled": {Provider: "openai", Model: "gpt-4o", Title: "Fix broken tests"},
+			"sess-notitle": {Provider: "anthropic", Model: "claude-sonnet-4"},
+		},
+	}
+
+	m := newModel(context.Background(), Config{Backend: b, Width: 100, Height: 30})
+
+	// Resume session with a title — header should show it.
+	cmd := m.resumeSessionCmd("sess-titled")
+	msg := cmd()
+	next, _ := m.Update(msg)
+	m = next.(model)
+	if m.tr.Title != "Fix broken tests" {
+		t.Fatalf("tr.Title after resume = %q, want %q", m.tr.Title, "Fix broken tests")
+	}
+
+	// Resume session without a title — header title should be empty.
+	cmd = m.resumeSessionCmd("sess-notitle")
+	msg = cmd()
+	next, _ = m.Update(msg)
+	m = next.(model)
+	if m.tr.Title != "" {
+		t.Fatalf("tr.Title after resume (no title) = %q, want empty", m.tr.Title)
 	}
 }

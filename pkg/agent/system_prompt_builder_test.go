@@ -218,8 +218,12 @@ func TestSystemPromptBuilder_SlimPrompt(t *testing.T) {
 	// MUST live in the static prefix or it gets silently skipped.
 	// See pkg/api/chat_runner.go:detectAndEmitReportMarkers for the
 	// receiving end of that contract.
-	if len(prompt) > 5500 {
-		t.Errorf("prompt too large for slim design: %d chars (target < 5500)", len(prompt))
+	// Ceiling raised for the structural-navigation guidance (prefer
+	// code_definition/code_references over grep; don't re-read files), which
+	// cuts tool round-trips and context growth — a net latency win despite the
+	// small static cost. See docs/architecture/code-intelligence.md.
+	if len(prompt) > 6100 {
+		t.Errorf("prompt too large for slim design: %d chars (target < 6100)", len(prompt))
 	}
 }
 

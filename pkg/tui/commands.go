@@ -24,6 +24,30 @@ var builtInSlashCommands = []slashCommand{
 	{Name: "exit", Aliases: []string{"quit", "q"}, Description: "Quit the terminal app"},
 }
 
+// providerSlashCommand is offered only when the backend supports local provider
+// management (code mode). It is not part of the always-on palette.
+var providerSlashCommand = slashCommand{
+	Name: "provider", Aliases: []string{"providers"}, Description: "Manage local providers (add/remove)",
+}
+
+// rollbackSlashCommand is offered only when the backend supports rollback
+// (code mode). It reverts chat and file changes to an earlier message.
+var rollbackSlashCommand = slashCommand{
+	Name: "rollback", Aliases: []string{"revert"}, Description: "Revert chat and file changes to an earlier message",
+}
+
+// compactSlashCommand is offered only when the backend supports on-demand
+// compaction (code mode). It compacts the conversation context to free window.
+var compactSlashCommand = slashCommand{
+	Name: "compact", Description: "Compact the conversation context to free up the window",
+}
+
+// webSearchSlashCommand is offered only when the backend supports local web
+// search configuration (code mode). It opens the web search provider picker.
+var webSearchSlashCommand = slashCommand{
+	Name: "websearch", Aliases: []string{"search"}, Description: "Configure web search provider",
+}
+
 // slashCompletion holds the active / completion popup state.
 type slashCompletion struct {
 	active  bool
@@ -33,8 +57,9 @@ type slashCompletion struct {
 }
 
 // filterSlashCommands returns commands whose name or alias has prefix query
-// (case-insensitive, without leading slash).
-func filterSlashCommands(query string) []slashCommand {
+// (case-insensitive, without leading slash). Extra commands (capability-gated,
+// e.g. /provider in code mode) are appended to the always-on palette.
+func filterSlashCommands(query string, extra ...slashCommand) []slashCommand {
 	q := strings.ToLower(strings.TrimSpace(query))
 	// Strip leading slash if present.
 	q = strings.TrimPrefix(q, "/")
@@ -44,7 +69,8 @@ func filterSlashCommands(query string) []slashCommand {
 	}
 
 	var out []slashCommand
-	for _, cmd := range builtInSlashCommands {
+	all := append(append([]slashCommand(nil), builtInSlashCommands...), extra...)
+	for _, cmd := range all {
 		if slashMatches(cmd, q) {
 			out = append(out, cmd)
 		}

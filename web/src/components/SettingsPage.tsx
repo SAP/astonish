@@ -5,7 +5,7 @@ import { PERSONAL_ITEMS, TEAM_ITEMS, ORG_ITEMS, PLATFORM_ITEMS, PLATFORM_SYSTEM_
 import type { SettingsMenuItem } from './settings/settingsMenuItems'
 import { useSettingsData } from '../hooks/useSettingsData'
 import type { UpdateInfo, MCPServerConfig, SettingsData, ProviderInfo } from './settings/settingsApi'
-import { fetchMCPConfig, fetchPlatformProviders, fetchOrgProviders, fetchTeamProviders, fetchSettings, savePlatformProviders, saveOrgProviders, saveSettings as saveTeamSettings, fetchStandardServers } from './settings/settingsApi'
+import { fetchMCPConfig, fetchPlatformProviders, fetchOrgProviders, fetchTeamProviders, fetchEffectiveProviders, fetchSettings, savePlatformProviders, saveOrgProviders, saveSettings as saveTeamSettings, fetchStandardServers } from './settings/settingsApi'
 import {
   fetchTeams, createTeam, deleteTeam,
   fetchTeamMembers, addTeamMember, removeTeamMember, setTeamMemberRole,
@@ -715,6 +715,10 @@ function PlatformProvidersTab() {
   const [saving, setSaving] = useState(false)
   const [, setSaveSuccess] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Providers configured in config.yaml (usable at runtime, but managed by
+  // editing config.yaml so read-only here). Surfaced so operators can see
+  // defaults baked into the deployment (e.g. Kubernetes).
+  const [configFileProviders, setConfigFileProviders] = useState<{ name: string; type: string; level: string }[]>([])
 
   const loadData = useCallback(async () => {
     try {
@@ -752,30 +756,82 @@ function PlatformProvidersTab() {
     } catch (err) {
       console.error('Failed to load platform providers:', err)
     }
+
+    // Surface config.yaml providers (source === 'local') as read-only entries.
+    try {
+      const eff = await fetchEffectiveProviders()
+      const local: { name: string; type: string; level: string }[] = []
+      if (eff.providers && eff.provider_sources) {
+        for (const [name, src] of Object.entries(eff.provider_sources)) {
+          if (src?.source === 'local') {
+            const type = eff.providers[name]?.type || name
+            local.push({ name, type, level: 'config.yaml' })
+          }
+        }
+      }
+      setConfigFileProviders(local)
+    } catch { /* effective endpoint optional; ignore */ }
   }, [])
 
   useEffect(() => { loadData() }, [loadData])
 
   return (
-    <ProvidersSettings
-      settings={settings}
-      providerForms={providerForms}
-      setProviderForms={setProviderForms}
-      generalForm={generalForm}
-      setGeneralForm={setGeneralForm}
-      saving={saving}
-      setSaving={setSaving}
-      setSaveSuccess={setSaveSuccess}
-      error={error}
-      setError={setError}
-      loadData={loadData}
-      level="platform"
-      inheritedProviders={[]}
-      onSaveDefault={async (provider, model) => {
-        await savePlatformProviders({ default_provider: provider, default_model: model })
-        loadData()
-      }}
-    />
+    <div className="space-y-6">
+      {configFileProviders.length > 0 && (
+        <div>
+          <div className="text-xs font-medium mb-2 uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>
+            From config.yaml (read-only)
+          </div>
+          <div className="space-y-2">
+            {configFileProviders.map(p => (
+              <div
+                key={p.name}
+                className="flex items-center justify-between p-3 rounded-lg"
+                style={{ background: 'var(--card)', border: '1px solid var(--border-color)' }}
+              >
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0"
+                    style={{ background: 'var(--brand-muted)', border: '1px solid color-mix(in oklab, var(--brand) 20%, transparent)' }}>
+                    <Key size={14} style={{ color: 'var(--brand)' }} />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium truncate" style={{ color: 'var(--text-primary)' }}>{p.name}</div>
+                    <div className="text-xs truncate" style={{ color: 'var(--text-muted)' }}>{p.type}</div>
+                  </div>
+                </div>
+                <span className="text-[10px] px-2 py-0.5 rounded-full"
+                  style={{ background: 'rgba(148, 163, 184, 0.15)', color: '#94a3b8' }}>
+                  config.yaml
+                </span>
+              </div>
+            ))}
+          </div>
+          <p className="text-xs mt-2" style={{ color: 'var(--text-muted)' }}>
+            Configured in the deployment&apos;s config.yaml. Shown once regardless of pod count. Managed by editing config.yaml, not here.
+          </p>
+        </div>
+      )}
+
+      <ProvidersSettings
+        settings={settings}
+        providerForms={providerForms}
+        setProviderForms={setProviderForms}
+        generalForm={generalForm}
+        setGeneralForm={setGeneralForm}
+        saving={saving}
+        setSaving={setSaving}
+        setSaveSuccess={setSaveSuccess}
+        error={error}
+        setError={setError}
+        loadData={loadData}
+        level="platform"
+        inheritedProviders={configFileProviders.map(p => ({ name: p.name, type: p.type, level: p.level }))}
+        onSaveDefault={async (provider, model) => {
+          await savePlatformProviders({ default_provider: provider, default_model: model })
+          loadData()
+        }}
+      />
+    </div>
   )
 }
 
@@ -793,6 +849,8 @@ function OrgProvidersTab() {
 
   // Inherited providers (read-only)
   const [platformProviders, setPlatformProviders] = useState<{ name: string; type: string; configured: boolean }[]>([])
+  // config.yaml providers (read-only, but selectable as default at any level)
+  const [configFileProviders, setConfigFileProviders] = useState<{ name: string; type: string; level: string }[]>([])
   // Platform-level defaults for inheritance display
   const [platformDefaults, setPlatformDefaults] = useState<{ provider: string; model: string }>({ provider: '', model: '' })
 
@@ -858,6 +916,22 @@ function OrgProvidersTab() {
     } catch {
       // Platform providers are optional
     }
+
+    // Surface config.yaml providers (source === 'local') from the effective
+    // endpoint so they can be shown read-only AND selected as a default here.
+    try {
+      const eff = await fetchEffectiveProviders()
+      const local: { name: string; type: string; level: string }[] = []
+      if (eff.providers && eff.provider_sources) {
+        for (const [name, src] of Object.entries(eff.provider_sources)) {
+          if (src?.source === 'local') {
+            const type = eff.providers[name]?.type || name
+            local.push({ name, type, level: 'config.yaml' })
+          }
+        }
+      }
+      setConfigFileProviders(local)
+    } catch { /* effective endpoint optional; ignore */ }
   }, [])
 
   useEffect(() => { loadData() }, [loadData])
@@ -905,6 +979,47 @@ function OrgProvidersTab() {
         </div>
       )}
 
+      {/* config.yaml providers (read-only; selectable as default) */}
+      {configFileProviders.length > 0 && (
+        <div>
+          <div className="text-xs font-medium mb-2 uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>
+            From config.yaml (read-only)
+          </div>
+          <div className="space-y-2">
+            {configFileProviders.map(p => (
+              <div
+                key={p.name}
+                className="flex items-center justify-between p-3 rounded-lg"
+                style={{ background: 'var(--card)', border: '1px solid var(--border-color)' }}
+              >
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0"
+                    style={{ background: 'var(--brand-muted)', border: '1px solid color-mix(in oklab, var(--brand) 20%, transparent)' }}>
+                    <Key size={14} style={{ color: 'var(--brand)' }} />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium truncate" style={{ color: 'var(--text-primary)' }}>{p.name}</div>
+                    <div className="text-xs truncate" style={{ color: 'var(--text-muted)' }}>{p.type}</div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  {generalForm.default_provider === p.name && (
+                    <span className="text-[10px] px-2 py-0.5 rounded-full"
+                      style={{ background: 'var(--brand-muted)', color: 'var(--brand)' }}>
+                      default
+                    </span>
+                  )}
+                  <span className="text-[10px] px-2 py-0.5 rounded-full"
+                    style={{ background: 'rgba(148, 163, 184, 0.15)', color: '#94a3b8' }}>
+                    config.yaml
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Org-level providers header (shown when there are inherited items) */}
       {platformProviders.length > 0 && (
         <div className="text-xs font-medium mb-2 uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>
@@ -926,7 +1041,12 @@ function OrgProvidersTab() {
         setError={setError}
         loadData={loadData}
         level="org"
-        inheritedProviders={platformProviders.map(p => ({ name: p.name, type: p.type, level: 'platform' }))}
+        inheritedProviders={[
+          ...platformProviders.map(p => ({ name: p.name, type: p.type, level: 'platform' })),
+          ...configFileProviders
+            .filter(c => !platformProviders.some(p => p.name === c.name))
+            .map(p => ({ name: p.name, type: p.type, level: p.level })),
+        ]}
         inheritedDefaults={platformDefaults.provider || platformDefaults.model ? { provider: platformDefaults.provider, model: platformDefaults.model, source: 'Platform' } : undefined}
         onSaveDefault={async (provider, model) => {
           await saveOrgProviders({ default_provider: provider, default_model: model })

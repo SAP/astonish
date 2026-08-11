@@ -27,6 +27,12 @@ type FileStore struct {
 	mu          sync.RWMutex
 	sessions    map[string]*fileSession // sessionID -> in-memory session (loaded on demand)
 
+	// liveCopies tracks *fileSession values returned to callers (Get/Create)
+	// so ArchiveAndReplaceEvents can rewrite the same event slice the ADK
+	// runner holds mid-turn. Without this, compaction only updates the store
+	// while the runner keeps replaying the full pre-compaction history.
+	liveCopies map[string]map[*fileSession]struct{}
+
 	// RedactFunc, if set, sanitizes text before persisting to disk.
 	// Used to strip credential values from session transcripts.
 	RedactFunc func(string) string
@@ -56,9 +62,42 @@ func NewFileStore(baseDir string) (*FileStore, error) {
 		index:       NewSessionIndex(indexPath),
 		threadIndex: NewThreadIndex(threadIndexPath),
 		sessions:    make(map[string]*fileSession),
+		liveCopies:  make(map[string]map[*fileSession]struct{}),
 		appState:    make(map[string]stateMap),
 		userState:   make(map[string]map[string]stateMap),
 	}, nil
+}
+
+// trackLive records a session pointer returned to a caller so later rewrites
+// (compaction) can update the ADK-held copy in place.
+func (s *FileStore) trackLive(fs *fileSession) {
+	if fs == nil {
+		return
+	}
+	if s.liveCopies[fs.id] == nil {
+		s.liveCopies[fs.id] = make(map[*fileSession]struct{})
+	}
+	s.liveCopies[fs.id][fs] = struct{}{}
+}
+
+// setEventsAll rewrites events on the stored session and every live copy.
+// Caller must hold s.mu.
+func (s *FileStore) setEventsAll(sessionID string, events []*adksession.Event) {
+	if stored, ok := s.sessions[sessionID]; ok {
+		stored.events = events
+		if len(events) > 0 {
+			stored.updatedAt = events[len(events)-1].Timestamp
+		}
+	}
+	for fs := range s.liveCopies[sessionID] {
+		if fs == nil {
+			continue
+		}
+		fs.events = events
+		if len(events) > 0 {
+			fs.updatedAt = events[len(events)-1].Timestamp
+		}
+	}
 }
 
 // Create creates a new session with optional initial state.
@@ -142,8 +181,9 @@ func (s *FileStore) Create(ctx context.Context, req *adksession.CreateRequest) (
 		return nil, fmt.Errorf("failed to add session to index: %w", err)
 	}
 
-	// Return a copy
+	// Return a copy (tracked so compaction can rewrite ADK-held sessions).
 	copiedSession := sess.copy()
+	s.trackLive(copiedSession)
 	return &adksession.CreateResponse{
 		Session: copiedSession,
 	}, nil
@@ -192,8 +232,16 @@ func (s *FileStore) Get(ctx context.Context, req *adksession.GetRequest) (*adkse
 		filteredEvents = filteredEvents[firstIdx:]
 	}
 
-	copiedSession.events = make([]*adksession.Event, len(filteredEvents))
-	copy(copiedSession.events, filteredEvents)
+	// Share the event slice with the stored session when no filter is applied so
+	// AppendEvent and compaction rewrites stay in sync with the ADK runner's
+	// session object. When filters are applied, copy as before.
+	if req.NumRecentEvents > 0 || !req.After.IsZero() {
+		copiedSession.events = make([]*adksession.Event, len(filteredEvents))
+		copy(copiedSession.events, filteredEvents)
+	} else {
+		copiedSession.events = sess.events
+	}
+	s.trackLive(copiedSession)
 
 	return &adksession.GetResponse{
 		Session: copiedSession,
@@ -309,14 +357,14 @@ func (s *FileStore) AppendEvent(ctx context.Context, curSession adksession.Sessi
 	// Trim temp state keys from the event
 	trimmedEvent := trimTempDeltaState(event)
 
-	// Update the caller's in-memory session (like ADK does)
-	if err := sess.appendEvent(trimmedEvent); err != nil {
+	// Append to the stored session first (authoritative), then re-point every
+	// live copy (including the caller's) at the same events slice so ADK and
+	// the store never diverge after compaction rewrites.
+	if err := storedSession.appendEvent(trimmedEvent); err != nil {
 		return fmt.Errorf("failed to update session: %w", err)
 	}
-
-	// Update the stored session
-	storedSession.events = append(storedSession.events, event)
-	storedSession.updatedAt = event.Timestamp
+	s.setEventsAll(sess.id, storedSession.events)
+	s.trackLive(sess)
 
 	// Apply state deltas
 	if len(event.Actions.StateDelta) > 0 {
@@ -348,6 +396,203 @@ func (s *FileStore) AppendEvent(ctx context.Context, curSession adksession.Sessi
 	}
 
 	return nil
+}
+
+// TruncateEvents rewrites a session to keep only its first keepCount events,
+// discarding the rest. It updates the in-memory session, the on-disk transcript
+// (via Transcript.Rewrite), and the index message count so a resumed session
+// reflects the truncation.
+//
+// This is the sanctioned mechanism behind code-mode /rollback: unlike the
+// package's usual "never delete a transcript entry" rule (which protects the
+// audit/resume chain during compaction), rollback is an explicit, user-driven
+// request to discard later turns. It rewrites the transcript rather than
+// silently dropping lines.
+//
+// keepCount is clamped to [0, len(events)]. Truncating to the full length is a
+// no-op. Returns the number of events retained.
+func (s *FileStore) TruncateEvents(appName, userID, sessionID string, keepCount int) (int, error) {
+	if appName == "" || userID == "" || sessionID == "" {
+		return 0, fmt.Errorf("app_name, user_id, session_id are required")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sess, ok := s.sessions[sessionID]
+	if !ok {
+		loaded, err := s.loadFromDisk(appName, userID, sessionID)
+		if err != nil {
+			return 0, fmt.Errorf("session %s not found: %w", sessionID, err)
+		}
+		s.sessions[sessionID] = loaded
+		sess = loaded
+	}
+	if sess.appName != appName || sess.userID != userID {
+		return 0, fmt.Errorf("session %s not found for app %q user %q", sessionID, appName, userID)
+	}
+
+	if keepCount < 0 {
+		keepCount = 0
+	}
+	if keepCount > len(sess.events) {
+		keepCount = len(sess.events)
+	}
+	if keepCount == len(sess.events) {
+		return keepCount, nil
+	}
+
+	kept := make([]*adksession.Event, keepCount)
+	copy(kept, sess.events[:keepCount])
+	sess.events = kept
+	if keepCount > 0 {
+		sess.updatedAt = kept[keepCount-1].Timestamp
+	} else {
+		sess.updatedAt = time.Time{}
+	}
+
+	// Rewrite the transcript on disk with the retained events, applying the
+	// configured redactor so previously redacted content stays redacted.
+	transcriptPath := filepath.Join(s.baseDir, appName, userID, sessionID+".jsonl")
+	transcript := NewTranscript(transcriptPath)
+	if err := transcript.Rewrite(sessionID, kept); err != nil {
+		return 0, fmt.Errorf("failed to rewrite transcript: %w", err)
+	}
+	if s.RedactFunc != nil {
+		if err := transcript.RedactTranscript(s.RedactFunc); err != nil {
+			return 0, fmt.Errorf("failed to redact truncated transcript: %w", err)
+		}
+	}
+
+	if err := s.index.Update(sessionID, func(meta *SessionMeta) {
+		meta.MessageCount = keepCount
+		meta.UpdatedAt = sess.updatedAt
+	}); err != nil {
+		slog.Warn("failed to update session index after truncate", "session_id", sessionID, "error", err)
+	}
+
+	return keepCount, nil
+}
+
+// ArchiveAndReplaceEvents is the durable compaction primitive for code mode:
+//
+//  1. Copies the active session's full event list into a new archive session
+//     (the "parent" in the compaction chain).
+//  2. Points the active session's ParentID at that archive.
+//  3. Rewrites the active session's events to compactedEvents (in-memory store,
+//     every live ADK session copy, and the on-disk transcript).
+//
+// The active session ID is unchanged, so an in-flight ADK Run that already
+// holds this session continues to see the rewritten history on the next model
+// step. The archive is never mutated by later compaction and remains available
+// for /rollback (via AncestorChain).
+//
+// compactedEvents must be non-empty. Returns the archive session ID.
+func (s *FileStore) ArchiveAndReplaceEvents(appName, userID, sessionID string, compactedEvents []*adksession.Event) (archiveID string, err error) {
+	if appName == "" || userID == "" || sessionID == "" {
+		return "", fmt.Errorf("app_name, user_id, session_id are required")
+	}
+	if len(compactedEvents) == 0 {
+		return "", fmt.Errorf("compacted events must not be empty")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sess, ok := s.sessions[sessionID]
+	if !ok {
+		loaded, loadErr := s.loadFromDisk(appName, userID, sessionID)
+		if loadErr != nil {
+			return "", fmt.Errorf("session %s not found: %w", sessionID, loadErr)
+		}
+		s.sessions[sessionID] = loaded
+		sess = loaded
+	}
+	if sess.appName != appName || sess.userID != userID {
+		return "", fmt.Errorf("session %s not found for app %q user %q", sessionID, appName, userID)
+	}
+
+	// Snapshot full history before rewrite.
+	full := make([]*adksession.Event, len(sess.events))
+	copy(full, sess.events)
+	if len(full) == 0 {
+		return "", fmt.Errorf("session %s has no events to archive", sessionID)
+	}
+
+	// Previous parent of the active session (if it was already a compacted tip).
+	prevParent := ""
+	if meta, mErr := s.index.Get(sessionID); mErr == nil && meta != nil {
+		prevParent = meta.ParentID
+	}
+
+	// Create archive session and seed it with the full history.
+	archiveID = uuid.NewString()
+	now := time.Now()
+	archive := &fileSession{
+		id:        archiveID,
+		appName:   appName,
+		userID:    userID,
+		events:    full,
+		state:     maps.Clone(sess.state),
+		updatedAt: sess.updatedAt,
+	}
+	s.sessions[archiveID] = archive
+
+	archiveMeta := SessionMeta{
+		ID:           archiveID,
+		AppName:      appName,
+		UserID:       userID,
+		CreatedAt:    now,
+		UpdatedAt:    archive.updatedAt,
+		MessageCount: len(full),
+		ParentID:     prevParent,
+		Title:        "",
+	}
+	if meta, mErr := s.index.Get(sessionID); mErr == nil && meta != nil {
+		// Keep the human title on the root of the chain when this is the first
+		// archive; subsequent archives inherit nothing special.
+		if prevParent == "" {
+			archiveMeta.Title = meta.Title
+		}
+	}
+	if err := s.index.Add(archiveMeta); err != nil {
+		delete(s.sessions, archiveID)
+		return "", fmt.Errorf("failed to index archive session: %w", err)
+	}
+
+	// Persist archive transcript.
+	archivePath := filepath.Join(s.baseDir, appName, userID, archiveID+".jsonl")
+	archiveTr := NewTranscript(archivePath)
+	if err := archiveTr.Rewrite(archiveID, full); err != nil {
+		_ = s.index.Remove(archiveID)
+		delete(s.sessions, archiveID)
+		return "", fmt.Errorf("failed to write archive transcript: %w", err)
+	}
+
+	// Active session becomes a child of the archive and holds only compacted events.
+	if err := s.index.Update(sessionID, func(meta *SessionMeta) {
+		meta.ParentID = archiveID
+		meta.MessageCount = len(compactedEvents)
+		meta.UpdatedAt = now
+	}); err != nil {
+		return "", fmt.Errorf("failed to update session parent: %w", err)
+	}
+
+	// Clone compacted events so callers cannot mutate our store later.
+	newEvents := make([]*adksession.Event, len(compactedEvents))
+	copy(newEvents, compactedEvents)
+	s.setEventsAll(sessionID, newEvents)
+
+	activePath := filepath.Join(s.baseDir, appName, userID, sessionID+".jsonl")
+	activeTr := NewTranscript(activePath)
+	if err := activeTr.Rewrite(sessionID, newEvents); err != nil {
+		return "", fmt.Errorf("failed to rewrite active transcript: %w", err)
+	}
+	if s.RedactFunc != nil {
+		_ = activeTr.RedactTranscript(s.RedactFunc)
+	}
+
+	return archiveID, nil
 }
 
 // ResolveSessionID resolves a partial session ID (prefix match) to a full ID.
@@ -413,6 +658,157 @@ func (s *FileStore) SetSessionTitle(_ context.Context, sessionID, title string) 
 func (s *FileStore) ListChildren(parentID string) ([]SessionMeta, error) {
 	return s.index.ListChildren(parentID)
 }
+
+// LatestDescendant follows the compaction chain from sessionID down through its
+// children to the tip (the currently-active session), returning the tip's ID.
+// Compaction creates a child session whose first event is the summary; the tip
+// is the session the runner should replay. When a session has multiple children
+// (should not happen for the linear compaction chain, but be defensive) the
+// most-recently-updated child is followed. Returns sessionID unchanged when it
+// has no children. Guards against cycles.
+//
+// Only children with the same appName and userID as the root are followed,
+// preventing cross-scope traversal (e.g. into Studio sessions linked as
+// sub-agent children of a code-mode session).
+//
+// If the tip of the chain has a missing transcript file (e.g. due to a crash
+// during compaction), the method falls back to the last ancestor whose
+// transcript exists on disk, preventing a silent empty-session load.
+func (s *FileStore) LatestDescendant(sessionID string) string {
+	if sessionID == "" {
+		return sessionID
+	}
+
+	// Resolve the root session's appName/userID to scope the walk.
+	rootMeta, err := s.index.Get(sessionID)
+	if err != nil || rootMeta == nil {
+		return sessionID
+	}
+	rootApp := rootMeta.AppName
+	rootUser := rootMeta.UserID
+
+	seen := map[string]bool{}
+	cur := sessionID
+	for !seen[cur] {
+		seen[cur] = true
+		children, err := s.index.ListChildren(cur)
+		if err != nil || len(children) == 0 {
+			break
+		}
+		// Filter to same-scope children only.
+		var scoped []SessionMeta
+		for _, c := range children {
+			if c.AppName == rootApp && c.UserID == rootUser {
+				scoped = append(scoped, c)
+			}
+		}
+		if len(scoped) == 0 {
+			break
+		}
+		// Follow the most-recently-updated same-scope child (the live tip).
+		next := scoped[0]
+		for _, c := range scoped[1:] {
+			if c.UpdatedAt.After(next.UpdatedAt) {
+				next = c
+			}
+		}
+		cur = next.ID
+	}
+
+	// No children — return as-is (no chain to validate).
+	if cur == sessionID {
+		return cur
+	}
+
+	// If the tip has a valid transcript, return it (the normal/fast path).
+	if s.transcriptExists(cur) {
+		return cur
+	}
+
+	// The tip's transcript is missing. Walk from root to cur, finding the
+	// deepest descendant whose transcript file is present on disk.
+	lastValid := sessionID
+	seen2 := map[string]bool{}
+	walk := sessionID
+	for !seen2[walk] {
+		seen2[walk] = true
+		if s.transcriptExists(walk) {
+			lastValid = walk
+		}
+		if walk == cur {
+			break
+		}
+		children, err := s.index.ListChildren(walk)
+		if err != nil || len(children) == 0 {
+			break
+		}
+		var scoped []SessionMeta
+		for _, c := range children {
+			if c.AppName == rootApp && c.UserID == rootUser {
+				scoped = append(scoped, c)
+			}
+		}
+		if len(scoped) == 0 {
+			break
+		}
+		next := scoped[0]
+		for _, c := range scoped[1:] {
+			if c.UpdatedAt.After(next.UpdatedAt) {
+				next = c
+			}
+		}
+		walk = next.ID
+	}
+
+	slog.Warn("compaction chain tip has missing transcript, falling back to last valid ancestor",
+		"component", "session",
+		"requested", sessionID,
+		"broken_tip", cur,
+		"fallback", lastValid,
+	)
+	return lastValid
+}
+
+// transcriptExists checks whether the transcript file for the given session ID
+// exists on disk. It looks up the session metadata from the index to determine
+// the correct appName/userID path components.
+func (s *FileStore) transcriptExists(sessionID string) bool {
+	meta, err := s.index.Get(sessionID)
+	if err != nil || meta == nil {
+		return false
+	}
+	path := filepath.Join(s.baseDir, meta.AppName, meta.UserID, sessionID+".jsonl")
+	_, err = os.Stat(path)
+	return err == nil
+}
+
+// AncestorChain returns the compaction chain from the root ancestor down to and
+// including sessionID (root first). For a session that was never compacted this
+// is just [sessionID]. Used by rollback to reconstruct the full history across
+// compaction boundaries. Guards against cycles.
+func (s *FileStore) AncestorChain(sessionID string) []string {
+	if sessionID == "" {
+		return nil
+	}
+	var chain []string
+	seen := map[string]bool{}
+	cur := sessionID
+	for cur != "" && !seen[cur] {
+		seen[cur] = true
+		chain = append(chain, cur)
+		meta, err := s.GetSessionMeta(cur)
+		if err != nil || meta == nil || meta.ParentID == "" {
+			break
+		}
+		cur = meta.ParentID
+	}
+	// Reverse so the root comes first.
+	for i, j := 0, len(chain)-1; i < j; i, j = i+1, j-1 {
+		chain[i], chain[j] = chain[j], chain[i]
+	}
+	return chain
+}
+
 
 // AddSessionMeta adds a metadata entry to the session index directly.
 // This is used by fleet sessions that need to appear in the session list
@@ -538,6 +934,10 @@ func sanitizeEventsOnLoad(events []*adksession.Event) {
 // but the FunctionResponse never arrives. Without repair, the malformed history
 // causes LLM providers (especially OpenAI) to reject the request with HTTP 400.
 //
+// FunctionCalls that were superseded by the approval flow (i.e., the tool was
+// intercepted for user approval and re-issued with a new ID) are not considered
+// orphaned — they are a normal part of the approval protocol.
+//
 // For each orphaned FunctionCall, a synthetic FunctionResponse event is appended
 // with an error message explaining the interruption.
 func repairOrphanedToolCalls(events []*adksession.Event) []*adksession.Event {
@@ -554,7 +954,43 @@ func repairOrphanedToolCalls(events []*adksession.Event) []*adksession.Event {
 		}
 	}
 
-	// Find orphaned FunctionCalls (have ID but no matching FunctionResponse)
+	// Collect FunctionCall IDs that were superseded by the approval flow.
+	// Pattern: a FunctionCall event is followed (before the next FunctionCall
+	// for the same tool) by an event whose StateDelta sets awaiting_approval=true.
+	// The approval flow re-issues the call with a new ID, so the original never
+	// gets a FunctionResponse — but this is intentional, not an interruption.
+	approvalSuperseded := make(map[string]bool)
+	for i, event := range events {
+		if event.Content == nil {
+			continue
+		}
+		for _, part := range event.Content.Parts {
+			if part.FunctionCall == nil || part.FunctionCall.ID == "" {
+				continue
+			}
+			if answeredIDs[part.FunctionCall.ID] {
+				continue // already has a response, skip
+			}
+			// Look ahead for awaiting_approval=true before the next user message
+			// or FunctionResponse for this ID.
+			for j := i + 1; j < len(events); j++ {
+				sd := events[j].Actions.StateDelta
+				if awaiting, ok := sd["awaiting_approval"]; ok {
+					if ab, isBool := awaiting.(bool); isBool && ab {
+						approvalSuperseded[part.FunctionCall.ID] = true
+						break
+					}
+				}
+				// Stop looking if we hit a user message (new turn boundary)
+				if events[j].Content != nil && events[j].Content.Role == "user" {
+					break
+				}
+			}
+		}
+	}
+
+	// Find orphaned FunctionCalls (have ID but no matching FunctionResponse
+	// and were not superseded by the approval flow)
 	var orphanParts []*genai.Part
 	for _, event := range events {
 		if event.Content == nil {
@@ -562,7 +998,7 @@ func repairOrphanedToolCalls(events []*adksession.Event) []*adksession.Event {
 		}
 		for _, part := range event.Content.Parts {
 			if part.FunctionCall != nil && part.FunctionCall.ID != "" {
-				if !answeredIDs[part.FunctionCall.ID] {
+				if !answeredIDs[part.FunctionCall.ID] && !approvalSuperseded[part.FunctionCall.ID] {
 					orphanParts = append(orphanParts, part)
 				}
 			}

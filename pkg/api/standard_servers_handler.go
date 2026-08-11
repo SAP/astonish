@@ -18,6 +18,7 @@ type StandardServerResponse struct {
 	DisplayName    string                     `json:"displayName"`
 	Description    string                     `json:"description"`
 	Kind           string                     `json:"kind,omitempty"`
+	Category       string                     `json:"category,omitempty"`
 	Installed      bool                       `json:"installed"`
 	Active         bool                       `json:"active"`
 	IsDefault      bool                       `json:"isDefault"`
@@ -50,6 +51,9 @@ func ListStandardServersHandler(w http.ResponseWriter, r *http.Request) {
 
 	response := make([]StandardServerResponse, 0, len(servers))
 	for _, srv := range servers {
+		if srv.Category != "web" {
+			continue
+		}
 		installed := config.IsStandardServerInstalled(srv.ID)
 		var details *StandardServerDetails
 		if srv.Kind == "model" && srv.ID == "perplexity" {
@@ -70,6 +74,7 @@ func ListStandardServersHandler(w http.ResponseWriter, r *http.Request) {
 			DisplayName: srv.DisplayName,
 			Description: srv.Description,
 			Kind:        kind,
+			Category:    srv.Category,
 			Installed:   installed,
 			Active:      srv.WebSearchTool != "" && srv.WebSearchTool == activeSearch,
 			IsDefault:   srv.IsDefault,

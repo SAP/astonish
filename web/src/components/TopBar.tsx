@@ -1,5 +1,5 @@
 import { useEffect, useState, type ElementType } from 'react'
-import { Moon, Sun, Settings, Cpu, Grid, MessageSquare, Rocket, ShieldCheck, ShieldAlert, Crosshair, AppWindow, ChevronDown, LogOut, MoreHorizontal, Menu, User, Users } from 'lucide-react'
+import { Moon, Sun, Settings, Cpu, Grid, MessageSquare, Rocket, ShieldCheck, ShieldAlert, Crosshair, AppWindow, ChevronDown, LogOut, MoreHorizontal, Menu } from 'lucide-react'
 
 import AstonishLogo from './AstonishLogo'
 import { Badge } from '@/components/ui/badge'
@@ -41,8 +41,6 @@ interface TopBarProps {
   teams?: { slug: string, name: string }[] | null
   onTeamChange?: (teamSlug: string) => void
   onLogout?: () => void
-  personalMemoryMode?: boolean
-  onTogglePersonalMemoryMode?: () => void
 }
 
 interface NavItem {
@@ -94,7 +92,7 @@ function useBreakpointTier(): 'sm' | 'md' | 'lg' {
   return tier
 }
 
-export default function TopBar({ theme, onToggleTheme, onOpenSandbox, defaultProvider, defaultModel, currentView, onNavigate, sandboxStatus, isPlatformMode, user, org, orgs, onOrgSwitch, activeTeam, teams, onTeamChange, onLogout, personalMemoryMode, onTogglePersonalMemoryMode }: TopBarProps) {
+export default function TopBar({ theme, onToggleTheme, onOpenSandbox, defaultProvider, defaultModel, currentView, onNavigate, sandboxStatus, isPlatformMode, user, org, orgs, onOrgSwitch, activeTeam, teams, onTeamChange, onLogout }: TopBarProps) {
   const [mobileOpen, setMobileOpen] = useState(false)
   const tier = useBreakpointTier()
   const moreItems: NavItem[] = tier === 'md' ? secondaryNavItems : []
@@ -292,20 +290,6 @@ export default function TopBar({ theme, onToggleTheme, onOpenSandbox, defaultPro
         )}
 
         <div className="flex shrink-0 items-center gap-2">
-          {isPlatformMode && onTogglePersonalMemoryMode && (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={onTogglePersonalMemoryMode}
-              className={cn('hidden rounded-full text-xs sm:inline-flex', personalMemoryMode ? 'border-blue-500/30 bg-blue-500/10 text-blue-500 hover:bg-blue-500/15' : 'border-primary/30 bg-primary/10 text-primary hover:bg-primary/15')}
-              title={personalMemoryMode ? 'Personal mode: memories saved privately. Click to switch to team mode.' : 'Team mode: memories shared with team. Click to switch to personal mode.'}
-            >
-              {personalMemoryMode ? <User size={13} /> : <Users size={13} />}
-              <span className="hidden xl:inline">{personalMemoryMode ? 'Personal' : 'Team'}</span>
-            </Button>
-          )}
-
           {isPlatformMode && teams && teams.length > 1 && (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>

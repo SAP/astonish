@@ -11,6 +11,81 @@ func boolPtr(b bool) *bool {
 	return &b
 }
 
+// TestMergeStandardServers_InjectsCodegraph verifies the keyless, non-web
+// codegraph standard server is always injected by the merge, survives the
+// web-only filter (even when no web search tool is selected), and carries the
+// read-only tool restriction env.
+func TestMergeStandardServers_InjectsCodegraph(t *testing.T) {
+	cfg := &MCPConfig{MCPServers: map[string]MCPServerConfig{}}
+
+	// No web search selected — web servers get stripped, codegraph must not.
+	mergeStandardServersWithConfig(cfg, &AppConfig{})
+
+	srv, ok := cfg.MCPServers["codegraph"]
+	if !ok {
+		t.Fatal("keyless non-web codegraph server should always be injected")
+	}
+	if srv.Command != "npx" || len(srv.Args) < 3 || srv.Args[0] != "--yes" || srv.Args[2] != "serve" {
+		t.Fatalf("codegraph command/args unexpected: %q %v", srv.Command, srv.Args)
+	}
+	if srv.Env["CODEGRAPH_MCP_TOOLS"] != "explore" {
+		t.Fatalf("codegraph should restrict exposed tools via CODEGRAPH_MCP_TOOLS=explore, got env %v", srv.Env)
+	}
+}
+
+// TestFilterInactiveStandardWebServers_KeepsCodegraph verifies the web-only
+// filter never strips the non-web codegraph server.
+func TestFilterInactiveStandardWebServers_KeepsCodegraph(t *testing.T) {
+	cfg := &MCPConfig{
+		MCPServers: map[string]MCPServerConfig{
+			"codegraph": {Command: "npx", Args: []string{"--yes", "@colbymchenry/codegraph", "serve", "--mcp"}},
+			"tavily":    {Command: "npx", Args: []string{"-y", "tavily-mcp@latest"}},
+		},
+	}
+	// No web selection → tavily stripped, codegraph kept.
+	filterInactiveStandardWebServers(cfg, &AppConfig{})
+	if _, ok := cfg.MCPServers["codegraph"]; !ok {
+		t.Fatal("codegraph (non-web) must survive the web-only filter")
+	}
+	if _, ok := cfg.MCPServers["tavily"]; ok {
+		t.Fatal("unselected web server should be stripped")
+	}
+}
+
+// TestSaveMCPConfig_DoesNotPersistCodegraph verifies the standard-ID stripping
+// keeps codegraph out of the saved mcp_config.json (it is a standard server,
+// injected at load time).
+func TestSaveMCPConfig_DoesNotPersistCodegraph(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+	// Some platforms resolve config dir from HOME; set both defensively.
+	t.Setenv("HOME", tmp)
+	if err := os.MkdirAll(filepath.Join(tmp, "astonish"), 0755); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+
+	cfg := &MCPConfig{
+		MCPServers: map[string]MCPServerConfig{
+			"codegraph": {Command: "npx", Args: []string{"--yes", "@colbymchenry/codegraph", "serve", "--mcp"}},
+			"my-custom": {Command: "node", Args: []string{"s.js"}},
+		},
+	}
+	if err := SaveMCPConfig(cfg); err != nil {
+		t.Fatalf("SaveMCPConfig: %v", err)
+	}
+	reloaded, err := LoadMCPConfigRaw()
+	if err != nil {
+		t.Fatalf("LoadMCPConfigRaw: %v", err)
+	}
+	if _, ok := reloaded.MCPServers["codegraph"]; ok {
+		t.Fatal("codegraph is a standard server and must not be written to mcp_config.json")
+	}
+	if _, ok := reloaded.MCPServers["my-custom"]; !ok {
+		t.Fatal("custom servers must still be persisted")
+	}
+}
+
+
 // TestMergeStandardServers_PreservesDisabledKeyBased verifies that a key-based server
 // with Enabled=false keeps that flag when re-merged with a valid API key.
 func TestMergeStandardServers_PreservesDisabledKeyBased(t *testing.T) {
@@ -409,5 +484,50 @@ func TestMergeStandardServersWithConfig_NilAppCfgNoFileFallback(t *testing.T) {
 	// Tavily (secret-based web) should NOT be present.
 	if _, ok := cfg.MCPServers["tavily"]; ok {
 		t.Fatal("tavily (secret server) should NOT be injected when nil appCfg is passed — no file fallback")
+	}
+}
+
+// TestFileMCPServers_ReturnsFileDeclaredServers verifies that FileMCPServers
+// loads servers declared in mcp_config.json and excludes standard servers,
+// so it can serve as the platform base layer.
+func TestFileMCPServers_ReturnsFileDeclaredServers(t *testing.T) {
+	setupTempConfigDir(t)
+
+	cfg := &MCPConfig{
+		MCPServers: map[string]MCPServerConfig{
+			"custom-a": {Command: "node", Args: []string{"a.js"}},
+			"custom-b": {Transport: "sse", URL: "http://example.local/sse"},
+			// A standard-server ID must be excluded from FileMCPServers output.
+			"tavily": {Command: "npx", Args: []string{"-y", "tavily-mcp@latest"}, Enabled: boolPtr(false)},
+		},
+	}
+	if err := SaveMCPConfig(cfg); err != nil {
+		t.Fatalf("SaveMCPConfig failed: %v", err)
+	}
+
+	got := FileMCPServers()
+
+	if _, ok := got["custom-a"]; !ok {
+		t.Errorf("expected custom-a in FileMCPServers, got: %v", got)
+	}
+	if _, ok := got["custom-b"]; !ok {
+		t.Errorf("expected custom-b in FileMCPServers, got: %v", got)
+	}
+	if _, ok := got["tavily"]; ok {
+		t.Errorf("standard server 'tavily' must be excluded from FileMCPServers (it is layered by MergeStandardServersWithConfig)")
+	}
+}
+
+// TestFileMCPServers_EmptyWhenNoFile verifies FileMCPServers returns a non-nil
+// empty map when no config file exists, so callers can seed a merge map safely.
+func TestFileMCPServers_EmptyWhenNoFile(t *testing.T) {
+	setupTempConfigDir(t) // creates dir but writes no mcp_config.json
+
+	got := FileMCPServers()
+	if got == nil {
+		t.Fatal("FileMCPServers must never return nil")
+	}
+	if len(got) != 0 {
+		t.Fatalf("expected empty map when no config file exists, got: %v", got)
 	}
 }

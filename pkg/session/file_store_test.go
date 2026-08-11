@@ -2,6 +2,10 @@ package session
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -698,5 +702,407 @@ func TestFileStore_DeleteCascadesChildren(t *testing.T) {
 	})
 	if err != nil {
 		t.Errorf("Get(unrelated) error = %v, want nil (should survive cascade)", err)
+	}
+}
+
+func TestFileStore_TruncateEvents(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	sess := createTestSession(t, store, "myapp", "user1")
+
+	for i, text := range []string{"msg0", "msg1", "msg2", "msg3"} {
+		ev := testEvent("ev"+string(rune('0'+i)), "user", text)
+		if err := store.AppendEvent(ctx, sess, ev); err != nil {
+			t.Fatalf("AppendEvent(%d) error = %v", i, err)
+		}
+	}
+
+	// Keep the first 2 events, discard the rest.
+	kept, err := store.TruncateEvents("myapp", "user1", sess.ID(), 2)
+	if err != nil {
+		t.Fatalf("TruncateEvents() error = %v", err)
+	}
+	if kept != 2 {
+		t.Errorf("TruncateEvents returned %d, want 2", kept)
+	}
+
+	getResp, err := store.Get(ctx, &adksession.GetRequest{
+		AppName:   "myapp",
+		UserID:    "user1",
+		SessionID: sess.ID(),
+	})
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if got := getResp.Session.Events().Len(); got != 2 {
+		t.Errorf("Events().Len() after truncate = %d, want 2", got)
+	}
+
+	// The persisted transcript should reflect the truncation after reload.
+	fresh, err := NewFileStore(store.BaseDir())
+	if err != nil {
+		t.Fatalf("NewFileStore() error = %v", err)
+	}
+	reloaded, err := fresh.Get(ctx, &adksession.GetRequest{
+		AppName:   "myapp",
+		UserID:    "user1",
+		SessionID: sess.ID(),
+	})
+	if err != nil {
+		t.Fatalf("Get(reloaded) error = %v", err)
+	}
+	if got := reloaded.Session.Events().Len(); got != 2 {
+		t.Errorf("reloaded Events().Len() = %d, want 2 (transcript rewrite)", got)
+	}
+
+	// Truncating to the full (already shorter) length is a no-op.
+	kept, err = store.TruncateEvents("myapp", "user1", sess.ID(), 5)
+	if err != nil {
+		t.Fatalf("TruncateEvents(over) error = %v", err)
+	}
+	if kept != 2 {
+		t.Errorf("TruncateEvents(over) returned %d, want 2 (clamped)", kept)
+	}
+
+	// Truncating to 0 clears all events.
+	if _, err := store.TruncateEvents("myapp", "user1", sess.ID(), 0); err != nil {
+		t.Fatalf("TruncateEvents(0) error = %v", err)
+	}
+	getResp, _ = store.Get(ctx, &adksession.GetRequest{
+		AppName:   "myapp",
+		UserID:    "user1",
+		SessionID: sess.ID(),
+	})
+	if got := getResp.Session.Events().Len(); got != 0 {
+		t.Errorf("Events().Len() after truncate(0) = %d, want 0", got)
+	}
+}
+
+func TestFileStore_LatestDescendantAndAncestorChain(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// root -> child -> tip
+	root, err := store.Create(ctx, &adksession.CreateRequest{
+		AppName: "app", UserID: "u", SessionID: "root",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Touch UpdatedAt order: create child then tip with slight delay via sequential creates.
+	_, err = store.Create(ctx, &adksession.CreateRequest{
+		AppName: "app", UserID: "u", SessionID: "child",
+		State: map[string]any{StateKeyParentID: root.Session.ID()},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.Create(ctx, &adksession.CreateRequest{
+		AppName: "app", UserID: "u", SessionID: "tip",
+		State: map[string]any{StateKeyParentID: "child"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := store.LatestDescendant("root"); got != "tip" {
+		t.Fatalf("LatestDescendant(root)=%q want tip", got)
+	}
+	if got := store.LatestDescendant("child"); got != "tip" {
+		t.Fatalf("LatestDescendant(child)=%q want tip", got)
+	}
+	if got := store.LatestDescendant("tip"); got != "tip" {
+		t.Fatalf("LatestDescendant(tip)=%q want tip", got)
+	}
+	if got := store.LatestDescendant("missing"); got != "missing" {
+		t.Fatalf("LatestDescendant(missing)=%q want missing", got)
+	}
+
+	chain := store.AncestorChain("tip")
+	if len(chain) != 3 || chain[0] != "root" || chain[1] != "child" || chain[2] != "tip" {
+		t.Fatalf("AncestorChain(tip)=%v want [root child tip]", chain)
+	}
+	chain = store.AncestorChain("root")
+	if len(chain) != 1 || chain[0] != "root" {
+		t.Fatalf("AncestorChain(root)=%v want [root]", chain)
+	}
+}
+
+func TestFileStore_LatestDescendantMissingTranscript(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Create a chain: root -> child -> tip
+	_, err := store.Create(ctx, &adksession.CreateRequest{
+		AppName: "app", UserID: "u", SessionID: "root",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.Create(ctx, &adksession.CreateRequest{
+		AppName: "app", UserID: "u", SessionID: "child",
+		State: map[string]any{StateKeyParentID: "root"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.Create(ctx, &adksession.CreateRequest{
+		AppName: "app", UserID: "u", SessionID: "tip",
+		State: map[string]any{StateKeyParentID: "child"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Normal case: chain is intact
+	if got := store.LatestDescendant("root"); got != "tip" {
+		t.Fatalf("LatestDescendant(root)=%q want tip (chain intact)", got)
+	}
+
+	// Remove the tip's transcript file to simulate a crash during compaction
+	tipPath := filepath.Join(store.BaseDir(), "app", "u", "tip.jsonl")
+	if err := os.Remove(tipPath); err != nil {
+		t.Fatalf("failed to remove tip transcript: %v", err)
+	}
+
+	// LatestDescendant should now fall back to "child" (last valid ancestor)
+	if got := store.LatestDescendant("root"); got != "child" {
+		t.Fatalf("LatestDescendant(root)=%q want child (tip transcript missing)", got)
+	}
+
+	// Also remove child's transcript — should fall back to root
+	childPath := filepath.Join(store.BaseDir(), "app", "u", "child.jsonl")
+	if err := os.Remove(childPath); err != nil {
+		t.Fatalf("failed to remove child transcript: %v", err)
+	}
+	if got := store.LatestDescendant("root"); got != "root" {
+		t.Fatalf("LatestDescendant(root)=%q want root (child+tip transcripts missing)", got)
+	}
+}
+
+func TestFileStore_ArchiveAndReplaceEvents(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	resp, err := store.Create(ctx, &adksession.CreateRequest{AppName: "app", UserID: "u", SessionID: "active"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := resp.Session
+	// Seed several events via the live session pointer (as ADK would).
+	for i := 0; i < 10; i++ {
+		ev := &adksession.Event{
+			ID:     fmt.Sprintf("e%d", i),
+			Author: "user",
+			LLMResponse: adkmodel.LLMResponse{
+				Content: genai.NewContentFromText(fmt.Sprintf("msg %d %s", i, strings.Repeat("x", 50)), genai.RoleUser),
+			},
+		}
+		if err := store.AppendEvent(ctx, sess, ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if sess.Events().Len() != 10 {
+		t.Fatalf("live events = %d want 10", sess.Events().Len())
+	}
+
+	compacted := []*adksession.Event{
+		{
+			ID:     "c0",
+			Author: "model",
+			LLMResponse: adkmodel.LLMResponse{
+				Content: genai.NewContentFromText("[Context Summary — 10 earlier messages compacted]\n\nSUMMARY", genai.RoleModel),
+			},
+		},
+		{
+			ID:     "c1",
+			Author: "user",
+			LLMResponse: adkmodel.LLMResponse{
+				Content: genai.NewContentFromText("recent", genai.RoleUser),
+			},
+		},
+	}
+	archiveID, err := store.ArchiveAndReplaceEvents("app", "u", "active", compacted)
+	if err != nil {
+		t.Fatalf("ArchiveAndReplaceEvents: %v", err)
+	}
+	if archiveID == "" || archiveID == "active" {
+		t.Fatalf("bad archive id %q", archiveID)
+	}
+
+	// Live ADK session pointer must see the rewrite immediately.
+	if sess.Events().Len() != 2 {
+		t.Fatalf("live session events after rewrite = %d want 2", sess.Events().Len())
+	}
+
+	// Archive has the full history.
+	arch, err := store.Get(ctx, &adksession.GetRequest{AppName: "app", UserID: "u", SessionID: archiveID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if arch.Session.Events().Len() != 10 {
+		t.Fatalf("archive events = %d want 10", arch.Session.Events().Len())
+	}
+
+	// Active is a child of the archive.
+	meta, err := store.GetSessionMeta("active")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.ParentID != archiveID {
+		t.Fatalf("active ParentID = %q want %q", meta.ParentID, archiveID)
+	}
+	if store.LatestDescendant(archiveID) != "active" {
+		t.Fatalf("LatestDescendant(archive)=%q want active", store.LatestDescendant(archiveID))
+	}
+}
+
+// TestRepairOrphanedToolCalls_ApprovalSuperseded verifies that FunctionCalls
+// superseded by the approval flow are NOT marked as orphaned. The approval
+// protocol re-issues the tool call with a new ID after user approval, so the
+// original FunctionCall intentionally never gets a FunctionResponse.
+func TestRepairOrphanedToolCalls_ApprovalSuperseded(t *testing.T) {
+	events := []*adksession.Event{
+		// 1. Model emits FunctionCall (pre-approval)
+		{
+			ID:     "e1",
+			Author: "chat",
+			LLMResponse: adkmodel.LLMResponse{
+				Content: &genai.Content{
+					Role: "model",
+					Parts: []*genai.Part{{
+						FunctionCall: &genai.FunctionCall{
+							ID:   "call_pre",
+							Name: "shell_command",
+							Args: map[string]any{"command": "ls /tmp"},
+						},
+					}},
+				},
+			},
+		},
+		// 2. System event sets awaiting_approval=true
+		{
+			ID:     "e2",
+			Author: "astonish_code",
+			LLMResponse: adkmodel.LLMResponse{
+				Content: genai.NewContentFromText("Approve?", genai.RoleModel),
+			},
+			Actions: adksession.EventActions{
+				StateDelta: map[string]any{
+					"awaiting_approval": true,
+					"approval_tool":     "shell_command",
+				},
+			},
+		},
+		// 3. User approves
+		{
+			ID:     "e3",
+			Author: "user",
+			LLMResponse: adkmodel.LLMResponse{
+				Content: genai.NewContentFromText("Allow", genai.RoleUser),
+			},
+		},
+		// 4. Model re-issues with new ID (post-approval)
+		{
+			ID:     "e4",
+			Author: "chat",
+			LLMResponse: adkmodel.LLMResponse{
+				Content: &genai.Content{
+					Role: "model",
+					Parts: []*genai.Part{{
+						FunctionCall: &genai.FunctionCall{
+							ID:   "call_post",
+							Name: "shell_command",
+							Args: map[string]any{"command": "ls /tmp"},
+						},
+					}},
+				},
+			},
+		},
+		// 5. Tool result for call_post only
+		{
+			ID:     "e5",
+			Author: "chat",
+			LLMResponse: adkmodel.LLMResponse{
+				Content: &genai.Content{
+					Role: "user",
+					Parts: []*genai.Part{{
+						FunctionResponse: &genai.FunctionResponse{
+							ID:       "call_post",
+							Name:     "shell_command",
+							Response: map[string]any{"stdout": "file1"},
+						},
+					}},
+				},
+			},
+		},
+	}
+
+	repaired := repairOrphanedToolCalls(events)
+
+	// The approval-superseded call (call_pre) should NOT get a synthetic error.
+	// repairOrphanedToolCalls should return the events unchanged.
+	if len(repaired) != len(events) {
+		t.Fatalf("expected %d events (no synthetic repair), got %d", len(events), len(repaired))
+	}
+
+	// Verify no synthetic FunctionResponse was injected for call_pre.
+	for _, ev := range repaired {
+		if ev.Content == nil {
+			continue
+		}
+		for _, part := range ev.Content.Parts {
+			if part.FunctionResponse != nil && part.FunctionResponse.ID == "call_pre" {
+				t.Fatalf("should not have injected synthetic response for approval-superseded call_pre, got: %+v", part.FunctionResponse)
+			}
+		}
+	}
+}
+
+// TestRepairOrphanedToolCalls_TrueOrphan verifies that a genuinely orphaned
+// FunctionCall (daemon killed mid-execution, no approval flow) still gets a
+// synthetic error response.
+func TestRepairOrphanedToolCalls_TrueOrphan(t *testing.T) {
+	events := []*adksession.Event{
+		// 1. Model emits FunctionCall
+		{
+			ID:     "e1",
+			Author: "chat",
+			LLMResponse: adkmodel.LLMResponse{
+				Content: &genai.Content{
+					Role: "model",
+					Parts: []*genai.Part{{
+						FunctionCall: &genai.FunctionCall{
+							ID:   "call_orphan",
+							Name: "shell_command",
+							Args: map[string]any{"command": "long_running_task"},
+						},
+					}},
+				},
+			},
+		},
+		// No FunctionResponse — daemon was killed
+	}
+
+	repaired := repairOrphanedToolCalls(events)
+
+	// Should have appended a synthetic event.
+	if len(repaired) != len(events)+1 {
+		t.Fatalf("expected %d events (original + 1 synthetic), got %d", len(events)+1, len(repaired))
+	}
+
+	synth := repaired[len(repaired)-1]
+	if synth.Content == nil || len(synth.Content.Parts) == 0 {
+		t.Fatal("synthetic event has no content/parts")
+	}
+	fr := synth.Content.Parts[0].FunctionResponse
+	if fr == nil {
+		t.Fatal("synthetic event part is not a FunctionResponse")
+	}
+	if fr.ID != "call_orphan" {
+		t.Errorf("synthetic FunctionResponse.ID = %q, want %q", fr.ID, "call_orphan")
+	}
+	errMsg, _ := fr.Response["error"].(string)
+	if errMsg == "" {
+		t.Error("synthetic FunctionResponse should have an error message")
 	}
 }

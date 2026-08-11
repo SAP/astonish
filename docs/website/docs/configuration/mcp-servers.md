@@ -12,25 +12,42 @@ MCP is an open protocol for AI tool integration. An MCP server exposes tools (fu
 
 ## How MCP Servers Are Managed
 
-MCP servers are stored in the **database** and managed through Studio Settings or the CLI. They follow the same **3-tier cascade resolution** as providers:
+MCP servers can come from two places, which are merged together — mirroring how [providers](./providers.md) merge a config-file base with the platform database:
+
+1. **Config file** (`~/.config/astonish/mcp_config.json`) — the **base layer**. Servers declared here are available to Astonish Code (personal mode) with no platform login, and in platform mode they become **defaults visible to every org and team**. This lets you ship an installation pre-configured with standard MCP servers.
+2. **Database** — managed through Studio Settings or the CLI, scoped per platform / org / team.
+
+The full **cascade resolution** (later tiers override earlier ones by server name):
 
 ```
-Platform (base) → Organization (overrides) → Team (overrides)
+Config file (mcp_config.json)  →  Platform  →  Organization  →  Team
+        (base layer)              (DB base)     (overrides)     (overrides)
 ```
 
 Each tier can define MCP servers. When names collide, the closest tier to the user wins:
 
 | Tier | Managed By | Scope | Overrides |
 |------|-----------|-------|-----------|
-| Platform | Platform admin | All orgs and teams | — (base layer) |
-| Organization | Org admin | All teams in the org | Platform |
-| Team | Team admin | Single team | Org + Platform |
+| Config file | Operator (edits `mcp_config.json`) | All orgs and teams (defaults) | — (base layer) |
+| Platform | Platform admin | All orgs and teams | Config file |
+| Organization | Org admin | All teams in the org | Config file + Platform |
+| Team | Team admin | Single team | Config file + Org + Platform |
 
-At runtime, Astonish merges all three tiers by server name — team-level definitions override org-level, which override platform-level.
+At runtime, Astonish merges every tier by server name — team-level definitions override org-level, which override platform-level, which override the config-file base.
 
-::: tip No Personal Level
-Unlike some other settings, MCP servers do not have a personal/user tier. They are always managed at the team level or above.
+::: tip Config-file servers as defaults
+A server declared in `mcp_config.json` shows up in **Settings → MCP Servers** marked as a `config` source. It is a read-only default from the config file; an org or team can override it by installing a same-named database entry, which then wins in the cascade above.
 :::
+
+### How MCP Tools Reach the Agent
+
+How a server's tools become callable depends on where you're running Astonish:
+
+- **Astonish Code (`astonish code`)** — MCP servers are **first-class**. Every configured server's tools are loaded onto the agent directly, so it can call any of them immediately with no discovery step. A coding session is personal and usually has only a handful of servers, so this keeps them all one call away.
+- **Studio / platform** — MCP tools are **discovered on demand**. Each server appears in the agent's tool catalog as a short summary, and the agent pulls in the specific tools it needs when a task calls for them. This keeps the agent efficient even when an organization exposes thousands of tools across many teams.
+
+Either way you configure servers the same way — only the way the agent reaches their tools differs.
+
 
 ## Managing via Studio Settings
 
@@ -157,8 +174,12 @@ astonish tools store install
 
 Consider a scenario where MCP servers are defined at multiple tiers:
 
+**Config file** (`mcp_config.json`, set by the operator):
+- `github` — default GitHub MCP server shipped with the installation
+- `internal-docs` — a keyless internal docs server
+
 **Platform level** (set by platform admin):
-- `github` — GitHub MCP server for all users
+- `github` — Override with a platform-managed GitHub token
 - `slack` — Slack integration
 
 **Org level** (set by org admin):
@@ -174,6 +195,7 @@ Consider a scenario where MCP servers are defined at multiple tiers:
 - `slack` → Inherited from Platform (no override)
 - `jira` → Inherited from Org (no team override)
 - `figma` → Team-specific (only exists at team level)
+- `internal-docs` → Inherited from the config-file base (no DB override at any tier)
 
 ## Debugging startup failures
 

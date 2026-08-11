@@ -57,7 +57,161 @@ func RunChatTUI(ctx context.Context, cfg *ChatConfig) error {
 		user:        user,
 		resumed:     cfg.SessionID != "",
 	}
-	return tui.Run(ctx, tui.Config{Backend: b})
+	// Provide local code mode as an alt backend so Ctrl+\ can switch to it.
+	// The code backend is lazily initialized on first switch.
+	var altBackend backend.Backend
+	if lb := newLazyCodeBackend(); lb != nil {
+		altBackend = lb
+	}
+	return tui.Run(ctx, tui.Config{Backend: b, AltBackend: altBackend})
+}
+
+// newPlatformBackend creates a platformBackend for use as the primary or alt
+// backend. It requires that the user is already logged in (client.IsRemoteMode).
+// Returns nil without error when not in remote mode (graceful degradation).
+func newPlatformBackend() backend.Backend {
+	if !client.IsRemoteMode() {
+		return nil
+	}
+	c, err := client.New()
+	if err != nil {
+		return nil
+	}
+	remoteCfg, _ := client.LoadRemoteConfig()
+	serverURL, org, team, user := "", "", "", ""
+	if remoteCfg != nil {
+		serverURL = remoteCfg.URL
+		org = remoteCfg.Org
+		team = remoteCfg.Team
+		user = remoteCfg.UserEmail
+	}
+	return &platformBackend{
+		client:    c,
+		serverURL: serverURL,
+		org:       org,
+		team:      team,
+		user:      user,
+	}
+}
+
+// newLazyCodeBackend returns a backend that lazily initializes the full local
+// code-mode agent on first Open(). Returns nil if code mode cannot be set up
+// (e.g. missing config). This allows `astonish chat` to offer Ctrl+\ switching
+// to code mode without paying the startup cost unless the user actually switches.
+func newLazyCodeBackend() backend.Backend {
+	return &lazyCodeBackend{}
+}
+
+// lazyCodeBackend wraps localAgentBackend with deferred initialization. All
+// backend.Backend methods delegate to the inner backend once Open() is called.
+type lazyCodeBackend struct {
+	inner backend.Backend
+}
+
+func (b *lazyCodeBackend) Info() backend.Info {
+	if b.inner != nil {
+		return b.inner.Info()
+	}
+	return backend.Info{Mode: "code"}
+}
+
+func (b *lazyCodeBackend) Open(ctx context.Context) error {
+	if b.inner != nil {
+		return nil // already opened
+	}
+	// Build the full code-mode backend. This mirrors RunCodeTUI's setup but
+	// runs lazily on first switch.
+	cfg := &CodeConfig{}
+	inner, err := buildCodeBackend(ctx, cfg)
+	if err != nil {
+		return fmt.Errorf("failed to initialize code mode: %w", err)
+	}
+	b.inner = inner
+	return b.inner.Open(ctx)
+}
+
+func (b *lazyCodeBackend) RunTurn(ctx context.Context, msg string, opts backend.TurnOptions) (<-chan events.Event, error) {
+	if b.inner == nil {
+		return nil, fmt.Errorf("code backend not opened")
+	}
+	return b.inner.RunTurn(ctx, msg, opts)
+}
+
+func (b *lazyCodeBackend) ListSessions(ctx context.Context) ([]backend.SessionSummary, error) {
+	if b.inner == nil {
+		return nil, nil
+	}
+	return b.inner.ListSessions(ctx)
+}
+
+func (b *lazyCodeBackend) LoadHistory(ctx context.Context) ([]backend.HistoryEntry, error) {
+	if b.inner == nil {
+		return nil, nil
+	}
+	return b.inner.LoadHistory(ctx)
+}
+
+func (b *lazyCodeBackend) ResumeSession(ctx context.Context, id string) ([]backend.HistoryEntry, error) {
+	if b.inner == nil {
+		return nil, fmt.Errorf("code backend not opened")
+	}
+	return b.inner.ResumeSession(ctx, id)
+}
+
+func (b *lazyCodeBackend) DeleteSession(ctx context.Context, id string) error {
+	if b.inner == nil {
+		return fmt.Errorf("code backend not opened")
+	}
+	return b.inner.DeleteSession(ctx, id)
+}
+
+func (b *lazyCodeBackend) NewSession() {
+	if b.inner != nil {
+		b.inner.NewSession()
+	}
+}
+
+func (b *lazyCodeBackend) ListProviders(ctx context.Context) ([]string, error) {
+	if b.inner == nil {
+		return nil, nil
+	}
+	return b.inner.ListProviders(ctx)
+}
+
+func (b *lazyCodeBackend) ListModels(ctx context.Context, provider string) ([]string, error) {
+	if b.inner == nil {
+		return nil, nil
+	}
+	return b.inner.ListModels(ctx, provider)
+}
+
+func (b *lazyCodeBackend) SetModelPin(ctx context.Context, provider, model string) (string, string, error) {
+	if b.inner == nil {
+		return "", "", fmt.Errorf("code backend not opened")
+	}
+	return b.inner.SetModelPin(ctx, provider, model)
+}
+
+func (b *lazyCodeBackend) ReadArtifactContent(ctx context.Context, sessionID, path string) (backend.ArtifactContent, error) {
+	if b.inner == nil {
+		return backend.ArtifactContent{}, fmt.Errorf("code backend not opened")
+	}
+	return b.inner.ReadArtifactContent(ctx, sessionID, path)
+}
+
+func (b *lazyCodeBackend) Close() error {
+	if b.inner != nil {
+		return b.inner.Close()
+	}
+	return nil
+}
+
+// RespondSubAgentAuth delegates to the inner backend if initialized.
+func (b *lazyCodeBackend) RespondSubAgentAuth(choice string) bool {
+	if b.inner != nil {
+		return b.inner.RespondSubAgentAuth(choice)
+	}
+	return false
 }
 
 // platformBackend implements backend.Backend over Studio REST/SSE.
@@ -117,6 +271,10 @@ func (b *platformBackend) Close() error {
 	b.closed = true
 	return nil
 }
+
+// RespondSubAgentAuth is a no-op for platform backends (sub-agent auth is
+// only enforced in code-mode TUI).
+func (b *platformBackend) RespondSubAgentAuth(choice string) bool { return false }
 
 func (b *platformBackend) loadInitialModelStatus(ctx context.Context) {
 	_ = ctx
@@ -486,12 +644,14 @@ func studioMessagesToHistory(msgs []client.StudioMessage) []backend.HistoryEntry
 			out = append(out, backend.HistoryEntry{
 				Kind:     "tool_call",
 				ToolName: m.ToolName,
+				ToolID:   m.ToolID,
 				Args:     args,
 			})
 		case "tool_result":
 			out = append(out, backend.HistoryEntry{
 				Kind:     "tool_result",
 				ToolName: m.ToolName,
+				ToolID:   m.ToolID,
 				Result:   m.ToolResult,
 			})
 		default:
@@ -535,6 +695,7 @@ func (b *platformBackend) RunTurn(ctx context.Context, message string, opts back
 		AutoApprove:   autoApprove,
 		Debug:         debug,
 		SystemContext: opts.SystemContext,
+		PlanMode:      opts.PlanMode,
 		Attachments:   chatAttachmentsFromBackend(opts.Attachments),
 	}
 	// Apply pre-session model pin on the first turn of a new session.
@@ -729,11 +890,16 @@ func mapSSEToEvents(sev *client.SSEEvent, debug bool) []events.Event {
 			Name    string         `json:"tool"`
 			Args    map[string]any `json:"args"`
 			Options []string       `json:"options"`
+			Kind    string         `json:"kind"`
+			Paths   []string       `json:"paths"`
 		}
 		if json.Unmarshal(data, &payload) == nil {
 			tool := payload.Tool
 			if tool == "" {
 				tool = payload.Name
+			}
+			if payload.Kind != "" {
+				return []events.Event{events.NewAuthorizationApproval(tool, payload.Args, payload.Options, payload.Kind, payload.Paths)}
 			}
 			return []events.Event{events.NewApproval(tool, payload.Args, payload.Options)}
 		}
@@ -794,6 +960,46 @@ func mapSSEToEvents(sev *client.SSEEvent, debug bool) []events.Event {
 					{Kind: events.KindSubagent, ToolName: payload.TaskName, Text: payload.TaskName},
 					events.NewStatus(fmt.Sprintf("Working: %s…", payload.TaskName)),
 				}
+			}
+		}
+	case "delegation":
+		var payload struct {
+			Type     string `json:"type"`
+			TaskName string `json:"task_name"`
+			Duration string `json:"duration"`
+			Error    string `json:"error"`
+			Tasks    []struct {
+				Name        string `json:"name"`
+				Description string `json:"description"`
+				PlanStep    string `json:"plan_step"`
+			} `json:"tasks"`
+			ToolName   string         `json:"tool_name"`
+			ToolArgs   map[string]any `json:"tool_args"`
+			ToolResult any            `json:"tool_result"`
+			Text       string         `json:"text"`
+		}
+		if json.Unmarshal(data, &payload) == nil {
+			switch payload.Type {
+			case "start":
+				tasks := make([]events.DelegationTask, len(payload.Tasks))
+				for i, t := range payload.Tasks {
+					tasks[i] = events.DelegationTask{Name: t.Name, Description: t.Description, PlanStep: t.PlanStep}
+				}
+				return []events.Event{events.NewDelegationStart(tasks)}
+			case "task_start":
+				return []events.Event{events.NewDelegationTaskUpdate("task_start", payload.TaskName, "", "")}
+			case "task_complete":
+				return []events.Event{events.NewDelegationTaskUpdate("task_complete", payload.TaskName, payload.Duration, "")}
+			case "task_failed":
+				return []events.Event{events.NewDelegationTaskUpdate("task_failed", payload.TaskName, payload.Duration, payload.Error)}
+			case "task_tool_call":
+				return []events.Event{events.NewDelegationTaskActivity("task_tool_call", payload.TaskName, payload.ToolName, payload.ToolArgs, nil, "")}
+			case "task_tool_result":
+				return []events.Event{events.NewDelegationTaskActivity("task_tool_result", payload.TaskName, payload.ToolName, nil, payload.ToolResult, "")}
+			case "task_text":
+				return []events.Event{events.NewDelegationTaskActivity("task_text", payload.TaskName, "", nil, nil, payload.Text)}
+			case "done":
+				return []events.Event{events.NewDelegation("done")}
 			}
 		}
 	case "report_marker":
@@ -879,6 +1085,7 @@ func mapSSEToEvents(sev *client.SSEEvent, debug bool) []events.Event {
 			InputTokens  int64 `json:"input_tokens"`
 			OutputTokens int64 `json:"output_tokens"`
 			TotalTokens  int64 `json:"total_tokens"`
+			Estimated    bool  `json:"estimated"`
 		}
 		if json.Unmarshal(data, &payload) == nil {
 			input := firstNonZero(payload.Input, payload.InputTokens)
@@ -890,9 +1097,10 @@ func mapSSEToEvents(sev *client.SSEEvent, debug bool) []events.Event {
 			return []events.Event{{
 				Kind: events.KindUsage,
 				Usage: &events.Usage{
-					Input:  input,
-					Output: output,
-					Total:  total,
+					Input:     input,
+					Output:    output,
+					Total:     total,
+					Estimated: payload.Estimated,
 				},
 			}}
 		}
@@ -921,6 +1129,22 @@ func mapSSEToEvents(sev *client.SSEEvent, debug bool) []events.Event {
 		if json.Unmarshal(data, &payload) == nil && payload.Text != "" {
 			return []events.Event{events.NewSystem(payload.Text)}
 		}
+	case "plan_approval":
+		var payload struct {
+			PlanContext      string `json:"plan_context"`
+			PlanWhatNotToDo  string `json:"plan_what_not_to_do"`
+			PlanVerification string `json:"plan_verification"`
+		}
+		_ = json.Unmarshal(data, &payload)
+		return []events.Event{{
+			Kind:             events.KindApproval,
+			ToolName:         "announce_plan",
+			Options:          []string{"Approve & implement", "Request changes", "Decline"},
+			ApprovalKind:     "plan",
+			PlanContext:      payload.PlanContext,
+			PlanWhatNotToDo:  payload.PlanWhatNotToDo,
+			PlanVerification: payload.PlanVerification,
+		}}
 	case "done":
 		return []events.Event{events.NewDone()}
 	case "debug":

@@ -754,6 +754,87 @@ func TestComposerHeightUsesRealValueNotCollapsedDisplay(t *testing.T) {
 	}
 }
 
+func TestComposerHeightGrowsForSoftWrappedLine(t *testing.T) {
+	// Width 100 → composer wrap width = 100 - 4 - 2 = 94 cells.
+	m := newPasteTestModel(t)
+	if got := m.composerWrapWidth(); got != 94 {
+		t.Fatalf("composerWrapWidth = %d, want 94", got)
+	}
+
+	// A short single line with no explicit newline stays one row.
+	m.ta.SetValue("hello world")
+	if h := m.composerTextHeight(); h != 1 {
+		t.Fatalf("height for short line = %d, want 1", h)
+	}
+
+	// A single long line (no newline) that exceeds the wrap width must grow the
+	// composer the same way an explicit Shift+Enter newline would.
+	m.ta.SetValue(strings.Repeat("word ", 40)) // ~200 cells → 3 visual rows at 94
+	if h := m.composerTextHeight(); h <= 1 {
+		t.Fatalf("height for soft-wrapped long line = %d, want > 1", h)
+	}
+
+	// Growth is capped at 4 rows regardless of length.
+	m.ta.SetValue(strings.Repeat("word ", 400))
+	if h := m.composerTextHeight(); h != 4 {
+		t.Fatalf("height for very long line = %d, want 4 (capped)", h)
+	}
+
+	// A collapsed paste placeholder is short and must still stay one row.
+	m.ta.SetValue("[Pasted: 120 lines]")
+	if h := m.composerTextHeight(); h != 1 {
+		t.Fatalf("height for placeholder = %d, want 1", h)
+	}
+}
+
+// TestComposerFirstRowStaysVisibleOnSoftWrap guards the 1→2 growth: typing a
+// line long enough to soft-wrap must not scroll the first visual row out of the
+// textarea's internal viewport. Regression for the reported bug where the first
+// row disappeared and only the (empty) second row showed until the user pressed
+// Up.
+func TestComposerFirstRowStaysVisibleOnSoftWrap(t *testing.T) {
+	// Narrow terminal so a short line wraps quickly.
+	m := newModel(context.Background(), Config{Backend: staticBackend{}, Width: 30, Height: 20})
+	m.ready = true
+	m.layout()
+
+	// Type characters one at a time through the real Update path (which runs
+	// the textarea's viewport reposition) until the value soft-wraps to 2 rows.
+	const prefix = "abcdef" // must remain visible on row 0 after wrapping
+	for _, r := range prefix + strings.Repeat("x", 60) {
+		m = applyKey(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		if m.composerTextHeight() > 1 {
+			break
+		}
+	}
+
+	if m.composerTextHeight() < 2 {
+		t.Fatalf("expected composer to grow past 1 row, got %d", m.composerTextHeight())
+	}
+	// The textarea's actual height must track the visual line count exactly —
+	// never left stuck at the pre-grow cap and never too short (which would
+	// scroll earlier rows out of the internal viewport).
+	if m.ta.Height() != m.composerTextHeight() {
+		t.Fatalf("textarea height %d != composerTextHeight %d", m.ta.Height(), m.composerTextHeight())
+	}
+	// The textarea's FIRST rendered row must still contain the start of the
+	// line; if row 0 had scrolled out of the internal viewport (the bug), the
+	// first rendered row would be the wrapped continuation or blank.
+	view := m.ta.View()
+	firstRow := strings.SplitN(view, "\n", 2)[0]
+	if !strings.Contains(firstRow, prefix) {
+		t.Fatalf("first row scrolled out of view: %q not in first rendered row %q\nfull view:\n%s", prefix, firstRow, view)
+	}
+
+	// Typing a further short char that does not change the wrapped line count
+	// must not leave the textarea padded at the pre-grow cap.
+	before := m.composerTextHeight()
+	m = applyKey(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'z'}})
+	if m.composerTextHeight() == before && m.ta.Height() != before {
+		t.Fatalf("textarea stuck at height %d after non-growing keystroke (want %d)", m.ta.Height(), before)
+	}
+}
+
 // ── prune / lifecycle ────────────────────────────────────────────────────
 
 func TestPrunePastedBlocksRemovesMissingPlaceholders(t *testing.T) {
@@ -964,6 +1045,23 @@ func TestSniffImageMIME(t *testing.T) {
 	}
 	if _, ok := sniffImageMIME([]byte("not-an-image")); ok {
 		t.Fatal("expected non-image to fail sniff")
+	}
+}
+
+// TestTextareaPasteMsgRejectsNonPaste ensures the paste-message detector only
+// recognizes textarea.pasteMsg values, so ordinary key/window messages are not
+// misrouted into the paste/image-paste branch.
+func TestTextareaPasteMsgRejectsNonPaste(t *testing.T) {
+	cases := []tea.Msg{
+		nil,
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")},
+		tea.WindowSizeMsg{Width: 10, Height: 10},
+		"plain string",
+	}
+	for _, msg := range cases {
+		if _, isPaste := textareaPasteMsg(msg); isPaste {
+			t.Fatalf("textareaPasteMsg(%T) reported a paste, want false", msg)
+		}
 	}
 }
 

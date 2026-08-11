@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
-import { Send, Plus, Trash2, MessageSquare, ChevronRight, ChevronDown, Loader, Square, Copy, Check, Code, RotateCcw, Clock, Search, Users, Info, FileText, Globe, ListChecks, AppWindow, Brain, Paperclip, X } from 'lucide-react'
+import { Send, Plus, Trash2, MessageSquare, ChevronRight, ChevronDown, Loader, Square, Copy, Check, Code, RotateCcw, Clock, Search, Users, User, Info, FileText, Globe, ListChecks, AppWindow, Brain, Paperclip, X } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 
@@ -255,6 +255,10 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
   const [preChatProvider, setPreChatProvider] = useState('')
   const [preChatModel, setPreChatModel] = useState('')
   const [preChatProviders, setPreChatProviders] = useState<string[]>([])
+
+  // Memory scope: per-session, defaults to 'team' (shared with the team).
+  // Resets to 'team' when starting a new session so team is always the default.
+  const [memoryScope, setMemoryScope] = useState<'team' | 'personal'>('team')
 
   // Chat state
   const [messages, setMessages] = useState<ChatMsg[]>([])
@@ -538,7 +542,11 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
     setActiveAppId(null)
     setAppsPanelOpen(false)
     setHasSessionMemories(false)
+    // Reset memory scope to team only when the user explicitly switches sessions
+    // or starts a new blank chat. Preserve the current scope when the session is
+    // first created by the stream (so pre-chat personal selection is kept).
     if (userInitiated) {
+      setMemoryScope('team')
       setActiveWizardContext(null)
     }
     if (onSessionChange) onSessionChange(sessionId)
@@ -878,7 +886,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
             return { type: 'image', data: m.data, mimeType: m.mimeType } as ImageMessage
           }
           if (m.type === 'plan') {
-            return { type: 'plan', goal: m.goal || '', steps: m.steps ?? [] } as PlanMessage
+            return { type: 'plan', goal: m.goal || '', steps: m.steps ?? [], context: m.context, whatNotToDo: m.whatNotToDo, verification: m.verification } as PlanMessage
           }
           return m as unknown as ChatMsg
         })
@@ -1252,15 +1260,22 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
 
             // ── Plan events ──
             if (stEventType === 'plan_announced') {
-              const steps: PlanStepInfo[] = ((data.plan_steps as Array<{ name: string; description: string }>) || []).map(s => ({
+              const steps: PlanStepInfo[] = ((data.plan_steps as Array<{ name: string; description: string; details?: string; files?: Array<{ path: string; kind: string }>; verify?: string; parallel_group?: string }>) || []).map(s => ({
                 name: s.name,
                 description: s.description,
                 status: 'pending' as const,
+                details: s.details,
+                files: s.files,
+                verify: s.verify,
+                parallelGroup: s.parallel_group,
               }))
               setMessages((prev: ChatMsg[]) => [...prev, {
                 type: 'plan',
                 goal: (data.plan_goal as string) || '',
                 steps,
+                context: (data.plan_context as string) || undefined,
+                whatNotToDo: (data.plan_what_not_to_do as string) || undefined,
+                verification: (data.plan_verification as string) || undefined,
               } as PlanMessage])
               break
             }
@@ -1751,6 +1766,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
       pinnedToolGroups: options.pinnedToolGroups || activePinnedToolGroups || undefined,
       provider: preChatProvider || undefined,
       model: preChatModel || undefined,
+      memoryScope,
       onEvent: (eventType, data) => {
         switch (eventType) {
           case 'session':
@@ -2168,15 +2184,22 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
 
             // ── Plan events ──
             if (eventType === 'plan_announced') {
-              const steps: PlanStepInfo[] = ((data.plan_steps as Array<{ name: string; description: string }>) || []).map(s => ({
+              const steps: PlanStepInfo[] = ((data.plan_steps as Array<{ name: string; description: string; details?: string; files?: Array<{ path: string; kind: string }>; verify?: string; parallel_group?: string }>) || []).map(s => ({
                 name: s.name,
                 description: s.description,
                 status: 'pending' as const,
+                details: s.details,
+                files: s.files,
+                verify: s.verify,
+                parallelGroup: s.parallel_group,
               }))
               setMessages((prev: ChatMsg[]) => [...prev, {
                 type: 'plan',
                 goal: (data.plan_goal as string) || '',
                 steps,
+                context: (data.plan_context as string) || undefined,
+                whatNotToDo: (data.plan_what_not_to_do as string) || undefined,
+                verification: (data.plan_verification as string) || undefined,
               } as PlanMessage])
               break
             }
@@ -2467,7 +2490,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
     })
 
     abortRef.current = controller
-  }, [activeSessionId, activeWizardContext, activePinnedToolGroups, attachments, prepareAttachmentPayloads, clearAttachments, preChatProvider, preChatModel, preChatProviders, changeSession, startSessionMemoryPolling])
+  }, [activeSessionId, activeWizardContext, activePinnedToolGroups, attachments, prepareAttachmentPayloads, clearAttachments, preChatProvider, preChatModel, preChatProviders, changeSession, startSessionMemoryPolling, memoryScope])
 
   // Process deferred fleet plan prompt (set by fleet_plan_redirect SSE event)
   useEffect(() => {
@@ -2677,6 +2700,22 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
                 onUpdate={setModelStatus}
               />
             )}
+            {/* Per-session memory scope toggle — defaults to team */}
+            <button
+              type="button"
+              onClick={() => setMemoryScope(prev => prev === 'team' ? 'personal' : 'team')}
+              className={`flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors ${
+                memoryScope === 'team'
+                  ? 'border border-primary/30 bg-primary/10 text-primary hover:bg-primary/15'
+                  : 'border border-blue-500/30 bg-blue-500/10 text-blue-500 hover:bg-blue-500/15'
+              }`}
+              title={memoryScope === 'team'
+                ? 'Team mode: memories are shared with the team. Click to switch to personal for this session.'
+                : 'Personal mode: memories are private to you for this session. Click to switch back to team.'}
+            >
+              {memoryScope === 'team' ? <Users size={11} /> : <User size={11} />}
+              <span>{memoryScope === 'team' ? 'Team' : 'Personal'}</span>
+            </button>
           </div>
 
           {/* Right side — Todo, Files, Apps, Model, Usage */}

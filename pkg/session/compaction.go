@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 
@@ -34,10 +35,54 @@ type Compactor struct {
 	// DebugMode enables verbose logging.
 	DebugMode bool
 
+	// PlanFilePath, when set, is the path to the per-session PLAN.md. When a
+	// plan file exists at compaction time, a pointer is appended to the context
+	// summary instructing the model to re-read it to recover the exact plan
+	// phases and completion status. The Compactor stays domain-agnostic: it only
+	// knows a plan file path, never its contents.
+	PlanFilePath string
+
 	// Stats tracking
 	lastEstimatedTokens int
 	compactionCount     int
 	forceCompact        bool // one-shot flag: force compaction on next ShouldCompact call
+
+	// summaryCache memoizes the summary of an "old portion" so repeated model
+	// calls within a session do not re-run the (expensive) summarizer LLM on the
+	// same history. ADK rebuilds req.Contents from the full session before every
+	// model call, so without this the compactor would re-summarize on every step
+	// of a tool loop — the dominant cause of "slow/frozen after compaction".
+	summaryCacheKey string
+	summaryCacheVal string
+
+	// onCompaction, when set, is invoked after a compaction actually reduces the
+	// contents, with the before/after estimated token counts. Used to surface
+	// compaction to the UI (status + transcript notice + header refresh). Kept
+	// domain-agnostic: it reports only token counts, never content.
+	onCompaction func(beforeTokens, afterTokens int)
+
+	// persistCompacted, when set, is invoked after a successful CompactContents
+	// from BeforeModelCallback with the session id and the compacted contents.
+	// Code mode uses this to archive the full history and rewrite the active
+	// session so the next model step does not rebuild the pre-compaction
+	// transcript (the 8k→190k thrash). Optional; nil = in-memory-only compact.
+	persistCompacted func(ctx context.Context, sessionID string, compacted []*genai.Content) error
+}
+
+// SetOnCompaction registers a callback invoked after a real compaction, with the
+// before/after estimated token counts. Thread-safe. Pass nil to clear.
+func (c *Compactor) SetOnCompaction(fn func(beforeTokens, afterTokens int)) {
+	c.mu.Lock()
+	c.onCompaction = fn
+	c.mu.Unlock()
+}
+
+// SetPersistCompacted registers a persistence hook for BeforeModelCallback
+// compaction. Thread-safe. Pass nil to clear.
+func (c *Compactor) SetPersistCompacted(fn func(ctx context.Context, sessionID string, compacted []*genai.Content) error) {
+	c.mu.Lock()
+	c.persistCompacted = fn
+	c.mu.Unlock()
 }
 
 // NewCompactor creates a Compactor with the given context window size.
@@ -55,6 +100,14 @@ func (c *Compactor) SetContextWindow(contextWindow int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.ContextWindow = contextWindow
+}
+
+// SetPlanFilePath updates the per-session PLAN.md path (thread-safe). Empty
+// disables the plan pointer in compaction summaries.
+func (c *Compactor) SetPlanFilePath(path string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.PlanFilePath = path
 }
 
 // EstimateTokens estimates the token count for a slice of Contents.
@@ -217,6 +270,13 @@ func (c *Compactor) CompactContents(ctx context.Context, contents []*genai.Conte
 		summary = c.truncationSummary(oldContents)
 	}
 
+	// If a per-session plan file exists, append a durable pointer so the model
+	// re-reads PLAN.md to recover the exact phases and completion status that
+	// prose summarization cannot faithfully preserve.
+	if ptr := c.planFilePointer(); ptr != "" {
+		summary += "\n\n" + ptr
+	}
+
 	// Determine summary role for proper role alternation.
 	// The sequence will be: summary → [taskAnchor?] → recentContents[0]...
 	// We need to ensure no consecutive same-role messages.
@@ -258,16 +318,44 @@ func (c *Compactor) CompactContents(ctx context.Context, contents []*genai.Conte
 
 	c.mu.Lock()
 	c.compactionCount++
-	c.lastEstimatedTokens = EstimateTokens(result)
+	beforeTokens := EstimateTokens(contents)
+	afterTokens := EstimateTokens(result)
+	c.lastEstimatedTokens = afterTokens
+	hook := c.onCompaction
 	c.mu.Unlock()
 
 	if c.DebugMode {
 		slog.Debug("compacted messages", "component", "compactor",
-			"before", len(contents), "after", len(result), "estimatedTokens", EstimateTokens(result),
+			"before", len(contents), "after", len(result), "estimatedTokens", afterTokens,
 			"taskAnchor", taskAnchor != nil)
 	}
 
+	// Notify observers (UI) only when compaction actually reduced the estimate.
+	if hook != nil && afterTokens < beforeTokens {
+		hook(beforeTokens, afterTokens)
+	}
+
 	return result, nil
+}
+
+// planFilePointer returns a pointer instruction if a per-session plan file is
+// configured and present on disk, or "" otherwise. Thread-safe.
+func (c *Compactor) planFilePointer() string {
+	c.mu.Lock()
+	path := c.PlanFilePath
+	c.mu.Unlock()
+	if path == "" {
+		return ""
+	}
+	if _, err := os.Stat(path); err != nil {
+		return ""
+	}
+	return fmt.Sprintf(
+		"[ACTIVE EXECUTION PLAN] An execution plan with per-phase completion status is persisted at %s. "+
+			"Re-read it with read_file to recover the exact phases and where you are before continuing. "+
+			"Do not reconstruct the plan from this summary.",
+		path,
+	)
 }
 
 // findLastUserTextInstruction scans backward through contents to find the most
@@ -360,6 +448,19 @@ func (c *Compactor) summarize(ctx context.Context, contents []*genai.Content) (s
 		return c.truncationSummary(contents), nil
 	}
 
+	// Reuse a cached summary when the old portion is unchanged. ADK rebuilds the
+	// request contents from the full session before every model call, so the
+	// same "old portion" is summarized repeatedly within a tool loop; caching
+	// avoids re-running the summarizer LLM each step (the main "slow" symptom).
+	fp := summaryFingerprint(contents)
+	c.mu.Lock()
+	if fp != "" && fp == c.summaryCacheKey && c.summaryCacheVal != "" {
+		cached := c.summaryCacheVal
+		c.mu.Unlock()
+		return cached, nil
+	}
+	c.mu.Unlock()
+
 	// Build a text representation of the old conversation.
 	// Collapses repetitive consecutive tool calls (e.g., 55× read_file)
 	// into a single counted entry to reduce noise and let the summarizer
@@ -433,7 +534,49 @@ func (c *Compactor) summarize(ctx context.Context, contents []*genai.Content) (s
 		prompt = prompt[:30000] + "\n\n[... truncated for summarization ...]"
 	}
 
-	return c.LLM(ctx, prompt)
+	out, err := c.LLM(ctx, prompt)
+	if err != nil {
+		return "", err
+	}
+	if fp != "" {
+		c.mu.Lock()
+		c.summaryCacheKey = fp
+		c.summaryCacheVal = out
+		c.mu.Unlock()
+	}
+	return out, nil
+}
+
+// summaryFingerprint returns a cheap, stable key for the "old portion" of a
+// conversation so identical re-compactions reuse the cached summary instead of
+// re-invoking the summarizer LLM. It combines the message count, estimated
+// tokens, and a small sample of the first/last text so unrelated histories do
+// not collide.
+func summaryFingerprint(contents []*genai.Content) string {
+	if len(contents) == 0 {
+		return ""
+	}
+	var firstText, lastText string
+	for _, c := range contents {
+		if c == nil {
+			continue
+		}
+		for _, p := range c.Parts {
+			if p != nil && p.Text != "" {
+				if firstText == "" {
+					firstText = p.Text
+				}
+				lastText = p.Text
+			}
+		}
+	}
+	sample := func(s string) string {
+		if len(s) > 64 {
+			return s[:64]
+		}
+		return s
+	}
+	return fmt.Sprintf("%d:%d:%s:%s", len(contents), EstimateTokens(contents), sample(firstText), sample(lastText))
 }
 
 // truncationSummary creates a basic summary without LLM, extracting key info.
@@ -482,7 +625,10 @@ func truncateText(s string, maxLen int) string {
 }
 
 // BeforeModelCallback returns a callback suitable for llmagent.Config.BeforeModelCallbacks.
-// It checks token usage and compacts the request contents if needed.
+// It checks token usage and compacts the request contents if needed. When a
+// PersistCompacted hook is set, the compacted contents are also written back to
+// the session store so the next model step rebuilds from the compact history
+// (not the full pre-compaction transcript).
 func (c *Compactor) BeforeModelCallback() llmagent.BeforeModelCallback {
 	return func(ctx adkagent.CallbackContext, req *model.LLMRequest) (*model.LLMResponse, error) {
 		if req == nil || len(req.Contents) == 0 {
@@ -504,6 +650,19 @@ func (c *Compactor) BeforeModelCallback() llmagent.BeforeModelCallback {
 		if err != nil {
 			slog.Debug("compaction failed", "component", "compactor", "error", err)
 			return nil, nil // proceed with original contents
+		}
+
+		// Persist so the next model step does not rebuild the full history.
+		c.mu.Lock()
+		persist := c.persistCompacted
+		c.mu.Unlock()
+		if persist != nil && ctx != nil {
+			if sid := ctx.SessionID(); sid != "" {
+				if pErr := persist(ctx, sid, compacted); pErr != nil {
+					slog.Warn("failed to persist compaction into session",
+						"component", "compactor", "session_id", sid, "error", pErr)
+				}
+			}
 		}
 
 		// Replace the request contents in place

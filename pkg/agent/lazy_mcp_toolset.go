@@ -3,9 +3,12 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/SAP/astonish/pkg/cache"
 	"github.com/SAP/astonish/pkg/config"
@@ -20,6 +23,16 @@ import (
 	"google.golang.org/genai"
 )
 
+const (
+	// maxMCPRetries is the maximum number of retry attempts for transient MCP
+	// server failures before giving up permanently.
+	maxMCPRetries = 3
+
+	// mcpRetryBackoff is the minimum time between retry attempts to avoid
+	// hammering a server that may be recovering.
+	mcpRetryBackoff = 2 * time.Second
+)
+
 // sessionMCPState holds MCP server state for a single session.
 // In sandbox mode, each session gets its own container/pod and thus its own
 // MCP server process. This struct tracks the per-session transport and tools.
@@ -28,6 +41,39 @@ type sessionMCPState struct {
 	liveTools map[string]tool.Tool
 	startErr  error
 	started   bool
+}
+
+// isTransientMCPError returns true if the error is likely transient and worth
+// retrying. Transient errors include context cancellation, timeouts, and
+// network-level failures that may resolve on their own.
+func isTransientMCPError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Check standard context errors (works through wrapping via errors.Is).
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+
+	// Check for network-level errors that are commonly transient.
+	// These may come from the MCP SDK transport layer wrapped in fmt.Errorf.
+	msg := strings.ToLower(err.Error())
+	transientPatterns := []string{
+		"connection refused",
+		"connection reset",
+		"broken pipe",
+		"eof",
+		"timeout",
+		"i/o timeout",
+	}
+	for _, pattern := range transientPatterns {
+		if strings.Contains(msg, pattern) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // LazyMCPToolset presents cached MCP tools without connecting to the server.
@@ -45,6 +91,13 @@ type sessionMCPState struct {
 // process (running in its own container/pod). The per-session state is stored in
 // the perSession map. In host mode, a single global state is used (the host
 // runs one MCP server process shared across all sessions).
+//
+// Retry resilience (host mode): transient startup failures (context canceled,
+// timeouts, connection refused, etc.) are retried up to maxMCPRetries times
+// with mcpRetryBackoff between attempts. Permanent errors (config not found,
+// server disabled, credential resolution failures) are never retried.
+// In sandbox mode, callers use CleanupSession to remove per-session state,
+// which allows re-initialization on the next tool call.
 type LazyMCPToolset struct {
 	serverName string
 	serverCfg  config.MCPServerConfig
@@ -69,11 +122,13 @@ type LazyMCPToolset struct {
 	credentialResolver credentials.CredentialResolver
 
 	// --- Host mode state (single global MCP server) ---
-	mu        sync.Mutex
-	manager   *mcp.Manager         // host-mode MCP manager
-	liveTools map[string]tool.Tool // host-mode: name -> real MCP tool
-	startErr  error                // host-mode: cached error if server failed to start
-	started   bool                 // host-mode: whether the server was started
+	mu          sync.Mutex
+	manager     *mcp.Manager         // host-mode MCP manager
+	liveTools   map[string]tool.Tool // host-mode: name -> real MCP tool
+	startErr    error                // host-mode: cached error if server failed to start
+	started     bool                 // host-mode: whether the server was started
+	retryCount  int                  // host-mode: number of retry attempts after transient failures
+	lastAttempt time.Time            // host-mode: when the last startup attempt was made
 
 	// --- Sandbox mode state (per-session MCP servers) ---
 	// perSession is keyed by session ID and holds the MCP state for each session.
@@ -187,6 +242,11 @@ func (l *LazyMCPToolset) Tools(_ adkagent.ReadonlyContext) ([]tool.Tool, error) 
 //
 // In sandbox mode, each session gets its own MCP server process inside its
 // own container. In host mode, a single global process is used.
+//
+// Host-mode retry: if the previous startup failed with a transient error
+// (context canceled, timeout, connection refused, etc.), the next call will
+// automatically retry up to maxMCPRetries times with mcpRetryBackoff between
+// attempts. Permanent errors are returned immediately without retry.
 func (l *LazyMCPToolset) ensureServerStarted(ctx context.Context, sessionID string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -198,7 +258,34 @@ func (l *LazyMCPToolset) ensureServerStarted(ctx context.Context, sessionID stri
 
 	// Host mode: global state
 	if l.started {
-		return l.startErr
+		// Success path: server is running fine.
+		if l.startErr == nil {
+			return nil
+		}
+
+		// Failure path: check if the error is transient and we can retry.
+		if isTransientMCPError(l.startErr) && l.retryCount < maxMCPRetries && time.Since(l.lastAttempt) >= mcpRetryBackoff {
+			slog.Info("retrying MCP server connection (transient failure)",
+				"component", "lazy-mcp", "server", l.serverName,
+				"attempt", l.retryCount+1, "maxRetries", maxMCPRetries,
+				"previousError", l.startErr)
+
+			// Clean up old manager if it exists.
+			if l.manager != nil {
+				l.manager.Cleanup()
+				l.manager = nil
+			}
+
+			// Reset state so startOnHost can run again.
+			l.started = false
+			l.startErr = nil
+			l.liveTools = nil
+			l.retryCount++
+			// Fall through to startOnHost below.
+		} else {
+			// Permanent error, max retries exhausted, or backoff not elapsed.
+			return l.startErr
+		}
 	}
 
 	if l.debugMode {
@@ -233,6 +320,8 @@ func (l *LazyMCPToolset) ensureServerStartedSandbox(ctx context.Context, session
 // Uses the config already resolved from the DB at factory time (not the filesystem).
 // Caller must hold l.mu.
 func (l *LazyMCPToolset) startOnHost(ctx context.Context) error {
+	l.lastAttempt = time.Now()
+
 	serverCfg, err := l.resolvedServerConfig(ctx)
 	if err != nil {
 		l.startErr = fmt.Errorf("failed to resolve credentials for MCP server '%s': %w", l.serverName, err)
@@ -277,6 +366,7 @@ func (l *LazyMCPToolset) startOnHost(ctx context.Context) error {
 
 	l.manager = mgr
 	l.started = true
+	l.retryCount = 0 // Reset retry count on success for future transient failures.
 
 	if l.debugMode {
 		slog.Debug("MCP server started (host)", "component", "lazy-mcp", "server", l.serverName, "tools", len(l.liveTools))

@@ -131,6 +131,44 @@ astonish chat -p anthropic -m claude-4  # Specific provider/model
 astonish chat --resume                 # Resume last session
 ```
 
+### Local code mode
+
+`astonish code` turns the binary into a local coding tool — like Claude Code, OpenCode, or Grok CLI. It runs the agent loop **in-process** and executes its built-in tools directly on your machine, in the current directory. No daemon, no server, and no login required.
+
+```bash
+astonish code                          # Start coding in the current directory
+astonish code -m openai:gpt-4o         # Pin a provider/model
+astonish code -C ./my-project          # Operate in a specific directory
+astonish code --auto-approve           # Bypass tool & folder authorization prompts (a.k.a. --yolo)
+```
+
+Tools run with your own permissions (no sandbox). Safety comes from two authorization prompts: **file-modifying / command-running tools ask before executing** (read-only inspection runs freely), and **access to paths outside the project directory asks first**. Each prompt offers **Allow**, **Always Allow** (for the rest of the turn/session), or **Deny** — use ↑/↓ and Enter, with the cursor defaulting to **Allow**. Use `--auto-approve` / `--yolo` to bypass both prompts.
+
+**Three operating modes** — cycle with `shift+tab`:
+
+| Mode | Border | Behavior |
+|------|--------|----------|
+| **Normal** | gray | Full tool access with authorization prompts |
+| **Plan** | orange | Read-only investigation; produces structured plans without changing files |
+| **Graph Plan** | cyan | Codegraph-driven planning — 4-phase flow using a pre-computed knowledge graph |
+
+**Graph-Optimized Plan mode** is the standout efficiency feature. It uses [codegraph](https://github.com/colbymchenry/codegraph) — a pre-computed knowledge graph of your repository (symbols, call edges, dependencies, blast radius) — to drive a phased planning flow:
+
+1. **GRAPH** — Query the knowledge graph. Most structural questions resolve in 1–4 calls.
+2. **READ** — Read exactly the files the graph identified.
+3. **GAP** — Fill genuine gaps with grep/find/code_references (only if needed).
+4. **PLAN** — Record the finalized, dependency-first plan.
+
+The result: plans that are faster (fewer tool calls), cheaper (lower token usage), and more complete (full blast-radius coverage) than free-form investigation. Plans persist to a session `PLAN.md` that survives context compaction.
+
+Code mode opens even if you haven't picked a model yet. Type `/model` inside the app to choose a provider and model; the selection is saved to your Astonish config (`~/.config/astonish/config.yaml`) and reused next time. If you have no providers configured, type `/provider` to add one (name, type, and API key) — code mode manages providers entirely in the config file and never needs a database.
+
+Code mode follows the [AGENTS.md](https://agents.md) convention: on startup it loads `AGENTS.md` (or `CLAUDE.md` as a fallback) from your project — walking up from the working directory to the repo root, nearest file winning — plus a global `~/.config/astonish/AGENTS.md`, and feeds them to the agent as project guidance.
+
+Your conversations are saved to disk and kept **separate per project directory** (and separate from Studio chat sessions). Each `astonish code` run starts a fresh session, but your earlier conversations in that directory are never lost — type `/sessions` to browse and resume a previous session. Sessions started in a different directory won't appear, so each project keeps its own history.
+
+Additional code-mode features: `/rollback` reverts both the conversation and file changes to any earlier point. When logged in to a platform, press `Ctrl+\` to switch between local code (orange accent) and platform chat (blue accent) within the same TUI.
+
 ---
 
 ## Generative UI (Apps)

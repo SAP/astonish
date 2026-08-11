@@ -38,6 +38,9 @@ func (id *AgentIdentity) IsConfigured() bool {
 //   - Tier 3 (Per-Turn Dynamic): Channel hints, scheduler hints, session context,
 //     execution plans, and auto-retrieved knowledge. These are appended at the end
 //     of the system prompt so the static prefix remains cacheable by providers.
+//
+// For code mode (astonish code), use CodeSystemPromptBuilder which embeds this
+// struct and installs a BuildOverride to emit code-specific sections.
 type SystemPromptBuilder struct {
 	Tools                 []tool.Tool
 	Toolsets              []tool.Toolset
@@ -63,6 +66,11 @@ type SystemPromptBuilder struct {
 	MCPAccessFilter       func(serverName string) bool // Per-turn filter for MCP groups in catalog (nil = allow all)
 	SandboxEnabled        bool                         // Whether a sandbox backend is configured
 	SandboxWorkspaceDir   string                       // Persistent workspace dir inside sandbox (e.g. "/sandbox" or "/root")
+
+	// BuildOverride, when non-nil, is called by Build() instead of the default
+	// builder logic. Installed by CodeSystemPromptBuilder to emit code-mode
+	// sections while keeping all per-turn field mutations on this base struct.
+	BuildOverride func(b *SystemPromptBuilder) string
 }
 
 // Clone creates a shallow copy of the SystemPromptBuilder suitable for
@@ -93,6 +101,26 @@ type PromptOverrides struct {
 	// remain available across all turns of a multi-turn guided conversation.
 	PinnedToolGroups []string
 
+	// PlanMode, when true, enables a hard runtime gate for the turn: mutating
+	// tools (anything not in SafeTools, plus delegate_tasks) are refused at
+	// execution time and the model is reminded it is in plan mode. This is a
+	// stronger guarantee than SessionContext prose alone, which the model can
+	// ignore. Callers that set PlanMode should also inject the plan-mode
+	// SessionContext so the model produces a plan rather than attempting work.
+	PlanMode bool
+
+	// GraphPlanMode, when true, enables the phased Graph-Optimized Plan runtime
+	// gate for the turn (code mode only): a per-session phase state machine
+	// (GraphPlanState) determines the tool allow-list, advanced by the gplan_*
+	// transition tools. Mutually exclusive with PlanMode. Callers that set this
+	// should also inject GraphPlanModeSystemContext as SessionContext.
+	GraphPlanMode bool
+
+	// AskMode, when true, enables the ask-mode gate: only read-only tools are
+	// allowed; the model is instructed to research and explain rather than plan
+	// or execute. Mutually exclusive with PlanMode and GraphPlanMode.
+	AskMode bool
+
 	// Web search/extract are resolved per request from the platform→team cascade
 	// so a singleton ChatAgent re-inited without tenant context still advertises
 	// the platform-selected tools for every user. Nil pointers mean "leave builder as-is".
@@ -121,7 +149,13 @@ func PromptOverridesFromContext(ctx context.Context) *PromptOverrides {
 // attention budget for smaller models. Detailed guidance for complex
 // capabilities (browser, credentials, scheduling, etc.) is stored in
 // memory/guidance/*.md and delivered via auto-knowledge retrieval.
+//
+// When BuildOverride is set (installed by CodeSystemPromptBuilder), it is
+// called instead and this method returns its result directly.
 func (b *SystemPromptBuilder) Build() string {
+	if b.BuildOverride != nil {
+		return b.BuildOverride(b)
+	}
 	var sb strings.Builder
 
 	// ── Tier 1: Static Core ──────────────────────────────────────
@@ -171,6 +205,7 @@ func (b *SystemPromptBuilder) Build() string {
 	sb.WriteString("- If a tool fails, try a different approach before giving up.\n")
 	sb.WriteString("- Prefer read_file/edit_file/write_file over shell sed/awk/echo/cat for file operations.\n")
 	sb.WriteString("- For repository navigation and source inspection, use dedicated tools: file_tree (structure), find_files (glob/discovery), grep_search (text/regex search), read_file (contents). Do NOT use shell_command with ls/find/grep/rg/cat/head/tail just to browse or search files. Reserve shell_command for executing project behavior: git, builds, tests, linters, package managers, CLIs, servers, and scripts.\n")
+	sb.WriteString("- Do NOT re-read a file already read this session unless it changed. If you need multiple regions of a file, batch them in a single `read_file` call with a wide enough range, or read the whole file once. Do not read the same file in many small sequential chunks.\n")
 	sb.WriteString("- http_request CANNOT reach private/RFC1918 IPs (192.168.x.x, 10.x.x.x, 172.16-31.x.x) or localhost. Use curl via shell_command for private network endpoints.\n")
 	sb.WriteString("- For multi-step tasks, execute sequentially, report progress, and search memory first for prior solutions.\n")
 	sb.WriteString("- After completing a task where you overcame obstacles or discovered non-obvious solutions, save the knowledge using memory_save. Search memory_search(\"memory usage\") first to retrieve the full saving guidelines.\n")
@@ -250,9 +285,6 @@ func (b *SystemPromptBuilder) Build() string {
 	capsLine := b.buildCapabilitiesLine()
 	sb.WriteString(fmt.Sprintf("You have tools for: %s.\n", capsLine))
 	guidanceCaps := []string{"browser automation", "credential management", "job scheduling", "task delegation", "process management", "web access patterns", "memory usage"}
-	if b.hasCodeIntelTools() {
-		guidanceCaps = []string{"browser automation", "code intelligence", "credential management", "job scheduling", "task delegation", "process management", "web access patterns", "memory usage"}
-	}
 	sb.WriteString(fmt.Sprintf("Step-by-step guidance for complex capabilities (%s) is stored in memory. ", strings.Join(guidanceCaps, ", ")))
 	sb.WriteString("Use `memory_search` with the capability name (e.g., \"browser automation\", \"credential management\", ")
 	sb.WriteString("\"job scheduling\") to retrieve instructions before using a complex feature for the first time in a conversation.\n")
@@ -294,13 +326,14 @@ func (b *SystemPromptBuilder) Build() string {
 
 		sb.WriteString("**Planning strategy:**\n")
 		sb.WriteString("1. For multi-step tasks, call `announce_plan` first to show the user your approach as a visible checklist.\n")
-		sb.WriteString("2. Decompose complex goals into independent, parallelizable sub-tasks (each with a clear deliverable).\n")
-		sb.WriteString("3. Keep each sub-task focused: one research question, one file operation, one API interaction.\n")
-		sb.WriteString("4. If tasks have dependencies, run them in separate `delegate_tasks` calls (first batch completes before the second starts).\n")
-		sb.WriteString("5. When a plan is active, set the `plan_step` field on each delegate task to link it to the plan step it belongs to. Multiple tasks can share the same `plan_step` — the step completes only when all its tasks finish.\n")
-		sb.WriteString("6. After all sub-tasks complete, **synthesize** the results yourself — don't just concatenate sub-agent output.\n")
-		sb.WriteString("7. For research, analysis, or comparison tasks, save the final deliverable as a markdown file with `write_file`. Present a summary inline.\n")
-		sb.WriteString("8. Plan steps are updated automatically as tools complete — do NOT try to update them manually.\n\n")
+		sb.WriteString("2. Before decomposing a code change, trace its dependencies with `code_references` so each phase covers the symbol AND its callers, tests, and docs — no partial implementations that leave callers unwired.\n")
+		sb.WriteString("3. Decompose complex goals into independent, parallelizable sub-tasks (each with a clear deliverable).\n")
+		sb.WriteString("4. Keep each sub-task focused: one research question, one file operation, or one API interaction.\n")
+		sb.WriteString("5. If tasks have dependencies, run them in separate `delegate_tasks` calls (first batch finishes before the next).\n")
+		sb.WriteString("6. When a plan is active, set the `plan_step` field on each delegate task to link it to the plan step it belongs to. Multiple tasks can share the same `plan_step` — the step completes only when all its tasks finish.\n")
+		sb.WriteString("7. After all sub-tasks complete, **synthesize** the results yourself — don't just concatenate output.\n")
+		sb.WriteString("8. For research or comparison tasks, save the final deliverable as a markdown file with `write_file`; end code work with a verification phase (build/test/lint) so nothing ships unverified.\n")
+		sb.WriteString("9. Delegated plan steps progress automatically from sub-task events — do NOT call `update_plan` for those. For phases you execute yourself on the main thread, call `update_plan` (status running → complete/failed) as you go so the checklist and PLAN.md stay accurate.\n\n")
 
 		sb.WriteString("**Available tool groups (for parallel delegation only):**\n")
 		ctx := &minimalReadonlyContext{Context: context.Background()}

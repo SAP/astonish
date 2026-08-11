@@ -14,13 +14,22 @@ type Info struct {
 	SessionID string
 	Provider  string
 	Model     string
-	Mode      string // "platform"
+	Mode      string // "platform" or "code"
 	ServerURL string
 	Org       string
 	Team      string
 	User      string
+	// WorkingDir is the host directory tools operate against. Only set in
+	// code mode (the local, unsandboxed coding tool); empty in platform mode.
+	WorkingDir string
 	// Usage is cumulative token usage known when opening/resuming a session.
 	Usage     *events.Usage
+	// ContextTokens is the current context-window occupancy known when
+	// opening/resuming a session (0 if unknown). Unlike Usage (which is
+	// cumulative across the whole session), this is "how full is the context
+	// right now" and drives the header's Context figure immediately on resume,
+	// before the first new turn reports usage.
+	ContextTokens int64
 	IsResumed bool
 	// AutoApprove reflects the session tool-approval mode for footer chrome.
 	AutoApprove bool
@@ -69,6 +78,21 @@ type TurnOptions struct {
 	// SystemContext is a per-turn hidden instruction sent to Studio chat. It is
 	// not persisted as a visible user message.
 	SystemContext string
+	// PlanMode, when true, requests the runtime plan-mode gate for this turn:
+	// mutating tools and delegate_tasks are refused server-side. Callers should
+	// also set SystemContext to the plan-mode prompt so the model produces a plan.
+	PlanMode bool
+	// GraphPlanMode, when true, requests the phased Graph-Optimized Plan gate
+	// for this turn (code mode only): a per-session phase state machine
+	// determines the tool allow-list, driven by the gplan_* transition tools.
+	// Mutually exclusive with PlanMode. Callers should also set SystemContext to
+	// the graph-plan prompt.
+	GraphPlanMode bool
+	// AskMode, when true, requests the runtime ask-mode gate for this turn:
+	// mutating tools, delegate_tasks, and announce_plan are refused server-side,
+	// and the model is instructed to answer questions without planning or
+	// executing. Mutually exclusive with PlanMode and GraphPlanMode.
+	AskMode bool
 	// Attachments are optional multimodal file/image payloads for this turn.
 	Attachments []Attachment
 }
@@ -78,6 +102,147 @@ type TurnOptions struct {
 type NetworkGrantBackend interface {
 	ApproveNetworkGrant(ctx context.Context, sessionID string, denial events.NetworkDenial, broader bool, sandboxName string) error
 	DenyNetworkGrant(ctx context.Context, sessionID string, denial events.NetworkDenial, sandboxName string) error
+}
+
+// ProviderInstance is one configured provider entry shown in the /provider
+// manager overlay.
+type ProviderInstance struct {
+	Name string // instance name (config key)
+	Type string // provider type id (e.g. "openai")
+}
+
+// ProviderField describes one input a provider type requires when being added
+// through the /provider overlay.
+type ProviderField struct {
+	Key      string // config key (e.g. "api_key", "base_url")
+	Label    string // human label shown in the form
+	Secret   bool   // render the input masked
+	Default  string // pre-filled default value
+	Optional bool   // may be left blank
+}
+
+// ProviderTypeInfo is one selectable provider type in the /provider overlay.
+type ProviderTypeInfo struct {
+	ID          string
+	DisplayName string
+	Fields      []ProviderField
+}
+
+// ProviderAdminBackend is an optional capability implemented by backends that
+// can manage provider configuration locally (code mode). It is intentionally
+// separate from Backend so the platform backend — which manages providers in
+// its database — is not required to implement it. The /provider overlay is
+// only offered when the active backend implements this interface.
+//
+// Implementations persist to the local config file only; they must not touch
+// any platform database.
+type ProviderAdminBackend interface {
+	// ListProviderInstances returns the currently configured provider instances.
+	ListProviderInstances(ctx context.Context) ([]ProviderInstance, error)
+	// ProviderTypes returns the catalog of provider types that can be added,
+	// each with the input fields it requires.
+	ProviderTypes() []ProviderTypeInfo
+	// AddProvider adds (or updates) a provider instance from the given fields
+	// and persists it to the config file. On success the provider is usable
+	// immediately in the running process.
+	AddProvider(ctx context.Context, name, typeID string, fields map[string]string) error
+	// RemoveProvider deletes a provider instance and persists the change.
+	RemoveProvider(ctx context.Context, name string) error
+}
+
+// WebSearchProvider describes one available web search provider in the /websearch picker.
+type WebSearchProvider struct {
+	ID          string // standard server ID (e.g. "tavily", "brave-search", "perplexity")
+	DisplayName string // human-friendly name
+	Description string // short explanation
+	Kind        string // "mcp" (needs API key) or "model" (uses existing provider)
+	Installed   bool   // credentials present / configured
+	Active      bool   // currently selected as general.web_search_tool
+	RequiresKey bool   // true if the provider needs an API key
+}
+
+// PerplexityOption is one provider instance that exposes Perplexity/Sonar models.
+type PerplexityOption struct {
+	Provider string   // provider instance name (e.g. "sap_ai_core")
+	Models   []string // filtered Sonar/Perplexity model IDs
+}
+
+// WebSearchAdminBackend is an optional capability implemented by backends that
+// can manage web search configuration locally (code mode). It is intentionally
+// separate from Backend so the platform backend — which manages web search in
+// its database — is not required to implement it. The /websearch overlay is
+// only offered when the active backend implements this interface.
+//
+// Implementations persist to the local config file only; they must not touch
+// any platform database.
+type WebSearchAdminBackend interface {
+	// ListWebSearchProviders returns the available standard web search servers
+	// with their install and active status.
+	ListWebSearchProviders(ctx context.Context) ([]WebSearchProvider, error)
+	// GetActiveWebSearch returns the currently configured web search tool ref
+	// (e.g. "tavily:tavily_search") or empty string if none.
+	GetActiveWebSearch(ctx context.Context) (string, error)
+	// InstallWebSearch installs a key-based web search server (stores the key
+	// and sets general.web_search_tool). Requires /new for the tool to be live.
+	InstallWebSearch(ctx context.Context, serverID, apiKey string) error
+	// ConfigurePerplexityWebSearch sets up model-backed Perplexity/Sonar web
+	// search using an existing provider instance and model.
+	ConfigurePerplexityWebSearch(ctx context.Context, providerName, modelName string) error
+	// ListPerplexityOptions returns configured provider instances that expose
+	// Perplexity/Sonar models suitable for web search.
+	ListPerplexityOptions(ctx context.Context) ([]PerplexityOption, error)
+	// ClearWebSearch removes the active web search configuration.
+	ClearWebSearch(ctx context.Context) error
+}
+
+// RollbackPoint is one selectable "revert to here" target in the /rollback
+// picker. Each point corresponds to a user message (turn) in the session.
+type RollbackPoint struct {
+	// ID uniquely identifies the point to RollbackTo (opaque to the TUI).
+	ID string
+	// Label is a short, single-line preview of the user message at this turn.
+	Label string
+	// Timestamp is a human-readable time the message was sent (may be empty).
+	Timestamp string
+	// FileCount is how many files would be restored if rolling back to here.
+	FileCount int
+	// TurnNumber is the 1-based ordinal of the user message for display.
+	TurnNumber int
+}
+
+// RollbackBackend is an optional capability implemented by backends that can
+// revert both the conversation and the working-directory file changes to an
+// earlier user message. It is intentionally separate from Backend so the
+// platform/Studio backend — which has no host filesystem to snapshot — is not
+// required to implement it. The /rollback command is only offered when the
+// active backend implements this interface (code mode).
+type RollbackBackend interface {
+	// ListRollbackPoints returns the selectable revert targets for the active
+	// session, oldest first. Empty when there is nothing to roll back to.
+	ListRollbackPoints(ctx context.Context) ([]RollbackPoint, error)
+	// RollbackTo reverts the conversation and file changes to the given point,
+	// returning the rebuilt history for the truncated session.
+	RollbackTo(ctx context.Context, pointID string) ([]HistoryEntry, error)
+}
+
+// CompactionBackend is an optional capability: a backend that can compact the
+// active session's context on demand (the `/compact` command). It is only
+// offered when the active backend implements this interface (code mode).
+type CompactionBackend interface {
+	// Compact runs context compaction for the active session immediately and
+	// returns a human-readable status line (before/after tokens, or why nothing
+	// was compacted). It must not defer work to the next user message.
+	Compact(ctx context.Context) (status string, err error)
+}
+
+// PlanBackend is an optional capability implemented by backends that persist an
+// announced plan to a PLAN.md sidecar (code mode only). It is intentionally
+// separate from Backend so the platform backend is not required to implement it.
+type PlanBackend interface {
+	// ActivePlanFilePath returns the absolute path of the active session's
+	// PLAN.md sidecar, or "" if plan persistence is not configured or no
+	// session is active yet.
+	ActivePlanFilePath() string
 }
 
 // Backend drives one interactive chat session against the platform.
@@ -131,6 +296,13 @@ type Backend interface {
 
 	// ReadArtifactContent loads generated file content for the artifact viewer.
 	ReadArtifactContent(ctx context.Context, sessionID, path string) (ArtifactContent, error)
+
+	// RespondSubAgentAuth sends the user's authorization decision back to a
+	// blocked sub-agent. Returns true if the current approval overlay was for
+	// a sub-agent (and the response was delivered). When true, the caller
+	// should NOT call RunTurn — the sub-agent resumes automatically.
+	// Backends that don't support sub-agent auth always return false.
+	RespondSubAgentAuth(choice string) bool
 
 	// Close releases resources (sandbox cleanup, HTTP clients, etc.).
 	Close() error

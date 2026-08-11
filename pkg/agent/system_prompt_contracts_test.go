@@ -15,8 +15,11 @@ var updateGolden = flag.Bool("update", false, "update golden files")
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 // maximalBuilder returns a SystemPromptBuilder with every feature enabled,
-// producing the most complete prompt possible. This is the configuration
+// producing the most complete chat-mode prompt possible. This is the configuration
 // used for golden file comparison and maximal contract assertions.
+// Note: code-mode fields (ProjectContext, MCPFirstClass, PlanFilePersistence,
+// EnforceAuthorization) are owned by CodeSystemPromptBuilder and are not
+// present here. See maximalCodeBuilder() in system_prompt_contracts_code_test.go.
 func maximalBuilder() *SystemPromptBuilder {
 	return &SystemPromptBuilder{
 		WorkspaceDir:          "/home/user/project",
@@ -62,7 +65,7 @@ func maximalBuilder() *SystemPromptBuilder {
 			"save_credential", "schedule_job", "process_read",
 			"http_request", "delegate_tasks", "email_list",
 			"browser_navigate", "browser_request_human",
-			"search_tools", "search_flows", "memory_search", "repo_map",
+			"search_tools", "search_flows", "memory_search",
 		),
 	}
 }
@@ -316,6 +319,9 @@ func TestSystemPromptContracts_Environment(t *testing.T) {
 	assertContains(t, prompt, "Working directory: /home/user/project", "workspace dir in environment")
 	assertContains(t, prompt, "Timezone: America/New_York", "timezone in environment")
 	assertContains(t, prompt, "OS:", "OS info in environment")
+	// PLAN.md persistence guidance belongs to code mode only — the Environment
+	// section must not contain the "Execution plan (PLAN.md):" block.
+	assertNotContains(t, prompt, "Execution plan (PLAN.md):", "PLAN.md execution plan guidance must not appear in chat-mode Environment section (code mode only)")
 }
 
 func TestSystemPromptContracts_Capabilities(t *testing.T) {
@@ -335,13 +341,15 @@ func TestSystemPromptContracts_Capabilities(t *testing.T) {
 		"HTTP API requests",
 		"task delegation",
 		"flow execution",
-		"code intelligence",
 		"persistent memory",
 		"email",
 		"fleet agents",
 	} {
 		assertContains(t, prompt, cap, fmt.Sprintf("capability %q listed", cap))
 	}
+
+	// "code intelligence" is a code-mode-only capability — not in base builder
+	assertNotContains(t, prompt, "code intelligence", "code intelligence must not appear in chat-mode capabilities (code mode only)")
 
 	// Named tool references in capabilities
 	assertContains(t, prompt, "tavily-search", "web search tool name in capabilities")
@@ -503,11 +511,11 @@ func TestSystemPromptContracts_Conditional_BrowserAvailable(t *testing.T) {
 
 func TestSystemPromptBuilder_MinimalSize(t *testing.T) {
 	prompt := minimalBuilder().Build()
-	// Minimal prompt includes always-present sections: Tool Use, Knowledge Context,
-	// Environment, Capabilities, and Visual Apps (Generative UI). Current: ~4416 bytes.
-	// Budget ceiling ~15% above current size.
-	if len(prompt) > 5100 {
-		t.Errorf("minimal prompt too large: %d bytes (limit 5100)", len(prompt))
+	// Minimal prompt includes always-present sections: Tool Use (incl.
+	// structural-navigation guidance), Knowledge Context, Environment,
+	// Capabilities, and Visual Apps (Generative UI). Budget ~15% above current.
+	if len(prompt) > 5700 {
+		t.Errorf("minimal prompt too large: %d bytes (limit 5700)", len(prompt))
 	}
 	if len(prompt) < 2000 {
 		t.Errorf("minimal prompt suspiciously small: %d bytes (expected > 2000)", len(prompt))
@@ -517,13 +525,12 @@ func TestSystemPromptBuilder_MinimalSize(t *testing.T) {
 
 func TestSystemPromptBuilder_MaximalSize(t *testing.T) {
 	prompt := maximalBuilder().Build()
-	// Maximal prompt with all features enabled — budget ceiling reflects
-	// post-Reports-section size. The Reports two-step contract is static
-	// (always present, ~600 bytes) because the LLM cannot retrieve
-	// guidance it doesn't know exists. See system_prompt_builder.go
-	// "## Reports" section.
-	if len(prompt) > 11000 {
-		t.Errorf("maximal prompt too large: %d bytes (limit 11000)", len(prompt))
+	// Maximal chat-mode prompt with all features enabled. Code-mode sections
+	// (project guidance, code-nav rules, PLAN.md, auth gates, MCP listing) are
+	// no longer part of the base builder — they live in CodeSystemPromptBuilder.
+	// The ceiling is lower than before since those sections are removed.
+	if len(prompt) > 12000 {
+		t.Errorf("maximal prompt too large: %d bytes (limit 12000)", len(prompt))
 	}
 	if len(prompt) < 5000 {
 		t.Errorf("maximal prompt suspiciously small: %d bytes (expected > 5000)", len(prompt))

@@ -196,6 +196,7 @@ func TestFindFiles(t *testing.T) {
 		result, err := FindFiles(nil, FindFilesArgs{
 			Pattern:    "*_test.go",
 			SearchPath: tmpDir,
+			Recursive:  true,
 		})
 		if err != nil {
 			t.Fatalf("FindFiles failed: %v", err)
@@ -210,6 +211,7 @@ func TestFindFiles(t *testing.T) {
 		result, err := FindFiles(nil, FindFilesArgs{
 			Pattern:    "*.js",
 			SearchPath: tmpDir,
+			Recursive:  true,
 		})
 		if err != nil {
 			t.Fatalf("FindFiles failed: %v", err)
@@ -447,6 +449,7 @@ func TestFindFiles_RecursiveGlob(t *testing.T) {
 		result, err := FindFiles(nil, FindFilesArgs{
 			Pattern:    "*.go",
 			SearchPath: tmpDir,
+			Recursive:  true,
 		})
 		if err != nil {
 			t.Fatalf("FindFiles failed: %v", err)
@@ -466,6 +469,7 @@ func TestFindFiles_RecursiveGlob(t *testing.T) {
 		result, err := FindFiles(nil, FindFilesArgs{
 			Pattern:    "*.js",
 			SearchPath: tmpDir,
+			Recursive:  true,
 		})
 		if err != nil {
 			t.Fatalf("FindFiles failed: %v", err)
@@ -480,6 +484,7 @@ func TestFindFiles_RecursiveGlob(t *testing.T) {
 			Pattern:    "*.go",
 			SearchPath: tmpDir,
 			MaxResults: 2,
+			Recursive:  true,
 		})
 		if err != nil {
 			t.Fatalf("FindFiles failed: %v", err)
@@ -494,6 +499,7 @@ func TestFindFiles_RecursiveGlob(t *testing.T) {
 		result, err := FindFiles(nil, FindFilesArgs{
 			Pattern:    "*.go",
 			SearchPath: tmpDir,
+			Recursive:  true,
 		})
 		if err != nil {
 			t.Fatalf("FindFiles failed: %v", err)
@@ -501,6 +507,101 @@ func TestFindFiles_RecursiveGlob(t *testing.T) {
 		// With 3 files and default max 100, should not be capped
 		if result.Capped {
 			t.Error("Should not be capped with only 3 files and max 100")
+		}
+	})
+
+	t.Run("PatternWithDoublestarForcesRecursion", func(t *testing.T) {
+		// A pattern containing ** must descend even without Recursive:true.
+		result, err := FindFiles(nil, FindFilesArgs{
+			Pattern:    "**/*.go",
+			SearchPath: tmpDir,
+		})
+		if err != nil {
+			t.Fatalf("FindFiles failed: %v", err)
+		}
+		if result.Total < 3 {
+			t.Errorf("Expected ** pattern to recurse and find >=3 .go files, got %d", result.Total)
+		}
+	})
+}
+
+// TestFindFiles_ShallowDefault verifies that find_files lists ONLY the
+// immediate children of search_path by default (no recursion), so a bare "list
+// this directory" call behaves like `ls` instead of flooding with the whole
+// subtree. This is the fix for the recursion-by-default regression.
+func TestFindFiles_ShallowDefault(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "findfiles_shallow_test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	os.MkdirAll(filepath.Join(tmpDir, "src", "pkg"), 0755)
+	os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte("package main"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "README.md"), []byte("# hi"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "src", "app.go"), []byte("package src"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "src", "pkg", "deep.go"), []byte("package pkg"), 0644)
+
+	t.Run("StarListsImmediateChildrenOnly", func(t *testing.T) {
+		result, err := FindFiles(nil, FindFilesArgs{
+			Pattern:    "*",
+			SearchPath: tmpDir,
+		})
+		if err != nil {
+			t.Fatalf("FindFiles failed: %v", err)
+		}
+		// Expect exactly the 3 top-level entries: main.go, README.md, src/ (dir).
+		if result.Total != 3 {
+			names := make([]string, len(result.Files))
+			for i, f := range result.Files {
+				names[i] = f.RelativePath
+			}
+			t.Fatalf("Expected 3 immediate children, got %d: %v", result.Total, names)
+		}
+		var sawDir bool
+		for _, f := range result.Files {
+			// No entry should be nested (relative path must be a bare basename).
+			if strings.Contains(f.RelativePath, string(filepath.Separator)) {
+				t.Errorf("Shallow listing returned nested entry: %s", f.RelativePath)
+			}
+			if f.RelativePath == "src" && f.IsDir {
+				sawDir = true
+			}
+		}
+		if !sawDir {
+			t.Error("Shallow listing should include the immediate child directory 'src'")
+		}
+	})
+
+	t.Run("ShallowStarGoTopLevelOnly", func(t *testing.T) {
+		// *.go shallow should match only main.go at the top level, NOT the
+		// nested app.go / deep.go.
+		result, err := FindFiles(nil, FindFilesArgs{
+			Pattern:    "*.go",
+			SearchPath: tmpDir,
+		})
+		if err != nil {
+			t.Fatalf("FindFiles failed: %v", err)
+		}
+		if result.Total != 1 {
+			t.Fatalf("Expected exactly 1 top-level .go file, got %d", result.Total)
+		}
+		if result.Files[0].RelativePath != "main.go" {
+			t.Errorf("Expected main.go, got %s", result.Files[0].RelativePath)
+		}
+	})
+
+	t.Run("RecursiveTrueDescends", func(t *testing.T) {
+		result, err := FindFiles(nil, FindFilesArgs{
+			Pattern:    "*.go",
+			SearchPath: tmpDir,
+			Recursive:  true,
+		})
+		if err != nil {
+			t.Fatalf("FindFiles failed: %v", err)
+		}
+		if result.Total < 3 {
+			t.Errorf("Recursive should find >=3 .go files, got %d", result.Total)
 		}
 	})
 }
@@ -763,6 +864,7 @@ func TestFindFiles_GitignoreRespected(t *testing.T) {
 		result, err := FindFiles(nil, FindFilesArgs{
 			Pattern:    "*.go",
 			SearchPath: tmpDir,
+			Recursive:  true,
 		})
 		if err != nil {
 			t.Fatalf("FindFiles failed: %v", err)
@@ -917,51 +1019,15 @@ func TestFindFiles_GoFallbackDoublestar(t *testing.T) {
 	}
 }
 
-func TestGoGrep_PathAndDoublestarGlobs(t *testing.T) {
-	tmpDir := t.TempDir()
-	srcDir := filepath.Join(tmpDir, "src")
-	if err := os.MkdirAll(srcDir, 0755); err != nil {
-		t.Fatal(err)
+// TestGrepTimeoutError_Actionable checks the user-facing timeout message guides
+// the model to narrow its search.
+func TestGrepTimeoutError_Actionable(t *testing.T) {
+	msg := grepTimeoutError("/Users/x/go/pkg/mod").Error()
+	for _, want := range []string{"timed out", "search_path", "include_globs"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("timeout error missing %q: %s", want, msg)
+		}
 	}
-	if err := os.WriteFile(filepath.Join(srcDir, "foo.go"), []byte("package src\nfunc UniqueGoGrepMarker() {}\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(tmpDir, "other.go"), []byte("package main\nfunc UniqueGoGrepMarker() {}\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	t.Run("nested doublestar glob", func(t *testing.T) {
-		matches, err := goGrep("UniqueGoGrepMarker", tmpDir, []string{"src/**/*.go"}, true, false, 50)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(matches) != 1 {
-			t.Fatalf("expected 1 match under src/**/*.go, got %d: %#v", len(matches), matches)
-		}
-		if !strings.Contains(matches[0].File, "src"+string(filepath.Separator)+"foo.go") {
-			t.Fatalf("unexpected file: %s", matches[0].File)
-		}
-	})
-
-	t.Run("basename glob", func(t *testing.T) {
-		matches, err := goGrep("UniqueGoGrepMarker", tmpDir, []string{"*.go"}, true, false, 50)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(matches) != 2 {
-			t.Fatalf("expected 2 matches for *.go, got %d", len(matches))
-		}
-	})
-
-	t.Run("non matching path glob", func(t *testing.T) {
-		matches, err := goGrep("UniqueGoGrepMarker", tmpDir, []string{"lib/**/*.go"}, true, false, 50)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(matches) != 0 {
-			t.Fatalf("expected 0 matches for lib/**/*.go, got %d", len(matches))
-		}
-	})
 }
 
 func TestMatchDoublestar(t *testing.T) {

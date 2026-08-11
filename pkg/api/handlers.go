@@ -841,6 +841,10 @@ type MCPServerInfo struct {
 	Command   string `json:"command,omitempty"`
 	URL       string `json:"url,omitempty"`
 	Enabled   bool   `json:"enabled"`
+	// Source indicates where the server config originates: "config" for servers
+	// declared in the local mcp_config.json file (read-only in the UI, they are
+	// the platform base layer), or "" for database-backed org/team servers.
+	Source string `json:"source,omitempty"`
 }
 
 // MCPServersListResponse is the response for GET /api/mcp/servers
@@ -853,6 +857,25 @@ func GetMCPServersHandler(w http.ResponseWriter, r *http.Request) {
 	// Platform mode: read from DB stores (org + team merged, team overrides org)
 	if svc := store.FromRequest(r); svc != nil && svc.Mode == store.ModePlatform {
 		serverMap := make(map[string]MCPServerInfo) // name -> info, team overrides org
+
+		// Config-file base (mcp_config.json). File-declared servers are the
+		// platform base layer and appear in the list; org/team DB entries below
+		// override them by name. Marked Source="config" so the UI can present
+		// them as read-only defaults.
+		for name, s := range config.FileMCPServers() {
+			transport := s.Transport
+			if transport == "" {
+				transport = "stdio"
+			}
+			serverMap[name] = MCPServerInfo{
+				Name:      name,
+				Transport: transport,
+				Command:   s.Command,
+				URL:       s.URL,
+				Enabled:   s.IsEnabled(),
+				Source:    "config",
+			}
+		}
 
 		// Org-level servers first
 		if svc.MCPServers != nil {

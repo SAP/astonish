@@ -3,17 +3,25 @@ package tui
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
 )
 
-// handleApprovalKey handles y/n and option keys while awaiting tool or network approval.
-// Returns handled=true when the key was consumed.
+// handleApprovalKey handles cursor navigation, y/n and option keys while
+// awaiting tool or network approval. Returns handled=true when the key was
+// consumed.
+//
+// Navigation model: the overlay shows the options as a vertical list with a
+// cursor (default on the first option, e.g. "Allow"). Up/down (or k/j) move the
+// cursor; Enter submits the highlighted option. Number keys 1..9 and the y/n/esc
+// shortcuts remain as accelerators.
 func (m model) handleApprovalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 	if !m.tr.Awaiting {
 		return m, nil, false
@@ -25,6 +33,18 @@ func (m model) handleApprovalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 	key := msg.String()
 
 	switch key {
+	case "up", "k", "shift+tab", "ctrl+p":
+		if len(opts) > 0 {
+			m.tr.ApprovalCursor = (m.tr.ApprovalCursor - 1 + len(opts)) % len(opts)
+			m.refreshViewport()
+		}
+		return m, nil, true
+	case "down", "j", "tab", "ctrl+n":
+		if len(opts) > 0 {
+			m.tr.ApprovalCursor = (m.tr.ApprovalCursor + 1) % len(opts)
+			m.refreshViewport()
+		}
+		return m, nil, true
 	case "esc":
 		next, cmd := m.submitApproval(pickNo(opts))
 		return next, cmd, true
@@ -41,9 +61,14 @@ func (m model) handleApprovalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 			return next, cmd, true
 		}
 	case "enter":
-		// Default to first option (usually Yes)
+		// Submit the highlighted option (cursor defaults to the first, e.g.
+		// "Allow", so a bare Enter accepts the safe default).
+		idx := m.tr.ApprovalCursor
+		if idx < 0 || idx >= len(opts) {
+			idx = 0
+		}
 		if len(opts) > 0 {
-			next, cmd := m.submitApproval(opts[0])
+			next, cmd := m.submitApproval(opts[idx])
 			return next, cmd, true
 		}
 	}
@@ -92,6 +117,36 @@ func pickNo(opts []string) string {
 }
 
 func (m model) submitApproval(choice string) (tea.Model, tea.Cmd) {
+	// Plan approval has its own flow: approve switches to Normal mode,
+	// request changes stays in plan mode, decline aborts.
+	if it := m.approvalItem(); it != nil && it.ApprovalKind == "plan" {
+		return m.submitPlanApproval(choice)
+	}
+
+	// Sub-agent authorization: if the approval overlay was triggered by a
+	// sub-agent (delegate_tasks), send the response directly to the blocked
+	// goroutine instead of calling RunTurn. The sub-agent resumes automatically.
+	if m.backend.RespondSubAgentAuth(choice) {
+		m.tr.ClearApproval()
+		m.ta.Reset()
+		if m.ready {
+			m.layout()
+		}
+		m.tr.Apply(events.NewSystem("Approval: " + choice))
+		m.tr.Streaming = true
+		m.tr.Status = "Thinking…"
+		m.refreshViewport()
+		// The parent turn is still running (delegate_tasks hasn't returned yet).
+		// Resume listening on the existing event channel so subsequent events
+		// (tool calls, text, more approvals, turn-done) are processed.
+		var cmd tea.Cmd
+		if m.eventCh != nil {
+			cmd = tea.Batch(waitEvent(m.eventCh), timerTick())
+			m.timerResume()
+		}
+		return m, cmd
+	}
+
 	m.tr.ClearApproval()
 	m.ta.Reset()
 	if m.ready {
@@ -115,7 +170,8 @@ func (m model) submitApproval(choice string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.eventCh = ch
-	return m, waitEvent(ch)
+	m.timerResume()
+	return m, tea.Batch(waitEvent(ch), timerTick())
 }
 
 func (m model) handleNetworkDenialKey(msg tea.KeyMsg, it *events.Item) (tea.Model, tea.Cmd, bool) {
@@ -250,8 +306,15 @@ func (m model) renderApprovalOverlay() string {
 	if it != nil && it.Kind == events.ItemNetworkDenial {
 		return m.renderNetworkDenialOverlay(it)
 	}
+	if it != nil && it.ApprovalKind == "plan" {
+		return m.renderPlanApprovalOverlay(it)
+	}
+	if it != nil && it.ApprovalKind == "folder" {
+		return m.renderFolderApprovalOverlay(it)
+	}
 	tool := "tool"
 	content := "Approve tool execution?"
+	title := "⚠ Approval required"
 	opts := m.approvalOptions()
 	if it != nil {
 		if it.ToolName != "" {
@@ -260,19 +323,28 @@ func (m model) renderApprovalOverlay() string {
 		if it.Content != "" {
 			content = it.Content
 		}
+		if it.ApprovalKind == "tool" {
+			title = "⚠ Tool authorization required"
+		}
 	}
 
 	var b strings.Builder
-	b.WriteString(th.Approval.Render("⚠ Approval required") + "\n\n")
+	b.WriteString(th.Approval.Render(title) + "\n\n")
 	b.WriteString(th.Text.Render(content) + "\n")
 	b.WriteString(th.Muted.Render("Tool: ") + th.Brand.Render(tool) + "\n")
 	if it != nil && len(it.Args) > 0 {
+		keys := make([]string, 0, len(it.Args))
+		for k := range it.Args {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
 		n := 0
-		for k, raw := range it.Args {
+		for _, k := range keys {
 			if n >= 4 {
 				b.WriteString(th.Muted.Render(fmt.Sprintf("  … +%d more", len(it.Args)-4)) + "\n")
 				break
 			}
+			raw := it.Args[k]
 			v := fmt.Sprintf("%v", raw)
 			v = strings.ReplaceAll(v, "\n", " ")
 			if len(v) > 60 {
@@ -283,16 +355,71 @@ func (m model) renderApprovalOverlay() string {
 		}
 	}
 	b.WriteString("\n")
-	var hints []approvalHint
-	for i, o := range opts {
-		hints = append(hints, approvalHint{Keys: fmt.Sprintf("%d", i+1), Label: o})
+	b.WriteString(m.renderApprovalOptions(opts))
+
+	w := m.width - 4
+	if w < 30 {
+		w = 30
 	}
-	hints = append(hints,
-		approvalHint{Keys: "y", Label: "yes"},
-		approvalHint{Keys: "n", Label: "no"},
-		approvalHint{Keys: "esc", Label: "deny"},
-	)
-	b.WriteString(renderApprovalHints(th, hints))
+	return th.InputBorderFocus.
+		BorderForeground(lipgloss.Color("221")).
+		Width(w).
+		Padding(1, 2).
+		Render(b.String())
+}
+
+// renderApprovalOptions renders the authorization options as a vertical,
+// cursor-navigable list. The highlighted option (m.tr.ApprovalCursor) shows a
+// "❯" caret and is rendered in the accent style; the rest are muted. A compact
+// key hint follows. Used by both the tool and folder authorization overlays so
+// the interaction is identical.
+func (m model) renderApprovalOptions(opts []string) string {
+	th := m.theme
+	cursor := m.tr.ApprovalCursor
+	if cursor < 0 || cursor >= len(opts) {
+		cursor = 0
+	}
+	var b strings.Builder
+	for i, o := range opts {
+		if i == cursor {
+			b.WriteString(th.Approval.Render("❯ "+o) + "\n")
+		} else {
+			b.WriteString(th.Muted.Render("  "+o) + "\n")
+		}
+	}
+	b.WriteString("\n")
+	b.WriteString(renderApprovalHints(th, []approvalHint{
+		{Keys: "↑/↓", Label: "move"},
+		{Keys: "enter", Label: "select"},
+		{Keys: "esc", Label: "deny"},
+	}))
+	return b.String()
+}
+
+// renderFolderApprovalOverlay renders the code-mode folder-access prompt: which
+// out-of-project paths a tool wants to touch, with once/session/deny options.
+func (m model) renderFolderApprovalOverlay(it *events.Item) string {
+	th := m.theme
+	tool := first(it.ToolName, "tool")
+
+	var b strings.Builder
+	b.WriteString(th.Approval.Render("⚠ Folder access required") + "\n\n")
+	b.WriteString(th.Text.Render("Allow ") + th.Brand.Render(tool) +
+		th.Text.Render(" to access files outside the project directory?") + "\n")
+	if len(it.Paths) > 0 {
+		b.WriteString(th.Muted.Render("Path(s):") + "\n")
+		for i, p := range it.Paths {
+			if i >= 5 {
+				b.WriteString(th.Muted.Render(fmt.Sprintf("  … +%d more", len(it.Paths)-5)) + "\n")
+				break
+			}
+			b.WriteString(th.Muted.Render("  • ") + th.Text.Render(compactLine(p, 100)) + "\n")
+		}
+	}
+	b.WriteString("\n")
+
+	opts := m.approvalOptions()
+	b.WriteString(m.renderApprovalOptions(opts))
 
 	w := m.width - 4
 	if w < 30 {
@@ -375,4 +502,122 @@ func compactLine(s string, maxRunes int) string {
 		return string([]rune(s)[:maxRunes-1]) + "…"
 	}
 	return s
+}
+
+// renderPlanApprovalFooter renders a compact inline footer for plan approval,
+// replacing the large bordered overlay dialog. Options are shown horizontally
+// with the cursor-highlighted option rendered in the accent style.
+func (m model) renderPlanApprovalFooter() string {
+	th := m.theme
+	opts := m.approvalOptions()
+	cursor := m.tr.ApprovalCursor
+	if cursor < 0 || cursor >= len(opts) {
+		cursor = 0
+	}
+	var parts []string
+	for i, o := range opts {
+		if i == cursor {
+			parts = append(parts, th.Approval.Render("❯ "+o))
+		} else {
+			parts = append(parts, th.Muted.Render("  "+o))
+		}
+	}
+	line := strings.Join(parts, th.Muted.Render("  "))
+	return m.paintRow(th.Header.Render("✦ Plan Ready")+"  "+line, m.width)
+}
+
+// renderPlanApprovalOverlay renders the plan approval prompt shown after
+// announce_plan completes in Plan or Graph Plan mode. If the plan carries a
+// Context narrative section, the first few lines are shown below the prompt so
+// the user can see the plan's rationale without leaving the overlay.
+func (m model) renderPlanApprovalOverlay(it *events.Item) string {
+	th := m.theme
+	var b strings.Builder
+	b.WriteString(th.Header.Render("✦ Plan Ready") + "\n\n")
+	b.WriteString(th.Text.Render("The plan has been announced. How would you like to proceed?") + "\n")
+	if it.PlanContext != "" {
+		// Show up to 3 lines of context (space-constrained overlay).
+		lines := strings.SplitN(strings.TrimSpace(it.PlanContext), "\n", 4)
+		if len(lines) > 3 {
+			lines = lines[:3]
+			lines[2] += " …"
+		}
+		b.WriteString("\n")
+		b.WriteString(th.Muted.Render("Context:") + "\n")
+		for _, l := range lines {
+			b.WriteString(th.Muted.Render("  "+compactLine(l, 100)) + "\n")
+		}
+	}
+	b.WriteString("\n")
+	opts := m.approvalOptions()
+	b.WriteString(m.renderApprovalOptions(opts))
+
+	w := m.width - 4
+	if w < 30 {
+		w = 30
+	}
+	return th.InputBorderFocus.
+		BorderForeground(lipgloss.Color("39")).
+		Width(w).
+		Padding(1, 2).
+		Render(b.String())
+}
+
+// submitPlanApproval handles the user's choice in the plan approval dialog.
+// "Approve & implement" switches to Normal mode and sends a turn to begin
+// execution. "Request changes" lets the user type feedback. "Decline" aborts
+// the plan and returns to Normal mode.
+func (m model) submitPlanApproval(choice string) (tea.Model, tea.Cmd) {
+	m.tr.ClearApproval()
+	m.ta.Reset()
+	if m.ready {
+		m.layout()
+	}
+
+	switch choice {
+	case "Approve & implement":
+		// Switch to Normal mode so the execution turn has full tool access.
+		m.planMode = false
+		m.graphPlanMode = false
+		m.tr.Apply(events.NewSystem("Plan approved. Starting implementation…"))
+		m.tr.Streaming = true
+		m.tr.Status = "Thinking…"
+		m.refreshViewport()
+
+		planPath := ""
+		if pb, ok := m.backend.(backend.PlanBackend); ok {
+			planPath = pb.ActivePlanFilePath()
+		}
+
+		turnCtx, cancel := context.WithCancel(m.ctx)
+		m.turnCancel = cancel
+		// Send as a normal-mode turn (no plan gate) to begin execution.
+		ch, err := m.backend.RunTurn(turnCtx, "I approve this plan. Please start implementing it now, phase by phase.", backend.TurnOptions{SystemContext: agent.BuildPlanExecutionSystemContext(planPath)})
+		if err != nil {
+			cancel()
+			m.turnCancel = nil
+			m.tr.Apply(events.NewError(err.Error()))
+			m.refreshViewport()
+			return m, nil
+		}
+		m.eventCh = ch
+		m.timerResume()
+		return m, tea.Batch(waitEvent(ch), timerTick())
+
+	case "Request changes":
+		// Stay in plan mode so the user can describe what to change.
+		m.tr.Apply(events.NewSystem("Describe the changes you'd like to the plan:"))
+		m.refreshViewport()
+		return m, nil
+
+	case "Decline":
+		m.planMode = false
+		m.graphPlanMode = false
+		m.tr.Apply(events.NewSystem("Plan declined. Returned to Normal mode."))
+		m.refreshViewport()
+		return m, nil
+	}
+
+	m.refreshViewport()
+	return m, nil
 }

@@ -2,7 +2,9 @@ package tools
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -13,7 +15,19 @@ import (
 	"time"
 
 	"google.golang.org/adk/tool"
+
+	"github.com/SAP/astonish/pkg/tools/ripgrep"
 )
+
+// grepSearchTimeout bounds how long a single grep_search may run. Without it, a
+// recursive search over a huge tree outside the working directory (e.g. the Go
+// module cache ~/go/pkg/mod, node_modules) can hang the agent turn for minutes
+// with no way to recover except a manual cancel. On timeout the search is
+// killed and a clear, actionable error is returned.
+const grepSearchTimeout = 25 * time.Second
+
+// errGrepTimeout signals that the search exceeded grepSearchTimeout.
+var errGrepTimeout = errors.New("grep_search timed out")
 
 // GrepSearchArgs defines arguments for the grep_search tool
 type GrepSearchArgs struct {
@@ -65,7 +79,7 @@ type ripgrepMatch struct {
 	} `json:"data"`
 }
 
-// GrepSearch searches for text patterns in files using ripgrep or Go fallback
+// GrepSearch searches for text patterns in files using ripgrep.
 func GrepSearch(ctx tool.Context, args GrepSearchArgs) (GrepSearchResult, error) {
 	start := time.Now()
 
@@ -107,36 +121,21 @@ func GrepSearch(ctx tool.Context, args GrepSearchArgs) (GrepSearchResult, error)
 		}
 	}
 
-	// Try ripgrep first, fall back to Go implementation
-	matches, truncatedReason, err := tryRipgrep(args, absPath, maxResults, headLimit)
+	// Bound the total search time so a runaway walk (e.g. over ~/go/pkg/mod)
+	// cannot hang the turn.
+	runCtx, cancel := context.WithTimeout(context.Background(), grepSearchTimeout)
+	defer cancel()
+
+	// Ripgrep is the only backend: it is gitignore-aware, fast, and supports
+	// type filters, multiline, and context lines. It is guaranteed available by
+	// pkg/tools/ripgrep (system rg or the pinned auto-provisioned build), so
+	// there is no pure-Go fallback.
+	matches, truncatedReason, err := tryRipgrep(runCtx, args, absPath, maxResults, headLimit)
 	if err != nil {
-		// Check if unsupported features were requested without ripgrep
-		unsupported := []string{}
-		if args.Multiline {
-			unsupported = append(unsupported, "multiline")
+		if errors.Is(err, errGrepTimeout) {
+			return GrepSearchResult{}, grepTimeoutError(absPath)
 		}
-		if args.Type != "" {
-			unsupported = append(unsupported, "type")
-		}
-		if args.Context > 0 {
-			unsupported = append(unsupported, "context")
-		}
-		if args.BeforeContext > 0 {
-			unsupported = append(unsupported, "before_context")
-		}
-		if args.AfterContext > 0 {
-			unsupported = append(unsupported, "after_context")
-		}
-		if len(unsupported) > 0 {
-			return GrepSearchResult{}, fmt.Errorf("ripgrep required for %s but unavailable: %w",
-				strings.Join(unsupported, ", "), err)
-		}
-		// Fallback to Go implementation (supports literal, regex, case, globs, cap)
-		matches, err = goGrep(args.Pattern, absPath, mergeGlobs(args), args.CaseSensitive, args.Regex, maxResults)
-		if err != nil {
-			return GrepSearchResult{}, err
-		}
-		truncatedReason = ""
+		return GrepSearchResult{}, err
 	}
 
 	capped := len(matches) >= maxResults
@@ -157,21 +156,21 @@ func GrepSearch(ctx tool.Context, args GrepSearchArgs) (GrepSearchResult, error)
 	}, nil
 }
 
-// mergeGlobs combines IncludeGlobs and the single Glob field into one slice
-func mergeGlobs(args GrepSearchArgs) []string {
-	globs := append([]string{}, args.IncludeGlobs...)
-	if args.Glob != "" {
-		globs = append(globs, args.Glob)
-	}
-	return globs
+// grepTimeoutError builds an actionable error for a timed-out search.
+func grepTimeoutError(searchPath string) error {
+	return fmt.Errorf("grep_search timed out after %s while scanning %q. "+
+		"Narrow the search: set search_path to a specific directory or file, add include_globs/type to limit files, "+
+		"or avoid scanning large trees outside the project (e.g. ~/go/pkg/mod, node_modules)",
+		grepSearchTimeout, searchPath)
 }
 
 // tryRipgrep attempts to use ripgrep for searching
-func tryRipgrep(args GrepSearchArgs, searchPath string, maxResults, headLimit int) ([]GrepMatch, string, error) {
-	// Check if rg is available
-	rgPath, err := exec.LookPath("rg")
+func tryRipgrep(ctx context.Context, args GrepSearchArgs, searchPath string, maxResults, headLimit int) ([]GrepMatch, string, error) {
+	// Resolve rg: an installed rg on PATH, else the managed (auto-provisioned)
+	// copy. This makes ripgrep effectively always available for code search.
+	rgPath, err := ripgrep.ResolvePath()
 	if err != nil {
-		return nil, "", fmt.Errorf("ripgrep not found")
+		return nil, "", fmt.Errorf("ripgrep not found: %w", err)
 	}
 
 	// Build rg command
@@ -224,7 +223,7 @@ func tryRipgrep(args GrepSearchArgs, searchPath string, maxResults, headLimit in
 	// Add pattern and path
 	rgArgs = append(rgArgs, args.Pattern, searchPath)
 
-	cmd := exec.Command(rgPath, rgArgs...)
+	cmd := exec.CommandContext(ctx, rgPath, rgArgs...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, "", fmt.Errorf("ripgrep pipe setup failed: %w", err)
@@ -247,6 +246,11 @@ func tryRipgrep(args GrepSearchArgs, searchPath string, maxResults, headLimit in
 	// We must wait for the command to finish, but we can ignore errors
 	// caused by the broken pipe from our early close
 	waitErr := cmd.Wait()
+	// If the context fired (deadline or cancel), CommandContext killed rg.
+	// Surface a clear timeout so the agent narrows its search.
+	if ctx.Err() != nil {
+		return nil, "", errGrepTimeout
+	}
 	if waitErr != nil && truncatedReason == "" {
 		if exitErr, ok := waitErr.(*exec.ExitError); ok {
 			switch exitErr.ExitCode() {
@@ -309,163 +313,4 @@ func parseRipgrepOutput(output []byte, maxResults int) ([]GrepMatch, error) {
 	}
 
 	return matches, nil
-}
-
-// goGrep is a pure Go fallback for grep functionality
-func goGrep(pattern, searchPath string, includeGlobs []string, caseSensitive, isRegex bool, maxResults int) ([]GrepMatch, error) {
-	var matches []GrepMatch
-
-	// Prepare the matcher
-	var matcher func(line string) bool
-	if isRegex {
-		flags := ""
-		if !caseSensitive {
-			flags = "(?i)"
-		}
-		re, err := regexp.Compile(flags + pattern)
-		if err != nil {
-			return nil, fmt.Errorf("invalid regex pattern: %w", err)
-		}
-		matcher = func(line string) bool {
-			return re.MatchString(line)
-		}
-	} else {
-		searchPattern := pattern
-		if !caseSensitive {
-			searchPattern = strings.ToLower(pattern)
-		}
-		matcher = func(line string) bool {
-			searchLine := line
-			if !caseSensitive {
-				searchLine = strings.ToLower(line)
-			}
-			return strings.Contains(searchLine, searchPattern)
-		}
-	}
-
-	err := filepath.Walk(searchPath, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil // Skip files we can't access
-		}
-
-		// Skip directories
-		if info.IsDir() {
-			name := info.Name()
-			// Skip excluded directories
-			if defaultExclusions[name] {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-
-		// Check if we've hit max results
-		if len(matches) >= maxResults {
-			return filepath.SkipAll
-		}
-
-		// Check include globs (basename Match for simple patterns;
-		// doublestar against relative path when pattern has ** or /).
-		if len(includeGlobs) > 0 {
-			matched := false
-			relPath, _ := filepath.Rel(searchPath, path)
-			for _, glob := range includeGlobs {
-				if strings.Contains(glob, "**") || strings.Contains(glob, "/") {
-					if matchDoublestar(glob, relPath) {
-						matched = true
-						break
-					}
-					continue
-				}
-				if m, _ := filepath.Match(glob, info.Name()); m {
-					matched = true
-					break
-				}
-			}
-			if !matched {
-				return nil
-			}
-		}
-
-		// Skip binary files (simple heuristic: skip files without common text extensions)
-		if !isLikelyTextFile(path) {
-			return nil
-		}
-
-		// Search file
-		fileMatches, err := searchFileWithMatcher(path, matcher, maxResults-len(matches))
-		if err != nil {
-			return nil // Skip files we can't read
-		}
-
-		matches = append(matches, fileMatches...)
-		return nil
-	})
-
-	if err != nil && err != filepath.SkipAll {
-		return nil, err
-	}
-
-	return matches, nil
-}
-
-// searchFileWithMatcher searches for matches in a single file using a matcher function
-func searchFileWithMatcher(path string, matcher func(string) bool, maxMatches int) ([]GrepMatch, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	var matches []GrepMatch
-	scanner := bufio.NewScanner(file)
-	lineNum := 0
-
-	for scanner.Scan() {
-		lineNum++
-		line := scanner.Text()
-
-		if matcher(line) {
-			matches = append(matches, GrepMatch{
-				File:       path,
-				LineNumber: lineNum,
-				Content:    strings.TrimSpace(line),
-				Kind:       "match",
-			})
-
-			if len(matches) >= maxMatches {
-				break
-			}
-		}
-	}
-
-	return matches, nil
-}
-
-
-
-// isLikelyTextFile checks if a file is likely a text file based on extension
-func isLikelyTextFile(path string) bool {
-	textExtensions := map[string]bool{
-		".go": true, ".js": true, ".ts": true, ".jsx": true, ".tsx": true,
-		".py": true, ".rb": true, ".java": true, ".c": true, ".cpp": true,
-		".h": true, ".hpp": true, ".cs": true, ".rs": true, ".swift": true,
-		".kt": true, ".scala": true, ".php": true, ".pl": true, ".pm": true,
-		".sh": true, ".bash": true, ".zsh": true, ".fish": true,
-		".html": true, ".htm": true, ".css": true, ".scss": true, ".less": true,
-		".json": true, ".xml": true, ".yaml": true, ".yml": true, ".toml": true,
-		".md": true, ".txt": true, ".rst": true, ".adoc": true,
-		".sql": true, ".graphql": true, ".proto": true,
-		".env": true, ".gitignore": true, ".dockerignore": true,
-		".makefile": true, ".dockerfile": true,
-		".vue": true, ".svelte": true, ".astro": true,
-	}
-
-	ext := strings.ToLower(filepath.Ext(path))
-	if ext == "" {
-		// Check for common extensionless files
-		base := strings.ToLower(filepath.Base(path))
-		return base == "makefile" || base == "dockerfile" || base == "readme" || base == "license"
-	}
-
-	return textExtensions[ext]
 }

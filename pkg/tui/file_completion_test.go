@@ -76,6 +76,74 @@ func TestExpandFileMentions(t *testing.T) {
 	}
 }
 
+func TestListFileCandidatesSkipsHiddenEntries(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite := func(path, content string) {
+		t.Helper()
+		full := filepath.Join(dir, path)
+		if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Visible files (should appear).
+	mustWrite("src/main.go", "package main")
+	mustWrite("README.md", "# readme")
+	// Hidden directories (should NOT appear).
+	mustWrite(".github/workflows/ci.yml", "name: CI")
+	mustWrite(".tmp/cache.bin", "binary")
+	mustWrite(".vscode/settings.json", "{}")
+	// Hidden files (should NOT appear).
+	mustWrite(".env", "SECRET=123")
+	mustWrite("src/.hidden_file", "hidden")
+
+	got := listFileCandidates(dir, "")
+	paths := make(map[string]bool, len(got))
+	for _, c := range got {
+		paths[c.Path] = true
+	}
+
+	// Visible files must be present.
+	for _, want := range []string{"src/main.go", "README.md"} {
+		if !paths[want] {
+			t.Errorf("expected %q in results, got: %v", want, got)
+		}
+	}
+	// Hidden entries must be absent.
+	for _, hidden := range []string{".github/workflows/ci.yml", ".tmp/cache.bin", ".vscode/settings.json", ".env", "src/.hidden_file"} {
+		if paths[hidden] {
+			t.Errorf("hidden path %q should not appear in results", hidden)
+		}
+	}
+	// Total count must be exactly 2.
+	if len(got) != 2 {
+		t.Fatalf("expected 2 candidates, got %d: %v", len(got), got)
+	}
+}
+
+func TestListFileCandidatesSkipsHiddenEvenWhenQueryMatches(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite := func(path, content string) {
+		t.Helper()
+		full := filepath.Join(dir, path)
+		if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustWrite(".github/workflows/ci.yml", "name: CI")
+	mustWrite("docs/github-guide.md", "# Guide")
+
+	got := listFileCandidates(dir, "github")
+	if len(got) != 1 || got[0].Path != "docs/github-guide.md" {
+		t.Fatalf("expected only docs/github-guide.md, got: %v", got)
+	}
+}
+
 func TestReadMentionFileRejectsEscapes(t *testing.T) {
 	_, err := readMentionFile(t.TempDir(), "../secret.txt")
 	if err == nil {

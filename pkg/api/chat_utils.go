@@ -232,6 +232,7 @@ func eventsToMessages(events session.Events, redactor *credentials.Redactor) []S
 				messages = append(messages, StudioMessage{
 					Type:     "tool_call",
 					ToolName: part.FunctionCall.Name,
+					ToolID:   part.FunctionCall.ID,
 					ToolArgs: args,
 				})
 			}
@@ -260,6 +261,7 @@ func eventsToMessages(events session.Events, redactor *credentials.Redactor) []S
 				messages = append(messages, StudioMessage{
 					Type:       "tool_result",
 					ToolName:   part.FunctionResponse.Name,
+					ToolID:     part.FunctionResponse.ID,
 					ToolResult: summarizeToolResult(resp),
 				})
 

@@ -26,8 +26,9 @@ const (
 	KindSubagent      Kind = "subagent"
 	KindSessionTitle  Kind = "session_title"
 	KindModelChanged  Kind = "model_changed"
-	KindStatus        Kind = "status" // spinner / live status text
-	KindUser          Kind = "user"   // local echo of user message
+	KindStatus        Kind = "status"     // spinner / live status text
+	KindUser          Kind = "user"       // local echo of user message
+	KindDelegation    Kind = "delegation" // sub-agent delegation lifecycle
 )
 
 // Usage holds token accounting for a turn.
@@ -35,6 +36,11 @@ type Usage struct {
 	Input  int64
 	Output int64
 	Total  int64
+	// Estimated marks a usage reading derived locally (e.g. from context size)
+	// rather than reported by the provider. Estimated readings update the
+	// context-occupancy figure but are NOT accumulated into cumulative session
+	// usage, since each one represents the full current context, not a delta.
+	Estimated bool
 }
 
 // NetworkDenial describes one outbound connection blocked by the sandbox proxy.
@@ -58,6 +64,13 @@ type Artifact struct {
 	ReportTitle string
 }
 
+// DelegationTask describes one sub-task in a delegation event.
+type DelegationTask struct {
+	Name        string
+	Description string
+	PlanStep    string
+}
+
 // Event is one unit of chat progress. Fields are optional by Kind.
 type Event struct {
 	Kind Kind
@@ -71,6 +84,18 @@ type Event struct {
 	Args     map[string]any
 	Result   any
 	Options  []string // approval options
+
+	// ApprovalKind distinguishes code-mode authorization prompts:
+	// "" (generic tool approval), "tool" (not-whitelisted tool execution),
+	// "folder" (out-of-project filesystem access), or "plan" (announce_plan
+	// approval). Paths holds the requested out-of-project paths for a "folder"
+	// prompt. PlanContext/PlanWhatNotToDo/PlanVerification carry the optional
+	// narrative sections from the plan document for "plan" approvals.
+	ApprovalKind        string
+	Paths               []string
+	PlanContext         string
+	PlanWhatNotToDo     string
+	PlanVerification    string
 
 	// SessionID for KindSession / KindSessionTitle.
 	SessionID string
@@ -97,6 +122,19 @@ type Event struct {
 
 	// Meta holds optional backend-specific keys without expanding the struct.
 	Meta map[string]any
+
+	// Delegation fields for KindDelegation.
+	DelegationType     string           // "start", "task_start", "task_complete", "task_failed", "done"
+	DelegationTasks    []DelegationTask // all tasks (only for "start")
+	DelegationTaskName string           // task name (for task_start/task_complete/task_failed)
+	DelegationDuration string           // human-readable duration (for task_complete/task_failed)
+	DelegationError    string           // error message (for task_failed)
+
+	// Delegation activity fields (for task_tool_call/task_tool_result/task_text).
+	DelegationToolName   string
+	DelegationToolArgs   map[string]any
+	DelegationToolResult any
+	DelegationText       string
 }
 
 // NewText returns a streaming agent text event.
@@ -144,7 +182,55 @@ func NewApproval(name string, args map[string]any, options []string) Event {
 	return Event{Kind: KindApproval, ToolName: name, Args: args, Options: options}
 }
 
+// NewAuthorizationApproval returns a code-mode authorization request carrying
+// the approval kind ("tool" or "folder") and, for folder requests, the
+// out-of-project paths being requested.
+func NewAuthorizationApproval(name string, args map[string]any, options []string, kind string, paths []string) Event {
+	return Event{
+		Kind:         KindApproval,
+		ToolName:     name,
+		Args:         args,
+		Options:      options,
+		ApprovalKind: kind,
+		Paths:        paths,
+	}
+}
+
 // NewNetworkDenial returns a network authorization request.
 func NewNetworkDenial(sessionID, sandboxName string, denials []NetworkDenial) Event {
 	return Event{Kind: KindNetworkDenial, SessionID: sessionID, SandboxName: sandboxName, NetworkDenials: denials}
+}
+
+// NewDelegation returns a delegation lifecycle event.
+func NewDelegation(dtype string) Event {
+	return Event{Kind: KindDelegation, DelegationType: dtype}
+}
+
+// NewDelegationStart returns a delegation start event with the full task list.
+func NewDelegationStart(tasks []DelegationTask) Event {
+	return Event{Kind: KindDelegation, DelegationType: "start", DelegationTasks: tasks}
+}
+
+// NewDelegationTaskUpdate returns a per-task lifecycle event (task_start, task_complete, task_failed).
+func NewDelegationTaskUpdate(dtype, taskName, duration, errMsg string) Event {
+	return Event{
+		Kind:               KindDelegation,
+		DelegationType:     dtype,
+		DelegationTaskName: taskName,
+		DelegationDuration: duration,
+		DelegationError:    errMsg,
+	}
+}
+
+// NewDelegationTaskActivity returns a per-task activity event (tool_call, tool_result, text).
+func NewDelegationTaskActivity(dtype, taskName, toolName string, args map[string]any, result any, text string) Event {
+	return Event{
+		Kind:                 KindDelegation,
+		DelegationType:       dtype,
+		DelegationTaskName:   taskName,
+		DelegationToolName:   toolName,
+		DelegationToolArgs:   args,
+		DelegationToolResult: result,
+		DelegationText:       text,
+	}
 }

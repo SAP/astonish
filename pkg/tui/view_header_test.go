@@ -39,7 +39,8 @@ func (b staticBackend) SetModelPin(_ context.Context, provider, model string) (s
 func (b staticBackend) ReadArtifactContent(_ context.Context, _, path string) (backend.ArtifactContent, error) {
 	return backend.ArtifactContent{Path: path, Content: ""}, nil
 }
-func (b staticBackend) Close() error { return nil }
+func (b staticBackend) Close() error                    { return nil }
+func (b staticBackend) RespondSubAgentAuth(string) bool { return false }
 
 func TestViewIncludesHeaderAsFirstLine(t *testing.T) {
 	m := newModel(context.Background(), Config{

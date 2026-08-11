@@ -40,6 +40,9 @@ func WebCapableToolsHandler(w http.ResponseWriter, r *http.Request) {
 	// 1. Add tools from installed standard servers
 	standardServers := config.GetStandardServers()
 	for _, srv := range standardServers {
+		if srv.Category != "web" {
+			continue
+		}
 		if !config.IsStandardServerInstalled(srv.ID) {
 			if srv.ID != "perplexity" {
 				continue

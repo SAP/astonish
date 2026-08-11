@@ -1,12 +1,34 @@
 # Choose Your Interface
 
-Astonish provides multiple interfaces for different workflows and environments. All interfaces connect to the same platform and share sessions, memory, and flows. The daemon must be running for all interfaces to function.
+Astonish provides multiple interfaces for different workflows and environments. Platform-based interfaces connect to the same platform and share sessions, memory, and flows. **Astonish Code** stands alone as a fully local coding tool that requires no platform.
 
 ## Interfaces
 
 ::: tip Recommended Starting Point
-New to Astonish? Start with **Studio** — it gives you the full visual experience with chat, flow design, generative UI, and settings management. You can always connect the CLI later for terminal workflows.
+New to Astonish? Start with **Studio** for the full visual experience, or **Astonish Code** if you want a local AI pair programmer in the terminal right now — no setup beyond an API key.
 :::
+
+### Astonish Code (Local Coding Tool)
+
+A fully local, in-process coding agent — like Claude Code or OpenCode. Runs directly in your project directory with no daemon, no platform, and no login required. Tools execute with your own permissions on the host filesystem.
+
+```bash
+astonish code                          # Start coding in current directory
+astonish code -m anthropic:claude-4    # Pin a specific model
+astonish code -C ./my-project          # Operate in a different directory
+astonish code --auto-approve           # Bypass authorization prompts
+```
+
+Features unique to code mode:
+- **Graph-Optimized Plan mode** — uses a pre-computed code knowledge graph for highly efficient, dependency-aware planning in a fraction of the tool calls
+- **Rollback** — revert both conversation and file changes to any earlier point
+- **Dual-backend switching** (`Ctrl+\`) — switch to platform chat without leaving the TUI
+- **AGENTS.md project guidance** — loads project conventions automatically
+- **Per-project sessions** — each directory keeps its own conversation history
+
+Best for: coding tasks, refactoring, local development, developers who want an AI pair programmer in the terminal.
+
+See [Code Mode documentation](../cli/code.md) for full details.
 
 ### Studio (Web UI)
 
@@ -16,7 +38,7 @@ Best for: flow design, generative UI, managing apps and settings, visual executi
 
 <!-- IMAGE: Studio interface showing chat panel, flow designer, and apps tab -->
 
-### CLI
+### CLI (Platform Chat)
 
 A rich terminal chat interface with colors, markdown rendering, and interactive elements. Supports all agent capabilities including tool use, memory, and flow execution. Requires authentication via `astonish login` before use.
 
@@ -27,7 +49,7 @@ astonish chat -p openai -m gpt-4o      # Specific provider/model
 astonish chat --resume                  # Resume last session
 ```
 
-Best for: quick interactions, scripting, developers who prefer the terminal.
+Best for: platform-backed interactions, team memory, sandboxed execution, developers who prefer the terminal.
 
 ### Remote CLI
 
@@ -62,17 +84,20 @@ Best for: team collaboration, integrating agent responses into existing Slack wo
 
 ## Comparison
 
-| Interface | Deployment | Real-time | Visual | Mobile |
-|-----------|-----------|-----------|--------|--------|
-| Studio | Local / Cloud | Yes | Yes | No |
-| CLI | Local / Cloud | Yes | No | No |
-| Remote CLI | Cloud only | Yes | No | No |
-| Telegram | Local / Cloud | Yes | No | Yes |
-| Email | Local / Cloud | No (async) | No | Yes |
-| Slack | Cloud only | Yes | No | Yes |
+| Interface | Deployment | Real-time | Visual | Mobile | Requires Platform |
+|-----------|-----------|-----------|--------|--------|-------------------|
+| Code | Local only | Yes | No | No | No |
+| Studio | Local / Cloud | Yes | Yes | No | Yes |
+| CLI | Local / Cloud | Yes | No | No | Yes |
+| Remote CLI | Cloud only | Yes | No | No | Yes |
+| Telegram | Local / Cloud | Yes | No | Yes | Yes |
+| Email | Local / Cloud | No (async) | No | Yes | Yes |
+| Slack | Cloud only | Yes | No | Yes | Yes |
 
 ## Running Multiple Interfaces
 
-Interfaces are not mutually exclusive. You can run Studio for visual work while using the CLI for quick tasks, and have Telegram configured for mobile access. All interfaces share the same sessions, memory, and platform context.
+Interfaces are not mutually exclusive. You can run Studio for visual work while using the CLI for quick tasks, and have Telegram configured for mobile access. All platform-based interfaces share the same sessions, memory, and platform context.
 
-The daemon (`astonish daemon start`) must be running for all interfaces to function. The CLI authenticates against the daemon via `astonish login`.
+**Astonish Code** is standalone — it does not require the daemon and can run alongside any other interface. When logged in to a platform, press `Ctrl+\` inside code mode to switch to the platform chat panel without leaving the TUI.
+
+The daemon (`astonish daemon start`) must be running for platform-based interfaces (Studio, CLI, Remote CLI, Channels). The CLI authenticates against the daemon via `astonish login`.

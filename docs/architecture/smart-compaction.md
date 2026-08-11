@@ -998,3 +998,137 @@ Headroom:          159K tokens (for model reasoning + new tool calls)
 
 → Model has MASSIVE headroom while retaining all important findings
 ```
+
+---
+
+## Execution Plan Survival (PLAN.md pointer)
+
+In addition to the task anchor, the compactor preserves the **active execution plan** across
+compaction without folding it into lossy prose.
+
+**Mechanism (current `CompactContents`):**
+
+- Code mode persists an announced plan to a per-session `PLAN.md` sidecar (see
+  `docs/plan-mode-enforcement-summary.md` → "Plan persistence (PLAN.md)"). The path is set on the
+  `Compactor` each turn via `Compactor.SetPlanFilePath` (`pkg/session/compaction.go`).
+- When `CompactContents` builds the context summary, if `PlanFilePath` is set **and** the file
+  exists on disk, a durable pointer is appended to the summary text:
+
+  ```
+  [ACTIVE EXECUTION PLAN] An execution plan with per-phase completion status is persisted at
+  <path>. Re-read it with read_file to recover the exact phases and where you are before
+  continuing. Do not reconstruct the plan from this summary.
+  ```
+
+- The model then re-reads `PLAN.md` to recover the exact phases and their checkbox status
+  (`[ ]` / `[~]` / `[x]` / `[!]`), rather than relying on the prose summary.
+
+**Domain-agnostic boundary:** the `Compactor` only knows a file *path* exists — it never parses
+the plan's contents. Rendering/parsing of the plan document lives in
+`pkg/agent/plan_document.go`. When no plan file is configured or present, compaction behavior is
+unchanged.
+
+**Lifecycle:** the sidecar is cleaned up when its session is deleted (`localAgentBackend.DeleteSession`
+in `pkg/launcher/tui_code.go`, and the `astonish sessions delete` / `sessions clear` CLI in
+`cmd/astonish/sessions.go`), so `PLAN.md` files never outlive their session on disk.
+
+---
+
+## Runtime behavior: memoization, visibility, and manual `/compact`
+
+The runtime `Compactor` (`pkg/session/compaction.go`) is created once in
+`NewWiredChatAgent` and wired via `chatAgent.Compactor.BeforeModelCallback()` in
+the **shared agent runtime** (`pkg/agent/chat_agent_run.go`), so it applies to
+every mode — code, chat/console, Studio, channels, and sub-agents.
+
+### Why compaction felt slow (and the fix)
+
+ADK rebuilds `LLMRequest.Contents` from the full session before **every** model
+call (`ContentsRequestProcessor`), and the compactor's `BeforeModelCallback`
+mutates only that in-flight request. So within a tool loop the *same* older
+history was re-summarized on every step — an expensive LLM call repeated many
+times, which presented as "slow / almost frozen after compaction".
+
+The `summarize` step is now **memoized**: it fingerprints the old portion
+(message count + estimated tokens + first/last text sample) and reuses the prior
+summary instead of re-invoking the summarizer LLM when the old portion is
+unchanged (`summaryFingerprint`, `summaryCacheKey`/`summaryCacheVal`). This
+removes the repeated-summarization cost for all modes.
+
+### Visibility and the header
+
+`Compactor.SetOnCompaction(func(before, after int))` fires after a compaction
+that actually reduces the estimate. Code mode wires this in `driveTurn`
+(`pkg/launcher/tui_code.go`) to:
+
+- emit a transcript `system` notice — `Compacted context: X → Y tokens.` — so
+  the user can see compaction happened (previously it was silent), and
+- emit an **estimated** `usage` reading with the post-compaction token count so
+  the header's `Context X/Y (%)` figure **drops** to the new size.
+
+For the header to decrease, the transcript treats *estimated* usage readings as
+authoritative snapshots (latest value wins, may go down), while provider
+per-call usage keeps the running-max behavior within a turn
+(`Transcript.applyUsage`, `pkg/tui/events/transcript.go`).
+
+### Manual `/compact`
+
+Compaction is automatic (threshold-based) and also **manual**:
+
+- **Code-mode TUI**: `/compact` runs compaction **immediately** via
+  `localAgentBackend.Compact` → `compactToChild(force=true)` (child session,
+  header update, status with before/after). It does **not** wait for the next
+  user message.
+- **Studio**: `/compact` still arms `ForceNextCompaction()` for the next model
+  call (Studio has no child-session compaction path yet).
+
+---
+
+## Persistent compaction (code mode): child-session chain
+
+Compaction must not only shrink the *in-flight* request — it must produce a
+**reloadable** active context. Otherwise a session that compacted three times
+while live still holds ~600k raw events on disk; on resume ADK rebuilds all of
+them and the one-shot re-summarize is both slow and lossy (summarizer input is
+capped).
+
+### Model: archive full history + rewrite active session in place
+
+Session `ecff74b2` showed the failure mode: in-callback compaction shrank the
+*request* to ~8k tokens, the header briefly reflected that, then
+`emitEstimatedContext` re-read the **unchanged full transcript** (~190k+) and
+the next model step rebuilt that full history again — a thrash loop. No child
+session was ever persisted.
+
+Code mode now **persists** compaction via `FileStore.ArchiveAndReplaceEvents`:
+
+1. Run `CompactContents` on the active session's events.
+2. **Archive** the full event list into a new session id (the parent in the
+   chain). That archive is never mutated by later compaction.
+3. **Rewrite** the *same* active session id to summary + recent events, and
+   update every live ADK session pointer (`liveCopies`) so an in-flight
+   `rnr.Run` sees the compact history on the next model step.
+4. Point the active session's `ParentID` at the archive.
+
+The active session id is unchanged (so mid-turn ADK keeps working). The chain
+`archive₀ ← archive₁ ← … ← active tip` is the source of truth:
+
+| Action | Behavior |
+|--------|----------|
+| **Resume** | Session list shows roots (archives / never-compacted). Resume follows `LatestDescendant` to the tip so the model sees `[latest summary]+tail`. |
+| **Rollback** | `ListRollbackPoints` walks `AncestorChain`. Point IDs are `sessionID:eventIndex`. Option A: re-activate the owning ancestor, truncate it, restore files, **delete later tips**. |
+| **After reload** | Archives still hold pre-compaction turns; rollback-past-compaction works live and after reload. |
+| **Mid-turn** | `BeforeModelCallback` + `SetPersistCompacted` also archives-and-rewrites, so the next tool-loop model call does not rebuild 190k of dead history. |
+
+### Within-turn safety valve
+
+`BeforeModelCallback` still exists and is **memoized** so a tool loop does not
+re-summarize the same old portion every model call. Turn-boundary child creation
+is what makes resume correct; the callback remains a safety net mid-turn.
+
+### Manual `/compact` (code mode)
+
+Runs `compactToChild(force=true)` immediately: creates the summary child,
+switches the active session, updates context tokens, and returns a status line
+with before/after. Automatic turn-boundary compaction still uses the threshold
+check (`force=false`).

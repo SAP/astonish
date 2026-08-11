@@ -56,7 +56,12 @@ func highlightPlainRange(line string, start, end int) string {
 	return string(runes[:start]) + ansiSelectionStart + string(runes[start:end]) + ansiReset + string(runes[end:])
 }
 
-func selectionText(lines []string, start, end selectionPoint) string {
+// selectionText extracts the plain-text selection from lines. spans, when
+// non-nil, gives the [start,end) content column range for each line so
+// decorative chrome (box borders, padding, expand hints) is excluded from the
+// copied text. Lines without a span (or with a nil spans slice) contribute
+// their full width, preserving behavior for undecorated blocks.
+func selectionText(lines []string, spans [][2]int, start, end selectionPoint) string {
 	if len(lines) == 0 {
 		return ""
 	}
@@ -79,6 +84,20 @@ func selectionText(lines []string, start, end selectionPoint) string {
 		}
 		if startCol > endCol {
 			startCol, endCol = endCol, startCol
+		}
+		// Clamp the selected columns to this line's content span so borders and
+		// interior padding never reach the clipboard.
+		if lineNo < len(spans) {
+			cs, ce := spans[lineNo][0], spans[lineNo][1]
+			if startCol < cs {
+				startCol = cs
+			}
+			if endCol > ce {
+				endCol = ce
+			}
+			if startCol > endCol {
+				startCol = endCol
+			}
 		}
 		out = append(out, strings.TrimRight(string(runes[startCol:endCol]), " "))
 	}

@@ -49,8 +49,11 @@ type SubTaskProgressEvent struct {
 	ToolResult any    `json:"tool_result,omitempty"` // Tool result (for task_tool_result)
 	Text       string `json:"text,omitempty"`        // Text output (for task_text)
 	// Fields for plan_announced
-	PlanGoal  string         `json:"plan_goal,omitempty"`  // Plan title (for plan_announced)
-	PlanSteps []PlanStepInfo `json:"plan_steps,omitempty"` // Plan steps (for plan_announced)
+	PlanGoal         string         `json:"plan_goal,omitempty"`          // Plan title (for plan_announced)
+	PlanSteps        []PlanStepInfo `json:"plan_steps,omitempty"`         // Plan steps (for plan_announced)
+	PlanContext      string         `json:"plan_context,omitempty"`       // Context section (for plan_announced)
+	PlanWhatNotToDo  string         `json:"plan_what_not_to_do,omitempty"` // What not to change (for plan_announced)
+	PlanVerification string         `json:"plan_verification,omitempty"`  // End-to-end smoke test (for plan_announced)
 	// Fields for plan_step_update
 	StepName   string `json:"step_name,omitempty"`   // Step name to update (for plan_step_update)
 	StepStatus string `json:"step_status,omitempty"` // New step status: running, complete, failed (for plan_step_update)
@@ -63,10 +66,46 @@ type SubTaskInfo struct {
 	PlanStep    string `json:"plan_step,omitempty"` // Which plan step this task belongs to
 }
 
+// PlanFileChange describes a single file a plan phase will touch, along with
+// the kind of change. It is persisted to PLAN.md and surfaced in the plan UI so
+// the user can see the concrete blast radius of each phase before approving.
+type PlanFileChange struct {
+	Path string `json:"path"`
+	// Kind is one of "new", "modify", "delete". An unrecognized or empty value
+	// is rendered as a plain modify entry.
+	Kind string `json:"kind,omitempty"`
+}
+
+// PlanDocumentInfo holds optional document-level narrative sections for a plan.
+// These sections provide context, scope guards, and end-to-end verification
+// guidance that survive context compaction alongside the phase list.
+type PlanDocumentInfo struct {
+	Context      string `json:"context,omitempty"`
+	WhatNotToDo  string `json:"what_not_to_do,omitempty"`
+	Verification string `json:"verification,omitempty"`
+}
+
 // PlanStepInfo describes a step in the high-level execution plan.
 type PlanStepInfo struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
+	// Details is optional, richer per-phase content (concrete files, commands,
+	// approach). It is persisted to PLAN.md so the detailed plan survives
+	// context compaction, not just the one-line description.
+	Details string `json:"details,omitempty"`
+	// Files is the optional list of files this phase will create, modify, or
+	// delete. Making the blast radius explicit (dependency-first, no orphaned
+	// code) is what turns a sketch into a complete, approvable plan. Persisted
+	// to PLAN.md and rendered in the plan UI.
+	Files []PlanFileChange `json:"files,omitempty"`
+	// Verify is the optional command that proves this phase is done (build,
+	// test, or lint). It encodes the "every phase ends verified" discipline and
+	// is persisted to PLAN.md.
+	Verify string `json:"verify,omitempty"`
+	// ParallelGroup, when non-empty, labels this step as a member of a named
+	// concurrency group. Steps sharing the same non-empty label may execute
+	// concurrently. Steps with an empty label execute serially.
+	ParallelGroup string `json:"parallel_group,omitempty"`
 }
 
 // SubAgentTask describes a single sub-agent task to execute.
@@ -231,6 +270,19 @@ type SubAgentManager struct {
 	// if it returns a non-nil ToolGroup, that group is injected into ToolGroups
 	// for the remainder of this session.
 	MCPGroupResolver func(ctx context.Context, serverName string) *ToolGroup
+
+	// AuthorizationGate, when set, is called by sub-agent BeforeToolCallbacks
+	// when a tool requires authorization that the session policy has not yet
+	// granted. It blocks until the user responds. Returns the user's decision.
+	// Only set in code-mode TUI (not platform/daemon). Thread-safe: may be
+	// called from multiple sub-agent goroutines (they serialize on the TUI's
+	// single approval slot).
+	AuthorizationGate func(req SubAgentAuthRequest) SubAgentAuthResponse
+
+	// GetAuthPolicy returns the parent session's authorization policy for the
+	// given session ID. Used by sub-agent authorization gates to check/consume
+	// grants on the shared policy. Nil when authorization is not enforced.
+	GetAuthPolicy func(sessionID string) *SessionAuthPolicy
 
 	// Internal
 	sem          chan struct{}     // concurrency semaphore
@@ -779,6 +831,102 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) TaskRe
 	// Wire credential placeholder substitution so sub-agents can use
 	// {{CREDENTIAL:...}} tokens in tool args.
 	var beforeToolCallbacks []llmagent.BeforeToolCallback
+
+	// ── Sub-agent authorization gates ──
+	// When the parent enforces authorization (code-mode TUI, non-yolo),
+	// sub-agents must check the parent's SessionAuthPolicy before executing
+	// tools. If a tool is not yet authorized, the gate blocks and surfaces
+	// the request to the parent TUI for user approval.
+	if m.AuthorizationGate != nil && m.GetAuthPolicy != nil && task.ParentID != "" {
+		authGate := m.AuthorizationGate
+		getPolicy := m.GetAuthPolicy
+		parentSessionID := task.ParentID
+		taskName := task.Name
+
+		// Folder-access gate (checked first, same as main thread).
+		beforeToolCallbacks = append(beforeToolCallbacks, func(_ tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+			policy := getPolicy(parentSessionID)
+			if policy == nil {
+				return nil, nil // no policy = no enforcement
+			}
+			outside := policy.OutOfScopePaths(args)
+			if len(outside) == 0 {
+				// Allowed — consume any one-shot path grant.
+				policy.ConsumePathGrants(args)
+				return nil, nil
+			}
+			// Paths are out of scope — request authorization from the user.
+			resp := authGate(SubAgentAuthRequest{
+				TaskName:        taskName,
+				Kind:            "folder",
+				ToolName:        t.Name(),
+				Args:            args,
+				OutOfScopePaths: outside,
+				ParentSessionID: parentSessionID,
+			})
+			if resp.Granted {
+				// Apply the grant to the policy based on the user's choice.
+				choice := NormalizeAuthChoice(resp.Choice)
+				switch choice {
+				case "broad2": // "Always Allow" → grant paths for session
+					for _, path := range outside {
+						policy.GrantPathForSession(path)
+					}
+				default: // "Allow" → grant paths once
+					for _, path := range outside {
+						policy.GrantPathOnce(path)
+					}
+				}
+				// Subsume the tool gate for this call (same as main thread).
+				if RequiresToolAuthorization(t.Name(), false) {
+					policy.GrantToolOnce(t.Name())
+				}
+				return nil, nil
+			}
+			return map[string]any{
+				"status": "authorization_denied",
+				"error":  AuthorizationDeniedMessage(t.Name()),
+			}, nil
+		})
+
+		// Tool-execution gate (Normal-mode whitelist = agent.SafeTools).
+		beforeToolCallbacks = append(beforeToolCallbacks, func(_ tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+			name := t.Name()
+			if !RequiresToolAuthorization(name, false) {
+				return nil, nil // safe tool, no authorization needed
+			}
+			policy := getPolicy(parentSessionID)
+			if policy == nil {
+				return nil, nil // no policy = no enforcement
+			}
+			if policy.ToolAuthorized(name) {
+				return nil, nil // already authorized (e.g., "Always Allow")
+			}
+			// Tool not authorized — request authorization from the user.
+			resp := authGate(SubAgentAuthRequest{
+				TaskName:        taskName,
+				Kind:            "tool",
+				ToolName:        name,
+				Args:            args,
+				ParentSessionID: parentSessionID,
+			})
+			if resp.Granted {
+				// Apply the grant to the policy based on the user's choice.
+				choice := NormalizeAuthChoice(resp.Choice)
+				switch choice {
+				case "broad2": // "Always Allow" → grant all tools for session
+					policy.GrantAllToolsSession()
+				default: // "Allow" → grant this tool once
+					policy.GrantToolOnce(name)
+				}
+				return nil, nil
+			}
+			return map[string]any{
+				"status": "authorization_denied",
+				"error":  AuthorizationDeniedMessage(name),
+			}, nil
+		})
+	}
 	{
 		agentResolver := m.CredentialStore // may be nil if file-based store failed
 		beforeToolCallbacks = append(beforeToolCallbacks, func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {

@@ -216,6 +216,55 @@ func TestShellCommand_AllowsNormalCommands(t *testing.T) {
 	}
 }
 
+// --- Filesystem scope confinement tests ---
+
+func TestShellCommand_ScopeRoot_BlocksOutside(t *testing.T) {
+	root := t.TempDir()
+	SetScopeRoot(root)
+	defer SetScopeRoot("") // reset for other tests
+
+	_, err := ShellCommand(nil, ShellCommandArgs{Command: "cat /etc/hosts"})
+	if err == nil {
+		t.Fatal("expected out-of-scope command to be blocked")
+	}
+	if !strings.Contains(err.Error(), "outside the project directory") {
+		t.Errorf("error should mention scope, got: %v", err)
+	}
+}
+
+func TestShellCommand_ScopeRoot_AllowsInside(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "marker.txt"), []byte("ok"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	SetScopeRoot(root)
+	defer SetScopeRoot("")
+
+	// An absolute path inside root must be allowed.
+	result, err := ShellCommand(nil, ShellCommandArgs{
+		Command: "cat " + filepath.Join(root, "marker.txt"),
+	})
+	if err != nil {
+		t.Fatalf("in-scope command should not be blocked: %v", err)
+	}
+	if !strings.Contains(result.Stdout, "ok") {
+		t.Errorf("unexpected output: %s", result.Stdout)
+	}
+}
+
+func TestShellCommand_ScopeRoot_DisabledByDefault(t *testing.T) {
+	// With no scope root configured, out-of-project paths are NOT blocked by
+	// the scope guard (preserves personal/CLI behavior). The command still runs.
+	SetScopeRoot("")
+	result, err := ShellCommand(nil, ShellCommandArgs{Command: "echo /etc/hosts"})
+	if err != nil {
+		t.Fatalf("with scoping disabled, command should run: %v", err)
+	}
+	if !strings.Contains(result.Stdout, "/etc/hosts") {
+		t.Errorf("unexpected output: %s", result.Stdout)
+	}
+}
+
 func TestReadFile_BlocksStoreKey(t *testing.T) {
 	configDir, err := config.GetConfigDir()
 	if err != nil {

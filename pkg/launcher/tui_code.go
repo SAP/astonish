@@ -884,20 +884,22 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 			}
 		}
 
-		// Graph-Optimized Plan mode: best-effort ensure the .codegraph/ index exists
-		// so the codegraph MCP server can answer queries. If unavailable, a notice
-		// tells the model to call gplan_gaps to skip the graph phase — but the gate
-		// still runs in all cases. We never downgrade to a different mode here.
+		// Ensure the .codegraph/ index exists so the codegraph MCP server can
+		// answer codegraph_explore queries. This runs on every turn but is a
+		// fast no-op when the index already exists (single os.Stat). On first
+		// run it indexes the project and shows progress in the status line.
+		if notice := EnsureCodegraph(ctx, b.workingDir, func(msg string) {
+			out <- events.NewStatus(msg)
+		}); notice != "" {
+			emit("system", map[string]any{"content": notice})
+		}
+
+		// Graph-Optimized Plan mode setup.
 		planMode := opts.PlanMode
 		graphPlan := opts.GraphPlanMode
 		askMode := opts.AskMode
 		systemContext := opts.SystemContext
 		if graphPlan {
-			if notice := EnsureCodegraph(ctx, b.workingDir, func(msg string) {
-				emit("system", map[string]any{"content": msg})
-			}); notice != "" {
-				emit("system", map[string]any{"content": notice})
-			}
 			gp := chatAgent.GetOrCreateGraphPlanState(sessionID)
 			gp.Reset()
 			chatAgent.SetActiveGraphPlan(gp)

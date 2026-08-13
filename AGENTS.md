@@ -279,6 +279,7 @@ The `docs/architecture/` directory is the authoritative reference for cross-cutt
 - `docs/architecture/openshell-sandbox-backend.md` — OpenShell-specific gRPC + Landlock/seccomp details.
 - `docs/architecture/sqlite-backend.md` — Personal-mode SQLite topology.
 - `docs/architecture/smart-compaction.md` — Session compaction algorithm.
+- `docs/architecture/a2a-server.md` — A2A protocol server channel, multi-client auth, identity propagation, task lifecycle.
 
 An index of every architecture doc plus the invariants it defends is in `docs/architecture/AGENTS.md`.
 

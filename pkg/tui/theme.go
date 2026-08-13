@@ -119,8 +119,8 @@ func DefaultTheme() Theme {
 		DiffAddedBg:   lipgloss.NewStyle().Foreground(text).Background(diffAddedBg),
 		DiffRemovedBg: lipgloss.NewStyle().Foreground(text).Background(diffRemovedBg),
 
-		PlanBorder: lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Background(bg),
-		PlanHeader: lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Background(bg).Bold(true),
+		PlanBorder: lipgloss.NewStyle().Foreground(lipgloss.Color("172")).Background(bg),
+		PlanHeader: lipgloss.NewStyle().Foreground(lipgloss.Color("172")).Background(bg).Bold(true),
 		PlanMuted:  lipgloss.NewStyle().Foreground(muted).Background(bg),
 
 		InputBorder: lipgloss.NewStyle().

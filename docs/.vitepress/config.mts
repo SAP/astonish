@@ -103,6 +103,7 @@ export default withMermaid(defineConfig({
             { text: 'Telegram', link: '/docs/channels/telegram' },
             { text: 'Email', link: '/docs/channels/email' },
             { text: 'Slack', link: '/docs/channels/slack' },
+            { text: 'A2A (Agent-to-Agent)', link: '/docs/channels/a2a' },
           ]
         },
         {

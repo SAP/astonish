@@ -68,6 +68,10 @@ var channelDefinitions = map[string]channelDefinition{
 			{key: "channels.slack.client_secret", label: "OAuth Client Secret"},
 		},
 	},
+	"a2a": {
+		description: "A2A Protocol (Agent-to-Agent)",
+		secrets:     []channelSecretDef{}, // A2A uses per-agent API keys managed via admin endpoints
+	},
 }
 
 // emailMSGraphSecrets defines the secrets needed for Microsoft Graph provider.
@@ -215,10 +219,29 @@ func PlatformAdminListChannelsHandler(w http.ResponseWriter, r *http.Request) {
 		result = append(result, info)
 	}
 
+	// A2A (Agent-to-Agent protocol)
+	{
+		info := channelFullInfo{
+			Type:        "a2a",
+			Description: "A2A Protocol (Agent-to-Agent)",
+			Config:      map[string]any{},
+			Secrets:     []channelSecretAt{}, // A2A uses per-agent API keys, not global secrets
+			SecretsSet:  true,                // No global secrets needed
+		}
+		if channels.A2A != nil {
+			info.Enabled = channels.A2A.Enabled
+			info.Config["base_url"] = channels.A2A.BaseURL
+			info.Config["description"] = channels.A2A.Description
+			info.Config["rate_limit"] = channels.A2A.RateLimit
+			info.Config["max_concurrent_tasks"] = channels.A2A.MaxConcurrentTasks
+			info.Config["task_ttl"] = channels.A2A.TaskTTL
+			info.Config["allow_identity_propagation"] = channels.A2A.AllowIdentityPropagation
+		}
+		result = append(result, info)
+	}
+
 	respondJSON(w, http.StatusOK, result)
 }
-
-// PlatformAdminSaveChannelHandler handles PUT /api/platform/admin/channels/{type}.
 // Saves both config fields and secrets for a channel adapter in one request.
 func PlatformAdminSaveChannelHandler(w http.ResponseWriter, r *http.Request) {
 	if RequirePlatformAdmin(w, r) == nil {
@@ -312,6 +335,29 @@ func PlatformAdminSaveChannelHandler(w http.ResponseWriter, r *http.Request) {
 			cfg.CommandURL = v
 		}
 		settings.Channels.Slack = cfg
+	case "a2a":
+		cfg := &store.PlatformA2AConfig{
+			Enabled: body.Enabled,
+		}
+		if v, ok := body.Config["base_url"].(string); ok {
+			cfg.BaseURL = v
+		}
+		if v, ok := body.Config["description"].(string); ok {
+			cfg.Description = v
+		}
+		if v, ok := body.Config["rate_limit"]; ok {
+			cfg.RateLimit = toInt(v)
+		}
+		if v, ok := body.Config["max_concurrent_tasks"]; ok {
+			cfg.MaxConcurrentTasks = toInt(v)
+		}
+		if v, ok := body.Config["task_ttl"].(string); ok {
+			cfg.TaskTTL = v
+		}
+		if v, ok := body.Config["allow_identity_propagation"].(bool); ok {
+			cfg.AllowIdentityPropagation = v
+		}
+		settings.Channels.A2A = cfg
 	}
 
 	if err := settingsStore.Save(r.Context(), settings); err != nil {

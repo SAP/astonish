@@ -1046,6 +1046,7 @@ RULES:
 - If the user asks you to make changes or create a plan, remind them they are in Ask mode and suggest switching to Normal or Plan mode (shift+tab).`
 
 func (m *model) togglePlanMode() {
+	m.restoreComposerPlaceholder()
 	// In platform mode, cycle Normal ↔ Plan only (no Graph Plan / Ask — they're
 	// code-mode-specific and rely on codegraph / local tools).
 	if m.info.Mode == "platform" {
@@ -1064,6 +1065,14 @@ func (m *model) togglePlanMode() {
 	default: // askMode
 		m.askMode = false
 	}
+}
+
+func (m *model) restoreComposerPlaceholder() {
+	if m.info.Mode == "platform" {
+		m.ta.Placeholder = "Message Platform…"
+		return
+	}
+	m.ta.Placeholder = "Message Astonish…"
 }
 
 func (m model) turnOptions() backend.TurnOptions {
@@ -4074,130 +4083,6 @@ func summarizeToolResult(result any, maxWidth int) string {
 	}
 	return strings.Join(lines, "\n")
 }
-// and replaces markdown checkboxes with colored status indicators.
-func (m model) renderPlanDocument(content string, width int) string {
-	th := m.theme
-	if width < 30 {
-		width = 30
-	}
-	inner := width - 6 // left border + 2 padding + right border + 2 padding
-	if inner < 20 {
-		inner = 20
-	}
-
-	// Extract goal from content for the header.
-	title := "Execution Plan"
-	for _, line := range strings.SplitN(content, "\n", 10) {
-		if strings.HasPrefix(line, "**Goal:**") {
-			title = strings.TrimSpace(strings.TrimPrefix(line, "**Goal:**"))
-			if len(title) > inner-10 {
-				title = title[:inner-13] + "…"
-			}
-			break
-		}
-	}
-
-	// Render the interior markdown content (skipping the "# Execution Plan" header
-	// since we show it in the frame border).
-	body := content
-	if strings.HasPrefix(body, "# Execution Plan\n") {
-		body = strings.TrimPrefix(body, "# Execution Plan\n")
-	}
-	body = strings.TrimSpace(body)
-
-	// Render interior as markdown.
-	md := render.Markdown(body, inner, th.RenderStyles())
-	if md == "" {
-		md = th.Text.Width(inner).Render(body)
-	}
-
-	// Post-process: replace checkbox markers with colored status indicators.
-	md = m.stylePlanCheckboxes(md)
-
-	// Build the bordered frame.
-	var b strings.Builder
-
-	// Top border: ┌─ ✦ Title ─────────────────┐
-	titleRendered := th.PlanHeader.Render(" ✦ " + title + " ")
-	titleW := lipgloss.Width(titleRendered)
-	topLineW := width - 2 - titleW // minus ┌ and ┐
-	leftW := 1                      // one ─ before title
-	rightW := topLineW - leftW
-	if rightW < 0 {
-		rightW = 0
-	}
-	b.WriteString(th.PlanBorder.Render("┌"+strings.Repeat("─", leftW)) +
-		titleRendered +
-		th.PlanBorder.Render(strings.Repeat("─", rightW)+"┐"))
-
-	// Body rows with side borders.
-	bodyLines := strings.Split(md, "\n")
-	for _, line := range bodyLines {
-		b.WriteByte('\n')
-		lineW := lipgloss.Width(line)
-		pad := inner - lineW
-		if pad < 0 {
-			pad = 0
-			line = truncateToWidth(line, inner)
-		}
-		b.WriteString(th.PlanBorder.Render("│"))
-		b.WriteString(th.Background.Render("  "))
-		b.WriteString(line)
-		b.WriteString(th.Background.Render(strings.Repeat(" ", pad)))
-		b.WriteString(th.Background.Render("  "))
-		b.WriteString(th.PlanBorder.Render("│"))
-	}
-
-	// Bottom border: └──────────────────────────┘
-	b.WriteByte('\n')
-	b.WriteString(th.PlanBorder.Render("└" + strings.Repeat("─", width-2) + "┘"))
-
-	return b.String()
-}
-
-// stylePlanCheckboxes replaces plain markdown checkbox markers in rendered plan
-// text with colored status indicators for visual clarity.
-func (m model) stylePlanCheckboxes(rendered string) string {
-	th := m.theme
-	// Replace status markers: [x]=complete, [~]=running, [ ]=pending, [!]=failed
-	rendered = strings.ReplaceAll(rendered, "[x]", th.Success.Render("[✓]"))
-	rendered = strings.ReplaceAll(rendered, "[X]", th.Success.Render("[✓]"))
-	rendered = strings.ReplaceAll(rendered, "[~]", th.Brand.Render("[●]"))
-	rendered = strings.ReplaceAll(rendered, "[ ]", th.PlanMuted.Render("[○]"))
-	rendered = strings.ReplaceAll(rendered, "[!]", th.Error.Render("[✗]"))
-	return rendered
-}
-
-// planDocumentContentSpan returns the [start,end) rune-column range of real
-// content within a rendered plan document line, excluding the border characters
-// and interior padding. Used for drag-to-copy selection.
-func planDocumentContentSpan(_ int, plain string) [2]int {
-	runes := []rune(plain)
-	first := -1
-	last := -1
-	for i, r := range runes {
-		if r == '│' {
-			if first == -1 {
-				first = i
-			}
-			last = i
-		}
-	}
-	// Border/decoration rows (top/bottom) have no vertical bars or only corners.
-	if first == -1 || last <= first {
-		return [2]int{0, 0}
-	}
-	start := first + 1
-	end := last
-	// Trim interior padding.
-	for start < end && runes[start] == ' ' {
-		start++
-	}
-	for end > start && runes[end-1] == ' ' {
-		end--
-	}
-	return [2]int{start, end}
-}
 
 // formatDuration renders a duration as a compact human-readable string:
 // "3s", "1m 23s", "1h 5m 12s".
@@ -4444,6 +4329,9 @@ func (m model) cancelInFlightTurn() (tea.Model, tea.Cmd, bool) {
 func (m model) renderHints() string {
 	th := m.theme
 	if m.tr.Awaiting {
+		if it := m.approvalItem(); it != nil && it.ApprovalKind == "plan" {
+			return th.Hint.Render("enter implement  ·  r request changes  ·  n/esc decline  ·  ↑↓ choose")
+		}
 		return th.Hint.Render("y approve  ·  n deny  ·  1/2 select  ·  esc deny")
 	}
 	if m.tr.Streaming {

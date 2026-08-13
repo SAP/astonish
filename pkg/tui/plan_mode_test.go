@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/SAP/astonish/pkg/tui/events"
 )
 
@@ -232,6 +234,80 @@ func TestPlanApprovalRequestChanges(t *testing.T) {
 	if !nm.graphPlanMode {
 		t.Fatal("graphPlanMode should stay true after request changes")
 	}
+	if nm.ta.Placeholder != planChangesHint {
+		t.Fatalf("placeholder = %q, want %q", nm.ta.Placeholder, planChangesHint)
+	}
+}
+
+func TestPlanApprovalKeysMapCorrectly(t *testing.T) {
+	newPlanModel := func() model {
+		m := newTestComposerModel(80)
+		m.graphPlanMode = true
+		m.tr.Apply(events.Event{
+			Kind:         events.KindApproval,
+			ToolName:     "announce_plan",
+			Options:      []string{"Approve & implement", "Request changes", "Decline"},
+			ApprovalKind: "plan",
+		})
+		return m
+	}
+
+	t.Run("y approves", func(t *testing.T) {
+		m := newPlanModel()
+		next, _, handled := m.handleApprovalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+		if !handled {
+			t.Fatal("expected y to be handled")
+		}
+		nm := next.(model)
+		if nm.graphPlanMode {
+			t.Fatal("y should approve and leave plan mode")
+		}
+	})
+	t.Run("r requests changes", func(t *testing.T) {
+		m := newPlanModel()
+		next, _, handled := m.handleApprovalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+		if !handled {
+			t.Fatal("expected r to be handled")
+		}
+		nm := next.(model)
+		if !nm.graphPlanMode {
+			t.Fatal("r should stay in plan mode")
+		}
+		if nm.ta.Placeholder != planChangesHint {
+			t.Fatalf("placeholder = %q, want %q", nm.ta.Placeholder, planChangesHint)
+		}
+	})
+	t.Run("n declines", func(t *testing.T) {
+		m := newPlanModel()
+		next, _, handled := m.handleApprovalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+		if !handled {
+			t.Fatal("expected n to be handled")
+		}
+		nm := next.(model)
+		if nm.graphPlanMode {
+			t.Fatal("n should decline and leave plan mode")
+		}
+		found := false
+		for _, it := range nm.tr.Items {
+			if it.Kind == events.ItemSystem && strings.Contains(it.Content, "declined") {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatal("expected decline system message")
+		}
+	})
+	t.Run("esc declines", func(t *testing.T) {
+		m := newPlanModel()
+		next, _, handled := m.handleApprovalKey(tea.KeyMsg{Type: tea.KeyEsc})
+		if !handled {
+			t.Fatal("expected esc to be handled")
+		}
+		nm := next.(model)
+		if nm.graphPlanMode {
+			t.Fatal("esc should decline and leave plan mode")
+		}
+	})
 }
 
 func TestTurnOptionsAskMode(t *testing.T) {

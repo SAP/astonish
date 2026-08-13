@@ -6,6 +6,7 @@ Communication-channel adapters (Slack, Telegram, Email) plus routing and channel
 - `channel.go` — the `Channel` interface: `InboundMessage`, `OutboundMessage`, `Target`, `ChannelStatus`.
 - `manager.go` — `ChannelManager` (channel registry, routing preferences, per-message routing decisions).
 - Adapters:
+  - `a2a/` — A2A (Agent-to-Agent) protocol adapter. Multi-client, HTTP-driven (not polling). See `pkg/channels/a2a/AGENTS.md`.
   - `email/email.go` — `EmailChannel` (plus-addressing for per-org routing).
   - `slack/slack.go` — `SlackChannel`.
   - `telegram/telegram.go` — `TelegramChannel`.

@@ -188,6 +188,34 @@ func ParsePlanMarkdownFull(md string) (doc PlanDocumentInfo, goal string, steps 
 	return parsePlanMarkdownFull(md)
 }
 
+// ParsePlanDocument re-hydrates PLAN.md into exported types, including per-phase
+// status. Used by the TUI structured card so it does not depend on the
+// unexported planStep type. The on-disk document format is unchanged.
+func ParsePlanDocument(md string) (doc PlanDocumentInfo, goal string, steps []PlanStepInfo, err error) {
+	doc, goal, internal, err := parsePlanMarkdownFull(md)
+	if err != nil {
+		return doc, goal, nil, err
+	}
+	steps = planStepsToInfo(internal)
+	return doc, goal, steps, nil
+}
+
+func planStepsToInfo(steps []planStep) []PlanStepInfo {
+	info := make([]PlanStepInfo, len(steps))
+	for i, s := range steps {
+		info[i] = PlanStepInfo{
+			Name:          s.name,
+			Description:   s.description,
+			Details:       s.details,
+			Files:         s.files,
+			Verify:        s.verify,
+			ParallelGroup: s.parallelGroup,
+			Status:        s.status,
+		}
+	}
+	return info
+}
+
 func parsePlanMarkdownFull(md string) (doc PlanDocumentInfo, goal string, steps []planStep, err error) {
 	scanner := bufio.NewScanner(strings.NewReader(md))
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)

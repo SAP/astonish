@@ -347,3 +347,50 @@ func TestParsePlanMarkdown_ParallelGroupsRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+func TestParsePlanDocument_ExportsStatusAndFiles(t *testing.T) {
+	md := `# Execution Plan
+
+**Goal:** Ship it
+
+## Context
+
+Why we are doing this.
+
+## Phases
+
+- [x] **one** — First
+  - File (new): pkg/tui/plan.go
+  - File (modify): pkg/tui/app.go
+  Verify: go test ./pkg/tui
+  details live here
+- [ ] **two** — Second
+
+## What Not To Change
+
+Do not touch the gate.
+
+## Verification
+
+go test ./pkg/tui
+`
+	doc, goal, steps, err := ParsePlanDocument(md)
+	if err != nil {
+		t.Fatalf("ParsePlanDocument: %v", err)
+	}
+	if goal != "Ship it" {
+		t.Fatalf("goal = %q", goal)
+	}
+	if doc.Context == "" || doc.WhatNotToDo == "" || doc.Verification == "" {
+		t.Fatalf("document sections not parsed: %+v", doc)
+	}
+	if len(steps) != 2 {
+		t.Fatalf("steps = %d, want 2", len(steps))
+	}
+	if steps[0].Status != "complete" || steps[1].Status != "pending" {
+		t.Fatalf("statuses = %q/%q", steps[0].Status, steps[1].Status)
+	}
+	if len(steps[0].Files) != 2 || steps[0].Files[0].Kind != "new" || steps[0].Verify == "" {
+		t.Fatalf("files/verify not exported: %+v", steps[0])
+	}
+}

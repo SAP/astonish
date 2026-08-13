@@ -131,6 +131,98 @@ func TestRenderPlanDocumentStatusIcons(t *testing.T) {
 	}
 }
 
+func TestRenderPlanDocumentStructuredCard(t *testing.T) {
+	m := newModel(context.Background(), Config{Backend: staticBackend{}, Width: 80, Height: 24})
+	m.ready = true
+	m.layout()
+
+	content := `# Execution Plan
+
+**Goal:** Implement feature X
+
+_Last updated: 2025-01-01T00:00:00Z_
+
+## Context
+
+Why this change is needed.
+
+## Phases
+
+### ⟳ Parallel group: wave-1
+
+- [ ] **structured-plan-card** — Replace the markdown box
+  - File (new): pkg/tui/plan.go
+  - File (modify): pkg/tui/app.go
+  - File (delete): pkg/tui/old_plan.go
+  Verify: go test ./pkg/tui
+  Keep the existing call site.
+- [~] **approval-action-bar** — Fix y/n/esc mapping
+
+## What Not To Change
+
+Do not change the plan-mode gate.
+
+## Verification
+
+go test ./pkg/tui -count=1
+`
+	plain := stripANSI(m.renderPlanDocument(content, 80))
+
+	if !strings.Contains(plain, "1  [○]") {
+		t.Fatalf("expected numbered pending phase:\n%s", plain)
+	}
+	if !strings.Contains(plain, "2  [●]") {
+		t.Fatalf("expected numbered running phase:\n%s", plain)
+	}
+	if !strings.Contains(plain, "+") || !strings.Contains(plain, "pkg/tui/plan.go") {
+		t.Fatalf("expected + new file kind:\n%s", plain)
+	}
+	if !strings.Contains(plain, "~") || !strings.Contains(plain, "pkg/tui/app.go") {
+		t.Fatalf("expected ~ modify file kind:\n%s", plain)
+	}
+	if !strings.Contains(plain, "−") || !strings.Contains(plain, "pkg/tui/old_plan.go") {
+		t.Fatalf("expected − delete file kind:\n%s", plain)
+	}
+	if !strings.Contains(plain, "$ go test ./pkg/tui") {
+		t.Fatalf("expected verify command:\n%s", plain)
+	}
+	if !strings.Contains(plain, "CONTEXT") {
+		t.Fatalf("expected CONTEXT band:\n%s", plain)
+	}
+	if !strings.Contains(plain, "WHAT NOT TO CHANGE") {
+		t.Fatalf("expected WHAT NOT TO CHANGE band:\n%s", plain)
+	}
+	if !strings.Contains(plain, "VERIFY") {
+		t.Fatalf("expected VERIFY band:\n%s", plain)
+	}
+	if !strings.Contains(plain, "⟳ wave-1") {
+		t.Fatalf("expected parallel-group divider:\n%s", plain)
+	}
+	if strings.Contains(plain, "_Last updated") {
+		t.Fatalf("structured card should hide _Last updated:\n%s", plain)
+	}
+	if strings.Contains(plain, "Legend:") {
+		t.Fatalf("structured card should hide checkbox legend:\n%s", plain)
+	}
+	if !strings.Contains(plain, "ready") && !strings.Contains(plain, "running") {
+		t.Fatalf("expected progress footer:\n%s", plain)
+	}
+}
+
+func TestRenderPlanDocumentFallbackOnUnparseable(t *testing.T) {
+	m := newModel(context.Background(), Config{Backend: staticBackend{}, Width: 80, Height: 24})
+	m.ready = true
+	m.layout()
+
+	plain := stripANSI(m.renderPlanDocument("# Execution Plan\n\nnot a real plan yet", 70))
+	if !strings.Contains(plain, "┌") || !strings.Contains(plain, "└") || !strings.Contains(plain, "│") {
+		t.Fatalf("unparseable plan should still produce a bordered box:\n%s", plain)
+	}
+	if !strings.Contains(plain, "✦") {
+		t.Fatalf("unparseable plan should keep the plan icon:\n%s", plain)
+	}
+}
+
 func TestRenderTranscriptPlanItem(t *testing.T) {
 	m := newModel(context.Background(), Config{Backend: staticBackend{}, Width: 80, Height: 24})
 	m.ready = true

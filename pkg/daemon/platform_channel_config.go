@@ -80,6 +80,18 @@ func loadChannelsConfigFromDB(backend platformDB, logger *Logger) config.Channel
 		}
 	}
 
+	// A2A (Agent-to-Agent protocol)
+	if ch.A2A != nil {
+		enabled := ch.A2A.Enabled
+		out.A2A.Enabled = &enabled
+		out.A2A.BaseURL = ch.A2A.BaseURL
+		out.A2A.TaskTTL = ch.A2A.TaskTTL
+
+		if enabled && logger != nil {
+			logger.Printf("[channels] DB config: A2A enabled base_url=%s", out.A2A.BaseURL)
+		}
+	}
+
 	return out
 }
 
@@ -87,5 +99,6 @@ func loadChannelsConfigFromDB(backend platformDB, logger *Logger) config.Channel
 func anyChannelEnabled(ch config.ChannelsConfig) bool {
 	return ch.Telegram.IsTelegramEnabled() ||
 		ch.Email.IsEmailEnabled() ||
-		ch.Slack.IsSlackEnabled()
+		ch.Slack.IsSlackEnabled() ||
+		ch.A2A.IsA2AEnabled()
 }

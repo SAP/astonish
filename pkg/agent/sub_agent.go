@@ -111,6 +111,10 @@ type PlanStepInfo struct {
 	// concurrency group. Steps sharing the same non-empty label may execute
 	// concurrently. Steps with an empty label execute serially.
 	ParallelGroup string `json:"parallel_group,omitempty"`
+	// Status is the live checkbox state: pending, running, complete, or failed.
+	// Omitted on announce_plan input (new steps start pending). Filled when
+	// re-hydrating PLAN.md or snapshotting PlanState for the TUI.
+	Status string `json:"status,omitempty"`
 }
 
 // SubAgentTask describes a single sub-agent task to execute.

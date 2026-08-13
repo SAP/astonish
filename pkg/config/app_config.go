@@ -1135,6 +1135,7 @@ type ChannelsConfig struct {
 	Telegram TelegramConfig `yaml:"telegram,omitempty" json:"telegram,omitempty"`
 	Email    EmailConfig    `yaml:"email,omitempty" json:"email,omitempty"`
 	Slack    SlackConfig    `yaml:"slack,omitempty" json:"slack,omitempty"`
+	A2A      A2AConfig      `yaml:"a2a,omitempty" json:"a2a,omitempty"`
 }
 
 // IsChannelsEnabled returns true if channels are explicitly enabled.
@@ -1468,6 +1469,22 @@ func (c *SlackConfig) GetMode() string {
 		return "socket"
 	}
 	return c.Mode
+}
+
+// A2AConfig holds configuration for the A2A (Agent-to-Agent) protocol channel.
+type A2AConfig struct {
+	// Enabled controls whether the A2A channel is active. Default: false (nil means false).
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// BaseURL is the external base URL where the A2A endpoint is reachable.
+	// Used in the Agent Card's URL field. Defaults to the daemon's listen address.
+	BaseURL string `yaml:"base_url,omitempty" json:"base_url,omitempty"`
+	// TaskTTL is how long completed tasks are retained. Default: "72h".
+	TaskTTL string `yaml:"task_ttl,omitempty" json:"task_ttl,omitempty"`
+}
+
+// IsA2AEnabled returns true if the A2A channel is explicitly enabled.
+func (c *A2AConfig) IsA2AEnabled() bool {
+	return c.Enabled != nil && *c.Enabled
 }
 
 type ProviderConfig map[string]string

@@ -214,6 +214,12 @@ func TestAnyChannelEnabled(t *testing.T) {
 			c.Slack.Enabled = &en
 			return c
 		}(), true},
+		{"a2a only", func() config.ChannelsConfig {
+			en := true
+			c := config.ChannelsConfig{}
+			c.A2A.Enabled = &en
+			return c
+		}(), true},
 		{"all disabled", func() config.ChannelsConfig {
 			f := false
 			c := config.ChannelsConfig{}
@@ -230,5 +236,41 @@ func TestAnyChannelEnabled(t *testing.T) {
 				t.Errorf("anyChannelEnabled() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestLoadChannelsConfigFromDB_A2AEnabled(t *testing.T) {
+	tmp := t.TempDir()
+	_, esStore, err := entstore.NewPlatformServices(context.Background(), entstore.Config{
+		DSN:     "file:" + filepath.Join(tmp, "platform.db"),
+		DataDir: tmp,
+	})
+	if err != nil {
+		t.Fatalf("NewPlatformServices: %v", err)
+	}
+	defer esStore.Close()
+
+	settings := &store.PlatformSettings{
+		Channels: &store.PlatformChannelSettings{
+			A2A: &store.PlatformA2AConfig{
+				Enabled: true,
+				BaseURL: "https://a2a.example.com",
+				TaskTTL: "48h",
+			},
+		},
+	}
+	if err := esStore.PlatformSettings().Save(context.Background(), settings); err != nil {
+		t.Fatalf("Save settings: %v", err)
+	}
+
+	cfg := loadChannelsConfigFromDB(esStore, nil)
+	if !cfg.A2A.IsA2AEnabled() {
+		t.Error("expected A2A to be enabled")
+	}
+	if cfg.A2A.BaseURL != "https://a2a.example.com" {
+		t.Errorf("expected base_url 'https://a2a.example.com', got %q", cfg.A2A.BaseURL)
+	}
+	if cfg.A2A.TaskTTL != "48h" {
+		t.Errorf("expected task_ttl '48h', got %q", cfg.A2A.TaskTTL)
 	}
 }

@@ -187,3 +187,27 @@ func truncateToWidth(s string, width int) string {
 	}
 	return b.String() + "…"
 }
+
+// truncatePathLeft shortens s to the requested terminal cell width by dropping
+// the prefix, so a path's project name survives overflow. An ellipsis is
+// prepended when truncation is required. It is intended for plain display text.
+func truncatePathLeft(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if lipgloss.Width(s) <= width {
+		return s
+	}
+	if width == 1 {
+		return "…"
+	}
+
+	runes := []rune(s)
+	for i := 1; i < len(runes); i++ {
+		candidate := "…" + string(runes[i:])
+		if lipgloss.Width(candidate) <= width {
+			return candidate
+		}
+	}
+	return "…"
+}

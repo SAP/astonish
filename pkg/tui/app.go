@@ -1919,6 +1919,9 @@ func (m model) statusText() string {
 		fmt.Fprintf(&b, "Org: %s  Team: %s\n", info.Org, info.Team)
 	}
 	fmt.Fprintf(&b, "Session: %s\n", first(info.SessionID, "(none)"))
+	if dir := footerWorkDirText(info.WorkingDir); dir != "" {
+		fmt.Fprintf(&b, "Folder: %s\n", dir)
+	}
 	fmt.Fprintf(&b, "Provider: %s  Model: %s\n", first(info.Provider, "-"), first(info.Model, "-"))
 	if m.planMode {
 		fmt.Fprintln(&b, "Plan mode: on")
@@ -2243,6 +2246,16 @@ func abbreviateHomePath(path string) string {
 		return "~" + string(filepath.Separator) + rel
 	}
 	return path
+}
+
+// footerWorkDirText is the glanceable project-folder label for the footer meta
+// row. Empty input yields empty output (platform mode). Home-prefixed paths are
+// abbreviated the same way as the welcome card.
+func footerWorkDirText(path string) string {
+	if path == "" {
+		return ""
+	}
+	return abbreviateHomePath(path)
 }
 
 // viewportTopY is the screen row where the transcript viewport starts.
@@ -4264,26 +4277,77 @@ func (m model) renderComposerBottomBorder(width int, label string, border lipglo
 		border.Render(strings.Repeat("─", right)+"╯")
 }
 
-// renderFooterMeta shows provider/model and approval mode (Grok footer strip).
+// minFooterFolderWidth is the smallest cell budget that still makes a
+// truncated project path worth showing on the footer meta row.
+const minFooterFolderWidth = 8
+
+// renderFooterMeta shows provider/model, the code-mode project folder, and
+// approval mode on a single Grok-style footer strip. Platform mode leaves
+// WorkingDir empty, so the folder is omitted and the row matches the
+// historical left/right layout.
 func (m model) renderFooterMeta() string {
 	th := m.theme
-	provider := first(m.info.Provider, m.tr.Provider)
-	modelName := first(m.info.Model, m.tr.Model)
+	provider := first(m.info.Provider, "")
+	modelName := first(m.info.Model, "")
+	if m.tr != nil {
+		provider = first(provider, m.tr.Provider)
+		modelName = first(modelName, m.tr.Model)
+	}
 	left := modelFooterText(provider, modelName)
+	folder := footerWorkDirText(m.info.WorkingDir)
 	right := ""
 	if m.info.AutoApprove {
 		right = "auto-approve"
 	}
 	leftR := th.FooterMeta.Render(left)
-	if right == "" {
+	leftW := lipgloss.Width(leftR)
+
+	rightR := ""
+	rightW := 0
+	if right != "" {
+		rightR = th.FooterMeta.Render(right)
+		rightW = lipgloss.Width(rightR)
+	}
+
+	folderR := ""
+	if folder != "" {
+		minGaps := 1
+		if right != "" {
+			minGaps = 2
+		}
+		remaining := m.width - leftW - rightW - minGaps
+		if remaining >= minFooterFolderWidth {
+			folderR = th.FooterMeta.Render(truncatePathLeft(folder, remaining))
+		}
+	}
+
+	switch {
+	case folderR == "" && rightR == "":
 		return m.paintRow(leftR, m.width)
+	case folderR == "":
+		gap := m.width - leftW - rightW
+		if gap < 1 {
+			gap = 1
+		}
+		return m.paintRow(leftR+strings.Repeat(" ", gap)+rightR, m.width)
+	case rightR == "":
+		gap := m.width - leftW - lipgloss.Width(folderR)
+		if gap < 1 {
+			gap = 1
+		}
+		return m.paintRow(leftR+strings.Repeat(" ", gap)+folderR, m.width)
+	default:
+		folderW := lipgloss.Width(folderR)
+		leftover := m.width - leftW - folderW - rightW
+		if leftover < 2 {
+			leftover = 2
+		}
+		leftGap := leftover - 1
+		if leftGap < 1 {
+			leftGap = 1
+		}
+		return m.paintRow(leftR+strings.Repeat(" ", leftGap)+folderR+strings.Repeat(" ", 1)+rightR, m.width)
 	}
-	rightR := th.FooterMeta.Render(right)
-	gap := m.width - lipgloss.Width(leftR) - lipgloss.Width(rightR)
-	if gap < 1 {
-		gap = 1
-	}
-	return m.paintRow(leftR+strings.Repeat(" ", gap)+rightR, m.width)
 }
 
 // renderHints is the keybinding help line under the composer.

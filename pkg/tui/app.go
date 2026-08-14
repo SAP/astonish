@@ -979,6 +979,12 @@ func (m model) insertNewline(intentional bool) (tea.Model, tea.Cmd) {
 	prevValue := m.ta.Value()
 	prevH := m.composerTextHeight()
 	m.ta.InsertString("\n")
+	// In bubbles v2, InsertString doesn't call repositionView(), so the
+	// textarea's internal viewport may not scroll to show the cursor after
+	// the newline is inserted at max height. Force a CursorEnd (no-op
+	// positionally since cursor is already at col 0 of new line) followed by
+	// routing a no-op key through Update to trigger repositionView().
+	m.ta, _ = m.ta.Update(nil)
 	cmd := m.afterComposerChange(prevValue)
 	if m.ready && m.composerTextHeight() != prevH {
 		m.layout()
@@ -2683,6 +2689,7 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 
 const (
 	ansiReset       = "\x1b[0m"
+	ansiResetShort  = "\x1b[m"
 	ansiTrueBlackBG = "\x1b[48;2;0;0;0m"
 	ansiDefaultBG   = "\x1b[49m"
 )
@@ -2714,7 +2721,10 @@ func (m model) paintRow(line string, width int) string {
 }
 
 func forceTrueBlackAfterReset(s string) string {
-	return strings.ReplaceAll(s, ansiReset, ansiReset+ansiTrueBlackBG)
+	s = strings.ReplaceAll(s, ansiReset, ansiReset+ansiTrueBlackBG)
+	// lipgloss v2 uses the short reset form \x1b[m — handle it too.
+	s = strings.ReplaceAll(s, ansiResetShort, ansiResetShort+ansiTrueBlackBG)
+	return s
 }
 
 // renderThinkingBubble is the mid-turn sticky agent slot (replaces between tools).

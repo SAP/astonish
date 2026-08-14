@@ -29,6 +29,41 @@ type Styles struct {
 	NoColor       bool
 }
 
+// Render applies style to text, returning plain text when NoColor is set.
+func (s Styles) Render(style lipgloss.Style, text string) string {
+	if s.NoColor {
+		return text
+	}
+	return style.Render(text)
+}
+
+// Effective returns a copy of the Styles with all style fields replaced by
+// lipgloss.NewStyle() when NoColor is true, so that .Render() calls produce
+// plain text. When NoColor is false, returns the styles unchanged.
+func (s Styles) Effective() Styles {
+	if !s.NoColor {
+		return s
+	}
+	plain := lipgloss.NewStyle()
+	return Styles{
+		Background:    plain,
+		Text:          plain,
+		Muted:         plain,
+		Brand:         plain,
+		Success:       plain,
+		Danger:        plain,
+		Number:        plain,
+		CodeGutter:    plain,
+		CodeHeader:    plain,
+		Heading:       plain,
+		Bold:          plain,
+		Italic:        plain,
+		DiffAddedBg:   plain,
+		DiffRemovedBg: plain,
+		NoColor:       true,
+	}
+}
+
 // DefaultStyles returns a dark-friendly palette matching the TUI theme.
 func DefaultStyles() Styles {
 	brand := lipgloss.Color("63")

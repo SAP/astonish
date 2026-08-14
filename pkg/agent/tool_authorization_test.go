@@ -593,3 +593,95 @@ func TestConsumePathGrants_InScopeNoop(t *testing.T) {
 		t.Error("session-granted directory must stay allowed after ConsumePathGrants")
 	}
 }
+
+// TestOutOfScopePaths_ShellCommandFalsePositives verifies that non-filesystem
+// commands (git, curl, docker, go, npm, etc.) do NOT trigger out-of-scope
+// detection, even when their arguments contain path-shaped tokens.
+func TestOutOfScopePaths_ShellCommandFalsePositives(t *testing.T) {
+	root := t.TempDir()
+	p := NewSessionAuthPolicy(root)
+
+	// Commands that should NOT produce out-of-scope paths (not filesystem commands).
+	noFlag := []struct {
+		name string
+		args map[string]any
+	}{
+		{"git commit with slash", map[string]any{"command": `git commit -m "fix A / B"`}},
+		{"go test with path", map[string]any{"command": "go test ./pkg/tools -run TestFoo"}},
+		{"curl with URL", map[string]any{"command": "curl https://api.example.com/v1/resource"}},
+		{"docker build with context", map[string]any{"command": "docker build -t myimage /path/to/ctx"}},
+		{"npm install", map[string]any{"command": "npm install @scope/package"}},
+		{"echo with path", map[string]any{"command": "echo 'path is /etc/passwd'"}},
+		{"python with import", map[string]any{"command": "python -c 'import /something'"}},
+		{"git push with ref", map[string]any{"command": "git push origin /refs/heads/main"}},
+	}
+	for _, tc := range noFlag {
+		t.Run("no_flag/"+tc.name, func(t *testing.T) {
+			if paths := p.OutOfScopePaths(tc.args); len(paths) != 0 {
+				t.Errorf("OutOfScopePaths(%v) = %v, want empty (non-filesystem command)", tc.args, paths)
+			}
+		})
+	}
+
+	// Commands that SHOULD produce out-of-scope paths (filesystem commands).
+	flag := []struct {
+		name string
+		args map[string]any
+	}{
+		{"cat /etc/passwd", map[string]any{"command": "cat /etc/passwd"}},
+		{"cp /etc/hosts", map[string]any{"command": "cp /etc/hosts ./local"}},
+		{"rm -rf /tmp/important", map[string]any{"command": "rm -rf /tmp/important"}},
+		{"sudo cat /etc/shadow", map[string]any{"command": "sudo cat /etc/shadow"}},
+		{"ls ~/Downloads", map[string]any{"command": "ls ~/Downloads"}},
+	}
+	for _, tc := range flag {
+		t.Run("flag/"+tc.name, func(t *testing.T) {
+			if paths := p.OutOfScopePaths(tc.args); len(paths) == 0 {
+				t.Errorf("OutOfScopePaths(%v) = empty, want non-empty (filesystem command with external path)", tc.args)
+			}
+		})
+	}
+}
+
+// TestOutOfScopePaths_RelativePathsInProject verifies that relative paths
+// within the project (like "pkg/tools/internal.go") do NOT trigger out-of-scope
+// detection when the policy root is set correctly.
+func TestOutOfScopePaths_RelativePathsInProject(t *testing.T) {
+	root := t.TempDir()
+	p := NewSessionAuthPolicy(root)
+
+	// Relative paths that should resolve inside the project root.
+	inScope := []struct {
+		name string
+		args map[string]any
+	}{
+		{"relative with slashes", map[string]any{"path": "pkg/tools/internal.go"}},
+		{"relative tsx", map[string]any{"path": "src/components/App.tsx"}},
+		{"bare filename", map[string]any{"path": "main.go"}},
+		{"dot-slash relative", map[string]any{"path": "./README.md"}},
+	}
+	for _, tc := range inScope {
+		t.Run("in_scope/"+tc.name, func(t *testing.T) {
+			if paths := p.OutOfScopePaths(tc.args); len(paths) != 0 {
+				t.Errorf("OutOfScopePaths(%v) = %v, want empty (relative path inside project)", tc.args, paths)
+			}
+		})
+	}
+
+	// Paths that should be flagged as out-of-scope.
+	outScope := []struct {
+		name string
+		args map[string]any
+	}{
+		{"absolute /etc/passwd", map[string]any{"path": "/etc/passwd"}},
+		{"relative escape", map[string]any{"path": "../outside.txt"}},
+		{"home path", map[string]any{"path": "~/Downloads/secret.txt"}},
+	}
+	for _, tc := range outScope {
+		t.Run("out_scope/"+tc.name, func(t *testing.T) {
+			if paths := p.OutOfScopePaths(tc.args); len(paths) == 0 {
+				t.Errorf("OutOfScopePaths(%v) = empty, want non-empty (path outside project)", tc.args)
+			}
+		})
+	}
+}

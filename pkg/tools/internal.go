@@ -66,7 +66,7 @@ func commandTouchesOutOfScope(command, root string) (string, bool) {
 		return "", false
 	}
 	for _, tok := range pathscope.ExtractCommandPaths(command) {
-		abs := pathscope.NormalizePath(tok)
+		abs := pathscope.NormalizePathInRoot(tok, root)
 		if abs == "" {
 			continue
 		}

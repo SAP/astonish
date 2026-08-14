@@ -802,8 +802,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.prunePastedBlocks()
 		// Keep completion popups in sync with composer value after typing.
+		prevPopupH := m.completionPopupHeight()
 		m.syncSlashCompletion()
 		m.syncFileCompletion()
+		// Re-layout when a completion popup opens/closes so the viewport
+		// shrinks/grows to keep total height within the terminal.
+		if m.completionPopupHeight() != prevPopupH {
+			m.layout()
+			m.refreshViewport()
+		}
 		if watch := m.ensureComposerWatch(); watch != nil {
 			cmds = append(cmds, watch)
 		}
@@ -2026,7 +2033,8 @@ func (m *model) layout() {
 	// Composer: 1 content line + 2 border rows; grow with multiline input.
 	taH := m.composerTextHeight()
 	composerH := taH + 2 // rounded border top/bottom
-	chrome := headerH + statusH + composerH + metaH + hintsH + seps
+	popupH := m.completionPopupHeight()
+	chrome := headerH + statusH + composerH + popupH + metaH + hintsH + seps
 	vh := screenH - chrome
 	if vh < 5 {
 		vh = 5
@@ -2088,6 +2096,31 @@ func (m model) composerTextHeight() int {
 		lines = composerMaxRows
 	}
 	return lines
+}
+
+// completionPopupHeight returns the number of extra lines that a completion
+// popup (slash commands or @file) will add above the composer. Returns 0 when
+// no popup is active. Used by layout() to shrink the viewport so the total
+// rendered height stays within the terminal.
+func (m model) completionPopupHeight() int {
+	if m.tr.Awaiting || m.sessions.open || m.rollback.open || m.modelPicker.open || m.providerPicker.open || m.webSearchPicker.open {
+		return 0
+	}
+	switch {
+	case m.slash.active && len(m.slash.matches) > 0:
+		n := len(m.slash.matches)
+		if n > 8 {
+			n = 8
+		}
+		return 1 + n // header + items
+	case m.files.active && len(m.files.matches) > 0:
+		n := len(m.files.matches)
+		if n > 8 {
+			n = 8
+		}
+		return 1 + n // header + items
+	}
+	return 0
 }
 
 // composerWrapWidth returns the effective text width the composer textarea
@@ -3308,10 +3341,23 @@ func (m model) viewContent() string {
 		}
 		// Non-plan approvals keep the existing overlay behavior.
 		overlay := m.renderApprovalOverlay()
+		// The overlay replaces the composer area but may be taller; cap the
+		// viewport output so the total fits within the terminal height.
+		vpView := m.vp.View()
+		overlayH := strings.Count(overlay, "\n") + 1
+		chrome := 4 + overlayH // header + 2 seps + hints + overlay
+		maxVP := m.screenHeight() - chrome
+		if maxVP < 3 {
+			maxVP = 3
+		}
+		if vpLines := strings.Count(vpView, "\n") + 1; vpLines > maxVP {
+			lines := strings.SplitN(vpView, "\n", maxVP+1)
+			vpView = strings.Join(lines[:maxVP], "\n")
+		}
 		return m.paintBackground(lipgloss.JoinVertical(lipgloss.Left,
 			m.renderHeader(),
 			sep,
-			m.vp.View(),
+			vpView,
 			sep,
 			overlay,
 			m.renderHints(),

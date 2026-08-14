@@ -2024,15 +2024,24 @@ func (m *model) layout() {
 		vh = 5
 	}
 	oldOffset := 0
+	wasAtBottom := true
 	if m.vp.Height() > 0 {
 		oldOffset = m.vp.YOffset()
+		wasAtBottom = m.vp.AtBottom()
 	}
 	m.vp = viewport.New(viewport.WithWidth(m.width), viewport.WithHeight(vh))
+	if !m.theme.NoColor {
+		m.vp.Style = lipgloss.NewStyle().Background(lipgloss.Color("#000000"))
+	}
 	content, hits, artifactHits := m.viewportContent()
 	m.hitRegions = hits
 	m.artifactHits = artifactHits
 	m.vp.SetContent(content)
-	m.vp.SetYOffset(oldOffset)
+	if wasAtBottom {
+		m.vp.GotoBottom()
+	} else {
+		m.vp.SetYOffset(oldOffset)
+	}
 	m.layoutFileViewer()
 
 	// Composer width: terminal width minus border (2) and padding (2).

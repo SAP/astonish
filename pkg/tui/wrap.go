@@ -118,6 +118,11 @@ func wrappedRows(line string, width int) int {
 		}
 		col += wlen
 	}
+	// The textarea adds a trailing cursor line when the last row is exactly
+	// full (>= width). Match that so our height calculation stays in sync.
+	if col >= width {
+		rows++
+	}
 	return rows
 }
 

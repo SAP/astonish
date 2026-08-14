@@ -6,8 +6,8 @@ import (
 	"sort"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/tui/backend"
@@ -28,6 +28,9 @@ func (m model) handleApprovalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 	}
 	if it := m.approvalItem(); it != nil && it.Kind == events.ItemNetworkDenial {
 		return m.handleNetworkDenialKey(msg, it)
+	}
+	if it := m.approvalItem(); it != nil && it.ApprovalKind == "plan" {
+		return m.handlePlanApprovalKey(msg)
 	}
 	opts := m.approvalOptions()
 	key := msg.String()
@@ -504,26 +507,130 @@ func compactLine(s string, maxRunes int) string {
 	return s
 }
 
-// renderPlanApprovalFooter renders a compact inline footer for plan approval,
-// replacing the large bordered overlay dialog. Options are shown horizontally
-// with the cursor-highlighted option rendered in the accent style.
+const (
+	planOptApprove  = "Approve & implement"
+	planOptRequest  = "Request changes"
+	planOptDecline  = "Decline"
+	planChangesHint = "Describe the changes to the plan…"
+)
+
+// handlePlanApprovalKey maps plan-approval accelerators without going through
+// pickYes/pickNo (those would send n/esc to "Request changes"). Navigation
+// keys still move ApprovalCursor; Enter submits the highlighted option.
+func (m model) handlePlanApprovalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
+	opts := m.approvalOptions()
+	key := msg.String()
+	switch key {
+	case "up", "k", "shift+tab", "ctrl+p":
+		if len(opts) > 0 {
+			m.tr.ApprovalCursor = (m.tr.ApprovalCursor - 1 + len(opts)) % len(opts)
+			m.refreshViewport()
+		}
+		return m, nil, true
+	case "down", "j", "tab", "ctrl+n":
+		if len(opts) > 0 {
+			m.tr.ApprovalCursor = (m.tr.ApprovalCursor + 1) % len(opts)
+			m.refreshViewport()
+		}
+		return m, nil, true
+	case "enter":
+		idx := m.tr.ApprovalCursor
+		if idx < 0 || idx >= len(opts) {
+			idx = 0
+		}
+		if len(opts) > 0 {
+			next, cmd := m.submitApproval(opts[idx])
+			return next, cmd, true
+		}
+		return m, nil, true
+	case "y", "Y", "1":
+		next, cmd := m.submitApproval(planOptApprove)
+		return next, cmd, true
+	case "r", "R", "2":
+		next, cmd := m.submitApproval(planOptRequest)
+		return next, cmd, true
+	case "n", "N", "esc", "3":
+		next, cmd := m.submitApproval(planOptDecline)
+		return next, cmd, true
+	}
+	return m, nil, false
+}
+
+// renderPlanApprovalFooter paints a 3-row amber-bordered action bar that
+// replaces the composer during plan approval. The highlighted option is
+// bold with a ▸ caret; narrow terminals stack one option per line.
 func (m model) renderPlanApprovalFooter() string {
 	th := m.theme
+	w := m.width
+	if w < 12 {
+		w = 12
+	}
+	innerW := w - 2
+	contentW := innerW - 2
+	if contentW < 8 {
+		contentW = 8
+	}
 	opts := m.approvalOptions()
 	cursor := m.tr.ApprovalCursor
 	if cursor < 0 || cursor >= len(opts) {
 		cursor = 0
 	}
-	var parts []string
+
+	accel := map[string]string{
+		planOptApprove: "Enter",
+		planOptRequest: "r",
+		planOptDecline: "n",
+	}
+	buttons := make([]string, 0, len(opts))
 	for i, o := range opts {
+		key := accel[o]
+		if key == "" {
+			key = fmt.Sprintf("%d", i+1)
+		}
+		label := fmt.Sprintf(" %s  %s ", key, o)
 		if i == cursor {
-			parts = append(parts, th.Approval.Render("❯ "+o))
+			buttons = append(buttons, th.PlanHeader.Bold(true).Render("▸"+label))
 		} else {
-			parts = append(parts, th.Muted.Render("  "+o))
+			buttons = append(buttons, th.PlanMuted.Render("["+label+"]"))
 		}
 	}
-	line := strings.Join(parts, th.Muted.Render("  "))
-	return m.paintRow(th.Header.Render("✦ Plan Ready")+"  "+line, m.width)
+
+	header := th.PlanHeader.Render("✦ Plan Ready · choose how to proceed")
+	row := strings.Join(buttons, "  ")
+	stacked := lipgloss.Width(stripANSI(row)) > contentW
+	var rows []string
+	rows = append(rows, header)
+	if stacked {
+		for _, btn := range buttons {
+			rows = append(rows, btn)
+		}
+	} else {
+		rows = append(rows, row)
+	}
+
+	border := th.PlanBorder
+	var b strings.Builder
+	b.WriteString(border.Render("╭" + strings.Repeat("─", innerW) + "╮"))
+	for _, line := range rows {
+		plainW := lipgloss.Width(stripANSI(line))
+		if plainW > contentW {
+			line = truncateToWidth(stripANSI(line), contentW)
+			plainW = lipgloss.Width(line)
+		}
+		pad := contentW - plainW
+		if pad < 0 {
+			pad = 0
+		}
+		b.WriteByte('\n')
+		b.WriteString(border.Render("│"))
+		b.WriteString(th.Background.Render(" "))
+		b.WriteString(line)
+		b.WriteString(th.Background.Render(strings.Repeat(" ", pad+1)))
+		b.WriteString(border.Render("│"))
+	}
+	b.WriteByte('\n')
+	b.WriteString(border.Render("╰" + strings.Repeat("─", innerW) + "╯"))
+	return b.String()
 }
 
 // renderPlanApprovalOverlay renders the plan approval prompt shown after
@@ -607,6 +714,8 @@ func (m model) submitPlanApproval(choice string) (tea.Model, tea.Cmd) {
 	case "Request changes":
 		// Stay in plan mode so the user can describe what to change.
 		m.tr.Apply(events.NewSystem("Describe the changes you'd like to the plan:"))
+		m.ta.Placeholder = planChangesHint
+		m.ta.Focus()
 		m.refreshViewport()
 		return m, nil
 

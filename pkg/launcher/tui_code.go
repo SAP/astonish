@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/SAP/astonish/pkg/agent"
@@ -685,11 +686,19 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 	}
 
 	out := make(chan events.Event, 64)
+	var outClosed atomic.Bool
 
 	// emit converts one (type, data) payload — exactly the shape ChatRunner
 	// produces — into TUI events and pushes them onto out. This is the Option B
 	// bridge: one shared translator (mapSSEToEvents), zero duplicated mapping.
+	//
+	// Safe to call from any goroutine, including after the turn goroutine has
+	// closed `out`. Late callers (sub-agent progress callbacks firing after
+	// context cancellation) are silently discarded.
 	emit := func(eventType string, data map[string]any) {
+		if outClosed.Load() {
+			return
+		}
 		raw, mErr := json.Marshal(data)
 		if mErr != nil {
 			return
@@ -704,9 +713,18 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 			if ev.Kind == events.KindModelChanged {
 				b.setModel(ev.Provider, ev.Model)
 			}
-			select {
-			case out <- ev:
-			case <-ctx.Done():
+			// Safe send: recover from the narrow TOCTOU race where
+			// outClosed is read as false but close(out) fires before
+			// the send executes. This can happen when a sub-agent's
+			// deferred progress emission races with context cancellation.
+			func() {
+				defer func() { recover() }() //nolint:errcheck // intentional panic suppression
+				select {
+				case out <- ev:
+				case <-ctx.Done():
+				}
+			}()
+			if outClosed.Load() {
 				return
 			}
 		}
@@ -908,7 +926,10 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 	}
 
 	go func() {
-		defer close(out)
+		defer func() {
+			outClosed.Store(true)
+			close(out)
+		}()
 
 		emit("session", map[string]any{"sessionId": sessionID, "isNew": isNew})
 		// On a brand-new session, seed the index with a provisional title from

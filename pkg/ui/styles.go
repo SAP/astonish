@@ -2,9 +2,10 @@ package ui
 
 import (
 	"fmt"
+	"image/color"
 	"sort"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 )
 
 // RenderToolBox renders a styled box for tool execution approval.
@@ -103,7 +104,7 @@ func RenderToolBox(toolName string, args map[string]interface{}) string {
 // RenderStatusBadge renders a styled status badge (e.g. "✓ Command approved")
 func RenderStatusBadge(text string, success bool) string {
 	var icon string
-	var iconColor lipgloss.Color
+	var iconColor color.Color
 
 	if success {
 		icon = "✓"

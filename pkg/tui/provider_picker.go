@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	"github.com/atotto/clipboard"
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
@@ -261,11 +261,8 @@ func (m model) handleProviderFormKey(msg tea.KeyMsg, key string) (tea.Model, tea
 	// Paste=true (and may be multi-rune); API-key/base-url fields are
 	// single-line, so collapse any newlines/tabs from a paste into spaces and
 	// trim surrounding whitespace.
-	if msg.Type == tea.KeyRunes {
-		text := string(msg.Runes)
-		if msg.Paste {
-			text = strings.TrimSpace(strings.NewReplacer("\r", "", "\n", " ", "\t", " ").Replace(text))
-		}
+	if msg.Key().Text != "" {
+		text := msg.Key().Text
 		m.providerPicker.values[m.providerPicker.fieldCursor] += text
 	}
 	return m, nil

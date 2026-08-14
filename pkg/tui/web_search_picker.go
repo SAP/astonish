@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
@@ -341,8 +341,8 @@ func (m model) handleWebSearchPickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	// Accumulate filter from printable runes.
-	if msg.Type == tea.KeyRunes && !msg.Paste {
-		m.webSearchPicker.filter += string(msg.Runes)
+	if msg.Key().Text != "" {
+		m.webSearchPicker.filter += msg.Key().Text
 		m.webSearchPicker.rebuildItems()
 		return m, nil
 	}
@@ -377,8 +377,8 @@ func (m model) handleWebSearchAPIKeyInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	// Accumulate printable runes into API key (both typed and pasted).
-	if msg.Type == tea.KeyRunes {
-		m.webSearchPicker.apiKeyInput += string(msg.Runes)
+	if msg.Key().Text != "" {
+		m.webSearchPicker.apiKeyInput += msg.Key().Text
 		return m, nil
 	}
 	return m, nil

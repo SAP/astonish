@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
@@ -62,10 +62,10 @@ func TestArtifactClickOpensViewerAndEscCloses(t *testing.T) {
 	if len(m.artifactHits) != 1 {
 		t.Fatalf("artifact hit count=%d want 1", len(m.artifactHits))
 	}
-	y := m.viewportTopY() + m.artifactHits[0].start - m.vp.YOffset
-	next, _ := m.handleMouse(tea.MouseMsg{X: 4, Y: y, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	y := m.viewportTopY() + m.artifactHits[0].start - m.vp.YOffset()
+	next, _ := m.handleMouse(tea.MouseClickMsg{X: 4, Y: y, Button: tea.MouseLeft})
 	m = next.(model)
-	next, cmd := m.handleMouse(tea.MouseMsg{X: 4, Y: y, Button: tea.MouseButtonLeft, Action: tea.MouseActionRelease})
+	next, cmd := m.handleMouse(tea.MouseReleaseMsg{X: 4, Y: y, Button: tea.MouseLeft})
 	m = next.(model)
 	if !m.fileViewer.open || !m.fileViewer.loading {
 		t.Fatalf("viewer not opened/loading: %+v", m.fileViewer)
@@ -90,7 +90,7 @@ func TestArtifactClickOpensViewerAndEscCloses(t *testing.T) {
 		t.Fatalf("markdown viewer did not render content:\n%s", out)
 	}
 
-	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	next, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	m = next.(model)
 	if m.fileViewer.open {
 		t.Fatal("expected esc to close file viewer")

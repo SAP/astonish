@@ -110,6 +110,7 @@ func (ps *PlanState) SnapshotInfo() (string, []PlanStepInfo) {
 			Files:         s.files,
 			Verify:        s.verify,
 			ParallelGroup: s.parallelGroup,
+			Status:        s.status,
 		}
 	}
 	return goal, info

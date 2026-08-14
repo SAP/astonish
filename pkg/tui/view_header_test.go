@@ -57,7 +57,7 @@ func TestViewIncludesHeaderAsFirstLine(t *testing.T) {
 	m.layout()
 	m.refreshViewport()
 
-	out := stripANSI(m.View())
+	out := stripANSI(m.View().Content)
 	lines := strings.Split(out, "\n")
 	firstLine := lines[0]
 	if !strings.Contains(firstLine, "Astonish · https://astonish.example.com · user@example.com") {

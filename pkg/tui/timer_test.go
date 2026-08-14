@@ -6,8 +6,6 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-
 	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
 )
@@ -300,5 +298,3 @@ func TestApplyEventPausesTimerOnApproval(t *testing.T) {
 	}
 }
 
-// Ensure the unused import of tea is consumed.
-var _ = tea.KeyMsg{}

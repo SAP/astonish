@@ -9,6 +9,7 @@ Channels are communication adapters that connect external messaging platforms to
 | [Telegram](./telegram.md) | Bot API (polling/webhook) | Real-time chat, inline commands |
 | [Email](./email.md) | IMAP/SMTP | Asynchronous, plus-addressing routing |
 | [Slack](./slack.md) | Events API + OAuth | Workspace integration, threads |
+| [A2A](./a2a.md) | JSON-RPC over HTTP | Agent-to-agent collaboration, multi-client |
 
 ## Architecture
 
@@ -25,6 +26,8 @@ Every channel adapter follows the same pattern:
 │  Telegram  │────▶│   Channel   │────▶│    Agent     │
 │  Email     │◀────│   Adapter   │◀────│    Engine    │
 │  Slack     │     └─────────────┘     └──────────────┘
+│  A2A       │
+└────────────┘
 ```
 
 The agent engine is shared across all interfaces. A conversation started in Telegram uses the same flows, tools, and memory as one started in Studio or the CLI.
@@ -62,3 +65,4 @@ See the individual channel pages for detailed setup instructions:
 - [Telegram](./telegram.md)
 - [Email](./email.md)
 - [Slack](./slack.md)
+- [A2A (Agent-to-Agent)](./a2a.md)

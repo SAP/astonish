@@ -19,7 +19,7 @@ import (
 	emailPkg "github.com/SAP/astonish/pkg/email"
 	"github.com/SAP/astonish/pkg/store/entstore"
 	"github.com/charmbracelet/huh"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	slackPkg "github.com/slack-go/slack"

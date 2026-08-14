@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/SAP/astonish/pkg/tui/backend"
 )
@@ -234,7 +234,7 @@ func TestModelPickerEscFromModelStepGoesBack(t *testing.T) {
 		models:           []string{"gpt-4o"},
 	}
 	m.modelPicker.rebuildItems()
-	next, _ := m.handleModelPickerKey(tea.KeyMsg{Type: tea.KeyEsc})
+	next, _ := m.handleModelPickerKey(tea.KeyPressMsg{Code: tea.KeyEsc})
 	m = next.(model)
 	if m.modelPicker.step != "provider" || !m.modelPicker.open {
 		t.Fatalf("step=%q open=%v", m.modelPicker.step, m.modelPicker.open)

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
@@ -163,7 +163,7 @@ func TestSmallPasteInsertsContentAsIs(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			m := newPasteTestModel(t)
-			m = applyKey(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(tc.text), Paste: true})
+			m = applyKey(t, m, tea.PasteMsg{Content: tc.text})
 			if got := m.ta.Value(); got != tc.text {
 				t.Fatalf("value = %q, want %q", got, tc.text)
 			}
@@ -212,9 +212,8 @@ func TestLargePasteShowsPlaceholder(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			m := newPasteTestModel(t)
-			// First case uses Paste:true; others exercise unbracketed multi-line KeyRunes.
-			paste := strings.Contains(tc.name, "bracketed")
-			m = applyKey(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(tc.text), Paste: paste})
+			// In v2, paste always arrives as tea.PasteMsg.
+			m = applyKey(t, m, tea.PasteMsg{Content: tc.text})
 			if got := m.ta.Value(); got != tc.wantPh {
 				t.Fatalf("value = %q, want %q", got, tc.wantPh)
 			}
@@ -236,7 +235,7 @@ func TestLargePasteShowsPlaceholder(t *testing.T) {
 
 func TestUnbracketedLargePasteShowsPlaceholder(t *testing.T) {
 	m := newPasteTestModel(t)
-	m = applyKey(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(pasteFourLines())})
+	m = applyKey(t, m, tea.PasteMsg{Content: pasteFourLines()})
 	if got := m.ta.Value(); got != "[Pasted: 4 lines]" {
 		t.Fatalf("value = %q", got)
 	}
@@ -248,9 +247,9 @@ func TestSingleLinePastesNeverCollapseEvenAfterFourLines(t *testing.T) {
 	// Collapse must be based on each paste payload size, not total composer lines.
 	m := newPasteTestModel(t)
 	for _, line := range []string{"one", "two", "three", "four", "five"} {
-		m = applyKey(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(line), Paste: true})
+		m = applyKey(t, m, tea.PasteMsg{Content: line})
 		if line != "five" {
-			m = applyKey(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("\n"), Paste: true})
+			m = applyKey(t, m, tea.PasteMsg{Content: "\n"})
 		}
 	}
 	if strings.Contains(m.ta.Value(), "[Pasted:") {
@@ -269,14 +268,14 @@ func TestLineByLineRuneInjectionDoesNotCollapse(t *testing.T) {
 	// Terminals may inject Command+V as ordinary one-line-at-a-time runes.
 	// Only a single multi-line insertion of 4+ lines should collapse.
 	m := newPasteTestModel(t)
-	for _, msg := range []tea.KeyMsg{
-		{Type: tea.KeyRunes, Runes: []rune("4")},
-		{Type: tea.KeyRunes, Runes: []rune("\n")},
-		{Type: tea.KeyRunes, Runes: []rune("5")},
-		{Type: tea.KeyRunes, Runes: []rune("\n")},
-		{Type: tea.KeyRunes, Runes: []rune("6")},
-		{Type: tea.KeyRunes, Runes: []rune("\n")},
-		{Type: tea.KeyRunes, Runes: []rune("7")},
+	for _, msg := range []tea.Msg{
+		tea.KeyPressMsg{Code: '4', Text: "4"},
+		tea.KeyPressMsg{Code: 'j', Mod: tea.ModCtrl},
+		tea.KeyPressMsg{Code: '5', Text: "5"},
+		tea.KeyPressMsg{Code: 'j', Mod: tea.ModCtrl},
+		tea.KeyPressMsg{Code: '6', Text: "6"},
+		tea.KeyPressMsg{Code: 'j', Mod: tea.ModCtrl},
+		tea.KeyPressMsg{Code: '7', Text: "7"},
 	} {
 		m = applyKey(t, m, msg)
 	}
@@ -291,7 +290,7 @@ func TestLineByLineRuneInjectionDoesNotCollapse(t *testing.T) {
 func TestMultiLinePasteIntoExistingComposerCollapsesOnlyPaste(t *testing.T) {
 	m := newPasteTestModel(t)
 	m.ta.SetValue("existing line")
-	m = applyKey(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("\none\ntwo\nthree\nfour"), Paste: true})
+	m = applyKey(t, m, tea.PasteMsg{Content: "\none\ntwo\nthree\nfour"})
 	if got := m.ta.Value(); got != "existing line[Pasted: 5 lines]" && got != "existing line\n[Pasted: 4 lines]" {
 		// Paste includes leading newline → 5 content lines after normalize, or 4 if counted differently.
 		// Accept either the placeholder form with prefix preserved.
@@ -357,6 +356,40 @@ func TestComposerExpandsForTypedMultiline(t *testing.T) {
 	}
 }
 
+// TestComposerFirstRowVisibleAfterShiftEnter verifies that pressing Shift+Enter
+// (insertNewline) to go from 1→2 lines does not scroll the first row out of the
+// textarea's internal viewport. Regression test for the pre-grow fix.
+func TestComposerFirstRowVisibleAfterShiftEnter(t *testing.T) {
+	m := newModel(context.Background(), Config{Backend: staticBackend{}, Width: 60, Height: 20})
+	m.ready = true
+	m.layout()
+
+	// Type some text on line 1.
+	const firstLine = "hello world"
+	for _, r := range firstLine {
+		m = applyKey(t, m, tea.KeyPressMsg{Code: r, Text: string(r)})
+	}
+	if m.composerTextHeight() != 1 {
+		t.Fatalf("expected height 1 before newline, got %d", m.composerTextHeight())
+	}
+
+	// Press Shift+Enter (insertNewline).
+	next, _ := m.insertNewline(true)
+	m = next.(model)
+
+	if m.composerTextHeight() != 2 {
+		t.Fatalf("expected height 2 after newline, got %d", m.composerTextHeight())
+	}
+
+	// The first row of the textarea view must still contain the first line text.
+	view := m.ta.View()
+	firstRow := strings.SplitN(view, "\n", 2)[0]
+	if !strings.Contains(firstRow, firstLine) {
+		t.Fatalf("first row scrolled out of view after Shift+Enter: %q not in %q\nfull view:\n%s",
+			firstLine, stripANSI(firstRow), view)
+	}
+}
+
 func TestIntentionalMultilineDoesNotCollapseOnIdleOrWatch(t *testing.T) {
 	m := newPasteTestModel(t)
 	m.intentionalMultiline = true
@@ -403,12 +436,12 @@ func TestLargePasteShowsPlaceholderAndSubmitsFullContent(t *testing.T) {
 	m := newPasteTestModelWithBackend(t, b)
 	pasted := pasteFourLines()
 
-	m = applyKey(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(pasted), Paste: true})
+	m = applyKey(t, m, tea.PasteMsg{Content: pasted})
 	if got := m.ta.Value(); got != "[Pasted: 4 lines]" {
 		t.Fatalf("value = %q", got)
 	}
 
-	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if cmd == nil {
 		t.Fatal("expected submit command")
 	}
@@ -437,7 +470,7 @@ func TestSubmitWithPrefixAndPlaceholderExpandsFullMessage(t *testing.T) {
 	content := pasteFourLines()
 	seedPlaceholder(t, &m, "note: ", "", content)
 
-	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if cmd == nil {
 		t.Fatal("expected submit command")
 	}
@@ -462,15 +495,15 @@ func TestPastePlaceholderArrowKeysJumpOverToken(t *testing.T) {
 	m.ta.SetValue("ab" + ph + "cd")
 
 	// Cursor at end of token.
-	m.ta.SetCursor(len("ab") + len(ph))
-	m = applyKey(t, m, tea.KeyMsg{Type: tea.KeyLeft})
+	m.ta.SetCursorColumn(len("ab") + len(ph))
+	m = applyKey(t, m, tea.KeyPressMsg{Code: tea.KeyLeft})
 	_, col := m.composerLineCol()
 	if col != len("ab") {
 		t.Fatalf("left from end → col %d, want %d (token start)", col, len("ab"))
 	}
 
 	// Right from start jumps to end.
-	m = applyKey(t, m, tea.KeyMsg{Type: tea.KeyRight})
+	m = applyKey(t, m, tea.KeyPressMsg{Code: tea.KeyRight})
 	_, col = m.composerLineCol()
 	if col != len("ab")+len(ph) {
 		t.Fatalf("right from start → col %d, want %d (token end)", col, len("ab")+len(ph))
@@ -483,7 +516,7 @@ func TestPastePlaceholderWordMotionJumpsOverToken(t *testing.T) {
 	ph := pastePlaceholder(content)
 	m.pastedBlocks = []pastedBlock{{placeholder: ph, content: content}}
 	m.ta.SetValue("ab" + ph + "cd")
-	m.ta.SetCursor(len("ab") + len(ph))
+	m.ta.SetCursorColumn(len("ab") + len(ph))
 
 	// alt+left / word-back from end of token should jump to start.
 	if !m.jumpPastePlaceholder(-1) {
@@ -510,14 +543,14 @@ func TestPastePlaceholderCannotNavigateInside(t *testing.T) {
 	m.ta.SetValue(ph)
 
 	// Force caret into the middle of the token, then snap out.
-	m.ta.SetCursor(3)
+	m.ta.SetCursorColumn(3)
 	m.snapOutOfPastePlaceholder(1)
 	_, col := m.composerLineCol()
 	if col != len(ph) {
 		t.Fatalf("snap-out col = %d, want %d (token end)", col, len(ph))
 	}
 
-	m.ta.SetCursor(3)
+	m.ta.SetCursorColumn(3)
 	m.snapOutOfPastePlaceholder(-1)
 	_, col = m.composerLineCol()
 	if col != 0 {
@@ -535,8 +568,8 @@ func TestPastePlaceholderTypingDoesNotSplitToken(t *testing.T) {
 	m.ta.SetValue("ab" + ph + "cd")
 
 	// Caret inside token; typing must not mutate the token body.
-	m.ta.SetCursor(len("ab") + 3)
-	m = applyKey(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("Z")})
+	m.ta.SetCursorColumn(len("ab") + 3)
+	m = applyKey(t, m, tea.KeyPressMsg{Code: 'Z', Text: "Z"})
 
 	assertPlaceholderIntact(t, m.ta.Value(), ph)
 	if strings.Contains(m.ta.Value(), "[PaZsted") {
@@ -557,7 +590,7 @@ func TestPastePlaceholderTypingAfterTokenWorks(t *testing.T) {
 	m.ta.SetValue(ph)
 	m.ta.CursorEnd()
 
-	m = applyKey(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("!")})
+	m = applyKey(t, m, tea.KeyPressMsg{Code: '!', Text: "!"})
 	if got := m.ta.Value(); got != ph+"!" {
 		t.Fatalf("typing after token = %q, want %q", got, ph+"!")
 	}
@@ -586,7 +619,8 @@ func TestPastePlaceholderDeleteKeysRemoveWholeToken(t *testing.T) {
 
 	tests := []struct {
 		name string
-		key  tea.KeyType
+		key  rune
+		mod  tea.KeyMod
 		str  string
 		// setup places caret; default is at end of token with prefix "before "
 		setup func(m *model)
@@ -603,7 +637,7 @@ func TestPastePlaceholderDeleteKeysRemoveWholeToken(t *testing.T) {
 		},
 		{
 			name: "ctrl+w at end",
-			key:  tea.KeyCtrlW,
+			key: 'w', mod: tea.ModCtrl,
 			setup: func(m *model) {
 				m.ta.SetValue("before " + ph)
 				m.ta.CursorEnd()
@@ -612,7 +646,7 @@ func TestPastePlaceholderDeleteKeysRemoveWholeToken(t *testing.T) {
 		},
 		{
 			name: "ctrl+w alone",
-			key:  tea.KeyCtrlW,
+			key: 'w', mod: tea.ModCtrl,
 			setup: func(m *model) {
 				m.ta.SetValue(ph)
 				m.ta.CursorEnd()
@@ -633,7 +667,7 @@ func TestPastePlaceholderDeleteKeysRemoveWholeToken(t *testing.T) {
 			key:  tea.KeyDelete,
 			setup: func(m *model) {
 				m.ta.SetValue(ph + " after")
-				m.ta.SetCursor(0)
+				m.ta.SetCursorColumn(0)
 			},
 			want: " after",
 		},
@@ -642,7 +676,7 @@ func TestPastePlaceholderDeleteKeysRemoveWholeToken(t *testing.T) {
 			key:  tea.KeyBackspace,
 			setup: func(m *model) {
 				m.ta.SetValue("x" + ph + "y")
-				m.ta.SetCursor(len("x") + 3)
+				m.ta.SetCursorColumn(len("x") + 3)
 			},
 			want: "xy",
 		},
@@ -666,9 +700,9 @@ func TestPastePlaceholderDeleteKeysRemoveWholeToken(t *testing.T) {
 			var msg tea.Msg
 			if tc.str != "" {
 				// ctrl+h is KeyCtrlH
-				msg = tea.KeyMsg{Type: tea.KeyCtrlH}
+				msg = tea.KeyPressMsg{Code: 'h', Mod: tea.ModCtrl}
 			} else {
-				msg = tea.KeyMsg{Type: tc.key}
+				msg = tea.KeyPressMsg{Code: tc.key, Mod: tc.mod}
 			}
 			m = applyKey(t, m, msg)
 
@@ -693,7 +727,7 @@ func TestPastePlaceholderBackspaceAfterSuffixOnlyDeletesChar(t *testing.T) {
 	m.ta.SetValue(ph + " after")
 	m.ta.CursorEnd()
 
-	m = applyKey(t, m, tea.KeyMsg{Type: tea.KeyBackspace})
+	m = applyKey(t, m, tea.KeyPressMsg{Code: tea.KeyBackspace})
 	if got := m.ta.Value(); got != ph+" afte" {
 		t.Fatalf("value = %q, want suffix char deleted only", got)
 	}
@@ -710,7 +744,7 @@ func TestCollapsedComposerBackspaceClearsWholePastedValue(t *testing.T) {
 		t.Fatal("expected collapse of 4-line empty-composer paste")
 	}
 
-	m = applyKey(t, m, tea.KeyMsg{Type: tea.KeyBackspace})
+	m = applyKey(t, m, tea.KeyPressMsg{Code: tea.KeyBackspace})
 	if got := m.ta.Value(); got != "" {
 		t.Fatalf("value = %q", got)
 	}
@@ -802,7 +836,7 @@ func TestComposerFirstRowStaysVisibleOnSoftWrap(t *testing.T) {
 	// the textarea's viewport reposition) until the value soft-wraps to 2 rows.
 	const prefix = "abcdef" // must remain visible on row 0 after wrapping
 	for _, r := range prefix + strings.Repeat("x", 60) {
-		m = applyKey(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = applyKey(t, m, tea.KeyPressMsg{Code: r, Text: string(r)})
 		if m.composerTextHeight() > 1 {
 			break
 		}
@@ -829,7 +863,7 @@ func TestComposerFirstRowStaysVisibleOnSoftWrap(t *testing.T) {
 	// Typing a further short char that does not change the wrapped line count
 	// must not leave the textarea padded at the pre-grow cap.
 	before := m.composerTextHeight()
-	m = applyKey(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'z'}})
+	m = applyKey(t, m, tea.KeyPressMsg{Code: 'z', Text: "z"})
 	if m.composerTextHeight() == before && m.ta.Height() != before {
 		t.Fatalf("textarea stuck at height %d after non-growing keystroke (want %d)", m.ta.Height(), before)
 	}
@@ -899,7 +933,7 @@ func TestImagePasteInsertsAtomicPlaceholder(t *testing.T) {
 	}
 	t.Cleanup(func() { clipboardImageReader = orig })
 
-	m = applyKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlV})
+	m = applyKey(t, m, tea.KeyPressMsg{Code: 'v', Mod: tea.ModCtrl})
 	if got := m.ta.Value(); got != "[image #1]" {
 		t.Fatalf("value = %q, want [image #1]", got)
 	}
@@ -920,8 +954,8 @@ func TestImagePasteIncrementsIndex(t *testing.T) {
 	}
 	t.Cleanup(func() { clipboardImageReader = orig })
 
-	m = applyKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlV})
-	m = applyKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlV})
+	m = applyKey(t, m, tea.KeyPressMsg{Code: 'v', Mod: tea.ModCtrl})
+	m = applyKey(t, m, tea.KeyPressMsg{Code: 'v', Mod: tea.ModCtrl})
 	if got := m.ta.Value(); got != "[image #1][image #2]" {
 		t.Fatalf("value = %q", got)
 	}
@@ -940,20 +974,20 @@ func TestImagePasteIsAtomicForNavigationAndDelete(t *testing.T) {
 		number:      1,
 	}}
 	m.ta.SetValue("ab[image #1]cd")
-	m.ta.SetCursor(len("ab") + len("[image #1]"))
+	m.ta.SetCursorColumn(len("ab") + len("[image #1]"))
 
-	m = applyKey(t, m, tea.KeyMsg{Type: tea.KeyLeft})
+	m = applyKey(t, m, tea.KeyPressMsg{Code: tea.KeyLeft})
 	_, col := m.composerLineCol()
 	if col != len("ab") {
 		t.Fatalf("left jump col = %d, want %d", col, len("ab"))
 	}
-	m = applyKey(t, m, tea.KeyMsg{Type: tea.KeyRight})
+	m = applyKey(t, m, tea.KeyPressMsg{Code: tea.KeyRight})
 	_, col = m.composerLineCol()
 	if col != len("ab")+len("[image #1]") {
 		t.Fatalf("right jump col = %d", col)
 	}
 
-	m = applyKey(t, m, tea.KeyMsg{Type: tea.KeyBackspace})
+	m = applyKey(t, m, tea.KeyPressMsg{Code: tea.KeyBackspace})
 	if got := m.ta.Value(); got != "abcd" {
 		t.Fatalf("backspace value = %q", got)
 	}
@@ -974,7 +1008,7 @@ func TestImagePasteSubmitSendsAttachments(t *testing.T) {
 	}}
 	m.ta.SetValue("look [image #1]")
 
-	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if cmd == nil {
 		t.Fatal("expected submit command")
 	}
@@ -1009,7 +1043,7 @@ func TestImageOnlySubmitUsesPlaceholderText(t *testing.T) {
 	}}
 	m.ta.SetValue("[image #1]")
 
-	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if cmd == nil {
 		t.Fatal("expected submit command")
 	}
@@ -1031,7 +1065,7 @@ func TestEmptyPasteWithImageUsesClipboardImage(t *testing.T) {
 	}
 	t.Cleanup(func() { clipboardImageReader = orig })
 
-	m = applyKey(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(""), Paste: true})
+	m = applyKey(t, m, tea.PasteMsg{Content: ""})
 	if got := m.ta.Value(); got != "[image #1]" {
 		t.Fatalf("value = %q", got)
 	}
@@ -1054,7 +1088,7 @@ func TestSniffImageMIME(t *testing.T) {
 func TestTextareaPasteMsgRejectsNonPaste(t *testing.T) {
 	cases := []tea.Msg{
 		nil,
-		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")},
+		tea.KeyPressMsg{Code: 'x', Text: "x"},
 		tea.WindowSizeMsg{Width: 10, Height: 10},
 		"plain string",
 	}

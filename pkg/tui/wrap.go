@@ -3,7 +3,7 @@ package tui
 import (
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 )
 
 // Layout margins (cells) for transcript content relative to the terminal edge.
@@ -118,6 +118,11 @@ func wrappedRows(line string, width int) int {
 		}
 		col += wlen
 	}
+	// The textarea adds a trailing cursor line when the last row is exactly
+	// full (>= width). Match that so our height calculation stays in sync.
+	if col >= width {
+		rows++
+	}
 	return rows
 }
 
@@ -186,4 +191,28 @@ func truncateToWidth(s string, width int) string {
 		b.WriteRune(r)
 	}
 	return b.String() + "…"
+}
+
+// truncatePathLeft shortens s to the requested terminal cell width by dropping
+// the prefix, so a path's project name survives overflow. An ellipsis is
+// prepended when truncation is required. It is intended for plain display text.
+func truncatePathLeft(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if lipgloss.Width(s) <= width {
+		return s
+	}
+	if width == 1 {
+		return "…"
+	}
+
+	runes := []rune(s)
+	for i := 1; i < len(runes); i++ {
+		candidate := "…" + string(runes[i:])
+		if lipgloss.Width(candidate) <= width {
+			return candidate
+		}
+	}
+	return "…"
 }

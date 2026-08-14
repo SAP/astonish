@@ -7,7 +7,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 )
 
 // Styles carries lipgloss colors used by renderers (subset of tui.Theme).
@@ -27,6 +27,41 @@ type Styles struct {
 	DiffAddedBg   lipgloss.Style // background band for added lines in diffs
 	DiffRemovedBg lipgloss.Style // background band for removed lines in diffs
 	NoColor       bool
+}
+
+// Render applies style to text, returning plain text when NoColor is set.
+func (s Styles) Render(style lipgloss.Style, text string) string {
+	if s.NoColor {
+		return text
+	}
+	return style.Render(text)
+}
+
+// Effective returns a copy of the Styles with all style fields replaced by
+// lipgloss.NewStyle() when NoColor is true, so that .Render() calls produce
+// plain text. When NoColor is false, returns the styles unchanged.
+func (s Styles) Effective() Styles {
+	if !s.NoColor {
+		return s
+	}
+	plain := lipgloss.NewStyle()
+	return Styles{
+		Background:    plain,
+		Text:          plain,
+		Muted:         plain,
+		Brand:         plain,
+		Success:       plain,
+		Danger:        plain,
+		Number:        plain,
+		CodeGutter:    plain,
+		CodeHeader:    plain,
+		Heading:       plain,
+		Bold:          plain,
+		Italic:        plain,
+		DiffAddedBg:   plain,
+		DiffRemovedBg: plain,
+		NoColor:       true,
+	}
 }
 
 // DefaultStyles returns a dark-friendly palette matching the TUI theme.

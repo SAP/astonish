@@ -363,8 +363,12 @@ func (p *SessionAuthPolicy) OutOfScopePaths(args map[string]any) []string {
 func (p *SessionAuthPolicy) resolvedPathArgs(args map[string]any) []string {
 	var out []string
 	seen := make(map[string]bool)
+	// Use the policy's project root to resolve relative paths, so that
+	// "pkg/tools/internal.go" resolves against the project directory rather
+	// than the Go process CWD (which may differ).
+	root := p.root
 	consider := func(raw string) {
-		abs := normalizePath(raw)
+		abs := pathscope.NormalizePathInRoot(raw, root)
 		if abs == "" || seen[abs] {
 			return
 		}
@@ -398,11 +402,11 @@ func (p *SessionAuthPolicy) resolvedPathArgs(args map[string]any) []string {
 	}
 	// Free-form command args (shell_command "command"): the paths are not a
 	// discrete arg but embedded in the command text. Extract path-shaped
-	// operands (absolute, ~, .., ./) heuristically and run them through the
-	// SAME containment check. This closes the shell_command bypass where a
-	// command like `cat ~/Downloads/x` or `ls /` reads outside the project
-	// root without ever tripping the folder-access gate. See
-	// pathscope.ExtractCommandPaths for the conservative extraction contract.
+	// operands from known filesystem commands and run them through the SAME
+	// containment check. This closes the shell_command bypass where a command
+	// like `cat ~/Downloads/x` or `ls /` reads outside the project root
+	// without ever tripping the folder-access gate. See
+	// pathscope.ExtractCommandPaths for the command-aware extraction contract.
 	for _, k := range commandArgKeys {
 		if v, ok := args[k]; ok {
 			if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {

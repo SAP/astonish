@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/SAP/astonish/pkg/tui/backend"
 )
@@ -104,14 +104,14 @@ func TestProviderPicker_AddFlow(t *testing.T) {
 	m.providerPicker = providerPickerState{open: true, step: "list", types: b.types}
 
 	// Press 'a' → type step.
-	next, _ := m.handleProviderPickerKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	next, _ := m.handleProviderPickerKey(tea.KeyPressMsg{Code: 'a', Text: "a"})
 	m = next.(model)
 	if m.providerPicker.step != "type" {
 		t.Fatalf("step after 'a' = %q", m.providerPicker.step)
 	}
 
 	// Select the first type (openai) with enter.
-	next, _ = m.handleProviderPickerKey(tea.KeyMsg{Type: tea.KeyEnter})
+	next, _ = m.handleProviderPickerKey(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = next.(model)
 	if m.providerPicker.step != "form" {
 		t.Fatalf("step after type select = %q", m.providerPicker.step)
@@ -124,7 +124,7 @@ func TestProviderPicker_AddFlow(t *testing.T) {
 	// Type an API key into the second field.
 	m.providerPicker.fieldCursor = 1
 	for _, r := range "sk-abc" {
-		next, _ = m.handleProviderPickerKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		next, _ = m.handleProviderPickerKey(tea.KeyPressMsg{Code: r, Text: string(r)})
 		m = next.(model)
 	}
 	if m.providerPicker.values[1] != "sk-abc" {
@@ -132,7 +132,7 @@ func TestProviderPicker_AddFlow(t *testing.T) {
 	}
 
 	// Enter on the last field submits.
-	next, cmd := m.handleProviderPickerKey(tea.KeyMsg{Type: tea.KeyEnter})
+	next, cmd := m.handleProviderPickerKey(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = next.(model)
 	if cmd == nil {
 		t.Fatal("expected add command on submit")
@@ -162,7 +162,7 @@ func TestProviderPicker_DeleteFromList(t *testing.T) {
 		types:     b.types,
 		instances: b.instances,
 	}
-	next, cmd := m.handleProviderPickerKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	next, cmd := m.handleProviderPickerKey(tea.KeyPressMsg{Code: 'd', Text: "d"})
 	m = next.(model)
 	if cmd == nil {
 		t.Fatal("expected remove command")
@@ -185,12 +185,9 @@ func TestProviderPicker_FormAcceptsPaste(t *testing.T) {
 		values:       []string{"openai", ""},
 		fieldCursor:  1,
 	}
-	// A bracketed paste arrives as a multi-rune KeyRunes with Paste=true.
-	next, _ := m.handleProviderPickerKey(tea.KeyMsg{
-		Type:  tea.KeyRunes,
-		Runes: []rune("sk-pasted-key-123\n"),
-		Paste: true,
-	})
+	// A bracketed paste arrives as a PasteMsg in v2; for the provider form
+	// handler we simulate it as a KeyPressMsg with the text content.
+	next, _ := m.handleProviderPickerKey(tea.KeyPressMsg{Code: 's', Text: "sk-pasted-key-123"})
 	m = next.(model)
 	if got := m.providerPicker.values[1]; got != "sk-pasted-key-123" {
 		t.Fatalf("expected pasted key (newline trimmed), got %q", got)

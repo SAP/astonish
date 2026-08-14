@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 )
 
 func TestContentWidth(t *testing.T) {
@@ -83,9 +83,10 @@ func TestWrappedRows(t *testing.T) {
 	if got := wrappedRows("hello", 40); got != 1 {
 		t.Fatalf("short line rows = %d, want 1", got)
 	}
-	// A word exactly at the width fits on one row.
-	if got := wrappedRows(strings.Repeat("x", 40), 40); got != 1 {
-		t.Fatalf("word == width rows = %d, want 1", got)
+	// A word exactly at the width produces 2 visual rows in the textarea
+	// (the cursor sits on a trailing line), matching bubbles/textarea v2 behavior.
+	if got := wrappedRows(strings.Repeat("x", 40), 40); got != 2 {
+		t.Fatalf("word == width rows = %d, want 2", got)
 	}
 	// One cell over the width spills to a second row.
 	if got := wrappedRows(strings.Repeat("x", 41), 40); got != 2 {

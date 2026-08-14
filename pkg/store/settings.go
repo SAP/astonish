@@ -76,6 +76,7 @@ type PlatformChannelSettings struct {
 	Telegram *PlatformTelegramConfig `json:"telegram,omitempty"`
 	Email    *PlatformEmailConfig    `json:"email,omitempty"`
 	Slack    *PlatformSlackConfig    `json:"slack,omitempty"`
+	A2A      *PlatformA2AConfig      `json:"a2a,omitempty"`
 }
 
 // PlatformTelegramConfig holds non-secret Telegram channel settings.
@@ -105,6 +106,17 @@ type PlatformSlackConfig struct {
 	AppID       string `json:"app_id,omitempty"`       // Slack App ID for manifest updates
 	ConfigToken string `json:"config_token,omitempty"` // Deprecated plaintext fallback; prefer platform secret
 	CommandURL  string `json:"command_url,omitempty"`  // HTTPS endpoint for slash commands
+}
+
+// PlatformA2AConfig holds non-secret A2A (Agent-to-Agent) channel settings.
+type PlatformA2AConfig struct {
+	Enabled                  bool   `json:"enabled"`
+	BaseURL                  string `json:"base_url,omitempty"`               // External base URL for Agent Card
+	Description              string `json:"description,omitempty"`            // Agent description in Agent Card
+	RateLimit                int    `json:"rate_limit,omitempty"`             // Per-agent requests/min (0 = unlimited)
+	MaxConcurrentTasks       int    `json:"max_concurrent_tasks,omitempty"`   // Per-agent concurrent tasks (0 = unlimited)
+	TaskTTL                  string `json:"task_ttl,omitempty"`               // Duration for task retention, e.g. "72h"
+	AllowIdentityPropagation bool   `json:"allow_identity_propagation"`      // Global toggle for identity propagation
 }
 
 // OrgSettings represents organization-wide configuration visible to all

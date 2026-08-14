@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/alecthomas/chroma/v2/lexers"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -311,6 +311,7 @@ func diffOps(oldLines, newLines []string, startLine int) []DiffRow {
 }
 
 func renderDiffEditor(path, rawPath string, rows []DiffRow, note string, width int, expanded bool, maxLines int, st Styles) string {
+	st = st.Effective()
 	if width < 20 {
 		width = 20
 	}

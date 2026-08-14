@@ -3,10 +3,10 @@ package ui
 import (
 	"fmt"
 
-	"github.com/charmbracelet/bubbles/progress"
-	"github.com/charmbracelet/bubbles/spinner"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/progress"
+	"charm.land/bubbles/v2/spinner"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 // ParallelModel holds the state of the parallel execution UI
@@ -36,7 +36,7 @@ func NewParallelProgram(total int, nodeName string) *tea.Program {
 
 func initialParallelModel(total int, nodeName string) ParallelModel {
 	p := progress.New(
-		progress.WithDefaultGradient(),
+		progress.WithDefaultBlend(),
 		progress.WithWidth(20), // Keep it compact
 		progress.WithoutPercentage(),
 	)
@@ -56,12 +56,12 @@ func (m ParallelModel) Init() tea.Cmd {
 	return m.spinner.Tick
 }
 
-func (m ParallelModel) View() string {
+func (m ParallelModel) View() tea.View {
 	if m.done {
 		// Final clean state replacing the progress bar
 		check := lipgloss.NewStyle().Foreground(lipgloss.Color("42")).SetString("✓")
 		text := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
-		return fmt.Sprintf("%s %s\n", check, text.Render(fmt.Sprintf("%s (%d items processed)", m.nodeName, m.totalItems)))
+		return tea.NewView(fmt.Sprintf("%s %s\n", check, text.Render(fmt.Sprintf("%s (%d items processed)", m.nodeName, m.totalItems))))
 	}
 
 	// While running
@@ -114,7 +114,7 @@ func (m ParallelModel) View() string {
 		view += "\n  " + logStyle.Render(log)
 	}
 
-	return view
+	return tea.NewView(view)
 }
 
 // ItemLogMsg signals a log message from a worker
@@ -151,8 +151,8 @@ func (m ParallelModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Required for the progress bar animation
 	case progress.FrameMsg:
-		progressModel, cmd := m.progress.Update(msg)
-		m.progress = progressModel.(progress.Model)
+		var cmd tea.Cmd
+		m.progress, cmd = m.progress.Update(msg)
 		return m, cmd
 	}
 	return m, nil

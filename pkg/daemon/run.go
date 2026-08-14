@@ -19,8 +19,10 @@ import (
 
 	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/api"
+	a2apkg "github.com/SAP/astonish/pkg/a2a"
 	"github.com/SAP/astonish/pkg/browser"
 	"github.com/SAP/astonish/pkg/channels"
+	a2achan "github.com/SAP/astonish/pkg/channels/a2a"
 	emailchan "github.com/SAP/astonish/pkg/channels/email"
 	slackchan "github.com/SAP/astonish/pkg/channels/slack"
 	"github.com/SAP/astonish/pkg/channels/telegram"
@@ -580,6 +582,31 @@ func Run(cfg RunConfig) error {
 			}
 		}
 
+		// Register A2A (Agent-to-Agent protocol) channel if enabled
+		var a2aConfigError string
+		if chCfg.A2A.IsA2AEnabled() {
+			taskTTL := 72 * time.Hour
+			if chCfg.A2A.TaskTTL != "" {
+				if parsed, err := time.ParseDuration(chCfg.A2A.TaskTTL); err == nil {
+					taskTTL = parsed
+				}
+			}
+			baseURL := chCfg.A2A.BaseURL
+			if baseURL == "" {
+				baseURL = "http://localhost:9393" // default
+			}
+			taskStore := a2apkg.NewInMemoryTaskStore(taskTTL)
+			agentRegistry := a2apkg.NewInMemoryAgentRegistry()
+			a2aCh := a2achan.New(&a2achan.Config{
+				TaskStore:     taskStore,
+				AgentRegistry: agentRegistry,
+				BaseURL:       baseURL,
+			}, log.Default())
+			mgr.Register(a2aCh)
+			api.SetA2AChannel(a2aCh)
+			logger.Printf("A2A channel registered (multi-client, HTTP-driven)")
+		}
+
 		if err := mgr.StartAll(ctx); err != nil {
 			return mgr, fmt.Errorf("failed to start channels: %w", err)
 		}
@@ -596,6 +623,9 @@ func Run(cfg RunConfig) error {
 		}
 		if chCfg.Slack.IsSlackEnabled() {
 			cfgStatuses["slack"] = api.ChannelConfigStatus{Enabled: true, Error: slackConfigError}
+		}
+		if chCfg.A2A.IsA2AEnabled() {
+			cfgStatuses["a2a"] = api.ChannelConfigStatus{Enabled: true, Error: a2aConfigError}
 		}
 		api.SetChannelConfigStatuses(cfgStatuses)
 

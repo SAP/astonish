@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/SAP/astonish/pkg/tui/events"
 )
@@ -95,7 +95,7 @@ func TestHandleMouseDragCopiesSelection(t *testing.T) {
 	m := model{
 		theme:  DefaultTheme(),
 		tr:     tr,
-		vp:     viewport.New(80, 10),
+		vp:     viewport.New(viewport.WithWidth(80), viewport.WithHeight(10)),
 		width:  80,
 		height: 24,
 		ready:  true,
@@ -103,11 +103,11 @@ func TestHandleMouseDragCopiesSelection(t *testing.T) {
 	m.refreshViewport()
 	y := m.viewportTopY()
 
-	next, _ := m.handleMouse(tea.MouseMsg{X: 2, Y: y, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	next, _ := m.handleMouse(tea.MouseClickMsg{X: 2, Y: y, Button: tea.MouseLeft})
 	m = next.(model)
-	next, _ = m.handleMouse(tea.MouseMsg{X: 7, Y: y, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion})
+	next, _ = m.handleMouse(tea.MouseMotionMsg{X: 7, Y: y, Button: tea.MouseLeft})
 	m = next.(model)
-	next, _ = m.handleMouse(tea.MouseMsg{X: 7, Y: y, Button: tea.MouseButtonLeft, Action: tea.MouseActionRelease})
+	next, _ = m.handleMouse(tea.MouseReleaseMsg{X: 7, Y: y, Button: tea.MouseLeft})
 	m = next.(model)
 
 	if strings.TrimSpace(copied) != "hello" {
@@ -177,7 +177,7 @@ func TestUserBubbleDragCopyExcludesChrome(t *testing.T) {
 	m := model{
 		theme:  th,
 		tr:     tr,
-		vp:     viewport.New(80, 10),
+		vp:     viewport.New(viewport.WithWidth(80), viewport.WithHeight(10)),
 		width:  80,
 		height: 24,
 		ready:  true,
@@ -196,16 +196,16 @@ func TestUserBubbleDragCopyExcludesChrome(t *testing.T) {
 		t.Fatalf("body line not found in %#v", m.transcriptPlainLines)
 	}
 	top := m.viewportTopY()
-	y := top + (bodyLine - m.vp.YOffset)
+	y := top + (bodyLine - m.vp.YOffset())
 	rowWidth := len([]rune(m.transcriptPlainLines[bodyLine]))
 
 	// Drag from the far-left border column across the whole row into the
 	// right border column — the selection spans the decorative chrome.
-	next, _ := m.handleMouse(tea.MouseMsg{X: 0, Y: y, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	next, _ := m.handleMouse(tea.MouseClickMsg{X: 0, Y: y, Button: tea.MouseLeft})
 	m = next.(model)
-	next, _ = m.handleMouse(tea.MouseMsg{X: rowWidth, Y: y, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion})
+	next, _ = m.handleMouse(tea.MouseMotionMsg{X: rowWidth, Y: y, Button: tea.MouseLeft})
 	m = next.(model)
-	next, _ = m.handleMouse(tea.MouseMsg{X: rowWidth, Y: y, Button: tea.MouseButtonLeft, Action: tea.MouseActionRelease})
+	next, _ = m.handleMouse(tea.MouseReleaseMsg{X: rowWidth, Y: y, Button: tea.MouseLeft})
 	m = next.(model)
 
 	if strings.TrimSpace(copied) != "the prompt text" {

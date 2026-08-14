@@ -26,6 +26,11 @@ This directory is the **authoritative reference** for cross-cutting design decis
 ### Code Intelligence
 - `code-intelligence.md` - Tree-sitter-first structural code intelligence. Scope graphs, reference graph, PageRank, sandbox-native execution. LSP is deferred pending observed need. **Status: implemented** (`pkg/codeintel`, sandbox packaging per backend).
 
+### Channels & Protocols
+- `channels.md` — External channel architecture: Telegram, Slack, Email adapters, routing, commands, fleet integration.
+- `a2a-server.md` — A2A (Agent-to-Agent) protocol server implementation as a channel adapter. Discovery (Agent Card), task lifecycle, streaming, push notifications, multi-tenant mapping.
+- `a2a-server-research.md` — Research findings and architectural decision record for A2A integration.
+
 ### Session behavior
 - `smart-compaction.md` — session compaction algorithm.
 

@@ -89,6 +89,52 @@ func NormalizeDir(dir string) string {
 	return NormalizePath(dir)
 }
 
+// NormalizePathInRoot resolves a path relative to root (instead of the process
+// CWD). If path is already absolute, it behaves like NormalizePath. If path is
+// relative and root is non-empty, resolves as filepath.Join(root, path) then
+// proceeds with symlink resolution. Falls back to NormalizePath (CWD-based) if
+// root is empty. This ensures tool arguments like "pkg/tools/internal.go" are
+// resolved against the project directory, not the Go process CWD.
+func NormalizePathInRoot(path, root string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	path = ExpandHome(path)
+	if !filepath.IsAbs(path) && root != "" {
+		path = filepath.Join(root, path)
+	}
+	// From here, same logic as NormalizePath: make absolute, resolve symlinks.
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return ""
+	}
+	abs = filepath.Clean(abs)
+
+	// Resolve symlinks on the deepest existing ancestor to defeat symlink
+	// escapes, then re-attach the non-existent tail.
+	existing := abs
+	var tail []string
+	for {
+		if _, statErr := os.Lstat(existing); statErr == nil {
+			break
+		}
+		parent := filepath.Dir(existing)
+		if parent == existing {
+			break
+		}
+		tail = append([]string{filepath.Base(existing)}, tail...)
+		existing = parent
+	}
+	if resolved, rerr := filepath.EvalSymlinks(existing); rerr == nil {
+		existing = resolved
+	}
+	if len(tail) > 0 {
+		return filepath.Join(append([]string{existing}, tail...)...)
+	}
+	return existing
+}
+
 // DirOf returns the directory containing path (the path itself if it is a
 // directory), normalized. Used when granting a path "for session".
 func DirOf(path string) string {
@@ -128,43 +174,70 @@ func PathWithin(root, candidate string) bool {
 	return true
 }
 
-// ExtractCommandPaths performs a best-effort extraction of the filesystem path
-// tokens embedded in a free-form shell command string. It is intentionally
-// CONSERVATIVE (default-deny biased): it recognizes tokens that reference a
-// location by absolute path (/...), home (~ or ~/...), or an explicit relative
-// escape/reference (../...). These are exactly the shapes that can point
-// OUTSIDE the project root, which is what the folder-access gate must catch.
+// filesystemCommands is the set of command names that are known to touch the
+// filesystem. Only arguments of these commands are inspected for out-of-scope
+// paths. Commands not in this set (git, curl, npm, docker, go, python, etc.)
+// are not inspected — their path-shaped arguments typically represent remote
+// refs, URLs, or other non-filesystem operands that should not trigger
+// folder-access prompts. This mirrors the approach used by OpenCode.
+var filesystemCommands = map[string]bool{
+	// Directory navigation
+	"cd": true, "pushd": true, "popd": true,
+	// File reading
+	"cat": true, "less": true, "more": true, "head": true, "tail": true, "tac": true,
+	// File manipulation
+	"cp": true, "mv": true, "rm": true, "mkdir": true, "rmdir": true,
+	"touch": true, "chmod": true, "chown": true, "chgrp": true,
+	"ln": true, "readlink": true, "realpath": true, "install": true,
+	// File inspection
+	"ls": true, "dir": true, "find": true, "locate": true,
+	"stat": true, "file": true, "du": true, "df": true, "wc": true,
+	// Archives
+	"tar": true, "zip": true, "unzip": true, "gzip": true, "gunzip": true,
+	"bzip2": true, "bunzip2": true, "xz": true, "unxz": true,
+	// Source/execute
+	"source": true, ".": true,
+	// Open
+	"open": true, "xdg-open": true,
+	// Editors (when used non-interactively)
+	"tee": true, "dd": true, "truncate": true, "shred": true,
+}
+
+// commandPrefixes are tokens that wrap the real command (e.g. "sudo cat" → the
+// real command is "cat"). When a segment starts with one of these, we skip it
+// and look at the next token as the command name.
+var commandPrefixes = map[string]bool{
+	"sudo": true, "env": true, "nice": true, "nohup": true,
+	"time": true, "command": true, "builtin": true, "exec": true,
+	"doas": true, "strace": true, "ltrace": true,
+}
+
+// ExtractCommandPaths extracts filesystem path tokens from shell commands that
+// are known to touch the filesystem. Commands like git, curl, npm, docker, etc.
+// are NOT inspected because their path-shaped arguments typically do not
+// represent filesystem access outside the project.
 //
-// Shell syntax is not fully parseable in the general case (command
-// substitution, variable expansion, eval, here-docs, nested shells like
-// `sh -c "..."`, etc. can all hide paths), so callers MUST treat a positive
-// extraction as "these tokens need a scope check" and MUST NOT treat an empty
-// result as proof the command is in-scope. The caller's policy decides what to
-// do when the command is opaque.
+// The function splits the command into segments (separated by shell operators
+// |, &, ;, etc.), identifies the command name in each segment (skipping
+// prefixes like sudo/env and env-assignment tokens), and only extracts
+// path-shaped arguments from commands in the filesystemCommands set.
+//
+// Redirect targets (>, >>, <) are always treated as filesystem paths regardless
+// of the command name, because redirects always touch the filesystem.
 //
 // The tokenizer is QUOTE-AWARE: a single- or double-quoted span is part of one
 // atomic token, so word/operator boundaries INSIDE quotes do not split it. This
-// is the key to not mis-flagging quoted LITERAL DATA — e.g. a commit message
-// `git commit -m "fixes A / B"` yields the whole message as one token, which is
-// not path-shaped (it does not start with /, ~, or ../), instead of a spurious
-// bare "/" operand. A genuinely path-shaped quoted argument such as
-// `cat "/etc/passwd"` still surfaces, because the token content ("/etc/passwd")
-// begins with an absolute-path shape. Just because a command *contains* a "/"
-// (or ~ or ..) inside quoted prose does NOT mean it accesses that location.
+// prevents false positives from quoted literal data (e.g. git commit messages
+// containing "/").
 //
-// The tokenizer:
-//   - splits on shell word boundaries and the common operators | & ; < > ( )
-//     but ONLY outside quotes,
-//   - treats '...' and "..." spans as literal and consumes the quote marks,
-//     joining adjacent quoted/unquoted runs into a single token (shell word-join),
-//   - drops flag tokens (those starting with '-'),
-//   - drops "key=value" env-assignment prefixes but inspects the value,
-//   - returns the raw (un-normalized) tokens; the caller normalizes + tests
-//     containment so this stays a pure string function.
+// Returns the raw (un-normalized) tokens; the caller normalizes + tests
+// containment so this stays a pure string function.
 func ExtractCommandPaths(command string) []string {
 	if strings.TrimSpace(command) == "" {
 		return nil
 	}
+
+	segments, redirectTargets := splitCommandSegments(command)
 
 	var out []string
 	seen := make(map[string]bool)
@@ -179,29 +252,168 @@ func ExtractCommandPaths(command string) []string {
 		}
 	}
 
-	for _, field := range splitCommand(command) {
-		field = strings.TrimSpace(field)
-		if field == "" {
+	// Redirect targets are always filesystem paths regardless of command.
+	for _, rt := range redirectTargets {
+		add(rt)
+	}
+
+	// Process each command segment independently.
+	for _, seg := range segments {
+		cmdName, args := identifyCommand(seg)
+		if cmdName == "" || !filesystemCommands[cmdName] {
 			continue
 		}
-		// Handle key=value env assignments and --opt=value flags: inspect the
-		// value, which may itself be a path (e.g. OUT=/etc/x, --file=../y).
-		// Checked BEFORE the flag-drop below so "--file=../y" still surfaces
-		// its value. Skip this for tokens containing whitespace: those can only
-		// come from a quoted literal (env assignments and --opt=value are always
-		// single unquoted words), and a literal message may legitimately contain
-		// '=' — we must not re-split it into a fake "value".
-		if eq := strings.IndexByte(field, '='); eq >= 0 && eq < len(field)-1 && !strings.ContainsAny(field, " \t") {
-			add(field[eq+1:])
-			continue
+		// Extract path-shaped arguments from this filesystem command.
+		for _, arg := range args {
+			arg = strings.TrimSpace(arg)
+			if arg == "" {
+				continue
+			}
+			// Handle --opt=value flags: inspect the value.
+			if eq := strings.IndexByte(arg, '='); eq >= 0 && eq < len(arg)-1 && !strings.ContainsAny(arg, " \t") {
+				add(arg[eq+1:])
+				continue
+			}
+			// Bare flags are never paths.
+			if strings.HasPrefix(arg, "-") {
+				continue
+			}
+			add(arg)
 		}
-		// Bare flags (e.g. -la, --color) with no attached value are never paths.
-		if strings.HasPrefix(field, "-") {
-			continue
-		}
-		add(field)
 	}
 	return out
+}
+
+// identifyCommand finds the command name in a segment, skipping command
+// prefixes (sudo, env, etc.) and env-assignment tokens (KEY=VALUE). Returns
+// the base name of the command and the remaining argument tokens.
+func identifyCommand(tokens []string) (string, []string) {
+	i := 0
+	for i < len(tokens) {
+		tok := tokens[i]
+		// Skip command prefixes (sudo, env, nice, etc.)
+		base := filepath.Base(tok)
+		if commandPrefixes[base] {
+			i++
+			// For "env", also skip KEY=VALUE tokens that follow it.
+			if base == "env" {
+				for i < len(tokens) && isEnvAssignment(tokens[i]) {
+					i++
+				}
+			}
+			continue
+		}
+		// Skip env-assignment tokens at the start (e.g. "FOO=bar cmd ...")
+		if isEnvAssignment(tok) {
+			i++
+			continue
+		}
+		// This is the command name.
+		if i+1 < len(tokens) {
+			return filepath.Base(tok), tokens[i+1:]
+		}
+		return filepath.Base(tok), nil
+	}
+	return "", nil
+}
+
+// isEnvAssignment reports whether a token looks like a shell env assignment
+// (KEY=VALUE where KEY is a valid identifier). Does not match tokens with
+// whitespace (those come from quoted literals).
+func isEnvAssignment(tok string) bool {
+	if strings.ContainsAny(tok, " \t") {
+		return false
+	}
+	eq := strings.IndexByte(tok, '=')
+	if eq <= 0 {
+		return false
+	}
+	key := tok[:eq]
+	for i, r := range key {
+		if r == '_' || (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') {
+			continue
+		}
+		if i > 0 && r >= '0' && r <= '9' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// splitCommandSegments splits a command line into segments (separated by shell
+// operators |, &, ;, &&, ||) and also extracts redirect targets. Each segment
+// is a slice of tokens representing one simple command. Redirect targets are
+// returned separately because they always represent filesystem access regardless
+// of the command.
+//
+// The tokenizer is quote-aware: quoted spans are treated as single tokens.
+func splitCommandSegments(command string) (segments [][]string, redirectTargets []string) {
+	var (
+		cur           strings.Builder
+		hasTok        bool
+		inQuote       rune
+		currentSeg    []string
+		afterRedirect bool // next token is a redirect target
+	)
+
+	flush := func() {
+		if hasTok {
+			tok := cur.String()
+			cur.Reset()
+			hasTok = false
+
+			if afterRedirect {
+				redirectTargets = append(redirectTargets, tok)
+				afterRedirect = false
+				return
+			}
+			currentSeg = append(currentSeg, tok)
+		}
+		// Note: we do NOT reset afterRedirect when hasTok is false.
+		// Whitespace between '>' and the target should not cancel the redirect.
+	}
+
+	finishSegment := func() {
+		flush()
+		if len(currentSeg) > 0 {
+			segments = append(segments, currentSeg)
+			currentSeg = nil
+		}
+		afterRedirect = false
+	}
+
+	for _, r := range command {
+		if inQuote != 0 {
+			if r == inQuote {
+				inQuote = 0
+				continue
+			}
+			cur.WriteRune(r)
+			hasTok = true
+			continue
+		}
+		switch r {
+		case '\'', '"':
+			inQuote = r
+			hasTok = true
+		case '|', '&', ';', '(', ')':
+			// Segment separator.
+			finishSegment()
+		case '<', '>':
+			// Redirect operator: flush current token, next token is a redirect target.
+			flush()
+			afterRedirect = true
+		case ' ', '\t', '\n', '\r':
+			flush()
+		default:
+			cur.WriteRune(r)
+			hasTok = true
+		}
+	}
+	finishSegment()
+
+	return segments, redirectTargets
 }
 
 // looksLikePathToken reports whether a bare command token references a location
@@ -234,53 +446,4 @@ func looksLikePathToken(tok string) bool {
 	return false
 }
 
-// splitCommand splits a command line into candidate word tokens, treating shell
-// operators as separators. It is QUOTE-AWARE: characters inside single- or
-// double-quoted spans are literal and never treated as word/operator
-// boundaries, and the quote marks themselves are consumed. Adjacent
-// quoted/unquoted runs join into a single token (e.g. cat"/etc"/passwd →
-// "cat/etc/passwd"), mirroring how a real shell forms a word. This is a
-// heuristic (not a full shell lexer — it does not handle backslash escapes,
-// command substitution, or here-docs) but it is sufficient to isolate
-// path-shaped operands from pipelines/redirections WITHOUT shredding quoted
-// literal data (messages, prose, patterns) into spurious path tokens.
-func splitCommand(command string) []string {
-	var (
-		tokens  []string
-		cur     strings.Builder
-		hasTok  bool // whether cur holds an in-progress token
-		inQuote rune // 0, '\'' or '"'
-	)
-	flush := func() {
-		if hasTok {
-			tokens = append(tokens, cur.String())
-			cur.Reset()
-			hasTok = false
-		}
-	}
-	for _, r := range command {
-		if inQuote != 0 {
-			if r == inQuote {
-				inQuote = 0 // closing quote; token continues (may join more)
-				continue
-			}
-			cur.WriteRune(r)
-			hasTok = true
-			continue
-		}
-		switch r {
-		case '\'', '"':
-			// Opening quote: begin a literal span, and mark that a token exists
-			// even if the quoted content is empty ("" is still a word).
-			inQuote = r
-			hasTok = true
-		case ' ', '\t', '\n', '\r', '|', '&', ';', '<', '>', '(', ')':
-			flush()
-		default:
-			cur.WriteRune(r)
-			hasTok = true
-		}
-	}
-	flush()
-	return tokens
-}
+

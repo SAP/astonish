@@ -24,7 +24,7 @@ func TestNewModelShowsWelcomeInsteadOfGreetingTranscript(t *testing.T) {
 	if len(m.tr.Items) != 0 {
 		t.Fatalf("new chat should not add a greeting transcript item: %#v", m.tr.Items)
 	}
-	out := stripANSI(m.View())
+	out := stripANSI(m.View().Content)
 	if !strings.Contains(out, "✦ Astonish") {
 		t.Fatalf("welcome card missing Astonish title:\n%s", out)
 	}
@@ -47,7 +47,7 @@ func TestWelcomeCodeModeShowsCodeCard(t *testing.T) {
 	m.layout()
 	m.refreshViewport()
 
-	out := stripANSI(m.View())
+	out := stripANSI(m.View().Content)
 	// Normalize non-breaking hyphens (U+2011) back to ASCII hyphens for assertions.
 	out = strings.ReplaceAll(out, "\u2011", "-")
 	if !strings.Contains(out, "✦ Astonish Code") {
@@ -83,7 +83,7 @@ func TestWelcomeCodeModeAutoApproveNotice(t *testing.T) {
 	m.layout()
 	m.refreshViewport()
 
-	out := stripANSI(m.View())
+	out := stripANSI(m.View().Content)
 	if !strings.Contains(out, "no prompts") {
 		t.Fatalf("code-mode welcome card should reflect auto-approve state:\n%s", out)
 	}
@@ -103,7 +103,7 @@ func TestWelcomeCodeModeAbbreviatesHomeDir(t *testing.T) {
 	m.layout()
 	m.refreshViewport()
 
-	out := stripANSI(m.View())
+	out := stripANSI(m.View().Content)
 	if !strings.Contains(out, "~"+string(filepath.Separator)+"code") {
 		t.Fatalf("code-mode welcome card should abbreviate the home directory to ~:\n%s", out)
 	}
@@ -117,13 +117,13 @@ func TestWelcomeDisappearsAfterFirstMessage(t *testing.T) {
 	m.ready = true
 	m.layout()
 	m.refreshViewport()
-	if !strings.Contains(stripANSI(m.View()), "✦ Astonish") {
+	if !strings.Contains(stripANSI(m.View().Content), "✦ Astonish") {
 		t.Fatal("expected welcome before conversation starts")
 	}
 
 	m.tr.Apply(events.NewUser("hello"))
 	m.refreshViewport()
-	out := stripANSI(m.View())
+	out := stripANSI(m.View().Content)
 	if strings.Contains(out, "✦ Astonish") {
 		t.Fatalf("welcome should disappear once transcript starts:\n%s", out)
 	}
@@ -142,7 +142,7 @@ func TestStartNewSessionReturnsToWelcome(t *testing.T) {
 
 	next, _ := m.startNewSession()
 	m = next.(model)
-	out := stripANSI(m.View())
+	out := stripANSI(m.View().Content)
 	if !strings.Contains(out, "✦ Astonish") {
 		t.Fatalf("new session should return to welcome:\n%s", out)
 	}
@@ -161,7 +161,7 @@ func TestWelcomeCodeModeHyphenatedDirNoWrap(t *testing.T) {
 	m.layout()
 	m.refreshViewport()
 
-	out := stripANSI(m.View())
+	out := stripANSI(m.View().Content)
 	// Replace non-breaking hyphens (U+2011) back to regular hyphens for assertion.
 	out = strings.ReplaceAll(out, "\u2011", "-")
 

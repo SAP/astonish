@@ -913,6 +913,8 @@ func (m model) handleSlashCompletionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, boo
 		return m, nil, true
 	case "esc":
 		m.slash = slashCompletion{}
+		m.layout()
+		m.refreshViewport()
 		return m, nil, true
 	case "enter":
 		if cmd, ok := m.slash.selectedCommand(); ok {
@@ -956,6 +958,8 @@ func (m model) handleFileCompletionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool
 		return m, nil, true
 	case "esc":
 		m.files = fileCompletion{}
+		m.layout()
+		m.refreshViewport()
 		return m, nil, true
 	case "enter", "ctrl+y":
 		if file, ok := m.files.selectedFile(); ok {

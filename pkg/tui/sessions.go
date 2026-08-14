@@ -156,6 +156,7 @@ func (m model) startNewSession() (tea.Model, tea.Cmd) {
 	m.backend.NewSession()
 	m.info = m.backend.Info()
 	m.tr.Reset()
+	m.layout()
 	m.refreshViewport()
 	return m, nil
 }
@@ -229,6 +230,7 @@ func (m model) applyHistory(msg historyLoadedMsg) (tea.Model, tea.Cmd) {
 		m.tr.Apply(events.NewSystem(msg.notice))
 	}
 	m.sessions = sessionsState{}
+	m.layout()
 	m.refreshViewport()
 	if m.ready {
 		m.vp.GotoBottom()

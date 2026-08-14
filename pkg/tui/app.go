@@ -978,6 +978,12 @@ func (m model) insertNewline(intentional bool) (tea.Model, tea.Cmd) {
 	}
 	prevValue := m.ta.Value()
 	prevH := m.composerTextHeight()
+	// Pre-grow the textarea so the internal viewport has room for the new
+	// line and doesn't scroll the first row out of view (same strategy as
+	// the regular key path).
+	if m.ta.Height() < composerMaxRows {
+		m.ta.SetHeight(composerMaxRows)
+	}
 	m.ta.InsertString("\n")
 	// In bubbles v2, InsertString doesn't call repositionView(), so the
 	// textarea's internal viewport may not scroll to show the cursor after
@@ -989,6 +995,8 @@ func (m model) insertNewline(intentional bool) (tea.Model, tea.Cmd) {
 	if m.ready && m.composerTextHeight() != prevH {
 		m.layout()
 		m.refreshViewport()
+	} else if m.ta.Height() != m.composerTextHeight() {
+		m.ta.SetHeight(m.composerTextHeight())
 	}
 	return m, cmd
 }

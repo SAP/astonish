@@ -356,6 +356,40 @@ func TestComposerExpandsForTypedMultiline(t *testing.T) {
 	}
 }
 
+// TestComposerFirstRowVisibleAfterShiftEnter verifies that pressing Shift+Enter
+// (insertNewline) to go from 1→2 lines does not scroll the first row out of the
+// textarea's internal viewport. Regression test for the pre-grow fix.
+func TestComposerFirstRowVisibleAfterShiftEnter(t *testing.T) {
+	m := newModel(context.Background(), Config{Backend: staticBackend{}, Width: 60, Height: 20})
+	m.ready = true
+	m.layout()
+
+	// Type some text on line 1.
+	const firstLine = "hello world"
+	for _, r := range firstLine {
+		m = applyKey(t, m, tea.KeyPressMsg{Code: r, Text: string(r)})
+	}
+	if m.composerTextHeight() != 1 {
+		t.Fatalf("expected height 1 before newline, got %d", m.composerTextHeight())
+	}
+
+	// Press Shift+Enter (insertNewline).
+	next, _ := m.insertNewline(true)
+	m = next.(model)
+
+	if m.composerTextHeight() != 2 {
+		t.Fatalf("expected height 2 after newline, got %d", m.composerTextHeight())
+	}
+
+	// The first row of the textarea view must still contain the first line text.
+	view := m.ta.View()
+	firstRow := strings.SplitN(view, "\n", 2)[0]
+	if !strings.Contains(firstRow, firstLine) {
+		t.Fatalf("first row scrolled out of view after Shift+Enter: %q not in %q\nfull view:\n%s",
+			firstLine, stripANSI(firstRow), view)
+	}
+}
+
 func TestIntentionalMultilineDoesNotCollapseOnIdleOrWatch(t *testing.T) {
 	m := newPasteTestModel(t)
 	m.intentionalMultiline = true

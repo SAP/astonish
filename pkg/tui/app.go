@@ -375,6 +375,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg := msg.(type) {
+	case tea.PasteMsg:
+		// In v2, bracketed paste arrives as tea.PasteMsg.
+		return m.handlePaste(msg.Content)
+
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height

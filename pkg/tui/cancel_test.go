@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
@@ -42,7 +42,7 @@ func transcriptHas(m model, substr string) bool {
 func TestEscCancelsInFlightTurn(t *testing.T) {
 	m, turnCtx := newStreamingModel(t)
 
-	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	next, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	if cmd != nil {
 		t.Fatalf("expected nil cmd after esc cancel, got %#v", cmd)
 	}
@@ -71,7 +71,7 @@ func TestEscCancelsInFlightTurn(t *testing.T) {
 func TestCtrlCCancelsInFlightTurn(t *testing.T) {
 	m, turnCtx := newStreamingModel(t)
 
-	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	next, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	if cmd != nil {
 		t.Fatalf("expected nil cmd after ctrl+c cancel, got %#v", cmd)
 	}
@@ -100,7 +100,7 @@ func TestEscIdleDoesNotQuit(t *testing.T) {
 	m.ready = true
 	m.layout()
 
-	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	next, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	if cmd != nil {
 		// Esc idle may fall through to textarea/viewport; a nil/no-op batch is fine,
 		// but must not be tea.Quit.
@@ -128,7 +128,7 @@ func TestCtrlCIdleQuits(t *testing.T) {
 	m.ready = true
 	m.layout()
 
-	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	next, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	m = next.(model)
 	if !m.quitting {
 		t.Fatal("ctrl+c idle should set quitting")

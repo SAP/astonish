@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
@@ -115,7 +115,7 @@ func TestNetworkDenialApproveClearsPromptBeforeGrantAndRetries(t *testing.T) {
 		BroaderPattern: "*.example.com",
 	}}))
 
-	next, cmd, handled := m.handleApprovalKey(tea.KeyMsg{Type: tea.KeyEnter})
+	next, cmd, handled := m.handleApprovalKey(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if !handled {
 		t.Fatal("expected enter to approve network grant")
 	}
@@ -164,7 +164,7 @@ func TestNetworkDenialBroaderApprove(t *testing.T) {
 	m.tr.SessionID = "sess-1"
 	m.tr.Apply(events.NewNetworkDenial("sess-1", "sandbox-1", []events.NetworkDenial{{Host: "api.example.com", Port: 443, BroaderPattern: "*.example.com"}}))
 
-	next, cmd, handled := m.handleApprovalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	next, cmd, handled := m.handleApprovalKey(tea.KeyPressMsg{Code: 'b', Text: "b"})
 	if !handled {
 		t.Fatal("expected b to approve broader grant")
 	}
@@ -201,7 +201,7 @@ func TestNetworkDenialDenyClearsPromptBeforeGrantBackend(t *testing.T) {
 	m.tr.SessionID = "sess-1"
 	m.tr.Apply(events.NewNetworkDenial("sess-1", "sandbox-1", []events.NetworkDenial{{Host: "api.example.com", Port: 443}}))
 
-	next, cmd, handled := m.handleApprovalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	next, cmd, handled := m.handleApprovalKey(tea.KeyPressMsg{Code: 'n', Text: "n"})
 	if !handled {
 		t.Fatal("expected n to deny network grant")
 	}

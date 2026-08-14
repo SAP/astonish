@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/SAP/astonish/pkg/tui/events"
 )
@@ -146,7 +146,7 @@ func TestHandleMouseSingleClickTogglesActivity(t *testing.T) {
 	m := model{
 		theme:                DefaultTheme(),
 		tr:                   tr,
-		vp:                   viewport.New(80, 10),
+		vp:                   viewport.New(viewport.WithWidth(80), viewport.WithHeight(10)),
 		width:                80,
 		height:               24,
 		ready:                true,
@@ -159,9 +159,9 @@ func TestHandleMouseSingleClickTogglesActivity(t *testing.T) {
 		}},
 	}
 
-	next, _ := m.handleMouse(tea.MouseMsg{X: 3, Y: m.viewportTopY(), Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	next, _ := m.handleMouse(tea.MouseClickMsg{X: 3, Y: m.viewportTopY(), Button: tea.MouseLeft})
 	m = next.(model)
-	next, _ = m.handleMouse(tea.MouseMsg{X: 3, Y: m.viewportTopY(), Button: tea.MouseButtonLeft, Action: tea.MouseActionRelease})
+	next, _ = m.handleMouse(tea.MouseReleaseMsg{X: 3, Y: m.viewportTopY(), Button: tea.MouseLeft})
 	got := next.(model)
 	if !got.tr.Items[0].Expanded {
 		t.Fatal("single-click should expand activity blocks")
@@ -368,7 +368,7 @@ func TestTimerTickRefreshesDuringDelegation(t *testing.T) {
 		height:        24,
 		ready:         true,
 		turnStartedAt: time.Now().Add(-5 * time.Second),
-		vp:            viewport.New(80, 10),
+		vp:            viewport.New(viewport.WithWidth(80), viewport.WithHeight(10)),
 	}
 	m.vp.SetContent("placeholder")
 
@@ -406,7 +406,7 @@ func TestDelegationDetailOpensOnClick(t *testing.T) {
 	m := model{
 		theme:  DefaultTheme(),
 		tr:     tr,
-		vp:     viewport.New(80, 20),
+		vp:     viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
 		width:  80,
 		height: 24,
 		ready:  true,
@@ -495,11 +495,11 @@ func TestDelegationDetailClosesOnEsc(t *testing.T) {
 			taskName: "worker",
 			taskIdx:  0,
 			itemIdx:  0,
-			vp:       viewport.New(80, 10),
+			vp:       viewport.New(viewport.WithWidth(80), viewport.WithHeight(10)),
 		},
 	}
 
-	next, _ := m.handleDelegationDetailKey(tea.KeyMsg{Type: tea.KeyEsc})
+	next, _ := m.handleDelegationDetailKey(tea.KeyPressMsg{Code: tea.KeyEsc})
 	got := next.(model)
 	if got.delegationDetail.open {
 		t.Fatal("Esc should close delegation detail overlay")

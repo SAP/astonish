@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/SAP/astonish/pkg/tui/backend"
 )
@@ -82,7 +82,7 @@ func TestRollbackRequiresConfirmation(t *testing.T) {
 	}
 
 	// Enter opens confirmation, does not roll back yet.
-	next, cmd := m.handleRollbackKey(tea.KeyMsg{Type: tea.KeyEnter})
+	next, cmd := m.handleRollbackKey(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = next.(model)
 	if cmd != nil {
 		t.Fatal("selecting a point should not call backend before confirmation")
@@ -95,7 +95,7 @@ func TestRollbackRequiresConfirmation(t *testing.T) {
 	}
 
 	// Confirm with 'y' triggers the rollback command.
-	next, cmd = m.handleRollbackKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	next, cmd = m.handleRollbackKey(tea.KeyPressMsg{Code: 'y', Text: "y"})
 	m = next.(model)
 	if cmd == nil {
 		t.Fatal("confirming should return a command")
@@ -121,7 +121,7 @@ func TestRollbackEscCancels(t *testing.T) {
 	m := newRollbackModel(b)
 	m.rollback = rollbackState{open: true, points: b.points}
 
-	next, _ := m.handleRollbackKey(tea.KeyMsg{Type: tea.KeyEsc})
+	next, _ := m.handleRollbackKey(tea.KeyPressMsg{Code: tea.KeyEsc})
 	m = next.(model)
 	if m.rollback.open {
 		t.Fatal("esc should close the rollback overlay")

@@ -3,9 +3,9 @@ package ui
 import (
 	"fmt"
 
-	"github.com/charmbracelet/bubbles/spinner"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/spinner"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 type SpinnerModel struct {
@@ -51,9 +51,10 @@ func (m SpinnerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func (m SpinnerModel) View() string {
+func (m SpinnerModel) View() tea.View {
 	if m.quitting {
-		return ""
+		return tea.NewView("")
 	}
-	return fmt.Sprintf("%s %s", m.spinner.View(), m.text)
+	return tea.NewView(fmt.Sprintf("%s %s", m.spinner.View(), m.text))
+
 }

@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"image/color"
 	"os"
 	"path/filepath"
 	"sort"
@@ -11,12 +12,12 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/textarea"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/textarea"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
@@ -97,7 +98,7 @@ func Run(ctx context.Context, cfg Config) error {
 	defer cfg.Backend.Close()
 
 	m := newModel(ctx, cfg)
-	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	p := tea.NewProgram(m)
 	_, err := p.Run()
 
 	// Close alt backend if it was opened during the session.
@@ -243,8 +244,8 @@ func newModel(parent context.Context, cfg Config) model {
 	ta.CharLimit = 0
 	ta.ShowLineNumbers = false
 	// First line: prompt; continuation lines: spaces (avoids stacked ❯ clutter).
-	ta.SetPromptFunc(2, func(lineIdx int) string {
-		if lineIdx == 0 {
+	ta.SetPromptFunc(2, func(info textarea.PromptInfo) string {
+		if info.LineNumber == 0 {
 			return "❯ "
 		}
 		return "  "
@@ -347,7 +348,7 @@ type artifactContentLoadedMsg struct {
 }
 
 func (m model) Init() tea.Cmd {
-	cmds := []tea.Cmd{textarea.Blink, m.spin.Tick, tea.EnableBracketedPaste}
+	cmds := []tea.Cmd{textarea.Blink, m.spin.Tick}
 	if m.info.IsResumed && m.info.SessionID != "" {
 		cmds = append(cmds, m.loadInitialHistoryCmd())
 	}
@@ -394,7 +395,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m.handleMouse(msg)
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		if m.fileViewer.open {
 			return m.handleFileViewerKey(msg)
 		}
@@ -424,16 +425,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return next, cmd
 			}
 		}
-		if msg.Type == tea.KeyRunes {
-			text := normalizePasteText(string(msg.Runes))
+		if msg.Key().Text != "" {
+			text := normalizePasteText(msg.Key().Text)
 			// Real paste events and multi-line rune bursts (common for terminal
 			// Command+V without bracketed-paste markers) go through handlePaste.
-			if msg.Paste || strings.Contains(text, "\n") {
-				if msg.Paste && text == "" {
-					if next, cmd, handled := m.tryPasteImage(); handled {
-						return next, cmd
-					}
-				}
+			if strings.Contains(text, "\n") {
 				return m.handlePaste(text)
 			}
 		}
@@ -761,7 +757,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Delegate to textarea / viewport when ready.
 	if m.ready {
 		// Never insert text inside a paste placeholder — treat it as one cell.
-		if keyMsg, ok := msg.(tea.KeyMsg); ok && keyMsg.Type == tea.KeyRunes && !keyMsg.Paste {
+		if keyMsg, ok := msg.(tea.KeyPressMsg); ok && keyMsg.Key().Text != "" {
 			m.escapePastePlaceholderForInsert()
 		}
 		prevValue := m.ta.Value()
@@ -1457,7 +1453,7 @@ func (m *model) setComposerCursorRuneOffset(offset int) {
 			break
 		}
 	}
-	m.ta.SetCursor(col)
+	m.ta.SetCursorColumn(col)
 }
 
 // jumpPastePlaceholder makes left/right treat a paste token as one cell.
@@ -1473,14 +1469,14 @@ func (m *model) jumpPastePlaceholder(dir int) bool {
 		if dir < 0 {
 			// At end of token or inside it → jump to start.
 			if col == span.lineEnd || (col > span.lineStart && col < span.lineEnd) {
-				m.ta.SetCursor(span.lineStart)
+				m.ta.SetCursorColumn(span.lineStart)
 				return true
 			}
 		}
 		if dir > 0 {
 			// At start of token or inside it → jump to end.
 			if col == span.lineStart || (col > span.lineStart && col < span.lineEnd) {
-				m.ta.SetCursor(span.lineEnd)
+				m.ta.SetCursorColumn(span.lineEnd)
 				return true
 			}
 		}
@@ -1497,7 +1493,7 @@ func (m *model) escapePastePlaceholderForInsert() {
 		}
 		if col > span.lineStart && col < span.lineEnd {
 			// Prefer inserting after the token.
-			m.ta.SetCursor(span.lineEnd)
+			m.ta.SetCursorColumn(span.lineEnd)
 			return
 		}
 	}
@@ -1512,9 +1508,9 @@ func (m *model) snapOutOfPastePlaceholder(dir int) {
 		}
 		if col > span.lineStart && col < span.lineEnd {
 			if dir < 0 {
-				m.ta.SetCursor(span.lineStart)
+				m.ta.SetCursorColumn(span.lineStart)
 			} else {
-				m.ta.SetCursor(span.lineEnd)
+				m.ta.SetCursorColumn(span.lineEnd)
 			}
 			return
 		}
@@ -2018,11 +2014,10 @@ func (m *model) layout() {
 		vh = 5
 	}
 	oldOffset := 0
-	if m.vp.Height > 0 {
-		oldOffset = m.vp.YOffset
+	if m.vp.Height() > 0 {
+		oldOffset = m.vp.YOffset()
 	}
-	m.vp = viewport.New(m.width, vh)
-	m.vp.Style = m.theme.Background
+	m.vp = viewport.New(viewport.WithWidth(m.width), viewport.WithHeight(vh))
 	content, hits, artifactHits := m.viewportContent()
 	m.hitRegions = hits
 	m.artifactHits = artifactHits
@@ -2119,16 +2114,16 @@ func (m model) isEmptyConversation() bool {
 }
 
 func (m model) renderWelcome() string {
-	if m.vp.Width <= 0 || m.vp.Height <= 0 {
+	if m.vp.Width() <= 0 || m.vp.Height() <= 0 {
 		return ""
 	}
 
-	boxW := m.vp.Width - 8
+	boxW := m.vp.Width() - 8
 	if boxW > 88 {
 		boxW = 88
 	}
 	if boxW < 56 {
-		boxW = max(32, m.vp.Width-2)
+		boxW = max(32, m.vp.Width()-2)
 	}
 	contentW := boxW - 6 // border(2) + horizontal padding(4)
 	if contentW < 24 {
@@ -2146,13 +2141,13 @@ func (m model) renderWelcome() string {
 		Render(strings.Join(lines, "\n"))
 
 	return lipgloss.Place(
-		m.vp.Width,
-		m.vp.Height,
+		m.vp.Width(),
+		m.vp.Height(),
 		lipgloss.Center,
 		lipgloss.Center,
 		body,
 		lipgloss.WithWhitespaceChars(" "),
-		lipgloss.WithWhitespaceBackground(lipgloss.Color("#000000")),
+		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(lipgloss.Color("#000000"))),
 	)
 }
 
@@ -2265,8 +2260,10 @@ func (m model) viewportTopY() int {
 }
 
 func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	// Wheel: let viewport scroll.
-	if msg.Button == tea.MouseButtonWheelUp || msg.Button == tea.MouseButtonWheelDown {
+	mouse := msg.Mouse()
+
+	switch msg.(type) {
+	case tea.MouseWheelMsg:
 		var cmd tea.Cmd
 		m.vp, cmd = m.vp.Update(msg)
 		// Track scroll position during streaming for auto-follow.
@@ -2278,25 +2275,31 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, cmd
-	}
 
-	if msg.Button != tea.MouseButtonLeft {
-		return m, nil
-	}
+	case tea.MouseClickMsg:
+		if mouse.Button != tea.MouseLeft {
+			return m, nil
+		}
+		return m.handleMousePress(mouse)
 
-	switch msg.Action {
-	case tea.MouseActionPress:
-		return m.handleMousePress(msg)
-	case tea.MouseActionMotion:
-		return m.handleMouseMotion(msg)
-	case tea.MouseActionRelease:
-		return m.handleMouseRelease(msg)
+	case tea.MouseMotionMsg:
+		if mouse.Button != tea.MouseLeft {
+			return m, nil
+		}
+		return m.handleMouseMotion(mouse)
+
+	case tea.MouseReleaseMsg:
+		if mouse.Button != tea.MouseLeft {
+			return m, nil
+		}
+		return m.handleMouseRelease(mouse)
+
 	default:
 		return m, nil
 	}
 }
 
-func (m model) handleMousePress(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+func (m model) handleMousePress(msg tea.Mouse) (tea.Model, tea.Cmd) {
 	p, ok := m.selectionPointForMouse(msg)
 	if !ok {
 		m.selecting = false
@@ -2319,7 +2322,7 @@ func (m model) handleMousePress(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m model) handleMouseMotion(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+func (m model) handleMouseMotion(msg tea.Mouse) (tea.Model, tea.Cmd) {
 	if !m.selecting {
 		return m, nil
 	}
@@ -2335,7 +2338,7 @@ func (m model) handleMouseMotion(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m model) handleMouseRelease(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+func (m model) handleMouseRelease(msg tea.Mouse) (tea.Model, tea.Cmd) {
 	if !m.selecting {
 		return m, nil
 	}
@@ -2392,12 +2395,12 @@ func (m model) handleMouseRelease(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m model) selectionPointForMouse(msg tea.MouseMsg) (selectionPoint, bool) {
+func (m model) selectionPointForMouse(msg tea.Mouse) (selectionPoint, bool) {
 	top := m.viewportTopY()
-	if msg.Y < top || msg.Y >= top+m.vp.Height {
+	if msg.Y < top || msg.Y >= top+m.vp.Height() {
 		return selectionPoint{}, false
 	}
-	line := m.vp.YOffset + (msg.Y - top)
+	line := m.vp.YOffset() + (msg.Y - top)
 	if line < 0 || line >= len(m.transcriptPlainLines) {
 		return selectionPoint{}, false
 	}
@@ -2442,7 +2445,7 @@ func (m model) openArtifactViewer(artifact events.Artifact) (tea.Model, tea.Cmd)
 		open:     true,
 		loading:  true,
 		artifact: artifact,
-		vp:       viewport.New(max(20, m.width-4), max(5, m.screenHeight()-4)),
+		vp:       viewport.New(viewport.WithWidth(max(20, m.width-4)), viewport.WithHeight(max(5, m.screenHeight()-4))),
 	}
 	return m, m.loadArtifactContentCmd(artifact.Path)
 }
@@ -2485,8 +2488,8 @@ func (m *model) layoutFileViewer() {
 	}
 	w := max(20, m.width-4)
 	h := max(5, m.screenHeight()-4)
-	m.fileViewer.vp.Width = w
-	m.fileViewer.vp.Height = h
+	m.fileViewer.vp.SetWidth(w)
+	m.fileViewer.vp.SetHeight(h)
 	m.fileViewer.vp.SetContent(m.renderFileViewerContent(w))
 }
 
@@ -2506,12 +2509,14 @@ func (m model) handleFileViewerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleFileViewerMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	if msg.Button != tea.MouseButtonWheelUp && msg.Button != tea.MouseButtonWheelDown {
+	switch msg.(type) {
+	case tea.MouseWheelMsg:
+		var cmd tea.Cmd
+		m.fileViewer.vp, cmd = m.fileViewer.vp.Update(msg)
+		return m, cmd
+	default:
 		return m, nil
 	}
-	var cmd tea.Cmd
-	m.fileViewer.vp, cmd = m.fileViewer.vp.Update(msg)
-	return m, cmd
 }
 
 // renderAgentMarkdown returns the rendered markdown for an agent message block,
@@ -3165,13 +3170,22 @@ func abs(n int) int {
 	return n
 }
 
-func (m model) View() string {
+func (m model) View() tea.View {
+	var content string
 	if m.quitting {
-		return ""
+		content = ""
+	} else if !m.ready {
+		content = m.paintBackground("\n  Initializing Astonish…\n")
+	} else {
+		content = m.viewContent()
 	}
-	if !m.ready {
-		return m.paintBackground("\n  Initializing Astonish…\n")
-	}
+	v := tea.NewView(content)
+	v.AltScreen = true
+	v.MouseMode = tea.MouseModeCellMotion
+	return v
+}
+
+func (m model) viewContent() string {
 
 	th := m.theme
 	sep := th.Border.Width(m.width).Render(strings.Repeat("─", max(1, m.width)))
@@ -3217,35 +3231,35 @@ func (m model) View() string {
 		overlay := m.renderSessionsOverlay()
 		return m.paintBackground(lipgloss.Place(m.width, m.screenHeight(), lipgloss.Center, lipgloss.Center, overlay,
 			lipgloss.WithWhitespaceChars(" "),
-			lipgloss.WithWhitespaceBackground(lipgloss.Color("#000000")),
+			lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(lipgloss.Color("#000000"))),
 		))
 	}
 	if m.modelPicker.open {
 		overlay := m.renderModelPickerOverlay()
 		return m.paintBackground(lipgloss.Place(m.width, m.screenHeight(), lipgloss.Center, lipgloss.Center, overlay,
 			lipgloss.WithWhitespaceChars(" "),
-			lipgloss.WithWhitespaceBackground(lipgloss.Color("#000000")),
+			lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(lipgloss.Color("#000000"))),
 		))
 	}
 	if m.providerPicker.open {
 		overlay := m.renderProviderPickerOverlay()
 		return m.paintBackground(lipgloss.Place(m.width, m.screenHeight(), lipgloss.Center, lipgloss.Center, overlay,
 			lipgloss.WithWhitespaceChars(" "),
-			lipgloss.WithWhitespaceBackground(lipgloss.Color("#000000")),
+			lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(lipgloss.Color("#000000"))),
 		))
 	}
 	if m.webSearchPicker.open {
 		overlay := m.renderWebSearchPickerOverlay()
 		return m.paintBackground(lipgloss.Place(m.width, m.screenHeight(), lipgloss.Center, lipgloss.Center, overlay,
 			lipgloss.WithWhitespaceChars(" "),
-			lipgloss.WithWhitespaceBackground(lipgloss.Color("#000000")),
+			lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(lipgloss.Color("#000000"))),
 		))
 	}
 	if m.rollback.open {
 		overlay := m.renderRollbackOverlay()
 		return m.paintBackground(lipgloss.Place(m.width, m.screenHeight(), lipgloss.Center, lipgloss.Center, overlay,
 			lipgloss.WithWhitespaceChars(" "),
-			lipgloss.WithWhitespaceBackground(lipgloss.Color("#000000")),
+			lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(lipgloss.Color("#000000"))),
 		))
 	}
 	if m.tr.Awaiting {
@@ -3287,7 +3301,7 @@ func (m model) paintBackground(s string) string {
 		lipgloss.Top,
 		forceTrueBlackAfterReset(s),
 		lipgloss.WithWhitespaceChars(" "),
-		lipgloss.WithWhitespaceBackground(lipgloss.Color("#000000")),
+		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(lipgloss.Color("#000000"))),
 	)
 	placed = m.padPaintedHeight(placed, paintH)
 	return ansiTrueBlackBG + placed + ansiDefaultBG
@@ -3898,7 +3912,7 @@ func (m model) openDelegationDetail(itemIdx, taskIdx int) (tea.Model, tea.Cmd) {
 	}
 	w := max(20, m.width-4)
 	h := max(5, m.screenHeight()-4)
-	vp := viewport.New(w, h)
+	vp := viewport.New(viewport.WithWidth(w), viewport.WithHeight(h))
 	vp.SetContent(m.renderDelegationDetailContent(tasks[taskIdx], w))
 	vp.GotoBottom()
 	m.delegationDetail = delegationDetailState{
@@ -3917,8 +3931,8 @@ func (m *model) layoutDelegationDetail() {
 	}
 	w := max(20, m.width-4)
 	h := max(5, m.screenHeight()-4)
-	m.delegationDetail.vp.Width = w
-	m.delegationDetail.vp.Height = h
+	m.delegationDetail.vp.SetWidth(w)
+	m.delegationDetail.vp.SetHeight(h)
 	// Refresh content from current task state.
 	if m.delegationDetail.itemIdx >= 0 && m.delegationDetail.itemIdx < len(m.tr.Items) {
 		tasks := m.tr.Items[m.delegationDetail.itemIdx].DelegationTasks
@@ -3948,12 +3962,14 @@ func (m model) handleDelegationDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleDelegationDetailMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	if msg.Button != tea.MouseButtonWheelUp && msg.Button != tea.MouseButtonWheelDown {
+	switch msg.(type) {
+	case tea.MouseWheelMsg:
+		var cmd tea.Cmd
+		m.delegationDetail.vp, cmd = m.delegationDetail.vp.Update(msg)
+		return m, cmd
+	default:
 		return m, nil
 	}
-	var cmd tea.Cmd
-	m.delegationDetail.vp, cmd = m.delegationDetail.vp.Update(msg)
-	return m, cmd
 }
 
 func (m model) renderDelegationDetail() string {
@@ -4212,21 +4228,21 @@ func (m model) composerBorderStyle() lipgloss.Style {
 	if m.theme.NoColor {
 		return lipgloss.NewStyle()
 	}
-	var color lipgloss.Color
+	var c color.Color
 	if m.graphPlanMode {
-		color = lipgloss.Color("172") // amber — plan mode accent
+		c = lipgloss.Color("172") // amber — plan mode accent
 	} else if m.planMode {
-		color = lipgloss.Color("172")
+		c = lipgloss.Color("172")
 	} else if m.askMode {
-		color = lipgloss.Color("114") // green/teal — research mode
+		c = lipgloss.Color("114") // green/teal — research mode
 	} else {
 		// Normal mode: use the neutral composer border color, not the brand accent.
-		color = lipgloss.Color("246")
+		c = lipgloss.Color("246")
 		if m.info.Mode == "platform" {
-			color = lipgloss.Color("39") // platform uses cyan even in normal mode
+			c = lipgloss.Color("39") // platform uses cyan even in normal mode
 		}
 	}
-	return lipgloss.NewStyle().Foreground(color).Background(lipgloss.Color("#000000"))
+	return lipgloss.NewStyle().Foreground(c).Background(lipgloss.Color("#000000"))
 }
 
 // composerModeLabel returns the text shown in the composer bottom border.

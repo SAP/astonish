@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/SAP/astonish/pkg/tui/events"
 )
@@ -254,7 +254,7 @@ func TestPlanApprovalKeysMapCorrectly(t *testing.T) {
 
 	t.Run("y approves", func(t *testing.T) {
 		m := newPlanModel()
-		next, _, handled := m.handleApprovalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+		next, _, handled := m.handleApprovalKey(tea.KeyPressMsg{Code: 'y', Text: "y"})
 		if !handled {
 			t.Fatal("expected y to be handled")
 		}
@@ -265,7 +265,7 @@ func TestPlanApprovalKeysMapCorrectly(t *testing.T) {
 	})
 	t.Run("r requests changes", func(t *testing.T) {
 		m := newPlanModel()
-		next, _, handled := m.handleApprovalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+		next, _, handled := m.handleApprovalKey(tea.KeyPressMsg{Code: 'r', Text: "r"})
 		if !handled {
 			t.Fatal("expected r to be handled")
 		}
@@ -279,7 +279,7 @@ func TestPlanApprovalKeysMapCorrectly(t *testing.T) {
 	})
 	t.Run("n declines", func(t *testing.T) {
 		m := newPlanModel()
-		next, _, handled := m.handleApprovalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+		next, _, handled := m.handleApprovalKey(tea.KeyPressMsg{Code: 'n', Text: "n"})
 		if !handled {
 			t.Fatal("expected n to be handled")
 		}
@@ -299,7 +299,7 @@ func TestPlanApprovalKeysMapCorrectly(t *testing.T) {
 	})
 	t.Run("esc declines", func(t *testing.T) {
 		m := newPlanModel()
-		next, _, handled := m.handleApprovalKey(tea.KeyMsg{Type: tea.KeyEsc})
+		next, _, handled := m.handleApprovalKey(tea.KeyPressMsg{Code: tea.KeyEsc})
 		if !handled {
 			t.Fatal("expected esc to be handled")
 		}

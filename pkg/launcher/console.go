@@ -28,7 +28,7 @@ import (
 	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 // ConsoleConfig contains configuration for the console launcher

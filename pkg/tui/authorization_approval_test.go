@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
@@ -182,7 +182,7 @@ func TestAuthorizationKey_SubmitsOptionByNumber(t *testing.T) {
 	))
 
 	// Number keys remain accelerators: "2" submits the second option.
-	next, cmd, handled := m.handleApprovalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}})
+	next, cmd, handled := m.handleApprovalKey(tea.KeyPressMsg{Code: '2', Text: "2"})
 	if !handled {
 		t.Fatal("expected key handled")
 	}
@@ -223,7 +223,7 @@ func TestAuthorizationKey_CursorEnter(t *testing.T) {
 	}
 
 	// Down once → "Always Allow" (index 1).
-	next, _, handled := m.handleApprovalKey(tea.KeyMsg{Type: tea.KeyDown})
+	next, _, handled := m.handleApprovalKey(tea.KeyPressMsg{Code: tea.KeyDown})
 	if !handled {
 		t.Fatal("expected down handled")
 	}
@@ -233,7 +233,7 @@ func TestAuthorizationKey_CursorEnter(t *testing.T) {
 	}
 
 	// Enter → submit the highlighted option ("Always Allow").
-	next, cmd, handled := m.handleApprovalKey(tea.KeyMsg{Type: tea.KeyEnter})
+	next, cmd, handled := m.handleApprovalKey(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if !handled || cmd == nil {
 		t.Fatal("expected enter handled with a command")
 	}
@@ -261,7 +261,7 @@ func TestAuthorizationKey_EnterDefaultAllows(t *testing.T) {
 		"tool", nil,
 	))
 
-	next, cmd, handled := m.handleApprovalKey(tea.KeyMsg{Type: tea.KeyEnter})
+	next, cmd, handled := m.handleApprovalKey(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if !handled || cmd == nil {
 		t.Fatal("expected enter handled with a command")
 	}
@@ -284,7 +284,7 @@ func TestAuthorizationKey_DenyViaEsc(t *testing.T) {
 		"tool", nil,
 	))
 
-	next, cmd, handled := m.handleApprovalKey(tea.KeyMsg{Type: tea.KeyEsc})
+	next, cmd, handled := m.handleApprovalKey(tea.KeyPressMsg{Code: tea.KeyEsc})
 	if !handled || cmd == nil {
 		t.Fatal("expected esc handled with a command")
 	}

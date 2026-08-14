@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/alecthomas/chroma/v2/lexers"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 )
 

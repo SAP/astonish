@@ -1,10 +1,11 @@
 package tui
 
 import (
+	"image/color"
 	"os"
 
-	"github.com/charmbracelet/bubbles/textarea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/textarea"
+	"charm.land/lipgloss/v2"
 
 	"github.com/SAP/astonish/pkg/tui/render"
 )
@@ -52,7 +53,7 @@ type Theme struct {
 	// AccentColor is the mode-identifying brand accent used by welcome titles
 	// and other brand-identity style builders. Code mode = orange (208), Platform = cyan (39).
 	// The composer border in normal mode uses a separate neutral color (see composerBorderStyle).
-	AccentColor lipgloss.Color
+	AccentColor color.Color
 
 	NoColor bool
 }
@@ -272,7 +273,7 @@ func (th Theme) ApplyTextareaStyles(ta *textarea.Model) {
 		return
 	}
 	// No background on cursor line — default AdaptiveColor paints a light chip.
-	clean := textarea.Style{
+	clean := textarea.StyleState{
 		Base:             th.Input,
 		CursorLine:       th.Input,
 		CursorLineNumber: th.Muted,
@@ -287,8 +288,10 @@ func (th Theme) ApplyTextareaStyles(ta *textarea.Model) {
 	blurred.Text = th.Muted
 	blurred.Placeholder = th.InputPlaceholder
 
-	ta.FocusedStyle = clean
-	ta.BlurredStyle = blurred
+	ta.SetStyles(textarea.Styles{
+		Focused: clean,
+		Blurred: blurred,
+	})
 }
 
 // RenderStyles maps the TUI theme into pure render.Styles for markdown/diff/activity.

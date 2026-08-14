@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
@@ -60,7 +60,7 @@ func TestAutoScrollRespectsUserScrollUp(t *testing.T) {
 	m := newStreamingModelWithContent(t)
 
 	// User scrolls up with pgup during streaming.
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	next, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
 	m = next.(model)
 
 	if !m.userScrolledUp {
@@ -68,7 +68,7 @@ func TestAutoScrollRespectsUserScrollUp(t *testing.T) {
 	}
 
 	// Now simulate new content arriving and viewport refresh.
-	prevOffset := m.vp.YOffset
+	prevOffset := m.vp.YOffset()
 	m.tr.Apply(events.NewText("new content after user scrolled up"))
 	m.refreshViewport()
 
@@ -76,8 +76,8 @@ func TestAutoScrollRespectsUserScrollUp(t *testing.T) {
 	if m.vp.AtBottom() {
 		t.Fatal("expected viewport to NOT jump to bottom when user has scrolled up")
 	}
-	if m.vp.YOffset != prevOffset {
-		t.Fatalf("expected viewport offset to remain at %d, got %d", prevOffset, m.vp.YOffset)
+	if m.vp.YOffset() != prevOffset {
+		t.Fatalf("expected viewport offset to remain at %d, got %d", prevOffset, m.vp.YOffset())
 	}
 }
 
@@ -85,7 +85,7 @@ func TestAutoScrollResumesWhenUserScrollsBack(t *testing.T) {
 	m := newStreamingModelWithContent(t)
 
 	// User scrolls up.
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	next, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
 	m = next.(model)
 
 	if !m.userScrolledUp {
@@ -95,7 +95,7 @@ func TestAutoScrollResumesWhenUserScrollsBack(t *testing.T) {
 	// User scrolls back down to bottom. We simulate by pressing pgdown
 	// multiple times until at bottom.
 	for i := 0; i < 50; i++ {
-		next, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+		next, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
 		m = next.(model)
 		if m.vp.AtBottom() {
 			break
@@ -152,9 +152,8 @@ func TestAutoScrollMouseWheelUpSetsFlag(t *testing.T) {
 	m := newStreamingModelWithContent(t)
 
 	// Mouse wheel up during streaming.
-	next, _ := m.Update(tea.MouseMsg{
-		Button: tea.MouseButtonWheelUp,
-		Action: tea.MouseActionPress,
+	next, _ := m.Update(tea.MouseWheelMsg{
+		Button: tea.MouseWheelUp,
 	})
 	m = next.(model)
 

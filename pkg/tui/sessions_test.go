@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/SAP/astonish/pkg/tui/backend"
 )
@@ -37,7 +37,7 @@ func TestSessionsPickerDeleteRequiresConfirmation(t *testing.T) {
 		cursor: 1,
 	}
 
-	next, cmd := m.handleSessionsKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	next, cmd := m.handleSessionsKey(tea.KeyPressMsg{Code: 'd', Text: "d"})
 	m = next.(model)
 	if cmd != nil {
 		t.Fatal("delete prompt should not call backend before confirmation")
@@ -49,7 +49,7 @@ func TestSessionsPickerDeleteRequiresConfirmation(t *testing.T) {
 		t.Fatalf("deleted before confirmation: %q", b.deletedID)
 	}
 
-	next, cmd = m.handleSessionsKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	next, cmd = m.handleSessionsKey(tea.KeyPressMsg{Code: 'y', Text: "y"})
 	m = next.(model)
 	if cmd == nil {
 		t.Fatal("confirming delete should return a command")

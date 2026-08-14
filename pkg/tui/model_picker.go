@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/SAP/astonish/pkg/tui/events"
 )
@@ -235,8 +235,8 @@ func (m model) handleModelPickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	// Accumulate filter from printable runes.
-	if msg.Type == tea.KeyRunes && !msg.Paste {
-		m.modelPicker.filter += string(msg.Runes)
+	if msg.Key().Text != "" {
+		m.modelPicker.filter += msg.Key().Text
 		m.modelPicker.rebuildItems()
 		return m, nil
 	}

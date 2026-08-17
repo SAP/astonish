@@ -1629,6 +1629,29 @@ Triggers that would motivate adding the warm pool:
 - Workload shift toward short-lived sessions (seconds to low-minutes), producing churn that stresses CNI IP allocation or kubelet pod-creation throughput.
 - Cost/performance trade-off in managed environments where pod startup is slower than bare-metal K3s.
 
+## 14.1 Network Access: SSRF Protection and Private Networks
+
+When tools run **inside a sandbox container**, the sandbox's own network policy (OpenShell Landlock/seccomp, K8s NetworkPolicy, Incus network config) is the security boundary. The Go-level SSRF protection (`checkSSRF()` in `pkg/tools/web_fetch.go`) that blocks requests to private/loopback IPs is therefore **automatically disabled** inside the sandbox node process (`cmd/astonish/node.go`).
+
+This means:
+- **`http_request`** can reach internal/corporate APIs (e.g., OpenStack, internal microservices) when running inside a sandbox — the sandbox network policy controls what is reachable.
+- **`web_fetch`** retains SSRF protection regardless of mode (it's for web content extraction, not authenticated API access).
+- **`shell_command`** (curl, wget, etc.) was never subject to SSRF checks and continues to work as before.
+
+### Personal/CLI mode (no sandbox)
+
+For users running without a sandbox (e.g., `astonish chat` on a corporate laptop with VPN access to internal APIs), SSRF protection can be disabled via config:
+
+```yaml
+# ~/.config/astonish/config.yaml
+security:
+  allow_private_networks: true
+```
+
+When this option is `true`, `http_request` can reach private/loopback IPs from the host. This is useful for accessing internal APIs that resolve to RFC1918 addresses.
+
+**Default:** `false` (SSRF protection active in personal/CLI mode).
+
 ## 15. References
 
 - `docs/architecture/sandbox.md` -- current Incus-based implementation.

@@ -845,6 +845,11 @@ func GetInternalTools() ([]tool.Tool, error) {
 			// in pkg/codeintel reads ASTONISH_TREESITTER_LIB.
 			_ = os.Setenv("ASTONISH_TREESITTER_LIB", appCfg.CodeIntel.LibraryPath)
 		}
+		// Honor security.allow_private_networks for personal/CLI mode (no sandbox).
+		// In sandbox mode this is set unconditionally by the node process.
+		if appCfg.Security.IsPrivateNetworkAllowed() {
+			SetAllowPrivateNetworks(true)
+		}
 	}
 
 	var codeIntelTools []tool.Tool

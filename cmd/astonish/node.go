@@ -86,6 +86,12 @@ func handleNodeCommand(args []string) error {
 	encoder := json.NewEncoder(os.Stdout)
 	scanner := bufio.NewScanner(os.Stdin)
 
+	// Inside a sandbox container, disable SSRF private-IP blocking for
+	// http_request. The sandbox's own network policy (OpenShell Landlock/seccomp,
+	// K8s NetworkPolicy, Incus network config) is the security boundary —
+	// the Go-level SSRF check is redundant and blocks legitimate internal API access.
+	tools.SetAllowPrivateNetworks(true)
+
 	// Increase scanner buffer for large tool args (e.g., write_file with big content)
 	const maxScanSize = 10 * 1024 * 1024 // 10MB
 	scanner.Buffer(make([]byte, 0, 64*1024), maxScanSize)

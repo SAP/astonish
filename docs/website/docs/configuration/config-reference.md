@@ -218,7 +218,7 @@ sandbox:
 # Security
 security:
   secret_scanner:
-    enabled: true
+    enabled: false  # opt-in; set to true to enable proactive secret detection
     entropy_threshold: 4.0
     min_token_length: 16
 ```

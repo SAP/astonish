@@ -122,6 +122,17 @@ func (r *Redactor) Redact(text string) string {
 	return text
 }
 
+// RedactNonUser applies credential redaction only when the text is NOT
+// user-authored. User input passes through unchanged to avoid revealing
+// credential names (e.g., [REDACTED:team-secret]) when a user accidentally
+// types a string that coincidentally matches a stored credential value.
+func (r *Redactor) RedactNonUser(text string, isUserAuthored bool) string {
+	if isUserAuthored {
+		return text
+	}
+	return r.Redact(text)
+}
+
 // Placeholderize scans text for any known credential values and replaces them
 // with {{CREDENTIAL:name:field}} tokens. Unlike Redact() which produces opaque
 // markers, this method produces actionable placeholders that document exactly

@@ -337,3 +337,25 @@ func TestSandboxKubernetesConfig_GCDisableEvictedUpperRetention(t *testing.T) {
 		t.Fatalf("K8sEvictedUpperRetention() = %s, %v; want 0, false", retention, enabled)
 	}
 }
+
+func TestSecretScanner_DisabledByDefault(t *testing.T) {
+	// Default config (nil Enabled pointer) should mean scanner is disabled.
+	cfg := SecurityConfig{}
+	if cfg.IsSecretScannerEnabled() {
+		t.Fatal("IsSecretScannerEnabled() = true for nil Enabled; want false (opt-in)")
+	}
+
+	// Explicitly enabled
+	enabled := true
+	cfg.SecretScanner.Enabled = &enabled
+	if !cfg.IsSecretScannerEnabled() {
+		t.Fatal("IsSecretScannerEnabled() = false when Enabled=true; want true")
+	}
+
+	// Explicitly disabled
+	disabled := false
+	cfg.SecretScanner.Enabled = &disabled
+	if cfg.IsSecretScannerEnabled() {
+		t.Fatal("IsSecretScannerEnabled() = true when Enabled=false; want false")
+	}
+}

@@ -37,7 +37,7 @@ const (
 	// testSecretName is the credential name used in redaction markers.
 	testSecretName = "test-api-key"
 	// testRedactedMarker is what should appear instead of the raw secret.
-	testRedactedMarker = "[REDACTED:test-api-key]"
+	testRedactedMarker = "[REDACTED]"
 )
 
 // setupRedactionTest extends setupIntegrationTest by wiring a Redactor
@@ -59,7 +59,7 @@ func setupRedactionTest(t *testing.T, mockLLM *MockLLM, tools []tool.Tool) *inte
 // --- CHAT-070: Tool result contains secret → must be redacted in SSE stream ---
 
 // TestRedaction_ToolResultRedacted verifies that when a tool's output contains
-// a raw secret value, the SSE tool_result event shows [REDACTED:name] instead.
+// a raw secret value, the SSE tool_result event shows [REDACTED] instead.
 //
 // Scenario: The LLM calls a tool, which returns the secret in its output. The
 // Redactor replaces the raw value before it reaches the browser.

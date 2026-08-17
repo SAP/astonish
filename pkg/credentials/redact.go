@@ -2,7 +2,6 @@ package credentials
 
 import (
 	"encoding/base64"
-	"fmt"
 	"net/url"
 	"strings"
 	"sync"
@@ -13,10 +12,11 @@ const (
 	// for redaction. Shorter values would cause too many false positives.
 	minSignatureLen = 8
 
-	// redactedPrefix is the prefix used in redaction replacement text.
-	redactedPrefix = "[REDACTED:"
-	// redactedSuffix is the suffix used in redaction replacement text.
-	redactedSuffix = "]"
+	// redactedMarker is the opaque replacement text used when a known
+	// credential value is found in text. It intentionally does NOT reveal
+	// which credential matched — exposing the name would let an attacker
+	// brute-force substrings to discover credential names and partial values.
+	redactedMarker = "[REDACTED]"
 
 	// storeKeyRedactName is the redaction label for the encryption key itself.
 	storeKeyRedactName = "store-encryption-key"
@@ -105,7 +105,7 @@ func (r *Redactor) RemoveByName(name string) {
 }
 
 // Redact scans text for any known credential values and replaces them
-// with [REDACTED:credential-name] markers.
+// with opaque [REDACTED] markers.
 func (r *Redactor) Redact(text string) string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -114,9 +114,9 @@ func (r *Redactor) Redact(text string) string {
 		return text
 	}
 
-	for sig, ref := range r.signatures {
+	for sig := range r.signatures {
 		if strings.Contains(text, sig) {
-			text = strings.ReplaceAll(text, sig, fmt.Sprintf("%s%s%s", redactedPrefix, ref.name, redactedSuffix))
+			text = strings.ReplaceAll(text, sig, redactedMarker)
 		}
 	}
 	return text
@@ -124,7 +124,7 @@ func (r *Redactor) Redact(text string) string {
 
 // RedactNonUser applies credential redaction only when the text is NOT
 // user-authored. User input passes through unchanged to avoid revealing
-// credential names (e.g., [REDACTED:team-secret]) when a user accidentally
+// credential names (e.g., [REDACTED]) when a user accidentally
 // types a string that coincidentally matches a stored credential value.
 func (r *Redactor) RedactNonUser(text string, isUserAuthored bool) string {
 	if isUserAuthored {

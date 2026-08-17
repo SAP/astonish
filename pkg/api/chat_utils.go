@@ -141,7 +141,7 @@ func eventsToMessages(events session.Events, redactor *credentials.Redactor) []S
 				// agent responses that may have been persisted before the
 				// credential was registered with the redactor. User-authored
 				// text is exempt to avoid leaking credential names via
-				// [REDACTED:name] markers when input coincidentally matches.
+				// [REDACTED] markers when input coincidentally matches.
 				if redactor != nil {
 					text = redactor.RedactNonUser(text, role == "user")
 				}

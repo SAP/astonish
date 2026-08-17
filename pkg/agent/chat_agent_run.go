@@ -505,6 +505,11 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 				if t.Name() == "shell_command" || t.Name() == "process_write" {
 					shellFields = []string{"command"}
 				}
+
+				// Register resolved credential values with the Redactor BEFORE
+				// substitution so AfterToolCallback's RedactMap catches them.
+				credentials.RegisterResolvedWithRedactor(args, resolver, c.Redactor)
+
 				credRestore := credentials.SubstituteAndRestore(args, resolver, shellFields...)
 
 				// After substitution, check if any placeholders remain unresolved.

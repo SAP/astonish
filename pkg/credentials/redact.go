@@ -193,6 +193,19 @@ func (r *Redactor) redactValue(v any) any {
 	}
 }
 
+// RegisterCredential registers all secret-bearing fields of a credential with
+// the redactor. This is the public entry point used by the credential
+// substitution pipeline to ensure dynamically-resolved values (e.g., Keystone
+// tokens fetched on-the-fly) are tracked for redaction in tool outputs.
+func (r *Redactor) RegisterCredential(name string, cred *Credential) {
+	if cred == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.addSecretFieldsLocked(name, cred)
+}
+
 // addSecretFieldsLocked extracts all secret-bearing fields from a credential
 // and adds their variants to the signature list. Must be called with mu held.
 func (r *Redactor) addSecretFieldsLocked(name string, cred *Credential) {

@@ -964,6 +964,11 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) TaskRe
 			if t.Name() == "shell_command" || t.Name() == "process_write" {
 				shellFields = []string{"command"}
 			}
+
+			// Register resolved credential values with the Redactor BEFORE
+			// substitution so AfterToolCallback's RedactMap catches them.
+			credentials.RegisterResolvedWithRedactor(args, resolver, m.Redactor)
+
 			credRestore := credentials.SubstituteAndRestore(args, resolver, shellFields...)
 			callID := ctx.FunctionCallID()
 			if prev, loaded := restoreFuncs.Load(callID); loaded {

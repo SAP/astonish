@@ -94,7 +94,7 @@ func httpRequest(ctx context.Context, args HttpRequestArgs) (HttpRequestResult, 
 		return HttpRequestResult{}, fmt.Errorf("only http and https URLs are supported, got %q", parsedURL.Scheme)
 	}
 
-	if !httpReqSkipSSRF {
+	if !httpReqSkipSSRF && !httpReqAllowPrivateNetworks {
 		if err := checkSSRF(parsedURL.Hostname()); err != nil {
 			return HttpRequestResult{}, err
 		}

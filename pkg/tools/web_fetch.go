@@ -152,6 +152,22 @@ func checkSSRF(hostname string) error {
 	return nil
 }
 
+// --- SSRF bypass for sandbox / config ---
+
+// httpReqAllowPrivateNetworks is the production toggle to disable SSRF checks.
+// Set to true by the in-container node process (sandbox provides network isolation)
+// or when the user explicitly sets security.allow_private_networks in config.
+var httpReqAllowPrivateNetworks bool
+
+// SetAllowPrivateNetworks enables or disables SSRF private-IP blocking for
+// http_request. When true, requests to private/loopback IPs are allowed.
+// This is set automatically inside sandbox containers (where the sandbox
+// provides its own network isolation) and can be enabled via config for
+// personal/CLI mode on corporate networks.
+func SetAllowPrivateNetworks(allow bool) {
+	httpReqAllowPrivateNetworks = allow
+}
+
 // fetchURL performs the HTTP GET with timeout, redirect limits, and body size limits.
 func fetchURL(rawURL string) (body, finalURL, contentType string, statusCode int, err error) {
 	redirectCount := 0

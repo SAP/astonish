@@ -476,7 +476,8 @@ func (c *SandboxOpenShellConfig) OpenShellIdleTimeout() time.Duration {
 
 // SecurityConfig controls security features like proactive secret detection.
 type SecurityConfig struct {
-	SecretScanner SecretScannerConfig `yaml:"secret_scanner,omitempty" json:"secret_scanner,omitempty"`
+	SecretScanner        SecretScannerConfig `yaml:"secret_scanner,omitempty" json:"secret_scanner,omitempty"`
+	AllowPrivateNetworks bool                `yaml:"allow_private_networks" json:"allow_private_networks,omitempty"`
 }
 
 // SecretScannerConfig controls the proactive secret detection engine that
@@ -494,6 +495,15 @@ func (c *SecurityConfig) IsSecretScannerEnabled() bool {
 		return true
 	}
 	return *c.SecretScanner.Enabled
+}
+
+// IsPrivateNetworkAllowed returns true if SSRF private-IP blocking is disabled.
+// Safe to call on a nil receiver.
+func (s *SecurityConfig) IsPrivateNetworkAllowed() bool {
+	if s == nil {
+		return false
+	}
+	return s.AllowPrivateNetworks
 }
 
 // StorageConfig controls the data storage backend.
@@ -1480,6 +1490,34 @@ type A2AConfig struct {
 	BaseURL string `yaml:"base_url,omitempty" json:"base_url,omitempty"`
 	// TaskTTL is how long completed tasks are retained. Default: "72h".
 	TaskTTL string `yaml:"task_ttl,omitempty" json:"task_ttl,omitempty"`
+	// DefaultAudience is the expected "aud" claim in incoming A2A JWTs when not overridden per-issuer.
+	DefaultAudience string `yaml:"default_audience,omitempty" json:"default_audience,omitempty"`
+	// AutoLinkByEmail enables automatic user linking by matching the token's email claim.
+	AutoLinkByEmail bool `yaml:"auto_link_by_email,omitempty" json:"auto_link_by_email,omitempty"`
+	// RequireActorClaim requires the "act" claim in incoming JWTs for delegation flows.
+	RequireActorClaim bool `yaml:"require_actor_claim,omitempty" json:"require_actor_claim,omitempty"`
+	// TrustedIssuers lists the trusted token issuers for A2A authentication.
+	TrustedIssuers []TrustedIssuerConfig `yaml:"trusted_issuers,omitempty" json:"trusted_issuers,omitempty"`
+	// AllowedAgents lists the allowed A2A agents.
+	AllowedAgents []AllowedAgentConfig `yaml:"allowed_agents,omitempty" json:"allowed_agents,omitempty"`
+}
+
+// TrustedIssuerConfig holds YAML configuration for a trusted A2A token issuer.
+type TrustedIssuerConfig struct {
+	Name      string `yaml:"name" json:"name"`
+	Issuer    string `yaml:"issuer" json:"issuer"`
+	JWKSURL   string `yaml:"jwks_url" json:"jwks_url"`
+	Audience  string `yaml:"audience" json:"audience"`
+	UserClaim string `yaml:"user_claim,omitempty" json:"user_claim,omitempty"` // default: "sub"
+}
+
+// AllowedAgentConfig holds YAML configuration for an allowed A2A agent.
+type AllowedAgentConfig struct {
+	Name      string `yaml:"name" json:"name"`
+	ActorSub  string `yaml:"actor_sub" json:"actor_sub"`
+	Issuer    string `yaml:"issuer" json:"issuer"` // references TrustedIssuerConfig.Name
+	RateLimit int    `yaml:"rate_limit,omitempty" json:"rate_limit,omitempty"`
+	MaxTasks  int    `yaml:"max_tasks,omitempty" json:"max_tasks,omitempty"`
 }
 
 // IsA2AEnabled returns true if the A2A channel is explicitly enabled.

@@ -746,3 +746,52 @@ func TestHttpRequest_MutuallyExclusiveBody(t *testing.T) {
 		t.Fatalf("expected mutual exclusion error, got %v", err)
 	}
 }
+
+// --- AllowPrivateNetworks tests ---
+
+func TestHttpRequest_AllowPrivateNetworks(t *testing.T) {
+	// Enable the production toggle — simulates running inside a sandbox container.
+	SetAllowPrivateNetworks(true)
+	defer SetAllowPrivateNetworks(false)
+
+	// Requests to private IPs should NOT be blocked by SSRF.
+	// They will fail with connection errors (no server listening), but the error
+	// must NOT be "private/loopback" — that would mean SSRF is still active.
+	// Use a 1-second timeout so tests don't hang waiting for unreachable IPs.
+	privateURLs := []string{
+		"http://10.0.0.1:8080/api",
+		"http://192.168.1.1/api",
+		"http://172.16.0.1/api",
+		"http://127.0.0.1:19999/api",
+	}
+
+	for _, u := range privateURLs {
+		t.Run(u, func(t *testing.T) {
+			_, err := HttpRequest(nil, HttpRequestArgs{URL: u, Timeout: 1})
+			if err == nil {
+				t.Fatal("expected connection error, got nil")
+			}
+			if strings.Contains(err.Error(), "private/loopback") {
+				t.Errorf("SSRF should be bypassed but got: %v", err)
+			}
+			// The error should be a connection error (refused/timeout), not SSRF block
+			if !strings.Contains(err.Error(), "request failed") {
+				t.Errorf("expected 'request failed' error, got: %v", err)
+			}
+		})
+	}
+}
+
+func TestHttpRequest_SSRFStillActiveByDefault(t *testing.T) {
+	// Ensure that without SetAllowPrivateNetworks, SSRF protection is still active.
+	// This guards against accidentally leaving the toggle on.
+	SetAllowPrivateNetworks(false)
+
+	_, err := HttpRequest(nil, HttpRequestArgs{URL: "http://10.0.0.1/api"})
+	if err == nil {
+		t.Fatal("expected SSRF error, got nil")
+	}
+	if !strings.Contains(err.Error(), "private/loopback") {
+		t.Errorf("expected SSRF block, got: %v", err)
+	}
+}

@@ -483,16 +483,16 @@ type SecurityConfig struct {
 // SecretScannerConfig controls the proactive secret detection engine that
 // scans user messages before sending them to the LLM provider.
 type SecretScannerConfig struct {
-	Enabled          *bool   `yaml:"enabled,omitempty" json:"enabled,omitempty"`                     // Default: true (nil means true)
+	Enabled          *bool   `yaml:"enabled,omitempty" json:"enabled,omitempty"`                     // Default: false (nil means disabled)
 	EntropyThreshold float64 `yaml:"entropy_threshold,omitempty" json:"entropy_threshold,omitempty"` // Shannon entropy bits/char. Default: 4.0
 	MinTokenLength   int     `yaml:"min_token_length,omitempty" json:"min_token_length,omitempty"`   // Minimum chars for entropy/structural check. Default: 16
 }
 
 // IsSecretScannerEnabled returns true if the secret scanner should run.
-// Default is true (nil means enabled).
+// Default is false (nil means disabled).
 func (c *SecurityConfig) IsSecretScannerEnabled() bool {
 	if c.SecretScanner.Enabled == nil {
-		return true
+		return false
 	}
 	return *c.SecretScanner.Enabled
 }

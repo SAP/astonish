@@ -137,11 +137,13 @@ func eventsToMessages(events session.Events, redactor *credentials.Redactor) []S
 				}
 
 				// Defense-in-depth: redact any credential values from text
-				// before sending to the frontend. This catches secrets in user
-				// messages and agent responses that may have been persisted
-				// before the credential was registered with the redactor.
+				// before sending to the frontend. This catches secrets in
+				// agent responses that may have been persisted before the
+				// credential was registered with the redactor. User-authored
+				// text is exempt to avoid leaking credential names via
+				// [REDACTED] markers when input coincidentally matches.
 				if redactor != nil {
-					text = redactor.Redact(text)
+					text = redactor.RedactNonUser(text, role == "user")
 				}
 				// Coalesce with previous message of same type, but only within
 				// the same invocation. Different invocations represent separate

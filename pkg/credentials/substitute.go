@@ -466,3 +466,52 @@ func resolveField(resolver CredentialResolver, name, field, fallback string) str
 
 	return fallback
 }
+
+// RegisterResolvedWithRedactor scans args for credential placeholders, resolves
+// each referenced credential, and registers all its secret fields with the
+// redactor. This ensures that dynamically-fetched values (e.g., Keystone tokens
+// obtained during Resolve()) are known to the Redactor BEFORE the tool executes,
+// so that AfterToolCallback's RedactMap can catch them in tool output (stdout,
+// API responses, etc.).
+//
+// Call this BEFORE SubstituteAndRestore — it reads the original placeholder
+// tokens from the args map to discover which credentials are referenced.
+func RegisterResolvedWithRedactor(args map[string]any, resolver CredentialResolver, redactor *Redactor) {
+	if resolver == nil || redactor == nil || args == nil {
+		return
+	}
+	if !mapContainsPlaceholder(args) {
+		return
+	}
+
+	// Collect all unique credential names referenced in the args.
+	seen := make(map[string]bool)
+	for _, v := range args {
+		collectUnresolvedNames(v, seen)
+	}
+	if len(seen) == 0 {
+		return
+	}
+
+	// For each referenced credential, resolve it (which may fetch a fresh
+	// token) and register all its secret fields with the redactor.
+	for name := range seen {
+		cred := resolver.Get(name)
+		if cred == nil {
+			continue
+		}
+		redactor.RegisterCredential(name, cred)
+
+		// For dynamic token types (Keystone, OAuth), also call Resolve()
+		// which fetches/refreshes the token, then register that token value
+		// directly. This covers the case where the token in the Credential
+		// struct is stale but Resolve() returns a fresh one.
+		switch cred.Type {
+		case CredOpenStackKeystone, CredOAuthClientCreds, CredOAuthAuthCode:
+			_, headerValue, err := resolver.Resolve(name)
+			if err == nil && len(headerValue) >= minSignatureLen {
+				redactor.AddSecret(name+"/resolved-token", headerValue)
+			}
+		}
+	}
+}

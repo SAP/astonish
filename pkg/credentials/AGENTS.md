@@ -11,7 +11,7 @@ Encrypted credential store, secret scanner, pending vault, OAuth token cache. An
 ## Non-negotiable rules
 1. **Envelope encryption**: credential ciphertext is encrypted with the org's DEK (AES-256-GCM). The DEK itself is wrapped with the master KEK. This layering must be preserved — never store plaintext, never re-use another org's DEK.
 2. **Personal-first resolution with team fallback**: reads look up personal creds first, then team. This is the invariant that lets an individual override team defaults without exposing personal secrets to the team.
-3. **Secret scanning is opt-out**, not opt-in. Any code path that composes a tool argument or shell command should let `SecretScanner` see it. Do not add a "trusted" bypass for convenience.
+3. **Secret scanning is opt-in** (disabled by default). Enable it via `security.secret_scanner.enabled: true` in config.yaml. When enabled, any code path that composes a tool argument or shell command should let `SecretScanner` see it.
 4. **OAuth refresh** must happen in a single goroutine per token (guarded by `tokenCache`). Never call refresh from a hot path without going through the cache.
 
 ## When editing

@@ -762,6 +762,14 @@ func (a *AstonishAgent) executeLLMNodeAttempt(ctx agent.InvocationContext, node 
 				if t.Name() == "shell_command" || t.Name() == "process_write" {
 					shellFields = []string{"command"}
 				}
+
+				// Register resolved credential values with the Redactor BEFORE
+				// substitution. This ensures dynamically-fetched tokens (e.g.,
+				// Keystone) are known to RedactMap in the AfterToolCallback,
+				// even when the resolver is a DB-backed adapter that doesn't
+				// share the agent's Redactor instance.
+				credentials.RegisterResolvedWithRedactor(args, resolver, a.Redactor)
+
 				credRestore := credentials.SubstituteAndRestore(args, resolver, shellFields...)
 
 				// After substitution, check if any placeholders remain unresolved.

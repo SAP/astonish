@@ -238,7 +238,7 @@ func TestStoreKeyRedactionWithHexFormat(t *testing.T) {
 	// Simulating: "cat .store_key" returns the hex string
 	// The redactor should catch it
 	redacted := store.Redactor().Redact(hexKey)
-	if !strings.Contains(redacted, "[REDACTED:") {
+	if !strings.Contains(redacted, "[REDACTED]") {
 		t.Errorf("hex key should be redacted, got: %s", redacted)
 	}
 	if strings.Contains(redacted, hexKey) {
@@ -726,7 +726,7 @@ func TestRedactSimple(t *testing.T) {
 
 	input := "The API key is sk-secret-key-12345678 in this text"
 	output := r.Redact(input)
-	expected := "The API key is [REDACTED:my-api] in this text"
+	expected := "The API key is [REDACTED] in this text"
 
 	if output != expected {
 		t.Errorf("Redact = %q, want %q", output, expected)
@@ -844,7 +844,7 @@ func TestRedactStoreKey(t *testing.T) {
 	if contains(output, hexKey) {
 		t.Error("store encryption key should be redacted from output")
 	}
-	if !contains(output, "[REDACTED:store-encryption-key]") {
+	if !contains(output, "[REDACTED]") {
 		t.Errorf("expected redaction marker, got: %s", output)
 	}
 }
@@ -866,7 +866,7 @@ func TestRedactCredentialValues(t *testing.T) {
 	if contains(output, "sk-prod-api-key-99887766") {
 		t.Error("credential value should be redacted")
 	}
-	if !contains(output, "[REDACTED:my-api]") {
+	if !contains(output, "[REDACTED]") {
 		t.Errorf("expected redaction marker, got: %s", output)
 	}
 }

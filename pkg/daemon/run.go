@@ -1134,8 +1134,9 @@ func Run(cfg RunConfig) error {
 		// Resolve default org/team for fleet session store (backward compat)
 		orgSlug := appCfg.Storage.Auth.GetDefaultOrgSlug()
 		if orgStore, orgErr := backend.ForOrg(orgSlug); orgErr == nil {
-			teamStore := orgStore.ForTeam("general")
-			fleetSessionStore = teamStore.Sessions()
+			if teamStore := orgStore.ForTeam("general"); teamStore != nil {
+				fleetSessionStore = teamStore.Sessions()
+			}
 		}
 
 		logger.Printf("Scheduler: multi-tenant (all orgs/teams)")
@@ -1152,10 +1153,11 @@ func Run(cfg RunConfig) error {
 		var fleetSchedBridge *fleetSchedulerBridge
 		orgSlug := appCfg.Storage.Auth.GetDefaultOrgSlug()
 		if orgStore, orgErr := backend.ForOrg(orgSlug); orgErr == nil {
-			teamStore := orgStore.ForTeam("general")
-			fleetJobStore := newPGSchedulerAdapter(teamStore.ScheduledJobs())
-			fleetSched := scheduler.New(fleetJobStore, schedExec.Execute, nil, log.Default())
-			fleetSchedBridge = newFleetSchedulerBridge(fleetSched)
+			if teamStore := orgStore.ForTeam("general"); teamStore != nil {
+				fleetJobStore := newPGSchedulerAdapter(teamStore.ScheduledJobs())
+				fleetSched := scheduler.New(fleetJobStore, schedExec.Execute, nil, log.Default())
+				fleetSchedBridge = newFleetSchedulerBridge(fleetSched)
+			}
 		}
 
 		if fleetSchedBridge != nil {
@@ -1166,8 +1168,9 @@ func Run(cfg RunConfig) error {
 				if backend != nil && fCfg.TeamSlug != "" {
 					orgSlug := appCfg.Storage.Auth.GetDefaultOrgSlug()
 					if orgStore, orgErr := backend.ForOrg(orgSlug); orgErr == nil {
-						teamStore := orgStore.ForTeam(fCfg.TeamSlug)
-						fleetStores = api.FleetStoresFromTeam(teamStore, orgStore, backend.PlatformMCPServers(), backend.PlatformSkills())
+						if teamStore := orgStore.ForTeam(fCfg.TeamSlug); teamStore != nil {
+							fleetStores = api.FleetStoresFromTeam(teamStore, orgStore, backend.PlatformMCPServers(), backend.PlatformSkills())
+						}
 					}
 				}
 				return api.StartHeadlessFleetSession(fCtx, fCfg, fleetSessionStore, fleetStores)
@@ -1179,10 +1182,11 @@ func Run(cfg RunConfig) error {
 				if backend != nil {
 					orgSlug := appCfg.Storage.Auth.GetDefaultOrgSlug()
 					if orgStore, orgErr := backend.ForOrg(orgSlug); orgErr == nil {
-						teamStore := orgStore.ForTeam("general")
-						return &dbPlanAccessAdapter{
-							store:        teamStore.FleetPlans(),
-							monitorStore: backend.NewMonitorStateStore(orgSlug, "general"),
+						if teamStore := orgStore.ForTeam("general"); teamStore != nil {
+							return &dbPlanAccessAdapter{
+								store:        teamStore.FleetPlans(),
+								monitorStore: backend.NewMonitorStateStore(orgSlug, "general"),
+							}
 						}
 					}
 				}
@@ -1217,8 +1221,9 @@ func Run(cfg RunConfig) error {
 				if backend != nil && rCfg.TeamSlug != "" {
 					orgSlug := appCfg.Storage.Auth.GetDefaultOrgSlug()
 					if orgStore, orgErr := backend.ForOrg(orgSlug); orgErr == nil {
-						teamStore := orgStore.ForTeam(rCfg.TeamSlug)
-						fleetStores = api.FleetStoresFromTeam(teamStore, orgStore, backend.PlatformMCPServers(), backend.PlatformSkills())
+						if teamStore := orgStore.ForTeam(rCfg.TeamSlug); teamStore != nil {
+							fleetStores = api.FleetStoresFromTeam(teamStore, orgStore, backend.PlatformMCPServers(), backend.PlatformSkills())
+						}
 					}
 				}
 				return api.RecoverFleetSession(rCtx, rCfg, fleetSessionStore, fleetStores)
@@ -1238,6 +1243,10 @@ func Run(cfg RunConfig) error {
 						return ""
 					}
 					teamStore := orgStore.ForTeam("general")
+					if teamStore == nil {
+						slog.Warn("failed to open team store for fleet credentials", "plan", plan.Key)
+						return ""
+					}
 					cs := teamStore.Credentials()
 					resolved, err := fleet.ResolveCredentialsPlatform(context.Background(), plan, cs)
 					if err != nil {
@@ -1287,8 +1296,9 @@ func Run(cfg RunConfig) error {
 				if backend != nil {
 					orgSlug := appCfg.Storage.Auth.GetDefaultOrgSlug()
 					if orgStore, orgErr := backend.ForOrg(orgSlug); orgErr == nil {
-						teamStore := orgStore.ForTeam("general")
-						return &dbFleetPlanRegistryAdapter{store: teamStore.FleetPlans()}
+						if teamStore := orgStore.ForTeam("general"); teamStore != nil {
+							return &dbFleetPlanRegistryAdapter{store: teamStore.FleetPlans()}
+						}
 					}
 				}
 				// Personal mode: use file-based registry
@@ -1303,8 +1313,9 @@ func Run(cfg RunConfig) error {
 				if backend != nil {
 					orgSlug := appCfg.Storage.Auth.GetDefaultOrgSlug()
 					if orgStore, orgErr := backend.ForOrg(orgSlug); orgErr == nil {
-						teamStore := orgStore.ForTeam("general")
-						return &dbFleetTemplateRegistryAdapter{store: teamStore.FleetTemplates()}
+						if teamStore := orgStore.ForTeam("general"); teamStore != nil {
+							return &dbFleetTemplateRegistryAdapter{store: teamStore.FleetTemplates()}
+						}
 					}
 				}
 				// Personal mode: use file-based registry
@@ -1321,9 +1332,10 @@ func Run(cfg RunConfig) error {
 				if backend != nil {
 					orgSlug := appCfg.Storage.Auth.GetDefaultOrgSlug()
 					if orgStore, orgErr := backend.ForOrg(orgSlug); orgErr == nil {
-						teamStore := orgStore.ForTeam("general")
-						fleetPlanStore = teamStore.FleetPlans()
-						fleetStores = api.FleetStoresFromTeam(teamStore, orgStore, backend.PlatformMCPServers(), backend.PlatformSkills())
+						if teamStore := orgStore.ForTeam("general"); teamStore != nil {
+							fleetPlanStore = teamStore.FleetPlans()
+							fleetStores = api.FleetStoresFromTeam(teamStore, orgStore, backend.PlatformMCPServers(), backend.PlatformSkills())
+						}
 					}
 				}
 				result, err := api.StartFleetSessionFromPlan(planKey, initialMessage, api.DefaultUserID(), "", nil, nil, "", fleetPlanStore, fleetStores)
@@ -1630,9 +1642,10 @@ func Run(cfg RunConfig) error {
 				warmSvc.OrgSettings = backend.OrgSettings(orgSlug)
 				if orgStore, orgErr := backend.ForOrg(orgSlug); orgErr == nil {
 					warmSvc.MCPServers = orgStore.OrgMCPServers()
-					teamStore := orgStore.ForTeam("general")
-					warmSvc.TeamMCPServers = teamStore.MCPServers()
-					warmSvc.Settings = teamStore.Settings()
+					if teamStore := orgStore.ForTeam("general"); teamStore != nil {
+						warmSvc.TeamMCPServers = teamStore.MCPServers()
+						warmSvc.Settings = teamStore.Settings()
+					}
 				}
 			}
 		}

@@ -11,11 +11,14 @@ import {
   hasAppFence,
   isAppProgressAgent,
   isHardBreakType,
+  isHousekeepingNote,
   isSoftNoteType,
   isStickyAgentBubble,
+  isSubstantiveMessage,
   isToolResultError,
   latestProcessText,
   liveActivityHint,
+  onlyHousekeepingToolsBetween,
   previewValue,
   stickyAgentBubbleKey,
   supersededAgentIndices,
@@ -471,5 +474,109 @@ describe('deriveLiveStreamStatus', () => {
       { type: 'agent', content: 'Hello', _streaming: true },
     ]
     expect(deriveLiveStreamStatus(messages)).toBe('Thinking…')
+  })
+})
+
+describe('supersededAgentIndices - housekeeping preservation', () => {
+  it('preserves substantive answer when followed by memory_save + trivial note', () => {
+    const messages: ChatMsg[] = [
+      { type: 'user', content: 'list VMs' },
+      {
+        type: 'agent',
+        content:
+          'Here are the available VMs:\n\n| Name | Status | IP |\n|---|---|---|\n| vm-1 | ACTIVE | 10.0.0.1 |\n| vm-2 | ACTIVE | 10.0.0.2 |\n| vm-3 | SHUTOFF | 10.0.0.3 |',
+      },
+      { type: 'tool_call', toolName: 'memory_save', toolArgs: {} },
+      { type: 'tool_result', toolName: 'memory_save', toolResult: { status: 'saved' } },
+      { type: 'agent', content: "I've saved the endpoint details to memory." },
+    ]
+    const superseded = supersededAgentIndices(messages)
+    expect(superseded.has(1)).toBe(false) // VM list is visible
+    expect(superseded.has(4)).toBe(false) // trivial note is also visible
+  })
+
+  it('normal superseding still works for intermediate thinking', () => {
+    const messages: ChatMsg[] = [
+      { type: 'user', content: 'find the VMs' },
+      { type: 'agent', content: 'Let me check...' },
+      { type: 'tool_call', toolName: 'shell_command', toolArgs: { command: 'openstack server list' } },
+      { type: 'tool_result', toolName: 'shell_command', toolResult: 'vm-1 ACTIVE\nvm-2 ACTIVE' },
+      {
+        type: 'agent',
+        content:
+          'Here are the results:\n\n| Name | Status |\n|---|---|\n| vm-1 | ACTIVE |\n| vm-2 | ACTIVE |',
+      },
+    ]
+    const superseded = supersededAgentIndices(messages)
+    expect(superseded.has(1)).toBe(true) // 'Let me check...' is superseded
+    expect(superseded.has(4)).toBe(false) // real answer is visible
+  })
+
+  it('multiple substantive messages - only last substantive before housekeeping survives', () => {
+    const messages: ChatMsg[] = [
+      { type: 'user', content: 'do stuff' },
+      { type: 'agent', content: 'First result with lots of content...'.repeat(20) },
+      { type: 'tool_call', toolName: 'edit_file', toolArgs: {} },
+      { type: 'tool_result', toolName: 'edit_file', toolResult: {} },
+      { type: 'agent', content: 'Updated result with even more content and details...'.repeat(20) },
+      { type: 'tool_call', toolName: 'memory_save', toolArgs: {} },
+      { type: 'tool_result', toolName: 'memory_save', toolResult: {} },
+      { type: 'agent', content: 'Done.' },
+    ]
+    const superseded = supersededAgentIndices(messages)
+    expect(superseded.has(1)).toBe(true) // first agent superseded (edit_file is not housekeeping)
+    expect(superseded.has(4)).toBe(false) // last substantive before housekeeping survives
+    expect(superseded.has(7)).toBe(false) // 'Done.' is visible
+  })
+
+  it('short final message after non-housekeeping tool still supersedes normally', () => {
+    const messages: ChatMsg[] = [
+      { type: 'user', content: 'run it' },
+      {
+        type: 'agent',
+        content: 'Here is a very long detailed response with tables and code blocks...'.repeat(10),
+      },
+      { type: 'tool_call', toolName: 'shell_command', toolArgs: {} },
+      { type: 'tool_result', toolName: 'shell_command', toolResult: {} },
+      { type: 'agent', content: 'Done.' },
+    ]
+    const superseded = supersededAgentIndices(messages)
+    expect(superseded.has(1)).toBe(true) // superseded (shell_command is not housekeeping)
+    expect(superseded.has(4)).toBe(false) // final message is visible
+  })
+
+  it('isHousekeepingNote helper', () => {
+    expect(isHousekeepingNote('Saved to memory.')).toBe(true)
+    expect(isHousekeepingNote('Done.')).toBe(true)
+    expect(isHousekeepingNote("I've noted that for next time.")).toBe(true)
+    expect(
+      isHousekeepingNote('Here are the VMs:\n| Name | Status |\n|---|---|\n| vm-1 | ACTIVE |'),
+    ).toBe(false) // has markdown table
+    expect(isHousekeepingNote('a'.repeat(200))).toBe(false) // too long
+  })
+
+  it('isSubstantiveMessage helper', () => {
+    expect(isSubstantiveMessage('Let me check...')).toBe(false) // short, no formatting
+    expect(isSubstantiveMessage('a'.repeat(250))).toBe(true) // long enough
+    expect(isSubstantiveMessage('Results:\n```\ncode here\n```')).toBe(true) // has code block
+    expect(isSubstantiveMessage('Items:\n- one\n- two\n- three')).toBe(true) // has list
+  })
+
+  it('onlyHousekeepingToolsBetween helper', () => {
+    const messages: ChatMsg[] = [
+      { type: 'agent', content: 'answer' },
+      { type: 'tool_call', toolName: 'memory_save', toolArgs: {} },
+      { type: 'tool_result', toolName: 'memory_save', toolResult: {} },
+      { type: 'agent', content: 'Done.' },
+    ]
+    expect(onlyHousekeepingToolsBetween(messages, 0, 3)).toBe(true)
+
+    const mixed: ChatMsg[] = [
+      { type: 'agent', content: 'answer' },
+      { type: 'tool_call', toolName: 'shell_command', toolArgs: {} },
+      { type: 'tool_result', toolName: 'shell_command', toolResult: {} },
+      { type: 'agent', content: 'Done.' },
+    ]
+    expect(onlyHousekeepingToolsBetween(mixed, 0, 3)).toBe(false)
   })
 })

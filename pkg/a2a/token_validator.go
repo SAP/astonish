@@ -1,10 +1,22 @@
 package a2a
 
 import (
+	"crypto/ecdsa"
+	"crypto/rsa"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+)
+
+var (
+	ErrTokenExpired    = errors.New("a2a: token expired")
+	ErrUntrustedIssuer = errors.New("a2a: untrusted issuer")
+	ErrInvalidAudience = errors.New("a2a: invalid audience")
+	ErrActorNotAllowed = errors.New("a2a: actor not allowed")
+	ErrMissingActClaim = errors.New("a2a: missing required act claim")
+	ErrTokenInvalid    = errors.New("a2a: token invalid")
 )
 
 // TrustedIssuer represents an IdP trusted for A2A token validation.
@@ -98,7 +110,7 @@ func (v *TokenValidator) Validate(tokenStr string) (*A2ATokenClaims, error) {
 		}
 	}
 	if matchedIssuer == nil {
-		return nil, fmt.Errorf("a2a: untrusted issuer %q", issuer)
+		return nil, fmt.Errorf("%w: %q", ErrUntrustedIssuer, issuer)
 	}
 
 	// Step 3: Fetch signing key from JWKS using `kid` and the issuer's JWKS URL.
@@ -109,16 +121,26 @@ func (v *TokenValidator) Validate(tokenStr string) (*A2ATokenClaims, error) {
 
 	// Step 4: Verify signature, expiry, not-before using jwt.Parse with the key.
 	verified, err := jwt.Parse(tokenStr, func(t *jwt.Token) (interface{}, error) {
-		// Ensure the signing method is RS256 or ES256.
-		switch t.Method.Alg() {
-		case "RS256", "RS384", "RS512", "ES256", "ES384", "ES512":
-			return pubKey, nil
+		// Pin allowed algorithms to the key type for defense in depth
+		switch pubKey.(type) {
+		case *rsa.PublicKey:
+			if t.Method.Alg() != "RS256" && t.Method.Alg() != "RS384" && t.Method.Alg() != "RS512" {
+				return nil, fmt.Errorf("unexpected signing method %v for RSA key", t.Header["alg"])
+			}
+		case *ecdsa.PublicKey:
+			if t.Method.Alg() != "ES256" && t.Method.Alg() != "ES384" && t.Method.Alg() != "ES512" {
+				return nil, fmt.Errorf("unexpected signing method %v for EC key", t.Header["alg"])
+			}
 		default:
-			return nil, fmt.Errorf("a2a: unexpected signing method %q", t.Method.Alg())
+			return nil, fmt.Errorf("unsupported key type %T", pubKey)
 		}
+		return pubKey, nil
 	}, jwt.WithExpirationRequired())
 	if err != nil {
-		return nil, fmt.Errorf("a2a: token verification failed: %w", err)
+		if errors.Is(err, jwt.ErrTokenExpired) {
+			return nil, fmt.Errorf("%w: %v", ErrTokenExpired, err)
+		}
+		return nil, fmt.Errorf("%w: %v", ErrTokenInvalid, err)
 	}
 
 	verifiedClaims, ok := verified.Claims.(jwt.MapClaims)
@@ -132,7 +154,7 @@ func (v *TokenValidator) Validate(tokenStr string) (*A2ATokenClaims, error) {
 		return nil, fmt.Errorf("a2a: failed to get audience claim: %w", err)
 	}
 	if !containsString(audience, matchedIssuer.Audience) {
-		return nil, fmt.Errorf("a2a: token audience %v does not contain expected %q", audience, matchedIssuer.Audience)
+		return nil, fmt.Errorf("%w: token audience %v does not contain %q", ErrInvalidAudience, audience, matchedIssuer.Audience)
 	}
 
 	// Step 6: Extract user identity from the configured `user_claim` field.
@@ -165,14 +187,14 @@ func (v *TokenValidator) Validate(tokenStr string) (*A2ATokenClaims, error) {
 		// Verify the actor matches an AllowedAgent for this org.
 		agent := v.findAllowedAgent(actorSub, matchedIssuer.ID, matchedIssuer.OrgID)
 		if agent == nil {
-			return nil, fmt.Errorf("a2a: actor %q is not an allowed agent", actorSub)
+			return nil, fmt.Errorf("%w: %q", ErrActorNotAllowed, actorSub)
 		}
 		if !agent.Enabled {
-			return nil, fmt.Errorf("a2a: agent %q is disabled", actorSub)
+			return nil, fmt.Errorf("%w: %q (disabled)", ErrActorNotAllowed, actorSub)
 		}
 		result.ActorIdentifier = actorSub
 	} else if v.requireActorClaim {
-		return nil, fmt.Errorf("a2a: token missing required act claim")
+		return nil, ErrMissingActClaim
 	}
 
 	return result, nil

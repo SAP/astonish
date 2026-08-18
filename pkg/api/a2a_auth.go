@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"sync"
@@ -58,12 +59,11 @@ func A2AAuthMiddleware(next http.Handler) http.Handler {
 
 		claims, err := validator.Validate(tokenStr)
 		if err != nil {
-			// Determine appropriate error code from the error message
+			// Determine appropriate error code
 			code := a2a.ErrCodeForbidden
-			if strings.Contains(err.Error(), "expired") {
+			if errors.Is(err, a2a.ErrTokenExpired) {
 				code = a2a.ErrCodeAuthRequired
-			} else if strings.Contains(err.Error(), "untrusted issuer") ||
-				strings.Contains(err.Error(), "no trusted issuer") {
+			} else if errors.Is(err, a2a.ErrUntrustedIssuer) || errors.Is(err, a2a.ErrInvalidAudience) || errors.Is(err, a2a.ErrActorNotAllowed) {
 				code = a2a.ErrCodeForbidden
 			}
 			writeJSONRPCError(w, nil, code, err.Error())

@@ -171,3 +171,84 @@ func (f *failingScenarioUpsertStore) ListBySession(_ context.Context, sessionID 
 func (f *failingScenarioUpsertStore) Count() int { return 0 }
 
 func (f *failingScenarioUpsertStore) Close() error { return nil }
+
+func TestSaveOrMergeWithStatus_DoesNotDiscardOperationalKnowledge(t *testing.T) {
+	// Content that uses negative phrasing but contains resolution indicators
+	// should NOT be discarded — it's operational knowledge.
+	memStore := &failingScenarioUpsertStore{}
+	merger := &MemoryMerger{}
+
+	result, err := merger.SaveOrMerge(context.Background(), memStore, store.MemoryEntry{
+		Content: strings.Join([]string{
+			"- Do not use the admin token, use the service-account credential instead",
+			"- The endpoint does not exist at /v1, use /v2/servers instead",
+		}, "\n"),
+		Category: "infrastructure/api-access",
+	})
+	if err != nil {
+		t.Fatalf("SaveOrMerge returned error: %v", err)
+	}
+	if result.Action == "discarded" {
+		t.Fatal("operational knowledge with resolution indicators should NOT be discarded")
+	}
+	if !memStore.addCalled {
+		t.Fatal("expected memory to be saved (Add called)")
+	}
+}
+
+func TestSaveOrMergeWithStatus_DiscardsEmptyContent(t *testing.T) {
+	// Content that produces no extractable bullets (all whitespace/empty lines)
+	// should be discarded.
+	memStore := &failingScenarioUpsertStore{}
+	merger := &MemoryMerger{}
+
+	result, err := merger.SaveOrMerge(context.Background(), memStore, store.MemoryEntry{
+		Content:  "   \n  \n  ",
+		Category: "test",
+	})
+	if err != nil {
+		t.Fatalf("SaveOrMerge returned error: %v", err)
+	}
+	if result.Action != "discarded" {
+		t.Fatalf("Action = %q, want discarded for empty content", result.Action)
+	}
+}
+
+func TestSaveOrMergeWithStatus_PromotesNonEphemeralCautions(t *testing.T) {
+	// Content where ALL lines are conditional cautions (no resolution indicator)
+	// but are NOT ephemeral should be promoted to recipe and saved.
+	memStore := &failingScenarioUpsertStore{}
+	merger := &MemoryMerger{}
+
+	result, err := merger.SaveOrMerge(context.Background(), memStore, store.MemoryEntry{
+		Content: strings.Join([]string{
+			"- The default configuration is incorrect for production environments",
+			"- The API schema does not match the documentation",
+		}, "\n"),
+		Category: "workarounds/api-quirks",
+	})
+	if err != nil {
+		t.Fatalf("SaveOrMerge returned error: %v", err)
+	}
+	// These are non-ephemeral cautions — they should be promoted and saved.
+	if result.Action == "discarded" {
+		t.Fatal("non-ephemeral cautions should be promoted to recipe, not discarded")
+	}
+}
+
+func TestSaveOrMergeWithStatus_DiscardsEphemeralCautionsOnly(t *testing.T) {
+	// Content where ALL lines are ephemeral cautions should still be discarded.
+	memStore := &failingScenarioUpsertStore{}
+	merger := &MemoryMerger{}
+
+	result, err := merger.SaveOrMerge(context.Background(), memStore, store.MemoryEntry{
+		Content:  "A temporary outage did not work during a failed attempt.",
+		Category: "temporary-outage",
+	})
+	if err != nil {
+		t.Fatalf("SaveOrMerge returned error: %v", err)
+	}
+	if result.Action != "discarded" {
+		t.Fatalf("Action = %q, want discarded for ephemeral-only content", result.Action)
+	}
+}

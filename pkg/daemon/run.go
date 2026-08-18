@@ -596,11 +596,9 @@ func Run(cfg RunConfig) error {
 				baseURL = "http://localhost:9393" // default
 			}
 			taskStore := a2apkg.NewInMemoryTaskStore(taskTTL)
-			agentRegistry := a2apkg.NewInMemoryAgentRegistry()
 			a2aCh := a2achan.New(&a2achan.Config{
-				TaskStore:     taskStore,
-				AgentRegistry: agentRegistry,
-				BaseURL:       baseURL,
+				TaskStore: taskStore,
+				BaseURL:   baseURL,
 			}, log.Default())
 			mgr.Register(a2aCh)
 			api.SetA2AChannel(a2aCh)
@@ -653,6 +651,25 @@ func Run(cfg RunConfig) error {
 			})
 			api.SetA2ATokenValidator(validator)
 			logger.Printf("A2A authentication: %d trusted issuers, %d allowed agents", len(issuers), len(agents))
+
+			// Wire per-agent rate limiter from allowed agents config.
+			rl := a2apkg.NewAgentRateLimiter()
+			for _, ag := range agents {
+				if ag.RateLimit > 0 || ag.MaxTasks > 0 {
+					rl.SetAgentLimits(ag.ActorSub, ag.RateLimit, ag.MaxTasks)
+				}
+			}
+			api.SetA2ARateLimiter(rl)
+
+			// Wire fail-closed user resolver.
+			// For now, accept all authenticated users (the JWT validation already
+			// ensures the token is from a trusted issuer). A full PlatformResolver
+			// integration that checks UserChannel linkage is a follow-up.
+			// Setting the resolver to nil means fail-open (skip check).
+			// To enable fail-closed, uncomment and wire the actual user lookup:
+			// api.SetA2AUserResolver(func(ctx context.Context, userID, orgID string) bool {
+			//     return backend.UserExists(ctx, userID, orgID)
+			// })
 		}
 
 		if err := mgr.StartAll(ctx); err != nil {
@@ -1136,8 +1153,9 @@ func Run(cfg RunConfig) error {
 		// Resolve default org/team for fleet session store (backward compat)
 		orgSlug := appCfg.Storage.Auth.GetDefaultOrgSlug()
 		if orgStore, orgErr := backend.ForOrg(orgSlug); orgErr == nil {
-			teamStore := orgStore.ForTeam("general")
-			fleetSessionStore = teamStore.Sessions()
+			if teamStore := orgStore.ForTeam("general"); teamStore != nil {
+				fleetSessionStore = teamStore.Sessions()
+			}
 		}
 
 		logger.Printf("Scheduler: multi-tenant (all orgs/teams)")
@@ -1154,10 +1172,11 @@ func Run(cfg RunConfig) error {
 		var fleetSchedBridge *fleetSchedulerBridge
 		orgSlug := appCfg.Storage.Auth.GetDefaultOrgSlug()
 		if orgStore, orgErr := backend.ForOrg(orgSlug); orgErr == nil {
-			teamStore := orgStore.ForTeam("general")
-			fleetJobStore := newPGSchedulerAdapter(teamStore.ScheduledJobs())
-			fleetSched := scheduler.New(fleetJobStore, schedExec.Execute, nil, log.Default())
-			fleetSchedBridge = newFleetSchedulerBridge(fleetSched)
+			if teamStore := orgStore.ForTeam("general"); teamStore != nil {
+				fleetJobStore := newPGSchedulerAdapter(teamStore.ScheduledJobs())
+				fleetSched := scheduler.New(fleetJobStore, schedExec.Execute, nil, log.Default())
+				fleetSchedBridge = newFleetSchedulerBridge(fleetSched)
+			}
 		}
 
 		if fleetSchedBridge != nil {
@@ -1168,8 +1187,9 @@ func Run(cfg RunConfig) error {
 				if backend != nil && fCfg.TeamSlug != "" {
 					orgSlug := appCfg.Storage.Auth.GetDefaultOrgSlug()
 					if orgStore, orgErr := backend.ForOrg(orgSlug); orgErr == nil {
-						teamStore := orgStore.ForTeam(fCfg.TeamSlug)
-						fleetStores = api.FleetStoresFromTeam(teamStore, orgStore, backend.PlatformMCPServers(), backend.PlatformSkills())
+						if teamStore := orgStore.ForTeam(fCfg.TeamSlug); teamStore != nil {
+							fleetStores = api.FleetStoresFromTeam(teamStore, orgStore, backend.PlatformMCPServers(), backend.PlatformSkills())
+						}
 					}
 				}
 				return api.StartHeadlessFleetSession(fCtx, fCfg, fleetSessionStore, fleetStores)
@@ -1181,10 +1201,11 @@ func Run(cfg RunConfig) error {
 				if backend != nil {
 					orgSlug := appCfg.Storage.Auth.GetDefaultOrgSlug()
 					if orgStore, orgErr := backend.ForOrg(orgSlug); orgErr == nil {
-						teamStore := orgStore.ForTeam("general")
-						return &dbPlanAccessAdapter{
-							store:        teamStore.FleetPlans(),
-							monitorStore: backend.NewMonitorStateStore(orgSlug, "general"),
+						if teamStore := orgStore.ForTeam("general"); teamStore != nil {
+							return &dbPlanAccessAdapter{
+								store:        teamStore.FleetPlans(),
+								monitorStore: backend.NewMonitorStateStore(orgSlug, "general"),
+							}
 						}
 					}
 				}
@@ -1219,8 +1240,9 @@ func Run(cfg RunConfig) error {
 				if backend != nil && rCfg.TeamSlug != "" {
 					orgSlug := appCfg.Storage.Auth.GetDefaultOrgSlug()
 					if orgStore, orgErr := backend.ForOrg(orgSlug); orgErr == nil {
-						teamStore := orgStore.ForTeam(rCfg.TeamSlug)
-						fleetStores = api.FleetStoresFromTeam(teamStore, orgStore, backend.PlatformMCPServers(), backend.PlatformSkills())
+						if teamStore := orgStore.ForTeam(rCfg.TeamSlug); teamStore != nil {
+							fleetStores = api.FleetStoresFromTeam(teamStore, orgStore, backend.PlatformMCPServers(), backend.PlatformSkills())
+						}
 					}
 				}
 				return api.RecoverFleetSession(rCtx, rCfg, fleetSessionStore, fleetStores)
@@ -1240,6 +1262,10 @@ func Run(cfg RunConfig) error {
 						return ""
 					}
 					teamStore := orgStore.ForTeam("general")
+					if teamStore == nil {
+						slog.Warn("failed to open team store for fleet credentials", "plan", plan.Key)
+						return ""
+					}
 					cs := teamStore.Credentials()
 					resolved, err := fleet.ResolveCredentialsPlatform(context.Background(), plan, cs)
 					if err != nil {
@@ -1289,8 +1315,9 @@ func Run(cfg RunConfig) error {
 				if backend != nil {
 					orgSlug := appCfg.Storage.Auth.GetDefaultOrgSlug()
 					if orgStore, orgErr := backend.ForOrg(orgSlug); orgErr == nil {
-						teamStore := orgStore.ForTeam("general")
-						return &dbFleetPlanRegistryAdapter{store: teamStore.FleetPlans()}
+						if teamStore := orgStore.ForTeam("general"); teamStore != nil {
+							return &dbFleetPlanRegistryAdapter{store: teamStore.FleetPlans()}
+						}
 					}
 				}
 				// Personal mode: use file-based registry
@@ -1305,8 +1332,9 @@ func Run(cfg RunConfig) error {
 				if backend != nil {
 					orgSlug := appCfg.Storage.Auth.GetDefaultOrgSlug()
 					if orgStore, orgErr := backend.ForOrg(orgSlug); orgErr == nil {
-						teamStore := orgStore.ForTeam("general")
-						return &dbFleetTemplateRegistryAdapter{store: teamStore.FleetTemplates()}
+						if teamStore := orgStore.ForTeam("general"); teamStore != nil {
+							return &dbFleetTemplateRegistryAdapter{store: teamStore.FleetTemplates()}
+						}
 					}
 				}
 				// Personal mode: use file-based registry
@@ -1323,9 +1351,10 @@ func Run(cfg RunConfig) error {
 				if backend != nil {
 					orgSlug := appCfg.Storage.Auth.GetDefaultOrgSlug()
 					if orgStore, orgErr := backend.ForOrg(orgSlug); orgErr == nil {
-						teamStore := orgStore.ForTeam("general")
-						fleetPlanStore = teamStore.FleetPlans()
-						fleetStores = api.FleetStoresFromTeam(teamStore, orgStore, backend.PlatformMCPServers(), backend.PlatformSkills())
+						if teamStore := orgStore.ForTeam("general"); teamStore != nil {
+							fleetPlanStore = teamStore.FleetPlans()
+							fleetStores = api.FleetStoresFromTeam(teamStore, orgStore, backend.PlatformMCPServers(), backend.PlatformSkills())
+						}
 					}
 				}
 				result, err := api.StartFleetSessionFromPlan(planKey, initialMessage, api.DefaultUserID(), "", nil, nil, "", fleetPlanStore, fleetStores)
@@ -1632,9 +1661,10 @@ func Run(cfg RunConfig) error {
 				warmSvc.OrgSettings = backend.OrgSettings(orgSlug)
 				if orgStore, orgErr := backend.ForOrg(orgSlug); orgErr == nil {
 					warmSvc.MCPServers = orgStore.OrgMCPServers()
-					teamStore := orgStore.ForTeam("general")
-					warmSvc.TeamMCPServers = teamStore.MCPServers()
-					warmSvc.Settings = teamStore.Settings()
+					if teamStore := orgStore.ForTeam("general"); teamStore != nil {
+						warmSvc.TeamMCPServers = teamStore.MCPServers()
+						warmSvc.Settings = teamStore.Settings()
+					}
 				}
 			}
 		}

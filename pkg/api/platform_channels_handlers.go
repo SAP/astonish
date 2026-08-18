@@ -365,6 +365,12 @@ func PlatformAdminSaveChannelHandler(w http.ResponseWriter, r *http.Request) {
 		if v, ok := body.Config["require_actor_claim"].(bool); ok {
 			cfg.RequireActorClaim = v
 		}
+		if v, ok := body.Config["trusted_issuers"]; ok {
+			cfg.TrustedIssuers = parseTrustedIssuers(v)
+		}
+		if v, ok := body.Config["allowed_agents"]; ok {
+			cfg.AllowedAgents = parseAllowedAgents(v)
+		}
 		settings.Channels.A2A = cfg
 	}
 
@@ -770,4 +776,74 @@ func PlatformAdminTestEmailHandler(w http.ResponseWriter, r *http.Request) {
 		"email":       meResp.Mail,
 		"displayName": meResp.DisplayName,
 	})
+}
+
+// parseTrustedIssuers parses the trusted_issuers field from the API config map.
+func parseTrustedIssuers(v any) []store.PlatformTrustedIssuer {
+	items, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	var issuers []store.PlatformTrustedIssuer
+	for _, item := range items {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		iss := store.PlatformTrustedIssuer{}
+		if s, ok := m["name"].(string); ok {
+			iss.Name = s
+		}
+		if s, ok := m["issuer"].(string); ok {
+			iss.Issuer = s
+		}
+		if s, ok := m["jwks_url"].(string); ok {
+			iss.JWKSURL = s
+		}
+		if s, ok := m["audience"].(string); ok {
+			iss.Audience = s
+		}
+		if s, ok := m["user_claim"].(string); ok {
+			iss.UserClaim = s
+		}
+		if iss.Issuer != "" {
+			issuers = append(issuers, iss)
+		}
+	}
+	return issuers
+}
+
+// parseAllowedAgents parses the allowed_agents field from the API config map.
+func parseAllowedAgents(v any) []store.PlatformAllowedAgent {
+	items, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	var agents []store.PlatformAllowedAgent
+	for _, item := range items {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		ag := store.PlatformAllowedAgent{}
+		if s, ok := m["name"].(string); ok {
+			ag.Name = s
+		}
+		if s, ok := m["actor_sub"].(string); ok {
+			ag.ActorSub = s
+		}
+		if s, ok := m["issuer"].(string); ok {
+			ag.Issuer = s
+		}
+		if rl, ok := m["rate_limit"]; ok {
+			ag.RateLimit = toInt(rl)
+		}
+		if mt, ok := m["max_tasks"]; ok {
+			ag.MaxTasks = toInt(mt)
+		}
+		if ag.ActorSub != "" {
+			agents = append(agents, ag)
+		}
+	}
+	return agents
 }

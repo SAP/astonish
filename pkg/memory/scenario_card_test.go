@@ -88,13 +88,27 @@ func TestDraftScenarioCardSeparatesCredentialFailuresFromRecommendedPath(t *test
 		Category: "infrastructure/openstack credential access",
 		Scope:    "team",
 	}})
+	// Lines with a conditional-caution marker BUT a resolution indicator should
+	// be treated as recipe steps (operational knowledge), not cautions.
+	// Only pure failure notes (no resolution) should be cautions.
 	for _, step := range card.RecommendedRecipe {
-		if strings.Contains(strings.ToLower(step), "not found") || strings.Contains(strings.ToLower(step), "does not work") || strings.Contains(strings.ToLower(step), "not substituted") {
-			t.Fatalf("failure/caution leaked into recommended path: %#v", card.RecommendedRecipe)
+		// "does NOT work ... not substituted" with no resolution indicator → should be a caution, not recipe
+		if strings.Contains(strings.ToLower(step), "does not work") && strings.Contains(strings.ToLower(step), "not substituted") {
+			t.Fatalf("pure failure note leaked into recommended path: %#v", card.RecommendedRecipe)
 		}
 	}
-	if len(card.CautionsOrConditionalFailures) < 2 {
-		t.Fatalf("CautionsOrConditionalFailures = %#v, want credential failure notes", card.CautionsOrConditionalFailures)
+	if len(card.CautionsOrConditionalFailures) < 1 {
+		t.Fatalf("CautionsOrConditionalFailures = %#v, want at least one pure failure note", card.CautionsOrConditionalFailures)
+	}
+	// The "not found — must use" line should be in recipe (has resolution indicator "use ")
+	foundNotFoundInRecipe := false
+	for _, step := range card.RecommendedRecipe {
+		if strings.Contains(strings.ToLower(step), "not found") && strings.Contains(strings.ToLower(step), "must use") {
+			foundNotFoundInRecipe = true
+		}
+	}
+	if !foundNotFoundInRecipe {
+		t.Fatalf("operational knowledge with resolution ('not found — must use') should be in recipe, got recipe=%#v", card.RecommendedRecipe)
 	}
 }
 
@@ -405,3 +419,100 @@ func (f *fakeMemoryStore) ListBySession(context.Context, string) ([]store.Memory
 func (f *fakeMemoryStore) Count() int { return len(f.entries) }
 
 func (f *fakeMemoryStore) Close() error { return nil }
+
+// --- Tests for cautionLine() structural heuristic ---
+
+func TestCautionLine_EphemeralFailures(t *testing.T) {
+	// Lines with always-caution markers should always be classified as cautions.
+	ephemeralLines := []string{
+		"The service returned a 503 error",
+		"Connection timeout after 30 seconds",
+		"A temporary outage prevented access",
+		"This was a failed attempt to reach the API",
+		"Trial and error showed the old endpoint is broken",
+	}
+	for _, line := range ephemeralLines {
+		if !cautionLine(line) {
+			t.Errorf("expected ephemeral line to be caution: %q", line)
+		}
+	}
+}
+
+func TestCautionLine_OperationalKnowledge(t *testing.T) {
+	// Lines with conditional-caution markers AND resolution indicators
+	// should NOT be classified as cautions — they are operational knowledge.
+	operationalLines := []string{
+		"Do not use the admin token, use the service-account credential instead",
+		"The endpoint does not exist at /v1, use /v2/servers instead",
+		"resolve_credential(\"openstack\") returns not found — must use openstack-keystone",
+		"The default port is incorrect, the correct port is 9090",
+		"Avoid the legacy API, prefer the v3 endpoint",
+		"The old path is wrong, should use /api/v2/resources",
+	}
+	for _, line := range operationalLines {
+		if cautionLine(line) {
+			t.Errorf("operational knowledge with resolution should NOT be caution: %q", line)
+		}
+	}
+}
+
+func TestCautionLine_PureNegative(t *testing.T) {
+	// Lines with conditional-caution markers but NO resolution indicator
+	// should be classified as cautions.
+	pureNegativeLines := []string{
+		"This approach does not work at all",
+		"The credential was not found in the store",
+		"The configuration is incorrect",
+		"Placeholders are not substituted in shell commands",
+	}
+	for _, line := range pureNegativeLines {
+		if !cautionLine(line) {
+			t.Errorf("pure negative line without resolution should be caution: %q", line)
+		}
+	}
+}
+
+func TestHasUsableScenarioRecipe_WithCautionOnlyContent(t *testing.T) {
+	// A card where all bullets were classified as cautions should have an
+	// empty RecommendedRecipe (only placeholder), making HasUsableScenarioRecipe false.
+	// The fix in memory_merge.go handles the promotion; this tests the gate itself.
+	card := ScenarioCard{
+		CanonicalKey:                 "test-card",
+		RecommendedRecipe:            []string{ScenarioCardPlaceholderRecipe},
+		CautionsOrConditionalFailures: []string{"This does not work at all"},
+	}
+	if HasUsableScenarioRecipe(card) {
+		t.Fatal("card with only placeholder recipe should not be usable")
+	}
+
+	// A card with a real recipe step should be usable.
+	card.RecommendedRecipe = []string{"Use the /v2/api endpoint with credential X"}
+	if !HasUsableScenarioRecipe(card) {
+		t.Fatal("card with real recipe step should be usable")
+	}
+}
+
+func TestIsEphemeralCaution(t *testing.T) {
+	ephemeral := []string{
+		"Service returned 503 temporarily",
+		"Connection timed out after 30s",
+		"A temporary network outage occurred",
+		"This was a failed attempt",
+	}
+	for _, line := range ephemeral {
+		if !IsEphemeralCaution(line) {
+			t.Errorf("expected ephemeral caution: %q", line)
+		}
+	}
+
+	nonEphemeral := []string{
+		"The credential was not found in the store",
+		"This approach does not work",
+		"The configuration is incorrect",
+	}
+	for _, line := range nonEphemeral {
+		if IsEphemeralCaution(line) {
+			t.Errorf("expected non-ephemeral caution: %q", line)
+		}
+	}
+}

@@ -1072,6 +1072,10 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		// the invocation context (and its session) may become invalid after
 		// the agent Run function returns.
 		if c.PlatformReflector != nil {
+			slog.Info("platform reflector triggered",
+				"component", "platform-reflector",
+				"toolCalls", trace.ToolCallCount(),
+				"sessionID", sessionID)
 			// Platform mode: the reflector needs the runner context (which has
 			// MemoryStore, SessionID, UserID injected by ChatRunner). We derive
 			// a new context from the invocation context (which IS the runner ctx)

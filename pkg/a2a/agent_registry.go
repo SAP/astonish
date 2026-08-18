@@ -13,17 +13,16 @@ import (
 
 // RegisteredAgent represents an external agent authorized to use the A2A endpoint.
 type RegisteredAgent struct {
-	ID                       string    `json:"id"`
-	Name                     string    `json:"name"`
-	Description              string    `json:"description,omitempty"`
-	APIKeyHash               string    `json:"-"` // never serialized
-	LinkedUserID             string    `json:"linked_user_id,omitempty"`
-	LinkedOrgSlug            string    `json:"linked_org_slug,omitempty"`
-	LinkedTeamSlug           string    `json:"linked_team_slug,omitempty"`
-	AllowIdentityPropagation bool      `json:"allow_identity_propagation"`
-	RateLimit                int       `json:"rate_limit,omitempty"`     // requests per minute
-	MaxConcurrent            int       `json:"max_concurrent,omitempty"` // max concurrent tasks
-	CreatedAt                time.Time `json:"created_at"`
+	ID             string    `json:"id"`
+	Name           string    `json:"name"`
+	Description    string    `json:"description,omitempty"`
+	APIKeyHash     string    `json:"-"` // never serialized
+	LinkedUserID   string    `json:"linked_user_id,omitempty"`
+	LinkedOrgSlug  string    `json:"linked_org_slug,omitempty"`
+	LinkedTeamSlug string    `json:"linked_team_slug,omitempty"`
+	RateLimit      int       `json:"rate_limit,omitempty"`     // requests per minute
+	MaxConcurrent  int       `json:"max_concurrent,omitempty"` // max concurrent tasks
+	CreatedAt      time.Time `json:"created_at"`
 }
 
 // AgentRegistry manages registered external agents.

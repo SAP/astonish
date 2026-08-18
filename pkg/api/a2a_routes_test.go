@@ -90,12 +90,10 @@ func setupA2ATestWithJWT(t *testing.T) *a2achan.A2AChannel {
 	t.Helper()
 	store := a2a.NewInMemoryTaskStore(1 * time.Hour)
 	t.Cleanup(store.Close)
-	reg := a2a.NewInMemoryAgentRegistry()
 
 	ch := a2achan.New(&a2achan.Config{
-		TaskStore:     store,
-		AgentRegistry: reg,
-		BaseURL:       "http://localhost:9393",
+		TaskStore: store,
+		BaseURL:   "http://localhost:9393",
 	}, nil)
 
 	// Set the global channel
@@ -501,12 +499,10 @@ func TestA2AHandler_ValidatorNotConfigured(t *testing.T) {
 	// Set up channel but no validator
 	store := a2a.NewInMemoryTaskStore(1 * time.Hour)
 	t.Cleanup(store.Close)
-	reg := a2a.NewInMemoryAgentRegistry()
 
 	ch := a2achan.New(&a2achan.Config{
-		TaskStore:     store,
-		AgentRegistry: reg,
-		BaseURL:       "http://localhost:9393",
+		TaskStore: store,
+		BaseURL:   "http://localhost:9393",
 	}, nil)
 
 	SetA2AChannel(ch)

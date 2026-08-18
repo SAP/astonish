@@ -107,37 +107,36 @@ func A2AHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Bridge: construct a RegisteredAgent from claims for backward compatibility
-	// with the channel adapter (until phase 5 updates the adapter signature).
-	agent := agentFromClaims(claims)
+	// Derive agentID from claims for task ownership scoping.
+	agentID := agentIDFromClaims(claims)
 
 	// Dispatch by method
 	switch req.Method {
 	case "message/send":
-		handleMessageSend(w, r, ch, agent, req)
+		handleMessageSend(w, r, ch, claims, req)
 	case "tasks/get":
-		handleTasksGet(w, ch, agent, req)
+		handleTasksGet(w, ch, agentID, req)
 	case "tasks/cancel":
-		handleTasksCancel(w, ch, agent, req)
+		handleTasksCancel(w, ch, agentID, req)
 	case "pushNotification/set":
-		handlePushNotificationSet(w, ch, agent, req)
+		handlePushNotificationSet(w, ch, agentID, req)
 	case "pushNotification/get":
-		handlePushNotificationGet(w, ch, agent, req)
+		handlePushNotificationGet(w, ch, agentID, req)
 	case "pushNotification/delete":
-		handlePushNotificationDelete(w, ch, agent, req)
+		handlePushNotificationDelete(w, ch, agentID, req)
 	default:
 		writeJSONRPCError(w, req.ID, a2a.ErrCodeMethodNotFound, fmt.Sprintf("Unknown method: %s", req.Method))
 	}
 }
 
-func handleMessageSend(w http.ResponseWriter, r *http.Request, ch *a2achan.A2AChannel, agent *a2a.RegisteredAgent, req a2a.JSONRPCRequest) {
+func handleMessageSend(w http.ResponseWriter, r *http.Request, ch *a2achan.A2AChannel, claims *a2a.A2ATokenClaims, req a2a.JSONRPCRequest) {
 	var params a2a.SendMessageParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		writeJSONRPCError(w, req.ID, a2a.ErrCodeInvalidParams, "Invalid params: "+err.Error())
 		return
 	}
 
-	task, err := ch.HandleSendMessage(r.Context(), agent, params)
+	task, err := ch.HandleSendMessage(r.Context(), claims, params)
 	if err != nil {
 		writeJSONRPCError(w, req.ID, a2a.ErrCodeInternal, err.Error())
 		return
@@ -146,14 +145,14 @@ func handleMessageSend(w http.ResponseWriter, r *http.Request, ch *a2achan.A2ACh
 	writeJSONRPCResult(w, req.ID, task)
 }
 
-func handleTasksGet(w http.ResponseWriter, ch *a2achan.A2AChannel, agent *a2a.RegisteredAgent, req a2a.JSONRPCRequest) {
+func handleTasksGet(w http.ResponseWriter, ch *a2achan.A2AChannel, agentID string, req a2a.JSONRPCRequest) {
 	var params a2a.GetTaskParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		writeJSONRPCError(w, req.ID, a2a.ErrCodeInvalidParams, "Invalid params: "+err.Error())
 		return
 	}
 
-	task, err := ch.HandleGetTask(agent, params.TaskID)
+	task, err := ch.HandleGetTask(agentID, params.TaskID)
 	if err != nil {
 		writeJSONRPCError(w, req.ID, a2a.ErrCodeTaskNotFound, err.Error())
 		return
@@ -162,14 +161,14 @@ func handleTasksGet(w http.ResponseWriter, ch *a2achan.A2AChannel, agent *a2a.Re
 	writeJSONRPCResult(w, req.ID, task)
 }
 
-func handleTasksCancel(w http.ResponseWriter, ch *a2achan.A2AChannel, agent *a2a.RegisteredAgent, req a2a.JSONRPCRequest) {
+func handleTasksCancel(w http.ResponseWriter, ch *a2achan.A2AChannel, agentID string, req a2a.JSONRPCRequest) {
 	var params a2a.CancelTaskParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		writeJSONRPCError(w, req.ID, a2a.ErrCodeInvalidParams, "Invalid params: "+err.Error())
 		return
 	}
 
-	if err := ch.HandleCancelTask(agent, params.TaskID); err != nil {
+	if err := ch.HandleCancelTask(agentID, params.TaskID); err != nil {
 		writeJSONRPCError(w, req.ID, a2a.ErrCodeTaskNotFound, err.Error())
 		return
 	}
@@ -177,7 +176,7 @@ func handleTasksCancel(w http.ResponseWriter, ch *a2achan.A2AChannel, agent *a2a
 	writeJSONRPCResult(w, req.ID, map[string]string{"status": "canceled"})
 }
 
-func handlePushNotificationSet(w http.ResponseWriter, ch *a2achan.A2AChannel, agent *a2a.RegisteredAgent, req a2a.JSONRPCRequest) {
+func handlePushNotificationSet(w http.ResponseWriter, ch *a2achan.A2AChannel, agentID string, req a2a.JSONRPCRequest) {
 	var params a2a.SetPushNotificationParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		writeJSONRPCError(w, req.ID, a2a.ErrCodeInvalidParams, "Invalid params: "+err.Error())
@@ -186,7 +185,7 @@ func handlePushNotificationSet(w http.ResponseWriter, ch *a2achan.A2AChannel, ag
 
 	// Verify agent owns the task
 	task, err := ch.TaskStore().Get(params.TaskID)
-	if err != nil || task.AgentID != agent.ID {
+	if err != nil || task.AgentID != agentID {
 		writeJSONRPCError(w, req.ID, a2a.ErrCodeTaskNotFound, "Task not found")
 		return
 	}
@@ -199,7 +198,7 @@ func handlePushNotificationSet(w http.ResponseWriter, ch *a2achan.A2AChannel, ag
 	writeJSONRPCResult(w, req.ID, params.Config)
 }
 
-func handlePushNotificationGet(w http.ResponseWriter, ch *a2achan.A2AChannel, agent *a2a.RegisteredAgent, req a2a.JSONRPCRequest) {
+func handlePushNotificationGet(w http.ResponseWriter, ch *a2achan.A2AChannel, agentID string, req a2a.JSONRPCRequest) {
 	var params a2a.GetTaskParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		writeJSONRPCError(w, req.ID, a2a.ErrCodeInvalidParams, "Invalid params: "+err.Error())
@@ -208,7 +207,7 @@ func handlePushNotificationGet(w http.ResponseWriter, ch *a2achan.A2AChannel, ag
 
 	// Verify agent owns the task
 	task, err := ch.TaskStore().Get(params.TaskID)
-	if err != nil || task.AgentID != agent.ID {
+	if err != nil || task.AgentID != agentID {
 		writeJSONRPCError(w, req.ID, a2a.ErrCodeTaskNotFound, "Task not found")
 		return
 	}
@@ -217,7 +216,7 @@ func handlePushNotificationGet(w http.ResponseWriter, ch *a2achan.A2AChannel, ag
 	writeJSONRPCResult(w, req.ID, cfg)
 }
 
-func handlePushNotificationDelete(w http.ResponseWriter, ch *a2achan.A2AChannel, agent *a2a.RegisteredAgent, req a2a.JSONRPCRequest) {
+func handlePushNotificationDelete(w http.ResponseWriter, ch *a2achan.A2AChannel, agentID string, req a2a.JSONRPCRequest) {
 	var params a2a.GetTaskParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		writeJSONRPCError(w, req.ID, a2a.ErrCodeInvalidParams, "Invalid params: "+err.Error())
@@ -226,7 +225,7 @@ func handlePushNotificationDelete(w http.ResponseWriter, ch *a2achan.A2AChannel,
 
 	// Verify agent owns the task
 	task, err := ch.TaskStore().Get(params.TaskID)
-	if err != nil || task.AgentID != agent.ID {
+	if err != nil || task.AgentID != agentID {
 		writeJSONRPCError(w, req.ID, a2a.ErrCodeTaskNotFound, "Task not found")
 		return
 	}
@@ -289,11 +288,8 @@ func A2AStreamHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
-	// Bridge: construct a RegisteredAgent from claims
-	agent := agentFromClaims(claims)
-
 	// Process the message (same as sync but we stream events)
-	task, err := ch.HandleSendMessage(r.Context(), agent, params)
+	task, err := ch.HandleSendMessage(r.Context(), claims, params)
 	if err != nil {
 		// Write error as SSE event
 		errResp := a2a.JSONRPCResponse{
@@ -318,28 +314,14 @@ func A2AStreamHandler(w http.ResponseWriter, r *http.Request) {
 	flusher.Flush()
 }
 
-// agentFromClaims constructs a RegisteredAgent from validated JWT claims.
-// This is a bridge function for backward compatibility with the channel adapter
-// until the adapter is updated to accept claims directly (phase 5).
-func agentFromClaims(claims *a2a.A2ATokenClaims) *a2a.RegisteredAgent {
-	// Derive agent ID for task ownership scoping.
-	// For delegated tokens (actor present): use composite key so one service
-	// acting for multiple users cannot see other users' tasks via tasks/get.
-	// For direct user tokens: use the user identifier alone.
-	var agentID string
+// agentIDFromClaims derives the agent ID string from validated JWT claims.
+// For delegated tokens (actor present): composite key prevents cross-user task access.
+// For direct user tokens: user identifier alone.
+func agentIDFromClaims(claims *a2a.A2ATokenClaims) string {
 	if claims.ActorIdentifier != "" {
-		agentID = claims.ActorIdentifier + ":" + claims.UserIdentifier
-	} else {
-		agentID = claims.UserIdentifier
+		return claims.ActorIdentifier + ":" + claims.UserIdentifier
 	}
-	return &a2a.RegisteredAgent{
-		ID:                       agentID,
-		Name:                     claims.ActorIdentifier,
-		LinkedUserID:             claims.UserIdentifier,
-		LinkedOrgSlug:            claims.OrgID,
-		LinkedTeamSlug:           "",
-		AllowIdentityPropagation: false, // explicit: identity comes from JWT, never from message metadata
-	}
+	return claims.UserIdentifier
 }
 
 // --- JSON-RPC response helpers ---

@@ -11,25 +11,26 @@ import (
 )
 
 // HandleSendMessage processes an incoming A2A message/send request.
+// Identity comes directly from the validated JWT claims (set by the auth middleware).
 // It normalizes the A2A message to an InboundMessage, dispatches to the
 // ChatAgent via the channel handler, and waits for the response.
 func (c *A2AChannel) HandleSendMessage(
 	ctx context.Context,
-	agent *a2a.RegisteredAgent,
+	claims *a2a.A2ATokenClaims,
 	params a2a.SendMessageParams,
 ) (*a2a.Task, error) {
 	if c.handler == nil {
 		return nil, fmt.Errorf("a2a channel not started")
 	}
 
-	// Resolve identity
-	var metadata map[string]any
-	if params.Configuration != nil {
-		metadata = params.Configuration.Metadata
-	}
-	identity, err := a2a.ResolveIdentity(agent, metadata)
-	if err != nil {
-		return nil, fmt.Errorf("identity resolution failed: %w", err)
+	// Derive agent ID for task ownership scoping.
+	// For delegated tokens (actor present): composite key prevents cross-user task access.
+	// For direct user tokens: user identifier alone.
+	var agentID string
+	if claims.ActorIdentifier != "" {
+		agentID = claims.ActorIdentifier + ":" + claims.UserIdentifier
+	} else {
+		agentID = claims.UserIdentifier
 	}
 
 	// Determine context ID
@@ -42,24 +43,26 @@ func (c *A2AChannel) HandleSendMessage(
 	}
 
 	// Create task in store
-	task := c.config.TaskStore.Create(agent.ID, contextID)
+	task := c.config.TaskStore.Create(agentID, contextID)
 
 	// Transition to working
 	_ = c.config.TaskStore.UpdateState(task.ID, a2a.TaskStateWorking, &params.Message)
 
-	// Build session key
-	userID := ""
-	if identity.IsPropagated {
-		userID = identity.ExternalID
+	// Build session key (scoped by user for session continuity)
+	sessionKey := SessionKey(agentID, claims.UserIdentifier, contextID)
+
+	// Sender name: use actor if present, otherwise "direct"
+	senderName := claims.ActorIdentifier
+	if senderName == "" {
+		senderName = "direct"
 	}
-	sessionKey := SessionKey(agent.ID, userID, contextID)
 
 	// Normalize A2A message to InboundMessage
 	inbound := channels.InboundMessage{
 		ID:         task.ID,
 		ChannelID:  "a2a",
-		SenderID:   identity.ExternalID,
-		SenderName: agent.Name,
+		SenderID:   claims.UserIdentifier,
+		SenderName: senderName,
 		ChatID:     contextID,
 		ChatType:   channels.ChatTypeDirect,
 		ThreadID:   sessionKey,
@@ -68,11 +71,10 @@ func (c *A2AChannel) HandleSendMessage(
 		Raw:        params.Message, // preserve full message for advanced use
 	}
 
-	// Set routing hint if identity has org/team info
-	if identity.OrgSlug != "" {
+	// Set routing hint from JWT claims org context
+	if claims.OrgID != "" {
 		inbound.RoutingHint = &channels.RoutingHint{
-			OrgSlug:  identity.OrgSlug,
-			TeamSlug: identity.TeamSlug,
+			OrgSlug: claims.OrgID,
 		}
 	}
 
@@ -138,24 +140,24 @@ func (c *A2AChannel) HandleSendMessage(
 }
 
 // HandleGetTask returns a task, validating that the requesting agent owns it.
-func (c *A2AChannel) HandleGetTask(agent *a2a.RegisteredAgent, taskID string) (*a2a.Task, error) {
+func (c *A2AChannel) HandleGetTask(agentID string, taskID string) (*a2a.Task, error) {
 	task, err := c.config.TaskStore.Get(taskID)
 	if err != nil {
 		return nil, err
 	}
-	if task.AgentID != agent.ID {
+	if task.AgentID != agentID {
 		return nil, fmt.Errorf("task %s not found", taskID) // don't reveal existence
 	}
 	return task, nil
 }
 
 // HandleCancelTask cancels a task, validating ownership.
-func (c *A2AChannel) HandleCancelTask(agent *a2a.RegisteredAgent, taskID string) error {
+func (c *A2AChannel) HandleCancelTask(agentID string, taskID string) error {
 	task, err := c.config.TaskStore.Get(taskID)
 	if err != nil {
 		return err
 	}
-	if task.AgentID != agent.ID {
+	if task.AgentID != agentID {
 		return fmt.Errorf("task %s not found", taskID)
 	}
 	return c.config.TaskStore.Cancel(taskID)

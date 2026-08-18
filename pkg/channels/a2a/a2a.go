@@ -13,10 +13,9 @@ import (
 
 // Config holds configuration for the A2A channel adapter.
 type Config struct {
-	TaskStore     a2a.TaskStore
-	AgentRegistry a2a.AgentRegistry
-	PushNotifier  *a2a.PushNotifier
-	BaseURL       string
+	TaskStore    a2a.TaskStore
+	PushNotifier *a2a.PushNotifier
+	BaseURL      string
 }
 
 // A2AChannel implements channels.Channel for the A2A protocol.
@@ -180,11 +179,6 @@ func (c *A2AChannel) Handler() channels.MessageHandler {
 // TaskStore returns the task store for use by the HTTP layer.
 func (c *A2AChannel) TaskStore() a2a.TaskStore {
 	return c.config.TaskStore
-}
-
-// AgentRegistry returns the agent registry for use by the HTTP layer.
-func (c *A2AChannel) AgentRegistry() a2a.AgentRegistry {
-	return c.config.AgentRegistry
 }
 
 // PushNotifier returns the push notifier.

@@ -86,9 +86,35 @@ func loadChannelsConfigFromDB(backend platformDB, logger *Logger) config.Channel
 		out.A2A.Enabled = &enabled
 		out.A2A.BaseURL = ch.A2A.BaseURL
 		out.A2A.TaskTTL = ch.A2A.TaskTTL
+		out.A2A.DefaultAudience = ch.A2A.DefaultAudience
+		out.A2A.AutoLinkByEmail = ch.A2A.AutoLinkByEmail
+		out.A2A.RequireActorClaim = ch.A2A.RequireActorClaim
+
+		// Populate trusted issuers from DB config
+		for _, iss := range ch.A2A.TrustedIssuers {
+			out.A2A.TrustedIssuers = append(out.A2A.TrustedIssuers, config.TrustedIssuerConfig{
+				Name:      iss.Name,
+				Issuer:    iss.Issuer,
+				JWKSURL:   iss.JWKSURL,
+				Audience:  iss.Audience,
+				UserClaim: iss.UserClaim,
+			})
+		}
+
+		// Populate allowed agents from DB config
+		for _, ag := range ch.A2A.AllowedAgents {
+			out.A2A.AllowedAgents = append(out.A2A.AllowedAgents, config.AllowedAgentConfig{
+				Name:      ag.Name,
+				ActorSub:  ag.ActorSub,
+				Issuer:    ag.Issuer,
+				RateLimit: ag.RateLimit,
+				MaxTasks:  ag.MaxTasks,
+			})
+		}
 
 		if enabled && logger != nil {
-			logger.Printf("[channels] DB config: A2A enabled base_url=%s", out.A2A.BaseURL)
+			logger.Printf("[channels] DB config: A2A enabled base_url=%s issuers=%d agents=%d",
+				out.A2A.BaseURL, len(out.A2A.TrustedIssuers), len(out.A2A.AllowedAgents))
 		}
 	}
 

@@ -596,11 +596,9 @@ func Run(cfg RunConfig) error {
 				baseURL = "http://localhost:9393" // default
 			}
 			taskStore := a2apkg.NewInMemoryTaskStore(taskTTL)
-			agentRegistry := a2apkg.NewInMemoryAgentRegistry()
 			a2aCh := a2achan.New(&a2achan.Config{
-				TaskStore:     taskStore,
-				AgentRegistry: agentRegistry,
-				BaseURL:       baseURL,
+				TaskStore: taskStore,
+				BaseURL:   baseURL,
 			}, log.Default())
 			mgr.Register(a2aCh)
 			api.SetA2AChannel(a2aCh)

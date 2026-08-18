@@ -274,3 +274,98 @@ func TestLoadChannelsConfigFromDB_A2AEnabled(t *testing.T) {
 		t.Errorf("expected task_ttl '48h', got %q", cfg.A2A.TaskTTL)
 	}
 }
+
+func TestLoadChannelsConfigFromDB_A2ATrustedIssuers(t *testing.T) {
+	tmp := t.TempDir()
+	_, esStore, err := entstore.NewPlatformServices(context.Background(), entstore.Config{
+		DSN:     "file:" + filepath.Join(tmp, "platform.db"),
+		DataDir: tmp,
+	})
+	if err != nil {
+		t.Fatalf("NewPlatformServices: %v", err)
+	}
+	defer esStore.Close()
+
+	settings := &store.PlatformSettings{
+		Channels: &store.PlatformChannelSettings{
+			A2A: &store.PlatformA2AConfig{
+				Enabled:           true,
+				BaseURL:           "https://a2a.example.com",
+				DefaultAudience:   "https://api.example.com",
+				RequireActorClaim: true,
+				TrustedIssuers: []store.PlatformTrustedIssuer{
+					{
+						Name:      "corp-idp",
+						Issuer:    "https://auth.corp.com",
+						JWKSURL:   "https://auth.corp.com/.well-known/jwks.json",
+						Audience:  "https://api.example.com",
+						UserClaim: "email",
+					},
+					{
+						Name:     "partner-idp",
+						Issuer:   "https://partner.example.com",
+						JWKSURL:  "https://partner.example.com/keys",
+						Audience: "https://api.example.com",
+					},
+				},
+				AllowedAgents: []store.PlatformAllowedAgent{
+					{
+						Name:      "CI Bot",
+						ActorSub:  "ci-bot-123",
+						Issuer:    "corp-idp",
+						RateLimit: 100,
+						MaxTasks:  10,
+					},
+				},
+			},
+		},
+	}
+	if err := esStore.PlatformSettings().Save(context.Background(), settings); err != nil {
+		t.Fatalf("Save settings: %v", err)
+	}
+
+	cfg := loadChannelsConfigFromDB(esStore, nil)
+
+	if !cfg.A2A.IsA2AEnabled() {
+		t.Error("expected A2A to be enabled")
+	}
+	if cfg.A2A.DefaultAudience != "https://api.example.com" {
+		t.Errorf("expected default_audience, got %q", cfg.A2A.DefaultAudience)
+	}
+	if !cfg.A2A.RequireActorClaim {
+		t.Error("expected require_actor_claim to be true")
+	}
+
+	// Verify trusted issuers
+	if len(cfg.A2A.TrustedIssuers) != 2 {
+		t.Fatalf("expected 2 trusted issuers, got %d", len(cfg.A2A.TrustedIssuers))
+	}
+	iss := cfg.A2A.TrustedIssuers[0]
+	if iss != (config.TrustedIssuerConfig{
+		Name:      "corp-idp",
+		Issuer:    "https://auth.corp.com",
+		JWKSURL:   "https://auth.corp.com/.well-known/jwks.json",
+		Audience:  "https://api.example.com",
+		UserClaim: "email",
+	}) {
+		t.Errorf("issuer[0] mismatch: %+v", iss)
+	}
+	if cfg.A2A.TrustedIssuers[1].Name != "partner-idp" {
+		t.Errorf("issuer[1] name mismatch: %q", cfg.A2A.TrustedIssuers[1].Name)
+	}
+
+	// Verify allowed agents
+	if len(cfg.A2A.AllowedAgents) != 1 {
+		t.Fatalf("expected 1 allowed agent, got %d", len(cfg.A2A.AllowedAgents))
+	}
+	ag := cfg.A2A.AllowedAgents[0]
+	if ag != (config.AllowedAgentConfig{
+		Name:      "CI Bot",
+		ActorSub:  "ci-bot-123",
+		Issuer:    "corp-idp",
+		RateLimit: 100,
+		MaxTasks:  10,
+	}) {
+		t.Errorf("agent[0] mismatch: %+v", ag)
+	}
+}

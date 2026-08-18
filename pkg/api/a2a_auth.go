@@ -30,6 +30,26 @@ func getA2ATokenValidator() *a2a.TokenValidator {
 	return a2aValidator
 }
 
+// --- Package-level state for A2A rate limiter (set by daemon during startup) ---
+
+var (
+	a2aRateLimiterMu sync.RWMutex
+	a2aRateLimiter   *a2a.AgentRateLimiter
+)
+
+// SetA2ARateLimiter sets the A2A per-agent rate limiter for the HTTP handlers.
+func SetA2ARateLimiter(rl *a2a.AgentRateLimiter) {
+	a2aRateLimiterMu.Lock()
+	defer a2aRateLimiterMu.Unlock()
+	a2aRateLimiter = rl
+}
+
+func getA2ARateLimiter() *a2a.AgentRateLimiter {
+	a2aRateLimiterMu.RLock()
+	defer a2aRateLimiterMu.RUnlock()
+	return a2aRateLimiter
+}
+
 // a2aClaimsContextKey is the context key for the validated A2A token claims.
 type a2aClaimsContextKey struct{}
 
@@ -89,4 +109,30 @@ func extractBearerToken(r *http.Request) string {
 		return strings.TrimPrefix(auth, "Bearer ")
 	}
 	return ""
+}
+
+// --- A2A User Resolver (fail-closed identity check) ---
+
+// A2AUserResolverFunc checks whether a user identifier is provisioned in the platform.
+// Returns true if the user exists and is allowed to use A2A, false otherwise.
+type A2AUserResolverFunc func(ctx context.Context, userIdentifier string, orgID string) bool
+
+var (
+	a2aUserResolverMu sync.RWMutex
+	a2aUserResolver   A2AUserResolverFunc
+)
+
+// SetA2AUserResolver sets the function that checks whether a user is provisioned.
+// When set, A2A requests from unresolved users are rejected with 403.
+// When nil, the check is skipped (fail-open for backward compatibility during migration).
+func SetA2AUserResolver(fn A2AUserResolverFunc) {
+	a2aUserResolverMu.Lock()
+	defer a2aUserResolverMu.Unlock()
+	a2aUserResolver = fn
+}
+
+func getA2AUserResolver() A2AUserResolverFunc {
+	a2aUserResolverMu.RLock()
+	defer a2aUserResolverMu.RUnlock()
+	return a2aUserResolver
 }

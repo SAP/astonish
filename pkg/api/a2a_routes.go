@@ -89,6 +89,14 @@ func A2AHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Fail-closed: reject if user is not provisioned in the platform
+	if resolver := getA2AUserResolver(); resolver != nil {
+		if !resolver(r.Context(), claims.UserIdentifier, claims.OrgID) {
+			writeJSONRPCError(w, nil, a2a.ErrCodeForbidden, "User not provisioned")
+			return
+		}
+	}
+
 	// Read and parse JSON-RPC request
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1MB limit
 	if err != nil {
@@ -134,6 +142,22 @@ func handleMessageSend(w http.ResponseWriter, r *http.Request, ch *a2achan.A2ACh
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		writeJSONRPCError(w, req.ID, a2a.ErrCodeInvalidParams, "Invalid params: "+err.Error())
 		return
+	}
+
+	agentID := agentIDFromClaims(claims)
+
+	// Enforce per-agent rate limit
+	if rl := getA2ARateLimiter(); rl != nil {
+		if !rl.AllowRequest(agentID) {
+			writeJSONRPCError(w, req.ID, a2a.ErrCodeRateLimited, "Rate limit exceeded")
+			return
+		}
+		// Enforce per-agent concurrency limit
+		if !rl.AcquireTask(agentID) {
+			writeJSONRPCError(w, req.ID, a2a.ErrCodeRateLimited, "Max concurrent tasks exceeded")
+			return
+		}
+		defer rl.ReleaseTask(agentID)
 	}
 
 	task, err := ch.HandleSendMessage(r.Context(), claims, params)
@@ -253,6 +277,14 @@ func A2AStreamHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Fail-closed: reject if user is not provisioned in the platform
+	if resolver := getA2AUserResolver(); resolver != nil {
+		if !resolver(r.Context(), claims.UserIdentifier, claims.OrgID) {
+			writeJSONRPCError(w, nil, a2a.ErrCodeForbidden, "User not provisioned")
+			return
+		}
+	}
+
 	// Read and parse JSON-RPC request
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
@@ -282,6 +314,21 @@ func A2AStreamHandler(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		writeJSONRPCError(w, req.ID, a2a.ErrCodeInternal, "Streaming not supported")
 		return
+	}
+
+	agentID := agentIDFromClaims(claims)
+
+	// Enforce per-agent rate limit
+	if rl := getA2ARateLimiter(); rl != nil {
+		if !rl.AllowRequest(agentID) {
+			writeJSONRPCError(w, req.ID, a2a.ErrCodeRateLimited, "Rate limit exceeded")
+			return
+		}
+		if !rl.AcquireTask(agentID) {
+			writeJSONRPCError(w, req.ID, a2a.ErrCodeRateLimited, "Max concurrent tasks exceeded")
+			return
+		}
+		defer rl.ReleaseTask(agentID)
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")

@@ -651,6 +651,25 @@ func Run(cfg RunConfig) error {
 			})
 			api.SetA2ATokenValidator(validator)
 			logger.Printf("A2A authentication: %d trusted issuers, %d allowed agents", len(issuers), len(agents))
+
+			// Wire per-agent rate limiter from allowed agents config.
+			rl := a2apkg.NewAgentRateLimiter()
+			for _, ag := range agents {
+				if ag.RateLimit > 0 || ag.MaxTasks > 0 {
+					rl.SetAgentLimits(ag.ActorSub, ag.RateLimit, ag.MaxTasks)
+				}
+			}
+			api.SetA2ARateLimiter(rl)
+
+			// Wire fail-closed user resolver.
+			// For now, accept all authenticated users (the JWT validation already
+			// ensures the token is from a trusted issuer). A full PlatformResolver
+			// integration that checks UserChannel linkage is a follow-up.
+			// Setting the resolver to nil means fail-open (skip check).
+			// To enable fail-closed, uncomment and wire the actual user lookup:
+			// api.SetA2AUserResolver(func(ctx context.Context, userID, orgID string) bool {
+			//     return backend.UserExists(ctx, userID, orgID)
+			// })
 		}
 
 		if err := mgr.StartAll(ctx); err != nil {

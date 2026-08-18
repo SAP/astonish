@@ -50,6 +50,8 @@ type A2ATokenClaims struct {
 	IssuerID        string    // matched TrustedIssuer.ID
 	OrgID           string
 	ExpiresAt       time.Time
+	RateLimit       int       // from matched AllowedAgent (0 = unlimited)
+	MaxTasks        int       // from matched AllowedAgent (0 = unlimited)
 }
 
 // TokenValidatorConfig configures the token validator.
@@ -193,6 +195,8 @@ func (v *TokenValidator) Validate(tokenStr string) (*A2ATokenClaims, error) {
 			return nil, fmt.Errorf("%w: %q (disabled)", ErrActorNotAllowed, actorSub)
 		}
 		result.ActorIdentifier = actorSub
+		result.RateLimit = agent.RateLimit
+		result.MaxTasks = agent.MaxTasks
 	} else if v.requireActorClaim {
 		return nil, ErrMissingActClaim
 	}

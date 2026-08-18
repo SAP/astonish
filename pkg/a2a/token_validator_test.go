@@ -265,10 +265,12 @@ func TestTokenValidator_ActClaimWithMatchingAgent(t *testing.T) {
 			{
 				ID:       "agent-1",
 				Name:     "Test Agent",
-				ActorSub: "service-abc",
-				IssuerID: "issuer-1",
-				OrgID:    "org-1",
-				Enabled:  true,
+				ActorSub:  "service-abc",
+				IssuerID:  "issuer-1",
+				OrgID:     "org-1",
+				RateLimit: 100,
+				MaxTasks:  5,
+				Enabled:   true,
 			},
 		},
 	}
@@ -297,6 +299,12 @@ func TestTokenValidator_ActClaimWithMatchingAgent(t *testing.T) {
 	}
 	if result.UserIdentifier != "user-123" {
 		t.Errorf("expected UserIdentifier=user-123, got %q", result.UserIdentifier)
+	}
+	if result.RateLimit != 100 {
+		t.Errorf("expected RateLimit=100, got %d", result.RateLimit)
+	}
+	if result.MaxTasks != 5 {
+		t.Errorf("expected MaxTasks=5, got %d", result.MaxTasks)
 	}
 }
 

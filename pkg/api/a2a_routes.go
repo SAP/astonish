@@ -39,13 +39,14 @@ func RegisterA2ARoutes(router *mux.Router) {
 	// Agent Card discovery — public, no auth required
 	router.HandleFunc("/.well-known/agent-card.json", AgentCardHandler).Methods("GET")
 
-	// A2A JSON-RPC endpoint — requires A2A auth (agent must be registered)
+	// A2A JSON-RPC endpoint — requires A2A auth (JWT Bearer validation)
 	a2aRouter := router.PathPrefix("/api/a2a").Subrouter()
 	a2aRouter.Use(A2AAuthMiddleware)
 	a2aRouter.HandleFunc("", A2AHandler).Methods("POST")
 	a2aRouter.HandleFunc("/stream", A2AStreamHandler).Methods("POST")
 
-	// Admin endpoints for managing registered agents
+	// Admin endpoints for managing registered agents (legacy — will be replaced with
+	// trusted issuer/allowed agent admin in a later phase)
 	router.HandleFunc("/api/admin/a2a/agents", A2AAdminListAgentsHandler).Methods("GET")
 	router.HandleFunc("/api/admin/a2a/agents", A2AAdminRegisterAgentHandler).Methods("POST")
 	router.HandleFunc("/api/admin/a2a/agents/{id}", A2AAdminDeleteAgentHandler).Methods("DELETE")
@@ -82,8 +83,8 @@ func A2AHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	agent := AgentFromContext(r.Context())
-	if agent == nil {
+	claims := A2AClaimsFromContext(r.Context())
+	if claims == nil {
 		writeJSONRPCError(w, nil, a2a.ErrCodeAuthRequired, "Authentication required")
 		return
 	}
@@ -105,6 +106,10 @@ func A2AHandler(w http.ResponseWriter, r *http.Request) {
 		writeJSONRPCError(w, req.ID, a2a.ErrCodeInvalidRequest, "Invalid JSON-RPC version")
 		return
 	}
+
+	// Bridge: construct a RegisteredAgent from claims for backward compatibility
+	// with the channel adapter (until phase 5 updates the adapter signature).
+	agent := agentFromClaims(claims)
 
 	// Dispatch by method
 	switch req.Method {
@@ -243,8 +248,8 @@ func A2AStreamHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	agent := AgentFromContext(r.Context())
-	if agent == nil {
+	claims := A2AClaimsFromContext(r.Context())
+	if claims == nil {
 		writeJSONRPCError(w, nil, a2a.ErrCodeAuthRequired, "Authentication required")
 		return
 	}
@@ -284,6 +289,9 @@ func A2AStreamHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
+	// Bridge: construct a RegisteredAgent from claims
+	agent := agentFromClaims(claims)
+
 	// Process the message (same as sync but we stream events)
 	task, err := ch.HandleSendMessage(r.Context(), agent, params)
 	if err != nil {
@@ -308,6 +316,25 @@ func A2AStreamHandler(w http.ResponseWriter, r *http.Request) {
 	data, _ := json.Marshal(resp)
 	fmt.Fprintf(w, "data: %s\n\n", data)
 	flusher.Flush()
+}
+
+// agentFromClaims constructs a RegisteredAgent from validated JWT claims.
+// This is a bridge function for backward compatibility with the channel adapter
+// until the adapter is updated to accept claims directly (phase 5).
+func agentFromClaims(claims *a2a.A2ATokenClaims) *a2a.RegisteredAgent {
+	// Use actor identifier as agent ID (for task ownership scoping).
+	// If no actor (direct user token), use the user identifier.
+	agentID := claims.ActorIdentifier
+	if agentID == "" {
+		agentID = claims.UserIdentifier
+	}
+	return &a2a.RegisteredAgent{
+		ID:             agentID,
+		Name:           claims.ActorIdentifier,
+		LinkedUserID:   claims.UserIdentifier,
+		LinkedOrgSlug:  claims.OrgID,
+		LinkedTeamSlug: "",
+	}
 }
 
 // --- JSON-RPC response helpers ---

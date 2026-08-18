@@ -4,15 +4,38 @@ import (
 	"context"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/SAP/astonish/pkg/a2a"
 )
 
-// a2aAgentContextKey is the context key for the authenticated A2A agent.
-type a2aAgentContextKey struct{}
+// --- Package-level state for A2A token validator (set by daemon during startup) ---
 
-// A2AAuthMiddleware authenticates incoming A2A requests by looking up the
-// agent in the registry. Supports Bearer token and X-API-Key header auth.
+var (
+	a2aValidatorMu sync.RWMutex
+	a2aValidator   *a2a.TokenValidator
+)
+
+// SetA2ATokenValidator sets the A2A token validator for the HTTP handlers.
+func SetA2ATokenValidator(v *a2a.TokenValidator) {
+	a2aValidatorMu.Lock()
+	defer a2aValidatorMu.Unlock()
+	a2aValidator = v
+}
+
+func getA2ATokenValidator() *a2a.TokenValidator {
+	a2aValidatorMu.RLock()
+	defer a2aValidatorMu.RUnlock()
+	return a2aValidator
+}
+
+// a2aClaimsContextKey is the context key for the validated A2A token claims.
+type a2aClaimsContextKey struct{}
+
+// A2AAuthMiddleware authenticates incoming A2A requests by validating a JWT
+// Bearer token against configured trusted issuers. The token's signature is
+// verified via JWKS, and the extracted identity (user + optional actor) is
+// injected into the request context.
 func A2AAuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ch := getA2AChannel()
@@ -21,45 +44,49 @@ func A2AAuthMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		apiKey := extractA2AKey(r)
-		if apiKey == "" {
-			writeJSONRPCError(w, nil, a2a.ErrCodeAuthRequired, "Authentication required: provide Authorization: Bearer <key> or X-API-Key header")
+		validator := getA2ATokenValidator()
+		if validator == nil {
+			writeJSONRPCError(w, nil, a2a.ErrCodeInternal, "A2A authentication not configured")
 			return
 		}
 
-		agent, err := ch.AgentRegistry().GetByAPIKey(apiKey)
+		tokenStr := extractBearerToken(r)
+		if tokenStr == "" {
+			writeJSONRPCError(w, nil, a2a.ErrCodeAuthRequired, "Authentication required: provide Authorization: Bearer <jwt>")
+			return
+		}
+
+		claims, err := validator.Validate(tokenStr)
 		if err != nil {
-			writeJSONRPCError(w, nil, a2a.ErrCodeForbidden, "Invalid credentials")
+			// Determine appropriate error code from the error message
+			code := a2a.ErrCodeForbidden
+			if strings.Contains(err.Error(), "expired") {
+				code = a2a.ErrCodeAuthRequired
+			} else if strings.Contains(err.Error(), "untrusted issuer") ||
+				strings.Contains(err.Error(), "no trusted issuer") {
+				code = a2a.ErrCodeForbidden
+			}
+			writeJSONRPCError(w, nil, code, err.Error())
 			return
 		}
 
-		// Inject agent into context
-		ctx := context.WithValue(r.Context(), a2aAgentContextKey{}, agent)
+		// Inject validated claims into context
+		ctx := context.WithValue(r.Context(), a2aClaimsContextKey{}, claims)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
-// AgentFromContext extracts the authenticated RegisteredAgent from the request context.
-func AgentFromContext(ctx context.Context) *a2a.RegisteredAgent {
-	agent, _ := ctx.Value(a2aAgentContextKey{}).(*a2a.RegisteredAgent)
-	return agent
+// A2AClaimsFromContext extracts the validated A2A token claims from the request context.
+func A2AClaimsFromContext(ctx context.Context) *a2a.A2ATokenClaims {
+	claims, _ := ctx.Value(a2aClaimsContextKey{}).(*a2a.A2ATokenClaims)
+	return claims
 }
 
-// extractA2AKey extracts the API key from the request.
-// Supports: Authorization: Bearer <key> and X-API-Key: <key>
-func extractA2AKey(r *http.Request) string {
-	// Check Authorization header first
+// extractBearerToken extracts the JWT from the Authorization: Bearer header.
+func extractBearerToken(r *http.Request) string {
 	auth := r.Header.Get("Authorization")
-	if auth != "" {
-		if strings.HasPrefix(auth, "Bearer ") {
-			return strings.TrimPrefix(auth, "Bearer ")
-		}
+	if auth != "" && strings.HasPrefix(auth, "Bearer ") {
+		return strings.TrimPrefix(auth, "Bearer ")
 	}
-
-	// Check X-API-Key header
-	if key := r.Header.Get("X-API-Key"); key != "" {
-		return key
-	}
-
 	return ""
 }

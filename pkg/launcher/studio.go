@@ -196,8 +196,9 @@ func NewStudioServer(port int, opts ...StudioOption) (*StudioServer, error) {
 		// Wrap router + SPA into a single handler
 		spaHandler := spaFileServer(http.FS(webFS))
 		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Let mux handle /api/* routes
-			if len(r.URL.Path) >= 4 && r.URL.Path[:4] == "/api" {
+			// Let mux handle /api/* and /.well-known/* routes
+			if (len(r.URL.Path) >= 4 && r.URL.Path[:4] == "/api") ||
+				strings.HasPrefix(r.URL.Path, "/.well-known/") {
 				router.ServeHTTP(w, r)
 				return
 			}
@@ -208,7 +209,8 @@ func NewStudioServer(port int, opts ...StudioOption) (*StudioServer, error) {
 		slog.Warn("no web assets found, run 'npm run build' in the web directory first")
 		fallback := noAssetsHandler()
 		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if len(r.URL.Path) >= 4 && r.URL.Path[:4] == "/api" {
+			if (len(r.URL.Path) >= 4 && r.URL.Path[:4] == "/api") ||
+				strings.HasPrefix(r.URL.Path, "/.well-known/") {
 				router.ServeHTTP(w, r)
 				return
 			}

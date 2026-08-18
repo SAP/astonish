@@ -235,7 +235,9 @@ func PlatformAdminListChannelsHandler(w http.ResponseWriter, r *http.Request) {
 			info.Config["rate_limit"] = channels.A2A.RateLimit
 			info.Config["max_concurrent_tasks"] = channels.A2A.MaxConcurrentTasks
 			info.Config["task_ttl"] = channels.A2A.TaskTTL
-			info.Config["allow_identity_propagation"] = channels.A2A.AllowIdentityPropagation
+			info.Config["default_audience"] = channels.A2A.DefaultAudience
+			info.Config["auto_link_by_email"] = channels.A2A.AutoLinkByEmail
+			info.Config["require_actor_claim"] = channels.A2A.RequireActorClaim
 		}
 		result = append(result, info)
 	}
@@ -354,8 +356,14 @@ func PlatformAdminSaveChannelHandler(w http.ResponseWriter, r *http.Request) {
 		if v, ok := body.Config["task_ttl"].(string); ok {
 			cfg.TaskTTL = v
 		}
-		if v, ok := body.Config["allow_identity_propagation"].(bool); ok {
-			cfg.AllowIdentityPropagation = v
+		if v, ok := body.Config["default_audience"].(string); ok {
+			cfg.DefaultAudience = v
+		}
+		if v, ok := body.Config["auto_link_by_email"].(bool); ok {
+			cfg.AutoLinkByEmail = v
+		}
+		if v, ok := body.Config["require_actor_claim"].(bool); ok {
+			cfg.RequireActorClaim = v
 		}
 		settings.Channels.A2A = cfg
 	}

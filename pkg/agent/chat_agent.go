@@ -546,6 +546,34 @@ func (c *ChatAgent) DynamicToolInjectionCallback() llmagent.BeforeModelCallback 
 						toolsToInject[entry.Name] = true
 					}
 				}
+				// Also check request-scoped groups (e.g., per-request A2A tools)
+				// that are not in the singleton ToolIndex.
+				if len(entries) == 0 {
+					if reqGroups := RequestMCPGroupsFromContext(cbCtx); reqGroups != nil {
+						if g := reqGroups[groupName]; g != nil {
+							for _, t := range g.Tools {
+								if t != nil {
+									toolsToInject[t.Name()] = true
+								}
+							}
+							readCtx := &minimalReadonlyContext{Context: cbCtx}
+							for _, ts := range g.Toolsets {
+								if ts == nil {
+									continue
+								}
+								tools, err := ts.Tools(readCtx)
+								if err != nil {
+									continue
+								}
+								for _, t := range tools {
+									if t != nil {
+										toolsToInject[t.Name()] = true
+									}
+								}
+							}
+						}
+					}
+				}
 			}
 		}
 

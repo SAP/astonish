@@ -12,6 +12,7 @@ import (
 	"entgo.io/ent"
 	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
+	"github.com/SAP/astonish/ent/org/orga2aagent"
 	"github.com/SAP/astonish/ent/org/orgapp"
 	"github.com/SAP/astonish/ent/org/orgauditlog"
 	"github.com/SAP/astonish/ent/org/orgencryptionkey"
@@ -82,6 +83,7 @@ var (
 func checkColumn(t, c string) error {
 	initCheck.Do(func() {
 		columnCheck = sql.NewColumnCheck(map[string]func(string) bool{
+			orga2aagent.Table:      orga2aagent.ValidColumn,
 			orgapp.Table:           orgapp.ValidColumn,
 			orgauditlog.Table:      orgauditlog.ValidColumn,
 			orgencryptionkey.Table: orgencryptionkey.ValidColumn,

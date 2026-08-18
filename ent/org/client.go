@@ -16,6 +16,7 @@ import (
 	"entgo.io/ent/dialect"
 	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
+	"github.com/SAP/astonish/ent/org/orga2aagent"
 	"github.com/SAP/astonish/ent/org/orgapp"
 	"github.com/SAP/astonish/ent/org/orgauditlog"
 	"github.com/SAP/astonish/ent/org/orgencryptionkey"
@@ -33,6 +34,8 @@ type Client struct {
 	config
 	// Schema is the client for creating, migrating and dropping schema.
 	Schema *migrate.Schema
+	// OrgA2AAgent is the client for interacting with the OrgA2AAgent builders.
+	OrgA2AAgent *OrgA2AAgentClient
 	// OrgApp is the client for interacting with the OrgApp builders.
 	OrgApp *OrgAppClient
 	// OrgAuditLog is the client for interacting with the OrgAuditLog builders.
@@ -64,6 +67,7 @@ func NewClient(opts ...Option) *Client {
 
 func (c *Client) init() {
 	c.Schema = migrate.NewSchema(c.driver)
+	c.OrgA2AAgent = NewOrgA2AAgentClient(c.config)
 	c.OrgApp = NewOrgAppClient(c.config)
 	c.OrgAuditLog = NewOrgAuditLogClient(c.config)
 	c.OrgEncryptionKey = NewOrgEncryptionKeyClient(c.config)
@@ -166,6 +170,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 	return &Tx{
 		ctx:              ctx,
 		config:           cfg,
+		OrgA2AAgent:      NewOrgA2AAgentClient(cfg),
 		OrgApp:           NewOrgAppClient(cfg),
 		OrgAuditLog:      NewOrgAuditLogClient(cfg),
 		OrgEncryptionKey: NewOrgEncryptionKeyClient(cfg),
@@ -195,6 +200,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 	return &Tx{
 		ctx:              ctx,
 		config:           cfg,
+		OrgA2AAgent:      NewOrgA2AAgentClient(cfg),
 		OrgApp:           NewOrgAppClient(cfg),
 		OrgAuditLog:      NewOrgAuditLogClient(cfg),
 		OrgEncryptionKey: NewOrgEncryptionKeyClient(cfg),
@@ -211,7 +217,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 // Debug returns a new debug-client. It's used to get verbose logging on specific operations.
 //
 //	client.Debug().
-//		OrgApp.
+//		OrgA2AAgent.
 //		Query().
 //		Count(ctx)
 func (c *Client) Debug() *Client {
@@ -234,8 +240,9 @@ func (c *Client) Close() error {
 // In order to add hooks to a specific client, call: `client.Node.Use(...)`.
 func (c *Client) Use(hooks ...Hook) {
 	for _, n := range []interface{ Use(...Hook) }{
-		c.OrgApp, c.OrgAuditLog, c.OrgEncryptionKey, c.OrgMCPServer, c.OrgMemory,
-		c.OrgNetworkPolicy, c.OrgSkill, c.OrgSkillFile, c.Team, c.TeamMembership,
+		c.OrgA2AAgent, c.OrgApp, c.OrgAuditLog, c.OrgEncryptionKey, c.OrgMCPServer,
+		c.OrgMemory, c.OrgNetworkPolicy, c.OrgSkill, c.OrgSkillFile, c.Team,
+		c.TeamMembership,
 	} {
 		n.Use(hooks...)
 	}
@@ -245,8 +252,9 @@ func (c *Client) Use(hooks ...Hook) {
 // In order to add interceptors to a specific client, call: `client.Node.Intercept(...)`.
 func (c *Client) Intercept(interceptors ...Interceptor) {
 	for _, n := range []interface{ Intercept(...Interceptor) }{
-		c.OrgApp, c.OrgAuditLog, c.OrgEncryptionKey, c.OrgMCPServer, c.OrgMemory,
-		c.OrgNetworkPolicy, c.OrgSkill, c.OrgSkillFile, c.Team, c.TeamMembership,
+		c.OrgA2AAgent, c.OrgApp, c.OrgAuditLog, c.OrgEncryptionKey, c.OrgMCPServer,
+		c.OrgMemory, c.OrgNetworkPolicy, c.OrgSkill, c.OrgSkillFile, c.Team,
+		c.TeamMembership,
 	} {
 		n.Intercept(interceptors...)
 	}
@@ -255,6 +263,8 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 // Mutate implements the ent.Mutator interface.
 func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 	switch m := m.(type) {
+	case *OrgA2AAgentMutation:
+		return c.OrgA2AAgent.mutate(ctx, m)
 	case *OrgAppMutation:
 		return c.OrgApp.mutate(ctx, m)
 	case *OrgAuditLogMutation:
@@ -277,6 +287,139 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.TeamMembership.mutate(ctx, m)
 	default:
 		return nil, fmt.Errorf("org: unknown mutation type %T", m)
+	}
+}
+
+// OrgA2AAgentClient is a client for the OrgA2AAgent schema.
+type OrgA2AAgentClient struct {
+	config
+}
+
+// NewOrgA2AAgentClient returns a client for the OrgA2AAgent from the given config.
+func NewOrgA2AAgentClient(c config) *OrgA2AAgentClient {
+	return &OrgA2AAgentClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `orga2aagent.Hooks(f(g(h())))`.
+func (c *OrgA2AAgentClient) Use(hooks ...Hook) {
+	c.hooks.OrgA2AAgent = append(c.hooks.OrgA2AAgent, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `orga2aagent.Intercept(f(g(h())))`.
+func (c *OrgA2AAgentClient) Intercept(interceptors ...Interceptor) {
+	c.inters.OrgA2AAgent = append(c.inters.OrgA2AAgent, interceptors...)
+}
+
+// Create returns a builder for creating a OrgA2AAgent entity.
+func (c *OrgA2AAgentClient) Create() *OrgA2AAgentCreate {
+	mutation := newOrgA2AAgentMutation(c.config, OpCreate)
+	return &OrgA2AAgentCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of OrgA2AAgent entities.
+func (c *OrgA2AAgentClient) CreateBulk(builders ...*OrgA2AAgentCreate) *OrgA2AAgentCreateBulk {
+	return &OrgA2AAgentCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *OrgA2AAgentClient) MapCreateBulk(slice any, setFunc func(*OrgA2AAgentCreate, int)) *OrgA2AAgentCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &OrgA2AAgentCreateBulk{err: fmt.Errorf("calling to OrgA2AAgentClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*OrgA2AAgentCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &OrgA2AAgentCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for OrgA2AAgent.
+func (c *OrgA2AAgentClient) Update() *OrgA2AAgentUpdate {
+	mutation := newOrgA2AAgentMutation(c.config, OpUpdate)
+	return &OrgA2AAgentUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *OrgA2AAgentClient) UpdateOne(_m *OrgA2AAgent) *OrgA2AAgentUpdateOne {
+	mutation := newOrgA2AAgentMutation(c.config, OpUpdateOne, withOrgA2AAgent(_m))
+	return &OrgA2AAgentUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *OrgA2AAgentClient) UpdateOneID(id uuid.UUID) *OrgA2AAgentUpdateOne {
+	mutation := newOrgA2AAgentMutation(c.config, OpUpdateOne, withOrgA2AAgentID(id))
+	return &OrgA2AAgentUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for OrgA2AAgent.
+func (c *OrgA2AAgentClient) Delete() *OrgA2AAgentDelete {
+	mutation := newOrgA2AAgentMutation(c.config, OpDelete)
+	return &OrgA2AAgentDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *OrgA2AAgentClient) DeleteOne(_m *OrgA2AAgent) *OrgA2AAgentDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *OrgA2AAgentClient) DeleteOneID(id uuid.UUID) *OrgA2AAgentDeleteOne {
+	builder := c.Delete().Where(orga2aagent.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &OrgA2AAgentDeleteOne{builder}
+}
+
+// Query returns a query builder for OrgA2AAgent.
+func (c *OrgA2AAgentClient) Query() *OrgA2AAgentQuery {
+	return &OrgA2AAgentQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeOrgA2AAgent},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a OrgA2AAgent entity by its id.
+func (c *OrgA2AAgentClient) Get(ctx context.Context, id uuid.UUID) (*OrgA2AAgent, error) {
+	return c.Query().Where(orga2aagent.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *OrgA2AAgentClient) GetX(ctx context.Context, id uuid.UUID) *OrgA2AAgent {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *OrgA2AAgentClient) Hooks() []Hook {
+	return c.hooks.OrgA2AAgent
+}
+
+// Interceptors returns the client interceptors.
+func (c *OrgA2AAgentClient) Interceptors() []Interceptor {
+	return c.inters.OrgA2AAgent
+}
+
+func (c *OrgA2AAgentClient) mutate(ctx context.Context, m *OrgA2AAgentMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&OrgA2AAgentCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&OrgA2AAgentUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&OrgA2AAgentUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&OrgA2AAgentDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("org: unknown OrgA2AAgent mutation op: %q", m.Op())
 	}
 }
 
@@ -1677,11 +1820,11 @@ func (c *TeamMembershipClient) mutate(ctx context.Context, m *TeamMembershipMuta
 // hooks and interceptors per client, for fast access.
 type (
 	hooks struct {
-		OrgApp, OrgAuditLog, OrgEncryptionKey, OrgMCPServer, OrgMemory,
+		OrgA2AAgent, OrgApp, OrgAuditLog, OrgEncryptionKey, OrgMCPServer, OrgMemory,
 		OrgNetworkPolicy, OrgSkill, OrgSkillFile, Team, TeamMembership []ent.Hook
 	}
 	inters struct {
-		OrgApp, OrgAuditLog, OrgEncryptionKey, OrgMCPServer, OrgMemory,
+		OrgA2AAgent, OrgApp, OrgAuditLog, OrgEncryptionKey, OrgMCPServer, OrgMemory,
 		OrgNetworkPolicy, OrgSkill, OrgSkillFile, Team,
 		TeamMembership []ent.Interceptor
 	}

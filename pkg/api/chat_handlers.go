@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/SAP/astonish/pkg/a2aclient"
 	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/apps"
 	"github.com/SAP/astonish/pkg/config"
@@ -1085,6 +1086,12 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 		runner.InjectMCPServerStores(svc.PlatformMCPServers, svc.MCPServers, svc.TeamMCPServers)
 	}
 
+	// Inject tenant-scoped A2A agent stores so the chat agent can resolve
+	// A2A agents from platform, org, and team stores (same cascade pattern as MCP).
+	if svc := store.FromRequest(r); svc != nil && (svc.PlatformA2AAgents != nil || svc.A2AAgents != nil || svc.TeamA2AAgents != nil) {
+		runner.InjectA2AAgentStores(svc.PlatformA2AAgents, svc.A2AAgents, svc.TeamA2AAgents)
+	}
+
 	// Per-request MCP tool groups: the singleton agent is often pre-warmed for
 	// a default team without this team's MCP servers / cached tools. Attach
 	// LazyMCP groups from the request stores so search_tools and main-thread
@@ -1100,6 +1107,34 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		if groups := buildRequestMCPToolGroups(r, pool, debug); len(groups) > 0 {
 			runner.InjectRequestMCPGroups(groups)
+		}
+	}
+
+	// Per-request A2A agent tools: load from tenant stores and inject as a
+	// request-scoped tool group so search_tools / dynamic injection see them.
+	if svc := store.FromRequest(r); svc != nil {
+		a2aStores := &store.A2AAgentStores{
+			Platform: svc.PlatformA2AAgents,
+			Org:      svc.A2AAgents,
+			Team:     svc.TeamA2AAgents,
+		}
+		if a2aTools := a2aclient.GetA2AToolsFromStores(r.Context(), a2aStores); len(a2aTools) > 0 {
+			a2aGroups := map[string]*agent.ToolGroup{
+				"a2a": {
+					Name:        "a2a",
+					Description: "Remote A2A agent skills (invoke external agents via the A2A protocol)",
+					Tools:       a2aTools,
+				},
+			}
+			runner.InjectRequestMCPGroups(a2aGroups)
+
+			// Build a brief listing for the system prompt so the LLM knows
+			// A2A agents are available without needing search_tools first.
+			var toolNames []string
+			for _, t := range a2aTools {
+				toolNames = append(toolNames, t.Name())
+			}
+			runner.InjectA2AToolsPrompt(toolNames)
 		}
 	}
 

@@ -5,6 +5,7 @@ package team
 import (
 	"time"
 
+	"github.com/SAP/astonish/ent/team/a2aagent"
 	"github.com/SAP/astonish/ent/team/app"
 	"github.com/SAP/astonish/ent/team/appstate"
 	"github.com/SAP/astonish/ent/team/chatsessionevent"
@@ -38,6 +39,42 @@ import (
 // (default values, validators, hooks and policies) and stitches it
 // to their package variables.
 func init() {
+	a2aagentFields := schema.A2aAgent{}.Fields()
+	_ = a2aagentFields
+	// a2aagentDescName is the schema descriptor for name field.
+	a2aagentDescName := a2aagentFields[1].Descriptor()
+	// a2aagent.NameValidator is a validator for the "name" field. It is called by the builders before save.
+	a2aagent.NameValidator = a2aagentDescName.Validators[0].(func(string) error)
+	// a2aagentDescURL is the schema descriptor for url field.
+	a2aagentDescURL := a2aagentFields[2].Descriptor()
+	// a2aagent.URLValidator is a validator for the "url" field. It is called by the builders before save.
+	a2aagent.URLValidator = a2aagentDescURL.Validators[0].(func(string) error)
+	// a2aagentDescAuthType is the schema descriptor for auth_type field.
+	a2aagentDescAuthType := a2aagentFields[4].Descriptor()
+	// a2aagent.DefaultAuthType holds the default value on creation for the auth_type field.
+	a2aagent.DefaultAuthType = a2aagentDescAuthType.Default.(string)
+	// a2aagentDescEnabled is the schema descriptor for enabled field.
+	a2aagentDescEnabled := a2aagentFields[5].Descriptor()
+	// a2aagent.DefaultEnabled holds the default value on creation for the enabled field.
+	a2aagent.DefaultEnabled = a2aagentDescEnabled.Default.(bool)
+	// a2aagentDescHeaders is the schema descriptor for headers field.
+	a2aagentDescHeaders := a2aagentFields[6].Descriptor()
+	// a2aagent.DefaultHeaders holds the default value on creation for the headers field.
+	a2aagent.DefaultHeaders = a2aagentDescHeaders.Default.(map[string]string)
+	// a2aagentDescCreatedAt is the schema descriptor for created_at field.
+	a2aagentDescCreatedAt := a2aagentFields[11].Descriptor()
+	// a2aagent.DefaultCreatedAt holds the default value on creation for the created_at field.
+	a2aagent.DefaultCreatedAt = a2aagentDescCreatedAt.Default.(func() time.Time)
+	// a2aagentDescUpdatedAt is the schema descriptor for updated_at field.
+	a2aagentDescUpdatedAt := a2aagentFields[12].Descriptor()
+	// a2aagent.DefaultUpdatedAt holds the default value on creation for the updated_at field.
+	a2aagent.DefaultUpdatedAt = a2aagentDescUpdatedAt.Default.(func() time.Time)
+	// a2aagent.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
+	a2aagent.UpdateDefaultUpdatedAt = a2aagentDescUpdatedAt.UpdateDefault.(func() time.Time)
+	// a2aagentDescID is the schema descriptor for id field.
+	a2aagentDescID := a2aagentFields[0].Descriptor()
+	// a2aagent.DefaultID holds the default value on creation for the id field.
+	a2aagent.DefaultID = a2aagentDescID.Default.(func() uuid.UUID)
 	appFields := schema.App{}.Fields()
 	_ = appFields
 	// appDescSlug is the schema descriptor for slug field.

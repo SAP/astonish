@@ -9,6 +9,35 @@ import (
 )
 
 var (
+	// A2aAgentsColumns holds the columns for the "a2a_agents" table.
+	A2aAgentsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "name", Type: field.TypeString},
+		{Name: "url", Type: field.TypeString},
+		{Name: "credential_name", Type: field.TypeString, Nullable: true},
+		{Name: "auth_type", Type: field.TypeString, Default: "bearer"},
+		{Name: "enabled", Type: field.TypeBool, Default: true},
+		{Name: "headers", Type: field.TypeJSON, Nullable: true},
+		{Name: "timeout", Type: field.TypeString, Nullable: true},
+		{Name: "cached_card", Type: field.TypeJSON, Nullable: true},
+		{Name: "cached_skills", Type: field.TypeJSON, Nullable: true},
+		{Name: "created_by", Type: field.TypeUUID},
+		{Name: "created_at", Type: field.TypeTime, Default: map[string]schema.Expr{"postgres": "now()", "sqlite3": "(datetime('now'))"}},
+		{Name: "updated_at", Type: field.TypeTime, Default: map[string]schema.Expr{"postgres": "now()", "sqlite3": "(datetime('now'))"}},
+	}
+	// A2aAgentsTable holds the schema information for the "a2a_agents" table.
+	A2aAgentsTable = &schema.Table{
+		Name:       "a2a_agents",
+		Columns:    A2aAgentsColumns,
+		PrimaryKey: []*schema.Column{A2aAgentsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "a2aagent_name",
+				Unique:  true,
+				Columns: []*schema.Column{A2aAgentsColumns[1]},
+			},
+		},
+	}
 	// AppsColumns holds the columns for the "apps" table.
 	AppsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -717,6 +746,7 @@ var (
 	}
 	// Tables holds all the tables in the schema.
 	Tables = []*schema.Table{
+		A2aAgentsTable,
 		AppsTable,
 		AppStateTable,
 		ChatSessionEventsTable,
@@ -746,6 +776,9 @@ var (
 )
 
 func init() {
+	A2aAgentsTable.Annotation = &entsql.Annotation{
+		Table: "a2a_agents",
+	}
 	AppsTable.Annotation = &entsql.Annotation{
 		Table: "apps",
 	}

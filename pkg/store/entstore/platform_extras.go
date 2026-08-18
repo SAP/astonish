@@ -150,6 +150,7 @@ func TenantMiddleware(s *Store) func(http.Handler) http.Handler {
 				Audit:                   orgStore.OrgAudit(),
 				Skills:                  orgStore.OrgSkills(),
 				MCPServers:              orgStore.OrgMCPServers(),
+				A2AAgents:              orgStore.OrgA2AAgents(),
 				PlatformMCPServers:      s.PlatformMCPServers(),
 				PlatformSkills:          s.PlatformSkills(),
 				PlatformSettings:        s.PlatformSettings(),
@@ -181,6 +182,7 @@ func TenantMiddleware(s *Store) func(http.Handler) http.Handler {
 				reqSvc.DrillReports = teamStore.DrillReports()
 				reqSvc.TeamSkills = teamStore.Skills()
 				reqSvc.TeamMCPServers = teamStore.MCPServers()
+				reqSvc.TeamA2AAgents = teamStore.A2AAgents()
 				reqSvc.TeamNetworkPolicies = teamStore.NetworkPolicies()
 				reqSvc.Settings = teamStore.Settings()
 				reqSvc.AppState = teamStore.AppState()

@@ -302,6 +302,17 @@ func (cr *ChatRunner) InjectMCPServerStores(platform, org, team store.MCPServerS
 	})
 }
 
+// InjectA2AAgentStores adds tenant-scoped A2A agent stores to the runner's context
+// so that the chat agent can resolve A2A agent configurations from the database
+// in platform mode. Must be called before Run().
+func (cr *ChatRunner) InjectA2AAgentStores(platform, org, team store.A2AAgentStore) {
+	cr.ctx = store.WithA2AAgentStores(cr.ctx, &store.A2AAgentStores{
+		Platform: platform,
+		Org:      org,
+		Team:     team,
+	})
+}
+
 // InjectRequestMCPGroups attaches per-request MCP tool groups so search_tools,
 // dynamic tool injection, and resolveTools see this team's MCP catalog even
 // when the singleton chat agent was pre-warmed without them.
@@ -310,6 +321,44 @@ func (cr *ChatRunner) InjectRequestMCPGroups(groups map[string]*agent.ToolGroup)
 		return
 	}
 	cr.ctx = agent.WithRequestMCPGroups(cr.ctx, groups)
+}
+
+// InjectA2AToolsPrompt appends A2A tool names to the session context in
+// PromptOverrides so the LLM knows these tools exist and can call them directly.
+// It also pins the "a2a" tool group so DynamicToolInjectionCallback injects
+// the tools on the very first LLM call (no bounce).
+func (cr *ChatRunner) InjectA2AToolsPrompt(toolNames []string) {
+	if len(toolNames) == 0 {
+		return
+	}
+	hint := "\n\n## A2A Agents (available directly)\n\nThe following remote A2A agent tools are configured and callable by their bare name:\n"
+	for _, name := range toolNames {
+		hint += "- `" + name + "`\n"
+	}
+	hint += "\nCall them with a `message` argument describing what you need. They connect to external AI agents via the A2A protocol.\n"
+
+	po := agent.PromptOverridesFromContext(cr.ctx)
+	if po != nil {
+		newPO := *po
+		newPO.SessionContext += hint
+		newPO.PinnedToolGroups = appendUniqueStr(newPO.PinnedToolGroups, "a2a")
+		cr.ctx = agent.WithPromptOverrides(cr.ctx, &newPO)
+	} else {
+		cr.ctx = agent.WithPromptOverrides(cr.ctx, &agent.PromptOverrides{
+			SessionContext:   hint,
+			PinnedToolGroups: []string{"a2a"},
+		})
+	}
+}
+
+// appendUniqueStr appends val to slice only if it's not already present.
+func appendUniqueStr(slice []string, val string) []string {
+	for _, s := range slice {
+		if s == val {
+			return slice
+		}
+	}
+	return append(slice, val)
 }
 
 // InjectNetworkPolicyStores adds the three-tier network policy stores to the

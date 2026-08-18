@@ -1173,6 +1173,16 @@ func RegisterRoutes(router *mux.Router, svc *store.Services, backend store.Platf
 	router.HandleFunc("/api/mcp-platform/servers/{name}", ToggleMCPPlatformServerHandler).Methods("PATCH")
 	router.HandleFunc("/api/mcp-platform/servers/{name}/refresh", RefreshMCPPlatformServerHandler).Methods("POST")
 
+	// A2A Client endpoints (external agent connections)
+	router.HandleFunc("/api/a2a-agents", ListA2AAgentsHandler).Methods("GET")
+	router.HandleFunc("/api/a2a-agents", CreateA2AAgentHandler).Methods("POST")
+	router.HandleFunc("/api/a2a-agents/{name}", GetA2AAgentHandler).Methods("GET")
+	router.HandleFunc("/api/a2a-agents/{name}", UpdateA2AAgentHandler).Methods("PUT")
+	router.HandleFunc("/api/a2a-agents/{name}", DeleteA2AAgentHandler).Methods("DELETE")
+	router.HandleFunc("/api/a2a-agents/{name}", ToggleA2AAgentHandler).Methods("PATCH")
+	router.HandleFunc("/api/a2a-agents/{name}/refresh", RefreshA2AAgentHandler).Methods("POST")
+	router.HandleFunc("/api/a2a-agents/{name}/test", TestA2AAgentHandler).Methods("POST")
+
 	// Network policy settings endpoints (multi-tier allow/deny rules)
 	router.HandleFunc("/api/network-policies", ListNetworkPoliciesHandler).Methods("GET")
 	router.HandleFunc("/api/network-policies", CreateNetworkPolicyHandler).Methods("POST")

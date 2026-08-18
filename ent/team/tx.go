@@ -12,6 +12,8 @@ import (
 // Tx is a transactional client that is created by calling Client.Tx().
 type Tx struct {
 	config
+	// A2aAgent is the client for interacting with the A2aAgent builders.
+	A2aAgent *A2aAgentClient
 	// App is the client for interacting with the App builders.
 	App *AppClient
 	// AppState is the client for interacting with the AppState builders.
@@ -193,6 +195,7 @@ func (tx *Tx) Client() *Client {
 }
 
 func (tx *Tx) init() {
+	tx.A2aAgent = NewA2aAgentClient(tx.config)
 	tx.App = NewAppClient(tx.config)
 	tx.AppState = NewAppStateClient(tx.config)
 	tx.ChatSessionEvent = NewChatSessionEventClient(tx.config)
@@ -227,7 +230,7 @@ func (tx *Tx) init() {
 // of them in order to commit or rollback the transaction.
 //
 // If a closed transaction is embedded in one of the generated entities, and the entity
-// applies a query, for example: App.QueryXXX(), the query will be executed
+// applies a query, for example: A2aAgent.QueryXXX(), the query will be executed
 // through the driver which created this transaction.
 //
 // Note that txDriver is not goroutine safe.

@@ -519,6 +519,16 @@ func (t *Transcript) appendAgentText(text string) {
 	if t.LinearThread {
 		t.nextTextReplaces = false
 		if n := len(t.Items); n > 0 && (t.Items[n-1].Kind == ItemAgent || t.Items[n-1].Kind == ItemPlan) {
+			// If the new text is a plan document but the last item is plain
+			// agent text, start a fresh ItemPlan instead of appending. The plan
+			// is a distinct visual block, not a continuation of prior prose.
+			// Without this, intermittent LLM preamble ("I'll announce the plan…")
+			// causes the plan to be buried inside an ItemAgent whose accumulated
+			// content no longer starts with "# Execution Plan\n".
+			if t.Items[n-1].Kind == ItemAgent && isPlanContent(text) {
+				t.Items = append(t.Items, Item{Kind: ItemPlan, Content: text})
+				return
+			}
 			t.Items[n-1].Content += text
 			// Promote to ItemPlan if the accumulated content is a plan document.
 			if t.Items[n-1].Kind == ItemAgent && isPlanContent(t.Items[n-1].Content) {

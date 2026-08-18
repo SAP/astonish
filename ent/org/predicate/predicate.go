@@ -6,6 +6,9 @@ import (
 	"entgo.io/ent/dialect/sql"
 )
 
+// OrgA2AAgent is the predicate function for orga2aagent builders.
+type OrgA2AAgent func(*sql.Selector)
+
 // OrgApp is the predicate function for orgapp builders.
 type OrgApp func(*sql.Selector)
 

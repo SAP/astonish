@@ -9,6 +9,18 @@ import (
 	"github.com/SAP/astonish/ent/org"
 )
 
+// The OrgA2AAgentFunc type is an adapter to allow the use of ordinary
+// function as OrgA2AAgent mutator.
+type OrgA2AAgentFunc func(context.Context, *org.OrgA2AAgentMutation) (org.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f OrgA2AAgentFunc) Mutate(ctx context.Context, m org.Mutation) (org.Value, error) {
+	if mv, ok := m.(*org.OrgA2AAgentMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *org.OrgA2AAgentMutation", m)
+}
+
 // The OrgAppFunc type is an adapter to allow the use of ordinary
 // function as OrgApp mutator.
 type OrgAppFunc func(context.Context, *org.OrgAppMutation) (org.Value, error)

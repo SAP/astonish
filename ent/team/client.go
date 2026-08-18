@@ -16,6 +16,7 @@ import (
 	"entgo.io/ent/dialect"
 	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
+	"github.com/SAP/astonish/ent/team/a2aagent"
 	"github.com/SAP/astonish/ent/team/app"
 	"github.com/SAP/astonish/ent/team/appstate"
 	"github.com/SAP/astonish/ent/team/chatsessionevent"
@@ -48,6 +49,8 @@ type Client struct {
 	config
 	// Schema is the client for creating, migrating and dropping schema.
 	Schema *migrate.Schema
+	// A2aAgent is the client for interacting with the A2aAgent builders.
+	A2aAgent *A2aAgentClient
 	// App is the client for interacting with the App builders.
 	App *AppClient
 	// AppState is the client for interacting with the AppState builders.
@@ -109,6 +112,7 @@ func NewClient(opts ...Option) *Client {
 
 func (c *Client) init() {
 	c.Schema = migrate.NewSchema(c.driver)
+	c.A2aAgent = NewA2aAgentClient(c.config)
 	c.App = NewAppClient(c.config)
 	c.AppState = NewAppStateClient(c.config)
 	c.ChatSessionEvent = NewChatSessionEventClient(c.config)
@@ -226,6 +230,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 	return &Tx{
 		ctx:                 ctx,
 		config:              cfg,
+		A2aAgent:            NewA2aAgentClient(cfg),
 		App:                 NewAppClient(cfg),
 		AppState:            NewAppStateClient(cfg),
 		ChatSessionEvent:    NewChatSessionEventClient(cfg),
@@ -270,6 +275,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 	return &Tx{
 		ctx:                 ctx,
 		config:              cfg,
+		A2aAgent:            NewA2aAgentClient(cfg),
 		App:                 NewAppClient(cfg),
 		AppState:            NewAppStateClient(cfg),
 		ChatSessionEvent:    NewChatSessionEventClient(cfg),
@@ -301,7 +307,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 // Debug returns a new debug-client. It's used to get verbose logging on specific operations.
 //
 //	client.Debug().
-//		App.
+//		A2aAgent.
 //		Query().
 //		Count(ctx)
 func (c *Client) Debug() *Client {
@@ -324,7 +330,7 @@ func (c *Client) Close() error {
 // In order to add hooks to a specific client, call: `client.Node.Use(...)`.
 func (c *Client) Use(hooks ...Hook) {
 	for _, n := range []interface{ Use(...Hook) }{
-		c.App, c.AppState, c.ChatSessionEvent, c.Credential, c.DrillReport,
+		c.A2aAgent, c.App, c.AppState, c.ChatSessionEvent, c.Credential, c.DrillReport,
 		c.FleetMailboxMessage, c.FleetMonitorState, c.FleetPlan, c.FleetRunState,
 		c.FleetSetupDraft, c.FleetSetupProfile, c.FleetTask, c.FleetTemplate, c.Flow,
 		c.McpServer, c.Memory, c.NetworkPolicy, c.SandboxSession, c.ScheduledJob,
@@ -338,7 +344,7 @@ func (c *Client) Use(hooks ...Hook) {
 // In order to add interceptors to a specific client, call: `client.Node.Intercept(...)`.
 func (c *Client) Intercept(interceptors ...Interceptor) {
 	for _, n := range []interface{ Intercept(...Interceptor) }{
-		c.App, c.AppState, c.ChatSessionEvent, c.Credential, c.DrillReport,
+		c.A2aAgent, c.App, c.AppState, c.ChatSessionEvent, c.Credential, c.DrillReport,
 		c.FleetMailboxMessage, c.FleetMonitorState, c.FleetPlan, c.FleetRunState,
 		c.FleetSetupDraft, c.FleetSetupProfile, c.FleetTask, c.FleetTemplate, c.Flow,
 		c.McpServer, c.Memory, c.NetworkPolicy, c.SandboxSession, c.ScheduledJob,
@@ -351,6 +357,8 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 // Mutate implements the ent.Mutator interface.
 func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 	switch m := m.(type) {
+	case *A2aAgentMutation:
+		return c.A2aAgent.mutate(ctx, m)
 	case *AppMutation:
 		return c.App.mutate(ctx, m)
 	case *AppStateMutation:
@@ -403,6 +411,139 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.TeamAuditLog.mutate(ctx, m)
 	default:
 		return nil, fmt.Errorf("team: unknown mutation type %T", m)
+	}
+}
+
+// A2aAgentClient is a client for the A2aAgent schema.
+type A2aAgentClient struct {
+	config
+}
+
+// NewA2aAgentClient returns a client for the A2aAgent from the given config.
+func NewA2aAgentClient(c config) *A2aAgentClient {
+	return &A2aAgentClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `a2aagent.Hooks(f(g(h())))`.
+func (c *A2aAgentClient) Use(hooks ...Hook) {
+	c.hooks.A2aAgent = append(c.hooks.A2aAgent, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `a2aagent.Intercept(f(g(h())))`.
+func (c *A2aAgentClient) Intercept(interceptors ...Interceptor) {
+	c.inters.A2aAgent = append(c.inters.A2aAgent, interceptors...)
+}
+
+// Create returns a builder for creating a A2aAgent entity.
+func (c *A2aAgentClient) Create() *A2aAgentCreate {
+	mutation := newA2aAgentMutation(c.config, OpCreate)
+	return &A2aAgentCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of A2aAgent entities.
+func (c *A2aAgentClient) CreateBulk(builders ...*A2aAgentCreate) *A2aAgentCreateBulk {
+	return &A2aAgentCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *A2aAgentClient) MapCreateBulk(slice any, setFunc func(*A2aAgentCreate, int)) *A2aAgentCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &A2aAgentCreateBulk{err: fmt.Errorf("calling to A2aAgentClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*A2aAgentCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &A2aAgentCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for A2aAgent.
+func (c *A2aAgentClient) Update() *A2aAgentUpdate {
+	mutation := newA2aAgentMutation(c.config, OpUpdate)
+	return &A2aAgentUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *A2aAgentClient) UpdateOne(_m *A2aAgent) *A2aAgentUpdateOne {
+	mutation := newA2aAgentMutation(c.config, OpUpdateOne, withA2aAgent(_m))
+	return &A2aAgentUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *A2aAgentClient) UpdateOneID(id uuid.UUID) *A2aAgentUpdateOne {
+	mutation := newA2aAgentMutation(c.config, OpUpdateOne, withA2aAgentID(id))
+	return &A2aAgentUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for A2aAgent.
+func (c *A2aAgentClient) Delete() *A2aAgentDelete {
+	mutation := newA2aAgentMutation(c.config, OpDelete)
+	return &A2aAgentDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *A2aAgentClient) DeleteOne(_m *A2aAgent) *A2aAgentDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *A2aAgentClient) DeleteOneID(id uuid.UUID) *A2aAgentDeleteOne {
+	builder := c.Delete().Where(a2aagent.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &A2aAgentDeleteOne{builder}
+}
+
+// Query returns a query builder for A2aAgent.
+func (c *A2aAgentClient) Query() *A2aAgentQuery {
+	return &A2aAgentQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeA2aAgent},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a A2aAgent entity by its id.
+func (c *A2aAgentClient) Get(ctx context.Context, id uuid.UUID) (*A2aAgent, error) {
+	return c.Query().Where(a2aagent.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *A2aAgentClient) GetX(ctx context.Context, id uuid.UUID) *A2aAgent {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *A2aAgentClient) Hooks() []Hook {
+	return c.hooks.A2aAgent
+}
+
+// Interceptors returns the client interceptors.
+func (c *A2aAgentClient) Interceptors() []Interceptor {
+	return c.inters.A2aAgent
+}
+
+func (c *A2aAgentClient) mutate(ctx context.Context, m *A2aAgentMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&A2aAgentCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&A2aAgentUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&A2aAgentUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&A2aAgentDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("team: unknown A2aAgent mutation op: %q", m.Op())
 	}
 }
 
@@ -3830,17 +3971,17 @@ func (c *TeamAuditLogClient) mutate(ctx context.Context, m *TeamAuditLogMutation
 // hooks and interceptors per client, for fast access.
 type (
 	hooks struct {
-		App, AppState, ChatSessionEvent, Credential, DrillReport, FleetMailboxMessage,
-		FleetMonitorState, FleetPlan, FleetRunState, FleetSetupDraft,
-		FleetSetupProfile, FleetTask, FleetTemplate, Flow, McpServer, Memory,
-		NetworkPolicy, SandboxSession, ScheduledJob, Session, SessionEvent, Setting,
-		Skill, SkillFile, TeamAuditLog []ent.Hook
+		A2aAgent, App, AppState, ChatSessionEvent, Credential, DrillReport,
+		FleetMailboxMessage, FleetMonitorState, FleetPlan, FleetRunState,
+		FleetSetupDraft, FleetSetupProfile, FleetTask, FleetTemplate, Flow, McpServer,
+		Memory, NetworkPolicy, SandboxSession, ScheduledJob, Session, SessionEvent,
+		Setting, Skill, SkillFile, TeamAuditLog []ent.Hook
 	}
 	inters struct {
-		App, AppState, ChatSessionEvent, Credential, DrillReport, FleetMailboxMessage,
-		FleetMonitorState, FleetPlan, FleetRunState, FleetSetupDraft,
-		FleetSetupProfile, FleetTask, FleetTemplate, Flow, McpServer, Memory,
-		NetworkPolicy, SandboxSession, ScheduledJob, Session, SessionEvent, Setting,
-		Skill, SkillFile, TeamAuditLog []ent.Interceptor
+		A2aAgent, App, AppState, ChatSessionEvent, Credential, DrillReport,
+		FleetMailboxMessage, FleetMonitorState, FleetPlan, FleetRunState,
+		FleetSetupDraft, FleetSetupProfile, FleetTask, FleetTemplate, Flow, McpServer,
+		Memory, NetworkPolicy, SandboxSession, ScheduledJob, Session, SessionEvent,
+		Setting, Skill, SkillFile, TeamAuditLog []ent.Interceptor
 	}
 )

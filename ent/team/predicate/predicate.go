@@ -6,6 +6,9 @@ import (
 	"entgo.io/ent/dialect/sql"
 )
 
+// A2aAgent is the predicate function for a2aagent builders.
+type A2aAgent func(*sql.Selector)
+
 // App is the predicate function for app builders.
 type App func(*sql.Selector)
 

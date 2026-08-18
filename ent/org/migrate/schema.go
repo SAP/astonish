@@ -9,6 +9,35 @@ import (
 )
 
 var (
+	// OrgA2aAgentsColumns holds the columns for the "org_a2a_agents" table.
+	OrgA2aAgentsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "name", Type: field.TypeString},
+		{Name: "url", Type: field.TypeString},
+		{Name: "credential_name", Type: field.TypeString, Nullable: true},
+		{Name: "auth_type", Type: field.TypeString, Default: "bearer"},
+		{Name: "enabled", Type: field.TypeBool, Default: true},
+		{Name: "headers", Type: field.TypeJSON, Nullable: true},
+		{Name: "timeout", Type: field.TypeString, Nullable: true},
+		{Name: "cached_card", Type: field.TypeJSON, Nullable: true},
+		{Name: "cached_skills", Type: field.TypeJSON, Nullable: true},
+		{Name: "created_by", Type: field.TypeUUID},
+		{Name: "created_at", Type: field.TypeTime, Default: map[string]schema.Expr{"postgres": "now()", "sqlite3": "(datetime('now'))"}},
+		{Name: "updated_at", Type: field.TypeTime, Default: map[string]schema.Expr{"postgres": "now()", "sqlite3": "(datetime('now'))"}},
+	}
+	// OrgA2aAgentsTable holds the schema information for the "org_a2a_agents" table.
+	OrgA2aAgentsTable = &schema.Table{
+		Name:       "org_a2a_agents",
+		Columns:    OrgA2aAgentsColumns,
+		PrimaryKey: []*schema.Column{OrgA2aAgentsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "orga2aagent_name",
+				Unique:  true,
+				Columns: []*schema.Column{OrgA2aAgentsColumns[1]},
+			},
+		},
+	}
 	// OrgAppsColumns holds the columns for the "org_apps" table.
 	OrgAppsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -304,6 +333,7 @@ var (
 	}
 	// Tables holds all the tables in the schema.
 	Tables = []*schema.Table{
+		OrgA2aAgentsTable,
 		OrgAppsTable,
 		OrgAuditLogTable,
 		OrgEncryptionKeysTable,
@@ -318,6 +348,9 @@ var (
 )
 
 func init() {
+	OrgA2aAgentsTable.Annotation = &entsql.Annotation{
+		Table: "org_a2a_agents",
+	}
 	OrgAppsTable.Annotation = &entsql.Annotation{
 		Table: "org_apps",
 	}

@@ -12,6 +12,7 @@ import (
 	"entgo.io/ent"
 	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
+	"github.com/SAP/astonish/ent/team/a2aagent"
 	"github.com/SAP/astonish/ent/team/app"
 	"github.com/SAP/astonish/ent/team/appstate"
 	"github.com/SAP/astonish/ent/team/chatsessionevent"
@@ -97,6 +98,7 @@ var (
 func checkColumn(t, c string) error {
 	initCheck.Do(func() {
 		columnCheck = sql.NewColumnCheck(map[string]func(string) bool{
+			a2aagent.Table:            a2aagent.ValidColumn,
 			app.Table:                 app.ValidColumn,
 			appstate.Table:            appstate.ValidColumn,
 			chatsessionevent.Table:    chatsessionevent.ValidColumn,

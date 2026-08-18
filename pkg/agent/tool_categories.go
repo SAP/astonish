@@ -187,6 +187,7 @@ var SafeTools = map[string]bool{
 	"git_diff_add_line_numbers": true,
 	"filter_json":               true,
 	"web_fetch":                 true,
+	"perplexity_web_search":     true,
 	"read_pdf":                  true,
 	"memory_search":             true,
 	"memory_get":                true,

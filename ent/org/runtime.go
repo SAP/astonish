@@ -5,6 +5,7 @@ package org
 import (
 	"time"
 
+	"github.com/SAP/astonish/ent/org/orga2aagent"
 	"github.com/SAP/astonish/ent/org/orgapp"
 	"github.com/SAP/astonish/ent/org/orgauditlog"
 	"github.com/SAP/astonish/ent/org/orgencryptionkey"
@@ -23,6 +24,42 @@ import (
 // (default values, validators, hooks and policies) and stitches it
 // to their package variables.
 func init() {
+	orga2aagentFields := schema.OrgA2AAgent{}.Fields()
+	_ = orga2aagentFields
+	// orga2aagentDescName is the schema descriptor for name field.
+	orga2aagentDescName := orga2aagentFields[1].Descriptor()
+	// orga2aagent.NameValidator is a validator for the "name" field. It is called by the builders before save.
+	orga2aagent.NameValidator = orga2aagentDescName.Validators[0].(func(string) error)
+	// orga2aagentDescURL is the schema descriptor for url field.
+	orga2aagentDescURL := orga2aagentFields[2].Descriptor()
+	// orga2aagent.URLValidator is a validator for the "url" field. It is called by the builders before save.
+	orga2aagent.URLValidator = orga2aagentDescURL.Validators[0].(func(string) error)
+	// orga2aagentDescAuthType is the schema descriptor for auth_type field.
+	orga2aagentDescAuthType := orga2aagentFields[4].Descriptor()
+	// orga2aagent.DefaultAuthType holds the default value on creation for the auth_type field.
+	orga2aagent.DefaultAuthType = orga2aagentDescAuthType.Default.(string)
+	// orga2aagentDescEnabled is the schema descriptor for enabled field.
+	orga2aagentDescEnabled := orga2aagentFields[5].Descriptor()
+	// orga2aagent.DefaultEnabled holds the default value on creation for the enabled field.
+	orga2aagent.DefaultEnabled = orga2aagentDescEnabled.Default.(bool)
+	// orga2aagentDescHeaders is the schema descriptor for headers field.
+	orga2aagentDescHeaders := orga2aagentFields[6].Descriptor()
+	// orga2aagent.DefaultHeaders holds the default value on creation for the headers field.
+	orga2aagent.DefaultHeaders = orga2aagentDescHeaders.Default.(map[string]string)
+	// orga2aagentDescCreatedAt is the schema descriptor for created_at field.
+	orga2aagentDescCreatedAt := orga2aagentFields[11].Descriptor()
+	// orga2aagent.DefaultCreatedAt holds the default value on creation for the created_at field.
+	orga2aagent.DefaultCreatedAt = orga2aagentDescCreatedAt.Default.(func() time.Time)
+	// orga2aagentDescUpdatedAt is the schema descriptor for updated_at field.
+	orga2aagentDescUpdatedAt := orga2aagentFields[12].Descriptor()
+	// orga2aagent.DefaultUpdatedAt holds the default value on creation for the updated_at field.
+	orga2aagent.DefaultUpdatedAt = orga2aagentDescUpdatedAt.Default.(func() time.Time)
+	// orga2aagent.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
+	orga2aagent.UpdateDefaultUpdatedAt = orga2aagentDescUpdatedAt.UpdateDefault.(func() time.Time)
+	// orga2aagentDescID is the schema descriptor for id field.
+	orga2aagentDescID := orga2aagentFields[0].Descriptor()
+	// orga2aagent.DefaultID holds the default value on creation for the id field.
+	orga2aagent.DefaultID = orga2aagentDescID.Default.(func() uuid.UUID)
 	orgappFields := schema.OrgApp{}.Fields()
 	_ = orgappFields
 	// orgappDescSlug is the schema descriptor for slug field.

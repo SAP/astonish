@@ -422,13 +422,14 @@ An external agent uses A2A to **delegate a task** to Astonish. Astonish then use
 - **`github.com/a2aproject/a2a-go/v2`** — Official Go SDK (A2A v1.0 compliant). Provides protocol types, JSON-RPC handling, and SSE utilities. Requires Go 1.25+.
 - Existing Astonish infrastructure: `pkg/channels` (Channel interface), `pkg/api` (HTTP routing), `pkg/credentials` (auth + redaction), `pkg/session` (session management).
 
-## Future: A2A Client (Not in Scope)
+## A2A Client (Astonish Calling External Agents)
 
-The A2A Client role (Astonish calling external agents) is a separate future initiative. It would involve:
-- A `delegate_to_agent` tool in `pkg/tools/`
-- Agent discovery and registry
-- Outbound task management
-- This is architecturally distinct from the channel layer
+The A2A Client role — Astonish connecting outward to external A2A agents — is now implemented and documented separately. See **[`a2a-client.md`](./a2a-client.md)** for the full architecture covering:
+- Configuration cascade (file → platform → org → team)
+- Credential integration via `CredentialResolver`
+- Tool generation from Agent Card skills
+- Streaming support (`message/stream` via SSE)
+- Multi-tenant isolation guarantees
 
 ### Multi-Client Architecture
 

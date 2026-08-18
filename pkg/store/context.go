@@ -288,6 +288,37 @@ func MCPServerStoresFromContext(ctx context.Context) *MCPServerStores {
 	return ms
 }
 
+const a2aAgentStoresKey contextKey = "astonish_a2a_agent_stores"
+
+// A2AAgentStores holds references to platform/org/team A2A agent stores
+// for use in tool context injection.
+//
+// Cascade contract: at chat-build time the agent must see A2A agents from
+// ALL three tiers, with team overriding org overriding platform on name
+// collisions (mirrors the MCP server cascade pattern).
+type A2AAgentStores struct {
+	Platform A2AAgentStore // platform-wide A2A agent store (nil in personal mode); cascades into all orgs/teams
+	Org      A2AAgentStore // org-level A2A agent store (nil if not in platform mode)
+	Team     A2AAgentStore // team-level A2A agent store (nil if not in platform mode)
+}
+
+// WithA2AAgentStores returns a new context containing the A2AAgentStores.
+// Used to propagate tenant-scoped A2A agent stores into the ADK runner context
+// so that the agent can resolve A2A agents dynamically per-request.
+func WithA2AAgentStores(ctx context.Context, as *A2AAgentStores) context.Context {
+	return context.WithValue(ctx, a2aAgentStoresKey, as)
+}
+
+// A2AAgentStoresFromContext retrieves the A2AAgentStores from a context.
+// Returns nil if no A2AAgentStores is present (personal mode or tests).
+func A2AAgentStoresFromContext(ctx context.Context) *A2AAgentStores {
+	if ctx == nil {
+		return nil
+	}
+	as, _ := ctx.Value(a2aAgentStoresKey).(*A2AAgentStores)
+	return as
+}
+
 const fleetTemplateStoreKey contextKey = "astonish_fleet_template_store"
 const fleetPlanStoreKey contextKey = "astonish_fleet_plan_store"
 const fleetSetupProfileStoreKey contextKey = "astonish_fleet_setup_profile_store"

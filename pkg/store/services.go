@@ -119,6 +119,19 @@ type Services struct {
 	// Only superadmins can manage these. Nil in personal mode.
 	PlatformMCPServers MCPServerStore
 
+	// A2AAgents provides access to org-level A2A agent connection configurations.
+	// In platform mode, these are remote A2A agents shared across all teams in the org.
+	A2AAgents A2AAgentStore
+
+	// TeamA2AAgents provides access to team-scoped A2A agent connection configurations.
+	// Team A2A agents override org A2A agents of the same name. Team admins manage these.
+	TeamA2AAgents A2AAgentStore
+
+	// PlatformA2AAgents provides access to platform-wide A2A agent connection configurations.
+	// Platform A2A agents are inherited by all organizations and teams.
+	// Only superadmins can manage these. Nil in personal mode.
+	PlatformA2AAgents A2AAgentStore
+
 	// PlatformSkills provides access to platform-wide skill definitions.
 	// Platform skills are inherited by all organizations and teams.
 	// Only superadmins can manage these. Nil in personal mode.

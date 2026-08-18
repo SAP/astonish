@@ -9,6 +9,18 @@ import (
 	"github.com/SAP/astonish/ent/team"
 )
 
+// The A2aAgentFunc type is an adapter to allow the use of ordinary
+// function as A2aAgent mutator.
+type A2aAgentFunc func(context.Context, *team.A2aAgentMutation) (team.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f A2aAgentFunc) Mutate(ctx context.Context, m team.Mutation) (team.Value, error) {
+	if mv, ok := m.(*team.A2aAgentMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *team.A2aAgentMutation", m)
+}
+
 // The AppFunc type is an adapter to allow the use of ordinary
 // function as App mutator.
 type AppFunc func(context.Context, *team.AppMutation) (team.Value, error)

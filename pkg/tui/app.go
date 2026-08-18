@@ -2693,13 +2693,13 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 			if md == "" {
 				md = th.Agent.Width(cw).Render(content)
 			}
-			appendBlock(i, it.Kind, md)
+			appendBlockSpanned(i, it.Kind, md, codeGutterContentSpan)
 		case events.ItemThinking:
 			appendBlock(i, it.Kind, m.renderThinkingBubble(it.Content, cw))
 		case events.ItemActivity:
-			appendBlock(i, it.Kind, m.renderActivity(it, cw))
+			appendBlockSpanned(i, it.Kind, m.renderActivity(it, cw), codeGutterContentSpan)
 		case events.ItemFileDiff:
-			appendBlock(i, it.Kind, m.renderFileDiff(it, cw))
+			appendBlockSpanned(i, it.Kind, m.renderFileDiff(it, cw), codeGutterContentSpan)
 		case events.ItemSystem:
 			appendBlock(i, it.Kind, th.System.Width(cw).Render(it.Content))
 		case events.ItemError:
@@ -3146,6 +3146,53 @@ func userBubbleContentSpan(_ int, plain string) [2]int {
 	}
 	for end > start && runes[end-1] == ' ' {
 		end--
+	}
+	return [2]int{start, end}
+}
+
+// codeGutterContentSpan returns the [start,end) rune-column range of real
+// content within a rendered code block or diff line, excluding the line-number
+// gutter prefix. Used for drag-to-copy selection so that copying code doesn't
+// include "  205 │ " decorative chrome.
+//
+// Lines with a │ gutter get their prefix stripped (up to and including "│ ");
+// lines without (prose, headers like "◆ go") keep their full width as content.
+// Diff markers (+/−) after the gutter are preserved as they carry meaning.
+func codeGutterContentSpan(_ int, plain string) [2]int {
+	runes := []rune(plain)
+	total := len(runes)
+	if total == 0 {
+		return [2]int{0, 0}
+	}
+
+	// Find the first │ — this is the gutter separator in code blocks and diffs.
+	pipeIdx := -1
+	for i, r := range runes {
+		if r == '│' {
+			pipeIdx = i
+			break
+		}
+	}
+
+	// No pipe: this is a prose line, header ("◆ go"), or separator — full width.
+	if pipeIdx < 0 {
+		return [2]int{0, total}
+	}
+
+	// Start after the pipe. Skip one space that always follows "│ ".
+	start := pipeIdx + 1
+	if start < total && runes[start] == ' ' {
+		start++
+	}
+
+	// Trim trailing whitespace (padding).
+	end := total
+	for end > start && runes[end-1] == ' ' {
+		end--
+	}
+
+	if start >= end {
+		return [2]int{0, 0}
 	}
 	return [2]int{start, end}
 }

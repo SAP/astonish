@@ -12,6 +12,8 @@ import (
 // Tx is a transactional client that is created by calling Client.Tx().
 type Tx struct {
 	config
+	// OrgA2AAgent is the client for interacting with the OrgA2AAgent builders.
+	OrgA2AAgent *OrgA2AAgentClient
 	// OrgApp is the client for interacting with the OrgApp builders.
 	OrgApp *OrgAppClient
 	// OrgAuditLog is the client for interacting with the OrgAuditLog builders.
@@ -163,6 +165,7 @@ func (tx *Tx) Client() *Client {
 }
 
 func (tx *Tx) init() {
+	tx.OrgA2AAgent = NewOrgA2AAgentClient(tx.config)
 	tx.OrgApp = NewOrgAppClient(tx.config)
 	tx.OrgAuditLog = NewOrgAuditLogClient(tx.config)
 	tx.OrgEncryptionKey = NewOrgEncryptionKeyClient(tx.config)
@@ -182,7 +185,7 @@ func (tx *Tx) init() {
 // of them in order to commit or rollback the transaction.
 //
 // If a closed transaction is embedded in one of the generated entities, and the entity
-// applies a query, for example: OrgApp.QueryXXX(), the query will be executed
+// applies a query, for example: OrgA2AAgent.QueryXXX(), the query will be executed
 // through the driver which created this transaction.
 //
 // Note that txDriver is not goroutine safe.

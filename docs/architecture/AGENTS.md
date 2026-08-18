@@ -29,6 +29,7 @@ This directory is the **authoritative reference** for cross-cutting design decis
 ### Channels & Protocols
 - `channels.md` — External channel architecture: Telegram, Slack, Email adapters, routing, commands, fleet integration.
 - `a2a-server.md` — A2A (Agent-to-Agent) protocol server implementation as a channel adapter. Discovery (Agent Card), task lifecycle, streaming, push notifications, multi-tenant mapping.
+- `a2a-client.md` — A2A Client: Astonish calling external A2A agents. Configuration cascade, credential integration, skill-to-tool mapping, streaming, multi-tenant isolation.
 - `a2a-server-research.md` — Research findings and architectural decision record for A2A integration.
 
 ### Session behavior

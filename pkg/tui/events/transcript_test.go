@@ -989,3 +989,80 @@ func TestTranscriptDelegationActivity(t *testing.T) {
 		}
 	}
 }
+
+// TestTranscript_PlanAfterAgentTextGetsOwnItem verifies that when the LLM emits
+// preamble text before announce_plan, the plan document still gets its own
+// ItemPlan transcript item rather than being appended to the preceding
+// ItemAgent (which would hide it from renderPlanDocument).
+func TestTranscript_PlanAfterAgentTextGetsOwnItem(t *testing.T) {
+	tr := NewTranscript()
+	tr.LinearThread = true
+
+	tr.Apply(NewUser("implement this feature"))
+	tr.Apply(NewText("I'll analyze the codebase and create a plan."))
+	tr.Apply(NewText("# Execution Plan\n\n**Goal:** Fix the bug\n\n## Phases\n\n- [ ] **step-1** — Do the thing\n"))
+
+	// Expect 3 items: user, agent (preamble), plan (document).
+	if len(tr.Items) != 3 {
+		t.Fatalf("items=%d want 3; kinds=%q", len(tr.Items), itemKinds(tr))
+	}
+	if tr.Items[0].Kind != ItemUser {
+		t.Fatalf("item[0] kind=%q want user", tr.Items[0].Kind)
+	}
+	if tr.Items[1].Kind != ItemAgent {
+		t.Fatalf("item[1] kind=%q want agent", tr.Items[1].Kind)
+	}
+	if tr.Items[1].Content != "I'll analyze the codebase and create a plan." {
+		t.Fatalf("item[1] content=%q", tr.Items[1].Content)
+	}
+	if tr.Items[2].Kind != ItemPlan {
+		t.Fatalf("item[2] kind=%q want plan", tr.Items[2].Kind)
+	}
+	if !strings.HasPrefix(tr.Items[2].Content, "# Execution Plan\n") {
+		t.Fatalf("item[2] content does not start with plan header: %q", tr.Items[2].Content[:50])
+	}
+}
+
+// TestTranscript_PlanStreamingChunksAccumulate verifies that when a plan
+// document arrives in multiple streaming chunks, they accumulate into the
+// same ItemPlan item (not split into separate items).
+func TestTranscript_PlanStreamingChunksAccumulate(t *testing.T) {
+	tr := NewTranscript()
+	tr.LinearThread = true
+
+	tr.Apply(NewUser("plan this"))
+	// First chunk starts the plan document.
+	tr.Apply(NewText("# Execution Plan\n\n**Goal:** Build feature X\n\n"))
+	// Second chunk continues the plan.
+	tr.Apply(NewText("## Phases\n\n- [ ] **step-1** — First step\n- [ ] **step-2** — Second step\n"))
+	tr.Apply(NewDone())
+
+	// Expect 2 items: user, plan (accumulated).
+	if len(tr.Items) != 2 {
+		t.Fatalf("items=%d want 2; kinds=%q", len(tr.Items), itemKinds(tr))
+	}
+	if tr.Items[1].Kind != ItemPlan {
+		t.Fatalf("item[1] kind=%q want plan", tr.Items[1].Kind)
+	}
+	if !strings.Contains(tr.Items[1].Content, "step-2") {
+		t.Fatalf("plan content missing second chunk: %q", tr.Items[1].Content)
+	}
+}
+
+// TestTranscript_PlanDirectWithoutPreamble verifies the baseline case: plan
+// text arriving as the first agent text in a turn creates an ItemPlan directly.
+func TestTranscript_PlanDirectWithoutPreamble(t *testing.T) {
+	tr := NewTranscript()
+	tr.LinearThread = true
+
+	tr.Apply(NewUser("plan this"))
+	tr.Apply(NewText("# Execution Plan\n\n**Goal:** Do something\n\n## Phases\n\n- [ ] **s1** — Step one\n"))
+	tr.Apply(NewDone())
+
+	if len(tr.Items) != 2 {
+		t.Fatalf("items=%d want 2; kinds=%q", len(tr.Items), itemKinds(tr))
+	}
+	if tr.Items[1].Kind != ItemPlan {
+		t.Fatalf("item[1] kind=%q want plan", tr.Items[1].Kind)
+	}
+}

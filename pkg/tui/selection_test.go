@@ -230,3 +230,103 @@ func TestTranscriptContentSpansAlignWithPlainLines(t *testing.T) {
 		t.Fatalf("spans=%d plainLines=%d", len(m.transcriptContentSpans), len(m.transcriptPlainLines))
 	}
 }
+
+func TestCodeGutterContentSpan(t *testing.T) {
+	tests := []struct {
+		name string
+		line string
+		want string // expected content substring, "" for empty spans
+	}{
+		{"code line", "  12 │ func main() {", "func main() {"},
+		{"code line with leading space", "   5 │ \treturn nil", "\treturn nil"},
+		{"code indented", "   5 │   return nil", "  return nil"},
+		{"diff added", " 169 │ + added line", "+ added line"},
+		{"diff removed U+2212", " 169 │ − removed line", "− removed line"},
+		{"diff context", " 167 │   context line", "  context line"},
+		{"header line", "◆ go", "◆ go"},
+		{"prose line", "This is prose text", "This is prose text"},
+		{"continuation gutter", "     │ continuation", "continuation"},
+		{"empty line", "", ""},
+		{"gap ellipsis", "     │ …", "…"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			span := codeGutterContentSpan(0, tc.line)
+			runes := []rune(tc.line)
+			got := ""
+			if span[0] < span[1] {
+				got = string(runes[span[0]:span[1]])
+			}
+			if got != tc.want {
+				t.Fatalf("span content=%q want %q (span=%v line=%q)", got, tc.want, span, tc.line)
+			}
+		})
+	}
+}
+
+func TestCodeBlockDragCopyExcludesGutter(t *testing.T) {
+	old := writeClipboard
+	defer func() { writeClipboard = old }()
+	var copied string
+	writeClipboard = func(s string) error {
+		copied = s
+		return nil
+	}
+
+	// Agent message with a code fence — renders with line-number gutter.
+	tr := events.NewTranscript()
+	tr.Items = []events.Item{{Kind: events.ItemAgent, Content: "```go\nfunc hello() {\n\treturn\n}\n```"}}
+	th := DefaultTheme()
+	th.NoColor = true // Disable color so plain lines match rendered exactly.
+	m := model{
+		theme:  th,
+		tr:     tr,
+		vp:     viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		width:  80,
+		height: 24,
+		ready:  true,
+	}
+	m.refreshViewport()
+
+	// Find a code line (one with │ gutter).
+	codeLine := -1
+	for i, line := range m.transcriptPlainLines {
+		if strings.Contains(line, "│") && strings.Contains(line, "func hello") {
+			codeLine = i
+			break
+		}
+	}
+	if codeLine < 0 {
+		t.Fatalf("code line with gutter not found in:\n%v", m.transcriptPlainLines)
+	}
+
+	// The span should exclude the gutter.
+	span := m.transcriptContentSpans[codeLine]
+	runes := []rune(m.transcriptPlainLines[codeLine])
+	content := string(runes[span[0]:span[1]])
+	if strings.Contains(content, "│") {
+		t.Fatalf("span still contains gutter pipe: %q (span=%v)", content, span)
+	}
+	if !strings.Contains(content, "func hello") {
+		t.Fatalf("span doesn't contain expected code: %q", content)
+	}
+
+	// Simulate drag-select across the full width of that line.
+	top := m.viewportTopY()
+	y := top + (codeLine - m.vp.YOffset())
+	rowWidth := len(runes)
+
+	next, _ := m.handleMouse(tea.MouseClickMsg{X: 0, Y: y, Button: tea.MouseLeft})
+	m = next.(model)
+	next, _ = m.handleMouse(tea.MouseMotionMsg{X: rowWidth, Y: y, Button: tea.MouseLeft})
+	m = next.(model)
+	next, _ = m.handleMouse(tea.MouseReleaseMsg{X: rowWidth, Y: y, Button: tea.MouseLeft})
+	m = next.(model)
+
+	if strings.ContainsRune(copied, '│') {
+		t.Fatalf("copied text includes gutter pipe: %q", copied)
+	}
+	if !strings.Contains(copied, "func hello") {
+		t.Fatalf("copied text missing code content: %q", copied)
+	}
+}

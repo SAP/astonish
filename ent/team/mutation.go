@@ -11,6 +11,7 @@ import (
 
 	"entgo.io/ent"
 	"entgo.io/ent/dialect/sql"
+	"github.com/SAP/astonish/ent/team/a2aagent"
 	"github.com/SAP/astonish/ent/team/app"
 	"github.com/SAP/astonish/ent/team/appstate"
 	"github.com/SAP/astonish/ent/team/chatsessionevent"
@@ -49,6 +50,7 @@ const (
 	OpUpdateOne = ent.OpUpdateOne
 
 	// Node types.
+	TypeA2aAgent            = "A2aAgent"
 	TypeApp                 = "App"
 	TypeAppState            = "AppState"
 	TypeChatSessionEvent    = "ChatSessionEvent"
@@ -75,6 +77,1064 @@ const (
 	TypeSkillFile           = "SkillFile"
 	TypeTeamAuditLog        = "TeamAuditLog"
 )
+
+// A2aAgentMutation represents an operation that mutates the A2aAgent nodes in the graph.
+type A2aAgentMutation struct {
+	config
+	op                  Op
+	typ                 string
+	id                  *uuid.UUID
+	name                *string
+	url                 *string
+	credential_name     *string
+	auth_type           *string
+	enabled             *bool
+	headers             *map[string]string
+	timeout             *string
+	cached_card         *[]uint8
+	appendcached_card   []uint8
+	cached_skills       *[]interface{}
+	appendcached_skills []interface{}
+	created_by          *uuid.UUID
+	created_at          *time.Time
+	updated_at          *time.Time
+	clearedFields       map[string]struct{}
+	done                bool
+	oldValue            func(context.Context) (*A2aAgent, error)
+	predicates          []predicate.A2aAgent
+}
+
+var _ ent.Mutation = (*A2aAgentMutation)(nil)
+
+// a2aagentOption allows management of the mutation configuration using functional options.
+type a2aagentOption func(*A2aAgentMutation)
+
+// newA2aAgentMutation creates new mutation for the A2aAgent entity.
+func newA2aAgentMutation(c config, op Op, opts ...a2aagentOption) *A2aAgentMutation {
+	m := &A2aAgentMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeA2aAgent,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withA2aAgentID sets the ID field of the mutation.
+func withA2aAgentID(id uuid.UUID) a2aagentOption {
+	return func(m *A2aAgentMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *A2aAgent
+		)
+		m.oldValue = func(ctx context.Context) (*A2aAgent, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().A2aAgent.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withA2aAgent sets the old A2aAgent of the mutation.
+func withA2aAgent(node *A2aAgent) a2aagentOption {
+	return func(m *A2aAgentMutation) {
+		m.oldValue = func(context.Context) (*A2aAgent, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m A2aAgentMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m A2aAgentMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("team: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of A2aAgent entities.
+func (m *A2aAgentMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *A2aAgentMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *A2aAgentMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().A2aAgent.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetName sets the "name" field.
+func (m *A2aAgentMutation) SetName(s string) {
+	m.name = &s
+}
+
+// Name returns the value of the "name" field in the mutation.
+func (m *A2aAgentMutation) Name() (r string, exists bool) {
+	v := m.name
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldName returns the old "name" field's value of the A2aAgent entity.
+// If the A2aAgent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *A2aAgentMutation) OldName(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldName is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldName requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldName: %w", err)
+	}
+	return oldValue.Name, nil
+}
+
+// ResetName resets all changes to the "name" field.
+func (m *A2aAgentMutation) ResetName() {
+	m.name = nil
+}
+
+// SetURL sets the "url" field.
+func (m *A2aAgentMutation) SetURL(s string) {
+	m.url = &s
+}
+
+// URL returns the value of the "url" field in the mutation.
+func (m *A2aAgentMutation) URL() (r string, exists bool) {
+	v := m.url
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldURL returns the old "url" field's value of the A2aAgent entity.
+// If the A2aAgent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *A2aAgentMutation) OldURL(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldURL is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldURL requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldURL: %w", err)
+	}
+	return oldValue.URL, nil
+}
+
+// ResetURL resets all changes to the "url" field.
+func (m *A2aAgentMutation) ResetURL() {
+	m.url = nil
+}
+
+// SetCredentialName sets the "credential_name" field.
+func (m *A2aAgentMutation) SetCredentialName(s string) {
+	m.credential_name = &s
+}
+
+// CredentialName returns the value of the "credential_name" field in the mutation.
+func (m *A2aAgentMutation) CredentialName() (r string, exists bool) {
+	v := m.credential_name
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCredentialName returns the old "credential_name" field's value of the A2aAgent entity.
+// If the A2aAgent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *A2aAgentMutation) OldCredentialName(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCredentialName is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCredentialName requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCredentialName: %w", err)
+	}
+	return oldValue.CredentialName, nil
+}
+
+// ClearCredentialName clears the value of the "credential_name" field.
+func (m *A2aAgentMutation) ClearCredentialName() {
+	m.credential_name = nil
+	m.clearedFields[a2aagent.FieldCredentialName] = struct{}{}
+}
+
+// CredentialNameCleared returns if the "credential_name" field was cleared in this mutation.
+func (m *A2aAgentMutation) CredentialNameCleared() bool {
+	_, ok := m.clearedFields[a2aagent.FieldCredentialName]
+	return ok
+}
+
+// ResetCredentialName resets all changes to the "credential_name" field.
+func (m *A2aAgentMutation) ResetCredentialName() {
+	m.credential_name = nil
+	delete(m.clearedFields, a2aagent.FieldCredentialName)
+}
+
+// SetAuthType sets the "auth_type" field.
+func (m *A2aAgentMutation) SetAuthType(s string) {
+	m.auth_type = &s
+}
+
+// AuthType returns the value of the "auth_type" field in the mutation.
+func (m *A2aAgentMutation) AuthType() (r string, exists bool) {
+	v := m.auth_type
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAuthType returns the old "auth_type" field's value of the A2aAgent entity.
+// If the A2aAgent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *A2aAgentMutation) OldAuthType(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAuthType is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAuthType requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAuthType: %w", err)
+	}
+	return oldValue.AuthType, nil
+}
+
+// ResetAuthType resets all changes to the "auth_type" field.
+func (m *A2aAgentMutation) ResetAuthType() {
+	m.auth_type = nil
+}
+
+// SetEnabled sets the "enabled" field.
+func (m *A2aAgentMutation) SetEnabled(b bool) {
+	m.enabled = &b
+}
+
+// Enabled returns the value of the "enabled" field in the mutation.
+func (m *A2aAgentMutation) Enabled() (r bool, exists bool) {
+	v := m.enabled
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldEnabled returns the old "enabled" field's value of the A2aAgent entity.
+// If the A2aAgent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *A2aAgentMutation) OldEnabled(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldEnabled is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldEnabled requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldEnabled: %w", err)
+	}
+	return oldValue.Enabled, nil
+}
+
+// ResetEnabled resets all changes to the "enabled" field.
+func (m *A2aAgentMutation) ResetEnabled() {
+	m.enabled = nil
+}
+
+// SetHeaders sets the "headers" field.
+func (m *A2aAgentMutation) SetHeaders(value map[string]string) {
+	m.headers = &value
+}
+
+// Headers returns the value of the "headers" field in the mutation.
+func (m *A2aAgentMutation) Headers() (r map[string]string, exists bool) {
+	v := m.headers
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldHeaders returns the old "headers" field's value of the A2aAgent entity.
+// If the A2aAgent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *A2aAgentMutation) OldHeaders(ctx context.Context) (v map[string]string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldHeaders is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldHeaders requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldHeaders: %w", err)
+	}
+	return oldValue.Headers, nil
+}
+
+// ClearHeaders clears the value of the "headers" field.
+func (m *A2aAgentMutation) ClearHeaders() {
+	m.headers = nil
+	m.clearedFields[a2aagent.FieldHeaders] = struct{}{}
+}
+
+// HeadersCleared returns if the "headers" field was cleared in this mutation.
+func (m *A2aAgentMutation) HeadersCleared() bool {
+	_, ok := m.clearedFields[a2aagent.FieldHeaders]
+	return ok
+}
+
+// ResetHeaders resets all changes to the "headers" field.
+func (m *A2aAgentMutation) ResetHeaders() {
+	m.headers = nil
+	delete(m.clearedFields, a2aagent.FieldHeaders)
+}
+
+// SetTimeout sets the "timeout" field.
+func (m *A2aAgentMutation) SetTimeout(s string) {
+	m.timeout = &s
+}
+
+// Timeout returns the value of the "timeout" field in the mutation.
+func (m *A2aAgentMutation) Timeout() (r string, exists bool) {
+	v := m.timeout
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTimeout returns the old "timeout" field's value of the A2aAgent entity.
+// If the A2aAgent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *A2aAgentMutation) OldTimeout(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTimeout is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTimeout requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTimeout: %w", err)
+	}
+	return oldValue.Timeout, nil
+}
+
+// ClearTimeout clears the value of the "timeout" field.
+func (m *A2aAgentMutation) ClearTimeout() {
+	m.timeout = nil
+	m.clearedFields[a2aagent.FieldTimeout] = struct{}{}
+}
+
+// TimeoutCleared returns if the "timeout" field was cleared in this mutation.
+func (m *A2aAgentMutation) TimeoutCleared() bool {
+	_, ok := m.clearedFields[a2aagent.FieldTimeout]
+	return ok
+}
+
+// ResetTimeout resets all changes to the "timeout" field.
+func (m *A2aAgentMutation) ResetTimeout() {
+	m.timeout = nil
+	delete(m.clearedFields, a2aagent.FieldTimeout)
+}
+
+// SetCachedCard sets the "cached_card" field.
+func (m *A2aAgentMutation) SetCachedCard(u []uint8) {
+	m.cached_card = &u
+	m.appendcached_card = nil
+}
+
+// CachedCard returns the value of the "cached_card" field in the mutation.
+func (m *A2aAgentMutation) CachedCard() (r []uint8, exists bool) {
+	v := m.cached_card
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCachedCard returns the old "cached_card" field's value of the A2aAgent entity.
+// If the A2aAgent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *A2aAgentMutation) OldCachedCard(ctx context.Context) (v []uint8, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCachedCard is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCachedCard requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCachedCard: %w", err)
+	}
+	return oldValue.CachedCard, nil
+}
+
+// AppendCachedCard adds u to the "cached_card" field.
+func (m *A2aAgentMutation) AppendCachedCard(u []uint8) {
+	m.appendcached_card = append(m.appendcached_card, u...)
+}
+
+// AppendedCachedCard returns the list of values that were appended to the "cached_card" field in this mutation.
+func (m *A2aAgentMutation) AppendedCachedCard() ([]uint8, bool) {
+	if len(m.appendcached_card) == 0 {
+		return nil, false
+	}
+	return m.appendcached_card, true
+}
+
+// ClearCachedCard clears the value of the "cached_card" field.
+func (m *A2aAgentMutation) ClearCachedCard() {
+	m.cached_card = nil
+	m.appendcached_card = nil
+	m.clearedFields[a2aagent.FieldCachedCard] = struct{}{}
+}
+
+// CachedCardCleared returns if the "cached_card" field was cleared in this mutation.
+func (m *A2aAgentMutation) CachedCardCleared() bool {
+	_, ok := m.clearedFields[a2aagent.FieldCachedCard]
+	return ok
+}
+
+// ResetCachedCard resets all changes to the "cached_card" field.
+func (m *A2aAgentMutation) ResetCachedCard() {
+	m.cached_card = nil
+	m.appendcached_card = nil
+	delete(m.clearedFields, a2aagent.FieldCachedCard)
+}
+
+// SetCachedSkills sets the "cached_skills" field.
+func (m *A2aAgentMutation) SetCachedSkills(i []interface{}) {
+	m.cached_skills = &i
+	m.appendcached_skills = nil
+}
+
+// CachedSkills returns the value of the "cached_skills" field in the mutation.
+func (m *A2aAgentMutation) CachedSkills() (r []interface{}, exists bool) {
+	v := m.cached_skills
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCachedSkills returns the old "cached_skills" field's value of the A2aAgent entity.
+// If the A2aAgent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *A2aAgentMutation) OldCachedSkills(ctx context.Context) (v []interface{}, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCachedSkills is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCachedSkills requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCachedSkills: %w", err)
+	}
+	return oldValue.CachedSkills, nil
+}
+
+// AppendCachedSkills adds i to the "cached_skills" field.
+func (m *A2aAgentMutation) AppendCachedSkills(i []interface{}) {
+	m.appendcached_skills = append(m.appendcached_skills, i...)
+}
+
+// AppendedCachedSkills returns the list of values that were appended to the "cached_skills" field in this mutation.
+func (m *A2aAgentMutation) AppendedCachedSkills() ([]interface{}, bool) {
+	if len(m.appendcached_skills) == 0 {
+		return nil, false
+	}
+	return m.appendcached_skills, true
+}
+
+// ClearCachedSkills clears the value of the "cached_skills" field.
+func (m *A2aAgentMutation) ClearCachedSkills() {
+	m.cached_skills = nil
+	m.appendcached_skills = nil
+	m.clearedFields[a2aagent.FieldCachedSkills] = struct{}{}
+}
+
+// CachedSkillsCleared returns if the "cached_skills" field was cleared in this mutation.
+func (m *A2aAgentMutation) CachedSkillsCleared() bool {
+	_, ok := m.clearedFields[a2aagent.FieldCachedSkills]
+	return ok
+}
+
+// ResetCachedSkills resets all changes to the "cached_skills" field.
+func (m *A2aAgentMutation) ResetCachedSkills() {
+	m.cached_skills = nil
+	m.appendcached_skills = nil
+	delete(m.clearedFields, a2aagent.FieldCachedSkills)
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (m *A2aAgentMutation) SetCreatedBy(u uuid.UUID) {
+	m.created_by = &u
+}
+
+// CreatedBy returns the value of the "created_by" field in the mutation.
+func (m *A2aAgentMutation) CreatedBy() (r uuid.UUID, exists bool) {
+	v := m.created_by
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedBy returns the old "created_by" field's value of the A2aAgent entity.
+// If the A2aAgent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *A2aAgentMutation) OldCreatedBy(ctx context.Context) (v uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedBy is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedBy requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedBy: %w", err)
+	}
+	return oldValue.CreatedBy, nil
+}
+
+// ResetCreatedBy resets all changes to the "created_by" field.
+func (m *A2aAgentMutation) ResetCreatedBy() {
+	m.created_by = nil
+}
+
+// SetCreatedAt sets the "created_at" field.
+func (m *A2aAgentMutation) SetCreatedAt(t time.Time) {
+	m.created_at = &t
+}
+
+// CreatedAt returns the value of the "created_at" field in the mutation.
+func (m *A2aAgentMutation) CreatedAt() (r time.Time, exists bool) {
+	v := m.created_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedAt returns the old "created_at" field's value of the A2aAgent entity.
+// If the A2aAgent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *A2aAgentMutation) OldCreatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedAt: %w", err)
+	}
+	return oldValue.CreatedAt, nil
+}
+
+// ResetCreatedAt resets all changes to the "created_at" field.
+func (m *A2aAgentMutation) ResetCreatedAt() {
+	m.created_at = nil
+}
+
+// SetUpdatedAt sets the "updated_at" field.
+func (m *A2aAgentMutation) SetUpdatedAt(t time.Time) {
+	m.updated_at = &t
+}
+
+// UpdatedAt returns the value of the "updated_at" field in the mutation.
+func (m *A2aAgentMutation) UpdatedAt() (r time.Time, exists bool) {
+	v := m.updated_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUpdatedAt returns the old "updated_at" field's value of the A2aAgent entity.
+// If the A2aAgent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *A2aAgentMutation) OldUpdatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUpdatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUpdatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUpdatedAt: %w", err)
+	}
+	return oldValue.UpdatedAt, nil
+}
+
+// ResetUpdatedAt resets all changes to the "updated_at" field.
+func (m *A2aAgentMutation) ResetUpdatedAt() {
+	m.updated_at = nil
+}
+
+// Where appends a list predicates to the A2aAgentMutation builder.
+func (m *A2aAgentMutation) Where(ps ...predicate.A2aAgent) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the A2aAgentMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *A2aAgentMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.A2aAgent, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *A2aAgentMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *A2aAgentMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (A2aAgent).
+func (m *A2aAgentMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *A2aAgentMutation) Fields() []string {
+	fields := make([]string, 0, 12)
+	if m.name != nil {
+		fields = append(fields, a2aagent.FieldName)
+	}
+	if m.url != nil {
+		fields = append(fields, a2aagent.FieldURL)
+	}
+	if m.credential_name != nil {
+		fields = append(fields, a2aagent.FieldCredentialName)
+	}
+	if m.auth_type != nil {
+		fields = append(fields, a2aagent.FieldAuthType)
+	}
+	if m.enabled != nil {
+		fields = append(fields, a2aagent.FieldEnabled)
+	}
+	if m.headers != nil {
+		fields = append(fields, a2aagent.FieldHeaders)
+	}
+	if m.timeout != nil {
+		fields = append(fields, a2aagent.FieldTimeout)
+	}
+	if m.cached_card != nil {
+		fields = append(fields, a2aagent.FieldCachedCard)
+	}
+	if m.cached_skills != nil {
+		fields = append(fields, a2aagent.FieldCachedSkills)
+	}
+	if m.created_by != nil {
+		fields = append(fields, a2aagent.FieldCreatedBy)
+	}
+	if m.created_at != nil {
+		fields = append(fields, a2aagent.FieldCreatedAt)
+	}
+	if m.updated_at != nil {
+		fields = append(fields, a2aagent.FieldUpdatedAt)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *A2aAgentMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case a2aagent.FieldName:
+		return m.Name()
+	case a2aagent.FieldURL:
+		return m.URL()
+	case a2aagent.FieldCredentialName:
+		return m.CredentialName()
+	case a2aagent.FieldAuthType:
+		return m.AuthType()
+	case a2aagent.FieldEnabled:
+		return m.Enabled()
+	case a2aagent.FieldHeaders:
+		return m.Headers()
+	case a2aagent.FieldTimeout:
+		return m.Timeout()
+	case a2aagent.FieldCachedCard:
+		return m.CachedCard()
+	case a2aagent.FieldCachedSkills:
+		return m.CachedSkills()
+	case a2aagent.FieldCreatedBy:
+		return m.CreatedBy()
+	case a2aagent.FieldCreatedAt:
+		return m.CreatedAt()
+	case a2aagent.FieldUpdatedAt:
+		return m.UpdatedAt()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *A2aAgentMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case a2aagent.FieldName:
+		return m.OldName(ctx)
+	case a2aagent.FieldURL:
+		return m.OldURL(ctx)
+	case a2aagent.FieldCredentialName:
+		return m.OldCredentialName(ctx)
+	case a2aagent.FieldAuthType:
+		return m.OldAuthType(ctx)
+	case a2aagent.FieldEnabled:
+		return m.OldEnabled(ctx)
+	case a2aagent.FieldHeaders:
+		return m.OldHeaders(ctx)
+	case a2aagent.FieldTimeout:
+		return m.OldTimeout(ctx)
+	case a2aagent.FieldCachedCard:
+		return m.OldCachedCard(ctx)
+	case a2aagent.FieldCachedSkills:
+		return m.OldCachedSkills(ctx)
+	case a2aagent.FieldCreatedBy:
+		return m.OldCreatedBy(ctx)
+	case a2aagent.FieldCreatedAt:
+		return m.OldCreatedAt(ctx)
+	case a2aagent.FieldUpdatedAt:
+		return m.OldUpdatedAt(ctx)
+	}
+	return nil, fmt.Errorf("unknown A2aAgent field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *A2aAgentMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case a2aagent.FieldName:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetName(v)
+		return nil
+	case a2aagent.FieldURL:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetURL(v)
+		return nil
+	case a2aagent.FieldCredentialName:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCredentialName(v)
+		return nil
+	case a2aagent.FieldAuthType:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAuthType(v)
+		return nil
+	case a2aagent.FieldEnabled:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetEnabled(v)
+		return nil
+	case a2aagent.FieldHeaders:
+		v, ok := value.(map[string]string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetHeaders(v)
+		return nil
+	case a2aagent.FieldTimeout:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTimeout(v)
+		return nil
+	case a2aagent.FieldCachedCard:
+		v, ok := value.([]uint8)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCachedCard(v)
+		return nil
+	case a2aagent.FieldCachedSkills:
+		v, ok := value.([]interface{})
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCachedSkills(v)
+		return nil
+	case a2aagent.FieldCreatedBy:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedBy(v)
+		return nil
+	case a2aagent.FieldCreatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedAt(v)
+		return nil
+	case a2aagent.FieldUpdatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUpdatedAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown A2aAgent field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *A2aAgentMutation) AddedFields() []string {
+	return nil
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *A2aAgentMutation) AddedField(name string) (ent.Value, bool) {
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *A2aAgentMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	}
+	return fmt.Errorf("unknown A2aAgent numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *A2aAgentMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(a2aagent.FieldCredentialName) {
+		fields = append(fields, a2aagent.FieldCredentialName)
+	}
+	if m.FieldCleared(a2aagent.FieldHeaders) {
+		fields = append(fields, a2aagent.FieldHeaders)
+	}
+	if m.FieldCleared(a2aagent.FieldTimeout) {
+		fields = append(fields, a2aagent.FieldTimeout)
+	}
+	if m.FieldCleared(a2aagent.FieldCachedCard) {
+		fields = append(fields, a2aagent.FieldCachedCard)
+	}
+	if m.FieldCleared(a2aagent.FieldCachedSkills) {
+		fields = append(fields, a2aagent.FieldCachedSkills)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *A2aAgentMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *A2aAgentMutation) ClearField(name string) error {
+	switch name {
+	case a2aagent.FieldCredentialName:
+		m.ClearCredentialName()
+		return nil
+	case a2aagent.FieldHeaders:
+		m.ClearHeaders()
+		return nil
+	case a2aagent.FieldTimeout:
+		m.ClearTimeout()
+		return nil
+	case a2aagent.FieldCachedCard:
+		m.ClearCachedCard()
+		return nil
+	case a2aagent.FieldCachedSkills:
+		m.ClearCachedSkills()
+		return nil
+	}
+	return fmt.Errorf("unknown A2aAgent nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *A2aAgentMutation) ResetField(name string) error {
+	switch name {
+	case a2aagent.FieldName:
+		m.ResetName()
+		return nil
+	case a2aagent.FieldURL:
+		m.ResetURL()
+		return nil
+	case a2aagent.FieldCredentialName:
+		m.ResetCredentialName()
+		return nil
+	case a2aagent.FieldAuthType:
+		m.ResetAuthType()
+		return nil
+	case a2aagent.FieldEnabled:
+		m.ResetEnabled()
+		return nil
+	case a2aagent.FieldHeaders:
+		m.ResetHeaders()
+		return nil
+	case a2aagent.FieldTimeout:
+		m.ResetTimeout()
+		return nil
+	case a2aagent.FieldCachedCard:
+		m.ResetCachedCard()
+		return nil
+	case a2aagent.FieldCachedSkills:
+		m.ResetCachedSkills()
+		return nil
+	case a2aagent.FieldCreatedBy:
+		m.ResetCreatedBy()
+		return nil
+	case a2aagent.FieldCreatedAt:
+		m.ResetCreatedAt()
+		return nil
+	case a2aagent.FieldUpdatedAt:
+		m.ResetUpdatedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown A2aAgent field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *A2aAgentMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *A2aAgentMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *A2aAgentMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *A2aAgentMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *A2aAgentMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *A2aAgentMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *A2aAgentMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown A2aAgent unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *A2aAgentMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown A2aAgent edge %s", name)
+}
 
 // AppMutation represents an operation that mutates the App nodes in the graph.
 type AppMutation struct {

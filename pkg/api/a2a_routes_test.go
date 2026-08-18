@@ -560,3 +560,128 @@ func TestA2AAuthExemptPaths(t *testing.T) {
 		}
 	}
 }
+
+func TestA2AHandler_TaskOwnershipIsolation(t *testing.T) {
+	// This test proves that a delegated service (actor) acting for multiple users
+	// cannot see other users' tasks — the exact attack vector identified in the
+	// design assessment.
+	ch := setupA2ATestWithJWT(t)
+
+	_ = ch.Start(context.Background(), func(ctx context.Context, msg channels.InboundMessage) error {
+		return nil
+	})
+
+	router := mux.NewRouter()
+	sub := router.PathPrefix("/api/a2a").Subrouter()
+	sub.Use(A2AAuthMiddleware)
+	sub.HandleFunc("", A2AHandler).Methods("POST")
+
+	// Helper to send a message and extract the task ID from the response.
+	sendMessage := func(t *testing.T, userSub string) string {
+		t.Helper()
+		params := a2a.SendMessageParams{
+			Message: a2a.Message{
+				Role:  "user",
+				Parts: []a2a.Part{a2a.TextPart{Text: "Hello from " + userSub}},
+			},
+			Configuration: &a2a.TaskConfig{
+				ReturnImmediately: true,
+			},
+		}
+		paramsJSON, _ := json.Marshal(params)
+		rpcReq := a2a.JSONRPCRequest{
+			JSONRPC: "2.0",
+			ID:      1,
+			Method:  "message/send",
+			Params:  paramsJSON,
+		}
+		body, _ := json.Marshal(rpcReq)
+
+		// Same actor (service-account-1) but different user
+		token := signTestJWT(t, "https://idp.example.com", userSub, "astonish-a2a", time.Now().Add(time.Hour), "service-account-1")
+
+		req := httptest.NewRequest("POST", "/api/a2a", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+
+		router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+		}
+
+		var resp a2a.JSONRPCResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("failed to parse response: %v", err)
+		}
+		if resp.Error != nil {
+			t.Fatalf("unexpected error: %+v", resp.Error)
+		}
+
+		// Extract task ID from result
+		resultBytes, _ := json.Marshal(resp.Result)
+		var task a2a.Task
+		if err := json.Unmarshal(resultBytes, &task); err != nil {
+			t.Fatalf("failed to parse task from result: %v", err)
+		}
+		if task.ID == "" {
+			t.Fatal("expected non-empty task ID")
+		}
+		return task.ID
+	}
+
+	// Helper to call tasks/get and return whether it succeeded.
+	getTask := func(t *testing.T, userSub, taskID string) (bool, *a2a.JSONRPCResponse) {
+		t.Helper()
+		params := a2a.GetTaskParams{TaskID: taskID}
+		paramsJSON, _ := json.Marshal(params)
+		rpcReq := a2a.JSONRPCRequest{
+			JSONRPC: "2.0",
+			ID:      2,
+			Method:  "tasks/get",
+			Params:  paramsJSON,
+		}
+		body, _ := json.Marshal(rpcReq)
+
+		token := signTestJWT(t, "https://idp.example.com", userSub, "astonish-a2a", time.Now().Add(time.Hour), "service-account-1")
+
+		req := httptest.NewRequest("POST", "/api/a2a", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+
+		router.ServeHTTP(w, req)
+
+		var resp a2a.JSONRPCResponse
+		json.Unmarshal(w.Body.Bytes(), &resp)
+		return resp.Error == nil, &resp
+	}
+
+	// Step 1: user-A creates a task via the shared service
+	taskA := sendMessage(t, "user-a@example.com")
+
+	// Step 2: user-B creates a task via the same service
+	taskB := sendMessage(t, "user-b@example.com")
+
+	// Step 3: user-B tries to access user-A's task — must fail
+	ok, resp := getTask(t, "user-b@example.com", taskA)
+	if ok {
+		t.Fatal("SECURITY: user-B was able to access user-A's task — cross-user visibility breach")
+	}
+	if resp.Error.Code != a2a.ErrCodeTaskNotFound {
+		t.Fatalf("expected task not found error, got code %d: %s", resp.Error.Code, resp.Error.Message)
+	}
+
+	// Step 4: user-A can still access their own task — must succeed
+	ok, _ = getTask(t, "user-a@example.com", taskA)
+	if !ok {
+		t.Fatal("user-A should be able to access their own task")
+	}
+
+	// Step 5: user-B can access their own task — must succeed
+	ok, _ = getTask(t, "user-b@example.com", taskB)
+	if !ok {
+		t.Fatal("user-B should be able to access their own task")
+	}
+}

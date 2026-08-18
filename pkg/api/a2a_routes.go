@@ -322,18 +322,23 @@ func A2AStreamHandler(w http.ResponseWriter, r *http.Request) {
 // This is a bridge function for backward compatibility with the channel adapter
 // until the adapter is updated to accept claims directly (phase 5).
 func agentFromClaims(claims *a2a.A2ATokenClaims) *a2a.RegisteredAgent {
-	// Use actor identifier as agent ID (for task ownership scoping).
-	// If no actor (direct user token), use the user identifier.
-	agentID := claims.ActorIdentifier
-	if agentID == "" {
+	// Derive agent ID for task ownership scoping.
+	// For delegated tokens (actor present): use composite key so one service
+	// acting for multiple users cannot see other users' tasks via tasks/get.
+	// For direct user tokens: use the user identifier alone.
+	var agentID string
+	if claims.ActorIdentifier != "" {
+		agentID = claims.ActorIdentifier + ":" + claims.UserIdentifier
+	} else {
 		agentID = claims.UserIdentifier
 	}
 	return &a2a.RegisteredAgent{
-		ID:             agentID,
-		Name:           claims.ActorIdentifier,
-		LinkedUserID:   claims.UserIdentifier,
-		LinkedOrgSlug:  claims.OrgID,
-		LinkedTeamSlug: "",
+		ID:                       agentID,
+		Name:                     claims.ActorIdentifier,
+		LinkedUserID:             claims.UserIdentifier,
+		LinkedOrgSlug:            claims.OrgID,
+		LinkedTeamSlug:           "",
+		AllowIdentityPropagation: false, // explicit: identity comes from JWT, never from message metadata
 	}
 }
 

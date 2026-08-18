@@ -354,6 +354,7 @@ func normalizeTaskState(s a2a.TaskState) a2a.TaskState {
 }
 
 // SendMessageStream sends a message and returns a channel of SSE events.
+// TODO(a2a-v1): Apply v1.0 transforms (method name, headers, params) when streaming is wired.
 func (c *Client) SendMessageStream(ctx context.Context, params a2a.SendMessageParams) (<-chan StreamEvent, error) {
 	reqBody, err := c.buildJSONRPCBody("message/stream", params)
 	if err != nil {
@@ -410,9 +411,19 @@ func (c *Client) GetTask(ctx context.Context, taskID string) (*a2a.Task, error) 
 	}
 
 	var task a2a.Task
-	if err := json.Unmarshal(resultBytes, &task); err != nil {
-		return nil, fmt.Errorf("a2aclient: failed to decode task: %w", err)
+	if c.isV1() {
+		task, err = parseV1TaskResponse(resultBytes)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		if err := json.Unmarshal(resultBytes, &task); err != nil {
+			return nil, fmt.Errorf("a2aclient: failed to decode task: %w", err)
+		}
 	}
+
+	// Normalize v1.0 task states to v0.3 equivalents
+	task.Status.State = normalizeTaskState(task.Status.State)
 
 	return &task, nil
 }

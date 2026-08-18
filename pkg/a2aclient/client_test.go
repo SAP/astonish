@@ -747,3 +747,96 @@ func TestV1SendMessageWithSupportedInterfaces(t *testing.T) {
 		t.Errorf("expected normalized state 'completed', got %q", task.Status.State)
 	}
 }
+
+func TestGetTask_V1_NormalizesState(t *testing.T) {
+	// Set up a test server that returns a v1.0 JSON-RPC response for tasks/get
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var rpcReq struct {
+			Method string `json:"method"`
+		}
+		json.NewDecoder(r.Body).Decode(&rpcReq)
+
+		if rpcReq.Method != "tasks/get" {
+			t.Errorf("expected method 'tasks/get', got %q", rpcReq.Method)
+		}
+
+		// Return a v1.0 response with task envelope and TASK_STATE_COMPLETED
+		resp := map[string]any{
+			"jsonrpc": "2.0",
+			"id":      1,
+			"result": map[string]any{
+				"task": map[string]any{
+					"id":        "task-123",
+					"contextId": "ctx-456",
+					"status": map[string]any{
+						"state":     "TASK_STATE_COMPLETED",
+						"timestamp": "2026-01-01T00:00:00Z",
+					},
+					"history": []map[string]any{
+						{
+							"role": "ROLE_AGENT",
+							"parts": []map[string]any{
+								{"text": "Hello from agent"},
+							},
+						},
+					},
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	// Create client with v1.0 protocol version
+	client := &Client{
+		httpClient: server.Client(),
+		config:     A2AAgentConfig{URL: server.URL},
+	}
+	client.SetProtocolVersion("1.0")
+
+	// Call GetTask
+	ctx := context.Background()
+	task, err := client.GetTask(ctx, "task-123")
+	if err != nil {
+		t.Fatalf("GetTask failed: %v", err)
+	}
+
+	// Verify task ID
+	if task.ID != "task-123" {
+		t.Errorf("expected task ID 'task-123', got %q", task.ID)
+	}
+
+	// Verify context ID
+	if task.ContextID != "ctx-456" {
+		t.Errorf("expected context ID 'ctx-456', got %q", task.ContextID)
+	}
+
+	// Verify state is normalized from TASK_STATE_COMPLETED to "completed"
+	if task.Status.State != a2a.TaskStateCompleted {
+		t.Errorf("expected normalized state 'completed', got %q", task.Status.State)
+	}
+
+	// Verify history is correctly parsed
+	if len(task.History) != 1 {
+		t.Fatalf("expected 1 history message, got %d", len(task.History))
+	}
+
+	histMsg := task.History[0]
+	if histMsg.Role != "ROLE_AGENT" {
+		t.Errorf("expected history role 'ROLE_AGENT', got %q", histMsg.Role)
+	}
+
+	if len(histMsg.Parts) != 1 {
+		t.Fatalf("expected 1 part in history message, got %d", len(histMsg.Parts))
+	}
+
+	textPart, ok := histMsg.Parts[0].(a2a.TextPart)
+	if !ok {
+		t.Fatalf("expected TextPart, got %T", histMsg.Parts[0])
+	}
+
+	if textPart.Text != "Hello from agent" {
+		t.Errorf("expected text 'Hello from agent', got %q", textPart.Text)
+	}
+}

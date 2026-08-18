@@ -101,7 +101,7 @@ export default function A2AAgentsSettings({
       if (isNew) {
         await createA2AAgent(editForm, scope, teamSlug)
       } else {
-        await updateA2AAgent(encodeURIComponent(expandedAgent!), editForm, scope, teamSlug)
+        await updateA2AAgent(expandedAgent!, editForm, scope, teamSlug)
       }
       setExpandedAgent(null)
       setIsNew(false)
@@ -135,7 +135,7 @@ export default function A2AAgentsSettings({
       prev.map(a => (a.name === agent.name ? { ...a, enabled: newEnabled } : a))
     )
     try {
-      await toggleA2AAgent(encodeURIComponent(agent.name), newEnabled, scope, teamSlug)
+      await toggleA2AAgent(agent.name, newEnabled, scope, teamSlug)
       if (onRefresh) onRefresh()
     } catch (err: any) {
       // Revert on error

@@ -316,7 +316,33 @@ func RefreshA2AAgentHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Fetch agent card from remote agent
 	cardURL := resolveAgentCardURL(existing.URL)
-	resp, err := http.Get(cardURL) //nolint:gosec // URL is user-configured
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, cardURL, nil) //nolint:gosec // URL is user-configured
+	if err != nil {
+		respondError(w, http.StatusBadGateway, "Invalid agent card URL: "+err.Error())
+		return
+	}
+
+	// Resolve credential-based auth header
+	resolver := credentialResolverForRequest(r)
+	if existing.CredentialName != "" && resolver != nil {
+		headerKey, headerValue, credErr := resolver.Resolve(existing.CredentialName)
+		if credErr != nil {
+			respondError(w, http.StatusBadGateway, "Credential resolution failed: "+credErr.Error())
+			return
+		}
+		if headerKey != "" && headerValue != "" {
+			req.Header.Set(headerKey, headerValue)
+		}
+	}
+
+	// Apply custom headers if configured
+	if existing.Headers != nil {
+		for key, value := range existing.Headers {
+			req.Header.Set(key, value)
+		}
+	}
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		respondError(w, http.StatusBadGateway, "Failed to fetch agent card: "+err.Error())
 		return
@@ -389,6 +415,22 @@ func TestA2AAgentHandler(w http.ResponseWriter, r *http.Request) {
 			"message": "Invalid URL: " + err.Error(),
 		})
 		return
+	}
+
+	// Resolve credential-based auth header
+	resolver := credentialResolverForRequest(r)
+	if existing.CredentialName != "" && resolver != nil {
+		headerKey, headerValue, credErr := resolver.Resolve(existing.CredentialName)
+		if credErr != nil {
+			respondJSON(w, http.StatusOK, map[string]any{
+				"status":  "error",
+				"message": "Credential resolution failed: " + credErr.Error(),
+			})
+			return
+		}
+		if headerKey != "" && headerValue != "" {
+			req.Header.Set(headerKey, headerValue)
+		}
 	}
 
 	// Apply custom headers if configured

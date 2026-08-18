@@ -539,15 +539,49 @@ func extractReusableBullets(content string) []string {
 
 func cautionLine(line string) bool {
 	lower := strings.ToLower(line)
-	markers := []string{
+
+	// Always-caution markers: genuinely ephemeral/transient failure notes.
+	// These are never operational knowledge worth keeping as recipe steps.
+	alwaysCaution := []string{
 		"caution:", "temporary", "temporarily", "outage", "timeout", "timed out", "503", "502",
-		"failed attempt", "trial and error", "did not work", "doesn't work", "does not work",
-		"do not use", "don't use", "avoid", "not found", "does not exist", "is not substituted", "are not substituted",
-		"not substituted", "wrong", "incorrect", "manual authenticate", "manually authenticate",
+		"failed attempt", "trial and error",
 	}
-	for _, marker := range markers {
+	for _, marker := range alwaysCaution {
 		if strings.Contains(lower, marker) {
 			return true
+		}
+	}
+
+	// Conditional-caution markers: only classify as caution if the line does
+	// NOT also contain a positive resolution indicator. Lines like "do not use
+	// X, use Y instead" are operational knowledge (recipe steps), not cautions.
+	conditionalCaution := []string{
+		"did not work", "doesn't work", "does not work",
+		"do not use", "don't use", "avoid", "not found", "does not exist",
+		"is not substituted", "are not substituted", "not substituted",
+		"wrong", "incorrect", "manual authenticate", "manually authenticate",
+	}
+	resolutionIndicators := []string{
+		"instead", "use ", "correct ", "should", "works",
+		"rather", "prefer", "recommended", "actual", "actually",
+	}
+
+	for _, marker := range conditionalCaution {
+		if strings.Contains(lower, marker) {
+			// Check if the line also contains a resolution indicator.
+			// If it does, this is operational knowledge, not a caution.
+			hasResolution := false
+			for _, res := range resolutionIndicators {
+				if strings.Contains(lower, res) {
+					hasResolution = true
+					break
+				}
+			}
+			if !hasResolution {
+				return true
+			}
+			// Has a resolution indicator — not a caution, it's a recipe step.
+			return false
 		}
 	}
 	return false
@@ -560,6 +594,23 @@ func softenCaution(line string) string {
 		return "Treat as conditional only; verify current service status before changing the path: " + line
 	}
 	return line
+}
+
+// IsEphemeralCaution returns true if a caution line is genuinely ephemeral
+// (contains always-caution markers like "timeout", "outage", "503", "502",
+// "temporary", "failed attempt"). These should never be promoted to recipe steps.
+func IsEphemeralCaution(line string) bool {
+	lower := strings.ToLower(line)
+	ephemeralMarkers := []string{
+		"caution:", "temporary", "temporarily", "outage", "timeout", "timed out",
+		"503", "502", "failed attempt", "trial and error",
+	}
+	for _, marker := range ephemeralMarkers {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func titleFromKey(key string) string {

@@ -105,7 +105,7 @@ func (r *PlatformReflector) Reflect(ctx context.Context, trace *ExecutionTrace, 
 	memStore := store.MemoryStoreFromContext(ctx)
 	sessionID := store.SessionIDFromContext(ctx)
 	if memStore == nil || sessionID == "" {
-		slog.Debug("platform reflector skipped: no memory store or session ID in context",
+		slog.Warn("platform reflector skipped: no memory store or session ID in context",
 			"component", "platform-reflector")
 		return
 	}
@@ -239,14 +239,14 @@ func (r *PlatformReflector) runReflection(ctx context.Context, trace *ExecutionT
 	var lastResp *model.LLMResponse
 	for resp, err := range r.effectiveLLM(ctx).GenerateContent(reflectCtx, req, false) {
 		if err != nil {
-			slog.Debug("platform reflection LLM error", "component", "platform-reflector", "error", err)
+			slog.Warn("platform reflection LLM error", "component", "platform-reflector", "error", err)
 			return
 		}
 		lastResp = resp
 	}
 
 	if lastResp == nil || lastResp.Content == nil {
-		slog.Debug("platform reflection: no response from LLM", "component", "platform-reflector")
+		slog.Warn("platform reflection: no response from LLM", "component", "platform-reflector")
 		return
 	}
 
@@ -260,7 +260,7 @@ func (r *PlatformReflector) runReflection(ctx context.Context, trace *ExecutionT
 	}
 
 	if saveCount > 0 {
-		slog.Debug("platform reflection saved entries", "component", "platform-reflector", "count", saveCount)
+		slog.Info("platform reflection saved entries", "component", "platform-reflector", "count", saveCount)
 	} else {
 		slog.Debug("platform reflection: model decided nothing worth saving", "component", "platform-reflector")
 	}
@@ -298,14 +298,14 @@ func (r *PlatformReflector) executePlatformSave(ctx context.Context, fc *genai.F
 
 	result, err := r.merger().SaveOrMergeWithStatus(ctx, memStore, entry, scenarioStatus)
 	if err != nil {
-		slog.Debug("platform reflection failed to save/merge",
+		slog.Warn("platform reflection failed to save/merge",
 			"component", "platform-reflector",
 			"category", category,
 			"error", err)
 		return
 	}
 
-	slog.Debug("platform reflection save result",
+	slog.Info("platform reflection save result",
 		"component", "platform-reflector",
 		"category", category,
 		"action", result.Action,

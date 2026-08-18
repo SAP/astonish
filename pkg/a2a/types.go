@@ -279,17 +279,39 @@ type SetPushNotificationParams struct {
 
 // AgentCard is the discovery document for an A2A agent.
 type AgentCard struct {
-	Name               string                    `json:"name"`
-	Description        string                    `json:"description,omitempty"`
-	URL                string                    `json:"url"`
-	Version            string                    `json:"version,omitempty"`
-	Provider           *AgentProvider            `json:"provider,omitempty"`
-	Capabilities       *AgentCapabilities        `json:"capabilities,omitempty"`
-	SecuritySchemes    map[string]SecurityScheme `json:"securitySchemes,omitempty"`
-	Security           []map[string][]string     `json:"security,omitempty"`
-	DefaultInputModes  []string                  `json:"defaultInputModes,omitempty"`
-	DefaultOutputModes []string                  `json:"defaultOutputModes,omitempty"`
-	Skills             []Skill                   `json:"skills,omitempty"`
+	Name                string                    `json:"name"`
+	Description         string                    `json:"description,omitempty"`
+	URL                 string                    `json:"url"`
+	Version             string                    `json:"version,omitempty"`
+	ProtocolVersion     string                    `json:"protocolVersion,omitempty"`
+	SupportedInterfaces []AgentInterface          `json:"supportedInterfaces,omitempty"`
+	Provider            *AgentProvider            `json:"provider,omitempty"`
+	Capabilities        *AgentCapabilities        `json:"capabilities,omitempty"`
+	SecuritySchemes     map[string]SecurityScheme `json:"securitySchemes,omitempty"`
+	Security            []map[string][]string     `json:"security,omitempty"`
+	DefaultInputModes   []string                  `json:"defaultInputModes,omitempty"`
+	DefaultOutputModes  []string                  `json:"defaultOutputModes,omitempty"`
+	Skills              []Skill                   `json:"skills,omitempty"`
+}
+
+// AgentInterface describes a supported protocol interface in the agent card.
+type AgentInterface struct {
+	URL             string `json:"url,omitempty"`
+	ProtocolBinding string `json:"protocolBinding,omitempty"`
+	ProtocolVersion string `json:"protocolVersion,omitempty"`
+}
+
+// DetectProtocolVersion returns the protocol version from the agent card,
+// checking (in order): top-level protocolVersion, supportedInterfaces[0].protocolVersion.
+// Returns empty string if no protocol version is found.
+func (c *AgentCard) DetectProtocolVersion() string {
+	if c.ProtocolVersion != "" {
+		return c.ProtocolVersion
+	}
+	if len(c.SupportedInterfaces) > 0 && c.SupportedInterfaces[0].ProtocolVersion != "" {
+		return c.SupportedInterfaces[0].ProtocolVersion
+	}
+	return ""
 }
 
 // AgentProvider identifies the organization providing the agent.

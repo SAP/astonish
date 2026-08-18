@@ -12,6 +12,8 @@ import {
   type Team, type TeamMember,
 } from '../api/platform'
 import { teamFetch } from '../api/teamContext'
+import { fetchA2AAgents } from '../api/a2aAgents'
+import type { A2AAgentListItem } from '../api/a2aAgents'
 
 declare const __UI_VERSION__: string
 
@@ -27,6 +29,7 @@ const TeamContainerTab = lazy(() => import('./TeamContainerTab'))
 const PlatformAdminPanel = lazy(() => import('./PlatformAdminPanel'))
 const KnowledgeBrowser = lazy(() => import('./KnowledgeBrowser'))
 const NetworkPolicySettings = lazy(() => import('./settings/NetworkPolicySettings'))
+const A2AAgentsSettings = lazy(() => import('./settings/A2AAgentsSettings'))
 
 // ---------------------------------------------------------------------------
 // Types
@@ -393,6 +396,187 @@ function TeamMCPServersTab({ teamSlug, theme }: { teamSlug: string; theme: strin
         teamSlug={teamSlug}
       />
     </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// TeamA2AAgentsTab — wraps A2AAgentsSettings with team-scoped data + inherited
+// ---------------------------------------------------------------------------
+
+function TeamA2AAgentsTab({ teamSlug, theme }: { teamSlug: string; theme: string }) {
+  const [orgAgents, setOrgAgents] = useState<A2AAgentListItem[]>([])
+  const [platformAgents, setPlatformAgents] = useState<A2AAgentListItem[]>([])
+
+  const loadInherited = useCallback(async () => {
+    try {
+      const orgData = await fetchA2AAgents('org')
+      setOrgAgents(orgData.agents || [])
+    } catch {
+      // Org agents are optional/inherited — ignore errors
+    }
+    try {
+      const platformData = await fetchA2AAgents('platform')
+      setPlatformAgents(platformData.agents || [])
+    } catch {
+      // Platform agents are optional/inherited — ignore errors
+    }
+  }, [])
+
+  useEffect(() => { loadInherited() }, [loadInherited])
+
+  return (
+    <div className="space-y-6">
+      {/* Platform-level inherited A2A agents (read-only) */}
+      {platformAgents.length > 0 && (
+        <div>
+          <div className="text-xs font-medium mb-2 uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>
+            Platform (inherited)
+          </div>
+          <div className="space-y-2">
+            {platformAgents.map(agent => (
+              <div
+                key={agent.name}
+                className="flex items-center justify-between p-3 rounded-lg"
+                style={{ background: 'var(--card)', border: '1px solid var(--border-color)' }}
+              >
+                <div className="flex items-center gap-3 min-w-0">
+                  <div
+                    className="w-2 h-2 rounded-full shrink-0"
+                    style={{ background: agent.enabled ? '#22c55e' : '#6b7280' }}
+                  />
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium truncate" style={{ color: 'var(--text-primary)' }}>{agent.name}</div>
+                    <div className="text-xs truncate" style={{ color: 'var(--text-muted)' }}>{agent.url}</div>
+                  </div>
+                </div>
+                <span className="text-[10px] px-2 py-0.5 rounded-full shrink-0" style={{ background: 'var(--brand-muted)', color: 'var(--brand)' }}>
+                  platform
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Org-level inherited A2A agents (read-only) */}
+      {orgAgents.length > 0 && (
+        <div>
+          <div className="text-xs font-medium mb-2 uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>
+            Organization (inherited)
+          </div>
+          <div className="space-y-2">
+            {orgAgents.map(agent => (
+              <div
+                key={agent.name}
+                className="flex items-center justify-between p-3 rounded-lg"
+                style={{ background: 'var(--card)', border: '1px solid var(--border-color)' }}
+              >
+                <div className="flex items-center gap-3 min-w-0">
+                  <div
+                    className="w-2 h-2 rounded-full shrink-0"
+                    style={{ background: agent.enabled ? '#22c55e' : '#6b7280' }}
+                  />
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium truncate" style={{ color: 'var(--text-primary)' }}>{agent.name}</div>
+                    <div className="text-xs truncate" style={{ color: 'var(--text-muted)' }}>{agent.url}</div>
+                  </div>
+                </div>
+                <span className="text-[10px] px-2 py-0.5 rounded-full shrink-0" style={{ background: 'rgba(59, 130, 246, 0.15)', color: '#3b82f6' }}>
+                  org
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Team-level A2A agents (editable) */}
+      {(orgAgents.length > 0 || platformAgents.length > 0) && (
+        <div className="text-xs font-medium mb-2 uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>
+          Team
+        </div>
+      )}
+      <Suspense fallback={<div className="flex items-center justify-center py-12"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--brand)' }} /></div>}>
+        <A2AAgentsSettings scope="team" teamSlug={teamSlug} theme={theme} onRefresh={loadInherited} />
+      </Suspense>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// OrgA2AAgentsTab — wraps A2AAgentsSettings with org-scoped data
+// ---------------------------------------------------------------------------
+
+function OrgA2AAgentsTab({ theme }: { theme: string }) {
+  const [platformAgents, setPlatformAgents] = useState<A2AAgentListItem[]>([])
+
+  const loadPlatformAgents = useCallback(async () => {
+    try {
+      const data = await fetchA2AAgents('platform')
+      setPlatformAgents(data.agents || [])
+    } catch {
+      // Platform agents are optional/inherited — ignore errors
+    }
+  }, [])
+
+  useEffect(() => { loadPlatformAgents() }, [loadPlatformAgents])
+
+  return (
+    <div className="space-y-6">
+      {/* Platform-level inherited A2A agents (read-only) */}
+      {platformAgents.length > 0 && (
+        <div>
+          <div className="text-xs font-medium mb-2 uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>
+            Platform (inherited)
+          </div>
+          <div className="space-y-2">
+            {platformAgents.map(agent => (
+              <div
+                key={agent.name}
+                className="flex items-center justify-between p-3 rounded-lg"
+                style={{ background: 'var(--card)', border: '1px solid var(--border-color)' }}
+              >
+                <div className="flex items-center gap-3 min-w-0">
+                  <div
+                    className="w-2 h-2 rounded-full shrink-0"
+                    style={{ background: agent.enabled ? '#22c55e' : '#6b7280' }}
+                  />
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium truncate" style={{ color: 'var(--text-primary)' }}>{agent.name}</div>
+                    <div className="text-xs truncate" style={{ color: 'var(--text-muted)' }}>{agent.url}</div>
+                  </div>
+                </div>
+                <span className="text-[10px] px-2 py-0.5 rounded-full shrink-0" style={{ background: 'var(--brand-muted)', color: 'var(--brand)' }}>
+                  platform
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Org-level A2A agents (editable) */}
+      {platformAgents.length > 0 && (
+        <div className="text-xs font-medium mb-2 uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>
+          Organization
+        </div>
+      )}
+      <Suspense fallback={<div className="flex items-center justify-center py-12"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--brand)' }} /></div>}>
+        <A2AAgentsSettings scope="org" theme={theme} />
+      </Suspense>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// PlatformA2AAgentsTab — A2AAgentsSettings for platform-level management (superadmin)
+// ---------------------------------------------------------------------------
+
+function PlatformA2AAgentsTab({ theme }: { theme: string }) {
+  return (
+    <Suspense fallback={<div className="flex items-center justify-center py-12"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--brand)' }} /></div>}>
+      <A2AAgentsSettings scope="platform" theme={theme} />
+    </Suspense>
   )
 }
 
@@ -1641,6 +1825,7 @@ function TeamContent({ tabId, teamSlug, theme, user, canManageTeam, team }: Team
       <Suspense fallback={<div className="flex items-center justify-center py-12"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--brand)' }} /></div>}>
         {tabId === 'providers' && <TeamProvidersTab teamSlug={teamSlug} />}
         {tabId === 'mcp' && <TeamMCPServersTab teamSlug={teamSlug} theme={theme} />}
+        {tabId === 'a2a' && <TeamA2AAgentsTab teamSlug={teamSlug} theme={theme} />}
         {tabId === 'network' && <TeamNetworkPolicyTab teamSlug={teamSlug} />}
         {tabId === 'taps' && <TapsSettings teamSlug={teamSlug} />}
         {tabId === 'flows' && <FlowStorePanel teamSlug={teamSlug} canManage={canManageTeam} />}
@@ -1721,7 +1906,7 @@ export default function SettingsPage({
 
   // --- Build sidebar categories ---
   // Admin-only team items (hidden from regular members)
-  const adminOnlyTeamItems = new Set(['team-providers', 'team-mcp', 'team-taps', 'team-container'])
+  const adminOnlyTeamItems = new Set(['team-providers', 'team-mcp', 'team-a2a', 'team-taps', 'team-container'])
   const memberTeamItems = canManageTeam ? TEAM_ITEMS : TEAM_ITEMS.filter(item => !adminOnlyTeamItems.has(item.id))
 
   // Platform section (superadmin only) — merges former "System" items.
@@ -1942,6 +2127,14 @@ export default function SettingsPage({
             </Suspense>
           )}
 
+          {activeSection === 'org-a2a' && (
+            <Suspense fallback={<div className="flex items-center justify-center h-full"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--brand)' }} /></div>}>
+              <div className="p-6 h-full">
+                <OrgA2AAgentsTab theme={theme} />
+              </div>
+            </Suspense>
+          )}
+
           {activeSection === 'org-network' && (
             <Suspense fallback={<div className="flex items-center justify-center h-full"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--brand)' }} /></div>}>
               <div className="p-6">
@@ -1969,6 +2162,13 @@ export default function SettingsPage({
           {activeSection === 'platform-mcp' && isSuperadmin && (
             <Suspense fallback={<div className="flex items-center justify-center h-full"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--brand)' }} /></div>}>
               <PlatformMCPServersTab theme={theme as string} />
+            </Suspense>
+          )}
+          {activeSection === 'platform-a2a' && isSuperadmin && (
+            <Suspense fallback={<div className="flex items-center justify-center h-full"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--brand)' }} /></div>}>
+              <div className="p-6 h-full">
+                <PlatformA2AAgentsTab theme={theme as string} />
+              </div>
             </Suspense>
           )}
           {activeSection === 'platform-network' && isSuperadmin && (

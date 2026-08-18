@@ -102,6 +102,7 @@ func (m *mockOrgDataStore) OrgMCPServers() store.MCPServerStore          { retur
 func (m *mockOrgDataStore) OrgNetworkPolicies() store.NetworkPolicyStore { return nil }
 func (m *mockOrgDataStore) OrgApps() store.AppStore                      { return m.orgApps }
 func (m *mockOrgDataStore) OrgAudit() store.AuditStore                   { return nil }
+func (m *mockOrgDataStore) OrgA2AAgents() store.A2AAgentStore            { return nil }
 func (m *mockOrgDataStore) Teams() store.TeamManagementStore {
 	return nil
 }
@@ -156,6 +157,7 @@ func (m *mockTeamDataStore) DrillReports() store.DrillReportStore { return nil }
 func (m *mockTeamDataStore) Settings() store.SettingsStore        { return nil }
 func (m *mockTeamDataStore) Audit() store.AuditStore              { return nil }
 func (m *mockTeamDataStore) AppStateSQL() store.AppStateSQLStore  { return nil }
+func (m *mockTeamDataStore) A2AAgents() store.A2AAgentStore       { return nil }
 
 func (m *mockTeamDataStore) SessionPin(_ context.Context, _ string) (*store.SessionPin, error) {
 	return nil, nil

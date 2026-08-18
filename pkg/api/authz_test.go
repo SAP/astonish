@@ -82,6 +82,7 @@ func (m *authzOrgDataStore) OrgMCPServers() store.MCPServerStore      { return n
 func (m *authzOrgDataStore) OrgNetworkPolicies() store.NetworkPolicyStore { return nil }
 func (m *authzOrgDataStore) OrgApps() store.AppStore                  { return nil }
 func (m *authzOrgDataStore) OrgAudit() store.AuditStore               { return nil }
+func (m *authzOrgDataStore) OrgA2AAgents() store.A2AAgentStore        { return nil }
 func (m *authzOrgDataStore) Teams() store.TeamManagementStore         { return m.teams }
 func (m *authzOrgDataStore) ProvisionTeam(_ context.Context, _ string) error {
 	return nil

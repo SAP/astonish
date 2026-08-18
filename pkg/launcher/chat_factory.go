@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/SAP/astonish/pkg/a2aclient"
 	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/api"
 	"github.com/SAP/astonish/pkg/browser"
@@ -1090,6 +1091,21 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			Toolsets:    []tool.Toolset{sanitized},
 		}
 		codeModeMainThreadToolsets = append(codeModeMainThreadToolsets, sanitized)
+	}
+
+	// --- 4c. A2A agent tools (discoverable via ToolIndex, not on main thread) ---
+	// A2A agents configured in Settings become callable tools. They are registered
+	// as a tool group so the ToolIndex can discover them on-demand (via search_tools
+	// or hybrid search) without bloating the system prompt.
+	if a2aTools := a2aclient.GetA2ATools(ctx, cfg.PlatformMode); len(a2aTools) > 0 {
+		toolGroups["a2a"] = &agent.ToolGroup{
+			Name:        "a2a",
+			Description: "Remote A2A agent skills (invoke external agents via the A2A protocol)",
+			Tools:       a2aTools,
+		}
+		if cfg.DebugMode {
+			slog.Debug("A2A agent tools registered", "component", "chat-factory", "tools", len(a2aTools))
+		}
 	}
 
 	if cfg.DebugMode {

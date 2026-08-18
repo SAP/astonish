@@ -29,6 +29,7 @@ export const TEAM_ITEMS: SettingsMenuItem[] = [
   { id: 'team-providers', label: 'Providers', icon: Key },
   { id: 'team-skills', label: 'Skills', icon: Wand2 },
   { id: 'team-mcp', label: 'MCP Servers', icon: Server },
+  { id: 'team-a2a', label: 'A2A Agents', icon: Globe },
   { id: 'team-network', label: 'Network Policy', icon: Network },
   { id: 'team-taps', label: 'Repositories', icon: GitBranch },
   { id: 'team-flows', label: 'Flow Store', icon: Store },
@@ -43,6 +44,7 @@ export const ORG_ITEMS: SettingsMenuItem[] = [
   { id: 'org-providers', label: 'Providers', icon: Key },
   { id: 'org-skills', label: 'Skills', icon: Wand2 },
   { id: 'org-mcp', label: 'MCP Servers', icon: Server },
+  { id: 'org-a2a', label: 'A2A Agents', icon: Globe },
   { id: 'org-network', label: 'Network Policy', icon: Network },
   { id: 'org-audit', label: 'Audit', icon: FileText },
 ]
@@ -55,6 +57,7 @@ export const PLATFORM_ITEMS: SettingsMenuItem[] = [
   { id: 'platform-providers', label: 'Providers', icon: Key },
   { id: 'platform-skills', label: 'Skills', icon: Wand2 },
   { id: 'platform-mcp', label: 'MCP Servers', icon: Server },
+  { id: 'platform-a2a', label: 'A2A Agents', icon: Globe },
   { id: 'platform-network', label: 'Network Policy', icon: Network },
   { id: 'platform-channels', label: 'Channels', icon: Radio },
   { id: 'platform-auth', label: 'Authentication', icon: Crown },

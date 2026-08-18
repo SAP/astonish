@@ -105,9 +105,26 @@ func extractResponse(task *a2a.Task) string {
 		}
 	}
 
+	// Also check for DataPart with text/plain mimeType (v1.0 format)
+	for _, artifact := range task.Artifacts {
+		for _, part := range artifact.Parts {
+			if dp, ok := part.(a2a.DataPart); ok && dp.MimeType == "text/plain" {
+				if text, ok := dp.Data["text"].(string); ok && text != "" {
+					return text
+				}
+				// Try any string value in the data map
+				for _, v := range dp.Data {
+					if text, ok := v.(string); ok && text != "" {
+						return text
+					}
+				}
+			}
+		}
+	}
+
 	// Fall back to history (last agent message)
 	for i := len(task.History) - 1; i >= 0; i-- {
-		if task.History[i].Role == "agent" {
+		if task.History[i].Role == "agent" || task.History[i].Role == "ROLE_AGENT" {
 			for _, part := range task.History[i].Parts {
 				if tp, ok := part.(a2a.TextPart); ok {
 					return tp.Text

@@ -78,6 +78,12 @@ func (m *Manager) Initialize(ctx context.Context) error {
 			continue
 		}
 		m.cards[name] = card
+
+		// Detect protocol version from the agent card.
+		// Uses the card's DetectProtocolVersion which checks top-level and supportedInterfaces.
+		if pv := card.DetectProtocolVersion(); pv != "" {
+			client.SetProtocolVersion(pv)
+		}
 	}
 
 	return nil

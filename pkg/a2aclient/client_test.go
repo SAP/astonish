@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -360,5 +361,389 @@ func TestNoCredentialStillAppliesHeaders(t *testing.T) {
 
 	if receivedHeader != "my-api-key" {
 		t.Errorf("expected header 'my-api-key', got %q", receivedHeader)
+	}
+}
+
+func TestV1ProtocolDetection(t *testing.T) {
+	// Test isV1 with various version strings
+	client := &Client{}
+
+	client.SetProtocolVersion("")
+	if client.isV1() {
+		t.Error("empty version should not be v1")
+	}
+
+	client.SetProtocolVersion("0.3")
+	if client.isV1() {
+		t.Error("0.3 should not be v1")
+	}
+
+	client.SetProtocolVersion("1.0")
+	if !client.isV1() {
+		t.Error("1.0 should be v1")
+	}
+
+	client.SetProtocolVersion("1")
+	if !client.isV1() {
+		t.Error("1 should be v1")
+	}
+
+	client.SetProtocolVersion("1.1")
+	if !client.isV1() {
+		t.Error("1.1 should be v1")
+	}
+}
+
+func TestV1SendMessageMethod(t *testing.T) {
+	// Set up a test server that captures the request
+	var receivedMethod string
+	var receivedBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		receivedBody = body
+		var rpcReq struct {
+			Method string `json:"method"`
+		}
+		json.Unmarshal(body, &rpcReq)
+		receivedMethod = rpcReq.Method
+
+		// Check A2A-Version header
+		if r.Header.Get("A2A-Version") != "1.0" {
+			t.Errorf("expected A2A-Version header '1.0', got %q", r.Header.Get("A2A-Version"))
+		}
+
+		// Return a valid v1.0 response with artifacts
+		resp := map[string]any{
+			"jsonrpc": "2.0",
+			"id":      1,
+			"result": map[string]any{
+				"task": map[string]any{
+					"id":        "task-123",
+					"contextId": "ctx-456",
+					"status": map[string]any{
+						"state":     "TASK_STATE_COMPLETED",
+						"timestamp": "2026-01-01T00:00:00Z",
+					},
+					"artifacts": []map[string]any{
+						{
+							"artifactId": "art-1",
+							"name":       "result",
+							"parts": []map[string]any{
+								{"data": map[string]any{"count": 3, "devices": []string{"a", "b", "c"}}, "mediaType": "application/json"},
+								{"text": "Found 3 devices", "mediaType": "text/plain"},
+							},
+						},
+					},
+				},
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	client := &Client{
+		httpClient: server.Client(),
+		config:     A2AAgentConfig{URL: server.URL},
+	}
+	client.SetProtocolVersion("1.0")
+
+	params := a2a.SendMessageParams{
+		Message: a2a.Message{
+			Role:  "user",
+			Parts: []a2a.Part{a2a.TextPart{Text: "Find devices"}},
+			Metadata: map[string]any{
+				"skill_id": "find_devices",
+			},
+		},
+	}
+
+	task, err := client.SendMessage(context.Background(), params)
+	if err != nil {
+		t.Fatalf("SendMessage failed: %v", err)
+	}
+
+	// Verify the RPC method used
+	if receivedMethod != "SendMessage" {
+		t.Errorf("expected method 'SendMessage', got %q", receivedMethod)
+	}
+
+	// Verify the body contains v1.0 format (ROLE_USER, messageId present)
+	var rpcReq struct {
+		Params json.RawMessage `json:"params"`
+	}
+	json.Unmarshal(receivedBody, &rpcReq)
+
+	var params2 map[string]any
+	json.Unmarshal(rpcReq.Params, &params2)
+
+	msg, _ := params2["message"].(map[string]any)
+	if msg["role"] != "ROLE_USER" {
+		t.Errorf("expected role 'ROLE_USER', got %v", msg["role"])
+	}
+
+	// Verify messageId is present (required in v1.0)
+	if msg["messageId"] == nil || msg["messageId"] == "" {
+		t.Error("expected messageId to be present in v1.0 message")
+	}
+
+	// Verify task state was normalized
+	if task.Status.State != a2a.TaskStateCompleted {
+		t.Errorf("expected normalized state 'completed', got %q", task.Status.State)
+	}
+
+	if task.ID != "task-123" {
+		t.Errorf("expected task ID 'task-123', got %q", task.ID)
+	}
+
+	// Verify artifacts were parsed correctly
+	if len(task.Artifacts) != 1 {
+		t.Fatalf("expected 1 artifact, got %d", len(task.Artifacts))
+	}
+	if task.Artifacts[0].Name != "result" {
+		t.Errorf("expected artifact name 'result', got %q", task.Artifacts[0].Name)
+	}
+	if len(task.Artifacts[0].Parts) != 2 {
+		t.Fatalf("expected 2 parts in artifact, got %d", len(task.Artifacts[0].Parts))
+	}
+	// First part should be DataPart
+	if dp, ok := task.Artifacts[0].Parts[0].(a2a.DataPart); !ok {
+		t.Errorf("expected first part to be DataPart, got %T", task.Artifacts[0].Parts[0])
+	} else if dp.MimeType != "application/json" {
+		t.Errorf("expected mediaType 'application/json', got %q", dp.MimeType)
+	}
+	// Second part should be TextPart
+	if tp, ok := task.Artifacts[0].Parts[1].(a2a.TextPart); !ok {
+		t.Errorf("expected second part to be TextPart, got %T", task.Artifacts[0].Parts[1])
+	} else if tp.Text != "Found 3 devices" {
+		t.Errorf("expected text 'Found 3 devices', got %q", tp.Text)
+	}
+}
+
+func TestV03SendMessageUnchanged(t *testing.T) {
+	// Verify that v0.3 behavior is preserved when protocolVersion is empty
+	var receivedMethod string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var rpcReq struct {
+			Method string `json:"method"`
+		}
+		json.Unmarshal(body, &rpcReq)
+		receivedMethod = rpcReq.Method
+
+		// Should NOT have A2A-Version header
+		if v := r.Header.Get("A2A-Version"); v != "" {
+			t.Errorf("v0.3 should not send A2A-Version header, got %q", v)
+		}
+
+		resp := map[string]any{
+			"jsonrpc": "2.0",
+			"id":      1,
+			"result": map[string]any{
+				"id":        "task-789",
+				"contextId": "ctx-000",
+				"status": map[string]any{
+					"state":     "completed",
+					"timestamp": "2026-01-01T00:00:00Z",
+				},
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	client := &Client{
+		httpClient: server.Client(),
+		config:     A2AAgentConfig{URL: server.URL},
+	}
+	// No SetProtocolVersion call — defaults to v0.3
+
+	params := a2a.SendMessageParams{
+		Message: a2a.Message{
+			Role:  "user",
+			Parts: []a2a.Part{a2a.TextPart{Text: "hello"}},
+		},
+	}
+
+	task, err := client.SendMessage(context.Background(), params)
+	if err != nil {
+		t.Fatalf("SendMessage failed: %v", err)
+	}
+
+	if receivedMethod != "message/send" {
+		t.Errorf("expected method 'message/send', got %q", receivedMethod)
+	}
+
+	if task.Status.State != a2a.TaskStateCompleted {
+		t.Errorf("expected state 'completed', got %q", task.Status.State)
+	}
+}
+
+func TestV1NormalizeTaskState(t *testing.T) {
+	tests := []struct {
+		input    a2a.TaskState
+		expected a2a.TaskState
+	}{
+		{"TASK_STATE_COMPLETED", a2a.TaskStateCompleted},
+		{"TASK_STATE_SUBMITTED", a2a.TaskStateSubmitted},
+		{"TASK_STATE_WORKING", a2a.TaskStateWorking},
+		{"TASK_STATE_FAILED", a2a.TaskStateFailed},
+		{"TASK_STATE_CANCELED", a2a.TaskStateCanceled},
+		{"TASK_STATE_INPUT_REQUIRED", a2a.TaskStateInputRequired},
+		{"TASK_STATE_AUTH_REQUIRED", a2a.TaskStateAuthRequired},
+		{"TASK_STATE_REJECTED", a2a.TaskStateRejected},
+		// v0.3 states should pass through unchanged
+		{a2a.TaskStateCompleted, a2a.TaskStateCompleted},
+		{a2a.TaskStateFailed, a2a.TaskStateFailed},
+		{"unknown_state", "unknown_state"},
+	}
+
+	for _, tt := range tests {
+		result := normalizeTaskState(tt.input)
+		if result != tt.expected {
+			t.Errorf("normalizeTaskState(%q) = %q, want %q", tt.input, result, tt.expected)
+		}
+	}
+}
+
+func TestDetectProtocolVersionFromSupportedInterfaces(t *testing.T) {
+	// Simulates the SAP Autonomous Operations agent card structure
+	card := a2a.AgentCard{
+		Name:    "AO Agent",
+		Version: "0.1.0", // This is the agent version, NOT protocol version
+		SupportedInterfaces: []a2a.AgentInterface{
+			{
+				URL:             "https://example.com/",
+				ProtocolBinding: "JSONRPC",
+				ProtocolVersion: "1.0",
+			},
+		},
+	}
+
+	pv := card.DetectProtocolVersion()
+	if pv != "1.0" {
+		t.Errorf("expected protocolVersion '1.0' from supportedInterfaces, got %q", pv)
+	}
+}
+
+func TestDetectProtocolVersionTopLevelTakesPrecedence(t *testing.T) {
+	card := a2a.AgentCard{
+		Name:            "Agent",
+		ProtocolVersion: "2.0",
+		SupportedInterfaces: []a2a.AgentInterface{
+			{ProtocolVersion: "1.0"},
+		},
+	}
+
+	pv := card.DetectProtocolVersion()
+	if pv != "2.0" {
+		t.Errorf("expected top-level protocolVersion '2.0' to take precedence, got %q", pv)
+	}
+}
+
+func TestDetectProtocolVersionEmpty(t *testing.T) {
+	card := a2a.AgentCard{
+		Name:    "Agent",
+		Version: "0.3.0", // agent version, not protocol
+	}
+
+	pv := card.DetectProtocolVersion()
+	if pv != "" {
+		t.Errorf("expected empty protocolVersion, got %q", pv)
+	}
+}
+
+func TestV1SendMessageWithSupportedInterfaces(t *testing.T) {
+	// End-to-end test: agent card has supportedInterfaces with protocolVersion 1.0
+	// Verify the manager detects it and the client sends the correct method
+	var receivedMethod string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/.well-known/agent-card.json" {
+			// Return a card with supportedInterfaces (like SAP AO agent)
+			card := map[string]any{
+				"name":    "AO Agent",
+				"version": "0.1.0",
+				"supportedInterfaces": []map[string]any{
+					{
+						"url":             "https://example.com/",
+						"protocolBinding": "JSONRPC",
+						"protocolVersion": "1.0",
+					},
+				},
+				"skills": []map[string]any{
+					{"id": "find_devices", "name": "Find Devices"},
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(card)
+			return
+		}
+
+		// RPC endpoint
+		body, _ := io.ReadAll(r.Body)
+		var rpcReq struct {
+			Method string `json:"method"`
+		}
+		json.Unmarshal(body, &rpcReq)
+		receivedMethod = rpcReq.Method
+
+		resp := map[string]any{
+			"jsonrpc": "2.0",
+			"id":      1,
+			"result": map[string]any{
+				"task": map[string]any{
+					"id":        "task-001",
+					"contextId": "ctx-001",
+					"status": map[string]any{
+						"state":     "TASK_STATE_COMPLETED",
+						"timestamp": "2026-01-01T00:00:00Z",
+					},
+				},
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	cfg := &A2AClientConfig{
+		Agents: map[string]A2AAgentConfig{
+			"ao": {Name: "ao", URL: server.URL},
+		},
+	}
+
+	mgr := NewManager(cfg)
+	err := mgr.Initialize(context.Background())
+	if err != nil {
+		t.Fatalf("Initialize failed: %v", err)
+	}
+
+	client, err := mgr.GetClient("ao")
+	if err != nil {
+		t.Fatalf("GetClient failed: %v", err)
+	}
+
+	// Verify protocol version was detected
+	if !client.isV1() {
+		t.Fatal("expected client to detect v1.0 from supportedInterfaces")
+	}
+
+	// Send a message and verify the method used
+	params := a2a.SendMessageParams{
+		Message: a2a.Message{
+			Role:  "user",
+			Parts: []a2a.Part{a2a.TextPart{Text: "Find devices"}},
+		},
+	}
+
+	task, err := client.SendMessage(context.Background(), params)
+	if err != nil {
+		t.Fatalf("SendMessage failed: %v", err)
+	}
+
+	if receivedMethod != "SendMessage" {
+		t.Errorf("expected method 'SendMessage', got %q", receivedMethod)
+	}
+
+	if task.Status.State != a2a.TaskStateCompleted {
+		t.Errorf("expected normalized state 'completed', got %q", task.Status.State)
 	}
 }

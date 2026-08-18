@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strings"
 
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/gorilla/mux"
@@ -314,7 +315,7 @@ func RefreshA2AAgentHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Fetch agent card from remote agent
-	cardURL := existing.URL + "/.well-known/agent-card.json"
+	cardURL := resolveAgentCardURL(existing.URL)
 	resp, err := http.Get(cardURL) //nolint:gosec // URL is user-configured
 	if err != nil {
 		respondError(w, http.StatusBadGateway, "Failed to fetch agent card: "+err.Error())
@@ -379,8 +380,25 @@ func TestA2AAgentHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Test connectivity by fetching the agent card
-	cardURL := existing.URL + "/.well-known/agent-card.json"
-	resp, err := http.Get(cardURL) //nolint:gosec // URL is user-configured
+	cardURL := resolveAgentCardURL(existing.URL)
+
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, cardURL, nil)
+	if err != nil {
+		respondJSON(w, http.StatusOK, map[string]any{
+			"status":  "error",
+			"message": "Invalid URL: " + err.Error(),
+		})
+		return
+	}
+
+	// Apply custom headers if configured
+	if existing.Headers != nil {
+		for key, value := range existing.Headers {
+			req.Header.Set(key, value)
+		}
+	}
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		respondJSON(w, http.StatusOK, map[string]any{
 			"status":  "error",
@@ -419,6 +437,17 @@ func TestA2AAgentHandler(w http.ResponseWriter, r *http.Request) {
 		"version":     card.Version,
 		"skill_count": len(card.Skills),
 	})
+}
+
+// resolveAgentCardURL returns the agent card URL for the given base URL.
+// If the URL already ends with /.well-known/agent-card.json, it is used as-is.
+// Otherwise, the well-known path is appended.
+func resolveAgentCardURL(rawURL string) string {
+	trimmed := strings.TrimRight(rawURL, "/")
+	if strings.HasSuffix(trimmed, "/.well-known/agent-card.json") {
+		return trimmed
+	}
+	return trimmed + "/.well-known/agent-card.json"
 }
 
 // --- Internal helpers ---

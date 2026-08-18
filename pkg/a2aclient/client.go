@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -26,10 +27,22 @@ type StreamEvent struct {
 
 // Client is an HTTP client for communicating with a remote A2A agent.
 type Client struct {
-	httpClient *http.Client
-	config     A2AAgentConfig
-	resolver   credentials.CredentialResolver
-	requestID  atomic.Int64
+	httpClient      *http.Client
+	config          A2AAgentConfig
+	resolver        credentials.CredentialResolver
+	requestID       atomic.Int64
+	protocolVersion string
+}
+
+// SetProtocolVersion sets the A2A protocol version detected from the agent card.
+func (c *Client) SetProtocolVersion(v string) {
+	c.protocolVersion = v
+}
+
+// isV1 returns true if the remote agent uses A2A v1.0 protocol.
+func (c *Client) isV1() bool {
+	v := c.protocolVersion
+	return v == "1.0" || v == "1" || strings.HasPrefix(v, "1.")
 }
 
 // NewClient creates a new A2A client for the given agent configuration.
@@ -79,7 +92,15 @@ func (c *Client) FetchAgentCard(ctx context.Context) (*a2a.AgentCard, error) {
 
 // SendMessage sends a message to the remote agent and returns the resulting task.
 func (c *Client) SendMessage(ctx context.Context, params a2a.SendMessageParams) (*a2a.Task, error) {
-	resp, err := c.doJSONRPC(ctx, "message/send", params)
+	method := "message/send"
+	var rpcParams any = params
+
+	if c.isV1() {
+		method = "SendMessage"
+		rpcParams = c.buildV1Params(params)
+	}
+
+	resp, err := c.doJSONRPC(ctx, method, rpcParams)
 	if err != nil {
 		return nil, err
 	}
@@ -95,11 +116,241 @@ func (c *Client) SendMessage(ctx context.Context, params a2a.SendMessageParams) 
 	}
 
 	var task a2a.Task
-	if err := json.Unmarshal(resultBytes, &task); err != nil {
-		return nil, fmt.Errorf("a2aclient: failed to decode task: %w", err)
+	if c.isV1() {
+		task, err = parseV1TaskResponse(resultBytes)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		if err := json.Unmarshal(resultBytes, &task); err != nil {
+			return nil, fmt.Errorf("a2aclient: failed to decode task: %w", err)
+		}
 	}
 
+	// Normalize v1.0 task states to v0.3 equivalents
+	task.Status.State = normalizeTaskState(task.Status.State)
+
 	return &task, nil
+}
+
+// parseV1TaskResponse parses a v1.0 task response which has a different part format.
+// v1.0 parts use field presence as discriminator (no "type" field):
+//
+//	{"text": "..."} for text parts
+//	{"data": {...}, "mediaType": "..."} for data parts
+func parseV1TaskResponse(data []byte) (a2a.Task, error) {
+	// v1.0 wraps in {"task": {...}}
+	var raw struct {
+		Task json.RawMessage `json:"task"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return a2a.Task{}, fmt.Errorf("a2aclient: failed to parse v1 response envelope: %w", err)
+	}
+
+	taskData := raw.Task
+	if taskData == nil {
+		// Not wrapped — try direct
+		taskData = data
+	}
+
+	// Parse the task with raw parts handling
+	var taskRaw struct {
+		ID        string `json:"id"`
+		ContextID string `json:"contextId"`
+		Status    struct {
+			State     a2a.TaskState `json:"state"`
+			Timestamp string        `json:"timestamp"`
+			Message   *struct {
+				Role  string            `json:"role"`
+				Parts []json.RawMessage `json:"parts"`
+			} `json:"message,omitempty"`
+		} `json:"status"`
+		Artifacts []struct {
+			ArtifactID  string            `json:"artifactId"`
+			Name        string            `json:"name"`
+			Description string            `json:"description,omitempty"`
+			Parts       []json.RawMessage `json:"parts"`
+			Index       int               `json:"index"`
+		} `json:"artifacts"`
+		History []struct {
+			Role  string            `json:"role"`
+			Parts []json.RawMessage `json:"parts"`
+		} `json:"history"`
+	}
+
+	if err := json.Unmarshal(taskData, &taskRaw); err != nil {
+		return a2a.Task{}, fmt.Errorf("a2aclient: failed to parse v1 task: %w", err)
+	}
+
+	task := a2a.Task{
+		ID:        taskRaw.ID,
+		ContextID: taskRaw.ContextID,
+		Status: a2a.TaskStatus{
+			State: taskRaw.Status.State,
+		},
+	}
+
+	// Parse status message parts
+	if taskRaw.Status.Message != nil {
+		msg := &a2a.Message{Role: taskRaw.Status.Message.Role}
+		msg.Parts = parseV1Parts(taskRaw.Status.Message.Parts)
+		task.Status.Message = msg
+	}
+
+	// Parse artifacts
+	for _, artRaw := range taskRaw.Artifacts {
+		art := a2a.Artifact{
+			Name:        artRaw.Name,
+			Description: artRaw.Description,
+			Index:       artRaw.Index,
+			Parts:       parseV1Parts(artRaw.Parts),
+		}
+		task.Artifacts = append(task.Artifacts, art)
+	}
+
+	// Parse history
+	for _, histRaw := range taskRaw.History {
+		msg := a2a.Message{
+			Role:  histRaw.Role,
+			Parts: parseV1Parts(histRaw.Parts),
+		}
+		task.History = append(task.History, msg)
+	}
+
+	return task, nil
+}
+
+// parseV1Parts converts v1.0 raw JSON parts into typed Part instances.
+// v1.0 uses field presence: {"text": "..."} or {"data": {...}, "mediaType": "..."}.
+func parseV1Parts(rawParts []json.RawMessage) []a2a.Part {
+	var parts []a2a.Part
+	for _, raw := range rawParts {
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &fields); err != nil {
+			continue
+		}
+
+		if textRaw, ok := fields["text"]; ok {
+			var text string
+			if err := json.Unmarshal(textRaw, &text); err == nil {
+				parts = append(parts, a2a.TextPart{Text: text})
+			}
+		} else if dataRaw, ok := fields["data"]; ok {
+			var data map[string]any
+			if err := json.Unmarshal(dataRaw, &data); err == nil {
+				dp := a2a.DataPart{Data: data}
+				if mtRaw, ok := fields["mediaType"]; ok {
+					var mt string
+					if json.Unmarshal(mtRaw, &mt) == nil {
+						dp.MimeType = mt
+					}
+				}
+				parts = append(parts, dp)
+			}
+		}
+	}
+	return parts
+}
+
+// buildV1Params transforms v0.3 SendMessageParams into v1.0 format.
+// v1.0 requires: messageId in message, role as ROLE_USER/ROLE_AGENT,
+// parts as [{text: "..."}, {data: {...}}], acceptedOutputModes in configuration.
+func (c *Client) buildV1Params(params a2a.SendMessageParams) map[string]any {
+	// Transform role
+	role := params.Message.Role
+	switch role {
+	case "user":
+		role = "ROLE_USER"
+	case "agent":
+		role = "ROLE_AGENT"
+	}
+
+	// Build parts from the original message
+	var parts []map[string]any
+	for _, part := range params.Message.Parts {
+		switch p := part.(type) {
+		case a2a.TextPart:
+			if p.Text != "" {
+				parts = append(parts, map[string]any{"text": p.Text})
+			}
+		case a2a.DataPart:
+			m := map[string]any{"data": p.Data}
+			if p.MimeType != "" {
+				m["mediaType"] = p.MimeType
+			}
+			parts = append(parts, m)
+		}
+	}
+
+	// If no parts were generated, use empty
+	if len(parts) == 0 {
+		parts = []map[string]any{}
+	}
+
+	// Generate a unique messageId (required in v1.0)
+	msgID := generateMessageID()
+
+	msg := map[string]any{
+		"role":      role,
+		"messageId": msgID,
+		"parts":     parts,
+	}
+
+	// Pass through metadata if present
+	if params.Message.Metadata != nil && len(params.Message.Metadata) > 0 {
+		msg["metadata"] = params.Message.Metadata
+	}
+
+	result := map[string]any{
+		"message": msg,
+	}
+
+	// Add configuration
+	cfg := map[string]any{
+		"acceptedOutputModes": []string{"application/json", "text/plain"},
+	}
+	if params.Configuration != nil {
+		if params.Configuration.ContextID != "" {
+			cfg["contextId"] = params.Configuration.ContextID
+		}
+		if params.Configuration.TaskID != "" {
+			cfg["taskId"] = params.Configuration.TaskID
+		}
+	}
+	result["configuration"] = cfg
+
+	return result
+}
+
+// generateMessageID creates a unique message ID for v1.0 requests.
+func generateMessageID() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return fmt.Sprintf("msg-%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+// normalizeTaskState converts v1.0 uppercase task states to v0.3 lowercase equivalents.
+func normalizeTaskState(s a2a.TaskState) a2a.TaskState {
+	switch s {
+	case "TASK_STATE_SUBMITTED":
+		return a2a.TaskStateSubmitted
+	case "TASK_STATE_WORKING":
+		return a2a.TaskStateWorking
+	case "TASK_STATE_COMPLETED":
+		return a2a.TaskStateCompleted
+	case "TASK_STATE_FAILED":
+		return a2a.TaskStateFailed
+	case "TASK_STATE_CANCELED":
+		return a2a.TaskStateCanceled
+	case "TASK_STATE_INPUT_REQUIRED":
+		return a2a.TaskStateInputRequired
+	case "TASK_STATE_AUTH_REQUIRED":
+		return a2a.TaskStateAuthRequired
+	case "TASK_STATE_REJECTED":
+		return a2a.TaskStateRejected
+	default:
+		return s // already v0.3 or unknown
+	}
 }
 
 // SendMessageStream sends a message and returns a channel of SSE events.
@@ -195,6 +446,9 @@ func (c *Client) doJSONRPC(ctx context.Context, method string, params any) (*a2a
 	}
 
 	req.Header.Set("Content-Type", "application/json")
+	if c.isV1() {
+		req.Header.Set("A2A-Version", "1.0")
+	}
 
 	if err := c.resolveAuthHeaders(req); err != nil {
 		return nil, fmt.Errorf("a2aclient: failed to resolve auth: %w", err)

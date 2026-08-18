@@ -110,13 +110,15 @@ type PlatformSlackConfig struct {
 
 // PlatformA2AConfig holds non-secret A2A (Agent-to-Agent) channel settings.
 type PlatformA2AConfig struct {
-	Enabled                  bool   `json:"enabled"`
-	BaseURL                  string `json:"base_url,omitempty"`               // External base URL for Agent Card
-	Description              string `json:"description,omitempty"`            // Agent description in Agent Card
-	RateLimit                int    `json:"rate_limit,omitempty"`             // Per-agent requests/min (0 = unlimited)
-	MaxConcurrentTasks       int    `json:"max_concurrent_tasks,omitempty"`   // Per-agent concurrent tasks (0 = unlimited)
-	TaskTTL                  string `json:"task_ttl,omitempty"`               // Duration for task retention, e.g. "72h"
-	AllowIdentityPropagation bool   `json:"allow_identity_propagation"`      // Global toggle for identity propagation
+	Enabled            bool   `json:"enabled"`
+	BaseURL            string `json:"base_url,omitempty"`             // External base URL for Agent Card
+	Description        string `json:"description,omitempty"`          // Agent description in Agent Card
+	RateLimit          int    `json:"rate_limit,omitempty"`           // Per-agent requests/min (0 = unlimited)
+	MaxConcurrentTasks int    `json:"max_concurrent_tasks,omitempty"` // Per-agent concurrent tasks (0 = unlimited)
+	TaskTTL            string `json:"task_ttl,omitempty"`             // Duration for task retention, e.g. "72h"
+	DefaultAudience    string `json:"default_audience,omitempty"`     // Expected "aud" claim in incoming A2A JWTs
+	AutoLinkByEmail    bool   `json:"auto_link_by_email"`            // Auto-link users by email claim
+	RequireActorClaim  bool   `json:"require_actor_claim"`           // Require "act" claim for delegation
 }
 
 // OrgSettings represents organization-wide configuration visible to all

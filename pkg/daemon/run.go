@@ -605,6 +605,54 @@ func Run(cfg RunConfig) error {
 			mgr.Register(a2aCh)
 			api.SetA2AChannel(a2aCh)
 			logger.Printf("A2A channel registered (multi-client, HTTP-driven)")
+
+			// Wire A2A token validator from channel config.
+			var issuers []a2apkg.TrustedIssuer
+			for _, ti := range chCfg.A2A.TrustedIssuers {
+				userClaim := ti.UserClaim
+				if userClaim == "" {
+					userClaim = "sub"
+				}
+				audience := ti.Audience
+				if audience == "" {
+					audience = chCfg.A2A.DefaultAudience
+				}
+				issuers = append(issuers, a2apkg.TrustedIssuer{
+					ID:        fmt.Sprintf("issuer-%s", ti.Name),
+					Name:      ti.Name,
+					Issuer:    ti.Issuer,
+					JWKSURL:   ti.JWKSURL,
+					Audience:  audience,
+					UserClaim: userClaim,
+				})
+			}
+			var agents []a2apkg.AllowedAgent
+			for _, aa := range chCfg.A2A.AllowedAgents {
+				// Find matching issuer ID by name.
+				var issuerID string
+				for _, iss := range issuers {
+					if iss.Name == aa.Issuer {
+						issuerID = iss.ID
+						break
+					}
+				}
+				agents = append(agents, a2apkg.AllowedAgent{
+					ID:        fmt.Sprintf("agent-%s", aa.Name),
+					Name:      aa.Name,
+					ActorSub:  aa.ActorSub,
+					IssuerID:  issuerID,
+					RateLimit: aa.RateLimit,
+					MaxTasks:  aa.MaxTasks,
+					Enabled:   true,
+				})
+			}
+			validator := a2apkg.NewTokenValidator(a2apkg.TokenValidatorConfig{
+				Issuers:           issuers,
+				Agents:            agents,
+				RequireActorClaim: chCfg.A2A.RequireActorClaim,
+			})
+			api.SetA2ATokenValidator(validator)
+			logger.Printf("A2A authentication: %d trusted issuers, %d allowed agents", len(issuers), len(agents))
 		}
 
 		if err := mgr.StartAll(ctx); err != nil {

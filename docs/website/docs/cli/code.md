@@ -150,6 +150,8 @@ By default, tools may only touch the **project working directory** and its subtr
 - **Always Allow** — authorize this directory for the session
 - **Deny** — the agent stays in-project
 
+Astonish's own config/state directory (session transcripts, `PLAN.md`, workspaces) and a few harmless special paths — currently just `/dev/null`, which agents commonly redirect output to — are always in-scope and never prompt.
+
 ### Bypassing Authorization
 
 ```bash

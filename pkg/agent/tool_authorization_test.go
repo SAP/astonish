@@ -151,6 +151,31 @@ func TestFolderContainment_OutsideRoot(t *testing.T) {
 	}
 }
 
+// TestFolderContainment_AlwaysAllowedDevNull verifies that /dev/null is exempt
+// from the folder-access gate even though it lives outside the project root:
+// agents routinely redirect output to it and prompting adds friction with no
+// security benefit. Both the PathAllowed gate and the OutOfScopePaths preflight
+// (which drives the authorization prompt) must treat it as in-scope.
+func TestFolderContainment_AlwaysAllowedDevNull(t *testing.T) {
+	root := t.TempDir()
+	p := NewSessionAuthPolicy(root)
+
+	if !p.PathAllowed("/dev/null") {
+		t.Error("PathAllowed(/dev/null) should be true (always-allowed special path)")
+	}
+	// Never consumed: repeated access stays allowed.
+	if !p.PathAllowed("/dev/null") {
+		t.Error("/dev/null exemption must not be consumed like a one-shot grant")
+	}
+	if out := p.OutOfScopePaths(map[string]any{"path": "/dev/null"}); len(out) != 0 {
+		t.Errorf("OutOfScopePaths for /dev/null = %v, want none (no prompt)", out)
+	}
+	// A shell command redirecting to /dev/null must not trip the gate either.
+	if out := p.OutOfScopePaths(map[string]any{"command": "cat foo.txt > /dev/null"}); len(out) != 0 {
+		t.Errorf("OutOfScopePaths for redirect to /dev/null = %v, want none", out)
+	}
+}
+
 func TestFolderContainment_SessionGrant(t *testing.T) {
 	root := t.TempDir()
 	sibling := t.TempDir()

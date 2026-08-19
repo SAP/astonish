@@ -326,9 +326,67 @@ export function softRunBounds(messages: ChatMsg[], index: number): [number, numb
   return [runStart, runEnd]
 }
 
+/** Tools that are purely bookkeeping and don't change the answer. */
+export const HOUSEKEEPING_TOOLS = new Set([
+  'memory_save',
+  'memory_delete',
+  'memory_search',
+  'memory_get',
+  'announce_plan',
+  'update_plan',
+])
+
+/**
+ * Returns true when content is short (< 120 chars trimmed) and doesn't contain
+ * markdown formatting (no code blocks, no tables, no lists with 3+ items).
+ */
+export function isHousekeepingNote(content: string): boolean {
+  const trimmed = content.trim()
+  if (trimmed.length >= 120) return false
+  if (trimmed.includes('```')) return false
+  if (trimmed.includes('|---')) return false
+  // Count list items (lines starting with - or *)
+  const listItems = trimmed.split('\n').filter(line => /^\s*[-*]\s/.test(line))
+  if (listItems.length >= 3) return false
+  return true
+}
+
+/**
+ * Returns true when content length > 200 chars OR contains markdown indicators
+ * (```, |---|, or 3+ lines starting with - or *).
+ */
+export function isSubstantiveMessage(content: string): boolean {
+  const trimmed = content.trim()
+  if (trimmed.length > 200) return true
+  if (trimmed.includes('```')) return true
+  if (trimmed.includes('|---')) return true
+  const listItems = trimmed.split('\n').filter(line => /^\s*[-*]\s/.test(line))
+  if (listItems.length >= 3) return true
+  return false
+}
+
+/**
+ * Returns true if all tool_call messages between fromIndex and toIndex (exclusive)
+ * have toolName in HOUSEKEEPING_TOOLS.
+ */
+export function onlyHousekeepingToolsBetween(messages: ChatMsg[], fromIndex: number, toIndex: number): boolean {
+  for (let i = fromIndex + 1; i < toIndex; i++) {
+    const msg = messages[i]
+    if (msg.type === 'tool_call') {
+      const name = String((msg as ToolCallMessage).toolName || '')
+      if (!HOUSEKEEPING_TOOLS.has(name)) return false
+    }
+  }
+  return true
+}
+
 /**
  * Within each soft+tool run, only the latest agent message is shown as a bubble.
  * Earlier agents are "replaced" (not rendered) so mid-turn tools never remove the bubble.
+ *
+ * Exception: if the latest agent is just a housekeeping note (e.g. "Saved to memory")
+ * and an earlier agent in the same run is substantive, and only housekeeping tools
+ * appear between them, the earlier substantive agent is also kept visible.
  */
 export function supersededAgentIndices(messages: ChatMsg[]): Set<number> {
   const skip = new Set<number>()
@@ -348,8 +406,30 @@ export function supersededAgentIndices(messages: ChatMsg[]): Set<number> {
       if (messages[j].type === 'agent') lastAgent = j
     }
     if (lastAgent < 0) continue
+
+    // Determine if we should also keep a substantive earlier agent visible
+    let preservedAgent = -1
+    const lastContent = typeof (messages[lastAgent] as any).content === 'string'
+      ? (messages[lastAgent] as any).content
+      : String((messages[lastAgent] as any).content ?? '')
+
+    if (isHousekeepingNote(lastContent)) {
+      // Find the LAST substantive agent before lastAgent that has only housekeeping tools between it and lastAgent
+      for (let j = lastAgent - 1; j >= runStart; j--) {
+        if (messages[j].type === 'agent') {
+          const content = typeof (messages[j] as any).content === 'string'
+            ? (messages[j] as any).content
+            : String((messages[j] as any).content ?? '')
+          if (isSubstantiveMessage(content) && onlyHousekeepingToolsBetween(messages, j, lastAgent)) {
+            preservedAgent = j
+            break
+          }
+        }
+      }
+    }
+
     for (let j = runStart; j <= runEnd; j++) {
-      if (messages[j].type === 'agent' && j !== lastAgent) {
+      if (messages[j].type === 'agent' && j !== lastAgent && j !== preservedAgent) {
         skip.add(j)
       }
     }

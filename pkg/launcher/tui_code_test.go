@@ -2879,16 +2879,3 @@ func TestRespondSubAgentAuth_DenyPropagates(t *testing.T) {
 		t.Fatal("timed out waiting for the sub-agent to receive the denial")
 	}
 }
-
-// TestLocalAgentBackend_SupportsInit verifies the backend.InitBackend marker:
-// AGENTS.md generation is available exactly when a host working directory is set.
-func TestLocalAgentBackend_SupportsInit(t *testing.T) {
-	withDir := &localAgentBackend{workingDir: t.TempDir()}
-	if !withDir.SupportsInit() {
-		t.Fatal("SupportsInit must be true when a working directory is configured")
-	}
-	noDir := &localAgentBackend{}
-	if noDir.SupportsInit() {
-		t.Fatal("SupportsInit must be false without a working directory")
-	}
-}

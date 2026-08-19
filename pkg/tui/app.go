@@ -859,9 +859,6 @@ func (m *model) syncSlashCompletion() {
 	if m.compactionCap() != nil {
 		extra = append(extra, compactSlashCommand)
 	}
-	if m.initCap() != nil {
-		extra = append(extra, initSlashCommand, initDeepSlashCommand)
-	}
 	matches := filterSlashCommands(query, extra...)
 	cursor := m.slash.cursor
 	if cursor >= len(matches) {
@@ -1086,33 +1083,6 @@ RULES:
 - You MAY use read-only tools (read_file, grep_search, find_files, file_tree, code_definition, code_references, repo_map, codegraph_explore, memory_search, web_fetch, etc.) to investigate the codebase and gather information.
 - Focus on providing clear, accurate, well-researched answers. Cite specific files, functions, and line numbers when relevant.
 - If the user asks you to make changes or create a plan, remind them they are in Ask mode and suggest switching to Normal or Plan mode (shift+tab).`
-
-// initSystemContext is injected as a per-turn SystemContext for the /init
-// command. Unlike the plan/ask constants above, this is NOT a runtime-gated
-// mode: it deliberately runs an UNRESTRICTED turn so the agent can call
-// write_file. It has no agent-side source of truth to keep in sync.
-const initSystemContext = `You are running the Astonish /init command. Your task is to analyze this project and generate a single, high-quality AGENTS.md file at the repository root. AGENTS.md is the context file the Astonish code assistant (and other agentic coding tools) load to understand the project before working on it.
-
-APPROACH:
-1. UNDERSTAND THE PROJECT STRUCTURE FIRST, CHEAPLY. Use codegraph_explore as your primary tool to map the codebase: the main packages/modules, entry points, core types and their relationships, and the cross-cutting subsystems. codegraph answers structural questions in a few calls with far fewer tokens than reading files. For things codegraph does not index — build manifests, configuration, and docs — use find_files, file_tree, and read_file (e.g. Makefile, package.json, go.mod, pyproject.toml, Cargo.toml, README, CI config). Read an existing AGENTS.md or README if present and build on it rather than discarding it.
-2. DETECT THE FACTS THAT MATTER TO A CODING AGENT: the language(s) and stack, the build / lint / test commands (extract the real ones from the Makefile, package.json scripts, task runner, etc. — do not invent them), how to run the project, the directory layout, and the important conventions and invariants a contributor must respect.
-3. WRITE THE FILE with write_file to AGENTS.md at the repo root. Structure it clearly with sections such as: Project Overview, Build / Lint / Test Commands, Code Style, File Structure, and Key Patterns / Conventions. Keep it concise, accurate, and specific to THIS project — a coding agent should be able to build, test, and navigate the project from it. Do not include boilerplate that does not apply. If an AGENTS.md already exists, refresh it in place rather than duplicating content.
-4. After writing the file, emit the astonish-report fence so the user can view it inline, then give a short summary of what you documented.
-
-Do not ask for confirmation before writing — generating the file is the whole point of the command.`
-
-// initDeepSystemContext is injected as a per-turn SystemContext for the
-// /init-deep command. Like initSystemContext it runs an UNRESTRICTED turn.
-const initDeepSystemContext = `You are running the Astonish /init-deep command. Your task is to analyze this project and generate a hierarchy of AGENTS.md files: one at the repository root PLUS a focused AGENTS.md inside each significant sub-folder. AGENTS.md files are the context files the Astonish code assistant (and other agentic coding tools) load to understand the project; deeper files describe the invariants and gotchas specific to that subtree that the root file cannot cover.
-
-APPROACH:
-1. UNDERSTAND THE PROJECT STRUCTURE FIRST, CHEAPLY. Use codegraph_explore as your primary tool to map the codebase: the main packages/modules, entry points, core types and their relationships, and how the major subsystems depend on each other. codegraph answers structural questions in a few calls with far fewer tokens than reading files. For non-indexed files (build manifests, configuration, docs) use find_files, file_tree, and read_file. Read any existing AGENTS.md / README files and build on them.
-2. IDENTIFY THE SIGNIFICANT SUB-FOLDERS. A significant sub-folder is a self-contained subsystem or module with its own responsibilities, conventions, or invariants worth documenting for someone editing it (for example the distinct packages/modules of the codebase). Skip folders that do not warrant their own file: vendored dependencies, generated code, build output, node_modules, .git, caches, and trivial leaf directories. Spend effort proportional to how much a contributor needs local guidance there.
-3. WRITE THE ROOT AGENTS.md first (via write_file) covering the whole project: Project Overview, Build / Lint / Test Commands (the real ones), Code Style, File Structure, Key Patterns, and a "Hierarchical AGENTS.md Index" section that lists each sub-folder AGENTS.md you create and, in one line, what it covers.
-4. WRITE A FOCUSED AGENTS.md IN EACH SIGNIFICANT SUB-FOLDER (via write_file to that folder's path, e.g. <subdir>/AGENTS.md). Each should be scoped to that subtree: its purpose, the key types/patterns, the invariants and gotchas a contributor must not break, and any local build/test notes. Do not repeat the whole root file — the deeper file complements it. Refresh any existing sub-folder AGENTS.md in place instead of duplicating.
-5. After writing the files, summarize which AGENTS.md files you created or updated and what each covers. If you wrote a notable root document, you may emit the astonish-report fence for it.
-
-Do not ask for confirmation before writing — generating the files is the whole point of the command. Extensively use codegraph_explore to keep the analysis fast and token-efficient across the whole project.`
 
 func (m *model) togglePlanMode() {
 	m.restoreComposerPlaceholder()
@@ -1876,7 +1846,7 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 	m.ta.Reset()
 	switch {
 	case text == "/help" || text == "/?":
-		m.tr.Apply(events.NewSystem(helpText(m.providerAdmin() != nil, m.webSearchAdmin() != nil, m.rollbackCap() != nil, m.compactionCap() != nil, m.initCap() != nil)))
+		m.tr.Apply(events.NewSystem(helpText(m.providerAdmin() != nil, m.webSearchAdmin() != nil, m.rollbackCap() != nil, m.compactionCap() != nil)))
 	case text == "/files":
 		cwd, _ := os.Getwd()
 		m.tr.Apply(events.NewSystem("Type `@` plus part of a local path to attach file context from " + cwd + "."))
@@ -1903,10 +1873,6 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		return m.openRollbackPicker()
 	case text == "/compact":
 		return m.runCompact()
-	case text == "/init":
-		return m.runInit(initSystemContext, "Generate a root AGENTS.md for this project.")
-	case text == "/init-deep":
-		return m.runInit(initDeepSystemContext, "Generate AGENTS.md files for this project (root and significant sub-folders).")
 	default:
 		// Pass through to backend as a normal message so server/local slash handlers can run later.
 		m.history = append(m.history, text)
@@ -1930,7 +1896,7 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func helpText(providerAdmin bool, webSearch bool, rollback bool, compaction bool, initItem bool) string {
+func helpText(providerAdmin bool, webSearch bool, rollback bool, compaction bool) string {
 	providerLine := ""
 	if providerAdmin {
 		providerLine = "\n  /provider      Manage local providers (add/remove)"
@@ -1947,17 +1913,12 @@ func helpText(providerAdmin bool, webSearch bool, rollback bool, compaction bool
 	if compaction {
 		compactLine = "\n  /compact       Compact the conversation context to free up the window"
 	}
-	initLine := ""
-	if initItem {
-		initLine = "\n  /init          Generate a root AGENTS.md for this project" +
-			"\n  /init-deep     Generate AGENTS.md in the root and each significant sub-folder"
-	}
 	return strings.TrimSpace(`
 Commands:
   /help          Show this help (/?)
   /status        Show session / provider / model
   /sessions      Open sessions picker (also ctrl+l)
-  /model         Choose provider and model` + providerLine + webSearchLine + rollbackLine + compactLine + initLine + `
+  /model         Choose provider and model` + providerLine + webSearchLine + rollbackLine + compactLine + `
   /new           Start a new session (also ctrl+n)
   /files         Show @file context help
   /plan          Toggle plan-only mode (also shift+tab)

@@ -241,18 +241,6 @@ type CompactionBackend interface {
 	Compact(ctx context.Context) (status string, err error)
 }
 
-// InitBackend is an optional capability implemented by backends that can
-// generate AGENTS.md context files for the working directory (the `/init` and
-// `/init-deep` commands). It is a marker capability: the generation itself runs
-// as a normal agent turn driven by a specialized system prompt, so this
-// interface has no methods beyond signaling code-mode availability. The
-// platform backend does not implement it (no host working directory).
-type InitBackend interface {
-	// SupportsInit reports whether AGENTS.md generation is available for the
-	// active session (a host working directory is configured).
-	SupportsInit() bool
-}
-
 // PlanBackend is an optional capability implemented by backends that persist an
 // announced plan to a PLAN.md sidecar (code mode only). It is intentionally
 // separate from Backend so the platform backend is not required to implement it.

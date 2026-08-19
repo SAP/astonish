@@ -48,16 +48,6 @@ var webSearchSlashCommand = slashCommand{
 	Name: "websearch", Aliases: []string{"search"}, Description: "Configure web search provider",
 }
 
-// initSlashCommand and initDeepSlashCommand are offered only when the backend
-// supports AGENTS.md generation (code mode). They analyze the project and write
-// context files the code TUI loads on future sessions.
-var initSlashCommand = slashCommand{
-	Name: "init", Description: "Analyze the project and generate a root AGENTS.md",
-}
-var initDeepSlashCommand = slashCommand{
-	Name: "init-deep", Description: "Generate AGENTS.md in the root and each significant sub-folder",
-}
-
 // slashCompletion holds the active / completion popup state.
 type slashCompletion struct {
 	active  bool

@@ -19,9 +19,14 @@ type VisualApp struct {
 }
 
 // DataSource defines a data feed for a running app.
+// Supported types:
+//   - "mcp_tool"  — invoke an MCP server tool (config: server, tool)
+//   - "http_api"  — make an HTTP request (config: url, method)
+//   - "a2a_agent" — send a message to a remote A2A agent (config: agent)
+//   - "static"    — return static data from config
 type DataSource struct {
 	ID       string         `json:"id" yaml:"id"`
-	Type     string         `json:"type" yaml:"type"`     // "mcp_tool", "http_api", "static"
+	Type     string         `json:"type" yaml:"type"`     // "mcp_tool", "http_api", "a2a_agent", "static"
 	Config   map[string]any `json:"config" yaml:"config"`
 	Interval string         `json:"interval,omitempty" yaml:"interval,omitempty"`
 }

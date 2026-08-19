@@ -11,8 +11,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/SAP/astonish/pkg/a2a"
+	"github.com/SAP/astonish/pkg/a2aclient"
 	"github.com/SAP/astonish/pkg/apps"
 	"github.com/SAP/astonish/pkg/config"
+	"github.com/SAP/astonish/pkg/credentials"
 	"github.com/SAP/astonish/pkg/mcp"
 	"github.com/SAP/astonish/pkg/sandbox"
 	"github.com/SAP/astonish/pkg/store"
@@ -113,6 +116,7 @@ func isHardBlockedIP(ip net.IP) bool {
 // appDataRequest is the JSON body for POST /api/apps/data.
 // sourceId uses convention-based routing:
 //   - "mcp:<serverName>/<toolName>"      → invoke MCP tool
+//   - "a2a:<agentName>"                  → send message to remote A2A agent
 //   - "http:<METHOD>:<url>"              → make HTTP request (no auth)
 //   - "http:<METHOD>:<url>@<credential>" → make HTTP request with credential auth
 //   - "static:<key>"                     → return static data from app config
@@ -319,6 +323,9 @@ func resolveDataSource(r *http.Request, sourceID string, args map[string]any, ap
 	if strings.HasPrefix(sourceID, "mcp:") {
 		return resolveMCPSource(r, sourceID[4:], args)
 	}
+	if strings.HasPrefix(sourceID, "a2a:") {
+		return resolveA2ASource(r, sourceID[4:], args)
+	}
 	if strings.HasPrefix(sourceID, "http:") {
 		return resolveHTTPSource(r, sourceID[5:], args)
 	}
@@ -331,7 +338,7 @@ func resolveDataSource(r *http.Request, sourceID string, args map[string]any, ap
 		return resolveAppDataSource(r, sourceID, args, appName)
 	}
 
-	return nil, fmt.Errorf("unknown source format: %q (expected mcp:<server>/<tool>, http:<METHOD>:<url>, or static:<key>)", sourceID)
+	return nil, fmt.Errorf("unknown source format: %q (expected mcp:<server>/<tool>, a2a:<agent>, http:<METHOD>:<url>, or static:<key>)", sourceID)
 }
 
 // resolveMCPSource invokes an MCP tool inside a sandbox container.
@@ -368,6 +375,113 @@ func resolveMCPSource(r *http.Request, serverTool string, args map[string]any) (
 
 	userID := effectiveUserID(r)
 	return invokeMCPToolInContainer(r, userID, serverName, toolName, serverCfg, args)
+}
+
+// resolveA2ASource sends a message to a remote A2A agent and returns the response.
+// agentName is the configured name of the A2A agent (as stored in platform/org/team settings).
+//
+// Expected args:
+//   - "message" (string, required): The message to send to the agent
+//   - "context_id" (string, optional): Conversation context ID for multi-turn interactions
+func resolveA2ASource(r *http.Request, agentName string, args map[string]any) (any, error) {
+	if agentName == "" {
+		return nil, fmt.Errorf("invalid A2A source: agent name is required (format: a2a:<agentName>)")
+	}
+
+	message, _ := args["message"].(string)
+	if message == "" {
+		return nil, fmt.Errorf("A2A source %q: 'message' argument is required", agentName)
+	}
+
+	ctx := r.Context()
+
+	// Load A2A config using the same 3-tier cascade as the chat agent.
+	var cfg *a2aclient.A2AClientConfig
+	var err error
+
+	if svc := store.FromRequest(r); svc != nil && svc.Mode == store.ModePlatform {
+		cfg, err = a2aclient.LoadA2AAgentConfig(ctx, true)
+	} else {
+		cfg, err = a2aclient.LoadA2AAgentConfig(ctx, false)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("A2A source: failed to load config: %w", err)
+	}
+	if cfg == nil || len(cfg.Agents) == 0 {
+		return nil, fmt.Errorf("A2A source: no A2A agents configured")
+	}
+
+	agentCfg, ok := cfg.Agents[agentName]
+	if !ok {
+		available := make([]string, 0, len(cfg.Agents))
+		for name := range cfg.Agents {
+			available = append(available, name)
+		}
+		return nil, fmt.Errorf("A2A agent %q not found (available: %v)", agentName, available)
+	}
+
+	// Resolve credentials for the A2A client
+	var resolver credentials.CredentialResolver
+	if credStore := effectiveCredentialStore(r); credStore != nil {
+		resolver = credentials.NewStoreAdapter(credStore)
+	}
+
+	client := a2aclient.NewClient(agentCfg, resolver)
+
+	// Fetch agent card to detect protocol version
+	card, err := client.FetchAgentCard(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("A2A agent %q: failed to fetch agent card: %w", agentName, err)
+	}
+	if pv := card.DetectProtocolVersion(); pv != "" {
+		client.SetProtocolVersion(pv)
+	}
+
+	// Build and send the message
+	contextID, _ := args["context_id"].(string)
+	params := a2a.SendMessageParams{
+		Message: a2a.Message{
+			Role:  "user",
+			Parts: []a2a.Part{a2a.TextPart{Text: message}},
+		},
+	}
+	if contextID != "" {
+		params.Configuration = &a2a.TaskConfig{
+			ContextID: contextID,
+		}
+	}
+
+	slog.Debug("app A2A invoke", "agent", agentName)
+	task, err := client.SendMessage(ctx, params)
+	if err != nil {
+		// Return error in the data payload (not as an HTTP error) so the app can handle it
+		return map[string]any{
+			"status":   "error",
+			"response": err.Error(),
+		}, nil
+	}
+
+	// Extract response using the shared helper
+	response := a2aclient.ExtractResponse(task)
+
+	result := map[string]any{
+		"status":   string(task.Status.State),
+		"response": response,
+		"task_id":  task.ID,
+	}
+	if len(task.Artifacts) > 0 {
+		artifacts := make([]any, 0, len(task.Artifacts))
+		for _, artifact := range task.Artifacts {
+			artifacts = append(artifacts, map[string]any{
+				"name":        artifact.Name,
+				"description": artifact.Description,
+				"index":       artifact.Index,
+			})
+		}
+		result["artifacts"] = artifacts
+	}
+
+	return result, nil
 }
 
 // invokeMCPToolInContainer runs an MCP tool inside a per-user sandbox container.
@@ -738,6 +852,15 @@ func resolveAppDataSource(r *http.Request, sourceID string, args map[string]any,
 					method = "GET"
 				}
 				return resolveHTTPSource(r, method+":"+urlStr, mergedArgs)
+
+			case "a2a_agent":
+				agentName, _ := ds.Config["agent"].(string)
+				if agentName == "" {
+					return nil, fmt.Errorf("a2a_agent data source %q missing agent config", sourceID)
+				}
+				// Remove agent from args — it's routing info, not a message arg
+				delete(mergedArgs, "agent")
+				return resolveA2ASource(r, agentName, mergedArgs)
 
 			case "static":
 				return ds.Config, nil

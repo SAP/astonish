@@ -233,7 +233,7 @@ export default function App() {
 3. **Export default** — Export your main component as the default export.
 4. **Single file** — Everything must be in one file. Helper components and utility functions go at the top, the main ` + "`export default function`" + ` goes at the bottom.
 5. **Self-contained** — Include all data, state, and logic within the component. Use hardcoded sample data for static apps; use ` + "`useAppData`" + ` for live data (see below).
-6. **NEVER use fetch(), XMLHttpRequest, or axios** — The sandbox blocks direct network access. ALL external data MUST go through ` + "`useAppData('http:GET:<url>')`" + ` or ` + "`useAppData('mcp:<server>/<tool>')`" + `. This is the ONLY way to get external data. If the user gives you a URL or API endpoint, put it in the useAppData sourceId, e.g. ` + "`useAppData('http:GET:https://api.example.com/data')`" + `.
+6. **NEVER use fetch(), XMLHttpRequest, or axios** — The sandbox blocks direct network access. ALL external data MUST go through ` + "`useAppData('http:GET:<url>')`" + `, ` + "`useAppData('mcp:<server>/<tool>')`" + `, or ` + "`useAppData('a2a:<agentName>')`" + `. This is the ONLY way to get external data. If the user gives you a URL or API endpoint, put it in the useAppData sourceId, e.g. ` + "`useAppData('http:GET:https://api.example.com/data')`" + `. If the user wants to call an A2A agent, use ` + "`useAppData('a2a:<agentName>', { args: { message: '...' } })`" + `.
 7. **App Canvas tokens** — **Do NOT set any background class (bg-*) on the outermost container** — it must be transparent so the Studio canvas shows through. Use App Canvas tokens (` + "`bg-surface`" + `, ` + "`bg-surface-2`" + `, ` + "`text-app`" + `, ` + "`bg-brand`" + `). Do not hard-code light-only or dark-only colors; one set of token classes works for both modes.
 8. **Make it interactive** — Use ` + "`useState`" + ` for buttons, toggles, tabs, filters.
 9. **Responsive** — Use responsive Tailwind classes (` + "`md:`" + `, ` + "`lg:`" + `) where appropriate.
@@ -248,6 +248,7 @@ Fetches data from a backend source. Returns ` + "`{ data, loading, error, refetc
 
 **sourceId convention:**
 - ` + "`\"mcp:<serverName>/<toolName>\"`" + ` — Invokes an MCP tool. Example: ` + "`\"mcp:postgres-mcp/query\"`" + `
+- ` + "`\"a2a:<agentName>\"`" + ` — Sends a message to a remote A2A agent. Example: ` + "`\"a2a:my-research-agent\"`" + `. Requires ` + "`args.message`" + `. Returns ` + "`{ status, response, task_id, artifacts }`" + `.
 - ` + "`\"http:GET:<url>\"`" + ` — Makes an HTTP GET request. Example: ` + "`\"http:GET:https://api.example.com/data\"`" + `
 - ` + "`\"http:POST:<url>\"`" + ` — Makes an HTTP POST request.
 - ` + "`\"http:<METHOD>:<url>@<credential-name>\"`" + ` — Makes an HTTP request with authentication. The ` + "`@credential-name`" + ` suffix references a named credential from the Astonish credential store (configured in Settings > Credentials). The credential is resolved server-side and its auth header is injected into the request. Example: ` + "`\"http:GET:https://api.example.com/data@my-api-key\"`" + `
@@ -347,6 +348,42 @@ export default function AIDeployments() {
 }
 ` + "```" + `
 
+**Example — A2A agent (remote agent communication):**
+` + "```" + `jsx
+export default function AgentDashboard() {
+  const [query, setQuery] = React.useState('');
+  const [submitted, setSubmitted] = React.useState('');
+
+  // Only fetch when user submits a query
+  const { data, loading, error, refetch } = useAppData(
+    submitted ? 'a2a:my-research-agent' : null,
+    { args: { message: submitted } }
+  );
+
+  return (
+    <div className="p-6 space-y-4">
+      <div className="flex gap-2">
+        <input value={query} onChange={e => setQuery(e.target.value)}
+          className="flex-1 px-3 py-2 bg-surface-2 border border-app-border rounded-lg text-app"
+          placeholder="Ask the agent..." />
+        <button onClick={() => { setSubmitted(query); if (submitted === query) refetch(); }}
+          className="px-4 py-2 bg-brand text-white rounded-lg hover:opacity-90">
+          Ask
+        </button>
+      </div>
+      {loading && <p className="text-app-muted">Agent is thinking...</p>}
+      {error && <p className="p-2 rounded-lg border border-danger-border bg-danger-soft text-danger text-sm">{error}</p>}
+      {data && (
+        <div className="p-4 bg-surface-2 rounded-lg border border-app-border">
+          <p className="text-xs text-app-muted mb-1">Status: {data.status}</p>
+          <p className="text-app whitespace-pre-wrap">{data.response}</p>
+        </div>
+      )}
+    </div>
+  );
+}
+` + "```" + `
+
 ### useAppAction(actionId, options?)
 
 Returns an async function for triggering write operations (mutations). Uses the same sourceId convention.
@@ -391,6 +428,7 @@ export default function TaskManager() {
 - **Authenticated APIs** — If the API requires authentication, append ` + "`@credential-name`" + ` to the sourceId: ` + "`\"http:GET:https://api.example.com/data@my-api-key\"`" + `. The credential must exist in the Astonish credential store (Settings > Credentials). Ask the user for the credential name if they mention authentication. Credentials support API keys, Bearer tokens, Basic auth, and OAuth (client_credentials and authorization_code with auto-refresh).
 - **Dynamic URLs** — If the URL contains a variable part (like a city name), construct the sourceId dynamically: ` + "`const { data, loading } = useAppData(` + \"`http:GET:https://api.example.com/${variable}`\" + `)`" + `. The hook re-fetches automatically when the sourceId string changes.
 - **Ask the user** what MCP server/tool or HTTP endpoint to use if they request live data but don't specify the source.
+- **A2A agents** — If the user wants to communicate with a remote agent (or you know from context that an A2A agent tool like ` + "`a2a_<name>`" + ` was used in the chat session), use the ` + "`a2a:`" + ` prefix with the agent name: ` + "`useAppData('a2a:agent-name', { args: { message: 'your question' } })`" + `. The agent name is the configured name (NOT the tool name — strip the ` + "`a2a_`" + ` prefix and replace underscores with hyphens if needed). The response contains ` + "`{ status, response, task_id, artifacts }`" + `.
 - **NEVER use fetch() or XMLHttpRequest** — even if it seems simpler. The proxy is required for all external data.
 
 ## AI Capabilities — useAppAI

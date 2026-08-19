@@ -508,10 +508,11 @@ func compactLine(s string, maxRunes int) string {
 }
 
 const (
-	planOptApprove  = "Approve & implement"
-	planOptRequest  = "Request changes"
-	planOptDecline  = "Decline"
-	planChangesHint = "Describe the changes to the plan…"
+	planOptApprove          = "Approve & implement"
+	planOptRequest          = "Request changes"
+	planOptDecline          = "Decline"
+	planChangesHint         = "Describe the changes to the plan…"
+	planApprovalUserMessage = "I approve this plan. Please start implementing it now, phase by phase."
 )
 
 // handlePlanApprovalKey maps plan-approval accelerators without going through
@@ -675,7 +676,21 @@ func (m model) renderPlanApprovalOverlay(it *events.Item) string {
 // execution. "Request changes" lets the user type feedback. "Decline" aborts
 // the plan and returns to Normal mode.
 func (m model) submitPlanApproval(choice string) (tea.Model, tea.Cmd) {
-	m.tr.ClearApproval()
+	status := events.PlanDeclined
+	switch choice {
+	case planOptApprove:
+		status = events.PlanApproved
+	case planOptRequest:
+		status = events.PlanChangesRequested
+	}
+	if lifecycle, ok := m.backend.(backend.PlanLifecycleBackend); ok {
+		if err := lifecycle.RecordPlanDecision(m.ctx, status); err != nil {
+			m.tr.Apply(events.NewError("Failed to save plan decision: " + err.Error()))
+			m.refreshViewport()
+			return m, nil
+		}
+	}
+	m.tr.ResolvePlan(status)
 	m.ta.Reset()
 	if m.ready {
 		m.layout()
@@ -699,7 +714,7 @@ func (m model) submitPlanApproval(choice string) (tea.Model, tea.Cmd) {
 		turnCtx, cancel := context.WithCancel(m.ctx)
 		m.turnCancel = cancel
 		// Send as a normal-mode turn (no plan gate) to begin execution.
-		ch, err := m.backend.RunTurn(turnCtx, "I approve this plan. Please start implementing it now, phase by phase.", backend.TurnOptions{SystemContext: agent.BuildPlanExecutionSystemContext(planPath)})
+		ch, err := m.backend.RunTurn(turnCtx, planApprovalUserMessage, backend.TurnOptions{SystemContext: agent.BuildPlanExecutionSystemContext(planPath)})
 		if err != nil {
 			cancel()
 			m.turnCancel = nil

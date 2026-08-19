@@ -14,9 +14,9 @@ const (
 	ItemAgent         ItemKind = "agent"
 	ItemThinking      ItemKind = "thinking"
 	ItemActivity      ItemKind = "activity"
-	ItemFileDiff      ItemKind = "file_diff"   // main-thread editor-style file change
-	ItemDelegation    ItemKind = "delegation"   // inline sub-task delegation tracker
-	ItemPlan          ItemKind = "plan"         // execution plan document (distinct visual treatment)
+	ItemFileDiff      ItemKind = "file_diff"  // main-thread editor-style file change
+	ItemDelegation    ItemKind = "delegation" // inline sub-task delegation tracker
+	ItemPlan          ItemKind = "plan"       // execution plan document (distinct visual treatment)
 	ItemSystem        ItemKind = "system"
 	ItemError         ItemKind = "error"
 	ItemApproval      ItemKind = "approval"
@@ -62,6 +62,7 @@ type Item struct {
 	PlanContext      string
 	PlanWhatNotToDo  string
 	PlanVerification string
+	PlanStatus       PlanStatus
 
 	// Network denial fields.
 	NetworkDenials []NetworkDenial
@@ -196,7 +197,49 @@ func (t *Transcript) Apply(ev Event) {
 		if t.Streaming && !t.hasRunningTools() {
 			t.Status = "Thinking…"
 		}
+	case KindPlan:
+		status := ev.PlanStatus
+		if status == "" {
+			status = PlanPending
+		}
+		t.Items = append(t.Items, Item{
+			Kind:             ItemPlan,
+			Content:          ev.Text,
+			ToolName:         firstNonEmpty(ev.ToolName, "announce_plan"),
+			Options:          defaultOptions(ev.Options),
+			ApprovalKind:     "plan",
+			PlanContext:      ev.PlanContext,
+			PlanWhatNotToDo:  ev.PlanWhatNotToDo,
+			PlanVerification: ev.PlanVerification,
+			PlanStatus:       status,
+		})
+		if status == PlanPending && !t.Awaiting {
+			t.Awaiting = true
+			t.ApprovalIdx = len(t.Items) - 1
+			t.ApprovalCursor = 0
+			t.Status = "Waiting for plan approval…"
+		}
 	case KindApproval:
+		// Legacy/platform plan approval events are attached to the latest plan
+		// item instead of creating a detached approval item.
+		if ev.ApprovalKind == "plan" {
+			for i := len(t.Items) - 1; i >= 0; i-- {
+				if t.Items[i].Kind != ItemPlan {
+					continue
+				}
+				t.Items[i].Options = defaultOptions(ev.Options)
+				t.Items[i].ApprovalKind = "plan"
+				t.Items[i].PlanStatus = PlanPending
+				t.Items[i].PlanContext = ev.PlanContext
+				t.Items[i].PlanWhatNotToDo = ev.PlanWhatNotToDo
+				t.Items[i].PlanVerification = ev.PlanVerification
+				t.Awaiting = true
+				t.ApprovalIdx = i
+				t.ApprovalCursor = 0
+				t.Status = "Waiting for plan approval…"
+				return
+			}
+		}
 		content := "Approve " + firstNonEmpty(ev.ToolName, "tool") + "?"
 		switch ev.ApprovalKind {
 		case "folder":
@@ -1074,6 +1117,17 @@ func (t *Transcript) ToggleLastUser() {
 	}
 }
 
+// ResolvePlan updates the active plan in place, then advances any queued
+// generic approval. The plan document remains in the transcript permanently.
+func (t *Transcript) ResolvePlan(status PlanStatus) {
+	idx := t.ApprovalIdx
+	if idx < 0 || idx >= len(t.Items) || t.Items[idx].Kind != ItemPlan {
+		return
+	}
+	t.Items[idx].PlanStatus = status
+	t.ClearApproval()
+}
+
 // ClearApproval marks the current approval as resolved (caller sends the
 // response). If another approval item was queued after the resolved one,
 // it becomes the new active approval so the user sees it next.
@@ -1086,7 +1140,8 @@ func (t *Transcript) ClearApproval() {
 	// Check for a queued approval after the one we just resolved.
 	if resolvedIdx >= 0 {
 		for i := resolvedIdx + 1; i < len(t.Items); i++ {
-			if t.Items[i].Kind == ItemApproval || t.Items[i].Kind == ItemNetworkDenial {
+			if t.Items[i].Kind == ItemApproval || t.Items[i].Kind == ItemNetworkDenial ||
+				(t.Items[i].Kind == ItemPlan && t.Items[i].PlanStatus == PlanPending) {
 				t.Awaiting = true
 				t.ApprovalIdx = i
 				t.ApprovalCursor = 0
@@ -1120,6 +1175,12 @@ type HistoryMsg struct {
 	Args     map[string]any
 	Result   any
 	Artifact *Artifact
+	// Plan fields are present when Kind is "plan".
+	PlanStatus       PlanStatus
+	Options          []string
+	PlanContext      string
+	PlanWhatNotToDo  string
+	PlanVerification string
 }
 
 // LoadHistory applies session history using the same sticky-agent / tool-fold
@@ -1146,6 +1207,13 @@ func (t *Transcript) LoadHistory(entries []HistoryMsg) {
 			t.Apply(NewToolCall(e.ToolName, e.ToolID, e.Args))
 		case "tool_result":
 			t.Apply(NewToolResult(e.ToolName, e.ToolID, e.Result))
+		case "plan":
+			ev := NewPlan(e.Text, e.PlanStatus)
+			ev.Options = e.Options
+			ev.PlanContext = e.PlanContext
+			ev.PlanWhatNotToDo = e.PlanWhatNotToDo
+			ev.PlanVerification = e.PlanVerification
+			t.Apply(ev)
 		case "artifact":
 			t.Apply(Event{Kind: KindArtifact, Text: e.Text, Artifact: e.Artifact})
 		}

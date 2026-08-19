@@ -90,7 +90,7 @@ func TestRenderPlanDocumentHasBorders(t *testing.T) {
 	m.ready = true
 	m.layout()
 
-	out := m.renderPlanDocument(samplePlanContent, 70)
+	out := m.renderPlanDocument(events.Item{Content: samplePlanContent}, 70)
 	plain := stripANSI(out)
 
 	if !strings.Contains(plain, "┌") || !strings.Contains(plain, "┐") {
@@ -115,7 +115,7 @@ func TestRenderPlanDocumentStatusIcons(t *testing.T) {
 	m.ready = true
 	m.layout()
 
-	out := m.renderPlanDocument(samplePlanContent, 70)
+	out := m.renderPlanDocument(events.Item{Content: samplePlanContent}, 70)
 	plain := stripANSI(out)
 
 	if !strings.Contains(plain, "[✓]") {
@@ -167,7 +167,7 @@ Do not change the plan-mode gate.
 
 go test ./pkg/tui -count=1
 `
-	plain := stripANSI(m.renderPlanDocument(content, 80))
+	plain := stripANSI(m.renderPlanDocument(events.Item{Content: content}, 80))
 
 	if !strings.Contains(plain, "1  [○]") {
 		t.Fatalf("expected numbered pending phase:\n%s", plain)
@@ -215,7 +215,7 @@ func TestRenderPlanDocumentFallbackOnUnparseable(t *testing.T) {
 	m.ready = true
 	m.layout()
 
-	plain := stripANSI(m.renderPlanDocument("# Execution Plan\n\nnot a real plan yet", 70))
+	plain := stripANSI(m.renderPlanDocument(events.Item{Content: "# Execution Plan\n\nnot a real plan yet"}, 70))
 	if !strings.Contains(plain, "┌") || !strings.Contains(plain, "└") || !strings.Contains(plain, "│") {
 		t.Fatalf("unparseable plan should still produce a bordered box:\n%s", plain)
 	}
@@ -318,7 +318,7 @@ _Last updated: 2025-01-01T00:00:00Z_
 
 Legend: ` + "`[ ]`" + ` pending · ` + "`[~]`" + ` running · ` + "`[x]`" + ` complete · ` + "`[!]`" + ` failed
 `
-	plain := stripANSI(m.renderPlanDocument(content, 80))
+	plain := stripANSI(m.renderPlanDocument(events.Item{Content: content}, 80))
 
 	if !strings.Contains(plain, "reduce database load by 80%") {
 		t.Fatalf("expected summary text for first phase in output:\n%s", plain)
@@ -348,7 +348,7 @@ _Last updated: 2025-01-01T00:00:00Z_
 
 Legend: ` + "`[ ]`" + ` pending · ` + "`[~]`" + ` running · ` + "`[x]`" + ` complete · ` + "`[!]`" + ` failed
 `
-	plain := stripANSI(m.renderPlanDocument(content, 80))
+	plain := stripANSI(m.renderPlanDocument(events.Item{Content: content}, 80))
 
 	if !strings.Contains(plain, "···") {
 		t.Fatalf("expected dot separators (·) between phases when 4 phases present:\n%s", plain)
@@ -373,7 +373,7 @@ _Last updated: 2025-01-01T00:00:00Z_
 
 Legend: ` + "`[ ]`" + ` pending · ` + "`[~]`" + ` running · ` + "`[x]`" + ` complete · ` + "`[!]`" + ` failed
 `
-	plain := stripANSI(m.renderPlanDocument(content, 80))
+	plain := stripANSI(m.renderPlanDocument(events.Item{Content: content}, 80))
 
 	if !strings.Contains(plain, "adapter pattern") {
 		t.Fatalf("expected details text rendered in output:\n%s", plain)
@@ -401,7 +401,7 @@ _Last updated: 2025-01-01T00:00:00Z_
 
 Legend: ` + "`[ ]`" + ` pending · ` + "`[~]`" + ` running · ` + "`[x]`" + ` complete · ` + "`[!]`" + ` failed
 `
-	plain := stripANSI(m.renderPlanDocument(content, 80))
+	plain := stripANSI(m.renderPlanDocument(events.Item{Content: content}, 80))
 
 	if !strings.Contains(plain, "1 new") {
 		t.Fatalf("expected '1 new' in file kind breakdown:\n%s", plain)

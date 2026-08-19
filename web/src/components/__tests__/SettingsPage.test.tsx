@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, act } from '@testing-library/react'
+import { render, screen, act, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import SettingsPage from '../SettingsPage'
 
@@ -37,10 +37,17 @@ vi.mock('../settings/settingsApi', () => ({
   fetchTeamProviders: vi.fn().mockResolvedValue({ providers: {}, default_provider: '', default_model: '' }),
   savePlatformProviders: vi.fn().mockResolvedValue({}),
   saveOrgProviders: vi.fn().mockResolvedValue({}),
+  inputClass: '',
+  inputStyle: {},
+  labelStyle: {},
+  hintStyle: {},
+  sectionBorderStyle: {},
+  saveButtonStyle: {},
 }))
 
 // Mock global fetch for /api/standard-servers and other API calls
 beforeEach(() => {
+  vi.clearAllMocks()
   globalThis.fetch = vi.fn().mockResolvedValue({
     ok: true,
     json: () => Promise.resolve({ servers: [] }),
@@ -121,6 +128,100 @@ describe('SettingsPage', () => {
     // platform-general maps through PLATFORM_SYSTEM_SECTIONS → 'general' → SettingsContent → GeneralSettings
     const el = await screen.findByTestId('general-settings')
     expect(el).toBeInTheDocument()
+  })
+
+  it('unlinks Slack with the CSRF header and refreshes the channel list', async () => {
+    const user = userEvent.setup()
+    const slackChannel = {
+      id: 'slack-1',
+      user_id: 'user-1',
+      channel_type: 'slack',
+      external_id: 'U123',
+      display_name: 'Test Slack',
+      enabled: true,
+      verified: true,
+      created_at: '2026-08-19T00:00:00Z',
+    }
+    let channelLoads = 0
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url === '/api/user/channels' && (!init?.method || init.method === 'GET')) {
+        channelLoads += 1
+        return new Response(JSON.stringify({ channels: channelLoads === 1 ? [slackChannel] : [] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      if (url === '/api/channels/info') {
+        return new Response(JSON.stringify({
+          telegram: { bot_username: '', configured: false, connected: false, enabled: false, error: '' },
+          slack: { bot_user_id: 'B123', configured: true, connected: true, enabled: true, error: '' },
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      }
+      if (url === '/api/user/channels/slack-1' && init?.method === 'DELETE') {
+        expect(new Headers(init.headers).get('X-Requested-With')).toBe('XMLHttpRequest')
+        return new Response(null, { status: 204 })
+      }
+      return new Response(JSON.stringify({ servers: [] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    })
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    render(<SettingsPage {...defaultProps} activeSection="channels" isPlatformMode />)
+    await screen.findByText('Test Slack')
+    await user.click(screen.getByTitle('Unlink'))
+
+    expect(await screen.findByText('Channel unlinked')).toBeInTheDocument()
+    await waitFor(() => expect(channelLoads).toBe(2))
+    expect(screen.queryByText('Test Slack')).not.toBeInTheDocument()
+  })
+
+  it('displays the server error when Slack unlink fails', async () => {
+    const user = userEvent.setup()
+    const slackChannel = {
+      id: 'slack-1',
+      user_id: 'user-1',
+      channel_type: 'slack',
+      external_id: 'U123',
+      display_name: 'Test Slack',
+      enabled: true,
+      verified: true,
+      created_at: '2026-08-19T00:00:00Z',
+    }
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url === '/api/user/channels/slack-1' && init?.method === 'DELETE') {
+        return new Response(JSON.stringify({ error: 'Slack unlink was rejected' }), {
+          status: 500,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      if (url === '/api/user/channels') {
+        return new Response(JSON.stringify({ channels: [slackChannel] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      if (url === '/api/channels/info') {
+        return new Response(JSON.stringify({
+          telegram: { bot_username: '', configured: false, connected: false, enabled: false, error: '' },
+          slack: { bot_user_id: 'B123', configured: true, connected: true, enabled: true, error: '' },
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ servers: [] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }) as unknown as typeof fetch
+
+    render(<SettingsPage {...defaultProps} activeSection="channels" isPlatformMode />)
+    await screen.findByText('Test Slack')
+    await user.click(screen.getByTitle('Unlink'))
+
+    expect(await screen.findByText('Slack unlink was rejected')).toBeInTheDocument()
+    expect(screen.getByText('Test Slack')).toBeInTheDocument()
   })
 
   it('renders ProvidersSettings for platform-providers section', async () => {

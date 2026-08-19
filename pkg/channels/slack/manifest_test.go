@@ -1,6 +1,7 @@
 package slack
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -100,6 +101,89 @@ func TestSlackCommandAliasUsesAppPrefix(t *testing.T) {
 	}
 	if got := slackCommandNameFromInvocation("/astonish-fleet-plan", registry); got != "fleet_plan" {
 		t.Fatalf("slackCommandNameFromInvocation(/astonish-fleet-plan) = %q", got)
+	}
+}
+
+func TestReconcileSlackManifestRequirements(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name           string
+		socketMode     bool
+		requestURL     string
+		wantRequestURL string
+	}{
+		{name: "socket mode clears Events API URL", socketMode: true, requestURL: "https://external.example.com/events"},
+		{name: "events mode preserves Events API URL", requestURL: "https://external.example.com/events", wantRequestURL: "https://external.example.com/events"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			manifest := &slackapi.Manifest{}
+			manifest.Display.Name = "External app"
+			manifest.Settings.AllowedIPAddressRanges = []string{"192.0.2.0/24"}
+			manifest.Settings.EventSubscriptions = &slackapi.EventSubscriptions{
+				RequestUrl: tt.requestURL,
+				BotEvents:  []string{"reaction_added", "message.im"},
+				UserEvents: []string{"message.channels"},
+			}
+			manifest.OAuthConfig.RedirectUrls = []string{"https://external.example.com/oauth"}
+			manifest.OAuthConfig.Scopes.Bot = []string{"files:read", "chat:write"}
+			manifest.OAuthConfig.Scopes.User = []string{"search:read"}
+			manifest.OAuthConfig.Scopes.BotOptional = []string{"reactions:read"}
+			manifest.Features.SlashCommands = []slackapi.ManifestSlashCommand{{Command: "/external"}}
+
+			reconcileSlackManifestRequirements(manifest, tt.socketMode)
+			first := *manifest
+			first.Settings.EventSubscriptions = &slackapi.EventSubscriptions{
+				RequestUrl: manifest.Settings.EventSubscriptions.RequestUrl,
+				BotEvents:  append([]string(nil), manifest.Settings.EventSubscriptions.BotEvents...),
+				UserEvents: append([]string(nil), manifest.Settings.EventSubscriptions.UserEvents...),
+			}
+			first.OAuthConfig.Scopes.Bot = append([]string(nil), manifest.OAuthConfig.Scopes.Bot...)
+			reconcileSlackManifestRequirements(manifest, tt.socketMode)
+
+			if !reflect.DeepEqual(first, *manifest) {
+				t.Fatalf("reconciliation is not idempotent:\nfirst:  %#v\nsecond: %#v", first, *manifest)
+			}
+			if got := manifest.Settings.EventSubscriptions.RequestUrl; got != tt.wantRequestURL {
+				t.Fatalf("request URL = %q, want %q", got, tt.wantRequestURL)
+			}
+			assertContainsEachOnce(t, manifest.Settings.EventSubscriptions.BotEvents, requiredSlackBotEvents)
+			assertContainsEachOnce(t, manifest.OAuthConfig.Scopes.Bot, requiredSlackBotScopes)
+			if manifest.Display.Name != "External app" ||
+				!reflect.DeepEqual(manifest.Settings.AllowedIPAddressRanges, []string{"192.0.2.0/24"}) ||
+				!reflect.DeepEqual(manifest.Settings.EventSubscriptions.UserEvents, []string{"message.channels"}) ||
+				!reflect.DeepEqual(manifest.OAuthConfig.RedirectUrls, []string{"https://external.example.com/oauth"}) ||
+				!reflect.DeepEqual(manifest.OAuthConfig.Scopes.User, []string{"search:read"}) ||
+				!reflect.DeepEqual(manifest.OAuthConfig.Scopes.BotOptional, []string{"reactions:read"}) ||
+				!reflect.DeepEqual(manifest.Features.SlashCommands, []slackapi.ManifestSlashCommand{{Command: "/external"}}) {
+				t.Fatalf("unmanaged manifest fields changed: %#v", manifest)
+			}
+		})
+	}
+}
+
+func TestReconcileSlackManifestRequirementsInitializesSubscriptions(t *testing.T) {
+	t.Parallel()
+	manifest := &slackapi.Manifest{}
+	reconcileSlackManifestRequirements(manifest, false)
+	if manifest.Settings.EventSubscriptions == nil {
+		t.Fatal("event subscriptions were not initialized")
+	}
+	assertContainsEachOnce(t, manifest.Settings.EventSubscriptions.BotEvents, requiredSlackBotEvents)
+	assertContainsEachOnce(t, manifest.OAuthConfig.Scopes.Bot, requiredSlackBotScopes)
+}
+
+func assertContainsEachOnce(t *testing.T, got, required []string) {
+	t.Helper()
+	counts := make(map[string]int, len(got))
+	for _, value := range got {
+		counts[value]++
+	}
+	for _, value := range required {
+		if counts[value] != 1 {
+			t.Errorf("%q occurs %d times in %#v, want once", value, counts[value], got)
+		}
 	}
 }
 

@@ -202,6 +202,12 @@ type RollbackPoint struct {
 	ID string
 	// Label is a short, single-line preview of the user message at this turn.
 	Label string
+	// MessageText is the full, untruncated text of the user message at this
+	// turn. Rolling back to a point discards that message from the transcript;
+	// the TUI prefills it into the input composer so the user can edit and
+	// resend without retyping. Unlike Label (a derived, truncated title), this
+	// is the verbatim message.
+	MessageText string
 	// Timestamp is a human-readable time the message was sent (may be empty).
 	Timestamp string
 	// FileCount is how many files would be restored if rolling back to here.

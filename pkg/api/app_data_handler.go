@@ -396,10 +396,22 @@ func resolveA2ASource(r *http.Request, agentName string, args map[string]any) (a
 	ctx := r.Context()
 
 	// Load A2A config using the same 3-tier cascade as the chat agent.
+	// In platform mode, inject the tenant-scoped A2A agent stores into the
+	// context so LoadA2AAgentConfig can cascade platform → org → team.
 	var cfg *a2aclient.A2AClientConfig
 	var err error
 
 	if svc := store.FromRequest(r); svc != nil && svc.Mode == store.ModePlatform {
+		// Enrich context with A2A agent stores from the request's Services
+		// (populated by TenantMiddleware). Without this, LoadA2AAgentConfig
+		// would see no stores and return only file-based agents.
+		if svc.PlatformA2AAgents != nil || svc.A2AAgents != nil || svc.TeamA2AAgents != nil {
+			ctx = store.WithA2AAgentStores(ctx, &store.A2AAgentStores{
+				Platform: svc.PlatformA2AAgents,
+				Org:      svc.A2AAgents,
+				Team:     svc.TeamA2AAgents,
+			})
+		}
 		cfg, err = a2aclient.LoadA2AAgentConfig(ctx, true)
 	} else {
 		cfg, err = a2aclient.LoadA2AAgentConfig(ctx, false)

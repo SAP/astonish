@@ -183,9 +183,50 @@ func splitFences(src string) []segment {
 func prose(src string, width int, st Styles) string {
 	lines := strings.Split(src, "\n")
 	var out []string
+	// blockStart is true at the top of the input and immediately after a blank
+	// line — the only positions where a CommonMark indented code block may
+	// begin (it cannot interrupt a paragraph).
+	blockStart := true
 	for i := 0; i < len(lines); {
 		line := strings.TrimRight(lines[i], "\r")
 		trim := strings.TrimSpace(line)
+
+		// CommonMark indented code block: a run of lines each indented by at
+		// least 4 spaces, beginning at a block boundary. The model sometimes
+		// emits code this way (e.g. in plan details) instead of using ``` fences;
+		// route it through the same syntax-highlighted CodeBlock renderer so it
+		// gets a gutter and highlighting rather than flat prose.
+		if blockStart && isIndentedCodeLine(line) {
+			var codeLines []string
+			for i < len(lines) {
+				l := strings.TrimRight(lines[i], "\r")
+				if isIndentedCodeLine(l) {
+					codeLines = append(codeLines, dedentCodeLine(l))
+					i++
+					continue
+				}
+				// Blank lines are part of the code block only when followed by
+				// another indented code line; otherwise they terminate it.
+				if strings.TrimSpace(l) == "" {
+					j := i + 1
+					for j < len(lines) && strings.TrimSpace(strings.TrimRight(lines[j], "\r")) == "" {
+						j++
+					}
+					if j < len(lines) && isIndentedCodeLine(strings.TrimRight(lines[j], "\r")) {
+						for i < j {
+							codeLines = append(codeLines, "")
+							i++
+						}
+						continue
+					}
+				}
+				break
+			}
+			body := strings.Join(codeLines, "\n")
+			out = append(out, CodeBlock(body, "", width, st, false))
+			blockStart = false
+			continue
+		}
 
 		// Markdown table: consecutive lines starting with |
 		if isTableRow(trim) {
@@ -200,12 +241,14 @@ func prose(src string, width int, st Styles) string {
 				i++
 			}
 			out = append(out, renderTable(tableLines, width, st))
+			blockStart = false
 			continue
 		}
 
 		if trim == "" {
 			out = append(out, "")
 			i++
+			blockStart = true
 			continue
 		}
 
@@ -220,6 +263,7 @@ func prose(src string, width int, st Styles) string {
 			}
 			out = append(out, st.Muted.Render(strings.Repeat("─", ruleW)))
 			i++
+			blockStart = false
 			continue
 		}
 
@@ -246,12 +290,35 @@ func prose(src string, width int, st Styles) string {
 			out = append(out, wrapStyledPlain(line, width, st.Text, st, true))
 		}
 		i++
+		blockStart = false
 	}
 	return strings.TrimRight(strings.Join(out, "\n"), "\n")
 }
 
 func isTableRow(trim string) bool {
 	return strings.HasPrefix(trim, "|") && strings.Contains(trim[1:], "|")
+}
+
+// isIndentedCodeLine reports whether a line qualifies as a CommonMark indented
+// code line: non-blank content indented by at least 4 leading spaces (a leading
+// tab also counts). Blank lines are handled separately by the caller.
+func isIndentedCodeLine(line string) bool {
+	if strings.TrimSpace(line) == "" {
+		return false
+	}
+	if strings.HasPrefix(line, "\t") {
+		return true
+	}
+	return strings.HasPrefix(line, "    ")
+}
+
+// dedentCodeLine strips the 4-space (or single-tab) code-block margin from a
+// line, preserving any relative indentation beyond it.
+func dedentCodeLine(line string) string {
+	if strings.HasPrefix(line, "\t") {
+		return strings.TrimPrefix(line, "\t")
+	}
+	return strings.TrimPrefix(line, "    ")
 }
 
 func isHorizontalRule(trim string) bool {

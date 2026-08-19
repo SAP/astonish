@@ -446,13 +446,14 @@ func resolveA2ASource(r *http.Request, agentName string, args map[string]any) (a
 
 	client := a2aclient.NewClient(agentCfg, resolver)
 
-	// Fetch agent card to detect protocol version
+	// Fetch and apply the shared card selection so app requests use the advertised
+	// JSON-RPC endpoint and its protocol version as one invocation configuration.
 	card, err := client.FetchAgentCard(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("A2A agent %q: failed to fetch agent card: %w", agentName, err)
 	}
-	if pv := card.DetectProtocolVersion(); pv != "" {
-		client.SetProtocolVersion(pv)
+	if err := client.ApplyAgentCard(card); err != nil {
+		return nil, fmt.Errorf("A2A agent %q: incompatible agent card: %w", agentName, err)
 	}
 
 	// Build and send the message

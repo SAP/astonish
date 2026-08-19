@@ -3,6 +3,7 @@ package a2aclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -31,6 +32,245 @@ func (m *mockResolver) Resolve(name string) (string, string, error) {
 
 func (m *mockResolver) Reload() error {
 	return nil
+}
+
+func TestEndpointURLHelpers(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		wantBase string
+		wantCard string
+	}{
+		{
+			name:     "root base",
+			input:    "https://example.com",
+			wantBase: "https://example.com",
+			wantCard: "https://example.com/.well-known/agent-card.json",
+		},
+		{
+			name:     "root base trailing slash",
+			input:    "https://example.com/",
+			wantBase: "https://example.com",
+			wantCard: "https://example.com/.well-known/agent-card.json",
+		},
+		{
+			name:     "root full card trailing slash",
+			input:    "https://example.com/.well-known/agent-card.json/",
+			wantBase: "https://example.com",
+			wantCard: "https://example.com/.well-known/agent-card.json",
+		},
+		{
+			name:     "subpath base trailing slash",
+			input:    "https://example.com/agents/demo/",
+			wantBase: "https://example.com/agents/demo",
+			wantCard: "https://example.com/agents/demo/.well-known/agent-card.json",
+		},
+		{
+			name:     "subpath full card",
+			input:    "https://example.com/agents/demo/.well-known/agent-card.json",
+			wantBase: "https://example.com/agents/demo",
+			wantCard: "https://example.com/agents/demo/.well-known/agent-card.json",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := NormalizeBaseURL(tt.input); got != tt.wantBase {
+				t.Errorf("NormalizeBaseURL(%q) = %q, want %q", tt.input, got, tt.wantBase)
+			}
+			if got := AgentCardURL(tt.input); got != tt.wantCard {
+				t.Errorf("AgentCardURL(%q) = %q, want %q", tt.input, got, tt.wantCard)
+			}
+			client := NewClient(A2AAgentConfig{URL: tt.input}, nil)
+			if got := client.config.URL; got != tt.wantBase {
+				t.Errorf("NewClient config URL = %q, want %q", got, tt.wantBase)
+			}
+		})
+	}
+}
+
+func TestClientEndpointPaths(t *testing.T) {
+	tests := []struct {
+		name         string
+		configured   func(string) string
+		wantCardPath string
+		wantRPCPath  string
+	}{
+		{"root base", func(base string) string { return base }, "/.well-known/agent-card.json", "/"},
+		{"root base trailing slash", func(base string) string { return base + "/" }, "/.well-known/agent-card.json", "/"},
+		{"root full card", func(base string) string { return base + "/.well-known/agent-card.json" }, "/.well-known/agent-card.json", "/"},
+		{"root full card trailing slash", func(base string) string { return base + "/.well-known/agent-card.json/" }, "/.well-known/agent-card.json", "/"},
+		{"subpath base", func(base string) string { return base + "/agents/demo" }, "/agents/demo/.well-known/agent-card.json", "/agents/demo"},
+		{"subpath base trailing slash", func(base string) string { return base + "/agents/demo/" }, "/agents/demo/.well-known/agent-card.json", "/agents/demo"},
+		{"subpath full card", func(base string) string { return base + "/agents/demo/.well-known/agent-card.json" }, "/agents/demo/.well-known/agent-card.json", "/agents/demo"},
+		{"subpath full card trailing slash", func(base string) string { return base + "/agents/demo/.well-known/agent-card.json/" }, "/agents/demo/.well-known/agent-card.json", "/agents/demo"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.Method {
+				case http.MethodGet:
+					if r.URL.Path != tt.wantCardPath {
+						t.Errorf("card GET path = %q, want %q", r.URL.Path, tt.wantCardPath)
+					}
+					_ = json.NewEncoder(w).Encode(a2a.AgentCard{Name: "test"})
+				case http.MethodPost:
+					if r.URL.Path != tt.wantRPCPath {
+						t.Errorf("JSON-RPC POST path = %q, want %q", r.URL.Path, tt.wantRPCPath)
+					}
+					var req a2a.JSONRPCRequest
+					if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+						t.Errorf("decode JSON-RPC request: %v", err)
+					}
+					_ = json.NewEncoder(w).Encode(a2a.JSONRPCResponse{
+						JSONRPC: "2.0",
+						ID:      req.ID,
+						Result: a2a.Task{
+							ID:     "task-1",
+							Status: a2a.TaskStatus{State: a2a.TaskStateCompleted},
+						},
+					})
+				default:
+					t.Errorf("unexpected method %s", r.Method)
+				}
+			}))
+			defer server.Close()
+
+			client := NewClient(A2AAgentConfig{URL: tt.configured(server.URL)}, nil)
+			if _, err := client.FetchAgentCard(context.Background()); err != nil {
+				t.Fatalf("FetchAgentCard failed: %v", err)
+			}
+			if _, err := client.SendMessage(context.Background(), a2a.SendMessageParams{
+				Message: a2a.Message{Role: "user", Parts: []a2a.Part{a2a.TextPart{Text: "hello"}}},
+			}); err != nil {
+				t.Fatalf("SendMessage failed: %v", err)
+			}
+		})
+	}
+}
+
+func TestFullAgentCardURLGeneratesAndInvokesTools(t *testing.T) {
+	var cardRequests, rpcRequests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			cardRequests++
+			if r.URL.Path != "/graph-agent/.well-known/agent-card.json" {
+				t.Errorf("card GET path = %q, want %q", r.URL.Path, "/graph-agent/.well-known/agent-card.json")
+			}
+			_ = json.NewEncoder(w).Encode(a2a.AgentCard{
+				Name: "graph-agent",
+				Skills: []a2a.Skill{
+					{ID: "query_graph", Name: "Query Graph", Description: "Queries the graph"},
+				},
+			})
+		case http.MethodPost:
+			rpcRequests++
+			if r.URL.Path != "/graph-agent" {
+				t.Errorf("tool JSON-RPC POST path = %q, want %q", r.URL.Path, "/graph-agent")
+			}
+			var req a2a.JSONRPCRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode JSON-RPC request: %v", err)
+			}
+			_ = json.NewEncoder(w).Encode(a2a.JSONRPCResponse{
+				JSONRPC: "2.0",
+				ID:      req.ID,
+				Result: a2a.Task{
+					ID: "task-1",
+					Status: a2a.TaskStatus{
+						State:   a2a.TaskStateCompleted,
+						Message: &a2a.Message{Role: "agent", Parts: []a2a.Part{a2a.TextPart{Text: "done"}}},
+					},
+				},
+			})
+		default:
+			t.Errorf("unexpected method %s", r.Method)
+		}
+	}))
+	defer server.Close()
+
+	cfg := &A2AClientConfig{Agents: map[string]A2AAgentConfig{
+		"graph-agent": {
+			Name: "graph-agent",
+			URL:  server.URL + "/graph-agent/.well-known/agent-card.json",
+		},
+	}}
+	mgr := NewManager(cfg)
+	if err := mgr.Initialize(context.Background()); err != nil {
+		t.Fatalf("Initialize failed: %v", err)
+	}
+
+	card, err := mgr.GetAgentCard("graph-agent")
+	if err != nil {
+		t.Fatalf("GetAgentCard failed: %v", err)
+	}
+	client, err := mgr.GetClient("graph-agent")
+	if err != nil {
+		t.Fatalf("GetClient failed: %v", err)
+	}
+	tools := GenerateTools("graph-agent", card, client)
+	if len(tools) != 1 {
+		t.Fatalf("generated %d tools, want 1", len(tools))
+	}
+	if tools[0].Name() != "a2a_graph_agent_query_graph" {
+		t.Errorf("tool name = %q, want %q", tools[0].Name(), "a2a_graph_agent_query_graph")
+	}
+	result, err := tools[0].Run(context.Background(), map[string]any{"message": "query"})
+	if err != nil {
+		t.Fatalf("tool Run failed: %v", err)
+	}
+	if result["response"] != "done" {
+		t.Errorf("tool response = %v, want %q", result["response"], "done")
+	}
+	if cardRequests != 1 || rpcRequests != 1 {
+		t.Errorf("requests = card:%d rpc:%d, want card:1 rpc:1", cardRequests, rpcRequests)
+	}
+}
+
+func TestApplyAgentCardRoutesRPCAndStreamToAdvertisedPath(t *testing.T) {
+	var rpcPaths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rpcPaths = append(rpcPaths, r.URL.Path)
+		if r.Header.Get("Accept") == "text/event-stream" {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = fmt.Fprint(w, "event: status_update\ndata: {\"jsonrpc\":\"2.0\",\"result\":{\"taskId\":\"task-1\",\"status\":{\"state\":\"completed\",\"timestamp\":\"0001-01-01T00:00:00Z\"}}}\n\n")
+			return
+		}
+		var req a2a.JSONRPCRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		_ = json.NewEncoder(w).Encode(a2a.JSONRPCResponse{
+			JSONRPC: "2.0", ID: req.ID,
+			Result: a2a.Task{ID: "task-1", Status: a2a.TaskStatus{State: a2a.TaskStateCompleted}},
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient(A2AAgentConfig{URL: server.URL + "/discovery-root"}, nil)
+	card := &a2a.AgentCard{SupportedInterfaces: []a2a.AgentInterface{{
+		URL: server.URL + "/advertised/rpc/", ProtocolBinding: "JSONRPC", ProtocolVersion: "0.3",
+	}}}
+	if err := client.ApplyAgentCard(card); err != nil {
+		t.Fatalf("ApplyAgentCard failed: %v", err)
+	}
+	if _, err := client.SendMessage(context.Background(), a2a.SendMessageParams{
+		Message: a2a.Message{Role: "user", Parts: []a2a.Part{a2a.TextPart{Text: "hello"}}},
+	}); err != nil {
+		t.Fatalf("SendMessage failed: %v", err)
+	}
+	stream, err := client.SendMessageStream(context.Background(), a2a.SendMessageParams{
+		Message: a2a.Message{Role: "user", Parts: []a2a.Part{a2a.TextPart{Text: "hello"}}},
+	})
+	if err != nil {
+		t.Fatalf("SendMessageStream failed: %v", err)
+	}
+	if event := <-stream; event.Error != nil {
+		t.Fatalf("stream event failed: %v", event.Error)
+	}
+	if len(rpcPaths) != 2 || rpcPaths[0] != "/advertised/rpc/" || rpcPaths[1] != "/advertised/rpc/" {
+		t.Fatalf("request paths = %v, want advertised path preserved twice", rpcPaths)
+	}
 }
 
 func TestFetchAgentCard(t *testing.T) {
@@ -605,6 +845,74 @@ func TestV1NormalizeTaskState(t *testing.T) {
 	}
 }
 
+func TestSelectCompatibleInterface(t *testing.T) {
+	tests := []struct {
+		name      string
+		card      a2a.AgentCard
+		want      a2a.AgentInterface
+		wantError bool
+	}{
+		{
+			name: "selects first compatible interface in advertised order",
+			card: a2a.AgentCard{SupportedInterfaces: []a2a.AgentInterface{
+				{URL: "https://grpc.example", ProtocolBinding: "GRPC", ProtocolVersion: "1.0"},
+				{URL: "https://first.example", ProtocolBinding: "JSONRPC", ProtocolVersion: "1.1"},
+				{URL: "https://second.example", ProtocolBinding: "jsonrpc", ProtocolVersion: "1.2"},
+			}},
+			want: a2a.AgentInterface{URL: "https://first.example", ProtocolBinding: "JSONRPC", ProtocolVersion: "1.1"},
+		},
+		{
+			name: "binding comparison is case insensitive",
+			card: a2a.AgentCard{SupportedInterfaces: []a2a.AgentInterface{
+				{URL: "https://example.com", ProtocolBinding: "jsonrpc", ProtocolVersion: "1.0"},
+			}},
+			want: a2a.AgentInterface{URL: "https://example.com", ProtocolBinding: "jsonrpc", ProtocolVersion: "1.0"},
+		},
+		{
+			name: "empty binding is compatible",
+			card: a2a.AgentCard{SupportedInterfaces: []a2a.AgentInterface{
+				{URL: "https://example.com", ProtocolVersion: "1.0"},
+			}},
+			want: a2a.AgentInterface{URL: "https://example.com", ProtocolVersion: "1.0"},
+		},
+		{
+			name: "legacy card falls back to top level fields",
+			card: a2a.AgentCard{URL: "https://legacy.example", ProtocolVersion: "0.3"},
+			want: a2a.AgentInterface{URL: "https://legacy.example", ProtocolBinding: "JSONRPC", ProtocolVersion: "0.3"},
+		},
+		{
+			name: "non-empty incompatible interfaces return explicit error",
+			card: a2a.AgentCard{
+				URL:             "https://legacy.example",
+				ProtocolVersion: "0.3",
+				SupportedInterfaces: []a2a.AgentInterface{
+					{URL: "https://grpc.example", ProtocolBinding: "GRPC", ProtocolVersion: "1.0"},
+					{URL: "https://http.example", ProtocolBinding: "HTTP+JSON", ProtocolVersion: "1.0"},
+				},
+			},
+			wantError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := tt.card.SelectCompatibleInterface()
+			if tt.wantError {
+				if !errors.Is(err, a2a.ErrNoCompatibleAgentInterface) {
+					t.Fatalf("SelectCompatibleInterface() error = %v, want ErrNoCompatibleAgentInterface", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("SelectCompatibleInterface() unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("SelectCompatibleInterface() = %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestDetectProtocolVersionFromSupportedInterfaces(t *testing.T) {
 	// Simulates the SAP Autonomous Operations agent card structure
 	card := a2a.AgentCard{
@@ -625,18 +933,30 @@ func TestDetectProtocolVersionFromSupportedInterfaces(t *testing.T) {
 	}
 }
 
-func TestDetectProtocolVersionTopLevelTakesPrecedence(t *testing.T) {
+func TestDetectProtocolVersionUsesSelectedInterface(t *testing.T) {
 	card := a2a.AgentCard{
 		Name:            "Agent",
 		ProtocolVersion: "2.0",
 		SupportedInterfaces: []a2a.AgentInterface{
-			{ProtocolVersion: "1.0"},
+			{ProtocolBinding: "GRPC", ProtocolVersion: "9.0"},
+			{ProtocolBinding: "JSONRPC", ProtocolVersion: "1.0"},
 		},
 	}
 
 	pv := card.DetectProtocolVersion()
-	if pv != "2.0" {
-		t.Errorf("expected top-level protocolVersion '2.0' to take precedence, got %q", pv)
+	if pv != "1.0" {
+		t.Errorf("expected selected interface protocolVersion '1.0', got %q", pv)
+	}
+}
+
+func TestDetectProtocolVersionLegacyTopLevel(t *testing.T) {
+	card := a2a.AgentCard{
+		Name:            "Agent",
+		ProtocolVersion: "0.3",
+	}
+
+	if pv := card.DetectProtocolVersion(); pv != "0.3" {
+		t.Errorf("expected legacy top-level protocolVersion '0.3', got %q", pv)
 	}
 }
 
@@ -656,7 +976,8 @@ func TestV1SendMessageWithSupportedInterfaces(t *testing.T) {
 	// End-to-end test: agent card has supportedInterfaces with protocolVersion 1.0
 	// Verify the manager detects it and the client sends the correct method
 	var receivedMethod string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/.well-known/agent-card.json" {
 			// Return a card with supportedInterfaces (like SAP AO agent)
 			card := map[string]any{
@@ -664,7 +985,7 @@ func TestV1SendMessageWithSupportedInterfaces(t *testing.T) {
 				"version": "0.1.0",
 				"supportedInterfaces": []map[string]any{
 					{
-						"url":             "https://example.com/",
+						"url":             server.URL + "/rpc/v1",
 						"protocolBinding": "JSONRPC",
 						"protocolVersion": "1.0",
 					},
@@ -679,6 +1000,9 @@ func TestV1SendMessageWithSupportedInterfaces(t *testing.T) {
 		}
 
 		// RPC endpoint
+		if r.URL.Path != "/rpc/v1" {
+			t.Errorf("RPC path = %q, want /rpc/v1", r.URL.Path)
+		}
 		body, _ := io.ReadAll(r.Body)
 		var rpcReq struct {
 			Method string `json:"method"`

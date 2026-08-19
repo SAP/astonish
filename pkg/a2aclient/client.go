@@ -19,34 +19,93 @@ import (
 
 // StreamEvent represents an event received from an SSE stream.
 type StreamEvent struct {
-	Type           string                        // "status_update" or "artifact_update"
-	StatusUpdate   *a2a.TaskStatusUpdateEvent    `json:"statusUpdate,omitempty"`
-	ArtifactUpdate *a2a.TaskArtifactUpdateEvent  `json:"artifactUpdate,omitempty"`
-	Error          error                         `json:"-"`
+	Type           string                       // "status_update" or "artifact_update"
+	StatusUpdate   *a2a.TaskStatusUpdateEvent   `json:"statusUpdate,omitempty"`
+	ArtifactUpdate *a2a.TaskArtifactUpdateEvent `json:"artifactUpdate,omitempty"`
+	Error          error                        `json:"-"`
 }
 
 // Client is an HTTP client for communicating with a remote A2A agent.
 type Client struct {
-	httpClient      *http.Client
-	config          A2AAgentConfig
-	resolver        credentials.CredentialResolver
-	requestID       atomic.Int64
+	httpClient *http.Client
+	config     A2AAgentConfig
+	resolver   credentials.CredentialResolver
+	requestID  atomic.Int64
+	invocation atomic.Pointer[invocationConfig]
+}
+
+type invocationConfig struct {
+	endpointURL     string
 	protocolVersion string
 }
 
 // SetProtocolVersion sets the A2A protocol version detected from the agent card.
 func (c *Client) SetProtocolVersion(v string) {
-	c.protocolVersion = v
+	for {
+		current := c.invocation.Load()
+		next := &invocationConfig{endpointURL: c.config.URL, protocolVersion: v}
+		if current != nil {
+			next.endpointURL = current.endpointURL
+		}
+		if c.invocation.CompareAndSwap(current, next) {
+			return
+		}
+	}
+}
+
+// ApplyAgentCard atomically applies the invocation endpoint and protocol version
+// selected from an agent card. Discovery continues to use the configured URL.
+func (c *Client) ApplyAgentCard(card *a2a.AgentCard) error {
+	selected, err := card.SelectCompatibleInterface()
+	if err != nil {
+		return fmt.Errorf("a2aclient: failed to select agent interface: %w", err)
+	}
+
+	endpointURL := selected.URL
+	if endpointURL == "" {
+		endpointURL = c.config.URL
+	}
+	c.invocation.Store(&invocationConfig{
+		endpointURL:     endpointURL,
+		protocolVersion: selected.ProtocolVersion,
+	})
+	return nil
+}
+
+func (c *Client) invocationConfig() invocationConfig {
+	if selected := c.invocation.Load(); selected != nil {
+		return *selected
+	}
+	return invocationConfig{endpointURL: c.config.URL}
 }
 
 // isV1 returns true if the remote agent uses A2A v1.0 protocol.
 func (c *Client) isV1() bool {
-	v := c.protocolVersion
+	return isV1Protocol(c.invocationConfig().protocolVersion)
+}
+
+func isV1Protocol(v string) bool {
 	return v == "1.0" || v == "1" || strings.HasPrefix(v, "1.")
+}
+
+const agentCardPath = "/.well-known/agent-card.json"
+
+// NormalizeBaseURL returns the canonical A2A agent base URL.
+// It removes trailing slashes and a terminal agent-card well-known path.
+func NormalizeBaseURL(rawURL string) string {
+	baseURL := strings.TrimRight(rawURL, "/")
+	baseURL = strings.TrimSuffix(baseURL, agentCardPath)
+	return strings.TrimRight(baseURL, "/")
+}
+
+// AgentCardURL returns the agent-card well-known URL for an A2A agent URL.
+func AgentCardURL(rawURL string) string {
+	return NormalizeBaseURL(rawURL) + agentCardPath
 }
 
 // NewClient creates a new A2A client for the given agent configuration.
 func NewClient(cfg A2AAgentConfig, resolver credentials.CredentialResolver) *Client {
+	cfg.URL = NormalizeBaseURL(cfg.URL)
 	timeout := cfg.Timeout
 	if timeout == 0 {
 		timeout = 30 * time.Second
@@ -60,7 +119,7 @@ func NewClient(cfg A2AAgentConfig, resolver credentials.CredentialResolver) *Cli
 
 // FetchAgentCard retrieves the agent card from the well-known endpoint.
 func (c *Client) FetchAgentCard(ctx context.Context) (*a2a.AgentCard, error) {
-	url := strings.TrimRight(c.config.URL, "/") + "/.well-known/agent-card.json"
+	url := AgentCardURL(c.config.URL)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -92,15 +151,17 @@ func (c *Client) FetchAgentCard(ctx context.Context) (*a2a.AgentCard, error) {
 
 // SendMessage sends a message to the remote agent and returns the resulting task.
 func (c *Client) SendMessage(ctx context.Context, params a2a.SendMessageParams) (*a2a.Task, error) {
+	invocation := c.invocationConfig()
+	v1 := isV1Protocol(invocation.protocolVersion)
 	method := "message/send"
 	var rpcParams any = params
 
-	if c.isV1() {
+	if v1 {
 		method = "SendMessage"
 		rpcParams = c.buildV1Params(params)
 	}
 
-	resp, err := c.doJSONRPC(ctx, method, rpcParams)
+	resp, err := c.doJSONRPCAt(ctx, invocation, method, rpcParams)
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +177,7 @@ func (c *Client) SendMessage(ctx context.Context, params a2a.SendMessageParams) 
 	}
 
 	var task a2a.Task
-	if c.isV1() {
+	if v1 {
 		task, err = parseV1TaskResponse(resultBytes)
 		if err != nil {
 			return nil, err
@@ -361,7 +422,7 @@ func (c *Client) SendMessageStream(ctx context.Context, params a2a.SendMessagePa
 		return nil, err
 	}
 
-	url := strings.TrimRight(c.config.URL, "/")
+	url := c.invocationConfig().endpointURL
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(reqBody))
 	if err != nil {
 		return nil, fmt.Errorf("a2aclient: failed to create stream request: %w", err)
@@ -445,19 +506,23 @@ func (c *Client) CancelTask(ctx context.Context, taskID string) error {
 
 // doJSONRPC performs a JSON-RPC 2.0 call to the remote agent.
 func (c *Client) doJSONRPC(ctx context.Context, method string, params any) (*a2a.JSONRPCResponse, error) {
+	return c.doJSONRPCAt(ctx, c.invocationConfig(), method, params)
+}
+
+func (c *Client) doJSONRPCAt(ctx context.Context, invocation invocationConfig, method string, params any) (*a2a.JSONRPCResponse, error) {
 	reqBody, err := c.buildJSONRPCBody(method, params)
 	if err != nil {
 		return nil, err
 	}
 
-	url := strings.TrimRight(c.config.URL, "/")
+	url := invocation.endpointURL
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(reqBody))
 	if err != nil {
 		return nil, fmt.Errorf("a2aclient: failed to create request: %w", err)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	if c.isV1() {
+	if isV1Protocol(invocation.protocolVersion) {
 		req.Header.Set("A2A-Version", "1.0")
 	}
 
@@ -574,7 +639,7 @@ func (c *Client) readSSEStream(ctx context.Context, body io.ReadCloser, ch chan<
 func (c *Client) parseSSEEvent(eventType, data string) StreamEvent {
 	// Try to parse as JSON-RPC response first
 	var rpcResp struct {
-		Result json.RawMessage `json:"result"`
+		Result json.RawMessage   `json:"result"`
 		Error  *a2a.JSONRPCError `json:"error,omitempty"`
 	}
 

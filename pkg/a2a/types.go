@@ -4,6 +4,9 @@ package a2a
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
 	"time"
 )
 
@@ -301,17 +304,46 @@ type AgentInterface struct {
 	ProtocolVersion string `json:"protocolVersion,omitempty"`
 }
 
-// DetectProtocolVersion returns the protocol version from the agent card,
-// checking (in order): top-level protocolVersion, supportedInterfaces[0].protocolVersion.
-// Returns empty string if no protocol version is found.
+// ErrNoCompatibleAgentInterface indicates that a card advertises interfaces,
+// but none use a protocol binding supported by this client.
+var ErrNoCompatibleAgentInterface = errors.New("no compatible agent interface")
+
+// SelectCompatibleInterface returns the first compatible interface in card order.
+// JSON-RPC binding matching is case-insensitive. A missing binding is treated as
+// JSON-RPC for compatibility with early v1 agent cards.
+//
+// Cards without supportedInterfaces use the legacy top-level URL and protocol
+// version. A non-empty supportedInterfaces list must contain a compatible entry.
+func (c *AgentCard) SelectCompatibleInterface() (AgentInterface, error) {
+	if len(c.SupportedInterfaces) == 0 {
+		return AgentInterface{
+			URL:             c.URL,
+			ProtocolBinding: "JSONRPC",
+			ProtocolVersion: c.ProtocolVersion,
+		}, nil
+	}
+
+	for _, agentInterface := range c.SupportedInterfaces {
+		binding := strings.TrimSpace(agentInterface.ProtocolBinding)
+		if binding == "" || strings.EqualFold(binding, "JSONRPC") {
+			return agentInterface, nil
+		}
+	}
+
+	return AgentInterface{}, fmt.Errorf("%w: supportedInterfaces contains no JSONRPC binding", ErrNoCompatibleAgentInterface)
+}
+
+// DetectProtocolVersion returns the protocol version selected from the agent card.
+// It prefers the first compatible supported interface in card order. Legacy cards
+// without supportedInterfaces fall back to the top-level protocolVersion.
+// Returns empty string if no protocol version is found or advertised interfaces
+// are incompatible.
 func (c *AgentCard) DetectProtocolVersion() string {
-	if c.ProtocolVersion != "" {
-		return c.ProtocolVersion
+	agentInterface, err := c.SelectCompatibleInterface()
+	if err != nil {
+		return ""
 	}
-	if len(c.SupportedInterfaces) > 0 && c.SupportedInterfaces[0].ProtocolVersion != "" {
-		return c.SupportedInterfaces[0].ProtocolVersion
-	}
-	return ""
+	return agentInterface.ProtocolVersion
 }
 
 // AgentProvider identifies the organization providing the agent.

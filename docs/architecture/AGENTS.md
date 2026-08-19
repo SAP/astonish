@@ -35,6 +35,10 @@ This directory is the **authoritative reference** for cross-cutting design decis
 ### Session behavior
 - `smart-compaction.md` — session compaction algorithm.
 
+## Package implementation guides
+
+Use the nearest package guide for implementation contracts: [`pkg/config`](../../pkg/config/AGENTS.md), [`pkg/mcp`](../../pkg/mcp/AGENTS.md), [`pkg/memory`](../../pkg/memory/AGENTS.md), [`pkg/provider`](../../pkg/provider/AGENTS.md), [`pkg/scheduler`](../../pkg/scheduler/AGENTS.md), [`pkg/store`](../../pkg/store/AGENTS.md), [`web/src/api`](../../web/src/api/AGENTS.md), and [`web/src/components/chat`](../../web/src/components/chat/AGENTS.md). Architecture documents remain authoritative for cross-cutting invariants.
+
 ## Rules for this directory
 1. **These docs are versioned invariants, not tutorials.** Keep them precise, terse, and code-adjacent (reference file paths, function names, and PR/commit hashes when useful).
 2. **A code change that alters a documented invariant must update the doc in the same commit.**

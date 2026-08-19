@@ -20,9 +20,12 @@ Before changing a subsystem, read the nearest nested `AGENTS.md`; those files co
 - `pkg/launcher/` — composition roots for local code TUI, remote chat TUI, and server/daemon launch paths.
 - `pkg/tui/`, `pkg/ui/` — Bubble Tea terminal clients and reusable terminal rendering.
 - `pkg/tools/`, `pkg/browser/`, `pkg/codeintel/` — built-in tools, CDP browser automation, and source-code intelligence.
-- `pkg/provider/`, `pkg/mcp/`, `pkg/skills/` — model providers, MCP integration, and skill loading.
-- `pkg/store/` — storage interfaces and implementations/routing; tenant scope is a core invariant.
-- `pkg/memory/`, `pkg/session/`, `pkg/fleet/`, `pkg/drill/`, `pkg/channels/` — major domain subsystems.
+- [`pkg/provider/`](pkg/provider/AGENTS.md), [`pkg/mcp/`](pkg/mcp/AGENTS.md), [`pkg/skills/`](pkg/skills/AGENTS.md) — model providers, MCP integration, and skill loading.
+- [`pkg/config/`](pkg/config/AGENTS.md) — configuration loading, defaults, and environment overrides.
+- [`pkg/store/`](pkg/store/AGENTS.md) — storage interfaces and implementations/routing; tenant scope is a core invariant.
+- [`pkg/memory/`](pkg/memory/AGENTS.md), `pkg/session/`, `pkg/fleet/`, `pkg/drill/`, `pkg/channels/` — major domain subsystems.
+- [`pkg/scheduler/`](pkg/scheduler/AGENTS.md) — scheduled-job registration and execution.
+- [`web/src/api/`](web/src/api/AGENTS.md), [`web/src/components/chat/`](web/src/components/chat/AGENTS.md) — Studio transport contracts and chat rendering/interaction guidance.
 - `pkg/sandbox/` — backend-neutral sandbox contracts plus Incus/Kubernetes/OpenShell implementations. `Backend` implementations must be concurrency-safe and lifecycle methods are intentionally idempotent.
 - `ent/{platform,org,team,personal}/` — four persistence scopes. Only `schema/*.go` and `generate.go` are normally hand-edited; the remaining Ent files are generated.
 - `web/src/` — Studio SPA. Entry points are `main.tsx` and `App.tsx`; `api/` contains REST/SSE clients and `components/` contains UI.

@@ -18,5 +18,11 @@ Encrypted credential store, secret scanner, pending vault, OAuth token cache. An
 1. Adding a new credential type? Extend `CredentialType`, ent schema (org or personal scope), and the scanner's redaction rules together.
 2. Changing encryption? Update key rotation policy in `docs/architecture/multi-tenant-platform.md` at the same time.
 
+## Verification
+
+Run `go test ./pkg/credentials/...`; include the affected store/MCP/tool package when changing resolution or redaction.
+
 ## References
-- `docs/architecture/multi-tenant-platform.md` — envelope encryption, six enforcement points.
+- [`pkg/store/AGENTS.md`](../store/AGENTS.md) — personal/team store composition and tenant scope.
+- [`pkg/mcp/AGENTS.md`](../mcp/AGENTS.md) — runtime placeholder resolution and secret-safe diagnostics.
+- [`docs/architecture/multi-tenant-platform.md`](../../docs/architecture/multi-tenant-platform.md) — platform encryption and tenant enforcement.

@@ -189,6 +189,7 @@ type model struct {
 	modelPicker      modelPickerState
 	providerPicker   providerPickerState
 	webSearchPicker  webSearchPickerState
+	skillsPicker     skillsPickerState
 	fileViewer       fileViewerState
 	delegationDetail delegationDetailState
 	// slash command completion popup (active when composer starts with /)
@@ -419,6 +420,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.webSearchPicker.open {
 			return m.handleWebSearchPickerKey(msg)
 		}
+		if m.skillsPicker.open {
+			return m.handleSkillsPickerKey(msg)
+		}
 		if m.rollback.open {
 			return m.handleRollbackKey(msg)
 		}
@@ -636,6 +640,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case perplexityOptionsLoadedMsg:
 		return m.applyPerplexityOptionsLoaded(msg)
+
+	case skillsLoadedMsg:
+		return m.applySkillsLoaded(msg)
 
 	case perplexityConfiguredMsg:
 		return m.applyPerplexityConfigured(msg)
@@ -858,6 +865,9 @@ func (m *model) syncSlashCompletion() {
 	}
 	if m.compactionCap() != nil {
 		extra = append(extra, compactSlashCommand)
+	}
+	if m.localSkillsCap() != nil {
+		extra = append(extra, skillsSlashCommand)
 	}
 	matches := filterSlashCommands(query, extra...)
 	cursor := m.slash.cursor
@@ -1137,7 +1147,7 @@ func isClipboardPasteKey(msg tea.KeyMsg) bool {
 }
 
 func (m model) tryPasteImage() (tea.Model, tea.Cmd, bool) {
-	if m.sessions.open || m.rollback.open || m.modelPicker.open || m.providerPicker.open || m.webSearchPicker.open || m.fileViewer.open {
+	if m.sessions.open || m.rollback.open || m.modelPicker.open || m.providerPicker.open || m.webSearchPicker.open || m.skillsPicker.open || m.fileViewer.open {
 		return m, nil, false
 	}
 	if m.tr.Streaming && !m.tr.Awaiting {
@@ -1159,7 +1169,7 @@ func (m model) tryPasteImage() (tea.Model, tea.Cmd, bool) {
 }
 
 func (m model) insertPastedImage(data []byte, mimeType string) (tea.Model, tea.Cmd) {
-	if m.sessions.open || m.rollback.open || m.modelPicker.open || m.providerPicker.open || m.webSearchPicker.open || m.fileViewer.open {
+	if m.sessions.open || m.rollback.open || m.modelPicker.open || m.providerPicker.open || m.webSearchPicker.open || m.skillsPicker.open || m.fileViewer.open {
 		return m, nil
 	}
 	prevH := m.composerTextHeight()
@@ -1183,7 +1193,7 @@ func (m model) insertPastedImage(data []byte, mimeType string) (tea.Model, tea.C
 }
 
 func (m model) handlePaste(text string) (tea.Model, tea.Cmd) {
-	if m.sessions.open || m.rollback.open || m.modelPicker.open || m.providerPicker.open || m.webSearchPicker.open || m.fileViewer.open {
+	if m.sessions.open || m.rollback.open || m.modelPicker.open || m.providerPicker.open || m.webSearchPicker.open || m.skillsPicker.open || m.fileViewer.open {
 		return m, nil
 	}
 	if m.tr.Streaming && !m.tr.Awaiting {
@@ -1846,7 +1856,7 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 	m.ta.Reset()
 	switch {
 	case text == "/help" || text == "/?":
-		m.tr.Apply(events.NewSystem(helpText(m.providerAdmin() != nil, m.webSearchAdmin() != nil, m.rollbackCap() != nil, m.compactionCap() != nil)))
+		m.tr.Apply(events.NewSystem(helpText(m.providerAdmin() != nil, m.webSearchAdmin() != nil, m.rollbackCap() != nil, m.compactionCap() != nil, m.localSkillsCap() != nil)))
 	case text == "/files":
 		cwd, _ := os.Getwd()
 		m.tr.Apply(events.NewSystem("Type `@` plus part of a local path to attach file context from " + cwd + "."))
@@ -1873,6 +1883,8 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		return m.openRollbackPicker()
 	case text == "/compact":
 		return m.runCompact()
+	case text == "/skills":
+		return m.openSkillsPicker()
 	default:
 		// Pass through to backend as a normal message so server/local slash handlers can run later.
 		m.history = append(m.history, text)
@@ -1896,7 +1908,8 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func helpText(providerAdmin bool, webSearch bool, rollback bool, compaction bool) string {
+func helpText(providerAdmin bool, webSearch bool, rollback bool, compaction bool, localSkillsCapability ...bool) string {
+	localSkills := len(localSkillsCapability) > 0 && localSkillsCapability[0]
 	providerLine := ""
 	if providerAdmin {
 		providerLine = "\n  /provider      Manage local providers (add/remove)"
@@ -1913,12 +1926,16 @@ func helpText(providerAdmin bool, webSearch bool, rollback bool, compaction bool
 	if compaction {
 		compactLine = "\n  /compact       Compact the conversation context to free up the window"
 	}
+	skillsLine := ""
+	if localSkills {
+		skillsLine = "\n  /skills        List local runtime skills"
+	}
 	return strings.TrimSpace(`
 Commands:
   /help          Show this help (/?)
   /status        Show session / provider / model
   /sessions      Open sessions picker (also ctrl+l)
-  /model         Choose provider and model` + providerLine + webSearchLine + rollbackLine + compactLine + `
+  /model         Choose provider and model` + providerLine + webSearchLine + rollbackLine + compactLine + skillsLine + `
   /new           Start a new session (also ctrl+n)
   /files         Show @file context help
   /plan          Toggle plan-only mode (also shift+tab)
@@ -3321,7 +3338,7 @@ func (m model) viewContent() string {
 
 	// Completion popups sit just above the composer (filter-as-you-type).
 	composerBlock := m.renderComposer()
-	if !m.tr.Awaiting && !m.sessions.open && !m.rollback.open && !m.modelPicker.open && !m.providerPicker.open && !m.webSearchPicker.open {
+	if !m.tr.Awaiting && !m.sessions.open && !m.rollback.open && !m.modelPicker.open && !m.providerPicker.open && !m.webSearchPicker.open && !m.skillsPicker.open {
 		switch {
 		case m.slash.active && len(m.slash.matches) > 0:
 			composerBlock = lipgloss.JoinVertical(lipgloss.Left,
@@ -3383,6 +3400,9 @@ func (m model) viewContent() string {
 			lipgloss.WithWhitespaceChars(" "),
 			lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(lipgloss.Color("#000000"))),
 		))
+	}
+	if m.skillsPicker.open {
+		return m.renderSkillsOverlay()
 	}
 	if m.rollback.open {
 		overlay := m.renderRollbackOverlay()

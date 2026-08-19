@@ -43,6 +43,10 @@ type ChannelManager struct {
 	modelName    string
 	toolCount    int
 
+	// Filesystem skills are loaded once when the manager is created, then used
+	// as the base beneath request-scoped platform DB skills.
+	filesystemSkills []skills.Skill
+
 	// LLM provider pool for per-message provider resolution.
 	// When set, each inbound message resolves the effective provider from
 	// the 3-tier DB cascade (Platform → Org → Team) and caches LLM instances.
@@ -210,9 +214,10 @@ type FleetSessionStartResult struct {
 
 // ChannelManagerConfig holds optional configuration for NewChannelManager.
 type ChannelManagerConfig struct {
-	ProviderName string
-	ModelName    string
-	ToolCount    int
+	ProviderName     string
+	ModelName        string
+	ToolCount        int
+	FilesystemSkills []skills.Skill
 }
 
 // NewChannelManager creates a new ChannelManager with the given ChatAgent
@@ -237,6 +242,7 @@ func NewChannelManager(chatAgent *agent.ChatAgent, sessSvc session.Service, logg
 		m.providerName = cfg.ProviderName
 		m.modelName = cfg.ModelName
 		m.toolCount = cfg.ToolCount
+		m.filesystemSkills = append([]skills.Skill(nil), cfg.FilesystemSkills...)
 	}
 	return m
 }
@@ -711,12 +717,10 @@ func (m *ChannelManager) handleInbound(ctx context.Context, msg InboundMessage) 
 	if pinnedGroups := m.consumePinnedToolGroups(route.SessionKey); len(pinnedGroups) > 0 {
 		overrides.PinnedToolGroups = pinnedGroups
 	}
-	// Build merged skill index (platform + org + team) so the LLM knows about
-	// all available skills — matching parity with the Studio Chat path.
+	// Build the full runtime cascade from the filesystem base and platform-only
+	// request stores. Personal/code mode has no SkillStores in its context.
 	if ss := store.SkillStoresFromContext(ctx); ss != nil {
-		if idx := buildChannelSkillIndex(ctx, ss); idx != "" {
-			overrides.SkillIndex = idx
-		}
+		overrides.SkillIndex = buildChannelSkillIndex(ctx, m.filesystemSkills, ss)
 	}
 	ctx = agent.WithPromptOverrides(ctx, overrides)
 
@@ -1343,80 +1347,57 @@ func (m *ChannelManager) sendTypingLoop(ctx context.Context, ch Channel, target 
 	}
 }
 
-// buildChannelSkillIndex constructs a merged skill index from all available
-// skill stores (platform + org + team) for injection into the system prompt.
-// This gives channel agents the same skill awareness as Studio Chat.
-func buildChannelSkillIndex(ctx context.Context, ss *store.SkillStores) string {
-	var all []skills.Skill
+// buildChannelSkillIndex overlays platform, org, and team DB skills on the
+// preloaded filesystem base. Names are matched case-insensitively and later
+// scopes win, yielding one rendered entry per skill name.
+func buildChannelSkillIndex(ctx context.Context, filesystem []skills.Skill, ss *store.SkillStores) string {
+	all := append([]skills.Skill(nil), filesystem...)
+	if ss == nil {
+		return skills.BuildSkillIndex(all)
+	}
 
-	// Platform skills (base layer, inherited by all orgs/teams)
-	if ss.Platform != nil {
-		if platformSkills, err := ss.Platform.LoadAll(ctx); err == nil {
-			for _, s := range platformSkills {
-				all = append(all, skills.Skill{
-					Name:        s.Name,
-					Description: s.Description,
-					OS:          s.OS,
-					RequireBins: s.RequireBins,
-					RequireEnv:  s.RequireEnv,
-					Source:      "platform",
-				})
-			}
+	for _, tier := range []struct {
+		name  string
+		store store.SkillStore
+	}{
+		{name: "platform", store: ss.Platform},
+		{name: "org", store: ss.Org},
+		{name: "team", store: ss.Team},
+	} {
+		if tier.store == nil {
+			continue
+		}
+		stored, err := tier.store.LoadAll(ctx)
+		if err != nil {
+			continue
+		}
+		for _, s := range stored {
+			all = append(all, skills.Skill{
+				Name:        s.Name,
+				Description: s.Description,
+				OS:          s.OS,
+				RequireBins: s.RequireBins,
+				RequireEnv:  s.RequireEnv,
+				Source:      tier.name,
+			})
 		}
 	}
 
-	// Org skills
-	if ss.Org != nil {
-		if orgSkills, err := ss.Org.LoadAll(ctx); err == nil {
-			for _, s := range orgSkills {
-				all = append(all, skills.Skill{
-					Name:        s.Name,
-					Description: s.Description,
-					OS:          s.OS,
-					RequireBins: s.RequireBins,
-					RequireEnv:  s.RequireEnv,
-					Source:      "org",
-				})
-			}
-		}
-	}
-
-	// Team skills (highest priority, can override org/platform names)
-	if ss.Team != nil {
-		if teamSkills, err := ss.Team.LoadAll(ctx); err == nil {
-			for _, s := range teamSkills {
-				all = append(all, skills.Skill{
-					Name:        s.Name,
-					Description: s.Description,
-					OS:          s.OS,
-					RequireBins: s.RequireBins,
-					RequireEnv:  s.RequireEnv,
-					Source:      "team",
-				})
-			}
-		}
-	}
-
-	if len(all) == 0 {
-		// Even with no platform/org/team skills, BuildSkillIndex will include
-		// built-in skills (e.g. generative-ui). Pass empty slice.
-		return skills.BuildSkillIndex(nil)
-	}
-
-	// Deduplicate preferring later entries (team > org > platform).
-	seen := make(map[string]bool, len(all))
-	var deduped []skills.Skill
+	seen := make(map[string]struct{}, len(all))
+	deduped := make([]skills.Skill, 0, len(all))
 	for i := len(all) - 1; i >= 0; i-- {
-		name := strings.ToLower(all[i].Name)
-		if !seen[name] {
-			seen[name] = true
-			deduped = append(deduped, all[i])
+		name := strings.ToLower(strings.TrimSpace(all[i].Name))
+		if name == "" {
+			continue
 		}
+		if _, exists := seen[name]; exists {
+			continue
+		}
+		seen[name] = struct{}{}
+		deduped = append(deduped, all[i])
 	}
-	// Reverse to restore platform → org → team display order
 	for i, j := 0, len(deduped)-1; i < j; i, j = i+1, j-1 {
 		deduped[i], deduped[j] = deduped[j], deduped[i]
 	}
-
 	return skills.BuildSkillIndex(deduped)
 }

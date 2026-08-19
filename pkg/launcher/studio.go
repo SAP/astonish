@@ -12,13 +12,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gorilla/mux"
 	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/api"
 	"github.com/SAP/astonish/pkg/sandbox"
+	"github.com/SAP/astonish/pkg/skills"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/tools"
 	"github.com/SAP/astonish/web"
+	"github.com/gorilla/mux"
 )
 
 // studioBackend is the minimal interface that StudioServer needs from the
@@ -31,15 +32,38 @@ type studioBackend interface {
 	NewToolVectorStore(ctx context.Context) (agent.ToolVectorStore, error)
 }
 
+func studioChatComponentsFromFactoryResult(result *ChatFactoryResult, sandboxEnabled bool) *api.StudioChatComponents {
+	if result == nil {
+		return nil
+	}
+	return &api.StudioChatComponents{
+		ChatAgent:         result.ChatAgent,
+		LLM:               result.LLM,
+		SwappableLLM:      result.SwappableLLM,
+		SessionService:    result.SessionService,
+		ProviderName:      result.ProviderName,
+		ModelName:         result.ModelName,
+		Compactor:         result.Compactor,
+		InternalToolCount: len(result.InternalTools),
+		MemoryActive:      result.MemorySearchAvailable,
+		SandboxEnabled:    sandboxEnabled,
+		StartupNotices:    result.StartupNotices,
+		ShutdownSandbox:   result.ShutdownSandbox,
+		Cleanup:           result.Cleanup,
+		SandboxPool:       result.SandboxPool,
+		FilesystemSkills:  append([]skills.Skill(nil), result.FilesystemSkills...),
+	}
+}
+
 // StudioServer wraps the HTTP server with lifecycle management.
 type StudioServer struct {
-	server        *http.Server
-	listener      net.Listener
-	port          int
-	platformAuth  *api.PlatformAuth   // non-nil in platform mode
-	backend       studioBackend       // non-nil in platform mode
-	tenantMW      func(http.Handler) http.Handler // tenant resolution middleware
-	services      *store.Services
+	server       *http.Server
+	listener     net.Listener
+	port         int
+	platformAuth *api.PlatformAuth               // non-nil in platform mode
+	backend      studioBackend                   // non-nil in platform mode
+	tenantMW     func(http.Handler) http.Handler // tenant resolution middleware
+	services     *store.Services
 }
 
 // StudioOption configures optional StudioServer behavior.
@@ -91,19 +115,19 @@ func NewStudioServer(port int, opts ...StudioOption) (*StudioServer, error) {
 
 	// Wire Studio Chat initialization (lazy, runs on first chat request)
 	isPlatform := s.platformAuth != nil // capture for closure
-	backendRef := s.backend            // capture for closure
+	backendRef := s.backend             // capture for closure
 	api.SetStudioChatInitFunc(func(ctx context.Context) (*api.StudioChatComponents, error) {
 		appCfg := api.EffectiveAppConfigFromContext(ctx, isPlatform)
 
 		factoryCfg := &ChatFactoryConfig{
-			AppConfig:     appCfg,
-			ProviderName:  appCfg.General.DefaultProvider,
-			ModelName:     appCfg.General.DefaultModel,
-			DebugMode:     false,
-			AutoApprove:   false,
-			WorkspaceDir:  "",
-			IsDaemon:      false,
-			PlatformMode:  isPlatform,
+			AppConfig:    appCfg,
+			ProviderName: appCfg.General.DefaultProvider,
+			ModelName:    appCfg.General.DefaultModel,
+			DebugMode:    false,
+			AutoApprove:  false,
+			WorkspaceDir: "",
+			IsDaemon:     false,
+			PlatformMode: isPlatform,
 		}
 
 		// In platform mode, create ToolIndex for dynamic tool discovery.
@@ -133,22 +157,7 @@ func NewStudioServer(port int, opts ...StudioOption) (*StudioServer, error) {
 			})
 		}
 
-		return &api.StudioChatComponents{
-			ChatAgent:         result.ChatAgent,
-			LLM:               result.LLM,
-			SwappableLLM:      result.SwappableLLM,
-			SessionService:    result.SessionService,
-			ProviderName:      result.ProviderName,
-			ModelName:         result.ModelName,
-			Compactor:         result.Compactor,
-			InternalToolCount: len(result.InternalTools),
-			MemoryActive:      result.MemorySearchAvailable,
-			SandboxEnabled:    sandbox.IsSandboxEnabled(&appCfg.Sandbox),
-			StartupNotices:    result.StartupNotices,
-			ShutdownSandbox:   result.ShutdownSandbox,
-			Cleanup:           result.Cleanup,
-			SandboxPool:       result.SandboxPool,
-		}, nil
+		return studioChatComponentsFromFactoryResult(result, sandbox.IsSandboxEnabled(&appCfg.Sandbox)), nil
 	})
 
 	// Wire a pre-warm context builder for auto-PreWarm on Reset().
@@ -283,7 +292,6 @@ func (s *StudioServer) Serve() error {
 func (s *StudioServer) Shutdown(ctx context.Context) error {
 	return s.server.Shutdown(ctx)
 }
-
 
 // getWebAssets returns the web assets filesystem
 // Priority: 1. Filesystem (for dev), 2. Embedded (for production)

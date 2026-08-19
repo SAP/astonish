@@ -24,6 +24,10 @@ var builtInSlashCommands = []slashCommand{
 	{Name: "exit", Aliases: []string{"quit", "q"}, Description: "Quit the terminal app"},
 }
 
+var skillsSlashCommand = slashCommand{
+	Name: "skills", Description: "List local runtime skills",
+}
+
 // providerSlashCommand is offered only when the backend supports local provider
 // management (code mode). It is not part of the always-on palette.
 var providerSlashCommand = slashCommand{

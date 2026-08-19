@@ -27,6 +27,7 @@ import (
 	incus "github.com/SAP/astonish/pkg/sandbox/incus"
 	"github.com/SAP/astonish/pkg/sandbox/openshell"
 	persistentsession "github.com/SAP/astonish/pkg/session"
+	"github.com/SAP/astonish/pkg/skills"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/tools"
 	"google.golang.org/adk/model"
@@ -45,9 +46,9 @@ type ChatFactoryConfig struct {
 	WorkspaceDir string
 	IsDaemon     bool // When true, always run indexing/watchers (we ARE the daemon).
 
-	// PlatformMode indicates multi-tenant platform mode. When true, skills are
-	// resolved per-request from context-injected stores (platform → org → team).
-	// The filesystem user skill directory is NOT read.
+	// PlatformMode indicates multi-tenant platform mode. When true, DB skills are
+	// resolved per-request from context-injected stores (platform → org → team)
+	// ahead of the configured filesystem cascade.
 	PlatformMode bool
 
 	// CodeMode indicates the local, single-user Astonish Code runtime (the
@@ -117,6 +118,9 @@ type ChatFactoryResult struct {
 	StartupNotices        []string
 	PromptBuilder         *agent.SystemPromptBuilder
 	CredentialStore       *credentials.Store // Encrypted credential store (nil if unavailable)
+	// FilesystemSkills is the exact configured filesystem slice loaded and wired
+	// into skill lookup for this runtime.
+	FilesystemSkills []skills.Skill
 
 	// Cleanup aggregates all deferred cleanups (embedder, MCP, file watcher).
 	// The caller must call this when the ChatAgent is no longer needed.
@@ -181,11 +185,12 @@ func mainThreadToolAllowlist() map[string]bool {
 		// Graph-Optimized Plan mode phase transitions — MUST be main-thread:
 		// they advance the per-session GraphPlanState owned by the main ChatAgent.
 		// Sub-agents have no ActiveGraphPlan; calling these from a sub-agent would fail silently.
-		"gplan_reads":    true,
-		"gplan_gaps":     true,
-		"gplan_finalize": true,
+		"gplan_reads":        true,
+		"gplan_gaps":         true,
+		"gplan_finalize":     true,
 		"resolve_credential": true,
 		"skill_lookup":       true,
+		"create_skill":       true,
 		// Platform web search must be main-thread always-on. If it only lives in
 		// the "web" group, ToolIndex may never inject it and the agent claims
 		// "no web search tools" even when General selects Perplexity.
@@ -201,6 +206,16 @@ func optionalCredentialResolver(store *credentials.Store) credentials.Credential
 		return nil
 	}
 	return store
+}
+
+func skillLookupMode(platformMode, codeMode bool) tools.SkillLookupMode {
+	if platformMode {
+		return tools.SkillLookupModePlatform
+	}
+	if codeMode {
+		return tools.SkillLookupModeCode
+	}
+	return tools.SkillLookupModeLocal
 }
 
 // NewWiredChatAgent creates a fully-wired ChatAgent ready for use by any caller
@@ -524,15 +539,27 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 
 	// --- 2h. Initialize skills system → deferred category ---
 	var skillIndex string
+	var filesystemSkills []skills.Skill
 	var skillToolSlice []tool.Tool
 	var skillLookupTool tool.Tool // hoisted for SubAgentManager wiring
 	if cfg.AppConfig != nil && cfg.AppConfig.Skills.IsSkillsEnabled() {
-		// In platform mode, skills are resolved per-request from context-injected stores
-		// (platform → org → team). The static index is empty; the per-request merged index
-		// is injected by InjectSkillIndex in chat_handlers.go.
-		// The skill_lookup tool is still created (with an empty static index) so it can
-		// resolve skills from context stores at runtime.
-		skillTool, stErr := tools.NewSkillLookupTool(nil)
+		lookupMode := skillLookupMode(cfg.PlatformMode, cfg.CodeMode)
+
+		// Load the configured filesystem cascade in every runtime mode. Platform
+		// requests layer DB skills over this static baseline via PromptOverrides.
+		loadedFilesystemSkills, loadErr := skills.LoadSkills(
+			cfg.AppConfig.Skills.GetUserSkillsDir(),
+			cfg.AppConfig.Skills.ExtraDirs,
+			cfg.AppConfig.Skills.Allowlist,
+		)
+		if loadErr != nil {
+			cleanup()
+			return nil, fmt.Errorf("failed to load filesystem skills: %w", loadErr)
+		}
+		filesystemSkills = loadedFilesystemSkills
+		skillIndex = skills.BuildSkillIndex(filesystemSkills)
+
+		skillTool, stErr := tools.NewSkillLookupTool(filesystemSkills, lookupMode)
 		if stErr != nil {
 			if cfg.DebugMode {
 				slog.Warn("failed to create skill_lookup tool", "error", stErr)
@@ -541,8 +568,21 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			skillToolSlice = append(skillToolSlice, skillTool)
 			skillLookupTool = skillTool // keep reference for sub-agent injection
 		}
+
+		// Skill creation is a personal-runtime capability. Bind it to the same
+		// configured user root used by the loader; never expose it in platform mode.
+		if !cfg.PlatformMode {
+			createSkillTool, createErr := tools.NewCreateSkillTool(cfg.AppConfig.Skills.GetUserSkillsDir())
+			if createErr != nil {
+				if cfg.DebugMode {
+					slog.Warn("failed to create create_skill tool", "error", createErr)
+				}
+			} else {
+				skillToolSlice = append(skillToolSlice, createSkillTool)
+			}
+		}
 		if cfg.DebugMode {
-			slog.Debug("skills system initialized", "component", "chat-factory", "platform", cfg.PlatformMode)
+			slog.Debug("skills system initialized", "component", "chat-factory", "platform", cfg.PlatformMode, "filesystem_skills", len(filesystemSkills))
 		}
 	}
 
@@ -719,9 +759,9 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			if len(emailToolsSlice) > 0 {
 				emailToolsSlice = sandbox.WrapToolsWithPool(emailToolsSlice, pool)
 			}
-			if len(skillToolSlice) > 0 {
-				skillToolSlice = sandbox.WrapToolsWithPool(skillToolSlice, pool)
-			}
+			// Skill tools manage/read the configured host-side skill roots and must
+			// not be sandbox-wrapped; wrapping would reinterpret those paths inside
+			// the sandbox and create scaffolds in the wrong filesystem.
 			// Note: browserToolsSlice NOT wrapped — browser tools call the
 			// Manager directly (which connects to Chromium in the sandbox via CDP).
 
@@ -883,9 +923,7 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			if len(emailToolsSlice) > 0 {
 				emailToolsSlice = sandbox.WrapToolsWithNode(emailToolsSlice, nodePool)
 			}
-			if len(skillToolSlice) > 0 {
-				skillToolSlice = sandbox.WrapToolsWithNode(skillToolSlice, nodePool)
-			}
+			// Skill tools stay host-side; see the pool-backed sandbox path above.
 			// Note: browserToolsSlice is intentionally NOT wrapped — Manager
 			// drives in-container Chromium via SandboxEnabled callbacks.
 
@@ -2053,6 +2091,7 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		StartupNotices:        startupNotices,
 		PromptBuilder:         promptBuilder,
 		CredentialStore:       credStore,
+		FilesystemSkills:      append([]skills.Skill(nil), filesystemSkills...),
 		Cleanup:               cleanup,
 		ShutdownSandbox:       shutdownSandbox,
 		SandboxPool:           resultPool,

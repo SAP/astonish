@@ -6,9 +6,31 @@ import (
 	"testing"
 
 	"github.com/SAP/astonish/pkg/config"
+	"github.com/SAP/astonish/pkg/launcher"
+	"github.com/SAP/astonish/pkg/skills"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/store/entstore"
 )
+
+func TestChannelManagerConfigFromFactoryResult_CopiesFilesystemSkills(t *testing.T) {
+	configured := []skills.Skill{{Name: "initialized", Description: "factory value"}}
+	result := &launcher.ChatFactoryResult{
+		ProviderName:     "provider",
+		ModelName:        "model",
+		FilesystemSkills: configured,
+	}
+
+	cfg := channelManagerConfigFromFactoryResult(result)
+	configured[0].Description = "mutated"
+	result.FilesystemSkills[0].Name = "changed"
+
+	if cfg.ProviderName != "provider" || cfg.ModelName != "model" {
+		t.Fatalf("provider/model = %s/%s", cfg.ProviderName, cfg.ModelName)
+	}
+	if got := cfg.FilesystemSkills[0]; got.Name != "initialized" || got.Description != "factory value" {
+		t.Fatalf("filesystem skill = %+v, want copied initialization-time value", got)
+	}
+}
 
 func TestLoadChannelsConfigFromDB_NilBackend(t *testing.T) {
 	cfg := loadChannelsConfigFromDB(nil, nil)

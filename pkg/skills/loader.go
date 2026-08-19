@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -227,9 +228,44 @@ func splitFrontmatter(data []byte) ([]byte, string, error) {
 	return []byte(strings.Join(frontLines, "\n")), strings.Join(bodyLines, "\n"), nil
 }
 
-// LoadSkills was the file-based loader for personal mode.
-// It has been removed in v3 (platform DB is the only source of truth for custom skills).
-// Use the platform/org/team SkillStore.LoadAll() for skills at each tier.
+// LoadSkills loads filesystem skills from the user directory followed by each
+// extra directory. Later directories override earlier definitions by name.
+// Name matching for overrides and allowlist filtering is case-insensitive.
+func LoadSkills(userDir string, extraDirs []string, allowlist []string) ([]Skill, error) {
+	byName := make(map[string]*Skill)
+
+	if userDir != "" {
+		loadSkillsFromDir(userDir, "user", byName)
+	}
+	for _, dir := range extraDirs {
+		if dir != "" {
+			loadSkillsFromDir(dir, "extra", byName)
+		}
+	}
+
+	allowed := make(map[string]struct{}, len(allowlist))
+	for _, name := range allowlist {
+		allowed[strings.ToLower(name)] = struct{}{}
+	}
+
+	result := make([]Skill, 0, len(byName))
+	for _, skill := range byName {
+		if len(allowed) > 0 {
+			if _, ok := allowed[strings.ToLower(skill.Name)]; !ok {
+				continue
+			}
+		}
+		result = append(result, *skill)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		left, right := strings.ToLower(result[i].Name), strings.ToLower(result[j].Name)
+		if left == right {
+			return result[i].Name < result[j].Name
+		}
+		return left < right
+	})
+	return result, nil
+}
 
 // loadSkillsFromDir loads skills from a directory on disk.
 // Each immediate subdirectory containing a SKILL.md is loaded.
@@ -261,7 +297,7 @@ func loadSkillsFromDir(dir string, source string, byName map[string]*Skill) {
 		} else {
 			skill.Directory = skillDir
 		}
-		byName[skill.Name] = skill
+		byName[strings.ToLower(skill.Name)] = skill
 	}
 }
 

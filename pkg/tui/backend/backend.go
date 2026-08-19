@@ -110,6 +110,21 @@ type NetworkGrantBackend interface {
 	DenyNetworkGrant(ctx context.Context, sessionID string, denial events.NetworkDenial, sandboxName string) error
 }
 
+// SkillSummary describes one skill available to the local runtime.
+type SkillSummary struct {
+	Name        string
+	Description string
+	Source      string
+	Eligible    bool
+	Missing     []string
+}
+
+// LocalSkillsBackend is an optional capability implemented by local code-mode
+// backends. Platform backends intentionally do not expose this capability.
+type LocalSkillsBackend interface {
+	ListLocalSkills(ctx context.Context) ([]SkillSummary, error)
+}
+
 // ProviderInstance is one configured provider entry shown in the /provider
 // manager overlay.
 type ProviderInstance struct {

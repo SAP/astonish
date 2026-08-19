@@ -17,9 +17,9 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	a2apkg "github.com/SAP/astonish/pkg/a2a"
 	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/api"
-	a2apkg "github.com/SAP/astonish/pkg/a2a"
 	"github.com/SAP/astonish/pkg/browser"
 	"github.com/SAP/astonish/pkg/channels"
 	a2achan "github.com/SAP/astonish/pkg/channels/a2a"
@@ -40,6 +40,7 @@ import (
 	"github.com/SAP/astonish/pkg/sandbox/openshell"
 	"github.com/SAP/astonish/pkg/scheduler"
 	persistentsession "github.com/SAP/astonish/pkg/session"
+	"github.com/SAP/astonish/pkg/skills"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/store/entstore"
 	"github.com/SAP/astonish/pkg/tools"
@@ -49,6 +50,18 @@ import (
 type RunConfig struct {
 	Port  int
 	Debug bool
+}
+
+func channelManagerConfigFromFactoryResult(result *launcher.ChatFactoryResult) *channels.ChannelManagerConfig {
+	if result == nil {
+		return nil
+	}
+	return &channels.ChannelManagerConfig{
+		ProviderName:     result.ProviderName,
+		ModelName:        result.ModelName,
+		ToolCount:        len(result.InternalTools),
+		FilesystemSkills: append([]skills.Skill(nil), result.FilesystemSkills...),
+	}
 }
 
 // Run starts the daemon in the foreground. It starts the Studio HTTP server,
@@ -349,11 +362,7 @@ func Run(cfg RunConfig) error {
 			return nil, fmt.Errorf("channels enabled but no ChatAgent available — restart the daemon")
 		}
 
-		mgr := channels.NewChannelManager(factoryResult.ChatAgent, factoryResult.SessionService, log.Default(), &channels.ChannelManagerConfig{
-			ProviderName: factoryResult.ProviderName,
-			ModelName:    factoryResult.ModelName,
-			ToolCount:    len(factoryResult.InternalTools),
-		})
+		mgr := channels.NewChannelManager(factoryResult.ChatAgent, factoryResult.SessionService, log.Default(), channelManagerConfigFromFactoryResult(factoryResult))
 
 		if factoryResult.CredentialStore != nil {
 			mgr.SetRedactor(factoryResult.CredentialStore.Redactor())

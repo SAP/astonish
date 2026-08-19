@@ -152,11 +152,7 @@ func TestFilterEligible(t *testing.T) {
 func TestLoadSkillsFromDir(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	// Create a skill directory
-	skillDir := filepath.Join(tmpDir, "my-tool")
-	os.MkdirAll(skillDir, 0755)
-	content := []byte("---\nname: my-tool\ndescription: \"My custom tool\"\n---\n\n# My Tool\n")
-	os.WriteFile(filepath.Join(skillDir, "SKILL.md"), content, 0644)
+	writeTestSkill(t, tmpDir, "my-tool", "my-tool", "My custom tool", "# My Tool")
 
 	byName := make(map[string]*Skill)
 	loadSkillsFromDir(tmpDir, "user", byName)
@@ -170,5 +166,111 @@ func TestLoadSkillsFromDir(t *testing.T) {
 	}
 	if skill.Source != "user" {
 		t.Errorf("Source = %q, want %q", skill.Source, "user")
+	}
+	wantDir, err := filepath.Abs(filepath.Join(tmpDir, "my-tool"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if skill.Directory != wantDir {
+		t.Errorf("Directory = %q, want %q", skill.Directory, wantDir)
+	}
+	if skill.FilePath != filepath.Join(tmpDir, "my-tool", "SKILL.md") {
+		t.Errorf("FilePath = %q", skill.FilePath)
+	}
+	if skill.Content != "# My Tool" {
+		t.Errorf("Content = %q", skill.Content)
+	}
+}
+
+func TestLoadSkillsSourcesOverridesAllowlistAndSort(t *testing.T) {
+	userDir := t.TempDir()
+	extraOne := t.TempDir()
+	extraTwo := t.TempDir()
+
+	writeTestSkill(t, userDir, "zulu", "Zulu", "user zulu", "user zulu")
+	writeTestSkill(t, userDir, "shared", "Shared", "user shared", "user shared")
+	writeTestSkill(t, extraOne, "alpha", "alpha", "extra alpha", "extra alpha")
+	writeTestSkill(t, extraOne, "shared", "sHaReD", "first override", "first override")
+	writeTestSkill(t, extraTwo, "shared", "SHARED", "last override", "last override")
+	writeTestSkill(t, extraTwo, "bravo", "Bravo", "extra bravo", "extra bravo")
+
+	sk, err := LoadSkills(userDir, []string{extraOne, extraTwo}, []string{"ALPHA", "shared", "BRAVO"})
+	if err != nil {
+		t.Fatalf("LoadSkills failed: %v", err)
+	}
+	if len(sk) != 3 {
+		t.Fatalf("got %d skills, want 3: %#v", len(sk), sk)
+	}
+	wantNames := []string{"alpha", "Bravo", "SHARED"}
+	for i, want := range wantNames {
+		if sk[i].Name != want {
+			t.Errorf("skill[%d].Name = %q, want %q", i, sk[i].Name, want)
+		}
+	}
+	if sk[2].Description != "last override" || sk[2].Content != "last override" {
+		t.Errorf("override did not retain winning skill: %#v", sk[2])
+	}
+	if sk[2].Source != "extra" {
+		t.Errorf("winning Source = %q, want extra", sk[2].Source)
+	}
+	wantDir, _ := filepath.Abs(filepath.Join(extraTwo, "shared"))
+	if sk[2].Directory != wantDir || sk[2].FilePath != filepath.Join(extraTwo, "shared", "SKILL.md") {
+		t.Errorf("winning filesystem metadata not retained: %#v", sk[2])
+	}
+}
+
+func TestLoadSkillsEmptyAllowlistAndInvalidInputs(t *testing.T) {
+	userDir := t.TempDir()
+	writeTestSkill(t, userDir, "valid", "Valid", "valid skill", "valid body")
+
+	if err := os.WriteFile(filepath.Join(userDir, "SKILL.md"), []byte("not a child skill"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(userDir, "missing-file"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	invalidDir := filepath.Join(userDir, "invalid")
+	if err := os.Mkdir(invalidDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(invalidDir, "SKILL.md"), []byte("invalid"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	sk, err := LoadSkills(userDir, []string{"", filepath.Join(userDir, "does-not-exist")}, nil)
+	if err != nil {
+		t.Fatalf("LoadSkills failed: %v", err)
+	}
+	if len(sk) != 1 || sk[0].Name != "Valid" {
+		t.Fatalf("got %#v, want only Valid", sk)
+	}
+	if sk[0].Source != "user" {
+		t.Errorf("Source = %q, want user", sk[0].Source)
+	}
+}
+
+func TestLoadSkillsCaseInsensitiveDedupeWithinRoot(t *testing.T) {
+	root := t.TempDir()
+	writeTestSkill(t, root, "a-first", "Duplicate", "first", "first")
+	writeTestSkill(t, root, "z-last", "duplicate", "last", "last")
+
+	sk, err := LoadSkills(root, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sk) != 1 || sk[0].Description != "last" {
+		t.Fatalf("got %#v, want deterministic last directory override", sk)
+	}
+}
+
+func writeTestSkill(t *testing.T, root, dirname, name, description, body string) {
+	t.Helper()
+	dir := filepath.Join(root, dirname)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	content := []byte("---\nname: " + name + "\ndescription: \"" + description + "\"\nmetadata:\n  custom: retained\n---\n\n" + body + "\n")
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), content, 0644); err != nil {
+		t.Fatal(err)
 	}
 }

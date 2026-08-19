@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/SAP/astonish/pkg/skills"
 	"github.com/SAP/astonish/pkg/store"
 )
 
@@ -24,9 +25,9 @@ func (m *mockSkillStore) Get(_ context.Context, name string) (*store.Skill, erro
 	}
 	return nil, nil
 }
-func (m *mockSkillStore) Save(_ context.Context, _ *store.Skill) error            { return nil }
-func (m *mockSkillStore) Delete(_ context.Context, _ string) error                 { return nil }
-func (m *mockSkillStore) List(_ context.Context) ([]store.Skill, error)            { return m.skills, nil }
+func (m *mockSkillStore) Save(_ context.Context, _ *store.Skill) error  { return nil }
+func (m *mockSkillStore) Delete(_ context.Context, _ string) error      { return nil }
+func (m *mockSkillStore) List(_ context.Context) ([]store.Skill, error) { return m.skills, nil }
 func (m *mockSkillStore) UpdateValidationStatus(_ context.Context, _, _, _ string) error {
 	return nil
 }
@@ -54,7 +55,7 @@ func TestBuildChannelSkillIndex_MergesAllTiers(t *testing.T) {
 		}},
 	}
 
-	result := buildChannelSkillIndex(context.Background(), ss)
+	result := buildChannelSkillIndex(context.Background(), nil, ss)
 
 	if result == "" {
 		t.Fatal("expected non-empty skill index")
@@ -85,7 +86,7 @@ func TestBuildChannelSkillIndex_DeduplicatesTeamWins(t *testing.T) {
 		}},
 	}
 
-	result := buildChannelSkillIndex(context.Background(), ss)
+	result := buildChannelSkillIndex(context.Background(), nil, ss)
 
 	if result == "" {
 		t.Fatal("expected non-empty skill index")
@@ -118,7 +119,7 @@ func TestBuildChannelSkillIndex_EmptyStores(t *testing.T) {
 		Team:     &mockSkillStore{skills: nil},
 	}
 
-	result := buildChannelSkillIndex(context.Background(), ss)
+	result := buildChannelSkillIndex(context.Background(), nil, ss)
 
 	// Even with no user/platform skills, built-in skills are always included
 	if !strings.Contains(result, "generative-ui") {
@@ -130,7 +131,7 @@ func TestBuildChannelSkillIndex_EmptyStores(t *testing.T) {
 func TestBuildChannelSkillIndex_NilStores(t *testing.T) {
 	// All nil
 	ss := &store.SkillStores{}
-	result := buildChannelSkillIndex(context.Background(), ss)
+	result := buildChannelSkillIndex(context.Background(), nil, ss)
 	// Built-in skills are always present
 	if !strings.Contains(result, "generative-ui") {
 		t.Error("expected built-in generative-ui skill even with nil stores")
@@ -142,7 +143,7 @@ func TestBuildChannelSkillIndex_NilStores(t *testing.T) {
 			{Name: "team-only", Description: "Only team skill"},
 		}},
 	}
-	result = buildChannelSkillIndex(context.Background(), ss)
+	result = buildChannelSkillIndex(context.Background(), nil, ss)
 	if !strings.Contains(result, "team-only") {
 		t.Error("team-only skill missing when Platform and Org are nil")
 	}
@@ -161,12 +162,50 @@ func TestBuildChannelSkillIndex_OrgOverridesPlatform(t *testing.T) {
 		Team: &mockSkillStore{skills: nil},
 	}
 
-	result := buildChannelSkillIndex(context.Background(), ss)
+	result := buildChannelSkillIndex(context.Background(), nil, ss)
 
 	if !strings.Contains(result, "Org version wins over platform") {
 		t.Error("org should override platform when team has no override")
 	}
 	if strings.Contains(result, "Platform version") {
 		t.Error("platform version should be overridden by org")
+	}
+}
+
+func TestBuildChannelSkillIndex_FilesystemBaseAndCaseInsensitiveLaterWins(t *testing.T) {
+	filesystem := []skills.Skill{
+		{Name: "filesystem-only", Description: "filesystem survives"},
+		{Name: "Shared", Description: "filesystem overridden"},
+	}
+	ss := &store.SkillStores{
+		Platform: &mockSkillStore{skills: []store.Skill{{Name: "SHARED", Description: "platform overridden"}}},
+		Org:      &mockSkillStore{skills: []store.Skill{{Name: "shared", Description: "org overridden"}}},
+		Team:     &mockSkillStore{skills: []store.Skill{{Name: "sHaReD", Description: "team wins"}}},
+	}
+
+	result := buildChannelSkillIndex(context.Background(), filesystem, ss)
+	if !strings.Contains(result, "filesystem survives") {
+		t.Error("filesystem-only skill missing from cascade")
+	}
+	if !strings.Contains(result, "team wins") {
+		t.Error("team skill should win case-insensitively")
+	}
+	for _, overridden := range []string{"filesystem overridden", "platform overridden", "org overridden"} {
+		if strings.Contains(result, overridden) {
+			t.Errorf("overridden entry %q should not be rendered", overridden)
+		}
+	}
+	if count := strings.Count(strings.ToLower(result), "**shared**"); count != 1 {
+		t.Errorf("expected one rendered shared entry, got %d", count)
+	}
+}
+
+func TestNewChannelManager_CopiesFilesystemSkills(t *testing.T) {
+	configured := []skills.Skill{{Name: "cached", Description: "loaded once"}}
+	manager := NewChannelManager(nil, nil, nil, &ChannelManagerConfig{FilesystemSkills: configured})
+	configured[0].Description = "mutated"
+
+	if got := manager.filesystemSkills[0].Description; got != "loaded once" {
+		t.Fatalf("manager filesystem skills = %q, want an initialization-time copy", got)
 	}
 }

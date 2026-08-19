@@ -10,13 +10,65 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gorilla/mux"
 	"github.com/SAP/astonish/pkg/agent"
+	"github.com/SAP/astonish/pkg/skills"
 	"github.com/SAP/astonish/pkg/store"
+	"github.com/gorilla/mux"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
+
+type apiSkillStore struct {
+	skills []store.Skill
+}
+
+func (s *apiSkillStore) LoadAll(context.Context) ([]store.Skill, error) { return s.skills, nil }
+func (s *apiSkillStore) Get(_ context.Context, name string) (*store.Skill, error) {
+	for i := range s.skills {
+		if strings.EqualFold(s.skills[i].Name, name) {
+			return &s.skills[i], nil
+		}
+	}
+	return nil, nil
+}
+func (s *apiSkillStore) Save(context.Context, *store.Skill) error    { return nil }
+func (s *apiSkillStore) Delete(context.Context, string) error        { return nil }
+func (s *apiSkillStore) List(context.Context) ([]store.Skill, error) { return s.skills, nil }
+func (s *apiSkillStore) UpdateValidationStatus(context.Context, string, string, string) error {
+	return nil
+}
+func (s *apiSkillStore) ListFiles(context.Context, string) ([]store.SkillFile, error) {
+	return nil, nil
+}
+func (s *apiSkillStore) GetFile(context.Context, string, string, string) (*store.SkillFile, error) {
+	return nil, nil
+}
+func (s *apiSkillStore) SaveFile(context.Context, string, *store.SkillFile) error { return nil }
+func (s *apiSkillStore) DeleteFile(context.Context, string, string, string) error { return nil }
+
+func TestBuildMergedSkillIndex_FilesystemBaseAndCaseInsensitiveLaterWins(t *testing.T) {
+	filesystem := []skills.Skill{
+		{Name: "filesystem-only", Description: "filesystem survives"},
+		{Name: "Shared", Description: "filesystem overridden"},
+	}
+	platform := &apiSkillStore{skills: []store.Skill{{Name: "SHARED", Description: "platform overridden"}}}
+	org := &apiSkillStore{skills: []store.Skill{{Name: "shared", Description: "org overridden"}}}
+	team := &apiSkillStore{skills: []store.Skill{{Name: "sHaReD", Description: "team wins"}}}
+
+	result := buildMergedSkillIndex(context.Background(), filesystem, platform, org, team)
+	if !strings.Contains(result, "filesystem survives") || !strings.Contains(result, "team wins") {
+		t.Fatalf("merged index missing base or winning entry:\n%s", result)
+	}
+	for _, overridden := range []string{"filesystem overridden", "platform overridden", "org overridden"} {
+		if strings.Contains(result, overridden) {
+			t.Errorf("overridden entry %q should not be rendered", overridden)
+		}
+	}
+	if count := strings.Count(strings.ToLower(result), "**shared**"); count != 1 {
+		t.Errorf("expected one rendered shared entry, got %d", count)
+	}
+}
 
 // testEvents implements session.Events for testing.
 type testEvents []*session.Event
@@ -310,33 +362,33 @@ func TestReconstructActiveApp_NoAppPreviews(t *testing.T) {
 
 func TestExtractAppFromSystemContext(t *testing.T) {
 	tests := []struct {
-		name       string
-		ctx        string
-		wantCode   string
-		wantTitle  string
+		name      string
+		ctx       string
+		wantCode  string
+		wantTitle string
 	}{
 		{
-			name:     "valid refinement context",
-			ctx:      "## Active App Refinement\n\nSome text.\n\n### Current Source Code\n\n```jsx\nfunction WeatherApp() {\n  return <div>Hello</div>\n}\nexport default WeatherApp\n```\n",
-			wantCode: "function WeatherApp() {\n  return <div>Hello</div>\n}\nexport default WeatherApp",
+			name:      "valid refinement context",
+			ctx:       "## Active App Refinement\n\nSome text.\n\n### Current Source Code\n\n```jsx\nfunction WeatherApp() {\n  return <div>Hello</div>\n}\nexport default WeatherApp\n```\n",
+			wantCode:  "function WeatherApp() {\n  return <div>Hello</div>\n}\nexport default WeatherApp",
 			wantTitle: "Weather App",
 		},
 		{
-			name:     "no refinement marker",
-			ctx:      "Some random system context without the marker",
-			wantCode: "",
+			name:      "no refinement marker",
+			ctx:       "Some random system context without the marker",
+			wantCode:  "",
 			wantTitle: "",
 		},
 		{
-			name:     "refinement marker but no code block",
-			ctx:      "## Active App Refinement\n\nNo code here.",
-			wantCode: "",
+			name:      "refinement marker but no code block",
+			ctx:       "## Active App Refinement\n\nNo code here.",
+			wantCode:  "",
 			wantTitle: "",
 		},
 		{
-			name:     "empty system context",
-			ctx:      "",
-			wantCode: "",
+			name:      "empty system context",
+			ctx:       "",
+			wantCode:  "",
 			wantTitle: "",
 		},
 	}

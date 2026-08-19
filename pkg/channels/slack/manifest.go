@@ -16,13 +16,17 @@ const (
 	slackCommandPrefix               = "astonish"
 )
 
-var slackBuiltinCommands = []slackapi.ManifestSlashCommand{
-	{
-		Command:     "/link",
-		Description: "Link your Slack account to Astonish",
-		UsageHint:   "CODE",
-	},
-}
+var (
+	slackBuiltinCommands = []slackapi.ManifestSlashCommand{
+		{
+			Command:     "/link",
+			Description: "Link your Slack account to Astonish",
+			UsageHint:   "CODE",
+		},
+	}
+	requiredSlackBotEvents = []string{"message.im", "app_mention"}
+	requiredSlackBotScopes = []string{"chat:write", "commands", "app_mentions:read", "im:history", "im:read", "im:write", "users:read"}
+)
 
 func (s *SlackChannel) refreshCommandsBestEffort(ctx context.Context, commands *channels.CommandRegistry) {
 	if ok, reason := s.manifestSyncConfigured(); !ok {
@@ -30,9 +34,9 @@ func (s *SlackChannel) refreshCommandsBestEffort(ctx context.Context, commands *
 		return
 	}
 	commandCount := len(buildAstonishSlackCommands(commands, s.manifestCommandURL()))
-	s.logger.Printf("[slack] Syncing %d slash command(s) via app manifest for app %s", commandCount, s.config.AppID)
+	s.logger.Printf("[slack] Synchronizing app manifest requirements and %d slash command(s) for app %s", commandCount, s.config.AppID)
 	if err := s.syncCommandManifest(ctx, commands); err != nil {
-		s.logger.Printf("[slack] Failed to sync slash commands via app manifest: %v", err)
+		s.logger.Printf("[slack] Failed to synchronize app manifest: %v", err)
 	}
 }
 
@@ -105,6 +109,7 @@ func (s *SlackChannel) syncCommandManifest(ctx context.Context, commands *channe
 	}
 
 	configureManifestTransport(manifest, s.usesSocketMode())
+	requirementsAdded := reconcileSlackManifestRequirements(manifest, s.usesSocketMode())
 	mergeAstonishSlashCommands(manifest, buildAstonishSlackCommands(commands, s.manifestCommandURL()), commands)
 	if err := validateSlackManifest(ctx, api, manifest, s.config.ConfigToken, s.config.AppID); err != nil {
 		return err
@@ -114,10 +119,10 @@ func (s *SlackChannel) syncCommandManifest(ctx context.Context, commands *channe
 	if err != nil {
 		return fmt.Errorf("update manifest: %w", err)
 	}
-	if resp != nil && resp.PermissionsUpdated {
-		s.logger.Printf("[slack] Slash commands synced; Slack reports permission changes, so the app may need reinstalling")
+	if (resp != nil && resp.PermissionsUpdated) || requirementsAdded {
+		s.logger.Printf("[slack] App manifest synchronized; required message events or bot permissions changed, so reinstall the Slack app for the changes to take effect")
 	} else {
-		s.logger.Printf("[slack] Slash commands synced via app manifest")
+		s.logger.Printf("[slack] App manifest requirements and slash commands synchronized")
 	}
 	return nil
 }
@@ -127,6 +132,41 @@ func configureManifestTransport(manifest *slackapi.Manifest, socketMode bool) {
 		return
 	}
 	manifest.Settings.SocketModeEnabled = socketMode
+}
+
+func reconcileSlackManifestRequirements(manifest *slackapi.Manifest, socketMode bool) bool {
+	if manifest == nil {
+		return false
+	}
+	changed := false
+	if manifest.Settings.EventSubscriptions == nil {
+		manifest.Settings.EventSubscriptions = &slackapi.EventSubscriptions{}
+		changed = true
+	}
+	subscriptions := manifest.Settings.EventSubscriptions
+	subscriptions.BotEvents, changed = appendMissingStrings(subscriptions.BotEvents, requiredSlackBotEvents, changed)
+	if socketMode && subscriptions.RequestUrl != "" {
+		subscriptions.RequestUrl = ""
+		changed = true
+	}
+	manifest.OAuthConfig.Scopes.Bot, changed = appendMissingStrings(manifest.OAuthConfig.Scopes.Bot, requiredSlackBotScopes, changed)
+	return changed
+}
+
+func appendMissingStrings(existing, required []string, changed bool) ([]string, bool) {
+	seen := make(map[string]bool, len(existing)+len(required))
+	for _, value := range existing {
+		seen[value] = true
+	}
+	for _, value := range required {
+		if seen[value] {
+			continue
+		}
+		existing = append(existing, value)
+		seen[value] = true
+		changed = true
+	}
+	return existing, changed
 }
 
 func buildAstonishSlackCommands(registry *channels.CommandRegistry, commandURL string) []slackapi.ManifestSlashCommand {

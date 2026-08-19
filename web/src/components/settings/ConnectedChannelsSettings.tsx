@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { Plus, Trash2, Check, AlertCircle, Loader2, Radio, CheckCircle, XCircle, Edit2, X, Copy, ExternalLink } from 'lucide-react'
 import { inputClass, inputStyle, labelStyle, hintStyle, sectionBorderStyle, saveButtonStyle } from './settingsApi'
+import { teamFetch } from '../../api/teamContext'
 import { useChannelLinkFlow } from '../../hooks/useChannelLinkFlow'
 
 interface UserChannel {
@@ -49,6 +50,20 @@ const channelLabels: Record<string, string> = {
   telegram: 'Telegram',
   email: 'Email',
   slack: 'Slack',
+}
+
+async function apiError(response: Response, fallback: string): Promise<string> {
+  try {
+    const body: unknown = await response.json()
+    if (typeof body === 'object' && body !== null) {
+      const { error, message } = body as { error?: unknown; message?: unknown }
+      if (typeof error === 'string' && error) return error
+      if (typeof message === 'string' && message) return message
+    }
+  } catch {
+    // Fall back when the response is empty or not JSON.
+  }
+  return fallback
 }
 
 export default function ConnectedChannelsSettings({ isAdmin = false }: { isAdmin?: boolean }) {
@@ -104,8 +119,8 @@ export default function ConnectedChannelsSettings({ isAdmin = false }: { isAdmin
 
   const fetchChannels = useCallback(async () => {
     try {
-      const res = await fetch('/api/user/channels', { credentials: 'include' })
-      if (!res.ok) throw new Error('Failed to load channels')
+      const res = await teamFetch('/api/user/channels', { credentials: 'include' })
+      if (!res.ok) throw new Error(await apiError(res, 'Failed to load channels'))
       const data = await res.json()
       setChannels(data.channels || [])
     } catch (err: unknown) {
@@ -117,8 +132,8 @@ export default function ConnectedChannelsSettings({ isAdmin = false }: { isAdmin
 
   const fetchChannelInfo = useCallback(async () => {
     try {
-      const res = await fetch('/api/channels/info', { credentials: 'include' })
-      if (!res.ok) throw new Error('Failed to load channel info')
+      const res = await teamFetch('/api/channels/info', { credentials: 'include' })
+      if (!res.ok) throw new Error(await apiError(res, 'Failed to load channel info'))
       const data: ChannelInfo = await res.json()
       setChannelInfo(data)
     } catch {
@@ -157,15 +172,14 @@ export default function ConnectedChannelsSettings({ isAdmin = false }: { isAdmin
     setEmailLinkLoading(true)
     setError(null)
     try {
-      const res = await fetch('/api/user/channels/link-code', {
+      const res = await teamFetch('/api/user/channels/link-code', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
         body: JSON.stringify({ channel_type: 'email', email: emailInput.trim() }),
       })
       if (!res.ok) {
-        const data = await res.json().catch(() => ({ error: 'Failed to send code' }))
-        throw new Error(data.error || 'Failed to send verification email')
+        throw new Error(await apiError(res, 'Failed to send verification email'))
       }
       const data = await res.json()
       setEmailLinkEmail(data.email)
@@ -183,15 +197,14 @@ export default function ConnectedChannelsSettings({ isAdmin = false }: { isAdmin
     setEmailLinkLoading(true)
     setError(null)
     try {
-      const res = await fetch('/api/user/channels/verify-email-code', {
+      const res = await teamFetch('/api/user/channels/verify-email-code', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
         body: JSON.stringify({ code: emailCodeInput.trim() }),
       })
       if (!res.ok) {
-        const data = await res.json().catch(() => ({ error: 'Verification failed' }))
-        throw new Error(data.error || 'Failed to verify email code')
+        throw new Error(await apiError(res, 'Failed to verify email code'))
       }
       setEmailLinkStep('idle')
       setEmailExpiresAt(null)
@@ -220,11 +233,11 @@ export default function ConnectedChannelsSettings({ isAdmin = false }: { isAdmin
     setActionLoading(id)
     setError(null)
     try {
-      const res = await fetch(`/api/user/channels/${id}`, {
+      const res = await teamFetch(`/api/user/channels/${id}`, {
         method: 'DELETE',
         credentials: 'include',
       })
-      if (!res.ok) throw new Error('Failed to unlink channel')
+      if (!res.ok) throw new Error(await apiError(res, 'Failed to unlink channel'))
       setSuccess('Channel unlinked')
       await fetchChannels()
       setTimeout(() => setSuccess(null), 3000)
@@ -240,13 +253,13 @@ export default function ConnectedChannelsSettings({ isAdmin = false }: { isAdmin
     setActionLoading(`edit-${editingChannel.id}`)
     setError(null)
     try {
-      const res = await fetch(`/api/user/channels/${editingChannel.id}`, {
+      const res = await teamFetch(`/api/user/channels/${editingChannel.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
         body: JSON.stringify(editForm),
       })
-      if (!res.ok) throw new Error('Failed to update channel')
+      if (!res.ok) throw new Error(await apiError(res, 'Failed to update channel'))
       setSuccess('Channel updated')
       setEditingChannel(null)
       await fetchChannels()

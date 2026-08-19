@@ -425,6 +425,12 @@ func resolveA2ASource(r *http.Request, agentName string, args map[string]any) (a
 
 	agentCfg, ok := cfg.Agents[agentName]
 	if !ok {
+		// Fallback: try normalized matching (kebab-case, lowercase, etc.)
+		// This handles the common case where the agent is stored with a display
+		// name like "SCI Autonomous Operation" but referenced as "sci-autonomous-operation".
+		agentCfg, ok = findAgentByNormalizedName(cfg.Agents, agentName)
+	}
+	if !ok {
 		available := make([]string, 0, len(cfg.Agents))
 		for name := range cfg.Agents {
 			available = append(available, name)
@@ -494,6 +500,43 @@ func resolveA2ASource(r *http.Request, agentName string, args map[string]any) (a
 	}
 
 	return result, nil
+}
+
+// findAgentByNormalizedName performs a fuzzy lookup of an A2A agent by normalizing
+// both the query name and stored agent names to a canonical form. This handles
+// the mismatch between kebab-case sourceIds used in app code (e.g. "sci-autonomous-operation")
+// and display names stored in the database (e.g. "SCI Autonomous Operation").
+//
+// Normalization: lowercase, replace spaces/underscores with hyphens, collapse runs of hyphens.
+func findAgentByNormalizedName(agents map[string]a2aclient.A2AAgentConfig, query string) (a2aclient.A2AAgentConfig, bool) {
+	normalized := normalizeAgentName(query)
+	for name, cfg := range agents {
+		if normalizeAgentName(name) == normalized {
+			return cfg, true
+		}
+	}
+	return a2aclient.A2AAgentConfig{}, false
+}
+
+// normalizeAgentName converts an agent name to a canonical lowercase-kebab form
+// for fuzzy matching: lowercase, spaces/underscores → hyphens, collapse multiple hyphens.
+func normalizeAgentName(name string) string {
+	var b strings.Builder
+	b.Grow(len(name))
+	prevHyphen := false
+	for _, r := range strings.ToLower(name) {
+		switch {
+		case r == ' ' || r == '_' || r == '-':
+			if !prevHyphen {
+				b.WriteByte('-')
+				prevHyphen = true
+			}
+		default:
+			b.WriteRune(r)
+			prevHyphen = false
+		}
+	}
+	return strings.Trim(b.String(), "-")
 }
 
 // invokeMCPToolInContainer runs an MCP tool inside a per-user sandbox container.

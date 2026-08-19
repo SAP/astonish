@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/SAP/astonish/pkg/a2aclient"
 	"github.com/SAP/astonish/pkg/store"
 )
 
@@ -129,5 +130,63 @@ func TestResolveA2ASource_PlatformStoresInjected(t *testing.T) {
 	// Expected: error about fetching agent card (network error to localhost:9999)
 	if !strings.Contains(err.Error(), "failed to fetch agent card") {
 		t.Fatalf("unexpected error (expected agent card fetch failure): %v", err)
+	}
+}
+
+func TestNormalizeAgentName(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"sci-autonomous-operation", "sci-autonomous-operation"},
+		{"SCI Autonomous Operation", "sci-autonomous-operation"},
+		{"SCI_Autonomous_Operation", "sci-autonomous-operation"},
+		{"sci autonomous operation", "sci-autonomous-operation"},
+		{"My--Agent", "my-agent"},
+		{"  leading spaces  ", "leading-spaces"},
+		{"UPPER", "upper"},
+		{"already-kebab", "already-kebab"},
+		{"mixed_Hyphens-And Spaces", "mixed-hyphens-and-spaces"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := normalizeAgentName(tt.input)
+			if got != tt.expected {
+				t.Errorf("normalizeAgentName(%q) = %q, want %q", tt.input, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestFindAgentByNormalizedName(t *testing.T) {
+	agents := map[string]a2aclient.A2AAgentConfig{
+		"SCI Autonomous Operation": {Name: "SCI Autonomous Operation", URL: "http://example.com"},
+		"my-other-agent":           {Name: "my-other-agent", URL: "http://other.com"},
+	}
+
+	tests := []struct {
+		query    string
+		wantOK   bool
+		wantName string
+	}{
+		{"sci-autonomous-operation", true, "SCI Autonomous Operation"},
+		{"SCI Autonomous Operation", true, "SCI Autonomous Operation"},
+		{"sci_autonomous_operation", true, "SCI Autonomous Operation"},
+		{"my-other-agent", true, "my-other-agent"},
+		{"My Other Agent", true, "my-other-agent"},
+		{"nonexistent", false, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.query, func(t *testing.T) {
+			cfg, ok := findAgentByNormalizedName(agents, tt.query)
+			if ok != tt.wantOK {
+				t.Fatalf("findAgentByNormalizedName(%q) ok=%v, want %v", tt.query, ok, tt.wantOK)
+			}
+			if ok && cfg.Name != tt.wantName {
+				t.Errorf("findAgentByNormalizedName(%q).Name = %q, want %q", tt.query, cfg.Name, tt.wantName)
+			}
+		})
 	}
 }

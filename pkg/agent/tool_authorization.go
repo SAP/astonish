@@ -310,6 +310,10 @@ func (p *SessionAuthPolicy) PathAllowed(path string) bool {
 		// real error rather than a confusing authorization prompt.
 		return true
 	}
+	// Well-known harmless special paths (e.g. /dev/null) are always allowed.
+	if pathscope.IsAlwaysAllowedPath(abs) {
+		return true
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -443,6 +447,10 @@ func (p *SessionAuthPolicy) ConsumePathGrants(args map[string]any) {
 // Caller must hold p.mu.
 func (p *SessionAuthPolicy) pathAllowedNoConsume(abs string) bool {
 	if p.root == "" {
+		return true
+	}
+	// Well-known harmless special paths (e.g. /dev/null) are always allowed.
+	if pathscope.IsAlwaysAllowedPath(abs) {
 		return true
 	}
 	if pathWithin(p.root, abs) {

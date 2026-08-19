@@ -10,7 +10,7 @@ CLI dispatch (Cobra). `main.go` calls `astonish.Execute()` here.
 ## Key rules
 1. **Local vs. remote mode is enforced via `mustBeRemote` / `mustNotBeRemote`.** Some commands only make sense against a remote daemon (skills/org management), some only make sense locally (daemon, sandbox, memory). Preserve the gating when adding new commands.
 2. **Commands are thin.** They parse flags and delegate to `pkg/launcher` / `pkg/daemon` / etc. Do not put business logic in `cmd/astonish/*.go`.
-3. **`chat` command flow**: always platform-backed. `handleChatCommand` requires `client.IsRemoteMode()` (login), then `launcher.RunChatTUI` (Studio SSE). Bare `astonish` delegates to the same path only when stdin/stdout are TTYs and login exists.
+3. **`chat` command flow**: platform-backed. `handleChatCommand` requires remote mode, then delegates to `launcher.RunChatTUI`. Bare `astonish` launches local code mode in a TTY; do not route it through remote chat.
 4. **`code` command flow**: fully local, in-process, **ungated** (works with or without login). `handleCodeCommand` parses flags and calls `launcher.RunCodeTUI`, which forces the sandbox off and runs the compiled-in tools directly on the host filesystem in the working directory (Claude-Code semantics). Do **not** add `mustBeRemote`/`mustNotBeRemote` to `code`. The `-m` flag accepts a bare model name or a `provider:model` pin (split via `parseModelPin`); `--yolo` aliases `--auto-approve`. Code mode opens with no model; the in-TUI `/model` and `/provider` overlays configure the model/providers and persist to `~/.config/astonish/config.yaml` (never a database).
 5. **`daemon` subcommands**: `run` (foreground), `install`/`start`/`stop` (launchd/systemd service). `daemon run` is what powers Studio.
 
@@ -20,3 +20,5 @@ CLI dispatch (Cobra). `main.go` calls `astonish.Execute()` here.
 
 ## References
 - `pkg/launcher/AGENTS.md` — where `chat`, `code`, and `daemon run` land.
+- [`pkg/config/AGENTS.md`](../../pkg/config/AGENTS.md) — local configuration and model/provider persistence.
+- [`pkg/memory/AGENTS.md`](../../pkg/memory/AGENTS.md) and [`pkg/scheduler/AGENTS.md`](../../pkg/scheduler/AGENTS.md) — command-owned domain behavior.

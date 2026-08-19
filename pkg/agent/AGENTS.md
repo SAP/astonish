@@ -1,26 +1,26 @@
 # pkg/agent — AGENTS.md
 
-Core `ChatAgent` runtime — the tool-use loop that drives Astonish's autonomous chat. Everything that runs "one turn" of the agent goes through here.
-
-## Scope
-- `ChatAgent` construction and step execution.
-- Prompt building (system prompt, tool descriptions, session context).
-- Tool-call orchestration: model → tool call → tool result → model, with streaming.
-- Sub-agent delegation (a `ChatAgent` may spawn up to 10 sub-agents with filtered tool access and isolated sessions).
+Core `ChatAgent` runtime: prompt assembly, model/tool loop, streaming, compaction, approvals, and sub-agent delegation.
 
 ## Interactions
-- Wired by `pkg/launcher/chat_factory.go:NewWiredChatAgent` — this is where the full agent (LLM, tools, sandbox, memory, tool index, prompt builder) is assembled.
-- Invoked by Studio via `pkg/api` chat handlers (SSE). `astonish chat` streams Studio SSE through `pkg/launcher.RunChatTUI`. **`astonish code` runs this same agent in-process** via `pkg/launcher.RunCodeTUI` (no platform).
-- Runs tools via `RunnableTool.Run` (see `pkg/tools/AGENTS.md`); tools that hit the shell/network/filesystem are wrapped by `pkg/sandbox` (see `pkg/sandbox/AGENTS.md`).
-- `project_context.go:LoadProjectContext` implements the [agents.md](https://agents.md) convention: it discovers `AGENTS.md` (fallback `CLAUDE.md`) by walking upward from the working dir to the git root, merges them nearest-last, and the factory injects the result into `SystemPromptBuilder.ProjectContext` (rendered as `## Project Guidance`). Only code mode enables this (via `ChatFactoryConfig.LoadProjectContext`); platform uses per-team DB instructions.
-- `tool_authorization.go:SessionAuthPolicy` holds the **code-mode** authorization state (one per session, on the `ChatAgent`). Two `BeforeToolCallbacks` in `chat_agent_run.go` enforce it when `ChatAgent.EnforceAuthorization` is set: a **folder-access gate** (paths outside `ChatAgent.WorkingDir` prompt — active in **both Normal and Ask mode**, since read-only tools can still target sensitive paths outside the project) and a **tool-execution gate** (Normal mode only — reuses `agent.SafeTools` as an auto-allow baseline; non-whitelisted tools prompt for authorization; skipped in Ask mode because the ask-mode hard gate already refuses non-safe tools). The folder gate's `OutOfScopePaths` inspects structured path args **and** free-form command strings (`shell_command`'s `command`) via `pathscope.ExtractCommandPaths` (quote-aware — quoted literal data like a commit message is not mis-flagged as a path operand), so a shell command touching `/`, `~/…`, or `../…` outside the root is caught. All path primitives (`NormalizePath`, `PathWithin`, `ExtractCommandPaths`, …) live in **`pkg/pathscope`** — the single source of truth shared with the `pkg/tools` shell guard (`tools.SetScopeRoot` + `ShellCommand`'s runtime reject), so the interactive gate and the non-interactive guard use identical containment logic. The `tools.SetScopeRoot` guard is **grant-blind** and is NOT engaged in the interactive code-mode launcher — the folder-access gate here is the authoritative *grant-aware* enforcer (approving an out-of-scope path records a grant so the retry succeeds); the shell guard is reserved for genuinely non-interactive callers (planner/scheduler). To avoid a double prompt when a not-whitelisted tool ALSO touches an out-of-scope path, granting the folder for that call also records a one-shot tool grant (`ApplyAuthorizationDecision`), so a single approval covers both gates for that one retry. Both callbacks run after the credential/secret callbacks and before the Plan-mode gate, and are bypassed by `--auto-approve`. Grants: tool once (consumed) / all-tools **session-scoped** (`GrantAllToolsSession`, what the tool gate's "Always Allow" records — survives `ResetForNewTurn` so the user isn't re-asked) plus an iteration-only `GrantAllToolsThisIteration`; folder once / for-session. The policy is also seeded with Astonish's own state dir (`config.GetConfigDir()`) as an implicit `allowedRoots` entry, so writing session transcripts / `PLAN.md` outside the project never prompts. See `docs/architecture/terminal-app.md#tool--folder-authorization-code-mode`.
+- `pkg/launcher/chat_factory.go` wires LLMs, tools, sandbox, memory, MCP, prompts, and stores. The agent receives configuration; it must not load host config itself.
+- Studio invokes the agent through `pkg/api` SSE handlers. Remote chat maps those events into `pkg/tui`; local code mode runs the same agent in-process.
+- Tool execution follows `pkg/tools/AGENTS.md`; sandbox-scoped operations follow `pkg/sandbox/AGENTS.md`.
+- `LoadProjectContext` discovers and merges `AGENTS.md`/fallback `CLAUDE.md` nearest-last for code mode only. Platform instructions remain store-backed.
 
-## Key rules
-1. **The agent must not read config directly** — it receives its configuration from the factory. Keeps testing tractable.
-2. **Streaming semantics**: partial model output is streamed as text events; tool calls are emitted as discrete events. Do not batch — Studio Chat relies on incremental delivery.
-3. **Tool-call safety**: never execute a tool call without going through the `Backend`-wrapped path when the tool is sandbox-scoped.
-4. **Sub-agent budget**: max 10 concurrent sub-agents by design (see the README and `docs/architecture/`). Do not raise this without discussion — it bounds fan-out cost.
+## Invariants
+1. **Streaming is incremental.** Partial text remains partial; tool calls/results and approval boundaries are discrete. Do not batch away ordering required by Studio/TUI reducers.
+2. **Tool safety is callback-enforced.** Preserve credential/secret callbacks, code-mode folder/tool authorization, plan/ask gates, and sandbox wrapping order.
+3. **Folder and command path checks share `pkg/pathscope`.** Do not create divergent containment logic. Interactive grants belong to `SessionAuthPolicy`; non-interactive shell guards remain grant-blind.
+4. **Authorization scope matters.** One-shot grants are consumed, session grants survive turn resets, and `--auto-approve` deliberately bypasses interactive prompts.
+5. **Sub-agent fan-out is bounded at 10.** Delegates use isolated sessions and filtered tools; do not raise the limit or merge their state implicitly.
+6. Prompt/report/app protocols are contracts with backend marker generation and frontend consumers, not presentation-only prose.
 
 ## When editing
-- Changing the tool-call loop? Update the Studio SSE runner (`pkg/api/chat_runner.go`). CLI chat consumes the same SSE events via `pkg/launcher/tui_chat.go` → `pkg/tui`.
-- Changing prompt construction? Coordinate with the system-prompt contract tests (they enforce the two-step artifact/report protocol).
+- Tool-loop or event changes require matching `pkg/api/chat_runner.go`, remote TUI mapping, Studio handling, docs, and scenarios.
+- Prompt changes require system-prompt contract tests and must preserve hidden runtime guidance versus visible user text.
+- Model, config, memory, or MCP changes follow [`pkg/provider/AGENTS.md`](../provider/AGENTS.md), [`pkg/config/AGENTS.md`](../config/AGENTS.md), [`pkg/memory/AGENTS.md`](../memory/AGENTS.md), and [`pkg/mcp/AGENTS.md`](../mcp/AGENTS.md).
+
+## Verification
+
+Run `go test ./pkg/agent/...`. For stream-visible changes also test `./pkg/api/...`, `./pkg/launcher/...`, and affected Studio scenarios.

@@ -20,7 +20,7 @@ type Request struct {
 	MaxTokens        int       `json:"max_tokens"`
 	Messages         []Message `json:"messages"`
 	System           string    `json:"system,omitempty"`
-	Temperature      float64   `json:"temperature,omitempty"`
+	Temperature      *float64  `json:"temperature,omitempty"`
 	Tools            []Tool    `json:"tools,omitempty"`
 }
 
@@ -68,7 +68,7 @@ type Response struct {
 
 // ConvertRequest converts an ADK LLMRequest to a Bedrock Request.
 // maxTokens can be 0 to use the default (8192)
-func ConvertRequest(req *model.LLMRequest, maxTokens int) (*Request, error) {
+func ConvertRequest(req *model.LLMRequest, maxTokens int, skipTemperature bool) (*Request, error) {
 	if maxTokens <= 0 {
 		maxTokens = 8192 // Default fallback
 	}
@@ -76,7 +76,10 @@ func ConvertRequest(req *model.LLMRequest, maxTokens int) (*Request, error) {
 		AnthropicVersion: "bedrock-2023-05-31",
 		MaxTokens:        maxTokens,
 		Messages:         make([]Message, 0),
-		Temperature:      0.7,
+	}
+	if !skipTemperature {
+		temp := 0.7
+		bedrockReq.Temperature = &temp
 	}
 
 	// Convert ADK messages to Bedrock messages

@@ -2352,11 +2352,12 @@ func (b *localAgentBackend) ListRollbackPoints(ctx context.Context) ([]backend.R
 				}
 			}
 			points = append(points, backend.RollbackPoint{
-				ID:         fmt.Sprintf("%s:%d", sid, idx),
-				Label:      label,
-				Timestamp:  ts,
-				FileCount:  fileCount,
-				TurnNumber: turnNumber,
+				ID:          fmt.Sprintf("%s:%d", sid, idx),
+				Label:       label,
+				MessageText: text,
+				Timestamp:   ts,
+				FileCount:   fileCount,
+				TurnNumber:  turnNumber,
 			})
 		}
 	}

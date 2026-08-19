@@ -23,14 +23,14 @@ type Info struct {
 	// code mode (the local, unsandboxed coding tool); empty in platform mode.
 	WorkingDir string
 	// Usage is cumulative token usage known when opening/resuming a session.
-	Usage     *events.Usage
+	Usage *events.Usage
 	// ContextTokens is the current context-window occupancy known when
 	// opening/resuming a session (0 if unknown). Unlike Usage (which is
 	// cumulative across the whole session), this is "how full is the context
 	// right now" and drives the header's Context figure immediately on resume,
 	// before the first new turn reports usage.
 	ContextTokens int64
-	IsResumed bool
+	IsResumed     bool
 	// AutoApprove reflects the session tool-approval mode for footer chrome.
 	AutoApprove bool
 	// Notices are shown once at startup (startup warnings, etc.).
@@ -202,6 +202,12 @@ type RollbackPoint struct {
 	ID string
 	// Label is a short, single-line preview of the user message at this turn.
 	Label string
+	// MessageText is the full, untruncated text of the user message at this
+	// turn. Rolling back to a point discards that message from the transcript;
+	// the TUI prefills it into the input composer so the user can edit and
+	// resend without retyping. Unlike Label (a derived, truncated title), this
+	// is the verbatim message.
+	MessageText string
 	// Timestamp is a human-readable time the message was sent (may be empty).
 	Timestamp string
 	// FileCount is how many files would be restored if rolling back to here.

@@ -22,6 +22,10 @@ type rollbackState struct {
 	notice        string
 	points        []backend.RollbackPoint
 	cursor        int
+	// prefill is the full text of the message being rolled back to. On a
+	// successful rollback it is placed into the input composer so the user can
+	// edit and resend it without retyping.
+	prefill string
 }
 
 type rollbackLoadedMsg struct {
@@ -102,6 +106,7 @@ func (m model) handleRollbackKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			id := m.rollback.points[m.rollback.cursor].ID
+			m.rollback.prefill = m.rollback.points[m.rollback.cursor].MessageText
 			m.rollback.loading = true
 			m.rollback.confirmRevert = false
 			m.rollback.err = ""
@@ -177,8 +182,23 @@ func (m model) applyRolledBack(msg rolledBackMsg) (tea.Model, tea.Cmd) {
 	m.tr.LoadHistory(entries)
 	m.info = m.backend.Info()
 	m.tr.LastUsage = nil
-	m.tr.Apply(events.NewSystem("Rolled back. Chat and file changes reverted to the selected message."))
+	m.tr.Apply(events.NewSystem("Rolled back. Chat and file changes reverted to before the selected message; its text is in the input for you to edit and resend."))
+	prefill := m.rollback.prefill
 	m.rollback = rollbackState{}
+	// Prefill the composer with the rolled-back message so the user can edit
+	// and resend it without retyping. CursorEnd places the caret at the end so
+	// they can start typing/editing immediately; recompute the composer height
+	// so a multi-line message is fully visible.
+	if prefill != "" {
+		m.ta.SetValue(prefill)
+		m.ta.CursorEnd()
+		if m.ready {
+			m.ta.SetHeight(m.composerTextHeight())
+			m.layout()
+		}
+		m.syncSlashCompletion()
+		m.syncFileCompletion()
+	}
 	m.refreshViewport()
 	if m.ready {
 		m.vp.GotoBottom()

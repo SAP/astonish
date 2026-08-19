@@ -174,6 +174,28 @@ func PathWithin(root, candidate string) bool {
 	return true
 }
 
+// alwaysAllowedPaths is the set of well-known, harmless special paths that never
+// require folder-access authorization even when they fall outside the project
+// root. /dev/null is the canonical example: agents routinely redirect output to
+// it, and prompting for it adds friction without any security benefit. The
+// entries are compared against the normalized (absolute, symlink-resolved) path.
+var alwaysAllowedPaths = map[string]bool{
+	"/dev/null": true,
+}
+
+// IsAlwaysAllowedPath reports whether path is a well-known special path that is
+// always permitted regardless of the project-root boundary (e.g. /dev/null).
+// The input is normalized first so callers may pass raw or absolute forms. This
+// is the single source of truth shared by every folder-access enforcement point
+// so they can never drift apart.
+func IsAlwaysAllowedPath(path string) bool {
+	abs := NormalizePath(path)
+	if abs == "" {
+		return false
+	}
+	return alwaysAllowedPaths[abs]
+}
+
 // filesystemCommands is the set of command names that are known to touch the
 // filesystem. Only arguments of these commands are inspected for out-of-scope
 // paths. Commands not in this set (git, curl, npm, docker, go, python, etc.)

@@ -69,8 +69,8 @@ func filterSlashCommandsForModel(m model, query string) []slashCommand {
 func TestRollbackRequiresConfirmation(t *testing.T) {
 	b := &rollbackBackend{
 		points: []backend.RollbackPoint{
-			{ID: "0", Label: "first", TurnNumber: 1},
-			{ID: "4", Label: "second", TurnNumber: 2, FileCount: 2},
+			{ID: "0", Label: "first", MessageText: "first message", TurnNumber: 1},
+			{ID: "4", Label: "second", MessageText: "the full second message text", TurnNumber: 2, FileCount: 2},
 		},
 		entries: []backend.HistoryEntry{{Kind: "user", Text: "first"}},
 	}
@@ -113,6 +113,11 @@ func TestRollbackRequiresConfirmation(t *testing.T) {
 	m = updated.(model)
 	if m.rollback.open {
 		t.Fatal("expected rollback overlay to close after applying result")
+	}
+	// The rolled-back message's full text is prefilled into the composer so the
+	// user can edit and resend it without retyping.
+	if got := m.ta.Value(); got != "the full second message text" {
+		t.Fatalf("composer value = %q, want the rolled-back message text prefilled", got)
 	}
 }
 

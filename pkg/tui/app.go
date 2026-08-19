@@ -184,12 +184,12 @@ type model struct {
 	userScrolledUp bool
 
 	// overlays
-	sessions       sessionsState
-	rollback       rollbackState
-	modelPicker    modelPickerState
-	providerPicker providerPickerState
-	webSearchPicker webSearchPickerState
-	fileViewer      fileViewerState
+	sessions         sessionsState
+	rollback         rollbackState
+	modelPicker      modelPickerState
+	providerPicker   providerPickerState
+	webSearchPicker  webSearchPickerState
+	fileViewer       fileViewerState
 	delegationDetail delegationDetailState
 	// slash command completion popup (active when composer starts with /)
 	slash slashCompletion
@@ -448,9 +448,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Global keys
 		switch msg.String() {
 		case "ctrl+c":
-			// Mid-turn: cancel the in-flight RunTurn. Idle: quit the app.
+			// Mid-turn: cancel the in-flight RunTurn. Idle: clear a non-empty
+			// input first, and only quit on a subsequent Ctrl+C (empty input).
 			if next, cmd, handled := m.cancelInFlightTurn(); handled {
 				return next, cmd
+			}
+			if m.ta.Value() != "" {
+				prevH := m.composerTextHeight()
+				m.ta.SetValue("")
+				m.pastedImages = nil
+				if m.ready && m.composerTextHeight() != prevH {
+					m.ta.SetHeight(m.composerTextHeight())
+					m.layout()
+				}
+				m.syncSlashCompletion()
+				m.syncFileCompletion()
+				m.refreshViewport()
+				return m, nil
 			}
 			m.quitting = true
 			m.cancel()
@@ -1928,7 +1942,7 @@ Keys:
   ctrl+n         New session
   shift+tab      Toggle plan-only mode
   esc            Cancel the current turn
-  ctrl+c         Cancel turn or quit
+  ctrl+c         Cancel turn, clear input, or quit
   ctrl+d         Quit (when input is empty)
 `)
 }

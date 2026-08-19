@@ -1,7 +1,12 @@
 package bedrock
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
+
+	"google.golang.org/adk/model"
+	"google.golang.org/genai"
 )
 
 func TestPatchOrphanedToolUse_NoOrphans(t *testing.T) {
@@ -228,5 +233,68 @@ func TestPatchOrphanedToolUse_StringContentAssistant(t *testing.T) {
 
 	if len(req.Messages) != 2 {
 		t.Fatalf("expected 2 messages, got %d", len(req.Messages))
+	}
+}
+
+func TestConvertRequest_TemperatureIncluded(t *testing.T) {
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{
+			{
+				Role:  "user",
+				Parts: []*genai.Part{{Text: "hello"}},
+			},
+		},
+	}
+
+	bedrockReq, err := ConvertRequest(req, 0, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	data, err := json.Marshal(bedrockReq)
+	if err != nil {
+		t.Fatalf("failed to marshal: %v", err)
+	}
+
+	jsonStr := string(data)
+	if !strings.Contains(jsonStr, `"temperature"`) {
+		t.Fatalf("expected temperature field in JSON, got: %s", jsonStr)
+	}
+
+	if bedrockReq.Temperature == nil {
+		t.Fatal("expected Temperature to be non-nil")
+	}
+	if *bedrockReq.Temperature != 0.7 {
+		t.Fatalf("expected temperature 0.7, got %f", *bedrockReq.Temperature)
+	}
+}
+
+func TestConvertRequest_TemperatureOmitted(t *testing.T) {
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{
+			{
+				Role:  "user",
+				Parts: []*genai.Part{{Text: "hello"}},
+			},
+		},
+	}
+
+	bedrockReq, err := ConvertRequest(req, 0, true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	data, err := json.Marshal(bedrockReq)
+	if err != nil {
+		t.Fatalf("failed to marshal: %v", err)
+	}
+
+	jsonStr := string(data)
+	if strings.Contains(jsonStr, `"temperature"`) {
+		t.Fatalf("expected temperature field to be absent in JSON, got: %s", jsonStr)
+	}
+
+	if bedrockReq.Temperature != nil {
+		t.Fatal("expected Temperature to be nil")
 	}
 }

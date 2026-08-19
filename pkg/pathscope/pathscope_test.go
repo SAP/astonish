@@ -210,3 +210,25 @@ func TestNormalizePathInRoot(t *testing.T) {
 		}
 	}
 }
+
+func TestIsAlwaysAllowedPath(t *testing.T) {
+	cases := []struct {
+		name string
+		path string
+		want bool
+	}{
+		{"dev null absolute", "/dev/null", true},
+		{"dev null with trailing dot segment", "/dev/./null", true},
+		{"empty", "", false},
+		{"project file", "/tmp/project/main.go", false},
+		{"other dev device", "/dev/zero", false},
+		{"home file", "~/secret.txt", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsAlwaysAllowedPath(tc.path); got != tc.want {
+				t.Errorf("IsAlwaysAllowedPath(%q) = %v, want %v", tc.path, got, tc.want)
+			}
+		})
+	}
+}

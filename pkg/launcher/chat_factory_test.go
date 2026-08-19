@@ -1,6 +1,38 @@
 package launcher
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/SAP/astonish/pkg/credentials"
+)
+
+func TestSubAgentCredentialStoreWiring(t *testing.T) {
+	t.Run("nil store remains a nil interface", func(t *testing.T) {
+		var store *credentials.Store
+		resolver := optionalCredentialResolver(store)
+		if resolver != nil {
+			t.Fatalf("optionalCredentialResolver(nil) = %#v, want nil interface", resolver)
+		}
+	})
+
+	t.Run("available store is wired as resolver", func(t *testing.T) {
+		store, err := credentials.Open(t.TempDir())
+		if err != nil {
+			t.Fatalf("open credential store: %v", err)
+		}
+
+		resolver := optionalCredentialResolver(store)
+		if resolver == nil {
+			t.Fatal("optionalCredentialResolver(store) returned nil")
+		}
+		if got := resolver.Get("missing"); got != nil {
+			t.Fatalf("resolver.Get(missing) = %#v, want nil", got)
+		}
+		if resolver != store {
+			t.Fatal("resolver does not preserve the opened credential store")
+		}
+	})
+}
 
 // TestMainThreadToolAllowlist_IncludesTreeSitter guards the fix for slow code
 // mode: the structural navigation tools must be available to the top-level

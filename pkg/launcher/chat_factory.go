@@ -193,6 +193,16 @@ func mainThreadToolAllowlist() map[string]bool {
 	}
 }
 
+// optionalCredentialResolver preserves a nil interface when the optional
+// file-backed store is unavailable. Assigning a nil *credentials.Store directly
+// to CredentialResolver creates a non-nil interface whose methods panic.
+func optionalCredentialResolver(store *credentials.Store) credentials.CredentialResolver {
+	if store == nil {
+		return nil
+	}
+	return store
+}
+
 // NewWiredChatAgent creates a fully-wired ChatAgent ready for use by any caller
 // (interactive console, channel manager, daemon, etc.).
 //
@@ -1502,9 +1512,10 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 	// regenerated .store_key). In platform mode, it gets hydrated per-request
 	// from the PG-backed credential store in chat_handlers.go.
 	redactor := credentials.NewRedactor()
-	if credStore != nil {
+	credentialResolver := optionalCredentialResolver(credStore)
+	if credentialResolver != nil {
 		redactor = credStore.Redactor()
-		chatAgent.CredentialStore = credStore
+		chatAgent.CredentialStore = credentialResolver
 	}
 	chatAgent.Redactor = redactor
 	// Create per-session PendingVault for <<<SECRET_N>>> token resolution.
@@ -1546,7 +1557,7 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		subAgentMgr.FleetTools = fleetOnlyTools
 		subAgentMgr.SessionService = sessionService
 		subAgentMgr.Redactor = chatAgent.Redactor
-		subAgentMgr.CredentialStore = credStore
+		subAgentMgr.CredentialStore = credentialResolver
 		subAgentMgr.PendingSecrets = chatAgent.PendingSecrets
 		subAgentMgr.EventForwarder = chatAgent.ForwardSubTaskEvent
 		// Wire structured sub-task progress: drive plan step transitions from

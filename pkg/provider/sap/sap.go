@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -357,15 +358,19 @@ func (t *sapTransport) getToken() (string, error) {
 type ModelConfig struct {
 	MaxTokens     int
 	ContextWindow int
+	NoTemperature bool
 }
 
 // ModelConfigs contains configuration for all supported models
 var ModelConfigs = map[string]ModelConfig{
-	// Anthropic models via Bedrock
-	"anthropic--claude-4.6-opus":   {MaxTokens: 64000, ContextWindow: 200000},
-	"anthropic--claude-4.5-sonnet": {MaxTokens: 64000, ContextWindow: 200000},
-	"anthropic--claude-4-sonnet":   {MaxTokens: 64000, ContextWindow: 200000},
-	"anthropic--claude-4-opus":     {MaxTokens: 64000, ContextWindow: 200000},
+	// Anthropic models via Bedrock.
+	// Claude 4.x and later: temperature is deprecated — must be omitted entirely.
+	"anthropic--claude-4.8-opus":   {MaxTokens: 64000, ContextWindow: 200000, NoTemperature: true},
+	"anthropic--claude-4.6-opus":   {MaxTokens: 64000, ContextWindow: 200000, NoTemperature: true},
+	"anthropic--claude-4.5-sonnet": {MaxTokens: 64000, ContextWindow: 200000, NoTemperature: true},
+	"anthropic--claude-4-sonnet":   {MaxTokens: 64000, ContextWindow: 200000, NoTemperature: true},
+	"anthropic--claude-4-opus":     {MaxTokens: 64000, ContextWindow: 200000, NoTemperature: true},
+	// Claude 3.x: temperature is still supported.
 	"anthropic--claude-3.7-sonnet": {MaxTokens: 64000, ContextWindow: 200000},
 	"anthropic--claude-3.5-sonnet": {MaxTokens: 8192, ContextWindow: 200000},
 	"anthropic--claude-3-sonnet":   {MaxTokens: 4096, ContextWindow: 200000},
@@ -397,12 +402,31 @@ var ModelConfigs = map[string]ModelConfig{
 	"sonar-pro": {MaxTokens: 128000, ContextWindow: 200000},
 }
 
-// GetModelConfig returns the configuration for a model, with fallback defaults
+// GetModelConfig returns the configuration for a model, with fallback defaults.
+//
+// Temperature handling for unknown anthropic--claude-X models:
+//   - Major version ≤ 3 (e.g. claude-3.x): temperature IS supported → NoTemperature: false
+//   - Major version ≥ 4 (e.g. claude-4.x, claude-5.x, …): temperature is deprecated
+//     → NoTemperature: true. This covers any future model not yet in the static map.
+//   - Non-Anthropic models: temperature included (NoTemperature: false)
 func GetModelConfig(modelName string) ModelConfig {
 	if config, ok := ModelConfigs[modelName]; ok {
 		return config
 	}
-	// Default fallback
+	// For unknown anthropic--claude-X models, infer from the major version:
+	// only Claude 3.x and below support temperature; 4.x and above do not.
+	if strings.HasPrefix(modelName, "anthropic--claude-") {
+		rest := strings.TrimPrefix(modelName, "anthropic--claude-")
+		// rest starts with the major version digits followed by "." or "-"
+		dotIdx := strings.IndexAny(rest, ".-")
+		if dotIdx > 0 {
+			if major, err := strconv.Atoi(rest[:dotIdx]); err == nil {
+				noTemp := major >= 4
+				return ModelConfig{MaxTokens: 64000, ContextWindow: 200000, NoTemperature: noTemp}
+			}
+		}
+	}
+	// Default fallback for all other unknown models (OpenAI, Gemini, etc.)
 	return ModelConfig{MaxTokens: 64000, ContextWindow: 200000}
 }
 
@@ -661,7 +685,7 @@ func (p *Provider) generateBedrockContent(ctx context.Context, req *model.LLMReq
 		config := GetModelConfig(p.modelName)
 
 		// Convert request using bedrock protocol with model-specific maxTokens
-		bedrockReq, err := bedrock.ConvertRequest(req, config.MaxTokens)
+		bedrockReq, err := bedrock.ConvertRequest(req, config.MaxTokens, config.NoTemperature)
 		if err != nil {
 			yield(nil, err)
 			return

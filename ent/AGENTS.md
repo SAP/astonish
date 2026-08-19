@@ -31,9 +31,9 @@ make ent-generate
 ```
 
 After regenerating:
-1. Run `go build ./...`.
-2. If you added or renamed fields, generate a migration: `make migrate-diff` (this diffs the ent schema against the Atlas baseline and writes new `*.sql` files under `schema/` and `pkg/store/*/migrations/`).
-3. Commit both the schema change **and** the migration in the same commit; the pre-commit hook will refuse otherwise.
+1. Run focused tests for the affected store, then `go test ./...` as practical.
+2. If you added or renamed fields, create the required migration using the repository's current migration workflow; see `docs/architecture/migrations.md`.
+3. Commit schema, generated output, and migration together; the pre-commit hook checks schema/migration consistency.
 
 ## Choosing the right scope
 - If it needs cross-org visibility → `platform`.
@@ -44,5 +44,7 @@ After regenerating:
 When in doubt, ask: "Would exposing this to another team/org be a data leak?" If yes, do not put it in `platform` or `org`.
 
 ## References
-- `pkg/store/entstore/AGENTS.md` — the router that picks the right ent client at runtime.
-- `docs/architecture/multi-tenant-platform.md` — invariants and enforcement points.
+- [`pkg/store/AGENTS.md`](../pkg/store/AGENTS.md) — storage interfaces, scope rules, and implementation map.
+- [`pkg/store/entstore/AGENTS.md`](../pkg/store/entstore/AGENTS.md) — the router that picks the right Ent client at runtime.
+- [`docs/architecture/multi-tenant-platform.md`](../docs/architecture/multi-tenant-platform.md) — invariants and enforcement points.
+- [`docs/architecture/migrations.md`](../docs/architecture/migrations.md) — migration workflow and safety rules.

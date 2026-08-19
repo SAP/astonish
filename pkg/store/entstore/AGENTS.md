@@ -2,6 +2,8 @@
 
 Multi-tenant DB router on top of Ent. This is the **only** legitimate entry point for reads/writes of tenant data.
 
+Read the parent [`pkg/store/AGENTS.md`](../AGENTS.md) first; this file adds implementation-specific rules.
+
 ## Scope
 - Choose the correct Ent client for a given tenant scope (`platform`, `org`, `team`, `personal`).
 - Own connection pools per DB / schema.
@@ -29,3 +31,7 @@ Multi-tenant DB router on top of Ent. This is the **only** legitimate entry poin
 - `docs/architecture/multi-tenant-platform.md` — six enforcement points, envelope encryption, cascading defaults.
 - `docs/architecture/sqlite-backend.md` — SQLite topology.
 - `ent/AGENTS.md` — schema editing rules.
+ tenant enforcement and cascading defaults.
+- [`docs/architecture/sqlite-backend.md`](../../../docs/architecture/sqlite-backend.md) — SQLite topology.
+- [`docs/architecture/migrations.md`](../../../docs/architecture/migrations.md) — migration workflow.
+- [`ent/AGENTS.md`](../../../ent/AGENTS.md) — schema editing rules.

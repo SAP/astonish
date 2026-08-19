@@ -214,6 +214,57 @@ func TestManagerRefreshCard(t *testing.T) {
 	}
 }
 
+func TestManagerRefreshCardAppliesSelectedEndpointAndVersion(t *testing.T) {
+	cardCalls := 0
+	var rpcPaths []string
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			cardCalls++
+			path, version := "/rpc/initial", "0.3"
+			if cardCalls > 1 {
+				path, version = "/rpc/refreshed/", "1.0"
+			}
+			_ = json.NewEncoder(w).Encode(a2a.AgentCard{SupportedInterfaces: []a2a.AgentInterface{{URL: server.URL + path, ProtocolBinding: "JSONRPC", ProtocolVersion: version}}})
+			return
+		}
+		rpcPaths = append(rpcPaths, r.URL.Path)
+		var req a2a.JSONRPCRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		result := any(a2a.Task{ID: "task-1", Status: a2a.TaskStatus{State: a2a.TaskStateCompleted}})
+		if req.Method == "SendMessage" {
+			result = map[string]any{"task": map[string]any{"id": "task-1", "status": map[string]any{"state": "TASK_STATE_COMPLETED"}}}
+		}
+		_ = json.NewEncoder(w).Encode(a2a.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: result})
+	}))
+	defer server.Close()
+
+	mgr := NewManager(&A2AClientConfig{Agents: map[string]A2AAgentConfig{"agent": {URL: server.URL + "/discovery"}}})
+	if err := mgr.Initialize(context.Background()); err != nil {
+		t.Fatalf("Initialize failed: %v", err)
+	}
+	client, err := mgr.GetClient("agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	send := func() {
+		if _, err := client.SendMessage(context.Background(), a2a.SendMessageParams{Message: a2a.Message{Role: "user", Parts: []a2a.Part{a2a.TextPart{Text: "hello"}}}}); err != nil {
+			t.Fatalf("SendMessage failed: %v", err)
+		}
+	}
+	send()
+	if _, err := mgr.RefreshCard(context.Background(), "agent"); err != nil {
+		t.Fatalf("RefreshCard failed: %v", err)
+	}
+	send()
+	if len(rpcPaths) != 2 || rpcPaths[0] != "/rpc/initial" || rpcPaths[1] != "/rpc/refreshed/" {
+		t.Fatalf("RPC paths = %v", rpcPaths)
+	}
+	if !client.isV1() {
+		t.Fatal("refreshed client should use v1 protocol")
+	}
+}
+
 func TestManagerInitializeWithFailedCard(t *testing.T) {
 	// Server that returns errors for agent card
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

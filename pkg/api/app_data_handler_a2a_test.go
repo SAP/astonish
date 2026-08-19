@@ -1,11 +1,14 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
+	"github.com/SAP/astonish/pkg/a2a"
 	"github.com/SAP/astonish/pkg/a2aclient"
 	"github.com/SAP/astonish/pkg/store"
 )
@@ -131,6 +134,116 @@ func TestResolveA2ASource_PlatformStoresInjected(t *testing.T) {
 	if !strings.Contains(err.Error(), "failed to fetch agent card") {
 		t.Fatalf("unexpected error (expected agent card fetch failure): %v", err)
 	}
+}
+
+func TestResolveA2ASource_AdvertisedInterfaceRouting(t *testing.T) {
+	var discoveryRequests atomic.Int32
+	var rpcRequests atomic.Int32
+
+	rpcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rpcRequests.Add(1)
+		if r.Method != http.MethodPost || r.URL.Path != "/invoke" {
+			t.Errorf("RPC request = %s %s, want POST /invoke", r.Method, r.URL.Path)
+		}
+		var req a2a.JSONRPCRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode RPC request: %v", err)
+		}
+		if req.Method != "SendMessage" {
+			t.Errorf("RPC method = %q, want SendMessage", req.Method)
+		}
+		_ = json.NewEncoder(w).Encode(a2a.JSONRPCResponse{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Result: map[string]any{"task": map[string]any{
+				"id": "task-1",
+				"status": map[string]any{
+					"state": "TASK_STATE_COMPLETED",
+					"message": map[string]any{
+						"role":  "ROLE_AGENT",
+						"parts": []map[string]any{{"text": "routed"}},
+					},
+				},
+			}},
+		})
+	}))
+	defer rpcServer.Close()
+
+	discoveryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		discoveryRequests.Add(1)
+		if r.Method != http.MethodGet || r.URL.Path != "/discovery/.well-known/agent-card.json" {
+			t.Errorf("discovery request = %s %s, want GET /discovery/.well-known/agent-card.json", r.Method, r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(a2a.AgentCard{
+			Name: "routed-agent",
+			SupportedInterfaces: []a2a.AgentInterface{
+				{URL: rpcServer.URL + "/ignored", ProtocolBinding: "GRPC", ProtocolVersion: "1.0"},
+				{URL: rpcServer.URL + "/invoke", ProtocolBinding: "JSONRPC", ProtocolVersion: "1.0"},
+			},
+		})
+	}))
+	defer discoveryServer.Close()
+
+	r := requestWithA2AAgent(t, "routed-agent", discoveryServer.URL+"/discovery")
+	result, err := resolveA2ASource(r, "routed-agent", map[string]any{"message": "hello"})
+	if err != nil {
+		t.Fatalf("resolveA2ASource failed: %v", err)
+	}
+	data, ok := result.(map[string]any)
+	if !ok {
+		t.Fatalf("result type = %T, want map[string]any", result)
+	}
+	if data["response"] != "routed" {
+		t.Errorf("response = %v, want routed", data["response"])
+	}
+	if discoveryRequests.Load() != 1 || rpcRequests.Load() != 1 {
+		t.Errorf("requests = discovery:%d rpc:%d, want 1 each", discoveryRequests.Load(), rpcRequests.Load())
+	}
+}
+
+func TestResolveA2ASource_IncompatibleAdvertisedInterfaces(t *testing.T) {
+	var rpcRequests atomic.Int32
+	rpcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rpcRequests.Add(1)
+		http.Error(w, "unexpected RPC", http.StatusInternalServerError)
+	}))
+	defer rpcServer.Close()
+
+	discoveryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(a2a.AgentCard{
+			Name: "incompatible-agent",
+			URL:  rpcServer.URL,
+			SupportedInterfaces: []a2a.AgentInterface{
+				{URL: rpcServer.URL, ProtocolBinding: "GRPC", ProtocolVersion: "1.0"},
+				{URL: rpcServer.URL, ProtocolBinding: "HTTP+JSON", ProtocolVersion: "1.0"},
+			},
+		})
+	}))
+	defer discoveryServer.Close()
+
+	r := requestWithA2AAgent(t, "incompatible-agent", discoveryServer.URL)
+	_, err := resolveA2ASource(r, "incompatible-agent", map[string]any{"message": "hello"})
+	if err == nil {
+		t.Fatal("expected incompatible interface error")
+	}
+	if !strings.Contains(err.Error(), "incompatible agent card") || !strings.Contains(err.Error(), "no compatible agent interface") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rpcRequests.Load() != 0 {
+		t.Errorf("RPC requests = %d, want 0", rpcRequests.Load())
+	}
+}
+
+func requestWithA2AAgent(t *testing.T, name, url string) *http.Request {
+	t.Helper()
+	agentStore := &mockA2AAgentStore{agents: map[string]*store.A2AAgent{
+		name: {Name: name, URL: url},
+	}}
+	r := httptest.NewRequest(http.MethodPost, "/api/apps/data", nil)
+	return r.WithContext(store.WithServices(r.Context(), &store.Services{
+		Mode:          store.ModePlatform,
+		TeamA2AAgents: agentStore,
+	}))
 }
 
 func TestNormalizeAgentName(t *testing.T) {

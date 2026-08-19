@@ -92,7 +92,7 @@ Location: `~/.config/astonish/a2a_agents.json`
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `url` | string | Base URL of the remote A2A agent |
+| `url` | string | Configured discovery anchor, supplied as either the agent base URL or the terminal `/.well-known/agent-card.json` URL; it is canonicalized to a base URL and is not necessarily the endpoint selected for invocation |
 | `credential_name` | string | Name of credential in the credential store |
 | `auth_type` | string | `bearer`, `api_key`, or `oauth` |
 | `enabled` | *bool | Defaults to `true` if nil |
@@ -162,10 +162,12 @@ func (c *Client) resolveAuthHeaders(req *http.Request) error {
 }
 ```
 
-**Key invariant:** Credentials are resolved at call time, never cached in the client struct. This ensures:
+**Key invariant:** Credentials are resolved at call time, never cached in the client struct. The same configured credential and custom headers are applied to both discovery requests and requests to the card-selected invocation endpoint. This ensures:
 - Token rotation is picked up immediately
 - OAuth token refresh happens transparently
 - No stale credentials after credential store updates
+
+Because the selected invocation URL can have a different origin from the configured discovery anchor, accepting an agent card also authorizes its compatible JSON-RPC endpoint to receive those headers. Operators must trust the discovery service to nominate that credential destination; see [Security Considerations](#11-security-considerations).
 
 ### Credential Sources
 
@@ -175,12 +177,25 @@ In platform mode, the credential resolver is backed by `credentials.StoreAdapter
 
 ### Agent Card Discovery
 
-On initialization (or refresh), the Manager fetches each agent's card from:
-```
-<agent_url>/.well-known/agent-card.json
-```
+On initialization (or refresh), the Manager normalizes the configured `url` and fetches the agent card. Configuration accepts either a base URL or a URL whose terminal path is `/.well-known/agent-card.json` (with an optional trailing slash). Normalization removes trailing slashes and, when present, that terminal card path, producing one canonical **discovery anchor**. This configured anchor determines where the card is fetched; it does not override an invocation endpoint advertised by that card.
 
-The card contains a `skills` array describing the agent's capabilities.
+Exact root and subpath discovery examples:
+
+| Configured `url` | Normalized discovery anchor | Discovery GET target |
+|------------------|-----------------------------|----------------------|
+| `https://example.com` | `https://example.com` | `https://example.com/.well-known/agent-card.json` |
+| `https://example.com/` | `https://example.com` | `https://example.com/.well-known/agent-card.json` |
+| `https://autonomous-operations-api.qa-de-1.cloud.sap/.well-known/agent-card.json` | `https://autonomous-operations-api.qa-de-1.cloud.sap` | `https://autonomous-operations-api.qa-de-1.cloud.sap/.well-known/agent-card.json` |
+| `https://autonomous-operations-api.qa-de-1.cloud.sap/graph-agent/.well-known/agent-card.json` | `https://autonomous-operations-api.qa-de-1.cloud.sap/graph-agent` | `https://autonomous-operations-api.qa-de-1.cloud.sap/graph-agent/.well-known/agent-card.json` |
+
+Discovery therefore always performs `GET <normalized_discovery_anchor>/.well-known/agent-card.json`. The returned card contains the `skills` used for tool generation and determines a separate **selected invocation endpoint** and protocol version:
+
+1. If `supportedInterfaces` is present, entries are inspected in advertised order. The first tuple whose `protocolBinding` is `JSONRPC` (case-insensitive; an omitted binding is accepted for early v1 cards) is selected.
+2. The tuple stays paired: both its `url` and its `protocolVersion` govern invocation. The client must not combine the URL from one interface with the version from another or with the top-level version.
+3. Legacy top-level `url` and `protocolVersion` are used only when `supportedInterfaces` is absent. They are not a fallback when the field is present but contains no compatible tuple.
+4. If a non-empty `supportedInterfaces` list contains no compatible JSON-RPC tuple, discovery fails explicitly with a no-compatible-interface error. The client does not silently post to the configured discovery anchor.
+
+JSON-RPC calls and SSE `message/stream` are sent to the selected invocation URL, not to the agent-card URL. A refresh repeats discovery from the unchanged configured anchor, re-runs ordered interface selection, and atomically replaces the cached card and the paired invocation URL/protocol version only after a compatible card is obtained. Thus a card may move invocation to a new endpoint on refresh; a fetch or compatibility failure leaves the previously usable selection intact rather than partially applying the new card.
 
 ### Tool Naming Convention
 
@@ -376,11 +391,14 @@ Errors from remote agents are **surfaced as tool output**, not propagated as pan
 
 ## 11. Security Considerations
 
-### URL Validation
+### URL and Endpoint Validation
 
-- URLs are validated with `url.ParseRequestURI()` on create/update via the API
-- Only HTTP(S) URLs are accepted
-- The agent card endpoint is deterministic: `<url>/.well-known/agent-card.json`
+- Create/update API inputs are checked with `url.ParseRequestURI()` for URL syntax; this check does not itself restrict the scheme to HTTP(S), require a host, or provide SSRF protection
+- The configured URL is a discovery anchor. The client accepts a base URL or a URL ending in `/.well-known/agent-card.json`, optionally followed by `/`, and canonicalizes either form before discovery
+- Discovery is deterministic relative to that anchor (`GET <normalized_discovery_anchor>/.well-known/agent-card.json`), but JSON-RPC and SSE use the first compatible invocation URL advertised by the card
+- Both the configured anchor and every potentially selected interface URL are remote-controlled network destinations and require equivalent scheme, host, SSRF, redirect, and allowlist validation
+- A cross-origin selected endpoint is especially sensitive because configured credentials and headers are sent to it; production policy should reject untrusted origins or explicitly allow the discovery-to-invocation origin transition
+- Refresh must apply the same checks before replacing the active endpoint, since a previously trusted card can later advertise a different URL
 
 ### Credential Isolation
 

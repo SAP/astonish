@@ -79,10 +79,10 @@ func (m *Manager) Initialize(ctx context.Context) error {
 		}
 		m.cards[name] = card
 
-		// Detect protocol version from the agent card.
-		// Uses the card's DetectProtocolVersion which checks top-level and supportedInterfaces.
-		if pv := card.DetectProtocolVersion(); pv != "" {
-			client.SetProtocolVersion(pv)
+		if err := client.ApplyAgentCard(card); err != nil {
+			log.Printf("a2aclient: warning: failed to apply agent card for %q: %v", name, err)
+			delete(m.cards, name)
+			continue
 		}
 	}
 
@@ -153,6 +153,10 @@ func (m *Manager) RefreshCard(ctx context.Context, agentName string) (*a2a.Agent
 
 	card, err := client.FetchAgentCard(ctx)
 	if err != nil {
+		return nil, err
+	}
+
+	if err := client.ApplyAgentCard(card); err != nil {
 		return nil, err
 	}
 

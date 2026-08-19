@@ -1,17 +1,19 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
-	"github.com/gorilla/mux"
+	"github.com/SAP/astonish/pkg/a2aclient"
 	"github.com/SAP/astonish/pkg/store"
+	"github.com/gorilla/mux"
 )
 
-func TestResolveAgentCardURL(t *testing.T) {
+func TestAgentCardURLSharedContract(t *testing.T) {
 	tests := []struct {
 		name     string
 		input    string
@@ -61,9 +63,9 @@ func TestResolveAgentCardURL(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := resolveAgentCardURL(tt.input)
+			got := a2aclient.AgentCardURL(tt.input)
 			if got != tt.expected {
-				t.Errorf("resolveAgentCardURL(%q) = %q, want %q", tt.input, got, tt.expected)
+				t.Errorf("a2aclient.AgentCardURL(%q) = %q, want %q", tt.input, got, tt.expected)
 			}
 		})
 	}
@@ -90,8 +92,15 @@ func (m *mockA2AAgentStore) Get(_ context.Context, name string) (*store.A2AAgent
 	return nil, nil
 }
 
-func (m *mockA2AAgentStore) Save(_ context.Context, _ *store.A2AAgent) error { return nil }
-func (m *mockA2AAgentStore) Delete(_ context.Context, _ string) error        { return nil }
+func (m *mockA2AAgentStore) Save(_ context.Context, agent *store.A2AAgent) error {
+	if m.agents == nil {
+		m.agents = make(map[string]*store.A2AAgent)
+	}
+	saved := *agent
+	m.agents[agent.Name] = &saved
+	return nil
+}
+func (m *mockA2AAgentStore) Delete(_ context.Context, _ string) error { return nil }
 func (m *mockA2AAgentStore) UpdateCachedCard(_ context.Context, _ string, _ json.RawMessage, _ json.RawMessage) error {
 	return nil
 }
@@ -119,6 +128,64 @@ func (b *bearerCredentialStore) Resolve(_ context.Context, name string) (string,
 }
 
 // --- Handler tests ---
+
+func TestCreateA2AAgentHandler_NormalizesAgentCardURLBeforeSave(t *testing.T) {
+	agentStore := &mockA2AAgentStore{}
+	body := []byte(`{"name":"graph-agent","url":"https://autonomous-operations-api.qa-de-1.cloud.sap/graph-agent/.well-known/agent-card.json"}`)
+	r := newPlatformAdminA2ARequest(http.MethodPost, "/api/a2a-agents?scope=platform", body, agentStore)
+
+	w := httptest.NewRecorder()
+	CreateA2AAgentHandler(w, r)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected status 201, got %d: %s", w.Code, w.Body.String())
+	}
+	saved := agentStore.agents["graph-agent"]
+	if saved == nil {
+		t.Fatal("expected created agent to be saved")
+	}
+	const want = "https://autonomous-operations-api.qa-de-1.cloud.sap/graph-agent"
+	if saved.URL != want {
+		t.Errorf("saved URL = %q, want %q", saved.URL, want)
+	}
+}
+
+func TestUpdateA2AAgentHandler_NormalizesAgentCardURLBeforeSave(t *testing.T) {
+	agentStore := &mockA2AAgentStore{}
+	body := []byte(`{"url":"https://autonomous-operations-api.qa-de-1.cloud.sap/.well-known/agent-card.json"}`)
+	r := newPlatformAdminA2ARequest(http.MethodPut, "/api/a2a-agents/root-agent?scope=platform", body, agentStore)
+	r = mux.SetURLVars(r, map[string]string{"name": "root-agent"})
+
+	w := httptest.NewRecorder()
+	UpdateA2AAgentHandler(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", w.Code, w.Body.String())
+	}
+	saved := agentStore.agents["root-agent"]
+	if saved == nil {
+		t.Fatal("expected updated agent to be saved")
+	}
+	const want = "https://autonomous-operations-api.qa-de-1.cloud.sap"
+	if saved.URL != want {
+		t.Errorf("saved URL = %q, want %q", saved.URL, want)
+	}
+}
+
+func newPlatformAdminA2ARequest(method, target string, body []byte, agentStore store.A2AAgentStore) *http.Request {
+	r := httptest.NewRequest(method, target, bytes.NewReader(body))
+	svc := &store.Services{
+		Mode:              store.ModePlatform,
+		PlatformA2AAgents: agentStore,
+	}
+	ctx := store.WithServices(r.Context(), svc)
+	ctx = WithPlatformUser(ctx, &PlatformUser{
+		ID:           "admin-user",
+		Email:        "admin@example.com",
+		PlatformRole: "superadmin",
+	})
+	return r.WithContext(ctx)
+}
 
 func TestTestA2AAgentHandler_ResolvesCredential(t *testing.T) {
 	// Mock HTTP server that requires Authorization: Bearer test-token

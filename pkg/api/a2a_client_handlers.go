@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
-	"strings"
 
+	"github.com/SAP/astonish/pkg/a2aclient"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/gorilla/mux"
 )
@@ -133,6 +133,7 @@ func CreateA2AAgentHandler(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, "Invalid URL format: "+err.Error())
 		return
 	}
+	req.URL = a2aclient.NormalizeBaseURL(req.URL)
 	if req.AuthType == "" {
 		req.AuthType = "bearer"
 	}
@@ -194,6 +195,7 @@ func UpdateA2AAgentHandler(w http.ResponseWriter, r *http.Request) {
 			respondError(w, http.StatusBadRequest, "Invalid URL format: "+err.Error())
 			return
 		}
+		req.URL = a2aclient.NormalizeBaseURL(req.URL)
 	}
 
 	if req.AuthType == "" {
@@ -315,7 +317,7 @@ func RefreshA2AAgentHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Fetch agent card from remote agent
-	cardURL := resolveAgentCardURL(existing.URL)
+	cardURL := a2aclient.AgentCardURL(existing.URL)
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, cardURL, nil) //nolint:gosec // URL is user-configured
 	if err != nil {
 		respondError(w, http.StatusBadGateway, "Invalid agent card URL: "+err.Error())
@@ -406,7 +408,7 @@ func TestA2AAgentHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Test connectivity by fetching the agent card
-	cardURL := resolveAgentCardURL(existing.URL)
+	cardURL := a2aclient.AgentCardURL(existing.URL)
 
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, cardURL, nil)
 	if err != nil {
@@ -479,17 +481,6 @@ func TestA2AAgentHandler(w http.ResponseWriter, r *http.Request) {
 		"version":     card.Version,
 		"skill_count": len(card.Skills),
 	})
-}
-
-// resolveAgentCardURL returns the agent card URL for the given base URL.
-// If the URL already ends with /.well-known/agent-card.json, it is used as-is.
-// Otherwise, the well-known path is appended.
-func resolveAgentCardURL(rawURL string) string {
-	trimmed := strings.TrimRight(rawURL, "/")
-	if strings.HasSuffix(trimmed, "/.well-known/agent-card.json") {
-		return trimmed
-	}
-	return trimmed + "/.well-known/agent-card.json"
 }
 
 // --- Internal helpers ---

@@ -34,6 +34,17 @@ When your plan is finalized, record it with announce_plan (goal + ordered, depen
 - 'details': write a concrete, self-contained description of exactly what to do in this phase — specific structs/functions to add or remove, the exact logic change, new fields, interface updates. Write enough detail that execution can proceed directly from this text without re-reading the code. This is the most important field; a vague 'details' makes the plan useless.
 - 'verify': the command that proves the phase is done (build/test/lint).
 
+Before calling announce_plan, run this COMPLETENESS SELF-CHECK:
+- [ ] If you are changing backend code: did you check whether the frontend (web/src/) consumes the affected API/event/type? If yes, add a phase for the frontend change.
+- [ ] If you are changing the Studio Chat (web/src/components/StudioChat.tsx or SSE events): did you check whether the terminal TUI (pkg/tui/) has equivalent rendering that needs updating?
+- [ ] If you are changing a type/interface: did codegraph show ALL callers? Add phases for every caller that needs updating.
+- [ ] Did you check docs/architecture/ for documentation that describes the subsystem you're changing? If it exists, add a phase to update it.
+- [ ] Did you check for existing tests (*_test.go, *.test.ts) covering the code you're changing? Add a phase for test updates or new tests.
+- [ ] If you are adding a new tool or SSE event: does it need documentation in AGENTS.md or docs/architecture/?
+- [ ] Are there any breaking changes or user-visible behavior differences? Surface them in the plan's context or as explicit decisions.
+
+If any check reveals a gap, add the missing phase BEFORE calling announce_plan. Do NOT announce an incomplete plan.
+
 Call announce_plan WITHOUT any preceding prose or summary — the plan document is shown directly to the user and speaks for itself. Do NOT write a "Here's my plan..." narration before the tool call. This persists the full plan to a session PLAN.md that survives context compaction and is shown to the user. Do NOT hand-write PLAN.md yourself. (You will drive phase status with update_plan once execution begins. When executing, treat PLAN.md as the authoritative source — do NOT re-investigate files or symbols already confirmed in the plan unless the code has changed since planning.)`
 
 // PlanModeBlockedMessage is returned to the model when it calls a mutating tool
@@ -62,7 +73,18 @@ PHASE 2 — READ. ` + "`read_file`" + ` (and read_pdf/filter_json) unlock, plus 
 
 PHASE 3 — GAP (complementary). The remaining read-only tools unlock: grep_search, find_files, file_tree, repo_map, code_definition, code_references, web_fetch, memory_search, memory_get, skill_lookup — and delegate_tasks. Use these ONLY for the genuine gaps codegraph could not fill. Prefer ` + "`delegate_tasks`" + ` with read-only ` + "`tools`" + ` filters (e.g. ["grep_search","read_file","code_references"]) to fan out independent gap questions in parallel. Do not re-answer anything already established. When gaps are closed, call ` + "`gplan_finalize`" + ` to advance to the PLAN phase.
 
-PHASE 4 — PLAN. ` + "`announce_plan`" + ` unlocks. Call it WITHOUT any preceding prose — the plan document is shown directly to the user. Record the finalized plan: goal + ordered, dependency-first phases. For each phase list its affected files (each marked new/modify/delete — the symbol AND its callers, tests, generated code, migrations, docs, so nothing is left unwired); write a concrete, self-contained 'details' field describing exactly what to do (specific functions/structs to add or change, the exact logic, new fields, interface updates — enough detail that execution can proceed directly from it without re-reading the code); and give a verify step (the build/test/lint command that proves the phase is done). File paths must be confirmed: only record a file path in 'details' or 'files' if codegraph_explore, code_definition, find_files, or read_file explicitly returned that exact path this session — do NOT infer paths from symbol names or directory conventions; if a path was not confirmed, call find_files before adding it to the plan. This persists the full plan to a session PLAN.md shown to the user; do NOT hand-write PLAN.md. End by asking the user to exit to Normal mode (shift+tab) before any execution. When executing later, treat PLAN.md as authoritative — do NOT re-investigate files or symbols already confirmed in the plan.
+PHASE 4 — PLAN. ` + "`announce_plan`" + ` unlocks. Call it WITHOUT any preceding prose — the plan document is shown directly to the user. Record the finalized plan: goal + ordered, dependency-first phases. For each phase list its affected files (each marked new/modify/delete — the symbol AND its callers, tests, generated code, migrations, docs, so nothing is left unwired); write a concrete, self-contained 'details' field describing exactly what to do (specific functions/structs to add or change, the exact logic, new fields, interface updates — enough detail that execution can proceed directly from it without re-reading the code); and give a verify step (the build/test/lint command that proves the phase is done); and write a 'summary' for each phase — a 1-2 sentence plain-English explanation of what the phase accomplishes from the user's perspective (e.g. 'Updates the TUI to show both the main answer and the memory-save note instead of hiding the answer'). File paths must be confirmed: only record a file path in 'details' or 'files' if codegraph_explore, code_definition, find_files, or read_file explicitly returned that exact path this session — do NOT infer paths from symbol names or directory conventions; if a path was not confirmed, call find_files before adding it to the plan. This persists the full plan to a session PLAN.md shown to the user; do NOT hand-write PLAN.md. End by asking the user to exit to Normal mode (shift+tab) before any execution. When executing later, treat PLAN.md as authoritative — do NOT re-investigate files or symbols already confirmed in the plan.
+
+Before calling announce_plan, run this COMPLETENESS SELF-CHECK:
+- [ ] If you are changing backend code: did you check whether the frontend (web/src/) consumes the affected API/event/type? If yes, add a phase for the frontend change.
+- [ ] If you are changing the Studio Chat (web/src/components/StudioChat.tsx or SSE events): did you check whether the terminal TUI (pkg/tui/) has equivalent rendering that needs updating?
+- [ ] If you are changing a type/interface: did codegraph show ALL callers? Add phases for every caller that needs updating.
+- [ ] Did you check docs/architecture/ for documentation that describes the subsystem you're changing? If it exists, add a phase to update it.
+- [ ] Did you check for existing tests (*_test.go, *.test.ts) covering the code you're changing? Add a phase for test updates or new tests.
+- [ ] If you are adding a new tool or SSE event: does it need documentation in AGENTS.md or docs/architecture/?
+- [ ] Are there any breaking changes or user-visible behavior differences? Surface them in the plan's context or as explicit decisions.
+
+If any check reveals a gap, add the missing phase BEFORE calling announce_plan. Do NOT announce an incomplete plan.
 
 Produce a COMPLETE plan — cover every dependency the change reaches, order phases dependency-first, and surface any human decisions (breaking changes, alternatives with trade-offs, ambiguous requirements) explicitly. Spend effort proportional to blast radius.`
 

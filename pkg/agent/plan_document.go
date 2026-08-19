@@ -73,6 +73,7 @@ func RenderPlanFromInfoWithDoc(goal string, doc PlanDocumentInfo, steps []PlanSt
 			name:          s.Name,
 			description:   s.Description,
 			details:       s.Details,
+			summary:       s.Summary,
 			files:         s.Files,
 			verify:        s.Verify,
 			parallelGroup: s.ParallelGroup,
@@ -131,6 +132,10 @@ func renderPlanMarkdownWithDoc(goal string, doc PlanDocumentInfo, steps []planSt
 				line += " — " + s.description
 			}
 			sb.WriteString(line + "\n")
+			// Emit optional summary for the human reviewing the plan.
+			if strings.TrimSpace(s.summary) != "" {
+				sb.WriteString("  Summary: " + strings.TrimSpace(s.summary) + "\n")
+			}
 			// Emit affected files as an indented, machine-parseable sub-block so the
 			// concrete blast radius (dependency-first, no orphaned code) is recorded
 			// and can be re-hydrated after compaction.
@@ -207,6 +212,7 @@ func planStepsToInfo(steps []planStep) []PlanStepInfo {
 			Name:          s.name,
 			Description:   s.description,
 			Details:       s.details,
+			Summary:       s.summary,
 			Files:         s.files,
 			Verify:        s.verify,
 			ParallelGroup: s.parallelGroup,
@@ -334,7 +340,19 @@ func parsePlanMarkdownFull(md string) (doc PlanDocumentInfo, goal string, steps 
 				steps[len(steps)-1].verify = strings.TrimSpace(strings.TrimPrefix(trimmed, "Verify:"))
 				continue
 			}
-			detailLines = append(detailLines, trimmed)
+			// Summary line: "Summary: <text>".
+			if strings.HasPrefix(trimmed, "Summary:") {
+				steps[len(steps)-1].summary = strings.TrimSpace(strings.TrimPrefix(trimmed, "Summary:"))
+				continue
+			}
+			detailLines = append(detailLines, strings.TrimPrefix(raw, "  "))
+			continue
+		}
+
+		// Blank line inside a detail block (e.g. between paragraphs or inside
+		// a fenced code block): preserve it so markdown rendering works correctly.
+		if trimmed == "" && len(detailLines) > 0 && currentSection == secPhases {
+			detailLines = append(detailLines, "")
 			continue
 		}
 

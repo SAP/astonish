@@ -98,6 +98,8 @@ type PlanStepInfo struct {
 	// approach). It is persisted to PLAN.md so the detailed plan survives
 	// context compaction, not just the one-line description.
 	Details string `json:"details,omitempty"`
+	// Summary is an optional plain-English explanation of what this phase accomplishes from the user's perspective. Unlike 'details' (which contains implementation instructions for the executor), 'summary' is written for the human approving the plan.
+	Summary string `json:"summary,omitempty"`
 	// Files is the optional list of files this phase will create, modify, or
 	// delete. Making the blast radius explicit (dependency-first, no orphaned
 	// code) is what turns a sketch into a complete, approvable plan. Persisted

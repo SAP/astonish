@@ -297,3 +297,45 @@ func TestCodeSystemPromptContracts_NoCodeSectionsInChatMode(t *testing.T) {
 		assertNotContains(t, prompt, forbidden, fmt.Sprintf("code-only section %q must not appear in chat-mode prompt", forbidden))
 	}
 }
+
+// ─── Plan Mode Completeness Self-Check Contract Tests ────────────────────────
+
+func TestGraphPlanModeSystemContext_CompletenessCheck(t *testing.T) {
+	ctx := GraphPlanModeSystemContext
+
+	if !strings.Contains(ctx, "COMPLETENESS SELF-CHECK") {
+		t.Errorf("GraphPlanModeSystemContext must contain 'COMPLETENESS SELF-CHECK'")
+	}
+	if !strings.Contains(ctx, "frontend") {
+		t.Errorf("GraphPlanModeSystemContext must contain 'frontend' (frontend/backend coverage check)")
+	}
+	if !strings.Contains(ctx, "terminal TUI") {
+		t.Errorf("GraphPlanModeSystemContext must contain 'terminal TUI' (TUI parity check)")
+	}
+	if !strings.Contains(ctx, "docs/architecture") {
+		t.Errorf("GraphPlanModeSystemContext must contain 'docs/architecture' (documentation check)")
+	}
+	if !strings.Contains(ctx, "tests") && !strings.Contains(ctx, "*_test.go") {
+		t.Errorf("GraphPlanModeSystemContext must contain 'tests' or '*_test.go' (test coverage check)")
+	}
+	if !strings.Contains(ctx, "breaking changes") {
+		t.Errorf("GraphPlanModeSystemContext must contain 'breaking changes' (user-facing changes check)")
+	}
+	if !strings.Contains(ctx, "summary") {
+		t.Errorf("GraphPlanModeSystemContext must contain 'summary' (PHASE 4 summary field)")
+	}
+}
+
+func TestPlanModeSystemContext_CompletenessCheck(t *testing.T) {
+	ctx := PlanModeSystemContext
+
+	if !strings.Contains(ctx, "COMPLETENESS SELF-CHECK") {
+		t.Errorf("PlanModeSystemContext must contain 'COMPLETENESS SELF-CHECK'")
+	}
+	if !strings.Contains(ctx, "frontend") {
+		t.Errorf("PlanModeSystemContext must contain 'frontend' (frontend/backend coverage check)")
+	}
+	if !strings.Contains(ctx, "terminal TUI") {
+		t.Errorf("PlanModeSystemContext must contain 'terminal TUI' (TUI parity check)")
+	}
+}

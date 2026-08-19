@@ -43,6 +43,7 @@ type planStep struct {
 	name          string
 	description   string
 	details       string           // optional richer per-phase content persisted to PLAN.md
+	summary       string           // optional plain-English explanation for the human approving the plan
 	files         []PlanFileChange // optional affected files (path + new/modify/delete) persisted to PLAN.md
 	verify        string           // optional command that proves the phase is done, persisted to PLAN.md
 	parallelGroup string           // optional concurrency group label
@@ -63,6 +64,7 @@ func NewPlanState(goal string, doc PlanDocumentInfo, steps []PlanStepInfo) *Plan
 			name:          s.Name,
 			description:   s.Description,
 			details:       s.Details,
+			summary:       s.Summary,
 			files:         s.Files,
 			verify:        s.Verify,
 			parallelGroup: s.ParallelGroup,
@@ -107,6 +109,7 @@ func (ps *PlanState) SnapshotInfo() (string, []PlanStepInfo) {
 			Name:          s.name,
 			Description:   s.description,
 			Details:       s.details,
+			Summary:       s.summary,
 			Files:         s.files,
 			Verify:        s.verify,
 			ParallelGroup: s.parallelGroup,

@@ -32,9 +32,20 @@ func (m model) renderPlanCard(goal string, doc agent.PlanDocumentInfo, steps []a
 	}
 
 	nFiles := 0
+	nNew, nModify, nDelete := 0, 0, 0
 	complete, running, pending := 0, 0, 0
 	for _, s := range steps {
 		nFiles += len(s.Files)
+		for _, f := range s.Files {
+			switch strings.ToLower(strings.TrimSpace(f.Kind)) {
+			case "new", "add", "create":
+				nNew++
+			case "delete", "remove", "rm":
+				nDelete++
+			default:
+				nModify++
+			}
+		}
 		switch s.Status {
 		case "complete":
 			complete++
@@ -67,6 +78,11 @@ func (m model) renderPlanCard(goal string, doc agent.PlanDocumentInfo, steps []a
 		body = append(body, m.planPhaseLines(i+1, s, inner)...)
 		if i < len(steps)-1 {
 			body = append(body, "")
+			if len(steps) > 2 {
+				sep := strings.Repeat("·", min(inner/2, 20))
+				body = append(body, th.PlanMuted.Render(sep))
+				body = append(body, "")
+			}
 		}
 	}
 
@@ -86,7 +102,32 @@ func (m model) renderPlanCard(goal string, doc agent.PlanDocumentInfo, steps []a
 	}
 	meta := fmt.Sprintf("%d phases", len(steps))
 	if nFiles > 0 {
-		meta += fmt.Sprintf(" · %d files", nFiles)
+		// Show file kind breakdown when there's a mix of kinds.
+		kinds := 0
+		if nNew > 0 {
+			kinds++
+		}
+		if nModify > 0 {
+			kinds++
+		}
+		if nDelete > 0 {
+			kinds++
+		}
+		if kinds > 1 {
+			var parts []string
+			if nNew > 0 {
+				parts = append(parts, fmt.Sprintf("%d new", nNew))
+			}
+			if nModify > 0 {
+				parts = append(parts, fmt.Sprintf("%d modify", nModify))
+			}
+			if nDelete > 0 {
+				parts = append(parts, fmt.Sprintf("%d delete", nDelete))
+			}
+			meta += fmt.Sprintf(" · %d files (%s)", nFiles, strings.Join(parts, ", "))
+		} else {
+			meta += fmt.Sprintf(" · %d files", nFiles)
+		}
 	}
 	return m.paintPlanFrame(title, meta, body, footer, width, inner)
 }
@@ -100,6 +141,11 @@ func (m model) planPhaseLines(n int, s agent.PlanStepInfo, inner int) []string {
 	prefix := th.Number.Render(fmt.Sprintf("%d", n)) + "  " + planStatusGlyph(s.Status, th) + " "
 	lines := wrapPrefixed(prefix, desc, inner, th.Text)
 
+	// Summary: plain-English explanation for the approver (prominent, normal text style).
+	if summary := strings.TrimSpace(s.Summary); summary != "" {
+		lines = append(lines, wrapPrefixed("   ", summary, inner, th.Text)...)
+	}
+
 	for _, f := range s.Files {
 		if strings.TrimSpace(f.Path) == "" {
 			continue
@@ -112,13 +158,22 @@ func (m model) planPhaseLines(n int, s agent.PlanStepInfo, inner int) []string {
 		lines = append(lines, wrapPrefixed("   ", "$ "+v, inner, th.PlanMuted)...)
 	}
 	if d := strings.TrimSpace(s.Details); d != "" {
-		for _, dl := range strings.Split(d, "\n") {
-			dl = strings.TrimSpace(dl)
-			if dl == "" {
-				lines = append(lines, "")
-				continue
-			}
-			lines = append(lines, wrapPrefixed("   ", dl, inner, th.PlanMuted)...)
+		lines = append(lines, "") // breathing room before implementation details
+		// Render details as markdown (with syntax highlighting, code blocks,
+		// inline formatting) rather than plain muted text. The details field
+		// typically contains numbered steps, backtick-quoted identifiers, and
+		// fenced code blocks that benefit from proper rendering.
+		detailWidth := inner - 3 // account for "   " indent
+		if detailWidth < 20 {
+			detailWidth = 20
+		}
+		md := render.Markdown(d, detailWidth, th.RenderStyles())
+		if md == "" {
+			// Fallback: plain text if markdown rendering produces nothing.
+			md = th.PlanMuted.Width(detailWidth).Render(d)
+		}
+		for _, dl := range strings.Split(md, "\n") {
+			lines = append(lines, "   "+dl)
 		}
 	}
 	return lines
@@ -127,12 +182,22 @@ func (m model) planPhaseLines(n int, s agent.PlanStepInfo, inner int) []string {
 func (m model) planBand(label, body string, inner int) []string {
 	th := m.theme
 	lines := []string{th.PlanHeader.Render(label)}
-	for _, para := range strings.Split(strings.TrimRight(body, "\n"), "\n") {
-		if strings.TrimSpace(para) == "" {
-			lines = append(lines, "")
-			continue
+	// Render band body as markdown for proper formatting (inline code,
+	// bold, lists) instead of plain muted text.
+	md := render.Markdown(body, inner, th.RenderStyles())
+	if md == "" {
+		// Fallback: plain wrapped text.
+		for _, para := range strings.Split(strings.TrimRight(body, "\n"), "\n") {
+			if strings.TrimSpace(para) == "" {
+				lines = append(lines, "")
+				continue
+			}
+			lines = append(lines, wrapPrefixed("", para, inner, th.PlanMuted)...)
 		}
-		lines = append(lines, wrapPrefixed("", para, inner, th.PlanMuted)...)
+	} else {
+		for _, ml := range strings.Split(md, "\n") {
+			lines = append(lines, ml)
+		}
 	}
 	return lines
 }

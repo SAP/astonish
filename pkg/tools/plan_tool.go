@@ -53,6 +53,7 @@ type PlanStepInput struct {
 	Name          string                `json:"name" jsonschema:"Short identifier for this step (e.g., 'explore-repos', 'analyze-implementations', 'write-report'). Use this exact value as the 'step' argument to update_plan."`
 	Description   string                `json:"description" jsonschema:"Human-readable label for this phase (e.g., 'Explore both repository structures and dependencies')."`
 	Details       string                `json:"details,omitempty" jsonschema:"Optional richer, concrete plan for this phase: the specific approach and reasoning. Persisted to the session PLAN.md so the detailed plan survives context compaction. Use this to record the actual step-by-step work, not just the label."`
+	Summary       string                `json:"summary,omitempty" jsonschema:"Optional 1-2 sentence plain-English explanation of what this phase accomplishes from the user's perspective. Write this for the human approving the plan, not for the executor. Example: 'Adds a meta flag to SSE text events so housekeeping messages don't hide the main answer.'"`
 	Files         []PlanFileChangeInput `json:"files,omitempty" jsonschema:"The files this phase will create, modify, or delete — the concrete blast radius. List every affected file (the symbol AND its callers, tests, generated code, migrations, docs) so the plan is complete and has no orphaned code. Order phases dependency-first. Persisted to PLAN.md and shown in the plan UI."`
 	Verify        string                `json:"verify,omitempty" jsonschema:"The command that proves this phase is done (build, test, or lint), e.g. 'go test ./pkg/agent/...'. Encodes the 'every phase ends verified' discipline. Persisted to PLAN.md."`
 	ParallelGroup string                `json:"parallel_group,omitempty" jsonschema:"Optional concurrency group label. Steps sharing the same non-empty label may execute concurrently. Steps touching different file subtrees with no shared interfaces can share a group. Steps that produce types or files consumed by other steps must remain serial (leave this empty or use distinct labels)."`
@@ -86,6 +87,7 @@ func announcePlan(_ tool.Context, args AnnouncePlanArgs) (AnnouncePlanResult, er
 			Name:          s.Name,
 			Description:   s.Description,
 			Details:       s.Details,
+			Summary:       s.Summary,
 			Files:         files,
 			Verify:        s.Verify,
 			ParallelGroup: s.ParallelGroup,
@@ -132,8 +134,12 @@ Document-level sections (set once for the whole plan):
 Make each phase complete, not a sketch:
 - 'files': list every file the phase touches, each marked 'new'/'modify'/'delete'. Include the symbol AND its callers, tests, generated code, migrations, and docs so nothing is left orphaned or unwired.
 - 'details': the concrete approach and reasoning for the phase.
+- 'summary': a 1-2 sentence plain-English explanation of what this phase accomplishes from the user's perspective. Written for the human approving the plan, not the executor. Example: 'Adds a meta flag to SSE text events so the frontend knows not to hide the main answer behind a housekeeping note.'
 - 'verify': the command that proves the phase is done (build/test/lint).
 - 'parallel_group': Structure the plan in waves. Before submitting, group phases by which ones can start simultaneously — a phase can start when it has no dependency on an unfinished phase's output (types, files, compiled symbols). Assign all phases in the same wave the same label (e.g. 'wave-1', 'wave-2'). Serial phases — where one phase produces something another phase needs — get no label or a distinct label. Most plans have at least two waves; a plan where every phase is unlabeled should only happen when every phase strictly depends on the previous one. Independence is about type/file dependencies, not package boundaries: two phases in the same package can be in the same wave if they touch disjoint files and neither produces a symbol the other consumes.
+
+Completeness discipline:
+Before calling announce_plan, verify you have covered: (1) both frontend and backend if the change crosses the boundary, (2) terminal TUI if you changed Studio Chat rendering, (3) docs/architecture/ if the subsystem has documentation, (4) tests for every file you modify, (5) any breaking changes surfaced explicitly.
 
 Tracking progress:
 - For work you do yourself on the main thread (edit_file, shell_command, etc.), call update_plan to mark each phase 'running' when you start it and 'complete' (or 'failed') when you finish. This keeps the checklist and PLAN.md accurate as you go, and lets you recover exactly where you were after a context summary.

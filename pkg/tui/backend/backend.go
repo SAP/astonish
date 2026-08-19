@@ -57,6 +57,12 @@ type HistoryEntry struct {
 	Args     map[string]any
 	Result   any
 	Artifact *events.Artifact
+	// Plan fields are present when Kind is "plan".
+	PlanStatus       events.PlanStatus
+	Options          []string
+	PlanContext      string
+	PlanWhatNotToDo  string
+	PlanVerification string
 }
 
 // Attachment is a file/image payload to send with a chat turn.
@@ -249,6 +255,12 @@ type PlanBackend interface {
 	// PLAN.md sidecar, or "" if plan persistence is not configured or no
 	// session is active yet.
 	ActivePlanFilePath() string
+}
+
+// PlanLifecycleBackend persists the user's decision for the latest announced
+// plan so a resumed code session restores pending and settled cards exactly.
+type PlanLifecycleBackend interface {
+	RecordPlanDecision(ctx context.Context, status events.PlanStatus) error
 }
 
 // Backend drives one interactive chat session against the platform.

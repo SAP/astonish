@@ -130,6 +130,13 @@ func (b *lazyCodeBackend) Open(ctx context.Context) error {
 	return b.inner.Open(ctx)
 }
 
+func (b *lazyCodeBackend) RecordPlanDecision(ctx context.Context, status events.PlanStatus) error {
+	if inner, ok := b.inner.(backend.PlanLifecycleBackend); ok {
+		return inner.RecordPlanDecision(ctx, status)
+	}
+	return nil
+}
+
 func (b *lazyCodeBackend) RunTurn(ctx context.Context, msg string, opts backend.TurnOptions) (<-chan events.Event, error) {
 	if b.inner == nil {
 		return nil, fmt.Errorf("code backend not opened")
@@ -1128,6 +1135,21 @@ func mapSSEToEvents(sev *client.SSEEvent, debug bool) []events.Event {
 		}
 		if json.Unmarshal(data, &payload) == nil && payload.Text != "" {
 			return []events.Event{events.NewSystem(payload.Text)}
+		}
+	case "plan":
+		var payload struct {
+			Text             string            `json:"text"`
+			Status           events.PlanStatus `json:"status"`
+			PlanContext      string            `json:"plan_context"`
+			PlanWhatNotToDo  string            `json:"plan_what_not_to_do"`
+			PlanVerification string            `json:"plan_verification"`
+		}
+		if json.Unmarshal(data, &payload) == nil && payload.Text != "" {
+			ev := events.NewPlan(payload.Text, payload.Status)
+			ev.PlanContext = payload.PlanContext
+			ev.PlanWhatNotToDo = payload.PlanWhatNotToDo
+			ev.PlanVerification = payload.PlanVerification
+			return []events.Event{ev}
 		}
 	case "plan_approval":
 		var payload struct {

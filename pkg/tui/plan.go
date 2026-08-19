@@ -7,6 +7,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/SAP/astonish/pkg/agent"
+	"github.com/SAP/astonish/pkg/tui/events"
 	"github.com/SAP/astonish/pkg/tui/render"
 )
 
@@ -14,14 +15,15 @@ import (
 // parses, it becomes a structured Studio-inspired card (numbered phases, file
 // kinds, narrative bands). Unparseable / mid-stream chunks fall back to the
 // generic markdown-in-a-box path so history never goes blank.
-func (m model) renderPlanDocument(content string, width int) string {
+func (m model) renderPlanDocument(it events.Item, width int) string {
+	content := it.Content
 	if doc, goal, steps, err := agent.ParsePlanDocument(content); err == nil && len(steps) > 0 {
-		return m.renderPlanCard(goal, doc, steps, width)
+		return m.renderPlanCard(goal, doc, steps, it, width)
 	}
-	return m.renderPlanDocumentMarkdown(content, width)
+	return m.renderPlanDocumentMarkdown(content, it, width)
 }
 
-func (m model) renderPlanCard(goal string, doc agent.PlanDocumentInfo, steps []agent.PlanStepInfo, width int) string {
+func (m model) renderPlanCard(goal string, doc agent.PlanDocumentInfo, steps []agent.PlanStepInfo, it events.Item, width int) string {
 	th := m.theme
 	if width < 30 {
 		width = 30
@@ -96,6 +98,7 @@ func (m model) renderPlanCard(goal string, doc agent.PlanDocumentInfo, steps []a
 	}
 
 	footer := planProgressFooter(complete, running, pending, len(steps))
+	body = append(body, m.planApprovalLines(it, inner)...)
 	title := strings.TrimSpace(goal)
 	if title == "" {
 		title = "Execution Plan"
@@ -198,6 +201,38 @@ func (m model) planBand(label, body string, inner int) []string {
 		for _, ml := range strings.Split(md, "\n") {
 			lines = append(lines, ml)
 		}
+	}
+	return lines
+}
+
+func (m model) planApprovalLines(it events.Item, inner int) []string {
+	if it.PlanStatus == "" {
+		return nil
+	}
+	lines := []string{"", m.theme.PlanMuted.Render(strings.Repeat("─", min(inner, 24))), ""}
+	switch it.PlanStatus {
+	case events.PlanPending:
+		lines = append(lines, m.theme.PlanHeader.Render("✦ Plan Ready · choose how to proceed"))
+		opts := it.Options
+		if len(opts) == 0 {
+			opts = []string{planOptApprove, planOptRequest, planOptDecline}
+		}
+		cursor := m.tr.ApprovalCursor
+		for i, option := range opts {
+			key := []string{"Enter", "r", "n"}[min(i, 2)]
+			label := fmt.Sprintf("%s  %s", key, option)
+			if i == cursor {
+				lines = append(lines, m.theme.PlanHeader.Bold(true).Render("▸ "+label))
+			} else {
+				lines = append(lines, m.theme.PlanMuted.Render("  "+label))
+			}
+		}
+	case events.PlanApproved:
+		lines = append(lines, m.theme.Success.Render("✓ Approved"))
+	case events.PlanChangesRequested:
+		lines = append(lines, m.theme.PlanHeader.Render("↺ Changes requested"))
+	case events.PlanDeclined:
+		lines = append(lines, m.theme.Error.Render("✗ Declined"))
 	}
 	return lines
 }
@@ -353,7 +388,7 @@ func (m model) planTopBorder(width int, titleRendered, metaRendered string) stri
 
 // renderPlanDocumentMarkdown is the fallback path for unparseable / partial
 // PLAN.md text: generic goldmark inside the same bordered frame.
-func (m model) renderPlanDocumentMarkdown(content string, width int) string {
+func (m model) renderPlanDocumentMarkdown(content string, it events.Item, width int) string {
 	th := m.theme
 	if width < 30 {
 		width = 30
@@ -390,6 +425,7 @@ func (m model) renderPlanDocumentMarkdown(content string, width int) string {
 	if md != "" {
 		bodyLines = strings.Split(md, "\n")
 	}
+	bodyLines = append(bodyLines, m.planApprovalLines(it, inner)...)
 	return m.paintPlanFrame(title, "", bodyLines, "", width, inner)
 }
 

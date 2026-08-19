@@ -38,7 +38,11 @@ import (
 
 // codeAppName is the ADK app name used for local code-mode sessions. It is
 // distinct from the Studio chat app name so the two never share session state.
-const codeAppName = "astonish_code"
+const (
+	codeAppName             = "astonish_code"
+	planLifecycleStateKey   = "astonish_plan_lifecycle"
+	planApprovalUserMessage = "I approve this plan. Please start implementing it now, phase by phase."
+)
 
 // codeUserID is the base local user for code mode (single-user, no auth).
 // Code-mode sessions are scoped per working directory by deriving a
@@ -1380,32 +1384,18 @@ func (b *localAgentBackend) driveTurn(
 			}
 			if part.FunctionResponse != nil {
 				if part.FunctionResponse.Name == "announce_plan" {
-					// The plan was stored in chatAgent by the planStateCallback.
-					// Render it as a formatted text block so the user sees the
-					// full plan document in the terminal instead of a prose summary.
+					// Emit the document and pending approval lifecycle atomically.
+					// This prevents a prompt from ever existing without its plan.
+					planPayload := map[string]any{"status": string(events.PlanPending)}
 					if plan := chatAgent.GetActivePlan(); plan != nil {
 						goal, steps := plan.SnapshotInfo()
 						doc := plan.SnapshotDoc()
-						rendered := agent.RenderPlanFromInfoWithDoc(goal, doc, steps)
-						emit("text", map[string]any{"text": rendered})
+						planPayload["text"] = agent.RenderPlanFromInfoWithDoc(goal, doc, steps)
+						planPayload["plan_context"] = doc.Context
+						planPayload["plan_what_not_to_do"] = doc.WhatNotToDo
+						planPayload["plan_verification"] = doc.Verification
 					}
-					// Emit plan_approval + done immediately so the TUI shows
-					// the approval footer right below the plan content with no
-					// intermediate tool activity in between.
-					planPayload := map[string]any{"plan_announced": true}
-					if plan := chatAgent.GetActivePlan(); plan != nil {
-						doc := plan.SnapshotDoc()
-						if doc.Context != "" {
-							planPayload["plan_context"] = doc.Context
-						}
-						if doc.WhatNotToDo != "" {
-							planPayload["plan_what_not_to_do"] = doc.WhatNotToDo
-						}
-						if doc.Verification != "" {
-							planPayload["plan_verification"] = doc.Verification
-						}
-					}
-					emit("plan_approval", planPayload)
+					emit("plan", planPayload)
 					emit("done", nil)
 					return
 				}
@@ -1702,6 +1692,34 @@ func (b *localAgentBackend) ListSessions(ctx context.Context) ([]backend.Session
 	return out, nil
 }
 
+func (b *localAgentBackend) RecordPlanDecision(ctx context.Context, status events.PlanStatus) error {
+	b.mu.Lock()
+	id := b.sessionID
+	b.mu.Unlock()
+	if id == "" || status == "" {
+		return nil
+	}
+	resp, err := b.sessionSvc.Get(ctx, &session.GetRequest{AppName: codeAppName, UserID: b.effectiveUserID(), SessionID: id})
+	if err != nil {
+		return fmt.Errorf("load session for plan decision: %w", err)
+	}
+	if resp == nil || resp.Session == nil {
+		return fmt.Errorf("load session for plan decision: session not found")
+	}
+	ev := &session.Event{
+		ID:        fmt.Sprintf("plan-decision-%d", time.Now().UnixNano()),
+		Author:    "system",
+		Timestamp: time.Now(),
+		Actions: session.EventActions{StateDelta: map[string]any{
+			planLifecycleStateKey: string(status),
+		}},
+	}
+	if err := b.sessionSvc.AppendEvent(ctx, resp.Session, ev); err != nil {
+		return fmt.Errorf("persist plan decision: %w", err)
+	}
+	return nil
+}
+
 func (b *localAgentBackend) LoadHistory(ctx context.Context) ([]backend.HistoryEntry, error) {
 	b.mu.Lock()
 	id := b.sessionID
@@ -1843,10 +1861,17 @@ func (b *localAgentBackend) loadHistory(ctx context.Context, id string) ([]backe
 	// session the plan is rendered as synthetic agent text (not stored in the
 	// session); on resume we must recreate that text from the stored call args.
 	announcePlanArgs := make(map[string]map[string]any)
+	latestPlanOutIdx := -1
 
 	var out []backend.HistoryEntry
 	for i, ev := range allEvents {
-		if ev == nil || ev.LLMResponse.Content == nil {
+		if ev == nil {
+			continue
+		}
+		if lifecycle, ok := ev.Actions.StateDelta[planLifecycleStateKey].(string); ok && latestPlanOutIdx >= 0 {
+			out[latestPlanOutIdx].PlanStatus = events.PlanStatus(lifecycle)
+		}
+		if ev.LLMResponse.Content == nil {
 			continue
 		}
 		role := ev.LLMResponse.Content.Role
@@ -1871,6 +1896,9 @@ func (b *localAgentBackend) loadHistory(ctx context.Context, id string) ([]backe
 				if kind == "user" && isApprovalResponseEvent(i, allEvents, approvalPromptIndices, part.Text) {
 					out = append(out, backend.HistoryEntry{Kind: "system", Text: "Approval: " + extractApprovalChoice(part.Text)})
 					continue
+				}
+				if kind == "user" && strings.TrimSpace(part.Text) == planApprovalUserMessage && latestPlanOutIdx >= 0 {
+					out[latestPlanOutIdx].PlanStatus = events.PlanApproved
 				}
 				out = append(out, backend.HistoryEntry{Kind: kind, Text: part.Text})
 			case part.FunctionCall != nil:
@@ -1897,7 +1925,13 @@ func (b *localAgentBackend) loadHistory(ctx context.Context, id string) ([]backe
 				if part.FunctionResponse.Name == "announce_plan" {
 					args := announcePlanArgs[part.FunctionResponse.ID]
 					if rendered := renderPlanFromArgs(args); rendered != "" {
-						out = append(out, backend.HistoryEntry{Kind: "agent", Text: rendered})
+						out = append(out, backend.HistoryEntry{
+							Kind:       "plan",
+							Text:       rendered,
+							PlanStatus: events.PlanPending,
+							Options:    []string{"Approve & implement", "Request changes", "Decline"},
+						})
+						latestPlanOutIdx = len(out) - 1
 					}
 					continue
 				}

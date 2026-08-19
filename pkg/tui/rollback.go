@@ -168,13 +168,18 @@ func (m model) applyRolledBack(msg rolledBackMsg) (tea.Model, tea.Cmd) {
 	entries := make([]events.HistoryMsg, 0, len(msg.entries))
 	for _, e := range msg.entries {
 		entries = append(entries, events.HistoryMsg{
-			Kind:     e.Kind,
-			Text:     e.Text,
-			ToolName: e.ToolName,
-			ToolID:   e.ToolID,
-			Args:     e.Args,
-			Result:   e.Result,
-			Artifact: e.Artifact,
+			Kind:             e.Kind,
+			Text:             e.Text,
+			ToolName:         e.ToolName,
+			ToolID:           e.ToolID,
+			Args:             e.Args,
+			Result:           e.Result,
+			Artifact:         e.Artifact,
+			PlanStatus:       e.PlanStatus,
+			Options:          e.Options,
+			PlanContext:      e.PlanContext,
+			PlanWhatNotToDo:  e.PlanWhatNotToDo,
+			PlanVerification: e.PlanVerification,
 		})
 	}
 	m.planMode = false

@@ -29,6 +29,17 @@ const (
 	KindStatus        Kind = "status"     // spinner / live status text
 	KindUser          Kind = "user"       // local echo of user message
 	KindDelegation    Kind = "delegation" // sub-agent delegation lifecycle
+	KindPlan          Kind = "plan"       // plan document plus its approval lifecycle
+)
+
+// PlanStatus is the approval lifecycle owned by a plan transcript item.
+type PlanStatus string
+
+const (
+	PlanPending          PlanStatus = "pending"
+	PlanApproved         PlanStatus = "approved"
+	PlanChangesRequested PlanStatus = "changes_requested"
+	PlanDeclined         PlanStatus = "declined"
 )
 
 // Usage holds token accounting for a turn.
@@ -91,11 +102,13 @@ type Event struct {
 	// approval). Paths holds the requested out-of-project paths for a "folder"
 	// prompt. PlanContext/PlanWhatNotToDo/PlanVerification carry the optional
 	// narrative sections from the plan document for "plan" approvals.
-	ApprovalKind        string
-	Paths               []string
-	PlanContext         string
-	PlanWhatNotToDo     string
-	PlanVerification    string
+	ApprovalKind     string
+	Paths            []string
+	PlanContext      string
+	PlanWhatNotToDo  string
+	PlanVerification string
+	// PlanStatus makes the document and its approval lifecycle one atomic event.
+	PlanStatus PlanStatus
 
 	// SessionID for KindSession / KindSessionTitle.
 	SessionID string
@@ -193,6 +206,21 @@ func NewAuthorizationApproval(name string, args map[string]any, options []string
 		Options:      options,
 		ApprovalKind: kind,
 		Paths:        paths,
+	}
+}
+
+// NewPlan returns one atomic plan document and approval-lifecycle event.
+func NewPlan(content string, status PlanStatus) Event {
+	if status == "" {
+		status = PlanPending
+	}
+	return Event{
+		Kind:         KindPlan,
+		Text:         content,
+		ToolName:     "announce_plan",
+		Options:      []string{"Approve & implement", "Request changes", "Decline"},
+		ApprovalKind: "plan",
+		PlanStatus:   status,
 	}
 }
 

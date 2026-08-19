@@ -2747,7 +2747,7 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 		case events.ItemDelegation:
 			appendBlock(i, it.Kind, m.renderDelegationItem(it, cw))
 		case events.ItemPlan:
-			appendBlockSpanned(i, it.Kind, m.renderPlanDocument(it.Content, cw), planDocumentContentSpan)
+			appendBlockSpanned(i, it.Kind, m.renderPlanDocument(it, cw), planDocumentContentSpan)
 		}
 	}
 	m.transcriptPlainLines = plainLines
@@ -3394,13 +3394,12 @@ func (m model) viewContent() string {
 	if m.tr.Awaiting {
 		it := m.approvalItem()
 		if it != nil && it.ApprovalKind == "plan" {
-			// Plan approval: keep plan content visible, show compact options footer
+			// The plan card itself owns the controls; keep the transcript visible
+			// and suppress the normal composer while it is pending.
 			return m.paintBackground(lipgloss.JoinVertical(lipgloss.Left,
 				m.renderHeader(),
 				sep,
 				m.vp.View(),
-				sep,
-				m.renderPlanApprovalFooter(),
 				m.renderHints(),
 			))
 		}

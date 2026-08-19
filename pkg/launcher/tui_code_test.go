@@ -701,8 +701,11 @@ func TestLoadHistory_AnnouncePlanReconstructsPlanDocument(t *testing.T) {
 		if e.Kind == "tool_result" && e.ToolName == "announce_plan" {
 			t.Errorf("announce_plan leaked as tool_result in history")
 		}
-		if e.Kind == "agent" && strings.HasPrefix(e.Text, "# Execution Plan") {
+		if e.Kind == "plan" && strings.HasPrefix(e.Text, "# Execution Plan") {
 			planText = e.Text
+			if e.PlanStatus != events.PlanPending {
+				t.Errorf("plan status = %q, want pending", e.PlanStatus)
+			}
 		}
 	}
 	if planText == "" {
@@ -713,6 +716,28 @@ func TestLoadHistory_AnnouncePlanReconstructsPlanDocument(t *testing.T) {
 	}
 	if !strings.Contains(planText, "phase-one") || !strings.Contains(planText, "phase-two") {
 		t.Errorf("plan document missing phases; got:\n%s", planText)
+	}
+
+	// A persisted lifecycle delta settles the same plan entry on resume rather
+	// than creating or removing a separate approval record.
+	if err := b.sessionSvc.AppendEvent(ctx, sess, &adksession.Event{
+		ID:        "plan-decision-approved",
+		Author:    "system",
+		Timestamp: time.Now(),
+		Actions: adksession.EventActions{StateDelta: map[string]any{
+			planLifecycleStateKey: string(events.PlanApproved),
+		}},
+	}); err != nil {
+		t.Fatalf("append plan decision: %v", err)
+	}
+	settled, err := b.loadHistory(ctx, id)
+	if err != nil {
+		t.Fatalf("load settled history: %v", err)
+	}
+	for _, e := range settled {
+		if e.Kind == "plan" && e.PlanStatus != events.PlanApproved {
+			t.Fatalf("settled plan status = %q, want approved", e.PlanStatus)
+		}
 	}
 }
 

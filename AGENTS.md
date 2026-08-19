@@ -1,337 +1,133 @@
-# AGENTS.md - Agent Coding Guidelines
+# AGENTS.md
 
-This document is the **root** guidance file for agentic coding systems working on the Astonish codebase. Deeper AGENTS.md files exist under significant subsystems (see [Hierarchical AGENTS.md Index](#hierarchical-agentsmd-index)) — always consult the deepest one whose scope covers the files you are editing.
+## Project overview
 
-## Project Overview
+Astonish is an AI-agent platform distributed as one Go binary. It supports a local coding TUI, a remote multi-tenant chat/platform, HTTP/SSE APIs, reusable flows, tools/MCP, memory, browser automation, fleet orchestration, and isolated execution through Incus, Kubernetes, or OpenShell backends. The Studio UI is a React SPA embedded into the Go binary.
 
-Astonish is a **multi-tenant AI agent platform** written in Go with a React/TypeScript UI. It uses Google's Agent Development Kit (ADK) and provides three top-level modes:
+The repository is primarily:
 
-- **Personal / CLI**: `astonish chat` — single-user, SQLite, in-process agent runtime.
-- **Studio (HTTP + SPA)**: `astonish daemon run` → serves REST/SSE API under `/api/*` and the embedded React SPA. This is what people usually call "Astonish Studio".
-- **Platform**: multi-tenant PostgreSQL, envelope encryption, org/team/personal scoping, sandboxed execution over Kubernetes/OpenShell/Incus, channel adapters (Slack/Telegram/Email), scheduler, remote CLI.
+- **Go 1.26** (`go.mod`, toolchain `go1.26.1`) for the CLI, agent runtime, API, storage, TUI, and sandbox backends.
+- **React 19 + TypeScript/legacy JSX + Vite + Tailwind CSS 4** under `web/`.
+- **Ent** for scoped persistence, with SQLite for personal/development use and PostgreSQL for the multi-tenant platform.
 
-**Stack:**
-- **Backend**: Go 1.26 (see `go.mod`; toolchain go1.26.x), ADK (`github.com/google/adk-go`), Ent ORM (`entgo.io/ent`), bubbletea (TUI), pgx (Postgres), `atlas` for migrations, `mcp-go-sdk`, starlark, Kubernetes/Incus client libraries.
-- **Frontend**: React 19.2 with **mixed TypeScript (`.ts`/`.tsx`) and JSX (`.jsx`)** (the app entry is `web/src/main.tsx`), Vite 7.2, Tailwind CSS 4.1, Vitest. `npm run build` runs `tsc --noEmit` before Vite.
-- **Build System**: Make (`Makefile`, `Makefile.integration`). Pre-commit hook (`.githooks/pre-commit`) enforces Atlas migration integrity.
-- **Sandbox / Isolation**: Incus (default, LXC), Kubernetes, OpenShell (gRPC gateway with Landlock/seccomp), plus an in-memory mock for tests.
+Before changing a subsystem, read the nearest nested `AGENTS.md`; those files contain stricter subsystem-specific contracts and override this root guide.
 
-## Build / Lint / Test Commands
+## Repository map
 
-### Go Backend
+- `main.go`, `cmd/astonish/` — binary entry point and CLI dispatch. Commands should parse arguments and delegate; keep business logic in `pkg/`. Preserve local/remote command gating. Bare `astonish` launches local code mode in a TTY.
+- `pkg/agent/` — LLM-driven agent loop, prompt construction, tool execution, compaction, delegation, and approvals.
+- `pkg/api/` — platform/Studio HTTP handlers, authentication, SSE chat/fleet streams, and orchestration wiring.
+- `pkg/launcher/` — composition roots for local code TUI, remote chat TUI, and server/daemon launch paths.
+- `pkg/tui/`, `pkg/ui/` — Bubble Tea terminal clients and reusable terminal rendering.
+- `pkg/tools/`, `pkg/browser/`, `pkg/codeintel/` — built-in tools, CDP browser automation, and source-code intelligence.
+- `pkg/provider/`, `pkg/mcp/`, `pkg/skills/` — model providers, MCP integration, and skill loading.
+- `pkg/store/` — storage interfaces and implementations/routing; tenant scope is a core invariant.
+- `pkg/memory/`, `pkg/session/`, `pkg/fleet/`, `pkg/drill/`, `pkg/channels/` — major domain subsystems.
+- `pkg/sandbox/` — backend-neutral sandbox contracts plus Incus/Kubernetes/OpenShell implementations. `Backend` implementations must be concurrency-safe and lifecycle methods are intentionally idempotent.
+- `ent/{platform,org,team,personal}/` — four persistence scopes. Only `schema/*.go` and `generate.go` are normally hand-edited; the remaining Ent files are generated.
+- `web/src/` — Studio SPA. Entry points are `main.tsx` and `App.tsx`; `api/` contains REST/SSE clients and `components/` contains UI.
+- `tests/e2e/`, `tests/e2eboot/`, `tests/scenarios/` — tagged E2E suites, shared bootstrap harness, and scenario catalogs/reporters.
+- `docs/architecture/` — authoritative design documents. Update the relevant document when changing a documented protocol or invariant.
+- `proto/`, `deploy/`, `docker/` — protocol definitions, deployment assets, and container images.
+
+## Setup, build, and run
+
+Prerequisites: Go 1.26.x, Node.js 24+ with npm, Make, and golangci-lint matching `.golangci-version` (currently the 2.12 minor line).
+
 ```bash
-# Build everything (UI + Go binary)
-make build-all
-
-# Build Go binary only
-make build
-
-# Build React UI only
-make build-ui
-
-# Run Go application
-go run .
-
-# Run Astonish Studio (HTTP + SPA on :9393 by default)
-make studio              # Production mode (serves embedded UI)
-make studio-dev          # Dev mode (live UI reload on http://localhost:5173)
-
-# Tests (tiered)
-make test-unit           # Go + frontend unit tests (fast, no external deps)
-make test-integration    # Integration tests (needs ASTONISH_TEST_DSN)
-make test-e2e            # Full E2E (needs ASTONISH_TEST_DSN + provider API key + kubectl + helm)
-make test-e2e-sqlite     # E2E in SQLite mode (no ASTONISH_TEST_DSN, still needs provider key + k8s sandbox)
-make test-e2e-openshell  # E2E against the OpenShell sandbox backend
-make test-e2e-inspect    # Leave a long-lived inspector server on :9394 after the run
-make test-e2e-inspect-stop # Stop the inspector
-
-# Run single test
-go test ./pkg/tools -run TestFileTree
-go test -v ./pkg/tools -run TestFileTree  # Verbose
-
-# Lint
-golangci-lint run        # Full lint check (bug-finders only; see .golangci.yml)
-# Prefer: make lint      # config verify + run; version must match .golangci-version (CI)
-
-# Atlas migrations (schema/*.sql, pkg/store/*/migrations)
-make migrate-diff        # Generate a new migration by diffing ent schemas
+make build-all       # Ent generation + npm/UI build + Go binary; also configures git hooks
+make build           # Go binary only: ./astonish
+make build-ui        # npm install and production UI/sandbox bundles in web/dist
+make run             # go run .
+go run .              # run CLI directly
+make studio           # build UI, then start Studio backend
+make studio-dev       # backend on :9393; run `cd web && npm run dev` separately for :5173
 ```
 
-Full e2e infra (docker-compose, k8s namespace bring-up, PVCs, inspector state) is documented in `tests/AGENTS.md`.
+`Makefile` auto-loads gitignored `.env` and `.env.local`; existing shell variables win. Start from `.env.example` or `.env.integration.example` and never commit credentials.
 
-### React Frontend (in `web/` directory)
+Useful generators:
+
 ```bash
-cd web
-
-# Development server with hot reload
-npm run dev              # http://localhost:5173
-
-# Build for production (runs tsc --noEmit first)
-npm run build
-
-# Lint
-npm run lint
-
-# Unit tests (Vitest)
-npm test
+make ent-generate       # regenerate all four Ent scopes
+make proto-gen          # regenerate gRPC stubs from vendored proto files
+make sandbox-entrypoint # regenerate the canonical sandbox entrypoint script
+make build-treesitter-lib
 ```
 
-### Quick Reference
-- Single test: `go test ./pkg/path -run TestFunctionName`
-- Verbose test: `go test -v ./pkg/path -run TestFunctionName`
-- Run specific package: `go test ./pkg/path`
-- Run with race detector: `go test -race ./pkg/path`
-- Rebuild the e2e-inspector when backend code changed: `make test-e2e-inspect` handles this automatically.
+Do not hand-edit generated Ent clients, protobuf stubs, `web/dist`, or generated sandbox artifacts. Change their source and rerun the corresponding target.
 
-## Go Code Style
+## Test and lint commands
 
-- **Imports**: stdlib → external → internal, with blank lines between groups.
-- **Naming**: `PascalCase` for exports, `camelCase` for private, lowercase packages.
-- **Tags**: `yaml` and `json` with `omitempty` for optional fields.
-- **Errors**: return as last value, check immediately, wrap with `fmt.Errorf` when needed. Never suppress with `_`.
-- **Interfaces**: minimal, defined **near use** (e.g., `RunnableTool`, `ToolWithDeclaration` in `pkg/tools`, `Backend` in `pkg/sandbox`, `Channel` in `pkg/channels`).
-- **Testing**: `*_test.go` same package, table-driven tests, `os.MkdirTemp` with cleanup. Integration/e2e tests use build tags (`//go:build integration`, `//go:build e2e`).
-- **Linting**: pre-commit runs `golangci-lint` (required; version must match `.golangci-version` / CI). Policy is in `.golangci.yml` and is **intentionally narrow**: only `govet`, `ineffassign`, `unused`, `staticcheck` (with ST*/S*/QF*/SA9003/SA1019 disabled), and `gosec` (with G101/G104/G117/G124/G301/G302 and related excludes). Do **not** re-enable style linters without discussion — the project deliberately prioritizes bug-finders. Always run `golangci-lint config verify` (or `make lint`) after editing excludes — unknown rule IDs break CI.
-- **Comments**: avoid unless the code is complex or non-obvious.
-- **Generated code**: never hand-edit `ent/*/*.go` except files under `ent/*/schema/`. See `ent/AGENTS.md`. The same applies to `pkg/sandbox/openshell/gen/openshellv1/*.pb.go` — regenerate from `proto/openshell/v1/*.proto`.
+Run the narrowest relevant checks while iterating, then broaden before finishing.
 
-## React / TypeScript / JSX Code Style
-
-- **Language**: The web app is **mixed TS and JSX**. New UI files should be **`.tsx`** unless they mirror an existing `.jsx` neighbor. The Vite/Vitest configs handle both; ESLint has separate blocks for `{js,jsx}` and `{ts,tsx}` in `web/eslint.config.js`.
-- **Components**: Functional with hooks, single per file, `export default` for the main component (named exports for helpers).
-- **Imports**: External first, local second. Named exports preferred for utilities. The web app supports the `@/*` alias for imports from `web/src`.
-- **Styling**: Tailwind CSS v4 with semantic tokens in `web/src/index.css`. Standard application UI should prefer source-owned shadcn/ui primitives in `web/src/components/ui/*`; custom product surfaces (Flow Canvas, Studio Chat rendering, embedded viewers, terminal, Apps iframe) should be tokenized rather than rewritten as generic shadcn UI. Dual-axis theming (mode × brand pack), token rules, and no hard-coded brand colors: **`docs/architecture/studio-ui-system.md`** and **`web/src/AGENTS.md`**.
-- **State**: React hooks only — **no Redux/Zustand/Jotai/etc.** Props drilling is acceptable. Cross-cutting state uses React Context sparingly.
-- **Handlers**: CamelCase, prevent default on forms, cleanup in `useEffect`.
-- **Linting**: ESLint config in `web/eslint.config.js`; `varsIgnorePattern: '^[A-Z_]'` allows unused component-name imports.
-- **Type-check gate**: `npm run build` runs `tsc --noEmit` — do not commit code that fails it.
-
-## File Structure
-
-```
-astonish/
-├── cmd/
-│   ├── astonish/                       # Cobra CLI dispatch (root.go, chat.go, daemon.go, …)
-│   └── astonish-sandbox-entrypoint-script/  # Generator for sandbox pod entrypoint
-├── pkg/
-│   ├── agent/            # Core ChatAgent runtime, tool-loop orchestration
-│   ├── api/              # HTTP handlers, SSE chat runner, tenant middleware, image build endpoints
-│   ├── apps/             # Generative UI (VisualApp, DataSource, versioning)
-│   ├── browser/          # Chromium-based browser automation, handoff, CAPTCHA
-│   ├── cache/            # Small in-memory caches (tools cache, etc.)
-│   ├── channels/         # Slack / Telegram / Email adapters + routing + commands
-│   ├── config/           # YAML config loading (LoadAgent, LoadAppConfig)
-│   ├── credentials/      # Encrypted credential store, secret scanner, pending vault, OAuth
-│   ├── daemon/           # Platform bootstrap: wires stores, scheduler, channels, fleet, Studio
-│   ├── drill/            # Test/drill suite runner (SuiteRunner, TriageAgent, ArtifactManager)
-│   ├── fleet/            # Multi-agent orchestration (FleetConfig, PlanRegistry, PlanActivator)
-│   ├── launcher/         # Studio + platform chat TUI entrypoints (RunChatTUI, NewStudioServer)
-│   ├── mcp/              # MCP client and server management
-│   ├── mcpstore/         # Tapped MCP server catalog
-│   ├── memory/           # Three-tier memory (personal / team / org) + embeddings
-│   ├── pdfgen/           # Markdown → PDF via goldmark-pdf and Chrome
-│   ├── planner/          # ReAct planning loop for providers without native tool-calling
-│   ├── provider/         # LLM provider factory (OpenAI, Anthropic, Gemini, …)
-│   ├── sandbox/          # Backend interface + incus/k8s/openshell/mock + imagebuilder
-│   ├── scheduler/        # Cron-like job scheduling and delivery
-│   ├── session/          # SessionIndex, Transcript, FileStore, Compactor
-│   ├── skills/           # SKILL.md loader, validator, ClawHub integration
-│   ├── store/entstore/   # Multi-tenant DB router on top of Ent
-│   ├── tools/            # Built-in tools implementing RunnableTool
-│   └── ui/               # TUI components (bubbletea)
-├── ent/
-│   ├── platform/ …/schema/*.go        # Hand-edited schema
-│   ├── org/     …/schema/*.go
-│   ├── team/    …/schema/*.go
-│   ├── personal/…/schema/*.go
-│   └── */generate.go                   # `go generate ./…` entrypoints (do NOT edit generated output)
-├── proto/openshell/v1/*.proto          # OpenShell gRPC contract (regen via `make …`, see pkg/sandbox/AGENTS.md)
-├── web/
-│   ├── src/
-│   │   ├── main.tsx                    # React entry (NOT main.jsx)
-│   │   ├── App.tsx
-│   │   ├── components/                 # React components (mix of .tsx and .jsx)
-│   │   └── api/                        # SPA API client
-│   ├── package.json
-│   ├── vite.config.ts
-│   └── eslint.config.js
-├── tests/
-│   ├── e2e/                            # Grouped e2e packages (chat_core, chat_auth, drill, fleet, sandbox_layerchain, …)
-│   ├── e2eboot/                        # Custom test harness (DB, seed, SSE, sandbox helpers, inspector)
-│   └── scenarios/*.yaml, *.mjs         # Scenario catalog + Node reporters
-├── tools/e2e-inspector/                # Long-lived StudioServer for post-run inspection (port 9394)
-├── docs/architecture/                  # Authoritative architecture references (see below)
-├── docker/sandbox-base/                # K8s sandbox base image
-├── docker/sandbox-openshell/           # OpenShell sandbox image
-├── deploy/{helm,k8s}/                  # Deployment manifests
-├── schema/*.sql, pkg/store/*/migrations/*.sql   # Atlas migrations (integrity-checked by pre-commit)
-├── .githooks/pre-commit                # Enforces migration integrity
-├── .golangci.yml                       # Lint policy (bug-finders only)
-├── Makefile / Makefile.integration
-├── go.mod
-└── main.go                             # Calls cmd/astonish.Execute()
-```
-
-## Key Patterns
-
-### General-Purpose Abstractions Must Stay Domain-Agnostic
-
-Astonish is a general agent platform. Most functionality is reusable across many tools, data sources, teams, and business domains. Do **not** hard-code behavior for one specific kind of result, provider, customer, resource, or answer shape inside general-purpose code.
-
-This rule applies broadly: renderers, parsers, API handlers, UI components, prompts, channel adapters, summaries, exporters, routing, tools, stores, and orchestration logic should operate on generic contracts and reusable structure rather than on domain-specific meaning. It is acceptable to recognize structural patterns such as tables, key/value pairs, grouped lists, code blocks, attachments, typed events, or explicitly modeled metadata. It is not acceptable to add one-off branches for a particular service, resource type, customer dataset, or example response when the feature is meant to work across scenarios.
-
-When richer behavior is needed, choose one of these approaches:
-
-1. Define or reuse a generic structure the producer can emit, such as a Markdown table, JSON schema, typed event, or metadata field.
-2. Add a domain-neutral parser for a reusable shape, such as grouped lists, records, key/value summaries, timelines, or tables.
-3. Introduce an explicit typed contract only after designing it as a general platform capability, not as a special case for one tool or one answer.
-
-Tests for general-purpose code should use neutral fixtures (`items`, `groups`, `records`, `resources`) unless the code is intentionally implementing a documented domain-specific integration. If you find yourself naming a specific external product, infrastructure resource, customer concept, or one-off example inside reusable code, stop and redesign the abstraction.
-
-### Unified TUI with Dual-Backend Mode Switching (Ctrl+\)
-
-The terminal TUI (`pkg/tui/app.go`) supports **dual-backend mode**: when launched from `astonish code` while logged into a platform, the user can press **Ctrl+\\** to switch between the local code agent and the platform chat — within the same bubbletea process. Each mode maintains its own session, transcript, plan-mode state, and accent theme independently.
-
-**Color-coded mode identity**: Code mode uses warm orange/amber accents (`DefaultTheme()`); Platform mode uses cool blue/cyan accents (`PlatformTheme()`). The entire UI chrome changes color on switch, providing visceral mode awareness without reading labels. The themes are defined in `pkg/tui/theme.go`; the switching logic lives in `pkg/tui/dual_backend.go`.
-
-Key implementation details:
-- `tui.Config.AltBackend` — optional second backend, lazily opened on first switch.
-- `backendSlot` — preserves per-mode state (transcript, planMode, history, theme).
-- `switchBackend()` — saves current slot, flips index, restores/opens new slot, swaps theme.
-- Platform mode disables `shift+tab` plan cycling (code-mode only feature).
-- Dual-mode is only available from `astonish code` when `client.IsRemoteMode()` is true.
-
-### Config Loading (Go)
-- User configs live in `~/.config/astonish/`.
-- YAML with `gopkg.in/yaml.v3`.
-- Use `config.LoadAgent()` for flow/agent configs, `config.LoadAppConfig()` for app settings.
-- Provider env-var mapping is in `pkg/config/provider_env.go`; the provider factory is `pkg/provider/factory.go`.
-
-### Tool Implementation (Go)
-- Tools implement `RunnableTool.Run(ctx tool.Context, args any) (map[string]any, error)`.
-- Declare the JSON schema with `Declaration() *genai.FunctionDeclaration`.
-- Return `map[string]any` with string keys.
-- Register in the appropriate group in `pkg/tools/` (see `pkg/tools/AGENTS.md`). Sandbox-aware tools are wrapped by `pkg/sandbox` so a single tool implementation works across backends.
-
-### API Handlers (Go)
-- Pattern: `func HandlerName(w http.ResponseWriter, r *http.Request)`.
-- Set `Content-Type: application/json`.
-- Use `json.NewEncoder(w).Encode(response)`.
-- Error responses: `http.Error(w, "message", statusCode)`.
-- Streaming chat / build logs use **SSE**. Chat SSE has strict invariants (see [Inline Report Rendering Contract](#inline-report-rendering-contract-do-not-loosen)).
-- Tenant scoping is enforced by `TenantMiddleware` — see `pkg/api/AGENTS.md`. Every handler that touches per-tenant data must consume the tenant context, not bypass it.
-
-### MCP Integration
-- MCP servers are defined in config (personal, team, org — cascading).
-- Tools are cached in `pkg/cache/tools_cache.go`.
-- Use `GetCachedTools()` to retrieve available tools.
-- Team-scoped MCP servers must remain isolated: **six enforcement points** — do not add code paths that read/write MCP configuration outside the tenant router.
-
-### Sandbox Execution
-- Every tool that touches the filesystem, network, or shell runs inside a **sandbox** via the `Backend` interface in `pkg/sandbox`.
-- Backend selection: config `BackendKind` → factory in `pkg/sandbox/backend_factory.go`. Blank imports in `cmd/astonish/sandbox_backends.go` ensure implementations are linked.
-- The OpenShell backend talks to the OpenShell Gateway via gRPC (`proto/openshell/v1/openshell.proto`). Landlock/seccomp/L7 network policy is enforced **inside the sandbox by the supervisor**, not by Go code — do not assume host-side checks are the whole story.
-- Deeper contract, image build flow, and provisioning are in `pkg/sandbox/AGENTS.md`.
-
-### Multi-Tenant Data Boundary
-- Ent schemas are split into four scopes: `platform`, `org`, `team`, `personal` — each in `ent/<scope>/schema/*.go`.
-- The router that picks the correct DB/schema is `pkg/store/entstore` (see `pkg/store/entstore/AGENTS.md`).
-- **Never bypass `entstore`** by opening a raw connection or using an ent client from another scope. Isolation is structural (database-per-org, schema-per-team) — code paths that circumvent the router break audit and encryption guarantees.
-- Migrations live under `schema/*.sql` and `pkg/store/*/migrations/*.sql`. The pre-commit hook validates Atlas integrity for envs `platform_{pg,lite}`, `org_{pg,lite}`, `team_{pg,lite}`, `personal_{pg,lite}` whenever those files change.
-
-### Inline Report Rendering Contract (do NOT loosen)
-
-A markdown artifact is promoted to inline `EmbeddedFileViewer` rendering iff **all three** signals are present:
-
-1. The artifact event was emitted in the **last turn** (after the most recent user message).
-2. The artifact's `fileType === 'Markdown'`.
-3. The artifact's `isReport === true`, set only when the agent emitted an `` ```astonish-report `` fence whose `path:` matches the artifact's path. The backend's `detectAndEmitReportMarkers` (`pkg/api/chat_runner.go`) validates the path match and emits a `report_marker` SSE event; `joinReportMarkers` (`pkg/api/chat_utils.go`) projects the persisted marker onto `ArtifactInfo` at session-detail load time.
-
-**Anything failing any one of these conditions falls back to the compact `ArtifactCard` download tile.** This is intentional. Do not "fix" code that produces an `ArtifactCard` for a non-report `write_file` by widening the gate. If you find yourself wanting to widen the gate, the agent prompt is the correct place to teach the LLM the two-step contract — not the gate.
-
-The two prior regressions to avoid:
-- `b5310ae`: widened the gate to "any last-turn artifact embeds" → incidental edits during a multi-step task were promoted to reports. Defended by `TestE2E_Chat_PlainWriteFileNotReport` (CHAT-066) and the system prompt contract test.
-- `ee2d47d`: tried to make the fence carry inline content (no `write_file`) → broke Files panel, artifact API, PDF/DOCX export. Defended by keeping the fence as a *signal*; the file is always real.
-
-Authoritative docs: `docs/architecture/chat-rendering-pipeline.md` ("The Report Pipeline" section).
-
-## Testing Guidelines
-
-- Write tests for non-trivial functions.
-- Focus on core business logic (agent execution, tools, config, tenant routing, sandbox contracts).
-- Mock external dependencies (API calls, file system). The `pkg/sandbox/mock` backend is the canonical way to exercise sandbox-consuming code in unit tests.
-- Test file names: `*_test.go`; e2e/integration use build tags.
-- Pre-commit lints but does **not** run tests. Run them yourself before pushing.
-- See `docs/architecture/testing-chat-scenarios.md` for the Studio Chat scenario test infrastructure.
-- E2E specifics (env vars, kubectl/helm prerequisites, provider keys, inspector mode) are in `tests/AGENTS.md`.
-
-## Architecture Documentation
-
-The `docs/architecture/` directory is the authoritative reference for cross-cutting design. Read the relevant file **before** modifying the corresponding subsystem:
-
-- `docs/architecture/chat-rendering-pipeline.md` — Studio Chat SSE transport, event types, message-to-component mapping, report/app/artifact pipelines, export pipeline. **Read this before modifying `web/src/components/StudioChat.tsx` or adding new SSE event types.**
-- `docs/architecture/studio-ui-system.md` — Studio design system: dual-axis brand packs, shadcn vs custom surfaces, token rules. **Read before UI styling, theme, or shared-component work under `web/`.**
-- `docs/architecture/testing-chat-scenarios.md` — Scenario test infrastructure, fixture authoring.
-- `docs/architecture/generative-ui.md` — App preview (Generative UI) pipeline.
-- `docs/architecture/api-studio.md` — REST API and SSE streaming surface.
-- `docs/architecture/multi-tenant-platform.md` — Org/team/personal isolation, envelope encryption, six enforcement points.
-- `docs/architecture/sandbox-backends.md` — In-depth backend comparison, resource lifecycle.
-- `docs/architecture/openshell-sandbox-backend.md` — OpenShell-specific gRPC + Landlock/seccomp details.
-- `docs/architecture/sqlite-backend.md` — Personal-mode SQLite topology.
-- `docs/architecture/smart-compaction.md` — Session compaction algorithm.
-- `docs/architecture/a2a-server.md` — A2A protocol server channel, multi-client auth, identity propagation, task lifecycle.
-
-An index of every architecture doc plus the invariants it defends is in `docs/architecture/AGENTS.md`.
-
-## Hierarchical AGENTS.md Index
-
-When you edit files under one of these subtrees, read the local AGENTS.md first — it names the invariants and gotchas the root file cannot cover:
-
-- `cmd/astonish/AGENTS.md` — CLI dispatch (Cobra), local vs. remote gating, `mustBeRemote` / `mustNotBeRemote`.
-- `pkg/api/AGENTS.md` — HTTP/SSE, chat runner, tenant middleware, image build handlers, report marker plumbing.
-- `pkg/agent/AGENTS.md` + `pkg/launcher/AGENTS.md` — ChatAgent, `RunChatTUI` (platform SSE), `NewWiredChatAgent`, `NewStudioServer`.
-- `pkg/sandbox/AGENTS.md` — Backend interface, backend selection, gRPC contract, image build, entrypoint, isolation model.
-- `pkg/store/entstore/AGENTS.md` — Multi-tenant DB router, migration policy.
-- `ent/AGENTS.md` — Schema hand-edit rules, four tenant scopes, regeneration flow.
-- `pkg/tools/AGENTS.md` — `RunnableTool`, `ToolWithDeclaration`, sandbox wrapping.
-- `pkg/fleet/AGENTS.md` — Fleet plans, activator, session manager, GitHub channel adapter.
-- `pkg/daemon/AGENTS.md` — Platform bootstrap, wiring boundary, `MultiTenantScheduler`.
-- `pkg/drill/AGENTS.md` — Drill suite runner, triage, LLM assertions.
-- `pkg/channels/AGENTS.md` — Channel interface, Slack/Telegram/Email adapters, routing.
-- `pkg/credentials/AGENTS.md` — Encrypted store, secret scanner, pending vault, OAuth cache.
-- `pkg/session/AGENTS.md` — Session index, transcripts, compaction.
-- `pkg/skills/AGENTS.md` — Skill loader, validator, ClawHub.
-- `pkg/browser/AGENTS.md` — Browser manager, handoff, CAPTCHA, accounts.
-- `web/src/AGENTS.md` — React/TS+JSX conventions, Studio UI system (themes/shadcn/tokens), StudioChat invariants, App preview pipeline.
-- `tests/AGENTS.md` — e2eboot harness, `ASTONISH_TEST_DSN`, provider keys, inspector, scenarios.
-- `docs/architecture/AGENTS.md` — Architecture doc index + invariant registry.
-
-If you land in a directory without a local AGENTS.md, walk **upward** to the nearest one.
-
-## Before Committing
-
-Always run linting:
 ```bash
-# Go linting (automatic via pre-commit hook)
-make build-all
+# All dependency-free unit suites
+make test                         # go test ./... + frontend Vitest
 
-# Manual Go lint
-golangci-lint run
+# Go
+go test ./pkg/agent/...           # focused package subtree
+go test ./pkg/tools -run TestName
+go test -race ./pkg/tools
+go test ./...                     # all normal Go tests
+make lint                         # version check + golangci config verify/run
 
-# Web linting
-cd web && npm run lint
+# Frontend
+cd web && npm test                # Vitest, one run
+cd web && npm run typecheck
+cd web && npm run lint            # installs isolated lint-tool dependencies
+cd web && npm run build           # typecheck + both Vite bundles
 ```
 
-If you modified schema or migrations, the pre-commit hook will run `atlas migrate hash --env <env>` for each affected env — do not skip it.
+External test tiers:
 
-Skip the lint check only when absolutely necessary:
 ```bash
-git commit --no-verify
+make test-integration  # requires admin-capable ASTONISH_TEST_DSN; integration build tag
+make test-e2e          # PostgreSQL + live LLM key + provisioned Kubernetes sandbox infra
+make test-e2e-sqlite   # SQLite, but still needs live LLM key and Kubernetes for sandbox tests
+make e2e-k8s-up        # provision E2E namespaces/PVCs
+make e2e-k8s-down
 ```
 
-# OpenCode Directives
+E2E tests use the `e2e` build tag and run serially through the scenario reporter. Put shared DB/auth/provider/sandbox setup in `tests/e2eboot/`, not individual tests. Never point `ASTONISH_TEST_DSN` at production; the harness creates and drops databases.
 
-CRITICAL: Whenever you process a request that involves writing or modifying code, you must execute the following steps before considering the task complete:
+## Code style
 
-1. **Unit Testing:** Always analyze the changes you made and create or modify the corresponding unit tests to ensure the new code is fully covered.
-2. **Documentation Review:** Always check the `docs/` folder. You **MUST update the architecture documentation and the vitepress user documentation** if they are relevant to the changes you just implemented.
+### Go
+
+- Run `gofmt`; use tabs. Import groups are standard library, external dependencies, then this module.
+- Use lowercase package names, `PascalCase` exports, and `camelCase` internals.
+- Return errors last, check them promptly, and wrap with context using `fmt.Errorf("operation: %w", err)`.
+- Prefer interfaces at subsystem boundaries and small dependency-injection methods over global state.
+- Keep command handlers thin. Add tests beside code as `*_test.go`; table-driven tests are preferred where cases share structure.
+- Use `t.TempDir()` or a temporary directory with `t.Cleanup`; do not leave test state on disk.
+- The configured Go linters are `govet`, `ineffassign`, `unused`, `staticcheck`, and `gosec`. Do not weaken lint configuration to hide a new finding.
+
+### Frontend
+
+- New UI files should be `.tsx`; legacy `.jsx` remains but should not be copied without reason.
+- Use functional components and hooks. Keep one main component per file and default-export it; extract components before files become unwieldy (roughly 300 lines).
+- Use React state/context only—do not introduce a separate state-management framework.
+- Use Tailwind v4 semantic tokens and local primitives in `web/src/components/ui/`; do not hard-code brand purple/indigo colors. Read `docs/architecture/studio-ui-system.md` for styling work.
+- Use two-space indentation and external imports before local imports. Prefer the `@/*` alias for shared `web/src` imports.
+- Add/update Vitest coverage for behavior changes.
+
+## Critical invariants and cross-cutting changes
+
+- **Tenant boundaries:** persistence is split into `platform → org → team → personal`. Defaults cascade downward; sharing/publication upward is explicit. Route through scoped stores and treat accidental cross-team or cross-org visibility as a security bug.
+- **Ent edits:** modify `ent/<scope>/schema/*.go`, regenerate, and commit generated output. Schema changes and their required migrations belong in the same change. Read `ent/AGENTS.md` and `docs/architecture/migrations.md` first.
+- **SSE contracts:** every event emitted by Go chat/fleet code must have a matching Studio consumer. Add or rename backend and frontend handlers in the same change and include a scenario fixture where applicable.
+- **Report rendering:** Studio promotes markdown to the report harness only when it is from the last turn, has `fileType === "Markdown"`, and backend-provided `isReport === true`. Fix marker generation in `pkg/api/chat_runner.go`; never weaken the client gate.
+- **Terminal parity:** chat-stream behavior changes may affect both Studio and the terminal TUI. Check `pkg/tui/` whenever changing events, approvals, artifacts, or rendering semantics.
+- **Generative UI security:** Apps execute in a sandboxed opaque-origin iframe and use `postMessage` plus a server-side SSRF-protected proxy. Do not bypass the iframe/origin boundary.
+- **Sandbox lifecycle:** preserve backend idempotency, readiness-before-exec, stream ownership/closure, and capability-based behavior. Read `pkg/sandbox/AGENTS.md` and `docs/architecture/sandbox-backends.md` before backend work.
+- **CLI modes:** local code mode is deliberately ungated and host-filesystem based; remote chat requires login. Preserve `mustBeRemote`/`mustNotBeRemote` decisions when adding commands. New sandbox backends also require registration/linkage described in `cmd/astonish/AGENTS.md`.
+- **Architecture docs:** when a change alters a protocol, security boundary, storage scope, generated artifact, or runtime flow, update the matching file in `docs/architecture/` in the same change.
+
+## Working practices
+
+1. Read the closest nested `AGENTS.md` and relevant architecture document before editing.
+2. Use code intelligence to trace definitions, callers, tests, and frontend/backend consumers before changing shared symbols.
+3. Keep changes scoped; do not mix visual refreshes with SSE/report behavior or unrelated generated output.
+4. Add focused tests for modified behavior. Verify the affected package/UI first, then run `make test`, relevant build checks, and linters as practical.
+5. Do not commit local binaries, `.env*` secrets, API keys, test databases, or transient E2E output.

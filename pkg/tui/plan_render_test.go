@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/tui/events"
 )
 
@@ -294,5 +295,169 @@ func TestPlanDocumentContentSpan(t *testing.T) {
 	}
 	if !strings.Contains(extracted, "Step one") {
 		t.Fatalf("extracted content should contain the body text, got %q", extracted)
+	}
+}
+
+func TestRenderPlanDocumentWithSummary(t *testing.T) {
+	m := newModel(context.Background(), Config{Backend: staticBackend{}, Width: 80, Height: 24})
+	m.ready = true
+	m.layout()
+
+	content := `# Execution Plan
+
+**Goal:** Add caching layer
+
+_Last updated: 2025-01-01T00:00:00Z_
+
+## Phases
+
+- [ ] **add-cache** — Implement Redis caching
+  Summary: This phase adds a Redis-backed cache to reduce database load by 80%.
+- [ ] **update-config** — Add cache configuration
+  Summary: Exposes cache TTL and connection pool settings to operators.
+
+Legend: ` + "`[ ]`" + ` pending · ` + "`[~]`" + ` running · ` + "`[x]`" + ` complete · ` + "`[!]`" + ` failed
+`
+	plain := stripANSI(m.renderPlanDocument(content, 80))
+
+	if !strings.Contains(plain, "reduce database load by 80%") {
+		t.Fatalf("expected summary text for first phase in output:\n%s", plain)
+	}
+	if !strings.Contains(plain, "cache TTL and connection pool") {
+		t.Fatalf("expected summary text for second phase in output:\n%s", plain)
+	}
+}
+
+func TestRenderPlanDocumentPhaseSeparators(t *testing.T) {
+	m := newModel(context.Background(), Config{Backend: staticBackend{}, Width: 80, Height: 24})
+	m.ready = true
+	m.layout()
+
+	content := `# Execution Plan
+
+**Goal:** Multi-phase refactor
+
+_Last updated: 2025-01-01T00:00:00Z_
+
+## Phases
+
+- [ ] **phase-one** — First step
+- [ ] **phase-two** — Second step
+- [ ] **phase-three** — Third step
+- [ ] **phase-four** — Fourth step
+
+Legend: ` + "`[ ]`" + ` pending · ` + "`[~]`" + ` running · ` + "`[x]`" + ` complete · ` + "`[!]`" + ` failed
+`
+	plain := stripANSI(m.renderPlanDocument(content, 80))
+
+	if !strings.Contains(plain, "···") {
+		t.Fatalf("expected dot separators (·) between phases when 4 phases present:\n%s", plain)
+	}
+}
+
+func TestRenderPlanDocumentDetailsRenderedAsMarkdown(t *testing.T) {
+	m := newModel(context.Background(), Config{Backend: staticBackend{}, Width: 80, Height: 24})
+	m.ready = true
+	m.layout()
+
+	content := `# Execution Plan
+
+**Goal:** Implement feature Y
+
+_Last updated: 2025-01-01T00:00:00Z_
+
+## Phases
+
+- [ ] **impl-feature** — Build the feature
+  Use the adapter pattern to decouple the interface from the implementation.
+
+Legend: ` + "`[ ]`" + ` pending · ` + "`[~]`" + ` running · ` + "`[x]`" + ` complete · ` + "`[!]`" + ` failed
+`
+	plain := stripANSI(m.renderPlanDocument(content, 80))
+
+	if !strings.Contains(plain, "adapter pattern") {
+		t.Fatalf("expected details text rendered in output:\n%s", plain)
+	}
+}
+
+func TestRenderPlanDocumentFileKindBreakdown(t *testing.T) {
+	m := newModel(context.Background(), Config{Backend: staticBackend{}, Width: 80, Height: 24})
+	m.ready = true
+	m.layout()
+
+	content := `# Execution Plan
+
+**Goal:** Refactor storage layer
+
+_Last updated: 2025-01-01T00:00:00Z_
+
+## Phases
+
+- [ ] **refactor-storage** — Restructure storage package
+  - File (new): pkg/storage/cache.go
+  - File (modify): pkg/storage/db.go
+  - File (modify): pkg/storage/config.go
+  - File (delete): pkg/storage/legacy.go
+
+Legend: ` + "`[ ]`" + ` pending · ` + "`[~]`" + ` running · ` + "`[x]`" + ` complete · ` + "`[!]`" + ` failed
+`
+	plain := stripANSI(m.renderPlanDocument(content, 80))
+
+	if !strings.Contains(plain, "1 new") {
+		t.Fatalf("expected '1 new' in file kind breakdown:\n%s", plain)
+	}
+	if !strings.Contains(plain, "2 modify") {
+		t.Fatalf("expected '2 modify' in file kind breakdown:\n%s", plain)
+	}
+	if !strings.Contains(plain, "1 delete") {
+		t.Fatalf("expected '1 delete' in file kind breakdown:\n%s", plain)
+	}
+}
+
+func TestPlanDocumentRoundTrip_Summary(t *testing.T) {
+	steps := []agent.PlanStepInfo{
+		{
+			Name:        "setup-infra",
+			Description: "Provision cloud resources",
+			Summary:     "Creates the VPC, subnets, and security groups needed for the service.",
+		},
+		{
+			Name:        "deploy-service",
+			Description: "Deploy the microservice",
+			Summary:     "Builds and deploys the container image to the new infrastructure.",
+			Files: []agent.PlanFileChange{
+				{Path: "deploy/main.tf", Kind: "modify"},
+			},
+			Verify: "terraform plan",
+		},
+	}
+	doc := agent.PlanDocumentInfo{
+		Context:      "We need dedicated infrastructure for the new service.",
+		Verification: "curl https://service.example.com/health",
+	}
+
+	rendered := agent.RenderPlanFromInfoWithDoc("Deploy new service", doc, steps)
+
+	parsedDoc, parsedGoal, parsedSteps, err := agent.ParsePlanDocument(rendered)
+	if err != nil {
+		t.Fatalf("ParsePlanDocument failed: %v", err)
+	}
+	if parsedGoal != "Deploy new service" {
+		t.Fatalf("goal mismatch: got %q", parsedGoal)
+	}
+	if parsedDoc.Context != doc.Context {
+		t.Fatalf("context mismatch: got %q", parsedDoc.Context)
+	}
+	if parsedDoc.Verification != doc.Verification {
+		t.Fatalf("verification mismatch: got %q", parsedDoc.Verification)
+	}
+	if len(parsedSteps) != 2 {
+		t.Fatalf("expected 2 steps, got %d", len(parsedSteps))
+	}
+	if parsedSteps[0].Summary != steps[0].Summary {
+		t.Fatalf("step 0 summary mismatch: got %q, want %q", parsedSteps[0].Summary, steps[0].Summary)
+	}
+	if parsedSteps[1].Summary != steps[1].Summary {
+		t.Fatalf("step 1 summary mismatch: got %q, want %q", parsedSteps[1].Summary, steps[1].Summary)
 	}
 }

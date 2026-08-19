@@ -348,6 +348,244 @@ func TestParsePlanMarkdown_ParallelGroupsRoundTrip(t *testing.T) {
 	}
 }
 
+func TestParsePlanMarkdown_Summary(t *testing.T) {
+	md := `# Execution Plan
+
+**Goal:** Test Summary Field
+
+_Last updated: 2025-01-01T00:00:00Z_
+
+## Phases
+
+- [ ] **step-one** — Implement the core logic
+  Summary: Adds the new data model so the frontend can display results
+  - File (modify): pkg/api/handler.go
+  Verify: go test ./pkg/api/...
+  Concrete implementation details here
+- [ ] **step-two** — Write unit tests
+  Summary: Ensures the new handler doesn't break existing behavior
+
+Legend: ` + "`[ ]`" + ` pending · ` + "`[~]`" + ` running · ` + "`[x]`" + ` complete · ` + "`[!]`" + ` failed
+`
+	doc, goal, steps, err := ParsePlanDocument(md)
+	if err != nil {
+		t.Fatalf("ParsePlanDocument error: %v", err)
+	}
+	_ = doc
+	if goal != "Test Summary Field" {
+		t.Errorf("goal = %q, want %q", goal, "Test Summary Field")
+	}
+	if len(steps) != 2 {
+		t.Fatalf("parsed %d steps, want 2", len(steps))
+	}
+	if steps[0].Summary != "Adds the new data model so the frontend can display results" {
+		t.Errorf("step 0 Summary = %q, want %q", steps[0].Summary, "Adds the new data model so the frontend can display results")
+	}
+	if steps[1].Summary != "Ensures the new handler doesn't break existing behavior" {
+		t.Errorf("step 1 Summary = %q, want %q", steps[1].Summary, "Ensures the new handler doesn't break existing behavior")
+	}
+	// Also verify that other fields parsed correctly alongside summary.
+	if len(steps[0].Files) != 1 || steps[0].Files[0].Path != "pkg/api/handler.go" {
+		t.Errorf("step 0 files = %+v, want 1 file", steps[0].Files)
+	}
+	if steps[0].Verify != "go test ./pkg/api/..." {
+		t.Errorf("step 0 Verify = %q", steps[0].Verify)
+	}
+	if steps[0].Details != "Concrete implementation details here" {
+		t.Errorf("step 0 Details = %q", steps[0].Details)
+	}
+}
+
+func TestRenderPlanFromInfoWithDoc_Summary(t *testing.T) {
+	orig := planClock
+	planClock = func() time.Time { return time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC) }
+	defer func() { planClock = orig }()
+
+	steps := []PlanStepInfo{
+		{
+			Name:        "step-one",
+			Description: "Implement the core logic",
+			Summary:     "Adds the new data model so the frontend can display results",
+			Files:       []PlanFileChange{{Path: "pkg/api/handler.go", Kind: "modify"}},
+			Verify:      "go test ./pkg/api/...",
+		},
+		{
+			Name:        "step-two",
+			Description: "Write unit tests",
+			Summary:     "Ensures the new handler doesn't break existing behavior",
+		},
+		{
+			Name:        "step-three",
+			Description: "No summary here",
+		},
+	}
+	doc := PlanDocumentInfo{}
+	md := RenderPlanFromInfoWithDoc("Test Summary Render", doc, steps)
+
+	wants := []string{
+		"  Summary: Adds the new data model so the frontend can display results",
+		"  Summary: Ensures the new handler doesn't break existing behavior",
+	}
+	for _, w := range wants {
+		if !strings.Contains(md, w) {
+			t.Errorf("rendered plan missing %q\n---\n%s", w, md)
+		}
+	}
+	// Step three has no summary, so "step-three" should NOT be followed by a Summary line.
+	stepThreeIdx := strings.Index(md, "**step-three**")
+	if stepThreeIdx < 0 {
+		t.Fatal("step-three not found in rendered markdown")
+	}
+	afterStepThree := md[stepThreeIdx:]
+	// Find the next newline after the step-three header line.
+	nlIdx := strings.Index(afterStepThree, "\n")
+	if nlIdx >= 0 {
+		nextLine := ""
+		rest := afterStepThree[nlIdx+1:]
+		if nlIdx2 := strings.Index(rest, "\n"); nlIdx2 >= 0 {
+			nextLine = rest[:nlIdx2]
+		} else {
+			nextLine = rest
+		}
+		if strings.Contains(nextLine, "Summary:") {
+			t.Errorf("step-three should not have a Summary line, but got: %q", nextLine)
+		}
+	}
+}
+
+func TestPlanDocument_RoundTrip_Summary(t *testing.T) {
+	orig := planClock
+	planClock = func() time.Time { return time.Date(2025, 6, 15, 12, 0, 0, 0, time.UTC) }
+	defer func() { planClock = orig }()
+
+	steps := []PlanStepInfo{
+		{
+			Name:        "alpha",
+			Description: "First phase",
+			Summary:     "Lays the groundwork for the feature",
+			Files:       []PlanFileChange{{Path: "pkg/core/model.go", Kind: "new"}},
+			Verify:      "go build ./pkg/core/...",
+			Details:     "Create the model struct",
+		},
+		{
+			Name:        "beta",
+			Description: "Second phase",
+			Summary:     "Wires up the API endpoints",
+		},
+		{
+			Name:        "gamma",
+			Description: "Third phase with no summary",
+		},
+	}
+	doc := PlanDocumentInfo{
+		Context:      "Adding a new feature.",
+		WhatNotToDo:  "Don't change the database schema.",
+		Verification: "go test ./...",
+	}
+
+	// Render
+	md := RenderPlanFromInfoWithDoc("Round Trip Goal", doc, steps)
+
+	// Parse back
+	parsedDoc, goal, parsedSteps, err := ParsePlanDocument(md)
+	if err != nil {
+		t.Fatalf("ParsePlanDocument error: %v", err)
+	}
+	if goal != "Round Trip Goal" {
+		t.Errorf("goal = %q, want %q", goal, "Round Trip Goal")
+	}
+	if parsedDoc.Context != doc.Context {
+		t.Errorf("Context = %q, want %q", parsedDoc.Context, doc.Context)
+	}
+	if len(parsedSteps) != 3 {
+		t.Fatalf("parsed %d steps, want 3", len(parsedSteps))
+	}
+
+	// Verify summaries round-trip.
+	if parsedSteps[0].Summary != "Lays the groundwork for the feature" {
+		t.Errorf("step 0 Summary = %q, want %q", parsedSteps[0].Summary, "Lays the groundwork for the feature")
+	}
+	if parsedSteps[1].Summary != "Wires up the API endpoints" {
+		t.Errorf("step 1 Summary = %q, want %q", parsedSteps[1].Summary, "Wires up the API endpoints")
+	}
+	if parsedSteps[2].Summary != "" {
+		t.Errorf("step 2 Summary = %q, want empty", parsedSteps[2].Summary)
+	}
+
+	// Also verify other fields still round-trip alongside summary.
+	if parsedSteps[0].Verify != "go build ./pkg/core/..." {
+		t.Errorf("step 0 Verify = %q", parsedSteps[0].Verify)
+	}
+	if len(parsedSteps[0].Files) != 1 || parsedSteps[0].Files[0].Path != "pkg/core/model.go" {
+		t.Errorf("step 0 Files = %+v", parsedSteps[0].Files)
+	}
+	if parsedSteps[0].Details != "Create the model struct" {
+		t.Errorf("step 0 Details = %q", parsedSteps[0].Details)
+	}
+}
+
+func TestParsePlanMarkdown_BackwardCompat(t *testing.T) {
+	// A PLAN.md without any Summary lines — should parse fine with empty Summary fields.
+	md := `# Execution Plan
+
+**Goal:** Legacy Plan
+
+_Last updated: 2024-06-01T10:00:00Z_
+
+## Phases
+
+- [x] **setup** — Initialize the project
+  - File (new): go.mod
+  Verify: go build ./...
+  Create go module
+- [~] **implement** — Write the code
+  - File (modify): main.go
+- [ ] **test** — Add tests
+
+Legend: ` + "`[ ]`" + ` pending · ` + "`[~]`" + ` running · ` + "`[x]`" + ` complete · ` + "`[!]`" + ` failed
+`
+	_, goal, steps, err := ParsePlanDocument(md)
+	if err != nil {
+		t.Fatalf("ParsePlanDocument error: %v", err)
+	}
+	if goal != "Legacy Plan" {
+		t.Errorf("goal = %q, want %q", goal, "Legacy Plan")
+	}
+	if len(steps) != 3 {
+		t.Fatalf("parsed %d steps, want 3", len(steps))
+	}
+
+	// All Summary fields should be empty.
+	for i, s := range steps {
+		if s.Summary != "" {
+			t.Errorf("step %d (%q) Summary = %q, want empty", i, s.Name, s.Summary)
+		}
+	}
+
+	// Verify other fields still parse correctly (backward compat).
+	if steps[0].Status != "complete" {
+		t.Errorf("step 0 status = %q, want complete", steps[0].Status)
+	}
+	if steps[1].Status != "running" {
+		t.Errorf("step 1 status = %q, want running", steps[1].Status)
+	}
+	if steps[2].Status != "pending" {
+		t.Errorf("step 2 status = %q, want pending", steps[2].Status)
+	}
+	if len(steps[0].Files) != 1 || steps[0].Files[0].Kind != "new" {
+		t.Errorf("step 0 files = %+v", steps[0].Files)
+	}
+	if steps[0].Verify != "go build ./..." {
+		t.Errorf("step 0 Verify = %q", steps[0].Verify)
+	}
+	if steps[0].Details != "Create go module" {
+		t.Errorf("step 0 Details = %q", steps[0].Details)
+	}
+	if steps[0].Name != "setup" || steps[1].Name != "implement" || steps[2].Name != "test" {
+		t.Errorf("names = %q, %q, %q", steps[0].Name, steps[1].Name, steps[2].Name)
+	}
+}
+
 func TestParsePlanDocument_ExportsStatusAndFiles(t *testing.T) {
 	md := `# Execution Plan
 

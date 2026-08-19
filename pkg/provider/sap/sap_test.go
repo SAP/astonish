@@ -54,6 +54,43 @@ func TestGetModelConfig_UnknownFallback(t *testing.T) {
 	}
 }
 
+func TestGetModelConfig_NoTemperatureFlag(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		model   string
+		wantNoT bool
+		desc    string
+	}{
+		// Explicit map entries — Claude 4.x+
+		{"anthropic--claude-4.8-opus", true, "claude-4.8-opus (explicit)"},
+		{"anthropic--claude-4.6-opus", true, "claude-4.6-opus (explicit)"},
+		{"anthropic--claude-4.5-sonnet", true, "claude-4.5-sonnet (explicit)"},
+		{"anthropic--claude-4-opus", true, "claude-4-opus (explicit)"},
+		// Explicit map entries — Claude 3.x (temperature still supported)
+		{"anthropic--claude-3.7-sonnet", false, "claude-3.7-sonnet (explicit)"},
+		{"anthropic--claude-3.5-sonnet", false, "claude-3.5-sonnet (explicit)"},
+		{"anthropic--claude-3-haiku", false, "claude-3-haiku (explicit)"},
+		// Pattern-inferred: unknown future models not in the static map
+		{"anthropic--claude-5-opus", true, "claude-5-opus (inferred, major=5)"},
+		{"anthropic--claude-5.1-sonnet", true, "claude-5.1-sonnet (inferred, major=5)"},
+		{"anthropic--claude-4.9-fable", true, "claude-4.9-fable (inferred, major=4)"},
+		{"anthropic--claude-3.9-unknown", false, "claude-3.9-unknown (inferred, major=3)"},
+		{"anthropic--claude-2-instant", false, "claude-2-instant (inferred, major=2)"},
+		// Non-Anthropic models — temperature always included
+		{"gpt-4o", false, "gpt-4o (non-anthropic)"},
+		{"gemini-2.5-pro", false, "gemini-2.5-pro (non-anthropic)"},
+		{"totally-unknown-model", false, "unknown non-anthropic model"},
+	}
+
+	for _, tc := range cases {
+		cfg := GetModelConfig(tc.model)
+		if cfg.NoTemperature != tc.wantNoT {
+			t.Errorf("%s: NoTemperature = %v, want %v", tc.desc, cfg.NoTemperature, tc.wantNoT)
+		}
+	}
+}
+
 // ---------- ModelIDMap ----------
 
 func TestModelIDMap_Contains(t *testing.T) {

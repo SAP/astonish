@@ -69,7 +69,7 @@ func TestParseSlashInput(t *testing.T) {
 // tell the user that Esc cancels the current turn (Claude Code / OpenCode
 // style), not only ctrl+c. See cancelInFlightTurn.
 func TestHelpText_DocumentsEscCancel(t *testing.T) {
-	h := helpText(false, false, false, false)
+	h := helpText(false, false, false, false, false)
 	if !strings.Contains(h, "esc") {
 		t.Fatalf("help text missing esc key:\n%s", h)
 	}
@@ -83,7 +83,7 @@ func TestHelpText_DocumentsEscCancel(t *testing.T) {
 // TestHelpText_ListsAllBuiltInCommands keeps /help in sync with the command
 // palette so no supported command is silently missing from help.
 func TestHelpText_ListsAllBuiltInCommands(t *testing.T) {
-	h := helpText(false, false, false, false)
+	h := helpText(false, false, false, false, false)
 	for _, cmd := range builtInSlashCommands {
 		if !strings.Contains(h, "/"+cmd.Name) {
 			t.Errorf("help text missing command /%s:\n%s", cmd.Name, h)
@@ -94,11 +94,11 @@ func TestHelpText_ListsAllBuiltInCommands(t *testing.T) {
 // TestHelpText_CapabilityGatedCommands ensures /provider, /websearch, and /rollback appear
 // only when their backend capability is available.
 func TestHelpText_CapabilityGatedCommands(t *testing.T) {
-	off := helpText(false, false, false, false)
+	off := helpText(false, false, false, false, false)
 	if strings.Contains(off, "/provider") || strings.Contains(off, "/rollback") || strings.Contains(off, "/websearch") {
 		t.Fatalf("gated commands should be hidden when unavailable:\n%s", off)
 	}
-	on := helpText(true, true, true, true)
+	on := helpText(true, true, true, true, true)
 	if !strings.Contains(on, "/provider") {
 		t.Errorf("help text missing /provider when provider admin available:\n%s", on)
 	}
@@ -114,5 +114,12 @@ func TestHelpText_CapabilityGatedCommands(t *testing.T) {
 	}
 	if !strings.Contains(on, "/compact") {
 		t.Errorf("help text missing /compact when compaction available:\n%s", on)
+	}
+	// /init and /init-deep are gated on the init capability (5th arg).
+	if strings.Contains(off, "/init") {
+		t.Fatalf("/init should be hidden when init unavailable:\n%s", off)
+	}
+	if !strings.Contains(on, "/init") || !strings.Contains(on, "/init-deep") {
+		t.Errorf("help text missing /init or /init-deep when init available:\n%s", on)
 	}
 }

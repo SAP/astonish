@@ -629,6 +629,13 @@ func (b *localAgentBackend) ActivePlanFilePath() string {
 	return b.planFilePath(sid)
 }
 
+// SupportsInit implements backend.InitBackend: AGENTS.md generation (/init and
+// /init-deep) is available whenever code mode has a host working directory to
+// analyze.
+func (b *localAgentBackend) SupportsInit() bool {
+	return strings.TrimSpace(b.workingDir) != ""
+}
+
 // ensureSession creates a new in-process session if none is active and returns
 // its ID. Safe to call under no lock; it locks internally.
 func (b *localAgentBackend) ensureSession(ctx context.Context) (string, bool, error) {

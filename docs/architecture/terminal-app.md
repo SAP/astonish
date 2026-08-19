@@ -168,6 +168,17 @@ Two mechanisms combine, both keyed off **event position** so they stay consisten
 
 `ListRollbackPoints` enumerates the session's user-authored text events (oldest first), annotating each with the number of files a rollback would restore (`CheckpointStore.FileCountFrom`). `RollbackTo(pointID)` restores files with a turn index `>= P` **newest-turn-first** (so the earliest pre-image for an overlapping file wins), then truncates the conversation, clears accumulated usage, and returns the rebuilt history — which the TUI applies via `Transcript.Reset` + `LoadHistory`. Deleting or resetting a session also discards its checkpoints (`CheckpointStore.DeleteSession`).
 
+### Generating context files (`/init` and `/init-deep`)
+
+Code mode loads project `AGENTS.md` files as `## Project Guidance` in the system prompt (see above), but a fresh project often has none. Two code-mode commands generate them:
+
+- **`/init`** — analyze the project and write a single root `AGENTS.md`.
+- **`/init-deep`** — write a root `AGENTS.md` plus a focused `AGENTS.md` in each significant sub-folder, mirroring Astonish's own hierarchical AGENTS.md layout (root + `pkg/*/AGENTS.md`).
+
+Both are exposed through the **optional** `backend.InitBackend` capability (`SupportsInit`), implemented only by `localAgentBackend` and true only when code mode has a host working directory. The platform backend does not implement it, so `/init` and `/init-deep` (command, help entry, and slash-completion) are offered **only** in code mode — gated in the usual three places (`handleSlash`, `syncSlashCompletion`, `helpText`) via `m.initCap()`.
+
+Unlike `/plan`, these are **not** runtime-gated modes. `runInit` (`pkg/tui/init.go`) dispatches an ordinary, **unrestricted** `RunTurn` with `initSystemContext` / `initDeepSystemContext` injected as `TurnOptions.SystemContext` (no `PlanMode`/`GraphPlanMode`/`AskMode`), so the agent is free to call `write_file`. The prompts steer the agent to explore the project **with `codegraph_explore` first** (cheap structural understanding), fall back to `find_files`/`read_file` for non-indexed files (Makefiles, manifests, README), and then write the file(s). Because there is no runtime gate, the two prompt constants live only on the TUI side — there is no `pkg/agent` source of truth to keep in sync (contrast the plan/ask constants, which mirror `agent.*SystemContext`).
+
 ### Event model
 
 All UI state is driven by `events.Event`. The platform backend maps Studio SSE types (`text`, `tool_call`, `tool_result`, `approval`, `network_denial_hint`, …) into the same kinds. Unknown / Studio-only events soft-degrade to `system` notices.

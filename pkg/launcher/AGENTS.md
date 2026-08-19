@@ -21,7 +21,7 @@ platform-backed terminal chat app and the Studio HTTP server.
 7. **Studio SPA assets**: `getWebAssets()` prefers `web/dist` on disk (dev) and falls back to the embedded FS built via `web/embed.go`. Do not add a third code path.
 8. **Middleware order in `NewStudioServer`** matters: platform auth → tenant → rate-limit → CSP → SPA/API split. Preserve this order when adding middleware.
 9. **`/api/*` vs. SPA**: everything under `/api/` is routed to the API mux; every other path serves the SPA `index.html`.
-10. **TUI presentation lives in `pkg/tui`.** Launcher implements `backend.Backend` (`platformBackend` in `tui_chat.go`, `localAgentBackend` in `tui_code.go`) and calls `tui.Run`. See `docs/architecture/terminal-app.md`.
+10. **TUI presentation lives in `pkg/tui`.** Launcher implements `backend.Backend` (`platformBackend` in `tui_chat.go`, `localAgentBackend` in `tui_code.go`) and calls `tui.Run`. `localAgentBackend` also implements the optional code-mode capabilities — `backend.CompactionBackend` (`Compact`), `backend.PlanBackend` (`ActivePlanFilePath`), and `backend.InitBackend` (`SupportsInit`, gating the `/init` and `/init-deep` AGENTS.md-generation commands; true only when a host working directory is set). `lazyCodeBackend` (in `tui_chat.go`) forwards these to its inner backend once code mode is opened. See `docs/architecture/terminal-app.md`.
 
 ## Entry-point relationship
 - CLI chat: `astonish chat` → requires `astonish login` → `RunChatTUI` → `platformBackend` (Studio SSE) → `tui.Run`.

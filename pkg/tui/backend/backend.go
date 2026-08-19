@@ -23,14 +23,14 @@ type Info struct {
 	// code mode (the local, unsandboxed coding tool); empty in platform mode.
 	WorkingDir string
 	// Usage is cumulative token usage known when opening/resuming a session.
-	Usage     *events.Usage
+	Usage *events.Usage
 	// ContextTokens is the current context-window occupancy known when
 	// opening/resuming a session (0 if unknown). Unlike Usage (which is
 	// cumulative across the whole session), this is "how full is the context
 	// right now" and drives the header's Context figure immediately on resume,
 	// before the first new turn reports usage.
 	ContextTokens int64
-	IsResumed bool
+	IsResumed     bool
 	// AutoApprove reflects the session tool-approval mode for footer chrome.
 	AutoApprove bool
 	// Notices are shown once at startup (startup warnings, etc.).
@@ -239,6 +239,18 @@ type CompactionBackend interface {
 	// returns a human-readable status line (before/after tokens, or why nothing
 	// was compacted). It must not defer work to the next user message.
 	Compact(ctx context.Context) (status string, err error)
+}
+
+// InitBackend is an optional capability implemented by backends that can
+// generate AGENTS.md context files for the working directory (the `/init` and
+// `/init-deep` commands). It is a marker capability: the generation itself runs
+// as a normal agent turn driven by a specialized system prompt, so this
+// interface has no methods beyond signaling code-mode availability. The
+// platform backend does not implement it (no host working directory).
+type InitBackend interface {
+	// SupportsInit reports whether AGENTS.md generation is available for the
+	// active session (a host working directory is configured).
+	SupportsInit() bool
 }
 
 // PlanBackend is an optional capability implemented by backends that persist an

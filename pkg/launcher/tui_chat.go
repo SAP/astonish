@@ -214,6 +214,16 @@ func (b *lazyCodeBackend) RespondSubAgentAuth(choice string) bool {
 	return false
 }
 
+// SupportsInit delegates to the inner backend's backend.InitBackend capability
+// when code mode has been opened. Before Open() (inner nil) it reports false, so
+// /init and /init-deep light up only once the local code backend is live.
+func (b *lazyCodeBackend) SupportsInit() bool {
+	if ib, ok := b.inner.(backend.InitBackend); ok {
+		return ib.SupportsInit()
+	}
+	return false
+}
+
 // platformBackend implements backend.Backend over Studio REST/SSE.
 type platformBackend struct {
 	client      *client.Client

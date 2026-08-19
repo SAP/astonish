@@ -33,10 +33,10 @@ func TestCompactionCapabilityGating(t *testing.T) {
 		t.Fatal("compaction-capable backend must expose the capability")
 	}
 	// /compact must be hidden from help when unavailable, shown when available.
-	if strings.Contains(helpText(false, false, false, false), "/compact") {
+	if strings.Contains(helpText(false, false, false, false, false), "/compact") {
 		t.Fatal("/compact should be hidden without capability")
 	}
-	if !strings.Contains(helpText(false, false, false, true), "/compact") {
+	if !strings.Contains(helpText(false, false, false, true, false), "/compact") {
 		t.Fatal("/compact should appear with capability")
 	}
 }

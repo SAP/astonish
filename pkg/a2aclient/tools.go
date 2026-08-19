@@ -65,7 +65,7 @@ func (t *A2ATool) Run(ctx context.Context, args map[string]any) (map[string]any,
 	}
 
 	// Extract text response from task
-	response := extractResponse(task)
+	response := ExtractResponse(task)
 
 	// Collect artifacts
 	artifacts := make([]any, 0, len(task.Artifacts))
@@ -85,8 +85,8 @@ func (t *A2ATool) Run(ctx context.Context, args map[string]any) (map[string]any,
 	}, nil
 }
 
-// extractResponse extracts the text response from a task's status message or history.
-func extractResponse(task *a2a.Task) string {
+// ExtractResponse extracts the text response from a task's status message or history.
+func ExtractResponse(task *a2a.Task) string {
 	// First check the status message
 	if task.Status.Message != nil {
 		for _, part := range task.Status.Message.Parts {

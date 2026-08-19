@@ -525,6 +525,7 @@ The primary mechanism for data access is **convention-based sourceId routing**. 
 | Prefix | Format | Example | Backend Action |
 |---|---|---|---|
 | `mcp:` | `mcp:<server>/<tool>` | `mcp:postgres-mcp/query` | Invoke MCP tool via `mcp.InvokeTool()` |
+| `a2a:` | `a2a:<agentName>` | `a2a:my-research-agent` | Send message to remote A2A agent |
 | `http:` | `http:<METHOD>:<url>` | `http:GET:https://api.example.com/data` | Server-side HTTP request (SSRF-protected; private IPs need Network Policy Allow or config `extra_endpoints`) |
 | `http:` | `http:<METHOD>:<url>@<cred>` | `http:GET:https://api.example.com/data@my-key` | HTTP request with credential auth |
 | `static:` | `static:<key>` | `static:config` | Return static data from app's DataSource config |
@@ -534,6 +535,35 @@ When a `sourceId` doesn't match any convention prefix and an `appName` is provid
 #### Credential Resolution
 
 Credentials are resolved server-side using the `@credential-name` suffix convention. A regex (`@([a-zA-Z][a-zA-Z0-9_-]*)$`) extracts the credential name from the end of the URL, ensuring it doesn't conflict with `@` symbols in HTTP basic auth URLs.
+
+#### A2A Agent Data Source
+
+Apps can communicate with remote agents via the A2A (Agent-to-Agent) protocol using the `a2a:` prefix:
+
+```jsx
+const { data, loading, error } = useAppData('a2a:my-research-agent', {
+  args: { message: 'What is the current project status?', context_id: 'optional-conversation-id' }
+})
+```
+
+The `message` argument is required. The optional `context_id` enables multi-turn conversations with the remote agent (the agent tracks state across calls sharing the same context ID).
+
+The response object contains:
+- `status` — A2A task state (`"completed"`, `"working"`, `"failed"`, etc.)
+- `response` — Text response extracted from the agent's reply
+- `task_id` — A2A task identifier for tracking
+- `artifacts` — Array of artifact metadata (name, description, index) if the agent produced any
+
+For saved apps, use the `a2a_agent` DataSource type:
+```yaml
+dataSources:
+  - id: agent_query
+    type: a2a_agent
+    config:
+      agent: my-research-agent
+```
+
+The A2A agent must be configured in the platform/org/team A2A agent settings (the same configuration used by the chat agent's A2A tools). Authentication is handled via the credential store reference in the agent configuration — credentials never reach the iframe.
 
 The credential store (`pkg/credentials/store.go`) resolves the name to a header key/value pair via `store.Resolve(name)`. This supports API keys, Bearer tokens, Basic auth, and OAuth (client_credentials and authorization_code with auto-refresh). Credentials never reach the iframe.
 
@@ -554,6 +584,7 @@ Parent page (AppPreview.tsx)
 Go backend (app_data_handler.go) → resolveDataSource()
   |
   +-- "mcp:" prefix → resolveMCPSource() → mcp.InvokeTool()
+  +-- "a2a:" prefix → resolveA2ASource() → A2A agent message send
   +-- "http:" prefix → resolveHTTPSource() → server-side HTTP (with optional @credential auth)
   +-- "static:" prefix → resolveStaticSource() → return from app YAML config
   +-- fallback → resolveAppDataSource() → look up in saved app's DataSources
@@ -724,6 +755,7 @@ The Apps tab includes a built-in CodeMirror editor for viewing and editing app s
 - **Agent Engine**: The ChatAgent detects UI generation intent via the system prompt and guidance documents. The active app context is tracked per-session for refinement. When an active app exists, `ClassifyAppIntent()` uses an LLM call to determine whether the user wants to refine, save, or do something unrelated. The current source code is injected into the system prompt for refinement turns.
 - **Sessions**: App previews are persisted in the session JSONL transcript using prefix markers (`[app_preview]`), following the same pattern as distill previews. Session reload reconstructs app preview messages and version history. Session titles get a provisional value from the first user message immediately (before the agent turn), then a best-effort LLM refine may emit a second `session_title` before the SSE stream closes.
 - **MCP**: The data proxy endpoint invokes MCP tools via `mcp.InvokeTool()`. Any MCP server configured in Astonish is available as a data source for apps via the `mcp:<server>/<tool>` sourceId convention, providing access to databases, APIs, and external services.
+- **A2A**: Apps can communicate with remote agents via the A2A protocol using the `a2a:<agentName>` sourceId convention. The backend loads agent configuration from the 3-tier platform cascade (platform → org → team), resolves credentials, fetches the agent card, and sends messages. This enables apps to orchestrate multi-agent workflows with external AI services.
 - **Credentials**: Data sources use the `@credential-name` suffix convention on sourceId URLs. The backend resolves credentials from the Astonish credential store (`pkg/credentials/store.go`) via `store.Resolve(name)`, which returns an auth header key/value pair. Credentials support API keys, Bearer tokens, Basic auth, and OAuth (client_credentials and authorization_code with auto-refresh). Credentials never reach the iframe.
 - **AI**: Apps can make one-shot LLM calls via the `useAppAI` hook. The backend handler (`POST /api/apps/ai`) uses the same model as the main Astonish agent (resolved via `ChatManager`). Calls are non-streaming with a 2-minute timeout. The LLM has no tool access -- apps should fetch data separately via `useAppData` and pass it as context.
 - **API & Studio**: REST endpoints for app CRUD and data/action/AI proxy. The Apps tab is a new top-level view in the Studio UI. The `TopBar` component has an "Apps" navigation item. Deep-linking via URL hash (`#/apps/AppName`) preserves app selection across page refreshes.

@@ -541,7 +541,7 @@ func (b *localAgentBackend) ListLocalSkills(ctx context.Context) ([]backend.Skil
 	}
 
 	merged := make(map[string]skills.Skill)
-	for _, skill := range skills.BuiltinSkills() {
+	for _, skill := range skills.BuiltinSkillsForCode() {
 		merged[strings.ToLower(skill.Name)] = skill
 	}
 	for _, skill := range liveSkills {

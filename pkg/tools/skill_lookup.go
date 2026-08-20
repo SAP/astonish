@@ -55,7 +55,17 @@ type SkillLookupResult struct {
 // are migrated. An omitted mode retains the historical platform behavior.
 func SkillLookup(allSkills []skills.Skill, modes ...SkillLookupMode) func(ctx tool.Context, args SkillLookupArgs) (SkillLookupResult, error) {
 	mode := lookupMode(modes)
-	builtins := skills.BuiltinSkills()
+	// Code mode uses the filtered builtin set so that skills marked
+	// ExcludeFromCodeMode (e.g. generative-ui) are not resolvable at all —
+	// not just hidden from the index. This prevents the coding agent from
+	// loading the generative-ui skill and generating astonish-app fences,
+	// which are Studio-only and have no renderer in Astonish Code.
+	var builtins []skills.Skill
+	if mode == SkillLookupModeCode {
+		builtins = skills.BuiltinSkillsForCode()
+	} else {
+		builtins = skills.BuiltinSkills()
+	}
 	staticIndex := make(map[string]*skills.Skill, len(builtins)+len(allSkills))
 	for i := range builtins {
 		staticIndex[strings.ToLower(builtins[i].Name)] = &builtins[i]

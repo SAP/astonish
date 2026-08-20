@@ -111,3 +111,67 @@ func TestBuildSkillIndexMultiple(t *testing.T) {
 		t.Error("Ineligible skill should be marked with setup required")
 	}
 }
+
+// TestBuiltinSkillsForCode_ExcludesGenerativeUI verifies that
+// BuiltinSkillsForCode() omits generative-ui (which is Studio-only) while
+// BuiltinSkills() still includes it for platform/chat mode.
+func TestBuiltinSkillsForCode_ExcludesGenerativeUI(t *testing.T) {
+	all := BuiltinSkills()
+	codeOnly := BuiltinSkillsForCode()
+
+	// platform/chat mode must still include generative-ui
+	found := false
+	for _, s := range all {
+		if s.Name == "generative-ui" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("BuiltinSkills() must contain generative-ui for platform/chat mode")
+	}
+
+	// code mode must NOT include generative-ui
+	for _, s := range codeOnly {
+		if s.Name == "generative-ui" {
+			t.Error("BuiltinSkillsForCode() must NOT contain generative-ui")
+		}
+	}
+}
+
+// TestBuildCodeSkillIndex_ExcludesGenerativeUI verifies that the code-mode
+// skill index omits generative-ui even when no user skills are provided,
+// while the regular index still includes it.
+func TestBuildCodeSkillIndex_ExcludesGenerativeUI(t *testing.T) {
+	codeResult := BuildCodeSkillIndex(nil)
+	platformResult := BuildSkillIndex(nil)
+
+	// Platform/chat index must include generative-ui
+	if !strings.Contains(platformResult, "generative-ui") {
+		t.Error("BuildSkillIndex must include generative-ui for platform/chat mode")
+	}
+
+	// Code-mode index must NOT include generative-ui
+	if strings.Contains(codeResult, "generative-ui") {
+		t.Error("BuildCodeSkillIndex must NOT include generative-ui in code mode")
+	}
+}
+
+// TestBuildCodeSkillIndex_UserSkillOverrideStillAppears verifies that a user
+// skill named "generative-ui" (a deliberate filesystem override) still appears
+// in the code-mode index when explicitly provided via filesystemSkills. The
+// exclusion is builtin-only; user-defined skills are never suppressed.
+func TestBuildCodeSkillIndex_UserSkillOverrideStillAppears(t *testing.T) {
+	userSkill := Skill{
+		Name:        "generative-ui",
+		Description: "User override",
+		Source:      "user",
+	}
+	result := BuildCodeSkillIndex([]Skill{userSkill})
+	if !strings.Contains(result, "generative-ui") {
+		t.Error("User-provided generative-ui skill should still appear in code-mode index (user override wins)")
+	}
+	if !strings.Contains(result, "User override") {
+		t.Error("User-provided description should appear in code-mode index")
+	}
+}

@@ -131,6 +131,41 @@ func TestNewSkillLookupTool(t *testing.T) {
 	}
 }
 
+// TestSkillLookupCodeMode_GenerativeUINotResolvable verifies that in
+// SkillLookupModeCode the generative-ui builtin cannot be resolved by name.
+// It must return an error result, not the skill content, so the coding agent
+// cannot load Studio-only instructions and generate astonish-app fences.
+func TestSkillLookupCodeMode_GenerativeUINotResolvable(t *testing.T) {
+	fn := SkillLookup(nil, SkillLookupModeCode)
+	result, err := fn(nil, SkillLookupArgs{Name: "generative-ui"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Error == "" {
+		t.Fatalf("expected error result for generative-ui in code mode, got content: %q", result.Content)
+	}
+	if result.Content != "" {
+		t.Fatalf("expected empty content for generative-ui in code mode, got: %q", result.Content)
+	}
+}
+
+// TestSkillLookupPlatformMode_GenerativeUIResolvable verifies that in
+// SkillLookupModePlatform the generative-ui builtin IS resolvable — it must
+// remain fully available for Studio/chat mode.
+func TestSkillLookupPlatformMode_GenerativeUIResolvable(t *testing.T) {
+	fn := SkillLookup(nil, SkillLookupModePlatform)
+	result, err := fn(nil, SkillLookupArgs{Name: "generative-ui"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Error != "" {
+		t.Fatalf("expected generative-ui to resolve in platform mode, got error: %q", result.Error)
+	}
+	if result.Content == "" {
+		t.Fatal("expected non-empty content for generative-ui in platform mode")
+	}
+}
+
 func writeLookupFile(t *testing.T, root, relative, content string) {
 	t.Helper()
 	path := filepath.Join(root, filepath.FromSlash(relative))

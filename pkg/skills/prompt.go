@@ -12,9 +12,25 @@ import (
 // Built-in skills are always prepended to ensure they appear regardless of
 // whether any user/platform skills are configured.
 func BuildSkillIndex(skills []Skill) string {
+	return buildSkillIndex(skills, BuiltinSkills())
+}
+
+// BuildCodeSkillIndex is the code-mode variant of BuildSkillIndex. It uses
+// BuiltinSkillsForCode() instead of BuiltinSkills() so that skills flagged
+// with ExcludeFromCodeMode (e.g. generative-ui) are omitted from the
+// "Available Skills" section of the coding agent's system prompt.
+// This prevents the coding agent from being directed to generate
+// Studio-only artifacts such as astonish-app fences.
+func BuildCodeSkillIndex(skills []Skill) string {
+	return buildSkillIndex(skills, BuiltinSkillsForCode())
+}
+
+// buildSkillIndex is the shared implementation used by BuildSkillIndex and
+// BuildCodeSkillIndex. builtins is the caller-chosen set of built-in skills
+// to prepend before the caller-provided slice.
+func buildSkillIndex(skills []Skill, builtins []Skill) string {
 	// Merge: builtins first, then caller-provided skills.
 	// Caller skills override builtins on name collision.
-	builtins := BuiltinSkills()
 	seen := make(map[string]bool, len(skills))
 	for _, s := range skills {
 		seen[s.Name] = true

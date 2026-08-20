@@ -2923,10 +2923,30 @@ func TestLocalAgentBackendListLocalSkills(t *testing.T) {
 	if got[0].Name != "alpha" || got[1].Name != "Generative-UI" || got[2].Name != "zeta" {
 		t.Fatalf("skills not sorted: %+v", got)
 	}
+	// generative-ui is excluded from BuiltinSkillsForCode; the filesystem skill
+	// with the same name (case-insensitive) appears as-is from the user's config.
 	if got[1].Description != "Override" || got[1].Source != "user" {
-		t.Fatalf("filesystem skill did not override builtin: %+v", got[1])
+		t.Fatalf("filesystem skill should appear with its own metadata: %+v", got[1])
 	}
 	if got[1].Eligible || len(got[1].Missing) != 1 || got[1].Missing[0] != "definitely-missing-astonish-test-bin" {
 		t.Fatalf("eligibility = %+v", got[1])
+	}
+}
+
+// TestLocalAgentBackendListLocalSkills_NoBuiltinGenerativeUI verifies that
+// when no filesystem skills are loaded, generative-ui does NOT appear in the
+// /skills picker for code mode. It is a Studio-only skill and must not
+// mislead the coding agent.
+func TestLocalAgentBackendListLocalSkills_NoBuiltinGenerativeUI(t *testing.T) {
+	b := &localAgentBackend{} // empty filesystemSkills — relies purely on builtins
+
+	got, err := b.ListLocalSkills(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range got {
+		if strings.EqualFold(s.Name, "generative-ui") {
+			t.Errorf("generative-ui must not appear in code-mode /skills picker, got: %+v", s)
+		}
 	}
 }

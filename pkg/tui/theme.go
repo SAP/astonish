@@ -65,7 +65,7 @@ func DefaultTheme() Theme {
 		return plainTheme()
 	}
 
-	bg := lipgloss.Color("#000000")         // true black terminal background
+	bg := lipgloss.Color("#111416")         // near-black terminal background
 	brand := lipgloss.Color("250")          // light gray accent (formerly purple)
 	muted := lipgloss.Color("245")          // gray
 	dim := lipgloss.Color("240")            // dimmer gray (hints)
@@ -158,7 +158,7 @@ func PlatformTheme() Theme {
 		return plainTheme()
 	}
 
-	bg := lipgloss.Color("#000000")         // true black terminal background
+	bg := lipgloss.Color("#111416")         // near-black terminal background
 	brand := lipgloss.Color("75")           // steel blue (replaces code-mode's 250 gray)
 	muted := lipgloss.Color("245")          // gray (shared)
 	dim := lipgloss.Color("240")            // dimmer gray (hints)

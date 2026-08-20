@@ -133,11 +133,10 @@ func (b *CodeSystemPromptBuilder) build(base *SystemPromptBuilder) string {
 	// Stop-exploring discipline — always present in code mode
 	sb.WriteString("- **Stop exploring when the scope is clear.** Once you can name every file you will change and why, stop reading and start acting. Do not read additional files \"for context\" beyond what the change directly touches. The goal is a correct, complete change — not a codebase survey.\n")
 	sb.WriteString("- http_request CANNOT reach private/RFC1918 IPs (192.168.x.x, 10.x.x.x, 172.16-31.x.x) or localhost. Use curl via shell_command for private network endpoints.\n")
-	sb.WriteString("- For multi-step tasks, execute sequentially, report progress, and search memory first for prior solutions.\n")
-	sb.WriteString("- After completing a task where you overcame obstacles or discovered non-obvious solutions, save the knowledge using memory_save. Search memory_search(\"memory usage\") first to retrieve the full saving guidelines.\n")
+	sb.WriteString("- For multi-step tasks, execute sequentially, report progress.\n")
 	sb.WriteString("- When the user asks you to do something, briefly acknowledge before starting work.\n")
 	if base.SkillIndex != "" {
-		sb.WriteString("- **Skill-first rule:** When a task matches any Available Skill, you MUST call `skill_lookup` to load it — no exceptions. Do this alongside your first batch of tool calls (e.g. parallel with memory_search). When you call `skill_lookup(name)`, the response includes a `files_manifest` of any additional files (scripts/, references/, etc.). Use `skill_lookup(name, file: \"...\")` to load specific files. The skill provides canonical commands and context that may be newer than stored memory. Having prior knowledge of a working method is NOT a reason to skip loading the skill.\n")
+		sb.WriteString("- **Skill-first rule:** When a task matches any Available Skill, you MUST call `skill_lookup` to load it — no exceptions. Do this alongside your first batch of tool calls. When you call `skill_lookup(name)`, the response includes a `files_manifest` of any additional files (scripts/, references/, etc.). Use `skill_lookup(name, file: \"...\")` to load specific files. The skill provides canonical commands and context that may be newer than stored memory. Having prior knowledge of a working method is NOT a reason to skip loading the skill.\n")
 	}
 	// Code mode: MCP tools are always first-class — no search_tools gate
 	sb.WriteString("- MCP tools are loaded directly on the main thread — call them by their bare name (e.g. `send_email`) without a `search_tools` detour.\n")
@@ -149,7 +148,6 @@ func (b *CodeSystemPromptBuilder) build(base *SystemPromptBuilder) string {
 	sb.WriteString("ALWAYS use the specific details from knowledge sections (IPs, ports, URLs, tool choices, commands) instead of defaults or assumptions. ")
 	sb.WriteString("If knowledge says to use a specific IP, use that IP — not localhost or a standard default. ")
 	sb.WriteString("If knowledge says to use a specific tool or approach, follow it exactly.\n")
-	sb.WriteString("The knowledge section already contains the most relevant memory results for this task — do not call memory_search to re-fetch information already present in it.\n")
 
 	// 4. Environment
 	sb.WriteString("\n## Environment\n\n")
@@ -221,10 +219,8 @@ func (b *CodeSystemPromptBuilder) build(base *SystemPromptBuilder) string {
 	sb.WriteString("\n## Capabilities\n\n")
 	capsLine := base.buildCapabilitiesLine()
 	sb.WriteString(fmt.Sprintf("You have tools for: %s.\n", capsLine))
-	guidanceCaps := []string{"browser automation", "code intelligence", "credential management", "job scheduling", "task delegation", "process management", "web access patterns", "memory usage"}
-	sb.WriteString(fmt.Sprintf("Step-by-step guidance for complex capabilities (%s) is stored in memory. ", strings.Join(guidanceCaps, ", ")))
-	sb.WriteString("Use `memory_search` with the capability name (e.g., \"browser automation\", \"credential management\", ")
-	sb.WriteString("\"job scheduling\") to retrieve instructions before using a complex feature for the first time in a conversation.\n")
+	guidanceCaps := []string{"browser automation", "code intelligence", "task delegation", "process management", "web access patterns"}
+	sb.WriteString(fmt.Sprintf("Step-by-step guidance for complex capabilities (%s) is stored in the skill index.\n", strings.Join(guidanceCaps, ", ")))
 
 	if base.WebSearchAvailable && base.WebSearchToolName != "" {
 		sb.WriteString(fmt.Sprintf("\n**Web search tool:** `%s` — this is the configured search tool (General → Web Tools). Use it for internet search and quick factual lookups (definitions, facts, finding URLs). Do not substitute other tools for web search when this tool is available. For research tasks that require gathering, comparing, or analyzing information from the web, use `delegate_tasks` with appropriate tool groups (web, browser) instead. Search indexes may be stale — when you need live/current data from a specific website, delegate with browser tools to navigate the site directly.\n", base.WebSearchToolName))
@@ -343,14 +339,12 @@ func (b *CodeSystemPromptBuilder) build(base *SystemPromptBuilder) string {
 		sb.WriteString(base.FleetSection)
 	}
 
-	// 6k. Generative UI
-	sb.WriteString("\n## Visual Apps (Generative UI)\n\n")
-	sb.WriteString("When users ask to build a UI, dashboard, app, or visual component, generate a React component inside an `astonish-app` code fence.\n")
-	sb.WriteString("**MANDATORY:** Before generating ANY visual app, call `skill_lookup` with name `generative-ui` to load the complete documentation. Do NOT generate app code without loading this skill first — it contains the only correct APIs, design system, and sandbox constraints.\n")
-	sb.WriteString("Sandbox hard constraints (violations cause runtime errors):\n")
-	sb.WriteString("- fetch(), XMLHttpRequest, and axios are BLOCKED — the skill documents the correct alternatives\n")
-	sb.WriteString("- Only react, recharts, lucide-react, and astonish modules exist — no other imports work\n")
-	sb.WriteString("- No component libraries (no shadcn/ui, no Material UI) — use native HTML + Tailwind\n")
+	// Note: The "Visual Apps (Generative UI)" section is intentionally absent from
+	// code mode. astonish-app fences are Studio-only; there is no app renderer in
+	// Astonish Code. Including the section (even gated behind skill_lookup) causes
+	// the coding agent to generate astonish-app output for plain "build an app"
+	// requests. The generative-ui skill is also excluded from code-mode skill
+	// lookup (SkillLookupModeCode uses BuiltinSkillsForCode) for the same reason.
 
 	// 6l. Reports
 	sb.WriteString("\n## Reports\n\n")

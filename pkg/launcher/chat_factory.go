@@ -336,15 +336,20 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		return nil, fmt.Errorf("failed to initialize internal tools: %w", err)
 	}
 
-	// Credential tools → deferred category
+	// Credential tools → deferred category.
+	// Credentials require a platform vault (PG-backed or file-backed store) that
+	// is never present in Astonish Code mode, so all credential tools are no-ops
+	// there. Suppress them entirely so they are not advertised to the agent.
 	var credToolsSlice []tool.Tool
-	credTools, credErr := tools.GetCredentialTools()
-	if credErr != nil {
-		if cfg.DebugMode {
-			slog.Warn("failed to create credential tools", "error", credErr)
+	if !cfg.CodeMode {
+		credTools, credErr := tools.GetCredentialTools()
+		if credErr != nil {
+			if cfg.DebugMode {
+				slog.Warn("failed to create credential tools", "error", credErr)
+			}
+		} else {
+			credToolsSlice = credTools
 		}
-	} else {
-		credToolsSlice = credTools
 	}
 
 	// Model-backed Perplexity/Sonar is registered only when General → Web Search
@@ -370,43 +375,55 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 	indexingDone := make(chan struct{})
 	close(indexingDone)
 
-	// Create memory tools → core category (always available)
-	// Platform mode: create memory tools with nil backing stores.
-	// At runtime, they detect stores from request context (injected by
-	// TenantMiddleware / ChatRunner.InjectMemoryStores) and route there.
-	memorySaveTool, msErr := tools.NewMemorySaveTool()
-	if msErr == nil {
-		coreTools = append(coreTools, memorySaveTool)
-	}
-	searchTool, searchErr := tools.NewMemorySearchTool()
-	if searchErr == nil {
-		coreTools = append(coreTools, searchTool)
-	}
-	memoryDeleteTool, mdErr := tools.NewMemoryDeleteTool()
-	if mdErr == nil {
-		coreTools = append(coreTools, memoryDeleteTool)
+	// Create memory tools → core category.
+	// Memory tools require a PG-backed store injected at request time by
+	// TenantMiddleware / ChatRunner.InjectMemoryStores. That injection never
+	// happens in Astonish Code mode (there is no platform context), so all
+	// three tools are no-ops there and must not be registered — the agent
+	// would waste turns calling them only to receive "not available" responses.
+	if !cfg.CodeMode {
+		memorySaveTool, msErr := tools.NewMemorySaveTool()
+		if msErr == nil {
+			coreTools = append(coreTools, memorySaveTool)
+		}
+		searchTool, searchErr := tools.NewMemorySearchTool()
+		if searchErr == nil {
+			coreTools = append(coreTools, searchTool)
+		}
+		memoryDeleteTool, mdErr := tools.NewMemoryDeleteTool()
+		if mdErr == nil {
+			coreTools = append(coreTools, memoryDeleteTool)
+		}
 	}
 
 	// --- 2d. Initialize scheduler tools → deferred category ---
+	// Scheduler tools require a running scheduler daemon (platform service).
+	// They are not available in Astonish Code mode.
 	var schedToolsSlice []tool.Tool
-	schedTools, schedErr := tools.GetSchedulerTools()
-	if schedErr != nil {
-		if cfg.DebugMode {
-			slog.Warn("failed to create scheduler tools", "error", schedErr)
+	if !cfg.CodeMode {
+		schedTools, schedErr := tools.GetSchedulerTools()
+		if schedErr != nil {
+			if cfg.DebugMode {
+				slog.Warn("failed to create scheduler tools", "error", schedErr)
+			}
+		} else {
+			schedToolsSlice = schedTools
 		}
-	} else {
-		schedToolsSlice = schedTools
 	}
 
 	// --- 2d-ii. Initialize distill_flow tool → deferred category ---
+	// Flow distillation is a platform service (requires LLM + flow registry).
+	// It is not available in Astonish Code mode.
 	var distillToolsSlice []tool.Tool
-	distillTools, distillErr := tools.GetDistillTools()
-	if distillErr != nil {
-		if cfg.DebugMode {
-			slog.Warn("failed to create distill tools", "error", distillErr)
+	if !cfg.CodeMode {
+		distillTools, distillErr := tools.GetDistillTools()
+		if distillErr != nil {
+			if cfg.DebugMode {
+				slog.Warn("failed to create distill tools", "error", distillErr)
+			}
+		} else {
+			distillToolsSlice = distillTools
 		}
-	} else {
-		distillToolsSlice = distillTools
 	}
 
 	// --- 2e. Initialize process management tools → core category ---
@@ -557,7 +574,11 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			return nil, fmt.Errorf("failed to load filesystem skills: %w", loadErr)
 		}
 		filesystemSkills = loadedFilesystemSkills
-		skillIndex = skills.BuildSkillIndex(filesystemSkills)
+		if cfg.CodeMode {
+			skillIndex = skills.BuildCodeSkillIndex(filesystemSkills)
+		} else {
+			skillIndex = skills.BuildSkillIndex(filesystemSkills)
+		}
 
 		skillTool, stErr := tools.NewSkillLookupTool(filesystemSkills, lookupMode)
 		if stErr != nil {
@@ -1016,9 +1037,13 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 	// Also pull resolve_credential from credToolsSlice into the main thread.
 	// It stays in the credentials group too (for sub-agents); the ToolIndex
 	// deduplicates and gives main-thread precedence.
-	for _, t := range credToolsSlice {
-		if mainThreadToolNames[t.Name()] {
-			mainThreadTools = append(mainThreadTools, t)
+	// In code mode credToolsSlice is always nil (credentials suppressed), so
+	// this loop is a no-op there — guard it explicitly for clarity.
+	if !cfg.CodeMode {
+		for _, t := range credToolsSlice {
+			if mainThreadToolNames[t.Name()] {
+				mainThreadTools = append(mainThreadTools, t)
+			}
 		}
 	}
 	// Same for skill_lookup — the system prompt instructs the agent to call
@@ -1466,15 +1491,21 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 	// --- 5d. Create flow tools (search_flows, run_flow) ---
 	// Flow discovery and execution via dedicated tools rather than
 	// knowledge injection.
-	if searchFlowsTool, sfErr := tools.NewSearchFlowsTool(); sfErr == nil {
-		mainThreadTools = append(mainThreadTools, searchFlowsTool)
-	} else if cfg.DebugMode {
-		slog.Warn("failed to create search_flows tool", "error", sfErr)
-	}
-	if runFlowTool, rfErr := tools.NewRunFlowTool(); rfErr == nil {
-		mainThreadTools = append(mainThreadTools, runFlowTool)
-	} else if cfg.DebugMode {
-		slog.Warn("failed to create run_flow tool", "error", rfErr)
+	// Flows are a platform feature — they require a flow registry and
+	// a running daemon. Neither is available in Astonish Code mode, so
+	// both tools are suppressed there (same pattern as credential,
+	// scheduler, distill, and memory tools above).
+	if !cfg.CodeMode {
+		if searchFlowsTool, sfErr := tools.NewSearchFlowsTool(); sfErr == nil {
+			mainThreadTools = append(mainThreadTools, searchFlowsTool)
+		} else if cfg.DebugMode {
+			slog.Warn("failed to create search_flows tool", "error", sfErr)
+		}
+		if runFlowTool, rfErr := tools.NewRunFlowTool(); rfErr == nil {
+			mainThreadTools = append(mainThreadTools, runFlowTool)
+		} else if cfg.DebugMode {
+			slog.Warn("failed to create run_flow tool", "error", rfErr)
+		}
 	}
 
 	// Create search_tools and add to main thread tools if tool index is available.

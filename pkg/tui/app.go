@@ -2082,7 +2082,7 @@ func (m *model) layout() {
 	}
 	m.vp = viewport.New(viewport.WithWidth(m.width), viewport.WithHeight(vh))
 	if !m.theme.NoColor {
-		m.vp.Style = lipgloss.NewStyle().Background(lipgloss.Color("#000000"))
+		m.vp.Style = lipgloss.NewStyle().Background(lipgloss.Color("#111416"))
 	}
 	content, hits, artifactHits := m.viewportContent()
 	m.hitRegions = hits
@@ -2232,7 +2232,7 @@ func (m model) renderWelcome() string {
 		Padding(1, 2).
 		Border(lipgloss.NormalBorder()).
 		BorderForeground(lipgloss.Color("238")).
-		Background(lipgloss.Color("#000000")).
+		Background(lipgloss.Color("#111416")).
 		Render(strings.Join(lines, "\n"))
 
 	return lipgloss.Place(
@@ -2242,7 +2242,7 @@ func (m model) renderWelcome() string {
 		lipgloss.Center,
 		body,
 		lipgloss.WithWhitespaceChars(" "),
-		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(lipgloss.Color("#000000"))),
+		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(lipgloss.Color("#111416"))),
 	)
 }
 
@@ -2254,7 +2254,7 @@ func (m model) welcomeLines(width int) []string {
 	th := m.theme
 	title := lipgloss.NewStyle().
 		Foreground(m.theme.AccentColor).
-		Background(lipgloss.Color("#000000")).
+		Background(lipgloss.Color("#111416")).
 		Bold(true).
 		Align(lipgloss.Center).
 		Width(width).
@@ -2279,7 +2279,7 @@ func (m model) codeWelcomeLines(width int) []string {
 	th := m.theme
 	title := lipgloss.NewStyle().
 		Foreground(m.theme.AccentColor).
-		Background(lipgloss.Color("#000000")).
+		Background(lipgloss.Color("#111416")).
 		Bold(true).
 		Align(lipgloss.Center).
 		Width(width).
@@ -2775,7 +2775,7 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 const (
 	ansiReset       = "\x1b[0m"
 	ansiResetShort  = "\x1b[m"
-	ansiTrueBlackBG = "\x1b[48;2;0;0;0m"
+	ansiTrueBlackBG = "\x1b[48;2;17;20;22m"
 	ansiDefaultBG   = "\x1b[49m"
 )
 
@@ -3377,28 +3377,28 @@ func (m model) viewContent() string {
 		overlay := m.renderSessionsOverlay()
 		return m.paintBackground(lipgloss.Place(m.width, m.screenHeight(), lipgloss.Center, lipgloss.Center, overlay,
 			lipgloss.WithWhitespaceChars(" "),
-			lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(lipgloss.Color("#000000"))),
+			lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(lipgloss.Color("#111416"))),
 		))
 	}
 	if m.modelPicker.open {
 		overlay := m.renderModelPickerOverlay()
 		return m.paintBackground(lipgloss.Place(m.width, m.screenHeight(), lipgloss.Center, lipgloss.Center, overlay,
 			lipgloss.WithWhitespaceChars(" "),
-			lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(lipgloss.Color("#000000"))),
+			lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(lipgloss.Color("#111416"))),
 		))
 	}
 	if m.providerPicker.open {
 		overlay := m.renderProviderPickerOverlay()
 		return m.paintBackground(lipgloss.Place(m.width, m.screenHeight(), lipgloss.Center, lipgloss.Center, overlay,
 			lipgloss.WithWhitespaceChars(" "),
-			lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(lipgloss.Color("#000000"))),
+			lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(lipgloss.Color("#111416"))),
 		))
 	}
 	if m.webSearchPicker.open {
 		overlay := m.renderWebSearchPickerOverlay()
 		return m.paintBackground(lipgloss.Place(m.width, m.screenHeight(), lipgloss.Center, lipgloss.Center, overlay,
 			lipgloss.WithWhitespaceChars(" "),
-			lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(lipgloss.Color("#000000"))),
+			lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(lipgloss.Color("#111416"))),
 		))
 	}
 	if m.skillsPicker.open {
@@ -3408,7 +3408,7 @@ func (m model) viewContent() string {
 		overlay := m.renderRollbackOverlay()
 		return m.paintBackground(lipgloss.Place(m.width, m.screenHeight(), lipgloss.Center, lipgloss.Center, overlay,
 			lipgloss.WithWhitespaceChars(" "),
-			lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(lipgloss.Color("#000000"))),
+			lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(lipgloss.Color("#111416"))),
 		))
 	}
 	if m.tr.Awaiting {
@@ -3462,7 +3462,7 @@ func (m model) paintBackground(s string) string {
 		lipgloss.Top,
 		forceTrueBlackAfterReset(s),
 		lipgloss.WithWhitespaceChars(" "),
-		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(lipgloss.Color("#000000"))),
+		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(lipgloss.Color("#111416"))),
 	)
 	placed = m.padPaintedHeight(placed, paintH)
 	return ansiTrueBlackBG + placed + ansiDefaultBG
@@ -4403,7 +4403,7 @@ func (m model) composerBorderStyle() lipgloss.Style {
 			c = lipgloss.Color("39") // platform uses cyan even in normal mode
 		}
 	}
-	return lipgloss.NewStyle().Foreground(c).Background(lipgloss.Color("#000000"))
+	return lipgloss.NewStyle().Foreground(c).Background(lipgloss.Color("#111416"))
 }
 
 // composerModeLabel returns the text shown in the composer bottom border.

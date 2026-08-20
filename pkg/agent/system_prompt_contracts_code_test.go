@@ -18,9 +18,8 @@ func maximalCodeBuilder() *CodeSystemPromptBuilder {
 		WorkspaceDir:          "/home/user/project",
 		CustomPrompt:          "You are a helpful assistant.",
 		InstructionsContent:   "Always be concise.",
-		BrowserAvailable:      true,
-		MemorySearchAvailable: true,
-		WebSearchAvailable:    true,
+		BrowserAvailable:   true,
+		WebSearchAvailable: true,
 		WebExtractAvailable:   true,
 		WebSearchToolName:     "tavily-search",
 		WebExtractToolName:    "tavily-extract",
@@ -55,10 +54,10 @@ func maximalCodeBuilder() *CodeSystemPromptBuilder {
 		},
 		Tools: mockTools(
 			"read_file", "write_file", "shell_command",
-			"save_credential", "schedule_job", "process_read",
+			"process_read",
 			"http_request", "delegate_tasks", "email_list",
 			"browser_navigate", "browser_request_human",
-			"search_flows", "memory_search", "repo_map",
+			"repo_map",
 			"code_definition", "code_references", "codegraph_explore",
 		),
 	}
@@ -296,6 +295,50 @@ func TestCodeSystemPromptContracts_NoCodeSectionsInChatMode(t *testing.T) {
 	} {
 		assertNotContains(t, prompt, forbidden, fmt.Sprintf("code-only section %q must not appear in chat-mode prompt", forbidden))
 	}
+}
+
+// TestCodeSystemPromptContracts_NoGenerativeUISection verifies that the code-mode
+// prompt does NOT contain the "Visual Apps (Generative UI)" section. astonish-app
+// fences are Studio-only; exposing this section in Astonish Code causes the
+// coding agent to generate astonish-app output for plain "build an app" requests.
+func TestCodeSystemPromptContracts_NoGenerativeUISection(t *testing.T) {
+	prompt := maximalCodeBuilder().Build()
+
+	assertNotContains(t, prompt, "## Visual Apps (Generative UI)", "Visual Apps section must NOT appear in code-mode prompt")
+	assertNotContains(t, prompt, "astonish-app code fence", "astonish-app fence instruction must NOT appear in code-mode prompt")
+	assertNotContains(t, prompt, "generative-ui", "generative-ui skill must NOT be referenced in code-mode prompt")
+}
+
+func TestCodeSystemPromptContracts_NoCredScheduleDistillInCodeMode(t *testing.T) {
+	// Credentials, scheduler, and distill are platform-only services with no
+	// backing in code mode. Their tools and tool names must not appear in the
+	// code-mode system prompt.
+	prompt := maximalCodeBuilder().Build()
+
+	// Credential tools
+	assertNotContains(t, prompt, "resolve_credential", "resolve_credential must NOT appear in code-mode prompt")
+	assertNotContains(t, prompt, "save_credential", "save_credential must NOT appear in code-mode prompt")
+	assertNotContains(t, prompt, "list_credentials", "list_credentials must NOT appear in code-mode prompt")
+	assertNotContains(t, prompt, "credential management", "\"credential management\" capability must NOT appear in code-mode prompt")
+
+	// Scheduler tools
+	assertNotContains(t, prompt, "schedule_job", "schedule_job must NOT appear in code-mode prompt")
+	assertNotContains(t, prompt, "job scheduling", "\"job scheduling\" capability must NOT appear in code-mode prompt")
+
+	// Distill tools
+	assertNotContains(t, prompt, "distill_flow", "distill_flow must NOT appear in code-mode prompt")
+}
+
+func TestCodeSystemPromptContracts_NoMemoryToolsInCodeMode(t *testing.T) {
+	// Memory tools (memory_search, memory_save, memory_delete) have no backing
+	// store in code mode — they must not be referenced in the code-mode prompt
+	// because they are not registered as tools and calling them wastes turns.
+	prompt := maximalCodeBuilder().Build()
+
+	assertNotContains(t, prompt, "memory_search", "memory_search must NOT appear in code-mode prompt")
+	assertNotContains(t, prompt, "memory_save", "memory_save must NOT appear in code-mode prompt")
+	assertNotContains(t, prompt, "memory_delete", "memory_delete must NOT appear in code-mode prompt")
+	assertNotContains(t, prompt, "memory usage", "\"memory usage\" capability hint must NOT appear in code-mode prompt")
 }
 
 // ─── Plan Mode Completeness Self-Check Contract Tests ────────────────────────

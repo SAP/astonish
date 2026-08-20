@@ -15,6 +15,28 @@ func BuiltinSkills() []Skill {
 			Description: "Complete API docs, design system, and examples for building visual apps (astonish-app). MUST load before generating any visual app.",
 			Content:     BuiltinGenerativeUI,
 			Source:      "builtin",
+			// ExcludeFromCodeMode: generative-ui produces astonish-app fences which
+			// are Studio-only. In Astonish Code mode there is no app renderer, so
+			// advertising this skill causes the coding agent to generate the wrong
+			// kind of app. Keep it resolvable via skill_lookup for explicit calls,
+			// but hide it from the Available Skills index and the /skills picker.
+			ExcludeFromCodeMode: true,
 		},
 	}
+}
+
+// BuiltinSkillsForCode returns the subset of BuiltinSkills() that is
+// appropriate for Astonish Code mode. Skills with ExcludeFromCodeMode set are
+// omitted so they do not appear in the system-prompt skill index or the
+// /skills picker, preventing the coding agent from accidentally generating
+// Studio-only artifacts (e.g. astonish-app fences).
+func BuiltinSkillsForCode() []Skill {
+	all := BuiltinSkills()
+	filtered := make([]Skill, 0, len(all))
+	for _, s := range all {
+		if !s.ExcludeFromCodeMode {
+			filtered = append(filtered, s)
+		}
+	}
+	return filtered
 }

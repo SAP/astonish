@@ -340,7 +340,9 @@ func TestLazyCodeBackendForwardsLocalSkills(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 2 || got[1].Name != "local" {
+	// generative-ui is excluded from code-mode builtins, so only the one
+	// filesystem skill is expected.
+	if len(got) != 1 || got[0].Name != "local" {
 		t.Fatalf("forwarded skills = %+v", got)
 	}
 	var _ backend.LocalSkillsBackend = b

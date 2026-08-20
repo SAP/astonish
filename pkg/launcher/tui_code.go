@@ -25,6 +25,7 @@ import (
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/provider"
 	persistentsession "github.com/SAP/astonish/pkg/session"
+	"github.com/SAP/astonish/pkg/skills"
 	"github.com/SAP/astonish/pkg/tools/ripgrep"
 	"github.com/SAP/astonish/pkg/tui"
 	"github.com/SAP/astonish/pkg/tui/backend"
@@ -232,6 +233,7 @@ func RunCodeTUI(ctx context.Context, cfg *CodeConfig) error {
 		configured:             result.ProviderConfigured,
 		resumed:                cfg.SessionID != "",
 		notices:                result.StartupNotices,
+		filesystemSkills:       append([]skills.Skill(nil), result.FilesystemSkills...),
 		subAgentAuthReqCh:      make(chan agent.SubAgentAuthRequest, 1),
 		subAgentAuthRespCh:     make(chan agent.SubAgentAuthResponse, 1),
 	}
@@ -362,6 +364,7 @@ func buildCodeBackend(ctx context.Context, cfg *CodeConfig) (backend.Backend, er
 		model:                  result.ModelName,
 		configured:             result.ProviderConfigured,
 		notices:                result.StartupNotices,
+		filesystemSkills:       append([]skills.Skill(nil), result.FilesystemSkills...),
 		subAgentAuthReqCh:      make(chan agent.SubAgentAuthRequest, 1),
 		subAgentAuthRespCh:     make(chan agent.SubAgentAuthResponse, 1),
 	}
@@ -473,6 +476,9 @@ type localAgentBackend struct {
 	debug      bool
 	workingDir string
 	notices    []string
+	// filesystemSkills is the exact initialization-time slice wired into the
+	// runtime skill lookup. It is not reloaded when /skills is invoked.
+	filesystemSkills []skills.Skill
 
 	mu          sync.Mutex
 	sessionID   string
@@ -512,6 +518,58 @@ type localAgentBackend struct {
 	// main-thread approvals would be misrouted and the turn would freeze.
 	subAgentAuthPending bool
 }
+
+func (b *localAgentBackend) ListLocalSkills(ctx context.Context) ([]backend.SkillSummary, error) {
+	_ = ctx
+	// Re-scan the filesystem on every call so skills added or removed since
+	// startup are immediately visible without restarting the process.
+	var liveSkills []skills.Skill
+	if b.appConfig != nil && b.appConfig.Skills.IsSkillsEnabled() {
+		loaded, err := skills.LoadSkills(
+			b.appConfig.Skills.GetUserSkillsDir(),
+			b.appConfig.Skills.ExtraDirs,
+			b.appConfig.Skills.Allowlist,
+		)
+		if err == nil {
+			liveSkills = loaded
+		} else {
+			// Fall back to the startup snapshot rather than surfacing an error.
+			liveSkills = b.filesystemSkills
+		}
+	} else {
+		liveSkills = b.filesystemSkills
+	}
+
+	merged := make(map[string]skills.Skill)
+	for _, skill := range skills.BuiltinSkills() {
+		merged[strings.ToLower(skill.Name)] = skill
+	}
+	for _, skill := range liveSkills {
+		merged[strings.ToLower(skill.Name)] = skill
+	}
+
+	summaries := make([]backend.SkillSummary, 0, len(merged))
+	for _, skill := range merged {
+		missing := skill.MissingRequirements()
+		summaries = append(summaries, backend.SkillSummary{
+			Name:        skill.Name,
+			Description: skill.Description,
+			Source:      skill.Source,
+			Eligible:    len(missing) == 0,
+			Missing:     append([]string(nil), missing...),
+		})
+	}
+	sort.Slice(summaries, func(i, j int) bool {
+		left, right := strings.ToLower(summaries[i].Name), strings.ToLower(summaries[j].Name)
+		if left == right {
+			return summaries[i].Name < summaries[j].Name
+		}
+		return left < right
+	})
+	return summaries, nil
+}
+
+var _ backend.LocalSkillsBackend = (*localAgentBackend)(nil)
 
 // contextEstimateInterval is the minimum wall-clock gap between mid-turn
 // context-occupancy estimates. It keeps the header's "Context" figure moving

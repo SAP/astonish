@@ -20,6 +20,7 @@ import (
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/sandbox"
 	persistentsession "github.com/SAP/astonish/pkg/session"
+	"github.com/SAP/astonish/pkg/skills"
 	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
 	adkmodel "google.golang.org/adk/model"
@@ -2902,5 +2903,30 @@ func TestRespondSubAgentAuth_DenyPropagates(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for the sub-agent to receive the denial")
+	}
+}
+
+func TestLocalAgentBackendListLocalSkills(t *testing.T) {
+	b := &localAgentBackend{filesystemSkills: []skills.Skill{
+		{Name: "zeta", Description: "Zeta skill", Source: "project"},
+		{Name: "Generative-UI", Description: "Override", Source: "user", RequireBins: []string{"definitely-missing-astonish-test-bin"}},
+		{Name: "alpha", Description: "Alpha skill", Source: "extra"},
+	}}
+
+	got, err := b.ListLocalSkills(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("skills = %+v", got)
+	}
+	if got[0].Name != "alpha" || got[1].Name != "Generative-UI" || got[2].Name != "zeta" {
+		t.Fatalf("skills not sorted: %+v", got)
+	}
+	if got[1].Description != "Override" || got[1].Source != "user" {
+		t.Fatalf("filesystem skill did not override builtin: %+v", got[1])
+	}
+	if got[1].Eligible || len(got[1].Missing) != 1 || got[1].Missing[0] != "definitely-missing-astonish-test-bin" {
+		t.Fatalf("eligibility = %+v", got[1])
 	}
 }

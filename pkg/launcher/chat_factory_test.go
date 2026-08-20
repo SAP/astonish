@@ -57,6 +57,36 @@ func TestMainThreadToolAllowlist_CoreEditingTools(t *testing.T) {
 	}
 }
 
+func TestMainThreadToolAllowlist_SkillTools(t *testing.T) {
+	allow := mainThreadToolAllowlist()
+	for _, name := range []string{"skill_lookup", "create_skill"} {
+		if !allow[name] {
+			t.Errorf("expected skill tool %q in the main-thread allowlist", name)
+		}
+	}
+}
+
+func TestSkillLookupMode(t *testing.T) {
+	tests := []struct {
+		name         string
+		platformMode bool
+		codeMode     bool
+		want         string
+	}{
+		{name: "local", want: "local"},
+		{name: "code", codeMode: true, want: "code"},
+		{name: "platform", platformMode: true, want: "platform"},
+		{name: "platform takes precedence", platformMode: true, codeMode: true, want: "platform"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := string(skillLookupMode(tt.platformMode, tt.codeMode)); got != tt.want {
+				t.Fatalf("skillLookupMode(%v, %v) = %q, want %q", tt.platformMode, tt.codeMode, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestMainThreadToolAllowlist_InteractiveTerminalTools guards the fix for the
 // interactive-terminal drive loop: shell_command runs in a PTY and can return
 // waiting_for_input=true, so the top-level agent must directly hold the process_*

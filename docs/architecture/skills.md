@@ -2,7 +2,7 @@
 
 ## Overview
 
-Skills are markdown-based guides that teach the AI agent how to use specific CLI tools and platforms. Each skill document describes capabilities, commands, patterns, and best practices for a technology (git, Docker, Kubernetes, Terraform, etc.). Skills are indexed in the vector store and retrieved automatically when the user's request matches a skill's domain.
+Skills are markdown-based guides that teach the AI agent how to use specific CLI tools, APIs, platforms, and workflows. Each skill has a required `SKILL.md` and may include auxiliary files such as scripts, references, and templates. The system exposes a lightweight list of available skills and lets the agent load full instructions and supporting files on demand with `skill_lookup`.
 
 ## Key Design Decisions
 
@@ -28,110 +28,123 @@ requires:
 This format was chosen because:
 
 - **Human-readable and editable**: Anyone can write or modify a skill.
-- **LLM-friendly**: Markdown is the format LLMs are most comfortable consuming and producing.
+- **LLM-friendly**: Markdown is a natural format for model instructions.
 - **Structured metadata**: YAML frontmatter provides machine-parseable eligibility criteria without polluting the content.
 - **Version-controllable**: Plain text files work naturally with git.
+- **Compatible with multi-file skills**: A skill directory can keep focused details in auxiliary files and reveal them only when needed.
 
 ### Why Eligibility Checking
 
-Not all skills are relevant to every environment. A Kubernetes skill is useless if `kubectl` isn't installed. Eligibility checking validates:
+Not all skills are relevant to every environment. Eligibility checking validates:
 
 - **OS**: The skill applies to the current operating system.
 - **Binaries**: Required CLI tools are installed (checked via `exec.LookPath`).
-- **Environment variables**: Required env vars are set.
+- **Environment variables**: Required environment variables are set.
 
-Ineligible skills are excluded from indexing, preventing the agent from attempting operations that will fail due to missing prerequisites.
+Missing requirements are reported with the skill so the agent can avoid blindly attempting operations that cannot succeed.
 
-### Why Bundled Skills Plus Marketplace
+### Why Filesystem Skills Plus Platform Scopes
 
-Astonish ships with 10 bundled skills covering common tools. But organizations and communities may need custom skills for their specific toolchains. The **ClawHub marketplace** provides:
+Local and Code sessions load filesystem skills from the configured user skills directory first, followed by each configured extra skills root in order. Each root contains one immediate subdirectory per skill, with `SKILL.md` at the skill root.
 
-- A registry of community-contributed skills.
-- Install/uninstall via the CLI or Studio.
-- Skills are downloaded to the local skills directory and indexed alongside bundled ones.
+An optional allowlist filters the merged result. Allowlist matching and skill-name collision matching are case-insensitive. Later filesystem roots replace earlier definitions with the same name, so the precedence is:
 
-### Why Directory Watching
+```text
+configured user skills directory < first extra root < ... < last extra root
+```
 
-Skills can be added, modified, or removed at any time. An `fsnotify` file watcher detects changes and triggers re-indexing automatically. This means:
+Built-in skills are also available. Filesystem skills override built-ins on a case-insensitive name collision.
 
-- Installing a new skill from the marketplace is immediately available.
-- Editing a skill file updates the vector index without restart.
-- Removing a skill removes it from retrieval.
+Code mode deliberately uses only this filesystem-plus-built-ins view. It does not read platform, organization, or team skill databases.
+
+Platform sessions add database-backed scopes. Their case-insensitive collision precedence is:
+
+```text
+filesystem and built-ins < platform < organization < team
+```
+
+Thus the most specific available definition wins while unrelated skills from every scope remain visible.
+
+### Why Progressive Disclosure
+
+The system prompt includes only skill names and one-line descriptions. Calling `skill_lookup` with a skill name returns the main instructions plus a manifest of auxiliary files. The agent can then request one file by relative path. This keeps the prompt small while making complete multi-file skills available when needed.
 
 ## Architecture
 
 ### Skill Discovery and Retrieval
 
-```
+```text
 User message: "Deploy the app to our Kubernetes cluster"
     |
     v
-Auto-knowledge retrieval (vector + BM25 search)
+Available Skills index identifies the kubernetes skill
     |
     v
-Matches: kubernetes skill (high relevance)
+Agent calls skill_lookup(name: "kubernetes")
     |
     v
-Skill content injected into system prompt (Tier 3 dynamic knowledge)
+SKILL.md and an auxiliary-file manifest are returned
     |
     v
-Agent uses Kubernetes commands and patterns from the skill
+Agent loads only the referenced scripts or documentation it needs
 ```
 
-The `skill_lookup` tool also allows the agent to explicitly search for skills mid-turn.
+Filesystem discovery loads the configured user root and then configured extra roots. The merged, allowlisted result is used by Local and Code sessions. Platform sessions overlay database skills using platform, organization, and team precedence.
 
-### Skill Index in System Prompt
+### Skill Index in the System Prompt
 
-The system prompt (Tier 1 static) includes a lightweight skill listing -- just names and one-line descriptions:
+The system prompt includes a lightweight skill listing rather than every skill body:
 
-```
+```text
 Available Skills: git (version control), docker (containers), kubernetes (orchestration), ...
 ```
 
-This tells the agent what skills exist without consuming tokens for full content. When a skill is relevant, the full content is retrieved from the vector store.
+This tells the agent what exists without consuming tokens for full content. `skill_lookup` provides explicit, on-demand access to the selected skill.
 
-### Bundled Skills
+### Multi-File Lookup and Security
 
-| Skill | Description |
-|---|---|
-| git | Version control operations, branching, merging |
-| github | GitHub CLI, issues, PRs, releases |
-| docker | Container management, Compose, images |
-| kubernetes | kubectl, deployments, services, pods |
-| terraform | Infrastructure as code, state management |
-| aws | AWS CLI, common services |
-| gcloud | Google Cloud CLI, projects, services |
-| npm | Node.js package management, scripts |
-| python | Python development, pip, venv, uv |
-| web-registration | Web portal account creation patterns |
+For a filesystem skill, `skill_lookup(name)` recursively lists regular files beneath the skill directory and returns both a sorted file list and a directory-grouped manifest. A request can use either `file`, or `path` plus `filename`, to read a specific auxiliary file.
 
-### Memory Integration
+Filesystem access is constrained as follows:
 
-Skills are indexed in the same vector store as other memory documents, under the "skill" category. This means:
+- Paths must be clean, relative paths; absolute paths, backslashes, and `..` traversal are rejected.
+- Recursive manifests skip symlinks and non-regular files.
+- A requested file is resolved through symlinks and must still be contained within the resolved skill root.
+- Only regular files are returned.
+- Reads are capped at **256 KiB per file**; larger files are rejected.
 
-- Skills participate in the same hybrid search (vector + BM25) as general knowledge.
-- The `CategoryFromPath` function assigns the "skill" category based on file location.
-- Skills can be filtered by category for targeted retrieval.
+Database-backed platform auxiliary files use the same lookup interface and 256 KiB read limit.
+
+See [Multi-File ClawHub Skill Support](./skills-multi-file-clawhub-support.md) for the detailed multi-file design.
+
+### Built-in Skills
+
+Astonish includes built-in skills for common tools and workflows. They form the lowest static layer: a same-named filesystem skill replaces a built-in before any platform database overlays are applied.
+
+### Agent-Created Skills
+
+The `create_skill` tool creates a new scaffold only in the configured local user skills directory. It validates the requested name and creates a new skill directory containing `SKILL.md`. It never writes to extra roots or platform databases, and it refuses to overwrite an existing skill directory or `SKILL.md`.
+
+### Terminal Command
+
+The terminal UI exposes `/skills` when the active backend supports local skill listing. It renders the available skill summaries directly and does not send an agent turn. Platform-only or otherwise unsupported backends report that the command is unavailable.
 
 ## Key Files
 
 | File | Purpose |
 |---|---|
-| `pkg/skills/skills.go` | Skill loading, eligibility checking, directory management |
-| `pkg/skills/bundled.go` | Embedded bundled skill files |
-| `pkg/skills/marketplace.go` | ClawHub marketplace integration |
-| `pkg/skills/watcher.go` | fsnotify-based directory watching for live updates |
-| `pkg/tools/skill_lookup.go` | skill_lookup tool for explicit skill search |
+| `pkg/skills/loader.go` | Filesystem loading, allowlist filtering, precedence, and eligibility metadata |
+| `pkg/skills/bundled.go` | Embedded built-in skill files |
+| `pkg/tools/skill_lookup.go` | Mode-aware main and auxiliary-file lookup |
+| `pkg/tools/create_skill.go` | Safe local skill scaffold creation |
+| `pkg/channels/manager.go` | Platform/org/team skill-index overlay |
+| `pkg/tui/skills.go` | Terminal `/skills` rendering |
 
 ## Interactions
 
-- **Memory**: Skills are indexed in the vector store for automatic retrieval. Category-based filtering allows partitioned searches.
-- **Agent Engine**: Skill content is injected into the system prompt via Tier 3 dynamic knowledge. The skill index (Tier 1) lists available skills.
-- **Configuration**: Skill directory is configured in app config. Custom skill paths can be added.
-- **Daemon**: Skill indexer initializes at daemon startup with fsnotify watcher.
-
-## Multi-File ClawHub Skills (Planned)
-
-The current system stores only the main `SKILL.md` content per skill. A future enhancement will add full support for the standard ClawHub multi-file layout (`scripts/`, `references/`, etc.) using a dedicated `skill_files` table, an enhanced `skill_lookup` tool, and a new `skill_tree` tool.
-
-See: [skills-multi-file-clawhub-support.md](./skills-multi-file-clawhub-support.md) for the detailed design and implementation plan.
+- **Agent Engine**: The system prompt lists available skills; the agent calls `skill_lookup` for full content.
+- **Code mode**: Uses filesystem skills and built-ins only and never consults database skill stores.
+- **Platform**: Adds database-backed skills with filesystem `<` platform `<` organization `<` team precedence.
+- **Configuration**: Defines the user skills directory, ordered extra roots, and optional allowlist.
+- **ClawHub**: Installed multi-file skills retain their auxiliary files for progressive lookup.
+- **Terminal UI**: `/skills` lists available local skills without invoking the model.

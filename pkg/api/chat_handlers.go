@@ -234,6 +234,9 @@ type StudioChatComponents struct {
 	ShutdownSandbox   func() // stops containers without destroying (for daemon shutdown)
 	Cleanup           func()
 	SandboxPool       sandbox.ToolNodePool // for adaptive InvalidateSandboxClient
+	// FilesystemSkills is a copy of the exact filesystem skill slice used to
+	// initialize this runtime. Platform DB scopes overlay it at request time.
+	FilesystemSkills []skills.Skill
 }
 
 // ChatManager manages a singleton chat agent for Studio chat.
@@ -1066,16 +1069,11 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 		runner.InjectDrillReportStore(svc.DrillReports)
 	}
 
-	// Inject tenant-scoped skill stores into the runner context so that
-	// the skill_lookup tool can resolve skills from platform, org, and team stores.
-	if svc := store.FromRequest(r); svc != nil && (svc.PlatformSkills != nil || svc.Skills != nil || svc.TeamSkills != nil) {
+	// DB-backed skills are a platform-only runtime capability. Overlay them on
+	// the exact filesystem slice used to initialize this component set.
+	if svc := store.FromRequest(r); svc != nil && svc.Mode == store.ModePlatform {
 		runner.InjectSkillStores(svc.PlatformSkills, svc.Skills, svc.TeamSkills)
-
-		// Build and inject a merged skill index (platform + org + team) so the LLM
-		// sees custom platform skills in the "Available Skills" section of the system prompt.
-		if merged := buildMergedSkillIndex(r.Context(), svc.PlatformSkills, svc.Skills, svc.TeamSkills); merged != "" {
-			runner.InjectSkillIndex(merged)
-		}
+		runner.InjectSkillIndex(buildMergedSkillIndex(r.Context(), comp.FilesystemSkills, svc.PlatformSkills, svc.Skills, svc.TeamSkills))
 	}
 
 	// Inject tenant-scoped MCP server stores into the runner context so that
@@ -1696,83 +1694,54 @@ func extractAppFromSystemContext(systemContext string) (code, title string) {
 	return code, title
 }
 
-// buildMergedSkillIndex builds a skill index string containing platform skills
-// plus any org-level and team-level skills from the platform DB.
-// This is used to populate the "Available Skills" section in the system prompt
-// so the LLM knows about custom platform skills and will call skill_lookup for them.
-func buildMergedSkillIndex(ctx context.Context, platformStore, orgStore, teamStore store.SkillStore) string {
-	var all []skills.Skill
+// buildMergedSkillIndex overlays platform, org, and team DB skills on the
+// filesystem base. Names are matched case-insensitively and later scopes win.
+func buildMergedSkillIndex(ctx context.Context, filesystem []skills.Skill, platformStore, orgStore, teamStore store.SkillStore) string {
+	all := append([]skills.Skill(nil), filesystem...)
 
-	// 1. Platform skills (base layer, inherited by all orgs/teams)
-	if platformStore != nil {
-		if platformSkills, err := platformStore.LoadAll(ctx); err == nil {
-			for _, s := range platformSkills {
-				all = append(all, skills.Skill{
-					Name:        s.Name,
-					Description: s.Description,
-					OS:          s.OS,
-					RequireBins: s.RequireBins,
-					RequireEnv:  s.RequireEnv,
-					Source:      "platform",
-				})
-			}
+	for _, tier := range []struct {
+		name  string
+		store store.SkillStore
+	}{
+		{name: "platform", store: platformStore},
+		{name: "org", store: orgStore},
+		{name: "team", store: teamStore},
+	} {
+		if tier.store == nil {
+			continue
+		}
+		stored, err := tier.store.LoadAll(ctx)
+		if err != nil {
+			continue
+		}
+		for _, s := range stored {
+			all = append(all, skills.Skill{
+				Name:        s.Name,
+				Description: s.Description,
+				OS:          s.OS,
+				RequireBins: s.RequireBins,
+				RequireEnv:  s.RequireEnv,
+				Source:      tier.name,
+			})
 		}
 	}
 
-	// 2. Org skills (if store available)
-	if orgStore != nil {
-		if orgSkills, err := orgStore.LoadAll(ctx); err == nil {
-			for _, s := range orgSkills {
-				all = append(all, skills.Skill{
-					Name:        s.Name,
-					Description: s.Description,
-					OS:          s.OS,
-					RequireBins: s.RequireBins,
-					RequireEnv:  s.RequireEnv,
-					Source:      "org",
-				})
-			}
-		}
-	}
-
-	// 3. Team skills (highest priority, can override org/platform names)
-	if teamStore != nil {
-		if teamSkills, err := teamStore.LoadAll(ctx); err == nil {
-			for _, s := range teamSkills {
-				all = append(all, skills.Skill{
-					Name:        s.Name,
-					Description: s.Description,
-					OS:          s.OS,
-					RequireBins: s.RequireBins,
-					RequireEnv:  s.RequireEnv,
-					Source:      "team",
-				})
-			}
-		}
-	}
-
-	if len(all) == 0 {
-		// Even with no platform/org/team skills, BuildSkillIndex will include
-		// built-in skills (e.g. generative-ui). Pass empty slice.
-		return skills.BuildSkillIndex(nil)
-	}
-
-	// Deduplicate preferring later entries (team > org > platform).
-	// Reverse-iterate and collect, then reverse to preserve original order — O(n).
-	seen := make(map[string]bool, len(all))
-	var deduped []skills.Skill
+	seen := make(map[string]struct{}, len(all))
+	deduped := make([]skills.Skill, 0, len(all))
 	for i := len(all) - 1; i >= 0; i-- {
-		name := strings.ToLower(all[i].Name)
-		if !seen[name] {
-			seen[name] = true
-			deduped = append(deduped, all[i])
+		name := strings.ToLower(strings.TrimSpace(all[i].Name))
+		if name == "" {
+			continue
 		}
+		if _, exists := seen[name]; exists {
+			continue
+		}
+		seen[name] = struct{}{}
+		deduped = append(deduped, all[i])
 	}
-	// Reverse to restore platform → org → team display order
 	for i, j := 0, len(deduped)-1; i < j; i, j = i+1, j-1 {
 		deduped[i], deduped[j] = deduped[j], deduped[i]
 	}
-
 	return skills.BuildSkillIndex(deduped)
 }
 

@@ -247,6 +247,26 @@ func TestSubAgentManager_BuildChildPromptNoInstructions(t *testing.T) {
 	}
 }
 
+func TestSubAgentManager_BuildChildPromptPrefersRequestSkillIndex(t *testing.T) {
+	mgr := NewSubAgentManager(SubAgentConfig{})
+	mgr.SkillIndex = "STATIC SKILL INDEX"
+	task := SubAgentTask{Name: "worker", Description: "Use a skill"}
+
+	ctx := WithPromptOverrides(context.Background(), &PromptOverrides{SkillIndex: "REQUEST SKILL INDEX"})
+	prompt := mgr.buildChildPrompt(ctx, task)
+	if !contains(prompt, "REQUEST SKILL INDEX") {
+		t.Fatal("prompt missing request-scoped skill index")
+	}
+	if contains(prompt, "STATIC SKILL INDEX") {
+		t.Fatal("prompt included static skill index despite request-scoped override")
+	}
+
+	fallback := mgr.buildChildPrompt(context.Background(), task)
+	if !contains(fallback, "STATIC SKILL INDEX") {
+		t.Fatal("prompt missing static skill index fallback")
+	}
+}
+
 func TestSubAgentManager_BuildChildPromptWithHTTPTools(t *testing.T) {
 	mgr := NewSubAgentManager(SubAgentConfig{})
 	mgr.ToolGroups = map[string]*ToolGroup{

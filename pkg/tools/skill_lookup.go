@@ -2,15 +2,28 @@ package tools
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
+	"github.com/SAP/astonish/pkg/safepath"
 	"github.com/SAP/astonish/pkg/skills"
 	"github.com/SAP/astonish/pkg/store"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
+)
+
+const maxSkillFileBytes = 256 * 1024
+
+// SkillLookupMode controls which skill sources the lookup is allowed to use.
+type SkillLookupMode string
+
+const (
+	SkillLookupModeLocal    SkillLookupMode = "local"
+	SkillLookupModeCode     SkillLookupMode = "code"
+	SkillLookupModePlatform SkillLookupMode = "platform"
 )
 
 // SkillLookupArgs defines the arguments for the skill_lookup tool.
@@ -26,265 +39,318 @@ type SkillLookupResult struct {
 	Name                string              `json:"name"`
 	Description         string              `json:"description"`
 	Content             string              `json:"content"`
-	File                string              `json:"file,omitempty"`       // When a specific file was requested
-	Directory           string              `json:"directory,omitempty"`  // Legacy (disk-based skills)
-	Files               []string            `json:"files,omitempty"`      // Flat list of files (for compatibility)
-	FilesManifest       map[string][]string `json:"files_manifest,omitempty"` // Structured: path -> [filenames]
+	File                string              `json:"file,omitempty"`
+	Directory           string              `json:"directory,omitempty"`
+	Files               []string            `json:"files,omitempty"`
+	FilesManifest       map[string][]string `json:"files_manifest,omitempty"`
 	MissingRequirements []string            `json:"missing_requirements,omitempty"`
 	Error               string              `json:"error,omitempty"`
 }
 
-// SkillLookup returns full skill content by name.
-// All installed skills are indexed (eligible and ineligible) so the agent can
-// discover skills that need setup and guide the user through configuration.
+// SkillLookup returns full skill content by name. Platform mode consults tenant
+// stores in team > org > platform order before filesystem and builtin skills.
+// Local and Code modes never consult context-injected stores.
 //
-// At runtime, this function checks the context for tenant-scoped skill
-// stores (platform + org + team) injected via store.WithSkillStores.
-// Resolution order: team > org > platform > static/builtin (team wins on name collision).
-func SkillLookup(allSkills []skills.Skill) func(ctx tool.Context, args SkillLookupArgs) (SkillLookupResult, error) {
-	// Build index: start with built-in skills, then overlay caller-provided
-	// (filesystem-based) skills. User-provided skills override builtins on
-	// name collision.
+// The variadic mode preserves source compatibility until all launcher call sites
+// are migrated. An omitted mode retains the historical platform behavior.
+func SkillLookup(allSkills []skills.Skill, modes ...SkillLookupMode) func(ctx tool.Context, args SkillLookupArgs) (SkillLookupResult, error) {
+	mode := lookupMode(modes)
 	builtins := skills.BuiltinSkills()
 	staticIndex := make(map[string]*skills.Skill, len(builtins)+len(allSkills))
 	for i := range builtins {
-		staticIndex[builtins[i].Name] = &builtins[i]
+		staticIndex[strings.ToLower(builtins[i].Name)] = &builtins[i]
 	}
 	for i := range allSkills {
-		staticIndex[allSkills[i].Name] = &allSkills[i]
+		staticIndex[strings.ToLower(allSkills[i].Name)] = &allSkills[i]
 	}
 
 	return func(ctx tool.Context, args SkillLookupArgs) (SkillLookupResult, error) {
-		if args.Name == "" {
+		if strings.TrimSpace(args.Name) == "" {
 			return SkillLookupResult{Error: "name is required"}, nil
 		}
-
 		name := strings.ToLower(strings.TrimSpace(args.Name))
 
-		// Check tenant-scoped stores (team > org > platform)
-		if ctx != nil {
+		if mode == SkillLookupModePlatform && ctx != nil {
 			if ss := store.SkillStoresFromContext(ctx); ss != nil {
-				// Team store takes highest priority
-				if ss.Team != nil {
-					if skill, err := ss.Team.Get(ctx, name); err == nil && skill != nil {
-						return handlePlatformSkillLookup(ctx, ss.Team, skill, args), nil
+				for _, skillStore := range []store.SkillStore{ss.Team, ss.Org, ss.Platform} {
+					if skillStore == nil {
+						continue
 					}
-				}
-				// Then org store
-				if ss.Org != nil {
-					if skill, err := ss.Org.Get(ctx, name); err == nil && skill != nil {
-						return handlePlatformSkillLookup(ctx, ss.Org, skill, args), nil
-					}
-				}
-				// Then platform store (lowest DB tier)
-				if ss.Platform != nil {
-					if skill, err := ss.Platform.Get(ctx, name); err == nil && skill != nil {
-						return handlePlatformSkillLookup(ctx, ss.Platform, skill, args), nil
+					if skill, err := skillStore.Get(ctx, name); err == nil && skill != nil {
+						return handlePlatformSkillLookup(ctx, skillStore, skill, args), nil
 					}
 				}
 			}
 		}
 
-		// Fall back to static/filesystem index (personal mode only)
 		skill, ok := staticIndex[name]
 		if !ok {
-			names := collectAllSkillNames(staticIndex, ctx)
+			names := collectAllSkillNames(staticIndex, ctx, mode)
 			if len(names) == 0 {
-				return SkillLookupResult{
-					Error: fmt.Sprintf("skill %q not found. No skills are configured.", args.Name),
-				}, nil
+				return SkillLookupResult{Error: fmt.Sprintf("skill %q not found. No skills are configured.", args.Name)}, nil
 			}
-			return SkillLookupResult{
-				Error: fmt.Sprintf("skill %q not found. Available: %s", args.Name, strings.Join(names, ", ")),
-			}, nil
+			return SkillLookupResult{Error: fmt.Sprintf("skill %q not found. Available: %s", args.Name, strings.Join(names, ", "))}, nil
 		}
-
-		result := SkillLookupResult{
-			Name:        skill.Name,
-			Description: skill.Description,
-			Content:     skill.Content,
-		}
-
-		// Include missing requirements so the agent can guide setup
-		if missing := skill.MissingRequirements(); len(missing) > 0 {
-			result.MissingRequirements = missing
-		}
-
-		// Include directory and file listing for disk-based skills
-		if skill.Directory != "" {
-			result.Directory = skill.Directory
-			if entries, err := os.ReadDir(skill.Directory); err == nil {
-				for _, e := range entries {
-					if !e.IsDir() {
-						result.Files = append(result.Files, e.Name())
-					}
-				}
-			}
-		}
-
-		return result, nil
+		return handleFilesystemSkillLookup(skill, args), nil
 	}
 }
 
-// storeSkillToResult converts a store.Skill to a SkillLookupResult.
-func storeSkillToResult(s *store.Skill) SkillLookupResult {
-	// Parse the raw content to extract the body (after frontmatter)
-	parsed, err := skills.ParseSkillFile("store:"+s.Name, []byte(s.Content))
+func lookupMode(modes []SkillLookupMode) SkillLookupMode {
+	if len(modes) == 0 {
+		return SkillLookupModePlatform
+	}
+	return modes[0]
+}
+
+func handleFilesystemSkillLookup(skill *skills.Skill, args SkillLookupArgs) SkillLookupResult {
+	result := SkillLookupResult{Name: skill.Name, Description: skill.Description, Content: skill.Content}
+	if missing := skill.MissingRequirements(); len(missing) > 0 {
+		result.MissingRequirements = missing
+	}
+	if skill.Directory == "" {
+		if requestedFile(args) != "" {
+			result.Content = ""
+			result.Error = fmt.Sprintf("skill %q has no filesystem files", skill.Name)
+		}
+		return result
+	}
+
+	root, err := filepath.EvalSymlinks(skill.Directory)
 	if err != nil {
-		// If parsing fails, return the raw content
-		return SkillLookupResult{
-			Name:        s.Name,
-			Description: s.Description,
-			Content:     s.Content,
+		result.Error = fmt.Sprintf("failed to access files for skill %q", skill.Name)
+		return result
+	}
+	root, err = filepath.Abs(root)
+	if err != nil {
+		result.Error = fmt.Sprintf("failed to access files for skill %q", skill.Name)
+		return result
+	}
+	result.Directory = root
+
+	if filePath := requestedFile(args); filePath != "" {
+		cleaned, err := cleanSkillRelativePath(filePath)
+		if err != nil {
+			result.Content = ""
+			result.Error = err.Error()
+			return result
+		}
+		data, err := readContainedSkillFile(root, cleaned)
+		result.Content = ""
+		if err != nil {
+			result.Error = fmt.Sprintf("failed to load file %q from skill %q: %v", cleaned, skill.Name, err)
+			return result
+		}
+		result.File = cleaned
+		result.Content = string(data)
+		return result
+	}
+
+	files, manifest, err := filesystemSkillManifest(root)
+	if err != nil {
+		result.Error = fmt.Sprintf("failed to list files for skill %q: %v", skill.Name, err)
+		return result
+	}
+	result.Files = files
+	result.FilesManifest = manifest
+	return result
+}
+
+func requestedFile(args SkillLookupArgs) string {
+	filePath := strings.TrimSpace(args.File)
+	if filePath == "" && strings.TrimSpace(args.Filename) != "" {
+		filePath = strings.TrimSpace(args.Filename)
+		if strings.TrimSpace(args.Path) != "" {
+			filePath = strings.TrimSpace(args.Path) + "/" + filePath
 		}
 	}
-	result := SkillLookupResult{
-		Name:        parsed.Name,
-		Description: parsed.Description,
-		Content:     parsed.Content,
+	return filePath
+}
+
+func cleanSkillRelativePath(path string) (string, error) {
+	if path == "" || strings.Contains(path, "\\") || filepath.IsAbs(path) {
+		return "", fmt.Errorf("invalid file path: must be a clean relative path without '..' or leading '/'")
 	}
+	cleaned := filepath.ToSlash(filepath.Clean(filepath.FromSlash(path)))
+	if cleaned == "." || cleaned != path || cleaned == ".." || strings.HasPrefix(cleaned, "../") {
+		return "", fmt.Errorf("invalid file path: must be a clean relative path without '..' or leading '/'")
+	}
+	return cleaned, nil
+}
+
+func readContainedSkillFile(root, relative string) ([]byte, error) {
+	candidate := filepath.Join(root, filepath.FromSlash(relative))
+	if err := safepath.ContainedWithin(candidate, root); err != nil {
+		return nil, fmt.Errorf("path escapes skill directory")
+	}
+	resolved, err := filepath.EvalSymlinks(candidate)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("file not found")
+		}
+		return nil, fmt.Errorf("file is not accessible")
+	}
+	if err := safepath.ContainedWithin(resolved, root); err != nil {
+		return nil, fmt.Errorf("path escapes skill directory through a symlink")
+	}
+	info, err := os.Stat(resolved)
+	if err != nil || !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("path is not a regular file")
+	}
+	f, err := os.Open(resolved)
+	if err != nil {
+		return nil, fmt.Errorf("file is not accessible")
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, maxSkillFileBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("file is not readable")
+	}
+	if len(data) > maxSkillFileBytes {
+		return nil, fmt.Errorf("file exceeds 256KiB limit")
+	}
+	return data, nil
+}
+
+func filesystemSkillManifest(root string) ([]string, map[string][]string, error) {
+	var files []string
+	manifest := make(map[string][]string)
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == root {
+			return nil
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		if !entry.Type().IsRegular() {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("path escapes skill directory")
+		}
+		rel = filepath.ToSlash(rel)
+		files = append(files, rel)
+		dir, name := filepath.ToSlash(filepath.Dir(rel)), filepath.Base(rel)
+		if dir == "." {
+			dir = ""
+		}
+		manifest[dir] = append(manifest[dir], name)
+		return nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	sort.Strings(files)
+	for dir := range manifest {
+		sort.Strings(manifest[dir])
+	}
+	if len(manifest) == 0 {
+		manifest = nil
+	}
+	return files, manifest, nil
+}
+
+func storeSkillToResult(s *store.Skill) SkillLookupResult {
+	parsed, err := skills.ParseSkillFile("store:"+s.Name, []byte(s.Content))
+	if err != nil {
+		return SkillLookupResult{Name: s.Name, Description: s.Description, Content: s.Content}
+	}
+	result := SkillLookupResult{Name: parsed.Name, Description: parsed.Description, Content: parsed.Content}
 	if missing := parsed.MissingRequirements(); len(missing) > 0 {
 		result.MissingRequirements = missing
 	}
 	return result
 }
 
-// collectAllSkillNames gathers skill names from static index + context stores.
-func collectAllSkillNames(staticIndex map[string]*skills.Skill, ctx tool.Context) []string {
+func collectAllSkillNames(staticIndex map[string]*skills.Skill, ctx tool.Context, mode SkillLookupMode) []string {
 	nameSet := make(map[string]struct{}, len(staticIndex))
-	for n := range staticIndex {
-		nameSet[n] = struct{}{}
+	for _, skill := range staticIndex {
+		nameSet[skill.Name] = struct{}{}
 	}
-
-	if ctx != nil {
+	if mode == SkillLookupModePlatform && ctx != nil {
 		if ss := store.SkillStoresFromContext(ctx); ss != nil {
-			if ss.Platform != nil {
-				if platformSkills, err := ss.Platform.List(ctx); err == nil {
-					for _, s := range platformSkills {
-						nameSet[s.Name] = struct{}{}
-					}
+			for _, skillStore := range []store.SkillStore{ss.Platform, ss.Org, ss.Team} {
+				if skillStore == nil {
+					continue
 				}
-			}
-			if ss.Org != nil {
-				if orgSkills, err := ss.Org.List(ctx); err == nil {
-					for _, s := range orgSkills {
-						nameSet[s.Name] = struct{}{}
-					}
-				}
-			}
-			if ss.Team != nil {
-				if teamSkills, err := ss.Team.List(ctx); err == nil {
-					for _, s := range teamSkills {
-						nameSet[s.Name] = struct{}{}
+				if stored, err := skillStore.List(ctx); err == nil {
+					for _, skill := range stored {
+						nameSet[skill.Name] = struct{}{}
 					}
 				}
 			}
 		}
 	}
-
 	names := make([]string, 0, len(nameSet))
-	for n := range nameSet {
-		names = append(names, n)
+	for name := range nameSet {
+		names = append(names, name)
 	}
 	sort.Strings(names)
 	return names
 }
 
-// NewSkillLookupTool creates the skill_lookup tool.
-func NewSkillLookupTool(allSkills []skills.Skill) (tool.Tool, error) {
+// NewSkillLookupTool creates the skill_lookup tool. See SkillLookup for the
+// temporary omitted-mode compatibility behavior.
+func NewSkillLookupTool(allSkills []skills.Skill, modes ...SkillLookupMode) (tool.Tool, error) {
 	return functiontool.New(functiontool.Config{
 		Name: "skill_lookup",
 		Description: "Load full instructions for a CLI tool skill by name. " +
 			"Use this to learn how to use a CLI tool or workflow before executing commands. " +
 			"If a skill references environment variables for auth, resolve them from the credential store. " +
 			"Check the Available Skills list in the system prompt for valid skill names.",
-	}, SkillLookup(allSkills))
+	}, SkillLookup(allSkills, modes...))
 }
 
-// handlePlatformSkillLookup handles skill_lookup for skills coming from platform stores (DB).
-// It supports fetching specific auxiliary files and returns a files manifest when loading the main skill.
-// SECURITY: Skills with non-usable validation_status are blocked at runtime.
-func handlePlatformSkillLookup(ctx tool.Context, store store.SkillStore, skill *store.Skill, args SkillLookupArgs) SkillLookupResult {
-	// Runtime validation gate — only skills with usable status can be loaded
+func handlePlatformSkillLookup(ctx tool.Context, skillStore store.SkillStore, skill *store.Skill, args SkillLookupArgs) SkillLookupResult {
 	if !skills.IsUsableStatus(skill.ValidationStatus) {
-		return SkillLookupResult{
-			Name: skill.Name,
-			Error: fmt.Sprintf("Skill %q is blocked (validation_status: %q). "+
-				"A team member must validate and acknowledge any critical security issues "+
-				"in Settings → Skills before this skill can be used.", skill.Name, skill.ValidationStatus),
-		}
+		return SkillLookupResult{Name: skill.Name, Error: fmt.Sprintf("Skill %q is blocked (validation_status: %q). A team member must validate and acknowledge any critical security issues in Settings → Skills before this skill can be used.", skill.Name, skill.ValidationStatus)}
 	}
-	// Determine if user asked for a specific file
-	filePath := strings.TrimSpace(args.File)
-	if filePath == "" && args.Filename != "" {
-		if args.Path != "" {
-			filePath = args.Path + "/" + args.Filename
-		} else {
-			filePath = args.Filename
-		}
-	}
-
-	if filePath != "" {
-		// Canonicalize and validate for path traversal
-		cleaned := filepath.ToSlash(filepath.Clean(filePath))
-		if cleaned != filePath || strings.Contains(cleaned, "..") || strings.HasPrefix(cleaned, "/") {
-			return SkillLookupResult{
-				Name:  skill.Name,
-				Error: "invalid file path: must be a clean relative path without '..' or leading '/'",
-			}
-		}
-		filePath = cleaned
-
-		// Specific file requested
-		// Normalize path/filename
-		dir, name := "", filePath
-		if idx := strings.LastIndex(filePath, "/"); idx != -1 {
-			dir = filePath[:idx]
-			name = filePath[idx+1:]
-		}
-		f, err := store.GetFile(ctx, skill.Name, dir, name)
+	if filePath := requestedFile(args); filePath != "" {
+		cleaned, err := cleanSkillRelativePath(filePath)
 		if err != nil {
-			// DB error — distinct from "file not found"
-			return SkillLookupResult{
-				Name:  skill.Name,
-				Error: fmt.Sprintf("failed to load file %q from skill %q (database error)", filePath, skill.Name),
-			}
+			return SkillLookupResult{Name: skill.Name, Error: err.Error()}
 		}
-		if f != nil {
-			return SkillLookupResult{
-				Name:      skill.Name,
-				File:      filePath,
-				Content:   f.Content,
-				Directory: "", // not meaningful for DB-backed files
-			}
+		dir, name := filepath.ToSlash(filepath.Dir(cleaned)), filepath.Base(cleaned)
+		if dir == "." {
+			dir = ""
 		}
-		// File not found
-		return SkillLookupResult{
-			Name:  skill.Name,
-			Error: fmt.Sprintf("file %q not found in skill %q", filePath, skill.Name),
+		f, err := skillStore.GetFile(ctx, skill.Name, dir, name)
+		if err != nil {
+			return SkillLookupResult{Name: skill.Name, Error: fmt.Sprintf("failed to load file %q from skill %q (database error)", cleaned, skill.Name)}
 		}
+		if f == nil {
+			return SkillLookupResult{Name: skill.Name, Error: fmt.Sprintf("file %q not found in skill %q", cleaned, skill.Name)}
+		}
+		if len(f.Content) > maxSkillFileBytes {
+			return SkillLookupResult{Name: skill.Name, Error: fmt.Sprintf("file %q exceeds 256KiB limit", cleaned)}
+		}
+		return SkillLookupResult{Name: skill.Name, File: cleaned, Content: f.Content}
 	}
 
-	// Default: return main skill content + files manifest
 	result := storeSkillToResult(skill)
-
-	// Attach files manifest from the new skill_files table
-	if files, err := store.ListFiles(ctx, skill.Name); err == nil && len(files) > 0 {
-		manifest := make(map[string][]string)
+	if files, err := skillStore.ListFiles(ctx, skill.Name); err == nil && len(files) > 0 {
+		result.FilesManifest = make(map[string][]string)
 		for _, f := range files {
-			manifest[f.Path] = append(manifest[f.Path], f.Filename)
-		}
-		// For backward compat with existing result shape, also populate flat Files list
-		for _, f := range files {
+			result.FilesManifest[f.Path] = append(result.FilesManifest[f.Path], f.Filename)
 			full := f.Filename
 			if f.Path != "" {
 				full = f.Path + "/" + f.Filename
 			}
 			result.Files = append(result.Files, full)
 		}
-		// Also expose structured manifest (new field)
-		result.FilesManifest = manifest
+		sort.Strings(result.Files)
+		for path := range result.FilesManifest {
+			sort.Strings(result.FilesManifest[path])
+		}
 	}
-
 	return result
 }

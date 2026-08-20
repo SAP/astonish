@@ -1,315 +1,181 @@
 # Multi-File ClawHub Skill Support
 
-**Status:** Draft  
-**Date:** 2026-05-29  
+**Status:** Implemented
+
+**Originally drafted:** 2026-05-29
+
 **Author:** Astonish Team
 
-## Problem Statement
+## Overview
 
-Astonish currently supports ClawHub skills only as single-file `SKILL.md` documents stored in the database. Many real-world ClawHub skills (and the OpenClaw reference implementation) use a multi-file directory structure:
+Astonish supports the standard multi-file skill layout used by ClawHub and OpenClaw:
 
-- `SKILL.md` (required)
-- `scripts/` — helper scripts the agent can execute
-- `references/` — documentation the agent can read on demand
-- `assets/` — templates and resources
-
-Current limitations:
-- Only the `SKILL.md` content is stored (in the `skills.content` column).
-- Auxiliary files from ClawHub ZIP downloads are discarded.
-- The agent has no way to discover or load additional files belonging to a skill.
-- This blocks adoption of the majority of useful community skills on ClawHub.
-
-## Goals
-
-1. **Full ClawHub compatibility** — Support the standard multi-file skill layout used by OpenClaw/ClawHub.
-2. **Preserve the `skill_lookup` model** — Keep explicit, controllable loading via tools instead of eager injection.
-3. **Strong isolation** — Skill files must never require host-to-container bind mounts when sandbox is enabled.
-4. **Centralized storage** — All skill content lives in the platform database (works for both SQLite and PostgreSQL in multi-instance K8s deployments).
-5. **Security by default** — Size limits, no arbitrary binary execution, clear provenance.
-
-## Non-Goals (for v1)
-
-- Executing pre-compiled binaries shipped inside skills (`bin/`).
-- Full dependency/install-spec resolution (`metadata.openclaw.install`).
-- Per-skill configuration/env injection.
-- Skill publishing or verification flows.
-
-## Design
-
-### 1. Database Schema
-
-We will use **Option A** (separate table) for minimal disruption:
-
-#### New Table: `skill_files`
-
-```sql
-CREATE TABLE skill_files (
-    id              TEXT PRIMARY KEY,
-    skill_id        TEXT NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
-    path            TEXT NOT NULL,           -- relative directory, e.g. "scripts" or ""
-    filename        TEXT NOT NULL,           -- e.g. "helper.sh" or "SKILL.md"
-    content         TEXT NOT NULL,           -- file contents (text only)
-    is_executable   BOOLEAN NOT NULL DEFAULT false,
-    size_bytes      INTEGER NOT NULL,
-    created_at      TEXT NOT NULL,
-    updated_at      TEXT NOT NULL,
-
-    UNIQUE(skill_id, path, filename)
-);
+```text
+my-skill/
+├── SKILL.md
+├── scripts/
+│   └── deploy.sh
+├── references/
+│   └── api.md
+└── assets/
+    └── template.yaml
 ```
 
-**Notes:**
-- `path` is the directory portion (empty string for root).
-- `filename` is just the basename.
-- Only text files are supported in v1 (`content` is `TEXT`).
-- Binary files are rejected during import.
-- The existing `skills` table remains unchanged (it continues to store the canonical `SKILL.md` in the `content` column for backwards compatibility and fast lookup).
+`SKILL.md` is required. Auxiliary files may be nested recursively under arbitrary directories. The agent first loads the main instructions and a file manifest, then reads individual supporting files on demand.
 
-Equivalent tables are created in both SQLite (per-team + org) and PostgreSQL schemas.
+## Goals and Constraints
 
-### 2. Tool Interface
+The implementation provides:
 
-#### `skill_lookup` (enhanced)
+1. **Multi-file compatibility** — Preserve and expose scripts, references, templates, and other auxiliary text files.
+2. **Progressive disclosure** — Keep the main prompt small and load supporting files through `skill_lookup` only when needed.
+3. **Mode isolation** — Code sessions use filesystem skills and built-ins only; they never query database-backed skill stores.
+4. **Deterministic precedence** — Resolve same-named skills case-insensitively according to the active mode.
+5. **Safe filesystem access** — Reject traversal and symlink escapes and enforce a 256 KiB per-file read limit.
+6. **Safe local creation** — Let the agent scaffold a local skill without overwriting existing content.
 
-Existing signature continues to work:
+Pre-compiled skill binaries and automatic dependency installation remain unsupported. A skill may provide a script as text, but executing it is a separate, explicit agent action subject to the normal tool and sandbox controls.
+
+## Discovery and Precedence
+
+### Filesystem Sources
+
+Filesystem loading begins with the configured user skills directory and then processes configured extra skills roots in order. Each root contains immediate child directories with a `SKILL.md` file.
+
+Names are normalized case-insensitively for both collision handling and allowlist filtering. A later root replaces an earlier same-named skill:
+
+```text
+configured user directory < first extra root < ... < last extra root
+```
+
+The optional allowlist is applied to the merged result and also matches case-insensitively. Built-in skills are the lowest static source; a same-named filesystem skill wins over a built-in.
+
+### Code Mode
+
+Code mode receives only:
+
+- built-in skills; and
+- the merged, allowlisted filesystem skills described above.
+
+It does **not** read platform, organization, or team database skills. This remains true even if database stores are present in the surrounding application context.
+
+### Platform Mode
+
+Platform mode overlays database-backed scopes on the static filesystem/built-in base. Same-name comparisons are case-insensitive, with this precedence:
+
+```text
+filesystem and built-ins < platform < organization < team
+```
+
+Lookup checks the most specific database scope first (team, then organization, then platform) and falls back to the filesystem/built-in definition. The rendered skill index uses the equivalent low-to-high overlay order, yielding one entry per case-insensitive name.
+
+## Tool Interface
+
+### `skill_lookup`
+
+Loading a skill root uses the existing signature:
+
 ```json
 { "name": "docker" }
 ```
 
-New parameters for multi-file access:
-```json
-{
-  "name": "docker",
-  "file": "scripts/deploy.sh"     // or
-  "path": "scripts",
-  "filename": "deploy.sh"
-}
-```
-
-**Revised behavior (inspired by Hermes progressive disclosure):**
-
-- If only `name` is provided → returns the main `SKILL.md` **plus** a `files` manifest showing all available auxiliary files for that skill (no separate discovery call needed).
-- If `file` (or `path`+`filename`) is provided → returns that specific file from `skill_files`.
-
-Example response when loading the skill root:
+For a filesystem skill, the response contains the parsed `SKILL.md` instructions and a recursive manifest of regular files:
 
 ```json
 {
   "name": "docker",
   "description": "Container management with Docker",
   "content": "# Docker\n\n## Building Images\n...",
-  "files": {
-    "scripts": ["scripts/deploy.sh", "scripts/cleanup.sh"],
-    "references": ["references/best-practices.md"],
-    "templates": ["templates/Dockerfile.tmpl"]
+  "files": [
+    "SKILL.md",
+    "references/best-practices.md",
+    "scripts/deploy.sh"
+  ],
+  "files_manifest": {
+    "": ["SKILL.md"],
+    "references": ["best-practices.md"],
+    "scripts": ["deploy.sh"]
   }
 }
 ```
 
-This approach reduces tool calls and ensures the model immediately knows what additional files exist for the skill.
+The agent can load one auxiliary file using either form:
 
-### 3. System Prompt Instructions
-
-The skill index section (already present via `BuildSkillIndex`) will be extended with guidance:
-
-> **Multi-file skills**: Many skills contain additional files (`scripts/`, `references/`, `templates/`, etc.).
->
-> When you call `skill_lookup(name)` on a skill, the response includes a `files` manifest listing all available auxiliary files. Use `skill_lookup(name, file: "scripts/foo.sh")` (or `path` + `filename`) to load any specific file.
->
-> Relative paths mentioned inside a skill's `SKILL.md` must be resolved by loading them via `skill_lookup`.
->
-> Never attempt to execute or reference files from a skill unless you first loaded them through `skill_lookup`.
-
-This design (inspired by Hermes) ensures the model discovers auxiliary files in the same call that loads the main skill content, reducing unnecessary tool calls.
-
-### 4. ClawHub Install Flow
-
-When a user runs `astonish skills install <slug>` (or the future Studio equivalent):
-
-1. Download the ZIP from the ClawHub registry endpoint.
-2. Extract the archive in memory.
-3. Locate `SKILL.md` (required).
-4. Parse frontmatter (name, description, metadata).
-5. Insert/update the main row in `skills` (name + full `SKILL.md` content).
-6. For every other file in the archive:
-   - If it is a text file and ≤ 256 KiB → insert into `skill_files`.
-   - If binary or too large → log a warning and skip (with clear message to the user).
-7. Store ClawHub provenance (slug, version, installed_at) — either in an extended `_meta` column or a small side table (future).
-
-The same logic will apply to manual uploads via the Studio UI.
-
-### 5. Runtime Execution Model (Sandbox vs Non-Sandbox)
-
-**When sandbox is enabled (the common case in platform deployments):**
-
-- `skill_lookup` runs on the host (it queries the DB).
-- When the agent calls `skill_lookup(name)`, it receives both the SKILL.md content **and** the `files` manifest in one response.
-- To load a specific auxiliary file, the agent calls `skill_lookup(name, file: "...")`.
-- The tool returns the content.
-- The agent uses `write_file` to place the content inside the session container at a well-known temporary location (e.g. `/tmp/skills/<skill-name>/scripts/deploy.sh`).
-- The agent then uses `shell_command` (which executes inside the container) to run it.
-
-**Benefits:**
-- No host paths are ever leaked into the container.
-- Full isolation is preserved.
-- The agent is in control of what gets materialized inside the sandbox.
-
-**When sandbox is disabled:**
-- The agent can still use `write_file` + `shell_command`, or the system can optionally write files to a temp directory on the host for convenience. The tool behavior remains the same.
-
-### 6. Limits and Security
-
-- **Per-file limit**: 256 KiB (matching OpenClaw's `SKILL.md` cap). Larger files are rejected at import time.
-- **Total per skill**: 2 MiB (soft limit, configurable later).
-- **Content type**: Only UTF-8 text files are accepted. Binary content is rejected.
-- **No execution of skill-shipped binaries**: Explicitly unsupported in v1 (and likely forever). Only scripts the agent writes into the container via `write_file` may be executed.
-- **Provenance**: All imported files carry metadata about their origin (ClawHub slug + version, or manual upload user + timestamp).
-
-## 7. UI Impact and Changes
-
-The current Studio Skills UI (`web/src/components/settings/SkillsSettings.tsx`) is designed exclusively around single-file skills. It presents each skill as a single CodeMirror editor showing the full `raw_file` (YAML frontmatter + markdown body). There is no concept of auxiliary files in the UI today, even though the backend already sends a `has_directory` flag (currently ignored by the frontend).
-
-Supporting multi-file ClawHub skills requires a significant but manageable evolution of the editor experience.
-
-### 7.1 Current UI State (Single-File Only)
-
-- Skill list shows name + description + eligibility badge.
-- Clicking View/Edit opens a full-screen CodeMirror editor for the entire `SKILL.md`.
-- Create flow: only asks for skill name → generates template → opens editor.
-- No file tree, no tabs, no "Add File" capability.
-- ClawHub installation is CLI-only (a hint message suggests using `astonish skills install`).
-
-### 7.2 Target Editor Experience (Multi-File)
-
-When a skill has auxiliary files, the editor should evolve to a two-pane layout:
-
-```
-┌────────────────────────────────────────────────────────────┐
-│  ← Back to Skills                              [Save All]  │
-├──────────────────────┬─────────────────────────────────────┤
-│ Files                │  SKILL.md  │  scripts/deploy.sh    │
-│                      ├─────────────────────────────────────┤
-│ ▼ my-skill           │                                     │
-│   SKILL.md        ●  │  ---                                │
-│   ▼ scripts          │  name: my-skill                     │
-│     deploy.sh        │  ...                                │
-│     cleanup.sh       │                                     │
-│   ▼ references       │  # My Skill                         │
-│     api.md           │  Instructions...                    │
-│                      │                                     │
-│ [+ Add File]         │                                     │
-│                      │                                     │
-└──────────────────────┴─────────────────────────────────────┘
+```json
+{ "name": "docker", "file": "scripts/deploy.sh" }
 ```
 
-**Key behaviors:**
+```json
+{
+  "name": "docker",
+  "path": "scripts",
+  "filename": "deploy.sh"
+}
+```
 
-- **Single-file skills** (only `SKILL.md`): Keep the current full-screen editor experience (no tree panel) for backwards compatibility.
-- **Multi-file skills**: Show a collapsible file tree on the left.
-- Clicking any file opens it in a tab on the right (CodeMirror with appropriate language mode: markdown, shell, etc.).
-- **[+ Add File]** button allows creating new files under `scripts/`, `references/`, `templates/`, or custom paths.
-- Right-click / hover menu on files supports Rename and Delete (with confirmation; `SKILL.md` cannot be deleted).
-- Files in `scripts/` are visually marked as executable.
-- Changes to any file are tracked; a global "Save All" button saves modified files.
+Database-backed platform skills expose the same main-content, manifest, and individual-file interface. The selected platform scope supplies both the main skill and its auxiliary files.
 
-### 7.3 API Changes Required
+### `create_skill`
 
-The existing skill content API must be extended:
+`create_skill` scaffolds a new skill only beneath the configured local user skills directory. The requested name is trimmed and must contain only ASCII letters, digits, hyphens, and underscores.
 
-| Method | Endpoint | Purpose |
-|--------|----------|---------|
-| `GET`  | `/api/skills/{name}/content?scope=` | Extend response to include `files: [{path, filename, size, is_executable}]` |
-| `GET`  | `/api/skills/{name}/files` | List all auxiliary files for a skill |
-| `GET`  | `/api/skills/{name}/files/{path}/{filename}` | Retrieve content of one auxiliary file |
-| `PUT`  | `/api/skills/{name}/files/{path}/{filename}` | Create or overwrite an auxiliary file |
-| `DELETE` | `/api/skills/{name}/files/{path}/{filename}` | Delete an auxiliary file |
+Creation is intentionally non-destructive:
 
-New backend handlers will be needed in `pkg/api/skills_handlers.go` to support the file operations (especially for the platform DB stores).
+- It never targets an extra root or a platform database.
+- It uses exclusive filesystem creation and never overwrites an existing directory or `SKILL.md`.
 
-### 7.4 Frontend Component Changes
+The generated scaffold can then be expanded with auxiliary directories and files through ordinary filesystem tools.
 
-Major updates expected in:
+## Secure Auxiliary-File Access
 
-- `SkillsSettings.tsx` — Core editor view will need significant refactoring to support the two-pane + tabbed layout.
-- New component: `SkillFileTree.tsx` — Renders the left-side file explorer.
-- New or extended editor wrapper to manage multiple open tabs and dirty state across files.
-- API client functions in `web/src/api/` or `settingsApi.ts` for the new file endpoints.
+Filesystem manifests walk the complete skill directory recursively, allowing nested paths such as `references/api/v2/auth.md`. The walk includes regular files only and does not follow symlinks.
 
-### 7.5 Create Flow
+Individual reads enforce all of the following:
 
-The "New Skill" modal can remain simple (just name). After creation:
-- The editor opens showing only `SKILL.md`.
-- The user can immediately use `[+ Add File]` to start building the multi-file structure.
+- The requested path must be a clean relative path.
+- Absolute paths, backslashes, empty paths, and `..` traversal are rejected.
+- The candidate path must be contained within the skill root before resolution.
+- Symlinks are resolved before reading, and the resolved target must still be within the resolved skill root.
+- The target must be a regular file.
+- At most **256 KiB** is read; larger files return an error and no partial content.
 
-No need to overcomplicate the initial creation step.
+These checks prevent a skill from exposing arbitrary host files through crafted paths or symlinks. Database auxiliary-file reads enforce the same 256 KiB limit.
 
-### 7.6 ClawHub Install UI (Phase 3)
+**Threat-model boundary:** The traversal and resolved-root/symlink containment checks protect a filesystem skill tree that remains stable during each lookup. The tree is expected not to be concurrently and adversarially mutated while validation and reading are in progress. Because lookup uses pathname-based filesystem APIs rather than descriptor-relative `openat`-style operations, it does not provide race hardening against an attacker who can rename or replace path components between checks and use. This concurrency assumption does not relax any of the traversal, symlink-resolution, containment, regular-file, or size checks above.
 
-A future "Install from ClawHub" button in the skills list header can:
-- Accept a ClawHub slug or URL.
-- Call a new `POST /api/skills/install` endpoint.
-- Show the number of files imported and open the skill in the new multi-file editor.
+## Runtime Execution Model
 
-This is lower priority; the CLI path works well in the meantime.
+### Sandbox Enabled
 
-### 7.7 Backwards Compatibility
+`skill_lookup` returns file content to the agent rather than exposing or mounting a host skill path into the sandbox. If a script is needed, the agent can explicitly materialize the returned text inside the session using `write_file`, inspect it, and then invoke `shell_command` under the sandbox's normal policy.
 
-- Skills that only contain `SKILL.md` continue to render exactly as today.
-- The file tree panel only appears when the `files` array returned by the API is non-empty (or when `has_directory` is true).
-- Existing single-file skills require zero changes from users.
+Benefits:
 
-## Implementation Phases
+- No skill-directory bind mount is required.
+- Host paths need not be usable from the container.
+- The agent materializes only files needed for the current task.
+- Existing sandbox command and network controls continue to apply.
 
-### Phase 1: Foundation (DB + Tools)
+### Sandbox Disabled
 
-- Add `skill_files` table (and equivalent org/team versions) + migrations.
-- Extend `skill_lookup` so that calling it with only `name` returns the main content + a `files` manifest of auxiliary files.
-- Extend `skill_lookup` to accept `file` / `path`+`filename` parameters to fetch specific files from `skill_files`.
-- Update system prompt instructions to reflect the single-tool progressive disclosure model.
-- Add basic validation + size limits at import time.
+The lookup contract is unchanged. The agent may use returned content directly or write it to an appropriate temporary/work directory before execution.
 
-### Phase 2: ClawHub Import
+## Terminal Experience
 
-- Modify `DownloadFromClawHub` + CLI install path to populate `skill_files`.
-- Add support for importing multi-file ZIPs via the existing `skills install` command.
-- Update tests.
+The terminal UI provides `/skills` when the backend supports local skill summaries. The command lists available skills and eligibility/source information directly without starting an LLM turn. It reports an unsupported message when that capability is unavailable.
 
-### Phase 3: Agent Experience & Polish (including Studio UI)
+## Storage and UI Notes
 
-- Finalize the `files` manifest format returned by `skill_lookup(name)`.
-- Add clear error messages when a skill references a file that doesn't exist in the manifest.
-- Implement full multi-file support in the Studio Skills editor:
-  - File tree sidebar + tabbed CodeMirror editor
-  - Add / Rename / Delete file operations
-  - Support for executable flag on scripts
-- Extend backend skill content APIs to return file manifests and support file CRUD.
-- Update documentation and bundled skill examples if needed.
-- Ensure `skill_lookup` (with file support) is included in the default tool allowlist.
+Filesystem multi-file skills remain directories on disk. Platform, organization, and team skills may store main and auxiliary content in their scoped stores. Code mode does not consult those stores.
 
-### Phase 4: Future (out of scope for v1)
+Studio can continue to present `SKILL.md` as the primary editor while progressively adding file-tree editing for auxiliary files. Regardless of UI capabilities, the runtime `skill_lookup` interface already supports manifests and individual auxiliary-file reads.
 
-- ClawHub lockfile / version tracking
-- `skills update` command
-- ClawHub install UI in Studio (Phase 3 has the editor; full install flow is future)
-- Install-spec evaluation (`metadata.openclaw.install`)
-- Per-skill configuration
-- Binary file support (explicitly out of scope)
+## Implementation References
 
-## Open Questions
-
-- Should we allow the agent to request a "bulk load" of small files in one call, or keep it strictly one-file-at-a-time via repeated `skill_lookup` calls?
-- Do we want a size-based heuristic that automatically inlines very small auxiliary files (< 2 KiB) directly in the `skill_lookup` response?
-- How (if at all) do we want to surface the existence of auxiliary files in the lightweight skill index shown in the system prompt (vs. only revealing them when the model calls `skill_lookup` on the skill)?
-
-## References
-
-- Existing skills architecture: `docs/architecture/skills.md`
-- OpenClaw skill layout and loading: `/root/openclaw` (reference implementation)
-- Hermes agent skills system: `/root/hermes-agent` — particularly its progressive disclosure model using `skills_list` + `skill_view(name)` (which returns a `linked_files` manifest) + `skill_view(name, file_path)`. This directly influenced the decision to embed the file manifest in the primary `skill_lookup` response instead of using a separate `skill_tree` tool.
-- Current `skill_lookup` implementation: `pkg/tools/skill_lookup.go`
-- ClawHub download logic: `pkg/skills/clawhub.go`
-- Skill store interfaces: `pkg/store/skills.go`
-
----
-
-**Next step:** Once this document is approved, we will begin Phase 1 implementation.
+- Filesystem loading and precedence: `pkg/skills/loader.go`
+- Built-in skills: `pkg/skills/bundled.go`
+- Main and auxiliary-file lookup: `pkg/tools/skill_lookup.go`
+- Safe local scaffolding: `pkg/tools/create_skill.go`
+- Platform/org/team overlay: `pkg/channels/manager.go`
+- Terminal `/skills`: `pkg/tui/skills.go`
+- General skills architecture: [skills.md](./skills.md)

@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/SAP/astonish/pkg/client"
+	"github.com/SAP/astonish/pkg/skills"
+	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
 )
 
@@ -328,4 +330,18 @@ func TestPlatformBackendDeleteActiveSessionResetsModelToCascade(t *testing.T) {
 	if info.Provider != "cascade-provider" || info.Model != "cascade-model" {
 		t.Fatalf("after delete active = %s/%s", info.Provider, info.Model)
 	}
+}
+
+func TestLazyCodeBackendForwardsLocalSkills(t *testing.T) {
+	inner := &localAgentBackend{filesystemSkills: []skills.Skill{{Name: "local", Description: "Local", Source: "project"}}}
+	b := &lazyCodeBackend{inner: inner}
+
+	got, err := b.ListLocalSkills(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[1].Name != "local" {
+		t.Fatalf("forwarded skills = %+v", got)
+	}
+	var _ backend.LocalSkillsBackend = b
 }

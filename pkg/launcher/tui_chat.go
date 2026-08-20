@@ -221,6 +221,19 @@ func (b *lazyCodeBackend) RespondSubAgentAuth(choice string) bool {
 	return false
 }
 
+func (b *lazyCodeBackend) ListLocalSkills(ctx context.Context) ([]backend.SkillSummary, error) {
+	if b.inner == nil {
+		return nil, fmt.Errorf("code backend not opened")
+	}
+	capability, ok := b.inner.(backend.LocalSkillsBackend)
+	if !ok {
+		return nil, fmt.Errorf("code backend does not support local skills")
+	}
+	return capability.ListLocalSkills(ctx)
+}
+
+var _ backend.LocalSkillsBackend = (*lazyCodeBackend)(nil)
+
 // platformBackend implements backend.Backend over Studio REST/SSE.
 type platformBackend struct {
 	client      *client.Client

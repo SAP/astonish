@@ -54,11 +54,11 @@ type SubTaskProgressEvent struct {
 	ToolResult any    `json:"tool_result,omitempty"` // Tool result (for task_tool_result)
 	Text       string `json:"text,omitempty"`        // Text output (for task_text)
 	// Fields for plan_announced
-	PlanGoal         string         `json:"plan_goal,omitempty"`          // Plan title (for plan_announced)
-	PlanSteps        []PlanStepInfo `json:"plan_steps,omitempty"`         // Plan steps (for plan_announced)
-	PlanContext      string         `json:"plan_context,omitempty"`       // Context section (for plan_announced)
+	PlanGoal         string         `json:"plan_goal,omitempty"`           // Plan title (for plan_announced)
+	PlanSteps        []PlanStepInfo `json:"plan_steps,omitempty"`          // Plan steps (for plan_announced)
+	PlanContext      string         `json:"plan_context,omitempty"`        // Context section (for plan_announced)
 	PlanWhatNotToDo  string         `json:"plan_what_not_to_do,omitempty"` // What not to change (for plan_announced)
-	PlanVerification string         `json:"plan_verification,omitempty"`  // End-to-end smoke test (for plan_announced)
+	PlanVerification string         `json:"plan_verification,omitempty"`   // End-to-end smoke test (for plan_announced)
 	// Fields for plan_step_update
 	StepName   string `json:"step_name,omitempty"`   // Step name to update (for plan_step_update)
 	StepStatus string `json:"step_status,omitempty"` // New step status: running, complete, failed (for plan_step_update)
@@ -1525,10 +1525,15 @@ func (m *SubAgentManager) buildChildPrompt(ctx context.Context, task SubAgentTas
 	}
 
 	// Inject skill index so sub-agents know which skills exist and can
-	// call skill_lookup to load them on demand.
-	if m.SkillIndex != "" {
+	// call skill_lookup to load them on demand. A request-scoped platform index
+	// takes precedence over the manager's static filesystem fallback.
+	skillIndex := m.SkillIndex
+	if overrides := PromptOverridesFromContext(ctx); overrides != nil && overrides.SkillIndex != "" {
+		skillIndex = overrides.SkillIndex
+	}
+	if skillIndex != "" {
 		sb.WriteString("\n")
-		sb.WriteString(m.SkillIndex)
+		sb.WriteString(skillIndex)
 	}
 
 	return sb.String()

@@ -143,6 +143,64 @@ func TestRenderToolAuthorizationOverlay(t *testing.T) {
 	}
 }
 
+// TestRenderToolAuthorizationOverlay_LongCommand verifies that a long or
+// multiline shell command is displayed across multiple lines rather than being
+// hard-cut at 60 bytes on a single line.
+func TestRenderToolAuthorizationOverlay_LongCommand(t *testing.T) {
+	longCmd := "git log --oneline --graph --decorate --all --color=always | head -50 && echo done"
+	m := newModel(context.Background(), Config{Backend: staticBackend{}, Width: 100, Height: 40})
+	m.ready = true
+	m.layout()
+	m.tr.Apply(events.NewAuthorizationApproval(
+		"shell_command",
+		map[string]any{"command": longCmd},
+		[]string{"Allow", "Always Allow", "Deny"},
+		"tool", nil,
+	))
+
+	out := stripANSI(m.renderApprovalOverlay())
+
+	// The full command must not be silently swallowed — at minimum the opening
+	// portion should be visible and the end should appear somewhere.
+	if !strings.Contains(out, "git log") {
+		t.Errorf("overlay missing start of long command:\n%s", out)
+	}
+	// At width=100 the card is wide enough to show the whole command; it must
+	// NOT be cut at 60 chars (old behaviour would lose "| head -50 && echo done").
+	if !strings.Contains(out, "head -50") {
+		t.Errorf("overlay cut long command too early (old 60-char truncation?): %q\n%s", longCmd, out)
+	}
+}
+
+// TestRenderToolAuthorizationOverlay_MultilineCommand verifies that a command
+// containing real newlines (e.g. a shell script) is displayed across multiple
+// visual lines instead of being collapsed to a single run-on line.
+func TestRenderToolAuthorizationOverlay_MultilineCommand(t *testing.T) {
+	script := "set -e\ncd /app\nnpm ci\nnpm run build\nnpm test"
+	m := newModel(context.Background(), Config{Backend: staticBackend{}, Width: 100, Height: 50})
+	m.ready = true
+	m.layout()
+	m.tr.Apply(events.NewAuthorizationApproval(
+		"shell_command",
+		map[string]any{"command": script},
+		[]string{"Allow", "Always Allow", "Deny"},
+		"tool", nil,
+	))
+
+	out := stripANSI(m.renderApprovalOverlay())
+
+	// Each line of the script should be visible.
+	for _, line := range []string{"set -e", "cd /app", "npm ci", "npm run build", "npm test"} {
+		if !strings.Contains(out, line) {
+			t.Errorf("overlay missing script line %q:\n%s", line, out)
+		}
+	}
+	// Must be rendered across multiple lines — the newlines must NOT be squashed.
+	if strings.Contains(out, "set -e cd /app") || strings.Contains(out, "set -encd /app") {
+		t.Errorf("overlay collapsed multiline command to a single line:\n%s", out)
+	}
+}
+
 func TestRenderFolderAuthorizationOverlay(t *testing.T) {
 	m := newModel(context.Background(), Config{Backend: staticBackend{}, Width: 100, Height: 30})
 	m.ready = true

@@ -1975,8 +1975,11 @@ func (m model) statusText() string {
 		fmt.Fprintf(&b, "Org: %s  Team: %s\n", info.Org, info.Team)
 	}
 	fmt.Fprintf(&b, "Session: %s\n", first(info.SessionID, "(none)"))
-	if dir := footerWorkDirText(info.WorkingDir); dir != "" {
+	if dir := footerWorkDirText(info.WorkingDir, ""); dir != "" {
 		fmt.Fprintf(&b, "Folder: %s\n", dir)
+	}
+	if info.GitBranch != "" {
+		fmt.Fprintf(&b, "Branch: %s\n", info.GitBranch)
 	}
 	fmt.Fprintf(&b, "Provider: %s  Model: %s\n", first(info.Provider, "-"), first(info.Model, "-"))
 	if m.planMode {
@@ -2340,12 +2343,18 @@ func abbreviateHomePath(path string) string {
 
 // footerWorkDirText is the glanceable project-folder label for the footer meta
 // row. Empty input yields empty output (platform mode). Home-prefixed paths are
-// abbreviated the same way as the welcome card.
-func footerWorkDirText(path string) string {
+// abbreviated the same way as the welcome card. When branch is non-empty (the
+// directory is inside a git repository), the branch is appended with a ⎇ icon
+// so the active branch is visible at a glance.
+func footerWorkDirText(path, branch string) string {
 	if path == "" {
 		return ""
 	}
-	return abbreviateHomePath(path)
+	dir := abbreviateHomePath(path)
+	if branch != "" {
+		return dir + "  ⎇ " + branch
+	}
+	return dir
 }
 
 // viewportTopY is the screen row where the transcript viewport starts.
@@ -4471,7 +4480,7 @@ func (m model) renderFooterMeta() string {
 		modelName = first(modelName, m.tr.Model)
 	}
 	left := modelFooterText(provider, modelName)
-	folder := footerWorkDirText(m.info.WorkingDir)
+	folder := footerWorkDirText(m.info.WorkingDir, m.info.GitBranch)
 	right := ""
 	if m.info.AutoApprove {
 		right = "auto-approve"

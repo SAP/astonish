@@ -22,6 +22,9 @@ type Info struct {
 	// WorkingDir is the host directory tools operate against. Only set in
 	// code mode (the local, unsandboxed coding tool); empty in platform mode.
 	WorkingDir string
+	// GitBranch is the active git branch when WorkingDir is inside a git
+	// repository. Empty when not in a git repo or in platform mode.
+	GitBranch string
 	// Usage is cumulative token usage known when opening/resuming a session.
 	Usage *events.Usage
 	// ContextTokens is the current context-window occupancy known when

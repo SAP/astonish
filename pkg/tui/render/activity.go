@@ -486,6 +486,13 @@ func wrapKeyValue(key, value string, width int) string {
 	return strings.Join(lines, "\n")
 }
 
+// WrapMultiline wraps s to width, keeping at most maxLines lines. A "…" line
+// is appended when the content is truncated. Used by the TUI approval overlay
+// to display tool args without the 60-char single-line hard cut.
+func WrapMultiline(s string, maxLines, width int) string {
+	return wrapMultiline(s, maxLines, width)
+}
+
 func wrapMultiline(s string, maxLines, width int) string {
 	if maxLines < 1 {
 		maxLines = 1

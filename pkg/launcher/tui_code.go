@@ -23,6 +23,7 @@ import (
 	"github.com/SAP/astonish/pkg/client"
 	"github.com/SAP/astonish/pkg/common"
 	"github.com/SAP/astonish/pkg/config"
+	"github.com/SAP/astonish/pkg/gitutil"
 	"github.com/SAP/astonish/pkg/provider"
 	persistentsession "github.com/SAP/astonish/pkg/session"
 	"github.com/SAP/astonish/pkg/skills"
@@ -228,6 +229,7 @@ func RunCodeTUI(ctx context.Context, cfg *CodeConfig) error {
 		autoApprove:            cfg.AutoApprove,
 		debug:                  cfg.DebugMode,
 		workingDir:             workingDir,
+		gitBranch:              gitutil.DetectBranch(workingDir),
 		provider:               result.ProviderName,
 		model:                  result.ModelName,
 		configured:             result.ProviderConfigured,
@@ -316,6 +318,9 @@ func buildCodeBackend(ctx context.Context, cfg *CodeConfig) (backend.Backend, er
 		workingDir = abs
 	}
 
+	// Detect the active git branch for footer display (best-effort; empty if not a repo).
+	gitBranch := gitutil.DetectBranch(workingDir)
+
 	sessionsDir, err := codeSessionsDir(appConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve code sessions directory: %w", err)
@@ -360,6 +365,7 @@ func buildCodeBackend(ctx context.Context, cfg *CodeConfig) (backend.Backend, er
 		autoApprove:            cfg.AutoApprove,
 		debug:                  cfg.DebugMode,
 		workingDir:             workingDir,
+		gitBranch:              gitBranch,
 		provider:               result.ProviderName,
 		model:                  result.ModelName,
 		configured:             result.ProviderConfigured,
@@ -475,6 +481,7 @@ type localAgentBackend struct {
 
 	debug      bool
 	workingDir string
+	gitBranch  string
 	notices    []string
 	// filesystemSkills is the exact initialization-time slice wired into the
 	// runtime skill lookup. It is not reloaded when /skills is invoked.
@@ -589,6 +596,7 @@ func (b *localAgentBackend) Info() backend.Info {
 		Model:         b.model,
 		Mode:          "code",
 		WorkingDir:    b.workingDir,
+		GitBranch:     b.gitBranch,
 		Usage:         cloneUsage(b.usage),
 		ContextTokens: b.contextTokens,
 		IsResumed:     b.resumed,

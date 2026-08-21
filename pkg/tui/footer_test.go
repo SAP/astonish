@@ -37,25 +37,40 @@ func TestModelFooterTextWaitsForProviderAndModel(t *testing.T) {
 }
 
 func TestFooterWorkDirText(t *testing.T) {
-	if got := footerWorkDirText(""); got != "" {
-		t.Fatalf("footerWorkDirText(\"\") = %q, want empty", got)
+	if got := footerWorkDirText("", ""); got != "" {
+		t.Fatalf("footerWorkDirText(\"\",\"\") = %q, want empty", got)
 	}
 
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
 		t.Skip("no home directory available")
 	}
-	got := footerWorkDirText(filepath.Join(home, "Projects", "astonish"))
+	got := footerWorkDirText(filepath.Join(home, "Projects", "astonish"), "")
 	want := "~" + string(filepath.Separator) + "Projects" + string(filepath.Separator) + "astonish"
 	if got != want {
-		t.Fatalf("footerWorkDirText(home/Projects/astonish) = %q, want %q", got, want)
+		t.Fatalf("footerWorkDirText(home/Projects/astonish, \"\") = %q, want %q", got, want)
 	}
 	if strings.Contains(got, home) {
 		t.Fatalf("footerWorkDirText should not include the raw home path: %q", got)
 	}
 
-	if got := footerWorkDirText("/tmp/my-project"); got != "/tmp/my-project" {
-		t.Fatalf("footerWorkDirText(non-home) = %q, want unchanged", got)
+	if got := footerWorkDirText("/tmp/my-project", ""); got != "/tmp/my-project" {
+		t.Fatalf("footerWorkDirText(non-home, \"\") = %q, want unchanged", got)
+	}
+
+	// With a branch: should include the icon and branch name.
+	gotBranch := footerWorkDirText("/tmp/proj", "main")
+	if !strings.Contains(gotBranch, "⎇") {
+		t.Fatalf("footerWorkDirText with branch should contain ⎇ icon, got %q", gotBranch)
+	}
+	if !strings.Contains(gotBranch, "main") {
+		t.Fatalf("footerWorkDirText with branch should contain branch name, got %q", gotBranch)
+	}
+
+	// Without a branch: should not include the icon.
+	gotNoBranch := footerWorkDirText("/tmp/proj", "")
+	if strings.Contains(gotNoBranch, "⎇") {
+		t.Fatalf("footerWorkDirText without branch should not contain ⎇ icon, got %q", gotNoBranch)
 	}
 }
 
@@ -214,12 +229,16 @@ func TestStatusTextIncludesFolderInCodeMode(t *testing.T) {
 			Provider:   "sap-ai-core",
 			Model:      "claude",
 			WorkingDir: "/tmp/my-project",
+			GitBranch:  "main",
 		},
 		tr: events.NewTranscript(),
 	}
 	got := m.statusText()
 	if !strings.Contains(got, "Folder: /tmp/my-project") {
 		t.Fatalf("status missing folder: %q", got)
+	}
+	if !strings.Contains(got, "Branch: main") {
+		t.Fatalf("status missing branch: %q", got)
 	}
 }
 
@@ -235,5 +254,70 @@ func TestStatusTextOmitsFolderInPlatformMode(t *testing.T) {
 	got := m.statusText()
 	if strings.Contains(got, "Folder:") {
 		t.Fatalf("platform status should omit folder: %q", got)
+	}
+}
+
+func TestStatusTextOmitsBranchWhenEmpty(t *testing.T) {
+	m := model{
+		info: backend.Info{
+			Mode:       "code",
+			Provider:   "sap-ai-core",
+			Model:      "claude",
+			WorkingDir: "/tmp/my-project",
+			GitBranch:  "",
+		},
+		tr: events.NewTranscript(),
+	}
+	got := m.statusText()
+	if strings.Contains(got, "Branch:") {
+		t.Fatalf("status should omit Branch: when GitBranch is empty: %q", got)
+	}
+}
+
+func TestRenderFooterMetaShowsGitBranch(t *testing.T) {
+	m := model{
+		theme: DefaultTheme(),
+		width: 120,
+		info: backend.Info{
+			Mode:       "code",
+			Provider:   "sap-ai-core",
+			Model:      "anthropic--claude-3.7-sonnet",
+			WorkingDir: "/tmp/my-project",
+			GitBranch:  "feature/my-branch",
+		},
+	}
+	out := stripANSI(m.renderFooterMeta())
+	if strings.Contains(out, "\n") {
+		t.Fatalf("footer with branch should stay on one line: %q", out)
+	}
+	if !strings.Contains(out, "⎇") {
+		t.Fatalf("footer missing branch icon ⎇: %q", out)
+	}
+	if !strings.Contains(out, "feature/my-branch") {
+		t.Fatalf("footer missing branch name: %q", out)
+	}
+	if !strings.Contains(out, "sap-ai-core / anthropic--claude-3.7-sonnet") {
+		t.Fatalf("footer missing model: %q", out)
+	}
+	if got := lipgloss.Width(out); got != 120 {
+		t.Fatalf("footer width=%d want 120: %q", got, out)
+	}
+}
+
+func TestRenderFooterMetaNoGitBranchWhenEmpty(t *testing.T) {
+	m := model{
+		theme: DefaultTheme(),
+		width: 120,
+		info: backend.Info{
+			Mode:       "code",
+			Provider:   "sap-ai-core",
+			Model:      "anthropic--claude-3.7-sonnet",
+			WorkingDir: "/tmp/my-project",
+			GitBranch:  "",
+		},
+	}
+	out := stripANSI(m.renderFooterMeta())
+	if strings.Contains(out, "⎇") {
+		t.Fatalf("footer should not show ⎇ when GitBranch is empty: %q", out)
 	}
 }

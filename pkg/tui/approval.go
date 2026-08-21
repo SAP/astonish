@@ -12,6 +12,7 @@ import (
 	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
+	"github.com/SAP/astonish/pkg/tui/render"
 )
 
 // handleApprovalKey handles cursor navigation, y/n and option keys while
@@ -341,19 +342,39 @@ func (m model) renderApprovalOverlay() string {
 			keys = append(keys, k)
 		}
 		sort.Strings(keys)
+		// Card inner width: terminal width minus border (2×2) and padding (2×2).
+		cardW := m.width - 8
+		if cardW < 30 {
+			cardW = 30
+		}
 		n := 0
 		for _, k := range keys {
 			if n >= 4 {
 				b.WriteString(th.Muted.Render(fmt.Sprintf("  … +%d more", len(it.Args)-4)) + "\n")
 				break
 			}
-			raw := it.Args[k]
-			v := fmt.Sprintf("%v", raw)
-			v = strings.ReplaceAll(v, "\n", " ")
-			if len(v) > 60 {
-				v = v[:59] + "…"
+			v := strings.TrimSpace(fmt.Sprintf("%v", it.Args[k]))
+			if v == "" {
+				continue
 			}
-			b.WriteString(th.Muted.Render(fmt.Sprintf("  %s: ", k)) + th.Text.Render(v) + "\n")
+			// Render the key prefix on the first line; indent continuation lines.
+			prefix := fmt.Sprintf("  %s: ", k)
+			bodyWidth := cardW - len(prefix)
+			if bodyWidth < 10 {
+				bodyWidth = cardW
+				prefix = "  "
+			}
+			// Up to 8 wrapped lines per arg — enough for a realistic multi-line
+			// shell script while keeping the overlay at a manageable height.
+			wrapped := render.WrapMultiline(v, 8, bodyWidth)
+			lines := strings.Split(wrapped, "\n")
+			for i, line := range lines {
+				if i == 0 {
+					b.WriteString(th.Muted.Render(prefix) + th.Text.Render(line) + "\n")
+				} else {
+					b.WriteString(th.Text.Render(strings.Repeat(" ", len(prefix))+line) + "\n")
+				}
+			}
 			n++
 		}
 	}

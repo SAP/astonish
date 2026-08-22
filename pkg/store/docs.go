@@ -19,6 +19,11 @@ type DeckManifest struct {
 	Assets        map[string]string `json:"assets,omitempty"`
 	CreatedAt     time.Time         `json:"createdAt"`
 	UpdatedAt     time.Time         `json:"updatedAt"`
+	// Scope is a non-persisted, in-memory annotation ("personal" or "team")
+	// set only by the list handler when merging scopes. There is no Deck
+	// column for it; CreateDeck/UpdateDeck use explicit setters so this field
+	// is ignored by writes.
+	Scope string `json:"scope,omitempty"`
 }
 
 // SlideContent is one ordered, canonical ASD slide fragment.

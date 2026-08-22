@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"path/filepath"
 	"runtime"
@@ -52,16 +53,57 @@ func ListDocsHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unsupported docs type", http.StatusBadRequest)
 		return
 	}
-	svc, ok := requireDocsService(w, r)
-	if !ok {
+
+	// Back-compat: an explicit ?scope=personal|team lists only that scope
+	// (existing single-scope callers/tools are unaffected). With no scope we
+	// merge personal + team and annotate each deck, mirroring ListAppsHandler.
+	if scope := r.URL.Query().Get("scope"); scope != "" {
+		svc, ok := requireDocsService(w, r)
+		if !ok {
+			return
+		}
+		decks, err := svc.ListDecks(r.Context())
+		if err != nil {
+			writeSlidesError(w, err)
+			return
+		}
+		for i := range decks {
+			decks[i].Scope = scope
+		}
+		writeSlidesJSON(w, http.StatusOK, map[string]any{"type": "slides", "decks": decks})
 		return
 	}
-	decks, err := svc.ListDecks(r.Context())
-	if err != nil {
-		writeSlidesError(w, err)
+
+	svc := store.FromRequest(r)
+	if svc == nil {
+		http.Error(w, "request services unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	writeSlidesJSON(w, http.StatusOK, map[string]any{"type": "slides", "decks": decks})
+
+	merged := make([]*store.DeckManifest, 0)
+	if svc.PersonalDocs != nil {
+		decks, err := (slides.Service{Store: svc.PersonalDocs}).ListDecks(r.Context())
+		if err != nil {
+			slog.Warn("failed to list personal decks", "error", err)
+		} else {
+			for i := range decks {
+				decks[i].Scope = "personal"
+			}
+			merged = append(merged, decks...)
+		}
+	}
+	if svc.Docs != nil {
+		decks, err := (slides.Service{Store: svc.Docs}).ListDecks(r.Context())
+		if err != nil {
+			slog.Warn("failed to list team decks", "error", err)
+		} else {
+			for i := range decks {
+				decks[i].Scope = "team"
+			}
+			merged = append(merged, decks...)
+		}
+	}
+	writeSlidesJSON(w, http.StatusOK, map[string]any{"type": "slides", "decks": merged})
 }
 
 func GetSlidesDeckHandler(w http.ResponseWriter, r *http.Request) {

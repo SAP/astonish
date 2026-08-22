@@ -109,3 +109,71 @@ func TestServicePreservesStoreNotFound(t *testing.T) {
 		t.Fatalf("error = %v", err)
 	}
 }
+
+func TestServiceCopyDeckTo(t *testing.T) {
+	ctx := context.Background()
+	srcBackend := &memoryDocsStore{}
+	src := Service{Store: srcBackend}
+	deck, err := src.CreateDeck(ctx, "quarterly", "Quarterly", "desc", map[string]string{"surface": "#0B1020"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, diags, err := src.WriteSlide(ctx, deck.Slug, 0, `<ast-slide id="intro"><ast-text x="0" y="0" w="100" h="100">First</ast-text></ast-slide>`, "notes one"); err != nil || HasErrors(diags) {
+		t.Fatalf("write slide 0: diags=%#v err=%v", diags, err)
+	}
+	if _, diags, err := src.WriteSlide(ctx, deck.Slug, 1, `<ast-slide id="second"><ast-text x="0" y="0" w="100" h="100">Second</ast-text></ast-slide>`, "notes two"); err != nil || HasErrors(diags) {
+		t.Fatalf("write slide 1: diags=%#v err=%v", diags, err)
+	}
+
+	dstBackend := &memoryDocsStore{}
+	dst := Service{Store: dstBackend}
+	newDeck, err := src.CopyDeckTo(ctx, dst, deck.Slug)
+	if err != nil {
+		t.Fatalf("copy deck: %v", err)
+	}
+	if newDeck.Slug != deck.Slug || newDeck.Title != deck.Title {
+		t.Fatalf("copied deck manifest mismatch: %#v", newDeck)
+	}
+	if newDeck.ID == deck.ID {
+		t.Fatalf("copied deck should be re-keyed, got same id %s", newDeck.ID)
+	}
+	if newDeck.Theme["surface"] != "#0B1020" {
+		t.Fatalf("theme not copied: %#v", newDeck.Theme)
+	}
+
+	_, dstSlides, err := dst.Deck(ctx, newDeck.Slug)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dstSlides) != 2 {
+		t.Fatalf("expected 2 slides copied, got %d", len(dstSlides))
+	}
+	_, srcSlides, _ := src.Deck(ctx, deck.Slug)
+	byPos := map[int]*store.SlideContent{}
+	for _, s := range dstSlides {
+		byPos[s.Position] = s
+	}
+	for _, orig := range srcSlides {
+		got, ok := byPos[orig.Position]
+		if !ok {
+			t.Fatalf("missing copied slide at position %d", orig.Position)
+		}
+		if got.Content != orig.Content || got.Notes != orig.Notes {
+			t.Fatalf("slide %d content/notes mismatch: %#v vs %#v", orig.Position, got, orig)
+		}
+		if got.ID == orig.ID {
+			t.Fatalf("slide %d should be re-keyed, got same id %s", orig.Position, got.ID)
+		}
+	}
+}
+
+func TestServiceCopyDeckToFailsWithoutDestination(t *testing.T) {
+	ctx := context.Background()
+	src := Service{Store: &memoryDocsStore{}}
+	if _, err := src.CreateDeck(ctx, "d", "D", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := src.CopyDeckTo(ctx, Service{}, "d"); err == nil {
+		t.Fatal("expected destination unavailable error")
+	}
+}

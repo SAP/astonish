@@ -25,6 +25,8 @@ import { fetchAgents, fetchAgent, saveAgent, deleteAgent, fetchTools, checkMcpDe
 import type { Agent, Tool, McpDependencyCheckResult } from './api/agents'
 import { publishAppToTeam, forkAppToPersonal } from './api/apps'
 import type { AppListItem } from './api/apps'
+import { publishDeckToTeam, forkDeckToPersonal } from './api/slides'
+import type { SlidesDeckListItem } from './api/slides'
 import { fetchSandboxStatus } from './api/sandbox'
 import type { SandboxStatus } from './api/sandbox'
 import { snakeToTitleCase } from './utils/formatters'
@@ -56,6 +58,7 @@ const StudioChat = lazy(() => import('./components/StudioChat'))
 const FleetView = lazy(() => import('./components/FleetView'))
 const DrillView = lazy(() => import('./components/DrillView'))
 const AppsView = lazy(() => import('./components/AppsView'))
+const SlidesView = lazy(() => import('./components/SlidesView'))
 
 /** Returns true if `latest` is a strictly newer semver than `current`. */
 function isNewerVersion(latest: string, current: string): boolean {
@@ -762,6 +765,8 @@ function App() {
       setView('drill')
     } else if (path.view === 'apps') {
       setView('apps')
+    } else if (path.view === 'slides') {
+      setView('slides')
     } else if (path.view === 'settings') {
       setView('settings')
     } else if (path.view === 'credentials') {
@@ -1465,6 +1470,28 @@ layout:
     }
   }, [showToast])
 
+  // Publish a personal deck to the team
+  const handlePublishDeck = useCallback(async (deck: SlidesDeckListItem) => {
+    try {
+      await publishDeckToTeam(deck.slug)
+      showToast(`Deck "${deck.title}" published to team`, 'success')
+      window.dispatchEvent(new Event('astonish:slides-updated'))
+    } catch (err) {
+      showToast(`Failed to publish deck: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
+    }
+  }, [showToast])
+
+  // Fork a team deck to personal
+  const handleForkDeck = useCallback(async (deck: SlidesDeckListItem) => {
+    try {
+      await forkDeckToPersonal(deck.slug)
+      showToast(`Deck "${deck.title}" forked to personal`, 'success')
+      window.dispatchEvent(new Event('astonish:slides-updated'))
+    } catch (err) {
+      showToast(`Failed to fork deck: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
+    }
+  }, [showToast])
+
   // Copy store agent to local
   const handleCopyToLocal = useCallback(async (agent: AppAgent) => {
     try {
@@ -1678,6 +1705,18 @@ layout:
               }}
               onPublishApp={isPlatformMode ? handlePublishApp : undefined}
               onForkApp={isPlatformMode ? handleForkApp : undefined}
+            />
+            </Suspense>
+          ) : view === 'slides' ? (
+            <Suspense fallback={null}>
+            <SlidesView
+              key={activeTeam || 'personal'}
+              theme={theme}
+              isPlatformMode={isPlatformMode}
+              deckSlug={path.view === 'slides' ? path.params.deckSlug : ''}
+              onNavigate={(hashPath: string) => navigate(hashPath)}
+              onPublishDeck={isPlatformMode ? handlePublishDeck : undefined}
+              onForkDeck={isPlatformMode ? handleForkDeck : undefined}
             />
             </Suspense>
           ) : view === 'settings' ? (

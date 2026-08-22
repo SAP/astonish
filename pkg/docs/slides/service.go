@@ -2,11 +2,16 @@ package slides
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/google/uuid"
 )
+
+// ErrDeckExists is returned by CopyDeckTo when the destination scope already
+// has a deck with the same slug (unique-slug constraint in the target store).
+var ErrDeckExists = errors.New("deck already exists in destination scope")
 
 type Service struct{ Store store.DocsStore }
 
@@ -91,6 +96,40 @@ func (s Service) DeleteDeck(ctx context.Context, slug string) error {
 		return fmt.Errorf("docs store unavailable")
 	}
 	return s.Store.DeleteDeck(ctx, slug)
+}
+
+// CopyDeckTo duplicates a deck (manifest + all slides) from this service's
+// scope into dst's scope. It mirrors the personal↔team copy that
+// AppPublishToTeamHandler performs for apps, but is deck-aware because
+// DocsStore splits a deck into a DeckManifest and N SlideContent rows.
+//
+// The destination deck and every slide get freshly minted UUIDs (CreateDeck
+// and WriteSlide re-key), so the two scopes never share ids. Slides are
+// written through the validated WriteSlide path, guaranteeing the promoted
+// deck is valid ASD in the destination scope.
+func (s Service) CopyDeckTo(ctx context.Context, dst Service, slug string) (*store.DeckManifest, error) {
+	deck, srcSlides, err := s.Deck(ctx, slug)
+	if err != nil {
+		return nil, err
+	}
+	if dst.Store == nil {
+		return nil, fmt.Errorf("destination docs store unavailable")
+	}
+	if existing, err := dst.Store.GetDeck(ctx, deck.Slug); err == nil && existing != nil {
+		return nil, ErrDeckExists
+	} else if err != nil && !errors.Is(err, store.ErrDocsNotFound) {
+		return nil, fmt.Errorf("check destination deck: %w", err)
+	}
+	newDeck, err := dst.CreateDeck(ctx, deck.Slug, deck.Title, deck.Description, deck.Theme)
+	if err != nil {
+		return nil, fmt.Errorf("create destination deck: %w", err)
+	}
+	for _, srcSlide := range srcSlides {
+		if _, _, err := dst.WriteSlide(ctx, newDeck.Slug, srcSlide.Position, srcSlide.Content, srcSlide.Notes); err != nil {
+			return nil, fmt.Errorf("copy slide %d: %w", srcSlide.Position, err)
+		}
+	}
+	return newDeck, nil
 }
 
 func (s Service) Scene(ctx context.Context, slug string) (SceneGraph, []Diagnostic, error) {

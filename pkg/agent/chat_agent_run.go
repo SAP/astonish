@@ -672,15 +672,9 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 				}
 
 				kind := approvedExecutionResearchKind(name)
-				if kind == "" {
+				limit := approvedExecutionResearchLimit(kind)
+				if kind == "" || limit <= 0 {
 					return nil, nil
-				}
-				limit := ApprovedExecutionMaxSourceReads
-				switch kind {
-				case "codegraph":
-					limit = ApprovedExecutionMaxCodegraphCalls
-				case "search":
-					limit = ApprovedExecutionMaxSearchCalls
 				}
 				executionResearchMu.Lock()
 				defer executionResearchMu.Unlock()

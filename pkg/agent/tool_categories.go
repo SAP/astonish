@@ -70,7 +70,7 @@ The runtime advances through four phases. Each phase unlocks a specific set of t
 
 PHASE 1 — GRAPH (current at turn start). Only ` + "`codegraph_explore`" + ` and ` + "`find_files`" + ` are available. codegraph is a pre-computed knowledge graph of this repo: symbols, call edges, dependencies, cross-file references, and change blast-radius. Query it FIRST to understand the code you will touch — it answers most structural questions in 1-4 calls with far fewer tokens than grep. Compound your findings as you go: never re-query the graph for something already in your context. When you have identified the exact regions you need to read, call ` + "`gplan_reads`" + ` with the synthesized read list (each entry: path + why you need it). Only include paths that ` + "`codegraph_explore`" + ` explicitly returned — do NOT guess or infer filenames; if you need a file but do not have its confirmed path, use ` + "`find_files`" + ` to locate it first. This advances you to the READ phase. If codegraph returns no coverage (language unsupported / not indexed), call ` + "`gplan_gaps`" + ` immediately to skip straight to the GAP phase.
 
-PHASE 2 — READ. ` + "`read_file`" + ` (and read_pdf/filter_json) unlock, plus codegraph_explore. Read exactly the regions you listed — do NOT re-search for information you already have. When you have read everything the graph pointed you to, decide: if genuine gaps remain that codegraph could not answer, call ` + "`gplan_gaps`" + ` with those gaps (each: the question + why codegraph was insufficient) to advance to the GAP phase. If there are no gaps, call ` + "`gplan_finalize`" + ` to skip straight to the PLAN phase.
+PHASE 2 — READ. ` + "`read_file`" + ` (and read_pdf/filter_json) unlock, plus codegraph_explore. There is no read quota — read every region on the list you recorded with gplan_reads. Never ` + "`read_file`" + ` a path whose contents are already in this turn's context, and do not re-search for information you already have. When you have read everything the graph pointed you to, decide: if genuine gaps remain that codegraph could not answer, call ` + "`gplan_gaps`" + ` with those gaps (each: the question + why codegraph was insufficient) to advance to the GAP phase. If there are no gaps, call ` + "`gplan_finalize`" + ` to skip straight to the PLAN phase.
 
 PHASE 3 — GAP (complementary). The remaining read-only tools unlock: grep_search, find_files, file_tree, repo_map, code_definition, code_references, web_fetch, memory_search, memory_get, skill_lookup — and delegate_tasks. Use these ONLY for the genuine gaps codegraph could not fill. Prefer ` + "`delegate_tasks`" + ` with read-only ` + "`tools`" + ` filters (e.g. ["grep_search","read_file","code_references"]) to fan out independent gap questions in parallel. Do not re-answer anything already established. When gaps are closed, call ` + "`gplan_finalize`" + ` to advance to the PLAN phase.
 
@@ -87,7 +87,7 @@ Before calling announce_plan, run this COMPLETENESS SELF-CHECK:
 
 If any check reveals a gap, add the missing phase BEFORE calling announce_plan. Do NOT announce an incomplete plan.
 
-Produce a COMPLETE plan — cover every dependency the change reaches, order phases dependency-first, and surface any human decisions (breaking changes, alternatives with trade-offs, ambiguous requirements) explicitly. Spend effort proportional to blast radius.`
+Produce a COMPLETE plan — cover every dependency the change reaches, order phases dependency-first, and surface any human decisions (breaking changes, alternatives with trade-offs, ambiguous requirements) explicitly. Spend effort proportional to blast radius. Stop when you can name every affected file and why — not because a counter tripped. Never re-query codegraph or grep for a fact already established.`
 
 // PlanExecutionSystemContext is injected as the per-turn SystemContext when the
 // user approves a plan and on every subsequent Normal turn while that plan is
@@ -114,12 +114,13 @@ EXECUTION RULES:
    thread in dependency order. Mark each main-thread phase running with update_plan before you
    start it, and complete/failed when you finish.
 2. DO NOT RE-INVESTIGATE. The plan's details and file paths were confirmed during planning —
-   trust them. The runtime enforces a per-turn ceiling of 1 codegraph/code-intelligence call,
-   2 search/list calls, and 12 source reads during approved execution. Use these only for a
-   concrete unexpected gap, never to rediscover the implementation area.
+   trust them. Do not restart repository discovery. Codegraph/search remain runtime-capped
+   (1 codegraph/code-intelligence call and 2 search/list calls per turn) for a concrete
+   unexpected gap only. Source reads are not capped.
 3. ALLOWED READS: (a) a file you are about to edit/create (read it once immediately before
-   writing to get the exact current content), (b) files the plan's 'details' explicitly instruct
-   you to read as part of the implementation.
+   writing to get the exact current content; do not re-read a path already in this turn's
+   context), (b) files the plan's 'details' explicitly instruct you to read as part of the
+   implementation.
 4. IF A FILE PATH IN THE PLAN IS WRONG: use find_files once to locate the correct path, then
    proceed — do not re-read the surrounding area.
 5. IF A COMPILATION ERROR requires understanding a type or import: use code_definition for that
@@ -209,21 +210,30 @@ func approvedPlanExecutionToolBlocked(name string) bool {
 const (
 	ApprovedExecutionMaxCodegraphCalls = 1
 	ApprovedExecutionMaxSearchCalls    = 2
-	ApprovedExecutionMaxSourceReads    = 12
 )
 
 // approvedExecutionResearchKind classifies discovery calls that must remain
-// bounded after a plan is approved. Empty means the tool is not research.
+// bounded after a plan is approved. Empty means the tool is not rediscovery
+// (source reads are allowed without a quota).
 func approvedExecutionResearchKind(name string) string {
 	switch name {
 	case "codegraph_explore", "repo_map", "code_definition", "code_references":
 		return "codegraph"
 	case "grep_search", "find_files", "file_tree":
 		return "search"
-	case "read_file", "read_pdf", "filter_json":
-		return "read"
 	default:
 		return ""
+	}
+}
+
+func approvedExecutionResearchLimit(kind string) int {
+	switch kind {
+	case "codegraph":
+		return ApprovedExecutionMaxCodegraphCalls
+	case "search":
+		return ApprovedExecutionMaxSearchCalls
+	default:
+		return 0
 	}
 }
 

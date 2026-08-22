@@ -36,10 +36,11 @@ type GraphPlanState struct {
 	counters GraphPlanCounters
 }
 
-// GraphPlanCounters is a snapshot of exploration charged to the current turn.
+// GraphPlanCounters is a snapshot of discovery charged to the current turn.
+// Source reads are not counted: reading the regions identified in the GRAPH
+// phase is the point of the READ phase, not research to ration.
 type GraphPlanCounters struct {
 	GraphQueries    int
-	FileReads       int
 	GapCalls        int
 	DelegationCalls int
 	DelegatedTasks  int
@@ -48,11 +49,9 @@ type GraphPlanCounters struct {
 
 const (
 	GraphPlanMaxGraphQueries    = 4
-	GraphPlanMaxFileReads       = 12
 	GraphPlanMaxGapCalls        = 12
 	GraphPlanMaxDelegationCalls = 1
 	GraphPlanMaxDelegatedTasks  = 6
-	GraphPlanMaxExploration     = 24
 )
 
 // NewGraphPlanState returns a state machine starting in the graph phase.
@@ -88,11 +87,11 @@ func (g *GraphPlanState) ChargeExploration(name string, args map[string]any) str
 		if next.GraphQueries > GraphPlanMaxGraphQueries {
 			return g.limitMessageLocked("codegraph query", GraphPlanMaxGraphQueries)
 		}
-	case "read_file", "read_pdf", "filter_json":
-		next.FileReads++
-		if next.FileReads > GraphPlanMaxFileReads {
-			return g.limitMessageLocked("file read", GraphPlanMaxFileReads)
-		}
+	case "read_file", "read_pdf", "filter_json", "announce_plan", "update_plan":
+		// Source reads and plan recorders are not discovery. A read quota
+		// truncates the READ phase; charging announce_plan as a gap call
+		// deadlocks PLAN after the gap budget is exhausted.
+		return ""
 	case "delegate_tasks":
 		next.DelegationCalls++
 		next.DelegatedTasks += delegationTaskCount(args)
@@ -113,9 +112,6 @@ func (g *GraphPlanState) ChargeExploration(name string, args map[string]any) str
 	}
 
 	next.Total++
-	if next.Total > GraphPlanMaxExploration {
-		return "Graph-plan exploration hard limit reached. Call gplan_finalize now and announce the plan from the evidence already collected."
-	}
 	g.counters = next
 	return ""
 }

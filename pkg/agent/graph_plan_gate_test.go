@@ -128,6 +128,8 @@ func TestGraphPlanModeSystemContext_Discipline(t *testing.T) {
 		"gplan_finalize",
 		"announce_plan",
 		"NO-CHANGES",
+		"no read quota",
+		"already in this turn's context",
 	} {
 		if !strings.Contains(GraphPlanModeSystemContext, want) {
 			t.Errorf("GraphPlanModeSystemContext should mention %q", want)

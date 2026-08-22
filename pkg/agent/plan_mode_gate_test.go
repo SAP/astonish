@@ -86,6 +86,34 @@ func TestAnnouncePlanNotInPlanModeMessage(t *testing.T) {
 	}
 }
 
+func TestApprovedPlanExecutionResearch_AllowsReadsCapsDiscovery(t *testing.T) {
+	if got := approvedExecutionResearchKind("read_file"); got != "" {
+		t.Fatalf("read_file must not be classified as rediscovery, got %q", got)
+	}
+	if got := approvedExecutionResearchKind("read_pdf"); got != "" {
+		t.Fatalf("read_pdf must not be classified as rediscovery, got %q", got)
+	}
+	if got := approvedExecutionResearchKind("write_file"); got != "" {
+		t.Fatalf("write_file must not be classified as rediscovery, got %q", got)
+	}
+	if got := approvedExecutionResearchKind("codegraph_explore"); got != "codegraph" {
+		t.Fatalf("codegraph_explore kind = %q, want codegraph", got)
+	}
+	if got := approvedExecutionResearchKind("grep_search"); got != "search" {
+		t.Fatalf("grep_search kind = %q, want search", got)
+	}
+
+	if approvedExecutionResearchLimit("codegraph") != ApprovedExecutionMaxCodegraphCalls {
+		t.Fatalf("codegraph limit = %d, want %d", approvedExecutionResearchLimit("codegraph"), ApprovedExecutionMaxCodegraphCalls)
+	}
+	if approvedExecutionResearchLimit("search") != ApprovedExecutionMaxSearchCalls {
+		t.Fatalf("search limit = %d, want %d", approvedExecutionResearchLimit("search"), ApprovedExecutionMaxSearchCalls)
+	}
+	if approvedExecutionResearchLimit("read") != 0 {
+		t.Fatal("read must have no execution research limit")
+	}
+}
+
 func TestPlanExecutionSystemContext_ForbidsReannouncement(t *testing.T) {
 	dir := t.TempDir()
 	planPath := dir + "/session.PLAN.md"
@@ -102,6 +130,15 @@ func TestPlanExecutionSystemContext_ForbidsReannouncement(t *testing.T) {
 	}
 	if strings.Contains(ctx, "IMMEDIATE FIRST ACTION: Call read_file") {
 		t.Fatal("execution context must not require a PLAN.md re-read")
+	}
+	if strings.Contains(ctx, "12 source reads") {
+		t.Fatal("execution context must not impose a source-read ceiling")
+	}
+	if !strings.Contains(ctx, "once immediately before") {
+		t.Fatal("execution context must tell the model to read a target file once immediately before writing")
+	}
+	if !strings.Contains(ctx, "do not re-read") {
+		t.Fatal("execution context must tell the model not to re-read a path already in context")
 	}
 }
 

@@ -98,6 +98,22 @@ func TestGraphPlanState_ConcurrentCharging(t *testing.T) {
 	}
 }
 
+func TestGraphPlanState_SourceReadsAreUncapped(t *testing.T) {
+	g := NewGraphPlanState()
+	g.Advance(GraphPlanPhaseRead)
+	for i := 0; i < 20; i++ {
+		if got := g.ChargeExploration("read_file", nil); got != "" {
+			t.Fatalf("read_file %d blocked: %s", i+1, got)
+		}
+	}
+	if got := g.Counters(); got.Total != 0 || got.GapCalls != 0 || got.GraphQueries != 0 {
+		t.Fatalf("source reads must not increment discovery counters: %+v", got)
+	}
+	if got := g.ChargeExploration("announce_plan", nil); got != "" {
+		t.Fatalf("announce_plan must not be charged as exploration: %s", got)
+	}
+}
+
 func TestGetOrCreateGraphPlanState_PerSession(t *testing.T) {
 	c := &ChatAgent{}
 	a := c.GetOrCreateGraphPlanState("session-a")

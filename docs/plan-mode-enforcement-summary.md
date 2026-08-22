@@ -227,6 +227,10 @@ Phase → additive allow-list (`GraphPlanPhaseTools`, single source of truth):
 | `gap`   | + `grep_search`, `find_files`, `file_tree`, `repo_map`, `code_definition`, `code_references`, `web_fetch`, `memory_search`, `memory_get`, `skill_lookup`, `delegate_tasks` (read-only `tools` filters) |
 | `plan`  | + `announce_plan` |
 
+Discovery budgets (`GraphPlanState.ChargeExploration`) bound **codegraph queries**, complementary **gap-filling** calls, and **delegation**. Source reads (`read_file` / `read_pdf` / `filter_json`) and plan recorders (`announce_plan` / `update_plan`) are **not charged** — a read quota truncates the READ phase, and charging `announce_plan` as a gap call deadlocks PLAN after the gap cap. Duplicate work is prevented by prompt reuse rules (never re-read a path already in context; never re-query the graph for a known fact), not by refusing the files the plan still needs.
+
+Approved execution separately caps rediscovery (1 codegraph/code-intelligence call and 2 search/list calls per turn) but does **not** cap source reads. Read each target file once immediately before editing.
+
 Transition semantics:
 - `gplan_reads(read_list)` — records the synthesized, non-repetitive read list and advances
   `graph → read` (unlocks `read_file`).

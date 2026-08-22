@@ -199,12 +199,12 @@ func newMockPersonalDataStore() *mockPersonalDataStore {
 }
 
 func (m *mockPersonalDataStore) Memories() store.MemoryStore         { return nil }
+func (m *mockPersonalDataStore) Docs() store.DocsStore               { return nil }
 func (m *mockPersonalDataStore) Apps() store.AppStore                { return m.apps }
 func (m *mockPersonalDataStore) Sessions() store.SessionStore        { return nil }
 func (m *mockPersonalDataStore) AppState() store.AppStateStore       { return m.appState }
 func (m *mockPersonalDataStore) Flows() store.FlowStore              { return nil }
 func (m *mockPersonalDataStore) Credentials() store.CredentialStore  { return nil }
-func (m *mockPersonalDataStore) Docs() store.DocsStore               { return nil }
 func (m *mockPersonalDataStore) ScheduledJobs() store.SchedulerStore { return nil }
 
 func (m *mockPersonalDataStore) PersonalSettings() store.PersonalSettingsStore { return nil }

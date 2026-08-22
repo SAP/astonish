@@ -129,6 +129,11 @@ func eventsToMessages(events session.Events, redactor *credentials.Redactor) []S
 						lastInvocationID = eventInvID
 						continue
 					}
+					if dm := tryParseDocsUpdateMessage(text); dm != nil {
+						messages = append(messages, *dm)
+						lastInvocationID = eventInvID
+						continue
+					}
 					if fm := tryParseFlowOutputMessage(text); fm != nil {
 						messages = append(messages, *fm)
 						lastInvocationID = eventInvID
@@ -1878,6 +1883,34 @@ func joinReportMarkers(artifacts []ArtifactInfo, markers map[string]string) []Ar
 // are neither rendered nor coalesced into the agent prose around them.
 func tryParseReportMarkerMessage(text string) bool {
 	return strings.HasPrefix(text, reportMarkerPrefix)
+}
+
+const docsUpdatePrefix = "[docs_update]"
+
+func persistDocsUpdate(ctx context.Context, svc session.Service, userID, sessionID string, payload map[string]any) {
+	if svc == nil || sessionID == "" || payload == nil {
+		return
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		slog.Error("failed to marshal docs update", "error", err)
+		return
+	}
+	persistSessionMessage(ctx, svc, userID, sessionID, "model", docsUpdatePrefix+string(data))
+}
+
+func tryParseDocsUpdateMessage(text string) *StudioMessage {
+	if !strings.HasPrefix(text, docsUpdatePrefix) {
+		return nil
+	}
+	var payload DocsUpdatePayload
+	if err := json.Unmarshal([]byte(text[len(docsUpdatePrefix):]), &payload); err != nil {
+		return nil
+	}
+	if payload.Type != "slides" || payload.DeckSlug == "" || payload.Action == "" {
+		return nil
+	}
+	return &StudioMessage{Type: "docs_update", DocsUpdate: &payload}
 }
 
 // --- Flow output persistence ---

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -76,10 +77,31 @@ func TestApprovedPlanExecutionGate_BlocksOnlyReannouncement(t *testing.T) {
 	}
 }
 
+func TestAnnouncePlanNotInPlanModeMessage(t *testing.T) {
+	msg := AnnouncePlanNotInPlanModeBlockedMessage()
+	for _, want := range []string{"announce_plan", "Plan mode", "Normal mode"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("blocked message should mention %q, got %q", want, msg)
+		}
+	}
+}
+
 func TestPlanExecutionSystemContext_ForbidsReannouncement(t *testing.T) {
-	ctx := BuildPlanExecutionSystemContext("/tmp/session.PLAN.md")
+	dir := t.TempDir()
+	planPath := dir + "/session.PLAN.md"
+	body := "# Execution Plan\n\n**Goal:** Ship it\n\n## Phases\n\n- [ ] **one** — First\n"
+	if err := os.WriteFile(planPath, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ctx := BuildPlanExecutionSystemContext(planPath)
 	if !strings.Contains(ctx, "Do NOT call announce_plan") || !strings.Contains(ctx, "Use update_plan") {
 		t.Fatalf("execution context must preserve the approved plan lifecycle:\n%s", ctx)
+	}
+	if !strings.Contains(ctx, "**Goal:** Ship it") || !strings.Contains(ctx, "**one**") {
+		t.Fatalf("execution context must inline PLAN.md:\n%s", ctx)
+	}
+	if strings.Contains(ctx, "IMMEDIATE FIRST ACTION: Call read_file") {
+		t.Fatal("execution context must not require a PLAN.md re-read")
 	}
 }
 

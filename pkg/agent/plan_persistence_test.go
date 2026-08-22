@@ -130,6 +130,47 @@ func TestChatAgent_ReplacedPlanIgnoresStaleOnChange(t *testing.T) {
 	}
 }
 
+func TestChatAgent_RestoreApprovedPlanPreservesStatus(t *testing.T) {
+	dir := t.TempDir()
+	planPath := filepath.Join(dir, "sess.PLAN.md")
+
+	c := &ChatAgent{}
+	c.SetPlanFilePath(planPath)
+	plan := NewPlanState("Build", PlanDocumentInfo{}, []PlanStepInfo{
+		{Name: "explore", Description: "investigate", Details: "read files", Files: []PlanFileChange{{Path: "pkg/a.go", Kind: "modify"}}},
+		{Name: "implement", Description: "write code", Details: "edit pkg/a.go", Files: []PlanFileChange{{Path: "pkg/a.go", Kind: "modify"}}},
+	})
+	if !c.TrySetActivePlan(plan) {
+		t.Fatal("announce should be accepted")
+	}
+	if name, status := plan.SetStepStatus("explore", "complete"); name != "explore" || status != "complete" {
+		t.Fatalf("SetStepStatus = (%q,%q)", name, status)
+	}
+	if name, status := plan.SetStepStatus("implement", "running"); name != "implement" || status != "running" {
+		t.Fatalf("SetStepStatus = (%q,%q)", name, status)
+	}
+
+	c2 := &ChatAgent{}
+	c2.SetPlanFilePath(planPath)
+	if err := c2.RestoreApprovedPlan(); err != nil {
+		t.Fatalf("RestoreApprovedPlan: %v", err)
+	}
+	if !c2.IsActivePlanApproved() {
+		t.Fatal("restored plan must be marked approved")
+	}
+	restored := c2.GetActivePlan()
+	if restored == nil {
+		t.Fatal("restored plan is nil")
+	}
+	_, steps := restored.SnapshotInfo()
+	if len(steps) != 2 {
+		t.Fatalf("steps = %d", len(steps))
+	}
+	if steps[0].Status != "complete" || steps[1].Status != "running" {
+		t.Fatalf("restored statuses = %q/%q, want complete/running", steps[0].Status, steps[1].Status)
+	}
+}
+
 func TestChatAgent_UpdatePlanRewritesPlanFile(t *testing.T) {
 	dir := t.TempDir()
 	planPath := filepath.Join(dir, "sess.PLAN.md")

@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/SAP/astonish/pkg/agent"
@@ -81,8 +82,13 @@ func TestAnnouncePlanTool_RejectedPlanDoesNotEmit(t *testing.T) {
 	SetPlanProgressCallback(func(agent.SubTaskProgressEvent) { emitted = true })
 
 	res, err := announcePlan(nil, AnnouncePlanArgs{
-		Goal:  "replacement",
-		Steps: []PlanStepInput{{Name: "replace", Description: "replace approved plan"}},
+		Goal: "replacement",
+		Steps: []PlanStepInput{{
+			Name:        "replace",
+			Description: "replace approved plan",
+			Details:     "Rewrite pkg/agent/plan_state.go SetActivePlan to reject replacements.",
+			Files:       []PlanFileChangeInput{{Path: "pkg/agent/plan_state.go", Kind: "modify"}},
+		}},
 	})
 	if err != nil {
 		t.Fatalf("announcePlan error: %v", err)
@@ -113,7 +119,12 @@ func TestAnnouncePlanTool_PassesDetailsThrough(t *testing.T) {
 	_, err := announcePlan(nil, AnnouncePlanArgs{
 		Goal: "g",
 		Steps: []PlanStepInput{
-			{Name: "a", Description: "desc a", Details: "do x then y"},
+			{
+				Name:        "a",
+				Description: "desc a",
+				Details:     "do x then y",
+				Files:       []PlanFileChangeInput{{Path: "pkg/a.go", Kind: "modify"}},
+			},
 		},
 	})
 	if err != nil {
@@ -121,5 +132,32 @@ func TestAnnouncePlanTool_PassesDetailsThrough(t *testing.T) {
 	}
 	if len(gotSteps) != 1 || gotSteps[0].Details != "do x then y" {
 		t.Fatalf("details not passed through: %+v", gotSteps)
+	}
+}
+
+func TestAnnouncePlanTool_RejectsIncompleteSteps(t *testing.T) {
+	orig := planStateCallback
+	defer func() { planStateCallback = orig }()
+	called := false
+	SetPlanStateCallback(func(string, agent.PlanDocumentInfo, []agent.PlanStepInfo) bool {
+		called = true
+		return true
+	})
+
+	res, err := announcePlan(nil, AnnouncePlanArgs{
+		Goal:  "g",
+		Steps: []PlanStepInput{{Name: "a", Description: "desc a"}},
+	})
+	if err != nil {
+		t.Fatalf("announcePlan error: %v", err)
+	}
+	if res.Status != "incomplete_plan" {
+		t.Fatalf("status = %q, want incomplete_plan", res.Status)
+	}
+	if !strings.Contains(res.Message, "details") || !strings.Contains(res.Message, "files") {
+		t.Fatalf("message = %q, want details and files", res.Message)
+	}
+	if called {
+		t.Fatal("incomplete plan must not store PlanState")
 	}
 }

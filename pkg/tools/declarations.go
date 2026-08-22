@@ -47,6 +47,9 @@ func GetAllFlowToolDeclarations() []ToolDeclaration {
 	// Memory tools (4)
 	decls = append(decls, memoryToolDeclarations()...)
 
+	// Slide deck tools (5)
+	decls = append(decls, slideToolDeclarations()...)
+
 	// Skill lookup tool (1)
 	decls = append(decls, ToolDeclaration{
 		Name:        "skill_lookup",
@@ -212,6 +215,16 @@ func memoryToolDeclarations() []ToolDeclaration {
 		{Name: "memory_search", Description: "Search memory for relevant knowledge", Category: "memory"},
 		{Name: "memory_get", Description: "Read full memory file content by path", Category: "memory"},
 		{Name: "memory_delete", Description: "Delete an existing memory by exact ID", Category: "memory"},
+	}
+}
+
+func slideToolDeclarations() []ToolDeclaration {
+	return []ToolDeclaration{
+		{Name: "create_deck", Description: "Create a private Astonish Slides deck", Category: "slides"},
+		{Name: "write_slide", Description: "Validate and write one ASD slide into a private deck", Category: "slides"},
+		{Name: "get_deck", Description: "Read a private deck and its ordered slide markup", Category: "slides"},
+		{Name: "list_decks", Description: "List private Astonish Slides decks", Category: "slides"},
+		{Name: "validate_deck", Description: "Validate all persisted slides in a deck", Category: "slides"},
 	}
 }
 

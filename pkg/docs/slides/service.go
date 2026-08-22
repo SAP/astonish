@@ -65,3 +65,51 @@ func (s Service) Deck(ctx context.Context, slug string) (*store.DeckManifest, []
 	slides, err := s.Store.ListSlides(ctx, d.ID)
 	return d, slides, err
 }
+
+func (s Service) ListDecks(ctx context.Context) ([]*store.DeckManifest, error) {
+	if s.Store == nil {
+		return nil, fmt.Errorf("docs store unavailable")
+	}
+	return s.Store.ListDecks(ctx)
+}
+
+func (s Service) Slide(ctx context.Context, deckSlug string, position int) (*store.SlideContent, error) {
+	_, deckSlides, err := s.Deck(ctx, deckSlug)
+	if err != nil {
+		return nil, err
+	}
+	for _, slide := range deckSlides {
+		if slide.Position == position {
+			return slide, nil
+		}
+	}
+	return nil, store.ErrDocsNotFound
+}
+
+func (s Service) DeleteDeck(ctx context.Context, slug string) error {
+	if s.Store == nil {
+		return fmt.Errorf("docs store unavailable")
+	}
+	return s.Store.DeleteDeck(ctx, slug)
+}
+
+func (s Service) Scene(ctx context.Context, slug string) (SceneGraph, []Diagnostic, error) {
+	deck, deckSlides, err := s.Deck(ctx, slug)
+	if err != nil {
+		return SceneGraph{}, nil, err
+	}
+	scene := SceneGraph{SchemaVersion: deck.SchemaVersion, Title: deck.Title, Theme: deck.Theme}
+	var diagnostics []Diagnostic
+	for _, persisted := range deckSlides {
+		slide, slideDiagnostics, err := ParseSlide(persisted.Content)
+		if err != nil {
+			return SceneGraph{}, diagnostics, fmt.Errorf("parse slide %d: %w", persisted.Position, err)
+		}
+		if persisted.Notes != "" {
+			slide.Notes = persisted.Notes
+		}
+		scene.Slides = append(scene.Slides, slide)
+		diagnostics = append(diagnostics, slideDiagnostics...)
+	}
+	return scene, diagnostics, nil
+}

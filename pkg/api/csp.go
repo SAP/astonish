@@ -77,6 +77,13 @@ func CSPMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
+		// Slide presentation documents execute a trusted, pre-built runtime under
+		// their own restrictive sandbox CSP. Do not replace it with Studio's CSP.
+		if strings.HasSuffix(r.URL.Path, "/present") && strings.HasPrefix(r.URL.Path, "/api/docs/slides/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		// The generative UI sandbox iframe gets a permissive CSP because
 		// it needs inline scripts and eval (Sucrase transpilation). Origin
 		// isolation is enforced by the iframe sandbox attribute — see

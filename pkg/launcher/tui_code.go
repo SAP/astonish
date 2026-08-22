@@ -696,6 +696,37 @@ func (b *localAgentBackend) ActivePlanFilePath() string {
 	return b.planFilePath(sid)
 }
 
+// shouldContinueApprovedPlan reports whether a Normal turn should keep executing
+// an already-approved PLAN.md (research ceilings, inlined plan, no replacement).
+func (b *localAgentBackend) shouldContinueApprovedPlan(ctx context.Context, sessionID, planPath string, chatAgent *agent.ChatAgent) bool {
+	if planPath == "" {
+		return false
+	}
+	if _, err := os.Stat(planPath); err != nil {
+		return false
+	}
+	if chatAgent != nil && chatAgent.IsActivePlanApproved() {
+		return true
+	}
+	return b.sessionPlanLifecycle(ctx, sessionID) == events.PlanApproved
+}
+
+func (b *localAgentBackend) sessionPlanLifecycle(ctx context.Context, sessionID string) events.PlanStatus {
+	if sessionID == "" || b.sessionSvc == nil {
+		return ""
+	}
+	resp, err := b.sessionSvc.Get(ctx, &session.GetRequest{AppName: codeAppName, UserID: b.effectiveUserID(), SessionID: sessionID})
+	if err != nil || resp == nil || resp.Session == nil {
+		return ""
+	}
+	val, err := resp.Session.State().Get(planLifecycleStateKey)
+	if err != nil {
+		return ""
+	}
+	s, _ := val.(string)
+	return events.PlanStatus(s)
+}
+
 // ensureSession creates a new in-process session if none is active and returns
 // its ID. Safe to call under no lock; it locks internally.
 func (b *localAgentBackend) ensureSession(ctx context.Context) (string, bool, error) {
@@ -980,17 +1011,27 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 	graphPlan := opts.GraphPlanMode
 	askMode := opts.AskMode
 	approvedPlanExecution := opts.ApprovedPlanExecution
-	if approvedPlanExecution {
-		if err := chatAgent.RestoreApprovedPlan(); err != nil {
-			return nil, fmt.Errorf("restore approved plan: %w", err)
-		}
-	} else {
-		// Every non-execution turn may intentionally announce one new/revised
-		// plan. TrySetActivePlan consumes this slot atomically, deduplicating
-		// parallel announcements from the same turn.
-		chatAgent.AllowActivePlanReplacement()
-	}
 	systemContext := opts.SystemContext
+	if planMode || graphPlan {
+		// Planning / revision turns may replace the plan. Approved execution
+		// never reopens that slot — announce_plan is Plan-mode only.
+		chatAgent.AllowActivePlanReplacement()
+	} else if !askMode {
+		if !approvedPlanExecution && b.shouldContinueApprovedPlan(ctx, sessionID, planPath, chatAgent) {
+			approvedPlanExecution = true
+		}
+		if approvedPlanExecution {
+			if err := chatAgent.RestoreApprovedPlan(); err != nil {
+				if opts.ApprovedPlanExecution {
+					return nil, fmt.Errorf("restore approved plan: %w", err)
+				}
+				slog.Debug("restore approved plan skipped", "component", "localAgentBackend", "error", err)
+			}
+			if strings.TrimSpace(systemContext) == "" {
+				systemContext = agent.BuildPlanExecutionSystemContext(planPath)
+			}
+		}
+	}
 	if graphPlan {
 		gp := chatAgent.GetOrCreateGraphPlanState(sessionID)
 		gp.Reset()

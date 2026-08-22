@@ -1,0 +1,25 @@
+{
+  "name": "slides-update",
+  "description": "Two queued live turns that incrementally update the same slide deck while preserving each turn's final card snapshot.",
+  "category": "downloads",
+  "events": [
+    [
+      { "type": "session", "data": { "sessionId": "sess-slides-update", "isNew": true } },
+      { "type": "text", "data": { "text": "Building the first draft of your migration presentation..." } },
+      { "type": "docs_update", "data": { "type": "slides", "deckSlug": "cloud-migration", "action": "deck_created", "totalSlides": 0, "deckTitle": "Cloud Migration Plan", "schemaVersion": 1, "validation": { "errors": 0, "warnings": 0 }, "pptxCapability": { "native": 0, "vector": 0, "raster": 0, "unsupported": 0 } } },
+      { "type": "docs_update", "data": { "type": "slides", "deckSlug": "cloud-migration", "action": "slide_written", "slideIndex": 1, "totalSlides": 4, "title": "Migration objectives", "deckTitle": "Cloud Migration Plan", "schemaVersion": 1, "validation": { "errors": 0, "warnings": 0 }, "pptxCapability": { "native": 6, "vector": 1, "raster": 0, "unsupported": 0 } } },
+      { "type": "docs_update", "data": { "type": "slides", "deckSlug": "cloud-migration", "action": "slide_written", "slideIndex": 2, "totalSlides": 4, "title": "Current-state assessment", "deckTitle": "Cloud Migration Plan", "schemaVersion": 1, "validation": { "errors": 0, "warnings": 1 }, "pptxCapability": { "native": 11, "vector": 1, "raster": 0, "unsupported": 0 } } },
+      { "type": "text", "data": { "text": "The first draft is ready for review." } },
+      { "type": "done", "data": { "done": true } }
+    ],
+    [
+      { "type": "session", "data": { "sessionId": "sess-slides-update", "isNew": false } },
+      { "type": "text", "data": { "text": "Adding the requested delivery detail..." } },
+      { "type": "docs_update", "data": { "type": "slides", "deckSlug": "cloud-migration", "action": "slide_written", "slideIndex": 3, "totalSlides": 4, "title": "Migration waves", "deckTitle": "Cloud Migration Plan", "schemaVersion": 1, "validation": { "errors": 0, "warnings": 1 }, "pptxCapability": { "native": 16, "vector": 2, "raster": 0, "unsupported": 0 } } },
+      { "type": "docs_update", "data": { "type": "slides", "deckSlug": "cloud-migration", "action": "slide_written", "slideIndex": 4, "totalSlides": 4, "title": "Delivery roadmap", "deckTitle": "Cloud Migration Plan", "schemaVersion": 1, "validation": { "errors": 0, "warnings": 2 }, "pptxCapability": { "native": 22, "vector": 2, "raster": 0, "unsupported": 0 } } },
+      { "type": "text", "data": { "text": "The expanded presentation is ready." } },
+      { "type": "done", "data": { "done": true } }
+    ]
+  ]
+}
+

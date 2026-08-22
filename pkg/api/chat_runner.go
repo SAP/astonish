@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/credentials"
+	"github.com/SAP/astonish/pkg/docs/slides"
 	"github.com/SAP/astonish/pkg/sandbox/netpolicy"
 	"github.com/SAP/astonish/pkg/sandbox/openshell"
 	"github.com/SAP/astonish/pkg/store"
@@ -144,6 +146,14 @@ func (cr *ChatRunner) startSessionTitle(llm model.LLM, titleSetter SessionTitleS
 	}()
 }
 
+func injectRequestDocsStores(runner *ChatRunner, r *http.Request) *store.Services {
+	svc := store.FromRequest(r)
+	if svc != nil {
+		runner.InjectDocsStores(svc.PersonalDocs, svc.Docs)
+	}
+	return svc
+}
+
 // InjectLLM adds a per-request LLM override to the runner's context.
 // When present, ChatAgent.Run will use this LLM instead of the agent's default,
 // enabling per-team provider resolution (platform → org → team hierarchy).
@@ -157,6 +167,19 @@ func (cr *ChatRunner) InjectLLM(llm model.LLM) {
 // Must be called before Run().
 func (cr *ChatRunner) InjectCredentialStore(cs store.CredentialStore) {
 	cr.ctx = store.WithCredentialStore(cr.ctx, cs)
+}
+
+func (cr *ChatRunner) InjectDocsStores(personal, team store.DocsStore) {
+	svc := store.FromContext(cr.ctx)
+	if svc == nil {
+		svc = &store.Services{}
+	} else {
+		clone := *svc
+		svc = &clone
+	}
+	svc.PersonalDocs = personal
+	svc.Docs = team
+	cr.ctx = store.WithServices(cr.ctx, svc)
 }
 
 // InjectMemoryStores adds tenant-scoped memory stores to the runner's context.
@@ -634,6 +657,7 @@ func (cr *ChatRunner) Run(
 					"name":   part.FunctionResponse.Name,
 					"result": summarizeToolResult(resp),
 				})
+				cr.maybeEmitDocsUpdate(sessionService, part.FunctionResponse.Name, resp)
 				cr.drainImagesAndFlowOutput(chatAgent, sessionService)
 				cr.maybeEmitTutorialBlueprint(chatAgent, sessionService, part.FunctionResponse.Name, resp)
 				cr.maybeEmitTutorialSceneSlideshow(sessionService, part.FunctionResponse.Name, resp)
@@ -853,6 +877,7 @@ runLoop:
 						"name":   part.FunctionResponse.Name,
 						"result": summarizeToolResult(resp),
 					})
+					cr.maybeEmitDocsUpdate(sessionService, part.FunctionResponse.Name, resp)
 					if cr.drainImagesAndFlowOutput(chatAgent, sessionService) > 0 {
 						hasContent = true
 					}
@@ -1033,6 +1058,7 @@ runLoop:
 							"name":   part.FunctionResponse.Name,
 							"result": summarizeToolResult(resp),
 						})
+						cr.maybeEmitDocsUpdate(sessionService, part.FunctionResponse.Name, resp)
 						cr.drainImagesAndFlowOutput(chatAgent, sessionService)
 						if cr.maybeEmitTutorialBlueprint(chatAgent, sessionService, part.FunctionResponse.Name, resp) {
 							break retryLoop
@@ -1606,6 +1632,77 @@ func isStreamTruncationError(err error) bool {
 		return false
 	}
 	return strings.Contains(err.Error(), "stream ended without a finish_reason")
+}
+
+func (cr *ChatRunner) maybeEmitDocsUpdate(sessionService session.Service, toolName string, result map[string]any) {
+	if result == nil {
+		return
+	}
+	if _, failed := result["error"]; failed {
+		return
+	}
+
+	action := ""
+	switch toolName {
+	case "create_deck":
+		action = slides.ActionDeckCreated
+	case "write_slide":
+		action = slides.ActionSlideWritten
+	case "get_deck":
+		action = slides.ActionDeckViewed
+	default:
+		return
+	}
+
+	deck, ok := result["deck"].(map[string]any)
+	if !ok {
+		return
+	}
+	slug, _ := deck["slug"].(string)
+	if slug == "" {
+		return
+	}
+
+	payload := map[string]any{
+		"type":     "slides",
+		"deckSlug": slug,
+		"action":   action,
+	}
+	if title, ok := deck["title"].(string); ok && title != "" {
+		payload["deckTitle"] = title
+	}
+	if schemaVersion, ok := numberAsInt(deck["schemaVersion"]); ok {
+		payload["schemaVersion"] = schemaVersion
+	}
+	if slideCount, ok := numberAsInt(result["slideCount"]); ok {
+		payload["totalSlides"] = slideCount
+	}
+	if slide, ok := result["slide"].(map[string]any); ok {
+		if position, ok := numberAsInt(slide["position"]); ok {
+			payload["slideIndex"] = position
+		}
+		if title, ok := slide["title"].(string); ok && title != "" {
+			payload["title"] = title
+		}
+	}
+
+	cr.emitEvent("docs_update", payload)
+	persistDocsUpdate(cr.ctx, sessionService, cr.UserID, cr.SessionID, payload)
+}
+
+func numberAsInt(value any) (int, bool) {
+	switch number := value.(type) {
+	case int:
+		return number, true
+	case int32:
+		return int(number), true
+	case int64:
+		return int(number), true
+	case float64:
+		return int(number), true
+	default:
+		return 0, false
+	}
 }
 
 // emitEvent creates a ChatEvent and sends it to all subscribers.

@@ -28,7 +28,7 @@ func (Slide) Fields() []ent.Field {
 }
 
 func (Slide) Edges() []ent.Edge {
-	return []ent.Edge{edge.From("deck", Deck.Type).Ref("slides").Unique().Required().Annotations(entsql.OnDelete(entsql.Cascade))}
+	return []ent.Edge{edge.From("deck", Deck.Type).Ref("slides").Unique().Required()}
 }
 func (Slide) Indexes() []ent.Index {
 	return []ent.Index{index.Edges("deck").Fields("position").Unique()}

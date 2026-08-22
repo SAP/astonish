@@ -159,22 +159,6 @@ func TenantMiddleware(s *Store) func(http.Handler) http.Handler {
 				PlatformNetworkPolicies: s.PlatformNetworkPolicies(),
 			}
 
-			// Personal scope depends on the authenticated user, not on team selection.
-			if tc.UserID != "" {
-				personalStore := orgStore.ForUser(tc.UserID)
-				if personalStore == nil {
-					http.Error(w, `{"error":"personal database unavailable"}`, http.StatusServiceUnavailable)
-					return
-				}
-				reqSvc.PersonalSessions = personalStore.Sessions()
-				reqSvc.PersonalFlows = personalStore.Flows()
-				reqSvc.PersonalApps = personalStore.Apps()
-				reqSvc.PersonalCredentials = personalStore.Credentials()
-				reqSvc.PersonalDocs = personalStore.Docs()
-				reqSvc.PersonalScheduler = personalStore.ScheduledJobs()
-				reqSvc.PersonalSettings = personalStore.PersonalSettings()
-			}
-
 			// Populate team-scoped stores if team is known
 			if tc.TeamSlug != "" {
 				teamStore := orgStore.ForTeam(tc.TeamSlug)
@@ -204,6 +188,22 @@ func TenantMiddleware(s *Store) func(http.Handler) http.Handler {
 				reqSvc.Settings = teamStore.Settings()
 				reqSvc.AppState = teamStore.AppState()
 				reqSvc.AppStateSQL = teamStore.AppStateSQL()
+
+				// Wire personal stores
+				if tc.UserID != "" {
+					personalStore := orgStore.ForUser(tc.UserID)
+					if personalStore == nil {
+						http.Error(w, `{"error":"personal database unavailable"}`, http.StatusServiceUnavailable)
+						return
+					}
+					reqSvc.PersonalSessions = personalStore.Sessions()
+					reqSvc.PersonalDocs = personalStore.Docs()
+					reqSvc.PersonalFlows = personalStore.Flows()
+					reqSvc.PersonalApps = personalStore.Apps()
+					reqSvc.PersonalCredentials = personalStore.Credentials()
+					reqSvc.PersonalScheduler = personalStore.ScheduledJobs()
+					reqSvc.PersonalSettings = personalStore.PersonalSettings()
+				}
 
 				// Build three-tier memory searcher
 				var personalMem store.MemoryStore

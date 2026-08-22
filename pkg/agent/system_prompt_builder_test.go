@@ -227,6 +227,23 @@ func TestSystemPromptBuilder_SlimPrompt(t *testing.T) {
 	}
 }
 
+func TestSystemPromptBuilder_SlideGuidanceIsConditional(t *testing.T) {
+	withoutSlides := (&SystemPromptBuilder{}).Build()
+	if strings.Contains(withoutSlides, "**Slide decks:**") {
+		t.Fatal("slide guidance should be absent when slide tools are unavailable")
+	}
+
+	withSlides := (&SystemPromptBuilder{Tools: mockTools("create_deck", "write_slide")}).Build()
+	for _, want := range []string{"**Slide decks:**", "create_deck", "write_slide", "validate_deck", "fixed 1920×1080 canvas", "never percentages or 0–100 coordinates", "never put Markdown markers", "shapes and theme tokens", "Do not substitute an `astonish-app`"} {
+		if !strings.Contains(withSlides, want) {
+			t.Errorf("slide-enabled prompt missing %q", want)
+		}
+	}
+	if !strings.Contains(withSlides, "slide deck authoring") {
+		t.Error("slide capability missing")
+	}
+}
+
 func TestSystemPromptBuilder_DynamicSections(t *testing.T) {
 	builder := &SystemPromptBuilder{
 		ChannelHints:   "Format as plain text.",

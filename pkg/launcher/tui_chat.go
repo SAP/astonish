@@ -1031,6 +1031,10 @@ func mapSSEToEvents(sev *client.SSEEvent, debug bool) []events.Event {
 				return []events.Event{events.NewDelegation("done")}
 			}
 		}
+	case "docs_update":
+		// Slide cards are a Studio-only rendering surface. The terminal client
+		// intentionally ignores this event rather than depending on Studio DTOs.
+		return nil
 	case "report_marker":
 		var payload struct {
 			Path  string `json:"path"`

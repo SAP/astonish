@@ -27,6 +27,8 @@ export interface RenderChatOptions {
   reconnectEvents?: FixtureEvent[]
   /** Pre-existing sessions in the sidebar */
   sessions?: MockFetchConfig['sessions']
+  /** Session history returned for a non-running session */
+  sessionHistory?: MockFetchConfig['sessionHistory']
   /** Session status (whether an active runner exists) */
   sessionStatus?: MockFetchConfig['sessionStatus']
   /** Initial session ID prop */
@@ -81,6 +83,7 @@ export function renderChat(options: RenderChatOptions = {}): RenderChatResult {
     scenarioEvents,
     reconnectEvents,
     sessions = [],
+    sessionHistory,
     sessionStatus,
     initialSessionId = null,
     mockConfig = {},
@@ -92,6 +95,7 @@ export function renderChat(options: RenderChatOptions = {}): RenderChatResult {
     scenarioEvents,
     reconnectEvents,
     sessions,
+    sessionHistory,
     sessionStatus,
     ...mockConfig,
   })
@@ -114,9 +118,13 @@ export function renderChat(options: RenderChatOptions = {}): RenderChatResult {
   }
 
   const sendMessage = async (text: string) => {
-    // Find the textarea (prefer data-testid, fall back to placeholder pattern)
-    const textarea = renderResult.container.querySelector('[data-testid="chat-input"]') as HTMLElement
-      || screen.getByPlaceholderText(/type.*message|ask.*anything/i)
+    // Find the editable textarea (the input may still be disabled while reconnect settles).
+    const textarea = await waitFor(() => {
+      const candidate = renderResult.container.querySelector('textarea[data-testid="chat-input"]') as HTMLTextAreaElement | null
+        || screen.getByPlaceholderText(/type.*message|ask.*anything/i) as HTMLTextAreaElement
+      if (candidate.disabled || candidate.readOnly) throw new Error('Chat input is not editable yet')
+      return candidate
+    }, { timeout: 10000 })
 
     // Type the message
     await user.clear(textarea)

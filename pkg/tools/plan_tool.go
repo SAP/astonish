@@ -1,6 +1,9 @@
 package tools
 
 import (
+	"fmt"
+	"strings"
+
 	"github.com/SAP/astonish/pkg/agent"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
@@ -54,9 +57,9 @@ type PlanFileChangeInput struct {
 type PlanStepInput struct {
 	Name          string                `json:"name" jsonschema:"Short identifier for this step (e.g., 'explore-repos', 'analyze-implementations', 'write-report'). Use this exact value as the 'step' argument to update_plan."`
 	Description   string                `json:"description" jsonschema:"Human-readable label for this phase (e.g., 'Explore both repository structures and dependencies')."`
-	Details       string                `json:"details,omitempty" jsonschema:"Optional richer, concrete plan for this phase: the specific approach and reasoning. Persisted to the session PLAN.md so the detailed plan survives context compaction. Use this to record the actual step-by-step work, not just the label."`
+	Details       string                `json:"details" jsonschema:"REQUIRED. Self-contained implementation spec for this phase: exact function/type/method names, signature changes, call-site updates, and test names. Execution must proceed from this text without re-investigating the repo. Persisted to PLAN.md."`
 	Summary       string                `json:"summary,omitempty" jsonschema:"Optional 1-2 sentence plain-English explanation of what this phase accomplishes from the user's perspective. Write this for the human approving the plan, not for the executor. Example: 'Adds a meta flag to SSE text events so housekeeping messages don't hide the main answer.'"`
-	Files         []PlanFileChangeInput `json:"files,omitempty" jsonschema:"The files this phase will create, modify, or delete — the concrete blast radius. List every affected file (the symbol AND its callers, tests, generated code, migrations, docs) so the plan is complete and has no orphaned code. Order phases dependency-first. Persisted to PLAN.md and shown in the plan UI."`
+	Files         []PlanFileChangeInput `json:"files" jsonschema:"REQUIRED. The files this phase will create, modify, or delete — the concrete blast radius. List every affected file (the symbol AND its callers, tests, generated code, migrations, docs) so the plan is complete and has no orphaned code. Order phases dependency-first. Persisted to PLAN.md and shown in the plan UI."`
 	Verify        string                `json:"verify,omitempty" jsonschema:"The command that proves this phase is done (build, test, or lint), e.g. 'go test ./pkg/agent/...'. Encodes the 'every phase ends verified' discipline. Persisted to PLAN.md."`
 	ParallelGroup string                `json:"parallel_group,omitempty" jsonschema:"Optional concurrency group label. Steps sharing the same non-empty label may execute concurrently. Steps touching different file subtrees with no shared interfaces can share a group. Steps that produce types or files consumed by other steps must remain serial (leave this empty or use distinct labels)."`
 }
@@ -72,7 +75,8 @@ type AnnouncePlanArgs struct {
 
 // AnnouncePlanResult is the output of the announce_plan tool.
 type AnnouncePlanResult struct {
-	Status string `json:"status"`
+	Status  string `json:"status"`
+	Message string `json:"message,omitempty"`
 }
 
 func announcePlan(ctx tool.Context, args AnnouncePlanArgs) (AnnouncePlanResult, error) {
@@ -83,6 +87,10 @@ func announcePlan(ctx tool.Context, args AnnouncePlanArgs) (AnnouncePlanResult, 
 		if po := agent.PromptOverridesFromContext(ctx); po != nil && po.ApprovedPlanExecution {
 			return AnnouncePlanResult{Status: "blocked_approved_plan_execution"}, nil
 		}
+	}
+
+	if msg := incompletePlanMessage(args.Steps); msg != "" {
+		return AnnouncePlanResult{Status: "incomplete_plan", Message: msg}, nil
 	}
 
 	steps := make([]agent.PlanStepInfo, len(args.Steps))
@@ -132,6 +140,33 @@ func announcePlan(ctx tool.Context, args AnnouncePlanArgs) (AnnouncePlanResult, 
 	return AnnouncePlanResult{Status: "ok"}, nil
 }
 
+func incompletePlanMessage(steps []PlanStepInput) string {
+	var missing []string
+	for i, s := range steps {
+		label := strings.TrimSpace(s.Name)
+		if label == "" {
+			label = fmt.Sprintf("step %d", i+1)
+		}
+		if strings.TrimSpace(s.Details) == "" {
+			missing = append(missing, fmt.Sprintf("%s: details", label))
+		}
+		hasFile := false
+		for _, f := range s.Files {
+			if strings.TrimSpace(f.Path) != "" {
+				hasFile = true
+				break
+			}
+		}
+		if !hasFile {
+			missing = append(missing, fmt.Sprintf("%s: files", label))
+		}
+	}
+	if len(missing) == 0 {
+		return ""
+	}
+	return "Each phase needs a self-contained 'details' implementation spec and a non-empty 'files' list. Missing: " + strings.Join(missing, "; ")
+}
+
 // NewAnnouncePlanTool creates the announce_plan tool.
 func NewAnnouncePlanTool() (tool.Tool, error) {
 	return functiontool.New(functiontool.Config{
@@ -143,9 +178,9 @@ Document-level sections (set once for the whole plan):
 - 'what_not_to_do': explicit scope guard — list APIs, files, behaviors, or invariants that must NOT change. Guards against accidental scope creep during execution.
 - 'verification': the end-to-end smoke test sequence for the entire plan after all phases complete. More comprehensive than per-phase verify commands.
 
-Make each phase complete, not a sketch:
+Make each phase complete, not a sketch. 'details' and 'files' are required:
 - 'files': list every file the phase touches, each marked 'new'/'modify'/'delete'. Include the symbol AND its callers, tests, generated code, migrations, and docs so nothing is left orphaned or unwired.
-- 'details': the concrete approach and reasoning for the phase.
+- 'details': a self-contained implementation spec — exact symbols, signature changes, call-site updates, test names. Execution must proceed from this text without re-investigating the repo.
 - 'summary': a 1-2 sentence plain-English explanation of what this phase accomplishes from the user's perspective. Written for the human approving the plan, not the executor. Example: 'Adds a meta flag to SSE text events so the frontend knows not to hide the main answer behind a housekeeping note.'
 - 'verify': the command that proves the phase is done (build/test/lint).
 - 'parallel_group': Structure the plan in waves. Before submitting, group phases by which ones can start simultaneously — a phase can start when it has no dependency on an unfinished phase's output (types, files, compiled symbols). Assign all phases in the same wave the same label (e.g. 'wave-1', 'wave-2'). Serial phases — where one phase produces something another phase needs — get no label or a distinct label. Most plans have at least two waves; a plan where every phase is unlabeled should only happen when every phase strictly depends on the previous one. Independence is about type/file dependencies, not package boundaries: two phases in the same package can be in the same wave if they touch disjoint files and neither produces a symbol the other consumes.

@@ -340,7 +340,7 @@ func TestAdjustSplitForToolPairs_NoAdjustment(t *testing.T) {
 	contents := []*genai.Content{
 		makeContent("user", "old"),
 		makeContent("model", "old response"),
-		makeContent("user", "recent question"),       // splitIdx = 2
+		makeContent("user", "recent question"), // splitIdx = 2
 		makeContent("model", "recent answer"),
 	}
 	got := adjustSplitForToolPairs(contents, 2)
@@ -352,12 +352,12 @@ func TestAdjustSplitForToolPairs_NoAdjustment(t *testing.T) {
 func TestAdjustSplitForToolPairs_OrphanedToolResponse(t *testing.T) {
 	// Split lands on a tool response — must include the preceding fn_call.
 	contents := []*genai.Content{
-		makeContent("user", "old"),                                               // 0
-		makeContent("model", "old response"),                                     // 1
-		makeFuncCallContent("model", "shell_command", map[string]any{"cmd": "ls"}), // 2
+		makeContent("user", "old"),                                                             // 0
+		makeContent("model", "old response"),                                                   // 1
+		makeFuncCallContent("model", "shell_command", map[string]any{"cmd": "ls"}),             // 2
 		makeFuncResponseContent("user", "shell_command", map[string]any{"output": "file.txt"}), // 3 ← naive splitIdx
-		makeContent("model", "Here are the files"),                               // 4
-		makeContent("user", "thanks"),                                            // 5
+		makeContent("model", "Here are the files"),                                             // 4
+		makeContent("user", "thanks"),                                                          // 5
 	}
 	// Naive split at 3 would orphan the tool response.
 	got := adjustSplitForToolPairs(contents, 3)
@@ -369,12 +369,12 @@ func TestAdjustSplitForToolPairs_OrphanedToolResponse(t *testing.T) {
 func TestAdjustSplitForToolPairs_MultipleOrphans(t *testing.T) {
 	// Split lands on a tool response preceded by another tool response.
 	contents := []*genai.Content{
-		makeContent("user", "old"),                                               // 0
-		makeFuncCallContent("model", "tool_a", map[string]any{}),                 // 1
-		makeFuncResponseContent("user", "tool_a", map[string]any{}),              // 2
-		makeFuncCallContent("model", "tool_b", map[string]any{}),                 // 3
-		makeFuncResponseContent("user", "tool_b", map[string]any{}),              // 4 ← naive splitIdx
-		makeContent("model", "done"),                                             // 5
+		makeContent("user", "old"),                                  // 0
+		makeFuncCallContent("model", "tool_a", map[string]any{}),    // 1
+		makeFuncResponseContent("user", "tool_a", map[string]any{}), // 2
+		makeFuncCallContent("model", "tool_b", map[string]any{}),    // 3
+		makeFuncResponseContent("user", "tool_b", map[string]any{}), // 4 ← naive splitIdx
+		makeContent("model", "done"),                                // 5
 	}
 	got := adjustSplitForToolPairs(contents, 4)
 	// Should move back to 3 (tool_b fn_call, which is NOT a fn_response).
@@ -389,11 +389,11 @@ func TestCompactContents_PreservesToolPairs(t *testing.T) {
 
 	// 6 messages: the naive split at idx=4 lands on a tool response
 	contents := []*genai.Content{
-		makeContent("user", "what files exist?"),                                  // 0
-		makeContent("model", "Let me check"),                                     // 1
-		makeFuncCallContent("model", "shell_command", map[string]any{"cmd": "ls"}), // 2
+		makeContent("user", "what files exist?"),                                                // 0
+		makeContent("model", "Let me check"),                                                    // 1
+		makeFuncCallContent("model", "shell_command", map[string]any{"cmd": "ls"}),              // 2
 		makeFuncResponseContent("user", "shell_command", map[string]any{"output": "a.go b.go"}), // 3
-		makeFuncCallContent("model", "read_file", map[string]any{"path": "a.go"}), // 4 ← naive splitIdx
+		makeFuncCallContent("model", "read_file", map[string]any{"path": "a.go"}),               // 4 ← naive splitIdx
 		makeFuncResponseContent("user", "read_file", map[string]any{"content": "package main"}), // 5
 	}
 
@@ -423,12 +423,12 @@ func TestCompactContents_OrphanedToolResponseFixed(t *testing.T) {
 
 	// The naive split at idx=3 lands on a tool response (orphaned fn_call at idx=2)
 	contents := []*genai.Content{
-		makeContent("user", "question"),                                           // 0
-		makeContent("model", "thinking..."),                                       // 1
-		makeFuncCallContent("model", "shell_command", map[string]any{"cmd": "ls"}), // 2
+		makeContent("user", "question"),                                                  // 0
+		makeContent("model", "thinking..."),                                              // 1
+		makeFuncCallContent("model", "shell_command", map[string]any{"cmd": "ls"}),       // 2
 		makeFuncResponseContent("user", "shell_command", map[string]any{"out": "files"}), // 3 ← naive splitIdx
-		makeContent("model", "Here are the files"),                                // 4
-		makeContent("user", "thanks"),                                             // 5
+		makeContent("model", "Here are the files"),                                       // 4
+		makeContent("user", "thanks"),                                                    // 5
 	}
 
 	result, err := c.CompactContents(context.Background(), contents)
@@ -519,7 +519,7 @@ func TestCompactContents_TaskAnchorPreserved(t *testing.T) {
 		makeFuncResponseContent("user", "read_file", map[string]any{"content": "# Security\nLong content here..."}),
 		makeFuncCallContent("model", "read_file", map[string]any{"path": "auth.md"}),
 		makeFuncResponseContent("user", "read_file", map[string]any{"content": "# Auth\nMore content..."}),
-		makeFuncCallContent("model", "read_file", map[string]any{"path": "crypto.md"}),               // preserved[-2]
+		makeFuncCallContent("model", "read_file", map[string]any{"path": "crypto.md"}),                // preserved[-2]
 		makeFuncResponseContent("user", "read_file", map[string]any{"content": "# Crypto\nStuff..."}), // preserved[-1]
 	}
 
@@ -607,7 +607,7 @@ func TestCompactContents_PlanFilePointer(t *testing.T) {
 	t.Run("pointer added when plan file exists", func(t *testing.T) {
 		dir := t.TempDir()
 		planPath := filepath.Join(dir, "sess.PLAN.md")
-		if err := os.WriteFile(planPath, []byte("# Execution Plan\n"), 0644); err != nil {
+		if err := os.WriteFile(planPath, []byte("# Execution Plan\n\n**Goal:** Keep going\n"), 0644); err != nil {
 			t.Fatalf("write plan file: %v", err)
 		}
 		c := NewCompactor(100)
@@ -624,6 +624,9 @@ func TestCompactContents_PlanFilePointer(t *testing.T) {
 		}
 		if !strings.Contains(summary, planPath) {
 			t.Errorf("expected plan path in summary, got:\n%s", summary)
+		}
+		if !strings.Contains(summary, "**Goal:** Keep going") {
+			t.Errorf("expected inlined PLAN.md body in summary, got:\n%s", summary)
 		}
 	})
 

@@ -185,7 +185,7 @@ Code-mode authorization has one pending owner per session. A gate atomically cla
 
 Folder preflight is schema-aware: declared path arguments and parsed `shell_command` operands are checked, but arbitrary nested prose, URL strings, and glob patterns are not recursively reinterpreted as paths. Containment and symlink-escape checks remain centralized in `pkg/pathscope`.
 
-An approved execution turn carries `ApprovedPlanExecution` independently of Normal/Plan mode. While that flag is set, the runtime rejects `announce_plan` but continues to allow `update_plan`. The active approved `PlanState` is sealed against racing replacement, and persistence callbacks from superseded plan versions cannot rewrite the current `PLAN.md`.
+`announce_plan` exists only in Plan mode (and in Graph-Optimized Plan, only in the PLAN phase). It is stripped from the model's tool list in Normal/Ask and refused if still called. An approved execution turn carries `ApprovedPlanExecution` independently of Normal/Plan mode — including subsequent Normal turns while the session lifecycle is `approved` and `PLAN.md` still exists. While that flag is set, the runtime rejects `announce_plan`, inlines `PLAN.md` into the turn's system context, and continues to allow `update_plan`. The active approved `PlanState` is sealed against racing replacement, and persistence callbacks from superseded plan versions cannot rewrite the current `PLAN.md`. There is no per-turn tool-call pause on the main agent (the previous 100-call stop is removed) and no per-child tool-call cap on `delegate_tasks` (the previous 25-call stop is removed); inactivity watchdog and absolute task timeout still bound sub-agents.
 
 ### Think-Tag Filtering
 

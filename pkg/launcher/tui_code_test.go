@@ -742,6 +742,41 @@ func TestLoadHistory_AnnouncePlanReconstructsPlanDocument(t *testing.T) {
 	}
 }
 
+func TestShouldContinueApprovedPlan(t *testing.T) {
+	dir := t.TempDir()
+	b := newFileStoreBackend(t, dir, codeUserID)
+	ctx := context.Background()
+	id := seedSession(t, b, "implement the plan")
+	path := b.planFilePath(id)
+	if err := os.WriteFile(path, []byte("# Execution Plan\n\n**Goal:** Keep going\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if b.shouldContinueApprovedPlan(ctx, id, path, nil) {
+		t.Fatal("must not continue before a plan is approved")
+	}
+
+	sess := getSession(t, b, id)
+	if err := b.sessionSvc.AppendEvent(ctx, sess, &adksession.Event{
+		ID:        "plan-decision-approved",
+		Author:    "system",
+		Timestamp: time.Now(),
+		Actions: adksession.EventActions{StateDelta: map[string]any{
+			planLifecycleStateKey: string(events.PlanApproved),
+		}},
+	}); err != nil {
+		t.Fatalf("append plan decision: %v", err)
+	}
+	if !b.shouldContinueApprovedPlan(ctx, id, path, nil) {
+		t.Fatal("must continue after session lifecycle is approved")
+	}
+
+	missing := filepath.Join(dir, "missing.PLAN.md")
+	if b.shouldContinueApprovedPlan(ctx, id, missing, nil) {
+		t.Fatal("must not continue when PLAN.md is missing")
+	}
+}
+
 // TestLoadHistory_EditFilePromotedToFileDiff verifies that an edit_file
 // call/response carrying verification_context is promoted to a main-thread
 // ItemFileDiff on resume (not left as a raw args key-value dump in the fold),

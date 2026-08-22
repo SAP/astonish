@@ -4,6 +4,21 @@ import (
 	"testing"
 )
 
+func TestNewPlanState_PreservesStatus(t *testing.T) {
+	ps := NewPlanState("test", PlanDocumentInfo{}, []PlanStepInfo{
+		{Name: "done", Description: "already finished", Status: "complete"},
+		{Name: "now", Description: "in flight", Status: "running"},
+		{Name: "next", Description: "queued"},
+	})
+	_, steps := ps.SnapshotInfo()
+	if len(steps) != 3 {
+		t.Fatalf("steps = %d", len(steps))
+	}
+	if steps[0].Status != "complete" || steps[1].Status != "running" || steps[2].Status != "pending" {
+		t.Fatalf("statuses = %q/%q/%q, want complete/running/pending", steps[0].Status, steps[1].Status, steps[2].Status)
+	}
+}
+
 func TestPlanState_AdvanceOnToolStart(t *testing.T) {
 	ps := NewPlanState("test", PlanDocumentInfo{}, []PlanStepInfo{
 		{Name: "clone-repos", Description: "Clone"},

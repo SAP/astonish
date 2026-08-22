@@ -32,7 +32,7 @@ type SubAgentConfig struct {
 	InactivityTimeout time.Duration `yaml:"inactivity_timeout,omitempty" json:"inactivity_timeout,omitempty"` // No meaningful activity timeout (default: 2m)
 	HeartbeatInterval time.Duration `yaml:"heartbeat_interval,omitempty" json:"heartbeat_interval,omitempty"` // Liveness update interval (default: 5s)
 	MaxRetries        int           `yaml:"max_retries,omitempty" json:"max_retries,omitempty"`               // Inner LLM retry attempts per task (default: 3)
-	MaxToolCalls      int           `yaml:"max_tool_calls,omitempty" json:"max_tool_calls,omitempty"`         // Hard cap per child task (default: 25)
+	MaxToolCalls      int           `yaml:"max_tool_calls,omitempty" json:"max_tool_calls,omitempty"`         // Unused. Previous per-task tool-call cap is removed.
 	DelegationTimeout time.Duration `yaml:"delegation_timeout,omitempty" json:"delegation_timeout,omitempty"` // Absolute deadline for a fan-out call (default: 5m)
 }
 
@@ -353,9 +353,6 @@ func NewSubAgentManager(cfg SubAgentConfig) *SubAgentManager {
 	if cfg.MaxRetries <= 0 {
 		cfg.MaxRetries = 3
 	}
-	if cfg.MaxToolCalls <= 0 {
-		cfg.MaxToolCalls = 25
-	}
 	if cfg.DelegationTimeout <= 0 {
 		cfg.DelegationTimeout = 5 * time.Minute
 	}
@@ -640,7 +637,6 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) TaskRe
 	var liveState atomic.Value
 	liveState.Store("running")
 	var inactivityTriggered atomic.Bool
-	var toolBudgetTriggered atomic.Bool
 	watchdogDone := make(chan struct{})
 	defer close(watchdogDone)
 
@@ -1278,8 +1274,6 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) TaskRe
 						idle := time.Since(time.Unix(0, lastActivity.Load())).Truncate(time.Second)
 						inactivityReason = fmt.Sprintf("no meaningful activity for %s", idle)
 						errMsg = "task cancelled by inactivity watchdog: " + inactivityReason
-					} else if toolBudgetTriggered.Load() {
-						errMsg = fmt.Sprintf("task stopped after reaching the %d tool-call limit", m.Config.MaxToolCalls)
 					} else if ctx.Err() != nil {
 						errMsg = "task cancelled by parent context"
 					} else {
@@ -1327,10 +1321,6 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) TaskRe
 					if part.FunctionCall != nil {
 						markMeaningfulActivity("running")
 						toolCallCount++
-						if toolCallCount >= m.Config.MaxToolCalls {
-							toolBudgetTriggered.Store(true)
-							cancel()
-						}
 						args := make(map[string]any)
 						if part.FunctionCall.Args != nil {
 							for k, v := range part.FunctionCall.Args {
@@ -1394,8 +1384,6 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) TaskRe
 			idle := time.Since(time.Unix(0, lastActivity.Load())).Truncate(time.Second)
 			inactivityReason = fmt.Sprintf("no meaningful activity for %s", idle)
 			errMsg = "task cancelled by inactivity watchdog: " + inactivityReason
-		} else if toolBudgetTriggered.Load() {
-			errMsg = fmt.Sprintf("task stopped after reaching the %d tool-call limit", m.Config.MaxToolCalls)
 		} else if ctx.Err() != nil {
 			errMsg = "task cancelled by parent context"
 		} else {

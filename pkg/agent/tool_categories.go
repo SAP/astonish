@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"google.golang.org/adk/session"
@@ -30,8 +31,8 @@ Your job is to produce a COMPLETE plan the user can approve with confidence — 
 4. BE EFFICIENT — SPEND EFFORT PROPORTIONAL TO BLAST RADIUS. A one-file tweak needs a quick look; a cross-cutting change needs full tracing. Stop exploring once you can name every file you would change and why — do not read the whole repo. Prefer structural tools (code_definition/code_references) over broad grep, and never re-read a file already in your context.
 
 When your plan is finalized, record it with announce_plan (goal + ordered, dependency-first phases). For each phase:
-- 'files': list every file the phase touches (marked new/modify/delete) — the symbol AND its callers, tests, generated code, migrations, docs.
-- 'details': write a concrete, self-contained description of exactly what to do in this phase — specific structs/functions to add or remove, the exact logic change, new fields, interface updates. Write enough detail that execution can proceed directly from this text without re-reading the code. This is the most important field; a vague 'details' makes the plan useless.
+- 'files': REQUIRED. List every file the phase touches (marked new/modify/delete) — the symbol AND its callers, tests, generated code, migrations, docs.
+- 'details': REQUIRED. Write a concrete, self-contained implementation spec — exact function/type/method names, signature changes, call-site updates, and test names. Execution must proceed from this text without a second codegraph pass. A sketch is incomplete.
 - 'verify': the command that proves the phase is done (build/test/lint).
 
 Before calling announce_plan, run this COMPLETENESS SELF-CHECK:
@@ -89,16 +90,21 @@ If any check reveals a gap, add the missing phase BEFORE calling announce_plan. 
 Produce a COMPLETE plan — cover every dependency the change reaches, order phases dependency-first, and surface any human decisions (breaking changes, alternatives with trade-offs, ambiguous requirements) explicitly. Spend effort proportional to blast radius.`
 
 // PlanExecutionSystemContext is injected as the per-turn SystemContext when the
-// user approves a plan and execution begins ("Approve & implement"). It gives
-// the model tight execution-discipline instructions so it follows the approved
-// PLAN.md directly instead of re-investigating confirmed things.
+// user approves a plan and on every subsequent Normal turn while that plan is
+// still the approved execution. It inlines PLAN.md so the model does not have
+// to re-read or reconstruct the plan after compaction.
 //
-// The literal token "__PLAN_PATH__" is a placeholder that must be replaced with
-// the absolute session PLAN.md path before injection. Use BuildPlanExecutionSystemContext.
+// Placeholders: "__PLAN_PATH__" (absolute sidecar path) and "__PLAN_BODY__"
+// (the current PLAN.md contents). Use BuildPlanExecutionSystemContext.
 const PlanExecutionSystemContext = `You are now in EXECUTION MODE — an approved plan is active.
 
-IMMEDIATE FIRST ACTION: Call read_file("__PLAN_PATH__") right now, before anything else. Load the full
-plan so you know every phase, its files, and its details.
+The approved plan is inlined below. Treat it as the authoritative source of phases, files, details,
+and progress. Do NOT call announce_plan (that tool exists only in Plan mode). Do NOT reconstruct
+the plan from conversation history.
+
+__PLAN_BODY__
+
+Sidecar path (for update_plan persistence): __PLAN_PATH__
 
 EXECUTION RULES:
 1. Follow the plan phase by phase. For each wave of phases that share the same parallel_group
@@ -111,25 +117,34 @@ EXECUTION RULES:
    trust them. The runtime enforces a per-turn ceiling of 1 codegraph/code-intelligence call,
    2 search/list calls, and 12 source reads during approved execution. Use these only for a
    concrete unexpected gap, never to rediscover the implementation area.
-3. ALLOWED READS: (a) PLAN.md itself, (b) a file you are about to edit/create (read it once
-   immediately before writing to get the exact current content), (c) files the plan's 'details'
-   explicitly instruct you to read as part of the implementation.
+3. ALLOWED READS: (a) a file you are about to edit/create (read it once immediately before
+   writing to get the exact current content), (b) files the plan's 'details' explicitly instruct
+   you to read as part of the implementation.
 4. IF A FILE PATH IN THE PLAN IS WRONG: use find_files once to locate the correct path, then
    proceed — do not re-read the surrounding area.
 5. IF A COMPILATION ERROR requires understanding a type or import: use code_definition for that
    one symbol, then continue.
-6. The approved plan is authoritative. Do NOT call announce_plan during execution; the runtime will
-   reject it. Use update_plan to record progress without replacing the approved plan.
-7. DO NOT write a preamble or summary. Start immediately with read_file("__PLAN_PATH__"), then execute.`
+6. The approved plan is authoritative. Do NOT call announce_plan — it exists only in Plan mode and
+   the runtime will reject it here. Use update_plan to record progress without replacing the plan.
+7. DO NOT write a preamble or summary. Start executing the inlined plan immediately.`
 
 // BuildPlanExecutionSystemContext returns PlanExecutionSystemContext with the
-// "__PLAN_PATH__" placeholder replaced by the given absolute plan file path.
-// If planPath is empty, falls back to the bare relative "PLAN.md".
+// plan path and inlined PLAN.md body filled in. If planPath is empty, falls
+// back to the bare relative "PLAN.md". Missing or unreadable files still
+// produce a usable context that names the path.
 func BuildPlanExecutionSystemContext(planPath string) string {
 	if planPath == "" {
 		planPath = "PLAN.md"
 	}
-	return strings.ReplaceAll(PlanExecutionSystemContext, "__PLAN_PATH__", planPath)
+	body := ""
+	if data, err := os.ReadFile(planPath); err == nil && len(data) > 0 {
+		body = strings.TrimRight(string(data), "\n")
+	}
+	if body == "" {
+		body = "(PLAN.md is empty or missing — follow any Progress/Phases already in context; do not re-announce a plan.)"
+	}
+	s := strings.ReplaceAll(PlanExecutionSystemContext, "__PLAN_PATH__", planPath)
+	return strings.ReplaceAll(s, "__PLAN_BODY__", body)
 }
 
 // GraphPlanBlockedMessage is returned to the model when it calls a tool that is
@@ -223,6 +238,14 @@ func ApprovedPlanExecutionResearchBlockedMessage(kind string, limit int) string 
 func ApprovedPlanExecutionBlockedMessage() string {
 	return "Blocked: `announce_plan` cannot run while an approved plan is executing. " +
 		"Continue implementing the active plan and use `update_plan` to record phase progress; do not replace the approved plan."
+}
+
+// AnnouncePlanNotInPlanModeBlockedMessage is returned when the model calls
+// announce_plan outside Plan / Graph-Optimized Plan mode.
+func AnnouncePlanNotInPlanModeBlockedMessage() string {
+	return "Blocked: `announce_plan` can only run in Plan mode (shift+tab). " +
+		"You are in Normal mode. If an approved PLAN.md is inlined in this turn, follow it with `update_plan`. " +
+		"To record a new plan, ask the user to switch to Plan mode."
 }
 
 // AskModeBlockedMessage is returned to the model when it calls a mutating tool

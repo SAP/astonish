@@ -591,18 +591,19 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 
 		// Graph-Optimized Plan hard gate (code mode only): a phased state machine
 		// determines the tool allow-list. The model advances phases via the
-		// gplan_* transition tools. Transition tools and announce_plan/update_plan
-		// are always allowed; every other tool must be permitted by the current
-		// phase's allow-list (GraphPlanPhaseTools). Anything else — including any
-		// non-SafeTools mutator and delegate_tasks outside the gap/plan phases —
-		// returns a blocked_graph_plan result (not an error) so the model
-		// self-corrects. This is a NO-CHANGES mode in every phase.
+		// gplan_* transition tools. Transition tools and update_plan are always
+		// allowed; announce_plan is allowed only in the PLAN phase via
+		// GraphPlanPhaseTools. Anything else — including any non-SafeTools
+		// mutator and delegate_tasks outside the gap/plan phases — returns a
+		// blocked_graph_plan result (not an error) so the model self-corrects.
+		// This is a NO-CHANGES mode in every phase.
 		if graphPlan {
 			gpState := c.GetOrCreateGraphPlanState(sessionID)
 			beforeToolCallbacks = append(beforeToolCallbacks, func(_ tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
 				name := t.Name()
-				// Transition tools + plan recording are always allowed.
-				if IsGraphPlanTransitionTool(name) || name == "announce_plan" || name == "update_plan" {
+				// Transition tools + progress updates are always allowed.
+				// announce_plan is phase-gated (PLAN phase only).
+				if IsGraphPlanTransitionTool(name) || name == "update_plan" {
 					return nil, nil
 				}
 				phase := gpState.Phase()
@@ -635,6 +636,20 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 					return map[string]any{
 						"status": "blocked_ask_mode",
 						"error":  AskModeBlockedMessage(name),
+					}, nil
+				}
+				return nil, nil
+			})
+		}
+
+		// announce_plan exists only in Plan / Graph-Optimized Plan mode.
+		// Hide it from the model in Normal/Ask and refuse it if it is still called.
+		if !planMode && !graphPlan {
+			beforeToolCallbacks = append(beforeToolCallbacks, func(_ tool.Context, t tool.Tool, _ map[string]any) (map[string]any, error) {
+				if t.Name() == "announce_plan" {
+					return map[string]any{
+						"status": "blocked_announce_plan_not_in_plan_mode",
+						"error":  AnnouncePlanNotInPlanModeBlockedMessage(),
 					}, nil
 				}
 				return nil, nil
@@ -843,6 +858,18 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		// tools from hybrid search matches and search_tools discoveries.
 		beforeModelCallbacks = append(beforeModelCallbacks, c.DynamicToolInjectionCallback())
 
+		// announce_plan is Plan-mode only. Strip it after dynamic injection so
+		// the model cannot see or call it in Normal/Ask, even if search_tools
+		// rediscovers it.
+		if !planMode && !graphPlan {
+			beforeModelCallbacks = append(beforeModelCallbacks, func(_ agent.CallbackContext, req *model.LLMRequest) (*model.LLMResponse, error) {
+				if req != nil {
+					delete(req.Tools, "announce_plan")
+				}
+				return nil, nil
+			})
+		}
+
 		if c.Compactor != nil {
 			beforeModelCallbacks = append(beforeModelCallbacks, c.Compactor.BeforeModelCallback())
 		}
@@ -897,8 +924,6 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		// (AutoInjectMissingToolCallback); this branch is a safety net only.
 		const maxRetries = 3
 		const maxUnknownToolRetries = 2 // separate cap for tool name hallucinations
-		toolCallCount := 0
-		maxToolCalls := c.MaxToolCalls
 		lastToolCallSeen := false
 		anyTextYielded := false
 		unknownToolRetries := 0
@@ -982,19 +1007,7 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 
 					for _, p := range event.LLMResponse.Content.Parts {
 						if p.FunctionCall != nil {
-							toolCallCount++
 							lastToolCallSeen = true
-							if toolCallCount >= maxToolCalls {
-								yield(&session.Event{
-									LLMResponse: model.LLMResponse{
-										Content: &genai.Content{
-											Parts: []*genai.Part{{Text: fmt.Sprintf("\n\nI've been working on this for a while now (%d tool calls). Let me pause here — would you like me to continue?", maxToolCalls)}},
-											Role:  "model",
-										},
-									},
-								}, nil)
-								goto postLoop
-							}
 						}
 						// Track whether any user-facing text was produced
 						if p.Text != "" && !p.Thought && p.FunctionCall == nil && p.FunctionResponse == nil {
@@ -1071,7 +1084,6 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			}, nil)
 		}
 
-	postLoop:
 		// Auto-complete any remaining plan steps at end of turn — but ONLY when
 		// the model did not explicitly drive the plan via update_plan. If the
 		// model tracked progress itself, its reported statuses are authoritative
@@ -1102,10 +1114,14 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 						}
 					}
 				}
-				// Work happened this turn — the plan is done for this turn.
-				c.activePlanMu.Lock()
-				c.activePlan = nil
-				c.activePlanMu.Unlock()
+				// Keep the in-memory plan while work remains so update_plan on
+				// the next Normal turn still has something to drive. Clear only
+				// when every phase is terminal.
+				if !endPlan.HasPendingSteps() {
+					c.activePlanMu.Lock()
+					c.activePlan = nil
+					c.activePlanMu.Unlock()
+				}
 			}
 		}
 

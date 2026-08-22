@@ -193,7 +193,7 @@ A capability-first fallback may project `<ast-slide>` content into reveal.js `<s
 ### Geometry
 
 - Logical canvas: **1920 × 1080** for 16:9.
-- Coordinates are integer logical pixels in source and convert to PowerPoint inches using `x / 160`, because a 12 × 6.75 inch widescreen slide maps to 1920 × 1080 units.
+- Coordinates are integer logical pixels in source and convert to PowerPoint inches using `x / 160`, because a 12 × 6.75 inch widescreen slide maps to 1920 × 1080 units. Percentage values and 0–100 coordinate systems are invalid; validation rejects slides whose top-level layout is wholly confined to that scale.
 - All exportable top-level components have explicit `x`, `y`, `w`, and `h`.
 - Groups establish a local coordinate space.
 - Web preview scales the fixed canvas; it does not reflow at responsive breakpoints.
@@ -203,7 +203,7 @@ A capability-first fallback may project `<ast-slide>` content into reveal.js `<s
 
 - Use theme tokens for fonts, colors, line styles, spacing, and reusable component styles.
 - Permit a small typed property set, not arbitrary inline CSS.
-- Rich text is represented as explicit semantic runs, not unbounded nested HTML.
+- Rich text is represented as explicit semantic runs, not unbounded nested HTML. `<ast-text>` content is plain text and does not parse Markdown; authors use typed attributes/runs rather than `**`, `_`, or other Markdown markers.
 - Images reference managed assets by ID; remote URLs must be ingested through the existing SSRF-protected asset path before export.
 - Charts and tables retain source data rather than only an SVG or canvas rendering.
 - Stable element IDs are mandatory for diagnostics, incremental updates, and future import/regeneration.
@@ -292,9 +292,7 @@ Use **PptxGenJS** as the initial native PPTX generation engine. It generates sta
 
 PptxGenJS is a drawing/generation API, not a general HTML renderer. Astonish supplies the semantic mapping layer. Its HTML import helper is table-focused and is not the architecture for arbitrary components.
 
-The Go server invokes a pinned, bundled Node worker rather than building a broad custom OOXML writer in Go. The Phase 0 spike selected a **controlled Node subprocess** for V1: Node is already required by the supported build environment, the JSON-over-stdio protocol is narrow and versioned, and the exporter boundary keeps a future embedded JavaScript runtime possible without changing the slide service. Production startup must verify the pinned worker checksum and Node compatibility before advertising PPTX export.
-
-The supported-font baseline is Aptos Display/Aptos with Arial fallback and Consolas with Courier New fallback. V1 accepts solid fills, solid lines, mapped AutoShapes, plain/rich text runs, native tables, and common native charts. Unsupported filters, blend modes, complex masks, SmartArt, and animations are rejected in strict mode or use a declared component-level fallback. The default "editable" label requires at least **95% Tier A coverage by non-image component area**, zero Tier D components, and no whole-slide raster fallback.
+The Go server invokes a pinned, bundled Node worker rather than building a broad custom OOXML writer in Go:
 
 ```text
 Go Slides service
@@ -313,11 +311,7 @@ Node PPTX worker
   5. package OOXML with PptxGenJS
 ```
 
-The worker must be reproducibly bundled and checksum-pinned. The initial implementation pins `pptxgenjs` 4.0.1 in `web/package-lock.json` and runs `pkg/docs/slides/pptxworker/worker.mjs` with a 30-second default deadline over protocol version 1. It receives no tenant credentials and no unrestricted network access. Assets are provided as validated local files/data by the Go service.
-
-### Phase 0 spike evidence
-
-The representative native-object test generates a widescreen package containing editable text, an AutoShape, a native table, a native chart relationship/part, and speaker notes. It unzips the result and fails if the default slide contains a picture object, establishing that the editable path is not a whole-slide screenshot. This gate runs in `go test ./pkg/docs/slides/...`; broader visual comparison and Open XML SDK validation remain Phase 3 acceptance requirements.
+The worker must be reproducibly bundled and checksum-pinned. It receives no tenant credentials and no unrestricted network access. Assets are provided as validated local files/data by the Go service.
 
 ### Deterministic export rules
 
@@ -460,120 +454,6 @@ The model receives generated documentation for the registered component vocabula
 
 ---
 
-## Web UI and User Journey
-
-Web Components are the deck's internal authoring and rendering model; users do not need to write component markup. V1 remains an **AI-first viewer and structured workspace**, not a free-form PowerPoint-style editor.
-
-### Create a deck in chat
-
-1. The user asks for a presentation in natural language and may specify audience, length, tone, required visuals, and PowerPoint editability.
-2. The agent creates a deck, chooses a theme, and writes slides incrementally using registered components.
-3. On the first `docs_update`, Studio inserts a `SlidesCard` into the conversation.
-4. As slides arrive, the card updates its count and preview. Users can inspect completed slides while generation continues.
-5. Validation and PowerPoint capability summaries update with each slide.
-
-```text
-┌────────────────────────────────────────────────────────┐
-│ Microservices Migration                      3 / 10    │
-│                                                        │
-│             Live Web Component preview                 │
-│                                                        │
-├────────────────────────────────────────────────────────┤
-│ ◀ Previous          ● ● ● ○ ○ ○          Next ▶      │
-│                                                        │
-│ PowerPoint: Native 9 · Vector 1 · Raster 0             │
-│ [Open deck]       [Present]       [Export ▾]           │
-└────────────────────────────────────────────────────────┘
-```
-
-The preview uses the real Web Component runtime, not an export screenshot. Preview controls can disable pointer interaction in the compact chat card while the full viewer permits registered interactive components.
-
-### Refine conversationally
-
-The user can request changes such as:
-
-- “Make slide 4 less crowded.”
-- “Replace the list with an editable comparison table.”
-- “Use a formal light theme.”
-- “Keep this interactive on the web, but use the current chart state in PowerPoint.”
-
-The agent reads the canonical slide, patches stable component IDs, validates it, and refreshes the preview. Structured table/chart data can be changed without rewriting arbitrary HTML.
-
-### Open deck workspace
-
-```text
-┌──────────────┬────────────────────────────────────┬──────────────────┐
-│ Slides       │                                    │ Deck details     │
-│              │                                    │                  │
-│ [thumbnail]  │       Selected slide preview       │ Theme            │
-│ [thumbnail]  │                                    │ Speaker notes    │
-│ [thumbnail]  │       Web Component runtime        │ Validation       │
-│ [thumbnail]  │                                    │ PPTX capability  │
-│              │                                    │                  │
-├──────────────┴────────────────────────────────────┴──────────────────┤
-│ Ask AI: “Turn this slide into a timeline and keep it PPTX-native.”   │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-V1 workspace actions:
-
-- navigate, reorder, duplicate, and delete slides;
-- select a slide as context for the agent;
-- inspect and edit speaker notes;
-- switch approved themes;
-- view validation, overflow, missing-asset, and export-capability warnings;
-- enter presenter mode;
-- export PDF, standalone HTML, or PPTX.
-
-Direct manipulation of arbitrary canvas objects is deferred. A later structured editor may expose forms and drag/resize operations, but every change must update the canonical component model rather than mutate rendered DOM.
-
-### Presenter mode
-
-Presenter mode opens a dedicated full-screen web deck and provides:
-
-- keyboard, touch, and pointer navigation;
-- audience and presenter windows;
-- speaker notes, progress, and slide overview;
-- fragments and registered web interactions;
-- fullscreen and second-display behavior.
-
-The web presentation may be richer than PowerPoint. Each interactive component must define its static PowerPoint state. For example, an interactive chart may export the currently selected/default data view as a native chart; a simulation may export an SVG or PNG with a warning.
-
-### Export experience
-
-Before downloading a PPTX, Studio shows a compatibility summary:
-
-```text
-PowerPoint compatibility: Partial
-
-✓ 18 text elements export as editable text
-✓ 6 shapes and connectors export as editable objects
-✓ 1 table exports as an editable table
-✓ 2 charts export as editable charts with data
-⚠ Interactive architecture explorer exports as SVG
-
-[Cancel] [Export strict-native] [Export with fallback]
-```
-
-- **Export strict-native** fails if any Tier B–D component is present.
-- **Export with fallback** permits declared SVG/PNG substitutions and lists them in the result.
-- **Visual-fidelity PPTX** is a separate opt-in whole-slide-image profile and is never labeled editable.
-- PDF export prioritizes browser visual fidelity.
-- Standalone HTML preserves registered interaction and presenter behavior.
-
-### Primary V1 story
-
-```text
-User requests a deck
-  → SlidesCard appears and updates during generation
-  → user previews and asks for revisions in chat
-  → user opens the deck workspace for navigation, notes, and diagnostics
-  → user presents through the Web Component runtime
-  → user exports native-first PPTX, visual PDF, or interactive HTML
-```
-
----
-
 ## Backend and Frontend Integration
 
 ### Package shape
@@ -642,7 +522,17 @@ Add optional fields without changing the event name:
 }
 ```
 
-Backend emitters, Studio consumers, persisted parsing, terminal behavior, and scenario fixtures must change together when this contract is implemented.
+Backend emitters, Studio consumers, persisted parsing, terminal behavior, and scenario fixtures must change together when this contract is implemented. Successful `create_deck`, `write_slide`, and `get_deck` tool results emit this event. `get_deck` uses the `deck_viewed` action so requests such as “show me the deck” render the existing `SlidesCard` with its authenticated preview and export actions rather than only returning raw tool data or prose.
+
+### Turn-scoped SlidesCard coalescing
+
+Studio folds slide `docs_update` messages into cards by `deckSlug` **only within one assistant turn**. The preceding user message is the turn boundary: updates for the same deck that occur after that user message and before the next user message belong to one fold. A same-turn `create_deck` followed by one or more `write_slide` updates therefore remains one evolving `SlidesCard`, with progress changes refreshing its authenticated preview.
+
+A later assistant turn starts a new fold even when it edits the same `deckSlug`. Its first successful slide update appends a fresh card rather than mutating or replacing the prior turn's card. That new card presents the latest deck state through the authenticated preview and exposes the **Present**, **PPTX**, **PDF**, and **HTML** actions. Earlier cards remain in transcript order as records of their turns.
+
+The same folding result is required across all three delivery paths: live SSE, active-run reconnect, and static history reconstructed from persisted `[docs_update]` markers. History loading must apply the same preceding-user boundary and must not globally deduplicate a deck across turns.
+
+This is a **frontend rendering and history-folding contract only**. It does not change backend `docs_update` payloads, marker persistence, tenant-scoped deck persistence or storage scope, or any presentation/export API.
 
 ---
 

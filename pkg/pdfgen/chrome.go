@@ -66,18 +66,12 @@ func (o HTMLPrintOptions) normalized() (HTMLPrintOptions, error) {
 	if err := validatePositiveDimension("paper height", o.PaperHeight); err != nil {
 		return HTMLPrintOptions{}, err
 	}
-	margins := []struct {
-		name  string
-		value float64
-	}{
-		{"top margin", o.MarginTop},
-		{"bottom margin", o.MarginBottom},
-		{"left margin", o.MarginLeft},
-		{"right margin", o.MarginRight},
-	}
-	for _, margin := range margins {
-		if math.IsNaN(margin.value) || math.IsInf(margin.value, 0) || margin.value < 0 {
-			return HTMLPrintOptions{}, fmt.Errorf("%s must be a finite non-negative number", margin.name)
+	for name, value := range map[string]float64{
+		"top margin": o.MarginTop, "bottom margin": o.MarginBottom,
+		"left margin": o.MarginLeft, "right margin": o.MarginRight,
+	} {
+		if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
+			return HTMLPrintOptions{}, fmt.Errorf("%s must be a finite non-negative number", name)
 		}
 	}
 	return o, nil

@@ -58,7 +58,7 @@ type ChatAgent struct {
 	SystemPrompt   *SystemPromptBuilder
 	DebugMode      bool
 	AutoApprove    bool
-	MaxToolCalls   int // Max consecutive tool calls per turn (default: 25)
+	MaxToolCalls   int // Unused. Previous per-turn tool-call pause is removed; 0 = unlimited.
 
 	// Flow distillation
 	FlowSaveDir   string         // Directory for saved flows (default: agents dir)
@@ -319,8 +319,6 @@ func NewChatAgent(llm model.LLM, internalTools []tool.Tool, toolsets []tool.Tool
 	sessionService session.Service, promptBuilder *SystemPromptBuilder,
 	debugMode bool, autoApprove bool) *ChatAgent {
 
-	maxToolCalls := 100
-
 	return &ChatAgent{
 		LLM:                  llm,
 		Tools:                internalTools,
@@ -329,7 +327,6 @@ func NewChatAgent(llm model.LLM, internalTools []tool.Tool, toolsets []tool.Tool
 		SystemPrompt:         promptBuilder,
 		DebugMode:            debugMode,
 		AutoApprove:          autoApprove,
-		MaxToolCalls:         maxToolCalls,
 		approvalHelper:       &AstonishAgent{LLM: llm, AutoApprove: autoApprove},
 		traceHistory:         make(map[string][]*ExecutionTrace),
 		pendingDistill:       make(map[string]*distillPreview),
@@ -892,6 +889,15 @@ func (c *ChatAgent) MarkActivePlanApproved() {
 		c.activePlanApproved = true
 	}
 	c.activePlanMu.Unlock()
+}
+
+// IsActivePlanApproved reports whether the in-memory plan has been sealed for
+// execution. Used by code-mode turns to keep following PLAN.md after the first
+// approval turn without reopening a replacement slot.
+func (c *ChatAgent) IsActivePlanApproved() bool {
+	c.activePlanMu.Lock()
+	defer c.activePlanMu.Unlock()
+	return c.activePlanApproved
 }
 
 // RestoreApprovedPlan loads the authoritative PLAN.md sidecar and rehydrates

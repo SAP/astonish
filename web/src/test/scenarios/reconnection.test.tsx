@@ -5,7 +5,6 @@
  * active background runner, the frontend reconnects via GET /api/studio/sessions/:id/stream
  * instead of loading static history. The SSE events from the reconnect stream should
  * render normally — text, tool calls, results, etc.
- *
  */
 
 import { describe, it, expect, afterEach } from 'vitest'
@@ -14,10 +13,9 @@ import { renderChat } from '../helpers/renderChat'
 import type { RenderChatResult } from '../helpers/renderChat'
 import type { FixtureEvent } from '../helpers/sseSimulator'
 
-// Shared mocks (react-markdown, remark-gfm, HomePage, FleetStartDialog, FleetTemplatePicker, MermaidBlock)
 import './scenarioSetup'
 
-// Fixtures
+import reconnectSlides from '../fixtures/scenarios/core/reconnect-slides.json'
 import reconnectStream from '../fixtures/scenarios/core/reconnect-stream.json'
 
 describe('Reconnection Scenarios', () => {
@@ -29,26 +27,18 @@ describe('Reconnection Scenarios', () => {
 
   describe('P1.9: Reconnect to active session', () => {
     it('renders events from reconnect stream when session is running', async () => {
-      // Set up: session "sess-reconnect" exists and is running.
-      // When the component loads with initialSessionId, it checks the session status.
-      // If running=true, it calls connectChatStream (GET /sessions/:id/stream)
-      // which returns our reconnectEvents.
       result = renderChat({
         reconnectEvents: reconnectStream.events as FixtureEvent[],
         initialSessionId: 'sess-reconnect',
-        sessions: [
-          { id: 'sess-reconnect', title: 'Active Session' },
-        ],
+        sessions: [{ id: 'sess-reconnect', title: 'Active Session' }],
         sessionStatus: { sessionId: 'sess-reconnect', running: true, eventCount: 5 },
       })
 
-      // Wait for reconnect stream events to render
       await waitFor(() => {
         const text = result.container.textContent || ''
         expect(text).toContain('Go 1.24 was released')
       }, { timeout: 10000 })
 
-      // Tool activity should be visible (collapsed summary or expanded tool name)
       await waitFor(() => {
         expect(result.container.querySelector('[data-testid="tool-activity-block"]')).toBeTruthy()
         const text = result.container.textContent || ''
@@ -60,25 +50,104 @@ describe('Reconnection Scenarios', () => {
       result = renderChat({
         reconnectEvents: reconnectStream.events as FixtureEvent[],
         initialSessionId: 'sess-reconnect',
-        sessions: [
-          { id: 'sess-reconnect', title: 'Active Session' },
-        ],
+        sessions: [{ id: 'sess-reconnect', title: 'Active Session' }],
         sessionStatus: { sessionId: 'sess-reconnect', running: true, eventCount: 5 },
       })
 
-      // Wait for stream to complete
       await waitFor(() => {
         const text = result.container.textContent || ''
         expect(text).toContain('Go 1.24 was released')
       }, { timeout: 10000 })
 
-      // After stream completes, textarea should be back to idle placeholder
       await waitFor(() => {
         const ta = result.container.querySelector('[data-testid="chat-input"]') as HTMLTextAreaElement
         if (ta) {
           const placeholder = ta.getAttribute('placeholder') || ''
           expect(placeholder.toLowerCase()).not.toContain('responding')
         }
+      }, { timeout: 10000 })
+    })
+
+    it('folds reconnect slide updates within a turn and retains the next turn snapshot', async () => {
+      const boundaryIndex = reconnectSlides.events.findIndex((event, index) => (
+        index > 0 && event.type === 'docs_update' && event.data.slideIndex === 6
+      ))
+
+      result = renderChat({
+        reconnectEvents: reconnectSlides.events.slice(0, boundaryIndex) as FixtureEvent[],
+        scenarioEvents: reconnectSlides.events.slice(boundaryIndex) as FixtureEvent[],
+        initialSessionId: 'sess-reconnect-slides',
+        sessions: [{ id: 'sess-reconnect-slides', title: 'Quarterly Business Review' }],
+        sessionStatus: { sessionId: 'sess-reconnect-slides', running: true, eventCount: boundaryIndex },
+      })
+
+      await waitFor(() => {
+        const cards = result.container.querySelectorAll('[data-testid="slides-card"]')
+        expect(cards).toHaveLength(1)
+        expect(cards[0]).toHaveTextContent('Quarterly Business Review')
+        expect(cards[0]).toHaveTextContent('4 / 8')
+        expect(cards[0]).toHaveTextContent('0 errors, 1 warnings')
+        expect(cards[0]).toHaveTextContent('9 native, 0 unsupported')
+      }, { timeout: 10000 })
+
+      await result.sendMessage('Add the priorities and risks slides')
+
+      await waitFor(() => {
+        const cards = result.container.querySelectorAll('[data-testid="slides-card"]')
+        expect(cards).toHaveLength(2)
+        expect(cards[0]).toHaveTextContent('4 / 8')
+        expect(cards[0]).toHaveTextContent('0 errors, 1 warnings')
+        expect(cards[0]).toHaveTextContent('9 native, 0 unsupported')
+        expect(cards[1]).toHaveTextContent('6 / 8')
+        expect(cards[1]).toHaveTextContent('1 errors, 0 warnings')
+        expect(cards[1]).toHaveTextContent('12 native, 1 unsupported')
+      }, { timeout: 10000 })
+    })
+  })
+
+  describe('Restored session history', () => {
+    it('folds same-deck updates only until the next user boundary', async () => {
+      const docsUpdate = (slideIndex: number, errors: number, warnings: number, native: number, unsupported: number) => ({
+        type: 'docs_update',
+        docsUpdate: {
+          deckSlug: 'quarterly-review',
+          action: 'slide_written',
+          slideIndex,
+          totalSlides: 8,
+          deckTitle: 'Quarterly Business Review',
+          schemaVersion: 1,
+          validation: { errors, warnings },
+          pptxCapability: { native, vector: 2, raster: 0, unsupported },
+        },
+      })
+
+      result = renderChat({
+        initialSessionId: 'sess-restored-slides',
+        sessions: [{ id: 'sess-restored-slides', title: 'Quarterly Business Review' }],
+        sessionStatus: { sessionId: 'sess-restored-slides', running: false },
+        sessionHistory: {
+          id: 'sess-restored-slides',
+          title: 'Quarterly Business Review',
+          messages: [
+            { type: 'user', content: 'Create the quarterly review' },
+            docsUpdate(2, 0, 2, 5, 0),
+            docsUpdate(4, 0, 1, 9, 0),
+            { type: 'user', content: 'Add the priorities and risks slides' },
+            docsUpdate(6, 1, 0, 12, 1),
+          ],
+        },
+      })
+
+      await waitFor(() => {
+        expect(result.container).toHaveTextContent('Create the quarterly review')
+        const cards = result.container.querySelectorAll('[data-testid="slides-card"]')
+        expect(cards).toHaveLength(2)
+        expect(cards[0]).toHaveTextContent('4 / 8')
+        expect(cards[0]).toHaveTextContent('0 errors, 1 warnings')
+        expect(cards[0]).toHaveTextContent('9 native, 0 unsupported')
+        expect(cards[1]).toHaveTextContent('6 / 8')
+        expect(cards[1]).toHaveTextContent('1 errors, 0 warnings')
+        expect(cards[1]).toHaveTextContent('12 native, 1 unsupported')
       }, { timeout: 10000 })
     })
   })

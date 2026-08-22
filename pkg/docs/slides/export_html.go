@@ -16,8 +16,9 @@ import (
 // runtime into a self-contained document. Asset references must already be
 // content-addressed data URLs before export.
 type HTMLExporter struct {
-	RuntimeJS []byte
-	Print     bool
+	RuntimeJS        []byte
+	RuntimeScriptURL string
+	Print            bool
 }
 
 func (e HTMLExporter) Export(scene SceneGraph) (ExportResult, error) {
@@ -41,11 +42,15 @@ func (e HTMLExporter) Export(scene SceneGraph) (ExportResult, error) {
 	var body bytes.Buffer
 	body.WriteString(`<!doctype html><html lang="en"><head><meta charset="utf-8">`)
 	body.WriteString(`<meta name="viewport" content="width=device-width,initial-scale=1">`)
-	hash := sha256.Sum256(e.RuntimeJS)
+	runtimeJS := bytes.ReplaceAll(e.RuntimeJS, []byte("</script"), []byte("<\\/script"))
+	hash := sha256.Sum256(runtimeJS)
 	body.WriteString(`<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-`)
 	body.WriteString(base64.StdEncoding.EncodeToString(hash[:]))
 	body.WriteString(`'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">`)
-	body.WriteString(`<title>` + html.EscapeString(scene.Title) + `</title></head><body>`)
+	body.WriteString(`<title>` + html.EscapeString(scene.Title) + `</title>`)
+	body.WriteString(`<style>:root{--ast-surface:#fff;--ast-ink:#172033;--ast-ink-muted:#64748b;--ast-accent:#1e40af;--ast-accent-soft:#dbeafe;--ast-display:Aptos Display,Arial,sans-serif;--ast-body-font:Aptos,Arial,sans-serif}`)
+	writeThemeCSS(&body, scene.Theme)
+	body.WriteString(`html,body{width:100%;height:100%;margin:0;overflow:hidden}body{background:#111827}ast-deck{display:block;position:relative;width:1920px;height:1080px;overflow:hidden;transform-origin:top left;background:var(--ast-surface);color:var(--ast-ink)}ast-slide{display:none;position:absolute;inset:0;width:1920px;height:1080px;overflow:hidden}ast-slide[active]{display:block}ast-notes{display:none}</style></head><body>`)
 	body.WriteString(`<ast-deck schema="1" ratio="16:9"`)
 	if e.Print {
 		body.WriteString(` print`)
@@ -55,9 +60,36 @@ func (e HTMLExporter) Export(scene SceneGraph) (ExportResult, error) {
 		renderSlide(&body, slide)
 	}
 	body.WriteString(`</ast-deck><script>`)
-	body.Write(bytes.ReplaceAll(e.RuntimeJS, []byte("</script"), []byte("<\\/script")))
+	body.Write(runtimeJS)
 	body.WriteString(`</script></body></html>`)
 	return ExportResult{Bytes: body.Bytes(), Diagnostics: diagnostics}, nil
+}
+
+func writeThemeCSS(out *bytes.Buffer, theme map[string]string) {
+	if len(theme) == 0 {
+		return
+	}
+	out.WriteString(`:root{`)
+	keys := make([]string, 0, len(theme))
+	for key := range theme {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if !safeAttributeName(key) || !safeCSSValue(theme[key]) {
+			continue
+		}
+		out.WriteString("--ast-")
+		out.WriteString(key)
+		out.WriteByte(':')
+		out.WriteString(theme[key])
+		out.WriteByte(';')
+	}
+	out.WriteByte('}')
+}
+
+func safeCSSValue(value string) bool {
+	return value != "" && !strings.ContainsAny(value, `;{}<>`)
 }
 
 func renderSlide(out *bytes.Buffer, slide Slide) {

@@ -172,9 +172,9 @@ func IsGraphPlanTransitionTool(name string) bool {
 
 // GraphPlanPhaseTools returns the additive allow-list of tool names permitted in
 // the given phase (in addition to the always-allowed transition tools and
-// announce_plan/update_plan). This is the single source of truth for the
-// runtime gate. The lists are additive: each phase includes everything the
-// prior phases allowed.
+// update_plan). announce_plan is allowed only in the PLAN phase. This is the
+// single source of truth for the runtime gate. The lists are additive: each
+// phase includes everything the prior phases allowed.
 func GraphPlanPhaseTools(phase GraphPlanPhase) map[string]bool {
 	allowed := map[string]bool{}
 

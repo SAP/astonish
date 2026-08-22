@@ -1,0 +1,13 @@
+{
+  "name": "reconnect-slides",
+  "description": "Reconnection to an active slide-authoring session with repeated same-deck updates, followed by a later-turn update. Verifies turn-scoped slide-card folding for reconnect delivery.",
+  "category": "core",
+  "events": [
+    { "type": "session", "data": { "sessionId": "sess-reconnect-slides", "isNew": false } },
+    { "type": "docs_update", "data": { "type": "slides", "deckSlug": "quarterly-review", "action": "slide_written", "slideIndex": 2, "totalSlides": 8, "title": "Market overview", "deckTitle": "Quarterly Business Review", "schemaVersion": 1, "validation": { "errors": 0, "warnings": 2 }, "pptxCapability": { "native": 5, "vector": 1, "raster": 0, "unsupported": 0 } } },
+    { "type": "docs_update", "data": { "type": "slides", "deckSlug": "quarterly-review", "action": "slide_written", "slideIndex": 4, "totalSlides": 8, "title": "Customer momentum", "deckTitle": "Quarterly Business Review", "schemaVersion": 1, "validation": { "errors": 0, "warnings": 1 }, "pptxCapability": { "native": 9, "vector": 2, "raster": 0, "unsupported": 0 } } },
+    { "type": "done", "data": { "done": true } },
+    { "type": "docs_update", "data": { "type": "slides", "deckSlug": "quarterly-review", "action": "slide_written", "slideIndex": 6, "totalSlides": 8, "title": "Next-quarter priorities", "deckTitle": "Quarterly Business Review", "schemaVersion": 1, "validation": { "errors": 1, "warnings": 0 }, "pptxCapability": { "native": 12, "vector": 2, "raster": 0, "unsupported": 1 } } },
+    { "type": "done", "data": { "done": true } }
+  ]
+}

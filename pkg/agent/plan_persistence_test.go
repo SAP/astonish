@@ -58,6 +58,119 @@ func TestChatAgent_SetActivePlanNoFileWhenPathEmpty(t *testing.T) {
 	}
 }
 
+func TestChatAgent_ApprovedPlanRejectsReplacementAndStaleWrites(t *testing.T) {
+	dir := t.TempDir()
+	planPath := filepath.Join(dir, "sess.PLAN.md")
+
+	c := &ChatAgent{}
+	c.SetPlanFilePath(planPath)
+	approved := NewPlanState("Approved goal", PlanDocumentInfo{}, []PlanStepInfo{
+		{Name: "implement", Description: "write approved code"},
+	})
+	if !c.TrySetActivePlan(approved) {
+		t.Fatal("first announcement should be accepted")
+	}
+	c.MarkActivePlanApproved()
+
+	replacement := NewPlanState("Replacement goal", PlanDocumentInfo{}, []PlanStepInfo{
+		{Name: "other", Description: "replace approved code"},
+	})
+	if c.TrySetActivePlan(replacement) {
+		t.Fatal("approved plan must reject replacement")
+	}
+	if c.GetActivePlan() != approved {
+		t.Fatal("rejected replacement changed the active plan")
+	}
+
+	// update_plan remains valid after approval and persists against the sealed plan.
+	name, status := approved.SetStepStatus("implement", "running")
+	if name != "implement" || status != "running" {
+		t.Fatalf("approved update = (%q, %q), want (implement, running)", name, status)
+	}
+	data, err := os.ReadFile(planPath)
+	if err != nil {
+		t.Fatalf("read approved plan: %v", err)
+	}
+	if !strings.Contains(string(data), "**Goal:** Approved goal") ||
+		!strings.Contains(string(data), "- [~] **implement**") ||
+		strings.Contains(string(data), "Replacement goal") {
+		t.Fatalf("approved PLAN.md was replaced or not updated:\n%s", data)
+	}
+}
+
+func TestChatAgent_ReplacedPlanIgnoresStaleOnChange(t *testing.T) {
+	dir := t.TempDir()
+	planPath := filepath.Join(dir, "sess.PLAN.md")
+
+	c := &ChatAgent{}
+	c.SetPlanFilePath(planPath)
+	oldPlan := NewPlanState("Old goal", PlanDocumentInfo{}, []PlanStepInfo{
+		{Name: "old", Description: "old work"},
+	})
+	if !c.TrySetActivePlan(oldPlan) {
+		t.Fatal("first announcement should be accepted")
+	}
+
+	c.AllowActivePlanReplacement()
+	newPlan := NewPlanState("New goal", PlanDocumentInfo{}, []PlanStepInfo{
+		{Name: "new", Description: "new work"},
+	})
+	if !c.TrySetActivePlan(newPlan) {
+		t.Fatal("explicit planning revision should be accepted")
+	}
+
+	// Simulate a callback from the superseded plan completing after replacement.
+	oldPlan.SetStepStatus("old", "complete")
+	data, err := os.ReadFile(planPath)
+	if err != nil {
+		t.Fatalf("read current plan: %v", err)
+	}
+	if !strings.Contains(string(data), "**Goal:** New goal") || strings.Contains(string(data), "Old goal") {
+		t.Fatalf("stale callback rewrote PLAN.md:\n%s", data)
+	}
+}
+
+func TestChatAgent_RestoreApprovedPlanPreservesStatus(t *testing.T) {
+	dir := t.TempDir()
+	planPath := filepath.Join(dir, "sess.PLAN.md")
+
+	c := &ChatAgent{}
+	c.SetPlanFilePath(planPath)
+	plan := NewPlanState("Build", PlanDocumentInfo{}, []PlanStepInfo{
+		{Name: "explore", Description: "investigate", Details: "read files", Files: []PlanFileChange{{Path: "pkg/a.go", Kind: "modify"}}},
+		{Name: "implement", Description: "write code", Details: "edit pkg/a.go", Files: []PlanFileChange{{Path: "pkg/a.go", Kind: "modify"}}},
+	})
+	if !c.TrySetActivePlan(plan) {
+		t.Fatal("announce should be accepted")
+	}
+	if name, status := plan.SetStepStatus("explore", "complete"); name != "explore" || status != "complete" {
+		t.Fatalf("SetStepStatus = (%q,%q)", name, status)
+	}
+	if name, status := plan.SetStepStatus("implement", "running"); name != "implement" || status != "running" {
+		t.Fatalf("SetStepStatus = (%q,%q)", name, status)
+	}
+
+	c2 := &ChatAgent{}
+	c2.SetPlanFilePath(planPath)
+	if err := c2.RestoreApprovedPlan(); err != nil {
+		t.Fatalf("RestoreApprovedPlan: %v", err)
+	}
+	if !c2.IsActivePlanApproved() {
+		t.Fatal("restored plan must be marked approved")
+	}
+	restored := c2.GetActivePlan()
+	if restored == nil {
+		t.Fatal("restored plan is nil")
+	}
+	_, steps := restored.SnapshotInfo()
+	if len(steps) != 2 {
+		t.Fatalf("steps = %d", len(steps))
+	}
+	if steps[0].Status != "complete" || steps[1].Status != "running" {
+		t.Fatalf("restored statuses = %q/%q, want complete/running", steps[0].Status, steps[1].Status)
+	}
+}
+
 func TestChatAgent_UpdatePlanRewritesPlanFile(t *testing.T) {
 	dir := t.TempDir()
 	planPath := filepath.Join(dir, "sess.PLAN.md")

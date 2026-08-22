@@ -202,6 +202,29 @@ export interface ReportMarkerMessage {
   title?: string
 }
 
+// ---- Slide document updates ----
+
+export interface DocsUpdateMessage {
+  type: 'docs_update'
+  docType: 'slides'
+  deckSlug: string
+  action: string
+  slideIndex?: number
+  totalSlides?: number
+  title?: string
+  schemaVersion?: number
+  validation?: {
+    errors: number
+    warnings: number
+  }
+  pptxCapability?: {
+    native: number
+    vector: number
+    raster: number
+    unsupported: number
+  }
+}
+
 // ---- Execution plan (announce_plan / update_plan) ----
 
 export interface PlanMessage {
@@ -362,6 +385,7 @@ export type ChatMsg =
   | AppSavedMessage
   | ReportPreviewMessage
   | ReportMarkerMessage
+  | DocsUpdateMessage
   | SourcesMessage
   | NetworkDenialMessage
 

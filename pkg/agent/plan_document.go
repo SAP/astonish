@@ -16,6 +16,59 @@ import (
 // The document is intentionally human-readable Markdown with GitHub-style
 // checkboxes so it renders cleanly and can be re-parsed back into plan state.
 
+// renderPlanProgress builds a generated Progress section from phase statuses so
+// the model can see "where I am" after compaction without reconstructing it.
+func renderPlanProgress(steps []planStep) string {
+	if len(steps) == 0 {
+		return ""
+	}
+	var running, completed, remaining, failed []string
+	for _, s := range steps {
+		name := strings.TrimSpace(s.name)
+		if name == "" {
+			continue
+		}
+		switch s.status {
+		case "complete":
+			completed = append(completed, name)
+		case "running":
+			running = append(running, name)
+		case "failed":
+			failed = append(failed, name)
+		default:
+			remaining = append(remaining, name)
+		}
+	}
+	current := ""
+	currentStatus := ""
+	if len(running) > 0 {
+		current = running[0]
+		currentStatus = "running"
+	} else if len(remaining) > 0 {
+		current = remaining[0]
+		currentStatus = "pending"
+	}
+
+	var b strings.Builder
+	b.WriteString("## Progress\n\n")
+	if current != "" {
+		b.WriteString(fmt.Sprintf("- Current: **%s** (%s)\n", current, currentStatus))
+	} else {
+		b.WriteString("- Current: (done)\n")
+	}
+	if len(completed) > 0 {
+		b.WriteString("- Completed: " + strings.Join(completed, ", ") + "\n")
+	}
+	if len(remaining) > 0 {
+		b.WriteString("- Remaining: " + strings.Join(remaining, ", ") + "\n")
+	}
+	if len(failed) > 0 {
+		b.WriteString("- Failed: " + strings.Join(failed, ", ") + "\n")
+	}
+	b.WriteString("\n")
+	return b.String()
+}
+
 // planStatusMarker maps a planStep status to its checkbox marker.
 func planStatusMarker(status string) string {
 	switch status {
@@ -102,6 +155,11 @@ func renderPlanMarkdownWithDoc(goal string, doc PlanDocumentInfo, steps []planSt
 		sb.WriteString(fmt.Sprintf("**Goal:** %s\n\n", goal))
 	}
 	sb.WriteString(fmt.Sprintf("_Last updated: %s_\n\n", planClock().UTC().Format(time.RFC3339)))
+
+	if progress := renderPlanProgress(steps); progress != "" {
+		sb.WriteString(progress)
+		sb.WriteString("\n")
+	}
 
 	// Emit optional Context section before the phases list.
 	if strings.TrimSpace(doc.Context) != "" {

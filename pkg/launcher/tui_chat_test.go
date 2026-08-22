@@ -117,6 +117,34 @@ func TestMapSSEToEvents_ReportMarker(t *testing.T) {
 	}
 }
 
+func TestMapSSEToEvents_DocsUpdate(t *testing.T) {
+	evs := mapSSEToEvents(&client.SSEEvent{
+		Type: "docs_update",
+		Data: `{"type":"slides","deckSlug":"migration","action":"slide_written","slideIndex":2,"totalSlides":3,"title":"Risk","deckTitle":"Migration","schemaVersion":1,"validation":{"errors":0,"warnings":1},"pptxCapability":{"native":9,"vector":1,"raster":0,"unsupported":0}}`,
+	}, false)
+	if len(evs) != 1 || evs[0].Kind != events.KindDocsUpdate || evs[0].DocsUpdate == nil {
+		t.Fatalf("docs_update: %+v", evs)
+	}
+	update := evs[0].DocsUpdate
+	if update.DeckSlug != "migration" || update.SlideIndex == nil || *update.SlideIndex != 2 || update.Validation.Warnings != 1 || update.PPTXCapability.Native != 9 {
+		t.Fatalf("docs update payload: %+v", update)
+	}
+}
+
+func TestStudioMessagesToHistoryIncludesDocsUpdate(t *testing.T) {
+	position := 1
+	hist := studioMessagesToHistory([]client.StudioMessage{{
+		Type:       "docs_update",
+		DocsUpdate: &client.DocsUpdate{Type: "slides", DeckSlug: "migration", Action: "slide_written", SlideIndex: &position, TotalSlides: 2},
+	}})
+	if len(hist) != 1 || hist[0].Kind != "docs_update" || hist[0].DocsUpdate == nil {
+		t.Fatalf("docs update history: %+v", hist)
+	}
+	if hist[0].DocsUpdate.SlideIndex == nil || *hist[0].DocsUpdate.SlideIndex != 1 {
+		t.Fatalf("slide index: %+v", hist[0].DocsUpdate)
+	}
+}
+
 func TestStudioDetailToHistoryIncludesArtifacts(t *testing.T) {
 	hist := studioDetailToHistory(&client.SessionDetail{
 		Messages:  []client.StudioMessage{{Type: "agent", Content: "done"}},

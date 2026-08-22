@@ -19,6 +19,7 @@ import type { FixtureEvent } from '../helpers/sseSimulator'
 // Fixtures
 import artifactCreated from '../fixtures/scenarios/downloads/artifact-created.json'
 import resultWithArtifacts from '../fixtures/scenarios/downloads/result-with-artifacts.json'
+import slidesUpdate from '../fixtures/scenarios/downloads/slides-update.json'
 
 describe('Downloads & Artifacts Scenarios', () => {
   let result: RenderChatResult
@@ -53,6 +54,56 @@ describe('Downloads & Artifacts Scenarios', () => {
       await waitFor(() => {
         const text = result.container.textContent || ''
         expect(text).toContain("I've created the report")
+      }, { timeout: 10000 })
+    })
+  })
+
+  describe('Slides docs_update', () => {
+    it('preserves each turn snapshot when the same deck is updated again', async () => {
+      result = renderChat({
+        scenarioEvents: slidesUpdate.events as FixtureEvent[][],
+        mockConfig: {
+          customHandlers: {
+            '/api/docs/slides/cloud-migration/present?scope=personal': () => new Response('<html>deck</html>', {
+              status: 200,
+              headers: { 'Content-Type': 'text/html' },
+            }),
+          },
+        },
+      })
+
+      await result.sendMessage('Create a migration deck')
+
+      await waitFor(() => {
+        const cards = result.container.querySelectorAll('[data-testid="slides-card"]')
+        expect(cards).toHaveLength(1)
+        expect(cards[0]).toHaveTextContent('Cloud Migration Plan')
+        expect(cards[0]).toHaveTextContent('2 / 4')
+        expect(cards[0]).toHaveTextContent('0 errors, 1 warnings')
+        expect(cards[0]).toHaveTextContent('11 native, 0 unsupported')
+        expect(cards[0].querySelector('[role="alert"]')).not.toBeInTheDocument()
+      }, { timeout: 10000 })
+
+      await result.sendMessage('Add migration waves and a delivery roadmap')
+
+      await waitFor(() => {
+        const cards = result.container.querySelectorAll('[data-testid="slides-card"]')
+        expect(cards).toHaveLength(2)
+
+        expect(cards[0]).toHaveTextContent('Cloud Migration Plan')
+        expect(cards[0]).toHaveTextContent('2 / 4')
+        expect(cards[0]).toHaveTextContent('0 errors, 1 warnings')
+        expect(cards[0]).toHaveTextContent('11 native, 0 unsupported')
+
+        expect(cards[1]).toHaveTextContent('Cloud Migration Plan')
+        expect(cards[1]).toHaveTextContent('4 / 4')
+        expect(cards[1]).toHaveTextContent('0 errors, 2 warnings')
+        expect(cards[1]).toHaveTextContent('22 native, 0 unsupported')
+        expect(cards[1].querySelectorAll('button')).toHaveLength(4)
+        expect(cards[1]).toHaveTextContent('Present')
+        expect(cards[1]).toHaveTextContent('PPTX')
+        expect(cards[1]).toHaveTextContent('PDF')
+        expect(cards[1]).toHaveTextContent('HTML')
       }, { timeout: 10000 })
     })
   })

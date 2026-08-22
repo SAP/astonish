@@ -692,16 +692,56 @@ func (m model) renderPlanApprovalOverlay(it *events.Item) string {
 		Render(b.String())
 }
 
+// planApprovalStartedMsg reports completion of asynchronous plan-decision
+// persistence and approved execution launch.
+type planApprovalStartedMsg struct {
+	ch     <-chan events.Event
+	cancel context.CancelFunc
+	err    error
+}
+
 // submitPlanApproval handles the user's choice in the plan approval dialog.
 // "Approve & implement" switches to Normal mode and sends a turn to begin
 // execution. "Request changes" lets the user type feedback. "Decline" aborts
 // the plan and returns to Normal mode.
 func (m model) submitPlanApproval(choice string) (tea.Model, tea.Cmd) {
+	if choice == planOptApprove {
+		if m.planApprovalPending || m.eventCh != nil {
+			return m, nil
+		}
+		m.planApprovalPending = true
+		m.planMode = false
+		m.graphPlanMode = false
+		m.tr.Apply(events.NewSystem("Plan approved. Preparing implementation…"))
+		m.refreshViewport()
+
+		ctx := m.ctx
+		b := m.backend
+		planPath := ""
+		if pb, ok := b.(backend.PlanBackend); ok {
+			planPath = pb.ActivePlanFilePath()
+		}
+		return m, func() tea.Msg {
+			if lifecycle, ok := b.(backend.PlanLifecycleBackend); ok {
+				if err := lifecycle.RecordPlanDecision(ctx, events.PlanApproved); err != nil {
+					return planApprovalStartedMsg{err: fmt.Errorf("failed to save plan decision: %w", err)}
+				}
+			}
+			turnCtx, cancel := context.WithCancel(ctx)
+			ch, err := b.RunTurn(turnCtx, planApprovalUserMessage, backend.TurnOptions{
+				SystemContext:         agent.BuildPlanExecutionSystemContext(planPath),
+				ApprovedPlanExecution: true,
+			})
+			if err != nil {
+				cancel()
+				return planApprovalStartedMsg{err: err}
+			}
+			return planApprovalStartedMsg{ch: ch, cancel: cancel}
+		}
+	}
+
 	status := events.PlanDeclined
-	switch choice {
-	case planOptApprove:
-		status = events.PlanApproved
-	case planOptRequest:
+	if choice == planOptRequest {
 		status = events.PlanChangesRequested
 	}
 	if lifecycle, ok := m.backend.(backend.PlanLifecycleBackend); ok {
@@ -718,51 +758,15 @@ func (m model) submitPlanApproval(choice string) (tea.Model, tea.Cmd) {
 	}
 
 	switch choice {
-	case "Approve & implement":
-		// Switch to Normal mode so the execution turn has full tool access.
-		m.planMode = false
-		m.graphPlanMode = false
-		m.tr.Apply(events.NewSystem("Plan approved. Starting implementation…"))
-		m.tr.Streaming = true
-		m.tr.Status = "Thinking…"
-		m.refreshViewport()
-
-		planPath := ""
-		if pb, ok := m.backend.(backend.PlanBackend); ok {
-			planPath = pb.ActivePlanFilePath()
-		}
-
-		turnCtx, cancel := context.WithCancel(m.ctx)
-		m.turnCancel = cancel
-		// Send as a normal-mode turn (no plan gate) to begin execution.
-		ch, err := m.backend.RunTurn(turnCtx, planApprovalUserMessage, backend.TurnOptions{SystemContext: agent.BuildPlanExecutionSystemContext(planPath)})
-		if err != nil {
-			cancel()
-			m.turnCancel = nil
-			m.tr.Apply(events.NewError(err.Error()))
-			m.refreshViewport()
-			return m, nil
-		}
-		m.eventCh = ch
-		m.timerResume()
-		return m, tea.Batch(waitEvent(ch), timerTick())
-
-	case "Request changes":
-		// Stay in plan mode so the user can describe what to change.
+	case planOptRequest:
 		m.tr.Apply(events.NewSystem("Describe the changes you'd like to the plan:"))
 		m.ta.Placeholder = planChangesHint
 		m.ta.Focus()
-		m.refreshViewport()
-		return m, nil
-
-	case "Decline":
+	case planOptDecline:
 		m.planMode = false
 		m.graphPlanMode = false
 		m.tr.Apply(events.NewSystem("Plan declined. Returned to Normal mode."))
-		m.refreshViewport()
-		return m, nil
 	}
-
 	m.refreshViewport()
 	return m, nil
 }

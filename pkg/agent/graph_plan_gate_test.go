@@ -6,11 +6,11 @@ import (
 )
 
 // graphPlanToolBlocked mirrors the runtime gate decision in chat_agent_run.go
-// for Graph-Optimized Plan mode: transition tools + announce_plan/update_plan
-// are always allowed; everything else must be permitted by the current phase's
-// allow-list.
+// for Graph-Optimized Plan mode: transition tools + update_plan are always
+// allowed; announce_plan is allowed only in the PLAN phase; everything else
+// must be permitted by the current phase's allow-list.
 func graphPlanToolBlocked(name string, phase GraphPlanPhase) bool {
-	if IsGraphPlanTransitionTool(name) || name == "announce_plan" || name == "update_plan" {
+	if IsGraphPlanTransitionTool(name) || name == "update_plan" {
 		return false
 	}
 	return !GraphPlanPhaseTools(phase)[name]
@@ -65,8 +65,12 @@ func TestGraphPlanGate_PhaseAllowList(t *testing.T) {
 		{"gplan_gaps in read", "gplan_gaps", GraphPlanPhaseRead, false},
 		{"gplan_finalize in gap", "gplan_finalize", GraphPlanPhaseGap, false},
 
-		// announce_plan always allowed (recording the plan).
+		// announce_plan is PLAN-phase only.
+		{"announce_plan in graph blocked", "announce_plan", GraphPlanPhaseGraph, true},
+		{"announce_plan in read blocked", "announce_plan", GraphPlanPhaseRead, true},
+		{"announce_plan in gap blocked", "announce_plan", GraphPlanPhaseGap, true},
 		{"announce_plan in plan", "announce_plan", GraphPlanPhasePlan, false},
+		{"update_plan in graph", "update_plan", GraphPlanPhaseGraph, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

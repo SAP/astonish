@@ -516,13 +516,9 @@ type localAgentBackend struct {
 	// and reused across turns (buffered channels, size 1).
 	subAgentAuthReqCh  chan agent.SubAgentAuthRequest
 	subAgentAuthRespCh chan agent.SubAgentAuthResponse
-	// subAgentAuthPending is true only while a sub-agent goroutine is blocked
-	// inside SubAgentAuthGate waiting on subAgentAuthRespCh. It is the sole
-	// signal RespondSubAgentAuth uses to decide whether the current approval
-	// overlay belongs to a sub-agent (deliver on the channel) or the main
-	// thread (fall through to RunTurn). Guarded by mu. Without this flag, the
-	// buffered response channel would always accept a non-blocking send, so
-	// main-thread approvals would be misrouted and the turn would freeze.
+	// Sub-agent authorization is serialized end-to-end. Only one child may own
+	// the approval overlay and response channel at a time.
+	subAgentAuthMu      sync.Mutex
 	subAgentAuthPending bool
 }
 
@@ -633,17 +629,18 @@ func (b *localAgentBackend) Close() error {
 // sub_agent.go once the response is received.
 func (b *localAgentBackend) RespondSubAgentAuth(choice string) bool {
 	b.mu.Lock()
-	pending := b.subAgentAuthPending
-	b.mu.Unlock()
-	if !pending {
-		// No sub-agent is waiting; this approval is for the main thread.
+	if !b.subAgentAuthPending {
+		b.mu.Unlock()
 		return false
 	}
-	granted := isGrantChoice(choice)
-	// A sub-agent is blocked on the receive, so this send is guaranteed to be
-	// consumed. The gate clears subAgentAuthPending once it wakes.
-	b.subAgentAuthRespCh <- agent.SubAgentAuthResponse{
-		Granted: granted,
+	// Claim this request before sending so repeated key events cannot deliver a
+	// second decision or be mistaken for another queued child.
+	b.subAgentAuthPending = false
+	respCh := b.subAgentAuthRespCh
+	b.mu.Unlock()
+
+	respCh <- agent.SubAgentAuthResponse{
+		Granted: isGrantChoice(choice),
 		Choice:  choice,
 	}
 	return true
@@ -697,6 +694,37 @@ func (b *localAgentBackend) ActivePlanFilePath() string {
 	sid := b.sessionID
 	b.mu.Unlock()
 	return b.planFilePath(sid)
+}
+
+// shouldContinueApprovedPlan reports whether a Normal turn should keep executing
+// an already-approved PLAN.md (research ceilings, inlined plan, no replacement).
+func (b *localAgentBackend) shouldContinueApprovedPlan(ctx context.Context, sessionID, planPath string, chatAgent *agent.ChatAgent) bool {
+	if planPath == "" {
+		return false
+	}
+	if _, err := os.Stat(planPath); err != nil {
+		return false
+	}
+	if chatAgent != nil && chatAgent.IsActivePlanApproved() {
+		return true
+	}
+	return b.sessionPlanLifecycle(ctx, sessionID) == events.PlanApproved
+}
+
+func (b *localAgentBackend) sessionPlanLifecycle(ctx context.Context, sessionID string) events.PlanStatus {
+	if sessionID == "" || b.sessionSvc == nil {
+		return ""
+	}
+	resp, err := b.sessionSvc.Get(ctx, &session.GetRequest{AppName: codeAppName, UserID: b.effectiveUserID(), SessionID: sessionID})
+	if err != nil || resp == nil || resp.Session == nil {
+		return ""
+	}
+	val, err := resp.Session.State().Get(planLifecycleStateKey)
+	if err != nil {
+		return ""
+	}
+	s, _ := val.(string)
+	return events.PlanStatus(s)
 }
 
 // ensureSession creates a new in-process session if none is active and returns
@@ -872,11 +900,21 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 			}
 			emit("delegation", map[string]any{"type": "start", "tasks": tasks})
 		case "task_start":
-			emit("delegation", map[string]any{"type": "task_start", "task_name": evt.TaskName})
+			emit("delegation", map[string]any{"type": "task_start", "task_name": evt.TaskName, "status": evt.Status, "attempt": evt.Attempt})
+		case "task_state", "task_retry":
+			emit("delegation", map[string]any{
+				"type": evt.Type, "task_name": evt.TaskName, "status": evt.Status,
+				"duration": evt.Duration, "last_activity": evt.LastActivity,
+				"attempt": evt.Attempt, "reason": evt.Reason, "no_activity": evt.NoActivity,
+			})
 		case "task_complete":
-			emit("delegation", map[string]any{"type": "task_complete", "task_name": evt.TaskName, "duration": evt.Duration})
+			emit("delegation", map[string]any{"type": "task_complete", "task_name": evt.TaskName, "duration": evt.Duration, "status": evt.Status, "attempt": evt.Attempt})
 		case "task_failed":
-			emit("delegation", map[string]any{"type": "task_failed", "task_name": evt.TaskName, "duration": evt.Duration, "error": evt.Error})
+			emit("delegation", map[string]any{
+				"type": "task_failed", "task_name": evt.TaskName, "duration": evt.Duration,
+				"error": evt.Error, "status": evt.Status, "attempt": evt.Attempt,
+				"reason": evt.Reason, "no_activity": evt.NoActivity,
+			})
 		case "task_tool_call":
 			emit("delegation", map[string]any{
 				"type": "task_tool_call", "task_name": evt.TaskName,
@@ -901,6 +939,22 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 	// gate blocks the sub-agent goroutine until the TUI user responds.
 	if chatAgent.EnforceAuthorization && !autoApprove {
 		chatAgent.SubAgentAuthGate = func(req agent.SubAgentAuthRequest) agent.SubAgentAuthResponse {
+			// Serialize the complete prompt/response lifecycle. Without this lock,
+			// parallel children overwrite the single overlay and all wait on the
+			// same uncorrelated response channel.
+			b.subAgentAuthMu.Lock()
+			defer b.subAgentAuthMu.Unlock()
+
+			policy := chatAgent.GetOrCreateAuthPolicy(req.ParentSessionID)
+			if policy != nil {
+				if req.Kind == "folder" && len(policy.OutOfScopePaths(req.Args)) == 0 {
+					return agent.SubAgentAuthResponse{Granted: true, Choice: "Always Allow"}
+				}
+				if req.Kind == "tool" && policy.AllToolsAllowedForSession() {
+					return agent.SubAgentAuthResponse{Granted: true, Choice: "Always Allow"}
+				}
+			}
+
 			// Determine options based on kind (same as main-thread gates).
 			var options []any
 			if req.Kind == "folder" {
@@ -919,12 +973,6 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 			// Cleared as soon as we wake, so a subsequent main-thread approval
 			// in the same turn is not misrouted.
 			b.mu.Lock()
-			// Drain any stale response left by a prior cancel/respond tie so
-			// this fresh request never consumes an old decision.
-			select {
-			case <-b.subAgentAuthRespCh:
-			default:
-			}
 			b.subAgentAuthPending = true
 			b.mu.Unlock()
 			// Emit approval event so the TUI shows the overlay.
@@ -951,10 +999,10 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 			case resp = <-b.subAgentAuthRespCh:
 			case <-ctx.Done():
 				resp = agent.SubAgentAuthResponse{Granted: false, Choice: "Deny"}
+				b.mu.Lock()
+				b.subAgentAuthPending = false
+				b.mu.Unlock()
 			}
-			b.mu.Lock()
-			b.subAgentAuthPending = false
-			b.mu.Unlock()
 			return resp
 		}
 	}
@@ -962,7 +1010,28 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 	planMode := opts.PlanMode
 	graphPlan := opts.GraphPlanMode
 	askMode := opts.AskMode
+	approvedPlanExecution := opts.ApprovedPlanExecution
 	systemContext := opts.SystemContext
+	if planMode || graphPlan {
+		// Planning / revision turns may replace the plan. Approved execution
+		// never reopens that slot — announce_plan is Plan-mode only.
+		chatAgent.AllowActivePlanReplacement()
+	} else if !askMode {
+		if !approvedPlanExecution && b.shouldContinueApprovedPlan(ctx, sessionID, planPath, chatAgent) {
+			approvedPlanExecution = true
+		}
+		if approvedPlanExecution {
+			if err := chatAgent.RestoreApprovedPlan(); err != nil {
+				if opts.ApprovedPlanExecution {
+					return nil, fmt.Errorf("restore approved plan: %w", err)
+				}
+				slog.Debug("restore approved plan skipped", "component", "localAgentBackend", "error", err)
+			}
+			if strings.TrimSpace(systemContext) == "" {
+				systemContext = agent.BuildPlanExecutionSystemContext(planPath)
+			}
+		}
+	}
 	if graphPlan {
 		gp := chatAgent.GetOrCreateGraphPlanState(sessionID)
 		gp.Reset()
@@ -971,12 +1040,13 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 		chatAgent.SetActiveGraphPlan(nil)
 	}
 
-	if systemContext != "" || planMode || graphPlan || askMode {
+	if systemContext != "" || planMode || graphPlan || askMode || approvedPlanExecution {
 		ctx = agent.WithPromptOverrides(ctx, &agent.PromptOverrides{
-			SessionContext: agent.EscapeCurlyPlaceholders(systemContext),
-			PlanMode:       planMode,
-			GraphPlanMode:  graphPlan,
-			AskMode:        askMode,
+			SessionContext:        agent.EscapeCurlyPlaceholders(systemContext),
+			PlanMode:              planMode,
+			GraphPlanMode:         graphPlan,
+			AskMode:               askMode,
+			ApprovedPlanExecution: approvedPlanExecution,
 		})
 	}
 
@@ -1450,6 +1520,17 @@ func (b *localAgentBackend) driveTurn(
 			}
 			if part.FunctionResponse != nil {
 				if part.FunctionResponse.Name == "announce_plan" {
+					status, _ := part.FunctionResponse.Response["status"].(string)
+					if status != "ok" {
+						// Rejected/no-op announcements are ordinary tool results. In
+						// particular, they must not create a second pending approval.
+						emit("tool_result", map[string]any{
+							"name":   part.FunctionResponse.Name,
+							"id":     part.FunctionResponse.ID,
+							"result": part.FunctionResponse.Response,
+						})
+						continue
+					}
 					// Emit the document and pending approval lifecycle atomically.
 					// This prevents a prompt from ever existing without its plan.
 					planPayload := map[string]any{"status": string(events.PlanPending)}

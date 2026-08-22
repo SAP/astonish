@@ -60,6 +60,10 @@ func NewPlanState(goal string, doc PlanDocumentInfo, steps []PlanStepInfo) *Plan
 		completedTasks: make(map[string]map[string]bool),
 	}
 	for i, s := range steps {
+		status := normalizePlanStatus(s.Status)
+		if strings.TrimSpace(s.Status) == "" {
+			status = "pending"
+		}
 		ps.steps[i] = planStep{
 			name:          s.Name,
 			description:   s.Description,
@@ -68,7 +72,7 @@ func NewPlanState(goal string, doc PlanDocumentInfo, steps []PlanStepInfo) *Plan
 			files:         s.Files,
 			verify:        s.Verify,
 			parallelGroup: s.ParallelGroup,
-			status:        "pending",
+			status:        status,
 		}
 	}
 	return ps

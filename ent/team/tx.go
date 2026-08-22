@@ -22,6 +22,8 @@ type Tx struct {
 	ChatSessionEvent *ChatSessionEventClient
 	// Credential is the client for interacting with the Credential builders.
 	Credential *CredentialClient
+	// Deck is the client for interacting with the Deck builders.
+	Deck *DeckClient
 	// DrillReport is the client for interacting with the DrillReport builders.
 	DrillReport *DrillReportClient
 	// FleetMailboxMessage is the client for interacting with the FleetMailboxMessage builders.
@@ -62,6 +64,8 @@ type Tx struct {
 	Skill *SkillClient
 	// SkillFile is the client for interacting with the SkillFile builders.
 	SkillFile *SkillFileClient
+	// Slide is the client for interacting with the Slide builders.
+	Slide *SlideClient
 	// TeamAuditLog is the client for interacting with the TeamAuditLog builders.
 	TeamAuditLog *TeamAuditLogClient
 
@@ -200,6 +204,7 @@ func (tx *Tx) init() {
 	tx.AppState = NewAppStateClient(tx.config)
 	tx.ChatSessionEvent = NewChatSessionEventClient(tx.config)
 	tx.Credential = NewCredentialClient(tx.config)
+	tx.Deck = NewDeckClient(tx.config)
 	tx.DrillReport = NewDrillReportClient(tx.config)
 	tx.FleetMailboxMessage = NewFleetMailboxMessageClient(tx.config)
 	tx.FleetMonitorState = NewFleetMonitorStateClient(tx.config)
@@ -220,6 +225,7 @@ func (tx *Tx) init() {
 	tx.Setting = NewSettingClient(tx.config)
 	tx.Skill = NewSkillClient(tx.config)
 	tx.SkillFile = NewSkillFileClient(tx.config)
+	tx.Slide = NewSlideClient(tx.config)
 	tx.TeamAuditLog = NewTeamAuditLogClient(tx.config)
 }
 

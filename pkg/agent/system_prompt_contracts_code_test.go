@@ -163,6 +163,7 @@ func TestCodeSystemPromptContracts_PlanFilePersistence(t *testing.T) {
 
 	assertContains(t, prompt, "Execution plan (PLAN.md):", "PLAN.md guidance present in code mode")
 	assertContains(t, prompt, "announce_plan", "announce_plan referenced in PLAN.md guidance")
+	assertContains(t, prompt, "MUST NOT call `announce_plan`", "Normal mode forbids announce_plan")
 	assertContains(t, prompt, "update_plan", "update_plan referenced in PLAN.md guidance")
 
 	// Without PlanFilePersistence it must not appear

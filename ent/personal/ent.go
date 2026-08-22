@@ -15,12 +15,14 @@ import (
 	"github.com/SAP/astonish/ent/personal/app"
 	"github.com/SAP/astonish/ent/personal/appstate"
 	"github.com/SAP/astonish/ent/personal/credential"
+	"github.com/SAP/astonish/ent/personal/deck"
 	"github.com/SAP/astonish/ent/personal/flow"
 	"github.com/SAP/astonish/ent/personal/memory"
 	"github.com/SAP/astonish/ent/personal/personalsettings"
 	"github.com/SAP/astonish/ent/personal/scheduledjob"
 	"github.com/SAP/astonish/ent/personal/session"
 	"github.com/SAP/astonish/ent/personal/sessionevent"
+	"github.com/SAP/astonish/ent/personal/slide"
 )
 
 // ent aliases to avoid import conflicts in user's code.
@@ -84,12 +86,14 @@ func checkColumn(t, c string) error {
 			app.Table:              app.ValidColumn,
 			appstate.Table:         appstate.ValidColumn,
 			credential.Table:       credential.ValidColumn,
+			deck.Table:             deck.ValidColumn,
 			flow.Table:             flow.ValidColumn,
 			memory.Table:           memory.ValidColumn,
 			personalsettings.Table: personalsettings.ValidColumn,
 			scheduledjob.Table:     scheduledjob.ValidColumn,
 			session.Table:          session.ValidColumn,
 			sessionevent.Table:     sessionevent.ValidColumn,
+			slide.Table:            slide.ValidColumn,
 		})
 	})
 	return columnCheck(t, c)

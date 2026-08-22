@@ -111,7 +111,7 @@ daemon:
 # Chat behavior
 chat:
   system_prompt: ""            # Custom system prompt text
-  max_tool_calls: 0            # Max tool calls per turn (0 = unlimited)
+  max_tool_calls: 0            # Unused (the agent loop no longer pauses at N tool calls)
   max_tools: 0                 # Max tools exposed to model (0 = all)
   auto_approve: false          # Auto-approve tool executions
   flow_save_dir: ""            # Where distilled flows are saved

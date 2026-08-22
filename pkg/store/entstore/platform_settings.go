@@ -28,7 +28,7 @@ const (
 
 // platformSettingsStore implements store.PlatformSettingsStore using the Ent platform client.
 type platformSettingsStore struct {
-	client      *platforment.Client
+	client *platforment.Client
 }
 
 func (s *Store) PlatformSettings() store.PlatformSettingsStore {

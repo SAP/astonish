@@ -17,6 +17,7 @@ import (
 	"github.com/SAP/astonish/pkg/cache"
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/credentials"
+	"github.com/SAP/astonish/pkg/docs/slides"
 	adrill "github.com/SAP/astonish/pkg/drill"
 	emailpkg "github.com/SAP/astonish/pkg/email"
 	"github.com/SAP/astonish/pkg/flowstore"
@@ -408,6 +409,21 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			}
 		} else {
 			schedToolsSlice = schedTools
+		}
+	}
+
+	// --- 2d-i. Initialize slide deck tools → deferred category ---
+	// Deck authoring is a Studio/platform capability backed by the personal docs
+	// store injected into each request. It is intentionally unavailable in Code mode.
+	var slideToolsSlice []tool.Tool
+	if !cfg.CodeMode {
+		deckTools, deckErr := slides.GetTools()
+		if deckErr != nil {
+			if cfg.DebugMode {
+				slog.Warn("failed to create slide deck tools", "error", deckErr)
+			}
+		} else {
+			slideToolsSlice = deckTools
 		}
 	}
 
@@ -1125,6 +1141,13 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			Tools:       schedToolsSlice,
 		}
 	}
+	if len(slideToolsSlice) > 0 {
+		toolGroups["slides"] = &agent.ToolGroup{
+			Name:        "slides",
+			Description: "Create, read, write, list, and validate Astonish slide decks",
+			Tools:       slideToolsSlice,
+		}
+	}
 	if len(emailToolsSlice) > 0 {
 		toolGroups["email"] = &agent.ToolGroup{
 			Name:        "email",
@@ -1761,9 +1784,9 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			}
 		})
 		// Wire plan state storage so AfterToolCallback can auto-progress steps.
-		tools.SetPlanStateCallback(func(goal string, doc agent.PlanDocumentInfo, steps []agent.PlanStepInfo) {
+		tools.SetPlanStateCallback(func(goal string, doc agent.PlanDocumentInfo, steps []agent.PlanStepInfo) bool {
 			plan := agent.NewPlanState(goal, doc, steps)
-			chatAgent.SetActivePlan(plan)
+			return chatAgent.TrySetActivePlan(plan)
 		})
 		// Wire explicit model-driven plan updates (update_plan tool) onto the
 		// active plan. This drives PLAN.md rewrites for main-thread work and
@@ -2055,9 +2078,6 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 
 	if cfg.AppConfig != nil && cfg.AppConfig.Chat.FlowSaveDir != "" {
 		chatAgent.FlowSaveDir = cfg.AppConfig.Chat.FlowSaveDir
-	}
-	if cfg.AppConfig != nil && cfg.AppConfig.Chat.MaxToolCalls > 0 {
-		chatAgent.MaxToolCalls = cfg.AppConfig.Chat.MaxToolCalls
 	}
 
 	// --- 6e. Initialize context compaction ---

@@ -279,16 +279,16 @@ When the user asks for a report with charts or diagrams, prefer mermaid in a mar
 
 ## Announcing Your Plan
 
-**For any multi-step task, call ` + "`announce_plan`" + ` first.** This shows the user a visible checklist of your approach before you start working, and persists the plan to a session ` + "`PLAN.md`" + ` that survives context compaction. Put the concrete per-phase work (files, commands, approach) in each step's ` + "`details`" + ` field so the detailed plan is preserved, not just the labels.
+**` + "`announce_plan`" + ` exists only in Plan mode.** The runtime will refuse it in Normal mode. In Plan mode it shows the user a visible checklist and persists the plan to a session ` + "`PLAN.md`" + ` that is inlined after approval and after compaction. Put a self-contained implementation spec in each step's ` + "`details`" + ` field (exact symbols, signatures, call sites, tests) and list every affected file so execution does not re-investigate.
 
 **Tracking progress — two mechanisms:**
 - **Work you do yourself (main thread):** call ` + "`update_plan`" + ` to mark a phase ` + "`running`" + ` when you start it and ` + "`complete`" + ` (or ` + "`failed`" + `) when you finish. Do this as you go — it keeps the checklist and ` + "`PLAN.md`" + ` accurate and lets you resume exactly where you left off after a context summary. There is no automatic completion for inline work; you own it.
 - **Delegated work:** set the ` + "`plan_step`" + ` field on each ` + "`delegate_tasks`" + ` task. Those phases progress automatically from sub-task lifecycle events — do not also call ` + "`update_plan`" + ` for them.
 
-**After a context summary:** re-read ` + "`PLAN.md`" + ` to recover the plan and its per-phase status, then mark the next phase ` + "`running`" + ` and continue.
+**After a context summary:** the approved PLAN.md is inlined in the execution context. Follow it; do not re-announce or re-investigate confirmed files.
 
-**How to use:**
-1. Call ` + "`announce_plan`" + ` with a concise ` + "`goal`" + ` (the plan title) and 3-7 ` + "`steps`" + ` (each with ` + "`name`" + `, ` + "`description`" + `, and rich ` + "`details`" + `).
+**How to use (Plan mode only):**
+1. Call ` + "`announce_plan`" + ` with a concise ` + "`goal`" + ` (the plan title) and 3-7 ` + "`steps`" + ` (each with ` + "`name`" + `, ` + "`description`" + `, required ` + "`details`" + ` and ` + "`files`" + `).
 2. Each step is a distinct phase of work (a ` + "`delegate_tasks`" + ` call or a chunk of main-thread work).
 3. Drive progress via ` + "`update_plan`" + ` (main-thread) or ` + "`plan_step`" + ` (delegated).
 

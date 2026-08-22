@@ -173,8 +173,19 @@ The `SubAgentManager` enables the ChatAgent to delegate work to specialized chil
 - **Depth limiting**: Default max depth of 2 prevents infinite delegation chains.
 - **Container sharing**: Sub-agent sessions are aliased to the parent's sandbox container via `NodeClientPool.Alias()`.
 - **Event forwarding**: When `UIEventCallback` is set, sub-agent events (tool calls, text) are streamed to the UI in real-time.
+- **Bounded liveness**: Every child has the existing absolute task timeout plus a shorter inactivity watchdog (two minutes by default). Meaningful activity is a tool call/result or non-thought text; hidden thought tokens never reset the watchdog. The watchdog cancels the child runner context, so a provider wait cannot hold a semaphore slot indefinitely.
+- **Observable state**: Structured progress events distinguish `queued`, `running`, `waiting_on_model`, `retrying`, `complete`, and `failed`, with attempt, elapsed duration, last-activity age, and an explicit inactivity reason. Heartbeats report state but do not themselves count as progress.
+- **Progress-gated retry**: The outer one-time retry is permitted only after meaningful partial progress (`ToolCalls > 0` or visible result text). Inert children fail promptly without retry; all cancellation paths release the concurrency semaphore.
 
 Each sub-agent gets its own system prompt built by `buildChildPrompt()` which includes the task instructions, available tool names, and a reminder that it's a focused worker with a specific mission.
+
+### Authorization and plan lifecycle invariants
+
+Code-mode authorization has one pending owner per session. A gate atomically claims that slot before emitting an approval; concurrent callbacks cannot replace it, and the user's decision atomically consumes it once. Sub-agent prompts are additionally serialized across their complete blocking prompt/response lifecycle, while a sub-agent decision resumes the existing parent event stream rather than creating a new parent turn.
+
+Folder preflight is schema-aware: declared path arguments and parsed `shell_command` operands are checked, but arbitrary nested prose, URL strings, and glob patterns are not recursively reinterpreted as paths. Containment and symlink-escape checks remain centralized in `pkg/pathscope`.
+
+`announce_plan` exists only in Plan mode (and in Graph-Optimized Plan, only in the PLAN phase). It is stripped from the model's tool list in Normal/Ask and refused if still called. An approved execution turn carries `ApprovedPlanExecution` independently of Normal/Plan mode — including subsequent Normal turns while the session lifecycle is `approved` and `PLAN.md` still exists. While that flag is set, the runtime rejects `announce_plan`, inlines `PLAN.md` into the turn's system context, and continues to allow `update_plan`. The active approved `PlanState` is sealed against racing replacement, and persistence callbacks from superseded plan versions cannot rewrite the current `PLAN.md`. There is no per-turn tool-call pause on the main agent (the previous 100-call stop is removed) and no per-child tool-call cap on `delegate_tasks` (the previous 25-call stop is removed); inactivity watchdog and absolute task timeout still bound sub-agents.
 
 ### Think-Tag Filtering
 

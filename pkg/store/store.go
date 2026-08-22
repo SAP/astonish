@@ -118,6 +118,7 @@ type TeamDataStore interface {
 	Sessions() SessionStore
 	Memories() MemoryStore
 	Credentials() CredentialStore
+	Docs() DocsStore
 	Apps() AppStore
 	AppState() AppStateStore
 	AppStateSQL() AppStateSQLStore
@@ -152,6 +153,7 @@ type PersonalDataStore interface {
 	AppState() AppStateStore
 	Flows() FlowStore
 	Credentials() CredentialStore
+	Docs() DocsStore
 	ScheduledJobs() SchedulerStore
 
 	PersonalSettings() PersonalSettingsStore

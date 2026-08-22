@@ -113,9 +113,9 @@ Codegraph is registered as a standard MCP server in Astonish — zero configurat
 
 #### Plan Persistence
 
-Plans created via `announce_plan` are written to a per-session `PLAN.md` file that:
-- Survives **context compaction** — when the context window fills and old messages are summarized, the plan file persists and the agent can re-read it to resume exactly where it left off.
-- Contains a **checkbox per phase** with status (pending/running/complete/failed).
+Plans created via `announce_plan` (Plan mode only) are written to a per-session `PLAN.md` file that:
+- Survives **context compaction** — when the context window fills, the plan is inlined into the summary and into later execution turns so the agent resumes exactly where it left off.
+- Contains a **checkbox per phase** with status (pending/running/complete/failed) and a generated Progress section.
 - Records the **concrete blast radius** (affected files marked new/modify/delete), verification commands, and execution details per phase.
 
 ### Ask Mode — Understand Before You Decide
@@ -275,7 +275,7 @@ The header shows real-time **context utilization**: `Context <used>/<window> (<p
 
 - **Automatic compaction** creates a summary of older messages while preserving recent context and any active plan.
 - **Manual `/compact`** forces compaction immediately.
-- **Plan persistence** ensures your `PLAN.md` survives compaction — the agent re-reads it and resumes exactly where it left off.
+- **Plan persistence** ensures your `PLAN.md` survives compaction — it is inlined into the summary and later execution turns so the agent resumes exactly where it left off.
 
 ## Native Prerequisites
 

@@ -17,6 +17,7 @@ import (
 	"github.com/SAP/astonish/ent/team/appstate"
 	"github.com/SAP/astonish/ent/team/chatsessionevent"
 	"github.com/SAP/astonish/ent/team/credential"
+	"github.com/SAP/astonish/ent/team/deck"
 	"github.com/SAP/astonish/ent/team/drillreport"
 	"github.com/SAP/astonish/ent/team/fleetmailboxmessage"
 	"github.com/SAP/astonish/ent/team/fleetmonitorstate"
@@ -37,6 +38,7 @@ import (
 	"github.com/SAP/astonish/ent/team/setting"
 	"github.com/SAP/astonish/ent/team/skill"
 	"github.com/SAP/astonish/ent/team/skillfile"
+	"github.com/SAP/astonish/ent/team/slide"
 	"github.com/SAP/astonish/ent/team/teamauditlog"
 )
 
@@ -103,6 +105,7 @@ func checkColumn(t, c string) error {
 			appstate.Table:            appstate.ValidColumn,
 			chatsessionevent.Table:    chatsessionevent.ValidColumn,
 			credential.Table:          credential.ValidColumn,
+			deck.Table:                deck.ValidColumn,
 			drillreport.Table:         drillreport.ValidColumn,
 			fleetmailboxmessage.Table: fleetmailboxmessage.ValidColumn,
 			fleetmonitorstate.Table:   fleetmonitorstate.ValidColumn,
@@ -123,6 +126,7 @@ func checkColumn(t, c string) error {
 			setting.Table:             setting.ValidColumn,
 			skill.Table:               skill.ValidColumn,
 			skillfile.Table:           skillfile.ValidColumn,
+			slide.Table:               slide.ValidColumn,
 			teamauditlog.Table:        teamauditlog.ValidColumn,
 		})
 	})

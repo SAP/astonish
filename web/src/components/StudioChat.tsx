@@ -13,7 +13,7 @@ import type { ChatSession, AttachmentPayload, SessionModelStatus } from '../api/
 import { startFleetSession, connectFleetStream, sendFleetMessage, stopFleetSession, fetchFleetSessions } from '../api/fleetChat'
 import type { FleetSession } from '../api/fleetChat'
 import HomePage from './HomePage'
-import type { FleetMessageItem, ChatMsg, FleetInfo, FleetStateInfo, DeferredPrompt, FleetExecutionMessage, FleetEvent, AgentMessage, ToolResultMessage, BrowserHandoffMessage, SubTaskExecutionMessage, SubTaskEvent, SubTaskInfo, PlanMessage, PlanStepInfo, SessionArtifact, ArtifactMessage, AppPreviewMessage, AppSavedMessage, DistillPreviewMessage, DistillSavedMessage, TutorialBlueprintPreviewMessage, TutorialBlueprintApprovedMessage, TutorialSceneSlideshowMessage, UserMessage, AttachmentInfo, NetworkDenialMessage, ImageMessage } from './chat/chatTypes'
+import type { FleetMessageItem, ChatMsg, FleetInfo, FleetStateInfo, DeferredPrompt, FleetExecutionMessage, FleetEvent, AgentMessage, ToolResultMessage, BrowserHandoffMessage, SubTaskExecutionMessage, SubTaskEvent, SubTaskInfo, PlanMessage, PlanStepInfo, SessionArtifact, ArtifactMessage, AppPreviewMessage, AppSavedMessage, DistillPreviewMessage, DistillSavedMessage, TutorialBlueprintPreviewMessage, TutorialBlueprintApprovedMessage, TutorialSceneSlideshowMessage, UserMessage, AttachmentInfo, NetworkDenialMessage, ImageMessage, DocsUpdateMessage } from './chat/chatTypes'
 import { buildActivityRenderIndex, deriveLiveStreamStatus, stickyAgentBubbleKey } from './chat/toolActivity'
 import ToolActivityBlock from './chat/ToolActivityBlock'
 import { getAgentColor } from './chat/chatTypes'
@@ -46,6 +46,7 @@ import NetworkDenialPrompt from './chat/NetworkDenialPrompt'
 import ModelCredentialBanner from './chat/ModelCredentialBanner'
 import SessionModelPicker from './chat/SessionModelPicker'
 import PreChatModelPicker from './chat/PreChatModelPicker'
+import SlidesCard from './docs/slides/SlidesCard'
 import { fileTypeFromFileName } from '../utils/artifactMedia'
 
 function normalizeBlueprintScenes(raw: unknown): TutorialBlueprintPreviewMessage['scenes'] {
@@ -72,6 +73,25 @@ function normalizeTutorialScenes(raw: unknown): TutorialSceneSlideshowMessage['s
     path: item?.path || '',
     duration_seconds: item?.duration_seconds || undefined,
   }))
+}
+
+function upsertDocsUpdate(messages: ChatMsg[], update: DocsUpdateMessage): ChatMsg[] {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index]
+    if (message.type === 'user') break
+    if (message.type === 'docs_update' && (message as DocsUpdateMessage).deckSlug === update.deckSlug) {
+      return messages.map((item, itemIndex) => itemIndex === index ? update : item)
+    }
+  }
+  return [...messages, update]
+}
+
+function collapseDocsUpdates(messages: ChatMsg[]): ChatMsg[] {
+  return messages.reduce<ChatMsg[]>((result, message) => (
+    message.type === 'docs_update'
+      ? upsertDocsUpdate(result, message as DocsUpdateMessage)
+      : [...result, message]
+  ), [])
 }
 
 function slideshowVideoPaths(messages: ChatMsg[]): Set<string> {
@@ -830,6 +850,9 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
           if (m.type === 'artifact' && m.content) {
             return { type: 'artifact', path: m.content, toolName: m.toolName || 'write_file' } as ArtifactMessage
           }
+          if (m.type === 'docs_update' && m.docsUpdate) {
+            return { type: 'docs_update', docType: m.docsUpdate.type, ...m.docsUpdate } as DocsUpdateMessage
+          }
           if (m.type === 'distill_preview') {
             return {
               type: 'distill_preview',
@@ -898,7 +921,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
           }
           return m as unknown as ChatMsg
         })
-        setMessages(mapped)
+        setMessages(collapseDocsUpdates(mapped))
         // Restore active app state from session history
         const appPreviews = mapped.filter((m): m is AppPreviewMessage => m.type === 'app_preview')
         if (appPreviews.length > 0) {
@@ -1023,6 +1046,23 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
                   }])
                 }
               }).catch(() => { /* non-fatal */ })
+            }
+            break
+
+          case 'docs_update':
+            if (data.type === 'slides' && data.deckSlug) {
+              setMessages((prev: ChatMsg[]) => upsertDocsUpdate(prev, {
+                type: 'docs_update',
+                docType: 'slides',
+                deckSlug: data.deckSlug as string,
+                action: (data.action as string) || 'updated',
+                slideIndex: data.slideIndex as number | undefined,
+                totalSlides: data.totalSlides as number | undefined,
+                title: (data.deckTitle || data.title) as string | undefined,
+                schemaVersion: data.schemaVersion as number | undefined,
+                validation: data.validation as DocsUpdateMessage['validation'],
+                pptxCapability: data.pptxCapability as DocsUpdateMessage['pptxCapability'],
+              }))
             }
             break
 
@@ -1902,6 +1942,23 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
           case 'image':
             if (data.data && data.mimeType) {
               setMessages((prev: ChatMsg[]) => [...prev, { type: 'image', data: data.data, mimeType: data.mimeType }])
+            }
+            break
+
+          case 'docs_update':
+            if (data.type === 'slides' && data.deckSlug) {
+              setMessages((prev: ChatMsg[]) => upsertDocsUpdate(prev, {
+                type: 'docs_update',
+                docType: 'slides',
+                deckSlug: data.deckSlug as string,
+                action: (data.action as string) || 'updated',
+                slideIndex: data.slideIndex as number | undefined,
+                totalSlides: data.totalSlides as number | undefined,
+                title: (data.deckTitle || data.title) as string | undefined,
+                schemaVersion: data.schemaVersion as number | undefined,
+                validation: data.validation as DocsUpdateMessage['validation'],
+                pptxCapability: data.pptxCapability as DocsUpdateMessage['pptxCapability'],
+              }))
             }
             break
 
@@ -3318,6 +3375,10 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
                     <span className="text-gray-400">{msg.reason as string}</span>
                   </div>
                 )
+              }
+
+              if (msg.type === 'docs_update') {
+                return <SlidesCard key={index} update={msg as DocsUpdateMessage} scope="personal" />
               }
 
               if (msg.type === 'artifact') {

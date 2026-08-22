@@ -171,6 +171,34 @@ type StudioMessage struct {
 
 	// file attachments on user messages — populated when session history is loaded
 	Attachments []AttachmentInfo `json:"attachments,omitempty"`
+
+	// docs_update fields — persisted slide-card metadata.
+	DocsUpdate *DocsUpdatePayload `json:"docsUpdate,omitempty"`
+}
+
+type DocsUpdatePayload struct {
+	Type           string                    `json:"type"`
+	DeckSlug       string                    `json:"deckSlug"`
+	Action         string                    `json:"action"`
+	SlideIndex     *int                      `json:"slideIndex,omitempty"`
+	TotalSlides    int                       `json:"totalSlides,omitempty"`
+	Title          string                    `json:"title,omitempty"`
+	DeckTitle      string                    `json:"deckTitle,omitempty"`
+	SchemaVersion  int                       `json:"schemaVersion,omitempty"`
+	Validation     DocsValidationSummary     `json:"validation,omitempty"`
+	PPTXCapability DocsPPTXCapabilitySummary `json:"pptxCapability,omitempty"`
+}
+
+type DocsValidationSummary struct {
+	Errors   int `json:"errors"`
+	Warnings int `json:"warnings"`
+}
+
+type DocsPPTXCapabilitySummary struct {
+	Native      int `json:"native"`
+	Vector      int `json:"vector"`
+	Raster      int `json:"raster"`
+	Unsupported int `json:"unsupported"`
 }
 
 // AttachmentInfo describes a file attachment in session history display.
@@ -968,7 +996,7 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 	// In platform mode, we inject a merged store (personal-first, team-fallback)
 	// so the LLM resolves the user's personal credentials first, then team creds.
 	// Writes from chat always go to the personal store.
-	if svc := store.FromRequest(r); svc != nil {
+	if svc := injectRequestDocsStores(runner, r); svc != nil {
 		if svc.PersonalCredentials != nil || svc.Credentials != nil {
 			merged := store.NewMergedCredentialStore(svc.PersonalCredentials, svc.Credentials)
 			runner.InjectCredentialStore(merged)

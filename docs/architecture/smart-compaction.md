@@ -1001,7 +1001,7 @@ Headroom:          159K tokens (for model reasoning + new tool calls)
 
 ---
 
-## Execution Plan Survival (PLAN.md pointer)
+## Execution Plan Survival (PLAN.md inline)
 
 In addition to the task anchor, the compactor preserves the **active execution plan** across
 compaction without folding it into lossy prose.
@@ -1012,18 +1012,19 @@ compaction without folding it into lossy prose.
   `docs/plan-mode-enforcement-summary.md` → "Plan persistence (PLAN.md)"). The path is set on the
   `Compactor` each turn via `Compactor.SetPlanFilePath` (`pkg/session/compaction.go`).
 - When `CompactContents` builds the context summary, if `PlanFilePath` is set **and** the file
-  exists on disk, a durable pointer is appended to the summary text:
+  exists on disk, the file contents are inlined into the summary (capped at 32KiB) under:
 
   ```
   [ACTIVE EXECUTION PLAN] An execution plan with per-phase completion status is persisted at
-  <path>. Re-read it with read_file to recover the exact phases and where you are before
-  continuing. Do not reconstruct the plan from this summary.
+  <path>. Follow this inlined plan; do not reconstruct it or re-investigate confirmed files.
+
+  <PLAN.md body>
   ```
 
-- The model then re-reads `PLAN.md` to recover the exact phases and their checkbox status
-  (`[ ]` / `[~]` / `[x]` / `[!]`), rather than relying on the prose summary.
+- Approved execution turns also inline the same document in the per-turn system context, so the
+  model does not depend on a follow-up `read_file` after compaction.
 
-**Domain-agnostic boundary:** the `Compactor` only knows a file *path* exists — it never parses
+**Domain-agnostic boundary:** the `Compactor` reads the file as opaque text — it never parses
 the plan's contents. Rendering/parsing of the plan document lives in
 `pkg/agent/plan_document.go`. When no plan file is configured or present, compaction behavior is
 unchanged.

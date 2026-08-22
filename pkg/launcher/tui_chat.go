@@ -984,11 +984,16 @@ func mapSSEToEvents(sev *client.SSEEvent, debug bool) []events.Event {
 		}
 	case "delegation":
 		var payload struct {
-			Type     string `json:"type"`
-			TaskName string `json:"task_name"`
-			Duration string `json:"duration"`
-			Error    string `json:"error"`
-			Tasks    []struct {
+			Type         string `json:"type"`
+			TaskName     string `json:"task_name"`
+			Status       string `json:"status"`
+			Duration     string `json:"duration"`
+			LastActivity string `json:"last_activity"`
+			Error        string `json:"error"`
+			Reason       string `json:"reason"`
+			Attempt      int    `json:"attempt"`
+			NoActivity   bool   `json:"no_activity"`
+			Tasks        []struct {
 				Name        string `json:"name"`
 				Description string `json:"description"`
 				PlanStep    string `json:"plan_step"`
@@ -1006,12 +1011,16 @@ func mapSSEToEvents(sev *client.SSEEvent, debug bool) []events.Event {
 					tasks[i] = events.DelegationTask{Name: t.Name, Description: t.Description, PlanStep: t.PlanStep}
 				}
 				return []events.Event{events.NewDelegationStart(tasks)}
-			case "task_start":
-				return []events.Event{events.NewDelegationTaskUpdate("task_start", payload.TaskName, "", "")}
+			case "task_start", "task_state", "task_retry":
+				return []events.Event{events.NewDelegationTaskState(payload.Type, payload.TaskName, payload.Status, payload.Duration, payload.LastActivity, payload.Reason, payload.Attempt, payload.NoActivity)}
 			case "task_complete":
-				return []events.Event{events.NewDelegationTaskUpdate("task_complete", payload.TaskName, payload.Duration, "")}
+				return []events.Event{events.NewDelegationTaskState("task_complete", payload.TaskName, payload.Status, payload.Duration, payload.LastActivity, "", payload.Attempt, false)}
 			case "task_failed":
-				return []events.Event{events.NewDelegationTaskUpdate("task_failed", payload.TaskName, payload.Duration, payload.Error)}
+				reason := payload.Reason
+				if reason == "" {
+					reason = payload.Error
+				}
+				return []events.Event{events.NewDelegationTaskState("task_failed", payload.TaskName, payload.Status, payload.Duration, payload.LastActivity, reason, payload.Attempt, payload.NoActivity)}
 			case "task_tool_call":
 				return []events.Event{events.NewDelegationTaskActivity("task_tool_call", payload.TaskName, payload.ToolName, payload.ToolArgs, nil, "")}
 			case "task_tool_result":
@@ -1022,6 +1031,10 @@ func mapSSEToEvents(sev *client.SSEEvent, debug bool) []events.Event {
 				return []events.Event{events.NewDelegation("done")}
 			}
 		}
+	case "docs_update":
+		// Slide cards are a Studio-only rendering surface. The terminal client
+		// intentionally ignores this event rather than depending on Studio DTOs.
+		return nil
 	case "report_marker":
 		var payload struct {
 			Path  string `json:"path"`

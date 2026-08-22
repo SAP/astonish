@@ -10,6 +10,9 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"math"
+	"strings"
+	"time"
 
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/proto"
@@ -23,6 +26,75 @@ import (
 // decoupled from the browser package.
 type BrowserProvider interface {
 	GetOrLaunch() (*rod.Browser, error)
+}
+
+const (
+	defaultHTMLPrintTimeout = 30 * time.Second
+	maxHTMLPrintTimeout     = 5 * time.Minute
+)
+
+// HTMLPrintOptions controls how a complete HTML document is printed by Chrome.
+// Dimensions and margins are expressed in inches. ReadinessExpression may be a
+// JavaScript value, promise, or zero-argument predicate; printing waits until it
+// resolves to a truthy value. A zero Timeout uses a bounded default.
+type HTMLPrintOptions struct {
+	Landscape           bool
+	PaperWidth          float64
+	PaperHeight         float64
+	MarginTop           float64
+	MarginBottom        float64
+	MarginLeft          float64
+	MarginRight         float64
+	PrintBackground     bool
+	ReadinessExpression string
+	Timeout             time.Duration
+}
+
+func (o HTMLPrintOptions) normalized() (HTMLPrintOptions, error) {
+	if o.Timeout == 0 {
+		o.Timeout = defaultHTMLPrintTimeout
+	}
+	if o.PaperWidth == 0 && o.PaperHeight == 0 {
+		o.PaperWidth, o.PaperHeight = 8.5, 11
+	}
+	if o.Timeout < 0 || o.Timeout > maxHTMLPrintTimeout {
+		return HTMLPrintOptions{}, fmt.Errorf("timeout must be between 0 and %s", maxHTMLPrintTimeout)
+	}
+	if err := validatePositiveDimension("paper width", o.PaperWidth); err != nil {
+		return HTMLPrintOptions{}, err
+	}
+	if err := validatePositiveDimension("paper height", o.PaperHeight); err != nil {
+		return HTMLPrintOptions{}, err
+	}
+	for name, value := range map[string]float64{
+		"top margin": o.MarginTop, "bottom margin": o.MarginBottom,
+		"left margin": o.MarginLeft, "right margin": o.MarginRight,
+	} {
+		if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
+			return HTMLPrintOptions{}, fmt.Errorf("%s must be a finite non-negative number", name)
+		}
+	}
+	return o, nil
+}
+
+func validatePositiveDimension(name string, value float64) error {
+	if math.IsNaN(value) || math.IsInf(value, 0) || value <= 0 {
+		return fmt.Errorf("%s must be a finite positive number", name)
+	}
+	return nil
+}
+
+func (o HTMLPrintOptions) printParams() *proto.PagePrintToPDF {
+	return &proto.PagePrintToPDF{
+		Landscape:       o.Landscape,
+		PrintBackground: o.PrintBackground,
+		PaperWidth:      &o.PaperWidth,
+		PaperHeight:     &o.PaperHeight,
+		MarginTop:       &o.MarginTop,
+		MarginBottom:    &o.MarginBottom,
+		MarginLeft:      &o.MarginLeft,
+		MarginRight:     &o.MarginRight,
+	}
 }
 
 // ConvertMarkdownToPDFChrome converts markdown source bytes to a high-quality
@@ -46,8 +118,19 @@ func ConvertMarkdownToPDFChrome(source []byte, browser BrowserProvider) ([]byte,
 	// Step 2: Wrap in a full HTML document with CSS styling.
 	fullHTML := wrapInHTMLTemplate(htmlContent)
 
-	// Step 3: Render to PDF using Chrome.
-	return renderHTMLToPDF(browser, fullHTML)
+	// Step 3: Render to PDF using Chrome. The readiness expression retains the
+	// existing bounded, best-effort Mermaid wait before printing.
+	return renderHTMLToPDFChrome(fullHTML, browser, HTMLPrintOptions{
+		PaperWidth:          8.5,
+		PaperHeight:         11,
+		MarginTop:           0.6,
+		MarginBottom:        0.6,
+		MarginLeft:          0.75,
+		MarginRight:         0.75,
+		PrintBackground:     true,
+		ReadinessExpression: mermaidReadinessExpression,
+		Timeout:             defaultHTMLPrintTimeout,
+	}, false)
 }
 
 // markdownToHTML converts markdown bytes to an HTML string using goldmark.
@@ -66,67 +149,62 @@ func markdownToHTML(source []byte) (string, error) {
 	return buf.String(), nil
 }
 
-// renderHTMLToPDF uses a headless Chrome page to print HTML to PDF.
-func renderHTMLToPDF(bp BrowserProvider, html string) ([]byte, error) {
+// RenderHTMLToPDFChrome prints a complete, trusted HTML document in a dedicated
+// headless Chrome page. It waits for page load, document fonts, and the optional
+// readiness expression before printing. The timeout bounds the complete page
+// lifecycle, including PDF generation.
+func RenderHTMLToPDFChrome(html string, bp BrowserProvider, options HTMLPrintOptions) ([]byte, error) {
+	return renderHTMLToPDFChrome(html, bp, options, true)
+}
+
+func renderHTMLToPDFChrome(html string, bp BrowserProvider, options HTMLPrintOptions, readinessRequired bool) ([]byte, error) {
+	if bp == nil {
+		return nil, fmt.Errorf("no browser provider available")
+	}
+	if strings.TrimSpace(html) == "" {
+		return nil, fmt.Errorf("HTML document must not be empty")
+	}
+
+	normalized, err := options.normalized()
+	if err != nil {
+		return nil, fmt.Errorf("invalid HTML print options: %w", err)
+	}
+
 	b, err := bp.GetOrLaunch()
 	if err != nil {
 		return nil, fmt.Errorf("failed to launch browser: %w", err)
 	}
 
-	// Create a dedicated page for PDF rendering — do not use the user's
-	// active page, as SetDocumentContent would destroy their session.
-	pg, err := b.Page(proto.TargetCreateTarget{URL: "about:blank"})
+	// Timeout the target creation too; after creation the page clone carries the
+	// same total deadline for every subsequent operation.
+	pg, err := b.Timeout(normalized.Timeout).Page(proto.TargetCreateTarget{URL: "about:blank"})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create browser page: %w", err)
 	}
-	defer pg.Close()
+	defer func() { _ = pg.CancelTimeout().Close() }()
 
-	// Inject the HTML content.
 	if err := pg.SetDocumentContent(html); err != nil {
 		return nil, fmt.Errorf("failed to set document content: %w", err)
 	}
-
-	// Wait for the page to be ready (fonts loaded, layout complete).
 	if err := pg.WaitLoad(); err != nil {
 		return nil, fmt.Errorf("failed to wait for page load: %w", err)
 	}
-
-	// Wait for all fonts (including emoji) to finish loading before printing.
-	// Chrome's WaitLoad fires on DOMContentLoaded/load events, but font loading
-	// (especially color emoji fonts like NotoColorEmoji) happens asynchronously.
-	// Without this, emoji may render as blank or tofu in the PDF.
-	_, err = pg.Eval(`() => document.fonts.ready`)
-	if err != nil {
+	if _, err := pg.Eval(`() => document.fonts.ready`); err != nil {
 		return nil, fmt.Errorf("failed to wait for fonts: %w", err)
 	}
-
-	// Wait for mermaid diagrams (if any) to finish rendering. The inline
-	// script in the HTML template sets window.__mermaidDone = true once all
-	// ```mermaid code blocks have been converted to SVG. We poll briefly
-	// to avoid blocking indefinitely if mermaid fails to load.
-	_, err = pg.Eval(`() => new Promise((resolve) => {
-		if (window.__mermaidDone) { resolve(true); return; }
-		let tries = 0;
-		const iv = setInterval(() => {
-			tries++;
-			if (window.__mermaidDone || tries > 100) { clearInterval(iv); resolve(true); }
-		}, 50);
-	})`)
-	if err != nil {
-		// Non-fatal: diagrams may not render but the rest of the PDF is fine.
-		fmt.Printf("warning: mermaid wait failed: %v\n", err)
+	if expression := strings.TrimSpace(normalized.ReadinessExpression); expression != "" {
+		if err := pg.Wait(rod.Eval(`() => {
+			const readiness = (` + expression + `);
+			return typeof readiness === 'function' ? readiness() : readiness;
+		}`).ByPromise()); err != nil {
+			if readinessRequired {
+				return nil, fmt.Errorf("failed to wait for HTML readiness: %w", err)
+			}
+			fmt.Printf("warning: mermaid wait failed: %v\n", err)
+		}
 	}
 
-	// Print to PDF with sensible margins and background printing.
-	marginV := 0.6  // inches (~1.5cm) top/bottom
-	marginH := 0.75 // inches (~1.9cm) left/right
-	reader, err := pg.PDF(&proto.PagePrintToPDF{
-		PrintBackground: true,
-		MarginTop:       &marginV,
-		MarginBottom:    &marginV,
-		MarginLeft:      &marginH,
-		MarginRight:     &marginH,
-	})
+	reader, err := pg.PDF(normalized.printParams())
 	if err != nil {
 		return nil, fmt.Errorf("Chrome PDF generation failed: %w", err)
 	}
@@ -136,9 +214,17 @@ func renderHTMLToPDF(bp BrowserProvider, html string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to read PDF data: %w", err)
 	}
-
 	return data, nil
 }
+
+const mermaidReadinessExpression = `new Promise((resolve) => {
+	if (window.__mermaidDone) { resolve(true); return; }
+	let tries = 0;
+	const iv = setInterval(() => {
+		tries++;
+		if (window.__mermaidDone || tries > 100) { clearInterval(iv); resolve(true); }
+	}, 50);
+})`
 
 // wrapInHTMLTemplate wraps an HTML fragment in a complete HTML document with
 // CSS styling optimized for print/PDF output. Includes mermaid.js for

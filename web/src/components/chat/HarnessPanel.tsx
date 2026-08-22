@@ -9,6 +9,7 @@ import TutorialBlueprintCard from './TutorialBlueprintCard'
 import TutorialSceneSlideshowCard from './TutorialSceneSlideshowCard'
 import EmbeddedFileViewer from './EmbeddedFileViewer'
 import BrowserView from './BrowserView'
+import SlidesDeckView from './SlidesDeckView'
 import {
   appVersionsForFocus,
   clampHarnessWidth,
@@ -24,6 +25,7 @@ import type {
   BrowserHandoffMessage,
   ChatMsg,
   DistillPreviewMessage,
+  DocsUpdateMessage,
   SessionArtifact,
   TutorialBlueprintPreviewMessage,
   TutorialSceneSlideshowMessage,
@@ -172,6 +174,10 @@ export default function HarnessPanel({
         const msg = messageAt<BrowserHandoffMessage>(messages, focus.messageIndex)
         return msg?.reason || msg?.pageTitle || harnessKindLabel(focus.kind)
       }
+      case 'slides': {
+        const msg = messageAt<DocsUpdateMessage>(messages, focus.messageIndex)
+        return msg?.title || focus.deckSlug || harnessKindLabel(focus.kind)
+      }
     }
   })()
 
@@ -179,6 +185,7 @@ export default function HarnessPanel({
     focus.kind === 'report' ||
     focus.kind === 'video' ||
     focus.kind === 'browser_handoff' ||
+    focus.kind === 'slides' ||
     focus.kind === 'app'
 
   return (
@@ -382,6 +389,12 @@ export default function HarnessPanel({
             </div>
           )
         })()}
+
+        {focus.kind === 'slides' && (
+          <div className="flex-1 min-h-0 h-full">
+            <SlidesDeckView deckSlug={focus.deckSlug} scope="personal" fillHeight />
+          </div>
+        )}
       </div>
     </div>
   )

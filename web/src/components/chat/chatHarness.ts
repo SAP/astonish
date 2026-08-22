@@ -3,6 +3,7 @@ import type {
   ArtifactMessage,
   ChatMsg,
   DistillPreviewMessage,
+  DocsUpdateMessage,
   TutorialBlueprintPreviewMessage,
 } from './chatTypes'
 
@@ -15,6 +16,7 @@ export type HarnessFocus =
   | { kind: 'tutorial_blueprint'; messageIndex: number }
   | { kind: 'tutorial_slideshow'; messageIndex: number }
   | { kind: 'browser_handoff'; messageIndex: number }
+  | { kind: 'slides'; deckSlug: string; messageIndex: number }
 
 /**
  * Scan messages chronologically and return the most recently emitted harness
@@ -45,6 +47,11 @@ export function deriveLatestHarness(
       latest = { kind: 'tutorial_slideshow', messageIndex: i }
     } else if (m.type === 'browser_handoff') {
       latest = { kind: 'browser_handoff', messageIndex: i }
+    } else if (m.type === 'docs_update') {
+      const docs = m as DocsUpdateMessage
+      if (docs.docType === 'slides' && docs.deckSlug) {
+        latest = { kind: 'slides', deckSlug: docs.deckSlug, messageIndex: i }
+      }
     } else if (m.type === 'artifact') {
       const art = m as ArtifactMessage
       if (reportPaths.has(art.path)) {
@@ -82,6 +89,8 @@ export function harnessFocusEquals(
   switch (a.kind) {
     case 'app':
       return a.appId === (b as Extract<HarnessFocus, { kind: 'app' }>).appId
+    case 'slides':
+      return a.deckSlug === (b as Extract<HarnessFocus, { kind: 'slides' }>).deckSlug
     case 'report':
     case 'video':
       return a.path === (b as Extract<HarnessFocus, { kind: 'report' | 'video' }>).path
@@ -97,6 +106,8 @@ export function harnessKindLabel(kind: HarnessFocus['kind']): string {
   switch (kind) {
     case 'app':
       return 'App'
+    case 'slides':
+      return 'Slides'
     case 'report':
       return 'Report'
     case 'video':

@@ -1,13 +1,23 @@
 import { html, LitElement } from 'lit'
 
 import { DeckController } from './DeckController'
-import { CANVAS_HEIGHT, CANVAS_WIDTH } from './types'
+import { CANVAS_HEIGHT, CANVAS_WIDTH, type AstDeckElement, type FragmentPolicy } from './types'
 
 const RUNTIME_TAGS = ['ast-deck', 'ast-slide', 'ast-text', 'ast-shape', 'ast-image', 'ast-group', 'ast-table', 'ast-chart', 'ast-code', 'ast-icon', 'ast-notes', 'ast-fragment']
 
-export class AstDeck extends LitElement {
+export class AstDeck extends LitElement implements AstDeckElement {
   private controller?: DeckController
   private observer?: ResizeObserver
+
+  get currentIndex(): number { return this.controller?.currentIndex ?? 0 }
+  get fragment(): number { return this.controller?.currentFragment ?? 0 }
+
+  next(): void { this.controller?.next() }
+  previous(): void { this.controller?.previous() }
+  goTo(indexOrId: number | string): void { this.controller?.goTo(indexOrId) }
+  enterPresenter(): Window | null { return this.controller?.enterPresenter() ?? null }
+  enterPrint(policy?: FragmentPolicy): void { this.controller?.enterPrint(policy) }
+  exitPrint(): void { this.controller?.exitPrint() }
 
   protected override createRenderRoot(): HTMLElement | DocumentFragment { return this }
   protected override render() { return html`<slot></slot>` }

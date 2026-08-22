@@ -64,6 +64,18 @@ function browser(reason: string): ChatMsg {
   }
 }
 
+function slidesDeck(deckSlug: string, title = 'Deck'): ChatMsg {
+  return {
+    type: 'docs_update',
+    docType: 'slides',
+    deckSlug,
+    action: 'slide_written',
+    slideIndex: 1,
+    totalSlides: 3,
+    title,
+  }
+}
+
 function artifact(path: string, isReport = true): ChatMsg {
   return {
     type: 'artifact',
@@ -161,6 +173,18 @@ describe('chatHarness', () => {
         messageIndex: 1,
       })
     })
+
+    it('picks a slides deck from a docs_update message', () => {
+      const messages: ChatMsg[] = [
+        { type: 'user', content: 'make a deck' },
+        slidesDeck('quarterly-review', 'Quarterly Review'),
+      ]
+      expect(deriveLatestHarness(messages, new Set())).toEqual({
+        kind: 'slides',
+        deckSlug: 'quarterly-review',
+        messageIndex: 1,
+      })
+    })
   })
 
   describe('resolveHarnessFocus', () => {
@@ -210,6 +234,21 @@ describe('chatHarness', () => {
         harnessFocusEquals(
           { kind: 'distill', messageIndex: 2 },
           { kind: 'distill', messageIndex: 3 },
+        ),
+      ).toBe(false)
+    })
+
+    it('matches slides by deckSlug', () => {
+      expect(
+        harnessFocusEquals(
+          { kind: 'slides', deckSlug: 'deck-a', messageIndex: 1 },
+          { kind: 'slides', deckSlug: 'deck-a', messageIndex: 9 },
+        ),
+      ).toBe(true)
+      expect(
+        harnessFocusEquals(
+          { kind: 'slides', deckSlug: 'deck-a', messageIndex: 1 },
+          { kind: 'slides', deckSlug: 'deck-b', messageIndex: 1 },
         ),
       ).toBe(false)
     })

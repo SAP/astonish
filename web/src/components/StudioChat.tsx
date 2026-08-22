@@ -46,7 +46,6 @@ import NetworkDenialPrompt from './chat/NetworkDenialPrompt'
 import ModelCredentialBanner from './chat/ModelCredentialBanner'
 import SessionModelPicker from './chat/SessionModelPicker'
 import PreChatModelPicker from './chat/PreChatModelPicker'
-import SlidesCard from './docs/slides/SlidesCard'
 import { fileTypeFromFileName } from '../utils/artifactMedia'
 
 function normalizeBlueprintScenes(raw: unknown): TutorialBlueprintPreviewMessage['scenes'] {
@@ -851,7 +850,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
             return { type: 'artifact', path: m.content, toolName: m.toolName || 'write_file' } as ArtifactMessage
           }
           if (m.type === 'docs_update' && m.docsUpdate) {
-            return { type: 'docs_update', docType: m.docsUpdate.type, ...m.docsUpdate } as DocsUpdateMessage
+            return { ...m.docsUpdate, type: 'docs_update', docType: m.docsUpdate.type || 'slides' } as DocsUpdateMessage
           }
           if (m.type === 'distill_preview') {
             return {
@@ -3378,7 +3377,25 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
               }
 
               if (msg.type === 'docs_update') {
-                return <SlidesCard key={index} update={msg as DocsUpdateMessage} scope="personal" />
+                const docs = msg as DocsUpdateMessage
+                if (docs.docType !== 'slides' || !docs.deckSlug) return null
+                const focus: HarnessFocus = { kind: 'slides', deckSlug: docs.deckSlug, messageIndex: index }
+                const progress = docs.slideIndex !== undefined && docs.totalSlides !== undefined
+                  ? `${docs.slideIndex} / ${docs.totalSlides}`
+                  : docs.totalSlides !== undefined
+                    ? `${docs.totalSlides} slides`
+                    : 'Preparing deck'
+                return (
+                  <div key={index}>
+                    <HarnessPlaceholder
+                      focus={focus}
+                      title={docs.title || docs.deckSlug}
+                      subtitle={progress}
+                      isFocused={harnessOpen && harnessFocusEquals(effectiveHarnessFocus, focus)}
+                      onOpen={openHarness}
+                    />
+                  </div>
+                )
               }
 
               if (msg.type === 'artifact') {

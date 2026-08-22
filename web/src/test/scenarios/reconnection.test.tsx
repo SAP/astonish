@@ -82,25 +82,19 @@ describe('Reconnection Scenarios', () => {
       })
 
       await waitFor(() => {
-        const cards = result.container.querySelectorAll('[data-testid="slides-card"]')
-        expect(cards).toHaveLength(1)
-        expect(cards[0]).toHaveTextContent('Quarterly Business Review')
-        expect(cards[0]).toHaveTextContent('4 / 8')
-        expect(cards[0]).toHaveTextContent('0 errors, 1 warnings')
-        expect(cards[0]).toHaveTextContent('9 native, 0 unsupported')
+        const launchers = result.container.querySelectorAll('[data-testid="harness-placeholder"][data-harness-kind="slides"]')
+        expect(launchers).toHaveLength(1)
+        expect(launchers[0]).toHaveTextContent('Quarterly Business Review')
+        expect(launchers[0]).toHaveTextContent('4 / 8')
       }, { timeout: 10000 })
 
       await result.sendMessage('Add the priorities and risks slides')
 
       await waitFor(() => {
-        const cards = result.container.querySelectorAll('[data-testid="slides-card"]')
-        expect(cards).toHaveLength(2)
-        expect(cards[0]).toHaveTextContent('4 / 8')
-        expect(cards[0]).toHaveTextContent('0 errors, 1 warnings')
-        expect(cards[0]).toHaveTextContent('9 native, 0 unsupported')
-        expect(cards[1]).toHaveTextContent('6 / 8')
-        expect(cards[1]).toHaveTextContent('1 errors, 0 warnings')
-        expect(cards[1]).toHaveTextContent('12 native, 1 unsupported')
+        const launchers = result.container.querySelectorAll('[data-testid="harness-placeholder"][data-harness-kind="slides"]')
+        expect(launchers).toHaveLength(2)
+        expect(launchers[0]).toHaveTextContent('4 / 8')
+        expect(launchers[1]).toHaveTextContent('6 / 8')
       }, { timeout: 10000 })
     })
   })
@@ -110,6 +104,7 @@ describe('Reconnection Scenarios', () => {
       const docsUpdate = (slideIndex: number, errors: number, warnings: number, native: number, unsupported: number) => ({
         type: 'docs_update',
         docsUpdate: {
+          type: 'slides',
           deckSlug: 'quarterly-review',
           action: 'slide_written',
           slideIndex,
@@ -140,14 +135,10 @@ describe('Reconnection Scenarios', () => {
 
       await waitFor(() => {
         expect(result.container).toHaveTextContent('Create the quarterly review')
-        const cards = result.container.querySelectorAll('[data-testid="slides-card"]')
-        expect(cards).toHaveLength(2)
-        expect(cards[0]).toHaveTextContent('4 / 8')
-        expect(cards[0]).toHaveTextContent('0 errors, 1 warnings')
-        expect(cards[0]).toHaveTextContent('9 native, 0 unsupported')
-        expect(cards[1]).toHaveTextContent('6 / 8')
-        expect(cards[1]).toHaveTextContent('1 errors, 0 warnings')
-        expect(cards[1]).toHaveTextContent('12 native, 1 unsupported')
+        const launchers = result.container.querySelectorAll('[data-testid="harness-placeholder"][data-harness-kind="slides"]')
+        expect(launchers).toHaveLength(2)
+        expect(launchers[0]).toHaveTextContent('4 / 8')
+        expect(launchers[1]).toHaveTextContent('6 / 8')
       }, { timeout: 10000 })
     })
   })

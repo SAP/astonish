@@ -1,4 +1,4 @@
-import { AppWindow, ChevronRight, Clapperboard, FileText, Film, Monitor, Workflow } from 'lucide-react'
+import { AppWindow, ChevronRight, Clapperboard, FileText, Film, Monitor, Presentation, Workflow } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
@@ -21,6 +21,7 @@ const ICONS: Record<HarnessFocus['kind'], LucideIcon> = {
   tutorial_blueprint: Clapperboard,
   tutorial_slideshow: Clapperboard,
   browser_handoff: Monitor,
+  slides: Presentation,
 }
 
 function kindPrefix(kind: HarnessFocus['kind']): string {
@@ -39,6 +40,8 @@ function kindPrefix(kind: HarnessFocus['kind']): string {
       return 'Tutorial scenes'
     case 'browser_handoff':
       return 'Browser'
+    case 'slides':
+      return 'Slides'
   }
 }
 

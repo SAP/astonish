@@ -265,10 +265,12 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		planMode := false
 		graphPlan := false
 		askMode := false
+		approvedPlanExecution := false
 		if po := PromptOverridesFromContext(ctx); po != nil {
 			planMode = po.PlanMode
 			graphPlan = po.GraphPlanMode
 			askMode = po.AskMode
+			approvedPlanExecution = po.ApprovedPlanExecution
 			if po.ChannelHints != "" {
 				promptBuilder.ChannelHints = po.ChannelHints
 			}
@@ -605,6 +607,13 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 				}
 				phase := gpState.Phase()
 				if GraphPlanPhaseTools(phase)[name] {
+					if limitMessage := gpState.ChargeExploration(name, args); limitMessage != "" {
+						return map[string]any{
+							"status": "blocked_graph_plan_budget",
+							"phase":  string(phase),
+							"error":  limitMessage,
+						}, nil
+					}
 					return nil, nil
 				}
 				return map[string]any{
@@ -632,6 +641,45 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			})
 		}
 
+		// Approved-plan execution is normal mode for all implementation tools, but
+		// the plan itself is immutable. Reject re-announcement before the tool body
+		// can replace PlanState or rewrite PLAN.md. update_plan remains allowed.
+		if approvedPlanExecution {
+			var executionResearchMu sync.Mutex
+			executionResearch := map[string]int{}
+			beforeToolCallbacks = append(beforeToolCallbacks, func(_ tool.Context, t tool.Tool, _ map[string]any) (map[string]any, error) {
+				name := t.Name()
+				if approvedPlanExecutionToolBlocked(name) {
+					return map[string]any{
+						"status": "blocked_approved_plan_execution",
+						"error":  ApprovedPlanExecutionBlockedMessage(),
+					}, nil
+				}
+
+				kind := approvedExecutionResearchKind(name)
+				if kind == "" {
+					return nil, nil
+				}
+				limit := ApprovedExecutionMaxSourceReads
+				switch kind {
+				case "codegraph":
+					limit = ApprovedExecutionMaxCodegraphCalls
+				case "search":
+					limit = ApprovedExecutionMaxSearchCalls
+				}
+				executionResearchMu.Lock()
+				defer executionResearchMu.Unlock()
+				if executionResearch[kind] >= limit {
+					return map[string]any{
+						"status": "blocked_approved_plan_research",
+						"error":  ApprovedPlanExecutionResearchBlockedMessage(kind, limit),
+					}, nil
+				}
+				executionResearch[kind]++
+				return nil, nil
+			})
+		}
+
 		// ── Code-mode authorization gates ──
 		// Active in code mode (EnforceAuthorization) for both Normal and Ask mode
 		// (planMode/graphPlan handled above). Two independent gates make
@@ -655,6 +703,14 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			authPolicy := c.GetOrCreateAuthPolicy(sessionID)
 
 			emitAuthPrompt := func(kind, toolName, prompt string, options []string, paths []string, args map[string]any) map[string]any {
+				// Only the callback that atomically claims the pending slot may emit
+				// an approval. Parallel tool calls remain suspended behind that owner.
+				if !authPolicy.TrySetPending(&PendingAuthorization{Kind: kind, Tool: toolName, Paths: paths}) {
+					return map[string]any{
+						"status": "pending_authorization",
+						"info":   "Waiting for user authorization on a previous tool call.",
+					}
+				}
 				delta := map[string]any{
 					"awaiting_approval": true,
 					"approval_tool":     toolName,
@@ -667,7 +723,6 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 				if len(args) > 0 {
 					delta["approval_args"] = args
 				}
-				authPolicy.SetPending(&PendingAuthorization{Kind: kind, Tool: toolName, Paths: paths})
 				authEventBuffer.append(&session.Event{
 					LLMResponse: model.LLMResponse{
 						Content: &genai.Content{

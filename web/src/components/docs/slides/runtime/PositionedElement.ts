@@ -1,0 +1,2 @@
+export { PositionedElement } from './base'
+

@@ -10,6 +10,7 @@ import (
 	"github.com/SAP/astonish/ent/team/appstate"
 	"github.com/SAP/astonish/ent/team/chatsessionevent"
 	"github.com/SAP/astonish/ent/team/credential"
+	"github.com/SAP/astonish/ent/team/deck"
 	"github.com/SAP/astonish/ent/team/drillreport"
 	"github.com/SAP/astonish/ent/team/fleetmailboxmessage"
 	"github.com/SAP/astonish/ent/team/fleetmonitorstate"
@@ -31,6 +32,7 @@ import (
 	"github.com/SAP/astonish/ent/team/setting"
 	"github.com/SAP/astonish/ent/team/skill"
 	"github.com/SAP/astonish/ent/team/skillfile"
+	"github.com/SAP/astonish/ent/team/slide"
 	"github.com/SAP/astonish/ent/team/teamauditlog"
 	"github.com/google/uuid"
 )
@@ -177,6 +179,38 @@ func init() {
 	credentialDescID := credentialFields[0].Descriptor()
 	// credential.DefaultID holds the default value on creation for the id field.
 	credential.DefaultID = credentialDescID.Default.(func() uuid.UUID)
+	deckFields := schema.Deck{}.Fields()
+	_ = deckFields
+	// deckDescSlug is the schema descriptor for slug field.
+	deckDescSlug := deckFields[1].Descriptor()
+	// deck.SlugValidator is a validator for the "slug" field. It is called by the builders before save.
+	deck.SlugValidator = deckDescSlug.Validators[0].(func(string) error)
+	// deckDescTitle is the schema descriptor for title field.
+	deckDescTitle := deckFields[2].Descriptor()
+	// deck.TitleValidator is a validator for the "title" field. It is called by the builders before save.
+	deck.TitleValidator = deckDescTitle.Validators[0].(func(string) error)
+	// deckDescDescription is the schema descriptor for description field.
+	deckDescDescription := deckFields[3].Descriptor()
+	// deck.DefaultDescription holds the default value on creation for the description field.
+	deck.DefaultDescription = deckDescDescription.Default.(string)
+	// deckDescSchemaVersion is the schema descriptor for schema_version field.
+	deckDescSchemaVersion := deckFields[4].Descriptor()
+	// deck.DefaultSchemaVersion holds the default value on creation for the schema_version field.
+	deck.DefaultSchemaVersion = deckDescSchemaVersion.Default.(int)
+	// deckDescCreatedAt is the schema descriptor for created_at field.
+	deckDescCreatedAt := deckFields[7].Descriptor()
+	// deck.DefaultCreatedAt holds the default value on creation for the created_at field.
+	deck.DefaultCreatedAt = deckDescCreatedAt.Default.(func() time.Time)
+	// deckDescUpdatedAt is the schema descriptor for updated_at field.
+	deckDescUpdatedAt := deckFields[8].Descriptor()
+	// deck.DefaultUpdatedAt holds the default value on creation for the updated_at field.
+	deck.DefaultUpdatedAt = deckDescUpdatedAt.Default.(func() time.Time)
+	// deck.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
+	deck.UpdateDefaultUpdatedAt = deckDescUpdatedAt.UpdateDefault.(func() time.Time)
+	// deckDescID is the schema descriptor for id field.
+	deckDescID := deckFields[0].Descriptor()
+	// deck.DefaultID holds the default value on creation for the id field.
+	deck.DefaultID = deckDescID.Default.(func() uuid.UUID)
 	drillreportFields := schema.DrillReport{}.Fields()
 	_ = drillreportFields
 	// drillreportDescSuite is the schema descriptor for suite field.
@@ -741,6 +775,38 @@ func init() {
 	skillfileDescID := skillfileFields[0].Descriptor()
 	// skillfile.DefaultID holds the default value on creation for the id field.
 	skillfile.DefaultID = skillfileDescID.Default.(func() uuid.UUID)
+	slideFields := schema.Slide{}.Fields()
+	_ = slideFields
+	// slideDescPosition is the schema descriptor for position field.
+	slideDescPosition := slideFields[1].Descriptor()
+	// slide.PositionValidator is a validator for the "position" field. It is called by the builders before save.
+	slide.PositionValidator = slideDescPosition.Validators[0].(func(int) error)
+	// slideDescTitle is the schema descriptor for title field.
+	slideDescTitle := slideFields[2].Descriptor()
+	// slide.DefaultTitle holds the default value on creation for the title field.
+	slide.DefaultTitle = slideDescTitle.Default.(string)
+	// slideDescNotes is the schema descriptor for notes field.
+	slideDescNotes := slideFields[4].Descriptor()
+	// slide.DefaultNotes holds the default value on creation for the notes field.
+	slide.DefaultNotes = slideDescNotes.Default.(string)
+	// slideDescSchemaVersion is the schema descriptor for schema_version field.
+	slideDescSchemaVersion := slideFields[5].Descriptor()
+	// slide.DefaultSchemaVersion holds the default value on creation for the schema_version field.
+	slide.DefaultSchemaVersion = slideDescSchemaVersion.Default.(int)
+	// slideDescCreatedAt is the schema descriptor for created_at field.
+	slideDescCreatedAt := slideFields[6].Descriptor()
+	// slide.DefaultCreatedAt holds the default value on creation for the created_at field.
+	slide.DefaultCreatedAt = slideDescCreatedAt.Default.(func() time.Time)
+	// slideDescUpdatedAt is the schema descriptor for updated_at field.
+	slideDescUpdatedAt := slideFields[7].Descriptor()
+	// slide.DefaultUpdatedAt holds the default value on creation for the updated_at field.
+	slide.DefaultUpdatedAt = slideDescUpdatedAt.Default.(func() time.Time)
+	// slide.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
+	slide.UpdateDefaultUpdatedAt = slideDescUpdatedAt.UpdateDefault.(func() time.Time)
+	// slideDescID is the schema descriptor for id field.
+	slideDescID := slideFields[0].Descriptor()
+	// slide.DefaultID holds the default value on creation for the id field.
+	slide.DefaultID = slideDescID.Default.(func() uuid.UUID)
 	teamauditlogFields := schema.TeamAuditLog{}.Fields()
 	_ = teamauditlogFields
 	// teamauditlogDescTimestamp is the schema descriptor for timestamp field.

@@ -12,12 +12,12 @@ import (
 type A2AAgent struct {
 	ID             string            `json:"id"`
 	Name           string            `json:"name"`
-	URL            string            `json:"url"`                        // Base URL of remote agent
-	CredentialName string            `json:"credential_name,omitempty"`  // Reference to credential in store
-	AuthType       string            `json:"auth_type,omitempty"`        // bearer, api_key, oauth
-	Enabled        *bool             `json:"enabled,omitempty"`          // nil defaults to true
-	Headers        map[string]string `json:"headers,omitempty"`          // Additional headers
-	Timeout        string            `json:"timeout,omitempty"`          // Duration string e.g. "30s", "2m"
+	URL            string            `json:"url"`                       // Base URL of remote agent
+	CredentialName string            `json:"credential_name,omitempty"` // Reference to credential in store
+	AuthType       string            `json:"auth_type,omitempty"`       // bearer, api_key, oauth
+	Enabled        *bool             `json:"enabled,omitempty"`         // nil defaults to true
+	Headers        map[string]string `json:"headers,omitempty"`         // Additional headers
+	Timeout        string            `json:"timeout,omitempty"`         // Duration string e.g. "30s", "2m"
 	CachedCard     json.RawMessage   `json:"cached_card,omitempty"`     // Serialized AgentCard from last refresh
 	CachedSkills   json.RawMessage   `json:"cached_skills,omitempty"`   // Cached skill list for tool generation
 	CreatedBy      string            `json:"created_by,omitempty"`

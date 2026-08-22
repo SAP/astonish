@@ -15,7 +15,9 @@ var planProgressCallback func(event agent.SubTaskProgressEvent)
 // planStateCallback is set by the launcher to store the announced plan in
 // ChatAgent.PlanState, enabling both automatic sub-task progression and
 // explicit model-driven updates via update_plan.
-var planStateCallback func(goal string, doc agent.PlanDocumentInfo, steps []agent.PlanStepInfo)
+// planStateCallback returns whether the announcement was accepted. A false
+// result means the active approved plan won a lifecycle race and must remain.
+var planStateCallback func(goal string, doc agent.PlanDocumentInfo, steps []agent.PlanStepInfo) bool
 
 // planStepUpdateCallback is set by the launcher to apply an explicit step
 // status transition from the update_plan tool onto the active PlanState. It
@@ -30,7 +32,7 @@ func SetPlanProgressCallback(fn func(event agent.SubTaskProgressEvent)) {
 
 // SetPlanStateCallback sets the callback used by announce_plan to store the
 // plan in ChatAgent for progression.
-func SetPlanStateCallback(fn func(goal string, doc agent.PlanDocumentInfo, steps []agent.PlanStepInfo)) {
+func SetPlanStateCallback(fn func(goal string, doc agent.PlanDocumentInfo, steps []agent.PlanStepInfo) bool) {
 	planStateCallback = fn
 }
 
@@ -73,7 +75,16 @@ type AnnouncePlanResult struct {
 	Status string `json:"status"`
 }
 
-func announcePlan(_ tool.Context, args AnnouncePlanArgs) (AnnouncePlanResult, error) {
+func announcePlan(ctx tool.Context, args AnnouncePlanArgs) (AnnouncePlanResult, error) {
+	// Defense in depth: the ChatAgent BeforeTool gate normally rejects this call,
+	// but checking the request-scoped flag here prevents a stale/racing invocation
+	// from replacing PlanState even if it reaches the function body directly.
+	if ctx != nil {
+		if po := agent.PromptOverridesFromContext(ctx); po != nil && po.ApprovedPlanExecution {
+			return AnnouncePlanResult{Status: "blocked_approved_plan_execution"}, nil
+		}
+	}
+
 	steps := make([]agent.PlanStepInfo, len(args.Steps))
 	for i, s := range args.Steps {
 		files := make([]agent.PlanFileChange, 0, len(s.Files))
@@ -100,9 +111,10 @@ func announcePlan(_ tool.Context, args AnnouncePlanArgs) (AnnouncePlanResult, er
 		Verification: args.Verification,
 	}
 
-	// Store the plan in ChatAgent for progression + PLAN.md persistence.
-	if planStateCallback != nil {
-		planStateCallback(args.Goal, doc, steps)
+	// Store the plan in ChatAgent for progression + PLAN.md persistence. A
+	// lifecycle rejection is a no-op: do not emit another approval event.
+	if planStateCallback != nil && !planStateCallback(args.Goal, doc, steps) {
+		return AnnouncePlanResult{Status: "blocked_active_approved_plan"}, nil
 	}
 
 	// Emit SSE event for frontend rendering.

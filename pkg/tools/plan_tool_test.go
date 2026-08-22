@@ -66,6 +66,35 @@ func TestUpdatePlanTool_NoActivePlan(t *testing.T) {
 	}
 }
 
+func TestAnnouncePlanTool_RejectedPlanDoesNotEmit(t *testing.T) {
+	origState := planStateCallback
+	origProgress := planProgressCallback
+	defer func() {
+		planStateCallback = origState
+		planProgressCallback = origProgress
+	}()
+
+	emitted := false
+	SetPlanStateCallback(func(string, agent.PlanDocumentInfo, []agent.PlanStepInfo) bool {
+		return false
+	})
+	SetPlanProgressCallback(func(agent.SubTaskProgressEvent) { emitted = true })
+
+	res, err := announcePlan(nil, AnnouncePlanArgs{
+		Goal:  "replacement",
+		Steps: []PlanStepInput{{Name: "replace", Description: "replace approved plan"}},
+	})
+	if err != nil {
+		t.Fatalf("announcePlan error: %v", err)
+	}
+	if res.Status != "blocked_active_approved_plan" {
+		t.Fatalf("status = %q, want blocked_active_approved_plan", res.Status)
+	}
+	if emitted {
+		t.Fatal("rejected announcement must not emit plan_announced")
+	}
+}
+
 func TestAnnouncePlanTool_PassesDetailsThrough(t *testing.T) {
 	orig := planStateCallback
 	origProgress := planProgressCallback
@@ -75,7 +104,10 @@ func TestAnnouncePlanTool_PassesDetailsThrough(t *testing.T) {
 	}()
 
 	var gotSteps []agent.PlanStepInfo
-	SetPlanStateCallback(func(goal string, doc agent.PlanDocumentInfo, steps []agent.PlanStepInfo) { gotSteps = steps })
+	SetPlanStateCallback(func(goal string, doc agent.PlanDocumentInfo, steps []agent.PlanStepInfo) bool {
+		gotSteps = steps
+		return true
+	})
 	SetPlanProgressCallback(func(agent.SubTaskProgressEvent) {})
 
 	_, err := announcePlan(nil, AnnouncePlanArgs{

@@ -59,6 +59,30 @@ func TestPlanModeBlockedMessage_NamesToolAndMode(t *testing.T) {
 	}
 }
 
+func TestApprovedPlanExecutionGate_BlocksOnlyReannouncement(t *testing.T) {
+	if !approvedPlanExecutionToolBlocked("announce_plan") {
+		t.Fatal("approved execution must block announce_plan")
+	}
+	for _, name := range []string{"update_plan", "write_file", "delegate_tasks"} {
+		if approvedPlanExecutionToolBlocked(name) {
+			t.Errorf("approved execution should allow %q", name)
+		}
+	}
+	msg := ApprovedPlanExecutionBlockedMessage()
+	for _, want := range []string{"announce_plan", "update_plan", "approved plan"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("blocked message should mention %q, got %q", want, msg)
+		}
+	}
+}
+
+func TestPlanExecutionSystemContext_ForbidsReannouncement(t *testing.T) {
+	ctx := BuildPlanExecutionSystemContext("/tmp/session.PLAN.md")
+	if !strings.Contains(ctx, "Do NOT call announce_plan") || !strings.Contains(ctx, "Use update_plan") {
+		t.Fatalf("execution context must preserve the approved plan lifecycle:\n%s", ctx)
+	}
+}
+
 func TestPlanModeSystemContext_HardConstraintLanguage(t *testing.T) {
 	// The prompt must clearly state the runtime enforces the no-changes rule
 	// and enumerate that mutating tools + delegate_tasks are disabled.

@@ -2877,6 +2877,9 @@ func TestRespondSubAgentAuth_PendingDeliversDecision(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for the sub-agent to receive the decision")
 	}
+	if b.RespondSubAgentAuth("Always Allow") {
+		t.Fatal("a repeated response must not be delivered to a new or resolved request")
+	}
 }
 
 // TestRespondSubAgentAuth_DenyPropagates verifies a denial choice is delivered

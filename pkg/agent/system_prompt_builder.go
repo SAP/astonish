@@ -121,6 +121,10 @@ type PromptOverrides struct {
 	// or execute. Mutually exclusive with PlanMode and GraphPlanMode.
 	AskMode bool
 
+	// ApprovedPlanExecution prevents an implementation turn from replacing the
+	// plan the user already approved. It is independent of Normal/Plan mode.
+	ApprovedPlanExecution bool
+
 	// Web search/extract are resolved per request from the platform→team cascade
 	// so a singleton ChatAgent re-inited without tenant context still advertises
 	// the platform-selected tools for every user. Nil pointers mean "leave builder as-is".

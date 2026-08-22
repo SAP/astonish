@@ -69,22 +69,22 @@ const (
 
 // ScheduledJob represents a scheduled automation job.
 type ScheduledJob struct {
-	ID                  string       `json:"id"`
-	Name                string       `json:"name"`
-	Mode                string       `json:"mode"` // routine, adaptive, fleet_poll
-	Schedule            JobSchedule  `json:"schedule"`
-	Payload             JobPayload   `json:"payload"`
-	Delivery            JobDelivery  `json:"delivery"`
-	Enabled             bool         `json:"enabled"`
-	CreatedAt           time.Time    `json:"created_at"`
-	OwnerID             string       `json:"owner_id,omitempty"` // platform user ID who created the job
-	Scope               string       `json:"scope,omitempty"`    // personal | team (runtime; which store owns the job)
-	TeamSlug            string       `json:"team_slug,omitempty"` // team context for personal jobs (credential/flow fallback)
-	LastRun             *time.Time   `json:"last_run,omitempty"`
-	LastStatus          string       `json:"last_status"`
-	LastError           string       `json:"last_error,omitempty"`
-	NextRun             *time.Time   `json:"next_run,omitempty"`
-	ConsecutiveFailures int          `json:"consecutive_failures"`
+	ID                  string      `json:"id"`
+	Name                string      `json:"name"`
+	Mode                string      `json:"mode"` // routine, adaptive, fleet_poll
+	Schedule            JobSchedule `json:"schedule"`
+	Payload             JobPayload  `json:"payload"`
+	Delivery            JobDelivery `json:"delivery"`
+	Enabled             bool        `json:"enabled"`
+	CreatedAt           time.Time   `json:"created_at"`
+	OwnerID             string      `json:"owner_id,omitempty"`  // platform user ID who created the job
+	Scope               string      `json:"scope,omitempty"`     // personal | team (runtime; which store owns the job)
+	TeamSlug            string      `json:"team_slug,omitempty"` // team context for personal jobs (credential/flow fallback)
+	LastRun             *time.Time  `json:"last_run,omitempty"`
+	LastStatus          string      `json:"last_status"`
+	LastError           string      `json:"last_error,omitempty"`
+	NextRun             *time.Time  `json:"next_run,omitempty"`
+	ConsecutiveFailures int         `json:"consecutive_failures"`
 }
 
 // JobSchedule defines when a job runs.

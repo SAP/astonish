@@ -108,9 +108,9 @@ type SessionAuthPolicy struct {
 	// is re-driven in the resumed turn.
 	pathOnceGrants map[string]bool
 
-	// pending holds the authorization request the turn is currently suspended
-	// on (nil when not awaiting). It is set when a gate emits an approval
-	// prompt and consumed when the user's decision arrives on the next turn.
+	// pending holds the single authorization request that currently owns the
+	// approval UI. Concurrent callbacks must not replace it: one user decision
+	// always applies to exactly one suspended operation.
 	pending *PendingAuthorization
 }
 
@@ -126,24 +126,47 @@ type PendingAuthorization struct {
 	Paths []string
 }
 
-// SetPending records the authorization request the turn is suspended on.
-func (p *SessionAuthPolicy) SetPending(req *PendingAuthorization) {
-	if p == nil {
-		return
+// TrySetPending records req only when no authorization request currently owns
+// the approval UI. It returns true to the owner that must emit the prompt.
+// Concurrent duplicate or distinct requests return false and must remain
+// suspended behind the existing owner rather than replacing it.
+func (p *SessionAuthPolicy) TrySetPending(req *PendingAuthorization) bool {
+	if p == nil || req == nil {
+		return false
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.pending = req
+	if p.pending != nil {
+		return false
+	}
+	p.pending = clonePendingAuthorization(req)
+	return true
 }
 
-// Pending returns the authorization request the turn is suspended on, or nil.
+// SetPending records an authorization request for compatibility with callers
+// that establish state serially. It never replaces a request that already owns
+// the approval UI.
+func (p *SessionAuthPolicy) SetPending(req *PendingAuthorization) {
+	p.TrySetPending(req)
+}
+
+// Pending returns a snapshot of the request owning the approval UI, or nil.
 func (p *SessionAuthPolicy) Pending() *PendingAuthorization {
 	if p == nil {
 		return nil
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.pending
+	return clonePendingAuthorization(p.pending)
+}
+
+func clonePendingAuthorization(req *PendingAuthorization) *PendingAuthorization {
+	if req == nil {
+		return nil
+	}
+	clone := *req
+	clone.Paths = append([]string(nil), req.Paths...)
+	return &clone
 }
 
 // ClearPending drops any recorded pending authorization request.
@@ -242,6 +265,17 @@ func (p *SessionAuthPolicy) GrantAllToolsSession() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.allowAllToolsSession = true
+}
+
+// AllToolsAllowedForSession reports whether the durable "Always Allow" tool
+// grant is active without consuming any one-shot grant.
+func (p *SessionAuthPolicy) AllToolsAllowedForSession() bool {
+	if p == nil {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.allowAllToolsSession
 }
 
 // ToolAuthorized reports whether the named tool may run right now given the
@@ -548,11 +582,17 @@ func (p *SessionAuthPolicy) ApplyAuthorizationDecision(response string) *Authori
 	if p == nil {
 		return nil
 	}
-	pending := p.Pending()
+
+	// Claim and clear the current owner atomically. The old Pending()+
+	// ClearPending() sequence allowed two concurrent responses to both apply to
+	// the same request.
+	p.mu.Lock()
+	pending := clonePendingAuthorization(p.pending)
+	p.pending = nil
+	p.mu.Unlock()
 	if pending == nil {
 		return nil
 	}
-	p.ClearPending()
 
 	choice := normalizeChoice(response)
 	d := &AuthorizationDecision{Kind: pending.Kind, Tool: pending.Tool}

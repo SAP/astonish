@@ -1761,9 +1761,9 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			}
 		})
 		// Wire plan state storage so AfterToolCallback can auto-progress steps.
-		tools.SetPlanStateCallback(func(goal string, doc agent.PlanDocumentInfo, steps []agent.PlanStepInfo) {
+		tools.SetPlanStateCallback(func(goal string, doc agent.PlanDocumentInfo, steps []agent.PlanStepInfo) bool {
 			plan := agent.NewPlanState(goal, doc, steps)
-			chatAgent.SetActivePlan(plan)
+			return chatAgent.TrySetActivePlan(plan)
 		})
 		// Wire explicit model-driven plan updates (update_plan tool) onto the
 		// active plan. This drives PLAN.md rewrites for main-thread work and

@@ -132,6 +132,9 @@ type model struct {
 	turnCancel context.CancelFunc
 	// eventCh is drained via tea.Cmds while a turn is active.
 	eventCh <-chan events.Event
+	// planApprovalPending prevents duplicate approval turns while persistence and
+	// RunTurn execute asynchronously outside Bubble Tea's update loop.
+	planApprovalPending bool
 	// turnStartedAt records when the current turn began (or resumed after a
 	// HITL pause), enabling a live elapsed-time counter in the status bar.
 	// Zero value means the timer is not actively ticking (either no turn or paused).
@@ -652,6 +655,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case artifactContentLoadedMsg:
 		return m.applyArtifactContentLoaded(msg)
+
+	case planApprovalStartedMsg:
+		m.planApprovalPending = false
+		if msg.err != nil {
+			m.tr.Apply(events.NewError("Approved plan did not start: " + msg.err.Error() + ". Press Enter to retry."))
+			m.refreshViewport()
+			return m, nil
+		}
+		m.tr.ResolvePlan(events.PlanApproved)
+		m.ta.Reset()
+		m.planMode = false
+		m.graphPlanMode = false
+		m.turnCancel = msg.cancel
+		m.eventCh = msg.ch
+		m.tr.Apply(events.NewSystem("Plan approved. Implementation started."))
+		m.tr.Streaming = true
+		m.tr.Status = "Thinking…"
+		m.timerResume()
+		if m.ready {
+			m.layout()
+		}
+		m.refreshViewport()
+		return m, tea.Batch(waitEvent(msg.ch), timerTick())
 
 	case eventMsg:
 		// Apply this event plus any others already sitting in the channel, then
@@ -3849,10 +3875,19 @@ func (m model) renderDelegationItem(it events.Item, width int) string {
 			icon = th.Error.Render("✗")
 			nameStyle = th.Error
 			timeStr = task.Duration
-		default: // "running"
+		case "queued":
+			icon = th.Muted.Render("○")
+			nameStyle = th.Muted
+			timeStr = task.Duration
+		case "retrying":
+			icon = th.Brand.Render("↻")
+			nameStyle = th.Text
+			timeStr = task.Duration
+		default: // running / waiting_on_model
 			icon = th.Brand.Render("●")
 			nameStyle = th.Text
-			if !task.StartedAt.IsZero() {
+			timeStr = task.Duration
+			if timeStr == "" && !task.StartedAt.IsZero() {
 				elapsed := time.Since(task.StartedAt).Truncate(time.Second)
 				timeStr = formatDuration(elapsed)
 			}
@@ -3897,30 +3932,52 @@ func (m model) renderDelegationItem(it events.Item, width int) string {
 		th.Muted.Italic(true).Render("    click task to expand details")
 }
 
-// delegationTaskStatusLine returns a short, human-friendly inline status for a
-// running task's latest activity (e.g. "→ Reading main.go" or "→ thinking…").
+// delegationTaskStatusLine returns a short, human-friendly inline liveness
+// status, preferring watchdog/retry metadata over the latest activity detail.
 func delegationTaskStatusLine(task events.DelegationTaskState, maxWidth int) string {
-	if task.Status != "running" || len(task.Activity) == 0 {
-		return ""
-	}
-	last := task.Activity[len(task.Activity)-1]
 	var line string
-	switch last.Type {
-	case "tool_call":
-		line = "→ " + delegationToolHint(last.ToolName, last.Args)
-	case "tool_result":
-		line = "→ " + render.ToolDisplayName(last.ToolName) + " done"
-	case "text":
-		t := strings.TrimSpace(last.Text)
-		if idx := strings.IndexByte(t, '\n'); idx >= 0 {
-			t = t[:idx]
+	switch {
+	case task.NoActivity:
+		line = "⚠ no activity"
+		if task.LastActivity != "" {
+			line += " for " + task.LastActivity
 		}
-		if t == "" {
-			return ""
+		if task.Error != "" {
+			line += ": " + task.Error
 		}
-		line = "→ " + t
-	default:
-		return ""
+	case task.Status == "queued":
+		line = "queued — waiting for a worker slot"
+	case task.Status == "waiting_on_model":
+		line = "waiting on model"
+		if task.LastActivity != "" {
+			line += " · last activity " + task.LastActivity + " ago"
+		}
+	case task.Status == "retrying":
+		line = "retrying"
+		if task.Attempt > 0 {
+			line += fmt.Sprintf(" · attempt %d", task.Attempt)
+		}
+		if task.Error != "" {
+			line += ": " + task.Error
+		}
+	case task.Status == "failed" && task.Error != "":
+		line = task.Error
+	case task.Status == "running" && len(task.Activity) > 0:
+		last := task.Activity[len(task.Activity)-1]
+		switch last.Type {
+		case "tool_call":
+			line = "→ " + delegationToolHint(last.ToolName, last.Args)
+		case "tool_result":
+			line = "→ " + render.ToolDisplayName(last.ToolName) + " done"
+		case "text":
+			t := strings.TrimSpace(last.Text)
+			if idx := strings.IndexByte(t, '\n'); idx >= 0 {
+				t = t[:idx]
+			}
+			if t != "" {
+				line = "→ " + t
+			}
+		}
 	}
 	if maxWidth > 0 && len([]rune(line)) > maxWidth {
 		runes := []rune(line)
@@ -4061,8 +4118,8 @@ func (m model) delegationTaskAtLine(line int, itemIdx int) int {
 					return i
 				}
 				currentLine++ // task row
-				// Running tasks with activity have an extra status line
-				if task.Status == "running" && len(task.Activity) > 0 {
+				// Tasks with a liveness/detail line consume one extra row.
+				if delegationTaskStatusLine(task, 0) != "" {
 					if offset == currentLine {
 						return i // clicking on status line selects the same task
 					}
@@ -4197,6 +4254,22 @@ func (m model) renderDelegationDetailContent(task events.DelegationTaskState, wi
 		th.Text.Bold(true).Render(task.Name),
 		th.Muted.Render(task.Status),
 		th.Muted.Render(timeStr)))
+	if task.Attempt > 0 {
+		b.WriteString("  " + th.Muted.Render(fmt.Sprintf("Attempt %d", task.Attempt)))
+		if task.LastActivity != "" {
+			b.WriteString(th.Muted.Render(" · last activity " + task.LastActivity + " ago"))
+		}
+		b.WriteString("\n")
+	}
+	if task.NoActivity {
+		warning := "No meaningful activity detected"
+		if task.Error != "" {
+			warning += ": " + task.Error
+		}
+		b.WriteString("  " + th.Error.Render("⚠ "+warning) + "\n")
+	} else if task.Status == "retrying" && task.Error != "" {
+		b.WriteString("  " + th.Muted.Render("Retry reason: "+task.Error) + "\n")
+	}
 
 	if task.Description != "" {
 		b.WriteString("  " + th.Muted.Render(task.Description) + "\n")

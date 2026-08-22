@@ -15,6 +15,9 @@ type AppState func(*sql.Selector)
 // Credential is the predicate function for credential builders.
 type Credential func(*sql.Selector)
 
+// Deck is the predicate function for deck builders.
+type Deck func(*sql.Selector)
+
 // Flow is the predicate function for flow builders.
 type Flow func(*sql.Selector)
 
@@ -32,3 +35,6 @@ type Session func(*sql.Selector)
 
 // SessionEvent is the predicate function for sessionevent builders.
 type SessionEvent func(*sql.Selector)
+
+// Slide is the predicate function for slide builders.
+type Slide func(*sql.Selector)

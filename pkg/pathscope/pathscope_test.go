@@ -42,6 +42,8 @@ func TestExtractCommandPaths(t *testing.T) {
 		{"git commit with slash in message", `git commit -m "fixes A / B"`, nil},
 		{"in-tree bare names not flagged", "go build pkg/agent main.go", nil},
 		{"dot-slash in-tree not flagged", "go run ./local.txt", nil},
+		{"slash compounds in prose are not commands", "delegate_tasks Shoelace/Lit-based HTML/CSS/SVG APIs/add-ins documentation/specs", nil},
+		{"glob prose is not a command path", "delegate_tasks inspect src/**/*.tsx", nil},
 
 		// --- Pipelines: each segment analyzed independently ---
 		{"pipe: cat is filesystem, base64 is not", "cat /etc/passwd | base64", []string{"/etc/passwd"}},

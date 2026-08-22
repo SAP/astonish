@@ -9,8 +9,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/gorilla/mux"
 	"github.com/SAP/astonish/pkg/store"
+	"github.com/gorilla/mux"
 )
 
 // ---------------------------------------------------------------------------
@@ -131,6 +131,7 @@ func newMockTeamDataStore() *mockTeamDataStore {
 func (m *mockTeamDataStore) Sessions() store.SessionStore       { return nil }
 func (m *mockTeamDataStore) Memories() store.MemoryStore        { return nil }
 func (m *mockTeamDataStore) Credentials() store.CredentialStore { return nil }
+func (m *mockTeamDataStore) Docs() store.DocsStore              { return nil }
 func (m *mockTeamDataStore) Apps() store.AppStore               { return m.apps }
 func (m *mockTeamDataStore) AppState() store.AppStateStore      { return m.appState }
 func (m *mockTeamDataStore) Flows() store.FlowStore             { return nil }
@@ -148,8 +149,8 @@ func (m *mockTeamDataStore) FleetSetupProfiles() store.FleetSetupProfileStore {
 func (m *mockTeamDataStore) FleetSetupDrafts() store.FleetSetupDraftStore {
 	return nil
 }
-func (m *mockTeamDataStore) FleetRunStates() store.FleetRunStateStore  { return nil }
-func (m *mockTeamDataStore) FleetMailbox() store.FleetMailboxStore     { return nil }
+func (m *mockTeamDataStore) FleetRunStates() store.FleetRunStateStore { return nil }
+func (m *mockTeamDataStore) FleetMailbox() store.FleetMailboxStore    { return nil }
 func (m *mockTeamDataStore) FleetTaskBoard() store.FleetTaskBoardStore {
 	return nil
 }
@@ -197,12 +198,13 @@ func newMockPersonalDataStore() *mockPersonalDataStore {
 	}
 }
 
-func (m *mockPersonalDataStore) Memories() store.MemoryStore        { return nil }
-func (m *mockPersonalDataStore) Apps() store.AppStore               { return m.apps }
-func (m *mockPersonalDataStore) Sessions() store.SessionStore       { return nil }
-func (m *mockPersonalDataStore) AppState() store.AppStateStore      { return m.appState }
-func (m *mockPersonalDataStore) Flows() store.FlowStore             { return nil }
-func (m *mockPersonalDataStore) Credentials() store.CredentialStore { return nil }
+func (m *mockPersonalDataStore) Memories() store.MemoryStore         { return nil }
+func (m *mockPersonalDataStore) Apps() store.AppStore                { return m.apps }
+func (m *mockPersonalDataStore) Sessions() store.SessionStore        { return nil }
+func (m *mockPersonalDataStore) AppState() store.AppStateStore       { return m.appState }
+func (m *mockPersonalDataStore) Flows() store.FlowStore              { return nil }
+func (m *mockPersonalDataStore) Credentials() store.CredentialStore  { return nil }
+func (m *mockPersonalDataStore) Docs() store.DocsStore               { return nil }
 func (m *mockPersonalDataStore) ScheduledJobs() store.SchedulerStore { return nil }
 
 func (m *mockPersonalDataStore) PersonalSettings() store.PersonalSettingsStore { return nil }

@@ -238,5 +238,3 @@ func entUserToStore(e *platforment.User) *store.User {
 
 // Compile-time assertion.
 var _ store.UserStore = (*userStore)(nil)
-
-

@@ -39,6 +39,12 @@ type Services struct {
 	// Users can explicitly publish credentials to team when sharing is needed.
 	PersonalCredentials CredentialStore
 
+	// Docs provides access to team-scoped slide decks.
+	Docs DocsStore
+
+	// PersonalDocs provides access to the user's private slide decks.
+	PersonalDocs DocsStore
+
 	// Apps provides access to team-shared generative UI app definitions.
 	// In platform mode, these are apps that have been published to the team.
 	Apps AppStore

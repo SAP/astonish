@@ -24,7 +24,7 @@ type MemoryEntry struct {
 	SourcePath string         `json:"sourcePath,omitempty"`
 	Embedding  []float32      `json:"-"`
 	Metadata   map[string]any `json:"metadata,omitempty"`
-	CreatedBy  string         `json:"createdBy,omitempty"`  // user ID (for team memories)
+	CreatedBy  string         `json:"createdBy,omitempty"` // user ID (for team memories)
 	SessionID  string         `json:"sessionId,omitempty"` // session that created this memory
 }
 
@@ -37,9 +37,9 @@ type MemorySearchResult struct {
 	Score     float64 `json:"score"`
 	Snippet   string  `json:"snippet"`
 	Category  string  `json:"category,omitempty"`
-	Scope     string  `json:"scope,omitempty"`       // "personal", "team", "org" (multi-tenant)
-	CreatedBy string  `json:"created_by,omitempty"`  // user ID of the creator
-	CreatedAt string  `json:"created_at,omitempty"`  // RFC3339 timestamp
+	Scope     string  `json:"scope,omitempty"`      // "personal", "team", "org" (multi-tenant)
+	CreatedBy string  `json:"created_by,omitempty"` // user ID of the creator
+	CreatedAt string  `json:"created_at,omitempty"` // RFC3339 timestamp
 	SessionID string  `json:"session_id,omitempty"` // session that created this memory
 }
 

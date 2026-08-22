@@ -365,6 +365,22 @@ func TestOutOfScopePaths_CommandArg(t *testing.T) {
 	})
 }
 
+func TestSessionAuthPolicy_OnlyDeclaredPathArgumentsAreInspected(t *testing.T) {
+	root := t.TempDir()
+	p := NewSessionAuthPolicy(root)
+	args := map[string]any{
+		"search_path": root,
+		"pattern":     "src/**/*.tsx",
+		"task":        "Compare Shoelace/Lit-based components and HTML/CSS/SVG APIs/add-ins",
+		"instructions": map[string]any{
+			"nested": "Read documentation/specs at https://example.com/api/path",
+		},
+	}
+	if out := p.OutOfScopePaths(args); len(out) != 0 {
+		t.Fatalf("prose, globs, URLs, and nested strings must not be treated as paths: %v", out)
+	}
+}
+
 func TestSessionAuthPolicy_NoRootDisablesScoping(t *testing.T) {
 	p := NewSessionAuthPolicy("")
 	if !p.PathAllowed("/etc/passwd") {
@@ -471,6 +487,46 @@ func TestApplyAuthorizationDecision_NoPending(t *testing.T) {
 	p := NewSessionAuthPolicy(t.TempDir())
 	if d := p.ApplyAuthorizationDecision("Allow once"); d != nil {
 		t.Error("expected nil decision when nothing is pending")
+	}
+}
+
+func TestSessionAuthPolicy_PendingSingleOwner(t *testing.T) {
+	p := NewSessionAuthPolicy(t.TempDir())
+	first := &PendingAuthorization{Kind: "tool", Tool: "write_file"}
+	second := &PendingAuthorization{Kind: "folder", Tool: "read_file", Paths: []string{"/etc/hosts"}}
+
+	if !p.TrySetPending(first) {
+		t.Fatal("first request should own the pending slot")
+	}
+	if p.TrySetPending(second) {
+		t.Fatal("concurrent request must not replace the pending owner")
+	}
+	if got := p.Pending(); got == nil || got.Tool != first.Tool || got.Kind != first.Kind {
+		t.Fatalf("pending = %+v, want first request", got)
+	}
+
+	if d := p.ApplyAuthorizationDecision(OptAllowToolOnce); d == nil || d.Tool != first.Tool || !d.Granted {
+		t.Fatalf("decision = %+v, want granted first request", d)
+	}
+	if d := p.ApplyAuthorizationDecision(OptAllowToolOnce); d != nil {
+		t.Fatalf("repeated response must not apply twice, got %+v", d)
+	}
+	if !p.TrySetPending(second) {
+		t.Fatal("next request should acquire the slot after the owner is resolved")
+	}
+}
+
+func TestSessionAuthPolicy_PendingSnapshotIsImmutable(t *testing.T) {
+	p := NewSessionAuthPolicy(t.TempDir())
+	req := &PendingAuthorization{Kind: "folder", Tool: "read_file", Paths: []string{"/etc/hosts"}}
+	if !p.TrySetPending(req) {
+		t.Fatal("expected request to acquire pending slot")
+	}
+	req.Paths[0] = "/tmp/replaced"
+	got := p.Pending()
+	got.Paths[0] = "/tmp/also-replaced"
+	if current := p.Pending(); current.Paths[0] != "/etc/hosts" {
+		t.Fatalf("pending paths were mutated through an alias: %v", current.Paths)
 	}
 }
 

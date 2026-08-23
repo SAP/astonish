@@ -11,7 +11,15 @@ try {
   if (request.protocolVersion !== 1) throw new Error(`unsupported protocol ${request.protocolVersion}`)
   const scene = request.scene
   const pptx = new pptxgen()
-  pptx.layout = 'LAYOUT_WIDE'
+  // The scene canvas is 1920x1080 logical units at 160 units/inch (UnitsPerInch
+  // in types.go) == 12in x 6.75in. pptxgenjs LAYOUT_WIDE is 13.333in x 7.5in, so
+  // using it would place the 12in-wide content on a wider slide, leaving all the
+  // slack on the right/bottom and shifting every element up-and-left of true
+  // center (a centered title landed ~5% left of the slide center). Define a
+  // custom layout that matches the canvas 1:1 so element geometry — and thus
+  // centering — is identical to the HTML/PDF exports.
+  pptx.defineLayout({ name: 'ASTONISH_CANVAS', width: 1920 / 160, height: 1080 / 160 })
+  pptx.layout = 'ASTONISH_CANVAS'
   pptx.author = scene.author || 'Astonish'
   pptx.subject = scene.subject || ''
   pptx.title = scene.title || ''
@@ -57,7 +65,7 @@ try {
   // Font size is authored in CSS px on the 1920x1080 logical canvas, where
   // 160 canvas units == 1 inch (UnitsPerInch). points = px * 72 / 160.
   const ptFromPx = px => Math.round((Number(px) || 0) * 72 / 160 * 100) / 100
-  const alignMap = { left: 'left', center: 'center', centre: 'center', right: 'right', justify: 'justify' }
+  const alignMap = { l: 'left', left: 'left', ctr: 'center', center: 'center', centre: 'center', c: 'center', r: 'right', right: 'right', justify: 'justify', justified: 'justify' }
   const anchorMap = { ctr: 'middle', center: 'middle', middle: 'middle', b: 'bottom', bottom: 'bottom', t: 'top', top: 'top' }
 
   const dashMap = { solid: 'solid', dash: 'dash', dashed: 'dash', dot: 'dot', dotted: 'dot', lgDash: 'lgDash', dashDot: 'dashDot' }
@@ -124,11 +132,30 @@ try {
       case 'shape': {
         const shapeOpts = {
           ...box,
-          line: {
-            color: color(node.line || node.props?.line || '172033'),
+        }
+        // Border: only draw an outline when the deck actually authored one.
+        // The HTML export gives a shape no border unless a line is specified,
+        // so PPTX must match — otherwise fill-only shapes (e.g. a full-slide
+        // background/frame panel) gain a spurious 1pt rectangle. A line is
+        // considered authored when a line color, an explicit width, a dash, or
+        // an arrow end is present.
+        const lineColor = node.line || node.props?.line
+        const hasLineWidth = node.props?.lineWidth != null
+        const hasDash = node.dash != null || node.props?.dash != null
+        const headArrow = arrowType(node.props?.headEnd || node.props?.beginArrow)
+        const tailArrow = arrowType(node.props?.tailEnd || node.props?.endArrow)
+        if (lineColor || hasLineWidth || hasDash || headArrow || tailArrow) {
+          shapeOpts.line = {
+            color: color(lineColor || '172033'),
             width: Number(node.props?.lineWidth || 1),
             dashType: dashType(node.dash || node.props?.dash),
-          },
+          }
+          if (headArrow) shapeOpts.line.beginArrowType = headArrow
+          if (tailArrow) shapeOpts.line.endArrowType = tailArrow
+        } else {
+          // No authored outline: declare an explicit transparent line so no
+          // rectangle is inherited from the theme/master.
+          shapeOpts.line = { color: 'FFFFFF', transparency: 100 }
         }
         // Fill: node-level fill / props.fill / gradient (approximated as solid first stop).
         if (node.gradient?.stops?.length) {
@@ -141,10 +168,6 @@ try {
           shapeOpts.fill.transparency = Math.round((1 - node.opacity) * 100)
         }
         if (node.rot) shapeOpts.rotate = Number(node.rot)
-        const headArrow = arrowType(node.props?.headEnd || node.props?.beginArrow)
-        const tailArrow = arrowType(node.props?.tailEnd || node.props?.endArrow)
-        if (headArrow) shapeOpts.line.beginArrowType = headArrow
-        if (tailArrow) shapeOpts.line.endArrowType = tailArrow
         slide.addShape(shapeTypeFor(node), shapeOpts)
         counts.native++
         break

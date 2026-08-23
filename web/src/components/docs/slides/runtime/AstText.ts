@@ -2,6 +2,31 @@ import { html, noChange, type TemplateResult } from 'lit'
 
 import { PositionedElement } from './base'
 
+// Maps the ASD `align` attribute — authored as `l | ctr | r` (and tolerating
+// the CSS full words) — to a valid CSS `text-align` value. Without this a raw
+// `ctr` reaches `text-align:ctr`, which is invalid CSS and silently falls back
+// to left, so titles authored with align="ctr" appeared left-aligned. The PPTX
+// exporter performs the equivalent mapping in worker.mjs (alignMap).
+export function alignToCSS(align: string): string {
+  switch (align) {
+    case 'ctr':
+    case 'c':
+    case 'center':
+    case 'centre':
+      return 'center'
+    case 'r':
+    case 'right':
+      return 'right'
+    case 'justify':
+    case 'justified':
+      return 'justify'
+    case 'l':
+    case 'left':
+    default:
+      return 'left'
+  }
+}
+
 type Run = {
   text: string
   bold: boolean
@@ -85,7 +110,7 @@ export class AstText extends PositionedElement {
     this.style.fontFamily = this.font ? this.font : `var(--ast-${this.fontToken}, Aptos, Arial, sans-serif)`
     this.style.fontSize = `${this.size}px`
     this.style.fontWeight = this.weight
-    this.style.textAlign = this.align
+    this.style.textAlign = alignToCSS(this.align)
     this.style.padding = `${this.inset}px`
     this.style.color = this.color ? this.color : `var(--ast-${this.colorToken}, currentColor)`
     // Preserve authored newlines between/inside ast-run spans (e.g. blank-line

@@ -98,6 +98,85 @@ func TestHTMLExporterRendersV2FidelityAttributes(t *testing.T) {
 	}
 }
 
+func TestExportHTML_TextWhitespacePreWrap(t *testing.T) {
+	// A run whose text contains a newline must survive into the emitted span,
+	// and the ast-text element must carry white-space:pre-wrap so the browser
+	// renders that newline as a line break instead of collapsing it.
+	scene := SceneGraph{SchemaVersion: SchemaV2, Title: "Whitespace Deck", Slides: []Slide{{
+		ID: "s",
+		Nodes: []Node{
+			{
+				ID: "rich", Type: "text",
+				Geometry: Geometry{X: 100, Y: 100, W: 800, H: 400},
+				Runs: []TextRun{
+					{Text: "Line one", Bold: true},
+					{Text: "\n\n"},
+					{Text: "Line two", Bold: true},
+				},
+			},
+		},
+	}}}
+	result, err := (HTMLExporter{RuntimeJS: []byte(`window.runtimeReady=true`)}).Export(scene)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := string(result.Bytes)
+	if !strings.Contains(doc, "white-space:pre-wrap") {
+		t.Fatal("ast-text white-space:pre-wrap CSS rule missing from export")
+	}
+	if !strings.Contains(doc, "ast-text{white-space:pre-wrap") {
+		t.Fatal("ast-text CSS rule not applied to the ast-text element")
+	}
+	// The separator run's newline must be present in the emitted markup.
+	if !strings.Contains(doc, "\n\n") {
+		t.Fatal("run newline was not preserved in exported HTML")
+	}
+}
+
+func TestHTMLExporterPrintModePaginatesOneSlidePerPage(t *testing.T) {
+	// A two-slide deck. In print mode the export must emit page-break CSS so
+	// Chrome produces one page per slide (not one overlapping page), and an
+	// @page box matching the 1920x1080 canvas so nothing is scaled or cropped.
+	scene := exportTestScene()
+	scene.Slides = append(scene.Slides, Slide{
+		ID:    "second",
+		Nodes: []Node{{ID: "t2", Type: "text", Geometry: Geometry{X: 0, Y: 0, W: 100, H: 40}, Text: "two"}},
+	})
+
+	printDoc := mustExport(t, HTMLExporter{RuntimeJS: []byte("window.runtimeReady=true"), Print: true}, scene)
+	for _, want := range []string{
+		"@page{size:20in 11.25in;margin:0}",
+		"ast-slide{display:block;position:relative",
+		"width:20in;height:11.25in",
+		"break-inside:avoid",
+		"break-after:page",
+		"page-break-after:always",
+		"ast-slide:last-of-type{break-after:auto",
+	} {
+		if !strings.Contains(printDoc, want) {
+			t.Errorf("print document missing %q", want)
+		}
+	}
+
+	// The screen (non-print) document must NOT carry the print pagination CSS;
+	// on screen slides overlap and are toggled by the runtime.
+	screenDoc := mustExport(t, HTMLExporter{RuntimeJS: []byte("window.runtimeReady=true")}, scene)
+	for _, unwanted := range []string{"@page{size:20in 11.25in", "break-after:page"} {
+		if strings.Contains(screenDoc, unwanted) {
+			t.Errorf("screen document unexpectedly contains print CSS %q", unwanted)
+		}
+	}
+}
+
+func mustExport(t *testing.T, e HTMLExporter, scene SceneGraph) string {
+	t.Helper()
+	result, err := e.Export(scene)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(result.Bytes)
+}
+
 func TestHTMLExporterCSPHashesExactEmbeddedRuntime(t *testing.T) {
 	runtimeJS := []byte(`window.template="</script>";window.runtimeReady=true`)
 	result, err := (HTMLExporter{RuntimeJS: runtimeJS}).Export(exportTestScene())

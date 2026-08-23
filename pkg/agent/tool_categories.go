@@ -171,14 +171,14 @@ func GraphPlanBlockedMessage(toolName string, phase GraphPlanPhase) string {
 		)
 	case GraphPlanPhaseGap:
 		return fmt.Sprintf(
-			"Blocked: `%s` cannot run in Graph-Optimized Plan mode — it is a mutating tool. This is a NO-CHANGES "+
-				"mode. Finish gap-filling with the read-only tools, then call `gplan_finalize` to record the plan.",
+			"Blocked: `%s` is not available in the GAP phase of Graph-Optimized Plan mode. "+
+				"Finish gap-filling with the available read-only tools, then call `gplan_finalize` to record the plan.",
 			toolName,
 		)
 	case GraphPlanPhasePlan:
 		return fmt.Sprintf(
-			"Blocked: `%s` cannot run in Graph-Optimized Plan mode — it is a mutating tool and this is a "+
-				"NO-CHANGES mode. Record the plan with `announce_plan`, then ask the user to exit to Normal mode "+
+			"Blocked: `%s` is not available in the PLAN phase of Graph-Optimized Plan mode. "+
+				"Record the plan with `announce_plan`, then ask the user to exit to Normal mode "+
 				"(shift+tab) before any execution.",
 			toolName,
 		)

@@ -16,6 +16,13 @@ interface SlidesDeckViewProps {
   scope?: DocsScope
   /** Fill the parent height (harness panel) instead of a fixed aspect box. */
   fillHeight?: boolean
+  /**
+   * Monotonic signal that bumps whenever new slides may have been written for
+   * this deck (e.g. each `docs_update` in the chat harness). A change forces a
+   * re-fetch of the deck and re-mounts the embedded present iframe so freshly
+   * generated slides appear without a manual page reload.
+   */
+  refreshSignal?: number
 }
 
 /**
@@ -27,13 +34,18 @@ interface SlidesDeckViewProps {
  * author-set markup ids. Present/export affordances live here in the panel —
  * the in-chat card is only a compact launcher.
  */
-export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeight = false }: SlidesDeckViewProps) {
+export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeight = false, refreshSignal = 0 }: SlidesDeckViewProps) {
   const [deck, setDeck] = useState<SlidesDeckResponse | null>(null)
   const [slideIndex, setSlideIndex] = useState(0)
   const [error, setError] = useState('')
   const [pendingExport, setPendingExport] = useState<SlidesExportFormat | null>(null)
   const [fullscreen, setFullscreen] = useState(false)
   const mountedRef = useRef(true)
+  // Tracks the deck/scope this component last loaded, so a pure refreshSignal
+  // bump (same deck gaining slides) re-fetches WITHOUT yanking the user off
+  // whatever slide they're viewing — we only reset slideIndex when the deck or
+  // scope actually changes.
+  const loadedKeyRef = useRef<string | null>(null)
 
   useEffect(() => {
     mountedRef.current = true
@@ -42,13 +54,18 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
 
   useEffect(() => {
     let cancelled = false
+    const key = `${deckSlug}|${scope}`
+    if (loadedKeyRef.current !== key) {
+      // New deck/scope: reset navigation to the first slide.
+      setSlideIndex(0)
+      loadedKeyRef.current = key
+    }
     setError('')
-    setSlideIndex(0)
     fetchSlidesDeck(deckSlug, scope)
       .then(response => { if (!cancelled) setDeck(response) })
       .catch(cause => { if (!cancelled) setError(cause instanceof Error ? cause.message : 'Failed to load slide deck') })
     return () => { cancelled = true }
-  }, [deckSlug, scope])
+  }, [deckSlug, scope, refreshSignal])
 
   const slides = deck?.slides ?? []
   const total = slides.length
@@ -94,7 +111,7 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
 
   const deckFrame = useMemo(() => (
     <iframe
-      key={`${deckSlug}#${slideHash}`}
+      key={`${deckSlug}#${slideHash}#${refreshSignal}`}
       src={iframeSrc}
       sandbox="allow-scripts"
       title={`Slide deck: ${deck?.deck.title || deckSlug}`}
@@ -102,7 +119,7 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
       className="h-full w-full rounded-lg border-0"
       style={{ background: 'var(--card)' }}
     />
-  ), [deckSlug, slideHash, iframeSrc, deck?.deck.title])
+  ), [deckSlug, slideHash, iframeSrc, deck?.deck.title, refreshSignal])
 
   return (
     <div className={cn('flex flex-col gap-3', fillHeight ? 'h-full min-h-0' : '')}>
@@ -218,7 +235,7 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
             </div>
             <div className="min-h-0 flex-1">
               <iframe
-                key={`fullscreen-${deckSlug}#${slideHash}`}
+                key={`fullscreen-${deckSlug}#${slideHash}#${refreshSignal}`}
                 src={iframeSrc}
                 sandbox="allow-scripts"
                 title={`Slide deck full screen: ${deck?.deck.title || deckSlug}`}

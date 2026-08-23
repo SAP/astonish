@@ -194,6 +194,9 @@ func GraphPlanPhaseTools(phase GraphPlanPhase) map[string]bool {
 	}
 
 	// gap phase (and beyond): unlock complementary read-only tools + delegation.
+	// web_fetch and perplexity_web_search are the two outbound read-only web
+	// tools — they change nothing on the host, so grounding gap questions in
+	// live web sources here does not violate the mode's no-mutation invariant.
 	add(
 		"grep_search",
 		"find_files",
@@ -202,6 +205,7 @@ func GraphPlanPhaseTools(phase GraphPlanPhase) map[string]bool {
 		"code_definition",
 		"code_references",
 		"web_fetch",
+		"perplexity_web_search",
 		"memory_search",
 		"memory_get",
 		"skill_lookup",

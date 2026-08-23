@@ -29,9 +29,12 @@ func (e PDFExporter) Export(scene SceneGraph) (ExportResult, error) {
 		render = pdfgen.RenderHTMLToPDFChrome
 	}
 	pdf, err := render(string(htmlResult.Bytes), e.Browser, pdfgen.HTMLPrintOptions{
-		Landscape:           true,
-		PaperWidth:          12,
-		PaperHeight:         6.75,
+		Landscape: true,
+		// Match the 1920x1080 canvas exactly: 1920/96dpi = 20in, 1080/96dpi = 11.25in.
+		// This keeps the @page box (declared in the print CSS) 1:1 with the sheet so
+		// each slide fills the page with no scaling or cropping.
+		PaperWidth:          20,
+		PaperHeight:         11.25,
 		PrintBackground:     true,
 		ReadinessExpression: slidesReadinessExpression,
 		Timeout:             e.Timeout,

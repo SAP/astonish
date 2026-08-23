@@ -29,7 +29,9 @@ func TestPDFExporterUsesSlidePrintContract(t *testing.T) {
 	if !strings.Contains(gotHTML, `<ast-deck schema="1" ratio="16:9" print>`) {
 		t.Fatal("print marker missing")
 	}
-	if gotOptions.PaperWidth != 12 || gotOptions.PaperHeight != 6.75 || !gotOptions.Landscape || !gotOptions.PrintBackground {
+	// Paper matches the 1920x1080 canvas at 96dpi (20in x 11.25in) so each slide
+	// fills a page with no scaling or cropping.
+	if gotOptions.PaperWidth != 20 || gotOptions.PaperHeight != 11.25 || !gotOptions.Landscape || !gotOptions.PrintBackground {
 		t.Fatalf("unexpected print options: %+v", gotOptions)
 	}
 	if gotOptions.ReadinessExpression != slidesReadinessExpression || gotOptions.Timeout != 12*time.Second {
@@ -43,5 +45,27 @@ func TestPDFExporterWrapsRendererError(t *testing.T) {
 	}}
 	if _, err := exporter.Export(exportTestScene()); err == nil || !strings.Contains(err.Error(), "render slides PDF: boom") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestPDFExporterPreservesDiagnosticsOnRendererError asserts that when the
+// Chrome render fails, the wrapped error still carries the HTML export
+// diagnostics so the handler can log/return actionable context (this is the
+// exact wrapping ExportSlidesPDFHandler surfaces to the operator).
+func TestPDFExporterPreservesDiagnosticsOnRendererError(t *testing.T) {
+	// A scene whose slide validates with a diagnostic-producing node still
+	// exports HTML (diagnostics are warnings), then the renderer fails.
+	scene := exportTestScene()
+	exporter := PDFExporter{RuntimeJS: []byte("runtime"), Render: func(string, pdfgen.BrowserProvider, pdfgen.HTMLPrintOptions) ([]byte, error) {
+		return nil, errors.New("failed to launch browser: no session")
+	}}
+	result, err := exporter.Export(scene)
+	if err == nil || !strings.Contains(err.Error(), "render slides PDF: failed to launch browser") {
+		t.Fatalf("expected wrapped launch error, got: %v", err)
+	}
+	// Diagnostics from the HTML export stage must survive onto the error result
+	// (Bytes are intentionally empty because the PDF never rendered).
+	if len(result.Bytes) != 0 {
+		t.Fatalf("expected no PDF bytes on render failure, got %d", len(result.Bytes))
 	}
 }

@@ -134,3 +134,26 @@ func TestGetOrCreateGraphPlanState_PerSession(t *testing.T) {
 		t.Fatal("advancing one session's state must not affect another")
 	}
 }
+
+// TestGraphPlanPhaseTools_WebSearchAllowedFromGap locks in that the outbound
+// read-only web tools (web_fetch and perplexity_web_search) are blocked in the
+// narrow GRAPH and READ phases but unlocked from the GAP phase onward. web_fetch
+// is asserted alongside perplexity_web_search so the two never diverge.
+func TestGraphPlanPhaseTools_WebSearchAllowedFromGap(t *testing.T) {
+	for _, name := range []string{"perplexity_web_search", "web_fetch"} {
+		cases := []struct {
+			phase GraphPlanPhase
+			want  bool
+		}{
+			{GraphPlanPhaseGraph, false},
+			{GraphPlanPhaseRead, false},
+			{GraphPlanPhaseGap, true},
+			{GraphPlanPhasePlan, true},
+		}
+		for _, tc := range cases {
+			if got := GraphPlanPhaseTools(tc.phase)[name]; got != tc.want {
+				t.Errorf("GraphPlanPhaseTools(%q)[%q] = %v, want %v", tc.phase, name, got, tc.want)
+			}
+		}
+	}
+}

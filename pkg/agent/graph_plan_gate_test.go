@@ -112,10 +112,21 @@ func TestGraphPlanBlockedMessage_PhaseAware(t *testing.T) {
 	if !strings.Contains(msg, "gplan_gaps") {
 		t.Errorf("read-phase blocked message should mention gplan_gaps, got %q", msg)
 	}
-	// Mutator in gap/plan phase should say NO-CHANGES.
+	// Mutator in gap/plan phase is blocked with phase-accurate guidance. The
+	// message no longer asserts "mutating" (not every blocked tool mutates —
+	// e.g. a web tool blocked only by phase); it names the phase and the
+	// transition tool to call next.
 	msg = GraphPlanBlockedMessage("write_file", GraphPlanPhaseGap)
-	if !strings.Contains(strings.ToUpper(msg), "NO-CHANGES") {
-		t.Errorf("gap-phase mutator message should mention NO-CHANGES, got %q", msg)
+	for _, want := range []string{"write_file", "GAP phase", "gplan_finalize"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("gap-phase blocked message should mention %q, got %q", want, msg)
+		}
+	}
+	msg = GraphPlanBlockedMessage("write_file", GraphPlanPhasePlan)
+	for _, want := range []string{"write_file", "PLAN phase", "announce_plan"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("plan-phase blocked message should mention %q, got %q", want, msg)
+		}
 	}
 }
 

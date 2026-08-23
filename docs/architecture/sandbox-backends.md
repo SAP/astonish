@@ -1652,6 +1652,27 @@ When this option is `true`, `http_request` can reach private/loopback IPs from t
 
 **Default:** `false` (SSRF protection active in personal/CLI mode).
 
+## 14.2 Slides PDF export (in-container rendering, no host fallback)
+
+Slides PDF export (`GET /api/docs/slides/{deck}/export/pdf`, `ExportSlidesPDFHandler` in `pkg/api/slides_handlers.go`) renders the deck HTML with a headless Chrome. Where that Chrome runs is decided **before** the scene is loaded, so a misconfigured sandbox fails fast:
+
+- **Sandbox disabled (personal / local dev).** The handler selects `GetLocalPDFBrowserManager()` and Chrome runs on the host. This is the legitimate path when there is no isolation tier — the host filesystem is already the trust boundary. `GetLocalPDFBrowserManager()` always reports `SandboxEnabled == false`.
+
+- **Sandbox enabled (platform).** The deck is tenant-authored HTML, so it MUST render inside the tenant's isolated container — never in the host Chrome of the platform process — and the platform pod is not guaranteed to have Chromium at all (on Kubernetes/OpenShell it is guaranteed *not* to). The handler:
+  1. Derives a **dedicated per-user PDF session id** `slides-pdf-<user>` from `effectiveUserID(r)`, mirroring the Apps MCP convention `app-mcp-<user>`.
+  2. Calls `GetSlidesPDFBrowserManager(sessionID)` (`pkg/api/run_handler.go`), which returns a `browser.Manager` wired for in-container rendering through the existing PDF browser callbacks:
+     - **Incus** — `wireSandboxBrowserCallbacks` plus an `EnsureSessionContainer`-based `ContainerResolveFunc` that re-starts a stopped `slides-pdf-<user>` container on demand.
+     - **Kubernetes / OpenShell** — the process-global `registeredPDFResolve` / `registeredPDFStartBrowser` / `registeredPDFDial` callbacks registered by `chat_factory` via `SetPDFBrowserCallbacksForBackend`, backed by `newBackendPDFResolveFunc` which creates + starts + waits for the session on demand.
+  3. Provisions the container on first use; the render timeout is raised to 90 s so a cold-container first render does not hit the 30 s readiness default.
+  4. Registers the session with the idle watchdog (`appMCPIdleTracker.StartIdleWatchdog`, 10 min). `destroyIdle` reaps any tracked session id generically via `DestroySession`, so `slides-pdf-*` ids are reclaimed exactly like `app-mcp-*` ids. `DestroySession` is idempotent, so the Incus backend's own container idle management and the watchdog can both reap without conflict.
+
+**No-fallback contract.** When the sandbox is enabled the export renders in the container or the request fails — it NEVER falls back to host Chrome:
+- If `GetSlidesPDFBrowserManager` returns an error, the handler responds `500` with `slides PDF export requires a sandbox browser but none is available: <err>`.
+- If the returned manager reports `SandboxEnabled == false` (i.e. no in-container browser callbacks were ever registered), the handler responds `500` with `slides PDF export requires an in-container browser which is not available on this backend`.
+- If Chrome fails to launch in the container, the exporter error (e.g. `render slides PDF: failed to start browser in container ...`) is surfaced verbatim as a `500`.
+
+**Known dependency.** On Kubernetes/OpenShell the PDF browser callbacks are registered when a chat agent is wired (`NewWiredChatAgent` → `SetPDFBrowserCallbacksForBackend` in `chat_factory`), not unconditionally at server start. A fresh process that has never wired a chat will report "in-container browser not available" for slides PDF export until that wiring occurs. This is intentional: the no-fallback rule means the export surfaces the missing-callback condition rather than silently rendering on the host.
+
 ## 15. References
 
 - `docs/architecture/sandbox.md` -- current Incus-based implementation.

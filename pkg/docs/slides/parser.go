@@ -263,7 +263,11 @@ func directText(n *html.Node) string {
 }
 
 func runFromHTML(n *html.Node) TextRun {
-	run := TextRun{Text: strings.TrimSpace(textContent(n))}
+	// Preserve the run's authored text verbatim (do NOT TrimSpace): the model
+	// emits deliberate whitespace-only separator runs like <ast-run>\n\n</ast-run>
+	// between items, and trimming would destroy the only line-break signal.
+	// Renderers set white-space:pre-wrap on ast-text so these newlines display.
+	run := TextRun{Text: textContent(n)}
 	for _, a := range n.Attr {
 		switch a.Key {
 		case "b":

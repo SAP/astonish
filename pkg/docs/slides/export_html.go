@@ -51,7 +51,19 @@ func (e HTMLExporter) Export(scene SceneGraph) (ExportResult, error) {
 	body.WriteString(`<title>` + html.EscapeString(scene.Title) + `</title>`)
 	body.WriteString(`<style>:root{--ast-surface:#fff;--ast-ink:#172033;--ast-ink-muted:#64748b;--ast-accent:#1e40af;--ast-accent-soft:#dbeafe;--ast-display:Aptos Display,Arial,sans-serif;--ast-body-font:Aptos,Arial,sans-serif}`)
 	writeThemeCSS(&body, scene.Theme)
-	body.WriteString(`html,body{width:100%;height:100%;margin:0;overflow:hidden}body{background:#111827}ast-deck{display:block;position:relative;width:1920px;height:1080px;overflow:hidden;transform-origin:top left;background:var(--ast-surface);color:var(--ast-ink)}ast-slide{display:none;position:absolute;inset:0;width:1920px;height:1080px;overflow:hidden}ast-slide[active]{display:block}ast-notes{display:none}</style></head><body>`)
+	body.WriteString(`html,body{width:100%;height:100%;margin:0;overflow:hidden}body{background:#111827}ast-deck{display:block;position:relative;width:1920px;height:1080px;overflow:hidden;transform-origin:top left;background:var(--ast-surface);color:var(--ast-ink)}ast-slide{display:none;position:absolute;inset:0;width:1920px;height:1080px;overflow:hidden}ast-slide[active]{display:block}ast-text{white-space:pre-wrap;overflow-wrap:break-word}ast-notes{display:none}`)
+	if e.Print {
+		// Print layout: paginate one slide per page. The @page box and every
+		// slide are declared in the SAME inch units as the PDF paper (20in x
+		// 11.25in == 1920x1080px at 96dpi) so Chrome maps content 1:1 to the
+		// sheet with no scale-to-fit (no white margins) and no sub-pixel
+		// overflow spilling onto a blank second page. The child nodes remain in
+		// px on the 1920x1080 canvas, which is exactly the inch box at 96dpi.
+		// break-inside:avoid on the slide prevents the trailing blank page that
+		// a page-sized block otherwise forces after its own forced break.
+		body.WriteString(`@page{size:20in 11.25in;margin:0}html,body{width:20in;margin:0;padding:0;overflow:visible}body{background:var(--ast-surface)}ast-deck{display:block;position:static;width:20in;height:auto;overflow:visible;background:transparent}ast-slide{display:block;position:relative;inset:auto;width:20in;height:11.25in;overflow:hidden;break-inside:avoid;break-after:page;page-break-after:always}ast-slide:last-of-type{break-after:auto;page-break-after:auto}`)
+	}
+	body.WriteString(`</style></head><body>`)
 	body.WriteString(`<ast-deck schema="1" ratio="16:9"`)
 	if e.Print {
 		body.WriteString(` print`)

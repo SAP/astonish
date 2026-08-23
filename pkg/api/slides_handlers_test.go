@@ -28,8 +28,8 @@ func (s *docsStoreStub) ListDecks(context.Context) ([]*store.DeckManifest, error
 	}
 	return out, nil
 }
-func (s *docsStoreStub) UpdateDeck(context.Context, *store.DeckManifest) error { return nil }
-func (s *docsStoreStub) DeleteDeck(context.Context, string) error             { return nil }
+func (s *docsStoreStub) UpdateDeck(context.Context, *store.DeckManifest) error  { return nil }
+func (s *docsStoreStub) DeleteDeck(context.Context, string) error               { return nil }
 func (s *docsStoreStub) UpsertSlide(context.Context, *store.SlideContent) error { return nil }
 func (s *docsStoreStub) GetSlide(context.Context, string, string) (*store.SlideContent, error) {
 	return nil, store.ErrDocsNotFound
@@ -95,5 +95,29 @@ func TestListDocsHandlerExplicitScopeIsSingle(t *testing.T) {
 	}
 	if len(resp.Decks) != 1 || resp.Decks[0].Slug != "t1" || resp.Decks[0].Scope != "team" {
 		t.Fatalf("expected only team deck, got %#v", resp.Decks)
+	}
+}
+
+// TestGetLocalPDFBrowserManagerIsNotSandboxed guards the slides PDF export fix:
+// the dedicated local PDF browser manager must NEVER enable the container
+// sandbox. Session-less exports (the slides deck export is triggered from the
+// docs UI with no chat session) previously called GetPDFBrowserManager(""),
+// which under sandbox mode tried to resolve a session container from an empty
+// session ID and failed with "failed to launch browser: failed to resolve
+// session container", surfacing as a 500. GetLocalPDFBrowserManager always uses
+// a local headless Chrome, so it needs no session/container.
+func TestGetLocalPDFBrowserManagerIsNotSandboxed(t *testing.T) {
+	mgr := GetLocalPDFBrowserManager()
+	if mgr == nil {
+		t.Fatal("GetLocalPDFBrowserManager returned nil")
+	}
+	if mgr.SandboxEnabled {
+		t.Fatal("local PDF browser manager must not enable the container sandbox; " +
+			"a session-less slides PDF export cannot resolve a session container")
+	}
+	// The manager is memoized via sync.Once — a second call returns the same
+	// instance and must still be non-sandboxed.
+	if again := GetLocalPDFBrowserManager(); again != mgr {
+		t.Fatal("expected GetLocalPDFBrowserManager to return the memoized instance")
 	}
 }

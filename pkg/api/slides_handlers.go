@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,11 +10,13 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"time"
 
 	"github.com/SAP/astonish/pkg/docs/slides"
 	"github.com/SAP/astonish/pkg/docs/slides/components"
 	"github.com/SAP/astonish/pkg/docs/slides/pptxworker"
 	"github.com/SAP/astonish/pkg/docs/slides/themes"
+	"github.com/SAP/astonish/pkg/pdfgen"
 	"github.com/SAP/astonish/pkg/store"
 	webassets "github.com/SAP/astonish/web"
 	"github.com/gorilla/mux"
@@ -170,15 +173,67 @@ func ExportSlidesHTMLHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func ExportSlidesPDFHandler(w http.ResponseWriter, r *http.Request) {
+	// Decide where Chrome renders BEFORE loading the scene, so a misconfigured
+	// sandbox (required but no in-container browser) fails fast with a clear
+	// error rather than after scene work. When the sandbox is enabled the deck
+	// HTML MUST render inside the user's isolated container (security boundary +
+	// the platform host is not guaranteed to have Chromium). There is NO host
+	// fallback in that case: it renders in the container or the request fails.
+	// When the sandbox is disabled (personal/local dev), host headless Chrome is
+	// the legitimate path.
+	required, backendLabel := sandboxBrowserRequiredFn()
+	var browserProv pdfgen.BrowserProvider
+	timeout := time.Duration(0) // pdfgen applies its bounded default when 0
+	sessionID := ""
+	if required {
+		sessionID = "slides-pdf-" + effectiveUserID(r) // dedicated per-user PDF session, mirrors app-mcp-<user>
+		mgr, err := slidesPDFBrowserManagerFn(sessionID)
+		if err != nil {
+			slog.Error("slides PDF: sandbox browser unavailable", "deck", mux.Vars(r)["deckSlug"], "backend", backendLabel, "error", err)
+			http.Error(w, "slides PDF export requires a sandbox browser but none is available: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		// No-fallback guard: if the sandbox is required but no in-container
+		// browser callbacks were ever registered (e.g. K8s/OpenShell where no
+		// chat has been wired yet), SandboxEnabled is false. Fail loudly
+		// instead of rendering on the host.
+		if !mgr.SandboxEnabled {
+			slog.Error("slides PDF: sandbox required but no in-container browser callbacks registered", "backend", backendLabel)
+			http.Error(w, "slides PDF export requires an in-container browser which is not available on this backend", http.StatusInternalServerError)
+			return
+		}
+		browserProv = mgr
+		// Ensure the idle reaper is running so warm slides-pdf-<user>
+		// containers are destroyed after inactivity. StartIdleWatchdog is
+		// idempotent (internal started guard); destroyIdle reaps any tracked
+		// session id generically via DestroySession, so slides-pdf-* ids are
+		// handled the same as app-mcp-* ids.
+		appMCPIdleTracker.StartIdleWatchdog(context.Background(), 10*time.Minute)
+		// Cold container launch + session provisioning can exceed the 30s
+		// readiness default; give the first render more headroom.
+		timeout = 90 * time.Second
+	} else {
+		browserProv = GetLocalPDFBrowserManager() // sandbox disabled → host Chrome is legitimate
+	}
+
 	scene, ok := loadSlidesScene(w, r)
 	if !ok {
 		return
 	}
-	result, err := (slides.PDFExporter{Browser: GetPDFBrowserManager(""), RuntimeJS: webassets.GetSlidesRuntime()}).Export(scene)
+
+	result, err := (slides.PDFExporter{Browser: browserProv, RuntimeJS: webassets.GetSlidesRuntime(), Timeout: timeout}).Export(scene)
 	if err != nil {
-		http.Error(w, "export slides PDF", http.StatusInternalServerError)
+		slog.Error("slides PDF export failed", "deck", mux.Vars(r)["deckSlug"], "scope", r.URL.Query().Get("scope"), "error", err)
+		http.Error(w, "export slides PDF: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	// On the sandbox path, keep the warm per-user container alive between
+	// exports and let the idle watchdog reap it after inactivity.
+	if required {
+		appMCPIdleTracker.touch(sessionID)
+	}
+
 	w.Header().Set("Content-Type", "application/pdf")
 	w.Header().Set("Content-Disposition", attachmentName(mux.Vars(r)["deckSlug"], "pdf"))
 	w.WriteHeader(http.StatusOK)
@@ -198,7 +253,8 @@ func ExportSlidesPPTXHandler(w http.ResponseWriter, r *http.Request) {
 	}}
 	result, err := exporter.Export(r.Context(), scene, r.URL.Query().Get("strictNative") == "true")
 	if err != nil {
-		http.Error(w, "export slides PPTX", http.StatusInternalServerError)
+		slog.Error("slides PPTX export failed", "deck", mux.Vars(r)["deckSlug"], "error", err)
+		http.Error(w, "export slides PPTX: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.presentationml.presentation")
@@ -266,6 +322,7 @@ func exportSlidesHTML(w http.ResponseWriter, r *http.Request, print bool) (slide
 	}
 	result, err := (slides.HTMLExporter{RuntimeJS: webassets.GetSlidesRuntime(), Print: print}).Export(scene)
 	if err != nil {
+		slog.Error("slides HTML render failed", "deck", mux.Vars(r)["deckSlug"], "error", err)
 		http.Error(w, "render slides", http.StatusInternalServerError)
 		return slides.ExportResult{}, false
 	}

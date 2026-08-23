@@ -88,6 +88,11 @@ export class AstText extends PositionedElement {
     this.style.textAlign = this.align
     this.style.padding = `${this.inset}px`
     this.style.color = this.color ? this.color : `var(--ast-${this.colorToken}, currentColor)`
+    // Preserve authored newlines between/inside ast-run spans (e.g. blank-line
+    // separators between bullet items) and wrap long words. Mirrors the
+    // ast-text{white-space:pre-wrap} rule in the HTML export.
+    this.style.whiteSpace = 'pre-wrap'
+    this.style.overflowWrap = 'break-word'
     if (this.anchor === 'ctr') {
       this.style.display = 'flex'
       this.style.flexDirection = 'column'

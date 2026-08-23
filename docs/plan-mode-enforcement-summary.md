@@ -224,7 +224,7 @@ Phase → additive allow-list (`GraphPlanPhaseTools`, single source of truth):
 |---------|----------------------------------------------------------------------|
 | `graph` | `codegraph_explore` |
 | `read`  | + `read_file`, `read_pdf`, `filter_json` |
-| `gap`   | + `grep_search`, `find_files`, `file_tree`, `repo_map`, `code_definition`, `code_references`, `web_fetch`, `memory_search`, `memory_get`, `skill_lookup`, `delegate_tasks` (read-only `tools` filters) |
+| `gap`   | + `grep_search`, `find_files`, `file_tree`, `repo_map`, `code_definition`, `code_references`, `web_fetch`, `perplexity_web_search`, `memory_search`, `memory_get`, `skill_lookup`, `delegate_tasks` (read-only `tools` filters) |
 | `plan`  | + `announce_plan` |
 
 Discovery budgets (`GraphPlanState.ChargeExploration`) bound **codegraph queries**, complementary **gap-filling** calls, and **delegation**. Source reads (`read_file` / `read_pdf` / `filter_json`) and plan recorders (`announce_plan` / `update_plan`) are **not charged** — a read quota truncates the READ phase, and charging `announce_plan` as a gap call deadlocks PLAN after the gap cap. Duplicate work is prevented by prompt reuse rules (never re-read a path already in context; never re-query the graph for a known fact), not by refusing the files the plan still needs.
@@ -245,7 +245,10 @@ plan-mode gate and the code-mode folder/tool authorization gates are skipped (re
 
 `codegraph_explore` and the three `gplan_*` transition tools are added to `agent.SafeTools`
 (read-only / phase-only, so they auto-approve). This mode remains a **no-changes** invariant: no
-mutating tool is ever allowed in any phase.
+mutating tool is ever allowed in any phase. The read-only outbound web tools (`web_fetch` and
+`perplexity_web_search`) are permitted from the GAP phase onward and are charged against the
+gap-filling budget; they do not violate the no-mutation invariant because they change nothing on
+the host (both are already in `agent.SafeTools`, classified read-only).
 
 ### Codegraph as a native standard MCP server
 

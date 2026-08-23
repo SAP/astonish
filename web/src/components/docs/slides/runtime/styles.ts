@@ -9,10 +9,15 @@ export const runtimeStyles = `
   ast-notes { display:none; }
   ast-fragment:not([revealed]) { visibility:hidden; }
   @media print {
-    @page { size:12in 6.75in; margin:0; }
-    html, body { margin:0; padding:0; }
-    ast-deck { transform:none!important; width:1920px; height:auto; overflow:visible; }
-    ast-slide { display:block!important; position:relative; break-after:page; page-break-after:always; }
+    /* Page + slide dimensions must match the PDF paper set in
+       pkg/docs/slides/export_pdf.go (20in x 11.25in == 1920x1080px at 96dpi).
+       Any mismatch makes Chrome scale-to-fit (white margins) and spill each
+       page-sized slide onto a trailing blank page. */
+    @page { size:20in 11.25in; margin:0; }
+    html, body { margin:0; padding:0; width:20in; overflow:visible; }
+    ast-deck { transform:none!important; position:static!important; width:20in; height:auto; overflow:visible; background:transparent!important; }
+    ast-slide { display:block!important; position:relative!important; inset:auto!important; width:20in!important; height:11.25in!important; overflow:hidden; break-inside:avoid; break-after:page; page-break-after:always; }
+    ast-slide:last-of-type { break-after:auto; page-break-after:auto; }
     ast-fragment { visibility:visible!important; }
   }
 `

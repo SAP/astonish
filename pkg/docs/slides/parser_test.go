@@ -1,6 +1,9 @@
 package slides
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseSlideRejectsExecutableContent(t *testing.T) {
 	cases := []string{
@@ -90,6 +93,51 @@ func TestParseSlideV1CompatUnchanged(t *testing.T) {
 	}
 	if slide.Nodes[0].Props["fill-token"] != "accent1" {
 		t.Fatalf("v1 token prop lost: %#v", slide.Nodes[0].Props)
+	}
+}
+
+func TestRunFromHTML_PreservesSeparatorNewlines(t *testing.T) {
+	// The model emits deliberate whitespace-only separator runs between bullet
+	// items. The parser must preserve that text verbatim (no TrimSpace) so the
+	// line-break signal survives to the renderers.
+	markup := `<ast-slide id="s">` +
+		`<ast-text id="t" x="100" y="100" w="600" h="400">` +
+		`<ast-run b>Label:</ast-run>` +
+		`<ast-run> text</ast-run>` +
+		`<ast-run>` + "\n\n" + `</ast-run>` +
+		`<ast-run b>Next:</ast-run>` +
+		`</ast-text>` +
+		`</ast-slide>`
+	slide, diags, err := ParseSlide(markup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if HasErrors(diags) {
+		t.Fatalf("unexpected diagnostics: %#v", diags)
+	}
+	if len(slide.Nodes) != 1 {
+		t.Fatalf("expected 1 node, got %d", len(slide.Nodes))
+	}
+	runs := slide.Nodes[0].Runs
+	if len(runs) != 4 {
+		t.Fatalf("expected 4 runs, got %d: %#v", len(runs), runs)
+	}
+	// Bold runs still parse with their content.
+	if !runs[0].Bold || runs[0].Text != "Label:" {
+		t.Fatalf("run 0 wrong: %#v", runs[0])
+	}
+	if !runs[3].Bold || runs[3].Text != "Next:" {
+		t.Fatalf("run 3 wrong: %#v", runs[3])
+	}
+	// The separator run's newlines survived (not emptied by TrimSpace).
+	foundSeparator := false
+	for _, r := range runs {
+		if strings.Contains(r.Text, "\n\n") {
+			foundSeparator = true
+		}
+	}
+	if !foundSeparator {
+		t.Fatalf("separator newlines were stripped from runs: %#v", runs)
 	}
 }
 

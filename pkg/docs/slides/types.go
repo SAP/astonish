@@ -7,6 +7,7 @@ const (
 	CanvasHeight = 1080
 	UnitsPerInch = 160
 	SchemaV1     = 1
+	SchemaV2     = 2
 )
 
 type Geometry struct {
@@ -17,10 +18,27 @@ type Geometry struct {
 }
 
 type TextRun struct {
-	Text   string `json:"text"`
-	Bold   bool   `json:"bold,omitempty"`
-	Italic bool   `json:"italic,omitempty"`
-	Color  string `json:"color,omitempty"`
+	Text      string `json:"text"`
+	Bold      bool   `json:"bold,omitempty"`
+	Italic    bool   `json:"italic,omitempty"`
+	Underline bool   `json:"underline,omitempty"`
+	Color     string `json:"color,omitempty"`
+	Font      string `json:"font,omitempty"`
+	Size      int    `json:"size,omitempty"`
+	Weight    string `json:"weight,omitempty"`
+}
+
+// GradientStop is a single color stop in a gradient fill. Pos is 0..100.
+type GradientStop struct {
+	Pos   int    `json:"pos"`
+	Color string `json:"color"`
+}
+
+// Gradient describes a linear or radial gradient fill for an ast-shape.
+type Gradient struct {
+	Kind  string         `json:"kind"` // linear | radial
+	Angle int            `json:"angle,omitempty"`
+	Stops []GradientStop `json:"stops"`
 }
 
 type TableData struct {
@@ -43,6 +61,16 @@ type Node struct {
 	Table    *TableData     `json:"table,omitempty"`
 	Series   []ChartSeries  `json:"series,omitempty"`
 	Children []Node         `json:"children,omitempty"`
+
+	// v2 fidelity fields.
+	Rot      int       `json:"rot,omitempty"`
+	Fill     string    `json:"fill,omitempty"`
+	Line     string    `json:"line,omitempty"`
+	Dash     string    `json:"dash,omitempty"`
+	Opacity  float64   `json:"opacity,omitempty"`
+	Geom     string    `json:"geom,omitempty"`
+	Path     string    `json:"path,omitempty"`
+	Gradient *Gradient `json:"gradient,omitempty"`
 }
 
 type Slide struct {

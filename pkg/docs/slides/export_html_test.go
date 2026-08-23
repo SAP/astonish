@@ -36,6 +36,68 @@ func TestHTMLExporterProducesSelfContainedEscapedDocument(t *testing.T) {
 	}
 }
 
+func TestHTMLExporterRendersV2FidelityAttributes(t *testing.T) {
+	scene := SceneGraph{SchemaVersion: SchemaV2, Title: "V2 Deck", Slides: []Slide{{
+		ID: "cover",
+		Nodes: []Node{
+			{
+				ID: "grad-box", Type: "shape",
+				Geometry: Geometry{X: 100, Y: 100, W: 400, H: 300},
+				Geom:     "rect",
+				Rot:      15,
+				Opacity:  0.5,
+				Gradient: &Gradient{Kind: "linear", Angle: 90, Stops: []GradientStop{
+					{Pos: 0, Color: "#ff0000"},
+					{Pos: 100, Color: "#0000ff"},
+				}},
+			},
+			{
+				ID: "custom", Type: "shape",
+				Geometry: Geometry{X: 600, Y: 100, W: 200, H: 200},
+				Path:     "M 0 0 L 100 0 L 50 100 Z",
+				Fill:     "#00ff00",
+			},
+			{
+				ID: "rich", Type: "text",
+				Geometry: Geometry{X: 100, Y: 500, W: 800, H: 120},
+				Runs: []TextRun{
+					{Text: "Hello ", Bold: true, Color: "#ff0000"},
+					{Text: "world", Italic: true, Underline: true, Size: 48},
+				},
+			},
+		},
+	}}}
+	result, err := (HTMLExporter{RuntimeJS: []byte(`window.runtimeReady=true`)}).Export(scene)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := string(result.Bytes)
+	for _, want := range []string{
+		"<linearGradient",
+		`<stop offset="0%"`,
+		`stop-color="#ff0000"`,
+		"rotate(15deg)",
+		`d="M 0 0 L 100 0 L 50 100 Z"`,
+		"<span",
+		"font-weight:700",
+		"color:#ff0000",
+		"font-style:italic",
+		"text-decoration:underline",
+		"font-size:48px",
+		"opacity:0.5",
+	} {
+		if !strings.Contains(doc, want) {
+			t.Errorf("v2 document missing %q", want)
+		}
+	}
+	if strings.Count(doc, "<span") < 2 {
+		t.Errorf("expected at least two run spans, got %d", strings.Count(doc, "<span"))
+	}
+	if !strings.Contains(doc, "#ff0000") {
+		t.Fatal("raw color did not reach export")
+	}
+}
+
 func TestHTMLExporterCSPHashesExactEmbeddedRuntime(t *testing.T) {
 	runtimeJS := []byte(`window.template="</script>";window.runtimeReady=true`)
 	result, err := (HTMLExporter{RuntimeJS: runtimeJS}).Export(exportTestScene())

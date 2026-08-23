@@ -14,7 +14,7 @@ type PPTXExporter struct {
 }
 
 func (e PPTXExporter) Export(ctx context.Context, scene SceneGraph, strictNative bool) (ExportResult, error) {
-	if scene.SchemaVersion != SchemaV1 {
+	if scene.SchemaVersion != SchemaV1 && scene.SchemaVersion != SchemaV2 {
 		return ExportResult{}, fmt.Errorf("unsupported slides schema version %d", scene.SchemaVersion)
 	}
 	data, err := json.Marshal(scene)

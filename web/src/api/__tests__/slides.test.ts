@@ -6,6 +6,8 @@ import {
   fetchSlidesPresentation,
   slidesPresentationURL,
   listSlidesDecks,
+  listSlidesTemplates,
+  importSlidesTemplate,
   publishDeckToTeam,
   forkDeckToPersonal,
   deleteSlidesDeck,
@@ -93,5 +95,54 @@ describe('slides API (list/publish/fork/delete)', () => {
   it('throws on non-ok list response', async () => {
     mockedTeamFetch.mockResolvedValue(new Response('boom', { status: 500 }))
     await expect(listSlidesDecks()).rejects.toThrow()
+  })
+})
+
+describe('slides API (templates)', () => {
+  beforeEach(() => mockedTeamFetch.mockReset())
+  afterEach(() => vi.clearAllMocks())
+
+  it('listSlidesTemplates GETs /api/docs/slides/templates and returns templates', async () => {
+    mockedTeamFetch.mockResolvedValue(new Response(JSON.stringify({
+      templates: [{ name: 'aurora', label: 'Aurora', tokens: { surface: '#fff', ink: '#000', accent: '#0af' } }],
+    }), { status: 200 }))
+    const { templates } = await listSlidesTemplates()
+    expect(mockedTeamFetch).toHaveBeenCalledWith('/api/docs/slides/templates')
+    expect(templates).toHaveLength(1)
+    expect(templates[0].name).toBe('aurora')
+  })
+
+  it('listSlidesTemplates tolerates missing templates field', async () => {
+    mockedTeamFetch.mockResolvedValue(new Response(JSON.stringify({}), { status: 200 }))
+    const { templates } = await listSlidesTemplates()
+    expect(templates).toEqual([])
+  })
+
+  it('importSlidesTemplate POSTs multipart FormData without a JSON content-type', async () => {
+    mockedTeamFetch.mockResolvedValue(new Response(JSON.stringify({ template: { name: 'imported', label: 'Imported' } }), { status: 200 }))
+    const file = new File(['pptx-bytes'], 'deck.pptx', { type: 'application/vnd.openxmlformats-officedocument.presentationml.presentation' })
+    const res = await importSlidesTemplate(file)
+    expect(res.template.name).toBe('imported')
+    const [url, init] = mockedTeamFetch.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('/api/docs/slides/import')
+    expect(init.method).toBe('POST')
+    expect(init.body).toBeInstanceOf(FormData)
+    expect((init.body as FormData).get('file')).toBe(file)
+    // Must NOT force a JSON content-type — the browser sets the multipart boundary.
+    const headers = new Headers(init.headers)
+    expect(headers.get('Content-Type')).toBeNull()
+  })
+
+  it('importSlidesTemplate appends scope when provided', async () => {
+    mockedTeamFetch.mockResolvedValue(new Response(JSON.stringify({ template: { name: 'x' } }), { status: 200 }))
+    const file = new File(['b'], 'd.pptx')
+    await importSlidesTemplate(file, 'team')
+    const [, init] = mockedTeamFetch.mock.calls[0] as [string, RequestInit]
+    expect((init.body as FormData).get('scope')).toBe('team')
+  })
+
+  it('importSlidesTemplate throws on non-ok response', async () => {
+    mockedTeamFetch.mockResolvedValue(new Response('nope', { status: 400 }))
+    await expect(importSlidesTemplate(new File(['b'], 'd.pptx'))).rejects.toThrow()
   })
 })

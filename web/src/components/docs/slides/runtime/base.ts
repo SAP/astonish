@@ -5,7 +5,7 @@ export abstract class PositionedElement extends LitElement {
   static override properties = {
     x: { type: Number, reflect: true }, y: { type: Number, reflect: true },
     w: { type: Number, reflect: true }, h: { type: Number, reflect: true },
-    rotation: { type: Number, reflect: true },
+    rotation: { type: Number, attribute: 'rot', reflect: true },
   }
   x = 0
   y = 0
@@ -23,6 +23,12 @@ export abstract class PositionedElement extends LitElement {
     this.style.width = `${this.w}px`
     this.style.height = `${this.h}px`
     this.style.boxSizing = 'border-box'
-    this.style.transform = this.rotation ? `rotate(${this.rotation}deg)` : ''
+    if (this.rotation) {
+      this.style.transform = `rotate(${this.rotation}deg)`
+      this.style.transformOrigin = 'center'
+    } else {
+      this.style.transform = ''
+      this.style.transformOrigin = ''
+    }
   }
 }

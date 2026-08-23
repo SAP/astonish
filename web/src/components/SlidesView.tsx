@@ -1,12 +1,15 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
-import { Presentation, Trash2, ArrowLeft, Clock, Upload, GitFork } from 'lucide-react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { Presentation, Trash2, ArrowLeft, Clock, Upload, GitFork, FileUp } from 'lucide-react'
 import {
   listSlidesDecks,
+  listSlidesTemplates,
+  importSlidesTemplate,
   fetchSlidesDeck,
   deleteSlidesDeck,
   slidesPresentationURL,
   type SlidesDeckListItem,
   type SlidesSlide,
+  type SlidesTemplate,
   type DocsScope,
 } from '../api/slides'
 import SlidesDeckView from './chat/SlidesDeckView'
@@ -207,12 +210,95 @@ function DeckCard({
   )
 }
 
+/** Small swatch row for a template's core tokens. */
+function TemplateSwatches({ tokens }: { tokens?: Record<string, string> }) {
+  const keys = ['surface', 'ink', 'accent'] as const
+  const colors = keys
+    .map(k => tokens?.[k])
+    .filter((c): c is string => Boolean(c))
+  if (colors.length === 0) return null
+  return (
+    <div className="flex items-center gap-0.5" data-testid="template-swatches">
+      {colors.map((c, i) => (
+        <div
+          key={i}
+          className="h-3 w-3 rounded-sm border"
+          style={{ backgroundColor: c, borderColor: 'var(--border-color)' }}
+        />
+      ))}
+    </div>
+  )
+}
+
+/** Compact row listing available slide templates with token swatches. */
+function TemplatesBar({ templates }: { templates: SlidesTemplate[] }) {
+  if (templates.length === 0) return null
+  return (
+    <div className="mb-4 flex flex-wrap items-center gap-2" data-testid="templates-bar">
+      <span className="text-xs font-medium" style={{ color: 'var(--text-muted)' }}>Templates</span>
+      {templates.map(tpl => (
+        <div
+          key={tpl.name}
+          className="flex items-center gap-1.5 rounded-full px-2 py-1 text-xs"
+          style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-color)', color: 'var(--text-secondary)' }}
+          title={tpl.description || tpl.label || tpl.name}
+          data-testid="template-chip"
+        >
+          <TemplateSwatches tokens={tpl.tokens} />
+          <span className="truncate">{tpl.label || tpl.name}</span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 export default function SlidesView({ theme, deckSlug, isPlatformMode, onNavigate, onPublishDeck, onForkDeck }: SlidesViewProps) {
   void theme
   const [decks, setDecks] = useState<SlidesDeckListItem[]>([])
   const [loading, setLoading] = useState(true)
   const [selectedSlug, setSelectedSlug] = useState<string | null>(deckSlug || null)
   const [deleteConfirm, setDeleteConfirm] = useState<{ slug: string; title: string; scope: DocsScope } | null>(null)
+  const [templates, setTemplates] = useState<SlidesTemplate[]>([])
+  const [importing, setImporting] = useState(false)
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+
+  const showToast = useCallback((message: string, type: 'success' | 'error') => {
+    setToast({ message, type })
+    setTimeout(() => setToast(null), 4000)
+  }, [])
+
+  const loadTemplates = useCallback(async () => {
+    try {
+      const data = await listSlidesTemplates()
+      setTemplates(data.templates || [])
+    } catch {
+      // Templates are best-effort; ignore load failures.
+    }
+  }, [])
+
+  useEffect(() => { loadTemplates() }, [loadTemplates])
+
+  const handleImportClick = useCallback(() => {
+    fileInputRef.current?.click()
+  }, [])
+
+  const handleImportFile = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    e.target.value = '' // Reset so the same file can be re-selected.
+    if (!file) return
+    setImporting(true)
+    try {
+      const { template } = await importSlidesTemplate(file)
+      await loadTemplates()
+      window.dispatchEvent(new CustomEvent('astonish:slides-updated'))
+      showToast(`Imported template "${template.label || template.name}"`, 'success')
+    } catch (err) {
+      showToast(`Failed to import template: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
+    } finally {
+      setImporting(false)
+    }
+  }, [loadTemplates, showToast])
 
   const loadDecks = useCallback(async () => {
     try {
@@ -331,7 +417,27 @@ export default function SlidesView({ theme, deckSlug, isPlatformMode, onNavigate
           <span className="rounded-full px-2 py-0.5 text-xs" style={{ background: 'var(--bg-tertiary)', color: 'var(--text-muted)' }}>
             {decks.length}
           </span>
+          <button
+            onClick={handleImportClick}
+            disabled={importing}
+            className="ml-auto flex cursor-pointer items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs transition-colors disabled:cursor-default disabled:opacity-60"
+            style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-color)', color: 'var(--text-secondary)' }}
+            title="Import a .pptx file as a slide template"
+          >
+            <FileUp size={14} />
+            {importing ? 'Importing…' : 'Import .pptx template'}
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".pptx"
+            onChange={handleImportFile}
+            className="hidden"
+            data-testid="template-import-input"
+          />
         </div>
+
+        <TemplatesBar templates={templates} />
 
         {isPlatformMode && (personalDecks.length > 0 || teamDecks.length > 0) ? (
           <>
@@ -392,6 +498,20 @@ export default function SlidesView({ theme, deckSlug, isPlatformMode, onNavigate
                 </button>
               </div>
             </div>
+          </div>
+        )}
+
+        {toast && (
+          <div className="fixed bottom-6 right-6 z-50 max-w-sm rounded-lg px-4 py-3 text-sm shadow-lg"
+            style={{
+              background: 'var(--bg-secondary)',
+              border: `1px solid ${toast.type === 'error' ? '#ef4444' : 'var(--border-color)'}`,
+              color: toast.type === 'error' ? '#f87171' : 'var(--text-primary)',
+            }}
+            role="status"
+            data-testid="slides-toast"
+          >
+            {toast.message}
           </div>
         )}
       </div>

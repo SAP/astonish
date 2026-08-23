@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/SAP/astonish/pkg/docs/slides/themes"
 	"github.com/SAP/astonish/pkg/store"
 )
 
@@ -175,5 +176,187 @@ func TestServiceCopyDeckToFailsWithoutDestination(t *testing.T) {
 	}
 	if _, err := src.CopyDeckTo(ctx, Service{}, "d"); err == nil {
 		t.Fatal("expected destination unavailable error")
+	}
+}
+
+// multiDeckStore is a minimal DocsStore that holds any number of decks, which
+// the single-deck memoryDocsStore cannot. It backs the template persistence
+// tests where a template deck coexists with regular decks.
+type multiDeckStore struct {
+	decks  map[string]*store.DeckManifest // by slug
+	slides map[string][]*store.SlideContent
+}
+
+func newMultiDeckStore() *multiDeckStore {
+	return &multiDeckStore{decks: map[string]*store.DeckManifest{}, slides: map[string][]*store.SlideContent{}}
+}
+
+func (m *multiDeckStore) CreateDeck(_ context.Context, d *store.DeckManifest) error {
+	cp := *d
+	m.decks[d.Slug] = &cp
+	return nil
+}
+func (m *multiDeckStore) GetDeck(_ context.Context, slug string) (*store.DeckManifest, error) {
+	d, ok := m.decks[slug]
+	if !ok {
+		return nil, store.ErrDocsNotFound
+	}
+	cp := *d
+	return &cp, nil
+}
+func (m *multiDeckStore) ListDecks(context.Context) ([]*store.DeckManifest, error) {
+	out := make([]*store.DeckManifest, 0, len(m.decks))
+	for _, d := range m.decks {
+		cp := *d
+		out = append(out, &cp)
+	}
+	return out, nil
+}
+func (m *multiDeckStore) UpdateDeck(_ context.Context, d *store.DeckManifest) error {
+	cp := *d
+	m.decks[d.Slug] = &cp
+	return nil
+}
+func (m *multiDeckStore) DeleteDeck(_ context.Context, slug string) error {
+	if d, ok := m.decks[slug]; ok {
+		delete(m.slides, d.ID)
+	}
+	delete(m.decks, slug)
+	return nil
+}
+func (m *multiDeckStore) UpsertSlide(_ context.Context, slide *store.SlideContent) error {
+	list := m.slides[slide.DeckID]
+	for i, existing := range list {
+		if existing.ID == slide.ID {
+			cp := *slide
+			list[i] = &cp
+			m.slides[slide.DeckID] = list
+			return nil
+		}
+	}
+	cp := *slide
+	m.slides[slide.DeckID] = append(list, &cp)
+	return nil
+}
+func (m *multiDeckStore) GetSlide(_ context.Context, deckID, slideID string) (*store.SlideContent, error) {
+	for _, s := range m.slides[deckID] {
+		if s.ID == slideID {
+			cp := *s
+			return &cp, nil
+		}
+	}
+	return nil, store.ErrDocsNotFound
+}
+func (m *multiDeckStore) ListSlides(_ context.Context, deckID string) ([]*store.SlideContent, error) {
+	var out []*store.SlideContent
+	for _, s := range m.slides[deckID] {
+		cp := *s
+		out = append(out, &cp)
+	}
+	return out, nil
+}
+func (m *multiDeckStore) DeleteSlide(context.Context, string, string) error     { return nil }
+func (m *multiDeckStore) ReorderSlides(context.Context, string, []string) error { return nil }
+
+func TestSaveAndListTemplatesRoundtrip(t *testing.T) {
+	ctx := context.Background()
+	svc := Service{Store: newMultiDeckStore()}
+	tmpl := themes.Template{
+		Schema:      SchemaV2,
+		Name:        "acme",
+		Label:       "Acme Brand",
+		Description: "corporate template",
+		Tokens:      map[string]string{"surface": "#101820", "ink": "#F2F2F2", "accent": "#FFB81C"},
+		Assets:      map[string]string{"logo": "acme.png"},
+		Archetypes: []themes.Archetype{
+			{Kind: "title", Markup: `<ast-slide id="t"><ast-text id="h" x="160" y="380" w="1600" h="200" color="#F2F2F2" size="72">{{TITLE}}</ast-text></ast-slide>`},
+			{Kind: "content", Markup: `<ast-slide id="c"><ast-text id="b" x="160" y="320" w="1600" h="600" color="#F2F2F2" size="36">{{BODY}}</ast-text></ast-slide>`},
+		},
+	}
+	if err := svc.SaveTemplate(ctx, tmpl); err != nil {
+		t.Fatalf("save template: %v", err)
+	}
+	// Idempotent overwrite must not duplicate.
+	if err := svc.SaveTemplate(ctx, tmpl); err != nil {
+		t.Fatalf("re-save template: %v", err)
+	}
+
+	got, err := svc.ListTemplates(ctx)
+	if err != nil {
+		t.Fatalf("list templates: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 template, got %d: %#v", len(got), got)
+	}
+	rt := got[0]
+	if rt.Name != "acme" || rt.Label != "Acme Brand" || rt.Description != "corporate template" {
+		t.Fatalf("template metadata mismatch: %#v", rt)
+	}
+	if rt.Scope != "scope" {
+		t.Fatalf("expected Scope=scope, got %q", rt.Scope)
+	}
+	if rt.Tokens["accent"] != "#FFB81C" || rt.Assets["logo"] != "acme.png" {
+		t.Fatalf("tokens/assets not roundtripped: %#v tokens=%#v assets=%#v", rt, rt.Tokens, rt.Assets)
+	}
+	if len(rt.Archetypes) != 2 {
+		t.Fatalf("expected 2 archetypes, got %d: %#v", len(rt.Archetypes), rt.Archetypes)
+	}
+	byKind := map[string]themes.Archetype{}
+	for _, a := range rt.Archetypes {
+		byKind[a.Kind] = a
+	}
+	for _, orig := range tmpl.Archetypes {
+		got, ok := byKind[orig.Kind]
+		if !ok {
+			t.Fatalf("missing archetype kind %q", orig.Kind)
+		}
+		if got.Markup != orig.Markup {
+			t.Fatalf("archetype %q markup mismatch:\n got=%s\nwant=%s", orig.Kind, got.Markup, orig.Markup)
+		}
+	}
+
+	// resolveTemplate should find the scoped template by name.
+	if _, ok := svc.resolveTemplate(ctx, "acme"); !ok {
+		t.Fatal("resolveTemplate did not find scoped template")
+	}
+	// Built-ins still resolve.
+	if _, ok := svc.resolveTemplate(ctx, "midnight"); !ok {
+		t.Fatal("resolveTemplate did not find built-in template")
+	}
+}
+
+func TestListDecksHidesTemplateDecks(t *testing.T) {
+	ctx := context.Background()
+	svc := Service{Store: newMultiDeckStore()}
+	if _, err := svc.CreateDeck(ctx, "quarterly", "Quarterly", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	tmpl := themes.Template{
+		Name:   "acme",
+		Tokens: map[string]string{"surface": "#FFFFFF"},
+		Archetypes: []themes.Archetype{
+			{Kind: "title", Markup: `<ast-slide id="t"><ast-text id="h" x="160" y="380" w="1600" h="200" color="#172033" size="72">{{TITLE}}</ast-text></ast-slide>`},
+		},
+	}
+	if err := svc.SaveTemplate(ctx, tmpl); err != nil {
+		t.Fatalf("save template: %v", err)
+	}
+	decks, err := svc.ListDecks(ctx)
+	if err != nil {
+		t.Fatalf("list decks: %v", err)
+	}
+	for _, d := range decks {
+		if d.Slug == "tmpl/acme" {
+			t.Fatalf("ListDecks leaked template deck: %#v", d)
+		}
+	}
+	found := false
+	for _, d := range decks {
+		if d.Slug == "quarterly" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("ListDecks dropped the regular deck; got %#v", decks)
 	}
 }

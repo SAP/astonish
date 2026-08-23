@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/SAP/astonish/pkg/docs/slides/themes"
 	"github.com/SAP/astonish/pkg/store"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
@@ -23,6 +24,7 @@ type CreateDeckArgs struct {
 	Title       string            `json:"title" jsonschema:"Human-readable deck title."`
 	Description string            `json:"description,omitempty" jsonschema:"Optional short deck description."`
 	Theme       map[string]string `json:"theme,omitempty" jsonschema:"Optional ASD theme token overrides."`
+	Template    string            `json:"template,omitempty" jsonschema:"Optional template name from slide_templates. Seeds a coherent theme + assets; reuse its title/section/content archetypes as starting markup."`
 }
 
 // DeckResult is the common deck payload returned by slide tools.
@@ -30,6 +32,7 @@ type DeckResult struct {
 	Deck       *store.DeckManifest   `json:"deck"`
 	Slides     []*store.SlideContent `json:"slides,omitempty"`
 	SlideCount int                   `json:"slideCount"`
+	Archetypes []themes.Archetype    `json:"archetypes,omitempty"`
 }
 
 // WriteSlideArgs defines the write_slide tool input.
@@ -59,6 +62,14 @@ type ListDecksArgs struct{}
 // ListDecksResult contains the user's private decks.
 type ListDecksResult struct {
 	Decks []*store.DeckManifest `json:"decks"`
+}
+
+// ListTemplatesArgs defines the slide_templates tool input.
+type ListTemplatesArgs struct{}
+
+// ListTemplatesResult contains the available slide templates (built-in + saved).
+type ListTemplatesResult struct {
+	Templates []themes.Template `json:"templates"`
 }
 
 // ValidateDeckArgs defines the validate_deck tool input.
@@ -94,7 +105,43 @@ func createDeck(ctx context.Context, args CreateDeckArgs) (DeckResult, error) {
 	if err != nil {
 		return DeckResult{}, err
 	}
-	deck, err := svc.CreateDeck(ctx, strings.TrimSpace(args.Slug), strings.TrimSpace(args.Title), strings.TrimSpace(args.Description), args.Theme)
+	slug := strings.TrimSpace(args.Slug)
+	title := strings.TrimSpace(args.Title)
+	description := strings.TrimSpace(args.Description)
+
+	if name := strings.TrimSpace(args.Template); name != "" {
+		tmpl, ok := themes.LookupTemplate(name)
+		if !ok {
+			scoped, listErr := svc.ListTemplates(ctx)
+			if listErr != nil {
+				return DeckResult{}, fmt.Errorf("resolve template %q: %w", name, listErr)
+			}
+			for _, t := range scoped {
+				if t.Name == name {
+					tmpl, ok = t, true
+					break
+				}
+			}
+		}
+		if !ok {
+			return DeckResult{}, fmt.Errorf("unknown template %q", name)
+		}
+		// Merge tokens: template tokens first, explicit args.Theme overlays win.
+		merged := make(map[string]string, len(tmpl.Tokens)+len(args.Theme))
+		for k, v := range tmpl.Tokens {
+			merged[k] = v
+		}
+		for k, v := range args.Theme {
+			merged[k] = v
+		}
+		deck, err := svc.CreateDeckWithAssets(ctx, slug, title, description, merged, tmpl.Assets)
+		if err != nil {
+			return DeckResult{}, err
+		}
+		return DeckResult{Deck: deck, Archetypes: tmpl.Archetypes}, nil
+	}
+
+	deck, err := svc.CreateDeck(ctx, slug, title, description, args.Theme)
 	if err != nil {
 		return DeckResult{}, err
 	}
@@ -138,11 +185,35 @@ func listDecks(ctx context.Context, _ ListDecksArgs) (ListDecksResult, error) {
 	if err != nil {
 		return ListDecksResult{}, err
 	}
-	decks, err := svc.Store.ListDecks(ctx)
+	decks, err := svc.ListDecks(ctx)
 	if err != nil {
 		return ListDecksResult{}, fmt.Errorf("list decks: %w", err)
 	}
 	return ListDecksResult{Decks: decks}, nil
+}
+
+func listTemplates(ctx context.Context, _ ListTemplatesArgs) (ListTemplatesResult, error) {
+	svc, err := personalService(ctx)
+	if err != nil {
+		return ListTemplatesResult{}, err
+	}
+	out := themes.ListTemplates()
+	seen := make(map[string]bool, len(out))
+	for _, t := range out {
+		seen[t.Name] = true
+	}
+	scoped, err := svc.ListTemplates(ctx)
+	if err != nil {
+		return ListTemplatesResult{}, fmt.Errorf("list templates: %w", err)
+	}
+	for _, t := range scoped {
+		if seen[t.Name] {
+			continue
+		}
+		seen[t.Name] = true
+		out = append(out, t)
+	}
+	return ListTemplatesResult{Templates: out}, nil
 }
 
 func validateDeck(ctx context.Context, args ValidateDeckArgs) (ValidateDeckResult, error) {
@@ -178,8 +249,8 @@ func GetTools() ([]tool.Tool, error) {
 		description string
 		newTool     func() (tool.Tool, error)
 	}{
-		{"create_deck", "Create a new private Astonish Slides deck before writing slides.", func() (tool.Tool, error) {
-			return functiontool.New(functiontool.Config{Name: "create_deck", Description: "Create a new private Astonish Slides deck before writing slides."}, func(ctx tool.Context, args CreateDeckArgs) (DeckResult, error) {
+		{"create_deck", "Create a new private Astonish Slides deck before writing slides. Pass an optional template (see slide_templates) to seed a coherent theme, assets, and starting archetypes.", func() (tool.Tool, error) {
+			return functiontool.New(functiontool.Config{Name: "create_deck", Description: "Create a new private Astonish Slides deck before writing slides. Pass an optional template (see slide_templates) to seed a coherent theme, assets, and starting archetypes."}, func(ctx tool.Context, args CreateDeckArgs) (DeckResult, error) {
 				return createDeck(ctx, args)
 			})
 		}},
@@ -196,6 +267,11 @@ func GetTools() ([]tool.Tool, error) {
 		{"list_decks", "List private Astonish Slides decks available to the current user.", func() (tool.Tool, error) {
 			return functiontool.New(functiontool.Config{Name: "list_decks", Description: "List private Astonish Slides decks available to the current user."}, func(ctx tool.Context, args ListDecksArgs) (ListDecksResult, error) {
 				return listDecks(ctx, args)
+			})
+		}},
+		{"slide_templates", "List available slide templates (built-in + saved) to seed a styled deck via create_deck.", func() (tool.Tool, error) {
+			return functiontool.New(functiontool.Config{Name: "slide_templates", Description: "List available slide templates (built-in + saved) to seed a styled deck via create_deck."}, func(ctx tool.Context, args ListTemplatesArgs) (ListTemplatesResult, error) {
+				return listTemplates(ctx, args)
 			})
 		}},
 		{"validate_deck", "Validate every persisted slide in a private deck and return structured ASD diagnostics.", func() (tool.Tool, error) {

@@ -55,6 +55,24 @@ export interface SlidesDeckListItem {
 
 export type SlidesExportFormat = 'pdf' | 'pptx' | 'html'
 
+/** A named archetype (layout) provided by a slide template. */
+export interface SlidesTemplateArchetype {
+  kind: string
+  title?: string
+  markup: string
+}
+
+/** A slide template (design tokens + assets + archetype layouts). */
+export interface SlidesTemplate {
+  name: string
+  label?: string
+  description?: string
+  tokens?: Record<string, string>
+  assets?: Record<string, string>
+  archetypes?: SlidesTemplateArchetype[]
+  scope?: string
+}
+
 function withScope(path: string, scope: DocsScope): string {
   const query = new URLSearchParams({ scope })
   return `${path}?${query.toString()}`
@@ -125,4 +143,35 @@ export async function deleteSlidesDeck(deckSlug: string, scope: DocsScope = 'per
     method: 'DELETE',
   })
   if (!response.ok) throw await responseError(response, 'Failed to delete slide deck')
+}
+
+/** List available slide templates (personal + team merged). */
+export async function listSlidesTemplates(): Promise<{ templates: SlidesTemplate[] }> {
+  const response = await teamFetch(`${DOCS_BASE}/slides/templates`)
+  if (!response.ok) throw await responseError(response, 'Failed to list slide templates')
+  const data = (await response.json()) as { templates?: SlidesTemplate[] }
+  return { templates: data.templates ?? [] }
+}
+
+/**
+ * Import a .pptx file as a new slide template.
+ *
+ * NOTE: the body is a FormData, so we intentionally pass NO Content-Type
+ * header — the browser sets the correct multipart/form-data boundary
+ * automatically. teamFetch only adds headers we explicitly provide (plus
+ * X-Requested-With / X-Astonish-Team), so this stays multipart.
+ */
+export async function importSlidesTemplate(
+  file: File,
+  scope?: DocsScope,
+): Promise<{ template: { name: string; label?: string; scope?: string } }> {
+  const form = new FormData()
+  form.append('file', file)
+  if (scope) form.append('scope', scope)
+  const response = await teamFetch(`${DOCS_BASE}/slides/import`, {
+    method: 'POST',
+    body: form,
+  })
+  if (!response.ok) throw await responseError(response, 'Failed to import template')
+  return response.json() as Promise<{ template: { name: string; label?: string; scope?: string } }>
 }

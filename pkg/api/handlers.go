@@ -1072,6 +1072,8 @@ func RegisterRoutes(router *mux.Router, svc *store.Services, backend store.Platf
 	// so gorilla/mux does not treat 'publish'/'fork' as a deck slug.
 	router.HandleFunc("/api/docs/slides/publish", SlidesPublishToTeamHandler).Methods("POST")
 	router.HandleFunc("/api/docs/slides/fork", SlidesForkToPersonalHandler).Methods("POST")
+	router.HandleFunc("/api/docs/slides/templates", ListSlidesTemplatesHandler).Methods("GET")
+	router.HandleFunc("/api/docs/slides/import", ImportSlidesTemplateHandler).Methods("POST")
 	router.HandleFunc("/api/docs/slides/{deckSlug}", GetSlidesDeckHandler).Methods("GET")
 	router.HandleFunc("/api/docs/slides/{deckSlug}", DeleteSlidesDeckHandler).Methods("DELETE")
 	router.HandleFunc("/api/docs/slides/{deckSlug}/slides/{idx:[0-9]+}", GetSlideHandler).Methods("GET")

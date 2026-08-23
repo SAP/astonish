@@ -2,8 +2,10 @@ package slides
 
 import (
 	"context"
+	"strings"
 	"testing"
 
+	"github.com/SAP/astonish/pkg/docs/slides/themes"
 	"github.com/SAP/astonish/pkg/store"
 )
 
@@ -100,7 +102,7 @@ func TestGetTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"create_deck", "write_slide", "get_deck", "list_decks", "validate_deck"}
+	want := []string{"create_deck", "write_slide", "get_deck", "list_decks", "slide_templates", "validate_deck"}
 	if len(got) != len(want) {
 		t.Fatalf("got %d tools, want %d", len(got), len(want))
 	}
@@ -108,5 +110,135 @@ func TestGetTools(t *testing.T) {
 		if got[i].Name() != name {
 			t.Fatalf("tool %d = %q, want %q", i, got[i].Name(), name)
 		}
+	}
+}
+
+func TestCreateDeckWithTemplateSeedsThemeAssetsAndArchetypes(t *testing.T) {
+	backend := newMultiDeckStore()
+	ctx := toolContext(t, backend)
+
+	created, err := createDeck(ctx, CreateDeckArgs{Slug: "kickoff", Title: "Kickoff", Template: "midnight"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Deck == nil {
+		t.Fatalf("expected deck, got %#v", created)
+	}
+	if created.Deck.Theme["surface"] == "" || created.Deck.Theme["ink"] == "" {
+		t.Fatalf("template theme tokens not seeded: %#v", created.Deck.Theme)
+	}
+	if created.Deck.Theme["surface"] != "#0B1220" {
+		t.Fatalf("expected midnight surface token, got %q", created.Deck.Theme["surface"])
+	}
+	if len(created.Archetypes) == 0 {
+		t.Fatalf("expected non-empty archetypes from template, got %#v", created.Archetypes)
+	}
+
+	// Explicit theme overrides win over template tokens.
+	created2, err := createDeck(ctx, CreateDeckArgs{Slug: "kickoff2", Title: "Kickoff2", Template: "midnight", Theme: map[string]string{"surface": "#000000"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created2.Deck.Theme["surface"] != "#000000" {
+		t.Fatalf("explicit theme override should win, got %q", created2.Deck.Theme["surface"])
+	}
+}
+
+func TestCreateDeckWithScopedTemplateSeedsAssets(t *testing.T) {
+	backend := newMultiDeckStore()
+	ctx := toolContext(t, backend)
+	svc := Service{Store: backend}
+	if err := svc.SaveTemplate(ctx, themes.Template{
+		Name:   "acme",
+		Label:  "Acme",
+		Tokens: map[string]string{"surface": "#101820", "ink": "#F2F2F2"},
+		Assets: map[string]string{"logo": "acme.png"},
+		Archetypes: []themes.Archetype{
+			{Kind: "title", Markup: `<ast-slide id="t"><ast-text id="h" x="160" y="380" w="1600" h="200" color="#F2F2F2" size="72">{{TITLE}}</ast-text></ast-slide>`},
+		},
+	}); err != nil {
+		t.Fatalf("save template: %v", err)
+	}
+
+	created, err := createDeck(ctx, CreateDeckArgs{Slug: "brand", Title: "Brand", Template: "acme"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Deck.Assets["logo"] != "acme.png" {
+		t.Fatalf("scoped template assets not seeded: %#v", created.Deck.Assets)
+	}
+	if created.Deck.Theme["surface"] != "#101820" {
+		t.Fatalf("scoped template tokens not seeded: %#v", created.Deck.Theme)
+	}
+	if len(created.Archetypes) != 1 {
+		t.Fatalf("expected 1 archetype from scoped template, got %#v", created.Archetypes)
+	}
+}
+
+func TestListTemplatesToolReturnsBuiltinsAndScoped(t *testing.T) {
+	backend := newMultiDeckStore()
+	ctx := toolContext(t, backend)
+	svc := Service{Store: backend}
+	if err := svc.SaveTemplate(ctx, themes.Template{
+		Name:   "acme",
+		Label:  "Acme",
+		Tokens: map[string]string{"surface": "#101820"},
+		Archetypes: []themes.Archetype{
+			{Kind: "title", Markup: `<ast-slide id="t"><ast-text id="h" x="160" y="380" w="1600" h="200" color="#F2F2F2" size="72">{{TITLE}}</ast-text></ast-slide>`},
+		},
+	}); err != nil {
+		t.Fatalf("save template: %v", err)
+	}
+
+	res, err := listTemplates(ctx, ListTemplatesArgs{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Templates) < 3 {
+		t.Fatalf("expected >=3 built-in templates, got %d: %#v", len(res.Templates), res.Templates)
+	}
+	names := map[string]bool{}
+	for _, tmpl := range res.Templates {
+		names[tmpl.Name] = true
+	}
+	for _, want := range []string{"light-corporate", "midnight", "aurora", "acme"} {
+		if !names[want] {
+			t.Fatalf("slide_templates missing %q; got %#v", want, names)
+		}
+	}
+}
+
+func TestListDecksToolHidesTemplateDecks(t *testing.T) {
+	backend := newMultiDeckStore()
+	ctx := toolContext(t, backend)
+	svc := Service{Store: backend}
+	if _, err := createDeck(ctx, CreateDeckArgs{Slug: "quarterly", Title: "Quarterly"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.SaveTemplate(ctx, themes.Template{
+		Name:   "acme",
+		Tokens: map[string]string{"surface": "#FFFFFF"},
+		Archetypes: []themes.Archetype{
+			{Kind: "title", Markup: `<ast-slide id="t"><ast-text id="h" x="160" y="380" w="1600" h="200" color="#172033" size="72">{{TITLE}}</ast-text></ast-slide>`},
+		},
+	}); err != nil {
+		t.Fatalf("save template: %v", err)
+	}
+
+	res, err := listDecks(ctx, ListDecksArgs{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, d := range res.Decks {
+		if strings.HasPrefix(d.Slug, "tmpl/") {
+			t.Fatalf("list_decks leaked template deck: %#v", d)
+		}
+		if d.Slug == "quarterly" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("list_decks dropped regular deck; got %#v", res.Decks)
 	}
 }

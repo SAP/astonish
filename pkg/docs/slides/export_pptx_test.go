@@ -69,3 +69,52 @@ func TestPPTXSpikeProducesNativeObjects(t *testing.T) {
 		t.Error("speaker notes part missing")
 	}
 }
+
+func TestPPTXExportV2NodeProps(t *testing.T) {
+	_, file, _, _ := runtime.Caller(0)
+	repo := filepath.Clean(filepath.Join(filepath.Dir(file), "../../.."))
+	exporter := PPTXExporter{Runner: pptxworker.Runner{
+		WorkingDir: filepath.Join(repo, "web"),
+		ScriptPath: filepath.Join(repo, "pkg/docs/slides/pptxworker/worker.mjs"),
+		Timeout:    30 * time.Second,
+	}}
+	scene := SceneGraph{SchemaVersion: SchemaV2, Title: "V2 fidelity", Slides: []Slide{{
+		ID: "v2", Notes: "Speaker note", Nodes: []Node{
+			{
+				ID: "grad", Type: "shape", Geometry: Geometry{X: 96, Y: 200, W: 400, H: 180},
+				Rot: 15, Geom: "roundRect", Dash: "dash", Opacity: 0.5,
+				Gradient: &Gradient{Kind: "linear", Angle: 45, Stops: []GradientStop{
+					{Pos: 0, Color: "#DBEAFE"}, {Pos: 100, Color: "#2563EB"},
+				}},
+			},
+			{
+				ID: "runs", Type: "text", Geometry: Geometry{X: 96, Y: 60, W: 1728, H: 100}, Rot: 5,
+				Runs: []TextRun{
+					{Text: "Bold ", Bold: true, Color: "#111827", Font: "Aptos", Size: 32},
+					{Text: "italic ", Italic: true, Color: "#2563EB"},
+					{Text: "underline", Underline: true},
+				},
+			},
+		},
+	}}}
+	result, err := exporter.Export(context.Background(), scene, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Capabilities.Native != 2 || result.Capabilities.Raster != 0 || result.Capabilities.Unsupported != 0 {
+		t.Fatalf("unexpected capabilities: %+v", result.Capabilities)
+	}
+	if _, err := zip.NewReader(bytes.NewReader(result.Bytes), int64(len(result.Bytes))); err != nil {
+		t.Fatalf("invalid pptx zip: %v", err)
+	}
+	// Gradient is approximated as a solid fill; expect a diagnostic for it.
+	foundGradientWarning := false
+	for _, d := range result.Diagnostics {
+		if strings.Contains(strings.ToLower(d.Message), "gradient") {
+			foundGradientWarning = true
+		}
+	}
+	if !foundGradientWarning {
+		t.Errorf("expected gradient approximation warning, got diagnostics: %+v", result.Diagnostics)
+	}
+}

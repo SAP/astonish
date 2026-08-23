@@ -22,12 +22,13 @@ type Definition struct {
 var v1 = map[string]Definition{
 	"ast-deck":  {TagName: "ast-deck", AllowedChildren: []string{"ast-slide"}, PPTXFidelity: FidelityNative},
 	"ast-slide": {TagName: "ast-slide", AllowedChildren: []string{"ast-text", "ast-shape", "ast-image", "ast-table", "ast-chart", "ast-group", "ast-notes"}, PPTXFidelity: FidelityNative},
-	"ast-text":  {TagName: "ast-text", RequiresGeometry: true, PPTXFidelity: FidelityNative},
-	"ast-shape": {TagName: "ast-shape", RequiresGeometry: true, AllowedChildren: []string{"ast-text"}, PPTXFidelity: FidelityNative},
+	"ast-text":  {TagName: "ast-text", RequiresGeometry: true, AllowedChildren: []string{"ast-run"}, PPTXFidelity: FidelityNative},
+	"ast-shape": {TagName: "ast-shape", RequiresGeometry: true, AllowedChildren: []string{"ast-text", "script"}, PPTXFidelity: FidelityNative},
 	"ast-image": {TagName: "ast-image", RequiresGeometry: true, PPTXFidelity: FidelityNative},
 	"ast-table": {TagName: "ast-table", RequiresGeometry: true, PPTXFidelity: FidelityNative},
 	"ast-chart": {TagName: "ast-chart", RequiresGeometry: true, PPTXFidelity: FidelityNative},
 	"ast-group": {TagName: "ast-group", RequiresGeometry: true, AllowedChildren: []string{"ast-text", "ast-shape", "ast-image"}, PPTXFidelity: FidelityNative},
+	"ast-run":   {TagName: "ast-run", PPTXFidelity: FidelityNative},
 	"ast-notes": {TagName: "ast-notes", PPTXFidelity: FidelityNative},
 }
 

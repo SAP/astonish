@@ -4,10 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
+	"github.com/SAP/astonish/pkg/docs/slides/themes"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/google/uuid"
 )
+
+// templatePrefix namespaces template decks so they can be persisted in the same
+// scope as regular decks while staying hidden from ListDecks.
+const templatePrefix = "tmpl/"
 
 // ErrDeckExists is returned by CopyDeckTo when the destination scope already
 // has a deck with the same slug (unique-slug constraint in the target store).
@@ -16,13 +22,20 @@ var ErrDeckExists = errors.New("deck already exists in destination scope")
 type Service struct{ Store store.DocsStore }
 
 func (s Service) CreateDeck(ctx context.Context, slug, title, description string, theme map[string]string) (*store.DeckManifest, error) {
+	return s.CreateDeckWithAssets(ctx, slug, title, description, theme, nil)
+}
+
+// CreateDeckWithAssets mirrors CreateDeck but also persists an optional asset
+// map (e.g. seeded from a template). SchemaVersion stays SchemaV1 for regular
+// decks so existing CreateDeck behavior is unchanged.
+func (s Service) CreateDeckWithAssets(ctx context.Context, slug, title, description string, theme, assets map[string]string) (*store.DeckManifest, error) {
 	if s.Store == nil {
 		return nil, fmt.Errorf("docs store unavailable")
 	}
 	if slug == "" || title == "" {
 		return nil, fmt.Errorf("slug and title are required")
 	}
-	d := &store.DeckManifest{ID: uuid.NewString(), Slug: slug, Title: title, Description: description, SchemaVersion: SchemaV1, Theme: theme}
+	d := &store.DeckManifest{ID: uuid.NewString(), Slug: slug, Title: title, Description: description, SchemaVersion: SchemaV1, Theme: theme, Assets: assets}
 	if err := s.Store.CreateDeck(ctx, d); err != nil {
 		return nil, fmt.Errorf("create deck: %w", err)
 	}
@@ -75,7 +88,127 @@ func (s Service) ListDecks(ctx context.Context) ([]*store.DeckManifest, error) {
 	if s.Store == nil {
 		return nil, fmt.Errorf("docs store unavailable")
 	}
-	return s.Store.ListDecks(ctx)
+	decks, err := s.Store.ListDecks(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := decks[:0]
+	for _, d := range decks {
+		if strings.HasPrefix(d.Slug, templatePrefix) {
+			continue
+		}
+		out = append(out, d)
+	}
+	return out, nil
+}
+
+// SaveTemplate persists a Template as a hidden deck (slug "tmpl/<name>") in this
+// service's scope. Persistence is idempotent: an existing template deck with the
+// same slug is deleted and recreated. Archetype markup is stored directly via
+// UpsertSlide (bypassing the WriteSlide validation gate) because the {{TITLE}}
+// and {{BODY}} placeholders are inert text content and validity is guaranteed by
+// TestBuiltinTemplateArchetypesAreValidASD.
+func (s Service) SaveTemplate(ctx context.Context, tmpl themes.Template) error {
+	if s.Store == nil {
+		return fmt.Errorf("docs store unavailable")
+	}
+	if tmpl.Name == "" {
+		return fmt.Errorf("template name is required")
+	}
+	slug := templatePrefix + tmpl.Name
+	if existing, err := s.Store.GetDeck(ctx, slug); err == nil && existing != nil {
+		if err := s.Store.DeleteDeck(ctx, slug); err != nil {
+			return fmt.Errorf("replace template deck: %w", err)
+		}
+	} else if err != nil && !errors.Is(err, store.ErrDocsNotFound) {
+		return fmt.Errorf("check template deck: %w", err)
+	}
+	title := tmpl.Label
+	if title == "" {
+		title = tmpl.Name
+	}
+	deck := &store.DeckManifest{
+		ID:            uuid.NewString(),
+		Slug:          slug,
+		Title:         title,
+		Description:   tmpl.Description,
+		SchemaVersion: SchemaV2,
+		Theme:         tmpl.Tokens,
+		Assets:        tmpl.Assets,
+	}
+	if err := s.Store.CreateDeck(ctx, deck); err != nil {
+		return fmt.Errorf("create template deck: %w", err)
+	}
+	for i, arch := range tmpl.Archetypes {
+		slide := &store.SlideContent{
+			ID:            uuid.NewString(),
+			DeckID:        deck.ID,
+			Position:      i,
+			Title:         arch.Kind,
+			Content:       arch.Markup,
+			SchemaVersion: SchemaV2,
+		}
+		if err := s.Store.UpsertSlide(ctx, slide); err != nil {
+			return fmt.Errorf("write template archetype %d: %w", i, err)
+		}
+	}
+	return nil
+}
+
+// ListTemplates reconstructs the Templates persisted in this service's scope from
+// their hidden "tmpl/" decks. Built-in templates are not included; use
+// resolveTemplate to merge built-ins and scoped templates by name.
+func (s Service) ListTemplates(ctx context.Context) ([]themes.Template, error) {
+	if s.Store == nil {
+		return nil, fmt.Errorf("docs store unavailable")
+	}
+	decks, err := s.Store.ListDecks(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var out []themes.Template
+	for _, deck := range decks {
+		if !strings.HasPrefix(deck.Slug, templatePrefix) {
+			continue
+		}
+		slides, err := s.Store.ListSlides(ctx, deck.ID)
+		if err != nil {
+			return nil, fmt.Errorf("list template archetypes: %w", err)
+		}
+		archetypes := make([]themes.Archetype, 0, len(slides))
+		for _, slide := range slides {
+			archetypes = append(archetypes, themes.Archetype{Kind: slide.Title, Markup: slide.Content})
+		}
+		out = append(out, themes.Template{
+			Schema:      SchemaV2,
+			Name:        strings.TrimPrefix(deck.Slug, templatePrefix),
+			Label:       deck.Title,
+			Description: deck.Description,
+			Tokens:      deck.Theme,
+			Assets:      deck.Assets,
+			Archetypes:  archetypes,
+			Scope:       "scope",
+		})
+	}
+	return out, nil
+}
+
+// resolveTemplate looks up a template by name, preferring a built-in over a
+// scoped template of the same name.
+func (s Service) resolveTemplate(ctx context.Context, name string) (themes.Template, bool) {
+	if t, ok := themes.LookupTemplate(name); ok {
+		return t, true
+	}
+	scoped, err := s.ListTemplates(ctx)
+	if err != nil {
+		return themes.Template{}, false
+	}
+	for _, t := range scoped {
+		if t.Name == name {
+			return t, true
+		}
+	}
+	return themes.Template{}, false
 }
 
 func (s Service) Slide(ctx context.Context, deckSlug string, position int) (*store.SlideContent, error) {

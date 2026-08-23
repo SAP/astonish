@@ -307,7 +307,7 @@ func (b *SystemPromptBuilder) Build() string {
 		sb.WriteString("\n**Credentials:** Encrypted vault (no files on disk). `resolve_credential` returns `{{CREDENTIAL:name:field}}` placeholders — auto-substituted in `shell_command`/`process_write`/`browser_type`. For HTTP APIs use `http_request(credential=\"name\")`.\n")
 	}
 	if b.hasSlideTools() {
-		sb.WriteString("\n**Slide decks:** For slide or presentation requests, use `create_deck` followed by one `write_slide` call per zero-based position. Each write must contain exactly one complete ASD v1 `<ast-slide>` root. All `x`, `y`, `w`, and `h` values are integer logical pixels on a fixed 1920×1080 canvas—never percentages or 0–100 coordinates. `ast-text` renders plain text, so never put Markdown markers in it; use `size`, `weight`, `font-token`, and `color-token` attributes and compose a designed slide with shapes and theme tokens. Fix validation errors before continuing. Use `get_deck` before revising an existing deck and `validate_deck` before declaring it complete. Do not substitute an `astonish-app` for a requested deck.\n")
+		sb.WriteString("\n**Slide decks:** For any slide, presentation, deck, or PowerPoint request, call `skill_lookup(\"slides\")` first to load the full authoring guide, then follow it: pick a template via `slide_templates`, create the deck from that template, and build the slides from its archetypes. Never produce an unstyled deck or substitute an `astonish-app` for a requested deck.\n")
 	}
 
 	// 6b. Task delegation — list available tool groups for delegate_tasks

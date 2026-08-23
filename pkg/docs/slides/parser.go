@@ -175,22 +175,129 @@ func nodeFromHTML(n *html.Node) (Node, error) {
 			return Node{}, err
 		}
 	}
-	out := Node{ID: attr(n, "id"), Type: strings.TrimPrefix(n.Data, "ast-"), Geometry: g, Text: strings.TrimSpace(textContent(n)), Props: map[string]any{}}
+	out := Node{ID: attr(n, "id"), Type: strings.TrimPrefix(n.Data, "ast-"), Geometry: g, Props: map[string]any{}}
 	for _, a := range n.Attr {
-		if a.Key != "id" && a.Key != "x" && a.Key != "y" && a.Key != "w" && a.Key != "h" {
+		switch a.Key {
+		case "id", "x", "y", "w", "h":
+			// geometry/identity handled separately
+		case "rot":
+			v, err := strconv.Atoi(strings.TrimSpace(a.Val))
+			if err != nil {
+				return Node{}, fmt.Errorf("%s attribute %q must be an integer", n.Data, a.Key)
+			}
+			out.Rot = v
+		case "opacity":
+			v, err := strconv.ParseFloat(strings.TrimSpace(a.Val), 64)
+			if err != nil {
+				return Node{}, fmt.Errorf("%s attribute %q must be a number", n.Data, a.Key)
+			}
+			out.Opacity = v
+		case "fill":
+			out.Fill = a.Val
+		case "line":
+			out.Line = a.Val
+		case "line-dash":
+			out.Dash = a.Val
+		case "geom":
+			out.Geom = a.Val
+		case "path":
+			out.Path = a.Val
+		default:
 			out.Props[a.Key] = a.Val
 		}
 	}
+	if err := collectChildren(n, &out); err != nil {
+		return Node{}, err
+	}
+	// Text content is only meaningful when there are no rich runs; a leaf's own
+	// text still populates Text for the single-run fallback path.
+	out.Text = strings.TrimSpace(directText(n))
+	return out, nil
+}
+
+// collectChildren walks element children of n, populating Node.Runs from
+// ast-run elements, Node.Gradient from a gradient JSON script block, and
+// Node.Children from nested ast-* elements.
+func collectChildren(n *html.Node, out *Node) error {
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		if c.Type == html.ElementNode && strings.HasPrefix(c.Data, "ast-") {
+		if c.Type != html.ElementNode {
+			continue
+		}
+		switch {
+		case c.Data == "ast-run":
+			out.Runs = append(out.Runs, runFromHTML(c))
+		case c.Data == "script":
+			grad, err := gradientFromScript(c)
+			if err != nil {
+				return err
+			}
+			if grad != nil {
+				out.Gradient = grad
+			}
+		case strings.HasPrefix(c.Data, "ast-"):
 			child, err := nodeFromHTML(c)
 			if err != nil {
-				return Node{}, err
+				return err
 			}
 			out.Children = append(out.Children, child)
 		}
 	}
-	return out, nil
+	return nil
+}
+
+// directText returns the concatenated text of n excluding text inside nested
+// ast-* elements so a parent's Text does not absorb its rich runs' content.
+func directText(n *html.Node) string {
+	var b strings.Builder
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		switch {
+		case c.Type == html.TextNode:
+			b.WriteString(c.Data)
+		case c.Type == html.ElementNode && (strings.HasPrefix(c.Data, "ast-") || c.Data == "script"):
+			// skip: rich runs and data blocks are captured separately
+		case c.Type == html.ElementNode:
+			b.WriteString(textContent(c))
+		}
+	}
+	return b.String()
+}
+
+func runFromHTML(n *html.Node) TextRun {
+	run := TextRun{Text: strings.TrimSpace(textContent(n))}
+	for _, a := range n.Attr {
+		switch a.Key {
+		case "b":
+			run.Bold = true
+		case "i":
+			run.Italic = true
+		case "u":
+			run.Underline = true
+		case "color":
+			run.Color = a.Val
+		case "font":
+			run.Font = a.Val
+		case "weight":
+			run.Weight = a.Val
+		case "size":
+			if v, err := strconv.Atoi(strings.TrimSpace(a.Val)); err == nil {
+				run.Size = v
+			}
+		}
+	}
+	return run
+}
+
+func gradientFromScript(n *html.Node) (*Gradient, error) {
+	raw := strings.TrimSpace(textContent(n))
+	if raw == "" {
+		return nil, nil
+	}
+	var g Gradient
+	dec := json.NewDecoder(strings.NewReader(raw))
+	if err := dec.Decode(&g); err != nil {
+		return nil, fmt.Errorf("invalid gradient JSON: %w", err)
+	}
+	return &g, nil
 }
 func parseIntAttr(n *html.Node, key string) (int, error) {
 	v := attr(n, key)

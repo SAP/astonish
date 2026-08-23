@@ -22,6 +22,16 @@ func BuiltinSkills() []Skill {
 			// but hide it from the Available Skills index and the /skills picker.
 			ExcludeFromCodeMode: true,
 		},
+		{
+			Name:        "slides",
+			Description: "Complete reference for building styled Astonish Slides decks (ASD v2): elements, attributes, gradients/rich text, the template workflow (slide_templates -> create_deck template -> archetypes), and requirement-gathering tips. Load before authoring any presentation/PowerPoint/deck.",
+			Content:     BuiltinSlides,
+			Source:      "builtin",
+			// Not ExcludeFromCodeMode: slide decks are server-side artifacts
+			// usable wherever the slide tools are present, in both platform and
+			// code modes, so this skill should resolve and be discoverable in
+			// both. BuiltinSkillsForCode() will therefore include it.
+		},
 	}
 }
 

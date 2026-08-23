@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -22,7 +23,7 @@ type HTMLExporter struct {
 }
 
 func (e HTMLExporter) Export(scene SceneGraph) (ExportResult, error) {
-	if scene.SchemaVersion != SchemaV1 {
+	if scene.SchemaVersion != SchemaV1 && scene.SchemaVersion != SchemaV2 {
 		return ExportResult{}, fmt.Errorf("unsupported slides schema version %d", scene.SchemaVersion)
 	}
 	if len(scene.Slides) == 0 {
@@ -89,7 +90,21 @@ func writeThemeCSS(out *bytes.Buffer, theme map[string]string) {
 }
 
 func safeCSSValue(value string) bool {
-	return value != "" && !strings.ContainsAny(value, `;{}<>`)
+	if value == "" || strings.ContainsAny(value, `;{}<>`) {
+		return false
+	}
+	// Allow the characters needed for hex colors (#), rgb()/rgba() and
+	// var(--ast-...) declarations, plus general letters/digits/spacing.
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '#' || r == '(' || r == ')' || r == ',' || r == '.' || r == '%':
+		case r == '-' || r == ' ' || r == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func renderSlide(out *bytes.Buffer, slide Slide) {
@@ -141,12 +156,329 @@ func renderNode(out *bytes.Buffer, node Node) {
 		data, _ := json.Marshal(node.Series)
 		writeAttr(out, "data-json", string(data))
 	}
+	if style := nodeInlineStyle(node); style != "" {
+		writeAttr(out, "style", style)
+	}
 	out.WriteByte('>')
-	out.WriteString(html.EscapeString(node.Text))
+	// v2 fidelity: rich shape rendering via inline SVG.
+	if tag == "ast-shape" && shapeNeedsSVG(node) {
+		writeShapeSVG(out, node)
+	}
+	// v2 fidelity: rich text runs.
+	if tag == "ast-text" && len(node.Runs) > 0 {
+		writeTextRuns(out, node.Runs)
+	} else {
+		out.WriteString(html.EscapeString(node.Text))
+	}
 	for _, child := range node.Children {
 		renderNode(out, child)
 	}
 	out.WriteString(`</` + tag + `>`)
+}
+
+// nodeInlineStyle assembles an inline style string from v2 fidelity fields.
+// Only safe, self-contained values are emitted (rotation + opacity).
+func nodeInlineStyle(node Node) string {
+	var parts []string
+	if node.Rot != 0 {
+		parts = append(parts, "transform:rotate("+strconv.Itoa(node.Rot)+"deg);transform-origin:center")
+	}
+	if node.Opacity > 0 && node.Opacity < 1 {
+		parts = append(parts, "opacity:"+strconv.FormatFloat(node.Opacity, 'g', -1, 64))
+	}
+	return strings.Join(parts, ";")
+}
+
+func shapeNeedsSVG(node Node) bool {
+	if node.Geom != "" || node.Path != "" || node.Gradient != nil {
+		return true
+	}
+	// Raw color fill also warrants an SVG shape.
+	if isRawColor(node.Fill) {
+		return true
+	}
+	return false
+}
+
+// isRawColor reports whether v is a literal color value (#hex or rgb()/rgba()).
+func isRawColor(v string) bool {
+	if v == "" {
+		return false
+	}
+	return strings.HasPrefix(v, "#") || strings.HasPrefix(v, "rgb(") || strings.HasPrefix(v, "rgba(")
+}
+
+// resolveColor turns a fidelity color-ish value into a CSS color. Raw colors
+// (#hex, rgb()) are used directly; anything else is treated as a theme token
+// and resolved to var(--ast-<token>). Returns "" if unsafe/empty.
+func resolveColor(v string) string {
+	if v == "" {
+		return ""
+	}
+	if isRawColor(v) {
+		if safeCSSValue(v) {
+			return v
+		}
+		return ""
+	}
+	if safeAttributeName(v) {
+		return "var(--ast-" + v + ")"
+	}
+	return ""
+}
+
+func dashArray(dash string) string {
+	switch dash {
+	case "dash":
+		return "8 6"
+	case "dot":
+		return "2 4"
+	default:
+		return ""
+	}
+}
+
+// writeShapeSVG emits an inline SVG that fills the node box, honoring geom,
+// path, gradient, fill/line/dash and arrow-head props. All content is inline
+// (no external URLs), satisfying the existing CSP.
+func writeShapeSVG(out *bytes.Buffer, node Node) {
+	w := node.Geometry.W
+	h := node.Geometry.H
+	if w <= 0 {
+		w = 100
+	}
+	if h <= 0 {
+		h = 100
+	}
+	vb := fmt.Sprintf("0 0 %d %d", w, h)
+
+	// Resolve fill.
+	var fill string
+	gradID := ""
+	if node.Gradient != nil {
+		gradID = "grad" + safeID(node.ID)
+		fill = "url(#" + gradID + ")"
+	} else if isRawColor(node.Fill) {
+		fill = resolveColor(node.Fill)
+	} else if node.Fill != "" {
+		fill = resolveColor(node.Fill)
+	}
+	if fill == "" {
+		fill = "none"
+	}
+
+	stroke := resolveColor(node.Line)
+	strokeWidth := ""
+	if node.Props != nil {
+		if lw, ok := scalarString(node.Props["line-width"]); ok && safeCSSValue(lw) {
+			strokeWidth = lw
+		}
+	}
+	dash := dashArray(node.Dash)
+
+	// Arrow markers (best-effort, mainly for line geom).
+	headEnd, _ := propString(node, "head-end")
+	tailEnd, _ := propString(node, "tail-end")
+	wantStartMarker := tailEnd == "arrow" || tailEnd == "triangle"
+	wantEndMarker := headEnd == "arrow" || headEnd == "triangle"
+	markerStartID := "mstart" + safeID(node.ID)
+	markerEndID := "mend" + safeID(node.ID)
+
+	out.WriteString(`<svg style="width:100%;height:100%" viewBox="` + vb + `" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">`)
+
+	// defs
+	needDefs := node.Gradient != nil || wantStartMarker || wantEndMarker
+	if needDefs {
+		out.WriteString(`<defs>`)
+		if node.Gradient != nil {
+			writeGradientDef(out, gradID, node.Gradient)
+		}
+		markerColor := stroke
+		if markerColor == "" {
+			markerColor = "currentColor"
+		}
+		if wantStartMarker {
+			writeArrowMarker(out, markerStartID, markerColor)
+		}
+		if wantEndMarker {
+			writeArrowMarker(out, markerEndID, markerColor)
+		}
+		out.WriteString(`</defs>`)
+	}
+
+	// shape element
+	geom := node.Geom
+	if node.Path != "" && geom != "line" {
+		geom = "path"
+	}
+	switch geom {
+	case "ellipse":
+		fmt.Fprintf(out, `<ellipse cx="%d" cy="%d" rx="%d" ry="%d"`, w/2, h/2, w/2, h/2)
+		writeShapePaint(out, fill, stroke, strokeWidth, dash, "", "")
+		out.WriteString(`/>`)
+	case "roundRect":
+		rx := w / 10
+		if rx <= 0 {
+			rx = 4
+		}
+		fmt.Fprintf(out, `<rect x="0" y="0" width="%d" height="%d" rx="%d"`, w, h, rx)
+		writeShapePaint(out, fill, stroke, strokeWidth, dash, "", "")
+		out.WriteString(`/>`)
+	case "triangle":
+		d := fmt.Sprintf("M %d 0 L %d %d L 0 %d Z", w/2, w, h, h)
+		out.WriteString(`<path d="` + html.EscapeString(d) + `"`)
+		writeShapePaint(out, fill, stroke, strokeWidth, dash, "", "")
+		out.WriteString(`/>`)
+	case "line":
+		d := node.Path
+		if d == "" {
+			d = fmt.Sprintf("M 0 %d L %d %d", h/2, w, h/2)
+		}
+		ms, me := "", ""
+		if wantStartMarker {
+			ms = markerStartID
+		}
+		if wantEndMarker {
+			me = markerEndID
+		}
+		lineStroke := stroke
+		if lineStroke == "" {
+			lineStroke = "currentColor"
+		}
+		out.WriteString(`<path d="` + html.EscapeString(d) + `"`)
+		writeShapePaint(out, "none", lineStroke, strokeWidth, dash, ms, me)
+		out.WriteString(`/>`)
+	case "path":
+		out.WriteString(`<path d="` + html.EscapeString(node.Path) + `"`)
+		writeShapePaint(out, fill, stroke, strokeWidth, dash, "", "")
+		out.WriteString(`/>`)
+	default: // rect and unknown presets fall back to a rectangle.
+		fmt.Fprintf(out, `<rect x="0" y="0" width="%d" height="%d"`, w, h)
+		writeShapePaint(out, fill, stroke, strokeWidth, dash, "", "")
+		out.WriteString(`/>`)
+	}
+
+	out.WriteString(`</svg>`)
+}
+
+func writeShapePaint(out *bytes.Buffer, fill, stroke, strokeWidth, dash, markerStart, markerEnd string) {
+	out.WriteString(` fill="` + html.EscapeString(fill) + `"`)
+	if stroke != "" {
+		out.WriteString(` stroke="` + html.EscapeString(stroke) + `"`)
+		if strokeWidth != "" {
+			out.WriteString(` stroke-width="` + html.EscapeString(strokeWidth) + `"`)
+		}
+	}
+	if dash != "" {
+		out.WriteString(` stroke-dasharray="` + html.EscapeString(dash) + `"`)
+	}
+	if markerStart != "" {
+		out.WriteString(` marker-start="url(#` + markerStart + `)"`)
+	}
+	if markerEnd != "" {
+		out.WriteString(` marker-end="url(#` + markerEnd + `)"`)
+	}
+}
+
+func writeGradientDef(out *bytes.Buffer, id string, g *Gradient) {
+	if g.Kind == "radial" {
+		out.WriteString(`<radialGradient id="` + id + `">`)
+		writeGradientStops(out, g.Stops)
+		out.WriteString(`</radialGradient>`)
+		return
+	}
+	// linear: derive endpoints from angle (degrees, clockwise from +x axis).
+	rad := float64(g.Angle) * math.Pi / 180
+	dx := math.Cos(rad)
+	dy := math.Sin(rad)
+	x1 := 0.5 - dx/2
+	y1 := 0.5 - dy/2
+	x2 := 0.5 + dx/2
+	y2 := 0.5 + dy/2
+	fmt.Fprintf(out, `<linearGradient id="%s" x1="%s" y1="%s" x2="%s" y2="%s">`,
+		id, fmtCoord(x1), fmtCoord(y1), fmtCoord(x2), fmtCoord(y2))
+	writeGradientStops(out, g.Stops)
+	out.WriteString(`</linearGradient>`)
+}
+
+func writeGradientStops(out *bytes.Buffer, stops []GradientStop) {
+	for _, s := range stops {
+		color := s.Color
+		if !safeCSSValue(color) {
+			color = ""
+		}
+		fmt.Fprintf(out, `<stop offset="%d%%" stop-color="%s"/>`, s.Pos, html.EscapeString(color))
+	}
+}
+
+func writeArrowMarker(out *bytes.Buffer, id, color string) {
+	out.WriteString(`<marker id="` + id + `" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">`)
+	out.WriteString(`<path d="M 0 0 L 10 5 L 0 10 z" fill="` + html.EscapeString(color) + `"/>`)
+	out.WriteString(`</marker>`)
+}
+
+func fmtCoord(v float64) string {
+	return strconv.FormatFloat(v, 'g', 4, 64)
+}
+
+// safeID sanitizes a node id for use in an SVG id attribute.
+func safeID(id string) string {
+	var b strings.Builder
+	for _, r := range id {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' {
+			b.WriteRune(r)
+		}
+	}
+	if b.Len() == 0 {
+		return "x"
+	}
+	return b.String()
+}
+
+func propString(node Node, key string) (string, bool) {
+	if node.Props == nil {
+		return "", false
+	}
+	return scalarString(node.Props[key])
+}
+
+// writeTextRuns renders rich text runs as nested styled spans.
+func writeTextRuns(out *bytes.Buffer, runs []TextRun) {
+	for _, run := range runs {
+		style := runInlineStyle(run)
+		out.WriteString(`<span`)
+		if style != "" {
+			out.WriteString(` style="` + html.EscapeString(style) + `"`)
+		}
+		out.WriteByte('>')
+		out.WriteString(html.EscapeString(run.Text))
+		out.WriteString(`</span>`)
+	}
+}
+
+func runInlineStyle(run TextRun) string {
+	var parts []string
+	if run.Bold {
+		parts = append(parts, "font-weight:700")
+	} else if run.Weight != "" && safeCSSValue(run.Weight) {
+		parts = append(parts, "font-weight:"+run.Weight)
+	}
+	if run.Italic {
+		parts = append(parts, "font-style:italic")
+	}
+	if run.Underline {
+		parts = append(parts, "text-decoration:underline")
+	}
+	if c := resolveColor(run.Color); c != "" {
+		parts = append(parts, "color:"+c)
+	}
+	if run.Font != "" && safeCSSValue(run.Font) {
+		parts = append(parts, "font-family:"+run.Font)
+	}
+	if run.Size > 0 {
+		parts = append(parts, "font-size:"+strconv.Itoa(run.Size)+"px")
+	}
+	return strings.Join(parts, ";")
 }
 
 func writeAttr(out *bytes.Buffer, name, value string) {

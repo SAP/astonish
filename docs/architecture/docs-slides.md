@@ -1,10 +1,10 @@
 # Docs — Slides (Web Component Presentations)
 
-> **Status**: Planned — revised proposal
+> **Status**: ASD v2 implemented — high-fidelity model, templates, and PPTX import shipped
 > **Category**: Productivity Tools
 > **First doc type**: Slides
 > **Future doc types**: Documents (rich text), Spreadsheets (structured data)
-> **Last research review**: 2026-08-21
+> **Last research review**: 2026-08-22
 
 ## Overview
 
@@ -239,6 +239,73 @@ Theme changes must not alter component geometry unless a full validation/render 
 
 ---
 
+## ASD v2 — High-Fidelity Model (implemented)
+
+ASD v1 was deliberately token-only: nodes could reference theme tokens (`fill-token`, `color-token`, `font-token`) but could not express a raw color, gradient, rotation, line dash/arrow, preset or custom shape geometry, rich multi-run text, or image opacity. Newly generated decks therefore looked unstyled. **ASD v2 is a strict superset of v1** — every v1 attribute still validates, so existing decks and fixtures parse unchanged — that adds faithful fidelity attributes and enables PowerPoint import.
+
+`SchemaV2 = 2` is defined alongside `SchemaV1 = 1` in `pkg/docs/slides/types.go`. `ParseSlide` is version-agnostic (it validates markup, not a version), and the HTML and PPTX exporters accept **both** v1 and v2 scenes. Templates and imported decks are created at `SchemaV2`.
+
+### New attributes and elements
+
+| Element | New optional v2 attributes |
+|---|---|
+| `ast-shape` | `rot` (degrees), `fill` (raw `#RRGGBB`/`#RRGGBBAA`/`rgb()`/`rgba()`), `line` (raw color), `line-dash` (`solid`\|`dash`\|`dot`), `head-end`/`tail-end` (`none`\|`arrow`\|`triangle`), `geom` (preset), `path` (SVG-subset custom geometry), `opacity` (0–1). v1 `fill-token`/`line-token`/`line-width` still work. |
+| `ast-text` | `rot`, `anchor` (`t`\|`ctr`\|`b`), `wrap`, `color` (raw), `font` (raw family). v1 `font-token`/`color-token`/`size`/`weight`/`align`/`inset` still work. |
+| `ast-image` | `rot`, `opacity`. |
+| `ast-group` | `rot`. Children keep absolute geometry (the importer flattens group child coordinates). |
+| **`ast-run`** *(new)* | Child of `ast-text` for multi-run rich text: `b`, `i`, `u`, `color`, `font`, `size`, `weight`; run text via textContent. When present, runs override the single-run token styling. |
+
+**Gradients** are expressed as an inert `application/json` `<script>` data block that is a child of `ast-shape` (reusing the existing JSON-block validation path), shaped as `{ "kind": "linear"|"radial", "angle": <deg>, "stops": [ { "pos": 0–100, "color": "#..." }, ... ] }`.
+
+Preset `geom` values: `rect roundRect ellipse triangle rtTriangle diamond parallelogram trapezoid hexagon octagon star5 rightArrow leftArrow chevron cloud can cube line bracketPair`.
+
+### Validation (`validation.go`)
+
+`ValidateSlide` keeps all v1 checks (geometry-in-canvas, geometry-scale, duplicate-id, missing-alt, literal-markdown) and adds v2 diagnostic codes: `invalid_rotation` (sane range), `invalid_opacity` (0–1), `invalid_color` (strict `#hex`/`rgb()`/`rgba()` safe pattern rejecting `;{}<>`), `invalid_gradient` (≥2 stops, ascending pos in 0–100, valid stop colors, kind linear/radial), `invalid_geometry_preset` (must be an allowed preset), `invalid_path` (only SVG-path-safe chars `M L C Q Z H V` + digits/spaces/commas/signs/dots), and font validation on rich runs. Imported colors/paths are validated numerics/hex — never raw pass-through.
+
+### Rendering
+
+- **HTML export (`export_html.go`)** — shapes with a preset `geom`, custom `path`, or gradient render as an inline `<svg>` filling the node box (`<rect>`/`<ellipse>`/`<path>`, `<defs>` with `<linearGradient>`/`<radialGradient>`, `stroke-dasharray` for dash, `marker-start`/`marker-end` for arrows). Rotation becomes `transform:rotate(Ndeg);transform-origin:center`. Rich runs render as nested `<span>`s with per-run bold/italic/underline/color/font/size. `safeCSSValue` was widened to allow `#hex` and `rgb()`/`rgba()` while still rejecting `;{}<>`. The export CSP (`style-src 'unsafe-inline'`, inline SVG) is unchanged — no external CSS/script/font URLs.
+- **Lit runtime (`web/src/components/docs/slides/runtime/*`)** — `AstShape`, `AstText`, `AstImage`, `AstGroup` render the same v2 attributes so Studio harness and present mode match the export. `ast-run` children are read directly by `AstText` (not registered as a heavy element). `PositionedElement` maps the `rot` attribute to a rotation transform.
+- **PPTX export (`pptxworker/worker.mjs`)** — extended additively (never rewritten): `rot`→pptxgenjs rotate, raw fill / gradient→solid or gradient fill (gradient approximated as solid with a warning), dash→`dashType`, arrows→begin/end arrow, `geom`→`ShapeType`, custom `path`→closest preset + warning, rich runs→`addText` run array with per-run formatting. Counts, warnings, and the stdin/stdout protocol are unchanged.
+
+---
+
+## Templates (implemented)
+
+A **Template** bundles a coherent look so decks are born styled instead of white-on-white. Defined in `pkg/docs/slides/themes/registry.go`:
+
+```go
+type Archetype struct { Kind string; Title string; Markup string } // Kind: title|section|content; Markup is valid ASD v2 with {{TITLE}}/{{BODY}} placeholders
+type Template struct {
+    Schema      int
+    Name, Label, Description string
+    Tokens      map[string]string   // theme tokens
+    Assets      map[string]string   // asset-ref -> data URL (logos/backgrounds)
+    Archetypes  []Archetype         // title / section / content layout skeletons
+    Scope       string
+}
+```
+
+Three built-ins ship: `light-corporate`, `midnight` (dark surface `#0b1220` / ink `#e2e8f0` / accent `#f59e0b`), and `aurora` (colorful, gradient title background). `LookupTemplate(name)` and `ListTemplates()` (deterministic) expose them; `Template.ThemeTokens()` returns the tokens. `templates_validate_test.go` asserts every built-in archetype passes `ParseSlide` with zero error diagnostics. The v1 `Theme`/`Lookup` API is retained for `ListSlidesThemesHandler`.
+
+### Scoped persistence — Option A (`tmpl/` decks)
+
+Imported/saved templates persist **without an Ent schema change** by reusing `DocsStore`: `Service.SaveTemplate(ctx, tmpl)` stores a hidden deck at slug `tmpl/<name>` with `Theme=Tokens`, `Assets=Assets`, and one slide per archetype (`Content=markup`, `Title=kind`), created at `SchemaV2`. `Service.ListTemplates(ctx)` reconstructs Templates from `tmpl/` decks; `resolveTemplate(ctx, name)` checks built-ins first, then scope. `Service.ListDecks` filters `tmpl/` slugs out, so template decks never appear in the normal deck list, the `list_decks` tool, or `ListDocsHandler`. Templates live in the resolved personal/team scope; built-ins are global read-only.
+
+> **Option B (future):** a dedicated Ent `Template` entity across the four scopes is the cleaner long-term design (typed fields, no slug overloading). It was deliberately not implemented now to avoid a schema/migration change for a pre-release feature.
+
+---
+
+## PPTX Import (implemented)
+
+A separate Node worker reconstructs an ASD v2 scene (or a Template) from an uploaded `.pptx`, leaving the export worker untouched. It uses **`jszip` + `fast-xml-parser`** (no dependency on Go `unioffice`/`gooxml`, which are AGPL/commercial). Rendering **logic** (not code) was borrowed from Apache-2.0 `aiden0z/pptx-renderer` and MIT PPTXjs.
+
+- **Go side** — `pkg/docs/slides/pptxworker/import_protocol.go` (`ImportProtocolVersion=1`, `ImportRequest{ProtocolVersion, PPTXBase64, Mode}` where Mode is `template`|`deck`, `ImportResponse{ProtocolVersion, SceneOrTemplate json.RawMessage, Warnings, Error}`) and `import_worker.go` (`ImportRunner{NodePath, WorkingDir, ScriptPath, Timeout}` with `Run(ctx, req)`), mirroring the export Runner's exec/stdin-stdout/timeout/protocol guards. Any Go-side OOXML parsing would use stdlib `archive/zip` + `encoding/xml` only.
+- **Node worker** — `import_worker.mjs`: opens the zip (with zip-bomb caps on total size and entry count), reads `presentation.xml` (`p:sldSz` EMU) and scales so slides fit `1920×1080` (`px = EMU / 9525`), parses `theme1.xml` `clrScheme`+`fontScheme` into theme tokens, and per slide walks `p:spTree`: `p:sp` (EMU→px geometry, `rot/60000`, `prstGeom` preset or `custGeom` path, `solidFill`/`gradFill`/`blipFill` resolved with `schemeClr` + `lumMod`/`lumOff`/`tint`/`shade`/`alpha` applied in order, `a:ln` stroke/dash/arrows, `txBody` runs→`ast-run`), `p:pic` (media→content-addressed data-URL asset via sha256), `p:graphicFrame` (table/chart best-effort or warning), `p:grpSp` (child→parent affine `sx=ext.cx/chExt.cx`, `xg=off.x+(xc-chOff.x)*sx`, flattened to absolute canvas geometry), and `p:cxnSp` (connector→line). In **template mode** it also matches slide→layout by `idx` and layout→master by `type` to derive title/section/content archetypes from placeholders. Unsupported OOXML features become structured warnings — never silently dropped.
+
+---
+
 ## Component Export Contract
 
 Every registered component implements the equivalent of:
@@ -439,6 +506,17 @@ Schema changes require edits in every applicable Ent scope, generated output, an
 
 `write_slide` must return validation diagnostics and an export capability summary. The LLM should call `validate_slides` for complex tables, charts, or custom components before finalizing a deck.
 
+> **Implemented tool surface (v2):** the shipped tools are `create_deck`, `write_slide`, `get_deck`, `list_decks`, `validate_deck`, and **`slide_templates`**. `create_deck` takes an optional `template` argument: when set, it resolves a built-in or scoped Template, merges its tokens under any explicit `theme` (explicit wins), seeds the deck's `Theme` **and** `Assets`, and returns the template's archetypes in the result so the model can reuse them as `write_slide` markup. `list_decks` hides `tmpl/` template decks. The system prompt (`hasSlideTools`-gated block) instructs the model to call `slide_templates` first, pass a fitting template to `create_deck`, and build a title → section → content structure from the archetypes using ASD v2 styling.
+
+### Slides guidance delivery — bundled on-demand skill
+
+Deep slides authoring guidance is delivered as a **built-in `slides` skill**, not as always-on prompt text. This mirrors the `generative-ui` skill delivery model:
+
+- The full reference (all `ast-*` elements + attributes, ASD v2 fidelity features, the template workflow, requirement-gathering tips, and worked examples) lives in `pkg/skills/builtin_content_slides.go` as the `BuiltinSlides` raw-string constant, registered in `BuiltinSkills()` (`pkg/skills/builtin.go`).
+- Unlike `generative-ui`, the `slides` skill is **not** `ExcludeFromCodeMode` — slide decks are server-side artifacts usable wherever the slide tools are present, so the skill resolves and is discoverable in both platform and code modes (it therefore also appears in `BuiltinSkillsForCode()`).
+- It is always listed in the "## Available Skills" index and always resolvable via `skill_lookup("slides")`, loaded into context on demand the moment the agent works on a presentation/deck/PowerPoint.
+- The standard system prompt keeps only a **minimal pointer** in the `hasSlideTools()`-gated block that tells the model to `skill_lookup("slides")` first and then follow the canonical template workflow (`slide_templates` → `create_deck` with a template → build slides from the returned archetypes). This keeps the always-on prompt slim while the depth is loaded only when relevant.
+
 ### Prompt rules
 
 The model receives generated documentation for the registered component vocabulary. Core rules:
@@ -497,8 +575,12 @@ POST   /api/docs/slides/{deckSlug}/export/html
 GET    /api/docs/slides/{deckSlug}/present
 DELETE /api/docs/slides/{deckSlug}
 GET    /api/docs/slides/themes
+GET    /api/docs/slides/templates          # merged built-in + scoped templates (implemented)
+POST   /api/docs/slides/import             # multipart .pptx upload -> Template (implemented)
 GET    /api/docs/slides/components
 ```
+
+The fixed `templates` and `import` routes are registered **before** the parameterized `{deckSlug}` routes so gorilla/mux does not treat them as deck slugs. `POST /api/docs/slides/import` is the first multipart endpoint in Studio: it enforces a `.pptx` extension/MIME and a ~25 MB cap, runs the import worker in `template` mode, and persists the result via `Service.SaveTemplate` in the resolved scope.
 
 The slide endpoint returns either the source fragment as data or a sandboxed runtime page. It must not concatenate untrusted source into the Studio document.
 
@@ -661,9 +743,15 @@ The exporter interface must isolate this choice. Browser-side export reduces ser
 
 - Additional chart types, connectors, animations, and transitions where both targets support them.
 - Optional Office content add-in export for explicitly live enterprise decks.
-- Version history, collaboration, templates, and manual editing.
-- PPTX import into ASD with explicit loss diagnostics.
-- Theme ingestion from corporate `.pptx` templates.
+- Version history, collaboration, and manual editing.
+- Option B for template storage: a dedicated Ent `Template` entity across the four scopes.
+
+### Implemented since original proposal
+
+- **ASD v2 high-fidelity model** — raw colors, gradients, rotation, line dash/arrows, preset + custom geometry, image opacity, and multi-run rich text (`ast-run`), as a strict superset of v1.
+- **Templates** — theme tokens + title/section/content archetypes + assets, with three built-ins and scoped `tmpl/` persistence; `create_deck` `template` arg + `slide_templates` tool.
+- **PPTX import into ASD** with structured loss diagnostics (warnings) — the `import_worker.mjs` Node worker + `ImportRunner`.
+- **Theme/template ingestion from corporate `.pptx`** — `POST /api/docs/slides/import` in template mode extracts theme tokens, archetypes, and media assets.
 
 ---
 

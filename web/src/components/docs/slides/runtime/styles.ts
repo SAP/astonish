@@ -3,6 +3,8 @@ export const runtimeStyles = `
   ast-slide { display:none; position:absolute; inset:0; width:1920px; height:1080px; overflow:hidden; }
   ast-slide[active] { display:block; }
   ast-text { white-space:pre-wrap; overflow:hidden; }
+  ast-run { display:inline; }
+  ast-shape svg { width:100%; height:100%; display:block; overflow:visible; }
   ast-image img { width:100%; height:100%; object-fit:var(--ast-image-fit,contain); }
   ast-notes { display:none; }
   ast-fragment:not([revealed]) { visibility:hidden; }

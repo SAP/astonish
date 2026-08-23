@@ -15,6 +15,34 @@ func TestRegistryV1CoreComponentsAreNative(t *testing.T) {
 	}
 }
 
+func TestRegistryV2ChildrenAndRun(t *testing.T) {
+	t.Parallel()
+	run, ok := LookupV1("ast-run")
+	if !ok {
+		t.Fatal("missing ast-run")
+	}
+	if run.PPTXFidelity != FidelityNative {
+		t.Errorf("ast-run fidelity = %q", run.PPTXFidelity)
+	}
+	text, _ := LookupV1("ast-text")
+	if !childAllowed(text, "ast-run") {
+		t.Error("ast-text must allow ast-run child")
+	}
+	shape, _ := LookupV1("ast-shape")
+	if !childAllowed(shape, "script") {
+		t.Error("ast-shape must allow script child for gradients")
+	}
+}
+
+func childAllowed(def Definition, child string) bool {
+	for _, c := range def.AllowedChildren {
+		if c == child {
+			return true
+		}
+	}
+	return false
+}
+
 func TestTagsV1Deterministic(t *testing.T) {
 	t.Parallel()
 	a, b := TagsV1(), TagsV1()

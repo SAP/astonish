@@ -32,26 +32,82 @@ try {
   })
   const color = value => String(value || '172033').replace(/^#/, '')
 
+  const dashMap = { solid: 'solid', dash: 'dash', dashed: 'dash', dot: 'dot', dotted: 'dot', lgDash: 'lgDash', dashDot: 'dashDot' }
+  const dashType = value => dashMap[String(value || '')] || 'solid'
+
+  const geomMap = {
+    rect: 'rect', rectangle: 'rect', roundRect: 'roundRect', ellipse: 'ellipse',
+    oval: 'ellipse', circle: 'ellipse', triangle: 'triangle', line: 'line',
+    diamond: 'diamond', hexagon: 'hexagon', pentagon: 'pentagon', chevron: 'chevron',
+    arrow: 'rightArrow', rightArrow: 'rightArrow', leftArrow: 'leftArrow',
+    star: 'star5', cloud: 'cloud',
+  }
+  const shapeTypeFor = node => {
+    // Custom path geometry is not expressible with pptxgenjs presets.
+    if (node.path) {
+      warnings.push(`Custom geometry approximated as rectangle (${node.id || 'unknown'})`)
+      return pptx.ShapeType.rect
+    }
+    const preset = node.geom || node.props?.kind
+    if (!preset) return pptx.ShapeType.rect
+    const mapped = geomMap[preset]
+    if (mapped && pptx.ShapeType[mapped]) return pptx.ShapeType[mapped]
+    if (pptx.ShapeType[preset]) return pptx.ShapeType[preset]
+    warnings.push(`Unknown shape preset ${preset} approximated as rectangle (${node.id || 'unknown'})`)
+    return pptx.ShapeType.rect
+  }
+
+  const arrowMap = { arrow: 'triangle', triangle: 'triangle', stealth: 'stealth', diamond: 'diamond', oval: 'oval', open: 'arrow', none: 'none' }
+  const arrowType = value => arrowMap[String(value || '')] || null
+
   const render = (slide, node, ox = 0, oy = 0) => {
     const box = options(node)
     box.x += ox
     box.y += oy
     switch (node.type) {
       case 'text':
-        slide.addText(node.runs?.length ? node.runs.map(run => ({ text: run.text, options: { bold: run.bold, italic: run.italic, color: color(run.color) } })) : node.text || '', {
+        slide.addText(node.runs?.length ? node.runs.map(run => ({
+          text: run.text,
+          options: {
+            bold: run.bold, italic: run.italic, underline: run.underline ? { style: 'sng' } : undefined,
+            color: color(run.color), fontFace: run.font || undefined, fontSize: run.size ? Number(run.size) : undefined,
+          },
+        })) : node.text || '', {
           ...box, fontFace: node.props?.fontFamily || 'Aptos', fontSize: Number(node.props?.fontSize || 24),
           bold: Boolean(node.props?.bold), color: color(node.props?.color), margin: Number(node.props?.margin || 0),
           breakLine: false, fit: 'shrink', valign: node.props?.valign || 'mid',
+          ...(node.rot ? { rotate: Number(node.rot) } : {}),
         })
         counts.native++
         break
-      case 'shape':
-        slide.addShape(pptx.ShapeType[node.props?.kind] || pptx.ShapeType.rect, {
-          ...box, fill: { color: color(node.props?.fill || 'FFFFFF') },
-          line: { color: color(node.props?.line || '172033'), width: Number(node.props?.lineWidth || 1) },
-        })
+      case 'shape': {
+        const shapeOpts = {
+          ...box,
+          line: {
+            color: color(node.line || node.props?.line || '172033'),
+            width: Number(node.props?.lineWidth || 1),
+            dashType: dashType(node.dash || node.props?.dash),
+          },
+        }
+        // Fill: node-level fill / props.fill / gradient (approximated as solid first stop).
+        if (node.gradient?.stops?.length) {
+          shapeOpts.fill = { color: color(node.gradient.stops[0].color) }
+          warnings.push(`Gradient approximated as solid fill (${node.id || 'unknown'})`)
+        } else {
+          shapeOpts.fill = { color: color(node.fill || node.props?.fill || 'FFFFFF') }
+        }
+        if (typeof node.opacity === 'number' && node.opacity > 0 && node.opacity < 1) {
+          shapeOpts.fill.transparency = Math.round((1 - node.opacity) * 100)
+        }
+        if (node.rot) shapeOpts.rotate = Number(node.rot)
+        const headArrow = arrowType(node.props?.headEnd || node.props?.beginArrow)
+        const tailArrow = arrowType(node.props?.tailEnd || node.props?.endArrow)
+        if (headArrow) shapeOpts.line.beginArrowType = headArrow
+        if (tailArrow) shapeOpts.line.endArrowType = tailArrow
+        slide.addShape(shapeTypeFor(node), shapeOpts)
         counts.native++
         break
+      }
       case 'image':
         if (!node.props?.data) throw new Error(`image ${node.id} has no validated data`)
         slide.addImage({ ...box, data: node.props.data })

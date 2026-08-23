@@ -59,4 +59,53 @@ describe('slides runtime', () => {
     expect(text.style.width).toBe('300px')
     expect(text.style.height).toBe('80px')
   })
+
+  it('renders a rotated shape with a rotate() transform', async () => {
+    await mount('<ast-deck><ast-slide id="one"><ast-shape id="s" kind="rect" x="0" y="0" w="100" h="100" rot="45" fill="#ff0000"></ast-shape></ast-slide></ast-deck>')
+    const shape = document.querySelector<HTMLElement>('ast-shape')!
+    await (shape as unknown as { updateComplete: Promise<unknown> }).updateComplete
+    expect(shape.style.transform).toBe('rotate(45deg)')
+    expect(shape.style.transformOrigin).toBe('center')
+  })
+
+  it('renders a gradient shape as an inline svg with a gradient definition', async () => {
+    await mount('<ast-deck><ast-slide id="one"><ast-shape id="s" kind="rect" x="0" y="0" w="200" h="120" geom="roundRect">' +
+      '<script type="application/json">{"kind":"linear","angle":90,"stops":[{"pos":0,"color":"#000000"},{"pos":100,"color":"#ffffff"}]}</script>' +
+      '</ast-shape></ast-slide></ast-deck>')
+    const shape = document.querySelector<HTMLElement>('ast-shape')!
+    await (shape as unknown as { updateComplete: Promise<unknown> }).updateComplete
+    expect(shape.querySelector('svg')).not.toBeNull()
+    expect(shape.querySelector('linearGradient')).not.toBeNull()
+    expect(shape.querySelectorAll('stop').length).toBe(2)
+    const path = shape.querySelector('path')!
+    expect(path.getAttribute('fill')).toMatch(/^url\(#/)
+  })
+
+  it('renders a custom-path shape with the supplied path d', async () => {
+    await mount('<ast-deck><ast-slide id="one"><ast-shape id="s" kind="rect" x="0" y="0" w="100" h="100" path="M0 0 L50 50 L0 100 Z" line="#00ff00"></ast-shape></ast-slide></ast-deck>')
+    const shape = document.querySelector<HTMLElement>('ast-shape')!
+    await (shape as unknown as { updateComplete: Promise<unknown> }).updateComplete
+    const path = shape.querySelector('path')!
+    expect(path.getAttribute('d')).toBe('M0 0 L50 50 L0 100 Z')
+    expect(path.getAttribute('stroke')).toBe('#00ff00')
+  })
+
+  it('renders multi-run text as styled spans', async () => {
+    await mount('<ast-deck><ast-slide id="one"><ast-text id="t" x="0" y="0" w="400" h="80">' +
+      '<ast-run b u color="#ff0000" font="Georgia" size="24">Bold</ast-run>' +
+      '<ast-run i>Ital</ast-run>' +
+      '</ast-text></ast-slide></ast-deck>')
+    const text = document.querySelector<HTMLElement>('ast-text')!
+    await (text as unknown as { updateComplete: Promise<unknown> }).updateComplete
+    const spans = text.querySelectorAll('span')
+    expect(spans.length).toBe(2)
+    expect(spans[0]?.textContent).toBe('Bold')
+    expect(spans[0]?.style.fontWeight).toBe('700')
+    expect(spans[0]?.style.textDecoration).toBe('underline')
+    expect(spans[0]?.style.color).toBe('rgb(255, 0, 0)')
+    expect(spans[0]?.style.fontFamily).toBe('Georgia')
+    expect(spans[0]?.style.fontSize).toBe('24px')
+    expect(spans[1]?.textContent).toBe('Ital')
+    expect(spans[1]?.style.fontStyle).toBe('italic')
+  })
 })

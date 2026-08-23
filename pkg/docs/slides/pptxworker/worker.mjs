@@ -32,6 +32,34 @@ try {
   })
   const color = value => String(value || '172033').replace(/^#/, '')
 
+  // Theme-token resolution mirrors the HTML export (:root defaults in
+  // export_html.go). Token strings match theme-map keys verbatim.
+  const themeDefaults = { ink: '172033', surface: 'FFFFFF', 'ink-muted': '64748B', accent: '1E40AF', 'accent-soft': 'DBEAFE' }
+  // resolveColorToken returns a 6-hex string, or null so pptxgenjs can inherit.
+  const resolveColorToken = (raw, token) => {
+    if (raw) return color(raw)
+    if (token) {
+      const v = scene.theme?.[token] || themeDefaults[token]
+      if (v) return color(v)
+    }
+    return null
+  }
+  // resolveFont prefers an explicit font, then maps token 'display' to the
+  // display font family and anything else to the body font family.
+  const displayFont = () => scene.theme?.displayFont || scene.theme?.display || 'Aptos Display'
+  const bodyFont = () => scene.theme?.bodyFont || scene.theme?.['body-font'] || 'Aptos'
+  const resolveFont = (raw, token) => {
+    if (raw) return raw
+    if (token === 'display') return displayFont()
+    if (token && token !== 'body-font') return scene.theme?.[token] || bodyFont()
+    return bodyFont()
+  }
+  // Font size is authored in CSS px on the 1920x1080 logical canvas, where
+  // 160 canvas units == 1 inch (UnitsPerInch). points = px * 72 / 160.
+  const ptFromPx = px => Math.round((Number(px) || 0) * 72 / 160 * 100) / 100
+  const alignMap = { left: 'left', center: 'center', centre: 'center', right: 'right', justify: 'justify' }
+  const anchorMap = { ctr: 'middle', center: 'middle', middle: 'middle', b: 'bottom', bottom: 'bottom', t: 'top', top: 'top' }
+
   const dashMap = { solid: 'solid', dash: 'dash', dashed: 'dash', dot: 'dot', dotted: 'dot', lgDash: 'lgDash', dashDot: 'dashDot' }
   const dashType = value => dashMap[String(value || '')] || 'solid'
 
@@ -65,21 +93,34 @@ try {
     box.x += ox
     box.y += oy
     switch (node.type) {
-      case 'text':
+      case 'text': {
+        const p = node.props || {}
+        const sizePx = p.size != null ? Number(p.size) : 32
+        const fontSize = ptFromPx(sizePx)
+        const weightNum = Number(p.weight)
+        const isBold = (!Number.isNaN(weightNum) && weightNum >= 600) || p.weight === 'bold'
+        const boxColor = resolveColorToken(p.color, p['color-token'] || 'ink')
+        const boxFont = resolveFont(p.font, p['font-token'] || 'body-font')
+        const boxAlign = alignMap[String(p.align || 'left')] || 'left'
+        const boxValign = anchorMap[String(p.anchor || 'top')] || 'top'
         slide.addText(node.runs?.length ? node.runs.map(run => ({
           text: run.text,
           options: {
             bold: run.bold, italic: run.italic, underline: run.underline ? { style: 'sng' } : undefined,
-            color: color(run.color), fontFace: run.font || undefined, fontSize: run.size ? Number(run.size) : undefined,
+            color: run.color ? color(run.color) : undefined,
+            fontFace: run.font || undefined,
+            fontSize: run.size ? ptFromPx(run.size) : undefined,
           },
         })) : node.text || '', {
-          ...box, fontFace: node.props?.fontFamily || 'Aptos', fontSize: Number(node.props?.fontSize || 24),
-          bold: Boolean(node.props?.bold), color: color(node.props?.color), margin: Number(node.props?.margin || 0),
-          breakLine: false, fit: 'shrink', valign: node.props?.valign || 'mid',
+          ...box, fontFace: boxFont, fontSize, bold: isBold,
+          ...(boxColor ? { color: boxColor } : {}),
+          align: boxAlign, valign: boxValign, margin: Number(p.inset || 0),
+          breakLine: false, fit: 'shrink', wrap: true,
           ...(node.rot ? { rotate: Number(node.rot) } : {}),
         })
         counts.native++
         break
+      }
       case 'shape': {
         const shapeOpts = {
           ...box,

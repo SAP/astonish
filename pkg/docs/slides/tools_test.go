@@ -2,6 +2,7 @@ package slides
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -102,7 +103,7 @@ func TestGetTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"create_deck", "write_slide", "get_deck", "list_decks", "slide_templates", "validate_deck"}
+	want := []string{"create_deck", "write_slide", "get_deck", "list_decks", "list_templates", "validate_deck"}
 	if len(got) != len(want) {
 		t.Fatalf("got %d tools, want %d", len(got), len(want))
 	}
@@ -203,7 +204,79 @@ func TestListTemplatesToolReturnsBuiltinsAndScoped(t *testing.T) {
 	}
 	for _, want := range []string{"light-corporate", "midnight", "aurora", "acme"} {
 		if !names[want] {
-			t.Fatalf("slide_templates missing %q; got %#v", want, names)
+			t.Fatalf("list_templates missing %q; got %#v", want, names)
+		}
+	}
+
+	// Symptom B: the lightweight catalog must NOT carry archetype markup. Every
+	// archetype ast-slide fragment contains "ast-slide", so its absence from the
+	// serialized result proves no full template payload leaked into the response.
+	blob, err := json.Marshal(res)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(blob), "ast-slide") {
+		t.Fatalf("list_templates result leaked archetype markup (found \"ast-slide\"): %s", blob)
+	}
+	// Scoped templates are tagged so the model can distinguish imports from built-ins.
+	for _, tmpl := range res.Templates {
+		if tmpl.Name == "acme" && tmpl.Scope != "scope" {
+			t.Fatalf("scoped template acme has scope %q, want \"scope\"", tmpl.Scope)
+		}
+	}
+}
+
+// TestSaveTemplateThenListSurfacesScopedTemplate pins Symptom A: a template
+// imported (persisted via SaveTemplate) into the same personal store the chat
+// tool reads must appear in list_templates alongside the built-ins.
+func TestSaveTemplateThenListSurfacesScopedTemplate(t *testing.T) {
+	backend := newMultiDeckStore()
+	ctx := toolContext(t, backend)
+	svc := Service{Store: backend}
+	if err := svc.SaveTemplate(ctx, themes.Template{
+		Name:        "brand",
+		Label:       "Brand",
+		Description: "Imported corporate template",
+		Tokens:      map[string]string{"surface": "#101820", "ink": "#F2F2F2"},
+		Archetypes: []themes.Archetype{
+			{Kind: "title", Markup: `<ast-slide id="t"><ast-text id="h" x="160" y="380" w="1600" h="200" color="#F2F2F2" size="72">{{TITLE}}</ast-text></ast-slide>`},
+			{Kind: "content", Markup: `<ast-slide id="c"><ast-text id="b" x="160" y="320" w="1600" h="600" color="#F2F2F2" size="36">{{BODY}}</ast-text></ast-slide>`},
+		},
+	}); err != nil {
+		t.Fatalf("save template: %v", err)
+	}
+
+	res, err := listTemplates(ctx, ListTemplatesArgs{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var brand *TemplateSummary
+	for i := range res.Templates {
+		if res.Templates[i].Name == "brand" {
+			brand = &res.Templates[i]
+			break
+		}
+	}
+	if brand == nil {
+		t.Fatalf("imported template \"brand\" not surfaced by list_templates; got %#v", res.Templates)
+	}
+	if brand.Scope != "scope" {
+		t.Fatalf("imported template scope = %q, want \"scope\"", brand.Scope)
+	}
+	if brand.Label != "Brand" || brand.Description != "Imported corporate template" {
+		t.Fatalf("imported template summary lost identity: %#v", brand)
+	}
+	if len(brand.ArchetypeKinds) != 2 || brand.ArchetypeKinds[0] != "title" {
+		t.Fatalf("imported template archetype kinds = %#v, want [title content]", brand.ArchetypeKinds)
+	}
+	// Built-ins are still present alongside the import.
+	seen := map[string]bool{}
+	for _, tmpl := range res.Templates {
+		seen[tmpl.Name] = true
+	}
+	for _, want := range []string{"light-corporate", "midnight", "aurora"} {
+		if !seen[want] {
+			t.Fatalf("built-in %q missing after import; got %#v", want, seen)
 		}
 	}
 }

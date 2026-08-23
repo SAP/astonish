@@ -125,6 +125,14 @@ type PromptOverrides struct {
 	// plan the user already approved. It is independent of Normal/Plan mode.
 	ApprovedPlanExecution bool
 
+	// ApprovedPlanExecutionExplicit is true only on the explicit execution turn
+	// launched directly from approving a plan. It arms the bounded research
+	// clamp (rediscovery would re-do planning work). Inferred continuation turns
+	// — where an approved PLAN.md merely still exists on disk — leave this false
+	// and discover open-endedly like Normal mode, while plan immutability is
+	// still enforced via ApprovedPlanExecution.
+	ApprovedPlanExecutionExplicit bool
+
 	// Web search/extract are resolved per request from the platform→team cascade
 	// so a singleton ChatAgent re-inited without tenant context still advertises
 	// the platform-selected tools for every user. Nil pointers mean "leave builder as-is".
@@ -307,7 +315,7 @@ func (b *SystemPromptBuilder) Build() string {
 		sb.WriteString("\n**Credentials:** Encrypted vault (no files on disk). `resolve_credential` returns `{{CREDENTIAL:name:field}}` placeholders — auto-substituted in `shell_command`/`process_write`/`browser_type`. For HTTP APIs use `http_request(credential=\"name\")`.\n")
 	}
 	if b.hasSlideTools() {
-		sb.WriteString("\n**Slide decks:** For any slide, presentation, deck, or PowerPoint request, call `skill_lookup(\"slides\")` first to load the full authoring guide, then follow it: pick a template via `slide_templates`, create the deck from that template, and build the slides from its archetypes. Never produce an unstyled deck or substitute an `astonish-app` for a requested deck.\n")
+		sb.WriteString("\n**Slide decks:** For slide or presentation requests, use `create_deck` followed by one `write_slide` call per zero-based position. Each write must contain exactly one complete ASD v1 `<ast-slide>` root. All `x`, `y`, `w`, and `h` values are integer logical pixels on a fixed 1920×1080 canvas—never percentages or 0–100 coordinates. `ast-text` renders plain text, so never put Markdown markers in it; use `size`, `weight`, `font-token`, and `color-token` attributes and compose a designed slide with shapes and theme tokens. Fix validation errors before continuing. Use `get_deck` before revising an existing deck and `validate_deck` before declaring it complete. Do not substitute an `astonish-app` for a requested deck.\n")
 	}
 
 	// 6b. Task delegation — list available tool groups for delegate_tasks

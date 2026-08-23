@@ -237,6 +237,17 @@ func approvedExecutionResearchLimit(kind string) int {
 	}
 }
 
+// approvedExecutionResearchApplies reports whether the bounded research clamp
+// should be armed for an approved-plan turn. It applies ONLY on the explicit
+// execution turn (the one launched directly from approving the plan), where
+// rediscovery would mean re-doing planning work. Inferred continuation turns
+// (an approved PLAN.md merely still exists on disk) are open-ended follow-ups
+// that behave as regular Normal mode — no research clamp. This is the single
+// source of truth shared by the runtime gate and its tests.
+func approvedExecutionResearchApplies(explicit bool) bool {
+	return explicit
+}
+
 // ApprovedPlanExecutionResearchBlockedMessage explains the bounded exception
 // policy: execution may inspect narrowly, but cannot restart planning research.
 func ApprovedPlanExecutionResearchBlockedMessage(kind string, limit int) string {

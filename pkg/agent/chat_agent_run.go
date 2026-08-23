@@ -266,11 +266,13 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		graphPlan := false
 		askMode := false
 		approvedPlanExecution := false
+		approvedPlanExecutionExplicit := false
 		if po := PromptOverridesFromContext(ctx); po != nil {
 			planMode = po.PlanMode
 			graphPlan = po.GraphPlanMode
 			askMode = po.AskMode
 			approvedPlanExecution = po.ApprovedPlanExecution
+			approvedPlanExecutionExplicit = po.ApprovedPlanExecutionExplicit
 			if po.ChannelHints != "" {
 				promptBuilder.ChannelHints = po.ChannelHints
 			}
@@ -673,6 +675,12 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 
 				kind := approvedExecutionResearchKind(name)
 				limit := approvedExecutionResearchLimit(kind)
+				// The research clamp is armed only on the explicit execution
+				// turn. Inferred continuation turns keep plan immutability
+				// (announce_plan blocked above) but discover like Normal mode.
+				if !approvedExecutionResearchApplies(approvedPlanExecutionExplicit) {
+					return nil, nil
+				}
 				if kind == "" || limit <= 0 {
 					return nil, nil
 				}

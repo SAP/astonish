@@ -86,6 +86,20 @@ func TestAnnouncePlanNotInPlanModeMessage(t *testing.T) {
 	}
 }
 
+func TestApprovedPlanExecutionResearchApplies(t *testing.T) {
+	// Explicit execution turn (launched directly from approving the plan):
+	// the bounded research clamp is armed to prevent re-doing planning work.
+	if !approvedExecutionResearchApplies(true) {
+		t.Error("explicit execution turn must arm the research clamp")
+	}
+	// Inferred continuation turn (an approved PLAN.md merely still exists on
+	// disk): an open-ended follow-up that must discover like regular Normal
+	// mode, so the research clamp must NOT apply.
+	if approvedExecutionResearchApplies(false) {
+		t.Error("inferred continuation turn must not arm the research clamp")
+	}
+}
+
 func TestApprovedPlanExecutionResearch_AllowsReadsCapsDiscovery(t *testing.T) {
 	if got := approvedExecutionResearchKind("read_file"); got != "" {
 		t.Fatalf("read_file must not be classified as rediscovery, got %q", got)

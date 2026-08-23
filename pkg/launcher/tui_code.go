@@ -1011,6 +1011,12 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 	graphPlan := opts.GraphPlanMode
 	askMode := opts.AskMode
 	approvedPlanExecution := opts.ApprovedPlanExecution
+	// Capture the explicit intent BEFORE the inferred branch below can flip
+	// approvedPlanExecution. This is true only when the turn was launched
+	// directly from approving the plan; it arms the bounded research clamp.
+	// Inferred continuations (an approved PLAN.md still on disk) leave this
+	// false so discovery behaves as regular Normal mode.
+	approvedPlanExecutionExplicit := opts.ApprovedPlanExecution
 	systemContext := opts.SystemContext
 	if planMode || graphPlan {
 		// Planning / revision turns may replace the plan. Approved execution
@@ -1042,11 +1048,12 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 
 	if systemContext != "" || planMode || graphPlan || askMode || approvedPlanExecution {
 		ctx = agent.WithPromptOverrides(ctx, &agent.PromptOverrides{
-			SessionContext:        agent.EscapeCurlyPlaceholders(systemContext),
-			PlanMode:              planMode,
-			GraphPlanMode:         graphPlan,
-			AskMode:               askMode,
-			ApprovedPlanExecution: approvedPlanExecution,
+			SessionContext:                agent.EscapeCurlyPlaceholders(systemContext),
+			PlanMode:                      planMode,
+			GraphPlanMode:                 graphPlan,
+			AskMode:                       askMode,
+			ApprovedPlanExecution:         approvedPlanExecution,
+			ApprovedPlanExecutionExplicit: approvedPlanExecutionExplicit,
 		})
 	}
 

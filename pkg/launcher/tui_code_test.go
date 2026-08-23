@@ -2955,11 +2955,13 @@ func TestLocalAgentBackendListLocalSkills(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 3 {
+	// The picker merges BuiltinSkillsForCode() (which includes the on-demand
+	// "slides" skill) with the filesystem skills, then sorts case-insensitively.
+	if len(got) != 4 {
 		t.Fatalf("skills = %+v", got)
 	}
-	if got[0].Name != "alpha" || got[1].Name != "Generative-UI" || got[2].Name != "zeta" {
-		t.Fatalf("skills not sorted: %+v", got)
+	if got[0].Name != "alpha" || got[1].Name != "Generative-UI" || got[2].Name != "slides" || got[3].Name != "zeta" {
+		t.Fatalf("skills not sorted or missing slides builtin: %+v", got)
 	}
 	// generative-ui is excluded from BuiltinSkillsForCode; the filesystem skill
 	// with the same name (case-insensitive) appears as-is from the user's config.

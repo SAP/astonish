@@ -24,7 +24,7 @@ type CreateDeckArgs struct {
 	Title       string            `json:"title" jsonschema:"Human-readable deck title."`
 	Description string            `json:"description,omitempty" jsonschema:"Optional short deck description."`
 	Theme       map[string]string `json:"theme,omitempty" jsonschema:"Optional ASD theme token overrides."`
-	Template    string            `json:"template,omitempty" jsonschema:"Optional template name from slide_templates. Seeds a coherent theme + assets; reuse its title/section/content archetypes as starting markup."`
+	Template    string            `json:"template,omitempty" jsonschema:"Optional template name from list_templates. Seeds a coherent theme + assets; reuse its title/section/content archetypes as starting markup."`
 }
 
 // DeckResult is the common deck payload returned by slide tools.
@@ -64,12 +64,27 @@ type ListDecksResult struct {
 	Decks []*store.DeckManifest `json:"decks"`
 }
 
-// ListTemplatesArgs defines the slide_templates tool input.
+// ListTemplatesArgs defines the list_templates tool input.
 type ListTemplatesArgs struct{}
 
-// ListTemplatesResult contains the available slide templates (built-in + saved).
+// TemplateSummary is a lightweight catalog entry for a slide template. It
+// deliberately omits the heavy archetype markup, theme tokens, and asset data
+// URIs so listing every template does not flood the model context. The full
+// payload (archetype markup + tokens + assets) is delivered only when a
+// template is chosen, via create_deck's template argument.
+type TemplateSummary struct {
+	Name           string   `json:"name"`
+	Label          string   `json:"label,omitempty"`
+	Description    string   `json:"description,omitempty"`
+	Scope          string   `json:"scope,omitempty"`
+	ArchetypeKinds []string `json:"archetypeKinds,omitempty"`
+}
+
+// ListTemplatesResult contains lightweight summaries of the available slide
+// templates (built-in + saved). It carries no archetype markup; call create_deck
+// with a template name to seed the full theme, assets, and archetypes.
 type ListTemplatesResult struct {
-	Templates []themes.Template `json:"templates"`
+	Templates []TemplateSummary `json:"templates"`
 }
 
 // ValidateDeckArgs defines the validate_deck tool input.
@@ -110,19 +125,7 @@ func createDeck(ctx context.Context, args CreateDeckArgs) (DeckResult, error) {
 	description := strings.TrimSpace(args.Description)
 
 	if name := strings.TrimSpace(args.Template); name != "" {
-		tmpl, ok := themes.LookupTemplate(name)
-		if !ok {
-			scoped, listErr := svc.ListTemplates(ctx)
-			if listErr != nil {
-				return DeckResult{}, fmt.Errorf("resolve template %q: %w", name, listErr)
-			}
-			for _, t := range scoped {
-				if t.Name == name {
-					tmpl, ok = t, true
-					break
-				}
-			}
-		}
+		tmpl, ok := svc.resolveTemplate(ctx, name)
 		if !ok {
 			return DeckResult{}, fmt.Errorf("unknown template %q", name)
 		}
@@ -197,10 +200,14 @@ func listTemplates(ctx context.Context, _ ListTemplatesArgs) (ListTemplatesResul
 	if err != nil {
 		return ListTemplatesResult{}, err
 	}
-	out := themes.ListTemplates()
-	seen := make(map[string]bool, len(out))
-	for _, t := range out {
+	summaries := make([]TemplateSummary, 0)
+	seen := make(map[string]bool)
+	for _, t := range themes.ListTemplates() {
+		if seen[t.Name] {
+			continue
+		}
 		seen[t.Name] = true
+		summaries = append(summaries, templateSummary(t, "builtin"))
 	}
 	scoped, err := svc.ListTemplates(ctx)
 	if err != nil {
@@ -211,9 +218,26 @@ func listTemplates(ctx context.Context, _ ListTemplatesArgs) (ListTemplatesResul
 			continue
 		}
 		seen[t.Name] = true
-		out = append(out, t)
+		summaries = append(summaries, templateSummary(t, "scope"))
 	}
-	return ListTemplatesResult{Templates: out}, nil
+	return ListTemplatesResult{Templates: summaries}, nil
+}
+
+// templateSummary projects a full themes.Template down to the lightweight
+// catalog entry returned by list_templates: identity plus the archetype KINDS
+// (e.g. title/section/content) but never the archetype markup, tokens, or assets.
+func templateSummary(t themes.Template, scope string) TemplateSummary {
+	kinds := make([]string, 0, len(t.Archetypes))
+	for _, arch := range t.Archetypes {
+		kinds = append(kinds, arch.Kind)
+	}
+	return TemplateSummary{
+		Name:           t.Name,
+		Label:          t.Label,
+		Description:    t.Description,
+		Scope:          scope,
+		ArchetypeKinds: kinds,
+	}
 }
 
 func validateDeck(ctx context.Context, args ValidateDeckArgs) (ValidateDeckResult, error) {
@@ -249,8 +273,8 @@ func GetTools() ([]tool.Tool, error) {
 		description string
 		newTool     func() (tool.Tool, error)
 	}{
-		{"create_deck", "Create a new private Astonish Slides deck before writing slides. Pass an optional template (see slide_templates) to seed a coherent theme, assets, and starting archetypes.", func() (tool.Tool, error) {
-			return functiontool.New(functiontool.Config{Name: "create_deck", Description: "Create a new private Astonish Slides deck before writing slides. Pass an optional template (see slide_templates) to seed a coherent theme, assets, and starting archetypes."}, func(ctx tool.Context, args CreateDeckArgs) (DeckResult, error) {
+		{"create_deck", "Create a new private Astonish Slides deck before writing slides. Pass an optional template (see list_templates) to seed a coherent theme, assets, and starting archetypes.", func() (tool.Tool, error) {
+			return functiontool.New(functiontool.Config{Name: "create_deck", Description: "Create a new private Astonish Slides deck before writing slides. Pass an optional template (see list_templates) to seed a coherent theme, assets, and starting archetypes."}, func(ctx tool.Context, args CreateDeckArgs) (DeckResult, error) {
 				return createDeck(ctx, args)
 			})
 		}},
@@ -269,8 +293,8 @@ func GetTools() ([]tool.Tool, error) {
 				return listDecks(ctx, args)
 			})
 		}},
-		{"slide_templates", "List available slide templates (built-in + saved) to seed a styled deck via create_deck.", func() (tool.Tool, error) {
-			return functiontool.New(functiontool.Config{Name: "slide_templates", Description: "List available slide templates (built-in + saved) to seed a styled deck via create_deck."}, func(ctx tool.Context, args ListTemplatesArgs) (ListTemplatesResult, error) {
+		{"list_templates", "List available slide templates (built-in + imported) as a lightweight catalog: each entry has name, label, description, scope, and archetype kinds only — no markup, tokens, or assets. Pass a template name to create_deck to seed the full theme + assets and receive the archetype markup to fill.", func() (tool.Tool, error) {
+			return functiontool.New(functiontool.Config{Name: "list_templates", Description: "List available slide templates (built-in + imported) as a lightweight catalog: each entry has name, label, description, scope, and archetype kinds only — no markup, tokens, or assets. Pass a template name to create_deck to seed the full theme + assets and receive the archetype markup to fill."}, func(ctx tool.Context, args ListTemplatesArgs) (ListTemplatesResult, error) {
 				return listTemplates(ctx, args)
 			})
 		}},

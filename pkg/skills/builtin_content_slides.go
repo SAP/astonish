@@ -17,8 +17,15 @@ The single most important rule: **start from a template.** A normal request must
 
 ## The Workflow (do this in order)
 
-1. **Pick a template — call ` + "`list_templates`" + ` first.**
-   It returns a **lightweight catalog** of the available templates (built-in + any the user imported from a real ` + "`.pptx`" + `): each entry has ` + "`name`" + `, ` + "`label`" + `, ` + "`description`" + `, ` + "`scope`" + `, and the ` + "`archetypeKinds`" + ` it provides (e.g. ` + "`title`" + `/` + "`section`" + `/` + "`content`" + `). It does **not** include the theme tokens, assets, or archetype markup — those are seeded for you by ` + "`create_deck`" + ` in step 2 when you pass the template name. Built-ins include ` + "`light-corporate`" + ` (clean light), ` + "`midnight`" + ` (dark), and ` + "`aurora`" + ` (colorful/gradient). Choose one that fits the audience and tone.
+1. **Choose a template — call ` + "`list_templates`" + ` first, then let the USER pick.**
+   It returns a **lightweight catalog** of the available templates (built-in + any the user imported from a real ` + "`.pptx`" + `): each entry has ` + "`name`" + `, ` + "`label`" + `, ` + "`description`" + `, ` + "`scope`" + `, and the ` + "`archetypeKinds`" + ` it provides (e.g. ` + "`title`" + `/` + "`section`" + `/` + "`content`" + `). It does **not** include the theme tokens, assets, or archetype markup — those are seeded for you by ` + "`create_deck`" + ` in step 2 when you pass the template name. Built-ins include ` + "`light-corporate`" + ` (clean light), ` + "`midnight`" + ` (dark), and ` + "`aurora`" + ` (colorful/gradient).
+
+   **The template choice belongs to the user — do NOT silently pick one yourself.** Decide which of these three cases applies:
+   - **The user named a template** (e.g. "use midnight", "our corporate template", "a dark theme") → use it and proceed without asking.
+   - **The user explicitly delegated the choice** (e.g. "you pick", "choose whatever fits", "your call", "surprise me") → pick the best fit, state which one and why in one line, and proceed.
+   - **The user said nothing about the template** (the common case — e.g. "make a deck about X") → **STOP and ask.** Present the ` + "`list_templates`" + ` results as a short numbered list (label + one-line description + scope for each) and ask the user which they'd like. Do **not** call ` + "`create_deck`" + ` until they answer. A brand/tone hint you could infer is NOT permission to choose — only an explicit named template or explicit delegation is.
+
+   When in doubt about which case applies, treat it as "said nothing" and ask.
 
 2. **Create the deck WITH that template — call ` + "`create_deck`" + ` and pass ` + "`template`" + `.**
    Passing the ` + "`template`" + ` name seeds the deck's theme tokens **and** assets, so every slide is styled automatically. ` + "`create_deck`" + ` returns the template's full ` + "`archetypes`" + ` (the ready-made ` + "`title`" + `/` + "`section`" + `/` + "`content`" + ` slide skeletons with ` + "`{{TITLE}}`" + `/` + "`{{BODY}}`" + ` placeholders) — this is where you get the markup to fill. Example arguments:
@@ -55,10 +62,10 @@ Before authoring, settle these — ask the user only what you genuinely can't in
 - **Audience & purpose** — execs vs. engineers vs. customers changes tone and density.
 - **Length** — how many slides? Default to a tight 5–8 for an overview unless told otherwise.
 - **Key points per slide** — 3–5 bullets max; one idea per slide. Prefer more slides over crowded ones.
-- **Tone / brand** — maps to template choice (` + "`light-corporate`" + `, ` + "`midnight`" + `, ` + "`aurora`" + `) or an imported ` + "`.pptx`" + ` template.
+- **Tone / brand** — informs your *recommendation*, but the template is the user's choice: present the ` + "`list_templates`" + ` options and let them pick (see Workflow step 1). Never auto-select a template just because you inferred a tone.
 - **Existing material** — if the user has a corporate ` + "`.pptx`" + `, they can import it as a template (Studio → Slides → Import ` + "`.pptx`" + `) so the deck matches their brand; then it appears in ` + "`list_templates`" + `.
 
-Good defaults when unspecified: ` + "`light-corporate`" + ` template, a title slide + one section + 4–6 content slides, concise bullets, speaker notes with the talking points.
+Good defaults when unspecified — but note the template is NOT one of them: a title slide + one section + 4–6 content slides, concise bullets, speaker notes with the talking points. **The template is never defaulted silently** — if the user didn't name one or delegate the choice, ask them (Workflow step 1).
 
 ---
 
@@ -159,7 +166,7 @@ Speaker notes. Prefer passing ` + "`notes`" + ` to ` + "`write_slide`" + ` inste
 
 ## Quick Checklist
 
-- [ ] Called ` + "`list_templates`" + ` and chose a template.
+- [ ] Called ` + "`list_templates`" + ` and either used the user's named template, or (if they delegated) picked one and said so, or (if unspecified) asked the user to choose before creating the deck.
 - [ ] Called ` + "`create_deck`" + ` **with** the ` + "`template`" + ` argument.
 - [ ] Built a title slide, section transitions, and content slides from the archetypes.
 - [ ] Replaced all ` + "`{{TITLE}}`" + `/` + "`{{BODY}}`" + ` placeholders; readable contrast throughout.

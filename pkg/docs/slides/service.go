@@ -2,6 +2,7 @@ package slides
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -102,6 +103,28 @@ func (s Service) ListDecks(ctx context.Context) ([]*store.DeckManifest, error) {
 	return out, nil
 }
 
+// ListDecksLite mirrors ListDecks (same template-deck filtering) but uses the
+// store's field-projected read so the heavy Assets/TemplateModel fields are
+// never loaded. Use this for list views; use ListDecks when those fields are
+// needed.
+func (s Service) ListDecksLite(ctx context.Context) ([]*store.DeckManifest, error) {
+	if s.Store == nil {
+		return nil, fmt.Errorf("docs store unavailable")
+	}
+	decks, err := s.Store.ListDecksLite(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := decks[:0]
+	for _, d := range decks {
+		if strings.HasPrefix(d.Slug, templatePrefix) {
+			continue
+		}
+		out = append(out, d)
+	}
+	return out, nil
+}
+
 // SaveTemplate persists a Template as a hidden deck (slug "tmpl/<name>") in this
 // service's scope. Persistence is idempotent: an existing template deck with the
 // same slug is deleted and recreated. Archetype markup is stored directly via
@@ -127,24 +150,42 @@ func (s Service) SaveTemplate(ctx context.Context, tmpl themes.Template) error {
 	if title == "" {
 		title = tmpl.Name
 	}
+	// IR-backed imported templates carry the lossless TemplateModel; persist it
+	// verbatim as raw JSON and mark the deck SchemaV3 so it is distinguishable
+	// from plain scoped templates (SchemaV2). Built-in/plain templates stay V2.
+	schemaVersion := SchemaV2
+	templateModelJSON := ""
+	if tmpl.Model != nil {
+		raw, err := json.Marshal(tmpl.Model)
+		if err != nil {
+			return fmt.Errorf("marshal template model: %w", err)
+		}
+		templateModelJSON = string(raw)
+		schemaVersion = SchemaV3
+	}
 	deck := &store.DeckManifest{
 		ID:            uuid.NewString(),
 		Slug:          slug,
 		Title:         title,
 		Description:   tmpl.Description,
-		SchemaVersion: SchemaV2,
+		SchemaVersion: schemaVersion,
 		Theme:         tmpl.Tokens,
 		Assets:        tmpl.Assets,
+		TemplateModel: templateModelJSON,
 	}
 	if err := s.Store.CreateDeck(ctx, deck); err != nil {
 		return fmt.Errorf("create template deck: %w", err)
 	}
 	for i, arch := range tmpl.Archetypes {
 		slide := &store.SlideContent{
-			ID:            uuid.NewString(),
-			DeckID:        deck.ID,
-			Position:      i,
-			Title:         arch.Kind,
+			ID:       uuid.NewString(),
+			DeckID:   deck.ID,
+			Position: i,
+			Title:    arch.Kind,
+			// Notes carries the human-readable variant label (arch.Title) so a
+			// template offering several variants per role (title, title-2, ...)
+			// can surface friendly names; Kind stays in SlideContent.Title.
+			Notes:         arch.Title,
 			Content:       arch.Markup,
 			SchemaVersion: SchemaV2,
 		}
@@ -177,7 +218,15 @@ func (s Service) ListTemplates(ctx context.Context) ([]themes.Template, error) {
 		}
 		archetypes := make([]themes.Archetype, 0, len(slides))
 		for _, slide := range slides {
-			archetypes = append(archetypes, themes.Archetype{Kind: slide.Title, Markup: slide.Content})
+			archetypes = append(archetypes, themes.Archetype{Kind: slide.Title, Title: slide.Notes, Markup: slide.Content})
+		}
+		// Rehydrate the lossless IR when this is an IR-backed imported template.
+		var model *themes.TemplateModel
+		if deck.TemplateModel != "" {
+			var m themes.TemplateModel
+			if err := json.Unmarshal([]byte(deck.TemplateModel), &m); err == nil {
+				model = &m
+			}
 		}
 		out = append(out, themes.Template{
 			Schema:      SchemaV2,
@@ -188,6 +237,7 @@ func (s Service) ListTemplates(ctx context.Context) ([]themes.Template, error) {
 			Assets:      deck.Assets,
 			Archetypes:  archetypes,
 			Scope:       "scope",
+			Model:       model,
 		})
 	}
 	return out, nil
@@ -294,7 +344,7 @@ func (s Service) Scene(ctx context.Context, slug string) (SceneGraph, []Diagnost
 	if err != nil {
 		return SceneGraph{}, nil, err
 	}
-	scene := SceneGraph{SchemaVersion: deck.SchemaVersion, Title: deck.Title, Theme: deck.Theme}
+	scene := SceneGraph{SchemaVersion: deck.SchemaVersion, Title: deck.Title, Theme: deck.Theme, Assets: deck.Assets}
 	var diagnostics []Diagnostic
 	for _, persisted := range deckSlides {
 		slide, slideDiagnostics, err := ParseSlide(persisted.Content)

@@ -112,7 +112,12 @@ function TemplateCard({
 }) {
   const isBuiltin = tpl.scope === 'builtin'
   const [editing, setEditing] = useState(false)
-  const archetypeKinds = tpl.archetypeKinds || (tpl.archetypes || []).map(a => a.kind)
+  // Prefer the richer {kind,label} variants so imported templates surface
+  // friendly per-variant labels; fall back to bare kinds for older payloads.
+  const variants: { kind: string; label?: string }[] =
+    tpl.archetypes && tpl.archetypes.length > 0
+      ? tpl.archetypes.map(a => ({ kind: a.kind, label: a.label }))
+      : (tpl.archetypeKinds || []).map(k => ({ kind: k }))
 
   return (
     <div
@@ -137,16 +142,16 @@ function TemplateCard({
 
       <div className="mb-3 flex items-center gap-2">
         <TemplateSwatches tokens={tpl.tokens} />
-        {archetypeKinds.length > 0 && (
+        {variants.length > 0 && (
           <div className="flex flex-wrap items-center gap-1">
-            {archetypeKinds.map(k => (
+            {variants.map(v => (
               <span
-                key={k}
+                key={v.kind}
                 className="flex items-center gap-0.5 rounded px-1 py-0.5 text-[9px]"
                 style={{ background: 'var(--bg-tertiary)', color: 'var(--text-muted)' }}
               >
                 <Layers size={8} />
-                {k}
+                {v.label || v.kind}
               </span>
             ))}
           </div>

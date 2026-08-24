@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/SAP/astonish/pkg/docs/slides"
@@ -32,6 +33,16 @@ func (s *docsStoreStub) ListDecks(context.Context) ([]*store.DeckManifest, error
 	out := make([]*store.DeckManifest, len(s.decks))
 	for i, d := range s.decks {
 		clone := *d
+		out[i] = &clone
+	}
+	return out, nil
+}
+func (s *docsStoreStub) ListDecksLite(context.Context) ([]*store.DeckManifest, error) {
+	out := make([]*store.DeckManifest, len(s.decks))
+	for i, d := range s.decks {
+		clone := *d
+		clone.Assets = nil
+		clone.TemplateModel = ""
 		out[i] = &clone
 	}
 	return out, nil
@@ -130,8 +141,84 @@ func TestGetLocalPDFBrowserManagerIsNotSandboxed(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// PPTX export (ASD PptxGenJS path).
+// slugStore is a docsStoreStub extended with a working GetDeck/ListSlides so the
+// deck-detail handler (GetSlidesDeckHandler) can be exercised end-to-end.
+type slugStore struct {
+	docsStoreStub
+	deck   *store.DeckManifest
+	slides []*store.SlideContent
+}
+
+func (s *slugStore) GetDeck(_ context.Context, slug string) (*store.DeckManifest, error) {
+	if s.deck != nil && s.deck.Slug == slug {
+		clone := *s.deck
+		return &clone, nil
+	}
+	return nil, store.ErrDocsNotFound
+}
+func (s *slugStore) ListSlides(context.Context, string) ([]*store.SlideContent, error) {
+	return s.slides, nil
+}
+
+// TestSlidesResponsesOmitHeavyManifestFields is the perf regression guard: the
+// Slides list (GET /api/docs) and the deck-detail (GET /api/docs/slides/{slug})
+// responses must NOT carry the multi-megabyte imported-template IR
+// (templateModel) or the base64 asset map (assets). No client consumer reads
+// them, and serializing them is what made imported-template decks slow to list
+// and hang on open. Assets still reach the renderer server-side via
+// Service.Scene, so this is purely a response-shape trim.
+func TestSlidesResponsesOmitHeavyManifestFields(t *testing.T) {
+	heavyModel := `{"schema":3,"layouts":[{"id":"l1"}]}`
+	heavyAssets := map[string]string{"sha256-abc": "data:image/png;base64,AAAA"}
+
+	// --- list ---
+	personal := &docsStoreStub{decks: []*store.DeckManifest{{
+		Slug: "imported", Title: "Imported", SchemaVersion: slides.SchemaV3,
+		TemplateModel: heavyModel, Assets: heavyAssets,
+	}}}
+	reqList := httptest.NewRequest(http.MethodGet, "/api/docs", nil)
+	reqList = reqList.WithContext(store.WithServices(reqList.Context(), &store.Services{PersonalDocs: personal}))
+	recList := httptest.NewRecorder()
+	ListDocsHandler(recList, reqList)
+	if recList.Code != http.StatusOK {
+		t.Fatalf("list status = %d body=%s", recList.Code, recList.Body.String())
+	}
+	listBody := recList.Body.String()
+	if strings.Contains(listBody, "templateModel") {
+		t.Fatalf("list response leaks templateModel: %s", listBody)
+	}
+	if strings.Contains(listBody, `"assets"`) || strings.Contains(listBody, "data:image/") {
+		t.Fatalf("list response leaks assets: %s", listBody)
+	}
+	if !strings.Contains(listBody, "imported") {
+		t.Fatalf("list response missing deck: %s", listBody)
+	}
+
+	// --- deck detail ---
+	detail := &slugStore{deck: &store.DeckManifest{
+		ID: "id1", Slug: "imported", Title: "Imported", SchemaVersion: slides.SchemaV3,
+		TemplateModel: heavyModel, Assets: heavyAssets,
+	}}
+	reqGet := httptest.NewRequest(http.MethodGet, "/api/docs/slides/imported", nil)
+	reqGet = mux.SetURLVars(reqGet, map[string]string{"deckSlug": "imported"})
+	reqGet = reqGet.WithContext(store.WithServices(reqGet.Context(), &store.Services{PersonalDocs: detail}))
+	recGet := httptest.NewRecorder()
+	GetSlidesDeckHandler(recGet, reqGet)
+	if recGet.Code != http.StatusOK {
+		t.Fatalf("get status = %d body=%s", recGet.Code, recGet.Body.String())
+	}
+	getBody := recGet.Body.String()
+	if strings.Contains(getBody, "templateModel") {
+		t.Fatalf("deck-detail response leaks templateModel: %s", getBody)
+	}
+	if strings.Contains(getBody, `"assets"`) || strings.Contains(getBody, "data:image/") {
+		t.Fatalf("deck-detail response leaks assets: %s", getBody)
+	}
+	if !strings.Contains(getBody, "imported") {
+		t.Fatalf("deck-detail response missing deck: %s", getBody)
+	}
+}
+
 // ---------------------------------------------------------------------------
 
 // seedExportDeck writes a deck manifest (with optional assets) and one ASD slide

@@ -66,7 +66,7 @@ The canonical source is not arbitrary rendered DOM and is not a screenshot. It i
 
 The **normalized scene graph** is the contract. The browser DOM is a rendering output and measurement aid, not the export source of truth. Exporters never scrape arbitrary DOM and guess its meaning.
 
-Importing a corporate `.pptx` produces a lightweight, lossy ASD template (theme tokens plus synthesized archetypes), which then flows through the same ASD runtime as app-authored decks.
+Importing a corporate `.pptx` produces a high-fidelity ASD template (theme tokens plus per-layout archetypes, `example-*` archetypes from real sample slides, and a lossless `TemplateModel` IR), which then flows through the same ASD runtime as app-authored decks.
 
 ### Studio Templates management surface
 
@@ -427,6 +427,196 @@ Schema changes require edits in every applicable Ent scope, generated output, an
 - Writers emit only the current version.
 - Persisting a migrated deck is an explicit operation.
 - Component removals require a migration or a stable legacy renderer.
+
+---
+
+## Imported Template IR (`TemplateModel`)
+
+Imported corporate `.pptx` templates are stored losslessly as a rich
+intermediate representation (IR) called `TemplateModel`, in addition to the
+fill-ready ASD archetypes the LLM authoring flow consumes. This is the
+"Option C" design: the IR is the persisted source of truth for the future
+in-browser template editor and for high-fidelity re-export, but rendering and
+preview today go through a single renderer — the existing ASD runtime — by
+converting IR → ASD. **There is no second/parallel renderer.**
+
+### Data model
+
+`TemplateModel` (Go: `pkg/docs/slides/themes/template_model.go`; TS mirror:
+`web/src/api/slidesTemplateModel.ts`) is expressed in Astonish canvas units
+(logical px on a 1920×1080 canvas, colors `#RRGGBB`) rather than OOXML EMUs/inches:
+
+- `TemplateModel { schema:3, size{w,h}, theme{}, layouts[], slides[], warnings[] }`
+- `IRLayout { id, name, background, objects[], placeholders[], slideNumber? }`
+- `IRChrome { kind: rect|ellipse|line|text|image|path, x,y,w,h, rot, fill?, line?, rectRadius, paths[], text, style?, mediaKey }`
+- `IRPlaceholder { name, type, x,y,w,h, style, prompt, ooxmlType, idx }`
+- `IRBackground { kind: solid|image, color, mediaKey }`
+- plus `IRFill`, `IRLine`, `IRTextStyle`, `IRSlideNumber`, `IRWarning`.
+
+`layouts` come from `ppt/slideLayouts/slideLayoutN.xml`; `slides` from the first
+sample slides. Each layout classifies every source shape as **chrome** (fixed
+brand decoration) or **placeholder** (a shape whose `p:sp` carries `nvSpPr//p:ph`),
+recording the OOXML placeholder type/idx.
+
+### Fidelity import pipeline
+
+The pptx worker (`import_worker.mjs`, template mode) extracts, per layout/sample slide:
+
+- **Custom geometry** (`a:custGeom`) → `kind:'path'` with real SVG path segments
+  (`moveTo`→M, `lnTo`→L, `arcTo`→A, `cubicBezTo`→C, `quadBezTo`→Q, `close`→Z) in
+  document order — not the old "approximate as rect".
+- **Rounded rectangles** → `kind:'rect'` + `rectRadius` (true radius retained in IR).
+- **Connectors** → `kind:'line'` with `flipH`/`flipV`.
+- **Pictures** → `kind:'image'` + `mediaKey` (asset ingested via `addAsset`).
+- **Theme styling**: resolves `p:style` `fillRef`/`lnRef` when a shape has no local fill.
+- **`asvg:svgBlip`**: walks `extLst` for the SVG blip `r:embed`.
+- **EMF/WMF media**: uses a raster sibling if present, else records an
+  `IRWarning` and skips (full EMF→SVG replay is out of scope for v1). Nothing
+  degrades silently — every inexpressible construct is recorded in `warnings[]`.
+
+Each layout is classified into an archetype **kind** from its **layout name
+first** (the corporate pptx has no `p:sldLayout type` attributes, so the name is
+the signal): `cover`/`title`→`title`, `divider`/`separator`/`section`→`section`,
+`agenda`/`toc`/`overview`→`agenda`, `thank`/`closing`/`contact`/`q&a`→`closing`,
+`blank`→`blank`; else it falls back to the placeholder signature (title +
+no-body→`title`, has-body→`content`). A suffixer de-duplicates within a family so
+multiple layouts of a role become `title`/`title-2`/… — preserving variant
+multiplicity. **Every archetype's human label is the real PowerPoint layout name**
+(`cSld @name`, e.g. "Blue cover, anvil and image", "Pink cover with anvil",
+"Divider Page with Image", "Full Bleed Image"), so the user and the agent can tell
+the colorful covers apart instead of seeing a bare `title-7`.
+
+Colorful cover/divider chrome is captured by resolving the **master→layout
+inheritance chain**, the way PowerPoint renders. A layout's effective background is
+the first non-fallback of `[layout own <p:bg>, master <p:bg>]` — so a layout with
+no explicit background inherits the master's (not white). The master's decorative
+chrome objects (backgrounds, logos, accent shapes) are merged **behind** the
+layout's own chrome (master first in z-order), skipping master placeholders and
+honoring `showMasterSp="0"` (recorded as an `IRWarning` when a layout suppresses
+master chrome). This is why imported covers now render in full color.
+
+The pptx's authored **sample slides are NO LONGER surfaced as archetypes.** They
+were previously turned into `example-*` archetypes, but 22 of 23 real corporate
+slides carry no own `<p:bg>` — they just drop a photo into the layout's picture
+placeholder — so those example archetypes rendered **white**. All the colorful
+variety (covers, dividers ±image, agenda, content) lives in the **layouts** under
+the single master, and those inheritance-corrected layout archetypes are the
+on-brand starting points. Sample slides are still captured into
+`templateModel.slides[]` for the future editor, just not as archetypes. The
+`title`/`section`/`content` baseline is still guaranteed, so imported templates
+always have those three roles even for a sparse pptx.
+
+### IR → ASD serialization
+
+Each `IRLayout` is serialized to a valid `<ast-slide>` archetype (fill-ready with
+`{{TITLE}}`/`{{BODY}}` placeholders). Notable mappings:
+
+- Full-bleed image background → a full-canvas
+  `<ast-image asset-ref=… x=0 y=0 w=1920 h=1080 fit=cover decorative>` emitted as
+  the **first** child (z-order behind chrome). No schema change — `ast-image` was
+  already allowed, and images still flow through the `AssetIngestor` (no `data:`
+  smuggling).
+- Custom paths → `<ast-shape kind="rect" path="M … A … Z">`; the SVG viewBox is
+  `0 0 W H` in canvas px, path coords scaled into the shape box.
+- Rounded rects → `geom="roundRect"` (the runtime's fixed ~0.12 radius). The IR
+  keeps the true `rectRadius` for the future editor / high-fidelity export; this
+  is a **known v1 approximation**.
+
+### ASD path-arc widening
+
+`validation.go`'s `safePathPattern` was widened as a **strict superset** to allow
+the arc command letters `A`/`a` (previously only `M L C Q Z H V`). This is a
+character-class allowlist only — no letters that would enable entity/script
+injection — and unlocks ellipses and curved brand geometry. `safeColor`/`safeFont`
+guards and the export CSP runtime-hash test are unchanged (no runtime change).
+
+### Persistence
+
+- The `Deck` Ent schema (personal + team scopes) gains an optional
+  `template_model` text column holding the raw IR JSON. It is additive and
+  populated **only** for imported templates.
+- Imported templates persist with `schemaVersion = SchemaV3` (`3`); built-in
+  templates and normal decks keep `SchemaV1`/`SchemaV2` and are untouched.
+- The worker's template-mode response is `{ schema:2, name, label, tokens,
+  assets, archetypes[], templateModel }`. `archetypes[]` (the IR→ASD output) keeps
+  the LLM authoring flow identical; `templateModel` banks the lossless IR.
+  `SaveTemplate` marshals `Template.Model` into the column; `ListTemplates`
+  unmarshals it back, so the IR round-trips.
+- Archetype **variants** surface to the agent and Studio: `list_templates`
+  returns `archetypeVariants[]` (`{kind,label}`); the Templates UI renders each as
+  a friendly label chip showing the real PowerPoint layout name. The human label is
+  persisted in `SlideContent.Notes` (kind stays in `SlideContent.Title`) — backward
+  compatible. Multiple same-role layout variants (several `title` covers, several
+  `section` dividers) each get their own chip by label.
+
+### Response performance (slim DTOs)
+
+The stored `store.DeckManifest` carries two heavy fields — `Assets` (a base64
+`data:` URI per logo/image) and `TemplateModel` (the multi-megabyte lossless IR).
+These are needed for **rendering** (present iframe + exporters) and **round-trip**
+(`SaveTemplate`/`ListTemplates`), but no client or model consumer reads them off a
+list/get/tool response. Serializing them verbatim made an imported-template deck
+slow to list, slow to open, and made the chat `SlidesDeckView` hang. The fix trims
+them at the **serialization boundary only** (the store record is unchanged):
+
+- `GET /api/docs` (Slides list) → `slidesDeckListItem` (id/slug/title/description/
+  schemaVersion/scope/timestamps; no theme/assets/templateModel).
+- `GET /api/docs/slides/{slug}` (deck open, `fetchSlidesDeck` → `SlidesDeckView`)
+  → `slidesDeckDTO` (adds `theme`, still drops assets + templateModel).
+- Slide tool results (`create_deck`/`get_deck`/`list_decks`/`write_slide`/
+  `validate_deck`) → `DeckView` (keeps theme; replaces the heavy fields with
+  `assetCount` + `hasTemplateModel` so the model still knows they exist).
+
+`Service.Scene` still reads `Assets` straight from the store, so `/present` and the
+PPTX/PDF/HTML exporters resolve `asset-ref` → `data:image/…` unchanged; the asset
+security path (asset-ref → `resolveImageSrc`, CSP) is untouched.
+
+**Store-level field projection.** The slim DTO above trims the *wire* payload, but
+`personalDocsStore.ListDecks`/`teamDocsStore.ListDecks` still ran
+`Deck.Query()…All()`, which SELECTs *every* column — including `template_model`
+(multi-MB IR) and `assets` (base64) — and `fillPersonalDeck`/`fillTeamDeck` copied
+them in, so the server still paid the read+deserialize cost on every Slides-list.
+The fix adds `DocsStore.ListDecksLite`, implemented with Ent field projection
+(`.Select(FieldID, FieldSlug, FieldTitle, FieldDescription, FieldSchemaVersion,
+FieldTheme, FieldCreatedAt, FieldUpdatedAt)`, **omitting** `FieldAssets` +
+`FieldTemplateModel`) and a `fill…Lite` that leaves those two fields zero. The HTTP
+list path (`ListDocsHandler` → `Service.ListDecksLite`) uses it, so the heavy
+columns are never read for the list. `ListTemplates` **keeps** full `ListDecks`
+(it needs `TemplateModel` to rehydrate the IR), and deck-open (`GetDeck`) stays
+full (a single row is acceptable and `Scene`/exporters need it). In-memory test
+stores implement `ListDecksLite` by delegating to `ListDecks` and nil-ing the heavy
+fields.
+
+### Resolved decision: one template with layout variants (Option A)
+
+A pptx like *GCO IPE&D PPT TEMPLATE — SAP PARTNER* is a **single design system**:
+one slide master, one slide-relevant theme ("SAP Colors 2023"), and 39 layouts.
+All the colorful variety (blue/pink/green anvil covers, image covers, agenda,
+divider ±image, content layouts) lives as **distinct layouts under that one
+master** — there is no natural boundary to split on.
+
+Two options were considered:
+
+- **Option A (chosen):** keep **one Astonish template per pptx** and expose its
+  layouts as classified, human-labeled, selectable **variants** (label = the real
+  PowerPoint layout name). Chrome fidelity comes from master→layout inheritance.
+- **Option B (rejected):** emit **multiple templates from one pptx** (e.g. one per
+  cover family). Rejected because there is a single master + single theme, so
+  splitting would fragment one coherent brand system and complicate recolor/manage.
+
+Option A is implemented. The white output was **not** a template-boundary problem —
+it was (1) example archetypes built from thin, background-less authored slides and
+(2) missing master→layout background/chrome inheritance. Both are now fixed:
+example-from-slide archetypes were removed, and inheritance is resolved at import.
+
+### Roadmap: in-browser template editing
+
+In-browser editing (contenteditable placeholders + `collectFills`, as validated in
+the pilot) is a **known next step, not part of this version**. The IR is persisted
+losslessly and typed in both Go and TS (`slidesTemplateModel.ts`) specifically so
+the editor can be built later **without re-importing** the source `.pptx`. The
+architecture must not preclude it — hence the IR is the source of truth even though
+rendering currently goes through IR → ASD.
 
 ---
 

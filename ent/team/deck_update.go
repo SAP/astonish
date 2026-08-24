@@ -117,6 +117,26 @@ func (_u *DeckUpdate) ClearAssets() *DeckUpdate {
 	return _u
 }
 
+// SetTemplateModel sets the "template_model" field.
+func (_u *DeckUpdate) SetTemplateModel(v string) *DeckUpdate {
+	_u.mutation.SetTemplateModel(v)
+	return _u
+}
+
+// SetNillableTemplateModel sets the "template_model" field if the given value is not nil.
+func (_u *DeckUpdate) SetNillableTemplateModel(v *string) *DeckUpdate {
+	if v != nil {
+		_u.SetTemplateModel(*v)
+	}
+	return _u
+}
+
+// ClearTemplateModel clears the value of the "template_model" field.
+func (_u *DeckUpdate) ClearTemplateModel() *DeckUpdate {
+	_u.mutation.ClearTemplateModel()
+	return _u
+}
+
 // SetUpdatedAt sets the "updated_at" field.
 func (_u *DeckUpdate) SetUpdatedAt(v time.Time) *DeckUpdate {
 	_u.mutation.SetUpdatedAt(v)
@@ -253,6 +273,12 @@ func (_u *DeckUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.AssetsCleared() {
 		_spec.ClearField(deck.FieldAssets, field.TypeJSON)
+	}
+	if value, ok := _u.mutation.TemplateModel(); ok {
+		_spec.SetField(deck.FieldTemplateModel, field.TypeString, value)
+	}
+	if _u.mutation.TemplateModelCleared() {
+		_spec.ClearField(deck.FieldTemplateModel, field.TypeString)
 	}
 	if value, ok := _u.mutation.UpdatedAt(); ok {
 		_spec.SetField(deck.FieldUpdatedAt, field.TypeTime, value)
@@ -406,6 +432,26 @@ func (_u *DeckUpdateOne) SetAssets(v map[string]string) *DeckUpdateOne {
 // ClearAssets clears the value of the "assets" field.
 func (_u *DeckUpdateOne) ClearAssets() *DeckUpdateOne {
 	_u.mutation.ClearAssets()
+	return _u
+}
+
+// SetTemplateModel sets the "template_model" field.
+func (_u *DeckUpdateOne) SetTemplateModel(v string) *DeckUpdateOne {
+	_u.mutation.SetTemplateModel(v)
+	return _u
+}
+
+// SetNillableTemplateModel sets the "template_model" field if the given value is not nil.
+func (_u *DeckUpdateOne) SetNillableTemplateModel(v *string) *DeckUpdateOne {
+	if v != nil {
+		_u.SetTemplateModel(*v)
+	}
+	return _u
+}
+
+// ClearTemplateModel clears the value of the "template_model" field.
+func (_u *DeckUpdateOne) ClearTemplateModel() *DeckUpdateOne {
+	_u.mutation.ClearTemplateModel()
 	return _u
 }
 
@@ -575,6 +621,12 @@ func (_u *DeckUpdateOne) sqlSave(ctx context.Context) (_node *Deck, err error) {
 	}
 	if _u.mutation.AssetsCleared() {
 		_spec.ClearField(deck.FieldAssets, field.TypeJSON)
+	}
+	if value, ok := _u.mutation.TemplateModel(); ok {
+		_spec.SetField(deck.FieldTemplateModel, field.TypeString, value)
+	}
+	if _u.mutation.TemplateModelCleared() {
+		_spec.ClearField(deck.FieldTemplateModel, field.TypeString)
 	}
 	if value, ok := _u.mutation.UpdatedAt(); ok {
 		_spec.SetField(deck.FieldUpdatedAt, field.TypeTime, value)

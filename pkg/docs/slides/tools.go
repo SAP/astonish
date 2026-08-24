@@ -27,9 +27,56 @@ type CreateDeckArgs struct {
 	Template    string            `json:"template,omitempty" jsonschema:"Optional template name from list_templates. Seeds a coherent theme + assets; reuse its title/section/content archetypes as starting markup."`
 }
 
+// DeckView is the slim deck projection returned by slide TOOL results. It drops
+// the two heavy store.DeckManifest fields — the Assets map (base64 data: URIs)
+// and the TemplateModel string (the multi-MB imported-template IR) — which
+// would otherwise flood the model context on every create_deck/get_deck/
+// list_decks/write_slide/validate_deck call. It keeps the small identity/theme
+// fields the model actually reasons about, and replaces the heavy fields with a
+// count/flag so the model still knows assets/an IR exist. The deck itself is
+// unchanged in the store; only the returned view is slim.
+type DeckView struct {
+	ID               string            `json:"id"`
+	Slug             string            `json:"slug"`
+	Title            string            `json:"title"`
+	Description      string            `json:"description,omitempty"`
+	SchemaVersion    int               `json:"schemaVersion"`
+	Theme            map[string]string `json:"theme,omitempty"`
+	Scope            string            `json:"scope,omitempty"`
+	AssetCount       int               `json:"assetCount,omitempty"`
+	HasTemplateModel bool              `json:"hasTemplateModel,omitempty"`
+}
+
+// deckView projects a store.DeckManifest to the slim DeckView.
+func deckView(d *store.DeckManifest) *DeckView {
+	if d == nil {
+		return nil
+	}
+	return &DeckView{
+		ID:               d.ID,
+		Slug:             d.Slug,
+		Title:            d.Title,
+		Description:      d.Description,
+		SchemaVersion:    d.SchemaVersion,
+		Theme:            d.Theme,
+		Scope:            d.Scope,
+		AssetCount:       len(d.Assets),
+		HasTemplateModel: d.TemplateModel != "",
+	}
+}
+
+// deckViews maps a slice of manifests to slim views.
+func deckViews(decks []*store.DeckManifest) []*DeckView {
+	out := make([]*DeckView, 0, len(decks))
+	for _, d := range decks {
+		out = append(out, deckView(d))
+	}
+	return out
+}
+
 // DeckResult is the common deck payload returned by slide tools.
 type DeckResult struct {
-	Deck       *store.DeckManifest   `json:"deck"`
+	Deck       *DeckView             `json:"deck"`
 	Slides     []*store.SlideContent `json:"slides,omitempty"`
 	SlideCount int                   `json:"slideCount"`
 	Archetypes []themes.Archetype    `json:"archetypes,omitempty"`
@@ -45,7 +92,7 @@ type WriteSlideArgs struct {
 
 // WriteSlideResult reports the persisted slide and all validation diagnostics.
 type WriteSlideResult struct {
-	Deck        *store.DeckManifest `json:"deck"`
+	Deck        *DeckView           `json:"deck"`
 	Slide       *store.SlideContent `json:"slide"`
 	SlideCount  int                 `json:"slideCount"`
 	Diagnostics []Diagnostic        `json:"diagnostics,omitempty"`
@@ -61,7 +108,7 @@ type ListDecksArgs struct{}
 
 // ListDecksResult contains the user's private decks.
 type ListDecksResult struct {
-	Decks []*store.DeckManifest `json:"decks"`
+	Decks []*DeckView `json:"decks"`
 }
 
 // ListTemplatesArgs defines the list_templates tool input.
@@ -73,11 +120,21 @@ type ListTemplatesArgs struct{}
 // payload (archetype markup + tokens + assets) is delivered only when a
 // template is chosen, via create_deck's template argument.
 type TemplateSummary struct {
-	Name           string   `json:"name"`
-	Label          string   `json:"label,omitempty"`
-	Description    string   `json:"description,omitempty"`
-	Scope          string   `json:"scope,omitempty"`
-	ArchetypeKinds []string `json:"archetypeKinds,omitempty"`
+	Name           string             `json:"name"`
+	Label          string             `json:"label,omitempty"`
+	Description    string             `json:"description,omitempty"`
+	Scope          string             `json:"scope,omitempty"`
+	ArchetypeKinds []string           `json:"archetypeKinds,omitempty"`
+	Archetypes     []ArchetypeVariant `json:"archetypes,omitempty"`
+}
+
+// ArchetypeVariant names one fillable slide skeleton in a template: its Kind
+// (role, e.g. title/section/content/agenda) plus a human-readable Label. A
+// template may carry MULTIPLE variants per role (title, title-2, ...); the model
+// uses Label to ask the user which to use. Markup is deliberately omitted here.
+type ArchetypeVariant struct {
+	Kind  string `json:"kind"`
+	Label string `json:"label,omitempty"`
 }
 
 // ListTemplatesResult contains lightweight summaries of the available slide
@@ -101,10 +158,10 @@ type DeckDiagnostic struct {
 
 // ValidateDeckResult reports whether every persisted slide is valid ASD v1.
 type ValidateDeckResult struct {
-	Deck        *store.DeckManifest `json:"deck"`
-	SlideCount  int                 `json:"slideCount"`
-	Valid       bool                `json:"valid"`
-	Diagnostics []DeckDiagnostic    `json:"diagnostics,omitempty"`
+	Deck        *DeckView        `json:"deck"`
+	SlideCount  int              `json:"slideCount"`
+	Valid       bool             `json:"valid"`
+	Diagnostics []DeckDiagnostic `json:"diagnostics,omitempty"`
 }
 
 func personalService(ctx context.Context) (Service, error) {
@@ -141,14 +198,14 @@ func createDeck(ctx context.Context, args CreateDeckArgs) (DeckResult, error) {
 		if err != nil {
 			return DeckResult{}, err
 		}
-		return DeckResult{Deck: deck, Archetypes: tmpl.Archetypes}, nil
+		return DeckResult{Deck: deckView(deck), Archetypes: tmpl.Archetypes}, nil
 	}
 
 	deck, err := svc.CreateDeck(ctx, slug, title, description, args.Theme)
 	if err != nil {
 		return DeckResult{}, err
 	}
-	return DeckResult{Deck: deck}, nil
+	return DeckResult{Deck: deckView(deck)}, nil
 }
 
 func writeSlide(ctx context.Context, args WriteSlideArgs) (WriteSlideResult, error) {
@@ -167,7 +224,7 @@ func writeSlide(ctx context.Context, args WriteSlideArgs) (WriteSlideResult, err
 	if err != nil {
 		return WriteSlideResult{}, fmt.Errorf("reload deck: %w", err)
 	}
-	return WriteSlideResult{Deck: deck, Slide: slide, SlideCount: len(slides), Diagnostics: diagnostics}, nil
+	return WriteSlideResult{Deck: deckView(deck), Slide: slide, SlideCount: len(slides), Diagnostics: diagnostics}, nil
 }
 
 func getDeck(ctx context.Context, args GetDeckArgs) (DeckResult, error) {
@@ -180,7 +237,7 @@ func getDeck(ctx context.Context, args GetDeckArgs) (DeckResult, error) {
 		return DeckResult{}, err
 	}
 	sort.Slice(slides, func(i, j int) bool { return slides[i].Position < slides[j].Position })
-	return DeckResult{Deck: deck, Slides: slides, SlideCount: len(slides)}, nil
+	return DeckResult{Deck: deckView(deck), Slides: slides, SlideCount: len(slides)}, nil
 }
 
 func listDecks(ctx context.Context, _ ListDecksArgs) (ListDecksResult, error) {
@@ -192,7 +249,7 @@ func listDecks(ctx context.Context, _ ListDecksArgs) (ListDecksResult, error) {
 	if err != nil {
 		return ListDecksResult{}, fmt.Errorf("list decks: %w", err)
 	}
-	return ListDecksResult{Decks: decks}, nil
+	return ListDecksResult{Decks: deckViews(decks)}, nil
 }
 
 func listTemplates(ctx context.Context, _ ListTemplatesArgs) (ListTemplatesResult, error) {
@@ -228,8 +285,10 @@ func listTemplates(ctx context.Context, _ ListTemplatesArgs) (ListTemplatesResul
 // (e.g. title/section/content) but never the archetype markup, tokens, or assets.
 func templateSummary(t themes.Template, scope string) TemplateSummary {
 	kinds := make([]string, 0, len(t.Archetypes))
+	variants := make([]ArchetypeVariant, 0, len(t.Archetypes))
 	for _, arch := range t.Archetypes {
 		kinds = append(kinds, arch.Kind)
+		variants = append(variants, ArchetypeVariant{Kind: arch.Kind, Label: arch.Title})
 	}
 	return TemplateSummary{
 		Name:           t.Name,
@@ -237,6 +296,7 @@ func templateSummary(t themes.Template, scope string) TemplateSummary {
 		Description:    t.Description,
 		Scope:          scope,
 		ArchetypeKinds: kinds,
+		Archetypes:     variants,
 	}
 }
 

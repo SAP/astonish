@@ -8,6 +8,10 @@ const (
 	UnitsPerInch = 160
 	SchemaV1     = 1
 	SchemaV2     = 2
+	// SchemaV3 marks a template deck backed by a lossless imported TemplateModel
+	// IR (persisted in Deck.template_model). Regular decks and plain templates
+	// stay on SchemaV1/SchemaV2; only imported high-fidelity templates use V3.
+	SchemaV3 = 3
 )
 
 type Geometry struct {
@@ -86,7 +90,12 @@ type SceneGraph struct {
 	Subject       string            `json:"subject,omitempty"`
 	Author        string            `json:"author,omitempty"`
 	Theme         map[string]string `json:"theme,omitempty"`
-	Slides        []Slide           `json:"slides"`
+	// Assets maps a content-addressed asset ref (e.g. "sha256-...") to a
+	// self-contained data: URL. Imported templates carry their logos/media
+	// here; the HTML exporter resolves each ast-image's asset-ref against this
+	// map into a concrete img src. Empty for decks that embed no assets.
+	Assets map[string]string `json:"assets,omitempty"`
+	Slides []Slide           `json:"slides"`
 }
 
 type CapabilityCounts struct {

@@ -17,8 +17,14 @@ type DeckManifest struct {
 	SchemaVersion int               `json:"schemaVersion"`
 	Theme         map[string]string `json:"theme,omitempty"`
 	Assets        map[string]string `json:"assets,omitempty"`
-	CreatedAt     time.Time         `json:"createdAt"`
-	UpdatedAt     time.Time         `json:"updatedAt"`
+	// TemplateModel holds the lossless imported-template IR as raw JSON
+	// (themes.TemplateModel marshaled). It is set only for high-fidelity
+	// imported templates (SchemaVersion=3) and is empty for all other decks.
+	// Stored as a raw string to avoid coupling the store package to the slides
+	// IR types.
+	TemplateModel string    `json:"templateModel,omitempty"`
+	CreatedAt     time.Time `json:"createdAt"`
+	UpdatedAt     time.Time `json:"updatedAt"`
 	// Scope is a non-persisted, in-memory annotation ("personal" or "team")
 	// set only by the list handler when merging scopes. There is no Deck
 	// column for it; CreateDeck/UpdateDeck use explicit setters so this field
@@ -45,6 +51,14 @@ type DocsStore interface {
 	CreateDeck(context.Context, *DeckManifest) error
 	GetDeck(context.Context, string) (*DeckManifest, error)
 	ListDecks(context.Context) ([]*DeckManifest, error)
+	// ListDecksLite returns the same decks as ListDecks but OMITS the two heavy
+	// DeckManifest fields — Assets (base64 data: URIs) and TemplateModel (the
+	// multi-MB imported-template IR). Implementations MUST use storage-level
+	// field projection so the megabytes are never read/deserialized, not merely
+	// nulled out after loading. Use this for list views (the Slides list) where
+	// those fields are unused; use ListDecks when Assets/TemplateModel are
+	// needed (e.g. ListTemplates rehydrating the IR).
+	ListDecksLite(context.Context) ([]*DeckManifest, error)
 	UpdateDeck(context.Context, *DeckManifest) error
 	DeleteDeck(context.Context, string) error
 

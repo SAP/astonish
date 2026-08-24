@@ -55,11 +55,15 @@ export interface SlidesDeckListItem {
 
 export type SlidesExportFormat = 'pdf' | 'pptx' | 'html'
 
-/** A named archetype (layout) provided by a slide template. */
+/** A named archetype (layout) provided by a slide template. In the lightweight
+ * list DTO only `kind` and `label` are present (no markup); the full archetype
+ * with `markup` is delivered when a template is chosen via create_deck. */
 export interface SlidesTemplateArchetype {
   kind: string
   title?: string
-  markup: string
+  /** Human-readable variant label surfaced in the Templates UI. */
+  label?: string
+  markup?: string
 }
 
 /** A slide template (design tokens + assets + archetype layouts). */

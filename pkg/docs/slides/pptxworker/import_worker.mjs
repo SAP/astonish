@@ -205,6 +205,101 @@ const mapGeom = (prst, id) => {
 const DASH_MAP = { solid: 'solid', dash: 'dash', dashDot: 'dashDot', lgDash: 'lgDash', dot: 'dot', sysDash: 'dash', sysDot: 'dot' }
 
 // ---------------------------------------------------------------------------
+// Custom geometry (a:custGeom) -> SVG path segments, parsed in DOCUMENT ORDER.
+// Ported from the pptx-html pilot (src/parse/path.ts): moveTo/lnTo/arcTo/
+// cubicBezTo/quadBezTo/close are emitted in the order they appear so mixed
+// command sequences are preserved. Coordinates are expressed in the shape's own
+// path-space (a:pathLst path @w/@h), which the renderer maps into the object box
+// via a 0..w/0..h viewBox, so we keep raw path units and report w/h per subpath.
+// ---------------------------------------------------------------------------
+const ptOf = (el) => {
+  const a = attrsOf(el)
+  return { x: Number(a['@_x'] || 0), y: Number(a['@_y'] || 0) }
+}
+// Convert an OOXML arc (a:arcTo swAng/stAng in 60000ths of a degree, wR/hR radii)
+// starting from the current point into an SVG 'A' command. OOXML arcs are given
+// as start angle + sweep angle on an ellipse; we compute the end point and emit a
+// single elliptical arc. This is an approximation good enough for brand curves.
+const arcToSvg = (cur, arc) => {
+  const a = attrsOf(arc)
+  const wR = Number(a['@_wR'] || 0)
+  const hR = Number(a['@_hR'] || 0)
+  const stAng = (Number(a['@_stAng'] || 0) / 60000) * (Math.PI / 180)
+  const swAng = (Number(a['@_swAng'] || 0) / 60000) * (Math.PI / 180)
+  // Ellipse center from the current point at the start angle.
+  const cx = cur.x - wR * Math.cos(stAng)
+  const cy = cur.y - hR * Math.sin(stAng)
+  const endAng = stAng + swAng
+  const ex = cx + wR * Math.cos(endAng)
+  const ey = cy + hR * Math.sin(endAng)
+  const largeArc = Math.abs(swAng) > Math.PI ? 1 : 0
+  const sweep = swAng > 0 ? 1 : 0
+  cur.x = ex
+  cur.y = ey
+  return `A${int(wR)} ${int(hR)} 0 ${largeArc} ${sweep} ${int(ex)} ${int(ey)}`
+}
+// Parse an a:custGeom element into an array of { d, w, h, fillNone } subpaths.
+const custGeomToPaths = (custGeom) => {
+  const pathLst = findChild(custGeom, 'a:pathLst')
+  if (!pathLst) return []
+  const out = []
+  for (const p of findAll(pathLst, 'a:path')) {
+    const pa = attrsOf(p)
+    const w = int(Number(pa['@_w'] || 0))
+    const h = int(Number(pa['@_h'] || 0))
+    const fillNone = pa['@_fill'] === 'none'
+    const cur = { x: 0, y: 0 }
+    let d = ''
+    for (const cmd of childrenOf(p)) {
+      const t = tagOf(cmd)
+      switch (t) {
+        case 'a:moveTo': {
+          const pt = ptOf(findChild(cmd, 'a:pt'))
+          cur.x = pt.x; cur.y = pt.y
+          d += `M${int(pt.x)} ${int(pt.y)} `
+          break
+        }
+        case 'a:lnTo': {
+          const pt = ptOf(findChild(cmd, 'a:pt'))
+          cur.x = pt.x; cur.y = pt.y
+          d += `L${int(pt.x)} ${int(pt.y)} `
+          break
+        }
+        case 'a:cubicBezTo': {
+          const pts = findAll(cmd, 'a:pt').map(ptOf)
+          if (pts.length === 3) {
+            d += `C${int(pts[0].x)} ${int(pts[0].y)} ${int(pts[1].x)} ${int(pts[1].y)} ${int(pts[2].x)} ${int(pts[2].y)} `
+            cur.x = pts[2].x; cur.y = pts[2].y
+          }
+          break
+        }
+        case 'a:quadBezTo': {
+          const pts = findAll(cmd, 'a:pt').map(ptOf)
+          if (pts.length === 2) {
+            d += `Q${int(pts[0].x)} ${int(pts[0].y)} ${int(pts[1].x)} ${int(pts[1].y)} `
+            cur.x = pts[1].x; cur.y = pts[1].y
+          }
+          break
+        }
+        case 'a:arcTo': {
+          d += arcToSvg(cur, cmd) + ' '
+          break
+        }
+        case 'a:close': {
+          d += 'Z '
+          break
+        }
+        default:
+          break
+      }
+    }
+    d = d.trim()
+    if (d) out.push({ d, w: w || CANVAS_W, h: h || CANVAS_H, fillNone })
+  }
+  return out
+}
+
+// ---------------------------------------------------------------------------
 // Rich text extraction: a:txBody -> runs[]
 // ---------------------------------------------------------------------------
 const extractRuns = (txBody, themeColors) => {
@@ -249,12 +344,15 @@ const readXfrm = (spPr) => {
   const oa = attrsOf(off)
   const ea = attrsOf(ext)
   const rotAttr = attrsOf(xfrm)['@_rot']
+  const xa = attrsOf(xfrm)
   return {
     x: Number(oa['@_x'] || 0),
     y: Number(oa['@_y'] || 0),
     cx: Number(ea['@_cx'] || 0),
     cy: Number(ea['@_cy'] || 0),
     rot: rotAttr ? Math.round(Number(rotAttr) / 60000) : 0,
+    flipH: xa['@_flipH'] === '1' || xa['@_flipH'] === 'true',
+    flipV: xa['@_flipV'] === '1' || xa['@_flipV'] === 'true',
   }
 }
 
@@ -519,6 +617,8 @@ try {
       cx: emu.cx * affine.sx,
       cy: emu.cy * affine.sy,
       rot: emu.rot,
+      flipH: emu.flipH,
+      flipV: emu.flipV,
     }
   }
 
@@ -529,18 +629,68 @@ try {
     box = applyAffine(box, affine)
     const node = { id: nextId('sp'), type: 'shape', geometry: toCanvasBox(box) }
     if (box.rot) node.rot = box.rot
+    if (box.flipH) node.flipH = true
+    if (box.flipV) node.flipV = true
+    // Record a placeholder marker (nvSpPr//p:ph) so template mode can classify
+    // this shape as a fillable placeholder vs decorative chrome. Deck mode
+    // ignores node.ph (it reads only type/geometry/geom/fill/line/runs), so
+    // attaching it is inert there.
+    const ph = findDeep(sp, 'p:ph')
+    if (ph) {
+      const pa = attrsOf(ph)
+      node.ph = { type: pa['@_type'] || 'body', idx: pa['@_idx'] != null ? String(pa['@_idx']) : '' }
+    }
     const prstGeom = spPr ? findChild(spPr, 'a:prstGeom') : null
     const custGeom = spPr ? findChild(spPr, 'a:custGeom') : null
     if (custGeom) {
-      warn(`Custom geometry approximated as rect (${node.id})`)
-      node.geom = 'rect'
+      // Extract real SVG path segments (in document order) so the renderer can
+      // draw the exact brand geometry rather than approximating as a rect.
+      const paths = custGeomToPaths(custGeom)
+      if (paths.length) {
+        node.geom = 'path'
+        node.paths = paths
+      } else {
+        warn(`Custom geometry produced no path segments; approximated as rect (${node.id})`)
+        node.geom = 'rect'
+      }
     } else if (prstGeom) {
-      node.geom = mapGeom(attrsOf(prstGeom)['@_prst'], node.id)
+      const prst = attrsOf(prstGeom)['@_prst']
+      node.geom = mapGeom(prst, node.id)
+      // Preserve the rounded-rect corner radius for the lossless IR (a:avLst
+      // adj is a fraction of the shorter side * 100000). ASD only supports a
+      // fixed roundRect radius today, but the IR keeps the true value.
+      if (prst === 'roundRect') {
+        const gd = findDeep(prstGeom, 'a:gd')
+        const fmla = gd ? attrsOf(gd)['@_fmla'] : ''
+        const m = fmla ? String(fmla).match(/val\s+(\d+)/) : null
+        const adj = m ? Number(m[1]) : 0
+        const shorter = Math.min(node.geometry.w, node.geometry.h)
+        node.rectRadius = int((adj / 100000) * shorter) || int(0.12 * shorter)
+      }
     } else {
       node.geom = 'rect'
     }
     extractFill(spPr, themeColors, node)
     extractLine(spPr, themeColors, node)
+    // SAP "anvil" chrome shapes often carry no local fill; they inherit from the
+    // theme via p:style/a:fillRef (idx into the theme fill style list, plus a
+    // color). Resolve that so accent bars/logos are not rendered transparent.
+    if (node.fill == null && node.gradient == null && node.opacity == null) {
+      const style = findChild(sp, 'p:style')
+      const fillRef = style ? findChild(style, 'a:fillRef') : null
+      if (fillRef) {
+        const c = colorFromFill(fillRef, themeColors)
+        if (c) node.fill = c.hex
+      }
+    }
+    if (node.line == null) {
+      const style = findChild(sp, 'p:style')
+      const lnRef = style ? findChild(style, 'a:lnRef') : null
+      if (lnRef) {
+        const c = colorFromFill(lnRef, themeColors)
+        if (c) node.line = c.hex
+      }
+    }
     const txBody = findChild(sp, 'p:txBody')
     const { runs, text } = extractRuns(txBody, themeColors)
     if (runs.length) {
@@ -557,16 +707,49 @@ try {
     box = applyAffine(box, affine)
     const node = { id: nextId('img'), type: 'image', geometry: toCanvasBox(box) }
     if (box.rot) node.rot = box.rot
+    // Placeholder marker (pic placeholders are fillable image slots in layouts).
+    const phEl = findDeep(pic, 'p:ph')
+    if (phEl) {
+      const pa = attrsOf(phEl)
+      node.ph = { type: pa['@_type'] || 'pic', idx: pa['@_idx'] != null ? String(pa['@_idx']) : '' }
+    }
     const blipFill = findChild(pic, 'p:blipFill')
     const blip = blipFill ? findChild(blipFill, 'a:blip') : null
-    const embed = blip ? attrsOf(blip)['@_r:embed'] : null
+    // Prefer a vector SVG alternative (asvg:svgBlip in extLst) when present, as
+    // it scales without raster loss; fall back to the raster r:embed otherwise.
+    let embed = null
+    if (blip) {
+      const extLst = findChild(blip, 'a:extLst')
+      if (extLst) {
+        const svgBlip = findDeep(extLst, 'asvg:svgBlip') || findDeep(extLst, 'svgBlip')
+        if (svgBlip) {
+          const se = attrsOf(svgBlip)['@_r:embed']
+          if (se && slideRels[se]) embed = se
+        }
+      }
+      if (!embed) embed = attrsOf(blip)['@_r:embed'] || null
+    }
     if (embed && slideRels[embed]) {
       const target = resolveTarget(slideDir, slideRels[embed].target)
-      const ref = target ? await addAsset(target) : null
-      if (ref) {
-        node.props = { assetRef: ref }
+      const ext = target ? (target.split('.').pop() || '').toLowerCase() : ''
+      if (ext === 'emf' || ext === 'wmf') {
+        // EMF/WMF are vector metafiles the browser cannot render. Full replay is
+        // out of scope for v1: use a raster sibling if one exists, else warn+skip.
+        const raster = target.replace(/\.(emf|wmf)$/i, '.png')
+        const ref = zip.file(raster) ? await addAsset(raster) : null
+        if (ref) {
+          node.props = { assetRef: ref }
+        } else {
+          warn(`EMF/WMF vector image not rendered (v1 limitation): ${target}`)
+          return null
+        }
       } else {
-        warn(`Image relationship ${embed} could not be resolved`)
+        const ref = target ? await addAsset(target) : null
+        if (ref) {
+          node.props = { assetRef: ref }
+        } else {
+          warn(`Image relationship ${embed} could not be resolved`)
+        }
       }
     } else {
       warn(`Image without embedded blip skipped (${node.id})`)
@@ -708,64 +891,505 @@ try {
     }
     ok(scene)
   } else {
-    // template mode: synthesize archetypes from slide layouts' placeholders.
+    // -----------------------------------------------------------------------
+    // Template mode (Option A): ONE Astonish template per .pptx that exposes the
+    // deck's LAYOUTS as classified, human-labeled, selectable variants. A single
+    // slide master + single theme = one design system, so we do not split into
+    // multiple templates. Each of the N slide layouts becomes an archetype whose
+    // KIND is its role (title/section/content/agenda/closing/blank) and whose
+    // LABEL is the real PowerPoint layout name (e.g. "Blue cover, anvil and
+    // image"), so the user/AI can choose among same-role variants. Each layout's
+    // color/chrome is captured via master→layout background+chrome inheritance
+    // (the colorful covers/dividers carry their pictures + accent shapes in the
+    // LAYOUT; plain layouts inherit the neutral background from the master).
+    // A lossless per-layout / per-sample-slide IR (TemplateModel, schema 3) is
+    // also persisted for the future in-browser editor. Everything renders through
+    // the existing IR→ASD serializer + ASD runtime (no second renderer).
+    // -----------------------------------------------------------------------
+
+    // Map an OOXML placeholder type to our coarse placeholder role.
+    const phRole = (t) => {
+      switch (t) {
+        case 'ctrTitle':
+        case 'title':
+          return 'title'
+        case 'subTitle':
+        case 'body':
+        case 'obj':
+          return 'body'
+        case 'pic':
+          return 'image'
+        case 'tbl':
+          return 'table'
+        case 'chart':
+          return 'chart'
+        default:
+          return 'body'
+      }
+    }
+
+    // Extract the background of a cSld: solid color or full-bleed image.
+    const bgOf = async (cSld, rels, dir) => {
+      const bg = cSld ? findChild(cSld, 'p:bg') : null
+      if (!bg) return { kind: 'solid', color: themeTokens.surface || '#FFFFFF' }
+      const bgPr = findChild(bg, 'p:bgPr')
+      const bgRef = findChild(bg, 'p:bgRef')
+      if (bgPr) {
+        const blipFill = findChild(bgPr, 'a:blipFill')
+        const blip = blipFill ? findChild(blipFill, 'a:blip') : null
+        const embed = blip ? attrsOf(blip)['@_r:embed'] : null
+        if (embed && rels[embed]) {
+          const target = resolveTarget(dir, rels[embed].target)
+          const ref = target ? await addAsset(target) : null
+          if (ref) return { kind: 'image', mediaKey: ref }
+        }
+        const c = colorFromFill(findChild(bgPr, 'a:solidFill'), themeColors)
+        if (c) return { kind: 'solid', color: c.hex }
+      }
+      if (bgRef) {
+        const c = colorFromFill(bgRef, themeColors)
+        if (c) return { kind: 'solid', color: c.hex }
+      }
+      return { kind: 'solid', color: themeTokens.surface || '#FFFFFF' }
+    }
+
+    // isFallbackBg reports whether a background is the neutral surface fallback
+    // bgOf returns when a cSld carries no explicit <p:bg> (so we know to look up
+    // the inheritance chain instead of rendering white).
+    const isFallbackBg = (bg) =>
+      !bg || (bg.kind === 'solid' && (bg.color === (themeTokens.surface || '#FFFFFF')))
+
+    // resolveBackground implements PowerPoint's master→layout background
+    // inheritance: prefer the layout's own <p:bg>; if the layout has none
+    // (bgOf returned the surface fallback), inherit the master's background
+    // instead of rendering white. masterCtx may be null (deck mode / no master).
+    const resolveBackground = async (ownCSld, ownRels, ownDir, masterCtx) => {
+      const own = await bgOf(ownCSld, ownRels, ownDir)
+      if (!isFallbackBg(own)) return own
+      if (masterCtx && masterCtx.bg && !isFallbackBg(masterCtx.bg)) return masterCtx.bg
+      return own
+    }
+
+    // Convert one processed node into either an IRChrome or an IRPlaceholder.
+    const styleOf = (node) => {
+      const st = {}
+      const r0 = node.runs && node.runs[0]
+      if (r0) {
+        if (r0.size) st.fontSize = r0.size
+        if (r0.color) st.color = r0.color
+        if (r0.bold) st.bold = true
+        if (r0.italic) st.italic = true
+        if (r0.font) st.fontFace = r0.font
+      }
+      return st
+    }
+
+    let phCounter = 0
+    const classify = (node, layout) => {
+      const g = node.geometry
+      if (node.ph) {
+        const type = phRole(node.ph.type)
+        phCounter += 1
+        const name = `${type}-${phCounter}`
+        layout.placeholders.push({
+          name,
+          type,
+          x: g.x, y: g.y, w: g.w, h: g.h,
+          style: styleOf(node),
+          prompt: type === 'title' ? '{{TITLE}}' : '{{BODY}}',
+          ooxmlType: node.ph.type,
+          idx: node.ph.idx ? Number(node.ph.idx) : 0,
+        })
+        return
+      }
+      // Chrome object (decorative).
+      const chrome = {
+        kind: node.type === 'image' ? 'image'
+          : node.type === 'table' ? 'text'
+            : node.geom === 'path' ? 'path'
+              : node.geom === 'line' ? 'line'
+                : node.geom === 'ellipse' ? 'ellipse'
+                  : node.text ? 'text' : 'rect',
+        x: g.x, y: g.y, w: g.w, h: g.h,
+      }
+      if (node.rot) chrome.rot = node.rot
+      if (node.flipH) chrome.flipH = true
+      if (node.flipV) chrome.flipV = true
+      if (node.fill) chrome.fill = { kind: 'solid', color: node.fill }
+      else if (node.gradient) chrome.fill = { kind: 'gradient', gradient: node.gradient }
+      if (node.line) chrome.line = { color: node.line, width: (node.props && node.props.lineWidth) || 1, dash: node.dash || 'solid' }
+      if (node.rectRadius) chrome.rectRadius = node.rectRadius
+      if (node.paths) chrome.paths = node.paths
+      if (node.text) { chrome.text = node.text; chrome.style = styleOf(node) }
+      if (node.type === 'image' && node.props && node.props.assetRef) chrome.mediaKey = node.props.assetRef
+      chrome.geom = node.geom
+      layout.objects.push(chrome)
+    }
+
+    // Build an IRLayout from a spTree root (layout or sample slide). When
+    // masterCtx is supplied (template mode), the background is resolved through
+    // the master→layout inheritance chain and the master's decorative chrome is
+    // prepended (behind the layout's own chrome) unless the layout suppresses
+    // master shapes (showMasterSp="0").
+    const buildIRLayout = async (spTree, cSld, rels, dir, id, name, masterCtx = null, showMasterSp = true) => {
+      const background = masterCtx
+        ? await resolveBackground(cSld, rels, dir, masterCtx)
+        : await bgOf(cSld, rels, dir)
+      const layout = { id, name, background, objects: [], placeholders: [] }
+      // Inherited master chrome first (behind), decorative objects only.
+      if (masterCtx && showMasterSp && masterCtx.chromeObjects && masterCtx.chromeObjects.length) {
+        for (const o of masterCtx.chromeObjects) layout.objects.push(o)
+      }
+      const nodes = []
+      if (spTree) await processTree(spTree, null, rels, dir, nodes)
+      for (const n of nodes) classify(n, layout)
+      return layout
+    }
+
+    // ---- Determine archetype KIND from a layout's NAME, then placeholders ---
+    // The .pptx layouts carry no <p:sldLayout type> attribute (confirmed empty
+    // on all 39 in the reference corporate deck), so the human layout NAME is
+    // the primary signal. Order matters: check the most specific roles first.
+    const kindOf = (layout, layoutType) => {
+      const name = (layout.name || '').toLowerCase()
+      const hasTitle = layout.placeholders.some((p) => p.type === 'title')
+      const bodyCount = layout.placeholders.filter((p) => p.type === 'body').length
+      // Closing family (thank you / contact / copyright / Q&A / closing).
+      if (/thank|closing|contact|copyright|q\s*&\s*a|q&a|farewell/.test(name)) return 'closing'
+      // Agenda / table-of-contents family.
+      if (/agenda|toc|overview|contents|table of contents/.test(name)) return 'agenda'
+      // Section / divider / separator family.
+      if (layoutType === 'secHead' || /divider|separator|section/.test(name)) return 'section'
+      // Cover / title family.
+      if (layoutType === 'title' || layoutType === 'titleOnly' || /cover|title slide/.test(name)) return 'title'
+      // Blank.
+      if (/blank/.test(name)) return 'blank'
+      // Fall back to the placeholder signature when the name is uninformative.
+      if (hasTitle && bodyCount === 0) return 'title'
+      if (bodyCount > 0) return 'content'
+      return 'content'
+    }
+
+    // uniqueKind() suffixes duplicates so variant multiplicity is preserved:
+    // title, title-2, title-3, ...
+    const kindCounts = {}
+    const uniqueKind = (base) => {
+      kindCounts[base] = (kindCounts[base] || 0) + 1
+      return kindCounts[base] === 1 ? base : `${base}-${kindCounts[base]}`
+    }
+
+    // ---- IR -> ASD serialization ------------------------------------------
+    // XML attribute-value escaping (ParseSlide consumes XML, not the indented
+    // DSL). We also strip characters the validators reject up front.
+    const esc = (s) => String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+    // Escape element text content.
+    const escText = (s) => String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    // Clamp geometry into the canvas so ValidateSlide's invalid_geometry check
+    // always passes (extraction already clamps, but chrome may exceed after
+    // synthesis).
+    const clampGeo = (o) => {
+      const x = Math.max(0, Math.min(CANVAS_W, o.x || 0))
+      const y = Math.max(0, Math.min(CANVAS_H, o.y || 0))
+      const w = Math.max(1, Math.min(CANVAS_W - x, o.w || 1))
+      const h = Math.max(1, Math.min(CANVAS_H - y, o.h || 1))
+      return `x="${x}" y="${y}" w="${w}" h="${h}"`
+    }
+    // Only #RRGGBB(AA) / rgb()/rgba() colors pass safeColor; drop anything else.
+    const safeCol = (c) => (c && /^#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$/.test(c)) ? c : null
+    // OOXML custom-path unit -> node-box px. The renderer's SVG viewBox is
+    // "0 0 W H" (node box), so path coordinates must be in that space.
+    const scalePath = (d, pathW, pathH, boxW, boxH) => {
+      const sx = pathW ? boxW / pathW : 1
+      const sy = pathH ? boxH / pathH : 1
+      // Scale every run of digits that represents a coordinate. Commands are
+      // letters; numbers between them are coordinate pairs. We scale alternating
+      // x/y by walking numeric tokens per command.
+      return d.replace(/([MLCQAHVZmlcqahvz])([^MLCQAHVZmlcqahvz]*)/g, (_, cmd, args) => {
+        const nums = (args.match(/-?\d*\.?\d+/g) || []).map(Number)
+        let out = cmd
+        const up = cmd.toUpperCase()
+        if (up === 'Z') return 'Z'
+        if (up === 'H') return cmd + nums.map((n) => Math.round(n * sx)).join(' ')
+        if (up === 'V') return cmd + nums.map((n) => Math.round(n * sy)).join(' ')
+        if (up === 'A') {
+          // rx ry rot largeArc sweep x y (7 params); scale rx,ry,x,y only.
+          const parts = []
+          for (let i = 0; i < nums.length; i += 7) {
+            const g = nums.slice(i, i + 7)
+            if (g.length < 7) break
+            parts.push(`${Math.round(g[0] * sx)} ${Math.round(g[1] * sy)} ${g[2]} ${g[3]} ${g[4]} ${Math.round(g[5] * sx)} ${Math.round(g[6] * sy)}`)
+          }
+          return cmd + parts.join(' ')
+        }
+        for (let i = 0; i < nums.length; i += 2) {
+          out += `${Math.round((nums[i] || 0) * sx)} ${Math.round((nums[i + 1] || 0) * sy)} `
+        }
+        return out.trim() + ' '
+      }).trim()
+    }
+
+    // Serialize a single IRChrome to an XML ast-* element. Returns '' when ASD
+    // cannot express it (caller records a warning).
+    const chromeToAsd = (o, idc) => {
+      const id = `c-${idc}`
+      const geo = clampGeo(o)
+      const rot = o.rot ? ` rot="${Math.max(-360, Math.min(360, o.rot))}"` : ''
+      if (o.kind === 'image' && o.mediaKey) {
+        return `<ast-image id="${id}" ${geo}${rot} asset-ref="${esc(o.mediaKey)}" fit="cover" decorative="true"></ast-image>`
+      }
+      if (o.kind === 'text' || o.text) {
+        const st = o.style || {}
+        const attrs = [`size="${st.fontSize || 24}"`]
+        const col = safeCol(st.color) || (themeTokens.ink && safeCol(themeTokens.ink)) || '#172033'
+        attrs.push(`color="${col}"`)
+        if (st.bold) attrs.push('weight="bold"')
+        if (st.fontFace && !/[;<>]/.test(st.fontFace)) attrs.push(`font="${esc(st.fontFace)}"`)
+        // italic is a run-level attribute (i) — ast-text has no italic attr.
+        const runAttr = st.italic ? ' i="true"' : ''
+        const runs = String(o.text).split('\n').filter((l) => l !== '')
+          .map((l) => `<ast-run${runAttr}>${escText(l)}</ast-run>`).join('')
+        return `<ast-text id="${id}" ${geo}${rot} ${attrs.join(' ')}>${runs || '<ast-run></ast-run>'}</ast-text>`
+      }
+      // Shape family (rect/ellipse/line/path). ast-shape requires kind.
+      let fillAttr = ''
+      if (o.fill && o.fill.kind === 'solid' && safeCol(o.fill.color)) fillAttr = ` fill="${o.fill.color}"`
+      else if (o.fill && o.fill.kind === 'gradient' && o.fill.gradient && o.fill.gradient.stops && o.fill.gradient.stops[0] && safeCol(o.fill.gradient.stops[0].color)) {
+        // ASD gradients need a JSON <script> child; for the archetype we
+        // approximate with the first stop color and keep the true gradient in IR.
+        fillAttr = ` fill="${o.fill.gradient.stops[0].color}"`
+        warn(`Gradient approximated as solid in archetype (${id})`)
+      }
+      const lineAttr = o.line && safeCol(o.line.color) ? ` line="${o.line.color}"` : ''
+      if (o.kind === 'path' && o.paths && o.paths.length) {
+        const p = o.paths[0]
+        const d = scalePath(p.d, p.w, p.h, o.w, o.h)
+        if (d && /^[MmLlCcQqZzHhVvAa0-9\s,.+-]*$/.test(d)) {
+          return `<ast-shape id="${id}" kind="rect" ${geo}${rot} path="${esc(d)}"${fillAttr}${lineAttr}></ast-shape>`
+        }
+        // Unsafe/empty path -> approximate as rect.
+        return `<ast-shape id="${id}" kind="rect" ${geo}${rot} geom="rect"${fillAttr}${lineAttr}></ast-shape>`
+      }
+      const geom = o.kind === 'line' ? 'line'
+        : o.kind === 'ellipse' ? 'ellipse'
+          : (o.geom === 'roundRect' || o.rectRadius) ? 'roundRect'
+            : (o.geom && o.geom !== 'path' && ALLOWED_GEOM.has(o.geom)) ? o.geom : 'rect'
+      const kind = geom === 'line' ? 'line' : geom === 'ellipse' ? 'ellipse' : 'rect'
+      return `<ast-shape id="${id}" kind="${kind}" ${geo}${rot} geom="${geom}"${fillAttr}${lineAttr}></ast-shape>`
+    }
+
+    // Geometry presets ASD's validator allows (mirror of allowedGeomPresets).
+    const ALLOWED_GEOM = new Set(['rect', 'roundRect', 'ellipse', 'triangle', 'rtTriangle', 'diamond', 'parallelogram', 'trapezoid', 'hexagon', 'octagon', 'star5', 'rightArrow', 'leftArrow', 'chevron', 'cloud', 'can', 'cube', 'line', 'bracketPair'])
+
+    // Serialize a placeholder to a fillable ast-text (XML).
+    const placeholderToAsd = (p, idc) => {
+      const st = p.style || {}
+      const col = safeCol(st.color) || (themeTokens.ink && safeCol(themeTokens.ink)) || '#172033'
+      const attrs = [`size="${st.fontSize || (p.type === 'title' ? 54 : 28)}"`, `color="${col}"`]
+      if (st.bold || p.type === 'title') attrs.push('weight="bold"')
+      if (st.fontFace && !/[;<>]/.test(st.fontFace)) attrs.push(`font="${esc(st.fontFace)}"`)
+      const runAttr = st.italic ? ' i="true"' : ''
+      const geo = clampGeo(p)
+      return `<ast-text id="ph-${idc}" ${geo} ${attrs.join(' ')}><ast-run${runAttr}>${escText(p.prompt || '{{BODY}}')}</ast-run></ast-text>`
+    }
+
+    // Serialize an entire IRLayout to a single-root <ast-slide> XML fragment.
+    const layoutToAsd = (layout) => {
+      const bg = layout.background || {}
+      const parts = []
+      // Solid background renders as a full-canvas decorative rect (matches the
+      // built-in template convention); image background renders as a full-canvas
+      // ast-image FIRST (behind chrome).
+      if (bg.kind === 'image' && bg.mediaKey) {
+        parts.push(`<ast-image id="bg" x="0" y="0" w="${CANVAS_W}" h="${CANVAS_H}" asset-ref="${esc(bg.mediaKey)}" fit="cover" decorative="true"></ast-image>`)
+      } else {
+        const col = safeCol(bg.color) || safeCol(themeTokens.surface) || '#FFFFFF'
+        parts.push(`<ast-shape id="bg" kind="rect" x="0" y="0" w="${CANVAS_W}" h="${CANVAS_H}" geom="rect" fill="${col}" decorative="true"></ast-shape>`)
+      }
+      let idc = 0
+      for (const o of layout.objects) {
+        idc += 1
+        const m = chromeToAsd(o, idc)
+        if (m) parts.push(m)
+        else warn(`Chrome object not representable in ASD and dropped (${layout.id} #${idc})`)
+      }
+      let pc = 0
+      for (const p of layout.placeholders) {
+        if (p.type === 'title' || p.type === 'body') {
+          pc += 1
+          parts.push(placeholderToAsd(p, pc))
+        }
+      }
+      // Guarantee a title + body slot so create_deck can fill it.
+      if (!layout.placeholders.some((p) => p.type === 'title')) {
+        parts.push(`<ast-text id="ph-title" x="160" y="120" w="1600" h="160" size="54" color="${safeCol(themeTokens.ink) || '#172033'}" weight="bold"><ast-run>{{TITLE}}</ast-run></ast-text>`)
+      }
+      if (!layout.placeholders.some((p) => p.type === 'body')) {
+        parts.push(`<ast-text id="ph-body" x="160" y="320" w="1600" h="600" size="28" color="${safeCol(themeTokens.ink) || '#172033'}"><ast-run>{{BODY}}</ast-run></ast-text>`)
+      }
+      const slideId = layout.id.replace(/[^a-zA-Z0-9-]/g, '-') || 'layout'
+      return `<ast-slide id="${slideId}">${parts.join('')}</ast-slide>`
+    }
+
+    // ---- Extract every layout, then a few sample slides -------------------
+    const layoutNames = Object.keys(zip.files)
+      .filter((n) => /^ppt\/slideLayouts\/slideLayout\d+\.xml$/.test(n))
+      .sort((a, b) => {
+        const na = Number((a.match(/slideLayout(\d+)\.xml/) || [])[1] || 0)
+        const nb = Number((b.match(/slideLayout(\d+)\.xml/) || [])[1] || 0)
+        return na - nb
+      })
+
+    const irLayouts = []
     const archetypes = []
-    const layoutNames = Object.keys(zip.files).filter((n) => /^ppt\/slideLayouts\/slideLayout\d+\.xml$/.test(n)).sort()
-    const seen = new Set()
+    const usedNames = new Set()
+    const uniqueLayoutId = (name) => {
+      let base = String(name || 'layout').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'layout'
+      let id = base
+      let n = 2
+      while (usedNames.has(id)) { id = `${base}-${n}`; n += 1 }
+      usedNames.add(id)
+      return id
+    }
+
+    // ---- Slide-master context (master→layout inheritance) -----------------
+    // PowerPoint slides/layouts inherit their neutral background and decorative
+    // chrome from the slide master. bgOf() alone only reads a part's OWN <p:bg>,
+    // which is why plain content layouts (no own bg) rendered white. We load
+    // each master once, capture its background and its DECORATIVE chrome objects
+    // (placeholders and the slide-number are excluded — they are per-slide holes,
+    // not brand chrome), and merge them behind each layout that references it.
+    const masterCtxByPath = {}
+    const loadMasterCtx = async (masterPath) => {
+      if (!masterPath) return null
+      if (masterCtxByPath[masterPath] !== undefined) return masterCtxByPath[masterPath]
+      const xml = await readText(masterPath)
+      if (!xml) { masterCtxByPath[masterPath] = null; return null }
+      const doc = parseXml(xml)
+      const masterEl = rootEl(doc, 'p:sldMaster')
+      if (!masterEl) { masterCtxByPath[masterPath] = null; return null }
+      const dir = masterPath.split('/').slice(0, -1).join('/')
+      const relsPath = `${dir}/_rels/${masterPath.split('/').pop()}.rels`
+      const rels = parseRels(await readText(relsPath))
+      const cSld = findChild(masterEl, 'p:cSld')
+      const spTree = cSld ? findChild(cSld, 'p:spTree') : null
+      const bg = await bgOf(cSld, rels, dir)
+      // Process the master spTree to IR, then keep only decorative objects.
+      phCounter = 0
+      const tmp = { id: 'master', name: 'master', background: bg, objects: [], placeholders: [] }
+      const nodes = []
+      if (spTree) await processTree(spTree, null, rels, dir, nodes)
+      for (const n of nodes) classify(n, tmp)
+      const ctx = { bg, chromeObjects: tmp.objects }
+      masterCtxByPath[masterPath] = ctx
+      return ctx
+    }
+    // Resolve a layout's master path from its .rels (slideMaster relationship).
+    const masterPathOfLayout = (layoutRels, layoutDir) => {
+      for (const id of Object.keys(layoutRels)) {
+        const r = layoutRels[id]
+        if (r && r.type && /slideMaster$/.test(r.type)) {
+          return resolveTarget(layoutDir, r.target)
+        }
+      }
+      return null
+    }
+
     for (const ln of layoutNames) {
       const xml = await readText(ln)
       if (!xml) continue
       const doc = parseXml(xml)
-      const layout = rootEl(doc, 'p:sldLayout')
-      if (!layout) continue
-      const phType = (() => {
-        const ph = findDeep(layout, 'p:ph')
-        return ph ? (attrsOf(ph)['@_type'] || 'body') : 'body'
-      })()
-      let kind = 'content'
-      if (phType === 'title' || phType === 'ctrTitle') kind = 'title'
-      else if (phType === 'secHead') kind = 'section'
-      if (seen.has(kind)) continue
-      seen.add(kind)
-      archetypes.push(kind)
+      const layoutEl = rootEl(doc, 'p:sldLayout')
+      if (!layoutEl) continue
+      const dir = ln.split('/').slice(0, -1).join('/')
+      const relsPath = `${dir}/_rels/${ln.split('/').pop()}.rels`
+      const rels = parseRels(await readText(relsPath))
+      const cSld = findChild(layoutEl, 'p:cSld')
+      const spTree = cSld ? findChild(cSld, 'p:spTree') : null
+      const layoutType = attrsOf(layoutEl)['@_type'] || ''
+      const rawName = (cSld && attrsOf(cSld)['@_name']) || `Layout ${irLayouts.length + 1}`
+      const id = uniqueLayoutId(rawName)
+      // Master inheritance: resolve this layout's master and whether it
+      // suppresses master shapes (showMasterSp="0").
+      const masterCtx = await loadMasterCtx(masterPathOfLayout(rels, dir))
+      const showMasterSp = attrsOf(layoutEl)['@_showMasterSp'] !== '0'
+      if (masterCtx && !showMasterSp) {
+        warn(`Layout "${rawName}" sets showMasterSp=0; master chrome intentionally suppressed`)
+      }
+      phCounter = 0
+      const ir = await buildIRLayout(spTree, cSld, rels, dir, id, rawName, masterCtx, showMasterSp)
+      irLayouts.push(ir)
+      const kind = uniqueKind(kindOf(ir, layoutType))
+      archetypes.push({ kind, title: rawName, markup: layoutToAsd(ir), _layout: ir })
     }
-    // Ensure the canonical three archetypes exist.
-    for (const k of ['title', 'section', 'content']) if (!archetypes.includes(k)) archetypes.push(k)
 
-    const surface = themeTokens.surface || '#FFFFFF'
-    const ink = themeTokens.ink || '#172033'
-    const accent = themeTokens.accent || '#2563EB'
-    const markupFor = (kind) => {
+    // Capture a few sample slides into the IR (templateModel.slides) so a future
+    // in-browser editor has real filled examples to work from. These are NOT
+    // turned into archetypes: authored slides in a corporate template are thin
+    // (a photo dropped into the layout's picture placeholder, no own background
+    // or accent chrome — the color lives in the LAYOUTS), so slide-derived
+    // archetypes rendered white. The colorful, inheritance-corrected LAYOUT
+    // archetypes above are the on-brand starting points instead. Cap at 6.
+    const irSlides = []
+    for (const p of slidePaths.slice(0, 6)) {
+      const xml = await readText(p)
+      if (!xml) continue
+      const doc = parseXml(xml)
+      const sld = rootEl(doc, 'p:sld')
+      if (!sld) continue
+      const dir = p.split('/').slice(0, -1).join('/')
+      const relsPath = `${dir}/_rels/${p.split('/').pop()}.rels`
+      const rels = parseRels(await readText(relsPath))
+      const cSld = findChild(sld, 'p:cSld')
+      const spTree = cSld ? findChild(cSld, 'p:spTree') : null
+      phCounter = 0
+      const ir = await buildIRLayout(spTree, cSld, rels, dir, uniqueLayoutId(`slide-${irSlides.length + 1}`), `Slide ${irSlides.length + 1}`)
+      irSlides.push(ir)
+    }
+
+    // Guarantee the canonical three archetype kinds exist (tests + baseline
+    // authoring flow). Synthesize minimal fallbacks from theme tokens only when
+    // a kind was not produced by any real layout.
+    const surface = safeCol(themeTokens.surface) || '#FFFFFF'
+    const ink = safeCol(themeTokens.ink) || '#172033'
+    const accent = safeCol(themeTokens.accent) || '#2563EB'
+    const fallbackMarkup = (kind) => {
       if (kind === 'title') {
-        return `ast-slide bg="${surface}"
-  ast-text x=160 y=420 w=1600 h=200 size=72 color="${ink}" bold
-    ast-run {{TITLE}}
-  ast-text x=160 y=640 w=1600 h=100 size=32 color="${accent}"
-    ast-run {{BODY}}`
+        return `<ast-slide id="title"><ast-shape id="bg" kind="rect" x="0" y="0" w="1920" h="1080" geom="rect" fill="${surface}" decorative="true"></ast-shape><ast-text id="ph-title" x="160" y="420" w="1600" h="200" size="72" color="${ink}" weight="bold"><ast-run>{{TITLE}}</ast-run></ast-text><ast-text id="ph-body" x="160" y="640" w="1600" h="100" size="32" color="${accent}"><ast-run>{{BODY}}</ast-run></ast-text></ast-slide>`
       }
       if (kind === 'section') {
-        return `ast-slide bg="${accent}"
-  ast-shape x=0 y=480 w=1920 h=120 geom=rect fill="${ink}"
-  ast-text x=160 y=500 w=1600 h=80 size=54 color="${surface}" bold
-    ast-run {{TITLE}}`
+        return `<ast-slide id="section"><ast-shape id="bg" kind="rect" x="0" y="0" w="1920" h="1080" geom="rect" fill="${accent}" decorative="true"></ast-shape><ast-shape id="c-1" kind="rect" x="0" y="480" w="1920" h="120" geom="rect" fill="${ink}"></ast-shape><ast-text id="ph-title" x="160" y="500" w="1600" h="80" size="54" color="${surface}" weight="bold"><ast-run>{{TITLE}}</ast-run></ast-text><ast-text id="ph-body" x="160" y="620" w="1600" h="80" size="28" color="${surface}"><ast-run>{{BODY}}</ast-run></ast-text></ast-slide>`
       }
-      return `ast-slide bg="${surface}"
-  ast-text x=160 y=120 w=1600 h=120 size=48 color="${ink}" bold
-    ast-run {{TITLE}}
-  ast-text x=160 y=280 w=1600 h=680 size=28 color="${ink}"
-    ast-run {{BODY}}`
+      return `<ast-slide id="content"><ast-shape id="bg" kind="rect" x="0" y="0" w="1920" h="1080" geom="rect" fill="${surface}" decorative="true"></ast-shape><ast-text id="ph-title" x="160" y="120" w="1600" h="120" size="48" color="${ink}" weight="bold"><ast-run>{{TITLE}}</ast-run></ast-text><ast-text id="ph-body" x="160" y="280" w="1600" h="680" size="28" color="${ink}"><ast-run>{{BODY}}</ast-run></ast-text></ast-slide>`
     }
+    const presentKinds = new Set(archetypes.map((a) => a.kind.replace(/-\d+$/, '')))
+    for (const want of ['title', 'section', 'content']) {
+      if (!presentKinds.has(want)) {
+        archetypes.push({ kind: uniqueKind(want), title: want.charAt(0).toUpperCase() + want.slice(1), markup: fallbackMarkup(want) })
+      }
+    }
+
+    const templateModel = {
+      schema: 3,
+      size: { w: CANVAS_W, h: CANVAS_H },
+      theme: themeTokens,
+      layouts: irLayouts,
+      slides: irSlides,
+      // The IR warnings are structured objects ({code,message}) to match the Go
+      // themes.IRWarning shape. The top-level ImportResponse.warnings stays a
+      // flat string list (protocol contract), so we project the strings here.
+      warnings: warnings.map((m) => ({ code: 'import', message: String(m) })),
+    }
+
     const template = {
       schema: 2,
       name: 'imported-template',
       label: 'Imported Template',
       tokens: themeTokens,
       assets,
-      archetypes: archetypes.map((kind) => ({
-        kind,
-        title: kind.charAt(0).toUpperCase() + kind.slice(1),
-        markup: markupFor(kind),
-      })),
+      archetypes: archetypes.map((a) => ({ kind: a.kind, title: a.title, markup: a.markup })),
+      templateModel,
     }
     ok(template)
   }

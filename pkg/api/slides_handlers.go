@@ -22,8 +22,89 @@ import (
 	"github.com/gorilla/mux"
 )
 
+// slidesDeckDTO is the slim per-deck payload returned by the deck-detail
+// endpoint. It deliberately OMITS the two heavy store.DeckManifest fields —
+// Assets (a base64 data: URI per logo/image) and TemplateModel (the multi-MB
+// lossless imported-template IR) — which no client consumer reads and which
+// made opening an imported-template deck (and the chat SlidesDeckView) hang.
+// The present iframe and the PPTX/PDF/HTML exporters still get Assets straight
+// from the store via Service.Scene, so rendering is unaffected. Theme is kept
+// (small) so any future client styling has it.
+type slidesDeckDTO struct {
+	ID            string            `json:"id"`
+	Slug          string            `json:"slug"`
+	Title         string            `json:"title"`
+	Description   string            `json:"description,omitempty"`
+	SchemaVersion int               `json:"schemaVersion"`
+	Theme         map[string]string `json:"theme,omitempty"`
+	Scope         string            `json:"scope,omitempty"`
+	CreatedAt     time.Time         `json:"createdAt"`
+	UpdatedAt     time.Time         `json:"updatedAt"`
+}
+
+// slidesDeckListItem is the slim summary returned by the merged deck list. Like
+// slidesDeckDTO it drops Assets + TemplateModel; it also drops Theme because the
+// list view never styles individual decks. Serializing the full manifest for
+// EVERY deck is what made the Slides list slow when an imported template was
+// present.
+type slidesDeckListItem struct {
+	ID            string    `json:"id"`
+	Slug          string    `json:"slug"`
+	Title         string    `json:"title"`
+	Description   string    `json:"description,omitempty"`
+	SchemaVersion int       `json:"schemaVersion"`
+	Scope         string    `json:"scope,omitempty"`
+	CreatedAt     time.Time `json:"createdAt"`
+	UpdatedAt     time.Time `json:"updatedAt"`
+}
+
+// slimDeck projects a store.DeckManifest to the list summary (no heavy fields).
+func slimDeck(d *store.DeckManifest) slidesDeckListItem {
+	if d == nil {
+		return slidesDeckListItem{}
+	}
+	return slidesDeckListItem{
+		ID:            d.ID,
+		Slug:          d.Slug,
+		Title:         d.Title,
+		Description:   d.Description,
+		SchemaVersion: d.SchemaVersion,
+		Scope:         d.Scope,
+		CreatedAt:     d.CreatedAt,
+		UpdatedAt:     d.UpdatedAt,
+	}
+}
+
+// slimDeckFull projects a store.DeckManifest to the deck-detail DTO (keeps Theme,
+// drops Assets + TemplateModel).
+func slimDeckFull(d *store.DeckManifest) *slidesDeckDTO {
+	if d == nil {
+		return nil
+	}
+	return &slidesDeckDTO{
+		ID:            d.ID,
+		Slug:          d.Slug,
+		Title:         d.Title,
+		Description:   d.Description,
+		SchemaVersion: d.SchemaVersion,
+		Theme:         d.Theme,
+		Scope:         d.Scope,
+		CreatedAt:     d.CreatedAt,
+		UpdatedAt:     d.UpdatedAt,
+	}
+}
+
+// slimDecks maps a slice of manifests to list summaries.
+func slimDecks(decks []*store.DeckManifest) []slidesDeckListItem {
+	out := make([]slidesDeckListItem, 0, len(decks))
+	for _, d := range decks {
+		out = append(out, slimDeck(d))
+	}
+	return out
+}
+
 type slidesDeckResponse struct {
-	Deck   *store.DeckManifest   `json:"deck"`
+	Deck   *slidesDeckDTO        `json:"deck"`
 	Slides []*store.SlideContent `json:"slides"`
 }
 
@@ -65,7 +146,7 @@ func ListDocsHandler(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			return
 		}
-		decks, err := svc.ListDecks(r.Context())
+		decks, err := svc.ListDecksLite(r.Context())
 		if err != nil {
 			writeSlidesError(w, err)
 			return
@@ -73,7 +154,7 @@ func ListDocsHandler(w http.ResponseWriter, r *http.Request) {
 		for i := range decks {
 			decks[i].Scope = scope
 		}
-		writeSlidesJSON(w, http.StatusOK, map[string]any{"type": "slides", "decks": decks})
+		writeSlidesJSON(w, http.StatusOK, map[string]any{"type": "slides", "decks": slimDecks(decks)})
 		return
 	}
 
@@ -85,7 +166,7 @@ func ListDocsHandler(w http.ResponseWriter, r *http.Request) {
 
 	merged := make([]*store.DeckManifest, 0)
 	if svc.PersonalDocs != nil {
-		decks, err := (slides.Service{Store: svc.PersonalDocs}).ListDecks(r.Context())
+		decks, err := (slides.Service{Store: svc.PersonalDocs}).ListDecksLite(r.Context())
 		if err != nil {
 			slog.Warn("failed to list personal decks", "error", err)
 		} else {
@@ -96,7 +177,7 @@ func ListDocsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if svc.Docs != nil {
-		decks, err := (slides.Service{Store: svc.Docs}).ListDecks(r.Context())
+		decks, err := (slides.Service{Store: svc.Docs}).ListDecksLite(r.Context())
 		if err != nil {
 			slog.Warn("failed to list team decks", "error", err)
 		} else {
@@ -106,7 +187,7 @@ func ListDocsHandler(w http.ResponseWriter, r *http.Request) {
 			merged = append(merged, decks...)
 		}
 	}
-	writeSlidesJSON(w, http.StatusOK, map[string]any{"type": "slides", "decks": merged})
+	writeSlidesJSON(w, http.StatusOK, map[string]any{"type": "slides", "decks": slimDecks(merged)})
 }
 
 func GetSlidesDeckHandler(w http.ResponseWriter, r *http.Request) {
@@ -119,7 +200,7 @@ func GetSlidesDeckHandler(w http.ResponseWriter, r *http.Request) {
 		writeSlidesError(w, err)
 		return
 	}
-	writeSlidesJSON(w, http.StatusOK, slidesDeckResponse{Deck: deck, Slides: deckSlides})
+	writeSlidesJSON(w, http.StatusOK, slidesDeckResponse{Deck: slimDeckFull(deck), Slides: deckSlides})
 }
 
 func GetSlideHandler(w http.ResponseWriter, r *http.Request) {

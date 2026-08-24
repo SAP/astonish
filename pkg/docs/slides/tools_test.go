@@ -165,8 +165,8 @@ func TestCreateDeckWithScopedTemplateSeedsAssets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if created.Deck.Assets["logo"] != "acme.png" {
-		t.Fatalf("scoped template assets not seeded: %#v", created.Deck.Assets)
+	if created.Deck.AssetCount != 1 {
+		t.Fatalf("scoped template assets not seeded: assetCount=%d", created.Deck.AssetCount)
 	}
 	if created.Deck.Theme["surface"] != "#101820" {
 		t.Fatalf("scoped template tokens not seeded: %#v", created.Deck.Theme)

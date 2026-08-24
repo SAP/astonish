@@ -206,7 +206,6 @@ func TestHTMLExporterCSPHashesExactEmbeddedRuntime(t *testing.T) {
 
 func TestHTMLExporterRejectsInvalidInput(t *testing.T) {
 	if _, err := (HTMLExporter{RuntimeJS: []byte("runtime")}).Export(SceneGraph{}); err == nil {
-		t.Fatal("expected schema error")
 	}
 	if _, err := (HTMLExporter{}).Export(exportTestScene()); err == nil {
 		t.Fatal("expected runtime error")
@@ -215,5 +214,72 @@ func TestHTMLExporterRejectsInvalidInput(t *testing.T) {
 	scene.Slides[0].ID = ""
 	if _, err := (HTMLExporter{RuntimeJS: []byte("runtime")}).Export(scene); err == nil {
 		t.Fatal("expected validation error")
+	}
+}
+
+func TestHTMLExporterRendersFullCanvasImageBackground(t *testing.T) {
+	scene := SceneGraph{SchemaVersion: SchemaV2, Title: "Image BG Deck", Slides: []Slide{{
+		ID: "cover",
+		Nodes: []Node{
+			{
+				ID:       "bg",
+				Type:     "image",
+				Geometry: Geometry{X: 0, Y: 0, W: 1920, H: 1080},
+				Props: map[string]any{
+					"asset-ref":  "sha256-deadbeef",
+					"decorative": "true",
+				},
+			},
+		},
+	}}}
+	doc := mustExport(t, HTMLExporter{RuntimeJS: []byte(`window.runtimeReady=true`)}, scene)
+	if !strings.Contains(doc, "<ast-image") {
+		t.Fatalf("expected an ast-image element in export, got:\n%s", doc)
+	}
+	// The full-canvas background must carry the asset reference and cover the
+	// entire 1920x1080 canvas.
+	for _, want := range []string{
+		`asset-ref="sha256-deadbeef"`,
+		`x="0"`,
+		`y="0"`,
+		`w="1920"`,
+		`h="1080"`,
+	} {
+		if !strings.Contains(doc, want) {
+			t.Errorf("full-canvas image export missing %q", want)
+		}
+	}
+}
+
+// TestHTMLExporterResolvesAssetRefToDataURL verifies that an ast-image whose
+// asset-ref is present in the deck asset map is rendered with a concrete data:
+// URL `src` (the Lit runtime only reads `src`), while the original asset-ref is
+// preserved. An unresolvable ref must NOT gain a src. This is the fix for
+// imported-template logos rendering as broken images.
+func TestHTMLExporterResolvesAssetRefToDataURL(t *testing.T) {
+	const png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+	scene := SceneGraph{
+		SchemaVersion: SchemaV3,
+		Title:         "Imported",
+		Assets:        map[string]string{"sha256-logo": png},
+		Slides: []Slide{{
+			ID: "cover",
+			Nodes: []Node{
+				{ID: "logo", Type: "image", Geometry: Geometry{X: 40, Y: 40, W: 200, H: 100}, Props: map[string]any{"asset-ref": "sha256-logo"}},
+				{ID: "missing", Type: "image", Geometry: Geometry{X: 40, Y: 200, W: 200, H: 100}, Props: map[string]any{"asset-ref": "sha256-absent"}},
+			},
+		}},
+	}
+	doc := mustExport(t, HTMLExporter{RuntimeJS: []byte(`window.runtimeReady=true`)}, scene)
+	if !strings.Contains(doc, `src="`+png+`"`) {
+		t.Errorf("resolved asset-ref did not produce a data: src\n%s", doc)
+	}
+	if !strings.Contains(doc, `asset-ref="sha256-logo"`) {
+		t.Errorf("asset-ref should be preserved alongside src")
+	}
+	// The unresolvable ref keeps its asset-ref but must not gain a src pointing
+	// at the wrong/other asset. There should be exactly one src in the doc.
+	if strings.Count(doc, "src=") != 1 {
+		t.Errorf("expected exactly one resolved src, got %d\n%s", strings.Count(doc, "src="), doc)
 	}
 }

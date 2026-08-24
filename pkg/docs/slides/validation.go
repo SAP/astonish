@@ -91,7 +91,7 @@ func HasErrors(ds []Diagnostic) bool {
 // rejected to guard against injection into SVG/CSS output.
 var (
 	safeColorPattern = regexp.MustCompile(`^(#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?|rgba?\([0-9.,%\s]+\))$`)
-	safePathPattern  = regexp.MustCompile(`^[MmLlCcQqZzHhVv0-9\s,.+-]*$`)
+	safePathPattern  = regexp.MustCompile(`^[MmLlCcQqZzHhVvAa0-9\s,.+-]*$`)
 )
 
 // allowedGeomPresets is the set of built-in geometry presets a shape may use.

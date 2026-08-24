@@ -108,6 +108,48 @@ func TestValidateSlideFidelityAttributes(t *testing.T) {
 	}
 }
 
+func TestSafePathAllowsArcCommand(t *testing.T) {
+	geom := Geometry{X: 100, Y: 100, W: 600, H: 400}
+	cases := []struct {
+		name     string
+		path     string
+		wantCode string // "" means no invalid_path diagnostic expected
+	}{
+		// (a) The SVG arc command (A/a) now validates — this is the widening.
+		{name: "arc command uppercase", path: "M10 10 A20 20 0 0 1 40 40 Z"},
+		{name: "arc command lowercase", path: "m10 10 a20 20 0 0 1 40 40 z"},
+		// (c) Superset: a pre-existing v2 path using only M/L/C/Q/Z still validates.
+		{name: "legacy curve path still valid", path: "M0 0 L10 10 C 20,20 30,30 40,40 Q 5,5 6,6 Z"},
+		// (b) Unsafe paths are still rejected.
+		{name: "script injection rejected", path: "M0 0 L10 10 <script>", wantCode: "invalid_path"},
+		{name: "unsafe letter rejected", path: "M0 0 Z X", wantCode: "invalid_path"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			node := Node{ID: "n", Type: "shape", Geometry: geom, Path: tc.path}
+			diagnostics := ValidateSlide(Slide{ID: "s", Nodes: []Node{node}})
+			hasInvalidPath := false
+			for _, d := range diagnostics {
+				if d.Code == "invalid_path" {
+					hasInvalidPath = true
+				}
+			}
+			if tc.wantCode == "invalid_path" {
+				if !hasInvalidPath {
+					t.Fatalf("expected invalid_path diagnostic, got %#v", diagnostics)
+				}
+				if !HasErrors(diagnostics) {
+					t.Fatalf("expected errors for unsafe path, got %#v", diagnostics)
+				}
+				return
+			}
+			if hasInvalidPath || HasErrors(diagnostics) {
+				t.Fatalf("expected no invalid_path error for path %q, got %#v", tc.path, diagnostics)
+			}
+		})
+	}
+}
+
 func TestValidateSlideRecursesIntoChildren(t *testing.T) {
 	diagnostics := ValidateSlide(Slide{ID: "s", Nodes: []Node{{
 		ID: "group", Type: "group", Geometry: Geometry{X: 100, Y: 100, W: 600, H: 400},

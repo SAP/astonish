@@ -76,6 +76,11 @@ func SchemaVersion(v int) predicate.Deck {
 	return predicate.Deck(sql.FieldEQ(FieldSchemaVersion, v))
 }
 
+// TemplateModel applies equality check predicate on the "template_model" field. It's identical to TemplateModelEQ.
+func TemplateModel(v string) predicate.Deck {
+	return predicate.Deck(sql.FieldEQ(FieldTemplateModel, v))
+}
+
 // CreatedAt applies equality check predicate on the "created_at" field. It's identical to CreatedAtEQ.
 func CreatedAt(v time.Time) predicate.Deck {
 	return predicate.Deck(sql.FieldEQ(FieldCreatedAt, v))
@@ -339,6 +344,81 @@ func AssetsIsNil() predicate.Deck {
 // AssetsNotNil applies the NotNil predicate on the "assets" field.
 func AssetsNotNil() predicate.Deck {
 	return predicate.Deck(sql.FieldNotNull(FieldAssets))
+}
+
+// TemplateModelEQ applies the EQ predicate on the "template_model" field.
+func TemplateModelEQ(v string) predicate.Deck {
+	return predicate.Deck(sql.FieldEQ(FieldTemplateModel, v))
+}
+
+// TemplateModelNEQ applies the NEQ predicate on the "template_model" field.
+func TemplateModelNEQ(v string) predicate.Deck {
+	return predicate.Deck(sql.FieldNEQ(FieldTemplateModel, v))
+}
+
+// TemplateModelIn applies the In predicate on the "template_model" field.
+func TemplateModelIn(vs ...string) predicate.Deck {
+	return predicate.Deck(sql.FieldIn(FieldTemplateModel, vs...))
+}
+
+// TemplateModelNotIn applies the NotIn predicate on the "template_model" field.
+func TemplateModelNotIn(vs ...string) predicate.Deck {
+	return predicate.Deck(sql.FieldNotIn(FieldTemplateModel, vs...))
+}
+
+// TemplateModelGT applies the GT predicate on the "template_model" field.
+func TemplateModelGT(v string) predicate.Deck {
+	return predicate.Deck(sql.FieldGT(FieldTemplateModel, v))
+}
+
+// TemplateModelGTE applies the GTE predicate on the "template_model" field.
+func TemplateModelGTE(v string) predicate.Deck {
+	return predicate.Deck(sql.FieldGTE(FieldTemplateModel, v))
+}
+
+// TemplateModelLT applies the LT predicate on the "template_model" field.
+func TemplateModelLT(v string) predicate.Deck {
+	return predicate.Deck(sql.FieldLT(FieldTemplateModel, v))
+}
+
+// TemplateModelLTE applies the LTE predicate on the "template_model" field.
+func TemplateModelLTE(v string) predicate.Deck {
+	return predicate.Deck(sql.FieldLTE(FieldTemplateModel, v))
+}
+
+// TemplateModelContains applies the Contains predicate on the "template_model" field.
+func TemplateModelContains(v string) predicate.Deck {
+	return predicate.Deck(sql.FieldContains(FieldTemplateModel, v))
+}
+
+// TemplateModelHasPrefix applies the HasPrefix predicate on the "template_model" field.
+func TemplateModelHasPrefix(v string) predicate.Deck {
+	return predicate.Deck(sql.FieldHasPrefix(FieldTemplateModel, v))
+}
+
+// TemplateModelHasSuffix applies the HasSuffix predicate on the "template_model" field.
+func TemplateModelHasSuffix(v string) predicate.Deck {
+	return predicate.Deck(sql.FieldHasSuffix(FieldTemplateModel, v))
+}
+
+// TemplateModelIsNil applies the IsNil predicate on the "template_model" field.
+func TemplateModelIsNil() predicate.Deck {
+	return predicate.Deck(sql.FieldIsNull(FieldTemplateModel))
+}
+
+// TemplateModelNotNil applies the NotNil predicate on the "template_model" field.
+func TemplateModelNotNil() predicate.Deck {
+	return predicate.Deck(sql.FieldNotNull(FieldTemplateModel))
+}
+
+// TemplateModelEqualFold applies the EqualFold predicate on the "template_model" field.
+func TemplateModelEqualFold(v string) predicate.Deck {
+	return predicate.Deck(sql.FieldEqualFold(FieldTemplateModel, v))
+}
+
+// TemplateModelContainsFold applies the ContainsFold predicate on the "template_model" field.
+func TemplateModelContainsFold(v string) predicate.Deck {
+	return predicate.Deck(sql.FieldContainsFold(FieldTemplateModel, v))
 }
 
 // CreatedAtEQ applies the EQ predicate on the "created_at" field.

@@ -2,6 +2,7 @@ package slides
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -31,6 +32,15 @@ func (m *memoryDocsStore) ListDecks(context.Context) ([]*store.DeckManifest, err
 		return nil, nil
 	}
 	return []*store.DeckManifest{m.deck}, nil
+}
+func (m *memoryDocsStore) ListDecksLite(context.Context) ([]*store.DeckManifest, error) {
+	if m.deck == nil {
+		return nil, nil
+	}
+	lite := *m.deck
+	lite.Assets = nil
+	lite.TemplateModel = ""
+	return []*store.DeckManifest{&lite}, nil
 }
 func (m *memoryDocsStore) UpdateDeck(_ context.Context, deck *store.DeckManifest) error {
 	m.deck = deck
@@ -212,6 +222,16 @@ func (m *multiDeckStore) ListDecks(context.Context) ([]*store.DeckManifest, erro
 	}
 	return out, nil
 }
+func (m *multiDeckStore) ListDecksLite(context.Context) ([]*store.DeckManifest, error) {
+	out := make([]*store.DeckManifest, 0, len(m.decks))
+	for _, d := range m.decks {
+		cp := *d
+		cp.Assets = nil
+		cp.TemplateModel = ""
+		out = append(out, &cp)
+	}
+	return out, nil
+}
 func (m *multiDeckStore) UpdateDeck(_ context.Context, d *store.DeckManifest) error {
 	cp := *d
 	m.decks[d.Slug] = &cp
@@ -258,6 +278,66 @@ func (m *multiDeckStore) ListSlides(_ context.Context, deckID string) ([]*store.
 func (m *multiDeckStore) DeleteSlide(context.Context, string, string) error     { return nil }
 func (m *multiDeckStore) ReorderSlides(context.Context, string, []string) error { return nil }
 
+// TestServiceListDecksLiteOmitsHeavyFields asserts the field-projection contract:
+// ListDecksLite returns decks with Assets/TemplateModel cleared but identity and
+// theme intact, while ListDecks still returns them fully populated. Both hide
+// template ("tmpl/") decks.
+func TestServiceListDecksLiteOmitsHeavyFields(t *testing.T) {
+	ctx := context.Background()
+	backend := newMultiDeckStore()
+	svc := Service{Store: backend}
+
+	heavy := &store.DeckManifest{
+		ID:            "deck-1",
+		Slug:          "q4-review",
+		Title:         "Q4 Review",
+		Description:   "desc",
+		SchemaVersion: SchemaV3,
+		Theme:         map[string]string{"surface": "#0B1020", "accent": "#FFB81C"},
+		Assets:        map[string]string{"logo": "data:image/png;base64,AAAA"},
+		TemplateModel: `{"schema":3,"layouts":[{"id":"x"}]}`,
+	}
+	if err := backend.CreateDeck(ctx, heavy); err != nil {
+		t.Fatal(err)
+	}
+	// A hidden template deck must not appear in either listing.
+	if err := backend.CreateDeck(ctx, &store.DeckManifest{ID: "tmpl-1", Slug: templatePrefix + "acme", Title: "Acme"}); err != nil {
+		t.Fatal(err)
+	}
+
+	lite, err := svc.ListDecksLite(ctx)
+	if err != nil {
+		t.Fatalf("ListDecksLite: %v", err)
+	}
+	if len(lite) != 1 {
+		t.Fatalf("expected 1 non-template deck, got %d", len(lite))
+	}
+	d := lite[0]
+	if d.Slug != "q4-review" || d.Title != "Q4 Review" {
+		t.Fatalf("identity not preserved in lite: %#v", d)
+	}
+	if d.Theme["accent"] != "#FFB81C" {
+		t.Fatalf("theme not preserved in lite: %#v", d.Theme)
+	}
+	if len(d.Assets) != 0 {
+		t.Fatalf("lite deck should omit assets, got %#v", d.Assets)
+	}
+	if d.TemplateModel != "" {
+		t.Fatalf("lite deck should omit templateModel, got %q", d.TemplateModel)
+	}
+
+	full, err := svc.ListDecks(ctx)
+	if err != nil {
+		t.Fatalf("ListDecks: %v", err)
+	}
+	if len(full) != 1 {
+		t.Fatalf("expected 1 non-template deck (full), got %d", len(full))
+	}
+	if len(full[0].Assets) != 1 || full[0].TemplateModel == "" {
+		t.Fatalf("full deck must retain assets+templateModel: %#v", full[0])
+	}
+}
+
 func TestSaveAndListTemplatesRoundtrip(t *testing.T) {
 	ctx := context.Background()
 	svc := Service{Store: newMultiDeckStore()}
@@ -271,6 +351,10 @@ func TestSaveAndListTemplatesRoundtrip(t *testing.T) {
 		Archetypes: []themes.Archetype{
 			{Kind: "title", Markup: `<ast-slide id="t"><ast-text id="h" x="160" y="380" w="1600" h="200" color="#F2F2F2" size="72">{{TITLE}}</ast-text></ast-slide>`},
 			{Kind: "content", Markup: `<ast-slide id="c"><ast-text id="b" x="160" y="320" w="1600" h="600" color="#F2F2F2" size="36">{{BODY}}</ast-text></ast-slide>`},
+			// An imported sample slide surfaced as an example-* archetype: it
+			// carries a human-readable label (Title) which must survive the
+			// SaveTemplate (label -> SlideContent.Notes) / ListTemplates round-trip.
+			{Kind: "example", Title: "GCID meeting title", Markup: `<ast-slide id="e"><ast-shape id="bg" kind="rect" x="0" y="0" w="1920" h="1080" geom="rect" fill="#101820" decorative="true"></ast-shape><ast-text id="ph-title" x="160" y="420" w="1600" h="200" size="72" color="#F2F2F2" weight="bold"><ast-run>{{TITLE}}</ast-run></ast-text><ast-text id="ph-body" x="160" y="640" w="1600" h="100" size="32" color="#FFB81C"><ast-run>{{BODY}}</ast-run></ast-text></ast-slide>`},
 		},
 	}
 	if err := svc.SaveTemplate(ctx, tmpl); err != nil {
@@ -298,8 +382,8 @@ func TestSaveAndListTemplatesRoundtrip(t *testing.T) {
 	if rt.Tokens["accent"] != "#FFB81C" || rt.Assets["logo"] != "acme.png" {
 		t.Fatalf("tokens/assets not roundtripped: %#v tokens=%#v assets=%#v", rt, rt.Tokens, rt.Assets)
 	}
-	if len(rt.Archetypes) != 2 {
-		t.Fatalf("expected 2 archetypes, got %d: %#v", len(rt.Archetypes), rt.Archetypes)
+	if len(rt.Archetypes) != 3 {
+		t.Fatalf("expected 3 archetypes, got %d: %#v", len(rt.Archetypes), rt.Archetypes)
 	}
 	byKind := map[string]themes.Archetype{}
 	for _, a := range rt.Archetypes {
@@ -313,6 +397,13 @@ func TestSaveAndListTemplatesRoundtrip(t *testing.T) {
 		if got.Markup != orig.Markup {
 			t.Fatalf("archetype %q markup mismatch:\n got=%s\nwant=%s", orig.Kind, got.Markup, orig.Markup)
 		}
+		if got.Title != orig.Title {
+			t.Fatalf("archetype %q label mismatch: got=%q want=%q", orig.Kind, got.Title, orig.Title)
+		}
+	}
+	// The example archetype's friendly label must survive the round-trip.
+	if byKind["example"].Title != "GCID meeting title" {
+		t.Fatalf("example archetype label not roundtripped: %q", byKind["example"].Title)
 	}
 
 	// resolveTemplate should find the scoped template by name.
@@ -322,6 +413,111 @@ func TestSaveAndListTemplatesRoundtrip(t *testing.T) {
 	// Built-ins still resolve.
 	if _, ok := svc.resolveTemplate(ctx, "midnight"); !ok {
 		t.Fatal("resolveTemplate did not find built-in template")
+	}
+}
+
+func TestSaveAndListTemplateWithModelRoundtrip(t *testing.T) {
+	ctx := context.Background()
+	svc := Service{Store: newMultiDeckStore()}
+	tmpl := themes.Template{
+		Schema: SchemaV2,
+		Name:   "corp",
+		Label:  "Corp Brand",
+		Tokens: map[string]string{"surface": "#FFFFFF", "ink": "#172033"},
+		Archetypes: []themes.Archetype{
+			{Kind: "title", Markup: `<ast-slide id="t"><ast-text id="h" x="160" y="380" w="1600" h="200" color="#172033" size="72">{{TITLE}}</ast-text></ast-slide>`},
+		},
+		Model: &themes.TemplateModel{
+			Schema: 3,
+			Size:   themes.IRSize{W: 1920, H: 1080},
+			Theme:  map[string]string{"surface": "#FFFFFF", "ink": "#172033"},
+			Layouts: []themes.IRLayout{{
+				ID:         "layout-1",
+				Name:       "Title Slide",
+				Background: themes.IRBackground{Kind: "solid", Color: "#FFFFFF"},
+				Objects: []themes.IRChrome{{
+					Kind: "rect", X: 0, Y: 480, W: 1920, H: 120,
+					Fill: &themes.IRFill{Kind: "solid", Color: "#172033"},
+				}},
+				Placeholders: []themes.IRPlaceholder{{Name: "title-1", Type: "title", X: 160, Y: 200, W: 1600, H: 200}},
+			}},
+		},
+	}
+	if err := svc.SaveTemplate(ctx, tmpl); err != nil {
+		t.Fatalf("save template: %v", err)
+	}
+	got, err := svc.ListTemplates(ctx)
+	if err != nil {
+		t.Fatalf("list templates: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 template, got %d", len(got))
+	}
+	rt := got[0]
+	if rt.Model == nil {
+		t.Fatal("template Model was not persisted/rehydrated")
+	}
+	if rt.Model.Schema != 3 || len(rt.Model.Layouts) != 1 {
+		t.Fatalf("Model round-trip mismatch: %#v", rt.Model)
+	}
+	l := rt.Model.Layouts[0]
+	if l.ID != "layout-1" || l.Background.Kind != "solid" || l.Background.Color != "#FFFFFF" {
+		t.Fatalf("layout background not preserved: %#v", l)
+	}
+	if len(l.Objects) != 1 || l.Objects[0].Fill == nil || l.Objects[0].Fill.Color != "#172033" {
+		t.Fatalf("chrome object not preserved: %#v", l.Objects)
+	}
+	if len(l.Placeholders) != 1 || l.Placeholders[0].Type != "title" {
+		t.Fatalf("placeholder not preserved: %#v", l.Placeholders)
+	}
+}
+
+// TestWorkerTemplateJSONWithWarningsDecodes guards the worker<->Go contract for
+// the template IR: the import worker must emit templateModel.warnings as an array
+// of structured objects ({code,message,layout?}) — NOT a flat string array —
+// because themes.TemplateModel.Warnings is []IRWarning. A real corporate .pptx
+// routinely produces warnings (gradient-approximated-as-solid, EMF skipped, ...),
+// so if the worker emitted strings here the import handler's unmarshal into
+// themes.Template would 500 with "import worker returned invalid template".
+// This is a pure-decode regression test (no node required).
+func TestWorkerTemplateJSONWithWarningsDecodes(t *testing.T) {
+	// Minimal worker-shaped template payload with a non-empty structured
+	// warnings list, mirroring import_worker.mjs `ok(template)` output.
+	payload := []byte(`{
+		"schema": 2,
+		"name": "imported-template",
+		"label": "Imported Template",
+		"tokens": {"surface": "#FFFFFF", "ink": "#172033"},
+		"archetypes": [
+			{"kind": "title", "title": "Title", "markup": "<ast-slide id=\"t\"></ast-slide>"}
+		],
+		"templateModel": {
+			"schema": 3,
+			"size": {"w": 1920, "h": 1080},
+			"theme": {"surface": "#FFFFFF"},
+			"layouts": [{"id": "layout-1", "name": "Title", "background": {"kind": "solid", "color": "#FFFFFF"}}],
+			"warnings": [
+				{"code": "import", "message": "Gradient approximated as solid in archetype (sp-3)"},
+				{"code": "import", "message": "EMF media skipped (no raster sibling)", "layout": "Title"}
+			]
+		}
+	}`)
+
+	var tmpl themes.Template
+	if err := json.Unmarshal(payload, &tmpl); err != nil {
+		t.Fatalf("worker template JSON must decode into themes.Template, got: %v", err)
+	}
+	if tmpl.Model == nil {
+		t.Fatal("expected templateModel to populate Template.Model")
+	}
+	if len(tmpl.Model.Warnings) != 2 {
+		t.Fatalf("expected 2 structured warnings, got %d: %#v", len(tmpl.Model.Warnings), tmpl.Model.Warnings)
+	}
+	if tmpl.Model.Warnings[0].Message == "" || tmpl.Model.Warnings[0].Code != "import" {
+		t.Fatalf("warning not decoded into IRWarning fields: %#v", tmpl.Model.Warnings[0])
+	}
+	if tmpl.Model.Warnings[1].Layout != "Title" {
+		t.Fatalf("expected warning layout to round-trip, got %q", tmpl.Model.Warnings[1].Layout)
 	}
 }
 

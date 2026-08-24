@@ -31,6 +31,8 @@ type Deck struct {
 	Theme map[string]string `json:"theme,omitempty"`
 	// Assets holds the value of the "assets" field.
 	Assets map[string]string `json:"assets,omitempty"`
+	// TemplateModel holds the value of the "template_model" field.
+	TemplateModel string `json:"template_model,omitempty"`
 	// CreatedAt holds the value of the "created_at" field.
 	CreatedAt time.Time `json:"created_at,omitempty"`
 	// UpdatedAt holds the value of the "updated_at" field.
@@ -68,7 +70,7 @@ func (*Deck) scanValues(columns []string) ([]any, error) {
 			values[i] = new([]byte)
 		case deck.FieldSchemaVersion:
 			values[i] = new(sql.NullInt64)
-		case deck.FieldSlug, deck.FieldTitle, deck.FieldDescription:
+		case deck.FieldSlug, deck.FieldTitle, deck.FieldDescription, deck.FieldTemplateModel:
 			values[i] = new(sql.NullString)
 		case deck.FieldCreatedAt, deck.FieldUpdatedAt:
 			values[i] = new(sql.NullTime)
@@ -134,6 +136,12 @@ func (_m *Deck) assignValues(columns []string, values []any) error {
 				if err := json.Unmarshal(*value, &_m.Assets); err != nil {
 					return fmt.Errorf("unmarshal field assets: %w", err)
 				}
+			}
+		case deck.FieldTemplateModel:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field template_model", values[i])
+			} else if value.Valid {
+				_m.TemplateModel = value.String
 			}
 		case deck.FieldCreatedAt:
 			if value, ok := values[i].(*sql.NullTime); !ok {
@@ -205,6 +213,9 @@ func (_m *Deck) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("assets=")
 	builder.WriteString(fmt.Sprintf("%v", _m.Assets))
+	builder.WriteString(", ")
+	builder.WriteString("template_model=")
+	builder.WriteString(_m.TemplateModel)
 	builder.WriteString(", ")
 	builder.WriteString("created_at=")
 	builder.WriteString(_m.CreatedAt.Format(time.ANSIC))

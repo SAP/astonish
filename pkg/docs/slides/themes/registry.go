@@ -45,6 +45,12 @@ type Template struct {
 	Assets      map[string]string `json:"assets,omitempty"`
 	Archetypes  []Archetype       `json:"archetypes"`
 	Scope       string            `json:"scope,omitempty"`
+	// Model is the lossless imported template IR. It is populated only for
+	// high-fidelity imported templates (SchemaV3) and is nil for built-ins and
+	// plain scoped templates. It is persisted verbatim so a future in-browser
+	// editor / high-fidelity re-export has complete input; the Archetypes are
+	// its rendered ASD projection.
+	Model *TemplateModel `json:"templateModel,omitempty"`
 }
 
 // ThemeTokens returns the design-token palette for the template.

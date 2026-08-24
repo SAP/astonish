@@ -75,6 +75,20 @@ func (_c *DeckCreate) SetAssets(v map[string]string) *DeckCreate {
 	return _c
 }
 
+// SetTemplateModel sets the "template_model" field.
+func (_c *DeckCreate) SetTemplateModel(v string) *DeckCreate {
+	_c.mutation.SetTemplateModel(v)
+	return _c
+}
+
+// SetNillableTemplateModel sets the "template_model" field if the given value is not nil.
+func (_c *DeckCreate) SetNillableTemplateModel(v *string) *DeckCreate {
+	if v != nil {
+		_c.SetTemplateModel(*v)
+	}
+	return _c
+}
+
 // SetCreatedAt sets the "created_at" field.
 func (_c *DeckCreate) SetCreatedAt(v time.Time) *DeckCreate {
 	_c.mutation.SetCreatedAt(v)
@@ -283,6 +297,10 @@ func (_c *DeckCreate) createSpec() (*Deck, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.Assets(); ok {
 		_spec.SetField(deck.FieldAssets, field.TypeJSON, value)
 		_node.Assets = value
+	}
+	if value, ok := _c.mutation.TemplateModel(); ok {
+		_spec.SetField(deck.FieldTemplateModel, field.TypeString, value)
+		_node.TemplateModel = value
 	}
 	if value, ok := _c.mutation.CreatedAt(); ok {
 		_spec.SetField(deck.FieldCreatedAt, field.TypeTime, value)

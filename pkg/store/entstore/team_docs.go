@@ -18,7 +18,7 @@ func (s *teamDocsStore) CreateDeck(ctx context.Context, d *store.DeckManifest) e
 	if err != nil {
 		return err
 	}
-	row, err := s.client.Deck.Create().SetID(id).SetSlug(d.Slug).SetTitle(d.Title).SetDescription(d.Description).SetSchemaVersion(d.SchemaVersion).SetTheme(d.Theme).SetAssets(d.Assets).Save(ctx)
+	row, err := s.client.Deck.Create().SetID(id).SetSlug(d.Slug).SetTitle(d.Title).SetDescription(d.Description).SetSchemaVersion(d.SchemaVersion).SetTheme(d.Theme).SetAssets(d.Assets).SetTemplateModel(d.TemplateModel).Save(ctx)
 	if err == nil {
 		fillTeamDeck(d, row)
 	}
@@ -49,6 +49,36 @@ func (s *teamDocsStore) ListDecks(ctx context.Context) ([]*store.DeckManifest, e
 	}
 	return out, nil
 }
+
+// ListDecksLite mirrors ListDecks but projects away the two heavy columns
+// (assets, template_model) at the SQL level, so the multi-MB IR and base64
+// asset blobs are never read/deserialized for list views. The returned
+// manifests have Assets=nil and TemplateModel="".
+func (s *teamDocsStore) ListDecksLite(ctx context.Context) ([]*store.DeckManifest, error) {
+	rows, err := s.client.Deck.Query().
+		Order(teament.Desc(teamdeck.FieldUpdatedAt)).
+		Select(
+			teamdeck.FieldID,
+			teamdeck.FieldSlug,
+			teamdeck.FieldTitle,
+			teamdeck.FieldDescription,
+			teamdeck.FieldSchemaVersion,
+			teamdeck.FieldTheme,
+			teamdeck.FieldCreatedAt,
+			teamdeck.FieldUpdatedAt,
+		).
+		All(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*store.DeckManifest, 0, len(rows))
+	for _, row := range rows {
+		d := &store.DeckManifest{}
+		fillTeamDeckLite(d, row)
+		out = append(out, d)
+	}
+	return out, nil
+}
 func (s *teamDocsStore) UpdateDeck(ctx context.Context, d *store.DeckManifest) error {
 	row, err := s.client.Deck.Query().Where(teamdeck.SlugEQ(d.Slug)).Only(ctx)
 	if teament.IsNotFound(err) {
@@ -57,7 +87,7 @@ func (s *teamDocsStore) UpdateDeck(ctx context.Context, d *store.DeckManifest) e
 	if err != nil {
 		return err
 	}
-	row, err = row.Update().SetTitle(d.Title).SetDescription(d.Description).SetSchemaVersion(d.SchemaVersion).SetTheme(d.Theme).SetAssets(d.Assets).Save(ctx)
+	row, err = row.Update().SetTitle(d.Title).SetDescription(d.Description).SetSchemaVersion(d.SchemaVersion).SetTheme(d.Theme).SetAssets(d.Assets).SetTemplateModel(d.TemplateModel).Save(ctx)
 	if err == nil {
 		fillTeamDeck(d, row)
 	}
@@ -211,6 +241,20 @@ func fillTeamDeck(out *store.DeckManifest, in *teament.Deck) {
 	out.SchemaVersion = in.SchemaVersion
 	out.Theme = in.Theme
 	out.Assets = in.Assets
+	out.TemplateModel = in.TemplateModel
+	out.CreatedAt = in.CreatedAt
+	out.UpdatedAt = in.UpdatedAt
+}
+
+// fillTeamDeckLite copies only the columns selected by ListDecksLite; Assets and
+// TemplateModel are intentionally left zero because they were not read.
+func fillTeamDeckLite(out *store.DeckManifest, in *teament.Deck) {
+	out.ID = in.ID.String()
+	out.Slug = in.Slug
+	out.Title = in.Title
+	out.Description = in.Description
+	out.SchemaVersion = in.SchemaVersion
+	out.Theme = in.Theme
 	out.CreatedAt = in.CreatedAt
 	out.UpdatedAt = in.UpdatedAt
 }

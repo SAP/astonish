@@ -48,6 +48,21 @@ func (m *memDocsStore) ListDecks(context.Context) ([]*store.DeckManifest, error)
 	}
 	return out, nil
 }
+
+// ListDecksLite mirrors ListDecks but nils out the heavy fields (in-memory cost
+// is irrelevant here; this satisfies the DocsStore interface and mirrors the
+// Ent stores' field-projected behavior for tests).
+func (m *memDocsStore) ListDecksLite(ctx context.Context) ([]*store.DeckManifest, error) {
+	decks, err := m.ListDecks(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, d := range decks {
+		d.Assets = nil
+		d.TemplateModel = ""
+	}
+	return decks, nil
+}
 func (m *memDocsStore) UpdateDeck(_ context.Context, d *store.DeckManifest) error {
 	m.decks[d.Slug] = d
 	return nil

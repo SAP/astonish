@@ -23,7 +23,7 @@ type HTMLExporter struct {
 }
 
 func (e HTMLExporter) Export(scene SceneGraph) (ExportResult, error) {
-	if scene.SchemaVersion != SchemaV1 && scene.SchemaVersion != SchemaV2 {
+	if scene.SchemaVersion != SchemaV1 && scene.SchemaVersion != SchemaV2 && scene.SchemaVersion != SchemaV3 {
 		return ExportResult{}, fmt.Errorf("unsupported slides schema version %d", scene.SchemaVersion)
 	}
 	if len(scene.Slides) == 0 {
@@ -70,7 +70,7 @@ func (e HTMLExporter) Export(scene SceneGraph) (ExportResult, error) {
 	}
 	body.WriteString(`>`)
 	for _, slide := range scene.Slides {
-		renderSlide(&body, slide)
+		renderSlide(&body, slide, scene.Assets)
 	}
 	body.WriteString(`</ast-deck><script>`)
 	body.Write(runtimeJS)
@@ -119,14 +119,14 @@ func safeCSSValue(value string) bool {
 	return true
 }
 
-func renderSlide(out *bytes.Buffer, slide Slide) {
+func renderSlide(out *bytes.Buffer, slide Slide, assets map[string]string) {
 	out.WriteString(`<ast-slide id="` + html.EscapeString(slide.ID) + `"`)
 	if slide.Title != "" {
 		out.WriteString(` title="` + html.EscapeString(slide.Title) + `"`)
 	}
 	out.WriteString(`>`)
 	for _, node := range slide.Nodes {
-		renderNode(out, node)
+		renderNode(out, node, assets)
 	}
 	if slide.Notes != "" {
 		out.WriteString(`<ast-notes>` + html.EscapeString(slide.Notes) + `</ast-notes>`)
@@ -134,7 +134,7 @@ func renderSlide(out *bytes.Buffer, slide Slide) {
 	out.WriteString(`</ast-slide>`)
 }
 
-func renderNode(out *bytes.Buffer, node Node) {
+func renderNode(out *bytes.Buffer, node Node, assets map[string]string) {
 	tag := "ast-" + node.Type
 	if !allowedNodeTag(tag) {
 		return
@@ -156,9 +156,22 @@ func renderNode(out *bytes.Buffer, node Node) {
 			continue
 		}
 		value, ok := scalarString(node.Props[key])
-		if ok {
-			writeAttr(out, key, value)
+		if !ok {
+			continue
 		}
+		// ast-image references its bitmap by content-addressed asset-ref; the Lit
+		// runtime only renders the `src` property. Keep the asset-ref (other
+		// consumers/exporters and a future editor rely on it) AND additionally
+		// emit a concrete data: URL resolved from the deck asset map so imported
+		// -template logos/media actually render and the export is self-contained.
+		if tag == "ast-image" && key == "asset-ref" {
+			writeAttr(out, key, value)
+			if src, ok := resolveImageSrc(value, assets); ok {
+				writeAttr(out, "src", src)
+			}
+			continue
+		}
+		writeAttr(out, key, value)
 	}
 	if node.Table != nil {
 		data, _ := json.Marshal(node.Table)
@@ -183,9 +196,30 @@ func renderNode(out *bytes.Buffer, node Node) {
 		out.WriteString(html.EscapeString(node.Text))
 	}
 	for _, child := range node.Children {
-		renderNode(out, child)
+		renderNode(out, child, assets)
 	}
 	out.WriteString(`</` + tag + `>`)
+}
+
+// resolveImageSrc turns an ast-image asset-ref into a concrete, self-contained
+// data: URL by looking it up in the deck asset map. It accepts an already-inline
+// data: URL as-is (idempotent) and rejects anything that is not a data:image/*
+// URL, so a stray or external reference can never become a live network src
+// under the export CSP. Returns ("", false) when the ref cannot be resolved to
+// a safe data URL.
+func resolveImageSrc(ref string, assets map[string]string) (string, bool) {
+	candidate := ref
+	if !strings.HasPrefix(candidate, "data:") {
+		resolved, ok := assets[ref]
+		if !ok {
+			return "", false
+		}
+		candidate = resolved
+	}
+	if !strings.HasPrefix(candidate, "data:image/") {
+		return "", false
+	}
+	return candidate, true
 }
 
 // nodeInlineStyle assembles an inline style string from v2 fidelity fields.

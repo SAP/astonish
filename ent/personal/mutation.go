@@ -2243,6 +2243,7 @@ type DeckMutation struct {
 	addschema_version *int
 	theme             *map[string]string
 	assets            *map[string]string
+	template_model    *string
 	created_at        *time.Time
 	updated_at        *time.Time
 	clearedFields     map[string]struct{}
@@ -2620,6 +2621,55 @@ func (m *DeckMutation) ResetAssets() {
 	delete(m.clearedFields, deck.FieldAssets)
 }
 
+// SetTemplateModel sets the "template_model" field.
+func (m *DeckMutation) SetTemplateModel(s string) {
+	m.template_model = &s
+}
+
+// TemplateModel returns the value of the "template_model" field in the mutation.
+func (m *DeckMutation) TemplateModel() (r string, exists bool) {
+	v := m.template_model
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTemplateModel returns the old "template_model" field's value of the Deck entity.
+// If the Deck object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DeckMutation) OldTemplateModel(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTemplateModel is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTemplateModel requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTemplateModel: %w", err)
+	}
+	return oldValue.TemplateModel, nil
+}
+
+// ClearTemplateModel clears the value of the "template_model" field.
+func (m *DeckMutation) ClearTemplateModel() {
+	m.template_model = nil
+	m.clearedFields[deck.FieldTemplateModel] = struct{}{}
+}
+
+// TemplateModelCleared returns if the "template_model" field was cleared in this mutation.
+func (m *DeckMutation) TemplateModelCleared() bool {
+	_, ok := m.clearedFields[deck.FieldTemplateModel]
+	return ok
+}
+
+// ResetTemplateModel resets all changes to the "template_model" field.
+func (m *DeckMutation) ResetTemplateModel() {
+	m.template_model = nil
+	delete(m.clearedFields, deck.FieldTemplateModel)
+}
+
 // SetCreatedAt sets the "created_at" field.
 func (m *DeckMutation) SetCreatedAt(t time.Time) {
 	m.created_at = &t
@@ -2780,7 +2830,7 @@ func (m *DeckMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *DeckMutation) Fields() []string {
-	fields := make([]string, 0, 8)
+	fields := make([]string, 0, 9)
 	if m.slug != nil {
 		fields = append(fields, deck.FieldSlug)
 	}
@@ -2798,6 +2848,9 @@ func (m *DeckMutation) Fields() []string {
 	}
 	if m.assets != nil {
 		fields = append(fields, deck.FieldAssets)
+	}
+	if m.template_model != nil {
+		fields = append(fields, deck.FieldTemplateModel)
 	}
 	if m.created_at != nil {
 		fields = append(fields, deck.FieldCreatedAt)
@@ -2825,6 +2878,8 @@ func (m *DeckMutation) Field(name string) (ent.Value, bool) {
 		return m.Theme()
 	case deck.FieldAssets:
 		return m.Assets()
+	case deck.FieldTemplateModel:
+		return m.TemplateModel()
 	case deck.FieldCreatedAt:
 		return m.CreatedAt()
 	case deck.FieldUpdatedAt:
@@ -2850,6 +2905,8 @@ func (m *DeckMutation) OldField(ctx context.Context, name string) (ent.Value, er
 		return m.OldTheme(ctx)
 	case deck.FieldAssets:
 		return m.OldAssets(ctx)
+	case deck.FieldTemplateModel:
+		return m.OldTemplateModel(ctx)
 	case deck.FieldCreatedAt:
 		return m.OldCreatedAt(ctx)
 	case deck.FieldUpdatedAt:
@@ -2904,6 +2961,13 @@ func (m *DeckMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetAssets(v)
+		return nil
+	case deck.FieldTemplateModel:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTemplateModel(v)
 		return nil
 	case deck.FieldCreatedAt:
 		v, ok := value.(time.Time)
@@ -2970,6 +3034,9 @@ func (m *DeckMutation) ClearedFields() []string {
 	if m.FieldCleared(deck.FieldAssets) {
 		fields = append(fields, deck.FieldAssets)
 	}
+	if m.FieldCleared(deck.FieldTemplateModel) {
+		fields = append(fields, deck.FieldTemplateModel)
+	}
 	return fields
 }
 
@@ -2989,6 +3056,9 @@ func (m *DeckMutation) ClearField(name string) error {
 		return nil
 	case deck.FieldAssets:
 		m.ClearAssets()
+		return nil
+	case deck.FieldTemplateModel:
+		m.ClearTemplateModel()
 		return nil
 	}
 	return fmt.Errorf("unknown Deck nullable field %s", name)
@@ -3015,6 +3085,9 @@ func (m *DeckMutation) ResetField(name string) error {
 		return nil
 	case deck.FieldAssets:
 		m.ResetAssets()
+		return nil
+	case deck.FieldTemplateModel:
+		m.ResetTemplateModel()
 		return nil
 	case deck.FieldCreatedAt:
 		m.ResetCreatedAt()

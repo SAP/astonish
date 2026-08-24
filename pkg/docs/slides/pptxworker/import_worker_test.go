@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -206,8 +207,26 @@ func TestImportTemplateMode(t *testing.T) {
 		Tokens     map[string]string `json:"tokens"`
 		Archetypes []struct {
 			Kind   string `json:"kind"`
+			Title  string `json:"title"`
 			Markup string `json:"markup"`
 		} `json:"archetypes"`
+		TemplateModel struct {
+			Schema  int `json:"schema"`
+			Layouts []struct {
+				ID      string `json:"id"`
+				Name    string `json:"name"`
+				Objects []struct {
+					Kind     string `json:"kind"`
+					MediaKey string `json:"mediaKey"`
+				} `json:"objects"`
+				Placeholders []struct {
+					Type string `json:"type"`
+				} `json:"placeholders"`
+			} `json:"layouts"`
+			Slides []struct {
+				ID string `json:"id"`
+			} `json:"slides"`
+		} `json:"templateModel"`
 	}
 	if err := json.Unmarshal(resp.SceneOrTemplate, &tmpl); err != nil {
 		t.Fatalf("bad template: %v\n%s", err, string(resp.SceneOrTemplate))
@@ -228,6 +247,31 @@ func TestImportTemplateMode(t *testing.T) {
 	for _, want := range []string{"title", "section", "content"} {
 		if !kinds[want] {
 			t.Fatalf("missing archetype %q; got %+v", want, kinds)
+		}
+	}
+	// The lossless IR must be present and carry at least one layout. (The
+	// synthetic fixture has few real chrome objects, so we assert the IR
+	// structure exists rather than requiring a specific chrome object here; the
+	// slides-package import_fidelity_test covers chrome preservation + ASD
+	// validity on richer fixtures.)
+	if tmpl.TemplateModel.Schema != 3 {
+		t.Fatalf("expected templateModel.schema 3, got %d", tmpl.TemplateModel.Schema)
+	}
+	if len(tmpl.TemplateModel.Layouts) < 1 {
+		t.Fatalf("expected >=1 IR layout, got %d", len(tmpl.TemplateModel.Layouts))
+	}
+	// Every archetype MUST carry a non-empty human label (its title = the real
+	// PowerPoint layout cSld @name). Layout variants are surfaced to the user/AI
+	// by this label. Example-* archetypes are NO LONGER generated from thin
+	// authored slides (which carried no background and rendered white); the
+	// colorful, on-brand starting points are the inheritance-corrected LAYOUT
+	// archetypes. templateModel.slides may still be populated for the editor.
+	for _, a := range tmpl.Archetypes {
+		if strings.TrimSpace(a.Title) == "" {
+			t.Fatalf("archetype %q has empty label (title); layout variants must be labeled", a.Kind)
+		}
+		if strings.HasPrefix(a.Kind, "example") {
+			t.Fatalf("unexpected example-* archetype %q; examples must not be derived from authored slides", a.Kind)
 		}
 	}
 }

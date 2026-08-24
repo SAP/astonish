@@ -23,6 +23,11 @@ func (Deck) Fields() []ent.Field {
 		field.Int("schema_version").Default(1),
 		field.JSON("theme", map[string]string{}).Optional(),
 		field.JSON("assets", map[string]string{}).Optional(),
+		// template_model holds the lossless imported-template IR as a raw JSON
+		// blob (themes.TemplateModel). Stored as text to avoid coupling the Ent
+		// schema to the slides IR types; empty for all decks except high-fidelity
+		// imported templates (schema_version=3). Additive optional column.
+		field.Text("template_model").Optional(),
 		field.Time("created_at").Default(time.Now).Immutable().Annotations(&entsql.Annotation{DefaultExprs: map[string]string{dialect.Postgres: "now()", dialect.SQLite: "(datetime('now'))"}}),
 		field.Time("updated_at").Default(time.Now).UpdateDefault(time.Now).Annotations(&entsql.Annotation{DefaultExprs: map[string]string{dialect.Postgres: "now()", dialect.SQLite: "(datetime('now'))"}}),
 	}

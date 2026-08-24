@@ -4,7 +4,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"path/filepath"
@@ -34,12 +36,20 @@ const pptxMIME = "application/vnd.openxmlformats-officedocument.presentationml.p
 // archetype markup — a Templates UI listing many templates must not ship
 // megabytes of asset bytes. Scope is "builtin" | "personal" | "team".
 type slidesTemplateListItem struct {
-	Name           string            `json:"name"`
-	Label          string            `json:"label,omitempty"`
-	Description    string            `json:"description,omitempty"`
-	Scope          string            `json:"scope"`
-	Tokens         map[string]string `json:"tokens,omitempty"`
-	ArchetypeKinds []string          `json:"archetypeKinds,omitempty"`
+	Name           string                   `json:"name"`
+	Label          string                   `json:"label,omitempty"`
+	Description    string                   `json:"description,omitempty"`
+	Scope          string                   `json:"scope"`
+	Tokens         map[string]string        `json:"tokens,omitempty"`
+	ArchetypeKinds []string                 `json:"archetypeKinds,omitempty"`
+	Archetypes     []slidesArchetypeVariant `json:"archetypes,omitempty"`
+}
+
+// slidesArchetypeVariant is one fillable slide skeleton: its role Kind plus a
+// human-readable Label. A template may carry multiple variants per role.
+type slidesArchetypeVariant struct {
+	Kind  string `json:"kind"`
+	Label string `json:"label,omitempty"`
 }
 
 // hexColorRe matches a #RRGGBB or #RRGGBBAA color used by recolor tokens.
@@ -57,6 +67,16 @@ func archetypeKinds(t themes.Template) []string {
 		kinds = append(kinds, a.Kind)
 	}
 	return kinds
+}
+
+// archetypeVariants projects a template's archetypes to {kind,label} variants so
+// the Templates UI can render friendly, per-variant chips. Markup is omitted.
+func archetypeVariants(t themes.Template) []slidesArchetypeVariant {
+	out := make([]slidesArchetypeVariant, 0, len(t.Archetypes))
+	for _, a := range t.Archetypes {
+		out = append(out, slidesArchetypeVariant{Kind: a.Kind, Label: a.Title})
+	}
+	return out
 }
 
 // scopeQuery returns the requested scope label for list DTOs: "team" when
@@ -88,6 +108,7 @@ func ListSlidesTemplatesHandler(w http.ResponseWriter, r *http.Request) {
 			Scope:          "builtin",
 			Tokens:         t.Tokens,
 			ArchetypeKinds: archetypeKinds(t),
+			Archetypes:     archetypeVariants(t),
 		})
 	}
 
@@ -108,6 +129,7 @@ func ListSlidesTemplatesHandler(w http.ResponseWriter, r *http.Request) {
 					Scope:          scope,
 					Tokens:         t.Tokens,
 					ArchetypeKinds: archetypeKinds(t),
+					Archetypes:     archetypeVariants(t),
 				})
 			}
 		}
@@ -306,6 +328,7 @@ func RecolorSlidesTemplateHandler(w http.ResponseWriter, r *http.Request) {
 		Scope:          scopeQuery(r),
 		Tokens:         tmpl.Tokens,
 		ArchetypeKinds: archetypeKinds(tmpl),
+		Archetypes:     archetypeVariants(tmpl),
 	})
 }
 
@@ -414,7 +437,9 @@ func ImportSlidesTemplateHandler(w http.ResponseWriter, r *http.Request) {
 
 	var tmpl themes.Template
 	if err := json.Unmarshal(resp.SceneOrTemplate, &tmpl); err != nil {
-		http.Error(w, "import worker returned invalid template", http.StatusInternalServerError)
+		slog.Error("import slides template: worker response did not decode into Template",
+			"error", err, "body_prefix", truncateForLog(resp.SceneOrTemplate, 2000))
+		http.Error(w, fmt.Sprintf("import worker returned invalid template: %v", err), http.StatusInternalServerError)
 		return
 	}
 
@@ -508,4 +533,14 @@ func importErrorStatus(err error) int {
 	default:
 		return http.StatusBadRequest
 	}
+}
+
+// truncateForLog returns a bounded string view of raw JSON for diagnostic logs,
+// so a large worker payload does not flood the log while still surfacing the
+// shape that failed to decode.
+func truncateForLog(b []byte, max int) string {
+	if len(b) <= max {
+		return string(b)
+	}
+	return string(b[:max]) + "…(truncated)"
 }

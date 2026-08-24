@@ -27,6 +27,8 @@ const (
 	FieldTheme = "theme"
 	// FieldAssets holds the string denoting the assets field in the database.
 	FieldAssets = "assets"
+	// FieldTemplateModel holds the string denoting the template_model field in the database.
+	FieldTemplateModel = "template_model"
 	// FieldCreatedAt holds the string denoting the created_at field in the database.
 	FieldCreatedAt = "created_at"
 	// FieldUpdatedAt holds the string denoting the updated_at field in the database.
@@ -53,6 +55,7 @@ var Columns = []string{
 	FieldSchemaVersion,
 	FieldTheme,
 	FieldAssets,
+	FieldTemplateModel,
 	FieldCreatedAt,
 	FieldUpdatedAt,
 }
@@ -112,6 +115,11 @@ func ByDescription(opts ...sql.OrderTermOption) OrderOption {
 // BySchemaVersion orders the results by the schema_version field.
 func BySchemaVersion(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldSchemaVersion, opts...).ToFunc()
+}
+
+// ByTemplateModel orders the results by the template_model field.
+func ByTemplateModel(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldTemplateModel, opts...).ToFunc()
 }
 
 // ByCreatedAt orders the results by the created_at field.

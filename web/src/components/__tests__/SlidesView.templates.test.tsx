@@ -36,7 +36,15 @@ const personal: SlidesTemplate = {
   label: 'Corp Deck',
   scope: 'personal',
   tokens: { surface: '#ffffff', ink: '#101010', accent: '#ff8800' },
-  archetypeKinds: ['title', 'content'],
+  archetypeKinds: ['title', 'title-2', 'content'],
+  // Rich {kind,label} variants (imported template): ONE master + many layouts,
+  // so the same role can have multiple variants each labeled with the real
+  // PowerPoint layout name. The UI must render every label as its own chip.
+  archetypes: [
+    { kind: 'title', label: 'Blue cover, anvil and image' },
+    { kind: 'title-2', label: 'Pink cover with anvil' },
+    { kind: 'content', label: 'Title and Content' },
+  ],
 }
 
 describe('SlidesView templates area', () => {
@@ -90,5 +98,26 @@ describe('SlidesView templates area', () => {
     fireEvent.click(screen.getByTestId('template-delete-confirm'))
     await waitFor(() => expect(deleteSlidesTemplate).toHaveBeenCalledTimes(1))
     expect((deleteSlidesTemplate as ReturnType<typeof vi.fn>).mock.calls[0][0]).toBe('corp')
+  })
+
+  it('renders human-friendly variant labels when archetypes carry labels', async () => {
+    renderArea()
+    await waitFor(() => expect(screen.getAllByTestId('template-card')).toHaveLength(2))
+    // The imported (personal) template exposes {kind,label} variants; the UI
+    // should prefer the label over the bare kind.
+    expect(screen.getByText('Blue cover, anvil and image')).toBeInTheDocument()
+    expect(screen.getByText('Title and Content')).toBeInTheDocument()
+    // The built-in template has no labels, so its bare kinds still render.
+    expect(screen.getByText('section')).toBeInTheDocument()
+  })
+
+  it('renders multiple same-role variant chips with their real layout-name labels', async () => {
+    renderArea()
+    await waitFor(() => expect(screen.getAllByTestId('template-card')).toHaveLength(2))
+    // ONE .pptx template exposes many role-classified variants; two distinct
+    // "title"-role covers must BOTH render as chips by their real PowerPoint
+    // layout names (not collapsed to a single "title" chip).
+    expect(screen.getByText('Blue cover, anvil and image')).toBeInTheDocument()
+    expect(screen.getByText('Pink cover with anvil')).toBeInTheDocument()
   })
 })

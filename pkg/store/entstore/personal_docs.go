@@ -19,7 +19,7 @@ func (s *personalDocsStore) CreateDeck(ctx context.Context, d *store.DeckManifes
 	if err != nil {
 		return err
 	}
-	row, err := s.client.Deck.Create().SetID(id).SetSlug(d.Slug).SetTitle(d.Title).SetDescription(d.Description).SetSchemaVersion(d.SchemaVersion).SetTheme(d.Theme).SetAssets(d.Assets).Save(ctx)
+	row, err := s.client.Deck.Create().SetID(id).SetSlug(d.Slug).SetTitle(d.Title).SetDescription(d.Description).SetSchemaVersion(d.SchemaVersion).SetTheme(d.Theme).SetAssets(d.Assets).SetTemplateModel(d.TemplateModel).Save(ctx)
 	if err == nil {
 		fillPersonalDeck(d, row)
 	}
@@ -50,6 +50,36 @@ func (s *personalDocsStore) ListDecks(ctx context.Context) ([]*store.DeckManifes
 	}
 	return out, nil
 }
+
+// ListDecksLite mirrors ListDecks but projects away the two heavy columns
+// (assets, template_model) at the SQL level via .Select, so the multi-MB IR and
+// base64 asset blobs are never read or deserialized for list views. The
+// returned manifests have Assets=nil and TemplateModel="".
+func (s *personalDocsStore) ListDecksLite(ctx context.Context) ([]*store.DeckManifest, error) {
+	rows, err := s.client.Deck.Query().
+		Order(personalent.Desc(personaldeck.FieldUpdatedAt)).
+		Select(
+			personaldeck.FieldID,
+			personaldeck.FieldSlug,
+			personaldeck.FieldTitle,
+			personaldeck.FieldDescription,
+			personaldeck.FieldSchemaVersion,
+			personaldeck.FieldTheme,
+			personaldeck.FieldCreatedAt,
+			personaldeck.FieldUpdatedAt,
+		).
+		All(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*store.DeckManifest, 0, len(rows))
+	for _, row := range rows {
+		d := &store.DeckManifest{}
+		fillPersonalDeckLite(d, row)
+		out = append(out, d)
+	}
+	return out, nil
+}
 func (s *personalDocsStore) UpdateDeck(ctx context.Context, d *store.DeckManifest) error {
 	row, err := s.client.Deck.Query().Where(personaldeck.SlugEQ(d.Slug)).Only(ctx)
 	if personalent.IsNotFound(err) {
@@ -58,7 +88,7 @@ func (s *personalDocsStore) UpdateDeck(ctx context.Context, d *store.DeckManifes
 	if err != nil {
 		return err
 	}
-	row, err = row.Update().SetTitle(d.Title).SetDescription(d.Description).SetSchemaVersion(d.SchemaVersion).SetTheme(d.Theme).SetAssets(d.Assets).Save(ctx)
+	row, err = row.Update().SetTitle(d.Title).SetDescription(d.Description).SetSchemaVersion(d.SchemaVersion).SetTheme(d.Theme).SetAssets(d.Assets).SetTemplateModel(d.TemplateModel).Save(ctx)
 	if err == nil {
 		fillPersonalDeck(d, row)
 	}
@@ -222,6 +252,20 @@ func fillPersonalDeck(out *store.DeckManifest, in *personalent.Deck) {
 	out.SchemaVersion = in.SchemaVersion
 	out.Theme = in.Theme
 	out.Assets = in.Assets
+	out.TemplateModel = in.TemplateModel
+	out.CreatedAt = in.CreatedAt
+	out.UpdatedAt = in.UpdatedAt
+}
+
+// fillPersonalDeckLite copies only the columns selected by ListDecksLite; Assets
+// and TemplateModel are intentionally left zero because they were not read.
+func fillPersonalDeckLite(out *store.DeckManifest, in *personalent.Deck) {
+	out.ID = in.ID.String()
+	out.Slug = in.Slug
+	out.Title = in.Title
+	out.Description = in.Description
+	out.SchemaVersion = in.SchemaVersion
+	out.Theme = in.Theme
 	out.CreatedAt = in.CreatedAt
 	out.UpdatedAt = in.UpdatedAt
 }

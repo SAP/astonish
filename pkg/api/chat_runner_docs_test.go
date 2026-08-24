@@ -17,6 +17,9 @@ func (*chatRunnerDocsStore) GetDeck(context.Context, string) (*store.DeckManifes
 func (*chatRunnerDocsStore) ListDecks(context.Context) ([]*store.DeckManifest, error) {
 	return nil, nil
 }
+func (*chatRunnerDocsStore) ListDecksLite(context.Context) ([]*store.DeckManifest, error) {
+	return nil, nil
+}
 func (*chatRunnerDocsStore) UpdateDeck(context.Context, *store.DeckManifest) error { return nil }
 func (*chatRunnerDocsStore) DeleteDeck(context.Context, string) error              { return nil }
 func (*chatRunnerDocsStore) UpsertSlide(context.Context, *store.SlideContent) error {

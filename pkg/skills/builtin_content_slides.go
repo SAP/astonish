@@ -27,6 +27,8 @@ The single most important rule: **start from a template.** A normal request must
 
    When in doubt about which case applies, treat it as "said nothing" and ask.
 
+   **A template may offer MULTIPLE variants per role.** ` + "`list_templates`" + ` also returns an ` + "`archetypes`" + ` list of ` + "`{kind, label}`" + ` entries — a high-fidelity imported template commonly has several title, section, agenda, or content variants (e.g. ` + "`title`" + `, ` + "`title-2`" + `, ` + "`agenda`" + `, ` + "`closing`" + `), each a distinct source **layout** carrying its own background/logos/accent chrome, and each **labeled with the real PowerPoint layout name** (e.g. "Blue cover, anvil and image", "Pink cover with anvil", "Divider Page with Image", "Full Bleed Image"). The colorful covers and dividers ARE the ` + "`title`" + ` and ` + "`section`" + ` variants — there are no separate "example" slides. Once the template is chosen, for each role the deck needs, **list the available variants by their label and ask the user which to use** (blue vs pink vs green cover; divider with or without image) — unless the user already specified. Do not silently pick the first variant.
+
 2. **Create the deck WITH that template — call ` + "`create_deck`" + ` and pass ` + "`template`" + `.**
    Passing the ` + "`template`" + ` name seeds the deck's theme tokens **and** assets, so every slide is styled automatically. ` + "`create_deck`" + ` returns the template's full ` + "`archetypes`" + ` (the ready-made ` + "`title`" + `/` + "`section`" + `/` + "`content`" + ` slide skeletons with ` + "`{{TITLE}}`" + `/` + "`{{BODY}}`" + ` placeholders) — this is where you get the markup to fill. Example arguments:
    ` + "```json" + `
@@ -39,6 +41,7 @@ The single most important rule: **start from a template.** A normal request must
    - a **title** archetype for slide 0 (position 0),
    - a **section** archetype as a transition slide before each major topic,
    - **content** archetypes for the body slides.
+   **Prefer a colorful cover/divider variant by label when you want an on-brand slide.** Imported templates expose their layouts as labeled variants (e.g. "Blue cover, anvil and image", "Divider Page with Image", "Full Bleed Image") — the covers/dividers already carry image backgrounds, logos and accent chrome. Starting from the variant whose label matches the role you need and filling its ` + "`{{TITLE}}`" + `/` + "`{{BODY}}`" + ` slots gives a far more polished result than hand-building from scratch. Keep the variant's chrome; only replace the placeholders and any obviously stale sample text.
    ` + "`write_slide`" + ` takes ` + "`deck_slug`" + `, a zero-based ` + "`position`" + ` (writing an occupied position replaces it), ` + "`markup`" + ` (exactly one complete ` + "`<ast-slide>`" + ` root), and optional ` + "`notes`" + ` (speaker notes — use this field, do not embed ` + "`<ast-notes>`" + ` yourself unless you need to).
 
 4. **Inspect before revising — call ` + "`get_deck`" + `.** It returns the deck and its ordered slide markup so you can edit precisely.
@@ -51,7 +54,9 @@ You can also ` + "`list_decks`" + ` to see existing decks (template decks are hi
 
 ## Imported corporate ` + "`.pptx`" + ` templates
 
-When the user imported a real corporate ` + "`.pptx`" + ` (Studio → Slides → Import ` + "`.pptx`" + `), it becomes a **standard ASD template** — a set of theme colors and archetypes derived from the file, not the original file itself. Importing is inherently lossy: fine details of the corporate design are approximated. The imported template appears in ` + "`list_templates`" + ` alongside the built-ins and is used exactly the same way: call ` + "`create_deck`" + ` with its ` + "`template`" + ` name, then fill the archetypes with ` + "`write_slide`" + `. You do not do anything special to author it.
+When the user imported a real corporate ` + "`.pptx`" + ` (Studio → Slides → Import ` + "`.pptx`" + `), it becomes ONE **high-fidelity ASD template** (the pptx is a single design system — one master, one theme). Its source **layouts** are extracted into role-classified, **layout-name-labeled variants**, each preserving that layout's background (including full-bleed image backgrounds), logos, accent bars, and curved/brand custom-path shapes — not just a set of theme colors. Colorful cover/divider chrome is captured by resolving the master→layout inheritance chain (backgrounds and decorative shapes flow down from the slide master into each layout, the way PowerPoint renders them). Expect **multiple variants per role** — e.g. several ` + "`title`" + ` covers ("Blue cover, anvil and image", "Pink cover with anvil", "White cover with green anvil"), several ` + "`section`" + ` dividers ("Divider Page", "Divider Page with Image", "Agenda"), and ` + "`content`" + ` layouts ("Title and Content", "Full Bleed Image") — the human label is always the real PowerPoint layout name. The lossless source model is also persisted for future in-browser editing.
+
+Use it exactly like a built-in: call ` + "`create_deck`" + ` with its ` + "`template`" + ` name, then fill the archetypes with ` + "`write_slide`" + `. **When the user wants an on-brand slide, prefer starting from a colorful cover/divider variant chosen by its label** (fill its placeholders, keep its chrome) rather than hand-building one. The one extra step: because these templates carry multiple variants per role, **list the variants by label and ask the user which title/section/agenda/content variant to use** when more than one exists for a role they need — unless they already told you. A small number of genuinely inexpressible constructs (e.g. EMF vector icons) may be approximated or omitted; the import records a warning for each so nothing degrades silently.
 
 ---
 
@@ -167,6 +172,8 @@ Speaker notes. Prefer passing ` + "`notes`" + ` to ` + "`write_slide`" + ` inste
 ## Quick Checklist
 
 - [ ] Called ` + "`list_templates`" + ` and either used the user's named template, or (if they delegated) picked one and said so, or (if unspecified) asked the user to choose before creating the deck.
+- [ ] If the chosen template offers multiple variants for a role you need, asked the user which variant (by label) to use.
+- [ ] For on-brand slides, started from a colorful cover/divider variant chosen by its label (the real PowerPoint layout name) rather than hand-building.
 - [ ] Called ` + "`create_deck`" + ` **with** the ` + "`template`" + ` argument.
 - [ ] Built a title slide, section transitions, and content slides from the archetypes.
 - [ ] Replaced all ` + "`{{TITLE}}`" + `/` + "`{{BODY}}`" + ` placeholders; readable contrast throughout.

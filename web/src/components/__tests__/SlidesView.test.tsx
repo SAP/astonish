@@ -42,14 +42,6 @@ const teamDeck: slidesApi.SlidesDeckListItem = {
   updatedAt: new Date().toISOString(),
 }
 
-const slidesFor = (deckId: string): slidesApi.SlidesDeckResponse => ({
-  deck: { id: deckId, slug: deckId, title: 'x', schemaVersion: 1 },
-  slides: [
-    { id: `${deckId}-s1`, deckId, position: 0, title: 'Intro Slide', content: '', schemaVersion: 1 },
-    { id: `${deckId}-s2`, deckId, position: 1, title: 'Second Slide', content: '', schemaVersion: 1 },
-  ],
-})
-
 describe('SlidesView', () => {
   beforeEach(() => {
     vi.mocked(slidesApi.listSlidesDecks).mockResolvedValue({ decks: [personalDeck, teamDeck] })
@@ -59,26 +51,28 @@ describe('SlidesView', () => {
       ],
     })
     vi.mocked(slidesApi.importSlidesTemplate).mockResolvedValue({ template: { name: 'imported', label: 'Imported' } })
-    vi.mocked(slidesApi.fetchSlidesDeck).mockImplementation(async (slug: string) => slidesFor(slug))
   })
 
   afterEach(() => {
     vi.clearAllMocks()
   })
 
-  it('renders Personal and Team sections with deck titles and thumbnail captions', async () => {
+  it('renders Personal and Team sections with deck titles and a first-page thumbnail', async () => {
     render(<SlidesView theme="dark" isPlatformMode />)
     await waitFor(() => expect(slidesApi.listSlidesDecks).toHaveBeenCalled())
 
-    expect(await screen.findByText('Personal Deck')).toBeInTheDocument()
-    expect(screen.getByText('Team Deck')).toBeInTheDocument()
+    // 'Personal Deck' appears twice per card (header + thumbnail caption).
+    expect((await screen.findAllByText('Personal Deck')).length).toBeGreaterThan(0)
+    expect(screen.getAllByText('Team Deck').length).toBeGreaterThan(0)
     expect(screen.getAllByText('Personal').length).toBeGreaterThan(0)
     expect(screen.getAllByText('Team').length).toBeGreaterThan(0)
 
-    // Thumbnail captions render from the fetched slides.
+    // Each card shows exactly one first-page thumbnail captioned with the deck
+    // title (no per-deck slide fetch happens anymore).
     const captions = await screen.findAllByTestId('slides-thumb-title')
-    expect(captions.length).toBeGreaterThan(0)
-    expect(screen.getAllByText('Intro Slide').length).toBeGreaterThan(0)
+    expect(captions.map(n => n.textContent)).toEqual(
+      expect.arrayContaining(['Personal Deck', 'Team Deck']),
+    )
   })
 
   it('invokes onPublishDeck for a personal card', async () => {
@@ -100,7 +94,9 @@ describe('SlidesView', () => {
   it('opens the deck detail (SlidesDeckView) when a card is clicked', async () => {
     const onNavigate = vi.fn()
     render(<SlidesView theme="dark" onNavigate={onNavigate} />)
-    const card = await screen.findByText('Personal Deck')
+    // Click inside the card body (the first card is the personal deck). The
+    // thumbnail caption lives inside the clickable region.
+    const card = (await screen.findAllByTestId('slides-thumb-title'))[0]
     fireEvent.click(card)
     expect(onNavigate).toHaveBeenCalledWith('/slides/personal-deck')
     expect(await screen.findByTestId('deck-view')).toHaveTextContent('personal-deck')

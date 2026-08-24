@@ -4,11 +4,9 @@ import {
   listSlidesDecks,
   listSlidesTemplates,
   importSlidesTemplate,
-  fetchSlidesDeck,
   deleteSlidesDeck,
   slidesPresentationURL,
   type SlidesDeckListItem,
-  type SlidesSlide,
   type SlidesTemplate,
   type DocsScope,
 } from '../api/slides'
@@ -24,9 +22,6 @@ interface SlidesViewProps {
   onPublishDeck?: (deck: SlidesDeckListItem) => void
   onForkDeck?: (deck: SlidesDeckListItem) => void
 }
-
-// Cap thumbnails per card to avoid mounting dozens of iframes.
-const MAX_THUMBS = 5
 
 function EmptyState() {
   return (
@@ -62,27 +57,63 @@ function formatDate(dateStr?: string) {
  * at the deck's present document at `#slide-<n>` (DeckController resolves the
  * positional hash via data-index). Same transport as SlidesDeckView, so the
  * themed background matches. The title is rendered beneath the tile.
+ *
+ * The iframe is LAZY: it only mounts once the tile scrolls into view (via
+ * IntersectionObserver). Each iframe boots the full slides runtime, so mounting
+ * one per off-screen card is what made the list slow — off-screen cards render
+ * a lightweight icon placeholder instead until the user scrolls to them.
  */
 function SlideThumbnail({ deckSlug, scope, index, title }: { deckSlug: string; scope: DocsScope; index: number; title?: string }) {
   const src = `${slidesPresentationURL(deckSlug, scope)}#slide-${index + 1}`
+  const tileRef = useRef<HTMLDivElement>(null)
+  const [visible, setVisible] = useState(false)
+
+  useEffect(() => {
+    // No IntersectionObserver (jsdom/tests, very old browsers): render eagerly.
+    if (typeof IntersectionObserver === 'undefined') {
+      setVisible(true)
+      return
+    }
+    const node = tileRef.current
+    if (!node) return
+    const observer = new IntersectionObserver(
+      entries => {
+        if (entries.some(e => e.isIntersecting)) {
+          setVisible(true)
+          observer.disconnect()
+        }
+      },
+      { rootMargin: '200px' },
+    )
+    observer.observe(node)
+    return () => observer.disconnect()
+  }, [])
+
   return (
     <div className="flex w-40 shrink-0 flex-col gap-1">
       <div
+        ref={tileRef}
         className="relative aspect-video w-40 overflow-hidden rounded-md border"
         style={{ borderColor: 'var(--border-color)', background: 'var(--card)' }}
       >
-        <iframe
-          src={src}
-          sandbox="allow-scripts"
-          title={`${title || `Slide ${index + 1}`} thumbnail`}
-          aria-hidden="true"
-          tabIndex={-1}
-          loading="lazy"
-          className="pointer-events-none absolute left-0 top-0 origin-top-left border-0"
-          // The present doc renders at a fixed canvas; scale it down to fit the
-          // 160px-wide tile. width/height are the pre-scale logical size.
-          style={{ width: '640px', height: '360px', transform: 'scale(0.25)' }}
-        />
+        {visible ? (
+          <iframe
+            src={src}
+            sandbox="allow-scripts"
+            title={`${title || `Slide ${index + 1}`} thumbnail`}
+            aria-hidden="true"
+            tabIndex={-1}
+            loading="lazy"
+            className="pointer-events-none absolute left-0 top-0 origin-top-left border-0"
+            // The present doc renders at a fixed canvas; scale it down to fit the
+            // 160px-wide tile. width/height are the pre-scale logical size.
+            style={{ width: '640px', height: '360px', transform: 'scale(0.25)' }}
+          />
+        ) : (
+          <div className="absolute inset-0 flex items-center justify-center" aria-hidden="true">
+            <Presentation size={20} style={{ color: '#10b981' }} />
+          </div>
+        )}
       </div>
       <span className="line-clamp-2 text-[10px] leading-tight text-muted-foreground" data-testid="slides-thumb-title">
         {title || `Slide ${index + 1}`}
@@ -107,18 +138,6 @@ function DeckCard({
   onDelete: (deck: SlidesDeckListItem) => void
 }) {
   const scope: DocsScope = deck.scope ?? 'personal'
-  const [slides, setSlides] = useState<SlidesSlide[]>([])
-
-  useEffect(() => {
-    let cancelled = false
-    fetchSlidesDeck(deck.slug, scope)
-      .then(res => { if (!cancelled) setSlides(res.slides) })
-      .catch(() => { /* thumbnails are best-effort */ })
-    return () => { cancelled = true }
-  }, [deck.slug, scope])
-
-  const shown = slides.slice(0, MAX_THUMBS)
-  const remaining = Math.max(0, slides.length - shown.length)
 
   return (
     <div
@@ -147,26 +166,10 @@ function DeckCard({
           )}
         </div>
 
-        {/* Thumbnail strip */}
-        {shown.length > 0 ? (
-          <div className="flex gap-3 overflow-x-auto pb-1">
-            {shown.map((slide, i) => (
-              <SlideThumbnail key={slide.id} deckSlug={deck.slug} scope={scope} index={i} title={slide.title} />
-            ))}
-            {remaining > 0 && (
-              <div
-                className="flex w-24 shrink-0 items-center justify-center rounded-md border text-xs text-muted-foreground"
-                style={{ borderColor: 'var(--border-color)' }}
-              >
-                +{remaining} more
-              </div>
-            )}
-          </div>
-        ) : (
-          <p className="text-xs text-muted-foreground">
-            {deck.description && deck.description !== deck.title ? deck.description : 'Open to view slides'}
-          </p>
-        )}
+        {/* Single first-page thumbnail (lazy-mounted when scrolled into view). */}
+        <div className="flex gap-3">
+          <SlideThumbnail deckSlug={deck.slug} scope={scope} index={0} title={deck.title} />
+        </div>
       </div>
 
       <div

@@ -6,7 +6,7 @@ toolchain go1.26.1
 
 require (
 	charm.land/bubbles/v2 v2.1.1
-	charm.land/bubbletea/v2 v2.0.8
+	charm.land/bubbletea/v2 v2.0.9
 	charm.land/lipgloss/v2 v2.0.6
 	codeberg.org/readeck/go-readability/v2 v2.1.2
 	entgo.io/ent v0.14.6

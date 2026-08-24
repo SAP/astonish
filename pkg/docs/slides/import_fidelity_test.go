@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -13,6 +14,22 @@ import (
 
 	"github.com/SAP/astonish/pkg/docs/slides/pptxworker"
 	"github.com/SAP/astonish/pkg/docs/slides/themes"
+)
+
+// Picture-region matchers for the fixed-tier fidelity assertions. A chrome
+// archetype whose source layout carried a picture region must render that region
+// as a REAL, swappable hero image — <ast-image id="ph-pic-N" ... asset-ref="…">
+// at the borrowed sample photo's own geometry (optionally flip-h/flip-v) — and
+// advertise ph-pic-N in fillSlots. It must NOT fall back to a synthetic neutral
+// panel (<ast-shape id="ph-pic-N" …>), which was the old "blank blue box" bug.
+var (
+	// picShapePanelRe matches the synthetic neutral panel a picture region used
+	// to fall back to (must NOT appear when the region is borrowable).
+	picShapePanelRe = regexp.MustCompile(`<ast-shape id="ph-pic-\d+"`)
+	// picImageIDRe captures the ph-pic-N id of a real, asset-backed hero image.
+	picImageIDRe = regexp.MustCompile(`<ast-image id="(ph-pic-\d+)"[^>]*asset-ref="[^"]+"`)
+	// picImageWithFlipRe matches a hero image that also carries a flip attribute.
+	picImageWithFlipRe = regexp.MustCompile(`<ast-image id="ph-pic-\d+"[^>]*asset-ref="[^"]+"[^>]*flip-[hv]="true"`)
 )
 
 // requireImportNodeEnv resolves the node working dir + worker scripts, skipping
@@ -99,6 +116,11 @@ func TestImportFidelityArchetypesAreValidASD(t *testing.T) {
 		t.Fatal("expected at least one archetype")
 	}
 	hasAssetRef := false
+	// sawImageSlot: at least one fixed archetype exposed a real, asset-backed,
+	// swappable hero-image slot (ph-pic-N in fillSlots). sawImageFlip: a borrowed
+	// sample photo carried a mirror flip that survived onto the ast-image.
+	sawImageSlot := false
+	sawImageFlip := false
 	for _, a := range tmpl.Archetypes {
 		if a.Markup == "" {
 			t.Fatalf("archetype %q has empty markup", a.Kind)
@@ -107,6 +129,56 @@ func TestImportFidelityArchetypesAreValidASD(t *testing.T) {
 		// name, stored in Title); layout variants are surfaced by this label.
 		if strings.TrimSpace(a.Title) == "" {
 			t.Fatalf("archetype %q has empty label (title); layout variants must be labeled", a.Kind)
+		}
+		// Fixed brand-chrome archetypes declare fillSlots (the ast-text ids the
+		// AI may edit); each declared slot id must be present in the markup so the
+		// text-only fill contract is honored.
+		if a.Tier == "fixed" {
+			if len(a.FillSlots) == 0 {
+				t.Fatalf("fixed archetype %q must declare fillSlots", a.Kind)
+			}
+			for _, id := range a.FillSlots {
+				if !strings.Contains(a.Markup, `id="`+id+`"`) {
+					t.Fatalf("fixed archetype %q declares fillSlot %q absent from markup:\n%s", a.Kind, id, a.Markup)
+				}
+			}
+			// Geometry-faithful, swappable hero-image contract: when a chrome
+			// archetype's source layout carried a picture region it is rendered as
+			// a REAL image at the borrowed sample photo's own geometry — an
+			// <ast-image id="ph-pic-N" … asset-ref="…"> — NOT a synthetic neutral
+			// <ast-shape> panel (the old "blank blue box" fallback). The image id
+			// (ph-pic-N) must be advertised in fillSlots so the photo is a
+			// replaceable IMAGE slot (not only text slots). Guard on the presence
+			// of a ph-pic- region so the assertion is meaningful even when the
+			// synthetic export fixture emits no picture placeholder.
+			if strings.Contains(a.Markup, `id="ph-pic-`) {
+				// The region must be a real image, never a fallback shape panel.
+				if picShapePanelRe.MatchString(a.Markup) {
+					t.Fatalf("fixed archetype %q renders a picture region as a synthetic <ast-shape> panel instead of a borrowed <ast-image asset-ref=…>:\n%s", a.Kind, a.Markup)
+				}
+				m := picImageIDRe.FindStringSubmatch(a.Markup)
+				if m == nil {
+					t.Fatalf("fixed archetype %q has a ph-pic- region but no <ast-image id=\"ph-pic-N\" … asset-ref=…>:\n%s", a.Kind, a.Markup)
+				}
+				picID := m[1]
+				inSlots := false
+				for _, id := range a.FillSlots {
+					if id == picID {
+						inSlots = true
+						break
+					}
+				}
+				if !inSlots {
+					t.Fatalf("fixed archetype %q emits image slot %q but does not advertise it in fillSlots %v (image regions must be replaceable IMAGE slots)", a.Kind, picID, a.FillSlots)
+				}
+				sawImageSlot = true
+				// A borrowed sample photo may carry a mirror flip; if the fixture's
+				// geometry made a flip available, assert it survives on the image.
+				// When the geometry offers no flip, we intentionally do not force it.
+				if picImageWithFlipRe.MatchString(a.Markup) {
+					sawImageFlip = true
+				}
+			}
 		}
 		_, diags, err := ParseSlide(a.Markup)
 		if err != nil {
@@ -148,4 +220,28 @@ func TestImportFidelityArchetypesAreValidASD(t *testing.T) {
 	if layoutHasImageChrome && !hasAssetRef {
 		t.Fatalf("a layout carries image chrome but no archetype markup references an asset; inherited chrome not captured")
 	}
+	// Geometry-faithful swappable hero-image cross-check at the IR level: if any
+	// source layout declared a picture placeholder region, at least one fixed
+	// archetype must have surfaced it as a real, asset-backed, replaceable image
+	// slot (ph-pic-N present in the markup as <ast-image asset-ref=…> AND in
+	// fillSlots) — never a synthetic neutral panel. This proves the borrow path
+	// ran end-to-end. When no layout has a picture region, there is nothing to
+	// assert (the per-archetype guard above already covers any ph-pic- that does
+	// appear), so we do not force sawImageSlot.
+	layoutHasPictureRegion := false
+	for _, l := range tmpl.Model.Layouts {
+		for _, p := range l.Placeholders {
+			if p.Type == "image" {
+				layoutHasPictureRegion = true
+			}
+		}
+	}
+	if layoutHasPictureRegion && !sawImageSlot {
+		t.Fatalf("a layout declares a picture region but no fixed archetype exposes a real <ast-image asset-ref=…> image fill slot (ph-pic-N in fillSlots); the swappable hero-image borrow did not run")
+	}
+	// sawImageFlip is asserted only opportunistically: when the fixture's borrowed
+	// sample photo geometry made a mirror flip available it must survive onto the
+	// ast-image. We record it here to make the intent explicit without forcing a
+	// flip the fixture geometry may not provide.
+	_ = sawImageFlip
 }

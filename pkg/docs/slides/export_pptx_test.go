@@ -403,3 +403,63 @@ func TestPPTXLayoutMatchesCanvasAndCenters(t *testing.T) {
 		t.Errorf(`centered title missing algn="ctr": %s`, slideXML)
 	}
 }
+
+// TestPPTXImageHonorsFlip guards that a horizontally-flipped image node round-
+// trips to a native picture with flipH="1" in its <a:xfrm>, so a borrowed hero
+// photo re-exports mirrored the same way the source PowerPoint authored it
+// (never re-mirrored). node.flipH/flipV reach the worker via the Node struct's
+// flipH/flipV json tags and are passed to pptxgenjs addImage as flip options.
+func TestPPTXImageHonorsFlip(t *testing.T) {
+	_, file, _, _ := runtime.Caller(0)
+	repo := filepath.Clean(filepath.Join(filepath.Dir(file), "../../.."))
+	exporter := PPTXExporter{Runner: pptxworker.Runner{
+		WorkingDir: filepath.Join(repo, "web"),
+		ScriptPath: filepath.Join(repo, "pkg/docs/slides/pptxworker/worker.mjs"),
+		Timeout:    30 * time.Second,
+	}}
+	// Minimal valid 1x1 transparent PNG as a data URL (the worker requires
+	// node.props.data on an image node).
+	const pngData = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+	scene := SceneGraph{SchemaVersion: SchemaV2, Title: "Flip image", Slides: []Slide{{
+		ID: "flip", Nodes: []Node{
+			{
+				ID: "hero", Type: "image",
+				Geometry: Geometry{X: 100, Y: 100, W: 800, H: 600},
+				FlipH:    true,
+				Props:    map[string]any{"data": pngData, "decorative": "true"},
+			},
+		},
+	}}}
+	result, err := exporter.Export(context.Background(), scene, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zr, err := zip.NewReader(bytes.NewReader(result.Bytes), int64(len(result.Bytes)))
+	if err != nil {
+		t.Fatalf("invalid pptx zip: %v", err)
+	}
+	var slideXML string
+	for _, f := range zr.File {
+		if f.Name == "ppt/slides/slide1.xml" {
+			r, openErr := f.Open()
+			if openErr != nil {
+				t.Fatal(openErr)
+			}
+			b, readErr := io.ReadAll(r)
+			_ = r.Close()
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			slideXML = string(b)
+		}
+	}
+	if slideXML == "" {
+		t.Fatal("slide1.xml missing from exported pptx")
+	}
+	if !strings.Contains(slideXML, "<p:pic>") {
+		t.Fatalf("expected a native picture in slide XML: %s", slideXML)
+	}
+	if !strings.Contains(slideXML, `flipH="1"`) {
+		t.Errorf(`flipped image must serialize flipH="1" in its xfrm: %s`, slideXML)
+	}
+}

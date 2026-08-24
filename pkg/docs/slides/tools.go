@@ -2,6 +2,7 @@ package slides
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"sort"
 	"strings"
@@ -11,6 +12,54 @@ import (
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
 )
+
+// AssetInfo is one lightweight entry in a deck's image-asset catalog. It carries
+// the identity the AI needs to reference or swap an image (Ref is the Assets map
+// key, e.g. "sha256-<hex>", used verbatim as an ast-image asset-ref) plus small
+// hints (MIME, approximate decoded Bytes, and a Kind heuristic). It DELIBERATELY
+// never carries the base64 data: URI value — that heavy payload must stay out of
+// the model context and off the wire (see TestSlidesResponsesOmitHeavyManifestFields).
+type AssetInfo struct {
+	Ref   string `json:"ref"`
+	MIME  string `json:"mime,omitempty"`
+	Bytes int    `json:"bytes,omitempty"`
+	Kind  string `json:"kind,omitempty"`
+}
+
+// assetCatalog projects a deck's Assets map (ref -> data: URI) into a sorted,
+// data-free catalog of AssetInfo. MIME is parsed from the "data:<mime>;base64,"
+// prefix, Bytes is the approximate decoded size, and Kind is a heuristic hint
+// ("logo" for SVG or very small images, else "image"). The data: value is never
+// copied into the result. Order is deterministic (sorted by Ref).
+func assetCatalog(assets map[string]string) []AssetInfo {
+	if len(assets) == 0 {
+		return nil
+	}
+	out := make([]AssetInfo, 0, len(assets))
+	for ref, dataURI := range assets {
+		info := AssetInfo{Ref: ref, Kind: "image"}
+		// Parse "data:<mime>;base64,<payload>" without retaining the payload.
+		if strings.HasPrefix(dataURI, "data:") {
+			rest := dataURI[len("data:"):]
+			if semi := strings.IndexByte(rest, ';'); semi >= 0 {
+				info.MIME = rest[:semi]
+			} else if comma := strings.IndexByte(rest, ','); comma >= 0 {
+				info.MIME = rest[:comma]
+			}
+			if comma := strings.IndexByte(rest, ','); comma >= 0 {
+				payload := rest[comma+1:]
+				// base64 decodes to ~3/4 of its length (ignoring padding).
+				info.Bytes = len(payload) * 3 / 4
+			}
+		}
+		if info.MIME == "image/svg+xml" || (info.Bytes > 0 && info.Bytes < 4096) {
+			info.Kind = "logo"
+		}
+		out = append(out, info)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Ref < out[j].Ref })
+	return out
+}
 
 const (
 	ActionDeckCreated  = "deck_created"
@@ -45,9 +94,15 @@ type DeckView struct {
 	Scope            string            `json:"scope,omitempty"`
 	AssetCount       int               `json:"assetCount,omitempty"`
 	HasTemplateModel bool              `json:"hasTemplateModel,omitempty"`
+	// Assets is the lightweight image catalog (ref/mime/bytes/kind hints, never
+	// data: URIs). It is populated only on single-deck views (create_deck /
+	// get_deck) via deckViewWithAssets so the AI can see which images a deck
+	// carries; list_decks uses deckView (no catalog) to stay light.
+	Assets []AssetInfo `json:"assets,omitempty"`
 }
 
-// deckView projects a store.DeckManifest to the slim DeckView.
+// deckView projects a store.DeckManifest to the slim DeckView WITHOUT the asset
+// catalog (used by list_decks, which spans many decks).
 func deckView(d *store.DeckManifest) *DeckView {
 	if d == nil {
 		return nil
@@ -63,6 +118,21 @@ func deckView(d *store.DeckManifest) *DeckView {
 		AssetCount:       len(d.Assets),
 		HasTemplateModel: d.TemplateModel != "",
 	}
+}
+
+// deckViewWithAssets is deckView plus the lightweight image catalog. Use it for
+// single-deck views (create_deck / get_deck / list_deck_assets) so the AI sees
+// the deck's images (imported template media, logos, photos) it can reference or
+// swap. The catalog carries hints only — never the base64 data: URIs.
+func deckViewWithAssets(d *store.DeckManifest) *DeckView {
+	v := deckView(d)
+	if v == nil {
+		return nil
+	}
+	if d != nil {
+		v.Assets = assetCatalog(d.Assets)
+	}
+	return v
 }
 
 // deckViews maps a slice of manifests to slim views.
@@ -131,10 +201,14 @@ type TemplateSummary struct {
 // ArchetypeVariant names one fillable slide skeleton in a template: its Kind
 // (role, e.g. title/section/content/agenda) plus a human-readable Label. A
 // template may carry MULTIPLE variants per role (title, title-2, ...); the model
-// uses Label to ask the user which to use. Markup is deliberately omitted here.
+// uses Label to ask the user which to use. Each variant also reports its Tier
+// ("fixed" brand chrome vs "flexible" content) and, for fixed chrome, the
+// FillSlots (ast-text ids the AI may edit). Markup is deliberately omitted here.
 type ArchetypeVariant struct {
-	Kind  string `json:"kind"`
-	Label string `json:"label,omitempty"`
+	Kind      string   `json:"kind"`
+	Label     string   `json:"label,omitempty"`
+	Tier      string   `json:"tier,omitempty"`
+	FillSlots []string `json:"fillSlots,omitempty"`
 }
 
 // ListTemplatesResult contains lightweight summaries of the available slide
@@ -198,7 +272,7 @@ func createDeck(ctx context.Context, args CreateDeckArgs) (DeckResult, error) {
 		if err != nil {
 			return DeckResult{}, err
 		}
-		return DeckResult{Deck: deckView(deck), Archetypes: tmpl.Archetypes}, nil
+		return DeckResult{Deck: deckViewWithAssets(deck), Archetypes: tmpl.Archetypes}, nil
 	}
 
 	deck, err := svc.CreateDeck(ctx, slug, title, description, args.Theme)
@@ -237,7 +311,7 @@ func getDeck(ctx context.Context, args GetDeckArgs) (DeckResult, error) {
 		return DeckResult{}, err
 	}
 	sort.Slice(slides, func(i, j int) bool { return slides[i].Position < slides[j].Position })
-	return DeckResult{Deck: deckView(deck), Slides: slides, SlideCount: len(slides)}, nil
+	return DeckResult{Deck: deckViewWithAssets(deck), Slides: slides, SlideCount: len(slides)}, nil
 }
 
 func listDecks(ctx context.Context, _ ListDecksArgs) (ListDecksResult, error) {
@@ -288,7 +362,7 @@ func templateSummary(t themes.Template, scope string) TemplateSummary {
 	variants := make([]ArchetypeVariant, 0, len(t.Archetypes))
 	for _, arch := range t.Archetypes {
 		kinds = append(kinds, arch.Kind)
-		variants = append(variants, ArchetypeVariant{Kind: arch.Kind, Label: arch.Title})
+		variants = append(variants, ArchetypeVariant{Kind: arch.Kind, Label: arch.Title, Tier: arch.Tier, FillSlots: arch.FillSlots})
 	}
 	return TemplateSummary{
 		Name:           t.Name,
@@ -326,6 +400,83 @@ func validateDeck(ctx context.Context, args ValidateDeckArgs) (ValidateDeckResul
 	return result, nil
 }
 
+// ListDeckAssetsArgs defines the list_deck_assets tool input.
+type ListDeckAssetsArgs struct {
+	DeckSlug string `json:"deck_slug" jsonschema:"Slug of the deck whose image assets to list."`
+}
+
+// ListDeckAssetsResult is the deck's image-asset catalog (hints only, no data URIs).
+type ListDeckAssetsResult struct {
+	Deck   *DeckView   `json:"deck"`
+	Assets []AssetInfo `json:"assets"`
+}
+
+// listDeckAssets returns the deck's image-asset catalog so the AI can discover
+// which asset-refs exist (imported template media, logos, photos) to reference
+// in an ast-image or to swap. It loads the full manifest (Assets present) and
+// projects it to the data-free catalog.
+func listDeckAssets(ctx context.Context, args ListDeckAssetsArgs) (ListDeckAssetsResult, error) {
+	svc, err := personalService(ctx)
+	if err != nil {
+		return ListDeckAssetsResult{}, err
+	}
+	deck, _, err := svc.Deck(ctx, strings.TrimSpace(args.DeckSlug))
+	if err != nil {
+		return ListDeckAssetsResult{}, err
+	}
+	return ListDeckAssetsResult{Deck: deckView(deck), Assets: assetCatalog(deck.Assets)}, nil
+}
+
+// AddDeckImageArgs defines the add_deck_image tool input.
+type AddDeckImageArgs struct {
+	DeckSlug string `json:"deck_slug" jsonschema:"Slug of the deck to add the image to."`
+	URL      string `json:"url" jsonschema:"Public https URL of an image to fetch and add to the deck asset library."`
+	Alt      string `json:"alt,omitempty" jsonschema:"Optional alt text describing the image."`
+}
+
+// AddDeckImageResult reports the newly added asset's ref (usable directly as an
+// ast-image asset-ref) plus MIME/size hints.
+type AddDeckImageResult struct {
+	Deck     *DeckView `json:"deck"`
+	AssetRef string    `json:"assetRef"`
+	MIME     string    `json:"mime"`
+	Bytes    int       `json:"bytes"`
+}
+
+// newAssetIngestor builds the AssetIngestor used by add_deck_image. It is a
+// package-level var so tests can inject a custom http.RoundTripper (the
+// SSRF-protected default rejects the loopback addresses httptest servers bind
+// to). Production always uses the zero-value ingestor with its safe defaults.
+var newAssetIngestor = func() AssetIngestor { return AssetIngestor{} }
+
+// addDeckImage fetches a public image URL through the SSRF-protected
+// AssetIngestor (MIME/SVG validation, 20MB cap) and adds it to the deck's asset
+// library, returning the content-addressed asset-ref the AI can put in an
+// ast-image. The ref is "sha256-<hex>" to match the importer's key convention so
+// resolveImageSrc lookups are uniform. Adding the same URL twice is idempotent.
+func addDeckImage(ctx context.Context, args AddDeckImageArgs) (AddDeckImageResult, error) {
+	svc, err := personalService(ctx)
+	if err != nil {
+		return AddDeckImageResult{}, err
+	}
+	slug := strings.TrimSpace(args.DeckSlug)
+	url := strings.TrimSpace(args.URL)
+	if slug == "" || url == "" {
+		return AddDeckImageResult{}, fmt.Errorf("deck_slug and url are required")
+	}
+	asset, err := newAssetIngestor().Fetch(ctx, url)
+	if err != nil {
+		return AddDeckImageResult{}, fmt.Errorf("fetch image: %w", err)
+	}
+	ref := "sha256-" + asset.ID
+	dataURI := "data:" + asset.MIME + ";base64," + base64.StdEncoding.EncodeToString(asset.Bytes)
+	deck, err := svc.AddDeckAsset(ctx, slug, ref, dataURI)
+	if err != nil {
+		return AddDeckImageResult{}, fmt.Errorf("add deck image: %w", err)
+	}
+	return AddDeckImageResult{Deck: deckViewWithAssets(deck), AssetRef: ref, MIME: asset.MIME, Bytes: len(asset.Bytes)}, nil
+}
+
 // GetTools returns the chat tools for authoring and inspecting private slide decks.
 func GetTools() ([]tool.Tool, error) {
 	specs := []struct {
@@ -333,8 +484,8 @@ func GetTools() ([]tool.Tool, error) {
 		description string
 		newTool     func() (tool.Tool, error)
 	}{
-		{"create_deck", "Create a new private Astonish Slides deck before writing slides. Pass an optional template (see list_templates) to seed a coherent theme, assets, and starting archetypes.", func() (tool.Tool, error) {
-			return functiontool.New(functiontool.Config{Name: "create_deck", Description: "Create a new private Astonish Slides deck before writing slides. Pass an optional template (see list_templates) to seed a coherent theme, assets, and starting archetypes."}, func(ctx tool.Context, args CreateDeckArgs) (DeckResult, error) {
+		{"create_deck", "Create a new private Astonish Slides deck before writing slides. Pass an optional template (see list_templates) to seed a coherent theme, assets, and starting archetypes tagged fixed|flexible; reproduce fixed chrome verbatim, editing only its fillSlots.", func() (tool.Tool, error) {
+			return functiontool.New(functiontool.Config{Name: "create_deck", Description: "Create a new private Astonish Slides deck before writing slides. Pass an optional template (see list_templates) to seed a coherent theme, assets, and starting archetypes tagged fixed|flexible; reproduce fixed chrome verbatim, editing only its fillSlots."}, func(ctx tool.Context, args CreateDeckArgs) (DeckResult, error) {
 				return createDeck(ctx, args)
 			})
 		}},
@@ -353,14 +504,24 @@ func GetTools() ([]tool.Tool, error) {
 				return listDecks(ctx, args)
 			})
 		}},
-		{"list_templates", "List available slide templates (built-in + imported) as a lightweight catalog: each entry has name, label, description, scope, and archetype kinds only — no markup, tokens, or assets. Pass a template name to create_deck to seed the full theme + assets and receive the archetype markup to fill.", func() (tool.Tool, error) {
-			return functiontool.New(functiontool.Config{Name: "list_templates", Description: "List available slide templates (built-in + imported) as a lightweight catalog: each entry has name, label, description, scope, and archetype kinds only — no markup, tokens, or assets. Pass a template name to create_deck to seed the full theme + assets and receive the archetype markup to fill."}, func(ctx tool.Context, args ListTemplatesArgs) (ListTemplatesResult, error) {
+		{"list_templates", "List available slide templates (built-in + imported) as a lightweight catalog: each entry has name, label, description, scope, and archetype variants reporting {kind,label,tier,fillSlots} — no markup, tokens, or assets. Pass a template name to create_deck to seed the full theme + assets and receive the archetype markup to fill.", func() (tool.Tool, error) {
+			return functiontool.New(functiontool.Config{Name: "list_templates", Description: "List available slide templates (built-in + imported) as a lightweight catalog: each entry has name, label, description, scope, and archetype variants reporting {kind,label,tier,fillSlots} — no markup, tokens, or assets. Pass a template name to create_deck to seed the full theme + assets and receive the archetype markup to fill."}, func(ctx tool.Context, args ListTemplatesArgs) (ListTemplatesResult, error) {
 				return listTemplates(ctx, args)
 			})
 		}},
 		{"validate_deck", "Validate every persisted slide in a private deck and return structured ASD diagnostics.", func() (tool.Tool, error) {
 			return functiontool.New(functiontool.Config{Name: "validate_deck", Description: "Validate every persisted slide in a private deck and return structured ASD diagnostics."}, func(ctx tool.Context, args ValidateDeckArgs) (ValidateDeckResult, error) {
 				return validateDeck(ctx, args)
+			})
+		}},
+		{"list_deck_assets", "List the image assets already in a deck (imported template media, logos, photos) with their asset-ref ids; use an id as an ast-image asset-ref. Returns hints only (ref, mime, size, kind) — never the image data.", func() (tool.Tool, error) {
+			return functiontool.New(functiontool.Config{Name: "list_deck_assets", Description: "List the image assets already in a deck (imported template media, logos, photos) with their asset-ref ids; use an id as an ast-image asset-ref. Returns hints only (ref, mime, size, kind) — never the image data."}, func(ctx tool.Context, args ListDeckAssetsArgs) (ListDeckAssetsResult, error) {
+				return listDeckAssets(ctx, args)
+			})
+		}},
+		{"add_deck_image", "Fetch a public https image URL and add it to the deck asset library; returns the asset-ref to reference in an ast-image. Use list_deck_assets first to see existing images and to swap one. The fetch is SSRF-protected and rejects non-image or private-network URLs.", func() (tool.Tool, error) {
+			return functiontool.New(functiontool.Config{Name: "add_deck_image", Description: "Fetch a public https image URL and add it to the deck asset library; returns the asset-ref to reference in an ast-image. Use list_deck_assets first to see existing images and to swap one. The fetch is SSRF-protected and rejects non-image or private-network URLs."}, func(ctx tool.Context, args AddDeckImageArgs) (AddDeckImageResult, error) {
+				return addDeckImage(ctx, args)
 			})
 		}},
 	}

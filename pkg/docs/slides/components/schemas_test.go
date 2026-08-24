@@ -15,9 +15,15 @@ func TestSchemaV1(t *testing.T) {
 func TestSchemaV2Superset(t *testing.T) {
 	// v2 fidelity attributes must be present as optional on the relevant tags.
 	shape, _ := SchemaV1("ast-shape")
-	for _, want := range []string{"rot", "fill", "line", "line-dash", "head-end", "tail-end", "geom", "path", "opacity", "fill-token", "line-token"} {
+	for _, want := range []string{"rot", "fill", "line", "line-dash", "head-end", "tail-end", "geom", "path", "opacity", "fill-token", "line-token", "flip-h", "flip-v"} {
 		if !contains(shape.Optional, want) {
 			t.Errorf("ast-shape missing optional attr %q", want)
+		}
+	}
+	image, _ := SchemaV1("ast-image")
+	for _, want := range []string{"fit", "rot", "opacity", "flip-h", "flip-v"} {
+		if !contains(image.Optional, want) {
+			t.Errorf("ast-image missing optional attr %q", want)
 		}
 	}
 	text, _ := SchemaV1("ast-text")

@@ -202,6 +202,10 @@ func nodeFromHTML(n *html.Node) (Node, error) {
 			out.Geom = a.Val
 		case "path":
 			out.Path = a.Val
+		case "flip-h":
+			out.FlipH = a.Val == "true" || a.Val == "1"
+		case "flip-v":
+			out.FlipV = a.Val == "true" || a.Val == "1"
 		default:
 			out.Props[a.Key] = a.Val
 		}

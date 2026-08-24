@@ -21,12 +21,12 @@ var schemasV1 = map[string]AttributeSchema{
 	"ast-shape": {Required: []string{"id", "kind", "x", "y", "w", "h"}, Optional: []string{
 		"fill-token", "line-token", "line-width", "alt", "decorative",
 		// v2 fidelity attributes:
-		"rot", "fill", "line", "line-dash", "head-end", "tail-end", "geom", "path", "opacity",
+		"rot", "fill", "line", "line-dash", "head-end", "tail-end", "geom", "path", "opacity", "flip-h", "flip-v",
 	}},
 	"ast-image": {Required: []string{"id", "asset-ref", "x", "y", "w", "h"}, Optional: []string{
 		"fit", "alt", "decorative",
 		// v2 fidelity attributes:
-		"rot", "opacity",
+		"rot", "opacity", "flip-h", "flip-v",
 	}},
 	"ast-table": {Required: []string{"id", "data-ref", "x", "y", "w", "h"}, Optional: []string{"header", "style-token", "alt"}},
 	"ast-chart": {Required: []string{"id", "kind", "data-ref", "x", "y", "w", "h"}, Optional: []string{"category-key", "value-keys", "style-token", "alt"}},

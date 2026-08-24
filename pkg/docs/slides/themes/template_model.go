@@ -136,7 +136,9 @@ type IRTextStyle struct {
 
 // IRPlaceholder is a fillable hole. Type is the normalized family
 // (title|body|image|chart|table|media); OOXMLType/Idx preserve the source key
-// so a future editor can round-trip exactly.
+// so a future editor can round-trip exactly. A placeholder may also ship its own
+// default paint from the layout: MediaKey references a default image (e.g. a
+// picture placeholder pre-filled in the layout) and Fill a default solid color.
 type IRPlaceholder struct {
 	Name      string      `json:"name"`
 	Type      string      `json:"type"`
@@ -148,6 +150,10 @@ type IRPlaceholder struct {
 	Prompt    string      `json:"prompt,omitempty"`
 	OOXMLType string      `json:"ooxmlType,omitempty"`
 	Idx       int         `json:"idx,omitempty"`
+	MediaKey  string      `json:"mediaKey,omitempty"`
+	Fill      string      `json:"fill,omitempty"`
+	FlipH     bool        `json:"flipH,omitempty"`
+	FlipV     bool        `json:"flipV,omitempty"`
 }
 
 // IRSlideNumber is the slide-number placeholder position/style, kept separate

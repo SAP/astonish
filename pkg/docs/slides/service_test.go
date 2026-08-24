@@ -416,6 +416,93 @@ func TestSaveAndListTemplatesRoundtrip(t *testing.T) {
 	}
 }
 
+// TestSaveAndListTemplatesTierFillSlotsRoundtrip asserts the optional two-tier
+// metadata (Archetype.Tier + Archetype.FillSlots) round-trips through
+// SaveTemplate -> ListTemplates using the NUL-delimiter encoding in
+// SlideContent.Notes, and that a plain Notes (no delimiter) decodes to Tier=""
+// / FillSlots=nil for backward compatibility with pre-tier persisted templates.
+func TestSaveAndListTemplatesTierFillSlotsRoundtrip(t *testing.T) {
+	ctx := context.Background()
+	backend := newMultiDeckStore()
+	svc := Service{Store: backend}
+	tmpl := themes.Template{
+		Schema: SchemaV2,
+		Name:   "acme",
+		Label:  "Acme Brand",
+		Tokens: map[string]string{"surface": "#101820", "ink": "#F2F2F2"},
+		Archetypes: []themes.Archetype{
+			// Fixed brand chrome: carries a label, tier, and the fillable slot ids.
+			{
+				Kind:      "title",
+				Title:     "TITLE_SLIDE",
+				Tier:      "fixed",
+				FillSlots: []string{"ph-title", "ph-body"},
+				Markup:    `<ast-slide id="t"><ast-text id="ph-title" x="160" y="380" w="1600" h="200" color="#F2F2F2" size="72">{{TITLE}}</ast-text></ast-slide>`,
+			},
+			// Flexible content: tier set, no fill slots.
+			{
+				Kind:   "content",
+				Title:  "Content",
+				Tier:   "flexible",
+				Markup: `<ast-slide id="c"><ast-text id="b" x="160" y="320" w="1600" h="600" color="#F2F2F2" size="36">{{BODY}}</ast-text></ast-slide>`,
+			},
+			// Legacy archetype with no tier metadata (label-only Notes): must
+			// decode with Tier="" / FillSlots=nil (backward compat).
+			{
+				Kind:   "example",
+				Title:  "Legacy Sample",
+				Markup: `<ast-slide id="e"><ast-text id="h" x="0" y="0" w="100" h="100">{{TITLE}}</ast-text></ast-slide>`,
+			},
+		},
+	}
+	if err := svc.SaveTemplate(ctx, tmpl); err != nil {
+		t.Fatalf("save template: %v", err)
+	}
+
+	got, err := svc.ListTemplates(ctx)
+	if err != nil {
+		t.Fatalf("list templates: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 template, got %d", len(got))
+	}
+	byKind := map[string]themes.Archetype{}
+	for _, a := range got[0].Archetypes {
+		byKind[a.Kind] = a
+	}
+
+	title := byKind["title"]
+	if title.Tier != "fixed" {
+		t.Fatalf("title tier not roundtripped: got %q want fixed", title.Tier)
+	}
+	if len(title.FillSlots) != 2 || title.FillSlots[0] != "ph-title" || title.FillSlots[1] != "ph-body" {
+		t.Fatalf("title fillSlots not roundtripped: %#v", title.FillSlots)
+	}
+	if title.Title != "TITLE_SLIDE" {
+		t.Fatalf("title label not roundtripped: got %q", title.Title)
+	}
+
+	content := byKind["content"]
+	if content.Tier != "flexible" {
+		t.Fatalf("content tier not roundtripped: got %q want flexible", content.Tier)
+	}
+	if len(content.FillSlots) != 0 {
+		t.Fatalf("content should have no fillSlots, got %#v", content.FillSlots)
+	}
+
+	// Backward compat: a plain (delimiter-free) Notes yields empty metadata.
+	legacy := byKind["example"]
+	if legacy.Tier != "" {
+		t.Fatalf("legacy archetype must decode Tier=\"\", got %q", legacy.Tier)
+	}
+	if legacy.FillSlots != nil {
+		t.Fatalf("legacy archetype must decode FillSlots=nil, got %#v", legacy.FillSlots)
+	}
+	if legacy.Title != "Legacy Sample" {
+		t.Fatalf("legacy label not roundtripped: got %q", legacy.Title)
+	}
+}
+
 func TestSaveAndListTemplateWithModelRoundtrip(t *testing.T) {
 	ctx := context.Background()
 	svc := Service{Store: newMultiDeckStore()}
@@ -597,5 +684,45 @@ func TestListDecksHidesTemplateDecks(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("ListDecks dropped the regular deck; got %#v", decks)
+	}
+}
+
+func TestAddDeckAsset(t *testing.T) {
+	backend := newMultiDeckStore()
+	svc := Service{Store: backend}
+	ctx := context.Background()
+
+	if _, err := svc.CreateDeck(ctx, "brand", "Brand", "desc", map[string]string{"surface": "#101820"}); err != nil {
+		t.Fatal(err)
+	}
+
+	const ref = "sha256-abc123"
+	const dataURI = "data:image/png;base64,AAAA"
+	if _, err := svc.AddDeckAsset(ctx, "brand", ref, dataURI); err != nil {
+		t.Fatal(err)
+	}
+
+	deck, _, err := svc.Deck(ctx, "brand")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deck.Assets[ref] != dataURI {
+		t.Fatalf("asset not persisted: %#v", deck.Assets)
+	}
+	// Unrelated fields are unchanged.
+	if deck.Title != "Brand" || deck.Description != "desc" || deck.Theme["surface"] != "#101820" {
+		t.Fatalf("AddDeckAsset mutated unrelated fields: %#v", deck)
+	}
+
+	// Idempotent overwrite with the same value keeps a single entry.
+	if _, err := svc.AddDeckAsset(ctx, "brand", ref, dataURI); err != nil {
+		t.Fatal(err)
+	}
+	deck2, _, err := svc.Deck(ctx, "brand")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deck2.Assets) != 1 {
+		t.Fatalf("expected 1 asset after idempotent add, got %d", len(deck2.Assets))
 	}
 }

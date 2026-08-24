@@ -118,6 +118,10 @@ export interface IRPlaceholder {
   prompt?: string
   ooxmlType?: string
   idx?: number
+  mediaKey?: string
+  fill?: string
+  flipH?: boolean
+  flipV?: boolean
 }
 
 export interface IRSlideNumber {

@@ -64,6 +64,12 @@ export interface SlidesTemplateArchetype {
   /** Human-readable variant label surfaced in the Templates UI. */
   label?: string
   markup?: string
+  /** Two-tier tag: 'fixed' = brand chrome reproduced verbatim (fill only the
+   * listed fillSlots text); 'flexible' = content adapted by type. Absent on
+   * built-in templates. */
+  tier?: 'fixed' | 'flexible'
+  /** For fixed chrome, the ast-text ids whose text the AI may substitute. */
+  fillSlots?: string[]
 }
 
 /** A slide template (design tokens + assets + archetype layouts). */

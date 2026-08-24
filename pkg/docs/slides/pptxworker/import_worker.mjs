@@ -302,10 +302,38 @@ const custGeomToPaths = (custGeom) => {
 // ---------------------------------------------------------------------------
 // Rich text extraction: a:txBody -> runs[]
 // ---------------------------------------------------------------------------
-const extractRuns = (txBody, themeColors) => {
+// styleDefaults (optional) supplies an inherited <size,font> resolved from the
+// master/layout <p:txStyles> for this shape's placeholder role, used ONLY when a
+// run carries no explicit @_sz / a:latin@typeface. This mirrors PowerPoint text
+// inheritance (run rPr -> shape lstStyle -> placeholder lvl defaults -> master
+// txStyles) so a footer/body run without an explicit run-level size/font is not
+// dropped to the hard-coded chromeToAsd/placeholderToAsd default (24pt / serif).
+// It is fully defensive: when styleDefaults is absent, behavior is unchanged.
+const extractRuns = (txBody, themeColors, styleDefaults = null) => {
   const runs = []
   let text = ''
   if (!txBody) return { runs, text }
+  // The shape's OWN <a:lstStyle><a:lvl1pPr><a:defRPr> is the most-local default
+  // (tighter than the master/layout txStyles). Prefer it over styleDefaults.
+  let localDefaults = null
+  const lstStyle = findChild(txBody, 'a:lstStyle')
+  if (lstStyle) {
+    const lvl1 = findChild(lstStyle, 'a:lvl1pPr')
+    const defRPr = lvl1 ? findChild(lvl1, 'a:defRPr') : null
+    if (defRPr) {
+      const da = attrsOf(defRPr)
+      const dLatin = findChild(defRPr, 'a:latin')
+      localDefaults = {
+        size: da['@_sz'] ? int(Number(da['@_sz']) / 100) : null,
+        font: dLatin && attrsOf(dLatin)['@_typeface'] ? String(attrsOf(dLatin)['@_typeface']) : null,
+      }
+    }
+  }
+  const inherit = (key) => {
+    if (localDefaults && localDefaults[key] != null) return localDefaults[key]
+    if (styleDefaults && styleDefaults[key] != null) return styleDefaults[key]
+    return null
+  }
   for (const p of findAll(txBody, 'a:p')) {
     for (const r of findAll(p, 'a:r')) {
       const rPr = findChild(r, 'a:rPr')
@@ -317,9 +345,13 @@ const extractRuns = (txBody, themeColors) => {
       if (attrs['@_b'] === '1' || attrs['@_b'] === 'true') run.bold = true
       if (attrs['@_i'] === '1' || attrs['@_i'] === 'true') run.italic = true
       if (attrs['@_u'] && attrs['@_u'] !== 'none') run.underline = true
+      // Size: explicit run-level @_sz wins; else inherit from lstStyle/txStyles.
       if (attrs['@_sz']) run.size = int(Number(attrs['@_sz']) / 100)
+      else { const s = inherit('size'); if (s != null) run.size = s }
       const latin = rPr ? findChild(rPr, 'a:latin') : null
+      // Font: explicit run-level a:latin wins; else inherit.
       if (latin && attrsOf(latin)['@_typeface']) run.font = String(attrsOf(latin)['@_typeface'])
+      else { const f = inherit('font'); if (f != null) run.font = f }
       const fill = rPr ? findChild(rPr, 'a:solidFill') : null
       const col = colorFromFill(fill, themeColors)
       if (col) run.color = col.hex
@@ -427,6 +459,28 @@ const parseRels = (xml) => {
 }
 
 const MIME = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', bmp: 'image/bmp', svg: 'image/svg+xml', webp: 'image/webp', emf: 'image/emf', wmf: 'image/wmf', tiff: 'image/tiff' }
+
+// sniffMime inspects the leading bytes of a media file to recover its true image
+// type when the file extension is missing, wrong, or generic (e.g. corporate
+// templates that ship a PNG as "image6.bin"). Without this the extension-only
+// MIME lookup falls back to application/octet-stream, and the render/export
+// layer (resolveImageSrc requires a data:image/ prefix) silently drops the
+// image — which is how real logos/chrome vanished. Mirrors the pptx-html pilot's
+// sniffMime; generic across templates, keyed off bytes not names.
+const sniffMime = (buf) => {
+  if (!buf || buf.length < 3) return null
+  const b = buf
+  if (b.length >= 8 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return 'image/png'
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'image/jpeg'
+  if (b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46) return 'image/gif'
+  if (b.length >= 12 && b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 && b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50) return 'image/webp'
+  if (b.length >= 2 && b[0] === 0x42 && b[1] === 0x4d) return 'image/bmp'
+  // SVG / XML-wrapped SVG (text).
+  const head = b.slice(0, 160).toString('utf-8').trimStart()
+  if (head.startsWith('<svg') || (head.startsWith('<?xml') && head.includes('<svg'))) return 'image/svg+xml'
+  return null
+}
+
 
 // Normalize a relative rels target against the part dir (e.g. ppt/slides).
 const resolveTarget = (baseDir, target) => {
@@ -545,6 +599,40 @@ try {
     themeTokens = { surface: '#FFFFFF', ink: '#172033', accent: '#2563EB', displayFont: 'Aptos Display', bodyFont: 'Aptos' }
   }
 
+  // Resolve an OOXML theme font-reference token to a concrete family. Runs that
+  // use the theme reference +mj-lt/+mn-lt (major/minor Latin) — or the -ea/-cs
+  // variants — carry the token literally in a:latin/@typeface; without this it
+  // would leak into markup as font="+mn-lt". themeTokens.displayFont/bodyFont
+  // already hold the resolved major/minor families. Concrete names (e.g.
+  // "72 Brand") are returned unchanged.
+  const resolveFontToken = (tf) => {
+    if (!tf) return tf
+    const s = String(tf)
+    if (/^\+mj-/.test(s)) return themeTokens.displayFont
+    if (/^\+mn-/.test(s)) return themeTokens.bodyFont
+    return s
+  }
+
+  // Corporate templates name concrete brand families (e.g. "72 Brand",
+  // "72 Brand Medium") that are NOT installed in a browser. ast-text applies the
+  // `font` attribute directly as `font-family`, so an uninstalled single family
+  // falls back to the browser default — which is a SERIF (Times), not the deck's
+  // sans-serif. Appending a web-safe generic fallback chain makes an uninstalled
+  // brand font degrade to Aptos/Arial/sans-serif instead of serif, while still
+  // preferring the real brand font when it IS available (embedded/installed).
+  // Generic and defensive: if the family already ends in a CSS generic, or is a
+  // theme token, it is returned unchanged.
+  const FONT_FALLBACK = 'Aptos, Arial, sans-serif'
+  const withFontFallback = (family) => {
+    if (!family) return family
+    const s = String(family).trim()
+    if (!s) return s
+    // Already a list or already ends in a generic keyword — leave as-is.
+    if (s.includes(',')) return s
+    if (/\b(sans-serif|serif|monospace|cursive|fantasy|system-ui)$/i.test(s)) return s
+    return `${s}, ${FONT_FALLBACK}`
+  }
+
   // Assets map (content-addressed).
   const assets = {}
   const addAsset = async (path) => {
@@ -555,7 +643,12 @@ try {
     const ref = `sha256-${hash}`
     if (!assets[ref]) {
       const ext = (path.split('.').pop() || '').toLowerCase()
-      const mime = MIME[ext] || 'application/octet-stream'
+      let mime = MIME[ext]
+      // If the extension gives no MIME, or a non-image one (e.g. ".bin"), sniff
+      // the bytes so a mislabeled image still resolves at render time.
+      if (!mime || !mime.startsWith('image/')) {
+        mime = sniffMime(data) || mime || 'application/octet-stream'
+      }
       assets[ref] = `data:${mime};base64,${data.toString('base64')}`
     }
     return ref
@@ -590,6 +683,48 @@ try {
   // ---- Shape processing -------------------------------------------------
   let nodeCounter = 0
   const nextId = (prefix) => `${prefix}-${++nodeCounter}`
+
+  // Inherited text-style defaults for the spTree currently being processed.
+  // Set from the master/layout <p:txStyles> before processTree runs so a shape
+  // whose runs carry no explicit @_sz / a:latin can inherit the real size/font
+  // for its placeholder role instead of the hard-coded chromeToAsd default.
+  // {title:{size,font}, body:{size,font}, other:{size,font}} (any may be null).
+  let currentTxStyles = null
+  // Map an OOXML placeholder role to the txStyles style bucket. Titles use
+  // titleStyle; everything decorative/footer/other uses otherStyle; body/content
+  // uses bodyStyle. When no placeholder is present (free text box), OTHER is the
+  // closest match (footers are userDrawn text boxes with no p:ph).
+  const txStyleDefaultFor = (phType) => {
+    if (!currentTxStyles) return null
+    const t = String(phType || '')
+    if (t === 'title' || t === 'ctrTitle') return currentTxStyles.title
+    if (t === 'body' || t === 'subTitle') return currentTxStyles.body
+    return currentTxStyles.other
+  }
+  // Parse a master/layout <p:txStyles> into resolved {title,body,other} defaults.
+  // Each style's lvl1 <a:defRPr> supplies the inherited @sz (points) and a:latin
+  // typeface. Returns null when the element is absent (defensive: no change).
+  const parseTxStyles = (txStyles) => {
+    if (!txStyles) return null
+    const pick = (styleTag) => {
+      const st = findChild(txStyles, styleTag)
+      if (!st) return null
+      const lvl1 = findChild(st, 'a:lvl1pPr')
+      const defRPr = lvl1 ? findChild(lvl1, 'a:defRPr') : null
+      if (!defRPr) return null
+      const da = attrsOf(defRPr)
+      const latin = findChild(defRPr, 'a:latin')
+      const font = latin && attrsOf(latin)['@_typeface'] ? String(attrsOf(latin)['@_typeface']) : null
+      const size = da['@_sz'] ? int(Number(da['@_sz']) / 100) : null
+      if (size == null && font == null) return null
+      return { size, font }
+    }
+    const title = pick('p:titleStyle')
+    const body = pick('p:bodyStyle')
+    const other = pick('p:otherStyle')
+    if (!title && !body && !other) return null
+    return { title, body, other }
+  }
 
   // Convert EMU box -> logical px box with scale + group affine already applied
   // by the caller (which passes absolute EMU). Clamp to canvas.
@@ -692,7 +827,7 @@ try {
       }
     }
     const txBody = findChild(sp, 'p:txBody')
-    const { runs, text } = extractRuns(txBody, themeColors)
+    const { runs, text } = extractRuns(txBody, themeColors, txStyleDefaultFor(node.ph && node.ph.type))
     if (runs.length) {
       node.runs = runs
       node.text = text
@@ -707,6 +842,8 @@ try {
     box = applyAffine(box, affine)
     const node = { id: nextId('img'), type: 'image', geometry: toCanvasBox(box) }
     if (box.rot) node.rot = box.rot
+    if (box.flipH) node.flipH = true
+    if (box.flipV) node.flipV = true
     // Placeholder marker (pic placeholders are fillable image slots in layouts).
     const phEl = findDeep(pic, 'p:ph')
     if (phEl) {
@@ -898,13 +1035,25 @@ try {
     // multiple templates. Each of the N slide layouts becomes an archetype whose
     // KIND is its role (title/section/content/agenda/closing/blank) and whose
     // LABEL is the real PowerPoint layout name (e.g. "Blue cover, anvil and
-    // image"), so the user/AI can choose among same-role variants. Each layout's
-    // color/chrome is captured via master→layout background+chrome inheritance
-    // (the colorful covers/dividers carry their pictures + accent shapes in the
-    // LAYOUT; plain layouts inherit the neutral background from the master).
-    // A lossless per-layout / per-sample-slide IR (TemplateModel, schema 3) is
-    // also persisted for the future in-browser editor. Everything renders through
-    // the existing IR→ASD serializer + ASD runtime (no second renderer).
+    // image"), so the user/AI can choose among same-role variants.
+    //
+    // TWO TIERS (see CHROME_KINDS / roleTier below):
+    //   • FIXED brand chrome — the stable role set { title, section (divider),
+    //     agenda, closing (thank-you/end) }. Reproduced VERBATIM; the AI edits
+    //     only the text inside the archetype's recorded fillSlots. This set is
+    //     GUARANTEED to exist: a missing role is filled by aliasing the closest
+    //     branded layout, else by synthesizing one in the template's OWN style
+    //     (master background + master chrome objects + theme tokens) — never a
+    //     generic white slab — so the chrome family stays visually coherent.
+    //   • FLEXIBLE content — content/blank/etc.; the AI adapts the body region
+    //     to the content type (bullets/table/chart/image) keeping the tokens.
+    //
+    // Each layout's color/chrome is captured via master→layout background+chrome
+    // inheritance (the colorful covers/dividers carry their pictures + accent
+    // shapes in the LAYOUT; plain layouts inherit the neutral background from the
+    // master). A lossless per-layout / per-sample-slide IR (TemplateModel, schema
+    // 3) is also persisted for the future in-browser editor. Everything renders
+    // through the existing IR→ASD serializer + ASD runtime (no second renderer).
     // -----------------------------------------------------------------------
 
     // Map an OOXML placeholder type to our coarse placeholder role.
@@ -975,11 +1124,17 @@ try {
       const st = {}
       const r0 = node.runs && node.runs[0]
       if (r0) {
-        if (r0.size) st.fontSize = r0.size
+        // Scale the raw OOXML point size to the ASD canvas exactly once, in the
+        // same closure where `scale` (line ~532) is defined. Geometry (x/y/w/h)
+        // is already scaled by `scale`; a footer at sz="1000" (10pt) must render
+        // at ~15 to match its 1.5x-enlarged box rather than a tiny size="10".
+        // extractRuns stores the RAW pt value (unscaled); resolution happens here
+        // mirroring the resolveFontToken pattern.
+        if (r0.size) st.fontSize = Math.max(1, int(r0.size * scale))
         if (r0.color) st.color = r0.color
         if (r0.bold) st.bold = true
         if (r0.italic) st.italic = true
-        if (r0.font) st.fontFace = r0.font
+        if (r0.font) st.fontFace = resolveFontToken(r0.font)
       }
       return st
     }
@@ -991,7 +1146,7 @@ try {
         const type = phRole(node.ph.type)
         phCounter += 1
         const name = `${type}-${phCounter}`
-        layout.placeholders.push({
+        const ph = {
           name,
           type,
           x: g.x, y: g.y, w: g.w, h: g.h,
@@ -999,7 +1154,15 @@ try {
           prompt: type === 'title' ? '{{TITLE}}' : '{{BODY}}',
           ooxmlType: node.ph.type,
           idx: node.ph.idx ? Number(node.ph.idx) : 0,
-        })
+        }
+        // A placeholder may ship its OWN default paint in the layout: a picture
+        // placeholder can carry a default blip image, and any placeholder can
+        // carry a default solid fill. Preserve those so the IR is lossless and
+        // the ASD projection can render the real default rather than a synthetic
+        // panel. (Generic: keyed off the extracted node, not any one template.)
+        if (node.type === 'image' && node.props && node.props.assetRef) ph.mediaKey = node.props.assetRef
+        if (node.fill) ph.fill = node.fill
+        layout.placeholders.push(ph)
         return
       }
       // Chrome object (decorative).
@@ -1041,7 +1204,11 @@ try {
         for (const o of masterCtx.chromeObjects) layout.objects.push(o)
       }
       const nodes = []
+      // Inherit the master's text-style defaults so layout/sample shapes without
+      // explicit run sizes resolve a real size/font (extractRuns reads this).
+      currentTxStyles = masterCtx ? (masterCtx.txStyles || null) : null
       if (spTree) await processTree(spTree, null, rels, dir, nodes)
+      currentTxStyles = null
       for (const n of nodes) classify(n, layout)
       return layout
     }
@@ -1050,25 +1217,54 @@ try {
     // The .pptx layouts carry no <p:sldLayout type> attribute (confirmed empty
     // on all 39 in the reference corporate deck), so the human layout NAME is
     // the primary signal. Order matters: check the most specific roles first.
+    // The name is NORMALIZED first — non-alphanumerics collapse to single spaces
+    // — so "TITLE_SLIDE"→"title slide" and "DividerPage"→"divider page" match.
     const kindOf = (layout, layoutType) => {
-      const name = (layout.name || '').toLowerCase()
+      const name = (layout.name || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
       const hasTitle = layout.placeholders.some((p) => p.type === 'title')
       const bodyCount = layout.placeholders.filter((p) => p.type === 'body').length
-      // Closing family (thank you / contact / copyright / Q&A / closing).
-      if (/thank|closing|contact|copyright|q\s*&\s*a|q&a|farewell/.test(name)) return 'closing'
-      // Agenda / table-of-contents family.
+      const picCount = layout.placeholders.filter((p) => p.type === 'image').length
+      // Signature-first: a layout carrying a body OR picture placeholder is
+      // editable CONTENT even when its name contains "Title" (e.g. "Title and
+      // Text", "Title and Text: 2 Columns", "Title and Content", "N Columns -
+      // Text and Images", "Text and Screenshot", "Title and Text with Image").
+      // Only PURE chrome names (cover/divider/agenda/thank-you) become fixed
+      // brand chrome. So the name regexes below are gated so they never fire on a
+      // compound content layout, and the loose `\btitle\b` cover match is dropped.
+      //
+      // Closing family (thank you / contact / copyright / farewell / goodbye) —
+      // only when the layout has no body content of its own (Q&A here carries
+      // title+body+pic, so it falls through to the content signature).
+      if (bodyCount === 0 && picCount <= 1 && /thank|farewell|goodbye|copyright|contact/.test(name)) return 'closing'
+      // Agenda / table-of-contents family (the Agenda layout is legitimately fixed).
       if (/agenda|toc|overview|contents|table of contents/.test(name)) return 'agenda'
-      // Section / divider / separator family.
-      if (layoutType === 'secHead' || /divider|separator|section/.test(name)) return 'section'
-      // Cover / title family.
-      if (layoutType === 'title' || layoutType === 'titleOnly' || /cover|title slide/.test(name)) return 'title'
+      // Section / divider / separator family (dividers are fixed brand chrome).
+      if (layoutType === 'secHead' || /divider|separator|section|chapter|transition/.test(name)) return 'section'
+      // Cover / title family — STRICT: only genuine cover names, never bare
+      // "title" (which would wrongly catch "Title and Text/Only/Content").
+      if (layoutType === 'title' || /cover|title slide/.test(name) || /^title$/.test(name)) return 'title'
       // Blank.
       if (/blank/.test(name)) return 'blank'
-      // Fall back to the placeholder signature when the name is uninformative.
-      if (hasTitle && bodyCount === 0) return 'title'
-      if (bodyCount > 0) return 'content'
+      // Signature fallback: anything with a body or picture placeholder is
+      // flexible content; a bare title-only page is an editable content layout,
+      // not fixed brand chrome (the stable-chrome guarantee still aliases the
+      // branded covers L1-L12 for the fixed 'title' role).
+      if (bodyCount > 0 || picCount > 0) return 'content'
       return 'content'
     }
+
+    // ---- Two-tier archetype model -----------------------------------------
+    // CHROME_KINDS are the STABLE brand-chrome roles the deck must always be able
+    // to offer: title (cover), section (divider), agenda, and closing (thank
+    // you / end). Their archetypes are tier="fixed" — the layout is the brand,
+    // so the AI reproduces the markup verbatim and edits ONLY the text inside the
+    // recorded fillSlots. Every other role (content, blank, ...) is tier=
+    // "flexible": the AI adapts the body region to the content type. When a chrome
+    // role is missing from the imported layouts it is guaranteed downstream by
+    // aliasing the closest branded layout, else by synthesizing one in the
+    // template's OWN style (master chrome + theme tokens), never a white slab.
+    const CHROME_KINDS = ['title', 'section', 'agenda', 'closing']
+    const roleTier = (base) => (CHROME_KINDS.includes(base) ? 'fixed' : 'flexible')
 
     // uniqueKind() suffixes duplicates so variant multiplicity is preserved:
     // title, title-2, title-3, ...
@@ -1145,7 +1341,7 @@ try {
         const col = safeCol(st.color) || (themeTokens.ink && safeCol(themeTokens.ink)) || '#172033'
         attrs.push(`color="${col}"`)
         if (st.bold) attrs.push('weight="bold"')
-        if (st.fontFace && !/[;<>]/.test(st.fontFace)) attrs.push(`font="${esc(st.fontFace)}"`)
+        if (st.fontFace && !/[;<>]/.test(st.fontFace) && !/^\+/.test(st.fontFace)) attrs.push(`font="${esc(withFontFallback(st.fontFace))}"`)
         // italic is a run-level attribute (i) — ast-text has no italic attr.
         const runAttr = st.italic ? ' i="true"' : ''
         const runs = String(o.text).split('\n').filter((l) => l !== '')
@@ -1188,16 +1384,23 @@ try {
       const col = safeCol(st.color) || (themeTokens.ink && safeCol(themeTokens.ink)) || '#172033'
       const attrs = [`size="${st.fontSize || (p.type === 'title' ? 54 : 28)}"`, `color="${col}"`]
       if (st.bold || p.type === 'title') attrs.push('weight="bold"')
-      if (st.fontFace && !/[;<>]/.test(st.fontFace)) attrs.push(`font="${esc(st.fontFace)}"`)
+      if (st.fontFace && !/[;<>]/.test(st.fontFace) && !/^\+/.test(st.fontFace)) attrs.push(`font="${esc(withFontFallback(st.fontFace))}"`)
       const runAttr = st.italic ? ' i="true"' : ''
       const geo = clampGeo(p)
       return `<ast-text id="ph-${idc}" ${geo} ${attrs.join(' ')}><ast-run${runAttr}>${escText(p.prompt || '{{BODY}}')}</ast-run></ast-text>`
     }
 
     // Serialize an entire IRLayout to a single-root <ast-slide> XML fragment.
+    // Returns { markup, fillSlots }: markup is the ast-slide (unchanged from the
+    // legacy string output), and fillSlots is the ordered list of ast-text ids
+    // that carry a {{TITLE}}/{{BODY}} placeholder — i.e. the fillable text holes
+    // the author/AI may edit. Chrome (backgrounds, images, accent shapes, picture
+    // panels) is NOT a fill slot: for a FIXED brand-chrome archetype the AI must
+    // change only the text inside these ids and reproduce everything else verbatim.
     const layoutToAsd = (layout) => {
       const bg = layout.background || {}
       const parts = []
+      const fillSlots = []
       // Solid background renders as a full-canvas decorative rect (matches the
       // built-in template convention); image background renders as a full-canvas
       // ast-image FIRST (behind chrome).
@@ -1219,17 +1422,64 @@ try {
         if (p.type === 'title' || p.type === 'body') {
           pc += 1
           parts.push(placeholderToAsd(p, pc))
+          // placeholderToAsd emits id="ph-${pc}" carrying a {{TITLE}}/{{BODY}}
+          // prompt — record it as a fillable text slot.
+          fillSlots.push(`ph-${pc}`)
+        } else if (p.type === 'image') {
+          // Picture placeholders (OOXML <p:ph type="pic">) are fillable, and now
+          // SWAPPABLE, image regions. A layout may leave them empty (a "picture
+          // goes here" slot) or ship a default blip; when empty, borrowSampleImages
+          // pre-populates p.mediaKey from an authored sample photo AND records that
+          // sample picture's OWN geometry (p.borrowX/Y/W/H) + flip (p.flipH/flipV)
+          // so the default hero renders faithfully (correct size/position/mirroring)
+          // rather than squeezed into the placeholder's small declared hole.
+          // Generic (no per-template assumptions):
+          //   - mediaKey present -> render a real <ast-image>, at the borrowed
+          //     sample geometry when available, else the placeholder's own box;
+          //   - else render a neutral panel + IRWarning (last resort).
+          // The image id is advertised in fillSlots so a user can later ask to
+          // replace just the photo; the replacement inherits this slot's geometry.
+          // Paint order (bg -> objects -> placeholders == document order) keeps any
+          // decorative shape (e.g. the layout's anvil) BEHIND this image.
+          pc += 1
+          const hasBorrowGeo = p.borrowW != null && p.borrowH != null
+          const g = hasBorrowGeo
+            ? clampGeo({ x: p.borrowX, y: p.borrowY, w: p.borrowW, h: p.borrowH })
+            : clampGeo(p)
+          if (p.mediaKey) {
+            const flipAttr = `${p.flipH ? ' flip-h="true"' : ''}${p.flipV ? ' flip-v="true"' : ''}`
+            const picId = `ph-pic-${pc}`
+            parts.push(`<ast-image id="${picId}" ${g} asset-ref="${esc(p.mediaKey)}" fit="cover"${flipAttr} decorative="true"></ast-image>`)
+            // A swappable hero picture is a fillable IMAGE slot, not fixed chrome.
+            fillSlots.push(picId)
+          } else {
+            // Empty picture placeholder in a content layout: a legitimate "insert
+            // picture here" hole the author fills, NOT a fidelity failure. Emit it
+            // as a fillable image drop-SLOT advertised in fillSlots (id ph-pic-N),
+            // so create_deck/write_slide can populate it exactly like a borrowed
+            // hero slot. ast-image requires an asset-ref, so an EMPTY slot is
+            // rendered as a light neutral panel affordance whose id is advertised
+            // as an image slot; the downstream fill replaces this shape with the
+            // chosen <ast-image>. It is NOT decorative (it is fillable), carries an
+            // alt describing the region, and emits no warning.
+            const picId = `ph-pic-${pc}`
+            const panel = (p.fill && safeCol(p.fill)) || safeCol(themeTokens.muted) || safeCol(themeTokens.accent2) || '#E2E8F0'
+            parts.push(`<ast-shape id="${picId}" kind="rect" ${g} geom="rect" fill="${panel}" alt="${esc(p.name || 'Image')}"></ast-shape>`)
+            fillSlots.push(picId)
+          }
         }
       }
       // Guarantee a title + body slot so create_deck can fill it.
       if (!layout.placeholders.some((p) => p.type === 'title')) {
         parts.push(`<ast-text id="ph-title" x="160" y="120" w="1600" h="160" size="54" color="${safeCol(themeTokens.ink) || '#172033'}" weight="bold"><ast-run>{{TITLE}}</ast-run></ast-text>`)
+        fillSlots.push('ph-title')
       }
       if (!layout.placeholders.some((p) => p.type === 'body')) {
         parts.push(`<ast-text id="ph-body" x="160" y="320" w="1600" h="600" size="28" color="${safeCol(themeTokens.ink) || '#172033'}"><ast-run>{{BODY}}</ast-run></ast-text>`)
+        fillSlots.push('ph-body')
       }
       const slideId = layout.id.replace(/[^a-zA-Z0-9-]/g, '-') || 'layout'
-      return `<ast-slide id="${slideId}">${parts.join('')}</ast-slide>`
+      return { markup: `<ast-slide id="${slideId}">${parts.join('')}</ast-slide>`, fillSlots }
     }
 
     // ---- Extract every layout, then a few sample slides -------------------
@@ -1243,6 +1493,11 @@ try {
 
     const irLayouts = []
     const archetypes = []
+    // The first non-null master context seen while walking layouts is the deck's
+    // shared brand chrome (single master in a corporate template). synthChrome
+    // reuses its background + decorative objects so a synthesized chrome slide
+    // shares the deck's real background/logo rather than being a generic slab.
+    let sharedMasterCtx = null
     const usedNames = new Set()
     const uniqueLayoutId = (name) => {
       let base = String(name || 'layout').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'layout'
@@ -1275,13 +1530,18 @@ try {
       const cSld = findChild(masterEl, 'p:cSld')
       const spTree = cSld ? findChild(cSld, 'p:spTree') : null
       const bg = await bgOf(cSld, rels, dir)
+      // Capture the master's <p:txStyles> so shapes without explicit run sizes
+      // inherit the real title/body/other size+font (used by extractRuns).
+      const masterTxStyles = parseTxStyles(findChild(masterEl, 'p:txStyles'))
       // Process the master spTree to IR, then keep only decorative objects.
       phCounter = 0
+      currentTxStyles = masterTxStyles
       const tmp = { id: 'master', name: 'master', background: bg, objects: [], placeholders: [] }
       const nodes = []
       if (spTree) await processTree(spTree, null, rels, dir, nodes)
       for (const n of nodes) classify(n, tmp)
-      const ctx = { bg, chromeObjects: tmp.objects }
+      currentTxStyles = null
+      const ctx = { bg, chromeObjects: tmp.objects, txStyles: masterTxStyles }
       masterCtxByPath[masterPath] = ctx
       return ctx
     }
@@ -1294,6 +1554,147 @@ try {
         }
       }
       return null
+    }
+    // Resolve a slide's layout path from its .rels (slideLayout relationship).
+    const layoutPathOfSlide = (slideRels, slideDir) => {
+      for (const id of Object.keys(slideRels)) {
+        const r = slideRels[id]
+        if (r && r.type && /slideLayout$/.test(r.type)) {
+          return resolveTarget(slideDir, r.target)
+        }
+      }
+      return null
+    }
+
+    // ---- Sample slides (extracted BEFORE layouts so a layout with an EMPTY
+    // picture placeholder can borrow the matching authored photo) --------------
+    // Corporate templates author the hero photo on the SAMPLE SLIDE as a
+    // free-floating <p:pic> (often with NO <p:ph> binding), while the LAYOUT
+    // ships only an empty <p:ph type="pic"> "insert picture here" slot. Without
+    // the borrow the layout archetype has no image for that region and
+    // layoutToAsd falls back to a neutral panel (the reported blue box). We keep
+    // each sample's layout path so borrowSampleImages() can find the right photo.
+    // Sample slides are still NOT surfaced as archetypes — only their picture
+    // FILL is borrowed into the matching chrome archetype's placeholder.
+    const irSlides = []
+    const samplesByLayoutPath = {}
+    for (const p of slidePaths.slice(0, 12)) {
+      const xml = await readText(p)
+      if (!xml) continue
+      const doc = parseXml(xml)
+      const sld = rootEl(doc, 'p:sld')
+      if (!sld) continue
+      const dir = p.split('/').slice(0, -1).join('/')
+      const relsPath = `${dir}/_rels/${p.split('/').pop()}.rels`
+      const rels = parseRels(await readText(relsPath))
+      const cSld = findChild(sld, 'p:cSld')
+      const spTree = cSld ? findChild(cSld, 'p:spTree') : null
+      phCounter = 0
+      // Only the first 6 samples are surfaced in templateModel.slides[] (editor
+      // examples), but we index ALL processed samples for image-borrowing.
+      const ir = await buildIRLayout(spTree, cSld, rels, dir, uniqueLayoutId(`slide-${irSlides.length + 1}`), `Slide ${irSlides.length + 1}`)
+      if (irSlides.length < 6) irSlides.push(ir)
+      const lp = layoutPathOfSlide(rels, dir)
+      if (lp) (samplesByLayoutPath[lp] = samplesByLayoutPath[lp] || []).push(ir)
+    }
+
+    // Intersection-over-union of two [x,y,w,h] boxes; used to match an authored
+    // sample photo to the layout's empty picture-placeholder region.
+    const boxIoU = (a, b) => {
+      const ix = Math.max(a.x, b.x), iy = Math.max(a.y, b.y)
+      const ix2 = Math.min(a.x + a.w, b.x + b.w), iy2 = Math.min(a.y + a.h, b.y + b.h)
+      const iw = Math.max(0, ix2 - ix), ih = Math.max(0, iy2 - iy)
+      const inter = iw * ih
+      const uni = (a.w * a.h) + (b.w * b.h) - inter
+      return uni > 0 ? inter / uni : 0
+    }
+
+    // For a layout whose image placeholder(s) carry no default blip, borrow the
+    // best-matching authored PHOTO from a sample slide that USES this layout.
+    // Matching is generic (no per-template assumptions). Corporate covers place
+    // the real photo full-bleed BEHIND a colored vector "anvil" overlay (a
+    // single-path SVG shape). A naive highest-IoU pick would grab that small
+    // vector overlay (it sits exactly over the placeholder box) instead of the
+    // photo, reproducing the wrong asset (the flat green shape). So we RANK:
+    //   1. raster photos (non-SVG) strongly preferred over vector/SVG shapes;
+    //   2. then larger area (a real photo covers more than a decorative accent);
+    //   3. then box overlap (IoU) with the placeholder as the tie-breaker.
+    // Only the mediaKey (the picture FILL) is copied — geometry and everything
+    // else stay the layout's own, so this is not "sample slide as archetype".
+    const isRasterAsset = (mediaKey) => {
+      const d = assets[mediaKey]
+      // data:image/<type>;base64,… — treat everything that is not svg as raster.
+      return typeof d === 'string' && /^data:image\//.test(d) && !/^data:image\/svg\+xml/.test(d)
+    }
+    const borrowSampleImages = (layoutIR, layoutPath) => {
+      const samples = samplesByLayoutPath[layoutPath]
+      if (!samples || !samples.length) return 0
+      // Collect candidate images (mediaKey + box) across all samples for this layout.
+      const candidates = []
+      // Normalize each candidate's box to {x,y,w,h,flipH,flipV} in canvas units.
+      // Sample OBJECTS carry geometry under o.geometry (+ node-level flipH/flipV
+      // set by processPic); sample PLACEHOLDERS carry x/y/w/h directly. Capturing
+      // a uniform box lets the borrow reproduce the sample picture's OWN geometry
+      // and horizontal/vertical flip, not just its mediaKey.
+      const boxOf = (o) => ({
+        x: o.x != null ? o.x : (o.geometry ? o.geometry.x : 0),
+        y: o.y != null ? o.y : (o.geometry ? o.geometry.y : 0),
+        w: o.w != null ? o.w : (o.geometry ? o.geometry.w : 0),
+        h: o.h != null ? o.h : (o.geometry ? o.geometry.h : 0),
+        flipH: !!o.flipH,
+        flipV: !!o.flipV,
+      })
+      for (const s of samples) {
+        for (const o of (s.objects || [])) {
+          if (o.kind === 'image' && o.mediaKey) candidates.push({ mediaKey: o.mediaKey, box: boxOf(o) })
+        }
+        for (const ph of (s.placeholders || [])) {
+          if (ph.type === 'image' && ph.mediaKey) candidates.push({ mediaKey: ph.mediaKey, box: boxOf(ph) })
+        }
+      }
+      if (!candidates.length) return 0
+      // Composite score: raster beats vector by a wide margin, then area, then IoU.
+      const scoreFor = (c, ph) => {
+        const raster = isRasterAsset(c.mediaKey) ? 1000000 : 0
+        const area = (c.box.w || 0) * (c.box.h || 0)
+        // Normalize area into a modest band so it never outweighs the raster flag
+        // but reliably separates a full-bleed photo from a small accent shape.
+        const areaScore = Math.min(area / (CANVAS_W * CANVAS_H), 1) * 1000
+        const iou = boxIoU(ph, c.box) * 100
+        return raster + areaScore + iou
+      }
+      let enriched = 0
+      const usedKeys = new Set()
+      for (const ph of layoutIR.placeholders) {
+        if (ph.type !== 'image' || ph.mediaKey) continue
+        let best = null, bestScore = -1
+        for (const c of candidates) {
+          if (usedKeys.has(c.mediaKey)) continue
+          const s = scoreFor(c, ph)
+          if (s > bestScore) { bestScore = s; best = c }
+        }
+        // Fallback: first unused candidate (an on-brand photo beats a blank panel).
+        if (!best) {
+          best = candidates.find((c) => !usedKeys.has(c.mediaKey)) || null
+        }
+        if (best) {
+          ph.mediaKey = best.mediaKey
+          usedKeys.add(best.mediaKey)
+          // Preserve the sample picture's OWN geometry + flip so the default hero
+          // renders faithfully (correct size/position/mirroring) rather than being
+          // squeezed into the placeholder's small declared hole. Stored in separate
+          // borrow* fields so a genuinely-empty placeholder (no borrow) still uses
+          // its own box. layoutToAsd prefers borrow* geometry when present.
+          ph.borrowX = best.box.x
+          ph.borrowY = best.box.y
+          ph.borrowW = best.box.w
+          ph.borrowH = best.box.h
+          if (best.box.flipH) ph.flipH = true
+          if (best.box.flipV) ph.flipV = true
+          enriched += 1
+        }
+      }
+      return enriched
     }
 
     for (const ln of layoutNames) {
@@ -1313,61 +1714,151 @@ try {
       // Master inheritance: resolve this layout's master and whether it
       // suppresses master shapes (showMasterSp="0").
       const masterCtx = await loadMasterCtx(masterPathOfLayout(rels, dir))
+      if (!sharedMasterCtx && masterCtx) sharedMasterCtx = masterCtx
       const showMasterSp = attrsOf(layoutEl)['@_showMasterSp'] !== '0'
-      if (masterCtx && !showMasterSp) {
-        warn(`Layout "${rawName}" sets showMasterSp=0; master chrome intentionally suppressed`)
-      }
       phCounter = 0
       const ir = await buildIRLayout(spTree, cSld, rels, dir, id, rawName, masterCtx, showMasterSp)
+      // showMasterSp=0 suppresses the master's decorative chrome. That is only a
+      // fidelity LOSS when the layout does not carry its own chrome instead — the
+      // 12 branded covers/dividers set showMasterSp=0 precisely because they paint
+      // their own full-page chrome (bg + anvil + logo + footer), so warning on all
+      // of them is false-alarm noise. buildIRLayout prepends master chrome only
+      // when showMasterSp is true, so with showMasterSp=0 ir.objects holds ONLY the
+      // layout's own objects — warn only when that is genuinely empty.
+      if (masterCtx && !showMasterSp && ir.objects.length === 0) {
+        warn(`Layout "${rawName}" suppresses master chrome and has no own decorative chrome; slide may render sparse`)
+      }
+      // A layout may ship an EMPTY picture placeholder (a "insert picture here"
+      // slot with no default blip). Borrow the matching authored photo from a
+      // sample slide that uses this layout so the hero image renders instead of
+      // a synthetic panel. Only the picture FILL (mediaKey) is copied.
+      borrowSampleImages(ir, ln)
       irLayouts.push(ir)
-      const kind = uniqueKind(kindOf(ir, layoutType))
-      archetypes.push({ kind, title: rawName, markup: layoutToAsd(ir), _layout: ir })
+      const baseKind = kindOf(ir, layoutType)
+      const kind = uniqueKind(baseKind)
+      const { markup, fillSlots } = layoutToAsd(ir)
+      archetypes.push({ kind, title: rawName, markup, tier: roleTier(baseKind), fillSlots, _layout: ir })
     }
 
-    // Capture a few sample slides into the IR (templateModel.slides) so a future
-    // in-browser editor has real filled examples to work from. These are NOT
-    // turned into archetypes: authored slides in a corporate template are thin
-    // (a photo dropped into the layout's picture placeholder, no own background
-    // or accent chrome — the color lives in the LAYOUTS), so slide-derived
-    // archetypes rendered white. The colorful, inheritance-corrected LAYOUT
-    // archetypes above are the on-brand starting points instead. Cap at 6.
-    const irSlides = []
-    for (const p of slidePaths.slice(0, 6)) {
-      const xml = await readText(p)
-      if (!xml) continue
-      const doc = parseXml(xml)
-      const sld = rootEl(doc, 'p:sld')
-      if (!sld) continue
-      const dir = p.split('/').slice(0, -1).join('/')
-      const relsPath = `${dir}/_rels/${p.split('/').pop()}.rels`
-      const rels = parseRels(await readText(relsPath))
-      const cSld = findChild(sld, 'p:cSld')
-      const spTree = cSld ? findChild(cSld, 'p:spTree') : null
-      phCounter = 0
-      const ir = await buildIRLayout(spTree, cSld, rels, dir, uniqueLayoutId(`slide-${irSlides.length + 1}`), `Slide ${irSlides.length + 1}`)
-      irSlides.push(ir)
-    }
-
-    // Guarantee the canonical three archetype kinds exist (tests + baseline
-    // authoring flow). Synthesize minimal fallbacks from theme tokens only when
-    // a kind was not produced by any real layout.
+    // Guarantee the STABLE brand-chrome set { title, section, agenda, closing }
+    // plus a flexible content role. For each role missing from the imported
+    // layouts we PREFER aliasing the closest branded layout (so the role is a
+    // real on-brand slide), and only SYNTHESIZE one when no layout fits — and
+    // even then in the template's OWN style (shared master background + master
+    // chrome objects + theme tokens), never a generic white slab. This is what
+    // makes the chrome family coherent and stops the AI from receiving a blank
+    // white archetype it would otherwise hand-rebuild off-brand.
     const surface = safeCol(themeTokens.surface) || '#FFFFFF'
     const ink = safeCol(themeTokens.ink) || '#172033'
     const accent = safeCol(themeTokens.accent) || '#2563EB'
-    const fallbackMarkup = (kind) => {
-      if (kind === 'title') {
-        return `<ast-slide id="title"><ast-shape id="bg" kind="rect" x="0" y="0" w="1920" h="1080" geom="rect" fill="${surface}" decorative="true"></ast-shape><ast-text id="ph-title" x="160" y="420" w="1600" h="200" size="72" color="${ink}" weight="bold"><ast-run>{{TITLE}}</ast-run></ast-text><ast-text id="ph-body" x="160" y="640" w="1600" h="100" size="32" color="${accent}"><ast-run>{{BODY}}</ast-run></ast-text></ast-slide>`
+
+    // Score how well an existing archetype's source layout can stand in for a
+    // wanted chrome/content role. Higher is better; 0 means unsuitable.
+    const scoreLayoutForRole = (arch, want) => {
+      const l = arch._layout
+      if (!l) return 0
+      const nm = (l.name || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+      const hasTitle = l.placeholders.some((p) => p.type === 'title')
+      const bodyCount = l.placeholders.filter((p) => p.type === 'body').length
+      const baseKind = arch.kind.replace(/-\d+$/, '')
+      if (want === 'title') {
+        if (/cover|title slide|\btitle\b/.test(nm)) return 5
+        if (hasTitle && bodyCount === 0) return 3
+        if (hasTitle) return 2
+      } else if (want === 'section') {
+        if (/divider|separator|section|chapter|transition/.test(nm)) return 5
+        if (hasTitle && bodyCount <= 1) return 2
+      } else if (want === 'agenda') {
+        if (/agenda|toc|overview|contents/.test(nm)) return 5
+        if (hasTitle && bodyCount >= 1) return 2
+      } else if (want === 'closing') {
+        if (/thank|closing|contact|farewell|goodbye|conclusion|end/.test(nm)) return 5
+        if (baseKind === 'title' || (hasTitle && bodyCount === 0)) return 2
+      } else if (want === 'content') {
+        if (bodyCount > 0) return 4
+        if (hasTitle) return 1
       }
-      if (kind === 'section') {
-        return `<ast-slide id="section"><ast-shape id="bg" kind="rect" x="0" y="0" w="1920" h="1080" geom="rect" fill="${accent}" decorative="true"></ast-shape><ast-shape id="c-1" kind="rect" x="0" y="480" w="1920" h="120" geom="rect" fill="${ink}"></ast-shape><ast-text id="ph-title" x="160" y="500" w="1600" h="80" size="54" color="${surface}" weight="bold"><ast-run>{{TITLE}}</ast-run></ast-text><ast-text id="ph-body" x="160" y="620" w="1600" h="80" size="28" color="${surface}"><ast-run>{{BODY}}</ast-run></ast-text></ast-slide>`
-      }
-      return `<ast-slide id="content"><ast-shape id="bg" kind="rect" x="0" y="0" w="1920" h="1080" geom="rect" fill="${surface}" decorative="true"></ast-shape><ast-text id="ph-title" x="160" y="120" w="1600" h="120" size="48" color="${ink}" weight="bold"><ast-run>{{TITLE}}</ast-run></ast-text><ast-text id="ph-body" x="160" y="280" w="1600" h="680" size="28" color="${ink}"><ast-run>{{BODY}}</ast-run></ast-text></ast-slide>`
+      return 0
     }
-    const presentKinds = new Set(archetypes.map((a) => a.kind.replace(/-\d+$/, '')))
-    for (const want of ['title', 'section', 'content']) {
-      if (!presentKinds.has(want)) {
-        archetypes.push({ kind: uniqueKind(want), title: want.charAt(0).toUpperCase() + want.slice(1), markup: fallbackMarkup(want) })
+
+    // Synthesize a chrome slide for `want` in the template's own style, reusing
+    // the shared master background + master chrome objects (logo/accent bars) so
+    // it belongs to the same visual family, and adding only role-appropriate
+    // fillable text (+ a section accent rule). Returns an IRLayout-shaped object
+    // fed through layoutToAsd, so the fill slots are recorded automatically.
+    const synthChrome = (want, siblingBg) => {
+      const mc = sharedMasterCtx
+      // Background: master bg → closest branded layout bg → theme surface.
+      let background = mc && mc.bg ? mc.bg : null
+      if ((!background || (background.kind === 'solid' && background.color === surface)) && siblingBg) {
+        background = siblingBg
       }
+      if (!background) background = { kind: 'solid', color: surface }
+      // Copy the shared master chrome objects (logo, accent bars, brand shapes)
+      // so the synthesized slide carries the deck's real chrome behind the text.
+      const objects = mc && Array.isArray(mc.chromeObjects) ? mc.chromeObjects.map((o) => ({ ...o })) : []
+      const placeholders = []
+      const bgIsDark = (() => {
+        const c = (background.kind === 'solid' && safeCol(background.color)) || surface
+        const n = parseInt(c.slice(1, 7), 16)
+        const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255
+        return (0.299 * r + 0.587 * g + 0.114 * b) < 140
+      })()
+      const onBg = bgIsDark ? surface : ink
+      // Every synthesized chrome slide carries a brand accent bar so it reads as
+      // part of the deck's chrome family (not a blank white slate) even when the
+      // master supplies no decorative objects.
+      if (want === 'title') {
+        objects.push({ kind: 'rect', x: 160, y: 360, w: 220, h: 12, fill: { kind: 'solid', color: accent }, geom: 'rect' })
+        placeholders.push({ name: 'title-1', type: 'title', x: 160, y: 420, w: 1600, h: 200, style: { fontSize: 72, color: onBg, bold: true, fontFace: themeTokens.displayFont }, prompt: '{{TITLE}}' })
+        placeholders.push({ name: 'body-1', type: 'body', x: 160, y: 640, w: 1600, h: 120, style: { fontSize: 32, color: onBg, fontFace: themeTokens.bodyFont }, prompt: '{{BODY}}' })
+      } else if (want === 'section') {
+        objects.push({ kind: 'rect', x: 160, y: 560, w: 480, h: 12, fill: { kind: 'solid', color: accent }, geom: 'rect' })
+        placeholders.push({ name: 'title-1', type: 'title', x: 160, y: 380, w: 1600, h: 180, style: { fontSize: 64, color: accent, bold: true, fontFace: themeTokens.displayFont }, prompt: '{{TITLE}}' })
+        placeholders.push({ name: 'body-1', type: 'body', x: 160, y: 600, w: 1600, h: 160, style: { fontSize: 36, color: onBg, fontFace: themeTokens.bodyFont }, prompt: '{{BODY}}' })
+      } else if (want === 'agenda') {
+        objects.push({ kind: 'rect', x: 160, y: 240, w: 220, h: 12, fill: { kind: 'solid', color: accent }, geom: 'rect' })
+        placeholders.push({ name: 'title-1', type: 'title', x: 160, y: 120, w: 1600, h: 140, style: { fontSize: 56, color: accent, bold: true, fontFace: themeTokens.displayFont }, prompt: '{{TITLE}}' })
+        placeholders.push({ name: 'body-1', type: 'body', x: 160, y: 320, w: 1600, h: 640, style: { fontSize: 36, color: onBg, fontFace: themeTokens.bodyFont }, prompt: '{{BODY}}' })
+      } else if (want === 'closing') {
+        objects.push({ kind: 'rect', x: 160, y: 400, w: 220, h: 12, fill: { kind: 'solid', color: accent }, geom: 'rect' })
+        placeholders.push({ name: 'title-1', type: 'title', x: 160, y: 440, w: 1600, h: 200, style: { fontSize: 80, color: accent, bold: true, fontFace: themeTokens.displayFont }, prompt: '{{TITLE}}' })
+        placeholders.push({ name: 'body-1', type: 'body', x: 160, y: 680, w: 1600, h: 120, style: { fontSize: 30, color: onBg, fontFace: themeTokens.bodyFont }, prompt: '{{BODY}}' })
+      } else {
+        placeholders.push({ name: 'title-1', type: 'title', x: 160, y: 120, w: 1600, h: 120, style: { fontSize: 48, color: onBg, bold: true, fontFace: themeTokens.displayFont }, prompt: '{{TITLE}}' })
+        placeholders.push({ name: 'body-1', type: 'body', x: 160, y: 280, w: 1600, h: 680, style: { fontSize: 28, color: onBg, fontFace: themeTokens.bodyFont }, prompt: '{{BODY}}' })
+      }
+      return { id: uniqueLayoutId(`synth-${want}`), name: `${want.charAt(0).toUpperCase()}${want.slice(1)}`, background, objects, placeholders }
+    }
+
+    // Roles to guarantee: the stable chrome set (fixed) + a flexible content role.
+    const presentKinds = new Set(archetypes.map((a) => a.kind.replace(/-\d+$/, '')))
+    for (const want of ['title', 'section', 'agenda', 'closing', 'content']) {
+      if (presentKinds.has(want)) continue
+      // (a) Prefer aliasing the best-scoring existing branded layout.
+      let best = null
+      let bestScore = 0
+      for (const a of archetypes) {
+        if (!a._layout) continue
+        const s = scoreLayoutForRole(a, want)
+        if (s > bestScore) { best = a; bestScore = s }
+      }
+      const tier = roleTier(want)
+      if (best && bestScore >= 2) {
+        phCounter = 0
+        const { markup, fillSlots } = layoutToAsd(best._layout)
+        archetypes.push({ kind: uniqueKind(want), title: best.title, markup, tier, fillSlots, _layout: best._layout })
+        continue
+      }
+      // (b) Else synthesize in the template's own style (master chrome + tokens).
+      const siblingBg = (archetypes.find((a) => a._layout && a._layout.background && a._layout.background.kind === 'image') || {})._layout
+      phCounter = 0
+      const synth = synthChrome(want, siblingBg ? siblingBg.background : null)
+      const { markup, fillSlots } = layoutToAsd(synth)
+      if (!sharedMasterCtx || !sharedMasterCtx.chromeObjects || sharedMasterCtx.chromeObjects.length === 0) {
+        warn(`Synthesized chrome role ${want} from theme tokens; no master chrome available`)
+      }
+      archetypes.push({ kind: uniqueKind(want), title: synth.name, markup, tier, fillSlots, _layout: synth })
     }
 
     const templateModel = {
@@ -1388,7 +1879,7 @@ try {
       label: 'Imported Template',
       tokens: themeTokens,
       assets,
-      archetypes: archetypes.map((a) => ({ kind: a.kind, title: a.title, markup: a.markup })),
+      archetypes: archetypes.map((a) => ({ kind: a.kind, title: a.title, markup: a.markup, tier: a.tier, fillSlots: a.fillSlots })),
       templateModel,
     }
     ok(template)

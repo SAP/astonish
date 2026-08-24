@@ -146,6 +146,15 @@ func renderNode(out *bytes.Buffer, node Node, assets map[string]string) {
 	writeAttr(out, "y", strconv.Itoa(node.Geometry.Y))
 	writeAttr(out, "w", strconv.Itoa(node.Geometry.W))
 	writeAttr(out, "h", strconv.Itoa(node.Geometry.H))
+	// FlipH/FlipV are struct fields (not Props), so emit them explicitly as
+	// reflected attributes so the embedded Lit runtime element composes the same
+	// scaleX/scaleY(-1) transform as nodeInlineStyle.
+	if node.FlipH {
+		writeAttr(out, "flip-h", "true")
+	}
+	if node.FlipV {
+		writeAttr(out, "flip-v", "true")
+	}
 	keys := make([]string, 0, len(node.Props))
 	for key := range node.Props {
 		keys = append(keys, key)
@@ -223,11 +232,24 @@ func resolveImageSrc(ref string, assets map[string]string) (string, bool) {
 }
 
 // nodeInlineStyle assembles an inline style string from v2 fidelity fields.
-// Only safe, self-contained values are emitted (rotation + opacity).
+// Only safe, self-contained values are emitted (transform + opacity). The
+// transform composes rotation and horizontal/vertical flip (scaleX/scaleY(-1)),
+// mirroring the Lit runtime's PositionedElement.updated() so the standalone HTML
+// and live web renderer agree.
 func nodeInlineStyle(node Node) string {
 	var parts []string
+	var transform []string
 	if node.Rot != 0 {
-		parts = append(parts, "transform:rotate("+strconv.Itoa(node.Rot)+"deg);transform-origin:center")
+		transform = append(transform, "rotate("+strconv.Itoa(node.Rot)+"deg)")
+	}
+	if node.FlipH {
+		transform = append(transform, "scaleX(-1)")
+	}
+	if node.FlipV {
+		transform = append(transform, "scaleY(-1)")
+	}
+	if len(transform) > 0 {
+		parts = append(parts, "transform:"+strings.Join(transform, " ")+";transform-origin:center")
 	}
 	if node.Opacity > 0 && node.Opacity < 1 {
 		parts = append(parts, "opacity:"+strconv.FormatFloat(node.Opacity, 'g', -1, 64))

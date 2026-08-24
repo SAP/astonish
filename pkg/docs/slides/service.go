@@ -16,6 +16,15 @@ import (
 // scope as regular decks while staying hidden from ListDecks.
 const templatePrefix = "tmpl/"
 
+// archetypeMetaDelim separates an archetype's human-readable variant label from
+// its optional metadata inside the persisted SlideContent.Notes field. Notes is
+// encoded as the label, optionally followed by this NUL byte and a JSON object
+// {"tier":..,"fillSlots":[..]} when either field is set. A NUL byte never
+// appears in a PowerPoint layout name, so it is a safe delimiter. Older rows
+// written without the delimiter decode to Tier="" and FillSlots=nil, preserving
+// backward compatibility.
+const archetypeMetaDelim = "\u0000"
+
 // ErrDeckExists is returned by CopyDeckTo when the destination scope already
 // has a deck with the same slug (unique-slug constraint in the target store).
 var ErrDeckExists = errors.New("deck already exists in destination scope")
@@ -42,6 +51,37 @@ func (s Service) CreateDeckWithAssets(ctx context.Context, slug, title, descript
 	}
 	return d, nil
 }
+
+// AddDeckAsset adds (or overwrites) one image asset in an existing deck's asset
+// library and persists it. ref is the Assets map key (e.g. "sha256-<hex>") used
+// verbatim as an ast-image asset-ref; dataURI is its "data:<mime>;base64,..."
+// value. It clones the existing Assets map (so the stored manifest is not
+// mutated in place), sets ref -> dataURI, and writes via UpdateDeck. Idempotent:
+// re-adding the same ref/dataURI is a no-op change. Mirrors CreateDeckWithAssets
+// but targets an existing deck.
+func (s Service) AddDeckAsset(ctx context.Context, slug, ref, dataURI string) (*store.DeckManifest, error) {
+	if s.Store == nil {
+		return nil, fmt.Errorf("docs store unavailable")
+	}
+	if slug == "" || ref == "" || dataURI == "" {
+		return nil, fmt.Errorf("slug, ref and dataURI are required")
+	}
+	deck, err := s.Store.GetDeck(ctx, slug)
+	if err != nil {
+		return nil, fmt.Errorf("get deck: %w", err)
+	}
+	assets := make(map[string]string, len(deck.Assets)+1)
+	for k, v := range deck.Assets {
+		assets[k] = v
+	}
+	assets[ref] = dataURI
+	deck.Assets = assets
+	if err := s.Store.UpdateDeck(ctx, deck); err != nil {
+		return nil, fmt.Errorf("update deck assets: %w", err)
+	}
+	return deck, nil
+}
+
 func (s Service) WriteSlide(ctx context.Context, deckSlug string, position int, markup, notes string) (*store.SlideContent, []Diagnostic, error) {
 	if s.Store == nil {
 		return nil, nil, fmt.Errorf("docs store unavailable")
@@ -177,15 +217,30 @@ func (s Service) SaveTemplate(ctx context.Context, tmpl themes.Template) error {
 		return fmt.Errorf("create template deck: %w", err)
 	}
 	for i, arch := range tmpl.Archetypes {
+		// Notes carries the human-readable variant label (arch.Title) so a
+		// template offering several variants per role (title, title-2, ...)
+		// can surface friendly names; Kind stays in SlideContent.Title. When
+		// the archetype has Tier/FillSlots metadata, encode it after a NUL
+		// delimiter (see archetypeMetaDelim) so it round-trips without a
+		// schema change.
+		notes := arch.Title
+		if arch.Tier != "" || len(arch.FillSlots) > 0 {
+			meta := struct {
+				Tier      string   `json:"tier,omitempty"`
+				FillSlots []string `json:"fillSlots,omitempty"`
+			}{Tier: arch.Tier, FillSlots: arch.FillSlots}
+			metaJSON, err := json.Marshal(meta)
+			if err != nil {
+				return fmt.Errorf("marshal archetype metadata: %w", err)
+			}
+			notes = arch.Title + archetypeMetaDelim + string(metaJSON)
+		}
 		slide := &store.SlideContent{
-			ID:       uuid.NewString(),
-			DeckID:   deck.ID,
-			Position: i,
-			Title:    arch.Kind,
-			// Notes carries the human-readable variant label (arch.Title) so a
-			// template offering several variants per role (title, title-2, ...)
-			// can surface friendly names; Kind stays in SlideContent.Title.
-			Notes:         arch.Title,
+			ID:            uuid.NewString(),
+			DeckID:        deck.ID,
+			Position:      i,
+			Title:         arch.Kind,
+			Notes:         notes,
 			Content:       arch.Markup,
 			SchemaVersion: SchemaV2,
 		}
@@ -218,7 +273,22 @@ func (s Service) ListTemplates(ctx context.Context) ([]themes.Template, error) {
 		}
 		archetypes := make([]themes.Archetype, 0, len(slides))
 		for _, slide := range slides {
-			archetypes = append(archetypes, themes.Archetype{Kind: slide.Title, Title: slide.Notes, Markup: slide.Content})
+			// Notes may carry optional Tier/FillSlots metadata after a NUL
+			// delimiter (see archetypeMetaDelim); split it back out. Rows
+			// without the delimiter decode to Tier="", FillSlots=nil.
+			parts := strings.SplitN(slide.Notes, archetypeMetaDelim, 2)
+			arch := themes.Archetype{Kind: slide.Title, Title: parts[0], Markup: slide.Content}
+			if len(parts) == 2 {
+				var meta struct {
+					Tier      string   `json:"tier,omitempty"`
+					FillSlots []string `json:"fillSlots,omitempty"`
+				}
+				if err := json.Unmarshal([]byte(parts[1]), &meta); err == nil {
+					arch.Tier = meta.Tier
+					arch.FillSlots = meta.FillSlots
+				}
+			}
+			archetypes = append(archetypes, arch)
 		}
 		// Rehydrate the lossless IR when this is an IR-backed imported template.
 		var model *themes.TemplateModel

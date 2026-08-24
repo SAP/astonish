@@ -168,13 +168,20 @@ try {
           shapeOpts.fill.transparency = Math.round((1 - node.opacity) * 100)
         }
         if (node.rot) shapeOpts.rotate = Number(node.rot)
+        if (node.flipH) shapeOpts.flipH = true
+        if (node.flipV) shapeOpts.flipV = true
         slide.addShape(shapeTypeFor(node), shapeOpts)
         counts.native++
         break
       }
       case 'image':
         if (!node.props?.data) throw new Error(`image ${node.id} has no validated data`)
-        slide.addImage({ ...box, data: node.props.data })
+        slide.addImage({
+          ...box, data: node.props.data,
+          ...(node.flipH ? { flipH: true } : {}),
+          ...(node.flipV ? { flipV: true } : {}),
+          ...(node.rot ? { rotate: Number(node.rot) } : {}),
+        })
         counts.native++
         break
       case 'table':

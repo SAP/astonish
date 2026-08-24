@@ -41,9 +41,9 @@ const personal: SlidesTemplate = {
   // so the same role can have multiple variants each labeled with the real
   // PowerPoint layout name. The UI must render every label as its own chip.
   archetypes: [
-    { kind: 'title', label: 'Blue cover, anvil and image' },
-    { kind: 'title-2', label: 'Pink cover with anvil' },
-    { kind: 'content', label: 'Title and Content' },
+    { kind: 'title', label: 'Blue cover, anvil and image', tier: 'fixed', fillSlots: ['ph-title'] },
+    { kind: 'title-2', label: 'Pink cover with anvil', tier: 'fixed', fillSlots: ['ph-title'] },
+    { kind: 'content', label: 'Title and Content', tier: 'flexible' },
   ],
 }
 

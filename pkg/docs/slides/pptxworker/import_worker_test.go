@@ -7,7 +7,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -206,9 +208,11 @@ func TestImportTemplateMode(t *testing.T) {
 		Schema     int               `json:"schema"`
 		Tokens     map[string]string `json:"tokens"`
 		Archetypes []struct {
-			Kind   string `json:"kind"`
-			Title  string `json:"title"`
-			Markup string `json:"markup"`
+			Kind      string   `json:"kind"`
+			Title     string   `json:"title"`
+			Markup    string   `json:"markup"`
+			Tier      string   `json:"tier"`
+			FillSlots []string `json:"fillSlots"`
 		} `json:"archetypes"`
 		TemplateModel struct {
 			Schema  int `json:"schema"`
@@ -244,9 +248,17 @@ func TestImportTemplateMode(t *testing.T) {
 			t.Fatalf("archetype %q has empty markup", a.Kind)
 		}
 	}
-	for _, want := range []string{"title", "section", "content"} {
-		if !kinds[want] {
-			t.Fatalf("missing archetype %q; got %+v", want, kinds)
+	// The STABLE brand-chrome set is guaranteed on every imported template:
+	// title (cover), section (divider), agenda, and closing (thank-you/end),
+	// plus a flexible content role. Compare on the base kind (strip any -N
+	// variant suffix) since a role may be present as title-2 etc.
+	baseKinds := map[string]bool{}
+	for k := range kinds {
+		baseKinds[stripVariantSuffix(k)] = true
+	}
+	for _, want := range []string{"title", "section", "agenda", "closing", "content"} {
+		if !baseKinds[want] {
+			t.Fatalf("missing guaranteed archetype role %q; got %+v", want, baseKinds)
 		}
 	}
 	// The lossless IR must be present and carry at least one layout. (The
@@ -260,21 +272,159 @@ func TestImportTemplateMode(t *testing.T) {
 	if len(tmpl.TemplateModel.Layouts) < 1 {
 		t.Fatalf("expected >=1 IR layout, got %d", len(tmpl.TemplateModel.Layouts))
 	}
-	// Every archetype MUST carry a non-empty human label (its title = the real
-	// PowerPoint layout cSld @name). Layout variants are surfaced to the user/AI
-	// by this label. Example-* archetypes are NO LONGER generated from thin
-	// authored slides (which carried no background and rendered white); the
-	// colorful, on-brand starting points are the inheritance-corrected LAYOUT
-	// archetypes. templateModel.slides may still be populated for the editor.
+	// The generic white slab that used to back a missing chrome role (a full
+	// canvas #FFFFFF rect with only ph-title/ph-body text and no other chrome).
+	// A chrome archetype must NEVER be this: it must either alias a real branded
+	// layout (non-empty layout-name label + its chrome) or be synthesized in the
+	// template's own style (master chrome + tokens). We assert each chrome
+	// archetype carries brand chrome — a real layout name label AND markup that
+	// references an asset (logo/photo) OR contains a non-white fill — rather than
+	// being an empty white slate.
 	for _, a := range tmpl.Archetypes {
+		base := stripVariantSuffix(a.Kind)
+		// (a) Every archetype has a non-empty human label (its layout name /
+		// synthesized role name) so variants are selectable by label.
 		if strings.TrimSpace(a.Title) == "" {
-			t.Fatalf("archetype %q has empty label (title); layout variants must be labeled", a.Kind)
+			t.Fatalf("archetype %q has empty label (title); variants must be labeled", a.Kind)
 		}
+		// (b) Example-* archetypes are never generated (they were white).
 		if strings.HasPrefix(a.Kind, "example") {
-			t.Fatalf("unexpected example-* archetype %q; examples must not be derived from authored slides", a.Kind)
+			t.Fatalf("unexpected example-* archetype %q", a.Kind)
+		}
+		// (c) Tier is always fixed|flexible; chrome roles are fixed with slots.
+		if a.Tier != "fixed" && a.Tier != "flexible" {
+			t.Fatalf("archetype %q has invalid tier %q (want fixed|flexible)", a.Kind, a.Tier)
+		}
+		isChrome := base == "title" || base == "section" || base == "agenda" || base == "closing"
+		if isChrome {
+			if a.Tier != "fixed" {
+				t.Fatalf("chrome archetype %q must be tier=fixed, got %q", a.Kind, a.Tier)
+			}
+			if len(a.FillSlots) == 0 {
+				t.Fatalf("chrome archetype %q must carry fillSlots", a.Kind)
+			}
+			// (d) Not the old generic white slab: it must reference a brand asset
+			// or carry a non-#FFFFFF fill (accent bar / colored bg / logo).
+			hasBrandChrome := strings.Contains(a.Markup, "asset-ref=") ||
+				hasNonWhiteFill(a.Markup)
+			if !hasBrandChrome {
+				t.Fatalf("chrome archetype %q (%s) has no brand chrome (no asset-ref and only white fills); looks like a generic white slab:\n%s", a.Kind, a.Title, a.Markup)
+			}
+			// (e) Its markup must actually contain each declared fill slot id.
+			for _, id := range a.FillSlots {
+				if !strings.Contains(a.Markup, `id="`+id+`"`) {
+					t.Fatalf("chrome archetype %q declares fillSlot %q not present in markup:\n%s", a.Kind, id, a.Markup)
+				}
+			}
 		}
 	}
 }
+
+// TestImportScalesFooterFontSize pins the footer-font-scale fix: imported run
+// font sizes are scaled to the ASD canvas by the same `scale` as geometry, so a
+// small footer (e.g. sz="1000" = 10pt on a 1280x720 slide, scale 1.5) renders at
+// ~15, not 10. The scaling lives in the importer's styleOf; we exercise it end to
+// end against the real reference corporate template when it is available locally
+// (it is not committed to the repo, so the test skips cleanly in CI).
+func TestImportScalesFooterFontSize(t *testing.T) {
+	workingDir, importScript, _ := requireNodeEnv(t)
+	ref := "/Users/I851355/Downloads/2026 GCO IPED PPT TEMPLATE.pptx"
+	raw, err := os.ReadFile(ref)
+	if err != nil {
+		t.Skipf("reference template not present (%v); skipping footer-scale smoke", err)
+	}
+	b64 := base64.StdEncoding.EncodeToString(raw)
+	resp, err := (ImportRunner{WorkingDir: workingDir, ScriptPath: importScript, Timeout: 60 * time.Second}).
+		Run(context.Background(), ImportRequest{PPTXBase64: b64, Mode: "template"})
+	if err != nil {
+		t.Fatalf("import worker failed: %v", err)
+	}
+	var tmpl struct {
+		Archetypes []struct {
+			Markup string `json:"markup"`
+		} `json:"archetypes"`
+	}
+	if err := json.Unmarshal(resp.SceneOrTemplate, &tmpl); err != nil {
+		t.Fatalf("bad template: %v", err)
+	}
+	// Find the footer ast-text ("INTERNAL ...") and assert its size scaled up.
+	// Go's RE2 has no lookahead, so match the opening ast-text tag then confirm
+	// the INTERNAL text follows before the element closes.
+	tagRe := regexp.MustCompile(`<ast-text[^>]*\bsize="(\d+)"[^>]*>`)
+	found := false
+	maxSize := 0
+	for _, a := range tmpl.Archetypes {
+		markup := a.Markup
+		for {
+			idx := strings.Index(markup, "INTERNAL")
+			if idx < 0 {
+				break
+			}
+			prefix := markup[:idx]
+			open := strings.LastIndex(prefix, "<ast-text")
+			markup = markup[idx+len("INTERNAL"):]
+			if open < 0 {
+				continue
+			}
+			tagEnd := strings.Index(prefix[open:], ">")
+			if tagEnd < 0 {
+				continue
+			}
+			tag := prefix[open : open+tagEnd+1]
+			m := tagRe.FindStringSubmatch(tag)
+			if m == nil {
+				t.Fatalf("footer ast-text has no size attribute: %s", tag)
+			}
+			found = true
+			size, _ := strconv.Atoi(m[1])
+			if size > maxSize {
+				maxSize = size
+			}
+			// The unscaled raw point values (10pt / 6pt) must never be emitted
+			// verbatim — every footer size is scaled by the canvas `scale`.
+			if size == 10 || size == 6 {
+				t.Fatalf("footer size %d is the raw unscaled point value; canvas scale was not applied\n%s", size, tag)
+			}
+			if !strings.Contains(tag, `font="72 Brand`) {
+				t.Fatalf("footer lost its brand font; expected font starting \"72 Brand\" in %s", tag)
+			}
+			if !strings.Contains(tag, "sans-serif") {
+				t.Fatalf("footer font missing web-safe sans-serif fallback in %s", tag)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("did not find the INTERNAL footer ast-text in any archetype")
+	}
+	// The primary footer (10pt) must render at ~15 after the 1.5x canvas scale.
+	if maxSize < 13 {
+		t.Fatalf("primary footer size %d not scaled to canvas (want ~15)", maxSize)
+	}
+}
+
+// stripVariantSuffix removes a trailing -N variant suffix (title-2 -> title).
+func stripVariantSuffix(kind string) string {
+	if i := strings.LastIndexByte(kind, '-'); i > 0 {
+		if _, err := strconv.Atoi(kind[i+1:]); err == nil {
+			return kind[:i]
+		}
+	}
+	return kind
+}
+
+// hasNonWhiteFill reports whether the markup contains a fill= attribute whose
+// color is not white (#FFFFFF / #FFF), i.e. real brand color chrome.
+func hasNonWhiteFill(markup string) bool {
+	for _, m := range fillAttrRe.FindAllStringSubmatch(markup, -1) {
+		c := strings.ToUpper(strings.TrimSpace(m[1]))
+		if c != "#FFFFFF" && c != "#FFF" && c != "#FFFFFFFF" {
+			return true
+		}
+	}
+	return false
+}
+
+var fillAttrRe = regexp.MustCompile(`fill="([^"]+)"`)
 
 func TestImportGarbageRejected(t *testing.T) {
 	workingDir, importScript, _ := requireNodeEnv(t)

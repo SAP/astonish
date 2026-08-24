@@ -6,12 +6,15 @@ export abstract class PositionedElement extends LitElement {
     x: { type: Number, reflect: true }, y: { type: Number, reflect: true },
     w: { type: Number, reflect: true }, h: { type: Number, reflect: true },
     rotation: { type: Number, attribute: 'rot', reflect: true },
+    flipH: { type: Boolean, attribute: 'flip-h', reflect: true }, flipV: { type: Boolean, attribute: 'flip-v', reflect: true },
   }
   x = 0
   y = 0
   w = 0
   h = 0
   rotation = 0
+  flipH = false
+  flipV = false
 
   protected override createRenderRoot(): HTMLElement | DocumentFragment { return this }
   protected override render(): unknown { return noChange }
@@ -23,12 +26,11 @@ export abstract class PositionedElement extends LitElement {
     this.style.width = `${this.w}px`
     this.style.height = `${this.h}px`
     this.style.boxSizing = 'border-box'
-    if (this.rotation) {
-      this.style.transform = `rotate(${this.rotation}deg)`
-      this.style.transformOrigin = 'center'
-    } else {
-      this.style.transform = ''
-      this.style.transformOrigin = ''
-    }
+    const parts: string[] = []
+    if (this.rotation) parts.push(`rotate(${this.rotation}deg)`)
+    if (this.flipH) parts.push('scaleX(-1)')
+    if (this.flipV) parts.push('scaleY(-1)')
+    this.style.transform = parts.join(' ')
+    this.style.transformOrigin = parts.length ? 'center' : ''
   }
 }

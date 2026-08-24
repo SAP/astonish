@@ -26,10 +26,20 @@ func Lookup(name string) (Theme, error) {
 // Archetype is a reusable slide skeleton within a Template. Kind is one of
 // title|section|content. Markup is a valid ASD v2 ast-slide fragment that uses
 // the {{TITLE}} and {{BODY}} placeholders for author-supplied text.
+//
+// Tier and FillSlots are optional metadata that describe how faithfully the
+// archetype must be reproduced. Tier is either "fixed" (the brand-chrome layout
+// is reproduced verbatim; only the text inside FillSlots may be substituted) or
+// "flexible" (a content layout the author may freely adapt). FillSlots lists the
+// ast-text element ids that carry the {{TITLE}}/{{BODY}} placeholders and are
+// therefore safe to replace with author-supplied text. Both fields are zero for
+// built-in archetypes.
 type Archetype struct {
-	Kind   string `json:"kind"`
-	Title  string `json:"title,omitempty"`
-	Markup string `json:"markup"`
+	Kind      string   `json:"kind"`
+	Title     string   `json:"title,omitempty"`
+	Markup    string   `json:"markup"`
+	Tier      string   `json:"tier,omitempty"`
+	FillSlots []string `json:"fillSlots,omitempty"`
 }
 
 // Template is a named collection of design tokens plus slide archetypes. It is

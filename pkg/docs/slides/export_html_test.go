@@ -98,6 +98,39 @@ func TestHTMLExporterRendersV2FidelityAttributes(t *testing.T) {
 	}
 }
 
+func TestHTMLExporterRendersImageFlipTransform(t *testing.T) {
+	scene := SceneGraph{SchemaVersion: SchemaV2, Title: "Flip Deck", Slides: []Slide{{
+		ID: "cover",
+		Nodes: []Node{
+			{
+				ID: "hero", Type: "image",
+				Geometry: Geometry{X: 100, Y: 100, W: 800, H: 600},
+				Rot:      30,
+				FlipH:    true,
+				Props:    map[string]any{"asset-ref": "sha256-abc", "decorative": "true"},
+			},
+		},
+	}}}
+	result, err := (HTMLExporter{RuntimeJS: []byte(`window.runtimeReady=true`)}).Export(scene)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := string(result.Bytes)
+	for _, want := range []string{
+		"scaleX(-1)",
+		"rotate(30deg)",
+		"transform-origin:center",
+		`flip-h="true"`,
+	} {
+		if !strings.Contains(doc, want) {
+			t.Errorf("flip document missing %q", want)
+		}
+	}
+	if strings.Contains(doc, "scaleY(-1)") {
+		t.Errorf("did not expect scaleY(-1) when FlipV is unset")
+	}
+}
+
 func TestExportHTML_TextWhitespacePreWrap(t *testing.T) {
 	// A run whose text contains a newline must survive into the emitted span,
 	// and the ast-text element must carry white-space:pre-wrap so the browser

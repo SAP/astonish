@@ -75,6 +75,8 @@ type Node struct {
 	Geom     string    `json:"geom,omitempty"`
 	Path     string    `json:"path,omitempty"`
 	Gradient *Gradient `json:"gradient,omitempty"`
+	FlipH    bool      `json:"flipH,omitempty"`
+	FlipV    bool      `json:"flipV,omitempty"`
 }
 
 type Slide struct {

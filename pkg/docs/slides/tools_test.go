@@ -2,7 +2,11 @@ package slides
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"io"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -103,7 +107,7 @@ func TestGetTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"create_deck", "write_slide", "get_deck", "list_decks", "list_templates", "validate_deck"}
+	want := []string{"create_deck", "write_slide", "get_deck", "list_decks", "list_templates", "validate_deck", "list_deck_assets", "add_deck_image"}
 	if len(got) != len(want) {
 		t.Fatalf("got %d tools, want %d", len(got), len(want))
 	}
@@ -278,6 +282,126 @@ func TestSaveTemplateThenListSurfacesScopedTemplate(t *testing.T) {
 		if !seen[want] {
 			t.Fatalf("built-in %q missing after import; got %#v", want, seen)
 		}
+	}
+}
+
+func TestListDeckAssets(t *testing.T) {
+	backend := newMultiDeckStore()
+	ctx := toolContext(t, backend)
+	svc := Service{Store: backend}
+
+	if _, err := createDeck(ctx, CreateDeckArgs{Slug: "gallery", Title: "Gallery"}); err != nil {
+		t.Fatal(err)
+	}
+	// Inject assets (a photo + a tiny svg logo) into the stored manifest.
+	if _, err := svc.AddDeckAsset(ctx, "gallery", "sha256-photo", "data:image/png;base64,"+strings.Repeat("A", 8000)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.AddDeckAsset(ctx, "gallery", "sha256-logo", "data:image/svg+xml;base64,AAAA"); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := listDeckAssets(ctx, ListDeckAssetsArgs{DeckSlug: "gallery"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Assets) != 2 {
+		t.Fatalf("expected 2 assets, got %d: %#v", len(res.Assets), res.Assets)
+	}
+	// Deterministic order (sorted by ref): sha256-logo < sha256-photo.
+	if res.Assets[0].Ref != "sha256-logo" || res.Assets[0].Kind != "logo" || res.Assets[0].MIME != "image/svg+xml" {
+		t.Fatalf("logo asset misclassified: %#v", res.Assets[0])
+	}
+	if res.Assets[1].Ref != "sha256-photo" || res.Assets[1].Kind != "image" || res.Assets[1].MIME != "image/png" {
+		t.Fatalf("photo asset misclassified: %#v", res.Assets[1])
+	}
+	// The catalog must never leak the heavy data: URI bytes.
+	blob, err := json.Marshal(res)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(blob), "data:image") {
+		t.Fatalf("list_deck_assets leaked a data: URI: %s", blob)
+	}
+}
+
+func TestAddDeckImage(t *testing.T) {
+	backend := newMultiDeckStore()
+	ctx := toolContext(t, backend)
+
+	if _, err := createDeck(ctx, CreateDeckArgs{Slug: "cover", Title: "Cover"}); err != nil {
+		t.Fatal(err)
+	}
+
+	png := []byte("\x89PNG\r\n\x1a\n" + strings.Repeat("x", 32))
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"image/png"}},
+			Body:       io.NopCloser(strings.NewReader(string(png))),
+			Request:    req,
+		}, nil
+	})
+	orig := newAssetIngestor
+	newAssetIngestor = func() AssetIngestor { return AssetIngestor{Transport: transport} }
+	t.Cleanup(func() { newAssetIngestor = orig })
+
+	res, err := addDeckImage(ctx, AddDeckImageArgs{DeckSlug: "cover", URL: "https://example.com/steve.png"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(png)
+	wantRef := "sha256-" + hex.EncodeToString(sum[:])
+	if res.AssetRef != wantRef {
+		t.Fatalf("assetRef = %q, want %q", res.AssetRef, wantRef)
+	}
+	if res.MIME != "image/png" || res.Bytes != len(png) {
+		t.Fatalf("unexpected mime/bytes: %#v", res)
+	}
+	// The manifest in the store now carries the ref -> data:image/png URI.
+	deck, err := backend.GetDeck(ctx, "cover")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := deck.Assets[wantRef]
+	if !strings.HasPrefix(got, "data:image/png;base64,") {
+		t.Fatalf("stored asset not a png data URI: %q", got)
+	}
+	// The returned catalog surfaces the new asset without leaking data.
+	if res.Deck == nil || len(res.Deck.Assets) != 1 || res.Deck.Assets[0].Ref != wantRef {
+		t.Fatalf("result catalog missing new asset: %#v", res.Deck)
+	}
+
+	// Idempotent: adding the same URL again does not duplicate the asset.
+	if _, err := addDeckImage(ctx, AddDeckImageArgs{DeckSlug: "cover", URL: "https://example.com/steve.png"}); err != nil {
+		t.Fatal(err)
+	}
+	deck2, err := backend.GetDeck(ctx, "cover")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deck2.Assets) != 1 {
+		t.Fatalf("re-adding same image duplicated assets: %d", len(deck2.Assets))
+	}
+}
+
+func TestAddDeckImageRejectsUnsafeURL(t *testing.T) {
+	backend := newMultiDeckStore()
+	ctx := toolContext(t, backend)
+	if _, err := createDeck(ctx, CreateDeckArgs{Slug: "cover", Title: "Cover"}); err != nil {
+		t.Fatal(err)
+	}
+	// Default (production) ingestor: a private-network URL must be rejected by
+	// AssetIngestor's SSRF validation before any asset is stored.
+	if _, err := addDeckImage(ctx, AddDeckImageArgs{DeckSlug: "cover", URL: "http://127.0.0.1/x.png"}); err == nil {
+		t.Fatal("expected private URL rejection")
+	}
+	deck, err := backend.GetDeck(ctx, "cover")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deck.Assets) != 0 {
+		t.Fatalf("rejected fetch must not persist an asset: %#v", deck.Assets)
 	}
 }
 

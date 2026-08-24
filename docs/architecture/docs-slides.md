@@ -476,8 +476,12 @@ The pptx worker (`import_worker.mjs`, template mode) extracts, per layout/sample
 
 Each layout is classified into an archetype **kind** from its **layout name
 first** (the corporate pptx has no `p:sldLayout type` attributes, so the name is
-the signal): `cover`/`title`→`title`, `divider`/`separator`/`section`→`section`,
-`agenda`/`toc`/`overview`→`agenda`, `thank`/`closing`/`contact`/`q&a`→`closing`,
+the signal). `kindOf()` **normalizes the name** (`toLowerCase().replace(/[^a-z0-9]+/g,' ')`)
+before matching, so `TITLE_SLIDE`→`title slide` and `DividerPage`→`divider page`
+are recognized rather than slipping past the patterns. Broadened patterns:
+`cover`/`title slide`/`title`→`title`, `divider`/`separator`/`section`/`chapter`/`transition`→`section`,
+`agenda`/`toc`/`overview`/`contents`→`agenda`,
+`thank`/`closing`/`contact`/`copyright`/`q&a`/`conclusion`/`summary`/`wrap up`/`next steps`/`end`→`closing`,
 `blank`→`blank`; else it falls back to the placeholder signature (title +
 no-body→`title`, has-body→`content`). A suffixer de-duplicates within a family so
 multiple layouts of a role become `title`/`title-2`/… — preserving variant
@@ -486,14 +490,87 @@ multiplicity. **Every archetype's human label is the real PowerPoint layout name
 "Divider Page with Image", "Full Bleed Image"), so the user and the agent can tell
 the colorful covers apart instead of seeing a bare `title-7`.
 
+### Two tiers: fixed brand chrome vs flexible content
+
+Every archetype is tagged with a **tier** (`themes.Archetype.Tier`, surfaced on
+the `list_templates`/`create_deck` tool results):
+
+- **`fixed` — brand chrome** (`title`, `section`/divider, `agenda`,
+  `closing`/thank-you). These are reproduced **verbatim**: the agent copies the
+  archetype markup and substitutes **only** the text inside the ast-text ids
+  listed in `FillSlots` (`themes.Archetype.FillSlots`, computed by `layoutToAsd`
+  as it emits the `{{TITLE}}`/`{{BODY}}` placeholders). No shape/image/background
+  may be moved, resized, recolored, added, or removed. Rebuilding the slide from
+  its elements or adding an ad-hoc accent/background is forbidden — that is what
+  produced the off-brand white cover with a stray green shape.
+- **`flexible` — content** (everything else; also all built-in archetypes, which
+  leave `Tier` unset). The agent starts from the archetype and adapts the body
+  region to the content type (bullets, small table, chart, image+caption) while
+  keeping the template background/tokens.
+
+**Classification is signature-first (`kindOf` in `import_worker.mjs`).** The tier
+is derived from a layout's *role*, and the role is decided by placeholder
+signature BEFORE the name. A layout carrying a **body or picture placeholder is
+flexible `content`** even when its name contains "Title" — so "Title and Text",
+"Title and Text: 2/3 Columns", "Title and Content", "Title Only", "Text and
+Screenshot", "N Columns – Text and Images", "Quote", "Full Bleed Image", and
+"Q&A" are all editable content (the agent adapts their body/table/image), NOT
+locked chrome. Only **pure chrome names** become `fixed`: cover names
+(`/cover/`, `title slide`, exactly `title`), dividers (`divider|section|
+separator|chapter|transition` or `secHead`), `agenda`/`toc`/`contents`, and
+thank-you/closing (`thank|farewell|goodbye|copyright|contact`, and only when the
+layout has no body of its own). The loose `\btitle\b` match was removed because
+it wrongly caught every "Title and …" content layout and froze it as verbatim
+brand chrome the agent could not adapt. The stable-chrome guarantee (below)
+still ensures a real cover/divider/agenda/closing exists by aliasing the branded
+cover layouts, so tightening `kindOf` never drops a chrome role.
+
+`Tier`/`FillSlots` are optional (`omitempty`) and persist without a schema change:
+`SaveTemplate`/`ListTemplates` encode them after a `\u0000` (NUL) delimiter in
+`SlideContent.Notes` (`label\u0000{"tier":…,"fillSlots":[…]}`). A delimiter-free
+Notes decodes to `Tier=""`/`FillSlots=nil` (backward compat for pre-tier
+templates). Built-ins stay exactly `{title,section,content}` with unset tier.
+
+### Stable chrome set guarantee
+
+Imported templates always expose the **complete stable chrome family** —
+`title`, `section`, `agenda`, and `closing` — plus at least one flexible
+`content` archetype. For each chrome role not already present after
+classification, the guarantee step (in `import_worker.mjs`):
+
+1. **Prefers a real branded layout** — it scores every imported layout for
+   role suitability and, when one scores above threshold, aliases it (reuses its
+   markup + `_layout` IR, `tier:'fixed'`, label = that layout's real name,
+   `fillSlots` copied). Real corporate decks usually have a cover/divider/agenda
+   to alias, so this is the primary path.
+2. **Else synthesizes in the template's own style** via `synthChrome(want, {masterCtx, themeTokens, siblingLayout})`:
+   it builds an IRLayout-shaped object whose background is the deck's **real
+   shared master background** (`masterCtx.bg`, or the closest branded layout's
+   background if the master bg is the neutral fallback), whose objects are a
+   **copy of the master chrome** (`masterCtx.chromeObjects` — shared logo/accent
+   bars/brand shapes), plus role-appropriate text/accent placeholders styled from
+   `themeTokens` (`surface/ink/accent/accent2/displayFont/bodyFont`). The result
+   is coherent with the rest of the chrome family.
+
+The old white generic `fallbackMarkup()` slab (hard-coded `#4472C4` accent on a
+white bg, unrelated to the template) has been **deleted**. A `warn()` is emitted
+only when both branded-alias and master-chrome synthesis are unavailable and it
+falls back to pure theme tokens.
+
 Colorful cover/divider chrome is captured by resolving the **master→layout
 inheritance chain**, the way PowerPoint renders. A layout's effective background is
 the first non-fallback of `[layout own <p:bg>, master <p:bg>]` — so a layout with
 no explicit background inherits the master's (not white). The master's decorative
 chrome objects (backgrounds, logos, accent shapes) are merged **behind** the
 layout's own chrome (master first in z-order), skipping master placeholders and
-honoring `showMasterSp="0"` (recorded as an `IRWarning` when a layout suppresses
-master chrome). This is why imported covers now render in full color.
+honoring `showMasterSp="0"`. Suppressing the master is only a fidelity LOSS when
+the layout has **no own chrome to replace it** — the branded covers/dividers set
+`showMasterSp="0"` precisely because they paint their own full-page chrome (bg +
+anvil + logo + footer). So the importer warns about suppression **only** when a
+`showMasterSp="0"` layout ends up with zero own decorative objects (a genuinely
+sparse slide), never for the richly-chromed covers; this keeps the warning list a
+real signal instead of ~19 false alarms. This is why imported covers now render
+in full color.
 
 The pptx's authored **sample slides are NO LONGER surfaced as archetypes.** They
 were previously turned into `example-*` archetypes, but 22 of 23 real corporate
@@ -503,8 +580,96 @@ variety (covers, dividers ±image, agenda, content) lives in the **layouts** und
 the single master, and those inheritance-corrected layout archetypes are the
 on-brand starting points. Sample slides are still captured into
 `templateModel.slides[]` for the future editor, just not as archetypes. The
-`title`/`section`/`content` baseline is still guaranteed, so imported templates
-always have those three roles even for a sparse pptx.
+stable chrome set (`title`/`section`/`agenda`/`closing`) **plus** a flexible
+`content` role is guaranteed via the branded-alias-preferred / style-derived
+synthesis described above, so imported templates always carry the full family
+even for a sparse pptx.
+
+### Picture placeholders: borrowing the authored sample photo
+
+A corporate layout's hero-image region is frequently an **empty picture
+placeholder** — a `<p:sp>` (or `<p:pic>`) carrying `<p:ph type="pic">` with **no
+`<a:blip>`**, i.e. an "insert picture here" slot. The actual photo is authored on
+the **sample slide** that uses the layout, usually as a free-floating `<p:pic>`
+(often with no `<p:ph>` binding at all). Because sample slides are not surfaced as
+archetypes, a naive import left that placeholder with no `mediaKey`, and
+`layoutToAsd` fell back to a synthetic neutral panel — the reported **blank blue
+box** (the panel color came from `themeTokens.accent2`).
+
+To fix this without re-surfacing sample slides, the importer **borrows the
+sample picture's fill _and_ its own geometry + flip**. Sample slides are
+extracted **before** the layout loop and indexed by their `slideLayout`
+relationship target (`samplesByLayoutPath`). For each layout, before
+serialization, `borrowSampleImages(ir, layoutPath)` walks that layout's
+`type:'image'` placeholders that lack a `mediaKey` and picks the best candidate
+among the sample slides' image objects/placeholders. Candidates are **ranked**
+(not by raw IoU alone — that would wrongly pick a decorative overlay): (1) a
+**raster photo is strongly preferred over a vector/SVG shape** — corporate
+covers place the real photo full-bleed *behind* a colored single-path SVG
+"anvil" overlay that sits exactly over the placeholder box, so a naive
+highest-IoU match grabs the flat shape instead of the photo; (2) then larger
+image area; (3) then box overlap (IoU) as the tie-breaker.
+
+The winning candidate contributes its `mediaKey` **plus the sample picture's own
+box** (`borrowX/borrowY/borrowW/borrowH`) **and its `flipH`/`flipV`** onto the
+placeholder (`processPic` now captures image flip the same way `processSp` does
+for shapes). `layoutToAsd`'s `if (p.mediaKey)` branch then emits a real
+`<ast-image asset-ref=…>` at the **borrowed sample geometry** (not squeezed into
+the placeholder's small declared hole) with `flip-h`/`flip-v` attributes when the
+sample was mirrored, so the default hero renders **faithfully** — correct
+size, position, and mirroring — matching the source PowerPoint out of the box.
+This still borrows only the picture fill (mediaKey + that picture's own box +
+flip), never the whole sample slide, so it is **not** "sample slide as
+archetype." The layout's own decorative shape (e.g. the dark-green anvil) stays
+**behind** the borrowed image because `layoutToAsd` emits `bg → objects →
+placeholders` and paint order == document order (see the renderer contract
+below); no z-index is introduced.
+
+The borrowed hero is also a **replaceable image fill slot**: its element id
+(`ph-pic-N`) is added to the archetype's `fillSlots`, exactly like the text
+`ph-title`/`ph-body` slots. `fillSlots` stays a flat `[]string` of element ids —
+an image slot is just an `<ast-image>` id in that list — so `create_deck` /
+`write_slide` and the slides skill can advertise the photo as swappable. A user
+can later ask to "replace the hero image with X" and only that image node
+changes; the replacement **inherits the slot's geometry and flip** (the default
+is pre-populated from the template so the slide looks right before any edit).
+
+Flip is expressed end-to-end as `flip-h`/`flip-v` boolean attributes (optional,
+`omitempty`, no protocol-version bump): the Lit web runtime
+(`PositionedElement.updated()`) and the standalone-HTML export
+(`nodeInlineStyle`) both compose `scaleX(-1)`/`scaleY(-1)` with the existing
+`rotate(...)` transform, and the PPTX export worker passes `flipH`/`flipV` to
+PptxGenJS `addImage` so a re-export stays faithful (never re-mirrored).
+
+An empty picture placeholder that is **not** a borrowable hero (i.e. no sample
+photo overlaps it — the common case for CONTENT layouts like "N Columns – Text
+and Images", "Text and Screenshot", "Title and Content") is **not** a fidelity
+failure: it is a legitimate "insert picture here" hole the author fills. The
+importer therefore emits it as a **fillable image drop-slot** — its id
+(`ph-pic-N`) is added to `fillSlots` exactly like the borrowed-hero slot, and it
+is rendered as a light neutral affordance (`<ast-shape id="ph-pic-N" … alt="…">`,
+because `ast-image` requires an `asset-ref`) that `create_deck`/`write_slide`
+replaces with the chosen image. It carries an `alt`, is **not** marked
+`decorative`, and emits **no warning**. This is what makes content-layout image
+slots contiguous in `fillSlots` (`ph-1, ph-pic-2, ph-3, ph-pic-4, …`) instead of
+the old non-contiguous `ph-1, ph-3, ph-5` (where the interleaved image regions
+were silently dropped to decorative panels). The old
+`Picture placeholder has no image; rendered neutral panel` warning is gone: an
+empty picture placeholder in a content layout is a fillable slot, not an error.
+The distinction is: a **borrowable hero** (a sample photo overlaps the region) is
+pre-populated with the default image at the sample's own geometry/flip; an
+**empty content slot** (no overlap) is an advertised, empty image slot — both are
+advertised in `fillSlots` and both are swappable.
+
+### Renderer contract: paint order == document order
+
+The runtime and HTML exporter have **no z-index** and **no implicit background
+layer**: paint order is document order (the first child paints at the back).
+`layoutToAsd` therefore emits the **full-canvas background first**, so a faithful
+branded archetype renders correctly. This was verified **not** to be the source
+of the white-cover bug — the failure was upstream (the AI never received a
+faithful branded archetype for the title role); do not add a z-index or an
+implicit-bg layer to "fix" rendering.
 
 ### IR → ASD serialization
 
@@ -521,6 +686,25 @@ Each `IRLayout` is serialized to a valid `<ast-slide>` archetype (fill-ready wit
 - Rounded rects → `geom="roundRect"` (the runtime's fixed ~0.12 radius). The IR
   keeps the true `rectRadius` for the future editor / high-fidelity export; this
   is a **known v1 approximation**.
+- **Font sizes are scaled to the ASD canvas.** OOXML run sizes are in points; the
+  runtime applies `ast-text size` as **px** on the fixed 1920×1080 canvas. Because
+  all geometry (x/y/w/h) is already scaled by `scale = min(1920/pxW, 1080/pxH)`
+  (a 1280×720 source ⇒ `scale ≈ 1.5`), the importer scales each run's point size by
+  the **same** `scale` exactly once, in `styleOf` (where `scale` is in closure
+  scope — `extractRuns` stores the raw pt value). A 10 pt footer (`sz="1000"`) thus
+  emits `size≈15` to match its 1.5×-enlarged box, instead of rendering tiny at
+  `size="10"`. Runs that carry **no explicit** `@sz`/`a:latin` inherit a real
+  size/font from the shape's own `a:lstStyle` first, else the master/layout
+  `p:txStyles` (`titleStyle`/`bodyStyle`/`otherStyle` → `a:lvl1pPr/a:defRPr`),
+  before scaling — so they no longer fall back to the hard-coded 24 pt / serif
+  default. All of this is generic (no template-specific fonts/sizes) and defensive
+  (absent `txStyles`/`lstStyle` ⇒ unchanged behavior). Emitted `font` families
+  carry a **web-safe fallback chain** (`<brand family>, Aptos, Arial, sans-serif`):
+  corporate fonts like `72 Brand`/`72 Brand Medium` are not installed in a browser,
+  and `ast-text` sets `font-family` directly, so a bare uninstalled family would
+  fall back to the browser default **serif** (Times). The appended chain degrades
+  an uninstalled brand font to Aptos/Arial/sans-serif (matching the deck body font)
+  while still preferring the real brand font when it is available.
 
 ### ASD path-arc widening
 
@@ -565,11 +749,49 @@ them at the **serialization boundary only** (the store record is unchanged):
   → `slidesDeckDTO` (adds `theme`, still drops assets + templateModel).
 - Slide tool results (`create_deck`/`get_deck`/`list_decks`/`write_slide`/
   `validate_deck`) → `DeckView` (keeps theme; replaces the heavy fields with
-  `assetCount` + `hasTemplateModel` so the model still knows they exist).
+  `assetCount` + `hasTemplateModel` so the model still knows they exist). Single-deck
+  results (`create_deck`/`get_deck`/`list_deck_assets`/`add_deck_image`) additionally
+  carry a lightweight `assets[]` **catalog** (see *Deck image assets* below) via
+  `deckViewWithAssets`; `list_decks` uses plain `deckView` (no catalog) to stay light.
 
 `Service.Scene` still reads `Assets` straight from the store, so `/present` and the
 PPTX/PDF/HTML exporters resolve `asset-ref` → `data:image/…` unchanged; the asset
 security path (asset-ref → `resolveImageSrc`, CSP) is untouched.
+
+### Deck image assets (catalog + AI add/swap)
+
+Imported templates carry their media (logos, brand marks, hero photos) in the
+deck's `Assets` map, keyed by a content hash (`sha256-<hex>`) with a
+`data:<mime>;base64,…` value. `ast-image` **requires** an `asset-ref`
+(`schemas.go`), and `asset-ref` resolves to a stored `data:` URI via
+`resolveImageSrc` — so the AI can only fill or swap an image slot if it knows
+which asset-refs exist. Two mechanisms surface and grow that library **without**
+leaking the heavy `data:` bytes into the model context or the wire:
+
+- **Catalog projection.** `DeckView.Assets` is a `[]AssetInfo` built by
+  `assetCatalog(assets)` — one entry per asset with `ref` (the map key, usable
+  verbatim as an `ast-image` `asset-ref`), `mime` (parsed from the `data:` prefix),
+  approximate decoded `bytes`, and a `kind` hint (`logo` for SVG/very-small images,
+  else `image`). It **never** copies the `data:` value. `create_deck` (template
+  branch) and `get_deck` return it via `deckViewWithAssets`, so the AI immediately
+  sees the imported template images it can reference or swap. This keeps the
+  perf/security guard (`TestSlidesResponsesOmitHeavyManifestFields`) green — the
+  catalog is hints only.
+- **`list_deck_assets`** loads the full manifest and returns the same catalog, so
+  the AI can enumerate an existing deck's images and pick an `asset-ref` to place
+  in an `ast-image` (fill a drop-slot) or to swap one image for another catalog id.
+- **`add_deck_image`** fetches a **public https image URL** through the
+  SSRF-protected `AssetIngestor.Fetch` (MIME/SVG validation, redirect re-check,
+  20 MB cap — no private-network fetches, no `data:` smuggling), stores it under
+  `ref = "sha256-" + asset.ID` (matching the importer's key convention so
+  `resolveImageSrc` lookups are uniform), persists it via `Service.AddDeckAsset`
+  (clone the `Assets` map → set `ref` → `UpdateDeck`; idempotent for the same URL),
+  and returns the `assetRef` for the AI to drop into an `ast-image`. This is the
+  supported path for "add this image to the deck" — there is no Studio upload UI;
+  the AI does it via the tool.
+
+The asset-ref → `resolveImageSrc` contract (data: only) and the `sha256-<hex>`
+key convention are unchanged; both new tools are additive (no protocol bump).
 
 **Store-level field projection.** The slim DTO above trims the *wire* payload, but
 `personalDocsStore.ListDecks`/`teamDocsStore.ListDecks` still ran

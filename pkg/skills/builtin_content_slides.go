@@ -42,6 +42,12 @@ You can also ` + "`list_decks`" + ` to see existing decks (template decks are hi
 
 ---
 
+## Imported corporate ` + "`.pptx`" + ` templates
+
+When the user imported a real corporate ` + "`.pptx`" + ` (Studio → Slides → Import ` + "`.pptx`" + `), it becomes a **standard ASD template** — a set of theme colors and archetypes derived from the file, not the original file itself. Importing is inherently lossy: fine details of the corporate design are approximated. The imported template appears in ` + "`list_templates`" + ` alongside the built-ins and is used exactly the same way: call ` + "`create_deck`" + ` with its ` + "`template`" + ` name, then fill the archetypes with ` + "`write_slide`" + `. You do not do anything special to author it.
+
+---
+
 ## Gathering Requirements (don't stall, but aim right)
 
 Before authoring, settle these — ask the user only what you genuinely can't infer, otherwise pick sensible defaults and proceed:

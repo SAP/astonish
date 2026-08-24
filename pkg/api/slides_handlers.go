@@ -241,24 +241,32 @@ func ExportSlidesPDFHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func ExportSlidesPPTXHandler(w http.ResponseWriter, r *http.Request) {
-	scene, ok := loadSlidesScene(w, r)
+	svc, ok := requireDocsService(w, r)
 	if !ok {
 		return
 	}
+	deckSlug := mux.Vars(r)["deckSlug"]
+	scene, _, err := svc.Scene(r.Context(), deckSlug)
+	if err != nil {
+		writeSlidesError(w, err)
+		return
+	}
+
 	_, currentFile, _, _ := runtime.Caller(0)
 	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(currentFile), "../.."))
+
 	exporter := slides.PPTXExporter{Runner: pptxworker.Runner{
 		WorkingDir: filepath.Join(repoRoot, "web"),
 		ScriptPath: filepath.Join(repoRoot, "pkg/docs/slides/pptxworker/worker.mjs"),
 	}}
 	result, err := exporter.Export(r.Context(), scene, r.URL.Query().Get("strictNative") == "true")
 	if err != nil {
-		slog.Error("slides PPTX export failed", "deck", mux.Vars(r)["deckSlug"], "error", err)
+		slog.Error("slides PPTX export failed", "deck", deckSlug, "error", err)
 		http.Error(w, "export slides PPTX: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.presentationml.presentation")
-	w.Header().Set("Content-Disposition", attachmentName(mux.Vars(r)["deckSlug"], "pptx"))
+	w.Header().Set("Content-Disposition", attachmentName(deckSlug, "pptx"))
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(result.Bytes)
 }

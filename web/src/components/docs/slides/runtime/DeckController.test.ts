@@ -63,4 +63,30 @@ describe('DeckController', () => {
     expect(deck.hasAttribute('print')).toBe(false)
     expect(deck.querySelectorAll('ast-slide[active]')).toHaveLength(1)
   })
+
+  it('renders only the active slide and leaves off-screen slides hidden', async () => {
+    const deck = await mountDeck()
+    const slides = [...deck.querySelectorAll('ast-slide')] as AstSlideElement[]
+    // Exactly one active slide; the inactive one is aria-hidden and, per
+    // styles.ts, display:none — so its subtree is never laid out.
+    expect(deck.querySelectorAll('ast-slide[active]')).toHaveLength(1)
+    expect(slides[0].active).toBe(true)
+    expect(slides[1].active).toBe(false)
+    expect(slides[1].hasAttribute('aria-hidden')).toBe(true)
+    expect(slides[0].hasAttribute('aria-hidden')).toBe(false)
+  })
+
+  it('does not re-fire lifecycle events for a slide that stays active across fragment steps', async () => {
+    const deck = await mountDeck()
+    const enterOne = vi.fn()
+    const leaveOne = vi.fn()
+    deck.querySelector('#one')?.addEventListener('ast-slide-enter', enterOne)
+    deck.querySelector('#one')?.addEventListener('ast-slide-leave', leaveOne)
+    // Advance a fragment within slide one — the active slide is unchanged, so
+    // applyState must not dispatch enter/leave again for it.
+    deck.next()
+    expect(deck.currentIndex).toBe(0)
+    expect(enterOne).not.toHaveBeenCalled()
+    expect(leaveOne).not.toHaveBeenCalled()
+  })
 })

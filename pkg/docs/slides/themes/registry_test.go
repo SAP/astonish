@@ -1,6 +1,9 @@
 package themes
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestListTemplatesDeterministicOrder(t *testing.T) {
 	got := ListTemplates()
@@ -43,5 +46,37 @@ func TestLookupTemplate(t *testing.T) {
 	}
 	if _, ok := LookupTemplate("does-not-exist"); ok {
 		t.Fatal("expected missing template to report ok=false")
+	}
+}
+
+func TestArchetypesForMatchesInternal(t *testing.T) {
+	got := ArchetypesFor("#101820", "#F2F2F2", "#FFB81C")
+	if len(got) != 3 {
+		t.Fatalf("expected 3 archetypes, got %d", len(got))
+	}
+	kinds := map[string]string{}
+	for _, a := range got {
+		kinds[a.Kind] = a.Markup
+	}
+	for _, k := range []string{"title", "section", "content"} {
+		markup, ok := kinds[k]
+		if !ok {
+			t.Fatalf("missing archetype kind %q", k)
+		}
+		// The palette colors must be embedded in the regenerated markup so
+		// previews reflect the new colors.
+		if !strings.Contains(markup, "#101820") {
+			t.Fatalf("archetype %q missing surface color: %s", k, markup)
+		}
+	}
+	// The exported wrapper must equal the internal builder for the default title.
+	want := archetypesFor("#101820", "#F2F2F2", "#FFB81C", "")
+	if len(want) != len(got) {
+		t.Fatalf("ArchetypesFor length %d != archetypesFor length %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i].Kind != want[i].Kind || got[i].Markup != want[i].Markup {
+			t.Fatalf("archetype %d mismatch between ArchetypesFor and archetypesFor", i)
+		}
 	}
 }

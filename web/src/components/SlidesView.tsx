@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
-import { Presentation, Trash2, ArrowLeft, Clock, Upload, GitFork, FileUp } from 'lucide-react'
+import { Presentation, Trash2, ArrowLeft, Clock, Upload, GitFork, FileUp, Layers } from 'lucide-react'
 import {
   listSlidesDecks,
   listSlidesTemplates,
@@ -13,10 +13,12 @@ import {
   type DocsScope,
 } from '../api/slides'
 import SlidesDeckView from './chat/SlidesDeckView'
+import TemplatesArea from './slides/TemplatesArea'
 
 interface SlidesViewProps {
   theme: string
   deckSlug?: string
+  templatesView?: boolean
   isPlatformMode?: boolean
   onNavigate?: (path: string) => void
   onPublishDeck?: (deck: SlidesDeckListItem) => void
@@ -211,7 +213,7 @@ function DeckCard({
 }
 
 /** Small swatch row for a template's core tokens. */
-function TemplateSwatches({ tokens }: { tokens?: Record<string, string> }) {
+export function TemplateSwatches({ tokens }: { tokens?: Record<string, string> }) {
   const keys = ['surface', 'ink', 'accent'] as const
   const colors = keys
     .map(k => tokens?.[k])
@@ -230,29 +232,7 @@ function TemplateSwatches({ tokens }: { tokens?: Record<string, string> }) {
   )
 }
 
-/** Compact row listing available slide templates with token swatches. */
-function TemplatesBar({ templates }: { templates: SlidesTemplate[] }) {
-  if (templates.length === 0) return null
-  return (
-    <div className="mb-4 flex flex-wrap items-center gap-2" data-testid="templates-bar">
-      <span className="text-xs font-medium" style={{ color: 'var(--text-muted)' }}>Templates</span>
-      {templates.map(tpl => (
-        <div
-          key={tpl.name}
-          className="flex items-center gap-1.5 rounded-full px-2 py-1 text-xs"
-          style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-color)', color: 'var(--text-secondary)' }}
-          title={tpl.description || tpl.label || tpl.name}
-          data-testid="template-chip"
-        >
-          <TemplateSwatches tokens={tpl.tokens} />
-          <span className="truncate">{tpl.label || tpl.name}</span>
-        </div>
-      ))}
-    </div>
-  )
-}
-
-export default function SlidesView({ theme, deckSlug, isPlatformMode, onNavigate, onPublishDeck, onForkDeck }: SlidesViewProps) {
+export default function SlidesView({ theme, deckSlug, templatesView, isPlatformMode, onNavigate, onPublishDeck, onForkDeck }: SlidesViewProps) {
   void theme
   const [decks, setDecks] = useState<SlidesDeckListItem[]>([])
   const [loading, setLoading] = useState(true)
@@ -353,6 +333,28 @@ export default function SlidesView({ theme, deckSlug, isPlatformMode, onNavigate
   const teamDecks = isPlatformMode ? decks.filter(d => d.scope === 'team') : []
   const hasDecks = personalDecks.length > 0 || teamDecks.length > 0
 
+  // Dedicated Templates management area (deep-linked at #/slides/templates).
+  if (templatesView) {
+    return (
+      <>
+        <TemplatesArea onNavigate={onNavigate} showToast={showToast} />
+        {toast && (
+          <div className="fixed bottom-6 right-6 z-50 max-w-sm rounded-lg px-4 py-3 text-sm shadow-lg"
+            style={{
+              background: 'var(--bg-secondary)',
+              border: `1px solid ${toast.type === 'error' ? '#ef4444' : 'var(--border-color)'}`,
+              color: toast.type === 'error' ? '#f87171' : 'var(--text-primary)',
+            }}
+            role="status"
+            data-testid="slides-toast"
+          >
+            {toast.message}
+          </div>
+        )}
+      </>
+    )
+  }
+
   // Detail view — reuse the existing SlidesDeckView renderer.
   if (selectedSlug) {
     const scope: DocsScope = selectedDeck?.scope ?? 'personal'
@@ -418,9 +420,24 @@ export default function SlidesView({ theme, deckSlug, isPlatformMode, onNavigate
             {decks.length}
           </span>
           <button
+            onClick={() => onNavigate?.('/slides/templates')}
+            className="ml-auto flex cursor-pointer items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs transition-colors"
+            style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-color)', color: 'var(--text-secondary)' }}
+            title="Manage slide templates"
+            data-testid="manage-templates-link"
+          >
+            <Layers size={14} />
+            Templates
+            {templates.length > 0 && (
+              <span className="rounded-full px-1 text-[10px]" style={{ background: 'var(--bg-tertiary)', color: 'var(--text-muted)' }}>
+                {templates.length}
+              </span>
+            )}
+          </button>
+          <button
             onClick={handleImportClick}
             disabled={importing}
-            className="ml-auto flex cursor-pointer items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs transition-colors disabled:cursor-default disabled:opacity-60"
+            className="flex cursor-pointer items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs transition-colors disabled:cursor-default disabled:opacity-60"
             style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-color)', color: 'var(--text-secondary)' }}
             title="Import a .pptx file as a slide template"
           >
@@ -436,8 +453,6 @@ export default function SlidesView({ theme, deckSlug, isPlatformMode, onNavigate
             data-testid="template-import-input"
           />
         </div>
-
-        <TemplatesBar templates={templates} />
 
         {isPlatformMode && (personalDecks.length > 0 || teamDecks.length > 0) ? (
           <>

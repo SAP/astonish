@@ -1714,6 +1714,7 @@ layout:
               theme={theme}
               isPlatformMode={isPlatformMode}
               deckSlug={path.view === 'slides' ? path.params.deckSlug : ''}
+              templatesView={path.view === 'slides' ? path.params.subView === 'templates' : false}
               onNavigate={(hashPath: string) => navigate(hashPath)}
               onPublishDeck={isPlatformMode ? handlePublishDeck : undefined}
               onForkDeck={isPlatformMode ? handleForkDeck : undefined}

@@ -119,6 +119,15 @@ var builtinTemplates = map[string]Template{
 	},
 }
 
+// ArchetypesFor builds the three standard archetypes (title, section, content)
+// from a palette using the default (non-gradient) title layout. It is a thin
+// exported wrapper over the internal archetypesFor so template-management code
+// outside this package (e.g. the recolor handler) can regenerate archetypes
+// from a new palette without duplicating the markup logic.
+func ArchetypesFor(bg, ink, accent string) []Archetype {
+	return archetypesFor(bg, ink, accent, "")
+}
+
 // LookupTemplate returns the built-in template with the given name.
 func LookupTemplate(name string) (Template, bool) {
 	t, ok := builtinTemplates[name]

@@ -104,22 +104,44 @@ export class DeckController {
     if (slides.length === 0) return
     this.index = Math.max(0, Math.min(this.index, slides.length - 1))
     const print = this.deck.hasAttribute('print')
+    // Performance: for large decks (hundreds of elements) we must not re-walk
+    // and re-toggle every slide + fragment on each state change. Only mutate a
+    // slide whose active/hidden state actually changes, and only re-reveal
+    // fragments on the slide that is (or just became) active. Off-screen slides
+    // stay display:none (see styles.ts) so their subtrees are never laid out
+    // until first activation.
     slides.forEach((slide, index) => {
       const active = print || index === this.index
-      if (slide.active && !active) slide.dispatchEvent(new CustomEvent('ast-slide-leave', { bubbles: true }))
+      const wasActive = slide.active
+      if (wasActive === active) {
+        // No active-state change: the only per-slide work still required is
+        // updating fragment reveal on the slide that remains active (its
+        // fragment index may have advanced). Keep aria-hidden in sync
+        // idempotently so the very first pass still marks inactive slides
+        // hidden (toggleAttribute is a no-op when already correct).
+        if (active) this.applyFragments(slide, print)
+        else if (!slide.hasAttribute('aria-hidden')) slide.setAttribute('aria-hidden', '')
+        return
+      }
+      if (wasActive && !active) slide.dispatchEvent(new CustomEvent('ast-slide-leave', { bubbles: true }))
       slide.active = active
       slide.toggleAttribute('aria-hidden', !active)
       if (!active) return
-      const ordered = [...slide.querySelectorAll<AstFragment>('ast-fragment')].sort((a, b) => a.order - b.order)
-      ordered.forEach((item, fragmentIndex) => {
-        item.revealed = print || fragmentIndex < this.fragment
-      })
+      this.applyFragments(slide, print)
       slide.dispatchEvent(new CustomEvent('ast-slide-enter', { bubbles: true }))
     })
     const active = slides[this.index]
     const detail: DeckChangeDetail = { index: this.index, slideId: active.id, fragment: this.fragment }
     this.deck.dispatchEvent(new CustomEvent<DeckChangeDetail>('ast-deck-change', { detail, bubbles: true }))
     if (updateLocation && active.id && location.hash !== `#${active.id}`) history.replaceState(null, '', `#${active.id}`)
+  }
+
+  private applyFragments(slide: AstSlide, print: boolean): void {
+    const ordered = [...slide.querySelectorAll<AstFragment>('ast-fragment')].sort((a, b) => a.order - b.order)
+    ordered.forEach((item, fragmentIndex) => {
+      const revealed = print || fragmentIndex < this.fragment
+      if (item.revealed !== revealed) item.revealed = revealed
+    })
   }
 
   private indexFromLocation(): number {

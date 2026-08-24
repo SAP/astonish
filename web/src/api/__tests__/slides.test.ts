@@ -8,6 +8,9 @@ import {
   listSlidesDecks,
   listSlidesTemplates,
   importSlidesTemplate,
+  deleteSlidesTemplate,
+  duplicateSlidesTemplate,
+  recolorSlidesTemplate,
   publishDeckToTeam,
   forkDeckToPersonal,
   deleteSlidesDeck,
@@ -144,5 +147,47 @@ describe('slides API (templates)', () => {
   it('importSlidesTemplate throws on non-ok response', async () => {
     mockedTeamFetch.mockResolvedValue(new Response('nope', { status: 400 }))
     await expect(importSlidesTemplate(new File(['b'], 'd.pptx'))).rejects.toThrow()
+  })
+
+  it('deleteSlidesTemplate issues DELETE with scope query', async () => {
+    mockedTeamFetch.mockResolvedValue(new Response('', { status: 200 }))
+    await deleteSlidesTemplate('corp', 'team')
+    const [url, init] = mockedTeamFetch.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('/api/docs/slides/templates/corp?scope=team')
+    expect(init.method).toBe('DELETE')
+  })
+
+  it('deleteSlidesTemplate throws on non-ok response', async () => {
+    mockedTeamFetch.mockResolvedValue(new Response('forbidden', { status: 403 }))
+    await expect(deleteSlidesTemplate('midnight')).rejects.toThrow()
+  })
+
+  it('duplicateSlidesTemplate POSTs JSON body with opts', async () => {
+    mockedTeamFetch.mockResolvedValue(new Response(JSON.stringify({ template: { name: 'corp-copy', label: 'Corp (copy)' } }), { status: 200 }))
+    const res = await duplicateSlidesTemplate('corp', { newName: 'corp-copy', newLabel: 'Corp (copy)' })
+    expect(res.template.name).toBe('corp-copy')
+    const [url, init] = mockedTeamFetch.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('/api/docs/slides/templates/corp/duplicate?scope=personal')
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(init.body as string)).toEqual({ newName: 'corp-copy', newLabel: 'Corp (copy)' })
+  })
+
+  it('duplicateSlidesTemplate throws on non-ok response', async () => {
+    mockedTeamFetch.mockResolvedValue(new Response('not found', { status: 404 }))
+    await expect(duplicateSlidesTemplate('nope')).rejects.toThrow()
+  })
+
+  it('recolorSlidesTemplate PATCHes tokens as JSON', async () => {
+    mockedTeamFetch.mockResolvedValue(new Response(JSON.stringify({ name: 'corp', tokens: { accent: '#FF8800' } }), { status: 200 }))
+    await recolorSlidesTemplate('corp', { accent: '#FF8800', surface: '#101010' }, 'team')
+    const [url, init] = mockedTeamFetch.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('/api/docs/slides/templates/corp/recolor?scope=team')
+    expect(init.method).toBe('PATCH')
+    expect(JSON.parse(init.body as string)).toEqual({ tokens: { accent: '#FF8800', surface: '#101010' } })
+  })
+
+  it('recolorSlidesTemplate throws on non-ok response', async () => {
+    mockedTeamFetch.mockResolvedValue(new Response('bad hex', { status: 400 }))
+    await expect(recolorSlidesTemplate('corp', { accent: 'red' })).rejects.toThrow()
   })
 })

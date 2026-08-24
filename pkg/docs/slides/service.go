@@ -211,6 +211,30 @@ func (s Service) resolveTemplate(ctx context.Context, name string) (themes.Templ
 	return themes.Template{}, false
 }
 
+// Template returns a single SCOPED template by name (reconstructed from its
+// hidden tmpl/<name> deck), or found=false when no scoped template with that
+// name exists. It intentionally does NOT fall back to built-ins — callers that
+// manage scoped templates (duplicate/recolor/delete) must distinguish a
+// built-in (which is read-only) from a scoped template. Use themes.LookupTemplate
+// for built-ins, or resolveTemplate to merge both.
+func (s Service) Template(ctx context.Context, name string) (themes.Template, bool, error) {
+	scoped, err := s.ListTemplates(ctx)
+	if err != nil {
+		return themes.Template{}, false, err
+	}
+	for _, t := range scoped {
+		if t.Name == name {
+			return t, true, nil
+		}
+	}
+	return themes.Template{}, false, nil
+}
+
+// TemplateSlug returns the canonical store slug for a scoped template of the
+// given name (the hidden tmpl/<name> deck). Exposed so HTTP handlers reference
+// the same prefix the service uses instead of hardcoding the literal.
+func (s Service) TemplateSlug(name string) string { return templatePrefix + name }
+
 func (s Service) Slide(ctx context.Context, deckSlug string, position int) (*store.SlideContent, error) {
 	_, deckSlides, err := s.Deck(ctx, deckSlug)
 	if err != nil {

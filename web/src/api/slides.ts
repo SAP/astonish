@@ -71,6 +71,8 @@ export interface SlidesTemplate {
   assets?: Record<string, string>
   archetypes?: SlidesTemplateArchetype[]
   scope?: string
+  /** Archetype kinds (title/section/content) available in the template. */
+  archetypeKinds?: string[]
 }
 
 function withScope(path: string, scope: DocsScope): string {
@@ -174,4 +176,47 @@ export async function importSlidesTemplate(
   })
   if (!response.ok) throw await responseError(response, 'Failed to import template')
   return response.json() as Promise<{ template: { name: string; label?: string; scope?: string } }>
+}
+
+/** Delete a scoped slide template (built-ins are read-only and return 403). */
+export async function deleteSlidesTemplate(name: string, scope: DocsScope = 'personal'): Promise<void> {
+  const response = await teamFetch(withScope(`${DOCS_BASE}/slides/templates/${encodeURIComponent(name)}`, scope), {
+    method: 'DELETE',
+  })
+  if (!response.ok) throw await responseError(response, 'Failed to delete template')
+}
+
+/**
+ * Duplicate a template (built-in or scoped) into a new scoped template the user
+ * can then edit. Returns the created template's identity.
+ */
+export async function duplicateSlidesTemplate(
+  name: string,
+  opts: { newName?: string; newLabel?: string } = {},
+  scope: DocsScope = 'personal',
+): Promise<{ template: { name: string; label?: string } }> {
+  const response = await teamFetch(withScope(`${DOCS_BASE}/slides/templates/${encodeURIComponent(name)}/duplicate`, scope), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(opts),
+  })
+  if (!response.ok) throw await responseError(response, 'Failed to duplicate template')
+  return response.json() as Promise<{ template: { name: string; label?: string } }>
+}
+
+/**
+ * Recolor a scoped template's palette tokens (surface/ink/accent). Built-ins are
+ * read-only and return 403.
+ */
+export async function recolorSlidesTemplate(
+  name: string,
+  tokens: Record<string, string>,
+  scope: DocsScope = 'personal',
+): Promise<void> {
+  const response = await teamFetch(withScope(`${DOCS_BASE}/slides/templates/${encodeURIComponent(name)}/recolor`, scope), {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tokens }),
+  })
+  if (!response.ok) throw await responseError(response, 'Failed to recolor template')
 }

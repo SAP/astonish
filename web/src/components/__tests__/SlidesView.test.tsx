@@ -112,10 +112,20 @@ describe('SlidesView', () => {
     expect(await screen.findByText(/No slide decks yet/i)).toBeInTheDocument()
   })
 
-  it('renders available templates with their labels', async () => {
+  it('shows a Manage templates link in the header with a count', async () => {
     render(<SlidesView theme="dark" />)
     await waitFor(() => expect(slidesApi.listSlidesTemplates).toHaveBeenCalled())
-    expect(await screen.findByText('Aurora')).toBeInTheDocument()
+    const link = await screen.findByTestId('manage-templates-link')
+    expect(link).toBeInTheDocument()
+    expect(link).toHaveTextContent('Templates')
+  })
+
+  it('navigates to the templates area when the header link is clicked', async () => {
+    const onNavigate = vi.fn()
+    render(<SlidesView theme="dark" onNavigate={onNavigate} />)
+    const link = await screen.findByTestId('manage-templates-link')
+    fireEvent.click(link)
+    expect(onNavigate).toHaveBeenCalledWith('/slides/templates')
   })
 
   it('imports a .pptx template via the hidden input and refetches templates', async () => {

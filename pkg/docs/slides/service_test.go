@@ -325,6 +325,49 @@ func TestSaveAndListTemplatesRoundtrip(t *testing.T) {
 	}
 }
 
+func TestServiceTemplateFetchesScoped(t *testing.T) {
+	ctx := context.Background()
+	svc := Service{Store: newMultiDeckStore()}
+	tmpl := themes.Template{
+		Schema: SchemaV2,
+		Name:   "acme",
+		Label:  "Acme Brand",
+		Tokens: map[string]string{"surface": "#101820", "ink": "#F2F2F2", "accent": "#FFB81C"},
+		Archetypes: []themes.Archetype{
+			{Kind: "title", Markup: `<ast-slide id="t"><ast-text id="h" x="160" y="380" w="1600" h="200" color="#F2F2F2" size="72">{{TITLE}}</ast-text></ast-slide>`},
+		},
+	}
+	if err := svc.SaveTemplate(ctx, tmpl); err != nil {
+		t.Fatalf("save template: %v", err)
+	}
+
+	got, found, err := svc.Template(ctx, "acme")
+	if err != nil {
+		t.Fatalf("Template: %v", err)
+	}
+	if !found {
+		t.Fatal("expected to find scoped template 'acme'")
+	}
+	if got.Name != "acme" || got.Label != "Acme Brand" || got.Tokens["accent"] != "#FFB81C" {
+		t.Fatalf("fetched template mismatch: %#v", got)
+	}
+
+	// Unknown scoped name -> found=false, no error.
+	if _, found, err := svc.Template(ctx, "does-not-exist"); err != nil || found {
+		t.Fatalf("expected not found for unknown template, got found=%v err=%v", found, err)
+	}
+
+	// A built-in name is NOT a scoped template: Template must not surface it.
+	if _, found, err := svc.Template(ctx, "midnight"); err != nil || found {
+		t.Fatalf("Template must not return built-ins, got found=%v err=%v", found, err)
+	}
+
+	// TemplateSlug returns the canonical hidden-deck slug.
+	if slug := svc.TemplateSlug("acme"); slug != "tmpl/acme" {
+		t.Fatalf("TemplateSlug = %q, want tmpl/acme", slug)
+	}
+}
+
 func TestListDecksHidesTemplateDecks(t *testing.T) {
 	ctx := context.Background()
 	svc := Service{Store: newMultiDeckStore()}

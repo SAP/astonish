@@ -1,13 +1,21 @@
 package api
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
 
+	"github.com/SAP/astonish/pkg/docs/slides"
 	"github.com/SAP/astonish/pkg/store"
+	"github.com/google/uuid"
+	"github.com/gorilla/mux"
 )
 
 // docsStoreStub is a minimal in-memory store.DocsStore for handler tests.
@@ -119,5 +127,68 @@ func TestGetLocalPDFBrowserManagerIsNotSandboxed(t *testing.T) {
 	// instance and must still be non-sandboxed.
 	if again := GetLocalPDFBrowserManager(); again != mgr {
 		t.Fatal("expected GetLocalPDFBrowserManager to return the memoized instance")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// PPTX export (ASD PptxGenJS path).
+// ---------------------------------------------------------------------------
+
+// seedExportDeck writes a deck manifest (with optional assets) and one ASD slide
+// into the store, returning the slug.
+func seedExportDeck(t *testing.T, s *memDocsStore, slug string, assets map[string]string) string {
+	t.Helper()
+	deckID := uuid.NewString()
+	if err := s.CreateDeck(context.Background(), &store.DeckManifest{
+		ID: deckID, Slug: slug, Title: "Deck", SchemaVersion: slides.SchemaV2, Assets: assets,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	markup := `<ast-slide id="s1">` +
+		`<ast-text id="h" x="160" y="120" w="1600" h="140" size="72" weight="bold" color="#172033">Quarter Results</ast-text>` +
+		`<ast-text id="b" x="160" y="320" w="1600" h="600" size="36" color="#172033">Revenue is up</ast-text>` +
+		`</ast-slide>`
+	if err := s.UpsertSlide(context.Background(), &store.SlideContent{
+		ID: uuid.NewString(), DeckID: deckID, Position: 0, Content: markup, SchemaVersion: slides.SchemaV2,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return slug
+}
+
+func exportPPTXRequest(t *testing.T, personal store.DocsStore, slug string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/docs/slides/"+slug+"/export/pptx?scope=personal", nil)
+	req = mux.SetURLVars(req, map[string]string{"deckSlug": slug})
+	req = withDocsServices(req, personal, newMemDocsStore())
+	rec := httptest.NewRecorder()
+	ExportSlidesPPTXHandler(rec, req)
+	return rec
+}
+
+// TestExportSlidesPPTXPlainDeckUsesPptxGenJS verifies a deck WITHOUT an origin
+// asset still exports via the existing ASD->PptxGenJS path and returns a valid
+// .pptx.
+func TestExportSlidesPPTXPlainDeckUsesPptxGenJS(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node not available; skipping node-dependent export test")
+	}
+	repo := apiRepoRoot(t)
+	workingDir := filepath.Join(repo, "web")
+	for _, mod := range []string{"pptxgenjs", "jszip"} {
+		if _, err := os.Stat(filepath.Join(workingDir, "node_modules", mod)); err != nil {
+			t.Skipf("web/node_modules/%s missing", mod)
+		}
+	}
+	personal := newMemDocsStore()
+	slug := seedExportDeck(t, personal, "plain-deck", nil) // no origin asset
+
+	rec := exportPPTXRequest(t, personal, slug)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.Bytes()
+	if _, err := zip.NewReader(bytes.NewReader(body), int64(len(body))); err != nil {
+		t.Fatalf("plain-deck export output not a valid .pptx zip: %v", err)
 	}
 }

@@ -1,7 +1,12 @@
 export const runtimeStyles = `
   ast-deck { display:block; position:relative; width:1920px; height:1080px; overflow:hidden; transform-origin:top left; background:var(--ast-surface,#fff); color:var(--ast-ink,#172033); }
-  ast-slide { display:none; position:absolute; inset:0; width:1920px; height:1080px; overflow:hidden; }
-  ast-slide[active] { display:block; }
+  /* Off-screen slides are display:none so their (potentially hundreds of)
+     elements are never laid out; content-visibility:auto + contain-intrinsic-size
+     lets the browser also skip rendering work for any slide that becomes
+     visible-but-off-viewport (e.g. overview/scroll modes) without a layout
+     pass over its whole subtree. See DeckController.applyState. */
+  ast-slide { display:none; position:absolute; inset:0; width:1920px; height:1080px; overflow:hidden; content-visibility:auto; contain-intrinsic-size:1080px 1920px; }
+  ast-slide[active] { display:block; content-visibility:visible; }
   ast-text { white-space:pre-wrap; overflow:hidden; }
   ast-run { display:inline; }
   ast-shape svg { width:100%; height:100%; display:block; overflow:visible; }

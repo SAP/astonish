@@ -13,11 +13,15 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/SAP/astonish/pkg/docs/slides"
 	"github.com/SAP/astonish/pkg/docs/slides/pptxworker"
+	"github.com/SAP/astonish/pkg/docs/slides/themes"
 	"github.com/SAP/astonish/pkg/store"
+	"github.com/gorilla/mux"
 )
 
 // memDocsStore, newMemDocsStore live in docs_sharing_handlers_test.go and are
@@ -137,7 +141,7 @@ func TestImportSlidesTemplateEmptyUpload(t *testing.T) {
 }
 
 func TestImportSlidesTemplateOversized(t *testing.T) {
-	// A .pptx part exceeding the 25MB limit -> 413. Fill with a byte pattern
+	// A .pptx part exceeding the 75MB limit -> 413. Fill with a byte pattern
 	// so the multipart body is deterministic and > maxImportPPTXBytes.
 	oversized := bytes.Repeat([]byte("A"), maxImportPPTXBytes+1024)
 	body, contentType := buildMultipartUpload(t, "file", "big.pptx", "", oversized)
@@ -283,5 +287,273 @@ func TestImportSlidesTemplateRoundTrip(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("imported template brand-deck not found in listing: %+v", listResp.Templates)
+	}
+
+	// The import must persist a usable (lossy ASD) template deck, but it must
+	// NOT persist the original uploaded .pptx bytes anymore (the automizer
+	// fidelity path was removed). Assert the deck exists and carries no
+	// origin-pptx asset.
+	tmplDeck, err := personal.GetDeck(context.Background(), "tmpl/brand-deck")
+	if err != nil {
+		t.Fatalf("get persisted template deck: %v", err)
+	}
+	for k := range tmplDeck.Assets {
+		if k == "origin-pptx" {
+			t.Fatalf("import must not persist origin .pptx bytes; found asset key %q", k)
+		}
+	}
+}
+
+// seedScopedTemplate persists a scoped template into the given store via the
+// slides service; used to set up delete/duplicate/recolor tests without the
+// node import path.
+func seedScopedTemplate(t *testing.T, backend store.DocsStore, name, label string) {
+	t.Helper()
+	tmpl := themes.Template{
+		Schema: 2,
+		Name:   name,
+		Label:  label,
+		Tokens: map[string]string{"surface": "#FFFFFF", "ink": "#172033", "accent": "#1E40AF"},
+		Archetypes: []themes.Archetype{
+			{Kind: "title", Markup: `<ast-slide id="t"><ast-text id="h" x="160" y="380" w="1600" h="200" color="#172033" size="72">{{TITLE}}</ast-text></ast-slide>`},
+		},
+	}
+	if err := (slides.Service{Store: backend}).SaveTemplate(context.Background(), tmpl); err != nil {
+		t.Fatalf("seed scoped template %q: %v", name, err)
+	}
+}
+
+// TestListSlidesTemplatesOmitsAssetsAndFlagsKind verifies the lightweight list
+// DTO: it never ships the assets map (no "assets" key) and correctly reports
+// scope for a scoped template vs a built-in.
+func TestListSlidesTemplatesOmitsAssetsAndFlagsScope(t *testing.T) {
+	personal := newMemDocsStore()
+	seedScopedTemplate(t, personal, "corp", "Corp")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/docs/slides/templates?scope=personal", nil)
+	req = withDocsServices(req, personal, newMemDocsStore())
+	rec := httptest.NewRecorder()
+	ListSlidesTemplatesHandler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "\"assets\"") {
+		t.Fatalf("list response must not include an assets map: %s", rec.Body.String())
+	}
+	var resp struct {
+		Templates []struct {
+			Name  string `json:"name"`
+			Scope string `json:"scope"`
+		} `json:"templates"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	var corp, builtin bool
+	for _, tmpl := range resp.Templates {
+		if tmpl.Name == "corp" {
+			corp = true
+			if tmpl.Scope != "personal" {
+				t.Fatalf("corp template scope wrong: %+v", tmpl)
+			}
+		}
+		if tmpl.Name == "midnight" {
+			builtin = true
+			if tmpl.Scope != "builtin" {
+				t.Fatalf("built-in scope wrong: %+v", tmpl)
+			}
+		}
+	}
+	if !corp || !builtin {
+		t.Fatalf("expected both corp (scoped) and midnight (builtin); got %+v", resp.Templates)
+	}
+}
+
+func deleteTemplateRequest(t *testing.T, personal store.DocsStore, name string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodDelete, "/api/docs/slides/templates/"+name+"?scope=personal", nil)
+	req = mux.SetURLVars(req, map[string]string{"name": name})
+	req = withDocsServices(req, personal, newMemDocsStore())
+	rec := httptest.NewRecorder()
+	DeleteSlidesTemplateHandler(rec, req)
+	return rec
+}
+
+func TestDeleteSlidesTemplateRejectsBuiltin(t *testing.T) {
+	rec := deleteTemplateRequest(t, newMemDocsStore(), "midnight")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 deleting built-in, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDeleteSlidesTemplateRemovesScoped(t *testing.T) {
+	personal := newMemDocsStore()
+	seedScopedTemplate(t, personal, "corp", "Corp")
+
+	rec := deleteTemplateRequest(t, personal, "corp")
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204 deleting scoped template, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if _, err := personal.GetDeck(context.Background(), "tmpl/corp"); err == nil {
+		t.Fatal("template deck still present after delete")
+	}
+	// Idempotent: deleting again is still 204.
+	if rec2 := deleteTemplateRequest(t, personal, "corp"); rec2.Code != http.StatusNoContent {
+		t.Fatalf("expected idempotent 204, got %d", rec2.Code)
+	}
+}
+
+func TestDeleteSlidesTemplateRejectsEmptyName(t *testing.T) {
+	req := httptest.NewRequest(http.MethodDelete, "/api/docs/slides/templates/", nil)
+	req = mux.SetURLVars(req, map[string]string{"name": ""})
+	req = withDocsServices(req, newMemDocsStore(), newMemDocsStore())
+	rec := httptest.NewRecorder()
+	DeleteSlidesTemplateHandler(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for empty name, got %d", rec.Code)
+	}
+}
+
+func duplicateTemplateReq(t *testing.T, personal store.DocsStore, name, bodyJSON string) *httptest.ResponseRecorder {
+	t.Helper()
+	var reader io.Reader
+	if bodyJSON != "" {
+		reader = strings.NewReader(bodyJSON)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/docs/slides/templates/"+name+"/duplicate?scope=personal", reader)
+	req = mux.SetURLVars(req, map[string]string{"name": name})
+	req = withDocsServices(req, personal, newMemDocsStore())
+	rec := httptest.NewRecorder()
+	DuplicateSlidesTemplateHandler(rec, req)
+	return rec
+}
+
+func TestDuplicateSlidesTemplateFromBuiltin(t *testing.T) {
+	personal := newMemDocsStore()
+	rec := duplicateTemplateReq(t, personal, "midnight", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 duplicating built-in, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Template struct {
+			Name  string `json:"name"`
+			Label string `json:"label"`
+		} `json:"template"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Template.Name != "midnight-copy" {
+		t.Fatalf("expected midnight-copy, got %q", resp.Template.Name)
+	}
+	// The new scoped template must be persisted.
+	if _, err := personal.GetDeck(context.Background(), "tmpl/midnight-copy"); err != nil {
+		t.Fatalf("duplicated template not persisted: %v", err)
+	}
+}
+
+func TestDuplicateSlidesTemplateUniquifies(t *testing.T) {
+	personal := newMemDocsStore()
+	seedScopedTemplate(t, personal, "corp", "Corp")
+	// Pre-create corp-copy so the duplicate must uniquify to corp-copy-2.
+	seedScopedTemplate(t, personal, "corp-copy", "Corp Copy")
+
+	rec := duplicateTemplateReq(t, personal, "corp", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Template struct {
+			Name string `json:"name"`
+		} `json:"template"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Template.Name != "corp-copy-2" {
+		t.Fatalf("expected uniquified corp-copy-2, got %q", resp.Template.Name)
+	}
+	// The uniquified duplicate must be persisted.
+	if _, err := personal.GetDeck(context.Background(), "tmpl/corp-copy-2"); err != nil {
+		t.Fatalf("duplicate not persisted: %v", err)
+	}
+}
+
+func TestDuplicateSlidesTemplateNotFound(t *testing.T) {
+	rec := duplicateTemplateReq(t, newMemDocsStore(), "nope", "")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for unknown template, got %d", rec.Code)
+	}
+}
+
+func recolorTemplateReq(t *testing.T, personal store.DocsStore, name, bodyJSON string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPatch, "/api/docs/slides/templates/"+name+"/recolor?scope=personal", strings.NewReader(bodyJSON))
+	req = mux.SetURLVars(req, map[string]string{"name": name})
+	req = withDocsServices(req, personal, newMemDocsStore())
+	rec := httptest.NewRecorder()
+	RecolorSlidesTemplateHandler(rec, req)
+	return rec
+}
+
+func TestRecolorSlidesTemplateRejectsBuiltin(t *testing.T) {
+	rec := recolorTemplateReq(t, newMemDocsStore(), "midnight", `{"tokens":{"accent":"#ABCDEF"}}`)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 recoloring built-in, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestRecolorSlidesTemplateValidatesInput(t *testing.T) {
+	personal := newMemDocsStore()
+	seedScopedTemplate(t, personal, "corp", "Corp")
+
+	// Bad hex.
+	if rec := recolorTemplateReq(t, personal, "corp", `{"tokens":{"accent":"red"}}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for bad hex, got %d", rec.Code)
+	}
+	// Unknown key.
+	if rec := recolorTemplateReq(t, personal, "corp", `{"tokens":{"border":"#ABCDEF"}}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for unknown key, got %d", rec.Code)
+	}
+	// Empty tokens.
+	if rec := recolorTemplateReq(t, personal, "corp", `{"tokens":{}}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for empty tokens, got %d", rec.Code)
+	}
+}
+
+func TestRecolorSlidesTemplateUpdatesTokens(t *testing.T) {
+	personal := newMemDocsStore()
+	seedScopedTemplate(t, personal, "corp", "Corp")
+
+	rec := recolorTemplateReq(t, personal, "corp", `{"tokens":{"accent":"#FF8800","surface":"#101010"}}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp slidesTemplateListItem
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Tokens["accent"] != "#FF8800" || resp.Tokens["surface"] != "#101010" {
+		t.Fatalf("tokens not updated in response: %#v", resp.Tokens)
+	}
+	// ink was not provided; the overlay must preserve it.
+	if resp.Tokens["ink"] != "#172033" {
+		t.Fatalf("ink token should be preserved, got %q", resp.Tokens["ink"])
+	}
+	// Persisted deck must reflect the new palette.
+	deck, err := personal.GetDeck(context.Background(), "tmpl/corp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deck.Theme["accent"] != "#FF8800" {
+		t.Fatalf("persisted theme not recolored: %#v", deck.Theme)
+	}
+}
+
+func TestRecolorSlidesTemplateNotFound(t *testing.T) {
+	rec := recolorTemplateReq(t, newMemDocsStore(), "nope", `{"tokens":{"accent":"#ABCDEF"}}`)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for unknown scoped template, got %d", rec.Code)
 	}
 }

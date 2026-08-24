@@ -1074,6 +1074,11 @@ func RegisterRoutes(router *mux.Router, svc *store.Services, backend store.Platf
 	router.HandleFunc("/api/docs/slides/fork", SlidesForkToPersonalHandler).Methods("POST")
 	router.HandleFunc("/api/docs/slides/templates", ListSlidesTemplatesHandler).Methods("GET")
 	router.HandleFunc("/api/docs/slides/import", ImportSlidesTemplateHandler).Methods("POST")
+	// Fixed 'templates/' prefixed mutation routes MUST precede the {deckSlug}
+	// wildcard so mux does not treat 'templates' as a deck slug.
+	router.HandleFunc("/api/docs/slides/templates/{name}", DeleteSlidesTemplateHandler).Methods("DELETE")
+	router.HandleFunc("/api/docs/slides/templates/{name}/duplicate", DuplicateSlidesTemplateHandler).Methods("POST")
+	router.HandleFunc("/api/docs/slides/templates/{name}/recolor", RecolorSlidesTemplateHandler).Methods("PATCH")
 	router.HandleFunc("/api/docs/slides/{deckSlug}", GetSlidesDeckHandler).Methods("GET")
 	router.HandleFunc("/api/docs/slides/{deckSlug}", DeleteSlidesDeckHandler).Methods("DELETE")
 	router.HandleFunc("/api/docs/slides/{deckSlug}/slides/{idx:[0-9]+}", GetSlideHandler).Methods("GET")

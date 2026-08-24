@@ -66,6 +66,14 @@ The canonical source is not arbitrary rendered DOM and is not a screenshot. It i
 
 The **normalized scene graph** is the contract. The browser DOM is a rendering output and measurement aid, not the export source of truth. Exporters never scrape arbitrary DOM and guess its meaning.
 
+Importing a corporate `.pptx` produces a lightweight, lossy ASD template (theme tokens plus synthesized archetypes), which then flows through the same ASD runtime as app-authored decks.
+
+### Studio Templates management surface
+
+A deep-linkable Studio area at `/slides/templates` lists both **built-in** and **scoped** (user-imported) templates. Each entry carries a **scope badge** (Built-in / Personal / Team). The surface supports **delete**, **duplicate**, and **recolor** for scoped templates, while built-ins are **read-only** (duplicate only) — deleting or recoloring a built-in returns `403`.
+
+Note that the templates **list** endpoint (`GET /api/docs/slides/templates`) returns a lightweight DTO that intentionally omits heavy assets (for performance and security).
+
 ### Why not arbitrary HTML as the canonical format?
 
 | Concern | Arbitrary HTML/CSS | Constrained Web Component document |
@@ -498,6 +506,9 @@ GET    /api/docs/slides/{deckSlug}/present
 DELETE /api/docs/slides/{deckSlug}
 GET    /api/docs/slides/themes
 GET    /api/docs/slides/components
+DELETE /api/docs/slides/templates/{name}            # delete a scoped template (built-ins read-only → 403; idempotent on missing); honors ?scope=personal|team
+POST   /api/docs/slides/templates/{name}/duplicate  # clone a built-in or scoped template into a NEW scoped template (optional body {"newName":"...","newLabel":"..."}); returns {"template":{"name":...,"label":...}}
+PATCH  /api/docs/slides/templates/{name}/recolor    # update a scoped template's palette tokens (surface/ink/accent; validated hex); 403 for built-ins, 400 for bad hex / unknown keys
 ```
 
 The slide endpoint returns either the source fragment as data or a sandboxed runtime page. It must not concatenate untrusted source into the Studio document.
@@ -603,7 +614,7 @@ Continue using existing Go infrastructure for stores, APIs, go-rod PDF rendering
 
 ### PPTX worker
 
-- `pptxgenjs` — native OOXML generation (MIT).
+- `pptxgenjs` — native OOXML generation for app-authored ASD decks (MIT).
 - bundled with the application build; no runtime `npm install`.
 
 Adding a Node-authored build artifact does not turn the distributed product into multiple binaries: the worker can be bundled and invoked through an available JS runtime strategy selected during implementation. Before committing to subprocess Node in production, prototype and choose among:
@@ -618,7 +629,7 @@ The exporter interface must isolate this choice. Browser-side export reduces ser
 
 ## Implementation Phases
 
-### Phase 0 — Fidelity spike and decision gate (1 week)
+### Phase 0 — Export spike and decision gate (1 week)
 
 - Implement five representative slides: title, rich text, shapes/connectors, table, and chart/image.
 - Render with prototype `ast-*` components.

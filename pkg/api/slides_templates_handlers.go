@@ -3,55 +3,341 @@ package api
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/SAP/astonish/pkg/docs/slides/pptxworker"
 	"github.com/SAP/astonish/pkg/docs/slides/themes"
+	"github.com/gorilla/mux"
 )
 
 // maxImportPPTXBytes bounds the uploaded .pptx payload accepted by the import
-// endpoint (25 MiB). Larger uploads are rejected with 413.
-const maxImportPPTXBytes = 25 << 20
+// endpoint (75 MiB). Larger uploads are rejected with 413. Corporate templates
+// with embedded fonts, master imagery, and media routinely exceed 25 MiB, and
+// the original bytes are persisted (base64, ~33% inflation) for the fidelity
+// export path, so the cap must accommodate real-world decks.
+const maxImportPPTXBytes = 75 << 20
 
 // pptxMIME is the OOXML PowerPoint content type used to validate uploads whose
 // filename does not end in .pptx.
 const pptxMIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 
+// slidesTemplateListItem is the lightweight DTO returned by
+// ListSlidesTemplatesHandler. It intentionally OMITS the Assets map and the
+// archetype markup — a Templates UI listing many templates must not ship
+// megabytes of asset bytes. Scope is "builtin" | "personal" | "team".
+type slidesTemplateListItem struct {
+	Name           string            `json:"name"`
+	Label          string            `json:"label,omitempty"`
+	Description    string            `json:"description,omitempty"`
+	Scope          string            `json:"scope"`
+	Tokens         map[string]string `json:"tokens,omitempty"`
+	ArchetypeKinds []string          `json:"archetypeKinds,omitempty"`
+}
+
+// hexColorRe matches a #RRGGBB or #RRGGBBAA color used by recolor tokens.
+var hexColorRe = regexp.MustCompile(`^#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})$`)
+
+// recolorTokenKeys is the closed set of palette tokens the recolor endpoint
+// accepts. Anything else is rejected (400) so a client cannot smuggle
+// arbitrary keys into a template's theme.
+var recolorTokenKeys = map[string]bool{"surface": true, "ink": true, "accent": true}
+
+// archetypeKinds projects a template's archetypes to their kinds only.
+func archetypeKinds(t themes.Template) []string {
+	kinds := make([]string, 0, len(t.Archetypes))
+	for _, a := range t.Archetypes {
+		kinds = append(kinds, a.Kind)
+	}
+	return kinds
+}
+
+// scopeQuery returns the requested scope label for list DTOs: "team" when
+// ?scope=team, else "personal".
+func scopeQuery(r *http.Request) string {
+	if r.URL.Query().Get("scope") == "team" {
+		return "team"
+	}
+	return "personal"
+}
+
 // ListSlidesTemplatesHandler returns the merged set of built-in templates plus
-// any templates persisted in the requested scope (?scope=personal|team). The
-// built-ins are always returned even when no scoped service is available.
-// Deduplication is by Name, preferring the built-in over a scoped template.
+// any templates persisted in the requested scope (?scope=personal|team) as a
+// LIGHTWEIGHT DTO (no assets / no markup). The built-ins are always returned
+// even when no scoped service is available. Deduplication is by Name, preferring
+// the built-in over a scoped template.
 func ListSlidesTemplatesHandler(w http.ResponseWriter, r *http.Request) {
-	merged := make([]themes.Template, 0)
+	merged := make([]slidesTemplateListItem, 0)
 	seen := map[string]bool{}
 	for _, t := range themes.ListTemplates() {
 		if seen[t.Name] {
 			continue
 		}
 		seen[t.Name] = true
-		merged = append(merged, t)
+		merged = append(merged, slidesTemplateListItem{
+			Name:           t.Name,
+			Label:          t.Label,
+			Description:    t.Description,
+			Scope:          "builtin",
+			Tokens:         t.Tokens,
+			ArchetypeKinds: archetypeKinds(t),
+		})
 	}
 
 	// Scoped templates are best-effort: if the request has no usable docs
 	// service we still return the built-ins with 200.
 	if svc, err := docsService(r); err == nil {
 		if scoped, err := svc.ListTemplates(r.Context()); err == nil {
+			scope := scopeQuery(r)
 			for _, t := range scoped {
 				if seen[t.Name] {
 					continue
 				}
 				seen[t.Name] = true
-				merged = append(merged, t)
+				merged = append(merged, slidesTemplateListItem{
+					Name:           t.Name,
+					Label:          t.Label,
+					Description:    t.Description,
+					Scope:          scope,
+					Tokens:         t.Tokens,
+					ArchetypeKinds: archetypeKinds(t),
+				})
 			}
 		}
 	}
 
 	writeSlidesJSON(w, http.StatusOK, map[string]any{"templates": merged})
+}
+
+// DeleteSlidesTemplateHandler deletes a SCOPED template (its hidden tmpl/<name>
+// deck). Built-in templates are read-only and cannot be deleted (403). Because
+// the underlying DeleteDeck is silent on a missing deck, deleting an absent
+// template is idempotent and still returns 204.
+func DeleteSlidesTemplateHandler(w http.ResponseWriter, r *http.Request) {
+	name := mux.Vars(r)["name"]
+	if strings.TrimSpace(name) == "" {
+		http.Error(w, "template name is required", http.StatusBadRequest)
+		return
+	}
+	if _, ok := themes.LookupTemplate(name); ok {
+		http.Error(w, "cannot delete a built-in template", http.StatusForbidden)
+		return
+	}
+	svc, ok := requireDocsService(w, r)
+	if !ok {
+		return
+	}
+	if err := svc.DeleteDeck(r.Context(), svc.TemplateSlug(name)); err != nil {
+		writeSlidesError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// duplicateTemplateRequest is the optional JSON body for a duplicate request.
+type duplicateTemplateRequest struct {
+	NewName  string `json:"newName"`
+	NewLabel string `json:"newLabel"`
+}
+
+// DuplicateSlidesTemplateHandler clones a template (built-in OR scoped) into a
+// NEW scoped template the user can then edit.
+func DuplicateSlidesTemplateHandler(w http.ResponseWriter, r *http.Request) {
+	name := mux.Vars(r)["name"]
+	if strings.TrimSpace(name) == "" {
+		http.Error(w, "template name is required", http.StatusBadRequest)
+		return
+	}
+
+	var body duplicateTemplateRequest
+	if r.Body != nil {
+		dec := json.NewDecoder(r.Body)
+		dec.DisallowUnknownFields()
+		// A missing/empty body is fine; only reject malformed JSON.
+		if err := dec.Decode(&body); err != nil && err != io.EOF {
+			http.Error(w, "invalid duplicate request body", http.StatusBadRequest)
+			return
+		}
+	}
+
+	svc, ok := requireDocsService(w, r)
+	if !ok {
+		return
+	}
+
+	// Resolve the source: built-in first, then a scoped template.
+	src, found := themes.LookupTemplate(name)
+	if !found {
+		scoped, ok, err := svc.Template(r.Context(), name)
+		if err != nil {
+			writeSlidesError(w, err)
+			return
+		}
+		if !ok {
+			http.Error(w, "template not found", http.StatusNotFound)
+			return
+		}
+		src = scoped
+	}
+
+	// Target name: explicit newName, else "<name>-copy"; slugified and made
+	// unique by suffixing -2, -3, ... when a tmpl/<n> deck already exists.
+	target := slugifyTemplateName(body.NewName)
+	if target == "" {
+		target = slugifyTemplateName(name + "-copy")
+	}
+	if target == "" {
+		target = "template-copy"
+	}
+	target = uniqueTemplateName(r, target)
+
+	label := strings.TrimSpace(body.NewLabel)
+	if label == "" {
+		if src.Label != "" {
+			label = src.Label + " (copy)"
+		} else {
+			label = target
+		}
+	}
+
+	dup := themes.Template{
+		Schema:      src.Schema,
+		Name:        target,
+		Label:       label,
+		Description: src.Description,
+		Tokens:      cloneStringMap(src.Tokens),
+		Assets:      cloneStringMap(src.Assets),
+		Archetypes:  append([]themes.Archetype(nil), src.Archetypes...),
+		Scope:       "",
+	}
+	if err := svc.SaveTemplate(r.Context(), dup); err != nil {
+		writeSlidesError(w, err)
+		return
+	}
+
+	writeSlidesJSON(w, http.StatusOK, map[string]any{
+		"template": map[string]any{"name": dup.Name, "label": dup.Label},
+	})
+}
+
+// recolorTemplateRequest is the JSON body for a recolor request.
+type recolorTemplateRequest struct {
+	Tokens map[string]string `json:"tokens"`
+}
+
+// RecolorSlidesTemplateHandler updates the surface/ink/accent theme tokens of a
+// SCOPED template. Built-ins are read-only (403). Unknown keys or malformed hex
+// values are rejected (400).
+//
+// v1 limitation: only the Tokens palette is updated; the persisted archetype
+// markup keeps its originally-embedded colors. Regenerating archetypes from the
+// new palette (via themes.ArchetypesFor) is a deliberate follow-up so this
+// endpoint stays small and predictable.
+func RecolorSlidesTemplateHandler(w http.ResponseWriter, r *http.Request) {
+	name := mux.Vars(r)["name"]
+	if strings.TrimSpace(name) == "" {
+		http.Error(w, "template name is required", http.StatusBadRequest)
+		return
+	}
+	if _, ok := themes.LookupTemplate(name); ok {
+		http.Error(w, "cannot recolor a built-in template", http.StatusForbidden)
+		return
+	}
+
+	var body recolorTemplateRequest
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil {
+		http.Error(w, "invalid recolor request body", http.StatusBadRequest)
+		return
+	}
+	if len(body.Tokens) == 0 {
+		http.Error(w, "tokens are required", http.StatusBadRequest)
+		return
+	}
+	for k, v := range body.Tokens {
+		if !recolorTokenKeys[k] {
+			http.Error(w, "unknown token key: "+k, http.StatusBadRequest)
+			return
+		}
+		if !hexColorRe.MatchString(v) {
+			http.Error(w, "invalid hex color for "+k+": "+v, http.StatusBadRequest)
+			return
+		}
+	}
+
+	svc, ok := requireDocsService(w, r)
+	if !ok {
+		return
+	}
+	tmpl, found, err := svc.Template(r.Context(), name)
+	if err != nil {
+		writeSlidesError(w, err)
+		return
+	}
+	if !found {
+		http.Error(w, "template not found", http.StatusNotFound)
+		return
+	}
+
+	// Overlay the provided tokens onto the existing palette.
+	if tmpl.Tokens == nil {
+		tmpl.Tokens = map[string]string{}
+	}
+	for k, v := range body.Tokens {
+		tmpl.Tokens[k] = v
+	}
+	if err := svc.SaveTemplate(r.Context(), tmpl); err != nil {
+		writeSlidesError(w, err)
+		return
+	}
+
+	writeSlidesJSON(w, http.StatusOK, slidesTemplateListItem{
+		Name:           tmpl.Name,
+		Label:          tmpl.Label,
+		Description:    tmpl.Description,
+		Scope:          scopeQuery(r),
+		Tokens:         tmpl.Tokens,
+		ArchetypeKinds: archetypeKinds(tmpl),
+	})
+}
+
+// uniqueTemplateName returns base, or base-2/base-3/... if a scoped template
+// deck already exists under that slug.
+func uniqueTemplateName(r *http.Request, base string) string {
+	dsvc, err := docsService(r)
+	if err != nil {
+		return base
+	}
+	candidate := base
+	for i := 2; ; i++ {
+		if _, _, dErr := dsvc.Deck(r.Context(), dsvc.TemplateSlug(candidate)); dErr != nil {
+			return candidate // not found (or store error) -> treat as free
+		}
+		candidate = base + "-" + strconv.Itoa(i)
+		if i > 100 { // pathological guard
+			return candidate
+		}
+	}
+}
+
+// cloneStringMap returns a shallow copy of m (nil-safe).
+func cloneStringMap(m map[string]string) map[string]string {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
 }
 
 // ImportSlidesTemplateHandler accepts a multipart .pptx upload, converts it to
@@ -66,6 +352,14 @@ func ImportSlidesTemplateHandler(w http.ResponseWriter, r *http.Request) {
 	// #nosec G120 -- r.Body is bounded by http.MaxBytesReader above, so form
 	// parsing cannot exhaust memory; the exact .pptx size is re-checked below.
 	if err := r.ParseMultipartForm(maxImportPPTXBytes); err != nil {
+		// Distinguish an oversized upload (body exceeded the MaxBytesReader cap
+		// during parsing) from a genuinely malformed multipart body, so the
+		// client gets an actionable 413 instead of a confusing 400.
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) || strings.Contains(err.Error(), "request body too large") {
+			http.Error(w, "upload exceeds 75MB limit", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "invalid multipart upload", http.StatusBadRequest)
 		return
 	}
@@ -99,7 +393,7 @@ func ImportSlidesTemplateHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(data) > maxImportPPTXBytes {
-		http.Error(w, "upload exceeds 25MB limit", http.StatusRequestEntityTooLarge)
+		http.Error(w, "upload exceeds 75MB limit", http.StatusRequestEntityTooLarge)
 		return
 	}
 

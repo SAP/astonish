@@ -27,6 +27,35 @@ export function alignToCSS(align: string): string {
   }
 }
 
+// Normalizes a CSS `font-family` value so brand families are actually applied
+// instead of being silently dropped. Per the CSS grammar an UNQUOTED family is
+// a sequence of identifiers, and a CSS identifier may NOT start with a digit —
+// so an imported brand family like `72 Brand` (as in `72 Brand, Aptos, ...`)
+// is INVALID unquoted and the whole declaration is discarded, falling back to
+// the default serif (Times). We quote each comma-separated family that needs it
+// (starts with a digit, or contains a character outside [A-Za-z0-9 _-]) and
+// leave generic keywords and already-quoted names untouched. Mirrors the PPTX
+// importer's cssFontFamilyName (import_worker.mjs) so live and exported render
+// identically.
+const CSS_GENERIC = /^(sans-serif|serif|monospace|cursive|fantasy|system-ui|ui-serif|ui-sans-serif|ui-monospace|ui-rounded|inherit|initial|unset|revert)$/i
+export function cssFontFamily(value: string): string {
+  if (!value) return value
+  return value
+    .split(',')
+    .map(part => {
+      const p = part.trim()
+      if (!p) return ''
+      if (/^["']/.test(p)) return p // already quoted
+      if (CSS_GENERIC.test(p)) return p
+      const needsQuote = /(^|\s)\d/.test(p) || /[^A-Za-z0-9 _-]/.test(p)
+      if (!needsQuote) return p
+      if (p.includes('"')) return p // defensive: leave malformed names alone
+      return `"${p}"`
+    })
+    .filter(Boolean)
+    .join(', ')
+}
+
 type Run = {
   text: string
   bold: boolean
@@ -93,7 +122,7 @@ export class AstText extends PositionedElement {
     if (run.italic) parts.push('font-style:italic')
     if (run.underline) parts.push('text-decoration:underline')
     if (run.color) parts.push(`color:${run.color}`)
-    if (run.font) parts.push(`font-family:${run.font}`)
+    if (run.font) parts.push(`font-family:${cssFontFamily(run.font)}`)
     if (!Number.isNaN(run.size)) parts.push(`font-size:${run.size}px`)
     return parts.join(';')
   }
@@ -107,7 +136,7 @@ export class AstText extends PositionedElement {
 
   protected override updated(): void {
     super.updated()
-    this.style.fontFamily = this.font ? this.font : `var(--ast-${this.fontToken}, Aptos, Arial, sans-serif)`
+    this.style.fontFamily = this.font ? cssFontFamily(this.font) : `var(--ast-${this.fontToken}, Aptos, Arial, sans-serif)`
     this.style.fontSize = `${this.size}px`
     this.style.fontWeight = this.weight
     this.style.textAlign = alignToCSS(this.align)

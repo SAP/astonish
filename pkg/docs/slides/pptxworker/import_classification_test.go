@@ -408,8 +408,8 @@ func TestImportResolvesThemeFontTokens(t *testing.T) {
 	if a == nil {
 		t.Fatalf("'Thank You' archetype not found; got %+v", as.Archetypes)
 	}
-	if !strings.Contains(a.Markup, `font="72 Brand`) {
-		t.Fatalf("expected +mn-lt run to resolve to the minor font \"72 Brand\":\n%s", a.Markup)
+	if !strings.Contains(a.Markup, `font="&quot;72 Brand&quot;`) {
+		t.Fatalf("expected +mn-lt run to resolve to the quoted minor font \"72 Brand\":\n%s", a.Markup)
 	}
 	if !strings.Contains(a.Markup, "sans-serif") {
 		t.Fatalf("resolved font missing web-safe sans-serif fallback:\n%s", a.Markup)

@@ -316,3 +316,46 @@ func TestHTMLExporterResolvesAssetRefToDataURL(t *testing.T) {
 		t.Errorf("expected exactly one resolved src, got %d\n%s", strings.Count(doc, "src="), doc)
 	}
 }
+
+func TestExportEmitsFontFace(t *testing.T) {
+	refs := `[{"family":"72 Brand","variant":"regular","assetKey":"font:72 Brand:regular"}]`
+	scene := SceneGraph{
+		SchemaVersion: SchemaV2,
+		Title:         "Branded",
+		Theme: map[string]string{
+			"display":             "72 Brand, Aptos, Arial, sans-serif",
+			embeddedFontsThemeKey: refs,
+		},
+		Assets: map[string]string{
+			"font:72 Brand:regular": "data:font/ttf;base64,AAEAAAA",
+		},
+		Slides: []Slide{{ID: "s1", Nodes: []Node{{ID: "t", Type: "text", Geometry: Geometry{W: 100, H: 40}, Text: "Hi", Props: map[string]any{"font-token": "display"}}}}},
+	}
+	doc := mustExport(t, HTMLExporter{RuntimeJS: []byte(`window.runtimeReady=true`)}, scene)
+
+	if !strings.Contains(doc, `@font-face{font-family:"72 Brand";src:url(data:font/ttf;base64,AAEAAAA) format("truetype");font-weight:400;font-style:normal;font-display:swap}`) {
+		t.Errorf("expected @font-face rule for 72 Brand regular; got:\n%s", doc)
+	}
+	// The embedded-fonts JSON manifest must NOT leak as a CSS variable.
+	if strings.Contains(doc, "--ast-embedded-fonts") {
+		t.Errorf("embedded-fonts must not be emitted as a --ast-* variable\n%s", doc)
+	}
+	// The concrete family name is still set on the display token.
+	if !strings.Contains(doc, "--ast-display:72 Brand, Aptos, Arial, sans-serif") {
+		t.Errorf("expected --ast-display to keep the bare family name; got:\n%s", doc)
+	}
+}
+
+func TestExportNoFontFaceWhenAbsent(t *testing.T) {
+	scene := SceneGraph{
+		SchemaVersion: SchemaV1,
+		Title:         "Plain",
+		Theme:         map[string]string{"display": "Aptos Display"},
+		Slides:        []Slide{{ID: "s1", Nodes: []Node{{ID: "t", Type: "text", Geometry: Geometry{W: 100, H: 40}, Text: "Hi"}}}},
+	}
+	doc := mustExport(t, HTMLExporter{RuntimeJS: []byte(`window.runtimeReady=true`)}, scene)
+	if strings.Contains(doc, "@font-face") {
+		t.Errorf("no deck without embedded fonts should emit @font-face; got:\n%s", doc)
+	}
+}
+

@@ -31,7 +31,7 @@ func requireNodeEnv(t *testing.T) (workingDir, importScript, exportScript string
 	}
 	repo := repoRoot(t)
 	workingDir = filepath.Join(repo, "web")
-	for _, mod := range []string{"jszip", "fast-xml-parser"} {
+	for _, mod := range []string{"jszip", "fast-xml-parser", "mtx-decompressor"} {
 		if _, err := os.Stat(filepath.Join(workingDir, "node_modules", mod)); err != nil {
 			t.Skipf("web/node_modules/%s missing; run `cd web && npm install jszip fast-xml-parser`", mod)
 		}
@@ -385,8 +385,8 @@ func TestImportScalesFooterFontSize(t *testing.T) {
 			if size == 10 || size == 6 {
 				t.Fatalf("footer size %d is the raw unscaled point value; canvas scale was not applied\n%s", size, tag)
 			}
-			if !strings.Contains(tag, `font="72 Brand`) {
-				t.Fatalf("footer lost its brand font; expected font starting \"72 Brand\" in %s", tag)
+			if !strings.Contains(tag, `font="&quot;72 Brand&quot;`) {
+				t.Fatalf("footer lost its brand font; expected quoted font \"72 Brand\" in %s", tag)
 			}
 			if !strings.Contains(tag, "sans-serif") {
 				t.Fatalf("footer font missing web-safe sans-serif fallback in %s", tag)
@@ -433,5 +433,148 @@ func TestImportGarbageRejected(t *testing.T) {
 		Run(context.Background(), ImportRequest{PPTXBase64: garbage, Mode: "deck"})
 	if err == nil {
 		t.Fatal("expected error for garbage (non-zip) input")
+	}
+}
+
+// TestExtractsEmbeddedFonts pins the font-embedding pipeline: when a .pptx embeds
+// fonts (ppt/fonts/*.fntdata via p:embeddedFontLst), the importer recovers each
+// face as a font:<family>:<variant> data:font/ asset and records the manifest in
+// the theme's embedded-fonts key. Exercised against the real reference corporate
+// template (72 Brand) when present locally; skips cleanly in CI where it is not
+// committed.
+func TestExtractsEmbeddedFonts(t *testing.T) {
+	workingDir, importScript, _ := requireNodeEnv(t)
+	ref := "/Users/I851355/Downloads/2026 GCO IPED PPT TEMPLATE.pptx"
+	raw, err := os.ReadFile(ref)
+	if err != nil {
+		t.Skipf("reference template not present (%v); skipping embedded-font smoke", err)
+	}
+	b64 := base64.StdEncoding.EncodeToString(raw)
+	resp, err := (ImportRunner{WorkingDir: workingDir, ScriptPath: importScript, Timeout: 60 * time.Second}).
+		Run(context.Background(), ImportRequest{PPTXBase64: b64, Mode: "template"})
+	if err != nil {
+		t.Fatalf("import worker failed: %v", err)
+	}
+	var tmpl struct {
+		Tokens map[string]string `json:"tokens"`
+		Assets map[string]string `json:"assets"`
+	}
+	if err := json.Unmarshal(resp.SceneOrTemplate, &tmpl); err != nil {
+		t.Fatalf("bad template: %v", err)
+	}
+
+	// At least one font:<family>:<variant> asset with a data:font/ payload.
+	var fontKeys []string
+	for k, v := range tmpl.Assets {
+		if strings.HasPrefix(k, "font:") {
+			if !strings.HasPrefix(v, "data:font/") {
+				t.Fatalf("font asset %q not a data:font URI: %.40q", k, v)
+			}
+			fontKeys = append(fontKeys, k)
+		}
+	}
+	if len(fontKeys) == 0 {
+		t.Fatalf("no embedded font assets extracted; keys=%v", keysOf(tmpl.Assets))
+	}
+	// The reference template embeds the "72 Brand" family.
+	foundBrand := false
+	for _, k := range fontKeys {
+		if strings.HasPrefix(k, "font:72 Brand:") {
+			foundBrand = true
+		}
+	}
+	if !foundBrand {
+		t.Fatalf("expected a 72 Brand embedded face; got %v", fontKeys)
+	}
+
+	// The embedded-fonts theme manifest lists those families/variants and each
+	// assetKey resolves to a stored asset.
+	manifestRaw := tmpl.Tokens["embedded-fonts"]
+	if manifestRaw == "" {
+		t.Fatal("theme missing embedded-fonts manifest")
+	}
+	var manifest []struct {
+		Family   string `json:"family"`
+		Variant  string `json:"variant"`
+		AssetKey string `json:"assetKey"`
+	}
+	if err := json.Unmarshal([]byte(manifestRaw), &manifest); err != nil {
+		t.Fatalf("embedded-fonts is not valid JSON: %v", err)
+	}
+	if len(manifest) == 0 {
+		t.Fatal("embedded-fonts manifest is empty")
+	}
+	for _, m := range manifest {
+		if m.Family == "" || m.AssetKey == "" {
+			t.Fatalf("manifest entry missing fields: %#v", m)
+		}
+		if _, ok := tmpl.Assets[m.AssetKey]; !ok {
+			t.Fatalf("manifest assetKey %q has no matching asset", m.AssetKey)
+		}
+	}
+}
+
+func keysOf(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
+// TestEotFntdataToTtf validates the mtx-decompressor integration the importer
+// relies on: the library is importable and exposes eotToTtf, and malformed EOT
+// buffers are handled defensively (throw is catchable, never crashes the host —
+// mirroring eotFntdataToTtf's try/catch). Full compressed→TrueType recovery of a
+// real face is covered end to end by TestExtractsEmbeddedFonts against the 72
+// Brand reference fonts (a valid EOT header is impractical to synthesize here).
+func TestEotFntdataToTtf(t *testing.T) {
+	workingDir, _, _ := requireNodeEnv(t)
+	script := `
+import { eotToTtf, parseEotMetadata, TTEMBED_TTCOMPRESSED } from 'mtx-decompressor'
+
+// The library must expose the functions the worker uses.
+const apiOk = typeof eotToTtf === 'function' &&
+  typeof parseEotMetadata === 'function' &&
+  typeof TTEMBED_TTCOMPRESSED === 'number'
+
+// A malformed / too-short buffer must be handled defensively: eotToTtf may throw,
+// but that must be a catchable error (EotError), never an uncatchable crash. This
+// mirrors eotFntdataToTtf() in import_worker.mjs which wraps the call in try/catch
+// and returns null so a bad face is skipped and import still succeeds.
+let defensiveOk = false
+try {
+  const garbage = Buffer.alloc(32) // zeroed: not a valid EOT
+  try { eotToTtf(new Uint8Array(garbage)) } catch { /* expected — caught, not fatal */ }
+  defensiveOk = true
+} catch { defensiveOk = false }
+
+process.stdout.write(JSON.stringify({ apiOk, defensiveOk }))
+`
+	// The probe must live inside web/ so Node resolves the bare 'mtx-decompressor'
+	// specifier against web/node_modules (ESM resolves relative to the file, not cwd).
+	tmp := filepath.Join(workingDir, "eot_probe_test.mjs")
+	if err := os.WriteFile(tmp, []byte(script), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(tmp) })
+	cmd := exec.CommandContext(context.Background(), "node", tmp)
+	cmd.Dir = workingDir
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("node probe failed: %v (%s)", err, out)
+	}
+	var res struct {
+		APIOk       bool `json:"apiOk"`
+		DefensiveOk bool `json:"defensiveOk"`
+	}
+	if err := json.Unmarshal(out, &res); err != nil {
+		t.Fatalf("bad probe output %q: %v", out, err)
+	}
+	if !res.APIOk {
+		t.Error("mtx-decompressor did not expose the expected eotToTtf/parseEotMetadata API")
+	}
+	if !res.DefensiveOk {
+		t.Error("malformed EOT was not handled defensively (uncatchable crash)")
 	}
 }

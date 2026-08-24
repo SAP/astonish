@@ -793,6 +793,71 @@ leaking the heavy `data:` bytes into the model context or the wire:
 The asset-ref → `resolveImageSrc` contract (data: only) and the `sha256-<hex>`
 key convention are unchanged; both new tools are additive (no protocol bump).
 
+### Embedded fonts (imported brand faces → `@font-face`)
+
+Corporate templates set the deck theme fonts to concrete brand families (e.g.
+`72 Brand`), which the theme surfaces as `--ast-display` / `--ast-body-font` and
+`ast-text` applies as `font-family`. But a bare, uninstalled family name resolves
+to the browser's default **serif (Times)** — the family name alone does not load a
+font. The template's actual font *files* must travel with the deck and be declared
+to the browser via `@font-face`:
+
+- **Extraction on import.** A `.pptx` that enabled "Embed fonts in the file" carries
+  its faces under `ppt/fonts/*.fntdata`, mapped family + variant
+  (`regular`/`bold`/`italic`/`boldItalic`) via `<p:embeddedFontLst>` in
+  `presentation.xml` (each variant → `r:id` → `.rels` `Target`). `import_worker.mjs`
+  `collectEmbeddedFonts()` walks that list, resolves each part, and recovers a plain
+  TrueType.
+- **`.fntdata` is EOT-wrapped, usually MTX-compressed.** These parts are Embedded
+  OpenType (EOT) containers — **not** the Word `.odttf` GUID-XOR obfuscation (there
+  is nothing to de-XOR). PowerPoint compresses the sfnt with MicroType Express (MTX),
+  so a naive header-strip is insufficient; the worker uses the `mtx-decompressor`
+  npm package (`eotToTtf`, MPL-2.0, zero-dependency) to parse the EOT header, apply
+  its compression/encryption flags, and reconstruct a standard `.ttf`. Any face that
+  fails to decode is skipped with a warning — import still succeeds.
+- **Stored as font assets.** Each recovered face is stored in the SAME deck `Assets`
+  map as images but under a font-namespaced key `font:<family>:<variant>` with a
+  `data:font/ttf;base64,…` value (distinct from the `sha256-<hex>` image keys). Faces
+  larger than a 4 MB per-face cap (typically a full CJK fallback like *Arial Unicode
+  MS*) are skipped — the web-safe fallback chain covers those glyphs.
+- **Manifest in the theme.** The importer records a compact manifest as a single
+  JSON string under the theme key `embedded-fonts`
+  (`[{family,variant,assetKey}]`). Because `Theme` is `map[string]string`, a string
+  value passes through the existing `tokens → DeckManifest.Theme → SceneGraph.Theme`
+  plumbing verbatim — no Go struct change.
+- **`@font-face` emission.** `export_html.go` `writeFontFaces` parses
+  `embedded-fonts` (via `parseEmbeddedFonts` in `fonts.go`), looks up each
+  `assetKey` in `Assets`, and emits an `@font-face` rule (family, `data:` src,
+  `format(truetype|opentype)`, `font-weight` 400/700 + `font-style` normal/italic per
+  variant, `font-display:swap`) inside the deck `<style>`. The export CSP already
+  allows `font-src data:`, so no CSP change is needed and no remote font is fetched.
+  `writeThemeCSS` skips the `embedded-fonts` key (it is a manifest, never a
+  `--ast-*` variable). With the `@font-face` declared, the concrete family the theme
+  names (e.g. `72 Brand`) resolves to the real font; the appended
+  `Aptos, Arial, sans-serif` chain is used only for missing glyphs/variants.
+- **Digit-leading families are quoted.** Per the CSS grammar an *unquoted*
+  `font-family` value is a list of identifiers, and a CSS identifier may **not**
+  start with a digit — so a brand family like `72 Brand` is invalid unquoted and
+  the browser silently drops the whole declaration, falling back to serif (Times)
+  *even when the `@font-face` is present*. Both the importer (`cssFontFamilyName` /
+  `withFontFallback` in `import_worker.mjs`, which normalizes the family list it
+  bakes into each `ast-text` `font=` attribute) and the runtime (`cssFontFamily`
+  in `AstText.ts`, the choke point that assigns `this.style.fontFamily`) double-
+  quote any family that starts with a digit or contains a character outside
+  `[A-Za-z0-9 _-]`, leaving generic keywords and already-quoted names untouched.
+  The runtime normalization is idempotent and also fixes decks stored before this
+  change. `@font-face` `font-family` names are always double-quoted string tokens,
+  so they were never affected.
+- **Kept out of the image surfaces.** `assetCatalog` skips `font:` keys, so embedded
+  fonts never appear in the image catalog the AI browses, are never selectable as an
+  `ast-image` `asset-ref`, and — like images — their heavy `data:` bytes never leak
+  into a tool result or HTTP response (`TestSlidesResponsesOmitHeavyManifestFields`
+  asserts no `data:image`/`data:font` substring).
+
+Generic across templates: a `.pptx` with no embedded fonts is a no-op (no
+`embedded-fonts` key, no `@font-face`), and the existing web-safe fallback chain
+remains the correct degraded behavior.
+
 **Store-level field projection.** The slim DTO above trims the *wire* payload, but
 `personalDocsStore.ListDecks`/`teamDocsStore.ListDecks` still ran
 `Deck.Query()…All()`, which SELECTs *every* column — including `template_model`

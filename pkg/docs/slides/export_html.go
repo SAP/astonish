@@ -51,6 +51,11 @@ func (e HTMLExporter) Export(scene SceneGraph) (ExportResult, error) {
 	body.WriteString(`<title>` + html.EscapeString(scene.Title) + `</title>`)
 	body.WriteString(`<style>:root{--ast-surface:#fff;--ast-ink:#172033;--ast-ink-muted:#64748b;--ast-accent:#1e40af;--ast-accent-soft:#dbeafe;--ast-display:Aptos Display,Arial,sans-serif;--ast-body-font:Aptos,Arial,sans-serif}`)
 	writeThemeCSS(&body, scene.Theme)
+	// Emit @font-face rules for any fonts embedded in an imported .pptx so the
+	// concrete brand family the theme names (e.g. "72 Brand") actually resolves
+	// in the browser instead of falling back to serif. The CSP above already
+	// allows font-src data:. No-op when the theme carries no embedded-fonts key.
+	writeFontFaces(&body, scene.Theme, scene.Assets)
 	body.WriteString(`html,body{width:100%;height:100%;margin:0;overflow:hidden}body{background:#111827}ast-deck{display:block;position:relative;width:1920px;height:1080px;overflow:hidden;transform-origin:top left;background:var(--ast-surface);color:var(--ast-ink)}ast-slide{display:none;position:absolute;inset:0;width:1920px;height:1080px;overflow:hidden}ast-slide[active]{display:block}ast-text{white-space:pre-wrap;overflow-wrap:break-word}ast-notes{display:none}`)
 	if e.Print {
 		// Print layout: paginate one slide per page. The @page box and every
@@ -89,6 +94,12 @@ func writeThemeCSS(out *bytes.Buffer, theme map[string]string) {
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
+		// The embedded-fonts key carries a JSON manifest consumed by
+		// writeFontFaces (emitted as @font-face rules), NOT a CSS value — never
+		// surface it as a --ast-* variable.
+		if key == embeddedFontsThemeKey {
+			continue
+		}
 		if !safeAttributeName(key) || !safeCSSValue(theme[key]) {
 			continue
 		}

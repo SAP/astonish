@@ -37,6 +37,13 @@ func assetCatalog(assets map[string]string) []AssetInfo {
 	}
 	out := make([]AssetInfo, 0, len(assets))
 	for ref, dataURI := range assets {
+		// Embedded fonts share this Assets map (keyed "font:<family>:<variant>",
+		// value data:font/...). They are NOT images: they must never appear in the
+		// image catalog the AI browses, never be selectable as an ast-image
+		// asset-ref, and never expose their heavy data: bytes. Skip them entirely.
+		if strings.HasPrefix(ref, "font:") {
+			continue
+		}
 		info := AssetInfo{Ref: ref, Kind: "image"}
 		// Parse "data:<mime>;base64,<payload>" without retaining the payload.
 		if strings.HasPrefix(dataURI, "data:") {

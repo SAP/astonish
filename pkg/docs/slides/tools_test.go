@@ -300,13 +300,23 @@ func TestListDeckAssets(t *testing.T) {
 	if _, err := svc.AddDeckAsset(ctx, "gallery", "sha256-logo", "data:image/svg+xml;base64,AAAA"); err != nil {
 		t.Fatal(err)
 	}
+	// Also inject an embedded FONT asset (shares the Assets map, keyed font:...).
+	// It must be excluded from the image catalog and never leak its data: bytes.
+	if _, err := svc.AddDeckAsset(ctx, "gallery", "font:72 Brand:regular", "data:font/ttf;base64,"+strings.Repeat("B", 4000)); err != nil {
+		t.Fatal(err)
+	}
 
 	res, err := listDeckAssets(ctx, ListDeckAssetsArgs{DeckSlug: "gallery"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(res.Assets) != 2 {
-		t.Fatalf("expected 2 assets, got %d: %#v", len(res.Assets), res.Assets)
+		t.Fatalf("expected 2 image assets (font excluded), got %d: %#v", len(res.Assets), res.Assets)
+	}
+	for _, a := range res.Assets {
+		if strings.HasPrefix(a.Ref, "font:") {
+			t.Fatalf("font asset must not appear in image catalog: %#v", a)
+		}
 	}
 	// Deterministic order (sorted by ref): sha256-logo < sha256-photo.
 	if res.Assets[0].Ref != "sha256-logo" || res.Assets[0].Kind != "logo" || res.Assets[0].MIME != "image/svg+xml" {
@@ -315,13 +325,16 @@ func TestListDeckAssets(t *testing.T) {
 	if res.Assets[1].Ref != "sha256-photo" || res.Assets[1].Kind != "image" || res.Assets[1].MIME != "image/png" {
 		t.Fatalf("photo asset misclassified: %#v", res.Assets[1])
 	}
-	// The catalog must never leak the heavy data: URI bytes.
+	// The catalog must never leak the heavy data: URI bytes (image OR font).
 	blob, err := json.Marshal(res)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(string(blob), "data:image") {
 		t.Fatalf("list_deck_assets leaked a data: URI: %s", blob)
+	}
+	if strings.Contains(string(blob), "data:font") {
+		t.Fatalf("list_deck_assets leaked a font data: URI: %s", blob)
 	}
 }
 

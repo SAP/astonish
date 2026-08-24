@@ -4,6 +4,12 @@ import { createHash } from 'node:crypto'
 const require = createRequire(`${process.cwd()}/package.json`)
 const JSZip = require('jszip')
 const { XMLParser } = require('fast-xml-parser')
+// mtx-decompressor recovers a plain TrueType font from a PowerPoint embedded-font
+// part (ppt/fonts/fontN.fntdata): those are EOT containers whose payload is
+// MicroType Express (MTX) compressed (PowerPoint compresses by default), so a
+// naive EOT-header strip is not enough. eotToTtf parses the EOT header, applies
+// the container's compression/encryption flags, and returns a standard .ttf.
+const mtxDecompressor = require('mtx-decompressor')
 
 // ---------------------------------------------------------------------------
 // Constants / limits
@@ -13,6 +19,15 @@ const CANVAS_W = 1920
 const CANVAS_H = 1080
 const MAX_TOTAL_UNCOMPRESSED = 200 * 1024 * 1024 // 200MB zip-bomb guard
 const MAX_ENTRIES = 5000
+// Per-face cap for embedded fonts recovered from ppt/fonts/*.fntdata. Brand
+// display/body faces are small; multi-MB faces are full CJK fallbacks that would
+// bloat every stored deck and the exported HTML with no visual benefit.
+const MAX_EMBEDDED_FONT_BYTES = 4 * 1024 * 1024 // 4MB (recovered TTF/OTF)
+// Cap on the COMPRESSED .fntdata part checked BEFORE decompression. MTX
+// decompression of a large face is very CPU-heavy (a ~12MB CJK fallback takes
+// ~17s), which alone blows the import worker timeout. Brand faces are tens of KB
+// compressed, so gating on the raw part size skips the expensive decode entirely.
+const MAX_EMBEDDED_FONT_COMPRESSED_BYTES = 2 * 1024 * 1024 // 2MB (raw .fntdata)
 
 const warnings = []
 const warn = (m) => { warnings.push(String(m)) }
@@ -482,6 +497,30 @@ const sniffMime = (buf) => {
 }
 
 
+// eotFntdataToTtf recovers a plain TrueType font (Uint8Array) from a PowerPoint
+// embedded-font part (ppt/fonts/fontN.fntdata). Those parts are EOT containers
+// wrapping an MTX-compressed sfnt (NOT the Word .odttf GUID-XOR obfuscation).
+// Returns { bytes, mime, family } or null on any failure/unsupported input.
+// Never throws — a bad face is skipped so import still succeeds.
+const eotFntdataToTtf = (buf) => {
+  try {
+    if (!buf || buf.length < 16) return null
+    const u8 = buf instanceof Uint8Array ? buf : new Uint8Array(buf)
+    let family = ''
+    try {
+      const meta = mtxDecompressor.parseEotMetadata(u8)
+      // EOT name strings are NUL-terminated UTF-16; strip trailing NULs.
+      family = String(meta.familyName || '').replace(/\0+$/g, '').trim()
+    } catch { /* metadata is best-effort; family comes from presentation.xml anyway */ }
+    const ttf = mtxDecompressor.eotToTtf(u8)
+    if (!ttf || ttf.length < 4) return null
+    // All recovered faces are sfnt TrueType; eotToTtf reconstructs a .ttf.
+    return { bytes: ttf, mime: 'font/ttf', family }
+  } catch {
+    return null
+  }
+}
+
 // Normalize a relative rels target against the part dir (e.g. ppt/slides).
 const resolveTarget = (baseDir, target) => {
   if (!target) return null
@@ -623,14 +662,45 @@ try {
   // Generic and defensive: if the family already ends in a CSS generic, or is a
   // theme token, it is returned unchanged.
   const FONT_FALLBACK = 'Aptos, Arial, sans-serif'
+  // Quote a single font-family name for a CSS font-family value when it is not a
+  // valid sequence of CSS identifiers. Per the CSS grammar an unquoted family is
+  // a list of identifiers, and a CSS identifier may NOT start with a digit — so a
+  // brand family like "72 Brand" is INVALID unquoted and the whole declaration is
+  // dropped by the browser, silently falling back to the default serif (Times).
+  // We quote when any space-separated word starts with a digit or the name
+  // contains a character outside [A-Za-z0-9 _-]. Names with no embedded double
+  // quote are wrapped in double quotes; the (rare) name containing a double quote
+  // is left unquoted (defensive — it will be sanitized/dropped downstream).
+  const cssFontFamilyName = (name) => {
+    const n = String(name).trim()
+    if (!n) return n
+    const needsQuote = /(^|\s)\d/.test(n) || /[^A-Za-z0-9 _-]/.test(n)
+    if (!needsQuote) return n
+    if (n.includes('"')) return n
+    return `"${n}"`
+  }
   const withFontFallback = (family) => {
     if (!family) return family
     const s = String(family).trim()
     if (!s) return s
-    // Already a list or already ends in a generic keyword — leave as-is.
-    if (s.includes(',')) return s
-    if (/\b(sans-serif|serif|monospace|cursive|fantasy|system-ui)$/i.test(s)) return s
-    return `${s}, ${FONT_FALLBACK}`
+    // Already a comma list: normalize every family in it (quoting brand names
+    // like "72 Brand" that are invalid unquoted CSS identifiers) and leave any
+    // generic keyword / already-quoted family untouched. This is why we must
+    // still process lists — the leading brand family may have been appended a
+    // fallback chain upstream and would otherwise ship unquoted (→ serif/Times).
+    if (s.includes(',')) {
+      return s.split(',').map((part) => {
+        const p = part.trim()
+        if (!p) return p
+        if (/^["']/.test(p)) return p // already quoted
+        if (/\b(sans-serif|serif|monospace|cursive|fantasy|system-ui)$/i.test(p)) return p
+        return cssFontFamilyName(p)
+      }).filter(Boolean).join(', ')
+    }
+    if (/\b(sans-serif|serif|monospace|cursive|fantasy|system-ui)$/i.test(s)) return cssFontFamilyName(s)
+    // Quote the brand family if it is not a valid unquoted CSS identifier list
+    // (e.g. starts with a digit like "72 Brand"), then append the web-safe chain.
+    return `${cssFontFamilyName(s)}, ${FONT_FALLBACK}`
   }
 
   // Assets map (content-addressed).
@@ -656,6 +726,76 @@ try {
 
   // Slide order from sldIdLst + presentation.xml.rels.
   const presRels = parseRels(await readText('ppt/_rels/presentation.xml.rels'))
+
+  // Extract fonts embedded in the .pptx (only present when the source enabled
+  // "Embed fonts in the file"). They live under ppt/fonts/*.fntdata as EOT-wrapped
+  // TTF/OTF and are mapped by family + variant via <p:embeddedFontLst> in
+  // presentation.xml. Corporate templates name concrete brand families (e.g.
+  // "72 Brand") that are NOT installed in a browser; without loading the real
+  // font file, a bare family name falls back to the browser default serif (Times).
+  // We recover each face (strip the EOT header via eotToSfnt), store it as a
+  // font-namespaced data: asset (key `font:<family>:<variant>`, distinct from the
+  // sha256- image keys), and record a compact manifest under
+  // themeTokens.embeddedFonts so the HTML exporter can emit matching @font-face
+  // rules. Generic across templates; a .pptx with no embedded fonts is a no-op.
+  const collectEmbeddedFonts = async () => {
+    try {
+      const fontLst = findChild(presentation, 'p:embeddedFontLst')
+      if (!fontLst) return
+      const variantTags = { 'p:regular': 'regular', 'p:bold': 'bold', 'p:italic': 'italic', 'p:boldItalic': 'boldItalic' }
+      const manifest = []
+      for (const ef of findAll(fontLst, 'p:embeddedFont')) {
+        const fontEl = findChild(ef, 'p:font')
+        const family = fontEl ? String(attrsOf(fontEl)['@_typeface'] || '').trim() : ''
+        if (!family) continue
+        for (const [tag, variant] of Object.entries(variantTags)) {
+          const vEl = findChild(ef, tag)
+          if (!vEl) continue
+          const rid = attrsOf(vEl)['@_r:id']
+          if (!rid) continue
+          const rel = presRels[rid]
+          if (!rel || !rel.target) continue
+          const path = resolveTarget('ppt', rel.target)
+          if (!path) continue
+          const f = zip.file(path)
+          if (!f) { warn(`Embedded font ${family} ${variant}: part ${path} missing`); continue }
+          let data
+          try { data = await f.async('nodebuffer') } catch { warn(`Embedded font ${family} ${variant}: unreadable`); continue }
+          // Gate on the COMPRESSED part size BEFORE the (expensive) MTX decode.
+          // A large face is a full CJK fallback whose decompression alone can
+          // exceed the import timeout; brand faces are tens of KB compressed.
+          if (data.length > MAX_EMBEDDED_FONT_COMPRESSED_BYTES) {
+            warn(`Embedded font ${family} ${variant}: ${Math.round(data.length / 1024)}KB compressed exceeds ${Math.round(MAX_EMBEDDED_FONT_COMPRESSED_BYTES / 1024)}KB cap; not embedded`)
+            continue
+          }
+          const sfnt = eotFntdataToTtf(data)
+          if (!sfnt) { warn(`Embedded font ${family} ${variant}: unsupported EOT/MTX payload; not embedded`); continue }
+          // Cap per-face size: brand display/body fonts are small (tens–hundreds of
+          // KB). A multi-MB face is almost always a full CJK fallback (e.g. Arial
+          // Unicode MS) that would bloat every stored deck + exported HTML for no
+          // visual benefit — the web-safe fallback chain covers those glyphs.
+          if (sfnt.bytes.length > MAX_EMBEDDED_FONT_BYTES) {
+            warn(`Embedded font ${family} ${variant}: ${Math.round(sfnt.bytes.length / 1024)}KB exceeds ${Math.round(MAX_EMBEDDED_FONT_BYTES / 1024)}KB cap; not embedded`)
+            continue
+          }
+          const key = `font:${family}:${variant}`
+          if (!assets[key]) {
+            assets[key] = `data:${sfnt.mime};base64,${Buffer.from(sfnt.bytes).toString('base64')}`
+          }
+          manifest.push({ family, variant, assetKey: key })
+        }
+      }
+      // Encode the embedded-font manifest as a single JSON STRING under a theme
+      // key. themeTokens flows to the Go side as the deck theme (map[string]string),
+      // so a nested array cannot pass through — a string can. The HTML exporter
+      // parses this key (and does NOT emit it as a --ast-* CSS variable).
+      if (manifest.length) themeTokens['embedded-fonts'] = JSON.stringify(manifest)
+    } catch (e) {
+      warn(`Embedded font extraction failed: ${e && e.message ? e.message : e}`)
+    }
+  }
+  await collectEmbeddedFonts()
+
   const sldIdLst = findChild(presentation, 'p:sldIdLst')
   const slidePaths = []
   if (sldIdLst) {

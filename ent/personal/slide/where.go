@@ -76,6 +76,11 @@ func Notes(v string) predicate.Slide {
 	return predicate.Slide(sql.FieldEQ(FieldNotes, v))
 }
 
+// ThumbnailRef applies equality check predicate on the "thumbnail_ref" field. It's identical to ThumbnailRefEQ.
+func ThumbnailRef(v string) predicate.Slide {
+	return predicate.Slide(sql.FieldEQ(FieldThumbnailRef, v))
+}
+
 // SchemaVersion applies equality check predicate on the "schema_version" field. It's identical to SchemaVersionEQ.
 func SchemaVersion(v int) predicate.Slide {
 	return predicate.Slide(sql.FieldEQ(FieldSchemaVersion, v))
@@ -324,6 +329,71 @@ func NotesEqualFold(v string) predicate.Slide {
 // NotesContainsFold applies the ContainsFold predicate on the "notes" field.
 func NotesContainsFold(v string) predicate.Slide {
 	return predicate.Slide(sql.FieldContainsFold(FieldNotes, v))
+}
+
+// ThumbnailRefEQ applies the EQ predicate on the "thumbnail_ref" field.
+func ThumbnailRefEQ(v string) predicate.Slide {
+	return predicate.Slide(sql.FieldEQ(FieldThumbnailRef, v))
+}
+
+// ThumbnailRefNEQ applies the NEQ predicate on the "thumbnail_ref" field.
+func ThumbnailRefNEQ(v string) predicate.Slide {
+	return predicate.Slide(sql.FieldNEQ(FieldThumbnailRef, v))
+}
+
+// ThumbnailRefIn applies the In predicate on the "thumbnail_ref" field.
+func ThumbnailRefIn(vs ...string) predicate.Slide {
+	return predicate.Slide(sql.FieldIn(FieldThumbnailRef, vs...))
+}
+
+// ThumbnailRefNotIn applies the NotIn predicate on the "thumbnail_ref" field.
+func ThumbnailRefNotIn(vs ...string) predicate.Slide {
+	return predicate.Slide(sql.FieldNotIn(FieldThumbnailRef, vs...))
+}
+
+// ThumbnailRefGT applies the GT predicate on the "thumbnail_ref" field.
+func ThumbnailRefGT(v string) predicate.Slide {
+	return predicate.Slide(sql.FieldGT(FieldThumbnailRef, v))
+}
+
+// ThumbnailRefGTE applies the GTE predicate on the "thumbnail_ref" field.
+func ThumbnailRefGTE(v string) predicate.Slide {
+	return predicate.Slide(sql.FieldGTE(FieldThumbnailRef, v))
+}
+
+// ThumbnailRefLT applies the LT predicate on the "thumbnail_ref" field.
+func ThumbnailRefLT(v string) predicate.Slide {
+	return predicate.Slide(sql.FieldLT(FieldThumbnailRef, v))
+}
+
+// ThumbnailRefLTE applies the LTE predicate on the "thumbnail_ref" field.
+func ThumbnailRefLTE(v string) predicate.Slide {
+	return predicate.Slide(sql.FieldLTE(FieldThumbnailRef, v))
+}
+
+// ThumbnailRefContains applies the Contains predicate on the "thumbnail_ref" field.
+func ThumbnailRefContains(v string) predicate.Slide {
+	return predicate.Slide(sql.FieldContains(FieldThumbnailRef, v))
+}
+
+// ThumbnailRefHasPrefix applies the HasPrefix predicate on the "thumbnail_ref" field.
+func ThumbnailRefHasPrefix(v string) predicate.Slide {
+	return predicate.Slide(sql.FieldHasPrefix(FieldThumbnailRef, v))
+}
+
+// ThumbnailRefHasSuffix applies the HasSuffix predicate on the "thumbnail_ref" field.
+func ThumbnailRefHasSuffix(v string) predicate.Slide {
+	return predicate.Slide(sql.FieldHasSuffix(FieldThumbnailRef, v))
+}
+
+// ThumbnailRefEqualFold applies the EqualFold predicate on the "thumbnail_ref" field.
+func ThumbnailRefEqualFold(v string) predicate.Slide {
+	return predicate.Slide(sql.FieldEqualFold(FieldThumbnailRef, v))
+}
+
+// ThumbnailRefContainsFold applies the ContainsFold predicate on the "thumbnail_ref" field.
+func ThumbnailRefContainsFold(v string) predicate.Slide {
+	return predicate.Slide(sql.FieldContainsFold(FieldThumbnailRef, v))
 }
 
 // SchemaVersionEQ applies the EQ predicate on the "schema_version" field.

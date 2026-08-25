@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/SAP/astonish/pkg/docs/slides"
@@ -221,6 +223,60 @@ func GetSlideHandler(w http.ResponseWriter, r *http.Request) {
 	writeSlidesJSON(w, http.StatusOK, item)
 }
 
+// deckSlideThumbnailPNGPrefix is the data-URI prefix stripped before
+// base64-decoding a baked per-slide deck thumbnail asset.
+const deckSlideThumbnailPNGPrefix = "data:image/png;base64,"
+
+// GetSlidesDeckSlideThumbnailHandler serves the pre-baked PNG thumbnail for a
+// single slide of a deck. It resolves the deck (full manifest, incl. Assets),
+// finds the slide at Position==idx, reads its ThumbnailRef, decodes the base64
+// PNG data URI stored in the deck's Assets under that ref, and streams it with
+// long-lived immutable cache headers. Any missing deck/slide/ref/asset or
+// decode failure returns 404 so the Slides view shows an EMPTY placeholder —
+// it never falls back to a live render.
+func GetSlidesDeckSlideThumbnailHandler(w http.ResponseWriter, r *http.Request) {
+	idx, err := strconv.Atoi(mux.Vars(r)["idx"])
+	if err != nil || idx < 0 {
+		http.Error(w, "slide index must be a non-negative integer", http.StatusBadRequest)
+		return
+	}
+	svc, ok := requireDocsService(w, r)
+	if !ok {
+		return
+	}
+	deck, deckSlides, err := svc.Deck(r.Context(), mux.Vars(r)["deckSlug"])
+	if err != nil {
+		http.Error(w, "thumbnail not found", http.StatusNotFound)
+		return
+	}
+	var ref string
+	for _, s := range deckSlides {
+		if s.Position == idx {
+			ref = s.ThumbnailRef
+			break
+		}
+	}
+	if ref == "" {
+		http.Error(w, "thumbnail not found", http.StatusNotFound)
+		return
+	}
+	asset, ok := deck.Assets[ref]
+	if !ok {
+		http.Error(w, "thumbnail not found", http.StatusNotFound)
+		return
+	}
+	png, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(asset, deckSlideThumbnailPNGPrefix))
+	if err != nil || len(png) == 0 {
+		http.Error(w, "thumbnail not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	w.Header().Set("ETag", `"`+ref+`"`)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(png)
+}
+
 func ValidateSlidesHandler(w http.ResponseWriter, r *http.Request) {
 	var request slidesValidateRequest
 	dec := json.NewDecoder(r.Body)
@@ -416,6 +472,54 @@ func exportSlidesHTML(w http.ResponseWriter, r *http.Request, print bool) (slide
 		return slides.ExportResult{}, false
 	}
 	return result, true
+}
+
+// bakeDeckThumbnails renders each slide of a finished deck to a static PNG and
+// stores it on the deck (best-effort). It acquires a headless-Chrome browser the
+// same way ExportSlidesPDFHandler does — the in-container sandbox browser when
+// the backend requires it (no host fallback), else the local host browser — and
+// hands it to slides.GenerateDeckThumbnails. It NEVER blocks or fails the caller:
+// a missing browser or any render error is logged and swallowed so finishing a
+// deck is unaffected. sessionSuffix disambiguates the per-user sandbox session
+// (e.g. the chat user id). A recover guard protects against a browser-layer panic.
+func bakeDeckThumbnails(ctx context.Context, svc slides.Service, slug, sessionSuffix string) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			slog.Error("deck slide thumbnail baking panicked", "deck", slug, "panic", rec)
+		}
+	}()
+
+	required, backendLabel := sandboxBrowserRequiredFn()
+	var browserProv pdfgen.BrowserProvider
+	if required {
+		sessionID := "slides-thumb-" + sessionSuffix
+		mgr, err := slidesPDFBrowserManagerFn(sessionID)
+		if err != nil {
+			slog.Warn("deck slide thumbnail baking skipped: sandbox browser unavailable",
+				"deck", slug, "backend", backendLabel, "error", err)
+			return
+		}
+		// No-fallback guard: never render on the host when the sandbox is required.
+		if !mgr.SandboxEnabled {
+			slog.Warn("deck slide thumbnail baking skipped: sandbox required but no in-container browser",
+				"deck", slug, "backend", backendLabel)
+			return
+		}
+		browserProv = mgr
+		appMCPIdleTracker.StartIdleWatchdog(context.Background(), 10*time.Minute)
+		defer appMCPIdleTracker.touch(sessionID)
+	} else {
+		mgr := GetLocalPDFBrowserManager()
+		if mgr == nil {
+			slog.Warn("deck slide thumbnail baking skipped: no local browser manager", "deck", slug)
+			return
+		}
+		browserProv = mgr
+	}
+
+	if err := slides.GenerateDeckThumbnails(ctx, svc, slug, webassets.GetSlidesRuntime(), browserProv); err != nil {
+		slog.Warn("deck slide thumbnail baking failed", "deck", slug, "error", err)
+	}
 }
 
 func setSlidesDocumentHeaders(w http.ResponseWriter, download bool) {

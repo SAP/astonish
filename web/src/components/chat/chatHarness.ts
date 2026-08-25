@@ -49,6 +49,12 @@ export function deriveLatestHarness(
       latest = { kind: 'browser_handoff', messageIndex: i }
     } else if (m.type === 'docs_update') {
       const docs = m as DocsUpdateMessage
+      // Reveal the slides harness as soon as the deck exists (create_deck /
+      // deck_viewed / slide_written) so the user sees the deck panel from the
+      // start and watches slides fill in live. When the deck has no slides yet
+      // the panel shows a "generating" placeholder (see SlidesDeckView); it does
+      // NOT show an empty/broken deck. Revealing eagerly is intentional — the
+      // panel updates in place as write_slide events arrive.
       if (docs.docType === 'slides' && docs.deckSlug) {
         latest = { kind: 'slides', deckSlug: docs.deckSlug, messageIndex: i }
       }

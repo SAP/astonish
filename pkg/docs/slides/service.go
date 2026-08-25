@@ -224,11 +224,12 @@ func (s Service) SaveTemplate(ctx context.Context, tmpl themes.Template) error {
 		// delimiter (see archetypeMetaDelim) so it round-trips without a
 		// schema change.
 		notes := arch.Title
-		if arch.Tier != "" || len(arch.FillSlots) > 0 {
+		if arch.Tier != "" || len(arch.FillSlots) > 0 || arch.ThumbnailRef != "" {
 			meta := struct {
-				Tier      string   `json:"tier,omitempty"`
-				FillSlots []string `json:"fillSlots,omitempty"`
-			}{Tier: arch.Tier, FillSlots: arch.FillSlots}
+				Tier         string   `json:"tier,omitempty"`
+				FillSlots    []string `json:"fillSlots,omitempty"`
+				ThumbnailRef string   `json:"thumbnailRef,omitempty"`
+			}{Tier: arch.Tier, FillSlots: arch.FillSlots, ThumbnailRef: arch.ThumbnailRef}
 			metaJSON, err := json.Marshal(meta)
 			if err != nil {
 				return fmt.Errorf("marshal archetype metadata: %w", err)
@@ -273,19 +274,21 @@ func (s Service) ListTemplates(ctx context.Context) ([]themes.Template, error) {
 		}
 		archetypes := make([]themes.Archetype, 0, len(slides))
 		for _, slide := range slides {
-			// Notes may carry optional Tier/FillSlots metadata after a NUL
-			// delimiter (see archetypeMetaDelim); split it back out. Rows
-			// without the delimiter decode to Tier="", FillSlots=nil.
+			// Notes may carry optional Tier/FillSlots/ThumbnailRef metadata after
+			// a NUL delimiter (see archetypeMetaDelim); split it back out. Rows
+			// without the delimiter decode to Tier="", FillSlots=nil, ThumbnailRef="".
 			parts := strings.SplitN(slide.Notes, archetypeMetaDelim, 2)
 			arch := themes.Archetype{Kind: slide.Title, Title: parts[0], Markup: slide.Content}
 			if len(parts) == 2 {
 				var meta struct {
-					Tier      string   `json:"tier,omitempty"`
-					FillSlots []string `json:"fillSlots,omitempty"`
+					Tier         string   `json:"tier,omitempty"`
+					FillSlots    []string `json:"fillSlots,omitempty"`
+					ThumbnailRef string   `json:"thumbnailRef,omitempty"`
 				}
 				if err := json.Unmarshal([]byte(parts[1]), &meta); err == nil {
 					arch.Tier = meta.Tier
 					arch.FillSlots = meta.FillSlots
+					arch.ThumbnailRef = meta.ThumbnailRef
 				}
 			}
 			archetypes = append(archetypes, arch)

@@ -33,6 +33,8 @@ export interface SlidesSlide {
   content: string
   notes?: string
   schemaVersion: number
+  /** Storage key of the pre-baked PNG thumbnail asset, if one has been rendered. */
+  thumbnailRef?: string
 }
 
 export interface SlidesDeckResponse {
@@ -155,6 +157,26 @@ export async function deleteSlidesDeck(deckSlug: string, scope: DocsScope = 'per
     method: 'DELETE',
   })
   if (!response.ok) throw await responseError(response, 'Failed to delete slide deck')
+}
+
+/**
+ * Build the URL for a pre-baked template archetype thumbnail served by the
+ * backend at `GET /api/docs/slides/templates/<name>/thumbnails/<kind>`
+ * (Content-Type image/png). `kind` is the archetype kind path param.
+ */
+export function templateThumbnailUrl(name: string, kind: string): string {
+  return `${DOCS_BASE}/slides/templates/${encodeURIComponent(name)}/thumbnails/${encodeURIComponent(kind)}`
+}
+
+/**
+ * Build the URL for a pre-baked per-slide deck thumbnail served by the backend
+ * at `GET /api/docs/slides/<deckSlug>/thumbnails/<index>` (Content-Type
+ * image/png). `index` is the slide Position. Returns 404 when no thumbnail has
+ * been baked for that slide — callers must render an EMPTY placeholder, never a
+ * live render.
+ */
+export function deckSlideThumbnailUrl(deckSlug: string, index: number, scope: DocsScope = 'personal'): string {
+  return withScope(`${DOCS_BASE}/slides/${encodeURIComponent(deckSlug)}/thumbnails/${index}`, scope)
 }
 
 /** List available slide templates (personal + team merged). */

@@ -279,3 +279,96 @@ func TestExportSlidesPPTXPlainDeckUsesPptxGenJS(t *testing.T) {
 		t.Fatalf("plain-deck export output not a valid .pptx zip: %v", err)
 	}
 }
+
+// deckThumbStore is a docsStoreStub that also serves a single deck (with Assets)
+// and its slides, for the per-slide thumbnail endpoint tests.
+type deckThumbStore struct {
+	docsStoreStub
+	deck   *store.DeckManifest
+	slides []*store.SlideContent
+}
+
+func (s *deckThumbStore) GetDeck(_ context.Context, slug string) (*store.DeckManifest, error) {
+	if s.deck == nil || s.deck.Slug != slug {
+		return nil, store.ErrDocsNotFound
+	}
+	clone := *s.deck
+	return &clone, nil
+}
+func (s *deckThumbStore) ListSlides(_ context.Context, deckID string) ([]*store.SlideContent, error) {
+	out := make([]*store.SlideContent, 0, len(s.slides))
+	for _, sc := range s.slides {
+		if sc.DeckID == deckID {
+			clone := *sc
+			out = append(out, &clone)
+		}
+	}
+	return out, nil
+}
+
+// tinyPNG is a minimal valid base64 payload (the handler decodes but does not
+// validate PNG structure, so any base64 works).
+const tinyPNGB64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNgAAAAAgAB"
+
+func deckThumbRequest(t *testing.T, store2 store.DocsStore, slug, idx string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/docs/slides/"+slug+"/thumbnails/"+idx, nil)
+	req = req.WithContext(store.WithServices(req.Context(), &store.Services{PersonalDocs: store2, Docs: store2}))
+	req = mux.SetURLVars(req, map[string]string{"deckSlug": slug, "idx": idx})
+	rec := httptest.NewRecorder()
+	GetSlidesDeckSlideThumbnailHandler(rec, req)
+	return rec
+}
+
+func TestGetSlidesDeckSlideThumbnail(t *testing.T) {
+	deckID := uuid.NewString()
+	backend := &deckThumbStore{
+		deck: &store.DeckManifest{
+			ID:     deckID,
+			Slug:   "my-deck",
+			Title:  "My Deck",
+			Assets: map[string]string{"slidethumb/0": "data:image/png;base64," + tinyPNGB64},
+		},
+		slides: []*store.SlideContent{
+			{ID: uuid.NewString(), DeckID: deckID, Position: 0, Content: "x", ThumbnailRef: "slidethumb/0"},
+			{ID: uuid.NewString(), DeckID: deckID, Position: 1, Content: "y"}, // no thumbnail baked
+		},
+	}
+
+	t.Run("served for a baked slide", func(t *testing.T) {
+		rec := deckThumbRequest(t, backend, "my-deck", "0")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+		}
+		if ct := rec.Header().Get("Content-Type"); ct != "image/png" {
+			t.Fatalf("content-type = %q", ct)
+		}
+		if !strings.Contains(rec.Header().Get("Cache-Control"), "immutable") {
+			t.Fatalf("missing immutable cache header: %q", rec.Header().Get("Cache-Control"))
+		}
+		if rec.Body.Len() == 0 {
+			t.Fatal("empty PNG body")
+		}
+	})
+
+	t.Run("404 for a slide with no baked thumbnail", func(t *testing.T) {
+		rec := deckThumbRequest(t, backend, "my-deck", "1")
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("status = %d want 404", rec.Code)
+		}
+	})
+
+	t.Run("404 for an unknown slide index", func(t *testing.T) {
+		rec := deckThumbRequest(t, backend, "my-deck", "9")
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("status = %d want 404", rec.Code)
+		}
+	})
+
+	t.Run("404 for an unknown deck", func(t *testing.T) {
+		rec := deckThumbRequest(t, backend, "no-such-deck", "0")
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("status = %d want 404", rec.Code)
+		}
+	})
+}

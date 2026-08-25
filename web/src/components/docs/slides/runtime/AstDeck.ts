@@ -30,6 +30,12 @@ export class AstDeck extends LitElement implements AstDeckElement {
       this.observer = new ResizeObserver(() => this.scaleToParent())
       if (this.parentElement) this.observer.observe(this.parentElement)
     }
+    // Cross-origin navigation channel. The embedding harness (SlidesDeckView)
+    // renders this document in a sandboxed, opaque-origin iframe, so it cannot
+    // touch our DOM or location directly. It posts { type: 'ast-nav', index }
+    // to jump to a slide WITHOUT reloading the document — the strip/thumbnail
+    // click path. We answer only same-window-parent messages of our own shape.
+    window.addEventListener('message', this.onMessage)
     this.scaleToParent()
     void this.signalReady()
   }
@@ -37,7 +43,15 @@ export class AstDeck extends LitElement implements AstDeckElement {
   override disconnectedCallback(): void {
     this.observer?.disconnect()
     this.controller?.disconnect()
+    window.removeEventListener('message', this.onMessage)
     super.disconnectedCallback()
+  }
+
+  private readonly onMessage = (event: MessageEvent): void => {
+    const data = event.data as { type?: string; index?: number; slideId?: string } | null
+    if (!data || data.type !== 'ast-nav') return
+    if (typeof data.index === 'number') this.controller?.goTo(data.index)
+    else if (typeof data.slideId === 'string') this.controller?.goTo(data.slideId)
   }
 
   private scaleToParent(): void {

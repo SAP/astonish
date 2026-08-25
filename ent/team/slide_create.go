@@ -63,6 +63,20 @@ func (_c *SlideCreate) SetNillableNotes(v *string) *SlideCreate {
 	return _c
 }
 
+// SetThumbnailRef sets the "thumbnail_ref" field.
+func (_c *SlideCreate) SetThumbnailRef(v string) *SlideCreate {
+	_c.mutation.SetThumbnailRef(v)
+	return _c
+}
+
+// SetNillableThumbnailRef sets the "thumbnail_ref" field if the given value is not nil.
+func (_c *SlideCreate) SetNillableThumbnailRef(v *string) *SlideCreate {
+	if v != nil {
+		_c.SetThumbnailRef(*v)
+	}
+	return _c
+}
+
 // SetSchemaVersion sets the "schema_version" field.
 func (_c *SlideCreate) SetSchemaVersion(v int) *SlideCreate {
 	_c.mutation.SetSchemaVersion(v)
@@ -173,6 +187,10 @@ func (_c *SlideCreate) defaults() {
 		v := slide.DefaultNotes
 		_c.mutation.SetNotes(v)
 	}
+	if _, ok := _c.mutation.ThumbnailRef(); !ok {
+		v := slide.DefaultThumbnailRef
+		_c.mutation.SetThumbnailRef(v)
+	}
 	if _, ok := _c.mutation.SchemaVersion(); !ok {
 		v := slide.DefaultSchemaVersion
 		_c.mutation.SetSchemaVersion(v)
@@ -209,6 +227,9 @@ func (_c *SlideCreate) check() error {
 	}
 	if _, ok := _c.mutation.Notes(); !ok {
 		return &ValidationError{Name: "notes", err: errors.New(`team: missing required field "Slide.notes"`)}
+	}
+	if _, ok := _c.mutation.ThumbnailRef(); !ok {
+		return &ValidationError{Name: "thumbnail_ref", err: errors.New(`team: missing required field "Slide.thumbnail_ref"`)}
 	}
 	if _, ok := _c.mutation.SchemaVersion(); !ok {
 		return &ValidationError{Name: "schema_version", err: errors.New(`team: missing required field "Slide.schema_version"`)}
@@ -278,6 +299,10 @@ func (_c *SlideCreate) createSpec() (*Slide, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.Notes(); ok {
 		_spec.SetField(slide.FieldNotes, field.TypeString, value)
 		_node.Notes = value
+	}
+	if value, ok := _c.mutation.ThumbnailRef(); ok {
+		_spec.SetField(slide.FieldThumbnailRef, field.TypeString, value)
+		_node.ThumbnailRef = value
 	}
 	if value, ok := _c.mutation.SchemaVersion(); ok {
 		_spec.SetField(slide.FieldSchemaVersion, field.TypeInt, value)

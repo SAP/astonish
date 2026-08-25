@@ -40,6 +40,7 @@ type SlideContent struct {
 	Title         string    `json:"title,omitempty"`
 	Content       string    `json:"content"`
 	Notes         string    `json:"notes,omitempty"`
+	ThumbnailRef  string    `json:"thumbnailRef,omitempty"`
 	SchemaVersion int       `json:"schemaVersion"`
 	CreatedAt     time.Time `json:"createdAt"`
 	UpdatedAt     time.Time `json:"updatedAt"`

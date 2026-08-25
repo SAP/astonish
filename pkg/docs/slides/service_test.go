@@ -726,3 +726,58 @@ func TestAddDeckAsset(t *testing.T) {
 		t.Fatalf("expected 1 asset after idempotent add, got %d", len(deck2.Assets))
 	}
 }
+
+// TestSaveTemplateRoundTripsThumbnailRef guards that an Archetype.ThumbnailRef —
+// together with its matching entry in the template deck's Assets map — survives a
+// SaveTemplate -> ListTemplates round-trip through the NUL-delimited Notes
+// metadata encoding, without a schema change.
+func TestSaveTemplateRoundTripsThumbnailRef(t *testing.T) {
+	backend := &memoryDocsStore{}
+	svc := Service{Store: backend}
+	ctx := context.Background()
+
+	const dataURI = "data:image/png;base64,iVBORw0KGgo="
+	tmpl := themes.Template{
+		Name:   "brandco",
+		Label:  "BrandCo",
+		Tokens: map[string]string{"surface": "#FFFFFF"},
+		Assets: map[string]string{"thumb/title": dataURI},
+		Archetypes: []themes.Archetype{
+			{
+				Kind:         "title",
+				Title:        "Blue cover",
+				Markup:       `<ast-slide id="title"><ast-text id="t" x="0" y="0" w="100" h="50">{{TITLE}}</ast-text></ast-slide>`,
+				Tier:         "fixed",
+				FillSlots:    []string{"t"},
+				ThumbnailRef: "thumb/title",
+			},
+		},
+	}
+	if err := svc.SaveTemplate(ctx, tmpl); err != nil {
+		t.Fatalf("SaveTemplate: %v", err)
+	}
+
+	got, err := svc.ListTemplates(ctx)
+	if err != nil {
+		t.Fatalf("ListTemplates: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 template, got %d", len(got))
+	}
+	tpl := got[0]
+	if len(tpl.Archetypes) != 1 {
+		t.Fatalf("expected 1 archetype, got %d", len(tpl.Archetypes))
+	}
+	arch := tpl.Archetypes[0]
+	if arch.ThumbnailRef != "thumb/title" {
+		t.Fatalf("ThumbnailRef did not round-trip: got %q", arch.ThumbnailRef)
+	}
+	if arch.Tier != "fixed" || len(arch.FillSlots) != 1 || arch.FillSlots[0] != "t" {
+		t.Fatalf("existing metadata regressed: tier=%q fillSlots=%v", arch.Tier, arch.FillSlots)
+	}
+	// The baked PNG bytes live in the template deck's Assets map (content-addressed),
+	// keyed by the ThumbnailRef.
+	if tpl.Assets["thumb/title"] != dataURI {
+		t.Fatalf("thumbnail asset did not round-trip: %#v", tpl.Assets)
+	}
+}

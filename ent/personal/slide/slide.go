@@ -23,6 +23,8 @@ const (
 	FieldContent = "content"
 	// FieldNotes holds the string denoting the notes field in the database.
 	FieldNotes = "notes"
+	// FieldThumbnailRef holds the string denoting the thumbnail_ref field in the database.
+	FieldThumbnailRef = "thumbnail_ref"
 	// FieldSchemaVersion holds the string denoting the schema_version field in the database.
 	FieldSchemaVersion = "schema_version"
 	// FieldCreatedAt holds the string denoting the created_at field in the database.
@@ -49,6 +51,7 @@ var Columns = []string{
 	FieldTitle,
 	FieldContent,
 	FieldNotes,
+	FieldThumbnailRef,
 	FieldSchemaVersion,
 	FieldCreatedAt,
 	FieldUpdatedAt,
@@ -82,6 +85,8 @@ var (
 	DefaultTitle string
 	// DefaultNotes holds the default value on creation for the "notes" field.
 	DefaultNotes string
+	// DefaultThumbnailRef holds the default value on creation for the "thumbnail_ref" field.
+	DefaultThumbnailRef string
 	// DefaultSchemaVersion holds the default value on creation for the "schema_version" field.
 	DefaultSchemaVersion int
 	// DefaultCreatedAt holds the default value on creation for the "created_at" field.
@@ -120,6 +125,11 @@ func ByContent(opts ...sql.OrderTermOption) OrderOption {
 // ByNotes orders the results by the notes field.
 func ByNotes(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldNotes, opts...).ToFunc()
+}
+
+// ByThumbnailRef orders the results by the thumbnail_ref field.
+func ByThumbnailRef(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldThumbnailRef, opts...).ToFunc()
 }
 
 // BySchemaVersion orders the results by the schema_version field.

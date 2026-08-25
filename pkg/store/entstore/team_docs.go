@@ -125,9 +125,9 @@ func (s *teamDocsStore) UpsertSlide(ctx context.Context, in *store.SlideContent)
 	}
 	row, err := s.client.Slide.Query().Where(teamslide.IDEQ(id), teamslide.HasDeckWith(teamdeck.IDEQ(deckID))).Only(ctx)
 	if teament.IsNotFound(err) {
-		row, err = s.client.Slide.Create().SetID(id).SetDeckID(deckID).SetPosition(in.Position).SetTitle(in.Title).SetContent(in.Content).SetNotes(in.Notes).SetSchemaVersion(in.SchemaVersion).Save(ctx)
+		row, err = s.client.Slide.Create().SetID(id).SetDeckID(deckID).SetPosition(in.Position).SetTitle(in.Title).SetContent(in.Content).SetNotes(in.Notes).SetThumbnailRef(in.ThumbnailRef).SetSchemaVersion(in.SchemaVersion).Save(ctx)
 	} else if err == nil {
-		row, err = row.Update().SetPosition(in.Position).SetTitle(in.Title).SetContent(in.Content).SetNotes(in.Notes).SetSchemaVersion(in.SchemaVersion).Save(ctx)
+		row, err = row.Update().SetPosition(in.Position).SetTitle(in.Title).SetContent(in.Content).SetNotes(in.Notes).SetThumbnailRef(in.ThumbnailRef).SetSchemaVersion(in.SchemaVersion).Save(ctx)
 	}
 	if err == nil {
 		fillTeamSlide(in, row)
@@ -269,6 +269,7 @@ func fillTeamSlide(out *store.SlideContent, in *teament.Slide) {
 	out.Title = in.Title
 	out.Content = in.Content
 	out.Notes = in.Notes
+	out.ThumbnailRef = in.ThumbnailRef
 	out.SchemaVersion = in.SchemaVersion
 	out.CreatedAt = in.CreatedAt
 	out.UpdatedAt = in.UpdatedAt

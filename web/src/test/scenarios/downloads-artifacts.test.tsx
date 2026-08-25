@@ -59,7 +59,7 @@ describe('Downloads & Artifacts Scenarios', () => {
   })
 
   describe('Slides docs_update', () => {
-    it('renders a compact launcher per turn and auto-opens the harness panel', async () => {
+    it('renders a single compact launcher per deck and auto-opens the harness panel', async () => {
       result = renderChat({
         scenarioEvents: slidesUpdate.events as FixtureEvent[][],
         mockConfig: {
@@ -97,12 +97,14 @@ describe('Downloads & Artifacts Scenarios', () => {
       await result.sendMessage('Add migration waves and a delivery roadmap')
 
       await waitFor(() => {
-        // One compact launcher per turn (turn-scoped coalescing preserved).
+        // Same deck across two turns → still ONE compact launcher, updated to the
+        // latest progress (earlier per-turn docs_update renders nothing). The
+        // deck itself is shown live in the right-hand harness panel.
         const launchers = result.container.querySelectorAll('[data-testid="harness-placeholder"][data-harness-kind="slides"]')
-        expect(launchers).toHaveLength(2)
-        expect(launchers[1]).toHaveTextContent('Cloud Migration Plan')
-        expect(launchers[1]).toHaveTextContent('4 / 4')
-        expect(launchers[1]).not.toHaveTextContent('PPTX')
+        expect(launchers).toHaveLength(1)
+        expect(launchers[0]).toHaveTextContent('Cloud Migration Plan')
+        expect(launchers[0]).toHaveTextContent('4 / 4')
+        expect(launchers[0]).not.toHaveTextContent('PPTX')
       }, { timeout: 10000 })
     })
   })

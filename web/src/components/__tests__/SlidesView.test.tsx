@@ -16,6 +16,7 @@ vi.mock('../../api/slides', async () => {
     fetchSlidesDeck: vi.fn(),
     deleteSlidesDeck: vi.fn(),
     slidesPresentationURL: vi.fn((slug: string) => `/api/docs/slides/${slug}/present`),
+    deckSlideThumbnailUrl: vi.fn((slug: string, index: number) => `/api/docs/slides/${slug}/thumbnails/${index}`),
   }
 })
 
@@ -73,6 +74,31 @@ describe('SlidesView', () => {
     expect(captions.map(n => n.textContent)).toEqual(
       expect.arrayContaining(['Personal Deck', 'Team Deck']),
     )
+  })
+
+  it('renders a pre-baked <img> thumbnail (never a live-render iframe), falling back to a placeholder on error', async () => {
+    const { container } = render(<SlidesView theme="dark" isPlatformMode />)
+    await waitFor(() => expect(slidesApi.listSlidesDecks).toHaveBeenCalled())
+
+    // Each card thumbnail is a static baked PNG <img>, NOT a live-render iframe.
+    expect(container.querySelector('iframe')).toBeNull()
+    const img = await waitFor(() => {
+      const el = container.querySelector('img')
+      if (!el) throw new Error('no img yet')
+      return el as HTMLImageElement
+    })
+    expect(img.getAttribute('src')).toContain('/thumbnails/0')
+
+    // The tile that owns this <img> (the aspect-video wrapper).
+    const tile = img.closest('div') as HTMLElement
+
+    // On a 404/onError the tile swaps to the empty placeholder icon — it must
+    // NOT fall back to an iframe / live render.
+    fireEvent.error(img)
+    await waitFor(() => expect(tile.querySelector('img')).toBeNull())
+    expect(tile.querySelector('iframe')).toBeNull()
+    // The placeholder icon (an <svg>) now occupies the tile.
+    expect(tile.querySelector('svg')).not.toBeNull()
   })
 
   it('invokes onPublishDeck for a personal card', async () => {

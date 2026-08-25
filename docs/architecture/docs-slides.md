@@ -217,6 +217,21 @@ A capability-first fallback may project `<ast-slide>` content into reveal.js `<s
 - Stable element IDs are mandatory for diagnostics, incremental updates, and future import/regeneration.
 - Accessibility fields include `lang`, reading order, `alt`, decorative state, and optional pronunciation/description metadata.
 
+#### Run adjacency (no implicit spacing)
+
+Multiple `<ast-run>` children of an `<ast-text>` render **verbatim, with no separator inserted between runs**, consistently across all targets: the web runtime (`AstText.render` concatenates run `<span>`s with nothing between them), the Go parser (`runFromHTML` preserves run text without `TrimSpace`, so deliberate whitespace-only separator runs like `<ast-run>\n\n</ast-run>` survive), and the PPTX worker (each run maps to a pptxgenjs text fragment with `breakLine: false`). This is intentional: the author controls all spacing.
+
+The consequence is a real authoring pitfall: `<ast-run>1972</ast-run><ast-run>Founded</ast-run>` renders as `1972Founded`. There are two correct fixes and no renderer change is appropriate (injecting a space would corrupt whitespace-only separator runs and `Label:`+` value` cases):
+
+1. Put the space inside a run — `<ast-run>1972 </ast-run>` or `<ast-run> Founded</ast-run>`.
+2. Preferred for a bold date + regular label (e.g. a timeline node): use **two separate positioned `<ast-text>` boxes**, one for the date and one for the label.
+
+#### Self-evaluation (`review_deck`)
+
+`review_deck` is an agent tool that renders the persisted deck to its parsed `SceneGraph` and returns a structured self-evaluation the model reads before declaring a deck done. It complements `validate_deck` (which is structural/geometry only) by catching **semantic/visual** defects. It returns heuristic `findings` — `run_adjacency` (the collision above, severity `warning`), `overlap` (two non-decorative text boxes whose bounding boxes substantially intersect — a colliding/misaligned layout such as a broad body placeholder swallowing a fixed label, `warning`), `low_contrast` (a fill/color with weak WCAG contrast against the surface, `info`), `missing_chrome` (a template-based slide that references none of the template's media/logo/footer, `info`), and `weak_source` (a vague, undated `Source: …` citation, `info`) — plus a fixed review `checklist` so the model always has guidance even when the heuristics are clean. It is **agent-driven, not a hard runtime block**: the slides skill instructs the model to fix all `warning`-level findings and re-run `review_deck` until clean before telling the user the deck is ready (mirroring the `ask_user` pattern). The result carries scene-derived text only — never `data:` image/font bytes.
+
+Studio also reveals the right-hand slides harness only **after the first slide is written** (a `slide_written` `docs_update`), not on `create_deck`/`deck_viewed`, so the user never sees an empty deck panel before generation.
+
 ### Theme contract
 
 A theme contains target-neutral tokens plus optional renderer-specific overrides:
@@ -1237,12 +1252,91 @@ token, so history stays readable and the model reads the answer naturally.
 ### Slides variant previews (`get_template_variant_previews`)
 
 `get_template_variant_previews(template, kind?)` returns each archetype variant's
-`{ kind, label, tier, fillSlots, markup }` plus the shared `theme` tokens and
-`assets`. It carries **ASD text and asset-refs only** — never `data:` image/font
+lightweight metadata — `{ kind, label, tier, fillSlots }` plus a **thumbnail
+reference** (`Archetype.ThumbnailRef`, an asset key on the hidden `tmpl/<name>`
+deck) and the shared `theme` tokens and `assets`. It **no longer ships the full
+`markup`** for each variant: the archetype markup the agent authors from is already
+returned by `create_deck`, so re-fetching it here is redundant. Returning only
+metadata + a thumbnail reference keeps the payload small and fixed a
+context-overflow authoring loop (see "Static archetype thumbnails" below). Like all
+tool results it carries **ASD text and asset-refs only** — never `data:` image/font
 bytes (those resolve through the deck asset plumbing at render time), so it is safe
 to return from a tool and keeps `TestSlidesResponsesOmitHeavyManifestFields` green.
-The agent passes a variant's `markup` (+ `theme`/`assets`) as an `ask_user`
-`slides-archetype` thumbnail.
+The picker (`ask_user`) references the thumbnail image instead of live-rendering
+ast-slide markup.
+
+### Static archetype thumbnails
+
+Each imported template variant has a **pre-rasterized cover thumbnail** so the
+questionnaire pickers can show what a variant looks like without shipping (or
+live-rendering) its `ast-slide` markup:
+
+- **Baked once at import.** When a `.pptx` is imported, every archetype's HTML
+  export is rendered to a PNG **one time** via headless Chrome
+  (`pdfgen.RenderHTMLToPNGChrome`). There is no per-request/per-asset live
+  rendering.
+- **Stored content-addressed.** Each PNG is stored as a content-addressed asset
+  keyed `thumb/<kind>` on the hidden `tmpl/<name>` deck, and the archetype records
+  its key in `Archetype.ThumbnailRef`.
+- **Served over HTTP.** Thumbnails are served at
+  `GET /api/docs/slides/templates/<name>/thumbnails/<kind>`.
+- **Referenced, not embedded.** The questionnaire pickers (`ask_user`,
+  `get_template_variant_previews`) reference these images by URL/asset key instead
+  of shipping ast-slide markup. This both **fixes the context-overflow authoring
+  loop** (large per-variant markup payloads were being fetched and re-fetched,
+  evicting and re-loading context) and **removes per-asset live rendering** from the
+  picker path.
+- **Built-ins fall back to live render.** Built-in templates
+  (`light-corporate`/`midnight`/`aurora`) have no baked thumbnail; their cards fall
+  back to a live `ast-deck` render of the archetype.
+
+Invariant: as with every slides tool result, thumbnail payloads carry only asset
+references/URLs — **tool results never carry `data:` bytes**.
+
+### Static deck slide thumbnails
+
+Real decks get the **same** static-thumbnail treatment so the Slides view
+(`SlidesView.tsx` deck cards and the `SlidesDeckView.tsx` slide strip) can show
+each slide as a pre-baked image instead of live-rendering every slide in a
+sandboxed `iframe src=.../present#slide-N`:
+
+- **Baked once when a deck is finished.** When the model runs `review_deck` — its
+  declared FINAL step — `chat_runner.maybeEmitDocsUpdate` fires a best-effort,
+  background bake (`bakeDeckThumbnails` in `pkg/api/slides_handlers.go`). Each
+  slide's single-slide HTML export is rendered to a PNG **one time** via headless
+  Chrome (`pdfgen.RenderHTMLToPNGChrome`), reusing the archetype pipeline
+  (`HTMLExporter{Print:false}` + `SlidesReadinessExpression` +
+  `CanvasWidth`/`CanvasHeight`). The baker (`slides.GenerateDeckThumbnails`) is
+  idempotent: a slide is skipped when its `ThumbnailRef` is already set and the
+  asset is still present.
+- **Stored content-addressed.** Each PNG is stored as a `data:image/png;base64,…`
+  asset keyed `slidethumb/<version>/<position>` on the deck's `Assets` map, and
+  the slide records its key in `SlideContent.ThumbnailRef` (a `thumbnail_ref`
+  column on the Slide entity in both the personal and team scopes). The capture is
+  **downscaled** (`ScreenshotOptions.Scale`, currently 0.25 → 480×270) so each PNG
+  is a few tens of KB rather than a multi-MB full-canvas image — the Slides list
+  renders one `<img>` per deck card, so full-resolution captures made the list
+  slow to paint. The `<version>` segment lets a format/scale change invalidate
+  previously baked assets: a slide pointing at an old-version ref fails the
+  idempotency check and re-bakes on the next `review_deck`.
+- **Served over HTTP.** Thumbnails are served at
+  `GET /api/docs/slides/<deckSlug>/thumbnails/<idx>`
+  (`GetSlidesDeckSlideThumbnailHandler`) with long-lived immutable cache headers.
+- **Empty fallback — never a live render.** The Slides view renders these images
+  by URL (`deckSlideThumbnailUrl`). When no thumbnail has been baked, the endpoint
+  returns `404` and the tile shows an **EMPTY placeholder icon**. It does **not**
+  fall back to a live `ast-deck` render — that is an explicit product invariant for
+  the thumbnail path. The large interactive deck viewer / Present / full-screen in
+  `SlidesDeckView.tsx` still render live via `/present`; only the small per-slide
+  thumbnails switched to baked images.
+- **Best-effort baking.** Deck finishing never fails when a browser is
+  unavailable: a missing/sandbox-required-but-absent browser or any per-slide
+  render error is logged and swallowed, leaving that slide's `ThumbnailRef` empty
+  (and thus an empty placeholder tile).
+
+Invariant: as with archetype thumbnails, the baked PNGs live only in the deck
+`Assets` map and are served over HTTP — **tool results (`review_deck`,
+`write_slide`, `create_deck`, `get_deck`) never carry `data:` bytes**.
 
 ### The `[chat_question]` event contract
 

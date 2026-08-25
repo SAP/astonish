@@ -5,6 +5,7 @@ import {
   fetchSlidesDeck,
   fetchSlidesPresentation,
   slidesPresentationURL,
+  deckSlideThumbnailUrl,
   listSlidesDecks,
   listSlidesTemplates,
   importSlidesTemplate,
@@ -34,6 +35,11 @@ describe('slides API (deck/present/export)', () => {
 
   it('builds a scoped presentation URL', () => {
     expect(slidesPresentationURL('deck-1', 'personal')).toBe('/api/docs/slides/deck-1/present?scope=personal')
+  })
+
+  it('builds a scoped, encoded per-slide thumbnail URL', () => {
+    expect(deckSlideThumbnailUrl('deck-1', 0, 'personal')).toBe('/api/docs/slides/deck-1/thumbnails/0?scope=personal')
+    expect(deckSlideThumbnailUrl('risk/a', 3, 'team')).toBe('/api/docs/slides/risk%2Fa/thumbnails/3?scope=team')
   })
 
   it('exports a deck blob', async () => {

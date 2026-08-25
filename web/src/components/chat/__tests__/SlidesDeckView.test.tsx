@@ -1,7 +1,7 @@
 /// <reference types="vitest" />
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import SlidesDeckView from '../SlidesDeckView'
 import * as slidesApi from '../../../api/slides'
 import '@testing-library/jest-dom'
@@ -68,5 +68,36 @@ describe('SlidesDeckView refresh signal', () => {
 
     // The embedded present iframe is still present (re-mounted, not crashed).
     expect(screen.getByTestId('slides-deck-frame')).toBeInTheDocument()
+  })
+
+  it('shows the "generating" placeholder while the deck has no slides', async () => {
+    vi.mocked(slidesApi.fetchSlidesDeck).mockResolvedValue(deckWith(0))
+    render(<SlidesDeckView deckSlug="d" refreshSignal={0} />)
+    await waitFor(() => expect(slidesApi.fetchSlidesDeck).toHaveBeenCalledTimes(1))
+    expect(screen.getByTestId('slides-generating')).toBeInTheDocument()
+    expect(screen.getByText(/Generating slides/i)).toBeInTheDocument()
+    // No slide tiles yet.
+    expect(screen.queryAllByTestId('slides-tile')).toHaveLength(0)
+  })
+
+  it('navigates via postMessage on thumbnail click without reloading the iframe', async () => {
+    vi.mocked(slidesApi.fetchSlidesDeck).mockResolvedValue(deckWith(3))
+    render(<SlidesDeckView deckSlug="d" refreshSignal={0} />)
+    await waitFor(() => expect(screen.getAllByTestId('slides-tile')).toHaveLength(3))
+
+    const frame = screen.getByTestId('slides-deck-frame') as HTMLIFrameElement
+    const srcBefore = frame.src
+    const postMessage = vi.fn()
+    Object.defineProperty(frame, 'contentWindow', { value: { postMessage }, configurable: true })
+
+    // Click the third thumbnail.
+    fireEvent.click(screen.getAllByTestId('slides-tile')[2])
+
+    await waitFor(() =>
+      expect(postMessage).toHaveBeenCalledWith({ type: 'ast-nav', index: 2 }, '*'),
+    )
+    // The iframe src must NOT change on navigation (no reload / no remount).
+    expect(frame.src).toBe(srcBefore)
+    expect(frame).toBe(screen.getByTestId('slides-deck-frame'))
   })
 })

@@ -224,6 +224,33 @@ func TestRenderHTMLToPDFChromeValidationWithoutBrowser(t *testing.T) {
 	}
 }
 
+func TestRenderHTMLToPNGChromeValidationWithoutBrowser(t *testing.T) {
+	if _, err := RenderHTMLToPNGChrome("<!doctype html><title>test</title>", nil, ScreenshotOptions{}); err == nil || !strings.Contains(err.Error(), "no browser provider") {
+		t.Fatalf("unexpected nil provider error: %v", err)
+	}
+
+	provider := stubBrowserProvider{}
+	if _, err := RenderHTMLToPNGChrome(" \n\t", provider, ScreenshotOptions{}); err == nil || !strings.Contains(err.Error(), "must not be empty") {
+		t.Fatalf("unexpected empty HTML error: %v", err)
+	}
+	if _, err := RenderHTMLToPNGChrome("<!doctype html><title>test</title>", provider, ScreenshotOptions{Timeout: -time.Second}); err == nil || !strings.Contains(err.Error(), "invalid screenshot options") {
+		t.Fatalf("unexpected options error: %v", err)
+	}
+}
+
+func TestScreenshotOptionsNormalizedDefaults(t *testing.T) {
+	got, err := (ScreenshotOptions{}).normalized()
+	if err != nil {
+		t.Fatalf("normalized returned error: %v", err)
+	}
+	if got.Width != 1920 || got.Height != 1080 {
+		t.Fatalf("unexpected default viewport: %dx%d", got.Width, got.Height)
+	}
+	if got.Timeout != defaultHTMLPrintTimeout {
+		t.Fatalf("unexpected default timeout: %s", got.Timeout)
+	}
+}
+
 type stubBrowserProvider struct {
 	browser *rod.Browser
 	err     error

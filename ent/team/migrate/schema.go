@@ -754,6 +754,7 @@ var (
 		{Name: "title", Type: field.TypeString, Default: ""},
 		{Name: "content", Type: field.TypeString, Size: 2147483647},
 		{Name: "notes", Type: field.TypeString, Size: 2147483647, Default: ""},
+		{Name: "thumbnail_ref", Type: field.TypeString, Size: 2147483647, Default: ""},
 		{Name: "schema_version", Type: field.TypeInt, Default: 1},
 		{Name: "created_at", Type: field.TypeTime, Default: map[string]schema.Expr{"postgres": "now()", "sqlite3": "(datetime('now'))"}},
 		{Name: "updated_at", Type: field.TypeTime, Default: map[string]schema.Expr{"postgres": "now()", "sqlite3": "(datetime('now'))"}},
@@ -767,7 +768,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "slides_decks_slides",
-				Columns:    []*schema.Column{SlidesColumns[8]},
+				Columns:    []*schema.Column{SlidesColumns[9]},
 				RefColumns: []*schema.Column{DecksColumns[0]},
 				OnDelete:   schema.NoAction,
 			},
@@ -776,7 +777,7 @@ var (
 			{
 				Name:    "slide_position_deck_slides",
 				Unique:  true,
-				Columns: []*schema.Column{SlidesColumns[1], SlidesColumns[8]},
+				Columns: []*schema.Column{SlidesColumns[1], SlidesColumns[9]},
 			},
 		},
 	}

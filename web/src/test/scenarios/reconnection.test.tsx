@@ -91,16 +91,17 @@ describe('Reconnection Scenarios', () => {
       await result.sendMessage('Add the priorities and risks slides')
 
       await waitFor(() => {
+        // Same deck across two turns → still ONE in-chat launcher, now showing
+        // the latest progress. The deck lives in the right-hand harness panel.
         const launchers = result.container.querySelectorAll('[data-testid="harness-placeholder"][data-harness-kind="slides"]')
-        expect(launchers).toHaveLength(2)
-        expect(launchers[0]).toHaveTextContent('4 / 8')
-        expect(launchers[1]).toHaveTextContent('6 / 8')
+        expect(launchers).toHaveLength(1)
+        expect(launchers[0]).toHaveTextContent('6 / 8')
       }, { timeout: 10000 })
     })
   })
 
   describe('Restored session history', () => {
-    it('folds same-deck updates only until the next user boundary', async () => {
+    it('renders a single slides launcher for a deck edited across turns (latest only)', async () => {
       const docsUpdate = (slideIndex: number, errors: number, warnings: number, native: number, unsupported: number) => ({
         type: 'docs_update',
         docsUpdate: {
@@ -135,10 +136,12 @@ describe('Reconnection Scenarios', () => {
 
       await waitFor(() => {
         expect(result.container).toHaveTextContent('Create the quarterly review')
+        // docs_update messages coalesce per-turn (so two survive: 4/8 from turn
+        // one, 6/8 from turn two), but the in-chat launcher renders ONCE per deck
+        // — only the latest. The deck itself lives in the right-hand harness.
         const launchers = result.container.querySelectorAll('[data-testid="harness-placeholder"][data-harness-kind="slides"]')
-        expect(launchers).toHaveLength(2)
-        expect(launchers[0]).toHaveTextContent('4 / 8')
-        expect(launchers[1]).toHaveTextContent('6 / 8')
+        expect(launchers).toHaveLength(1)
+        expect(launchers[0]).toHaveTextContent('6 / 8')
       }, { timeout: 10000 })
     })
   })

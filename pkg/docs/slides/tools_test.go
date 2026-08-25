@@ -107,7 +107,7 @@ func TestGetTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"create_deck", "write_slide", "get_deck", "list_decks", "list_templates", "get_template_variant_previews", "validate_deck", "list_deck_assets", "add_deck_image", "ask_user"}
+	want := []string{"create_deck", "write_slide", "get_deck", "list_decks", "list_templates", "get_template_variant_previews", "validate_deck", "review_deck", "list_deck_assets", "add_deck_image", "ask_user"}
 	if len(got) != len(want) {
 		t.Fatalf("got %d tools, want %d", len(got), len(want))
 	}
@@ -718,5 +718,131 @@ func TestAskUserSlidesTemplatePicker(t *testing.T) {
 	// asset map (that would bloat model history / persisted message by MBs).
 	if acme.Thumbnail.AssetRef != "" {
 		t.Fatalf("template picker must not embed asset bytes/refs; got %q", acme.Thumbnail.AssetRef)
+	}
+}
+
+// reviewFindingsWithCode returns the findings from result matching code.
+func reviewFindingsWithCode(findings []ReviewFinding, code string) []ReviewFinding {
+	var out []ReviewFinding
+	for _, f := range findings {
+		if f.Code == code {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+func TestReviewDeckDetectsRunAdjacency(t *testing.T) {
+	// A timeline label authored as two adjacent runs with no separating space
+	// ("1972" + "Founded") is the "1972Founded" collision — review_deck must
+	// flag it as a warning.
+	collide := `<ast-slide id="s"><ast-text id="label" x="100" y="400" w="200" h="120">` +
+		`<ast-run b>1972</ast-run><ast-run>Founded</ast-run></ast-text></ast-slide>`
+	// The same content with a trailing space inside the date run, or a leading
+	// space in the label run, is correctly separated — no finding.
+	spacedTrailing := `<ast-slide id="s"><ast-text id="label" x="100" y="400" w="200" h="120">` +
+		`<ast-run b>1972 </ast-run><ast-run>Founded</ast-run></ast-text></ast-slide>`
+	spacedLeading := `<ast-slide id="s"><ast-text id="label" x="100" y="400" w="200" h="120">` +
+		`<ast-run b>1972</ast-run><ast-run> Founded</ast-run></ast-text></ast-slide>`
+
+	for _, tc := range []struct {
+		name       string
+		markup     string
+		wantColide bool
+	}{
+		{"collides", collide, true},
+		{"trailing space in first run", spacedTrailing, false},
+		{"leading space in second run", spacedLeading, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backend := &memoryDocsStore{}
+			ctx := toolContext(t, backend)
+			if _, err := createDeck(ctx, CreateDeckArgs{Slug: "deck", Title: "Deck"}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := writeSlide(ctx, WriteSlideArgs{DeckSlug: "deck", Position: 0, Markup: tc.markup}); err != nil {
+				t.Fatal(err)
+			}
+			result, err := reviewDeck(ctx, ReviewDeckArgs{Slug: "deck"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			adj := reviewFindingsWithCode(result.Findings, "run_adjacency")
+			if tc.wantColide {
+				if len(adj) != 1 {
+					t.Fatalf("expected 1 run_adjacency finding, got %d: %#v", len(adj), result.Findings)
+				}
+				if adj[0].Severity != "warning" {
+					t.Fatalf("run_adjacency must be a warning, got %q", adj[0].Severity)
+				}
+				if adj[0].NodeID != "label" {
+					t.Fatalf("finding should name the offending node, got %q", adj[0].NodeID)
+				}
+			} else if len(adj) != 0 {
+				t.Fatalf("expected no run_adjacency finding for %q, got %#v", tc.name, adj)
+			}
+		})
+	}
+}
+
+func TestReviewDeckChecklistAlwaysPresent(t *testing.T) {
+	backend := &memoryDocsStore{}
+	ctx := toolContext(t, backend)
+	if _, err := createDeck(ctx, CreateDeckArgs{Slug: "deck", Title: "Deck"}); err != nil {
+		t.Fatal(err)
+	}
+	// A clean slide with no heuristic findings still returns the checklist so
+	// the model always has review guidance.
+	clean := `<ast-slide id="s"><ast-text id="t" x="96" y="72" w="1728" h="100">Clean title</ast-text></ast-slide>`
+	if _, err := writeSlide(ctx, WriteSlideArgs{DeckSlug: "deck", Position: 0, Markup: clean}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := reviewDeck(ctx, ReviewDeckArgs{Slug: "deck"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Checklist) == 0 {
+		t.Fatal("review_deck must always return a non-empty checklist")
+	}
+	if len(reviewFindingsWithCode(result.Findings, "run_adjacency")) != 0 {
+		t.Fatalf("clean slide should have no run_adjacency finding: %#v", result.Findings)
+	}
+	if result.Message == "" {
+		t.Fatal("review_deck must return an instruction message")
+	}
+	if result.SlideCount != 1 {
+		t.Fatalf("SlideCount = %d, want 1", result.SlideCount)
+	}
+}
+
+func TestReviewDeckOmitsHeavyData(t *testing.T) {
+	backend := &memoryDocsStore{}
+	ctx := toolContext(t, backend)
+	if _, err := createDeck(ctx, CreateDeckArgs{Slug: "deck", Title: "Deck"}); err != nil {
+		t.Fatal(err)
+	}
+	// Add a real image asset so the deck carries data: bytes in its store.
+	svc := Service{Store: backend}
+	if _, err := svc.AddDeckAsset(ctx, "deck", "sha256-abc", "data:image/png;base64,AAAA"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writeSlide(ctx, WriteSlideArgs{DeckSlug: "deck", Position: 0,
+		Markup: `<ast-slide id="s"><ast-text id="t" x="96" y="72" w="1728" h="100">Title</ast-text></ast-slide>`}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := reviewDeck(ctx, ReviewDeckArgs{Slug: "deck"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "data:image") || strings.Contains(string(raw), "base64,AAAA") {
+		t.Fatalf("review_deck result leaked heavy asset data: %s", raw)
+	}
+	// The slim DeckView reports assets exist via a count, never the bytes.
+	if result.Deck == nil || result.Deck.AssetCount == 0 {
+		t.Fatalf("expected slim deck view with asset count, got %#v", result.Deck)
 	}
 }

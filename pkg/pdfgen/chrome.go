@@ -217,6 +217,130 @@ func renderHTMLToPDFChrome(html string, bp BrowserProvider, options HTMLPrintOpt
 	return data, nil
 }
 
+// ScreenshotOptions controls a full-page PNG capture of a trusted HTML document.
+// Width/Height set the emulated device viewport so a fixed-size canvas (e.g. the
+// 1920x1080 ast-deck) is captured exactly; zero values fall back to 1920x1080.
+// ReadinessExpression and Timeout mirror HTMLPrintOptions semantics.
+type ScreenshotOptions struct {
+	Width               int
+	Height              int
+	ReadinessExpression string
+	Timeout             time.Duration
+	// Scale downscales the captured image relative to the emulated viewport
+	// while leaving page LAYOUT untouched (the page still renders at Width x
+	// Height, but the PNG is Scale*Width x Scale*Height). Use it to produce a
+	// small thumbnail from a large fixed canvas without megabyte-sized output.
+	// Values <= 0 mean 1.0 (no downscale). Values must be <= 1 (upscaling is
+	// pointless and only bloats the PNG).
+	Scale float64
+}
+
+func (o ScreenshotOptions) normalized() (ScreenshotOptions, error) {
+	if o.Width <= 0 {
+		o.Width = 1920
+	}
+	if o.Height <= 0 {
+		o.Height = 1080
+	}
+	if o.Scale <= 0 {
+		o.Scale = 1
+	}
+	if o.Scale > 1 {
+		return ScreenshotOptions{}, fmt.Errorf("scale must be between 0 and 1")
+	}
+	// Apply scale to the effective viewport dimensions so the captured PNG is
+	// (Width*Scale) x (Height*Scale). The page's own scaling logic (e.g.
+	// ast-deck's DeckController) adapts the fixed canvas to fit the smaller
+	// viewport — layout is correct but the output is lighter.
+	if o.Scale < 1 {
+		o.Width = max(1, int(float64(o.Width)*o.Scale))
+		o.Height = max(1, int(float64(o.Height)*o.Scale))
+	}
+	if o.Timeout == 0 {
+		o.Timeout = defaultHTMLPrintTimeout
+	}
+	if o.Timeout < 0 || o.Timeout > maxHTMLPrintTimeout {
+		return ScreenshotOptions{}, fmt.Errorf("timeout must be between 0 and %s", maxHTMLPrintTimeout)
+	}
+	return o, nil
+}
+
+// RenderHTMLToPNGChrome renders a complete, trusted HTML document in a dedicated
+// headless Chrome page and captures it as a PNG. It mirrors RenderHTMLToPDFChrome's
+// page lifecycle (load, fonts.ready, optional readiness expression) but emulates a
+// fixed device viewport and captures a full-page screenshot instead of printing.
+// The timeout bounds the complete page lifecycle including capture.
+func RenderHTMLToPNGChrome(html string, bp BrowserProvider, options ScreenshotOptions) ([]byte, error) {
+	if bp == nil {
+		return nil, fmt.Errorf("no browser provider available")
+	}
+	if strings.TrimSpace(html) == "" {
+		return nil, fmt.Errorf("HTML document must not be empty")
+	}
+
+	normalized, err := options.normalized()
+	if err != nil {
+		return nil, fmt.Errorf("invalid screenshot options: %w", err)
+	}
+
+	b, err := bp.GetOrLaunch()
+	if err != nil {
+		return nil, fmt.Errorf("failed to launch browser: %w", err)
+	}
+
+	pg, err := b.Timeout(normalized.Timeout).Page(proto.TargetCreateTarget{URL: "about:blank"})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create browser page: %w", err)
+	}
+	defer func() { _ = pg.CancelTimeout().Close() }()
+
+	// Emulate a device viewport matching the requested canvas. For thumbnails the
+	// caller passes smaller Width/Height (e.g. 480×270) and the page's own
+	// scaling logic (ast-deck's DeckController) shrinks the 1920×1080 fixed
+	// canvas to fit, producing a small output PNG directly. DeviceScaleFactor
+	// stays 1 (reliable across all Chrome versions).
+	metrics := proto.EmulationSetDeviceMetricsOverride{
+		Width:             normalized.Width,
+		Height:            normalized.Height,
+		DeviceScaleFactor: 1,
+		Mobile:            false,
+	}
+	if err := metrics.Call(pg); err != nil {
+		return nil, fmt.Errorf("failed to set device metrics: %w", err)
+	}
+
+	if err := pg.SetDocumentContent(html); err != nil {
+		return nil, fmt.Errorf("failed to set document content: %w", err)
+	}
+	if err := pg.WaitLoad(); err != nil {
+		return nil, fmt.Errorf("failed to wait for page load: %w", err)
+	}
+	if _, err := pg.Eval(`() => document.fonts.ready`); err != nil {
+		return nil, fmt.Errorf("failed to wait for fonts: %w", err)
+	}
+	if expression := strings.TrimSpace(normalized.ReadinessExpression); expression != "" {
+		if err := pg.Wait(rod.Eval(`() => {
+			const readiness = (` + expression + `);
+			return typeof readiness === 'function' ? readiness() : readiness;
+		}`).ByPromise()); err != nil {
+			return nil, fmt.Errorf("failed to wait for HTML readiness: %w", err)
+		}
+	}
+
+	// When Scale < 1, capture only the viewport (the runtime's transform scales
+	// the fixed 1920×1080 canvas into the smaller viewport; a fullPage capture
+	// would still see the DOM's intrinsic 1920×1080 layout). At Scale == 1, use
+	// fullPage so nothing is clipped.
+	fullPage := normalized.Scale >= 1
+	data, err := pg.Screenshot(fullPage, &proto.PageCaptureScreenshot{
+		Format: proto.PageCaptureScreenshotFormatPng,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("Chrome PNG capture failed: %w", err)
+	}
+	return data, nil
+}
+
 const mermaidReadinessExpression = `new Promise((resolve) => {
 	if (window.__mermaidDone) { resolve(true); return; }
 	let tries = 0;

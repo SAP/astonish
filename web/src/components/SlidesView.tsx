@@ -5,7 +5,7 @@ import {
   listSlidesTemplates,
   importSlidesTemplate,
   deleteSlidesDeck,
-  slidesPresentationURL,
+  deckSlideThumbnailUrl,
   type SlidesDeckListItem,
   type SlidesTemplate,
   type DocsScope,
@@ -53,20 +53,22 @@ function formatDate(dateStr?: string) {
 }
 
 /**
- * A single slide thumbnail: a scaled, non-interactive sandboxed iframe pointed
- * at the deck's present document at `#slide-<n>` (DeckController resolves the
- * positional hash via data-index). Same transport as SlidesDeckView, so the
- * themed background matches. The title is rendered beneath the tile.
+ * A single slide thumbnail: a pre-baked static PNG served by the backend at
+ * `GET /api/docs/slides/<slug>/thumbnails/<index>`. Baked once when a deck is
+ * finished (the model's review_deck step), so opening the Slides view no longer
+ * boots the full slides runtime per tile. When no thumbnail has been baked (or
+ * the fetch 404s), we show an EMPTY placeholder icon — we NEVER fall back to a
+ * live ast-deck render here.
  *
- * The iframe is LAZY: it only mounts once the tile scrolls into view (via
- * IntersectionObserver). Each iframe boots the full slides runtime, so mounting
- * one per off-screen card is what made the list slow — off-screen cards render
- * a lightweight icon placeholder instead until the user scrolls to them.
+ * The image is LAZY: it only mounts once the tile scrolls into view (via
+ * IntersectionObserver); off-screen cards render the lightweight icon
+ * placeholder until the user scrolls to them.
  */
 function SlideThumbnail({ deckSlug, scope, index, title }: { deckSlug: string; scope: DocsScope; index: number; title?: string }) {
-  const src = `${slidesPresentationURL(deckSlug, scope)}#slide-${index + 1}`
+  const src = deckSlideThumbnailUrl(deckSlug, index, scope)
   const tileRef = useRef<HTMLDivElement>(null)
   const [visible, setVisible] = useState(false)
+  const [imgFailed, setImgFailed] = useState(false)
 
   useEffect(() => {
     // No IntersectionObserver (jsdom/tests, very old browsers): render eagerly.
@@ -96,18 +98,14 @@ function SlideThumbnail({ deckSlug, scope, index, title }: { deckSlug: string; s
         className="relative aspect-video w-40 overflow-hidden rounded-md border"
         style={{ borderColor: 'var(--border-color)', background: 'var(--card)' }}
       >
-        {visible ? (
-          <iframe
+        {visible && !imgFailed ? (
+          <img
             src={src}
-            sandbox="allow-scripts"
-            title={`${title || `Slide ${index + 1}`} thumbnail`}
+            alt={title || `Slide ${index + 1}`}
             aria-hidden="true"
-            tabIndex={-1}
             loading="lazy"
-            className="pointer-events-none absolute left-0 top-0 origin-top-left border-0"
-            // The present doc renders at a fixed canvas; scale it down to fit the
-            // 160px-wide tile. width/height are the pre-scale logical size.
-            style={{ width: '640px', height: '360px', transform: 'scale(0.25)' }}
+            onError={() => setImgFailed(true)}
+            className="absolute inset-0 h-full w-full object-cover"
           />
         ) : (
           <div className="absolute inset-0 flex items-center justify-center" aria-hidden="true">

@@ -557,3 +557,109 @@ func TestRecolorSlidesTemplateNotFound(t *testing.T) {
 		t.Fatalf("expected 404 for unknown scoped template, got %d", rec.Code)
 	}
 }
+
+// thumbnailReq drives GetSlidesTemplateThumbnailHandler through mux.SetURLVars
+// with the given docs store bound in context.
+func thumbnailReq(t *testing.T, personal store.DocsStore, name, kind string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/docs/slides/templates/"+name+"/thumbnails/"+kind, nil)
+	req = withDocsServices(req, personal, newMemDocsStore())
+	req = mux.SetURLVars(req, map[string]string{"name": name, "kind": kind})
+	rec := httptest.NewRecorder()
+	GetSlidesTemplateThumbnailHandler(rec, req)
+	return rec
+}
+
+// seedThumbnailTemplate persists a scoped template carrying a single archetype
+// with a baked PNG thumbnail (a valid base64 data URI) in its Assets map.
+func seedThumbnailTemplate(t *testing.T, backend store.DocsStore, name, kind string) []byte {
+	t.Helper()
+	// A tiny valid PNG (1x1); the handler only base64-decodes, it does not
+	// validate PNG structure, so any decodable payload would work.
+	png := []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x01, 0x02, 0x03}
+	ref := "thumb/" + kind
+	tmpl := themes.Template{
+		Schema: 2,
+		Name:   name,
+		Label:  name,
+		Tokens: map[string]string{"surface": "#FFFFFF", "ink": "#172033", "accent": "#1E40AF"},
+		Assets: map[string]string{ref: "data:image/png;base64," + base64.StdEncoding.EncodeToString(png)},
+		Archetypes: []themes.Archetype{
+			{Kind: kind, Markup: `<ast-slide id="t"></ast-slide>`, ThumbnailRef: ref},
+		},
+	}
+	if err := (slides.Service{Store: backend}).SaveTemplate(context.Background(), tmpl); err != nil {
+		t.Fatalf("seed thumbnail template %q: %v", name, err)
+	}
+	return png
+}
+
+func TestGetSlidesTemplateThumbnailServesPNG(t *testing.T) {
+	personal := newMemDocsStore()
+	png := seedThumbnailTemplate(t, personal, "thumbtpl", "title")
+
+	rec := thumbnailReq(t, personal, "thumbtpl", "title")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "image/png" {
+		t.Fatalf("Content-Type = %q, want image/png", ct)
+	}
+	if cc := rec.Header().Get("Cache-Control"); !strings.Contains(cc, "immutable") {
+		t.Fatalf("Cache-Control = %q, want immutable", cc)
+	}
+	if et := rec.Header().Get("ETag"); et != `"thumb/title"` {
+		t.Fatalf("ETag = %q, want %q", et, `"thumb/title"`)
+	}
+	if !bytes.Equal(rec.Body.Bytes(), png) {
+		t.Fatalf("body bytes did not match seeded PNG; got %d bytes", rec.Body.Len())
+	}
+}
+
+func TestGetSlidesTemplateThumbnailMatchesVariantSuffix(t *testing.T) {
+	personal := newMemDocsStore()
+	seedThumbnailTemplate(t, personal, "thumbtpl", "title")
+
+	// Requesting a variant kind (title-2) must fall back to the base "title"
+	// archetype's thumbnail.
+	rec := thumbnailReq(t, personal, "thumbtpl", "title-2")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestGetSlidesTemplateThumbnailUnknownTemplate(t *testing.T) {
+	rec := thumbnailReq(t, newMemDocsStore(), "no-such-template", "title")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for unknown template, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestGetSlidesTemplateThumbnailUnknownKind(t *testing.T) {
+	personal := newMemDocsStore()
+	seedThumbnailTemplate(t, personal, "thumbtpl", "title")
+
+	rec := thumbnailReq(t, personal, "thumbtpl", "chart")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for unknown kind, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestGetSlidesTemplateThumbnailBuiltinWithoutRef(t *testing.T) {
+	// Built-in templates predate the thumbnail pipeline: their archetypes carry
+	// no ThumbnailRef, so the endpoint must 404 for them.
+	builtins := themes.ListTemplates()
+	if len(builtins) == 0 {
+		t.Skip("no built-in templates registered")
+	}
+	tmpl := builtins[0]
+	if len(tmpl.Archetypes) == 0 {
+		t.Skip("built-in template has no archetypes")
+	}
+	kind := tmpl.Archetypes[0].Kind
+
+	rec := thumbnailReq(t, newMemDocsStore(), tmpl.Name, kind)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for built-in archetype without thumbnail, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}

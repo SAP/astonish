@@ -27,6 +27,8 @@ type Slide struct {
 	Content string `json:"content,omitempty"`
 	// Notes holds the value of the "notes" field.
 	Notes string `json:"notes,omitempty"`
+	// ThumbnailRef holds the value of the "thumbnail_ref" field.
+	ThumbnailRef string `json:"thumbnail_ref,omitempty"`
 	// SchemaVersion holds the value of the "schema_version" field.
 	SchemaVersion int `json:"schema_version,omitempty"`
 	// CreatedAt holds the value of the "created_at" field.
@@ -67,7 +69,7 @@ func (*Slide) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case slide.FieldPosition, slide.FieldSchemaVersion:
 			values[i] = new(sql.NullInt64)
-		case slide.FieldTitle, slide.FieldContent, slide.FieldNotes:
+		case slide.FieldTitle, slide.FieldContent, slide.FieldNotes, slide.FieldThumbnailRef:
 			values[i] = new(sql.NullString)
 		case slide.FieldCreatedAt, slide.FieldUpdatedAt:
 			values[i] = new(sql.NullTime)
@@ -119,6 +121,12 @@ func (_m *Slide) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field notes", values[i])
 			} else if value.Valid {
 				_m.Notes = value.String
+			}
+		case slide.FieldThumbnailRef:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field thumbnail_ref", values[i])
+			} else if value.Valid {
+				_m.ThumbnailRef = value.String
 			}
 		case slide.FieldSchemaVersion:
 			if value, ok := values[i].(*sql.NullInt64); !ok {
@@ -197,6 +205,9 @@ func (_m *Slide) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("notes=")
 	builder.WriteString(_m.Notes)
+	builder.WriteString(", ")
+	builder.WriteString("thumbnail_ref=")
+	builder.WriteString(_m.ThumbnailRef)
 	builder.WriteString(", ")
 	builder.WriteString("schema_version=")
 	builder.WriteString(fmt.Sprintf("%v", _m.SchemaVersion))

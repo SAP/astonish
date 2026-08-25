@@ -1747,6 +1747,8 @@ func (cr *ChatRunner) maybeEmitDocsUpdate(sessionService session.Service, toolNa
 		action = slides.ActionSlideWritten
 	case "get_deck":
 		action = slides.ActionDeckViewed
+	case "review_deck":
+		action = slides.ActionDeckReviewed
 	default:
 		return
 	}
@@ -1785,6 +1787,20 @@ func (cr *ChatRunner) maybeEmitDocsUpdate(sessionService session.Service, toolNa
 
 	cr.emitEvent("docs_update", payload)
 	persistDocsUpdate(cr.ctx, sessionService, cr.UserID, cr.SessionID, payload)
+
+	// When the model finishes a deck (its declared final step, review_deck),
+	// bake each slide to a static PNG once so the Slides view can show pre-baked
+	// images instead of live-rendering every slide. This is best-effort and runs
+	// in the background so it never blocks the SSE turn; it self-skips when no
+	// browser is available and is idempotent (unchanged slides are not re-baked).
+	if action == slides.ActionDeckReviewed {
+		if svc := store.FromContext(cr.ctx); svc != nil && svc.PersonalDocs != nil {
+			deckSvc := slides.Service{Store: svc.PersonalDocs}
+			bakeCtx := cr.ctx
+			userID := cr.UserID
+			go bakeDeckThumbnails(bakeCtx, deckSvc, slug, userID)
+		}
+	}
 }
 
 func numberAsInt(value any) (int, bool) {

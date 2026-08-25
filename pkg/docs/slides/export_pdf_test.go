@@ -34,7 +34,7 @@ func TestPDFExporterUsesSlidePrintContract(t *testing.T) {
 	if gotOptions.PaperWidth != 20 || gotOptions.PaperHeight != 11.25 || !gotOptions.Landscape || !gotOptions.PrintBackground {
 		t.Fatalf("unexpected print options: %+v", gotOptions)
 	}
-	if gotOptions.ReadinessExpression != slidesReadinessExpression || gotOptions.Timeout != 12*time.Second {
+	if gotOptions.ReadinessExpression != SlidesReadinessExpression || gotOptions.Timeout != 12*time.Second {
 		t.Fatalf("unexpected readiness options: %+v", gotOptions)
 	}
 }

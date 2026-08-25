@@ -7,7 +7,10 @@ import (
 	"github.com/SAP/astonish/pkg/pdfgen"
 )
 
-const slidesReadinessExpression = `document.documentElement.dataset.astRenderComplete === 'true'`
+// SlidesReadinessExpression is the JS predicate the slides runtime sets true once
+// the ast-deck has finished rendering; PDF and PNG exporters wait on it before
+// capturing so the output is never a blank/partial frame.
+const SlidesReadinessExpression = `document.documentElement.dataset.astRenderComplete === 'true'`
 
 type HTMLPDFRenderer func(string, pdfgen.BrowserProvider, pdfgen.HTMLPrintOptions) ([]byte, error)
 
@@ -36,7 +39,7 @@ func (e PDFExporter) Export(scene SceneGraph) (ExportResult, error) {
 		PaperWidth:          20,
 		PaperHeight:         11.25,
 		PrintBackground:     true,
-		ReadinessExpression: slidesReadinessExpression,
+		ReadinessExpression: SlidesReadinessExpression,
 		Timeout:             e.Timeout,
 	})
 	if err != nil {

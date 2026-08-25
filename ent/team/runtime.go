@@ -789,16 +789,20 @@ func init() {
 	slideDescNotes := slideFields[4].Descriptor()
 	// slide.DefaultNotes holds the default value on creation for the notes field.
 	slide.DefaultNotes = slideDescNotes.Default.(string)
+	// slideDescThumbnailRef is the schema descriptor for thumbnail_ref field.
+	slideDescThumbnailRef := slideFields[5].Descriptor()
+	// slide.DefaultThumbnailRef holds the default value on creation for the thumbnail_ref field.
+	slide.DefaultThumbnailRef = slideDescThumbnailRef.Default.(string)
 	// slideDescSchemaVersion is the schema descriptor for schema_version field.
-	slideDescSchemaVersion := slideFields[5].Descriptor()
+	slideDescSchemaVersion := slideFields[6].Descriptor()
 	// slide.DefaultSchemaVersion holds the default value on creation for the schema_version field.
 	slide.DefaultSchemaVersion = slideDescSchemaVersion.Default.(int)
 	// slideDescCreatedAt is the schema descriptor for created_at field.
-	slideDescCreatedAt := slideFields[6].Descriptor()
+	slideDescCreatedAt := slideFields[7].Descriptor()
 	// slide.DefaultCreatedAt holds the default value on creation for the created_at field.
 	slide.DefaultCreatedAt = slideDescCreatedAt.Default.(func() time.Time)
 	// slideDescUpdatedAt is the schema descriptor for updated_at field.
-	slideDescUpdatedAt := slideFields[7].Descriptor()
+	slideDescUpdatedAt := slideFields[8].Descriptor()
 	// slide.DefaultUpdatedAt holds the default value on creation for the updated_at field.
 	slide.DefaultUpdatedAt = slideDescUpdatedAt.Default.(func() time.Time)
 	// slide.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.

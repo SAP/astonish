@@ -93,6 +93,20 @@ func (_u *SlideUpdate) SetNillableNotes(v *string) *SlideUpdate {
 	return _u
 }
 
+// SetThumbnailRef sets the "thumbnail_ref" field.
+func (_u *SlideUpdate) SetThumbnailRef(v string) *SlideUpdate {
+	_u.mutation.SetThumbnailRef(v)
+	return _u
+}
+
+// SetNillableThumbnailRef sets the "thumbnail_ref" field if the given value is not nil.
+func (_u *SlideUpdate) SetNillableThumbnailRef(v *string) *SlideUpdate {
+	if v != nil {
+		_u.SetThumbnailRef(*v)
+	}
+	return _u
+}
+
 // SetSchemaVersion sets the "schema_version" field.
 func (_u *SlideUpdate) SetSchemaVersion(v int) *SlideUpdate {
 	_u.mutation.ResetSchemaVersion()
@@ -218,6 +232,9 @@ func (_u *SlideUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	if value, ok := _u.mutation.Notes(); ok {
 		_spec.SetField(slide.FieldNotes, field.TypeString, value)
 	}
+	if value, ok := _u.mutation.ThumbnailRef(); ok {
+		_spec.SetField(slide.FieldThumbnailRef, field.TypeString, value)
+	}
 	if value, ok := _u.mutation.SchemaVersion(); ok {
 		_spec.SetField(slide.FieldSchemaVersion, field.TypeInt, value)
 	}
@@ -335,6 +352,20 @@ func (_u *SlideUpdateOne) SetNotes(v string) *SlideUpdateOne {
 func (_u *SlideUpdateOne) SetNillableNotes(v *string) *SlideUpdateOne {
 	if v != nil {
 		_u.SetNotes(*v)
+	}
+	return _u
+}
+
+// SetThumbnailRef sets the "thumbnail_ref" field.
+func (_u *SlideUpdateOne) SetThumbnailRef(v string) *SlideUpdateOne {
+	_u.mutation.SetThumbnailRef(v)
+	return _u
+}
+
+// SetNillableThumbnailRef sets the "thumbnail_ref" field if the given value is not nil.
+func (_u *SlideUpdateOne) SetNillableThumbnailRef(v *string) *SlideUpdateOne {
+	if v != nil {
+		_u.SetThumbnailRef(*v)
 	}
 	return _u
 }
@@ -493,6 +524,9 @@ func (_u *SlideUpdateOne) sqlSave(ctx context.Context) (_node *Slide, err error)
 	}
 	if value, ok := _u.mutation.Notes(); ok {
 		_spec.SetField(slide.FieldNotes, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.ThumbnailRef(); ok {
+		_spec.SetField(slide.FieldThumbnailRef, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.SchemaVersion(); ok {
 		_spec.SetField(slide.FieldSchemaVersion, field.TypeInt, value)

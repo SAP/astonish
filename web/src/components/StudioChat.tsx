@@ -30,7 +30,7 @@ import HarnessPlaceholder from './chat/HarnessPlaceholder'
 import ChatErrorBoundary from './chat/ChatErrorBoundary'
 import YesNoCard from './chat/questions/YesNoCard'
 import SingleSelectCard from './chat/questions/SingleSelectCard'
-import SlidesArchetypeThumb from './chat/questions/SlidesArchetypeThumb'
+import QuestionOptionThumb from './chat/questions/QuestionOptionThumb'
 import {
   deriveLatestHarness,
   harnessFocusEquals,
@@ -483,6 +483,22 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
     () => resolveHarnessFocus(latestHarness, manualHarnessFocus),
     [latestHarness, manualHarnessFocus],
   )
+
+  // The in-chat slides launcher must appear ONCE per deck, not once per turn
+  // that touched it. docs_update messages are coalesced per-turn (see
+  // upsertDocsUpdate), so a deck edited across several turns leaves several
+  // docs_update messages — rendering each as a card cluttered the thread. We
+  // keep only the LAST docs_update index per deckSlug; earlier ones render
+  // nothing. The deck itself lives in the right-hand harness panel.
+  const latestDocsUpdateIndexByDeck = useMemo(() => {
+    const byDeck = new Map<string, number>()
+    messages.forEach((m, i) => {
+      if (m.type !== 'docs_update') return
+      const d = m as DocsUpdateMessage
+      if (d.docType === 'slides' && d.deckSlug) byDeck.set(d.deckSlug, i)
+    })
+    return byDeck
+  }, [messages])
 
   const openHarness = useCallback((focus: HarnessFocus) => {
     setManualHarnessFocus(focus)
@@ -3453,6 +3469,9 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
               if (msg.type === 'docs_update') {
                 const docs = msg as DocsUpdateMessage
                 if (docs.docType !== 'slides' || !docs.deckSlug) return null
+                // One launcher per deck: skip all but the latest docs_update for
+                // this deck so the thread isn't cluttered with a card per turn.
+                if (latestDocsUpdateIndexByDeck.get(docs.deckSlug) !== index) return null
                 const focus: HarnessFocus = { kind: 'slides', deckSlug: docs.deckSlug, messageIndex: index }
                 const progress = docs.slideIndex !== undefined && docs.totalSlides !== undefined
                   ? `${docs.slideIndex} / ${docs.totalSlides}`
@@ -3571,14 +3590,9 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
                             id: o.id,
                             label: o.label,
                             description: o.description,
-                            thumbnail:
-                              o.thumbnail?.kind === 'slides-archetype' && o.thumbnail.markup ? (
-                                <SlidesArchetypeThumb
-                                  markup={o.thumbnail.markup}
-                                  theme={o.thumbnail.theme}
-                                  template={o.thumbnail.template}
-                                />
-                              ) : undefined,
+                            thumbnail: o.thumbnail ? (
+                              <QuestionOptionThumb thumbnail={o.thumbnail} label={o.label} />
+                            ) : undefined,
                           }))}
                           onSelect={(optionId, label) =>
                             handleQuestionAnswer(questionMsg, label, optionId)

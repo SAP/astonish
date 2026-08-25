@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -15,8 +16,10 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/SAP/astonish/pkg/docs/slides"
 	"github.com/SAP/astonish/pkg/docs/slides/pptxworker"
 	"github.com/SAP/astonish/pkg/docs/slides/themes"
+	webassets "github.com/SAP/astonish/web"
 	"github.com/gorilla/mux"
 )
 
@@ -50,6 +53,10 @@ type slidesTemplateListItem struct {
 type slidesArchetypeVariant struct {
 	Kind  string `json:"kind"`
 	Label string `json:"label,omitempty"`
+	// ThumbnailRef is the deck Assets key of a pre-baked PNG thumbnail for this
+	// archetype (empty when none was baked). Only the ref string is shipped; the
+	// asset bytes are served separately by GetSlidesTemplateThumbnailHandler.
+	ThumbnailRef string `json:"thumbnailRef,omitempty"`
 }
 
 // hexColorRe matches a #RRGGBB or #RRGGBBAA color used by recolor tokens.
@@ -74,7 +81,7 @@ func archetypeKinds(t themes.Template) []string {
 func archetypeVariants(t themes.Template) []slidesArchetypeVariant {
 	out := make([]slidesArchetypeVariant, 0, len(t.Archetypes))
 	for _, a := range t.Archetypes {
-		out = append(out, slidesArchetypeVariant{Kind: a.Kind, Label: a.Title})
+		out = append(out, slidesArchetypeVariant{Kind: a.Kind, Label: a.Title, ThumbnailRef: a.ThumbnailRef})
 	}
 	return out
 }
@@ -332,6 +339,110 @@ func RecolorSlidesTemplateHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// thumbnailPNGPrefix is the data-URI prefix stripped before base64-decoding a
+// baked archetype thumbnail asset.
+const thumbnailPNGPrefix = "data:image/png;base64,"
+
+// GetSlidesTemplateThumbnailHandler serves the pre-baked PNG thumbnail for a
+// single archetype of a template. It resolves the template (built-in first,
+// then the scoped docs service), finds the archetype by exact kind (falling
+// back to a variant-suffix-insensitive match), decodes the base64 PNG data URI
+// stored in the template's Assets under the archetype's ThumbnailRef, and
+// streams it with long-lived immutable cache headers. Any missing template,
+// archetype, thumbnail ref, asset, or decode failure returns 404 so a client
+// can transparently fall back to a live render.
+func GetSlidesTemplateThumbnailHandler(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	name := strings.TrimSpace(vars["name"])
+	kind := strings.TrimSpace(vars["kind"])
+	if name == "" || kind == "" {
+		http.Error(w, "template name and kind are required", http.StatusBadRequest)
+		return
+	}
+
+	// Resolve the template: built-in first, then a scoped template.
+	tmpl, found := themes.LookupTemplate(name)
+	if !found {
+		svc, err := docsService(r)
+		if err != nil {
+			http.Error(w, "template not found", http.StatusNotFound)
+			return
+		}
+		scoped, err := svc.ListTemplates(r.Context())
+		if err != nil {
+			http.Error(w, "template not found", http.StatusNotFound)
+			return
+		}
+		for _, t := range scoped {
+			if t.Name == name {
+				tmpl = t
+				found = true
+				break
+			}
+		}
+	}
+	if !found {
+		http.Error(w, "template not found", http.StatusNotFound)
+		return
+	}
+
+	// Find the archetype by exact kind, then fall back to a variant-suffix
+	// insensitive match (title-2 -> title).
+	arch, ok := findArchetypeForThumbnail(tmpl, kind)
+	if !ok || arch.ThumbnailRef == "" {
+		http.Error(w, "thumbnail not found", http.StatusNotFound)
+		return
+	}
+
+	asset, ok := tmpl.Assets[arch.ThumbnailRef]
+	if !ok {
+		http.Error(w, "thumbnail not found", http.StatusNotFound)
+		return
+	}
+	payload := strings.TrimPrefix(asset, thumbnailPNGPrefix)
+	png, err := base64.StdEncoding.DecodeString(payload)
+	if err != nil || len(png) == 0 {
+		http.Error(w, "thumbnail not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	w.Header().Set("ETag", `"`+arch.ThumbnailRef+`"`)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(png)
+}
+
+// findArchetypeForThumbnail returns the archetype matching kind exactly, or the
+// first archetype whose kind collapses to the same base role once variant
+// suffixes are stripped (title-2 and title both match "title").
+func findArchetypeForThumbnail(tmpl themes.Template, kind string) (themes.Archetype, bool) {
+	for _, a := range tmpl.Archetypes {
+		if a.Kind == kind {
+			return a, true
+		}
+	}
+	base := stripThumbnailVariantSuffix(kind)
+	for _, a := range tmpl.Archetypes {
+		if stripThumbnailVariantSuffix(a.Kind) == base {
+			return a, true
+		}
+	}
+	return themes.Archetype{}, false
+}
+
+// stripThumbnailVariantSuffix removes a trailing "-N" numeric variant suffix
+// from a role kind (title-2 -> title). It mirrors stripVariantSuffix in
+// pkg/docs/slides, which is unexported and therefore not reachable here.
+func stripThumbnailVariantSuffix(kind string) string {
+	if i := strings.LastIndexByte(kind, '-'); i > 0 {
+		if _, err := strconv.Atoi(kind[i+1:]); err == nil {
+			return kind[:i]
+		}
+	}
+	return kind
+}
+
 // uniqueTemplateName returns base, or base-2/base-3/... if a scoped template
 // deck already exists under that slug.
 func uniqueTemplateName(r *http.Request, base string) string {
@@ -465,6 +576,12 @@ func ImportSlidesTemplateHandler(w http.ResponseWriter, r *http.Request) {
 	tmpl.Label = label
 	tmpl.Scope = ""
 
+	// Pre-bake static PNG thumbnails for each archetype using the shared headless
+	// Chrome browser. This is BEST-EFFORT: any browser-launch or per-archetype
+	// failure is logged and the import proceeds without thumbnails (the picker
+	// falls back to a live render). Never fail the import over thumbnails.
+	generateTemplateThumbnails(r.Context(), &tmpl)
+
 	svc, ok := requireDocsService(w, r)
 	if !ok {
 		return
@@ -482,6 +599,30 @@ func ImportSlidesTemplateHandler(w http.ResponseWriter, r *http.Request) {
 		},
 		"warnings": resp.Warnings,
 	})
+}
+
+// generateTemplateThumbnails pre-bakes static PNG thumbnails for each archetype
+// in tmpl using the shared local headless-Chrome browser. It is BEST-EFFORT: a
+// nil browser manager, a browser-launch panic, or any per-archetype error must
+// not fail the import — the picker falls back to a live render for archetypes
+// without a baked thumbnail. The recover guard protects against an unexpected
+// panic from the browser layer.
+func generateTemplateThumbnails(ctx context.Context, tmpl *themes.Template) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			slog.Error("slides thumbnail generation panicked; importing without thumbnails",
+				"template", tmpl.Name, "panic", rec)
+		}
+	}()
+
+	mgr := GetLocalPDFBrowserManager()
+	if mgr == nil {
+		slog.Warn("slides thumbnail generation skipped: no local PDF browser manager",
+			"template", tmpl.Name)
+		return
+	}
+	runtimeJS := webassets.GetSlidesRuntime()
+	slides.GenerateArchetypeThumbnails(ctx, tmpl, runtimeJS, mgr)
 }
 
 // isPPTXUpload reports whether the upload looks like a PowerPoint file, by

@@ -21,6 +21,7 @@ func (Slide) Fields() []ent.Field {
 		field.String("title").Default(""),
 		field.Text("content"),
 		field.Text("notes").Default(""),
+		field.Text("thumbnail_ref").Default(""),
 		field.Int("schema_version").Default(1),
 		field.Time("created_at").Default(time.Now).Immutable().Annotations(&entsql.Annotation{DefaultExprs: map[string]string{dialect.Postgres: "now()", dialect.SQLite: "(datetime('now'))"}}),
 		field.Time("updated_at").Default(time.Now).UpdateDefault(time.Now).Annotations(&entsql.Annotation{DefaultExprs: map[string]string{dialect.Postgres: "now()", dialect.SQLite: "(datetime('now'))"}}),

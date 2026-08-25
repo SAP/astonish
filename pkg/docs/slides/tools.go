@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -74,6 +75,10 @@ const (
 	ActionDeckCreated  = "deck_created"
 	ActionDeckViewed   = "deck_viewed"
 	ActionSlideWritten = "slide_written"
+	// ActionDeckReviewed is emitted when the model runs review_deck, its
+	// declared FINAL step. The pkg/api trigger uses this to kick off
+	// best-effort slide thumbnail baking.
+	ActionDeckReviewed = "deck_reviewed"
 )
 
 // CreateDeckArgs defines the create_deck tool input.
@@ -836,6 +841,305 @@ func validateDeck(ctx context.Context, args ValidateDeckArgs) (ValidateDeckResul
 	return result, nil
 }
 
+// ReviewDeckArgs defines the review_deck tool input.
+type ReviewDeckArgs struct {
+	Slug string `json:"slug" jsonschema:"Deck slug to self-review before declaring done."`
+}
+
+// ReviewFinding is one heuristic observation about a slide. Severity is
+// "warning" (must fix before finishing) or "info" (should consider). It carries
+// scene-derived text only — never image/font bytes.
+type ReviewFinding struct {
+	SlideIndex int    `json:"slideIndex"`
+	NodeID     string `json:"nodeId,omitempty"`
+	Code       string `json:"code"`
+	Severity   string `json:"severity"`
+	Message    string `json:"message"`
+}
+
+// ReviewDeckResult is the self-evaluation the model reads before declaring a
+// deck done: automated heuristic Findings plus a human-style Checklist of
+// review points. It DELIBERATELY carries no data: bytes (only the slim DeckView,
+// counts, and text findings) so it stays out of model context / off the wire
+// (see TestSlidesResponsesOmitHeavyManifestFields).
+type ReviewDeckResult struct {
+	Deck       *DeckView       `json:"deck"`
+	SlideCount int             `json:"slideCount"`
+	Findings   []ReviewFinding `json:"findings,omitempty"`
+	Checklist  []string        `json:"checklist"`
+	Message    string          `json:"message"`
+}
+
+// reviewChecklist is the fixed set of human review points the model should
+// verify on every deck, even when the automated heuristics find nothing.
+var reviewChecklist = []string{
+	"Adjacent runs: no date/label collision (e.g. \"1972Founded\"); dates and labels are visually separated.",
+	"Contrast & hierarchy: markers, text, and accents have adequate contrast against the surface; the visual hierarchy is clear.",
+	"Template chrome: the deck reuses the template's fixed chrome (logo, footer, page furniture) so content slides match the cover/closing.",
+	"Precise milestones: timeline/labels use specific dated events, not vague open-ended phrases (\"Today\", \"era\").",
+	"Source citation: sources are precise (publisher, page/URL, access date) rather than a generic \"Source: X history\".",
+}
+
+// isAlphaNumRune reports whether r is an ASCII alphanumeric (used for the
+// run-adjacency collision heuristic: a number/word touching a word/number with
+// no whitespace between the two runs renders as e.g. "1972Founded").
+func isAlphaNumRune(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
+}
+
+// runsCollide reports whether run text a is directly followed by run text b with
+// no separating whitespace where the boundary joins two alphanumeric runes —
+// the "1972" + "Founded" -> "1972Founded" defect. Empty runs never collide.
+func runsCollide(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	last := []rune(a)
+	first := []rune(b)
+	lr := last[len(last)-1]
+	fr := first[0]
+	return isAlphaNumRune(lr) && isAlphaNumRune(fr)
+}
+
+// hexLuminance parses a #RRGGBB (or RRGGBB) hex color and returns its relative
+// luminance (0..1) per the WCAG formula. ok=false when the value is not a
+// 6-digit hex color (so callers skip the contrast check rather than guess).
+func hexLuminance(hex string) (float64, bool) {
+	s := strings.TrimSpace(hex)
+	s = strings.TrimPrefix(s, "#")
+	if len(s) != 6 {
+		return 0, false
+	}
+	v, err := strconv.ParseUint(s, 16, 32)
+	if err != nil {
+		return 0, false
+	}
+	channel := func(c float64) float64 {
+		c /= 255.0
+		if c <= 0.03928 {
+			return c / 12.92
+		}
+		return pow24((c + 0.055) / 1.055)
+	}
+	r := float64((v >> 16) & 0xff)
+	g := float64((v >> 8) & 0xff)
+	b := float64(v & 0xff)
+	return 0.2126*channel(r) + 0.7152*channel(g) + 0.0722*channel(b), true
+}
+
+// pow24 computes x^2.4 for x in [0,1]. Isolated so hexLuminance reads cleanly.
+func pow24(x float64) float64 { return math.Pow(x, 2.4) }
+
+// contrastRatio returns the WCAG contrast ratio between two relative luminances.
+func contrastRatio(l1, l2 float64) float64 {
+	hi, lo := l1, l2
+	if lo > hi {
+		hi, lo = lo, hi
+	}
+	return (hi + 0.05) / (lo + 0.05)
+}
+
+// nodeFillHex returns the explicit fill/color hex authored on a node (node-level
+// Fill, then props "fill"/"color"), or "" when none is set. It ignores theme
+// tokens (color-token/fill-token) since those resolve to theme-controlled,
+// generally accessible colors.
+func nodeFillHex(n Node) string {
+	if n.Fill != "" {
+		return n.Fill
+	}
+	if n.Props != nil {
+		if v, ok := n.Props["fill"].(string); ok && v != "" {
+			return v
+		}
+		if v, ok := n.Props["color"].(string); ok && v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// nodeText returns a node's full text (joined runs, else Text) for the
+// source-citation heuristic.
+func nodeText(n Node) string {
+	if len(n.Runs) > 0 {
+		var b strings.Builder
+		for _, r := range n.Runs {
+			b.WriteString(r.Text)
+		}
+		return b.String()
+	}
+	return n.Text
+}
+
+// slideHasTemplateAssetRef reports whether any node on the slide references a
+// template/deck asset via an ast-image asset-ref, i.e. the slide reuses at least
+// one piece of template media (a proxy for retained chrome such as a logo).
+func slideHasTemplateAssetRef(nodes []Node) bool {
+	for _, n := range nodes {
+		if n.Props != nil {
+			if v, ok := n.Props["asset-ref"].(string); ok && strings.TrimSpace(v) != "" {
+				return true
+			}
+			if v, ok := n.Props["assetRef"].(string); ok && strings.TrimSpace(v) != "" {
+				return true
+			}
+		}
+		if len(n.Children) > 0 && slideHasTemplateAssetRef(n.Children) {
+			return true
+		}
+	}
+	return false
+}
+
+// reviewTextNodes walks a node tree, invoking fn for every text node so the
+// heuristics can inspect runs/text at any nesting depth (groups included).
+func reviewTextNodes(nodes []Node, fn func(Node)) {
+	for _, n := range nodes {
+		if n.Type == "text" {
+			fn(n)
+		}
+		if len(n.Children) > 0 {
+			reviewTextNodes(n.Children, fn)
+		}
+	}
+}
+
+// weakSourcePattern matches a vague, undated "Source: <name> history/overview"
+// citation with no URL or year (case-insensitive). A precise citation with a
+// URL (contains a dot+slash or "http") or a 4-digit year is not flagged.
+func isWeakSourceCitation(text string) bool {
+	t := strings.ToLower(strings.TrimSpace(text))
+	if !strings.HasPrefix(t, "source:") {
+		return false
+	}
+	// Precise if it carries a URL-ish token or a 4-digit year.
+	if strings.Contains(t, "http") || strings.Contains(t, ".com") || strings.Contains(t, ".org") || strings.Contains(t, ".html") {
+		return false
+	}
+	for i := 0; i+4 <= len(t); i++ {
+		seg := t[i : i+4]
+		if seg[0] >= '1' && seg[0] <= '2' && allDigits(seg) {
+			return false
+		}
+	}
+	return true
+}
+
+func allDigits(s string) bool {
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return len(s) > 0
+}
+
+// reviewDeck renders the persisted deck to its parsed SceneGraph and returns a
+// structured self-evaluation: automated heuristic findings (adjacent-run
+// collision, low-contrast markers, missing template chrome, weak source
+// citation) plus a fixed review checklist. It is AGENT-DRIVEN, not a hard
+// runtime gate: the model calls it as the final step before finishing and
+// revises until there are no warning-level findings. It never returns data:
+// bytes — only scene-derived text.
+func reviewDeck(ctx context.Context, args ReviewDeckArgs) (ReviewDeckResult, error) {
+	svc, err := personalService(ctx)
+	if err != nil {
+		return ReviewDeckResult{}, err
+	}
+	slug := strings.TrimSpace(args.Slug)
+	deck, _, err := svc.Deck(ctx, slug)
+	if err != nil {
+		return ReviewDeckResult{}, err
+	}
+	scene, _, err := svc.Scene(ctx, slug)
+	if err != nil {
+		return ReviewDeckResult{}, err
+	}
+
+	fromTemplate := deck.TemplateModel != "" || len(deck.Assets) > 0
+	// Surface color for the contrast check: theme surface token, else white.
+	surfaceHex := "#FFFFFF"
+	if deck.Theme != nil {
+		if v := strings.TrimSpace(deck.Theme["surface"]); v != "" {
+			surfaceHex = v
+		}
+	}
+	surfaceLum, surfaceOK := hexLuminance(surfaceHex)
+
+	var findings []ReviewFinding
+	for si, slide := range scene.Slides {
+		reviewTextNodes(slide.Nodes, func(n Node) {
+			// 1) Adjacent-run collision.
+			for i := 0; i+1 < len(n.Runs); i++ {
+				if runsCollide(n.Runs[i].Text, n.Runs[i+1].Text) {
+					findings = append(findings, ReviewFinding{
+						SlideIndex: si,
+						NodeID:     n.ID,
+						Code:       "run_adjacency",
+						Severity:   "warning",
+						Message: fmt.Sprintf(
+							"Adjacent runs %q and %q render with no space between them (e.g. \"1972Founded\"). Add a space inside a run (e.g. %q) or split the date and label into two separate positioned ast-text boxes.",
+							n.Runs[i].Text, n.Runs[i+1].Text, n.Runs[i].Text+" "),
+					})
+				}
+			}
+			// 4) Weak source citation.
+			if isWeakSourceCitation(nodeText(n)) {
+				findings = append(findings, ReviewFinding{
+					SlideIndex: si,
+					NodeID:     n.ID,
+					Code:       "weak_source",
+					Severity:   "info",
+					Message:    "Source citation is generic (no publisher page, URL, or access date). Cite the specific source precisely.",
+				})
+			}
+		})
+
+		// 2) Low-contrast marker (best-effort; only when both colors are hex).
+		if surfaceOK {
+			for _, n := range slide.Nodes {
+				hex := nodeFillHex(n)
+				if hex == "" {
+					continue
+				}
+				lum, ok := hexLuminance(hex)
+				if !ok {
+					continue
+				}
+				if contrastRatio(lum, surfaceLum) < 2.0 {
+					findings = append(findings, ReviewFinding{
+						SlideIndex: si,
+						NodeID:     n.ID,
+						Code:       "low_contrast",
+						Severity:   "info",
+						Message:    fmt.Sprintf("Fill %s has low contrast against the slide surface; the element may read as faint. Use a stronger, consistent color.", hex),
+					})
+				}
+			}
+		}
+
+		// 3) Missing template chrome (only meaningful for template-based decks).
+		if fromTemplate && !slideHasTemplateAssetRef(slide.Nodes) {
+			findings = append(findings, ReviewFinding{
+				SlideIndex: si,
+				Code:       "missing_chrome",
+				Severity:   "info",
+				Message:    "This slide reuses none of the template's media/chrome (logo, footer). Consider adapting a template archetype so it matches the cover and closing slides.",
+			})
+		}
+	}
+
+	checklist := make([]string, len(reviewChecklist))
+	copy(checklist, reviewChecklist)
+	return ReviewDeckResult{
+		Deck:       deckView(deck),
+		SlideCount: len(scene.Slides),
+		Findings:   findings,
+		Checklist:  checklist,
+		Message:    "Self-review complete. Fix warnings, then re-run review_deck; only declare the deck done when there are no warning-level findings.",
+	}, nil
+}
+
 // ListDeckAssetsArgs defines the list_deck_assets tool input.
 type ListDeckAssetsArgs struct {
 	DeckSlug string `json:"deck_slug" jsonschema:"Slug of the deck whose image assets to list."`
@@ -953,6 +1257,11 @@ func GetTools() ([]tool.Tool, error) {
 		{"validate_deck", "Validate every persisted slide in a private deck and return structured ASD diagnostics.", func() (tool.Tool, error) {
 			return functiontool.New(functiontool.Config{Name: "validate_deck", Description: "Validate every persisted slide in a private deck and return structured ASD diagnostics."}, func(ctx tool.Context, args ValidateDeckArgs) (ValidateDeckResult, error) {
 				return validateDeck(ctx, args)
+			})
+		}},
+		{"review_deck", "Self-review a finished deck as the FINAL step before you tell the user it is ready. Renders the persisted scene and returns heuristic findings (run_adjacency = collided date/label text like \"1972Founded\"; low_contrast markers; missing_chrome = a template slide that dropped the logo/footer; weak_source = a vague citation) plus a review checklist. Fix EVERY warning-level finding, then call review_deck again; only declare the deck done when there are no warnings. This catches semantic/visual defects that validate_deck (structural only) does not. Returns text findings only, never image data.", func() (tool.Tool, error) {
+			return functiontool.New(functiontool.Config{Name: "review_deck", Description: "Self-review a finished deck as the FINAL step before you tell the user it is ready. Renders the persisted scene and returns heuristic findings (run_adjacency = collided date/label text like \"1972Founded\"; low_contrast markers; missing_chrome = a template slide that dropped the logo/footer; weak_source = a vague citation) plus a review checklist. Fix EVERY warning-level finding, then call review_deck again; only declare the deck done when there are no warnings. This catches semantic/visual defects that validate_deck (structural only) does not. Returns text findings only, never image data."}, func(ctx tool.Context, args ReviewDeckArgs) (ReviewDeckResult, error) {
+				return reviewDeck(ctx, args)
 			})
 		}},
 		{"list_deck_assets", "List the image assets already in a deck (imported template media, logos, photos) with their asset-ref ids; use an id as an ast-image asset-ref. Returns hints only (ref, mime, size, kind) — never the image data.", func() (tool.Tool, error) {

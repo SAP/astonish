@@ -40,6 +40,11 @@ type Archetype struct {
 	Markup    string   `json:"markup"`
 	Tier      string   `json:"tier,omitempty"`
 	FillSlots []string `json:"fillSlots,omitempty"`
+	// ThumbnailRef names the deck Assets key (e.g. "thumb/title", "thumb/section-2")
+	// holding a pre-baked PNG data URI rendered once at .pptx import time. It is
+	// zero for built-ins and for imports made before the static-thumbnail pipeline
+	// existed; those fall back to a live ast-deck render.
+	ThumbnailRef string `json:"thumbnailRef,omitempty"`
 }
 
 // Template is a named collection of design tokens plus slide archetypes. It is

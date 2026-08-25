@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Download, ExternalLink, Loader2, Maximize2, TriangleAlert, X } from 'lucide-react'
 
 import {
@@ -41,11 +41,17 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
   const [pendingExport, setPendingExport] = useState<SlidesExportFormat | null>(null)
   const [fullscreen, setFullscreen] = useState(false)
   const mountedRef = useRef(true)
+  const iframeRef = useRef<HTMLIFrameElement | null>(null)
+  const fsIframeRef = useRef<HTMLIFrameElement | null>(null)
   // Tracks the deck/scope this component last loaded, so a pure refreshSignal
   // bump (same deck gaining slides) re-fetches WITHOUT yanking the user off
   // whatever slide they're viewing — we only reset slideIndex when the deck or
   // scope actually changes.
   const loadedKeyRef = useRef<string | null>(null)
+  // Slide count the embedded iframe was last (re)loaded with. New slides only
+  // require an iframe reload when the count actually grew; navigation and other
+  // docs_update churn must NOT reload the document (that caused the flicker).
+  const renderedCountRef = useRef(0)
 
   useEffect(() => {
     mountedRef.current = true
@@ -59,6 +65,7 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
       // New deck/scope: reset navigation to the first slide.
       setSlideIndex(0)
       loadedKeyRef.current = key
+      renderedCountRef.current = 0
     }
     setError('')
     fetchSlidesDeck(deckSlug, scope)
@@ -70,10 +77,47 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
   const slides = deck?.slides ?? []
   const total = slides.length
   const boundedIndex = Math.min(slideIndex, Math.max(0, total - 1))
-  // Positional 1-based hash — DeckController resolves `#slide-<n>` via data-index.
-  const slideHash = `slide-${boundedIndex + 1}`
   const presentUrl = slidesPresentationURL(deckSlug, scope)
-  const iframeSrc = total > 0 ? `${presentUrl}#${slideHash}` : presentUrl
+  // The iframe mounts ONCE per deck/scope (key excludes slideIndex + refreshSignal).
+  // We load the deck at its first slide; subsequent navigation and live slide
+  // additions are driven imperatively (postMessage nav + a targeted reload when
+  // the count grows) so the user never sees a full-document flash.
+  const iframeSrc = presentUrl
+
+  // Navigate the embedded deck to boundedIndex WITHOUT reloading it. The runtime
+  // (AstDeck) listens for { type: 'ast-nav', index } on the opaque-origin iframe
+  // and calls DeckController.goTo. targetOrigin is '*' because the sandboxed
+  // iframe has an opaque origin; the payload is inert (a slide index).
+  const postNav = useCallback((index: number) => {
+    const win = (fullscreen ? fsIframeRef.current : iframeRef.current)?.contentWindow
+    win?.postMessage({ type: 'ast-nav', index }, '*')
+  }, [fullscreen])
+
+  // Drive navigation on thumbnail click / index change — no remount, no reload.
+  useEffect(() => {
+    if (total === 0) return
+    postNav(boundedIndex)
+  }, [boundedIndex, total, postNav])
+
+  // Live slide additions: reload the embedded document only when the slide count
+  // actually increased (a new write_slide landed), then restore the viewed
+  // slide. Pure docs_update churn (validation/review events) never reloads.
+  useEffect(() => {
+    if (total > renderedCountRef.current) {
+      renderedCountRef.current = total
+      const frame = fullscreen ? fsIframeRef.current : iframeRef.current
+      if (frame) {
+        const onLoad = () => { postNav(boundedIndex) }
+        frame.addEventListener('load', onLoad, { once: true })
+        // Reassigning src reloads the (single) iframe in place — far less jarring
+        // than React unmounting/remounting the element, and it keeps focus/scroll.
+        frame.src = iframeSrc
+      }
+    }
+  // boundedIndex intentionally read at reload time only; excluded from deps so a
+  // mere navigation does not trigger a reload.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [total, iframeSrc, fullscreen, postNav])
 
   const present = useCallback(() => {
     window.open(slidesPresentationURL(deckSlug, scope), '_blank', 'noopener,noreferrer')
@@ -109,17 +153,39 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
     }
   }, [fullscreen])
 
-  const deckFrame = useMemo(() => (
+  const deckTitle = deck?.deck.title || deckSlug
+  // The embedded deck iframe is mounted ONCE per deck/scope. Navigation and live
+  // slide additions are driven imperatively (see effects above) so we never
+  // change the element's `key` on nav/refresh — that remount was the flicker.
+  const deckFrame = (
     <iframe
-      key={`${deckSlug}#${slideHash}#${refreshSignal}`}
+      ref={iframeRef}
+      key={`${deckSlug}|${scope}`}
       src={iframeSrc}
       sandbox="allow-scripts"
-      title={`Slide deck: ${deck?.deck.title || deckSlug}`}
+      title={`Slide deck: ${deckTitle}`}
       data-testid="slides-deck-frame"
       className="h-full w-full rounded-lg border-0"
       style={{ background: 'var(--card)' }}
     />
-  ), [deckSlug, slideHash, iframeSrc, deck?.deck.title, refreshSignal])
+  )
+
+  // Shown in the deck area while the deck exists but has no slides yet — the
+  // panel reveals from the start (see chatHarness.deriveLatestHarness) so the
+  // user sees this instead of an empty/broken deck until the first slide lands.
+  const generatingPlaceholder = (
+    <div
+      data-testid="slides-generating"
+      className="flex h-full w-full flex-col items-center justify-center gap-3 rounded-lg text-center"
+      style={{ background: 'var(--card)', border: '1px dashed var(--border-color)' }}
+    >
+      <Loader2 size={22} className="animate-spin" style={{ color: 'var(--brand)' }} />
+      <div className="text-sm font-medium text-foreground">Generating slides…</div>
+      <div className="max-w-xs px-6 text-xs text-muted-foreground">
+        The deck is being created. Slides will appear here as they’re written — no need to reload.
+      </div>
+    </div>
+  )
 
   return (
     <div className={cn('flex flex-col gap-3', fillHeight ? 'h-full min-h-0' : '')}>
@@ -171,9 +237,16 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
         ))}
       </div>
 
-      {/* Embedded deck */}
-      <div className={cn('min-h-0 overflow-hidden rounded-lg', fillHeight ? 'flex-1' : 'aspect-video')}>
+      {/* Embedded deck — the iframe stays mounted; while the deck has no slides
+          yet the "generating" placeholder covers it so the user never sees an
+          empty document. */}
+      <div className={cn('relative min-h-0 overflow-hidden rounded-lg', fillHeight ? 'flex-1' : 'aspect-video')}>
         {deckFrame}
+        {total === 0 && (
+          <div className="absolute inset-0">
+            {generatingPlaceholder}
+          </div>
+        )}
       </div>
 
       {/* Slide strip */}
@@ -235,10 +308,12 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
             </div>
             <div className="min-h-0 flex-1">
               <iframe
-                key={`fullscreen-${deckSlug}#${slideHash}#${refreshSignal}`}
+                ref={fsIframeRef}
+                key={`fullscreen-${deckSlug}|${scope}`}
                 src={iframeSrc}
                 sandbox="allow-scripts"
-                title={`Slide deck full screen: ${deck?.deck.title || deckSlug}`}
+                title={`Slide deck full screen: ${deckTitle}`}
+                onLoad={() => { if (total > 0) postNav(boundedIndex) }}
                 className="h-full w-full border-0"
                 style={{ background: 'var(--card)' }}
               />

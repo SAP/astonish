@@ -338,9 +338,11 @@ const extractRuns = (txBody, themeColors, styleDefaults = null) => {
     if (defRPr) {
       const da = attrsOf(defRPr)
       const dLatin = findChild(defRPr, 'a:latin')
+      const dFill = colorFromFill(findChild(defRPr, 'a:solidFill'), themeColors)
       localDefaults = {
         size: da['@_sz'] ? int(Number(da['@_sz']) / 100) : null,
         font: dLatin && attrsOf(dLatin)['@_typeface'] ? String(attrsOf(dLatin)['@_typeface']) : null,
+        color: dFill ? dFill.hex : null,
       }
     }
   }
@@ -370,12 +372,13 @@ const extractRuns = (txBody, themeColors, styleDefaults = null) => {
       const fill = rPr ? findChild(rPr, 'a:solidFill') : null
       const col = colorFromFill(fill, themeColors)
       if (col) run.color = col.hex
+      else { const c = inherit('color'); if (c != null) run.color = c }
       runs.push(run)
       text += str
     }
     text += '\n'
   }
-  return { runs, text: text.trim() }
+  return { runs, text: text.trim(), defaults: localDefaults }
 }
 
 // ---------------------------------------------------------------------------
@@ -856,8 +859,14 @@ try {
       const latin = findChild(defRPr, 'a:latin')
       const font = latin && attrsOf(latin)['@_typeface'] ? String(attrsOf(latin)['@_typeface']) : null
       const size = da['@_sz'] ? int(Number(da['@_sz']) / 100) : null
-      if (size == null && font == null) return null
-      return { size, font }
+      // Capture the inherited text color from the style's defRPr solidFill.
+      // PowerPoint layouts commonly define the title/body color ONLY here (e.g.
+      // white title on a dark cover), leaving individual runs uncolored. Without
+      // this the placeholder falls back to the renderer's default (black).
+      const fillCol = colorFromFill(findChild(defRPr, 'a:solidFill'), themeColors)
+      const color = fillCol ? fillCol.hex : null
+      if (size == null && font == null && color == null) return null
+      return { size, font, color }
     }
     const title = pick('p:titleStyle')
     const body = pick('p:bodyStyle')
@@ -967,11 +976,15 @@ try {
       }
     }
     const txBody = findChild(sp, 'p:txBody')
-    const { runs, text } = extractRuns(txBody, themeColors, txStyleDefaultFor(node.ph && node.ph.type))
+    const { runs, text, defaults } = extractRuns(txBody, themeColors, txStyleDefaultFor(node.ph && node.ph.type))
     if (runs.length) {
       node.runs = runs
       node.text = text
     }
+    // Empty placeholders (no runs) still carry an authored color via the shape's
+    // own <a:lstStyle> defRPr solidFill (a layout-level override). Preserve it so
+    // classify() can backfill the placeholder color when styleOf finds no run.
+    if (defaults) node.textDefaults = defaults
     return node
   }
 
@@ -1295,6 +1308,25 @@ try {
           ooxmlType: node.ph.type,
           idx: node.ph.idx ? Number(node.ph.idx) : 0,
         }
+        // A layout title/body placeholder is usually EMPTY (no a:r runs), so
+        // styleOf yields no color/size/font. The real text color for that role
+        // lives in the shape's own <a:lstStyle> defRPr (a layout-level override,
+        // tightest) or the master <p:txStyles> (e.g. a white title on a dark
+        // cover). Backfill any style not already resolved from runs so the
+        // placeholder renders in its authored color instead of the default black.
+        const txDef = txStyleDefaultFor(node.ph.type)
+        const own = node.textDefaults || null
+        const pickDef = (key) => {
+          if (own && own[key] != null) return own[key]
+          if (txDef && txDef[key] != null) return txDef[key]
+          return null
+        }
+        const bColor = pickDef('color')
+        const bSize = pickDef('size')
+        const bFont = pickDef('font')
+        if (ph.style.color == null && bColor != null) ph.style.color = bColor
+        if (ph.style.fontSize == null && bSize != null) ph.style.fontSize = Math.max(1, int(bSize * scale))
+        if (ph.style.fontFace == null && bFont != null) ph.style.fontFace = resolveFontToken(bFont)
         // A placeholder may ship its OWN default paint in the layout: a picture
         // placeholder can carry a default blip image, and any placeholder can
         // carry a default solid fill. Preserve those so the IR is lossless and

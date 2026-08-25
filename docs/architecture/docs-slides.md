@@ -1193,6 +1193,82 @@ The exporter interface must isolate this choice. Browser-side export reduces ser
 
 ---
 
+## Interactive questions (`ask_user`)
+
+When a template offers **multiple variants per role** (several title covers, several
+dividers) or the flow needs a yes/no decision (e.g. "add an agenda slide?"), the
+agent no longer asks with a plain-text numbered list in Studio. Instead it renders a
+**generic, reusable inline chat questionnaire** — one question at a time — using the
+`ask_user` tool. Slides is the first consumer of this generic primitive; nothing
+about the question mechanism is slides-specific.
+
+### The `ask_user` tool
+
+`ask_user` is a cross-cutting agent tool (registered with the slides/docs toolset,
+consumed on the general chat path). Arguments:
+
+- `kind`: `"yesno"` (renders a Yes/No card) or `"select"` (renders a pick-one card).
+- `prompt`: the single question sentence.
+- `options` (for `select`): `[{ id, label, description? }]`.
+- `thumbnails` (optional): `[{ optionId, kind, markup?, assetRef?, theme?, assets? }]`
+  attached per option for a **visual** picker. For slides, `kind` is
+  `"slides-archetype"` and `markup` is the archetype's ASD `ast-slide` fragment
+  (from `get_template_variant_previews`).
+
+The tool does **not** block the agent loop. On invocation the chat runner
+(`maybeEmitChatQuestion` in `pkg/api/chat_runner.go`) turns the result into an inline
+question card, then ends the turn. The user answers by clicking; that click is sent
+back as an **ordinary user message** (the chosen option label, or `Yes`/`No`) via the
+existing `connectChat` path — there is no dedicated answer endpoint and no sentinel
+token, so history stays readable and the model reads the answer naturally.
+
+### Slides variant previews (`get_template_variant_previews`)
+
+`get_template_variant_previews(template, kind?)` returns each archetype variant's
+`{ kind, label, tier, fillSlots, markup }` plus the shared `theme` tokens and
+`assets`. It carries **ASD text and asset-refs only** — never `data:` image/font
+bytes (those resolve through the deck asset plumbing at render time), so it is safe
+to return from a tool and keeps `TestSlidesResponsesOmitHeavyManifestFields` green.
+The agent passes a variant's `markup` (+ `theme`/`assets`) as an `ask_user`
+`slides-archetype` thumbnail.
+
+### The `[chat_question]` event contract
+
+The card is emitted with the same prefix-marker pattern as `distill_preview` /
+`app_preview` / `tutorial_blueprint_preview`:
+
+- **Live**: an SSE event of type `chat_question` with data
+  `{ questionId, kind, prompt, options: [{ id, label, description?, thumbnail? }] }`.
+- **Reload**: a persisted `model` message text prefixed `[chat_question]` followed by
+  the same JSON, reconstructed on load by `tryParseChatQuestionMessage`
+  (`pkg/api/chat_utils.go`) into a typed `chat_question` `StudioMessage`.
+
+### Rendering
+
+- **Studio** (`web/src/components/StudioChat.tsx`): a `chat_question` message renders
+  a generic **`YesNoCard`** or **`SingleSelectCard`**
+  (`web/src/components/chat/questions/`). For a `slides-archetype` thumbnail,
+  **`SlidesArchetypeThumb`** live-renders the variant's `ast-slide` markup by mounting
+  the same `ast-*` runtime components the deck viewer uses, scaled down from the
+  1920×1080 canvas and set to `pointer-events: none` (non-interactive). On answer the
+  card collapses to a read-only `You chose: <label>` state and the chosen label is
+  sent as a normal user message, entering the agent loop like typed input.
+- **Terminal TUI** (`pkg/launcher/tui_chat.go`, `mapSSEToEvents`): the same event
+  **degrades to text** — the prompt followed by a numbered list of option labels
+  (or Yes/No). There are no thumbnails; the user answers by typing the number/label,
+  which flows through the existing input → SSE user-message path (terminal parity).
+
+### Slides workflow integration
+
+For a template with multiple variants, the agent asks **one question at a time in
+sequence**: (1) `ask_user kind="select"` with `slides-archetype` thumbnails for the
+title/cover variant, (2) `ask_user kind="yesno"` for "Would you like an agenda
+slide?", (3) `ask_user kind="select"` with thumbnails for the divider/section
+variant. The questionnaire remains **agent-driven** (the model chooses to ask); it is
+not hard-enforced at the runtime level in this pass.
+
+---
+
 ## Research Summary and Primary Sources
 
 Research conducted for this revision found:

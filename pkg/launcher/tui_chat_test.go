@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/SAP/astonish/pkg/client"
@@ -87,6 +88,38 @@ func TestMapSSEToEvents_SoftDegrade(t *testing.T) {
 	evs := mapSSEToEvents(&client.SSEEvent{Type: "app_preview", Data: `{}`}, false)
 	if len(evs) != 1 || evs[0].Kind != events.KindSystem {
 		t.Fatalf("soft degrade: %+v", evs)
+	}
+}
+
+func TestMapSSEToEvents_ChatQuestionYesNo(t *testing.T) {
+	evs := mapSSEToEvents(&client.SSEEvent{
+		Type: "chat_question",
+		Data: `{"questionId":"q1","kind":"yesno","prompt":"Ship it?"}`,
+	}, false)
+	if len(evs) != 1 || evs[0].Kind != events.KindText {
+		t.Fatalf("chat_question yesno: %+v", evs)
+	}
+	text := evs[0].Text
+	for _, want := range []string{"Ship it?", "1. Yes", "2. No", "Reply with the number"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("chat_question yesno missing %q in %q", want, text)
+		}
+	}
+}
+
+func TestMapSSEToEvents_ChatQuestionSelect(t *testing.T) {
+	evs := mapSSEToEvents(&client.SSEEvent{
+		Type: "chat_question",
+		Data: `{"questionId":"q2","kind":"select","prompt":"Pick a theme","options":[{"id":"a","label":"Aurora","description":"Cool blues"},{"id":"b","label":"Ember"}]}`,
+	}, false)
+	if len(evs) != 1 || evs[0].Kind != events.KindText {
+		t.Fatalf("chat_question select: %+v", evs)
+	}
+	text := evs[0].Text
+	for _, want := range []string{"Pick a theme", "1. Aurora", "Cool blues", "2. Ember", "Reply with the number"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("chat_question select missing %q in %q", want, text)
+		}
 	}
 }
 

@@ -1,6 +1,7 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, act } from '@testing-library/react'
 import StudioChat from '../StudioChat'
+import { fetchSessionHistory } from '../../api/studioChat'
 
 // Mock all API modules
 vi.mock('../../api/studioChat', () => ({
@@ -9,7 +10,16 @@ vi.mock('../../api/studioChat', () => ({
   deleteSession: vi.fn().mockResolvedValue({}),
   connectChat: vi.fn().mockReturnValue(new AbortController()),
   stopChat: vi.fn().mockResolvedValue({}),
+  fetchSessionStatus: vi.fn().mockResolvedValue({ running: false }),
+  connectChatStream: vi.fn().mockReturnValue(new AbortController()),
+  fetchNetworkDenials: vi.fn().mockResolvedValue([]),
+  fetchSessionModelStatus: vi.fn().mockResolvedValue(null),
+  patchSessionModel: vi.fn().mockResolvedValue({}),
   fetchAvailableProviders: vi.fn().mockResolvedValue([]),
+}))
+
+vi.mock('../../api/platform', () => ({
+  listSessionMemories: vi.fn().mockResolvedValue({ memories: [] }),
 }))
 
 vi.mock('../../api/fleetChat', () => ({
@@ -96,6 +106,62 @@ describe('StudioChat', () => {
     expect(searchInput).toBeInTheDocument()
     await act(async () => {
       await new Promise(resolve => setTimeout(resolve, 0))
+    })
+  })
+
+  describe('chat_question rendering', () => {
+    beforeEach(() => {
+      vi.mocked(fetchSessionHistory).mockReset()
+    })
+
+    it('renders a yesno chat question with Yes/No controls', async () => {
+      vi.mocked(fetchSessionHistory).mockResolvedValue({
+        messages: [
+          {
+            type: 'chat_question',
+            questionId: 'q1',
+            kind: 'yesno',
+            prompt: 'Ship it?',
+            options: [],
+          },
+        ],
+      } as never)
+
+      await act(async () => {
+        render(<StudioChat {...defaultProps} initialSessionId="sess-1" />)
+        await new Promise(resolve => setTimeout(resolve, 0))
+      })
+
+      expect(screen.getByText('Ship it?')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Yes' })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'No' })).toBeInTheDocument()
+    })
+
+    it('renders a select chat question with option tiles', async () => {
+      vi.mocked(fetchSessionHistory).mockResolvedValue({
+        messages: [
+          {
+            type: 'chat_question',
+            questionId: 'q2',
+            kind: 'select',
+            prompt: 'Pick a layout',
+            options: [
+              { id: 'a', label: 'Layout A', description: 'First' },
+              { id: 'b', label: 'Layout B' },
+            ],
+          },
+        ],
+      } as never)
+
+      await act(async () => {
+        render(<StudioChat {...defaultProps} initialSessionId="sess-2" />)
+        await new Promise(resolve => setTimeout(resolve, 0))
+      })
+
+      expect(screen.getByText('Pick a layout')).toBeInTheDocument()
+      expect(screen.getByText('Layout A')).toBeInTheDocument()
+      expect(screen.getByText('Layout B')).toBeInTheDocument()
+      expect(screen.getAllByRole('radio')).toHaveLength(2)
     })
   })
 })

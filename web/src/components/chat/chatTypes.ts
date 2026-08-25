@@ -279,6 +279,33 @@ export interface DistillSavedMessage {
   runCommand: string
 }
 
+// ---- Interactive chat question (yes/no or select) ----
+
+export interface ChatQuestionOption {
+  id: string
+  label: string
+  description?: string
+  thumbnail?: {
+    kind: 'slides-archetype' | 'image'
+    markup?: string
+    assetRef?: string
+    theme?: Record<string, string>
+    /** Template name; asset-refs in `markup` resolve from this template's
+     *  assets at render time (never embedded data: bytes). */
+    template?: string
+  }
+}
+
+export interface ChatQuestionMessage {
+  type: 'chat_question'
+  questionId: string
+  kind: 'yesno' | 'select'
+  prompt: string
+  options: ChatQuestionOption[]
+  answered?: boolean
+  answer?: string
+}
+
 export interface TutorialBlueprintSceneRow {
   id: string
   title: string
@@ -379,6 +406,7 @@ export type ChatMsg =
   | AppPreviewMessage
   | DistillPreviewMessage
   | DistillSavedMessage
+  | ChatQuestionMessage
   | TutorialBlueprintPreviewMessage
   | TutorialBlueprintApprovedMessage
   | TutorialSceneSlideshowMessage

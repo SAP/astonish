@@ -107,7 +107,7 @@ func TestGetTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"create_deck", "write_slide", "get_deck", "list_decks", "list_templates", "validate_deck", "list_deck_assets", "add_deck_image"}
+	want := []string{"create_deck", "write_slide", "get_deck", "list_decks", "list_templates", "get_template_variant_previews", "validate_deck", "list_deck_assets", "add_deck_image", "ask_user"}
 	if len(got) != len(want) {
 		t.Fatalf("got %d tools, want %d", len(got), len(want))
 	}
@@ -450,5 +450,185 @@ func TestListDecksToolHidesTemplateDecks(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("list_decks dropped regular deck; got %#v", res.Decks)
+	}
+}
+
+func TestAskUserSlidesTemplateAttachesThumbnailsAndOptions(t *testing.T) {
+	backend := newMultiDeckStore()
+	ctx := toolContext(t, backend)
+	svc := Service{Store: backend}
+
+	if err := svc.SaveTemplate(ctx, themes.Template{
+		Name:   "acme",
+		Tokens: map[string]string{"surface": "#0b1220", "ink": "#e2e8f0"},
+		Assets: map[string]string{},
+		Archetypes: []themes.Archetype{
+			{Kind: "title", Title: "Blue cover", Tier: "fixed", Markup: `<ast-slide id="a"><ast-text id="h" x="160" y="380" w="1600" h="200" color="#e2e8f0" size="72">{{TITLE}}</ast-text></ast-slide>`},
+			{Kind: "title", Title: "Pink cover", Tier: "fixed", Markup: `<ast-slide id="b"><ast-text id="h" x="160" y="380" w="1600" h="200" color="#e2e8f0" size="72">{{TITLE}}</ast-text></ast-slide>`},
+			{Kind: "section", Title: "Divider", Tier: "fixed", Markup: `<ast-slide id="c"><ast-text id="h" x="160" y="470" w="1600" h="140" color="#e2e8f0" size="64">{{TITLE}}</ast-text></ast-slide>`},
+		},
+	}); err != nil {
+		t.Fatalf("save template: %v", err)
+	}
+
+	// Options omitted → auto-generated one per title variant, each with a live
+	// slides-archetype thumbnail carrying the variant markup + shared theme.
+	res, err := askUser(ctx, AskUserArgs{
+		Kind:           "select",
+		Prompt:         "Which cover?",
+		SlidesTemplate: "acme",
+		SlidesKind:     "title",
+	})
+	if err != nil {
+		t.Fatalf("askUser: %v", err)
+	}
+	if len(res.Options) != 2 {
+		t.Fatalf("expected 2 auto-generated title options, got %d: %#v", len(res.Options), res.Options)
+	}
+	for _, o := range res.Options {
+		if o.Thumbnail == nil {
+			t.Fatalf("option %q missing thumbnail", o.Label)
+		}
+		if o.Thumbnail.Kind != "slides-archetype" {
+			t.Fatalf("option %q thumbnail kind = %q, want slides-archetype", o.Label, o.Thumbnail.Kind)
+		}
+		if strings.TrimSpace(o.Thumbnail.Markup) == "" {
+			t.Fatalf("option %q thumbnail markup empty", o.Label)
+		}
+		if o.Thumbnail.Theme["surface"] != "#0b1220" {
+			t.Fatalf("option %q thumbnail missing shared theme: %#v", o.Label, o.Thumbnail.Theme)
+		}
+		// The thumbnail must carry the template NAME (so the frontend resolves
+		// asset-refs at render time) and MUST NOT embed a resolved asset map:
+		// embedding data URIs here bloated model history to hundreds of MB.
+		if o.Thumbnail.Template != "acme" {
+			t.Fatalf("option %q thumbnail missing template name: %#v", o.Label, o.Thumbnail)
+		}
+	}
+
+	// slidesKind filters to the single section variant.
+	sec, err := askUser(ctx, AskUserArgs{Kind: "select", Prompt: "Which divider?", SlidesTemplate: "acme", SlidesKind: "section"})
+	if err != nil {
+		t.Fatalf("askUser section: %v", err)
+	}
+	if len(sec.Options) != 1 || sec.Options[0].Thumbnail == nil {
+		t.Fatalf("expected 1 section option with thumbnail, got %#v", sec.Options)
+	}
+
+	// A stray single explicit option must NOT hide the other variants: when
+	// slidesTemplate is set and fewer options than variants are supplied, the
+	// full variant set replaces them.
+	partial, err := askUser(ctx, AskUserArgs{
+		Kind:           "select",
+		Prompt:         "Which cover?",
+		SlidesTemplate: "acme",
+		SlidesKind:     "title",
+		Options:        []AskUserOption{{ID: "blue-cover", Label: "Blue cover"}},
+	})
+	if err != nil {
+		t.Fatalf("askUser partial: %v", err)
+	}
+	if len(partial.Options) != 2 {
+		t.Fatalf("partial explicit options should expand to all 2 title variants, got %d: %#v", len(partial.Options), partial.Options)
+	}
+	for _, o := range partial.Options {
+		if o.Thumbnail == nil {
+			t.Fatalf("expanded option %q missing thumbnail", o.Label)
+		}
+	}
+}
+
+// TestGetTemplateVariantPreviewsMatchesVariantSuffixedKinds guards the "only one
+// option shown" regression for imported templates: variant multiplicity is
+// preserved by suffixing the role (title, title-2, title-3, …), so a filter by
+// slidesKind="title" must return the whole role family, not just the exact match.
+func TestGetTemplateVariantPreviewsMatchesVariantSuffixedKinds(t *testing.T) {
+	backend := newMultiDeckStore()
+	ctx := toolContext(t, backend)
+	svc := Service{Store: backend}
+
+	mk := func(kind, title string) themes.Archetype {
+		return themes.Archetype{Kind: kind, Title: title, Tier: "fixed",
+			Markup: `<ast-slide id="` + kind + `"><ast-text id="h" x="0" y="0" w="1920" h="200" size="72">{{TITLE}}</ast-text></ast-slide>`}
+	}
+	if err := svc.SaveTemplate(ctx, themes.Template{
+		Name:   "gco",
+		Tokens: map[string]string{"surface": "#0b1220"},
+		Archetypes: []themes.Archetype{
+			mk("title", "White cover with blue pattern"),
+			mk("title-2", "Blue cover, anvil and image"),
+			mk("title-3", "Dark cover"),
+			mk("section", "Divider A"),
+			mk("section-2", "Divider B"),
+			mk("content", "Content"),
+		},
+	}); err != nil {
+		t.Fatalf("save template: %v", err)
+	}
+
+	res, err := getTemplateVariantPreviews(ctx, TemplateVariantPreviewsArgs{Template: "gco", Kind: "title"})
+	if err != nil {
+		t.Fatalf("getTemplateVariantPreviews: %v", err)
+	}
+	if len(res.Variants) != 3 {
+		t.Fatalf("expected 3 title-family variants, got %d: %#v", len(res.Variants), res.Variants)
+	}
+
+	// ask_user auto-generation must therefore surface all three as options.
+	ask, err := askUser(ctx, AskUserArgs{Kind: "select", Prompt: "Which cover?", SlidesTemplate: "gco", SlidesKind: "title"})
+	if err != nil {
+		t.Fatalf("askUser: %v", err)
+	}
+	if len(ask.Options) != 3 {
+		t.Fatalf("expected 3 title options, got %d: %#v", len(ask.Options), ask.Options)
+	}
+}
+
+// TestAskUserSlidesTemplateUniqueOptionIDs guards the "only one option shown"
+// regression: when title variants have EMPTY labels (common for imported
+// templates), every option must still get a distinct, non-empty id and label.
+// Duplicate ids would collapse into a single rendered tile on the frontend
+// (which keys tiles by id).
+func TestAskUserSlidesTemplateUniqueOptionIDs(t *testing.T) {
+	backend := newMultiDeckStore()
+	ctx := toolContext(t, backend)
+	svc := Service{Store: backend}
+
+	if err := svc.SaveTemplate(ctx, themes.Template{
+		Name:   "acme",
+		Tokens: map[string]string{"surface": "#0b1220"},
+		Archetypes: []themes.Archetype{
+			{Kind: "title", Markup: `<ast-slide id="a"><ast-text id="h" x="0" y="0" w="1920" h="200" size="72">{{TITLE}}</ast-text></ast-slide>`},
+			{Kind: "title", Markup: `<ast-slide id="b"><ast-text id="h" x="0" y="0" w="1920" h="200" size="72">{{TITLE}}</ast-text></ast-slide>`},
+			{Kind: "title", Markup: `<ast-slide id="c"><ast-text id="h" x="0" y="0" w="1920" h="200" size="72">{{TITLE}}</ast-text></ast-slide>`},
+		},
+	}); err != nil {
+		t.Fatalf("save template: %v", err)
+	}
+
+	res, err := askUser(ctx, AskUserArgs{
+		Kind:           "select",
+		Prompt:         "Which cover?",
+		SlidesTemplate: "acme",
+		SlidesKind:     "title",
+	})
+	if err != nil {
+		t.Fatalf("askUser: %v", err)
+	}
+	if len(res.Options) != 3 {
+		t.Fatalf("expected 3 title options, got %d: %#v", len(res.Options), res.Options)
+	}
+	seen := make(map[string]bool, len(res.Options))
+	for _, o := range res.Options {
+		if strings.TrimSpace(o.ID) == "" {
+			t.Fatalf("option has empty id: %#v", o)
+		}
+		if strings.TrimSpace(o.Label) == "" {
+			t.Fatalf("option has empty label: %#v", o)
+		}
+		if seen[o.ID] {
+			t.Fatalf("duplicate option id %q would collapse tiles: %#v", o.ID, res.Options)
+		}
+		seen[o.ID] = true
 	}
 }

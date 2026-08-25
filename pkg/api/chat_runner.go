@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -886,6 +887,12 @@ runLoop:
 						// (same hard-stop pattern as network_denial_hint).
 						break runLoop
 					}
+					if cr.maybeEmitChatQuestion(sessionService, part.FunctionResponse.Name, resp) {
+						// Question card is up; end the turn and wait for the user's
+						// answer, which arrives as an ordinary user message. Same
+						// hard-stop pattern as the blueprint approval card.
+						break runLoop
+					}
 					cr.maybeEmitTutorialSceneSlideshow(sessionService, part.FunctionResponse.Name, resp)
 
 					// Emit memory_saved SSE event when memory_save tool succeeds
@@ -1207,6 +1214,96 @@ func (cr *ChatRunner) maybeEmitTutorialBlueprint(chatAgent *agent.ChatAgent, ses
 	cr.emitEvent("tutorial_blueprint_preview", payload)
 	persistTutorialBlueprintPreview(cr.ctx, sessionService, cr.UserID, cr.SessionID, payload)
 	return true
+}
+
+// maybeEmitChatQuestion turns a successful ask_user tool result into an inline
+// [chat_question] card: it emits a live SSE `chat_question` event AND persists a
+// prefix-marked model message so the card reconstructs on reload (mirroring
+// maybeEmitTutorialBlueprint). ask_user is GENERIC (yes/no or single-select with
+// optional per-option thumbnails); the Slides variant picker is its first
+// consumer. Returns true when a card was emitted so the caller ends the agent
+// turn — the user answers by clicking, which arrives as an ordinary user message.
+func (cr *ChatRunner) maybeEmitChatQuestion(sessionService session.Service, toolName string, resp map[string]any) bool {
+	if toolName != "ask_user" || resp == nil {
+		return false
+	}
+	if status, _ := resp["status"].(string); status != "ok" {
+		return false
+	}
+	kind, _ := resp["kind"].(string)
+	prompt, _ := resp["prompt"].(string)
+	if prompt == "" || (kind != "yesno" && kind != "select") {
+		return false
+	}
+	questionID, _ := resp["questionId"].(string)
+
+	options := make([]chatQuestionOptionPayload, 0)
+	if rawOpts, ok := resp["options"].([]any); ok {
+		for _, item := range rawOpts {
+			m, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			opt := chatQuestionOptionPayload{
+				ID:          strVal(m["id"]),
+				Label:       strVal(m["label"]),
+				Description: strVal(m["description"]),
+			}
+			if thumbRaw, ok := m["thumbnail"].(map[string]any); ok {
+				thumb := &chatQuestionThumbnailPayload{
+					Kind:     strVal(thumbRaw["kind"]),
+					Markup:   strVal(thumbRaw["markup"]),
+					AssetRef: strVal(thumbRaw["assetRef"]),
+					Theme:    strMap(thumbRaw["theme"]),
+					Template: strVal(thumbRaw["template"]),
+				}
+				opt.Thumbnail = thumb
+			}
+			options = append(options, opt)
+		}
+	}
+	if kind == "select" && len(options) == 0 {
+		return false
+	}
+
+	payload := chatQuestionPayload{
+		QuestionID: questionID,
+		Kind:       kind,
+		Prompt:     prompt,
+		Options:    options,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		slog.Error("failed to marshal chat question SSE payload", "error", err)
+		return false
+	}
+	var eventData map[string]any
+	if err := json.Unmarshal(data, &eventData); err != nil {
+		slog.Error("failed to build chat question SSE payload", "error", err)
+		return false
+	}
+	cr.emitEvent("chat_question", eventData)
+	persistChatQuestion(cr.ctx, sessionService, cr.UserID, cr.SessionID, payload)
+	return true
+}
+
+// strMap coerces a JSON-decoded value into a map[string]string, dropping any
+// non-string values. Returns nil for a nil/empty/mismatched input.
+func strMap(v any) map[string]string {
+	m, ok := v.(map[string]any)
+	if !ok || len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, val := range m {
+		if s, ok := val.(string); ok {
+			out[k] = s
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // maybeEmitTutorialSceneSlideshow emits the post-run scene navigator when

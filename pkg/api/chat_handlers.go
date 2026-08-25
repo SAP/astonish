@@ -174,6 +174,36 @@ type StudioMessage struct {
 
 	// docs_update fields — persisted slide-card metadata.
 	DocsUpdate *DocsUpdatePayload `json:"docsUpdate,omitempty"`
+
+	// chat_question fields — populated for a generic inline questionnaire card
+	// (yes/no or single-select, with optional per-option thumbnails). The card is
+	// answered once and then collapses; the answer re-enters the agent loop as an
+	// ordinary user message (no dedicated endpoint).
+	QuestionID   string               `json:"questionId,omitempty"`
+	QuestionKind string               `json:"questionKind,omitempty"` // "yesno" | "select"
+	Prompt       string               `json:"prompt,omitempty"`
+	Options      []ChatQuestionOption `json:"options,omitempty"`
+}
+
+// ChatQuestionOption is one selectable answer in a chat_question card. For a
+// yes/no question Options is empty (the card renders fixed Yes/No buttons).
+type ChatQuestionOption struct {
+	ID          string                 `json:"id"`
+	Label       string                 `json:"label"`
+	Description string                 `json:"description,omitempty"`
+	Thumbnail   *ChatQuestionThumbnail `json:"thumbnail,omitempty"`
+}
+
+// ChatQuestionThumbnail describes an optional visual preview for a select option.
+// For slides it carries the archetype ast-slide MARKUP (rendered live in a scaled
+// sandboxed iframe by the frontend); for a plain image it carries an assetRef the
+// existing asset plumbing resolves at render time. Never carries data: bytes.
+type ChatQuestionThumbnail struct {
+	Kind     string            `json:"kind"` // "slides-archetype" | "image"
+	Markup   string            `json:"markup,omitempty"`
+	AssetRef string            `json:"assetRef,omitempty"`
+	Theme    map[string]string `json:"theme,omitempty"`
+	Template string            `json:"template,omitempty"` // template name; frontend resolves asset-refs from it at render time (never data: bytes)
 }
 
 type DocsUpdatePayload struct {

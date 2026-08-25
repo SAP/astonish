@@ -1220,6 +1220,15 @@ func mapSSEToEvents(sev *client.SSEEvent, debug bool) []events.Event {
 			return nil
 		}
 		return []events.Event{events.NewSystem("[debug] " + sev.Data)}
+	case "chat_question":
+		// Interactive question card. The terminal has no thumbnails, so degrade to
+		// a numbered text prompt (parity with Studio's YesNoCard/SingleSelectCard).
+		// The user answers by typing the number or label as their next message,
+		// which flows through the existing input → SSE user-message path.
+		var payload chatQuestionPayload
+		if json.Unmarshal(data, &payload) == nil && payload.Prompt != "" {
+			return []events.Event{events.NewText(renderChatQuestion(payload))}
+		}
 	case "app_preview", "app_done", "app_saved", "browser_handoff",
 		"distill_preview", "distill_saved", "fleet_progress", "fleet_redirect",
 		"fleet_plan_redirect", "drill_redirect", "drill_add_redirect",
@@ -1236,6 +1245,49 @@ func mapSSEToEvents(sev *client.SSEEvent, debug bool) []events.Event {
 
 func containsToolBoxFrame(s string) bool {
 	return len(s) > 0 && (containsRune(s, '╭') || containsRune(s, '╰') || containsRune(s, '│'))
+}
+
+// chatQuestionOptionPayload mirrors the persisted/SSE option shape emitted by
+// pkg/api (ChatQuestionOption). The terminal ignores the thumbnail entirely.
+type chatQuestionOptionPayload struct {
+	ID          string `json:"id"`
+	Label       string `json:"label"`
+	Description string `json:"description,omitempty"`
+}
+
+// chatQuestionPayload mirrors the persisted/SSE chat_question payload shape from
+// pkg/api. Thumbnails are intentionally omitted — the TUI degrades to text.
+type chatQuestionPayload struct {
+	QuestionID string                      `json:"questionId"`
+	Kind       string                      `json:"kind"` // "yesno" | "select"
+	Prompt     string                      `json:"prompt"`
+	Options    []chatQuestionOptionPayload `json:"options,omitempty"`
+}
+
+// renderChatQuestion degrades an interactive chat_question card to a readable
+// numbered text prompt (no thumbnails). For kind="yesno" it lists "1. Yes" /
+// "2. No"; for kind="select" it numbers the option labels (with any description
+// appended). A hint line tells the user how to answer by typing.
+func renderChatQuestion(p chatQuestionPayload) string {
+	var b strings.Builder
+	b.WriteString(p.Prompt)
+	switch p.Kind {
+	case "yesno":
+		b.WriteString("\n1. Yes\n2. No")
+	case "select":
+		for i, o := range p.Options {
+			label := o.Label
+			if label == "" {
+				label = o.ID
+			}
+			b.WriteString(fmt.Sprintf("\n%d. %s", i+1, label))
+			if o.Description != "" {
+				b.WriteString(" — " + o.Description)
+			}
+		}
+	}
+	b.WriteString("\n\nReply with the number or the option text.")
+	return b.String()
 }
 
 func containsRune(s string, r rune) bool {

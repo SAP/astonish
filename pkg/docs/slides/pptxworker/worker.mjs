@@ -25,9 +25,23 @@ try {
   pptx.title = scene.title || ''
   pptx.company = 'Astonish'
   pptx.lang = 'en-US'
+  // fontFace values flow into <a:latin typeface="..."> verbatim (pptxgenjs does
+  // not escape the attribute). CSS font-family stacks — especially those pulled
+  // from imported templates, e.g. '"72 Brand", Aptos, Arial, sans-serif' — carry
+  // embedded quotes and comma-separated fallbacks that produce malformed OOXML
+  // (typeface=""72 Brand", ...") and blank/recovered slides. Reduce any CSS
+  // font-family stack to a single, quote-free family name PowerPoint accepts.
+  const cssFontToFace = value => {
+    if (value == null) return value
+    const first = String(value).split(',')[0].trim()
+    // Strip matching surrounding single or double quotes, then any stray quotes.
+    const unquoted = first.replace(/^['"]|['"]$/g, '').replace(/["']/g, '').trim()
+    return unquoted || undefined
+  }
+
   pptx.theme = {
-    headFontFace: scene.theme?.displayFont || 'Aptos Display',
-    bodyFontFace: scene.theme?.bodyFont || 'Aptos',
+    headFontFace: cssFontToFace(scene.theme?.displayFont) || 'Aptos Display',
+    bodyFontFace: cssFontToFace(scene.theme?.bodyFont) || 'Aptos',
     lang: 'en-US',
   }
 
@@ -57,10 +71,12 @@ try {
   const displayFont = () => scene.theme?.displayFont || scene.theme?.display || 'Aptos Display'
   const bodyFont = () => scene.theme?.bodyFont || scene.theme?.['body-font'] || 'Aptos'
   const resolveFont = (raw, token) => {
-    if (raw) return raw
-    if (token === 'display') return displayFont()
-    if (token && token !== 'body-font') return scene.theme?.[token] || bodyFont()
-    return bodyFont()
+    let family
+    if (raw) family = raw
+    else if (token === 'display') family = displayFont()
+    else if (token && token !== 'body-font') family = scene.theme?.[token] || bodyFont()
+    else family = bodyFont()
+    return cssFontToFace(family)
   }
   // Font size is authored in CSS px on the 1920x1080 logical canvas, where
   // 160 canvas units == 1 inch (UnitsPerInch). points = px * 72 / 160.
@@ -116,7 +132,7 @@ try {
           options: {
             bold: run.bold, italic: run.italic, underline: run.underline ? { style: 'sng' } : undefined,
             color: run.color ? color(run.color) : undefined,
-            fontFace: run.font || undefined,
+            fontFace: cssFontToFace(run.font) || undefined,
             fontSize: run.size ? ptFromPx(run.size) : undefined,
           },
         })) : node.text || '', {
@@ -174,16 +190,35 @@ try {
         counts.native++
         break
       }
-      case 'image':
-        if (!node.props?.data) throw new Error(`image ${node.id} has no validated data`)
+      case 'image': {
+        // Resolve the image bytes. Decks author images as <ast-image asset-ref="…">
+        // whose bytes live in scene.assets (the deck/template asset map), mirroring
+        // the HTML exporter's resolveImageSrc. Accept a pre-resolved props.data
+        // (already a data: URL) as-is. Only data:image/* is allowed so a stray or
+        // external ref can never smuggle a non-image into the deck. A ref that
+        // cannot be resolved degrades to a skipped image with a warning rather than
+        // failing the whole export (imported templates may reference an asset that
+        // was dropped, e.g. an unsupported EMF vector).
+        const rawRef = node.props?.data || node.props?.['asset-ref'] || node.props?.assetRef
+        let imgData = null
+        if (typeof rawRef === 'string' && rawRef) {
+          const candidate = rawRef.startsWith('data:') ? rawRef : (scene.assets?.[rawRef] || '')
+          if (candidate.startsWith('data:image/')) imgData = candidate
+        }
+        if (!imgData) {
+          counts.unsupported++
+          warnings.push(`Image ${node.id || 'unknown'} skipped: no resolvable image data (asset-ref not in deck assets or not a data:image/*)`)
+          break
+        }
         slide.addImage({
-          ...box, data: node.props.data,
+          ...box, data: imgData,
           ...(node.flipH ? { flipH: true } : {}),
           ...(node.flipV ? { flipV: true } : {}),
           ...(node.rot ? { rotate: Number(node.rot) } : {}),
         })
         counts.native++
         break
+      }
       case 'table':
         slide.addTable(node.table?.rows || [], { ...box, border: { type: 'solid', color: 'CBD5E1', pt: 1 }, fontFace: 'Aptos', fontSize: 14 })
         counts.native++

@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"encoding/xml"
 	"io"
 	"path/filepath"
 	"regexp"
@@ -462,4 +463,182 @@ func TestPPTXImageHonorsFlip(t *testing.T) {
 	if !strings.Contains(slideXML, `flipH="1"`) {
 		t.Errorf(`flipped image must serialize flipH="1" in its xfrm: %s`, slideXML)
 	}
+}
+
+// TestPPTXImageResolvesAssetRef guards the imported-template export path. Deck
+// slides built from an imported .pptx template author images as
+// <ast-image asset-ref="sha256-…"> whose bytes live in the deck asset map
+// (SceneGraph.Assets), NOT inline on the node. The PPTX worker must resolve the
+// asset-ref against scene.assets into the picture's data (mirroring the HTML
+// exporter's resolveImageSrc) instead of throwing "image … has no validated
+// data" — the regression that broke PPTX export of every template-based deck.
+func TestPPTXImageResolvesAssetRef(t *testing.T) {
+	_, file, _, _ := runtime.Caller(0)
+	repo := filepath.Clean(filepath.Join(filepath.Dir(file), "../../.."))
+	exporter := PPTXExporter{Runner: pptxworker.Runner{
+		WorkingDir: filepath.Join(repo, "web"),
+		ScriptPath: filepath.Join(repo, "pkg/docs/slides/pptxworker/worker.mjs"),
+		Timeout:    30 * time.Second,
+	}}
+	const pngData = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+	const ref = "sha256-deadbeef"
+	scene := SceneGraph{
+		SchemaVersion: SchemaV2,
+		Title:         "Asset ref image",
+		// The bytes live in the deck asset map, keyed by the asset-ref.
+		Assets: map[string]string{ref: pngData},
+		Slides: []Slide{{
+			ID: "cover", Nodes: []Node{
+				{
+					ID: "logo", Type: "image",
+					Geometry: Geometry{X: 100, Y: 100, W: 400, H: 200},
+					// No inline data — only the asset-ref, as imported templates author it.
+					Props: map[string]any{"asset-ref": ref},
+				},
+			},
+		}},
+	}
+	result, err := exporter.Export(context.Background(), scene, false)
+	if err != nil {
+		t.Fatalf("export must resolve asset-ref, not fail: %v", err)
+	}
+	zr, err := zip.NewReader(bytes.NewReader(result.Bytes), int64(len(result.Bytes)))
+	if err != nil {
+		t.Fatalf("invalid pptx zip: %v", err)
+	}
+	var slideXML string
+	for _, f := range zr.File {
+		if f.Name == "ppt/slides/slide1.xml" {
+			r, openErr := f.Open()
+			if openErr != nil {
+				t.Fatal(openErr)
+			}
+			b, readErr := io.ReadAll(r)
+			_ = r.Close()
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			slideXML = string(b)
+		}
+	}
+	if !strings.Contains(slideXML, "<p:pic>") {
+		t.Fatalf("asset-ref image must serialize as a native picture: %s", slideXML)
+	}
+}
+
+// TestPPTXImageMissingAssetDegrades guards that an image whose asset-ref cannot
+// be resolved (e.g. an imported template that dropped an unsupported EMF vector)
+// degrades to a skipped image with a warning rather than failing the whole
+// export. Losing one decorative image must never make the deck un-exportable.
+func TestPPTXImageMissingAssetDegrades(t *testing.T) {
+	_, file, _, _ := runtime.Caller(0)
+	repo := filepath.Clean(filepath.Join(filepath.Dir(file), "../../.."))
+	exporter := PPTXExporter{Runner: pptxworker.Runner{
+		WorkingDir: filepath.Join(repo, "web"),
+		ScriptPath: filepath.Join(repo, "pkg/docs/slides/pptxworker/worker.mjs"),
+		Timeout:    30 * time.Second,
+	}}
+	scene := SceneGraph{
+		SchemaVersion: SchemaV2,
+		Title:         "Missing asset",
+		Slides: []Slide{{
+			ID: "cover", Nodes: []Node{
+				{ID: "title", Type: "text", Geometry: Geometry{X: 160, Y: 380, W: 1600, H: 160}, Text: "Still exports", Props: map[string]any{"size": "72"}},
+				{ID: "c-3", Type: "image", Geometry: Geometry{X: 100, Y: 100, W: 400, H: 200}, Props: map[string]any{"asset-ref": "sha256-missing"}},
+			},
+		}},
+	}
+	result, err := exporter.Export(context.Background(), scene, false)
+	if err != nil {
+		t.Fatalf("a missing image asset must not fail the whole export: %v", err)
+	}
+	if len(result.Bytes) == 0 {
+		t.Fatal("export produced no pptx bytes")
+	}
+	// The unresolved image is reported as a fallback diagnostic, not a hard error.
+	foundWarn := false
+	for _, d := range result.Diagnostics {
+		if strings.Contains(d.Message, "c-3") {
+			foundWarn = true
+		}
+	}
+	if !foundWarn {
+		t.Fatalf("expected a fallback warning naming the skipped image, got %#v", result.Diagnostics)
+	}
+}
+
+// TestPPTXFontStackProducesWellFormedXML guards the fix for imported templates
+// whose theme fonts are full CSS font-family stacks with embedded quotes, e.g.
+// `"72 Brand", Aptos, Arial, sans-serif`. pptxgenjs writes fontFace verbatim
+// into <a:latin typeface="...">, so an embedded quote produced malformed OOXML
+// (typeface=""72 Brand", ...") and PowerPoint recovered the file, blanking the
+// affected slides. The worker must reduce any CSS stack to a single, quote-free
+// family so every slide part is well-formed XML.
+func TestPPTXFontStackProducesWellFormedXML(t *testing.T) {
+	_, file, _, _ := runtime.Caller(0)
+	repo := filepath.Clean(filepath.Join(filepath.Dir(file), "../../.."))
+	exporter := PPTXExporter{Runner: pptxworker.Runner{
+		WorkingDir: filepath.Join(repo, "web"),
+		ScriptPath: filepath.Join(repo, "pkg/docs/slides/pptxworker/worker.mjs"),
+		Timeout:    30 * time.Second,
+	}}
+	scene := SceneGraph{
+		SchemaVersion: SchemaV2,
+		Title:         "Quoted font stack",
+		Theme: map[string]string{
+			"displayFont": `"72 Brand Medium", Aptos, Arial, sans-serif`,
+			"bodyFont":    `"72 Brand", Aptos, Arial, sans-serif`,
+		},
+		Slides: []Slide{{
+			ID: "cover", Nodes: []Node{
+				{ID: "title", Type: "text", Geometry: Geometry{X: 160, Y: 380, W: 1600, H: 160}, Text: "Cover title", Props: map[string]any{"size": "96", "font-token": "display"}},
+				{ID: "body", Type: "text", Geometry: Geometry{X: 160, Y: 560, W: 1600, H: 120}, Text: "Body text", Props: map[string]any{"size": "40", "font-token": "body-font"}},
+			},
+		}},
+	}
+	result, err := exporter.Export(context.Background(), scene, false)
+	if err != nil {
+		t.Fatalf("export failed: %v", err)
+	}
+	zr, err := zip.NewReader(bytes.NewReader(result.Bytes), int64(len(result.Bytes)))
+	if err != nil {
+		t.Fatalf("invalid pptx zip: %v", err)
+	}
+	for _, f := range zr.File {
+		if !strings.HasSuffix(f.Name, ".xml") {
+			continue
+		}
+		r, openErr := f.Open()
+		if openErr != nil {
+			t.Fatal(openErr)
+		}
+		b, readErr := io.ReadAll(r)
+		_ = r.Close()
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		xmlText := string(b)
+		// The real corruption is malformed OOXML: an embedded quote in the
+		// typeface attribute value breaks XML parsing (PowerPoint then recovers
+		// the file and blanks the slide). Parsing the part is the reliable gate.
+		// (Empty typeface="" for east-asian/complex-script fonts is valid and
+		// intentional PptxGenJS output, so we do not string-match on it.)
+		if err := xml.Unmarshal(b, new(struct {
+			XMLName xml.Name
+		})); err != nil {
+			t.Fatalf("%s is not well-formed XML: %v (near %s)", f.Name, err, firstTypeface(xmlText))
+		}
+	}
+}
+
+func firstTypeface(xmlText string) string {
+	idx := strings.Index(xmlText, `typeface="`)
+	if idx < 0 {
+		return ""
+	}
+	snippet := xmlText[idx:]
+	if len(snippet) > 80 {
+		snippet = snippet[:80]
+	}
+	return snippet
 }

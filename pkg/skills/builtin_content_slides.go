@@ -36,8 +36,13 @@ The single most important rule: **start from a template.** A normal request must
    ` + "```" + `
    **Never call ` + "`create_deck`" + ` without a template for a normal presentation request.** Only skip the template if the user explicitly wants a blank canvas — and even then set readable ` + "`theme`" + ` tokens so text is legible.
 
-3. **Build slides from the archetypes — call ` + "`write_slide`" + ` once per slide.**
-   How you fill an archetype depends on its ` + "`tier`" + ` — this is the **TWO-TIER rule**:
+3. **Run the visual questionnaire BEFORE authoring any content slide — call ` + "`ask_user`" + `, one question at a time.**
+   This step is **not optional**. After the deck is created and you know the topic/content, ask the user a short, visual questionnaire so version zero already matches how they want their information shown. Two parts:
+   - **Static picks** (always, when the template has them): title/cover variant → agenda yes/no → divider/section variant. See "Asking the user with ` + "`ask_user`" + `".
+   - **Adaptive content questions** (this is the part that makes the deck feel bespoke): look at the actual content you're about to build and ask targeted questions about HOW to present it. **If the content shows one or more strong signals (numbers, a comparison, dates/phases, a process, notable length), you MUST ask at least one adaptive question — do not silently default to bullets.** Cap the adaptive questions at **5**, ask only when the answer changes what you build, and skip a signal that isn't strong. See "Adaptive content questions" for the signal→question map. **Do not proceed to ` + "`write_slide`" + ` for the body slides until the questionnaire is done.**
+
+4. **Build slides from the archetypes — call ` + "`write_slide`" + ` once per slide.**
+   Honor every questionnaire answer (e.g. build an ` + "`ast-chart`" + `, a comparison table, or a timeline instead of plain bullets when the user chose it). How you fill an archetype depends on its ` + "`tier`" + ` — this is the **TWO-TIER rule**:
    - **FIXED chrome slides** (` + "`tier`" + `=` + "`fixed`" + ` — the ` + "`title`" + `/` + "`section`" + `/` + "`agenda`" + `/` + "`closing`" + ` roles): copy the archetype markup **VERBATIM** into ` + "`write_slide`" + ` and change **ONLY the text inside the element ids listed in that archetype's ` + "`fillSlots`" + `** (the ` + "`{{TITLE}}`" + `/` + "`{{BODY}}`" + ` holes). Do **NOT** move, resize, recolor, add, or remove any shape/image/background. **Never "rebuild the slide from its elements" and never add your own accent shapes or backgrounds** — that is exactly what produces an off-brand white slide with a stray shape. Keep every pixel of the branded chrome; touch only the ` + "`fillSlots`" + ` text.
    - **FLEXIBLE content slides** (` + "`tier`" + `=` + "`flexible`" + `, or built-in templates whose archetypes carry no ` + "`tier`" + `): start from the archetype and **ADAPT the body region to the content type** — bullets, a small table, a simple chart, or an image+caption — while keeping the template background/tokens intact.
 
@@ -51,9 +56,9 @@ The single most important rule: **start from a template.** A normal request must
    ` + "`agenda`" + ` and ` + "`closing`" + ` are part of the stable brand chrome and are always available (real or synthesized in the template's own style) — reproduce them verbatim and fill only their ` + "`fillSlots`" + ` text, exactly like ` + "`title`" + ` and ` + "`section`" + `.
    ` + "`write_slide`" + ` takes ` + "`deck_slug`" + `, a zero-based ` + "`position`" + ` (writing an occupied position replaces it), ` + "`markup`" + ` (exactly one complete ` + "`<ast-slide>`" + ` root), and optional ` + "`notes`" + ` (speaker notes — use this field, do not embed ` + "`<ast-notes>`" + ` yourself unless you need to).
 
-4. **Inspect before revising — call ` + "`get_deck`" + `.** It returns the deck and its ordered slide markup so you can edit precisely.
+5. **Inspect before revising — call ` + "`get_deck`" + `.** It returns the deck and its ordered slide markup so you can edit precisely.
 
-5. **Validate before declaring done — call ` + "`validate_deck`" + `.** It returns structured diagnostics. **Fix every error before continuing** — do not leave a deck with validation errors.
+6. **Validate before declaring done — call ` + "`validate_deck`" + `.** It returns structured diagnostics. **Fix every error before continuing** — do not leave a deck with validation errors.
 
 You can also ` + "`list_decks`" + ` to see existing decks (template decks are hidden from this list).
 
@@ -73,6 +78,27 @@ Repeat the same ` + "`slidesTemplate`" + ` + ` + "`slidesKind`" + ` select patte
 
 **Terminal fallback:** in the terminal chat client there are no thumbnails — ` + "`ask_user`" + ` degrades to the prompt followed by a numbered list of the option labels, and the user answers by typing the number or label. This is the same information as the old plain-text list, so behavior is consistent everywhere; you do not need to do anything special for the terminal.
 
+### Adaptive content questions (make the deck ready from v0)
+
+The picks above (title, agenda yes/no, divider) are the **static** questions — always ask those when they apply. Beyond them, ask a SMALL number of **adaptive** questions that are driven by the actual content you're about to build, so the first version already reflects how the user wants their information shown — not a generic wall of bullets. Use the same ` + "`ask_user`" + ` tool (` + "`select`" + ` or ` + "`yesno`" + `), one question at a time.
+
+**Hard limits — respect these to avoid question fatigue:**
+- **At most 5 adaptive questions total**, on top of the static picks. Fewer is better.
+- Ask an adaptive question **only if the answer would materially change what you build** (a different visual form, an extra slide, a different structure). If a sensible default is obvious, **just use it and don't ask.**
+- Never ask about something the user already told you, and never ask two questions that resolve to the same decision.
+- Prefer questions the content *invites*. If the topic has no numbers, don't ask about charts; if there are no phases/dates, don't ask about a timeline.
+
+**Decide adaptively from the material you've gathered.** Inspect the content and, for each strong signal, consider ONE targeted question. Examples (illustrative, not a fixed script):
+- The content has **metrics / quantities / trends** → "Show these figures as a **chart** or keep them as a **table/bullets**?" (` + "`select`" + `: Bar chart / Line chart / Table / Bullets).
+- The content **compares two or more things** → "Present the comparison as a **side-by-side layout**, a **comparison table**, or **pros/cons columns**?"
+- The content has **events, phases, milestones, or dates** → "Show the sequence as a **visual timeline** or a **plain list**?"
+- The content is a **process or steps** → "Render as a **numbered step diagram** or **bullets**?"
+- The content is **long** → "Prefer **more slides with less on each** (recommended) or a **denser** deck?"
+- A **section clearly warrants emphasis** → "Add a **highlight / key-takeaway** slide for <topic>?" (` + "`yesno`" + `).
+- The deck could benefit from a **closing** → "End with a **thank-you / next-steps** slide?" (` + "`yesno`" + `) — only if the template has a ` + "`closing`" + ` role and you haven't already decided.
+
+Sequence: do the static picks first (title → agenda → divider), then the adaptive questions (most impactful first), then build. If NONE of the adaptive signals are strong, ask nothing extra and proceed with good defaults — a fast, clean deck beats an interrogation. When the user answers, honor the choice in the slides you author (e.g. build an ` + "`ast-chart`" + ` timeline instead of a bullet list).
+
 ---
 
 ## Imported corporate ` + "`.pptx`" + ` templates
@@ -81,7 +107,7 @@ When the user imported a real corporate ` + "`.pptx`" + ` (Studio → Slides →
 
 **Every imported template is GUARANTEED to provide the stable brand-chrome set** — ` + "`title`" + ` (cover), ` + "`section`" + ` (divider), ` + "`agenda`" + `, and ` + "`closing`" + ` (thank-you/end). These are the ` + "`tier`" + `=` + "`fixed`" + ` roles. If the source ` + "`.pptx`" + ` lacks a real branded layout for one of them, a chrome slide is **synthesized in the template's own style** (same background/logo/accent tokens) — **never a blank white slide**. All other layouts (e.g. "Title and Content", "Full Bleed Image") are ` + "`tier`" + `=` + "`flexible`" + ` content archetypes. Expect **multiple variants per role** — e.g. several ` + "`title`" + ` covers ("Blue cover, anvil and image", "Pink cover with anvil", "White cover with green anvil"), several ` + "`section`" + ` dividers ("Divider Page", "Divider Page with Image") — the human label is always the real PowerPoint layout name. The lossless source model is also persisted for future in-browser editing.
 
-Use it exactly like a built-in: call ` + "`create_deck`" + ` with its ` + "`template`" + ` name, then fill the archetypes with ` + "`write_slide`" + ` following the TWO-TIER rule (Workflow step 3). **For a chrome variant, reproduce it VERBATIM and fill only its ` + "`fillSlots`" + ` text** — do not hand-build, rebuild from elements, or add your own backgrounds/accents. For a flexible content archetype, adapt the body to the content type while keeping the template chrome. The one extra step: because these templates carry multiple variants per role, **ask the user which title/section/agenda/closing/content variant to use with the visual ` + "`ask_user`" + ` picker** (one question at a time — see "Asking the user with ` + "`ask_user`" + `") when more than one exists for a role they need — unless they already told you. A small number of genuinely inexpressible constructs (e.g. EMF vector icons) may be approximated or omitted; the import records a warning for each so nothing degrades silently.
+Use it exactly like a built-in: call ` + "`create_deck`" + ` with its ` + "`template`" + ` name, then fill the archetypes with ` + "`write_slide`" + ` following the TWO-TIER rule (Workflow step 4). **For a chrome variant, reproduce it VERBATIM and fill only its ` + "`fillSlots`" + ` text** — do not hand-build, rebuild from elements, or add your own backgrounds/accents. For a flexible content archetype, adapt the body to the content type while keeping the template chrome. The one extra step: because these templates carry multiple variants per role, **ask the user which title/section/agenda/closing/content variant to use with the visual ` + "`ask_user`" + ` picker** (one question at a time — see "Asking the user with ` + "`ask_user`" + `") when more than one exists for a role they need — unless they already told you. A small number of genuinely inexpressible constructs (e.g. EMF vector icons) may be approximated or omitted; the import records a warning for each so nothing degrades silently.
 
 ---
 
@@ -96,6 +122,8 @@ Before authoring, settle these — ask the user only what you genuinely can't in
 - **Existing material** — if the user has a corporate ` + "`.pptx`" + `, they can import it as a template (Studio → Slides → Import ` + "`.pptx`" + `) so the deck matches their brand; then it appears in ` + "`list_templates`" + `.
 
 Good defaults when unspecified — but note the template is NOT one of them: a title slide + one section + 4–6 content slides, concise bullets, speaker notes with the talking points. **The template is never defaulted silently** — if the user didn't name one or delegate the choice, ask them (Workflow step 1).
+
+After you know the template and rough content, run the visual questionnaire: the static picks (title / agenda / divider) **and** up to 5 **adaptive** content questions chosen from the material — charts vs. tables, timelines, comparisons, emphasis slides, etc. See "Adaptive content questions" above. Ask only what materially changes the deck so version zero already matches how the user wants their information presented.
 
 ---
 
@@ -199,6 +227,7 @@ Speaker notes. Prefer passing ` + "`notes`" + ` to ` + "`write_slide`" + ` inste
 
 - [ ] Called ` + "`list_templates`" + ` and either used the user's named template, or (if they delegated) picked one and said so, or (if unspecified) asked the user to choose before creating the deck.
 - [ ] If the chosen template offers multiple variants for a role you need, asked the user which variant with the visual ` + "`ask_user`" + ` picker (thumbnails from ` + "`get_template_variant_previews`" + `), one question at a time, plus a ` + "`kind=\"yesno\"`" + ` ask for the agenda slide.
+- [ ] Asked up to 5 **adaptive** content questions where they materially change the deck (chart vs. table, timeline vs. list, comparison layout, emphasis/closing slide) — and skipped them entirely when no strong signal was present (no fatigue).
 - [ ] For on-brand slides, started from a variant chosen by its label (the real PowerPoint layout name) rather than hand-building.
 - [ ] For chrome slides (` + "`title`" + `/` + "`section`" + `/` + "`agenda`" + `/` + "`closing`" + `), reproduced the branded/synthesized variant verbatim and edited only its ` + "`fillSlots`" + ` text (did not rebuild it or add backgrounds/accents).
 - [ ] Called ` + "`create_deck`" + ` **with** the ` + "`template`" + ` argument.

@@ -23,7 +23,7 @@ The single most important rule: **start from a template.** A normal request must
    **The template choice belongs to the user — do NOT silently pick one yourself.** Decide which of these three cases applies:
    - **The user named a template** (e.g. "use midnight", "our corporate template", "a dark theme") → use it and proceed without asking.
    - **The user explicitly delegated the choice** (e.g. "you pick", "choose whatever fits", "your call", "surprise me") → pick the best fit, state which one and why in one line, and proceed.
-   - **The user said nothing about the template** (the common case — e.g. "make a deck about X") → **STOP and ask.** Present the ` + "`list_templates`" + ` results as a short numbered list (label + one-line description + scope for each) and ask the user which they'd like. Do **not** call ` + "`create_deck`" + ` until they answer. A brand/tone hint you could infer is NOT permission to choose — only an explicit named template or explicit delegation is.
+   - **The user said nothing about the template** (the common case — e.g. "make a deck about X") → **STOP and ask — visually.** Call ` + "`ask_user`" + ` with ` + "`kind: \"select\"`" + ` and ` + "`slidesTemplatePicker: true`" + ` (omit ` + "`options`" + `). ask_user lists every available template as a **card with a live thumbnail of that template's cover**, plus its label and one-line description, so the user picks by seeing the design. **Do NOT enumerate the templates as a numbered/bulleted text list** — that bypasses the visual picker; always use the ask_user tool. Do **not** call ` + "`create_deck`" + ` until they answer (their next message is the chosen template). A brand/tone hint you could infer is NOT permission to choose — only an explicit named template or explicit delegation is.
 
    When in doubt about which case applies, treat it as "said nothing" and ask.
 
@@ -66,7 +66,11 @@ You can also ` + "`list_decks`" + ` to see existing decks (template decks are hi
 
 ## Asking the user with ` + "`ask_user`" + ` (visual variant picker)
 
-When a role has multiple variants, or you need a yes/no decision, ask the user with the generic ` + "`ask_user`" + ` tool so Studio renders an **inline, visual, one-question-at-a-time card** instead of a plain-text list. **This is a hard rule: NEVER enumerate the variants as a numbered/bulleted list in your chat reply and ask the user to type a choice — that bypasses the visual picker; always call the ask_user tool.** Ask **ONE question at a time, in this sequence**, waiting for each answer before the next:
+When a role has multiple variants, or you need a yes/no decision, ask the user with the generic ` + "`ask_user`" + ` tool so Studio renders an **inline, visual, one-question-at-a-time card** instead of a plain-text list. **This is a hard rule: NEVER enumerate the choices as a numbered/bulleted list in your chat reply and ask the user to type a choice — that bypasses the visual picker; always call the ask_user tool.**
+
+**Template choice (the very first question, when the user didn't name one):** call ` + "`ask_user`" + ` with ` + "`kind: \"select\"`" + ` and ` + "`slidesTemplatePicker: true`" + ` (omit ` + "`options`" + `). ask_user auto-generates one card per available template with a **live thumbnail of that template's cover** plus its label/description. The user's reply is the template name — pass it to ` + "`create_deck`" + `. Then continue with the per-role picks below.
+
+Ask **ONE question at a time, in this sequence**, waiting for each answer before the next:
 
 1. **Title / cover** — call ` + "`ask_user`" + ` with ` + "`kind: \"select\"`" + `, ` + "`slidesTemplate: <the template name>`" + `, and ` + "`slidesKind: \"title\"`" + `. That's it — ` + "`ask_user`" + ` fetches the variant previews itself and shows the user a **live mini-render (thumbnail) of each cover**, auto-generating one option per variant. (You may pass explicit ` + "`options`" + ` to control labels/order, but you do **not** need to and must **not** hand-copy markup or thumbnails.)
 2. **Agenda** — call ` + "`ask_user`" + ` with ` + "`kind: \"yesno\"`" + `, ` + "`prompt: \"Would you like an agenda slide?\"`" + `.

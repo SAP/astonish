@@ -632,3 +632,91 @@ func TestAskUserSlidesTemplateUniqueOptionIDs(t *testing.T) {
 		seen[o.ID] = true
 	}
 }
+
+// TestAskUserSlidesTemplatePicker verifies the FIRST question — "which template
+// should I use?" — renders as a visual card: slidesTemplatePicker=true (with no
+// options) auto-generates one option per available template (built-in + scoped),
+// each carrying a live cover thumbnail (the template's title archetype markup)
+// tagged with the template name so the frontend resolves asset-refs at render
+// time. It must never embed data: bytes.
+func TestAskUserSlidesTemplatePicker(t *testing.T) {
+	backend := newMultiDeckStore()
+	ctx := toolContext(t, backend)
+	svc := Service{Store: backend}
+
+	if err := svc.SaveTemplate(ctx, themes.Template{
+		Name:        "acme",
+		Label:       "Acme Brand",
+		Description: "The corporate template",
+		Tokens:      map[string]string{"surface": "#0b1220", "ink": "#e2e8f0"},
+		Assets:      map[string]string{},
+		Archetypes: []themes.Archetype{
+			// A non-title archetype first, to prove the picker prefers the title
+			// (cover) role rather than blindly taking the first archetype.
+			{Kind: "content", Title: "Body", Tier: "flexible", Markup: `<ast-slide id="body"><ast-text id="b" x="160" y="320" w="1600" h="600" size="36">{{BODY}}</ast-text></ast-slide>`},
+			{Kind: "title", Title: "Blue cover", Tier: "fixed", Markup: `<ast-slide id="cover"><ast-text id="h" x="160" y="380" w="1600" h="200" color="#e2e8f0" size="72">{{TITLE}}</ast-text></ast-slide>`},
+		},
+	}); err != nil {
+		t.Fatalf("save template: %v", err)
+	}
+
+	res, err := askUser(ctx, AskUserArgs{
+		Kind:                 "select",
+		Prompt:               "Which template would you like?",
+		SlidesTemplatePicker: true,
+	})
+	if err != nil {
+		t.Fatalf("askUser: %v", err)
+	}
+
+	// The scoped "acme" template must appear as one option, id == template name.
+	var acme *AskUserOptionPayload
+	seen := make(map[string]bool, len(res.Options))
+	for i := range res.Options {
+		o := &res.Options[i]
+		if seen[o.ID] {
+			t.Fatalf("duplicate option id %q would collapse tiles: %#v", o.ID, res.Options)
+		}
+		seen[o.ID] = true
+		if strings.TrimSpace(o.ID) == "" || strings.TrimSpace(o.Label) == "" {
+			t.Fatalf("template option missing id/label: %#v", o)
+		}
+		if o.ID == "acme" {
+			acme = o
+		}
+	}
+	// Built-in templates are also enumerated, so there must be more than one.
+	if len(res.Options) < 2 {
+		t.Fatalf("expected built-ins + acme, got %d options: %#v", len(res.Options), res.Options)
+	}
+	if acme == nil {
+		t.Fatalf("scoped template 'acme' not offered: %#v", res.Options)
+	}
+	if acme.Label != "Acme Brand" {
+		t.Fatalf("acme label = %q, want catalog label 'Acme Brand'", acme.Label)
+	}
+	if acme.Description != "The corporate template" {
+		t.Fatalf("acme description = %q, want catalog description", acme.Description)
+	}
+	if acme.Thumbnail == nil {
+		t.Fatalf("acme option missing cover thumbnail")
+	}
+	if acme.Thumbnail.Kind != "slides-archetype" {
+		t.Fatalf("acme thumbnail kind = %q, want slides-archetype", acme.Thumbnail.Kind)
+	}
+	// The cover thumbnail must be the TITLE archetype, not the first (content).
+	if !strings.Contains(acme.Thumbnail.Markup, `id="cover"`) {
+		t.Fatalf("acme thumbnail should render the title cover, got: %s", acme.Thumbnail.Markup)
+	}
+	if acme.Thumbnail.Template != "acme" {
+		t.Fatalf("acme thumbnail missing template name for asset resolution: %#v", acme.Thumbnail)
+	}
+	if acme.Thumbnail.Theme["surface"] != "#0b1220" {
+		t.Fatalf("acme thumbnail missing shared theme tokens: %#v", acme.Thumbnail.Theme)
+	}
+	// Guard the no-data:-bytes invariant: the picker never embeds a resolved
+	// asset map (that would bloat model history / persisted message by MBs).
+	if acme.Thumbnail.AssetRef != "" {
+		t.Fatalf("template picker must not embed asset bytes/refs; got %q", acme.Thumbnail.AssetRef)
+	}
+}

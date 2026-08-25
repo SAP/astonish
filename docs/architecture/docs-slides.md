@@ -1214,6 +1214,18 @@ consumed on the general chat path). Arguments:
   attached per option for a **visual** picker. For slides, `kind` is
   `"slides-archetype"` and `markup` is the archetype's ASD `ast-slide` fragment
   (from `get_template_variant_previews`).
+- `slidesTemplate` (optional slides convenience, `select`): a template name. ask_user
+  then resolves that template's per-role variants itself, auto-generates one option
+  per variant, and attaches a live `slides-archetype` thumbnail to each — so the model
+  never hand-copies markup. `slidesKind` filters to one role (title/section/…).
+- `slidesTemplatePicker` (optional slides convenience, `select`): set `true` (omit
+  `options`) for the **first** question, "which template should I use?". ask_user
+  enumerates every available template (built-in + scoped/imported) via
+  `templatePickerOptions`, generates one option per template (`id` = template name,
+  `label`/`description` from the `list_templates` catalog), and attaches a live cover
+  thumbnail per template — the template's first `title` archetype (else its first
+  archetype), tagged with the template name so the frontend resolves asset-refs at
+  render time. Never embeds `data:` bytes.
 
 The tool does **not** block the agent loop. On invocation the chat runner
 (`maybeEmitChatQuestion` in `pkg/api/chat_runner.go`) turns the result into an inline
@@ -1261,7 +1273,10 @@ The card is emitted with the same prefix-marker pattern as `distill_preview` /
 ### Slides workflow integration
 
 For a template with multiple variants, the agent asks **one question at a time in
-sequence**: (1) `ask_user kind="select"` with `slides-archetype` thumbnails for the
+sequence**: (0) when the user did not name a template, `ask_user kind="select"` with
+`slidesTemplatePicker=true` — a card with one live cover thumbnail per available
+template, so the user chooses the design visually; the reply is the template name for
+`create_deck`. Then (1) `ask_user kind="select"` with `slides-archetype` thumbnails for the
 title/cover variant, (2) `ask_user kind="yesno"` for "Would you like an agenda
 slide?", (3) `ask_user kind="select"` with thumbnails for the divider/section
 variant. The questionnaire remains **agent-driven** (the model chooses to ask); it is

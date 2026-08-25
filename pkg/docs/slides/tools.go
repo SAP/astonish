@@ -458,6 +458,78 @@ func getTemplateVariantPreviews(ctx context.Context, args TemplateVariantPreview
 	}, nil
 }
 
+// templatePick pairs a generated select option with its resolved cover
+// thumbnail for the template-choice picker.
+type templatePick struct {
+	option    AskUserOption
+	thumbnail *AskUserThumbnail
+}
+
+// templatePickerOptions enumerates every available template (built-in +
+// scoped/imported) and returns one option per template — id=template name,
+// label/description from the catalog — each carrying a live thumbnail of that
+// template's cover slide (its first `title` archetype, else its first
+// archetype). The thumbnail is a slides-archetype whose asset-refs resolve on
+// the client from the template's own asset map (never data: bytes here). Order
+// mirrors list_templates (built-ins first, then scoped) for determinism.
+func templatePickerOptions(ctx context.Context) ([]templatePick, error) {
+	svc, err := personalService(ctx)
+	if err != nil {
+		return nil, err
+	}
+	picks := make([]templatePick, 0)
+	seen := make(map[string]bool)
+	add := func(t themes.Template) {
+		if seen[t.Name] {
+			return
+		}
+		seen[t.Name] = true
+		label := strings.TrimSpace(t.Label)
+		if label == "" {
+			label = t.Name
+		}
+		pick := templatePick{
+			option: AskUserOption{ID: t.Name, Label: label, Description: strings.TrimSpace(t.Description)},
+		}
+		if cover := coverArchetype(t); cover != nil && strings.TrimSpace(cover.Markup) != "" {
+			pick.thumbnail = &AskUserThumbnail{
+				OptionID: t.Name,
+				Kind:     "slides-archetype",
+				Markup:   cover.Markup,
+				Theme:    t.Tokens,
+				Template: t.Name,
+			}
+		}
+		picks = append(picks, pick)
+	}
+	for _, t := range themes.ListTemplates() {
+		add(t)
+	}
+	scoped, err := svc.ListTemplates(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list templates: %w", err)
+	}
+	for _, t := range scoped {
+		add(t)
+	}
+	return picks, nil
+}
+
+// coverArchetype returns the archetype that best represents a template's look:
+// the first `title` (cover) role — matching the base kind so suffixed variants
+// like title-2 also qualify — falling back to the template's first archetype.
+func coverArchetype(t themes.Template) *themes.Archetype {
+	for i := range t.Archetypes {
+		if stripVariantSuffix(t.Archetypes[i].Kind) == "title" {
+			return &t.Archetypes[i]
+		}
+	}
+	if len(t.Archetypes) > 0 {
+		return &t.Archetypes[0]
+	}
+	return nil
+}
+
 // --- ask_user: generic interactive chat question ---
 //
 // ask_user is a GENERIC, domain-agnostic tool: it lets the assistant ask the
@@ -507,6 +579,13 @@ type AskUserArgs struct {
 	// the reliable way to get a VISUAL slide picker — do not hand-copy markup.
 	SlidesTemplate string `json:"slidesTemplate,omitempty" jsonschema:"For a slide-variant picker: the template name (from list_templates). ask_user auto-attaches a live thumbnail per option and, if options are omitted, generates one option per variant."`
 	SlidesKind     string `json:"slidesKind,omitempty" jsonschema:"Optional archetype role to filter the variants by (e.g. title, section, agenda, closing, content). Only used with slidesTemplate."`
+	// Slides convenience: for the FIRST question — "which template should I use?"
+	// — set slidesTemplatePicker=true (with kind='select') and omit options.
+	// ask_user then enumerates every available template (built-in + imported),
+	// generates one option per template (id=template name, label+description from
+	// the catalog), and attaches a live thumbnail of each template's cover so the
+	// user picks by seeing the design. Do NOT hand-copy markup or thumbnails.
+	SlidesTemplatePicker bool `json:"slidesTemplatePicker,omitempty" jsonschema:"For the template-choice question: set true (with kind='select', no options) to auto-generate one option per available template, each with a live thumbnail of that template's cover slide."`
 }
 
 // AskUserResult is the structured payload the chat runner turns into a
@@ -549,6 +628,37 @@ func askUser(ctx context.Context, args AskUserArgs) (AskUserResult, error) {
 	}
 
 	inOptions := args.Options
+
+	// Slides convenience (FIRST question): when slidesTemplatePicker is set,
+	// enumerate every available template and generate one option per template,
+	// each carrying a live thumbnail of that template's cover slide. This turns
+	// "which template should I use?" into a VISUAL card instead of a text list.
+	if args.SlidesTemplatePicker && kind == "select" {
+		picks, err := templatePickerOptions(ctx)
+		if err != nil {
+			return AskUserResult{}, fmt.Errorf("resolve template picker: %w", err)
+		}
+		// Auto-generate options from the templates when the model omitted them
+		// (or passed fewer than exist), so the picker always covers every
+		// template. The model may still curate labels/order by passing options
+		// whose ids are template names.
+		if len(inOptions) < len(picks) {
+			inOptions = inOptions[:0]
+			for _, p := range picks {
+				inOptions = append(inOptions, AskUserOption{ID: p.option.ID, Label: p.option.Label, Description: p.option.Description})
+			}
+		}
+		// Attach a cover thumbnail per option (unless one was passed explicitly),
+		// matched by option id == template name.
+		for _, p := range picks {
+			if _, ok := thumbByOption[p.option.ID]; ok {
+				continue
+			}
+			if p.thumbnail != nil {
+				thumbByOption[p.option.ID] = *p.thumbnail
+			}
+		}
+	}
 
 	// Slides convenience: when slidesTemplate is set, resolve the template's
 	// per-variant preview markup and (a) generate one option per variant if the
@@ -855,8 +965,8 @@ func GetTools() ([]tool.Tool, error) {
 				return addDeckImage(ctx, args)
 			})
 		}},
-		{"ask_user", "Ask the user ONE structured question inline in chat and WAIT for their reply. kind='yesno' shows Yes/No buttons; kind='select' shows a pick-one list. For a SLIDES VARIANT PICKER, just set slidesTemplate (the template name) and optionally slidesKind (title|section|agenda|closing|content) — ask_user then shows a LIVE THUMBNAIL of each variant and can auto-generate the options; do NOT hand-copy markup. GENERIC: use it any time you need the user to choose. After calling it, end your turn — the user's next message is their answer.", func() (tool.Tool, error) {
-			return functiontool.New(functiontool.Config{Name: "ask_user", Description: "Ask the user ONE structured question inline in chat and WAIT for their reply. kind='yesno' shows Yes/No buttons; kind='select' shows a pick-one list. For a SLIDES VARIANT PICKER, just set slidesTemplate (the template name) and optionally slidesKind (title|section|agenda|closing|content) — ask_user then shows a LIVE THUMBNAIL of each variant and can auto-generate the options; do NOT hand-copy markup. GENERIC: use it any time you need the user to choose. After calling it, end your turn — the user's next message is their answer."}, func(ctx tool.Context, args AskUserArgs) (AskUserResult, error) {
+		{"ask_user", "Ask the user ONE structured question inline in chat and WAIT for their reply. kind='yesno' shows Yes/No buttons; kind='select' shows a pick-one list. For the TEMPLATE-CHOICE question ('which template should I use?'), set slidesTemplatePicker=true (kind='select', no options) — ask_user lists every available template with a LIVE THUMBNAIL of each template's cover. For a SLIDES VARIANT PICKER within a chosen template, set slidesTemplate (the template name) and optionally slidesKind (title|section|agenda|closing|content) — ask_user then shows a LIVE THUMBNAIL of each variant and can auto-generate the options; do NOT hand-copy markup. GENERIC: use it any time you need the user to choose. After calling it, end your turn — the user's next message is their answer.", func() (tool.Tool, error) {
+			return functiontool.New(functiontool.Config{Name: "ask_user", Description: "Ask the user ONE structured question inline in chat and WAIT for their reply. kind='yesno' shows Yes/No buttons; kind='select' shows a pick-one list. For the TEMPLATE-CHOICE question ('which template should I use?'), set slidesTemplatePicker=true (kind='select', no options) — ask_user lists every available template with a LIVE THUMBNAIL of each template's cover. For a SLIDES VARIANT PICKER within a chosen template, set slidesTemplate (the template name) and optionally slidesKind (title|section|agenda|closing|content) — ask_user then shows a LIVE THUMBNAIL of each variant and can auto-generate the options; do NOT hand-copy markup. GENERIC: use it any time you need the user to choose. After calling it, end your turn — the user's next message is their answer."}, func(ctx tool.Context, args AskUserArgs) (AskUserResult, error) {
 				return askUser(ctx, args)
 			})
 		}},

@@ -23,8 +23,12 @@ type DeckManifest struct {
 	// Stored as a raw string to avoid coupling the store package to the slides
 	// IR types.
 	TemplateModel string    `json:"templateModel,omitempty"`
-	CreatedAt     time.Time `json:"createdAt"`
-	UpdatedAt     time.Time `json:"updatedAt"`
+	// ThumbnailReady is true when at least one slide has been baked to a
+	// static PNG thumbnail. Used by the list DTO so the frontend can skip
+	// issuing an image request for decks that have no thumbnails.
+	ThumbnailReady bool      `json:"thumbnailReady,omitempty"`
+	CreatedAt      time.Time `json:"createdAt"`
+	UpdatedAt      time.Time `json:"updatedAt"`
 	// Scope is a non-persisted, in-memory annotation ("personal" or "team")
 	// set only by the list handler when merging scopes. There is no Deck
 	// column for it; CreateDeck/UpdateDeck use explicit setters so this field

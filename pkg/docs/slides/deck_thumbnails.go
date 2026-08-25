@@ -129,6 +129,15 @@ func generateDeckThumbnails(ctx context.Context, svc Service, slug string, opts 
 		}
 		deck.Assets[ref] = dataURI
 	}
+
+	// Mark the deck as thumbnail-ready so the list DTO signals the frontend to
+	// show <img> tags (avoids unnecessary 404 probes for decks without thumbs).
+	if !deck.ThumbnailReady {
+		deck.ThumbnailReady = true
+		if err := svc.Store.UpdateDeck(ctx, deck); err != nil {
+			slog.Warn("deck thumbnail_ready flag persist failed", "deck", slug, "error", err)
+		}
+	}
 	return nil
 }
 

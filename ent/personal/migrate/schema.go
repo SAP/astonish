@@ -98,6 +98,7 @@ var (
 		{Name: "theme", Type: field.TypeJSON, Nullable: true},
 		{Name: "assets", Type: field.TypeJSON, Nullable: true},
 		{Name: "template_model", Type: field.TypeString, Nullable: true, Size: 2147483647},
+		{Name: "thumbnail_ready", Type: field.TypeBool, Default: false},
 		{Name: "created_at", Type: field.TypeTime, Default: map[string]schema.Expr{"postgres": "now()", "sqlite3": "(datetime('now'))"}},
 		{Name: "updated_at", Type: field.TypeTime, Default: map[string]schema.Expr{"postgres": "now()", "sqlite3": "(datetime('now'))"}},
 	}

@@ -89,6 +89,20 @@ func (_c *DeckCreate) SetNillableTemplateModel(v *string) *DeckCreate {
 	return _c
 }
 
+// SetThumbnailReady sets the "thumbnail_ready" field.
+func (_c *DeckCreate) SetThumbnailReady(v bool) *DeckCreate {
+	_c.mutation.SetThumbnailReady(v)
+	return _c
+}
+
+// SetNillableThumbnailReady sets the "thumbnail_ready" field if the given value is not nil.
+func (_c *DeckCreate) SetNillableThumbnailReady(v *bool) *DeckCreate {
+	if v != nil {
+		_c.SetThumbnailReady(*v)
+	}
+	return _c
+}
+
 // SetCreatedAt sets the "created_at" field.
 func (_c *DeckCreate) SetCreatedAt(v time.Time) *DeckCreate {
 	_c.mutation.SetCreatedAt(v)
@@ -189,6 +203,10 @@ func (_c *DeckCreate) defaults() {
 		v := deck.DefaultSchemaVersion
 		_c.mutation.SetSchemaVersion(v)
 	}
+	if _, ok := _c.mutation.ThumbnailReady(); !ok {
+		v := deck.DefaultThumbnailReady
+		_c.mutation.SetThumbnailReady(v)
+	}
 	if _, ok := _c.mutation.CreatedAt(); !ok {
 		v := deck.DefaultCreatedAt()
 		_c.mutation.SetCreatedAt(v)
@@ -226,6 +244,9 @@ func (_c *DeckCreate) check() error {
 	}
 	if _, ok := _c.mutation.SchemaVersion(); !ok {
 		return &ValidationError{Name: "schema_version", err: errors.New(`personal: missing required field "Deck.schema_version"`)}
+	}
+	if _, ok := _c.mutation.ThumbnailReady(); !ok {
+		return &ValidationError{Name: "thumbnail_ready", err: errors.New(`personal: missing required field "Deck.thumbnail_ready"`)}
 	}
 	switch _c.driver.Dialect() {
 	case dialect.MySQL, dialect.SQLite:
@@ -301,6 +322,10 @@ func (_c *DeckCreate) createSpec() (*Deck, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.TemplateModel(); ok {
 		_spec.SetField(deck.FieldTemplateModel, field.TypeString, value)
 		_node.TemplateModel = value
+	}
+	if value, ok := _c.mutation.ThumbnailReady(); ok {
+		_spec.SetField(deck.FieldThumbnailReady, field.TypeBool, value)
+		_node.ThumbnailReady = value
 	}
 	if value, ok := _c.mutation.CreatedAt(); ok {
 		_spec.SetField(deck.FieldCreatedAt, field.TypeTime, value)

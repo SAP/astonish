@@ -81,6 +81,11 @@ func TemplateModel(v string) predicate.Deck {
 	return predicate.Deck(sql.FieldEQ(FieldTemplateModel, v))
 }
 
+// ThumbnailReady applies equality check predicate on the "thumbnail_ready" field. It's identical to ThumbnailReadyEQ.
+func ThumbnailReady(v bool) predicate.Deck {
+	return predicate.Deck(sql.FieldEQ(FieldThumbnailReady, v))
+}
+
 // CreatedAt applies equality check predicate on the "created_at" field. It's identical to CreatedAtEQ.
 func CreatedAt(v time.Time) predicate.Deck {
 	return predicate.Deck(sql.FieldEQ(FieldCreatedAt, v))
@@ -419,6 +424,16 @@ func TemplateModelEqualFold(v string) predicate.Deck {
 // TemplateModelContainsFold applies the ContainsFold predicate on the "template_model" field.
 func TemplateModelContainsFold(v string) predicate.Deck {
 	return predicate.Deck(sql.FieldContainsFold(FieldTemplateModel, v))
+}
+
+// ThumbnailReadyEQ applies the EQ predicate on the "thumbnail_ready" field.
+func ThumbnailReadyEQ(v bool) predicate.Deck {
+	return predicate.Deck(sql.FieldEQ(FieldThumbnailReady, v))
+}
+
+// ThumbnailReadyNEQ applies the NEQ predicate on the "thumbnail_ready" field.
+func ThumbnailReadyNEQ(v bool) predicate.Deck {
+	return predicate.Deck(sql.FieldNEQ(FieldThumbnailReady, v))
 }
 
 // CreatedAtEQ applies the EQ predicate on the "created_at" field.

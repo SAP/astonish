@@ -197,12 +197,16 @@ func init() {
 	deckDescSchemaVersion := deckFields[4].Descriptor()
 	// deck.DefaultSchemaVersion holds the default value on creation for the schema_version field.
 	deck.DefaultSchemaVersion = deckDescSchemaVersion.Default.(int)
+	// deckDescThumbnailReady is the schema descriptor for thumbnail_ready field.
+	deckDescThumbnailReady := deckFields[8].Descriptor()
+	// deck.DefaultThumbnailReady holds the default value on creation for the thumbnail_ready field.
+	deck.DefaultThumbnailReady = deckDescThumbnailReady.Default.(bool)
 	// deckDescCreatedAt is the schema descriptor for created_at field.
-	deckDescCreatedAt := deckFields[8].Descriptor()
+	deckDescCreatedAt := deckFields[9].Descriptor()
 	// deck.DefaultCreatedAt holds the default value on creation for the created_at field.
 	deck.DefaultCreatedAt = deckDescCreatedAt.Default.(func() time.Time)
 	// deckDescUpdatedAt is the schema descriptor for updated_at field.
-	deckDescUpdatedAt := deckFields[9].Descriptor()
+	deckDescUpdatedAt := deckFields[10].Descriptor()
 	// deck.DefaultUpdatedAt holds the default value on creation for the updated_at field.
 	deck.DefaultUpdatedAt = deckDescUpdatedAt.Default.(func() time.Time)
 	// deck.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.

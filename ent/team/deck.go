@@ -33,6 +33,8 @@ type Deck struct {
 	Assets map[string]string `json:"assets,omitempty"`
 	// TemplateModel holds the value of the "template_model" field.
 	TemplateModel string `json:"template_model,omitempty"`
+	// ThumbnailReady holds the value of the "thumbnail_ready" field.
+	ThumbnailReady bool `json:"thumbnail_ready,omitempty"`
 	// CreatedAt holds the value of the "created_at" field.
 	CreatedAt time.Time `json:"created_at,omitempty"`
 	// UpdatedAt holds the value of the "updated_at" field.
@@ -68,6 +70,8 @@ func (*Deck) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case deck.FieldTheme, deck.FieldAssets:
 			values[i] = new([]byte)
+		case deck.FieldThumbnailReady:
+			values[i] = new(sql.NullBool)
 		case deck.FieldSchemaVersion:
 			values[i] = new(sql.NullInt64)
 		case deck.FieldSlug, deck.FieldTitle, deck.FieldDescription, deck.FieldTemplateModel:
@@ -143,6 +147,12 @@ func (_m *Deck) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.TemplateModel = value.String
 			}
+		case deck.FieldThumbnailReady:
+			if value, ok := values[i].(*sql.NullBool); !ok {
+				return fmt.Errorf("unexpected type %T for field thumbnail_ready", values[i])
+			} else if value.Valid {
+				_m.ThumbnailReady = value.Bool
+			}
 		case deck.FieldCreatedAt:
 			if value, ok := values[i].(*sql.NullTime); !ok {
 				return fmt.Errorf("unexpected type %T for field created_at", values[i])
@@ -216,6 +226,9 @@ func (_m *Deck) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("template_model=")
 	builder.WriteString(_m.TemplateModel)
+	builder.WriteString(", ")
+	builder.WriteString("thumbnail_ready=")
+	builder.WriteString(fmt.Sprintf("%v", _m.ThumbnailReady))
 	builder.WriteString(", ")
 	builder.WriteString("created_at=")
 	builder.WriteString(_m.CreatedAt.Format(time.ANSIC))

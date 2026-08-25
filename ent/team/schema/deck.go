@@ -28,6 +28,7 @@ func (Deck) Fields() []ent.Field {
 		// schema to the slides IR types; empty for all decks except high-fidelity
 		// imported templates (schema_version=3). Additive optional column.
 		field.Text("template_model").Optional(),
+		field.Bool("thumbnail_ready").Default(false),
 		field.Time("created_at").Default(time.Now).Immutable().Annotations(&entsql.Annotation{DefaultExprs: map[string]string{dialect.Postgres: "now()", dialect.SQLite: "(datetime('now'))"}}),
 		field.Time("updated_at").Default(time.Now).UpdateDefault(time.Now).Annotations(&entsql.Annotation{DefaultExprs: map[string]string{dialect.Postgres: "now()", dialect.SQLite: "(datetime('now'))"}}),
 	}

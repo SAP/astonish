@@ -50,14 +50,15 @@ type slidesDeckDTO struct {
 // EVERY deck is what made the Slides list slow when an imported template was
 // present.
 type slidesDeckListItem struct {
-	ID            string    `json:"id"`
-	Slug          string    `json:"slug"`
-	Title         string    `json:"title"`
-	Description   string    `json:"description,omitempty"`
-	SchemaVersion int       `json:"schemaVersion"`
-	Scope         string    `json:"scope,omitempty"`
-	CreatedAt     time.Time `json:"createdAt"`
-	UpdatedAt     time.Time `json:"updatedAt"`
+	ID             string    `json:"id"`
+	Slug           string    `json:"slug"`
+	Title          string    `json:"title"`
+	Description    string    `json:"description,omitempty"`
+	SchemaVersion  int       `json:"schemaVersion"`
+	Scope          string    `json:"scope,omitempty"`
+	ThumbnailReady bool      `json:"thumbnailReady,omitempty"`
+	CreatedAt      time.Time `json:"createdAt"`
+	UpdatedAt      time.Time `json:"updatedAt"`
 }
 
 // slimDeck projects a store.DeckManifest to the list summary (no heavy fields).
@@ -66,14 +67,15 @@ func slimDeck(d *store.DeckManifest) slidesDeckListItem {
 		return slidesDeckListItem{}
 	}
 	return slidesDeckListItem{
-		ID:            d.ID,
-		Slug:          d.Slug,
-		Title:         d.Title,
-		Description:   d.Description,
-		SchemaVersion: d.SchemaVersion,
-		Scope:         d.Scope,
-		CreatedAt:     d.CreatedAt,
-		UpdatedAt:     d.UpdatedAt,
+		ID:             d.ID,
+		Slug:           d.Slug,
+		Title:          d.Title,
+		Description:    d.Description,
+		SchemaVersion:  d.SchemaVersion,
+		Scope:          d.Scope,
+		ThumbnailReady: d.ThumbnailReady,
+		CreatedAt:      d.CreatedAt,
+		UpdatedAt:      d.UpdatedAt,
 	}
 }
 

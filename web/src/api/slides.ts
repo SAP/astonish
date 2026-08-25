@@ -53,6 +53,7 @@ export interface SlidesDeckListItem {
   scope?: DocsScope
   updatedAt?: string
   slideCount?: number
+  thumbnailReady?: boolean
 }
 
 export type SlidesExportFormat = 'pdf' | 'pptx' | 'html'

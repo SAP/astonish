@@ -29,6 +29,8 @@ const (
 	FieldAssets = "assets"
 	// FieldTemplateModel holds the string denoting the template_model field in the database.
 	FieldTemplateModel = "template_model"
+	// FieldThumbnailReady holds the string denoting the thumbnail_ready field in the database.
+	FieldThumbnailReady = "thumbnail_ready"
 	// FieldCreatedAt holds the string denoting the created_at field in the database.
 	FieldCreatedAt = "created_at"
 	// FieldUpdatedAt holds the string denoting the updated_at field in the database.
@@ -56,6 +58,7 @@ var Columns = []string{
 	FieldTheme,
 	FieldAssets,
 	FieldTemplateModel,
+	FieldThumbnailReady,
 	FieldCreatedAt,
 	FieldUpdatedAt,
 }
@@ -79,6 +82,8 @@ var (
 	DefaultDescription string
 	// DefaultSchemaVersion holds the default value on creation for the "schema_version" field.
 	DefaultSchemaVersion int
+	// DefaultThumbnailReady holds the default value on creation for the "thumbnail_ready" field.
+	DefaultThumbnailReady bool
 	// DefaultCreatedAt holds the default value on creation for the "created_at" field.
 	DefaultCreatedAt func() time.Time
 	// DefaultUpdatedAt holds the default value on creation for the "updated_at" field.
@@ -120,6 +125,11 @@ func BySchemaVersion(opts ...sql.OrderTermOption) OrderOption {
 // ByTemplateModel orders the results by the template_model field.
 func ByTemplateModel(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldTemplateModel, opts...).ToFunc()
+}
+
+// ByThumbnailReady orders the results by the thumbnail_ready field.
+func ByThumbnailReady(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldThumbnailReady, opts...).ToFunc()
 }
 
 // ByCreatedAt orders the results by the created_at field.

@@ -32,6 +32,7 @@ const personalDeck: slidesApi.SlidesDeckListItem = {
   schemaVersion: 1,
   scope: 'personal',
   updatedAt: new Date().toISOString(),
+  thumbnailReady: true,
 }
 
 const teamDeck: slidesApi.SlidesDeckListItem = {
@@ -41,6 +42,7 @@ const teamDeck: slidesApi.SlidesDeckListItem = {
   schemaVersion: 1,
   scope: 'team',
   updatedAt: new Date().toISOString(),
+  thumbnailReady: true,
 }
 
 describe('SlidesView', () => {

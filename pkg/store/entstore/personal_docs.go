@@ -65,6 +65,7 @@ func (s *personalDocsStore) ListDecksLite(ctx context.Context) ([]*store.DeckMan
 			personaldeck.FieldDescription,
 			personaldeck.FieldSchemaVersion,
 			personaldeck.FieldTheme,
+			personaldeck.FieldThumbnailReady,
 			personaldeck.FieldCreatedAt,
 			personaldeck.FieldUpdatedAt,
 		).
@@ -88,7 +89,7 @@ func (s *personalDocsStore) UpdateDeck(ctx context.Context, d *store.DeckManifes
 	if err != nil {
 		return err
 	}
-	row, err = row.Update().SetTitle(d.Title).SetDescription(d.Description).SetSchemaVersion(d.SchemaVersion).SetTheme(d.Theme).SetAssets(d.Assets).SetTemplateModel(d.TemplateModel).Save(ctx)
+	row, err = row.Update().SetTitle(d.Title).SetDescription(d.Description).SetSchemaVersion(d.SchemaVersion).SetTheme(d.Theme).SetAssets(d.Assets).SetTemplateModel(d.TemplateModel).SetThumbnailReady(d.ThumbnailReady).Save(ctx)
 	if err == nil {
 		fillPersonalDeck(d, row)
 	}
@@ -253,6 +254,7 @@ func fillPersonalDeck(out *store.DeckManifest, in *personalent.Deck) {
 	out.Theme = in.Theme
 	out.Assets = in.Assets
 	out.TemplateModel = in.TemplateModel
+	out.ThumbnailReady = in.ThumbnailReady
 	out.CreatedAt = in.CreatedAt
 	out.UpdatedAt = in.UpdatedAt
 }
@@ -266,6 +268,7 @@ func fillPersonalDeckLite(out *store.DeckManifest, in *personalent.Deck) {
 	out.Description = in.Description
 	out.SchemaVersion = in.SchemaVersion
 	out.Theme = in.Theme
+	out.ThumbnailReady = in.ThumbnailReady
 	out.CreatedAt = in.CreatedAt
 	out.UpdatedAt = in.UpdatedAt
 }

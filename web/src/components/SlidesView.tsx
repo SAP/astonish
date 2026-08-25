@@ -64,11 +64,15 @@ function formatDate(dateStr?: string) {
  * IntersectionObserver); off-screen cards render the lightweight icon
  * placeholder until the user scrolls to them.
  */
-function SlideThumbnail({ deckSlug, scope, index, title }: { deckSlug: string; scope: DocsScope; index: number; title?: string }) {
+function SlideThumbnail({ deckSlug, scope, index, title, thumbnailReady }: { deckSlug: string; scope: DocsScope; index: number; title?: string; thumbnailReady?: boolean }) {
   const src = deckSlideThumbnailUrl(deckSlug, index, scope)
   const tileRef = useRef<HTMLDivElement>(null)
   const [visible, setVisible] = useState(false)
   const [imgFailed, setImgFailed] = useState(false)
+
+  // When the backend signals no thumbnail is baked, skip the <img> entirely —
+  // show the placeholder immediately without issuing a 404 HTTP request.
+  const showImage = thumbnailReady && visible && !imgFailed
 
   useEffect(() => {
     // No IntersectionObserver (jsdom/tests, very old browsers): render eagerly.
@@ -98,7 +102,7 @@ function SlideThumbnail({ deckSlug, scope, index, title }: { deckSlug: string; s
         className="relative aspect-video w-40 overflow-hidden rounded-md border"
         style={{ borderColor: 'var(--border-color)', background: 'var(--card)' }}
       >
-        {visible && !imgFailed ? (
+        {showImage ? (
           <img
             src={src}
             alt={title || `Slide ${index + 1}`}
@@ -166,7 +170,7 @@ function DeckCard({
 
         {/* Single first-page thumbnail (lazy-mounted when scrolled into view). */}
         <div className="flex gap-3">
-          <SlideThumbnail deckSlug={deck.slug} scope={scope} index={0} title={deck.title} />
+          <SlideThumbnail deckSlug={deck.slug} scope={scope} index={0} title={deck.title} thumbnailReady={deck.thumbnailReady} />
         </div>
       </div>
 

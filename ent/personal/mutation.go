@@ -2244,6 +2244,7 @@ type DeckMutation struct {
 	theme             *map[string]string
 	assets            *map[string]string
 	template_model    *string
+	thumbnail_ready   *bool
 	created_at        *time.Time
 	updated_at        *time.Time
 	clearedFields     map[string]struct{}
@@ -2670,6 +2671,42 @@ func (m *DeckMutation) ResetTemplateModel() {
 	delete(m.clearedFields, deck.FieldTemplateModel)
 }
 
+// SetThumbnailReady sets the "thumbnail_ready" field.
+func (m *DeckMutation) SetThumbnailReady(b bool) {
+	m.thumbnail_ready = &b
+}
+
+// ThumbnailReady returns the value of the "thumbnail_ready" field in the mutation.
+func (m *DeckMutation) ThumbnailReady() (r bool, exists bool) {
+	v := m.thumbnail_ready
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldThumbnailReady returns the old "thumbnail_ready" field's value of the Deck entity.
+// If the Deck object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DeckMutation) OldThumbnailReady(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldThumbnailReady is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldThumbnailReady requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldThumbnailReady: %w", err)
+	}
+	return oldValue.ThumbnailReady, nil
+}
+
+// ResetThumbnailReady resets all changes to the "thumbnail_ready" field.
+func (m *DeckMutation) ResetThumbnailReady() {
+	m.thumbnail_ready = nil
+}
+
 // SetCreatedAt sets the "created_at" field.
 func (m *DeckMutation) SetCreatedAt(t time.Time) {
 	m.created_at = &t
@@ -2830,7 +2867,7 @@ func (m *DeckMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *DeckMutation) Fields() []string {
-	fields := make([]string, 0, 9)
+	fields := make([]string, 0, 10)
 	if m.slug != nil {
 		fields = append(fields, deck.FieldSlug)
 	}
@@ -2851,6 +2888,9 @@ func (m *DeckMutation) Fields() []string {
 	}
 	if m.template_model != nil {
 		fields = append(fields, deck.FieldTemplateModel)
+	}
+	if m.thumbnail_ready != nil {
+		fields = append(fields, deck.FieldThumbnailReady)
 	}
 	if m.created_at != nil {
 		fields = append(fields, deck.FieldCreatedAt)
@@ -2880,6 +2920,8 @@ func (m *DeckMutation) Field(name string) (ent.Value, bool) {
 		return m.Assets()
 	case deck.FieldTemplateModel:
 		return m.TemplateModel()
+	case deck.FieldThumbnailReady:
+		return m.ThumbnailReady()
 	case deck.FieldCreatedAt:
 		return m.CreatedAt()
 	case deck.FieldUpdatedAt:
@@ -2907,6 +2949,8 @@ func (m *DeckMutation) OldField(ctx context.Context, name string) (ent.Value, er
 		return m.OldAssets(ctx)
 	case deck.FieldTemplateModel:
 		return m.OldTemplateModel(ctx)
+	case deck.FieldThumbnailReady:
+		return m.OldThumbnailReady(ctx)
 	case deck.FieldCreatedAt:
 		return m.OldCreatedAt(ctx)
 	case deck.FieldUpdatedAt:
@@ -2968,6 +3012,13 @@ func (m *DeckMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetTemplateModel(v)
+		return nil
+	case deck.FieldThumbnailReady:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetThumbnailReady(v)
 		return nil
 	case deck.FieldCreatedAt:
 		v, ok := value.(time.Time)
@@ -3088,6 +3139,9 @@ func (m *DeckMutation) ResetField(name string) error {
 		return nil
 	case deck.FieldTemplateModel:
 		m.ResetTemplateModel()
+		return nil
+	case deck.FieldThumbnailReady:
+		m.ResetThumbnailReady()
 		return nil
 	case deck.FieldCreatedAt:
 		m.ResetCreatedAt()

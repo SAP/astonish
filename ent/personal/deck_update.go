@@ -137,6 +137,20 @@ func (_u *DeckUpdate) ClearTemplateModel() *DeckUpdate {
 	return _u
 }
 
+// SetThumbnailReady sets the "thumbnail_ready" field.
+func (_u *DeckUpdate) SetThumbnailReady(v bool) *DeckUpdate {
+	_u.mutation.SetThumbnailReady(v)
+	return _u
+}
+
+// SetNillableThumbnailReady sets the "thumbnail_ready" field if the given value is not nil.
+func (_u *DeckUpdate) SetNillableThumbnailReady(v *bool) *DeckUpdate {
+	if v != nil {
+		_u.SetThumbnailReady(*v)
+	}
+	return _u
+}
+
 // SetUpdatedAt sets the "updated_at" field.
 func (_u *DeckUpdate) SetUpdatedAt(v time.Time) *DeckUpdate {
 	_u.mutation.SetUpdatedAt(v)
@@ -279,6 +293,9 @@ func (_u *DeckUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.TemplateModelCleared() {
 		_spec.ClearField(deck.FieldTemplateModel, field.TypeString)
+	}
+	if value, ok := _u.mutation.ThumbnailReady(); ok {
+		_spec.SetField(deck.FieldThumbnailReady, field.TypeBool, value)
 	}
 	if value, ok := _u.mutation.UpdatedAt(); ok {
 		_spec.SetField(deck.FieldUpdatedAt, field.TypeTime, value)
@@ -455,6 +472,20 @@ func (_u *DeckUpdateOne) ClearTemplateModel() *DeckUpdateOne {
 	return _u
 }
 
+// SetThumbnailReady sets the "thumbnail_ready" field.
+func (_u *DeckUpdateOne) SetThumbnailReady(v bool) *DeckUpdateOne {
+	_u.mutation.SetThumbnailReady(v)
+	return _u
+}
+
+// SetNillableThumbnailReady sets the "thumbnail_ready" field if the given value is not nil.
+func (_u *DeckUpdateOne) SetNillableThumbnailReady(v *bool) *DeckUpdateOne {
+	if v != nil {
+		_u.SetThumbnailReady(*v)
+	}
+	return _u
+}
+
 // SetUpdatedAt sets the "updated_at" field.
 func (_u *DeckUpdateOne) SetUpdatedAt(v time.Time) *DeckUpdateOne {
 	_u.mutation.SetUpdatedAt(v)
@@ -627,6 +658,9 @@ func (_u *DeckUpdateOne) sqlSave(ctx context.Context) (_node *Deck, err error) {
 	}
 	if _u.mutation.TemplateModelCleared() {
 		_spec.ClearField(deck.FieldTemplateModel, field.TypeString)
+	}
+	if value, ok := _u.mutation.ThumbnailReady(); ok {
+		_spec.SetField(deck.FieldThumbnailReady, field.TypeBool, value)
 	}
 	if value, ok := _u.mutation.UpdatedAt(); ok {
 		_spec.SetField(deck.FieldUpdatedAt, field.TypeTime, value)

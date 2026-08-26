@@ -610,13 +610,6 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 				}
 				phase := gpState.Phase()
 				if GraphPlanPhaseTools(phase)[name] {
-					if limitMessage := gpState.ChargeExploration(name, args); limitMessage != "" {
-						return map[string]any{
-							"status": "blocked_graph_plan_budget",
-							"phase":  string(phase),
-							"error":  limitMessage,
-						}, nil
-					}
 					return nil, nil
 				}
 				return map[string]any{

@@ -18,6 +18,9 @@ type Credential func(*sql.Selector)
 // Deck is the predicate function for deck builders.
 type Deck func(*sql.Selector)
 
+// DeckVersion is the predicate function for deckversion builders.
+type DeckVersion func(*sql.Selector)
+
 // Flow is the predicate function for flow builders.
 type Flow func(*sql.Selector)
 

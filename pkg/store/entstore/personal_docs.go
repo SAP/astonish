@@ -7,6 +7,7 @@ import (
 
 	personalent "github.com/SAP/astonish/ent/personal"
 	personaldeck "github.com/SAP/astonish/ent/personal/deck"
+	personaldeckversion "github.com/SAP/astonish/ent/personal/deckversion"
 	personalslide "github.com/SAP/astonish/ent/personal/slide"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/google/uuid"
@@ -19,7 +20,7 @@ func (s *personalDocsStore) CreateDeck(ctx context.Context, d *store.DeckManifes
 	if err != nil {
 		return err
 	}
-	row, err := s.client.Deck.Create().SetID(id).SetSlug(d.Slug).SetTitle(d.Title).SetDescription(d.Description).SetSchemaVersion(d.SchemaVersion).SetTheme(d.Theme).SetAssets(d.Assets).SetTemplateModel(d.TemplateModel).Save(ctx)
+	row, err := s.client.Deck.Create().SetID(id).SetSlug(d.Slug).SetTitle(d.Title).SetDescription(d.Description).SetSchemaVersion(d.SchemaVersion).SetTheme(d.Theme).SetAssets(d.Assets).SetTemplateModel(d.TemplateModel).SetThumbnailReady(d.ThumbnailReady).SetSessionID(d.SessionID).SetVersion(d.Version).SetSourceSlug(d.SourceSlug).Save(ctx)
 	if err == nil {
 		fillPersonalDeck(d, row)
 	}
@@ -66,6 +67,9 @@ func (s *personalDocsStore) ListDecksLite(ctx context.Context) ([]*store.DeckMan
 			personaldeck.FieldSchemaVersion,
 			personaldeck.FieldTheme,
 			personaldeck.FieldThumbnailReady,
+			personaldeck.FieldSessionID,
+			personaldeck.FieldVersion,
+			personaldeck.FieldSourceSlug,
 			personaldeck.FieldCreatedAt,
 			personaldeck.FieldUpdatedAt,
 		).
@@ -89,7 +93,7 @@ func (s *personalDocsStore) UpdateDeck(ctx context.Context, d *store.DeckManifes
 	if err != nil {
 		return err
 	}
-	row, err = row.Update().SetTitle(d.Title).SetDescription(d.Description).SetSchemaVersion(d.SchemaVersion).SetTheme(d.Theme).SetAssets(d.Assets).SetTemplateModel(d.TemplateModel).SetThumbnailReady(d.ThumbnailReady).Save(ctx)
+	row, err = row.Update().SetTitle(d.Title).SetDescription(d.Description).SetSchemaVersion(d.SchemaVersion).SetTheme(d.Theme).SetAssets(d.Assets).SetTemplateModel(d.TemplateModel).SetThumbnailReady(d.ThumbnailReady).SetSessionID(d.SessionID).SetVersion(d.Version).SetSourceSlug(d.SourceSlug).Save(ctx)
 	if err == nil {
 		fillPersonalDeck(d, row)
 	}
@@ -255,6 +259,9 @@ func fillPersonalDeck(out *store.DeckManifest, in *personalent.Deck) {
 	out.Assets = in.Assets
 	out.TemplateModel = in.TemplateModel
 	out.ThumbnailReady = in.ThumbnailReady
+	out.SessionID = in.SessionID
+	out.Version = in.Version
+	out.SourceSlug = in.SourceSlug
 	out.CreatedAt = in.CreatedAt
 	out.UpdatedAt = in.UpdatedAt
 }
@@ -269,6 +276,9 @@ func fillPersonalDeckLite(out *store.DeckManifest, in *personalent.Deck) {
 	out.SchemaVersion = in.SchemaVersion
 	out.Theme = in.Theme
 	out.ThumbnailReady = in.ThumbnailReady
+	out.SessionID = in.SessionID
+	out.Version = in.Version
+	out.SourceSlug = in.SourceSlug
 	out.CreatedAt = in.CreatedAt
 	out.UpdatedAt = in.UpdatedAt
 }
@@ -291,3 +301,91 @@ func fillPersonalSlide(out *store.SlideContent, in *personalent.Slide) {
 
 var _ store.DocsStore = (*personalDocsStore)(nil)
 var _ = errors.Is
+
+func (s *personalDocsStore) DeleteDecksBySessionID(ctx context.Context, sessionID string) error {
+	if sessionID == "" {
+		return nil
+	}
+	rows, err := s.client.Deck.Query().Where(personaldeck.SessionIDEQ(sessionID)).All(ctx)
+	if err != nil {
+		return err
+	}
+	for _, row := range rows {
+		// Delete slides first (edge), then deck.
+		_, _ = s.client.Slide.Delete().Where(personalslide.HasDeckWith(personaldeck.IDEQ(row.ID))).Exec(ctx)
+		_ = s.client.Deck.DeleteOneID(row.ID).Exec(ctx)
+	}
+	return nil
+}
+
+func (s *personalDocsStore) SaveDeckVersion(ctx context.Context, v *store.DeckVersionSnapshot) error {
+	id, err := docsUUID(v.ID)
+	if err != nil {
+		return err
+	}
+	_, err = s.client.DeckVersion.Create().
+		SetID(id).
+		SetDeckSlug(v.DeckSlug).
+		SetVersion(v.Version).
+		SetTitle(v.Title).
+		SetSnapshot(v.Snapshot).
+		Save(ctx)
+	if err != nil {
+		return err
+	}
+	// Prune: keep at most 5 versions per deck (delete oldest).
+	versions, err := s.client.DeckVersion.Query().
+		Where(personaldeckversion.DeckSlugEQ(v.DeckSlug)).
+		Order(personalent.Desc(personaldeckversion.FieldVersion)).
+		All(ctx)
+	if err == nil && len(versions) > 5 {
+		for _, old := range versions[5:] {
+			_ = s.client.DeckVersion.DeleteOneID(old.ID).Exec(ctx)
+		}
+	}
+	return nil
+}
+
+func (s *personalDocsStore) ListDeckVersions(ctx context.Context, deckSlug string) ([]*store.DeckVersionSnapshot, error) {
+	rows, err := s.client.DeckVersion.Query().
+		Where(personaldeckversion.DeckSlugEQ(deckSlug)).
+		Order(personalent.Desc(personaldeckversion.FieldVersion)).
+		All(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*store.DeckVersionSnapshot, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, &store.DeckVersionSnapshot{
+			ID:        row.ID.String(),
+			DeckSlug:  row.DeckSlug,
+			Version:   row.Version,
+			Title:     row.Title,
+			Snapshot:  row.Snapshot,
+			CreatedAt: row.CreatedAt,
+		})
+	}
+	return out, nil
+}
+
+func (s *personalDocsStore) GetDeckVersion(ctx context.Context, deckSlug string, version int) (*store.DeckVersionSnapshot, error) {
+	row, err := s.client.DeckVersion.Query().
+		Where(
+			personaldeckversion.DeckSlugEQ(deckSlug),
+			personaldeckversion.VersionEQ(version),
+		).Only(ctx)
+	if personalent.IsNotFound(err) {
+		return nil, store.ErrDocsNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &store.DeckVersionSnapshot{
+		ID:        row.ID.String(),
+		DeckSlug:  row.DeckSlug,
+		Version:   row.Version,
+		Title:     row.Title,
+		Snapshot:  row.Snapshot,
+		CreatedAt: row.CreatedAt,
+	}, nil
+}

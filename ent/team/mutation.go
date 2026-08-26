@@ -17,6 +17,7 @@ import (
 	"github.com/SAP/astonish/ent/team/chatsessionevent"
 	"github.com/SAP/astonish/ent/team/credential"
 	"github.com/SAP/astonish/ent/team/deck"
+	"github.com/SAP/astonish/ent/team/deckversion"
 	"github.com/SAP/astonish/ent/team/drillreport"
 	"github.com/SAP/astonish/ent/team/fleetmailboxmessage"
 	"github.com/SAP/astonish/ent/team/fleetmonitorstate"
@@ -58,6 +59,7 @@ const (
 	TypeChatSessionEvent    = "ChatSessionEvent"
 	TypeCredential          = "Credential"
 	TypeDeck                = "Deck"
+	TypeDeckVersion         = "DeckVersion"
 	TypeDrillReport         = "DrillReport"
 	TypeFleetMailboxMessage = "FleetMailboxMessage"
 	TypeFleetMonitorState   = "FleetMonitorState"
@@ -4022,6 +4024,10 @@ type DeckMutation struct {
 	assets            *map[string]string
 	template_model    *string
 	thumbnail_ready   *bool
+	session_id        *string
+	version           *int
+	addversion        *int
+	source_slug       *string
 	created_at        *time.Time
 	updated_at        *time.Time
 	clearedFields     map[string]struct{}
@@ -4484,6 +4490,134 @@ func (m *DeckMutation) ResetThumbnailReady() {
 	m.thumbnail_ready = nil
 }
 
+// SetSessionID sets the "session_id" field.
+func (m *DeckMutation) SetSessionID(s string) {
+	m.session_id = &s
+}
+
+// SessionID returns the value of the "session_id" field in the mutation.
+func (m *DeckMutation) SessionID() (r string, exists bool) {
+	v := m.session_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSessionID returns the old "session_id" field's value of the Deck entity.
+// If the Deck object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DeckMutation) OldSessionID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSessionID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSessionID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSessionID: %w", err)
+	}
+	return oldValue.SessionID, nil
+}
+
+// ResetSessionID resets all changes to the "session_id" field.
+func (m *DeckMutation) ResetSessionID() {
+	m.session_id = nil
+}
+
+// SetVersion sets the "version" field.
+func (m *DeckMutation) SetVersion(i int) {
+	m.version = &i
+	m.addversion = nil
+}
+
+// Version returns the value of the "version" field in the mutation.
+func (m *DeckMutation) Version() (r int, exists bool) {
+	v := m.version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldVersion returns the old "version" field's value of the Deck entity.
+// If the Deck object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DeckMutation) OldVersion(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldVersion is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldVersion requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldVersion: %w", err)
+	}
+	return oldValue.Version, nil
+}
+
+// AddVersion adds i to the "version" field.
+func (m *DeckMutation) AddVersion(i int) {
+	if m.addversion != nil {
+		*m.addversion += i
+	} else {
+		m.addversion = &i
+	}
+}
+
+// AddedVersion returns the value that was added to the "version" field in this mutation.
+func (m *DeckMutation) AddedVersion() (r int, exists bool) {
+	v := m.addversion
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetVersion resets all changes to the "version" field.
+func (m *DeckMutation) ResetVersion() {
+	m.version = nil
+	m.addversion = nil
+}
+
+// SetSourceSlug sets the "source_slug" field.
+func (m *DeckMutation) SetSourceSlug(s string) {
+	m.source_slug = &s
+}
+
+// SourceSlug returns the value of the "source_slug" field in the mutation.
+func (m *DeckMutation) SourceSlug() (r string, exists bool) {
+	v := m.source_slug
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSourceSlug returns the old "source_slug" field's value of the Deck entity.
+// If the Deck object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DeckMutation) OldSourceSlug(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSourceSlug is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSourceSlug requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSourceSlug: %w", err)
+	}
+	return oldValue.SourceSlug, nil
+}
+
+// ResetSourceSlug resets all changes to the "source_slug" field.
+func (m *DeckMutation) ResetSourceSlug() {
+	m.source_slug = nil
+}
+
 // SetCreatedAt sets the "created_at" field.
 func (m *DeckMutation) SetCreatedAt(t time.Time) {
 	m.created_at = &t
@@ -4644,7 +4778,7 @@ func (m *DeckMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *DeckMutation) Fields() []string {
-	fields := make([]string, 0, 10)
+	fields := make([]string, 0, 13)
 	if m.slug != nil {
 		fields = append(fields, deck.FieldSlug)
 	}
@@ -4668,6 +4802,15 @@ func (m *DeckMutation) Fields() []string {
 	}
 	if m.thumbnail_ready != nil {
 		fields = append(fields, deck.FieldThumbnailReady)
+	}
+	if m.session_id != nil {
+		fields = append(fields, deck.FieldSessionID)
+	}
+	if m.version != nil {
+		fields = append(fields, deck.FieldVersion)
+	}
+	if m.source_slug != nil {
+		fields = append(fields, deck.FieldSourceSlug)
 	}
 	if m.created_at != nil {
 		fields = append(fields, deck.FieldCreatedAt)
@@ -4699,6 +4842,12 @@ func (m *DeckMutation) Field(name string) (ent.Value, bool) {
 		return m.TemplateModel()
 	case deck.FieldThumbnailReady:
 		return m.ThumbnailReady()
+	case deck.FieldSessionID:
+		return m.SessionID()
+	case deck.FieldVersion:
+		return m.Version()
+	case deck.FieldSourceSlug:
+		return m.SourceSlug()
 	case deck.FieldCreatedAt:
 		return m.CreatedAt()
 	case deck.FieldUpdatedAt:
@@ -4728,6 +4877,12 @@ func (m *DeckMutation) OldField(ctx context.Context, name string) (ent.Value, er
 		return m.OldTemplateModel(ctx)
 	case deck.FieldThumbnailReady:
 		return m.OldThumbnailReady(ctx)
+	case deck.FieldSessionID:
+		return m.OldSessionID(ctx)
+	case deck.FieldVersion:
+		return m.OldVersion(ctx)
+	case deck.FieldSourceSlug:
+		return m.OldSourceSlug(ctx)
 	case deck.FieldCreatedAt:
 		return m.OldCreatedAt(ctx)
 	case deck.FieldUpdatedAt:
@@ -4797,6 +4952,27 @@ func (m *DeckMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetThumbnailReady(v)
 		return nil
+	case deck.FieldSessionID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSessionID(v)
+		return nil
+	case deck.FieldVersion:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetVersion(v)
+		return nil
+	case deck.FieldSourceSlug:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSourceSlug(v)
+		return nil
 	case deck.FieldCreatedAt:
 		v, ok := value.(time.Time)
 		if !ok {
@@ -4822,6 +4998,9 @@ func (m *DeckMutation) AddedFields() []string {
 	if m.addschema_version != nil {
 		fields = append(fields, deck.FieldSchemaVersion)
 	}
+	if m.addversion != nil {
+		fields = append(fields, deck.FieldVersion)
+	}
 	return fields
 }
 
@@ -4832,6 +5011,8 @@ func (m *DeckMutation) AddedField(name string) (ent.Value, bool) {
 	switch name {
 	case deck.FieldSchemaVersion:
 		return m.AddedSchemaVersion()
+	case deck.FieldVersion:
+		return m.AddedVersion()
 	}
 	return nil, false
 }
@@ -4847,6 +5028,13 @@ func (m *DeckMutation) AddField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.AddSchemaVersion(v)
+		return nil
+	case deck.FieldVersion:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddVersion(v)
 		return nil
 	}
 	return fmt.Errorf("unknown Deck numeric field %s", name)
@@ -4919,6 +5107,15 @@ func (m *DeckMutation) ResetField(name string) error {
 		return nil
 	case deck.FieldThumbnailReady:
 		m.ResetThumbnailReady()
+		return nil
+	case deck.FieldSessionID:
+		m.ResetSessionID()
+		return nil
+	case deck.FieldVersion:
+		m.ResetVersion()
+		return nil
+	case deck.FieldSourceSlug:
+		m.ResetSourceSlug()
 		return nil
 	case deck.FieldCreatedAt:
 		m.ResetCreatedAt()
@@ -5012,6 +5209,590 @@ func (m *DeckMutation) ResetEdge(name string) error {
 		return nil
 	}
 	return fmt.Errorf("unknown Deck edge %s", name)
+}
+
+// DeckVersionMutation represents an operation that mutates the DeckVersion nodes in the graph.
+type DeckVersionMutation struct {
+	config
+	op            Op
+	typ           string
+	id            *uuid.UUID
+	deck_slug     *string
+	version       *int
+	addversion    *int
+	title         *string
+	snapshot      *string
+	created_at    *time.Time
+	clearedFields map[string]struct{}
+	done          bool
+	oldValue      func(context.Context) (*DeckVersion, error)
+	predicates    []predicate.DeckVersion
+}
+
+var _ ent.Mutation = (*DeckVersionMutation)(nil)
+
+// deckversionOption allows management of the mutation configuration using functional options.
+type deckversionOption func(*DeckVersionMutation)
+
+// newDeckVersionMutation creates new mutation for the DeckVersion entity.
+func newDeckVersionMutation(c config, op Op, opts ...deckversionOption) *DeckVersionMutation {
+	m := &DeckVersionMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeDeckVersion,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withDeckVersionID sets the ID field of the mutation.
+func withDeckVersionID(id uuid.UUID) deckversionOption {
+	return func(m *DeckVersionMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *DeckVersion
+		)
+		m.oldValue = func(ctx context.Context) (*DeckVersion, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().DeckVersion.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withDeckVersion sets the old DeckVersion of the mutation.
+func withDeckVersion(node *DeckVersion) deckversionOption {
+	return func(m *DeckVersionMutation) {
+		m.oldValue = func(context.Context) (*DeckVersion, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m DeckVersionMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m DeckVersionMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("team: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of DeckVersion entities.
+func (m *DeckVersionMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *DeckVersionMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *DeckVersionMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().DeckVersion.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetDeckSlug sets the "deck_slug" field.
+func (m *DeckVersionMutation) SetDeckSlug(s string) {
+	m.deck_slug = &s
+}
+
+// DeckSlug returns the value of the "deck_slug" field in the mutation.
+func (m *DeckVersionMutation) DeckSlug() (r string, exists bool) {
+	v := m.deck_slug
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDeckSlug returns the old "deck_slug" field's value of the DeckVersion entity.
+// If the DeckVersion object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DeckVersionMutation) OldDeckSlug(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDeckSlug is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDeckSlug requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDeckSlug: %w", err)
+	}
+	return oldValue.DeckSlug, nil
+}
+
+// ResetDeckSlug resets all changes to the "deck_slug" field.
+func (m *DeckVersionMutation) ResetDeckSlug() {
+	m.deck_slug = nil
+}
+
+// SetVersion sets the "version" field.
+func (m *DeckVersionMutation) SetVersion(i int) {
+	m.version = &i
+	m.addversion = nil
+}
+
+// Version returns the value of the "version" field in the mutation.
+func (m *DeckVersionMutation) Version() (r int, exists bool) {
+	v := m.version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldVersion returns the old "version" field's value of the DeckVersion entity.
+// If the DeckVersion object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DeckVersionMutation) OldVersion(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldVersion is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldVersion requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldVersion: %w", err)
+	}
+	return oldValue.Version, nil
+}
+
+// AddVersion adds i to the "version" field.
+func (m *DeckVersionMutation) AddVersion(i int) {
+	if m.addversion != nil {
+		*m.addversion += i
+	} else {
+		m.addversion = &i
+	}
+}
+
+// AddedVersion returns the value that was added to the "version" field in this mutation.
+func (m *DeckVersionMutation) AddedVersion() (r int, exists bool) {
+	v := m.addversion
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetVersion resets all changes to the "version" field.
+func (m *DeckVersionMutation) ResetVersion() {
+	m.version = nil
+	m.addversion = nil
+}
+
+// SetTitle sets the "title" field.
+func (m *DeckVersionMutation) SetTitle(s string) {
+	m.title = &s
+}
+
+// Title returns the value of the "title" field in the mutation.
+func (m *DeckVersionMutation) Title() (r string, exists bool) {
+	v := m.title
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTitle returns the old "title" field's value of the DeckVersion entity.
+// If the DeckVersion object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DeckVersionMutation) OldTitle(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTitle is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTitle requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTitle: %w", err)
+	}
+	return oldValue.Title, nil
+}
+
+// ResetTitle resets all changes to the "title" field.
+func (m *DeckVersionMutation) ResetTitle() {
+	m.title = nil
+}
+
+// SetSnapshot sets the "snapshot" field.
+func (m *DeckVersionMutation) SetSnapshot(s string) {
+	m.snapshot = &s
+}
+
+// Snapshot returns the value of the "snapshot" field in the mutation.
+func (m *DeckVersionMutation) Snapshot() (r string, exists bool) {
+	v := m.snapshot
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSnapshot returns the old "snapshot" field's value of the DeckVersion entity.
+// If the DeckVersion object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DeckVersionMutation) OldSnapshot(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSnapshot is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSnapshot requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSnapshot: %w", err)
+	}
+	return oldValue.Snapshot, nil
+}
+
+// ResetSnapshot resets all changes to the "snapshot" field.
+func (m *DeckVersionMutation) ResetSnapshot() {
+	m.snapshot = nil
+}
+
+// SetCreatedAt sets the "created_at" field.
+func (m *DeckVersionMutation) SetCreatedAt(t time.Time) {
+	m.created_at = &t
+}
+
+// CreatedAt returns the value of the "created_at" field in the mutation.
+func (m *DeckVersionMutation) CreatedAt() (r time.Time, exists bool) {
+	v := m.created_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedAt returns the old "created_at" field's value of the DeckVersion entity.
+// If the DeckVersion object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DeckVersionMutation) OldCreatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedAt: %w", err)
+	}
+	return oldValue.CreatedAt, nil
+}
+
+// ResetCreatedAt resets all changes to the "created_at" field.
+func (m *DeckVersionMutation) ResetCreatedAt() {
+	m.created_at = nil
+}
+
+// Where appends a list predicates to the DeckVersionMutation builder.
+func (m *DeckVersionMutation) Where(ps ...predicate.DeckVersion) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the DeckVersionMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *DeckVersionMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.DeckVersion, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *DeckVersionMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *DeckVersionMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (DeckVersion).
+func (m *DeckVersionMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *DeckVersionMutation) Fields() []string {
+	fields := make([]string, 0, 5)
+	if m.deck_slug != nil {
+		fields = append(fields, deckversion.FieldDeckSlug)
+	}
+	if m.version != nil {
+		fields = append(fields, deckversion.FieldVersion)
+	}
+	if m.title != nil {
+		fields = append(fields, deckversion.FieldTitle)
+	}
+	if m.snapshot != nil {
+		fields = append(fields, deckversion.FieldSnapshot)
+	}
+	if m.created_at != nil {
+		fields = append(fields, deckversion.FieldCreatedAt)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *DeckVersionMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case deckversion.FieldDeckSlug:
+		return m.DeckSlug()
+	case deckversion.FieldVersion:
+		return m.Version()
+	case deckversion.FieldTitle:
+		return m.Title()
+	case deckversion.FieldSnapshot:
+		return m.Snapshot()
+	case deckversion.FieldCreatedAt:
+		return m.CreatedAt()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *DeckVersionMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case deckversion.FieldDeckSlug:
+		return m.OldDeckSlug(ctx)
+	case deckversion.FieldVersion:
+		return m.OldVersion(ctx)
+	case deckversion.FieldTitle:
+		return m.OldTitle(ctx)
+	case deckversion.FieldSnapshot:
+		return m.OldSnapshot(ctx)
+	case deckversion.FieldCreatedAt:
+		return m.OldCreatedAt(ctx)
+	}
+	return nil, fmt.Errorf("unknown DeckVersion field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *DeckVersionMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case deckversion.FieldDeckSlug:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDeckSlug(v)
+		return nil
+	case deckversion.FieldVersion:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetVersion(v)
+		return nil
+	case deckversion.FieldTitle:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTitle(v)
+		return nil
+	case deckversion.FieldSnapshot:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSnapshot(v)
+		return nil
+	case deckversion.FieldCreatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown DeckVersion field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *DeckVersionMutation) AddedFields() []string {
+	var fields []string
+	if m.addversion != nil {
+		fields = append(fields, deckversion.FieldVersion)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *DeckVersionMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case deckversion.FieldVersion:
+		return m.AddedVersion()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *DeckVersionMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case deckversion.FieldVersion:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddVersion(v)
+		return nil
+	}
+	return fmt.Errorf("unknown DeckVersion numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *DeckVersionMutation) ClearedFields() []string {
+	return nil
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *DeckVersionMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *DeckVersionMutation) ClearField(name string) error {
+	return fmt.Errorf("unknown DeckVersion nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *DeckVersionMutation) ResetField(name string) error {
+	switch name {
+	case deckversion.FieldDeckSlug:
+		m.ResetDeckSlug()
+		return nil
+	case deckversion.FieldVersion:
+		m.ResetVersion()
+		return nil
+	case deckversion.FieldTitle:
+		m.ResetTitle()
+		return nil
+	case deckversion.FieldSnapshot:
+		m.ResetSnapshot()
+		return nil
+	case deckversion.FieldCreatedAt:
+		m.ResetCreatedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown DeckVersion field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *DeckVersionMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *DeckVersionMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *DeckVersionMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *DeckVersionMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *DeckVersionMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *DeckVersionMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *DeckVersionMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown DeckVersion unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *DeckVersionMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown DeckVersion edge %s", name)
 }
 
 // DrillReportMutation represents an operation that mutates the DrillReport nodes in the graph.

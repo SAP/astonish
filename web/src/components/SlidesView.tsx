@@ -1,13 +1,13 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
-import { Presentation, Trash2, ArrowLeft, Clock, Upload, GitFork, FileUp, Layers } from 'lucide-react'
+import { Presentation, Trash2, ArrowLeft, Clock, Upload, GitFork, Layers, Plus, Sparkles, History, RotateCcw } from 'lucide-react'
 import {
   listSlidesDecks,
-  listSlidesTemplates,
-  importSlidesTemplate,
   deleteSlidesDeck,
   deckSlideThumbnailUrl,
+  listDeckVersions,
+  restoreDeckVersion,
   type SlidesDeckListItem,
-  type SlidesTemplate,
+  type SlidesDeckVersionSnapshot,
   type DocsScope,
 } from '../api/slides'
 import SlidesDeckView from './chat/SlidesDeckView'
@@ -21,9 +21,10 @@ interface SlidesViewProps {
   onNavigate?: (path: string) => void
   onPublishDeck?: (deck: SlidesDeckListItem) => void
   onForkDeck?: (deck: SlidesDeckListItem) => void
+  onCreateSlide?: (message: string) => void
 }
 
-function EmptyState() {
+function EmptyState({ onCreateSlide }: { onCreateSlide?: (message: string) => void }) {
   return (
     <div className="flex flex-1 items-center justify-center">
       <div className="text-center">
@@ -32,6 +33,17 @@ function EmptyState() {
         <p className="max-w-md text-sm text-muted-foreground">
           No slide decks yet. Ask in Chat to build a presentation, then it appears here.
         </p>
+        {onCreateSlide && (
+          <button
+            onClick={() => onCreateSlide('I want to create a new slide presentation. Please load the slides skill and help me build a deck.')}
+            className="mt-4 flex cursor-pointer items-center gap-1.5 rounded-md px-4 py-2 text-sm font-medium text-white transition-colors mx-auto"
+            style={{ background: 'var(--accent, #6366f1)' }}
+            data-testid="create-slide-button-empty"
+          >
+            <Plus size={16} />
+            Create Slide
+          </button>
+        )}
       </div>
     </div>
   )
@@ -131,6 +143,7 @@ function DeckCard({
   onPublish,
   onFork,
   onDelete,
+  onEnhance,
 }: {
   deck: SlidesDeckListItem
   isPlatformMode?: boolean
@@ -138,6 +151,7 @@ function DeckCard({
   onPublish?: (deck: SlidesDeckListItem) => void
   onFork?: (deck: SlidesDeckListItem) => void
   onDelete: (deck: SlidesDeckListItem) => void
+  onEnhance?: (deck: SlidesDeckListItem) => void
 }) {
   const scope: DocsScope = deck.scope ?? 'personal'
 
@@ -184,6 +198,16 @@ function DeckCard({
         </div>
         <div className="flex items-center gap-2" onClick={e => e.stopPropagation()}>
           <div className="flex gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+            {onEnhance && (
+              <button
+                onClick={e => { e.stopPropagation(); onEnhance(deck) }}
+                className="rounded p-1 transition-all hover:bg-purple-500/20"
+                title="Enhance with AI"
+                data-testid="slides-enhance-btn"
+              >
+                <Sparkles size={12} className="text-purple-400" />
+              </button>
+            )}
             {isPlatformMode && scope === 'personal' && onPublish && (
               <button
                 onClick={e => { e.stopPropagation(); onPublish(deck) }}
@@ -237,53 +261,22 @@ export function TemplateSwatches({ tokens }: { tokens?: Record<string, string> }
   )
 }
 
-export default function SlidesView({ theme, deckSlug, templatesView, isPlatformMode, onNavigate, onPublishDeck, onForkDeck }: SlidesViewProps) {
+export default function SlidesView({ theme, deckSlug, templatesView, isPlatformMode, onNavigate, onPublishDeck, onForkDeck, onCreateSlide }: SlidesViewProps) {
   void theme
   const [decks, setDecks] = useState<SlidesDeckListItem[]>([])
   const [loading, setLoading] = useState(true)
   const [selectedSlug, setSelectedSlug] = useState<string | null>(deckSlug || null)
   const [deleteConfirm, setDeleteConfirm] = useState<{ slug: string; title: string; scope: DocsScope } | null>(null)
-  const [templates, setTemplates] = useState<SlidesTemplate[]>([])
-  const [importing, setImporting] = useState(false)
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null)
-  const fileInputRef = useRef<HTMLInputElement>(null)
+  const [versions, setVersions] = useState<SlidesDeckVersionSnapshot[]>([])
+  const [showVersions, setShowVersions] = useState(false)
+  const [restoringVersion, setRestoringVersion] = useState<number | null>(null)
 
   const showToast = useCallback((message: string, type: 'success' | 'error') => {
     setToast({ message, type })
     setTimeout(() => setToast(null), 4000)
   }, [])
 
-  const loadTemplates = useCallback(async () => {
-    try {
-      const data = await listSlidesTemplates()
-      setTemplates(data.templates || [])
-    } catch {
-      // Templates are best-effort; ignore load failures.
-    }
-  }, [])
-
-  useEffect(() => { loadTemplates() }, [loadTemplates])
-
-  const handleImportClick = useCallback(() => {
-    fileInputRef.current?.click()
-  }, [])
-
-  const handleImportFile = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    e.target.value = '' // Reset so the same file can be re-selected.
-    if (!file) return
-    setImporting(true)
-    try {
-      const { template } = await importSlidesTemplate(file)
-      await loadTemplates()
-      window.dispatchEvent(new CustomEvent('astonish:slides-updated'))
-      showToast(`Imported template "${template.label || template.name}"`, 'success')
-    } catch (err) {
-      showToast(`Failed to import template: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
-    } finally {
-      setImporting(false)
-    }
-  }, [loadTemplates, showToast])
 
   const loadDecks = useCallback(async () => {
     try {
@@ -334,6 +327,46 @@ export default function SlidesView({ theme, deckSlug, templatesView, isPlatformM
     setDeleteConfirm(null)
   }, [selectedSlug, onNavigate])
 
+  const handleEnhance = useCallback((deck: SlidesDeckListItem) => {
+    onCreateSlide?.(`I want to refine my slide deck "${deck.title}" (slug: ${deck.slug}). Please load the slides skill, then create a working copy using create_deck with source="${deck.slug}" and slug="${deck.slug}-draft". This creates a session copy of my saved deck. Then call get_deck on the new "${deck.slug}-draft" deck to see its slides, and ask me what I'd like to change. Important: modify slides in the "${deck.slug}-draft" deck using write_slide — do NOT create any other new decks.`)
+  }, [onCreateSlide])
+
+  const loadVersions = useCallback(async (slug: string, scope: DocsScope) => {
+    try {
+      const result = await listDeckVersions(slug, scope)
+      setVersions(result.versions ?? [])
+    } catch {
+      setVersions([])
+    }
+  }, [])
+
+  const handleToggleVersions = useCallback(() => {
+    if (!showVersions && selectedSlug) {
+      const scope: DocsScope = selectedDeck?.scope ?? 'personal'
+      loadVersions(selectedSlug, scope)
+    }
+    setShowVersions(v => !v)
+  }, [showVersions, selectedSlug, selectedDeck, loadVersions])
+
+  const handleRestoreVersion = useCallback(async (version: number) => {
+    if (!selectedSlug) return
+    const scope: DocsScope = selectedDeck?.scope ?? 'personal'
+    setRestoringVersion(version)
+    try {
+      await restoreDeckVersion(selectedSlug, version, scope)
+      showToast(`Restored version ${version}`, 'success')
+      setShowVersions(false)
+      loadDecks()
+      // Force SlidesDeckView to refetch by toggling selectedSlug
+      setSelectedSlug(null)
+      setTimeout(() => setSelectedSlug(selectedSlug), 50)
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Failed to restore version', 'error')
+    } finally {
+      setRestoringVersion(null)
+    }
+  }, [selectedSlug, selectedDeck, showToast, loadDecks])
+
   const personalDecks = isPlatformMode ? decks.filter(d => (d.scope ?? 'personal') === 'personal') : decks
   const teamDecks = isPlatformMode ? decks.filter(d => d.scope === 'team') : []
   const hasDecks = personalDecks.length > 0 || teamDecks.length > 0
@@ -370,7 +403,7 @@ export default function SlidesView({ theme, deckSlug, templatesView, isPlatformM
           style={{ borderBottom: '1px solid var(--border-color)', background: 'var(--bg-secondary)' }}
         >
           <button
-            onClick={() => { setSelectedSlug(null); onNavigate?.('/slides') }}
+            onClick={() => { setSelectedSlug(null); setShowVersions(false); onNavigate?.('/slides') }}
             className="flex cursor-pointer items-center gap-1 rounded px-2 py-1 text-xs transition-colors"
             style={{ color: 'var(--text-secondary)' }}
           >
@@ -382,8 +415,75 @@ export default function SlidesView({ theme, deckSlug, templatesView, isPlatformM
             <span className="truncate text-sm font-medium" style={{ color: 'var(--text-primary)' }}>
               {selectedDeck?.title || selectedSlug}
             </span>
+            {(selectedDeck?.version ?? 0) > 1 && (
+              <span className="text-xs rounded px-1.5 py-0.5" style={{ background: 'var(--bg-tertiary)', color: 'var(--text-muted)' }}>
+                v{selectedDeck?.version}
+              </span>
+            )}
           </div>
+          <button
+            onClick={handleToggleVersions}
+            className="flex items-center gap-1 rounded px-2 py-1.5 text-xs transition-colors"
+            style={{
+              color: showVersions ? 'var(--brand)' : 'var(--text-secondary)',
+              background: showVersions ? 'var(--brand-soft)' : 'transparent',
+            }}
+            title="Version history"
+          >
+            <History size={14} />
+            History
+          </button>
         </div>
+
+        {/* Version history panel */}
+        {showVersions && (
+          <div
+            className="shrink-0 overflow-auto border-b px-4 py-3"
+            style={{ borderColor: 'var(--border-color)', background: 'var(--bg-secondary)', maxHeight: '200px' }}
+          >
+            {versions.length === 0 ? (
+              <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
+                No previous versions. Versions are created when you override-save a deck.
+              </p>
+            ) : (
+              <div className="flex flex-col gap-1.5">
+                <p className="mb-1 text-xs font-medium" style={{ color: 'var(--text-secondary)' }}>
+                  Previous versions ({versions.length})
+                </p>
+                {versions.map(v => (
+                  <div
+                    key={v.version}
+                    className="flex items-center justify-between rounded px-2.5 py-1.5 text-xs"
+                    style={{ background: 'var(--bg-primary)', border: '1px solid var(--border-color)' }}
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium" style={{ color: 'var(--text-primary)' }}>
+                        v{v.version}
+                      </span>
+                      <span style={{ color: 'var(--text-muted)' }}>
+                        {v.title}
+                      </span>
+                      <span style={{ color: 'var(--text-muted)' }}>
+                        {new Date(v.createdAt).toLocaleDateString()}
+                      </span>
+                    </div>
+                    <button
+                      onClick={() => handleRestoreVersion(v.version)}
+                      disabled={restoringVersion !== null}
+                      className="flex items-center gap-1 rounded px-2 py-1 text-xs transition-colors hover:opacity-80 disabled:opacity-50"
+                      style={{ color: 'var(--brand)' }}
+                      title={`Restore version ${v.version}`}
+                    >
+                      <RotateCcw size={12} />
+                      {restoringVersion === v.version ? 'Restoring…' : 'Restore'}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
         <div className="min-h-0 flex-1 overflow-auto p-4">
           <SlidesDeckView deckSlug={selectedSlug} scope={scope} fillHeight />
         </div>
@@ -400,7 +500,7 @@ export default function SlidesView({ theme, deckSlug, templatesView, isPlatformM
   }
 
   if (!hasDecks) {
-    return <EmptyState />
+    return <EmptyState onCreateSlide={onCreateSlide} />
   }
 
   const renderCard = (deck: SlidesDeckListItem) => (
@@ -412,6 +512,7 @@ export default function SlidesView({ theme, deckSlug, templatesView, isPlatformM
       onPublish={onPublishDeck}
       onFork={onForkDeck}
       onDelete={d => setDeleteConfirm({ slug: d.slug, title: d.title, scope: d.scope ?? 'personal' })}
+      onEnhance={onCreateSlide ? handleEnhance : undefined}
     />
   )
 
@@ -425,38 +526,25 @@ export default function SlidesView({ theme, deckSlug, templatesView, isPlatformM
             {decks.length}
           </span>
           <button
+            onClick={() => onCreateSlide?.('I want to create a new slide presentation. Please load the slides skill and help me build a deck.')}
+            className="ml-auto flex cursor-pointer items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-white transition-colors"
+            style={{ background: 'var(--accent, #6366f1)' }}
+            title="Create a new slide deck with AI"
+            data-testid="create-slide-button"
+          >
+            <Plus size={14} />
+            Create Slide
+          </button>
+          <button
             onClick={() => onNavigate?.('/slides/templates')}
-            className="ml-auto flex cursor-pointer items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs transition-colors"
+            className="flex cursor-pointer items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs transition-colors"
             style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-color)', color: 'var(--text-secondary)' }}
             title="Manage slide templates"
             data-testid="manage-templates-link"
           >
             <Layers size={14} />
             Templates
-            {templates.length > 0 && (
-              <span className="rounded-full px-1 text-[10px]" style={{ background: 'var(--bg-tertiary)', color: 'var(--text-muted)' }}>
-                {templates.length}
-              </span>
-            )}
           </button>
-          <button
-            onClick={handleImportClick}
-            disabled={importing}
-            className="flex cursor-pointer items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs transition-colors disabled:cursor-default disabled:opacity-60"
-            style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-color)', color: 'var(--text-secondary)' }}
-            title="Import a .pptx file as a slide template"
-          >
-            <FileUp size={14} />
-            {importing ? 'Importing…' : 'Import .pptx template'}
-          </button>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".pptx"
-            onChange={handleImportFile}
-            className="hidden"
-            data-testid="template-import-input"
-          />
         </div>
 
         {isPlatformMode && (personalDecks.length > 0 || teamDecks.length > 0) ? (

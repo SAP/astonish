@@ -27,6 +27,13 @@ type DeckManifest struct {
 	// static PNG thumbnail. Used by the list DTO so the frontend can skip
 	// issuing an image request for decks that have no thumbnails.
 	ThumbnailReady bool      `json:"thumbnailReady,omitempty"`
+	// SessionID links the deck to the chat session that created it. Empty
+	// means the deck is saved/permanent; non-empty means session-scoped.
+	SessionID   string `json:"sessionId,omitempty"`
+	// Version is the current version number (bumps on override-save).
+	Version     int    `json:"version"`
+	// SourceSlug links an enhance-copy to the saved deck it was cloned from.
+	SourceSlug  string `json:"sourceSlug,omitempty"`
 	CreatedAt      time.Time `json:"createdAt"`
 	UpdatedAt      time.Time `json:"updatedAt"`
 	// Scope is a non-persisted, in-memory annotation ("personal" or "team")
@@ -72,4 +79,26 @@ type DocsStore interface {
 	ListSlides(context.Context, string) ([]*SlideContent, error)
 	DeleteSlide(context.Context, string, string) error
 	ReorderSlides(context.Context, string, []string) error
+
+	// DeleteDecksBySessionID removes all decks (and their slides) that belong
+	// to the given session. Used for cascade cleanup when a session is deleted.
+	DeleteDecksBySessionID(ctx context.Context, sessionID string) error
+
+	// SaveDeckVersion archives a snapshot of a deck at a version number.
+	// Implementations should prune versions exceeding 5 per deck.
+	SaveDeckVersion(ctx context.Context, v *DeckVersionSnapshot) error
+	// ListDeckVersions returns all archived versions for a deck, newest first.
+	ListDeckVersions(ctx context.Context, deckSlug string) ([]*DeckVersionSnapshot, error)
+	// GetDeckVersion retrieves a specific version snapshot.
+	GetDeckVersion(ctx context.Context, deckSlug string, version int) (*DeckVersionSnapshot, error)
+}
+
+// DeckVersionSnapshot is a historical snapshot of a deck at a specific version.
+type DeckVersionSnapshot struct {
+	ID        string    `json:"id"`
+	DeckSlug  string    `json:"deckSlug"`
+	Version   int       `json:"version"`
+	Title     string    `json:"title"`
+	Snapshot  string    `json:"snapshot"` // JSON: {theme, assets, slides[]}
+	CreatedAt time.Time `json:"createdAt"`
 }

@@ -23,6 +23,9 @@ export interface SlidesDeck {
   description?: string
   schemaVersion: number
   theme?: Record<string, string>
+  sessionId?: string
+  version?: number
+  sourceSlug?: string
 }
 
 export interface SlidesSlide {
@@ -54,6 +57,9 @@ export interface SlidesDeckListItem {
   updatedAt?: string
   slideCount?: number
   thumbnailReady?: boolean
+  sessionId?: string
+  version?: number
+  sourceSlug?: string
 }
 
 export type SlidesExportFormat = 'pdf' | 'pptx' | 'html'
@@ -252,4 +258,53 @@ export async function recolorSlidesTemplate(
     body: JSON.stringify({ tokens }),
   })
   if (!response.ok) throw await responseError(response, 'Failed to recolor template')
+}
+
+/** Version snapshot returned by the versions endpoint. */
+export interface SlidesDeckVersionSnapshot {
+  id: string
+  deckSlug: string
+  version: number
+  title: string
+  snapshot: string
+  createdAt: string
+}
+
+/** Save (copy) a session-scoped deck to permanent storage. */
+export async function saveDeck(
+  deckSlug: string,
+  body: { targetSlug: string; title?: string },
+  scope: DocsScope = 'personal',
+): Promise<SlidesDeckResponse> {
+  const response = await teamFetch(withScope(`${DOCS_BASE}/slides/${encodeURIComponent(deckSlug)}/save`, scope), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!response.ok) throw await responseError(response, 'Failed to save deck')
+  return response.json() as Promise<SlidesDeckResponse>
+}
+
+/** List version history for a saved deck. */
+export async function listDeckVersions(
+  deckSlug: string,
+  scope: DocsScope = 'personal',
+): Promise<{ versions: SlidesDeckVersionSnapshot[] }> {
+  const response = await teamFetch(withScope(`${DOCS_BASE}/slides/${encodeURIComponent(deckSlug)}/versions`, scope))
+  if (!response.ok) throw await responseError(response, 'Failed to list deck versions')
+  return response.json() as Promise<{ versions: SlidesDeckVersionSnapshot[] }>
+}
+
+/** Restore a specific version of a deck. */
+export async function restoreDeckVersion(
+  deckSlug: string,
+  version: number,
+  scope: DocsScope = 'personal',
+): Promise<SlidesDeckResponse> {
+  const response = await teamFetch(
+    withScope(`${DOCS_BASE}/slides/${encodeURIComponent(deckSlug)}/versions/${version}/restore`, scope),
+    { method: 'POST' },
+  )
+  if (!response.ok) throw await responseError(response, 'Failed to restore deck version')
+  return response.json() as Promise<SlidesDeckResponse>
 }

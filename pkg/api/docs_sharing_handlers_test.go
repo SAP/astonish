@@ -103,6 +103,24 @@ func (m *memDocsStore) ListSlides(_ context.Context, deckID string) ([]*store.Sl
 }
 func (m *memDocsStore) DeleteSlide(context.Context, string, string) error     { return nil }
 func (m *memDocsStore) ReorderSlides(context.Context, string, []string) error { return nil }
+func (m *memDocsStore) DeleteDecksBySessionID(_ context.Context, sessionID string) error {
+	for slug, d := range m.decks {
+		if d.SessionID == sessionID {
+			delete(m.slides, d.ID)
+			delete(m.decks, slug)
+		}
+	}
+	return nil
+}
+func (m *memDocsStore) SaveDeckVersion(context.Context, *store.DeckVersionSnapshot) error {
+	return nil
+}
+func (m *memDocsStore) ListDeckVersions(context.Context, string) ([]*store.DeckVersionSnapshot, error) {
+	return nil, nil
+}
+func (m *memDocsStore) GetDeckVersion(context.Context, string, int) (*store.DeckVersionSnapshot, error) {
+	return nil, store.ErrDocsNotFound
+}
 
 var _ store.DocsStore = (*memDocsStore)(nil)
 

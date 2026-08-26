@@ -40,6 +40,9 @@ type slidesDeckDTO struct {
 	SchemaVersion int               `json:"schemaVersion"`
 	Theme         map[string]string `json:"theme,omitempty"`
 	Scope         string            `json:"scope,omitempty"`
+	SessionID     string            `json:"sessionId,omitempty"`
+	Version       int               `json:"version,omitempty"`
+	SourceSlug    string            `json:"sourceSlug,omitempty"`
 	CreatedAt     time.Time         `json:"createdAt"`
 	UpdatedAt     time.Time         `json:"updatedAt"`
 }
@@ -57,6 +60,9 @@ type slidesDeckListItem struct {
 	SchemaVersion  int       `json:"schemaVersion"`
 	Scope          string    `json:"scope,omitempty"`
 	ThumbnailReady bool      `json:"thumbnailReady,omitempty"`
+	SessionID      string    `json:"sessionId,omitempty"`
+	Version        int       `json:"version,omitempty"`
+	SourceSlug     string    `json:"sourceSlug,omitempty"`
 	CreatedAt      time.Time `json:"createdAt"`
 	UpdatedAt      time.Time `json:"updatedAt"`
 }
@@ -74,6 +80,9 @@ func slimDeck(d *store.DeckManifest) slidesDeckListItem {
 		SchemaVersion:  d.SchemaVersion,
 		Scope:          d.Scope,
 		ThumbnailReady: d.ThumbnailReady,
+		SessionID:      d.SessionID,
+		Version:        d.Version,
+		SourceSlug:     d.SourceSlug,
 		CreatedAt:      d.CreatedAt,
 		UpdatedAt:      d.UpdatedAt,
 	}
@@ -93,6 +102,9 @@ func slimDeckFull(d *store.DeckManifest) *slidesDeckDTO {
 		SchemaVersion: d.SchemaVersion,
 		Theme:         d.Theme,
 		Scope:         d.Scope,
+		SessionID:     d.SessionID,
+		Version:       d.Version,
+		SourceSlug:    d.SourceSlug,
 		CreatedAt:     d.CreatedAt,
 		UpdatedAt:     d.UpdatedAt,
 	}
@@ -467,6 +479,12 @@ func exportSlidesHTML(w http.ResponseWriter, r *http.Request, print bool) (slide
 	if !ok {
 		return slides.ExportResult{}, false
 	}
+	// If the deck has no slides yet (e.g. freshly cloned, still being built),
+	// return a minimal empty-state HTML document instead of failing with a 500.
+	if len(scene.Slides) == 0 {
+		empty := []byte(`<!doctype html><html><head><meta charset="utf-8"><title>` + scene.Title + `</title><style>body{display:flex;align-items:center;justify-content:center;height:100vh;margin:0;font-family:system-ui;color:#64748b;background:#0f172a}</style></head><body><p>Generating slides…</p></body></html>`)
+		return slides.ExportResult{Bytes: empty}, true
+	}
 	result, err := (slides.HTMLExporter{RuntimeJS: webassets.GetSlidesRuntime(), Print: print}).Export(scene)
 	if err != nil {
 		slog.Error("slides HTML render failed", "deck", mux.Vars(r)["deckSlug"], "error", err)
@@ -536,6 +554,258 @@ func setSlidesDocumentHeaders(w http.ResponseWriter, download bool) {
 
 func attachmentName(slug, extension string) string {
 	return fmt.Sprintf("attachment; filename=%q", slug+"."+extension)
+}
+
+// --- Save / Versions / Restore handlers ---
+
+// saveSlidesDeckRequest is the JSON body for POST /api/docs/slides/{deckSlug}/save.
+type saveSlidesDeckRequest struct {
+	TargetSlug string `json:"targetSlug"`
+	Title      string `json:"title"`
+	Override   bool   `json:"override"`
+}
+
+// deckSnapshotPayload is the JSON structure stored inside DeckVersionSnapshot.Snapshot.
+type deckSnapshotPayload struct {
+	Theme         map[string]string `json:"theme,omitempty"`
+	Assets        map[string]string `json:"assets,omitempty"`
+	Slides        []*store.SlideContent `json:"slides"`
+	TemplateModel string            `json:"templateModel,omitempty"`
+}
+
+// SaveSlidesDeckHandler handles POST /api/docs/slides/{deckSlug}/save.
+// It copies a session-scoped deck into permanent storage. The session deck remains
+// unchanged (like Apps: the session continues with its own copy).
+// Body JSON: { "name": "my-deck-name" }
+// - If a saved deck with that name (slug) already exists: archives the old version
+//   (up to 5), then overwrites it with the current session deck content. Version is bumped.
+// - If no saved deck with that name exists: creates a new permanent deck.
+// The session deck is NEVER deleted or modified — it stays in the session for further edits.
+func SaveSlidesDeckHandler(w http.ResponseWriter, r *http.Request) {
+	svc, ok := requireDocsService(w, r)
+	if !ok {
+		return
+	}
+	ctx := r.Context()
+	deckSlug := mux.Vars(r)["deckSlug"]
+
+	var req saveSlidesDeckRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		req = saveSlidesDeckRequest{}
+	}
+
+	// Load the source deck.
+	sourceDeck, sourceSlides, err := svc.Deck(ctx, deckSlug)
+	if err != nil {
+		writeSlidesError(w, err)
+		return
+	}
+
+	// The source deck must be session-scoped (non-empty SessionID).
+	if sourceDeck.SessionID == "" {
+		http.Error(w, "deck is already saved", http.StatusBadRequest)
+		return
+	}
+
+	// A name (target slug) is required — the user must choose a name.
+	targetSlug := strings.TrimSpace(req.TargetSlug)
+	if targetSlug == "" {
+		http.Error(w, "name is required: provide targetSlug", http.StatusBadRequest)
+		return
+	}
+
+	// Check if a saved deck with that slug already exists.
+	existingDeck, _ := svc.Store.GetDeck(ctx, targetSlug)
+
+	if existingDeck != nil && existingDeck.SessionID == "" {
+		// Existing saved deck found — archive it and overwrite (version bump).
+		existingSlides, _ := svc.Store.ListSlides(ctx, existingDeck.ID)
+		snapPayload, _ := json.Marshal(deckSnapshotPayload{
+			Theme:         existingDeck.Theme,
+			Assets:        existingDeck.Assets,
+			Slides:        existingSlides,
+			TemplateModel: existingDeck.TemplateModel,
+		})
+		snapshot := &store.DeckVersionSnapshot{
+			DeckSlug: existingDeck.Slug,
+			Version:  existingDeck.Version,
+			Title:    existingDeck.Title,
+			Snapshot: string(snapPayload),
+		}
+		if err := svc.Store.SaveDeckVersion(ctx, snapshot); err != nil {
+			slog.Warn("save deck version failed", "deck", existingDeck.Slug, "error", err)
+		}
+
+		// Overwrite with source content.
+		overrideTitle := strings.TrimSpace(req.Title)
+		if overrideTitle == "" {
+			overrideTitle = sourceDeck.Title
+		}
+		existingDeck.Title = overrideTitle
+		existingDeck.Theme = sourceDeck.Theme
+		existingDeck.Assets = sourceDeck.Assets
+		existingDeck.TemplateModel = sourceDeck.TemplateModel
+		existingDeck.ThumbnailReady = sourceDeck.ThumbnailReady
+		existingDeck.Version++
+		if err := svc.Store.UpdateDeck(ctx, existingDeck); err != nil {
+			writeSlidesError(w, err)
+			return
+		}
+
+		// Replace slides on existing deck.
+		for _, s := range existingSlides {
+			_ = svc.Store.DeleteSlide(ctx, existingDeck.ID, s.ID)
+		}
+		for _, s := range sourceSlides {
+			slide := &store.SlideContent{
+				ID: "", DeckID: existingDeck.ID, Position: s.Position,
+				Title: s.Title, Content: s.Content, Notes: s.Notes,
+				ThumbnailRef: s.ThumbnailRef, SchemaVersion: s.SchemaVersion,
+			}
+			_ = svc.Store.UpsertSlide(ctx, slide)
+		}
+
+		// Trigger best-effort thumbnail baking after override-save.
+		go bakeDeckThumbnails(ctx, svc, existingDeck.Slug, "save")
+
+		writeSlidesJSON(w, http.StatusOK, slidesDeckResponse{Deck: slimDeckFull(existingDeck), Slides: sourceSlides})
+	} else {
+		// No existing saved deck — create a new permanent deck with the target slug.
+		// Use the provided title, or fall back to the source deck's title.
+		title := strings.TrimSpace(req.Title)
+		if title == "" {
+			title = sourceDeck.Title
+		}
+		newDeck := &store.DeckManifest{
+			Slug:           targetSlug,
+			Title:          title,
+			Description:    sourceDeck.Description,
+			SchemaVersion:  sourceDeck.SchemaVersion,
+			Theme:          sourceDeck.Theme,
+			Assets:         sourceDeck.Assets,
+			TemplateModel:  sourceDeck.TemplateModel,
+			ThumbnailReady: sourceDeck.ThumbnailReady,
+			Version:        1,
+			// SessionID is empty = permanent/saved
+		}
+		if err := svc.Store.CreateDeck(ctx, newDeck); err != nil {
+			http.Error(w, "failed to create saved deck: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		for _, s := range sourceSlides {
+			slide := &store.SlideContent{
+				ID: "", DeckID: newDeck.ID, Position: s.Position,
+				Title: s.Title, Content: s.Content, Notes: s.Notes,
+				ThumbnailRef: s.ThumbnailRef, SchemaVersion: s.SchemaVersion,
+			}
+			_ = svc.Store.UpsertSlide(ctx, slide)
+		}
+
+		// Trigger best-effort thumbnail baking for the saved deck so it shows
+		// preview images in the Slides view immediately.
+		go bakeDeckThumbnails(ctx, svc, targetSlug, "save")
+
+		writeSlidesJSON(w, http.StatusOK, slidesDeckResponse{Deck: slimDeckFull(newDeck), Slides: sourceSlides})
+	}
+}
+
+// ListSlidesDeckVersionsHandler handles GET /api/docs/slides/{deckSlug}/versions.
+func ListSlidesDeckVersionsHandler(w http.ResponseWriter, r *http.Request) {
+	svc, ok := requireDocsService(w, r)
+	if !ok {
+		return
+	}
+	deckSlug := mux.Vars(r)["deckSlug"]
+	versions, err := svc.Store.ListDeckVersions(r.Context(), deckSlug)
+	if err != nil {
+		writeSlidesError(w, err)
+		return
+	}
+	if versions == nil {
+		versions = []*store.DeckVersionSnapshot{}
+	}
+	writeSlidesJSON(w, http.StatusOK, map[string]any{"versions": versions})
+}
+
+// RestoreSlidesDeckVersionHandler handles POST /api/docs/slides/{deckSlug}/versions/{version}/restore.
+func RestoreSlidesDeckVersionHandler(w http.ResponseWriter, r *http.Request) {
+	svc, ok := requireDocsService(w, r)
+	if !ok {
+		return
+	}
+	ctx := r.Context()
+	deckSlug := mux.Vars(r)["deckSlug"]
+	versionStr := mux.Vars(r)["version"]
+	version, err := strconv.Atoi(versionStr)
+	if err != nil || version < 1 {
+		http.Error(w, "version must be a positive integer", http.StatusBadRequest)
+		return
+	}
+
+	// Get the version snapshot to restore.
+	snapshot, err := svc.Store.GetDeckVersion(ctx, deckSlug, version)
+	if err != nil {
+		writeSlidesError(w, err)
+		return
+	}
+
+	// Load the current deck.
+	deck, currentSlides, err := svc.Deck(ctx, deckSlug)
+	if err != nil {
+		writeSlidesError(w, err)
+		return
+	}
+
+	// Archive the current state as a new version before restoring.
+	currentSnapPayload, _ := json.Marshal(deckSnapshotPayload{
+		Theme:         deck.Theme,
+		Assets:        deck.Assets,
+		Slides:        currentSlides,
+		TemplateModel: deck.TemplateModel,
+	})
+	archiveSnapshot := &store.DeckVersionSnapshot{
+		ID:       fmt.Sprintf("%s-v%d", deck.Slug, deck.Version),
+		DeckSlug: deck.Slug,
+		Version:  deck.Version,
+		Title:    deck.Title,
+		Snapshot: string(currentSnapPayload),
+	}
+	if err := svc.Store.SaveDeckVersion(ctx, archiveSnapshot); err != nil {
+		slog.Warn("archive current version failed", "deck", deckSlug, "error", err)
+	}
+
+	// Parse the snapshot payload.
+	var payload deckSnapshotPayload
+	if err := json.Unmarshal([]byte(snapshot.Snapshot), &payload); err != nil {
+		http.Error(w, "corrupt version snapshot", http.StatusInternalServerError)
+		return
+	}
+
+	// Restore deck metadata.
+	deck.Title = snapshot.Title
+	deck.Theme = payload.Theme
+	deck.Assets = payload.Assets
+	deck.TemplateModel = payload.TemplateModel
+	deck.Version++
+	if err := svc.Store.UpdateDeck(ctx, deck); err != nil {
+		writeSlidesError(w, err)
+		return
+	}
+
+	// Replace slides: delete existing, write restored slides.
+	for _, s := range currentSlides {
+		_ = svc.Store.DeleteSlide(ctx, deck.ID, s.ID)
+	}
+	for _, s := range payload.Slides {
+		slide := &store.SlideContent{
+			ID: s.ID, DeckID: deck.ID, Position: s.Position,
+			Title: s.Title, Content: s.Content, Notes: s.Notes,
+			ThumbnailRef: s.ThumbnailRef, SchemaVersion: s.SchemaVersion,
+		}
+		_ = svc.Store.UpsertSlide(ctx, slide)
+	}
+
+	writeSlidesJSON(w, http.StatusOK, slidesDeckResponse{Deck: slimDeckFull(deck), Slides: payload.Slides})
 }
 
 func writeSlidesJSON(w http.ResponseWriter, status int, value any) {

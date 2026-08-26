@@ -24,6 +24,8 @@ type Tx struct {
 	Credential *CredentialClient
 	// Deck is the client for interacting with the Deck builders.
 	Deck *DeckClient
+	// DeckVersion is the client for interacting with the DeckVersion builders.
+	DeckVersion *DeckVersionClient
 	// DrillReport is the client for interacting with the DrillReport builders.
 	DrillReport *DrillReportClient
 	// FleetMailboxMessage is the client for interacting with the FleetMailboxMessage builders.
@@ -205,6 +207,7 @@ func (tx *Tx) init() {
 	tx.ChatSessionEvent = NewChatSessionEventClient(tx.config)
 	tx.Credential = NewCredentialClient(tx.config)
 	tx.Deck = NewDeckClient(tx.config)
+	tx.DeckVersion = NewDeckVersionClient(tx.config)
 	tx.DrillReport = NewDrillReportClient(tx.config)
 	tx.FleetMailboxMessage = NewFleetMailboxMessageClient(tx.config)
 	tx.FleetMonitorState = NewFleetMonitorStateClient(tx.config)

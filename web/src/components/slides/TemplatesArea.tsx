@@ -1,10 +1,11 @@
-import { useState, useEffect, useCallback } from 'react'
-import { ArrowLeft, Copy, Trash2, Palette, Layers } from 'lucide-react'
+import { useState, useEffect, useCallback, useRef } from 'react'
+import { ArrowLeft, Copy, Trash2, Palette, Layers, FileUp } from 'lucide-react'
 import {
   listSlidesTemplates,
   deleteSlidesTemplate,
   duplicateSlidesTemplate,
   recolorSlidesTemplate,
+  importSlidesTemplate,
   type SlidesTemplate,
   type DocsScope,
 } from '@/api/slides'
@@ -220,6 +221,8 @@ export default function TemplatesArea({ onNavigate, showToast }: TemplatesAreaPr
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [deleteConfirm, setDeleteConfirm] = useState<SlidesTemplate | null>(null)
+  const [importing, setImporting] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   const load = useCallback(async () => {
     try {
@@ -281,6 +284,27 @@ export default function TemplatesArea({ onNavigate, showToast }: TemplatesAreaPr
     }
   }, [load, notifyUpdated, showToast])
 
+  const handleImportClick = useCallback(() => {
+    fileInputRef.current?.click()
+  }, [])
+
+  const handleImportFile = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file) return
+    setImporting(true)
+    try {
+      const { template } = await importSlidesTemplate(file)
+      await load()
+      notifyUpdated()
+      showToast(`Imported template "${template.label || template.name}"`, 'success')
+    } catch (err) {
+      showToast(`Failed to import template: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
+    } finally {
+      setImporting(false)
+    }
+  }, [load, notifyUpdated, showToast])
+
   return (
     <div className="flex-1 overflow-auto p-6" style={{ background: 'var(--bg-primary)' }} data-testid="templates-area">
       <div className="mx-auto max-w-5xl">
@@ -296,6 +320,25 @@ export default function TemplatesArea({ onNavigate, showToast }: TemplatesAreaPr
           <span className="rounded-full px-2 py-0.5 text-xs" style={{ background: 'var(--bg-tertiary)', color: 'var(--text-muted)' }}>
             {templates.length}
           </span>
+          <button
+            onClick={handleImportClick}
+            disabled={importing}
+            className="ml-auto flex cursor-pointer items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs transition-colors disabled:cursor-default disabled:opacity-60"
+            style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-color)', color: 'var(--text-secondary)' }}
+            title="Import a .pptx file as a slide template"
+            data-testid="template-import-button"
+          >
+            <FileUp size={14} />
+            {importing ? 'Importing…' : 'Import .pptx'}
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".pptx"
+            onChange={handleImportFile}
+            className="hidden"
+            data-testid="template-import-input"
+          />
         </div>
 
         {loading ? (

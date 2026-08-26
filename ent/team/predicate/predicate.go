@@ -24,6 +24,9 @@ type Credential func(*sql.Selector)
 // Deck is the predicate function for deck builders.
 type Deck func(*sql.Selector)
 
+// DeckVersion is the predicate function for deckversion builders.
+type DeckVersion func(*sql.Selector)
+
 // DrillReport is the predicate function for drillreport builders.
 type DrillReport func(*sql.Selector)
 

@@ -86,6 +86,21 @@ func ThumbnailReady(v bool) predicate.Deck {
 	return predicate.Deck(sql.FieldEQ(FieldThumbnailReady, v))
 }
 
+// SessionID applies equality check predicate on the "session_id" field. It's identical to SessionIDEQ.
+func SessionID(v string) predicate.Deck {
+	return predicate.Deck(sql.FieldEQ(FieldSessionID, v))
+}
+
+// Version applies equality check predicate on the "version" field. It's identical to VersionEQ.
+func Version(v int) predicate.Deck {
+	return predicate.Deck(sql.FieldEQ(FieldVersion, v))
+}
+
+// SourceSlug applies equality check predicate on the "source_slug" field. It's identical to SourceSlugEQ.
+func SourceSlug(v string) predicate.Deck {
+	return predicate.Deck(sql.FieldEQ(FieldSourceSlug, v))
+}
+
 // CreatedAt applies equality check predicate on the "created_at" field. It's identical to CreatedAtEQ.
 func CreatedAt(v time.Time) predicate.Deck {
 	return predicate.Deck(sql.FieldEQ(FieldCreatedAt, v))
@@ -434,6 +449,176 @@ func ThumbnailReadyEQ(v bool) predicate.Deck {
 // ThumbnailReadyNEQ applies the NEQ predicate on the "thumbnail_ready" field.
 func ThumbnailReadyNEQ(v bool) predicate.Deck {
 	return predicate.Deck(sql.FieldNEQ(FieldThumbnailReady, v))
+}
+
+// SessionIDEQ applies the EQ predicate on the "session_id" field.
+func SessionIDEQ(v string) predicate.Deck {
+	return predicate.Deck(sql.FieldEQ(FieldSessionID, v))
+}
+
+// SessionIDNEQ applies the NEQ predicate on the "session_id" field.
+func SessionIDNEQ(v string) predicate.Deck {
+	return predicate.Deck(sql.FieldNEQ(FieldSessionID, v))
+}
+
+// SessionIDIn applies the In predicate on the "session_id" field.
+func SessionIDIn(vs ...string) predicate.Deck {
+	return predicate.Deck(sql.FieldIn(FieldSessionID, vs...))
+}
+
+// SessionIDNotIn applies the NotIn predicate on the "session_id" field.
+func SessionIDNotIn(vs ...string) predicate.Deck {
+	return predicate.Deck(sql.FieldNotIn(FieldSessionID, vs...))
+}
+
+// SessionIDGT applies the GT predicate on the "session_id" field.
+func SessionIDGT(v string) predicate.Deck {
+	return predicate.Deck(sql.FieldGT(FieldSessionID, v))
+}
+
+// SessionIDGTE applies the GTE predicate on the "session_id" field.
+func SessionIDGTE(v string) predicate.Deck {
+	return predicate.Deck(sql.FieldGTE(FieldSessionID, v))
+}
+
+// SessionIDLT applies the LT predicate on the "session_id" field.
+func SessionIDLT(v string) predicate.Deck {
+	return predicate.Deck(sql.FieldLT(FieldSessionID, v))
+}
+
+// SessionIDLTE applies the LTE predicate on the "session_id" field.
+func SessionIDLTE(v string) predicate.Deck {
+	return predicate.Deck(sql.FieldLTE(FieldSessionID, v))
+}
+
+// SessionIDContains applies the Contains predicate on the "session_id" field.
+func SessionIDContains(v string) predicate.Deck {
+	return predicate.Deck(sql.FieldContains(FieldSessionID, v))
+}
+
+// SessionIDHasPrefix applies the HasPrefix predicate on the "session_id" field.
+func SessionIDHasPrefix(v string) predicate.Deck {
+	return predicate.Deck(sql.FieldHasPrefix(FieldSessionID, v))
+}
+
+// SessionIDHasSuffix applies the HasSuffix predicate on the "session_id" field.
+func SessionIDHasSuffix(v string) predicate.Deck {
+	return predicate.Deck(sql.FieldHasSuffix(FieldSessionID, v))
+}
+
+// SessionIDEqualFold applies the EqualFold predicate on the "session_id" field.
+func SessionIDEqualFold(v string) predicate.Deck {
+	return predicate.Deck(sql.FieldEqualFold(FieldSessionID, v))
+}
+
+// SessionIDContainsFold applies the ContainsFold predicate on the "session_id" field.
+func SessionIDContainsFold(v string) predicate.Deck {
+	return predicate.Deck(sql.FieldContainsFold(FieldSessionID, v))
+}
+
+// VersionEQ applies the EQ predicate on the "version" field.
+func VersionEQ(v int) predicate.Deck {
+	return predicate.Deck(sql.FieldEQ(FieldVersion, v))
+}
+
+// VersionNEQ applies the NEQ predicate on the "version" field.
+func VersionNEQ(v int) predicate.Deck {
+	return predicate.Deck(sql.FieldNEQ(FieldVersion, v))
+}
+
+// VersionIn applies the In predicate on the "version" field.
+func VersionIn(vs ...int) predicate.Deck {
+	return predicate.Deck(sql.FieldIn(FieldVersion, vs...))
+}
+
+// VersionNotIn applies the NotIn predicate on the "version" field.
+func VersionNotIn(vs ...int) predicate.Deck {
+	return predicate.Deck(sql.FieldNotIn(FieldVersion, vs...))
+}
+
+// VersionGT applies the GT predicate on the "version" field.
+func VersionGT(v int) predicate.Deck {
+	return predicate.Deck(sql.FieldGT(FieldVersion, v))
+}
+
+// VersionGTE applies the GTE predicate on the "version" field.
+func VersionGTE(v int) predicate.Deck {
+	return predicate.Deck(sql.FieldGTE(FieldVersion, v))
+}
+
+// VersionLT applies the LT predicate on the "version" field.
+func VersionLT(v int) predicate.Deck {
+	return predicate.Deck(sql.FieldLT(FieldVersion, v))
+}
+
+// VersionLTE applies the LTE predicate on the "version" field.
+func VersionLTE(v int) predicate.Deck {
+	return predicate.Deck(sql.FieldLTE(FieldVersion, v))
+}
+
+// SourceSlugEQ applies the EQ predicate on the "source_slug" field.
+func SourceSlugEQ(v string) predicate.Deck {
+	return predicate.Deck(sql.FieldEQ(FieldSourceSlug, v))
+}
+
+// SourceSlugNEQ applies the NEQ predicate on the "source_slug" field.
+func SourceSlugNEQ(v string) predicate.Deck {
+	return predicate.Deck(sql.FieldNEQ(FieldSourceSlug, v))
+}
+
+// SourceSlugIn applies the In predicate on the "source_slug" field.
+func SourceSlugIn(vs ...string) predicate.Deck {
+	return predicate.Deck(sql.FieldIn(FieldSourceSlug, vs...))
+}
+
+// SourceSlugNotIn applies the NotIn predicate on the "source_slug" field.
+func SourceSlugNotIn(vs ...string) predicate.Deck {
+	return predicate.Deck(sql.FieldNotIn(FieldSourceSlug, vs...))
+}
+
+// SourceSlugGT applies the GT predicate on the "source_slug" field.
+func SourceSlugGT(v string) predicate.Deck {
+	return predicate.Deck(sql.FieldGT(FieldSourceSlug, v))
+}
+
+// SourceSlugGTE applies the GTE predicate on the "source_slug" field.
+func SourceSlugGTE(v string) predicate.Deck {
+	return predicate.Deck(sql.FieldGTE(FieldSourceSlug, v))
+}
+
+// SourceSlugLT applies the LT predicate on the "source_slug" field.
+func SourceSlugLT(v string) predicate.Deck {
+	return predicate.Deck(sql.FieldLT(FieldSourceSlug, v))
+}
+
+// SourceSlugLTE applies the LTE predicate on the "source_slug" field.
+func SourceSlugLTE(v string) predicate.Deck {
+	return predicate.Deck(sql.FieldLTE(FieldSourceSlug, v))
+}
+
+// SourceSlugContains applies the Contains predicate on the "source_slug" field.
+func SourceSlugContains(v string) predicate.Deck {
+	return predicate.Deck(sql.FieldContains(FieldSourceSlug, v))
+}
+
+// SourceSlugHasPrefix applies the HasPrefix predicate on the "source_slug" field.
+func SourceSlugHasPrefix(v string) predicate.Deck {
+	return predicate.Deck(sql.FieldHasPrefix(FieldSourceSlug, v))
+}
+
+// SourceSlugHasSuffix applies the HasSuffix predicate on the "source_slug" field.
+func SourceSlugHasSuffix(v string) predicate.Deck {
+	return predicate.Deck(sql.FieldHasSuffix(FieldSourceSlug, v))
+}
+
+// SourceSlugEqualFold applies the EqualFold predicate on the "source_slug" field.
+func SourceSlugEqualFold(v string) predicate.Deck {
+	return predicate.Deck(sql.FieldEqualFold(FieldSourceSlug, v))
+}
+
+// SourceSlugContainsFold applies the ContainsFold predicate on the "source_slug" field.
+func SourceSlugContainsFold(v string) predicate.Deck {
+	return predicate.Deck(sql.FieldContainsFold(FieldSourceSlug, v))
 }
 
 // CreatedAtEQ applies the EQ predicate on the "created_at" field.

@@ -682,6 +682,17 @@ func StudioDeleteSessionHandler(w http.ResponseWriter, r *http.Request) {
 				slog.Debug("failed to drop session app schemas", "sessionId", sessionID, "error", err)
 			}
 		}
+		// Clean up session-scoped slide decks
+		if svc.PersonalDocs != nil {
+			if err := svc.PersonalDocs.DeleteDecksBySessionID(r.Context(), sessionID); err != nil {
+				slog.Debug("failed to delete session decks", "sessionId", sessionID, "error", err)
+			}
+		}
+		if svc.Docs != nil {
+			if err := svc.Docs.DeleteDecksBySessionID(r.Context(), sessionID); err != nil {
+				slog.Debug("failed to delete session team decks", "sessionId", sessionID, "error", err)
+			}
+		}
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -721,6 +732,20 @@ func StudioDeleteSessionHandler(w http.ResponseWriter, r *http.Request) {
 		prefix := "session_" + apps.Slugify(sessionID) + "_"
 		if err := svc.AppStateSQL.DropSchemasWithPrefix(r.Context(), prefix); err != nil {
 			slog.Debug("failed to drop session app schemas", "sessionId", sessionID, "error", err)
+		}
+	}
+
+	// Best-effort: clean up session-scoped slide decks
+	if svc := store.FromRequest(r); svc != nil {
+		if svc.PersonalDocs != nil {
+			if err := svc.PersonalDocs.DeleteDecksBySessionID(r.Context(), sessionID); err != nil {
+				slog.Debug("failed to delete session decks", "sessionId", sessionID, "error", err)
+			}
+		}
+		if svc.Docs != nil {
+			if err := svc.Docs.DeleteDecksBySessionID(r.Context(), sessionID); err != nil {
+				slog.Debug("failed to delete session team decks", "sessionId", sessionID, "error", err)
+			}
 		}
 	}
 

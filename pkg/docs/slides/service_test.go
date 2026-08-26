@@ -79,6 +79,16 @@ func (m *memoryDocsStore) ListSlides(_ context.Context, deckID string) ([]*store
 }
 func (m *memoryDocsStore) DeleteSlide(context.Context, string, string) error     { return nil }
 func (m *memoryDocsStore) ReorderSlides(context.Context, string, []string) error { return nil }
+func (m *memoryDocsStore) DeleteDecksBySessionID(context.Context, string) error  { return nil }
+func (m *memoryDocsStore) SaveDeckVersion(context.Context, *store.DeckVersionSnapshot) error {
+	return nil
+}
+func (m *memoryDocsStore) ListDeckVersions(context.Context, string) ([]*store.DeckVersionSnapshot, error) {
+	return nil, nil
+}
+func (m *memoryDocsStore) GetDeckVersion(context.Context, string, int) (*store.DeckVersionSnapshot, error) {
+	return nil, store.ErrDocsNotFound
+}
 
 func TestServiceWriteSlideReplacesPosition(t *testing.T) {
 	ctx := context.Background()
@@ -277,6 +287,24 @@ func (m *multiDeckStore) ListSlides(_ context.Context, deckID string) ([]*store.
 }
 func (m *multiDeckStore) DeleteSlide(context.Context, string, string) error     { return nil }
 func (m *multiDeckStore) ReorderSlides(context.Context, string, []string) error { return nil }
+func (m *multiDeckStore) DeleteDecksBySessionID(_ context.Context, sessionID string) error {
+	for slug, d := range m.decks {
+		if d.SessionID == sessionID {
+			delete(m.slides, d.ID)
+			delete(m.decks, slug)
+		}
+	}
+	return nil
+}
+func (m *multiDeckStore) SaveDeckVersion(context.Context, *store.DeckVersionSnapshot) error {
+	return nil
+}
+func (m *multiDeckStore) ListDeckVersions(context.Context, string) ([]*store.DeckVersionSnapshot, error) {
+	return nil, nil
+}
+func (m *multiDeckStore) GetDeckVersion(context.Context, string, int) (*store.DeckVersionSnapshot, error) {
+	return nil, store.ErrDocsNotFound
+}
 
 // TestServiceListDecksLiteOmitsHeavyFields asserts the field-projection contract:
 // ListDecksLite returns decks with Assets/TemplateModel cleared but identity and
@@ -779,5 +807,80 @@ func TestSaveTemplateRoundTripsThumbnailRef(t *testing.T) {
 	// keyed by the ThumbnailRef.
 	if tpl.Assets["thumb/title"] != dataURI {
 		t.Fatalf("thumbnail asset did not round-trip: %#v", tpl.Assets)
+	}
+}
+
+// TestListDecksFiltersSessionScopedDecks verifies that decks with a non-empty
+// SessionID are hidden from ListDecks (and ListDecksLite), while saved decks
+// (empty SessionID) remain visible.
+func TestListDecksFiltersSessionScopedDecks(t *testing.T) {
+	ctx := context.Background()
+	backend := newMultiDeckStore()
+	svc := Service{Store: backend}
+
+	// Directly inject a session-scoped deck into the backing store.
+	sessionDeck := &store.DeckManifest{
+		ID:        "deck-session",
+		Slug:      "session-deck",
+		Title:     "Session Deck",
+		SessionID: "test-session-123",
+	}
+	if err := backend.CreateDeck(ctx, sessionDeck); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a saved (permanent) deck via the service.
+	savedDeck, err := svc.CreateDeck(ctx, "saved-deck", "Saved Deck", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// ListDecks should only return the saved deck.
+	decks, err := svc.ListDecks(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(decks) != 1 {
+		t.Fatalf("expected 1 deck from ListDecks, got %d", len(decks))
+	}
+	if decks[0].Slug != savedDeck.Slug {
+		t.Fatalf("expected slug %q, got %q", savedDeck.Slug, decks[0].Slug)
+	}
+
+	// ListDecksLite should also filter out the session-scoped deck.
+	lite, err := svc.ListDecksLite(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lite) != 1 {
+		t.Fatalf("expected 1 deck from ListDecksLite, got %d", len(lite))
+	}
+	if lite[0].Slug != savedDeck.Slug {
+		t.Fatalf("expected slug %q from ListDecksLite, got %q", savedDeck.Slug, lite[0].Slug)
+	}
+}
+
+// TestCreateDeckTagsSessionID verifies that CreateDeckWithAssets picks up the
+// session ID from the context and persists it on the deck manifest.
+func TestCreateDeckTagsSessionID(t *testing.T) {
+	ctx := store.WithSessionID(context.Background(), "chat-session-abc")
+	backend := newMultiDeckStore()
+	svc := Service{Store: backend}
+
+	deck, err := svc.CreateDeck(ctx, "auto-tagged", "Auto Tagged", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deck.SessionID != "chat-session-abc" {
+		t.Fatalf("expected SessionID %q, got %q", "chat-session-abc", deck.SessionID)
+	}
+
+	// A deck created without a session context should have empty SessionID.
+	deck2, err := svc.CreateDeck(context.Background(), "no-session", "No Session", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deck2.SessionID != "" {
+		t.Fatalf("expected empty SessionID, got %q", deck2.SessionID)
 	}
 }

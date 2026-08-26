@@ -35,6 +35,12 @@ type Deck struct {
 	TemplateModel string `json:"template_model,omitempty"`
 	// ThumbnailReady holds the value of the "thumbnail_ready" field.
 	ThumbnailReady bool `json:"thumbnail_ready,omitempty"`
+	// SessionID holds the value of the "session_id" field.
+	SessionID string `json:"session_id,omitempty"`
+	// Version holds the value of the "version" field.
+	Version int `json:"version,omitempty"`
+	// SourceSlug holds the value of the "source_slug" field.
+	SourceSlug string `json:"source_slug,omitempty"`
 	// CreatedAt holds the value of the "created_at" field.
 	CreatedAt time.Time `json:"created_at,omitempty"`
 	// UpdatedAt holds the value of the "updated_at" field.
@@ -72,9 +78,9 @@ func (*Deck) scanValues(columns []string) ([]any, error) {
 			values[i] = new([]byte)
 		case deck.FieldThumbnailReady:
 			values[i] = new(sql.NullBool)
-		case deck.FieldSchemaVersion:
+		case deck.FieldSchemaVersion, deck.FieldVersion:
 			values[i] = new(sql.NullInt64)
-		case deck.FieldSlug, deck.FieldTitle, deck.FieldDescription, deck.FieldTemplateModel:
+		case deck.FieldSlug, deck.FieldTitle, deck.FieldDescription, deck.FieldTemplateModel, deck.FieldSessionID, deck.FieldSourceSlug:
 			values[i] = new(sql.NullString)
 		case deck.FieldCreatedAt, deck.FieldUpdatedAt:
 			values[i] = new(sql.NullTime)
@@ -153,6 +159,24 @@ func (_m *Deck) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.ThumbnailReady = value.Bool
 			}
+		case deck.FieldSessionID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field session_id", values[i])
+			} else if value.Valid {
+				_m.SessionID = value.String
+			}
+		case deck.FieldVersion:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field version", values[i])
+			} else if value.Valid {
+				_m.Version = int(value.Int64)
+			}
+		case deck.FieldSourceSlug:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field source_slug", values[i])
+			} else if value.Valid {
+				_m.SourceSlug = value.String
+			}
 		case deck.FieldCreatedAt:
 			if value, ok := values[i].(*sql.NullTime); !ok {
 				return fmt.Errorf("unexpected type %T for field created_at", values[i])
@@ -229,6 +253,15 @@ func (_m *Deck) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("thumbnail_ready=")
 	builder.WriteString(fmt.Sprintf("%v", _m.ThumbnailReady))
+	builder.WriteString(", ")
+	builder.WriteString("session_id=")
+	builder.WriteString(_m.SessionID)
+	builder.WriteString(", ")
+	builder.WriteString("version=")
+	builder.WriteString(fmt.Sprintf("%v", _m.Version))
+	builder.WriteString(", ")
+	builder.WriteString("source_slug=")
+	builder.WriteString(_m.SourceSlug)
 	builder.WriteString(", ")
 	builder.WriteString("created_at=")
 	builder.WriteString(_m.CreatedAt.Format(time.ANSIC))

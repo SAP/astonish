@@ -151,6 +151,55 @@ func (_u *DeckUpdate) SetNillableThumbnailReady(v *bool) *DeckUpdate {
 	return _u
 }
 
+// SetSessionID sets the "session_id" field.
+func (_u *DeckUpdate) SetSessionID(v string) *DeckUpdate {
+	_u.mutation.SetSessionID(v)
+	return _u
+}
+
+// SetNillableSessionID sets the "session_id" field if the given value is not nil.
+func (_u *DeckUpdate) SetNillableSessionID(v *string) *DeckUpdate {
+	if v != nil {
+		_u.SetSessionID(*v)
+	}
+	return _u
+}
+
+// SetVersion sets the "version" field.
+func (_u *DeckUpdate) SetVersion(v int) *DeckUpdate {
+	_u.mutation.ResetVersion()
+	_u.mutation.SetVersion(v)
+	return _u
+}
+
+// SetNillableVersion sets the "version" field if the given value is not nil.
+func (_u *DeckUpdate) SetNillableVersion(v *int) *DeckUpdate {
+	if v != nil {
+		_u.SetVersion(*v)
+	}
+	return _u
+}
+
+// AddVersion adds value to the "version" field.
+func (_u *DeckUpdate) AddVersion(v int) *DeckUpdate {
+	_u.mutation.AddVersion(v)
+	return _u
+}
+
+// SetSourceSlug sets the "source_slug" field.
+func (_u *DeckUpdate) SetSourceSlug(v string) *DeckUpdate {
+	_u.mutation.SetSourceSlug(v)
+	return _u
+}
+
+// SetNillableSourceSlug sets the "source_slug" field if the given value is not nil.
+func (_u *DeckUpdate) SetNillableSourceSlug(v *string) *DeckUpdate {
+	if v != nil {
+		_u.SetSourceSlug(*v)
+	}
+	return _u
+}
+
 // SetUpdatedAt sets the "updated_at" field.
 func (_u *DeckUpdate) SetUpdatedAt(v time.Time) *DeckUpdate {
 	_u.mutation.SetUpdatedAt(v)
@@ -296,6 +345,18 @@ func (_u *DeckUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if value, ok := _u.mutation.ThumbnailReady(); ok {
 		_spec.SetField(deck.FieldThumbnailReady, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.SessionID(); ok {
+		_spec.SetField(deck.FieldSessionID, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.Version(); ok {
+		_spec.SetField(deck.FieldVersion, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedVersion(); ok {
+		_spec.AddField(deck.FieldVersion, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.SourceSlug(); ok {
+		_spec.SetField(deck.FieldSourceSlug, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.UpdatedAt(); ok {
 		_spec.SetField(deck.FieldUpdatedAt, field.TypeTime, value)
@@ -486,6 +547,55 @@ func (_u *DeckUpdateOne) SetNillableThumbnailReady(v *bool) *DeckUpdateOne {
 	return _u
 }
 
+// SetSessionID sets the "session_id" field.
+func (_u *DeckUpdateOne) SetSessionID(v string) *DeckUpdateOne {
+	_u.mutation.SetSessionID(v)
+	return _u
+}
+
+// SetNillableSessionID sets the "session_id" field if the given value is not nil.
+func (_u *DeckUpdateOne) SetNillableSessionID(v *string) *DeckUpdateOne {
+	if v != nil {
+		_u.SetSessionID(*v)
+	}
+	return _u
+}
+
+// SetVersion sets the "version" field.
+func (_u *DeckUpdateOne) SetVersion(v int) *DeckUpdateOne {
+	_u.mutation.ResetVersion()
+	_u.mutation.SetVersion(v)
+	return _u
+}
+
+// SetNillableVersion sets the "version" field if the given value is not nil.
+func (_u *DeckUpdateOne) SetNillableVersion(v *int) *DeckUpdateOne {
+	if v != nil {
+		_u.SetVersion(*v)
+	}
+	return _u
+}
+
+// AddVersion adds value to the "version" field.
+func (_u *DeckUpdateOne) AddVersion(v int) *DeckUpdateOne {
+	_u.mutation.AddVersion(v)
+	return _u
+}
+
+// SetSourceSlug sets the "source_slug" field.
+func (_u *DeckUpdateOne) SetSourceSlug(v string) *DeckUpdateOne {
+	_u.mutation.SetSourceSlug(v)
+	return _u
+}
+
+// SetNillableSourceSlug sets the "source_slug" field if the given value is not nil.
+func (_u *DeckUpdateOne) SetNillableSourceSlug(v *string) *DeckUpdateOne {
+	if v != nil {
+		_u.SetSourceSlug(*v)
+	}
+	return _u
+}
+
 // SetUpdatedAt sets the "updated_at" field.
 func (_u *DeckUpdateOne) SetUpdatedAt(v time.Time) *DeckUpdateOne {
 	_u.mutation.SetUpdatedAt(v)
@@ -661,6 +771,18 @@ func (_u *DeckUpdateOne) sqlSave(ctx context.Context) (_node *Deck, err error) {
 	}
 	if value, ok := _u.mutation.ThumbnailReady(); ok {
 		_spec.SetField(deck.FieldThumbnailReady, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.SessionID(); ok {
+		_spec.SetField(deck.FieldSessionID, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.Version(); ok {
+		_spec.SetField(deck.FieldVersion, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedVersion(); ok {
+		_spec.AddField(deck.FieldVersion, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.SourceSlug(); ok {
+		_spec.SetField(deck.FieldSourceSlug, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.UpdatedAt(); ok {
 		_spec.SetField(deck.FieldUpdatedAt, field.TypeTime, value)

@@ -31,6 +31,12 @@ const (
 	FieldTemplateModel = "template_model"
 	// FieldThumbnailReady holds the string denoting the thumbnail_ready field in the database.
 	FieldThumbnailReady = "thumbnail_ready"
+	// FieldSessionID holds the string denoting the session_id field in the database.
+	FieldSessionID = "session_id"
+	// FieldVersion holds the string denoting the version field in the database.
+	FieldVersion = "version"
+	// FieldSourceSlug holds the string denoting the source_slug field in the database.
+	FieldSourceSlug = "source_slug"
 	// FieldCreatedAt holds the string denoting the created_at field in the database.
 	FieldCreatedAt = "created_at"
 	// FieldUpdatedAt holds the string denoting the updated_at field in the database.
@@ -59,6 +65,9 @@ var Columns = []string{
 	FieldAssets,
 	FieldTemplateModel,
 	FieldThumbnailReady,
+	FieldSessionID,
+	FieldVersion,
+	FieldSourceSlug,
 	FieldCreatedAt,
 	FieldUpdatedAt,
 }
@@ -84,6 +93,12 @@ var (
 	DefaultSchemaVersion int
 	// DefaultThumbnailReady holds the default value on creation for the "thumbnail_ready" field.
 	DefaultThumbnailReady bool
+	// DefaultSessionID holds the default value on creation for the "session_id" field.
+	DefaultSessionID string
+	// DefaultVersion holds the default value on creation for the "version" field.
+	DefaultVersion int
+	// DefaultSourceSlug holds the default value on creation for the "source_slug" field.
+	DefaultSourceSlug string
 	// DefaultCreatedAt holds the default value on creation for the "created_at" field.
 	DefaultCreatedAt func() time.Time
 	// DefaultUpdatedAt holds the default value on creation for the "updated_at" field.
@@ -130,6 +145,21 @@ func ByTemplateModel(opts ...sql.OrderTermOption) OrderOption {
 // ByThumbnailReady orders the results by the thumbnail_ready field.
 func ByThumbnailReady(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldThumbnailReady, opts...).ToFunc()
+}
+
+// BySessionID orders the results by the session_id field.
+func BySessionID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldSessionID, opts...).ToFunc()
+}
+
+// ByVersion orders the results by the version field.
+func ByVersion(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldVersion, opts...).ToFunc()
+}
+
+// BySourceSlug orders the results by the source_slug field.
+func BySourceSlug(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldSourceSlug, opts...).ToFunc()
 }
 
 // ByCreatedAt orders the results by the created_at field.

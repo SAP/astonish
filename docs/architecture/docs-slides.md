@@ -1413,4 +1413,37 @@ Research conducted for this revision found:
 - Microsoft Open XML notes slides: <https://learn.microsoft.com/en-us/office/open-xml/presentation/working-with-notes-slides>
 - Microsoft PresentationML extensions: <https://learn.microsoft.com/en-us/openspecs/office_standards/ms-pptx/efd8bb2d-d888-4e2e-af25-cad476730c9f>
 - Open XML SDK and validator: <https://github.com/dotnet/Open-XML-SDK>
+
+---
+
+## Session-scoped deck lifecycle
+
+Slide decks created during a chat session follow a session-scoped lifecycle (analogous to Apps):
+
+1. **Session tagging**: When a deck is created via `create_deck` during a chat session, `store.SessionIDFromContext(ctx)` automatically sets the deck's `SessionID` field. The deck is invisible in the Slides view (`ListDecks` / `ListDecksLite` filter out non-empty `SessionID`).
+
+2. **Cascade deletion**: When a session is deleted (`StudioDeleteSessionHandler`), all decks with that session's ID are cascade-deleted via `DeleteDecksBySessionID`. No garbage accumulates.
+
+3. **Explicit Save**: The user promotes a session-scoped deck to permanent via `POST /api/docs/slides/{slug}/save`. This clears the `SessionID` (and optionally `SourceSlug`), making the deck visible in Slides view.
+
+4. **Enhance with AI**: From the Slides view, "Enhance with AI" navigates to Chat with a prompt referencing the saved deck. The model calls `get_deck` (saved decks are always accessible) and then `create_deck` with `source` parameter, which clones the deck into a session-scoped copy with `SourceSlug` set. The Save dialog then offers "Override Original" or "Save as New".
+
+5. **Versioning on override**: When override-saving (replacing an existing saved deck with session deck content), the old deck state is archived as a `DeckVersion` snapshot (title + JSON blob of theme/assets/slides). Up to 5 versions are kept per deck; the oldest are pruned.
+
+6. **Version history**: `GET /api/docs/slides/{slug}/versions` lists all archived versions (newest first). `POST /api/docs/slides/{slug}/versions/{version}/restore` restores a snapshot, archiving the current state first, then replacing deck content with the snapshot and bumping the version number.
+
+### Schema additions
+
+- **Deck entity** (`ent/{personal,team}/schema/deck.go`): Added `session_id` (string, default ""), `version` (int, default 1), `source_slug` (string, default ""). Index on `session_id` for efficient cascade queries.
+- **DeckVersion entity** (`ent/{personal,team}/schema/deck_version.go`): `id` (UUID), `deck_slug`, `version`, `title`, `snapshot` (text/JSON), `created_at`. Unique index on `(deck_slug, version)`.
+- **DocsStore interface** (`pkg/store/docs.go`): Added `DeleteDecksBySessionID`, `SaveDeckVersion`, `ListDeckVersions`, `GetDeckVersion`.
+- **DeckManifest** (`pkg/store/docs.go`): Added `SessionID`, `Version`, `SourceSlug` fields.
+
+### API endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/docs/slides/{slug}/save` | Promote session deck to permanent (simple/override/save-as-new) |
+| GET | `/api/docs/slides/{slug}/versions` | List version history |
+| POST | `/api/docs/slides/{slug}/versions/{v}/restore` | Restore a version snapshot |
 - ECMA-376 Office Open XML standard: <https://ecma-international.org/publications-and-standards/standards/ecma-376/>

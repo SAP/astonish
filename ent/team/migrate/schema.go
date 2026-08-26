@@ -158,6 +158,9 @@ var (
 		{Name: "assets", Type: field.TypeJSON, Nullable: true},
 		{Name: "template_model", Type: field.TypeString, Nullable: true, Size: 2147483647},
 		{Name: "thumbnail_ready", Type: field.TypeBool, Default: false},
+		{Name: "session_id", Type: field.TypeString, Default: ""},
+		{Name: "version", Type: field.TypeInt, Default: 1},
+		{Name: "source_slug", Type: field.TypeString, Default: ""},
 		{Name: "created_at", Type: field.TypeTime, Default: map[string]schema.Expr{"postgres": "now()", "sqlite3": "(datetime('now'))"}},
 		{Name: "updated_at", Type: field.TypeTime, Default: map[string]schema.Expr{"postgres": "now()", "sqlite3": "(datetime('now'))"}},
 	}
@@ -171,6 +174,38 @@ var (
 				Name:    "deck_slug",
 				Unique:  true,
 				Columns: []*schema.Column{DecksColumns[1]},
+			},
+			{
+				Name:    "deck_session_id",
+				Unique:  false,
+				Columns: []*schema.Column{DecksColumns[9]},
+			},
+		},
+	}
+	// DeckVersionsColumns holds the columns for the "deck_versions" table.
+	DeckVersionsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "deck_slug", Type: field.TypeString},
+		{Name: "version", Type: field.TypeInt, Default: 1},
+		{Name: "title", Type: field.TypeString},
+		{Name: "snapshot", Type: field.TypeString, Size: 2147483647, Default: ""},
+		{Name: "created_at", Type: field.TypeTime, Default: map[string]schema.Expr{"postgres": "now()", "sqlite3": "(datetime('now'))"}},
+	}
+	// DeckVersionsTable holds the schema information for the "deck_versions" table.
+	DeckVersionsTable = &schema.Table{
+		Name:       "deck_versions",
+		Columns:    DeckVersionsColumns,
+		PrimaryKey: []*schema.Column{DeckVersionsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "deckversion_deck_slug_version",
+				Unique:  true,
+				Columns: []*schema.Column{DeckVersionsColumns[1], DeckVersionsColumns[2]},
+			},
+			{
+				Name:    "deckversion_deck_slug",
+				Unique:  false,
+				Columns: []*schema.Column{DeckVersionsColumns[1]},
 			},
 		},
 	}
@@ -813,6 +848,7 @@ var (
 		ChatSessionEventsTable,
 		CredentialsTable,
 		DecksTable,
+		DeckVersionsTable,
 		DrillReportsTable,
 		FleetMailboxMessagesTable,
 		FleetMonitorStateTable,

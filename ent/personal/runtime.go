@@ -9,6 +9,7 @@ import (
 	"github.com/SAP/astonish/ent/personal/appstate"
 	"github.com/SAP/astonish/ent/personal/credential"
 	"github.com/SAP/astonish/ent/personal/deck"
+	"github.com/SAP/astonish/ent/personal/deckversion"
 	"github.com/SAP/astonish/ent/personal/flow"
 	"github.com/SAP/astonish/ent/personal/memory"
 	"github.com/SAP/astonish/ent/personal/personalsettings"
@@ -126,12 +127,24 @@ func init() {
 	deckDescThumbnailReady := deckFields[8].Descriptor()
 	// deck.DefaultThumbnailReady holds the default value on creation for the thumbnail_ready field.
 	deck.DefaultThumbnailReady = deckDescThumbnailReady.Default.(bool)
+	// deckDescSessionID is the schema descriptor for session_id field.
+	deckDescSessionID := deckFields[9].Descriptor()
+	// deck.DefaultSessionID holds the default value on creation for the session_id field.
+	deck.DefaultSessionID = deckDescSessionID.Default.(string)
+	// deckDescVersion is the schema descriptor for version field.
+	deckDescVersion := deckFields[10].Descriptor()
+	// deck.DefaultVersion holds the default value on creation for the version field.
+	deck.DefaultVersion = deckDescVersion.Default.(int)
+	// deckDescSourceSlug is the schema descriptor for source_slug field.
+	deckDescSourceSlug := deckFields[11].Descriptor()
+	// deck.DefaultSourceSlug holds the default value on creation for the source_slug field.
+	deck.DefaultSourceSlug = deckDescSourceSlug.Default.(string)
 	// deckDescCreatedAt is the schema descriptor for created_at field.
-	deckDescCreatedAt := deckFields[9].Descriptor()
+	deckDescCreatedAt := deckFields[12].Descriptor()
 	// deck.DefaultCreatedAt holds the default value on creation for the created_at field.
 	deck.DefaultCreatedAt = deckDescCreatedAt.Default.(func() time.Time)
 	// deckDescUpdatedAt is the schema descriptor for updated_at field.
-	deckDescUpdatedAt := deckFields[10].Descriptor()
+	deckDescUpdatedAt := deckFields[13].Descriptor()
 	// deck.DefaultUpdatedAt holds the default value on creation for the updated_at field.
 	deck.DefaultUpdatedAt = deckDescUpdatedAt.Default.(func() time.Time)
 	// deck.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
@@ -140,6 +153,32 @@ func init() {
 	deckDescID := deckFields[0].Descriptor()
 	// deck.DefaultID holds the default value on creation for the id field.
 	deck.DefaultID = deckDescID.Default.(func() uuid.UUID)
+	deckversionFields := schema.DeckVersion{}.Fields()
+	_ = deckversionFields
+	// deckversionDescDeckSlug is the schema descriptor for deck_slug field.
+	deckversionDescDeckSlug := deckversionFields[1].Descriptor()
+	// deckversion.DeckSlugValidator is a validator for the "deck_slug" field. It is called by the builders before save.
+	deckversion.DeckSlugValidator = deckversionDescDeckSlug.Validators[0].(func(string) error)
+	// deckversionDescVersion is the schema descriptor for version field.
+	deckversionDescVersion := deckversionFields[2].Descriptor()
+	// deckversion.DefaultVersion holds the default value on creation for the version field.
+	deckversion.DefaultVersion = deckversionDescVersion.Default.(int)
+	// deckversionDescTitle is the schema descriptor for title field.
+	deckversionDescTitle := deckversionFields[3].Descriptor()
+	// deckversion.TitleValidator is a validator for the "title" field. It is called by the builders before save.
+	deckversion.TitleValidator = deckversionDescTitle.Validators[0].(func(string) error)
+	// deckversionDescSnapshot is the schema descriptor for snapshot field.
+	deckversionDescSnapshot := deckversionFields[4].Descriptor()
+	// deckversion.DefaultSnapshot holds the default value on creation for the snapshot field.
+	deckversion.DefaultSnapshot = deckversionDescSnapshot.Default.(string)
+	// deckversionDescCreatedAt is the schema descriptor for created_at field.
+	deckversionDescCreatedAt := deckversionFields[5].Descriptor()
+	// deckversion.DefaultCreatedAt holds the default value on creation for the created_at field.
+	deckversion.DefaultCreatedAt = deckversionDescCreatedAt.Default.(func() time.Time)
+	// deckversionDescID is the schema descriptor for id field.
+	deckversionDescID := deckversionFields[0].Descriptor()
+	// deckversion.DefaultID holds the default value on creation for the id field.
+	deckversion.DefaultID = deckversionDescID.Default.(func() uuid.UUID)
 	flowFields := schema.Flow{}.Fields()
 	_ = flowFields
 	// flowDescName is the schema descriptor for name field.

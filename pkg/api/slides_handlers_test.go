@@ -58,6 +58,16 @@ func (s *docsStoreStub) ListSlides(context.Context, string) ([]*store.SlideConte
 }
 func (s *docsStoreStub) DeleteSlide(context.Context, string, string) error     { return nil }
 func (s *docsStoreStub) ReorderSlides(context.Context, string, []string) error { return nil }
+func (s *docsStoreStub) DeleteDecksBySessionID(context.Context, string) error  { return nil }
+func (s *docsStoreStub) SaveDeckVersion(context.Context, *store.DeckVersionSnapshot) error {
+	return nil
+}
+func (s *docsStoreStub) ListDeckVersions(context.Context, string) ([]*store.DeckVersionSnapshot, error) {
+	return nil, nil
+}
+func (s *docsStoreStub) GetDeckVersion(context.Context, string, int) (*store.DeckVersionSnapshot, error) {
+	return nil, store.ErrDocsNotFound
+}
 
 var _ store.DocsStore = (*docsStoreStub)(nil)
 

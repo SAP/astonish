@@ -81,6 +81,18 @@ func (f DeckFunc) Mutate(ctx context.Context, m team.Mutation) (team.Value, erro
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *team.DeckMutation", m)
 }
 
+// The DeckVersionFunc type is an adapter to allow the use of ordinary
+// function as DeckVersion mutator.
+type DeckVersionFunc func(context.Context, *team.DeckVersionMutation) (team.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f DeckVersionFunc) Mutate(ctx context.Context, m team.Mutation) (team.Value, error) {
+	if mv, ok := m.(*team.DeckVersionMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *team.DeckVersionMutation", m)
+}
+
 // The DrillReportFunc type is an adapter to allow the use of ordinary
 // function as DrillReport mutator.
 type DrillReportFunc func(context.Context, *team.DrillReportMutation) (team.Value, error)

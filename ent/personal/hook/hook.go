@@ -57,6 +57,18 @@ func (f DeckFunc) Mutate(ctx context.Context, m personal.Mutation) (personal.Val
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *personal.DeckMutation", m)
 }
 
+// The DeckVersionFunc type is an adapter to allow the use of ordinary
+// function as DeckVersion mutator.
+type DeckVersionFunc func(context.Context, *personal.DeckVersionMutation) (personal.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f DeckVersionFunc) Mutate(ctx context.Context, m personal.Mutation) (personal.Value, error) {
+	if mv, ok := m.(*personal.DeckVersionMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *personal.DeckVersionMutation", m)
+}
+
 // The FlowFunc type is an adapter to allow the use of ordinary
 // function as Flow mutator.
 type FlowFunc func(context.Context, *personal.FlowMutation) (personal.Value, error)

@@ -11,8 +11,6 @@ vi.mock('../../api/slides', async () => {
   return {
     ...actual,
     listSlidesDecks: vi.fn(),
-    listSlidesTemplates: vi.fn(),
-    importSlidesTemplate: vi.fn(),
     fetchSlidesDeck: vi.fn(),
     deleteSlidesDeck: vi.fn(),
     slidesPresentationURL: vi.fn((slug: string) => `/api/docs/slides/${slug}/present`),
@@ -48,12 +46,6 @@ const teamDeck: slidesApi.SlidesDeckListItem = {
 describe('SlidesView', () => {
   beforeEach(() => {
     vi.mocked(slidesApi.listSlidesDecks).mockResolvedValue({ decks: [personalDeck, teamDeck] })
-    vi.mocked(slidesApi.listSlidesTemplates).mockResolvedValue({
-      templates: [
-        { name: 'aurora', label: 'Aurora', tokens: { surface: '#111827', ink: '#f9fafb', accent: '#38bdf8' } },
-      ],
-    })
-    vi.mocked(slidesApi.importSlidesTemplate).mockResolvedValue({ template: { name: 'imported', label: 'Imported' } })
   })
 
   afterEach(() => {
@@ -136,9 +128,9 @@ describe('SlidesView', () => {
     expect(await screen.findByText(/No slide decks yet/i)).toBeInTheDocument()
   })
 
-  it('shows a Manage templates link in the header with a count', async () => {
+  it('shows a Manage templates link in the header', async () => {
     render(<SlidesView theme="dark" />)
-    await waitFor(() => expect(slidesApi.listSlidesTemplates).toHaveBeenCalled())
+    await waitFor(() => expect(slidesApi.listSlidesDecks).toHaveBeenCalled())
     const link = await screen.findByTestId('manage-templates-link')
     expect(link).toBeInTheDocument()
     expect(link).toHaveTextContent('Templates')
@@ -152,32 +144,22 @@ describe('SlidesView', () => {
     expect(onNavigate).toHaveBeenCalledWith('/slides/templates')
   })
 
-  it('imports a .pptx template via the hidden input and refetches templates', async () => {
-    render(<SlidesView theme="dark" />)
+  it('Create Slide button calls onCreateSlide with a prompt message', async () => {
+    const onCreateSlide = vi.fn()
+    render(<SlidesView theme="dark" onCreateSlide={onCreateSlide} />)
     await waitFor(() => expect(slidesApi.listSlidesDecks).toHaveBeenCalled())
-
-    // The visible button triggers the hidden input.
-    const importBtn = await screen.findByTitle('Import a .pptx file as a slide template')
-    expect(importBtn).toBeInTheDocument()
-
-    const input = screen.getByTestId('template-import-input') as HTMLInputElement
-    const file = new File(['pptx'], 'deck.pptx', { type: 'application/vnd.openxmlformats-officedocument.presentationml.presentation' })
-    fireEvent.change(input, { target: { files: [file] } })
-
-    await waitFor(() => expect(slidesApi.importSlidesTemplate).toHaveBeenCalledWith(file))
-    // Refetch after import (once on mount + once after import).
-    await waitFor(() => expect(vi.mocked(slidesApi.listSlidesTemplates).mock.calls.length).toBeGreaterThanOrEqual(2))
-    // Success toast appears.
-    expect(await screen.findByTestId('slides-toast')).toHaveTextContent(/Imported template/i)
+    const btn = await screen.findByTestId('create-slide-button')
+    fireEvent.click(btn)
+    expect(onCreateSlide).toHaveBeenCalledTimes(1)
+    expect(onCreateSlide.mock.calls[0][0]).toContain('slides skill')
   })
 
-  it('shows an error toast when import fails', async () => {
-    vi.mocked(slidesApi.importSlidesTemplate).mockRejectedValue(new Error('bad file'))
-    render(<SlidesView theme="dark" />)
-    await waitFor(() => expect(slidesApi.listSlidesDecks).toHaveBeenCalled())
-    const input = screen.getByTestId('template-import-input') as HTMLInputElement
-    const file = new File(['x'], 'deck.pptx')
-    fireEvent.change(input, { target: { files: [file] } })
-    expect(await screen.findByTestId('slides-toast')).toHaveTextContent(/Failed to import template/i)
+  it('shows Create Slide button in the empty state', async () => {
+    vi.mocked(slidesApi.listSlidesDecks).mockResolvedValue({ decks: [] })
+    const onCreateSlide = vi.fn()
+    render(<SlidesView theme="dark" onCreateSlide={onCreateSlide} />)
+    expect(await screen.findByTestId('create-slide-button-empty')).toBeInTheDocument()
+    fireEvent.click(screen.getByTestId('create-slide-button-empty'))
+    expect(onCreateSlide).toHaveBeenCalledTimes(1)
   })
 })

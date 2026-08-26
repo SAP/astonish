@@ -1718,6 +1718,10 @@ layout:
               onNavigate={(hashPath: string) => navigate(hashPath)}
               onPublishDeck={isPlatformMode ? handlePublishDeck : undefined}
               onForkDeck={isPlatformMode ? handleForkDeck : undefined}
+              onCreateSlide={(message: string) => {
+                setPendingChatMessage({ message })
+                navigate(buildPath('chat'))
+              }}
             />
             </Suspense>
           ) : view === 'settings' ? (

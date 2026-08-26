@@ -35,6 +35,16 @@ func (*chatRunnerDocsStore) DeleteSlide(context.Context, string, string) error {
 func (*chatRunnerDocsStore) ReorderSlides(context.Context, string, []string) error {
 	return nil
 }
+func (*chatRunnerDocsStore) DeleteDecksBySessionID(context.Context, string) error { return nil }
+func (*chatRunnerDocsStore) SaveDeckVersion(context.Context, *store.DeckVersionSnapshot) error {
+	return nil
+}
+func (*chatRunnerDocsStore) ListDeckVersions(context.Context, string) ([]*store.DeckVersionSnapshot, error) {
+	return nil, nil
+}
+func (*chatRunnerDocsStore) GetDeckVersion(context.Context, string, int) (*store.DeckVersionSnapshot, error) {
+	return nil, store.ErrDocsNotFound
+}
 
 func TestRequestDocsStoresInjectedIntoChatRunner(t *testing.T) {
 	personal := &chatRunnerDocsStore{}

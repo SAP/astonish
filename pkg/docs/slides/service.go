@@ -46,6 +46,9 @@ func (s Service) CreateDeckWithAssets(ctx context.Context, slug, title, descript
 		return nil, fmt.Errorf("slug and title are required")
 	}
 	d := &store.DeckManifest{ID: uuid.NewString(), Slug: slug, Title: title, Description: description, SchemaVersion: SchemaV1, Theme: theme, Assets: assets}
+	if sid := store.SessionIDFromContext(ctx); sid != "" {
+		d.SessionID = sid
+	}
 	if err := s.Store.CreateDeck(ctx, d); err != nil {
 		return nil, fmt.Errorf("create deck: %w", err)
 	}
@@ -138,6 +141,9 @@ func (s Service) ListDecks(ctx context.Context) ([]*store.DeckManifest, error) {
 		if strings.HasPrefix(d.Slug, templatePrefix) {
 			continue
 		}
+		if d.SessionID != "" {
+			continue // session-scoped decks are not visible in the Slides view
+		}
 		out = append(out, d)
 	}
 	return out, nil
@@ -159,6 +165,9 @@ func (s Service) ListDecksLite(ctx context.Context) ([]*store.DeckManifest, erro
 	for _, d := range decks {
 		if strings.HasPrefix(d.Slug, templatePrefix) {
 			continue
+		}
+		if d.SessionID != "" {
+			continue // session-scoped decks are not visible in the Slides view
 		}
 		out = append(out, d)
 	}

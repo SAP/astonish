@@ -103,6 +103,48 @@ func (_c *DeckCreate) SetNillableThumbnailReady(v *bool) *DeckCreate {
 	return _c
 }
 
+// SetSessionID sets the "session_id" field.
+func (_c *DeckCreate) SetSessionID(v string) *DeckCreate {
+	_c.mutation.SetSessionID(v)
+	return _c
+}
+
+// SetNillableSessionID sets the "session_id" field if the given value is not nil.
+func (_c *DeckCreate) SetNillableSessionID(v *string) *DeckCreate {
+	if v != nil {
+		_c.SetSessionID(*v)
+	}
+	return _c
+}
+
+// SetVersion sets the "version" field.
+func (_c *DeckCreate) SetVersion(v int) *DeckCreate {
+	_c.mutation.SetVersion(v)
+	return _c
+}
+
+// SetNillableVersion sets the "version" field if the given value is not nil.
+func (_c *DeckCreate) SetNillableVersion(v *int) *DeckCreate {
+	if v != nil {
+		_c.SetVersion(*v)
+	}
+	return _c
+}
+
+// SetSourceSlug sets the "source_slug" field.
+func (_c *DeckCreate) SetSourceSlug(v string) *DeckCreate {
+	_c.mutation.SetSourceSlug(v)
+	return _c
+}
+
+// SetNillableSourceSlug sets the "source_slug" field if the given value is not nil.
+func (_c *DeckCreate) SetNillableSourceSlug(v *string) *DeckCreate {
+	if v != nil {
+		_c.SetSourceSlug(*v)
+	}
+	return _c
+}
+
 // SetCreatedAt sets the "created_at" field.
 func (_c *DeckCreate) SetCreatedAt(v time.Time) *DeckCreate {
 	_c.mutation.SetCreatedAt(v)
@@ -207,6 +249,18 @@ func (_c *DeckCreate) defaults() {
 		v := deck.DefaultThumbnailReady
 		_c.mutation.SetThumbnailReady(v)
 	}
+	if _, ok := _c.mutation.SessionID(); !ok {
+		v := deck.DefaultSessionID
+		_c.mutation.SetSessionID(v)
+	}
+	if _, ok := _c.mutation.Version(); !ok {
+		v := deck.DefaultVersion
+		_c.mutation.SetVersion(v)
+	}
+	if _, ok := _c.mutation.SourceSlug(); !ok {
+		v := deck.DefaultSourceSlug
+		_c.mutation.SetSourceSlug(v)
+	}
 	if _, ok := _c.mutation.CreatedAt(); !ok {
 		v := deck.DefaultCreatedAt()
 		_c.mutation.SetCreatedAt(v)
@@ -247,6 +301,15 @@ func (_c *DeckCreate) check() error {
 	}
 	if _, ok := _c.mutation.ThumbnailReady(); !ok {
 		return &ValidationError{Name: "thumbnail_ready", err: errors.New(`personal: missing required field "Deck.thumbnail_ready"`)}
+	}
+	if _, ok := _c.mutation.SessionID(); !ok {
+		return &ValidationError{Name: "session_id", err: errors.New(`personal: missing required field "Deck.session_id"`)}
+	}
+	if _, ok := _c.mutation.Version(); !ok {
+		return &ValidationError{Name: "version", err: errors.New(`personal: missing required field "Deck.version"`)}
+	}
+	if _, ok := _c.mutation.SourceSlug(); !ok {
+		return &ValidationError{Name: "source_slug", err: errors.New(`personal: missing required field "Deck.source_slug"`)}
 	}
 	switch _c.driver.Dialect() {
 	case dialect.MySQL, dialect.SQLite:
@@ -326,6 +389,18 @@ func (_c *DeckCreate) createSpec() (*Deck, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.ThumbnailReady(); ok {
 		_spec.SetField(deck.FieldThumbnailReady, field.TypeBool, value)
 		_node.ThumbnailReady = value
+	}
+	if value, ok := _c.mutation.SessionID(); ok {
+		_spec.SetField(deck.FieldSessionID, field.TypeString, value)
+		_node.SessionID = value
+	}
+	if value, ok := _c.mutation.Version(); ok {
+		_spec.SetField(deck.FieldVersion, field.TypeInt, value)
+		_node.Version = value
+	}
+	if value, ok := _c.mutation.SourceSlug(); ok {
+		_spec.SetField(deck.FieldSourceSlug, field.TypeString, value)
+		_node.SourceSlug = value
 	}
 	if value, ok := _c.mutation.CreatedAt(); ok {
 		_spec.SetField(deck.FieldCreatedAt, field.TypeTime, value)

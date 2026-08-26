@@ -18,6 +18,7 @@ import (
 	"github.com/SAP/astonish/ent/team/chatsessionevent"
 	"github.com/SAP/astonish/ent/team/credential"
 	"github.com/SAP/astonish/ent/team/deck"
+	"github.com/SAP/astonish/ent/team/deckversion"
 	"github.com/SAP/astonish/ent/team/drillreport"
 	"github.com/SAP/astonish/ent/team/fleetmailboxmessage"
 	"github.com/SAP/astonish/ent/team/fleetmonitorstate"
@@ -106,6 +107,7 @@ func checkColumn(t, c string) error {
 			chatsessionevent.Table:    chatsessionevent.ValidColumn,
 			credential.Table:          credential.ValidColumn,
 			deck.Table:                deck.ValidColumn,
+			deckversion.Table:         deckversion.ValidColumn,
 			drillreport.Table:         drillreport.ValidColumn,
 			fleetmailboxmessage.Table: fleetmailboxmessage.ValidColumn,
 			fleetmonitorstate.Table:   fleetmonitorstate.ValidColumn,

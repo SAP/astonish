@@ -1088,6 +1088,9 @@ func RegisterRoutes(router *mux.Router, svc *store.Services, backend store.Platf
 	router.HandleFunc("/api/docs/slides/{deckSlug}/export/html", ExportSlidesHTMLHandler).Methods("POST")
 	router.HandleFunc("/api/docs/slides/{deckSlug}/export/pdf", ExportSlidesPDFHandler).Methods("POST")
 	router.HandleFunc("/api/docs/slides/{deckSlug}/export/pptx", ExportSlidesPPTXHandler).Methods("POST")
+	router.HandleFunc("/api/docs/slides/{deckSlug}/save", SaveSlidesDeckHandler).Methods("POST")
+	router.HandleFunc("/api/docs/slides/{deckSlug}/versions", ListSlidesDeckVersionsHandler).Methods("GET")
+	router.HandleFunc("/api/docs/slides/{deckSlug}/versions/{version:[0-9]+}/restore", RestoreSlidesDeckVersionHandler).Methods("POST")
 
 	// Settings endpoints
 	router.HandleFunc("/api/settings/config", GetSettingsHandler).Methods("GET")

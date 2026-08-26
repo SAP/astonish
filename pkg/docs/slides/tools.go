@@ -88,6 +88,7 @@ type CreateDeckArgs struct {
 	Description string            `json:"description,omitempty" jsonschema:"Optional short deck description."`
 	Theme       map[string]string `json:"theme,omitempty" jsonschema:"Optional ASD theme token overrides."`
 	Template    string            `json:"template,omitempty" jsonschema:"Optional template name from list_templates. Seeds a coherent theme + assets; reuse its title/section/content archetypes as starting markup."`
+	Source      string            `json:"source,omitempty" jsonschema:"Optional slug of an existing saved deck to clone. Copies theme, assets, and slides into this new session deck and sets source_slug so Save can offer Override Original."`
 }
 
 // DeckView is the slim deck projection returned by slide TOOL results. It drops
@@ -298,6 +299,70 @@ func createDeck(ctx context.Context, args CreateDeckArgs) (DeckResult, error) {
 	slug := strings.TrimSpace(args.Slug)
 	title := strings.TrimSpace(args.Title)
 	description := strings.TrimSpace(args.Description)
+
+	// Source clone: copy an existing saved deck into a new session-scoped deck.
+	if src := strings.TrimSpace(args.Source); src != "" {
+		srcDeck, srcSlides, err := svc.Deck(ctx, src)
+		if err != nil {
+			return DeckResult{}, fmt.Errorf("source deck %q: %w", src, err)
+		}
+		if title == "" {
+			title = srcDeck.Title
+		}
+		if description == "" {
+			description = srcDeck.Description
+		}
+		// Ensure the slug doesn't collide with the source deck.
+		if slug == "" || slug == src {
+			slug = src + "-draft"
+		}
+		// If a deck with this slug already exists, handle the collision:
+		// - Session-scoped: delete it (stale previous attempt).
+		// - Saved (permanent): pick a unique slug by appending a hash suffix.
+		if existing, _ := svc.Store.GetDeck(ctx, slug); existing != nil {
+			if existing.SessionID != "" {
+				// Stale session deck from a previous attempt — safe to remove.
+				_ = svc.Store.DeleteDeck(ctx, slug)
+			} else {
+				// Permanent deck — append a short hash to avoid collision.
+				h := sha256.Sum256([]byte(slug + store.SessionIDFromContext(ctx)))
+				slug = slug + "-" + fmt.Sprintf("%x", h[:3])
+			}
+		}
+		theme := srcDeck.Theme
+		if len(args.Theme) > 0 {
+			theme = args.Theme
+		}
+		deck, err := svc.CreateDeckWithAssets(ctx, slug, title, description, theme, srcDeck.Assets)
+		if err != nil {
+			return DeckResult{}, fmt.Errorf("create deck copy %q from source %q: %w", slug, src, err)
+		}
+		// Preserve the source deck's schema version, template model, and thumbnail
+		// state so the copied slides render correctly and thumbnails display.
+		deck.SchemaVersion = srcDeck.SchemaVersion
+		deck.ThumbnailReady = srcDeck.ThumbnailReady
+		if srcDeck.TemplateModel != "" {
+			deck.TemplateModel = srcDeck.TemplateModel
+		}
+		// Tag with source_slug so Save can offer Override Original.
+		deck.SourceSlug = src
+		if err := svc.Store.UpdateDeck(ctx, deck); err != nil {
+			return DeckResult{}, fmt.Errorf("set source_slug: %w", err)
+		}
+		// Copy slides from source.
+		for _, slide := range srcSlides {
+			item := &store.SlideContent{
+				ID: "", DeckID: deck.ID, Position: slide.Position,
+				Title: slide.Title, Content: slide.Content, Notes: slide.Notes,
+				SchemaVersion: slide.SchemaVersion, ThumbnailRef: slide.ThumbnailRef,
+			}
+			if err := svc.Store.UpsertSlide(ctx, item); err != nil {
+				return DeckResult{}, fmt.Errorf("copy slide %d: %w", slide.Position, err)
+			}
+		}
+		slides, _ := svc.Store.ListSlides(ctx, deck.ID)
+		return DeckResult{Deck: deckViewWithAssets(deck), Slides: slides, SlideCount: len(slides)}, nil
+	}
 
 	if name := strings.TrimSpace(args.Template); name != "" {
 		tmpl, ok := svc.resolveTemplate(ctx, name)

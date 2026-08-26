@@ -22,6 +22,7 @@ import (
 	"github.com/SAP/astonish/ent/team/chatsessionevent"
 	"github.com/SAP/astonish/ent/team/credential"
 	"github.com/SAP/astonish/ent/team/deck"
+	"github.com/SAP/astonish/ent/team/deckversion"
 	"github.com/SAP/astonish/ent/team/drillreport"
 	"github.com/SAP/astonish/ent/team/fleetmailboxmessage"
 	"github.com/SAP/astonish/ent/team/fleetmonitorstate"
@@ -63,6 +64,8 @@ type Client struct {
 	Credential *CredentialClient
 	// Deck is the client for interacting with the Deck builders.
 	Deck *DeckClient
+	// DeckVersion is the client for interacting with the DeckVersion builders.
+	DeckVersion *DeckVersionClient
 	// DrillReport is the client for interacting with the DrillReport builders.
 	DrillReport *DrillReportClient
 	// FleetMailboxMessage is the client for interacting with the FleetMailboxMessage builders.
@@ -124,6 +127,7 @@ func (c *Client) init() {
 	c.ChatSessionEvent = NewChatSessionEventClient(c.config)
 	c.Credential = NewCredentialClient(c.config)
 	c.Deck = NewDeckClient(c.config)
+	c.DeckVersion = NewDeckVersionClient(c.config)
 	c.DrillReport = NewDrillReportClient(c.config)
 	c.FleetMailboxMessage = NewFleetMailboxMessageClient(c.config)
 	c.FleetMonitorState = NewFleetMonitorStateClient(c.config)
@@ -244,6 +248,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		ChatSessionEvent:    NewChatSessionEventClient(cfg),
 		Credential:          NewCredentialClient(cfg),
 		Deck:                NewDeckClient(cfg),
+		DeckVersion:         NewDeckVersionClient(cfg),
 		DrillReport:         NewDrillReportClient(cfg),
 		FleetMailboxMessage: NewFleetMailboxMessageClient(cfg),
 		FleetMonitorState:   NewFleetMonitorStateClient(cfg),
@@ -291,6 +296,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		ChatSessionEvent:    NewChatSessionEventClient(cfg),
 		Credential:          NewCredentialClient(cfg),
 		Deck:                NewDeckClient(cfg),
+		DeckVersion:         NewDeckVersionClient(cfg),
 		DrillReport:         NewDrillReportClient(cfg),
 		FleetMailboxMessage: NewFleetMailboxMessageClient(cfg),
 		FleetMonitorState:   NewFleetMonitorStateClient(cfg),
@@ -343,9 +349,9 @@ func (c *Client) Close() error {
 func (c *Client) Use(hooks ...Hook) {
 	for _, n := range []interface{ Use(...Hook) }{
 		c.A2aAgent, c.App, c.AppState, c.ChatSessionEvent, c.Credential, c.Deck,
-		c.DrillReport, c.FleetMailboxMessage, c.FleetMonitorState, c.FleetPlan,
-		c.FleetRunState, c.FleetSetupDraft, c.FleetSetupProfile, c.FleetTask,
-		c.FleetTemplate, c.Flow, c.McpServer, c.Memory, c.NetworkPolicy,
+		c.DeckVersion, c.DrillReport, c.FleetMailboxMessage, c.FleetMonitorState,
+		c.FleetPlan, c.FleetRunState, c.FleetSetupDraft, c.FleetSetupProfile,
+		c.FleetTask, c.FleetTemplate, c.Flow, c.McpServer, c.Memory, c.NetworkPolicy,
 		c.SandboxSession, c.ScheduledJob, c.Session, c.SessionEvent, c.Setting,
 		c.Skill, c.SkillFile, c.Slide, c.TeamAuditLog,
 	} {
@@ -358,9 +364,9 @@ func (c *Client) Use(hooks ...Hook) {
 func (c *Client) Intercept(interceptors ...Interceptor) {
 	for _, n := range []interface{ Intercept(...Interceptor) }{
 		c.A2aAgent, c.App, c.AppState, c.ChatSessionEvent, c.Credential, c.Deck,
-		c.DrillReport, c.FleetMailboxMessage, c.FleetMonitorState, c.FleetPlan,
-		c.FleetRunState, c.FleetSetupDraft, c.FleetSetupProfile, c.FleetTask,
-		c.FleetTemplate, c.Flow, c.McpServer, c.Memory, c.NetworkPolicy,
+		c.DeckVersion, c.DrillReport, c.FleetMailboxMessage, c.FleetMonitorState,
+		c.FleetPlan, c.FleetRunState, c.FleetSetupDraft, c.FleetSetupProfile,
+		c.FleetTask, c.FleetTemplate, c.Flow, c.McpServer, c.Memory, c.NetworkPolicy,
 		c.SandboxSession, c.ScheduledJob, c.Session, c.SessionEvent, c.Setting,
 		c.Skill, c.SkillFile, c.Slide, c.TeamAuditLog,
 	} {
@@ -383,6 +389,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.Credential.mutate(ctx, m)
 	case *DeckMutation:
 		return c.Deck.mutate(ctx, m)
+	case *DeckVersionMutation:
+		return c.DeckVersion.mutate(ctx, m)
 	case *DrillReportMutation:
 		return c.DrillReport.mutate(ctx, m)
 	case *FleetMailboxMessageMutation:
@@ -1259,6 +1267,139 @@ func (c *DeckClient) mutate(ctx context.Context, m *DeckMutation) (Value, error)
 		return (&DeckDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
 	default:
 		return nil, fmt.Errorf("team: unknown Deck mutation op: %q", m.Op())
+	}
+}
+
+// DeckVersionClient is a client for the DeckVersion schema.
+type DeckVersionClient struct {
+	config
+}
+
+// NewDeckVersionClient returns a client for the DeckVersion from the given config.
+func NewDeckVersionClient(c config) *DeckVersionClient {
+	return &DeckVersionClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `deckversion.Hooks(f(g(h())))`.
+func (c *DeckVersionClient) Use(hooks ...Hook) {
+	c.hooks.DeckVersion = append(c.hooks.DeckVersion, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `deckversion.Intercept(f(g(h())))`.
+func (c *DeckVersionClient) Intercept(interceptors ...Interceptor) {
+	c.inters.DeckVersion = append(c.inters.DeckVersion, interceptors...)
+}
+
+// Create returns a builder for creating a DeckVersion entity.
+func (c *DeckVersionClient) Create() *DeckVersionCreate {
+	mutation := newDeckVersionMutation(c.config, OpCreate)
+	return &DeckVersionCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of DeckVersion entities.
+func (c *DeckVersionClient) CreateBulk(builders ...*DeckVersionCreate) *DeckVersionCreateBulk {
+	return &DeckVersionCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *DeckVersionClient) MapCreateBulk(slice any, setFunc func(*DeckVersionCreate, int)) *DeckVersionCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &DeckVersionCreateBulk{err: fmt.Errorf("calling to DeckVersionClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*DeckVersionCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &DeckVersionCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for DeckVersion.
+func (c *DeckVersionClient) Update() *DeckVersionUpdate {
+	mutation := newDeckVersionMutation(c.config, OpUpdate)
+	return &DeckVersionUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *DeckVersionClient) UpdateOne(_m *DeckVersion) *DeckVersionUpdateOne {
+	mutation := newDeckVersionMutation(c.config, OpUpdateOne, withDeckVersion(_m))
+	return &DeckVersionUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *DeckVersionClient) UpdateOneID(id uuid.UUID) *DeckVersionUpdateOne {
+	mutation := newDeckVersionMutation(c.config, OpUpdateOne, withDeckVersionID(id))
+	return &DeckVersionUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for DeckVersion.
+func (c *DeckVersionClient) Delete() *DeckVersionDelete {
+	mutation := newDeckVersionMutation(c.config, OpDelete)
+	return &DeckVersionDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *DeckVersionClient) DeleteOne(_m *DeckVersion) *DeckVersionDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *DeckVersionClient) DeleteOneID(id uuid.UUID) *DeckVersionDeleteOne {
+	builder := c.Delete().Where(deckversion.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &DeckVersionDeleteOne{builder}
+}
+
+// Query returns a query builder for DeckVersion.
+func (c *DeckVersionClient) Query() *DeckVersionQuery {
+	return &DeckVersionQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeDeckVersion},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a DeckVersion entity by its id.
+func (c *DeckVersionClient) Get(ctx context.Context, id uuid.UUID) (*DeckVersion, error) {
+	return c.Query().Where(deckversion.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *DeckVersionClient) GetX(ctx context.Context, id uuid.UUID) *DeckVersion {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *DeckVersionClient) Hooks() []Hook {
+	return c.hooks.DeckVersion
+}
+
+// Interceptors returns the client interceptors.
+func (c *DeckVersionClient) Interceptors() []Interceptor {
+	return c.inters.DeckVersion
+}
+
+func (c *DeckVersionClient) mutate(ctx context.Context, m *DeckVersionMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&DeckVersionCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&DeckVersionUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&DeckVersionUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&DeckVersionDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("team: unknown DeckVersion mutation op: %q", m.Op())
 	}
 }
 
@@ -4287,15 +4428,15 @@ func (c *TeamAuditLogClient) mutate(ctx context.Context, m *TeamAuditLogMutation
 // hooks and interceptors per client, for fast access.
 type (
 	hooks struct {
-		A2aAgent, App, AppState, ChatSessionEvent, Credential, Deck, DrillReport,
-		FleetMailboxMessage, FleetMonitorState, FleetPlan, FleetRunState,
+		A2aAgent, App, AppState, ChatSessionEvent, Credential, Deck, DeckVersion,
+		DrillReport, FleetMailboxMessage, FleetMonitorState, FleetPlan, FleetRunState,
 		FleetSetupDraft, FleetSetupProfile, FleetTask, FleetTemplate, Flow, McpServer,
 		Memory, NetworkPolicy, SandboxSession, ScheduledJob, Session, SessionEvent,
 		Setting, Skill, SkillFile, Slide, TeamAuditLog []ent.Hook
 	}
 	inters struct {
-		A2aAgent, App, AppState, ChatSessionEvent, Credential, Deck, DrillReport,
-		FleetMailboxMessage, FleetMonitorState, FleetPlan, FleetRunState,
+		A2aAgent, App, AppState, ChatSessionEvent, Credential, Deck, DeckVersion,
+		DrillReport, FleetMailboxMessage, FleetMonitorState, FleetPlan, FleetRunState,
 		FleetSetupDraft, FleetSetupProfile, FleetTask, FleetTemplate, Flow, McpServer,
 		Memory, NetworkPolicy, SandboxSession, ScheduledJob, Session, SessionEvent,
 		Setting, Skill, SkillFile, Slide, TeamAuditLog []ent.Interceptor

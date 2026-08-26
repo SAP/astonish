@@ -12,6 +12,7 @@ vi.mock('@/api/slides', async () => {
     deleteSlidesTemplate: vi.fn().mockResolvedValue(undefined),
     duplicateSlidesTemplate: vi.fn().mockResolvedValue({ template: { name: 'corp-copy', label: 'Corp (copy)' } }),
     recolorSlidesTemplate: vi.fn().mockResolvedValue(undefined),
+    importSlidesTemplate: vi.fn().mockResolvedValue({ template: { name: 'imported', label: 'Imported Theme' } }),
   }
 })
 
@@ -20,6 +21,7 @@ import {
   deleteSlidesTemplate,
   duplicateSlidesTemplate,
   recolorSlidesTemplate,
+  importSlidesTemplate,
   type SlidesTemplate,
 } from '@/api/slides'
 
@@ -119,5 +121,25 @@ describe('SlidesView templates area', () => {
     // layout names (not collapsed to a single "title" chip).
     expect(screen.getByText('Blue cover, anvil and image')).toBeInTheDocument()
     expect(screen.getByText('Pink cover with anvil')).toBeInTheDocument()
+  })
+
+  it('shows the Import .pptx button in the templates header', async () => {
+    renderArea()
+    await waitFor(() => expect(screen.getAllByTestId('template-card')).toHaveLength(2))
+    expect(screen.getByTestId('template-import-button')).toBeInTheDocument()
+    expect(screen.getByTestId('template-import-button')).toHaveTextContent('Import .pptx')
+  })
+
+  it('imports a .pptx template via the hidden input and refetches the list', async () => {
+    renderArea()
+    await waitFor(() => expect(screen.getAllByTestId('template-card')).toHaveLength(2))
+
+    const input = screen.getByTestId('template-import-input') as HTMLInputElement
+    const file = new File(['pptx'], 'deck.pptx', { type: 'application/vnd.openxmlformats-officedocument.presentationml.presentation' })
+    fireEvent.change(input, { target: { files: [file] } })
+
+    await waitFor(() => expect(importSlidesTemplate).toHaveBeenCalledWith(file))
+    // Refetch after import (once on mount + once after import).
+    await waitFor(() => expect((listSlidesTemplates as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThanOrEqual(2))
   })
 })

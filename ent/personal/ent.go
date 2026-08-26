@@ -16,6 +16,7 @@ import (
 	"github.com/SAP/astonish/ent/personal/appstate"
 	"github.com/SAP/astonish/ent/personal/credential"
 	"github.com/SAP/astonish/ent/personal/deck"
+	"github.com/SAP/astonish/ent/personal/deckversion"
 	"github.com/SAP/astonish/ent/personal/flow"
 	"github.com/SAP/astonish/ent/personal/memory"
 	"github.com/SAP/astonish/ent/personal/personalsettings"
@@ -87,6 +88,7 @@ func checkColumn(t, c string) error {
 			appstate.Table:         appstate.ValidColumn,
 			credential.Table:       credential.ValidColumn,
 			deck.Table:             deck.ValidColumn,
+			deckversion.Table:      deckversion.ValidColumn,
 			flow.Table:             flow.ValidColumn,
 			memory.Table:           memory.ValidColumn,
 			personalsettings.Table: personalsettings.ValidColumn,

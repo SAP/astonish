@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Download, ExternalLink, Loader2, Maximize2, TriangleAlert, X } from 'lucide-react'
+import { Download, ExternalLink, Loader2, Maximize2, Save, TriangleAlert, X } from 'lucide-react'
 
 import {
   exportSlidesDeck,
   fetchSlidesDeck,
+  saveDeck,
   slidesPresentationURL,
   type DocsScope,
   type SlidesDeckResponse,
@@ -39,6 +40,10 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
   const [slideIndex, setSlideIndex] = useState(0)
   const [error, setError] = useState('')
   const [pendingExport, setPendingExport] = useState<SlidesExportFormat | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [saveSuccess, setSaveSuccess] = useState(false)
+  const [saveDialogOpen, setSaveDialogOpen] = useState(false)
+  const [saveName, setSaveName] = useState('')
   const [fullscreen, setFullscreen] = useState(false)
   const mountedRef = useRef(true)
   const iframeRef = useRef<HTMLIFrameElement | null>(null)
@@ -141,6 +146,23 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
     }
   }, [deckSlug, scope])
 
+  const handleSave = useCallback(async (title: string) => {
+    // Derive a URL-safe slug from the title (prefix with "saved-" to avoid session-deck slug collisions)
+    const slug = 'saved-' + title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60)
+    setSaving(true)
+    setError('')
+    try {
+      await saveDeck(deckSlug, { targetSlug: slug, title }, scope)
+      setSaveSuccess(true)
+      setTimeout(() => { if (mountedRef.current) setSaveSuccess(false) }, 3000)
+      window.dispatchEvent(new CustomEvent('astonish:slides-updated'))
+    } catch (cause) {
+      if (mountedRef.current) setError(cause instanceof Error ? cause.message : 'Failed to save deck')
+    } finally {
+      if (mountedRef.current) setSaving(false)
+    }
+  }, [deckSlug, scope])
+
   useEffect(() => {
     if (!fullscreen) return
     const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') setFullscreen(false) }
@@ -235,7 +257,89 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
             {format.toUpperCase()}
           </button>
         ))}
+
+        {/* Save button — copies session deck to permanent storage (session deck stays) */}
+        {deck?.deck.sessionId && !saving && !saveSuccess && (
+          <div className="ml-auto flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => { setSaveName(deck?.deck.title || ''); setSaveDialogOpen(true) }}
+              disabled={saving}
+              data-testid="slides-save"
+              className="inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50"
+              style={{ background: 'var(--brand)' }}
+            >
+              <Save size={13} />
+              Save
+            </button>
+          </div>
+        )}
+        {saving && (
+          <div className="ml-auto flex items-center gap-1.5">
+            <span className="inline-flex items-center gap-1.5 text-xs" style={{ color: 'var(--text-muted)' }}>
+              <Loader2 size={13} className="animate-spin" /> Saving…
+            </span>
+          </div>
+        )}
+        {saveSuccess && (
+          <div className="ml-auto flex items-center gap-1.5">
+            <span className="inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium"
+              style={{ color: 'var(--success, #10b981)' }}>
+              ✓ Saved!
+            </span>
+          </div>
+        )}
       </div>
+
+      {/* Save dialog — inline modal for naming the deck */}
+      {saveDialogOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center"
+          style={{ background: 'rgba(0,0,0,0.5)' }}
+          onClick={e => { if (e.target === e.currentTarget) setSaveDialogOpen(false) }}
+        >
+          <div
+            className="mx-4 w-full max-w-sm rounded-xl p-5"
+            style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-color)' }}
+          >
+            <h3 className="mb-1 text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
+              Save Slide Deck
+            </h3>
+            <p className="mb-3 text-xs" style={{ color: 'var(--text-muted)' }}>
+              Choose a name for your deck. Saving again with the same name creates a new version.
+            </p>
+            <input
+              type="text"
+              autoFocus
+              value={saveName}
+              onChange={e => setSaveName(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter' && saveName.trim()) { setSaveDialogOpen(false); handleSave(saveName.trim()) } }}
+              placeholder="My Presentation"
+              className="mb-3 w-full rounded-md border px-3 py-2 text-sm outline-none"
+              style={{ borderColor: 'var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-primary)' }}
+              data-testid="slides-save-name-input"
+            />
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setSaveDialogOpen(false)}
+                className="cursor-pointer rounded px-3 py-1.5 text-xs"
+                style={{ color: 'var(--text-secondary)', background: 'var(--bg-tertiary)' }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => { if (saveName.trim()) { setSaveDialogOpen(false); handleSave(saveName.trim()) } }}
+                disabled={!saveName.trim()}
+                className="cursor-pointer rounded px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50"
+                style={{ background: 'var(--brand)' }}
+                data-testid="slides-save-confirm"
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Embedded deck — the iframe stays mounted; while the deck has no slides
           yet the "generating" placeholder covers it so the user never sees an

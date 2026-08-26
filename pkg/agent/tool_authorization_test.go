@@ -751,6 +751,7 @@ func TestOutOfScopePaths_ShellCommandFalsePositives(t *testing.T) {
 // within the project (like "pkg/tools/internal.go") do NOT trigger out-of-scope
 // detection when the policy root is set correctly.
 func TestOutOfScopePaths_RelativePathsInProject(t *testing.T) {
+	disableTmpAllowlist(t)
 	root := t.TempDir()
 	p := NewSessionAuthPolicy(root)
 

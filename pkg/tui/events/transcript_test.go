@@ -1197,3 +1197,64 @@ func TestTranscript_CompactionIsHardBreak(t *testing.T) {
 		t.Fatalf("item[3] kind=%q want agent", tr.Items[3].Kind)
 	}
 }
+
+// TestTranscript_LoadHistory_PlanPendingNotAwaiting verifies that resuming a
+// session containing a plan with PlanPending status does NOT leave the
+// transcript in Awaiting state. Historical sessions are complete — there is no
+// live backend waiting for an approval response.
+func TestTranscript_LoadHistory_PlanPendingNotAwaiting(t *testing.T) {
+	tr := NewTranscript()
+	tr.LinearThread = true
+
+	entries := []HistoryMsg{
+		{Kind: "user", Text: "plan a refactor"},
+		{Kind: "plan", Text: "# Plan\n\n**Goal:** Refactor the code", PlanStatus: PlanPending, Options: []string{"Approve & implement", "Request changes", "Decline"}},
+		{Kind: "user", Text: "I approve this plan. Please start implementing it now, phase by phase."},
+		{Kind: "agent", Text: "I'll start implementing the plan."},
+		{Kind: "tool_call", ToolName: "edit_file", ToolID: "1", Args: map[string]any{"path": "a.go"}},
+		{Kind: "tool_result", ToolName: "edit_file", ToolID: "1", Result: "ok"},
+		{Kind: "agent", Text: "Done!"},
+	}
+	tr.LoadHistory(entries)
+
+	if tr.Awaiting {
+		t.Fatal("Awaiting should be false after LoadHistory — plan approval is historical")
+	}
+	if tr.ApprovalIdx != -1 {
+		t.Fatalf("ApprovalIdx should be -1, got %d", tr.ApprovalIdx)
+	}
+	if tr.Streaming {
+		t.Fatal("Streaming should be false after LoadHistory")
+	}
+
+	// The plan item should still exist and be rendered.
+	found := false
+	for _, it := range tr.Items {
+		if it.Kind == ItemPlan {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected a plan item in the transcript")
+	}
+}
+
+// TestTranscript_LoadHistory_PlanApprovedNotAwaiting verifies that a plan with
+// PlanApproved status does not set Awaiting either (even before the fix, this
+// should have been fine, but it's good to confirm).
+func TestTranscript_LoadHistory_PlanApprovedNotAwaiting(t *testing.T) {
+	tr := NewTranscript()
+	entries := []HistoryMsg{
+		{Kind: "user", Text: "plan something"},
+		{Kind: "plan", Text: "# Plan\n\n**Goal:** Do stuff", PlanStatus: PlanApproved},
+		{Kind: "agent", Text: "implementing..."},
+	}
+	tr.LoadHistory(entries)
+
+	if tr.Awaiting {
+		t.Fatal("Awaiting should be false for approved plan")
+	}
+	if tr.ApprovalIdx != -1 {
+		t.Fatalf("ApprovalIdx should be -1, got %d", tr.ApprovalIdx)
+	}
+}

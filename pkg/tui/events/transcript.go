@@ -1293,6 +1293,22 @@ func (t *Transcript) LoadHistory(entries []HistoryMsg) {
 	t.Streaming = false
 	t.Status = ""
 	t.nextTextReplaces = false
+	// If the transcript ends with a pending plan approval that was never
+	// resolved but events followed it (user messages, tool calls, agent
+	// text), clear the stale awaiting state. There is no live backend
+	// waiting for the response. A truly pending plan (last item, nothing
+	// after it) is left alone so the user can resume the decision.
+	if t.Awaiting && t.ApprovalIdx >= 0 {
+		for i := t.ApprovalIdx + 1; i < len(t.Items); i++ {
+			k := t.Items[i].Kind
+			if k == ItemUser || k == ItemAgent || k == ItemActivity || k == ItemSystem {
+				t.Awaiting = false
+				t.ApprovalIdx = -1
+				t.ApprovalCursor = 0
+				break
+			}
+		}
+	}
 }
 
 func summarizeSteps(steps []ToolStep) string {

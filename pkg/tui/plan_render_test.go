@@ -169,11 +169,14 @@ go test ./pkg/tui -count=1
 `
 	plain := stripANSI(m.renderPlanDocument(events.Item{Content: content}, 80))
 
-	if !strings.Contains(plain, "1  [○]") {
+	if !strings.Contains(plain, "[○] 1") {
 		t.Fatalf("expected numbered pending phase:\n%s", plain)
 	}
-	if !strings.Contains(plain, "2  [●]") {
+	if !strings.Contains(plain, "[●] 2") {
 		t.Fatalf("expected numbered running phase:\n%s", plain)
+	}
+	if !strings.Contains(plain, "FILES") {
+		t.Fatalf("expected FILES section label:\n%s", plain)
 	}
 	if !strings.Contains(plain, "+") || !strings.Contains(plain, "pkg/tui/plan.go") {
 		t.Fatalf("expected + new file kind:\n%s", plain)
@@ -196,8 +199,8 @@ go test ./pkg/tui -count=1
 	if !strings.Contains(plain, "VERIFY") {
 		t.Fatalf("expected VERIFY band:\n%s", plain)
 	}
-	if !strings.Contains(plain, "⟳ wave-1") {
-		t.Fatalf("expected parallel-group divider:\n%s", plain)
+	if !strings.Contains(plain, "⟳ wave-1") || !strings.Contains(plain, "EXECUTION ORDER") {
+		t.Fatalf("expected EXECUTION ORDER section with wave-1 group:\n%s", plain)
 	}
 	if strings.Contains(plain, "_Last updated") {
 		t.Fatalf("structured card should hide _Last updated:\n%s", plain)
@@ -350,8 +353,8 @@ Legend: ` + "`[ ]`" + ` pending · ` + "`[~]`" + ` running · ` + "`[x]`" + ` co
 `
 	plain := stripANSI(m.renderPlanDocument(events.Item{Content: content}, 80))
 
-	if !strings.Contains(plain, "···") {
-		t.Fatalf("expected dot separators (·) between phases when 4 phases present:\n%s", plain)
+	if !strings.Contains(plain, "────") {
+		t.Fatalf("expected thin rule separators (─) between phases when 4 phases present:\n%s", plain)
 	}
 }
 
@@ -377,6 +380,9 @@ Legend: ` + "`[ ]`" + ` pending · ` + "`[~]`" + ` running · ` + "`[x]`" + ` co
 
 	if !strings.Contains(plain, "adapter pattern") {
 		t.Fatalf("expected details text rendered in output:\n%s", plain)
+	}
+	if !strings.Contains(plain, "DETAILS") {
+		t.Fatalf("expected DETAILS section label:\n%s", plain)
 	}
 }
 
@@ -459,5 +465,71 @@ func TestPlanDocumentRoundTrip_Summary(t *testing.T) {
 	}
 	if parsedSteps[1].Summary != steps[1].Summary {
 		t.Fatalf("step 1 summary mismatch: got %q, want %q", parsedSteps[1].Summary, steps[1].Summary)
+	}
+}
+
+func TestRenderPlanDocumentSectionLabels(t *testing.T) {
+	m := newModel(context.Background(), Config{Backend: staticBackend{}, Width: 80, Height: 24})
+	m.ready = true
+	m.layout()
+
+	content := `# Execution Plan
+
+**Goal:** Full section label test
+
+_Last updated: 2025-01-01T00:00:00Z_
+
+## Phases
+
+- [ ] **all-sections** — Phase with all sections
+  - File (new): pkg/foo/bar.go
+  - File (modify): pkg/foo/baz.go
+  Verify: go test ./pkg/foo/...
+  Use dependency injection for the new adapter layer.
+
+Legend: ` + "`[ ]`" + ` pending · ` + "`[~]`" + ` running · ` + "`[x]`" + ` complete · ` + "`[!]`" + ` failed
+`
+	plain := stripANSI(m.renderPlanDocument(events.Item{Content: content}, 80))
+
+	if !strings.Contains(plain, "FILES") {
+		t.Fatalf("expected FILES section label:\n%s", plain)
+	}
+	if !strings.Contains(plain, "VERIFY") {
+		t.Fatalf("expected VERIFY section label:\n%s", plain)
+	}
+	if !strings.Contains(plain, "DETAILS") {
+		t.Fatalf("expected DETAILS section label:\n%s", plain)
+	}
+}
+
+func TestRenderPlanDocumentSummaryProminent(t *testing.T) {
+	m := newModel(context.Background(), Config{Backend: staticBackend{}, Width: 80, Height: 24})
+	m.ready = true
+	m.layout()
+
+	content := `# Execution Plan
+
+**Goal:** Summary prominence test
+
+_Last updated: 2025-01-01T00:00:00Z_
+
+## Phases
+
+- [ ] **with-summary** — Add the caching layer
+  Summary: Introduces a Redis-backed cache to cut latency by 50%.
+  Wire up the cache client in the service constructor.
+
+Legend: ` + "`[ ]`" + ` pending · ` + "`[~]`" + ` running · ` + "`[x]`" + ` complete · ` + "`[!]`" + ` failed
+`
+	plain := stripANSI(m.renderPlanDocument(events.Item{Content: content}, 80))
+
+	if !strings.Contains(plain, "Add the caching layer") {
+		t.Fatalf("expected description text in output:\n%s", plain)
+	}
+	if !strings.Contains(plain, "cut latency by 50%") {
+		t.Fatalf("expected summary text in output:\n%s", plain)
+	}
+	if !strings.Contains(plain, "Wire up the cache client") {
+		t.Fatalf("expected details text in output:\n%s", plain)
 	}
 }

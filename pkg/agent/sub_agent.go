@@ -16,6 +16,7 @@ import (
 	"google.golang.org/adk/runner"
 	adksession "google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
+	"google.golang.org/genai"
 
 	"github.com/SAP/astonish/pkg/credentials"
 	"github.com/SAP/astonish/pkg/provider/llmerror"
@@ -33,7 +34,7 @@ type SubAgentConfig struct {
 	HeartbeatInterval time.Duration `yaml:"heartbeat_interval,omitempty" json:"heartbeat_interval,omitempty"` // Liveness update interval (default: 5s)
 	MaxRetries        int           `yaml:"max_retries,omitempty" json:"max_retries,omitempty"`               // Inner LLM retry attempts per task (default: 3)
 	MaxToolCalls      int           `yaml:"max_tool_calls,omitempty" json:"max_tool_calls,omitempty"`         // Unused. Previous per-task tool-call cap is removed.
-	DelegationTimeout time.Duration `yaml:"delegation_timeout,omitempty" json:"delegation_timeout,omitempty"` // Absolute deadline for a fan-out call (default: 5m)
+	DelegationTimeout time.Duration `yaml:"delegation_timeout,omitempty" json:"delegation_timeout,omitempty"` // Absolute deadline for a fan-out call (default: 25m)
 }
 
 // SubTaskProgressEvent represents a structured lifecycle event for sub-task
@@ -354,7 +355,7 @@ func NewSubAgentManager(cfg SubAgentConfig) *SubAgentManager {
 		cfg.MaxRetries = 3
 	}
 	if cfg.DelegationTimeout <= 0 {
-		cfg.DelegationTimeout = 5 * time.Minute
+		cfg.DelegationTimeout = 25 * time.Minute
 	}
 
 	sem := make(chan struct{}, cfg.MaxConcurrent)
@@ -432,9 +433,12 @@ func (m *SubAgentManager) RunTasks(ctx context.Context, tasks []SubAgentTask) []
 			result.Attempts = 1
 
 			// Auto-retry: if the task failed with a retryable error and was
-			// making progress (had tool calls or partial output), retry once
-			// with a fresh timeout and a continuation prompt.
+			// making progress (had tool calls or partial output), evaluate
+			// whether to continue or restart with a different approach.
 			if isRetryableFailure(result) && hasProgress(result) {
+				// Evaluate whether the task was making progress or was stuck
+				evalAction, evalReason, evalGuidance := evaluateTimeoutResult(ctx, m.LLM, t, result)
+
 				// Emit task_retry event so the UI knows
 				if m.SubTaskProgress != nil {
 					m.SubTaskProgress(SubTaskProgressEvent{
@@ -444,7 +448,7 @@ func (m *SubAgentManager) RunTasks(ctx context.Context, tasks []SubAgentTask) []
 						Status:     "retrying",
 						Attempt:    2,
 						Error:      result.Error,
-						Reason:     retryReason(result),
+						Reason:     evalReason,
 						NoActivity: result.InactivityReason != "",
 						SessionID:  store.SessionIDFromContext(ctx),
 					})
@@ -456,11 +460,23 @@ func (m *SubAgentManager) RunTasks(ctx context.Context, tasks []SubAgentTask) []
 					"error", result.Error,
 					"tool_calls", result.ToolCalls,
 					"duration", result.Duration,
+					"eval_action", evalAction,
+					"eval_reason", evalReason,
 				)
 
-				// Build continuation prompt with partial context from first attempt
+				// Build retry prompt based on evaluation decision
 				retryTask := t
-				retryTask.Description = buildRetryPrompt(t.Description, result)
+				if evalAction == "restart" {
+					// Fresh start — do not carry forward partial output
+					retryTask.Description = buildRestartPrompt(t.Description, result, evalGuidance)
+				} else {
+					// Continue — carry forward partial context
+					prompt := buildRetryPrompt(t.Description, result)
+					if evalGuidance != "" {
+						prompt += "\n\nAdditional guidance: " + evalGuidance
+					}
+					retryTask.Description = prompt
+				}
 				retryTask.Attempt = 2
 				result = m.RunTask(ctx, retryTask)
 				result.Attempts = 2
@@ -567,6 +583,176 @@ func buildRetryPrompt(originalDescription string, firstAttempt TaskResult) strin
 	}
 
 	sb.WriteString("Continue from where you left off. Do NOT repeat work already done above. Original task:\n")
+	sb.WriteString(originalDescription)
+	return sb.String()
+}
+
+// evaluateTimeoutPrompt is the system prompt used when evaluating whether a
+// timed-out task was making meaningful progress or was stuck in a loop.
+const evaluateTimeoutPrompt = `You are evaluating a sub-agent task that was interrupted by a timeout. Analyze the execution summary and determine whether the task was making meaningful forward progress or was stuck.
+
+Meaningful progress indicators:
+- Different tool calls over time (not repeating the same call)
+- Accumulating output/results toward the goal
+- Working through a multi-step plan
+- Each tool call advancing the task further
+
+Stuck/looping indicators:
+- Same tool called repeatedly with same or similar arguments
+- Repeated errors with no change in approach
+- No convergence toward the goal
+- Retrying the same failing operation
+
+Respond with EXACTLY this format (no other text):
+ACTION: continue
+REASON: <1-2 sentence explanation>
+GUIDANCE: <specific instruction for what to do next, or empty if just continuing>
+
+OR:
+ACTION: restart
+REASON: <1-2 sentence explanation>
+GUIDANCE: <what different approach to try instead>`
+
+// buildEvaluationSummary creates a concise execution summary for the timeout
+// evaluator LLM. It includes the task description, duration, tool call count,
+// the last N trace steps, and partial output.
+func buildEvaluationSummary(task SubAgentTask, result TaskResult) string {
+	var sb strings.Builder
+
+	// Task info
+	desc := task.Description
+	if len(desc) > 500 {
+		desc = desc[:500] + "... (truncated)"
+	}
+	sb.WriteString(fmt.Sprintf("Task: %s\nDescription: %s\n", task.Name, desc))
+	sb.WriteString(fmt.Sprintf("Duration: %s\nTool calls made: %d\n", result.Duration.Truncate(time.Second), result.ToolCalls))
+	sb.WriteString(fmt.Sprintf("Termination reason: %s\n", result.Error))
+
+	// Last N trace steps
+	if result.Trace != nil {
+		result.Trace.mu.Lock()
+		steps := result.Trace.Steps
+		result.Trace.mu.Unlock()
+
+		startIdx := 0
+		if len(steps) > 10 {
+			startIdx = len(steps) - 10
+		}
+		if len(steps) > 0 {
+			sb.WriteString(fmt.Sprintf("\nLast %d tool calls (of %d total):\n", len(steps)-startIdx, len(steps)))
+			for i := startIdx; i < len(steps); i++ {
+				step := steps[i]
+				status := "success"
+				if !step.Success {
+					status = "failed"
+				}
+				sb.WriteString(fmt.Sprintf("  %d. %s → %s\n", i+1, step.ToolName, status))
+			}
+		}
+	}
+
+	// Partial output tail
+	if result.Result != "" {
+		partial := result.Result
+		if len(partial) > 1000 {
+			partial = partial[len(partial)-1000:]
+		}
+		sb.WriteString(fmt.Sprintf("\nPartial output (last %d chars):\n%s\n", len(partial), partial))
+	}
+
+	return sb.String()
+}
+
+// evaluateTimeoutResult uses an LLM to decide whether a timed-out task was
+// making meaningful progress ("continue") or was stuck in a loop ("restart").
+// Returns the action, a reason explanation, and optional guidance for the retry.
+// Falls back to ("continue", "evaluation unavailable - assuming progress", "")
+// if the LLM call fails or the response cannot be parsed.
+func evaluateTimeoutResult(ctx context.Context, llm model.LLM, task SubAgentTask, result TaskResult) (action string, reason string, guidance string) {
+	if llm == nil {
+		return "continue", "evaluation unavailable - no LLM configured", ""
+	}
+
+	summary := buildEvaluationSummary(task, result)
+
+	// Use a short timeout for the evaluation call — it should be fast
+	evalCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{
+			{
+				Parts: []*genai.Part{{Text: evaluateTimeoutPrompt}},
+				Role:  "user",
+			},
+			{
+				Parts: []*genai.Part{{Text: summary}},
+				Role:  "user",
+			},
+		},
+	}
+
+	var responseText string
+	for resp, err := range llm.GenerateContent(evalCtx, req, false) {
+		if err != nil {
+			slog.Warn("timeout evaluation LLM call failed", "task", task.Name, "error", err)
+			return "continue", "evaluation unavailable - assuming progress", ""
+		}
+		if resp.Content != nil {
+			for _, p := range resp.Content.Parts {
+				if p.Text != "" {
+					responseText += p.Text
+				}
+			}
+		}
+	}
+
+	// Parse the response
+	action, reason, guidance = parseEvaluationResponse(responseText)
+	return action, reason, guidance
+}
+
+// parseEvaluationResponse extracts ACTION, REASON, and GUIDANCE from the
+// evaluator LLM's response text.
+func parseEvaluationResponse(response string) (action string, reason string, guidance string) {
+	lines := strings.Split(response, "\n")
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		lower := strings.ToLower(trimmed)
+		if strings.HasPrefix(lower, "action:") {
+			action = strings.TrimSpace(trimmed[len("action:"):])
+			action = strings.ToLower(action)
+		} else if strings.HasPrefix(lower, "reason:") {
+			reason = strings.TrimSpace(trimmed[len("reason:"):])
+		} else if strings.HasPrefix(lower, "guidance:") {
+			guidance = strings.TrimSpace(trimmed[len("guidance:"):])
+		}
+	}
+
+	// Validate action
+	if action != "continue" && action != "restart" {
+		// Default to continue if we can't parse
+		if reason == "" {
+			reason = "evaluation response unparseable - assuming progress"
+		}
+		action = "continue"
+	}
+
+	return action, reason, guidance
+}
+
+// buildRestartPrompt creates a fresh-start prompt for a task that was stuck.
+// Unlike buildRetryPrompt, it does NOT carry forward partial output — the task
+// starts completely fresh with corrective guidance.
+func buildRestartPrompt(originalDescription string, failedAttempt TaskResult, guidance string) string {
+	var sb strings.Builder
+	sb.WriteString("RESTART: Your previous attempt at this task was stopped because it was not converging.\n\n")
+	if guidance != "" {
+		sb.WriteString("The previous approach failed. Try a DIFFERENT approach: ")
+		sb.WriteString(guidance)
+		sb.WriteString("\n\n")
+	}
+	sb.WriteString("Do NOT repeat the approach that failed. Original task:\n")
 	sb.WriteString(originalDescription)
 	return sb.String()
 }

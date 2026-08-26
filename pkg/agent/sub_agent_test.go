@@ -39,6 +39,9 @@ func TestNewSubAgentManager_Defaults(t *testing.T) {
 	if mgr.Config.HeartbeatInterval != 5*time.Second {
 		t.Errorf("HeartbeatInterval = %v, want 5s", mgr.Config.HeartbeatInterval)
 	}
+	if mgr.Config.DelegationTimeout != 25*time.Minute {
+		t.Errorf("DelegationTimeout = %v, want 25m", mgr.Config.DelegationTimeout)
+	}
 }
 
 func TestNewSubAgentManager_CustomConfig(t *testing.T) {
@@ -835,6 +838,337 @@ func TestIsRawContextDeadlineExceeded(t *testing.T) {
 			got := isRawContextDeadlineExceeded(tt.err)
 			if got != tt.want {
 				t.Errorf("isRawContextDeadlineExceeded(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+// --- evaluateTimeoutResult tests ---
+
+// evalMockLLM implements model.LLM with a canned response or error for testing.
+type evalMockLLM struct {
+	response string
+	err      error
+}
+
+func (m evalMockLLM) Name() string { return "eval-mock" }
+
+func (m evalMockLLM) GenerateContent(_ context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		if m.err != nil {
+			yield(nil, m.err)
+			return
+		}
+		yield(&model.LLMResponse{
+			Content: &genai.Content{
+				Parts: []*genai.Part{{Text: m.response}},
+				Role:  "model",
+			},
+			TurnComplete: true,
+		}, nil)
+	}
+}
+
+func TestEvaluateTimeoutResult_Continue(t *testing.T) {
+	mockLLM := evalMockLLM{
+		response: "ACTION: continue\nREASON: task was reading files progressively\nGUIDANCE: continue with remaining files",
+	}
+
+	task := SubAgentTask{Name: "reader", Description: "read all go files"}
+	result := TaskResult{
+		Name:      "reader",
+		Status:    "timeout",
+		Error:     "task timed out",
+		ToolCalls: 15,
+		Duration:  10 * time.Minute,
+		Result:    "partial output here",
+	}
+
+	action, reason, guidance := evaluateTimeoutResult(context.Background(), mockLLM, task, result)
+
+	if action != "continue" {
+		t.Errorf("action = %q, want 'continue'", action)
+	}
+	if reason != "task was reading files progressively" {
+		t.Errorf("reason = %q, want 'task was reading files progressively'", reason)
+	}
+	if guidance != "continue with remaining files" {
+		t.Errorf("guidance = %q, want 'continue with remaining files'", guidance)
+	}
+}
+
+func TestEvaluateTimeoutResult_Restart(t *testing.T) {
+	mockLLM := evalMockLLM{
+		response: "ACTION: restart\nREASON: task repeated same grep 5 times\nGUIDANCE: use code_definition instead",
+	}
+
+	task := SubAgentTask{Name: "searcher", Description: "find function definition"}
+	result := TaskResult{
+		Name:      "searcher",
+		Status:    "timeout",
+		Error:     "task timed out",
+		ToolCalls: 20,
+		Duration:  10 * time.Minute,
+	}
+
+	action, reason, guidance := evaluateTimeoutResult(context.Background(), mockLLM, task, result)
+
+	if action != "restart" {
+		t.Errorf("action = %q, want 'restart'", action)
+	}
+	if reason != "task repeated same grep 5 times" {
+		t.Errorf("reason = %q, want 'task repeated same grep 5 times'", reason)
+	}
+	if guidance != "use code_definition instead" {
+		t.Errorf("guidance = %q, want 'use code_definition instead'", guidance)
+	}
+}
+
+func TestEvaluateTimeoutResult_LLMError(t *testing.T) {
+	mockLLM := evalMockLLM{
+		err: fmt.Errorf("connection refused"),
+	}
+
+	task := SubAgentTask{Name: "worker", Description: "do work"}
+	result := TaskResult{
+		Name:      "worker",
+		Status:    "timeout",
+		Error:     "task timed out",
+		ToolCalls: 5,
+		Duration:  10 * time.Minute,
+	}
+
+	action, reason, guidance := evaluateTimeoutResult(context.Background(), mockLLM, task, result)
+
+	if action != "continue" {
+		t.Errorf("action = %q, want 'continue' (fallback)", action)
+	}
+	if !strings.Contains(reason, "evaluation unavailable") {
+		t.Errorf("reason = %q, want to contain 'evaluation unavailable'", reason)
+	}
+	if guidance != "" {
+		t.Errorf("guidance = %q, want empty string on fallback", guidance)
+	}
+}
+
+func TestEvaluateTimeoutResult_MalformedResponse(t *testing.T) {
+	mockLLM := evalMockLLM{
+		response: "I don't know what to do. The task seems complicated.",
+	}
+
+	task := SubAgentTask{Name: "confused", Description: "something"}
+	result := TaskResult{
+		Name:      "confused",
+		Status:    "timeout",
+		Error:     "task timed out",
+		ToolCalls: 3,
+		Duration:  5 * time.Minute,
+	}
+
+	action, reason, guidance := evaluateTimeoutResult(context.Background(), mockLLM, task, result)
+
+	if action != "continue" {
+		t.Errorf("action = %q, want 'continue' (fallback on malformed response)", action)
+	}
+	if reason == "" {
+		t.Error("reason should not be empty on malformed response")
+	}
+	_ = guidance // may or may not be empty
+}
+
+func TestEvaluateTimeoutResult_NilLLM(t *testing.T) {
+	task := SubAgentTask{Name: "worker", Description: "do work"}
+	result := TaskResult{
+		Name:      "worker",
+		Status:    "timeout",
+		Error:     "task timed out",
+		ToolCalls: 5,
+		Duration:  10 * time.Minute,
+	}
+
+	action, reason, guidance := evaluateTimeoutResult(context.Background(), nil, task, result)
+
+	if action != "continue" {
+		t.Errorf("action = %q, want 'continue' (fallback)", action)
+	}
+	if !strings.Contains(reason, "evaluation unavailable") {
+		t.Errorf("reason = %q, want to contain 'evaluation unavailable'", reason)
+	}
+	if guidance != "" {
+		t.Errorf("guidance = %q, want empty", guidance)
+	}
+}
+
+func TestBuildRestartPrompt(t *testing.T) {
+	originalDesc := "find all bugs in the codebase"
+	failedResult := TaskResult{
+		Name:      "bugfinder",
+		Status:    "timeout",
+		Error:     "timed out",
+		ToolCalls: 15,
+		Result:    "some partial output that should NOT appear in restart prompt",
+	}
+	guidance := "try a different search strategy"
+
+	prompt := buildRestartPrompt(originalDesc, failedResult, guidance)
+
+	if !strings.Contains(prompt, "RESTART") {
+		t.Error("restart prompt missing 'RESTART' keyword")
+	}
+	if !strings.Contains(prompt, "DIFFERENT approach") {
+		t.Error("restart prompt missing 'DIFFERENT approach' instruction")
+	}
+	if !strings.Contains(prompt, originalDesc) {
+		t.Error("restart prompt missing original task description")
+	}
+	if !strings.Contains(prompt, guidance) {
+		t.Error("restart prompt missing guidance text")
+	}
+	if strings.Contains(prompt, "some partial output") {
+		t.Error("restart prompt should NOT contain partial output from failed attempt")
+	}
+}
+
+func TestBuildRestartPrompt_NoGuidance(t *testing.T) {
+	prompt := buildRestartPrompt("do something", TaskResult{}, "")
+
+	if !strings.Contains(prompt, "RESTART") {
+		t.Error("restart prompt missing 'RESTART' keyword")
+	}
+	if !strings.Contains(prompt, "do something") {
+		t.Error("restart prompt missing original description")
+	}
+	// Without guidance, should not have the "DIFFERENT approach" line
+	if strings.Contains(prompt, "DIFFERENT approach") {
+		t.Error("restart prompt should NOT include 'DIFFERENT approach' when guidance is empty")
+	}
+}
+
+func TestBuildEvaluationSummary(t *testing.T) {
+	task := SubAgentTask{
+		Name:        "test-task",
+		Description: "do something important",
+	}
+
+	trace := NewExecutionTrace("do something important")
+	trace.RecordStep("read_file", map[string]any{"path": "a.go"}, nil, nil)
+	trace.mu.Lock()
+	trace.Steps[0].Success = true
+	trace.mu.Unlock()
+	trace.RecordStep("grep_search", map[string]any{"pattern": "foo"}, nil, nil)
+	trace.mu.Lock()
+	trace.Steps[1].Success = true
+	trace.mu.Unlock()
+	trace.RecordStep("shell_command", map[string]any{"command": "go build"}, nil, nil)
+	trace.mu.Lock()
+	trace.Steps[2].Success = false
+	trace.mu.Unlock()
+
+	result := TaskResult{
+		Name:      "test-task",
+		Status:    "timeout",
+		Error:     "task timed out",
+		ToolCalls: 3,
+		Duration:  8 * time.Minute,
+		Trace:     trace,
+		Result:    "some partial output from the task",
+	}
+
+	summary := buildEvaluationSummary(task, result)
+
+	if !strings.Contains(summary, "test-task") {
+		t.Error("summary missing task name")
+	}
+	if !strings.Contains(summary, "do something important") {
+		t.Error("summary missing task description")
+	}
+	if !strings.Contains(summary, "read_file") {
+		t.Error("summary missing tool name 'read_file'")
+	}
+	if !strings.Contains(summary, "grep_search") {
+		t.Error("summary missing tool name 'grep_search'")
+	}
+	if !strings.Contains(summary, "shell_command") {
+		t.Error("summary missing tool name 'shell_command'")
+	}
+	if !strings.Contains(summary, "success") {
+		t.Error("summary missing 'success' status indicator")
+	}
+	if !strings.Contains(summary, "failed") {
+		t.Error("summary missing 'failed' status indicator")
+	}
+	if !strings.Contains(summary, "task timed out") {
+		t.Error("summary missing error message")
+	}
+	if !strings.Contains(summary, "8m") {
+		t.Error("summary missing duration")
+	}
+}
+
+func TestNewSubAgentManager_DefaultDelegationTimeout(t *testing.T) {
+	mgr := NewSubAgentManager(SubAgentConfig{})
+
+	if mgr.Config.DelegationTimeout != 25*time.Minute {
+		t.Errorf("DelegationTimeout = %v, want 25m", mgr.Config.DelegationTimeout)
+	}
+}
+
+func TestParseEvaluationResponse(t *testing.T) {
+	tests := []struct {
+		name         string
+		response     string
+		wantAction   string
+		wantReason   string
+		wantGuidance string
+	}{
+		{
+			name:         "continue with guidance",
+			response:     "ACTION: continue\nREASON: making progress\nGUIDANCE: keep going",
+			wantAction:   "continue",
+			wantReason:   "making progress",
+			wantGuidance: "keep going",
+		},
+		{
+			name:         "restart with guidance",
+			response:     "ACTION: restart\nREASON: stuck in loop\nGUIDANCE: try grep instead",
+			wantAction:   "restart",
+			wantReason:   "stuck in loop",
+			wantGuidance: "try grep instead",
+		},
+		{
+			name:         "case insensitive action",
+			response:     "ACTION: Continue\nREASON: works fine\nGUIDANCE:",
+			wantAction:   "continue",
+			wantReason:   "works fine",
+			wantGuidance: "",
+		},
+		{
+			name:         "no action line",
+			response:     "I think the task was doing fine",
+			wantAction:   "continue",
+			wantReason:   "evaluation response unparseable - assuming progress",
+			wantGuidance: "",
+		},
+		{
+			name:         "invalid action",
+			response:     "ACTION: maybe\nREASON: not sure",
+			wantAction:   "continue",
+			wantReason:   "not sure",
+			wantGuidance: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			action, reason, guidance := parseEvaluationResponse(tt.response)
+			if action != tt.wantAction {
+				t.Errorf("action = %q, want %q", action, tt.wantAction)
+			}
+			if reason != tt.wantReason {
+				t.Errorf("reason = %q, want %q", reason, tt.wantReason)
+			}
+			if guidance != tt.wantGuidance {
+				t.Errorf("guidance = %q, want %q", guidance, tt.wantGuidance)
 			}
 		})
 	}

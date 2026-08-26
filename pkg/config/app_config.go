@@ -1302,7 +1302,7 @@ type SubAgentAppConfig struct {
 	MaxDepth int `yaml:"max_depth,omitempty" json:"max_depth,omitempty"`
 	// MaxConcurrent is the maximum number of parallel sub-agents. Default: 5.
 	MaxConcurrent int `yaml:"max_concurrent,omitempty" json:"max_concurrent,omitempty"`
-	// TaskTimeoutSec is the per-task timeout in seconds. Default: 300 (5 minutes).
+	// TaskTimeoutSec is the per-task timeout in seconds. Default: 600 (10 minutes).
 	TaskTimeoutSec int `yaml:"task_timeout_sec,omitempty" json:"task_timeout_sec,omitempty"`
 }
 
@@ -1318,7 +1318,7 @@ func (c *SubAgentAppConfig) IsSubAgentsEnabled() bool {
 // TaskTimeout returns the per-task timeout as a time.Duration.
 func (c *SubAgentAppConfig) TaskTimeout() time.Duration {
 	if c.TaskTimeoutSec <= 0 {
-		return 5 * time.Minute
+		return 10 * time.Minute
 	}
 	return time.Duration(c.TaskTimeoutSec) * time.Second
 }

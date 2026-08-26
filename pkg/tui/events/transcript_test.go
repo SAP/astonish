@@ -1094,3 +1094,167 @@ func TestTranscript_PlanDirectWithoutPreamble(t *testing.T) {
 		t.Fatalf("item[1] kind=%q want plan", tr.Items[1].Kind)
 	}
 }
+
+func TestNewCompaction_ConstructsEvent(t *testing.T) {
+	info := CompactionInfo{
+		BeforeTokens:   150000,
+		AfterTokens:    42000,
+		Strategy:       "code",
+		MessageCount:   12,
+		SummaryPreview: "Summary of earlier conversation...",
+	}
+	ev := NewCompaction(info)
+	if ev.Kind != KindCompaction {
+		t.Fatalf("Kind=%q want %q", ev.Kind, KindCompaction)
+	}
+	if ev.Compaction == nil {
+		t.Fatal("Compaction field should be non-nil")
+	}
+	if ev.Compaction.BeforeTokens != 150000 {
+		t.Fatalf("BeforeTokens=%d want 150000", ev.Compaction.BeforeTokens)
+	}
+	if ev.Compaction.AfterTokens != 42000 {
+		t.Fatalf("AfterTokens=%d want 42000", ev.Compaction.AfterTokens)
+	}
+	if ev.Compaction.Strategy != "code" {
+		t.Fatalf("Strategy=%q want code", ev.Compaction.Strategy)
+	}
+	if ev.Compaction.MessageCount != 12 {
+		t.Fatalf("MessageCount=%d want 12", ev.Compaction.MessageCount)
+	}
+}
+
+func TestTranscript_CompactionEvent(t *testing.T) {
+	tr := NewTranscript()
+	tr.Apply(NewUser("hello"))
+
+	// Compaction with structured info.
+	tr.Apply(NewCompaction(CompactionInfo{
+		BeforeTokens: 150000,
+		AfterTokens:  42000,
+		Strategy:     "code",
+		MessageCount: 8,
+	}))
+
+	if len(tr.Items) != 2 {
+		t.Fatalf("items=%d want 2", len(tr.Items))
+	}
+	item := tr.Items[1]
+	if item.Kind != ItemCompaction {
+		t.Fatalf("kind=%q want compaction", item.Kind)
+	}
+	if item.Compaction == nil {
+		t.Fatal("Compaction field should be set on item")
+	}
+	if !strings.Contains(item.Content, "150k") {
+		t.Fatalf("content should mention before tokens, got: %q", item.Content)
+	}
+	if !strings.Contains(item.Content, "42k") {
+		t.Fatalf("content should mention after tokens, got: %q", item.Content)
+	}
+	if !strings.Contains(item.Content, "code") {
+		t.Fatalf("content should mention strategy, got: %q", item.Content)
+	}
+	if !strings.Contains(item.Content, "8 messages") {
+		t.Fatalf("content should mention message count, got: %q", item.Content)
+	}
+}
+
+func TestTranscript_CompactionWithSummaryPreviewOnly(t *testing.T) {
+	tr := NewTranscript()
+	tr.Apply(NewCompaction(CompactionInfo{
+		SummaryPreview: "Compacted context: 150k → 42k tokens.",
+	}))
+
+	if len(tr.Items) != 1 {
+		t.Fatalf("items=%d want 1", len(tr.Items))
+	}
+	item := tr.Items[0]
+	if item.Kind != ItemCompaction {
+		t.Fatalf("kind=%q want compaction", item.Kind)
+	}
+	if !strings.Contains(item.Content, "Compacted context:") {
+		t.Fatalf("content should contain summary preview, got: %q", item.Content)
+	}
+}
+
+func TestTranscript_CompactionIsHardBreak(t *testing.T) {
+	tr := NewTranscript()
+	tr.Apply(NewUser("hello"))
+	tr.Apply(NewText("response"))
+	tr.Apply(NewCompaction(CompactionInfo{SummaryPreview: "compacted"}))
+	tr.Apply(NewText("new text"))
+
+	// After compaction (hard break), the new text should start a fresh agent item.
+	// Items: user, agent("response"), compaction, agent("new text")
+	if len(tr.Items) != 4 {
+		t.Fatalf("items=%d want 4; kinds: %v", len(tr.Items), itemKinds(tr))
+	}
+	if tr.Items[2].Kind != ItemCompaction {
+		t.Fatalf("item[2] kind=%q want compaction", tr.Items[2].Kind)
+	}
+	if tr.Items[3].Kind != ItemAgent {
+		t.Fatalf("item[3] kind=%q want agent", tr.Items[3].Kind)
+	}
+}
+
+// TestTranscript_LoadHistory_PlanPendingNotAwaiting verifies that resuming a
+// session containing a plan with PlanPending status does NOT leave the
+// transcript in Awaiting state. Historical sessions are complete — there is no
+// live backend waiting for an approval response.
+func TestTranscript_LoadHistory_PlanPendingNotAwaiting(t *testing.T) {
+	tr := NewTranscript()
+	tr.LinearThread = true
+
+	entries := []HistoryMsg{
+		{Kind: "user", Text: "plan a refactor"},
+		{Kind: "plan", Text: "# Plan\n\n**Goal:** Refactor the code", PlanStatus: PlanPending, Options: []string{"Approve & implement", "Request changes", "Decline"}},
+		{Kind: "user", Text: "I approve this plan. Please start implementing it now, phase by phase."},
+		{Kind: "agent", Text: "I'll start implementing the plan."},
+		{Kind: "tool_call", ToolName: "edit_file", ToolID: "1", Args: map[string]any{"path": "a.go"}},
+		{Kind: "tool_result", ToolName: "edit_file", ToolID: "1", Result: "ok"},
+		{Kind: "agent", Text: "Done!"},
+	}
+	tr.LoadHistory(entries)
+
+	if tr.Awaiting {
+		t.Fatal("Awaiting should be false after LoadHistory — plan approval is historical")
+	}
+	if tr.ApprovalIdx != -1 {
+		t.Fatalf("ApprovalIdx should be -1, got %d", tr.ApprovalIdx)
+	}
+	if tr.Streaming {
+		t.Fatal("Streaming should be false after LoadHistory")
+	}
+
+	// The plan item should still exist and be rendered.
+	found := false
+	for _, it := range tr.Items {
+		if it.Kind == ItemPlan {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected a plan item in the transcript")
+	}
+}
+
+// TestTranscript_LoadHistory_PlanApprovedNotAwaiting verifies that a plan with
+// PlanApproved status does not set Awaiting either (even before the fix, this
+// should have been fine, but it's good to confirm).
+func TestTranscript_LoadHistory_PlanApprovedNotAwaiting(t *testing.T) {
+	tr := NewTranscript()
+	entries := []HistoryMsg{
+		{Kind: "user", Text: "plan something"},
+		{Kind: "plan", Text: "# Plan\n\n**Goal:** Do stuff", PlanStatus: PlanApproved},
+		{Kind: "agent", Text: "implementing..."},
+	}
+	tr.LoadHistory(entries)
+
+	if tr.Awaiting {
+		t.Fatal("Awaiting should be false for approved plan")
+	}
+	if tr.ApprovalIdx != -1 {
+		t.Fatalf("ApprovalIdx should be -1, got %d", tr.ApprovalIdx)
+	}
+}

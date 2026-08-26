@@ -61,31 +61,33 @@ func (m model) renderPlanCard(goal string, doc agent.PlanDocumentInfo, steps []a
 	}
 
 	var body []string
+
+	// Context band (overview / motivation).
 	if ctx := strings.TrimSpace(doc.Context); ctx != "" {
 		body = append(body, m.planBand("CONTEXT", ctx, inner)...)
 		body = append(body, "")
 	}
 
-	lastGroup := ""
+	// Phase blocks — each phase is a self-contained section separated by rules.
+	// Parallel group headers are NOT shown inline; parallelization is summarized
+	// at the end as an "Execution Order" section for cleaner scanning.
 	for i, s := range steps {
-		if s.ParallelGroup != lastGroup {
-			if s.ParallelGroup != "" {
-				if len(body) > 0 && body[len(body)-1] != "" {
-					body = append(body, "")
-				}
-				body = append(body, th.PlanMuted.Render("⟳ "+s.ParallelGroup))
-			}
-			lastGroup = s.ParallelGroup
-		}
-		body = append(body, m.planPhaseLines(i+1, s, inner)...)
-		if i < len(steps)-1 {
+		if i > 0 {
 			body = append(body, "")
-			if len(steps) > 2 {
-				sep := strings.Repeat("·", min(inner/2, 20))
-				body = append(body, th.PlanMuted.Render(sep))
-				body = append(body, "")
-			}
+			rule := strings.Repeat("─", min(inner, 40))
+			body = append(body, th.PlanSeparator.Render(rule))
+			body = append(body, "")
 		}
+		body = append(body, m.planPhaseBlock(i+1, s, inner)...)
+	}
+
+	// Execution order section — shows parallelization if any groups exist.
+	if order := m.planExecutionOrder(steps, inner); len(order) > 0 {
+		body = append(body, "")
+		rule := strings.Repeat("─", min(inner, 40))
+		body = append(body, th.PlanSeparator.Render(rule))
+		body = append(body, "")
+		body = append(body, order...)
 	}
 
 	if guard := strings.TrimSpace(doc.WhatNotToDo); guard != "" {
@@ -135,49 +137,123 @@ func (m model) renderPlanCard(goal string, doc agent.PlanDocumentInfo, steps []a
 	return m.paintPlanFrame(title, meta, body, footer, width, inner)
 }
 
-func (m model) planPhaseLines(n int, s agent.PlanStepInfo, inner int) []string {
+func (m model) planPhaseBlock(n int, s agent.PlanStepInfo, inner int) []string {
 	th := m.theme
 	desc := strings.TrimSpace(s.Description)
 	if desc == "" {
 		desc = strings.TrimSpace(s.Name)
 	}
-	prefix := th.Number.Render(fmt.Sprintf("%d", n)) + "  " + planStatusGlyph(s.Status, th) + " "
-	lines := wrapPrefixed(prefix, desc, inner, th.Text)
 
-	// Summary: plain-English explanation for the approver (prominent, normal text style).
+	// Phase heading: status glyph + number + description (bold).
+	prefix := planStatusGlyph(s.Status, th) + " " + th.Number.Render(fmt.Sprintf("%d", n)) + "  "
+	lines := wrapPrefixed(prefix, desc, inner, th.PlanPhaseTitle)
+
+	// Summary / Intent: the plain-English explanation for the approver.
 	if summary := strings.TrimSpace(s.Summary); summary != "" {
-		lines = append(lines, wrapPrefixed("   ", summary, inner, th.Text)...)
+		lines = append(lines, "")
+		lines = append(lines, wrapPrefixed("", summary, inner, th.PlanSummary)...)
 	}
 
-	for _, f := range s.Files {
-		if strings.TrimSpace(f.Path) == "" {
-			continue
+	// FILES section.
+	if len(s.Files) > 0 {
+		hasFile := false
+		for _, f := range s.Files {
+			if strings.TrimSpace(f.Path) != "" {
+				hasFile = true
+				break
+			}
 		}
-		glyph, st := planFileKindStyle(f.Kind, th)
-		filePrefix := "   " + st.Render(glyph) + " "
-		lines = append(lines, wrapPrefixed(filePrefix, f.Path, inner, th.Text)...)
+		if hasFile {
+			lines = append(lines, "")
+			lines = append(lines, th.PlanSection.Render("FILES"))
+			for _, f := range s.Files {
+				if strings.TrimSpace(f.Path) == "" {
+					continue
+				}
+				glyph, st := planFileKindStyle(f.Kind, th)
+				lines = append(lines, "  "+st.Render(glyph)+" "+f.Path)
+			}
+		}
 	}
+
+	// VERIFY section.
 	if v := strings.TrimSpace(s.Verify); v != "" {
-		lines = append(lines, wrapPrefixed("   ", "$ "+v, inner, th.PlanMuted)...)
+		lines = append(lines, "")
+		lines = append(lines, th.PlanSection.Render("VERIFY"))
+		lines = append(lines, wrapPrefixed("  ", "$ "+v, inner, th.PlanMuted)...)
 	}
+
+	// DETAILS section.
 	if d := strings.TrimSpace(s.Details); d != "" {
-		lines = append(lines, "") // breathing room before implementation details
-		// Render details as markdown (with syntax highlighting, code blocks,
-		// inline formatting) rather than plain muted text. The details field
-		// typically contains numbered steps, backtick-quoted identifiers, and
-		// fenced code blocks that benefit from proper rendering.
-		detailWidth := inner - 3 // account for "   " indent
+		lines = append(lines, "")
+		lines = append(lines, th.PlanSection.Render("DETAILS"))
+		detailWidth := inner - 2 // account for "  " indent
 		if detailWidth < 20 {
 			detailWidth = 20
 		}
 		md := render.Markdown(d, detailWidth, th.RenderStyles())
 		if md == "" {
 			// Fallback: plain text if markdown rendering produces nothing.
-			md = th.PlanMuted.Width(detailWidth).Render(d)
+			md = th.PlanDetail.Width(detailWidth).Render(d)
 		}
 		for _, dl := range strings.Split(md, "\n") {
-			lines = append(lines, "   "+dl)
+			lines = append(lines, "  "+dl)
 		}
+	}
+	return lines
+}
+
+// planExecutionOrder renders a compact "EXECUTION ORDER" section at the end of
+// the plan that shows which phases can run in parallel. Only shown when at least
+// one phase has a parallel group.
+func (m model) planExecutionOrder(steps []agent.PlanStepInfo, inner int) []string {
+	// Collect groups in order of first appearance.
+	type groupInfo struct {
+		label string
+		names []string
+	}
+	var groups []groupInfo
+	groupIdx := map[string]int{}
+	var serial []string
+
+	for _, s := range steps {
+		name := strings.TrimSpace(s.Name)
+		if name == "" {
+			name = strings.TrimSpace(s.Description)
+		}
+		if s.ParallelGroup == "" {
+			serial = append(serial, name)
+		} else {
+			if idx, ok := groupIdx[s.ParallelGroup]; ok {
+				groups[idx].names = append(groups[idx].names, name)
+			} else {
+				groupIdx[s.ParallelGroup] = len(groups)
+				groups = append(groups, groupInfo{label: s.ParallelGroup, names: []string{name}})
+			}
+		}
+	}
+
+	// Only show if there's actual parallelism.
+	if len(groups) == 0 {
+		return nil
+	}
+
+	th := m.theme
+	var lines []string
+	lines = append(lines, th.PlanSection.Render("EXECUTION ORDER"))
+
+	for _, g := range groups {
+		if len(g.names) > 1 {
+			lines = append(lines, "  "+th.PlanMuted.Render("⟳ "+g.label+" (parallel):"))
+			for _, name := range g.names {
+				lines = append(lines, "    "+th.Text.Render("• "+name))
+			}
+		} else {
+			lines = append(lines, "  "+th.PlanMuted.Render(g.label+": ")+th.Text.Render(g.names[0]))
+		}
+	}
+	for _, name := range serial {
+		lines = append(lines, "  "+th.PlanMuted.Render("→ ")+th.Text.Render(name)+" "+th.PlanMuted.Render("(serial)"))
 	}
 	return lines
 }

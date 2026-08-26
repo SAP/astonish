@@ -221,10 +221,18 @@ func TestIsAlwaysAllowedPath(t *testing.T) {
 	}{
 		{"dev null absolute", "/dev/null", true},
 		{"dev null with trailing dot segment", "/dev/./null", true},
+		{"tmp directory itself", "/tmp", true},
+		{"file under tmp", "/tmp/scratch.txt", true},
+		{"nested under tmp", "/tmp/build/output/file.o", true},
+		{"private tmp directory itself", "/private/tmp", true},
+		{"file under private tmp", "/private/tmp/test.log", true},
+		{"nested under private tmp", "/private/tmp/a/b/c.txt", true},
 		{"empty", "", false},
-		{"project file", "/tmp/project/main.go", false},
+		{"project file", "/home/user/project/main.go", false},
 		{"other dev device", "/dev/zero", false},
 		{"home file", "~/secret.txt", false},
+		{"tmpish but not tmp", "/tmpdata/file", false},
+		{"private but not tmp", "/private/var/file", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

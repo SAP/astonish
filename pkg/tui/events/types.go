@@ -28,8 +28,9 @@ const (
 	KindModelChanged  Kind = "model_changed"
 	KindStatus        Kind = "status"     // spinner / live status text
 	KindUser          Kind = "user"       // local echo of user message
-	KindDelegation    Kind = "delegation" // sub-agent delegation lifecycle
-	KindPlan          Kind = "plan"       // plan document plus its approval lifecycle
+	KindDelegation    Kind = "delegation"  // sub-agent delegation lifecycle
+	KindPlan          Kind = "plan"        // plan document plus its approval lifecycle
+	KindCompaction    Kind = "compaction"  // context compaction result
 )
 
 // PlanStatus is the approval lifecycle owned by a plan transcript item.
@@ -73,6 +74,15 @@ type Artifact struct {
 	ToolName    string
 	IsReport    bool
 	ReportTitle string
+}
+
+// CompactionInfo carries structured data about a context compaction event.
+type CompactionInfo struct {
+	BeforeTokens   int    `json:"before_tokens"`
+	AfterTokens    int    `json:"after_tokens"`
+	Strategy       string `json:"strategy"`                  // "code" or "platform"
+	MessageCount   int    `json:"message_count"`             // how many messages were compacted
+	SummaryPreview string `json:"summary_preview,omitempty"` // first ~200 chars of summary
 }
 
 // DelegationTask describes one sub-task in a delegation event.
@@ -132,6 +142,9 @@ type Event struct {
 
 	// Artifact for KindArtifact.
 	Artifact *Artifact
+
+	// Compaction for KindCompaction.
+	Compaction *CompactionInfo
 
 	// Meta holds optional backend-specific keys without expanding the struct.
 	Meta map[string]any
@@ -273,5 +286,13 @@ func NewDelegationTaskActivity(dtype, taskName, toolName string, args map[string
 		DelegationToolArgs:   args,
 		DelegationToolResult: result,
 		DelegationText:       text,
+	}
+}
+
+// NewCompaction creates a compaction event with structured info.
+func NewCompaction(info CompactionInfo) Event {
+	return Event{
+		Kind:       KindCompaction,
+		Compaction: &info,
 	}
 }

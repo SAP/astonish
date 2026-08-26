@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"fmt"
 	"sync"
 )
 
@@ -27,32 +26,13 @@ const (
 	GraphPlanPhasePlan GraphPlanPhase = "plan"
 )
 
-// GraphPlanState tracks the current phase and bounded exploration budget for a
-// single Graph-Optimized Plan session. All access is guarded because parallel
-// tool calls may enter the gate concurrently.
+// GraphPlanState tracks the current phase for a single Graph-Optimized Plan
+// session. All access is guarded because parallel tool calls may enter the gate
+// concurrently.
 type GraphPlanState struct {
-	mu       sync.Mutex
-	phase    GraphPlanPhase
-	counters GraphPlanCounters
+	mu    sync.Mutex
+	phase GraphPlanPhase
 }
-
-// GraphPlanCounters is a snapshot of discovery charged to the current turn.
-// Source reads are not counted: reading the regions identified in the GRAPH
-// phase is the point of the READ phase, not research to ration.
-type GraphPlanCounters struct {
-	GraphQueries    int
-	GapCalls        int
-	DelegationCalls int
-	DelegatedTasks  int
-	Total           int
-}
-
-const (
-	GraphPlanMaxGraphQueries    = 4
-	GraphPlanMaxGapCalls        = 12
-	GraphPlanMaxDelegationCalls = 1
-	GraphPlanMaxDelegatedTasks  = 6
-)
 
 // NewGraphPlanState returns a state machine starting in the graph phase.
 func NewGraphPlanState() *GraphPlanState {
@@ -66,75 +46,6 @@ func (g *GraphPlanState) Phase() GraphPlanPhase {
 	return g.phase
 }
 
-// Counters returns a concurrency-safe budget snapshot.
-func (g *GraphPlanState) Counters() GraphPlanCounters {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return g.counters
-}
-
-// ChargeExploration atomically reserves budget for an exploration tool. An
-// empty message means the call is allowed; a non-empty message explains the
-// transition the model must take instead. Rejected calls are not charged.
-func (g *GraphPlanState) ChargeExploration(name string, args map[string]any) string {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-
-	next := g.counters
-	switch name {
-	case "codegraph_explore":
-		next.GraphQueries++
-		if next.GraphQueries > GraphPlanMaxGraphQueries {
-			return g.limitMessageLocked("codegraph query", GraphPlanMaxGraphQueries)
-		}
-	case "read_file", "read_pdf", "filter_json", "announce_plan", "update_plan":
-		// Source reads and plan recorders are not discovery. A read quota
-		// truncates the READ phase; charging announce_plan as a gap call
-		// deadlocks PLAN after the gap budget is exhausted.
-		return ""
-	case "delegate_tasks":
-		next.DelegationCalls++
-		next.DelegatedTasks += delegationTaskCount(args)
-		if next.DelegationCalls > GraphPlanMaxDelegationCalls {
-			return g.limitMessageLocked("delegation call", GraphPlanMaxDelegationCalls)
-		}
-		if next.DelegatedTasks > GraphPlanMaxDelegatedTasks {
-			return g.limitMessageLocked("delegated task", GraphPlanMaxDelegatedTasks)
-		}
-	default:
-		if !GraphPlanPhaseTools(g.phase)[name] {
-			return ""
-		}
-		next.GapCalls++
-		if next.GapCalls > GraphPlanMaxGapCalls {
-			return g.limitMessageLocked("gap-filling call", GraphPlanMaxGapCalls)
-		}
-	}
-
-	next.Total++
-	g.counters = next
-	return ""
-}
-
-func delegationTaskCount(args map[string]any) int {
-	if tasks, ok := args["tasks"].([]any); ok {
-		return len(tasks)
-	}
-	// A decoding shape we cannot inspect still represents at least one task.
-	return 1
-}
-
-func (g *GraphPlanState) limitMessageLocked(kind string, limit int) string {
-	transition := "gplan_finalize"
-	switch g.phase {
-	case GraphPlanPhaseGraph:
-		transition = "gplan_reads (or gplan_gaps if codegraph has no coverage)"
-	case GraphPlanPhaseRead:
-		transition = "gplan_gaps (or gplan_finalize if no gaps remain)"
-	}
-	return fmt.Sprintf("Graph-plan %s limit reached (%d). Stop researching and call %s.", kind, limit, transition)
-}
-
 // Advance transitions to the given phase. Thread-safe. Any target is accepted;
 // the transition tools encode the legal orderings.
 func (g *GraphPlanState) Advance(to GraphPlanPhase) {
@@ -143,11 +54,10 @@ func (g *GraphPlanState) Advance(to GraphPlanPhase) {
 	g.mu.Unlock()
 }
 
-// Reset returns the machine and all budgets to the initial graph phase.
+// Reset returns the machine to the initial graph phase.
 func (g *GraphPlanState) Reset() {
 	g.mu.Lock()
 	g.phase = GraphPlanPhaseGraph
-	g.counters = GraphPlanCounters{}
 	g.mu.Unlock()
 }
 

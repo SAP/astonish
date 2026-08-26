@@ -2092,6 +2092,9 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		}
 		compactor.DebugMode = cfg.DebugMode
 		compactor.LLM = makeLLMFunc(llm)
+		if cfg.CodeMode {
+			compactor.SetStrategy(&persistentsession.CodeStrategy{})
+		}
 		chatAgent.Compactor = compactor
 		if subAgentMgr != nil {
 			subAgentMgr.Compactor = compactor

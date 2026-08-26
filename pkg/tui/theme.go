@@ -41,6 +41,13 @@ type Theme struct {
 	PlanHeader lipgloss.Style // bold styled title (✦ Execution Plan)
 	PlanMuted  lipgloss.Style // muted text inside the plan (metadata, legend)
 
+	// Plan document chrome — new section-based layout
+	PlanPhaseTitle lipgloss.Style // bold phase title (e.g. "Phase 1 — Implement core logic")
+	PlanSummary    lipgloss.Style // slightly prominent summary/intent text (normal weight, text color)
+	PlanDetail     lipgloss.Style // dimmed/recessed detail text (for deep implementation notes)
+	PlanSection    lipgloss.Style // section label within a phase (e.g. "FILES", "VERIFY")
+	PlanSeparator  lipgloss.Style // horizontal separator between phases
+
 	// Composer / footer chrome
 	InputBorder      lipgloss.Style
 	InputBorderFocus lipgloss.Style
@@ -123,6 +130,12 @@ func DefaultTheme() Theme {
 		PlanBorder: lipgloss.NewStyle().Foreground(lipgloss.Color("172")).Background(bg),
 		PlanHeader: lipgloss.NewStyle().Foreground(lipgloss.Color("172")).Background(bg).Bold(true),
 		PlanMuted:  lipgloss.NewStyle().Foreground(muted).Background(bg),
+
+		PlanPhaseTitle: lipgloss.NewStyle().Foreground(text).Background(bg).Bold(true),
+		PlanSummary:    lipgloss.NewStyle().Foreground(text).Background(bg),
+		PlanDetail:     lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Background(bg),
+		PlanSection:    lipgloss.NewStyle().Foreground(lipgloss.Color("172")).Background(bg),
+		PlanSeparator:  lipgloss.NewStyle().Foreground(lipgloss.Color("238")).Background(bg),
 
 		InputBorder: lipgloss.NewStyle().
 			Background(bg).
@@ -213,6 +226,12 @@ func PlatformTheme() Theme {
 		PlanHeader: lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Background(bg).Bold(true),
 		PlanMuted:  lipgloss.NewStyle().Foreground(muted).Background(bg),
 
+		PlanPhaseTitle: lipgloss.NewStyle().Foreground(text).Background(bg).Bold(true),
+		PlanSummary:    lipgloss.NewStyle().Foreground(text).Background(bg),
+		PlanDetail:     lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Background(bg),
+		PlanSection:    lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Background(bg),
+		PlanSeparator:  lipgloss.NewStyle().Foreground(lipgloss.Color("238")).Background(bg),
+
 		InputBorder: lipgloss.NewStyle().
 			Background(bg).
 			Border(lipgloss.RoundedBorder()).
@@ -260,6 +279,7 @@ func plainTheme() Theme {
 		CodeGutter:  s,
 		DiffAddedBg: s, DiffRemovedBg: s,
 		PlanBorder: s, PlanHeader: s, PlanMuted: s,
+		PlanPhaseTitle: s, PlanSummary: s, PlanDetail: s, PlanSection: s, PlanSeparator: s,
 		InputBorder: box, InputBorderFocus: box, InputBorderPlan: box,
 		InputPrompt: s, InputPlaceholder: s, FooterMeta: s, Hint: s,
 		NoColor: true,

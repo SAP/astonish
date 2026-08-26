@@ -236,6 +236,7 @@ func RunCodeTUI(ctx context.Context, cfg *CodeConfig) error {
 		resumed:                cfg.SessionID != "",
 		notices:                result.StartupNotices,
 		filesystemSkills:       append([]skills.Skill(nil), result.FilesystemSkills...),
+		sessionNotes:           persistentsession.NewSessionNotes(),
 		subAgentAuthReqCh:      make(chan agent.SubAgentAuthRequest, 1),
 		subAgentAuthRespCh:     make(chan agent.SubAgentAuthResponse, 1),
 	}
@@ -371,6 +372,7 @@ func buildCodeBackend(ctx context.Context, cfg *CodeConfig) (backend.Backend, er
 		configured:             result.ProviderConfigured,
 		notices:                result.StartupNotices,
 		filesystemSkills:       append([]skills.Skill(nil), result.FilesystemSkills...),
+		sessionNotes:           persistentsession.NewSessionNotes(),
 		subAgentAuthReqCh:      make(chan agent.SubAgentAuthRequest, 1),
 		subAgentAuthRespCh:     make(chan agent.SubAgentAuthResponse, 1),
 	}
@@ -486,6 +488,11 @@ type localAgentBackend struct {
 	// filesystemSkills is the exact initialization-time slice wired into the
 	// runtime skill lookup. It is not reloaded when /skills is invoked.
 	filesystemSkills []skills.Skill
+
+	// sessionNotes tracks structured session state (files modified, tasks,
+	// decisions) incrementally. Used by CodeStrategy at compaction time as a
+	// pre-built summary to avoid expensive LLM re-summarization.
+	sessionNotes *persistentsession.SessionNotes
 
 	mu          sync.Mutex
 	sessionID   string
@@ -1313,13 +1320,21 @@ func (b *localAgentBackend) compactToChild(ctx context.Context, sessionID string
 // maybeCompactToChild runs automatic threshold-based compaction at a turn
 // boundary and surfaces a notice on the event stream when it fires.
 func (b *localAgentBackend) maybeCompactToChild(ctx context.Context, sessionID string, emit func(string, map[string]any)) string {
+	// Wire session notes into the code strategy before compaction.
+	if b.result != nil && b.result.ChatAgent != nil && b.result.ChatAgent.Compactor != nil {
+		if cs, ok := b.result.ChatAgent.Compactor.Strategy.(*persistentsession.CodeStrategy); ok && b.sessionNotes != nil {
+			cs.SessionNotes = b.sessionNotes.Clone()
+		}
+	}
 	res := b.compactToChild(ctx, sessionID, false)
-	// Re-arm the UI hook for any within-turn safety-valve compactons.
+	// Re-arm the UI hook for any within-turn safety-valve compactions.
 	if b.result != nil && b.result.ChatAgent != nil && b.result.ChatAgent.Compactor != nil {
 		comp := b.result.ChatAgent.Compactor
 		comp.SetOnCompaction(func(beforeTokens, afterTokens int) {
-			emit("system", map[string]any{
-				"content": fmt.Sprintf("Compacted context: %s → %s tokens.", formatCodeTokens(beforeTokens), formatCodeTokens(afterTokens)),
+			emit("compaction", map[string]any{
+				"before_tokens": beforeTokens,
+				"after_tokens":  afterTokens,
+				"strategy":      comp.StrategyName(),
 			})
 			emit("usage", map[string]any{
 				"input_tokens": afterTokens,
@@ -1333,9 +1348,10 @@ func (b *localAgentBackend) maybeCompactToChild(ctx context.Context, sessionID s
 	if !res.Did {
 		return sessionID
 	}
-	emit("system", map[string]any{
-		"content": fmt.Sprintf("Compacted context: %s → %s tokens. Earlier turns are preserved and remain reachable via /rollback.",
-			formatCodeTokens(res.Before), formatCodeTokens(res.After)),
+	emit("compaction", map[string]any{
+		"before_tokens": res.Before,
+		"after_tokens":  res.After,
+		"strategy":      b.result.ChatAgent.Compactor.StrategyName(),
 	})
 	emit("usage", map[string]any{"input_tokens": res.After, "estimated": true})
 	emit("session", map[string]any{"sessionId": res.SessionID, "isNew": false})
@@ -2275,6 +2291,9 @@ func (b *localAgentBackend) NewSession() {
 	rebuild := b.needsRebuild
 	b.needsRebuild = false
 	b.mu.Unlock()
+
+	// Reset session notes for a fresh session.
+	b.sessionNotes = persistentsession.NewSessionNotes()
 
 	if rebuild {
 		b.rebuildAgent()

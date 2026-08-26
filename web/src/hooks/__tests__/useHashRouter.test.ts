@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { buildPath } from '../../hooks/useHashRouter'
+import { buildPath, parseHash } from '../../hooks/useHashRouter'
 
 // Note: parseHash is not exported, but we can test it indirectly through the hook
 // or test buildPath which is the exported function
@@ -56,5 +56,31 @@ describe('buildPath', () => {
 
   it('defaults to /chat for unknown view', () => {
     expect(buildPath('unknown')).toBe('/chat')
+  })
+
+  it('builds slides path', () => {
+    expect(buildPath('slides')).toBe('/slides')
+  })
+
+  it('builds slides path with deck slug', () => {
+    expect(buildPath('slides', { subKey: 'my-deck' })).toBe('/slides/my-deck')
+  })
+
+  it('encodes special characters in slides deck slug', () => {
+    expect(buildPath('slides', { subKey: 'q3 review' })).toBe('/slides/q3%20review')
+  })
+})
+
+describe('parseHash', () => {
+  it('parses #/slides to slides view with empty deckSlug', () => {
+    expect(parseHash('#/slides')).toEqual({ view: 'slides', params: { deckSlug: '' } })
+  })
+
+  it('parses #/slides/my-deck to slides view with deckSlug', () => {
+    expect(parseHash('#/slides/my-deck')).toEqual({ view: 'slides', params: { deckSlug: 'my-deck' } })
+  })
+
+  it('decodes encoded deckSlug', () => {
+    expect(parseHash('#/slides/q3%20review')).toEqual({ view: 'slides', params: { deckSlug: 'q3 review' } })
   })
 })

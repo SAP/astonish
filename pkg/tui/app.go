@@ -132,6 +132,9 @@ type model struct {
 	turnCancel context.CancelFunc
 	// eventCh is drained via tea.Cmds while a turn is active.
 	eventCh <-chan events.Event
+	// planApprovalPending prevents duplicate approval turns while persistence and
+	// RunTurn execute asynchronously outside Bubble Tea's update loop.
+	planApprovalPending bool
 	// turnStartedAt records when the current turn began (or resumed after a
 	// HITL pause), enabling a live elapsed-time counter in the status bar.
 	// Zero value means the timer is not actively ticking (either no turn or paused).
@@ -653,6 +656,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case artifactContentLoadedMsg:
 		return m.applyArtifactContentLoaded(msg)
 
+	case planApprovalStartedMsg:
+		m.planApprovalPending = false
+		if msg.err != nil {
+			m.tr.Apply(events.NewError("Approved plan did not start: " + msg.err.Error() + ". Press Enter to retry."))
+			m.refreshViewport()
+			return m, nil
+		}
+		m.tr.ResolvePlan(events.PlanApproved)
+		m.ta.Reset()
+		m.planMode = false
+		m.graphPlanMode = false
+		m.turnCancel = msg.cancel
+		m.eventCh = msg.ch
+		m.tr.Apply(events.NewSystem("Plan approved. Implementation started."))
+		m.tr.Streaming = true
+		m.tr.Status = "Thinking…"
+		m.timerResume()
+		if m.ready {
+			m.layout()
+		}
+		m.refreshViewport()
+		return m, tea.Batch(waitEvent(msg.ch), timerTick())
+
 	case eventMsg:
 		// Apply this event plus any others already sitting in the channel, then
 		// repaint once. A burst of tool output (e.g. a large diff followed by
@@ -1073,13 +1099,13 @@ The runtime advances through four phases. Each phase unlocks a specific set of t
 
 PHASE 1 — GRAPH (current at turn start). Only ` + "`codegraph_explore`" + ` and ` + "`find_files`" + ` are available. codegraph is a pre-computed knowledge graph of this repo: symbols, call edges, dependencies, cross-file references, and change blast-radius. Query it FIRST to understand the code you will touch — it answers most structural questions in 1-4 calls with far fewer tokens than grep. Compound your findings as you go: never re-query the graph for something already in your context. When you have identified the exact regions you need to read, call ` + "`gplan_reads`" + ` with the synthesized read list (each entry: path + why you need it). Only include paths that ` + "`codegraph_explore`" + ` explicitly returned — do NOT guess or infer filenames; if you need a file but do not have its confirmed path, use ` + "`find_files`" + ` to locate it first. This advances you to the READ phase. If codegraph returns no coverage (language unsupported / not indexed), call ` + "`gplan_gaps`" + ` immediately to skip straight to the GAP phase.
 
-PHASE 2 — READ. ` + "`read_file`" + ` (and read_pdf/filter_json) unlock, plus codegraph_explore. Read exactly the regions you listed — do NOT re-search for information you already have. When you have read everything the graph pointed you to, decide: if genuine gaps remain that codegraph could not answer, call ` + "`gplan_gaps`" + ` with those gaps (each: the question + why codegraph was insufficient) to advance to the GAP phase. If there are no gaps, call ` + "`gplan_finalize`" + ` to skip straight to the PLAN phase.
+PHASE 2 — READ. ` + "`read_file`" + ` (and read_pdf/filter_json) unlock, plus codegraph_explore. There is no read quota — read every region on the list you recorded with gplan_reads. Never ` + "`read_file`" + ` a path whose contents are already in this turn's context, and do not re-search for information you already have. When you have read everything the graph pointed you to, decide: if genuine gaps remain that codegraph could not answer, call ` + "`gplan_gaps`" + ` with those gaps (each: the question + why codegraph was insufficient) to advance to the GAP phase. If there are no gaps, call ` + "`gplan_finalize`" + ` to skip straight to the PLAN phase.
 
 PHASE 3 — GAP (complementary). The remaining read-only tools unlock: grep_search, find_files, file_tree, repo_map, code_definition, code_references, web_fetch, memory_search, memory_get, skill_lookup — and delegate_tasks. Use these ONLY for the genuine gaps codegraph could not fill. Prefer ` + "`delegate_tasks`" + ` with read-only ` + "`tools`" + ` filters (e.g. ["grep_search","read_file","code_references"]) to fan out independent gap questions in parallel. Do not re-answer anything already established. When gaps are closed, call ` + "`gplan_finalize`" + ` to advance to the PLAN phase.
 
 PHASE 4 — PLAN. ` + "`announce_plan`" + ` unlocks. Call it WITHOUT any preceding prose — the plan document is shown directly to the user. Record the finalized plan: goal + ordered, dependency-first phases. For each phase list its affected files (each marked new/modify/delete — the symbol AND its callers, tests, generated code, migrations, docs, so nothing is left unwired); write a concrete, self-contained 'details' field describing exactly what to do (specific functions/structs to add or change, the exact logic, new fields, interface updates — enough detail that execution can proceed directly from it without re-reading the code); and give a verify step (the build/test/lint command that proves the phase is done). File paths must be confirmed: only record a file path in 'details' or 'files' if codegraph_explore, code_definition, find_files, or read_file explicitly returned that exact path this session — do NOT infer paths from symbol names or directory conventions; if a path was not confirmed, call find_files before adding it to the plan. This persists the full plan to a session PLAN.md shown to the user; do NOT hand-write PLAN.md. End by asking the user to exit to Normal mode (shift+tab) before any execution. When executing later, treat PLAN.md as authoritative — do NOT re-investigate files or symbols already confirmed in the plan.
 
-Produce a COMPLETE plan — cover every dependency the change reaches, order phases dependency-first, and surface any human decisions (breaking changes, alternatives with trade-offs, ambiguous requirements) explicitly. Spend effort proportional to blast radius.`
+Produce a COMPLETE plan — cover every dependency the change reaches, order phases dependency-first, and surface any human decisions (breaking changes, alternatives with trade-offs, ambiguous requirements) explicitly. Spend effort proportional to blast radius. Stop when you can name every affected file and why — not because a counter tripped. Never re-query codegraph or grep for a fact already established.`
 
 // askModeSystemContext must stay in sync with agent.AskModeSystemContext
 // (the runtime gate's source of truth). It teaches the model it is in a
@@ -3849,10 +3875,19 @@ func (m model) renderDelegationItem(it events.Item, width int) string {
 			icon = th.Error.Render("✗")
 			nameStyle = th.Error
 			timeStr = task.Duration
-		default: // "running"
+		case "queued":
+			icon = th.Muted.Render("○")
+			nameStyle = th.Muted
+			timeStr = task.Duration
+		case "retrying":
+			icon = th.Brand.Render("↻")
+			nameStyle = th.Text
+			timeStr = task.Duration
+		default: // running / waiting_on_model
 			icon = th.Brand.Render("●")
 			nameStyle = th.Text
-			if !task.StartedAt.IsZero() {
+			timeStr = task.Duration
+			if timeStr == "" && !task.StartedAt.IsZero() {
 				elapsed := time.Since(task.StartedAt).Truncate(time.Second)
 				timeStr = formatDuration(elapsed)
 			}
@@ -3897,30 +3932,52 @@ func (m model) renderDelegationItem(it events.Item, width int) string {
 		th.Muted.Italic(true).Render("    click task to expand details")
 }
 
-// delegationTaskStatusLine returns a short, human-friendly inline status for a
-// running task's latest activity (e.g. "→ Reading main.go" or "→ thinking…").
+// delegationTaskStatusLine returns a short, human-friendly inline liveness
+// status, preferring watchdog/retry metadata over the latest activity detail.
 func delegationTaskStatusLine(task events.DelegationTaskState, maxWidth int) string {
-	if task.Status != "running" || len(task.Activity) == 0 {
-		return ""
-	}
-	last := task.Activity[len(task.Activity)-1]
 	var line string
-	switch last.Type {
-	case "tool_call":
-		line = "→ " + delegationToolHint(last.ToolName, last.Args)
-	case "tool_result":
-		line = "→ " + render.ToolDisplayName(last.ToolName) + " done"
-	case "text":
-		t := strings.TrimSpace(last.Text)
-		if idx := strings.IndexByte(t, '\n'); idx >= 0 {
-			t = t[:idx]
+	switch {
+	case task.NoActivity:
+		line = "⚠ no activity"
+		if task.LastActivity != "" {
+			line += " for " + task.LastActivity
 		}
-		if t == "" {
-			return ""
+		if task.Error != "" {
+			line += ": " + task.Error
 		}
-		line = "→ " + t
-	default:
-		return ""
+	case task.Status == "queued":
+		line = "queued — waiting for a worker slot"
+	case task.Status == "waiting_on_model":
+		line = "waiting on model"
+		if task.LastActivity != "" {
+			line += " · last activity " + task.LastActivity + " ago"
+		}
+	case task.Status == "retrying":
+		line = "retrying"
+		if task.Attempt > 0 {
+			line += fmt.Sprintf(" · attempt %d", task.Attempt)
+		}
+		if task.Error != "" {
+			line += ": " + task.Error
+		}
+	case task.Status == "failed" && task.Error != "":
+		line = task.Error
+	case task.Status == "running" && len(task.Activity) > 0:
+		last := task.Activity[len(task.Activity)-1]
+		switch last.Type {
+		case "tool_call":
+			line = "→ " + delegationToolHint(last.ToolName, last.Args)
+		case "tool_result":
+			line = "→ " + render.ToolDisplayName(last.ToolName) + " done"
+		case "text":
+			t := strings.TrimSpace(last.Text)
+			if idx := strings.IndexByte(t, '\n'); idx >= 0 {
+				t = t[:idx]
+			}
+			if t != "" {
+				line = "→ " + t
+			}
+		}
 	}
 	if maxWidth > 0 && len([]rune(line)) > maxWidth {
 		runes := []rune(line)
@@ -4061,8 +4118,8 @@ func (m model) delegationTaskAtLine(line int, itemIdx int) int {
 					return i
 				}
 				currentLine++ // task row
-				// Running tasks with activity have an extra status line
-				if task.Status == "running" && len(task.Activity) > 0 {
+				// Tasks with a liveness/detail line consume one extra row.
+				if delegationTaskStatusLine(task, 0) != "" {
 					if offset == currentLine {
 						return i // clicking on status line selects the same task
 					}
@@ -4197,6 +4254,22 @@ func (m model) renderDelegationDetailContent(task events.DelegationTaskState, wi
 		th.Text.Bold(true).Render(task.Name),
 		th.Muted.Render(task.Status),
 		th.Muted.Render(timeStr)))
+	if task.Attempt > 0 {
+		b.WriteString("  " + th.Muted.Render(fmt.Sprintf("Attempt %d", task.Attempt)))
+		if task.LastActivity != "" {
+			b.WriteString(th.Muted.Render(" · last activity " + task.LastActivity + " ago"))
+		}
+		b.WriteString("\n")
+	}
+	if task.NoActivity {
+		warning := "No meaningful activity detected"
+		if task.Error != "" {
+			warning += ": " + task.Error
+		}
+		b.WriteString("  " + th.Error.Render("⚠ "+warning) + "\n")
+	} else if task.Status == "retrying" && task.Error != "" {
+		b.WriteString("  " + th.Muted.Render("Retry reason: "+task.Error) + "\n")
+	}
 
 	if task.Description != "" {
 		b.WriteString("  " + th.Muted.Render(task.Description) + "\n")

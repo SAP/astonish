@@ -29,6 +29,20 @@ func GetSandboxRuntime() []byte {
 	return data
 }
 
+// GetSlidesRuntime returns the pre-bundled Slides Web Component runtime JS file
+// (slides-runtime.js) from the embedded dist filesystem, or nil if not found.
+func GetSlidesRuntime() []byte {
+	distFS := resolveDistFS()
+	if distFS == nil {
+		return nil
+	}
+	data, err := fs.ReadFile(distFS, "slides-runtime.js")
+	if err != nil {
+		return nil
+	}
+	return data
+}
+
 // GetTailwindBrowser returns the Tailwind CSS v4 browser runtime script
 // (tailwind-browser.js) from the embedded dist filesystem, or nil if not found.
 func GetTailwindBrowser() []byte {

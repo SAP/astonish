@@ -1063,6 +1063,35 @@ func RegisterRoutes(router *mux.Router, svc *store.Services, backend store.Platf
 	router.HandleFunc("/api/mcp-internet-install", InternetMCPInstallHandler).Methods("POST")
 	router.HandleFunc("/api/mcp-dependencies/check", CheckMCPDependenciesHandler).Methods("POST")
 
+	// Tenant-scoped slide deck endpoints.
+	router.HandleFunc("/api/docs", ListDocsHandler).Methods("GET")
+	router.HandleFunc("/api/docs/slides/themes", ListSlidesThemesHandler).Methods("GET")
+	router.HandleFunc("/api/docs/slides/components", ListSlidesComponentsHandler).Methods("GET")
+	router.HandleFunc("/api/docs/slides/validate", ValidateSlidesHandler).Methods("POST")
+	// Fixed paths MUST be registered before the parameterized {deckSlug} routes
+	// so gorilla/mux does not treat 'publish'/'fork' as a deck slug.
+	router.HandleFunc("/api/docs/slides/publish", SlidesPublishToTeamHandler).Methods("POST")
+	router.HandleFunc("/api/docs/slides/fork", SlidesForkToPersonalHandler).Methods("POST")
+	router.HandleFunc("/api/docs/slides/templates", ListSlidesTemplatesHandler).Methods("GET")
+	router.HandleFunc("/api/docs/slides/import", ImportSlidesTemplateHandler).Methods("POST")
+	// Fixed 'templates/' prefixed mutation routes MUST precede the {deckSlug}
+	// wildcard so mux does not treat 'templates' as a deck slug.
+	router.HandleFunc("/api/docs/slides/templates/{name}", DeleteSlidesTemplateHandler).Methods("DELETE")
+	router.HandleFunc("/api/docs/slides/templates/{name}/duplicate", DuplicateSlidesTemplateHandler).Methods("POST")
+	router.HandleFunc("/api/docs/slides/templates/{name}/recolor", RecolorSlidesTemplateHandler).Methods("PATCH")
+	router.HandleFunc("/api/docs/slides/templates/{name}/thumbnails/{kind}", GetSlidesTemplateThumbnailHandler).Methods("GET")
+	router.HandleFunc("/api/docs/slides/{deckSlug}", GetSlidesDeckHandler).Methods("GET")
+	router.HandleFunc("/api/docs/slides/{deckSlug}", DeleteSlidesDeckHandler).Methods("DELETE")
+	router.HandleFunc("/api/docs/slides/{deckSlug}/slides/{idx:[0-9]+}", GetSlideHandler).Methods("GET")
+	router.HandleFunc("/api/docs/slides/{deckSlug}/thumbnails/{idx:[0-9]+}", GetSlidesDeckSlideThumbnailHandler).Methods("GET")
+	router.HandleFunc("/api/docs/slides/{deckSlug}/present", PresentSlidesHandler).Methods("GET")
+	router.HandleFunc("/api/docs/slides/{deckSlug}/export/html", ExportSlidesHTMLHandler).Methods("POST")
+	router.HandleFunc("/api/docs/slides/{deckSlug}/export/pdf", ExportSlidesPDFHandler).Methods("POST")
+	router.HandleFunc("/api/docs/slides/{deckSlug}/export/pptx", ExportSlidesPPTXHandler).Methods("POST")
+	router.HandleFunc("/api/docs/slides/{deckSlug}/save", SaveSlidesDeckHandler).Methods("POST")
+	router.HandleFunc("/api/docs/slides/{deckSlug}/versions", ListSlidesDeckVersionsHandler).Methods("GET")
+	router.HandleFunc("/api/docs/slides/{deckSlug}/versions/{version:[0-9]+}/restore", RestoreSlidesDeckVersionHandler).Methods("POST")
+
 	// Settings endpoints
 	router.HandleFunc("/api/settings/config", GetSettingsHandler).Methods("GET")
 	router.HandleFunc("/api/settings/config", UpdateSettingsHandler).Methods("PUT")

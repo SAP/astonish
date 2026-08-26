@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	adkagent "google.golang.org/adk/agent"
@@ -25,10 +26,14 @@ import (
 
 // SubAgentConfig holds configuration for the sub-agent system.
 type SubAgentConfig struct {
-	MaxDepth      int           `yaml:"max_depth,omitempty" json:"max_depth,omitempty"`           // Max delegation nesting (default: 2)
-	MaxConcurrent int           `yaml:"max_concurrent,omitempty" json:"max_concurrent,omitempty"` // Max parallel sub-agents (default: 5)
-	TaskTimeout   time.Duration `yaml:"task_timeout,omitempty" json:"task_timeout,omitempty"`     // Per-task timeout (default: 10m)
-	MaxRetries    int           `yaml:"max_retries,omitempty" json:"max_retries,omitempty"`       // Inner LLM retry attempts per task (default: 3)
+	MaxDepth          int           `yaml:"max_depth,omitempty" json:"max_depth,omitempty"`                   // Max delegation nesting (default: 2)
+	MaxConcurrent     int           `yaml:"max_concurrent,omitempty" json:"max_concurrent,omitempty"`         // Max parallel sub-agents (default: 5)
+	TaskTimeout       time.Duration `yaml:"task_timeout,omitempty" json:"task_timeout,omitempty"`             // Per-task absolute timeout (default: 10m)
+	InactivityTimeout time.Duration `yaml:"inactivity_timeout,omitempty" json:"inactivity_timeout,omitempty"` // No meaningful activity timeout (default: 2m)
+	HeartbeatInterval time.Duration `yaml:"heartbeat_interval,omitempty" json:"heartbeat_interval,omitempty"` // Liveness update interval (default: 5s)
+	MaxRetries        int           `yaml:"max_retries,omitempty" json:"max_retries,omitempty"`               // Inner LLM retry attempts per task (default: 3)
+	MaxToolCalls      int           `yaml:"max_tool_calls,omitempty" json:"max_tool_calls,omitempty"`         // Unused. Previous per-task tool-call cap is removed.
+	DelegationTimeout time.Duration `yaml:"delegation_timeout,omitempty" json:"delegation_timeout,omitempty"` // Absolute deadline for a fan-out call (default: 5m)
 }
 
 // SubTaskProgressEvent represents a structured lifecycle event for sub-task
@@ -45,9 +50,13 @@ type SubTaskProgressEvent struct {
 	// Fields for delegation_start
 	Tasks []SubTaskInfo `json:"tasks,omitempty"` // All tasks in the delegation (only for delegation_start)
 	// Fields for task_complete / task_failed
-	Status   string `json:"status,omitempty"`   // "success", "error", "timeout" (for task_complete/task_failed)
-	Duration string `json:"duration,omitempty"` // Human-readable duration (for task_complete/task_failed)
-	Error    string `json:"error,omitempty"`    // Error message (for task_failed)
+	Status       string `json:"status,omitempty"`        // queued, running, waiting_on_model, retrying, complete, failed
+	Duration     string `json:"duration,omitempty"`      // Human-readable elapsed/final duration
+	Error        string `json:"error,omitempty"`         // Error message (for task_failed/task_retry)
+	Attempt      int    `json:"attempt,omitempty"`       // 1-based attempt number
+	LastActivity string `json:"last_activity,omitempty"` // Human-readable age since meaningful activity
+	Reason       string `json:"reason,omitempty"`        // Retry/failure/watchdog reason
+	NoActivity   bool   `json:"no_activity,omitempty"`   // True when inactivity watchdog fired
 	// Fields for task_tool_call / task_tool_result / task_text
 	ToolName   string `json:"tool_name,omitempty"`   // Tool name (for task_tool_call / task_tool_result)
 	ToolArgs   any    `json:"tool_args,omitempty"`   // Tool arguments (for task_tool_call)
@@ -166,17 +175,20 @@ type SubAgentTask struct {
 	// Internal: set by SubAgentManager, not by callers
 	ParentDepth int    // Current nesting depth
 	ParentID    string // Parent session ID for linking
+	Attempt     int    // 1-based task attempt
 }
 
 // TaskResult holds the outcome of a single sub-agent task execution.
 type TaskResult struct {
-	Name      string          // Matches SubAgentTask.Name
-	Status    string          // "success", "error", "timeout"
-	Result    string          // Final text output from the sub-agent
-	Trace     *ExecutionTrace // Execution trace for the sub-agent's work
-	ToolCalls int             // Number of tool calls made
-	Duration  time.Duration   // Wall clock time for the task
-	Error     string          // Error message if Status != "success"
+	Name             string          // Matches SubAgentTask.Name
+	Status           string          // "success", "error", "timeout"
+	Result           string          // Final text output from the sub-agent
+	Trace            *ExecutionTrace // Execution trace for the sub-agent's work
+	ToolCalls        int             // Number of tool calls made
+	Duration         time.Duration   // Wall clock time for the task
+	Error            string          // Error message if Status != "success"
+	Attempts         int             // Number of task attempts made
+	InactivityReason string          // Non-empty when the inactivity watchdog cancelled the task
 }
 
 // ToolGroup defines a named group of tools that sub-agents can request.
@@ -329,8 +341,20 @@ func NewSubAgentManager(cfg SubAgentConfig) *SubAgentManager {
 	if cfg.TaskTimeout <= 0 {
 		cfg.TaskTimeout = 10 * time.Minute
 	}
+	if cfg.InactivityTimeout <= 0 {
+		cfg.InactivityTimeout = 2 * time.Minute
+	}
+	if cfg.HeartbeatInterval <= 0 {
+		cfg.HeartbeatInterval = 5 * time.Second
+	}
+	if cfg.HeartbeatInterval > cfg.InactivityTimeout {
+		cfg.HeartbeatInterval = cfg.InactivityTimeout
+	}
 	if cfg.MaxRetries <= 0 {
 		cfg.MaxRetries = 3
+	}
+	if cfg.DelegationTimeout <= 0 {
+		cfg.DelegationTimeout = 5 * time.Minute
 	}
 
 	sem := make(chan struct{}, cfg.MaxConcurrent)
@@ -366,6 +390,10 @@ func (m *SubAgentManager) PopLastTraces() []*ExecutionTrace {
 // a fresh timeout and a continuation prompt carrying forward partial context.
 // This method blocks until all tasks complete (or timeout).
 func (m *SubAgentManager) RunTasks(ctx context.Context, tasks []SubAgentTask) []TaskResult {
+	delegationCtx, cancel := context.WithTimeout(ctx, m.Config.DelegationTimeout)
+	defer cancel()
+	ctx = delegationCtx
+
 	results := make([]TaskResult, len(tasks))
 	var wg sync.WaitGroup
 
@@ -373,6 +401,17 @@ func (m *SubAgentManager) RunTasks(ctx context.Context, tasks []SubAgentTask) []
 		wg.Add(1)
 		go func(idx int, t SubAgentTask) {
 			defer wg.Done()
+
+			if m.SubTaskProgress != nil {
+				m.SubTaskProgress(SubTaskProgressEvent{
+					Type:      "task_state",
+					TaskName:  t.Name,
+					PlanStep:  t.PlanStep,
+					Status:    "queued",
+					Attempt:   1,
+					SessionID: store.SessionIDFromContext(ctx),
+				})
+			}
 
 			// Acquire semaphore
 			select {
@@ -387,7 +426,10 @@ func (m *SubAgentManager) RunTasks(ctx context.Context, tasks []SubAgentTask) []
 				return
 			}
 
-			result := m.RunTask(ctx, t)
+			taskAttempt := t
+			taskAttempt.Attempt = 1
+			result := m.RunTask(ctx, taskAttempt)
+			result.Attempts = 1
 
 			// Auto-retry: if the task failed with a retryable error and was
 			// making progress (had tool calls or partial output), retry once
@@ -396,11 +438,15 @@ func (m *SubAgentManager) RunTasks(ctx context.Context, tasks []SubAgentTask) []
 				// Emit task_retry event so the UI knows
 				if m.SubTaskProgress != nil {
 					m.SubTaskProgress(SubTaskProgressEvent{
-						Type:      "task_retry",
-						TaskName:  t.Name,
-						PlanStep:  t.PlanStep,
-						Error:     result.Error,
-						SessionID: store.SessionIDFromContext(ctx),
+						Type:       "task_retry",
+						TaskName:   t.Name,
+						PlanStep:   t.PlanStep,
+						Status:     "retrying",
+						Attempt:    2,
+						Error:      result.Error,
+						Reason:     retryReason(result),
+						NoActivity: result.InactivityReason != "",
+						SessionID:  store.SessionIDFromContext(ctx),
 					})
 				}
 
@@ -415,7 +461,9 @@ func (m *SubAgentManager) RunTasks(ctx context.Context, tasks []SubAgentTask) []
 				// Build continuation prompt with partial context from first attempt
 				retryTask := t
 				retryTask.Description = buildRetryPrompt(t.Description, result)
+				retryTask.Attempt = 2
 				result = m.RunTask(ctx, retryTask)
+				result.Attempts = 2
 			}
 
 			results[idx] = result
@@ -429,6 +477,10 @@ func (m *SubAgentManager) RunTasks(ctx context.Context, tasks []SubAgentTask) []
 // isRetryableFailure returns true if the task result indicates a transient
 // failure that is worth retrying (timeout, API errors, rate limits).
 func isRetryableFailure(r TaskResult) bool {
+	if strings.Contains(strings.ToLower(r.Error), "tool-call limit") ||
+		strings.Contains(strings.ToLower(r.Error), "parent context") {
+		return false
+	}
 	if r.Status == "timeout" {
 		return true
 	}
@@ -461,6 +513,13 @@ func isRetryableFailure(r TaskResult) bool {
 // (had tool calls or produced partial output).
 func hasProgress(r TaskResult) bool {
 	return r.ToolCalls > 0 || len(r.Result) > 0
+}
+
+func retryReason(r TaskResult) string {
+	if r.InactivityReason != "" {
+		return r.InactivityReason
+	}
+	return r.Error
 }
 
 // isRawContextDeadlineExceeded checks if an error is a context deadline exceeded
@@ -518,6 +577,10 @@ func buildRetryPrompt(originalDescription string, firstAttempt TaskResult) strin
 func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) TaskResult {
 	start := time.Now()
 	parentSessionID := store.SessionIDFromContext(ctx)
+	attempt := task.Attempt
+	if attempt <= 0 {
+		attempt = 1
+	}
 
 	// Helper to emit progress events with the parent session ID attached.
 	emitProgress := func(evt SubTaskProgressEvent) {
@@ -532,22 +595,32 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) TaskRe
 		Type:     "task_start",
 		TaskName: task.Name,
 		PlanStep: task.PlanStep,
+		Status:   "running",
+		Attempt:  attempt,
 	})
 
 	// Emit task_complete or task_failed on every exit path
 	var result TaskResult
 	defer func() {
+		if result.Attempts == 0 {
+			result.Attempts = attempt
+		}
 		evtType := "task_complete"
+		state := "complete"
 		if result.Status != "success" {
 			evtType = "task_failed"
+			state = "failed"
 		}
 		emitProgress(SubTaskProgressEvent{
-			Type:     evtType,
-			TaskName: task.Name,
-			PlanStep: task.PlanStep,
-			Status:   result.Status,
-			Duration: result.Duration.Round(100 * 1e6).String(),
-			Error:    result.Error,
+			Type:       evtType,
+			TaskName:   task.Name,
+			PlanStep:   task.PlanStep,
+			Status:     state,
+			Duration:   result.Duration.Round(100 * time.Millisecond).String(),
+			Error:      result.Error,
+			Attempt:    result.Attempts,
+			Reason:     retryReason(result),
+			NoActivity: result.InactivityReason != "",
 		})
 	}()
 
@@ -558,6 +631,62 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) TaskRe
 	}
 	taskCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+
+	var lastActivity atomic.Int64
+	lastActivity.Store(time.Now().UnixNano())
+	var liveState atomic.Value
+	liveState.Store("running")
+	var inactivityTriggered atomic.Bool
+	watchdogDone := make(chan struct{})
+	defer close(watchdogDone)
+
+	markMeaningfulActivity := func(state string) {
+		lastActivity.Store(time.Now().UnixNano())
+		if state != "" {
+			liveState.Store(state)
+		}
+	}
+
+	go func() {
+		ticker := time.NewTicker(m.Config.HeartbeatInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-watchdogDone:
+				return
+			case <-taskCtx.Done():
+				return
+			case now := <-ticker.C:
+				idle := now.Sub(time.Unix(0, lastActivity.Load()))
+				state, _ := liveState.Load().(string)
+				emitProgress(SubTaskProgressEvent{
+					Type:         "task_state",
+					TaskName:     task.Name,
+					PlanStep:     task.PlanStep,
+					Status:       state,
+					Duration:     time.Since(start).Truncate(time.Second).String(),
+					LastActivity: idle.Truncate(time.Second).String(),
+					Attempt:      attempt,
+				})
+				if idle >= m.Config.InactivityTimeout && inactivityTriggered.CompareAndSwap(false, true) {
+					reason := fmt.Sprintf("no meaningful activity for %s", idle.Truncate(time.Second))
+					emitProgress(SubTaskProgressEvent{
+						Type:         "task_state",
+						TaskName:     task.Name,
+						PlanStep:     task.PlanStep,
+						Status:       "failed",
+						Duration:     time.Since(start).Truncate(time.Second).String(),
+						LastActivity: idle.Truncate(time.Second).String(),
+						Attempt:      attempt,
+						Reason:       reason,
+						NoActivity:   true,
+					})
+					cancel()
+					return
+				}
+			}
+		}
+	}()
 
 	// Depth check
 	if task.ParentDepth >= m.Config.MaxDepth {
@@ -1064,16 +1193,33 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) TaskRe
 	var toolCallCount int
 	maxRetries := m.Config.MaxRetries
 
-	for attempt := range maxRetries {
+	for attemptIdx := range maxRetries {
 		retried := false
+		liveState.Store("waiting_on_model")
+		emitProgress(SubTaskProgressEvent{
+			Type:     "task_state",
+			TaskName: task.Name,
+			PlanStep: task.PlanStep,
+			Status:   "waiting_on_model",
+			Attempt:  attempt,
+		})
 		for event, runErr := range r.Run(taskCtx, userID, childSessionID, userMsg, adkagent.RunConfig{}) {
 			if runErr != nil {
 				// Check for retryable LLM errors (rate limit, server overload, timeout)
-				if llmerror.IsRetryable(runErr) && attempt < maxRetries-1 {
-					wait := retryBackoff(attempt, runErr)
+				if llmerror.IsRetryable(runErr) && attemptIdx < maxRetries-1 {
+					wait := retryBackoff(attemptIdx, runErr)
+					liveState.Store("retrying")
+					emitProgress(SubTaskProgressEvent{
+						Type:     "task_state",
+						TaskName: task.Name,
+						PlanStep: task.PlanStep,
+						Status:   "retrying",
+						Attempt:  attempt,
+						Reason:   runErr.Error(),
+					})
 					slog.Info("sub-agent retrying transient LLM error",
 						"task", task.Name,
-						"attempt", attempt+1,
+						"attempt", attemptIdx+1,
 						"max_retries", maxRetries,
 						"error", runErr,
 						"wait", wait,
@@ -1090,11 +1236,20 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) TaskRe
 
 				// Also treat raw "context deadline exceeded" from HTTP client as retryable
 				// (SAP AI Core gateway timeouts surface as non-wrapped context errors)
-				if isRawContextDeadlineExceeded(runErr) && attempt < maxRetries-1 {
-					wait := retryBackoff(attempt, runErr)
+				if isRawContextDeadlineExceeded(runErr) && attemptIdx < maxRetries-1 {
+					wait := retryBackoff(attemptIdx, runErr)
+					liveState.Store("retrying")
+					emitProgress(SubTaskProgressEvent{
+						Type:     "task_state",
+						TaskName: task.Name,
+						PlanStep: task.PlanStep,
+						Status:   "retrying",
+						Attempt:  attempt,
+						Reason:   runErr.Error(),
+					})
 					slog.Info("sub-agent retrying context deadline exceeded",
 						"task", task.Name,
-						"attempt", attempt+1,
+						"attempt", attemptIdx+1,
 						"max_retries", maxRetries,
 						"error", runErr,
 						"wait", wait,
@@ -1110,14 +1265,31 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) TaskRe
 
 				// Non-retryable error or retries exhausted
 				trace.Finalize()
+				errMsg := fmt.Sprintf("agent run error: %v", runErr)
+				status := "error"
+				inactivityReason := ""
+				if taskCtx.Err() != nil {
+					status = "timeout"
+					if inactivityTriggered.Load() {
+						idle := time.Since(time.Unix(0, lastActivity.Load())).Truncate(time.Second)
+						inactivityReason = fmt.Sprintf("no meaningful activity for %s", idle)
+						errMsg = "task cancelled by inactivity watchdog: " + inactivityReason
+					} else if ctx.Err() != nil {
+						errMsg = "task cancelled by parent context"
+					} else {
+						errMsg = "task timed out"
+					}
+				}
 				result = TaskResult{
-					Name:      task.Name,
-					Status:    "error",
-					Result:    strings.Join(outputParts, ""),
-					Error:     fmt.Sprintf("agent run error: %v", runErr),
-					Trace:     trace,
-					ToolCalls: toolCallCount,
-					Duration:  time.Since(start),
+					Name:             task.Name,
+					Status:           status,
+					Result:           strings.Join(outputParts, ""),
+					Error:            errMsg,
+					Trace:            trace,
+					ToolCalls:        toolCallCount,
+					Duration:         time.Since(start),
+					Attempts:         attempt,
+					InactivityReason: inactivityReason,
 				}
 				return result
 			}
@@ -1136,6 +1308,7 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) TaskRe
 			if event.LLMResponse.Content != nil {
 				for _, part := range event.LLMResponse.Content.Parts {
 					if part.Text != "" && !part.Thought {
+						markMeaningfulActivity("waiting_on_model")
 						outputParts = append(outputParts, part.Text)
 						// Emit task_text progress event
 						emitProgress(SubTaskProgressEvent{
@@ -1146,6 +1319,7 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) TaskRe
 					}
 					// Record tool calls in trace
 					if part.FunctionCall != nil {
+						markMeaningfulActivity("running")
 						toolCallCount++
 						args := make(map[string]any)
 						if part.FunctionCall.Args != nil {
@@ -1164,6 +1338,7 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) TaskRe
 					}
 					// Record tool results in trace
 					if part.FunctionResponse != nil {
+						markMeaningfulActivity("waiting_on_model")
 						// Update the last trace step with the result
 						trace.mu.Lock()
 						if len(trace.Steps) > 0 {
@@ -1202,19 +1377,30 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) TaskRe
 	// Check if context was cancelled (timeout)
 	status := "success"
 	errMsg := ""
+	inactivityReason := ""
 	if taskCtx.Err() != nil {
 		status = "timeout"
-		errMsg = "task timed out"
+		if inactivityTriggered.Load() {
+			idle := time.Since(time.Unix(0, lastActivity.Load())).Truncate(time.Second)
+			inactivityReason = fmt.Sprintf("no meaningful activity for %s", idle)
+			errMsg = "task cancelled by inactivity watchdog: " + inactivityReason
+		} else if ctx.Err() != nil {
+			errMsg = "task cancelled by parent context"
+		} else {
+			errMsg = "task timed out"
+		}
 	}
 
 	result = TaskResult{
-		Name:      task.Name,
-		Status:    status,
-		Result:    finalOutput,
-		Trace:     trace,
-		ToolCalls: toolCallCount,
-		Duration:  time.Since(start),
-		Error:     errMsg,
+		Name:             task.Name,
+		Status:           status,
+		Result:           finalOutput,
+		Trace:            trace,
+		ToolCalls:        toolCallCount,
+		Duration:         time.Since(start),
+		Error:            errMsg,
+		Attempts:         attempt,
+		InactivityReason: inactivityReason,
 	}
 	return result
 }

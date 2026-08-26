@@ -3,12 +3,19 @@ package agent
 import (
 	"context"
 	"fmt"
+	"iter"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/SAP/astonish/pkg/common"
 	adkagent "google.golang.org/adk/agent"
+	"google.golang.org/adk/model"
+	adksession "google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
+	"google.golang.org/genai"
 )
 
 func TestNewSubAgentManager_Defaults(t *testing.T) {
@@ -25,6 +32,12 @@ func TestNewSubAgentManager_Defaults(t *testing.T) {
 	}
 	if mgr.Config.MaxRetries != 3 {
 		t.Errorf("MaxRetries = %d, want 3", mgr.Config.MaxRetries)
+	}
+	if mgr.Config.InactivityTimeout != 2*time.Minute {
+		t.Errorf("InactivityTimeout = %v, want 2m", mgr.Config.InactivityTimeout)
+	}
+	if mgr.Config.HeartbeatInterval != 5*time.Second {
+		t.Errorf("HeartbeatInterval = %v, want 5s", mgr.Config.HeartbeatInterval)
 	}
 }
 
@@ -452,6 +465,185 @@ func TestSubAgentManager_DepthCheck(t *testing.T) {
 	if !contains(result.Error, "max delegation depth") {
 		t.Errorf("Error = %q, want to contain 'max delegation depth'", result.Error)
 	}
+}
+
+func TestSubAgentManager_InactivityWatchdogCancelsProviderWait(t *testing.T) {
+	mgr := newLivenessTestManager(SubAgentConfig{
+		TaskTimeout:       time.Second,
+		InactivityTimeout: 40 * time.Millisecond,
+		HeartbeatInterval: 10 * time.Millisecond,
+	})
+	mgr.LLM = livenessTestLLM{generate: func(ctx context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+		return func(yield func(*model.LLMResponse, error) bool) {
+			<-ctx.Done()
+		}
+	}}
+
+	var eventsMu sync.Mutex
+	var progress []SubTaskProgressEvent
+	mgr.SubTaskProgress = func(evt SubTaskProgressEvent) {
+		eventsMu.Lock()
+		progress = append(progress, evt)
+		eventsMu.Unlock()
+	}
+
+	started := time.Now()
+	result := mgr.RunTask(context.Background(), SubAgentTask{Name: "inert", Description: "wait"})
+	if elapsed := time.Since(started); elapsed >= 500*time.Millisecond {
+		t.Fatalf("watchdog returned after %v, want prompt cancellation", elapsed)
+	}
+	if result.Status != "timeout" || result.InactivityReason == "" {
+		t.Fatalf("result = %#v, want inactivity timeout", result)
+	}
+	if !strings.Contains(result.Error, "inactivity watchdog") {
+		t.Fatalf("error = %q, want inactivity watchdog reason", result.Error)
+	}
+
+	eventsMu.Lock()
+	defer eventsMu.Unlock()
+	if !hasProgressEvent(progress, "task_state", "waiting_on_model", false) {
+		t.Fatalf("missing waiting_on_model event: %#v", progress)
+	}
+	if !hasProgressEvent(progress, "task_state", "failed", true) {
+		t.Fatalf("missing no-activity warning event: %#v", progress)
+	}
+}
+
+func TestSubAgentManager_ThoughtDoesNotResetInactivity(t *testing.T) {
+	mgr := newLivenessTestManager(SubAgentConfig{
+		TaskTimeout:       time.Second,
+		InactivityTimeout: 45 * time.Millisecond,
+		HeartbeatInterval: 10 * time.Millisecond,
+	})
+	mgr.LLM = livenessTestLLM{generate: func(ctx context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+		return func(yield func(*model.LLMResponse, error) bool) {
+			ticker := time.NewTicker(5 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if !yield(&model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{{Text: "hidden", Thought: true}}}, Partial: true}, nil) {
+						return
+					}
+				}
+			}
+		}
+	}}
+
+	result := mgr.RunTask(context.Background(), SubAgentTask{Name: "thinking", Description: "wait"})
+	if result.InactivityReason == "" {
+		t.Fatalf("thought tokens incorrectly counted as progress: %#v", result)
+	}
+	if result.Result != "" {
+		t.Fatalf("hidden thought leaked into result: %q", result.Result)
+	}
+}
+
+func TestSubAgentManager_RetriesInactivityOnlyAfterProgress(t *testing.T) {
+	mgr := newLivenessTestManager(SubAgentConfig{
+		TaskTimeout:       time.Second,
+		InactivityTimeout: 40 * time.Millisecond,
+		HeartbeatInterval: 10 * time.Millisecond,
+	})
+	var calls atomic.Int32
+	mgr.LLM = livenessTestLLM{generate: func(ctx context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+		return func(yield func(*model.LLMResponse, error) bool) {
+			if calls.Add(1) == 1 {
+				yield(&model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{{Text: "partial"}}}, Partial: true}, nil)
+				<-ctx.Done()
+				return
+			}
+			yield(&model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{{Text: "done"}}}, TurnComplete: true}, nil)
+		}
+	}}
+
+	var eventsMu sync.Mutex
+	var progress []SubTaskProgressEvent
+	mgr.SubTaskProgress = func(evt SubTaskProgressEvent) {
+		eventsMu.Lock()
+		progress = append(progress, evt)
+		eventsMu.Unlock()
+	}
+
+	results := mgr.RunTasks(context.Background(), []SubAgentTask{{Name: "retry", Description: "work"}})
+	if len(results) != 1 || results[0].Status != "success" || results[0].Attempts != 2 {
+		t.Fatalf("retry result = %#v, want success on attempt 2", results)
+	}
+	if !strings.Contains(results[0].Result, "done") {
+		t.Fatalf("retry result missing final output: %#v", results[0])
+	}
+
+	eventsMu.Lock()
+	defer eventsMu.Unlock()
+	if !hasProgressEvent(progress, "task_retry", "retrying", true) {
+		t.Fatalf("missing retry event with inactivity reason: %#v", progress)
+	}
+}
+
+func TestSubAgentManager_ParentCancellationReleasesSemaphore(t *testing.T) {
+	mgr := newLivenessTestManager(SubAgentConfig{
+		MaxConcurrent:     1,
+		TaskTimeout:       time.Second,
+		InactivityTimeout: time.Second,
+		HeartbeatInterval: 10 * time.Millisecond,
+	})
+	var calls atomic.Int32
+	mgr.LLM = livenessTestLLM{generate: func(ctx context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+		return func(yield func(*model.LLMResponse, error) bool) {
+			if calls.Add(1) == 1 {
+				<-ctx.Done()
+				return
+			}
+			yield(&model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{{Text: "ok"}}}, TurnComplete: true}, nil)
+		}
+	}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan []TaskResult, 1)
+	go func() {
+		done <- mgr.RunTasks(ctx, []SubAgentTask{{Name: "blocked", Description: "wait"}})
+	}()
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("parent cancellation did not release first task")
+	}
+
+	result := mgr.RunTasks(context.Background(), []SubAgentTask{{Name: "next", Description: "finish"}})
+	if len(result) != 1 || result[0].Status != "success" {
+		t.Fatalf("semaphore was not released: %#v", result)
+	}
+}
+
+func newLivenessTestManager(cfg SubAgentConfig) *SubAgentManager {
+	mgr := NewSubAgentManager(cfg)
+	mgr.AppName = "sub-agent-liveness-test"
+	mgr.UserID = "test-user"
+	mgr.SessionService = common.NewAutoInitService(adksession.InMemoryService())
+	return mgr
+}
+
+type livenessTestLLM struct {
+	generate func(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error]
+}
+
+func (l livenessTestLLM) Name() string { return "liveness-test" }
+
+func (l livenessTestLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	return l.generate(ctx, req, stream)
+}
+
+func hasProgressEvent(events []SubTaskProgressEvent, eventType, status string, noActivity bool) bool {
+	for _, evt := range events {
+		if evt.Type == eventType && evt.Status == status && evt.NoActivity == noActivity {
+			return true
+		}
+	}
+	return false
 }
 
 func TestExcludedChildTools(t *testing.T) {

@@ -86,12 +86,15 @@ type Item struct {
 
 // DelegationTaskState tracks the live status of one delegated sub-task.
 type DelegationTaskState struct {
-	Name        string
-	Description string
-	Status      string    // "running", "complete", "failed"
-	StartedAt   time.Time // when the task started (for live timer)
-	Duration    string    // set when complete/failed (from the event)
-	Error       string    // set when failed
+	Name         string
+	Description  string
+	Status       string    // queued, running, waiting_on_model, retrying, complete, failed
+	StartedAt    time.Time // when the task was delegated (for live timer)
+	Duration     string    // latest elapsed/final duration
+	LastActivity string    // age since meaningful activity
+	Error        string    // failure/retry reason
+	Attempt      int       // 1-based attempt
+	NoActivity   bool      // inactivity watchdog warning
 	// Activity log: tool calls and text output from this sub-task.
 	Activity []DelegationActivity
 }
@@ -377,8 +380,9 @@ func (t *Transcript) applyDelegation(ev Event) {
 			tasks[i] = DelegationTaskState{
 				Name:        task.Name,
 				Description: task.Description,
-				Status:      "running",
+				Status:      "queued",
 				StartedAt:   now,
+				Attempt:     1,
 			}
 		}
 		// Insert the inline item into the transcript thread.
@@ -394,23 +398,53 @@ func (t *Transcript) applyDelegation(ev Event) {
 		t.Delegation = delegCopy
 		t.DelegationActive = true
 		t.Status = "Delegating tasks…"
-	case "task_start":
+	case "task_start", "task_state", "task_retry":
 		t.updateDelegationTask(ev.DelegationTaskName, func(task *DelegationTaskState) {
 			if task.StartedAt.IsZero() {
 				task.StartedAt = time.Now()
 			}
-			task.Status = "running"
+			if ev.DelegationStatus != "" {
+				task.Status = ev.DelegationStatus
+			} else if ev.DelegationType == "task_start" {
+				task.Status = "running"
+			} else if ev.DelegationType == "task_retry" {
+				task.Status = "retrying"
+			}
+			if ev.DelegationDuration != "" {
+				task.Duration = ev.DelegationDuration
+			}
+			if ev.DelegationLastActivity != "" {
+				task.LastActivity = ev.DelegationLastActivity
+			}
+			if ev.DelegationError != "" {
+				task.Error = ev.DelegationError
+			}
+			if ev.DelegationAttempt > 0 {
+				task.Attempt = ev.DelegationAttempt
+			}
+			task.NoActivity = ev.DelegationNoActivity
 		})
 	case "task_complete":
 		t.updateDelegationTask(ev.DelegationTaskName, func(task *DelegationTaskState) {
 			task.Status = "complete"
 			task.Duration = ev.DelegationDuration
+			task.LastActivity = ev.DelegationLastActivity
+			if ev.DelegationAttempt > 0 {
+				task.Attempt = ev.DelegationAttempt
+			}
+			task.Error = ""
+			task.NoActivity = false
 		})
 	case "task_failed":
 		t.updateDelegationTask(ev.DelegationTaskName, func(task *DelegationTaskState) {
 			task.Status = "failed"
 			task.Duration = ev.DelegationDuration
+			task.LastActivity = ev.DelegationLastActivity
 			task.Error = ev.DelegationError
+			if ev.DelegationAttempt > 0 {
+				task.Attempt = ev.DelegationAttempt
+			}
+			task.NoActivity = ev.DelegationNoActivity
 		})
 	case "task_tool_call":
 		t.updateDelegationTask(ev.DelegationTaskName, func(task *DelegationTaskState) {

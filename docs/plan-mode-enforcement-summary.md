@@ -39,10 +39,10 @@ if planMode:
   the tree-sitter navigation tools `repo_map` / `code_definition` / `code_references`,
   `memory_search`, …) so the agent can still investigate to produce an accurate plan.
   Note: structural navigation is read-only (it only parses and returns locations) and
-  must never be blocked in Plan mode. `announce_plan` and `update_plan` are also allowed (both in
-  `agent.SafeTools`) because they perform no arbitrary mutation — they only record/transition plan
-  state (in-memory `PlanState` + the session `PLAN.md`) so the model can save and later track its
-  plan.
+  must never be blocked in Plan mode. `announce_plan` and `update_plan` are also allowed in Plan
+  mode (both in `agent.SafeTools`) because they perform no arbitrary mutation — they only
+  record/transition plan state (in-memory `PlanState` + the session `PLAN.md`). `announce_plan` is
+  **Plan-mode only**: it is stripped from the tool list and refused in Normal/Ask.
 - The block returns a **result** (not an error), so the model receives a reminder and keeps
   producing the plan rather than crashing the turn.
 
@@ -165,22 +165,22 @@ plan to a **per-session `PLAN.md`**.
   started, the plan is also left **active** so it carries into the next turn where execution begins,
   instead of being cleared. Defended by `TestPlanState_AnnounceOnlyTurnDoesNotComplete` and
   `TestPlanState_HasStartedSteps`.
-- **Detail preserved:** each phase carries an optional `details` field (concrete approach) plus an
-  optional `files` list (each affected file marked new/modify/delete) and a `verify` command
-  (build/test/lint), all captured by `announce_plan` and rendered as an indented sub-block. This
-  makes the *detailed*, dependency-aware plan — not just one-line labels — survive compaction, and
-  encodes the "no partial implementations / every phase ends verified" discipline the plan-mode
-  prompt now teaches.
+- **Detail preserved:** each phase requires a `details` implementation spec plus a `files` list
+  (each affected file marked new/modify/delete) and a `verify` command (build/test/lint), all
+  captured by `announce_plan` and rendered as an indented sub-block. Incomplete announcements are
+  rejected. This makes the *detailed*, dependency-aware plan — not just one-line labels — survive
+  compaction, and encodes the "no partial implementations / every phase ends verified" discipline
+  the plan-mode prompt now teaches.
 - **Format:** human-readable Markdown with GitHub-style checkboxes per phase
   (`[ ]` pending · `[~]` running · `[x]` complete · `[!]` failed), plus indented sub-lines for
   affected files (`- File (<kind>): <path>`), the verification command (`Verify: <cmd>`), and a
   free-form details block. Rendered/parsed losslessly by `RenderPlanMarkdown` / `ParsePlanMarkdown`
   in `pkg/agent/plan_document.go` (round-trip covered by `TestParsePlanMarkdown_FilesAndVerifyRoundTrip`).
 - **Compaction survival:** the `Compactor` (`pkg/session/compaction.go`) holds an optional
-  `PlanFilePath`. When a plan file exists at compaction time, a durable pointer is appended to
-  the context summary telling the model to re-read `PLAN.md` with `read_file` to recover the
-  exact phases and completion status. The compactor stays domain-agnostic — it only knows a path
-  exists, never the plan's contents.
+  `PlanFilePath`. When a plan file exists at compaction time, its contents are inlined into the
+  context summary (capped at 32KiB). Approved execution turns also inline the same document in
+  the per-turn system context and restore per-phase status from disk (`RestoreApprovedPlan`
+  preserves `[~]`/`[x]`). The compactor stays domain-agnostic — it reads the file as opaque text.
 - **Scope:** code mode only. Platform/Studio has no local session filesystem for this, so the
   prompt guidance (`SystemPromptBuilder.PlanFilePersistence`) is enabled only when
   `!PlatformMode`.
@@ -220,12 +220,16 @@ so the model *physically cannot* call `grep_search` in the Graph phase.
 
 Phase → additive allow-list (`GraphPlanPhaseTools`, single source of truth):
 
-| Phase   | Allowed (besides transition tools + `announce_plan` / `update_plan`) |
+| Phase   | Allowed (besides transition tools + `update_plan`) |
 |---------|----------------------------------------------------------------------|
 | `graph` | `codegraph_explore` |
 | `read`  | + `read_file`, `read_pdf`, `filter_json` |
-| `gap`   | + `grep_search`, `find_files`, `file_tree`, `repo_map`, `code_definition`, `code_references`, `web_fetch`, `memory_search`, `memory_get`, `skill_lookup`, `delegate_tasks` (read-only `tools` filters) |
+| `gap`   | + `grep_search`, `find_files`, `file_tree`, `repo_map`, `code_definition`, `code_references`, `web_fetch`, `perplexity_web_search`, `memory_search`, `memory_get`, `skill_lookup`, `delegate_tasks` (read-only `tools` filters) |
 | `plan`  | + `announce_plan` |
+
+Discovery budgets (`GraphPlanState.ChargeExploration`) bound **codegraph queries**, complementary **gap-filling** calls, and **delegation**. Source reads (`read_file` / `read_pdf` / `filter_json`) and plan recorders (`announce_plan` / `update_plan`) are **not charged** — a read quota truncates the READ phase, and charging `announce_plan` as a gap call deadlocks PLAN after the gap cap. Duplicate work is prevented by prompt reuse rules (never re-read a path already in context; never re-query the graph for a known fact), not by refusing the files the plan still needs.
+
+Approved execution separately caps rediscovery (1 codegraph/code-intelligence call and 2 search/list calls per turn) but does **not** cap source reads. Read each target file once immediately before editing.
 
 Transition semantics:
 - `gplan_reads(read_list)` — records the synthesized, non-repetitive read list and advances
@@ -241,7 +245,10 @@ plan-mode gate and the code-mode folder/tool authorization gates are skipped (re
 
 `codegraph_explore` and the three `gplan_*` transition tools are added to `agent.SafeTools`
 (read-only / phase-only, so they auto-approve). This mode remains a **no-changes** invariant: no
-mutating tool is ever allowed in any phase.
+mutating tool is ever allowed in any phase. The read-only outbound web tools (`web_fetch` and
+`perplexity_web_search`) are permitted from the GAP phase onward and are charged against the
+gap-filling budget; they do not violate the no-mutation invariant because they change nothing on
+the host (both are already in `agent.SafeTools`, classified read-only).
 
 ### Codegraph as a native standard MCP server
 

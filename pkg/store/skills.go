@@ -25,8 +25,8 @@ type Skill struct {
 type SkillFile struct {
 	ID           string `json:"id"`
 	SkillID      string `json:"skill_id"`
-	Path         string `json:"path"`         // e.g. "scripts" or ""
-	Filename     string `json:"filename"`     // e.g. "deploy.sh"
+	Path         string `json:"path"`     // e.g. "scripts" or ""
+	Filename     string `json:"filename"` // e.g. "deploy.sh"
 	Content      string `json:"content"`
 	IsExecutable bool   `json:"is_executable"`
 	SizeBytes    int64  `json:"size_bytes"`

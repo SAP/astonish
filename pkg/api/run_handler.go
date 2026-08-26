@@ -76,6 +76,25 @@ var browserOnce sync.Once
 var pdfBrowserMgr *browser.Manager
 var pdfBrowserOnce sync.Once
 
+// localPDFBrowserMgr is a dedicated, always-local (non-sandbox) headless Chrome
+// used for session-less PDF exports such as the slides deck export, which is
+// triggered from the docs UI with no chat session to bind a container to. The
+// exported document is fully self-contained and trusted (identical to the HTML
+// export), so it does not need the session sandbox.
+var localPDFBrowserMgr *browser.Manager
+var localPDFBrowserOnce sync.Once
+
+// slidesPDFBrowserMgr is a dedicated, sandbox-aware PDF browser manager for the
+// slides deck export. Unlike localPDFBrowserMgr (host-only) it wires the same
+// container browser callbacks as GetPDFBrowserManager, and unlike the chat PDF
+// manager it is keyed separately so slides exports never thrash the chat PDF
+// manager's container/session state (EnsureSessionID is destructive). When the
+// sandbox is enabled it runs Chrome inside a dedicated per-user session
+// container; when the sandbox is disabled it is unused (the handler selects
+// GetLocalPDFBrowserManager instead).
+var slidesPDFBrowserMgr *browser.Manager
+var slidesPDFBrowserOnce sync.Once
+
 // Registered PDF browser callbacks (set by chat_factory for OpenShell/K8s path).
 // These mirror the pattern used by SetVNCContainerDialFunc: the launcher wires
 // them at startup, and the PDF handler picks them up on first use.
@@ -251,6 +270,168 @@ func GetPDFBrowserManager(sessionID string) *browser.Manager {
 	}
 
 	return pdfBrowserMgr
+}
+
+// GetLocalPDFBrowserManager returns a dedicated, always-local headless Chrome
+// manager for session-less PDF exports (e.g. the slides deck export). Unlike
+// GetPDFBrowserManager, it never enables the container sandbox, so it does not
+// require a chat session / running container to resolve. It honors the
+// Browser.ChromePath config override when set. The exported document is fully
+// self-contained and trusted, so a local Chrome is appropriate here.
+func GetLocalPDFBrowserManager() *browser.Manager {
+	localPDFBrowserOnce.Do(func() {
+		slog.Info("PDF browser (local): initializing dedicated local PDF browser manager")
+		cfg := browser.DefaultConfig()
+		cfg.Headless = true
+		// Temp profile dir to avoid Chrome lock conflicts with other managers.
+		cfg.UserDataDir = ""
+		if appCfg, cfgErr := config.LoadAppConfig(); cfgErr == nil && appCfg != nil {
+			if appCfg.Browser.ChromePath != "" {
+				cfg.ChromePath = appCfg.Browser.ChromePath
+			}
+		}
+		localPDFBrowserMgr = browser.NewManager(cfg)
+		// Intentionally NOT sandbox-wired: SandboxEnabled stays false so
+		// GetOrLaunch() uses the local launcher path, no session required.
+		slog.Info("PDF browser (local): initialized (sync.Once)")
+	})
+	return localPDFBrowserMgr
+}
+
+// sandboxBrowserRequiredFn is the seam the slides PDF handler uses to decide
+// sandbox-vs-host. It is a package var so tests can override the decision
+// without depending on on-disk app config. Production points at
+// sandboxBrowserRequired.
+var sandboxBrowserRequiredFn = sandboxBrowserRequired
+
+// sandboxBrowserRequired reports whether PDF rendering must happen inside a
+// sandbox container rather than on the host. It returns true when the app
+// config has the sandbox enabled (any backend). The slides PDF handler uses
+// this to (a) choose the sandbox-aware manager over the host manager, and
+// (b) enforce the no-fallback contract: when the sandbox is required but no
+// in-container browser is available, the export fails rather than silently
+// rendering on the host. backendLabel is the configured backend kind, used
+// only for diagnostics.
+func sandboxBrowserRequired() (required bool, backendLabel string) {
+	appCfg, err := config.LoadAppConfig()
+	if err != nil || appCfg == nil {
+		return false, ""
+	}
+	if !sandbox.IsSandboxEnabled(&appCfg.Sandbox) {
+		return false, string(sandbox.BackendKind(appCfg.Sandbox.BackendKind()))
+	}
+	return true, string(sandbox.BackendKind(appCfg.Sandbox.BackendKind()))
+}
+
+// slidesPDFBrowserManagerFn is the seam the slides PDF handler uses to obtain
+// the sandbox-aware PDF manager. It is a package var so tests can inject a
+// manager without triggering the sync.Once / real sandbox wiring. Production
+// points at GetSlidesPDFBrowserManager.
+var slidesPDFBrowserManagerFn = GetSlidesPDFBrowserManager
+
+// GetSlidesPDFBrowserManager returns the dedicated, sandbox-aware PDF browser
+// manager for slides deck export. It mirrors GetPDFBrowserManager's sandbox
+// wiring (Incus via wireSandboxBrowserCallbacks + an EnsureSessionContainer
+// ContainerResolveFunc that restarts a stopped container; K8s/OpenShell via the
+// process-global registeredPDF* callbacks set by chat_factory) but uses a
+// separate manager instance keyed for slides so it never thrashes the chat PDF
+// manager's container/session state. The sessionID identifies the dedicated
+// per-user slides container ("slides-pdf-<user>").
+//
+// This accessor never decides sandbox-vs-host; that decision and the
+// no-fallback rule live in the slides handler via sandboxBrowserRequired().
+// When the sandbox is disabled the manager's SandboxEnabled stays false, but
+// the handler will not use this manager in that case.
+func GetSlidesPDFBrowserManager(sessionID string) (*browser.Manager, error) {
+	slidesPDFBrowserOnce.Do(func() {
+		slog.Info("slides PDF browser: initializing dedicated slides PDF browser manager")
+		cfg := browser.DefaultConfig()
+		cfg.Headless = true
+		// Temp profile dir to avoid Chrome lock conflicts with other managers.
+		cfg.UserDataDir = ""
+
+		appCfg, cfgErr := config.LoadAppConfig()
+		if cfgErr == nil && appCfg != nil {
+			if appCfg.Browser.ChromePath != "" {
+				cfg.ChromePath = appCfg.Browser.ChromePath
+			}
+		}
+		slidesPDFBrowserMgr = browser.NewManager(cfg)
+
+		// Wire Incus sandbox callbacks (no-op for non-Incus backends).
+		wireSandboxBrowserCallbacks(slidesPDFBrowserMgr, cfg, appCfg, cfgErr)
+
+		// Incus: override ContainerResolveFunc so a stopped/evicted slides
+		// container is re-started via EnsureSessionContainer (the shared helper
+		// only checks IsRunning and fails otherwise). Mirrors the override in
+		// GetPDFBrowserManager.
+		if slidesPDFBrowserMgr.SandboxEnabled && cfgErr == nil && appCfg != nil && sandbox.BackendKind(appCfg.Sandbox.BackendKind()) == sandbox.BackendKindIncus {
+			sandboxLimits := &appCfg.Sandbox.Limits
+			slidesPDFBrowserMgr.ContainerResolveFunc = func(sessID string) (string, string, error) {
+				client, err := sandbox.SetupSandboxRuntime()
+				if err != nil {
+					return "", "", fmt.Errorf("sandbox runtime not available: %w", err)
+				}
+				sessRegistry, err := sandbox.NewSessionRegistry()
+				if err != nil {
+					return "", "", fmt.Errorf("failed to open session registry: %w", err)
+				}
+				tplRegistry, err := sandbox.NewTemplateRegistry()
+				if err != nil {
+					return "", "", fmt.Errorf("failed to open template registry: %w", err)
+				}
+				templateName := "@base"
+				if entry := sessRegistry.Get(sessID); entry != nil && entry.TemplateName != "" {
+					templateName = entry.TemplateName
+				}
+				containerName, err := sandbox.EnsureSessionContainer(client, sessRegistry, tplRegistry, sessID, templateName, sandboxLimits)
+				if err != nil {
+					return "", "", fmt.Errorf("failed to ensure session container: %w", err)
+				}
+				ip, err := client.GetContainerIPv4(containerName)
+				if err != nil {
+					return "", "", fmt.Errorf("failed to get IP for session container %q: %w", containerName, err)
+				}
+				return containerName, ip, nil
+			}
+		}
+
+		slog.Info("slides PDF browser: initialized (sync.Once)", "sandboxEnabled", slidesPDFBrowserMgr.SandboxEnabled)
+	})
+
+	if slidesPDFBrowserMgr == nil {
+		return nil, fmt.Errorf("slides PDF browser manager unavailable")
+	}
+
+	// After the once, always apply K8s/OpenShell callbacks if chat_factory has
+	// registered them (process-global). These take precedence over the Incus
+	// callbacks (which wireSandboxBrowserCallbacks may have set on a platform
+	// where Incus isn't the active backend).
+	registeredPDFMu.RLock()
+	resolve := registeredPDFResolve
+	startBrowser := registeredPDFStartBrowser
+	dial := registeredPDFDial
+	backendLabel := registeredPDFBackend
+	registeredPDFMu.RUnlock()
+
+	if resolve != nil && dial != nil {
+		slidesPDFBrowserMgr.SandboxEnabled = true
+		slidesPDFBrowserMgr.ContainerResolveFunc = resolve
+		slidesPDFBrowserMgr.ContainerStartBrowserFunc = startBrowser
+		slidesPDFBrowserMgr.ContainerDialFunc = dial
+		if backendLabel == "" {
+			backendLabel = "registered"
+		}
+		slog.Info("slides PDF browser: using registered sandbox callbacks", "backend", backendLabel)
+	}
+
+	// Bind the dedicated per-user slides session container. Safe on every call:
+	// a no-op if the session hasn't changed.
+	if sessionID != "" {
+		slidesPDFBrowserMgr.EnsureSessionID(sessionID)
+	}
+
+	return slidesPDFBrowserMgr, nil
 }
 
 // wireSandboxBrowserCallbacks wires Incus container callbacks onto a browser.Manager

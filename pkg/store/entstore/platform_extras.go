@@ -150,7 +150,7 @@ func TenantMiddleware(s *Store) func(http.Handler) http.Handler {
 				Audit:                   orgStore.OrgAudit(),
 				Skills:                  orgStore.OrgSkills(),
 				MCPServers:              orgStore.OrgMCPServers(),
-				A2AAgents:              orgStore.OrgA2AAgents(),
+				A2AAgents:               orgStore.OrgA2AAgents(),
 				PlatformMCPServers:      s.PlatformMCPServers(),
 				PlatformSkills:          s.PlatformSkills(),
 				PlatformSettings:        s.PlatformSettings(),
@@ -169,6 +169,7 @@ func TenantMiddleware(s *Store) func(http.Handler) http.Handler {
 				reqSvc.Sessions = teamStore.Sessions()
 				reqSvc.Memory = teamStore.Memories()
 				reqSvc.Credentials = teamStore.Credentials()
+				reqSvc.Docs = teamStore.Docs()
 				reqSvc.Apps = teamStore.Apps()
 				reqSvc.Flows = teamStore.Flows()
 				reqSvc.Scheduler = teamStore.ScheduledJobs()
@@ -196,6 +197,7 @@ func TenantMiddleware(s *Store) func(http.Handler) http.Handler {
 						return
 					}
 					reqSvc.PersonalSessions = personalStore.Sessions()
+					reqSvc.PersonalDocs = personalStore.Docs()
 					reqSvc.PersonalFlows = personalStore.Flows()
 					reqSvc.PersonalApps = personalStore.Apps()
 					reqSvc.PersonalCredentials = personalStore.Credentials()

@@ -3,8 +3,10 @@ package api
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/credentials"
+	"github.com/SAP/astonish/pkg/docs/slides"
 	"github.com/SAP/astonish/pkg/sandbox/netpolicy"
 	"github.com/SAP/astonish/pkg/sandbox/openshell"
 	"github.com/SAP/astonish/pkg/store"
@@ -144,6 +147,14 @@ func (cr *ChatRunner) startSessionTitle(llm model.LLM, titleSetter SessionTitleS
 	}()
 }
 
+func injectRequestDocsStores(runner *ChatRunner, r *http.Request) *store.Services {
+	svc := store.FromRequest(r)
+	if svc != nil {
+		runner.InjectDocsStores(svc.PersonalDocs, svc.Docs)
+	}
+	return svc
+}
+
 // InjectLLM adds a per-request LLM override to the runner's context.
 // When present, ChatAgent.Run will use this LLM instead of the agent's default,
 // enabling per-team provider resolution (platform → org → team hierarchy).
@@ -157,6 +168,19 @@ func (cr *ChatRunner) InjectLLM(llm model.LLM) {
 // Must be called before Run().
 func (cr *ChatRunner) InjectCredentialStore(cs store.CredentialStore) {
 	cr.ctx = store.WithCredentialStore(cr.ctx, cs)
+}
+
+func (cr *ChatRunner) InjectDocsStores(personal, team store.DocsStore) {
+	svc := store.FromContext(cr.ctx)
+	if svc == nil {
+		svc = &store.Services{}
+	} else {
+		clone := *svc
+		svc = &clone
+	}
+	svc.PersonalDocs = personal
+	svc.Docs = team
+	cr.ctx = store.WithServices(cr.ctx, svc)
 }
 
 // InjectMemoryStores adds tenant-scoped memory stores to the runner's context.
@@ -634,6 +658,7 @@ func (cr *ChatRunner) Run(
 					"name":   part.FunctionResponse.Name,
 					"result": summarizeToolResult(resp),
 				})
+				cr.maybeEmitDocsUpdate(sessionService, part.FunctionResponse.Name, resp)
 				cr.drainImagesAndFlowOutput(chatAgent, sessionService)
 				cr.maybeEmitTutorialBlueprint(chatAgent, sessionService, part.FunctionResponse.Name, resp)
 				cr.maybeEmitTutorialSceneSlideshow(sessionService, part.FunctionResponse.Name, resp)
@@ -853,12 +878,19 @@ runLoop:
 						"name":   part.FunctionResponse.Name,
 						"result": summarizeToolResult(resp),
 					})
+					cr.maybeEmitDocsUpdate(sessionService, part.FunctionResponse.Name, resp)
 					if cr.drainImagesAndFlowOutput(chatAgent, sessionService) > 0 {
 						hasContent = true
 					}
 					if cr.maybeEmitTutorialBlueprint(chatAgent, sessionService, part.FunctionResponse.Name, resp) {
 						// Blueprint card is up; wait for Approve / Request changes / Cancel
 						// (same hard-stop pattern as network_denial_hint).
+						break runLoop
+					}
+					if cr.maybeEmitChatQuestion(sessionService, part.FunctionResponse.Name, resp) {
+						// Question card is up; end the turn and wait for the user's
+						// answer, which arrives as an ordinary user message. Same
+						// hard-stop pattern as the blueprint approval card.
 						break runLoop
 					}
 					cr.maybeEmitTutorialSceneSlideshow(sessionService, part.FunctionResponse.Name, resp)
@@ -1033,6 +1065,7 @@ runLoop:
 							"name":   part.FunctionResponse.Name,
 							"result": summarizeToolResult(resp),
 						})
+						cr.maybeEmitDocsUpdate(sessionService, part.FunctionResponse.Name, resp)
 						cr.drainImagesAndFlowOutput(chatAgent, sessionService)
 						if cr.maybeEmitTutorialBlueprint(chatAgent, sessionService, part.FunctionResponse.Name, resp) {
 							break retryLoop
@@ -1181,6 +1214,96 @@ func (cr *ChatRunner) maybeEmitTutorialBlueprint(chatAgent *agent.ChatAgent, ses
 	cr.emitEvent("tutorial_blueprint_preview", payload)
 	persistTutorialBlueprintPreview(cr.ctx, sessionService, cr.UserID, cr.SessionID, payload)
 	return true
+}
+
+// maybeEmitChatQuestion turns a successful ask_user tool result into an inline
+// [chat_question] card: it emits a live SSE `chat_question` event AND persists a
+// prefix-marked model message so the card reconstructs on reload (mirroring
+// maybeEmitTutorialBlueprint). ask_user is GENERIC (yes/no or single-select with
+// optional per-option thumbnails); the Slides variant picker is its first
+// consumer. Returns true when a card was emitted so the caller ends the agent
+// turn — the user answers by clicking, which arrives as an ordinary user message.
+func (cr *ChatRunner) maybeEmitChatQuestion(sessionService session.Service, toolName string, resp map[string]any) bool {
+	if toolName != "ask_user" || resp == nil {
+		return false
+	}
+	if status, _ := resp["status"].(string); status != "ok" {
+		return false
+	}
+	kind, _ := resp["kind"].(string)
+	prompt, _ := resp["prompt"].(string)
+	if prompt == "" || (kind != "yesno" && kind != "select") {
+		return false
+	}
+	questionID, _ := resp["questionId"].(string)
+
+	options := make([]chatQuestionOptionPayload, 0)
+	if rawOpts, ok := resp["options"].([]any); ok {
+		for _, item := range rawOpts {
+			m, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			opt := chatQuestionOptionPayload{
+				ID:          strVal(m["id"]),
+				Label:       strVal(m["label"]),
+				Description: strVal(m["description"]),
+			}
+			if thumbRaw, ok := m["thumbnail"].(map[string]any); ok {
+				thumb := &chatQuestionThumbnailPayload{
+					Kind:     strVal(thumbRaw["kind"]),
+					Markup:   strVal(thumbRaw["markup"]),
+					AssetRef: strVal(thumbRaw["assetRef"]),
+					Theme:    strMap(thumbRaw["theme"]),
+					Template: strVal(thumbRaw["template"]),
+				}
+				opt.Thumbnail = thumb
+			}
+			options = append(options, opt)
+		}
+	}
+	if kind == "select" && len(options) == 0 {
+		return false
+	}
+
+	payload := chatQuestionPayload{
+		QuestionID: questionID,
+		Kind:       kind,
+		Prompt:     prompt,
+		Options:    options,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		slog.Error("failed to marshal chat question SSE payload", "error", err)
+		return false
+	}
+	var eventData map[string]any
+	if err := json.Unmarshal(data, &eventData); err != nil {
+		slog.Error("failed to build chat question SSE payload", "error", err)
+		return false
+	}
+	cr.emitEvent("chat_question", eventData)
+	persistChatQuestion(cr.ctx, sessionService, cr.UserID, cr.SessionID, payload)
+	return true
+}
+
+// strMap coerces a JSON-decoded value into a map[string]string, dropping any
+// non-string values. Returns nil for a nil/empty/mismatched input.
+func strMap(v any) map[string]string {
+	m, ok := v.(map[string]any)
+	if !ok || len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, val := range m {
+		if s, ok := val.(string); ok {
+			out[k] = s
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // maybeEmitTutorialSceneSlideshow emits the post-run scene navigator when
@@ -1606,6 +1729,93 @@ func isStreamTruncationError(err error) bool {
 		return false
 	}
 	return strings.Contains(err.Error(), "stream ended without a finish_reason")
+}
+
+func (cr *ChatRunner) maybeEmitDocsUpdate(sessionService session.Service, toolName string, result map[string]any) {
+	if result == nil {
+		return
+	}
+	if _, failed := result["error"]; failed {
+		return
+	}
+
+	action := ""
+	switch toolName {
+	case "create_deck":
+		action = slides.ActionDeckCreated
+	case "write_slide":
+		action = slides.ActionSlideWritten
+	case "get_deck":
+		action = slides.ActionDeckViewed
+	case "review_deck":
+		action = slides.ActionDeckReviewed
+	default:
+		return
+	}
+
+	deck, ok := result["deck"].(map[string]any)
+	if !ok {
+		return
+	}
+	slug, _ := deck["slug"].(string)
+	if slug == "" {
+		return
+	}
+
+	payload := map[string]any{
+		"type":     "slides",
+		"deckSlug": slug,
+		"action":   action,
+	}
+	if title, ok := deck["title"].(string); ok && title != "" {
+		payload["deckTitle"] = title
+	}
+	if schemaVersion, ok := numberAsInt(deck["schemaVersion"]); ok {
+		payload["schemaVersion"] = schemaVersion
+	}
+	if slideCount, ok := numberAsInt(result["slideCount"]); ok {
+		payload["totalSlides"] = slideCount
+	}
+	if slide, ok := result["slide"].(map[string]any); ok {
+		if position, ok := numberAsInt(slide["position"]); ok {
+			payload["slideIndex"] = position
+		}
+		if title, ok := slide["title"].(string); ok && title != "" {
+			payload["title"] = title
+		}
+	}
+
+	cr.emitEvent("docs_update", payload)
+	persistDocsUpdate(cr.ctx, sessionService, cr.UserID, cr.SessionID, payload)
+
+	// When the model finishes a deck (its declared final step, review_deck),
+	// bake each slide to a static PNG once so the Slides view can show pre-baked
+	// images instead of live-rendering every slide. This is best-effort and runs
+	// in the background so it never blocks the SSE turn; it self-skips when no
+	// browser is available and is idempotent (unchanged slides are not re-baked).
+	if action == slides.ActionDeckReviewed {
+		if svc := store.FromContext(cr.ctx); svc != nil && svc.PersonalDocs != nil {
+			deckSvc := slides.Service{Store: svc.PersonalDocs}
+			bakeCtx := cr.ctx
+			userID := cr.UserID
+			go bakeDeckThumbnails(bakeCtx, deckSvc, slug, userID)
+		}
+	}
+}
+
+func numberAsInt(value any) (int, bool) {
+	switch number := value.(type) {
+	case int:
+		return number, true
+	case int32:
+		return int(number), true
+	case int64:
+		return int(number), true
+	case float64:
+		return int(number), true
+	default:
+		return 0, false
+	}
 }
 
 // emitEvent creates a ChatEvent and sends it to all subscribers.

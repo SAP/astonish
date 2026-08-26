@@ -708,8 +708,8 @@ func TestTranscriptDelegationStart(t *testing.T) {
 		t.Fatalf("first task name=%q want researcher", tr.Delegation[0].Name)
 	}
 	for i, task := range tr.Delegation {
-		if task.Status != "running" {
-			t.Fatalf("task %d status=%q want running", i, task.Status)
+		if task.Status != "queued" {
+			t.Fatalf("task %d status=%q want queued", i, task.Status)
 		}
 		if task.StartedAt.IsZero() {
 			t.Fatalf("task %d StartedAt should be set", i)
@@ -750,9 +750,9 @@ func TestTranscriptDelegationTaskComplete(t *testing.T) {
 	if tr.Delegation[0].Duration != "5.2s" {
 		t.Fatalf("researcher duration=%q want 5.2s", tr.Delegation[0].Duration)
 	}
-	// The other task should still be running.
-	if tr.Delegation[1].Status != "running" {
-		t.Fatalf("coder status=%q want running", tr.Delegation[1].Status)
+	// The other task should still be queued.
+	if tr.Delegation[1].Status != "queued" {
+		t.Fatalf("coder status=%q want queued", tr.Delegation[1].Status)
 	}
 	// Verify the inline Item is also updated.
 	for _, it := range tr.Items {
@@ -786,6 +786,34 @@ func TestTranscriptDelegationTaskFailed(t *testing.T) {
 			if it.DelegationTasks[0].Status != "failed" {
 				t.Fatalf("ItemDelegation task[0] status=%q want failed", it.DelegationTasks[0].Status)
 			}
+		}
+	}
+}
+
+func TestTranscriptDelegationTaskLiveness(t *testing.T) {
+	tr := NewTranscript()
+	tr.Apply(NewDelegationStart([]DelegationTask{{Name: "researcher", Description: "Research"}}))
+	tr.Apply(NewDelegationTaskState("task_state", "researcher", "waiting_on_model", "12s", "7s", "", 1, false))
+
+	task := tr.Delegation[0]
+	if task.Status != "waiting_on_model" || task.Duration != "12s" || task.LastActivity != "7s" || task.Attempt != 1 {
+		t.Fatalf("waiting state not reduced: %#v", task)
+	}
+
+	tr.Apply(NewDelegationTaskState("task_retry", "researcher", "retrying", "13s", "8s", "provider timeout", 2, false))
+	task = tr.Delegation[0]
+	if task.Status != "retrying" || task.Attempt != 2 || task.Error != "provider timeout" {
+		t.Fatalf("retry state not reduced: %#v", task)
+	}
+
+	tr.Apply(NewDelegationTaskState("task_failed", "researcher", "failed", "14s", "9s", "no meaningful activity for 9s", 2, true))
+	task = tr.Delegation[0]
+	if task.Status != "failed" || !task.NoActivity || task.LastActivity != "9s" {
+		t.Fatalf("watchdog state not reduced: %#v", task)
+	}
+	for _, item := range tr.Items {
+		if item.Kind == ItemDelegation && !item.DelegationTasks[0].NoActivity {
+			t.Fatal("inline delegation item did not receive watchdog metadata")
 		}
 	}
 }

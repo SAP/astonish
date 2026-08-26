@@ -88,6 +88,68 @@ var (
 			},
 		},
 	}
+	// DecksColumns holds the columns for the "decks" table.
+	DecksColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "slug", Type: field.TypeString},
+		{Name: "title", Type: field.TypeString},
+		{Name: "description", Type: field.TypeString, Default: ""},
+		{Name: "schema_version", Type: field.TypeInt, Default: 1},
+		{Name: "theme", Type: field.TypeJSON, Nullable: true},
+		{Name: "assets", Type: field.TypeJSON, Nullable: true},
+		{Name: "template_model", Type: field.TypeString, Nullable: true, Size: 2147483647},
+		{Name: "thumbnail_ready", Type: field.TypeBool, Default: false},
+		{Name: "session_id", Type: field.TypeString, Default: ""},
+		{Name: "version", Type: field.TypeInt, Default: 1},
+		{Name: "source_slug", Type: field.TypeString, Default: ""},
+		{Name: "created_at", Type: field.TypeTime, Default: map[string]schema.Expr{"postgres": "now()", "sqlite3": "(datetime('now'))"}},
+		{Name: "updated_at", Type: field.TypeTime, Default: map[string]schema.Expr{"postgres": "now()", "sqlite3": "(datetime('now'))"}},
+	}
+	// DecksTable holds the schema information for the "decks" table.
+	DecksTable = &schema.Table{
+		Name:       "decks",
+		Columns:    DecksColumns,
+		PrimaryKey: []*schema.Column{DecksColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "deck_slug",
+				Unique:  true,
+				Columns: []*schema.Column{DecksColumns[1]},
+			},
+			{
+				Name:    "deck_session_id",
+				Unique:  false,
+				Columns: []*schema.Column{DecksColumns[9]},
+			},
+		},
+	}
+	// DeckVersionsColumns holds the columns for the "deck_versions" table.
+	DeckVersionsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "deck_slug", Type: field.TypeString},
+		{Name: "version", Type: field.TypeInt, Default: 1},
+		{Name: "title", Type: field.TypeString},
+		{Name: "snapshot", Type: field.TypeString, Size: 2147483647, Default: ""},
+		{Name: "created_at", Type: field.TypeTime, Default: map[string]schema.Expr{"postgres": "now()", "sqlite3": "(datetime('now'))"}},
+	}
+	// DeckVersionsTable holds the schema information for the "deck_versions" table.
+	DeckVersionsTable = &schema.Table{
+		Name:       "deck_versions",
+		Columns:    DeckVersionsColumns,
+		PrimaryKey: []*schema.Column{DeckVersionsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "deckversion_deck_slug_version",
+				Unique:  true,
+				Columns: []*schema.Column{DeckVersionsColumns[1], DeckVersionsColumns[2]},
+			},
+			{
+				Name:    "deckversion_deck_slug",
+				Unique:  false,
+				Columns: []*schema.Column{DeckVersionsColumns[1]},
+			},
+		},
+	}
 	// FlowsColumns holds the columns for the "flows" table.
 	FlowsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -259,17 +321,54 @@ var (
 			},
 		},
 	}
+	// SlidesColumns holds the columns for the "slides" table.
+	SlidesColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "position", Type: field.TypeInt},
+		{Name: "title", Type: field.TypeString, Default: ""},
+		{Name: "content", Type: field.TypeString, Size: 2147483647},
+		{Name: "notes", Type: field.TypeString, Size: 2147483647, Default: ""},
+		{Name: "thumbnail_ref", Type: field.TypeString, Size: 2147483647, Default: ""},
+		{Name: "schema_version", Type: field.TypeInt, Default: 1},
+		{Name: "created_at", Type: field.TypeTime, Default: map[string]schema.Expr{"postgres": "now()", "sqlite3": "(datetime('now'))"}},
+		{Name: "updated_at", Type: field.TypeTime, Default: map[string]schema.Expr{"postgres": "now()", "sqlite3": "(datetime('now'))"}},
+		{Name: "deck_slides", Type: field.TypeUUID},
+	}
+	// SlidesTable holds the schema information for the "slides" table.
+	SlidesTable = &schema.Table{
+		Name:       "slides",
+		Columns:    SlidesColumns,
+		PrimaryKey: []*schema.Column{SlidesColumns[0]},
+		ForeignKeys: []*schema.ForeignKey{
+			{
+				Symbol:     "slides_decks_slides",
+				Columns:    []*schema.Column{SlidesColumns[9]},
+				RefColumns: []*schema.Column{DecksColumns[0]},
+				OnDelete:   schema.NoAction,
+			},
+		},
+		Indexes: []*schema.Index{
+			{
+				Name:    "slide_position_deck_slides",
+				Unique:  true,
+				Columns: []*schema.Column{SlidesColumns[1], SlidesColumns[9]},
+			},
+		},
+	}
 	// Tables holds all the tables in the schema.
 	Tables = []*schema.Table{
 		AppsTable,
 		AppStateTable,
 		CredentialsTable,
+		DecksTable,
+		DeckVersionsTable,
 		FlowsTable,
 		MemoriesTable,
 		PersonalSettingsTable,
 		ScheduledJobsTable,
 		SessionsTable,
 		SessionEventsTable,
+		SlidesTable,
 	}
 )
 
@@ -303,4 +402,5 @@ func init() {
 	SessionEventsTable.Annotation = &entsql.Annotation{
 		Table: "session_events",
 	}
+	SlidesTable.ForeignKeys[0].RefTable = DecksTable
 }

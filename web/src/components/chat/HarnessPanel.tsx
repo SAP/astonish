@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { X, GripVertical } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
@@ -9,6 +9,7 @@ import TutorialBlueprintCard from './TutorialBlueprintCard'
 import TutorialSceneSlideshowCard from './TutorialSceneSlideshowCard'
 import EmbeddedFileViewer from './EmbeddedFileViewer'
 import BrowserView from './BrowserView'
+import SlidesDeckView from './SlidesDeckView'
 import {
   appVersionsForFocus,
   clampHarnessWidth,
@@ -24,6 +25,7 @@ import type {
   BrowserHandoffMessage,
   ChatMsg,
   DistillPreviewMessage,
+  DocsUpdateMessage,
   SessionArtifact,
   TutorialBlueprintPreviewMessage,
   TutorialSceneSlideshowMessage,
@@ -172,6 +174,10 @@ export default function HarnessPanel({
         const msg = messageAt<BrowserHandoffMessage>(messages, focus.messageIndex)
         return msg?.reason || msg?.pageTitle || harnessKindLabel(focus.kind)
       }
+      case 'slides': {
+        const msg = messageAt<DocsUpdateMessage>(messages, focus.messageIndex)
+        return msg?.title || focus.deckSlug || harnessKindLabel(focus.kind)
+      }
     }
   })()
 
@@ -179,7 +185,28 @@ export default function HarnessPanel({
     focus.kind === 'report' ||
     focus.kind === 'video' ||
     focus.kind === 'browser_handoff' ||
+    focus.kind === 'slides' ||
     focus.kind === 'app'
+
+  // Per-deck refresh signal for the Slides panel: as the agent writes slides,
+  // each write_slide emits a `docs_update` message. Counting those (plus the
+  // latest reported total) yields a monotonically-increasing number that drives
+  // SlidesDeckView to re-fetch + re-mount its iframe, so the panel updates live
+  // instead of showing the empty "render slides" placeholder until a reload.
+  const slidesRefreshSignal = useMemo(() => {
+    if (focus.kind !== 'slides') return 0
+    let count = 0
+    let maxTotal = 0
+    for (const m of messages) {
+      if (m.type !== 'docs_update') continue
+      const d = m as DocsUpdateMessage
+      if (d.docType === 'slides' && d.deckSlug === focus.deckSlug) {
+        count++
+        if (typeof d.totalSlides === 'number' && d.totalSlides > maxTotal) maxTotal = d.totalSlides
+      }
+    }
+    return count * 1000 + maxTotal
+  }, [messages, focus])
 
   return (
     <div
@@ -382,6 +409,12 @@ export default function HarnessPanel({
             </div>
           )
         })()}
+
+        {focus.kind === 'slides' && (
+          <div className="flex-1 min-h-0 h-full">
+            <SlidesDeckView deckSlug={focus.deckSlug} scope="personal" fillHeight refreshSignal={slidesRefreshSignal} />
+          </div>
+        )}
       </div>
     </div>
   )

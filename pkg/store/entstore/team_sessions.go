@@ -44,8 +44,8 @@ type teamSession struct {
 }
 
 func (s *teamSession) ID() string      { return s.id }
-func (s *teamSession) AppName() string  { return s.appName }
-func (s *teamSession) UserID() string   { return s.userID }
+func (s *teamSession) AppName() string { return s.appName }
+func (s *teamSession) UserID() string  { return s.userID }
 func (s *teamSession) State() adksession.State {
 	return &teamSessionState{mu: &s.mu, state: s.state}
 }

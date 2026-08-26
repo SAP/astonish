@@ -155,12 +155,12 @@ func (s *orgA2AAgentStore) UpdateCachedCard(ctx context.Context, name string, ca
 
 func entOrgA2AAgentToStore(e *orgent.OrgA2AAgent) store.A2AAgent {
 	agent := store.A2AAgent{
-		ID:       e.ID.String(),
-		Name:     e.Name,
-		URL:      e.URL,
-		AuthType: e.AuthType,
-		Enabled:  &e.Enabled,
-		Headers:  e.Headers,
+		ID:        e.ID.String(),
+		Name:      e.Name,
+		URL:       e.URL,
+		AuthType:  e.AuthType,
+		Enabled:   &e.Enabled,
+		Headers:   e.Headers,
 		CreatedBy: e.CreatedBy.String(),
 		CreatedAt: e.CreatedAt,
 		UpdatedAt: e.UpdatedAt,

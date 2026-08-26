@@ -171,6 +171,64 @@ type StudioMessage struct {
 
 	// file attachments on user messages — populated when session history is loaded
 	Attachments []AttachmentInfo `json:"attachments,omitempty"`
+
+	// docs_update fields — persisted slide-card metadata.
+	DocsUpdate *DocsUpdatePayload `json:"docsUpdate,omitempty"`
+
+	// chat_question fields — populated for a generic inline questionnaire card
+	// (yes/no or single-select, with optional per-option thumbnails). The card is
+	// answered once and then collapses; the answer re-enters the agent loop as an
+	// ordinary user message (no dedicated endpoint).
+	QuestionID   string               `json:"questionId,omitempty"`
+	QuestionKind string               `json:"questionKind,omitempty"` // "yesno" | "select"
+	Prompt       string               `json:"prompt,omitempty"`
+	Options      []ChatQuestionOption `json:"options,omitempty"`
+}
+
+// ChatQuestionOption is one selectable answer in a chat_question card. For a
+// yes/no question Options is empty (the card renders fixed Yes/No buttons).
+type ChatQuestionOption struct {
+	ID          string                 `json:"id"`
+	Label       string                 `json:"label"`
+	Description string                 `json:"description,omitempty"`
+	Thumbnail   *ChatQuestionThumbnail `json:"thumbnail,omitempty"`
+}
+
+// ChatQuestionThumbnail describes an optional visual preview for a select option.
+// For slides it carries the archetype ast-slide MARKUP (rendered live in a scaled
+// sandboxed iframe by the frontend); for a plain image it carries an assetRef the
+// existing asset plumbing resolves at render time. Never carries data: bytes.
+type ChatQuestionThumbnail struct {
+	Kind     string            `json:"kind"` // "slides-archetype" | "image"
+	Markup   string            `json:"markup,omitempty"`
+	AssetRef string            `json:"assetRef,omitempty"`
+	Theme    map[string]string `json:"theme,omitempty"`
+	Template string            `json:"template,omitempty"` // template name; frontend resolves asset-refs from it at render time (never data: bytes)
+}
+
+type DocsUpdatePayload struct {
+	Type           string                    `json:"type"`
+	DeckSlug       string                    `json:"deckSlug"`
+	Action         string                    `json:"action"`
+	SlideIndex     *int                      `json:"slideIndex,omitempty"`
+	TotalSlides    int                       `json:"totalSlides,omitempty"`
+	Title          string                    `json:"title,omitempty"`
+	DeckTitle      string                    `json:"deckTitle,omitempty"`
+	SchemaVersion  int                       `json:"schemaVersion,omitempty"`
+	Validation     DocsValidationSummary     `json:"validation,omitempty"`
+	PPTXCapability DocsPPTXCapabilitySummary `json:"pptxCapability,omitempty"`
+}
+
+type DocsValidationSummary struct {
+	Errors   int `json:"errors"`
+	Warnings int `json:"warnings"`
+}
+
+type DocsPPTXCapabilitySummary struct {
+	Native      int `json:"native"`
+	Vector      int `json:"vector"`
+	Raster      int `json:"raster"`
+	Unsupported int `json:"unsupported"`
 }
 
 // AttachmentInfo describes a file attachment in session history display.
@@ -968,7 +1026,7 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 	// In platform mode, we inject a merged store (personal-first, team-fallback)
 	// so the LLM resolves the user's personal credentials first, then team creds.
 	// Writes from chat always go to the personal store.
-	if svc := store.FromRequest(r); svc != nil {
+	if svc := injectRequestDocsStores(runner, r); svc != nil {
 		if svc.PersonalCredentials != nil || svc.Credentials != nil {
 			merged := store.NewMergedCredentialStore(svc.PersonalCredentials, svc.Credentials)
 			runner.InjectCredentialStore(merged)

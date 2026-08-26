@@ -64,6 +64,31 @@ function browser(reason: string): ChatMsg {
   }
 }
 
+function slidesDeck(deckSlug: string, title = 'Deck'): ChatMsg {
+  return {
+    type: 'docs_update',
+    docType: 'slides',
+    deckSlug,
+    action: 'slide_written',
+    slideIndex: 1,
+    totalSlides: 3,
+    title,
+  }
+}
+
+// A create_deck / get_deck docs_update: the deck exists but has no written
+// slides yet (no slideIndex/totalSlides). The harness reveals eagerly on this
+// (the panel shows a "generating" placeholder until slides arrive).
+function slidesDeckCreated(deckSlug: string, action = 'deck_created', title = 'Deck'): ChatMsg {
+  return {
+    type: 'docs_update',
+    docType: 'slides',
+    deckSlug,
+    action,
+    title,
+  }
+}
+
 function artifact(path: string, isReport = true): ChatMsg {
   return {
     type: 'artifact',
@@ -161,6 +186,54 @@ describe('chatHarness', () => {
         messageIndex: 1,
       })
     })
+
+    it('picks a slides deck from a docs_update message', () => {
+      const messages: ChatMsg[] = [
+        { type: 'user', content: 'make a deck' },
+        slidesDeck('quarterly-review', 'Quarterly Review'),
+      ]
+      expect(deriveLatestHarness(messages, new Set())).toEqual({
+        kind: 'slides',
+        deckSlug: 'quarterly-review',
+        messageIndex: 1,
+      })
+    })
+
+    it('reveals the harness for a create_deck docs_update (eager, from the start)', () => {
+      const messages: ChatMsg[] = [
+        { type: 'user', content: 'make a deck' },
+        slidesDeckCreated('quarterly-review', 'deck_created'),
+      ]
+      expect(deriveLatestHarness(messages, new Set())).toEqual({
+        kind: 'slides',
+        deckSlug: 'quarterly-review',
+        messageIndex: 1,
+      })
+    })
+
+    it('reveals the harness for a get_deck (deck_viewed) docs_update', () => {
+      const messages: ChatMsg[] = [slidesDeckCreated('quarterly-review', 'deck_viewed')]
+      expect(deriveLatestHarness(messages, new Set())).toEqual({
+        kind: 'slides',
+        deckSlug: 'quarterly-review',
+        messageIndex: 0,
+      })
+    })
+
+    it('keeps the slides focus as slides are written (updates in place)', () => {
+      // create_deck reveals first; a later slide_written keeps the same deck
+      // focused (the panel updates live rather than re-revealing a new target).
+      const messages: ChatMsg[] = [
+        { type: 'user', content: 'make a deck' },
+        slidesDeckCreated('quarterly-review', 'deck_created'),
+        slidesDeck('quarterly-review', 'Quarterly Review'),
+      ]
+      expect(deriveLatestHarness(messages, new Set())).toEqual({
+        kind: 'slides',
+        deckSlug: 'quarterly-review',
+        messageIndex: 2,
+      })
+    })
   })
 
   describe('resolveHarnessFocus', () => {
@@ -210,6 +283,21 @@ describe('chatHarness', () => {
         harnessFocusEquals(
           { kind: 'distill', messageIndex: 2 },
           { kind: 'distill', messageIndex: 3 },
+        ),
+      ).toBe(false)
+    })
+
+    it('matches slides by deckSlug', () => {
+      expect(
+        harnessFocusEquals(
+          { kind: 'slides', deckSlug: 'deck-a', messageIndex: 1 },
+          { kind: 'slides', deckSlug: 'deck-a', messageIndex: 9 },
+        ),
+      ).toBe(true)
+      expect(
+        harnessFocusEquals(
+          { kind: 'slides', deckSlug: 'deck-a', messageIndex: 1 },
+          { kind: 'slides', deckSlug: 'deck-b', messageIndex: 1 },
         ),
       ).toBe(false)
     })

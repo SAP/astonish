@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/SAP/astonish/pkg/client"
@@ -90,6 +91,38 @@ func TestMapSSEToEvents_SoftDegrade(t *testing.T) {
 	}
 }
 
+func TestMapSSEToEvents_ChatQuestionYesNo(t *testing.T) {
+	evs := mapSSEToEvents(&client.SSEEvent{
+		Type: "chat_question",
+		Data: `{"questionId":"q1","kind":"yesno","prompt":"Ship it?"}`,
+	}, false)
+	if len(evs) != 1 || evs[0].Kind != events.KindText {
+		t.Fatalf("chat_question yesno: %+v", evs)
+	}
+	text := evs[0].Text
+	for _, want := range []string{"Ship it?", "1. Yes", "2. No", "Reply with the number"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("chat_question yesno missing %q in %q", want, text)
+		}
+	}
+}
+
+func TestMapSSEToEvents_ChatQuestionSelect(t *testing.T) {
+	evs := mapSSEToEvents(&client.SSEEvent{
+		Type: "chat_question",
+		Data: `{"questionId":"q2","kind":"select","prompt":"Pick a theme","options":[{"id":"a","label":"Aurora","description":"Cool blues"},{"id":"b","label":"Ember"}]}`,
+	}, false)
+	if len(evs) != 1 || evs[0].Kind != events.KindText {
+		t.Fatalf("chat_question select: %+v", evs)
+	}
+	text := evs[0].Text
+	for _, want := range []string{"Pick a theme", "1. Aurora", "Cool blues", "2. Ember", "Reply with the number"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("chat_question select missing %q in %q", want, text)
+		}
+	}
+}
+
 func TestMapSSEToEvents_ArtifactMetadata(t *testing.T) {
 	evs := mapSSEToEvents(&client.SSEEvent{
 		Type: "artifact",
@@ -114,6 +147,25 @@ func TestMapSSEToEvents_ReportMarker(t *testing.T) {
 	}
 	if evs[0].Artifact.Path != "/tmp/report.md" || !evs[0].Artifact.IsReport || evs[0].Artifact.ReportTitle != "Quarterly Report" {
 		t.Fatalf("report marker artifact: %+v", evs[0].Artifact)
+	}
+}
+
+func TestMapSSEToEvents_DocsUpdateIsStudioOnly(t *testing.T) {
+	evs := mapSSEToEvents(&client.SSEEvent{
+		Type: "docs_update",
+		Data: `{"type":"slides","deckSlug":"migration","action":"slide_written","slideIndex":2,"totalSlides":3}`,
+	}, false)
+	if len(evs) != 0 {
+		t.Fatalf("terminal client must ignore docs_update SSE, got %+v", evs)
+	}
+}
+
+func TestStudioMessagesToHistorySkipsDocsUpdate(t *testing.T) {
+	hist := studioMessagesToHistory([]client.StudioMessage{{
+		Type: "docs_update",
+	}})
+	if len(hist) != 0 {
+		t.Fatalf("terminal history must skip Studio-only docs_update, got %+v", hist)
 	}
 }
 
@@ -340,9 +392,10 @@ func TestLazyCodeBackendForwardsLocalSkills(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// generative-ui is excluded from code-mode builtins, so only the one
-	// filesystem skill is expected.
-	if len(got) != 1 || got[0].Name != "local" {
+	// The picker merges BuiltinSkillsForCode() (which includes the on-demand
+	// "slides" skill) with the filesystem skill, sorted case-insensitively.
+	// generative-ui is excluded from code-mode builtins.
+	if len(got) != 2 || got[0].Name != "local" || got[1].Name != "slides" {
 		t.Fatalf("forwarded skills = %+v", got)
 	}
 	var _ backend.LocalSkillsBackend = b

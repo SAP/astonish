@@ -10,6 +10,29 @@ import (
 	"github.com/SAP/astonish/pkg/tui/events"
 )
 
+func TestDelegationTaskStatusLineShowsLiveness(t *testing.T) {
+	tests := []struct {
+		name string
+		task events.DelegationTaskState
+		want []string
+	}{
+		{name: "queued", task: events.DelegationTaskState{Status: "queued"}, want: []string{"queued", "worker slot"}},
+		{name: "waiting", task: events.DelegationTaskState{Status: "waiting_on_model", LastActivity: "12s"}, want: []string{"waiting on model", "12s"}},
+		{name: "retry", task: events.DelegationTaskState{Status: "retrying", Attempt: 2, Error: "gateway timeout"}, want: []string{"retrying", "attempt 2", "gateway timeout"}},
+		{name: "watchdog", task: events.DelegationTaskState{Status: "failed", NoActivity: true, LastActivity: "2m0s", Error: "no meaningful activity"}, want: []string{"no activity", "2m0s", "no meaningful activity"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := delegationTaskStatusLine(tt.task, 120)
+			for _, want := range tt.want {
+				if !strings.Contains(got, want) {
+					t.Fatalf("status line %q missing %q", got, want)
+				}
+			}
+		})
+	}
+}
+
 func TestRenderHeaderShowsConnectionAndUsage(t *testing.T) {
 	m := model{
 		theme: DefaultTheme(),

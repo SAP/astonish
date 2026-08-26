@@ -137,11 +137,15 @@ type Event struct {
 	Meta map[string]any
 
 	// Delegation fields for KindDelegation.
-	DelegationType     string           // "start", "task_start", "task_complete", "task_failed", "done"
-	DelegationTasks    []DelegationTask // all tasks (only for "start")
-	DelegationTaskName string           // task name (for task_start/task_complete/task_failed)
-	DelegationDuration string           // human-readable duration (for task_complete/task_failed)
-	DelegationError    string           // error message (for task_failed)
+	DelegationType         string           // start, per-task lifecycle/activity, done
+	DelegationTasks        []DelegationTask // all tasks (only for "start")
+	DelegationTaskName     string           // task name (for per-task events)
+	DelegationStatus       string           // queued/running/waiting_on_model/retrying/complete/failed
+	DelegationDuration     string           // human-readable elapsed/final duration
+	DelegationLastActivity string           // human-readable age since meaningful activity
+	DelegationError        string           // failure/retry reason
+	DelegationAttempt      int              // 1-based attempt
+	DelegationNoActivity   bool             // inactivity watchdog warning
 
 	// Delegation activity fields (for task_tool_call/task_tool_result/task_text).
 	DelegationToolName   string
@@ -239,15 +243,24 @@ func NewDelegationStart(tasks []DelegationTask) Event {
 	return Event{Kind: KindDelegation, DelegationType: "start", DelegationTasks: tasks}
 }
 
-// NewDelegationTaskUpdate returns a per-task lifecycle event (task_start, task_complete, task_failed).
-func NewDelegationTaskUpdate(dtype, taskName, duration, errMsg string) Event {
+// NewDelegationTaskState returns a per-task lifecycle/liveness event.
+func NewDelegationTaskState(dtype, taskName, status, duration, lastActivity, reason string, attempt int, noActivity bool) Event {
 	return Event{
-		Kind:               KindDelegation,
-		DelegationType:     dtype,
-		DelegationTaskName: taskName,
-		DelegationDuration: duration,
-		DelegationError:    errMsg,
+		Kind:                   KindDelegation,
+		DelegationType:         dtype,
+		DelegationTaskName:     taskName,
+		DelegationStatus:       status,
+		DelegationDuration:     duration,
+		DelegationLastActivity: lastActivity,
+		DelegationError:        reason,
+		DelegationAttempt:      attempt,
+		DelegationNoActivity:   noActivity,
 	}
+}
+
+// NewDelegationTaskUpdate returns a legacy per-task lifecycle event.
+func NewDelegationTaskUpdate(dtype, taskName, duration, errMsg string) Event {
+	return NewDelegationTaskState(dtype, taskName, "", duration, "", errMsg, 0, false)
 }
 
 // NewDelegationTaskActivity returns a per-task activity event (tool_call, tool_result, text).

@@ -23,6 +23,11 @@ func TestRenderPlanMarkdown_StatusMarkers(t *testing.T) {
 	wants := []string{
 		"**Goal:** Do the thing",
 		"_Last updated: 2024-01-02T03:04:05Z_",
+		"## Progress",
+		"- Current: **build** (running)",
+		"- Completed: explore",
+		"- Remaining: verify",
+		"- Failed: deploy",
 		"- [x] **explore** — look around",
 		"- [~] **build** — make changes",
 		"- [ ] **verify** — run tests",
@@ -301,15 +306,15 @@ func TestRenderPlanMarkdown_ParallelGroups(t *testing.T) {
 			t.Errorf("rendered plan missing %q\n---\n%s", w, md)
 		}
 	}
-	// backend group header must precede data-layer step.
+	// backend group header must precede data-layer phase checkbox.
 	backendIdx := strings.Index(md, "### ⟳ Parallel group: backend")
-	dataIdx := strings.Index(md, "**data-layer**")
+	dataIdx := strings.Index(md, "- [ ] **data-layer**")
 	if backendIdx < 0 || dataIdx < 0 || backendIdx > dataIdx {
 		t.Errorf("backend group header must appear before data-layer step")
 	}
-	// serial header must precede cleanup step.
+	// serial header must precede cleanup phase checkbox.
 	serialIdx := strings.Index(md, "### (serial)")
-	cleanupIdx := strings.Index(md, "**cleanup**")
+	cleanupIdx := strings.Index(md, "- [ ] **cleanup**")
 	if serialIdx < 0 || cleanupIdx < 0 || serialIdx > cleanupIdx {
 		t.Errorf("(serial) header must appear before cleanup step")
 	}

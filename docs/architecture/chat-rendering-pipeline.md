@@ -73,7 +73,7 @@ Two functions share identical parsing logic:
 4. `JSON.parse(data)` and call `onEvent(eventType, parsedData)`
 5. On stream end, call `onDone()`
 
-**Both connect paths must have identical event handlers.** When adding a new event type, the `case` must be added to both the `connectChat` handler (in `sendMessage`) and the `connectChatStream` handler (in the reconnect logic). Missing one causes events to be silently dropped on reconnect.
+**Both connect paths must have identical event handlers.** When adding a new event type, the `case` must be added to both the `connectChat` handler (in `sendMessage`) and the `connectChatStream` handler (in the reconnect logic). Missing one causes events to be silently dropped on reconnect. Persisted transcript DTOs must also map the type during history loading; for example, `docs_update` is projected into a typed slide message and rendered by `SlidesCard` in all three paths.
 
 ## SSE Event Types
 
@@ -111,6 +111,26 @@ Tool messages stay separate in React state (and on the wire). At render time, `g
 - **Hard breaks** always passthrough and split folds: `user`, `subtask_execution`, `plan`, `fleet_*`, `browser_handoff`, `app_*`, `distill_*`, `tutorial_*`, `artifact`, `approval`, `network_denial`, `image`, `error*`, `system`, and any unknown future type. Soft absorbable allowlist only: `agent` (interstitial / provisional), `thinking`, `auto_approved`, `retry`.
 - Expand the block for paired tool steps + notes; expand a step for full args/result JSON.
 - Source citation chips (`collectSourceUrls`) still walk raw `tool_result` messages — grouping is display-only. Report three-signal gate is unchanged.
+
+### Document Update Events
+
+| Event | Data Shape | Frontend Action |
+|-------|-----------|----------------|
+| `docs_update` | `{type, deckSlug, action, slideIndex?, totalSlides, title?, deckTitle?, schemaVersion, validation, pptxCapability}` | Insert or refresh the slide-deck progress surface; terminal clients render a concise update line |
+
+Successful `create_deck` and `write_slide` results are normalized through `slides.UpdateFromToolResult` in every direct, retry, flat sub-agent, and structured-delegation execution path. `ChatRunner` emits the typed payload and persists the same JSON behind a `[docs_update]` marker. Session reconstruction projects that marker as a `StudioMessage{type: "docs_update"}`, so reload and live delivery use the same contract. The remote terminal maps both live SSE frames and restored messages to `KindDocsUpdate`; malformed payloads and failed tool results are ignored.
+
+#### Turn-scoped SlidesCard coalescing and preview recovery contract
+
+A successful `create_deck` can emit `docs_update` before the deck contains any slides. Studio may therefore mount a `SlidesCard` whose first authenticated presentation fetch returns `404` / content-not-found. This is a transient empty-deck preview state.
+
+Studio coalesces slide updates by `deckSlug` **only within one assistant turn**. The preceding user message is the boundary for that fold. Thus a same-turn `create_deck` followed by one or more `write_slide` updates remains one evolving message and `SlidesCard`, rather than appending one card per update. A change in slide progress is the refresh signal: the existing card re-fetches the presentation through the authenticated API. After a write succeeds and that fetch returns presentation content, the card must clear the earlier content-not-found state and render the preview; an initial 404 must not latch as a permanent error.
+
+A later user message ends that fold. If a later assistant turn edits the same `deckSlug`, its first successful update appends a fresh `SlidesCard`; it must not mutate, replace, or globally deduplicate the earlier turn's card. The fresh card loads the latest deck through the authenticated preview and exposes **Present**, **PPTX**, **PDF**, and **HTML** actions. Prior cards remain in transcript order as turn records.
+
+The folded transcript must be identical for live SSE, active-run reconnect, and static history reconstructed from persisted `[docs_update]` markers. Each path applies the same `deckSlug` identity within the same preceding-user boundary, progress-driven re-fetching, authenticated retrieval, and transient-error recovery. Static history must not coalesce matching deck slugs across user-message boundaries.
+
+This contract is **frontend rendering and history folding only**. It does not alter backend `docs_update` payloads, persisted marker shape or behavior, deck persistence or tenant/storage scope, or the existing presentation and export APIs.
 
 ### Artifact & File Events
 

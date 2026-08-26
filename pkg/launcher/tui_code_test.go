@@ -742,6 +742,41 @@ func TestLoadHistory_AnnouncePlanReconstructsPlanDocument(t *testing.T) {
 	}
 }
 
+func TestShouldContinueApprovedPlan(t *testing.T) {
+	dir := t.TempDir()
+	b := newFileStoreBackend(t, dir, codeUserID)
+	ctx := context.Background()
+	id := seedSession(t, b, "implement the plan")
+	path := b.planFilePath(id)
+	if err := os.WriteFile(path, []byte("# Execution Plan\n\n**Goal:** Keep going\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if b.shouldContinueApprovedPlan(ctx, id, path, nil) {
+		t.Fatal("must not continue before a plan is approved")
+	}
+
+	sess := getSession(t, b, id)
+	if err := b.sessionSvc.AppendEvent(ctx, sess, &adksession.Event{
+		ID:        "plan-decision-approved",
+		Author:    "system",
+		Timestamp: time.Now(),
+		Actions: adksession.EventActions{StateDelta: map[string]any{
+			planLifecycleStateKey: string(events.PlanApproved),
+		}},
+	}); err != nil {
+		t.Fatalf("append plan decision: %v", err)
+	}
+	if !b.shouldContinueApprovedPlan(ctx, id, path, nil) {
+		t.Fatal("must continue after session lifecycle is approved")
+	}
+
+	missing := filepath.Join(dir, "missing.PLAN.md")
+	if b.shouldContinueApprovedPlan(ctx, id, missing, nil) {
+		t.Fatal("must not continue when PLAN.md is missing")
+	}
+}
+
 // TestLoadHistory_EditFilePromotedToFileDiff verifies that an edit_file
 // call/response carrying verification_context is promoted to a main-thread
 // ItemFileDiff on resume (not left as a raw args key-value dump in the fold),
@@ -2877,6 +2912,9 @@ func TestRespondSubAgentAuth_PendingDeliversDecision(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for the sub-agent to receive the decision")
 	}
+	if b.RespondSubAgentAuth("Always Allow") {
+		t.Fatal("a repeated response must not be delivered to a new or resolved request")
+	}
 }
 
 // TestRespondSubAgentAuth_DenyPropagates verifies a denial choice is delivered
@@ -2917,11 +2955,13 @@ func TestLocalAgentBackendListLocalSkills(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 3 {
+	// The picker merges BuiltinSkillsForCode() (which includes the on-demand
+	// "slides" skill) with the filesystem skills, then sorts case-insensitively.
+	if len(got) != 4 {
 		t.Fatalf("skills = %+v", got)
 	}
-	if got[0].Name != "alpha" || got[1].Name != "Generative-UI" || got[2].Name != "zeta" {
-		t.Fatalf("skills not sorted: %+v", got)
+	if got[0].Name != "alpha" || got[1].Name != "Generative-UI" || got[2].Name != "slides" || got[3].Name != "zeta" {
+		t.Fatalf("skills not sorted or missing slides builtin: %+v", got)
 	}
 	// generative-ui is excluded from BuiltinSkillsForCode; the filesystem skill
 	// with the same name (case-insensitive) appears as-is from the user's config.

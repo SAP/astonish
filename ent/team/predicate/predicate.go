@@ -21,6 +21,12 @@ type ChatSessionEvent func(*sql.Selector)
 // Credential is the predicate function for credential builders.
 type Credential func(*sql.Selector)
 
+// Deck is the predicate function for deck builders.
+type Deck func(*sql.Selector)
+
+// DeckVersion is the predicate function for deckversion builders.
+type DeckVersion func(*sql.Selector)
+
 // DrillReport is the predicate function for drillreport builders.
 type DrillReport func(*sql.Selector)
 
@@ -80,6 +86,9 @@ type Skill func(*sql.Selector)
 
 // SkillFile is the predicate function for skillfile builders.
 type SkillFile func(*sql.Selector)
+
+// Slide is the predicate function for slide builders.
+type Slide func(*sql.Selector)
 
 // TeamAuditLog is the predicate function for teamauditlog builders.
 type TeamAuditLog func(*sql.Selector)

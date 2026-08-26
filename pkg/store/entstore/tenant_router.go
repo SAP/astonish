@@ -1112,6 +1112,7 @@ func (t *teamDataStore) Credentials() store.CredentialStore {
 		},
 	}
 }
+func (t *teamDataStore) Docs() store.DocsStore         { return &teamDocsStore{client: t.client} }
 func (t *teamDataStore) Apps() store.AppStore          { return &teamAppStore{client: t.client} }
 func (t *teamDataStore) AppState() store.AppStateStore { return &teamAppStateStore{client: t.client} }
 func (t *teamDataStore) AppStateSQL() store.AppStateSQLStore {
@@ -1201,7 +1202,8 @@ func (p *personalDataStore) Memories() store.MemoryStore {
 	}
 	return ms
 }
-func (p *personalDataStore) Apps() store.AppStore { return &personalAppStore{client: p.client} }
+func (p *personalDataStore) Docs() store.DocsStore { return &personalDocsStore{client: p.client} }
+func (p *personalDataStore) Apps() store.AppStore  { return &personalAppStore{client: p.client} }
 func (p *personalDataStore) Sessions() store.SessionStore {
 	return &personalSessionStore{client: p.client}
 }

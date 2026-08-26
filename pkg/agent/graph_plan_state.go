@@ -1,6 +1,9 @@
 package agent
 
-import "sync"
+import (
+	"fmt"
+	"sync"
+)
 
 // GraphPlanPhase identifies the current stage of the Graph-Optimized Plan mode
 // state machine. The current phase determines the runtime tool allow-list
@@ -24,14 +27,32 @@ const (
 	GraphPlanPhasePlan GraphPlanPhase = "plan"
 )
 
-// GraphPlanState tracks the current phase for a single Graph-Optimized Plan
-// session. It mirrors PlanState's concurrency style (a mutex guarding all
-// access) so the gate and the transition tools can read/advance it safely from
-// the ADK tool-callback goroutines.
+// GraphPlanState tracks the current phase and bounded exploration budget for a
+// single Graph-Optimized Plan session. All access is guarded because parallel
+// tool calls may enter the gate concurrently.
 type GraphPlanState struct {
-	mu    sync.Mutex
-	phase GraphPlanPhase
+	mu       sync.Mutex
+	phase    GraphPlanPhase
+	counters GraphPlanCounters
 }
+
+// GraphPlanCounters is a snapshot of discovery charged to the current turn.
+// Source reads are not counted: reading the regions identified in the GRAPH
+// phase is the point of the READ phase, not research to ration.
+type GraphPlanCounters struct {
+	GraphQueries    int
+	GapCalls        int
+	DelegationCalls int
+	DelegatedTasks  int
+	Total           int
+}
+
+const (
+	GraphPlanMaxGraphQueries    = 4
+	GraphPlanMaxGapCalls        = 12
+	GraphPlanMaxDelegationCalls = 1
+	GraphPlanMaxDelegatedTasks  = 6
+)
 
 // NewGraphPlanState returns a state machine starting in the graph phase.
 func NewGraphPlanState() *GraphPlanState {
@@ -45,6 +66,75 @@ func (g *GraphPlanState) Phase() GraphPlanPhase {
 	return g.phase
 }
 
+// Counters returns a concurrency-safe budget snapshot.
+func (g *GraphPlanState) Counters() GraphPlanCounters {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.counters
+}
+
+// ChargeExploration atomically reserves budget for an exploration tool. An
+// empty message means the call is allowed; a non-empty message explains the
+// transition the model must take instead. Rejected calls are not charged.
+func (g *GraphPlanState) ChargeExploration(name string, args map[string]any) string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	next := g.counters
+	switch name {
+	case "codegraph_explore":
+		next.GraphQueries++
+		if next.GraphQueries > GraphPlanMaxGraphQueries {
+			return g.limitMessageLocked("codegraph query", GraphPlanMaxGraphQueries)
+		}
+	case "read_file", "read_pdf", "filter_json", "announce_plan", "update_plan":
+		// Source reads and plan recorders are not discovery. A read quota
+		// truncates the READ phase; charging announce_plan as a gap call
+		// deadlocks PLAN after the gap budget is exhausted.
+		return ""
+	case "delegate_tasks":
+		next.DelegationCalls++
+		next.DelegatedTasks += delegationTaskCount(args)
+		if next.DelegationCalls > GraphPlanMaxDelegationCalls {
+			return g.limitMessageLocked("delegation call", GraphPlanMaxDelegationCalls)
+		}
+		if next.DelegatedTasks > GraphPlanMaxDelegatedTasks {
+			return g.limitMessageLocked("delegated task", GraphPlanMaxDelegatedTasks)
+		}
+	default:
+		if !GraphPlanPhaseTools(g.phase)[name] {
+			return ""
+		}
+		next.GapCalls++
+		if next.GapCalls > GraphPlanMaxGapCalls {
+			return g.limitMessageLocked("gap-filling call", GraphPlanMaxGapCalls)
+		}
+	}
+
+	next.Total++
+	g.counters = next
+	return ""
+}
+
+func delegationTaskCount(args map[string]any) int {
+	if tasks, ok := args["tasks"].([]any); ok {
+		return len(tasks)
+	}
+	// A decoding shape we cannot inspect still represents at least one task.
+	return 1
+}
+
+func (g *GraphPlanState) limitMessageLocked(kind string, limit int) string {
+	transition := "gplan_finalize"
+	switch g.phase {
+	case GraphPlanPhaseGraph:
+		transition = "gplan_reads (or gplan_gaps if codegraph has no coverage)"
+	case GraphPlanPhaseRead:
+		transition = "gplan_gaps (or gplan_finalize if no gaps remain)"
+	}
+	return fmt.Sprintf("Graph-plan %s limit reached (%d). Stop researching and call %s.", kind, limit, transition)
+}
+
 // Advance transitions to the given phase. Thread-safe. Any target is accepted;
 // the transition tools encode the legal orderings.
 func (g *GraphPlanState) Advance(to GraphPlanPhase) {
@@ -53,11 +143,11 @@ func (g *GraphPlanState) Advance(to GraphPlanPhase) {
 	g.mu.Unlock()
 }
 
-// Reset returns the machine to the initial graph phase. Called at the start of
-// each new user turn so a fresh plan always begins with the graph phase.
+// Reset returns the machine and all budgets to the initial graph phase.
 func (g *GraphPlanState) Reset() {
 	g.mu.Lock()
 	g.phase = GraphPlanPhaseGraph
+	g.counters = GraphPlanCounters{}
 	g.mu.Unlock()
 }
 
@@ -78,9 +168,9 @@ func IsGraphPlanTransitionTool(name string) bool {
 
 // GraphPlanPhaseTools returns the additive allow-list of tool names permitted in
 // the given phase (in addition to the always-allowed transition tools and
-// announce_plan/update_plan). This is the single source of truth for the
-// runtime gate. The lists are additive: each phase includes everything the
-// prior phases allowed.
+// update_plan). announce_plan is allowed only in the PLAN phase. This is the
+// single source of truth for the runtime gate. The lists are additive: each
+// phase includes everything the prior phases allowed.
 func GraphPlanPhaseTools(phase GraphPlanPhase) map[string]bool {
 	allowed := map[string]bool{}
 
@@ -104,6 +194,9 @@ func GraphPlanPhaseTools(phase GraphPlanPhase) map[string]bool {
 	}
 
 	// gap phase (and beyond): unlock complementary read-only tools + delegation.
+	// web_fetch and perplexity_web_search are the two outbound read-only web
+	// tools — they change nothing on the host, so grounding gap questions in
+	// live web sources here does not violate the mode's no-mutation invariant.
 	add(
 		"grep_search",
 		"find_files",
@@ -112,6 +205,7 @@ func GraphPlanPhaseTools(phase GraphPlanPhase) map[string]bool {
 		"code_definition",
 		"code_references",
 		"web_fetch",
+		"perplexity_web_search",
 		"memory_search",
 		"memory_get",
 		"skill_lookup",

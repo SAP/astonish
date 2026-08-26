@@ -121,6 +121,18 @@ type PromptOverrides struct {
 	// or execute. Mutually exclusive with PlanMode and GraphPlanMode.
 	AskMode bool
 
+	// ApprovedPlanExecution prevents an implementation turn from replacing the
+	// plan the user already approved. It is independent of Normal/Plan mode.
+	ApprovedPlanExecution bool
+
+	// ApprovedPlanExecutionExplicit is true only on the explicit execution turn
+	// launched directly from approving a plan. It arms the bounded research
+	// clamp (rediscovery would re-do planning work). Inferred continuation turns
+	// — where an approved PLAN.md merely still exists on disk — leave this false
+	// and discover open-endedly like Normal mode, while plan immutability is
+	// still enforced via ApprovedPlanExecution.
+	ApprovedPlanExecutionExplicit bool
+
 	// Web search/extract are resolved per request from the platform→team cascade
 	// so a singleton ChatAgent re-inited without tenant context still advertises
 	// the platform-selected tools for every user. Nil pointers mean "leave builder as-is".
@@ -302,6 +314,9 @@ func (b *SystemPromptBuilder) Build() string {
 	if b.hasCredentialTools() {
 		sb.WriteString("\n**Credentials:** Encrypted vault (no files on disk). `resolve_credential` returns `{{CREDENTIAL:name:field}}` placeholders — auto-substituted in `shell_command`/`process_write`/`browser_type`. For HTTP APIs use `http_request(credential=\"name\")`.\n")
 	}
+	if b.hasSlideTools() {
+		sb.WriteString("\n**Slide decks:** For slide or presentation requests, use `create_deck` followed by one `write_slide` call per zero-based position. Each write must contain exactly one complete ASD v1 `<ast-slide>` root. All `x`, `y`, `w`, and `h` values are integer logical pixels on a fixed 1920×1080 canvas—never percentages or 0–100 coordinates. `ast-text` renders plain text, so never put Markdown markers in it; use `size`, `weight`, `font-token`, and `color-token` attributes and compose a designed slide with shapes and theme tokens. Fix validation errors before continuing. Use `get_deck` before revising an existing deck and `validate_deck` before declaring it complete. Do not substitute an `astonish-app` for a requested deck.\n")
+	}
 
 	// 6b. Task delegation — list available tool groups for delegate_tasks
 	if len(b.Catalog) > 0 {
@@ -325,7 +340,7 @@ func (b *SystemPromptBuilder) Build() string {
 		sb.WriteString("- `delegate_tasks` is for **parallelism and context isolation**, not error recovery\n\n")
 
 		sb.WriteString("**Planning strategy:**\n")
-		sb.WriteString("1. For multi-step tasks, call `announce_plan` first to show the user your approach as a visible checklist.\n")
+		sb.WriteString("1. Record implementation plans only in Plan mode with `announce_plan`. In Normal mode do not call `announce_plan`; if a plan is already approved, follow it with `update_plan`.\n")
 		sb.WriteString("2. Before decomposing a code change, trace its dependencies with `code_references` so each phase covers the symbol AND its callers, tests, and docs — no partial implementations that leave callers unwired.\n")
 		sb.WriteString("3. Decompose complex goals into independent, parallelizable sub-tasks (each with a clear deliverable).\n")
 		sb.WriteString("4. Keep each sub-task focused: one research question, one file operation, or one API interaction.\n")
@@ -477,6 +492,9 @@ func (b *SystemPromptBuilder) buildCapabilitiesLine() string {
 	if b.hasEmailTools() {
 		caps = append(caps, "email")
 	}
+	if b.hasSlideTools() {
+		caps = append(caps, "slide deck authoring")
+	}
 	if b.FleetSection != "" {
 		caps = append(caps, "fleet agents")
 	}
@@ -564,6 +582,16 @@ func (b *SystemPromptBuilder) hasHandoffTool() bool {
 func (b *SystemPromptBuilder) hasEmailTools() bool {
 	for _, t := range b.Tools {
 		if t.Name() == "email_list" {
+			return true
+		}
+	}
+	return false
+}
+
+// hasSlideTools returns true if create_deck is among the available tools.
+func (b *SystemPromptBuilder) hasSlideTools() bool {
+	for _, t := range b.Tools {
+		if t.Name() == "create_deck" {
 			return true
 		}
 	}

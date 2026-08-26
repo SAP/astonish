@@ -9,8 +9,8 @@ import (
 type DrillReport struct {
 	ID         string    `json:"id"`
 	Suite      string    `json:"suite"`
-	Status     string    `json:"status"`     // "passed", "failed", "error"
-	Summary    string    `json:"summary"`    // e.g., "3/3 tests passed"
+	Status     string    `json:"status"`  // "passed", "failed", "error"
+	Summary    string    `json:"summary"` // e.g., "3/3 tests passed"
 	DurationMs int64     `json:"duration_ms"`
 	ReportData []byte    `json:"report_data"` // full SuiteReport JSON
 	StartedAt  time.Time `json:"started_at"`

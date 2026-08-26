@@ -7,6 +7,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
 )
 
@@ -164,8 +165,23 @@ func TestPlanApprovalOverlayRendered(t *testing.T) {
 	}
 }
 
+type planApprovalCaptureBackend struct {
+	staticBackend
+	opts backend.TurnOptions
+}
+
+func (b *planApprovalCaptureBackend) RunTurn(_ context.Context, _ string, opts backend.TurnOptions) (<-chan events.Event, error) {
+	b.opts = opts
+	ch := make(chan events.Event)
+	close(ch)
+	return ch, nil
+}
+
 func TestPlanApprovalApprove(t *testing.T) {
-	m := newTestComposerModel(80)
+	capture := &planApprovalCaptureBackend{}
+	m := newModel(context.Background(), Config{Backend: capture, Width: 80, Height: 24})
+	m.ready = true
+	m.layout()
 	m.graphPlanMode = true
 	m.planMode = false
 	m.tr.Apply(events.Event{
@@ -177,13 +193,32 @@ func TestPlanApprovalApprove(t *testing.T) {
 	// submitPlanApproval with "Approve & implement" calls RunTurn on the
 	// backend. staticBackend.RunTurn returns (nil, nil) which triggers an
 	// early error path. We just verify mode switching works.
-	next, _ := m.submitPlanApproval("Approve & implement")
+	next, cmd := m.submitPlanApproval("Approve & implement")
 	nm := next.(model)
+	if cmd == nil {
+		t.Fatal("approve should return an asynchronous launch command")
+	}
+	msg := cmd()
+	started, ok := msg.(planApprovalStartedMsg)
+	if !ok {
+		t.Fatalf("launch command returned %T, want planApprovalStartedMsg", msg)
+	}
+	if started.err != nil {
+		t.Fatalf("launch command failed: %v", started.err)
+	}
+	next, _ = nm.Update(started)
+	nm = next.(model)
 	if nm.planMode {
 		t.Fatal("planMode should be false after approve")
 	}
 	if nm.graphPlanMode {
 		t.Fatal("graphPlanMode should be false after approve")
+	}
+	if !capture.opts.ApprovedPlanExecution {
+		t.Fatal("approved implementation turn must enable the runtime lifecycle gate")
+	}
+	if !strings.Contains(capture.opts.SystemContext, "Do NOT call announce_plan") {
+		t.Fatalf("execution context missing re-announcement prohibition: %q", capture.opts.SystemContext)
 	}
 }
 
@@ -409,4 +444,3 @@ func TestPlanApprovalNotRenderedInTranscript(t *testing.T) {
 		t.Fatalf("plan approval should NOT be rendered in transcript, got:\n%s", plain)
 	}
 }
-

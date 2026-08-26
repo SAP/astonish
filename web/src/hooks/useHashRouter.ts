@@ -56,7 +56,7 @@ export function useHashRouter(): HashRouter {
   return { path, navigate, replaceHash }
 }
 
-function parseHash(hash: string): RouterPath {
+export function parseHash(hash: string): RouterPath {
   const cleanHash = hash.replace(/^#\/?/, '')
   const parts = cleanHash.split('/').filter(Boolean)
   
@@ -124,6 +124,14 @@ function parseHash(hash: string): RouterPath {
 
   if (view === 'apps') {
     return { view: 'apps', params: { appName: parts[1] ? decodeURIComponent(parts[1]) : '' } }
+  }
+
+  if (view === 'slides') {
+    // Reserved first segment 'templates' routes to the dedicated Templates area.
+    if (parts[1] === 'templates') {
+      return { view: 'slides', params: { subView: 'templates' } }
+    }
+    return { view: 'slides', params: { deckSlug: parts[1] ? decodeURIComponent(parts[1]) : '' } }
   }
 
   if (view === 'home') {
@@ -216,6 +224,14 @@ export function buildPath(view: string, params: BuildPathParams = {}): string {
         return `/apps/${encodeURIComponent(params.subKey)}`
       }
       return '/apps'
+    case 'slides':
+      if (params.subView === 'templates') {
+        return '/slides/templates'
+      }
+      if (params.subKey) {
+        return `/slides/${encodeURIComponent(params.subKey)}`
+      }
+      return '/slides'
     default:
       return '/chat'
   }

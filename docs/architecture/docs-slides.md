@@ -1,1182 +1,1449 @@
-# Docs — Slides (AI Presentation Generation)
+# Docs — Slides (Web Component Presentations)
 
-> **Status**: Planned  
-> **Category**: Productivity Tools  
-> **First doc type**: Slides  
+> **Status**: Planned — revised proposal
+> **Category**: Productivity Tools
+> **First doc type**: Slides
 > **Future doc types**: Documents (rich text), Spreadsheets (structured data)
+> **Last research review**: 2026-08-21
 
 ## Overview
 
-Astonish Docs is a new productivity category that enables the AI agent to create, edit, and export professional presentations (and later other document types) using natural language. The first implementation focuses on **Slides** — AI-generated HTML presentations that render live in Studio and export to PDF, PPTX, and standalone HTML.
+Astonish Docs enables the agent to create, refine, present, and export professional presentations from natural language. Slides are authored as a **versioned, declarative Web Component document** and rendered live in Studio. The same semantic source compiles to:
 
-### Design Philosophy
+- an interactive web presentation;
+- a deterministic PDF;
+- a standalone HTML deck; and
+- a `.pptx` whose supported text, shapes, images, tables, and charts are **native editable PowerPoint objects**.
 
-- **AI-first authoring**: No manual editor in V1. The LLM generates and refines slides via dedicated tools.
-- **HTML as the internal format**: Each slide is stored as self-contained HTML with absolute positioning (proven by Genspark at scale). This gives the LLM maximum styling freedom while enabling pixel-perfect rendering.
-- **Pre-built themes with AI flexibility**: Ship with 5 strong defaults; users can ask the AI to modify or create custom themes.
-- **Database-first storage**: Follows the existing `entstore` pattern (like apps, sessions, memories). Personal → Team → Org scoping from day one.
-- **Export-native**: PDF (via existing go-rod), PPTX (custom minimal OOXML writer, image-based), standalone HTML.
-- **System fonts for V1**: Use system font stacks (`system-ui`, `monospace`) to avoid font-loading complexity. Custom web fonts in V2.
+The canonical source is not arbitrary rendered DOM and is not a screenshot. It is a constrained component tree with explicit geometry and typed data. Web and PowerPoint are separate render targets of that tree.
 
-### Inspiration
+## Goals
 
-The architecture is inspired by Genspark's slide generation system, which:
-1. Uses individual HTML files per slide with absolute positioning and CSS variables
-2. Renders in iframes at 1920×1080, scaled for preview
-3. Maintains a manifest for slide ordering and metadata
-4. Exports to PPTX/PDF via headless browser screenshots
+1. Give the LLM a compact, composable slide vocabulary instead of unconstrained HTML/CSS.
+2. Make the web deck standards-based and framework-neutral through Custom Elements.
+3. Preserve native editability in PowerPoint wherever a semantic mapping exists.
+4. Make export behavior predictable, inspectable, and testable.
+5. Allow richer web-only components without pretending they can round-trip to PowerPoint.
+6. Preserve existing Astonish tenant scoping, Studio SSE behavior, and sandbox boundaries.
 
-Additionally validated by PPTAgent research (95% success rate with HTML rendering vs 74.6% without).
+## Non-goals
 
----
-
-## Architecture
-
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                         LLM AGENT                                 │
-│  System prompt guidance: how to produce slide HTML                │
-│  Tools: create_slides, write_slide, read_slide, update_theme ... │
-└──────────────┬──────────────────────────────────────┬────────────┘
-               │ tool calls                            │ returns results
-               ▼                                       ▼
-┌──────────────────────────┐    ┌──────────────────────────────────┐
-│   DATABASE (entstore)    │    │   ChatRunner drain pattern       │
-│                          │    │                                  │
-│   DocsStore interface    │    │   afterToolCallback captures     │
-│   ├─ SQLite (local)      │    │   → pendingDocsUpdates buffer    │
-│   └─ PostgreSQL (plat)   │    │   → DrainDocsUpdates() called    │
-│                          │    │   → emitEvent("docs_update",{})  │
-│   Tables:                │    └──────────────┬───────────────────┘
-│   - docs (metadata)      │                   │
-│   - doc_slides (content) │                   ▼
-│                          │    ┌──────────────────────────────────┐
-└──────────────────────────┘    │   FRONTEND: SlidesCard           │
-                                │   • Iframe renders current slide │
-                                │   • Nav arrows / keyboard        │
-                                │   • Slide counter / thumbnails   │
-                                │   • Fullscreen presenter mode    │
-                                │   • Export dropdown              │
-                                └──────────────┬───────────────────┘
-                                               │ export request
-                                               ▼
-                                ┌──────────────────────────────────┐
-                                │   EXPORT PIPELINE (Go backend)   │
-                                │                                  │
-                                │  PDF: go-rod renders each slide  │
-                                │       at 1920×1080 → multi-page  │
-                                │       landscape PDF              │
-                                │                                  │
-                                │  PPTX: go-rod screenshots →     │
-                                │        custom OOXML writer →     │
-                                │        full-bleed image slides   │
-                                │                                  │
-                                │  HTML: Bundle slides + theme     │
-                                │        into self-contained file  │
-                                │        with keyboard navigation  │
-                                └──────────────────────────────────┘
-```
+- A general HTML/CSS/JavaScript-to-PowerPoint converter.
+- Pixel-identical rendering for arbitrary CSS and native PowerPoint objects at the same time.
+- Executing arbitrary scripts supplied by the model.
+- Embedding live Web Components as ordinary, portable PowerPoint shapes. PowerPoint can host HTML through an Office content add-in, but that is an add-in runtime, not native slide content, and is not the default export.
+- Full PowerPoint animation, SmartArt, or macro support in V1.
+- Manual WYSIWYG editing or bidirectional PPTX import in V1.
 
 ---
 
-## Storage & Data Model
+## Key Architectural Decision
 
-### Database Schema (Ent-based)
+### One semantic source, two renderers
 
-Following the existing `pkg/store/` + `ent/` pattern used by apps, sessions, and memories:
+```text
+                         LLM AGENT
+         create_deck / write_slide / read_slide / validate_deck
+                                │
+                                ▼
+                ASTONISH SLIDES DOCUMENT (ASD v1)
+        versioned custom-element markup + typed properties/data
+                                │
+                 parse → validate → normalized scene graph
+                                │
+                    ┌───────────┴───────────┐
+                    ▼                       ▼
+             WEB RENDERER              PPTX RENDERER
+       Custom Elements + theme       native object compiler
+       interactive components        PptxGenJS → OOXML
+                    │                       │
+       Studio / Presenter / HTML      editable .pptx
+                    │
+             Chromium print
+                    │
+                   PDF
+```
 
-**Interface** (`pkg/store/docs.go`):
-```go
-package store
+The **normalized scene graph** is the contract. The browser DOM is a rendering output and measurement aid, not the export source of truth. Exporters never scrape arbitrary DOM and guess its meaning.
 
-type DocListItem struct {
-    ID          string    `json:"id"`
-    Slug        string    `json:"slug"`
-    Title       string    `json:"title"`
-    Description string    `json:"description,omitempty"`
-    DocType     string    `json:"docType"`     // "slides", "document", "sheet"
-    SlideCount  int       `json:"slideCount"`
-    Version     int       `json:"version"`
-    ThemeName   string    `json:"themeName"`
-    UpdatedAt   time.Time `json:"updatedAt"`
-    CreatedAt   time.Time `json:"createdAt"`
-}
+Importing a corporate `.pptx` produces a high-fidelity ASD template (theme tokens plus per-layout archetypes, `example-*` archetypes from real sample slides, and a lossless `TemplateModel` IR), which then flows through the same ASD runtime as app-authored decks.
 
-type DocsStore interface {
-    // Deck CRUD
-    CreateDeck(ctx context.Context, deck *DeckManifest) error
-    GetDeck(ctx context.Context, slug string) (*DeckManifest, error)
-    UpdateDeck(ctx context.Context, slug string, deck *DeckManifest) error
-    DeleteDeck(ctx context.Context, slug string) error
-    ListDecks(ctx context.Context) ([]DocListItem, error)
+### Studio Templates management surface
 
-    // Slide CRUD
-    WriteSlide(ctx context.Context, deckSlug string, index int, slide *SlideContent) error
-    ReadSlide(ctx context.Context, deckSlug string, index int) (*SlideContent, error)
-    DeleteSlide(ctx context.Context, deckSlug string, index int) error
-    ReorderSlides(ctx context.Context, deckSlug string, newOrder []int) error
+A deep-linkable Studio area at `/slides/templates` lists both **built-in** and **scoped** (user-imported) templates. Each entry carries a **scope badge** (Built-in / Personal / Team). The surface supports **delete**, **duplicate**, and **recolor** for scoped templates, while built-ins are **read-only** (duplicate only) — deleting or recoloring a built-in returns `403`.
+
+Note that the templates **list** endpoint (`GET /api/docs/slides/templates`) returns a lightweight DTO that intentionally omits heavy assets (for performance and security).
+
+### Why not arbitrary HTML as the canonical format?
+
+| Concern | Arbitrary HTML/CSS | Constrained Web Component document |
+|---|---|---|
+| LLM authoring | Familiar but easy to produce invalid or unexportable effects | Small vocabulary, schema-guided arguments |
+| Web rendering | Maximum flexibility | Rich enough for presentation layouts |
+| PPTX editability | Meaning must be inferred from pixels/DOM | Component type selects native PPT object |
+| Validation | Mostly syntactic | Semantic, geometry, overflow, and capability checks |
+| Themes | CSS can affect geometry unpredictably | Tokens have defined web and PPT mappings |
+| Evolution | Undocumented conventions | Versioned schema and migrations |
+| Security | Large HTML/CSS/script attack surface | Allowlisted elements, attributes, URLs, and styles |
+
+The restricted vocabulary is a feature: it establishes the subset that can be represented consistently in both CSS and PresentationML.
+
+---
+
+## Technology Decision
+
+### Public authoring model: Astonish Custom Elements
+
+Use autonomous Custom Elements with an `ast-` prefix:
+
+- `<ast-deck>`
+- `<ast-slide>`
+- `<ast-text>`
+- `<ast-shape>`
+- `<ast-image>`
+- `<ast-table>`
+- `<ast-chart>`
+- `<ast-group>`
+- `<ast-code>`
+- `<ast-icon>`
+- `<ast-fragment>` for web presentation sequencing
+- `<ast-notes>` for speaker notes
+
+Implement reactive elements with **Lit** where useful. Lit components remain standard Custom Elements; the serialized deck must not depend on React or Lit-specific syntax.
+
+Keep meaningful content and machine-readable data in attributes/light DOM. Shadow DOM is allowed for renderer internals and controls, but must not hide the only copy of exportable text or chart/table data.
+
+### Presentation runtime
+
+Build a small Astonish-owned deck controller around `<ast-deck>` and `<ast-slide>`. It owns:
+
+- keyboard, pointer, and touch navigation;
+- fullscreen and overview modes;
+- URL/deep-link state;
+- fragment sequencing;
+- presenter view and notes;
+- lifecycle events such as `ast-slide-enter` and `ast-slide-leave`;
+- deterministic print mode.
+
+Do not make a third-party runtime part of the stored format.
+
+#### Framework evaluation
+
+| Option | Finding | Decision |
+|---|---|---|
+| Lit | Active, standards-based Custom Element library; no slide runtime | Use as the implementation helper for Astonish components |
+| OddBird `<slide-deck>` | The closest modern true Web Component deck; small and pre-1.0; no first-class export | Use as design reference or prototype behind an adapter, not as a persisted contract |
+| reveal.js | Mature presentation runtime and excellent PDF workflow; not Web Component-based | Keep as a possible runtime adapter if the owned controller becomes too costly |
+| Slidev | Mature Vue/Markdown product with strong export; PPTX export is image-oriented | Do not use as the canonical model |
+| WebSlides | HTML/CSS framework, not Web Components; limited recent maintenance and export ownership | Use only as visual/layout inspiration |
+| DeckDeckGo | Valuable Web Component prior art, but archived | Do not depend on it |
+
+A capability-first fallback may project `<ast-slide>` content into reveal.js `<section>` elements. Reveal-specific classes and configuration must remain inside an adapter.
+
+---
+
+## Canonical Slide Format
+
+### Example
+
+```html
+<ast-deck schema="1" ratio="16:9" theme="light-corporate" lang="en-US">
+  <ast-slide id="risk" title="Migration risk by service">
+    <ast-text
+      id="title"
+      role="title"
+      x="96" y="72" w="1728" h="100"
+      font-token="display" size="54" weight="700">
+      Migration risk by service
+    </ast-text>
+
+    <ast-table
+      id="risk-table"
+      x="96" y="220" w="1120" h="690"
+      data-ref="risk-data"
+      header="true"
+      style-token="data-table">
+    </ast-table>
+
+    <ast-chart
+      id="risk-chart"
+      kind="bar"
+      x="1280" y="250" w="544" h="560"
+      data-ref="risk-chart-data"
+      category-key="service"
+      value-keys="probability,impact">
+    </ast-chart>
+
+    <ast-shape
+      id="callout"
+      kind="roundRect"
+      x="1280" y="840" w="544" h="120"
+      fill-token="accent-soft" line-token="accent">
+      <ast-text inset="24" size="24">Prioritize checkout and identity.</ast-text>
+    </ast-shape>
+
+    <ast-notes>
+      Explain that probability is delivery risk, while impact is customer impact.
+    </ast-notes>
+
+    <script type="application/json" id="risk-data">
+      {"columns":["Service","Probability","Impact","Mitigation"],"rows":[["Checkout","High","High","Parallel run"]]}
+    </script>
+    <script type="application/json" id="risk-chart-data">
+      {"rows":[{"service":"Checkout","probability":85,"impact":95}]}
+    </script>
+  </ast-slide>
+</ast-deck>
+```
+
+`<script type="application/json">` is inert data, not executable script. The parser permits this exact use and rejects executable script types.
+
+### Geometry
+
+- Logical canvas: **1920 × 1080** for 16:9.
+- Coordinates are integer logical pixels in source and convert to PowerPoint inches using `x / 160`, because a 12 × 6.75 inch widescreen slide maps to 1920 × 1080 units. Percentage values and 0–100 coordinate systems are invalid; validation rejects slides whose top-level layout is wholly confined to that scale.
+- All exportable top-level components have explicit `x`, `y`, `w`, and `h`.
+- Groups establish a local coordinate space.
+- Web preview scales the fixed canvas; it does not reflow at responsive breakpoints.
+- Components may perform internal layout only where the same algorithm is implemented by the PPTX renderer. Otherwise children require explicit geometry.
+
+### Content and style rules
+
+- Use theme tokens for fonts, colors, line styles, spacing, and reusable component styles.
+- Permit a small typed property set, not arbitrary inline CSS.
+- Rich text is represented as explicit semantic runs, not unbounded nested HTML. `<ast-text>` content is plain text and does not parse Markdown; authors use typed attributes/runs rather than `**`, `_`, or other Markdown markers.
+- Images reference managed assets by ID; remote URLs must be ingested through the existing SSRF-protected asset path before export.
+- Charts and tables retain source data rather than only an SVG or canvas rendering.
+- Stable element IDs are mandatory for diagnostics, incremental updates, and future import/regeneration.
+- Accessibility fields include `lang`, reading order, `alt`, decorative state, and optional pronunciation/description metadata.
+
+#### Run adjacency (no implicit spacing)
+
+Multiple `<ast-run>` children of an `<ast-text>` render **verbatim, with no separator inserted between runs**, consistently across all targets: the web runtime (`AstText.render` concatenates run `<span>`s with nothing between them), the Go parser (`runFromHTML` preserves run text without `TrimSpace`, so deliberate whitespace-only separator runs like `<ast-run>\n\n</ast-run>` survive), and the PPTX worker (each run maps to a pptxgenjs text fragment with `breakLine: false`). This is intentional: the author controls all spacing.
+
+The consequence is a real authoring pitfall: `<ast-run>1972</ast-run><ast-run>Founded</ast-run>` renders as `1972Founded`. There are two correct fixes and no renderer change is appropriate (injecting a space would corrupt whitespace-only separator runs and `Label:`+` value` cases):
+
+1. Put the space inside a run — `<ast-run>1972 </ast-run>` or `<ast-run> Founded</ast-run>`.
+2. Preferred for a bold date + regular label (e.g. a timeline node): use **two separate positioned `<ast-text>` boxes**, one for the date and one for the label.
+
+#### Self-evaluation (`review_deck`)
+
+`review_deck` is an agent tool that renders the persisted deck to its parsed `SceneGraph` and returns a structured self-evaluation the model reads before declaring a deck done. It complements `validate_deck` (which is structural/geometry only) by catching **semantic/visual** defects. It returns heuristic `findings` — `run_adjacency` (the collision above, severity `warning`), `overlap` (two non-decorative text boxes whose bounding boxes substantially intersect — a colliding/misaligned layout such as a broad body placeholder swallowing a fixed label, `warning`), `low_contrast` (a fill/color with weak WCAG contrast against the surface, `info`), `missing_chrome` (a template-based slide that references none of the template's media/logo/footer, `info`), and `weak_source` (a vague, undated `Source: …` citation, `info`) — plus a fixed review `checklist` so the model always has guidance even when the heuristics are clean. It is **agent-driven, not a hard runtime block**: the slides skill instructs the model to fix all `warning`-level findings and re-run `review_deck` until clean before telling the user the deck is ready (mirroring the `ask_user` pattern). The result carries scene-derived text only — never `data:` image/font bytes.
+
+Studio also reveals the right-hand slides harness only **after the first slide is written** (a `slide_written` `docs_update`), not on `create_deck`/`deck_viewed`, so the user never sees an empty deck panel before generation.
+
+### Theme contract
+
+A theme contains target-neutral tokens plus optional renderer-specific overrides:
+
+```json
+{
+  "schema": 1,
+  "name": "light-corporate",
+  "colors": {
+    "surface": "#FFFFFF",
+    "ink": "#172033",
+    "ink-muted": "#64748B",
+    "accent": "#1E40AF",
+    "accent-soft": "#DBEAFE"
+  },
+  "fonts": {
+    "display": {"family": "Aptos Display", "fallback": ["Arial"]},
+    "body": {"family": "Aptos", "fallback": ["Arial"]},
+    "mono": {"family": "Consolas", "fallback": ["Courier New"]}
+  },
+  "styles": {
+    "data-table": {"headerFill": "accent", "headerText": "#FFFFFF"}
+  }
 }
 ```
 
-**Ent Schema** (`ent/team/schema/doc.go`):
-```go
-type Doc struct { ent.Schema }
+Theme changes must not alter component geometry unless a full validation/render pass succeeds. Font availability is recorded in export diagnostics.
 
-func (Doc) Fields() []ent.Field {
-    return []ent.Field{
-        field.UUID("id", uuid.UUID{}).Default(uuid.New),
-        field.String("slug").NotEmpty(),                    // ULID-based, unique
-        field.String("title").NotEmpty(),
-        field.String("description").Default(""),
-        field.String("doc_type").Default("slides"),         // "slides" | "document" | "sheet"
-        field.Int("version").Default(1),
-        field.String("theme_name").Default("dark-minimal"),
-        field.Text("theme_css").Default(""),                // Full theme CSS content
-        field.JSON("metadata", map[string]any{}).Optional(), // Dimensions, extra config
-        field.Int("slide_count").Default(0),
-        field.String("session_id").Default(""),
-        field.Time("created_at").Default(time.Now).Immutable(),
-        field.Time("updated_at").Default(time.Now).UpdateDefault(time.Now),
-    }
-}
-func (Doc) Indexes() []ent.Index {
-    return []ent.Index{index.Fields("slug").Unique()}
-}
-func (Doc) Annotations() []schema.Annotation {
-    return []schema.Annotation{entsql.Table("docs")}
+---
+
+## Component Export Contract
+
+Every registered component implements the equivalent of:
+
+```ts
+interface SlideComponentDefinition {
+  tagName: string
+  schema: JSONSchema
+  renderWeb(node: SlideNode, context: WebRenderContext): HTMLElement
+  renderPptx(node: SlideNode, context: PptxRenderContext): Promise<void>
+  validate(node: SlideNode, context: ValidationContext): Diagnostic[]
+  fallback: 'native' | 'svg' | 'raster' | 'error'
 }
 ```
 
-**Ent Schema** (`ent/team/schema/doc_slide.go`):
-```go
-type DocSlide struct { ent.Schema }
+The actual registry may be split between TypeScript and Go-generated metadata, but the schemas and capability names must come from one versioned source.
 
-func (DocSlide) Fields() []ent.Field {
-    return []ent.Field{
-        field.UUID("id", uuid.UUID{}).Default(uuid.New),
-        field.String("doc_slug").NotEmpty(),                // FK to docs.slug
-        field.Int("position").Default(0),                   // Order index (0-based)
-        field.String("title").Default(""),                  // Slide title (for nav)
-        field.Text("html_content").Default(""),             // Full slide HTML
-        field.Text("speaker_notes").Default(""),            // Presenter notes
-        field.Time("created_at").Default(time.Now).Immutable(),
-        field.Time("updated_at").Default(time.Now).UpdateDefault(time.Now),
-    }
-}
-func (DocSlide) Indexes() []ent.Index {
-    return []ent.Index{
-        index.Fields("doc_slug", "position").Unique(),
-        index.Fields("doc_slug"),
-    }
-}
-func (DocSlide) Annotations() []schema.Annotation {
-    return []schema.Annotation{entsql.Table("doc_slides")}
-}
+### Native mapping matrix
+
+| Component | Web renderer | PPTX output | Editability | V1 fallback |
+|---|---|---|---|---|
+| `ast-text` | HTML text | native text box and text runs | Full | Error on unsupported text effect |
+| `ast-shape` | CSS/SVG | native PowerPoint AutoShape/line | Full for mapped shapes | SVG, then raster |
+| `ast-image` | `<img>` | picture with crop/contain geometry | Image-level | Raster is already the native representation |
+| `ast-table` | semantic HTML table | native PowerPoint table | Cells and formatting | Raster only if feature is explicitly marked unsupported |
+| `ast-chart` | web chart renderer | native PowerPoint chart with workbook data | Data, series, common formatting | SVG/raster for unsupported chart types |
+| `ast-group` | positioned container | native group where supported | Child objects remain editable | Flatten group transform, not children |
+| `ast-code` | highlighted HTML | native text runs with monospace font | Text editable | Raster only for unsupported highlighting |
+| `ast-icon` | inline SVG | SVG picture | Picture-level; user may use PowerPoint “Convert to Shape” | PNG compatibility fallback |
+| `ast-fragment` | staged visibility | final-state objects | Objects editable; sequencing omitted | Emit warning |
+| custom web-only component | Custom Element | none | None | Explicit component raster plus warning |
+
+### Fidelity tiers
+
+- **Tier A — native**: PowerPoint text, shape, image, table, chart, group, or notes object.
+- **Tier B — vector**: SVG picture; scalable but not decomposed into native objects.
+- **Tier C — raster**: component-level PNG fallback.
+- **Tier D — unsupported**: export fails in strict mode.
+
+The export response and deck manifest record counts and diagnostics by tier. A deck advertised as “editable” must meet a configurable native threshold, for example 95% of non-image content by area at Tier A.
+
+A whole-slide screenshot is allowed only as an explicit `fidelity=visual` export mode, never as the default editable PPTX path.
+
+---
+
+## PPTX Export Pipeline
+
+### Selected implementation
+
+Use **PptxGenJS** as the initial native PPTX generation engine. It generates standard OOXML and supports native text, shapes, images, tables, common charts, slide masters, and speaker notes in browser/Node environments.
+
+PptxGenJS is a drawing/generation API, not a general HTML renderer. Astonish supplies the semantic mapping layer. Its HTML import helper is table-focused and is not the architecture for arbitrary components.
+
+The Go server invokes a pinned, bundled Node worker rather than building a broad custom OOXML writer in Go:
+
+```text
+Go Slides service
+  1. authorize and load tenant-scoped deck/assets
+  2. parse + migrate ASD source
+  3. validate and build normalized scene graph JSON
+  4. invoke versioned PPTX worker with bounded resources
+  5. receive pptx bytes + export diagnostics
+  6. validate package and return artifact
+
+Node PPTX worker
+  1. load scene graph and theme
+  2. create widescreen presentation/master/layouts
+  3. dispatch each node to its registered PPTX renderer
+  4. attach speaker notes and accessibility metadata where supported
+  5. package OOXML with PptxGenJS
 ```
 
-### Domain Types (`pkg/docs/slides/types.go`)
+The worker must be reproducibly bundled and checksum-pinned. It receives no tenant credentials and no unrestricted network access. Assets are provided as validated local files/data by the Go service.
+
+### Deterministic export rules
+
+- Resolve all assets and fonts before compilation.
+- Record exporter, schema, and theme versions in document metadata.
+- Use stable object order and IDs derived from component IDs.
+- Convert geometry directly from logical units; do not depend on viewport size.
+- Use explicit text-box dimensions and margins.
+- Run overflow detection before export. Do not silently shrink text below theme minimums.
+- Convert chart/table data semantically, not from their rendered pixels.
+- Treat browser measurements as optional diagnostics only. If a component requires browser measurement, serialize the measured values into the normalized graph and mark the component non-deterministic until validated.
+
+### PowerPoint constraints
+
+Web and PowerPoint rendering engines differ in font metrics, line breaking, gradients, shadows, clipping, masks, blending, filters, and transforms. Therefore:
+
+- define an **export-safe style subset**;
+- reject or downgrade unsupported effects explicitly;
+- compare semantic layout and visual output in tests;
+- never promise arbitrary CSS fidelity and complete native editability simultaneously.
+
+SVG inserted into PowerPoint is a picture, not automatically a set of editable PowerPoint shapes. Microsoft 365 may offer “Convert to Shape” interactively, but that is lossy and is not an Astonish round-trip guarantee.
+
+### Live web content in PowerPoint
+
+A PowerPoint **content Office Add-in** can host HTML/JavaScript in a slide. It depends on an add-in manifest, a supported Office host, policy/trust, and usually hosted HTTPS content. The object remains an add-in surface rather than editable text/shapes/charts.
+
+This may become a separate enterprise export profile for live demos. It is not used by standard `.pptx` export and must have a static fallback.
+
+---
+
+## PDF and Standalone HTML Export
+
+### PDF
+
+Render the print mode of the same Web Component deck in Chromium through the existing go-rod infrastructure:
+
+1. load the complete deck at a fixed 1920 × 1080 logical canvas;
+2. await `customElements.whenDefined()` for all registered tags;
+3. await `document.fonts.ready`, asset readiness, and an `ast-render-complete` signal;
+4. select a fragment policy (`final` by default, optionally one page per step);
+5. print one slide per landscape page with backgrounds and no margins.
+
+PDF is the visual-fidelity target. PPTX is the native-editability target. Their renderings should be close, but they are not produced by the same layout engine.
+
+### Standalone HTML
+
+Bundle:
+
+- serialized ASD markup;
+- the versioned component runtime;
+- theme tokens/styles;
+- sanitized, content-addressed assets;
+- presenter/navigation code;
+- a strict Content Security Policy.
+
+Default exports are self-contained and do not make network requests. Custom interactive components must declare and package their runtime dependencies.
+
+---
+
+## Storage and Domain Model
+
+Continue using scoped `DocsStore` implementations and Ent storage for personal/team contexts. Tenant routing remains mandatory.
+
+Store the canonical deck or slide markup, schema version, normalized metadata, and assets—not complete per-slide HTML documents generated for a specific runtime.
+
+Representative fields:
 
 ```go
-package slides
-
-import "time"
-
 type DeckManifest struct {
-    ID          string            `json:"id"`
-    Slug        string            `json:"slug"`
-    Title       string            `json:"title"`
-    Description string            `json:"description,omitempty"`
-    Version     int               `json:"version"`
-    Theme       ThemeInfo         `json:"theme"`
-    Dimensions  Dimensions        `json:"dimensions"`
-    Slides      []SlideInfo       `json:"slides"`
-    CreatedAt   time.Time         `json:"createdAt"`
-    UpdatedAt   time.Time         `json:"updatedAt"`
-}
-
-type ThemeInfo struct {
-    Name string `json:"name"`    // e.g., "dark-minimal"
-    CSS  string `json:"css"`     // Full CSS content (stored in DB)
-}
-
-type Dimensions struct {
-    Width  int `json:"width"`    // 1920
-    Height int `json:"height"`   // 1080
-}
-
-type SlideInfo struct {
-    Index int    `json:"index"`
-    Title string `json:"title"`
-    Notes string `json:"notes,omitempty"`
+    ID            string            `json:"id"`
+    Slug          string            `json:"slug"`
+    Title         string            `json:"title"`
+    Description   string            `json:"description,omitempty"`
+    Version       int               `json:"version"`
+    SchemaVersion int               `json:"schemaVersion"`
+    Theme         ThemeInfo         `json:"theme"`
+    Dimensions    Dimensions        `json:"dimensions"`
+    Slides        []SlideInfo       `json:"slides"`
+    Assets        []AssetInfo       `json:"assets"`
+    Metadata      map[string]any    `json:"metadata,omitempty"`
+    CreatedAt     time.Time         `json:"createdAt"`
+    UpdatedAt     time.Time         `json:"updatedAt"`
 }
 
 type SlideContent struct {
-    Index   int    `json:"index"`
-    Title   string `json:"title"`
-    HTML    string `json:"html"`    // Complete slide HTML document
-    Notes   string `json:"notes"`
+    ID            string       `json:"id"`
+    Position      int          `json:"position"`
+    Title         string       `json:"title"`
+    SchemaVersion int          `json:"schemaVersion"`
+    Markup        string       `json:"markup"` // one <ast-slide> document fragment
+    Notes         string       `json:"notes"`
+    Diagnostics   []Diagnostic `json:"diagnostics,omitempty"`
 }
 ```
 
-### Deck ID Generation
+The Ent slide field should be named `component_markup` (or neutral `source_content`), not `html_content`. Theme data should be structured JSON plus optional audited extension tokens, not unrestricted CSS.
 
-Uses ULID (Universally Unique Lexicographically Sortable Identifier):
-```go
-import "github.com/oklog/ulid/v2"
+Schema changes require edits in every applicable Ent scope, generated output, and a migration in the same implementation change.
 
-func generateDeckSlug(title string) string {
-    // ULID prefix (sortable by creation time) + short title slug
-    id := ulid.Make().String()[:10]  // First 10 chars of ULID
-    slug := slugify(title)
-    if len(slug) > 20 {
-        slug = slug[:20]
-    }
-    return fmt.Sprintf("%s-%s", strings.ToLower(id), slug)
-    // Example: "01j5kxyz12-microservices-migration"
-}
-```
+### Versioning and migration
 
-**Why ULID-based?**
-- No collision risk (unlike pure title slugification)
-- Sortable by creation time (useful for listing)
-- URL-safe (no encoding needed)
-- Works for non-ASCII titles (the slug part is best-effort, ULID ensures uniqueness)
-
-### Slide HTML Format
-
-Each slide is stored as a complete HTML document (in the `doc_slides.html_content` column):
-
-```html
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <style>/* Theme CSS injected here at render time by the API */</style>
-</head>
-<body style="margin:0; background:var(--surface);">
-  <div class="slide-container" style="width:1920px; height:1080px; position:relative; overflow:hidden;">
-    
-    <!-- All elements use absolute positioning -->
-    <div data-element="title" style="position:absolute; left:96px; top:200px; width:800px;">
-      <h1 style="font-family:var(--font-display); font-size:64px; font-weight:700; color:var(--ink);">
-        Slide Title
-      </h1>
-    </div>
-
-    <div data-element="body" style="position:absolute; left:96px; top:400px; width:700px;">
-      <p style="font-family:var(--font-body); font-size:28px; color:var(--ink-mute); line-height:1.6;">
-        Content paragraph here.
-      </p>
-    </div>
-
-    <div data-element="shape" style="position:absolute; left:1000px; top:300px; width:800px; height:500px;
-         background:var(--panel); border:1px solid var(--line); border-radius:12px;">
-    </div>
-
-  </div>
-</body>
-</html>
-```
-
-**Note:** The theme CSS is injected inline by the API at serve time (not via `<link>` to a file), since storage is database-backed. The stored HTML uses CSS variables that resolve against the injected theme.
-
-**Conventions:**
-- Fixed canvas: 1920×1080 pixels (16:9 widescreen)
-- All elements use absolute positioning within `.slide-container`
-- `data-element` attributes (`title`, `body`, `stat`, `shape`, `image`, `chart`) for export fidelity
-- Theme CSS variables for colors/fonts — swapping the theme changes the entire deck
-- Inline styles for positions and sizes; theme variables for visual properties
-
-### Why HTML (not JSON → rendered)?
-
-| Consideration | HTML | JSON + renderer |
-|---------------|------|-----------------|
-| LLM output quality | CSS is what LLMs excel at | Would need a mapping layer |
-| Rendering | Direct iframe — zero compilation | Needs a rendering engine |
-| Styling freedom | Unlimited (any CSS) | Limited to schema properties |
-| Export fidelity | What you see = what you export | May have rendering differences |
-| Editability | AI edits HTML directly | AI edits structured data |
-| Proven at scale | Genspark + PPTAgent validate this | Requires custom validation |
-| Absolute positioning | Maps cleanly to PPTX coordinates | Same |
+- Every deck carries `schemaVersion`.
+- Readers migrate old versions into the current normalized graph without mutating stored source.
+- Writers emit only the current version.
+- Persisting a migrated deck is an explicit operation.
+- Component removals require a migration or a stable legacy renderer.
 
 ---
 
-## Backend (Go)
+## Imported Template IR (`TemplateModel`)
 
-### Package Structure
+Imported corporate `.pptx` templates are stored losslessly as a rich
+intermediate representation (IR) called `TemplateModel`, in addition to the
+fill-ready ASD archetypes the LLM authoring flow consumes. This is the
+"Option C" design: the IR is the persisted source of truth for the future
+in-browser template editor and for high-fidelity re-export, but rendering and
+preview today go through a single renderer — the existing ASD runtime — by
+converting IR → ASD. **There is no second/parallel renderer.**
 
-```
-pkg/
-├── docs/                          # Shared docs infrastructure
-│   ├── types.go                   # DocType enum, shared interfaces
-│   └── registry.go                # Registry of doc types (slides, future: documents, sheets)
-│
-├── docs/slides/                   # Slides-specific logic
-│   ├── types.go                   # DeckManifest, SlideInfo, SlideContent structs
-│   ├── service.go                 # Business logic layer (wraps DocsStore)
-│   ├── tools.go                   # Tool implementations (create, write, read, etc.)
-│   ├── export_pdf.go              # Multi-page PDF via go-rod
-│   ├── export_pptx.go            # Image-based PPTX via custom OOXML writer
-│   ├── export_html.go            # Self-contained HTML bundle
-│   ├── pptxwriter/                # Minimal PPTX ZIP builder (no external dep)
-│   │   ├── writer.go             # ZIP assembly + OOXML XML generation
-│   │   └── templates.go          # XML template strings for slide/rels/content_types
-│   └── themes/                    # Embedded theme CSS files (go:embed)
-│       ├── embed.go              # //go:embed directives
-│       ├── dark_minimal.css
-│       ├── light_corporate.css
-│       ├── vibrant.css
-│       ├── gradient.css
-│       └── terminal_dev.css
+### Data model
 
-pkg/store/
-├── docs.go                        # DocsStore interface definition
+`TemplateModel` (Go: `pkg/docs/slides/themes/template_model.go`; TS mirror:
+`web/src/api/slidesTemplateModel.ts`) is expressed in Astonish canvas units
+(logical px on a 1920×1080 canvas, colors `#RRGGBB`) rather than OOXML EMUs/inches:
 
-pkg/store/entstore/
-├── team_docs.go                   # teamDocsStore implementation
-├── personal_docs.go               # personalDocsStore implementation
+- `TemplateModel { schema:3, size{w,h}, theme{}, layouts[], slides[], warnings[] }`
+- `IRLayout { id, name, background, objects[], placeholders[], slideNumber? }`
+- `IRChrome { kind: rect|ellipse|line|text|image|path, x,y,w,h, rot, fill?, line?, rectRadius, paths[], text, style?, mediaKey }`
+- `IRPlaceholder { name, type, x,y,w,h, style, prompt, ooxmlType, idx }`
+- `IRBackground { kind: solid|image, color, mediaKey }`
+- plus `IRFill`, `IRLine`, `IRTextStyle`, `IRSlideNumber`, `IRWarning`.
 
-ent/team/schema/
-├── doc.go                         # Doc Ent schema
-├── doc_slide.go                   # DocSlide Ent schema
+`layouts` come from `ppt/slideLayouts/slideLayoutN.xml`; `slides` from the first
+sample slides. Each layout classifies every source shape as **chrome** (fixed
+brand decoration) or **placeholder** (a shape whose `p:sp` carries `nvSpPr//p:ph`),
+recording the OOXML placeholder type/idx.
 
-ent/personal/schema/
-├── doc.go                         # Doc Ent schema (personal scope)
-├── doc_slide.go                   # DocSlide Ent schema (personal scope)
-```
+### Fidelity import pipeline
 
-### Tools
+The pptx worker (`import_worker.mjs`, template mode) extracts, per layout/sample slide:
 
-| Tool | Description | Key Args |
-|------|-------------|----------|
-| `create_slides` | Create a new slide deck | `title`, `theme`, `description?` |
-| `write_slide` | Write/overwrite a single slide's HTML | `deckSlug`, `slideIndex`, `content` (HTML), `title?`, `notes?` |
-| `read_slide` | Read back the current HTML of a slide | `deckSlug`, `slideIndex` |
-| `update_slide_notes` | Update just speaker notes | `deckSlug`, `slideIndex`, `notes` |
-| `reorder_slides` | Change slide ordering | `deckSlug`, `order` (int array) |
+- **Custom geometry** (`a:custGeom`) → `kind:'path'` with real SVG path segments
+  (`moveTo`→M, `lnTo`→L, `arcTo`→A, `cubicBezTo`→C, `quadBezTo`→Q, `close`→Z) in
+  document order — not the old "approximate as rect".
+- **Rounded rectangles** → `kind:'rect'` + `rectRadius` (true radius retained in IR).
+- **Connectors** → `kind:'line'` with `flipH`/`flipV`.
+- **Pictures** → `kind:'image'` + `mediaKey` (asset ingested via `addAsset`).
+- **Theme styling**: resolves `p:style` `fillRef`/`lnRef` when a shape has no local fill.
+- **`asvg:svgBlip`**: walks `extLst` for the SVG blip `r:embed`.
+- **EMF/WMF media**: uses a raster sibling if present, else records an
+  `IRWarning` and skips (full EMF→SVG replay is out of scope for v1). Nothing
+  degrades silently — every inexpressible construct is recorded in `warnings[]`.
+
+Each layout is classified into an archetype **kind** from its **layout name
+first** (the corporate pptx has no `p:sldLayout type` attributes, so the name is
+the signal). `kindOf()` **normalizes the name** (`toLowerCase().replace(/[^a-z0-9]+/g,' ')`)
+before matching, so `TITLE_SLIDE`→`title slide` and `DividerPage`→`divider page`
+are recognized rather than slipping past the patterns. Broadened patterns:
+`cover`/`title slide`/`title`→`title`, `divider`/`separator`/`section`/`chapter`/`transition`→`section`,
+`agenda`/`toc`/`overview`/`contents`→`agenda`,
+`thank`/`closing`/`contact`/`copyright`/`q&a`/`conclusion`/`summary`/`wrap up`/`next steps`/`end`→`closing`,
+`blank`→`blank`; else it falls back to the placeholder signature (title +
+no-body→`title`, has-body→`content`). A suffixer de-duplicates within a family so
+multiple layouts of a role become `title`/`title-2`/… — preserving variant
+multiplicity. **Every archetype's human label is the real PowerPoint layout name**
+(`cSld @name`, e.g. "Blue cover, anvil and image", "Pink cover with anvil",
+"Divider Page with Image", "Full Bleed Image"), so the user and the agent can tell
+the colorful covers apart instead of seeing a bare `title-7`.
+
+### Two tiers: fixed brand chrome vs flexible content
+
+Every archetype is tagged with a **tier** (`themes.Archetype.Tier`, surfaced on
+the `list_templates`/`create_deck` tool results):
+
+- **`fixed` — brand chrome** (`title`, `section`/divider, `agenda`,
+  `closing`/thank-you). These are reproduced **verbatim**: the agent copies the
+  archetype markup and substitutes **only** the text inside the ast-text ids
+  listed in `FillSlots` (`themes.Archetype.FillSlots`, computed by `layoutToAsd`
+  as it emits the `{{TITLE}}`/`{{BODY}}` placeholders). No shape/image/background
+  may be moved, resized, recolored, added, or removed. Rebuilding the slide from
+  its elements or adding an ad-hoc accent/background is forbidden — that is what
+  produced the off-brand white cover with a stray green shape.
+- **`flexible` — content** (everything else; also all built-in archetypes, which
+  leave `Tier` unset). The agent starts from the archetype and adapts the body
+  region to the content type (bullets, small table, chart, image+caption) while
+  keeping the template background/tokens.
+
+**Classification is signature-first (`kindOf` in `import_worker.mjs`).** The tier
+is derived from a layout's *role*, and the role is decided by placeholder
+signature BEFORE the name. A layout carrying a **body or picture placeholder is
+flexible `content`** even when its name contains "Title" — so "Title and Text",
+"Title and Text: 2/3 Columns", "Title and Content", "Title Only", "Text and
+Screenshot", "N Columns – Text and Images", "Quote", "Full Bleed Image", and
+"Q&A" are all editable content (the agent adapts their body/table/image), NOT
+locked chrome. Only **pure chrome names** become `fixed`: cover names
+(`/cover/`, `title slide`, exactly `title`), dividers (`divider|section|
+separator|chapter|transition` or `secHead`), `agenda`/`toc`/`contents`, and
+thank-you/closing (`thank|farewell|goodbye|copyright|contact`, and only when the
+layout has no body of its own). The loose `\btitle\b` match was removed because
+it wrongly caught every "Title and …" content layout and froze it as verbatim
+brand chrome the agent could not adapt. The stable-chrome guarantee (below)
+still ensures a real cover/divider/agenda/closing exists by aliasing the branded
+cover layouts, so tightening `kindOf` never drops a chrome role.
+
+`Tier`/`FillSlots` are optional (`omitempty`) and persist without a schema change:
+`SaveTemplate`/`ListTemplates` encode them after a `\u0000` (NUL) delimiter in
+`SlideContent.Notes` (`label\u0000{"tier":…,"fillSlots":[…]}`). A delimiter-free
+Notes decodes to `Tier=""`/`FillSlots=nil` (backward compat for pre-tier
+templates). Built-ins stay exactly `{title,section,content}` with unset tier.
+
+### Stable chrome set guarantee
+
+Imported templates always expose the **complete stable chrome family** —
+`title`, `section`, `agenda`, and `closing` — plus at least one flexible
+`content` archetype. For each chrome role not already present after
+classification, the guarantee step (in `import_worker.mjs`):
+
+1. **Prefers a real branded layout** — it scores every imported layout for
+   role suitability and, when one scores above threshold, aliases it (reuses its
+   markup + `_layout` IR, `tier:'fixed'`, label = that layout's real name,
+   `fillSlots` copied). Real corporate decks usually have a cover/divider/agenda
+   to alias, so this is the primary path.
+2. **Else synthesizes in the template's own style** via `synthChrome(want, {masterCtx, themeTokens, siblingLayout})`:
+   it builds an IRLayout-shaped object whose background is the deck's **real
+   shared master background** (`masterCtx.bg`, or the closest branded layout's
+   background if the master bg is the neutral fallback), whose objects are a
+   **copy of the master chrome** (`masterCtx.chromeObjects` — shared logo/accent
+   bars/brand shapes), plus role-appropriate text/accent placeholders styled from
+   `themeTokens` (`surface/ink/accent/accent2/displayFont/bodyFont`). The result
+   is coherent with the rest of the chrome family.
+
+The old white generic `fallbackMarkup()` slab (hard-coded `#4472C4` accent on a
+white bg, unrelated to the template) has been **deleted**. A `warn()` is emitted
+only when both branded-alias and master-chrome synthesis are unavailable and it
+falls back to pure theme tokens.
+
+Colorful cover/divider chrome is captured by resolving the **master→layout
+inheritance chain**, the way PowerPoint renders. A layout's effective background is
+the first non-fallback of `[layout own <p:bg>, master <p:bg>]` — so a layout with
+no explicit background inherits the master's (not white). The master's decorative
+chrome objects (backgrounds, logos, accent shapes) are merged **behind** the
+layout's own chrome (master first in z-order), skipping master placeholders and
+honoring `showMasterSp="0"`. Suppressing the master is only a fidelity LOSS when
+the layout has **no own chrome to replace it** — the branded covers/dividers set
+`showMasterSp="0"` precisely because they paint their own full-page chrome (bg +
+anvil + logo + footer). So the importer warns about suppression **only** when a
+`showMasterSp="0"` layout ends up with zero own decorative objects (a genuinely
+sparse slide), never for the richly-chromed covers; this keeps the warning list a
+real signal instead of ~19 false alarms. This is why imported covers now render
+in full color.
+
+The pptx's authored **sample slides are NO LONGER surfaced as archetypes.** They
+were previously turned into `example-*` archetypes, but 22 of 23 real corporate
+slides carry no own `<p:bg>` — they just drop a photo into the layout's picture
+placeholder — so those example archetypes rendered **white**. All the colorful
+variety (covers, dividers ±image, agenda, content) lives in the **layouts** under
+the single master, and those inheritance-corrected layout archetypes are the
+on-brand starting points. Sample slides are still captured into
+`templateModel.slides[]` for the future editor, just not as archetypes. The
+stable chrome set (`title`/`section`/`agenda`/`closing`) **plus** a flexible
+`content` role is guaranteed via the branded-alias-preferred / style-derived
+synthesis described above, so imported templates always carry the full family
+even for a sparse pptx.
+
+### Picture placeholders: borrowing the authored sample photo
+
+A corporate layout's hero-image region is frequently an **empty picture
+placeholder** — a `<p:sp>` (or `<p:pic>`) carrying `<p:ph type="pic">` with **no
+`<a:blip>`**, i.e. an "insert picture here" slot. The actual photo is authored on
+the **sample slide** that uses the layout, usually as a free-floating `<p:pic>`
+(often with no `<p:ph>` binding at all). Because sample slides are not surfaced as
+archetypes, a naive import left that placeholder with no `mediaKey`, and
+`layoutToAsd` fell back to a synthetic neutral panel — the reported **blank blue
+box** (the panel color came from `themeTokens.accent2`).
+
+To fix this without re-surfacing sample slides, the importer **borrows the
+sample picture's fill _and_ its own geometry + flip**. Sample slides are
+extracted **before** the layout loop and indexed by their `slideLayout`
+relationship target (`samplesByLayoutPath`). For each layout, before
+serialization, `borrowSampleImages(ir, layoutPath)` walks that layout's
+`type:'image'` placeholders that lack a `mediaKey` and picks the best candidate
+among the sample slides' image objects/placeholders. Candidates are **ranked**
+(not by raw IoU alone — that would wrongly pick a decorative overlay): (1) a
+**raster photo is strongly preferred over a vector/SVG shape** — corporate
+covers place the real photo full-bleed *behind* a colored single-path SVG
+"anvil" overlay that sits exactly over the placeholder box, so a naive
+highest-IoU match grabs the flat shape instead of the photo; (2) then larger
+image area; (3) then box overlap (IoU) as the tie-breaker.
+
+The winning candidate contributes its `mediaKey` **plus the sample picture's own
+box** (`borrowX/borrowY/borrowW/borrowH`) **and its `flipH`/`flipV`** onto the
+placeholder (`processPic` now captures image flip the same way `processSp` does
+for shapes). `layoutToAsd`'s `if (p.mediaKey)` branch then emits a real
+`<ast-image asset-ref=…>` at the **borrowed sample geometry** (not squeezed into
+the placeholder's small declared hole) with `flip-h`/`flip-v` attributes when the
+sample was mirrored, so the default hero renders **faithfully** — correct
+size, position, and mirroring — matching the source PowerPoint out of the box.
+This still borrows only the picture fill (mediaKey + that picture's own box +
+flip), never the whole sample slide, so it is **not** "sample slide as
+archetype." The layout's own decorative shape (e.g. the dark-green anvil) stays
+**behind** the borrowed image because `layoutToAsd` emits `bg → objects →
+placeholders` and paint order == document order (see the renderer contract
+below); no z-index is introduced.
+
+The borrowed hero is also a **replaceable image fill slot**: its element id
+(`ph-pic-N`) is added to the archetype's `fillSlots`, exactly like the text
+`ph-title`/`ph-body` slots. `fillSlots` stays a flat `[]string` of element ids —
+an image slot is just an `<ast-image>` id in that list — so `create_deck` /
+`write_slide` and the slides skill can advertise the photo as swappable. A user
+can later ask to "replace the hero image with X" and only that image node
+changes; the replacement **inherits the slot's geometry and flip** (the default
+is pre-populated from the template so the slide looks right before any edit).
+
+Flip is expressed end-to-end as `flip-h`/`flip-v` boolean attributes (optional,
+`omitempty`, no protocol-version bump): the Lit web runtime
+(`PositionedElement.updated()`) and the standalone-HTML export
+(`nodeInlineStyle`) both compose `scaleX(-1)`/`scaleY(-1)` with the existing
+`rotate(...)` transform, and the PPTX export worker passes `flipH`/`flipV` to
+PptxGenJS `addImage` so a re-export stays faithful (never re-mirrored).
+
+An empty picture placeholder that is **not** a borrowable hero (i.e. no sample
+photo overlaps it — the common case for CONTENT layouts like "N Columns – Text
+and Images", "Text and Screenshot", "Title and Content") is **not** a fidelity
+failure: it is a legitimate "insert picture here" hole the author fills. The
+importer therefore emits it as a **fillable image drop-slot** — its id
+(`ph-pic-N`) is added to `fillSlots` exactly like the borrowed-hero slot, and it
+is rendered as a light neutral affordance (`<ast-shape id="ph-pic-N" … alt="…">`,
+because `ast-image` requires an `asset-ref`) that `create_deck`/`write_slide`
+replaces with the chosen image. It carries an `alt`, is **not** marked
+`decorative`, and emits **no warning**. This is what makes content-layout image
+slots contiguous in `fillSlots` (`ph-1, ph-pic-2, ph-3, ph-pic-4, …`) instead of
+the old non-contiguous `ph-1, ph-3, ph-5` (where the interleaved image regions
+were silently dropped to decorative panels). The old
+`Picture placeholder has no image; rendered neutral panel` warning is gone: an
+empty picture placeholder in a content layout is a fillable slot, not an error.
+The distinction is: a **borrowable hero** (a sample photo overlaps the region) is
+pre-populated with the default image at the sample's own geometry/flip; an
+**empty content slot** (no overlap) is an advertised, empty image slot — both are
+advertised in `fillSlots` and both are swappable.
+
+### Renderer contract: paint order == document order
+
+The runtime and HTML exporter have **no z-index** and **no implicit background
+layer**: paint order is document order (the first child paints at the back).
+`layoutToAsd` therefore emits the **full-canvas background first**, so a faithful
+branded archetype renders correctly. This was verified **not** to be the source
+of the white-cover bug — the failure was upstream (the AI never received a
+faithful branded archetype for the title role); do not add a z-index or an
+implicit-bg layer to "fix" rendering.
+
+### IR → ASD serialization
+
+Each `IRLayout` is serialized to a valid `<ast-slide>` archetype (fill-ready with
+`{{TITLE}}`/`{{BODY}}` placeholders). Notable mappings:
+
+- Full-bleed image background → a full-canvas
+  `<ast-image asset-ref=… x=0 y=0 w=1920 h=1080 fit=cover decorative>` emitted as
+  the **first** child (z-order behind chrome). No schema change — `ast-image` was
+  already allowed, and images still flow through the `AssetIngestor` (no `data:`
+  smuggling).
+- Custom paths → `<ast-shape kind="rect" path="M … A … Z">`; the SVG viewBox is
+  `0 0 W H` in canvas px, path coords scaled into the shape box.
+- Rounded rects → `geom="roundRect"` (the runtime's fixed ~0.12 radius). The IR
+  keeps the true `rectRadius` for the future editor / high-fidelity export; this
+  is a **known v1 approximation**.
+- **Font sizes are scaled to the ASD canvas.** OOXML run sizes are in points; the
+  runtime applies `ast-text size` as **px** on the fixed 1920×1080 canvas. Because
+  all geometry (x/y/w/h) is already scaled by `scale = min(1920/pxW, 1080/pxH)`
+  (a 1280×720 source ⇒ `scale ≈ 1.5`), the importer scales each run's point size by
+  the **same** `scale` exactly once, in `styleOf` (where `scale` is in closure
+  scope — `extractRuns` stores the raw pt value). A 10 pt footer (`sz="1000"`) thus
+  emits `size≈15` to match its 1.5×-enlarged box, instead of rendering tiny at
+  `size="10"`. Runs that carry **no explicit** `@sz`/`a:latin` inherit a real
+  size/font from the shape's own `a:lstStyle` first, else the master/layout
+  `p:txStyles` (`titleStyle`/`bodyStyle`/`otherStyle` → `a:lvl1pPr/a:defRPr`),
+  before scaling — so they no longer fall back to the hard-coded 24 pt / serif
+  default. All of this is generic (no template-specific fonts/sizes) and defensive
+  (absent `txStyles`/`lstStyle` ⇒ unchanged behavior). Emitted `font` families
+  carry a **web-safe fallback chain** (`<brand family>, Aptos, Arial, sans-serif`):
+  corporate fonts like `72 Brand`/`72 Brand Medium` are not installed in a browser,
+  and `ast-text` sets `font-family` directly, so a bare uninstalled family would
+  fall back to the browser default **serif** (Times). The appended chain degrades
+  an uninstalled brand font to Aptos/Arial/sans-serif (matching the deck body font)
+  while still preferring the real brand font when it is available.
+
+### ASD path-arc widening
+
+`validation.go`'s `safePathPattern` was widened as a **strict superset** to allow
+the arc command letters `A`/`a` (previously only `M L C Q Z H V`). This is a
+character-class allowlist only — no letters that would enable entity/script
+injection — and unlocks ellipses and curved brand geometry. `safeColor`/`safeFont`
+guards and the export CSP runtime-hash test are unchanged (no runtime change).
+
+### Persistence
+
+- The `Deck` Ent schema (personal + team scopes) gains an optional
+  `template_model` text column holding the raw IR JSON. It is additive and
+  populated **only** for imported templates.
+- Imported templates persist with `schemaVersion = SchemaV3` (`3`); built-in
+  templates and normal decks keep `SchemaV1`/`SchemaV2` and are untouched.
+- The worker's template-mode response is `{ schema:2, name, label, tokens,
+  assets, archetypes[], templateModel }`. `archetypes[]` (the IR→ASD output) keeps
+  the LLM authoring flow identical; `templateModel` banks the lossless IR.
+  `SaveTemplate` marshals `Template.Model` into the column; `ListTemplates`
+  unmarshals it back, so the IR round-trips.
+- Archetype **variants** surface to the agent and Studio: `list_templates`
+  returns `archetypeVariants[]` (`{kind,label}`); the Templates UI renders each as
+  a friendly label chip showing the real PowerPoint layout name. The human label is
+  persisted in `SlideContent.Notes` (kind stays in `SlideContent.Title`) — backward
+  compatible. Multiple same-role layout variants (several `title` covers, several
+  `section` dividers) each get their own chip by label.
+
+### Response performance (slim DTOs)
+
+The stored `store.DeckManifest` carries two heavy fields — `Assets` (a base64
+`data:` URI per logo/image) and `TemplateModel` (the multi-megabyte lossless IR).
+These are needed for **rendering** (present iframe + exporters) and **round-trip**
+(`SaveTemplate`/`ListTemplates`), but no client or model consumer reads them off a
+list/get/tool response. Serializing them verbatim made an imported-template deck
+slow to list, slow to open, and made the chat `SlidesDeckView` hang. The fix trims
+them at the **serialization boundary only** (the store record is unchanged):
+
+- `GET /api/docs` (Slides list) → `slidesDeckListItem` (id/slug/title/description/
+  schemaVersion/scope/timestamps; no theme/assets/templateModel).
+- `GET /api/docs/slides/{slug}` (deck open, `fetchSlidesDeck` → `SlidesDeckView`)
+  → `slidesDeckDTO` (adds `theme`, still drops assets + templateModel).
+- Slide tool results (`create_deck`/`get_deck`/`list_decks`/`write_slide`/
+  `validate_deck`) → `DeckView` (keeps theme; replaces the heavy fields with
+  `assetCount` + `hasTemplateModel` so the model still knows they exist). Single-deck
+  results (`create_deck`/`get_deck`/`list_deck_assets`/`add_deck_image`) additionally
+  carry a lightweight `assets[]` **catalog** (see *Deck image assets* below) via
+  `deckViewWithAssets`; `list_decks` uses plain `deckView` (no catalog) to stay light.
+
+`Service.Scene` still reads `Assets` straight from the store, so `/present` and the
+PPTX/PDF/HTML exporters resolve `asset-ref` → `data:image/…` unchanged; the asset
+security path (asset-ref → `resolveImageSrc`, CSP) is untouched.
+
+### Deck image assets (catalog + AI add/swap)
+
+Imported templates carry their media (logos, brand marks, hero photos) in the
+deck's `Assets` map, keyed by a content hash (`sha256-<hex>`) with a
+`data:<mime>;base64,…` value. `ast-image` **requires** an `asset-ref`
+(`schemas.go`), and `asset-ref` resolves to a stored `data:` URI via
+`resolveImageSrc` — so the AI can only fill or swap an image slot if it knows
+which asset-refs exist. Two mechanisms surface and grow that library **without**
+leaking the heavy `data:` bytes into the model context or the wire:
+
+- **Catalog projection.** `DeckView.Assets` is a `[]AssetInfo` built by
+  `assetCatalog(assets)` — one entry per asset with `ref` (the map key, usable
+  verbatim as an `ast-image` `asset-ref`), `mime` (parsed from the `data:` prefix),
+  approximate decoded `bytes`, and a `kind` hint (`logo` for SVG/very-small images,
+  else `image`). It **never** copies the `data:` value. `create_deck` (template
+  branch) and `get_deck` return it via `deckViewWithAssets`, so the AI immediately
+  sees the imported template images it can reference or swap. This keeps the
+  perf/security guard (`TestSlidesResponsesOmitHeavyManifestFields`) green — the
+  catalog is hints only.
+- **`list_deck_assets`** loads the full manifest and returns the same catalog, so
+  the AI can enumerate an existing deck's images and pick an `asset-ref` to place
+  in an `ast-image` (fill a drop-slot) or to swap one image for another catalog id.
+- **`add_deck_image`** fetches a **public https image URL** through the
+  SSRF-protected `AssetIngestor.Fetch` (MIME/SVG validation, redirect re-check,
+  20 MB cap — no private-network fetches, no `data:` smuggling), stores it under
+  `ref = "sha256-" + asset.ID` (matching the importer's key convention so
+  `resolveImageSrc` lookups are uniform), persists it via `Service.AddDeckAsset`
+  (clone the `Assets` map → set `ref` → `UpdateDeck`; idempotent for the same URL),
+  and returns the `assetRef` for the AI to drop into an `ast-image`. This is the
+  supported path for "add this image to the deck" — there is no Studio upload UI;
+  the AI does it via the tool.
+
+The asset-ref → `resolveImageSrc` contract (data: only) and the `sha256-<hex>`
+key convention are unchanged; both new tools are additive (no protocol bump).
+
+### Embedded fonts (imported brand faces → `@font-face`)
+
+Corporate templates set the deck theme fonts to concrete brand families (e.g.
+`72 Brand`), which the theme surfaces as `--ast-display` / `--ast-body-font` and
+`ast-text` applies as `font-family`. But a bare, uninstalled family name resolves
+to the browser's default **serif (Times)** — the family name alone does not load a
+font. The template's actual font *files* must travel with the deck and be declared
+to the browser via `@font-face`:
+
+- **Extraction on import.** A `.pptx` that enabled "Embed fonts in the file" carries
+  its faces under `ppt/fonts/*.fntdata`, mapped family + variant
+  (`regular`/`bold`/`italic`/`boldItalic`) via `<p:embeddedFontLst>` in
+  `presentation.xml` (each variant → `r:id` → `.rels` `Target`). `import_worker.mjs`
+  `collectEmbeddedFonts()` walks that list, resolves each part, and recovers a plain
+  TrueType.
+- **`.fntdata` is EOT-wrapped, usually MTX-compressed.** These parts are Embedded
+  OpenType (EOT) containers — **not** the Word `.odttf` GUID-XOR obfuscation (there
+  is nothing to de-XOR). PowerPoint compresses the sfnt with MicroType Express (MTX),
+  so a naive header-strip is insufficient; the worker uses the `mtx-decompressor`
+  npm package (`eotToTtf`, MPL-2.0, zero-dependency) to parse the EOT header, apply
+  its compression/encryption flags, and reconstruct a standard `.ttf`. Any face that
+  fails to decode is skipped with a warning — import still succeeds.
+- **Stored as font assets.** Each recovered face is stored in the SAME deck `Assets`
+  map as images but under a font-namespaced key `font:<family>:<variant>` with a
+  `data:font/ttf;base64,…` value (distinct from the `sha256-<hex>` image keys). Faces
+  larger than a 4 MB per-face cap (typically a full CJK fallback like *Arial Unicode
+  MS*) are skipped — the web-safe fallback chain covers those glyphs.
+- **Manifest in the theme.** The importer records a compact manifest as a single
+  JSON string under the theme key `embedded-fonts`
+  (`[{family,variant,assetKey}]`). Because `Theme` is `map[string]string`, a string
+  value passes through the existing `tokens → DeckManifest.Theme → SceneGraph.Theme`
+  plumbing verbatim — no Go struct change.
+- **`@font-face` emission.** `export_html.go` `writeFontFaces` parses
+  `embedded-fonts` (via `parseEmbeddedFonts` in `fonts.go`), looks up each
+  `assetKey` in `Assets`, and emits an `@font-face` rule (family, `data:` src,
+  `format(truetype|opentype)`, `font-weight` 400/700 + `font-style` normal/italic per
+  variant, `font-display:swap`) inside the deck `<style>`. The export CSP already
+  allows `font-src data:`, so no CSP change is needed and no remote font is fetched.
+  `writeThemeCSS` skips the `embedded-fonts` key (it is a manifest, never a
+  `--ast-*` variable). With the `@font-face` declared, the concrete family the theme
+  names (e.g. `72 Brand`) resolves to the real font; the appended
+  `Aptos, Arial, sans-serif` chain is used only for missing glyphs/variants.
+- **Digit-leading families are quoted.** Per the CSS grammar an *unquoted*
+  `font-family` value is a list of identifiers, and a CSS identifier may **not**
+  start with a digit — so a brand family like `72 Brand` is invalid unquoted and
+  the browser silently drops the whole declaration, falling back to serif (Times)
+  *even when the `@font-face` is present*. Both the importer (`cssFontFamilyName` /
+  `withFontFallback` in `import_worker.mjs`, which normalizes the family list it
+  bakes into each `ast-text` `font=` attribute) and the runtime (`cssFontFamily`
+  in `AstText.ts`, the choke point that assigns `this.style.fontFamily`) double-
+  quote any family that starts with a digit or contains a character outside
+  `[A-Za-z0-9 _-]`, leaving generic keywords and already-quoted names untouched.
+  The runtime normalization is idempotent and also fixes decks stored before this
+  change. `@font-face` `font-family` names are always double-quoted string tokens,
+  so they were never affected.
+- **Kept out of the image surfaces.** `assetCatalog` skips `font:` keys, so embedded
+  fonts never appear in the image catalog the AI browses, are never selectable as an
+  `ast-image` `asset-ref`, and — like images — their heavy `data:` bytes never leak
+  into a tool result or HTTP response (`TestSlidesResponsesOmitHeavyManifestFields`
+  asserts no `data:image`/`data:font` substring).
+
+Generic across templates: a `.pptx` with no embedded fonts is a no-op (no
+`embedded-fonts` key, no `@font-face`), and the existing web-safe fallback chain
+remains the correct degraded behavior.
+
+**Store-level field projection.** The slim DTO above trims the *wire* payload, but
+`personalDocsStore.ListDecks`/`teamDocsStore.ListDecks` still ran
+`Deck.Query()…All()`, which SELECTs *every* column — including `template_model`
+(multi-MB IR) and `assets` (base64) — and `fillPersonalDeck`/`fillTeamDeck` copied
+them in, so the server still paid the read+deserialize cost on every Slides-list.
+The fix adds `DocsStore.ListDecksLite`, implemented with Ent field projection
+(`.Select(FieldID, FieldSlug, FieldTitle, FieldDescription, FieldSchemaVersion,
+FieldTheme, FieldCreatedAt, FieldUpdatedAt)`, **omitting** `FieldAssets` +
+`FieldTemplateModel`) and a `fill…Lite` that leaves those two fields zero. The HTTP
+list path (`ListDocsHandler` → `Service.ListDecksLite`) uses it, so the heavy
+columns are never read for the list. `ListTemplates` **keeps** full `ListDecks`
+(it needs `TemplateModel` to rehydrate the IR), and deck-open (`GetDeck`) stays
+full (a single row is acceptable and `Scene`/exporters need it). In-memory test
+stores implement `ListDecksLite` by delegating to `ListDecks` and nil-ing the heavy
+fields.
+
+### Resolved decision: one template with layout variants (Option A)
+
+A pptx like *GCO IPE&D PPT TEMPLATE — SAP PARTNER* is a **single design system**:
+one slide master, one slide-relevant theme ("SAP Colors 2023"), and 39 layouts.
+All the colorful variety (blue/pink/green anvil covers, image covers, agenda,
+divider ±image, content layouts) lives as **distinct layouts under that one
+master** — there is no natural boundary to split on.
+
+Two options were considered:
+
+- **Option A (chosen):** keep **one Astonish template per pptx** and expose its
+  layouts as classified, human-labeled, selectable **variants** (label = the real
+  PowerPoint layout name). Chrome fidelity comes from master→layout inheritance.
+- **Option B (rejected):** emit **multiple templates from one pptx** (e.g. one per
+  cover family). Rejected because there is a single master + single theme, so
+  splitting would fragment one coherent brand system and complicate recolor/manage.
+
+Option A is implemented. The white output was **not** a template-boundary problem —
+it was (1) example archetypes built from thin, background-less authored slides and
+(2) missing master→layout background/chrome inheritance. Both are now fixed:
+example-from-slide archetypes were removed, and inheritance is resolved at import.
+
+### Roadmap: in-browser template editing
+
+In-browser editing (contenteditable placeholders + `collectFills`, as validated in
+the pilot) is a **known next step, not part of this version**. The IR is persisted
+losslessly and typed in both Go and TS (`slidesTemplateModel.ts`) specifically so
+the editor can be built later **without re-importing** the source `.pptx`. The
+architecture must not preclude it — hence the IR is the source of truth even though
+rendering currently goes through IR → ASD.
+
+---
+
+## Agent Tools
+
+| Tool | Purpose | Key arguments |
+|---|---|---|
+| `create_slides` | Create a deck and theme | `title`, `theme`, `description?`, `ratio?` |
+| `write_slide` | Write/replace one `<ast-slide>` fragment | `deckSlug`, `slideIndex`, `markup`, `notes?` |
+| `read_slide` | Return source plus diagnostics | `deckSlug`, `slideIndex` |
+| `validate_slides` | Validate without persisting | `deckSlug?`, `markup?`, `targets` |
+| `inspect_slide` | Return normalized nodes and export capabilities | `deckSlug`, `slideIndex` |
+| `update_slide_notes` | Update speaker notes | `deckSlug`, `slideIndex`, `notes` |
+| `reorder_slides` | Change ordering | `deckSlug`, `order` |
 | `delete_slide` | Remove a slide | `deckSlug`, `slideIndex` |
-| `update_theme` | Switch or replace theme CSS | `deckSlug`, `themeName` or `cssContent` |
-| `list_slides_decks` | List all saved decks | (none) |
+| `update_theme` | Replace tokenized theme values | `deckSlug`, `themeName` or `theme` |
+| `list_slides_decks` | List visible decks | none |
 
-**Tool registration (following existing pattern):**
-```go
-// Tools implement the standard pattern:
-type CreateSlidesArgs struct {
-    Title       string `json:"title" jsonschema:"The presentation title"`
-    Theme       string `json:"theme" jsonschema:"Theme: dark-minimal, light-corporate, vibrant, gradient, terminal-dev"`
-    Description string `json:"description,omitempty" jsonschema:"Brief description of the deck's purpose"`
-}
+`write_slide` must return validation diagnostics and an export capability summary. The LLM should call `validate_slides` for complex tables, charts, or custom components before finalizing a deck.
 
-type CreateSlidesResult struct {
-    DeckSlug string `json:"deck_slug"`
-    Message  string `json:"message"`
-}
+### Prompt rules
 
-func CreateSlides(ctx tool.Context, args CreateSlidesArgs) (CreateSlidesResult, error) {
-    svc := ctx.Value(store.ServiceKey).(*store.Services)
-    docsStore := svc.Docs  // or svc.PersonalDocs depending on scope
+The model receives generated documentation for the registered component vocabulary. Core rules:
 
-    // 1. Generate ULID-based slug
-    // 2. Load theme CSS from embedded templates
-    // 3. Create deck in database via docsStore.CreateDeck()
-    // 4. Capture docs update for SSE emission (via ChatAgent pending buffer)
-    // 5. Return deck slug
-}
-```
-
-**`read_slide` tool** (critical for iterative refinement):
-```go
-type ReadSlideArgs struct {
-    DeckSlug   string `json:"deck_slug" jsonschema:"The deck slug identifier"`
-    SlideIndex int    `json:"slide_index" jsonschema:"0-based slide index to read"`
-}
-
-type ReadSlideResult struct {
-    HTML  string `json:"html"`
-    Title string `json:"title"`
-    Notes string `json:"notes"`
-}
-
-func ReadSlide(ctx tool.Context, args ReadSlideArgs) (ReadSlideResult, error) {
-    // Retrieve slide from DocsStore and return HTML + metadata
-    // This allows the LLM to see current content before modifying
-}
-```
-
-### SSE Event Emission (ChatRunner Drain Pattern)
-
-Following the existing `artifact` event pattern — tools do NOT emit SSE directly:
-
-**1. ChatAgent pending buffer** (`pkg/agent/chat_agent.go`):
-```go
-type ChatAgent struct {
-    // ... existing fields ...
-
-    // Docs update side-channel
-    pendingDocsUpdates []DocsUpdateInfo
-    docsUpdateMu       sync.Mutex
-}
-
-type DocsUpdateInfo struct {
-    DocType     string `json:"type"`        // "slides"
-    DeckSlug    string `json:"deckSlug"`
-    Action      string `json:"action"`      // "created" | "slide_written" | "reordered" | "deleted" | "theme_updated"
-    SlideIndex  int    `json:"slideIndex"`
-    TotalSlides int    `json:"totalSlides"`
-    Title       string `json:"title"`
-}
-
-func (c *ChatAgent) CaptureDocsUpdate(info DocsUpdateInfo) {
-    c.docsUpdateMu.Lock()
-    defer c.docsUpdateMu.Unlock()
-    c.pendingDocsUpdates = append(c.pendingDocsUpdates, info)
-}
-
-func (c *ChatAgent) DrainDocsUpdates() []DocsUpdateInfo {
-    c.docsUpdateMu.Lock()
-    defer c.docsUpdateMu.Unlock()
-    updates := c.pendingDocsUpdates
-    c.pendingDocsUpdates = nil
-    return updates
-}
-```
-
-**2. afterToolCallback capture** (`pkg/agent/chat_agent_run.go`):
-```go
-// In afterToolCallback, after success check:
-if err == nil {
-    switch t.Name() {
-    case "create_slides", "write_slide", "reorder_slides", "delete_slide", "update_theme":
-        // Extract DocsUpdateInfo from tool output
-        if info, ok := extractDocsUpdateFromOutput(output); ok {
-            c.CaptureDocsUpdate(info)
-        }
-    }
-}
-```
-
-**3. ChatRunner drain** (`pkg/api/chat_runner.go`):
-```go
-// In drainImagesAndFlowOutput (or renamed drainSideChannels):
-for _, du := range chatAgent.DrainDocsUpdates() {
-    cr.emitEvent("docs_update", map[string]any{
-        "type":        du.DocType,
-        "deckSlug":    du.DeckSlug,
-        "action":      du.Action,
-        "slideIndex":  du.SlideIndex,
-        "totalSlides": du.TotalSlides,
-        "title":       du.Title,
-    })
-}
-```
-
-**4. Persistence for session reload** (`pkg/api/chat_utils.go`):
-```go
-const docsUpdatePrefix = "[docs_update]"
-
-func persistDocsUpdate(ctx context.Context, svc session.Service, userID, sessionID string, info DocsUpdateInfo) {
-    data, _ := json.Marshal(info)
-    text := docsUpdatePrefix + string(data)
-    persistSessionMessage(ctx, svc, userID, sessionID, "model", text)
-}
-
-func tryParseDocsUpdateMessage(text string) (*DocsUpdateInfo, bool) {
-    if !strings.HasPrefix(text, docsUpdatePrefix) {
-        return nil, false
-    }
-    var info DocsUpdateInfo
-    if err := json.Unmarshal([]byte(strings.TrimPrefix(text, docsUpdatePrefix)), &info); err != nil {
-        return nil, false
-    }
-    return &info, true
-}
-```
-
-### API Endpoints
-
-```
-GET    /api/docs                                    # List all docs (all types)
-GET    /api/docs?type=slides                        # List slide decks only
-
-GET    /api/docs/slides/{deckSlug}                  # Get deck manifest (JSON)
-GET    /api/docs/slides/{deckSlug}/slides/{idx}     # Serve slide HTML (iframe src)
-DELETE /api/docs/slides/{deckSlug}                   # Delete deck
-
-POST   /api/docs/slides/{deckSlug}/export/pdf       # Generate + return PDF
-POST   /api/docs/slides/{deckSlug}/export/pptx      # Generate + return PPTX
-POST   /api/docs/slides/{deckSlug}/export/html      # Generate + return standalone HTML
-
-GET    /api/docs/slides/{deckSlug}/present          # Self-contained presenter HTML (new window)
-
-GET    /api/docs/slides/themes                      # List available theme names
-```
-
-**Slide serving endpoint** (`GET /api/docs/slides/{deckSlug}/slides/{idx}`):
-- Reads slide HTML from database
-- Injects theme CSS inline (replaces `<style>` placeholder or prepends to `<head>`)
-- Returns complete HTML document ready for iframe rendering
-- Sets appropriate cache headers
-
-**Presenter endpoint** (`GET /api/docs/slides/{deckSlug}/present`):
-- Returns a self-contained HTML page with all slides + navigation JS
-- Can be opened in a separate browser window (external display)
-- Contains keyboard shortcuts, slide counter, speaker notes toggle
-- Zero React overhead — vanilla JS
-
-### Export Pipeline
-
-#### PDF Export (extending existing `pkg/pdfgen/chrome.go`)
-
-```go
-func ExportPDF(ctx context.Context, docsStore store.DocsStore, deckSlug string, serverBaseURL string) ([]byte, error) {
-    // 1. Load deck manifest from DB
-    deck, _ := docsStore.GetDeck(ctx, deckSlug)
-
-    // 2. Launch go-rod browser (reuse pool from pkg/pdfgen)
-    browser := rod.New().MustConnect()
-    defer browser.MustClose()
-
-    // 3. For each slide:
-    //    a. Navigate to {serverBaseURL}/api/docs/slides/{slug}/slides/{i}
-    //    b. Set viewport 1920×1080
-    //    c. Wait for rendering: page.MustEval(`() => document.fonts.ready`)
-    //    d. page.PDF() with:
-    //       - Landscape orientation
-    //       - Custom page size: 338.67mm × 190.5mm (16:9 at 144dpi)
-    //       - No margins
-    //       - PrintBackground: true
-    // 4. Merge per-slide PDFs into single multi-page PDF
-    // 5. Return combined PDF bytes
-}
-```
-
-#### PPTX Export (custom minimal writer, no external dependency)
-
-The PPTX format is a ZIP archive containing XML files. For image-only slides, the structure is well-defined and simple:
-
-```go
-// pkg/docs/slides/pptxwriter/writer.go
-package pptxwriter
-
-// Create creates a valid .pptx file with one full-bleed image per slide.
-// Each image is a PNG screenshot of the rendered slide HTML.
-func Create(slides []SlideImage) ([]byte, error) {
-    buf := new(bytes.Buffer)
-    zw := zip.NewWriter(buf)
-
-    // 1. Write [Content_Types].xml — declares PNG + XML content types
-    // 2. Write _rels/.rels — root relationships
-    // 3. Write ppt/presentation.xml — slide list
-    // 4. Write ppt/_rels/presentation.xml.rels — slide relationships
-    // 5. For each slide:
-    //    a. Write ppt/slides/slide{N}.xml — references image
-    //    b. Write ppt/slides/_rels/slide{N}.xml.rels — image relationship
-    //    c. Write ppt/media/image{N}.png — the screenshot bytes
-    // 6. Write ppt/slideLayouts/slideLayout1.xml — blank layout
-    // 7. Write ppt/slideMasters/slideMaster1.xml — blank master
-
-    zw.Close()
-    return buf.Bytes(), nil
-}
-
-type SlideImage struct {
-    PNG []byte // Screenshot at 1920×1080
-}
-```
-
-The XML templates for each file are ~20-50 lines of static OOXML. Total implementation: ~200 lines of Go, zero external dependencies.
-
-```go
-// pkg/docs/slides/export_pptx.go
-func ExportPPTX(ctx context.Context, docsStore store.DocsStore, deckSlug string, serverBaseURL string) ([]byte, error) {
-    deck, _ := docsStore.GetDeck(ctx, deckSlug)
-
-    // 1. Launch go-rod browser
-    // 2. For each slide:
-    //    - Navigate to slide URL
-    //    - Set viewport 1920×1080
-    //    - page.MustScreenshot() → PNG bytes
-    // 3. Pass []SlideImage to pptxwriter.Create()
-    // 4. Return .pptx bytes
-}
-```
-
-**V2 enhancement:** After creating the base image-only PPTX, optionally parse slide HTML (using `golang.org/x/net/html`) to extract `data-element` nodes with their positions/text, and add invisible text frames overlaid on the images for searchability and accessibility.
-
-#### Standalone HTML Export
-
-```go
-func ExportHTML(ctx context.Context, docsStore store.DocsStore, deckSlug string) ([]byte, error) {
-    deck, _ := docsStore.GetDeck(ctx, deckSlug)
-
-    // 1. Load all slides from DB
-    // 2. Build single HTML file:
-    //    a. Inline theme CSS in a <style> block
-    //    b. Each slide becomes a <section class="slide" data-index="N">
-    //       with its content (strip <html>/<head>/<body> wrappers)
-    //    c. Fetch and base64-encode any external images referenced in slides
-    //    d. Add navigation JS:
-    //       - Arrow keys / Space for next/prev
-    //       - Escape for overview mode (thumbnail grid)
-    //       - Slide counter overlay
-    //    e. Add CSS for slide transitions (fade or instant)
-    //    f. Only show one slide at a time (display:none for others)
-    // 3. Return self-contained HTML bytes (zero external dependencies)
-}
-```
+1. Emit exactly one `<ast-slide>` fragment per `write_slide` call.
+2. Use only registered tags and properties.
+3. Give every object a stable ID and explicit geometry.
+4. Use theme tokens; do not emit CSS or executable JavaScript.
+5. Store table/chart data semantically.
+6. Prefer Tier A components. Use web-only components only when the user values interactivity over editable PPTX.
+7. Read before modifying and validate before finalizing.
+8. Keep text within declared boxes and minimum font sizes.
 
 ---
 
-## Frontend (React)
+## Backend and Frontend Integration
 
-### Component Structure
+### Package shape
 
-```
-web/src/components/docs/
-├── DocsView.jsx              # Main sidebar view (#/studio/docs)
-├── DocsList.jsx              # Grid/list of all docs with type filters
-├── slides/
-│   ├── SlidesCard.jsx        # In-chat card (rendered during generation)
-│   ├── SlidesViewer.jsx      # Full viewer (iframe + nav + controls)
-│   ├── SlideNavigator.jsx    # Thumbnail strip + dot indicator + counter
-│   ├── PresenterMode.jsx     # React wrapper that opens /present in new window
-│   └── SlidesExport.jsx      # Export dropdown (PDF / PPTX / HTML)
-```
+```text
+pkg/docs/slides/
+├── types.go                   # manifest, source, diagnostics, capabilities
+├── service.go                 # scoped business logic
+├── parser.go                  # ASD markup → normalized graph
+├── validation.go             # schema, geometry, overflow, security
+├── migrations/               # source schema migrations
+├── tools.go                  # agent tools
+├── export_pdf.go             # Chromium print orchestration
+├── export_html.go            # standalone component bundle
+├── export_pptx.go            # worker invocation and package checks
+├── components/               # schemas and target-neutral metadata
+├── themes/                   # embedded tokenized themes
+└── pptxworker/               # embedded, pinned JS bundle and protocol
 
-### SlidesCard (in-chat inline card)
-
-Displayed in the chat stream when the frontend receives `docs_update` SSE events. Renders the current slide in a scaled iframe with navigation controls.
-
-```
-┌──────────────────────────────────────────────────────┐
-│  ┌─ Introducing Astonish ─────────────── 4 / 13 ─┐  │
-│  │                                                 │  │
-│  │   [Scaled iframe: 1920×1080 → ~500px wide]     │  │
-│  │   src="/api/docs/slides/{slug}/slides/4"        │  │
-│  │                                                 │  │
-│  └─────────────────────────────────────────────────┘  │
-│                                                        │
-│  ◀ Prev    ● ● ● ● ○ ○ ○ ○ ○ ○ ○ ○ ○    Next ▶     │
-│                                                        │
-│  [⛶ Present]  [↓ Export ▾]  [📂 Open in Docs]        │
-└──────────────────────────────────────────────────────┘
+web/src/components/docs/slides/
+├── runtime/                   # ast-* Custom Elements and deck controller
+├── SlidesCard.tsx            # in-chat host
+├── SlidesViewer.tsx          # full viewer
+├── SlideNavigator.tsx
+├── PresenterMode.tsx
+└── SlidesExport.tsx
 ```
 
-**Behavior:**
-- Appears when first `docs_update` with `action: "created"` is received
-- Updates live as `action: "slide_written"` events arrive (increments total, optionally auto-advances to latest slide)
-- Navigation enabled immediately — user can browse already-written slides while AI writes more
-- After generation completes: card is "finalized" (no more live updates expected)
-- Clicking "Open in Docs" navigates to `#/studio/docs/slides/{deckSlug}`
-- Clicking "Present" opens `/api/docs/slides/{slug}/present` in a new window
+New UI files use TypeScript/TSX. The Web Component runtime is framework-neutral; React hosts it rather than owning slide semantics.
 
-**Iframe rendering:**
-```jsx
-<div style={{ width: containerWidth, height: containerWidth * (9/16), position: 'relative', overflow: 'hidden' }}>
-  <iframe
-    src={`/api/docs/slides/${deckSlug}/slides/${currentSlide}`}
-    style={{
-      width: '1920px',
-      height: '1080px',
-      transform: `scale(${containerWidth / 1920})`,
-      transformOrigin: 'top left',
-      border: 'none',
-      pointerEvents: 'none'  // Prevent interaction in preview mode
-    }}
-  />
-</div>
+### API
+
+```text
+GET    /api/docs?type=slides
+GET    /api/docs/slides/{deckSlug}
+GET    /api/docs/slides/{deckSlug}/slides/{idx}
+POST   /api/docs/slides/validate
+POST   /api/docs/slides/{deckSlug}/export/pdf
+POST   /api/docs/slides/{deckSlug}/export/pptx
+POST   /api/docs/slides/{deckSlug}/export/html
+GET    /api/docs/slides/{deckSlug}/present
+DELETE /api/docs/slides/{deckSlug}
+GET    /api/docs/slides/themes
+GET    /api/docs/slides/components
+DELETE /api/docs/slides/templates/{name}            # delete a scoped template (built-ins read-only → 403; idempotent on missing); honors ?scope=personal|team
+POST   /api/docs/slides/templates/{name}/duplicate  # clone a built-in or scoped template into a NEW scoped template (optional body {"newName":"...","newLabel":"..."}); returns {"template":{"name":...,"label":...}}
+PATCH  /api/docs/slides/templates/{name}/recolor    # update a scoped template's palette tokens (surface/ink/accent; validated hex); 403 for built-ins, 400 for bad hex / unknown keys
 ```
 
-### DocsView (sidebar, `#/studio/docs`)
+The slide endpoint returns either the source fragment as data or a sandboxed runtime page. It must not concatenate untrusted source into the Studio document.
 
-```
-┌─────────────────────────────────────────────────────────┐
-│  Docs                                           [Filter] │
-│─────────────────────────────────────────────────────────│
-│                                                          │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │
-│  │              │  │              │  │              │  │
-│  │  [thumbnail] │  │  [thumbnail] │  │  [thumbnail] │  │
-│  │              │  │              │  │              │  │
-│  ├──────────────┤  ├──────────────┤  ├──────────────┤  │
-│  │ Astonish     │  │ Q2 Review    │  │ Onboarding   │  │
-│  │ Introduction │  │              │  │ Guide        │  │
-│  │ 13 slides    │  │ 8 slides     │  │ 20 slides    │  │
-│  │ Jun 22, 2026 │  │ Jun 20, 2026 │  │ Jun 18, 2026 │  │
-│  └──────────────┘  └──────────────┘  └──────────────┘  │
-│                                                          │
-│  ─────────────────────────────────────────────────────  │
-│  [Improve with AI]  Opens chat with deck as context     │
-└─────────────────────────────────────────────────────────┘
-```
+### SSE
 
-**Features:**
-- Grid of deck cards with first-slide thumbnails (rendered via scaled iframe or cached screenshot)
-- Click opens `SlidesViewer` (full-page viewer with navigation)
-- Type filter (when Documents/Sheets are added later)
-- "Improve with AI" button → starts a new chat session with the deck slug in context
-- Export/delete actions per deck (context menu or action buttons)
+Preserve the existing ChatRunner drain pattern: tools capture pending document updates, `ChatRunner` emits `docs_update`, Studio consumes the matching event, and persisted markers reconstruct the card after reload.
 
-### Presenter Mode (dual approach)
+Add optional fields without changing the event name:
 
-**Backend route** (`GET /api/docs/slides/{slug}/present`):
-- Self-contained HTML page with all slides inlined
-- Keyboard navigation (arrows, space, escape)
-- Speaker notes toggle (N key)
-- Slide counter overlay
-- Works in external windows / second monitors
-- Zero React dependency — pure vanilla JS + CSS
-
-**React wrapper** (`PresenterMode.jsx`):
-- Button in SlidesCard and SlidesViewer that calls `window.open('/api/docs/slides/{slug}/present', '_blank')`
-- Also provides an in-app fullscreen overlay option (for quick previews without opening a new window)
-- Fullscreen overlay uses the same iframe approach but at full viewport
-
-### SSE Subscription
-
-The chat component subscribes to `docs_update` events in the SSE stream:
-
-```jsx
-// In chat message stream handler (same pattern as artifact/app_preview):
-case 'docs_update':
-  const data = JSON.parse(event.data);
-  if (data.type === 'slides') {
-    updateOrCreateSlidesCard(data.deckSlug, {
-      action: data.action,
-      slideIndex: data.slideIndex,
-      totalSlides: data.totalSlides,
-      title: data.title,
-    });
-  }
-  break;
+```json
+{
+  "type": "slides",
+  "deckSlug": "...",
+  "action": "slide_written",
+  "slideIndex": 4,
+  "totalSlides": 10,
+  "title": "Migration risk",
+  "schemaVersion": 1,
+  "validation": {"errors": 0, "warnings": 1},
+  "pptxCapability": {"native": 9, "vector": 1, "raster": 0, "unsupported": 0}
+}
 ```
 
-**Session reload**: When loading an existing session, `tryParseDocsUpdateMessage` detects persisted `[docs_update]` events and reconstructs the SlidesCard state.
+Backend emitters, Studio consumers, persisted parsing, terminal behavior, and scenario fixtures must change together when this contract is implemented. Successful `create_deck`, `write_slide`, and `get_deck` tool results emit this event. `get_deck` uses the `deck_viewed` action so requests such as “show me the deck” render the existing `SlidesCard` with its authenticated preview and export actions rather than only returning raw tool data or prose.
+
+### Turn-scoped SlidesCard coalescing
+
+Studio folds slide `docs_update` messages into cards by `deckSlug` **only within one assistant turn**. The preceding user message is the turn boundary: updates for the same deck that occur after that user message and before the next user message belong to one fold. A same-turn `create_deck` followed by one or more `write_slide` updates therefore remains one evolving `SlidesCard`, with progress changes refreshing its authenticated preview.
+
+A later assistant turn starts a new fold even when it edits the same `deckSlug`. Its first successful slide update appends a fresh card rather than mutating or replacing the prior turn's card. That new card presents the latest deck state through the authenticated preview and exposes the **Present**, **PPTX**, **PDF**, and **HTML** actions. Earlier cards remain in transcript order as records of their turns.
+
+The same folding result is required across all three delivery paths: live SSE, active-run reconnect, and static history reconstructed from persisted `[docs_update]` markers. History loading must apply the same preceding-user boundary and must not globally deduplicate a deck across turns.
+
+This is a **frontend rendering and history-folding contract only**. It does not change backend `docs_update` payloads, marker persistence, tenant-scoped deck persistence or storage scope, or any presentation/export API.
 
 ---
 
-## Pre-Built Themes
+## Security
 
-### 5 Shipped Themes
-
-| # | Name | Surface | Accent | Font Stack | Target Audience |
-|---|------|---------|--------|------------|-----------------|
-| 1 | **dark-minimal** | Near-black `#0B0D0F` | Violet `#8B5CF6` | `system-ui` + `ui-monospace` | Developer/tech talks |
-| 2 | **light-corporate** | White `#FFFFFF` | Navy `#1E40AF` | `system-ui` + `ui-monospace` | Business/boardroom |
-| 3 | **vibrant** | Dark slate `#0F172A` | Multi (teal/amber/rose) | `system-ui` + `ui-monospace` | Startup pitches |
-| 4 | **gradient** | Dark `#09090B` + blurs | Purple-to-blue gradient | `system-ui` + `ui-monospace` | Modern SaaS / product |
-| 5 | **terminal-dev** | Pure black `#000000` | Green `#22C55E` | `ui-monospace` only | Hacker/dev aesthetic |
-
-**V1: System fonts only.** All themes use native font stacks:
-- Display: `system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif`
-- Monospace: `ui-monospace, 'SF Mono', 'Cascadia Code', 'Consolas', monospace`
-
-**V2: Custom web fonts** — add Google Fonts with local caching/embedding for export.
-
-### Theme CSS Structure
-
-```css
-/* Example: dark-minimal theme (V1 — system fonts) */
-:root {
-  /* Colors */
-  --surface: #0B0D0F;
-  --panel: #15181C;
-  --panel-elevated: #1C2026;
-  --line: rgba(255, 255, 255, 0.08);
-  --line-strong: rgba(255, 255, 255, 0.14);
-  --ink: #ECEDEE;
-  --ink-mute: #94A3B8;
-  --ink-dim: #5B6470;
-  --accent: #8B5CF6;
-  --accent-strong: #7C3AED;
-  --accent-soft: #A78BFA;
-  --accent-ink: #FFFFFF;
-
-  /* Typography (system fonts — no loading required) */
-  --font-display: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
-  --font-body: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
-  --font-mono: ui-monospace, 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
-
-  /* Spacing & Radii */
-  --margin-edge: 96px;
-  --radius-sm: 6px;
-  --radius-md: 10px;
-  --radius-lg: 16px;
-}
-
-/* Base slide styles */
-.slide-container {
-  font-family: var(--font-body);
-  color: var(--ink);
-  background: var(--surface);
-}
-
-/* Utility classes available to slides */
-.mono { font-family: var(--font-mono); }
-.accent { color: var(--accent); }
-.muted { color: var(--ink-mute); }
-.panel {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-md);
-}
-```
+- Parse source into an allowlisted AST; never execute author markup while validating.
+- Reject unknown elements, event-handler attributes, executable scripts, arbitrary `style`, unsafe URL schemes, foreign objects, and unsanitized SVG.
+- Treat inert JSON blocks as data with a size limit and schema validation.
+- Ingest remote assets through SSRF-protected fetching with MIME, size, redirect, and address validation.
+- Render previews in a sandboxed opaque-origin iframe, consistent with the generative UI boundary.
+- Give the PPTX worker no network and no tenant credentials; use resource/time limits.
+- Escape all text sent to XML-generating libraries and validate resulting packages.
+- Apply tenant scope at every store and export lookup.
 
 ---
 
-## LLM System Prompt Guidance
+## Validation and Test Strategy
 
-Injected conditionally when the user's message references presentations/slides/deck (keyword detection), or when a deck is already in context for the active session.
+### Source conformance
 
-```markdown
-## Creating Presentations (Docs → Slides)
+- schema tests for each component and theme;
+- parser fuzzing and hostile markup fixtures;
+- geometry bounds, overlap, and reading-order checks;
+- text overflow using approved font metrics;
+- missing asset/data reference checks;
+- capability diagnostics for every export target.
 
-When the user asks you to create a presentation, pitch deck, slides, or any visual slide-based document:
+### Web rendering
 
-### Workflow
+- Custom Element unit tests and accessibility checks;
+- deterministic screenshots at fixed Chromium/font versions;
+- presenter navigation, fragments, notes, fullscreen, and print-mode tests;
+- standalone export tested offline under its CSP.
 
-1. Use `create_slides` to initialize the deck. Choose an appropriate theme:
-   - **dark-minimal** — Developer/tech audience, terminal-influenced, Astonish brand violet
-   - **light-corporate** — Business/boardroom, clean white, navy accents
-   - **vibrant** — Startup pitch, energetic, multi-color accents on dark slate
-   - **gradient** — Modern SaaS/product, dark with gradient blur halos
-   - **terminal-dev** — Hacker aesthetic, pure black, green monospace
+### PPTX structure
 
-2. Use `write_slide` for each slide, one at a time. Generate complete HTML per slide.
+For every fixture deck:
 
-3. To modify an existing slide, first use `read_slide` to see its current content, then `write_slide` to overwrite it.
+1. unzip and inspect expected slide, media, notes, chart, and relationship parts;
+2. confirm text is represented by text shapes, tables by table markup, and charts by chart parts rather than a slide-sized image;
+3. validate OOXML using the Open XML SDK validator in CI or a pinned validation container;
+4. open/save smoke-test in supported PowerPoint versions where CI infrastructure permits;
+5. open in LibreOffice Impress as a secondary interoperability signal, not the authority for PowerPoint fidelity;
+6. verify speaker notes, hyperlinks, alt text, reading order, masters, and theme values;
+7. compare rendered slide images from PowerPoint/LibreOffice with web reference images using tolerances and component masks.
 
-4. After writing all slides, summarize what you created and mention export options.
+### Acceptance gates
 
-### Slide HTML Rules
-
-Each slide MUST follow this structure:
-- DOCTYPE + html + head (with empty <style> tag — theme is injected at serve time) + body
-- Single `.slide-container` div: exactly 1920×1080px, position:relative, overflow:hidden
-- All content elements use absolute positioning inside the container
-- Add `data-element` attributes: "title", "body", "stat", "shape", "image", "chart"
-- Use theme CSS variables for all colors and fonts (NEVER hardcode colors or font names)
-- Use inline `style` for positions and dimensions
-
-### Design Principles
-
-- **One idea per slide** — don't overcrowd
-- **Title**: 48-72px, font-weight 700, positioned top area
-- **Body text**: 24-32px minimum for readability at presentation scale
-- **Consistent margins**: 96px from canvas edges (use var(--margin-edge))
-- **Accent for emphasis**: stats, highlights, labels, decorative elements
-- **Shapes via CSS**: border-radius, gradients, borders, box-shadow — no external images for decoration
-- **Mono labels**: Use var(--font-mono) for chapter numbers, categories, metadata
-- **Hierarchy**: Every slide has a clear visual hierarchy (eyebrow → title → body → detail)
-- **Images**: Use `https://` URLs for images. For decorative elements, use CSS only.
-
-### Typical Deck Structure
-
-| Slide | Purpose | Layout Style |
-|-------|---------|-------------|
-| 1 | Cover | Centered title, tagline, minimal |
-| 2-3 | Problem / Context | Text-heavy or stat-forward |
-| 4-N | Content slides | Vary: two-column, cards grid, full-bleed, diagram |
-| N+1 | Closing | CTA, contact info, links |
-
-### Speaker Notes
-
-Pass notes via the `notes` parameter on `write_slide`. Notes are for the presenter,
-not the audience. Keep them conversational: what to say, transitions, timing cues.
-
-### Modifying Existing Slides
-
-When asked to improve or modify a specific slide:
-1. Use `read_slide` to retrieve the current HTML
-2. Modify the HTML as needed
-3. Use `write_slide` to save the updated version
-4. If asked to change the overall look, use `update_theme` instead of modifying individual slides
-```
-
-**Injection strategy**: Only inject when:
-1. User's message contains keywords: "presentation", "slides", "deck", "pitch"
-2. The active session already has a docs_update event (deck in progress)
-3. Similar to how browser tool guidance is conditionally injected
-
----
-
-## Error Handling & Recovery
-
-### Partial Generation Failure
-
-If the LLM errors mid-deck (rate limit, context overflow, etc.):
-- The deck remains in a valid state with slides 1..N viewable
-- `slide_count` in the DB reflects only successfully written slides
-- The user can ask the AI to "continue" and it will read the manifest to know where to resume
-- `read_slide` allows the AI to check what already exists
-
-### Manifest Atomicity
-
-All database writes use Ent's transaction support:
-```go
-func (s *teamDocsStore) WriteSlide(ctx context.Context, deckSlug string, index int, slide *SlideContent) error {
-    return s.client.WithTx(ctx, func(tx *ent.Tx) error {
-        // 1. Upsert slide content
-        // 2. Update deck slide_count if this is a new slide
-        // 3. Update deck updated_at
-        return nil
-    })
-}
-```
-
-### Slide Validation
-
-The `write_slide` tool validates HTML before accepting:
-```go
-func validateSlideHTML(html string) error {
-    // 1. Must parse as valid HTML (golang.org/x/net/html)
-    // 2. Must contain a .slide-container element
-    // 3. Must not exceed size limit (e.g., 100KB — prevents accidental huge content)
-    // 4. Must not contain <script> tags (security)
-}
-```
-
-### Image Handling
-
-**V1 strategy:**
-- Allow `https://` image URLs in slide HTML (simplest)
-- For iframe preview: browser loads images directly
-- For PDF/PPTX export: go-rod renders them (has network access)
-- For standalone HTML export: fetch images server-side → base64-encode inline
-- LLM is guided to use `data-element="image"` on image containers
-
----
-
-## Platform Sharing Architecture (Future)
-
-The database-first design means Platform sharing requires minimal changes:
-
-| Aspect | V1 (Personal) | V2 (Platform) |
-|--------|----------------|----------------|
-| Storage | Personal SQLite (same as PersonalApps) | Team PostgreSQL (same as team Apps) |
-| Deck slug | Unique per user | Unique per team |
-| Access | Single user | ACL: personal / team / org visibility |
-| SSE events | Same session only | Broadcast to all viewers |
-| API paths | Identical | Identical (store resolved by tenant middleware) |
-| Presenter URL | Local only | Shareable link (authenticated) |
-
-**What needs to change for Platform sharing:**
-1. Add `DocsStore` to `TeamDataStore` interface (same pattern as `AppStore`)
-2. Add team Ent schema (likely identical to personal)
-3. Wire in `TenantMiddleware` (resolves correct store per request)
-4. Add `published_by` field for team-published decks
-5. Broadcast `docs_update` SSE to all active sessions viewing the same deck
+- No whole-slide image in default editable export.
+- All Tier A fixture objects remain individually selectable/editable after PowerPoint open/save.
+- No source validation errors.
+- No unexpected Tier C/D downgrade.
+- Text must not clip or overflow in the supported font environment.
+- Package validation has zero errors.
 
 ---
 
 ## Dependencies
 
-### Go (go.mod additions)
+### Go
 
-```
-# No new external dependencies for V1-V2!
-# PPTX writer is custom code (~200 lines) using only:
-#   - archive/zip (stdlib)
-#   - encoding/xml (stdlib)
-#   - bytes (stdlib)
+Continue using existing Go infrastructure for stores, APIs, go-rod PDF rendering, asset handling, and worker orchestration. Do not implement a broad PresentationML writer in Go for V1.
 
-# Already in go.mod:
-github.com/go-rod/rod         # PDF export + PPTX screenshots
-github.com/oklog/ulid/v2      # Deck ID generation (already indirect dep)
-golang.org/x/net/html         # HTML parsing for validation (stdlib-adjacent)
-```
+### Web/runtime
 
-### Frontend (web/package.json)
+- `lit` — Custom Element implementation helper (BSD-3-Clause).
+- optional deck-runtime adapter kept behind Astonish interfaces.
 
-**No new dependencies.** Uses:
-- React 19 (existing) — component rendering
-- Tailwind CSS (existing) — DocsView styling
-- `file-saver` (existing) — export file downloads
-- Native `<iframe>` — slide rendering
+### PPTX worker
+
+- `pptxgenjs` — native OOXML generation for app-authored ASD decks (MIT).
+- bundled with the application build; no runtime `npm install`.
+
+Adding a Node-authored build artifact does not turn the distributed product into multiple binaries: the worker can be bundled and invoked through an available JS runtime strategy selected during implementation. Before committing to subprocess Node in production, prototype and choose among:
+
+1. embedded worker executed by a small bundled JS runtime;
+2. a Node subprocess available in the controlled server image;
+3. browser-side PptxGenJS generation for trusted, already-loaded scene graphs.
+
+The exporter interface must isolate this choice. Browser-side export reduces server dependencies but can expose large assets and produce device-dependent behavior; the server-side worker is preferred for deterministic platform export.
 
 ---
 
 ## Implementation Phases
 
-### Phase 1: Core Foundation (2-3 weeks)
+### Phase 0 — Export spike and decision gate (1 week)
 
-**Backend:**
-- [ ] `pkg/store/docs.go` — `DocsStore` interface definition
-- [ ] `ent/personal/schema/doc.go` + `doc_slide.go` — Ent schemas
-- [ ] `ent/team/schema/doc.go` + `doc_slide.go` — Ent schemas
-- [ ] `go generate ./ent/personal && go generate ./ent/team`
-- [ ] `pkg/store/entstore/personal_docs.go` — DocsStore implementation
-- [ ] `pkg/store/entstore/team_docs.go` — DocsStore implementation
-- [ ] Wire into `Services` container + `TenantMiddleware`
-- [ ] `pkg/docs/slides/types.go` — domain types
-- [ ] `pkg/docs/slides/service.go` — business logic layer
-- [ ] `pkg/docs/slides/tools.go` — `create_slides`, `write_slide`, `read_slide`, `update_theme`
-- [ ] `pkg/docs/slides/themes/` — 5 embedded CSS theme files
-- [ ] `pkg/agent/chat_agent.go` — add `pendingDocsUpdates` buffer + `DrainDocsUpdates()`
-- [ ] `pkg/agent/chat_agent_run.go` — capture docs updates in `afterToolCallback`
-- [ ] `pkg/api/chat_runner.go` — drain + emit `docs_update` SSE events
-- [ ] `pkg/api/chat_utils.go` — persist/parse docs update markers
-- [ ] API routes: slide serving, deck CRUD, theme list
-- [ ] System prompt guidance (conditional injection)
-- [ ] Register tools in tool registry
+- Implement five representative slides: title, rich text, shapes/connectors, table, and chart/image.
+- Render with prototype `ast-*` components.
+- Export with PptxGenJS to native objects.
+- Test PowerPoint open/edit/save and compare visual output.
+- Decide worker runtime and document supported fonts/effects.
+- Exit only when native-object and package-validation gates pass.
 
-**Frontend:**
-- [ ] `web/src/components/docs/slides/SlidesCard.jsx` — in-chat card with iframe + nav
-- [ ] `web/src/components/docs/DocsView.jsx` — sidebar section, deck grid
-- [ ] `web/src/components/docs/slides/SlidesViewer.jsx` — full viewer (opened from sidebar)
-- [ ] SSE handler for `docs_update` events in chat stream
-- [ ] Session reload: reconstruct SlidesCard from persisted markers
-- [ ] Sidebar entry: icon + "Docs" label, routes to `#/studio/docs`
+### Phase 1 — Component model and web runtime (2–3 weeks)
 
-### Phase 2: Export + Presenter Mode (1-2 weeks)
+- Define ASD v1 schemas, parser, normalized graph, diagnostics, and migrations.
+- Implement core `ast-deck`, `ast-slide`, `ast-text`, `ast-shape`, `ast-image`, `ast-group`, and `ast-notes`.
+- Implement deck navigation, presenter view, print mode, theme tokens, and offline bundle.
+- Add validation tools and generated model guidance.
+- Add scoped storage schemas/implementations and migrations.
 
-- [ ] `pkg/docs/slides/export_pdf.go` — multi-page landscape PDF via go-rod
-- [ ] `pkg/docs/slides/export_html.go` — bundled self-navigating HTML (with image inlining)
-- [ ] Export API endpoints (`POST /api/docs/slides/{slug}/export/pdf`, `/html`)
-- [ ] `GET /api/docs/slides/{slug}/present` — self-contained presenter HTML page
-- [ ] `SlidesExport.jsx` — export dropdown component (PDF, HTML)
-- [ ] `PresenterMode.jsx` — opens /present in new window + in-app fullscreen overlay
-- [ ] `SlideNavigator.jsx` — thumbnail dots + counter
-- [ ] Additional tools: `reorder_slides`, `delete_slide`, `update_slide_notes`
+### Phase 2 — Astonish integration (2 weeks)
 
-### Phase 3: PPTX Export (1-2 weeks)
+- Add deck/slide tools and conditional prompt guidance.
+- Add APIs and sandboxed slide serving.
+- Wire `docs_update` through agent capture, ChatRunner drain, persistence, Studio consumer, terminal parity review, and scenario fixtures.
+- Add Docs list, SlidesCard, viewer, navigation, presenter, and error states.
 
-- [ ] `pkg/docs/slides/pptxwriter/writer.go` — minimal OOXML ZIP builder (~200 lines)
-- [ ] `pkg/docs/slides/pptxwriter/templates.go` — XML template strings
-- [ ] `pkg/docs/slides/export_pptx.go` — screenshot slides → pptxwriter.Create()
-- [ ] PPTX export API endpoint
-- [ ] Add PPTX option to `SlidesExport.jsx` dropdown
-- [ ] Unit tests for pptxwriter (verify output opens in PowerPoint/LibreOffice)
+### Phase 3 — Native PPTX vertical slices (2–3 weeks)
 
-### Phase 4: Polish & Refinement (1 week)
+- Build the exporter protocol and PptxGenJS worker.
+- Map text, shape, image, group, notes, theme, and master components.
+- Add table and common native chart mappings.
+- Add SVG and component-raster fallback with diagnostics.
+- Add OOXML validation, native-object assertions, and PowerPoint smoke fixtures.
 
-- [ ] "Improve with AI" button in DocsView (starts chat with deck slug in context)
-- [ ] Deck thumbnails in DocsView (render first slide, cache as data URL)
-- [ ] Theme preview/swatches in SlidesCard
-- [ ] Delete confirmation dialog
-- [ ] Error states: loading, failed export, empty deck
-- [ ] Slide validation in `write_slide` tool (well-formed HTML, size limits, no scripts)
-- [ ] Conditional system prompt injection (keyword detection)
+### Phase 4 — PDF, HTML, and production hardening (1–2 weeks)
 
-### Phase 5: Future Growth
+- Add deterministic go-rod PDF export.
+- Add self-contained HTML export and CSP.
+- Add asset ingestion, font checks, time/resource limits, caching, and export observability.
+- Add strict/native and visual-fidelity export profiles.
 
-- [ ] Custom web fonts (Google Fonts with local caching + embedding for export)
-- [ ] PPTX import (parse theme → generate theme.css, parse content → generate slide HTML)
-- [ ] Platform sharing (team scope, ACL, shared presenter URLs)
-- [ ] "Documents" doc type (rich text / Markdown → DOCX export)
-- [ ] "Spreadsheets" doc type (structured data → HTML tables → XLSX)
-- [ ] Versioning / history (track slide modifications, diff view)
-- [ ] Collaborative editing in Platform mode
-- [ ] Deck templates (pre-built starter decks for common scenarios)
-- [ ] PPTX text overlay extraction (V2 export enhancement)
+### Future
+
+- Additional chart types, connectors, animations, and transitions where both targets support them.
+- Optional Office content add-in export for explicitly live enterprise decks.
+- Version history, collaboration, templates, and manual editing.
+- PPTX import into ASD with explicit loss diagnostics.
+- Theme ingestion from corporate `.pptx` templates.
 
 ---
 
-## User Journey (Example)
+## Risks
 
-```
-User: "Create a presentation about our new microservices migration.
-       10 slides, for engineering leadership. Focus on risk
-       mitigation and timeline."
-
-Agent: [calls create_slides(title="Microservices Migration",
-        theme="light-corporate",
-        description="Engineering leadership pitch: risk + timeline")]
-       → afterToolCallback captures DocsUpdateInfo{action:"created"}
-       → ChatRunner drains → emitEvent("docs_update", {...})
-       → SlidesCard appears in chat (empty, title shown)
-
-       [calls write_slide(deckSlug, 0, "<html>...cover slide...", title="Cover")]
-       → SSE: docs_update {action:"slide_written", slideIndex:0, totalSlides:1}
-       → SlidesCard renders slide 0 in iframe
-
-       [calls write_slide(deckSlug, 1, "<html>...current architecture...")]
-       → SSE: docs_update {action:"slide_written", slideIndex:1, totalSlides:2}
-       → SlidesCard updates counter to "1 / 2"
-
-       ... (continues for all 10 slides) ...
-
-       [After final slide:]
-       "I've created a 10-slide deck covering the migration approach,
-        service dependency graph, risk matrix by service, rollback
-        strategy, timeline with milestones, and team allocation.
-
-        You can navigate through it inline, open in presenter mode
-        (full screen), or export to PDF/PPTX/HTML from the Docs section."
-
-User: "The risk slide needs more detail. Add a comparison table
-       for each service."
-
-Agent: [calls read_slide(deckSlug, 4)]
-       → Returns current HTML of slide 5 (0-indexed: 4)
-
-       [calls write_slide(deckSlug, 4, "<html>...updated risk slide with table...")]
-       → SlidesCard updates, auto-navigates to slide 4
-
-       "Updated slide 5 with a risk comparison table showing
-        probability, impact, and mitigation strategy per service."
-
-User: "Switch to the dark theme, this will be presented in a dim room."
-
-Agent: [calls update_theme(deckSlug, "dark-minimal")]
-       → All slides now render with dark-minimal CSS variables
-       → SlidesCard iframe refreshes
-
-       "Switched to the dark-minimal theme. All slides now use
-        the dark background with violet accents."
-```
-
----
-
-## Risk Assessment
-
-| Risk | Likelihood | Impact | Mitigation |
-|------|-----------|--------|------------|
-| LLM produces inconsistent slide quality | Medium | High | Strong system prompt guidance + theme constraints + `data-element` conventions |
-| System font rendering varies across OS | Low | Low | System fonts are designed for cross-platform consistency; export via go-rod uses Chromium's font renderer |
-| Performance (10+ go-rod page loads for export) | Low | Medium | Reuse single browser instance; parallel tab rendering |
-| Scope creep (editor, collaboration) | High | High | Strict V1 = AI-only; defer manual editing entirely |
-| Token cost (one tool call per slide) | Low | Low | ~500-2000 tokens per slide HTML; 10 slides = 5-20K output tokens |
-| Database storage for HTML | Low | Low | Slide HTML is 2-10KB each; 100 decks x 15 slides = ~15MB (trivial) |
-| PPTX image quality | Low | Medium | Screenshots at 1920x1080 → excellent quality for projection; PNG compression keeps file sizes reasonable |
-
----
-
-## Comparison: Genspark vs Astonish Docs
-
-| Aspect | Genspark | Astonish Docs |
-|--------|----------|---------------|
-| Rendering | Cloud-rendered iframes + screenshots | Local iframe rendering (same-origin API) |
-| Storage | Cloud project/git-backed | Database (SQLite local / PostgreSQL platform) |
-| Export | Server-side only (cloud) | Server-side via go-rod + custom PPTX writer |
-| Editing | AI-only iteration (cloud LLM) | AI-only (V1), uses Astonish's own agent |
-| Verification | Screenshot + geometry analysis | Live iframe preview (instant feedback) |
-| Theme source | Uploaded PPTX or style picker | 5 built-in + AI-generated + future PPTX import |
-| PPTX quality | Likely native element mapping | Image-based (V1) → hybrid text overlay (V2) |
-| Presentation mode | Cloud-hosted viewer | Local presenter HTML + React fullscreen |
-| Collaboration | Multi-user cloud | Personal V1 → Platform sharing V2 |
-| Integration | Standalone product | Integrated in Astonish agent workflow (flows, memory, tools) |
-| Font handling | Custom fonts (Google Fonts) | System fonts V1, custom fonts V2 |
-| Dependencies | Proprietary | Zero new external Go deps; custom PPTX writer |
+| Risk | Impact | Mitigation |
+|---|---|---|
+| Web and PowerPoint text engines wrap differently | High | Fixed boxes, approved fonts, overflow checks, PowerPoint render tests |
+| LLM requests unsupported CSS/effects | Medium | Schema-generated prompt, allowlist, strict validation, explicit fallback tiers |
+| Custom components silently flatten | High | Capability metadata, export diagnostics, strict mode, native-area acceptance gate |
+| PptxGenJS lacks a required PresentationML feature | Medium | Exporter abstraction; targeted OOXML post-processing or commercial SDK evaluation only when justified |
+| Node/JS worker complicates one-binary distribution | Medium | Phase 0 runtime spike, embedded bundle, isolated protocol, browser option for local mode |
+| PowerPoint and LibreOffice differ | Medium | PowerPoint is authoritative; LibreOffice is secondary compatibility testing |
+| Fonts unavailable on recipient machine | High | Approved font set, fallback declaration, preflight warning; investigate licensed embedding later |
+| Arbitrary asset URLs create SSRF/privacy risk | High | Managed asset ingestion and offline export |
+| Office add-in is mistaken for portable native content | Medium | Keep it a separate opt-in profile and always provide static fallback |
+| Component/schema evolution breaks old decks | High | Versioned source, migrations, legacy renderers, fixture corpus |
 
 ---
 
 ## Technical Decisions Log
 
 | Decision | Choice | Rationale |
-|----------|--------|-----------|
-| Internal format | HTML (absolute positioning) | Maximum LLM freedom, proven by Genspark + PPTAgent, direct iframe rendering |
-| Storage | Database (Ent/entstore pattern) | Consistent with apps/sessions/memories; no filesystem→DB migration needed |
-| Deck ID | ULID-based slug | No collision risk, sortable by time, URL-safe, works with non-ASCII titles |
-| PPTX generation | Custom minimal OOXML writer | Zero external deps, fully open-source, image-only is ~200 lines of Go |
-| PDF engine | `go-rod` (already in codebase) | Proven in `pkg/pdfgen/chrome.go`, pixel-perfect, zero new deps |
-| Slide dimensions | 1920×1080 (16:9) | Industry standard widescreen |
-| PPTX export strategy | Image-based (V1) → hybrid (V2) | Pragmatic quality vs effort trade-off |
-| UI category | "Docs" with sidebar section | Extensible to Documents and Sheets later |
-| Trigger mechanism | Natural language + conditional guidance | Lowest friction, consistent with Astonish UX |
-| Theme system | 5 pre-built + CSS variables | Strong defaults with full customizability |
-| Font strategy | System fonts V1, custom V2 | Avoids font-loading complexity in export; guaranteed cross-platform rendering |
-| Editing mode | AI-only (V1) | Keeps scope manageable; `read_slide` enables iterative refinement |
-| SSE emission | ChatRunner drain pattern | Architectural consistency; tools don't emit directly |
-| Presenter mode | API endpoint + React wrapper | External window for real presentations; in-app for quick preview |
-| Sharing architecture | DocsStore interface (same as AppStore) | Team/Org scope is additive, not a rewrite |
+|---|---|---|
+| Canonical source | Versioned `ast-*` Custom Element markup | Human/LLM-readable web format with explicit export semantics |
+| Internal contract | Normalized semantic scene graph | Decouples source syntax, web DOM, and PPTX library |
+| Web implementation | Astonish components, Lit where useful | Standards-based and framework-neutral without making Lit syntax persistent |
+| Runtime | Small owned controller behind an adapter | Avoids coupling persisted decks to a third-party framework |
+| Geometry | Fixed 1920 × 1080 logical canvas | Deterministic 16:9 mapping to 12 × 6.75 inch PowerPoint |
+| Styling | Typed theme tokens and export-safe properties | Predictable dual-target behavior and stronger security |
+| PPTX engine | PptxGenJS behind an exporter protocol | Best open-source balance of native objects, notes, charts, tables, and browser/Node support |
+| PPTX default | Native-first component compilation | Meets PowerPoint editability requirement |
+| Fallback | Per-component SVG/raster with diagnostics | Preserves the rest of the slide as editable objects |
+| Screenshot deck | Explicit visual-fidelity mode only | Useful escape hatch without mislabeling output as editable |
+| PDF | Chromium print of Web Components | Web rendering is the visual-fidelity target |
+| Live HTML in PPTX | Separate optional Office add-in profile | Add-ins are hosted runtime surfaces, not native portable shapes |
+| Storage | Tenant-scoped database and managed assets | Preserves Astonish scope invariants |
+| Security | Parsed allowlisted DSL in sandboxed iframe | Web Components do not justify arbitrary model-authored script execution |
+
+---
+
+## Interactive questions (`ask_user`)
+
+When a template offers **multiple variants per role** (several title covers, several
+dividers) or the flow needs a yes/no decision (e.g. "add an agenda slide?"), the
+agent no longer asks with a plain-text numbered list in Studio. Instead it renders a
+**generic, reusable inline chat questionnaire** — one question at a time — using the
+`ask_user` tool. Slides is the first consumer of this generic primitive; nothing
+about the question mechanism is slides-specific.
+
+### The `ask_user` tool
+
+`ask_user` is a cross-cutting agent tool (registered with the slides/docs toolset,
+consumed on the general chat path). Arguments:
+
+- `kind`: `"yesno"` (renders a Yes/No card) or `"select"` (renders a pick-one card).
+- `prompt`: the single question sentence.
+- `options` (for `select`): `[{ id, label, description? }]`.
+- `thumbnails` (optional): `[{ optionId, kind, markup?, assetRef?, theme?, assets? }]`
+  attached per option for a **visual** picker. For slides, `kind` is
+  `"slides-archetype"` and `markup` is the archetype's ASD `ast-slide` fragment
+  (from `get_template_variant_previews`).
+- `slidesTemplate` (optional slides convenience, `select`): a template name. ask_user
+  then resolves that template's per-role variants itself, auto-generates one option
+  per variant, and attaches a live `slides-archetype` thumbnail to each — so the model
+  never hand-copies markup. `slidesKind` filters to one role (title/section/…).
+- `slidesTemplatePicker` (optional slides convenience, `select`): set `true` (omit
+  `options`) for the **first** question, "which template should I use?". ask_user
+  enumerates every available template (built-in + scoped/imported) via
+  `templatePickerOptions`, generates one option per template (`id` = template name,
+  `label`/`description` from the `list_templates` catalog), and attaches a live cover
+  thumbnail per template — the template's first `title` archetype (else its first
+  archetype), tagged with the template name so the frontend resolves asset-refs at
+  render time. Never embeds `data:` bytes.
+
+The tool does **not** block the agent loop. On invocation the chat runner
+(`maybeEmitChatQuestion` in `pkg/api/chat_runner.go`) turns the result into an inline
+question card, then ends the turn. The user answers by clicking; that click is sent
+back as an **ordinary user message** (the chosen option label, or `Yes`/`No`) via the
+existing `connectChat` path — there is no dedicated answer endpoint and no sentinel
+token, so history stays readable and the model reads the answer naturally.
+
+### Slides variant previews (`get_template_variant_previews`)
+
+`get_template_variant_previews(template, kind?)` returns each archetype variant's
+lightweight metadata — `{ kind, label, tier, fillSlots }` plus a **thumbnail
+reference** (`Archetype.ThumbnailRef`, an asset key on the hidden `tmpl/<name>`
+deck) and the shared `theme` tokens and `assets`. It **no longer ships the full
+`markup`** for each variant: the archetype markup the agent authors from is already
+returned by `create_deck`, so re-fetching it here is redundant. Returning only
+metadata + a thumbnail reference keeps the payload small and fixed a
+context-overflow authoring loop (see "Static archetype thumbnails" below). Like all
+tool results it carries **ASD text and asset-refs only** — never `data:` image/font
+bytes (those resolve through the deck asset plumbing at render time), so it is safe
+to return from a tool and keeps `TestSlidesResponsesOmitHeavyManifestFields` green.
+The picker (`ask_user`) references the thumbnail image instead of live-rendering
+ast-slide markup.
+
+### Static archetype thumbnails
+
+Each imported template variant has a **pre-rasterized cover thumbnail** so the
+questionnaire pickers can show what a variant looks like without shipping (or
+live-rendering) its `ast-slide` markup:
+
+- **Baked once at import.** When a `.pptx` is imported, every archetype's HTML
+  export is rendered to a PNG **one time** via headless Chrome
+  (`pdfgen.RenderHTMLToPNGChrome`). There is no per-request/per-asset live
+  rendering.
+- **Stored content-addressed.** Each PNG is stored as a content-addressed asset
+  keyed `thumb/<kind>` on the hidden `tmpl/<name>` deck, and the archetype records
+  its key in `Archetype.ThumbnailRef`.
+- **Served over HTTP.** Thumbnails are served at
+  `GET /api/docs/slides/templates/<name>/thumbnails/<kind>`.
+- **Referenced, not embedded.** The questionnaire pickers (`ask_user`,
+  `get_template_variant_previews`) reference these images by URL/asset key instead
+  of shipping ast-slide markup. This both **fixes the context-overflow authoring
+  loop** (large per-variant markup payloads were being fetched and re-fetched,
+  evicting and re-loading context) and **removes per-asset live rendering** from the
+  picker path.
+- **Built-ins fall back to live render.** Built-in templates
+  (`light-corporate`/`midnight`/`aurora`) have no baked thumbnail; their cards fall
+  back to a live `ast-deck` render of the archetype.
+
+Invariant: as with every slides tool result, thumbnail payloads carry only asset
+references/URLs — **tool results never carry `data:` bytes**.
+
+### Static deck slide thumbnails
+
+Real decks get the **same** static-thumbnail treatment so the Slides view
+(`SlidesView.tsx` deck cards and the `SlidesDeckView.tsx` slide strip) can show
+each slide as a pre-baked image instead of live-rendering every slide in a
+sandboxed `iframe src=.../present#slide-N`:
+
+- **Baked once when a deck is finished.** When the model runs `review_deck` — its
+  declared FINAL step — `chat_runner.maybeEmitDocsUpdate` fires a best-effort,
+  background bake (`bakeDeckThumbnails` in `pkg/api/slides_handlers.go`). Each
+  slide's single-slide HTML export is rendered to a PNG **one time** via headless
+  Chrome (`pdfgen.RenderHTMLToPNGChrome`), reusing the archetype pipeline
+  (`HTMLExporter{Print:false}` + `SlidesReadinessExpression` +
+  `CanvasWidth`/`CanvasHeight`). The baker (`slides.GenerateDeckThumbnails`) is
+  idempotent: a slide is skipped when its `ThumbnailRef` is already set and the
+  asset is still present.
+- **Stored content-addressed.** Each PNG is stored as a `data:image/png;base64,…`
+  asset keyed `slidethumb/<version>/<position>` on the deck's `Assets` map, and
+  the slide records its key in `SlideContent.ThumbnailRef` (a `thumbnail_ref`
+  column on the Slide entity in both the personal and team scopes). The capture is
+  **downscaled** (`ScreenshotOptions.Scale`, currently 0.25 → 480×270) so each PNG
+  is a few tens of KB rather than a multi-MB full-canvas image — the Slides list
+  renders one `<img>` per deck card, so full-resolution captures made the list
+  slow to paint. The `<version>` segment lets a format/scale change invalidate
+  previously baked assets: a slide pointing at an old-version ref fails the
+  idempotency check and re-bakes on the next `review_deck`.
+- **Served over HTTP.** Thumbnails are served at
+  `GET /api/docs/slides/<deckSlug>/thumbnails/<idx>`
+  (`GetSlidesDeckSlideThumbnailHandler`) with long-lived immutable cache headers.
+- **Empty fallback — never a live render.** The Slides view renders these images
+  by URL (`deckSlideThumbnailUrl`). When no thumbnail has been baked, the endpoint
+  returns `404` and the tile shows an **EMPTY placeholder icon**. It does **not**
+  fall back to a live `ast-deck` render — that is an explicit product invariant for
+  the thumbnail path. The large interactive deck viewer / Present / full-screen in
+  `SlidesDeckView.tsx` still render live via `/present`; only the small per-slide
+  thumbnails switched to baked images.
+- **Best-effort baking.** Deck finishing never fails when a browser is
+  unavailable: a missing/sandbox-required-but-absent browser or any per-slide
+  render error is logged and swallowed, leaving that slide's `ThumbnailRef` empty
+  (and thus an empty placeholder tile).
+
+Invariant: as with archetype thumbnails, the baked PNGs live only in the deck
+`Assets` map and are served over HTTP — **tool results (`review_deck`,
+`write_slide`, `create_deck`, `get_deck`) never carry `data:` bytes**.
+
+### The `[chat_question]` event contract
+
+The card is emitted with the same prefix-marker pattern as `distill_preview` /
+`app_preview` / `tutorial_blueprint_preview`:
+
+- **Live**: an SSE event of type `chat_question` with data
+  `{ questionId, kind, prompt, options: [{ id, label, description?, thumbnail? }] }`.
+- **Reload**: a persisted `model` message text prefixed `[chat_question]` followed by
+  the same JSON, reconstructed on load by `tryParseChatQuestionMessage`
+  (`pkg/api/chat_utils.go`) into a typed `chat_question` `StudioMessage`.
+
+### Rendering
+
+- **Studio** (`web/src/components/StudioChat.tsx`): a `chat_question` message renders
+  a generic **`YesNoCard`** or **`SingleSelectCard`**
+  (`web/src/components/chat/questions/`). For a `slides-archetype` thumbnail,
+  **`SlidesArchetypeThumb`** live-renders the variant's `ast-slide` markup by mounting
+  the same `ast-*` runtime components the deck viewer uses, scaled down from the
+  1920×1080 canvas and set to `pointer-events: none` (non-interactive). On answer the
+  card collapses to a read-only `You chose: <label>` state and the chosen label is
+  sent as a normal user message, entering the agent loop like typed input.
+- **Terminal TUI** (`pkg/launcher/tui_chat.go`, `mapSSEToEvents`): the same event
+  **degrades to text** — the prompt followed by a numbered list of option labels
+  (or Yes/No). There are no thumbnails; the user answers by typing the number/label,
+  which flows through the existing input → SSE user-message path (terminal parity).
+
+### Slides workflow integration
+
+For a template with multiple variants, the agent asks **one question at a time in
+sequence**: (0) when the user did not name a template, `ask_user kind="select"` with
+`slidesTemplatePicker=true` — a card with one live cover thumbnail per available
+template, so the user chooses the design visually; the reply is the template name for
+`create_deck`. Then (1) `ask_user kind="select"` with `slides-archetype` thumbnails for the
+title/cover variant, (2) `ask_user kind="yesno"` for "Would you like an agenda
+slide?", (3) `ask_user kind="select"` with thumbnails for the divider/section
+variant. The questionnaire remains **agent-driven** (the model chooses to ask); it is
+not hard-enforced at the runtime level in this pass.
+
+---
+
+## Research Summary and Primary Sources
+
+Research conducted for this revision found:
+
+1. **WebSlides is not based on Web Components.** It is a conventional HTML/CSS/JavaScript presentation framework. Its design examples remain useful, but it should not define a new architecture.
+2. **Lit is the strongest standards-based component foundation**, but it is not a presentation runtime or exporter.
+3. **reveal.js is the mature runtime and PDF benchmark**, but its canonical slide structure is `<section>`-based rather than Custom Elements. It remains a viable adapter.
+4. **OddBird `<slide-deck>` is promising true-Web-Component prior art**, but it is pre-1.0 and lacks a complete export pipeline.
+5. **PptxGenJS is suitable for native PPTX generation**, but does not convert arbitrary DOM/CSS. Its HTML conversion is primarily for tables. Semantic application mapping is required.
+6. **PPTX cannot contain arbitrary live Web Components as ordinary native shapes.** Office content add-ins can host web UI, but introduce deployment, trust, network, and portability constraints.
+7. **SVG is normally inserted as a picture.** PowerPoint may let a user convert suitable SVG to shapes, but that is not a lossless round trip.
+
+### Primary references
+
+- Lit component model: <https://lit.dev/docs/components/overview/>
+- Lit repository and BSD-3-Clause license: <https://github.com/lit/lit>
+- OddBird slide-deck: <https://github.com/oddbird/slide-deck>
+- reveal.js markup: <https://revealjs.com/markup/>
+- reveal.js plugins: <https://revealjs.com/plugins/>
+- reveal.js PDF export: <https://revealjs.com/pdf-export/>
+- reveal.js repository and MIT license: <https://github.com/hakimel/reveal.js>
+- Slidev export behavior: <https://sli.dev/guide/exporting.html>
+- WebSlides repository: <https://github.com/webslides/WebSlides>
+- Archived DeckDeckGo repository: <https://github.com/deckgo/deckdeckgo>
+- PptxGenJS repository: <https://github.com/gitbrent/PptxGenJS>
+- PptxGenJS documentation: <https://gitbrent.github.io/PptxGenJS/>
+- PptxGenJS HTML/table conversion: <https://gitbrent.github.io/PptxGenJS/docs/html-to-powerpoint/>
+- PptxGenJS speaker notes: <https://gitbrent.github.io/PptxGenJS/docs/speaker-notes/>
+- PptxGenJS masters/placeholders: <https://gitbrent.github.io/PptxGenJS/docs/masters/>
+- Microsoft PowerPoint add-ins: <https://learn.microsoft.com/en-us/office/dev/add-ins/powerpoint/powerpoint-add-ins>
+- Microsoft content Office Add-ins: <https://learn.microsoft.com/en-us/office/dev/add-ins/design/content-add-ins>
+- Microsoft SVG editing and Convert to Shape: <https://support.microsoft.com/en-us/office/edit-svg-images-in-microsoft-365-69f29d39-194a-4072-8c35-dbe5e7ea528c>
+- Microsoft Open XML notes slides: <https://learn.microsoft.com/en-us/office/open-xml/presentation/working-with-notes-slides>
+- Microsoft PresentationML extensions: <https://learn.microsoft.com/en-us/openspecs/office_standards/ms-pptx/efd8bb2d-d888-4e2e-af25-cad476730c9f>
+- Open XML SDK and validator: <https://github.com/dotnet/Open-XML-SDK>
+
+---
+
+## Session-scoped deck lifecycle
+
+Slide decks created during a chat session follow a session-scoped lifecycle (analogous to Apps):
+
+1. **Session tagging**: When a deck is created via `create_deck` during a chat session, `store.SessionIDFromContext(ctx)` automatically sets the deck's `SessionID` field. The deck is invisible in the Slides view (`ListDecks` / `ListDecksLite` filter out non-empty `SessionID`).
+
+2. **Cascade deletion**: When a session is deleted (`StudioDeleteSessionHandler`), all decks with that session's ID are cascade-deleted via `DeleteDecksBySessionID`. No garbage accumulates.
+
+3. **Explicit Save**: The user promotes a session-scoped deck to permanent via `POST /api/docs/slides/{slug}/save`. This clears the `SessionID` (and optionally `SourceSlug`), making the deck visible in Slides view.
+
+4. **Enhance with AI**: From the Slides view, "Enhance with AI" navigates to Chat with a prompt referencing the saved deck. The model calls `get_deck` (saved decks are always accessible) and then `create_deck` with `source` parameter, which clones the deck into a session-scoped copy with `SourceSlug` set. The Save dialog then offers "Override Original" or "Save as New".
+
+5. **Versioning on override**: When override-saving (replacing an existing saved deck with session deck content), the old deck state is archived as a `DeckVersion` snapshot (title + JSON blob of theme/assets/slides). Up to 5 versions are kept per deck; the oldest are pruned.
+
+6. **Version history**: `GET /api/docs/slides/{slug}/versions` lists all archived versions (newest first). `POST /api/docs/slides/{slug}/versions/{version}/restore` restores a snapshot, archiving the current state first, then replacing deck content with the snapshot and bumping the version number.
+
+### Schema additions
+
+- **Deck entity** (`ent/{personal,team}/schema/deck.go`): Added `session_id` (string, default ""), `version` (int, default 1), `source_slug` (string, default ""). Index on `session_id` for efficient cascade queries.
+- **DeckVersion entity** (`ent/{personal,team}/schema/deck_version.go`): `id` (UUID), `deck_slug`, `version`, `title`, `snapshot` (text/JSON), `created_at`. Unique index on `(deck_slug, version)`.
+- **DocsStore interface** (`pkg/store/docs.go`): Added `DeleteDecksBySessionID`, `SaveDeckVersion`, `ListDeckVersions`, `GetDeckVersion`.
+- **DeckManifest** (`pkg/store/docs.go`): Added `SessionID`, `Version`, `SourceSlug` fields.
+
+### API endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/docs/slides/{slug}/save` | Promote session deck to permanent (simple/override/save-as-new) |
+| GET | `/api/docs/slides/{slug}/versions` | List version history |
+| POST | `/api/docs/slides/{slug}/versions/{v}/restore` | Restore a version snapshot |
+- ECMA-376 Office Open XML standard: <https://ecma-international.org/publications-and-standards/standards/ecma-376/>

@@ -129,6 +129,16 @@ func eventsToMessages(events session.Events, redactor *credentials.Redactor) []S
 						lastInvocationID = eventInvID
 						continue
 					}
+					if qm := tryParseChatQuestionMessage(text); qm != nil {
+						messages = append(messages, *qm)
+						lastInvocationID = eventInvID
+						continue
+					}
+					if dm := tryParseDocsUpdateMessage(text); dm != nil {
+						messages = append(messages, *dm)
+						lastInvocationID = eventInvID
+						continue
+					}
 					if fm := tryParseFlowOutputMessage(text); fm != nil {
 						messages = append(messages, *fm)
 						lastInvocationID = eventInvID
@@ -1409,6 +1419,107 @@ func tryParseDistillMessage(text string) *StudioMessage {
 	return nil
 }
 
+// --- Chat question (generic inline questionnaire) persistence ---
+//
+// A chat_question is a GENERIC, reusable interactive card: the assistant asks the
+// user a yes/no or single-select question (single-select options may carry an
+// optional thumbnail) and the user answers by clicking, which sends their choice
+// back as an ordinary user message. It is persisted using the same prefix-marker
+// pattern as distill/app previews so eventsToMessages can reconstruct it on reload.
+// Format: [chat_question]<JSON payload>.
+//
+// ANSWER ROUND-TRIP CONVENTION: there is NO dedicated endpoint. The ask_user tool
+// returns a short result telling the model the user's next message is the answer;
+// the frontend card, on click, sends the chosen option label (for select) or
+// "Yes"/"No" (for yesno) as a normal user message via the existing connectChat
+// path, so the model reads the answer naturally and history stays readable.
+
+const chatQuestionPrefix = "[chat_question]"
+
+// chatQuestionThumbnailPayload mirrors ChatQuestionThumbnail on the wire.
+//
+// It DELIBERATELY does NOT carry the resolved asset map (asset-ref -> data URI):
+// embedding image/font bytes here would bloat both the model's conversation
+// history and the persisted message by megabytes per option (see the OpenAI
+// "string too long" incident). Instead it carries the template NAME; the
+// frontend resolves any asset-ref tokens in the markup at render time from the
+// template's assets via the existing slides API — the same "resolve by
+// slug/name at render time" plumbing the deck viewer uses. Never add an Assets
+// field back here.
+type chatQuestionThumbnailPayload struct {
+	Kind     string            `json:"kind"`
+	Markup   string            `json:"markup,omitempty"`
+	AssetRef string            `json:"assetRef,omitempty"`
+	Theme    map[string]string `json:"theme,omitempty"`
+	Template string            `json:"template,omitempty"`
+}
+
+// chatQuestionOptionPayload mirrors ChatQuestionOption on the wire.
+type chatQuestionOptionPayload struct {
+	ID          string                        `json:"id"`
+	Label       string                        `json:"label"`
+	Description string                        `json:"description,omitempty"`
+	Thumbnail   *chatQuestionThumbnailPayload `json:"thumbnail,omitempty"`
+}
+
+// chatQuestionPayload is the JSON structure persisted inside the text event.
+type chatQuestionPayload struct {
+	QuestionID string                      `json:"questionId"`
+	Kind       string                      `json:"kind"` // "yesno" | "select"
+	Prompt     string                      `json:"prompt"`
+	Options    []chatQuestionOptionPayload `json:"options,omitempty"`
+}
+
+// persistChatQuestion serializes a chat question as a structured text event so
+// the frontend renders an inline YesNoCard / SingleSelectCard and the terminal
+// TUI degrades it to a numbered text prompt.
+func persistChatQuestion(ctx context.Context, svc session.Service, userID, sessionID string, payload chatQuestionPayload) {
+	if svc == nil || sessionID == "" || payload.Prompt == "" {
+		return
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		slog.Error("failed to marshal chat question", "error", err)
+		return
+	}
+	persistSessionMessage(ctx, svc, userID, sessionID, "model", chatQuestionPrefix+string(data))
+}
+
+// tryParseChatQuestionMessage checks if a text starts with the chat_question
+// marker prefix and returns a structured StudioMessage if so. Returns nil if not
+// a chat question message.
+func tryParseChatQuestionMessage(text string) *StudioMessage {
+	if !strings.HasPrefix(text, chatQuestionPrefix) {
+		return nil
+	}
+	jsonStr := text[len(chatQuestionPrefix):]
+	var payload chatQuestionPayload
+	if err := json.Unmarshal([]byte(jsonStr), &payload); err != nil {
+		return nil
+	}
+	options := make([]ChatQuestionOption, 0, len(payload.Options))
+	for _, o := range payload.Options {
+		opt := ChatQuestionOption{ID: o.ID, Label: o.Label, Description: o.Description}
+		if o.Thumbnail != nil {
+			opt.Thumbnail = &ChatQuestionThumbnail{
+				Kind:     o.Thumbnail.Kind,
+				Markup:   o.Thumbnail.Markup,
+				AssetRef: o.Thumbnail.AssetRef,
+				Theme:    o.Thumbnail.Theme,
+				Template: o.Thumbnail.Template,
+			}
+		}
+		options = append(options, opt)
+	}
+	return &StudioMessage{
+		Type:         "chat_question",
+		QuestionID:   payload.QuestionID,
+		QuestionKind: payload.Kind,
+		Prompt:       payload.Prompt,
+		Options:      options,
+	}
+}
+
 // --- Tutorial blueprint preview persistence ---
 
 const tutorialBlueprintPreviewPrefix = "[tutorial_blueprint_preview]"
@@ -1878,6 +1989,34 @@ func joinReportMarkers(artifacts []ArtifactInfo, markers map[string]string) []Ar
 // are neither rendered nor coalesced into the agent prose around them.
 func tryParseReportMarkerMessage(text string) bool {
 	return strings.HasPrefix(text, reportMarkerPrefix)
+}
+
+const docsUpdatePrefix = "[docs_update]"
+
+func persistDocsUpdate(ctx context.Context, svc session.Service, userID, sessionID string, payload map[string]any) {
+	if svc == nil || sessionID == "" || payload == nil {
+		return
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		slog.Error("failed to marshal docs update", "error", err)
+		return
+	}
+	persistSessionMessage(ctx, svc, userID, sessionID, "model", docsUpdatePrefix+string(data))
+}
+
+func tryParseDocsUpdateMessage(text string) *StudioMessage {
+	if !strings.HasPrefix(text, docsUpdatePrefix) {
+		return nil
+	}
+	var payload DocsUpdatePayload
+	if err := json.Unmarshal([]byte(text[len(docsUpdatePrefix):]), &payload); err != nil {
+		return nil
+	}
+	if payload.Type != "slides" || payload.DeckSlug == "" || payload.Action == "" {
+		return nil
+	}
+	return &StudioMessage{Type: "docs_update", DocsUpdate: &payload}
 }
 
 // --- Flow output persistence ---

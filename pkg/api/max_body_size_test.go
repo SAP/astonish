@@ -85,6 +85,7 @@ func TestLimitForPath(t *testing.T) {
 		{"/api/fleet/sessions/abc", "POST", largeMaxBody},
 		{"/api/sandbox/templates/create", "POST", largeMaxBody},
 		{"/api/studio/sessions/import", "POST", largeMaxBody},
+		{"/api/docs/slides/import", "POST", pptxImportMaxBody},
 		{"/api/agents", "GET", defaultMaxBody},
 		{"/api/agents/test", "DELETE", defaultMaxBody},
 	}

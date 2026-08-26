@@ -102,6 +102,10 @@ type TurnOptions struct {
 	// and the model is instructed to answer questions without planning or
 	// executing. Mutually exclusive with PlanMode and GraphPlanMode.
 	AskMode bool
+	// ApprovedPlanExecution marks the implementation turn launched from an
+	// approved plan. The runtime allows normal tools and update_plan, but rejects
+	// announce_plan so execution cannot replace the approved plan.
+	ApprovedPlanExecution bool
 	// Attachments are optional multimodal file/image payloads for this turn.
 	Attachments []Attachment
 }

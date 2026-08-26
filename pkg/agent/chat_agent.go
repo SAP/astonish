@@ -58,7 +58,7 @@ type ChatAgent struct {
 	SystemPrompt   *SystemPromptBuilder
 	DebugMode      bool
 	AutoApprove    bool
-	MaxToolCalls   int // Max consecutive tool calls per turn (default: 25)
+	MaxToolCalls   int // Unused. Previous per-turn tool-call pause is removed; 0 = unlimited.
 
 	// Flow distillation
 	FlowSaveDir   string         // Directory for saved flows (default: agents dir)
@@ -157,8 +157,11 @@ type ChatAgent struct {
 	// Plan auto-progression: tracks step state from announce_plan so that
 	// AfterToolCallback can automatically mark steps running/complete
 	// without requiring the LLM to call update_plan (saving full round-trips).
-	activePlan   *PlanState
-	activePlanMu sync.Mutex
+	activePlan                   *PlanState
+	activePlanApproved           bool
+	activePlanReplacementAllowed bool
+	activePlanVersion            uint64
+	activePlanMu                 sync.Mutex
 
 	// activeGraphPlan is the GraphPlanState the gplan_* transition tools drive
 	// for the current turn. Code mode sets it at turn start (to the per-session
@@ -316,8 +319,6 @@ func NewChatAgent(llm model.LLM, internalTools []tool.Tool, toolsets []tool.Tool
 	sessionService session.Service, promptBuilder *SystemPromptBuilder,
 	debugMode bool, autoApprove bool) *ChatAgent {
 
-	maxToolCalls := 100
-
 	return &ChatAgent{
 		LLM:                  llm,
 		Tools:                internalTools,
@@ -326,7 +327,6 @@ func NewChatAgent(llm model.LLM, internalTools []tool.Tool, toolsets []tool.Tool
 		SystemPrompt:         promptBuilder,
 		DebugMode:            debugMode,
 		AutoApprove:          autoApprove,
-		MaxToolCalls:         maxToolCalls,
 		approvalHelper:       &AstonishAgent{LLM: llm, AutoApprove: autoApprove},
 		traceHistory:         make(map[string][]*ExecutionTrace),
 		pendingDistill:       make(map[string]*distillPreview),
@@ -842,9 +842,89 @@ func (c *ChatAgent) DrainFlowOutput() string {
 // it survives context compaction.
 func (c *ChatAgent) SetActivePlan(plan *PlanState) {
 	c.activePlanMu.Lock()
+	c.activePlanVersion++
+	version := c.activePlanVersion
 	c.activePlan = plan
+	c.activePlanApproved = false
+	c.activePlanReplacementAllowed = false
+	c.activePlanMu.Unlock()
+	c.persistActivePlan(plan, version)
+}
+
+// TrySetActivePlan installs a newly announced plan unless the current plan has
+// already been approved for execution. The check and replacement are atomic, so
+// stale or concurrent announce_plan calls cannot overwrite the approved state.
+func (c *ChatAgent) TrySetActivePlan(plan *PlanState) bool {
+	c.activePlanMu.Lock()
+	if c.activePlan != nil && (c.activePlanApproved || !c.activePlanReplacementAllowed) {
+		c.activePlanMu.Unlock()
+		return false
+	}
+	c.activePlanVersion++
+	version := c.activePlanVersion
+	c.activePlan = plan
+	c.activePlanReplacementAllowed = false
 	c.activePlanMu.Unlock()
 
+	c.persistActivePlan(plan, version)
+	return true
+}
+
+// AllowActivePlanReplacement opens one revision slot for a planning turn after
+// the user explicitly requests changes. The next accepted announcement consumes
+// the slot, preventing parallel announcements from both replacing the plan.
+func (c *ChatAgent) AllowActivePlanReplacement() {
+	c.activePlanMu.Lock()
+	if !c.activePlanApproved {
+		c.activePlanReplacementAllowed = true
+	}
+	c.activePlanMu.Unlock()
+}
+
+// MarkActivePlanApproved seals the current plan against replacement while
+// allowing update_plan to continue mutating its step statuses.
+func (c *ChatAgent) MarkActivePlanApproved() {
+	c.activePlanMu.Lock()
+	if c.activePlan != nil {
+		c.activePlanApproved = true
+	}
+	c.activePlanMu.Unlock()
+}
+
+// IsActivePlanApproved reports whether the in-memory plan has been sealed for
+// execution. Used by code-mode turns to keep following PLAN.md after the first
+// approval turn without reopening a replacement slot.
+func (c *ChatAgent) IsActivePlanApproved() bool {
+	c.activePlanMu.Lock()
+	defer c.activePlanMu.Unlock()
+	return c.activePlanApproved
+}
+
+// RestoreApprovedPlan loads the authoritative PLAN.md sidecar and rehydrates
+// PlanState before an approved execution turn. This removes reliance on the
+// model remembering to read the file after resume or context compaction.
+func (c *ChatAgent) RestoreApprovedPlan() error {
+	c.planFileMu.Lock()
+	path := c.planFilePath
+	c.planFileMu.Unlock()
+	if path == "" {
+		return fmt.Errorf("plan file path is not configured")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read active plan: %w", err)
+	}
+	doc, goal, steps, err := ParsePlanDocument(string(data))
+	if err != nil {
+		return fmt.Errorf("parse active plan: %w", err)
+	}
+	plan := NewPlanState(goal, doc, steps)
+	c.SetActivePlan(plan)
+	c.MarkActivePlanApproved()
+	return nil
+}
+
+func (c *ChatAgent) persistActivePlan(plan *PlanState, version uint64) {
 	if plan == nil {
 		return
 	}
@@ -857,13 +937,14 @@ func (c *ChatAgent) SetActivePlan(plan *PlanState) {
 	}
 
 	// Persist on every phase transition, and once immediately so the file
-	// exists the moment the plan is announced.
+	// exists the moment the plan is announced. Version checks prevent an older
+	// plan's callback from rewriting the file after a newer plan was installed.
 	plan.SetOnChange(func() {
 		goal, steps := plan.snapshotLocked()
-		c.writePlanFile(renderPlanMarkdownWithDoc(goal, plan.doc, steps))
+		c.writePlanFileVersion(version, renderPlanMarkdownWithDoc(goal, plan.doc, steps))
 	})
 	goal, steps := plan.Snapshot()
-	c.writePlanFile(renderPlanMarkdownWithDoc(goal, plan.SnapshotDoc(), steps))
+	c.writePlanFileVersion(version, renderPlanMarkdownWithDoc(goal, plan.SnapshotDoc(), steps))
 }
 
 // SetPlanFilePath configures the per-session PLAN.md path. Empty disables
@@ -889,6 +970,15 @@ func (c *ChatAgent) GetActiveGraphPlan() *GraphPlanState {
 	c.activeGraphPlanMu.Lock()
 	defer c.activeGraphPlanMu.Unlock()
 	return c.activeGraphPlan
+}
+
+func (c *ChatAgent) writePlanFileVersion(version uint64, content string) {
+	c.activePlanMu.Lock()
+	defer c.activePlanMu.Unlock()
+	if version != c.activePlanVersion {
+		return
+	}
+	c.writePlanFile(content)
 }
 
 // writePlanFile writes the rendered plan document to the configured PLAN.md

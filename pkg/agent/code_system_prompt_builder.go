@@ -168,9 +168,8 @@ func (b *CodeSystemPromptBuilder) build(base *SystemPromptBuilder) string {
 		sb.WriteString("If the sandbox was recycled (files missing), silently re-clone and continue — do not ask the user.\n")
 	}
 	if b.PlanFilePersistence {
-		sb.WriteString("\n**Execution plan (PLAN.md):** When you announce a multi-phase plan (announce_plan), it is persisted to a session PLAN.md at an absolute path. When you start executing (after plan approval), the execution context provides the exact path — call read_file with that path immediately. As you work, keep it current: for main-thread phases call update_plan (running → complete/failed); delegated phases update automatically. ")
-		sb.WriteString("After a context summary, re-read PLAN.md with read_file to recover the exact plan and where you left off, then mark the next phase running and continue.\n")
-		sb.WriteString("\nUse these optional announce_plan fields to make plans safe to follow:\n")
+		sb.WriteString("\n**Execution plan (PLAN.md):** Implementation plans are recorded only in Plan mode via `announce_plan` and persisted to a session PLAN.md. In Normal mode you MUST NOT call `announce_plan` — the runtime will refuse it. When executing an approved plan, PLAN.md is inlined in the execution context; follow it phase by phase. Keep it current: for main-thread phases call `update_plan` (running → complete/failed); delegated phases update automatically. After a context summary, the inlined PLAN.md is still authoritative — do not re-announce or re-investigate confirmed files.\n")
+		sb.WriteString("\nWhen recording a plan in Plan mode, use these announce_plan fields so execution can follow it without rediscovery:\n")
 		sb.WriteString("- `context`: WHY this change is needed (motivation, problem, background). Write it when the reason isn't obvious from the goal title.\n")
 		sb.WriteString("- `what_not_to_do`: explicit scope guard — list APIs, files, behaviors, or invariants that must NOT change. Guards against accidental scope creep.\n")
 		sb.WriteString("- `verification`: end-to-end smoke test sequence for the entire plan after all phases complete.\n")
@@ -255,7 +254,7 @@ func (b *CodeSystemPromptBuilder) build(base *SystemPromptBuilder) string {
 		sb.WriteString("- `delegate_tasks` is for **parallelism and context isolation**, not error recovery\n\n")
 
 		sb.WriteString("**Planning strategy:**\n")
-		sb.WriteString("1. For multi-step tasks, call `announce_plan` first to show the user your approach as a visible checklist.\n")
+		sb.WriteString("1. Record implementation plans only in Plan mode with `announce_plan`. In Normal mode do not call `announce_plan`; if a PLAN.md is active, follow it with `update_plan`.\n")
 		sb.WriteString("2. Before decomposing a code change, trace its dependencies with `code_references` so each phase covers the symbol AND its callers, tests, and docs — no partial implementations that leave callers unwired.\n")
 		sb.WriteString("3. Decompose complex goals into independent, parallelizable sub-tasks (each with a clear deliverable).\n")
 		sb.WriteString("4. Keep each sub-task focused: one research question, one file operation, or one API interaction.\n")

@@ -69,6 +69,30 @@ func (f CredentialFunc) Mutate(ctx context.Context, m team.Mutation) (team.Value
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *team.CredentialMutation", m)
 }
 
+// The DeckFunc type is an adapter to allow the use of ordinary
+// function as Deck mutator.
+type DeckFunc func(context.Context, *team.DeckMutation) (team.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f DeckFunc) Mutate(ctx context.Context, m team.Mutation) (team.Value, error) {
+	if mv, ok := m.(*team.DeckMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *team.DeckMutation", m)
+}
+
+// The DeckVersionFunc type is an adapter to allow the use of ordinary
+// function as DeckVersion mutator.
+type DeckVersionFunc func(context.Context, *team.DeckVersionMutation) (team.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f DeckVersionFunc) Mutate(ctx context.Context, m team.Mutation) (team.Value, error) {
+	if mv, ok := m.(*team.DeckVersionMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *team.DeckVersionMutation", m)
+}
+
 // The DrillReportFunc type is an adapter to allow the use of ordinary
 // function as DrillReport mutator.
 type DrillReportFunc func(context.Context, *team.DrillReportMutation) (team.Value, error)
@@ -307,6 +331,18 @@ func (f SkillFileFunc) Mutate(ctx context.Context, m team.Mutation) (team.Value,
 		return f(ctx, mv)
 	}
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *team.SkillFileMutation", m)
+}
+
+// The SlideFunc type is an adapter to allow the use of ordinary
+// function as Slide mutator.
+type SlideFunc func(context.Context, *team.SlideMutation) (team.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f SlideFunc) Mutate(ctx context.Context, m team.Mutation) (team.Value, error) {
+	if mv, ok := m.(*team.SlideMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *team.SlideMutation", m)
 }
 
 // The TeamAuditLogFunc type is an adapter to allow the use of ordinary

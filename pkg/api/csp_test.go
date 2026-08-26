@@ -43,3 +43,19 @@ func TestCSPMiddleware_AllowsBlobMedia(t *testing.T) {
 		t.Fatalf("CSP missing GitHub release-check allowance, got %q", csp)
 	}
 }
+
+func TestCSPMiddlewarePreservesSlidesPresentationPolicy(t *testing.T) {
+	const presentationCSP = "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'"
+	handler := CSPMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Security-Policy", presentationCSP)
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/docs/slides/einstein/present?scope=personal", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if got := rr.Header().Get("Content-Security-Policy"); got != presentationCSP {
+		t.Fatalf("presentation CSP = %q, want %q", got, presentationCSP)
+	}
+}

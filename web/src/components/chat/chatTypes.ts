@@ -202,6 +202,29 @@ export interface ReportMarkerMessage {
   title?: string
 }
 
+// ---- Slide document updates ----
+
+export interface DocsUpdateMessage {
+  type: 'docs_update'
+  docType: 'slides'
+  deckSlug: string
+  action: string
+  slideIndex?: number
+  totalSlides?: number
+  title?: string
+  schemaVersion?: number
+  validation?: {
+    errors: number
+    warnings: number
+  }
+  pptxCapability?: {
+    native: number
+    vector: number
+    raster: number
+    unsupported: number
+  }
+}
+
 // ---- Execution plan (announce_plan / update_plan) ----
 
 export interface PlanMessage {
@@ -254,6 +277,33 @@ export interface DistillSavedMessage {
   type: 'distill_saved'
   filePath: string
   runCommand: string
+}
+
+// ---- Interactive chat question (yes/no or select) ----
+
+export interface ChatQuestionOption {
+  id: string
+  label: string
+  description?: string
+  thumbnail?: {
+    kind: 'slides-archetype' | 'image'
+    markup?: string
+    assetRef?: string
+    theme?: Record<string, string>
+    /** Template name; asset-refs in `markup` resolve from this template's
+     *  assets at render time (never embedded data: bytes). */
+    template?: string
+  }
+}
+
+export interface ChatQuestionMessage {
+  type: 'chat_question'
+  questionId: string
+  kind: 'yesno' | 'select'
+  prompt: string
+  options: ChatQuestionOption[]
+  answered?: boolean
+  answer?: string
 }
 
 export interface TutorialBlueprintSceneRow {
@@ -356,12 +406,14 @@ export type ChatMsg =
   | AppPreviewMessage
   | DistillPreviewMessage
   | DistillSavedMessage
+  | ChatQuestionMessage
   | TutorialBlueprintPreviewMessage
   | TutorialBlueprintApprovedMessage
   | TutorialSceneSlideshowMessage
   | AppSavedMessage
   | ReportPreviewMessage
   | ReportMarkerMessage
+  | DocsUpdateMessage
   | SourcesMessage
   | NetworkDenialMessage
 

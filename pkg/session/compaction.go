@@ -36,10 +36,10 @@ type Compactor struct {
 	DebugMode bool
 
 	// PlanFilePath, when set, is the path to the per-session PLAN.md. When a
-	// plan file exists at compaction time, a pointer is appended to the context
-	// summary instructing the model to re-read it to recover the exact plan
-	// phases and completion status. The Compactor stays domain-agnostic: it only
-	// knows a plan file path, never its contents.
+	// plan file exists at compaction time, its contents are inlined into the
+	// context summary so the exact phases and completion status survive
+	// compaction without a follow-up read. The Compactor stays domain-agnostic:
+	// it only reads the file as opaque text.
 	PlanFilePath string
 
 	// Stats tracking
@@ -270,9 +270,9 @@ func (c *Compactor) CompactContents(ctx context.Context, contents []*genai.Conte
 		summary = c.truncationSummary(oldContents)
 	}
 
-	// If a per-session plan file exists, append a durable pointer so the model
-	// re-reads PLAN.md to recover the exact phases and completion status that
-	// prose summarization cannot faithfully preserve.
+	// If a per-session plan file exists, inline it so the model recovers the
+	// exact phases and completion status that prose summarization cannot
+	// faithfully preserve.
 	if ptr := c.planFilePointer(); ptr != "" {
 		summary += "\n\n" + ptr
 	}
@@ -350,11 +350,19 @@ func (c *Compactor) planFilePointer() string {
 	if _, err := os.Stat(path); err != nil {
 		return ""
 	}
+	data, err := os.ReadFile(path)
+	if err != nil || len(data) == 0 {
+		return ""
+	}
+	body := string(data)
+	const maxPlanInlineBytes = 32 * 1024
+	if len(body) > maxPlanInlineBytes {
+		body = body[:maxPlanInlineBytes] + "\n… [PLAN.md truncated]"
+	}
 	return fmt.Sprintf(
 		"[ACTIVE EXECUTION PLAN] An execution plan with per-phase completion status is persisted at %s. "+
-			"Re-read it with read_file to recover the exact phases and where you are before continuing. "+
-			"Do not reconstruct the plan from this summary.",
-		path,
+			"Follow this inlined plan; do not reconstruct it or re-investigate confirmed files.\n\n%s",
+		path, strings.TrimRight(body, "\n"),
 	)
 }
 

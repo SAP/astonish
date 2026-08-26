@@ -119,7 +119,15 @@ func detachedRuntimeNetworkPolicyContext(r *http.Request, appCfg *config.AppConf
 }
 
 // --- App sandbox idle management (shared by MCP + HTTP) ---
-
+//
+// This tracker is also reused by the slides PDF export path
+// (ExportSlidesPDFHandler) for its dedicated per-user "slides-pdf-<user>"
+// sessions. destroyIdle reaps any tracked session id generically via
+// backend.DestroySession — it makes no assumption about an "app-mcp-" prefix —
+// so slides-pdf-* sessions are created, kept warm (touch), and reaped by the
+// same watchdog. DestroySession is idempotent per the backend contract, so it
+// is safe even for the Incus path which also has its own container idle
+// management.
 var appMCPIdleTracker = &appMCPTracker{
 	lastActivity: make(map[string]time.Time),
 }

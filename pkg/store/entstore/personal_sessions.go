@@ -45,8 +45,8 @@ type personalSession struct {
 }
 
 func (s *personalSession) ID() string      { return s.id }
-func (s *personalSession) AppName() string  { return s.appName }
-func (s *personalSession) UserID() string   { return s.userID }
+func (s *personalSession) AppName() string { return s.appName }
+func (s *personalSession) UserID() string  { return s.userID }
 func (s *personalSession) State() adksession.State {
 	return &personalSessionState{mu: &s.mu, state: s.state}
 }

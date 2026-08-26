@@ -15,9 +15,9 @@ type MCPServer struct {
 	Command     string            `json:"command,omitempty"`
 	Args        []string          `json:"args,omitempty"`
 	Env         map[string]string `json:"env,omitempty"`
-	Transport   string            `json:"transport"`             // "stdio" or "sse"
-	URL         string            `json:"url,omitempty"`         // For SSE transport
-	Enabled     *bool             `json:"enabled,omitempty"`     // nil defaults to true
+	Transport   string            `json:"transport"`              // "stdio" or "sse"
+	URL         string            `json:"url,omitempty"`          // For SSE transport
+	Enabled     *bool             `json:"enabled,omitempty"`      // nil defaults to true
 	CachedTools json.RawMessage   `json:"cached_tools,omitempty"` // Tool declarations from last refresh
 	CreatedBy   string            `json:"created_by,omitempty"`
 	CreatedAt   time.Time         `json:"created_at,omitempty"`

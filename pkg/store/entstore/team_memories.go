@@ -750,4 +750,3 @@ func buildORTsquery(text string) string {
 	// Join with " or " for websearch_to_tsquery syntax.
 	return strings.Join(unique, " or ")
 }
-

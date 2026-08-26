@@ -45,6 +45,30 @@ func (f CredentialFunc) Mutate(ctx context.Context, m personal.Mutation) (person
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *personal.CredentialMutation", m)
 }
 
+// The DeckFunc type is an adapter to allow the use of ordinary
+// function as Deck mutator.
+type DeckFunc func(context.Context, *personal.DeckMutation) (personal.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f DeckFunc) Mutate(ctx context.Context, m personal.Mutation) (personal.Value, error) {
+	if mv, ok := m.(*personal.DeckMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *personal.DeckMutation", m)
+}
+
+// The DeckVersionFunc type is an adapter to allow the use of ordinary
+// function as DeckVersion mutator.
+type DeckVersionFunc func(context.Context, *personal.DeckVersionMutation) (personal.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f DeckVersionFunc) Mutate(ctx context.Context, m personal.Mutation) (personal.Value, error) {
+	if mv, ok := m.(*personal.DeckVersionMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *personal.DeckVersionMutation", m)
+}
+
 // The FlowFunc type is an adapter to allow the use of ordinary
 // function as Flow mutator.
 type FlowFunc func(context.Context, *personal.FlowMutation) (personal.Value, error)
@@ -115,6 +139,18 @@ func (f SessionEventFunc) Mutate(ctx context.Context, m personal.Mutation) (pers
 		return f(ctx, mv)
 	}
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *personal.SessionEventMutation", m)
+}
+
+// The SlideFunc type is an adapter to allow the use of ordinary
+// function as Slide mutator.
+type SlideFunc func(context.Context, *personal.SlideMutation) (personal.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f SlideFunc) Mutate(ctx context.Context, m personal.Mutation) (personal.Value, error) {
+	if mv, ok := m.(*personal.SlideMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *personal.SlideMutation", m)
 }
 
 // Condition is a hook condition function.

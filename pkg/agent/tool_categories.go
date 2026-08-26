@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"google.golang.org/adk/session"
@@ -30,8 +31,8 @@ Your job is to produce a COMPLETE plan the user can approve with confidence — 
 4. BE EFFICIENT — SPEND EFFORT PROPORTIONAL TO BLAST RADIUS. A one-file tweak needs a quick look; a cross-cutting change needs full tracing. Stop exploring once you can name every file you would change and why — do not read the whole repo. Prefer structural tools (code_definition/code_references) over broad grep, and never re-read a file already in your context.
 
 When your plan is finalized, record it with announce_plan (goal + ordered, dependency-first phases). For each phase:
-- 'files': list every file the phase touches (marked new/modify/delete) — the symbol AND its callers, tests, generated code, migrations, docs.
-- 'details': write a concrete, self-contained description of exactly what to do in this phase — specific structs/functions to add or remove, the exact logic change, new fields, interface updates. Write enough detail that execution can proceed directly from this text without re-reading the code. This is the most important field; a vague 'details' makes the plan useless.
+- 'files': REQUIRED. List every file the phase touches (marked new/modify/delete) — the symbol AND its callers, tests, generated code, migrations, docs.
+- 'details': REQUIRED. Write a concrete, self-contained implementation spec — exact function/type/method names, signature changes, call-site updates, and test names. Execution must proceed from this text without a second codegraph pass. A sketch is incomplete.
 - 'verify': the command that proves the phase is done (build/test/lint).
 
 Before calling announce_plan, run this COMPLETENESS SELF-CHECK:
@@ -69,7 +70,7 @@ The runtime advances through four phases. Each phase unlocks a specific set of t
 
 PHASE 1 — GRAPH (current at turn start). Only ` + "`codegraph_explore`" + ` and ` + "`find_files`" + ` are available. codegraph is a pre-computed knowledge graph of this repo: symbols, call edges, dependencies, cross-file references, and change blast-radius. Query it FIRST to understand the code you will touch — it answers most structural questions in 1-4 calls with far fewer tokens than grep. Compound your findings as you go: never re-query the graph for something already in your context. When you have identified the exact regions you need to read, call ` + "`gplan_reads`" + ` with the synthesized read list (each entry: path + why you need it). Only include paths that ` + "`codegraph_explore`" + ` explicitly returned — do NOT guess or infer filenames; if you need a file but do not have its confirmed path, use ` + "`find_files`" + ` to locate it first. This advances you to the READ phase. If codegraph returns no coverage (language unsupported / not indexed), call ` + "`gplan_gaps`" + ` immediately to skip straight to the GAP phase.
 
-PHASE 2 — READ. ` + "`read_file`" + ` (and read_pdf/filter_json) unlock, plus codegraph_explore. Read exactly the regions you listed — do NOT re-search for information you already have. When you have read everything the graph pointed you to, decide: if genuine gaps remain that codegraph could not answer, call ` + "`gplan_gaps`" + ` with those gaps (each: the question + why codegraph was insufficient) to advance to the GAP phase. If there are no gaps, call ` + "`gplan_finalize`" + ` to skip straight to the PLAN phase.
+PHASE 2 — READ. ` + "`read_file`" + ` (and read_pdf/filter_json) unlock, plus codegraph_explore. There is no read quota — read every region on the list you recorded with gplan_reads. Never ` + "`read_file`" + ` a path whose contents are already in this turn's context, and do not re-search for information you already have. When you have read everything the graph pointed you to, decide: if genuine gaps remain that codegraph could not answer, call ` + "`gplan_gaps`" + ` with those gaps (each: the question + why codegraph was insufficient) to advance to the GAP phase. If there are no gaps, call ` + "`gplan_finalize`" + ` to skip straight to the PLAN phase.
 
 PHASE 3 — GAP (complementary). The remaining read-only tools unlock: grep_search, find_files, file_tree, repo_map, code_definition, code_references, web_fetch, memory_search, memory_get, skill_lookup — and delegate_tasks. Use these ONLY for the genuine gaps codegraph could not fill. Prefer ` + "`delegate_tasks`" + ` with read-only ` + "`tools`" + ` filters (e.g. ["grep_search","read_file","code_references"]) to fan out independent gap questions in parallel. Do not re-answer anything already established. When gaps are closed, call ` + "`gplan_finalize`" + ` to advance to the PLAN phase.
 
@@ -86,19 +87,24 @@ Before calling announce_plan, run this COMPLETENESS SELF-CHECK:
 
 If any check reveals a gap, add the missing phase BEFORE calling announce_plan. Do NOT announce an incomplete plan.
 
-Produce a COMPLETE plan — cover every dependency the change reaches, order phases dependency-first, and surface any human decisions (breaking changes, alternatives with trade-offs, ambiguous requirements) explicitly. Spend effort proportional to blast radius.`
+Produce a COMPLETE plan — cover every dependency the change reaches, order phases dependency-first, and surface any human decisions (breaking changes, alternatives with trade-offs, ambiguous requirements) explicitly. Spend effort proportional to blast radius. Stop when you can name every affected file and why — not because a counter tripped. Never re-query codegraph or grep for a fact already established.`
 
 // PlanExecutionSystemContext is injected as the per-turn SystemContext when the
-// user approves a plan and execution begins ("Approve & implement"). It gives
-// the model tight execution-discipline instructions so it follows the approved
-// PLAN.md directly instead of re-investigating confirmed things.
+// user approves a plan and on every subsequent Normal turn while that plan is
+// still the approved execution. It inlines PLAN.md so the model does not have
+// to re-read or reconstruct the plan after compaction.
 //
-// The literal token "__PLAN_PATH__" is a placeholder that must be replaced with
-// the absolute session PLAN.md path before injection. Use BuildPlanExecutionSystemContext.
+// Placeholders: "__PLAN_PATH__" (absolute sidecar path) and "__PLAN_BODY__"
+// (the current PLAN.md contents). Use BuildPlanExecutionSystemContext.
 const PlanExecutionSystemContext = `You are now in EXECUTION MODE — an approved plan is active.
 
-IMMEDIATE FIRST ACTION: Call read_file("__PLAN_PATH__") right now, before anything else. Load the full
-plan so you know every phase, its files, and its details.
+The approved plan is inlined below. Treat it as the authoritative source of phases, files, details,
+and progress. Do NOT call announce_plan (that tool exists only in Plan mode). Do NOT reconstruct
+the plan from conversation history.
+
+__PLAN_BODY__
+
+Sidecar path (for update_plan persistence): __PLAN_PATH__
 
 EXECUTION RULES:
 1. Follow the plan phase by phase. For each wave of phases that share the same parallel_group
@@ -108,25 +114,38 @@ EXECUTION RULES:
    thread in dependency order. Mark each main-thread phase running with update_plan before you
    start it, and complete/failed when you finish.
 2. DO NOT RE-INVESTIGATE. The plan's details and file paths were confirmed during planning —
-   trust them. Do NOT call code_definition, codegraph_explore, grep_search, find_files, repo_map,
-   or read a source file just to verify something the plan already established.
-3. ALLOWED READS: (a) PLAN.md itself, (b) a file you are about to edit/create (read it once
-   immediately before writing to get the exact current content), (c) files the plan's 'details'
-   explicitly instruct you to read as part of the implementation.
+   trust them. Do not restart repository discovery. Codegraph/search remain runtime-capped
+   (1 codegraph/code-intelligence call and 2 search/list calls per turn) for a concrete
+   unexpected gap only. Source reads are not capped.
+3. ALLOWED READS: (a) a file you are about to edit/create (read it once immediately before
+   writing to get the exact current content; do not re-read a path already in this turn's
+   context), (b) files the plan's 'details' explicitly instruct you to read as part of the
+   implementation.
 4. IF A FILE PATH IN THE PLAN IS WRONG: use find_files once to locate the correct path, then
    proceed — do not re-read the surrounding area.
 5. IF A COMPILATION ERROR requires understanding a type or import: use code_definition for that
    one symbol, then continue.
-6. DO NOT write a preamble or summary. Start immediately with read_file("__PLAN_PATH__"), then execute.`
+6. The approved plan is authoritative. Do NOT call announce_plan — it exists only in Plan mode and
+   the runtime will reject it here. Use update_plan to record progress without replacing the plan.
+7. DO NOT write a preamble or summary. Start executing the inlined plan immediately.`
 
 // BuildPlanExecutionSystemContext returns PlanExecutionSystemContext with the
-// "__PLAN_PATH__" placeholder replaced by the given absolute plan file path.
-// If planPath is empty, falls back to the bare relative "PLAN.md".
+// plan path and inlined PLAN.md body filled in. If planPath is empty, falls
+// back to the bare relative "PLAN.md". Missing or unreadable files still
+// produce a usable context that names the path.
 func BuildPlanExecutionSystemContext(planPath string) string {
 	if planPath == "" {
 		planPath = "PLAN.md"
 	}
-	return strings.ReplaceAll(PlanExecutionSystemContext, "__PLAN_PATH__", planPath)
+	body := ""
+	if data, err := os.ReadFile(planPath); err == nil && len(data) > 0 {
+		body = strings.TrimRight(string(data), "\n")
+	}
+	if body == "" {
+		body = "(PLAN.md is empty or missing — follow any Progress/Phases already in context; do not re-announce a plan.)"
+	}
+	s := strings.ReplaceAll(PlanExecutionSystemContext, "__PLAN_PATH__", planPath)
+	return strings.ReplaceAll(s, "__PLAN_BODY__", body)
 }
 
 // GraphPlanBlockedMessage is returned to the model when it calls a tool that is
@@ -152,14 +171,14 @@ func GraphPlanBlockedMessage(toolName string, phase GraphPlanPhase) string {
 		)
 	case GraphPlanPhaseGap:
 		return fmt.Sprintf(
-			"Blocked: `%s` cannot run in Graph-Optimized Plan mode — it is a mutating tool. This is a NO-CHANGES "+
-				"mode. Finish gap-filling with the read-only tools, then call `gplan_finalize` to record the plan.",
+			"Blocked: `%s` is not available in the GAP phase of Graph-Optimized Plan mode. "+
+				"Finish gap-filling with the available read-only tools, then call `gplan_finalize` to record the plan.",
 			toolName,
 		)
 	case GraphPlanPhasePlan:
 		return fmt.Sprintf(
-			"Blocked: `%s` cannot run in Graph-Optimized Plan mode — it is a mutating tool and this is a "+
-				"NO-CHANGES mode. Record the plan with `announce_plan`, then ask the user to exit to Normal mode "+
+			"Blocked: `%s` is not available in the PLAN phase of Graph-Optimized Plan mode. "+
+				"Record the plan with `announce_plan`, then ask the user to exit to Normal mode "+
 				"(shift+tab) before any execution.",
 			toolName,
 		)
@@ -181,6 +200,74 @@ RULES:
 - You MAY use read-only tools (read_file, grep_search, find_files, file_tree, code_definition, code_references, repo_map, codegraph_explore, memory_search, web_fetch, etc.) to investigate the codebase and gather information.
 - Focus on providing clear, accurate, well-researched answers. Cite specific files, functions, and line numbers when relevant.
 - If the user asks you to make changes or create a plan, remind them they are in Ask mode and suggest switching to Normal or Plan mode (shift+tab).`
+
+// approvedPlanExecutionToolBlocked reports whether a tool would replace the
+// authoritative plan during its approved implementation turn.
+func approvedPlanExecutionToolBlocked(name string) bool {
+	return name == "announce_plan"
+}
+
+const (
+	ApprovedExecutionMaxCodegraphCalls = 1
+	ApprovedExecutionMaxSearchCalls    = 2
+)
+
+// approvedExecutionResearchKind classifies discovery calls that must remain
+// bounded after a plan is approved. Empty means the tool is not rediscovery
+// (source reads are allowed without a quota).
+func approvedExecutionResearchKind(name string) string {
+	switch name {
+	case "codegraph_explore", "repo_map", "code_definition", "code_references":
+		return "codegraph"
+	case "grep_search", "find_files", "file_tree":
+		return "search"
+	default:
+		return ""
+	}
+}
+
+func approvedExecutionResearchLimit(kind string) int {
+	switch kind {
+	case "codegraph":
+		return ApprovedExecutionMaxCodegraphCalls
+	case "search":
+		return ApprovedExecutionMaxSearchCalls
+	default:
+		return 0
+	}
+}
+
+// approvedExecutionResearchApplies reports whether the bounded research clamp
+// should be armed for an approved-plan turn. It applies ONLY on the explicit
+// execution turn (the one launched directly from approving the plan), where
+// rediscovery would mean re-doing planning work. Inferred continuation turns
+// (an approved PLAN.md merely still exists on disk) are open-ended follow-ups
+// that behave as regular Normal mode — no research clamp. This is the single
+// source of truth shared by the runtime gate and its tests.
+func approvedExecutionResearchApplies(explicit bool) bool {
+	return explicit
+}
+
+// ApprovedPlanExecutionResearchBlockedMessage explains the bounded exception
+// policy: execution may inspect narrowly, but cannot restart planning research.
+func ApprovedPlanExecutionResearchBlockedMessage(kind string, limit int) string {
+	return fmt.Sprintf("Blocked: approved-plan execution reached its %s research limit (%d). Follow the persisted plan, edit the named files, and use update_plan; do not restart repository discovery.", kind, limit)
+}
+
+// ApprovedPlanExecutionBlockedMessage explains why an approved execution turn
+// may update progress but cannot replace the plan the user approved.
+func ApprovedPlanExecutionBlockedMessage() string {
+	return "Blocked: `announce_plan` cannot run while an approved plan is executing. " +
+		"Continue implementing the active plan and use `update_plan` to record phase progress; do not replace the approved plan."
+}
+
+// AnnouncePlanNotInPlanModeBlockedMessage is returned when the model calls
+// announce_plan outside Plan / Graph-Optimized Plan mode.
+func AnnouncePlanNotInPlanModeBlockedMessage() string {
+	return "Blocked: `announce_plan` can only run in Plan mode (shift+tab). " +
+		"You are in Normal mode. If an approved PLAN.md is inlined in this turn, follow it with `update_plan`. " +
+		"To record a new plan, ask the user to switch to Plan mode."
+}
 
 // AskModeBlockedMessage is returned to the model when it calls a mutating tool
 // while ask mode is active. Returning a result (rather than an error that

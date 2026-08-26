@@ -1,5 +1,5 @@
 import { useEffect, useState, type ElementType } from 'react'
-import { Moon, Sun, Settings, Cpu, Grid, MessageSquare, Rocket, ShieldCheck, ShieldAlert, Crosshair, AppWindow, ChevronDown, LogOut, MoreHorizontal, Menu } from 'lucide-react'
+import { Moon, Sun, Settings, Cpu, Grid, MessageSquare, Rocket, ShieldCheck, ShieldAlert, Crosshair, AppWindow, Presentation, ChevronDown, LogOut, MoreHorizontal, Menu } from 'lucide-react'
 
 import AstonishLogo from './AstonishLogo'
 import { Badge } from '@/components/ui/badge'
@@ -58,6 +58,7 @@ const secondaryNavItems: NavItem[] = [
   { view: 'fleet', label: 'Fleet', Icon: Rocket },
   { view: 'drill', label: 'Drill', Icon: Crosshair },
   { view: 'apps', label: 'Apps', Icon: AppWindow },
+  { view: 'slides', label: 'Slides', Icon: Presentation },
 ]
 
 const allCoreNavItems: NavItem[] = [

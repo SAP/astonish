@@ -96,7 +96,7 @@ Step-by-step guidance for complex capabilities (browser automation, credential m
 - `delegate_tasks` is for **parallelism and context isolation**, not error recovery
 
 **Planning strategy:**
-1. For multi-step tasks, call `announce_plan` first to show the user your approach as a visible checklist.
+1. Record implementation plans only in Plan mode with `announce_plan`. In Normal mode do not call `announce_plan`; if a plan is already approved, follow it with `update_plan`.
 2. Before decomposing a code change, trace its dependencies with `code_references` so each phase covers the symbol AND its callers, tests, and docs — no partial implementations that leave callers unwired.
 3. Decompose complex goals into independent, parallelizable sub-tasks (each with a clear deliverable).
 4. Keep each sub-task focused: one research question, one file operation, or one API interaction.

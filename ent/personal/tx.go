@@ -18,6 +18,10 @@ type Tx struct {
 	AppState *AppStateClient
 	// Credential is the client for interacting with the Credential builders.
 	Credential *CredentialClient
+	// Deck is the client for interacting with the Deck builders.
+	Deck *DeckClient
+	// DeckVersion is the client for interacting with the DeckVersion builders.
+	DeckVersion *DeckVersionClient
 	// Flow is the client for interacting with the Flow builders.
 	Flow *FlowClient
 	// Memory is the client for interacting with the Memory builders.
@@ -30,6 +34,8 @@ type Tx struct {
 	Session *SessionClient
 	// SessionEvent is the client for interacting with the SessionEvent builders.
 	SessionEvent *SessionEventClient
+	// Slide is the client for interacting with the Slide builders.
+	Slide *SlideClient
 
 	// lazily loaded.
 	client     *Client
@@ -164,12 +170,15 @@ func (tx *Tx) init() {
 	tx.App = NewAppClient(tx.config)
 	tx.AppState = NewAppStateClient(tx.config)
 	tx.Credential = NewCredentialClient(tx.config)
+	tx.Deck = NewDeckClient(tx.config)
+	tx.DeckVersion = NewDeckVersionClient(tx.config)
 	tx.Flow = NewFlowClient(tx.config)
 	tx.Memory = NewMemoryClient(tx.config)
 	tx.PersonalSettings = NewPersonalSettingsClient(tx.config)
 	tx.ScheduledJob = NewScheduledJobClient(tx.config)
 	tx.Session = NewSessionClient(tx.config)
 	tx.SessionEvent = NewSessionEventClient(tx.config)
+	tx.Slide = NewSlideClient(tx.config)
 }
 
 // txDriver wraps the given dialect.Tx with a nop dialect.Driver implementation.

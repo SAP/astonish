@@ -13,7 +13,7 @@ import type { ChatSession, AttachmentPayload, SessionModelStatus } from '../api/
 import { startFleetSession, connectFleetStream, sendFleetMessage, stopFleetSession, fetchFleetSessions } from '../api/fleetChat'
 import type { FleetSession } from '../api/fleetChat'
 import HomePage from './HomePage'
-import type { FleetMessageItem, ChatMsg, FleetInfo, FleetStateInfo, DeferredPrompt, FleetExecutionMessage, FleetEvent, AgentMessage, ToolResultMessage, BrowserHandoffMessage, SubTaskExecutionMessage, SubTaskEvent, SubTaskInfo, PlanMessage, PlanStepInfo, SessionArtifact, ArtifactMessage, AppPreviewMessage, AppSavedMessage, DistillPreviewMessage, DistillSavedMessage, TutorialBlueprintPreviewMessage, TutorialBlueprintApprovedMessage, TutorialSceneSlideshowMessage, UserMessage, AttachmentInfo, NetworkDenialMessage, ImageMessage } from './chat/chatTypes'
+import type { FleetMessageItem, ChatMsg, FleetInfo, FleetStateInfo, DeferredPrompt, FleetExecutionMessage, FleetEvent, AgentMessage, ToolResultMessage, BrowserHandoffMessage, SubTaskExecutionMessage, SubTaskEvent, SubTaskInfo, PlanMessage, PlanStepInfo, SessionArtifact, ArtifactMessage, AppPreviewMessage, AppSavedMessage, DistillPreviewMessage, DistillSavedMessage, ChatQuestionMessage, TutorialBlueprintPreviewMessage, TutorialBlueprintApprovedMessage, TutorialSceneSlideshowMessage, UserMessage, AttachmentInfo, NetworkDenialMessage, ImageMessage, DocsUpdateMessage } from './chat/chatTypes'
 import { buildActivityRenderIndex, deriveLiveStreamStatus, stickyAgentBubbleKey } from './chat/toolActivity'
 import ToolActivityBlock from './chat/ToolActivityBlock'
 import { getAgentColor } from './chat/chatTypes'
@@ -27,6 +27,10 @@ import TodoPanel from './chat/TodoPanel'
 import AppsPanel from './chat/AppsPanel'
 import HarnessPanel from './chat/HarnessPanel'
 import HarnessPlaceholder from './chat/HarnessPlaceholder'
+import ChatErrorBoundary from './chat/ChatErrorBoundary'
+import YesNoCard from './chat/questions/YesNoCard'
+import SingleSelectCard from './chat/questions/SingleSelectCard'
+import QuestionOptionThumb from './chat/questions/QuestionOptionThumb'
 import {
   deriveLatestHarness,
   harnessFocusEquals,
@@ -72,6 +76,25 @@ function normalizeTutorialScenes(raw: unknown): TutorialSceneSlideshowMessage['s
     path: item?.path || '',
     duration_seconds: item?.duration_seconds || undefined,
   }))
+}
+
+function upsertDocsUpdate(messages: ChatMsg[], update: DocsUpdateMessage): ChatMsg[] {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index]
+    if (message.type === 'user') break
+    if (message.type === 'docs_update' && (message as DocsUpdateMessage).deckSlug === update.deckSlug) {
+      return messages.map((item, itemIndex) => itemIndex === index ? update : item)
+    }
+  }
+  return [...messages, update]
+}
+
+function collapseDocsUpdates(messages: ChatMsg[]): ChatMsg[] {
+  return messages.reduce<ChatMsg[]>((result, message) => (
+    message.type === 'docs_update'
+      ? upsertDocsUpdate(result, message as DocsUpdateMessage)
+      : [...result, message]
+  ), [])
 }
 
 function slideshowVideoPaths(messages: ChatMsg[]): Set<string> {
@@ -461,6 +484,22 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
     [latestHarness, manualHarnessFocus],
   )
 
+  // The in-chat slides launcher must appear ONCE per deck, not once per turn
+  // that touched it. docs_update messages are coalesced per-turn (see
+  // upsertDocsUpdate), so a deck edited across several turns leaves several
+  // docs_update messages — rendering each as a card cluttered the thread. We
+  // keep only the LAST docs_update index per deckSlug; earlier ones render
+  // nothing. The deck itself lives in the right-hand harness panel.
+  const latestDocsUpdateIndexByDeck = useMemo(() => {
+    const byDeck = new Map<string, number>()
+    messages.forEach((m, i) => {
+      if (m.type !== 'docs_update') return
+      const d = m as DocsUpdateMessage
+      if (d.docType === 'slides' && d.deckSlug) byDeck.set(d.deckSlug, i)
+    })
+    return byDeck
+  }, [messages])
+
   const openHarness = useCallback((focus: HarnessFocus) => {
     setManualHarnessFocus(focus)
     setHarnessOpen(true)
@@ -830,6 +869,9 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
           if (m.type === 'artifact' && m.content) {
             return { type: 'artifact', path: m.content, toolName: m.toolName || 'write_file' } as ArtifactMessage
           }
+          if (m.type === 'docs_update' && m.docsUpdate) {
+            return { ...m.docsUpdate, type: 'docs_update', docType: m.docsUpdate.type || 'slides' } as DocsUpdateMessage
+          }
           if (m.type === 'distill_preview') {
             return {
               type: 'distill_preview',
@@ -887,6 +929,16 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
               appId: m.appId || undefined,
             } as AppPreviewMessage
           }
+          if (m.type === 'chat_question') {
+            // Reload: pkg/api reconstructs a StudioMessage with QuestionID/QuestionKind/Prompt/Options.
+            return {
+              type: 'chat_question',
+              questionId: m.questionId || m.QuestionID || '',
+              kind: (m.kind || m.questionKind || m.QuestionKind || 'yesno') as ChatQuestionMessage['kind'],
+              prompt: m.prompt || m.Prompt || '',
+              options: (m.options || m.Options || []) as ChatQuestionMessage['options'],
+            } as ChatQuestionMessage
+          }
           if (m.type === 'flow_output') {
             return { type: 'agent', content: m.content || '' } as AgentMessage
           }
@@ -898,7 +950,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
           }
           return m as unknown as ChatMsg
         })
-        setMessages(mapped)
+        setMessages(collapseDocsUpdates(mapped))
         // Restore active app state from session history
         const appPreviews = mapped.filter((m): m is AppPreviewMessage => m.type === 'app_preview')
         if (appPreviews.length > 0) {
@@ -1023,6 +1075,23 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
                   }])
                 }
               }).catch(() => { /* non-fatal */ })
+            }
+            break
+
+          case 'docs_update':
+            if (data.type === 'slides' && data.deckSlug) {
+              setMessages((prev: ChatMsg[]) => upsertDocsUpdate(prev, {
+                type: 'docs_update',
+                docType: 'slides',
+                deckSlug: data.deckSlug as string,
+                action: (data.action as string) || 'updated',
+                slideIndex: data.slideIndex as number | undefined,
+                totalSlides: data.totalSlides as number | undefined,
+                title: (data.deckTitle || data.title) as string | undefined,
+                schemaVersion: data.schemaVersion as number | undefined,
+                validation: data.validation as DocsUpdateMessage['validation'],
+                pptxCapability: data.pptxCapability as DocsUpdateMessage['pptxCapability'],
+              }))
             }
             break
 
@@ -1224,6 +1293,29 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
               appId: data.appId as string || undefined,
             } as AppPreviewMessage])
             if (data.appId) setActiveAppId(data.appId as string)
+            break
+
+          case 'chat_question':
+            // Live SSE: backend emits { questionId, kind, prompt, options:[{id,label,description?,thumbnail?}] }.
+            // Finalize any streaming text first (mirror app_preview / distill_preview above).
+            if (streamingTextRef.current) {
+              const finalText = streamingTextRef.current
+              streamingTextRef.current = ''
+              setMessages((prev: ChatMsg[]) => {
+                const last = prev[prev.length - 1]
+                if (last && last.type === 'agent' && (last as AgentMessage)._streaming) {
+                  return [...prev.slice(0, -1), { type: 'agent', content: finalText }]
+                }
+                return prev
+              })
+            }
+            setMessages((prev: ChatMsg[]) => [...prev, {
+              type: 'chat_question',
+              questionId: data.questionId as string,
+              kind: data.kind as ChatQuestionMessage['kind'],
+              prompt: data.prompt as string,
+              options: (data.options as ChatQuestionMessage['options']) || [],
+            } as ChatQuestionMessage])
             break
 
           case 'app_done':
@@ -1905,6 +1997,23 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
             }
             break
 
+          case 'docs_update':
+            if (data.type === 'slides' && data.deckSlug) {
+              setMessages((prev: ChatMsg[]) => upsertDocsUpdate(prev, {
+                type: 'docs_update',
+                docType: 'slides',
+                deckSlug: data.deckSlug as string,
+                action: (data.action as string) || 'updated',
+                slideIndex: data.slideIndex as number | undefined,
+                totalSlides: data.totalSlides as number | undefined,
+                title: (data.deckTitle || data.title) as string | undefined,
+                schemaVersion: data.schemaVersion as number | undefined,
+                validation: data.validation as DocsUpdateMessage['validation'],
+                pptxCapability: data.pptxCapability as DocsUpdateMessage['pptxCapability'],
+              }))
+            }
+            break
+
           case 'artifact':
             if (data.path) {
               const fileName = (data.path as string).split('/').pop() || 'file'
@@ -2412,6 +2521,29 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
             if (data.appId) setActiveAppId(data.appId as string)
             break
 
+          case 'chat_question':
+            // Live SSE: backend emits { questionId, kind, prompt, options:[{id,label,description?,thumbnail?}] }.
+            // Finalize any streaming text first (mirror app_preview / distill_preview above).
+            if (streamingTextRef.current) {
+              const finalText = streamingTextRef.current
+              streamingTextRef.current = ''
+              setMessages((prev: ChatMsg[]) => {
+                const last = prev[prev.length - 1]
+                if (last && last.type === 'agent' && (last as AgentMessage)._streaming) {
+                  return [...prev.slice(0, -1), { type: 'agent', content: finalText }]
+                }
+                return prev
+              })
+            }
+            setMessages((prev: ChatMsg[]) => [...prev, {
+              type: 'chat_question',
+              questionId: data.questionId as string,
+              kind: data.kind as ChatQuestionMessage['kind'],
+              prompt: data.prompt as string,
+              options: (data.options as ChatQuestionMessage['options']) || [],
+            } as ChatQuestionMessage])
+            break
+
           case 'app_done':
           case 'app_saved':
             setActiveAppId(null)
@@ -2540,6 +2672,20 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
       }
     }
   }, [pendingChatMessage, isStreaming, sendMessage, onPendingChatMessageConsumed, activeSessionId, changeSession])
+
+  const handleQuestionAnswer = useCallback((msg: ChatQuestionMessage, answerText: string, _optionId: string) => {
+    // Guard: a second click is a no-op once answered.
+    if (msg.answered) return
+    // Mark the message answered locally so the card collapses and cannot be answered twice.
+    setMessages((prev: ChatMsg[]) => prev.map((m) => {
+      if (m.type !== 'chat_question') return m
+      if (m.questionId !== msg.questionId) return m
+      if (m.answered) return m
+      return { ...m, answered: true, answer: answerText }
+    }))
+    // Send the answer as a NORMAL user message through the same path the composer uses.
+    void sendMessage(answerText)
+  }, [sendMessage])
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
@@ -3320,6 +3466,31 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
                 )
               }
 
+              if (msg.type === 'docs_update') {
+                const docs = msg as DocsUpdateMessage
+                if (docs.docType !== 'slides' || !docs.deckSlug) return null
+                // One launcher per deck: skip all but the latest docs_update for
+                // this deck so the thread isn't cluttered with a card per turn.
+                if (latestDocsUpdateIndexByDeck.get(docs.deckSlug) !== index) return null
+                const focus: HarnessFocus = { kind: 'slides', deckSlug: docs.deckSlug, messageIndex: index }
+                const progress = docs.slideIndex !== undefined && docs.totalSlides !== undefined
+                  ? `${docs.slideIndex} / ${docs.totalSlides}`
+                  : docs.totalSlides !== undefined
+                    ? `${docs.totalSlides} slides`
+                    : 'Preparing deck'
+                return (
+                  <div key={index}>
+                    <HarnessPlaceholder
+                      focus={focus}
+                      title={docs.title || docs.deckSlug}
+                      subtitle={progress}
+                      isFocused={harnessOpen && harnessFocusEquals(effectiveHarnessFocus, focus)}
+                      onOpen={openHarness}
+                    />
+                  </div>
+                )
+              }
+
               if (msg.type === 'artifact') {
                 const artifactMsg = msg as ArtifactMessage
                 // Suppress inline card when this artifact is embedded in the ResultCard
@@ -3386,6 +3557,50 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
                       onOpen={openHarness}
                     />
                   </div>
+                )
+              }
+
+              if (msg.type === 'chat_question') {
+                const questionMsg = msg as ChatQuestionMessage
+                if (questionMsg.answered) {
+                  return (
+                    <div key={index} className="my-2">
+                      <p className="text-xs text-muted-foreground">
+                        You chose: {questionMsg.answer}
+                      </p>
+                    </div>
+                  )
+                }
+                return (
+                  <ChatErrorBoundary key={index}>
+                    <div className="my-3 w-full max-w-2xl">
+                      {questionMsg.kind === 'yesno' ? (
+                        <YesNoCard
+                          prompt={questionMsg.prompt}
+                          disabled={questionMsg.answered}
+                          onAnswer={(yes) =>
+                            handleQuestionAnswer(questionMsg, yes ? 'Yes' : 'No', yes ? 'yes' : 'no')
+                          }
+                        />
+                      ) : (
+                        <SingleSelectCard
+                          prompt={questionMsg.prompt}
+                          disabled={questionMsg.answered}
+                          options={(Array.isArray(questionMsg.options) ? questionMsg.options : []).map((o) => ({
+                            id: o.id,
+                            label: o.label,
+                            description: o.description,
+                            thumbnail: o.thumbnail ? (
+                              <QuestionOptionThumb thumbnail={o.thumbnail} label={o.label} />
+                            ) : undefined,
+                          }))}
+                          onSelect={(optionId, label) =>
+                            handleQuestionAnswer(questionMsg, label, optionId)
+                          }
+                        />
+                      )}
+                    </div>
+                  </ChatErrorBoundary>
                 )
               }
 

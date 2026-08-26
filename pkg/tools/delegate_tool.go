@@ -43,13 +43,15 @@ type DelegateTasksArgs struct {
 
 // SubTaskResultItem holds the result of a single delegated sub-task.
 type SubTaskResultItem struct {
-	Name         string `json:"name"`
-	Status       string `json:"status"`
-	Result       string `json:"result,omitempty"`
-	FullResultID string `json:"full_result_id,omitempty"` // ID for read_task_result if result was summarized
-	ToolCalls    int    `json:"tool_calls"`
-	Duration     string `json:"duration"`
-	Error        string `json:"error,omitempty"`
+	Name             string `json:"name"`
+	Status           string `json:"status"`
+	Result           string `json:"result,omitempty"`
+	FullResultID     string `json:"full_result_id,omitempty"` // ID for read_task_result if result was summarized
+	ToolCalls        int    `json:"tool_calls"`
+	Duration         string `json:"duration"`
+	Error            string `json:"error,omitempty"`
+	Attempts         int    `json:"attempts"`
+	InactivityReason string `json:"inactivity_reason,omitempty"`
 }
 
 // DelegateTasksResult is the output schema for the delegate_tasks tool.
@@ -157,11 +159,13 @@ func delegateTasks(ctx tool.Context, args DelegateTasksArgs) (DelegateTasksResul
 	successCount := 0
 	for i, r := range results {
 		item := SubTaskResultItem{
-			Name:      r.Name,
-			Status:    r.Status,
-			ToolCalls: r.ToolCalls,
-			Duration:  r.Duration.Round(100 * 1e6).String(), // Round to 100ms
-			Error:     r.Error,
+			Name:             r.Name,
+			Status:           r.Status,
+			ToolCalls:        r.ToolCalls,
+			Duration:         r.Duration.Round(100 * 1e6).String(), // Round to 100ms
+			Error:            r.Error,
+			Attempts:         r.Attempts,
+			InactivityReason: r.InactivityReason,
 		}
 
 		if r.Status == "success" {
@@ -215,7 +219,7 @@ func delegateTasks(ctx tool.Context, args DelegateTasksArgs) (DelegateTasksResul
 // NewDelegateTasksTool creates the delegate_tasks tool.
 func NewDelegateTasksTool() (tool.Tool, error) {
 	return functiontool.New(functiontool.Config{
-		Name:        "delegate_tasks",
+		Name: "delegate_tasks",
 		Description: `Delegate tasks to parallel sub-agents with isolated sessions. Each sub-agent gets the tool groups you specify (e.g., ["core"], ["browser"], ["core", "web"]) or auto-discovers tools based on the task description if tools is omitted. Use this for specialized tasks like browser automation, web fetching, email, API calls, or any task requiring tools not on the main thread. Each sub-agent has read-only memory, a search_tools capability, and a 10-minute timeout (automatically retried once if making progress). Max 10 tasks per call.
 
 When a plan is active (you called announce_plan), set the plan_step field on each task to link it to a plan step. Multiple tasks can share the same plan_step — the step is marked complete only when ALL tasks with that plan_step finish. This drives accurate progress tracking in the UI.`,

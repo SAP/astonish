@@ -2032,6 +2032,9 @@ func TestMaybeCompactToChild_CreatesChildAndPreservesParent(t *testing.T) {
 				notices = append(notices, s)
 			}
 		}
+		if typ == "compaction" {
+			notices = append(notices, fmt.Sprintf("Compacted context: %v → %v tokens", data["before_tokens"], data["after_tokens"]))
+		}
 	}
 	// Active session ID stays the same; full history is archived under ParentID.
 	activeID := b.maybeCompactToChild(ctx, parentID, emit)

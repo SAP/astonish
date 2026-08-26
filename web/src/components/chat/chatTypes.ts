@@ -83,6 +83,13 @@ export interface SystemMessage {
   content: string
 }
 
+export interface CompactionMessage {
+  type: 'compaction'
+  beforeTokens: number
+  afterTokens: number
+  strategy?: string
+}
+
 export interface RetryMessage {
   type: 'retry'
   attempt: unknown

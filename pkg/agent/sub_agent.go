@@ -391,6 +391,18 @@ func (m *SubAgentManager) PopLastTraces() []*ExecutionTrace {
 // a fresh timeout and a continuation prompt carrying forward partial context.
 // This method blocks until all tasks complete (or timeout).
 func (m *SubAgentManager) RunTasks(ctx context.Context, tasks []SubAgentTask) []TaskResult {
+	// Log the incoming context deadline to debug timeout issues
+	if deadline, ok := ctx.Deadline(); ok {
+		slog.Info("RunTasks: incoming context has deadline",
+			"deadline", deadline,
+			"remaining", time.Until(deadline).Truncate(time.Second),
+		)
+	}
+	slog.Info("RunTasks starting",
+		"delegation_timeout", m.Config.DelegationTimeout,
+		"task_timeout", m.Config.TaskTimeout,
+		"task_count", len(tasks),
+	)
 	delegationCtx, cancel := context.WithTimeout(ctx, m.Config.DelegationTimeout)
 	defer cancel()
 	ctx = delegationCtx

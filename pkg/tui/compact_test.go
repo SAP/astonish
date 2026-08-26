@@ -84,7 +84,7 @@ func TestRunCompact_InvokesBackendAndReportsStatus(t *testing.T) {
 		t.Fatalf("unexpected status: %q", done.status)
 	}
 
-	// Applying the result should clear in-progress state and add a system line.
+	// Applying the result should clear in-progress state and add a compaction line.
 	next2, _ := nm.applyCompactDone(done)
 	nm2 := next2.(model)
 	if nm2.compacting {
@@ -148,3 +148,32 @@ func TestCompactDoneMsg_Dispatched(t *testing.T) {
 }
 
 var _ = backend.CompactionBackend(&compactBackend{})
+
+func TestCompactDone_EmitsCompactionKind(t *testing.T) {
+	be := &compactBackend{status: "Compacted context: 150k → 42k tokens (now ~30% of 1M). Earlier turns are preserved."}
+	m := newModel(context.Background(), Config{Backend: be, Width: 100, Height: 30})
+	m.ready = true
+	m.layout()
+	m.compacting = true
+
+	done := compactDoneMsg{status: be.status}
+	next, _ := m.applyCompactDone(done)
+	nm := next.(model)
+
+	// The transcript should contain an ItemCompaction, not ItemSystem.
+	foundCompaction := false
+	for _, it := range nm.tr.Items {
+		if it.Kind == "compaction" {
+			foundCompaction = true
+			if it.Compaction == nil {
+				t.Fatal("ItemCompaction should have Compaction info set")
+			}
+			if it.Compaction.SummaryPreview != be.status {
+				t.Fatalf("SummaryPreview = %q, want %q", it.Compaction.SummaryPreview, be.status)
+			}
+		}
+	}
+	if !foundCompaction {
+		t.Fatal("expected ItemCompaction in transcript after compaction done")
+	}
+}

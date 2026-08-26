@@ -42,6 +42,11 @@ type Compactor struct {
 	// it only reads the file as opaque text.
 	PlanFilePath string
 
+	// Strategy, when set, controls how the old conversation portion is
+	// summarized. Code mode uses CodeStrategy for structured summaries;
+	// platform mode uses GenericStrategy (or nil, which defaults to generic).
+	Strategy CompactionStrategy
+
 	// Stats tracking
 	lastEstimatedTokens int
 	compactionCount     int
@@ -108,6 +113,25 @@ func (c *Compactor) SetPlanFilePath(path string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.PlanFilePath = path
+}
+
+// SetStrategy sets the compaction strategy (thread-safe). Pass nil to use
+// the default GenericStrategy.
+func (c *Compactor) SetStrategy(s CompactionStrategy) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.Strategy = s
+}
+
+// StrategyName returns the name of the active strategy ("code" or "platform").
+func (c *Compactor) StrategyName() string {
+	c.mu.Lock()
+	s := c.Strategy
+	c.mu.Unlock()
+	if s != nil {
+		return s.Name()
+	}
+	return "platform"
 }
 
 // EstimateTokens estimates the token count for a slice of Contents.
@@ -469,77 +493,15 @@ func (c *Compactor) summarize(ctx context.Context, contents []*genai.Content) (s
 	}
 	c.mu.Unlock()
 
-	// Build a text representation of the old conversation.
-	// Collapses repetitive consecutive tool calls (e.g., 55× read_file)
-	// into a single counted entry to reduce noise and let the summarizer
-	// focus on meaningful content.
-	var sb strings.Builder
-	sb.WriteString("Summarize the following conversation history. Focus on:\n")
-	sb.WriteString("1. CURRENT TASK: What is the user's most recent request? What was the model actively working on?\n")
-	sb.WriteString("2. PROGRESS: What has been accomplished so far? What step was the model on when this history ends?\n")
-	sb.WriteString("3. KEY FACTS: Important decisions, file paths, variable names, and outcomes.\n")
-	sb.WriteString("4. COMPLETED WORK: What earlier tasks finished successfully.\n\n")
-	sb.WriteString("Start your summary with 'CURRENT TASK:' stating what's actively being worked on.\n")
-	sb.WriteString("Then 'PROGRESS:' with what's been done for that task.\n")
-	sb.WriteString("Then 'COMPLETED:' listing earlier finished work.\n\n")
-
-	var lastToolName string
-	var toolRepeatCount int
-
-	flushToolRepeat := func() {
-		if toolRepeatCount > 0 {
-			if toolRepeatCount == 1 {
-				sb.WriteString(fmt.Sprintf("[model] Called tool: %s\n[tool] %s responded\n", lastToolName, lastToolName))
-			} else {
-				sb.WriteString(fmt.Sprintf("[model] Called tool: %s (×%d repeated calls)\n", lastToolName, toolRepeatCount))
-			}
-			toolRepeatCount = 0
-			lastToolName = ""
-		}
-	}
-
-	for _, content := range contents {
-		if content == nil {
-			continue
-		}
-		role := content.Role
-		if role == "" {
-			role = "system"
-		}
-		for _, p := range content.Parts {
-			if p == nil {
-				continue
-			}
-			if p.Text != "" {
-				flushToolRepeat()
-				sb.WriteString(fmt.Sprintf("[%s]: %s\n", role, truncateText(p.Text, 500)))
-			}
-			if p.FunctionCall != nil {
-				if p.FunctionCall.Name == lastToolName {
-					toolRepeatCount++
-				} else {
-					flushToolRepeat()
-					lastToolName = p.FunctionCall.Name
-					toolRepeatCount = 1
-				}
-			}
-			if p.FunctionResponse != nil {
-				// Function responses are counted with their calls (don't emit separately)
-				if p.FunctionResponse.Name != lastToolName {
-					// Mismatched response — emit it
-					flushToolRepeat()
-					sb.WriteString(fmt.Sprintf("[tool] %s responded\n", p.FunctionResponse.Name))
-				}
-			}
-		}
-	}
-	flushToolRepeat()
-
-	prompt := sb.String()
-
-	// Cap the prompt to avoid sending a huge summarization request
-	if len(prompt) > 30000 {
-		prompt = prompt[:30000] + "\n\n[... truncated for summarization ...]"
+	// Build prompt using the configured strategy (or default generic).
+	var prompt string
+	c.mu.Lock()
+	strategy := c.Strategy
+	c.mu.Unlock()
+	if strategy != nil {
+		prompt = strategy.BuildSummarizationPrompt(contents)
+	} else {
+		prompt = (&GenericStrategy{}).BuildSummarizationPrompt(contents)
 	}
 
 	out, err := c.LLM(ctx, prompt)

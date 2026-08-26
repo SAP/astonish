@@ -66,7 +66,9 @@ func (m model) applyCompactDone(msg compactDoneMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
 		m.tr.Apply(events.NewError("Compaction failed: " + msg.err.Error()))
 	} else if msg.status != "" {
-		m.tr.Apply(events.NewSystem(msg.status))
+		m.tr.Apply(events.NewCompaction(events.CompactionInfo{
+			SummaryPreview: msg.status,
+		}))
 	}
 	// Refresh header metadata (session id + context tokens after compaction).
 	m.info = m.backend.Info()

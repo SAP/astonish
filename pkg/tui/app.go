@@ -2768,6 +2768,8 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 			appendBlockSpanned(i, it.Kind, m.renderFileDiff(it, cw), codeGutterContentSpan)
 		case events.ItemSystem:
 			appendBlock(i, it.Kind, th.System.Width(cw).Render(it.Content))
+		case events.ItemCompaction:
+			appendBlock(i, it.Kind, th.System.Width(cw).Render(it.Content))
 		case events.ItemError:
 			appendBlock(i, it.Kind, th.Error.Width(cw).Render(it.Content))
 		case events.ItemApproval:

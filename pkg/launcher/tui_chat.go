@@ -1035,6 +1035,23 @@ func mapSSEToEvents(sev *client.SSEEvent, debug bool) []events.Event {
 		// Slide cards are a Studio-only rendering surface. The terminal client
 		// intentionally ignores this event rather than depending on Studio DTOs.
 		return nil
+	case "compaction":
+		var payload struct {
+			BeforeTokens   int    `json:"before_tokens"`
+			AfterTokens    int    `json:"after_tokens"`
+			Strategy       string `json:"strategy"`
+			MessageCount   int    `json:"message_count"`
+			SummaryPreview string `json:"summary_preview"`
+		}
+		if json.Unmarshal(data, &payload) == nil {
+			return []events.Event{events.NewCompaction(events.CompactionInfo{
+				BeforeTokens:   payload.BeforeTokens,
+				AfterTokens:    payload.AfterTokens,
+				Strategy:       payload.Strategy,
+				MessageCount:   payload.MessageCount,
+				SummaryPreview: payload.SummaryPreview,
+			})}
+		}
 	case "report_marker":
 		var payload struct {
 			Path  string `json:"path"`

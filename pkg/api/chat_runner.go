@@ -599,6 +599,24 @@ func (cr *ChatRunner) Run(
 	// Set auto-approve for this request
 	chatAgent.AutoApprove = autoApprove
 
+	// Register compaction hook so context compaction events are visible in Studio.
+	// The Compactor fires via BeforeModelCallback during chatAgent.Run(); this
+	// emits a "compaction" SSE event so the frontend can display a notice.
+	if chatAgent.Compactor != nil {
+		chatAgent.Compactor.SetOnCompaction(func(beforeTokens, afterTokens int) {
+			cr.emitEvent("compaction", map[string]any{
+				"before_tokens": beforeTokens,
+				"after_tokens":  afterTokens,
+				"strategy":      chatAgent.Compactor.StrategyName(),
+			})
+		})
+	}
+	defer func() {
+		if chatAgent.Compactor != nil {
+			chatAgent.Compactor.SetOnCompaction(nil)
+		}
+	}()
+
 	// Inject per-turn session context via context overrides (thread-safe).
 	// Run() clones the SystemPromptBuilder and applies these on the clone.
 	if systemContext != "" || len(pinnedToolGroups) > 0 || planMode {

@@ -1,6 +1,7 @@
 package events
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 	"time"
@@ -22,6 +23,7 @@ const (
 	ItemApproval      ItemKind = "approval"
 	ItemNetworkDenial ItemKind = "network_denial"
 	ItemArtifact      ItemKind = "artifact"
+	ItemCompaction    ItemKind = "compaction"
 )
 
 // ToolStep is one paired tool call/result inside an activity fold.
@@ -73,6 +75,9 @@ type Item struct {
 	Path string
 	// Artifacts holds one or more generated files shown as a compact file list.
 	Artifacts []Artifact
+
+	// Compaction fields (ItemCompaction).
+	Compaction *CompactionInfo
 
 	// FileDiff fields (ItemFileDiff) — single-gutter editor view on the main thread.
 	// DiffVerification is preferred (tool verification_context). Args hold
@@ -341,6 +346,9 @@ func (t *Transcript) Apply(ev Event) {
 		t.finalizeProvisionalAgents()
 	case KindSystem:
 		t.Items = append(t.Items, Item{Kind: ItemSystem, Content: ev.Text})
+	case KindCompaction:
+		content := compactionContent(ev.Compaction)
+		t.Items = append(t.Items, Item{Kind: ItemCompaction, Content: content, Compaction: ev.Compaction})
 	case KindSubagent:
 		name := firstNonEmpty(ev.ToolName, ev.Text)
 		if ev.ToolName != "" {
@@ -532,7 +540,7 @@ func (t *Transcript) addUsage(usage *Usage) {
 func (t *Transcript) turnStart() int {
 	for i := len(t.Items) - 1; i >= 0; i-- {
 		switch t.Items[i].Kind {
-		case ItemUser, ItemError, ItemApproval, ItemNetworkDenial, ItemArtifact, ItemSystem, ItemPlan:
+		case ItemUser, ItemError, ItemApproval, ItemNetworkDenial, ItemArtifact, ItemSystem, ItemPlan, ItemCompaction:
 			return i + 1
 		}
 	}
@@ -784,6 +792,34 @@ func artifactListContent(artifacts []Artifact) string {
 		}
 	}
 	return strings.Join(paths, "\n")
+}
+
+// compactionContent renders a human-readable summary from CompactionInfo.
+func compactionContent(info *CompactionInfo) string {
+	if info == nil {
+		return "📦 Context compacted."
+	}
+	if info.BeforeTokens > 0 && info.AfterTokens > 0 {
+		s := "📦 Context compacted: " + formatTokens(info.BeforeTokens) + " → " + formatTokens(info.AfterTokens) + " tokens"
+		if info.Strategy != "" {
+			s += " (" + info.Strategy + ")"
+		}
+		if info.MessageCount > 0 {
+			s += ". " + fmt.Sprintf("%d", info.MessageCount) + " messages summarized."
+		}
+		return s
+	}
+	if info.SummaryPreview != "" {
+		return "📦 " + info.SummaryPreview
+	}
+	return "📦 Context compacted."
+}
+
+func formatTokens(n int) string {
+	if n >= 1000 {
+		return fmt.Sprintf("%dk", n/1000)
+	}
+	return fmt.Sprintf("%d", n)
 }
 
 func artifactBaseName(path string) string {

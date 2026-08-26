@@ -126,7 +126,7 @@ func TestAskMode_FolderAuthStillEnforced(t *testing.T) {
 		}
 	}
 	// ...but the folder-access gate still catches out-of-scope paths for them.
-	for _, pathArg := range []string{"/etc/passwd", "/var/log/system.log", "/tmp/secret.txt"} {
+	for _, pathArg := range []string{"/etc/passwd", "/var/log/system.log", "/opt/secret.txt"} {
 		args := map[string]any{"path": pathArg}
 		if len(p.OutOfScopePaths(args)) == 0 {
 			t.Errorf("folder-access gate should flag %q as out-of-scope even for safe tools in Ask mode", pathArg)

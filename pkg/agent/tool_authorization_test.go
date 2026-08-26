@@ -711,7 +711,7 @@ func TestOutOfScopePaths_ShellCommandFalsePositives(t *testing.T) {
 	}{
 		{"cat /etc/passwd", map[string]any{"command": "cat /etc/passwd"}},
 		{"cp /etc/hosts", map[string]any{"command": "cp /etc/hosts ./local"}},
-		{"rm -rf /tmp/important", map[string]any{"command": "rm -rf /tmp/important"}},
+		{"rm -rf /var/important", map[string]any{"command": "rm -rf /var/important"}},
 		{"sudo cat /etc/shadow", map[string]any{"command": "sudo cat /etc/shadow"}},
 		{"ls ~/Downloads", map[string]any{"command": "ls ~/Downloads"}},
 	}

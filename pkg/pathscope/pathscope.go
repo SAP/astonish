@@ -183,17 +183,35 @@ var alwaysAllowedPaths = map[string]bool{
 	"/dev/null": true,
 }
 
+// alwaysAllowedDirs is the set of well-known, harmless directory trees that
+// never require folder-access authorization. Any path equal to or under one of
+// these directories is always permitted. /tmp and /private/tmp are canonical
+// examples: agents routinely write temporary files there and prompting adds
+// friction without security benefit since the contents are ephemeral.
+var alwaysAllowedDirs = []string{
+	"/tmp",
+	"/private/tmp",
+}
+
 // IsAlwaysAllowedPath reports whether path is a well-known special path that is
-// always permitted regardless of the project-root boundary (e.g. /dev/null).
-// The input is normalized first so callers may pass raw or absolute forms. This
-// is the single source of truth shared by every folder-access enforcement point
-// so they can never drift apart.
+// always permitted regardless of the project-root boundary (e.g. /dev/null,
+// /tmp/*, /private/tmp/*). The input is normalized first so callers may pass
+// raw or absolute forms. This is the single source of truth shared by every
+// folder-access enforcement point so they can never drift apart.
 func IsAlwaysAllowedPath(path string) bool {
 	abs := NormalizePath(path)
 	if abs == "" {
 		return false
 	}
-	return alwaysAllowedPaths[abs]
+	if alwaysAllowedPaths[abs] {
+		return true
+	}
+	for _, dir := range alwaysAllowedDirs {
+		if PathWithin(dir, abs) {
+			return true
+		}
+	}
+	return false
 }
 
 // filesystemCommands is the set of command names that are known to touch the

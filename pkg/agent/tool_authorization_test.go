@@ -4,7 +4,18 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/SAP/astonish/pkg/pathscope"
 )
+
+// disableTmpAllowlist clears the /tmp always-allowed dirs for tests that verify
+// path denial. On Linux, t.TempDir() creates directories under /tmp which would
+// otherwise be auto-allowed, defeating the test assertions.
+func disableTmpAllowlist(t *testing.T) {
+	t.Helper()
+	restore := pathscope.OverrideAlwaysAllowedDirsForTest(nil)
+	t.Cleanup(restore)
+}
 
 func TestRequiresToolAuthorization(t *testing.T) {
 	tests := []struct {
@@ -97,6 +108,7 @@ func TestSessionAuthPolicy_AllToolsSessionSurvivesReset(t *testing.T) {
 }
 
 func TestSessionAuthPolicy_ResetPreservesPathOnce(t *testing.T) {
+	disableTmpAllowlist(t)
 	root := t.TempDir()
 	p := NewSessionAuthPolicy(root)
 	outside := filepath.Join(t.TempDir(), "other.txt")
@@ -135,6 +147,7 @@ func TestFolderContainment_InRoot(t *testing.T) {
 }
 
 func TestFolderContainment_OutsideRoot(t *testing.T) {
+	disableTmpAllowlist(t)
 	root := t.TempDir()
 	sibling := t.TempDir() // a different temp dir, guaranteed outside root
 	p := NewSessionAuthPolicy(root)
@@ -177,6 +190,7 @@ func TestFolderContainment_AlwaysAllowedDevNull(t *testing.T) {
 }
 
 func TestFolderContainment_SessionGrant(t *testing.T) {
+	disableTmpAllowlist(t)
 	root := t.TempDir()
 	sibling := t.TempDir()
 	p := NewSessionAuthPolicy(root)
@@ -203,6 +217,7 @@ func TestFolderContainment_SessionGrant(t *testing.T) {
 // from prompting when it writes session transcripts / PLAN.md outside the
 // project root.
 func TestFolderContainment_ExtraRoots(t *testing.T) {
+	disableTmpAllowlist(t)
 	root := t.TempDir()
 	stateDir := t.TempDir() // stands in for the astonish config/state dir
 	p := NewSessionAuthPolicy(root, stateDir)
@@ -227,6 +242,7 @@ func TestFolderContainment_ExtraRoots(t *testing.T) {
 }
 
 func TestFolderContainment_SymlinkEscape(t *testing.T) {
+	disableTmpAllowlist(t)
 	root := t.TempDir()
 	outsideDir := t.TempDir()
 	outsideFile := filepath.Join(outsideDir, "target.txt")
@@ -260,6 +276,7 @@ func TestFolderContainment_HomeExpansion(t *testing.T) {
 }
 
 func TestOutOfScopePaths(t *testing.T) {
+	disableTmpAllowlist(t)
 	root := t.TempDir()
 	sibling := t.TempDir()
 	p := NewSessionAuthPolicy(root)
@@ -288,6 +305,7 @@ func TestOutOfScopePaths(t *testing.T) {
 }
 
 func TestOutOfScopePaths_SliceArg(t *testing.T) {
+	disableTmpAllowlist(t)
 	root := t.TempDir()
 	sibling := t.TempDir()
 	p := NewSessionAuthPolicy(root)
@@ -308,6 +326,7 @@ func TestOutOfScopePaths_SliceArg(t *testing.T) {
 // bypass: a command whose operands reference a location outside the project
 // root must be flagged even though "command" is not a path arg.
 func TestOutOfScopePaths_CommandArg(t *testing.T) {
+	disableTmpAllowlist(t)
 	root := t.TempDir()
 	p := NewSessionAuthPolicy(root)
 
@@ -439,6 +458,7 @@ func TestApplyAuthorizationDecision_Tool(t *testing.T) {
 }
 
 func TestApplyAuthorizationDecision_Folder(t *testing.T) {
+	disableTmpAllowlist(t)
 	root := t.TempDir()
 	sibling := t.TempDir()
 	outside := filepath.Join(sibling, "x.txt")
@@ -537,6 +557,7 @@ func TestSessionAuthPolicy_PendingSnapshotIsImmutable(t *testing.T) {
 // prompted a second time on the same call. See the folder-grant branch of
 // ApplyAuthorizationDecision.
 func TestApplyAuthorizationDecision_FolderGrantSubsumesTool(t *testing.T) {
+	disableTmpAllowlist(t)
 	root := t.TempDir()
 	sibling := t.TempDir()
 	outside := filepath.Join(sibling, "x.txt")
@@ -611,6 +632,7 @@ func TestApplyAuthorizationDecision_FolderGrantSubsumesTool(t *testing.T) {
 //  3. list /tmp → still allowed (session grant persists).
 //  4. list /   → must prompt AGAIN (the once-grant was consumed in step 2).
 func TestConsumePathGrants_OnceIsNotAlways(t *testing.T) {
+	disableTmpAllowlist(t)
 	root := t.TempDir()
 	p := NewSessionAuthPolicy(root)
 
@@ -654,6 +676,7 @@ func TestConsumePathGrants_OnceIsNotAlways(t *testing.T) {
 // paths inside the project root or a session grant (there is no once-grant to
 // consume for them) and is a no-op when no grant exists.
 func TestConsumePathGrants_InScopeNoop(t *testing.T) {
+	disableTmpAllowlist(t)
 	root := t.TempDir()
 	p := NewSessionAuthPolicy(root)
 

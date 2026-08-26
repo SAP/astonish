@@ -193,6 +193,15 @@ var alwaysAllowedDirs = []string{
 	"/private/tmp",
 }
 
+// OverrideAlwaysAllowedDirsForTest replaces the global alwaysAllowedDirs with
+// the given list and returns a restore function. Intended exclusively for tests
+// in other packages that need to verify denial of paths under /tmp.
+func OverrideAlwaysAllowedDirsForTest(dirs []string) (restore func()) {
+	old := alwaysAllowedDirs
+	alwaysAllowedDirs = dirs
+	return func() { alwaysAllowedDirs = old }
+}
+
 // IsAlwaysAllowedPath reports whether path is a well-known special path that is
 // always permitted regardless of the project-root boundary (e.g. /dev/null,
 // /tmp/*, /private/tmp/*). The input is normalized first so callers may pass

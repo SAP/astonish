@@ -1,10 +1,10 @@
 # Docs — Slides (Web Component Presentations)
 
-> **Status**: Implemented (template import + fill_slides authoring)
+> **Status**: Implemented (template import + recipe layout engine + fill_slides authoring)
 > **Category**: Productivity Tools
 > **First doc type**: Slides
 > **Future doc types**: Documents (rich text), Spreadsheets (structured data)
-> **Last research review**: 2026-08-21
+> **Last research review**: 2026-08-27
 
 ## Overview
 
@@ -17,6 +17,8 @@ Astonish Docs enables the agent to create, refine, present, and export professio
 
 The canonical source is not arbitrary rendered DOM and is not a screenshot. It is a constrained component tree with explicit geometry and typed data. Web and PowerPoint are separate render targets of that tree.
 
+Default authoring is **not** “fill empty holes in an imported sample slide.” The agent picks a **named layout type** (`recipe-*`); the server composes ASD from that type, themed with the active template’s style guide (colors, fonts, spacing) and overlaid with extracted brand chrome (logo, legal). The imported `.pptx` is the identity source, not the composition engine.
+
 ## Goals
 
 1. Give the LLM a compact, composable slide vocabulary instead of unconstrained HTML/CSS.
@@ -25,6 +27,7 @@ The canonical source is not arbitrary rendered DOM and is not a screenshot. It i
 4. Make export behavior predictable, inspectable, and testable.
 5. Allow richer web-only components without pretending they can round-trip to PowerPoint.
 6. Preserve existing Astonish tenant scoping, Studio SSE behavior, and sandbox boundaries.
+7. Compose on-brand decks from a small catalog of layout types (cover, chapter, contrast, quote, closer) rather than pouring a story into whichever imported sample ranked richest.
 
 ## Non-goals
 
@@ -43,7 +46,13 @@ The canonical source is not arbitrary rendered DOM and is not a screenshot. It i
 
 ```text
                          LLM AGENT
-         create_deck / fill_slides / write_slide / read_slide / validate_deck
+         create_deck → catalog (recipe-* first, then imported archetypes)
+         fill_slides { kind: recipe-…, fills: { eyebrow, headline, … } }
+                                │
+                                ▼
+                     RECIPE RENDERER  (pkg/docs/slides/recipe.go)
+         layout type + styleGuide tokens + ExtractChrome (logo, legal)
+         optional slots omitted; cards hug copy; named ast-text slots
                                 │
                                 ▼
                 ASTONISH SLIDES DOCUMENT (ASD v1)
@@ -66,7 +75,7 @@ The canonical source is not arbitrary rendered DOM and is not a screenshot. It i
 
 The **normalized scene graph** is the contract. The browser DOM is a rendering output and measurement aid, not the export source of truth. Exporters never scrape arbitrary DOM and guess its meaning.
 
-Importing a corporate `.pptx` produces a high-fidelity ASD template (theme tokens plus per-layout archetypes, `example-*` archetypes from real sample slides, and a lossless `TemplateModel` IR), which then flows through the same ASD runtime as app-authored decks.
+Importing a corporate `.pptx` produces a high-fidelity ASD template: theme tokens, a style guide, **fixed** chrome layouts (`title` / `section` / `agenda` / `closing`), **flexible** `pattern-*` archetypes from sample slides, and a lossless `TemplateModel` IR. That template **feeds** the recipe renderer. The LLM does not author by copying imported sample markup. `write_slide` remains blank-canvas only.
 
 ### Studio Templates management surface
 
@@ -87,6 +96,153 @@ Note that the templates **list** endpoint (`GET /api/docs/slides/templates`) ret
 | Security | Large HTML/CSS/script attack surface | Allowlisted elements, attributes, URLs, and styles |
 
 The restricted vocabulary is a feature: it establishes the subset that can be represented consistently in both CSS and PresentationML.
+
+---
+
+## Layout-type recipe engine
+
+This is the default authoring path for every templated deck (built-in or imported). It exists because filling imported sample holes (`pattern-*`, `ph-1…ph-N` in reading order) produced on-brand but empty-looking slides: leftover gray cards, photo-only blanks, title-only dividers, and copy parked in the wrong box. The composition model is the one used by high-quality generated decks: a **repeating chrome frame**, a **small catalog of layout types**, and **copy that fills every region of the chosen type**.
+
+The imported template is still required. It supplies identity (palette, type, logo, legal). It does not supply the page grid the story is poured into.
+
+Code: `pkg/docs/slides/recipe.go` (catalog, palette, chrome, named slots) and `pkg/docs/slides/recipe_layouts.go` (ten layout geometries). Tests in `recipe_test.go`. The slides skill (`pkg/skills/builtin_content_slides.go`) is the agent contract.
+
+### Pipeline
+
+```text
+create_deck(template)
+    │
+    ├─ seed deck theme tokens + embedded fonts only
+    ├─ catalogFromTemplate:
+    │     RecipeArchetypes(tmpl)     ← recipe-* first
+    │     + tmpl.Archetypes          ← title/section/pattern-* after
+    └─ StyleGuide = RecipeGuideMarkdown() + tmpl.StyleGuide.Markdown
+
+fill_slides({ position, kind: "recipe-split-narrative", fills: {…} })
+    │
+    ├─ findTemplateArchetype (recipe kinds resolve here, not from the pptx)
+    ├─ ExtractChrome(tmpl)           ← logo asset-ref, legal, confidential
+    ├─ chrome.DeckTitle = deck.Title
+    ├─ chrome.Page = position + 1
+    ├─ RenderRecipe(kind, styleGuide, tokens, chrome, fills)
+    │     optional empty slots are not emitted (cards/columns collapse)
+    ├─ missingTextSlotFills          ← required named slots only
+    ├─ fillArchetypeMarkup           ← substitute ast-text by id
+    ├─ mergeDeckAssets               ← copy logo / image refs used in markup
+    └─ WriteSlide                    ← same ASD persist/export path as today
+```
+
+There is **no extra LLM round-trip**. The model still authors the whole deck in one `fill_slides` call. The server owns geometry and chrome; the model owns copy.
+
+`get_archetype` can still return a recipe prototype (page 0, no running title). That is an escape hatch. `fill_slides` always re-renders with page number and deck title.
+
+### Catalog (ten kinds)
+
+Every `create_deck` catalog leads with these kinds, then the imported archetypes. Summaries name the **job**, not “6 rounded cards.”
+
+| Kind | Job | Required regions (named slots) |
+|---|---|---|
+| `recipe-cover` | Slide 0 lockup | `eyebrow`, `headline`, `dek`, `meta_1_*`, `meta_2_*`; optional `headline_2`, `meta_3_*`, `meta_4_*` |
+| `recipe-split-narrative` | Chapter: left story + 3 claims | header + `body_1` + `item_1..3_title/body`; `body_2` optional |
+| `recipe-quote-split` | Turning point | header + `body_1` + `quote` + `attribution`; `body_2` optional |
+| `recipe-two-up` | Contrast / pair | header + two columns (`col_N_kicker/title/body`) |
+| `recipe-three-up` | Triad or short timeline | header + 3 cards (`item_N_kicker/title/body`) |
+| `recipe-stat-row` | Metrics | header + 3 tiles (`stat_N_label/number/caption`); 4th tile optional |
+| `recipe-numbered-grid` | Six principles | header + 6 cells (`item_N_title/body`); index `01…06` is chrome |
+| `recipe-callout-rail` | Argument + lesson | header + `body_1` + `callout_kicker/title/body`; `body_2` optional |
+| `recipe-year-hero` | Giant year + 3 claims | `eyebrow`, `headline`, `year`, `item_1..3_*` |
+| `recipe-closer` | Last slide | `eyebrow`, `headline`, `thesis`, 3 takeaway cards |
+
+Shared **header** on body types: `eyebrow` (chapter/section kicker), optional `date` (year range or right marker), `headline`, optional `headline_2` (split display title). A chapter is an eyebrow on a full content slide. Empty `section` dividers are not part of the default spine.
+
+The model picks the type whose **slot count matches the content**. Three products → `recipe-three-up`, not a 6-card imported sample. Two sides → `recipe-two-up`. A quote → `recipe-quote-split`. Last slide → `recipe-closer`.
+
+### Named slots, not `ph-N`
+
+Recipe `FillSlots` are stable English ids (`eyebrow`, `item_2_body`). `SlotHint.Role` of `optional` means the slot is listed in the catalog but is **not** required by `missingTextSlotFills`. At fill time, empty optional slots are omitted from the markup (the 4th stat tile disappears; `headline_2` does not leave a blank display line). Required slots still reject empty fills.
+
+`fillArchetypeMarkup` skips empty values so an omitted optional key is not an error. Image slots remain `ph-pic-*` / asset-ref on **imported** archetypes only; recipes do not invent photo holes.
+
+This is what stops “iPhone body landed in the kicker”: there is no `ph-4`.
+
+### Palette and contrast
+
+`paletteFrom(styleGuide, tokens)` reads `surface`, `ink`, `accent`, `muted`, `displayFont`, `bodyFont`, and spacing from the template. Display type is used for headlines; body type for paragraphs and labels.
+
+Template `muted` is often a **decorative wash** (pale cyan on white). Recipes use it as caption/body color **only** if it meets WCAG AA (contrast ≥ 4.5) against `surface`. Otherwise captions use `secondary = mix(ink, surface, 0.22)` — readable gray/ink, not the wash. Card fills are `mix(surface, ink, 0.08)`, not `muted`.
+
+Accent is reserved for eyebrows, kickers, rules, and index numbers.
+
+### Chrome overlay
+
+`ExtractChrome` scans imported archetype markup (preferring title/closing) for:
+
+- the first non-thumb, non-full-bleed `ast-image` → logo `asset-ref` (aspect ratio preserved, capped ~200×52)
+- legal-like text (`©`, copyright, “partners only”)
+- confidential/internal stamps
+
+If legal and confidential are the **same stamp** (typical `INTERNAL – …` line), it is painted **once**, in the footer. It is not also repeated top-right.
+
+Every recipe then adds:
+
+- full-canvas `surface` background
+- logo at the top-left when present
+- unique confidential line top-right when it is not the legal stamp
+- **eyebrow below the logo** (a full row of gap — the kicker is not tucked under the mark)
+- 64×3 accent rule under the eyebrow
+- footer: legal (else deck title) left, `01`-style page right
+
+Page and running title are filled at `fill_slides` time so the model does not invent folio numbers. Logo refs used in markup are copied onto the session deck the same way other `asset-ref`s are.
+
+Recipes are **generic**. They contain no named-brand or named-story literals. GCO/SAP identity arrives only through tokens + extracted chrome.
+
+### Geometry (content-sized cards)
+
+Logical canvas remains 1920×1080. Cards **hug copy**: padding plus 3–6 lines of body. They do not stretch to the footer (that produced tall empty gray slabs with a paragraph at the top). Quote cards size to quote + attribution. Stat tiles size to label + number + caption. The numbered grid is two rows of content-sized cells, not leftover-height cells.
+
+When optional `body_2` is omitted, `body_1` grows so the left column is not a short paragraph over white.
+
+Cover meta cells are placed **under the dek**, not at a fixed Y=900. Unused optional meta columns are dropped so two facts do not leave two empty cells.
+
+Footer lives in the bottom ~48px. Text boxes must not overlap; `recipe_test.go` asserts this on every filled type.
+
+### What the imported catalog is for
+
+| Catalog kind | Role after this engine |
+|---|---|
+| `recipe-*` | **Default** cover and body. Always present, even on built-in themes. |
+| `title` / `section` / `agenda` / `closing` | Official brand layouts. Use only when the user asks for the official cover/divider/agenda. |
+| `pattern-*` | Sample-derived designed slides (cards, icon rows). Optional when geometry matches the same job and slot count. Not chosen for “chrome richness.” |
+| `content` / Title and Text | Last resort. |
+
+Binding a `pattern-*` into a recipe (reuse GCO’s actual rounded cards when the job is three-up) is a **follow-up**. v1 always renders recipes so composition is stable; tokens + logo keep the deck on-brand.
+
+No re-import is required for recipes to work. Importer changes still require re-import if the operator wants updated `pattern-*` hints.
+
+### Agent contract (slides skill)
+
+The skill instructs the model to:
+
+1. Let the **user** pick the template (`ask_user` + `slidesTemplatePicker`). Inferring tone is not permission to choose.
+2. `create_deck`, then **go straight to `fill_slides`** — do not stall on cover/agenda/section chrome pickers unless the user asked for official layouts.
+3. Plan the story as jobs (cover, chapters, contrast, closer) in that one call. Prefer 8–16 dense slides over 18 sparse ones. At least three different `recipe-*` kinds on a deck longer than six slides.
+4. Titles are takeaways (complete sentence or two-line split headline), not topic labels.
+5. Density: headline + 2–4 content blocks. Cards/items are a complete thought (~12–22 words). Body columns are short paragraphs (~40–70 words). 6×6 is a **bullet cap**, not permission to leave the canvas blank.
+6. After `review_deck`, fix the named slides; do not rebuild the deck.
+
+`create_deck` instructions and `fill_slides` tool descriptions say the same thing so the always-on prompt cannot fight the skill.
+
+### `review_deck` additions
+
+Existing heuristics still apply (`run_adjacency`, `empty_card`, `missing_title`, `unfilled_image_slot`, `weak_source`). Recipes add:
+
+| Code | Severity | When |
+|---|---|---|
+| `sparse_slide` | warning | Body slide (not cover) whose text bbox covers &lt; ~35% of the safe area **and** has ≤2 non-empty text nodes |
+| `missing_eyebrow` | warning | Recipe slide (`id=eyebrow` present) with empty kicker |
+| `nominal_title` | info | 1–4 word topic-label headline with no verb and no `headline_2` |
+| `sparse_section` | warning | More than one title-only divider — chapters belong on recipe slides |
+| `missing_chrome` | warning | **Not** fired on recipe layouts (the frame *is* the chrome). Still fired on title+body walls with no cards/media |
 
 ---
 
@@ -228,7 +384,21 @@ The consequence is a real authoring pitfall: `<ast-run>1972</ast-run><ast-run>Fo
 
 #### Self-evaluation (`review_deck`)
 
-`review_deck` is an agent tool that renders the persisted deck to its parsed `SceneGraph` and returns a structured self-evaluation the model reads before declaring a deck done. It complements `validate_deck` (which is structural/geometry only) by catching **semantic/visual** defects. It returns heuristic `findings` — `run_adjacency` (the collision above, severity `warning`), `overlap` (two non-decorative text boxes whose bounding boxes substantially intersect — a colliding/misaligned layout such as a broad body placeholder swallowing a fixed label, `warning`), `low_contrast` (a fill/color with weak WCAG contrast against the surface, `info`; skipped for `id=bg`, full-canvas nodes, and fills equal to the surface), `missing_chrome` (a template-based **title+body wall** with no cards/media; empty dividers and chevron/card slides are not flagged; `warning`), `unfilled_image_slot` (a `ph-pic-*` still rendered as an empty shape panel, `warning`), and `weak_source` (a vague, undated `Source: …` citation, `info`) — plus a fixed review `checklist` so the model always has guidance even when the heuristics are clean. It is **agent-driven, not a hard runtime block**: the slides skill instructs the model to fix all `warning`-level findings and re-run `review_deck` until clean before telling the user the deck is ready (mirroring the `ask_user` pattern). The result carries scene-derived text only — never `data:` image/font bytes.
+`review_deck` is an agent tool that renders the persisted deck to its parsed `SceneGraph` and returns a structured self-evaluation the model reads before declaring a deck done. It complements `validate_deck` (which is structural/geometry only) by catching **semantic/visual** defects. It returns heuristic `findings`:
+
+- `run_adjacency` — colliding adjacent runs (e.g. `1972Founded`), `warning`
+- `overlap` — two non-decorative text boxes whose bounding boxes substantially intersect, `warning`
+- `low_contrast` — fill/color with weak WCAG contrast against the surface, `info` (skipped for `id=bg`, full-canvas nodes, and fills equal to the surface)
+- `missing_chrome` — template-based **title+body wall** with no cards/media; empty dividers, chevron/card slides, and **recipe layouts** (ids `eyebrow` / `headline` / `chrome-footer`) are not flagged; `warning`
+- `unfilled_image_slot` — a `ph-pic-*` still rendered as an empty shape panel, `warning`
+- `weak_source` — vague, undated `Source: …` citation, `info`
+- `empty_card` / `missing_title` — leftover empty designed boxes or no visible title
+- `sparse_slide` — body slide that barely uses the canvas (recipe-era density check), `warning`
+- `missing_eyebrow` — recipe kicker present but empty, `warning`
+- `nominal_title` — topic-label headline instead of a takeaway, `info`
+- `sparse_section` — more than one title-only divider, `warning`
+
+plus a fixed review `checklist` so the model always has guidance even when the heuristics are clean. It is **agent-driven, not a hard runtime block**: the slides skill instructs the model to fix all `warning`-level findings and re-run `review_deck` until clean before telling the user the deck is ready (mirroring the `ask_user` pattern). The result carries scene-derived text only — never `data:` image/font bytes.
 
 Studio also reveals the right-hand slides harness only **after the first slide is written** (a `slide_written` `docs_update`), not on `create_deck`/`deck_viewed`, so the user never sees an empty deck panel before generation.
 
@@ -448,12 +618,19 @@ Schema changes require edits in every applicable Ent scope, generated output, an
 ## Imported Template IR (`TemplateModel`)
 
 Imported corporate `.pptx` templates are stored losslessly as a rich
-intermediate representation (IR) called `TemplateModel`, in addition to the
-fill-ready ASD archetypes the LLM authoring flow consumes. This is the
-"Option C" design: the IR is the persisted source of truth for the future
-in-browser template editor and for high-fidelity re-export, but rendering and
-preview today go through a single renderer — the existing ASD runtime — by
-converting IR → ASD. **There is no second/parallel renderer.**
+intermediate representation (IR) called `TemplateModel`, in addition to
+fill-ready ASD archetypes (`title` / `section` / `pattern-*`). The IR is the
+persisted source of truth for the future in-browser template editor and for
+high-fidelity re-export. Rendering and preview today go through a single
+renderer — the existing ASD runtime — by converting IR → ASD. **There is no
+second/parallel renderer.**
+
+The LLM's **default** authoring path does not consume those imported archetypes
+directly. `create_deck` prepends `recipe-*` entries generated from the template
+style guide; `fill_slides` composes those layouts server-side and overlays
+extracted chrome (see *Layout-type recipe engine*). Imported `pattern-*`
+samples remain in the catalog as an optional match. `templateModel` still
+banks the lossless IR.
 
 ### Data model
 
@@ -519,9 +696,11 @@ the `list_slide_templates`/`create_deck` tool results):
   its elements or adding an ad-hoc accent/background is forbidden — that is what
   produced the off-brand white cover with a stray green shape.
 - **`flexible` — content** (everything else; also all built-in archetypes, which
-  leave `Tier` unset). The agent starts from the archetype and adapts the body
-  region to the content type (bullets, small table, chart, image+caption) while
-  keeping the template background/tokens.
+  leave `Tier` unset, and all `recipe-*` kinds, which are `tier: flexible`).
+  Recipes are composed by the server from the style guide; the agent fills named
+  slots only. Imported flexible archetypes (`pattern-*`, multi-column content)
+  remain fillable when the job matches. The agent must not rebuild chrome by
+  hand.
 
 **Classification is signature-first (`kindOf` in `import_worker.mjs`).** The tier
 is derived from a layout's *role*, and the role is decided by placeholder
@@ -604,8 +783,14 @@ PowerPoint document order. Card grids get hints like `card 2 of 6 (top-middle) �
 one short headline, not a heading+body pair`; icon rows get `item N of M`. A wide
 short bar between title and cards is a `kicker`, not a seventh card. Widget-sheet
 samples (more than 16 fill slots or 30 decorative shapes) are not promoted.
-`example-*` kinds are not used. The model never reprints that chrome —
-`fill_slide` substitutes slots server-side.
+`example-*` kinds are not used.
+
+**`pattern-*` is not the default body path.** The recipe engine composes cover and
+body slides from named layout types and paints template tokens + logo/legal on
+top. Filling a `pattern-*` is an optional match when the sample's structure
+equals the chosen job (same slot count). The model never reprints imported
+chrome by hand — `fill_slides` substitutes slots server-side, and for `recipe-*`
+it renders the layout first.
 
 After layouts are classified, the **richest variant** of each chrome role
 (`title`, `section`, `closing`) is promoted to the unsuffixed kind so
@@ -757,8 +942,10 @@ guards and the export CSP runtime-hash test are unchanged (no runtime change).
 - Imported templates persist with `schemaVersion = SchemaV3` (`3`); built-in
   templates and normal decks keep `SchemaV1`/`SchemaV2` and are untouched.
 - The worker's template-mode response is `{ schema:2, name, label, tokens,
-  assets, archetypes[], templateModel }`. `archetypes[]` (the IR→ASD output) keeps
-  the LLM authoring flow identical; `templateModel` banks the lossless IR.
+  assets, archetypes[], templateModel }`. `archetypes[]` (the IR→ASD output) is
+  the imported catalog (`title` / `pattern-*` / …). The LLM authoring flow
+  **prepends** `recipe-*` at `create_deck` time from those tokens and the style
+  guide; `templateModel` banks the lossless IR.
   `SaveTemplate` marshals `Template.Model` into the column; `ListTemplates`
   unmarshals it back, so the IR round-trips.
 - Archetype **variants** surface to the agent and Studio: `list_slide_templates`
@@ -933,6 +1120,11 @@ it was (1) example archetypes built from thin, background-less authored slides a
 (2) missing master→layout background/chrome inheritance. Both are now fixed:
 example-from-slide archetypes were removed, and inheritance is resolved at import.
 
+Option A is the **identity** decision (one template per pptx). Body **composition**
+is the recipe engine: the agent does not pick among 39 imported layouts as the
+default page grid. Variants remain available for official covers/dividers and as
+optional `pattern-*` matches.
+
 ### Roadmap: in-browser template editing
 
 In-browser editing (contenteditable placeholders + `collectFills`, as validated in
@@ -950,8 +1142,8 @@ rendering currently goes through IR → ASD.
 |---|---|---|
 | `list_slide_templates` | Slim catalog of built-in + imported templates | none |
 | `create_deck` | Create a deck; with `template`, seeds theme/assets and a **slim catalog** (no markup) | `slug`, `title`, `template?` |
-| `fill_slides` | Copy catalog entries server-side and substitute fillSlots for many slides in one call | `deck_slug`, `slides[{position, kind or label, fills}]` |
-| `fill_slide` | Same substitution for one slide (later edits) | `deck_slug`, `position`, `kind` or `label`, `fills` |
+| `fill_slides` | Author many slides in one call. `recipe-*`: server composes the layout, then substitutes **named** fills. Imported kinds: copy archetype markup and substitute `ph-*` slots | `deck_slug`, `slides[{position, kind or label, fills}]` |
+| `fill_slide` | Same for one slide (later edits) | `deck_slug`, `position`, `kind` or `label`, `fills` |
 | `get_archetype` | Escape hatch: one archetype's markup | `template`, `kind` or `label` |
 | `write_slide` | Write a full `<ast-slide>` (blank-canvas only) | `deck_slug`, `position`, `markup` |
 | `get_deck` | Deck identity + slim slide index (no markup) | `slug` |
@@ -960,15 +1152,18 @@ rendering currently goes through IR → ASD.
 | `validate_deck` / `review_deck` | Structural then semantic/visual review | `slug` |
 | `list_deck_assets` / `add_deck_image` | Image catalog / SSRF-safe ingest | `deck_slug`, `url?` |
 
-`fill_slides` is the default authoring API for templated decks (one tool call for the whole deck). `fill_slide` is the later single-slide edit. The server owns chrome (covers, sample-derived cards, master logo/footer); the model supplies slot text (or an asset-ref for image slots). `create_deck` copies only embedded fonts onto the session deck and `fill_*` copies the image refs the authored markup uses — unused sample-slide photos stay on the template so present/export HTML stays small. `create_deck` / `ask_user` / `get_template_variant_previews` must not dump full ASD markup into the model context — baked PNG `thumbnailRef`s are used for pickers.
+`fill_slides` is the default authoring API for templated decks (one tool call for the whole deck). `fill_slide` is the later single-slide edit. See *Layout-type recipe engine* for the compose-then-fill path.
+
+`create_deck` copies only embedded fonts onto the session deck and `fill_*` copies the image refs the authored markup uses (including the recipe logo). Unused sample-slide photos stay on the template so present/export HTML stays small. `create_deck` / `ask_user` / `get_template_variant_previews` must not dump full ASD markup into the model context — baked PNG `thumbnailRef`s are used for pickers. Recipe catalog entries omit markup the same way.
 
 ### Prompt rules
 
 1. Always start from a template. Use `fill_slides` (whole deck, one call) when a catalog is present.
-2. Prefer `pattern-*` catalog entries for body slides (they carry the imported example-slide cards). Title and Text is last resort. Use at most one section divider.
-3. Fixed chrome (title/section/agenda/closing): fill text slots only.
-4. Do not reprint `<ast-shape>` chrome into `write_slide`.
-5. Validate, then `review_deck` until warnings are clean.
+2. Prefer `recipe-*` catalog entries. Pick the layout whose slot count matches the content. A chapter is an eyebrow on a full content slide — do not insert empty section dividers.
+3. Fill every required named slot. Titles are takeaways (complete sentence or split headline), not topic labels. Empty canvas is a defect.
+4. Imported `pattern-*` only when it matches the same job. Title and Text is last resort.
+5. Do not reprint `<ast-shape>` chrome into `write_slide`.
+6. Validate, then `review_deck` until warnings are clean (`sparse_slide`, `missing_eyebrow`, `empty_card`).
 
 ---
 
@@ -983,13 +1178,16 @@ pkg/docs/slides/
 ├── parser.go                  # ASD markup → normalized graph
 ├── validation.go             # schema, geometry, overflow, security
 ├── migrations/               # source schema migrations
-├── tools.go                  # agent tools
+├── fill.go                    # slot substitution, catalogFromTemplate
+├── recipe.go                  # layout-type catalog, palette, chrome, RenderRecipe
+├── recipe_layouts.go          # ten layout geometries (cover … closer)
+├── tools.go                   # agent tools (create_deck, fill_slides, review_deck)
 ├── export_pdf.go             # Chromium print orchestration
 ├── export_html.go            # standalone component bundle
 ├── export_pptx.go            # worker invocation and package checks
 ├── components/               # schemas and target-neutral metadata
-├── themes/                   # embedded tokenized themes
-└── pptxworker/               # embedded, pinned JS bundle and protocol
+├── themes/                   # tokens, style guide, TemplateModel IR
+└── pptxworker/               # import + PptxGenJS export workers
 
 web/src/components/docs/slides/
 ├── runtime/                   # ast-* Custom Elements and deck controller
@@ -1079,7 +1277,8 @@ This is a **frontend rendering and history-folding contract only**. It does not 
 - geometry bounds, overlap, and reading-order checks;
 - text overflow using approved font metrics;
 - missing asset/data reference checks;
-- capability diagnostics for every export target.
+- capability diagnostics for every export target;
+- recipe renderer: every layout type parses, named slots present, no text-box overlap, cards hug copy, pale `muted` is not used as body color, confidentiality stamp is not duplicated, cover meta follows the dek, no brand/story literals in recipe source.
 
 ### Web rendering
 
@@ -1178,13 +1377,21 @@ The exporter interface must isolate this choice. Browser-side export reduces ser
 - Add asset ingestion, font checks, time/resource limits, caching, and export observability.
 - Add strict/native and visual-fidelity export profiles.
 
+### Phase 5 — Recipe layout engine (implemented)
+
+- Ten named layout types (`recipe-cover` … `recipe-closer`) composed server-side from the template style guide.
+- Named slots, optional-slot collapse, content-sized cards, WCAG-gated secondary text.
+- Chrome overlay: logo, single confidentiality line, running footer, page numbers.
+- `create_deck` catalog leads with `recipe-*`; `fill_slides` re-renders with page/title; `review_deck` flags sparse slides and empty eyebrows.
+- Slides skill: pick layout by job; no empty section dividers; no chrome-picker stall on the recipe path.
+
 ### Future
 
+- Bind imported `pattern-*` samples into a matching recipe when geometry and slot count agree (reuse the template's actual cards instead of token-drawn ones).
 - Additional chart types, connectors, animations, and transitions where both targets support them.
 - Optional Office content add-in export for explicitly live enterprise decks.
-- Version history, collaboration, templates, and manual editing.
-- PPTX import into ASD with explicit loss diagnostics.
-- Theme ingestion from corporate `.pptx` templates.
+- Version history, collaboration, and manual editing.
+- Domain outline packs (briefing, exec update) that only supply story structure; they still render through `recipe-*`.
 
 ---
 
@@ -1193,6 +1400,8 @@ The exporter interface must isolate this choice. Browser-side export reduces ser
 | Risk | Impact | Mitigation |
 |---|---|---|
 | Web and PowerPoint text engines wrap differently | High | Fixed boxes, approved fonts, overflow checks, PowerPoint render tests |
+| LLM pours a story into the richest `pattern-*` | High | Catalog leads with `recipe-*`; skill and `create_deck` instructions pick layout by job; `review_deck` flags sparse slides |
+| Template `muted` is unreadable as body text | Medium | Recipes use it for captions only when contrast ≥ 4.5; otherwise mix ink toward surface |
 | LLM requests unsupported CSS/effects | Medium | Schema-generated prompt, allowlist, strict validation, explicit fallback tiers |
 | Custom components silently flatten | High | Capability metadata, export diagnostics, strict mode, native-area acceptance gate |
 | PptxGenJS lacks a required PresentationML feature | Medium | Exporter abstraction; targeted OOXML post-processing or commercial SDK evaluation only when justified |
@@ -1223,6 +1432,8 @@ The exporter interface must isolate this choice. Browser-side export reduces ser
 | Live HTML in PPTX | Separate optional Office add-in profile | Add-ins are hosted runtime surfaces, not native portable shapes |
 | Storage | Tenant-scoped database and managed assets | Preserves Astonish scope invariants |
 | Security | Parsed allowlisted DSL in sandboxed iframe | Web Components do not justify arbitrary model-authored script execution |
+| Default body authoring | Server-side `recipe-*` layouts themed from the template | Named slots + chrome overlay beat filling imported sample holes; identity still comes from the `.pptx` |
+| Template `muted` token | Body/caption color only if WCAG AA vs surface | Corporate washes are decorative; unreadable cyan captions are a defect |
 
 ---
 
@@ -1272,11 +1483,12 @@ token, so history stays readable and the model reads the answer naturally.
 `get_template_variant_previews(template, kind?)` returns each archetype variant's
 lightweight metadata — `{ kind, label, tier, fillSlots }` plus a **thumbnail
 reference** (`Archetype.ThumbnailRef`, an asset key on the hidden `tmpl/<name>`
-deck) and the shared `theme` tokens and `assets`. It **no longer ships the full
-`markup`** for each variant: the archetype markup the agent authors from is already
-returned by `create_deck`, so re-fetching it here is redundant. Returning only
-metadata + a thumbnail reference keeps the payload small and fixed a
-context-overflow authoring loop (see "Static archetype thumbnails" below). Like all
+deck) and the shared `theme` tokens and `assets`. It **does not ship markup**.
+`create_deck` also omits markup (slim catalog of kind/label/slots/summary).
+Recipe kinds are composed at `fill_slides` time; imported kinds are filled
+server-side. Returning only metadata + a thumbnail reference keeps the payload
+small and avoids a context-overflow authoring loop (see "Static archetype
+thumbnails" below). Like all
 tool results it carries **ASD text and asset-refs only** — never `data:` image/font
 bytes (those resolve through the deck asset plumbing at render time), so it is safe
 to return from a tool and keeps `TestSlidesResponsesOmitHeavyManifestFields` green.
@@ -1384,15 +1596,25 @@ The card is emitted with the same prefix-marker pattern as `distill_preview` /
 
 ### Slides workflow integration
 
-For a template with multiple variants, the agent asks **one question at a time in
-sequence**: (0) when the user did not name a template, `ask_user kind="select"` with
-`slidesTemplatePicker=true` — a card with one live cover thumbnail per available
-template, so the user chooses the design visually; the reply is the template name for
-`create_deck`. Then (1) `ask_user kind="select"` with `slides-archetype` thumbnails for the
+Default path (recipe engine):
+
+0. When the user did not name a template, `ask_user kind="select"` with
+   `slidesTemplatePicker=true` — a card with one live cover thumbnail per available
+   template. The reply is the template name for `create_deck`.
+1. `create_deck` with that template. Catalog leads with `recipe-*`.
+2. **Straight to one `fill_slides` call** using recipe kinds and named fills.
+   Do not stall on cover / agenda / divider chrome pickers.
+
+Official-layout path (only if the user asked to use the imported title/section/agenda):
+
+Then (1) `ask_user kind="select"` with `slides-archetype` thumbnails for the
 title/cover variant, (2) `ask_user kind="yesno"` for "Would you like an agenda
 slide?", (3) `ask_user kind="select"` with thumbnails for the divider/section
-variant. The questionnaire remains **agent-driven** (the model chooses to ask); it is
-not hard-enforced at the runtime level in this pass.
+variant.
+
+The questionnaire remains **agent-driven** (the model chooses to ask); it is
+not hard-enforced at the runtime level. The skill forbids chrome-picker stalls
+on the recipe path because they added turns without improving composition.
 
 ---
 

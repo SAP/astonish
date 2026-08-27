@@ -592,6 +592,153 @@ func TestImportPatternInheritsLayoutTitle(t *testing.T) {
 	}
 }
 
+func TestImportEmptyCardsGetFillSlots(t *testing.T) {
+	workingDir, importScript, _ := requireNodeEnv(t)
+	titleOnly := layoutXML("Title Only", "",
+		phSp(2, "Title 1", "title", "", 288000, 400000, 11000000, 900000, "", "Click to add title"))
+	emptyCard := func(id int, fill string, x, y int) string {
+		return `<p:sp>
+<p:nvSpPr><p:cNvPr id="` + itoa(id) + `" name="Card"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+<p:spPr><a:xfrm><a:off x="` + itoa(x) + `" y="` + itoa(y) + `"/><a:ext cx="4000000" cy="2200000"/></a:xfrm>
+<a:prstGeom prst="roundRect"><a:avLst/></a:prstGeom>
+<a:solidFill><a:srgbClr val="` + fill + `"/></a:solidFill></p:spPr>
+<p:txBody><a:bodyPr/><a:p/></p:txBody>
+</p:sp>`
+	}
+	filledCard := func(id int, fill, text string, x, y int) string {
+		return `<p:sp>
+<p:nvSpPr><p:cNvPr id="` + itoa(id) + `" name="Card"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+<p:spPr><a:xfrm><a:off x="` + itoa(x) + `" y="` + itoa(y) + `"/><a:ext cx="4000000" cy="2200000"/></a:xfrm>
+<a:prstGeom prst="roundRect"><a:avLst/></a:prstGeom>
+<a:solidFill><a:srgbClr val="` + fill + `"/></a:solidFill></p:spPr>
+<p:txBody><a:bodyPr/><a:p><a:r><a:rPr lang="en-US" sz="2000"/><a:t>` + text + `</a:t></a:r></a:p></p:txBody>
+</p:sp>`
+	}
+	sample := `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+<p:cSld><p:spTree>
+<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+<p:grpSpPr/>
+` + filledCard(10, "DBEAFE", "Only this card has copy", 400000, 1800000) + `
+` + emptyCard(11, "D1EFFF", 4800000, 1800000) + `
+` + emptyCard(12, "A6E0FF", 400000, 4300000) + `
+` + emptyCard(13, "89D1FF", 4800000, 4300000) + `
+</p:spTree></p:cSld>
+</p:sld>`
+	resp, err := (ImportRunner{WorkingDir: workingDir, ScriptPath: importScript, Timeout: 30 * time.Second}).
+		Run(context.Background(), ImportRequest{PPTXBase64: zipPPTX(t, minimalTemplateFiles(sample, titleOnly, classificationMaster)), Mode: "template"})
+	if err != nil {
+		t.Fatalf("import worker failed: %v", err)
+	}
+	var tmpl themes.Template
+	if err := json.Unmarshal(resp.SceneOrTemplate, &tmpl); err != nil {
+		t.Fatalf("bad template: %v", err)
+	}
+	pattern := findArchByKindPrefix(tmpl, "pattern")
+	if pattern == nil {
+		t.Fatal("expected a pattern")
+	}
+	textSlots := 0
+	for _, id := range pattern.FillSlots {
+		if strings.HasPrefix(id, "ph-") && !strings.HasPrefix(id, "ph-pic-") {
+			textSlots++
+		}
+	}
+	if textSlots < 5 {
+		t.Fatalf("want title + 4 card slots, got %d fillSlots=%v\n%s", textSlots, pattern.FillSlots, pattern.Markup)
+	}
+	if strings.Count(pattern.Markup, `geom="roundRect"`) < 4 {
+		t.Fatalf("empty cards must stay as chrome:\n%s", pattern.Markup)
+	}
+}
+
+func TestImportIconRowCaptionsSitBelowMarkers(t *testing.T) {
+	workingDir, importScript, _ := requireNodeEnv(t)
+	titleOnly := layoutXML("Title Only", "",
+		phSp(2, "Title 1", "title", "", 288000, 400000, 11000000, 900000, "", "Click to add title"))
+	ellipse := func(id, x, y int) string {
+		return `<p:sp>
+<p:nvSpPr><p:cNvPr id="` + itoa(id) + `" name="Icon"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+<p:spPr><a:xfrm><a:off x="` + itoa(x) + `" y="` + itoa(y) + `"/><a:ext cx="800000" cy="800000"/></a:xfrm>
+<a:prstGeom prst="ellipse"><a:avLst/></a:prstGeom>
+<a:solidFill><a:srgbClr val="0070F2"/></a:solidFill></p:spPr></p:sp>`
+	}
+	caption := func(id int, text string, x, y int) string {
+		return `<p:sp>
+<p:nvSpPr><p:cNvPr id="` + itoa(id) + `" name="Cap"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+<p:spPr><a:xfrm><a:off x="` + itoa(x) + `" y="` + itoa(y) + `"/><a:ext cx="1800000" cy="900000"/></a:xfrm>
+<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
+<p:txBody><a:bodyPr/><a:p><a:r><a:rPr lang="en-US" sz="1400"/><a:t>` + text + `</a:t></a:r></a:p></p:txBody>
+</p:sp>`
+	}
+	dot := func(id, x, y int) string {
+		return `<p:sp>
+<p:nvSpPr><p:cNvPr id="` + itoa(id) + `" name="Dot"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+<p:spPr><a:xfrm><a:off x="` + itoa(x) + `" y="` + itoa(y) + `"/><a:ext cx="180000" cy="180000"/></a:xfrm>
+<a:prstGeom prst="ellipse"><a:avLst/></a:prstGeom>
+<a:solidFill><a:srgbClr val="0070F2"/></a:solidFill></p:spPr></p:sp>`
+	}
+	hairline := `<p:sp>
+<p:nvSpPr><p:cNvPr id="30" name="Rule"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+<p:spPr><a:xfrm><a:off x="400000" y="3100000"/><a:ext cx="11000000" cy="30000"/></a:xfrm>
+<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+<a:solidFill><a:srgbClr val="0070F2"/></a:solidFill></p:spPr></p:sp>`
+	// Five icon markers + timeline dots/rule. Dots must not become extra captions.
+	sample := `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+<p:cSld><p:spTree>
+<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+<p:grpSpPr/>
+` + ellipse(10, 400000, 2200000) + ellipse(11, 2800000, 2200000) + ellipse(12, 5200000, 2200000) + ellipse(13, 7600000, 2200000) + ellipse(14, 10000000, 2200000) + `
+` + hairline + dot(31, 700000, 3020000) + dot(32, 3100000, 3020000) + dot(33, 5500000, 3020000) + `
+` + caption(20, "One", 200000, 3300000) + caption(21, "Two", 2600000, 3300000) + caption(22, "Three", 5000000, 3300000) + caption(23, "Four", 7400000, 2400000) + `
+</p:spTree></p:cSld>
+</p:sld>`
+	resp, err := (ImportRunner{WorkingDir: workingDir, ScriptPath: importScript, Timeout: 30 * time.Second}).
+		Run(context.Background(), ImportRequest{PPTXBase64: zipPPTX(t, minimalTemplateFiles(sample, titleOnly, classificationMaster)), Mode: "template"})
+	if err != nil {
+		t.Fatalf("import worker failed: %v", err)
+	}
+	var tmpl themes.Template
+	if err := json.Unmarshal(resp.SceneOrTemplate, &tmpl); err != nil {
+		t.Fatalf("bad template: %v", err)
+	}
+	pattern := findArchByKindPrefix(tmpl, "pattern")
+	if pattern == nil {
+		t.Fatal("expected a pattern")
+	}
+	// Captions must sit below the markers (y=2200000 EMU ≈ 346px, h≈126 → bottom ~472)
+	// AND below the timeline rule (~488px). Connector dots must not add extra slots.
+	re := regexp.MustCompile(`<ast-text id="ph-\d+" x="(\d+)" y="(\d+)" w="(\d+)" h="(\d+)"[^>]*>`)
+	markerBottom := 346 + 126
+	ruleY := 3100000 / 6350 // ≈488
+	captions := 0
+	for _, m := range re.FindAllStringSubmatch(pattern.Markup, -1) {
+		y, _ := strconv.Atoi(m[2])
+		h, _ := strconv.Atoi(m[4])
+		open := m[0]
+		if y < 200 {
+			continue // title
+		}
+		captions++
+		if y < markerBottom {
+			t.Errorf("caption y=%d overlaps markers (bottom ~%d):\n%s", y, markerBottom, pattern.Markup)
+		}
+		if y < ruleY+8 {
+			t.Errorf("caption y=%d overlaps timeline rule (~%d):\n%s", y, ruleY, pattern.Markup)
+		}
+		if strings.Contains(open, `anchor="ctr"`) {
+			t.Errorf("icon caption must top-align, not vertical-center:\n%s", open)
+		}
+		if h > 160 {
+			t.Errorf("icon caption h=%d is too tall and will collide:\n%s", h, open)
+		}
+	}
+	if captions > 5 {
+		t.Fatalf("timeline dots must not become extra captions, got %d body slots\n%s", captions, pattern.Markup)
+	}
+}
+
 // hiddenWidgetMaster is a GCO-class slide master: visible brand chrome plus the
 // authoring palettes PowerPoint hides (Harvey-ball group, DRAFT/Dummy stickers,
 // a unique lime bar used only to detect a hidden-flag miss).

@@ -173,8 +173,11 @@ func TestCreateDeckCatalogPayloadIsBounded(t *testing.T) {
 	if strings.Contains(raw, "<ast-slide") || strings.Contains(raw, "data:image") || strings.Contains(raw, "data:font") {
 		t.Fatalf("create_deck leaked markup or data URIs (%d bytes)", len(raw))
 	}
-	if len(raw) > 20_000 {
+	if len(raw) > 80_000 {
 		t.Fatalf("create_deck builtin catalog too large: %d bytes", len(raw))
+	}
+	if !catalogHasKind(created.Catalog, "recipe-cover") {
+		t.Fatalf("create_deck catalog missing recipe-cover: %#v", created.Catalog)
 	}
 	if created.Deck.Theme[themeKeyTemplateName] != "midnight" {
 		t.Fatalf("template-name not stamped: %#v", created.Deck.Theme)
@@ -342,6 +345,51 @@ func TestFillSlidesWritesManyAndCopiesOnlyReferencedAssets(t *testing.T) {
 	}
 }
 
+func TestFillSlidesRecipeUsesNamedSlotsAndTheme(t *testing.T) {
+	backend := newMultiDeckStore()
+	ctx := toolContext(t, backend)
+	if _, err := createDeck(ctx, CreateDeckArgs{Slug: "deck", Title: "Life story", Template: "midnight"}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := fillSlides(ctx, FillSlidesArgs{
+		DeckSlug: "deck",
+		Slides: []FillSlideSpec{{
+			Position: 0,
+			Kind:     RecipeCover,
+			Fills: map[string]string{
+				"eyebrow":      "A biographical presentation",
+				"headline":     "Steve",
+				"headline_2":   "Jobs",
+				"dek":          "A life in twelve chapters, stated as a thesis sentence.",
+				"meta_1_label": "Born",
+				"meta_1_value": "1955",
+				"meta_2_label": "Died",
+				"meta_2_value": "2011",
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := readSlide(ctx, ReadSlideArgs{DeckSlug: "deck", Position: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := got.Slide.Content
+	if !strings.Contains(body, "A biographical presentation") || !strings.Contains(body, "Steve") {
+		t.Fatalf("missing fills:\n%s", body)
+	}
+	if !strings.Contains(body, `id="eyebrow"`) || !strings.Contains(body, `id="headline"`) {
+		t.Fatalf("missing named slots:\n%s", body)
+	}
+	if !strings.Contains(body, `fill="#0B1220"`) {
+		t.Fatalf("midnight surface not applied:\n%s", body)
+	}
+	if !strings.Contains(body, "Life story") {
+		t.Fatalf("running footer should use deck title:\n%s", body)
+	}
+}
+
 func TestFillSlidesRejectsDuplicatePositions(t *testing.T) {
 	backend := newMultiDeckStore()
 	ctx := toolContext(t, backend)
@@ -368,6 +416,15 @@ func TestFillSlidesRejectsDuplicatePositions(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected duplicate position error")
 	}
+}
+
+func catalogHasKind(cat []ArchetypeCatalogEntry, kind string) bool {
+	for _, e := range cat {
+		if e.Kind == kind {
+			return true
+		}
+	}
+	return false
 }
 
 func jsonDump(t *testing.T, v any) string {
@@ -405,8 +462,11 @@ func TestCreateDeckWithScopedTemplateSeedsAssets(t *testing.T) {
 	if created.Deck.Theme["surface"] != "#101820" {
 		t.Fatalf("scoped template tokens not seeded: %#v", created.Deck.Theme)
 	}
-	if len(created.Catalog) != 1 {
-		t.Fatalf("expected 1 catalog entry from scoped template, got %#v", created.Catalog)
+	if !catalogHasKind(created.Catalog, "title") {
+		t.Fatalf("scoped template title missing from catalog: %#v", created.Catalog)
+	}
+	if !catalogHasKind(created.Catalog, "recipe-cover") {
+		t.Fatalf("expected recipe-cover in catalog, got %#v", created.Catalog)
 	}
 }
 
@@ -1216,5 +1276,141 @@ func TestReviewDeckSparseSection(t *testing.T) {
 	}
 	if got := reviewFindingsWithCode(result.Findings, "sparse_section"); len(got) != 1 {
 		t.Fatalf("two title-only dividers should be sparse_section, got %#v", result.Findings)
+	}
+	if got := reviewFindingsWithCode(result.Findings, "sparse_slide"); len(got) == 0 {
+		t.Fatalf("second title-only slide should be sparse_slide, got %#v", result.Findings)
+	}
+}
+
+func TestReviewDeckRecipeEyebrowAndNominalTitle(t *testing.T) {
+	backend := &memoryDocsStore{}
+	ctx := toolContext(t, backend)
+	if _, err := createDeck(ctx, CreateDeckArgs{Slug: "deck", Title: "Deck", Theme: map[string]string{themeKeyTemplateName: "brand"}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := Service{Store: backend}
+	if _, err := svc.AddDeckAsset(ctx, "deck", "sha256-abc", "data:image/png;base64,AAAA"); err != nil {
+		t.Fatal(err)
+	}
+	markup := `<ast-slide id="s">` +
+		`<ast-shape id="bg" kind="rect" x="0" y="0" w="1920" h="1080" geom="rect" fill="#FFFFFF" decorative="true"></ast-shape>` +
+		`<ast-text id="eyebrow" x="120" y="72" w="800" h="28"></ast-text>` +
+		`<ast-text id="headline" x="120" y="140" w="1600" h="80" size="56">Early life</ast-text>` +
+		`<ast-text id="body_1" x="120" y="400" w="800" h="200">A paragraph that uses the canvas.</ast-text>` +
+		`<ast-text id="item_1_title" x="1000" y="400" w="700" h="40">Craft</ast-text>` +
+		`<ast-text id="item_1_body" x="1000" y="450" w="700" h="80">A complete sentence about craft.</ast-text>` +
+		`<ast-text id="chrome-footer" x="120" y="1036" w="800" h="24">Deck</ast-text>` +
+		`</ast-slide>`
+	if _, err := writeSlide(ctx, WriteSlideArgs{DeckSlug: "deck", Position: 0, Markup: markup}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := reviewDeck(ctx, ReviewDeckArgs{Slug: "deck"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reviewFindingsWithCode(result.Findings, "missing_eyebrow"); len(got) != 1 {
+		t.Fatalf("empty eyebrow should warn, got %#v", result.Findings)
+	}
+	if got := reviewFindingsWithCode(result.Findings, "missing_chrome"); len(got) != 0 {
+		t.Fatalf("recipe layout should not be missing_chrome, got %#v", result.Findings)
+	}
+	if _, err := writeSlide(ctx, WriteSlideArgs{DeckSlug: "deck", Position: 1, Markup: markup}); err != nil {
+		t.Fatal(err)
+	}
+	result, err = reviewDeck(ctx, ReviewDeckArgs{Slug: "deck"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reviewFindingsWithCode(result.Findings, "nominal_title"); len(got) == 0 {
+		t.Fatalf("Early life should be nominal_title on a body slide, got %#v", result.Findings)
+	}
+}
+
+func TestReviewDeckEmptyCardAndMissingTitle(t *testing.T) {
+	backend := &memoryDocsStore{}
+	ctx := toolContext(t, backend)
+	if _, err := createDeck(ctx, CreateDeckArgs{Slug: "deck", Title: "Deck", Theme: map[string]string{themeKeyTemplateName: "brand"}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := Service{Store: backend}
+	if _, err := svc.AddDeckAsset(ctx, "deck", "sha256-abc", "data:image/png;base64,AAAA"); err != nil {
+		t.Fatal(err)
+	}
+	emptyCards := `<ast-slide id="s">` +
+		`<ast-shape id="bg" kind="rect" x="0" y="0" w="1920" h="1080" geom="rect" fill="#FFFFFF" decorative="true"></ast-shape>` +
+		`<ast-text id="ph-1" x="80" y="48" w="1600" h="80" size="36">The Journey</ast-text>` +
+		`<ast-shape id="c-1" kind="rect" x="80" y="200" w="800" h="280" geom="roundRect" fill="#DBEAFE"></ast-shape>` +
+		`<ast-shape id="c-2" kind="rect" x="960" y="200" w="800" h="280" geom="roundRect" fill="#A6E0FF"></ast-shape>` +
+		`</ast-slide>`
+	if _, err := writeSlide(ctx, WriteSlideArgs{DeckSlug: "deck", Position: 0, Markup: emptyCards}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := reviewDeck(ctx, ReviewDeckArgs{Slug: "deck"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reviewFindingsWithCode(result.Findings, "empty_card"); len(got) < 2 {
+		t.Fatalf("empty roundRects should be empty_card, got %#v", result.Findings)
+	}
+
+	noTitle := `<ast-slide id="s">` +
+		`<ast-shape id="bg" kind="rect" x="0" y="0" w="1920" h="1080" geom="rect" fill="#FFFFFF" decorative="true"></ast-shape>` +
+		`<ast-text id="ph-1" x="80" y="500" w="280" h="40" size="16">1997</ast-text>` +
+		`</ast-slide>`
+	if _, err := writeSlide(ctx, WriteSlideArgs{DeckSlug: "deck", Position: 0, Markup: noTitle}); err != nil {
+		t.Fatal(err)
+	}
+	result, err = reviewDeck(ctx, ReviewDeckArgs{Slug: "deck"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reviewFindingsWithCode(result.Findings, "missing_title"); len(got) != 1 {
+		t.Fatalf("small mid-slide caption should be missing_title, got %#v", result.Findings)
+	}
+
+	photoCard := `<ast-slide id="s">` +
+		`<ast-shape id="bg" kind="rect" x="0" y="0" w="1920" h="1080" geom="rect" fill="#FFFFFF" decorative="true"></ast-shape>` +
+		`<ast-text id="ph-1" x="80" y="48" w="1600" h="80" size="36">Title</ast-text>` +
+		`<ast-shape id="c-1" kind="rect" x="900" y="200" w="900" h="700" geom="roundRect" fill="#DBEAFE"></ast-shape>` +
+		`<ast-image id="pic" x="910" y="210" w="880" h="680" asset-ref="sha256-abc"></ast-image>` +
+		`</ast-slide>`
+	if _, err := writeSlide(ctx, WriteSlideArgs{DeckSlug: "deck", Position: 0, Markup: photoCard}); err != nil {
+		t.Fatal(err)
+	}
+	result, err = reviewDeck(ctx, ReviewDeckArgs{Slug: "deck"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reviewFindingsWithCode(result.Findings, "empty_card"); len(got) != 0 {
+		t.Fatalf("a card covered by a photograph is not an empty text card, got %#v", result.Findings)
+	}
+}
+
+func TestFillSlidesRequiresEveryTextSlot(t *testing.T) {
+	backend := newMultiDeckStore()
+	ctx := toolContext(t, backend)
+	svc := Service{Store: backend}
+	markup := `<ast-slide id="p"><ast-text id="ph-1" x="10" y="10" w="400" h="80" size="24"><ast-run>{{TITLE}}</ast-run></ast-text>` +
+		`<ast-text id="ph-2" x="10" y="100" w="400" h="80" size="20"><ast-run>{{BODY}}</ast-run></ast-text></ast-slide>`
+	if err := svc.SaveTemplate(ctx, themes.Template{
+		Name:   "brand",
+		Tokens: map[string]string{"surface": "#FFFFFF"},
+		Archetypes: []themes.Archetype{
+			{Kind: "pattern", Markup: markup, FillSlots: []string{"ph-1", "ph-2"}, SlotHints: []themes.SlotHint{{ID: "ph-1", Role: "title"}, {ID: "ph-2", Role: "body"}}},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := createDeck(ctx, CreateDeckArgs{Slug: "deck", Title: "Deck", Template: "brand"}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := fillSlides(ctx, FillSlidesArgs{
+		DeckSlug: "deck",
+		Slides: []FillSlideSpec{
+			{Position: 0, Kind: "pattern", Fills: map[string]string{"ph-1": "Only the title"}},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "ph-2") {
+		t.Fatalf("expected missing ph-2 error, got %v", err)
 	}
 }

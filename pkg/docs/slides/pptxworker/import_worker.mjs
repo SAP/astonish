@@ -1660,11 +1660,13 @@ try {
       // ~100 of these). They paint as opaque white squares in PPTX.
       if (isWhiteOrEmptyFill(o)) return true
       // Authoring palettes (Harvey balls, stacked icon sheets) are small
-      // squares. Real accent bars are long and thin — keep those.
+      // squares. Real accent bars are long and thin; icon-row markers are
+      // ellipses/images — keep those.
       const w = o.w || 0
       const h = o.h || 0
       const maxSide = Math.max(w, h)
       const minSide = Math.min(w, h)
+      if (o.kind === 'ellipse' || o.geom === 'ellipse' || o.kind === 'image') return false
       if (maxSide > 0 && maxSide <= 220 && minSide >= maxSide * 0.55) return true
       return false
     }
@@ -1719,7 +1721,7 @@ try {
     }
     const hintForText = (o) => {
       const role = hintRoleForText(o) === 'heading' ? 'heading' : 'text'
-      return `${regionHint(o)} ${role} — keep short enough to fit the box`
+      return `${regionHint(o)} ${role} — a complete thought that fits the box (~12–22 words), not a 5-word stub`
     }
 
     // Reading order: cluster into rows by similar y, then left-to-right.
@@ -1807,6 +1809,9 @@ try {
       return `<ast-text id="${id}" ${geo} ${attrs.join(' ')}${extraAttrs}><ast-run${runAttr}>${escText(prompt)}</ast-run></ast-text>`
     }
     const CENTER_ATTRS = ' align="ctr" anchor="ctr"'
+    // Icon-row captions sit BELOW markers; top-align so taller copy grows down
+    // instead of vertically centering up through the icon and rule.
+    const ICON_CAPTION_ATTRS = ' align="ctr"'
 
     const mergePatternPlaceholders = (layoutPhs, samplePhs) => {
       const sample = (samplePhs || []).slice()
@@ -1859,13 +1864,60 @@ try {
         if (!(o.geom === 'roundRect' || o.rectRadius || (o.fill && o.fill.color))) return
         cardChrome.push({ x: o.x || 0, y: o.y || 0, w, h })
       }
-      const queueTextSlot = (box, style, fromCard, placeholder) => {
+      const queueTextSlot = (box, style, fromCard, placeholder, extraAttrs) => {
         pendingText.push({
           x: box.x || 0, y: box.y || 0, w: box.w || 0, h: box.h || 0,
           style: style || {},
           fromCard: !!fromCard,
           placeholder: placeholder || null,
+          extraAttrs: extraAttrs || '',
         })
+      }
+      const boxesOverlap = (a, b) => {
+        const ix = Math.min((a.x || 0) + (a.w || 0), (b.x || 0) + (b.w || 0)) - Math.max(a.x || 0, b.x || 0)
+        const iy = Math.min((a.y || 0) + (a.h || 0), (b.y || 0) + (b.h || 0)) - Math.max(a.y || 0, b.y || 0)
+        return ix > 24 && iy > 24
+      }
+      const overlapArea = (a, b) => {
+        const ix = Math.min((a.x || 0) + (a.w || 0), (b.x || 0) + (b.w || 0)) - Math.max(a.x || 0, b.x || 0)
+        const iy = Math.min((a.y || 0) + (a.h || 0), (b.y || 0) + (b.h || 0)) - Math.max(a.y || 0, b.y || 0)
+        return (ix > 0 && iy > 0) ? ix * iy : 0
+      }
+      // Photos (not 40–90px icons) that cover a card must not get a text fill —
+      // long copy on a picture is unreadable.
+      const isLargePhoto = (o) => {
+        if (!o || o.kind !== 'image') return false
+        return (o.w || 0) >= 360 && (o.h || 0) >= 280
+      }
+      const overlapsLargePhoto = (box) => {
+        const area = Math.max(1, (box.w || 0) * (box.h || 0))
+        for (const o of (layout.objects || [])) {
+          if (!isLargePhoto(o)) continue
+          if (overlapArea(box, o) / area > 0.35) return true
+        }
+        return false
+      }
+      // Small icons sitting inside a card should not be painted over by the fill.
+      const fitTextAwayFromIcons = (box) => {
+        const icons = (layout.objects || []).filter((o) => {
+          if (o.kind !== 'image' && o.kind !== 'ellipse' && o.geom !== 'ellipse') return false
+          const maxs = Math.max(o.w || 0, o.h || 0)
+          if (maxs < 28 || maxs > 140) return false
+          return boxesOverlap(o, box)
+        })
+        if (!icons.length) return box
+        const left = icons.filter((o) => (o.x || 0) + (o.w || 0) / 2 < box.x + box.w * 0.42)
+        if (left.length === icons.length) {
+          const right = Math.max(...left.map((o) => (o.x || 0) + (o.w || 0)))
+          const x = Math.max(box.x, right + 16)
+          return { ...box, x, w: Math.max(80, box.x + box.w - x) }
+        }
+        const bottom = Math.max(...icons.map((o) => (o.y || 0) + (o.h || 0)))
+        if (bottom < box.y + box.h * 0.6) {
+          const y = Math.max(box.y, bottom + 10)
+          return { ...box, y, h: Math.max(40, box.y + box.h - y) }
+        }
+        return box
       }
       for (let i = 0; i < (layout.objects || []).length; i += 1) {
         const o = layout.objects[i]
@@ -1893,7 +1945,11 @@ try {
           // Split a card (shape + text) so the colored box stays chrome and the
           // copy becomes a fill slot inset inside the box. Slot ids are assigned
           // later in reading order, not PowerPoint document order.
-          if (objectHasShape(o)) {
+          const cardLike = objectHasShape(o) && (
+            o.geom === 'roundRect' || o.rectRadius ||
+            ((o.w || 0) >= 200 && (o.h || 0) >= 80 && o.fill && o.fill.color)
+          )
+          if (objectHasShape(o) && cardLike) {
             const shapeOnly = { ...o, text: '', kind: o.kind === 'text' ? (o.geom === 'ellipse' ? 'ellipse' : o.kind === 'line' ? 'line' : 'rect') : o.kind }
             const m = chromeToAsd(shapeOnly, idc)
             if (m) parts.push(m)
@@ -1901,8 +1957,9 @@ try {
             idc += 1
             if (!inherited) noteCardChrome(o)
           }
-          const box = objectHasShape(o) ? insetBox(o) : o
-          queueTextSlot(box, o.style, objectHasShape(o), null)
+          const box = cardLike ? insetBox(o) : o
+          if (overlapsLargePhoto(box)) continue
+          queueTextSlot(cardLike ? fitTextAwayFromIcons(box) : box, o.style, cardLike, null)
           continue
         }
         const m = chromeToAsd(o, idc)
@@ -1933,8 +1990,8 @@ try {
             bestDx = dx
           }
         }
-        if (best) {
-          const inset = insetBox(best)
+        if (best && !overlapsLargePhoto(best)) {
+          const inset = fitTextAwayFromIcons(insetBox(best))
           t.x = inset.x
           t.y = inset.y
           t.w = inset.w
@@ -1957,14 +2014,23 @@ try {
           const y = o.y || 0
           if (y < 140 || y > 780) return false
           const maxs = Math.max(o.w || 0, o.h || 0)
-          if (maxs < 36 || maxs > 260) return false
+          // Timeline connector dots are tiny; icon glyphs are ~70–140px.
+          if (maxs < 56 || maxs > 220) return false
           return o.kind === 'image' || o.kind === 'ellipse' || o.geom === 'ellipse'
         }).sort((a, b) => (a.x || 0) - (b.x || 0))
         if (markers.length < 3) return
         const ys = markers.map((m) => m.y || 0)
         if (Math.max(...ys) - Math.min(...ys) > 120) return
-        const rowY = Math.max(...markers.map((m) => (m.y || 0) + (m.h || 0))) + 16
-        const candidates = texts.filter((t) => !t.placeholder && !t.fromCard)
+        let rowY = Math.max(...markers.map((m) => (m.y || 0) + (m.h || 0))) + 20
+        for (const o of (objects || [])) {
+          const maxs = Math.max(o.w || 0, o.h || 0)
+          const isLine = o.kind === 'line' || o.geom === 'line' || ((o.h || 0) <= 10 && (o.w || 0) > 400)
+          const isDot = (o.kind === 'ellipse' || o.geom === 'ellipse') && maxs > 0 && maxs < 56
+          if (!isLine && !isDot) continue
+          const bottom = (o.y || 0) + (isLine ? 0 : (o.h || 0))
+          if (bottom >= Math.min(...ys) && bottom <= rowY + 80) rowY = Math.max(rowY, bottom + 22)
+        }
+        const candidates = texts.filter((t) => !t.placeholder && !t.fromCard && !t.forceTitle)
         const used = new Set()
         for (const m of markers) {
           const cx = (m.x || 0) + (m.w || 0) / 2
@@ -1982,25 +2048,72 @@ try {
             best.w = w
             best.x = Math.round(cx - w / 2)
             best.y = rowY
-            best.h = Math.max(72, best.h || 0)
-            best.extraAttrs = CENTER_ATTRS
+            best.h = 110
+            best.extraAttrs = ICON_CAPTION_ATTRS
           } else {
             texts.push({
-              x: Math.round(cx - w / 2), y: rowY, w, h: 72,
-              style: {}, fromCard: false, extraAttrs: CENTER_ATTRS,
+              x: Math.round(cx - w / 2), y: rowY, w, h: 110,
+              style: {}, fromCard: false, extraAttrs: ICON_CAPTION_ATTRS,
             })
           }
         }
       }
       snapAndPadMarkerRow(pendingText, layout.objects)
+      // Designed cards with no copy in the sample still need a fill slot —
+      // otherwise the model ships empty colored boxes. Do not invent a slot
+      // on top of a large photo.
+      if (extraTextAsSlots) {
+        for (const c of cardChrome) {
+          if (pendingText.some((t) => boxesOverlap(t, c))) continue
+          if (overlapsLargePhoto(c)) continue
+          const inset = fitTextAwayFromIcons(insetBox(c))
+          pendingText.push({
+            x: inset.x, y: inset.y, w: inset.w, h: inset.h,
+            style: { fontSize: 22, bold: true },
+            fromCard: true,
+            extraAttrs: CENTER_ATTRS,
+          })
+        }
+        const hasTitlePh = pendingText.some((t) => t.placeholder && t.placeholder.type === 'title')
+        const hasTopBanner = pendingText.some((t) => {
+          if (t.forceTitle) return true
+          const y = t.y || 0
+          const w = t.w || 0
+          const sz = (t.style && t.style.fontSize) || 0
+          return y < 220 && (w > 600 || sz >= 28)
+        })
+        const titleBox = { x: 80, y: 40, w: 1760, h: 90 }
+        if (!hasTitlePh && !hasTopBanner && !pendingText.some((t) => boxesOverlap(t, titleBox))) {
+          pendingText.push({
+            ...titleBox,
+            style: { fontSize: 36, bold: true, color: themeTokens.ink },
+            fromCard: false,
+            forceTitle: true,
+          })
+        }
+        for (let i = pendingText.length - 1; i >= 0; i -= 1) {
+          const t = pendingText[i]
+          if (t.placeholder || t.forceTitle) continue
+          if (overlapsLargePhoto(t)) pendingText.splice(i, 1)
+        }
+        // Tiny leftover caption boxes (h < 70) cannot hold a complete thought.
+        // Grow them downward when the canvas has room so copy is not clipped.
+        for (const t of pendingText) {
+          if (t.forceTitle || (t.placeholder && t.placeholder.type === 'title')) continue
+          if ((t.h || 0) >= 70 || (t.w || 0) < 200) continue
+          const room = CANVAS_H - 48 - (t.y || 0)
+          if (room < 72) continue
+          t.h = Math.min(120, room)
+        }
+      }
       // Text slots in reading order (top-to-bottom, left-to-right) so ph-1 is
       // the first thing a reader sees — not PowerPoint's document order.
       const ordered = readingOrder(pendingText)
       const cards = detectCardGrid(ordered)
       const iconRow = detectIconRow(ordered, cards)
-      let titleItem = ordered.find((it) => it.placeholder && it.placeholder.type === 'title') || null
+      let titleItem = ordered.find((it) => it.forceTitle || (it.placeholder && it.placeholder.type === 'title')) || null
       if (!titleItem) {
-        const rest = ordered.filter((it) => !cards.includes(it))
+        const rest = ordered.filter((it) => !cards.includes(it) && !iconRow.includes(it))
         rest.sort((a, b) => {
           const sa = (a.style && a.style.fontSize) || 0
           const sb = (b.style && b.style.fontSize) || 0
@@ -2011,10 +2124,32 @@ try {
         if (cand && ((cand.style && cand.style.fontSize) || 0) >= 28) titleItem = cand
         else if (cand && (cand.h || 0) >= 70 && (cand.w || 0) > 600 && cand.y < 280) titleItem = cand
       }
+      const snapY = (v) => Math.round(v / 60) * 60
+      const cardHint = (item, group) => {
+        const n = group.indexOf(item) + 1
+        const pos = gridPosLabel(item, group)
+        const ys = [...new Set(group.map((g) => snapY(g.y)))].sort((a, b) => a - b)
+        if (ys.length === 2 && group.length >= 4 && group.length % 2 === 0) {
+          const topRow = group.filter((g) => snapY(g.y) === ys[0])
+          const botRow = group.filter((g) => snapY(g.y) === ys[1])
+          const topOnCards = topRow.length && topRow.every((g) => g.fromCard)
+          const botOnCards = botRow.length && botRow.every((g) => g.fromCard)
+          if (topOnCards && !botOnCards) {
+            const cols = group.length / 2
+            const isTop = Math.abs(snapY(item.y) - ys[0]) <= Math.abs(snapY(item.y) - ys[1])
+            const col = (isTop ? topRow : botRow).slice().sort((a, b) => a.x - b.x).indexOf(item) + 1
+            if (isTop) {
+              return { role: 'heading', hint: `column ${col || n} of ${cols} heading (${pos}) — short label in the bar (3–8 words)` }
+            }
+            return { role: 'body', hint: `column ${col || n} of ${cols} supporting line (${pos}) — one sentence under that heading (~12–20 words)` }
+          }
+        }
+        return { role: 'body', hint: `card ${n} of ${group.length} (${pos}) — a complete thought that fits the box (claim + why, two lines / ~12–22 words). Not a 5-word stub.` }
+      }
       const emitTextItem = (item, role, hint, prompt, extraAttrs = '') => {
         pc += 1
         const id = `ph-${pc}`
-        if (item.placeholder) {
+        if (item.placeholder && !item.forceTitle) {
           parts.push(placeholderToAsd(item.placeholder, pc))
         } else {
           parts.push(textSlotToAsd(item, item.style, id, prompt || '{{BODY}}', extraAttrs || item.extraAttrs || ''))
@@ -2023,19 +2158,18 @@ try {
       }
       for (const item of ordered) {
         if (item === titleItem) {
-          emitTextItem(item, 'title', 'Slide title', '{{TITLE}}')
+          emitTextItem(item, 'title', 'Slide title — names the topic (3–8 words). Not the first fact.', '{{TITLE}}')
           continue
         }
         if (cards.includes(item)) {
-          const n = cards.indexOf(item) + 1
-          const pos = gridPosLabel(item, cards)
-          emitTextItem(item, 'body', `card ${n} of ${cards.length} (${pos}) — one short headline, not a heading+body pair`, '{{BODY}}', CENTER_ATTRS)
+          const h = cardHint(item, cards)
+          emitTextItem(item, h.role, h.hint, '{{BODY}}', item.extraAttrs || CENTER_ATTRS)
           continue
         }
         if (iconRow.includes(item)) {
           const n = iconRow.indexOf(item) + 1
           const pos = gridPosLabel(item, iconRow)
-          emitTextItem(item, 'body', `item ${n} of ${iconRow.length} (${pos}) — matches the marker above it; one phrase`, '{{BODY}}', item.extraAttrs || CENTER_ATTRS)
+          emitTextItem(item, 'body', `item ${n} of ${iconRow.length} (${pos}) — caption under the marker; a complete phrase (~8–16 words), not a one-word label`, '{{BODY}}', item.extraAttrs || ICON_CAPTION_ATTRS)
           continue
         }
         if (isKickerBox(item, titleItem, cards)) {
@@ -2564,10 +2698,10 @@ try {
       if (cardHints.length >= 2) {
         const m = String(cardHints[0].hint).match(/of (\d+)/)
         const n = m ? m[1] : String(cardHints.length)
-        return `${n} cards — one phrase each`
+        return `${n} cards — title plus a sentence in every card`
       }
       if ((hints || []).some((h) => /item \d+ of \d+/i.test(h.hint || ''))) {
-        return 'Icon row — one phrase per marker'
+        return 'Icon row — title plus a caption per marker'
       }
       const rr = extras.filter((o) => o.geom === 'roundRect' || o.rectRadius).length
       const ell = extras.filter((o) => o.kind === 'ellipse').length

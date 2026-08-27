@@ -9,9 +9,10 @@ func DefaultStyleRules() string {
 ### Content Density
 - Maximum 6 bullet points per slide (Presentation Zen 6×6 rule)
 - Maximum 6 words per bullet point
-- Prefer more slides over crowded ones
-- One key idea per slide
-- If content exceeds these limits, split across multiple slides
+- 6×6 is a bullet cap, not permission to leave the rest of the canvas blank
+- One key idea per slide, fully developed: a takeaway headline plus 2–4 content blocks
+- Empty canvas is a defect — prefer a layout type that fills the page over a title on white
+- If bullets exceed 6×6, split across slides; if a slide is sparse, pick a denser layout type instead of adding empty dividers
 
 ### Typography Hierarchy
 - Title/headline: largest size, boldest weight — states the TAKEAWAY, not a topic label

@@ -49,9 +49,9 @@ func catalogFrom(archetypes []themes.Archetype) []ArchetypeCatalogEntry {
 			}
 		}
 		if cardTotal >= 2 {
-			summary = fmt.Sprintf("%s — %d cards, one phrase each", label, cardTotal)
+			summary = fmt.Sprintf("%s — %d cards; title plus a sentence in every card", label, cardTotal)
 		} else if n := strings.Count(a.Markup, `geom="roundRect"`); n >= 2 {
-			summary = fmt.Sprintf("%s — %d rounded cards", summary, n)
+			summary = fmt.Sprintf("%s — %d rounded cards; fill every card", summary, n)
 		}
 		out = append(out, ArchetypeCatalogEntry{
 			Kind:         a.Kind,
@@ -73,6 +73,9 @@ func findTemplateArchetype(tmpl themes.Template, kind, label string) (themes.Arc
 		return themes.Archetype{}, fmt.Errorf("kind or label is required")
 	}
 	if kind != "" {
+		if isRecipeKind(kind) {
+			return recipeArchetypeFor(tmpl, kind, ExtractChrome(tmpl), nil)
+		}
 		for _, a := range tmpl.Archetypes {
 			if a.Kind == kind {
 				return a, nil
@@ -100,6 +103,11 @@ func findTemplateArchetype(tmpl themes.Template, kind, label string) (themes.Arc
 	if found != nil {
 		return *found, nil
 	}
+	for _, m := range allRecipeMeta() {
+		if strings.ToLower(m.Title) == want {
+			return recipeArchetypeFor(tmpl, m.Kind, ExtractChrome(tmpl), nil)
+		}
+	}
 	return themes.Archetype{}, fmt.Errorf("no archetype with label %q", label)
 }
 
@@ -123,6 +131,9 @@ func fillArchetypeMarkup(markup string, fills map[string]string) (string, error)
 			continue
 		}
 		value := strings.TrimSpace(raw)
+		if value == "" {
+			continue
+		}
 		next, err := replaceSlot(out, id, value)
 		if err != nil {
 			return "", err
@@ -133,6 +144,62 @@ func fillArchetypeMarkup(markup string, fills map[string]string) (string, error)
 		return "", fmt.Errorf("unfilled template placeholders remain ({{TITLE}}/{{BODY}}); pass a fill for every text slot")
 	}
 	return out, nil
+}
+
+func recipeArchetypeFor(tmpl themes.Template, kind string, chrome Chrome, fills map[string]string) (themes.Archetype, error) {
+	m, ok := recipeByKind(kind)
+	if !ok {
+		return themes.Archetype{}, fmt.Errorf("unknown recipe kind %q", kind)
+	}
+	markup, err := RenderRecipe(m.Kind, tmpl.StyleGuide, tmpl.Tokens, chrome, fills)
+	if err != nil {
+		return themes.Archetype{}, err
+	}
+	return themes.Archetype{
+		Kind:      m.Kind,
+		Title:     m.Title,
+		Markup:    markup,
+		Tier:      "flexible",
+		FillSlots: requiredFillSlots(m.Slots),
+		SlotHints: m.Slots,
+	}, nil
+}
+
+func slotHintRole(arch themes.Archetype, id string) string {
+	for _, h := range arch.SlotHints {
+		if h.ID == id {
+			return strings.ToLower(strings.TrimSpace(h.Role))
+		}
+	}
+	return ""
+}
+
+func isImageFillSlot(arch themes.Archetype, id string) bool {
+	if strings.HasPrefix(id, "ph-pic-") {
+		return true
+	}
+	return slotHintRole(arch, id) == "image"
+}
+
+// missingTextSlotFills lists text fillSlots that have no non-empty fill.
+// Image slots are optional. Built-in archetypes with no FillSlots skip the check.
+func missingTextSlotFills(arch themes.Archetype, fills map[string]string) []string {
+	if len(arch.FillSlots) == 0 {
+		return nil
+	}
+	var missing []string
+	for _, id := range arch.FillSlots {
+		if isImageFillSlot(arch, id) {
+			continue
+		}
+		if slotHintRole(arch, id) == "optional" {
+			continue
+		}
+		if strings.TrimSpace(fills[id]) == "" {
+			missing = append(missing, id)
+		}
+	}
+	return missing
 }
 
 func replaceSlot(markup, id, value string) (string, error) {

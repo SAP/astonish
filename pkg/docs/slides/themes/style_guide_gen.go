@@ -857,8 +857,8 @@ func generateMarkdown(sg *StyleGuide, tokens map[string]string) string {
 	if len(sg.ComponentPatterns) > 0 {
 		b.WriteString("## Content Layout Guide (FLEXIBLE Archetypes)\n\n")
 		b.WriteString("Each entry is a fillable layout or sample-derived pattern. Author it with fill_slides\n")
-		b.WriteString("(kind or label + fills map). Prefer pattern-* entries for body slides — they carry the\n")
-		b.WriteString("template's cards and colored boxes. Do not rebuild chrome by hand.\n\n")
+		b.WriteString("(kind or label + fills map). Prefer recipe-* layout types for cover and body slides.\n")
+		b.WriteString("Use pattern-* only when the imported sample matches the same job. Do not rebuild chrome by hand.\n\n")
 		for _, cp := range sg.ComponentPatterns {
 			b.WriteString(fmt.Sprintf("### %s (kind: %s)\n", cp.ArchetypeLabel, cp.Kind))
 			b.WriteString(fmt.Sprintf("**Looks like:** %s\n", cp.VisualSummary))

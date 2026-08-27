@@ -36,11 +36,14 @@ func TestBuiltinSkills_IncludesSlides(t *testing.T) {
 		"The template choice belongs to the user",
 		"Inferring a tone",
 		"list_slide_templates",
-		"one short headline",
+		"complete thought",
+		"Fill every required text slot",
 		"Title and Text is last resort",
 		"fill_slides",
 		"one LLM round-trip per slide",
-		"At most ONE section divider",
+		"recipe-cover",
+		"recipe-split-narrative",
+		"Pick layout by job",
 	} {
 		if !strings.Contains(slides.Content, want) {
 			t.Errorf("slides skill must contain %q (visual template picker is mandatory)", want)

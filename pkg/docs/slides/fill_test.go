@@ -87,6 +87,24 @@ func TestCollectAssetRefsAndLightweightSeed(t *testing.T) {
 	}
 }
 
+func TestMissingTextSlotFills(t *testing.T) {
+	arch := themes.Archetype{
+		FillSlots: []string{"ph-1", "ph-2", "ph-pic-3"},
+		SlotHints: []themes.SlotHint{
+			{ID: "ph-1", Role: "title"},
+			{ID: "ph-2", Role: "body"},
+			{ID: "ph-pic-3", Role: "image"},
+		},
+	}
+	miss := missingTextSlotFills(arch, map[string]string{"ph-1": "Title"})
+	if len(miss) != 1 || miss[0] != "ph-2" {
+		t.Fatalf("missing = %#v, want [ph-2]", miss)
+	}
+	if miss := missingTextSlotFills(arch, map[string]string{"ph-1": "Title", "ph-2": "Body"}); len(miss) != 0 {
+		t.Fatalf("fully filled text slots still missing %#v", miss)
+	}
+}
+
 func TestLooksLikePlaceholderFillGenericPrompts(t *testing.T) {
 	for _, s := range []string{
 		"Contact information:",
@@ -145,6 +163,21 @@ func TestFindTemplateArchetype(t *testing.T) {
 	}
 	if _, err := findTemplateArchetype(tmpl, "missing", ""); err == nil {
 		t.Fatal("expected missing kind error")
+	}
+}
+
+func TestFindTemplateArchetypeResolvesRecipes(t *testing.T) {
+	tmpl := themes.Template{Tokens: map[string]string{"surface": "#FFFFFF", "ink": "#111", "accent": "#00F"}}
+	a, err := findTemplateArchetype(tmpl, RecipeCover, "")
+	if err != nil || a.Kind != RecipeCover {
+		t.Fatalf("recipe kind: %#v %v", a, err)
+	}
+	if len(a.FillSlots) == 0 || a.FillSlots[0] != "eyebrow" {
+		t.Fatalf("named slots: %#v", a.FillSlots)
+	}
+	a, err = findTemplateArchetype(tmpl, "", "Three-up cards")
+	if err != nil || a.Kind != RecipeThreeUp {
+		t.Fatalf("recipe label: %#v %v", a, err)
 	}
 }
 

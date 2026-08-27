@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"math"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -464,17 +465,20 @@ func createDeck(ctx context.Context, args CreateDeckArgs) (DeckResult, error) {
 		view := deckView(deck)
 		view.Assets = assetCatalog(tmpl.Assets)
 		view.AssetCount = len(view.Assets)
-		result := DeckResult{Deck: view, Catalog: catalogFrom(tmpl.Archetypes)}
-		if len(tmpl.Archetypes) > 0 {
+		result := DeckResult{Deck: view, Catalog: catalogFromTemplate(tmpl)}
+		if len(result.Catalog) > 0 {
 			result.Instructions = "MANDATORY: author the whole deck in ONE fill_slides call (slides: [{position, kind or label, fills}, ...]). " +
 				"Do NOT call fill_slide once per slide — that is one LLM round-trip per slide. fill_slide is only for later single-slide edits. " +
-				"Do NOT call write_slide and do NOT copy archetype markup. Prefer pattern-* catalog entries for body slides " +
-				"(they carry the template's cards/boxes); use multi-column layouts for grids; use Title and Text only as a last resort. " +
-				"Fixed-tier title/section/agenda/closing entries keep brand chrome — fill their text slots only. " +
-				"Use at most one section divider. Vary patterns across body slides."
+				"Do NOT call write_slide and do NOT copy archetype markup. " +
+				"Body and cover slides: prefer recipe-* catalog entries (named slots: eyebrow, headline, body_1, item_1_title, …). " +
+				"Pick the recipe whose slot count matches the content. A chapter is an eyebrow on a full content slide — do not insert empty section dividers. " +
+				"Imported pattern-* is optional when it matches the same job; Title and Text is last resort. " +
+				"Fill EVERY required text slot. Cover = recipe-cover (thesis in the dek). Closer = recipe-closer. " +
+				"Vary at least three recipe-* kinds in a deck longer than 6 slides."
 		}
+		result.StyleGuide = RecipeGuideMarkdown()
 		if tmpl.StyleGuide != nil && tmpl.StyleGuide.Markdown != "" {
-			result.StyleGuide = tmpl.StyleGuide.Markdown
+			result.StyleGuide += tmpl.StyleGuide.Markdown
 		}
 		return result, nil
 	}
@@ -564,6 +568,20 @@ func applyFills(ctx context.Context, deckSlug, templateName string, specs []Fill
 		arch, err := findTemplateArchetype(tmpl, spec.Kind, spec.Label)
 		if err != nil {
 			return empty, "", nil, fmt.Errorf("slides[%d]: %w", i, err)
+		}
+		if isRecipeKind(arch.Kind) {
+			chrome := ExtractChrome(tmpl)
+			if deck != nil {
+				chrome.DeckTitle = strings.TrimSpace(deck.Title)
+			}
+			chrome.Page = spec.Position + 1
+			arch, err = recipeArchetypeFor(tmpl, arch.Kind, chrome, spec.Fills)
+			if err != nil {
+				return empty, "", nil, fmt.Errorf("slides[%d]: %w", i, err)
+			}
+		}
+		if miss := missingTextSlotFills(arch, spec.Fills); len(miss) > 0 {
+			return empty, "", nil, fmt.Errorf("slides[%d]: missing fills for text slots %s — fill every required slot (or pick a recipe with fewer items)", i, strings.Join(miss, ", "))
 		}
 		markup, err := fillArchetypeMarkup(arch.Markup, spec.Fills)
 		if err != nil {
@@ -1393,6 +1411,257 @@ func slideHasDesignedChrome(nodes []Node) bool {
 	return false
 }
 
+func nodeFontSize(n Node) int {
+	if n.Props != nil {
+		switch v := n.Props["size"].(type) {
+		case int:
+			return v
+		case float64:
+			return int(v)
+		case string:
+			sz, _ := strconv.Atoi(v)
+			return sz
+		}
+	}
+	for _, r := range n.Runs {
+		if r.Size > 0 {
+			return r.Size
+		}
+	}
+	return 0
+}
+
+func slideIsRecipeLayout(nodes []Node) bool {
+	found := false
+	walkNodes(nodes, func(n Node) {
+		if n.ID == "eyebrow" || n.ID == "chrome-footer" || n.ID == "chrome-legal" || n.ID == "headline" {
+			found = true
+		}
+	})
+	return found
+}
+
+func slideHasEmptyEyebrow(nodes []Node) bool {
+	saw := false
+	empty := false
+	walkNodes(nodes, func(n Node) {
+		if n.ID != "eyebrow" {
+			return
+		}
+		saw = true
+		if strings.TrimSpace(nodeText(n)) == "" {
+			empty = true
+		}
+	})
+	return saw && empty
+}
+
+func countNonEmptyText(nodes []Node) int {
+	n := 0
+	reviewTextNodes(nodes, func(node Node) {
+		if strings.TrimSpace(nodeText(node)) == "" {
+			return
+		}
+		if node.ID == "chrome-footer" || node.ID == "chrome-legal" || node.ID == "chrome-page" || node.ID == "chrome-confidential" {
+			return
+		}
+		n++
+	})
+	return n
+}
+
+func slideContentCoverage(nodes []Node) float64 {
+	minX, minY := CanvasWidth, CanvasHeight
+	maxX, maxY := 0, 0
+	any := false
+	reviewTextNodes(nodes, func(n Node) {
+		if strings.TrimSpace(nodeText(n)) == "" {
+			return
+		}
+		if n.Geometry.W < 40 || n.Geometry.H < 16 {
+			return
+		}
+		any = true
+		if n.Geometry.X < minX {
+			minX = n.Geometry.X
+		}
+		if n.Geometry.Y < minY {
+			minY = n.Geometry.Y
+		}
+		if n.Geometry.X+n.Geometry.W > maxX {
+			maxX = n.Geometry.X + n.Geometry.W
+		}
+		if n.Geometry.Y+n.Geometry.H > maxY {
+			maxY = n.Geometry.Y + n.Geometry.H
+		}
+	})
+	if !any {
+		return 0
+	}
+	area := (maxX - minX) * (maxY - minY)
+	safe := (CanvasWidth - 160) * (CanvasHeight - 120)
+	if safe <= 0 {
+		return 0
+	}
+	return float64(area) / float64(safe)
+}
+
+var takeawayVerbRe = regexp.MustCompile(`(?i)\b(is|are|was|were|will|can|cannot|should|must|missed|grew|fell|cut|won|lost|made|built|chose|became|do|does|did|not|and then)\b`)
+
+func slideHasNominalTitle(nodes []Node) bool {
+	var title Node
+	found := false
+	reviewTextNodes(nodes, func(n Node) {
+		if n.ID != "headline" && n.ID != "headline_2" {
+			if found {
+				return
+			}
+			if n.Geometry.Y < 280 && n.Geometry.W >= 600 && nodeFontSize(n) >= 32 {
+				title = n
+				found = true
+			}
+			return
+		}
+		if n.ID == "headline" {
+			title = n
+			found = true
+		}
+	})
+	if !found {
+		return false
+	}
+	text := strings.TrimSpace(nodeText(title))
+	if text == "" {
+		return false
+	}
+	// A filled headline_2 makes a split title, not a nominal label.
+	hasLine2 := false
+	reviewTextNodes(nodes, func(n Node) {
+		if n.ID == "headline_2" && strings.TrimSpace(nodeText(n)) != "" {
+			hasLine2 = true
+		}
+	})
+	if hasLine2 {
+		return false
+	}
+	words := strings.Fields(text)
+	if len(words) == 0 || len(words) > 6 {
+		return false
+	}
+	if takeawayVerbRe.MatchString(text) || strings.ContainsAny(text, ".,;:—") {
+		return false
+	}
+	return len(words) <= 4
+}
+
+func slideHasVisibleTitle(nodes []Node) bool {
+	found := false
+	reviewTextNodes(nodes, func(n Node) {
+		if found || strings.TrimSpace(nodeText(n)) == "" {
+			return
+		}
+		sz := nodeFontSize(n)
+		top := n.Geometry.Y < 260 && n.Geometry.W >= 600
+		display := sz >= 32 && n.Geometry.W >= 500
+		banner := n.Geometry.W >= 1000 && n.Geometry.H >= 56
+		if top || display || banner {
+			found = true
+		}
+	})
+	return found
+}
+
+func slideEmptyCardIDs(nodes []Node) []string {
+	type box struct {
+		id string
+		g  Geometry
+	}
+	var cards []box
+	var texts []Geometry
+	var photos []Geometry
+	walkNodes(nodes, func(n Node) {
+		if n.Type == "image" && n.Geometry.W >= 360 && n.Geometry.H >= 280 {
+			photos = append(photos, n.Geometry)
+		}
+		if n.Type == "text" && strings.TrimSpace(nodeText(n)) != "" {
+			texts = append(texts, n.Geometry)
+			return
+		}
+		if n.Type != "shape" || n.ID == "bg" || isFullCanvasNode(n) {
+			return
+		}
+		if n.Geometry.W < 180 || n.Geometry.H < 70 || n.Geometry.W >= 1400 {
+			return
+		}
+		if n.Geometry.H > 400 && n.Geometry.H > 2*n.Geometry.W {
+			return
+		}
+		if n.Props != nil {
+			if v, ok := n.Props["decorative"].(string); ok && (v == "true" || v == "1") {
+				return
+			}
+		}
+		isCard := n.Geom == "roundRect" || n.Geom == "chevron"
+		if !isCard {
+			fill := nodeFillHex(n)
+			if fill == "" || isNeutralFill(fill) {
+				return
+			}
+			isCard = true
+		}
+		if isCard {
+			cards = append(cards, box{id: n.ID, g: n.Geometry})
+		}
+	})
+	coversPhoto := func(g Geometry) bool {
+		area := g.W * g.H
+		if area <= 0 {
+			return false
+		}
+		for _, p := range photos {
+			ix := minInt(g.X+g.W, p.X+p.W) - maxInt(g.X, p.X)
+			iy := minInt(g.Y+g.H, p.Y+p.H) - maxInt(g.Y, p.Y)
+			if ix > 0 && iy > 0 && ix*iy*100/area > 35 {
+				return true
+			}
+		}
+		return false
+	}
+	var empty []string
+	for _, c := range cards {
+		if coversPhoto(c.g) {
+			continue
+		}
+		hit := false
+		for _, t := range texts {
+			ix := minInt(c.g.X+c.g.W, t.X+t.W) - maxInt(c.g.X, t.X)
+			iy := minInt(c.g.Y+c.g.H, t.Y+t.H) - maxInt(c.g.Y, t.Y)
+			if ix > 20 && iy > 20 {
+				hit = true
+				break
+			}
+		}
+		if !hit {
+			empty = append(empty, c.id)
+		}
+	}
+	return empty
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 func slideIsSparseTitleOnly(nodes []Node) bool {
 	if slideHasTemplateAssetRef(nodes) || slideHasDesignedChrome(nodes) {
 		return false
@@ -1594,16 +1863,58 @@ func reviewDeck(ctx context.Context, args ReviewDeckArgs) (ReviewDeckResult, err
 		})
 		// Warn only for flexible title+body walls. Empty dividers and chevron
 		// card slides are not missing chrome.
-		if fromTemplate && !slideHasTemplateAssetRef(slide.Nodes) && !slideHasDesignedChrome(slide.Nodes) && slideLooksLikeTitleAndBody(slide.Nodes) {
+		if fromTemplate && !slideIsRecipeLayout(slide.Nodes) && !slideHasTemplateAssetRef(slide.Nodes) && !slideHasDesignedChrome(slide.Nodes) && slideLooksLikeTitleAndBody(slide.Nodes) {
 			findings = append(findings, ReviewFinding{
 				SlideIndex: si,
 				Code:       "missing_chrome",
 				Severity:   "warning",
-				Message:    "This slide has no template media and no designed cards/boxes. Prefer a pattern-* catalog entry via fill_slides so body slides match the imported example slides.",
+				Message:    "This slide has no template media and no designed cards/boxes. Prefer a recipe-* catalog entry via fill_slides so each slide uses a full layout type.",
 			})
 		}
 		if fromTemplate && slideIsSparseTitleOnly(slide.Nodes) {
 			sparseIdx = append(sparseIdx, si)
+		}
+		if fromTemplate && si > 0 && slideContentCoverage(slide.Nodes) < 0.35 && countNonEmptyText(slide.Nodes) <= 2 {
+			findings = append(findings, ReviewFinding{
+				SlideIndex: si,
+				Code:       "sparse_slide",
+				Severity:   "warning",
+				Message:    "This slide leaves most of the canvas unused. Use a recipe-* layout (split-narrative, three-up, two-up, …) and fill every required slot so the story uses the page.",
+			})
+		}
+		if fromTemplate && slideIsRecipeLayout(slide.Nodes) && slideHasEmptyEyebrow(slide.Nodes) {
+			findings = append(findings, ReviewFinding{
+				SlideIndex: si,
+				NodeID:     "eyebrow",
+				Code:       "missing_eyebrow",
+				Severity:   "warning",
+				Message:    "Recipe slides need an eyebrow (chapter/section kicker). Fill the eyebrow slot; do not leave it blank.",
+			})
+		}
+		if fromTemplate && si > 0 && slideHasNominalTitle(slide.Nodes) {
+			findings = append(findings, ReviewFinding{
+				SlideIndex: si,
+				Code:       "nominal_title",
+				Severity:   "info",
+				Message:    "Headline reads as a topic label. Prefer a complete-sentence takeaway or a two-line split headline that states the claim.",
+			})
+		}
+		if fromTemplate && !slideHasVisibleTitle(slide.Nodes) {
+			findings = append(findings, ReviewFinding{
+				SlideIndex: si,
+				Code:       "missing_title",
+				Severity:   "warning",
+				Message:    "This slide has no real title. Fill the title slot with a 3–8 word topic name — not the first fact, and not a blank.",
+			})
+		}
+		for _, id := range slideEmptyCardIDs(slide.Nodes) {
+			findings = append(findings, ReviewFinding{
+				SlideIndex: si,
+				NodeID:     id,
+				Code:       "empty_card",
+				Severity:   "warning",
+				Message:    "A designed card/box is empty. Fill every text slot on this layout, or pick a pattern whose slot count matches the content you have. Do not leave colored components blank.",
+			})
 		}
 		walkNodes(slide.Nodes, func(n Node) {
 			if !strings.HasPrefix(n.ID, "ph-pic-") || n.Type == "image" {
@@ -1625,7 +1936,7 @@ func reviewDeck(ctx context.Context, args ReviewDeckArgs) (ReviewDeckResult, err
 			Code:       "sparse_section",
 			Severity:   "warning",
 			Message: fmt.Sprintf(
-				"%d slides are title-only dividers (positions %v). Use at most one section divider; put the rest of the story on pattern-* body slides.",
+				"%d slides are title-only dividers (positions %v). Do not insert empty section dividers; put each chapter on a recipe-* content slide with an eyebrow.",
 				len(sparseIdx), sparseIdx),
 		})
 	}
@@ -1765,8 +2076,8 @@ func GetTools() ([]tool.Tool, error) {
 				return createDeck(ctx, args)
 			})
 		}},
-		{"fill_slides", "Write many slides in one call from template catalog entries. Pass slides: [{position, kind or label, fills}]. Prefer this over fill_slide so the whole deck is authored in one LLM turn. Prefer pattern-* for body slides.", func() (tool.Tool, error) {
-			return functiontool.New(functiontool.Config{Name: "fill_slides", Description: "Write many slides in one call from template catalog entries. Pass slides: [{position, kind or label, fills}]. Prefer this over fill_slide so the whole deck is authored in one LLM turn. Prefer pattern-* for body slides."}, func(ctx tool.Context, args FillSlidesArgs) (FillSlidesResult, error) {
+		{"fill_slides", "Write many slides in one call from template catalog entries. Pass slides: [{position, kind or label, fills}]. Prefer this over fill_slide so the whole deck is authored in one LLM turn. Prefer recipe-* layout types for cover and body slides; pattern-* only when it matches the same job.", func() (tool.Tool, error) {
+			return functiontool.New(functiontool.Config{Name: "fill_slides", Description: "Write many slides in one call from template catalog entries. Pass slides: [{position, kind or label, fills}]. Prefer this over fill_slide so the whole deck is authored in one LLM turn. Prefer recipe-* layout types for cover and body slides; pattern-* only when it matches the same job."}, func(ctx tool.Context, args FillSlidesArgs) (FillSlidesResult, error) {
 				return fillSlides(ctx, args)
 			})
 		}},

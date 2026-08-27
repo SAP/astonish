@@ -175,6 +175,46 @@ func TestToolIndex_SyncTools(t *testing.T) {
 	}
 }
 
+func TestToolIndex_FirstPartyWinsOverMCPNameCollision(t *testing.T) {
+	idx := newTestToolIndex(t, testEmbeddingFunc())
+	// MCP group sorts before "slides"; previously first-wins would keep the MCP
+	// tool and hide the built-in list_templates.
+	groups := []*ToolGroup{
+		{Name: "mcp:email-mcp", Tools: mockTools("list_templates")},
+		{Name: "slides", Tools: mockTools("list_templates")},
+	}
+	if err := idx.SyncTools(context.Background(), nil, groups); err != nil {
+		t.Fatalf("SyncTools: %v", err)
+	}
+	entry := idx.GetToolEntry("list_templates")
+	if entry == nil {
+		t.Fatal("list_templates missing from registry")
+	}
+	if entry.GroupName != "slides" {
+		t.Fatalf("first-party slides tool must win over MCP, got group %q", entry.GroupName)
+	}
+	if idx.FirstPartyToolEntry("list_templates") == nil {
+		t.Fatal("FirstPartyToolEntry should find the slides tool")
+	}
+}
+
+func TestDropMCPShadowsOfFirstParty(t *testing.T) {
+	idx := newTestToolIndex(t, testEmbeddingFunc())
+	if err := idx.SyncTools(context.Background(), nil, []*ToolGroup{
+		{Name: "slides", Tools: mockTools("list_templates")},
+	}); err != nil {
+		t.Fatalf("SyncTools: %v", err)
+	}
+	matches := []ToolMatch{
+		{ToolName: "list_templates", GroupName: "mcp:email-mcp", Description: "email templates"},
+		{ToolName: "send_email", GroupName: "mcp:email-mcp", Description: "send"},
+	}
+	got := DropMCPShadowsOfFirstParty(idx, matches)
+	if len(got) != 1 || got[0].ToolName != "send_email" {
+		t.Fatalf("expected only send_email, got %#v", got)
+	}
+}
+
 func TestToolIndex_SyncTools_Idempotent(t *testing.T) {
 	idx := newTestToolIndex(t, testEmbeddingFunc())
 

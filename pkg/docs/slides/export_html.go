@@ -97,7 +97,7 @@ func writeThemeCSS(out *bytes.Buffer, theme map[string]string) {
 		// The embedded-fonts key carries a JSON manifest consumed by
 		// writeFontFaces (emitted as @font-face rules), NOT a CSS value — never
 		// surface it as a --ast-* variable.
-		if key == embeddedFontsThemeKey {
+		if isThemeMetaKey(key) {
 			continue
 		}
 		if !safeAttributeName(key) || !safeCSSValue(theme[key]) {

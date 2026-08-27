@@ -576,6 +576,14 @@ func ImportSlidesTemplateHandler(w http.ResponseWriter, r *http.Request) {
 	tmpl.Label = label
 	tmpl.Scope = ""
 
+	// Generate rich style guidance for LLM content authoring. Best-effort:
+	// a nil or incomplete guide never fails the import.
+	if tmpl.Model != nil {
+		tmpl.StyleGuide = themes.GenerateStyleGuide(tmpl.Model, tmpl.Tokens, tmpl.Archetypes)
+		// Also store on the model so it persists through TemplateModel JSON serialization.
+		tmpl.Model.StyleGuide = tmpl.StyleGuide
+	}
+
 	// Pre-bake static PNG thumbnails for each archetype using the shared headless
 	// Chrome browser. This is BEST-EFFORT: any browser-launch or per-archetype
 	// failure is logged and the import proceeds without thumbnails (the picker

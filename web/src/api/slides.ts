@@ -65,8 +65,8 @@ export interface SlidesDeckListItem {
 export type SlidesExportFormat = 'pdf' | 'pptx' | 'html'
 
 /** A named archetype (layout) provided by a slide template. In the lightweight
- * list DTO only `kind` and `label` are present (no markup); the full archetype
- * with `markup` is delivered when a template is chosen via create_deck. */
+ * list DTO only `kind` and `label` are present (no markup). Chat authoring uses
+ * fill_slides against the create_deck catalog rather than copying markup. */
 export interface SlidesTemplateArchetype {
   kind: string
   title?: string
@@ -92,6 +92,8 @@ export interface SlidesTemplate {
   scope?: string
   /** Archetype kinds (title/section/content) available in the template. */
   archetypeKinds?: string[]
+  /** Whether this template has a rich style guide for LLM content generation. */
+  hasStyleGuide?: boolean
 }
 
 function withScope(path: string, scope: DocsScope): string {

@@ -1761,7 +1761,7 @@ func (cr *ChatRunner) maybeEmitDocsUpdate(sessionService session.Service, toolNa
 	switch toolName {
 	case "create_deck":
 		action = slides.ActionDeckCreated
-	case "write_slide":
+	case "write_slide", "fill_slide", "fill_slides":
 		action = slides.ActionSlideWritten
 	case "get_deck":
 		action = slides.ActionDeckViewed

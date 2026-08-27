@@ -40,11 +40,21 @@ type Archetype struct {
 	Markup    string   `json:"markup"`
 	Tier      string   `json:"tier,omitempty"`
 	FillSlots []string `json:"fillSlots,omitempty"`
+	// SlotHints describe each fill slot (id, role, short hint) so fill_slide
+	// callers know what to put in ph-2 vs ph-3 without reading the markup.
+	SlotHints []SlotHint `json:"slotHints,omitempty"`
 	// ThumbnailRef names the deck Assets key (e.g. "thumb/title", "thumb/section-2")
 	// holding a pre-baked PNG data URI rendered once at .pptx import time. It is
 	// zero for built-ins and for imports made before the static-thumbnail pipeline
 	// existed; those fall back to a live ast-deck render.
 	ThumbnailRef string `json:"thumbnailRef,omitempty"`
+}
+
+// SlotHint is a compact description of one fill slot on an archetype.
+type SlotHint struct {
+	ID   string `json:"id"`
+	Role string `json:"role,omitempty"` // title|body|image|heading|caption
+	Hint string `json:"hint,omitempty"`
 }
 
 // Template is a named collection of design tokens plus slide archetypes. It is
@@ -65,7 +75,8 @@ type Template struct {
 	// plain scoped templates. It is persisted verbatim so a future in-browser
 	// editor / high-fidelity re-export has complete input; the Archetypes are
 	// its rendered ASD projection.
-	Model *TemplateModel `json:"templateModel,omitempty"`
+	Model      *TemplateModel `json:"templateModel,omitempty"`
+	StyleGuide *StyleGuide    `json:"styleGuide,omitempty"`
 }
 
 // ThemeTokens returns the design-token palette for the template.

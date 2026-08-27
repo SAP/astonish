@@ -148,10 +148,14 @@ func (idx *ToolIndex) SyncTools(ctx context.Context, mainTools []tool.Tool, grou
 		})
 	}
 
-	// Index tools from each group
+	// Index tools from each group. First-party groups (slides, email, core, …)
+	// run before MCP groups so an MCP server that reuses a generic name
+	// (e.g. list_templates) cannot steal the built-in tool in the registry.
 	readCtx := &minimalReadonlyContext{Context: ctx}
-	for _, g := range groups {
-		// Regular tools
+	indexGroup := func(g *ToolGroup) {
+		if g == nil {
+			return
+		}
 		for _, t := range g.Tools {
 			name := t.Name()
 			if _, exists := registry[name]; exists {
@@ -175,8 +179,6 @@ func (idx *ToolIndex) SyncTools(ctx context.Context, mainTools []tool.Tool, grou
 				},
 			})
 		}
-
-		// MCP toolset tools
 		for _, ts := range g.Toolsets {
 			mcpTools, err := ts.Tools(readCtx)
 			if err != nil {
@@ -206,6 +208,17 @@ func (idx *ToolIndex) SyncTools(ctx context.Context, mainTools []tool.Tool, grou
 				})
 			}
 		}
+	}
+	var mcpGroups []*ToolGroup
+	for _, g := range groups {
+		if g != nil && strings.HasPrefix(g.Name, "mcp:") {
+			mcpGroups = append(mcpGroups, g)
+			continue
+		}
+		indexGroup(g)
+	}
+	for _, g := range mcpGroups {
+		indexGroup(g)
 	}
 
 	// Incremental sync: only embed tools whose content has changed.
@@ -485,6 +498,20 @@ func (idx *ToolIndex) GetToolEntry(toolName string) *ToolEntry {
 	return nil
 }
 
+// FirstPartyToolEntry returns the index entry when it is a built-in / first-party
+// tool (not an mcp:* group). Used so MCP servers cannot shadow slides/email/core
+// tools that share a generic name like list_templates.
+func (idx *ToolIndex) FirstPartyToolEntry(toolName string) *ToolEntry {
+	e := idx.GetToolEntry(toolName)
+	if e == nil || e.Tool == nil {
+		return nil
+	}
+	if strings.HasPrefix(e.GroupName, "mcp:") {
+		return nil
+	}
+	return e
+}
+
 // GetToolsByGroup returns all tool entries belonging to the given group name.
 // Returns nil if the group has no tools registered.
 func (idx *ToolIndex) GetToolsByGroup(groupName string) []ToolEntry {
@@ -556,6 +583,22 @@ func MatchMCPGroupsFromQuery(idx *ToolIndex, query string) []ToolMatch {
 			seen[m.ToolName] = true
 			out = append(out, m)
 		}
+	}
+	return out
+}
+
+// DropMCPShadowsOfFirstParty removes MCP search hits whose bare name is already
+// a first-party tool in idx. Email-mcp list_templates must not hide slides.
+func DropMCPShadowsOfFirstParty(idx *ToolIndex, matches []ToolMatch) []ToolMatch {
+	if idx == nil || len(matches) == 0 {
+		return matches
+	}
+	out := matches[:0]
+	for _, m := range matches {
+		if strings.HasPrefix(m.GroupName, "mcp:") && idx.FirstPartyToolEntry(m.ToolName) != nil {
+			continue
+		}
+		out = append(out, m)
 	}
 	return out
 }

@@ -150,7 +150,7 @@ export default function SlidesArchetypeThumb({
     if (!deck || !theme) return
     try {
       for (const [key, value] of Object.entries(theme)) {
-        if (!key) continue
+        if (!key || key === 'embedded-fonts' || key === 'template-name') continue
         deck.style.setProperty(`--ast-${key}`, value)
       }
     } catch {

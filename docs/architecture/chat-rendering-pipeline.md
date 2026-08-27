@@ -118,7 +118,7 @@ Tool messages stay separate in React state (and on the wire). At render time, `g
 |-------|-----------|----------------|
 | `docs_update` | `{type, deckSlug, action, slideIndex?, totalSlides, title?, deckTitle?, schemaVersion, validation, pptxCapability}` | Insert or refresh the slide-deck progress surface; terminal clients render a concise update line |
 
-Successful `create_deck` and `write_slide` results are normalized through `slides.UpdateFromToolResult` in every direct, retry, flat sub-agent, and structured-delegation execution path. `ChatRunner` emits the typed payload and persists the same JSON behind a `[docs_update]` marker. Session reconstruction projects that marker as a `StudioMessage{type: "docs_update"}`, so reload and live delivery use the same contract. The remote terminal maps both live SSE frames and restored messages to `KindDocsUpdate`; malformed payloads and failed tool results are ignored.
+Successful `create_deck`, `write_slide`, `fill_slide`, and `fill_slides` results are normalized through `slides.UpdateFromToolResult` in every direct, retry, flat sub-agent, and structured-delegation execution path. `ChatRunner` emits the typed payload and persists the same JSON behind a `[docs_update]` marker. Session reconstruction projects that marker as a `StudioMessage{type: "docs_update"}`, so reload and live delivery use the same contract. The remote terminal maps both live SSE frames and restored messages to `KindDocsUpdate`; malformed payloads and failed tool results are ignored.
 
 #### Turn-scoped SlidesCard coalescing and preview recovery contract
 

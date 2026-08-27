@@ -1,6 +1,6 @@
 # Docs — Slides (Web Component Presentations)
 
-> **Status**: Planned — revised proposal
+> **Status**: Implemented (template import + fill_slides authoring)
 > **Category**: Productivity Tools
 > **First doc type**: Slides
 > **Future doc types**: Documents (rich text), Spreadsheets (structured data)
@@ -43,7 +43,7 @@ The canonical source is not arbitrary rendered DOM and is not a screenshot. It i
 
 ```text
                          LLM AGENT
-         create_deck / write_slide / read_slide / validate_deck
+         create_deck / fill_slides / write_slide / read_slide / validate_deck
                                 │
                                 ▼
                 ASTONISH SLIDES DOCUMENT (ASD v1)
@@ -228,7 +228,7 @@ The consequence is a real authoring pitfall: `<ast-run>1972</ast-run><ast-run>Fo
 
 #### Self-evaluation (`review_deck`)
 
-`review_deck` is an agent tool that renders the persisted deck to its parsed `SceneGraph` and returns a structured self-evaluation the model reads before declaring a deck done. It complements `validate_deck` (which is structural/geometry only) by catching **semantic/visual** defects. It returns heuristic `findings` — `run_adjacency` (the collision above, severity `warning`), `overlap` (two non-decorative text boxes whose bounding boxes substantially intersect — a colliding/misaligned layout such as a broad body placeholder swallowing a fixed label, `warning`), `low_contrast` (a fill/color with weak WCAG contrast against the surface, `info`), `missing_chrome` (a template-based slide that references none of the template's media/logo/footer, `info`), and `weak_source` (a vague, undated `Source: …` citation, `info`) — plus a fixed review `checklist` so the model always has guidance even when the heuristics are clean. It is **agent-driven, not a hard runtime block**: the slides skill instructs the model to fix all `warning`-level findings and re-run `review_deck` until clean before telling the user the deck is ready (mirroring the `ask_user` pattern). The result carries scene-derived text only — never `data:` image/font bytes.
+`review_deck` is an agent tool that renders the persisted deck to its parsed `SceneGraph` and returns a structured self-evaluation the model reads before declaring a deck done. It complements `validate_deck` (which is structural/geometry only) by catching **semantic/visual** defects. It returns heuristic `findings` — `run_adjacency` (the collision above, severity `warning`), `overlap` (two non-decorative text boxes whose bounding boxes substantially intersect — a colliding/misaligned layout such as a broad body placeholder swallowing a fixed label, `warning`), `low_contrast` (a fill/color with weak WCAG contrast against the surface, `info`; skipped for `id=bg`, full-canvas nodes, and fills equal to the surface), `missing_chrome` (a template-based **title+body wall** with no cards/media; empty dividers and chevron/card slides are not flagged; `warning`), `unfilled_image_slot` (a `ph-pic-*` still rendered as an empty shape panel, `warning`), and `weak_source` (a vague, undated `Source: …` citation, `info`) — plus a fixed review `checklist` so the model always has guidance even when the heuristics are clean. It is **agent-driven, not a hard runtime block**: the slides skill instructs the model to fix all `warning`-level findings and re-run `review_deck` until clean before telling the user the deck is ready (mirroring the `ask_user` pattern). The result carries scene-derived text only — never `data:` image/font bytes.
 
 Studio also reveals the right-hand slides harness only **after the first slide is written** (a `slide_written` `docs_update`), not on `create_deck`/`deck_viewed`, so the user never sees an empty deck panel before generation.
 
@@ -508,7 +508,7 @@ the colorful covers apart instead of seeing a bare `title-7`.
 ### Two tiers: fixed brand chrome vs flexible content
 
 Every archetype is tagged with a **tier** (`themes.Archetype.Tier`, surfaced on
-the `list_templates`/`create_deck` tool results):
+the `list_slide_templates`/`create_deck` tool results):
 
 - **`fixed` — brand chrome** (`title`, `section`/divider, `agenda`,
   `closing`/thank-you). These are reproduced **verbatim**: the agent copies the
@@ -577,8 +577,14 @@ inheritance chain**, the way PowerPoint renders. A layout's effective background
 the first non-fallback of `[layout own <p:bg>, master <p:bg>]` — so a layout with
 no explicit background inherits the master's (not white). The master's decorative
 chrome objects (backgrounds, logos, accent shapes) are merged **behind** the
-layout's own chrome (master first in z-order), skipping master placeholders and
-honoring `showMasterSp="0"`. Suppressing the master is only a fidelity LOSS when
+layout's own chrome (master first in z-order), skipping master placeholders,
+OOXML `hidden="1"` shapes and groups, and honoring `showMasterSp="0"`. Corporate
+masters (notably SAP GCO) hide authoring palettes — Harvey-ball status widgets
+are ~100 stacked squares in a hidden group — and instruction stickers (`DRAFT`,
+`Dummy data`, `For discussion`). Flattening those without honoring `hidden`
+paints black tiles and dummy labels onto every generated slide. Dummy /
+placeholder / watermark copy is also dropped even when it sits on a filled
+shape. Suppressing the master is only a fidelity LOSS when
 the layout has **no own chrome to replace it** — the branded covers/dividers set
 `showMasterSp="0"` precisely because they paint their own full-page chrome (bg +
 anvil + logo + footer). So the importer warns about suppression **only** when a
@@ -587,18 +593,32 @@ sparse slide), never for the richly-chromed covers; this keeps the warning list 
 real signal instead of ~19 false alarms. This is why imported covers now render
 in full color.
 
-The pptx's authored **sample slides are NO LONGER surfaced as archetypes.** They
-were previously turned into `example-*` archetypes, but 22 of 23 real corporate
-slides carry no own `<p:bg>` — they just drop a photo into the layout's picture
-placeholder — so those example archetypes rendered **white**. All the colorful
-variety (covers, dividers ±image, agenda, content) lives in the **layouts** under
-the single master, and those inheritance-corrected layout archetypes are the
-on-brand starting points. Sample slides are still captured into
-`templateModel.slides[]` for the future editor, just not as archetypes. The
-stable chrome set (`title`/`section`/`agenda`/`closing`) **plus** a flexible
-`content` role is guaranteed via the branded-alias-preferred / style-derived
-synthesis described above, so imported templates always carry the full family
-even for a sparse pptx.
+Cover/divider chrome lives in the **layouts** (with master→layout inheritance).
+**Body design does not.** Content layouts are empty placeholder holes; the cards,
+colored boxes, and icon rows live as free shapes on the pptx **sample slides**
+(typically authored on Title Only). Those samples are promoted to fillable
+`pattern-*` archetypes: master chrome is merged in (so they are not white), extra
+shapes stay as chrome, extra text becomes fill slots, and sample copy is stripped.
+Fill slot ids are assigned in **reading order** (top-to-bottom, left-to-right), not
+PowerPoint document order. Card grids get hints like `card 2 of 6 (top-middle) —
+one short headline, not a heading+body pair`; icon rows get `item N of M`. A wide
+short bar between title and cards is a `kicker`, not a seventh card. Widget-sheet
+samples (more than 16 fill slots or 30 decorative shapes) are not promoted.
+`example-*` kinds are not used. The model never reprints that chrome —
+`fill_slide` substitutes slots server-side.
+
+After layouts are classified, the **richest variant** of each chrome role
+(`title`, `section`, `closing`) is promoted to the unsuffixed kind so
+`fill_slide(kind: "title")` gets a photo cover rather than the first empty
+cover in file order. Ranking uses real media and shape count, not a named
+template. Empty full-bleed picture placeholders on fixed chrome are omitted
+(no muted full-slide panel). Short instructional dummy on closing/covers
+(field captions ending in `:`, "goes here", dummy `Month 00` dates) becomes a
+fill slot, not frozen chrome.
+
+The stable chrome set (`title`/`section`/`agenda`/`closing`) **plus** a flexible
+`content` role is still guaranteed via branded-alias / style-derived synthesis.
+Sample slides are also stored in `templateModel.slides[]` for the future editor.
 
 ### Picture placeholders: borrowing the authored sample photo
 
@@ -741,7 +761,7 @@ guards and the export CSP runtime-hash test are unchanged (no runtime change).
   the LLM authoring flow identical; `templateModel` banks the lossless IR.
   `SaveTemplate` marshals `Template.Model` into the column; `ListTemplates`
   unmarshals it back, so the IR round-trips.
-- Archetype **variants** surface to the agent and Studio: `list_templates`
+- Archetype **variants** surface to the agent and Studio: `list_slide_templates`
   returns `archetypeVariants[]` (`{kind,label}`); the Templates UI renders each as
   a friendly label chip showing the real PowerPoint layout name. The human label is
   persisted in `SlideContent.Notes` (kind stays in `SlideContent.Title`) — backward
@@ -769,9 +789,11 @@ them at the **serialization boundary only** (the store record is unchanged):
   carry a lightweight `assets[]` **catalog** (see *Deck image assets* below) via
   `deckViewWithAssets`; `list_decks` uses plain `deckView` (no catalog) to stay light.
 
-`Service.Scene` still reads `Assets` straight from the store, so `/present` and the
-PPTX/PDF/HTML exporters resolve `asset-ref` → `data:image/…` unchanged; the asset
-security path (asset-ref → `resolveImageSrc`, CSP) is untouched.
+`Service.Scene` still reads `Assets` from the store, then **keeps only** fonts
+and `asset-ref`s used by the current slides, so `/present` and the PPTX/PDF/HTML
+exporters do not embed unused sample-slide photos. `create_deck` from a template
+seeds fonts only; `fill_slides` copies the refs the authored markup uses. The
+asset security path (asset-ref → `resolveImageSrc`, CSP) is untouched.
 
 ### Deck image assets (catalog + AI add/swap)
 
@@ -926,31 +948,27 @@ rendering currently goes through IR → ASD.
 
 | Tool | Purpose | Key arguments |
 |---|---|---|
-| `create_slides` | Create a deck and theme | `title`, `theme`, `description?`, `ratio?` |
-| `write_slide` | Write/replace one `<ast-slide>` fragment | `deckSlug`, `slideIndex`, `markup`, `notes?` |
-| `read_slide` | Return source plus diagnostics | `deckSlug`, `slideIndex` |
-| `validate_slides` | Validate without persisting | `deckSlug?`, `markup?`, `targets` |
-| `inspect_slide` | Return normalized nodes and export capabilities | `deckSlug`, `slideIndex` |
-| `update_slide_notes` | Update speaker notes | `deckSlug`, `slideIndex`, `notes` |
-| `reorder_slides` | Change ordering | `deckSlug`, `order` |
-| `delete_slide` | Remove a slide | `deckSlug`, `slideIndex` |
-| `update_theme` | Replace tokenized theme values | `deckSlug`, `themeName` or `theme` |
-| `list_slides_decks` | List visible decks | none |
+| `list_slide_templates` | Slim catalog of built-in + imported templates | none |
+| `create_deck` | Create a deck; with `template`, seeds theme/assets and a **slim catalog** (no markup) | `slug`, `title`, `template?` |
+| `fill_slides` | Copy catalog entries server-side and substitute fillSlots for many slides in one call | `deck_slug`, `slides[{position, kind or label, fills}]` |
+| `fill_slide` | Same substitution for one slide (later edits) | `deck_slug`, `position`, `kind` or `label`, `fills` |
+| `get_archetype` | Escape hatch: one archetype's markup | `template`, `kind` or `label` |
+| `write_slide` | Write a full `<ast-slide>` (blank-canvas only) | `deck_slug`, `position`, `markup` |
+| `get_deck` | Deck identity + slim slide index (no markup) | `slug` |
+| `read_slide` | One slide's markup | `deck_slug`, `position` |
+| `ask_user` | Visual template/variant picker | `slidesTemplatePicker` or `slidesTemplate`+`slidesKind` |
+| `validate_deck` / `review_deck` | Structural then semantic/visual review | `slug` |
+| `list_deck_assets` / `add_deck_image` | Image catalog / SSRF-safe ingest | `deck_slug`, `url?` |
 
-`write_slide` must return validation diagnostics and an export capability summary. The LLM should call `validate_slides` for complex tables, charts, or custom components before finalizing a deck.
+`fill_slides` is the default authoring API for templated decks (one tool call for the whole deck). `fill_slide` is the later single-slide edit. The server owns chrome (covers, sample-derived cards, master logo/footer); the model supplies slot text (or an asset-ref for image slots). `create_deck` copies only embedded fonts onto the session deck and `fill_*` copies the image refs the authored markup uses — unused sample-slide photos stay on the template so present/export HTML stays small. `create_deck` / `ask_user` / `get_template_variant_previews` must not dump full ASD markup into the model context — baked PNG `thumbnailRef`s are used for pickers.
 
 ### Prompt rules
 
-The model receives generated documentation for the registered component vocabulary. Core rules:
-
-1. Emit exactly one `<ast-slide>` fragment per `write_slide` call.
-2. Use only registered tags and properties.
-3. Give every object a stable ID and explicit geometry.
-4. Use theme tokens; do not emit CSS or executable JavaScript.
-5. Store table/chart data semantically.
-6. Prefer Tier A components. Use web-only components only when the user values interactivity over editable PPTX.
-7. Read before modifying and validate before finalizing.
-8. Keep text within declared boxes and minimum font sizes.
+1. Always start from a template. Use `fill_slides` (whole deck, one call) when a catalog is present.
+2. Prefer `pattern-*` catalog entries for body slides (they carry the imported example-slide cards). Title and Text is last resort. Use at most one section divider.
+3. Fixed chrome (title/section/agenda/closing): fill text slots only.
+4. Do not reprint `<ast-shape>` chrome into `write_slide`.
+5. Validate, then `review_deck` until warnings are clean.
 
 ---
 
@@ -1025,7 +1043,7 @@ Add optional fields without changing the event name:
 }
 ```
 
-Backend emitters, Studio consumers, persisted parsing, terminal behavior, and scenario fixtures must change together when this contract is implemented. Successful `create_deck`, `write_slide`, and `get_deck` tool results emit this event. `get_deck` uses the `deck_viewed` action so requests such as “show me the deck” render the existing `SlidesCard` with its authenticated preview and export actions rather than only returning raw tool data or prose.
+Backend emitters, Studio consumers, persisted parsing, terminal behavior, and scenario fixtures must change together when this contract is implemented. Successful `create_deck`, `write_slide`, `fill_slide`, `fill_slides`, and `get_deck` tool results emit this event. `get_deck` uses the `deck_viewed` action so requests such as “show me the deck” render the existing `SlidesCard` with its authenticated preview and export actions rather than only returning raw tool data or prose.
 
 ### Turn-scoped SlidesCard coalescing
 
@@ -1237,7 +1255,7 @@ consumed on the general chat path). Arguments:
   `options`) for the **first** question, "which template should I use?". ask_user
   enumerates every available template (built-in + scoped/imported) via
   `templatePickerOptions`, generates one option per template (`id` = template name,
-  `label`/`description` from the `list_templates` catalog), and attaches a live cover
+  `label`/`description` from the `list_slide_templates` catalog), and attaches a live cover
   thumbnail per template — the template's first `title` archetype (else its first
   archetype), tagged with the template name so the frontend resolves asset-refs at
   render time. Never embeds `data:` bytes.

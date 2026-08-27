@@ -40,6 +40,25 @@ func TestMaybeEmitDocsUpdate(t *testing.T) {
 		wantAction string
 	}{
 		{
+			name:     "fill slides batch",
+			toolName: "fill_slides",
+			result: map[string]any{
+				"deck":       map[string]any{"slug": "migration", "title": "Migration", "schemaVersion": 1},
+				"slideCount": 4,
+			},
+			wantAction: slides.ActionSlideWritten,
+		},
+		{
+			name:     "fill one slide",
+			toolName: "fill_slide",
+			result: map[string]any{
+				"deck":       map[string]any{"slug": "migration", "title": "Migration", "schemaVersion": 1},
+				"slideCount": 1,
+				"position":   0,
+			},
+			wantAction: slides.ActionSlideWritten,
+		},
+		{
 			name:     "write slide",
 			toolName: "write_slide",
 			result: map[string]any{

@@ -87,7 +87,7 @@ type CreateDeckArgs struct {
 	Title       string            `json:"title" jsonschema:"Human-readable deck title."`
 	Description string            `json:"description,omitempty" jsonschema:"Optional short deck description."`
 	Theme       map[string]string `json:"theme,omitempty" jsonschema:"Optional ASD theme token overrides."`
-	Template    string            `json:"template,omitempty" jsonschema:"Optional template name from list_templates. Seeds a coherent theme + assets; reuse its title/section/content archetypes as starting markup."`
+	Template    string            `json:"template,omitempty" jsonschema:"Optional template name from list_slide_templates. Seeds theme, fonts, and a slim catalog of layouts/patterns. Author with fill_slides; do not copy markup."`
 	Source      string            `json:"source,omitempty" jsonschema:"Optional slug of an existing saved deck to clone. Copies theme, assets, and slides into this new session deck and sets source_slug so Save can offer Override Original."`
 }
 
@@ -161,17 +161,95 @@ func deckViews(decks []*store.DeckManifest) []*DeckView {
 
 // DeckResult is the common deck payload returned by slide tools.
 type DeckResult struct {
-	Deck       *DeckView             `json:"deck"`
-	Slides     []*store.SlideContent `json:"slides,omitempty"`
-	SlideCount int                   `json:"slideCount"`
-	Archetypes []themes.Archetype    `json:"archetypes,omitempty"`
+	Deck         *DeckView               `json:"deck"`
+	Slides       []*store.SlideContent   `json:"slides,omitempty"`
+	SlideCount   int                     `json:"slideCount"`
+	Archetypes   []themes.Archetype      `json:"archetypes,omitempty"`
+	Catalog      []ArchetypeCatalogEntry `json:"catalog,omitempty"`
+	StyleGuide   string                  `json:"styleGuide,omitempty"`
+	Instructions string                  `json:"instructions,omitempty"`
+	// SlideIndex is the slim get_deck listing (id/position/title, no markup).
+	SlideIndex []SlideInfo `json:"slideIndex,omitempty"`
+}
+
+// SlideInfo is one slide's identity without canonical markup.
+type SlideInfo struct {
+	ID       string `json:"id"`
+	Position int    `json:"position"`
+	Title    string `json:"title,omitempty"`
+}
+
+// FillSlideArgs defines the fill_slide tool input: pick a catalog entry and
+// supply per-slot text (or an asset-ref for image slots). The server copies
+// the stored archetype markup and substitutes — the model never reprints chrome.
+type FillSlideArgs struct {
+	DeckSlug string            `json:"deck_slug" jsonschema:"Slug of the deck to update."`
+	Position int               `json:"position" jsonschema:"Zero-based slide position. Writing an occupied position replaces that slide."`
+	Kind     string            `json:"kind,omitempty" jsonschema:"Archetype kind from the create_deck catalog (e.g. title, pattern-2)."`
+	Label    string            `json:"label,omitempty" jsonschema:"Archetype label from the catalog (e.g. '3 rounded cards'). Used when kind is omitted."`
+	Template string            `json:"template,omitempty" jsonschema:"Template name. Optional when create_deck stamped it on the deck."`
+	Fills    map[string]string `json:"fills" jsonschema:"Map of fillSlots id to text (or sha256- asset-ref for ph-pic image slots)."`
+	Notes    string            `json:"notes,omitempty" jsonschema:"Optional speaker notes."`
+}
+
+// FillSlideResult reports the persisted slide without echoing markup.
+type FillSlideResult struct {
+	Deck        *DeckView    `json:"deck"`
+	Position    int          `json:"position"`
+	SlideID     string       `json:"slideId,omitempty"`
+	Filled      []string     `json:"filled,omitempty"`
+	SlideCount  int          `json:"slideCount"`
+	Diagnostics []Diagnostic `json:"diagnostics,omitempty"`
+}
+
+// FillSlideSpec is one slide in a fill_slides batch.
+type FillSlideSpec struct {
+	Position int               `json:"position" jsonschema:"Zero-based slide position. Writing an occupied position replaces that slide."`
+	Kind     string            `json:"kind,omitempty" jsonschema:"Archetype kind from the create_deck catalog (e.g. title, pattern-2)."`
+	Label    string            `json:"label,omitempty" jsonschema:"Archetype label from the catalog when kind is omitted."`
+	Fills    map[string]string `json:"fills" jsonschema:"Map of fillSlots id to text (or sha256- asset-ref for ph-pic image slots)."`
+	Notes    string            `json:"notes,omitempty" jsonschema:"Optional speaker notes."`
+}
+
+// FillSlidesArgs writes many slides in one tool call so the model does not pay
+// an LLM round-trip per slide.
+type FillSlidesArgs struct {
+	DeckSlug string          `json:"deck_slug" jsonschema:"Slug of the deck to update."`
+	Slides   []FillSlideSpec `json:"slides" jsonschema:"Every slide to write in this call. Include the whole deck; do not emit one fill_slide per turn."`
+}
+
+// FillSlidesResult reports the batch without echoing markup.
+type FillSlidesResult struct {
+	Deck        *DeckView    `json:"deck"`
+	SlideCount  int          `json:"slideCount"`
+	Positions   []int        `json:"positions,omitempty"`
+	Diagnostics []Diagnostic `json:"diagnostics,omitempty"`
+}
+
+const maxFillSlides = 40
+
+// GetArchetypeArgs fetches one archetype's markup (escape hatch; prefer fill_slide).
+type GetArchetypeArgs struct {
+	Template string `json:"template" jsonschema:"Template name from list_slide_templates / create_deck."`
+	Kind     string `json:"kind,omitempty" jsonschema:"Archetype kind to fetch."`
+	Label    string `json:"label,omitempty" jsonschema:"Archetype label to fetch when kind is omitted."`
+}
+
+// GetArchetypeResult returns a single archetype including markup.
+type GetArchetypeResult struct {
+	Kind      string            `json:"kind"`
+	Label     string            `json:"label,omitempty"`
+	Tier      string            `json:"tier,omitempty"`
+	FillSlots []string          `json:"fillSlots,omitempty"`
+	SlotHints []themes.SlotHint `json:"slotHints,omitempty"`
+	Markup    string            `json:"markup"`
 }
 
 // WriteSlideArgs defines the write_slide tool input.
 type WriteSlideArgs struct {
 	DeckSlug string `json:"deck_slug" jsonschema:"Slug of the deck to update."`
 	Position int    `json:"position" jsonschema:"Zero-based slide position. Writing an occupied position replaces that slide."`
-	Markup   string `json:"markup" jsonschema:"One complete validated ast-slide element using ASD v1 markup. Geometry x/y/w/h uses integer logical pixels on a fixed 1920x1080 canvas, never percentages or a 0-100 coordinate system. ast-text is plain text: use size, weight, font-token, and color-token attributes instead of Markdown markers."`
+	Markup   string `json:"markup" jsonschema:"One complete validated ast-slide element. When a template was used, prefer fill_slide instead of writing markup. Geometry x/y/w/h uses integer logical pixels on a fixed 1920x1080 canvas, never percentages or a 0-100 coordinate system. ast-text is plain text: use size, weight, font-token, and color-token attributes instead of Markdown markers."`
 	Notes    string `json:"notes,omitempty" jsonschema:"Optional speaker notes. Use this field instead of embedding ast-notes in markup."`
 }
 
@@ -211,6 +289,7 @@ type TemplateSummary struct {
 	Scope          string             `json:"scope,omitempty"`
 	ArchetypeKinds []string           `json:"archetypeKinds,omitempty"`
 	Archetypes     []ArchetypeVariant `json:"archetypes,omitempty"`
+	HasStyleGuide  bool               `json:"hasStyleGuide,omitempty"`
 }
 
 // ArchetypeVariant names one fillable slide skeleton in a template: its Kind
@@ -235,8 +314,8 @@ type ListTemplatesResult struct {
 
 // TemplateVariantPreviewsArgs defines the get_template_variant_previews input.
 type TemplateVariantPreviewsArgs struct {
-	Template string `json:"template" jsonschema:"Template name (from list_templates) to fetch variant previews for."`
-	Kind     string `json:"kind,omitempty" jsonschema:"Optional archetype role to filter by (e.g. title, section, agenda, closing, content). Omit for all roles."`
+	Template string `json:"template" jsonschema:"Template name (from list_slide_templates) to fetch variant previews for."`
+	Kind     string `json:"kind" jsonschema:"Archetype role to filter by (title, section, agenda, closing, content, pattern). Required — omitting it used to dump every variant's markup."`
 }
 
 // TemplateVariantPreview is one archetype variant plus the render inputs a UI
@@ -245,11 +324,11 @@ type TemplateVariantPreviewsArgs struct {
 // never embeds data: image/font bytes (those resolve through the deck asset
 // plumbing at render time), so it is safe to return from a tool.
 type TemplateVariantPreview struct {
-	Kind      string   `json:"kind"`
-	Label     string   `json:"label,omitempty"`
-	Tier      string   `json:"tier,omitempty"`
-	FillSlots []string `json:"fillSlots,omitempty"`
-	Markup    string   `json:"markup"`
+	Kind         string   `json:"kind"`
+	Label        string   `json:"label,omitempty"`
+	Tier         string   `json:"tier,omitempty"`
+	FillSlots    []string `json:"fillSlots,omitempty"`
+	ThumbnailRef string   `json:"thumbnailRef,omitempty"`
 }
 
 // TemplateVariantPreviewsResult carries the per-variant preview markup plus the
@@ -377,11 +456,27 @@ func createDeck(ctx context.Context, args CreateDeckArgs) (DeckResult, error) {
 		for k, v := range args.Theme {
 			merged[k] = v
 		}
-		deck, err := svc.CreateDeckWithAssets(ctx, slug, title, description, merged, tmpl.Assets)
+		merged[themeKeyTemplateName] = tmpl.Name
+		deck, err := svc.CreateDeckWithAssets(ctx, slug, title, description, merged, seedLightweightAssets(tmpl.Assets))
 		if err != nil {
 			return DeckResult{}, err
 		}
-		return DeckResult{Deck: deckViewWithAssets(deck), Archetypes: tmpl.Archetypes}, nil
+		view := deckView(deck)
+		view.Assets = assetCatalog(tmpl.Assets)
+		view.AssetCount = len(view.Assets)
+		result := DeckResult{Deck: view, Catalog: catalogFrom(tmpl.Archetypes)}
+		if len(tmpl.Archetypes) > 0 {
+			result.Instructions = "MANDATORY: author the whole deck in ONE fill_slides call (slides: [{position, kind or label, fills}, ...]). " +
+				"Do NOT call fill_slide once per slide — that is one LLM round-trip per slide. fill_slide is only for later single-slide edits. " +
+				"Do NOT call write_slide and do NOT copy archetype markup. Prefer pattern-* catalog entries for body slides " +
+				"(they carry the template's cards/boxes); use multi-column layouts for grids; use Title and Text only as a last resort. " +
+				"Fixed-tier title/section/agenda/closing entries keep brand chrome — fill their text slots only. " +
+				"Use at most one section divider. Vary patterns across body slides."
+		}
+		if tmpl.StyleGuide != nil && tmpl.StyleGuide.Markdown != "" {
+			result.StyleGuide = tmpl.StyleGuide.Markdown
+		}
+		return result, nil
 	}
 
 	deck, err := svc.CreateDeck(ctx, slug, title, description, args.Theme)
@@ -389,6 +484,167 @@ func createDeck(ctx context.Context, args CreateDeckArgs) (DeckResult, error) {
 		return DeckResult{}, err
 	}
 	return DeckResult{Deck: deckView(deck)}, nil
+}
+
+func fillSlide(ctx context.Context, args FillSlideArgs) (FillSlideResult, error) {
+	batch, lastID, lastFilled, err := applyFills(ctx, args.DeckSlug, args.Template, []FillSlideSpec{{
+		Position: args.Position,
+		Kind:     args.Kind,
+		Label:    args.Label,
+		Fills:    args.Fills,
+		Notes:    args.Notes,
+	}})
+	if err != nil {
+		return FillSlideResult{Deck: batch.Deck, Position: args.Position, SlideCount: batch.SlideCount, Diagnostics: batch.Diagnostics}, err
+	}
+	return FillSlideResult{
+		Deck:        batch.Deck,
+		Position:    args.Position,
+		SlideID:     lastID,
+		Filled:      lastFilled,
+		SlideCount:  batch.SlideCount,
+		Diagnostics: batch.Diagnostics,
+	}, nil
+}
+
+func fillSlides(ctx context.Context, args FillSlidesArgs) (FillSlidesResult, error) {
+	batch, _, _, err := applyFills(ctx, args.DeckSlug, "", args.Slides)
+	return batch, err
+}
+
+func applyFills(ctx context.Context, deckSlug, templateName string, specs []FillSlideSpec) (FillSlidesResult, string, []string, error) {
+	empty := FillSlidesResult{}
+	if len(specs) == 0 {
+		return empty, "", nil, fmt.Errorf("slides is required")
+	}
+	if len(specs) > maxFillSlides {
+		return empty, "", nil, fmt.Errorf("at most %d slides per fill_slides call", maxFillSlides)
+	}
+	seen := make(map[int]bool, len(specs))
+	for i, spec := range specs {
+		if spec.Position < 0 {
+			return empty, "", nil, fmt.Errorf("slides[%d]: position must be zero or greater", i)
+		}
+		if seen[spec.Position] {
+			return empty, "", nil, fmt.Errorf("duplicate position %d in fill_slides", spec.Position)
+		}
+		seen[spec.Position] = true
+		if len(spec.Fills) == 0 {
+			return empty, "", nil, fmt.Errorf("slides[%d]: fills is required", i)
+		}
+	}
+	svc, err := personalService(ctx)
+	if err != nil {
+		return empty, "", nil, err
+	}
+	deckSlug = strings.TrimSpace(deckSlug)
+	deck, _, err := svc.Deck(ctx, deckSlug)
+	if err != nil {
+		return empty, "", nil, err
+	}
+	tmplName := strings.TrimSpace(templateName)
+	if tmplName == "" && deck != nil && deck.Theme != nil {
+		tmplName = strings.TrimSpace(deck.Theme[themeKeyTemplateName])
+	}
+	if tmplName == "" {
+		return empty, "", nil, fmt.Errorf("template is required (pass template or create the deck with create_deck)")
+	}
+	tmpl, ok := svc.resolveTemplate(ctx, tmplName)
+	if !ok {
+		return empty, "", nil, fmt.Errorf("unknown template %q", tmplName)
+	}
+
+	type prepared struct {
+		spec   FillSlideSpec
+		markup string
+		filled []string
+	}
+	items := make([]prepared, 0, len(specs))
+	for i, spec := range specs {
+		arch, err := findTemplateArchetype(tmpl, spec.Kind, spec.Label)
+		if err != nil {
+			return empty, "", nil, fmt.Errorf("slides[%d]: %w", i, err)
+		}
+		markup, err := fillArchetypeMarkup(arch.Markup, spec.Fills)
+		if err != nil {
+			return empty, "", nil, fmt.Errorf("slides[%d]: %w", i, err)
+		}
+		filled := make([]string, 0, len(spec.Fills))
+		for id := range spec.Fills {
+			filled = append(filled, id)
+		}
+		sort.Strings(filled)
+		items = append(items, prepared{spec: spec, markup: markup, filled: filled})
+	}
+
+	extra := make(map[string]string)
+	for _, it := range items {
+		for _, ref := range collectAssetRefs(it.markup) {
+			if v, ok := tmpl.Assets[ref]; ok {
+				extra[ref] = v
+			}
+		}
+	}
+	if _, err := svc.mergeDeckAssets(ctx, deckSlug, extra); err != nil {
+		return empty, "", nil, err
+	}
+
+	var diagnostics []Diagnostic
+	var lastSlide *store.SlideContent
+	positions := make([]int, 0, len(items))
+	for i, it := range items {
+		slide, diags, err := svc.WriteSlide(ctx, deckSlug, it.spec.Position, it.markup, it.spec.Notes)
+		diagnostics = append(diagnostics, diags...)
+		if err != nil {
+			return FillSlidesResult{Diagnostics: diagnostics, Positions: positions}, "", nil, fmt.Errorf("slides[%d]: %w", i, err)
+		}
+		lastSlide = slide
+		positions = append(positions, it.spec.Position)
+	}
+	if err := svc.syncDeckAssetsFromTemplate(ctx, deckSlug, tmpl); err != nil {
+		return FillSlidesResult{Diagnostics: diagnostics, Positions: positions}, "", nil, err
+	}
+	deck, slides, err := svc.Deck(ctx, deckSlug)
+	if err != nil {
+		return empty, "", nil, fmt.Errorf("reload deck: %w", err)
+	}
+	slideID := ""
+	if lastSlide != nil {
+		slideID = lastSlide.ID
+	}
+	return FillSlidesResult{
+		Deck:        deckView(deck),
+		SlideCount:  len(slides),
+		Positions:   positions,
+		Diagnostics: diagnostics,
+	}, slideID, items[len(items)-1].filled, nil
+}
+
+func getArchetype(ctx context.Context, args GetArchetypeArgs) (GetArchetypeResult, error) {
+	svc, err := personalService(ctx)
+	if err != nil {
+		return GetArchetypeResult{}, err
+	}
+	name := strings.TrimSpace(args.Template)
+	if name == "" {
+		return GetArchetypeResult{}, fmt.Errorf("template is required")
+	}
+	tmpl, ok := svc.resolveTemplate(ctx, name)
+	if !ok {
+		return GetArchetypeResult{}, fmt.Errorf("unknown template %q", name)
+	}
+	arch, err := findTemplateArchetype(tmpl, args.Kind, args.Label)
+	if err != nil {
+		return GetArchetypeResult{}, err
+	}
+	return GetArchetypeResult{
+		Kind:      arch.Kind,
+		Label:     arch.Title,
+		Tier:      arch.Tier,
+		FillSlots: arch.FillSlots,
+		SlotHints: arch.SlotHints,
+		Markup:    arch.Markup,
+	}, nil
 }
 
 func writeSlide(ctx context.Context, args WriteSlideArgs) (WriteSlideResult, error) {
@@ -420,7 +676,37 @@ func getDeck(ctx context.Context, args GetDeckArgs) (DeckResult, error) {
 		return DeckResult{}, err
 	}
 	sort.Slice(slides, func(i, j int) bool { return slides[i].Position < slides[j].Position })
-	return DeckResult{Deck: deckViewWithAssets(deck), Slides: slides, SlideCount: len(slides)}, nil
+	index := make([]SlideInfo, 0, len(slides))
+	for _, s := range slides {
+		index = append(index, SlideInfo{ID: s.ID, Position: s.Position, Title: s.Title})
+	}
+	return DeckResult{Deck: deckViewWithAssets(deck), SlideIndex: index, SlideCount: len(slides)}, nil
+}
+
+// ReadSlideArgs defines the read_slide tool input.
+type ReadSlideArgs struct {
+	DeckSlug string `json:"deck_slug" jsonschema:"Slug of the deck."`
+	Position int    `json:"position" jsonschema:"Zero-based slide position to read."`
+}
+
+func readSlide(ctx context.Context, args ReadSlideArgs) (WriteSlideResult, error) {
+	if args.Position < 0 {
+		return WriteSlideResult{}, fmt.Errorf("position must be zero or greater")
+	}
+	svc, err := personalService(ctx)
+	if err != nil {
+		return WriteSlideResult{}, err
+	}
+	deck, slides, err := svc.Deck(ctx, strings.TrimSpace(args.DeckSlug))
+	if err != nil {
+		return WriteSlideResult{}, err
+	}
+	for _, s := range slides {
+		if s.Position == args.Position {
+			return WriteSlideResult{Deck: deckView(deck), Slide: s, SlideCount: len(slides)}, nil
+		}
+	}
+	return WriteSlideResult{}, fmt.Errorf("no slide at position %d", args.Position)
 }
 
 func listDecks(ctx context.Context, _ ListDecksArgs) (ListDecksResult, error) {
@@ -480,6 +766,7 @@ func templateSummary(t themes.Template, scope string) TemplateSummary {
 		Scope:          scope,
 		ArchetypeKinds: kinds,
 		Archetypes:     variants,
+		HasStyleGuide:  t.StyleGuide != nil,
 	}
 }
 
@@ -503,22 +790,27 @@ func getTemplateVariantPreviews(ctx context.Context, args TemplateVariantPreview
 		return TemplateVariantPreviewsResult{}, fmt.Errorf("unknown template %q", name)
 	}
 	wantKind := strings.TrimSpace(args.Kind)
+	if wantKind == "" {
+		return TemplateVariantPreviewsResult{}, fmt.Errorf("kind is required (title, section, agenda, closing, content, or pattern)")
+	}
 	variants := make([]TemplateVariantPreview, 0, len(tmpl.Archetypes))
 	for _, arch := range tmpl.Archetypes {
 		// Imported templates preserve variant multiplicity by suffixing the
 		// role: a template with several covers stores them as title, title-2,
 		// title-3, … (see uniqueKind in import_worker.mjs). A caller filtering
 		// by slidesKind="title" means the whole ROLE family, so match on the
-		// base kind (strip any -N suffix), not an exact string.
-		if wantKind != "" && stripVariantSuffix(arch.Kind) != wantKind {
+		// base kind (strip any -N suffix), not an exact string. content also
+		// matches pattern-* (sample-derived designed body slides).
+		base := stripVariantSuffix(arch.Kind)
+		if base != wantKind && !(wantKind == "content" && base == "pattern") {
 			continue
 		}
 		variants = append(variants, TemplateVariantPreview{
-			Kind:      arch.Kind,
-			Label:     arch.Title,
-			Tier:      arch.Tier,
-			FillSlots: arch.FillSlots,
-			Markup:    arch.Markup,
+			Kind:         arch.Kind,
+			Label:        arch.Title,
+			Tier:         arch.Tier,
+			FillSlots:    arch.FillSlots,
+			ThumbnailRef: arch.ThumbnailRef,
 		})
 	}
 	return TemplateVariantPreviewsResult{
@@ -561,13 +853,10 @@ func templatePickerOptions(ctx context.Context) ([]templatePick, error) {
 		pick := templatePick{
 			option: AskUserOption{ID: t.Name, Label: label, Description: strings.TrimSpace(t.Description)},
 		}
-		if cover := coverArchetype(t); cover != nil && strings.TrimSpace(cover.Markup) != "" {
-			pick.thumbnail = &AskUserThumbnail{
-				OptionID: t.Name,
-				Kind:     "slides-archetype",
-				Markup:   cover.Markup,
-				Theme:    t.Tokens,
-				Template: t.Name,
+		if cover := coverArchetype(t); cover != nil {
+			if thumb := archetypeThumbnail(t.Name, t.Tokens, *cover); thumb != nil {
+				thumb.OptionID = t.Name
+				pick.thumbnail = thumb
 			}
 		}
 		picks = append(picks, pick)
@@ -598,6 +887,19 @@ func coverArchetype(t themes.Template) *themes.Archetype {
 		return &t.Archetypes[0]
 	}
 	return nil
+}
+
+// archetypeThumbnail prefers a baked PNG (kind=image) so the model never sees
+// full ASD markup. Built-ins without ThumbnailRef fall back to a live
+// slides-archetype render of the (small) markup.
+func archetypeThumbnail(templateName string, tokens map[string]string, arch themes.Archetype) *AskUserThumbnail {
+	if ref := strings.TrimSpace(arch.ThumbnailRef); ref != "" {
+		return &AskUserThumbnail{Kind: "image", AssetRef: ref, Template: templateName}
+	}
+	if strings.TrimSpace(arch.Markup) == "" {
+		return nil
+	}
+	return &AskUserThumbnail{Kind: "slides-archetype", Markup: arch.Markup, Theme: tokens, Template: templateName}
 }
 
 // --- ask_user: generic interactive chat question ---
@@ -647,7 +949,7 @@ type AskUserArgs struct {
 	// slides-archetype thumbnail to each option, matching by label (falling back
 	// to id). If options are omitted, one option is generated per variant. This is
 	// the reliable way to get a VISUAL slide picker — do not hand-copy markup.
-	SlidesTemplate string `json:"slidesTemplate,omitempty" jsonschema:"For a slide-variant picker: the template name (from list_templates). ask_user auto-attaches a live thumbnail per option and, if options are omitted, generates one option per variant."`
+	SlidesTemplate string `json:"slidesTemplate,omitempty" jsonschema:"For a slide-variant picker: the template name (from list_slide_templates). ask_user auto-attaches a live thumbnail per option and, if options are omitted, generates one option per variant."`
 	SlidesKind     string `json:"slidesKind,omitempty" jsonschema:"Optional archetype role to filter the variants by (e.g. title, section, agenda, closing, content). Only used with slidesTemplate."`
 	// Slides convenience: for the FIRST question — "which template should I use?"
 	// — set slidesTemplatePicker=true (with kind='select') and omit options.
@@ -743,6 +1045,18 @@ func askUser(ctx context.Context, args AskUserArgs) (AskUserResult, error) {
 		if err != nil {
 			return AskUserResult{}, fmt.Errorf("resolve slide variant previews: %w", err)
 		}
+		svc, err := personalService(ctx)
+		if err != nil {
+			return AskUserResult{}, err
+		}
+		tmpl, ok := svc.resolveTemplate(ctx, template)
+		if !ok {
+			return AskUserResult{}, fmt.Errorf("unknown template %q", template)
+		}
+		archByKind := make(map[string]themes.Archetype, len(tmpl.Archetypes))
+		for _, a := range tmpl.Archetypes {
+			archByKind[a.Kind] = a
+		}
 		byLabel := make(map[string]TemplateVariantPreview, len(previews.Variants))
 		for _, v := range previews.Variants {
 			byLabel[strings.ToLower(strings.TrimSpace(v.Label))] = v
@@ -786,16 +1100,19 @@ func askUser(ctx context.Context, args AskUserArgs) (AskUserResult, error) {
 				continue
 			}
 			v, ok := byLabel[strings.ToLower(strings.TrimSpace(o.Label))]
-			if !ok || strings.TrimSpace(v.Markup) == "" {
+			if !ok {
 				continue
 			}
-			thumbByOption[o.ID] = AskUserThumbnail{
-				OptionID: o.ID,
-				Kind:     "slides-archetype",
-				Markup:   v.Markup,
-				Theme:    previews.Theme,
-				Template: previews.Template,
+			arch, ok := archByKind[v.Kind]
+			if !ok {
+				continue
 			}
+			thumb := archetypeThumbnail(previews.Template, tmpl.Tokens, arch)
+			if thumb == nil {
+				continue
+			}
+			thumb.OptionID = o.ID
+			thumbByOption[o.ID] = *thumb
 		}
 	}
 
@@ -881,12 +1198,16 @@ func slugifyOptionID(label string) string {
 }
 
 func validateDeck(ctx context.Context, args ValidateDeckArgs) (ValidateDeckResult, error) {
-	deckResult, err := getDeck(ctx, GetDeckArgs{Slug: args.Slug})
+	svc, err := personalService(ctx)
 	if err != nil {
 		return ValidateDeckResult{}, err
 	}
-	result := ValidateDeckResult{Deck: deckResult.Deck, SlideCount: deckResult.SlideCount, Valid: true}
-	for _, persisted := range deckResult.Slides {
+	deck, slides, err := svc.Deck(ctx, strings.TrimSpace(args.Slug))
+	if err != nil {
+		return ValidateDeckResult{}, err
+	}
+	result := ValidateDeckResult{Deck: deckView(deck), SlideCount: len(slides), Valid: true}
+	for _, persisted := range slides {
 		_, diagnostics, parseErr := ParseSlide(persisted.Content)
 		if parseErr != nil {
 			result.Valid = false
@@ -1036,9 +1357,77 @@ func nodeText(n Node) string {
 	return n.Text
 }
 
-// slideHasTemplateAssetRef reports whether any node on the slide references a
-// template/deck asset via an ast-image asset-ref, i.e. the slide reuses at least
-// one piece of template media (a proxy for retained chrome such as a logo).
+func isFullCanvasNode(n Node) bool {
+	return n.Geometry.W >= 1800 && n.Geometry.H >= 1000
+}
+
+func isNeutralFill(hex string) bool {
+	s := strings.ToUpper(strings.TrimPrefix(strings.TrimSpace(hex), "#"))
+	return s == "FFFFFF" || s == "FFF" || s == "FFFFFFFF" || s == "000000" || s == "000"
+}
+
+var designedGeom = map[string]bool{
+	"roundRect": true, "ellipse": true, "chevron": true, "rightArrow": true,
+	"leftArrow": true, "triangle": true, "hexagon": true, "trapezoid": true,
+	"parallelogram": true, "diamond": true, "star5": true,
+}
+
+func slideHasDesignedChrome(nodes []Node) bool {
+	for _, n := range nodes {
+		if n.ID == "bg" || isFullCanvasNode(n) {
+			if len(n.Children) > 0 && slideHasDesignedChrome(n.Children) {
+				return true
+			}
+			continue
+		}
+		if designedGeom[n.Geom] || n.Path != "" {
+			return true
+		}
+		if fill := nodeFillHex(n); fill != "" && !isNeutralFill(fill) && n.Geometry.W > 80 && n.Geometry.H > 40 {
+			return true
+		}
+		if len(n.Children) > 0 && slideHasDesignedChrome(n.Children) {
+			return true
+		}
+	}
+	return false
+}
+
+func slideIsSparseTitleOnly(nodes []Node) bool {
+	if slideHasTemplateAssetRef(nodes) || slideHasDesignedChrome(nodes) {
+		return false
+	}
+	texts := 0
+	reviewTextNodes(nodes, func(n Node) {
+		if strings.TrimSpace(nodeText(n)) == "" {
+			return
+		}
+		if n.Geometry.H >= 40 || n.Geometry.W >= 400 {
+			texts++
+		}
+	})
+	return texts == 1
+}
+
+func slideLooksLikeTitleAndBody(nodes []Node) bool {
+	texts := 0
+	reviewTextNodes(nodes, func(n Node) {
+		if n.Geometry.H >= 40 || n.Geometry.W >= 400 {
+			texts++
+		}
+	})
+	return texts >= 2
+}
+
+func walkNodes(nodes []Node, fn func(Node)) {
+	for _, n := range nodes {
+		fn(n)
+		if len(n.Children) > 0 {
+			walkNodes(n.Children, fn)
+		}
+	}
+}
+
 func slideHasTemplateAssetRef(nodes []Node) bool {
 	for _, n := range nodes {
 		if n.Props != nil {
@@ -1121,7 +1510,8 @@ func reviewDeck(ctx context.Context, args ReviewDeckArgs) (ReviewDeckResult, err
 		return ReviewDeckResult{}, err
 	}
 
-	fromTemplate := deck.TemplateModel != "" || len(deck.Assets) > 0
+	fromTemplate := (deck.Theme != nil && strings.TrimSpace(deck.Theme[themeKeyTemplateName]) != "") ||
+		deck.TemplateModel != "" || len(deck.Assets) > 0
 	// Surface color for the contrast check: theme surface token, else white.
 	surfaceHex := "#FFFFFF"
 	if deck.Theme != nil {
@@ -1132,6 +1522,7 @@ func reviewDeck(ctx context.Context, args ReviewDeckArgs) (ReviewDeckResult, err
 	surfaceLum, surfaceOK := hexLuminance(surfaceHex)
 
 	var findings []ReviewFinding
+	var sparseIdx []int
 	for si, slide := range scene.Slides {
 		reviewTextNodes(slide.Nodes, func(n Node) {
 			// 1) Adjacent-run collision.
@@ -1162,14 +1553,20 @@ func reviewDeck(ctx context.Context, args ReviewDeckArgs) (ReviewDeckResult, err
 
 		// 2) Low-contrast marker (best-effort; only when both colors are hex).
 		if surfaceOK {
-			for _, n := range slide.Nodes {
+			walkNodes(slide.Nodes, func(n Node) {
+				if n.ID == "bg" || isFullCanvasNode(n) {
+					return
+				}
 				hex := nodeFillHex(n)
 				if hex == "" {
-					continue
+					return
+				}
+				if isNeutralFill(hex) && isNeutralFill(surfaceHex) {
+					return
 				}
 				lum, ok := hexLuminance(hex)
 				if !ok {
-					continue
+					return
 				}
 				if contrastRatio(lum, surfaceLum) < 2.0 {
 					findings = append(findings, ReviewFinding{
@@ -1180,18 +1577,57 @@ func reviewDeck(ctx context.Context, args ReviewDeckArgs) (ReviewDeckResult, err
 						Message:    fmt.Sprintf("Fill %s has low contrast against the slide surface; the element may read as faint. Use a stronger, consistent color.", hex),
 					})
 				}
-			}
+			})
 		}
 
 		// 3) Missing template chrome (only meaningful for template-based decks).
-		if fromTemplate && !slideHasTemplateAssetRef(slide.Nodes) {
+		reviewTextNodes(slide.Nodes, func(n Node) {
+			if strings.Contains(nodeText(n), "{{TITLE}}") || strings.Contains(nodeText(n), "{{BODY}}") {
+				findings = append(findings, ReviewFinding{
+					SlideIndex: si,
+					NodeID:     n.ID,
+					Code:       "unfilled_slot",
+					Severity:   "warning",
+					Message:    "Unfilled {{TITLE}}/{{BODY}} placeholder remains. Pass a fill for every text slot in fill_slide.",
+				})
+			}
+		})
+		// Warn only for flexible title+body walls. Empty dividers and chevron
+		// card slides are not missing chrome.
+		if fromTemplate && !slideHasTemplateAssetRef(slide.Nodes) && !slideHasDesignedChrome(slide.Nodes) && slideLooksLikeTitleAndBody(slide.Nodes) {
 			findings = append(findings, ReviewFinding{
 				SlideIndex: si,
 				Code:       "missing_chrome",
-				Severity:   "info",
-				Message:    "This slide reuses none of the template's media/chrome (logo, footer). Consider adapting a template archetype so it matches the cover and closing slides.",
+				Severity:   "warning",
+				Message:    "This slide has no template media and no designed cards/boxes. Prefer a pattern-* catalog entry via fill_slides so body slides match the imported example slides.",
 			})
 		}
+		if fromTemplate && slideIsSparseTitleOnly(slide.Nodes) {
+			sparseIdx = append(sparseIdx, si)
+		}
+		walkNodes(slide.Nodes, func(n Node) {
+			if !strings.HasPrefix(n.ID, "ph-pic-") || n.Type == "image" {
+				return
+			}
+			findings = append(findings, ReviewFinding{
+				SlideIndex: si,
+				NodeID:     n.ID,
+				Code:       "unfilled_image_slot",
+				Severity:   "warning",
+				Message:    "Image slot is still an empty panel. Pass a sha256- asset-ref in fill_slide or pick a title variant that already has a photo.",
+			})
+		})
+	}
+
+	if len(sparseIdx) > 1 {
+		findings = append(findings, ReviewFinding{
+			SlideIndex: sparseIdx[0],
+			Code:       "sparse_section",
+			Severity:   "warning",
+			Message: fmt.Sprintf(
+				"%d slides are title-only dividers (positions %v). Use at most one section divider; put the rest of the story on pattern-* body slides.",
+				len(sparseIdx), sparseIdx),
+		})
 	}
 
 	checklist := make([]string, len(reviewChecklist))
@@ -1229,7 +1665,42 @@ func listDeckAssets(ctx context.Context, args ListDeckAssetsArgs) (ListDeckAsset
 	if err != nil {
 		return ListDeckAssetsResult{}, err
 	}
-	return ListDeckAssetsResult{Deck: deckView(deck), Assets: assetCatalog(deck.Assets)}, nil
+	if deck == nil {
+		return ListDeckAssetsResult{}, fmt.Errorf("deck not found")
+	}
+	catalog := assetCatalog(deck.Assets)
+	if deck.Theme != nil {
+		if name := strings.TrimSpace(deck.Theme[themeKeyTemplateName]); name != "" {
+			if tmpl, ok := svc.resolveTemplate(ctx, name); ok {
+				catalog = mergeAssetCatalogs(catalog, assetCatalog(tmpl.Assets))
+			}
+		}
+	}
+	return ListDeckAssetsResult{Deck: deckView(deck), Assets: catalog}, nil
+}
+
+func mergeAssetCatalogs(a, b []AssetInfo) []AssetInfo {
+	if len(b) == 0 {
+		return a
+	}
+	seen := make(map[string]bool, len(a)+len(b))
+	out := make([]AssetInfo, 0, len(a)+len(b))
+	for _, info := range a {
+		if info.Ref == "" || seen[info.Ref] {
+			continue
+		}
+		seen[info.Ref] = true
+		out = append(out, info)
+	}
+	for _, info := range b {
+		if info.Ref == "" || seen[info.Ref] {
+			continue
+		}
+		seen[info.Ref] = true
+		out = append(out, info)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Ref < out[j].Ref })
+	return out
 }
 
 // AddDeckImageArgs defines the add_deck_image tool input.
@@ -1289,19 +1760,39 @@ func GetTools() ([]tool.Tool, error) {
 		description string
 		newTool     func() (tool.Tool, error)
 	}{
-		{"create_deck", "Create a new private Astonish Slides deck before writing slides. Pass an optional template (see list_templates) to seed a coherent theme, assets, and starting archetypes tagged fixed|flexible; reproduce fixed chrome verbatim, editing only its fillSlots.", func() (tool.Tool, error) {
-			return functiontool.New(functiontool.Config{Name: "create_deck", Description: "Create a new private Astonish Slides deck before writing slides. Pass an optional template (see list_templates) to seed a coherent theme, assets, and starting archetypes tagged fixed|flexible; reproduce fixed chrome verbatim, editing only its fillSlots."}, func(ctx tool.Context, args CreateDeckArgs) (DeckResult, error) {
+		{"create_deck", "Create a new private Astonish Slides deck. Pass template from list_slide_templates after the USER chose it. If they did not name a template or explicitly delegate the choice, do NOT call this yet — call ask_user with slidesTemplatePicker=true first. Seeds theme, fonts, and a slim catalog. Author with fill_slides; do not copy markup.", func() (tool.Tool, error) {
+			return functiontool.New(functiontool.Config{Name: "create_deck", Description: "Create a new private Astonish Slides deck. Pass template from list_slide_templates after the USER chose it. If they did not name a template or explicitly delegate the choice, do NOT call this yet — call ask_user with slidesTemplatePicker=true first. Seeds theme, fonts, and a slim catalog. Author with fill_slides; do not copy markup."}, func(ctx tool.Context, args CreateDeckArgs) (DeckResult, error) {
 				return createDeck(ctx, args)
 			})
 		}},
-		{"write_slide", "Validate and write one complete ASD v1 ast-slide at a zero-based position in a private deck.", func() (tool.Tool, error) {
-			return functiontool.New(functiontool.Config{Name: "write_slide", Description: "Validate and write one complete ASD v1 ast-slide at a zero-based position in a private deck."}, func(ctx tool.Context, args WriteSlideArgs) (WriteSlideResult, error) {
+		{"fill_slides", "Write many slides in one call from template catalog entries. Pass slides: [{position, kind or label, fills}]. Prefer this over fill_slide so the whole deck is authored in one LLM turn. Prefer pattern-* for body slides.", func() (tool.Tool, error) {
+			return functiontool.New(functiontool.Config{Name: "fill_slides", Description: "Write many slides in one call from template catalog entries. Pass slides: [{position, kind or label, fills}]. Prefer this over fill_slide so the whole deck is authored in one LLM turn. Prefer pattern-* for body slides."}, func(ctx tool.Context, args FillSlidesArgs) (FillSlidesResult, error) {
+				return fillSlides(ctx, args)
+			})
+		}},
+		{"fill_slide", "Write or replace ONE slide from a template catalog entry. Use fill_slides to author the whole deck; use this only for a later single-slide edit.", func() (tool.Tool, error) {
+			return functiontool.New(functiontool.Config{Name: "fill_slide", Description: "Write or replace ONE slide from a template catalog entry. Use fill_slides to author the whole deck; use this only for a later single-slide edit."}, func(ctx tool.Context, args FillSlideArgs) (FillSlideResult, error) {
+				return fillSlide(ctx, args)
+			})
+		}},
+		{"get_archetype", "Fetch a single template archetype's markup by kind or label. Escape hatch only — prefer fill_slide, which does not require copying markup.", func() (tool.Tool, error) {
+			return functiontool.New(functiontool.Config{Name: "get_archetype", Description: "Fetch a single template archetype's markup by kind or label. Escape hatch only — prefer fill_slide, which does not require copying markup."}, func(ctx tool.Context, args GetArchetypeArgs) (GetArchetypeResult, error) {
+				return getArchetype(ctx, args)
+			})
+		}},
+		{"write_slide", "Write one slide as a complete ast-slide fragment. Only for blank-canvas decks (no template). When create_deck returned a catalog, use fill_slides instead.", func() (tool.Tool, error) {
+			return functiontool.New(functiontool.Config{Name: "write_slide", Description: "Write one slide as a complete ast-slide fragment. Only for blank-canvas decks (no template). When create_deck returned a catalog, use fill_slides instead."}, func(ctx tool.Context, args WriteSlideArgs) (WriteSlideResult, error) {
 				return writeSlide(ctx, args)
 			})
 		}},
-		{"get_deck", "Read a private slide deck and its ordered canonical ASD slide markup.", func() (tool.Tool, error) {
-			return functiontool.New(functiontool.Config{Name: "get_deck", Description: "Read a private slide deck and its ordered canonical ASD slide markup."}, func(ctx tool.Context, args GetDeckArgs) (DeckResult, error) {
+		{"get_deck", "Read a private slide deck: identity, theme, asset catalog, and a slim slide index (id/position/title). Does not return slide markup — use read_slide for one slide.", func() (tool.Tool, error) {
+			return functiontool.New(functiontool.Config{Name: "get_deck", Description: "Read a private slide deck: identity, theme, asset catalog, and a slim slide index (id/position/title). Does not return slide markup — use read_slide for one slide."}, func(ctx tool.Context, args GetDeckArgs) (DeckResult, error) {
 				return getDeck(ctx, args)
+			})
+		}},
+		{"read_slide", "Read one slide's canonical ASD markup and notes by position.", func() (tool.Tool, error) {
+			return functiontool.New(functiontool.Config{Name: "read_slide", Description: "Read one slide's canonical ASD markup and notes by position."}, func(ctx tool.Context, args ReadSlideArgs) (WriteSlideResult, error) {
+				return readSlide(ctx, args)
 			})
 		}},
 		{"list_decks", "List private Astonish Slides decks available to the current user.", func() (tool.Tool, error) {
@@ -1309,13 +1800,13 @@ func GetTools() ([]tool.Tool, error) {
 				return listDecks(ctx, args)
 			})
 		}},
-		{"list_templates", "List available slide templates (built-in + imported) as a lightweight catalog: each entry has name, label, description, scope, and archetype variants reporting {kind,label,tier,fillSlots} — no markup, tokens, or assets. Pass a template name to create_deck to seed the full theme + assets and receive the archetype markup to fill.", func() (tool.Tool, error) {
-			return functiontool.New(functiontool.Config{Name: "list_templates", Description: "List available slide templates (built-in + imported) as a lightweight catalog: each entry has name, label, description, scope, and archetype variants reporting {kind,label,tier,fillSlots} — no markup, tokens, or assets. Pass a template name to create_deck to seed the full theme + assets and receive the archetype markup to fill."}, func(ctx tool.Context, args ListTemplatesArgs) (ListTemplatesResult, error) {
+		{"list_slide_templates", "List available slide templates (built-in + imported) as a lightweight catalog: each entry has name, label, description, scope, and archetype variants reporting {kind,label,tier,fillSlots} — no markup, tokens, or assets. Pass a template name to create_deck to seed theme + assets and a slim catalog. Do not confuse with email MCP list_templates.", func() (tool.Tool, error) {
+			return functiontool.New(functiontool.Config{Name: "list_slide_templates", Description: "List available slide templates (built-in + imported) as a lightweight catalog: each entry has name, label, description, scope, and archetype variants reporting {kind,label,tier,fillSlots} — no markup, tokens, or assets. Pass a template name to create_deck to seed theme + assets and a slim catalog. Do not confuse with email MCP list_templates."}, func(ctx tool.Context, args ListTemplatesArgs) (ListTemplatesResult, error) {
 				return listTemplates(ctx, args)
 			})
 		}},
-		{"get_template_variant_previews", "Get the per-variant preview markup for a template so you can show the user a VISUAL picker of variants (e.g. via ask_user thumbnails). Returns each archetype variant's {kind,label,tier,fillSlots,markup} plus the shared theme + assets. Optionally filter by kind (title|section|agenda|closing|content). Returns ASD markup and asset-refs only — never image/font bytes.", func() (tool.Tool, error) {
-			return functiontool.New(functiontool.Config{Name: "get_template_variant_previews", Description: "Get the per-variant preview markup for a template so you can show the user a VISUAL picker of variants (e.g. via ask_user thumbnails). Returns each archetype variant's {kind,label,tier,fillSlots,markup} plus the shared theme + assets. Optionally filter by kind (title|section|agenda|closing|content). Returns ASD markup and asset-refs only — never image/font bytes."}, func(ctx tool.Context, args TemplateVariantPreviewsArgs) (TemplateVariantPreviewsResult, error) {
+		{"get_template_variant_previews", "Get lightweight per-variant previews for a template role (kind is required). Returns {kind,label,tier,fillSlots,thumbnailRef} — never full ASD markup or image bytes. Prefer ask_user with slidesTemplate for a visual picker.", func() (tool.Tool, error) {
+			return functiontool.New(functiontool.Config{Name: "get_template_variant_previews", Description: "Get lightweight per-variant previews for a template role (kind is required). Returns {kind,label,tier,fillSlots,thumbnailRef} — never full ASD markup or image bytes. Prefer ask_user with slidesTemplate for a visual picker."}, func(ctx tool.Context, args TemplateVariantPreviewsArgs) (TemplateVariantPreviewsResult, error) {
 				return getTemplateVariantPreviews(ctx, args)
 			})
 		}},

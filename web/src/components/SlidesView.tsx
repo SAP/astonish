@@ -328,7 +328,7 @@ export default function SlidesView({ theme, deckSlug, templatesView, isPlatformM
   }, [selectedSlug, onNavigate])
 
   const handleEnhance = useCallback((deck: SlidesDeckListItem) => {
-    onCreateSlide?.(`I want to refine my slide deck "${deck.title}" (slug: ${deck.slug}). Please load the slides skill, then create a working copy using create_deck with source="${deck.slug}" and slug="${deck.slug}-draft". This creates a session copy of my saved deck. Then call get_deck on the new "${deck.slug}-draft" deck to see its slides, and ask me what I'd like to change. Important: modify slides in the "${deck.slug}-draft" deck using write_slide — do NOT create any other new decks.`)
+    onCreateSlide?.(`I want to refine my slide deck "${deck.title}" (slug: ${deck.slug}). Please load the slides skill, then create a working copy using create_deck with source="${deck.slug}" and slug="${deck.slug}-draft". This creates a session copy of my saved deck. Then call get_deck on the new "${deck.slug}-draft" deck for the slide index, and read_slide for any slide you need to edit. Ask me what I'd like to change. Important: modify slides in the "${deck.slug}-draft" deck using write_slide (or fill_slide if a template catalog applies) — do NOT create any other new decks.`)
   }, [onCreateSlide])
 
   const loadVersions = useCallback(async (slug: string, scope: DocsScope) => {

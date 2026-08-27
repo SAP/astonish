@@ -82,6 +82,52 @@ func TestPPTXSpikeProducesNativeObjects(t *testing.T) {
 	}
 }
 
+func TestPPTXOmitsUnfilledShapesInsteadOfWhiteTiles(t *testing.T) {
+	_, file, _, _ := runtime.Caller(0)
+	repo := filepath.Clean(filepath.Join(filepath.Dir(file), "../../.."))
+	exporter := PPTXExporter{Runner: pptxworker.Runner{
+		WorkingDir: filepath.Join(repo, "web"),
+		ScriptPath: filepath.Join(repo, "pkg/docs/slides/pptxworker/worker.mjs"),
+		Timeout:    30 * time.Second,
+	}}
+	scene := SceneGraph{SchemaVersion: SchemaV2, Title: "No white ghosts", Slides: []Slide{{
+		ID: "s", Nodes: []Node{
+			{ID: "bg", Type: "shape", Geometry: Geometry{X: 0, Y: 0, W: 1920, H: 1080}, Fill: "#0B1220", Geom: "rect"},
+			{ID: "ghost", Type: "shape", Geometry: Geometry{X: 100, Y: 100, W: 142, H: 142}, Geom: "rect"},
+			{ID: "accent", Type: "shape", Geometry: Geometry{X: 0, Y: 0, W: 12, H: 1080}, Fill: "#E76500", Geom: "rect"},
+		},
+	}}}
+	result, err := exporter.Export(context.Background(), scene, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zr, err := zip.NewReader(bytes.NewReader(result.Bytes), int64(len(result.Bytes)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var slideXML string
+	for _, f := range zr.File {
+		if f.Name == "ppt/slides/slide1.xml" {
+			r, e := f.Open()
+			if e != nil {
+				t.Fatal(e)
+			}
+			b, e := io.ReadAll(r)
+			_ = r.Close()
+			if e != nil {
+				t.Fatal(e)
+			}
+			slideXML = string(b)
+		}
+	}
+	if strings.Count(slideXML, "<p:sp>") != 2 {
+		t.Fatalf("expected 2 shapes (bg + accent), ghost unfilled tile must be omitted; got %d in\n%s", strings.Count(slideXML, "<p:sp>"), slideXML)
+	}
+	if !strings.Contains(slideXML, "0B1220") || !strings.Contains(slideXML, "E76500") {
+		t.Fatalf("expected authored fills; got\n%s", slideXML)
+	}
+}
+
 func TestPPTXTextHonorsAlignmentAndSize(t *testing.T) {
 	_, file, _, _ := runtime.Caller(0)
 	repo := filepath.Clean(filepath.Join(filepath.Dir(file), "../../.."))

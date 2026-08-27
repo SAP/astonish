@@ -24,7 +24,7 @@ func BuiltinSkills() []Skill {
 		},
 		{
 			Name:        "slides",
-			Description: "Complete reference for building styled Astonish Slides decks (ASD v2): elements, attributes, gradients/rich text, the template workflow (list_templates -> create_deck template -> archetypes), and requirement-gathering tips. Load before authoring any presentation/PowerPoint/deck.",
+			Description: "Complete reference for building styled Astonish Slides decks: list_slide_templates, create_deck catalog, fill_slides (never copy markup). Load before authoring any presentation/PowerPoint/deck.",
 			Content:     BuiltinSlides,
 			Source:      "builtin",
 			// Not ExcludeFromCodeMode: slide decks are server-side artifacts

@@ -325,7 +325,7 @@ export default function TemplatesArea({ onNavigate, showToast }: TemplatesAreaPr
             disabled={importing}
             className="ml-auto flex cursor-pointer items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs transition-colors disabled:cursor-default disabled:opacity-60"
             style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-color)', color: 'var(--text-secondary)' }}
-            title="Import a .pptx file as a slide template"
+            title="Import a .pptx as a slide template. Re-import an existing file to pick up designed content patterns from its example slides."
             data-testid="template-import-button"
           >
             <FileUp size={14} />

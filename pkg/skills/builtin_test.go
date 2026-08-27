@@ -31,6 +31,21 @@ func TestBuiltinSkills_IncludesSlides(t *testing.T) {
 	if slides.ExcludeFromCodeMode {
 		t.Error("slides skill must not be ExcludeFromCodeMode")
 	}
+	for _, want := range []string{
+		"slidesTemplatePicker",
+		"The template choice belongs to the user",
+		"Inferring a tone",
+		"list_slide_templates",
+		"one short headline",
+		"Title and Text is last resort",
+		"fill_slides",
+		"one LLM round-trip per slide",
+		"At most ONE section divider",
+	} {
+		if !strings.Contains(slides.Content, want) {
+			t.Errorf("slides skill must contain %q (visual template picker is mandatory)", want)
+		}
+	}
 }
 
 func TestBuiltinSkillsForCode_IncludesSlidesExcludesGenerativeUI(t *testing.T) {

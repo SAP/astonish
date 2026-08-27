@@ -173,15 +173,32 @@ try {
           // rectangle is inherited from the theme/master.
           shapeOpts.line = { color: 'FFFFFF', transparency: 100 }
         }
-        // Fill: node-level fill / props.fill / gradient (approximated as solid first stop).
+        // Fill: only paint a solid when the scene actually authored one.
+        // The HTML runtime defaults missing fill to transparent; defaulting to
+        // #FFFFFF here turned imported master widgets (noFill / empty tiles)
+        // into ~100 opaque white squares that wreck PPTX export.
+        const authoredFill = node.fill || node.props?.fill
         if (node.gradient?.stops?.length) {
           shapeOpts.fill = { color: color(node.gradient.stops[0].color) }
           warnings.push(`Gradient approximated as solid fill (${node.id || 'unknown'})`)
+        } else if (authoredFill) {
+          shapeOpts.fill = { color: color(authoredFill) }
         } else {
-          shapeOpts.fill = { color: color(node.fill || node.props?.fill || 'FFFFFF') }
+          shapeOpts.fill = { type: 'none' }
         }
-        if (typeof node.opacity === 'number' && node.opacity > 0 && node.opacity < 1) {
-          shapeOpts.fill.transparency = Math.round((1 - node.opacity) * 100)
+        if (typeof node.opacity === 'number') {
+          if (node.opacity <= 0) {
+            shapeOpts.fill = { type: 'none' }
+          } else if (node.opacity < 1 && shapeOpts.fill && shapeOpts.fill.type !== 'none') {
+            shapeOpts.fill.transparency = Math.round((1 - node.opacity) * 100)
+          }
+        }
+        const hasVisibleFill = shapeOpts.fill && shapeOpts.fill.type !== 'none'
+        const hasVisibleLine = !!(lineColor || hasLineWidth || hasDash || headArrow || tailArrow)
+        if (!hasVisibleFill && !hasVisibleLine) {
+          // Invisible leftover (master noFill tiles): omit rather than emit a
+          // white rectangle.
+          break
         }
         if (node.rot) shapeOpts.rotate = Number(node.rot)
         if (node.flipH) shapeOpts.flipH = true

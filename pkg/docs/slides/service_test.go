@@ -884,3 +884,37 @@ func TestCreateDeckTagsSessionID(t *testing.T) {
 		t.Fatalf("expected empty SessionID, got %q", deck2.SessionID)
 	}
 }
+
+func TestSceneOmitsUnreferencedAssets(t *testing.T) {
+	ctx := context.Background()
+	backend := newMultiDeckStore()
+	svc := Service{Store: backend}
+	assets := map[string]string{
+		"sha256-used":        "data:image/png;base64,AAAUSED",
+		"sha256-unused":      "data:image/png;base64,AAANOISE",
+		"font:Brand:regular": "data:font/ttf;base64,AAAFONT",
+	}
+	theme := map[string]string{
+		embeddedFontsThemeKey: `[{"family":"Brand","variant":"regular","assetKey":"font:Brand:regular"}]`,
+	}
+	if _, err := svc.CreateDeckWithAssets(ctx, "d", "Deck", "", theme, assets); err != nil {
+		t.Fatal(err)
+	}
+	markup := `<ast-slide id="s" title="T"><ast-image id="im" x="10" y="10" w="100" h="80" asset-ref="sha256-used"></ast-image></ast-slide>`
+	if _, _, err := svc.WriteSlide(ctx, "d", 0, markup, ""); err != nil {
+		t.Fatal(err)
+	}
+	scene, _, err := svc.Scene(ctx, "d")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scene.Assets["sha256-unused"] != "" {
+		t.Fatalf("unused photo must not be in the scene: %#v", scene.Assets)
+	}
+	if scene.Assets["sha256-used"] == "" {
+		t.Fatal("referenced image missing from scene")
+	}
+	if scene.Assets["font:Brand:regular"] == "" {
+		t.Fatal("embedded font missing from scene")
+	}
+}

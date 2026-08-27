@@ -1,6 +1,7 @@
 package slides
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"strings"
@@ -340,9 +341,27 @@ func TestExportEmitsFontFace(t *testing.T) {
 	if strings.Contains(doc, "--ast-embedded-fonts") {
 		t.Errorf("embedded-fonts must not be emitted as a --ast-* variable\n%s", doc)
 	}
-	// The concrete family name is still set on the display token.
 	if !strings.Contains(doc, "--ast-display:72 Brand, Aptos, Arial, sans-serif") {
 		t.Errorf("expected --ast-display to keep the bare family name; got:\n%s", doc)
+	}
+}
+
+func TestWriteThemeCSSSkipsTemplateName(t *testing.T) {
+	var buf bytes.Buffer
+	writeThemeCSS(&buf, map[string]string{
+		"surface":             "#FFFFFF",
+		themeKeyTemplateName:  "gco-iped",
+		embeddedFontsThemeKey: "[]",
+	})
+	css := buf.String()
+	if strings.Contains(css, "--ast-template-name") || strings.Contains(css, "gco-iped") {
+		t.Fatalf("template-name leaked into CSS: %s", css)
+	}
+	if strings.Contains(css, "--ast-embedded-fonts") {
+		t.Fatalf("embedded-fonts leaked into CSS: %s", css)
+	}
+	if !strings.Contains(css, "--ast-surface:#FFFFFF") {
+		t.Fatalf("surface token missing: %s", css)
 	}
 }
 
@@ -358,4 +377,3 @@ func TestExportNoFontFaceWhenAbsent(t *testing.T) {
 		t.Errorf("no deck without embedded fonts should emit @font-face; got:\n%s", doc)
 	}
 }
-

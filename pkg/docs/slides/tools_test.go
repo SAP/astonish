@@ -71,8 +71,18 @@ func TestSlideToolsCreateWriteReadAndValidate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.SlideCount != 1 || len(got.Slides) != 1 || got.Slides[0].Title != "Overview" {
+	if got.SlideCount != 1 || len(got.SlideIndex) != 1 || got.SlideIndex[0].Title != "Overview" {
 		t.Fatalf("unexpected deck result: %#v", got)
+	}
+	if len(got.Slides) != 0 {
+		t.Fatalf("get_deck must not return slide markup, got %d slides", len(got.Slides))
+	}
+	one, err := readSlide(ctx, ReadSlideArgs{DeckSlug: "quarterly", Position: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if one.Slide == nil || !strings.Contains(one.Slide.Content, "Quarterly review") {
+		t.Fatalf("read_slide missing markup: %#v", one)
 	}
 
 	validation, err := validateDeck(ctx, ValidateDeckArgs{Slug: "quarterly"})
@@ -107,7 +117,7 @@ func TestGetTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"create_deck", "write_slide", "get_deck", "list_decks", "list_templates", "get_template_variant_previews", "validate_deck", "review_deck", "list_deck_assets", "add_deck_image", "ask_user"}
+	want := []string{"create_deck", "fill_slides", "fill_slide", "get_archetype", "write_slide", "get_deck", "read_slide", "list_decks", "list_slide_templates", "get_template_variant_previews", "validate_deck", "review_deck", "list_deck_assets", "add_deck_image", "ask_user"}
 	if len(got) != len(want) {
 		t.Fatalf("got %d tools, want %d", len(got), len(want))
 	}
@@ -135,8 +145,11 @@ func TestCreateDeckWithTemplateSeedsThemeAssetsAndArchetypes(t *testing.T) {
 	if created.Deck.Theme["surface"] != "#0B1220" {
 		t.Fatalf("expected midnight surface token, got %q", created.Deck.Theme["surface"])
 	}
-	if len(created.Archetypes) == 0 {
-		t.Fatalf("expected non-empty archetypes from template, got %#v", created.Archetypes)
+	if len(created.Catalog) == 0 {
+		t.Fatalf("expected non-empty catalog from template, got %#v", created.Catalog)
+	}
+	if len(created.Archetypes) != 0 {
+		t.Fatalf("create_deck must not dump archetype markup, got %d archetypes", len(created.Archetypes))
 	}
 
 	// Explicit theme overrides win over template tokens.
@@ -147,6 +160,223 @@ func TestCreateDeckWithTemplateSeedsThemeAssetsAndArchetypes(t *testing.T) {
 	if created2.Deck.Theme["surface"] != "#000000" {
 		t.Fatalf("explicit theme override should win, got %q", created2.Deck.Theme["surface"])
 	}
+}
+
+func TestCreateDeckCatalogPayloadIsBounded(t *testing.T) {
+	backend := newMultiDeckStore()
+	ctx := toolContext(t, backend)
+	created, err := createDeck(ctx, CreateDeckArgs{Slug: "kickoff", Title: "Kickoff", Template: "midnight"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := jsonDump(t, created)
+	if strings.Contains(raw, "<ast-slide") || strings.Contains(raw, "data:image") || strings.Contains(raw, "data:font") {
+		t.Fatalf("create_deck leaked markup or data URIs (%d bytes)", len(raw))
+	}
+	if len(raw) > 20_000 {
+		t.Fatalf("create_deck builtin catalog too large: %d bytes", len(raw))
+	}
+	if created.Deck.Theme[themeKeyTemplateName] != "midnight" {
+		t.Fatalf("template-name not stamped: %#v", created.Deck.Theme)
+	}
+}
+
+func TestFillSlideSubstitutesSlotsAndOmitsMarkup(t *testing.T) {
+	backend := newMultiDeckStore()
+	ctx := toolContext(t, backend)
+	svc := Service{Store: backend}
+	markup := `<ast-slide id="p"><ast-shape id="bg" kind="rect" x="0" y="0" w="1920" h="1080" geom="rect" fill="#FFFFFF" decorative="true"></ast-shape>` +
+		`<ast-shape id="card" kind="rect" x="80" y="200" w="500" h="300" geom="roundRect" fill="#DBEAFE"></ast-shape>` +
+		`<ast-text id="ph-1" x="160" y="80" w="1600" h="100" size="54" color="#111111"><ast-run>{{TITLE}}</ast-run></ast-text>` +
+		`<ast-text id="ph-2" x="100" y="220" w="460" h="80" size="28" color="#111111"><ast-run>{{BODY}}</ast-run></ast-text></ast-slide>`
+	if err := svc.SaveTemplate(ctx, themes.Template{
+		Name:   "cards",
+		Label:  "Cards",
+		Tokens: map[string]string{"surface": "#FFFFFF", "ink": "#111111"},
+		Archetypes: []themes.Archetype{
+			{Kind: "pattern", Title: "3 rounded cards", Tier: "flexible", Markup: markup, FillSlots: []string{"ph-1", "ph-2"}},
+		},
+	}); err != nil {
+		t.Fatalf("save template: %v", err)
+	}
+
+	created, err := createDeck(ctx, CreateDeckArgs{Slug: "deck", Title: "Deck", Template: "cards"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(jsonDump(t, created), "<ast-slide") {
+		t.Fatal("create_deck must not include ast-slide markup")
+	}
+	if created.Deck.Theme[themeKeyTemplateName] != "cards" {
+		t.Fatalf("template-name not stamped: %#v", created.Deck.Theme)
+	}
+
+	res, err := fillSlide(ctx, FillSlideArgs{
+		DeckSlug: "deck", Position: 0, Kind: "pattern",
+		Fills: map[string]string{"ph-1": "Revenue grew 23%", "ph-2": "Enterprise renewals"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.SlideCount != 1 || res.Position != 0 {
+		t.Fatalf("unexpected fill result: %#v", res)
+	}
+	raw, _ := json.Marshal(res)
+	if strings.Contains(string(raw), "<ast-slide") || strings.Contains(string(raw), "roundRect") {
+		t.Fatalf("fill_slide result must not echo markup: %s", raw)
+	}
+
+	got, err := readSlide(ctx, ReadSlideArgs{DeckSlug: "deck", Position: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Slide == nil {
+		t.Fatal("expected a slide")
+	}
+	body := got.Slide.Content
+	if !strings.Contains(body, `geom="roundRect"`) {
+		t.Fatalf("persisted slide lost card chrome:\n%s", body)
+	}
+	if !strings.Contains(body, "Revenue grew 23%") {
+		t.Fatalf("persisted slide missing fill:\n%s", body)
+	}
+	if strings.Contains(body, "{{TITLE}}") {
+		t.Fatalf("placeholder left behind:\n%s", body)
+	}
+}
+
+func TestFillSlidesWritesManyAndCopiesOnlyReferencedAssets(t *testing.T) {
+	backend := newMultiDeckStore()
+	ctx := toolContext(t, backend)
+	svc := Service{Store: backend}
+	used := "sha256-used"
+	unused := "sha256-unused"
+	logo := "data:image/png;base64,AAAUSED"
+	noise := "data:image/png;base64,AAANOISE"
+	font := "data:font/ttf;base64,AAAFONT"
+	markup := `<ast-slide id="p" title="Cover"><ast-image id="logo" x="40" y="40" w="200" h="80" asset-ref="` + used + `"></ast-image>` +
+		`<ast-text id="ph-1" x="160" y="80" w="1600" h="100" size="54"><ast-run>{{TITLE}}</ast-run></ast-text></ast-slide>`
+	bodyMarkup := `<ast-slide id="b" title="Body"><ast-text id="ph-1" x="160" y="80" w="1600" h="100" size="40"><ast-run>{{TITLE}}</ast-run></ast-text></ast-slide>`
+	if err := svc.SaveTemplate(ctx, themes.Template{
+		Name:   "brand",
+		Label:  "Brand",
+		Tokens: map[string]string{"surface": "#FFFFFF", "ink": "#111111"},
+		Assets: map[string]string{
+			used:                 logo,
+			unused:               noise,
+			"font:Brand:regular": font,
+		},
+		Archetypes: []themes.Archetype{
+			{Kind: "title", Title: "Title", Tier: "fixed", Markup: markup, FillSlots: []string{"ph-1"}},
+			{Kind: "pattern", Title: "Cards", Tier: "flexible", Markup: bodyMarkup, FillSlots: []string{"ph-1"}},
+		},
+	}); err != nil {
+		t.Fatalf("save template: %v", err)
+	}
+
+	created, err := createDeck(ctx, CreateDeckArgs{Slug: "deck", Title: "Deck", Template: "brand"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := backend.GetDeck(ctx, "deck")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Assets[unused] != "" || stored.Assets[used] != "" {
+		t.Fatalf("create_deck must not copy sample photos, got %#v", stored.Assets)
+	}
+	if stored.Assets["font:Brand:regular"] != font {
+		t.Fatalf("create_deck should seed embedded fonts, got %#v", stored.Assets)
+	}
+	if created.Deck == nil {
+		t.Fatal("expected deck view")
+	}
+	foundUsed, foundUnused := false, false
+	for _, a := range created.Deck.Assets {
+		if a.Ref == used {
+			foundUsed = true
+		}
+		if a.Ref == unused {
+			foundUnused = true
+		}
+	}
+	if !foundUsed || !foundUnused {
+		t.Fatalf("create_deck catalog should list template image refs, got %#v", created.Deck.Assets)
+	}
+
+	batch, err := fillSlides(ctx, FillSlidesArgs{
+		DeckSlug: "deck",
+		Slides: []FillSlideSpec{
+			{Position: 0, Kind: "title", Fills: map[string]string{"ph-1": "Steve Jobs"}},
+			{Position: 1, Kind: "pattern", Fills: map[string]string{"ph-1": "Early life"}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if batch.SlideCount != 2 || len(batch.Positions) != 2 {
+		t.Fatalf("unexpected batch: %#v", batch)
+	}
+	raw, _ := json.Marshal(batch)
+	if strings.Contains(string(raw), "<ast-slide") || strings.Contains(string(raw), "data:image") {
+		t.Fatalf("fill_slides must not echo markup or data URIs: %s", raw)
+	}
+
+	stored, err = backend.GetDeck(ctx, "deck")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Assets[used] != logo {
+		t.Fatalf("referenced logo was not copied onto the deck: %#v", stored.Assets)
+	}
+	if stored.Assets[unused] != "" {
+		t.Fatalf("unused sample photo was copied onto the deck: %#v", stored.Assets)
+	}
+
+	cover, err := readSlide(ctx, ReadSlideArgs{DeckSlug: "deck", Position: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cover.Slide == nil || !strings.Contains(cover.Slide.Content, "Steve Jobs") {
+		t.Fatalf("cover missing fill: %#v", cover)
+	}
+}
+
+func TestFillSlidesRejectsDuplicatePositions(t *testing.T) {
+	backend := newMultiDeckStore()
+	ctx := toolContext(t, backend)
+	svc := Service{Store: backend}
+	if err := svc.SaveTemplate(ctx, themes.Template{
+		Name:   "brand",
+		Tokens: map[string]string{"surface": "#FFFFFF"},
+		Archetypes: []themes.Archetype{
+			{Kind: "title", Markup: `<ast-slide id="p"><ast-text id="ph-1" x="10" y="10" w="400" h="80" size="24"><ast-run>{{TITLE}}</ast-run></ast-text></ast-slide>`, FillSlots: []string{"ph-1"}},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := createDeck(ctx, CreateDeckArgs{Slug: "deck", Title: "Deck", Template: "brand"}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := fillSlides(ctx, FillSlidesArgs{
+		DeckSlug: "deck",
+		Slides: []FillSlideSpec{
+			{Position: 0, Kind: "title", Fills: map[string]string{"ph-1": "One"}},
+			{Position: 0, Kind: "title", Fills: map[string]string{"ph-1": "Two"}},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected duplicate position error")
+	}
+}
+
+func jsonDump(t *testing.T, v any) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
 }
 
 func TestCreateDeckWithScopedTemplateSeedsAssets(t *testing.T) {
@@ -175,8 +405,8 @@ func TestCreateDeckWithScopedTemplateSeedsAssets(t *testing.T) {
 	if created.Deck.Theme["surface"] != "#101820" {
 		t.Fatalf("scoped template tokens not seeded: %#v", created.Deck.Theme)
 	}
-	if len(created.Archetypes) != 1 {
-		t.Fatalf("expected 1 archetype from scoped template, got %#v", created.Archetypes)
+	if len(created.Catalog) != 1 {
+		t.Fatalf("expected 1 catalog entry from scoped template, got %#v", created.Catalog)
 	}
 }
 
@@ -573,6 +803,9 @@ func TestGetTemplateVariantPreviewsMatchesVariantSuffixedKinds(t *testing.T) {
 	if len(res.Variants) != 3 {
 		t.Fatalf("expected 3 title-family variants, got %d: %#v", len(res.Variants), res.Variants)
 	}
+	if raw := jsonDump(t, res); strings.Contains(raw, "<ast-slide") {
+		t.Fatalf("previews must not include markup: %s", raw)
+	}
 
 	// ask_user auto-generation must therefore surface all three as options.
 	ask, err := askUser(ctx, AskUserArgs{Kind: "select", Prompt: "Which cover?", SlidesTemplate: "gco", SlidesKind: "title"})
@@ -581,6 +814,37 @@ func TestGetTemplateVariantPreviewsMatchesVariantSuffixedKinds(t *testing.T) {
 	}
 	if len(ask.Options) != 3 {
 		t.Fatalf("expected 3 title options, got %d: %#v", len(ask.Options), ask.Options)
+	}
+}
+
+func TestAskUserUsesBakedThumbnailWithoutMarkup(t *testing.T) {
+	backend := newMultiDeckStore()
+	ctx := toolContext(t, backend)
+	svc := Service{Store: backend}
+	if err := svc.SaveTemplate(ctx, themes.Template{
+		Name:   "baked",
+		Tokens: map[string]string{"surface": "#0b1220"},
+		Assets: map[string]string{"thumb/title": "data:image/png;base64,AAAA"},
+		Archetypes: []themes.Archetype{
+			{Kind: "title", Title: "Blue cover", Tier: "fixed", ThumbnailRef: "thumb/title",
+				Markup: `<ast-slide id="a"><ast-text id="h" x="0" y="0" w="100" h="100">{{TITLE}}</ast-text></ast-slide>`},
+		},
+	}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	res, err := askUser(ctx, AskUserArgs{Kind: "select", Prompt: "Cover?", SlidesTemplate: "baked", SlidesKind: "title"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Options) != 1 || res.Options[0].Thumbnail == nil {
+		t.Fatalf("got %#v", res.Options)
+	}
+	th := res.Options[0].Thumbnail
+	if th.Kind != "image" || th.AssetRef != "thumb/title" || th.Template != "baked" {
+		t.Fatalf("expected baked image thumb, got %#v", th)
+	}
+	if strings.Contains(jsonDump(t, res), "<ast-slide") {
+		t.Fatalf("ask_user must not dump markup when a baked thumb exists: %s", jsonDump(t, res))
 	}
 }
 
@@ -844,5 +1108,113 @@ func TestReviewDeckOmitsHeavyData(t *testing.T) {
 	// The slim DeckView reports assets exist via a count, never the bytes.
 	if result.Deck == nil || result.Deck.AssetCount == 0 {
 		t.Fatalf("expected slim deck view with asset count, got %#v", result.Deck)
+	}
+}
+
+func TestReviewDeckChromeHeuristics(t *testing.T) {
+	backend := &memoryDocsStore{}
+	ctx := toolContext(t, backend)
+	if _, err := createDeck(ctx, CreateDeckArgs{Slug: "deck", Title: "Deck"}); err != nil {
+		t.Fatal(err)
+	}
+	svc := Service{Store: backend}
+	if _, err := svc.AddDeckAsset(ctx, "deck", "sha256-abc", "data:image/png;base64,AAAA"); err != nil {
+		t.Fatal(err)
+	}
+
+	chevron := `<ast-slide id="s">` +
+		`<ast-shape id="bg" kind="rect" x="0" y="0" w="1920" h="1080" geom="rect" fill="#FFFFFF" decorative="true"></ast-shape>` +
+		`<ast-shape id="c-1" kind="rect" x="80" y="300" w="560" h="80" geom="chevron" fill="#003FC9"></ast-shape>` +
+		`<ast-text id="ph-1" x="100" y="310" w="500" h="60">Apple I</ast-text>` +
+		`</ast-slide>`
+	if _, err := writeSlide(ctx, WriteSlideArgs{DeckSlug: "deck", Position: 0, Markup: chevron}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := reviewDeck(ctx, ReviewDeckArgs{Slug: "deck"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reviewFindingsWithCode(result.Findings, "missing_chrome"); len(got) != 0 {
+		t.Fatalf("chevron card slide should not be missing_chrome, got %#v", got)
+	}
+	if got := reviewFindingsWithCode(result.Findings, "low_contrast"); len(got) != 0 {
+		t.Fatalf("white full-canvas bg should not be low_contrast, got %#v", got)
+	}
+
+	titleBody := `<ast-slide id="s">` +
+		`<ast-shape id="bg" kind="rect" x="0" y="0" w="1920" h="1080" geom="rect" fill="#FFFFFF" decorative="true"></ast-shape>` +
+		`<ast-text id="ph-1" x="80" y="80" w="1760" h="80">A title</ast-text>` +
+		`<ast-text id="ph-2" x="80" y="200" w="1760" h="600">A wall of body copy that is just title and text.</ast-text>` +
+		`</ast-slide>`
+	if _, err := writeSlide(ctx, WriteSlideArgs{DeckSlug: "deck", Position: 0, Markup: titleBody}); err != nil {
+		t.Fatal(err)
+	}
+	result, err = reviewDeck(ctx, ReviewDeckArgs{Slug: "deck"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reviewFindingsWithCode(result.Findings, "missing_chrome"); len(got) != 1 {
+		t.Fatalf("title+body wall should be missing_chrome, got %#v", result.Findings)
+	}
+
+	divider := `<ast-slide id="s">` +
+		`<ast-shape id="bg" kind="rect" x="0" y="0" w="1920" h="1080" geom="rect" fill="#FFFFFF" decorative="true"></ast-shape>` +
+		`<ast-text id="ph-1" x="80" y="480" w="1760" h="80">Founding Apple in 1976</ast-text>` +
+		`</ast-slide>`
+	if _, err := writeSlide(ctx, WriteSlideArgs{DeckSlug: "deck", Position: 0, Markup: divider}); err != nil {
+		t.Fatal(err)
+	}
+	result, err = reviewDeck(ctx, ReviewDeckArgs{Slug: "deck"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reviewFindingsWithCode(result.Findings, "missing_chrome"); len(got) != 0 {
+		t.Fatalf("single-title divider should not be missing_chrome, got %#v", got)
+	}
+
+	emptyPic := `<ast-slide id="s">` +
+		`<ast-shape id="bg" kind="rect" x="0" y="0" w="1920" h="1080" geom="rect" fill="#FFFFFF" decorative="true"></ast-shape>` +
+		`<ast-shape id="ph-pic-2" kind="rect" x="960" y="0" w="960" h="1080" geom="rect" fill="#89D1FF" alt="Image"></ast-shape>` +
+		`<ast-text id="ph-1" x="80" y="400" w="800" h="120">Cover</ast-text>` +
+		`</ast-slide>`
+	if _, err := writeSlide(ctx, WriteSlideArgs{DeckSlug: "deck", Position: 0, Markup: emptyPic}); err != nil {
+		t.Fatal(err)
+	}
+	result, err = reviewDeck(ctx, ReviewDeckArgs{Slug: "deck"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reviewFindingsWithCode(result.Findings, "unfilled_image_slot"); len(got) != 1 {
+		t.Fatalf("empty ph-pic panel should be unfilled_image_slot, got %#v", result.Findings)
+	}
+}
+
+func TestReviewDeckSparseSection(t *testing.T) {
+	backend := &memoryDocsStore{}
+	ctx := toolContext(t, backend)
+	if _, err := createDeck(ctx, CreateDeckArgs{Slug: "deck", Title: "Deck", Theme: map[string]string{themeKeyTemplateName: "brand"}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := Service{Store: backend}
+	if _, err := svc.AddDeckAsset(ctx, "deck", "sha256-abc", "data:image/png;base64,AAAA"); err != nil {
+		t.Fatal(err)
+	}
+	divider := func(id, title string) string {
+		return `<ast-slide id="` + id + `">` +
+			`<ast-shape id="bg" kind="rect" x="0" y="0" w="1920" h="1080" geom="rect" fill="#FFFFFF" decorative="true"></ast-shape>` +
+			`<ast-text id="ph-1" x="80" y="480" w="1760" h="80">` + title + `</ast-text></ast-slide>`
+	}
+	if _, err := writeSlide(ctx, WriteSlideArgs{DeckSlug: "deck", Position: 0, Markup: divider("a", "Early Life")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writeSlide(ctx, WriteSlideArgs{DeckSlug: "deck", Position: 1, Markup: divider("b", "Founding Apple")}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := reviewDeck(ctx, ReviewDeckArgs{Slug: "deck"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reviewFindingsWithCode(result.Findings, "sparse_section"); len(got) != 1 {
+		t.Fatalf("two title-only dividers should be sparse_section, got %#v", result.Findings)
 	}
 }

@@ -106,6 +106,7 @@ func SearchTools(toolIndex *agent.ToolIndex, onResults func([]string)) func(ctx 
 			}
 		}
 		matches = agent.FilterAccessibleToolMatches(searchCtx, matches)
+		matches = agent.DropMCPShadowsOfFirstParty(toolIndex, matches)
 
 		if len(matches) == 0 {
 			return SearchToolsResult{
@@ -184,6 +185,9 @@ func listAllTools(ctx context.Context, toolIndex *agent.ToolIndex) SearchToolsRe
 		seen := make(map[string]bool)
 		for _, m := range groups[gName] {
 			if seen[m.ToolName] {
+				continue
+			}
+			if strings.HasPrefix(gName, "mcp:") && toolIndex != nil && toolIndex.FirstPartyToolEntry(m.ToolName) != nil {
 				continue
 			}
 			seen[m.ToolName] = true

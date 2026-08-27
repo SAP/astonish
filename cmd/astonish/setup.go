@@ -32,6 +32,7 @@ import (
 	"github.com/SAP/astonish/pkg/provider/poe"
 	"github.com/SAP/astonish/pkg/provider/sap"
 	"github.com/SAP/astonish/pkg/provider/xai"
+	xai_oauth "github.com/SAP/astonish/pkg/provider/xai_oauth"
 	"github.com/SAP/astonish/pkg/sandbox"
 	incus "github.com/SAP/astonish/pkg/sandbox/incus"
 	"github.com/SAP/astonish/pkg/store"
@@ -296,6 +297,38 @@ func handleSetupCommand() error {
 		} else {
 			goto SaveConfig
 		}
+	case "xai_oauth":
+		// Use the well-known public Grok CLI OAuth client_id (not a secret)
+		clientID := xai_oauth.DefaultClientID
+		pCfg["client_id"] = clientID
+		// Run device-code flow
+		fmt.Println("\nInitiating xAI OAuth device authorization...")
+		dcResp, err := xai_oauth.RequestDeviceCode(context.Background(), clientID)
+		if err != nil {
+			return fmt.Errorf("failed to request device code: %w", err)
+		}
+		fmt.Printf("\n\U0001f510 Please visit: %s\n", dcResp.VerificationURIComplete)
+		fmt.Printf("   and enter code: %s\n\n", dcResp.UserCode)
+		fmt.Println("Waiting for authorization...")
+		tokenResp, err := xai_oauth.PollForToken(context.Background(), clientID, dcResp.DeviceCode, dcResp.Interval)
+		if err != nil {
+			return fmt.Errorf("OAuth authorization failed: %w", err)
+		}
+		// Store tokens in config
+		pCfg["access_token"] = tokenResp.AccessToken
+		pCfg["refresh_token"] = tokenResp.RefreshToken
+		expiresAt := time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
+		pCfg["expires_at"] = expiresAt.Format(time.RFC3339)
+		fmt.Println("\u2713 Successfully authenticated with xAI OAuth!")
+		if err := fetchAndSelectXAIOAuthModel(pCfg, cfg); err != nil {
+			if isUserAborted(err) {
+				fmt.Println("Setup aborted by user; no changes were saved.")
+				return nil
+			}
+			fmt.Printf("Warning: Failed to fetch/select xAI models: %v\n", err)
+		} else {
+			goto SaveConfig
+		}
 	case "openai_compat":
 		runAPIKeyForm("API Key", "api_key", pCfg)
 		runBaseURLForm("Base URL", "https://api.openai.com/v1", pCfg)
@@ -476,6 +509,7 @@ func selectProviderType() string {
 		huh.NewOption(provider.GetProviderDisplayName("poe"), "poe"),
 		huh.NewOption(provider.GetProviderDisplayName("sap_ai_core"), "sap_ai_core"),
 		huh.NewOption(provider.GetProviderDisplayName("xai"), "xai"),
+		huh.NewOption(provider.GetProviderDisplayName("xai_oauth"), "xai_oauth"),
 	}
 
 	err := huh.NewForm(
@@ -740,6 +774,8 @@ func saveProviderSecretsToStore(instanceName, providerType string, pCfg config.P
 		secretKeys = []string{"client_id", "client_secret", "auth_url"}
 	case "ollama", "lm_studio":
 		secretKeys = nil // no secrets for local providers
+	case "xai_oauth":
+		secretKeys = []string{"access_token", "refresh_token"}
 	}
 
 	secrets := make(map[string]string)
@@ -1201,6 +1237,40 @@ func fetchAndSelectXAIModel(pCfg config.ProviderConfig, appCfg *config.AppConfig
 		return err
 	}
 
+	appCfg.General.DefaultModel = selectedModel
+	return nil
+}
+
+func fetchAndSelectXAIOAuthModel(pCfg config.ProviderConfig, appCfg *config.AppConfig) error {
+	accessToken := pCfg["access_token"]
+	if accessToken == "" {
+		return fmt.Errorf("access token required")
+	}
+	runSpinner("Fetching models from xAI...")
+	models, err := xai_oauth.ListModels(context.Background(), accessToken)
+	if err != nil {
+		return err
+	}
+	if len(models) == 0 {
+		return fmt.Errorf("no models found")
+	}
+	var options []huh.Option[string]
+	for _, m := range models {
+		options = append(options, huh.NewOption(m, m))
+	}
+	var selectedModel string
+	clearScreen()
+	err = huh.NewForm(
+		huh.NewGroup(
+			huh.NewSelect[string]().
+				Title("Select an xAI Model").
+				Options(options...).
+				Value(&selectedModel),
+		),
+	).Run()
+	if err != nil {
+		return err
+	}
 	appCfg.General.DefaultModel = selectedModel
 	return nil
 }

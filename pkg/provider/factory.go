@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/sashabaranov/go-openai"
 	"github.com/SAP/astonish/pkg/config"
@@ -21,6 +22,7 @@ import (
 	"github.com/SAP/astonish/pkg/provider/poe"
 	"github.com/SAP/astonish/pkg/provider/sap"
 	"github.com/SAP/astonish/pkg/provider/xai"
+	xai_oauth "github.com/SAP/astonish/pkg/provider/xai_oauth"
 	"google.golang.org/adk/model"
 )
 
@@ -50,6 +52,7 @@ var ProviderDisplayNames = map[string]string{
 	"poe":           "Poe",
 	"sap_ai_core":   "SAP AI Core",
 	"xai":           "xAI",
+	"xai_oauth":     "xAI (OAuth)",
 }
 
 // GetProviderDisplayName returns the proper display name for a provider ID.
@@ -312,6 +315,34 @@ func GetProvider(ctx context.Context, instanceName string, modelName string, cfg
 		client := openai.NewClientWithConfig(config)
 		return openai_provider.NewProvider(client, modelName, true), nil
 
+	case "xai_oauth":
+		accessToken := instance["access_token"]
+		refreshToken := instance["refresh_token"]
+		clientID := instance["client_id"]
+		if accessToken == "" {
+			accessToken = os.Getenv("XAI_OAUTH_ACCESS_TOKEN")
+		}
+		if refreshToken == "" {
+			refreshToken = os.Getenv("XAI_OAUTH_REFRESH_TOKEN")
+		}
+		if clientID == "" {
+			clientID = os.Getenv("XAI_OAUTH_CLIENT_ID")
+		}
+		if clientID == "" {
+			clientID = xai_oauth.DefaultClientID
+		}
+		if accessToken == "" {
+			return nil, fmt.Errorf("xAI OAuth requires access_token (run setup to authenticate)")
+		}
+		if modelName == "" {
+			modelName = "grok-3"
+		}
+		var expiresAt time.Time
+		if exp := instance["expires_at"]; exp != "" {
+			expiresAt, _ = time.Parse(time.RFC3339, exp)
+		}
+		return xai_oauth.NewProvider(clientID, accessToken, refreshToken, expiresAt, modelName, nil), nil
+
 	case "openai_compat":
 		apiKey := instance["api_key"]
 		if apiKey == "" {
@@ -397,6 +428,16 @@ func ListModelsForProvider(ctx context.Context, providerID string, cfg *config.A
 			return nil, fmt.Errorf("xAI API key not configured")
 		}
 		return xai.ListModels(ctx, apiKey)
+
+	case "xai_oauth":
+		accessToken := instanceConfig["access_token"]
+		if accessToken == "" {
+			accessToken = os.Getenv("XAI_OAUTH_ACCESS_TOKEN")
+		}
+		if accessToken == "" {
+			return nil, fmt.Errorf("xAI OAuth access_token not configured (run setup to authenticate)")
+		}
+		return xai_oauth.ListModels(ctx, accessToken)
 
 	case "ollama":
 		baseURL := "http://localhost:11434"
@@ -530,6 +571,13 @@ func TestProviderConnection(ctx context.Context, providerType string, params map
 			return nil, fmt.Errorf("api_key is required")
 		}
 		return xai.ListModels(ctx, apiKey)
+
+	case "xai_oauth":
+		accessToken := params["access_token"]
+		if accessToken == "" {
+			return nil, fmt.Errorf("access_token is required")
+		}
+		return xai_oauth.ListModels(ctx, accessToken)
 
 	case "ollama":
 		baseURL := params["base_url"]

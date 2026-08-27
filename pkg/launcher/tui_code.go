@@ -11,6 +11,7 @@ import (
 	"log"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -25,6 +26,7 @@ import (
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/gitutil"
 	"github.com/SAP/astonish/pkg/provider"
+	xai_oauth "github.com/SAP/astonish/pkg/provider/xai_oauth"
 	persistentsession "github.com/SAP/astonish/pkg/session"
 	"github.com/SAP/astonish/pkg/skills"
 	"github.com/SAP/astonish/pkg/tools/ripgrep"
@@ -2714,6 +2716,9 @@ func codeProviderTypes() []backend.ProviderTypeInfo {
 		{ID: "gemini", DisplayName: provider.GetProviderDisplayName("gemini"), Fields: []backend.ProviderField{apiKey}},
 		{ID: "groq", DisplayName: provider.GetProviderDisplayName("groq"), Fields: []backend.ProviderField{apiKey}},
 		{ID: "xai", DisplayName: provider.GetProviderDisplayName("xai"), Fields: []backend.ProviderField{apiKey}},
+		{ID: "xai_oauth", DisplayName: provider.GetProviderDisplayName("xai_oauth"), Fields: []backend.ProviderField{
+			{Key: "client_id", Label: "OAuth Client ID (auto-filled)", Default: "b1a00492-073a-47ea-816f-4c329264a828", Optional: true},
+		}},
 		{ID: "openrouter", DisplayName: provider.GetProviderDisplayName("openrouter"), Fields: []backend.ProviderField{apiKey}},
 		{ID: "poe", DisplayName: provider.GetProviderDisplayName("poe"), Fields: []backend.ProviderField{apiKey}},
 		{
@@ -2824,6 +2829,27 @@ func (b *localAgentBackend) AddProvider(ctx context.Context, name, typeID string
 		inst[f.Key] = val
 	}
 
+	// Copy extra fields that are not catalog inputs (e.g. OAuth tokens
+	// obtained by the TUI two-phase device-code flow).
+	for k, v := range fields {
+		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
+		if k == "" || k == "type" || v == "" {
+			continue
+		}
+		if _, exists := inst[k]; exists {
+			continue
+		}
+		inst[k] = v
+	}
+
+	// For xai_oauth, run the device-code flow unless the caller already
+	// obtained tokens (the TUI two-phase path passes them in fields).
+	if typeID == "xai_oauth" && inst["access_token"] == "" {
+		if err := b.runXAIOAuthFlow(inst); err != nil {
+			return fmt.Errorf("xAI OAuth authentication failed: %w", err)
+		}
+	}
+
 	b.mu.Lock()
 	if b.appConfig.Providers == nil {
 		b.appConfig.Providers = make(map[string]config.ProviderConfig)
@@ -2839,6 +2865,92 @@ func (b *localAgentBackend) AddProvider(ctx context.Context, name, typeID string
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 	return nil
+}
+
+// runXAIOAuthFlow performs the OAuth 2.0 Device Authorization Grant (RFC 8628)
+// for xAI, obtaining access and refresh tokens and storing them in the provider config.
+func (b *localAgentBackend) runXAIOAuthFlow(inst config.ProviderConfig) error {
+	pending, err := b.StartXAIOAuth(context.Background(), inst["client_id"])
+	if err != nil {
+		return err
+	}
+	if inst["client_id"] == "" {
+		inst["client_id"] = pending.ClientID
+	}
+	fmt.Fprintf(os.Stderr, "\n🔐 xAI OAuth: authorize in your browser\n   Code: %s\n   URL:  %s\n\n", pending.UserCode, pending.VerificationURL)
+	tokens, err := b.WaitXAIOAuth(context.Background(), *pending)
+	if err != nil {
+		return err
+	}
+	for k, v := range tokens {
+		inst[k] = v
+	}
+	return nil
+}
+
+// StartXAIOAuth requests a device code and opens the verification URL.
+func (b *localAgentBackend) StartXAIOAuth(ctx context.Context, clientID string) (*backend.XAIOAuthPending, error) {
+	if clientID == "" {
+		clientID = xai_oauth.DefaultClientID
+	}
+	dcResp, err := xai_oauth.RequestDeviceCode(ctx, clientID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to request device code: %w", err)
+	}
+	verifyURL := dcResp.VerificationURIComplete
+	if verifyURL == "" {
+		verifyURL = dcResp.VerificationURI
+	}
+	_ = openBrowser(verifyURL)
+	// Do not write the user code to stderr/slog here: the TUI owns the
+	// alt screen and displays UserCode/VerificationURL in the overlay.
+	// Non-TUI callers (setup wizard / AddProvider) print after this returns.
+	return &backend.XAIOAuthPending{
+		ClientID:        clientID,
+		DeviceCode:      dcResp.DeviceCode,
+		UserCode:        dcResp.UserCode,
+		VerificationURL: verifyURL,
+		Interval:        dcResp.Interval,
+	}, nil
+}
+
+// WaitXAIOAuth polls until the user approves the device authorization.
+func (b *localAgentBackend) WaitXAIOAuth(ctx context.Context, pending backend.XAIOAuthPending) (map[string]string, error) {
+	tokenResp, err := xai_oauth.PollForToken(ctx, pending.ClientID, pending.DeviceCode, pending.Interval)
+	if err != nil {
+		return nil, fmt.Errorf("visit %s and enter code %s — %w", pending.VerificationURL, pending.UserCode, err)
+	}
+	expiresAt := time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
+	return map[string]string{
+		"client_id":     pending.ClientID,
+		"access_token":  tokenResp.AccessToken,
+		"refresh_token": tokenResp.RefreshToken,
+		"expires_at":    expiresAt.Format(time.RFC3339),
+	}, nil
+}
+
+// openBrowser attempts to open a URL in the user's default browser.
+func openBrowser(url string) error {
+	var cmd string
+	var args []string
+
+	switch {
+	case fileExists("/usr/bin/open"): // macOS
+		cmd = "open"
+		args = []string{url}
+	case fileExists("/usr/bin/xdg-open"): // Linux
+		cmd = "xdg-open"
+		args = []string{url}
+	default:
+		return fmt.Errorf("no browser opener found")
+	}
+
+	return exec.Command(cmd, args...).Start()
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 func (b *localAgentBackend) RemoveProvider(ctx context.Context, name string) error {
@@ -2874,6 +2986,7 @@ func (b *localAgentBackend) RemoveProvider(ctx context.Context, name string) err
 
 // Verify localAgentBackend implements the optional provider-admin capability.
 var _ backend.ProviderAdminBackend = (*localAgentBackend)(nil)
+var _ backend.XAIOAuthBackend = (*localAgentBackend)(nil)
 
 // --- WebSearchAdminBackend (code-mode local web search configuration) ---
 // These methods let the /websearch TUI overlay configure web search providers

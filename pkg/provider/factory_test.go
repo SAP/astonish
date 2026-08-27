@@ -45,7 +45,7 @@ func TestGetProviderIDs(t *testing.T) {
 		t.Error("GetProviderIDs returned empty slice")
 	}
 
-	expectedCount := 12
+	expectedCount := 13
 	if len(ids) != expectedCount {
 		t.Errorf("GetProviderIDs returned %d IDs, expected %d", len(ids), expectedCount)
 	}

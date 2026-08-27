@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/atotto/clipboard"
 	tea "charm.land/bubbletea/v2"
+	"github.com/atotto/clipboard"
 
 	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
@@ -20,7 +20,7 @@ type providerPickerState struct {
 	err     string
 	notice  string
 
-	// step: "list" | "type" | "form"
+	// step: "list" | "type" | "form" | "oauth"
 	step string
 
 	instances []backend.ProviderInstance
@@ -49,12 +49,26 @@ type providerMutatedMsg struct {
 	err    error
 }
 
+type xaiOAuthStartedMsg struct {
+	name    string
+	fields  map[string]string
+	pending backend.XAIOAuthPending
+	err     error
+}
+
 // providerAdmin returns the ProviderAdminBackend capability of the active
 // backend, or nil when the backend does not support local provider management
 // (e.g. platform chat). The /provider command is only offered when non-nil.
 func (m model) providerAdmin() backend.ProviderAdminBackend {
 	if pa, ok := m.backend.(backend.ProviderAdminBackend); ok {
 		return pa
+	}
+	return nil
+}
+
+func (m model) xaiOAuth() backend.XAIOAuthBackend {
+	if xo, ok := m.backend.(backend.XAIOAuthBackend); ok {
+		return xo
 	}
 	return nil
 }
@@ -103,6 +117,44 @@ func (m model) addProviderCmd(name, typeID string, fields map[string]string) tea
 	}
 }
 
+func (m model) startXAIOAuthCmd(name string, fields map[string]string) tea.Cmd {
+	xo := m.xaiOAuth()
+	return func() tea.Msg {
+		if xo == nil {
+			return xaiOAuthStartedMsg{name: name, fields: fields, err: fmt.Errorf("xAI OAuth unavailable")}
+		}
+		pending, err := xo.StartXAIOAuth(m.ctx, fields["client_id"])
+		msg := xaiOAuthStartedMsg{name: name, fields: fields, err: err}
+		if pending != nil {
+			msg.pending = *pending
+		}
+		return msg
+	}
+}
+
+func (m model) waitXAIOAuthCmd(msg xaiOAuthStartedMsg) tea.Cmd {
+	xo := m.xaiOAuth()
+	pa := m.providerAdmin()
+	return func() tea.Msg {
+		if xo == nil || pa == nil {
+			return providerMutatedMsg{action: "add", name: msg.name, err: fmt.Errorf("xAI OAuth unavailable")}
+		}
+		tokens, err := xo.WaitXAIOAuth(m.ctx, msg.pending)
+		if err != nil {
+			return providerMutatedMsg{action: "add", name: msg.name, err: err}
+		}
+		fields := make(map[string]string, len(msg.fields)+len(tokens))
+		for k, v := range msg.fields {
+			fields[k] = v
+		}
+		for k, v := range tokens {
+			fields[k] = v
+		}
+		err = pa.AddProvider(m.ctx, msg.name, "xai_oauth", fields)
+		return providerMutatedMsg{action: "add", name: msg.name, err: err}
+	}
+}
+
 func (m model) removeProviderCmd(name string) tea.Cmd {
 	pa := m.providerAdmin()
 	return func() tea.Msg {
@@ -136,6 +188,9 @@ func (m model) handleProviderPickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 	if m.providerPicker.loading {
 		if key == "esc" || key == "ctrl+c" {
+			if m.providerPicker.step == "oauth" {
+				return m.cancelProviderOAuth()
+			}
 			m.providerPicker = providerPickerState{}
 			return m, nil
 		}
@@ -148,6 +203,27 @@ func (m model) handleProviderPickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleProviderTypeKey(key)
 	case "form":
 		return m.handleProviderFormKey(msg, key)
+	case "oauth":
+		return m.handleProviderOAuthKey(key)
+	}
+	return m, nil
+}
+
+func (m model) cancelProviderOAuth() (tea.Model, tea.Cmd) {
+	// Return to the form so the user can retry without closing /provider.
+	// The in-flight WaitXAIOAuth cmd may still complete; applyProviderMutated
+	// ignores it if the overlay has left the oauth step (or was closed).
+	m.providerPicker.step = "form"
+	m.providerPicker.err = ""
+	m.providerPicker.notice = ""
+	m.providerPicker.loading = false
+	return m, nil
+}
+
+func (m model) handleProviderOAuthKey(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "esc", "ctrl+c":
+		return m.cancelProviderOAuth()
 	}
 	return m, nil
 }
@@ -279,9 +355,34 @@ func (m model) submitProviderForm() (tea.Model, tea.Cmd) {
 		fields[f.Key] = strings.TrimSpace(m.providerPicker.values[i+1])
 	}
 	m.providerPicker.loading = true
-	m.providerPicker.notice = "Saving " + name + "…"
 	m.providerPicker.err = ""
+	if m.providerPicker.selectedType.ID == "xai_oauth" && m.xaiOAuth() != nil {
+		m.providerPicker.notice = "Requesting xAI authorization…"
+		return m, m.startXAIOAuthCmd(name, fields)
+	}
+	m.providerPicker.notice = "Saving " + name + "…"
 	return m, m.addProviderCmd(name, m.providerPicker.selectedType.ID, fields)
+}
+
+func (m model) applyXAIOAuthStarted(msg xaiOAuthStartedMsg) (tea.Model, tea.Cmd) {
+	if !m.providerPicker.open {
+		return m, nil
+	}
+	if msg.err != nil {
+		m.providerPicker.loading = false
+		m.providerPicker.err = "Failed: " + msg.err.Error()
+		m.providerPicker.notice = ""
+		m.providerPicker.step = "form"
+		return m, nil
+	}
+	m.providerPicker.loading = true
+	m.providerPicker.err = ""
+	m.providerPicker.step = "oauth"
+	m.providerPicker.notice = fmt.Sprintf(
+		"Authorize in your browser\nCode: %s\nURL:  %s\nWaiting for approval…",
+		msg.pending.UserCode, msg.pending.VerificationURL,
+	)
+	return m, m.waitXAIOAuthCmd(msg)
 }
 
 func (m model) applyProviderMutated(msg providerMutatedMsg) (tea.Model, tea.Cmd) {
@@ -289,6 +390,11 @@ func (m model) applyProviderMutated(msg providerMutatedMsg) (tea.Model, tea.Cmd)
 		if m.providerPicker.open {
 			m.providerPicker.loading = false
 			m.providerPicker.err = "Failed: " + msg.err.Error()
+			if m.providerPicker.step == "oauth" {
+				// Poll failed; return to the form so the error is editable.
+				m.providerPicker.step = "form"
+				m.providerPicker.notice = ""
+			}
 			return m, nil
 		}
 		m.tr.Apply(events.NewError("Provider update failed: " + msg.err.Error()))
@@ -405,7 +511,31 @@ func (m model) renderProviderPickerOverlay() string {
 			body.WriteString(style.Render(mark+r.label+": ") + th.Text.Render(shown) + "\n")
 		}
 		if pp.loading {
-			body.WriteString("\n" + th.Muted.Render(first(pp.notice, "Saving…")))
+			body.WriteString("\n")
+			if pp.notice != "" {
+				for _, line := range strings.Split(pp.notice, "\n") {
+					body.WriteString(th.Success.Render(line) + "\n")
+				}
+			} else {
+				body.WriteString(th.Muted.Render("Saving…"))
+			}
+		}
+
+	case "oauth":
+		body.WriteString(th.Header.Render("Authorize "+first(pp.selectedType.DisplayName, "xAI (OAuth)")) +
+			th.Muted.Render("  esc cancel") + "\n\n")
+		if pp.err != "" {
+			body.WriteString(th.Error.Render(pp.err) + "\n\n")
+		}
+		if pp.notice != "" {
+			for _, line := range strings.Split(pp.notice, "\n") {
+				if line == "" {
+					continue
+				}
+				body.WriteString(th.Success.Render(line) + "\n")
+			}
+		} else if pp.loading {
+			body.WriteString(th.Muted.Render("Waiting for approval…"))
 		}
 	}
 

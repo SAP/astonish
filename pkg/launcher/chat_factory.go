@@ -925,9 +925,34 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 				return nil, fmt.Errorf("sandbox is enabled but the runtime is not available: %w\n\nTo disable sandbox, set 'sandbox.enabled: false' in ~/.config/astonish/config.yaml", sandboxErr)
 			}
 
-			sessRegistry, regErr := sandbox.NewSessionRegistry()
-			if regErr != nil {
-				return nil, fmt.Errorf("sandbox is enabled but session registry failed: %w", regErr)
+			// The daemon is always platform: session records must live in the
+			// team-scoped platform store (PG, or SQLite in localhost mode) so
+			// that the tenant-scoped HTTP handlers (list/delete/expose/proxy)
+			// observe exactly the containers created here — and only for the
+			// caller's own team. The local JSON registry is legacy and is used
+			// only as a last-resort fallback when tenant context is missing.
+			var sessRegistry *sandbox.SessionRegistry
+			if svc := store.FromContext(ctx); svc != nil && svc.Platform != nil {
+				orgSlug := store.OrgSlugFromContext(ctx)
+				teamSlug := store.TeamSlugFromContext(ctx)
+				if orgSlug == "" {
+					orgSlug = cfg.AppConfig.Storage.Auth.GetDefaultOrgSlug()
+				}
+				if teamSlug == "" {
+					teamSlug = "general"
+				}
+				if provider, ok := svc.Platform.(store.SandboxSessionProvider); ok {
+					if sessStore := provider.SandboxSessionsForTeam(ctx, orgSlug, teamSlug); sessStore != nil {
+						sessRegistry = sandbox.NewSessionRegistryFromStore(sessStore)
+					}
+				}
+			}
+			if sessRegistry == nil {
+				var regErr error
+				sessRegistry, regErr = sandbox.NewSessionRegistry()
+				if regErr != nil {
+					return nil, fmt.Errorf("sandbox is enabled but session registry failed: %w", regErr)
+				}
 			}
 
 			tplRegistry, tplErr := sandbox.NewTemplateRegistry()

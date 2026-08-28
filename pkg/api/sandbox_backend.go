@@ -106,6 +106,29 @@ func buildPGSessionRegistry(ctx context.Context) *sandbox.SessionRegistry {
 	return sandbox.NewSessionRegistryFromStore(sessStore)
 }
 
+// sandboxSessionRegistryForRequest returns the sandbox SessionRegistry that
+// the caller is allowed to see, scoped to the request's tenant.
+//
+// In platform (multi-tenant / PostgreSQL) mode it returns the DB-backed
+// registry for the caller's org/team via buildPGSessionRegistry, so lookups
+// (List, ResolveSessionID, GetByContainerName, ...) only observe that team's
+// sandbox sessions. In personal / single-tenant (SQLite) mode
+// buildPGSessionRegistry returns nil and we fall back to the local
+// file-based registry, which is adequate because there is only one tenant.
+//
+// SECURITY: sandbox container-management handlers MUST obtain their registry
+// through this helper rather than calling sandbox.NewSessionRegistry()
+// directly. The direct call yields the unscoped personal-mode registry, which
+// on a platform deployment exposes every team's sandbox sessions and allows
+// cross-tenant list/delete/expose/proxy by container id.
+func sandboxSessionRegistryForRequest(r *http.Request) (*sandbox.SessionRegistry, error) {
+	if reg := buildPGSessionRegistry(r.Context()); reg != nil {
+		return reg, nil
+	}
+	// Personal / single-tenant deployments: no team schema to scope to.
+	return sandbox.NewSessionRegistry()
+}
+
 // teamTemplateSessionID returns the canonical session ID used by the
 // team-template editor for a given team slug. This is a well-known,
 // deterministic ID so the editor pod/container can be found across

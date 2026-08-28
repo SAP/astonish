@@ -957,7 +957,7 @@ func readFromSandboxContainer(r *http.Request, sessionID, filePath string) ([]by
 	if err != nil || appCfg == nil || !sandbox.IsSandboxEnabled(&appCfg.Sandbox) {
 		return nil, false
 	}
-	registry, err := sandbox.NewSessionRegistry()
+	registry, err := sandboxSessionRegistryForRequest(r)
 	if err != nil {
 		slog.Debug("failed to load sandbox session registry", "error", err)
 		return nil, false

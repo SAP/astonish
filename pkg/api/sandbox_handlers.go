@@ -383,7 +383,7 @@ func SandboxDetailsHandler(w http.ResponseWriter, r *http.Request) {
 				if tplErr != nil {
 					slog.Warn("failed to create template registry", "error", tplErr)
 				}
-				sessRegistry, sessErr := sandbox.NewSessionRegistry()
+				sessRegistry, sessErr := sandboxSessionRegistryForRequest(r)
 				if sessErr != nil {
 					slog.Warn("failed to create session registry", "error", sessErr)
 				}
@@ -417,7 +417,7 @@ func SandboxContainerListHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sessRegistry, err := sandbox.NewSessionRegistry()
+	sessRegistry, err := sandboxSessionRegistryForRequest(r)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to load session registry: "+err.Error())
 		return
@@ -520,7 +520,7 @@ func SandboxContainerDeleteHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sessRegistry, err := sandbox.NewSessionRegistry()
+	sessRegistry, err := sandboxSessionRegistryForRequest(r)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to load session registry: "+err.Error())
 		return
@@ -550,7 +550,7 @@ func SandboxPruneHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sessRegistry, err := sandbox.NewSessionRegistry()
+	sessRegistry, err := sandboxSessionRegistryForRequest(r)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to load session registry: "+err.Error())
 		return
@@ -886,7 +886,7 @@ func SandboxExposePortHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sessRegistry, err := sandbox.NewSessionRegistry()
+	sessRegistry, err := sandboxSessionRegistryForRequest(r)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to load session registry: "+err.Error())
 		return
@@ -954,7 +954,7 @@ func SandboxUnexposePortHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sessRegistry, err := sandbox.NewSessionRegistry()
+	sessRegistry, err := sandboxSessionRegistryForRequest(r)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to load session registry: "+err.Error())
 		return
@@ -1009,7 +1009,7 @@ func SandboxPinContainerHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sessRegistry, err := sandbox.NewSessionRegistry()
+	sessRegistry, err := sandboxSessionRegistryForRequest(r)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to load session registry: "+err.Error())
 		return
@@ -1041,7 +1041,7 @@ func SandboxListExposedPortsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sessRegistry, err := sandbox.NewSessionRegistry()
+	sessRegistry, err := sandboxSessionRegistryForRequest(r)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to load session registry: "+err.Error())
 		return

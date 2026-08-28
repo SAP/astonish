@@ -219,6 +219,8 @@ export interface DocsUpdateMessage {
   slideIndex?: number
   totalSlides?: number
   title?: string
+  deckTitle?: string
+  description?: string
   schemaVersion?: number
   validation?: {
     errors: number
@@ -230,6 +232,15 @@ export interface DocsUpdateMessage {
     raster: number
     unsupported: number
   }
+}
+
+/** Human label for the chat Slides card. Never the persist slug (s-<sessionID>). */
+export function slidesHarnessLabel(update: Pick<DocsUpdateMessage, 'description' | 'deckTitle' | 'title'>): string {
+  for (const value of [update.description, update.deckTitle, update.title]) {
+    const text = (value || '').trim()
+    if (text) return text
+  }
+  return 'Presentation'
 }
 
 // ---- Execution plan (announce_plan / update_plan) ----

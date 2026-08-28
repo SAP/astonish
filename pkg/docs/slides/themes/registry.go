@@ -3,6 +3,7 @@ package themes
 import (
 	"fmt"
 	"sort"
+	"strings"
 )
 
 type Theme struct {
@@ -77,6 +78,36 @@ type Template struct {
 	// its rendered ASD projection.
 	Model      *TemplateModel `json:"templateModel,omitempty"`
 	StyleGuide *StyleGuide    `json:"styleGuide,omitempty"`
+	// Skin selects the visual language for recipe layouts: "corporate" (logo,
+	// legal, accent rule) or "product" (dark canvas, mono chrome, panels).
+	// Empty means corporate.
+	Skin string `json:"skin,omitempty"`
+	// Palettes are named token overlays (surface/ink/accent/muted) for the
+	// same template. Built-in product ships several colorways; imported brand
+	// templates typically have none — their color is the brand.
+	Palettes []Palette `json:"palettes,omitempty"`
+}
+
+// Palette is a named colorway on a Template. Skin, furniture, and fonts stay
+// put; only the listed tokens change.
+type Palette struct {
+	ID     string            `json:"id"`
+	Label  string            `json:"label"`
+	Tokens map[string]string `json:"tokens"`
+}
+
+// PaletteByID returns the named colorway, if the template defines it.
+func (t Template) PaletteByID(id string) (Palette, bool) {
+	want := strings.TrimSpace(id)
+	if want == "" {
+		return Palette{}, false
+	}
+	for _, p := range t.Palettes {
+		if p.ID == want {
+			return p, true
+		}
+	}
+	return Palette{}, false
 }
 
 // ThemeTokens returns the design-token palette for the template.
@@ -149,6 +180,49 @@ var builtinTemplates = map[string]Template{
 		Tokens:      map[string]string{"surface": "#0F172A", "ink": "#F8FAFC", "accent": "#0EA5E9"},
 		Archetypes:  archetypesFor("#0F172A", "#F8FAFC", "#0EA5E9", auroraTitle),
 	},
+	"product": {
+		Schema: 2,
+		Name:   "product",
+		Label:  "Product Deck",
+		Description: "Product deck: one accent, monospace chrome, terminal furniture, and colorways " +
+			"(dark and light). Same recipe jobs as other templates, different visual language.",
+		Skin: "product",
+		Tokens: map[string]string{
+			"surface":     "#0B0D0F",
+			"ink":         "#ECEDEE",
+			"accent":      "#8B5CF6",
+			"muted":       "#94A3B8",
+			"displayFont": "Manrope",
+			"bodyFont":    "Manrope",
+			"monoFont":    "JetBrains Mono",
+		},
+		Archetypes: archetypesFor("#0B0D0F", "#ECEDEE", "#8B5CF6", ""),
+		Palettes:   productPalettes(),
+	},
+}
+
+func productPalettes() []Palette {
+	dark := func(id, label, accent string) Palette {
+		return Palette{ID: id, Label: label, Tokens: map[string]string{
+			"surface": "#0B0D0F", "ink": "#ECEDEE", "accent": accent, "muted": "#94A3B8",
+		}}
+	}
+	return []Palette{
+		dark("violet", "Violet", "#8B5CF6"),
+		dark("orange", "Orange", "#F97316"),
+		dark("teal", "Teal", "#14B8A6"),
+		dark("blue", "Blue", "#3B82F6"),
+		dark("rose", "Rose", "#F43F5E"),
+		{ID: "light-violet", Label: "Light violet", Tokens: map[string]string{
+			"surface": "#F7F5FF", "ink": "#1A1228", "accent": "#7C3AED", "muted": "#64748B",
+		}},
+		{ID: "light-orange", Label: "Light orange", Tokens: map[string]string{
+			"surface": "#FFF7ED", "ink": "#1C1917", "accent": "#EA580C", "muted": "#78716C",
+		}},
+		{ID: "editorial", Label: "Editorial", Tokens: map[string]string{
+			"surface": "#FAFAF8", "ink": "#171717", "accent": "#171717", "muted": "#525252",
+		}},
+	}
 }
 
 // ArchetypesFor builds the three standard archetypes (title, section, content)

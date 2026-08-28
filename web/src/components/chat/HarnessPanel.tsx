@@ -16,6 +16,7 @@ import {
   harnessKindLabel,
   messageAt,
   readStoredHarnessWidth,
+  slidesHarnessLabel,
   writeStoredHarnessWidth,
   HARNESS_DEFAULT_WIDTH,
   type HarnessFocus,
@@ -176,7 +177,7 @@ export default function HarnessPanel({
       }
       case 'slides': {
         const msg = messageAt<DocsUpdateMessage>(messages, focus.messageIndex)
-        return msg?.title || focus.deckSlug || harnessKindLabel(focus.kind)
+        return msg ? slidesHarnessLabel(msg) : harnessKindLabel(focus.kind)
       }
     }
   })()

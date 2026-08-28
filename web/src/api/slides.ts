@@ -173,8 +173,19 @@ export async function deleteSlidesDeck(deckSlug: string, scope: DocsScope = 'per
  * backend at `GET /api/docs/slides/templates/<name>/thumbnails/<kind>`
  * (Content-Type image/png). `kind` is the archetype kind path param.
  */
-export function templateThumbnailUrl(name: string, kind: string): string {
-  return `${DOCS_BASE}/slides/templates/${encodeURIComponent(name)}/thumbnails/${encodeURIComponent(kind)}`
+export function templateThumbnailUrl(name: string, kind: string, cacheKey?: string): string {
+  const url = `${DOCS_BASE}/slides/templates/${encodeURIComponent(name)}/thumbnails/${encodeURIComponent(kind)}`
+  if (!cacheKey) return url
+  const sep = url.includes('?') ? '&' : '?'
+  return `${url}${sep}v=${encodeURIComponent(cacheKey)}`
+}
+
+/**
+ * Build the URL for a template image asset (example cover photo) served at
+ * `GET /api/docs/slides/templates/<name>/media/<ref>`.
+ */
+export function templateMediaUrl(name: string, ref: string): string {
+  return `${DOCS_BASE}/slides/templates/${encodeURIComponent(name)}/media/${encodeURIComponent(ref)}`
 }
 
 /**

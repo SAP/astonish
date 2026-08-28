@@ -85,6 +85,21 @@ func HasErrors(ds []Diagnostic) bool {
 	return false
 }
 
+func formatDiagnostics(diags []Diagnostic) string {
+	var parts []string
+	for _, d := range diags {
+		if d.Severity != "error" {
+			continue
+		}
+		msg := d.Message
+		if d.ElementID != "" {
+			msg = d.ElementID + ": " + msg
+		}
+		parts = append(parts, msg)
+	}
+	return strings.Join(parts, "; ")
+}
+
 // safeColorPattern matches either a hex color (#RRGGBB or #RRGGBBAA) or an
 // rgb()/rgba() function containing only digits, commas, spaces, dots, and
 // percent signs. Anything else (letters, semicolons, angle brackets) is

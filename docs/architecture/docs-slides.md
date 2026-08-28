@@ -46,13 +46,13 @@ Default authoring is **not** “fill empty holes in an imported sample slide.”
 
 ```text
                          LLM AGENT
-         create_deck → catalog (recipe-* first, then imported archetypes)
-         fill_slides { kind: recipe-…, fills: { eyebrow, headline, … } }
+         intake (ask_user) → create_deck → catalog (recipe-* + official title/closing)
+         fill_slides { kind: title-2 | recipe-…, fills: { … } }
                                 │
                                 ▼
                      RECIPE RENDERER  (pkg/docs/slides/recipe.go)
          layout type + styleGuide tokens + ExtractChrome (logo, legal)
-         optional slots omitted; cards hug copy; named ast-text slots
+         optional slots omitted; card grids are capped panels; named ast-text slots
                                 │
                                 ▼
                 ASTONISH SLIDES DOCUMENT (ASD v1)
@@ -103,7 +103,9 @@ The restricted vocabulary is a feature: it establishes the subset that can be re
 
 This is the default authoring path for every templated deck (built-in or imported). It exists because filling imported sample holes (`pattern-*`, `ph-1…ph-N` in reading order) produced on-brand but empty-looking slides: leftover gray cards, photo-only blanks, title-only dividers, and copy parked in the wrong box. The composition model is the one used by high-quality generated decks: a **repeating chrome frame**, a **small catalog of layout types**, and **copy that fills every region of the chosen type**.
 
-The imported template is still required. It supplies identity (palette, type, logo, legal). It does not supply the page grid the story is poured into.
+The imported template is still required. It supplies identity (palette, type, and a logo only if the file actually contains one). Recipes never invent a logo or decorative disk to stand in for a missing mark. It does not supply the page grid the story is poured into.
+
+A template also owns a **skin** (`themes.Template.Skin`): `corporate` (the original recipe look — logo, legal, accent rule, light or token-tinted cards) or `product` (near-black canvas with an opaque radial accent wash, monospace rails, one accent, panels, terminals). Built-in `product` (label **Product Deck**) uses the product skin; `light-corporate`, `midnight`, `aurora`, and imported `.pptx` templates use corporate. Same recipe jobs, different furniture. Skins do not let the model pick free x/y. Product Deck ships **palettes** (named `surface`/`ink`/`accent`/`muted` overlays on the same skin) — one template, many colorways, not extra rows in the Templates library. Imported brand templates typically have no palettes; GCO’s blue vs pink covers are title-layout variants, not palettes. Product backgrounds are a real ASD gradient (`<script type="application/json" id="bg-gradient">`), not a solid `#0B0D0F` and not a fake logo circle. PPTX has no native pptxgenjs gradient, so the exporter embeds that SVG as a vector image instead of flattening to the first stop.
 
 Code: `pkg/docs/slides/recipe.go` (catalog, palette, chrome, named slots) and `pkg/docs/slides/recipe_layouts.go` (ten layout geometries). Tests in `recipe_test.go`. The slides skill (`pkg/skills/builtin_content_slides.go`) is the agent contract.
 
@@ -115,7 +117,7 @@ create_deck(template)
     ├─ seed deck theme tokens + embedded fonts only
     ├─ catalogFromTemplate:
     │     RecipeArchetypes(tmpl)     ← recipe-* first
-    │     + tmpl.Archetypes          ← title/section/pattern-* after
+    │     + title* / closing*        ← official bookends only (pattern/section/agenda stay on disk)
     └─ StyleGuide = RecipeGuideMarkdown() + tmpl.StyleGuide.Markdown
 
 fill_slides({ position, kind: "recipe-split-narrative", fills: {…} })
@@ -142,7 +144,7 @@ Every `create_deck` catalog leads with these kinds, then the imported archetypes
 
 | Kind | Job | Required regions (named slots) |
 |---|---|---|
-| `recipe-cover` | Slide 0 lockup | `eyebrow`, `headline`, `dek`, `meta_1_*`, `meta_2_*`; optional `headline_2`, `meta_3_*`, `meta_4_*` |
+| `recipe-cover` | Slide 0 lockup | `eyebrow`, `headline`, `dek`, `meta_1_*`, `meta_2_*`; optional `headline_2`, `meta_3_*`. Corporate also optional `meta_4_*`. Product optional `prompt` (no `meta_4`) |
 | `recipe-split-narrative` | Chapter: left story + 3 claims | header + `body_1` + `item_1..3_title/body`; `body_2` optional |
 | `recipe-quote-split` | Turning point | header + `body_1` + `quote` + `attribution`; `body_2` optional |
 | `recipe-two-up` | Contrast / pair | header + two columns (`col_N_kicker/title/body`) |
@@ -151,7 +153,13 @@ Every `create_deck` catalog leads with these kinds, then the imported archetypes
 | `recipe-numbered-grid` | Six principles | header + 6 cells (`item_N_title/body`); index `01…06` is chrome |
 | `recipe-callout-rail` | Argument + lesson | header + `body_1` + `callout_kicker/title/body`; `body_2` optional |
 | `recipe-year-hero` | Giant year + 3 claims | `eyebrow`, `headline`, `year`, `item_1..3_*` |
-| `recipe-closer` | Last slide | `eyebrow`, `headline`, `thesis`, 3 takeaway cards |
+| `recipe-closer` | Last slide | Corporate: `eyebrow`, `headline`, `thesis`, 3 takeaway cards. Product: `eyebrow`, `headline`, optional `cta_*` (no item cards) |
+| `recipe-statement-evidence` | Problem / why-now | left argument + 3 evidence rows |
+| `recipe-data-table` | Spec / comparison | hairline table, 3 rows × 3–4 columns |
+| `recipe-layer-stack` | Architecture | L4–L0 stack + 3 side cards; `emphasis` = layer |
+| `recipe-process-terminal` | How it works | 3 steps + transcript; `emphasis` = payoff step |
+
+Structured variation (still locked): `headline_accent` / `dek_accent` color one phrase; `emphasis` (`"1"`/`"2"`/`"3"`) paints exactly one card as the recommended path. Product cover uses `prompt`; closer may use `cta_body`.
 
 Shared **header** on body types: `eyebrow` (chapter/section kicker), optional `date` (year range or right marker), `headline`, optional `headline_2` (split display title). A chapter is an eyebrow on a full content slide. Empty `section` dividers are not part of the default spine.
 
@@ -159,9 +167,13 @@ The model picks the type whose **slot count matches the content**. Three product
 
 ### Named slots, not `ph-N`
 
-Recipe `FillSlots` are stable English ids (`eyebrow`, `item_2_body`). `SlotHint.Role` of `optional` means the slot is listed in the catalog but is **not** required by `missingTextSlotFills`. At fill time, empty optional slots are omitted from the markup (the 4th stat tile disappears; `headline_2` does not leave a blank display line). Required slots still reject empty fills.
+Recipe `FillSlots` are stable English ids (`eyebrow`, `item_2_body`). `create_deck` computes `fillSlots` / `slotHints` from the **rendered prototype for this template’s skin**, not the union of every skin. Product cover therefore does not advertise `meta_4_*`; product closer does not advertise `thesis` or takeaway cards.
 
-`fillArchetypeMarkup` skips empty values so an omitted optional key is not an error. Image slots remain `ph-pic-*` / asset-ref on **imported** archetypes only; recipes do not invent photo holes.
+`SlotHint.Role` of `optional` means the slot is listed in the catalog but is **not** required by `missingTextSlotFills`. At fill time, empty optional slots are omitted from the markup (the 4th stat tile disappears; `headline_2` does not leave a blank display line). Required slots still reject empty fills.
+
+`fillArchetypeMarkup` skips empty values **and** fill keys that are not present in the markup, so an extra `meta_4_label` on product cover is a no-op rather than `fill slot not found`. Image slots remain `ph-pic-*` / asset-ref on **imported** archetypes only; recipes do not invent photo holes.
+
+`WriteSlide` validation errors (off-canvas geometry, duplicate ids, …) are included in the `fill_slides` / `fill_slide` error string. Decorative product glows are clamped to the 1920×1080 canvas.
 
 This is what stops “iPhone body landed in the kicker”: there is no `ph-4`.
 
@@ -198,7 +210,7 @@ Recipes are **generic**. They contain no named-brand or named-story literals. GC
 
 ### Geometry (content-sized cards)
 
-Logical canvas remains 1920×1080. Cards **hug copy**: padding plus 3–6 lines of body. They do not stretch to the footer (that produced tall empty gray slabs with a paragraph at the top). Quote cards size to quote + attribution. Stat tiles size to label + number + caption. The numbered grid is two rows of content-sized cells, not leftover-height cells.
+Logical canvas remains 1920×1080. Card grids (two-up, three-up, stat, callout) are **capped panels** (~360–460px): substantial, not a thin strip, and not a full-height empty slab. Quote cards hug quote + attribution. Numbered grids still share the remaining band. Cover and closer may keep more negative space. Product backgrounds use a visible radial accent wash (opaque stops), not a solid black field and not a logo disk.
 
 When optional `body_2` is omitted, `body_1` grows so the left column is not a short paragraph over white.
 
@@ -210,10 +222,11 @@ Footer lives in the bottom ~48px. Text boxes must not overlap; `recipe_test.go` 
 
 | Catalog kind | Role after this engine |
 |---|---|
-| `recipe-*` | **Default** cover and body. Always present, even on built-in themes. |
-| `title` / `section` / `agenda` / `closing` | Official brand layouts. Use only when the user asks for the official cover/divider/agenda. |
-| `pattern-*` | Sample-derived designed slides (cards, icon rows). Optional when geometry matches the same job and slot count. Not chosen for “chrome richness.” |
-| `content` / Title and Text | Last resort. |
+| `recipe-*` | **Default body** (and cover/closer on built-ins with no branded title/closing). Always present. |
+| `title` / `title-N` | Official imported cover. Slide 0 **must** use this family when listed. |
+| `closing` / `closing-N` | Official imported end page. Last slide **must** use this family when listed. |
+| `section` / `agenda` / `pattern-*` | Stored on the template; fetchable via `get_archetype`; **not** in the default `create_deck` catalog. |
+| `content` / Title and Text | Last resort; not in the default catalog. |
 
 Binding a `pattern-*` into a recipe (reuse GCO’s actual rounded cards when the job is three-up) is a **follow-up**. v1 always renders recipes so composition is stable; tokens + logo keep the deck on-brand.
 
@@ -223,14 +236,15 @@ No re-import is required for recipes to work. Importer changes still require re-
 
 The skill instructs the model to:
 
-1. Let the **user** pick the template (`ask_user` + `slidesTemplatePicker`). Inferring tone is not permission to choose.
-2. `create_deck`, then **go straight to `fill_slides`** — do not stall on cover/agenda/section chrome pickers unless the user asked for official layouts.
-3. Plan the story as jobs (cover, chapters, contrast, closer) in that one call. Prefer 8–16 dense slides over 18 sparse ones. At least three different `recipe-*` kinds on a deck longer than six slides.
-4. Titles are takeaways (complete sentence or two-line split headline), not topic labels.
-5. Density: headline + 2–4 content blocks. Cards/items are a complete thought (~12–22 words). Body columns are short paragraphs (~40–70 words). 6×6 is a **bullet cap**, not permission to leave the canvas blank.
-6. After `review_deck`, fix the named slides; do not rebuild the deck.
+1. Run **iterative intake** (one `ask_user` per turn): audience, length, then who picks the template. Do **not** ask to generate images. The first tool after `skill_lookup("slides")` is `ask_user`, not `create_deck`. Skip a question only when that fact is already explicit (named audience, count, template, or "you pick" / "don't ask, just make it"). A research constraint ("only with information you already have", "don't search") is **not** a skip. If they want to choose the template, `slidesTemplatePicker`. If they delegate, pick and say why in one line. Inferring tone is not permission to choose. Title variant (when 2+) happens **before** `create_deck`; `titleKind` is the `ask_user` option id (the catalog kind).
+2. After the template is known: title variant if `count(title*) > 1` (layout chrome; sample photos stripped); if that title has a `ph-pic-*` well, yes/no then `slidesImagePicker` for one template photo (`titleImage`); palette if the template has `palettes` (Product Deck); closing variant if `count(closing*) > 1`.
+3. `create_deck` with `template` (+ `palette` / `titleKind` / `titleImage` / `closingKind`). Catalog is `recipe-*` plus official title/closing only.
+4. Plan the story as jobs in one `fill_slides` call. Slide 0 is the official title family when listed, else `recipe-cover`. Last slide is official closing when listed, else `recipe-closer`. Body is `recipe-*`. Prefer 8–16 dense slides (honor the length they picked). At least three different `recipe-*` kinds on a deck longer than six slides.
+5. Titles are takeaways (complete sentence or two-line split headline), not topic labels. Official covers use that variant’s `fillSlots` (`ph-*` / `{{TITLE}}`), not recipe ids.
+6. Density: headline + 2–4 content blocks. Cards/items are a complete thought (~12–22 words). Body columns are short paragraphs (~40–70 words). 6×6 is a **bullet cap**, not permission to leave the canvas blank.
+7. After `review_deck`, fix the named slides; do not rebuild the deck.
 
-`create_deck` instructions and `fill_slides` tool descriptions say the same thing so the always-on prompt cannot fight the skill.
+`create_deck` instructions, `fill_slides` tool descriptions, and the always-on **Slide decks** pointer all require `ask_user` intake before `create_deck`, so the system prompt cannot fight the skill.
 
 ### `review_deck` additions
 
@@ -840,10 +854,15 @@ sample was mirrored, so the default hero renders **faithfully** — correct
 size, position, and mirroring — matching the source PowerPoint out of the box.
 This still borrows only the picture fill (mediaKey + that picture's own box +
 flip), never the whole sample slide, so it is **not** "sample slide as
-archetype." The layout's own decorative shape (e.g. the dark-green anvil) stays
-**behind** the borrowed image because `layoutToAsd` emits `bg → objects →
-placeholders` and paint order == document order (see the renderer contract
-below); no z-index is introduced.
+archetype." Same-layout borrow only: a title that never appears as a filled
+sample does **not** inherit a photo from another cover (that was painting the
+same person/bike on every title tile). At authoring time the title picker
+strips sample photos so the user sees layout chrome; they may pick **one**
+photo from the template's example covers via `slidesImagePicker`. The layout's
+own decorative shape (e.g. the dark-green anvil) stays **behind** the borrowed
+image because `layoutToAsd` emits `bg → objects → placeholders` and paint
+order == document order (see the renderer contract below); no z-index is
+introduced.
 
 The borrowed hero is also a **replaceable image fill slot**: its element id
 (`ph-pic-N`) is added to the archetype's `fillSlots`, exactly like the text
@@ -1140,15 +1159,15 @@ rendering currently goes through IR → ASD.
 
 | Tool | Purpose | Key arguments |
 |---|---|---|
-| `list_slide_templates` | Slim catalog of built-in + imported templates | none |
-| `create_deck` | Create a deck; with `template`, seeds theme/assets and a **slim catalog** (no markup) | `slug`, `title`, `template?` |
-| `fill_slides` | Author many slides in one call. `recipe-*`: server composes the layout, then substitutes **named** fills. Imported kinds: copy archetype markup and substitute `ph-*` slots | `deck_slug`, `slides[{position, kind or label, fills}]` |
+| `list_slide_templates` | Slim catalog of built-in + imported templates (includes `palettes` id/label when present) | none |
+| `create_deck` | Create a deck; with `template`, seeds theme/assets and a **slim catalog** (recipe-* + official title/closing, no markup). In chat, `slug` is a hint: persist key is `s-<sessionID>` | `slug`, `title`, `description?`, `template?`, `palette?`, `titleKind?`, `closingKind?` |
+| `fill_slides` | Author many slides in one call. Official `title*`/`closing*`: substitute catalog slots (headline/dek aliases). `recipe-*`: server composes the layout, then substitutes **named** fills | `deck_slug`, `slides[{position, kind or label, fills}]` |
 | `fill_slide` | Same for one slide (later edits) | `deck_slug`, `position`, `kind` or `label`, `fills` |
 | `get_archetype` | Escape hatch: one archetype's markup | `template`, `kind` or `label` |
 | `write_slide` | Write a full `<ast-slide>` (blank-canvas only) | `deck_slug`, `position`, `markup` |
 | `get_deck` | Deck identity + slim slide index (no markup) | `slug` |
 | `read_slide` | One slide's markup | `deck_slug`, `position` |
-| `ask_user` | Visual template/variant picker | `slidesTemplatePicker` or `slidesTemplate`+`slidesKind` |
+| `ask_user` | Visual template / title / palette / closing / cover-photo picker | `slidesTemplatePicker`, `slidesTemplate`+`slidesKind`, `slidesPalettePicker`, or `slidesImagePicker` |
 | `validate_deck` / `review_deck` | Structural then semantic/visual review | `slug` |
 | `list_deck_assets` / `add_deck_image` | Image catalog / SSRF-safe ingest | `deck_slug`, `url?` |
 
@@ -1158,10 +1177,10 @@ rendering currently goes through IR → ASD.
 
 ### Prompt rules
 
-1. Always start from a template. Use `fill_slides` (whole deck, one call) when a catalog is present.
-2. Prefer `recipe-*` catalog entries. Pick the layout whose slot count matches the content. A chapter is an eyebrow on a full content slide — do not insert empty section dividers.
+1. Always start from a template after intake. Use `fill_slides` (whole deck, one call) when a catalog is present.
+2. Official title/closing when listed for slide 0 / last; `recipe-*` for the body. Pick the layout whose slot count matches the content. A chapter is an eyebrow on a full content slide — do not insert empty section dividers.
 3. Fill every required named slot. Titles are takeaways (complete sentence or split headline), not topic labels. Empty canvas is a defect.
-4. Imported `pattern-*` only when it matches the same job. Title and Text is last resort.
+4. `pattern-*` / section / agenda are not in the default catalog. Title and Text is last resort.
 5. Do not reprint `<ast-shape>` chrome into `write_slide`.
 6. Validate, then `review_deck` until warnings are clean (`sparse_slide`, `missing_eyebrow`, `empty_card`).
 
@@ -1278,7 +1297,7 @@ This is a **frontend rendering and history-folding contract only**. It does not 
 - text overflow using approved font metrics;
 - missing asset/data reference checks;
 - capability diagnostics for every export target;
-- recipe renderer: every layout type parses, named slots present, no text-box overlap, cards hug copy, pale `muted` is not used as body color, confidentiality stamp is not duplicated, cover meta follows the dek, no brand/story literals in recipe source.
+- recipe renderer: every layout type parses, named slots present, no text-box overlap, card grids are capped panels, pale `muted` is not used as body color, confidentiality stamp is not duplicated, cover meta follows the dek, no invented logo/glow, product bg is a visible radial wash, no brand/story literals in recipe source.
 
 ### Web rendering
 
@@ -1379,9 +1398,10 @@ The exporter interface must isolate this choice. Browser-side export reduces ser
 
 ### Phase 5 — Recipe layout engine (implemented)
 
-- Ten named layout types (`recipe-cover` … `recipe-closer`) composed server-side from the template style guide.
-- Named slots, optional-slot collapse, content-sized cards, WCAG-gated secondary text.
-- Chrome overlay: logo, single confidentiality line, running footer, page numbers.
+- Fourteen named layout types (`recipe-cover` … `recipe-process-terminal`) composed server-side from the template style guide and skin.
+- Named slots, optional-slot collapse, capped card-grid panels, WCAG-gated secondary text.
+- Catalog `fillSlots` match the skin’s markup; extra fill keys are ignored; validation diagnostics are returned on `fill_slides` errors.
+- Chrome overlay: logo only when the template provides a real image asset (never an invented mark or glow circle), single confidentiality line, running footer, page numbers.
 - `create_deck` catalog leads with `recipe-*`; `fill_slides` re-renders with page/title; `review_deck` flags sparse slides and empty eyebrows.
 - Slides skill: pick layout by job; no empty section dividers; no chrome-picker stall on the recipe path.
 
@@ -1462,14 +1482,20 @@ consumed on the general chat path). Arguments:
   then resolves that template's per-role variants itself, auto-generates one option
   per variant, and attaches a live `slides-archetype` thumbnail to each — so the model
   never hand-copies markup. `slidesKind` filters to one role (title/section/…).
+  Title and closing pickers also include a "Use the default" option.
 - `slidesTemplatePicker` (optional slides convenience, `select`): set `true` (omit
-  `options`) for the **first** question, "which template should I use?". ask_user
+  `options`) when the user asked to **choose** the template. ask_user
   enumerates every available template (built-in + scoped/imported) via
   `templatePickerOptions`, generates one option per template (`id` = template name,
   `label`/`description` from the `list_slide_templates` catalog), and attaches a live cover
   thumbnail per template — the template's first `title` archetype (else its first
   archetype), tagged with the template name so the frontend resolves asset-refs at
   render time. Never embeds `data:` bytes.
+- `slidesPalettePicker` (optional slides convenience, `select`): set `true` with
+  `slidesTemplate` when that template defines `Palettes` (Product Deck). ask_user
+  lists each colorway with a live `recipe-cover` thumbnail recolored to that
+  palette's tokens, plus a "Use the default" option. Imported brand templates
+  typically have no palettes — the tool errors rather than inventing colorways.
 
 The tool does **not** block the agent loop. On invocation the chat runner
 (`maybeEmitChatQuestion` in `pkg/api/chat_runner.go`) turns the result into an inline
@@ -1596,25 +1622,40 @@ The card is emitted with the same prefix-marker pattern as `distill_preview` /
 
 ### Slides workflow integration
 
-Default path (recipe engine):
+Intake is **iterative** (one `ask_user` card per turn). The always-on system
+prompt and the slides skill both require `ask_user` **before** `create_deck`.
+Audience and length run unless that fact is already explicit in the
+message. Do not ask about generating images. A research constraint ("use what
+you know", "don't search") is not a skip. Template ownership is "Show me the templates" vs "You pick what fits" —
+not an immediate visual gallery, and not an inferred-tone auto-pick. `slidesTemplatePicker` runs only if they want to choose. After the
+template is known:
 
-0. When the user did not name a template, `ask_user kind="select"` with
-   `slidesTemplatePicker=true` — a card with one live cover thumbnail per available
-   template. The reply is the template name for `create_deck`.
-1. `create_deck` with that template. Catalog leads with `recipe-*`.
-2. **Straight to one `fill_slides` call** using recipe kinds and named fills.
-   Do not stall on cover / agenda / divider chrome pickers.
+- title variant (`slidesKind=title`) when `count(title*) > 1` (GCO-style). Tiles
+  show **layout chrome** (anvil, colors, empty wells) — not the same sample
+  person/bike on every option;
+- cover photo: if the chosen title has a `ph-pic-*` well, yes/no then
+  `slidesImagePicker` listing unique rasters from the example title slides.
+  At most one photo; a second image later is `add_deck_image`;
+- palette (`slidesPalettePicker`) when the template has palettes (Product Deck);
+- closing variant when `count(closing*) > 1`.
 
-Official-layout path (only if the user asked to use the imported title/section/agenda):
+`create_deck` then seeds theme (including the chosen palette tokens and optional
+`titleImage`) and a slim catalog of `recipe-*` plus official title/closing. One
+`fill_slides` call: slide 0 is the **chosen** official title kind (or
+`recipe-cover` on built-ins), body is `recipe-*`, last slide is the official
+closing (or `recipe-closer`). Sample cover photos are **not** kept unless
+`titleImage` / a `ph-pic-*` fill named that asset-ref. A **split** empty
+picture well (GCO "White cover with blue pattern" is a right-hand half-page) is
+kept and painted with the template muted color so fill matches the picker; only
+a near-full-canvas empty hole is omitted. Existing templates restore that well
+from the stored IR at fill time. Same-layout sample borrow still records a
+default photo in the IR; cross-layout "global hero" borrow is off so every
+title does not inherit one stock photo. Title pickers list richer (photo-well /
+color) variants first; option ids are catalog kinds (`title`, `title-2`).
 
-Then (1) `ask_user kind="select"` with `slides-archetype` thumbnails for the
-title/cover variant, (2) `ask_user kind="yesno"` for "Would you like an agenda
-slide?", (3) `ask_user kind="select"` with thumbnails for the divider/section
-variant.
-
-The questionnaire remains **agent-driven** (the model chooses to ask); it is
-not hard-enforced at the runtime level. The skill forbids chrome-picker stalls
-on the recipe path because they added turns without improving composition.
+Do **not** stall on section/agenda chrome pickers unless the user asked. Do not
+re-ask a template they already named. The questionnaire remains **agent-driven**
+(the model chooses to ask); it is not hard-enforced at the runtime level.
 
 ---
 
@@ -1662,15 +1703,17 @@ Slide decks created during a chat session follow a session-scoped lifecycle (ana
 
 1. **Session tagging**: When a deck is created via `create_deck` during a chat session, `store.SessionIDFromContext(ctx)` automatically sets the deck's `SessionID` field. The deck is invisible in the Slides view (`ListDecks` / `ListDecksLite` filter out non-empty `SessionID`).
 
-2. **Cascade deletion**: When a session is deleted (`StudioDeleteSessionHandler`), all decks with that session's ID are cascade-deleted via `DeleteDecksBySessionID`. No garbage accumulates.
+2. **Unique persist slug**: Chat drafts are stored as `s-<sessionID>` regardless of the model's hint slug (e.g. `steve-jobs-life`). A retry in the **same** session replaces that leftover. Another session's draft and saved decks are never deleted. Later tools (`fill_slides`, `get_deck`, `write_slide`, …) remap a human hint onto this session's draft so two chats on the same topic cannot overwrite each other. The chat Slides card shows `description` / title, never the persist slug.
 
-3. **Explicit Save**: The user promotes a session-scoped deck to permanent via `POST /api/docs/slides/{slug}/save`. This clears the `SessionID` (and optionally `SourceSlug`), making the deck visible in Slides view.
+3. **Cascade deletion**: When a session is deleted (`StudioDeleteSessionHandler`), all decks with that session's ID are cascade-deleted via `DeleteDecksBySessionID`. No garbage accumulates.
 
-4. **Enhance with AI**: From the Slides view, "Enhance with AI" navigates to Chat with a prompt referencing the saved deck. The model calls `get_deck` (saved decks are always accessible) and then `create_deck` with `source` parameter, which clones the deck into a session-scoped copy with `SourceSlug` set. The Save dialog then offers "Override Original" or "Save as New".
+4. **Explicit Save**: The user promotes a session-scoped deck to permanent via `POST /api/docs/slides/{slug}/save`. This clears the `SessionID` (and optionally `SourceSlug`), making the deck visible in Slides view.
 
-5. **Versioning on override**: When override-saving (replacing an existing saved deck with session deck content), the old deck state is archived as a `DeckVersion` snapshot (title + JSON blob of theme/assets/slides). Up to 5 versions are kept per deck; the oldest are pruned.
+5. **Enhance with AI**: From the Slides view, "Enhance with AI" navigates to Chat with a prompt referencing the saved deck. The model calls `get_deck` (saved decks are always accessible) and then `create_deck` with `source` parameter, which clones the deck into a session-scoped copy with `SourceSlug` set. The Save dialog then offers "Override Original" or "Save as New".
 
-6. **Version history**: `GET /api/docs/slides/{slug}/versions` lists all archived versions (newest first). `POST /api/docs/slides/{slug}/versions/{version}/restore` restores a snapshot, archiving the current state first, then replacing deck content with the snapshot and bumping the version number.
+6. **Versioning on override**: When override-saving (replacing an existing saved deck with session deck content), the old deck state is archived as a `DeckVersion` snapshot (title + JSON blob of theme/assets/slides). Up to 5 versions are kept per deck; the oldest are pruned.
+
+7. **Version history**: `GET /api/docs/slides/{slug}/versions` lists all archived versions (newest first). `POST /api/docs/slides/{slug}/versions/{version}/restore` restores a snapshot, archiving the current state first, then replacing deck content with the snapshot and bumping the version number.
 
 ### Schema additions
 

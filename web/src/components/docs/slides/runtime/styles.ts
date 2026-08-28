@@ -7,7 +7,7 @@ export const runtimeStyles = `
      pass over its whole subtree. See DeckController.applyState. */
   ast-slide { display:none; position:absolute; inset:0; width:1920px; height:1080px; overflow:hidden; content-visibility:auto; contain-intrinsic-size:1080px 1920px; }
   ast-slide[active] { display:block; content-visibility:visible; }
-  ast-text { white-space:pre-wrap; overflow:hidden; }
+  ast-text { white-space:pre-wrap; overflow:hidden; font-variant-ligatures:none; }
   ast-run { display:inline; }
   ast-shape svg { width:100%; height:100%; display:block; overflow:visible; }
   ast-image img { width:100%; height:100%; object-fit:var(--ast-image-fit,contain); }

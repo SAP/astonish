@@ -84,11 +84,15 @@ const (
 
 // CreateDeckArgs defines the create_deck tool input.
 type CreateDeckArgs struct {
-	Slug        string            `json:"slug" jsonschema:"Stable URL-safe deck slug."`
-	Title       string            `json:"title" jsonschema:"Human-readable deck title."`
-	Description string            `json:"description,omitempty" jsonschema:"Optional short deck description."`
-	Theme       map[string]string `json:"theme,omitempty" jsonschema:"Optional ASD theme token overrides."`
-	Template    string            `json:"template,omitempty" jsonschema:"Optional template name from list_slide_templates. Seeds theme, fonts, and a slim catalog of layouts/patterns. Author with fill_slides; do not copy markup."`
+	Slug        string            `json:"slug" jsonschema:"Hint only. In chat the server persists a unique per-session slug (s-<sessionID>) and returns it — use that in later calls. Two chats on the same topic must not share a persist slug."`
+	Title       string            `json:"title" jsonschema:"Human-readable deck title (shown in the chat Slides card)."`
+	Description string            `json:"description,omitempty" jsonschema:"Short deck description shown under Slides in chat. Prefer this over the persist slug for humans."`
+	Theme       map[string]string `json:"theme,omitempty" jsonschema:"Optional ASD theme token overrides. Prefer palette for Product Deck colorways instead of copying hex."`
+	Template    string            `json:"template,omitempty" jsonschema:"Template name from list_slide_templates after intake (user named it, delegated, or picked from slidesTemplatePicker). Seeds theme, fonts, and a slim catalog. Author with fill_slides; do not copy markup."`
+	Palette     string            `json:"palette,omitempty" jsonschema:"Optional palette id from the template palettes list (e.g. orange, light-violet). Overlays surface/ink/accent/muted. Prefer this over copying hex into theme."`
+	TitleKind   string            `json:"titleKind,omitempty" jsonschema:"Official title variant kind (title, title-2, …) chosen via ask_user. Stamped on the deck; slide 0 must use this kind when the catalog lists title family."`
+	TitleImage  string            `json:"titleImage,omitempty" jsonschema:"Asset-ref of the one template photo chosen via slidesImagePicker for the cover's image well. Omit or 'none' to leave the well empty — do not keep sample photos."`
+	ClosingKind string            `json:"closingKind,omitempty" jsonschema:"Official closing variant kind (closing, closing-2, …). Last slide must use this kind when the catalog lists closing family."`
 	Source      string            `json:"source,omitempty" jsonschema:"Optional slug of an existing saved deck to clone. Copies theme, assets, and slides into this new session deck and sets source_slug so Save can offer Override Original."`
 }
 
@@ -167,10 +171,18 @@ type DeckResult struct {
 	SlideCount   int                     `json:"slideCount"`
 	Archetypes   []themes.Archetype      `json:"archetypes,omitempty"`
 	Catalog      []ArchetypeCatalogEntry `json:"catalog,omitempty"`
+	Palettes     []PaletteInfo           `json:"palettes,omitempty"`
 	StyleGuide   string                  `json:"styleGuide,omitempty"`
 	Instructions string                  `json:"instructions,omitempty"`
 	// SlideIndex is the slim get_deck listing (id/position/title, no markup).
 	SlideIndex []SlideInfo `json:"slideIndex,omitempty"`
+}
+
+// PaletteInfo is a lightweight colorway entry (id + label, no tokens) so the
+// model knows to call ask_user slidesPalettePicker without copying hex.
+type PaletteInfo struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
 }
 
 // SlideInfo is one slide's identity without canonical markup.
@@ -184,7 +196,7 @@ type SlideInfo struct {
 // supply per-slot text (or an asset-ref for image slots). The server copies
 // the stored archetype markup and substitutes — the model never reprints chrome.
 type FillSlideArgs struct {
-	DeckSlug string            `json:"deck_slug" jsonschema:"Slug of the deck to update."`
+	DeckSlug string            `json:"deck_slug" jsonschema:"Persist slug from create_deck, or the hint — in chat the server remaps a hint onto this session's draft."`
 	Position int               `json:"position" jsonschema:"Zero-based slide position. Writing an occupied position replaces that slide."`
 	Kind     string            `json:"kind,omitempty" jsonschema:"Archetype kind from the create_deck catalog (e.g. title, pattern-2)."`
 	Label    string            `json:"label,omitempty" jsonschema:"Archetype label from the catalog (e.g. '3 rounded cards'). Used when kind is omitted."`
@@ -215,7 +227,7 @@ type FillSlideSpec struct {
 // FillSlidesArgs writes many slides in one tool call so the model does not pay
 // an LLM round-trip per slide.
 type FillSlidesArgs struct {
-	DeckSlug string          `json:"deck_slug" jsonschema:"Slug of the deck to update."`
+	DeckSlug string          `json:"deck_slug" jsonschema:"Persist slug from create_deck, or the hint — in chat the server remaps a hint onto this session's draft."`
 	Slides   []FillSlideSpec `json:"slides" jsonschema:"Every slide to write in this call. Include the whole deck; do not emit one fill_slide per turn."`
 }
 
@@ -290,6 +302,7 @@ type TemplateSummary struct {
 	Scope          string             `json:"scope,omitempty"`
 	ArchetypeKinds []string           `json:"archetypeKinds,omitempty"`
 	Archetypes     []ArchetypeVariant `json:"archetypes,omitempty"`
+	Palettes       []PaletteInfo      `json:"palettes,omitempty"`
 	HasStyleGuide  bool               `json:"hasStyleGuide,omitempty"`
 }
 
@@ -396,19 +409,7 @@ func createDeck(ctx context.Context, args CreateDeckArgs) (DeckResult, error) {
 		if slug == "" || slug == src {
 			slug = src + "-draft"
 		}
-		// If a deck with this slug already exists, handle the collision:
-		// - Session-scoped: delete it (stale previous attempt).
-		// - Saved (permanent): pick a unique slug by appending a hash suffix.
-		if existing, _ := svc.Store.GetDeck(ctx, slug); existing != nil {
-			if existing.SessionID != "" {
-				// Stale session deck from a previous attempt — safe to remove.
-				_ = svc.Store.DeleteDeck(ctx, slug)
-			} else {
-				// Permanent deck — append a short hash to avoid collision.
-				h := sha256.Sum256([]byte(slug + store.SessionIDFromContext(ctx)))
-				slug = slug + "-" + fmt.Sprintf("%x", h[:3])
-			}
-		}
+		slug = resolvePersonalDeckSlug(ctx, svc, slug)
 		theme := srcDeck.Theme
 		if len(args.Theme) > 0 {
 			theme = args.Theme
@@ -449,15 +450,20 @@ func createDeck(ctx context.Context, args CreateDeckArgs) (DeckResult, error) {
 		if !ok {
 			return DeckResult{}, fmt.Errorf("unknown template %q", name)
 		}
-		// Merge tokens: template tokens first, explicit args.Theme overlays win.
-		merged := make(map[string]string, len(tmpl.Tokens)+len(args.Theme))
+		// Merge tokens: template tokens, then named palette, then explicit theme.
+		merged := make(map[string]string, len(tmpl.Tokens)+len(args.Theme)+8)
 		for k, v := range tmpl.Tokens {
 			merged[k] = v
+		}
+		if err := applyPaletteTokens(tmpl, args.Palette, merged); err != nil {
+			return DeckResult{}, err
 		}
 		for k, v := range args.Theme {
 			merged[k] = v
 		}
 		merged[themeKeyTemplateName] = tmpl.Name
+		stampBookendKinds(tmpl, args, merged)
+		slug = resolvePersonalDeckSlug(ctx, svc, slug)
 		deck, err := svc.CreateDeckWithAssets(ctx, slug, title, description, merged, seedLightweightAssets(tmpl.Assets))
 		if err != nil {
 			return DeckResult{}, err
@@ -465,16 +471,9 @@ func createDeck(ctx context.Context, args CreateDeckArgs) (DeckResult, error) {
 		view := deckView(deck)
 		view.Assets = assetCatalog(tmpl.Assets)
 		view.AssetCount = len(view.Assets)
-		result := DeckResult{Deck: view, Catalog: catalogFromTemplate(tmpl)}
+		result := DeckResult{Deck: view, Catalog: catalogFromTemplate(tmpl), Palettes: paletteInfos(tmpl)}
 		if len(result.Catalog) > 0 {
-			result.Instructions = "MANDATORY: author the whole deck in ONE fill_slides call (slides: [{position, kind or label, fills}, ...]). " +
-				"Do NOT call fill_slide once per slide — that is one LLM round-trip per slide. fill_slide is only for later single-slide edits. " +
-				"Do NOT call write_slide and do NOT copy archetype markup. " +
-				"Body and cover slides: prefer recipe-* catalog entries (named slots: eyebrow, headline, body_1, item_1_title, …). " +
-				"Pick the recipe whose slot count matches the content. A chapter is an eyebrow on a full content slide — do not insert empty section dividers. " +
-				"Imported pattern-* is optional when it matches the same job; Title and Text is last resort. " +
-				"Fill EVERY required text slot. Cover = recipe-cover (thesis in the dek). Closer = recipe-closer. " +
-				"Vary at least three recipe-* kinds in a deck longer than 6 slides."
+			result.Instructions = createDeckCatalogInstructions(tmpl, merged)
 		}
 		result.StyleGuide = RecipeGuideMarkdown()
 		if tmpl.StyleGuide != nil && tmpl.StyleGuide.Markdown != "" {
@@ -483,11 +482,68 @@ func createDeck(ctx context.Context, args CreateDeckArgs) (DeckResult, error) {
 		return result, nil
 	}
 
+	slug = resolvePersonalDeckSlug(ctx, svc, slug)
 	deck, err := svc.CreateDeck(ctx, slug, title, description, args.Theme)
 	if err != nil {
 		return DeckResult{}, err
 	}
 	return DeckResult{Deck: deckView(deck)}, nil
+}
+
+// sessionDraftSlug is the stable persist key for a chat session's working deck.
+// One draft per session so two chats on the same topic cannot overwrite each other.
+func sessionDraftSlug(sessionID string) string {
+	return "s-" + strings.TrimSpace(sessionID)
+}
+
+// resolvePersonalDeckSlug picks the persist slug for create_deck.
+// In a chat session the deck is always stored as s-<sessionID>. A retry in the
+// SAME session replaces that leftover. Another session's draft and saved decks
+// are never deleted.
+func resolvePersonalDeckSlug(ctx context.Context, svc Service, requested string) string {
+	sid := strings.TrimSpace(store.SessionIDFromContext(ctx))
+	slug := strings.TrimSpace(requested)
+	if sid != "" {
+		slug = sessionDraftSlug(sid)
+	}
+	if slug == "" {
+		slug = "deck"
+	}
+	existing, _ := svc.Store.GetDeck(ctx, slug)
+	if existing == nil {
+		return slug
+	}
+	if sid != "" && existing.SessionID == sid {
+		_ = svc.Store.DeleteDeck(ctx, slug)
+		return slug
+	}
+	h := sha256.Sum256([]byte(slug + "|" + sid + "|" + requested))
+	return slug + "-" + fmt.Sprintf("%x", h[:3])
+}
+
+// resolveWorkingDeckSlug maps a model-supplied hint onto this chat's draft.
+// create_deck persists s-<sessionID>, but the model often still passes the
+// human hint (e.g. steve-jobs-life). Prefer the session draft when it exists
+// so fill/write never touch another session's deck or a saved deck that
+// happens to share the hint.
+func resolveWorkingDeckSlug(ctx context.Context, svc Service, requested string) string {
+	requested = strings.TrimSpace(requested)
+	sid := strings.TrimSpace(store.SessionIDFromContext(ctx))
+	if sid != "" {
+		draft := sessionDraftSlug(sid)
+		if d, err := svc.Store.GetDeck(ctx, draft); err == nil && d != nil {
+			return draft
+		}
+		if requested != "" {
+			if d, err := svc.Store.GetDeck(ctx, requested); err == nil && d != nil {
+				if d.SessionID == sid || d.SessionID == "" {
+					return requested
+				}
+			}
+		}
+		return draft
+	}
+	return requested
 }
 
 func fillSlide(ctx context.Context, args FillSlideArgs) (FillSlideResult, error) {
@@ -541,7 +597,7 @@ func applyFills(ctx context.Context, deckSlug, templateName string, specs []Fill
 	if err != nil {
 		return empty, "", nil, err
 	}
-	deckSlug = strings.TrimSpace(deckSlug)
+	deckSlug = resolveWorkingDeckSlug(ctx, svc, deckSlug)
 	deck, _, err := svc.Deck(ctx, deckSlug)
 	if err != nil {
 		return empty, "", nil, err
@@ -557,6 +613,9 @@ func applyFills(ctx context.Context, deckSlug, templateName string, specs []Fill
 	if !ok {
 		return empty, "", nil, fmt.Errorf("unknown template %q", tmplName)
 	}
+	if deck != nil {
+		tmpl = overlayDeckTheme(tmpl, deck.Theme)
+	}
 
 	type prepared struct {
 		spec   FillSlideSpec
@@ -564,6 +623,13 @@ func applyFills(ctx context.Context, deckSlug, templateName string, specs []Fill
 		filled []string
 	}
 	items := make([]prepared, 0, len(specs))
+	total := 0
+	for _, spec := range specs {
+		if spec.Position+1 > total {
+			total = spec.Position + 1
+		}
+	}
+	skin := SkinFor(tmpl)
 	for i, spec := range specs {
 		arch, err := findTemplateArchetype(tmpl, spec.Kind, spec.Label)
 		if err != nil {
@@ -575,20 +641,39 @@ func applyFills(ctx context.Context, deckSlug, templateName string, specs []Fill
 				chrome.DeckTitle = strings.TrimSpace(deck.Title)
 			}
 			chrome.Page = spec.Position + 1
+			chrome.Total = total
 			arch, err = recipeArchetypeFor(tmpl, arch.Kind, chrome, spec.Fills)
 			if err != nil {
 				return empty, "", nil, fmt.Errorf("slides[%d]: %w", i, err)
 			}
 		}
-		if miss := missingTextSlotFills(arch, spec.Fills); len(miss) > 0 {
+		fills := aliasOfficialBookendFills(arch, spec.Fills)
+		titleImage := ""
+		if deck != nil && deck.Theme != nil {
+			titleImage = deck.Theme[themeKeyTitleImage]
+		}
+		fills = applyCoverPhotoFill(arch, fills, titleImage)
+		if miss := missingTextSlotFills(arch, fills); len(miss) > 0 {
 			return empty, "", nil, fmt.Errorf("slides[%d]: missing fills for text slots %s — fill every required slot (or pick a recipe with fewer items)", i, strings.Join(miss, ", "))
 		}
-		markup, err := fillArchetypeMarkup(arch.Markup, spec.Fills)
+		markup, err := fillArchetypeMarkup(arch.Markup, fills)
 		if err != nil {
 			return empty, "", nil, fmt.Errorf("slides[%d]: %w", i, err)
 		}
-		filled := make([]string, 0, len(spec.Fills))
-		for id := range spec.Fills {
+		if isOfficialBookendKind(arch.Kind) {
+			filledPhotos := make(map[string]bool)
+			for id, v := range fills {
+				if isImageFillSlot(arch, id) && strings.TrimSpace(v) != "" {
+					filledPhotos[id] = true
+				}
+			}
+			markup = stripUnselectedHeroPhotos(markup, filledPhotos, mutedColor(tmpl.Tokens))
+		}
+		if isRecipeKind(arch.Kind) {
+			markup = applyAccentSpans(markup, fills, skin.Accent)
+		}
+		filled := make([]string, 0, len(fills))
+		for id := range fills {
 			filled = append(filled, id)
 		}
 		sort.Strings(filled)
@@ -673,11 +758,12 @@ func writeSlide(ctx context.Context, args WriteSlideArgs) (WriteSlideResult, err
 	if err != nil {
 		return WriteSlideResult{}, err
 	}
-	slide, diagnostics, err := svc.WriteSlide(ctx, strings.TrimSpace(args.DeckSlug), args.Position, args.Markup, args.Notes)
+	slug := resolveWorkingDeckSlug(ctx, svc, args.DeckSlug)
+	slide, diagnostics, err := svc.WriteSlide(ctx, slug, args.Position, args.Markup, args.Notes)
 	if err != nil {
 		return WriteSlideResult{Diagnostics: diagnostics}, err
 	}
-	deck, slides, err := svc.Deck(ctx, args.DeckSlug)
+	deck, slides, err := svc.Deck(ctx, slug)
 	if err != nil {
 		return WriteSlideResult{}, fmt.Errorf("reload deck: %w", err)
 	}
@@ -689,7 +775,7 @@ func getDeck(ctx context.Context, args GetDeckArgs) (DeckResult, error) {
 	if err != nil {
 		return DeckResult{}, err
 	}
-	deck, slides, err := svc.Deck(ctx, strings.TrimSpace(args.Slug))
+	deck, slides, err := svc.Deck(ctx, resolveWorkingDeckSlug(ctx, svc, args.Slug))
 	if err != nil {
 		return DeckResult{}, err
 	}
@@ -715,7 +801,7 @@ func readSlide(ctx context.Context, args ReadSlideArgs) (WriteSlideResult, error
 	if err != nil {
 		return WriteSlideResult{}, err
 	}
-	deck, slides, err := svc.Deck(ctx, strings.TrimSpace(args.DeckSlug))
+	deck, slides, err := svc.Deck(ctx, resolveWorkingDeckSlug(ctx, svc, args.DeckSlug))
 	if err != nil {
 		return WriteSlideResult{}, err
 	}
@@ -784,8 +870,103 @@ func templateSummary(t themes.Template, scope string) TemplateSummary {
 		Scope:          scope,
 		ArchetypeKinds: kinds,
 		Archetypes:     variants,
+		Palettes:       paletteInfos(t),
 		HasStyleGuide:  t.StyleGuide != nil,
 	}
+}
+
+func paletteInfos(t themes.Template) []PaletteInfo {
+	if len(t.Palettes) == 0 {
+		return nil
+	}
+	out := make([]PaletteInfo, 0, len(t.Palettes))
+	for _, p := range t.Palettes {
+		out = append(out, PaletteInfo{ID: p.ID, Label: p.Label})
+	}
+	return out
+}
+
+func applyPaletteTokens(tmpl themes.Template, paletteID string, merged map[string]string) error {
+	id := strings.TrimSpace(paletteID)
+	if id == "" || strings.EqualFold(id, "default") {
+		return nil
+	}
+	pal, ok := tmpl.PaletteByID(id)
+	if !ok {
+		return fmt.Errorf("unknown palette %q for template %q", id, tmpl.Name)
+	}
+	for k, v := range pal.Tokens {
+		if strings.TrimSpace(v) == "" {
+			continue
+		}
+		merged[k] = v
+	}
+	merged[themeKeyPalette] = pal.ID
+	return nil
+}
+
+func stampBookendKinds(tmpl themes.Template, args CreateDeckArgs, merged map[string]string) {
+	titleKind := strings.TrimSpace(args.TitleKind)
+	if strings.EqualFold(titleKind, "default") {
+		titleKind = ""
+	}
+	closingKind := strings.TrimSpace(args.ClosingKind)
+	if strings.EqualFold(closingKind, "default") {
+		closingKind = ""
+	}
+	titles := officialBookendKinds(tmpl, "title")
+	closings := officialBookendKinds(tmpl, "closing")
+	if titleKind == "" && len(titles) == 1 {
+		titleKind = titles[0]
+	}
+	if closingKind == "" && len(closings) == 1 {
+		closingKind = closings[0]
+	}
+	if titleKind != "" {
+		merged[themeKeyTitleKind] = titleKind
+	}
+	if closingKind != "" {
+		merged[themeKeyClosingKind] = closingKind
+	}
+	if img := normalizeCoverPhotoRef(args.TitleImage); img != "" {
+		merged[themeKeyTitleImage] = img
+	}
+}
+
+func createDeckCatalogInstructions(tmpl themes.Template, theme map[string]string) string {
+	s := "MANDATORY: author the whole deck in ONE fill_slides call (slides: [{position, kind or label, fills}, ...]). " +
+		"Do NOT call fill_slide once per slide — that is one LLM round-trip per slide. fill_slide is only for later single-slide edits. " +
+		"Do NOT call write_slide and do NOT copy archetype markup. " +
+		"Body slides: recipe-* catalog entries (named slots: eyebrow, headline, body_1, item_1_title, …). " +
+		"Pick the recipe whose slot count matches the content. A chapter is an eyebrow on a full content slide — do not insert empty section dividers. "
+	titles := officialBookendKinds(tmpl, "title")
+	closings := officialBookendKinds(tmpl, "closing")
+	if len(titles) > 0 {
+		s += "Slide 0 MUST be the official title family (" + strings.Join(titles, ", ") + "), not recipe-cover. "
+		if k := strings.TrimSpace(theme[themeKeyTitleKind]); k != "" {
+			s += "Use kind " + k + ". "
+		}
+		s += "Fill that variant's catalog fillSlots (often ph-* or the ids in slotHints). headline maps to the title slot, dek to the subtitle/body slot when those recipe names are not on the cover. "
+		if k := strings.TrimSpace(theme[themeKeyTitleImage]); k != "" {
+			s += "Cover photo is " + k + " in the first ph-pic-* slot. "
+		} else {
+			s += "Do not keep sample cover photos; omit ph-pic fills unless the user picked a template photo (titleImage). "
+		}
+	} else {
+		s += "Cover = recipe-cover (thesis in the dek). "
+	}
+	if len(closings) > 0 {
+		s += "Last slide MUST be the official closing family (" + strings.Join(closings, ", ") + "), not recipe-closer. "
+		if k := strings.TrimSpace(theme[themeKeyClosingKind]); k != "" {
+			s += "Use kind " + k + ". "
+		}
+	} else {
+		s += "Closer = recipe-closer. "
+	}
+	s += "Fill EVERY required text slot listed in this catalog's fillSlots (product closer requires thesis + 3 takeaway chips; product cover has two meta cells). " +
+		"Extra fill keys the skin does not emit are ignored. " +
+		"Vary at least three recipe-* kinds in a deck longer than 6 slides."
+	return s
 }
 
 // getTemplateVariantPreviews resolves a template and returns the per-variant
@@ -910,7 +1091,16 @@ func coverArchetype(t themes.Template) *themes.Archetype {
 // archetypeThumbnail prefers a baked PNG (kind=image) so the model never sees
 // full ASD markup. Built-ins without ThumbnailRef fall back to a live
 // slides-archetype render of the (small) markup.
+// Title/closing pickers always live-render chrome with sample photos stripped
+// so every cover does not show the same template person/bike.
 func archetypeThumbnail(templateName string, tokens map[string]string, arch themes.Archetype) *AskUserThumbnail {
+	if isOfficialBookendKind(arch.Kind) {
+		markup := layoutPreviewMarkup(arch.Markup, tokens)
+		if strings.TrimSpace(markup) == "" {
+			return nil
+		}
+		return &AskUserThumbnail{Kind: "slides-archetype", Markup: markup, Theme: tokens, Template: templateName}
+	}
 	if ref := strings.TrimSpace(arch.ThumbnailRef); ref != "" {
 		return &AskUserThumbnail{Kind: "image", AssetRef: ref, Template: templateName}
 	}
@@ -918,6 +1108,170 @@ func archetypeThumbnail(templateName string, tokens map[string]string, arch them
 		return nil
 	}
 	return &AskUserThumbnail{Kind: "slides-archetype", Markup: arch.Markup, Theme: tokens, Template: templateName}
+}
+
+func shouldOfferDefaultChoice(kind string) bool {
+	base := stripVariantSuffix(strings.TrimSpace(kind))
+	return base == "title" || base == "closing"
+}
+
+// archetypeVisualScore ranks a cover/end variant so photo + color layouts
+// appear before empty white title skeletons in the picker.
+func archetypeVisualScore(a themes.Archetype) int {
+	s := 0
+	re := regexp.MustCompile(`<ast-image\b([^>]*)>`)
+	for _, m := range re.FindAllStringSubmatch(a.Markup, -1) {
+		tag := m[1]
+		if !strings.Contains(tag, "asset-ref=") {
+			continue
+		}
+		area := attrIntFrom(tag, "w") * attrIntFrom(tag, "h")
+		if area >= 400*300 {
+			s += 120
+		} else if area >= 250*180 {
+			s += 40
+		}
+	}
+	for _, id := range a.FillSlots {
+		if strings.HasPrefix(id, "ph-pic-") {
+			s += 40
+		}
+	}
+	n := strings.Count(a.Markup, "<ast-shape ")
+	if n > 15 {
+		n = 15
+	}
+	s += n * 4
+	return s
+}
+
+func appendDefaultAskOption(opts []AskUserOption, description string) []AskUserOption {
+	for _, o := range opts {
+		if o.ID == "default" {
+			return opts
+		}
+	}
+	return append(opts, AskUserOption{ID: "default", Label: "Use the default", Description: description})
+}
+
+// palettePickerOptions returns one option per template palette, each with a
+// live recipe-cover thumbnail recolored to that palette. Imported brand
+// templates typically have no palettes — callers get an error rather than a
+// made-up colorway list.
+func palettePickerOptions(ctx context.Context, templateName string) ([]templatePick, error) {
+	svc, err := personalService(ctx)
+	if err != nil {
+		return nil, err
+	}
+	tmpl, ok := svc.resolveTemplate(ctx, templateName)
+	if !ok {
+		return nil, fmt.Errorf("unknown template %q", templateName)
+	}
+	if len(tmpl.Palettes) == 0 {
+		return nil, fmt.Errorf("template %q has no color palettes", tmpl.Name)
+	}
+	chrome := ExtractChrome(tmpl)
+	picks := make([]templatePick, 0, len(tmpl.Palettes))
+	for _, pal := range tmpl.Palettes {
+		tokens := cloneStringMap(tmpl.Tokens)
+		if tokens == nil {
+			tokens = make(map[string]string)
+		}
+		for k, v := range pal.Tokens {
+			if strings.TrimSpace(v) == "" {
+				continue
+			}
+			tokens[k] = v
+		}
+		clone := tmpl
+		clone.Tokens = tokens
+		markup, err := RenderRecipe(RecipeCover, SkinFor(clone), clone.StyleGuide, chrome, nil)
+		if err != nil {
+			return nil, fmt.Errorf("palette %q cover: %w", pal.ID, err)
+		}
+		thumb := &AskUserThumbnail{
+			Kind:     "slides-archetype",
+			Markup:   markup,
+			Theme:    tokens,
+			Template: tmpl.Name,
+			OptionID: pal.ID,
+		}
+		picks = append(picks, templatePick{
+			option:    AskUserOption{ID: pal.ID, Label: pal.Label},
+			thumbnail: thumb,
+		})
+	}
+	return picks, nil
+}
+
+func isRasterDataURI(v string) bool {
+	v = strings.TrimSpace(v)
+	return strings.HasPrefix(v, "data:image/") && !strings.HasPrefix(v, "data:image/svg+xml")
+}
+
+func collectTemplateHeroPhotos(tmpl themes.Template) []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(ref string) {
+		ref = strings.TrimSpace(ref)
+		if ref == "" || seen[ref] {
+			return
+		}
+		if data, ok := tmpl.Assets[ref]; ok && !isRasterDataURI(data) {
+			return
+		}
+		seen[ref] = true
+		out = append(out, ref)
+	}
+	for _, a := range tmpl.Archetypes {
+		if stripVariantSuffix(a.Kind) != "title" {
+			continue
+		}
+		for _, m := range astImageTagRe.FindAllStringSubmatch(a.Markup, -1) {
+			attrs := m[1]
+			if attrs == "" && len(m) > 2 {
+				attrs = m[2]
+			}
+			ref := attrValue(attrs, "asset-ref")
+			area := attrIntFrom(attrs, "w") * attrIntFrom(attrs, "h")
+			if ref == "" || area < heroPhotoMinArea {
+				continue
+			}
+			add(ref)
+		}
+	}
+	return out
+}
+
+// templateHeroPhotoOptions lists unique rasters from the template's example
+// title slides so the user can pick ONE photo for the cover well.
+func templateHeroPhotoOptions(ctx context.Context, templateName string) ([]templatePick, error) {
+	svc, err := personalService(ctx)
+	if err != nil {
+		return nil, err
+	}
+	tmpl, ok := svc.resolveTemplate(ctx, templateName)
+	if !ok {
+		return nil, fmt.Errorf("unknown template %q", templateName)
+	}
+	refs := collectTemplateHeroPhotos(tmpl)
+	if len(refs) == 0 {
+		return nil, fmt.Errorf("template %q has no example title photos", tmpl.Name)
+	}
+	picks := make([]templatePick, 0, len(refs))
+	for i, ref := range refs {
+		label := fmt.Sprintf("Photo %d", i+1)
+		picks = append(picks, templatePick{
+			option: AskUserOption{ID: ref, Label: label, Description: "From this template's example covers"},
+			thumbnail: &AskUserThumbnail{
+				Kind:     "image",
+				AssetRef: ref,
+				Template: tmpl.Name,
+				OptionID: ref,
+			},
+		})
+	}
+	return picks, nil
 }
 
 // --- ask_user: generic interactive chat question ---
@@ -976,6 +1330,12 @@ type AskUserArgs struct {
 	// the catalog), and attaches a live thumbnail of each template's cover so the
 	// user picks by seeing the design. Do NOT hand-copy markup or thumbnails.
 	SlidesTemplatePicker bool `json:"slidesTemplatePicker,omitempty" jsonschema:"For the template-choice question: set true (with kind='select', no options) to auto-generate one option per available template, each with a live thumbnail of that template's cover slide."`
+	// Slides convenience: colorways on a template that defines Palettes (Product
+	// Deck). Set true with kind='select' and slidesTemplate; omit options.
+	SlidesPalettePicker bool `json:"slidesPalettePicker,omitempty" jsonschema:"For a color-palette question: set true (kind='select') with slidesTemplate. ask_user lists each palette with a live recolored cover thumbnail. Omit options. Do not invent palettes for imported brand templates."`
+	// Slides convenience: photos from the template's example title slides, for
+	// the cover's single image well. Set true with kind='select' and slidesTemplate.
+	SlidesImagePicker bool `json:"slidesImagePicker,omitempty" jsonschema:"For the cover-photo question after a title layout with a ph-pic well: set true (kind='select') with slidesTemplate. ask_user lists each unique template photo. Omit options. Pass the chosen id as titleImage on create_deck."`
 }
 
 // AskUserResult is the structured payload the chat runner turns into a
@@ -1050,12 +1410,57 @@ func askUser(ctx context.Context, args AskUserArgs) (AskUserResult, error) {
 		}
 	}
 
-	// Slides convenience: when slidesTemplate is set, resolve the template's
-	// per-variant preview markup and (a) generate one option per variant if the
-	// model omitted options, and (b) auto-attach a live slides-archetype
-	// thumbnail to every option, matched by label (case-insensitive) then id.
-	// This is what makes the picker VISUAL without the model copying markup.
-	if template := strings.TrimSpace(args.SlidesTemplate); template != "" && kind == "select" {
+	// Slides convenience: color palettes on a template (Product Deck). Each
+	// option is a live recipe-cover recolored with that palette's tokens.
+	if args.SlidesPalettePicker && kind == "select" {
+		template := strings.TrimSpace(args.SlidesTemplate)
+		if template == "" {
+			return AskUserResult{}, fmt.Errorf("slidesPalettePicker requires slidesTemplate")
+		}
+		picks, err := palettePickerOptions(ctx, template)
+		if err != nil {
+			return AskUserResult{}, fmt.Errorf("resolve palette picker: %w", err)
+		}
+		if len(inOptions) < len(picks) {
+			inOptions = inOptions[:0]
+			for _, p := range picks {
+				inOptions = append(inOptions, AskUserOption{ID: p.option.ID, Label: p.option.Label, Description: p.option.Description})
+			}
+		}
+		for _, p := range picks {
+			if _, ok := thumbByOption[p.option.ID]; ok {
+				continue
+			}
+			if p.thumbnail != nil {
+				thumbByOption[p.option.ID] = *p.thumbnail
+			}
+		}
+		inOptions = appendDefaultAskOption(inOptions, "Keep this template's default colorway")
+	} else if args.SlidesImagePicker && kind == "select" {
+		template := strings.TrimSpace(args.SlidesTemplate)
+		if template == "" {
+			return AskUserResult{}, fmt.Errorf("slidesImagePicker requires slidesTemplate")
+		}
+		picks, err := templateHeroPhotoOptions(ctx, template)
+		if err != nil {
+			return AskUserResult{}, fmt.Errorf("resolve image picker: %w", err)
+		}
+		if len(inOptions) < len(picks) {
+			inOptions = inOptions[:0]
+			for _, p := range picks {
+				inOptions = append(inOptions, AskUserOption{ID: p.option.ID, Label: p.option.Label, Description: p.option.Description})
+			}
+		}
+		for _, p := range picks {
+			if _, ok := thumbByOption[p.option.ID]; ok {
+				continue
+			}
+			if p.thumbnail != nil {
+				thumbByOption[p.option.ID] = *p.thumbnail
+			}
+		}
+		inOptions = appendDefaultAskOption(inOptions, "No photo — leave the cover image well empty")
+	} else if template := strings.TrimSpace(args.SlidesTemplate); template != "" && kind == "select" {
 		previews, err := getTemplateVariantPreviews(ctx, TemplateVariantPreviewsArgs{
 			Template: template,
 			Kind:     strings.TrimSpace(args.SlidesKind),
@@ -1074,6 +1479,14 @@ func askUser(ctx context.Context, args AskUserArgs) (AskUserResult, error) {
 		archByKind := make(map[string]themes.Archetype, len(tmpl.Archetypes))
 		for _, a := range tmpl.Archetypes {
 			archByKind[a.Kind] = a
+		}
+		// Title/closing pickers lead with the richest cover (photo + color) so
+		// an empty white layout is not the first tile the user clicks.
+		if shouldOfferDefaultChoice(args.SlidesKind) {
+			sort.SliceStable(previews.Variants, func(i, j int) bool {
+				return archetypeVisualScore(archByKind[previews.Variants[i].Kind]) >
+					archetypeVisualScore(archByKind[previews.Variants[j].Kind])
+			})
 		}
 		byLabel := make(map[string]TemplateVariantPreview, len(previews.Variants))
 		for _, v := range previews.Variants {
@@ -1099,11 +1512,13 @@ func askUser(ctx context.Context, args AskUserArgs) (AskUserResult, error) {
 					}
 					label = fmt.Sprintf("%s %d", capitalizeFirst(label), i+1)
 				}
-				// IDs MUST be unique: the frontend keys option tiles by id, so two
-				// variants that slugify to the same id (e.g. duplicate/empty labels)
-				// would otherwise collapse into a single rendered tile. Disambiguate
-				// collisions with a numeric suffix.
-				id := slugifyOptionID(label)
+				// Prefer the catalog kind (title, title-2) as the option id so
+				// fill_slides / titleKind can use the ask_user result directly.
+				// Fall back to a slug of the label when kinds collide.
+				id := strings.TrimSpace(v.Kind)
+				if id == "" || seenID[id] > 0 {
+					id = slugifyOptionID(label)
+				}
 				baseID := id
 				if n := seenID[baseID]; n > 0 {
 					id = fmt.Sprintf("%s-%d", baseID, n+1)
@@ -1131,6 +1546,9 @@ func askUser(ctx context.Context, args AskUserArgs) (AskUserResult, error) {
 			}
 			thumb.OptionID = o.ID
 			thumbByOption[o.ID] = *thumb
+		}
+		if shouldOfferDefaultChoice(args.SlidesKind) {
+			inOptions = appendDefaultAskOption(inOptions, "I'll pick the variant that fits this deck")
 		}
 	}
 
@@ -1220,7 +1638,7 @@ func validateDeck(ctx context.Context, args ValidateDeckArgs) (ValidateDeckResul
 	if err != nil {
 		return ValidateDeckResult{}, err
 	}
-	deck, slides, err := svc.Deck(ctx, strings.TrimSpace(args.Slug))
+	deck, slides, err := svc.Deck(ctx, resolveWorkingDeckSlug(ctx, svc, args.Slug))
 	if err != nil {
 		return ValidateDeckResult{}, err
 	}
@@ -1769,7 +2187,7 @@ func reviewDeck(ctx context.Context, args ReviewDeckArgs) (ReviewDeckResult, err
 	if err != nil {
 		return ReviewDeckResult{}, err
 	}
-	slug := strings.TrimSpace(args.Slug)
+	slug := resolveWorkingDeckSlug(ctx, svc, args.Slug)
 	deck, _, err := svc.Deck(ctx, slug)
 	if err != nil {
 		return ReviewDeckResult{}, err
@@ -1972,7 +2390,7 @@ func listDeckAssets(ctx context.Context, args ListDeckAssetsArgs) (ListDeckAsset
 	if err != nil {
 		return ListDeckAssetsResult{}, err
 	}
-	deck, _, err := svc.Deck(ctx, strings.TrimSpace(args.DeckSlug))
+	deck, _, err := svc.Deck(ctx, resolveWorkingDeckSlug(ctx, svc, args.DeckSlug))
 	if err != nil {
 		return ListDeckAssetsResult{}, err
 	}
@@ -2016,7 +2434,7 @@ func mergeAssetCatalogs(a, b []AssetInfo) []AssetInfo {
 
 // AddDeckImageArgs defines the add_deck_image tool input.
 type AddDeckImageArgs struct {
-	DeckSlug string `json:"deck_slug" jsonschema:"Slug of the deck to add the image to."`
+	DeckSlug string `json:"deck_slug" jsonschema:"Persist slug from create_deck, or the hint — in chat the server remaps a hint onto this session's draft."`
 	URL      string `json:"url" jsonschema:"Public https URL of an image to fetch and add to the deck asset library."`
 	Alt      string `json:"alt,omitempty" jsonschema:"Optional alt text describing the image."`
 }
@@ -2046,7 +2464,7 @@ func addDeckImage(ctx context.Context, args AddDeckImageArgs) (AddDeckImageResul
 	if err != nil {
 		return AddDeckImageResult{}, err
 	}
-	slug := strings.TrimSpace(args.DeckSlug)
+	slug := resolveWorkingDeckSlug(ctx, svc, args.DeckSlug)
 	url := strings.TrimSpace(args.URL)
 	if slug == "" || url == "" {
 		return AddDeckImageResult{}, fmt.Errorf("deck_slug and url are required")
@@ -2071,13 +2489,13 @@ func GetTools() ([]tool.Tool, error) {
 		description string
 		newTool     func() (tool.Tool, error)
 	}{
-		{"create_deck", "Create a new private Astonish Slides deck. Pass template from list_slide_templates after the USER chose it. If they did not name a template or explicitly delegate the choice, do NOT call this yet — call ask_user with slidesTemplatePicker=true first. Seeds theme, fonts, and a slim catalog. Author with fill_slides; do not copy markup.", func() (tool.Tool, error) {
-			return functiontool.New(functiontool.Config{Name: "create_deck", Description: "Create a new private Astonish Slides deck. Pass template from list_slide_templates after the USER chose it. If they did not name a template or explicitly delegate the choice, do NOT call this yet — call ask_user with slidesTemplatePicker=true first. Seeds theme, fonts, and a slim catalog. Author with fill_slides; do not copy markup."}, func(ctx tool.Context, args CreateDeckArgs) (DeckResult, error) {
+		{"create_deck", "Create a new private Astonish Slides deck AFTER ask_user intake (audience, length, who picks the template, title variant, optional cover photo) unless those answers are already explicit in the user message. Using existing knowledge / skipping search is not a skip. Pass template (named, delegated, or picked). Optional palette, titleKind, titleImage, closingKind. Seeds theme, fonts, and a slim catalog. Author with fill_slides; do not copy markup.", func() (tool.Tool, error) {
+			return functiontool.New(functiontool.Config{Name: "create_deck", Description: "Create a new private Astonish Slides deck AFTER ask_user intake (audience, length, who picks the template, title variant, optional cover photo) unless those answers are already explicit in the user message. Using existing knowledge / skipping search is not a skip. Pass template (named, delegated, or picked). Optional palette, titleKind, titleImage, closingKind. Seeds theme, fonts, and a slim catalog. Author with fill_slides; do not copy markup."}, func(ctx tool.Context, args CreateDeckArgs) (DeckResult, error) {
 				return createDeck(ctx, args)
 			})
 		}},
-		{"fill_slides", "Write many slides in one call from template catalog entries. Pass slides: [{position, kind or label, fills}]. Prefer this over fill_slide so the whole deck is authored in one LLM turn. Prefer recipe-* layout types for cover and body slides; pattern-* only when it matches the same job.", func() (tool.Tool, error) {
-			return functiontool.New(functiontool.Config{Name: "fill_slides", Description: "Write many slides in one call from template catalog entries. Pass slides: [{position, kind or label, fills}]. Prefer this over fill_slide so the whole deck is authored in one LLM turn. Prefer recipe-* layout types for cover and body slides; pattern-* only when it matches the same job."}, func(ctx tool.Context, args FillSlidesArgs) (FillSlidesResult, error) {
+		{"fill_slides", "Write many slides in one call from template catalog entries. Pass slides: [{position, kind or label, fills}]. Prefer this over fill_slide so the whole deck is authored in one LLM turn. Slide 0 is the official title family when the catalog lists title*; last slide is official closing* when listed; body is recipe-*.", func() (tool.Tool, error) {
+			return functiontool.New(functiontool.Config{Name: "fill_slides", Description: "Write many slides in one call from template catalog entries. Pass slides: [{position, kind or label, fills}]. Prefer this over fill_slide so the whole deck is authored in one LLM turn. Slide 0 is the official title family when the catalog lists title*; last slide is official closing* when listed; body is recipe-*."}, func(ctx tool.Context, args FillSlidesArgs) (FillSlidesResult, error) {
 				return fillSlides(ctx, args)
 			})
 		}},
@@ -2111,8 +2529,8 @@ func GetTools() ([]tool.Tool, error) {
 				return listDecks(ctx, args)
 			})
 		}},
-		{"list_slide_templates", "List available slide templates (built-in + imported) as a lightweight catalog: each entry has name, label, description, scope, and archetype variants reporting {kind,label,tier,fillSlots} — no markup, tokens, or assets. Pass a template name to create_deck to seed theme + assets and a slim catalog. Do not confuse with email MCP list_templates.", func() (tool.Tool, error) {
-			return functiontool.New(functiontool.Config{Name: "list_slide_templates", Description: "List available slide templates (built-in + imported) as a lightweight catalog: each entry has name, label, description, scope, and archetype variants reporting {kind,label,tier,fillSlots} — no markup, tokens, or assets. Pass a template name to create_deck to seed theme + assets and a slim catalog. Do not confuse with email MCP list_templates."}, func(ctx tool.Context, args ListTemplatesArgs) (ListTemplatesResult, error) {
+		{"list_slide_templates", "List available slide templates (built-in + imported) as a lightweight catalog: name, label, description, scope, palettes (id/label when the template has colorways), and archetype variants {kind,label,tier,fillSlots} — no markup, tokens, or assets. Use palettes and title*/closing* counts to decide which ask_user questions to ask. Do not confuse with email MCP list_templates.", func() (tool.Tool, error) {
+			return functiontool.New(functiontool.Config{Name: "list_slide_templates", Description: "List available slide templates (built-in + imported) as a lightweight catalog: name, label, description, scope, palettes (id/label when the template has colorways), and archetype variants {kind,label,tier,fillSlots} — no markup, tokens, or assets. Use palettes and title*/closing* counts to decide which ask_user questions to ask. Do not confuse with email MCP list_templates."}, func(ctx tool.Context, args ListTemplatesArgs) (ListTemplatesResult, error) {
 				return listTemplates(ctx, args)
 			})
 		}},
@@ -2141,8 +2559,8 @@ func GetTools() ([]tool.Tool, error) {
 				return addDeckImage(ctx, args)
 			})
 		}},
-		{"ask_user", "Ask the user ONE structured question inline in chat and WAIT for their reply. kind='yesno' shows Yes/No buttons; kind='select' shows a pick-one list. For the TEMPLATE-CHOICE question ('which template should I use?'), set slidesTemplatePicker=true (kind='select', no options) — ask_user lists every available template with a LIVE THUMBNAIL of each template's cover. For a SLIDES VARIANT PICKER within a chosen template, set slidesTemplate (the template name) and optionally slidesKind (title|section|agenda|closing|content) — ask_user then shows a LIVE THUMBNAIL of each variant and can auto-generate the options; do NOT hand-copy markup. GENERIC: use it any time you need the user to choose. After calling it, end your turn — the user's next message is their answer.", func() (tool.Tool, error) {
-			return functiontool.New(functiontool.Config{Name: "ask_user", Description: "Ask the user ONE structured question inline in chat and WAIT for their reply. kind='yesno' shows Yes/No buttons; kind='select' shows a pick-one list. For the TEMPLATE-CHOICE question ('which template should I use?'), set slidesTemplatePicker=true (kind='select', no options) — ask_user lists every available template with a LIVE THUMBNAIL of each template's cover. For a SLIDES VARIANT PICKER within a chosen template, set slidesTemplate (the template name) and optionally slidesKind (title|section|agenda|closing|content) — ask_user then shows a LIVE THUMBNAIL of each variant and can auto-generate the options; do NOT hand-copy markup. GENERIC: use it any time you need the user to choose. After calling it, end your turn — the user's next message is their answer."}, func(ctx tool.Context, args AskUserArgs) (AskUserResult, error) {
+		{"ask_user", "Ask the user ONE structured question inline in chat and WAIT for their reply. kind='yesno' shows Yes/No; kind='select' shows a pick-one list. Intake: audience, length, who picks the template. If they want to choose, slidesTemplatePicker=true (kind='select', no options) shows a live cover thumbnail per template. After a template is known, slidesTemplate+slidesKind=title|closing shows official cover/end LAYOUTS (sample photos stripped). If the chosen title has a ph-pic well, yes/no then slidesImagePicker=true with slidesTemplate lists template photos. slidesPalettePicker=true with slidesTemplate shows Product Deck colorways. Do NOT hand-copy markup. After calling it, end your turn.", func() (tool.Tool, error) {
+			return functiontool.New(functiontool.Config{Name: "ask_user", Description: "Ask the user ONE structured question inline in chat and WAIT for their reply. kind='yesno' shows Yes/No; kind='select' shows a pick-one list. Intake: audience, length, who picks the template. If they want to choose, slidesTemplatePicker=true (kind='select', no options) shows a live cover thumbnail per template. After a template is known, slidesTemplate+slidesKind=title|closing shows official cover/end LAYOUTS (sample photos stripped). If the chosen title has a ph-pic well, yes/no then slidesImagePicker=true with slidesTemplate lists template photos. slidesPalettePicker=true with slidesTemplate shows Product Deck colorways. Do NOT hand-copy markup. After calling it, end your turn."}, func(ctx tool.Context, args AskUserArgs) (AskUserResult, error) {
 				return askUser(ctx, args)
 			})
 		}},

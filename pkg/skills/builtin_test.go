@@ -33,7 +33,9 @@ func TestBuiltinSkills_IncludesSlides(t *testing.T) {
 	}
 	for _, want := range []string{
 		"slidesTemplatePicker",
-		"The template choice belongs to the user",
+		"slidesPalettePicker",
+		"You pick what fits",
+		"Product Deck",
 		"Inferring a tone",
 		"list_slide_templates",
 		"complete thought",
@@ -43,7 +45,20 @@ func TestBuiltinSkills_IncludesSlides(t *testing.T) {
 		"one LLM round-trip per slide",
 		"recipe-cover",
 		"recipe-split-narrative",
+		"recipe-data-table",
+		"recipe-process-terminal",
+		"headline_accent",
 		"Pick layout by job",
+		"product",
+		"official title",
+		"titleKind",
+		"research constraint",
+		"next tool call is",
+		"cannot generate them",
+		"slidesImagePicker",
+		"titleImage",
+		"room for one photo",
+		"per-session slug",
 	} {
 		if !strings.Contains(slides.Content, want) {
 			t.Errorf("slides skill must contain %q (visual template picker is mandatory)", want)

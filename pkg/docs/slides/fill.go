@@ -13,10 +13,230 @@ import (
 // themeKeyTemplateName is stamped onto a deck's theme when create_deck seeds
 // from a template so fill_slides can resolve archetypes without a schema change.
 // It is a meta key, never a CSS variable.
-const themeKeyTemplateName = "template-name"
+const (
+	themeKeyTemplateName = "template-name"
+	themeKeyTitleKind    = "template-title-kind"
+	themeKeyClosingKind  = "template-closing-kind"
+	themeKeyPalette      = "template-palette"
+	themeKeyTitleImage   = "template-title-image"
+)
+
+// heroPhotoMinArea is the floor at which an ast-image is a sample hero photo
+// (cover people/bikes), not a logo. Matches the importer's global-hero floor.
+const heroPhotoMinArea = 400 * 300
 
 func isThemeMetaKey(key string) bool {
-	return key == embeddedFontsThemeKey || key == themeKeyTemplateName
+	switch key {
+	case embeddedFontsThemeKey, themeKeyTemplateName, themeKeyTitleKind, themeKeyClosingKind, themeKeyPalette, themeKeyTitleImage:
+		return true
+	default:
+		return false
+	}
+}
+
+// overlayDeckTheme copies non-meta color/type tokens from the session deck onto
+// the template so recipe skins follow create_deck palette/theme overlays.
+func overlayDeckTheme(tmpl themes.Template, deckTheme map[string]string) themes.Template {
+	if len(deckTheme) == 0 {
+		return tmpl
+	}
+	merged := cloneStringMap(tmpl.Tokens)
+	if merged == nil {
+		merged = make(map[string]string)
+	}
+	for k, v := range deckTheme {
+		if isThemeMetaKey(k) || strings.TrimSpace(v) == "" {
+			continue
+		}
+		merged[k] = v
+	}
+	tmpl.Tokens = merged
+	return tmpl
+}
+
+func cloneStringMap(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+// agentCatalogBookends are the imported title/closing family shown to the model.
+// pattern-*, section, agenda, and extra content samples stay on disk and remain
+// fetchable via get_archetype but are not in the create_deck catalog.
+func agentCatalogBookends(tmpl themes.Template) []themes.Archetype {
+	out := make([]themes.Archetype, 0)
+	for _, a := range tmpl.Archetypes {
+		if !isAgentCatalogBookend(tmpl, a) {
+			continue
+		}
+		out = append(out, restoreOfficialPictureWells(tmpl, a))
+	}
+	return out
+}
+
+// restoreOfficialPictureWells re-inserts a split-cover picture well that import
+// omitted (empty full-bleed cyan-slab guard). GCO "White cover with blue pattern"
+// keeps a right-hand ~half-page well at the template muted color; without it the
+// filled slide is a blank white page while the picker thumbnail still shows blue.
+func restoreOfficialPictureWells(tmpl themes.Template, arch themes.Archetype) themes.Archetype {
+	base := stripVariantSuffix(arch.Kind)
+	if base != "title" && base != "closing" {
+		return arch
+	}
+	if tmpl.Model == nil {
+		return arch
+	}
+	var layout *themes.IRLayout
+	for i := range tmpl.Model.Layouts {
+		if tmpl.Model.Layouts[i].Name == arch.Title {
+			layout = &tmpl.Model.Layouts[i]
+			break
+		}
+	}
+	if layout == nil {
+		return arch
+	}
+	next := 1
+	for strings.Contains(arch.Markup, fmt.Sprintf(`id="ph-pic-%d"`, next)) {
+		next++
+	}
+	muted := mutedColor(tmpl.Tokens)
+	for _, ph := range layout.Placeholders {
+		if ph.Type != "image" {
+			continue
+		}
+		if ph.W < 200 || ph.H < 200 {
+			continue
+		}
+		if ph.W >= CanvasWidth*9/10 && ph.H >= CanvasHeight*9/10 {
+			continue
+		}
+		id := fmt.Sprintf("ph-pic-%d", next)
+		next++
+		fill := muted
+		if c := strings.TrimSpace(ph.Fill); strings.HasPrefix(c, "#") {
+			fill = c
+		}
+		well := fmt.Sprintf(`<ast-shape id="%s" kind="rect" x="%d" y="%d" w="%d" h="%d" geom="rect" fill="%s" alt="" decorative="true"></ast-shape>`,
+			id, ph.X, ph.Y, ph.W, ph.H, fill)
+		arch.Markup = injectAfterBackground(arch.Markup, well)
+		seen := false
+		for _, s := range arch.FillSlots {
+			if s == id {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			arch.FillSlots = append(arch.FillSlots, id)
+			arch.SlotHints = append(arch.SlotHints, themes.SlotHint{ID: id, Role: "image", Hint: "template picture well"})
+		}
+	}
+	return arch
+}
+
+func mutedColor(tokens map[string]string) string {
+	if v := strings.TrimSpace(tokens["muted"]); v != "" {
+		return v
+	}
+	if v := strings.TrimSpace(tokens["accent2"]); v != "" {
+		return v
+	}
+	return "#89D1FF"
+}
+
+func isOfficialBookendKind(kind string) bool {
+	base := stripVariantSuffix(kind)
+	return base == "title" || base == "closing"
+}
+
+func firstImageSlotID(arch themes.Archetype) string {
+	for _, id := range arch.FillSlots {
+		if isImageFillSlot(arch, id) {
+			return id
+		}
+	}
+	return ""
+}
+
+func normalizeCoverPhotoRef(ref string) string {
+	ref = strings.TrimSpace(ref)
+	if ref == "" || strings.EqualFold(ref, "none") || strings.EqualFold(ref, "default") {
+		return ""
+	}
+	return ref
+}
+
+// applyCoverPhotoFill puts the user-chosen template photo into the cover's
+// single image well when the model omitted ph-pic fills.
+func applyCoverPhotoFill(arch themes.Archetype, fills map[string]string, titleImage string) map[string]string {
+	if stripVariantSuffix(arch.Kind) != "title" {
+		return fills
+	}
+	slot := firstImageSlotID(arch)
+	if slot == "" {
+		return fills
+	}
+	if strings.TrimSpace(fills[slot]) != "" {
+		return fills
+	}
+	ref := normalizeCoverPhotoRef(titleImage)
+	if ref == "" {
+		return fills
+	}
+	out := cloneStringMap(fills)
+	if out == nil {
+		out = map[string]string{}
+	}
+	out[slot] = ref
+	return out
+}
+
+func injectAfterBackground(markup, well string) string {
+	if well == "" || markup == "" {
+		return markup
+	}
+	const closeShape = "</ast-shape>"
+	if i := strings.Index(markup, closeShape); i > 0 && strings.Contains(markup[:i], `id="bg"`) {
+		at := i + len(closeShape)
+		return markup[:at] + well + markup[at:]
+	}
+	if i := strings.Index(markup, ">"); i >= 0 {
+		return markup[:i+1] + well + markup[i+1:]
+	}
+	return markup + well
+}
+
+func isAgentCatalogBookend(tmpl themes.Template, a themes.Archetype) bool {
+	base := stripVariantSuffix(a.Kind)
+	if base != "title" && base != "closing" {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(a.Tier), "fixed") || tmpl.Model != nil {
+		return true
+	}
+	// Built-in generic title/section/content skeletons (archetypesFor) are not
+	// official brand bookends — the model should use recipe-cover / recipe-closer.
+	if _, builtin := themes.LookupTemplate(tmpl.Name); builtin && strings.TrimSpace(tmpl.Scope) != "scope" {
+		return false
+	}
+	return true
+}
+
+func officialBookendKinds(tmpl themes.Template, role string) []string {
+	role = strings.TrimSpace(role)
+	var out []string
+	for _, a := range agentCatalogBookends(tmpl) {
+		if stripVariantSuffix(a.Kind) == role {
+			out = append(out, a.Kind)
+		}
+	}
+	return out
 }
 
 // ArchetypeCatalogEntry is the slim per-layout/pattern description returned by
@@ -78,13 +298,13 @@ func findTemplateArchetype(tmpl themes.Template, kind, label string) (themes.Arc
 		}
 		for _, a := range tmpl.Archetypes {
 			if a.Kind == kind {
-				return a, nil
+				return restoreOfficialPictureWells(tmpl, a), nil
 			}
 		}
 		base := stripVariantSuffix(kind)
 		for _, a := range tmpl.Archetypes {
 			if stripVariantSuffix(a.Kind) == base {
-				return a, nil
+				return restoreOfficialPictureWells(tmpl, a), nil
 			}
 		}
 		return themes.Archetype{}, fmt.Errorf("no archetype with kind %q", kind)
@@ -94,14 +314,14 @@ func findTemplateArchetype(tmpl themes.Template, kind, label string) (themes.Arc
 	for i := range tmpl.Archetypes {
 		got := strings.ToLower(strings.TrimSpace(tmpl.Archetypes[i].Title))
 		if got == want {
-			return tmpl.Archetypes[i], nil
+			return restoreOfficialPictureWells(tmpl, tmpl.Archetypes[i]), nil
 		}
 		if found == nil && strings.Contains(got, want) {
 			found = &tmpl.Archetypes[i]
 		}
 	}
 	if found != nil {
-		return *found, nil
+		return restoreOfficialPictureWells(tmpl, *found), nil
 	}
 	for _, m := range allRecipeMeta() {
 		if strings.ToLower(m.Title) == want {
@@ -121,8 +341,9 @@ func looksLikeAssetRef(s string) bool {
 // fillArchetypeMarkup copies archetype markup and substitutes fillSlots.
 // Text slots (ast-text) get their inner content replaced with a single ast-run.
 // Image slots (ast-image or ast-shape id=ph-pic-*) whose value looks like an
-// asset-ref become an ast-image at the same geometry. Unmentioned slots are
-// left as-is; leftover {{TITLE}}/{{BODY}} is an error.
+// asset-ref become an ast-image at the same geometry. Unmentioned slots and
+// fill keys that are not in the markup are left as-is / ignored; leftover
+// {{TITLE}}/{{BODY}} is an error.
 func fillArchetypeMarkup(markup string, fills map[string]string) (string, error) {
 	out := markup
 	for id, raw := range fills {
@@ -132,6 +353,14 @@ func fillArchetypeMarkup(markup string, fills map[string]string) (string, error)
 		}
 		value := strings.TrimSpace(raw)
 		if value == "" {
+			continue
+		}
+		if isRecipeControlFill(id) {
+			continue
+		}
+		if !markupHasID(out, id) {
+			// Extra keys (optional slots the skin does not emit, typos) are
+			// ignored so a product cover fill of meta_4 is not a hard error.
 			continue
 		}
 		next, err := replaceSlot(out, id, value)
@@ -146,23 +375,161 @@ func fillArchetypeMarkup(markup string, fills map[string]string) (string, error)
 	return out, nil
 }
 
+// aliasOfficialBookendFills maps recipe-ish names (headline/dek) onto an
+// imported title/closing's real slots (ph-* or {{TITLE}}/{{BODY}}). Recipe
+// fills are left unchanged.
+func aliasOfficialBookendFills(arch themes.Archetype, fills map[string]string) map[string]string {
+	if isRecipeKind(arch.Kind) || len(fills) == 0 {
+		return fills
+	}
+	base := stripVariantSuffix(arch.Kind)
+	if base != "title" && base != "closing" {
+		return fills
+	}
+	out := cloneStringMap(fills)
+	if out == nil {
+		out = make(map[string]string)
+	}
+	titleID := firstNonEmpty(
+		slotIDContaining(arch.Markup, "{{TITLE}}"),
+		firstSlotWithRole(arch, "title", "heading"),
+		nthFillSlot(arch, 0),
+	)
+	bodyID := firstNonEmpty(
+		slotIDContaining(arch.Markup, "{{BODY}}"),
+		firstSlotWithRole(arch, "body", "subtitle", "caption"),
+		nthFillSlot(arch, 1),
+	)
+	aliasInto(out, titleID, "headline", "title", "TITLE")
+	aliasInto(out, bodyID, "dek", "subtitle", "body", "BODY")
+	return out
+}
+
+func aliasInto(fills map[string]string, dest string, aliases ...string) {
+	dest = strings.TrimSpace(dest)
+	if dest == "" || strings.TrimSpace(fills[dest]) != "" {
+		return
+	}
+	for _, a := range aliases {
+		if v := strings.TrimSpace(fills[a]); v != "" {
+			fills[dest] = v
+			return
+		}
+	}
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func nthFillSlot(arch themes.Archetype, i int) string {
+	if i < 0 || i >= len(arch.FillSlots) {
+		return ""
+	}
+	return arch.FillSlots[i]
+}
+
+func firstSlotWithRole(arch themes.Archetype, roles ...string) string {
+	want := make(map[string]bool, len(roles))
+	for _, r := range roles {
+		want[strings.ToLower(strings.TrimSpace(r))] = true
+	}
+	for _, h := range arch.SlotHints {
+		if want[strings.ToLower(strings.TrimSpace(h.Role))] {
+			return h.ID
+		}
+	}
+	return ""
+}
+
+var astTextOpenRe = regexp.MustCompile(`<ast-text\b([^>]*)>`)
+
+func slotIDContaining(markup, needle string) string {
+	if needle == "" || markup == "" {
+		return ""
+	}
+	locs := astTextOpenRe.FindAllStringSubmatchIndex(markup, -1)
+	for _, idx := range locs {
+		attrs := markup[idx[2]:idx[3]]
+		id := attrValue(attrs, "id")
+		if id == "" {
+			continue
+		}
+		rest := markup[idx[1]:]
+		end := strings.Index(rest, "</ast-text>")
+		if end < 0 {
+			continue
+		}
+		if strings.Contains(rest[:end], needle) {
+			return id
+		}
+	}
+	return ""
+}
+
+func attrValue(attrs, name string) string {
+	re := regexp.MustCompile(`\b` + name + `="([^"]*)"`)
+	m := re.FindStringSubmatch(attrs)
+	if len(m) == 2 {
+		return m[1]
+	}
+	return ""
+}
+
+func isRecipeControlFill(id string) bool {
+	switch id {
+	case "emphasis", "headline_accent", "dek_accent", "thesis_accent":
+		return true
+	default:
+		return false
+	}
+}
+
 func recipeArchetypeFor(tmpl themes.Template, kind string, chrome Chrome, fills map[string]string) (themes.Archetype, error) {
 	m, ok := recipeByKind(kind)
 	if !ok {
 		return themes.Archetype{}, fmt.Errorf("unknown recipe kind %q", kind)
 	}
-	markup, err := RenderRecipe(m.Kind, tmpl.StyleGuide, tmpl.Tokens, chrome, fills)
+	markup, err := RenderRecipe(m.Kind, SkinFor(tmpl), tmpl.StyleGuide, chrome, fills)
 	if err != nil {
 		return themes.Archetype{}, err
 	}
+	hints := recipeSlotsInMarkup(m.Slots, markup)
 	return themes.Archetype{
 		Kind:      m.Kind,
 		Title:     m.Title,
 		Markup:    markup,
 		Tier:      "flexible",
-		FillSlots: requiredFillSlots(m.Slots),
-		SlotHints: m.Slots,
+		FillSlots: requiredFillSlots(hints),
+		SlotHints: hints,
 	}, nil
+}
+
+// recipeSlotsInMarkup keeps slot hints that the rendered markup actually has,
+// plus control fills (emphasis / *_accent) which never appear as DOM ids.
+// Product cover has no meta_4; product closer has no thesis/item cards.
+func recipeSlotsInMarkup(slots []themes.SlotHint, markup string) []themes.SlotHint {
+	out := make([]themes.SlotHint, 0, len(slots))
+	for _, s := range slots {
+		if isRecipeControlFill(s.ID) {
+			out = append(out, s)
+			continue
+		}
+		if markupHasID(markup, s.ID) {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func markupHasID(markup, id string) bool {
+	_, _, _, _, _, _, ok := findElement(markup, id)
+	return ok
 }
 
 func slotHintRole(arch themes.Archetype, id string) string {
@@ -311,6 +678,70 @@ func geometryAttrs(attrs string) string {
 	return strings.Join(parts, " ")
 }
 
+var astImageTagRe = regexp.MustCompile(`<ast-image\b([^>]*)></ast-image>|<ast-image\b([^/][^>]*)/>`)
+
+func imageTagAttrs(match []int, markup string) (attrs string) {
+	// Submatch groups: (1) paired tag attrs, (2) self-closing attrs.
+	if len(match) >= 4 && match[2] >= 0 {
+		return markup[match[2]:match[3]]
+	}
+	if len(match) >= 6 && match[4] >= 0 {
+		return markup[match[4]:match[5]]
+	}
+	return ""
+}
+
+// stripUnselectedHeroPhotos removes sample cover photos the user did not pick.
+// Unfilled ph-pic-* slots become muted wells so split covers keep their
+// geometry; large decorative ast-image heroes are dropped. Logos stay.
+func stripUnselectedHeroPhotos(markup string, filled map[string]bool, muted string) string {
+	if markup == "" {
+		return markup
+	}
+	if muted == "" {
+		muted = "#89D1FF"
+	}
+	matches := astImageTagRe.FindAllStringSubmatchIndex(markup, -1)
+	for i := len(matches) - 1; i >= 0; i-- {
+		loc := matches[i]
+		attrs := imageTagAttrs(loc, markup)
+		id := attrValue(attrs, "id")
+		if filled[id] {
+			continue
+		}
+		area := attrIntFrom(attrs, "w") * attrIntFrom(attrs, "h")
+		isPicSlot := strings.HasPrefix(id, "ph-pic-")
+		isLogo := strings.Contains(strings.ToLower(id), "logo") || (area > 0 && area < heroPhotoMinArea)
+		if isPicSlot {
+			well := fmt.Sprintf(`<ast-shape id="%s" kind="rect" %s geom="rect" fill="%s" alt="" decorative="true"></ast-shape>`,
+				html.EscapeString(id), geometryAttrs(attrs), muted)
+			markup = markup[:loc[0]] + well + markup[loc[1]:]
+			continue
+		}
+		if isLogo {
+			continue
+		}
+		if area < heroPhotoMinArea {
+			continue
+		}
+		w, h := attrIntFrom(attrs, "w"), attrIntFrom(attrs, "h")
+		if w >= CanvasWidth*9/10 && h >= CanvasHeight*9/10 {
+			markup = markup[:loc[0]] + markup[loc[1]:]
+			continue
+		}
+		well := fmt.Sprintf(`<ast-shape id="%s" kind="rect" %s geom="rect" fill="%s" alt="" decorative="true"></ast-shape>`,
+			html.EscapeString(id), geometryAttrs(attrs), muted)
+		markup = markup[:loc[0]] + well + markup[loc[1]:]
+	}
+	return markup
+}
+
+// layoutPreviewMarkup is the title/closing picker preview: chrome and empty
+// picture wells, never the template's sample people/bike photos.
+func layoutPreviewMarkup(markup string, tokens map[string]string) string {
+	return stripUnselectedHeroPhotos(markup, nil, mutedColor(tokens))
+}
+
 var assetRefAttrRe = regexp.MustCompile(`\basset-ref="([^"]+)"`)
 
 // collectAssetRefs returns unique ast-image asset-ref values in markup.
@@ -358,8 +789,7 @@ func keepAssetKey(k string) bool {
 // findElement locates the element whose id attribute equals id. ASD markup is
 // a constrained XML fragment (no prefixed ids, no CDATA), so a scan is enough.
 func findElement(markup, id string) (start int, tag, attrs string, innerStart, innerEnd, closeEnd int, ok bool) {
-	needle := `id="` + id + `"`
-	idx := strings.Index(markup, needle)
+	idx := idAttrIndex(markup, id)
 	if idx < 0 {
 		return 0, "", "", 0, 0, 0, false
 	}
@@ -392,4 +822,27 @@ func findElement(markup, id string) (start int, tag, attrs string, innerStart, i
 	innerEnd = gt + 1 + end
 	closeEnd = innerEnd + len(close)
 	return lt, tag, attrs, innerStart, innerEnd, closeEnd, true
+}
+
+// idAttrIndex finds `id="foo"` as a complete attribute value so `headline`
+// does not match `headline_2`.
+func idAttrIndex(markup, id string) int {
+	needle := `id="` + id + `"`
+	start := 0
+	for {
+		idx := strings.Index(markup[start:], needle)
+		if idx < 0 {
+			return -1
+		}
+		idx += start
+		end := idx + len(needle)
+		if end == len(markup) || !isXMLNameChar(markup[end]) {
+			return idx
+		}
+		start = end
+	}
+}
+
+func isXMLNameChar(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_' || b == '-'
 }

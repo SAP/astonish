@@ -1788,6 +1788,9 @@ func (cr *ChatRunner) maybeEmitDocsUpdate(sessionService session.Service, toolNa
 	if title, ok := deck["title"].(string); ok && title != "" {
 		payload["deckTitle"] = title
 	}
+	if description, ok := deck["description"].(string); ok && description != "" {
+		payload["description"] = description
+	}
 	if schemaVersion, ok := numberAsInt(deck["schemaVersion"]); ok {
 		payload["schemaVersion"] = schemaVersion
 	}

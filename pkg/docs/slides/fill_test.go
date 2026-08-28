@@ -181,6 +181,189 @@ func TestFindTemplateArchetypeResolvesRecipes(t *testing.T) {
 	}
 }
 
+func TestFillArchetypeMarkupIgnoresUnknownSlots(t *testing.T) {
+	markup := `<ast-slide id="p"><ast-text id="headline" x="10" y="10" w="400" h="80" size="24"></ast-text></ast-slide>`
+	out, err := fillArchetypeMarkup(markup, map[string]string{
+		"headline":     "Steve Jobs",
+		"meta_4_label": "Legacy",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "Steve Jobs") {
+		t.Fatalf("headline fill missing:\n%s", out)
+	}
+}
+
+func TestFindElementDoesNotMatchPrefixIDs(t *testing.T) {
+	markup := `<ast-slide id="p"><ast-text id="headline_2" x="1" y="1" w="10" h="10"></ast-text><ast-text id="headline" x="1" y="20" w="10" h="10"></ast-text></ast-slide>`
+	start, _, _, _, _, _, ok := findElement(markup, "headline")
+	if !ok {
+		t.Fatal("headline not found")
+	}
+	snip := markup[start:]
+	if !strings.HasPrefix(snip, `<ast-text id="headline"`) {
+		t.Fatalf("matched wrong element: %s", snip[:min(60, len(snip))])
+	}
+}
+
+func TestProductCatalogOmitsSkinMissingSlots(t *testing.T) {
+	tmpl, ok := themes.LookupTemplate("product")
+	if !ok {
+		t.Fatal("missing product template")
+	}
+	cat := catalogFromTemplate(tmpl)
+	var cover, closer ArchetypeCatalogEntry
+	for _, e := range cat {
+		switch e.Kind {
+		case RecipeCover:
+			cover = e
+		case RecipeCloser:
+			closer = e
+		}
+	}
+	if cover.Kind == "" || closer.Kind == "" {
+		t.Fatalf("missing cover/closer in catalog: %#v", cat)
+	}
+	for _, id := range cover.FillSlots {
+		if strings.HasPrefix(id, "meta_4") {
+			t.Fatalf("product cover fillSlots includes %s: %#v", id, cover.FillSlots)
+		}
+	}
+	for _, h := range cover.SlotHints {
+		if strings.HasPrefix(h.ID, "meta_4") {
+			t.Fatalf("product cover slotHints includes %s", h.ID)
+		}
+	}
+	foundThesis, foundItem := false, false
+	for _, id := range closer.FillSlots {
+		if id == "thesis" {
+			foundThesis = true
+		}
+		if id == "item_1_title" {
+			foundItem = true
+		}
+	}
+	if !foundThesis || !foundItem {
+		t.Fatalf("product closer must require thesis + takeaway chips, fillSlots=%v", closer.FillSlots)
+	}
+	wantCover := []string{"eyebrow", "headline", "dek", "meta_1_label", "meta_1_value", "meta_2_label", "meta_2_value"}
+	for _, id := range wantCover {
+		found := false
+		for _, got := range cover.FillSlots {
+			if got == id {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("product cover missing required %s: %#v", id, cover.FillSlots)
+		}
+	}
+}
+
+func TestProductCatalogOmitsGenericTitle(t *testing.T) {
+	tmpl, ok := themes.LookupTemplate("product")
+	if !ok {
+		t.Fatal("missing product")
+	}
+	cat := catalogFromTemplate(tmpl)
+	for _, e := range cat {
+		base := stripVariantSuffix(e.Kind)
+		if base == "title" || base == "closing" || base == "pattern" || base == "section" {
+			t.Fatalf("product catalog should omit generic bookends and samples, got %s", e.Kind)
+		}
+	}
+}
+
+func TestRestoreOfficialPictureWellFromModel(t *testing.T) {
+	tmpl := themes.Template{
+		Name:   "gco",
+		Tokens: map[string]string{"muted": "#89D1FF", "surface": "#FFFFFF"},
+		Model: &themes.TemplateModel{
+			Layouts: []themes.IRLayout{{
+				Name: "White cover with blue pattern",
+				Placeholders: []themes.IRPlaceholder{
+					{Name: "title-1", Type: "title", X: 45, Y: 426, W: 857, H: 157},
+					{Name: "image-2", Type: "image", X: 957, Y: 0, W: 963, H: 1080, OOXMLType: "pic"},
+				},
+			}},
+		},
+		Archetypes: []themes.Archetype{{
+			Kind: "title-2", Title: "White cover with blue pattern", Tier: "fixed",
+			Markup:    `<ast-slide id="white"><ast-shape id="bg" kind="rect" x="0" y="0" w="1920" h="1080" fill="#FFFFFF" decorative="true"></ast-shape><ast-text id="ph-1" x="45" y="426" w="857" h="157">{{TITLE}}</ast-text></ast-slide>`,
+			FillSlots: []string{"ph-1"},
+		}},
+	}
+	arch, err := findTemplateArchetype(tmpl, "title-2", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(arch.Markup, `id="ph-pic-1"`) {
+		t.Fatalf("expected restored picture well:\n%s", arch.Markup)
+	}
+	if !strings.Contains(arch.Markup, `fill="#89D1FF"`) {
+		t.Fatalf("picture well should use template muted:\n%s", arch.Markup)
+	}
+	if !strings.Contains(arch.Markup, `x="957"`) || !strings.Contains(arch.Markup, `w="963"`) {
+		t.Fatalf("picture well geometry: %s", arch.Markup)
+	}
+	got := catalogFromTemplate(tmpl)
+	var e ArchetypeCatalogEntry
+	for _, c := range got {
+		if c.Kind == "title-2" {
+			e = c
+		}
+	}
+	found := false
+	for _, id := range e.FillSlots {
+		if id == "ph-pic-1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("catalog should list restored ph-pic-1: %#v", e.FillSlots)
+	}
+}
+
+func TestStripUnselectedHeroPhotosKeepsLogos(t *testing.T) {
+	markup := `<ast-slide id="t">` +
+		`<ast-image id="hero" x="0" y="0" w="1920" h="1080" asset-ref="sha256-bike"></ast-image>` +
+		`<ast-image id="ph-pic-2" x="960" y="0" w="960" h="1080" asset-ref="sha256-bike"></ast-image>` +
+		`<ast-image id="logo" x="20" y="20" w="100" h="40" asset-ref="sha256-logo"></ast-image>` +
+		`</ast-slide>`
+	got := stripUnselectedHeroPhotos(markup, nil, "#89D1FF")
+	if strings.Contains(got, `asset-ref="sha256-bike"`) {
+		t.Fatalf("hero photos should be gone:\n%s", got)
+	}
+	if !strings.Contains(got, `id="ph-pic-2"`) || !strings.Contains(got, `fill="#89D1FF"`) {
+		t.Fatalf("pic well should be muted shape:\n%s", got)
+	}
+	if !strings.Contains(got, `asset-ref="sha256-logo"`) {
+		t.Fatalf("logo should remain:\n%s", got)
+	}
+}
+
+func TestAliasOfficialBookendFillsMapsHeadlineDek(t *testing.T) {
+	arch := themes.Archetype{
+		Kind:      "title-2",
+		Tier:      "fixed",
+		Markup:    `<ast-slide id="t"><ast-text id="ph-1" x="0" y="0" w="100" h="40">{{TITLE}}</ast-text><ast-text id="ph-2" x="0" y="50" w="100" h="40">{{BODY}}</ast-text></ast-slide>`,
+		FillSlots: []string{"ph-1", "ph-2"},
+	}
+	got := aliasOfficialBookendFills(arch, map[string]string{"headline": "Cover", "dek": "Subtitle"})
+	if got["ph-1"] != "Cover" || got["ph-2"] != "Subtitle" {
+		t.Fatalf("aliases: %#v", got)
+	}
+	out, err := fillArchetypeMarkup(arch.Markup, got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "Cover") || !strings.Contains(out, "Subtitle") {
+		t.Fatalf("filled:\n%s", out)
+	}
+}
+
 func TestCatalogFromOmitsMarkup(t *testing.T) {
 	cat := catalogFrom([]themes.Archetype{{
 		Kind: "pattern", Title: "3 rounded cards", Tier: "flexible",

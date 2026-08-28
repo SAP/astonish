@@ -54,6 +54,33 @@ try {
   })
   const color = value => String(value || '172033').replace(/^#/, '')
 
+  const hexColor = value => {
+    const h = color(value)
+    return /^[0-9A-Fa-f]{6}$/.test(h) ? '#' + h : '#000000'
+  }
+
+  const gradientShapeSVG = node => {
+    const w = Math.max(1, Number(node.geometry?.w) || 1920)
+    const h = Math.max(1, Number(node.geometry?.h) || 1080)
+    const g = node.gradient
+    const stops = (g.stops || []).map(s => {
+      const pos = Math.max(0, Math.min(100, Number(s.pos) || 0))
+      return `<stop offset="${pos}%" stop-color="${hexColor(s.color)}"/>`
+    }).join('')
+    let def
+    if (g.kind === 'radial') {
+      def = `<radialGradient id="g" cx="80%" cy="8%" r="72%">${stops}</radialGradient>`
+    } else {
+      const rad = (Number(g.angle) || 0) * Math.PI / 180
+      const x1 = 0.5 - Math.cos(rad) / 2
+      const y1 = 0.5 - Math.sin(rad) / 2
+      const x2 = 0.5 + Math.cos(rad) / 2
+      const y2 = 0.5 + Math.sin(rad) / 2
+      def = `<linearGradient id="g" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}">${stops}</linearGradient>`
+    }
+    return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><defs>${def}</defs><rect width="${w}" height="${h}" fill="url(#g)"/></svg>`
+  }
+
   // Theme-token resolution mirrors the HTML export (:root defaults in
   // export_html.go). Token strings match theme-map keys verbatim.
   const themeDefaults = { ink: '172033', surface: 'FFFFFF', 'ink-muted': '64748B', accent: '1E40AF', 'accent-soft': 'DBEAFE' }
@@ -179,8 +206,16 @@ try {
         // into ~100 opaque white squares that wreck PPTX export.
         const authoredFill = node.fill || node.props?.fill
         if (node.gradient?.stops?.length) {
-          shapeOpts.fill = { color: color(node.gradient.stops[0].color) }
-          warnings.push(`Gradient approximated as solid fill (${node.id || 'unknown'})`)
+          // pptxgenjs 4.x has no native gradient fill. Emit the same SVG the
+          // HTML renderer uses so PPTX is not a solid first-stop (all-black
+          // product decks). Counted as vector.
+          const svg = gradientShapeSVG(node)
+          slide.addImage({
+            ...box,
+            data: 'image/svg+xml;base64,' + Buffer.from(svg).toString('base64'),
+          })
+          counts.vector++
+          break
         } else if (authoredFill) {
           shapeOpts.fill = { color: color(authoredFill) }
         } else {

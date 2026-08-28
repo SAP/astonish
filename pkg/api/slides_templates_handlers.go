@@ -343,6 +343,27 @@ func RecolorSlidesTemplateHandler(w http.ResponseWriter, r *http.Request) {
 // baked archetype thumbnail asset.
 const thumbnailPNGPrefix = "data:image/png;base64,"
 
+func resolveSlidesTemplateFromRequest(r *http.Request, name string) (themes.Template, bool) {
+	tmpl, found := themes.LookupTemplate(name)
+	if found {
+		return tmpl, true
+	}
+	svc, err := docsService(r)
+	if err != nil {
+		return themes.Template{}, false
+	}
+	scoped, err := svc.ListTemplates(r.Context())
+	if err != nil {
+		return themes.Template{}, false
+	}
+	for _, t := range scoped {
+		if t.Name == name {
+			return t, true
+		}
+	}
+	return themes.Template{}, false
+}
+
 // GetSlidesTemplateThumbnailHandler serves the pre-baked PNG thumbnail for a
 // single archetype of a template. It resolves the template (built-in first,
 // then the scoped docs service), finds the archetype by exact kind (falling
@@ -360,34 +381,14 @@ func GetSlidesTemplateThumbnailHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Resolve the template: built-in first, then a scoped template.
-	tmpl, found := themes.LookupTemplate(name)
-	if !found {
-		svc, err := docsService(r)
-		if err != nil {
-			http.Error(w, "template not found", http.StatusNotFound)
-			return
-		}
-		scoped, err := svc.ListTemplates(r.Context())
-		if err != nil {
-			http.Error(w, "template not found", http.StatusNotFound)
-			return
-		}
-		for _, t := range scoped {
-			if t.Name == name {
-				tmpl = t
-				found = true
-				break
-			}
-		}
-	}
+	tmpl, found := resolveSlidesTemplateFromRequest(r, name)
 	if !found {
 		http.Error(w, "template not found", http.StatusNotFound)
 		return
 	}
 
-	// Find the archetype by exact kind, then fall back to a variant-suffix
-	// insensitive match (title-2 -> title).
+	// Exact kind only — title-2 is a different cover from title. Falling back
+	// to the first title* served the wrong thumbnail (white cover vs blue anvil).
 	arch, ok := findArchetypeForThumbnail(tmpl, kind)
 	if !ok || arch.ThumbnailRef == "" {
 		http.Error(w, "thumbnail not found", http.StatusNotFound)
@@ -413,34 +414,74 @@ func GetSlidesTemplateThumbnailHandler(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(png)
 }
 
-// findArchetypeForThumbnail returns the archetype matching kind exactly, or the
-// first archetype whose kind collapses to the same base role once variant
-// suffixes are stripped (title-2 and title both match "title").
+// GetSlidesTemplateMediaHandler serves one template image asset by ref
+// (sha256-…) so the cover-photo picker can show example title photos without
+// embedding data: bytes in chat. Fonts and missing refs 404.
+func GetSlidesTemplateMediaHandler(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	name := strings.TrimSpace(vars["name"])
+	ref := strings.TrimSpace(vars["ref"])
+	if name == "" || ref == "" {
+		http.Error(w, "template name and ref are required", http.StatusBadRequest)
+		return
+	}
+	if strings.HasPrefix(ref, "font:") {
+		http.Error(w, "asset not found", http.StatusNotFound)
+		return
+	}
+	tmpl, found := resolveSlidesTemplateFromRequest(r, name)
+	if !found {
+		http.Error(w, "template not found", http.StatusNotFound)
+		return
+	}
+	asset, ok := tmpl.Assets[ref]
+	if !ok {
+		http.Error(w, "asset not found", http.StatusNotFound)
+		return
+	}
+	ctype, body, ok := decodeImageDataURI(asset)
+	if !ok {
+		http.Error(w, "asset not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", ctype)
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	w.Header().Set("ETag", `"`+ref+`"`)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
+}
+
+func decodeImageDataURI(s string) (contentType string, body []byte, ok bool) {
+	s = strings.TrimSpace(s)
+	if !strings.HasPrefix(s, "data:") {
+		return "", nil, false
+	}
+	rest := s[len("data:"):]
+	const marker = ";base64,"
+	i := strings.Index(rest, marker)
+	if i < 0 {
+		return "", nil, false
+	}
+	mime := rest[:i]
+	if !strings.HasPrefix(mime, "image/") || mime == "image/svg+xml" {
+		return "", nil, false
+	}
+	raw, err := base64.StdEncoding.DecodeString(rest[i+len(marker):])
+	if err != nil || len(raw) == 0 {
+		return "", nil, false
+	}
+	return mime, raw, true
+}
+
+// findArchetypeForThumbnail returns the archetype matching kind exactly.
+// Variant suffixes are significant: title-2 is a different cover from title.
 func findArchetypeForThumbnail(tmpl themes.Template, kind string) (themes.Archetype, bool) {
 	for _, a := range tmpl.Archetypes {
 		if a.Kind == kind {
 			return a, true
 		}
 	}
-	base := stripThumbnailVariantSuffix(kind)
-	for _, a := range tmpl.Archetypes {
-		if stripThumbnailVariantSuffix(a.Kind) == base {
-			return a, true
-		}
-	}
 	return themes.Archetype{}, false
-}
-
-// stripThumbnailVariantSuffix removes a trailing "-N" numeric variant suffix
-// from a role kind (title-2 -> title). It mirrors stripVariantSuffix in
-// pkg/docs/slides, which is unexported and therefore not reachable here.
-func stripThumbnailVariantSuffix(kind string) string {
-	if i := strings.LastIndexByte(kind, '-'); i > 0 {
-		if _, err := strconv.Atoi(kind[i+1:]); err == nil {
-			return kind[:i]
-		}
-	}
-	return kind
 }
 
 // uniqueTemplateName returns base, or base-2/base-3/... if a scoped template

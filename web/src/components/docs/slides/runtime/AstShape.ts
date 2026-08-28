@@ -110,7 +110,7 @@ export class AstShape extends PositionedElement {
   private renderGradientDef(g: Gradient): TemplateResult {
     const stops = g.stops.map(s => svg`<stop offset="${s.pos}%" stop-color="${s.color}"></stop>`)
     if (g.kind === 'radial') {
-      return svg`<radialGradient id="${this.gradId}">${stops}</radialGradient>`
+      return svg`<radialGradient id="${this.gradId}" cx="80%" cy="8%" r="72%">${stops}</radialGradient>`
     }
     const rad = (g.angle * Math.PI) / 180
     const x2 = (Math.cos(rad) * 0.5 + 0.5).toFixed(4)

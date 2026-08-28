@@ -193,6 +193,9 @@ func (s Service) WriteSlide(ctx context.Context, deckSlug string, position int, 
 		return nil, nil, err
 	}
 	if HasErrors(diags) {
+		if detail := formatDiagnostics(diags); detail != "" {
+			return nil, diags, fmt.Errorf("slide validation failed: %s", detail)
+		}
 		return nil, diags, fmt.Errorf("slide validation failed")
 	}
 	item := &store.SlideContent{ID: uuid.NewString(), DeckID: deck.ID, Position: position, Title: parsed.Title, Content: markup, Notes: notes, SchemaVersion: SchemaV1}

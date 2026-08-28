@@ -14,16 +14,20 @@ import (
 // style guide. They are the default body (and cover/closer) catalog — imported
 // pattern-* entries remain as an optional match when geometry equals the job.
 const (
-	RecipeCover          = "recipe-cover"
-	RecipeSplitNarrative = "recipe-split-narrative"
-	RecipeQuoteSplit     = "recipe-quote-split"
-	RecipeTwoUp          = "recipe-two-up"
-	RecipeThreeUp        = "recipe-three-up"
-	RecipeStatRow        = "recipe-stat-row"
-	RecipeNumberedGrid   = "recipe-numbered-grid"
-	RecipeCalloutRail    = "recipe-callout-rail"
-	RecipeYearHero       = "recipe-year-hero"
-	RecipeCloser         = "recipe-closer"
+	RecipeCover             = "recipe-cover"
+	RecipeSplitNarrative    = "recipe-split-narrative"
+	RecipeQuoteSplit        = "recipe-quote-split"
+	RecipeTwoUp             = "recipe-two-up"
+	RecipeThreeUp           = "recipe-three-up"
+	RecipeStatRow           = "recipe-stat-row"
+	RecipeNumberedGrid      = "recipe-numbered-grid"
+	RecipeCalloutRail       = "recipe-callout-rail"
+	RecipeYearHero          = "recipe-year-hero"
+	RecipeCloser            = "recipe-closer"
+	RecipeStatementEvidence = "recipe-statement-evidence"
+	RecipeDataTable         = "recipe-data-table"
+	RecipeLayerStack        = "recipe-layer-stack"
+	RecipeProcessTerminal   = "recipe-process-terminal"
 )
 
 // Chrome is brand furniture copied from the imported template onto every recipe.
@@ -36,6 +40,7 @@ type Chrome struct {
 	Confidential string
 	DeckTitle    string
 	Page         int
+	Total        int
 }
 
 type recipeMeta struct {
@@ -50,12 +55,14 @@ func allRecipeMeta() []recipeMeta {
 		{
 			Kind:    RecipeCover,
 			Title:   "Cover lockup",
-			Summary: "Cover lockup — eyebrow, split display title, dek, 4 meta cells. Slide 0.",
+			Summary: "Cover lockup — eyebrow, split display title, dek, 2–4 meta cells. Slide 0.",
 			Slots: []themes.SlotHint{
 				{ID: "eyebrow", Role: "label", Hint: "2–5 word kicker (uppercase)"},
 				{ID: "headline", Role: "title", Hint: "Display title line 1"},
 				{ID: "headline_2", Role: "optional", Hint: "Display title line 2 (optional)"},
 				{ID: "dek", Role: "body", Hint: "One-sentence thesis, 12–22 words"},
+				{ID: "dek_accent", Role: "optional", Hint: "Exact substring of dek to paint in accent"},
+				{ID: "prompt", Role: "optional", Hint: "Cover prompt (e.g. $ astonish chat) — product skin"},
 				{ID: "meta_1_label", Role: "label", Hint: "Meta cell 1 label"},
 				{ID: "meta_1_value", Role: "body", Hint: "Meta cell 1 value"},
 				{ID: "meta_2_label", Role: "label", Hint: "Meta cell 2 label"},
@@ -110,6 +117,12 @@ func allRecipeMeta() []recipeMeta {
 				{ID: "stat_4_label", Role: "optional", Hint: "Metric 4 label (optional)"},
 				{ID: "stat_4_number", Role: "optional", Hint: "Metric 4 number (optional)"},
 				{ID: "stat_4_caption", Role: "optional", Hint: "Metric 4 caption (optional)"},
+				{ID: "detail_1_kicker", Role: "optional", Hint: "Wide card 1 kicker under the stats"},
+				{ID: "detail_1_title", Role: "optional", Hint: "Wide card 1 title"},
+				{ID: "detail_1_body", Role: "optional", Hint: "Wide card 1 sentence"},
+				{ID: "detail_2_kicker", Role: "optional", Hint: "Wide card 2 kicker"},
+				{ID: "detail_2_title", Role: "optional", Hint: "Wide card 2 title"},
+				{ID: "detail_2_body", Role: "optional", Hint: "Wide card 2 sentence"},
 			}),
 		},
 		{
@@ -143,13 +156,102 @@ func allRecipeMeta() []recipeMeta {
 		{
 			Kind:    RecipeCloser,
 			Title:   "Closer",
-			Summary: "Last slide: thesis paragraph plus 3 questions or takeaways.",
+			Summary: "Last slide. Corporate: thesis plus 3 takeaway cards. Product: quote, one-line thesis, 3 takeaway chips — never a lone headline on empty canvas.",
 			Slots: append([]themes.SlotHint{
 				{ID: "eyebrow", Role: "label", Hint: "Closer kicker"},
 				{ID: "headline", Role: "title", Hint: "Takeaway title line 1"},
 				{ID: "headline_2", Role: "optional", Hint: "Title line 2 (optional)"},
+				{ID: "headline_accent", Role: "optional", Hint: "Exact substring of headline to paint in accent"},
 				{ID: "thesis", Role: "body", Hint: "Closing thesis, 40–80 words"},
+				{ID: "thesis_accent", Role: "optional", Hint: "Exact substring of thesis to paint in accent"},
+				{ID: "cta_kicker", Role: "optional", Hint: "Closing CTA kicker (Get started)"},
+				{ID: "cta_body", Role: "optional", Hint: "Install commands or next step, one per line"},
 			}, itemSlots(3, false)...),
+		},
+		{
+			Kind:    RecipeStatementEvidence,
+			Title:   "Statement + evidence",
+			Summary: "Big claim left, evidence list right. Use for the problem or why-now slide.",
+			Slots: headerSlotsPlus([]themes.SlotHint{
+				{ID: "body_1", Role: "body", Hint: "Left argument, two short paragraphs"},
+				{ID: "evidence_kicker", Role: "label", Hint: "Evidence panel kicker"},
+				{ID: "evidence_1_title", Role: "heading", Hint: "Evidence 1 heading"},
+				{ID: "evidence_1_body", Role: "body", Hint: "Evidence 1 sentence"},
+				{ID: "evidence_2_title", Role: "heading", Hint: "Evidence 2 heading"},
+				{ID: "evidence_2_body", Role: "body", Hint: "Evidence 2 sentence"},
+				{ID: "evidence_3_title", Role: "heading", Hint: "Evidence 3 heading"},
+				{ID: "evidence_3_body", Role: "body", Hint: "Evidence 3 sentence"},
+			}),
+		},
+		{
+			Kind:    RecipeDataTable,
+			Title:   "Data table",
+			Summary: "Hairline table — tiers, comparisons, spec sheets. Not a card grid.",
+			Slots: headerSlotsPlus([]themes.SlotHint{
+				{ID: "col_1", Role: "label", Hint: "Column 1 header"},
+				{ID: "col_2", Role: "label", Hint: "Column 2 header"},
+				{ID: "col_3", Role: "label", Hint: "Column 3 header"},
+				{ID: "col_4", Role: "optional", Hint: "Column 4 header"},
+				{ID: "row_1_col_1", Role: "body", Hint: "Row 1 col 1"},
+				{ID: "row_1_col_2", Role: "body", Hint: "Row 1 col 2"},
+				{ID: "row_1_col_3", Role: "body", Hint: "Row 1 col 3"},
+				{ID: "row_1_col_4", Role: "optional", Hint: "Row 1 col 4"},
+				{ID: "row_2_col_1", Role: "body", Hint: "Row 2 col 1"},
+				{ID: "row_2_col_2", Role: "body", Hint: "Row 2 col 2"},
+				{ID: "row_2_col_3", Role: "body", Hint: "Row 2 col 3"},
+				{ID: "row_2_col_4", Role: "optional", Hint: "Row 2 col 4"},
+				{ID: "row_3_col_1", Role: "body", Hint: "Row 3 col 1"},
+				{ID: "row_3_col_2", Role: "body", Hint: "Row 3 col 2"},
+				{ID: "row_3_col_3", Role: "body", Hint: "Row 3 col 3"},
+				{ID: "row_3_col_4", Role: "optional", Hint: "Row 3 col 4"},
+				{ID: "table_note", Role: "optional", Hint: "One-line footnote under the table"},
+			}),
+		},
+		{
+			Kind:    RecipeLayerStack,
+			Title:   "Layer stack",
+			Summary: "Numbered stack left, 3 argument cards right. Highlight one layer with emphasis=2.",
+			Slots: headerSlotsPlus([]themes.SlotHint{
+				{ID: "lede", Role: "optional", Hint: "One-line lede under the headline"},
+				{ID: "stack_label", Role: "label", Hint: "Stack panel label"},
+				{ID: "layer_4_name", Role: "heading", Hint: "Top layer name"},
+				{ID: "layer_4_meta", Role: "optional", Hint: "Top layer meta"},
+				{ID: "layer_3_name", Role: "heading", Hint: "Layer 3 name"},
+				{ID: "layer_3_meta", Role: "optional", Hint: "Layer 3 meta"},
+				{ID: "layer_2_name", Role: "heading", Hint: "Layer 2 name (often the argument)"},
+				{ID: "layer_2_meta", Role: "optional", Hint: "Layer 2 meta"},
+				{ID: "layer_1_name", Role: "heading", Hint: "Layer 1 name"},
+				{ID: "layer_1_meta", Role: "optional", Hint: "Layer 1 meta"},
+				{ID: "layer_0_name", Role: "heading", Hint: "Foundation layer name"},
+				{ID: "layer_0_meta", Role: "optional", Hint: "Foundation meta"},
+				{ID: "card_1_kicker", Role: "label", Hint: "Right card 1 kicker"},
+				{ID: "card_1_title", Role: "heading", Hint: "Right card 1 title"},
+				{ID: "card_1_body", Role: "body", Hint: "Right card 1 sentence"},
+				{ID: "card_2_kicker", Role: "label", Hint: "Right card 2 kicker"},
+				{ID: "card_2_title", Role: "heading", Hint: "Right card 2 title"},
+				{ID: "card_2_body", Role: "body", Hint: "Right card 2 sentence"},
+				{ID: "card_3_kicker", Role: "label", Hint: "Right card 3 kicker"},
+				{ID: "card_3_title", Role: "heading", Hint: "Right card 3 title"},
+				{ID: "card_3_body", Role: "body", Hint: "Right card 3 sentence"},
+			}),
+		},
+		{
+			Kind:    RecipeProcessTerminal,
+			Title:   "Process + terminal",
+			Summary: "Three steps plus a full-width transcript. Use for how-it-works. emphasis=3 is the payoff.",
+			Slots: headerSlotsPlus([]themes.SlotHint{
+				{ID: "step_1_kicker", Role: "label", Hint: "Step 1 kicker"},
+				{ID: "step_1_title", Role: "heading", Hint: "Step 1 title"},
+				{ID: "step_1_body", Role: "body", Hint: "Step 1 sentence"},
+				{ID: "step_2_kicker", Role: "label", Hint: "Step 2 kicker"},
+				{ID: "step_2_title", Role: "heading", Hint: "Step 2 title"},
+				{ID: "step_2_body", Role: "body", Hint: "Step 2 sentence"},
+				{ID: "step_3_kicker", Role: "label", Hint: "Step 3 kicker"},
+				{ID: "step_3_title", Role: "heading", Hint: "Step 3 title"},
+				{ID: "step_3_body", Role: "body", Hint: "Step 3 sentence"},
+				{ID: "terminal_kicker", Role: "label", Hint: "Transcript label"},
+				{ID: "terminal_body", Role: "body", Hint: "4-line transcript, one command per line"},
+			}),
 		},
 	}
 }
@@ -157,9 +259,11 @@ func allRecipeMeta() []recipeMeta {
 func headerSlotsPlus(extra []themes.SlotHint) []themes.SlotHint {
 	base := []themes.SlotHint{
 		{ID: "eyebrow", Role: "label", Hint: "Chapter/section kicker, 2–5 words"},
-		{ID: "date", Role: "optional", Hint: "Year range or right marker (optional)"},
+		{ID: "date", Role: "optional", Hint: "Year range or // kicker (optional)"},
 		{ID: "headline", Role: "title", Hint: "Display title line 1"},
 		{ID: "headline_2", Role: "optional", Hint: "Display title line 2 (optional)"},
+		{ID: "headline_accent", Role: "optional", Hint: "Exact substring of headline to paint in accent (one phrase)"},
+		{ID: "emphasis", Role: "optional", Hint: "Which card/column to emphasize: 1, 2, or 3"},
 	}
 	return append(base, extra...)
 }
@@ -236,21 +340,13 @@ func recipeByKind(kind string) (recipeMeta, bool) {
 // prototype (page 0, no running title); fill_slides re-renders with chrome.
 func RecipeArchetypes(tmpl themes.Template) []themes.Archetype {
 	chrome := ExtractChrome(tmpl)
-	sg := tmpl.StyleGuide
-	out := make([]themes.Archetype, 0, 10)
+	out := make([]themes.Archetype, 0, 16)
 	for _, m := range allRecipeMeta() {
-		markup, err := RenderRecipe(m.Kind, sg, tmpl.Tokens, chrome, nil)
+		a, err := recipeArchetypeFor(tmpl, m.Kind, chrome, nil)
 		if err != nil {
 			continue
 		}
-		out = append(out, themes.Archetype{
-			Kind:      m.Kind,
-			Title:     m.Title,
-			Markup:    markup,
-			Tier:      "flexible",
-			FillSlots: requiredFillSlots(m.Slots),
-			SlotHints: m.Slots,
-		})
+		out = append(out, a)
 	}
 	return out
 }
@@ -263,16 +359,16 @@ func catalogFromTemplate(tmpl themes.Template) []ArchetypeCatalogEntry {
 			cat[i].Summary = m.Summary
 		}
 	}
-	return append(cat, catalogFrom(tmpl.Archetypes)...)
+	return append(cat, catalogFrom(agentCatalogBookends(tmpl))...)
 }
 
 // RenderRecipe builds ASD markup for one layout type. fills are applied later
 // by fillArchetypeMarkup; this emits empty named ast-text slots plus chrome.
-func RenderRecipe(kind string, sg *themes.StyleGuide, tokens map[string]string, chrome Chrome, fills map[string]string) (string, error) {
+func RenderRecipe(kind string, skin Skin, sg *themes.StyleGuide, chrome Chrome, fills map[string]string) (string, error) {
 	if _, ok := recipeByKind(kind); !ok {
 		return "", fmt.Errorf("unknown recipe kind %q", kind)
 	}
-	b := newRecipeBuilder(kind, sg, tokens, chrome, fills)
+	b := newRecipeBuilder(kind, skin, sg, chrome, fills)
 	switch kind {
 	case RecipeCover:
 		b.layoutCover()
@@ -294,106 +390,68 @@ func RenderRecipe(kind string, sg *themes.StyleGuide, tokens map[string]string, 
 		b.layoutYearHero()
 	case RecipeCloser:
 		b.layoutCloser()
+	case RecipeStatementEvidence:
+		b.layoutStatementEvidence()
+	case RecipeDataTable:
+		b.layoutDataTable()
+	case RecipeLayerStack:
+		b.layoutLayerStack()
+	case RecipeProcessTerminal:
+		b.layoutProcessTerminal()
 	}
 	return b.finish(), nil
 }
 
 type pal struct {
-	surface, ink, accent, muted, card, secondary string
-	display, body                                string
-	mx, my, contentW                             int
-	h1, h2, h3, bodySize, labelSize              int
+	skinID                                            string
+	surface, ink, accent, muted, card, secondary      string
+	panel, inset, line, accentFill, accentEdge        string
+	accentGlow, inkDim                                string
+	display, body, mono                               string
+	mx, my, contentW                                  int
+	h1, h2, h3, bodySize, labelSize, chromeSize, stat int
 }
 
-func paletteFrom(sg *themes.StyleGuide, tokens map[string]string) pal {
+func paletteFrom(skin Skin, sg *themes.StyleGuide) pal {
 	p := pal{
-		surface:   "#FFFFFF",
-		ink:       "#172033",
-		accent:    "#1E40AF",
-		display:   "",
-		body:      "",
-		mx:        120,
-		my:        72,
-		h1:        92,
-		h2:        56,
-		h3:        32,
-		bodySize:  22,
-		labelSize: 15,
+		skinID:     skin.ID,
+		surface:    skin.Surface,
+		ink:        skin.Ink,
+		accent:     skin.Accent,
+		muted:      skin.InkMute,
+		secondary:  skin.InkMute,
+		card:       skin.Panel,
+		panel:      skin.Panel,
+		inset:      skin.Inset,
+		line:       skin.Line,
+		accentFill: skin.AccentFill,
+		accentEdge: skin.AccentEdge,
+		accentGlow: skin.AccentGlow,
+		inkDim:     skin.InkDim,
+		display:    skin.DisplayFont,
+		body:       skin.BodyFont,
+		mono:       skin.MonoFont,
+		mx:         skin.MarginX,
+		my:         skin.MarginY,
+		h1:         skin.HeroSize,
+		h2:         skin.H2Size,
+		h3:         skin.CardTitle,
+		bodySize:   skin.BodySize,
+		labelSize:  skin.EyebrowSize,
+		chromeSize: skin.ChromeSize,
+		stat:       skin.Stat,
 	}
-	if tokens != nil {
-		if v := strings.TrimSpace(tokens["surface"]); v != "" {
-			p.surface = v
-		}
-		if v := strings.TrimSpace(tokens["ink"]); v != "" {
-			p.ink = v
-		}
-		if v := strings.TrimSpace(tokens["accent"]); v != "" {
-			p.accent = v
-		}
-		if v := strings.TrimSpace(tokens["muted"]); v != "" {
-			p.muted = v
-		}
-		if v := strings.TrimSpace(tokens["displayFont"]); v != "" {
-			p.display = v
-		}
-		if v := strings.TrimSpace(tokens["bodyFont"]); v != "" {
-			p.body = v
-		}
+	if !skin.IsProduct() && sg != nil && sg.SpacingSystem != nil {
+		p.mx = clampInt(sg.SpacingSystem.PageMarginX, 80, 160)
+		p.my = clampInt(sg.SpacingSystem.PageMarginY, 56, 100)
 	}
-	if sg != nil {
-		for _, r := range sg.ColorRoles {
-			c := strings.TrimSpace(r.Color)
-			if c == "" {
-				continue
-			}
-			switch r.Name {
-			case "surface":
-				p.surface = c
-			case "ink":
-				p.ink = c
-			case "accent":
-				p.accent = c
-			case "muted":
-				p.muted = c
-			}
-		}
-		if sg.FontPairing != nil {
-			if sg.FontPairing.DisplayFont != "" {
-				p.display = sg.FontPairing.DisplayFont
-			}
-			if sg.FontPairing.BodyFont != "" {
-				p.body = sg.FontPairing.BodyFont
-			}
-		}
-		if sg.SpacingSystem != nil {
-			p.mx = clampInt(sg.SpacingSystem.PageMarginX, 80, 160)
-			p.my = clampInt(sg.SpacingSystem.PageMarginY, 56, 100)
-		}
-		for _, tl := range sg.TypographyScale {
-			switch tl.Role {
-			case "h1":
-				p.h1 = clampInt(tl.FontSize, 72, 108)
-			case "h2":
-				p.h2 = clampInt(tl.FontSize, 48, 72)
-			case "h3":
-				p.h3 = clampInt(tl.FontSize, 26, 40)
-			case "body":
-				p.bodySize = clampInt(tl.FontSize, 20, 28)
-			case "label", "caption":
-				p.labelSize = clampInt(tl.FontSize, 13, 18)
-			}
-		}
+	if !textContrastOK(p.secondary, p.surface) {
+		p.secondary = mixHex(p.ink, p.surface, 0.22)
 	}
-	if p.muted == "" {
-		p.muted = mixHex(p.ink, p.surface, 0.42)
+	if p.card == "" {
+		p.card = mixHex(p.surface, p.ink, 0.08)
+		p.panel = p.card
 	}
-	// Template "muted" is often a decorative wash (pale cyan on white). Use it
-	// for body/caption text only when it still meets WCAG AA against surface.
-	p.secondary = mixHex(p.ink, p.surface, 0.22)
-	if textContrastOK(p.muted, p.surface) {
-		p.secondary = p.muted
-	}
-	p.card = mixHex(p.surface, p.ink, 0.08)
 	p.contentW = CanvasWidth - 2*p.mx
 	return p
 }
@@ -458,8 +516,59 @@ type recipeBuilder struct {
 	parts  []string
 }
 
-func newRecipeBuilder(kind string, sg *themes.StyleGuide, tokens map[string]string, chrome Chrome, fills map[string]string) *recipeBuilder {
-	return &recipeBuilder{kind: kind, pal: paletteFrom(sg, tokens), chrome: chrome, fills: fills, parts: make([]string, 0, 48)}
+func newRecipeBuilder(kind string, skin Skin, sg *themes.StyleGuide, chrome Chrome, fills map[string]string) *recipeBuilder {
+	return &recipeBuilder{kind: kind, pal: paletteFrom(skin, sg), chrome: chrome, fills: fills, parts: make([]string, 0, 48)}
+}
+
+func (b *recipeBuilder) isProduct() bool { return b.pal.skinID == SkinProduct }
+
+func (b *recipeBuilder) chromeFont() string {
+	if b.isProduct() && b.pal.mono != "" {
+		return b.pal.mono
+	}
+	return b.pal.body
+}
+
+func (b *recipeBuilder) emphasis(def int) int {
+	if b.fills == nil {
+		return def
+	}
+	s := strings.TrimSpace(b.fills["emphasis"])
+	if s == "" {
+		return def
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 0 {
+		return def
+	}
+	return n
+}
+
+func (b *recipeBuilder) panel(id string, x, y, w, h int, emphasized bool) {
+	x, y, w, h, ok := clampCanvas(x, y, w, h)
+	if !ok {
+		return
+	}
+	fill := b.pal.panel
+	line := b.pal.line
+	if emphasized {
+		fill = b.pal.accentFill
+		if fill == "" {
+			fill = mixHex(b.pal.surface, b.pal.accent, 0.14)
+		}
+		line = b.pal.accentEdge
+		if line == "" {
+			line = b.pal.accent
+		}
+	}
+	extra := ""
+	if line != "" {
+		extra = fmt.Sprintf(` line="%s" line-width="1"`, line)
+	}
+	dec := ""
+	b.parts = append(b.parts, fmt.Sprintf(
+		`<ast-shape id="%s" kind="rect" x="%d" y="%d" w="%d" h="%d" geom="roundRect" fill="%s"%s alt=""%s></ast-shape>`,
+		html.EscapeString(id), x, y, w, h, fill, extra, dec))
 }
 
 // want reports whether a named slot should be emitted. Required slots always
@@ -489,6 +598,10 @@ func (b *recipeBuilder) finish() string {
 }
 
 func (b *recipeBuilder) shape(id, geom string, x, y, w, h int, fill string, decorative bool) {
+	x, y, w, h, ok := clampCanvas(x, y, w, h)
+	if !ok {
+		return
+	}
 	dec := ""
 	if decorative {
 		dec = ` decorative="true"`
@@ -501,8 +614,36 @@ func (b *recipeBuilder) shape(id, geom string, x, y, w, h int, fill string, deco
 		html.EscapeString(id), x, y, w, h, geom, fill, dec))
 }
 
+func clampCanvas(x, y, w, h int) (int, int, int, int, bool) {
+	if x < 0 {
+		w += x
+		x = 0
+	}
+	if y < 0 {
+		h += y
+		y = 0
+	}
+	if x >= CanvasWidth || y >= CanvasHeight {
+		return 0, 0, 0, 0, false
+	}
+	if x+w > CanvasWidth {
+		w = CanvasWidth - x
+	}
+	if y+h > CanvasHeight {
+		h = CanvasHeight - y
+	}
+	if w <= 0 || h <= 0 {
+		return 0, 0, 0, 0, false
+	}
+	return x, y, w, h, true
+}
+
 func (b *recipeBuilder) slot(id string, x, y, w, h, size int, color, weight, font, align string) {
 	if !b.want(id) {
+		return
+	}
+	x, y, w, h, ok := clampCanvas(x, y, w, h)
+	if !ok {
 		return
 	}
 	var sb strings.Builder
@@ -525,6 +666,10 @@ func (b *recipeBuilder) slot(id string, x, y, w, h, size int, color, weight, fon
 }
 
 func (b *recipeBuilder) staticText(id string, x, y, w, h, size int, color, weight, font, align, text string) {
+	x, y, w, h, ok := clampCanvas(x, y, w, h)
+	if !ok {
+		return
+	}
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf(`<ast-text id="%s" x="%d" y="%d" w="%d" h="%d" size="%d" color="%s" decorative="true"`,
 		html.EscapeString(id), x, y, w, h, size, color))
@@ -542,10 +687,30 @@ func (b *recipeBuilder) staticText(id string, x, y, w, h, size int, color, weigh
 }
 
 func (b *recipeBuilder) bg() {
+	if b.isProduct() {
+		b.productBG()
+		return
+	}
 	b.shape("bg", "rect", 0, 0, CanvasWidth, CanvasHeight, b.pal.surface, true)
 }
 
+// productBG paints an opaque radial wash (accent mixed into surface). Stops
+// are solid colors so HTML/PDF/PPTX do not depend on shape opacity. The first
+// stop stays clearly violet; it must still read as atmosphere, not a disk.
+func (b *recipeBuilder) productBG() {
+	hi := mixHex(b.pal.accent, b.pal.surface, 0.30)
+	mid := mixHex(b.pal.accent, b.pal.surface, 0.72)
+	lo := b.pal.surface
+	payload := fmt.Sprintf(`{"kind":"radial","stops":[{"pos":0,"color":"%s"},{"pos":42,"color":"%s"},{"pos":100,"color":"%s"}]}`, hi, mid, lo)
+	b.parts = append(b.parts, fmt.Sprintf(
+		`<ast-shape id="bg" kind="rect" x="0" y="0" w="%d" h="%d" geom="rect" fill="%s" alt="" decorative="true"><script type="application/json" id="bg-gradient">%s</script></ast-shape>`,
+		CanvasWidth, CanvasHeight, html.EscapeString(lo), payload))
+}
+
 func (b *recipeBuilder) topY() int {
+	if b.isProduct() {
+		return 188
+	}
 	y := b.pal.my
 	if b.chrome.LogoRef != "" {
 		_, h := b.logoSize()
@@ -585,7 +750,8 @@ func (b *recipeBuilder) logoSize() (w, h int) {
 }
 
 func (b *recipeBuilder) paintLogo() {
-	if b.chrome.LogoRef == "" {
+	// Only a real template asset. Never invent a mark, circle, or wordmark.
+	if b.isProduct() || b.chrome.LogoRef == "" {
 		return
 	}
 	w, h := b.logoSize()
@@ -603,6 +769,15 @@ func (b *recipeBuilder) paintConfidential() {
 
 func (b *recipeBuilder) paintFooter() {
 	y := 1036
+	if b.isProduct() {
+		b.shape("chrome-hairline", "rect", b.pal.mx, 1020, b.pal.contentW, 1, b.pal.line, true)
+		left := strings.TrimSpace(b.chrome.DeckTitle)
+		if left == "" {
+			left = "deck"
+		}
+		b.staticText("chrome-footer", b.pal.mx, y, 900, 24, b.pal.chromeSize, b.pal.inkDim, "", b.pal.mono, "", strings.ToLower(left))
+		return
+	}
 	left := strings.TrimSpace(b.chrome.Legal)
 	if left == "" {
 		left = strings.TrimSpace(b.chrome.DeckTitle)
@@ -619,10 +794,49 @@ func (b *recipeBuilder) paintFooter() {
 	}
 }
 
+func (b *recipeBuilder) paintProductRail() {
+	p := b.pal
+	page := b.chrome.Page
+	if page <= 0 {
+		page = 1
+	}
+	total := b.chrome.Total
+	if total <= 0 {
+		total = page
+	}
+	b.shape("rail-dot", "ellipse", p.mx, 70, 10, 10, p.accent, true)
+	// Eyebrow sits in the rail as "05 · SECTION". The slot is empty; static
+	// prefix is chrome. The actual eyebrow text is a following slot.
+	b.staticText("rail-page-left", p.mx+20, 64, 80, 28, p.chromeSize, p.secondary, "600", p.mono, "", fmt.Sprintf("%02d", page)+"  ·")
+	b.slot("eyebrow", p.mx+108, 64, 900, 28, p.chromeSize, p.secondary, "600", p.mono, "")
+	b.staticText("rail-page-right", CanvasWidth-p.mx-160, 64, 160, 28, p.chromeSize, p.secondary, "", p.mono, "right", fmt.Sprintf("%02d / %02d", page, total))
+}
+
 // header writes eyebrow, optional date, accent rule, headline, optional headline_2.
 // Returns the Y where body content should start.
 func (b *recipeBuilder) header(split bool) int {
 	b.bg()
+	if b.isProduct() {
+		b.paintProductRail()
+		y := 188
+		if b.want("date") {
+			b.slot("date", b.pal.mx, y, b.pal.contentW, 28, b.pal.labelSize, b.pal.accent, "", b.pal.mono, "")
+			y += 36
+		}
+		line := b.pal.h2 + 16
+		if line < 80 {
+			line = 80
+		}
+		if split && b.want("headline_2") {
+			b.slot("headline", b.pal.mx, y, b.pal.contentW, line, b.pal.h2, b.pal.ink, "700", b.pal.display, "")
+			b.slot("headline_2", b.pal.mx, y+line-8, b.pal.contentW, line, b.pal.h2, b.pal.ink, "700", b.pal.display, "")
+			return y + 2*line + 16
+		}
+		// One takeaway slot: two wrapped lines so long titles are not clipped.
+		hh := line*2 + 8
+		b.slot("headline", b.pal.mx, y, b.pal.contentW, hh, b.pal.h2, b.pal.ink, "700", b.pal.display, "")
+		return y + hh + 20
+	}
 	b.paintLogo()
 	b.paintConfidential()
 	y := b.topY()
@@ -630,19 +844,39 @@ func (b *recipeBuilder) header(split bool) int {
 	b.slot("date", b.pal.mx+1000, y, b.pal.contentW-1000, 32, b.pal.labelSize, b.pal.secondary, "", b.pal.body, "right")
 	b.shape("rule", "rect", b.pal.mx, y+40, 64, 3, b.pal.accent, true)
 	hy := y + 56
-	hh := b.pal.h2 + 16
-	if hh < 72 {
-		hh = 72
+	line := b.pal.h2 + 16
+	if line < 72 {
+		line = 72
 	}
-	if hh > 96 {
-		hh = 96
-	}
-	b.slot("headline", b.pal.mx, hy, b.pal.contentW, hh, b.pal.h2, b.pal.ink, "700", b.pal.display, "")
 	if split && b.want("headline_2") {
-		b.slot("headline_2", b.pal.mx, hy+hh-6, b.pal.contentW, hh, b.pal.h2, b.pal.ink, "700", b.pal.display, "")
-		return hy + 2*hh + 12
+		b.slot("headline", b.pal.mx, hy, b.pal.contentW, line, b.pal.h2, b.pal.ink, "700", b.pal.display, "")
+		b.slot("headline_2", b.pal.mx, hy+line-6, b.pal.contentW, line, b.pal.h2, b.pal.ink, "700", b.pal.display, "")
+		return hy + 2*line + 12
 	}
-	return hy + hh + 20
+	hh := line*2 + 4
+	b.slot("headline", b.pal.mx, hy, b.pal.contentW, hh, b.pal.h2, b.pal.ink, "700", b.pal.display, "")
+	return hy + hh + 16
+}
+
+// contentBottom is the last Y body cards may occupy (above the footer hairline).
+func (b *recipeBuilder) contentBottom() int { return 1004 }
+
+func (b *recipeBuilder) bodyH(fromY int) int {
+	h := b.contentBottom() - fromY
+	if h < 220 {
+		h = 220
+	}
+	return h
+}
+
+// cappedBodyH is for card grids: tall enough to feel like a panel, short
+// enough that two sentences are not floating in an empty slab.
+func (b *recipeBuilder) cappedBodyH(fromY, cap int) int {
+	h := b.bodyH(fromY)
+	if cap > 0 && h > cap {
+		return cap
+	}
+	return h
 }
 
 func (b *recipeBuilder) close() {
@@ -756,18 +990,90 @@ func firstMatchingText(markup string, re *regexp.Regexp) string {
 	return ""
 }
 
+func applyAccentSpans(markup string, fills map[string]string, accent string) string {
+	if accent == "" || fills == nil {
+		return markup
+	}
+	pairs := [][2]string{
+		{"headline", "headline_accent"},
+		{"dek", "dek_accent"},
+		{"thesis", "thesis_accent"},
+	}
+	for _, p := range pairs {
+		phrase := strings.TrimSpace(fills[p[1]])
+		if phrase == "" {
+			continue
+		}
+		markup = colorizeTextSlot(markup, p[0], phrase, accent)
+	}
+	return markup
+}
+
+func colorizeTextSlot(markup, id, phrase, accent string) string {
+	_, tag, _, innerStart, innerEnd, _, ok := findElement(markup, id)
+	if !ok || tag != "ast-text" {
+		return markup
+	}
+	inner := markup[innerStart:innerEnd]
+	text := inner
+	if m := astRunTextRe.FindStringSubmatch(inner); len(m) == 2 {
+		text = html.UnescapeString(m[1])
+	} else {
+		text = html.UnescapeString(stripTags(inner))
+	}
+	if text == "" {
+		return markup
+	}
+	idx := strings.Index(strings.ToLower(text), strings.ToLower(phrase))
+	if idx < 0 {
+		return markup
+	}
+	// Preserve original phrase casing from the filled text.
+	mid := text[idx : idx+len(phrase)]
+	before := text[:idx]
+	after := text[idx+len(phrase):]
+	var b strings.Builder
+	if before != "" {
+		b.WriteString(`<ast-run>` + html.EscapeString(before) + `</ast-run>`)
+	}
+	b.WriteString(`<ast-run color="` + html.EscapeString(accent) + `">` + html.EscapeString(mid) + `</ast-run>`)
+	if after != "" {
+		b.WriteString(`<ast-run>` + html.EscapeString(after) + `</ast-run>`)
+	}
+	return markup[:innerStart] + b.String() + markup[innerEnd:]
+}
+
+func stripTags(s string) string {
+	var b strings.Builder
+	in := false
+	for _, r := range s {
+		switch {
+		case r == '<':
+			in = true
+		case r == '>':
+			in = false
+		case !in:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
 // RecipeGuideMarkdown is prepended to the template style guide so the model
 // sees layout types before imported pattern-* holes.
 func RecipeGuideMarkdown() string {
 	var b strings.Builder
 	b.WriteString("## Layout types (recipe-*) — default body slides\n\n")
-	b.WriteString("Compose every slide from a recipe-* catalog entry. Recipes use this template's ")
-	b.WriteString("colors, fonts, logo, and legal line. Pick the type whose slot count matches the content. ")
-	b.WriteString("Do not pick a 6-card imported pattern because it looks rich. A chapter is an eyebrow on a full content slide — do not insert empty section dividers.\n\n")
+	b.WriteString("Compose body slides from a recipe-* catalog entry. Official title/closing in the catalog are the bookends. Recipes use this template's ")
+	b.WriteString("**skin** (corporate: logo/legal/accent rule; product: dark canvas, mono rails, panels). ")
+	b.WriteString("Pick the type whose slot count matches the content. Mix card layouts with table, stack, and terminal so pages do not all look like the same boxes. ")
+	b.WriteString("Optional `headline_accent` colors one phrase; `emphasis` (1/2/3) highlights one card. ")
+	b.WriteString("The catalog's fillSlots for this template is authoritative (product cover has two meta cells, optional third — not meta_4; product closer requires thesis + 3 takeaway chips). ")
+	b.WriteString("If the catalog lists title / title-N, slide 0 is that official cover (fill those slot ids, not recipe names). If it lists closing / closing-N, the last slide is that official end page. ")
+	b.WriteString("pattern-*, section, and agenda are not in the default catalog; fetch them with get_archetype only if the user asked. A chapter is an eyebrow on a full content slide — do not insert empty section dividers.\n\n")
 	for _, m := range allRecipeMeta() {
-		b.WriteString(fmt.Sprintf("- **%s** (`%s`): %s Required fills: %s.\n",
-			m.Title, m.Kind, m.Summary, strings.Join(requiredFillSlots(m.Slots), ", ")))
+		b.WriteString(fmt.Sprintf("- **%s** (`%s`): %s\n", m.Title, m.Kind, m.Summary))
 	}
-	b.WriteString("\nImported `pattern-*` entries are optional when their structure matches the same job. Title and Text is last resort.\n\n")
+	b.WriteString("\nTitle and Text is last resort. Do not pour a story into an imported sample.\n\n")
 	return b.String()
 }

@@ -2196,7 +2196,7 @@ try {
           ? { x: p.borrowX, y: p.borrowY, w: p.borrowW, h: p.borrowH }
           : p
         const area = (box.w || 0) * (box.h || 0)
-        const fullBleed = area > CANVAS_W * CANVAS_H * 0.35
+        const nearlyFullCanvas = (box.w || 0) >= CANVAS_W * 0.9 && (box.h || 0) >= CANVAS_H * 0.9
         if (p.mediaKey) {
           pc += 1
           const g = clampGeo(box)
@@ -2206,19 +2206,16 @@ try {
           pushSlot(picId, 'image', hintForPlaceholder(p))
           continue
         }
-        // Empty picture placeholder. A full-bleed muted panel on a sparse cover
-        // is a cyan slab — omit it. Do not omit when a large frame (anvil, split
-        // panel) is meant to hold the photo; dropping it leaves an empty hole.
-        if (omitEmptyFullBleedPic && fullBleed && !hasLargeFrame) continue
+        // Empty picture placeholder. A near-full-canvas muted panel on a sparse
+        // cover is a cyan slab — omit that. A SPLIT well (GCO "White cover with
+        // blue pattern" is a right-hand ~half page) IS the cover design: keep it
+        // and paint it with the template muted/accent so fill matches the picker.
+        if (omitEmptyFullBleedPic && nearlyFullCanvas && !hasLargeFrame) continue
         pc += 1
         const picId = `ph-pic-${pc}`
         const g = clampGeo(box)
-        if (fullBleed) {
-          parts.push(`<ast-shape id="${picId}" kind="rect" ${g} geom="rect" alt="${esc(p.name || 'Image')}"></ast-shape>`)
-        } else {
-          const panel = (p.fill && safeCol(p.fill)) || safeCol(themeTokens.muted) || safeCol(themeTokens.accent2) || '#E2E8F0'
-          parts.push(`<ast-shape id="${picId}" kind="rect" ${g} geom="rect" fill="${panel}" alt="${esc(p.name || 'Image')}"></ast-shape>`)
-        }
+        const panel = (p.fill && safeCol(p.fill)) || safeCol(themeTokens.muted) || safeCol(themeTokens.accent2) || '#E2E8F0'
+        parts.push(`<ast-shape id="${picId}" kind="rect" ${g} geom="rect" fill="${panel}" alt="${esc(p.name || 'Image')}"></ast-shape>`)
         pushSlot(picId, 'image', hintForPlaceholder(p))
       }
       // Do NOT inject a generic title/body hole onto layouts that already have
@@ -2383,74 +2380,73 @@ try {
       // data:image/<type>;base64,… — treat everything that is not svg as raster.
       return typeof d === 'string' && /^data:image\//.test(d) && !/^data:image\/svg\+xml/.test(d)
     }
-    const borrowSampleImages = (layoutIR, layoutPath) => {
-      const samples = samplesByLayoutPath[layoutPath]
-      if (!samples || !samples.length) return 0
-      // Collect candidate images (mediaKey + box) across all samples for this layout.
-      const candidates = []
-      // Normalize each candidate's box to {x,y,w,h,flipH,flipV} in canvas units.
-      // Sample OBJECTS carry geometry under o.geometry (+ node-level flipH/flipV
-      // set by processPic); sample PLACEHOLDERS carry x/y/w/h directly. Capturing
-      // a uniform box lets the borrow reproduce the sample picture's OWN geometry
-      // and horizontal/vertical flip, not just its mediaKey.
-      const boxOf = (o) => ({
-        x: o.x != null ? o.x : (o.geometry ? o.geometry.x : 0),
-        y: o.y != null ? o.y : (o.geometry ? o.geometry.y : 0),
-        w: o.w != null ? o.w : (o.geometry ? o.geometry.w : 0),
-        h: o.h != null ? o.h : (o.geometry ? o.geometry.h : 0),
-        flipH: !!o.flipH,
-        flipV: !!o.flipV,
-      })
-      for (const s of samples) {
-        for (const o of (s.objects || [])) {
-          if (o.kind === 'image' && o.mediaKey) candidates.push({ mediaKey: o.mediaKey, box: boxOf(o) })
-        }
-        for (const ph of (s.placeholders || [])) {
-          if (ph.type === 'image' && ph.mediaKey) candidates.push({ mediaKey: ph.mediaKey, box: boxOf(ph) })
-        }
+    // Normalize a sample object/placeholder to {x,y,w,h,flipH,flipV} in canvas units.
+    const boxOf = (o) => ({
+      x: o.x != null ? o.x : (o.geometry ? o.geometry.x : 0),
+      y: o.y != null ? o.y : (o.geometry ? o.geometry.y : 0),
+      w: o.w != null ? o.w : (o.geometry ? o.geometry.w : 0),
+      h: o.h != null ? o.h : (o.geometry ? o.geometry.h : 0),
+      flipH: !!o.flipH,
+      flipV: !!o.flipV,
+    })
+    const collectImages = (ir) => {
+      const out = []
+      for (const o of (ir.objects || [])) {
+        if (o.kind === 'image' && o.mediaKey) out.push({ mediaKey: o.mediaKey, box: boxOf(o) })
       }
-      if (!candidates.length) return 0
+      for (const ph of (ir.placeholders || [])) {
+        if (ph.type === 'image' && ph.mediaKey) out.push({ mediaKey: ph.mediaKey, box: boxOf(ph) })
+      }
+      return out
+    }
+    // Cross-layout hero borrow used to copy one sample photo (often the same
+    // person/bike) onto every title/closing with an empty picture hole. Cover
+    // photos are now an opt-in pick from the template's example images, so
+    // empty wells stay empty here. Same-layout borrow below still fills a
+    // placeholder from a sample that actually uses this layout.
+    const borrowSampleImages = (layoutIR, layoutPath) => {
+      const samples = samplesByLayoutPath[layoutPath] || []
+      const candidates = []
+      for (const s of samples) candidates.push(...collectImages(s))
       // Composite score: raster beats vector by a wide margin, then area, then IoU.
       const scoreFor = (c, ph) => {
         const raster = isRasterAsset(c.mediaKey) ? 1000000 : 0
         const area = (c.box.w || 0) * (c.box.h || 0)
-        // Normalize area into a modest band so it never outweighs the raster flag
-        // but reliably separates a full-bleed photo from a small accent shape.
         const areaScore = Math.min(area / (CANVAS_W * CANVAS_H), 1) * 1000
         const iou = boxIoU(ph, c.box) * 100
         return raster + areaScore + iou
       }
       let enriched = 0
       const usedKeys = new Set()
-      for (const ph of layoutIR.placeholders) {
-        if (ph.type !== 'image' || ph.mediaKey) continue
-        let best = null, bestScore = -1
-        for (const c of candidates) {
-          if (usedKeys.has(c.mediaKey)) continue
-          const s = scoreFor(c, ph)
-          if (s > bestScore) { bestScore = s; best = c }
-        }
-        // Fallback: first unused candidate (an on-brand photo beats a blank panel).
-        if (!best) {
-          best = candidates.find((c) => !usedKeys.has(c.mediaKey)) || null
-        }
-        if (best) {
-          ph.mediaKey = best.mediaKey
-          usedKeys.add(best.mediaKey)
-          // Preserve the sample picture's OWN geometry + flip so the default hero
-          // renders faithfully (correct size/position/mirroring) rather than being
-          // squeezed into the placeholder's small declared hole. Stored in separate
-          // borrow* fields so a genuinely-empty placeholder (no borrow) still uses
-          // its own box. layoutToAsd prefers borrow* geometry when present.
+      const applyHero = (ph, best, keepOwnBox) => {
+        ph.mediaKey = best.mediaKey
+        usedKeys.add(best.mediaKey)
+        if (!keepOwnBox) {
+          // Same-layout borrow: keep the sample picture's own geometry + flip.
           ph.borrowX = best.box.x
           ph.borrowY = best.box.y
           ph.borrowW = best.box.w
           ph.borrowH = best.box.h
-          if (best.box.flipH) ph.flipH = true
-          if (best.box.flipV) ph.flipV = true
-          enriched += 1
+        }
+        if (best.box.flipH) ph.flipH = true
+        if (best.box.flipV) ph.flipV = true
+        enriched += 1
+      }
+      const pickFrom = (pool, keepOwnBox) => {
+        if (!pool.length) return
+        for (const ph of layoutIR.placeholders) {
+          if (ph.type !== 'image' || ph.mediaKey) continue
+          let best = null, bestScore = -1
+          for (const c of pool) {
+            if (usedKeys.has(c.mediaKey)) continue
+            const s = scoreFor(c, ph)
+            if (s > bestScore) { bestScore = s; best = c }
+          }
+          if (!best) best = pool.find((c) => !usedKeys.has(c.mediaKey)) || null
+          if (best) applyHero(ph, best, keepOwnBox)
         }
       }
+      pickFrom(candidates, false)
       return enriched
     }
 
@@ -2487,15 +2483,15 @@ try {
       }
       // A layout may ship an EMPTY picture placeholder (a "insert picture here"
       // slot with no default blip). Borrow the matching authored photo from a
-      // sample slide that uses this layout so the hero image renders instead of
-      // a synthetic panel. Only the picture FILL (mediaKey) is copied.
+      // sample slide that uses this layout so the placeholder has a real default
+      // in the IR (the authoring picker still strips it until the user picks).
+      const baseKind = kindOf(ir, layoutType)
       borrowSampleImages(ir, ln)
       ir._layoutPath = ln
       ir._showMasterSp = showMasterSp
       ir._layoutType = layoutType
       ir._masterCount = (showMasterSp && masterCtx && masterCtx.chromeObjects) ? masterCtx.chromeObjects.length : 0
       irLayouts.push(ir)
-      const baseKind = kindOf(ir, layoutType)
       const kind = uniqueKind(baseKind)
       const tier = roleTier(baseKind)
       // Keep master-inherited chrome on flexible layouts too. Chrome is no longer

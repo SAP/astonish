@@ -56,7 +56,7 @@ func (e HTMLExporter) Export(scene SceneGraph) (ExportResult, error) {
 	// in the browser instead of falling back to serif. The CSP above already
 	// allows font-src data:. No-op when the theme carries no embedded-fonts key.
 	writeFontFaces(&body, scene.Theme, scene.Assets)
-	body.WriteString(`html,body{width:100%;height:100%;margin:0;overflow:hidden}body{background:#111827}ast-deck{display:block;position:relative;width:1920px;height:1080px;overflow:hidden;transform-origin:top left;background:var(--ast-surface);color:var(--ast-ink)}ast-slide{display:none;position:absolute;inset:0;width:1920px;height:1080px;overflow:hidden}ast-slide[active]{display:block}ast-text{white-space:pre-wrap;overflow-wrap:break-word}ast-notes{display:none}`)
+	body.WriteString(`html,body{width:100%;height:100%;margin:0;overflow:hidden}body{background:#111827}ast-deck{display:block;position:relative;width:1920px;height:1080px;overflow:hidden;transform-origin:top left;background:var(--ast-surface);color:var(--ast-ink)}ast-slide{display:none;position:absolute;inset:0;width:1920px;height:1080px;overflow:hidden}ast-slide[active]{display:block}ast-text{white-space:pre-wrap;overflow-wrap:break-word;font-variant-ligatures:none}ast-notes{display:none}`)
 	if e.Print {
 		// Print layout: paginate one slide per page. The @page box and every
 		// slide are declared in the SAME inch units as the PDF paper (20in x
@@ -461,7 +461,7 @@ func writeShapePaint(out *bytes.Buffer, fill, stroke, strokeWidth, dash, markerS
 
 func writeGradientDef(out *bytes.Buffer, id string, g *Gradient) {
 	if g.Kind == "radial" {
-		out.WriteString(`<radialGradient id="` + id + `">`)
+		out.WriteString(`<radialGradient id="` + id + `" cx="80%" cy="8%" r="72%">`)
 		writeGradientStops(out, g.Stops)
 		out.WriteString(`</radialGradient>`)
 		return

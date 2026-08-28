@@ -267,21 +267,16 @@ func TestPPTXExportV2NodeProps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Capabilities.Native != 2 || result.Capabilities.Raster != 0 || result.Capabilities.Unsupported != 0 {
+	if result.Capabilities.Native != 1 || result.Capabilities.Vector != 1 || result.Capabilities.Raster != 0 || result.Capabilities.Unsupported != 0 {
 		t.Fatalf("unexpected capabilities: %+v", result.Capabilities)
 	}
 	if _, err := zip.NewReader(bytes.NewReader(result.Bytes), int64(len(result.Bytes))); err != nil {
 		t.Fatalf("invalid pptx zip: %v", err)
 	}
-	// Gradient is approximated as a solid fill; expect a diagnostic for it.
-	foundGradientWarning := false
 	for _, d := range result.Diagnostics {
-		if strings.Contains(strings.ToLower(d.Message), "gradient") {
-			foundGradientWarning = true
+		if strings.Contains(strings.ToLower(d.Message), "approximated as solid") {
+			t.Errorf("gradient must not flatten to a solid: %+v", result.Diagnostics)
 		}
-	}
-	if !foundGradientWarning {
-		t.Errorf("expected gradient approximation warning, got diagnostics: %+v", result.Diagnostics)
 	}
 }
 

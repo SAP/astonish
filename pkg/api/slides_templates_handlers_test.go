@@ -616,15 +616,14 @@ func TestGetSlidesTemplateThumbnailServesPNG(t *testing.T) {
 	}
 }
 
-func TestGetSlidesTemplateThumbnailMatchesVariantSuffix(t *testing.T) {
+func TestGetSlidesTemplateThumbnailExactKindOnly(t *testing.T) {
 	personal := newMemDocsStore()
 	seedThumbnailTemplate(t, personal, "thumbtpl", "title")
 
-	// Requesting a variant kind (title-2) must fall back to the base "title"
-	// archetype's thumbnail.
+	// title-2 is a different cover. Do not serve the title thumbnail.
 	rec := thumbnailReq(t, personal, "thumbtpl", "title-2")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("title-2 must not fall back to title, got %d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -632,6 +631,59 @@ func TestGetSlidesTemplateThumbnailUnknownTemplate(t *testing.T) {
 	rec := thumbnailReq(t, newMemDocsStore(), "no-such-template", "title")
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 for unknown template, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestGetSlidesTemplateMediaServesPNG(t *testing.T) {
+	personal := newMemDocsStore()
+	png := []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x01, 0x02, 0x03}
+	ref := "sha256-deadbeef"
+	tmpl := themes.Template{
+		Schema: 2,
+		Name:   "phototpl",
+		Assets: map[string]string{ref: "data:image/png;base64," + base64.StdEncoding.EncodeToString(png)},
+		Archetypes: []themes.Archetype{
+			{Kind: "title", Markup: `<ast-slide id="t"></ast-slide>`},
+		},
+	}
+	if err := (slides.Service{Store: personal}).SaveTemplate(context.Background(), tmpl); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/docs/slides/templates/phototpl/media/"+ref, nil)
+	req = withDocsServices(req, personal, newMemDocsStore())
+	req = mux.SetURLVars(req, map[string]string{"name": "phototpl", "ref": ref})
+	rec := httptest.NewRecorder()
+	GetSlidesTemplateMediaHandler(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "image/png" {
+		t.Fatalf("Content-Type = %q", ct)
+	}
+	if !bytes.Equal(rec.Body.Bytes(), png) {
+		t.Fatalf("body mismatch")
+	}
+}
+
+func TestGetSlidesTemplateMediaRejectsFont(t *testing.T) {
+	personal := newMemDocsStore()
+	tmpl := themes.Template{
+		Name:   "phototpl",
+		Assets: map[string]string{"font:SAP:regular": "data:font/ttf;base64,AAAA"},
+		Archetypes: []themes.Archetype{
+			{Kind: "title", Markup: `<ast-slide id="t"></ast-slide>`},
+		},
+	}
+	if err := (slides.Service{Store: personal}).SaveTemplate(context.Background(), tmpl); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/docs/slides/templates/phototpl/media/font:SAP:regular", nil)
+	req = withDocsServices(req, personal, newMemDocsStore())
+	req = mux.SetURLVars(req, map[string]string{"name": "phototpl", "ref": "font:SAP:regular"})
+	rec := httptest.NewRecorder()
+	GetSlidesTemplateMediaHandler(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("fonts must 404, got %d", rec.Code)
 	}
 }
 

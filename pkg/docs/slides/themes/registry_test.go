@@ -7,10 +7,10 @@ import (
 
 func TestListTemplatesDeterministicOrder(t *testing.T) {
 	got := ListTemplates()
-	if len(got) != 3 {
-		t.Fatalf("expected 3 built-in templates, got %d", len(got))
+	if len(got) != 4 {
+		t.Fatalf("expected 4 built-in templates, got %d", len(got))
 	}
-	want := []string{"aurora", "light-corporate", "midnight"}
+	want := []string{"aurora", "light-corporate", "midnight", "product"}
 	for i, name := range want {
 		if got[i].Name != name {
 			t.Fatalf("template %d = %q, want %q", i, got[i].Name, name)
@@ -46,6 +46,35 @@ func TestLookupTemplate(t *testing.T) {
 	}
 	if _, ok := LookupTemplate("does-not-exist"); ok {
 		t.Fatal("expected missing template to report ok=false")
+	}
+	prod, ok := LookupTemplate("product")
+	if !ok {
+		t.Fatal("expected product template to exist")
+	}
+	if prod.Skin != "product" || prod.Tokens["accent"] != "#8B5CF6" {
+		t.Fatalf("unexpected product template: %#v", prod)
+	}
+	if prod.Label != "Product Deck" {
+		t.Fatalf("product label = %q, want Product Deck", prod.Label)
+	}
+	if len(prod.Palettes) < 8 {
+		t.Fatalf("product palettes = %d, want >= 8", len(prod.Palettes))
+	}
+	if _, ok := prod.PaletteByID("orange"); !ok {
+		t.Fatal("product missing orange palette")
+	}
+	if _, ok := prod.PaletteByID("editorial"); !ok {
+		t.Fatal("product missing editorial palette")
+	}
+	seen := map[string]bool{}
+	for _, p := range prod.Palettes {
+		if p.ID == "" || p.Label == "" || p.Tokens["accent"] == "" {
+			t.Fatalf("invalid palette: %#v", p)
+		}
+		if seen[p.ID] {
+			t.Fatalf("duplicate palette id %q", p.ID)
+		}
+		seen[p.ID] = true
 	}
 }
 

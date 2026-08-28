@@ -214,6 +214,7 @@ type DocsUpdatePayload struct {
 	TotalSlides    int                       `json:"totalSlides,omitempty"`
 	Title          string                    `json:"title,omitempty"`
 	DeckTitle      string                    `json:"deckTitle,omitempty"`
+	Description    string                    `json:"description,omitempty"`
 	SchemaVersion  int                       `json:"schemaVersion,omitempty"`
 	Validation     DocsValidationSummary     `json:"validation,omitempty"`
 	PPTXCapability DocsPPTXCapabilitySummary `json:"pptxCapability,omitempty"`

@@ -43,54 +43,62 @@ func sampleFills(kind string) map[string]string {
 }
 
 func TestRenderRecipeParsesAllTypes(t *testing.T) {
-	tokens := fixtureTokens()
-	chrome := Chrome{DeckTitle: "A life in twelve chapters", Page: 2}
-	for _, m := range allRecipeMeta() {
-		t.Run(m.Kind, func(t *testing.T) {
-			skel, err := RenderRecipe(m.Kind, nil, tokens, chrome, nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, diags, err := ParseSlide(skel); err != nil {
-				t.Fatalf("prototype parse: %v\n%s", err, skel)
-			} else {
-				for _, d := range diags {
-					if d.Severity == "error" {
-						t.Errorf("prototype diagnostic: %+v", d)
+	chrome := Chrome{DeckTitle: "A life in twelve chapters", Page: 2, Total: 12}
+	skins := []struct {
+		name string
+		skin Skin
+	}{
+		{"corporate", CorporateSkin(fixtureTokens())},
+		{"product", ProductSkin(nil)},
+	}
+	for _, sc := range skins {
+		for _, m := range allRecipeMeta() {
+			t.Run(sc.name+"/"+m.Kind, func(t *testing.T) {
+				skel, err := RenderRecipe(m.Kind, sc.skin, nil, chrome, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, diags, err := ParseSlide(skel); err != nil {
+					t.Fatalf("prototype parse: %v\n%s", err, skel)
+				} else {
+					for _, d := range diags {
+						if d.Severity == "error" {
+							t.Errorf("prototype diagnostic: %+v", d)
+						}
 					}
 				}
-			}
-			filledSkel, err := RenderRecipe(m.Kind, nil, tokens, chrome, sampleFills(m.Kind))
-			if err != nil {
-				t.Fatal(err)
-			}
-			filledMarkup, err := fillArchetypeMarkup(filledSkel, sampleFills(m.Kind))
-			if err != nil {
-				t.Fatal(err)
-			}
-			slide, diags, err := ParseSlide(filledMarkup)
-			if err != nil {
-				t.Fatalf("filled parse: %v\n%s", err, filledMarkup)
-			}
-			for _, d := range diags {
-				if d.Severity == "error" {
-					t.Errorf("filled diagnostic: %+v", d)
+				filledSkel, err := RenderRecipe(m.Kind, sc.skin, nil, chrome, sampleFills(m.Kind))
+				if err != nil {
+					t.Fatal(err)
 				}
-			}
-			assertNoTextOverlap(t, slide)
-			assertFooterInBottom(t, slide)
-			if !strings.Contains(filledMarkup, `id="eyebrow"`) && m.Kind != "" {
-				t.Error("missing eyebrow slot")
-			}
-			if chrome.DeckTitle != "" && !strings.Contains(filledMarkup, chrome.DeckTitle) && !strings.Contains(filledMarkup, "02") {
-				t.Error("expected running footer or page number")
-			}
-		})
+				filledMarkup, err := fillArchetypeMarkup(filledSkel, sampleFills(m.Kind))
+				if err != nil {
+					t.Fatal(err)
+				}
+				slide, diags, err := ParseSlide(filledMarkup)
+				if err != nil {
+					t.Fatalf("filled parse: %v\n%s", err, filledMarkup)
+				}
+				for _, d := range diags {
+					if d.Severity == "error" {
+						t.Errorf("filled diagnostic: %+v", d)
+					}
+				}
+				assertNoTextOverlap(t, slide)
+				assertFooterInBottom(t, slide)
+				if !strings.Contains(filledMarkup, `id="eyebrow"`) && m.Kind != "" {
+					t.Error("missing eyebrow slot")
+				}
+				if chrome.DeckTitle != "" && !strings.Contains(filledMarkup, chrome.DeckTitle) && !strings.Contains(filledMarkup, "02") {
+					t.Error("expected running footer or page number")
+				}
+			})
+		}
 	}
 }
 
 func TestRenderRecipeRequiredSlotsPresent(t *testing.T) {
-	markup, err := RenderRecipe(RecipeSplitNarrative, nil, fixtureTokens(), Chrome{}, nil)
+	markup, err := RenderRecipe(RecipeSplitNarrative, CorporateSkin(fixtureTokens()), nil, Chrome{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +124,7 @@ func TestMissingRecipeSlotRejected(t *testing.T) {
 
 func TestOptionalHeadline2OmittedWhenEmpty(t *testing.T) {
 	fills := sampleFills(RecipeSplitNarrative)
-	markup, err := RenderRecipe(RecipeSplitNarrative, nil, fixtureTokens(), Chrome{Page: 1}, fills)
+	markup, err := RenderRecipe(RecipeSplitNarrative, CorporateSkin(fixtureTokens()), nil, Chrome{Page: 1}, fills)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +132,7 @@ func TestOptionalHeadline2OmittedWhenEmpty(t *testing.T) {
 		t.Fatal("empty optional headline_2 should be omitted at fill time")
 	}
 	fills["headline_2"] = "then chosen"
-	markup, err = RenderRecipe(RecipeSplitNarrative, nil, fixtureTokens(), Chrome{Page: 1}, fills)
+	markup, err = RenderRecipe(RecipeSplitNarrative, CorporateSkin(fixtureTokens()), nil, Chrome{Page: 1}, fills)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +162,7 @@ func TestChromeOverlayLogoAndLegal(t *testing.T) {
 	if ch.Confidential != "" {
 		t.Fatalf("duplicate confidentiality should be footer-only, confidential=%q legal=%q", ch.Confidential, ch.Legal)
 	}
-	markup, err := RenderRecipe(RecipeCover, nil, tmpl.Tokens, ch, sampleFills(RecipeCover))
+	markup, err := RenderRecipe(RecipeCover, CorporateSkin(tmpl.Tokens), nil, ch, sampleFills(RecipeCover))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,6 +216,40 @@ func TestCatalogFromTemplateLeadsWithRecipes(t *testing.T) {
 			t.Errorf("missing %s", m.Kind)
 		}
 	}
+	if !kinds["title"] {
+		t.Fatal("expected scoped/unbuilt title bookend in catalog")
+	}
+}
+
+func TestCatalogFromTemplateDropsPatternsAndSection(t *testing.T) {
+	tmpl := themes.Template{
+		Name:   "gco",
+		Tokens: fixtureTokens(),
+		Archetypes: []themes.Archetype{
+			{Kind: "title", Title: "Cover A", Tier: "fixed", Markup: `<ast-slide id="t"></ast-slide>`},
+			{Kind: "title-2", Title: "Cover B", Tier: "fixed", Markup: `<ast-slide id="t2"></ast-slide>`},
+			{Kind: "closing", Title: "End", Tier: "fixed", Markup: `<ast-slide id="c"></ast-slide>`},
+			{Kind: "section", Title: "Divider", Tier: "fixed", Markup: `<ast-slide id="s"></ast-slide>`},
+			{Kind: "agenda", Title: "Agenda", Tier: "fixed", Markup: `<ast-slide id="a"></ast-slide>`},
+			{Kind: "pattern", Title: "Cards", Tier: "flexible", Markup: `<ast-slide id="p"></ast-slide>`},
+			{Kind: "content", Title: "Title and Text", Markup: `<ast-slide id="x"></ast-slide>`},
+		},
+	}
+	cat := catalogFromTemplate(tmpl)
+	kinds := map[string]bool{}
+	for _, e := range cat {
+		kinds[e.Kind] = true
+	}
+	for _, want := range []string{RecipeCover, "title", "title-2", "closing"} {
+		if !kinds[want] {
+			t.Errorf("catalog missing %s", want)
+		}
+	}
+	for _, drop := range []string{"pattern", "section", "agenda", "content"} {
+		if kinds[drop] {
+			t.Errorf("catalog should omit %s", drop)
+		}
+	}
 }
 
 func TestRecipeSourceHasNoBrandLiterals(t *testing.T) {
@@ -227,7 +269,7 @@ func mustRead(t *testing.T, name string) []byte {
 
 func TestPaletteUsesTemplateTokens(t *testing.T) {
 	tokens := map[string]string{"surface": "#0B1220", "ink": "#E2E8F0", "accent": "#F59E0B"}
-	markup, err := RenderRecipe(RecipeThreeUp, nil, tokens, Chrome{Page: 1}, sampleFills(RecipeThreeUp))
+	markup, err := RenderRecipe(RecipeThreeUp, CorporateSkin(tokens), nil, Chrome{Page: 1}, sampleFills(RecipeThreeUp))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,14 +288,14 @@ func TestPaleMutedIsNotUsedForBodyText(t *testing.T) {
 		"accent":  "#1E40AF",
 		"muted":   "#89D1FF",
 	}
-	p := paletteFrom(nil, tokens)
+	p := paletteFrom(CorporateSkin(tokens), nil)
 	if !textContrastOK(p.secondary, p.surface) {
 		t.Fatalf("secondary %s fails contrast on %s", p.secondary, p.surface)
 	}
 	if strings.EqualFold(p.secondary, "#89D1FF") {
 		t.Fatal("pale decorative muted must not be used as body text")
 	}
-	markup, err := RenderRecipe(RecipeThreeUp, nil, tokens, Chrome{Page: 1}, sampleFills(RecipeThreeUp))
+	markup, err := RenderRecipe(RecipeThreeUp, CorporateSkin(tokens), nil, Chrome{Page: 1}, sampleFills(RecipeThreeUp))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,8 +304,8 @@ func TestPaleMutedIsNotUsedForBodyText(t *testing.T) {
 	}
 }
 
-func TestCardsHugContent(t *testing.T) {
-	markup, err := RenderRecipe(RecipeThreeUp, nil, fixtureTokens(), Chrome{Page: 1}, sampleFills(RecipeThreeUp))
+func TestBodyCardsFillToFooter(t *testing.T) {
+	markup, err := RenderRecipe(RecipeThreeUp, CorporateSkin(fixtureTokens()), nil, Chrome{Page: 1}, sampleFills(RecipeThreeUp))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,10 +317,10 @@ func TestCardsHugContent(t *testing.T) {
 	if card.ID == "" {
 		t.Fatal("missing card-1")
 	}
-	if card.Geometry.H > 400 {
-		t.Fatalf("three-up card stretched to leftover canvas: h=%d", card.Geometry.H)
+	if card.Geometry.H < 320 || card.Geometry.H > 480 {
+		t.Fatalf("three-up card should be a panel, not a full-height empty slab: h=%d", card.Geometry.H)
 	}
-	quote, err := RenderRecipe(RecipeQuoteSplit, nil, fixtureTokens(), Chrome{Page: 1}, sampleFills(RecipeQuoteSplit))
+	quote, err := RenderRecipe(RecipeQuoteSplit, CorporateSkin(fixtureTokens()), nil, Chrome{Page: 1}, sampleFills(RecipeQuoteSplit))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -287,14 +329,73 @@ func TestCardsHugContent(t *testing.T) {
 		t.Fatal(err)
 	}
 	qc := nodeByID(qslide.Nodes, "quote-card")
-	if qc.Geometry.H > 360 {
-		t.Fatalf("quote card too tall: h=%d", qc.Geometry.H)
+	if qc.Geometry.H < 240 || qc.Geometry.H > 420 {
+		t.Fatalf("quote card should hug quote+attribution, h=%d", qc.Geometry.H)
+	}
+}
+
+func TestProductBackgroundIsGradient(t *testing.T) {
+	markup, err := RenderRecipe(RecipeThreeUp, ProductSkin(nil), nil, Chrome{Page: 1, Total: 8}, sampleFills(RecipeThreeUp))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(markup, `id="bg-gradient"`) || !strings.Contains(markup, `"kind":"radial"`) {
+		t.Fatalf("product bg should be a radial gradient:\n%s", markup)
+	}
+	slide, diags, err := ParseSlide(markup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range diags {
+		if d.Severity == "error" {
+			t.Fatalf("gradient bg invalid: %+v", d)
+		}
+	}
+	bg := nodeByID(slide.Nodes, "bg")
+	if bg.Gradient == nil || bg.Gradient.Kind != "radial" || len(bg.Gradient.Stops) < 2 {
+		t.Fatalf("parsed bg gradient: %#v", bg.Gradient)
+	}
+	if strings.EqualFold(bg.Gradient.Stops[0].Color, ProductSkin(nil).Surface) {
+		t.Fatal("first gradient stop must be a visible accent wash, not the surface")
+	}
+}
+
+func TestProductCoverHasNoInventedLogo(t *testing.T) {
+	for _, kind := range []string{RecipeCover, RecipeCloser} {
+		markup, err := RenderRecipe(kind, ProductSkin(nil), nil, Chrome{Page: 1, Total: 8, DeckTitle: "deck"}, sampleFills(kind))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(markup, "cover-glow") || strings.Contains(markup, `id="chrome-logo"`) {
+			t.Fatalf("%s invented a logo/glow:\n%s", kind, markup)
+		}
+	}
+}
+
+func TestAccentSpanDoesNotDoubleEscape(t *testing.T) {
+	fills := sampleFills(RecipeCover)
+	fills["dek"] = "The world's most valuable company — twice."
+	fills["dek_accent"] = "twice"
+	markup, err := RenderRecipe(RecipeCover, ProductSkin(nil), nil, Chrome{Page: 1}, fills)
+	if err != nil {
+		t.Fatal(err)
+	}
+	markup, err = fillArchetypeMarkup(markup, fills)
+	if err != nil {
+		t.Fatal(err)
+	}
+	markup = applyAccentSpans(markup, fills, "#8B5CF6")
+	if strings.Contains(markup, "&amp;") {
+		t.Fatalf("double-escaped markup:\n%s", markup)
+	}
+	if !strings.Contains(markup, "twice") || !strings.Contains(markup, "world") {
+		t.Fatalf("dek fill missing:\n%s", markup)
 	}
 }
 
 func TestCoverMetaFollowsDek(t *testing.T) {
 	fills := sampleFills(RecipeCover)
-	markup, err := RenderRecipe(RecipeCover, nil, fixtureTokens(), Chrome{Page: 1}, fills)
+	markup, err := RenderRecipe(RecipeCover, CorporateSkin(fixtureTokens()), nil, Chrome{Page: 1}, fills)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,6 +413,80 @@ func TestCoverMetaFollowsDek(t *testing.T) {
 	}
 	if meta.Geometry.Y > dek.Geometry.Y+dek.Geometry.H+80 {
 		t.Fatalf("meta parked at bottom instead of under dek: meta.y=%d dek bottom=%d", meta.Geometry.Y, dek.Geometry.Y+dek.Geometry.H)
+	}
+}
+
+func TestProductSkinUsesDotRailNotLogoRule(t *testing.T) {
+	tokens := map[string]string{"surface": "#0B0D0F", "ink": "#ECEDEE", "accent": "#8B5CF6"}
+	corp, err := RenderRecipe(RecipeThreeUp, CorporateSkin(tokens), nil, Chrome{Page: 1, Total: 8}, sampleFills(RecipeThreeUp))
+	if err != nil {
+		t.Fatal(err)
+	}
+	prod, err := RenderRecipe(RecipeThreeUp, ProductSkin(tokens), nil, Chrome{Page: 1, Total: 8, DeckTitle: "astonish"}, sampleFills(RecipeThreeUp))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(prod, `id="rule"`) && strings.Contains(prod, `y="`) && !strings.Contains(prod, `id="rail-dot"`) {
+		t.Fatal("product skin should use the dot rail, not the corporate accent rule")
+	}
+	if !strings.Contains(prod, `id="rail-dot"`) {
+		t.Fatalf("product missing rail-dot:\n%s", prod)
+	}
+	if strings.Contains(corp, `id="rail-dot"`) {
+		t.Fatal("corporate skin should not use the product rail")
+	}
+	if _, _, err := ParseSlide(prod); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSkinForProductTemplate(t *testing.T) {
+	tmpl, ok := themes.LookupTemplate("product")
+	if !ok {
+		t.Fatal("missing product template")
+	}
+	if SkinFor(tmpl).ID != SkinProduct {
+		t.Fatalf("product template skin = %s", SkinFor(tmpl).ID)
+	}
+	if SkinFor(themes.Template{Name: "gco"}).ID != SkinCorporate {
+		t.Fatal("imported-like template should be corporate")
+	}
+}
+
+func TestAccentSpanColorsPhrase(t *testing.T) {
+	fills := sampleFills(RecipeSplitNarrative)
+	fills["headline"] = "An agent that acts, not just answers."
+	fills["headline_accent"] = "acts"
+	markup, err := RenderRecipe(RecipeSplitNarrative, ProductSkin(nil), nil, Chrome{Page: 2, Total: 10}, fills)
+	if err != nil {
+		t.Fatal(err)
+	}
+	markup, err = fillArchetypeMarkup(markup, fills)
+	if err != nil {
+		t.Fatal(err)
+	}
+	markup = applyAccentSpans(markup, fills, "#8B5CF6")
+	if !strings.Contains(markup, `color="#8B5CF6"`) || !strings.Contains(markup, "acts") {
+		t.Fatalf("accent span missing:\n%s", markup)
+	}
+	if _, _, err := ParseSlide(markup); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTwoUpEmphasizesColumn(t *testing.T) {
+	fills := sampleFills(RecipeTwoUp)
+	fills["emphasis"] = "2"
+	markup, err := RenderRecipe(RecipeTwoUp, ProductSkin(nil), nil, Chrome{Page: 1, Total: 4}, fills)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(markup, `id="col-card-2"`) {
+		t.Fatal("missing col-card-2")
+	}
+	// Emphasized card uses accent fill.
+	if !strings.Contains(markup, ProductSkin(nil).AccentFill) {
+		t.Fatalf("expected emphasized fill %s:\n%s", ProductSkin(nil).AccentFill, markup)
 	}
 }
 
@@ -361,7 +536,7 @@ func assertFooterInBottom(t *testing.T, slide Slide) {
 			t.Errorf("footer %s y=%d, want >= 1000", n.ID, n.Geometry.Y)
 		}
 	})
-	if !found {
+	if !found && slide.ID != RecipeCover {
 		t.Error("expected a footer node")
 	}
 }

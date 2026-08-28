@@ -147,6 +147,7 @@ export class AstText extends PositionedElement {
     // ast-text{white-space:pre-wrap} rule in the HTML export.
     this.style.whiteSpace = 'pre-wrap'
     this.style.overflowWrap = 'break-word'
+    this.style.fontVariantLigatures = 'none'
     if (this.anchor === 'ctr') {
       this.style.display = 'flex'
       this.style.flexDirection = 'column'

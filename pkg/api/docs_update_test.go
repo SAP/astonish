@@ -43,7 +43,7 @@ func TestMaybeEmitDocsUpdate(t *testing.T) {
 			name:     "fill slides batch",
 			toolName: "fill_slides",
 			result: map[string]any{
-				"deck":       map[string]any{"slug": "migration", "title": "Migration", "schemaVersion": 1},
+				"deck":       map[string]any{"slug": "migration", "title": "Migration", "description": "Q4 cloud cutover", "schemaVersion": 1},
 				"slideCount": 4,
 			},
 			wantAction: slides.ActionSlideWritten,
@@ -93,6 +93,11 @@ func TestMaybeEmitDocsUpdate(t *testing.T) {
 			}
 			if ev.Data["deckSlug"] != "migration" || ev.Data["action"] != tt.wantAction {
 				t.Fatalf("event data = %#v", ev.Data)
+			}
+			if tt.name == "fill slides batch" {
+				if ev.Data["deckTitle"] != "Migration" || ev.Data["description"] != "Q4 cloud cutover" {
+					t.Fatalf("label fields = %#v", ev.Data)
+				}
 			}
 		})
 	}

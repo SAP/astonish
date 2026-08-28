@@ -37,6 +37,7 @@ import {
   resolveHarnessFocus,
   SIDEBAR_COLLAPSED_WIDTH,
   SIDEBAR_EXPANDED_WIDTH,
+  slidesHarnessLabel,
   type HarnessFocus,
 } from './chat/chatHarness'
 import SessionMemoryPanel from './SessionMemoryPanel'
@@ -76,6 +77,23 @@ function normalizeTutorialScenes(raw: unknown): TutorialSceneSlideshowMessage['s
     path: item?.path || '',
     duration_seconds: item?.duration_seconds || undefined,
   }))
+}
+
+function docsUpdateFromEvent(data: Record<string, any>): DocsUpdateMessage {
+  return {
+    type: 'docs_update',
+    docType: 'slides',
+    deckSlug: String(data.deckSlug || ''),
+    action: (data.action as string) || 'updated',
+    slideIndex: data.slideIndex as number | undefined,
+    totalSlides: data.totalSlides as number | undefined,
+    title: data.title as string | undefined,
+    deckTitle: data.deckTitle as string | undefined,
+    description: data.description as string | undefined,
+    schemaVersion: data.schemaVersion as number | undefined,
+    validation: data.validation as DocsUpdateMessage['validation'],
+    pptxCapability: data.pptxCapability as DocsUpdateMessage['pptxCapability'],
+  }
 }
 
 function upsertDocsUpdate(messages: ChatMsg[], update: DocsUpdateMessage): ChatMsg[] {
@@ -1080,18 +1098,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
 
           case 'docs_update':
             if (data.type === 'slides' && data.deckSlug) {
-              setMessages((prev: ChatMsg[]) => upsertDocsUpdate(prev, {
-                type: 'docs_update',
-                docType: 'slides',
-                deckSlug: data.deckSlug as string,
-                action: (data.action as string) || 'updated',
-                slideIndex: data.slideIndex as number | undefined,
-                totalSlides: data.totalSlides as number | undefined,
-                title: (data.deckTitle || data.title) as string | undefined,
-                schemaVersion: data.schemaVersion as number | undefined,
-                validation: data.validation as DocsUpdateMessage['validation'],
-                pptxCapability: data.pptxCapability as DocsUpdateMessage['pptxCapability'],
-              }))
+              setMessages((prev: ChatMsg[]) => upsertDocsUpdate(prev, docsUpdateFromEvent(data)))
             }
             break
 
@@ -1999,18 +2006,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
 
           case 'docs_update':
             if (data.type === 'slides' && data.deckSlug) {
-              setMessages((prev: ChatMsg[]) => upsertDocsUpdate(prev, {
-                type: 'docs_update',
-                docType: 'slides',
-                deckSlug: data.deckSlug as string,
-                action: (data.action as string) || 'updated',
-                slideIndex: data.slideIndex as number | undefined,
-                totalSlides: data.totalSlides as number | undefined,
-                title: (data.deckTitle || data.title) as string | undefined,
-                schemaVersion: data.schemaVersion as number | undefined,
-                validation: data.validation as DocsUpdateMessage['validation'],
-                pptxCapability: data.pptxCapability as DocsUpdateMessage['pptxCapability'],
-              }))
+              setMessages((prev: ChatMsg[]) => upsertDocsUpdate(prev, docsUpdateFromEvent(data)))
             }
             break
 
@@ -3482,7 +3478,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
                   <div key={index}>
                     <HarnessPlaceholder
                       focus={focus}
-                      title={docs.title || docs.deckSlug}
+                      title={slidesHarnessLabel(docs)}
                       subtitle={progress}
                       isFocused={harnessOpen && harnessFocusEquals(effectiveHarnessFocus, focus)}
                       onOpen={openHarness}

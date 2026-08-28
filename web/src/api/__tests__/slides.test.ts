@@ -6,6 +6,7 @@ import {
   fetchSlidesPresentation,
   slidesPresentationURL,
   deckSlideThumbnailUrl,
+  templateMediaUrl,
   listSlidesDecks,
   listSlidesTemplates,
   importSlidesTemplate,
@@ -40,6 +41,11 @@ describe('slides API (deck/present/export)', () => {
   it('builds a scoped, encoded per-slide thumbnail URL', () => {
     expect(deckSlideThumbnailUrl('deck-1', 0, 'personal')).toBe('/api/docs/slides/deck-1/thumbnails/0?scope=personal')
     expect(deckSlideThumbnailUrl('risk/a', 3, 'team')).toBe('/api/docs/slides/risk%2Fa/thumbnails/3?scope=team')
+  })
+
+  it('builds an encoded template media URL', () => {
+    expect(templateMediaUrl('gco', 'sha256-abc')).toBe('/api/docs/slides/templates/gco/media/sha256-abc')
+    expect(templateMediaUrl('acme/brand', 'sha256-de/f')).toBe('/api/docs/slides/templates/acme%2Fbrand/media/sha256-de%2Ff')
   })
 
   it('exports a deck blob', async () => {

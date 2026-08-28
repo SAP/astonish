@@ -121,6 +121,14 @@ type ToolNodePool interface {
 	// first). Next GetOrCreate returns a fresh unbound client. Used by
 	// ephemeral adaptive scheduler runs after DestroySandbox.
 	Remove(sessionID string)
+
+	// SetSessionScope records the tenant identity (org/team) for a session,
+	// resolved from the live request context, before the session's first
+	// GetOrCreate*. Platform pools use it to route the session's container
+	// record into the caller's own team schema instead of a registry bound
+	// when the process-wide chat agent was first constructed. No-op when the
+	// session already has a client or both slugs are empty.
+	SetSessionScope(sessionID, orgSlug, teamSlug string)
 }
 
 // Compile-time assertions that the concrete Incus-bound types satisfy
@@ -195,4 +203,8 @@ func (a *nodePoolAdapter) Alias(childSessionID, parentSessionID string) {
 
 func (a *nodePoolAdapter) Remove(sessionID string) {
 	a.p.Remove(sessionID)
+}
+
+func (a *nodePoolAdapter) SetSessionScope(sessionID, orgSlug, teamSlug string) {
+	a.p.SetSessionScope(sessionID, orgSlug, teamSlug)
 }

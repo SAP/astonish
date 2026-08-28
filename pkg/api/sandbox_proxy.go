@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
-	"github.com/SAP/astonish/pkg/sandbox"
 	incus "github.com/SAP/astonish/pkg/sandbox/incus"
 )
 
@@ -87,8 +86,12 @@ func SandboxProxyHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check that the port is explicitly exposed
-	sessRegistry, err := sandbox.NewSessionRegistry()
+	// Check that the port is explicitly exposed.
+	// SECURITY: use the tenant-scoped registry so a caller can only proxy
+	// into containers owned by their own team. sandbox.NewSessionRegistry()
+	// would return the unscoped personal-mode registry and allow cross-tenant
+	// proxying by container name on a platform deployment.
+	sessRegistry, err := sandboxSessionRegistryForRequest(r)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, `{"error":"failed to load session registry"}`)
 		return

@@ -62,10 +62,11 @@ func (s *warmSpyPool) GetOrCreateWithChain(string, string, []string) ToolNodeCli
 func (s *warmSpyPool) GetOrCreateWithImage(string, string, []string, string) ToolNodeClient {
 	return s.client
 }
-func (s *warmSpyPool) Cleanup()            {}
-func (s *warmSpyPool) GetBackend() Backend { return nil }
-func (s *warmSpyPool) Alias(_, _ string)   {}
-func (s *warmSpyPool) Remove(_ string)     {}
+func (s *warmSpyPool) Cleanup()                       {}
+func (s *warmSpyPool) GetBackend() Backend            { return nil }
+func (s *warmSpyPool) Alias(_, _ string)              {}
+func (s *warmSpyPool) Remove(_ string)                {}
+func (s *warmSpyPool) SetSessionScope(_, _, _ string) {}
 
 func TestWarmFlowSession_BindsAndEnsuresReady(t *testing.T) {
 	prev := NetworkPolicyPreSeeder

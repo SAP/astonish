@@ -925,9 +925,34 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 				return nil, fmt.Errorf("sandbox is enabled but the runtime is not available: %w\n\nTo disable sandbox, set 'sandbox.enabled: false' in ~/.config/astonish/config.yaml", sandboxErr)
 			}
 
+			// The daemon is always platform: session records must live in the
+			// team-scoped platform store (PG, or SQLite in localhost mode) so
+			// that the tenant-scoped HTTP handlers (list/delete/expose/proxy)
+			// observe exactly the containers created here — and only for the
+			// caller's own team.
+			//
+			// CRITICAL: the Studio chat agent (and this pool) is constructed
+			// ONCE, lazily, on the first chat request and then shared across
+			// every team for the life of the process. So we must NOT bind a
+			// single team's registry here — doing so would send every team's
+			// containers into whichever team happened to trigger the first
+			// chat. Instead we install a per-session resolver (below) that the
+			// pool invokes with the caller's org/team resolved from the live
+			// request context at bind time. The registry created here is only a
+			// last-resort fallback for sessions with no tenant context.
 			sessRegistry, regErr := sandbox.NewSessionRegistry()
 			if regErr != nil {
 				return nil, fmt.Errorf("sandbox is enabled but session registry failed: %w", regErr)
+			}
+
+			// Capture the platform backend so the per-session resolver can build
+			// a team-scoped registry for any org/team on demand. Resolved from
+			// the factory ctx's store service (stable for the process).
+			var sandboxSessionProvider store.SandboxSessionProvider
+			if svc := store.FromContext(ctx); svc != nil && svc.Platform != nil {
+				if provider, ok := svc.Platform.(store.SandboxSessionProvider); ok {
+					sandboxSessionProvider = provider
+				}
 			}
 
 			tplRegistry, tplErr := sandbox.NewTemplateRegistry()
@@ -942,6 +967,26 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			// on the first tool call for that session.
 			limits := sandbox.EffectiveLimits(&cfg.AppConfig.Sandbox)
 			nodePool := sandbox.NewNodeClientPool(sandboxClient, sessRegistry, tplRegistry, "", &limits)
+
+			// Install the per-session team registry resolver. NodeTool records
+			// the caller's org/team on the session (SetSessionScope) from the
+			// live request context; the pool calls this to obtain that team's
+			// DB-backed registry so the container record lands in the caller's
+			// own team schema. Returns nil when the platform backend does not
+			// support DB-backed sandbox sessions, in which case the pool falls
+			// back to the fallback registry above.
+			if sandboxSessionProvider != nil {
+				nodePool.SetRegistryResolver(func(orgSlug, teamSlug string) *sandbox.SessionRegistry {
+					if orgSlug == "" || teamSlug == "" {
+						return nil
+					}
+					sessStore := sandboxSessionProvider.SandboxSessionsForTeam(ctx, orgSlug, teamSlug)
+					if sessStore == nil {
+						return nil
+					}
+					return sandbox.NewSessionRegistryFromStore(sessStore)
+				})
+			}
 
 			// Wrap all tool category slices with NodeTool proxies (pool-backed).
 			// Browser tools are NOT wrapped — they run on the host and need direct

@@ -939,6 +939,26 @@ type NodeClientPool struct {
 	closed   bool
 	orgSlug  string // org slug for container naming/networking (platform mode)
 	teamSlug string // team slug for container naming (platform mode)
+
+	// registryResolver, when set, resolves the team-scoped session registry
+	// for a given org/team at per-session bind time. This is how platform
+	// deployments route each chat session's container record into the caller's
+	// own team schema instead of a single registry captured at pool-construction
+	// time (which would bind every team's containers to whichever team happened
+	// to trigger the first chat). Returns nil to fall back to the pool default.
+	registryResolver func(orgSlug, teamSlug string) *SessionRegistry
+
+	// sessionScopes holds per-session tenant overrides resolved from the live
+	// request context (see SetSessionScope). Keyed by session ID.
+	sessionScopes map[string]sessionScope
+}
+
+// sessionScope captures the tenant-resolved registry and slugs for a single
+// session, resolved from the request that first touches that session.
+type sessionScope struct {
+	registry *SessionRegistry
+	orgSlug  string
+	teamSlug string
 }
 
 // NewNodeClientPool creates a pool that will create per-session LazyNodeClients
@@ -950,12 +970,13 @@ type NodeClientPool struct {
 // components that have been migrated to the Backend interface (Phase B.3).
 func NewNodeClientPool(client *IncusClient, sessRegistry *SessionRegistry, tplRegistry *TemplateRegistry, template string, limits *config.SandboxLimits) *NodeClientPool {
 	p := &NodeClientPool{
-		incusClient:  client,
-		sessRegistry: sessRegistry,
-		tplRegistry:  tplRegistry,
-		template:     template,
-		limits:       limits,
-		clients:      make(map[string]*LazyNodeClient),
+		incusClient:   client,
+		sessRegistry:  sessRegistry,
+		tplRegistry:   tplRegistry,
+		template:      template,
+		limits:        limits,
+		clients:       make(map[string]*LazyNodeClient),
+		sessionScopes: make(map[string]sessionScope),
 	}
 	// Best-effort Backend construction. Failure here is non-fatal: callers
 	// that need the Backend can check GetBackend() for nil. This keeps pool
@@ -999,6 +1020,51 @@ func (p *NodeClientPool) OrgSlug() string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.orgSlug
+}
+
+// SetRegistryResolver installs a function that resolves the team-scoped session
+// registry for a given org/team. Platform deployments set this so that each
+// chat session's container record is persisted into the caller's own team
+// schema (resolved per session from the live request context via
+// SetSessionScope), rather than a single registry captured when the pool — and
+// the process-wide shared chat agent — was first constructed.
+func (p *NodeClientPool) SetRegistryResolver(fn func(orgSlug, teamSlug string) *SessionRegistry) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.registryResolver = fn
+}
+
+// SetSessionScope records the tenant identity for a session, resolved from the
+// live request context (see NodeTool.getClientFromContext). If a registry
+// resolver is installed, the team-scoped registry is resolved now and used for
+// this session's container lifecycle so the record lands in the caller's team
+// schema. This must be called before the session's first GetOrCreate* so the
+// freshly created LazyNodeClient picks up the correct registry and slugs.
+//
+// It is a no-op once a client already exists for the session (the registry and
+// slugs are immutable for the life of a container) and when both slugs are
+// empty (nothing to scope — the pool default applies).
+func (p *NodeClientPool) SetSessionScope(sessionID, orgSlug, teamSlug string) {
+	if sessionID == "" || (orgSlug == "" && teamSlug == "") {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return
+	}
+	// Immutable once a client (and therefore a container) exists.
+	if _, ok := p.clients[sessionID]; ok {
+		return
+	}
+	if _, ok := p.sessionScopes[sessionID]; ok {
+		return
+	}
+	scope := sessionScope{orgSlug: orgSlug, teamSlug: teamSlug}
+	if p.registryResolver != nil {
+		scope.registry = p.registryResolver(orgSlug, teamSlug)
+	}
+	p.sessionScopes[sessionID] = scope
 }
 
 // GetOrCreate returns the LazyNodeClient for the given session ID, creating
@@ -1055,11 +1121,25 @@ func (p *NodeClientPool) GetOrCreateWithTemplate(sessionID, template string) *La
 		tpl = template
 	}
 
-	// Create a new LazyNodeClient for this session
-	client := NewLazyNodeClient(p.incusClient, p.sessRegistry, p.tplRegistry, tpl, p.limits)
+	// Create a new LazyNodeClient for this session. If a per-session tenant
+	// scope was resolved from the request context (platform mode), use its
+	// team-scoped registry and slugs so the container record lands in the
+	// caller's own team schema; otherwise fall back to the pool defaults.
+	sessRegistry := p.sessRegistry
+	orgSlug := p.orgSlug
+	teamSlug := p.teamSlug
+	if scope, ok := p.sessionScopes[sessionID]; ok {
+		if scope.registry != nil {
+			sessRegistry = scope.registry
+		}
+		orgSlug = scope.orgSlug
+		teamSlug = scope.teamSlug
+	}
+
+	client := NewLazyNodeClient(p.incusClient, sessRegistry, p.tplRegistry, tpl, p.limits)
 	client.Env = p.env
-	client.OrgSlug = p.orgSlug
-	client.TeamSlug = p.teamSlug
+	client.OrgSlug = orgSlug
+	client.TeamSlug = teamSlug
 	p.clients[sessionID] = client
 	return client
 }
@@ -1087,6 +1167,14 @@ func (p *NodeClientPool) Alias(childSessionID, parentSessionID string) {
 	}
 
 	p.clients[childSessionID] = parent
+	// Share the parent's tenant scope so the child (sub-agent) resolves the
+	// same team schema if it ever creates its own client.
+	if scope, ok := p.sessionScopes[parentSessionID]; ok {
+		if p.sessionScopes == nil {
+			p.sessionScopes = make(map[string]sessionScope)
+		}
+		p.sessionScopes[childSessionID] = scope
+	}
 }
 
 // TouchActivity updates the last activity timestamp for a session's container
@@ -1112,6 +1200,7 @@ func (p *NodeClientPool) Remove(sessionID string) {
 	if ok {
 		delete(p.clients, sessionID)
 	}
+	delete(p.sessionScopes, sessionID)
 	p.mu.Unlock()
 
 	if ok && client != nil {
@@ -1131,6 +1220,7 @@ func (p *NodeClientPool) Cleanup() {
 		clients[k] = v
 	}
 	p.clients = nil
+	p.sessionScopes = nil
 	p.mu.Unlock()
 
 	for _, client := range clients {

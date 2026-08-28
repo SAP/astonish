@@ -54,10 +54,6 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
   // whatever slide they're viewing — we only reset slideIndex when the deck or
   // scope actually changes.
   const loadedKeyRef = useRef<string | null>(null)
-  // Slide count the embedded iframe was last (re)loaded with. New slides only
-  // require an iframe reload when the count actually grew; navigation and other
-  // docs_update churn must NOT reload the document (that caused the flicker).
-  const renderedCountRef = useRef(0)
 
   useEffect(() => {
     mountedRef.current = true
@@ -71,7 +67,6 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
       // New deck/scope: reset navigation to the first slide.
       setSlideIndex(0)
       loadedKeyRef.current = key
-      renderedCountRef.current = 0
     }
     setError('')
     fetchSlidesDeck(deckSlug, scope)
@@ -84,11 +79,13 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
   const total = slides.length
   const boundedIndex = Math.min(slideIndex, Math.max(0, total - 1))
   const presentUrl = slidesPresentationURL(deckSlug, scope)
-  // The iframe mounts ONCE per deck/scope (key excludes slideIndex + refreshSignal).
-  // We load the deck at its first slide; subsequent navigation and live slide
-  // additions are driven imperatively (postMessage nav + a targeted reload when
-  // the count grows) so the user never sees a full-document flash.
-  const iframeSrc = presentUrl
+  // Cache-bust the present document on every refreshSignal. Reassigning the
+  // same URL does not reload in browsers, so slide writes looked stale until
+  // a full page refresh. Navigation still uses postMessage (src unchanged
+  // while the token is stable).
+  const iframeSrc = presentUrl.includes('?')
+    ? `${presentUrl}&t=${refreshSignal}`
+    : `${presentUrl}?t=${refreshSignal}`
 
   // Navigate the embedded deck to boundedIndex WITHOUT reloading it. The runtime
   // (AstDeck) listens for { type: 'ast-nav', index } on the opaque-origin iframe
@@ -119,25 +116,11 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
     return () => window.removeEventListener('message', onMessage)
   }, [])
 
-  // Live slide additions: reload the embedded document only when the slide count
-  // actually increased (a new write_slide landed), then restore the viewed
-  // slide. Pure docs_update churn (validation/review events) never reloads.
-  useEffect(() => {
-    if (total > renderedCountRef.current) {
-      renderedCountRef.current = total
-      const frame = fullscreen ? fsIframeRef.current : iframeRef.current
-      if (frame) {
-        const onLoad = () => { postNav(boundedIndex) }
-        frame.addEventListener('load', onLoad, { once: true })
-        // Reassigning src reloads the (single) iframe in place — far less jarring
-        // than React unmounting/remounting the element, and it keeps focus/scroll.
-        frame.src = iframeSrc
-      }
-    }
-  // boundedIndex intentionally read at reload time only; excluded from deps so a
-  // mere navigation does not trigger a reload.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [total, iframeSrc, fullscreen, postNav])
+  // After the present document reloads (new slides or an in-place rewrite),
+  // restore the strip's current index inside the iframe.
+  const onPresentLoad = useCallback(() => {
+    if (total > 0) postNav(boundedIndex)
+  }, [total, boundedIndex, postNav])
 
   const present = useCallback(() => {
     window.open(slidesPresentationURL(deckSlug, scope), '_blank', 'noopener,noreferrer')
@@ -202,6 +185,7 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
       sandbox="allow-scripts"
       title={`Slide deck: ${deckTitle}`}
       data-testid="slides-deck-frame"
+      onLoad={onPresentLoad}
       className="h-full w-full rounded-lg border-0"
       style={{ background: 'var(--card)' }}
     />
@@ -368,9 +352,15 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
         )}
       </div>
 
-      {/* Slide strip */}
+      {/* Slide strip. Padding keeps the selected ring inside the scrollport
+          (overflow-x:auto otherwise clips it on the top and left). The preview
+          is clipped in an inner layer so the ring on the button is not. */}
       {total > 0 && (
-        <div className="flex shrink-0 gap-2 overflow-x-auto pb-1" role="tablist" aria-label="Slides">
+        <div
+          className="relative z-10 flex shrink-0 gap-2 overflow-x-auto px-1 pt-1.5 pb-1.5"
+          role="tablist"
+          aria-label="Slides"
+        >
           {slides.map((slide, index) => (
             <button
               key={slide.id}
@@ -382,24 +372,26 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
               data-testid="slides-tile"
               onClick={() => setSlideIndex(index)}
               className={cn(
-                'relative h-14 w-24 shrink-0 overflow-hidden rounded-md border text-left transition-colors',
+                'relative h-14 w-24 shrink-0 rounded-md border text-left transition-colors',
                 index === boundedIndex
-                  ? 'border-primary ring-1 ring-primary'
+                  ? 'z-10 border-primary ring-2 ring-primary'
                   : 'border-border bg-card hover:border-primary/40'
               )}
             >
-              {slide.content ? (
-                <SlidesArchetypeThumb
-                  markup={slide.content}
-                  theme={deck?.deck.theme}
-                  template={deck?.deck.theme?.['template-name']}
-                />
-              ) : (
-                <span className="absolute inset-0 flex items-center justify-center text-[11px] font-semibold text-muted-foreground">
-                  {index + 1}
-                </span>
-              )}
-              <span className="pointer-events-none absolute left-1 top-0.5 rounded bg-black/50 px-1 text-[10px] font-semibold text-white">
+              <span className="pointer-events-none absolute inset-0 overflow-hidden rounded-[5px]">
+                {slide.content ? (
+                  <SlidesArchetypeThumb
+                    markup={slide.content}
+                    theme={deck?.deck.theme}
+                    template={deck?.deck.theme?.['template-name']}
+                  />
+                ) : (
+                  <span className="flex h-full w-full items-center justify-center text-[11px] font-semibold text-muted-foreground">
+                    {index + 1}
+                  </span>
+                )}
+              </span>
+              <span className="pointer-events-none absolute left-1 top-0.5 z-10 rounded bg-black/50 px-1 text-[10px] font-semibold text-white">
                 {index + 1}
               </span>
             </button>
@@ -442,7 +434,7 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
                 src={iframeSrc}
                 sandbox="allow-scripts"
                 title={`Slide deck full screen: ${deckTitle}`}
-                onLoad={() => { if (total > 0) postNav(boundedIndex) }}
+                onLoad={onPresentLoad}
                 className="h-full w-full border-0"
                 style={{ background: 'var(--card)' }}
               />

@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
 
 	"google.golang.org/genai"
@@ -46,6 +47,10 @@ func NewTimestampedUserContent(text string) *genai.Content {
 // (Claude 3.5, GPT-4o, Gemini) can interpret directly.
 func NewTimestampedUserContentWithAttachments(text string, attachments []Attachment) *genai.Content {
 	ts := time.Now().UTC().Format("2006-01-02 15:04:05 MST")
+	text = strings.TrimSpace(text)
+	if text == "" {
+		text = attachmentCaption(attachments)
+	}
 	stamped := fmt.Sprintf("[%s]\n%s", ts, text)
 
 	parts := []*genai.Part{genai.NewPartFromText(stamped)}
@@ -66,6 +71,23 @@ func NewTimestampedUserContentWithAttachments(text string, attachments []Attachm
 		Parts: parts,
 		Role:  genai.RoleUser,
 	}
+}
+
+func attachmentCaption(attachments []Attachment) string {
+	var names []string
+	for _, a := range attachments {
+		n := strings.TrimSpace(a.Filename)
+		if n != "" {
+			names = append(names, n)
+		}
+	}
+	if len(names) == 0 {
+		return "[attached file]"
+	}
+	if len(names) == 1 {
+		return "[attached " + names[0] + "]"
+	}
+	return "[attached " + strings.Join(names, ", ") + "]"
 }
 
 // StripTimestamp removes the timestamp prefix injected by NewTimestampedUserContent.

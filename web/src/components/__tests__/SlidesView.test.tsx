@@ -162,4 +162,13 @@ describe('SlidesView', () => {
     fireEvent.click(screen.getByTestId('create-slide-button-empty'))
     expect(onCreateSlide).toHaveBeenCalledTimes(1)
   })
+
+  it('shows a Templates link in the empty state', async () => {
+    vi.mocked(slidesApi.listSlidesDecks).mockResolvedValue({ decks: [] })
+    const onNavigate = vi.fn()
+    render(<SlidesView theme="dark" onNavigate={onNavigate} />)
+    const link = await screen.findByTestId('manage-templates-link')
+    fireEvent.click(link)
+    expect(onNavigate).toHaveBeenCalledWith('/slides/templates')
+  })
 })

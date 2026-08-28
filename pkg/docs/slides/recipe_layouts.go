@@ -63,6 +63,7 @@ func (b *recipeBuilder) layoutCoverProduct() {
 	b.bg()
 	p := b.pal
 	b.paintProductRail()
+	b.paintProductCoverLogo()
 	if b.want("prompt") {
 		b.slot("prompt", p.mx, 300, 1400, 36, 20, p.accent, "", p.mono, "")
 	}
@@ -360,7 +361,7 @@ func (b *recipeBuilder) layoutCloserProduct() {
 		b.slot("headline_2", p.mx, hy, 1700, 90, 64, p.ink, "800", p.display, "")
 		hy += 100
 	}
-	b.slot("thesis", p.mx, hy+12, 1600, 80, 22, p.secondary, "", p.display, "")
+	b.slot("thesis", p.mx, hy+12, 1600, 130, 22, p.secondary, "", p.display, "")
 	chipY := 720
 	chipH := b.contentBottom() - chipY
 	if chipH < 160 {

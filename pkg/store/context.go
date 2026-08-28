@@ -18,6 +18,7 @@ const flowStoreKey contextKey = "astonish_flow_store"
 const teamFlowStoreKey contextKey = "astonish_team_flow_store"
 const drillReportStoreKey contextKey = "astonish_drill_report_store"
 const sessionIDKey contextKey = "astonish_session_id"
+const chatFilesKey contextKey = "astonish_chat_files"
 
 // WithServices returns a new context containing the Services instance.
 func WithServices(ctx context.Context, svc *Services) context.Context {
@@ -678,6 +679,32 @@ func SessionIDFromContext(ctx context.Context) string {
 	}
 	s, _ := ctx.Value(sessionIDKey).(string)
 	return s
+}
+
+// ChatFile is one file the user attached on the current chat turn (decoded
+// bytes). Tools such as add_deck_image read these instead of asking the user
+// to rehost the file on a public URL.
+type ChatFile struct {
+	Filename string
+	MimeType string
+	Data     []byte
+}
+
+// WithChatFiles returns a context carrying this turn's chat attachments.
+func WithChatFiles(ctx context.Context, files []ChatFile) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, chatFilesKey, files)
+}
+
+// ChatFilesFromContext returns this turn's chat attachments, or nil.
+func ChatFilesFromContext(ctx context.Context) []ChatFile {
+	if ctx == nil {
+		return nil
+	}
+	files, _ := ctx.Value(chatFilesKey).([]ChatFile)
+	return files
 }
 
 // --- Memory Merge Function (cross-session dedup) ---

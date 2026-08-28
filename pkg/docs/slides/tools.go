@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"math"
+	"path"
 	"regexp"
 	"sort"
 	"strconv"
@@ -87,11 +88,11 @@ type CreateDeckArgs struct {
 	Slug        string            `json:"slug" jsonschema:"Hint only. In chat the server persists a unique per-session slug (s-<sessionID>) and returns it — use that in later calls. Two chats on the same topic must not share a persist slug."`
 	Title       string            `json:"title" jsonschema:"Human-readable deck title (shown in the chat Slides card)."`
 	Description string            `json:"description,omitempty" jsonschema:"Short deck description shown under Slides in chat. Prefer this over the persist slug for humans."`
-	Theme       map[string]string `json:"theme,omitempty" jsonschema:"Optional ASD theme token overrides. Prefer palette for Product Deck colorways instead of copying hex."`
+	Theme       map[string]string `json:"theme,omitempty" jsonschema:"Optional ASD theme token overrides. Prefer palette for modern colorways instead of copying hex."`
 	Template    string            `json:"template,omitempty" jsonschema:"Template name from list_slide_templates after intake (user named it, delegated, or picked from slidesTemplatePicker). Seeds theme, fonts, and a slim catalog. Author with fill_slides; do not copy markup."`
 	Palette     string            `json:"palette,omitempty" jsonschema:"Optional palette id from the template palettes list (e.g. orange, light-violet). Overlays surface/ink/accent/muted. Prefer this over copying hex into theme."`
 	TitleKind   string            `json:"titleKind,omitempty" jsonschema:"Required when the template has 2+ title* covers: the ask_user option id (title, title-2, …) or 'default' after they saw the picker. create_deck errors if this is omitted."`
-	TitleImage  string            `json:"titleImage,omitempty" jsonschema:"Required when the chosen cover has a ph-pic well: slidesImagePicker option id, or 'none' if they declined. Omit only when the cover has no image well."`
+	TitleImage  string            `json:"titleImage,omitempty" jsonschema:"Required when the cover has an image well (imported ph-pic, or Modern's optional logo): slidesImagePicker id, 'upload' (this-turn attachment), a public image URL, or 'none' if they declined."`
 	ClosingKind string            `json:"closingKind,omitempty" jsonschema:"Official closing variant kind (closing, closing-2, …). Last slide must use this kind when the catalog lists closing family."`
 	Source      string            `json:"source,omitempty" jsonschema:"Optional slug of an existing saved deck to clone. Copies theme, assets, and slides into this new session deck and sets source_slug so Save can offer Override Original."`
 }
@@ -465,14 +466,37 @@ func createDeck(ctx context.Context, args CreateDeckArgs) (DeckResult, error) {
 		if err := requireBookendIntake(tmpl, args); err != nil {
 			return DeckResult{}, err
 		}
+		imageRef, imageURI, err := resolveTitleImageAsset(ctx, args.TitleImage)
+		if err != nil {
+			return DeckResult{}, err
+		}
+		// A this-turn chat image wins over titleImage=none. Users often attach a
+		// logo and click Yes; the model may still pass none after a retry.
+		if imageRef == "" && coverWantsTitleImage(tmpl, strings.TrimSpace(args.TitleKind)) && chatHasImage(ctx) {
+			imageRef, imageURI, err = resolveTitleImageAsset(ctx, "upload")
+			if err != nil {
+				return DeckResult{}, err
+			}
+		}
+		args.TitleImage = imageRef
 		stampBookendKinds(tmpl, args, merged)
 		slug = resolvePersonalDeckSlug(ctx, svc, slug)
-		deck, err := svc.CreateDeckWithAssets(ctx, slug, title, description, merged, seedLightweightAssets(tmpl.Assets))
+		assets := seedLightweightAssets(tmpl.Assets)
+		if imageURI != "" {
+			if assets == nil {
+				assets = map[string]string{}
+			}
+			assets[imageRef] = imageURI
+		}
+		deck, err := svc.CreateDeckWithAssets(ctx, slug, title, description, merged, assets)
 		if err != nil {
 			return DeckResult{}, err
 		}
 		view := deckView(deck)
 		view.Assets = assetCatalog(tmpl.Assets)
+		if imageURI != "" {
+			view.Assets = append(assetCatalog(map[string]string{imageRef: imageURI}), view.Assets...)
+		}
 		view.AssetCount = len(view.Assets)
 		result := DeckResult{Deck: view, Catalog: catalogFromTemplate(tmpl), Palettes: paletteInfos(tmpl)}
 		if len(result.Catalog) > 0 {
@@ -619,6 +643,16 @@ func applyFills(ctx context.Context, deckSlug, templateName string, specs []Fill
 	if deck != nil {
 		tmpl = overlayDeckTheme(tmpl, deck.Theme)
 	}
+	if deck != nil {
+		if stamped, extra, err := ensureCoverImageFromChat(ctx, svc, deck); err != nil {
+			return empty, "", nil, err
+		} else if stamped != nil {
+			deck = stamped
+			if _, err := svc.mergeDeckAssets(ctx, deckSlug, extra); err != nil {
+				return empty, "", nil, err
+			}
+		}
+	}
 
 	type prepared struct {
 		spec   FillSlideSpec
@@ -645,6 +679,10 @@ func applyFills(ctx context.Context, deckSlug, templateName string, specs []Fill
 		if err != nil {
 			return empty, "", nil, fmt.Errorf("slides[%d]: %w", i, err)
 		}
+		titleImage := ""
+		if deck != nil && deck.Theme != nil {
+			titleImage = deck.Theme[themeKeyTitleImage]
+		}
 		if isRecipeKind(arch.Kind) {
 			chrome := ExtractChrome(tmpl)
 			if deck != nil {
@@ -652,16 +690,14 @@ func applyFills(ctx context.Context, deckSlug, templateName string, specs []Fill
 			}
 			chrome.Page = spec.Position + 1
 			chrome.Total = total
-			arch, err = recipeArchetypeFor(tmpl, arch.Kind, chrome, spec.Fills)
+			recipeFills := withRecipeCoverImageFill(arch.Kind, spec.Fills, titleImage)
+			arch, err = recipeArchetypeFor(tmpl, arch.Kind, chrome, recipeFills)
 			if err != nil {
 				return empty, "", nil, fmt.Errorf("slides[%d]: %w", i, err)
 			}
+			spec.Fills = recipeFills
 		}
 		fills := aliasOfficialBookendFills(arch, spec.Fills)
-		titleImage := ""
-		if deck != nil && deck.Theme != nil {
-			titleImage = deck.Theme[themeKeyTitleImage]
-		}
 		fills = applyCoverPhotoFill(arch, fills, titleImage)
 		if miss := missingTextSlotFills(arch, fills); len(miss) > 0 {
 			return empty, "", nil, fmt.Errorf("slides[%d]: missing fills for text slots %s — fill every required slot (or pick a recipe with fewer items)", i, strings.Join(miss, ", "))
@@ -931,16 +967,117 @@ func requireBookendIntake(tmpl themes.Template, args CreateDeckArgs) error {
 			resolvedTitle = defaultOfficialKind(tmpl, titles)
 		}
 	}
-	if resolvedTitle != "" {
-		arch, err := findTemplateArchetype(tmpl, resolvedTitle, "")
-		if err == nil && firstImageSlotID(arch) != "" && strings.TrimSpace(args.TitleImage) == "" {
-			return fmt.Errorf("titleImage is required: cover %q has an image well. Ask yes/no then ask_user slidesImagePicker=true with slidesTemplate=%q, and pass the photo id or \"none\"", resolvedTitle, tmpl.Name)
+	if coverWantsTitleImage(tmpl, resolvedTitle) && strings.TrimSpace(args.TitleImage) == "" {
+		if SkinFor(tmpl).ID == SkinProduct {
+			return fmt.Errorf("titleImage is required: Modern cover has an optional top-right logo. Ask yes/no, then pass \"none\", \"upload\" (this-turn attachment), a public image URL, or an asset-ref")
 		}
+		return fmt.Errorf("titleImage is required: cover %q has an image well. Ask_user slidesImagePicker=true with slidesTemplate=%q (pick a template photo, \"upload\" for their own, or \"none\"), then pass that id", resolvedTitle, tmpl.Name)
 	}
 	if len(closings) > 1 && closingKind == "" {
 		return fmt.Errorf("closingKind is required: template %q has %d end-page layouts. Call ask_user with slidesTemplate=%q and slidesKind=closing, then pass the option id as closingKind (or \"default\" after they see the picker)", tmpl.Name, len(closings), tmpl.Name)
 	}
 	return nil
+}
+
+func coverWantsTitleImage(tmpl themes.Template, resolvedTitle string) bool {
+	if SkinFor(tmpl).ID == SkinProduct {
+		return true
+	}
+	if resolvedTitle == "" {
+		return false
+	}
+	arch, err := findTemplateArchetype(tmpl, resolvedTitle, "")
+	return err == nil && firstImageSlotID(arch) != ""
+}
+
+// resolveTitleImageAsset turns create_deck titleImage into a stamped asset-ref.
+// "none"/"default"/empty → no image. "upload"/"attach" ingests this-turn chat
+// attachments. http(s) URLs are fetched. sha256-… keys pass through (template photos).
+func chatHasImage(ctx context.Context) bool {
+	for _, f := range store.ChatFilesFromContext(ctx) {
+		if chatFileLooksLikeImage(f) {
+			return true
+		}
+	}
+	return false
+}
+
+// ensureCoverImageFromChat ingests a this-turn chat image onto the deck when
+// the cover wants a photo/logo but none was stamped (model passed none, or a
+// retry skipped the attachment).
+func ensureCoverImageFromChat(ctx context.Context, svc Service, deck *store.DeckManifest) (*store.DeckManifest, map[string]string, error) {
+	if deck == nil || chatHasImage(ctx) == false {
+		return nil, nil, nil
+	}
+	if deck.Theme != nil && normalizeCoverPhotoRef(deck.Theme[themeKeyTitleImage]) != "" {
+		return nil, nil, nil
+	}
+	tmplName := ""
+	if deck.Theme != nil {
+		tmplName = strings.TrimSpace(deck.Theme[themeKeyTemplateName])
+	}
+	if tmplName == "" {
+		return nil, nil, nil
+	}
+	tmpl, ok := svc.resolveTemplate(ctx, tmplName)
+	if !ok {
+		return nil, nil, nil
+	}
+	titleKind := ""
+	if deck.Theme != nil {
+		titleKind = strings.TrimSpace(deck.Theme[themeKeyTitleKind])
+	}
+	if !coverWantsTitleImage(tmpl, titleKind) {
+		return nil, nil, nil
+	}
+	ref, uri, err := resolveTitleImageAsset(ctx, "upload")
+	if err != nil || ref == "" || uri == "" {
+		return nil, nil, err
+	}
+	theme := cloneStringMap(deck.Theme)
+	if theme == nil {
+		theme = map[string]string{}
+	}
+	theme[themeKeyTitleImage] = ref
+	deck.Theme = theme
+	if err := svc.Store.UpdateDeck(ctx, deck); err != nil {
+		return nil, nil, fmt.Errorf("stamp cover image: %w", err)
+	}
+	return deck, map[string]string{ref: uri}, nil
+}
+
+func resolveTitleImageAsset(ctx context.Context, raw string) (ref, dataURI string, err error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || strings.EqualFold(raw, "none") || strings.EqualFold(raw, "default") {
+		return "", "", nil
+	}
+	if strings.EqualFold(raw, "upload") || strings.EqualFold(raw, "attach") || strings.EqualFold(raw, "provided") {
+		asset, err := ingestChatImage(ctx, "")
+		if err != nil {
+			return "", "", fmt.Errorf("titleImage upload: attach an image this turn (or pass none): %w", err)
+		}
+		ref, uri := assetRefAndURI(asset)
+		return ref, uri, nil
+	}
+	lower := strings.ToLower(raw)
+	if strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") {
+		asset, err := newAssetIngestor().Fetch(ctx, raw)
+		if err != nil {
+			return "", "", fmt.Errorf("titleImage url: %w", err)
+		}
+		ref, uri := assetRefAndURI(asset)
+		return ref, uri, nil
+	}
+	if strings.HasPrefix(raw, "sha256-") || strings.HasPrefix(raw, "thumb/") {
+		return raw, "", nil
+	}
+	return "", "", fmt.Errorf("titleImage must be a template photo id, none, upload (chat attachment), or a public image URL, got %q", raw)
+}
+
+func assetRefAndURI(a Asset) (string, string) {
+	ref := "sha256-" + a.ID
+	uri := "data:" + a.MIME + ";base64," + base64.StdEncoding.EncodeToString(a.Bytes)
+	return ref, uri
 }
 
 func defaultOfficialKind(tmpl themes.Template, kinds []string) string {
@@ -1031,6 +1168,11 @@ func createDeckCatalogInstructions(tmpl themes.Template, theme map[string]string
 		}
 	} else {
 		s += "Cover = recipe-cover (thesis in the dek). "
+		if k := strings.TrimSpace(theme[themeKeyTitleImage]); k != "" {
+			s += "Optional top-right logo is " + k + " in ph-pic-1 (contain-fit). "
+		} else if SkinFor(tmpl).ID == SkinProduct {
+			s += "No cover logo unless titleImage was provided; omit ph-pic-1. "
+		}
 	}
 	if len(closings) > 0 {
 		s += "Last slide MUST be the official closing family (" + strings.Join(closings, ", ") + "), not recipe-closer. "
@@ -1229,6 +1371,19 @@ func appendDefaultAskOption(opts []AskUserOption, description string) []AskUserO
 		}
 	}
 	return append(opts, AskUserOption{ID: "default", Label: "Use the default", Description: description})
+}
+
+func appendUploadAskOption(opts []AskUserOption) []AskUserOption {
+	for _, o := range opts {
+		if o.ID == "upload" {
+			return opts
+		}
+	}
+	return append(opts, AskUserOption{
+		ID:          "upload",
+		Label:       "I'll provide my own image",
+		Description: "Attach a file this turn, or pass a public image URL as titleImage",
+	})
 }
 
 // palettePickerOptions returns one option per template palette, each with a
@@ -1443,12 +1598,12 @@ type AskUserArgs struct {
 	// the catalog), and attaches a live thumbnail of each template's cover so the
 	// user picks by seeing the design. Do NOT hand-copy markup or thumbnails.
 	SlidesTemplatePicker bool `json:"slidesTemplatePicker,omitempty" jsonschema:"For the template-choice question: set true (with kind='select', no options) to auto-generate one option per available template, each with a live thumbnail of that template's cover slide."`
-	// Slides convenience: colorways on a template that defines Palettes (Product
-	// Deck). Set true with kind='select' and slidesTemplate; omit options.
+	// Slides convenience: colorways on a template that defines Palettes (modern).
+	// Set true with kind='select' and slidesTemplate; omit options.
 	SlidesPalettePicker bool `json:"slidesPalettePicker,omitempty" jsonschema:"For a color-palette question: set true (kind='select') with slidesTemplate. ask_user lists each palette with a live recolored cover thumbnail. Omit options. Do not invent palettes for imported brand templates."`
 	// Slides convenience: photos from the template's example title slides, for
 	// the cover's single image well. Set true with kind='select' and slidesTemplate.
-	SlidesImagePicker bool `json:"slidesImagePicker,omitempty" jsonschema:"For the cover-photo question after a title layout with a ph-pic well: set true (kind='select') with slidesTemplate. ask_user lists each unique template photo. Omit options. Pass the chosen id as titleImage on create_deck."`
+	SlidesImagePicker bool `json:"slidesImagePicker,omitempty" jsonschema:"For the cover-photo question after a title layout with a ph-pic well: set true (kind='select') with slidesTemplate. Lists template photos plus 'I'll provide my own' (upload) and no-photo. Pass the chosen id as titleImage. Not for Modern — that template has no example photos; ask yes/no for a logo instead."`
 }
 
 // AskUserResult is the structured payload the chat runner turns into a
@@ -1523,7 +1678,7 @@ func askUser(ctx context.Context, args AskUserArgs) (AskUserResult, error) {
 		}
 	}
 
-	// Slides convenience: color palettes on a template (Product Deck). Each
+	// Slides convenience: color palettes on a template (modern). Each
 	// option is a live recipe-cover recolored with that palette's tokens.
 	if args.SlidesPalettePicker && kind == "select" {
 		template := strings.TrimSpace(args.SlidesTemplate)
@@ -1572,6 +1727,7 @@ func askUser(ctx context.Context, args AskUserArgs) (AskUserResult, error) {
 				thumbByOption[p.option.ID] = *p.thumbnail
 			}
 		}
+		inOptions = appendUploadAskOption(inOptions)
 		inOptions = appendDefaultAskOption(inOptions, "No photo — leave the cover image well empty")
 	} else if template := strings.TrimSpace(args.SlidesTemplate); template != "" && kind == "select" {
 		previews, err := getTemplateVariantPreviews(ctx, TemplateVariantPreviewsArgs{
@@ -2547,9 +2703,10 @@ func mergeAssetCatalogs(a, b []AssetInfo) []AssetInfo {
 
 // AddDeckImageArgs defines the add_deck_image tool input.
 type AddDeckImageArgs struct {
-	DeckSlug string `json:"deck_slug" jsonschema:"Persist slug from create_deck, or the hint — in chat the server remaps a hint onto this session's draft."`
-	URL      string `json:"url" jsonschema:"Public https URL of an image to fetch and add to the deck asset library."`
-	Alt      string `json:"alt,omitempty" jsonschema:"Optional alt text describing the image."`
+	DeckSlug   string `json:"deck_slug" jsonschema:"Persist slug from create_deck, or the hint — in chat the server remaps a hint onto this session's draft."`
+	URL        string `json:"url,omitempty" jsonschema:"Public https URL of an image to fetch. Omit when the user attached an image in this chat turn."`
+	Attachment string `json:"attachment,omitempty" jsonschema:"Optional filename of a chat attachment to ingest. When the user attached an image, omit url and either omit this or pass the filename; the server stores it on the deck."`
+	Alt        string `json:"alt,omitempty" jsonschema:"Optional alt text describing the image."`
 }
 
 // AddDeckImageResult reports the newly added asset's ref (usable directly as an
@@ -2578,13 +2735,21 @@ func addDeckImage(ctx context.Context, args AddDeckImageArgs) (AddDeckImageResul
 		return AddDeckImageResult{}, err
 	}
 	slug := resolveWorkingDeckSlug(ctx, svc, args.DeckSlug)
-	url := strings.TrimSpace(args.URL)
-	if slug == "" || url == "" {
-		return AddDeckImageResult{}, fmt.Errorf("deck_slug and url are required")
+	if slug == "" {
+		return AddDeckImageResult{}, fmt.Errorf("deck_slug is required")
 	}
-	asset, err := newAssetIngestor().Fetch(ctx, url)
-	if err != nil {
-		return AddDeckImageResult{}, fmt.Errorf("fetch image: %w", err)
+	url := strings.TrimSpace(args.URL)
+	var asset Asset
+	if url != "" {
+		asset, err = newAssetIngestor().Fetch(ctx, url)
+		if err != nil {
+			return AddDeckImageResult{}, fmt.Errorf("fetch image: %w", err)
+		}
+	} else {
+		asset, err = ingestChatImage(ctx, args.Attachment)
+		if err != nil {
+			return AddDeckImageResult{}, err
+		}
 	}
 	ref := "sha256-" + asset.ID
 	dataURI := "data:" + asset.MIME + ";base64," + base64.StdEncoding.EncodeToString(asset.Bytes)
@@ -2595,6 +2760,51 @@ func addDeckImage(ctx context.Context, args AddDeckImageArgs) (AddDeckImageResul
 	return AddDeckImageResult{Deck: deckViewWithAssets(deck), AssetRef: ref, MIME: asset.MIME, Bytes: len(asset.Bytes)}, nil
 }
 
+func ingestChatImage(ctx context.Context, name string) (Asset, error) {
+	files := store.ChatFilesFromContext(ctx)
+	if len(files) == 0 {
+		return Asset{}, fmt.Errorf("url or a chat image attachment is required — when the user attached a file, call add_deck_image without url")
+	}
+	want := strings.TrimSpace(name)
+	wantBase := path.Base(want)
+	var chosen *store.ChatFile
+	for i := len(files) - 1; i >= 0; i-- {
+		f := files[i]
+		if !chatFileLooksLikeImage(f) {
+			continue
+		}
+		if want == "" || strings.EqualFold(f.Filename, want) || strings.EqualFold(path.Base(f.Filename), wantBase) {
+			chosen = &files[i]
+			break
+		}
+	}
+	if chosen == nil {
+		if want != "" {
+			return Asset{}, fmt.Errorf("no chat image attachment named %q", name)
+		}
+		return Asset{}, fmt.Errorf("no image attachment on this chat turn")
+	}
+	asset, err := newAssetIngestor().Accept(chosen.Data, chosen.MimeType)
+	if err != nil {
+		return Asset{}, fmt.Errorf("ingest attachment: %w", err)
+	}
+	return asset, nil
+}
+
+func chatFileLooksLikeImage(f store.ChatFile) bool {
+	mime := strings.ToLower(strings.TrimSpace(f.MimeType))
+	if strings.HasPrefix(mime, "image/") {
+		return true
+	}
+	n := strings.ToLower(f.Filename)
+	for _, ext := range []string{".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"} {
+		if strings.HasSuffix(n, ext) {
+			return true
+		}
+	}
+	return false
+}
+
 // GetTools returns the chat tools for authoring and inspecting private slide decks.
 func GetTools() ([]tool.Tool, error) {
 	specs := []struct {
@@ -2602,8 +2812,8 @@ func GetTools() ([]tool.Tool, error) {
 		description string
 		newTool     func() (tool.Tool, error)
 	}{
-		{"create_deck", "Create a new private Astonish Slides deck AFTER ask_user intake (audience, length, who picks the template, title variant, cover photo) unless those answers are already explicit in the user message. Using existing knowledge / skipping search is not a skip. Pass template. titleKind is required when the template has 2+ title* covers; titleImage is required (sha256-… or none) when that cover has a ph-pic well. Optional palette, closingKind. Seeds theme, fonts, and a slim catalog. Author with fill_slides; do not copy markup.", func() (tool.Tool, error) {
-			return functiontool.New(functiontool.Config{Name: "create_deck", Description: "Create a new private Astonish Slides deck AFTER ask_user intake (audience, length, who picks the template, title variant, cover photo) unless those answers are already explicit in the user message. Using existing knowledge / skipping search is not a skip. Pass template. titleKind is required when the template has 2+ title* covers; titleImage is required (sha256-… or none) when that cover has a ph-pic well. Optional palette, closingKind. Seeds theme, fonts, and a slim catalog. Author with fill_slides; do not copy markup."}, func(ctx tool.Context, args CreateDeckArgs) (DeckResult, error) {
+		{"create_deck", "Create a new private Astonish Slides deck AFTER ask_user intake (audience, length, who picks the template, title variant, cover image) unless those answers are already explicit in the user message. Using existing knowledge / skipping search is not a skip. Pass template. titleKind is required when the template has 2+ title* covers; titleImage is required (sha256-…, upload, URL, or none) when that cover has a ph-pic well or the template is modern. Optional palette, closingKind. Seeds theme, fonts, and a slim catalog. Author with fill_slides; do not copy markup.", func() (tool.Tool, error) {
+			return functiontool.New(functiontool.Config{Name: "create_deck", Description: "Create a new private Astonish Slides deck AFTER ask_user intake (audience, length, who picks the template, title variant, cover image) unless those answers are already explicit in the user message. Using existing knowledge / skipping search is not a skip. Pass template. titleKind is required when the template has 2+ title* covers; titleImage is required (sha256-…, upload, URL, or none) when that cover has a ph-pic well or the template is modern. Optional palette, closingKind. Seeds theme, fonts, and a slim catalog. Author with fill_slides; do not copy markup."}, func(ctx tool.Context, args CreateDeckArgs) (DeckResult, error) {
 				return createDeck(ctx, args)
 			})
 		}},
@@ -2667,13 +2877,13 @@ func GetTools() ([]tool.Tool, error) {
 				return listDeckAssets(ctx, args)
 			})
 		}},
-		{"add_deck_image", "Fetch a public https image URL and add it to the deck asset library; returns the asset-ref to reference in an ast-image. Use list_deck_assets first to see existing images and to swap one. The fetch is SSRF-protected and rejects non-image or private-network URLs.", func() (tool.Tool, error) {
-			return functiontool.New(functiontool.Config{Name: "add_deck_image", Description: "Fetch a public https image URL and add it to the deck asset library; returns the asset-ref to reference in an ast-image. Use list_deck_assets first to see existing images and to swap one. The fetch is SSRF-protected and rejects non-image or private-network URLs."}, func(ctx tool.Context, args AddDeckImageArgs) (AddDeckImageResult, error) {
+		{"add_deck_image", "Add an image to the deck asset library and return the asset-ref for fill_slides/fill_slide (ph-pic or ast-image). Prefer a chat attachment: when the user uploaded a file this turn, omit url (optional attachment=filename). Otherwise pass a public https url (SSRF-protected). Do not ask the user to rehost an attached file.", func() (tool.Tool, error) {
+			return functiontool.New(functiontool.Config{Name: "add_deck_image", Description: "Add an image to the deck asset library and return the asset-ref for fill_slides/fill_slide (ph-pic or ast-image). Prefer a chat attachment: when the user uploaded a file this turn, omit url (optional attachment=filename). Otherwise pass a public https url (SSRF-protected). Do not ask the user to rehost an attached file."}, func(ctx tool.Context, args AddDeckImageArgs) (AddDeckImageResult, error) {
 				return addDeckImage(ctx, args)
 			})
 		}},
-		{"ask_user", "Ask the user ONE structured question inline in chat and WAIT for their reply. kind='yesno' shows Yes/No; kind='select' shows a pick-one list. Intake: audience, length, who picks the template. If they want to choose, slidesTemplatePicker=true (kind='select', no options) shows a live cover thumbnail per template. After a template is known, slidesTemplate+slidesKind=title|closing shows official cover/end LAYOUTS (sample photos stripped). If the chosen title has a ph-pic well, yes/no then slidesImagePicker=true with slidesTemplate lists template photos. slidesPalettePicker=true with slidesTemplate shows Product Deck colorways. Do NOT hand-copy markup. After calling it, end your turn.", func() (tool.Tool, error) {
-			return functiontool.New(functiontool.Config{Name: "ask_user", Description: "Ask the user ONE structured question inline in chat and WAIT for their reply. kind='yesno' shows Yes/No; kind='select' shows a pick-one list. Intake: audience, length, who picks the template. If they want to choose, slidesTemplatePicker=true (kind='select', no options) shows a live cover thumbnail per template. After a template is known, slidesTemplate+slidesKind=title|closing shows official cover/end LAYOUTS (sample photos stripped). If the chosen title has a ph-pic well, yes/no then slidesImagePicker=true with slidesTemplate lists template photos. slidesPalettePicker=true with slidesTemplate shows Product Deck colorways. Do NOT hand-copy markup. After calling it, end your turn."}, func(ctx tool.Context, args AskUserArgs) (AskUserResult, error) {
+		{"ask_user", "Ask the user ONE structured question inline in chat and WAIT for their reply. kind='yesno' shows Yes/No; kind='select' shows a pick-one list. Intake: audience, length, who picks the template. If they want to choose, slidesTemplatePicker=true (kind='select', no options) shows a live cover thumbnail per template. After a template is known, slidesTemplate+slidesKind=title|closing shows official cover/end LAYOUTS (sample photos stripped). If the chosen title has a ph-pic well, slidesImagePicker=true with slidesTemplate lists template photos plus provide-own (upload) and none. The modern template has no example photos: yes/no for a top-right logo. slidesPalettePicker=true with slidesTemplate shows Modern colorways. Do NOT hand-copy markup. After calling it, end your turn.", func() (tool.Tool, error) {
+			return functiontool.New(functiontool.Config{Name: "ask_user", Description: "Ask the user ONE structured question inline in chat and WAIT for their reply. kind='yesno' shows Yes/No; kind='select' shows a pick-one list. Intake: audience, length, who picks the template. If they want to choose, slidesTemplatePicker=true (kind='select', no options) shows a live cover thumbnail per template. After a template is known, slidesTemplate+slidesKind=title|closing shows official cover/end LAYOUTS (sample photos stripped). If the chosen title has a ph-pic well, slidesImagePicker=true with slidesTemplate lists template photos plus provide-own (upload) and none. The modern template has no example photos: yes/no for a top-right logo. slidesPalettePicker=true with slidesTemplate shows Modern colorways. Do NOT hand-copy markup. After calling it, end your turn."}, func(ctx tool.Context, args AskUserArgs) (AskUserResult, error) {
 				return askUser(ctx, args)
 			})
 		}},

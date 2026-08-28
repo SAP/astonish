@@ -665,7 +665,33 @@ func TestGetSlidesTemplateMediaServesPNG(t *testing.T) {
 	}
 }
 
-func TestGetSlidesTemplateMediaRejectsFont(t *testing.T) {
+func TestGetSlidesTemplateMediaServesBuiltinDeclaredFont(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/docs/slides/templates/modern/media/font:Manrope:400", nil)
+	req = mux.SetURLVars(req, map[string]string{"name": "modern", "ref": "font:Manrope:400"})
+	rec := httptest.NewRecorder()
+	GetSlidesTemplateMediaHandler(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("modern declared Manrope should serve, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("Content-Type") != "font/woff2" {
+		t.Fatalf("Content-Type = %q", rec.Header().Get("Content-Type"))
+	}
+	if rec.Body.Len() < 100 {
+		t.Fatal("empty font body")
+	}
+}
+
+func TestGetSlidesTemplateMediaBuiltinWithoutDeclaration(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/docs/slides/templates/aurora/media/font:Manrope:400", nil)
+	req = mux.SetURLVars(req, map[string]string{"name": "aurora", "ref": "font:Manrope:400"})
+	rec := httptest.NewRecorder()
+	GetSlidesTemplateMediaHandler(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("undeclared aurora font should 404, got %d", rec.Code)
+	}
+}
+
+func TestGetSlidesTemplateMediaServesFont(t *testing.T) {
 	personal := newMemDocsStore()
 	tmpl := themes.Template{
 		Name:   "phototpl",
@@ -682,8 +708,11 @@ func TestGetSlidesTemplateMediaRejectsFont(t *testing.T) {
 	req = mux.SetURLVars(req, map[string]string{"name": "phototpl", "ref": "font:SAP:regular"})
 	rec := httptest.NewRecorder()
 	GetSlidesTemplateMediaHandler(rec, req)
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("fonts must 404, got %d", rec.Code)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("fonts should serve, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("Content-Type") != "font/ttf" {
+		t.Fatalf("Content-Type = %q", rec.Header().Get("Content-Type"))
 	}
 }
 

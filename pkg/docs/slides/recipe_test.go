@@ -366,9 +366,34 @@ func TestProductCoverHasNoInventedLogo(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if strings.Contains(markup, "cover-glow") || strings.Contains(markup, `id="chrome-logo"`) {
+		if strings.Contains(markup, "cover-glow") || strings.Contains(markup, `id="chrome-logo"`) || strings.Contains(markup, `id="ph-pic-1"`) {
 			t.Fatalf("%s invented a logo/glow:\n%s", kind, markup)
 		}
+	}
+}
+
+func TestProductCoverPaintsProvidedLogo(t *testing.T) {
+	fills := sampleFills(RecipeCover)
+	fills["ph-pic-1"] = "sha256-aabbccdd"
+	markup, err := RenderRecipe(RecipeCover, ProductSkin(nil), nil, Chrome{Page: 1, Total: 8}, fills)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(markup, `id="ph-pic-1"`) || !strings.Contains(markup, `asset-ref="sha256-aabbccdd"`) || !strings.Contains(markup, `fit="contain"`) {
+		t.Fatalf("expected top-right logo:\n%s", markup)
+	}
+	if !strings.Contains(markup, `w="630"`) || !strings.Contains(markup, `h="180"`) {
+		t.Fatalf("logo well should be 630×180 on the Modern cover:\n%s", markup)
+	}
+	if strings.Contains(markup, `id="rail-page-right"`) {
+		t.Fatal("page counter should not overlap the logo")
+	}
+	plain, err := RenderRecipe(RecipeCover, ProductSkin(nil), nil, Chrome{Page: 1, Total: 8}, sampleFills(RecipeCover))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(plain, `id="rail-page-right"`) {
+		t.Fatal("cover without a logo should keep the page counter")
 	}
 }
 
@@ -441,7 +466,7 @@ func TestProductSkinUsesDotRailNotLogoRule(t *testing.T) {
 }
 
 func TestSkinForProductTemplate(t *testing.T) {
-	tmpl, ok := themes.LookupTemplate("product")
+	tmpl, ok := themes.LookupTemplate("modern")
 	if !ok {
 		t.Fatal("missing product template")
 	}

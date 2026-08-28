@@ -198,15 +198,19 @@ export default function HarnessPanel({
     if (focus.kind !== 'slides') return 0
     let count = 0
     let maxTotal = 0
+    let maxRevision = 0
     for (const m of messages) {
       if (m.type !== 'docs_update') continue
       const d = m as DocsUpdateMessage
       if (d.docType === 'slides' && d.deckSlug === focus.deckSlug) {
         count++
         if (typeof d.totalSlides === 'number' && d.totalSlides > maxTotal) maxTotal = d.totalSlides
+        if (typeof d.revision === 'number' && d.revision > maxRevision) maxRevision = d.revision
       }
     }
-    return count * 1000 + maxTotal
+    // revision changes on every live write (including in-place slide edits
+    // that keep the same total). Fall back to count+total for reconnect.
+    return maxRevision || count * 1000 + maxTotal
   }, [messages, focus])
 
   return (

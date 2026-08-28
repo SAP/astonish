@@ -147,7 +147,7 @@ func applyTokenOverrides(s *Skin, tokens map[string]string) {
 	}
 }
 
-// SkinFor picks the visual language for a template. Built-in "product" (and
+// SkinFor picks the visual language for a template. Built-in "modern" (and
 // explicit Skin=product) get the dark developer-tool language; everything else
 // — including imported corporate decks — uses the original corporate recipes.
 func SkinFor(tmpl themes.Template) Skin {
@@ -156,7 +156,7 @@ func SkinFor(tmpl themes.Template) Skin {
 		id = strings.ToLower(strings.TrimSpace(tmpl.Name))
 	}
 	switch id {
-	case SkinProduct, "devtool", "product-dark":
+	case SkinProduct, "modern", "devtool", "product-dark":
 		return ProductSkin(tmpl.Tokens)
 	default:
 		return CorporateSkin(tmpl.Tokens)

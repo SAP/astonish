@@ -104,6 +104,15 @@ func TestWriteFontFacesGuards(t *testing.T) {
 		}
 	})
 
+	t.Run("numeric weight", func(t *testing.T) {
+		var buf bytes.Buffer
+		theme := mkTheme([]EmbeddedFontRef{{Family: "Manrope", Variant: "600", AssetKey: "k"}})
+		writeFontFaces(&buf, theme, map[string]string{"k": "data:font/woff2;base64,AAAA"})
+		if !strings.Contains(buf.String(), "font-weight:600") {
+			t.Errorf("want weight 600, got %q", buf.String())
+		}
+	})
+
 	t.Run("unsafe family name skipped", func(t *testing.T) {
 		var buf bytes.Buffer
 		theme := mkTheme([]EmbeddedFontRef{{Family: `bad"</style>`, Variant: "regular", AssetKey: "k"}})

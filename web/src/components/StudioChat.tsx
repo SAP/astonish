@@ -93,6 +93,7 @@ function docsUpdateFromEvent(data: Record<string, any>): DocsUpdateMessage {
     schemaVersion: data.schemaVersion as number | undefined,
     validation: data.validation as DocsUpdateMessage['validation'],
     pptxCapability: data.pptxCapability as DocsUpdateMessage['pptxCapability'],
+    revision: Date.now(),
   }
 }
 

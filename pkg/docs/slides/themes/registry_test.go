@@ -10,7 +10,7 @@ func TestListTemplatesDeterministicOrder(t *testing.T) {
 	if len(got) != 4 {
 		t.Fatalf("expected 4 built-in templates, got %d", len(got))
 	}
-	want := []string{"aurora", "light-corporate", "midnight", "product"}
+	want := []string{"aurora", "light-corporate", "midnight", "modern"}
 	for i, name := range want {
 		if got[i].Name != name {
 			t.Fatalf("template %d = %q, want %q", i, got[i].Name, name)
@@ -47,24 +47,39 @@ func TestLookupTemplate(t *testing.T) {
 	if _, ok := LookupTemplate("does-not-exist"); ok {
 		t.Fatal("expected missing template to report ok=false")
 	}
-	prod, ok := LookupTemplate("product")
+	prod, ok := LookupTemplate("modern")
 	if !ok {
-		t.Fatal("expected product template to exist")
+		t.Fatal("expected modern template to exist")
 	}
-	if prod.Skin != "product" || prod.Tokens["accent"] != "#8B5CF6" {
-		t.Fatalf("unexpected product template: %#v", prod)
+	if prod.Name != "modern" || prod.Skin != "product" || prod.Tokens["accent"] != "#8B5CF6" {
+		t.Fatalf("unexpected modern template: %#v", prod)
 	}
-	if prod.Label != "Product Deck" {
-		t.Fatalf("product label = %q, want Product Deck", prod.Label)
+	if prod.Label != "Modern" {
+		t.Fatalf("modern label = %q, want Modern", prod.Label)
 	}
 	if len(prod.Palettes) < 8 {
-		t.Fatalf("product palettes = %d, want >= 8", len(prod.Palettes))
+		t.Fatalf("modern palettes = %d, want >= 8", len(prod.Palettes))
 	}
 	if _, ok := prod.PaletteByID("orange"); !ok {
-		t.Fatal("product missing orange palette")
+		t.Fatal("modern missing orange palette")
 	}
 	if _, ok := prod.PaletteByID("editorial"); !ok {
-		t.Fatal("product missing editorial palette")
+		t.Fatal("modern missing editorial palette")
+	}
+	if !strings.Contains(prod.Tokens["embedded-fonts"], `"family":"Manrope"`) {
+		t.Fatal("modern must declare the faces it needs")
+	}
+	if !strings.Contains(prod.Tokens["embedded-fonts"], `"family":"JetBrains Mono"`) {
+		t.Fatal("modern must declare JetBrains Mono")
+	}
+	for _, name := range []string{"aurora", "midnight", "light-corporate"} {
+		other, ok := LookupTemplate(name)
+		if !ok {
+			t.Fatalf("%s missing", name)
+		}
+		if other.Tokens["embedded-fonts"] != "" {
+			t.Fatalf("%s must not declare fonts it does not need", name)
+		}
 	}
 	seen := map[string]bool{}
 	for _, p := range prod.Palettes {

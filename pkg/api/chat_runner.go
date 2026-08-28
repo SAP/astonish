@@ -170,6 +170,12 @@ func (cr *ChatRunner) InjectCredentialStore(cs store.CredentialStore) {
 	cr.ctx = store.WithCredentialStore(cr.ctx, cs)
 }
 
+// InjectChatFiles makes this turn's user-uploaded files available to tools
+// (e.g. add_deck_image) without a public URL.
+func (cr *ChatRunner) InjectChatFiles(files []store.ChatFile) {
+	cr.ctx = store.WithChatFiles(cr.ctx, files)
+}
+
 func (cr *ChatRunner) InjectDocsStores(personal, team store.DocsStore) {
 	svc := store.FromContext(cr.ctx)
 	if svc == nil {
@@ -1011,7 +1017,7 @@ runLoop:
 	// (from the provider detecting no finish_reason), attempt a single retry
 	// by re-running the agent. The session history already contains the partial
 	// response, so the LLM will see the conversation so far and continue.
-	if lastRunErr != nil && isStreamTruncationError(lastRunErr) && cr.ctx.Err() == nil {
+	if lastRunErr != nil && shouldRetryTruncatedStream(lastRunErr, hasContent) && cr.ctx.Err() == nil {
 		slog.Warn("LLM stream was truncated, attempting retry",
 			"session", cr.SessionID,
 			"error", lastRunErr.Error())
@@ -1747,6 +1753,13 @@ func isStreamTruncationError(err error) bool {
 		return false
 	}
 	return strings.Contains(err.Error(), "stream ended without a finish_reason")
+}
+
+// shouldRetryTruncatedStream is the truncation-retry gate. If the model already
+// produced user-facing text (e.g. "please attach a logo"), a nudge to "complete
+// the task" skips waiting for the user — do not retry in that case.
+func shouldRetryTruncatedStream(err error, hasContent bool) bool {
+	return isStreamTruncationError(err) && !hasContent
 }
 
 func (cr *ChatRunner) maybeEmitDocsUpdate(sessionService session.Service, toolName string, result map[string]any) {

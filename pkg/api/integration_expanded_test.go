@@ -316,6 +316,13 @@ func TestIntegration_X16_StreamTruncationRetry(t *testing.T) {
 				t.Errorf("isStreamTruncationError(%q) = %v, want %v", tt.err, got, tt.expect)
 			}
 		}
+		trunc := stringError("stream ended without a finish_reason")
+		if shouldRetryTruncatedStream(trunc, true) {
+			t.Error("should not truncation-retry after the model already produced text")
+		}
+		if !shouldRetryTruncatedStream(trunc, false) {
+			t.Error("should truncation-retry when the stream died with no content")
+		}
 	})
 
 	// Test 2: Full pipeline retry — MockLLM that errors on first call with
@@ -371,7 +378,10 @@ func TestIntegration_X17_MultiTurn(t *testing.T) {
 	ch2 := runner2.Subscribe("test")
 	t.Cleanup(func() {
 		runner2.Stop()
-		go func() { for range ch2 {} }()
+		go func() {
+			for range ch2 {
+			}
+		}()
 	})
 
 	userMsg2 := &genai.Content{

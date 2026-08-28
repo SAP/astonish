@@ -413,7 +413,7 @@ func TestFillSlidesProductCoverAndCloser(t *testing.T) {
 	backend := newMultiDeckStore()
 	ctx := toolContext(t, backend)
 	if _, err := createDeck(ctx, CreateDeckArgs{
-		Slug: "steve-jobs-2026", Title: "Steve Jobs: Think Different", Template: "product",
+		Slug: "steve-jobs-2026", Title: "Steve Jobs: Think Different", Template: "modern", TitleImage: "none",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -484,6 +484,9 @@ func TestFillSlidesProductCoverAndCloser(t *testing.T) {
 	if strings.Contains(cover.Slide.Content, `id="meta_4_label"`) {
 		t.Fatal("product cover should not emit meta_4")
 	}
+	if strings.Contains(cover.Slide.Content, `id="ph-pic-1"`) {
+		t.Fatal("product cover must omit the logo well when titleImage is none")
+	}
 	closer, err := readSlide(ctx, ReadSlideArgs{DeckSlug: "steve-jobs-2026", Position: 2})
 	if err != nil {
 		t.Fatal(err)
@@ -502,11 +505,11 @@ func TestFillSlidesProductCoverAndCloser(t *testing.T) {
 func TestCreateDeckResolvesSlugCollision(t *testing.T) {
 	backend := newMultiDeckStore()
 	ctx := toolContext(t, backend)
-	first, err := createDeck(ctx, CreateDeckArgs{Slug: "steve-jobs-life", Title: "One", Template: "product"})
+	first, err := createDeck(ctx, CreateDeckArgs{Slug: "steve-jobs-life", Title: "One", Template: "modern", TitleImage: "none"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := createDeck(ctx, CreateDeckArgs{Slug: "steve-jobs-life", Title: "Two", Template: "product"})
+	second, err := createDeck(ctx, CreateDeckArgs{Slug: "steve-jobs-life", Title: "Two", Template: "modern", TitleImage: "none"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -520,11 +523,11 @@ func TestCreateDeckSessionUsesUniqueSlug(t *testing.T) {
 	ctxA := sessionToolContext(t, backend, "session-a")
 	ctxB := sessionToolContext(t, backend, "session-b")
 
-	first, err := createDeck(ctxA, CreateDeckArgs{Slug: "steve-jobs-life", Title: "Jobs A", Description: "Session A biography", Template: "product"})
+	first, err := createDeck(ctxA, CreateDeckArgs{Slug: "steve-jobs-life", Title: "Jobs A", Description: "Session A biography", Template: "modern", TitleImage: "none"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := createDeck(ctxB, CreateDeckArgs{Slug: "steve-jobs-life", Title: "Jobs B", Description: "Session B biography", Template: "product"})
+	second, err := createDeck(ctxB, CreateDeckArgs{Slug: "steve-jobs-life", Title: "Jobs B", Description: "Session B biography", Template: "modern", TitleImage: "none"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -557,11 +560,11 @@ func TestCreateDeckSessionUsesUniqueSlug(t *testing.T) {
 func TestCreateDeckSameSessionReplacesDraft(t *testing.T) {
 	backend := newMultiDeckStore()
 	ctx := sessionToolContext(t, backend, "session-retry")
-	first, err := createDeck(ctx, CreateDeckArgs{Slug: "steve-jobs-life", Title: "One", Template: "product"})
+	first, err := createDeck(ctx, CreateDeckArgs{Slug: "steve-jobs-life", Title: "One", Template: "modern", TitleImage: "none"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := createDeck(ctx, CreateDeckArgs{Slug: "steve-jobs-life", Title: "Two", Description: "Retry", Template: "product"})
+	second, err := createDeck(ctx, CreateDeckArgs{Slug: "steve-jobs-life", Title: "Two", Description: "Retry", Template: "modern", TitleImage: "none"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -786,7 +789,7 @@ func TestListTemplatesToolReturnsBuiltinsAndScoped(t *testing.T) {
 	for _, tmpl := range res.Templates {
 		names[tmpl.Name] = true
 	}
-	for _, want := range []string{"light-corporate", "midnight", "aurora", "product", "acme"} {
+	for _, want := range []string{"light-corporate", "midnight", "aurora", "modern", "acme"} {
 		if !names[want] {
 			t.Fatalf("list_templates missing %q; got %#v", want, names)
 		}
@@ -858,7 +861,7 @@ func TestSaveTemplateThenListSurfacesScopedTemplate(t *testing.T) {
 	for _, tmpl := range res.Templates {
 		seen[tmpl.Name] = true
 	}
-	for _, want := range []string{"light-corporate", "midnight", "aurora", "product"} {
+	for _, want := range []string{"light-corporate", "midnight", "aurora", "modern"} {
 		if !seen[want] {
 			t.Fatalf("built-in %q missing after import; got %#v", want, seen)
 		}
@@ -975,6 +978,55 @@ func TestAddDeckImage(t *testing.T) {
 	}
 	if len(deck2.Assets) != 1 {
 		t.Fatalf("re-adding same image duplicated assets: %d", len(deck2.Assets))
+	}
+}
+
+func TestAddDeckImageFromChatAttachment(t *testing.T) {
+	backend := newMultiDeckStore()
+	ctx := toolContext(t, backend)
+	if _, err := createDeck(ctx, CreateDeckArgs{Slug: "cover", Title: "Cover"}); err != nil {
+		t.Fatal(err)
+	}
+	png := []byte("\x89PNG\r\n\x1a\n" + strings.Repeat("x", 32))
+	ctx = store.WithChatFiles(ctx, []store.ChatFile{{
+		Filename: "apple-logo.png",
+		MimeType: "image/png",
+		Data:     png,
+	}})
+	res, err := addDeckImage(ctx, AddDeckImageArgs{DeckSlug: "cover"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(png)
+	wantRef := "sha256-" + hex.EncodeToString(sum[:])
+	if res.AssetRef != wantRef {
+		t.Fatalf("assetRef = %q, want %q", res.AssetRef, wantRef)
+	}
+	deck, err := backend.GetDeck(ctx, "cover")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(deck.Assets[wantRef], "data:image/png;base64,") {
+		t.Fatalf("attachment not stored on deck: %#v", deck.Assets)
+	}
+	named, err := addDeckImage(ctx, AddDeckImageArgs{DeckSlug: "cover", Attachment: "apple-logo.png"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if named.AssetRef != wantRef {
+		t.Fatalf("filename match = %q", named.AssetRef)
+	}
+}
+
+func TestAddDeckImageRequiresURLOrAttachment(t *testing.T) {
+	backend := newMultiDeckStore()
+	ctx := toolContext(t, backend)
+	if _, err := createDeck(ctx, CreateDeckArgs{Slug: "cover", Title: "Cover"}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := addDeckImage(ctx, AddDeckImageArgs{DeckSlug: "cover"})
+	if err == nil || !strings.Contains(err.Error(), "chat image attachment") {
+		t.Fatalf("expected attachment-or-url error, got %v", err)
 	}
 }
 
@@ -1849,7 +1901,7 @@ func TestFillSlidesUsesStampedTitleKind(t *testing.T) {
 func TestCreateDeckProductPaletteOverlaysTokens(t *testing.T) {
 	backend := newMultiDeckStore()
 	ctx := toolContext(t, backend)
-	created, err := createDeck(ctx, CreateDeckArgs{Slug: "deck", Title: "Deck", Template: "product", Palette: "orange"})
+	created, err := createDeck(ctx, CreateDeckArgs{Slug: "deck", Title: "Deck", Template: "modern", Palette: "orange", TitleImage: "none"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1868,12 +1920,12 @@ func TestCreateDeckProductPaletteOverlaysTokens(t *testing.T) {
 	}
 	var product *TemplateSummary
 	for i := range listed.Templates {
-		if listed.Templates[i].Name == "product" {
+		if listed.Templates[i].Name == "modern" {
 			product = &listed.Templates[i]
 			break
 		}
 	}
-	if product == nil || product.Label != "Product Deck" || len(product.Palettes) < 8 {
+	if product == nil || product.Label != "Modern" || len(product.Palettes) < 8 {
 		t.Fatalf("list_slide_templates product: %#v", product)
 	}
 }
@@ -1881,7 +1933,7 @@ func TestCreateDeckProductPaletteOverlaysTokens(t *testing.T) {
 func TestCreateDeckUnknownPalette(t *testing.T) {
 	backend := newMultiDeckStore()
 	ctx := toolContext(t, backend)
-	_, err := createDeck(ctx, CreateDeckArgs{Slug: "deck", Title: "Deck", Template: "product", Palette: "hot-pink"})
+	_, err := createDeck(ctx, CreateDeckArgs{Slug: "deck", Title: "Deck", Template: "modern", Palette: "hot-pink"})
 	if err == nil || !strings.Contains(err.Error(), "unknown palette") {
 		t.Fatalf("expected unknown palette error, got %v", err)
 	}
@@ -1933,7 +1985,7 @@ func TestFillSlidesOfficialTitleDoesNotRenderRecipe(t *testing.T) {
 func TestFillSlidesProductPaletteRecolorsRecipes(t *testing.T) {
 	backend := newMultiDeckStore()
 	ctx := toolContext(t, backend)
-	if _, err := createDeck(ctx, CreateDeckArgs{Slug: "deck", Title: "Deck", Template: "product", Palette: "orange"}); err != nil {
+	if _, err := createDeck(ctx, CreateDeckArgs{Slug: "deck", Title: "Deck", Template: "modern", Palette: "orange", TitleImage: "none"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := fillSlides(ctx, FillSlidesArgs{
@@ -1964,13 +2016,13 @@ func TestAskUserSlidesPalettePicker(t *testing.T) {
 	res, err := askUser(ctx, AskUserArgs{
 		Kind:                "select",
 		Prompt:              "Which color?",
-		SlidesTemplate:      "product",
+		SlidesTemplate:      "modern",
 		SlidesPalettePicker: true,
 	})
 	if err != nil {
 		t.Fatalf("askUser palette: %v", err)
 	}
-	prod, ok := themes.LookupTemplate("product")
+	prod, ok := themes.LookupTemplate("modern")
 	if !ok {
 		t.Fatal("missing product")
 	}
@@ -1992,7 +2044,7 @@ func TestAskUserSlidesPalettePicker(t *testing.T) {
 		if strings.TrimSpace(o.Thumbnail.Markup) == "" {
 			t.Fatalf("palette %q empty markup", o.Label)
 		}
-		if o.Thumbnail.Template != "product" {
+		if o.Thumbnail.Template != "modern" {
 			t.Fatalf("palette %q template = %q", o.Label, o.Thumbnail.Template)
 		}
 		acc := o.Thumbnail.Theme["accent"]
@@ -2316,5 +2368,199 @@ func TestAskUserImagePickerIncludesExampleSlidePhotos(t *testing.T) {
 	}
 	if nBB != 1 {
 		t.Fatalf("duplicate example photo listed %d times: %v", nBB, ids)
+	}
+	var sawUpload, sawDefault bool
+	for _, o := range res.Options {
+		if o.ID == "upload" {
+			sawUpload = true
+		}
+		if o.ID == "default" {
+			sawDefault = true
+		}
+	}
+	if !sawUpload || !sawDefault {
+		t.Fatalf("image picker must offer upload and none, got %v", ids)
+	}
+}
+
+func TestCreateDeckProductRequiresTitleImage(t *testing.T) {
+	backend := newMultiDeckStore()
+	ctx := toolContext(t, backend)
+	_, err := createDeck(ctx, CreateDeckArgs{Slug: "deck", Title: "Deck", Template: "modern"})
+	if err == nil || !strings.Contains(err.Error(), "titleImage is required") {
+		t.Fatalf("expected titleImage required for Modern, got %v", err)
+	}
+	created, err := createDeck(ctx, CreateDeckArgs{Slug: "deck", Title: "Deck", Template: "modern", TitleImage: "none"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Deck.Theme[themeKeyTitleImage] != "" {
+		t.Fatalf("none must not stamp a logo: %#v", created.Deck.Theme)
+	}
+}
+
+func TestCreateDeckIngestsTitleImageUpload(t *testing.T) {
+	backend := newMultiDeckStore()
+	ctx := toolContext(t, backend)
+	png := []byte("\x89PNG\r\n\x1a\n" + strings.Repeat("x", 32))
+	ctx = store.WithChatFiles(ctx, []store.ChatFile{{
+		Filename: "logo.png",
+		MimeType: "image/png",
+		Data:     png,
+	}})
+	created, err := createDeck(ctx, CreateDeckArgs{Slug: "deck", Title: "Deck", Template: "modern", TitleImage: "upload"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(png)
+	wantRef := "sha256-" + hex.EncodeToString(sum[:])
+	if created.Deck.Theme[themeKeyTitleImage] != wantRef {
+		t.Fatalf("stamped titleImage = %q, want %q", created.Deck.Theme[themeKeyTitleImage], wantRef)
+	}
+	deck, err := backend.GetDeck(ctx, created.Deck.Slug)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(deck.Assets[wantRef], "data:image/png;base64,") {
+		t.Fatalf("uploaded logo not stored on deck: %#v", deck.Assets)
+	}
+	if _, err := fillSlides(ctx, FillSlidesArgs{
+		DeckSlug: created.Deck.Slug,
+		Slides: []FillSlideSpec{{
+			Position: 0, Kind: RecipeCover,
+			Fills: map[string]string{
+				"eyebrow": "LEGACY", "headline": "Stay hungry", "dek": "A one-sentence thesis that fits the dek.",
+				"meta_1_label": "Ask", "meta_1_value": "Remember", "meta_2_label": "When", "meta_2_value": "2005",
+			},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readSlide(ctx, ReadSlideArgs{DeckSlug: created.Deck.Slug, Position: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := got.Slide.Content
+	if !strings.Contains(body, `id="ph-pic-1"`) || !strings.Contains(body, `asset-ref="`+wantRef+`"`) {
+		t.Fatalf("cover missing uploaded logo:\n%s", body)
+	}
+	if !strings.Contains(body, `fit="contain"`) {
+		t.Fatalf("logo should contain-fit:\n%s", body)
+	}
+	if strings.Contains(body, `id="rail-page-right"`) {
+		t.Fatalf("page counter should yield the top-right to the logo:\n%s", body)
+	}
+}
+
+func TestCreateDeckUsesChatAttachmentEvenWhenTitleImageNone(t *testing.T) {
+	backend := newMultiDeckStore()
+	ctx := toolContext(t, backend)
+	png := []byte("\x89PNG\r\n\x1a\n" + strings.Repeat("z", 32))
+	ctx = store.WithChatFiles(ctx, []store.ChatFile{{
+		Filename: "logo.png",
+		MimeType: "image/png",
+		Data:     png,
+	}})
+	created, err := createDeck(ctx, CreateDeckArgs{Slug: "deck", Title: "Deck", Template: "modern", TitleImage: "none"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(png)
+	wantRef := "sha256-" + hex.EncodeToString(sum[:])
+	if created.Deck.Theme[themeKeyTitleImage] != wantRef {
+		t.Fatalf("attached logo should win over titleImage=none, got %q", created.Deck.Theme[themeKeyTitleImage])
+	}
+	deck, err := backend.GetDeck(ctx, created.Deck.Slug)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(deck.Assets[wantRef], "data:image/png;base64,") {
+		t.Fatalf("logo not stored: %#v", deck.Assets)
+	}
+}
+
+func TestFillSlidesUsesChatAttachmentWhenTitleImageMissing(t *testing.T) {
+	backend := newMultiDeckStore()
+	ctx := toolContext(t, backend)
+	if _, err := createDeck(ctx, CreateDeckArgs{Slug: "deck", Title: "Deck", Template: "modern", TitleImage: "none"}); err != nil {
+		t.Fatal(err)
+	}
+	png := []byte("\x89PNG\r\n\x1a\n" + strings.Repeat("w", 32))
+	ctx = store.WithChatFiles(ctx, []store.ChatFile{{
+		Filename: "logo.png",
+		MimeType: "image/png",
+		Data:     png,
+	}})
+	if _, err := fillSlides(ctx, FillSlidesArgs{
+		DeckSlug: "deck",
+		Slides: []FillSlideSpec{{
+			Position: 0, Kind: RecipeCover,
+			Fills: map[string]string{
+				"eyebrow": "LEGACY", "headline": "Stay hungry", "dek": "A one-sentence thesis that fits the dek.",
+				"meta_1_label": "Ask", "meta_1_value": "Remember", "meta_2_label": "When", "meta_2_value": "2005",
+			},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readSlide(ctx, ReadSlideArgs{DeckSlug: "deck", Position: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(png)
+	wantRef := "sha256-" + hex.EncodeToString(sum[:])
+	if !strings.Contains(got.Slide.Content, `asset-ref="`+wantRef+`"`) {
+		t.Fatalf("cover missing attached logo:\n%s", got.Slide.Content)
+	}
+}
+
+func TestCreateDeckTitleImageUploadRequiresAttachment(t *testing.T) {
+	backend := newMultiDeckStore()
+	ctx := toolContext(t, backend)
+	_, err := createDeck(ctx, CreateDeckArgs{Slug: "deck", Title: "Deck", Template: "modern", TitleImage: "upload"})
+	if err == nil || !strings.Contains(err.Error(), "attach") {
+		t.Fatalf("expected attach error, got %v", err)
+	}
+}
+
+func TestFillSlidesImportedCoverUsesUploadedTitleImage(t *testing.T) {
+	backend := newMultiDeckStore()
+	ctx := toolContext(t, backend)
+	svc := Service{Store: backend}
+	markup := `<ast-slide id="title"><ast-shape id="bg" kind="rect" x="0" y="0" w="1920" h="1080" fill="#0057D2" decorative="true"></ast-shape>` +
+		`<ast-shape id="ph-pic-2" kind="rect" x="1234" y="0" w="686" h="1080" fill="#89D1FF" decorative="true"></ast-shape>` +
+		`<ast-text id="ph-1" x="45" y="426" w="800" h="157" size="54" color="#FFFFFF">{{TITLE}}</ast-text></ast-slide>`
+	if err := svc.SaveTemplate(ctx, themes.Template{
+		Name: "gco", Tokens: map[string]string{"surface": "#0057D2", "muted": "#89D1FF"},
+		Archetypes: []themes.Archetype{{
+			Kind: "title", Title: "Split cover", Tier: "fixed", Markup: markup,
+			FillSlots: []string{"ph-1", "ph-pic-2"}, SlotHints: []themes.SlotHint{{ID: "ph-pic-2", Role: "image"}},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	png := []byte("\x89PNG\r\n\x1a\n" + strings.Repeat("y", 32))
+	ctx = store.WithChatFiles(ctx, []store.ChatFile{{
+		Filename: "hero.png",
+		MimeType: "image/png",
+		Data:     png,
+	}})
+	if _, err := createDeck(ctx, CreateDeckArgs{Slug: "deck", Title: "Deck", Template: "gco", TitleKind: "title", TitleImage: "upload"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fillSlides(ctx, FillSlidesArgs{
+		DeckSlug: "deck",
+		Slides:   []FillSlideSpec{{Position: 0, Kind: "title", Fills: map[string]string{"ph-1": "Steve Jobs"}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readSlide(ctx, ReadSlideArgs{DeckSlug: "deck", Position: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(png)
+	wantRef := "sha256-" + hex.EncodeToString(sum[:])
+	if !strings.Contains(got.Slide.Content, `asset-ref="`+wantRef+`"`) {
+		t.Fatalf("uploaded cover photo missing:\n%s", got.Slide.Content)
 	}
 }

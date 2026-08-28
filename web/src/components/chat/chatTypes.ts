@@ -222,6 +222,8 @@ export interface DocsUpdateMessage {
   deckTitle?: string
   description?: string
   schemaVersion?: number
+  /** Client-assigned; increments on every live docs_update so the panel reloads. */
+  revision?: number
   validation?: {
     errors: number
     warnings: number

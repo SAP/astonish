@@ -46,6 +46,9 @@ describe('slides API (deck/present/export)', () => {
   it('builds an encoded template media URL', () => {
     expect(templateMediaUrl('gco', 'sha256-abc')).toBe('/api/docs/slides/templates/gco/media/sha256-abc')
     expect(templateMediaUrl('acme/brand', 'sha256-de/f')).toBe('/api/docs/slides/templates/acme%2Fbrand/media/sha256-de%2Ff')
+    expect(templateMediaUrl('modern', 'font:JetBrains Mono:400')).toBe(
+      '/api/docs/slides/templates/modern/media/font%3AJetBrains%20Mono%3A400',
+    )
   })
 
   it('exports a deck blob', async () => {

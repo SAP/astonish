@@ -2,7 +2,7 @@ import { createElement, useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 
 import { registerSlidesRuntime } from '@/components/docs/slides/runtime'
-import { listSlidesTemplates } from '@/api/slides'
+import { listSlidesTemplates, templateMediaUrl } from '@/api/slides'
 
 export interface SlidesArchetypeThumbProps {
   markup: string
@@ -52,6 +52,75 @@ async function loadTemplateAssets(template: string): Promise<Record<string, stri
   })()
   templateAssetsInflight.set(template, promise)
   return promise
+}
+
+type EmbeddedFontRef = { family: string; variant?: string; assetKey: string }
+
+function declaredFonts(theme?: Record<string, string>): EmbeddedFontRef[] {
+  const raw = theme?.['embedded-fonts']
+  if (!raw) return []
+  try {
+    const parsed = JSON.parse(raw) as EmbeddedFontRef[]
+    return Array.isArray(parsed) ? parsed.filter((r) => r?.family && r?.assetKey) : []
+  } catch {
+    return []
+  }
+}
+
+function fontWeight(variant?: string): string {
+  const v = (variant || '').trim()
+  if (v === 'bold' || v === 'boldItalic') return '700'
+  if (/^\d+$/.test(v)) return v
+  return '400'
+}
+
+function fontStyle(variant?: string): string {
+  const v = (variant || '').trim()
+  return v === 'italic' || v === 'boldItalic' ? 'italic' : 'normal'
+}
+
+function safeThumbFontFamily(family: string): boolean {
+  if (!family) return false
+  for (const ch of family) {
+    if (ch === '"' || ch === '\\' || ch === '<' || ch === '>' || ch.charCodeAt(0) < 0x20) return false
+  }
+  return true
+}
+
+/** Inject @font-face for faces the theme declared. One style tag per template. */
+function installDeclaredFonts(
+  theme?: Record<string, string>,
+  template?: string,
+  assets?: Record<string, string>,
+): void {
+  const refs = declaredFonts(theme)
+  if (refs.length === 0 || typeof document === 'undefined') return
+  const id = `astonish-slides-fonts-${template || 'deck'}`
+  if (document.getElementById(id)) return
+  const rules: string[] = []
+  for (const ref of refs) {
+    if (!safeThumbFontFamily(ref.family)) continue
+    const data = assets?.[ref.assetKey]
+    const src = data
+      ? `url(${data})`
+      : template
+        ? `url("${templateMediaUrl(template, ref.assetKey)}")`
+        : ''
+    if (!src) continue
+    const format = data?.startsWith('data:font/woff2')
+      ? ' format("woff2")'
+      : !data
+        ? ' format("woff2")'
+        : ''
+    rules.push(
+      `@font-face{font-family:"${ref.family}";src:${src}${format};font-weight:${fontWeight(ref.variant)};font-style:${fontStyle(ref.variant)};font-display:swap}`,
+    )
+  }
+  if (rules.length === 0) return
+  const style = document.createElement('style')
+  style.id = id
+  style.textContent = rules.join('')
+  document.head.append(style)
 }
 
 /**
@@ -156,7 +225,8 @@ export default function SlidesArchetypeThumb({
     } catch {
       // Ignore invalid token values.
     }
-  }, [theme])
+    installDeclaredFonts(theme, template, effectiveAssets)
+  }, [theme, template, effectiveAssets])
 
   // The wrapper is the deck's parent; AstDeck.scaleToParent() fits the 1920x1080
   // canvas to it (uniform min(w/1920, h/1080)). transform-origin is top-left in

@@ -208,7 +208,7 @@ func TestFindElementDoesNotMatchPrefixIDs(t *testing.T) {
 }
 
 func TestProductCatalogOmitsSkinMissingSlots(t *testing.T) {
-	tmpl, ok := themes.LookupTemplate("product")
+	tmpl, ok := themes.LookupTemplate("modern")
 	if !ok {
 		t.Fatal("missing product template")
 	}
@@ -260,10 +260,27 @@ func TestProductCatalogOmitsSkinMissingSlots(t *testing.T) {
 			t.Fatalf("product cover missing required %s: %#v", id, cover.FillSlots)
 		}
 	}
+	for _, id := range cover.FillSlots {
+		if id == "ph-pic-1" {
+			t.Fatalf("optional logo must not be a required fillSlot: %#v", cover.FillSlots)
+		}
+	}
+	foundLogo := false
+	for _, h := range cover.SlotHints {
+		if h.ID == "ph-pic-1" {
+			foundLogo = true
+			if !strings.EqualFold(h.Role, "optional") && !strings.EqualFold(h.Role, "image") {
+				t.Fatalf("logo slot role = %q", h.Role)
+			}
+		}
+	}
+	if !foundLogo {
+		t.Fatal("product cover should advertise optional ph-pic-1 logo in slotHints")
+	}
 }
 
 func TestProductCatalogOmitsGenericTitle(t *testing.T) {
-	tmpl, ok := themes.LookupTemplate("product")
+	tmpl, ok := themes.LookupTemplate("modern")
 	if !ok {
 		t.Fatal("missing product")
 	}

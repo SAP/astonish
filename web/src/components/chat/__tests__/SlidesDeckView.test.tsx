@@ -60,6 +60,7 @@ describe('SlidesDeckView refresh signal', () => {
 
     rerender(<SlidesDeckView deckSlug="d" refreshSignal={2} />)
     await waitFor(() => expect(slidesApi.fetchSlidesDeck).toHaveBeenCalledTimes(3))
+    expect(screen.getByTestId('slides-deck-frame').getAttribute('src')).toContain('t=2')
   })
 
   it('renders newly arrived slides after the deck grows from 0 to N', async () => {
@@ -94,6 +95,7 @@ describe('SlidesDeckView refresh signal', () => {
     await waitFor(() => expect(screen.getAllByTestId('slides-tile')).toHaveLength(3))
 
     const frame = screen.getByTestId('slides-deck-frame') as HTMLIFrameElement
+    expect(frame.getAttribute('src')).toContain('t=0')
     const srcBefore = frame.src
     const postMessage = vi.fn()
     Object.defineProperty(frame, 'contentWindow', { value: { postMessage }, configurable: true })
@@ -124,6 +126,19 @@ describe('SlidesDeckView refresh signal', () => {
     expect(screen.getAllByTestId('slides-tile')[0]).not.toHaveAttribute('aria-current')
   })
 
+  it('keeps the selected tile ring outside overflow clipping', async () => {
+    vi.mocked(slidesApi.fetchSlidesDeck).mockResolvedValue(deckWith(3))
+    render(<SlidesDeckView deckSlug="d" refreshSignal={0} />)
+    const tiles = await screen.findAllByTestId('slides-tile')
+    const selected = tiles[0]
+    expect(selected.className).not.toMatch(/\boverflow-hidden\b/)
+    expect(selected.className).toMatch(/ring-2/)
+    const strip = selected.parentElement
+    expect(strip?.className).toMatch(/pt-1\.5/)
+    expect(strip?.className).toMatch(/px-1/)
+    expect(selected.querySelector('.overflow-hidden')).not.toBeNull()
+  })
+
   it('renders live slide markup in strip tiles when content is present', async () => {
     vi.mocked(slidesApi.fetchSlidesDeck).mockResolvedValue({
       deck: { id: 'd', slug: 'd', title: 'Deck', schemaVersion: 2, theme: { surface: '#0057D2', 'template-name': 'gco' } },
@@ -140,6 +155,6 @@ describe('SlidesDeckView refresh signal', () => {
     await waitFor(() => expect(screen.getByTestId('slides-tile')).toBeInTheDocument())
     const tile = screen.getByTestId('slides-tile')
     expect(tile.querySelector('ast-deck')).not.toBeNull()
-    expect(tile.textContent).toContain('Cover title')
+    await waitFor(() => expect(tile.textContent).toContain('Cover title'))
   })
 })

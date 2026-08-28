@@ -55,7 +55,7 @@ func allRecipeMeta() []recipeMeta {
 		{
 			Kind:    RecipeCover,
 			Title:   "Cover lockup",
-			Summary: "Cover lockup — eyebrow, split display title, dek, 2–4 meta cells. Slide 0.",
+			Summary: "Cover lockup — eyebrow, split display title, dek, 2–4 meta cells. Modern: optional top-right logo (ph-pic-1). Slide 0.",
 			Slots: []themes.SlotHint{
 				{ID: "eyebrow", Role: "label", Hint: "2–5 word kicker (uppercase)"},
 				{ID: "headline", Role: "title", Hint: "Display title line 1"},
@@ -63,6 +63,7 @@ func allRecipeMeta() []recipeMeta {
 				{ID: "dek", Role: "body", Hint: "One-sentence thesis, 12–22 words"},
 				{ID: "dek_accent", Role: "optional", Hint: "Exact substring of dek to paint in accent"},
 				{ID: "prompt", Role: "optional", Hint: "Cover prompt (e.g. $ astonish chat) — product skin"},
+				{ID: "ph-pic-1", Role: "optional", Hint: "Optional top-right logo (modern). sha256 asset-ref, or omit"},
 				{ID: "meta_1_label", Role: "label", Hint: "Meta cell 1 label"},
 				{ID: "meta_1_value", Role: "body", Hint: "Meta cell 1 value"},
 				{ID: "meta_2_label", Role: "label", Hint: "Meta cell 2 label"},
@@ -809,7 +810,47 @@ func (b *recipeBuilder) paintProductRail() {
 	// prefix is chrome. The actual eyebrow text is a following slot.
 	b.staticText("rail-page-left", p.mx+20, 64, 80, 28, p.chromeSize, p.secondary, "600", p.mono, "", fmt.Sprintf("%02d", page)+"  ·")
 	b.slot("eyebrow", p.mx+108, 64, 900, 28, p.chromeSize, p.secondary, "600", p.mono, "")
+	if b.kind == RecipeCover && b.productCoverLogoRef() != "" {
+		return
+	}
 	b.staticText("rail-page-right", CanvasWidth-p.mx-160, 64, 160, 28, p.chromeSize, p.secondary, "", p.mono, "right", fmt.Sprintf("%02d / %02d", page, total))
+}
+
+// productCoverLogoRef is the optional top-right logo on the product/Modern
+// cover. Empty when the user declined or no image was provided — then no
+// well is painted.
+func (b *recipeBuilder) productCoverLogoRef() string {
+	if b.fills == nil {
+		return ""
+	}
+	ref := strings.TrimSpace(b.fills["ph-pic-1"])
+	if ref == "" || strings.EqualFold(ref, "none") || strings.EqualFold(ref, "default") {
+		return ""
+	}
+	return ref
+}
+
+// Modern cover logo well — top-right of the 1920×1080 canvas, aligned with
+// the product rail (y≈64) and the right margin. Sized for a wordmark or a
+// square mark (contain-fit). When present it occupies this slot instead of
+// the page counter. 630×180 is 1.5× the previous well so a typical mark reads.
+const (
+	productCoverLogoW = 630
+	productCoverLogoH = 180
+	productCoverLogoY = 40
+)
+
+func (b *recipeBuilder) paintProductCoverLogo() {
+	ref := b.productCoverLogoRef()
+	if ref == "" {
+		return
+	}
+	w, h := productCoverLogoW, productCoverLogoH
+	x := CanvasWidth - b.pal.mx - w
+	y := productCoverLogoY
+	b.parts = append(b.parts, fmt.Sprintf(
+		`<ast-image id="ph-pic-1" x="%d" y="%d" w="%d" h="%d" asset-ref="%s" fit="contain" alt="" decorative="true"></ast-image>`,
+		x, y, w, h, html.EscapeString(ref)))
 }
 
 // header writes eyebrow, optional date, accent rule, headline, optional headline_2.

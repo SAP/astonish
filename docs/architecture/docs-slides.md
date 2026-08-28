@@ -105,7 +105,7 @@ This is the default authoring path for every templated deck (built-in or importe
 
 The imported template is still required. It supplies identity (palette, type, and a logo only if the file actually contains one). Recipes never invent a logo or decorative disk to stand in for a missing mark. It does not supply the page grid the story is poured into.
 
-A template also owns a **skin** (`themes.Template.Skin`): `corporate` (the original recipe look — logo, legal, accent rule, light or token-tinted cards) or `product` (near-black canvas with an opaque radial accent wash, monospace rails, one accent, panels, terminals). Built-in `product` (label **Product Deck**) uses the product skin; `light-corporate`, `midnight`, `aurora`, and imported `.pptx` templates use corporate. Same recipe jobs, different furniture. Skins do not let the model pick free x/y. Product Deck ships **palettes** (named `surface`/`ink`/`accent`/`muted` overlays on the same skin) — one template, many colorways, not extra rows in the Templates library. Imported brand templates typically have no palettes; GCO’s blue vs pink covers are title-layout variants, not palettes. Product backgrounds are a real ASD gradient (`<script type="application/json" id="bg-gradient">`), not a solid `#0B0D0F` and not a fake logo circle. PPTX has no native pptxgenjs gradient, so the exporter embeds that SVG as a vector image instead of flattening to the first stop.
+A template also owns a **skin** (`themes.Template.Skin`): `corporate` (the original recipe look — logo, legal, accent rule, light or token-tinted cards) or `product` (near-black canvas with an opaque radial accent wash, monospace rails, one accent, panels, terminals). Built-in `modern` uses the product skin; `light-corporate`, `midnight`, `aurora`, and imported `.pptx` templates use corporate. Same recipe jobs, different furniture. Skins do not let the model pick free x/y. Modern ships **palettes** (named `surface`/`ink`/`accent`/`muted` overlays on the same skin) — one template, many colorways, not extra rows in the Templates library. Imported brand templates typically have no palettes; GCO’s blue vs pink covers are title-layout variants, not palettes. Product backgrounds are a real ASD gradient (`<script type="application/json" id="bg-gradient">`), not a solid `#0B0D0F` and not a fake logo circle. PPTX has no native pptxgenjs gradient, so the exporter embeds that SVG as a vector image instead of flattening to the first stop.
 
 Code: `pkg/docs/slides/recipe.go` (catalog, palette, chrome, named slots) and `pkg/docs/slides/recipe_layouts.go` (ten layout geometries). Tests in `recipe_test.go`. The slides skill (`pkg/skills/builtin_content_slides.go`) is the agent contract.
 
@@ -171,7 +171,7 @@ Recipe `FillSlots` are stable English ids (`eyebrow`, `item_2_body`). `create_de
 
 `SlotHint.Role` of `optional` means the slot is listed in the catalog but is **not** required by `missingTextSlotFills`. At fill time, empty optional slots are omitted from the markup (the 4th stat tile disappears; `headline_2` does not leave a blank display line). Required slots still reject empty fills.
 
-`fillArchetypeMarkup` skips empty values **and** fill keys that are not present in the markup, so an extra `meta_4_label` on product cover is a no-op rather than `fill slot not found`. Image slots remain `ph-pic-*` / asset-ref on **imported** archetypes only; recipes do not invent photo holes.
+`fillArchetypeMarkup` skips empty values **and** fill keys that are not present in the markup, so an extra `meta_4_label` on product cover is a no-op rather than `fill slot not found`. Image slots remain `ph-pic-*` / asset-ref on **imported** archetypes, plus an optional top-right `ph-pic-1` logo on the Modern (`modern`) recipe cover — omitted entirely when `titleImage` is `none` or missing. Recipes do not invent other photo holes.
 
 `WriteSlide` validation errors (off-canvas geometry, duplicate ids, …) are included in the `fill_slides` / `fill_slide` error string. Decorative product glows are clamped to the 1920×1080 canvas.
 
@@ -237,8 +237,8 @@ No re-import is required for recipes to work. Importer changes still require re-
 The skill instructs the model to:
 
 1. Run **iterative intake** (one `ask_user` per turn): audience, length, then who picks the template. Do **not** ask to generate images. The first tool after `skill_lookup("slides")` is `ask_user`, not `create_deck`. Skip a question only when that fact is already explicit (named audience, count, template, or "you pick" / "don't ask, just make it"). A research constraint ("only with information you already have", "don't search") is **not** a skip. If they want to choose the template, `slidesTemplatePicker`. If they delegate, pick and say why in one line. Inferring tone is not permission to choose. Title variant (when 2+) happens **before** `create_deck`; `titleKind` is the `ask_user` option id (the catalog kind).
-2. After the template is known: title variant if `count(title*) > 1` (layout chrome; sample photos stripped); if that title has a `ph-pic-*` well, yes/no then `slidesImagePicker` for one template photo (`titleImage`); palette if the template has `palettes` (Product Deck); closing variant if `count(closing*) > 1`.
-3. `create_deck` with `template` (+ `palette` / `titleKind` / `titleImage` / `closingKind`). **`titleKind` is required when the template has 2+ title* covers; `titleImage` (`sha256-…` or `none`) is required when that cover has a `ph-pic` well** — omitting them is an error, not a skip. Catalog is `recipe-*` plus official title/closing only.
+2. After the template is known: title variant if `count(title*) > 1` (layout chrome; sample photos stripped); if that title has a `ph-pic-*` well, `slidesImagePicker` lists template photos plus provide-own (`upload`) and none (`titleImage`); if the template is `modern`, yes/no for an optional top-right logo (no template photos); palette if the template has `palettes` (Modern); closing variant if `count(closing*) > 1`.
+3. `create_deck` with `template` (+ `palette` / `titleKind` / `titleImage` / `closingKind`). **`titleKind` is required when the template has 2+ title* covers; `titleImage` (`sha256-…`, `upload`, a public URL, or `none`) is required when that cover has a `ph-pic` well or the template is Modern** — omitting them is an error, not a skip. Catalog is `recipe-*` plus official title/closing only.
 4. Plan the story as jobs in one `fill_slides` call. Slide 0 is the official title family when listed, else `recipe-cover`. Last slide is official closing when listed, else `recipe-closer`. Body is `recipe-*`. Prefer 8–16 dense slides (honor the length they picked). At least three different `recipe-*` kinds on a deck longer than six slides.
 5. Titles are takeaways (complete sentence or two-line split headline), not topic labels. Official covers use that variant’s `fillSlots` (`ph-*` / `{{TITLE}}`), not recipe ids.
 6. Density: headline + 2–4 content blocks. Cards/items are a complete thought (~12–22 words). Body columns are short paragraphs (~40–70 words). 6×6 is a **bullet cap**, not permission to leave the canvas blank.
@@ -860,7 +860,7 @@ same person/bike on every title tile). At authoring time the title picker
 strips sample photos so the user sees layout chrome; they may pick **one**
 photo from the template's example slides via `slidesImagePicker` (every large
 raster on `templateModel.slides[]`, not only the one photo left on the title
-layout). The layout's own decorative shape (e.g. the dark-green anvil) stays
+layout), or provide their own (`upload` / chat attachment / public URL). The layout's own decorative shape (e.g. the dark-green anvil) stays
 **behind** the borrowed
 image because `layoutToAsd` emits `bg → objects → placeholders` and paint
 order == document order (see the renderer contract below); no z-index is
@@ -1025,15 +1025,14 @@ leaking the heavy `data:` bytes into the model context or the wire:
 - **`list_deck_assets`** loads the full manifest and returns the same catalog, so
   the AI can enumerate an existing deck's images and pick an `asset-ref` to place
   in an `ast-image` (fill a drop-slot) or to swap one image for another catalog id.
-- **`add_deck_image`** fetches a **public https image URL** through the
-  SSRF-protected `AssetIngestor.Fetch` (MIME/SVG validation, redirect re-check,
-  20 MB cap — no private-network fetches, no `data:` smuggling), stores it under
-  `ref = "sha256-" + asset.ID` (matching the importer's key convention so
-  `resolveImageSrc` lookups are uniform), persists it via `Service.AddDeckAsset`
-  (clone the `Assets` map → set `ref` → `UpdateDeck`; idempotent for the same URL),
-  and returns the `assetRef` for the AI to drop into an `ast-image`. This is the
-  supported path for "add this image to the deck" — there is no Studio upload UI;
-  the AI does it via the tool.
+- **`add_deck_image`** ingests an image onto the session deck and returns an
+  `assetRef` (`sha256-<hex>`) for `fill_slide` / `ast-image`. Sources: (1) a
+  **public https URL** through SSRF-protected `AssetIngestor.Fetch`; (2) a
+  **chat attachment** on this turn (`store.ChatFilesFromContext`) when `url` is
+  omitted — Studio already uploaded the bytes with the user message. Both paths
+  run MIME/SVG validation and the 20 MB cap, persist via `Service.AddDeckAsset`,
+  and must not echo `data:` bytes in the tool result. When the user attached a
+  file, the model must not ask them to rehost it.
 
 The asset-ref → `resolveImageSrc` contract (data: only) and the `sha256-<hex>`
 key convention are unchanged; both new tools are additive (no protocol bump).
@@ -1103,6 +1102,30 @@ Generic across templates: a `.pptx` with no embedded fonts is a no-op (no
 `embedded-fonts` key, no `@font-face`), and the existing web-safe fallback chain
 remains the correct degraded behavior.
 
+### Deck-declared fonts (built-in templates)
+
+Loading is driven **only** by `theme["embedded-fonts"]`, not by sniffing
+`displayFont` / `bodyFont` (Manrope is not special-cased). A template that needs
+webfonts lists `{family, variant, assetKey}` there; present/export then:
+
+1. Read the deck’s declaration. If it is empty, copy `embedded-fonts` from the
+   built-in named by `template-name` (older session decks stamped type tokens
+   but not the manifest).
+2. For each declared face, if `Assets[assetKey]` is empty, fill from the
+   bundled latin library (`pkg/docs/slides/webfonts/*.woff2`) when that
+   family+weight exists. Imported `font:` bytes always win.
+3. `writeFontFaces` emits `@font-face` only for declared faces that have a
+   `data:font/` asset. No declaration → no extra faces.
+
+Built-in `modern` declares Manrope 400–800 and JetBrains Mono 400/600.
+`aurora` / `midnight` / `light-corporate` declare nothing and load nothing extra.
+A future template that needs another family adds it to `embedded-fonts` (and a
+bundled file if we ship it); the loader does not change. Studio `index.html`
+Google Fonts are app chrome (Fraunces/Geist/Inter), not slides.
+
+Template-picker thumbs inject `@font-face` from the same declaration, sourcing
+files at `GET /api/docs/slides/templates/{name}/media/{fontKey}`.
+
 **Store-level field projection.** The slim DTO above trims the *wire* payload, but
 `personalDocsStore.ListDecks`/`teamDocsStore.ListDecks` still ran
 `Deck.Query()…All()`, which SELECTs *every* column — including `template_model`
@@ -1171,7 +1194,7 @@ rendering currently goes through IR → ASD.
 | `read_slide` | One slide's markup | `deck_slug`, `position` |
 | `ask_user` | Visual template / title / palette / closing / cover-photo picker | `slidesTemplatePicker`, `slidesTemplate`+`slidesKind`, `slidesPalettePicker`, or `slidesImagePicker` |
 | `validate_deck` / `review_deck` | Structural then semantic/visual review | `slug` |
-| `list_deck_assets` / `add_deck_image` | Image catalog / SSRF-safe ingest | `deck_slug`, `url?` |
+| `list_deck_assets` / `add_deck_image` | Image catalog / ingest | `deck_slug`, `url?` or chat `attachment` |
 
 `fill_slides` is the default authoring API for templated decks (one tool call for the whole deck). `fill_slide` is the later single-slide edit. See *Layout-type recipe engine* for the compose-then-fill path.
 
@@ -1494,7 +1517,7 @@ consumed on the general chat path). Arguments:
   archetype), tagged with the template name so the frontend resolves asset-refs at
   render time. Never embeds `data:` bytes.
 - `slidesPalettePicker` (optional slides convenience, `select`): set `true` with
-  `slidesTemplate` when that template defines `Palettes` (Product Deck). ask_user
+  `slidesTemplate` when that template defines `Palettes` (Modern / `modern`). ask_user
   lists each colorway with a live `recipe-cover` thumbnail recolored to that
   palette's tokens, plus a "Use the default" option. Imported brand templates
   typically have no palettes — the tool errors rather than inventing colorways.
@@ -1639,10 +1662,12 @@ template is known:
 - title variant (`slidesKind=title`) when `count(title*) > 1` (GCO-style). Tiles
   show **layout chrome** (anvil, colors, empty wells) — not the same sample
   person/bike on every option;
-- cover photo: if the chosen title has a `ph-pic-*` well, yes/no then
-  `slidesImagePicker` listing unique rasters from the example title slides.
-  At most one photo; a second image later is `add_deck_image`;
-- palette (`slidesPalettePicker`) when the template has palettes (Product Deck);
+- cover image: if the chosen title has a `ph-pic-*` well, `slidesImagePicker`
+  listing unique rasters from the example title slides plus **I'll provide my
+  own** (`upload`, chat attachment or public URL as `titleImage`) and none.
+  At most one photo; a second image later is `add_deck_image`. Modern has no
+  template photos: yes/no for an optional top-right logo, then `upload` or `none`;
+- palette (`slidesPalettePicker`) when the template has palettes (Modern);
 - closing variant when `count(closing*) > 1`.
 
 `create_deck` then seeds theme (including the chosen palette tokens and optional

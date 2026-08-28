@@ -346,7 +346,7 @@ const thumbnailPNGPrefix = "data:image/png;base64,"
 func resolveSlidesTemplateFromRequest(r *http.Request, name string) (themes.Template, bool) {
 	tmpl, found := themes.LookupTemplate(name)
 	if found {
-		return tmpl, true
+		return slides.HydrateTemplateFonts(tmpl), true
 	}
 	svc, err := docsService(r)
 	if err != nil {
@@ -414,19 +414,15 @@ func GetSlidesTemplateThumbnailHandler(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(png)
 }
 
-// GetSlidesTemplateMediaHandler serves one template image asset by ref
-// (sha256-…) so the cover-photo picker can show example title photos without
-// embedding data: bytes in chat. Fonts and missing refs 404.
+// GetSlidesTemplateMediaHandler serves one template asset by ref (sha256-…
+// images or font:… faces) so pickers and thumbs can load media without
+// embedding data: bytes in chat. Missing refs 404.
 func GetSlidesTemplateMediaHandler(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	name := strings.TrimSpace(vars["name"])
 	ref := strings.TrimSpace(vars["ref"])
 	if name == "" || ref == "" {
 		http.Error(w, "template name and ref are required", http.StatusBadRequest)
-		return
-	}
-	if strings.HasPrefix(ref, "font:") {
-		http.Error(w, "asset not found", http.StatusNotFound)
 		return
 	}
 	tmpl, found := resolveSlidesTemplateFromRequest(r, name)
@@ -439,7 +435,7 @@ func GetSlidesTemplateMediaHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "asset not found", http.StatusNotFound)
 		return
 	}
-	ctype, body, ok := decodeImageDataURI(asset)
+	ctype, body, ok := decodeTemplateMediaURI(asset)
 	if !ok {
 		http.Error(w, "asset not found", http.StatusNotFound)
 		return
@@ -451,7 +447,7 @@ func GetSlidesTemplateMediaHandler(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(body)
 }
 
-func decodeImageDataURI(s string) (contentType string, body []byte, ok bool) {
+func decodeTemplateMediaURI(s string) (contentType string, body []byte, ok bool) {
 	s = strings.TrimSpace(s)
 	if !strings.HasPrefix(s, "data:") {
 		return "", nil, false
@@ -463,7 +459,10 @@ func decodeImageDataURI(s string) (contentType string, body []byte, ok bool) {
 		return "", nil, false
 	}
 	mime := rest[:i]
-	if !strings.HasPrefix(mime, "image/") || mime == "image/svg+xml" {
+	if mime == "image/svg+xml" {
+		return "", nil, false
+	}
+	if !strings.HasPrefix(mime, "image/") && !strings.HasPrefix(mime, "font/") {
 		return "", nil, false
 	}
 	raw, err := base64.StdEncoding.DecodeString(rest[i+len(marker):])

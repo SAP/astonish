@@ -148,6 +148,9 @@ export class AstText extends PositionedElement {
     this.style.whiteSpace = 'pre-wrap'
     this.style.overflowWrap = 'break-word'
     this.style.fontVariantLigatures = 'none'
+    // Clip horizontally (long tokens) but never shave glyph descenders.
+    this.style.overflowX = 'clip'
+    this.style.overflowY = 'visible'
     if (this.anchor === 'ctr') {
       this.style.display = 'flex'
       this.style.flexDirection = 'column'

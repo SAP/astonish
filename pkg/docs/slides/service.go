@@ -456,7 +456,7 @@ func (s Service) resolveTemplate(ctx context.Context, name string) (themes.Templ
 		return themes.Template{}, false
 	}
 	if t, ok := themes.LookupTemplate(name); ok {
-		return t, true
+		return HydrateTemplateFonts(t), true
 	}
 	t, ok, err := s.scopedTemplate(ctx, name)
 	if err != nil || !ok {

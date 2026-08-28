@@ -49,6 +49,42 @@ func (s *apiSkillStore) GetFile(context.Context, string, string, string) (*store
 func (s *apiSkillStore) SaveFile(context.Context, string, *store.SkillFile) error { return nil }
 func (s *apiSkillStore) DeleteFile(context.Context, string, string, string) error { return nil }
 
+func TestStudioUserContentImageOnlyIsUserTurn(t *testing.T) {
+	png := "iVBORw0KGgo=" // tiny base64 payload; decode need not be a valid PNG
+	got := studioUserContent("", []ChatAttachment{{
+		Filename: "logo.png",
+		MimeType: "image/png",
+		Data:     png,
+	}})
+	if got == nil {
+		t.Fatal("image-only send must still produce a user message (Bedrock prefill)")
+	}
+	if got.Role != genai.RoleUser {
+		t.Fatalf("role = %q, want user", got.Role)
+	}
+	hasImage, hasText := false, false
+	for _, p := range got.Parts {
+		if p.InlineData != nil {
+			hasImage = true
+		}
+		if strings.TrimSpace(p.Text) != "" {
+			hasText = true
+		}
+	}
+	if !hasImage || !hasText {
+		t.Fatalf("want text + image parts, image=%v text=%v parts=%d", hasImage, hasText, len(got.Parts))
+	}
+}
+
+func TestStudioUserContentEmptyIsNil(t *testing.T) {
+	if studioUserContent("", nil) != nil {
+		t.Fatal("empty request should not invent a user turn")
+	}
+	if studioUserContent("   ", nil) != nil {
+		t.Fatal("whitespace-only request should not invent a user turn")
+	}
+}
+
 func TestChatManagerEnsureReadyTimingLogs(t *testing.T) {
 	tests := []struct {
 		name     string

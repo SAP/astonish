@@ -161,6 +161,9 @@ func TestExportHTML_TextWhitespacePreWrap(t *testing.T) {
 	if !strings.Contains(doc, "ast-text{white-space:pre-wrap") {
 		t.Fatal("ast-text CSS rule not applied to the ast-text element")
 	}
+	if !strings.Contains(doc, "overflow-x:clip") || !strings.Contains(doc, "overflow-y:visible") {
+		t.Fatal("ast-text must not clip glyph descenders with overflow:hidden")
+	}
 	// The separator run's newline must be present in the emitted markup.
 	if !strings.Contains(doc, "\n\n") {
 		t.Fatal("run newline was not preserved in exported HTML")
@@ -362,6 +365,73 @@ func TestWriteThemeCSSSkipsTemplateName(t *testing.T) {
 	}
 	if !strings.Contains(css, "--ast-surface:#FFFFFF") {
 		t.Fatalf("surface token missing: %s", css)
+	}
+}
+
+func TestExportLoadsOnlyDeclaredDeckFonts(t *testing.T) {
+	scene := SceneGraph{
+		SchemaVersion: SchemaV1,
+		Title:         "Modern",
+		Theme: map[string]string{
+			"displayFont":         "Manrope",
+			embeddedFontsThemeKey: `[{"family":"Manrope","variant":"400","assetKey":"font:Manrope:400"}]`,
+		},
+		Slides: []Slide{{ID: "s1", Nodes: []Node{{ID: "t", Type: "text", Geometry: Geometry{W: 100, H: 40}, Text: "Hi"}}}},
+	}
+	doc := mustExport(t, HTMLExporter{RuntimeJS: []byte(`window.runtimeReady=true`)}, scene)
+	if !strings.Contains(doc, `@font-face{font-family:"Manrope"`) || !strings.Contains(doc, `data:font/woff2;base64,`) {
+		t.Fatalf("declared Manrope face missing:\n%s", doc[:min(600, len(doc))])
+	}
+	if strings.Contains(doc, `font-family:"JetBrains Mono"`) {
+		t.Fatal("undeclared JetBrains Mono must not be loaded")
+	}
+}
+
+func TestExportIgnoresDisplayFontWithoutDeclaration(t *testing.T) {
+	scene := SceneGraph{
+		SchemaVersion: SchemaV1,
+		Title:         "Named but undeclared",
+		Theme:         map[string]string{"displayFont": "Manrope", "monoFont": "JetBrains Mono"},
+		Slides:        []Slide{{ID: "s1", Nodes: []Node{{ID: "t", Type: "text", Geometry: Geometry{W: 100, H: 40}, Text: "Hi"}}}},
+	}
+	doc := mustExport(t, HTMLExporter{RuntimeJS: []byte(`window.runtimeReady=true`)}, scene)
+	if strings.Contains(doc, "@font-face") {
+		t.Fatal("naming a family without embedded-fonts must not load faces")
+	}
+}
+
+func TestExportInheritsDeclaredFontsFromTemplate(t *testing.T) {
+	scene := SceneGraph{
+		SchemaVersion: SchemaV1,
+		Title:         "Older modern deck",
+		Theme: map[string]string{
+			themeKeyTemplateName: "modern",
+			"displayFont":        "Manrope",
+		},
+		Slides: []Slide{{ID: "s1", Nodes: []Node{{ID: "t", Type: "text", Geometry: Geometry{W: 100, H: 40}, Text: "Hi"}}}},
+	}
+	doc := mustExport(t, HTMLExporter{RuntimeJS: []byte(`window.runtimeReady=true`)}, scene)
+	if !strings.Contains(doc, `@font-face{font-family:"Manrope"`) {
+		t.Fatal("inheriting modern's declaration should load Manrope")
+	}
+	if !strings.Contains(doc, `@font-face{font-family:"JetBrains Mono"`) {
+		t.Fatal("inheriting modern's declaration should load JetBrains Mono")
+	}
+}
+
+func TestExportDoesNotLoadFontsFromUndeclaringTemplate(t *testing.T) {
+	scene := SceneGraph{
+		SchemaVersion: SchemaV1,
+		Title:         "Aurora",
+		Theme: map[string]string{
+			themeKeyTemplateName: "aurora",
+			"displayFont":        "Manrope",
+		},
+		Slides: []Slide{{ID: "s1", Nodes: []Node{{ID: "t", Type: "text", Geometry: Geometry{W: 100, H: 40}, Text: "Hi"}}}},
+	}
+	doc := mustExport(t, HTMLExporter{RuntimeJS: []byte(`window.runtimeReady=true`)}, scene)
+	if strings.Contains(doc, "@font-face") {
+		t.Fatal("aurora declares no fonts; naming Manrope must not load faces")
 	}
 }
 

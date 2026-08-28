@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -272,6 +273,39 @@ func toAgentAttachments(apiAtts []ChatAttachment) []agent.Attachment {
 			MimeType: a.MimeType,
 			Data:     a.Data,
 		}
+	}
+	return out
+}
+
+// studioUserContent builds the ADK user turn for a Studio chat request.
+// Attachments alone (empty caption) still produce a user message so the
+// conversation does not end on an assistant turn.
+func studioUserContent(msg string, atts []ChatAttachment) *genai.Content {
+	msg = strings.TrimSpace(msg)
+	if len(atts) > 0 {
+		return agent.NewTimestampedUserContentWithAttachments(msg, toAgentAttachments(atts))
+	}
+	if msg == "" {
+		return nil
+	}
+	return agent.NewTimestampedUserContent(msg)
+}
+
+func chatFilesFromAttachments(apiAtts []ChatAttachment) []store.ChatFile {
+	if len(apiAtts) == 0 {
+		return nil
+	}
+	out := make([]store.ChatFile, 0, len(apiAtts))
+	for _, a := range apiAtts {
+		raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(a.Data))
+		if err != nil || len(raw) == 0 {
+			continue
+		}
+		out = append(out, store.ChatFile{
+			Filename: strings.TrimSpace(a.Filename),
+			MimeType: strings.TrimSpace(a.MimeType),
+			Data:     raw,
+		})
 	}
 	return out
 }
@@ -982,15 +1016,10 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 		isNew = true
 	}
 
-	// Prepare user message
-	var userMsg *genai.Content
-	if msg != "" {
-		if len(req.Attachments) > 0 {
-			userMsg = agent.NewTimestampedUserContentWithAttachments(msg, toAgentAttachments(req.Attachments))
-		} else {
-			userMsg = agent.NewTimestampedUserContent(msg)
-		}
-	}
+	// Prepare user message. Image-only sends (paste, no caption) must still
+	// be a user turn — Bedrock rejects a request whose last message is
+	// assistant ("does not support assistant message prefill").
+	userMsg := studioUserContent(msg, req.Attachments)
 
 	// Seed ActiveApp from system context when opening a saved app for refinement.
 	// This avoids making the LLM re-emit the component on the first turn.
@@ -1019,6 +1048,9 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 	// Launch background runner — the agent runs independently of this HTTP request.
 	runner := newChatRunner(sessionID, userID, isNew)
 	runner.titleWaitTimeout = 30 * time.Second // wait for title refine before closing SSE
+	if files := chatFilesFromAttachments(req.Attachments); len(files) > 0 {
+		runner.InjectChatFiles(files)
+	}
 
 	// Inject tenant-scoped credential store into the runner context so that
 	// credential tools (list_credentials, resolve_credential, etc.) can access

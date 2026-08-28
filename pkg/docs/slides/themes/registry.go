@@ -83,7 +83,7 @@ type Template struct {
 	// Empty means corporate.
 	Skin string `json:"skin,omitempty"`
 	// Palettes are named token overlays (surface/ink/accent/muted) for the
-	// same template. Built-in product ships several colorways; imported brand
+	// same template. Built-in modern ships several colorways; imported brand
 	// templates typically have none — their color is the brand.
 	Palettes []Palette `json:"palettes,omitempty"`
 }
@@ -180,11 +180,11 @@ var builtinTemplates = map[string]Template{
 		Tokens:      map[string]string{"surface": "#0F172A", "ink": "#F8FAFC", "accent": "#0EA5E9"},
 		Archetypes:  archetypesFor("#0F172A", "#F8FAFC", "#0EA5E9", auroraTitle),
 	},
-	"product": {
+	"modern": {
 		Schema: 2,
-		Name:   "product",
-		Label:  "Product Deck",
-		Description: "Product deck: one accent, monospace chrome, terminal furniture, and colorways " +
+		Name:   "modern",
+		Label:  "Modern",
+		Description: "Modern product language: one accent, monospace chrome, terminal furniture, and colorways " +
 			"(dark and light). Same recipe jobs as other templates, different visual language.",
 		Skin: "product",
 		Tokens: map[string]string{
@@ -195,11 +195,19 @@ var builtinTemplates = map[string]Template{
 			"displayFont": "Manrope",
 			"bodyFont":    "Manrope",
 			"monoFont":    "JetBrains Mono",
+			// Declares which faces this template needs. Present/export load
+			// exactly this list (files are filled from the bundled library).
+			"embedded-fonts": modernEmbeddedFontsJSON,
 		},
 		Archetypes: archetypesFor("#0B0D0F", "#ECEDEE", "#8B5CF6", ""),
 		Palettes:   productPalettes(),
 	},
 }
+
+// modernEmbeddedFontsJSON is the Modern template's font declaration: family,
+// CSS weight, and the Assets key present/export will resolve. Other templates
+// omit this key and no extra faces are loaded.
+const modernEmbeddedFontsJSON = `[{"family":"Manrope","variant":"400","assetKey":"font:Manrope:400"},{"family":"Manrope","variant":"500","assetKey":"font:Manrope:500"},{"family":"Manrope","variant":"600","assetKey":"font:Manrope:600"},{"family":"Manrope","variant":"700","assetKey":"font:Manrope:700"},{"family":"Manrope","variant":"800","assetKey":"font:Manrope:800"},{"family":"JetBrains Mono","variant":"400","assetKey":"font:JetBrains Mono:400"},{"family":"JetBrains Mono","variant":"600","assetKey":"font:JetBrains Mono:600"}]`
 
 func productPalettes() []Palette {
 	dark := func(id, label, accent string) Palette {

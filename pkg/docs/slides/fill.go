@@ -175,10 +175,13 @@ func normalizeCoverPhotoRef(ref string) string {
 // applyCoverPhotoFill puts the user-chosen template photo into the cover's
 // single image well when the model omitted ph-pic fills.
 func applyCoverPhotoFill(arch themes.Archetype, fills map[string]string, titleImage string) map[string]string {
-	if stripVariantSuffix(arch.Kind) != "title" {
+	if stripVariantSuffix(arch.Kind) != "title" && arch.Kind != RecipeCover {
 		return fills
 	}
 	slot := firstImageSlotID(arch)
+	if slot == "" && arch.Kind == RecipeCover {
+		slot = "ph-pic-1"
+	}
 	if slot == "" {
 		return fills
 	}
@@ -195,6 +198,15 @@ func applyCoverPhotoFill(arch themes.Archetype, fills map[string]string, titleIm
 	}
 	out[slot] = ref
 	return out
+}
+
+// withRecipeCoverImageFill injects the stamped cover logo/photo into recipe
+// fills before RenderRecipe, so an optional ph-pic-1 well is actually emitted.
+func withRecipeCoverImageFill(kind string, fills map[string]string, titleImage string) map[string]string {
+	if kind != RecipeCover {
+		return fills
+	}
+	return applyCoverPhotoFill(themes.Archetype{Kind: RecipeCover}, fills, titleImage)
 }
 
 func injectAfterBackground(markup, well string) string {
@@ -500,6 +512,14 @@ func recipeArchetypeFor(tmpl themes.Template, kind string, chrome Chrome, fills 
 		return themes.Archetype{}, err
 	}
 	hints := recipeSlotsInMarkup(m.Slots, markup)
+	if m.Kind == RecipeCover && SkinFor(tmpl).ID == SkinProduct {
+		for _, s := range m.Slots {
+			if s.ID == "ph-pic-1" {
+				hints = ensureSlotHint(hints, s)
+				break
+			}
+		}
+	}
 	return themes.Archetype{
 		Kind:      m.Kind,
 		Title:     m.Title,
@@ -508,6 +528,15 @@ func recipeArchetypeFor(tmpl themes.Template, kind string, chrome Chrome, fills 
 		FillSlots: requiredFillSlots(hints),
 		SlotHints: hints,
 	}, nil
+}
+
+func ensureSlotHint(hints []themes.SlotHint, extra themes.SlotHint) []themes.SlotHint {
+	for _, h := range hints {
+		if h.ID == extra.ID {
+			return hints
+		}
+	}
+	return append(hints, extra)
 }
 
 // recipeSlotsInMarkup keeps slot hints that the rendered markup actually has,
@@ -586,11 +615,18 @@ func replaceSlot(markup, id, value string) (string, error) {
 		return markup[:start] + open + inner + markup[innerEnd:], nil
 	}
 	if (tag == "ast-image" || tag == "ast-shape") && (strings.HasPrefix(id, "ph-pic-") || looksLikeAssetRef(value)) {
-		if !looksLikeAssetRef(value) {
+		if !looksLikeAssetRef(value) && !strings.HasPrefix(value, "sha256-") {
 			return "", fmt.Errorf("image slot %q requires an asset-ref (sha256-…), got %q", id, value)
 		}
 		geo := geometryAttrs(attrs)
-		repl := `<ast-image id="` + html.EscapeString(id) + `" ` + geo + ` asset-ref="` + html.EscapeString(value) + `" fit="cover"></ast-image>`
+		fit := attrValue(attrs, "fit")
+		if fit == "" {
+			fit = "cover"
+			if attrIntFrom(attrs, "w")*attrIntFrom(attrs, "h") < heroPhotoMinArea {
+				fit = "contain"
+			}
+		}
+		repl := `<ast-image id="` + html.EscapeString(id) + `" ` + geo + ` asset-ref="` + html.EscapeString(value) + `" fit="` + html.EscapeString(fit) + `"></ast-image>`
 		return markup[:start] + repl + markup[closeEnd:], nil
 	}
 	return "", fmt.Errorf("slot %q is a <%s>; pass text for ast-text slots or an asset-ref for image slots", id, tag)

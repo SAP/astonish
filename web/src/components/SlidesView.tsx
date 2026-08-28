@@ -24,7 +24,13 @@ interface SlidesViewProps {
   onCreateSlide?: (message: string) => void
 }
 
-function EmptyState({ onCreateSlide }: { onCreateSlide?: (message: string) => void }) {
+function EmptyState({
+  onCreateSlide,
+  onNavigate,
+}: {
+  onCreateSlide?: (message: string) => void
+  onNavigate?: (path: string) => void
+}) {
   return (
     <div className="flex flex-1 items-center justify-center">
       <div className="text-center">
@@ -33,17 +39,31 @@ function EmptyState({ onCreateSlide }: { onCreateSlide?: (message: string) => vo
         <p className="max-w-md text-sm text-muted-foreground">
           No slide decks yet. Ask in Chat to build a presentation, then it appears here.
         </p>
-        {onCreateSlide && (
-          <button
-            onClick={() => onCreateSlide('I want to create a new slide presentation. Please load the slides skill and help me build a deck.')}
-            className="mt-4 flex cursor-pointer items-center gap-1.5 rounded-md px-4 py-2 text-sm font-medium text-white transition-colors mx-auto"
-            style={{ background: 'var(--accent, #6366f1)' }}
-            data-testid="create-slide-button-empty"
-          >
-            <Plus size={16} />
-            Create Slide
-          </button>
-        )}
+        <div className="mt-4 flex items-center justify-center gap-2">
+          {onCreateSlide && (
+            <button
+              onClick={() => onCreateSlide('I want to create a new slide presentation. Please load the slides skill and help me build a deck.')}
+              className="flex cursor-pointer items-center gap-1.5 rounded-md px-4 py-2 text-sm font-medium text-white transition-colors"
+              style={{ background: 'var(--accent, #6366f1)' }}
+              data-testid="create-slide-button-empty"
+            >
+              <Plus size={16} />
+              Create Slide
+            </button>
+          )}
+          {onNavigate && (
+            <button
+              onClick={() => onNavigate('/slides/templates')}
+              className="flex cursor-pointer items-center gap-1.5 rounded-md px-4 py-2 text-sm transition-colors"
+              style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-color)', color: 'var(--text-secondary)' }}
+              title="Manage slide templates"
+              data-testid="manage-templates-link"
+            >
+              <Layers size={16} />
+              Templates
+            </button>
+          )}
+        </div>
       </div>
     </div>
   )
@@ -500,7 +520,7 @@ export default function SlidesView({ theme, deckSlug, templatesView, isPlatformM
   }
 
   if (!hasDecks) {
-    return <EmptyState onCreateSlide={onCreateSlide} />
+    return <EmptyState onCreateSlide={onCreateSlide} onNavigate={onNavigate} />
   }
 
   const renderCard = (deck: SlidesDeckListItem) => (

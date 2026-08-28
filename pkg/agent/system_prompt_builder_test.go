@@ -234,7 +234,7 @@ func TestSystemPromptBuilder_SlideGuidanceIsConditional(t *testing.T) {
 	}
 
 	withSlides := (&SystemPromptBuilder{Tools: mockTools("create_deck", "write_slide")}).Build()
-	for _, want := range []string{"**Slide decks:**", "skill_lookup", "ask_user", "create_deck", "write_slide", "validate_deck", "title variant", "cover photo", "fixed 1920×1080 canvas", "never percentages or 0–100 coordinates", "never put Markdown markers", "shapes and theme tokens", "Do not substitute an `astonish-app`"} {
+	for _, want := range []string{"**Slide decks:**", "skill_lookup", "ask_user", "create_deck", "write_slide", "validate_deck", "title variant", "cover image", "fixed 1920×1080 canvas", "never percentages or 0–100 coordinates", "never put Markdown markers", "shapes and theme tokens", "Do not substitute an `astonish-app`"} {
 		if !strings.Contains(withSlides, want) {
 			t.Errorf("slide-enabled prompt missing %q", want)
 		}

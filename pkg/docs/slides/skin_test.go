@@ -47,8 +47,8 @@ func TestProductSkinLightSurface(t *testing.T) {
 }
 
 func TestSkinForNameFallback(t *testing.T) {
-	if SkinFor(themes.Template{Name: "product"}).ID != SkinProduct {
-		t.Fatal("name product")
+	if SkinFor(themes.Template{Name: "modern"}).ID != SkinProduct {
+		t.Fatal("name modern")
 	}
 	if SkinFor(themes.Template{Name: "acme", Skin: "product"}).ID != SkinProduct {
 		t.Fatal("explicit skin")

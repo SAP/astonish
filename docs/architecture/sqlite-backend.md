@@ -83,6 +83,39 @@ The default data directory follows XDG conventions:
 
 Configuration data (YAML configs, agent definitions) remains in `~/.config/astonish/`. The data directory holds only SQLite databases.
 
+### macOS Daemon Startup Diagnosis
+
+On macOS, distinguish three independent readiness boundaries:
+
+1. **launchd service startup** — launchd starts the configured LaunchAgent process.
+2. **HTTP readiness** — the daemon has completed synchronous setup and logged `HTTP server listening`.
+3. **First-session readiness** — Studio has constructed its cached ChatAgent for the first usable chat request.
+
+A slow launchd invocation does not by itself show whether the HTTP listener or the first Studio session is slow. With `sandbox.enabled: false`, Astonish bypasses the Docker+Incus sandbox branch; this does not bypass database, provider, embedding, skills, MCP-cache, scheduler, fleet, channel, or Studio initialization.
+
+#### Locations and configuration
+
+For a per-user installation, inspect the installed LaunchAgent plist under `~/Library/LaunchAgents/` and use its configured `ProgramArguments`, `WorkingDirectory`, and `EnvironmentVariables` as the source of truth. The LaunchAgent's standard-output and standard-error paths normally identify the daemon log and error log; inspect those configured paths rather than assuming they are inherited from an interactive shell.
+
+Keep these locations separate when troubleshooting:
+
+- macOS configuration and log locations are under the user Library/Application Support and LaunchAgent configuration selected by the installation.
+- SQLite defaults to `~/Library/Application Support/astonish/`.
+- `storage.sqlite.data_dir` explicitly overrides the SQLite location.
+- YAML configuration and agent definitions remain under `~/.config/astonish/`.
+
+Do not put the SQLite data directory on a synchronized, cloud-backed, removable, or network-mounted location. Prefer a local filesystem path so WAL, locking, and file-latency behavior remain predictable.
+
+#### Safe troubleshooting flow
+
+1. Confirm `sandbox.enabled: false` in the effective daemon configuration, then restart the installed LaunchAgent rather than starting a second interactive daemon.
+2. Collect timestamped `daemon.log` and `daemon.err` entries from process start through `HTTP server listening`. Read the ordered elapsed phase records to identify whether time is spent in store open, migration, embedding/provider setup, channels, scheduler/fleet restoration, or listener setup.
+3. Treat repeating roughly 5- or 10-second plateaus as evidence to investigate SQLite lock/busy-timeout behavior. Check for duplicate or repeatedly restarted LaunchAgent processes, and verify explicit LaunchAgent environment variables do not select an unexpected configuration or data directory.
+4. Verify that the effective SQLite data directory is local and that its parent directories are writable by the LaunchAgent user.
+5. After HTTP readiness, make one Studio chat request and then a second equivalent request. Compare the cold `component=studio-chat` cache-miss and `component=chat-factory` elapsed records with the second request, which should not trigger another cached Studio initialization record.
+
+Enabled channels can intentionally require an expensive ChatAgent construction. The daemon begins Studio chat pre-warming as soon as the HTTP listener is available, and only then starts the optional channel bootstrap. This avoids two heavyweight ChatAgent factories contending during a cold start: Studio sessions get priority, while channel status remains unavailable or transitional until its bootstrap completes. Inbound channel messages are not accepted until their adapter has started. Separately, the first Studio session may lazily initialize provider, embedding, skills, or MCP-cache work even while sandboxing is disabled. These records identify the bottleneck; they do not establish a fixed root cause or imply that functional subsystems should be disabled.
+
 ---
 
 ## Schema Design

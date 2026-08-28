@@ -496,12 +496,15 @@ func (cm *ChatManager) ensureReady(ctx context.Context) error {
 		return fmt.Errorf("studio chat not initialized: no init function set")
 	}
 
+	started := time.Now()
 	components, err := cm.initFn(ctx)
 	if err != nil {
+		slog.Warn("studio chat initialization failed", "component", "studio-chat", "elapsed", time.Since(started).Round(time.Millisecond), "error", err)
 		return err
 	}
 
 	cm.components = components
+	slog.Info("studio chat initialized", "component", "studio-chat", "elapsed", time.Since(started).Round(time.Millisecond))
 	return nil
 }
 

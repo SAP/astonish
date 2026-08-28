@@ -110,19 +110,38 @@ func SortedGroups(groups map[string]*ToolGroup) []*ToolGroup {
 	return sorted
 }
 
+// PrimeTools builds the local registry and BM25 catalog without embedding any
+// documents. It makes tool discovery usable immediately while SyncTools updates
+// semantic vectors in the background.
+func (idx *ToolIndex) PrimeTools(ctx context.Context, mainTools []tool.Tool, groups []*ToolGroup) {
+	registry, docs := buildToolCatalog(ctx, mainTools, groups)
+	idx.mu.Lock()
+	idx.toolRegistry = registry
+	idx.bm25 = buildBM25Index(docs)
+	idx.mu.Unlock()
+}
+
 // SyncTools indexes all tools from main-thread tools and tool groups.
 // Each tool becomes a single document: "{tool_name}: {tool_description}"
 // with metadata for group_name and tool_name.
 //
-// This is called at startup and whenever tool groups change.
 // It performs an incremental sync: only tools with new or changed content
-// are re-embedded. Unchanged tools reuse their persisted embeddings,
-// making restarts near-instant when the tool set hasn't changed.
+// are re-embedded. Unchanged tools reuse their persisted embeddings.
 func (idx *ToolIndex) SyncTools(ctx context.Context, mainTools []tool.Tool, groups []*ToolGroup) error {
+	// Build and publish the lexical catalog before any potentially slow remote
+	// embedding work. SearchHybrid can therefore use BM25 while vectors refresh.
+	registry, docs := buildToolCatalog(ctx, mainTools, groups)
 	idx.mu.Lock()
-	defer idx.mu.Unlock()
+	idx.toolRegistry = registry
+	idx.bm25 = buildBM25Index(docs)
+	idx.mu.Unlock()
 
-	// Build the registry and document list
+	// Do not hold idx.mu while a remote embedding provider is running. Reads keep
+	// using the published lexical catalog (and any previously stored vectors).
+	return idx.syncToolDocuments(ctx, registry, docs)
+}
+
+func buildToolCatalog(ctx context.Context, mainTools []tool.Tool, groups []*ToolGroup) (map[string]ToolEntry, []ToolVectorDoc) {
 	registry := make(map[string]ToolEntry)
 	var docs []ToolVectorDoc
 
@@ -221,6 +240,10 @@ func (idx *ToolIndex) SyncTools(ctx context.Context, mainTools []tool.Tool, grou
 		indexGroup(g)
 	}
 
+	return registry, docs
+}
+
+func (idx *ToolIndex) syncToolDocuments(ctx context.Context, registry map[string]ToolEntry, docs []ToolVectorDoc) error {
 	// Incremental sync: only embed tools whose content has changed.
 	// On a typical restart where tools haven't changed, this skips all
 	// embedding calls — the only cost is GetByID lookups against the store.
@@ -263,11 +286,11 @@ func (idx *ToolIndex) SyncTools(ctx context.Context, mainTools []tool.Tool, grou
 			slog.Debug("pruned stale tool index entries", "count", len(staleIDs))
 		}
 	}
+	idx.mu.Lock()
 	idx.knownIDs = currentIDs
+	idx.mu.Unlock()
 
 	if len(docs) == 0 {
-		idx.toolRegistry = registry
-		idx.bm25 = nil
 		return nil
 	}
 
@@ -278,9 +301,6 @@ func (idx *ToolIndex) SyncTools(ctx context.Context, mainTools []tool.Tool, grou
 		}
 	}
 
-	// Build BM25 inverted index from the same documents.
-	idx.bm25 = buildBM25Index(docs)
-	idx.toolRegistry = registry
 	return nil
 }
 

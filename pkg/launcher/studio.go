@@ -119,15 +119,28 @@ func NewStudioServer(port int, opts ...StudioOption) (*StudioServer, error) {
 	api.SetStudioChatInitFunc(func(ctx context.Context) (*api.StudioChatComponents, error) {
 		appCfg := api.EffectiveAppConfigFromContext(ctx, isPlatform)
 
+		// A daemon pre-warm has no authenticated user/session from which to
+		// resolve a personal model pin. Use the effective platform defaults when
+		// they exist, but keep reusable agent infrastructure warm when this
+		// installation has no deployable unaffiliated default. Request-time
+		// resolution remains authoritative and swaps the caller's effective LLM
+		// before a turn runs.
+		providerName := appCfg.General.DefaultProvider
+		modelName := appCfg.General.DefaultModel
+		deferLLMBinding := providerName == "" || modelName == ""
+		if deferLLMBinding {
+			slog.Info("studio pre-warm deferring LLM binding: no deployable default", "component", "studio-chat")
+		}
 		factoryCfg := &ChatFactoryConfig{
-			AppConfig:    appCfg,
-			ProviderName: appCfg.General.DefaultProvider,
-			ModelName:    appCfg.General.DefaultModel,
-			DebugMode:    false,
-			AutoApprove:  false,
-			WorkspaceDir: "",
-			IsDaemon:     false,
-			PlatformMode: isPlatform,
+			AppConfig:            appCfg,
+			ProviderName:         providerName,
+			ModelName:            modelName,
+			AllowMissingProvider: deferLLMBinding,
+			DebugMode:            false,
+			AutoApprove:          false,
+			WorkspaceDir:         "",
+			IsDaemon:             false,
+			PlatformMode:         isPlatform,
 		}
 
 		// In platform mode, create ToolIndex for dynamic tool discovery.

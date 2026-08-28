@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"iter"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -46,6 +48,64 @@ func (s *apiSkillStore) GetFile(context.Context, string, string, string) (*store
 }
 func (s *apiSkillStore) SaveFile(context.Context, string, *store.SkillFile) error { return nil }
 func (s *apiSkillStore) DeleteFile(context.Context, string, string, string) error { return nil }
+
+func TestChatManagerEnsureReadyTimingLogs(t *testing.T) {
+	tests := []struct {
+		name     string
+		manager  *ChatManager
+		wantErr  string
+		contains []string
+	}{
+		{
+			name: "cold success",
+			manager: &ChatManager{initFn: func(context.Context) (*StudioChatComponents, error) {
+				return &StudioChatComponents{}, nil
+			}},
+			contains: []string{"msg=\"studio chat initialized\"", "component=studio-chat", "elapsed="},
+		},
+		{
+			name: "cold failure",
+			manager: &ChatManager{initFn: func(context.Context) (*StudioChatComponents, error) {
+				return nil, errors.New("initialization failed")
+			}},
+			wantErr:  "initialization failed",
+			contains: []string{"msg=\"studio chat initialization failed\"", "component=studio-chat", "elapsed=", "error=\"initialization failed\""},
+		},
+		{
+			name: "cached is silent",
+			manager: &ChatManager{components: &StudioChatComponents{}, initFn: func(context.Context) (*StudioChatComponents, error) {
+				t.Fatal("cached components must not call initFn")
+				return nil, nil
+			}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			old := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+			defer slog.SetDefault(old)
+
+			err := tt.manager.ensureReady(context.Background())
+			if tt.wantErr == "" && err != nil {
+				t.Fatalf("ensureReady() error = %v", err)
+			}
+			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("ensureReady() error = %v, want %q", err, tt.wantErr)
+			}
+			got := buf.String()
+			for _, want := range tt.contains {
+				if !strings.Contains(got, want) {
+					t.Errorf("log %q does not contain %q", got, want)
+				}
+			}
+			if len(tt.contains) == 0 && got != "" {
+				t.Errorf("cached ensureReady() logged %q", got)
+			}
+		})
+	}
+}
 
 func TestBuildMergedSkillIndex_FilesystemBaseAndCaseInsensitiveLaterWins(t *testing.T) {
 	filesystem := []skills.Skill{

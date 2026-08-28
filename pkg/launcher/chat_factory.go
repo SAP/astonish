@@ -219,6 +219,27 @@ func skillLookupMode(platformMode, codeMode bool) tools.SkillLookupMode {
 	return tools.SkillLookupModeLocal
 }
 
+func logChatFactoryPhase(started time.Time, phase string) {
+	slog.Info("chat factory phase complete", "component", "chat-factory", "phase", phase, "elapsed", time.Since(started).Round(time.Millisecond))
+}
+
+func logChatFactoryInitialization(started time.Time, cfg *ChatFactoryConfig, result *ChatFactoryResult, err error) {
+	attrs := []any{
+		"component", "chat-factory",
+		"elapsed", time.Since(started).Round(time.Millisecond),
+		"platform", cfg.PlatformMode,
+		"code_mode", cfg.CodeMode,
+		"daemon", cfg.IsDaemon,
+	}
+	if err != nil {
+		attrs = append(attrs, "error", err)
+		slog.Warn("chat agent initialization failed", attrs...)
+		return
+	}
+	attrs = append(attrs, "provider", result.ProviderName, "model", result.ModelName)
+	slog.Info("chat agent initialized", attrs...)
+}
+
 // NewWiredChatAgent creates a fully-wired ChatAgent ready for use by any caller
 // (interactive console, channel manager, daemon, etc.).
 //
@@ -229,6 +250,14 @@ func skillLookupMode(platformMode, codeMode bool) tools.SkillLookupMode {
 // The returned ChatFactoryResult contains the ChatAgent and all auxiliary objects
 // that callers may need. Callers MUST call result.Cleanup() when done.
 func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactoryResult, error) {
+	started := time.Now()
+	result, err := newWiredChatAgent(ctx, cfg)
+	logChatFactoryInitialization(started, cfg, result, err)
+	return result, err
+}
+
+func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactoryResult, error) {
+	phaseStarted := time.Now()
 	var cleanups []func()
 	cleanup := func() {
 		// Run cleanups in reverse order (LIFO, like defer)
@@ -297,6 +326,8 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 	if credStore == nil {
 		config.SetupAllProviderEnv(cfg.AppConfig)
 	}
+	logChatFactoryPhase(phaseStarted, "credentials-config")
+	phaseStarted = time.Now()
 
 	// --- 1. Initialize LLM ---
 	if cfg.DebugMode {
@@ -322,6 +353,8 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 	if cfg.DebugMode {
 		slog.Debug("provider initialized", "component", "chat-factory", "provider", cfg.ProviderName, "model", cfg.ModelName)
 	}
+	logChatFactoryPhase(phaseStarted, "provider")
+	phaseStarted = time.Now()
 
 	// Wrap in SwappableLLM so the model can be hot-swapped without rebuilding
 	// the entire ChatAgent (tools, MCP, sandbox, ToolIndex all survive).
@@ -711,6 +744,9 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		}
 	}
 
+	logChatFactoryPhase(phaseStarted, "tools-skills-mcp")
+	phaseStarted = time.Now()
+
 	// --- 3b. Initialize sandbox (session container isolation) ---
 	// When sandbox is enabled, all internal tools are wrapped with NodeTool
 	// proxies that route execution to an astonish node inside an Incus
@@ -1018,6 +1054,9 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			return nil, fmt.Errorf("sandbox: unsupported backend kind %q", kind)
 		}
 	}
+
+	logChatFactoryPhase(phaseStarted, "sandbox")
+	phaseStarted = time.Now()
 
 	// --- 4. Create session service ---
 	// Platform mode: sessions are persisted in the DB per-request.
@@ -1501,15 +1540,21 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			}
 		} else {
 			sortedGroups := agent.SortedGroups(toolGroups)
-			if syncErr := toolIndex.SyncTools(context.Background(), mainThreadTools, sortedGroups); syncErr != nil {
-				if cfg.DebugMode {
-					slog.Warn("failed to sync tool index", "error", syncErr)
+			// Publish the complete lexical catalog immediately. Semantic vectors are
+			// refreshed in the background: a slow embedding provider must never make
+			// a Studio session wait before search_tools and prompt injection work.
+			toolIndex.PrimeTools(context.Background(), mainThreadTools, sortedGroups)
+			go func(idx *agent.ToolIndex, main []tool.Tool, groups []*agent.ToolGroup) {
+				if syncErr := idx.SyncTools(context.Background(), main, groups); syncErr != nil {
+					slog.Warn("background tool index refresh failed; retaining lexical catalog", "component", "tool-index", "error", syncErr)
+					return
 				}
-			} else if cfg.DebugMode {
-				slog.Debug("tool index ready", "tools_indexed", toolIndex.Count())
-			}
+				slog.Debug("background tool index refresh complete", "component", "tool-index", "tools_indexed", idx.Count())
+			}(toolIndex, mainThreadTools, sortedGroups)
 		}
 	}
+
+	logChatFactoryPhase(phaseStarted, "tool-index-sync")
 
 	// --- 5d. Create flow tools (search_flows, run_flow) ---
 	// Flow discovery and execution via dedicated tools rather than

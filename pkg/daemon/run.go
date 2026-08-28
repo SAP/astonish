@@ -64,6 +64,10 @@ func channelManagerConfigFromFactoryResult(result *launcher.ChatFactoryResult) *
 	}
 }
 
+func startupPhaseRecord(phase, outcome string, elapsed time.Duration) string {
+	return fmt.Sprintf("startup phase=%s outcome=%s elapsed=%s", phase, outcome, elapsed.Round(time.Millisecond))
+}
+
 // Run starts the daemon in the foreground. It starts the Studio HTTP server,
 // writes a PID file, handles signals for graceful shutdown, and cleans up on exit.
 // This function blocks until a shutdown signal is received.
@@ -124,6 +128,11 @@ func Run(cfg RunConfig) error {
 	log.SetFlags(0) // Logger adds its own timestamps.
 	slog.SetDefault(slog.New(slog.NewTextHandler(logger, nil)))
 
+	startupStarted := time.Now()
+	logStartupPhase := func(phase, outcome string, phaseStarted time.Time) {
+		logger.Printf("%s backend=%s mode=%s", startupPhaseRecord(phase, outcome, time.Since(phaseStarted)), appCfg.Storage.Backend, daemonMode)
+	}
+
 	// Back-compat for users upgrading from v2 (personal mode).
 	// "file" and empty backend are no longer supported; default to sqlite (zero-config).
 	if appCfg.Storage.Backend == "" || appCfg.Storage.Backend == "file" {
@@ -182,6 +191,7 @@ func Run(cfg RunConfig) error {
 	var backend platformDB // unified interface — assigned below
 
 	// Both "postgres" and "sqlite" now use the unified entstore.
+	storeStarted := time.Now()
 	entCfg := entstore.Config{
 		InstanceSuffix:  appCfg.Storage.Postgres.InstanceSuffix,
 		MaxOpenConns:    appCfg.Storage.Postgres.GetMaxOpenConns(),
@@ -196,6 +206,7 @@ func Run(cfg RunConfig) error {
 		entCfg.DSN = "file:" + filepath.Join(appCfg.Storage.SQLite.GetDataDir(), "platform.db")
 		entCfg.DataDir = appCfg.Storage.SQLite.GetDataDir()
 	default:
+		logStartupPhase("platform-store", "failed", storeStarted)
 		return fmt.Errorf("unsupported storage backend %q: must be 'postgres' or 'sqlite'", appCfg.Storage.Backend)
 	}
 
@@ -213,26 +224,34 @@ func Run(cfg RunConfig) error {
 				return fmt.Errorf("failed to initialize platform storage after auto-bootstrap: %w", err)
 			}
 		} else {
+			logStartupPhase("platform-store", "failed", storeStarted)
 			return fmt.Errorf("failed to initialize storage: %w", err)
 		}
 	}
 	defer entStore.Close()
 	backend = entStore
+	logStartupPhase("platform-store", "complete", storeStarted)
 	// Persist/learn per-model token limits from provider 400 responses (SAP Vertex).
 	provider.SetSAPModelLimitsStore(entStore.ModelLimits())
 	logger.Printf("Storage backend: %s (platform mode)", appCfg.Storage.Backend)
 
 	// Run migrations
+	migrationStarted := time.Now()
 	if err := entStore.MigrateAllSchemas(context.Background()); err != nil {
 		logger.Printf("Warning: migration errors: %v", err)
+		logStartupPhase("migrations", "failed", migrationStarted)
+	} else {
+		logStartupPhase("migrations", "complete", migrationStarted)
 	}
 
 	// Initialize embedding
+	embeddingStarted := time.Now()
 	{
 		embGetSecret := daemonSecretGetter(backend, credStore)
 		embResult, embErr := memory.ResolveEmbeddingFunc(appCfg, &appCfg.Memory, cfg.Debug, embGetSecret)
 		if embErr != nil {
 			logger.Printf("Warning: embedding unavailable (keyword-only search): %v", embErr)
+			logStartupPhase("embedding", "failed", embeddingStarted)
 		} else {
 			backend.SetEmbedFunc(func(ctx context.Context, text string) ([]float32, error) {
 				return embResult.EmbeddingFunc(ctx, text)
@@ -241,10 +260,12 @@ func Run(cfg RunConfig) error {
 				defer embResult.Cleanup()
 			}
 			logger.Printf("Memory stores: hybrid vector+keyword search enabled")
+			logStartupPhase("embedding", "complete", embeddingStarted)
 		}
 	}
 
 	// In platform mode, cascade platform and default-org provider settings
+	providerSetupStarted := time.Now()
 	// into appCfg so the channel/fleet agent sees all configured providers.
 	// This is the daemon-level equivalent of effectiveAppConfig() in HTTP handlers.
 	// Provider env vars are set here (not earlier) because in platform mode
@@ -277,6 +298,7 @@ func Run(cfg RunConfig) error {
 	if mcpCfg, err := config.LoadMCPConfig(); err == nil {
 		config.SetupMCPEnv(mcpCfg)
 	}
+	logStartupPhase("provider-mcp-environment", "complete", providerSetupStarted)
 
 	// Context for background goroutines
 	ctx, ctxCancel := context.WithCancel(context.Background())
@@ -305,6 +327,8 @@ func Run(cfg RunConfig) error {
 	// - Adaptive jobs use the shared ChatAgent if available, or fail gracefully
 	// The ChatAgent is expensive to create, so we only init it when channels are enabled.
 	var channelMgr *channels.ChannelManager
+	var configureFleetCommands func(*channels.ChannelManager)
+	var schedExec *scheduler.Executor
 	var factoryResult *launcher.ChatFactoryResult
 	llmPool := provider.NewPool() // Shared LLM cache for per-message provider resolution
 	defer func() {
@@ -322,31 +346,18 @@ func Run(cfg RunConfig) error {
 
 	// Channel configuration now lives exclusively in the platform DB (SQLite or Postgres).
 	// We consult it early to decide whether we need a ChatAgent for channels/scheduler.
+	channelConfigStarted := time.Now()
 	dbChannelsAtStartup := loadChannelsConfigFromDB(backend, logger)
 	needsChatAgent := anyChannelEnabled(dbChannelsAtStartup) && daemonMode != config.DaemonModeAPI
+	logStartupPhase("channel-configuration", "complete", channelConfigStarted)
 
-	if needsChatAgent {
-		logger.Printf("Initializing ChatAgent for channels...")
-
-		// Build a fully-wired ChatAgent for channel/scheduler use
-		fr, factoryErr := launcher.NewWiredChatAgent(ctx, &launcher.ChatFactoryConfig{
-			AppConfig:               appCfg,
-			ProviderName:            appCfg.General.DefaultProvider,
-			ModelName:               appCfg.General.DefaultModel,
-			DebugMode:               cfg.Debug,
-			AutoApprove:             true, // Channels/scheduler auto-approve all tools
-			IsDaemon:                true, // We ARE the daemon — always run indexing/watchers.
-			PlatformMode:            true,
-			PlatformToolVectorStore: platformToolVectorStore,
-			PlatformEmbedFunc:       platformEmbedFunc,
-		})
-		if factoryErr != nil {
-			logger.Printf("Warning: Failed to initialize ChatAgent: %v", factoryErr)
-		} else {
-			factoryResult = fr
-			// Make distillation available to LLM tools (for auto-distill during scheduling)
-			tools.SetDistillAccess(newDistillBridge(fr.ChatAgent))
-		}
+	// Channel adapters require a fully wired ChatAgent, but neither the Studio
+	// listener nor its API routes require channel adapters to be ready. Build the
+	// channel agent after HTTP is listening so slow optional integrations cannot
+	// delay Studio availability. The bootstrap below reuses reloadChannels to
+	// apply the normal manager, allowlist, resolver, and link-handler wiring.
+	if !needsChatAgent {
+		logStartupPhase("channel-chat-agent-disabled", "complete", time.Now())
 	}
 
 	// initChannels creates (or recreates) the ChannelManager.
@@ -817,13 +828,9 @@ func Run(cfg RunConfig) error {
 	// Email tools now read their config exclusively from the platform DB.
 	initEmailTools()
 
-	// --- Initialize channel manager (reads exclusively from platform DB) ---
-	if mgr, err := initChannels(appCfg); err != nil {
-		logger.Printf("Warning: %v", err)
-	} else {
-		channelMgr = mgr
-	}
-	api.SetChannelManager(channelMgr)
+	// Channel initialization is deferred until after Studio starts. The API
+	// reports no active manager while optional channels are still bootstrapping.
+	api.SetChannelManager(nil)
 
 	// --- Dynamic allowlist from user_channels (platform mode) ---
 	// In platform mode, channel allowlists are built exclusively from the
@@ -983,6 +990,7 @@ func Run(cfg RunConfig) error {
 				ModelName:               freshCfg.General.DefaultModel,
 				DebugMode:               cfg.Debug,
 				AutoApprove:             true,
+				IsDaemon:                true,
 				PlatformMode:            true,
 				PlatformToolVectorStore: platformToolVectorStore,
 				PlatformEmbedFunc:       platformEmbedFunc,
@@ -1006,6 +1014,9 @@ func Run(cfg RunConfig) error {
 			logger.Printf("Warning: %v", err)
 		}
 		channelMgr = mgr
+		if channelMgr != nil && configureFleetCommands != nil {
+			configureFleetCommands(channelMgr)
+		}
 		api.SetChannelManager(channelMgr)
 
 		// Refresh dynamic allowlist after channel reload (platform mode).
@@ -1081,7 +1092,7 @@ func Run(cfg RunConfig) error {
 			if err := WatchConfig(ctx, configPath, ConfigWatcherOpts{
 				DebounceMs:     1500,
 				Logger:         logger,
-				GetManager:     func() *channels.ChannelManager { return channelMgr },
+				GetManager:     api.GetChannelManager,
 				ReloadChannels: reloadChannels,
 				LastConfig:     appCfg,
 			}); err != nil {
@@ -1093,7 +1104,6 @@ func Run(cfg RunConfig) error {
 	// --- Initialize scheduler if enabled ---
 	// Skipped in API mode — only default and worker modes run the scheduler.
 	var mtSched *MultiTenantScheduler
-	var schedExec *scheduler.Executor
 
 	// Register the headless runner for ALL modes (including API mode).
 	// API pods need this to construct a local executor for schedule_job test
@@ -1106,6 +1116,7 @@ func Run(cfg RunConfig) error {
 	var fleetSessionStore store.SessionStore
 
 	if appCfg.Scheduler.IsSchedulerEnabled() && daemonMode != config.DaemonModeAPI {
+		schedulerStarted := time.Now()
 		// Platform mode: use the multi-tenant scheduler that iterates
 		// all orgs → all teams on every tick. Individual job CRUD goes
 		// through the request-scoped store.SchedulerStore in API handlers.
@@ -1168,6 +1179,9 @@ func Run(cfg RunConfig) error {
 		}
 
 		logger.Printf("Scheduler: multi-tenant (all orgs/teams)")
+		logStartupPhase("scheduler", "complete", schedulerStarted)
+	} else {
+		logStartupPhase("scheduler-disabled", "complete", time.Now())
 	}
 
 	// --- Initialize fleet plan activator ---
@@ -1189,6 +1203,7 @@ func Run(cfg RunConfig) error {
 		}
 
 		if fleetSchedBridge != nil {
+			fleetRestoreStarted := time.Now()
 			fleetStarter := func(fCtx context.Context, fCfg fleet.HeadlessFleetConfig) (string, error) {
 				// Resolve tenant-scoped stores for the fleet session so sub-agents
 				// can access team drills, credentials, skills, etc. in platform mode.
@@ -1306,6 +1321,9 @@ func Run(cfg RunConfig) error {
 			// Restore previously activated plans (re-create monitors)
 			if err := activator.RestoreActivated(); err != nil {
 				logger.Printf("Warning: Failed to restore activated plans: %v", err)
+				logStartupPhase("fleet-plan-restore", "failed", fleetRestoreStarted)
+			} else {
+				logStartupPhase("fleet-plan-restore", "complete", fleetRestoreStarted)
 			}
 
 			logger.Printf("Fleet plan activator initialized")
@@ -1314,7 +1332,10 @@ func Run(cfg RunConfig) error {
 
 	// --- Wire fleet commands into channels ---
 	// Must happen after both channelMgr and fleet registries are initialized.
-	if channelMgr != nil {
+	configureFleetCommands = func(channelMgr *channels.ChannelManager) {
+		if channelMgr == nil {
+			return
+		}
 		channelMgr.SetFleetDeps(&channels.FleetDeps{
 			GetSessionRegistry: func() channels.FleetSessionRegistry {
 				return api.GetFleetSessionRegistry()
@@ -1400,6 +1421,9 @@ func Run(cfg RunConfig) error {
 			},
 		})
 		logger.Printf("Fleet commands wired into channels")
+	}
+	if channelMgr != nil {
+		configureFleetCommands(channelMgr)
 	}
 
 	// Start periodic cleanup goroutine (session expiry + orphan container pruning)
@@ -1634,6 +1658,7 @@ func Run(cfg RunConfig) error {
 	}
 
 	// Create and start the Studio server
+	studioServerStarted := time.Now()
 	var studioOpts []launcher.StudioOption
 	studioOpts = append(studioOpts, launcher.WithServices(svc))
 	if platformAuth != nil && backend != nil {
@@ -1646,8 +1671,10 @@ func Run(cfg RunConfig) error {
 	studio, err := launcher.NewStudioServer(port, studioOpts...)
 	if err != nil {
 		logger.Printf("Failed to start HTTP server: %v", err)
+		logStartupPhase("studio-server", "failed", studioServerStarted)
 		return fmt.Errorf("failed to start HTTP server: %w", err)
 	}
+	logStartupPhase("studio-server", "complete", studioServerStarted)
 
 	// Pre-warm the Studio chat agent in the background so the first web request is fast.
 	// Also register the context builder so that Reset() can auto-PreWarm after settings changes.
@@ -1682,7 +1709,13 @@ func Run(cfg RunConfig) error {
 	api.SetPreWarmContextFunc(buildPreWarmCtx)
 	api.SetLLMPool(llmPool)
 
+	// Complete this channel exactly once after the Studio factory has either
+	// initialized or failed. Optional channel bootstrap waits for it so the two
+	// heavyweight factory calls never contend for process-wide credential, tool,
+	// MCP, and provider initialization during a cold daemon start.
+	studioPreWarmDone := make(chan struct{})
 	go func() {
+		defer close(studioPreWarmDone)
 		warmCtx := buildPreWarmCtx()
 		if err := api.GetChatManager().PreWarm(warmCtx); err != nil {
 			logger.Printf("Studio chat pre-warm failed (will retry on first request): %v", err)
@@ -1704,6 +1737,7 @@ func Run(cfg RunConfig) error {
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 
 	// Start serving in a goroutine
+	logger.Printf("%s backend=%s mode=%s", startupPhaseRecord("serve-handoff", "complete", time.Since(startupStarted)), appCfg.Storage.Backend, daemonMode)
 	errCh := make(chan error, 1)
 	go func() {
 		logger.Printf("HTTP server listening on http://localhost:%d", port)
@@ -1711,6 +1745,42 @@ func Run(cfg RunConfig) error {
 			errCh <- err
 		}
 		close(errCh)
+	}()
+
+	// Optional inbound channels must not delay HTTP readiness. Build their
+	// shared ChatAgent and register adapters only after the listener is live.
+	// reloadChannels owns the complete channel wiring path, including dynamic
+	// allowlists, platform resolvers, link handlers, and API publication.
+	var channelBootstrapWG sync.WaitGroup
+	channelBootstrapDone := make(chan struct{})
+	if needsChatAgent {
+		channelBootstrapWG.Add(1)
+		go func() {
+			defer channelBootstrapWG.Done()
+			channelBootstrapStarted := time.Now()
+			logger.Printf("Background channel bootstrap waiting for Studio chat pre-warm...")
+			select {
+			case <-studioPreWarmDone:
+			case <-ctx.Done():
+				logStartupPhase("channel-bootstrap", "cancelled", channelBootstrapStarted)
+				return
+			}
+			if ctx.Err() != nil {
+				logStartupPhase("channel-bootstrap", "cancelled", channelBootstrapStarted)
+				return
+			}
+			logger.Printf("Starting background channel bootstrap...")
+			if err := reloadChannels(); err != nil {
+				logger.Printf("Warning: background channel bootstrap failed: %v", err)
+				logStartupPhase("channel-bootstrap", "failed", channelBootstrapStarted)
+				return
+			}
+			logStartupPhase("channel-bootstrap", "complete", channelBootstrapStarted)
+		}()
+	}
+	go func() {
+		channelBootstrapWG.Wait()
+		close(channelBootstrapDone)
 	}()
 
 	// Print to stdout for foreground mode
@@ -1739,6 +1809,11 @@ func Run(cfg RunConfig) error {
 
 	// Cancel the main context to stop background goroutines (cleanup, etc.)
 	ctxCancel()
+
+	// Join the bootstrap before tearing down stores and process-wide integrations.
+	// Channel factory construction receives the cancelled daemon context, and the
+	// join prevents it from publishing a manager after daemon shutdown.
+	<-channelBootstrapDone
 
 	// Stop scheduler first (finish in-flight jobs)
 	if mtSched != nil {

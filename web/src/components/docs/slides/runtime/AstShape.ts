@@ -3,7 +3,7 @@ import { html, noChange, svg, type TemplateResult } from 'lit'
 import { PositionedElement } from './base'
 
 type GradientStop = { pos: number, color: string }
-type Gradient = { kind: 'linear' | 'radial', angle: number, stops: GradientStop[] }
+type Gradient = { kind: 'linear' | 'radial', angle: number, cx?: number, cy?: number, stops: GradientStop[] }
 
 let gradientSeq = 0
 
@@ -49,6 +49,12 @@ export class AstShape extends PositionedElement {
   gradient = ''
 
   private readonly gradId = `ast-grad-${gradientSeq++}`
+
+  private paintServerId(): string {
+    const slide = this.closest?.('ast-slide')
+    const slideId = slide?.id ? String(slide.id).replace(/[^A-Za-z0-9_-]/g, '') : ''
+    return slideId ? `${this.gradId}-${slideId}` : this.gradId
+  }
   private cachedGradient: Gradient | null = null
   private gradientCached = false
 
@@ -85,6 +91,8 @@ export class AstShape extends PositionedElement {
       this.cachedGradient = {
         kind: data.kind === 'radial' ? 'radial' : 'linear',
         angle: typeof data.angle === 'number' ? data.angle : 0,
+        cx: typeof data.cx === 'number' ? data.cx : 0,
+        cy: typeof data.cy === 'number' ? data.cy : 0,
         stops: data.stops.map(s => ({ pos: Number(s.pos) || 0, color: String(s.color ?? '') })),
       }
       return this.cachedGradient
@@ -96,7 +104,7 @@ export class AstShape extends PositionedElement {
 
   /** Resolves a paint value: gradient url, raw color, or token var fallback. */
   private paint(raw: string, token: string, hasGradient: boolean): string {
-    if (hasGradient) return `url(#${this.gradId})`
+    if (hasGradient) return `url(#${this.paintServerId()})`
     if (this.isRawColor(raw)) return raw
     return `var(--ast-${token}, transparent)`
   }
@@ -110,14 +118,16 @@ export class AstShape extends PositionedElement {
   private renderGradientDef(g: Gradient): TemplateResult {
     const stops = g.stops.map(s => svg`<stop offset="${s.pos}%" stop-color="${s.color}"></stop>`)
     if (g.kind === 'radial') {
-      return svg`<radialGradient id="${this.gradId}" cx="80%" cy="8%" r="72%">${stops}</radialGradient>`
+      const cx = g.cx && g.cx > 0 ? g.cx : 80
+      const cy = g.cy && g.cy > 0 ? g.cy : 8
+      return svg`<radialGradient id="${this.paintServerId()}" cx="${cx}%" cy="${cy}%" r="72%">${stops}</radialGradient>`
     }
     const rad = (g.angle * Math.PI) / 180
     const x2 = (Math.cos(rad) * 0.5 + 0.5).toFixed(4)
     const y2 = (Math.sin(rad) * 0.5 + 0.5).toFixed(4)
     const x1 = (1 - Number(x2)).toFixed(4)
     const y1 = (1 - Number(y2)).toFixed(4)
-    return svg`<linearGradient id="${this.gradId}" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}">${stops}</linearGradient>`
+    return svg`<linearGradient id="${this.paintServerId()}" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}">${stops}</linearGradient>`
   }
 
   private markerId(suffix: string): string { return `${this.gradId}-${suffix}` }

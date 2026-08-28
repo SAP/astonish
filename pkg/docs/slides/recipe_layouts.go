@@ -60,7 +60,7 @@ func (b *recipeBuilder) layoutCover() {
 }
 
 func (b *recipeBuilder) layoutCoverProduct() {
-	b.bg()
+	b.productBGAt(80, 8)
 	p := b.pal
 	b.paintProductRail()
 	b.paintProductCoverLogo()
@@ -138,7 +138,9 @@ func (b *recipeBuilder) layoutQuoteSplit() {
 	attrH := 48
 	quoteH := 200
 	cardH := 28 + quoteH + 16 + attrH + 28
-	b.shape("quote-card", "roundRect", rightX, y, rightW, cardH, p.card, false)
+	if !b.isProduct() {
+		b.shape("quote-card", "roundRect", rightX, y, rightW, cardH, p.card, false)
+	}
 	b.shape("quote-bar", "rect", rightX, y, 6, cardH, p.accent, true)
 	b.slot("quote", rightX+28, y+24, rightW-48, quoteH, p.h3, p.ink, "600", p.display, "")
 	b.slot("attribution", rightX+28, y+24+quoteH+12, rightW-48, attrH, p.labelSize+1, p.secondary, "", p.body, "")
@@ -262,7 +264,11 @@ func (b *recipeBuilder) layoutNumberedGrid() {
 		row := i / cols
 		x := p.mx + col*(cellW+gapX)
 		iy := y + row*(cellH+gapY)
-		b.shape(fmt.Sprintf("grid-card-%d", i+1), "roundRect", x, iy, cellW, cellH, p.card, false)
+		if b.isProduct() {
+			b.hairline(fmt.Sprintf("grid-card-%d", i+1), x, iy, cellW)
+		} else {
+			b.shape(fmt.Sprintf("grid-card-%d", i+1), "roundRect", x, iy, cellW, cellH, p.card, false)
+		}
 		b.staticText(fmt.Sprintf("grid-idx-%d", i+1), x+20, iy+16, 80, 28, p.labelSize, p.accent, "700", p.body, "", fmt.Sprintf("%02d", i+1))
 		b.slot(fmt.Sprintf("item_%d_title", i+1), x+20, iy+44, cellW-40, 40, p.h3-2, p.ink, "700", p.display, "")
 		b.slot(fmt.Sprintf("item_%d_body", i+1), x+20, iy+88, cellW-40, bodyH, p.bodySize-2, p.secondary, "", p.body, "")
@@ -331,50 +337,67 @@ func (b *recipeBuilder) layoutCloser() {
 	thesisH := 160
 	b.slot("thesis", p.mx, y, p.contentW, thesisH, p.bodySize+2, p.ink, "", p.body, "")
 	itemY := y + thesisH + 28
-	gap := 24
-	colW := (p.contentW - 2*gap) / 3
-	colH := b.contentBottom() - itemY
-	if colH < 180 {
-		colH = 180
+	var cols []int
+	for i := 1; i <= 3; i++ {
+		if b.want(fmt.Sprintf("item_%d_title", i)) {
+			cols = append(cols, i)
+		}
 	}
-	bodyH := colH - 16 - 24 - 8 - 48 - 12 - 24
-	if bodyH < 64 {
-		bodyH = 64
-	}
-	for i := 0; i < 3; i++ {
-		x := p.mx + i*(colW+gap)
-		b.panel(fmt.Sprintf("close-card-%d", i+1), x, itemY, colW, colH, false)
-		b.staticText(fmt.Sprintf("close-idx-%d", i+1), x+20, itemY+16, 64, 24, p.labelSize, p.accent, "700", b.chromeFont(), "", fmt.Sprintf("%02d", i+1))
-		b.slot(fmt.Sprintf("item_%d_title", i+1), x+20, itemY+44, colW-40, 48, p.h3-2, p.ink, "700", p.display, "")
-		b.slot(fmt.Sprintf("item_%d_body", i+1), x+20, itemY+96, colW-40, bodyH, p.bodySize-2, p.secondary, "", p.body, "")
+	if n := len(cols); n > 0 {
+		gap := 24
+		colW := (p.contentW - gap*(n-1)) / n
+		colH := b.contentBottom() - itemY
+		if colH < 180 {
+			colH = 180
+		}
+		bodyH := colH - 16 - 24 - 8 - 48 - 12 - 24
+		if bodyH < 64 {
+			bodyH = 64
+		}
+		for i, idx := range cols {
+			x := p.mx + i*(colW+gap)
+			b.panel(fmt.Sprintf("close-card-%d", idx), x, itemY, colW, colH, false)
+			b.staticText(fmt.Sprintf("close-idx-%d", idx), x+20, itemY+16, 64, 24, p.labelSize, p.accent, "700", b.chromeFont(), "", fmt.Sprintf("%02d", idx))
+			b.slot(fmt.Sprintf("item_%d_title", idx), x+20, itemY+44, colW-40, 48, p.h3-2, p.ink, "700", p.display, "")
+			b.slot(fmt.Sprintf("item_%d_body", idx), x+20, itemY+96, colW-40, bodyH, p.bodySize-2, p.secondary, "", p.body, "")
+		}
 	}
 	b.close()
 }
 
 func (b *recipeBuilder) layoutCloserProduct() {
-	b.bg()
+	b.productBGAt(18, 88)
 	p := b.pal
 	b.paintProductRail()
-	b.slot("headline", p.mx, 220, 1700, 110, 72, p.ink, "800", p.display, "")
-	hy := 340
+	hy := 320
+	b.slot("headline", p.mx, hy, 1600, 140, p.h1, p.ink, "800", p.display, "")
 	if b.want("headline_2") {
-		b.slot("headline_2", p.mx, hy, 1700, 90, 64, p.ink, "800", p.display, "")
+		b.slot("headline_2", p.mx, hy+120, 1600, 100, p.h1-24, p.ink, "800", p.display, "")
 		hy += 100
 	}
-	b.slot("thesis", p.mx, hy+12, 1600, 130, 22, p.secondary, "", p.display, "")
-	chipY := 720
-	chipH := b.contentBottom() - chipY
-	if chipH < 160 {
-		chipH = 160
+	b.slot("thesis", p.mx, hy+160, 1600, 130, 22, p.secondary, "", p.display, "")
+	ctaY := hy + 310
+	if b.want("cta_kicker") || b.want("cta_body") {
+		b.slot("cta_kicker", p.mx, ctaY, 800, 24, p.chromeSize, p.accent, "600", p.mono, "")
+		b.slot("cta_body", p.mx, ctaY+32, 1000, 90, 18, p.ink, "", p.mono, "")
 	}
-	gap := 24
-	colW := (p.contentW - 2*gap) / 3
-	for i := 0; i < 3; i++ {
-		x := p.mx + i*(colW+gap)
-		b.panel(fmt.Sprintf("close-card-%d", i+1), x, chipY, colW, chipH, false)
-		b.staticText(fmt.Sprintf("close-idx-%d", i+1), x+24, chipY+20, 64, 24, p.labelSize, p.accent, "700", p.mono, "", fmt.Sprintf("%02d", i+1))
-		b.slot(fmt.Sprintf("item_%d_title", i+1), x+24, chipY+48, colW-48, 40, p.h3-2, p.ink, "700", p.display, "")
-		b.slot(fmt.Sprintf("item_%d_body", i+1), x+24, chipY+96, colW-48, chipH-116, p.bodySize-2, p.secondary, "", p.body, "")
+	var cols []int
+	for i := 1; i <= 3; i++ {
+		if b.want(fmt.Sprintf("item_%d_title", i)) {
+			cols = append(cols, i)
+		}
+	}
+	if n := len(cols); n > 0 {
+		rowY := 820
+		gap := 48
+		cellW := (p.contentW - gap*(n-1)) / n
+		for i, idx := range cols {
+			x := p.mx + i*(cellW+gap)
+			b.staticText(fmt.Sprintf("close-idx-%d", idx), x, rowY, 64, 24, p.labelSize, p.accent, "700", p.mono, "", fmt.Sprintf("%02d", idx))
+			b.hairline(fmt.Sprintf("close-rule-%d", idx), x, rowY+36, cellW)
+			b.slot(fmt.Sprintf("item_%d_title", idx), x, rowY+48, cellW, 40, p.h3-2, p.ink, "700", p.display, "")
+			b.slot(fmt.Sprintf("item_%d_body", idx), x, rowY+92, cellW, 72, p.bodySize-2, p.secondary, "", p.body, "")
+		}
 	}
 	b.close()
 }
@@ -409,33 +432,46 @@ func (b *recipeBuilder) layoutDataTable() {
 		nCol = 3
 	}
 	colW := p.contentW / nCol
-	// Header row
-	for i := 0; i < nCol; i++ {
-		b.slot(fmt.Sprintf("col_%d", i+1), p.mx+i*colW, y, colW-16, 28, p.labelSize, p.secondary, "600", b.chromeFont(), "")
+	headFont := b.chromeFont()
+	headSize := p.labelSize
+	rowSize := p.bodySize + 2
+	rowBox := 72
+	if b.isProduct() {
+		headSize = p.chromeSize
+		rowSize = p.bodySize + 4
+		rowBox = 88
 	}
-	b.shape("table-head-rule", "rect", p.mx, y+36, p.contentW, 1, p.line, true)
+	for i := 0; i < nCol; i++ {
+		b.slot(fmt.Sprintf("col_%d", i+1), p.mx+i*colW, y, colW-16, 32, headSize, p.secondary, "600", headFont, "")
+	}
+	b.shape("table-head-rule", "rect", p.mx, y+40, p.contentW, 2, p.accent, true)
 	noteH := 0
 	if b.want("table_note") {
 		noteH = 48
 	}
-	rowH := (b.bodyH(y) - 52 - noteH) / 3
-	if rowH < 72 {
-		rowH = 72
+	rowH := (b.bodyH(y) - 56 - noteH) / 3
+	if rowH < rowBox {
+		rowH = rowBox
 	}
 	for r := 0; r < 3; r++ {
-		ry := y + 52 + r*rowH
+		ry := y + 56 + r*rowH
 		for c := 0; c < nCol; c++ {
 			id := fmt.Sprintf("row_%d_col_%d", r+1, c+1)
 			color := p.ink
-			if c >= 2 {
+			weight := "600"
+			font := p.display
+			if c == 0 {
+				font = b.chromeFont()
+				weight = "500"
+			} else if c == nCol-1 {
 				color = p.accent
 			}
-			b.slot(id, p.mx+c*colW, ry, colW-16, 72, p.bodySize+2, color, "600", p.display, "")
+			b.slot(id, p.mx+c*colW, ry, colW-16, rowBox, rowSize, color, weight, font, "")
 		}
 		b.shape(fmt.Sprintf("table-rule-%d", r+1), "rect", p.mx, ry+rowH-16, p.contentW, 1, p.line, true)
 	}
 	if b.want("table_note") {
-		b.slot("table_note", p.mx, y+52+3*rowH, p.contentW, 40, p.bodySize, p.secondary, "", p.body, "")
+		b.slot("table_note", p.mx, y+56+3*rowH, p.contentW, 40, p.bodySize, p.secondary, "", p.body, "")
 	}
 	b.close()
 }
@@ -502,7 +538,7 @@ func (b *recipeBuilder) layoutProcessTerminal() {
 	if th < 140 {
 		th = 140
 	}
-	b.panel("terminal-panel", p.mx, ty, p.contentW, th, false)
+	b.inset("terminal-panel", p.mx, ty, p.contentW, th)
 	b.slot("terminal_kicker", p.mx+24, ty+16, p.contentW-48, 22, 13, p.inkDim, "", p.mono, "")
 	b.slot("terminal_body", p.mx+24, ty+44, p.contentW-48, th-64, 17, p.ink, "", p.mono, "")
 	b.close()

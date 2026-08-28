@@ -25,8 +25,10 @@ func TestBuiltinSkills_IncludesSlides(t *testing.T) {
 	if slides.Content != BuiltinSlides {
 		t.Error("slides skill Content must be BuiltinSlides")
 	}
-	if !strings.Contains(slides.Description, "template") && !strings.Contains(slides.Description, "presentation") {
-		t.Errorf("slides skill Description should mention template/presentation, got %q", slides.Description)
+	for _, want := range []string{"slides", "slide deck", "slideshow", "slide show", "presentation", "PowerPoint"} {
+		if !strings.Contains(slides.Description, want) {
+			t.Errorf("slides skill Description should mention %q, got %q", want, slides.Description)
+		}
 	}
 	if slides.ExcludeFromCodeMode {
 		t.Error("slides skill must not be ExcludeFromCodeMode")
@@ -64,6 +66,12 @@ func TestBuiltinSkills_IncludesSlides(t *testing.T) {
 		"add_deck_image",
 		"rehost an attached file",
 		"per-session slug",
+		"slideshow",
+		"slide show",
+		"always-on system-prompt pointer is not a substitute",
+		"cover-like",
+		"at least once when comparing",
+		"all-card deck",
 	} {
 		if !strings.Contains(slides.Content, want) {
 			t.Errorf("slides skill must contain %q (visual template picker is mandatory)", want)

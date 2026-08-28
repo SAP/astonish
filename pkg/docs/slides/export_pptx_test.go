@@ -267,7 +267,9 @@ func TestPPTXExportV2NodeProps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Capabilities.Native != 1 || result.Capabilities.Vector != 1 || result.Capabilities.Raster != 0 || result.Capabilities.Unsupported != 0 {
+	// Gradients are rasterized to PNG (pptxgenjs SVG writes a fake .png preview
+	// and reuses id="g", so PowerPoint showed the first wash on every slide).
+	if result.Capabilities.Native != 2 || result.Capabilities.Vector != 0 || result.Capabilities.Unsupported != 0 {
 		t.Fatalf("unexpected capabilities: %+v", result.Capabilities)
 	}
 	if _, err := zip.NewReader(bytes.NewReader(result.Bytes), int64(len(result.Bytes))); err != nil {
@@ -503,6 +505,102 @@ func TestPPTXImageHonorsFlip(t *testing.T) {
 	}
 	if !strings.Contains(slideXML, `flipH="1"`) {
 		t.Errorf(`flipped image must serialize flipH="1" in its xfrm: %s`, slideXML)
+	}
+}
+
+func TestPPTXImageContainFitDoesNotStretch(t *testing.T) {
+	_, file, _, _ := runtime.Caller(0)
+	repo := filepath.Clean(filepath.Join(filepath.Dir(file), "../../.."))
+	exporter := PPTXExporter{Runner: pptxworker.Runner{
+		WorkingDir: filepath.Join(repo, "web"),
+		ScriptPath: filepath.Join(repo, "pkg/docs/slides/pptxworker/worker.mjs"),
+		Timeout:    30 * time.Second,
+	}}
+	const pngData = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+	scene := SceneGraph{SchemaVersion: SchemaV2, Title: "Contain", Slides: []Slide{{
+		ID: "s", Nodes: []Node{{
+			ID: "logo", Type: "image",
+			Geometry: Geometry{X: 0, Y: 0, W: 800, H: 400},
+			Props:    map[string]any{"data": pngData, "fit": "contain"},
+		}},
+	}}}
+	result, err := exporter.Export(context.Background(), scene, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zr, err := zip.NewReader(bytes.NewReader(result.Bytes), int64(len(result.Bytes)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var slideXML string
+	for _, f := range zr.File {
+		if f.Name == "ppt/slides/slide1.xml" {
+			r, _ := f.Open()
+			b, _ := io.ReadAll(r)
+			_ = r.Close()
+			slideXML = string(b)
+		}
+	}
+	re := regexp.MustCompile(`(?s)<p:pic>.*?<a:ext cx="(\d+)" cy="(\d+)"/>`)
+	m := re.FindStringSubmatch(slideXML)
+	if len(m) != 3 {
+		t.Fatalf("no picture ext: %s", slideXML)
+	}
+	cx, _ := strconv.Atoi(m[1])
+	cy, _ := strconv.Atoi(m[2])
+	if cx == 0 || cy == 0 {
+		t.Fatalf("empty picture %d x %d in %s", cx, cy, slideXML)
+	}
+	if cx != cy {
+		t.Fatalf("1x1 image in a wide well must stay square (contain), got %d x %d", cx, cy)
+	}
+}
+
+func TestPPTXGradientIsPNGNotFakeSVG(t *testing.T) {
+	_, file, _, _ := runtime.Caller(0)
+	repo := filepath.Clean(filepath.Join(filepath.Dir(file), "../../.."))
+	exporter := PPTXExporter{Runner: pptxworker.Runner{
+		WorkingDir: filepath.Join(repo, "web"),
+		ScriptPath: filepath.Join(repo, "pkg/docs/slides/pptxworker/worker.mjs"),
+		Timeout:    30 * time.Second,
+	}}
+	mk := func(id string, cx, cy int) Slide {
+		return Slide{ID: id, Nodes: []Node{{
+			ID: "bg", Type: "shape", Geometry: Geometry{W: 64, H: 36}, Geom: "rect", Fill: "#0B0D0F",
+			Gradient: &Gradient{Kind: "radial", Cx: cx, Cy: cy, Stops: []GradientStop{
+				{Pos: 0, Color: "#118478"}, {Pos: 100, Color: "#0B0D0F"},
+			}},
+		}}}
+	}
+	scene := SceneGraph{SchemaVersion: SchemaV2, Title: "Washes", Slides: []Slide{mk("cover", 80, 8), mk("closer", 18, 88)}}
+	result, err := exporter.Export(context.Background(), scene, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zr, err := zip.NewReader(bytes.NewReader(result.Bytes), int64(len(result.Bytes)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pngs [][]byte
+	for _, f := range zr.File {
+		if !strings.HasPrefix(f.Name, "ppt/media/") {
+			continue
+		}
+		r, _ := f.Open()
+		b, _ := io.ReadAll(r)
+		_ = r.Close()
+		if len(b) >= 8 && string(b[:4]) == "\x89PNG" {
+			pngs = append(pngs, b)
+		}
+		if bytes.Contains(b, []byte("<svg")) {
+			t.Fatalf("%s is SVG stored as media; PowerPoint shows a missing-image glyph", f.Name)
+		}
+	}
+	if len(pngs) < 2 {
+		t.Fatalf("want a PNG wash per slide, got %d pngs", len(pngs))
+	}
+	if bytes.Equal(pngs[0], pngs[1]) {
+		t.Fatal("cover and closer washes must differ (top-right vs bottom-left)")
 	}
 }
 

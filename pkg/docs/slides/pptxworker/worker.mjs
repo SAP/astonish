@@ -59,7 +59,7 @@ try {
     return /^[0-9A-Fa-f]{6}$/.test(h) ? '#' + h : '#000000'
   }
 
-  const gradientShapeSVG = node => {
+  const gradientShapeSVG = (node, slideKey) => {
     const w = Math.max(1, Number(node.geometry?.w) || 1920)
     const h = Math.max(1, Number(node.geometry?.h) || 1080)
     const g = node.gradient
@@ -67,18 +67,52 @@ try {
       const pos = Math.max(0, Math.min(100, Number(s.pos) || 0))
       return `<stop offset="${pos}%" stop-color="${hexColor(s.color)}"/>`
     }).join('')
+    const gid = `g-${String(slideKey || 's')}-${String(node.id || 'bg')}`.replace(/[^A-Za-z0-9_-]/g, '')
     let def
     if (g.kind === 'radial') {
-      def = `<radialGradient id="g" cx="80%" cy="8%" r="72%">${stops}</radialGradient>`
+      const cx = Number(g.cx) > 0 ? Math.min(100, Number(g.cx)) : 80
+      const cy = Number(g.cy) > 0 ? Math.min(100, Number(g.cy)) : 8
+      def = `<radialGradient id="${gid}" cx="${cx}%" cy="${cy}%" r="72%">${stops}</radialGradient>`
     } else {
       const rad = (Number(g.angle) || 0) * Math.PI / 180
       const x1 = 0.5 - Math.cos(rad) / 2
       const y1 = 0.5 - Math.sin(rad) / 2
       const x2 = 0.5 + Math.cos(rad) / 2
       const y2 = 0.5 + Math.sin(rad) / 2
-      def = `<linearGradient id="g" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}">${stops}</linearGradient>`
+      def = `<linearGradient id="${gid}" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}">${stops}</linearGradient>`
     }
-    return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><defs>${def}</defs><rect width="${w}" height="${h}" fill="url(#g)"/></svg>`
+    return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><defs>${def}</defs><rect width="${w}" height="${h}" fill="url(#${gid})"/></svg>`
+  }
+
+  // pngSize reads IHDR width/height from a data:image/png URI.
+  const pngSize = dataURI => {
+    const m = /^data:image\/png;base64,(.+)$/i.exec(String(dataURI || ''))
+    if (!m) return null
+    const b = Buffer.from(m[1], 'base64')
+    if (b.length < 24 || b[0] !== 0x89 || b[1] !== 0x50) return null
+    const w = b.readUInt32BE(16)
+    const h = b.readUInt32BE(20)
+    if (!w || !h) return null
+    return { w, h }
+  }
+
+  // fitImageBox matches ast-image object-fit. pptxgenjs stretches to the
+  // authored box by default, which squash-distorts logos (Apple in a wide well).
+  const fitImageBox = (box, imgData, fit) => {
+    const mode = String(fit || 'contain').toLowerCase()
+    if (mode === 'fill' || mode === 'none') return box
+    const nat = pngSize(imgData)
+    if (!nat) return box
+    const scale = mode === 'cover'
+      ? Math.max(box.w / nat.w, box.h / nat.h)
+      : Math.min(box.w / nat.w, box.h / nat.h)
+    const w = nat.w * scale
+    const h = nat.h * scale
+    return {
+      x: box.x + (box.w - w) / 2,
+      y: box.y + (box.h - h) / 2,
+      w, h,
+    }
   }
 
   // Theme-token resolution mirrors the HTML export (:root defaults in
@@ -139,7 +173,7 @@ try {
   const arrowMap = { arrow: 'triangle', triangle: 'triangle', stealth: 'stealth', diamond: 'diamond', oval: 'oval', open: 'arrow', none: 'none' }
   const arrowType = value => arrowMap[String(value || '')] || null
 
-  const render = (slide, node, ox = 0, oy = 0) => {
+  const render = (slide, node, ox = 0, oy = 0, slideKey = '') => {
     const box = options(node)
     box.x += ox
     box.y += oy
@@ -209,7 +243,7 @@ try {
           // pptxgenjs 4.x has no native gradient fill. Emit the same SVG the
           // HTML renderer uses so PPTX is not a solid first-stop (all-black
           // product decks). Counted as vector.
-          const svg = gradientShapeSVG(node)
+          const svg = gradientShapeSVG(node, slideKey || slide._slideNum)
           slide.addImage({
             ...box,
             data: 'image/svg+xml;base64,' + Buffer.from(svg).toString('base64'),
@@ -262,8 +296,9 @@ try {
           warnings.push(`Image ${node.id || 'unknown'} skipped: no resolvable image data (asset-ref not in deck assets or not a data:image/*)`)
           break
         }
+        const fitted = fitImageBox(box, imgData, node.props?.fit)
         slide.addImage({
-          ...box, data: imgData,
+          ...fitted, data: imgData,
           ...(node.flipH ? { flipH: true } : {}),
           ...(node.flipV ? { flipV: true } : {}),
           ...(node.rot ? { rotate: Number(node.rot) } : {}),
@@ -283,7 +318,7 @@ try {
       }
       case 'group':
         counts.native++
-        for (const child of node.children || []) render(slide, child, box.x, box.y)
+        for (const child of node.children || []) render(slide, child, box.x, box.y, slideKey)
         break
       default:
         counts.unsupported++
@@ -294,7 +329,7 @@ try {
   for (const sourceSlide of scene.slides || []) {
     const slide = pptx.addSlide()
     slide.background = { color: color(scene.theme?.surface || 'FFFFFF') }
-    for (const node of sourceSlide.nodes || []) render(slide, node)
+    for (const node of sourceSlide.nodes || []) render(slide, node, 0, 0, sourceSlide.id)
     if (sourceSlide.notes) slide.addNotes(sourceSlide.notes)
   }
 

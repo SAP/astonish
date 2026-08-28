@@ -244,8 +244,11 @@ func TestProductCatalogOmitsSkinMissingSlots(t *testing.T) {
 			foundItem = true
 		}
 	}
-	if !foundThesis || !foundItem {
-		t.Fatalf("product closer must require thesis + takeaway chips, fillSlots=%v", closer.FillSlots)
+	if !foundThesis {
+		t.Fatalf("product closer must require thesis, fillSlots=%v", closer.FillSlots)
+	}
+	if foundItem {
+		t.Fatalf("product closer takeaways must be optional, not required chips: %#v", closer.FillSlots)
 	}
 	wantCover := []string{"eyebrow", "headline", "dek", "meta_1_label", "meta_1_value", "meta_2_label", "meta_2_value"}
 	for _, id := range wantCover {

@@ -335,12 +335,15 @@ func TestBodyCardsFillToFooter(t *testing.T) {
 }
 
 func TestProductBackgroundIsGradient(t *testing.T) {
-	markup, err := RenderRecipe(RecipeThreeUp, ProductSkin(nil), nil, Chrome{Page: 1, Total: 8}, sampleFills(RecipeThreeUp))
+	markup, err := RenderRecipe(RecipeCover, ProductSkin(nil), nil, Chrome{Page: 1, Total: 8}, sampleFills(RecipeCover))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(markup, `id="bg-gradient"`) || !strings.Contains(markup, `"kind":"radial"`) {
-		t.Fatalf("product bg should be a radial gradient:\n%s", markup)
+		t.Fatalf("product cover bg should be a radial gradient:\n%s", markup)
+	}
+	if !strings.Contains(markup, `"cx":80`) || !strings.Contains(markup, `"cy":8`) {
+		t.Fatalf("product cover glare should be top-right:\n%s", markup)
 	}
 	slide, diags, err := ParseSlide(markup)
 	if err != nil {
@@ -357,6 +360,79 @@ func TestProductBackgroundIsGradient(t *testing.T) {
 	}
 	if strings.EqualFold(bg.Gradient.Stops[0].Color, ProductSkin(nil).Surface) {
 		t.Fatal("first gradient stop must be a visible accent wash, not the surface")
+	}
+}
+
+func TestProductBodyHasNoGradientWash(t *testing.T) {
+	markup, err := RenderRecipe(RecipeThreeUp, ProductSkin(nil), nil, Chrome{Page: 2, Total: 8}, sampleFills(RecipeThreeUp))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(markup, `id="bg-gradient"`) || strings.Contains(markup, `"kind":"radial"`) {
+		t.Fatalf("product body slides are solid surface, not a wash:\n%s", markup)
+	}
+	slide, _, err := ParseSlide(markup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bg := nodeByID(slide.Nodes, "bg")
+	if bg.ID == "" {
+		t.Fatal("body still needs a solid bg")
+	}
+	if bg.Gradient != nil {
+		t.Fatalf("body bg must not carry a gradient: %#v", bg.Gradient)
+	}
+}
+
+func TestProductCloserIsCoverLike(t *testing.T) {
+	markup, err := RenderRecipe(RecipeCloser, ProductSkin(nil), nil, Chrome{Page: 8, Total: 8, DeckTitle: "deck"}, sampleFills(RecipeCloser))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(markup, `id="close-card-1"`) {
+		t.Fatalf("product closer must not paint gray chips:\n%s", markup)
+	}
+	if !strings.Contains(markup, `"cx":18`) || !strings.Contains(markup, `"cy":88`) {
+		t.Fatalf("product closer glare should be bottom-left:\n%s", markup)
+	}
+	if !strings.Contains(markup, `id="thesis"`) || !strings.Contains(markup, `id="headline"`) {
+		t.Fatal("product closer needs headline + thesis like the cover")
+	}
+	filled := sampleFills(RecipeCloser)
+	filled["item_1_title"] = "Apple"
+	filled["item_1_body"] = "A company."
+	withItems, err := RenderRecipe(RecipeCloser, ProductSkin(nil), nil, Chrome{Page: 8, Total: 8}, filled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(withItems, `id="close-card-1"`) {
+		t.Fatal("optional takeaways must stay a type row, not a card")
+	}
+	if !strings.Contains(withItems, `id="item_1_title"`) || !strings.Contains(withItems, `id="close-idx-1"`) {
+		t.Fatalf("optional takeaway type row missing:\n%s", withItems)
+	}
+}
+
+func TestProductThreeUpHasNoGraySlab(t *testing.T) {
+	markup, err := RenderRecipe(RecipeThreeUp, ProductSkin(nil), nil, Chrome{Page: 1, Total: 8}, sampleFills(RecipeThreeUp))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(markup, `geom="roundRect"`) && strings.Contains(markup, `id="card-1"`) {
+		if strings.Contains(markup, `id="card-1"`) && strings.Contains(markup, `h="440"`) {
+			t.Fatalf("product three-up should not be a filled slab:\n%s", markup)
+		}
+	}
+	if !strings.Contains(markup, `id="card-1"`) {
+		t.Fatal("product three-up should keep a hairline named card-1")
+	}
+	slide, _, err := ParseSlide(markup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	card := nodeByID(slide.Nodes, "card-1")
+	if card.Geometry.H != 1 {
+		t.Fatalf("product three-up card-1 should be a hairline, h=%d", card.Geometry.H)
 	}
 }
 

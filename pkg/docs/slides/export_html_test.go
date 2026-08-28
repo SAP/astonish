@@ -368,6 +368,54 @@ func TestWriteThemeCSSSkipsTemplateName(t *testing.T) {
 	}
 }
 
+func TestHTMLGradientIDsAreSlideScoped(t *testing.T) {
+	grad := func(cx, cy int) *Gradient {
+		return &Gradient{Kind: "radial", Cx: cx, Cy: cy, Stops: []GradientStop{
+			{Pos: 0, Color: "#8B5CF6"}, {Pos: 100, Color: "#0B0D0F"},
+		}}
+	}
+	scene := SceneGraph{
+		SchemaVersion: SchemaV1,
+		Title:         "Two washes",
+		Slides: []Slide{
+			{ID: "cover", Nodes: []Node{
+				{ID: "bg", Type: "shape", Geometry: Geometry{W: 1920, H: 1080}, Geom: "rect", Fill: "#0B0D0F", Gradient: grad(80, 8)},
+				{ID: "t", Type: "text", Geometry: Geometry{W: 100, H: 40}, Text: "A"},
+			}},
+			{ID: "closer", Nodes: []Node{
+				{ID: "bg", Type: "shape", Geometry: Geometry{W: 1920, H: 1080}, Geom: "rect", Fill: "#0B0D0F", Gradient: grad(18, 88)},
+				{ID: "t", Type: "text", Geometry: Geometry{W: 100, H: 40}, Text: "B"},
+			}},
+		},
+	}
+	doc := mustExport(t, HTMLExporter{RuntimeJS: []byte(`window.runtimeReady=true`)}, scene)
+	if strings.Contains(doc, `id="gradbg"`) {
+		t.Fatal("duplicate id=gradbg would make PDF paint the cover wash on every slide")
+	}
+	if !strings.Contains(doc, `id="grad-cover-bg"`) || !strings.Contains(doc, `id="grad-closer-bg"`) {
+		t.Fatalf("expected slide-scoped gradient ids")
+	}
+	if !strings.Contains(doc, `url(#grad-cover-bg)`) || !strings.Contains(doc, `url(#grad-closer-bg)`) {
+		t.Fatal("rects must point at their own gradient id")
+	}
+}
+
+func TestExportRadialOriginFromTheme(t *testing.T) {
+	scene := SceneGraph{
+		SchemaVersion: SchemaV1,
+		Title:         "Closer",
+		Slides: []Slide{{ID: "s1", Nodes: []Node{
+			{ID: "bg", Type: "shape", Geometry: Geometry{W: 1920, H: 1080}, Geom: "rect", Fill: "#0B0D0F",
+				Gradient: &Gradient{Kind: "radial", Cx: 18, Cy: 88, Stops: []GradientStop{{Pos: 0, Color: "#8B5CF6"}, {Pos: 100, Color: "#0B0D0F"}}}},
+			{ID: "t", Type: "text", Geometry: Geometry{W: 100, H: 40}, Text: "Hi"},
+		}}},
+	}
+	doc := mustExport(t, HTMLExporter{RuntimeJS: []byte(`window.runtimeReady=true`)}, scene)
+	if !strings.Contains(doc, `cx="18%"`) || !strings.Contains(doc, `cy="88%"`) {
+		t.Fatalf("closer glare origin missing:\n%s", doc[:min(800, len(doc))])
+	}
+}
+
 func TestExportLoadsOnlyDeclaredDeckFonts(t *testing.T) {
 	scene := SceneGraph{
 		SchemaVersion: SchemaV1,

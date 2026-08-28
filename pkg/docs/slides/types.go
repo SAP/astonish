@@ -39,9 +39,13 @@ type GradientStop struct {
 }
 
 // Gradient describes a linear or radial gradient fill for an ast-shape.
+// Cx/Cy are radial origin percents (0–100). Zero means the exporter default
+// (top-right 80/8). The product closer uses ~18/88 (bottom-left).
 type Gradient struct {
 	Kind  string         `json:"kind"` // linear | radial
 	Angle int            `json:"angle,omitempty"`
+	Cx    int            `json:"cx,omitempty"`
+	Cy    int            `json:"cy,omitempty"`
 	Stops []GradientStop `json:"stops"`
 }
 

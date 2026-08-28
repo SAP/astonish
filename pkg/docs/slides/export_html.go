@@ -145,7 +145,7 @@ func renderSlide(out *bytes.Buffer, slide Slide, assets map[string]string) {
 	}
 	out.WriteString(`>`)
 	for _, node := range slide.Nodes {
-		renderNode(out, node, assets)
+		renderNode(out, node, assets, slide.ID)
 	}
 	if slide.Notes != "" {
 		out.WriteString(`<ast-notes>` + html.EscapeString(slide.Notes) + `</ast-notes>`)
@@ -153,7 +153,7 @@ func renderSlide(out *bytes.Buffer, slide Slide, assets map[string]string) {
 	out.WriteString(`</ast-slide>`)
 }
 
-func renderNode(out *bytes.Buffer, node Node, assets map[string]string) {
+func renderNode(out *bytes.Buffer, node Node, assets map[string]string, slideID string) {
 	tag := "ast-" + node.Type
 	if !allowedNodeTag(tag) {
 		return
@@ -215,7 +215,7 @@ func renderNode(out *bytes.Buffer, node Node, assets map[string]string) {
 	out.WriteByte('>')
 	// v2 fidelity: rich shape rendering via inline SVG.
 	if tag == "ast-shape" && shapeNeedsSVG(node) {
-		writeShapeSVG(out, node)
+		writeShapeSVG(out, node, slideID)
 	}
 	// v2 fidelity: rich text runs.
 	if tag == "ast-text" && len(node.Runs) > 0 {
@@ -224,7 +224,7 @@ func renderNode(out *bytes.Buffer, node Node, assets map[string]string) {
 		out.WriteString(html.EscapeString(node.Text))
 	}
 	for _, child := range node.Children {
-		renderNode(out, child, assets)
+		renderNode(out, child, assets, slideID)
 	}
 	out.WriteString(`</` + tag + `>`)
 }
@@ -328,7 +328,7 @@ func dashArray(dash string) string {
 // writeShapeSVG emits an inline SVG that fills the node box, honoring geom,
 // path, gradient, fill/line/dash and arrow-head props. All content is inline
 // (no external URLs), satisfying the existing CSP.
-func writeShapeSVG(out *bytes.Buffer, node Node) {
+func writeShapeSVG(out *bytes.Buffer, node Node, slideID string) {
 	w := node.Geometry.W
 	h := node.Geometry.H
 	if w <= 0 {
@@ -339,11 +339,14 @@ func writeShapeSVG(out *bytes.Buffer, node Node) {
 	}
 	vb := fmt.Sprintf("0 0 %d %d", w, h)
 
-	// Resolve fill.
+	// Resolve fill. Gradient/marker ids must be unique across the whole
+	// document: every recipe slide uses id="bg", so id="gradbg" would make
+	// print/PDF paint the first slide's wash on every page (including the
+	// closer's bottom-left glare).
 	var fill string
 	gradID := ""
 	if node.Gradient != nil {
-		gradID = "grad" + safeID(node.ID)
+		gradID = "grad-" + safeID(slideID) + "-" + safeID(node.ID)
 		fill = "url(#" + gradID + ")"
 	} else if isRawColor(node.Fill) {
 		fill = resolveColor(node.Fill)
@@ -368,8 +371,8 @@ func writeShapeSVG(out *bytes.Buffer, node Node) {
 	tailEnd, _ := propString(node, "tail-end")
 	wantStartMarker := tailEnd == "arrow" || tailEnd == "triangle"
 	wantEndMarker := headEnd == "arrow" || headEnd == "triangle"
-	markerStartID := "mstart" + safeID(node.ID)
-	markerEndID := "mend" + safeID(node.ID)
+	markerStartID := "mstart-" + safeID(slideID) + "-" + safeID(node.ID)
+	markerEndID := "mend-" + safeID(slideID) + "-" + safeID(node.ID)
 
 	out.WriteString(`<svg style="width:100%;height:100%" viewBox="` + vb + `" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">`)
 
@@ -469,7 +472,8 @@ func writeShapePaint(out *bytes.Buffer, fill, stroke, strokeWidth, dash, markerS
 
 func writeGradientDef(out *bytes.Buffer, id string, g *Gradient) {
 	if g.Kind == "radial" {
-		out.WriteString(`<radialGradient id="` + id + `" cx="80%" cy="8%" r="72%">`)
+		cx, cy := radialOrigin(g)
+		fmt.Fprintf(out, `<radialGradient id="%s" cx="%d%%" cy="%d%%" r="72%%">`, id, cx, cy)
 		writeGradientStops(out, g.Stops)
 		out.WriteString(`</radialGradient>`)
 		return
@@ -486,6 +490,32 @@ func writeGradientDef(out *bytes.Buffer, id string, g *Gradient) {
 		id, fmtCoord(x1), fmtCoord(y1), fmtCoord(x2), fmtCoord(y2))
 	writeGradientStops(out, g.Stops)
 	out.WriteString(`</linearGradient>`)
+}
+
+// radialOrigin is the wash center. Cover/body default top-right; a closer
+// that sets cx/cy (e.g. 18/88) puts the glare bottom-left.
+func radialOrigin(g *Gradient) (cx, cy int) {
+	cx, cy = 80, 8
+	if g == nil {
+		return cx, cy
+	}
+	if g.Cx != 0 {
+		cx = clampPct(g.Cx)
+	}
+	if g.Cy != 0 {
+		cy = clampPct(g.Cy)
+	}
+	return cx, cy
+}
+
+func clampPct(v int) int {
+	if v < 0 {
+		return 0
+	}
+	if v > 100 {
+		return 100
+	}
+	return v
 }
 
 func writeGradientStops(out *bytes.Buffer, stops []GradientStop) {

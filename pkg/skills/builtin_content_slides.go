@@ -5,7 +5,7 @@ package skills
 // the working contract: intake, official bookends, recipe body, never reprint chrome.
 
 const BuiltinSlides = "# Astonish Slides — Authoring\n" + `
-Load this skill for a presentation, slide deck, PowerPoint, or ` + "`.pptx`" + `.
+Load this skill for slides, a slide deck, a slideshow, a slide show, a presentation, PowerPoint, or ` + "`.pptx`" + `. The always-on system-prompt pointer is not a substitute — you must ` + "`skill_lookup(\"slides\")`" + ` even if you already know the intake questions.
 
 **Start from a template.** Never ship an unstyled deck.
 **When a template is active, author with ` + "`fill_slides`" + ` (the whole deck in one call).** Do not copy ast-slide markup and do not call ` + "`write_slide`" + `. ` + "`fill_slide`" + ` is only for a later single-slide edit.
@@ -68,13 +68,13 @@ Do not emit one ` + "`fill_slide`" + ` per slide; that is one LLM round-trip per
    - Six principles → ` + "`recipe-numbered-grid`" + `
    - Argument + lesson → ` + "`recipe-callout-rail`" + `
    - Giant year + 3 points → ` + "`recipe-year-hero`" + `
-   - Last slide → official ` + "`closing`" + ` / ` + "`closing-N`" + ` when listed; otherwise ` + "`recipe-closer`" + `. Corporate closer: thesis + 3 takeaways. Product closer: quote (` + "`headline`" + `/` + "`headline_2`" + `) + one-line ` + "`thesis`" + ` + 3 takeaway chips. Eyebrow is LEGACY / THE ASK, never a date range. Never ship a closer that is only two words on empty canvas.
+   - Last slide → official ` + "`closing`" + ` / ` + "`closing-N`" + ` when listed; otherwise ` + "`recipe-closer`" + `. Corporate closer: thesis + 3 takeaways. Product closer is **cover-like**: split ` + "`headline`" + `/` + "`headline_2`" + ` + ` + "`thesis`" + ` (glare bottom-left). Optional ` + "`cta_kicker`" + `/` + "`cta_body`" + ` as GET STARTED. Optional numbered takeaways as a type row — never three gray chips. Eyebrow is LEGACY / THE ASK, never a date range. Never ship a closer that is only two words on empty canvas.
    - Problem / why-now → ` + "`recipe-statement-evidence`" + `
-   - Comparison table → ` + "`recipe-data-table`" + `
+   - Comparison table → ` + "`recipe-data-table`" + ` (eras, products, options, specs)
    - Architecture / layers → ` + "`recipe-layer-stack`" + `
    - How it works → ` + "`recipe-process-terminal`" + `
    **Structured variation (do this):** put ` + "`headline_accent`" + ` as the exact phrase in the headline to paint in accent (one phrase). Set ` + "`emphasis`" + ` to ` + "`\"1\"`" + `, ` + "`\"2\"`" + `, or ` + "`\"3\"`" + ` so exactly one card/column/step is the recommended path. Fill ` + "`detail_1_*`" + ` / ` + "`detail_2_*`" + ` on stat-row when you have supporting points. On ` + "`modern`" + `, fill ` + "`prompt`" + ` on the cover and ` + "`cta_body`" + ` on the closer; use ` + "`date`" + ` as the ` + "`// kicker`" + ` line.
-   **A chapter is an eyebrow on a full content slide.** Do not insert empty section dividers. Prefer 8–16 dense slides over 18 sparse ones (honor the length they picked). Use at least 3 different recipe-* kinds in a deck longer than 6 slides — mix card layouts with table / stack / terminal / statement-evidence so pages are not all the same boxes.
+   **A chapter is an eyebrow on a full content slide.** Do not insert empty section dividers. Prefer 8–16 dense slides over 18 sparse ones (honor the length they picked). Use at least 3 different recipe-* kinds in a deck longer than 6 slides. Prefer split-narrative, year-hero, statement-evidence, data-table, process-terminal over repeating three-up / numbered-grid. On ` + "`modern`" + ` decks of 8+ slides include ` + "`recipe-data-table`" + ` at least once when comparing eras, products, or options — an all-card deck is a defect.
    **Fill every required text slot.** The server rejects a slide that leaves a required slot empty. If you have 3 items, use three-up, not a 6-cell grid.
    **Titles are takeaways.** Complete sentence, or a two-line split headline that states the claim — not "Early life" or "Market Overview".
    **Density.** Headline + 2–4 content blocks. Body columns are short paragraphs (~40–70 words). Cards/items are a complete thought (~12–22 words). Empty canvas is a defect; 6×6 is a bullet cap, not permission to leave the rest blank.
@@ -137,6 +137,6 @@ A pptx import supplies the style guide (colors, fonts, logo, legal), official ti
 - [ ] Did not ask to generate images; cover image is slidesImagePicker (template / upload / none) or Modern logo attach / none
 - [ ] create_deck with template (+ title, description, palette / titleKind / titleImage / closingKind as chosen — titleKind is the ask_user option id). slug is a hint; persist slug is session-unique
 - [ ] Slide 0 is the chosen official title kind when listed (not a different variant); last is official closing when listed, else recipe-closer; body is recipe-*; cover image / Modern logo only if they picked or attached one
-- [ ] Whole deck via one fill_slides call; official covers use catalog fillSlots; every required slot filled; chapters are eyebrows not empty dividers; at least 3 recipe kinds on a long deck
+- [ ] Whole deck via one fill_slides call; official covers use catalog fillSlots; every required slot filled; chapters are eyebrows not empty dividers; at least 3 recipe kinds on a long deck; Modern includes recipe-data-table when comparing; closer is cover-like (not three chips)
 - [ ] validate_deck clean; review_deck warnings resolved
 `

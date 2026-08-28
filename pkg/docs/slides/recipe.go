@@ -157,7 +157,7 @@ func allRecipeMeta() []recipeMeta {
 		{
 			Kind:    RecipeCloser,
 			Title:   "Closer",
-			Summary: "Last slide. Corporate: thesis plus 3 takeaway cards. Product: quote, one-line thesis, 3 takeaway chips — never a lone headline on empty canvas.",
+			Summary: "Last slide. Corporate: thesis plus 3 takeaway cards. Product: cover-like quote + thesis, inverted glare, optional CTA — not three gray chips.",
 			Slots: append([]themes.SlotHint{
 				{ID: "eyebrow", Role: "label", Hint: "Closer kicker"},
 				{ID: "headline", Role: "title", Hint: "Takeaway title line 1"},
@@ -167,7 +167,7 @@ func allRecipeMeta() []recipeMeta {
 				{ID: "thesis_accent", Role: "optional", Hint: "Exact substring of thesis to paint in accent"},
 				{ID: "cta_kicker", Role: "optional", Hint: "Closing CTA kicker (Get started)"},
 				{ID: "cta_body", Role: "optional", Hint: "Install commands or next step, one per line"},
-			}, itemSlots(3, false)...),
+			}, optionalItemSlots(3)...),
 		},
 		{
 			Kind:    RecipeStatementEvidence,
@@ -292,6 +292,17 @@ func itemSlots(n int, withKicker bool) []themes.SlotHint {
 			themes.SlotHint{ID: fmt.Sprintf("item_%d_title", i), Role: "heading", Hint: fmt.Sprintf("Item %d heading, 1–6 words", i)},
 			themes.SlotHint{ID: fmt.Sprintf("item_%d_body", i), Role: "body", Hint: fmt.Sprintf("Item %d complete sentence, 12–22 words", i)},
 		)
+	}
+	return out
+}
+
+func optionalItemSlots(n int) []themes.SlotHint {
+	out := itemSlots(n, false)
+	for i := range out {
+		out[i].Role = "optional"
+		if strings.HasSuffix(out[i].ID, "_title") {
+			out[i].Hint = "Optional numbered takeaway heading (product closer: type row, not a card)"
+		}
 	}
 	return out
 }
@@ -550,6 +561,12 @@ func (b *recipeBuilder) panel(id string, x, y, w, h int, emphasized bool) {
 	if !ok {
 		return
 	}
+	// Product default is open canvas: a top hairline, not a gray roundRect.
+	// Emphasized cards and inset() furniture still get a filled panel.
+	if b.isProduct() && !emphasized {
+		b.hairline(id, x, y, w)
+		return
+	}
 	fill := b.pal.panel
 	line := b.pal.line
 	if emphasized {
@@ -562,14 +579,30 @@ func (b *recipeBuilder) panel(id string, x, y, w, h int, emphasized bool) {
 			line = b.pal.accent
 		}
 	}
+	b.roundPanel(id, x, y, w, h, fill, line)
+}
+
+// inset is a filled product panel used for furniture (terminal), not content cards.
+func (b *recipeBuilder) inset(id string, x, y, w, h int) {
+	x, y, w, h, ok := clampCanvas(x, y, w, h)
+	if !ok {
+		return
+	}
+	b.roundPanel(id, x, y, w, h, b.pal.panel, b.pal.line)
+}
+
+func (b *recipeBuilder) hairline(id string, x, y, w int) {
+	b.shape(id, "rect", x, y, w, 1, b.pal.line, true)
+}
+
+func (b *recipeBuilder) roundPanel(id string, x, y, w, h int, fill, line string) {
 	extra := ""
 	if line != "" {
 		extra = fmt.Sprintf(` line="%s" line-width="1"`, line)
 	}
-	dec := ""
 	b.parts = append(b.parts, fmt.Sprintf(
-		`<ast-shape id="%s" kind="rect" x="%d" y="%d" w="%d" h="%d" geom="roundRect" fill="%s"%s alt=""%s></ast-shape>`,
-		html.EscapeString(id), x, y, w, h, fill, extra, dec))
+		`<ast-shape id="%s" kind="rect" x="%d" y="%d" w="%d" h="%d" geom="roundRect" fill="%s"%s alt=""></ast-shape>`,
+		html.EscapeString(id), x, y, w, h, fill, extra))
 }
 
 // want reports whether a named slot should be emitted. Required slots always
@@ -688,21 +721,19 @@ func (b *recipeBuilder) staticText(id string, x, y, w, h, size int, color, weigh
 }
 
 func (b *recipeBuilder) bg() {
-	if b.isProduct() {
-		b.productBG()
-		return
-	}
 	b.shape("bg", "rect", 0, 0, CanvasWidth, CanvasHeight, b.pal.surface, true)
 }
 
-// productBG paints an opaque radial wash (accent mixed into surface). Stops
-// are solid colors so HTML/PDF/PPTX do not depend on shape opacity. The first
-// stop stays clearly violet; it must still read as atmosphere, not a disk.
-func (b *recipeBuilder) productBG() {
+// productBGAt paints the bookend radial wash. Cover uses 80/8 (top-right);
+// closer uses 18/88 (bottom-left). Body slides stay a solid surface — the
+// glare is not a theme-wide background.
+func (b *recipeBuilder) productBGAt(cx, cy int) {
 	hi := mixHex(b.pal.accent, b.pal.surface, 0.30)
 	mid := mixHex(b.pal.accent, b.pal.surface, 0.72)
 	lo := b.pal.surface
-	payload := fmt.Sprintf(`{"kind":"radial","stops":[{"pos":0,"color":"%s"},{"pos":42,"color":"%s"},{"pos":100,"color":"%s"}]}`, hi, mid, lo)
+	payload := fmt.Sprintf(
+		`{"kind":"radial","cx":%d,"cy":%d,"stops":[{"pos":0,"color":"%s"},{"pos":42,"color":"%s"},{"pos":100,"color":"%s"}]}`,
+		cx, cy, hi, mid, lo)
 	b.parts = append(b.parts, fmt.Sprintf(
 		`<ast-shape id="bg" kind="rect" x="0" y="0" w="%d" h="%d" geom="rect" fill="%s" alt="" decorative="true"><script type="application/json" id="bg-gradient">%s</script></ast-shape>`,
 		CanvasWidth, CanvasHeight, html.EscapeString(lo), payload))
@@ -1106,10 +1137,10 @@ func RecipeGuideMarkdown() string {
 	var b strings.Builder
 	b.WriteString("## Layout types (recipe-*) — default body slides\n\n")
 	b.WriteString("Compose body slides from a recipe-* catalog entry. Official title/closing in the catalog are the bookends. Recipes use this template's ")
-	b.WriteString("**skin** (corporate: logo/legal/accent rule; product: dark canvas, mono rails, panels). ")
-	b.WriteString("Pick the type whose slot count matches the content. Mix card layouts with table, stack, and terminal so pages do not all look like the same boxes. ")
+	b.WriteString("**skin** (corporate: logo/legal/accent rule; product: dark canvas, mono rails, hairlines — not gray cards). ")
+	b.WriteString("Pick the type whose slot count matches the content. Mix split / year-hero / statement-evidence with table, stack, and terminal so pages do not all look like the same boxes. ")
 	b.WriteString("Optional `headline_accent` colors one phrase; `emphasis` (1/2/3) highlights one card. ")
-	b.WriteString("The catalog's fillSlots for this template is authoritative (product cover has two meta cells, optional third — not meta_4; product closer requires thesis + 3 takeaway chips). ")
+	b.WriteString("The catalog's fillSlots for this template is authoritative (product cover has two meta cells, optional third — not meta_4; product closer is cover-like: headline + thesis, optional CTA, optional numbered takeaways — not three gray chips). ")
 	b.WriteString("If the catalog lists title / title-N, slide 0 is that official cover (fill those slot ids, not recipe names). If it lists closing / closing-N, the last slide is that official end page. ")
 	b.WriteString("pattern-*, section, and agenda are not in the default catalog; fetch them with get_archetype only if the user asked. A chapter is an eyebrow on a full content slide — do not insert empty section dividers.\n\n")
 	for _, m := range allRecipeMeta() {

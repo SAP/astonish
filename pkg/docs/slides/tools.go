@@ -1182,9 +1182,9 @@ func createDeckCatalogInstructions(tmpl themes.Template, theme map[string]string
 	} else {
 		s += "Closer = recipe-closer. "
 	}
-	s += "Fill EVERY required text slot listed in this catalog's fillSlots (product closer requires thesis + 3 takeaway chips; product cover has two meta cells). " +
+	s += "Fill EVERY required text slot listed in this catalog's fillSlots (product closer requires headline + thesis, not three chips; product cover has two meta cells). " +
 		"Extra fill keys the skin does not emit are ignored. " +
-		"Vary at least three recipe-* kinds in a deck longer than 6 slides."
+		"Vary at least three recipe-* kinds in a deck longer than 6 slides; include recipe-data-table when comparing eras, products, or options."
 	return s
 }
 

@@ -494,8 +494,11 @@ func TestFillSlidesProductCoverAndCloser(t *testing.T) {
 	if closer.Slide == nil || !strings.Contains(closer.Slide.Content, "Stay hungry") {
 		t.Fatalf("closer missing fill: %#v", closer)
 	}
-	if !strings.Contains(closer.Slide.Content, `id="item_1_title"`) || !strings.Contains(closer.Slide.Content, "Apple") {
-		t.Fatalf("product closer missing takeaway chips:\n%s", closer.Slide.Content)
+	if strings.Contains(closer.Slide.Content, `id="close-card-1"`) {
+		t.Fatalf("product closer must not paint gray chips:\n%s", closer.Slide.Content)
+	}
+	if !strings.Contains(closer.Slide.Content, `"cy":88`) {
+		t.Fatalf("product closer glare should be bottom-left:\n%s", closer.Slide.Content)
 	}
 	if !strings.Contains(cover.Slide.Content, "bg-gradient") {
 		t.Fatalf("product cover missing background gradient:\n%s", cover.Slide.Content)

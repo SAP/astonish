@@ -17,6 +17,11 @@ func (e PPTXExporter) Export(ctx context.Context, scene SceneGraph, strictNative
 	if scene.SchemaVersion != SchemaV1 && scene.SchemaVersion != SchemaV2 {
 		return ExportResult{}, fmt.Errorf("unsupported slides schema version %d", scene.SchemaVersion)
 	}
+	// Flatten gradients to PNG before the Node worker. pptxgenjs SVG images
+	// write a bogus .png preview and share id="g", so PowerPoint shows the
+	// first slide's wash on every page and Quick Look shows a missing-image
+	// glyph. Raster origin follows Gradient.Cx/Cy (cover vs closer).
+	scene = rasterizeSceneGradients(scene)
 	data, err := json.Marshal(scene)
 	if err != nil {
 		return ExportResult{}, fmt.Errorf("marshal slide scene: %w", err)

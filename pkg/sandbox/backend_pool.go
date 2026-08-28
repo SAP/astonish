@@ -71,18 +71,18 @@ const backendExecTimeout = 5 * time.Minute
 // triggers the first network round-trip. Safe for concurrent Call().
 type backendNodeClient struct {
 	backend    Backend
-	sessionID  string // set by BindSession; stable after first call
-	templateID string // may be empty → backend default
+	sessionID  string   // set by BindSession; stable after first call
+	templateID string   // may be empty → backend default
 	layerChain []string // pre-resolved chain (K8s); nil → derive from templateID
-	image      string // per-template container image (OpenShell); empty → backend default
+	image      string   // per-template container image (OpenShell); empty → backend default
 	limits     ResourceLimits
 	sessionEnv map[string]string
 
-	mu         sync.Mutex
-	bound      bool          // BindSession has run
-	bindDone   chan struct{} // closed once the create/start round-trip finishes
-	bindErr    error         // captured on bindDone close
-	closed     bool          // Cleanup has run
+	mu       sync.Mutex
+	bound    bool          // BindSession has run
+	bindDone chan struct{} // closed once the create/start round-trip finishes
+	bindErr  error         // captured on bindDone close
+	closed   bool          // Cleanup has run
 	// networkAllowEndpoints are baked into OpenShell CreateSession when set
 	// before BindSession completes provisioning (see SetNetworkAllowEndpoints).
 	networkAllowEndpoints []NetworkAllowEndpoint
@@ -540,6 +540,14 @@ func (p *backendPool) GetBackend() Backend {
 	return p.backend
 }
 
+// SetSessionScope is a no-op for backend pools. The backend-agnostic pools
+// (K8s/OpenShell/mock) resolve their team-scoped session store inside the
+// Backend at construction time via BackendFromAppConfigWithSessions; the
+// registry is not swappable per session here. Per-session tenant routing for
+// those backends is a separate concern and not part of the Incus cross-tenant
+// container-isolation fix this method supports. Present to satisfy ToolNodePool.
+func (p *backendPool) SetSessionScope(_, _, _ string) {}
+
 func (p *backendPool) getOrCreate(sessionID, template string, chain []string, image string) ToolNodeClient {
 	if sessionID == "" {
 		return nil
@@ -699,3 +707,8 @@ func (p *singleClientPool) Alias(_, _ string) {}
 
 // Remove is a no-op for fleet single-client pools (the client is pinned).
 func (p *singleClientPool) Remove(_ string) {}
+
+// SetSessionScope is a no-op for fleet single-client pools. Fleet sessions bind
+// their own registry and org/team at wiring time (wireFleetSandbox), so there
+// is no per-session tenant resolution to perform here.
+func (p *singleClientPool) SetSessionScope(_, _, _ string) {}

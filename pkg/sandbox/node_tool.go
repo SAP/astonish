@@ -342,6 +342,17 @@ func (nt *NodeTool) getClientFromContext(ctx context.Context, sessionID string) 
 		tpl := store.SandboxTemplateFromContext(ctx)
 		chain := store.SandboxLayerChainFromContext(ctx)
 		image := store.SandboxImageFromContext(ctx)
+		// Resolve the caller's tenant from the live request context and record
+		// it for this session BEFORE the pool creates the client. Platform pools
+		// use this to persist the container record into the caller's own team
+		// schema. Without this, the pool would use whatever registry/team was
+		// bound when the process-wide shared chat agent was first constructed,
+		// sending every team's containers into a single schema (cross-tenant bug).
+		orgSlug := store.OrgSlugFromContext(ctx)
+		teamSlug := store.TeamSlugFromContext(ctx)
+		if orgSlug != "" || teamSlug != "" {
+			nt.pool.SetSessionScope(sessionID, orgSlug, teamSlug)
+		}
 		if len(chain) > 0 || image != "" {
 			// Use the full-context method when we have a chain and/or image.
 			return nt.pool.GetOrCreateWithImage(sessionID, tpl, chain, image)

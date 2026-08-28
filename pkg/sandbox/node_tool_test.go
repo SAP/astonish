@@ -18,11 +18,14 @@ import (
 
 // spyPool records which ToolNodePool method was called and with what args.
 type spyPool struct {
-	method   string
-	session  string
-	template string
-	chain    []string
-	image    string
+	method    string
+	session   string
+	template  string
+	chain     []string
+	image     string
+	scopeSess string
+	scopeOrg  string
+	scopeTeam string
 }
 
 func (s *spyPool) GetOrCreate(sessionID string) ToolNodeClient {
@@ -62,6 +65,12 @@ func (s *spyPool) GetBackend() Backend { return nil }
 func (s *spyPool) Alias(_, _ string) {}
 
 func (s *spyPool) Remove(_ string) {}
+
+func (s *spyPool) SetSessionScope(sessionID, orgSlug, teamSlug string) {
+	s.scopeSess = sessionID
+	s.scopeOrg = orgSlug
+	s.scopeTeam = teamSlug
+}
 
 // stubClient satisfies ToolNodeClient for test purposes.
 type stubClient struct{}
@@ -112,10 +121,11 @@ func (s *preseedSpyPool) GetOrCreateWithChain(string, string, []string) ToolNode
 func (s *preseedSpyPool) GetOrCreateWithImage(string, string, []string, string) ToolNodeClient {
 	return s.client
 }
-func (s *preseedSpyPool) Cleanup()            {}
-func (s *preseedSpyPool) GetBackend() Backend { return nil }
-func (s *preseedSpyPool) Alias(_, _ string)   {}
-func (s *preseedSpyPool) Remove(_ string)     {}
+func (s *preseedSpyPool) Cleanup()                       {}
+func (s *preseedSpyPool) GetBackend() Backend            { return nil }
+func (s *preseedSpyPool) Alias(_, _ string)              {}
+func (s *preseedSpyPool) Remove(_ string)                {}
+func (s *preseedSpyPool) SetSessionScope(_, _, _ string) {}
 
 type testNetworkPolicyStore struct {
 	rules []store.NetworkPolicyRule
@@ -305,6 +315,81 @@ func TestGetClientFromContext_TemplateNoChain(t *testing.T) {
 	}
 	if spy.template != "my-tpl" {
 		t.Fatalf("expected template 'my-tpl', got %q", spy.template)
+	}
+}
+
+func TestGetClientFromContext_PropagatesTenantScope(t *testing.T) {
+	// The caller's org/team from the live request context must be recorded on
+	// the session (SetSessionScope) before the pool creates a client, so the
+	// container record lands in the caller's own team schema. This is the fix
+	// for the cross-tenant sandbox container leak.
+	spy := &spyPool{}
+	nt := &NodeTool{pool: spy}
+
+	ctx := context.Background()
+	ctx = store.WithOrgSlug(ctx, "myorg")
+	ctx = store.WithTeamSlug(ctx, "test-b")
+
+	if client := nt.getClientFromContext(ctx, "session-scoped"); client == nil {
+		t.Fatal("expected non-nil client")
+	}
+	if spy.scopeSess != "session-scoped" {
+		t.Fatalf("expected scope session 'session-scoped', got %q", spy.scopeSess)
+	}
+	if spy.scopeOrg != "myorg" {
+		t.Fatalf("expected scope org 'myorg', got %q", spy.scopeOrg)
+	}
+	if spy.scopeTeam != "test-b" {
+		t.Fatalf("expected scope team 'test-b', got %q", spy.scopeTeam)
+	}
+}
+
+func TestGetClientFromContext_NoTenantScopeWhenSlugsAbsent(t *testing.T) {
+	// Without tenant slugs in context (e.g. personal/localhost single tenant),
+	// getClientFromContext must not call SetSessionScope, so the pool keeps its
+	// default registry behavior.
+	spy := &spyPool{}
+	nt := &NodeTool{pool: spy}
+
+	if client := nt.getClientFromContext(context.Background(), "session-plain"); client == nil {
+		t.Fatal("expected non-nil client")
+	}
+	if spy.scopeSess != "" || spy.scopeOrg != "" || spy.scopeTeam != "" {
+		t.Fatalf("expected no scope call, got sess=%q org=%q team=%q", spy.scopeSess, spy.scopeOrg, spy.scopeTeam)
+	}
+}
+
+func TestNodeClientPool_SessionScopeSelectsResolvedRegistry(t *testing.T) {
+	// SetSessionScope must resolve the team-scoped registry via the installed
+	// resolver and use it (plus the org/team slugs) for the LazyNodeClient the
+	// pool creates for that session — instead of the pool's default registry.
+	defaultReg := newTestRegistry(t)
+	teamReg := newTestRegistry(t)
+
+	pool := NewNodeClientPool(nil, defaultReg, nil, "", nil)
+	var gotOrg, gotTeam string
+	pool.SetRegistryResolver(func(orgSlug, teamSlug string) *SessionRegistry {
+		gotOrg, gotTeam = orgSlug, teamSlug
+		if orgSlug == "myorg" && teamSlug == "test-b" {
+			return teamReg
+		}
+		return nil
+	})
+
+	pool.SetSessionScope("sess-1", "myorg", "test-b")
+	if gotOrg != "myorg" || gotTeam != "test-b" {
+		t.Fatalf("resolver got org=%q team=%q", gotOrg, gotTeam)
+	}
+
+	client := pool.GetOrCreate("sess-1")
+	if client == nil {
+		t.Fatal("expected non-nil client")
+	}
+	if client.sessRegistry != teamReg {
+		t.Fatal("expected client to use the resolved team registry, not the pool default")
+	}
+	if client.OrgSlug != "myorg" || client.TeamSlug != "test-b" {
+		t.Fatalf("expected org/team slugs on client, got org=%q team=%q", client.OrgSlug, client.TeamSlug)
 	}
 }
 

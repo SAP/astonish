@@ -58,6 +58,8 @@ func TestBuiltinSkills_IncludesSlides(t *testing.T) {
 		"slidesImagePicker",
 		"titleImage",
 		"room for one photo",
+		"never skip the title-variant question",
+		"example slides",
 		"per-session slug",
 	} {
 		if !strings.Contains(slides.Content, want) {

@@ -238,7 +238,7 @@ The skill instructs the model to:
 
 1. Run **iterative intake** (one `ask_user` per turn): audience, length, then who picks the template. Do **not** ask to generate images. The first tool after `skill_lookup("slides")` is `ask_user`, not `create_deck`. Skip a question only when that fact is already explicit (named audience, count, template, or "you pick" / "don't ask, just make it"). A research constraint ("only with information you already have", "don't search") is **not** a skip. If they want to choose the template, `slidesTemplatePicker`. If they delegate, pick and say why in one line. Inferring tone is not permission to choose. Title variant (when 2+) happens **before** `create_deck`; `titleKind` is the `ask_user` option id (the catalog kind).
 2. After the template is known: title variant if `count(title*) > 1` (layout chrome; sample photos stripped); if that title has a `ph-pic-*` well, yes/no then `slidesImagePicker` for one template photo (`titleImage`); palette if the template has `palettes` (Product Deck); closing variant if `count(closing*) > 1`.
-3. `create_deck` with `template` (+ `palette` / `titleKind` / `titleImage` / `closingKind`). Catalog is `recipe-*` plus official title/closing only.
+3. `create_deck` with `template` (+ `palette` / `titleKind` / `titleImage` / `closingKind`). **`titleKind` is required when the template has 2+ title* covers; `titleImage` (`sha256-…` or `none`) is required when that cover has a `ph-pic` well** — omitting them is an error, not a skip. Catalog is `recipe-*` plus official title/closing only.
 4. Plan the story as jobs in one `fill_slides` call. Slide 0 is the official title family when listed, else `recipe-cover`. Last slide is official closing when listed, else `recipe-closer`. Body is `recipe-*`. Prefer 8–16 dense slides (honor the length they picked). At least three different `recipe-*` kinds on a deck longer than six slides.
 5. Titles are takeaways (complete sentence or two-line split headline), not topic labels. Official covers use that variant’s `fillSlots` (`ph-*` / `{{TITLE}}`), not recipe ids.
 6. Density: headline + 2–4 content blocks. Cards/items are a complete thought (~12–22 words). Body columns are short paragraphs (~40–70 words). 6×6 is a **bullet cap**, not permission to leave the canvas blank.
@@ -858,8 +858,10 @@ archetype." Same-layout borrow only: a title that never appears as a filled
 sample does **not** inherit a photo from another cover (that was painting the
 same person/bike on every title tile). At authoring time the title picker
 strips sample photos so the user sees layout chrome; they may pick **one**
-photo from the template's example covers via `slidesImagePicker`. The layout's
-own decorative shape (e.g. the dark-green anvil) stays **behind** the borrowed
+photo from the template's example slides via `slidesImagePicker` (every large
+raster on `templateModel.slides[]`, not only the one photo left on the title
+layout). The layout's own decorative shape (e.g. the dark-green anvil) stays
+**behind** the borrowed
 image because `layoutToAsd` emits `bg → objects → placeholders` and paint
 order == document order (see the renderer contract below); no z-index is
 introduced.
@@ -1578,13 +1580,17 @@ sandboxed `iframe src=.../present#slide-N`:
 - **Served over HTTP.** Thumbnails are served at
   `GET /api/docs/slides/<deckSlug>/thumbnails/<idx>`
   (`GetSlidesDeckSlideThumbnailHandler`) with long-lived immutable cache headers.
-- **Empty fallback — never a live render.** The Slides view renders these images
-  by URL (`deckSlideThumbnailUrl`). When no thumbnail has been baked, the endpoint
-  returns `404` and the tile shows an **EMPTY placeholder icon**. It does **not**
-  fall back to a live `ast-deck` render — that is an explicit product invariant for
-  the thumbnail path. The large interactive deck viewer / Present / full-screen in
-  `SlidesDeckView.tsx` still render live via `/present`; only the small per-slide
-  thumbnails switched to baked images.
+- **Empty fallback on the Slides list — never a live render there.** The Slides
+  library view renders these images by URL (`deckSlideThumbnailUrl`). When no
+  thumbnail has been baked, the endpoint returns `404` and the tile shows an
+  **EMPTY placeholder icon**. It does **not** fall back to a live `ast-deck`
+  render on the library grid. The in-chat / panel **slide strip** is different:
+  it live-renders each slide's already-fetched ASD markup (same scaled `ast-deck`
+  path as the template picker) so the strip is not blank before `review_deck`
+  bakes PNGs. Click/keyboard navigation inside the present iframe posts
+  `ast-deck-change` to the parent so the strip selection stays in sync.
+  The large interactive deck viewer / Present / full-screen in
+  `SlidesDeckView.tsx` still render live via `/present`.
 - **Best-effort baking.** Deck finishing never fails when a browser is
   unavailable: a missing/sandbox-required-but-absent browser or any per-slide
   render error is logged and swallowed, leaving that slide's `ThumbnailRef` empty

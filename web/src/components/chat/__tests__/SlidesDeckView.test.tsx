@@ -6,6 +6,14 @@ import SlidesDeckView from '../SlidesDeckView'
 import * as slidesApi from '../../../api/slides'
 import '@testing-library/jest-dom'
 
+if (typeof (globalThis as { ResizeObserver?: unknown }).ResizeObserver === 'undefined') {
+  ;(globalThis as { ResizeObserver?: unknown }).ResizeObserver = class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  }
+}
+
 vi.mock('../../../api/slides', async () => {
   const actual = await vi.importActual<typeof import('../../../api/slides')>('../../../api/slides')
   return {
@@ -99,5 +107,39 @@ describe('SlidesDeckView refresh signal', () => {
     // The iframe src must NOT change on navigation (no reload / no remount).
     expect(frame.src).toBe(srcBefore)
     expect(frame).toBe(screen.getByTestId('slides-deck-frame'))
+  })
+
+  it('selects the matching strip tile when the iframe reports ast-deck-change', async () => {
+    vi.mocked(slidesApi.fetchSlidesDeck).mockResolvedValue(deckWith(5))
+    render(<SlidesDeckView deckSlug="d" refreshSignal={0} />)
+    await waitFor(() => expect(screen.getAllByTestId('slides-tile')).toHaveLength(5))
+
+    expect(screen.getAllByTestId('slides-tile')[0]).toHaveAttribute('aria-current', 'true')
+
+    fireEvent(window, new MessageEvent('message', { data: { type: 'ast-deck-change', index: 4 } }))
+
+    await waitFor(() => {
+      expect(screen.getAllByTestId('slides-tile')[4]).toHaveAttribute('aria-current', 'true')
+    })
+    expect(screen.getAllByTestId('slides-tile')[0]).not.toHaveAttribute('aria-current')
+  })
+
+  it('renders live slide markup in strip tiles when content is present', async () => {
+    vi.mocked(slidesApi.fetchSlidesDeck).mockResolvedValue({
+      deck: { id: 'd', slug: 'd', title: 'Deck', schemaVersion: 2, theme: { surface: '#0057D2', 'template-name': 'gco' } },
+      slides: [{
+        id: 'd-s0',
+        deckId: 'd',
+        position: 0,
+        title: 'Cover',
+        content: '<ast-slide id="s0"><ast-text id="h" x="40" y="40" w="400" h="80">Cover title</ast-text></ast-slide>',
+        schemaVersion: 2,
+      }],
+    })
+    render(<SlidesDeckView deckSlug="d" refreshSignal={0} />)
+    await waitFor(() => expect(screen.getByTestId('slides-tile')).toBeInTheDocument())
+    const tile = screen.getByTestId('slides-tile')
+    expect(tile.querySelector('ast-deck')).not.toBeNull()
+    expect(tile.textContent).toContain('Cover title')
   })
 })

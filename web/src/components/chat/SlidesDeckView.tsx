@@ -11,6 +11,7 @@ import {
   type SlidesExportFormat,
 } from '@/api/slides'
 import { cn } from '@/lib/utils'
+import SlidesArchetypeThumb from './questions/SlidesArchetypeThumb'
 
 interface SlidesDeckViewProps {
   deckSlug: string
@@ -103,6 +104,20 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
     if (total === 0) return
     postNav(boundedIndex)
   }, [boundedIndex, total, postNav])
+
+  // Click/keyboard nav happens inside the sandboxed present iframe. Mirror
+  // ast-deck-change messages onto the strip selection.
+  useEffect(() => {
+    const onMessage = (event: MessageEvent) => {
+      const data = event.data as { type?: string; index?: number } | null
+      if (!data || data.type !== 'ast-deck-change' || typeof data.index !== 'number') return
+      const index = data.index
+      if (!Number.isInteger(index) || index < 0) return
+      setSlideIndex(prev => (prev === index ? prev : index))
+    }
+    window.addEventListener('message', onMessage)
+    return () => window.removeEventListener('message', onMessage)
+  }, [])
 
   // Live slide additions: reload the embedded document only when the slide count
   // actually increased (a new write_slide landed), then restore the viewed
@@ -367,16 +382,26 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
               data-testid="slides-tile"
               onClick={() => setSlideIndex(index)}
               className={cn(
-                'flex h-14 w-24 shrink-0 flex-col items-start justify-between rounded-md border px-2 py-1.5 text-left transition-colors',
+                'relative h-14 w-24 shrink-0 overflow-hidden rounded-md border text-left transition-colors',
                 index === boundedIndex
-                  ? 'border-primary bg-primary/10'
+                  ? 'border-primary ring-1 ring-primary'
                   : 'border-border bg-card hover:border-primary/40'
               )}
             >
-              <span className="text-[11px] font-semibold text-foreground">{index + 1}</span>
-              {slide.title && (
-                <span className="line-clamp-2 text-[10px] leading-tight text-muted-foreground">{slide.title}</span>
+              {slide.content ? (
+                <SlidesArchetypeThumb
+                  markup={slide.content}
+                  theme={deck?.deck.theme}
+                  template={deck?.deck.theme?.['template-name']}
+                />
+              ) : (
+                <span className="absolute inset-0 flex items-center justify-center text-[11px] font-semibold text-muted-foreground">
+                  {index + 1}
+                </span>
               )}
+              <span className="pointer-events-none absolute left-1 top-0.5 rounded bg-black/50 px-1 text-[10px] font-semibold text-white">
+                {index + 1}
+              </span>
             </button>
           ))}
         </div>

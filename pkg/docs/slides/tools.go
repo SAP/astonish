@@ -90,8 +90,8 @@ type CreateDeckArgs struct {
 	Theme       map[string]string `json:"theme,omitempty" jsonschema:"Optional ASD theme token overrides. Prefer palette for Product Deck colorways instead of copying hex."`
 	Template    string            `json:"template,omitempty" jsonschema:"Template name from list_slide_templates after intake (user named it, delegated, or picked from slidesTemplatePicker). Seeds theme, fonts, and a slim catalog. Author with fill_slides; do not copy markup."`
 	Palette     string            `json:"palette,omitempty" jsonschema:"Optional palette id from the template palettes list (e.g. orange, light-violet). Overlays surface/ink/accent/muted. Prefer this over copying hex into theme."`
-	TitleKind   string            `json:"titleKind,omitempty" jsonschema:"Official title variant kind (title, title-2, …) chosen via ask_user. Stamped on the deck; slide 0 must use this kind when the catalog lists title family."`
-	TitleImage  string            `json:"titleImage,omitempty" jsonschema:"Asset-ref of the one template photo chosen via slidesImagePicker for the cover's image well. Omit or 'none' to leave the well empty — do not keep sample photos."`
+	TitleKind   string            `json:"titleKind,omitempty" jsonschema:"Required when the template has 2+ title* covers: the ask_user option id (title, title-2, …) or 'default' after they saw the picker. create_deck errors if this is omitted."`
+	TitleImage  string            `json:"titleImage,omitempty" jsonschema:"Required when the chosen cover has a ph-pic well: slidesImagePicker option id, or 'none' if they declined. Omit only when the cover has no image well."`
 	ClosingKind string            `json:"closingKind,omitempty" jsonschema:"Official closing variant kind (closing, closing-2, …). Last slide must use this kind when the catalog lists closing family."`
 	Source      string            `json:"source,omitempty" jsonschema:"Optional slug of an existing saved deck to clone. Copies theme, assets, and slides into this new session deck and sets source_slug so Save can offer Override Original."`
 }
@@ -462,6 +462,9 @@ func createDeck(ctx context.Context, args CreateDeckArgs) (DeckResult, error) {
 			merged[k] = v
 		}
 		merged[themeKeyTemplateName] = tmpl.Name
+		if err := requireBookendIntake(tmpl, args); err != nil {
+			return DeckResult{}, err
+		}
 		stampBookendKinds(tmpl, args, merged)
 		slug = resolvePersonalDeckSlug(ctx, svc, slug)
 		deck, err := svc.CreateDeckWithAssets(ctx, slug, title, description, merged, seedLightweightAssets(tmpl.Assets))
@@ -630,7 +633,14 @@ func applyFills(ctx context.Context, deckSlug, templateName string, specs []Fill
 		}
 	}
 	skin := SkinFor(tmpl)
+	lastPos := 0
+	for _, spec := range specs {
+		if spec.Position > lastPos {
+			lastPos = spec.Position
+		}
+	}
 	for i, spec := range specs {
+		spec = applyStampedBookendKind(spec, deck, lastPos)
 		arch, err := findTemplateArchetype(tmpl, spec.Kind, spec.Label)
 		if err != nil {
 			return empty, "", nil, fmt.Errorf("slides[%d]: %w", i, err)
@@ -905,17 +915,84 @@ func applyPaletteTokens(tmpl themes.Template, paletteID string, merged map[strin
 	return nil
 }
 
-func stampBookendKinds(tmpl themes.Template, args CreateDeckArgs, merged map[string]string) {
-	titleKind := strings.TrimSpace(args.TitleKind)
-	if strings.EqualFold(titleKind, "default") {
-		titleKind = ""
-	}
-	closingKind := strings.TrimSpace(args.ClosingKind)
-	if strings.EqualFold(closingKind, "default") {
-		closingKind = ""
-	}
+func requireBookendIntake(tmpl themes.Template, args CreateDeckArgs) error {
 	titles := officialBookendKinds(tmpl, "title")
 	closings := officialBookendKinds(tmpl, "closing")
+	titleKind := strings.TrimSpace(args.TitleKind)
+	closingKind := strings.TrimSpace(args.ClosingKind)
+	if len(titles) > 1 && titleKind == "" {
+		return fmt.Errorf("titleKind is required: template %q has %d cover layouts. Call ask_user with slidesTemplate=%q and slidesKind=title, then pass the option id as titleKind (or \"default\" after they see the picker)", tmpl.Name, len(titles), tmpl.Name)
+	}
+	resolvedTitle := titleKind
+	if strings.EqualFold(resolvedTitle, "default") || resolvedTitle == "" {
+		if len(titles) == 1 {
+			resolvedTitle = titles[0]
+		} else if strings.EqualFold(titleKind, "default") {
+			resolvedTitle = defaultOfficialKind(tmpl, titles)
+		}
+	}
+	if resolvedTitle != "" {
+		arch, err := findTemplateArchetype(tmpl, resolvedTitle, "")
+		if err == nil && firstImageSlotID(arch) != "" && strings.TrimSpace(args.TitleImage) == "" {
+			return fmt.Errorf("titleImage is required: cover %q has an image well. Ask yes/no then ask_user slidesImagePicker=true with slidesTemplate=%q, and pass the photo id or \"none\"", resolvedTitle, tmpl.Name)
+		}
+	}
+	if len(closings) > 1 && closingKind == "" {
+		return fmt.Errorf("closingKind is required: template %q has %d end-page layouts. Call ask_user with slidesTemplate=%q and slidesKind=closing, then pass the option id as closingKind (or \"default\" after they see the picker)", tmpl.Name, len(closings), tmpl.Name)
+	}
+	return nil
+}
+
+func defaultOfficialKind(tmpl themes.Template, kinds []string) string {
+	for _, k := range kinds {
+		arch, err := findTemplateArchetype(tmpl, k, "")
+		if err != nil {
+			continue
+		}
+		if firstImageSlotID(arch) == "" {
+			return k
+		}
+	}
+	if len(kinds) > 0 {
+		return kinds[0]
+	}
+	return ""
+}
+
+func applyStampedBookendKind(spec FillSlideSpec, deck *store.DeckManifest, lastPos int) FillSlideSpec {
+	if deck == nil || deck.Theme == nil {
+		return spec
+	}
+	if spec.Position == 0 {
+		if k := strings.TrimSpace(deck.Theme[themeKeyTitleKind]); k != "" {
+			if spec.Kind == "" || isOfficialBookendKind(spec.Kind) || spec.Kind == RecipeCover {
+				spec.Kind = k
+				spec.Label = ""
+			}
+		}
+	}
+	if spec.Position == lastPos && lastPos > 0 {
+		if k := strings.TrimSpace(deck.Theme[themeKeyClosingKind]); k != "" {
+			if spec.Kind == "" || isOfficialBookendKind(spec.Kind) || spec.Kind == RecipeCloser {
+				spec.Kind = k
+				spec.Label = ""
+			}
+		}
+	}
+	return spec
+}
+
+func stampBookendKinds(tmpl themes.Template, args CreateDeckArgs, merged map[string]string) {
+	titleKind := strings.TrimSpace(args.TitleKind)
+	closingKind := strings.TrimSpace(args.ClosingKind)
+	titles := officialBookendKinds(tmpl, "title")
+	closings := officialBookendKinds(tmpl, "closing")
+	if strings.EqualFold(titleKind, "default") {
+		titleKind = defaultOfficialKind(tmpl, titles)
+	}
+	if strings.EqualFold(closingKind, "default") {
+		closingKind = defaultOfficialKind(tmpl, closings)
+	}
 	if titleKind == "" && len(titles) == 1 {
 		titleKind = titles[0]
 	}
@@ -1209,42 +1286,79 @@ func isRasterDataURI(v string) bool {
 	return strings.HasPrefix(v, "data:image/") && !strings.HasPrefix(v, "data:image/svg+xml")
 }
 
-func collectTemplateHeroPhotos(tmpl themes.Template) []string {
+const maxCoverPhotoOptions = 18
+
+type heroPhoto struct {
+	Ref         string
+	Label       string
+	Description string
+}
+
+func collectTemplateHeroPhotos(tmpl themes.Template) []heroPhoto {
 	seen := map[string]bool{}
-	var out []string
-	add := func(ref string) {
+	var out []heroPhoto
+	add := func(ref, label, desc string, w, h int) {
 		ref = strings.TrimSpace(ref)
-		if ref == "" || seen[ref] {
+		if ref == "" || seen[ref] || len(out) >= maxCoverPhotoOptions {
 			return
 		}
-		if data, ok := tmpl.Assets[ref]; ok && !isRasterDataURI(data) {
+		if w <= 0 || h <= 0 || w*h < heroPhotoMinArea {
+			return
+		}
+		data, ok := tmpl.Assets[ref]
+		if !ok || !isRasterDataURI(data) {
 			return
 		}
 		seen[ref] = true
-		out = append(out, ref)
+		if strings.TrimSpace(label) == "" {
+			label = fmt.Sprintf("Photo %d", len(out)+1)
+		}
+		if strings.TrimSpace(desc) == "" {
+			desc = "From this template's example slides"
+		}
+		out = append(out, heroPhoto{Ref: ref, Label: label, Description: desc})
+	}
+	// Example slides first — these are the authored photos users expect to
+	// reuse on a cover, not the single raster left on the layout archetype.
+	if tmpl.Model != nil {
+		for i, slide := range tmpl.Model.Slides {
+			label := strings.TrimSpace(slide.Name)
+			if label == "" {
+				label = fmt.Sprintf("Example slide %d", i+1)
+			}
+			if mk := strings.TrimSpace(slide.Background.MediaKey); mk != "" {
+				add(mk, label, "Background from "+label, CanvasWidth, CanvasHeight)
+			}
+			for _, o := range slide.Objects {
+				add(o.MediaKey, label, "From "+label, o.W, o.H)
+			}
+			for _, p := range slide.Placeholders {
+				add(p.MediaKey, label, "From "+label, p.W, p.H)
+			}
+		}
 	}
 	for _, a := range tmpl.Archetypes {
-		if stripVariantSuffix(a.Kind) != "title" {
+		if stripVariantSuffix(a.Kind) != "title" && stripVariantSuffix(a.Kind) != "closing" {
 			continue
+		}
+		from := strings.TrimSpace(a.Title)
+		if from == "" {
+			from = a.Kind
 		}
 		for _, m := range astImageTagRe.FindAllStringSubmatch(a.Markup, -1) {
 			attrs := m[1]
 			if attrs == "" && len(m) > 2 {
 				attrs = m[2]
 			}
-			ref := attrValue(attrs, "asset-ref")
-			area := attrIntFrom(attrs, "w") * attrIntFrom(attrs, "h")
-			if ref == "" || area < heroPhotoMinArea {
-				continue
-			}
-			add(ref)
+			add(attrValue(attrs, "asset-ref"), from, "From "+from, attrIntFrom(attrs, "w"), attrIntFrom(attrs, "h"))
 		}
 	}
 	return out
 }
 
-// templateHeroPhotoOptions lists unique rasters from the template's example
-// title slides so the user can pick ONE photo for the cover well.
+// templateHeroPhotoOptions lists unique large rasters from the template's
+// example slides (and leftover title/closing markup) so the user can pick ONE
+// photo for the cover well.
 func templateHeroPhotoOptions(ctx context.Context, templateName string) ([]templatePick, error) {
 	svc, err := personalService(ctx)
 	if err != nil {
@@ -1254,20 +1368,19 @@ func templateHeroPhotoOptions(ctx context.Context, templateName string) ([]templ
 	if !ok {
 		return nil, fmt.Errorf("unknown template %q", templateName)
 	}
-	refs := collectTemplateHeroPhotos(tmpl)
-	if len(refs) == 0 {
-		return nil, fmt.Errorf("template %q has no example title photos", tmpl.Name)
+	photos := collectTemplateHeroPhotos(tmpl)
+	if len(photos) == 0 {
+		return nil, fmt.Errorf("template %q has no example photos", tmpl.Name)
 	}
-	picks := make([]templatePick, 0, len(refs))
-	for i, ref := range refs {
-		label := fmt.Sprintf("Photo %d", i+1)
+	picks := make([]templatePick, 0, len(photos))
+	for _, p := range photos {
 		picks = append(picks, templatePick{
-			option: AskUserOption{ID: ref, Label: label, Description: "From this template's example covers"},
+			option: AskUserOption{ID: p.Ref, Label: p.Label, Description: p.Description},
 			thumbnail: &AskUserThumbnail{
 				Kind:     "image",
-				AssetRef: ref,
+				AssetRef: p.Ref,
 				Template: tmpl.Name,
-				OptionID: ref,
+				OptionID: p.Ref,
 			},
 		})
 	}
@@ -2489,8 +2602,8 @@ func GetTools() ([]tool.Tool, error) {
 		description string
 		newTool     func() (tool.Tool, error)
 	}{
-		{"create_deck", "Create a new private Astonish Slides deck AFTER ask_user intake (audience, length, who picks the template, title variant, optional cover photo) unless those answers are already explicit in the user message. Using existing knowledge / skipping search is not a skip. Pass template (named, delegated, or picked). Optional palette, titleKind, titleImage, closingKind. Seeds theme, fonts, and a slim catalog. Author with fill_slides; do not copy markup.", func() (tool.Tool, error) {
-			return functiontool.New(functiontool.Config{Name: "create_deck", Description: "Create a new private Astonish Slides deck AFTER ask_user intake (audience, length, who picks the template, title variant, optional cover photo) unless those answers are already explicit in the user message. Using existing knowledge / skipping search is not a skip. Pass template (named, delegated, or picked). Optional palette, titleKind, titleImage, closingKind. Seeds theme, fonts, and a slim catalog. Author with fill_slides; do not copy markup."}, func(ctx tool.Context, args CreateDeckArgs) (DeckResult, error) {
+		{"create_deck", "Create a new private Astonish Slides deck AFTER ask_user intake (audience, length, who picks the template, title variant, cover photo) unless those answers are already explicit in the user message. Using existing knowledge / skipping search is not a skip. Pass template. titleKind is required when the template has 2+ title* covers; titleImage is required (sha256-… or none) when that cover has a ph-pic well. Optional palette, closingKind. Seeds theme, fonts, and a slim catalog. Author with fill_slides; do not copy markup.", func() (tool.Tool, error) {
+			return functiontool.New(functiontool.Config{Name: "create_deck", Description: "Create a new private Astonish Slides deck AFTER ask_user intake (audience, length, who picks the template, title variant, cover photo) unless those answers are already explicit in the user message. Using existing knowledge / skipping search is not a skip. Pass template. titleKind is required when the template has 2+ title* covers; titleImage is required (sha256-… or none) when that cover has a ph-pic well. Optional palette, closingKind. Seeds theme, fonts, and a slim catalog. Author with fill_slides; do not copy markup."}, func(ctx tool.Context, args CreateDeckArgs) (DeckResult, error) {
 				return createDeck(ctx, args)
 			})
 		}},

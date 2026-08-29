@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/credentials"
 )
 
@@ -56,6 +57,23 @@ func TestLogChatFactoryInitialization(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestShouldRegisterFactoryPerplexity(t *testing.T) {
+	appCfg := &config.AppConfig{}
+	appCfg.General.WebSearchTool = "perplexity:perplexity_web_search"
+	appCfg.PerplexityWebSearch.Provider = "provider"
+	appCfg.PerplexityWebSearch.Model = "sonar"
+
+	if shouldRegisterFactoryPerplexity(&ChatFactoryConfig{AppConfig: appCfg, PlatformMode: true}) {
+		t.Fatal("platform shared agent must use request-scoped Perplexity only")
+	}
+	if shouldRegisterFactoryPerplexity(&ChatFactoryConfig{AppConfig: appCfg}) {
+		t.Fatal("Studio personal-mode shared agent must use request-scoped Perplexity only")
+	}
+	if !shouldRegisterFactoryPerplexity(&ChatFactoryConfig{AppConfig: appCfg, CodeMode: true}) {
+		t.Fatal("local Code mode should register its factory-scoped Perplexity tool")
 	}
 }
 

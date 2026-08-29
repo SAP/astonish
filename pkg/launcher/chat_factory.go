@@ -405,12 +405,9 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		}
 	}
 
-	// Model-backed Perplexity/Sonar is registered only when General → Web Search
-	// Tool selects it (and provider/model are configured).
-	if cfg.AppConfig != nil &&
-		isSelectedWebSearchServer(cfg.AppConfig, "perplexity") &&
-		cfg.AppConfig.PerplexityWebSearch.Provider != "" &&
-		cfg.AppConfig.PerplexityWebSearch.Model != "" {
+	// Studio injects Perplexity per request because the shared agent can serve
+	// multiple tenants. Only local Code mode owns a factory-scoped instance.
+	if shouldRegisterFactoryPerplexity(cfg) {
 		perplexityTool, perplexityErr := tools.NewPerplexityWebSearchTool(cfg.AppConfig, provider.GetProvider)
 		if perplexityErr != nil {
 			if cfg.DebugMode {
@@ -2444,6 +2441,13 @@ func loadMCPConfig(ctx context.Context, platformMode bool, appCfg *config.AppCon
 // namedToolset is the minimal surface selectedWeb* needs from lazy MCP toolsets.
 type namedToolset interface {
 	Name() string
+}
+
+func shouldRegisterFactoryPerplexity(cfg *ChatFactoryConfig) bool {
+	return cfg != nil && cfg.CodeMode && cfg.AppConfig != nil &&
+		isSelectedWebSearchServer(cfg.AppConfig, "perplexity") &&
+		cfg.AppConfig.PerplexityWebSearch.Provider != "" &&
+		cfg.AppConfig.PerplexityWebSearch.Model != ""
 }
 
 func isSelectedWebSearchServer(appCfg *config.AppConfig, serverID string) bool {

@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/SAP/astonish/pkg/common"
 	"github.com/SAP/astonish/pkg/provider/httpool"
 
 	"google.golang.org/adk/model"
@@ -41,6 +42,7 @@ func (p *Provider) Name() string {
 }
 
 func (p *Provider) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	req = common.CanonicalizeRequestTools(req)
 	// WORKAROUND: Google GenAI (Gemini) does not support function calling with response_mime_type: application/json
 	// If tools are present, we must unset the response MIME type and schema to avoid 400 error.
 	// The prompt instructions will still guide the model to produce JSON, and the agent will parse it manually.

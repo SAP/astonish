@@ -13,8 +13,9 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/sashabaranov/go-openai"
+	"github.com/SAP/astonish/pkg/common"
 	"github.com/SAP/astonish/pkg/provider/llmerror"
+	"github.com/sashabaranov/go-openai"
 	"google.golang.org/adk/model"
 	"google.golang.org/genai"
 )
@@ -56,6 +57,7 @@ func NewProviderWithMaxTokens(client *openai.Client, modelName string, supportsJ
 
 // GenerateContent implements model.LLM.
 func (p *Provider) GenerateContent(ctx context.Context, req *model.LLMRequest, streaming bool) iter.Seq2[*model.LLMResponse, error] {
+	req = common.CanonicalizeRequestTools(req)
 	return func(yield func(*model.LLMResponse, error) bool) {
 		messages := p.toOpenAIMessages(req)
 

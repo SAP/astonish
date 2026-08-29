@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/SAP/astonish/pkg/common"
 	"github.com/SAP/astonish/pkg/provider/httpool"
 	"github.com/SAP/astonish/pkg/provider/llmerror"
 
@@ -304,6 +305,7 @@ func (p *Provider) handleStream(body io.Reader, yield func(*model.LLMResponse, e
 }
 
 func (p *Provider) toAnthropicRequest(req *model.LLMRequest, streaming bool) (*Request, error) {
+	req = common.CanonicalizeRequestTools(req)
 	var messages []Message
 	var system string
 

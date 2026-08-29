@@ -1,8 +1,42 @@
 package anthropic
 
 import (
+	"encoding/json"
 	"testing"
+
+	"google.golang.org/adk/model"
+	"google.golang.org/genai"
 )
+
+func TestToolSerializationIsCanonical(t *testing.T) {
+	provider := NewProvider("test", "test-model")
+	req := &model.LLMRequest{Config: &genai.GenerateContentConfig{Tools: []*genai.Tool{
+		{FunctionDeclarations: []*genai.FunctionDeclaration{{Name: "zeta", ParametersJsonSchema: map[string]any{}}}},
+		{FunctionDeclarations: []*genai.FunctionDeclaration{{
+			Name: "alpha",
+			ParametersJsonSchema: map[string]any{
+				"type":     "object",
+				"required": []string{"z", "a"},
+				"properties": map[string]any{
+					"nested": map[string]any{"type": "object"},
+				},
+			},
+		}}},
+	}}}
+
+	converted, err := provider.toAnthropicRequest(req, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(converted.Tools)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `[{"name":"alpha","input_schema":{"properties":{"nested":{"properties":{},"type":"object"}},"required":["a","z"],"type":"object"}},{"name":"zeta","input_schema":{"properties":{},"type":"object"}}]`
+	if string(data) != want {
+		t.Fatalf("serialized tools mismatch\n got: %s\nwant: %s", data, want)
+	}
+}
 
 func TestPatchOrphanedToolUse_NoOrphans(t *testing.T) {
 	messages := []Message{

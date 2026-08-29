@@ -141,29 +141,6 @@ func (t *sanitizedTool) Run(ctx tool.Context, args any) (map[string]any, error) 
 	return runner.Run(ctx, args)
 }
 
-// NormalizeSchema converts any schema type (e.g. *jsonschema.Schema) to
-// map[string]any via a JSON round-trip. This ensures consistent key ordering
-// when the schema is later re-serialized by providers, which is critical for
-// LLM KV cache stability (the tool definitions are part of the prompt prefix).
-// If the schema is already map[string]any it is returned as-is.
-func NormalizeSchema(schema any) map[string]any {
-	if schema == nil {
-		return nil
-	}
-	if m, ok := schema.(map[string]any); ok {
-		return m
-	}
-	data, err := json.Marshal(schema)
-	if err != nil {
-		return nil
-	}
-	var m map[string]any
-	if err := json.Unmarshal(data, &m); err != nil {
-		return nil
-	}
-	return m
-}
-
 // sanitizeJSONSchema fixes common issues in raw JSON schemas from MCP servers.
 // Common issues:
 //   - type "object" without a "properties" field

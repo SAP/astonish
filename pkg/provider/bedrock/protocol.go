@@ -10,6 +10,7 @@ import (
 	"iter"
 	"strings"
 
+	"github.com/SAP/astonish/pkg/common"
 	"google.golang.org/adk/model"
 	"google.golang.org/genai"
 )
@@ -69,6 +70,7 @@ type Response struct {
 // ConvertRequest converts an ADK LLMRequest to a Bedrock Request.
 // maxTokens can be 0 to use the default (8192)
 func ConvertRequest(req *model.LLMRequest, maxTokens int, skipTemperature bool) (*Request, error) {
+	req = common.CanonicalizeRequestTools(req)
 	if maxTokens <= 0 {
 		maxTokens = 8192 // Default fallback
 	}

@@ -10,6 +10,7 @@ import (
 	"iter"
 	"strings"
 
+	"github.com/SAP/astonish/pkg/common"
 	"google.golang.org/adk/model"
 	"google.golang.org/genai"
 )
@@ -90,6 +91,7 @@ type Candidate struct {
 // ConvertRequest converts an ADK LLMRequest to a Vertex AI Request.
 // maxOutputTokens can be 0 to use the default (8192)
 func ConvertRequest(req *model.LLMRequest, maxOutputTokens int) (*Request, error) {
+	req = common.CanonicalizeRequestTools(req)
 	if maxOutputTokens <= 0 {
 		maxOutputTokens = 8192 // Default fallback
 	}

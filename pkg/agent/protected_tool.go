@@ -106,9 +106,7 @@ func (p *ProtectedTool) Declaration() *genai.FunctionDeclaration {
 	if declTool, ok := p.Tool.(ToolWithDeclaration); ok {
 		decl := declTool.Declaration()
 		if decl != nil && decl.ParametersJsonSchema != nil {
-			if _, isMap := decl.ParametersJsonSchema.(map[string]any); !isMap {
-				decl.ParametersJsonSchema = NormalizeSchema(decl.ParametersJsonSchema)
-			}
+			decl.ParametersJsonSchema = common.CanonicalizeToolSchema(decl.ParametersJsonSchema)
 		}
 		return decl
 	}

@@ -775,7 +775,7 @@ func saveProviderSecretsToStore(instanceName, providerType string, pCfg config.P
 	case "ollama", "lm_studio":
 		secretKeys = nil // no secrets for local providers
 	case "xai_oauth":
-		secretKeys = []string{"access_token", "refresh_token"}
+		secretKeys = []string{"access_token", "refresh_token", "expires_at"}
 	}
 
 	secrets := make(map[string]string)

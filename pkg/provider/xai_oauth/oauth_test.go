@@ -149,6 +149,31 @@ func TestPollForToken_Success(t *testing.T) {
 	}
 }
 
+func TestPollForTokenRejectsEmptyResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+
+	_, err := pollForTokenFromURL(context.Background(), "test-client", "dev-code", 1, server.URL)
+	if err == nil || !strings.Contains(err.Error(), "neither an access token nor an OAuth error") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestRequestTokenReportsServerStatusBeforeParsing(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "temporary outage", http.StatusBadGateway)
+	}))
+	defer server.Close()
+
+	_, err := requestToken(context.Background(), "test-client", "dev-code", server.URL)
+	if err == nil || !strings.Contains(err.Error(), "502 Bad Gateway") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestNextPollingIntervalAccumulatesSlowDown(t *testing.T) {
 	interval := 5
 	interval = nextPollingInterval(interval)
@@ -301,6 +326,39 @@ func TestOAuthTransport_RefreshesExpiredToken(t *testing.T) {
 	if receivedAuth != "Bearer refreshed-access-token" {
 		t.Errorf("Authorization = %q, want Bearer refreshed-access-token", receivedAuth)
 	}
+}
+
+func TestOAuthTransportCallsRefreshCallbackWithoutLock(t *testing.T) {
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(TokenResponse{AccessToken: "new-token", ExpiresIn: 3600})
+	}))
+	defer tokenServer.Close()
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer apiServer.Close()
+
+	transport := &oauthTransport{
+		base:         http.DefaultTransport,
+		clientID:     "test-client",
+		accessToken:  "old-token",
+		refreshToken: "refresh-token",
+		expiresAt:    time.Now().Add(-time.Minute),
+		tokenURL:     tokenServer.URL,
+	}
+	transport.onTokenRefresh = func(string, string, time.Time) {
+		if !transport.mu.TryLock() {
+			t.Error("transport mutex held during refresh callback")
+			return
+		}
+		transport.mu.Unlock()
+	}
+
+	resp, err := (&http.Client{Transport: transport}).Get(apiServer.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
 }
 
 func TestOAuthTransport_ReturnsRefreshError(t *testing.T) {

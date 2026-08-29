@@ -39,6 +39,17 @@ describe('DeckController', () => {
     expect(deck.currentIndex).toBe(1)
   })
 
+  it('accepts navigation messages only from its parent window', async () => {
+    const deck = await mountDeck()
+    window.dispatchEvent(new MessageEvent('message', { data: { type: 'ast-nav', index: 1 }, source: window }))
+    expect(deck.currentIndex).toBe(1)
+
+    deck.goTo(0)
+    const hostileSource = { postMessage: vi.fn() } as unknown as Window
+    window.dispatchEvent(new MessageEvent('message', { data: { type: 'ast-nav', index: 1 }, source: hostileSource }))
+    expect(deck.currentIndex).toBe(0)
+  })
+
   it('does not advance on click while canvas edit mode is on', async () => {
     const deck = await mountDeck()
     deck.setAttribute('edit', '')

@@ -148,6 +148,7 @@ func pollForTokenFromURL(ctx context.Context, clientID, deviceCode string, inter
 			if tokenResp.AccessToken != "" {
 				return tokenResp, nil
 			}
+			return nil, fmt.Errorf("token response contained neither an access token nor an OAuth error")
 		}
 	}
 }
@@ -180,6 +181,9 @@ func requestToken(ctx context.Context, clientID, deviceCode, endpoint string) (*
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxOAuthResponseBytes))
 	if err != nil {
 		return nil, fmt.Errorf("read token response: %w", err)
+	}
+	if resp.StatusCode >= http.StatusInternalServerError {
+		return nil, fmt.Errorf("token request returned %s", resp.Status)
 	}
 
 	var tokenResp TokenResponse

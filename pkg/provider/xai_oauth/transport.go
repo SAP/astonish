@@ -44,6 +44,7 @@ func NewOAuthTransport(clientID, accessToken, refreshToken string, expiresAt tim
 func (t *oauthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	t.mu.Lock()
 
+	var refreshed bool
 	// Refresh if token is expired or will expire within 60 seconds
 	if t.refreshToken != "" && !t.expiresAt.IsZero() && time.Until(t.expiresAt) < 60*time.Second {
 		endpoint := tokenURL
@@ -60,14 +61,18 @@ func (t *oauthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			t.refreshToken = tokenResp.RefreshToken
 		}
 		t.expiresAt = time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
-
-		if t.onTokenRefresh != nil {
-			t.onTokenRefresh(t.accessToken, t.refreshToken, t.expiresAt)
-		}
+		refreshed = true
 	}
 
 	token := t.accessToken
+	refreshToken := t.refreshToken
+	expiresAt := t.expiresAt
+	onTokenRefresh := t.onTokenRefresh
 	t.mu.Unlock()
+
+	if refreshed && onTokenRefresh != nil {
+		onTokenRefresh(token, refreshToken, expiresAt)
+	}
 
 	// Clone the request to avoid mutating the original
 	reqClone := req.Clone(req.Context())

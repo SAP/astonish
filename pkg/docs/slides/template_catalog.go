@@ -315,10 +315,11 @@ func TemplateFromRecord(rec *store.SlideTemplateRecord) (themes.Template, error)
 	}
 	if rec.TemplateModel != "" {
 		var model themes.TemplateModel
-		if err := json.Unmarshal([]byte(rec.TemplateModel), &model); err == nil {
-			t.Model = &model
-			t.StyleGuide = styleGuideFromModel(&model)
+		if err := json.Unmarshal([]byte(rec.TemplateModel), &model); err != nil {
+			return themes.Template{}, fmt.Errorf("decode template model: %w", err)
 		}
+		t.Model = &model
+		t.StyleGuide = styleGuideFromModel(&model)
 	}
 	return t, nil
 }

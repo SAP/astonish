@@ -53,6 +53,7 @@ export class AstDeck extends LitElement implements AstDeckElement {
   }
 
   private readonly onMessage = (event: MessageEvent): void => {
+    if (event.source !== window.parent) return
     const data = event.data as { type?: string; index?: number; slideId?: string; enabled?: boolean } | null
     if (!data?.type) return
     switch (data.type) {

@@ -8,6 +8,13 @@ import (
 	"github.com/SAP/astonish/pkg/store"
 )
 
+func TestTemplateFromRecordRejectsInvalidTemplateModel(t *testing.T) {
+	_, err := TemplateFromRecord(&store.SlideTemplateRecord{Name: "broken", TemplateModel: `{not-json`})
+	if err == nil {
+		t.Fatal("expected invalid template model error")
+	}
+}
+
 func TestCatalogResolvePrefersPersonalOverOrg(t *testing.T) {
 	ctx := context.Background()
 	org := store.NewMemorySlideTemplateStore()

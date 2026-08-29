@@ -422,6 +422,9 @@ func TestPatchSlideMovesElement(t *testing.T) {
 	if badRec.Code != http.StatusBadRequest {
 		t.Fatalf("missing id status = %d, want 400", badRec.Code)
 	}
+	if got := strings.TrimSpace(badRec.Body.String()); got != "invalid slide edit" {
+		t.Fatalf("body = %q, want safe edit error", got)
+	}
 }
 
 func TestPatchSlideResizesImage(t *testing.T) {

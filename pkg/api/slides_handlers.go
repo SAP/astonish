@@ -299,7 +299,7 @@ func PatchSlideHandler(w http.ResponseWriter, r *http.Request) {
 			writeSlidesError(w, err)
 			return
 		}
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, "invalid slide edit", http.StatusBadRequest)
 		return
 	}
 	if slides.HasErrors(diags) {

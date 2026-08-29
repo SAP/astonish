@@ -35,6 +35,46 @@ export default function SlidesTemplatesAdmin({ scope }: SlidesTemplatesAdminProp
   const [error, setError] = useState('')
   const [deleteConfirm, setDeleteConfirm] = useState<SlidesTemplate | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const deleteDialogRef = useRef<HTMLDivElement>(null)
+  const deleteCancelRef = useRef<HTMLButtonElement>(null)
+  const deleteTriggerRef = useRef<HTMLElement | null>(null)
+
+  const closeDeleteDialog = useCallback(() => {
+    setDeleteConfirm(null)
+    requestAnimationFrame(() => deleteTriggerRef.current?.focus())
+  }, [])
+
+  useEffect(() => {
+    if (!deleteConfirm) return
+    deleteCancelRef.current?.focus()
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !busy) {
+        event.preventDefault()
+        closeDeleteDialog()
+        return
+      }
+      if (event.key !== 'Tab') return
+      const focusable = [...(deleteDialogRef.current?.querySelectorAll<HTMLElement>('button:not(:disabled), [href], input:not(:disabled), [tabindex]:not([tabindex="-1"])') ?? [])]
+      if (focusable.length === 0) {
+        event.preventDefault()
+        deleteDialogRef.current?.focus()
+        return
+      }
+      const first = focusable[0]
+      const last = focusable[focusable.length - 1]
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault()
+        first.focus()
+      }
+    }
+
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [busy, closeDeleteDialog, deleteConfirm])
 
   const load = useCallback(async () => {
     try {
@@ -71,14 +111,14 @@ export default function SlidesTemplatesAdmin({ scope }: SlidesTemplatesAdminProp
     setError('')
     try {
       await deleteSlidesTemplate(tpl.name, scope)
-      setDeleteConfirm(null)
+      closeDeleteDialog()
       await load()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to delete template')
     } finally {
       setBusy(false)
     }
-  }, [load, scope])
+  }, [closeDeleteDialog, load, scope])
 
   const label = SCOPE_LABEL[scope] || scope
 
@@ -155,7 +195,10 @@ export default function SlidesTemplatesAdmin({ scope }: SlidesTemplatesAdminProp
                 </div>
                 <button
                   type="button"
-                  onClick={() => setDeleteConfirm(tpl)}
+                  onClick={event => {
+                    deleteTriggerRef.current = event.currentTarget
+                    setDeleteConfirm(tpl)
+                  }}
                   disabled={busy}
                   className="ml-auto flex cursor-pointer items-center gap-1 rounded px-2 py-1 text-[11px] disabled:opacity-60"
                   style={{ color: '#f87171', background: 'rgba(239, 68, 68, 0.1)' }}
@@ -171,12 +214,24 @@ export default function SlidesTemplatesAdmin({ scope }: SlidesTemplatesAdminProp
 
       {deleteConfirm ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: 'rgba(0,0,0,0.5)' }}>
-          <div className="mx-4 w-full max-w-sm rounded-xl p-5" style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-color)' }}>
-            <p className="text-sm" style={{ color: 'var(--text-primary)' }}>
+          <div
+            ref={deleteDialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="slides-template-delete-title"
+            aria-describedby="slides-template-delete-description"
+            tabIndex={-1}
+            className="mx-4 w-full max-w-sm rounded-xl p-5"
+            style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-color)' }}
+          >
+            <h3 id="slides-template-delete-title" className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
+              Delete template?
+            </h3>
+            <p id="slides-template-delete-description" className="mt-1 text-sm" style={{ color: 'var(--text-primary)' }}>
               Delete “{deleteConfirm.label || deleteConfirm.name}” from {label.toLowerCase()} templates?
             </p>
             <div className="mt-4 flex justify-end gap-2">
-              <button type="button" onClick={() => setDeleteConfirm(null)} className="rounded px-3 py-1.5 text-xs" style={{ color: 'var(--text-secondary)' }}>
+              <button ref={deleteCancelRef} type="button" onClick={closeDeleteDialog} className="rounded px-3 py-1.5 text-xs" style={{ color: 'var(--text-secondary)' }}>
                 Cancel
               </button>
               <button

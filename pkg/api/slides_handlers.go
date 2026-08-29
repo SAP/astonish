@@ -238,7 +238,9 @@ func GetSlideHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 type slideMovesRequest struct {
-	Moves []slideMove `json:"moves"`
+	Moves   []slideMove `json:"moves"`
+	Texts   []slideText `json:"texts"`
+	Deletes []string    `json:"deletes"`
 }
 
 type slideMove struct {
@@ -247,7 +249,12 @@ type slideMove struct {
 	Y  int    `json:"y"`
 }
 
-// PatchSlideHandler applies canvas object moves (x/y) to a stored slide.
+type slideText struct {
+	ID   string `json:"id"`
+	Text string `json:"text"`
+}
+
+// PatchSlideHandler applies canvas object moves, text edits, and deletes.
 func PatchSlideHandler(w http.ResponseWriter, r *http.Request) {
 	position, err := strconv.Atoi(mux.Vars(r)["idx"])
 	if err != nil || position < 0 {
@@ -256,22 +263,25 @@ func PatchSlideHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	var body slideMovesRequest
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, "invalid move payload", http.StatusBadRequest)
+		http.Error(w, "invalid edit payload", http.StatusBadRequest)
 		return
 	}
-	if len(body.Moves) == 0 {
-		http.Error(w, "moves are required", http.StatusBadRequest)
+	if len(body.Moves) == 0 && len(body.Texts) == 0 && len(body.Deletes) == 0 {
+		http.Error(w, "moves, texts, or deletes are required", http.StatusBadRequest)
 		return
 	}
 	svc, ok := requireDocsService(w, r)
 	if !ok {
 		return
 	}
-	moves := make([]slides.ElementMove, 0, len(body.Moves))
+	edits := slides.SlideEdits{Deletes: append([]string(nil), body.Deletes...)}
 	for _, m := range body.Moves {
-		moves = append(moves, slides.ElementMove{ID: m.ID, X: m.X, Y: m.Y})
+		edits.Moves = append(edits.Moves, slides.ElementMove{ID: m.ID, X: m.X, Y: m.Y})
 	}
-	item, diags, err := svc.MoveSlideElements(r.Context(), mux.Vars(r)["deckSlug"], position, moves)
+	for _, t := range body.Texts {
+		edits.Texts = append(edits.Texts, slides.ElementText{ID: t.ID, Text: t.Text})
+	}
+	item, diags, err := svc.ApplySlideEdits(r.Context(), mux.Vars(r)["deckSlug"], position, edits)
 	if err != nil {
 		if errors.Is(err, store.ErrDocsNotFound) {
 			writeSlidesError(w, err)

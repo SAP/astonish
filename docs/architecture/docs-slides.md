@@ -1255,7 +1255,7 @@ New UI files use TypeScript/TSX. The Web Component runtime is framework-neutral;
 GET    /api/docs?type=slides
 GET    /api/docs/slides/{deckSlug}
 GET    /api/docs/slides/{deckSlug}/slides/{idx}
-PATCH  /api/docs/slides/{deckSlug}/slides/{idx}     # canvas object moves {moves:[{id,x,y}]}; validates via WriteSlide
+PATCH  /api/docs/slides/{deckSlug}/slides/{idx}     # canvas edits {moves,texts,deletes}; validates via WriteSlide
 POST   /api/docs/slides/validate
 POST   /api/docs/slides/{deckSlug}/export/pdf
 POST   /api/docs/slides/{deckSlug}/export/pptx
@@ -1271,13 +1271,20 @@ PATCH  /api/docs/slides/templates/{name}/recolor    # update a scoped template's
 
 The slide endpoint returns either the source fragment as data or a sandboxed runtime page. It must not concatenate untrusted source into the Studio document.
 
-### Canvas object edit (move)
+### Canvas object edit (move, text, delete)
 
-The harness **canvas** (`SlidesDeckView` main iframe) can move objects. **Present** (new window) and **Full screen** do not. The iframe stays `sandbox="allow-scripts"` (opaque origin); the parent never reads iframe DOM.
+The harness **canvas** (`SlidesDeckView` main iframe) can edit objects. **Present** (new window) and **Full screen** do not. The iframe stays `sandbox="allow-scripts"` (opaque origin); the parent never reads iframe DOM.
 
-After the canvas iframe loads, Studio posts `{ type: "ast-edit-mode", enabled: true }`. The runtime (`EditController`) highlights the object under the pointer, selects on click, and drags `x`/`y` in logical 1920×1080 px (pointer delta ÷ CSS scale). Full-bleed decorative backgrounds (`id="bg"`) are not selectable. Click-to-advance is off while edit is on.
+After the canvas iframe loads, Studio posts `{ type: "ast-edit-mode", enabled: true }`. The runtime (`EditController`):
 
-On pointer-up after a real move the iframe posts `{ type: "ast-edit-moved", index, changes: [{ id, x, y }] }`. Studio shows **Discard** / **Apply**. Discard posts `{ type: "ast-edit-reset" }`. Apply `PATCH`es `/api/docs/slides/{slug}/slides/{idx}` with those moves; the server rewrites attributes via `findElement`, then `WriteSlide` (validate + upsert). Success posts `{ type: "ast-edit-commit" }` (new baseline). No `docs_update` chat event — this is Studio, not the agent loop.
+- highlights the object under the pointer, selects on click, and drags `x`/`y` in logical 1920×1080 px (pointer delta ÷ CSS scale);
+- while dragging, **snaps** to another object's left / right / top / bottom / center within 6 px and draws a dotted alignment guide across the canvas;
+- **double-click**, a second click on an already-selected `ast-text`, or Enter, to edit copy in place (Escape cancels; Shift+Enter inserts a newline);
+- **Delete** / **Backspace**, or the toolbar **Delete** control, removes the selected object.
+
+Full-bleed decorative backgrounds (`id="bg"`) are not selectable. Click-to-advance is off while edit is on.
+
+On a real change the iframe posts `{ type: "ast-edit-changed", index, moves, texts, deletes }`. Studio replaces **Save** with **Discard** / **Apply**. Discard posts `{ type: "ast-edit-reset" }`. Apply `PATCH`es `/api/docs/slides/{slug}/slides/{idx}` with that payload; the server rewrites markup via `findElement`, then `WriteSlide` (validate + upsert). Success posts `{ type: "ast-edit-commit" }` (new baseline). No `docs_update` chat event — this is Studio, not the agent loop.
 
 ### SSE
 

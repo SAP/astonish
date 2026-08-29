@@ -400,3 +400,34 @@ func TestCatalogFromOmitsMarkup(t *testing.T) {
 		t.Fatalf("summary should mention cards: %q", cat[0].Summary)
 	}
 }
+
+func TestSetElementTextEscapesAndRejectsNonText(t *testing.T) {
+	markup := `<ast-slide id="s0"><ast-text id="headline" x="1" y="1" w="10" h="10">Title</ast-text><ast-shape id="card" x="1" y="1" w="10" h="10"></ast-shape></ast-slide>`
+	got, err := setElementText(markup, "headline", `Hello & <world>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "Hello &amp; &lt;world&gt;") {
+		t.Fatalf("escaped text missing: %s", got)
+	}
+	if _, err := setElementText(markup, "card", "nope"); err == nil {
+		t.Fatal("expected non-text reject")
+	}
+	if _, err := setElementText(markup, "missing", "nope"); err == nil {
+		t.Fatal("expected missing id")
+	}
+}
+
+func TestRemoveElementDropsMarkup(t *testing.T) {
+	markup := `<ast-slide id="s0"><ast-text id="headline" x="1" y="1" w="10" h="10">Title</ast-text><ast-text id="dek" x="1" y="20" w="10" h="10">Sub</ast-text></ast-slide>`
+	got, err := removeElement(markup, "dek")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got, `id="dek"`) {
+		t.Fatalf("dek still present: %s", got)
+	}
+	if !strings.Contains(got, `id="headline"`) {
+		t.Fatalf("headline removed: %s", got)
+	}
+}

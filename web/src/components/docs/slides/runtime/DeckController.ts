@@ -170,7 +170,11 @@ export class DeckController {
   }
 
   private readonly onKeyDown = (event: KeyboardEvent): void => {
-    if (this.deck.hasAttribute('edit') && (event.key === ' ' || event.key === 'Spacebar')) return
+    if (this.deck.hasAttribute('edit')) {
+      const target = event.target as HTMLElement | null
+      if (target?.isContentEditable) return
+      if ([' ', 'Spacebar', 'Delete', 'Backspace', 'Enter', 'Escape'].includes(event.key)) return
+    }
     if (!NAVIGATION_KEYS.has(event.key)) return
     event.preventDefault()
     if (event.key === 'Home') this.goTo(0)

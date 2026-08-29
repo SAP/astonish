@@ -905,6 +905,34 @@ func setElementXY(markup, id string, x, y int) (string, error) {
 	return markup[:start] + open + markup[innerStart:innerEnd] + "</" + tag + ">" + markup[closeEnd:], nil
 }
 
+func setElementText(markup, id, text string) (string, error) {
+	start, tag, attrs, innerStart, _, closeEnd, ok := findElement(markup, id)
+	if !ok {
+		return "", fmt.Errorf("element %q not found", id)
+	}
+	if tag != "ast-text" {
+		return "", fmt.Errorf("cannot set text on <%s> %q", tag, id)
+	}
+	if closeEnd == innerStart {
+		return "", fmt.Errorf("cannot set text on self-closing element %q", id)
+	}
+	attrs = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(attrs), "/"))
+	open := "<" + tag
+	if strings.TrimSpace(attrs) != "" {
+		open += " " + strings.TrimSpace(attrs)
+	}
+	open += ">"
+	return markup[:start] + open + html.EscapeString(text) + "</" + tag + ">" + markup[closeEnd:], nil
+}
+
+func removeElement(markup, id string) (string, error) {
+	start, _, _, _, _, closeEnd, ok := findElement(markup, id)
+	if !ok {
+		return "", fmt.Errorf("element %q not found", id)
+	}
+	return markup[:start] + markup[closeEnd:], nil
+}
+
 func setIntAttr(attrs, key string, n int) string {
 	prefix := key + `="`
 	idx := strings.Index(attrs, prefix)

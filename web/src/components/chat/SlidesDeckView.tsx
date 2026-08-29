@@ -1,14 +1,15 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
-import { Download, ExternalLink, Loader2, Maximize2, Save, TriangleAlert, X } from 'lucide-react'
+import { Download, ExternalLink, Loader2, Maximize2, Save, Trash2, TriangleAlert, X } from 'lucide-react'
 
 import {
   exportSlidesDeck,
   fetchSlidesDeck,
   patchSlideMoves,
   saveDeck,
+  slideEditIsDirty,
   slidesPresentationURL,
   type DocsScope,
-  type SlideElementMove,
+  type SlideEditDraft,
   type SlidesDeckResponse,
   type SlidesExportFormat,
 } from '@/api/slides'
@@ -48,7 +49,8 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
   const [saveDialogOpen, setSaveDialogOpen] = useState(false)
   const [saveName, setSaveName] = useState('')
   const [fullscreen, setFullscreen] = useState(false)
-  const [pendingBySlide, setPendingBySlide] = useState<Record<number, SlideElementMove[]>>({})
+  const [pendingBySlide, setPendingBySlide] = useState<Record<number, SlideEditDraft>>({})
+  const [selectedObject, setSelectedObject] = useState<{ id: string; tag: string } | null>(null)
   const [applying, setApplying] = useState(false)
   const mountedRef = useRef(true)
   const iframeRef = useRef<HTMLIFrameElement | null>(null)
@@ -82,6 +84,7 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
 
   useEffect(() => {
     setPendingBySlide({})
+    setSelectedObject(null)
   }, [deckSlug, scope, refreshSignal])
 
   const slides = deck?.slides ?? []
@@ -112,11 +115,20 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
   }, [boundedIndex, total, postNav])
 
   // Click/keyboard nav happens inside the sandboxed present iframe. Mirror
-  // ast-deck-change messages onto the strip selection. Canvas object moves
-  // arrive as ast-edit-moved.
+  // ast-deck-change messages onto the strip selection. Canvas edits arrive as
+  // ast-edit-changed; selection as ast-edit-selected.
   useEffect(() => {
     const onMessage = (event: MessageEvent) => {
-      const data = event.data as { type?: string; index?: number; changes?: SlideElementMove[] } | null
+      const data = event.data as {
+        type?: string
+        index?: number
+        id?: string | null
+        tag?: string | null
+        changes?: SlideEditDraft['moves']
+        moves?: SlideEditDraft['moves']
+        texts?: SlideEditDraft['texts']
+        deletes?: string[]
+      } | null
       if (!data?.type) return
       if (data.type === 'ast-deck-change') {
         const index = data.index
@@ -124,18 +136,28 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
         setSlideIndex(prev => (prev === index ? prev : index))
         return
       }
-      if (data.type === 'ast-edit-moved') {
+      if (data.type === 'ast-edit-selected') {
+        const id = typeof data.id === 'string' && data.id ? data.id : null
+        const tag = typeof data.tag === 'string' && data.tag ? data.tag : ''
+        setSelectedObject(id ? { id, tag } : null)
+        return
+      }
+      if (data.type === 'ast-edit-changed' || data.type === 'ast-edit-moved') {
         const index = data.index
-        const changes = Array.isArray(data.changes) ? data.changes : []
         if (typeof index !== 'number' || !Number.isInteger(index) || index < 0) return
+        const draft: SlideEditDraft = {
+          moves: data.moves ?? data.changes ?? [],
+          texts: data.texts ?? [],
+          deletes: data.deletes ?? [],
+        }
         setPendingBySlide(prev => {
-          if (changes.length === 0) {
+          if (!slideEditIsDirty(draft)) {
             if (!(index in prev)) return prev
             const next = { ...prev }
             delete next[index]
             return next
           }
-          return { ...prev, [index]: changes }
+          return { ...prev, [index]: draft }
         })
       }
     }
@@ -158,11 +180,13 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
     postToCanvas({ type: 'ast-edit-mode', enabled: true })
   }, [onPresentLoad, postToCanvas])
 
-  const currentPending = pendingBySlide[boundedIndex] || []
-  const editDirty = currentPending.length > 0 && !fullscreen
+  const currentPending = pendingBySlide[boundedIndex]
+  const editDirty = slideEditIsDirty(currentPending) && !fullscreen
+  const canDeleteObject = Boolean(selectedObject) && !fullscreen && !applying
 
   const discardEdits = useCallback(() => {
     postToCanvas({ type: 'ast-edit-reset' })
+    setSelectedObject(null)
     setPendingBySlide(prev => {
       if (!(boundedIndex in prev)) return prev
       const next = { ...prev }
@@ -172,7 +196,7 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
   }, [boundedIndex, postToCanvas])
 
   const applyEdits = useCallback(async () => {
-    if (currentPending.length === 0) return
+    if (!slideEditIsDirty(currentPending) || !currentPending) return
     setApplying(true)
     setError('')
     try {
@@ -185,6 +209,7 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
         }
       })
       postToCanvas({ type: 'ast-edit-commit' })
+      setSelectedObject(null)
       setPendingBySlide(prev => {
         const next = { ...prev }
         delete next[boundedIndex]
@@ -367,7 +392,20 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
           </button>
         ))}
 
-        {/* Right slot: Save, or Discard/Apply while a canvas move is pending. */}
+        {canDeleteObject ? (
+          <button
+            type="button"
+            onClick={() => postToCanvas({ type: 'ast-edit-delete' })}
+            data-testid="slides-edit-delete"
+            className="inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs font-medium"
+            style={{ borderColor: 'var(--border-color)', color: 'var(--text-secondary)' }}
+          >
+            <Trash2 size={13} />
+            Delete
+          </button>
+        ) : null}
+
+        {/* Right slot: Save, or Discard/Apply while a canvas edit is pending. */}
         {editDirty ? (
           <div className="ml-auto flex items-center gap-1.5">
             <button

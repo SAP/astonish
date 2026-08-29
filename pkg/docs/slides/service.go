@@ -222,18 +222,68 @@ type ElementMove struct {
 	Y  int
 }
 
-// MoveSlideElements patches x/y on named elements in a stored slide, then
-// validates and upserts through WriteSlide.
+// ElementText is a canvas text rewrite for an ast-text element.
+type ElementText struct {
+	ID   string
+	Text string
+}
+
+// SlideEdits is a canvas edit batch: moves, text rewrites, and deletes.
+type SlideEdits struct {
+	Moves   []ElementMove
+	Texts   []ElementText
+	Deletes []string
+}
+
+// MoveSlideElements patches x/y on named elements in a stored slide.
 func (s Service) MoveSlideElements(ctx context.Context, deckSlug string, position int, moves []ElementMove) (*store.SlideContent, []Diagnostic, error) {
+	return s.ApplySlideEdits(ctx, deckSlug, position, SlideEdits{Moves: moves})
+}
+
+// ApplySlideEdits applies canvas moves, text edits, and deletes, then
+// validates and upserts through WriteSlide.
+func (s Service) ApplySlideEdits(ctx context.Context, deckSlug string, position int, edits SlideEdits) (*store.SlideContent, []Diagnostic, error) {
 	item, err := s.Slide(ctx, deckSlug, position)
 	if err != nil {
 		return nil, nil, err
 	}
 	markup := item.Content
-	for _, m := range moves {
+	for _, id := range edits.Deletes {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return nil, nil, fmt.Errorf("delete is missing element id")
+		}
+		next, err := removeElement(markup, id)
+		if err != nil {
+			return nil, nil, err
+		}
+		markup = next
+	}
+	deleted := map[string]bool{}
+	for _, id := range edits.Deletes {
+		deleted[strings.TrimSpace(id)] = true
+	}
+	for _, t := range edits.Texts {
+		id := strings.TrimSpace(t.ID)
+		if id == "" {
+			return nil, nil, fmt.Errorf("text edit is missing element id")
+		}
+		if deleted[id] {
+			continue
+		}
+		next, err := setElementText(markup, id, t.Text)
+		if err != nil {
+			return nil, nil, err
+		}
+		markup = next
+	}
+	for _, m := range edits.Moves {
 		id := strings.TrimSpace(m.ID)
 		if id == "" {
 			return nil, nil, fmt.Errorf("move is missing element id")
+		}
+		if deleted[id] {
+			continue
 		}
 		next, err := setElementXY(markup, id, m.X, m.Y)
 		if err != nil {

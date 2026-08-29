@@ -75,6 +75,9 @@ export class AstDeck extends LitElement implements AstDeckElement {
       case 'ast-edit-commit':
         this.editor?.commit()
         break
+      case 'ast-edit-delete':
+        this.editor?.deleteSelection()
+        break
       default:
         break
     }

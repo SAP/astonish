@@ -13,8 +13,19 @@ const EDITABLE_TAGS = new Set([
 
 const DRAG_THRESHOLD = 4
 const MIN_VISIBLE = 8
+export const ALIGN_SNAP = 6
 
 type Geom = { x: number; y: number; w: number; h: number }
+
+export type AlignGuide = { axis: 'x' | 'y'; pos: number }
+
+export type EditMove = { id: string; x: number; y: number }
+export type EditText = { id: string; text: string }
+export type EditDraft = {
+  moves: EditMove[]
+  texts: EditText[]
+  deletes: string[]
+}
 
 type DragState = {
   el: HTMLElement
@@ -23,17 +34,24 @@ type DragState = {
   pointerX: number
   pointerY: number
   moved: boolean
+  alreadySelected: boolean
 }
 
-export type EditMove = { id: string; x: number; y: number }
+type Baseline = { x: number; y: number; text: string }
 
-/** Canvas object mover for the harness iframe (not Present / fullscreen). */
+/** Canvas object editor for the harness iframe (not Present / fullscreen). */
 export class EditController {
   private enabled = false
   private hover: HTMLElement | null = null
   private selected: HTMLElement | null = null
   private drag: DragState | null = null
-  private baseline = new Map<string, { x: number; y: number }>()
+  private editing: HTMLElement | null = null
+  private editingOriginal = ''
+  private editingHTML = ''
+  private baseline = new Map<string, Baseline>()
+  private deleted = new Set<string>()
+  private slideHTML = new Map<number, string>()
+  private guides: SVGSVGElement | null = null
 
   constructor(private readonly deck: HTMLElement) {}
 
@@ -46,14 +64,18 @@ export class EditController {
     this.deck.addEventListener('pointermove', this.onPointerMove)
     this.deck.addEventListener('pointerup', this.onPointerUp)
     this.deck.addEventListener('pointercancel', this.onPointerUp)
-    this.deck.addEventListener('lostpointercapture', this.onPointerUp)
+    this.deck.addEventListener('dblclick', this.onDblClick)
+    this.deck.addEventListener('ast-deck-change', this.onSlideChange)
+    this.deck.ownerDocument.addEventListener('keydown', this.onKeyDown, true)
   }
 
   disable(): void {
     if (!this.enabled) return
     this.enabled = false
+    this.endTextEdit(false, false)
     this.clearHover()
     this.clearSelected()
+    this.clearGuides()
     this.drag = null
     this.deck.removeAttribute('edit')
     this.deck.removeAttribute('data-edit-dragging')
@@ -61,49 +83,65 @@ export class EditController {
     this.deck.removeEventListener('pointermove', this.onPointerMove)
     this.deck.removeEventListener('pointerup', this.onPointerUp)
     this.deck.removeEventListener('pointercancel', this.onPointerUp)
-    this.deck.removeEventListener('lostpointercapture', this.onPointerUp)
+    this.deck.removeEventListener('dblclick', this.onDblClick)
+    this.deck.removeEventListener('ast-deck-change', this.onSlideChange)
+    this.deck.ownerDocument.removeEventListener('keydown', this.onKeyDown, true)
+    this.guides?.remove()
+    this.guides = null
   }
 
   disconnect(): void {
     this.disable()
     this.baseline.clear()
+    this.deleted.clear()
+    this.slideHTML.clear()
   }
 
-  /** Restore last committed positions on the active slide. */
+  /** Restore last committed markup on the active slide. */
   reset(): void {
+    this.endTextEdit(false, false)
+    const index = this.slideIndex()
     const slide = this.activeSlide()
-    if (!slide) return
-    for (const el of editableChildren(slide)) {
-      const id = el.id
-      const orig = this.baseline.get(baselineKey(this.slideIndex(), id))
-      if (!orig) continue
-      setGeom(el, orig.x, orig.y)
-    }
+    const html = this.slideHTML.get(index)
+    if (slide && html != null) slide.innerHTML = html
+    this.clearDeleted(index)
     this.clearHover()
+    this.clearSelected()
+    this.clearGuides()
     this.deck.removeAttribute('data-edit-dragging')
     this.drag = null
   }
 
-  /** Treat current positions as the saved baseline (after Apply). */
+  /** Treat current slide as the saved baseline (after Apply). */
   commit(): void {
+    this.endTextEdit(true, false)
     this.snapshotSlide(this.slideIndex())
     this.drag = null
+    this.clearGuides()
     this.deck.removeAttribute('data-edit-dragging')
+  }
+
+  /** Remove the selected object (toolbar Delete or keyboard). */
+  deleteSelection(): void {
+    this.deleteSelected()
   }
 
   private snapshotAll(): void {
     this.baseline.clear()
-    const slides = [...this.deck.querySelectorAll<HTMLElement>(':scope > ast-slide')]
-    slides.forEach((_, index) => this.snapshotSlide(index))
+    this.deleted.clear()
+    this.slideHTML.clear()
+    this.slides().forEach((_, index) => this.snapshotSlide(index))
   }
 
   private snapshotSlide(index: number): void {
     const slide = this.slides()[index]
     if (!slide) return
+    this.slideHTML.set(index, slide.innerHTML)
+    this.clearDeleted(index)
     for (const el of editableChildren(slide)) {
       if (!el.id) continue
       const g = geom(el)
-      this.baseline.set(baselineKey(index, el.id), { x: g.x, y: g.y })
+      this.baseline.set(baselineKey(index, el.id), { x: g.x, y: g.y, text: el.textContent ?? '' })
     }
   }
 
@@ -123,20 +161,41 @@ export class EditController {
     return i >= 0 ? i : 0
   }
 
-  private pendingMoves(): EditMove[] {
-    const slide = this.activeSlide()
-    if (!slide) return []
-    const index = this.slideIndex()
-    const out: EditMove[] = []
+  private pendingDraft(slide: HTMLElement | null = this.activeSlide(), index: number = this.slideIndex()): EditDraft {
+    const deletes = [...this.deleted].filter(key => key.startsWith(`${index}:`)).map(key => key.slice(`${index}:`.length))
+    const moves: EditMove[] = []
+    const texts: EditText[] = []
+    if (!slide) return { moves, texts, deletes }
     for (const el of editableChildren(slide)) {
       if (!el.id) continue
-      const g = geom(el)
       const orig = this.baseline.get(baselineKey(index, el.id))
+      const g = geom(el)
       if (!orig || orig.x !== g.x || orig.y !== g.y) {
-        out.push({ id: el.id, x: g.x, y: g.y })
+        moves.push({ id: el.id, x: g.x, y: g.y })
+      }
+      const text = el.textContent ?? ''
+      if (el.tagName === 'AST-TEXT' && orig && orig.text !== text) {
+        texts.push({ id: el.id, text })
       }
     }
-    return out
+    return { moves, texts, deletes }
+  }
+
+  private notifyParent(slide?: HTMLElement | null, index?: number): void {
+    if (window.parent === window) return
+    const target = slide === undefined ? this.activeSlide() : slide
+    const i = index === undefined ? this.slideIndex() : index
+    window.parent.postMessage({ type: 'ast-edit-changed', index: i, ...this.pendingDraft(target, i) }, '*')
+  }
+
+  private notifySelection(): void {
+    if (window.parent === window) return
+    window.parent.postMessage({
+      type: 'ast-edit-selected',
+      index: this.slideIndex(),
+      id: this.selected?.id ?? null,
+      tag: this.selected?.tagName ?? null,
+    }, '*')
   }
 
   private setHover(el: HTMLElement | null): void {
@@ -158,16 +217,95 @@ export class EditController {
     if (el) {
       el.removeAttribute('data-edit-hover')
       el.setAttribute('data-edit-selected', '')
+      if (!this.editing) {
+        try { this.deck.focus({ preventScroll: true }) } catch { this.deck.focus() }
+      }
     }
+    this.notifySelection()
   }
 
   private clearSelected(): void {
-    this.selected?.removeAttribute('data-edit-selected')
+    if (!this.selected) return
+    this.selected.removeAttribute('data-edit-selected')
     this.selected = null
+    this.notifySelection()
+  }
+
+  private startTextEdit(el: HTMLElement): void {
+    if (el.tagName !== 'AST-TEXT') return
+    if (this.editing === el) return
+    this.endTextEdit(true)
+    this.editingOriginal = el.textContent ?? ''
+    this.editingHTML = el.innerHTML
+    this.editing = el
+    flattenPlainText(el, this.editingOriginal)
+    el.setAttribute('contenteditable', 'true')
+    el.setAttribute('data-edit-text', '')
+    el.setAttribute('spellcheck', 'false')
+    el.addEventListener('input', this.onTextInput)
+    el.focus()
+    const range = document.createRange()
+    range.selectNodeContents(el)
+    const sel = window.getSelection()
+    sel?.removeAllRanges()
+    sel?.addRange(range)
+  }
+
+  private endTextEdit(commit: boolean, notify = true): void {
+    const el = this.editing
+    if (!el) return
+    el.removeEventListener('input', this.onTextInput)
+    this.editing = null
+    const next = el.textContent ?? ''
+    if (!commit || next === this.editingOriginal) {
+      el.innerHTML = this.editingHTML
+    } else {
+      flattenPlainText(el, next)
+    }
+    el.removeAttribute('contenteditable')
+    el.removeAttribute('data-edit-text')
+    el.removeAttribute('spellcheck')
+    this.editingOriginal = ''
+    this.editingHTML = ''
+    if (notify) {
+      const slide = el.closest('ast-slide') as HTMLElement | null
+      const i = slide ? this.slides().indexOf(slide) : this.slideIndex()
+      this.notifyParent(slide, i >= 0 ? i : this.slideIndex())
+    }
+  }
+
+  private readonly onTextInput = (): void => {
+    this.notifyParent()
+  }
+
+  private deleteSelected(): void {
+    const el = this.selected
+    if (!el?.id) return
+    if (this.editing) this.endTextEdit(false)
+    const index = this.slideIndex()
+    this.deleted.add(baselineKey(index, el.id))
+    this.clearSelected()
+    this.clearHover()
+    el.remove()
+    this.notifyParent()
+  }
+
+  private readonly onSlideChange = (): void => {
+    if (this.editing) this.endTextEdit(true)
+    this.drag = null
+    this.clearHover()
+    this.clearSelected()
+    this.clearGuides()
+    this.deck.removeAttribute('data-edit-dragging')
   }
 
   private readonly onPointerDown = (event: PointerEvent): void => {
     if (!this.enabled || event.button !== 0) return
+    if (this.editing) {
+      const t = event.target as Node | null
+      if (t && this.editing.contains(t)) return
+      this.endTextEdit(true)
+    }
     const hit = hitTest(this.deck, event.clientX, event.clientY)
     if (!hit) {
       this.clearSelected()
@@ -175,6 +313,7 @@ export class EditController {
     }
     event.preventDefault()
     event.stopPropagation()
+    const alreadySelected = this.selected === hit
     this.setSelected(hit)
     this.clearHover()
     const g = geom(hit)
@@ -185,6 +324,7 @@ export class EditController {
       pointerX: event.clientX,
       pointerY: event.clientY,
       moved: false,
+      alreadySelected,
     }
     try {
       this.deck.setPointerCapture(event.pointerId)
@@ -194,7 +334,7 @@ export class EditController {
   }
 
   private readonly onPointerMove = (event: PointerEvent): void => {
-    if (!this.enabled) return
+    if (!this.enabled || this.editing) return
     if (!this.drag) {
       const hit = hitTest(this.deck, event.clientX, event.clientY)
       this.setHover(hit)
@@ -207,25 +347,127 @@ export class EditController {
     this.drag.moved = true
     this.deck.setAttribute('data-edit-dragging', '')
     const g = geom(this.drag.el)
-    const next = clampPos(this.drag.startX + dx, this.drag.startY + dy, g.w, g.h)
-    setGeom(this.drag.el, next.x, next.y)
+    const raw = clampPos(this.drag.startX + dx, this.drag.startY + dy, g.w, g.h)
+    const others = this.siblingBoxes(this.drag.el)
+    const snapped = snapToAlign({ x: raw.x, y: raw.y, w: g.w, h: g.h }, others)
+    const pos = clampPos(snapped.x, snapped.y, g.w, g.h)
+    setGeom(this.drag.el, pos.x, pos.y)
+    this.renderGuides(snapped.guides)
   }
 
   private readonly onPointerUp = (event: PointerEvent): void => {
     if (!this.drag) return
     const moved = this.drag.moved
+    const alreadySelected = this.drag.alreadySelected
+    const el = this.drag.el
     this.drag = null
     this.deck.removeAttribute('data-edit-dragging')
+    this.clearGuides()
     try {
       this.deck.releasePointerCapture(event.pointerId)
     } catch {
       /* already released / jsdom */
     }
-    if (!moved) return
-    const changes = this.pendingMoves()
-    if (changes.length === 0) return
-    if (window.parent === window) return
-    window.parent.postMessage({ type: 'ast-edit-moved', index: this.slideIndex(), changes }, '*')
+    if (moved) {
+      this.notifyParent()
+      return
+    }
+    if (alreadySelected && el.tagName === 'AST-TEXT' && el.isConnected) {
+      this.startTextEdit(el)
+    }
+  }
+
+  private readonly onDblClick = (event: MouseEvent): void => {
+    if (!this.enabled) return
+    const hit = hitTest(this.deck, event.clientX, event.clientY)
+    if (!hit || hit.tagName !== 'AST-TEXT') return
+    event.preventDefault()
+    event.stopPropagation()
+    this.drag = null
+    this.setSelected(hit)
+    this.startTextEdit(hit)
+  }
+
+  private readonly onKeyDown = (event: KeyboardEvent): void => {
+    if (!this.enabled) return
+    if (this.editing) {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        this.endTextEdit(false)
+        return
+      }
+      if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+        event.preventDefault()
+        this.endTextEdit(true)
+      }
+      return
+    }
+    if (event.key === 'Escape') {
+      this.clearSelected()
+      return
+    }
+    if ((event.key === 'Delete' || event.key === 'Backspace') && this.selected) {
+      event.preventDefault()
+      event.stopPropagation()
+      this.deleteSelected()
+      return
+    }
+    if (event.key === 'Enter' && this.selected?.tagName === 'AST-TEXT') {
+      event.preventDefault()
+      this.startTextEdit(this.selected)
+    }
+  }
+
+  private siblingBoxes(moving: HTMLElement): Geom[] {
+    const slide = this.activeSlide()
+    if (!slide) return []
+    return editableChildren(slide)
+      .filter(el => el !== moving)
+      .map(geom)
+  }
+
+  private ensureGuides(): SVGSVGElement {
+    if (this.guides?.isConnected) return this.guides
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+    svg.setAttribute('class', 'ast-edit-guides')
+    svg.setAttribute('viewBox', `0 0 ${CANVAS_WIDTH} ${CANVAS_HEIGHT}`)
+    svg.setAttribute('width', String(CANVAS_WIDTH))
+    svg.setAttribute('height', String(CANVAS_HEIGHT))
+    svg.setAttribute('aria-hidden', 'true')
+    this.deck.append(svg)
+    this.guides = svg
+    return svg
+  }
+
+  private renderGuides(guides: AlignGuide[]): void {
+    const svg = this.ensureGuides()
+    svg.replaceChildren()
+    for (const g of guides) {
+      const line = document.createElementNS('http://www.w3.org/2000/svg', 'line')
+      if (g.axis === 'x') {
+        line.setAttribute('x1', String(g.pos))
+        line.setAttribute('x2', String(g.pos))
+        line.setAttribute('y1', '0')
+        line.setAttribute('y2', String(CANVAS_HEIGHT))
+      } else {
+        line.setAttribute('y1', String(g.pos))
+        line.setAttribute('y2', String(g.pos))
+        line.setAttribute('x1', '0')
+        line.setAttribute('x2', String(CANVAS_WIDTH))
+      }
+      svg.append(line)
+    }
+  }
+
+  private clearGuides(): void {
+    this.guides?.replaceChildren()
+  }
+
+  private clearDeleted(index: number): void {
+    const prefix = `${index}:`
+    for (const key of [...this.deleted]) {
+      if (key.startsWith(prefix)) this.deleted.delete(key)
+    }
   }
 }
 
@@ -261,6 +503,63 @@ function clampPos(x: number, y: number, w: number, h: number): { x: number; y: n
   const nx = Math.max(MIN_VISIBLE - w, Math.min(x, CANVAS_WIDTH - MIN_VISIBLE))
   const ny = Math.max(MIN_VISIBLE - h, Math.min(y, CANVAS_HEIGHT - MIN_VISIBLE))
   return { x: Math.round(nx), y: Math.round(ny) }
+}
+
+function edges(b: Geom) {
+  return { l: b.x, r: b.x + b.w, t: b.y, b: b.y + b.h, cx: b.x + b.w / 2, cy: b.y + b.h / 2 }
+}
+
+/** Snap a moving box to siblings' left/right/top/bottom/center edges. */
+export function snapToAlign(moving: Geom, others: Geom[], threshold = ALIGN_SNAP): { x: number; y: number; guides: AlignGuide[] } {
+  const m = edges(moving)
+  let bestDx = 0
+  let bestDy = 0
+  let bestAbsX = threshold + 1
+  let bestAbsY = threshold + 1
+  for (const other of others) {
+    const e = edges(other)
+    for (const from of [m.l, m.cx, m.r]) {
+      for (const to of [e.l, e.cx, e.r]) {
+        const d = to - from
+        const a = Math.abs(d)
+        if (a < bestAbsX) {
+          bestAbsX = a
+          bestDx = d
+        }
+      }
+    }
+    for (const from of [m.t, m.cy, m.b]) {
+      for (const to of [e.t, e.cy, e.b]) {
+        const d = to - from
+        const a = Math.abs(d)
+        if (a < bestAbsY) {
+          bestAbsY = a
+          bestDy = d
+        }
+      }
+    }
+  }
+  const x = bestAbsX <= threshold ? Math.round(moving.x + bestDx) : moving.x
+  const y = bestAbsY <= threshold ? Math.round(moving.y + bestDy) : moving.y
+  const snapped = edges({ ...moving, x, y })
+  const seen = new Set<string>()
+  const guides: AlignGuide[] = []
+  const add = (axis: 'x' | 'y', pos: number) => {
+    const key = `${axis}:${Math.round(pos)}`
+    if (seen.has(key)) return
+    seen.add(key)
+    guides.push({ axis, pos: Math.round(pos) })
+  }
+  for (const other of others) {
+    const e = edges(other)
+    for (const pos of [snapped.l, snapped.cx, snapped.r]) {
+      if ([e.l, e.cx, e.r].some(t => Math.abs(t - pos) <= 0.51)) add('x', pos)
+    }
+    for (const pos of [snapped.t, snapped.cy, snapped.b]) {
+      if ([e.t, e.cy, e.b].some(t => Math.abs(t - pos) <= 0.51)) add('y', pos)
+    }
+  }
+  return { x, y, guides }
 }
 
 function editableChildren(slide: HTMLElement): HTMLElement[] {
@@ -302,4 +601,13 @@ function directChildOf(slide: HTMLElement, node: Element): HTMLElement | null {
   }
   if (cur && cur.parentElement === slide && cur instanceof HTMLElement) return cur
   return null
+}
+
+function flattenPlainText(el: HTMLElement, text: string): void {
+  const node = el as HTMLElement & { replacePlainText?: (value: string) => void }
+  if (typeof node.replacePlainText === 'function') {
+    node.replacePlainText(text)
+    return
+  }
+  el.textContent = text
 }

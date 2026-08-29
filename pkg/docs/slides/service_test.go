@@ -142,6 +142,33 @@ func TestServiceMoveSlideElementsRewritesXY(t *testing.T) {
 	}
 }
 
+func TestServiceApplySlideEditsTextAndDelete(t *testing.T) {
+	ctx := context.Background()
+	backend := &memoryDocsStore{}
+	svc := Service{Store: backend}
+	deck, err := svc.CreateDeck(ctx, "deck", "Deck", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	markup := `<ast-slide id="s0"><ast-text id="headline" x="160" y="380" w="400" h="80">Title</ast-text><ast-text id="dek" x="160" y="500" w="400" h="40">Sub</ast-text></ast-slide>`
+	if _, diags, err := svc.WriteSlide(ctx, deck.Slug, 0, markup, ""); err != nil || HasErrors(diags) {
+		t.Fatalf("seed: diags=%#v err=%v", diags, err)
+	}
+	item, diags, err := svc.ApplySlideEdits(ctx, deck.Slug, 0, SlideEdits{
+		Texts:   []ElementText{{ID: "headline", Text: "Hello & world"}},
+		Deletes: []string{"dek"},
+	})
+	if err != nil || HasErrors(diags) {
+		t.Fatalf("edit: diags=%#v err=%v", diags, err)
+	}
+	if !strings.Contains(item.Content, "Hello &amp; world") {
+		t.Fatalf("text not rewritten: %s", item.Content)
+	}
+	if strings.Contains(item.Content, `id="dek"`) {
+		t.Fatalf("dek should be deleted: %s", item.Content)
+	}
+}
+
 func TestServiceFailsClosedWithoutStore(t *testing.T) {
 	svc := Service{}
 	if _, err := svc.CreateDeck(context.Background(), "slug", "title", "", nil); err == nil {

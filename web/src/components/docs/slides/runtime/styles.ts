@@ -16,11 +16,15 @@ export const runtimeStyles = `
   ast-image img { width:100%; height:100%; object-fit:var(--ast-image-fit,contain); }
   ast-notes { display:none; }
   ast-fragment:not([revealed]) { visibility:hidden; }
-  ast-deck[edit] { cursor:default; }
+  ast-deck[edit] { cursor:default; user-select:none; }
+  ast-deck[edit] img, ast-deck[edit] svg { -webkit-user-drag:none; user-select:none; }
   ast-deck[edit] [data-edit-hover] { outline:2px solid var(--ast-accent,#2563eb); outline-offset:2px; cursor:grab; }
   ast-deck[edit] [data-edit-selected] { outline:2px solid var(--ast-accent,#2563eb); outline-offset:2px; cursor:grab; }
   ast-deck[edit][data-edit-dragging],
   ast-deck[edit][data-edit-dragging] [data-edit-selected] { cursor:grabbing; user-select:none; }
+  ast-deck[edit] ast-text[data-edit-text] { cursor:text; outline:2px solid var(--ast-accent,#2563eb); outline-offset:2px; caret-color:var(--ast-ink,#172033); user-select:text; }
+  ast-deck[edit] .ast-edit-guides { position:absolute; left:0; top:0; width:1920px; height:1080px; pointer-events:none; z-index:20; overflow:visible; }
+  ast-deck[edit] .ast-edit-guides line { stroke:#f43f5e; stroke-width:2; stroke-dasharray:8 6; fill:none; vector-effect:non-scaling-stroke; }
   @media print {
     /* Page + slide dimensions must match the PDF paper set in
        pkg/docs/slides/export_pdf.go (20in x 11.25in == 1920x1080px at 96dpi).

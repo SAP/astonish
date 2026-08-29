@@ -47,6 +47,21 @@ describe('slides API (deck/present/export)', () => {
     expect(JSON.parse(String(init.body))).toEqual({ moves: [{ id: 'headline', x: 200, y: 400 }] })
   })
 
+  it('PATCHes slide text and deletes', async () => {
+    mockedTeamFetch.mockResolvedValue(new Response(JSON.stringify({
+      id: 's1', deckId: 'd', position: 0, content: '<ast-slide id="s0"></ast-slide>', schemaVersion: 1,
+    }), { status: 200 }))
+    await patchSlideMoves('deck-1', 0, {
+      texts: [{ id: 'headline', text: 'Hello' }],
+      deletes: ['dek'],
+    }, 'personal')
+    const [, init] = mockedTeamFetch.mock.calls[0] as [string, RequestInit]
+    expect(JSON.parse(String(init.body))).toEqual({
+      texts: [{ id: 'headline', text: 'Hello' }],
+      deletes: ['dek'],
+    })
+  })
+
   it('builds a scoped presentation URL', () => {
     expect(slidesPresentationURL('deck-1', 'personal')).toBe('/api/docs/slides/deck-1/present?scope=personal')
   })

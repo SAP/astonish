@@ -124,17 +124,38 @@ export interface SlideElementMove {
   y: number
 }
 
-/** Apply canvas object moves to a stored slide (logical 1920×1080 px). */
+export interface SlideElementText {
+  id: string
+  text: string
+}
+
+export interface SlideEditDraft {
+  moves?: SlideElementMove[]
+  texts?: SlideElementText[]
+  deletes?: string[]
+}
+
+export function slideEditIsDirty(draft?: SlideEditDraft | null): boolean {
+  if (!draft) return false
+  return (draft.moves?.length ?? 0) > 0 || (draft.texts?.length ?? 0) > 0 || (draft.deletes?.length ?? 0) > 0
+}
+
+/** Apply canvas object moves, text edits, and deletes to a stored slide. */
 export async function patchSlideMoves(
   deckSlug: string,
   index: number,
-  moves: SlideElementMove[],
+  draft: SlideElementMove[] | SlideEditDraft,
   scope: DocsScope = 'personal',
 ): Promise<SlidesSlide> {
+  const body: SlideEditDraft = Array.isArray(draft) ? { moves: draft } : {
+    moves: draft.moves?.length ? draft.moves : undefined,
+    texts: draft.texts?.length ? draft.texts : undefined,
+    deletes: draft.deletes?.length ? draft.deletes : undefined,
+  }
   const response = await teamFetch(withScope(`${DOCS_BASE}/slides/${encodeURIComponent(deckSlug)}/slides/${index}`, scope), {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ moves }),
+    body: JSON.stringify(body),
   })
   if (!response.ok) throw await responseError(response, 'Failed to save slide layout')
   return response.json() as Promise<SlidesSlide>

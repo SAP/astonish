@@ -423,3 +423,38 @@ func TestPatchSlideMovesElement(t *testing.T) {
 		t.Fatalf("missing id status = %d, want 400", badRec.Code)
 	}
 }
+
+func TestPatchSlideAppliesTextAndDelete(t *testing.T) {
+	personal := newMemDocsStore()
+	svc := slides.Service{Store: personal}
+	ctx := context.Background()
+	deck, err := svc.CreateDeck(ctx, "edit-deck", "Edit", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	markup := `<ast-slide id="s0"><ast-text id="headline" x="160" y="380" w="400" h="80">Title</ast-text><ast-text id="dek" x="160" y="500" w="400" h="40">Sub</ast-text></ast-slide>`
+	if _, diags, err := svc.WriteSlide(ctx, deck.Slug, 0, markup, ""); err != nil || slides.HasErrors(diags) {
+		t.Fatalf("seed: diags=%#v err=%v", diags, err)
+	}
+
+	body := bytes.NewBufferString(`{"texts":[{"id":"headline","text":"Hello"}],"deletes":["dek"]}`)
+	req := httptest.NewRequest(http.MethodPatch, "/api/docs/slides/edit-deck/slides/0?scope=personal", body)
+	req.Header.Set("Content-Type", "application/json")
+	req = mux.SetURLVars(req, map[string]string{"deckSlug": "edit-deck", "idx": "0"})
+	req = withDocsServices(req, personal, newMemDocsStore())
+	rec := httptest.NewRecorder()
+	PatchSlideHandler(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var item store.SlideContent
+	if err := json.Unmarshal(rec.Body.Bytes(), &item); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(item.Content, "Hello") {
+		t.Fatalf("text not patched: %s", item.Content)
+	}
+	if strings.Contains(item.Content, `id="dek"`) {
+		t.Fatalf("dek should be deleted: %s", item.Content)
+	}
+}

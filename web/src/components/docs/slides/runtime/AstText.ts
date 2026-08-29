@@ -127,6 +127,13 @@ export class AstText extends PositionedElement {
     return parts.join(';')
   }
 
+  /** Flatten styled runs to one text node so canvas editing can rewrite copy. */
+  replacePlainText(text: string): void {
+    this.runs = null
+    this.runsRead = true
+    this.textContent = text
+  }
+
   protected override render(): unknown {
     const runs = this.readRuns()
     if (runs.length === 0) return noChange

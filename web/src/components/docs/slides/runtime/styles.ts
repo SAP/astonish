@@ -16,6 +16,11 @@ export const runtimeStyles = `
   ast-image img { width:100%; height:100%; object-fit:var(--ast-image-fit,contain); }
   ast-notes { display:none; }
   ast-fragment:not([revealed]) { visibility:hidden; }
+  ast-deck[edit] { cursor:default; }
+  ast-deck[edit] [data-edit-hover] { outline:2px solid var(--ast-accent,#2563eb); outline-offset:2px; cursor:grab; }
+  ast-deck[edit] [data-edit-selected] { outline:2px solid var(--ast-accent,#2563eb); outline-offset:2px; cursor:grab; }
+  ast-deck[edit][data-edit-dragging],
+  ast-deck[edit][data-edit-dragging] [data-edit-selected] { cursor:grabbing; user-select:none; }
   @media print {
     /* Page + slide dimensions must match the PDF paper set in
        pkg/docs/slides/export_pdf.go (20in x 11.25in == 1920x1080px at 96dpi).

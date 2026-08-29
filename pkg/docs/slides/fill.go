@@ -882,3 +882,42 @@ func idAttrIndex(markup, id string) int {
 func isXMLNameChar(b byte) bool {
 	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_' || b == '-'
 }
+
+// setElementXY rewrites the x/y attributes of the element with the given id.
+func setElementXY(markup, id string, x, y int) (string, error) {
+	start, tag, attrs, innerStart, innerEnd, closeEnd, ok := findElement(markup, id)
+	if !ok {
+		return "", fmt.Errorf("element %q not found", id)
+	}
+	attrs = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(attrs), "/"))
+	attrs = setIntAttr(attrs, "x", x)
+	attrs = setIntAttr(attrs, "y", y)
+	selfClose := closeEnd == innerStart
+	open := "<" + tag
+	if strings.TrimSpace(attrs) != "" {
+		open += " " + strings.TrimSpace(attrs)
+	}
+	if selfClose {
+		open += "/>"
+		return markup[:start] + open + markup[closeEnd:], nil
+	}
+	open += ">"
+	return markup[:start] + open + markup[innerStart:innerEnd] + "</" + tag + ">" + markup[closeEnd:], nil
+}
+
+func setIntAttr(attrs, key string, n int) string {
+	prefix := key + `="`
+	idx := strings.Index(attrs, prefix)
+	if idx >= 0 {
+		rest := attrs[idx+len(prefix):]
+		end := strings.IndexByte(rest, '"')
+		if end >= 0 {
+			return attrs[:idx] + fmt.Sprintf(`%s="%d"`, key, n) + rest[end+1:]
+		}
+	}
+	attrs = strings.TrimSpace(attrs)
+	if attrs == "" {
+		return fmt.Sprintf(`%s="%d"`, key, n)
+	}
+	return attrs + " " + fmt.Sprintf(`%s="%d"`, key, n)
+}

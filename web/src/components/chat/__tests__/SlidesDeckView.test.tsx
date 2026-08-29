@@ -20,12 +20,13 @@ vi.mock('../../../api/slides', async () => {
     ...actual,
     fetchSlidesDeck: vi.fn(),
     exportSlidesDeck: vi.fn(),
+    patchSlideMoves: vi.fn(),
     slidesPresentationURL: vi.fn((slug: string) => `/api/docs/slides/${slug}/present`),
   }
 })
 
 const deckWith = (n: number): slidesApi.SlidesDeckResponse => ({
-  deck: { id: 'd', slug: 'd', title: 'Deck', schemaVersion: 2 },
+  deck: { id: 'd', slug: 'd', title: 'Deck', schemaVersion: 2, sessionId: 'sess-1' },
   slides: Array.from({ length: n }, (_, i) => ({
     id: `d-s${i}`,
     deckId: 'd',
@@ -183,5 +184,63 @@ describe('SlidesDeckView refresh signal', () => {
     const tile = screen.getByTestId('slides-tile')
     expect(tile.querySelector('ast-deck')).not.toBeNull()
     await waitFor(() => expect(tile.textContent).toContain('Cover title'))
+  })
+
+  it('shows Discard/Apply after a canvas move and discard posts ast-edit-reset', async () => {
+    vi.mocked(slidesApi.fetchSlidesDeck).mockResolvedValue(deckWith(2))
+    render(<SlidesDeckView deckSlug="d" refreshSignal={0} />)
+    await waitFor(() => expect(screen.getAllByTestId('slides-tile')).toHaveLength(2))
+
+    const frame = screen.getByTestId('slides-deck-frame') as HTMLIFrameElement
+    const postMessage = vi.fn()
+    Object.defineProperty(frame, 'contentWindow', { value: { postMessage }, configurable: true })
+
+    expect(screen.queryByTestId('slides-edit-apply')).not.toBeInTheDocument()
+    expect(screen.getByTestId('slides-save')).toBeInTheDocument()
+
+    fireEvent(window, new MessageEvent('message', {
+      data: { type: 'ast-edit-moved', index: 0, changes: [{ id: 'headline', x: 200, y: 400 }] },
+    }))
+
+    expect(await screen.findByTestId('slides-edit-apply')).toBeInTheDocument()
+    expect(screen.getByTestId('slides-edit-discard')).toBeInTheDocument()
+    expect(screen.queryByTestId('slides-save')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByTestId('slides-edit-discard'))
+    expect(postMessage).toHaveBeenCalledWith({ type: 'ast-edit-reset' }, '*')
+    expect(screen.queryByTestId('slides-edit-apply')).not.toBeInTheDocument()
+    expect(screen.getByTestId('slides-save')).toBeInTheDocument()
+  })
+
+  it('applies pending moves through patchSlideMoves', async () => {
+    vi.mocked(slidesApi.fetchSlidesDeck).mockResolvedValue(deckWith(1))
+    vi.mocked(slidesApi.patchSlideMoves).mockResolvedValue({
+      id: 'd-s0',
+      deckId: 'd',
+      position: 0,
+      content: '<ast-slide id="s0"></ast-slide>',
+      schemaVersion: 2,
+    })
+    render(<SlidesDeckView deckSlug="d" refreshSignal={0} />)
+    await waitFor(() => expect(screen.getByTestId('slides-tile')).toBeInTheDocument())
+
+    const frame = screen.getByTestId('slides-deck-frame') as HTMLIFrameElement
+    const postMessage = vi.fn()
+    Object.defineProperty(frame, 'contentWindow', { value: { postMessage }, configurable: true })
+
+    expect(screen.getByTestId('slides-save')).toBeInTheDocument()
+    fireEvent(window, new MessageEvent('message', {
+      data: { type: 'ast-edit-moved', index: 0, changes: [{ id: 'headline', x: 200, y: 400 }] },
+    }))
+    expect(screen.queryByTestId('slides-save')).not.toBeInTheDocument()
+    fireEvent.click(await screen.findByTestId('slides-edit-apply'))
+
+    await waitFor(() => expect(slidesApi.patchSlideMoves).toHaveBeenCalledWith(
+      'd',
+      0,
+      [{ id: 'headline', x: 200, y: 400 }],
+      'personal',
+    ))
+    expect(postMessage).toHaveBeenCalledWith({ type: 'ast-edit-commit' }, '*')
+    await waitFor(() => expect(screen.getByTestId('slides-save')).toBeInTheDocument())
   })
 })

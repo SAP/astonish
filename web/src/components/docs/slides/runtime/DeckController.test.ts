@@ -39,6 +39,13 @@ describe('DeckController', () => {
     expect(deck.currentIndex).toBe(1)
   })
 
+  it('does not advance on click while canvas edit mode is on', async () => {
+    const deck = await mountDeck()
+    deck.setAttribute('edit', '')
+    deck.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: 800 }))
+    expect(deck.currentIndex).toBe(0)
+  })
+
   it('handles keyboard navigation and slide lifecycle events', async () => {
     const deck = await mountDeck()
     const leave = vi.fn()

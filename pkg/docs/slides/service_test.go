@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/SAP/astonish/pkg/docs/slides/themes"
@@ -111,6 +112,33 @@ func TestServiceWriteSlideReplacesPosition(t *testing.T) {
 	}
 	if len(backend.slides) != 1 || backend.slides[0].Notes != "notes two" {
 		t.Fatalf("position was not replaced: %#v", backend.slides)
+	}
+}
+
+func TestServiceMoveSlideElementsRewritesXY(t *testing.T) {
+	ctx := context.Background()
+	backend := &memoryDocsStore{}
+	svc := Service{Store: backend}
+	deck, err := svc.CreateDeck(ctx, "deck", "Deck", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	markup := `<ast-slide id="s0"><ast-text id="headline" x="160" y="380" w="400" h="80">Title</ast-text></ast-slide>`
+	if _, diags, err := svc.WriteSlide(ctx, deck.Slug, 0, markup, ""); err != nil || HasErrors(diags) {
+		t.Fatalf("seed: diags=%#v err=%v", diags, err)
+	}
+	item, diags, err := svc.MoveSlideElements(ctx, deck.Slug, 0, []ElementMove{{ID: "headline", X: 220, Y: 410}})
+	if err != nil || HasErrors(diags) {
+		t.Fatalf("move: diags=%#v err=%v", diags, err)
+	}
+	if !strings.Contains(item.Content, `id="headline"`) || !strings.Contains(item.Content, `x="220"`) || !strings.Contains(item.Content, `y="410"`) {
+		t.Fatalf("expected rewritten geometry, got %s", item.Content)
+	}
+	if strings.Contains(item.Content, `x="160"`) {
+		t.Fatalf("old x still present: %s", item.Content)
+	}
+	if _, _, err := svc.MoveSlideElements(ctx, deck.Slug, 0, []ElementMove{{ID: "missing", X: 1, Y: 1}}); err == nil {
+		t.Fatal("expected missing element error")
 	}
 }
 

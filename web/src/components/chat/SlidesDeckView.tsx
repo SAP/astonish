@@ -4,9 +4,11 @@ import { Download, ExternalLink, Loader2, Maximize2, Save, TriangleAlert, X } fr
 import {
   exportSlidesDeck,
   fetchSlidesDeck,
+  patchSlideMoves,
   saveDeck,
   slidesPresentationURL,
   type DocsScope,
+  type SlideElementMove,
   type SlidesDeckResponse,
   type SlidesExportFormat,
 } from '@/api/slides'
@@ -46,6 +48,8 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
   const [saveDialogOpen, setSaveDialogOpen] = useState(false)
   const [saveName, setSaveName] = useState('')
   const [fullscreen, setFullscreen] = useState(false)
+  const [pendingBySlide, setPendingBySlide] = useState<Record<number, SlideElementMove[]>>({})
+  const [applying, setApplying] = useState(false)
   const mountedRef = useRef(true)
   const iframeRef = useRef<HTMLIFrameElement | null>(null)
   const fsIframeRef = useRef<HTMLIFrameElement | null>(null)
@@ -76,6 +80,10 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
     return () => { cancelled = true }
   }, [deckSlug, scope, refreshSignal])
 
+  useEffect(() => {
+    setPendingBySlide({})
+  }, [deckSlug, scope, refreshSignal])
+
   const slides = deck?.slides ?? []
   const total = slides.length
   const boundedIndex = Math.min(slideIndex, Math.max(0, total - 1))
@@ -104,24 +112,90 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
   }, [boundedIndex, total, postNav])
 
   // Click/keyboard nav happens inside the sandboxed present iframe. Mirror
-  // ast-deck-change messages onto the strip selection.
+  // ast-deck-change messages onto the strip selection. Canvas object moves
+  // arrive as ast-edit-moved.
   useEffect(() => {
     const onMessage = (event: MessageEvent) => {
-      const data = event.data as { type?: string; index?: number } | null
-      if (!data || data.type !== 'ast-deck-change' || typeof data.index !== 'number') return
-      const index = data.index
-      if (!Number.isInteger(index) || index < 0) return
-      setSlideIndex(prev => (prev === index ? prev : index))
+      const data = event.data as { type?: string; index?: number; changes?: SlideElementMove[] } | null
+      if (!data?.type) return
+      if (data.type === 'ast-deck-change') {
+        const index = data.index
+        if (typeof index !== 'number' || !Number.isInteger(index) || index < 0) return
+        setSlideIndex(prev => (prev === index ? prev : index))
+        return
+      }
+      if (data.type === 'ast-edit-moved') {
+        const index = data.index
+        const changes = Array.isArray(data.changes) ? data.changes : []
+        if (typeof index !== 'number' || !Number.isInteger(index) || index < 0) return
+        setPendingBySlide(prev => {
+          if (changes.length === 0) {
+            if (!(index in prev)) return prev
+            const next = { ...prev }
+            delete next[index]
+            return next
+          }
+          return { ...prev, [index]: changes }
+        })
+      }
     }
     window.addEventListener('message', onMessage)
     return () => window.removeEventListener('message', onMessage)
   }, [])
 
+  const postToCanvas = useCallback((payload: Record<string, unknown>) => {
+    iframeRef.current?.contentWindow?.postMessage(payload, '*')
+  }, [])
+
   // After the present document reloads (new slides or an in-place rewrite),
-  // restore the strip's current index inside the iframe.
+  // restore the strip's current index inside the iframe and enable canvas edit.
   const onPresentLoad = useCallback(() => {
     if (total > 0) postNav(boundedIndex)
   }, [total, boundedIndex, postNav])
+
+  const onCanvasLoad = useCallback(() => {
+    onPresentLoad()
+    postToCanvas({ type: 'ast-edit-mode', enabled: true })
+  }, [onPresentLoad, postToCanvas])
+
+  const currentPending = pendingBySlide[boundedIndex] || []
+  const editDirty = currentPending.length > 0 && !fullscreen
+
+  const discardEdits = useCallback(() => {
+    postToCanvas({ type: 'ast-edit-reset' })
+    setPendingBySlide(prev => {
+      if (!(boundedIndex in prev)) return prev
+      const next = { ...prev }
+      delete next[boundedIndex]
+      return next
+    })
+  }, [boundedIndex, postToCanvas])
+
+  const applyEdits = useCallback(async () => {
+    if (currentPending.length === 0) return
+    setApplying(true)
+    setError('')
+    try {
+      const updated = await patchSlideMoves(deckSlug, boundedIndex, currentPending, scope)
+      setDeck(prev => {
+        if (!prev) return prev
+        return {
+          ...prev,
+          slides: prev.slides.map((slide, i) => i === boundedIndex ? { ...slide, content: updated.content } : slide),
+        }
+      })
+      postToCanvas({ type: 'ast-edit-commit' })
+      setPendingBySlide(prev => {
+        const next = { ...prev }
+        delete next[boundedIndex]
+        return next
+      })
+    } catch (cause) {
+      if (mountedRef.current) setError(cause instanceof Error ? cause.message : 'Failed to save slide layout')
+    } finally {
+      if (mountedRef.current) setApplying(false)
+    }
+  }, [boundedIndex, currentPending, deckSlug, postToCanvas, scope])
 
   const focusStripTile = useCallback((index: number) => {
     const tiles = stripRef.current?.querySelectorAll<HTMLButtonElement>('[data-testid="slides-tile"]')
@@ -221,7 +295,7 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
       sandbox="allow-scripts"
       title={`Slide deck: ${deckTitle}`}
       data-testid="slides-deck-frame"
-      onLoad={onPresentLoad}
+      onLoad={onCanvasLoad}
       className="h-full w-full rounded-lg border-0"
       style={{ background: 'var(--card)' }}
     />
@@ -293,8 +367,45 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
           </button>
         ))}
 
-        {/* Save button — copies session deck to permanent storage (session deck stays) */}
-        {deck?.deck.sessionId && !saving && !saveSuccess && (
+        {/* Right slot: Save, or Discard/Apply while a canvas move is pending. */}
+        {editDirty ? (
+          <div className="ml-auto flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={discardEdits}
+              disabled={applying}
+              data-testid="slides-edit-discard"
+              className="inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs font-medium disabled:opacity-50"
+              style={{ borderColor: 'var(--border-color)', color: 'var(--text-secondary)' }}
+            >
+              Discard
+            </button>
+            <button
+              type="button"
+              onClick={() => { void applyEdits() }}
+              disabled={applying}
+              data-testid="slides-edit-apply"
+              className="inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50"
+              style={{ background: 'var(--brand)' }}
+            >
+              {applying ? <Loader2 size={13} className="animate-spin" /> : null}
+              Apply
+            </button>
+          </div>
+        ) : saving ? (
+          <div className="ml-auto flex items-center gap-1.5">
+            <span className="inline-flex items-center gap-1.5 text-xs" style={{ color: 'var(--text-muted)' }}>
+              <Loader2 size={13} className="animate-spin" /> Saving…
+            </span>
+          </div>
+        ) : saveSuccess ? (
+          <div className="ml-auto flex items-center gap-1.5">
+            <span className="inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium"
+              style={{ color: 'var(--success, #10b981)' }}>
+              ✓ Saved!
+            </span>
+          </div>
+        ) : deck?.deck.sessionId ? (
           <div className="ml-auto flex items-center gap-1.5">
             <button
               type="button"
@@ -308,22 +419,7 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
               Save
             </button>
           </div>
-        )}
-        {saving && (
-          <div className="ml-auto flex items-center gap-1.5">
-            <span className="inline-flex items-center gap-1.5 text-xs" style={{ color: 'var(--text-muted)' }}>
-              <Loader2 size={13} className="animate-spin" /> Saving…
-            </span>
-          </div>
-        )}
-        {saveSuccess && (
-          <div className="ml-auto flex items-center gap-1.5">
-            <span className="inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium"
-              style={{ color: 'var(--success, #10b981)' }}>
-              ✓ Saved!
-            </span>
-          </div>
-        )}
+        ) : null}
       </div>
 
       {/* Save dialog — inline modal for naming the deck */}

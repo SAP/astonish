@@ -118,6 +118,28 @@ async function responseError(response: Response, operation: string): Promise<Err
   return new Error(detail ? `${operation}: ${detail}` : `${operation}: HTTP ${response.status}`)
 }
 
+export interface SlideElementMove {
+  id: string
+  x: number
+  y: number
+}
+
+/** Apply canvas object moves to a stored slide (logical 1920×1080 px). */
+export async function patchSlideMoves(
+  deckSlug: string,
+  index: number,
+  moves: SlideElementMove[],
+  scope: DocsScope = 'personal',
+): Promise<SlidesSlide> {
+  const response = await teamFetch(withScope(`${DOCS_BASE}/slides/${encodeURIComponent(deckSlug)}/slides/${index}`, scope), {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ moves }),
+  })
+  if (!response.ok) throw await responseError(response, 'Failed to save slide layout')
+  return response.json() as Promise<SlidesSlide>
+}
+
 export async function fetchSlidesDeck(deckSlug: string, scope: DocsScope = 'personal'): Promise<SlidesDeckResponse> {
   const response = await teamFetch(withScope(`${DOCS_BASE}/slides/${encodeURIComponent(deckSlug)}`, scope))
   if (!response.ok) throw await responseError(response, 'Failed to load slide deck')

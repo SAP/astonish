@@ -214,6 +214,36 @@ func (s Service) WriteSlide(ctx context.Context, deckSlug string, position int, 
 	}
 	return item, diags, nil
 }
+
+// ElementMove is one canvas drag: element id and new logical origin.
+type ElementMove struct {
+	ID string
+	X  int
+	Y  int
+}
+
+// MoveSlideElements patches x/y on named elements in a stored slide, then
+// validates and upserts through WriteSlide.
+func (s Service) MoveSlideElements(ctx context.Context, deckSlug string, position int, moves []ElementMove) (*store.SlideContent, []Diagnostic, error) {
+	item, err := s.Slide(ctx, deckSlug, position)
+	if err != nil {
+		return nil, nil, err
+	}
+	markup := item.Content
+	for _, m := range moves {
+		id := strings.TrimSpace(m.ID)
+		if id == "" {
+			return nil, nil, fmt.Errorf("move is missing element id")
+		}
+		next, err := setElementXY(markup, id, m.X, m.Y)
+		if err != nil {
+			return nil, nil, err
+		}
+		markup = next
+	}
+	return s.WriteSlide(ctx, deckSlug, position, markup, item.Notes)
+}
+
 func (s Service) Deck(ctx context.Context, slug string) (*store.DeckManifest, []*store.SlideContent, error) {
 	if s.Store == nil {
 		return nil, nil, fmt.Errorf("docs store unavailable")

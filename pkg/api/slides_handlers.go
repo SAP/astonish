@@ -237,6 +237,56 @@ func GetSlideHandler(w http.ResponseWriter, r *http.Request) {
 	writeSlidesJSON(w, http.StatusOK, item)
 }
 
+type slideMovesRequest struct {
+	Moves []slideMove `json:"moves"`
+}
+
+type slideMove struct {
+	ID string `json:"id"`
+	X  int    `json:"x"`
+	Y  int    `json:"y"`
+}
+
+// PatchSlideHandler applies canvas object moves (x/y) to a stored slide.
+func PatchSlideHandler(w http.ResponseWriter, r *http.Request) {
+	position, err := strconv.Atoi(mux.Vars(r)["idx"])
+	if err != nil || position < 0 {
+		http.Error(w, "slide index must be a non-negative integer", http.StatusBadRequest)
+		return
+	}
+	var body slideMovesRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid move payload", http.StatusBadRequest)
+		return
+	}
+	if len(body.Moves) == 0 {
+		http.Error(w, "moves are required", http.StatusBadRequest)
+		return
+	}
+	svc, ok := requireDocsService(w, r)
+	if !ok {
+		return
+	}
+	moves := make([]slides.ElementMove, 0, len(body.Moves))
+	for _, m := range body.Moves {
+		moves = append(moves, slides.ElementMove{ID: m.ID, X: m.X, Y: m.Y})
+	}
+	item, diags, err := svc.MoveSlideElements(r.Context(), mux.Vars(r)["deckSlug"], position, moves)
+	if err != nil {
+		if errors.Is(err, store.ErrDocsNotFound) {
+			writeSlidesError(w, err)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if slides.HasErrors(diags) {
+		http.Error(w, "slide validation failed", http.StatusBadRequest)
+		return
+	}
+	writeSlidesJSON(w, http.StatusOK, item)
+}
+
 // deckSlideThumbnailPNGPrefix is the data-URI prefix stripped before
 // base64-decoding a baked per-slide deck thumbnail asset.
 const deckSlideThumbnailPNGPrefix = "data:image/png;base64,"
@@ -567,19 +617,20 @@ type saveSlidesDeckRequest struct {
 
 // deckSnapshotPayload is the JSON structure stored inside DeckVersionSnapshot.Snapshot.
 type deckSnapshotPayload struct {
-	Theme         map[string]string `json:"theme,omitempty"`
-	Assets        map[string]string `json:"assets,omitempty"`
+	Theme         map[string]string     `json:"theme,omitempty"`
+	Assets        map[string]string     `json:"assets,omitempty"`
 	Slides        []*store.SlideContent `json:"slides"`
-	TemplateModel string            `json:"templateModel,omitempty"`
+	TemplateModel string                `json:"templateModel,omitempty"`
 }
 
 // SaveSlidesDeckHandler handles POST /api/docs/slides/{deckSlug}/save.
 // It copies a session-scoped deck into permanent storage. The session deck remains
 // unchanged (like Apps: the session continues with its own copy).
 // Body JSON: { "name": "my-deck-name" }
-// - If a saved deck with that name (slug) already exists: archives the old version
-//   (up to 5), then overwrites it with the current session deck content. Version is bumped.
-// - If no saved deck with that name exists: creates a new permanent deck.
+//   - If a saved deck with that name (slug) already exists: archives the old version
+//     (up to 5), then overwrites it with the current session deck content. Version is bumped.
+//   - If no saved deck with that name exists: creates a new permanent deck.
+//
 // The session deck is NEVER deleted or modified — it stays in the session for further edits.
 func SaveSlidesDeckHandler(w http.ResponseWriter, r *http.Request) {
 	svc, ok := requireDocsService(w, r)

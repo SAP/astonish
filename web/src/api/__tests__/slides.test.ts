@@ -9,6 +9,7 @@ import {
   templateMediaUrl,
   listSlidesDecks,
   listSlidesTemplates,
+  patchSlideMoves,
   importSlidesTemplate,
   deleteSlidesTemplate,
   duplicateSlidesTemplate,
@@ -32,6 +33,18 @@ describe('slides API (deck/present/export)', () => {
     const res = await fetchSlidesDeck('risk/a', 'team')
     expect(mockedTeamFetch).toHaveBeenCalledWith('/api/docs/slides/risk%2Fa?scope=team')
     expect(res.deck.title).toBe('Risk')
+  })
+
+  it('PATCHes slide object moves', async () => {
+    mockedTeamFetch.mockResolvedValue(new Response(JSON.stringify({
+      id: 's1', deckId: 'd', position: 0, content: '<ast-slide id="s0"></ast-slide>', schemaVersion: 1,
+    }), { status: 200 }))
+    const slide = await patchSlideMoves('deck-1', 0, [{ id: 'headline', x: 200, y: 400 }], 'personal')
+    expect(slide.position).toBe(0)
+    const [url, init] = mockedTeamFetch.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('/api/docs/slides/deck-1/slides/0?scope=personal')
+    expect(init.method).toBe('PATCH')
+    expect(JSON.parse(String(init.body))).toEqual({ moves: [{ id: 'headline', x: 200, y: 400 }] })
   })
 
   it('builds a scoped presentation URL', () => {

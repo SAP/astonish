@@ -1084,6 +1084,7 @@ func RegisterRoutes(router *mux.Router, svc *store.Services, backend store.Platf
 	router.HandleFunc("/api/docs/slides/{deckSlug}", GetSlidesDeckHandler).Methods("GET")
 	router.HandleFunc("/api/docs/slides/{deckSlug}", DeleteSlidesDeckHandler).Methods("DELETE")
 	router.HandleFunc("/api/docs/slides/{deckSlug}/slides/{idx:[0-9]+}", GetSlideHandler).Methods("GET")
+	router.HandleFunc("/api/docs/slides/{deckSlug}/slides/{idx:[0-9]+}", PatchSlideHandler).Methods("PATCH")
 	router.HandleFunc("/api/docs/slides/{deckSlug}/thumbnails/{idx:[0-9]+}", GetSlidesDeckSlideThumbnailHandler).Methods("GET")
 	router.HandleFunc("/api/docs/slides/{deckSlug}/present", PresentSlidesHandler).Methods("GET")
 	router.HandleFunc("/api/docs/slides/{deckSlug}/export/html", ExportSlidesHTMLHandler).Methods("POST")

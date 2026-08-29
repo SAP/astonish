@@ -90,10 +90,11 @@ func (b *SystemPromptBuilder) Clone() *SystemPromptBuilder {
 // and applied to the cloned SystemPromptBuilder inside Run().
 // This eliminates shared mutable state across concurrent requests.
 type PromptOverrides struct {
-	ChannelHints   string // Channel-specific output constraints
-	SchedulerHints string // Scheduler-specific output constraints
-	SessionContext string // Per-turn session context (fleet wizard, etc.)
-	SkillIndex     string // Per-request merged skill index (platform + org + team)
+	ChannelHints    string      // Channel-specific output constraints
+	SchedulerHints  string      // Scheduler-specific output constraints
+	SessionContext  string      // Per-turn session context (fleet wizard, etc.)
+	SkillIndex      string      // Per-request merged skill index (platform + org + team)
+	AdditionalTools []tool.Tool // Per-request main-thread tools and declarations
 
 	// PinnedToolGroups lists tool groups required by wizard sessions. Deferred
 	// members remain available through the fixed progressive tool bridge.

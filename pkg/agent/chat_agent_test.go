@@ -1063,22 +1063,3 @@ func TestParseMCPToolRef(t *testing.T) {
 		}
 	}
 }
-
-func TestEnsureMainThreadTool_AddsOnce(t *testing.T) {
-	ca := &ChatAgent{
-		Tools:        nil,
-		SystemPrompt: &SystemPromptBuilder{},
-	}
-	toolA := mockTool{name: "perplexity_web_search"}
-	ca.EnsureMainThreadTool(toolA)
-	ca.EnsureMainThreadTool(toolA)
-	if !ca.HasMainThreadTool("perplexity_web_search") {
-		t.Fatal("expected tool to be registered")
-	}
-	if len(ca.Tools) != 1 {
-		t.Fatalf("expected single registration, got %d", len(ca.Tools))
-	}
-	if len(ca.SystemPrompt.Tools) != 1 {
-		t.Fatalf("expected system prompt tools to include tool once, got %d", len(ca.SystemPrompt.Tools))
-	}
-}

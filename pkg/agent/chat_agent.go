@@ -73,10 +73,6 @@ type ChatAgent struct {
 	// Tool discovery
 	ToolIndex *ToolIndex // Semantic catalog for deferred tool discovery (nil = disabled)
 
-	// toolsMu protects Tools / SystemPrompt.Tools when a late-configured
-	// platform tool (e.g. perplexity_web_search) is added after init.
-	toolsMu sync.Mutex
-
 	// Self-management callbacks
 	SelfMDRefresher func() // Called after config changes to regenerate SELF.md
 
@@ -327,48 +323,6 @@ func NewChatAgent(llm model.LLM, internalTools []tool.Tool, toolsets []tool.Tool
 		approvedTutorialBP:   make(map[string]bool),
 		activeApps:           make(map[string]*ActiveApp),
 	}
-}
-
-// EnsureMainThreadTool adds t to the agent's static tool list if missing.
-// Used when platform web search is configured after the singleton agent was
-// first initialized (or pre-warmed without tenant web settings).
-func (c *ChatAgent) EnsureMainThreadTool(t tool.Tool) {
-	if c == nil || t == nil {
-		return
-	}
-	name := t.Name()
-	c.toolsMu.Lock()
-	defer c.toolsMu.Unlock()
-	for _, existing := range c.Tools {
-		if existing != nil && existing.Name() == name {
-			return
-		}
-	}
-	c.Tools = append(c.Tools, t)
-	if c.SystemPrompt != nil {
-		for _, existing := range c.SystemPrompt.Tools {
-			if existing != nil && existing.Name() == name {
-				return
-			}
-		}
-		c.SystemPrompt.Tools = append(c.SystemPrompt.Tools, t)
-	}
-}
-
-// HasMainThreadTool reports whether a tool with the given name is already
-// registered on the agent.
-func (c *ChatAgent) HasMainThreadTool(name string) bool {
-	if c == nil || name == "" {
-		return false
-	}
-	c.toolsMu.Lock()
-	defer c.toolsMu.Unlock()
-	for _, existing := range c.Tools {
-		if existing != nil && existing.Name() == name {
-			return true
-		}
-	}
-	return false
 }
 
 // ForwardSubTaskEvent processes a sub-agent event for transparent delegation.
@@ -732,27 +686,20 @@ func isMCPServerAccessible(ctx context.Context, serverName string) bool {
 	if stores == nil {
 		return true // no stores in context — allow all
 	}
-	// Standard servers (Tavily, Brave, etc.) are always accessible when installed.
-	if config.IsStandardServerInstalled(serverName) {
-		return true
-	}
-	// Check all three tiers: platform → org → team
-	if stores.Platform != nil {
-		if s, _ := stores.Platform.Get(ctx, serverName); s != nil {
-			return s.IsEnabled()
+	// Resolve the most specific declaration first. Disabled entries are
+	// authoritative overrides and must not fall through to a parent or an
+	// installed standard server.
+	for _, serverStore := range []store.MCPServerStore{stores.Team, stores.Org, stores.Platform} {
+		if serverStore == nil {
+			continue
+		}
+		if server, err := serverStore.Get(ctx, serverName); err == nil && server != nil {
+			return server.IsEnabled()
 		}
 	}
-	if stores.Org != nil {
-		if s, _ := stores.Org.Get(ctx, serverName); s != nil {
-			return s.IsEnabled()
-		}
-	}
-	if stores.Team != nil {
-		if s, _ := stores.Team.Get(ctx, serverName); s != nil {
-			return s.IsEnabled()
-		}
-	}
-	return false
+	// Standard servers without a scoped declaration remain inherited from the
+	// effective application configuration.
+	return config.IsStandardServerInstalled(serverName)
 }
 
 // mcpServerNameFromGroup extracts the MCP server name from a tool group name.

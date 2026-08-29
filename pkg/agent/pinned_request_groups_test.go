@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -64,6 +65,93 @@ func TestProgressiveToolBridge_RequestScopedExecutionAndDisabledCheck(t *testing
 	})
 	if err == nil || !strings.Contains(err.Error(), "disabled") {
 		t.Fatalf("disabled execute error = %v, want disabled error", err)
+	}
+}
+
+func TestRequestGroupsMergeAndRejectAmbiguousBareNames(t *testing.T) {
+	mcpTool, err := functiontool.New(functiontool.Config{Name: "shared", Description: "mcp"}, func(_ tool.Context, _ map[string]any) (map[string]any, error) {
+		return map[string]any{"source": "mcp"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a2aTool, err := functiontool.New(functiontool.Config{Name: "shared", Description: "a2a"}, func(_ tool.Context, _ map[string]any) (map[string]any, error) {
+		return map[string]any{"source": "a2a"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := WithRequestMCPGroups(context.Background(), map[string]*ToolGroup{
+		"mcp:test": {Name: "mcp:test", Tools: []tool.Tool{mcpTool}},
+	})
+	ctx = WithRequestMCPGroups(ctx, map[string]*ToolGroup{
+		"a2a": {Name: "a2a", Tools: []tool.Tool{a2aTool}},
+	})
+	if len(RequestMCPGroupsFromContext(ctx)) != 2 {
+		t.Fatalf("request groups = %#v, want merged MCP and A2A groups", RequestMCPGroupsFromContext(ctx))
+	}
+
+	resolver := deferredToolResolver{}
+	if _, _, err := resolver.resolve(&minimalReadonlyContext{Context: ctx}, "shared"); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("bare collision error = %v, want ambiguity", err)
+	}
+	resolved, group, err := resolver.resolve(&minimalReadonlyContext{Context: ctx}, "mcp:test/shared")
+	if err != nil || resolved != mcpTool || group != "mcp:test" {
+		t.Fatalf("qualified resolve = (%v, %q, %v), want MCP tool", resolved, group, err)
+	}
+
+	bridge, err := NewProgressiveToolBridge(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := bridge[1].(runnableDeferredTool)
+	result, err := runner.Run(&contextToolContext{minimalReadonlyContext{Context: ctx}}, map[string]any{
+		"name": "mcp:test/shared", "arguments": map[string]any{},
+	})
+	if err != nil || result["source"] != "mcp" {
+		t.Fatalf("qualified execute = %#v, %v", result, err)
+	}
+}
+
+type testMCPServerStore struct {
+	servers map[string]*store.MCPServer
+}
+
+func (s *testMCPServerStore) List(context.Context) ([]store.MCPServer, error) { return nil, nil }
+func (s *testMCPServerStore) Get(_ context.Context, name string) (*store.MCPServer, error) {
+	return s.servers[name], nil
+}
+func (s *testMCPServerStore) Save(context.Context, *store.MCPServer) error { return nil }
+func (s *testMCPServerStore) Delete(context.Context, string) error         { return nil }
+func (s *testMCPServerStore) UpdateCachedTools(context.Context, string, json.RawMessage) error {
+	return nil
+}
+
+func TestMCPServerAuthorizationUsesMostSpecificOverride(t *testing.T) {
+	enabled, disabled := true, false
+	server := func(value *bool) *testMCPServerStore {
+		return &testMCPServerStore{servers: map[string]*store.MCPServer{
+			"perplexity": {Name: "perplexity", Enabled: value},
+		}}
+	}
+	tests := []struct {
+		name   string
+		stores *store.MCPServerStores
+		want   bool
+	}{
+		{"team disable overrides enabled parents", &store.MCPServerStores{Platform: server(&enabled), Org: server(&enabled), Team: server(&disabled)}, false},
+		{"org disable overrides enabled platform", &store.MCPServerStores{Platform: server(&enabled), Org: server(&disabled)}, false},
+		{"team enable overrides disabled parents", &store.MCPServerStores{Platform: server(&disabled), Org: server(&disabled), Team: server(&enabled)}, true},
+		{"scoped disable overrides installed standard server", &store.MCPServerStores{Team: server(&disabled)}, false},
+		{"installed standard server allowed without scoped declaration", &store.MCPServerStores{}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := store.WithMCPServerStores(context.Background(), tt.stores)
+			if got := isMCPServerAccessible(ctx, "perplexity"); got != tt.want {
+				t.Fatalf("isMCPServerAccessible = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 

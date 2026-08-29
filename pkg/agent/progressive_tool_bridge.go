@@ -31,7 +31,7 @@ type DescribeToolsResult struct {
 }
 
 type ExecuteToolArgs struct {
-	Name      string         `json:"name" jsonschema:"Exact bare tool name returned by search_tools"`
+	Name      string         `json:"name" jsonschema:"Exact tool reference returned by describe_tools"`
 	Arguments map[string]any `json:"arguments" jsonschema:"Arguments matching the schema returned by describe_tools"`
 }
 
@@ -45,7 +45,8 @@ func (r deferredToolResolver) resolve(ctx agent.ReadonlyContext, name string) (t
 		return nil, "", fmt.Errorf("tool name is required")
 	}
 	resolved := resolveIndexedToolName(r.index, name)
-	if r.index != nil {
+	qualified := strings.Contains(name, "/")
+	if !qualified && r.index != nil {
 		if entry := r.index.FirstPartyToolEntry(resolved); entry != nil {
 			if isToolDisabled(ctx, name, entry.Name) {
 				return nil, "", fmt.Errorf("tool %q is disabled", entry.Name)
@@ -53,7 +54,9 @@ func (r deferredToolResolver) resolve(ctx agent.ReadonlyContext, name string) (t
 			return entry.Tool, entry.GroupName, nil
 		}
 	}
-	if t, group, ok := LookupRequestMCPTool(ctx, name); ok && t != nil {
+	if t, group, lookupErr := LookupRequestMCPTool(ctx, name); lookupErr != nil {
+		return nil, "", lookupErr
+	} else if t != nil {
 		if isToolDisabled(ctx, name, t.Name()) {
 			return nil, "", fmt.Errorf("tool %q is disabled", t.Name())
 		}
@@ -64,6 +67,9 @@ func (r deferredToolResolver) resolve(ctx agent.ReadonlyContext, name string) (t
 	}
 	if r.index != nil {
 		if entry := r.index.GetToolEntry(resolved); entry != nil && entry.Tool != nil {
+			if qualified && name != entry.GroupName+"/"+entry.Name {
+				return nil, "", fmt.Errorf("tool %q was not found in the available catalog", name)
+			}
 			if isToolDisabled(ctx, name, entry.Name) {
 				return nil, "", fmt.Errorf("tool %q is disabled", entry.Name)
 			}
@@ -99,7 +105,7 @@ type executeToolBridge struct {
 
 func (b *executeToolBridge) Name() string { return executeToolName }
 func (b *executeToolBridge) Description() string {
-	return "Execute one deferred catalog tool by bare name. Call describe_tools first and pass its required arguments in arguments."
+	return "Execute one deferred catalog tool by the exact reference returned from describe_tools, with its required arguments."
 }
 func (b *executeToolBridge) IsLongRunning() bool { return false }
 func (b *executeToolBridge) ProcessRequest(_ agent.ToolContext, req *model.LLMRequest) error {
@@ -170,7 +176,11 @@ func NewProgressiveToolBridge(index *ToolIndex) ([]tool.Tool, error) {
 				result.Errors = append(result.Errors, resolveErr.Error())
 				continue
 			}
-			described := DescribedTool{Name: t.Name(), Description: t.Description(), GroupName: group}
+			resolvedName := t.Name()
+			if RequestMCPGroupsFromContext(ctx)[group] != nil {
+				resolvedName = group + "/" + t.Name()
+			}
+			described := DescribedTool{Name: resolvedName, Description: t.Description(), GroupName: group}
 			if declared, ok := t.(interface {
 				Declaration() *genai.FunctionDeclaration
 			}); ok {

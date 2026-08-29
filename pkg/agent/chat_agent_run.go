@@ -266,8 +266,11 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		promptBuilder.SessionContext = ""
 		promptBuilder.RelevantKnowledge = ""
 		promptBuilder.RelevantTools = ""
+		var requestTools []tool.Tool
 		if po := promptOverrides; po != nil {
 			*turnOverrides = *po
+			requestTools = append(requestTools, po.AdditionalTools...)
+			promptBuilder.Tools = append(append([]tool.Tool(nil), promptBuilder.Tools...), requestTools...)
 			planMode = po.PlanMode
 			graphPlan = po.GraphPlanMode
 			askMode = po.AskMode
@@ -887,13 +890,15 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		// keys and fail with "state key does not exist".
 		// Same pattern as node_llm.go for flow agents.
 		instr := instruction
+		mainThreadTools := append([]tool.Tool(nil), c.Tools...)
+		mainThreadTools = append(mainThreadTools, requestTools...)
 		llmAgent, err := llmagent.New(llmagent.Config{
 			Name:  "chat",
 			Model: effectiveLLM,
 			InstructionProvider: func(_ agent.ReadonlyContext) (string, error) {
 				return instr, nil
 			},
-			Tools:                c.Tools,
+			Tools:                mainThreadTools,
 			Toolsets:             c.Toolsets,
 			BeforeToolCallbacks:  beforeToolCallbacks,
 			BeforeModelCallbacks: beforeModelCallbacks,

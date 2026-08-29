@@ -1971,7 +1971,7 @@ func sessionProviderHasCredential(ctx context.Context, svc *store.Services, name
 // This closes the gap where a singleton ChatAgent pre-warmed before platform
 // web settings were saved (or with a different tenant context) would leave
 // some browser sessions without web search while others worked.
-func applyPerRequestWebSearch(runner *ChatRunner, chatAgent *agent.ChatAgent, appCfg *config.AppConfig) {
+func applyPerRequestWebSearch(runner *ChatRunner, _ *agent.ChatAgent, appCfg *config.AppConfig) {
 	if runner == nil || appCfg == nil {
 		return
 	}
@@ -2006,14 +2006,12 @@ func applyPerRequestWebSearch(runner *ChatRunner, chatAgent *agent.ChatAgent, ap
 
 	runner.InjectWebSearchPrompt(searchAvailable, searchName, extractAvailable, extractName)
 
-	// Late-bind Perplexity onto the main thread if selected but missing from the
-	// singleton agent (common after config change without a full process restart).
-	if searchAvailable && searchServer == "perplexity" && chatAgent != nil && !chatAgent.HasMainThreadTool("perplexity_web_search") {
+	// Perplexity is request-scoped because the singleton serves multiple tenants.
+	if searchAvailable && searchServer == "perplexity" {
 		if t, err := tools.NewPerplexityWebSearchTool(appCfg, provider.GetProvider); err != nil {
-			slog.Warn("failed to late-bind perplexity_web_search tool", "error", err)
+			slog.Warn("failed to create request-scoped perplexity_web_search tool", "error", err)
 		} else {
-			chatAgent.EnsureMainThreadTool(t)
-			slog.Info("late-bound perplexity_web_search onto chat agent for platform web search")
+			runner.InjectRequestTools(t)
 		}
 	}
 }

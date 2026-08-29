@@ -24,6 +24,7 @@ import (
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
+	adktool "google.golang.org/adk/tool"
 	"google.golang.org/genai"
 )
 
@@ -302,6 +303,20 @@ func (cr *ChatRunner) InjectSkillIndex(index string) {
 // effective platform→team cascade. The singleton ChatAgent may have been
 // pre-warmed without the latest platform WebSearchTool; this keeps every user's
 // prompt honest about which search tool is selected.
+func (cr *ChatRunner) InjectRequestTools(tools ...adktool.Tool) {
+	if len(tools) == 0 {
+		return
+	}
+	po := agent.PromptOverridesFromContext(cr.ctx)
+	var newPO agent.PromptOverrides
+	if po != nil {
+		newPO = *po
+		newPO.AdditionalTools = append([]adktool.Tool(nil), po.AdditionalTools...)
+	}
+	newPO.AdditionalTools = append(newPO.AdditionalTools, tools...)
+	cr.ctx = agent.WithPromptOverrides(cr.ctx, &newPO)
+}
+
 func (cr *ChatRunner) InjectWebSearchPrompt(searchAvailable bool, searchToolName string, extractAvailable bool, extractToolName string) {
 	po := agent.PromptOverridesFromContext(cr.ctx)
 	var newPO agent.PromptOverrides

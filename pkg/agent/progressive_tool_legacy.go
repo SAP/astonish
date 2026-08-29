@@ -93,7 +93,7 @@ func canAutoInjectTool(ctx context.Context, toolIndex *ToolIndex, toolName strin
 	}
 	// Request-scoped MCP tools (team catalog) take precedence over stale MCP
 	// index entries, but not over first-party tools (checked above).
-	if t, gName, ok := LookupRequestMCPTool(ctx, toolName); ok && t != nil {
+	if t, gName, lookupErr := LookupRequestMCPTool(ctx, toolName); lookupErr == nil && t != nil {
 		for _, disabled := range store.DisabledToolsFromContext(ctx) {
 			if disabled == t.Name() || disabled == toolName {
 				return false

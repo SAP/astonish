@@ -557,22 +557,26 @@ func styleGuideFromModel(m *themes.TemplateModel) *themes.StyleGuide {
 
 // resolveTemplate looks up a template by name, preferring a built-in over a
 // scoped template of the same name.
-func (s Service) resolveTemplate(ctx context.Context, name string) (themes.Template, bool) {
+func (s Service) resolveTemplate(ctx context.Context, name string) (themes.Template, bool, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return themes.Template{}, false
+		return themes.Template{}, false, nil
 	}
-	if t, ok, err := catalogFromContext(ctx).Resolve(ctx, name); err == nil && ok {
-		return t, true
+	t, ok, err := catalogFromContext(ctx).Resolve(ctx, name)
+	if err != nil {
+		return themes.Template{}, false, fmt.Errorf("resolve template %q: %w", name, err)
+	}
+	if ok {
+		return t, true, nil
 	}
 	if t, ok := themes.LookupTemplate(name); ok {
-		return HydrateTemplateFonts(t), true
+		return HydrateTemplateFonts(t), true, nil
 	}
-	t, ok, err := s.scopedTemplate(ctx, name)
-	if err != nil || !ok {
-		return themes.Template{}, false
+	t, ok, err = s.scopedTemplate(ctx, name)
+	if err != nil {
+		return themes.Template{}, false, fmt.Errorf("resolve template %q: %w", name, err)
 	}
-	return t, true
+	return t, ok, nil
 }
 
 // Template returns a single SCOPED template by name (reconstructed from its
@@ -653,7 +657,7 @@ func (s Service) CopyDeckTo(ctx context.Context, dst Service, slug string) (*sto
 	} else if err != nil && !errors.Is(err, store.ErrDocsNotFound) {
 		return nil, fmt.Errorf("check destination deck: %w", err)
 	}
-	newDeck, err := dst.CreateDeck(ctx, deck.Slug, deck.Title, deck.Description, deck.Theme)
+	newDeck, err := dst.CreateDeckWithAssets(ctx, deck.Slug, deck.Title, deck.Description, deck.Theme, deck.Assets)
 	if err != nil {
 		return nil, fmt.Errorf("create destination deck: %w", err)
 	}

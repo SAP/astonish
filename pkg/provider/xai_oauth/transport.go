@@ -1,7 +1,7 @@
 package xai_oauth
 
 import (
-	"context"
+	"fmt"
 	"net/http"
 	"sync"
 	"time"
@@ -50,19 +50,20 @@ func (t *oauthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		if t.tokenURL != "" {
 			endpoint = t.tokenURL
 		}
-		tokenResp, err := refreshAccessTokenFromURL(context.Background(), t.clientID, t.refreshToken, endpoint)
-		if err == nil {
-			t.accessToken = tokenResp.AccessToken
-			if tokenResp.RefreshToken != "" {
-				t.refreshToken = tokenResp.RefreshToken
-			}
-			t.expiresAt = time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
-
-			if t.onTokenRefresh != nil {
-				t.onTokenRefresh(t.accessToken, t.refreshToken, t.expiresAt)
-			}
+		tokenResp, err := refreshAccessTokenFromURL(req.Context(), t.clientID, t.refreshToken, endpoint)
+		if err != nil {
+			t.mu.Unlock()
+			return nil, fmt.Errorf("refresh xAI OAuth token: %w", err)
 		}
-		// If refresh fails, try with the existing token anyway
+		t.accessToken = tokenResp.AccessToken
+		if tokenResp.RefreshToken != "" {
+			t.refreshToken = tokenResp.RefreshToken
+		}
+		t.expiresAt = time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
+
+		if t.onTokenRefresh != nil {
+			t.onTokenRefresh(t.accessToken, t.refreshToken, t.expiresAt)
+		}
 	}
 
 	token := t.accessToken

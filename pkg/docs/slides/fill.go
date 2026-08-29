@@ -490,12 +490,41 @@ func slotIDContaining(markup, needle string) string {
 }
 
 func attrValue(attrs, name string) string {
-	re := regexp.MustCompile(`\b` + name + `="([^"]*)"`)
-	m := re.FindStringSubmatch(attrs)
-	if len(m) == 2 {
-		return m[1]
+	start, end, ok := attrValueRange(attrs, name)
+	if !ok {
+		return ""
 	}
-	return ""
+	return attrs[start:end]
+}
+
+func attrValueRange(attrs, name string) (int, int, bool) {
+	prefix := name + `="`
+	searchFrom := 0
+	for searchFrom < len(attrs) {
+		rel := strings.Index(attrs[searchFrom:], prefix)
+		if rel < 0 {
+			return 0, 0, false
+		}
+		idx := searchFrom + rel
+		if idx == 0 || attrs[idx-1] == '<' || isAttrSpace(attrs[idx-1]) {
+			start := idx + len(prefix)
+			if relEnd := strings.IndexByte(attrs[start:], '"'); relEnd >= 0 {
+				return start, start + relEnd, true
+			}
+			return 0, 0, false
+		}
+		searchFrom = idx + len(prefix)
+	}
+	return 0, 0, false
+}
+
+func isAttrSpace(b byte) bool {
+	switch b {
+	case ' ', '\t', '\n', '\r':
+		return true
+	default:
+		return false
+	}
 }
 
 func isRecipeControlFill(id string) bool {
@@ -647,17 +676,9 @@ func looksLikePlaceholderFill(s string) bool {
 }
 
 func attrIntFrom(tag, name string) int {
-	re := regexp.MustCompile(`\b` + name + `="(-?\d+)"`)
-	m := re.FindStringSubmatch(tag)
-	if len(m) < 2 {
+	n, err := strconv.Atoi(attrValue(tag, name))
+	if err != nil {
 		return 0
-	}
-	n := 0
-	for _, c := range m[1] {
-		if c == '-' {
-			continue
-		}
-		n = n*10 + int(c-'0')
 	}
 	return n
 }
@@ -704,16 +725,14 @@ func shrinkOpenTagToFit(open, text string) (string, bool) {
 	if size == orig {
 		return open, false
 	}
-	re := regexp.MustCompile(`\bsize="\d+"`)
-	return re.ReplaceAllString(open, fmt.Sprintf(`size="%d"`, size)), true
+	return setIntAttr(open, "size", size), true
 }
 
 func geometryAttrs(attrs string) string {
 	var parts []string
 	for _, name := range []string{"x", "y", "w", "h", "rot", "flip-h", "flip-v"} {
-		re := regexp.MustCompile(`\b` + name + `="([^"]*)"`)
-		if m := re.FindStringSubmatch(attrs); len(m) == 2 {
-			parts = append(parts, name+`="`+m[1]+`"`)
+		if value := attrValue(attrs, name); value != "" {
+			parts = append(parts, name+`="`+value+`"`)
 		}
 	}
 	return strings.Join(parts, " ")
@@ -951,14 +970,8 @@ func removeElement(markup, id string) (string, error) {
 }
 
 func setIntAttr(attrs, key string, n int) string {
-	prefix := key + `="`
-	idx := strings.Index(attrs, prefix)
-	if idx >= 0 {
-		rest := attrs[idx+len(prefix):]
-		end := strings.IndexByte(rest, '"')
-		if end >= 0 {
-			return attrs[:idx] + fmt.Sprintf(`%s="%d"`, key, n) + rest[end+1:]
-		}
+	if start, end, ok := attrValueRange(attrs, key); ok {
+		return attrs[:start] + strconv.Itoa(n) + attrs[end:]
 	}
 	attrs = strings.TrimSpace(attrs)
 	if attrs == "" {

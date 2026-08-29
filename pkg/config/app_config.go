@@ -13,7 +13,11 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+type ProviderTokenRefreshFunc func(instanceName, accessToken, refreshToken string, expiresAt time.Time) error
+
 type AppConfig struct {
+	ProviderTokenRefresh ProviderTokenRefreshFunc `yaml:"-" json:"-"`
+
 	General             GeneralConfig              `yaml:"general"`
 	WebServers          map[string]WebServerConfig `yaml:"web_servers,omitempty" json:"web_servers,omitempty"`
 	PerplexityWebSearch PerplexityWebSearchConfig  `yaml:"perplexity_web_search,omitempty" json:"perplexity_web_search,omitempty"`

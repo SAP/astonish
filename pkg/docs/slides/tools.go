@@ -474,7 +474,10 @@ func createDeck(ctx context.Context, args CreateDeckArgs) (DeckResult, error) {
 	}
 
 	if name := strings.TrimSpace(args.Template); name != "" {
-		tmpl, ok := svc.resolveTemplate(ctx, name)
+		tmpl, ok, err := svc.resolveTemplate(ctx, name)
+		if err != nil {
+			return DeckResult{}, err
+		}
 		if !ok {
 			return DeckResult{}, fmt.Errorf("unknown template %q", name)
 		}
@@ -667,7 +670,10 @@ func applyFills(ctx context.Context, deckSlug, templateName string, specs []Fill
 	if tmplName == "" {
 		return empty, "", nil, fmt.Errorf("template is required (pass template or create the deck with create_deck)")
 	}
-	tmpl, ok := svc.resolveTemplate(ctx, tmplName)
+	tmpl, ok, err := svc.resolveTemplate(ctx, tmplName)
+	if err != nil {
+		return empty, "", nil, err
+	}
 	if !ok {
 		return empty, "", nil, fmt.Errorf("unknown template %q", tmplName)
 	}
@@ -809,7 +815,10 @@ func getArchetype(ctx context.Context, args GetArchetypeArgs) (GetArchetypeResul
 	if name == "" {
 		return GetArchetypeResult{}, fmt.Errorf("template is required")
 	}
-	tmpl, ok := svc.resolveTemplate(ctx, name)
+	tmpl, ok, err := svc.resolveTemplate(ctx, name)
+	if err != nil {
+		return GetArchetypeResult{}, err
+	}
 	if !ok {
 		return GetArchetypeResult{}, fmt.Errorf("unknown template %q", name)
 	}
@@ -855,7 +864,7 @@ func writeSlide(ctx context.Context, args WriteSlideArgs) (WriteSlideResult, err
 	// renders as a broken image.
 	if refs := collectAssetRefs(args.Markup); len(refs) > 0 {
 		if tmplName := deckTemplateName(ctx, svc, slug); tmplName != "" {
-			if tmpl, ok := svc.resolveTemplate(ctx, tmplName); ok {
+			if tmpl, ok, resolveErr := svc.resolveTemplate(ctx, tmplName); resolveErr == nil && ok {
 				_ = svc.syncDeckAssetsFromTemplate(ctx, slug, tmpl)
 			}
 		}
@@ -917,7 +926,11 @@ func addSlideImage(ctx context.Context, args AddSlideImageArgs) (AddSlideImageRe
 	assetExists := deck.Assets[ref] != ""
 	if !assetExists {
 		if tmplName := deckTemplateName(ctx, svc, slug); tmplName != "" {
-			if tmpl, ok := svc.resolveTemplate(ctx, tmplName); ok {
+			tmpl, ok, err := svc.resolveTemplate(ctx, tmplName)
+			if err != nil {
+				return AddSlideImageResult{}, err
+			}
+			if ok {
 				assetExists = tmpl.Assets[ref] != ""
 			}
 		}
@@ -979,7 +992,11 @@ func addSlideImage(ctx context.Context, args AddSlideImageArgs) (AddSlideImageRe
 		return AddSlideImageResult{AssetRef: ref, ElementID: elementID, Diagnostics: diagnostics}, err
 	}
 	if tmplName := deckTemplateName(ctx, svc, slug); tmplName != "" {
-		if tmpl, ok := svc.resolveTemplate(ctx, tmplName); ok {
+		tmpl, ok, err := svc.resolveTemplate(ctx, tmplName)
+		if err != nil {
+			return AddSlideImageResult{}, err
+		}
+		if ok {
 			if err := svc.syncDeckAssetsFromTemplate(ctx, slug, tmpl); err != nil {
 				return AddSlideImageResult{}, err
 			}
@@ -1186,7 +1203,10 @@ func ensureCoverImageFromChat(ctx context.Context, svc Service, deck *store.Deck
 	if tmplName == "" {
 		return nil, nil, nil
 	}
-	tmpl, ok := svc.resolveTemplate(ctx, tmplName)
+	tmpl, ok, err := svc.resolveTemplate(ctx, tmplName)
+	if err != nil {
+		return nil, nil, err
+	}
 	if !ok {
 		return nil, nil, nil
 	}
@@ -1374,7 +1394,10 @@ func getTemplateVariantPreviews(ctx context.Context, args TemplateVariantPreview
 	if name == "" {
 		return TemplateVariantPreviewsResult{}, fmt.Errorf("template is required")
 	}
-	tmpl, ok := svc.resolveTemplate(ctx, name)
+	tmpl, ok, err := svc.resolveTemplate(ctx, name)
+	if err != nil {
+		return TemplateVariantPreviewsResult{}, err
+	}
 	if !ok {
 		return TemplateVariantPreviewsResult{}, fmt.Errorf("unknown template %q", name)
 	}
@@ -1551,7 +1574,10 @@ func palettePickerOptions(ctx context.Context, templateName string) ([]templateP
 	if err != nil {
 		return nil, err
 	}
-	tmpl, ok := svc.resolveTemplate(ctx, templateName)
+	tmpl, ok, err := svc.resolveTemplate(ctx, templateName)
+	if err != nil {
+		return nil, err
+	}
 	if !ok {
 		return nil, fmt.Errorf("unknown template %q", templateName)
 	}
@@ -1675,7 +1701,10 @@ func templateHeroPhotoOptions(ctx context.Context, templateName string) ([]templ
 	if err != nil {
 		return nil, err
 	}
-	tmpl, ok := svc.resolveTemplate(ctx, templateName)
+	tmpl, ok, err := svc.resolveTemplate(ctx, templateName)
+	if err != nil {
+		return nil, err
+	}
 	if !ok {
 		return nil, fmt.Errorf("unknown template %q", templateName)
 	}
@@ -1897,7 +1926,10 @@ func askUser(ctx context.Context, args AskUserArgs) (AskUserResult, error) {
 		if err != nil {
 			return AskUserResult{}, err
 		}
-		tmpl, ok := svc.resolveTemplate(ctx, template)
+		tmpl, ok, err := svc.resolveTemplate(ctx, template)
+		if err != nil {
+			return AskUserResult{}, err
+		}
 		if !ok {
 			return AskUserResult{}, fmt.Errorf("unknown template %q", template)
 		}
@@ -2825,7 +2857,11 @@ func listDeckAssets(ctx context.Context, args ListDeckAssetsArgs) (ListDeckAsset
 	catalog := assetCatalog(deck.Assets)
 	if deck.Theme != nil {
 		if name := strings.TrimSpace(deck.Theme[themeKeyTemplateName]); name != "" {
-			if tmpl, ok := svc.resolveTemplate(ctx, name); ok {
+			tmpl, ok, err := svc.resolveTemplate(ctx, name)
+			if err != nil {
+				return ListDeckAssetsResult{}, err
+			}
+			if ok {
 				catalog = mergeAssetCatalogs(catalog, assetCatalog(tmpl.Assets))
 			}
 		}

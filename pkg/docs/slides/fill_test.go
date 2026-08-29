@@ -62,6 +62,19 @@ func TestFillArchetypeMarkupReplacesImageSlot(t *testing.T) {
 	}
 }
 
+func TestAttrIntFromPreservesNegativeValues(t *testing.T) {
+	if got := attrIntFrom(`<ast-image x="-50" y="20">`, "x"); got != -50 {
+		t.Fatalf("attrIntFrom(x) = %d, want -50", got)
+	}
+}
+
+func TestSetIntAttrDoesNotMatchLongerAttributeName(t *testing.T) {
+	got := setIntAttr(`cx="100" rx="20"`, "x", -50)
+	if got != `cx="100" rx="20" x="-50"` {
+		t.Fatalf("setIntAttr() = %q", got)
+	}
+}
+
 func TestFillArchetypeMarkupRejectsPlaceholderDummy(t *testing.T) {
 	markup := `<ast-slide id="p"><ast-text id="ph-1" x="10" y="10" w="400" h="80" size="24"><ast-run>{{TITLE}}</ast-run></ast-text></ast-slide>`
 	if _, err := fillArchetypeMarkup(markup, map[string]string{"ph-1": "<initials> <date>yyyy-MM-dd</date>:"}); err == nil {

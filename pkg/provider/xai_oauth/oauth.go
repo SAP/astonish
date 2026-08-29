@@ -14,6 +14,8 @@ import (
 )
 
 const (
+	maxOAuthResponseBytes = 1 << 20
+
 	// deviceCodeURL is the xAI OAuth 2.0 Device Authorization endpoint (RFC 8628).
 	deviceCodeURL = "https://auth.x.ai/oauth2/device/code"
 	// tokenURL is the xAI OAuth 2.0 Token endpoint.
@@ -72,7 +74,7 @@ func requestDeviceCodeFromURL(ctx context.Context, clientID, endpoint string) (*
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxOAuthResponseBytes))
 	if err != nil {
 		return nil, fmt.Errorf("read device code response: %w", err)
 	}
@@ -130,8 +132,8 @@ func pollForTokenFromURL(ctx context.Context, clientID, deviceCode string, inter
 					// User hasn't approved yet, keep polling
 					continue
 				case "slow_down":
-					// Increase polling interval by 5 seconds
-					ticker.Reset(time.Duration(interval+5) * time.Second)
+					interval = nextPollingInterval(interval)
+					ticker.Reset(time.Duration(interval) * time.Second)
 					continue
 				case "expired_token":
 					return nil, fmt.Errorf("device code expired: %s", tokenResp.ErrorDescription)
@@ -148,6 +150,10 @@ func pollForTokenFromURL(ctx context.Context, clientID, deviceCode string, inter
 			}
 		}
 	}
+}
+
+func nextPollingInterval(interval int) int {
+	return interval + 5
 }
 
 // requestToken makes a single token request to the token endpoint.
@@ -171,7 +177,7 @@ func requestToken(ctx context.Context, clientID, deviceCode, endpoint string) (*
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxOAuthResponseBytes))
 	if err != nil {
 		return nil, fmt.Errorf("read token response: %w", err)
 	}
@@ -210,7 +216,7 @@ func refreshAccessTokenFromURL(ctx context.Context, clientID, refreshToken, endp
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxOAuthResponseBytes))
 	if err != nil {
 		return nil, fmt.Errorf("read refresh response: %w", err)
 	}

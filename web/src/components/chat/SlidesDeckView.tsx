@@ -119,6 +119,7 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
   // ast-edit-changed; selection as ast-edit-selected.
   useEffect(() => {
     const onMessage = (event: MessageEvent) => {
+      if (event.source !== iframeRef.current?.contentWindow) return
       const data = event.data as {
         type?: string
         index?: number

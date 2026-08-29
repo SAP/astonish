@@ -31,9 +31,9 @@ var ProviderEnvMapping = map[string]map[string]string{
 		"api_key": "XAI_API_KEY",
 	},
 	"xai_oauth": {
-		"client_id":      "XAI_OAUTH_CLIENT_ID",
-		"access_token":   "XAI_OAUTH_ACCESS_TOKEN",
-		"refresh_token":  "XAI_OAUTH_REFRESH_TOKEN",
+		"client_id":     "XAI_OAUTH_CLIENT_ID",
+		"access_token":  "XAI_OAUTH_ACCESS_TOKEN",
+		"refresh_token": "XAI_OAUTH_REFRESH_TOKEN",
 	},
 	"groq": {
 		"api_key": "GROQ_API_KEY",
@@ -203,6 +203,7 @@ var providerSecretKeys = map[string][]string{
 	"openrouter":    {"api_key"},
 	"groq":          {"api_key"},
 	"xai":           {"api_key"},
+	"xai_oauth":     {"access_token", "refresh_token", "expires_at"},
 	"grok":          {"api_key"},
 	"poe":           {"api_key"},
 	"litellm":       {"api_key"},

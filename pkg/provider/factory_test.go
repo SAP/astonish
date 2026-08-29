@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/SAP/astonish/pkg/config"
 )
@@ -129,6 +130,37 @@ func TestGetProvider_BackwardCompatibility(t *testing.T) {
 				t.Error("expected non-nil provider")
 			}
 		})
+	}
+}
+
+func TestGetProvider_WiresXAIOAuthRefreshPersistence(t *testing.T) {
+	var gotInstance, gotAccess, gotRefresh string
+	var gotExpiry time.Time
+	cfg := &config.AppConfig{
+		Providers: map[string]config.ProviderConfig{
+			"grok-subscription": {
+				"type":          "xai_oauth",
+				"access_token":  "access",
+				"refresh_token": "refresh",
+				"expires_at":    "2099-01-01T00:00:00Z",
+			},
+		},
+		ProviderTokenRefresh: func(instanceName, accessToken, refreshToken string, expiresAt time.Time) error {
+			gotInstance, gotAccess, gotRefresh, gotExpiry = instanceName, accessToken, refreshToken, expiresAt
+			return nil
+		},
+	}
+
+	if _, err := GetProvider(context.Background(), "grok-subscription", "grok-3", cfg); err != nil {
+		t.Fatal(err)
+	}
+	callback := xaiOAuthRefreshCallback(cfg, "grok-subscription")
+	if callback == nil {
+		t.Fatal("refresh callback is nil")
+	}
+	callback("new-access", "new-refresh", time.Unix(123, 0))
+	if gotInstance != "grok-subscription" || gotAccess != "new-access" || gotRefresh != "new-refresh" || gotExpiry.Unix() != 123 {
+		t.Fatalf("refresh callback got (%q, %q, %q, %v)", gotInstance, gotAccess, gotRefresh, gotExpiry)
 	}
 }
 

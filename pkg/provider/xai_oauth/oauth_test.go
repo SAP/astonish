@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -145,6 +146,15 @@ func TestPollForToken_Success(t *testing.T) {
 	}
 	if got := attempts.Load(); got != 3 {
 		t.Errorf("poll attempts = %d, want 3", got)
+	}
+}
+
+func TestNextPollingIntervalAccumulatesSlowDown(t *testing.T) {
+	interval := 5
+	interval = nextPollingInterval(interval)
+	interval = nextPollingInterval(interval)
+	if interval != 15 {
+		t.Fatalf("interval = %d, want 15", interval)
 	}
 }
 
@@ -290,6 +300,27 @@ func TestOAuthTransport_RefreshesExpiredToken(t *testing.T) {
 	}
 	if receivedAuth != "Bearer refreshed-access-token" {
 		t.Errorf("Authorization = %q, want Bearer refreshed-access-token", receivedAuth)
+	}
+}
+
+func TestOAuthTransport_ReturnsRefreshError(t *testing.T) {
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(TokenResponse{Error: "invalid_grant", ErrorDescription: "revoked"})
+	}))
+	defer tokenServer.Close()
+
+	transport := &oauthTransport{
+		base:         http.DefaultTransport,
+		clientID:     "test-client",
+		accessToken:  "expired-token",
+		refreshToken: "revoked-token",
+		expiresAt:    time.Now().Add(-time.Minute),
+		tokenURL:     tokenServer.URL,
+	}
+	client := &http.Client{Transport: transport}
+	_, err := client.Get("https://api.example.invalid")
+	if err == nil || !strings.Contains(err.Error(), "refresh xAI OAuth token") {
+		t.Fatalf("request error = %v, want refresh error", err)
 	}
 }
 

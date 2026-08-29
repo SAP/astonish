@@ -382,19 +382,10 @@ func RecolorSlidesTemplateHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cat := slides.CatalogFromServices(store.FromRequest(r))
-	owned, err := cat.ListScope(r.Context(), scope)
+	tmpl, found, err := cat.GetScope(r.Context(), scope, name)
 	if err != nil {
 		writeSlidesError(w, err)
 		return
-	}
-	var tmpl themes.Template
-	found := false
-	for _, t := range owned {
-		if t.Name == name {
-			tmpl = t
-			found = true
-			break
-		}
 	}
 	if !found {
 		http.Error(w, "template not found", http.StatusNotFound)
@@ -420,28 +411,15 @@ func RecolorSlidesTemplateHandler(w http.ResponseWriter, r *http.Request) {
 // baked archetype thumbnail asset.
 const thumbnailPNGPrefix = "data:image/png;base64,"
 
-func resolveSlidesTemplateFromRequest(r *http.Request, name string) (themes.Template, bool) {
+func resolveSlidesTemplateFromRequest(r *http.Request, name string) (themes.Template, bool, error) {
 	cat := slides.CatalogFromServices(store.FromRequest(r))
 	if scope := slidesTemplateScope(r); scope != "" {
 		if t, ok := themes.LookupTemplate(name); ok {
-			return slides.HydrateTemplateFonts(t), true
+			return slides.HydrateTemplateFonts(t), true, nil
 		}
-		owned, err := cat.ListScope(r.Context(), scope)
-		if err != nil {
-			return themes.Template{}, false
-		}
-		for _, t := range owned {
-			if t.Name == name {
-				return t, true
-			}
-		}
-		return themes.Template{}, false
+		return cat.GetScope(r.Context(), scope, name)
 	}
-	t, ok, err := cat.Resolve(r.Context(), name)
-	if err != nil || !ok {
-		return themes.Template{}, false
-	}
-	return t, true
+	return cat.Resolve(r.Context(), name)
 }
 
 // GetSlidesTemplateThumbnailHandler serves the pre-baked PNG thumbnail for a
@@ -461,7 +439,11 @@ func GetSlidesTemplateThumbnailHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tmpl, found := resolveSlidesTemplateFromRequest(r, name)
+	tmpl, found, err := resolveSlidesTemplateFromRequest(r, name)
+	if err != nil {
+		writeSlidesError(w, err)
+		return
+	}
 	if !found {
 		http.Error(w, "template not found", http.StatusNotFound)
 		return
@@ -505,7 +487,11 @@ func GetSlidesTemplateMediaHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "template name and ref are required", http.StatusBadRequest)
 		return
 	}
-	tmpl, found := resolveSlidesTemplateFromRequest(r, name)
+	tmpl, found, err := resolveSlidesTemplateFromRequest(r, name)
+	if err != nil {
+		writeSlidesError(w, err)
+		return
+	}
 	if !found {
 		http.Error(w, "template not found", http.StatusNotFound)
 		return

@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sashabaranov/go-openai"
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/provider/anthropic"
 	"github.com/SAP/astonish/pkg/provider/google"
@@ -23,6 +22,7 @@ import (
 	"github.com/SAP/astonish/pkg/provider/sap"
 	"github.com/SAP/astonish/pkg/provider/xai"
 	xai_oauth "github.com/SAP/astonish/pkg/provider/xai_oauth"
+	"github.com/sashabaranov/go-openai"
 	"google.golang.org/adk/model"
 )
 
@@ -341,7 +341,7 @@ func GetProvider(ctx context.Context, instanceName string, modelName string, cfg
 		if exp := instance["expires_at"]; exp != "" {
 			expiresAt, _ = time.Parse(time.RFC3339, exp)
 		}
-		return xai_oauth.NewProvider(clientID, accessToken, refreshToken, expiresAt, modelName, nil), nil
+		return xai_oauth.NewProvider(clientID, accessToken, refreshToken, expiresAt, modelName, xaiOAuthRefreshCallback(cfg, instanceName)), nil
 
 	case "openai_compat":
 		apiKey := instance["api_key"]
@@ -359,6 +359,17 @@ func GetProvider(ctx context.Context, instanceName string, modelName string, cfg
 
 	default:
 		return nil, fmt.Errorf("unsupported provider type: %s", providerType)
+	}
+}
+
+func xaiOAuthRefreshCallback(cfg *config.AppConfig, instanceName string) func(string, string, time.Time) {
+	if cfg == nil || cfg.ProviderTokenRefresh == nil {
+		return nil
+	}
+	return func(accessToken, refreshToken string, expiresAt time.Time) {
+		if err := cfg.ProviderTokenRefresh(instanceName, accessToken, refreshToken, expiresAt); err != nil {
+			slog.Error("failed to persist refreshed OAuth tokens", "provider", instanceName, "error", err)
+		}
 	}
 }
 

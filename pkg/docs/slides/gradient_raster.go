@@ -77,6 +77,10 @@ func cloneProps(in map[string]any) map[string]any {
 }
 
 func rasterizeGradientPNG(g *Gradient, w, h int) (string, error) {
+	const maxGradientPixels = 1920 * 1080 * 4
+	if w <= 0 || h <= 0 || w > maxGradientPixels/h {
+		return "", fmt.Errorf("gradient dimensions %dx%d exceed raster limit", w, h)
+	}
 	img := image.NewNRGBA(image.Rect(0, 0, w, h))
 	stops := make([]struct {
 		t float64

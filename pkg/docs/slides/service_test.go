@@ -213,7 +213,7 @@ func TestServiceCopyDeckTo(t *testing.T) {
 	ctx := context.Background()
 	srcBackend := &memoryDocsStore{}
 	src := Service{Store: srcBackend}
-	deck, err := src.CreateDeck(ctx, "quarterly", "Quarterly", "desc", map[string]string{"surface": "#0B1020"})
+	deck, err := src.CreateDeckWithAssets(ctx, "quarterly", "Quarterly", "desc", map[string]string{"surface": "#0B1020"}, map[string]string{"sha256-photo": "data:image/png;base64,cGhvdG8="})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,6 +238,9 @@ func TestServiceCopyDeckTo(t *testing.T) {
 	}
 	if newDeck.Theme["surface"] != "#0B1020" {
 		t.Fatalf("theme not copied: %#v", newDeck.Theme)
+	}
+	if newDeck.Assets["sha256-photo"] != deck.Assets["sha256-photo"] {
+		t.Fatalf("assets not copied: %#v", newDeck.Assets)
 	}
 
 	_, dstSlides, err := dst.Deck(ctx, newDeck.Slug)
@@ -513,12 +516,12 @@ func TestSaveAndListTemplatesRoundtrip(t *testing.T) {
 	}
 
 	// resolveTemplate should find the scoped template by name.
-	if _, ok := svc.resolveTemplate(ctx, "acme"); !ok {
-		t.Fatal("resolveTemplate did not find scoped template")
+	if _, ok, err := svc.resolveTemplate(ctx, "acme"); err != nil || !ok {
+		t.Fatalf("resolveTemplate did not find scoped template: %v", err)
 	}
 	// Built-ins still resolve.
-	if _, ok := svc.resolveTemplate(ctx, "midnight"); !ok {
-		t.Fatal("resolveTemplate did not find built-in template")
+	if _, ok, err := svc.resolveTemplate(ctx, "midnight"); err != nil || !ok {
+		t.Fatalf("resolveTemplate did not find built-in template: %v", err)
 	}
 }
 

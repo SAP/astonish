@@ -64,6 +64,31 @@ func (c TemplateCatalog) store(scope string) store.SlideTemplateStore {
 	}
 }
 
+// GetScope returns one imported template from exactly one scope.
+func (c TemplateCatalog) GetScope(ctx context.Context, scope, name string) (themes.Template, bool, error) {
+	name = themes.CanonicalTemplateName(name)
+	if name == "" {
+		return themes.Template{}, false, nil
+	}
+	st := c.store(scope)
+	if st == nil {
+		return themes.Template{}, false, fmt.Errorf("%s slide template store unavailable", scope)
+	}
+	rec, err := st.Get(ctx, name)
+	if err != nil {
+		return themes.Template{}, false, err
+	}
+	if rec == nil {
+		return themes.Template{}, false, nil
+	}
+	t, err := TemplateFromRecord(rec)
+	if err != nil {
+		return themes.Template{}, false, err
+	}
+	t.Scope = scope
+	return t, true, nil
+}
+
 // ListScope returns imported templates in one store, tagged with scope.
 func (c TemplateCatalog) ListScope(ctx context.Context, scope string) ([]themes.Template, error) {
 	st := c.store(scope)

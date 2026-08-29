@@ -2857,12 +2857,39 @@ func (b *localAgentBackend) AddProvider(ctx context.Context, name, typeID string
 	b.appConfig.Providers[name] = inst
 	b.mu.Unlock()
 
+	var accessToken, refreshToken, expiresAt string
+	if typeID == "xai_oauth" && b.result != nil && b.result.CredentialStore != nil {
+		accessToken, refreshToken, expiresAt = inst["access_token"], inst["refresh_token"], inst["expires_at"]
+		if err := b.result.CredentialStore.SetSecretBatch(map[string]string{
+			"provider." + name + ".access_token":  accessToken,
+			"provider." + name + ".refresh_token": refreshToken,
+			"provider." + name + ".expires_at":    expiresAt,
+		}); err != nil {
+			b.mu.Lock()
+			delete(b.appConfig.Providers, name)
+			b.mu.Unlock()
+			return fmt.Errorf("failed to save OAuth credentials: %w", err)
+		}
+		delete(inst, "access_token")
+		delete(inst, "refresh_token")
+		delete(inst, "expires_at")
+	}
+
 	if err := b.saveAppConfig(); err != nil {
 		// Roll back the in-memory change so state matches disk.
 		b.mu.Lock()
 		delete(b.appConfig.Providers, name)
 		b.mu.Unlock()
 		return fmt.Errorf("failed to save config: %w", err)
+	}
+	if accessToken != "" {
+		inst["access_token"] = accessToken
+	}
+	if refreshToken != "" {
+		inst["refresh_token"] = refreshToken
+	}
+	if expiresAt != "" {
+		inst["expires_at"] = expiresAt
 	}
 	return nil
 }

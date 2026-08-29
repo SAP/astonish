@@ -37,6 +37,13 @@ const deckWith = (n: number): slidesApi.SlidesDeckResponse => ({
   })),
 })
 
+const dispatchIframeMessage = (data: unknown) => {
+  const frame = screen.getByTestId('slides-deck-frame') as HTMLIFrameElement
+  const event = new MessageEvent('message', { data })
+  Object.defineProperty(event, 'source', { value: frame.contentWindow })
+  fireEvent(window, event)
+}
+
 describe('SlidesDeckView refresh signal', () => {
   beforeEach(() => {
     vi.mocked(slidesApi.fetchSlidesDeck).mockResolvedValue(deckWith(1))
@@ -146,12 +153,26 @@ describe('SlidesDeckView refresh signal', () => {
 
     expect(screen.getAllByTestId('slides-tile')[0]).toHaveAttribute('aria-current', 'true')
 
-    fireEvent(window, new MessageEvent('message', { data: { type: 'ast-deck-change', index: 4 } }))
+    dispatchIframeMessage({ type: 'ast-deck-change', index: 4 })
 
     await waitFor(() => {
       expect(screen.getAllByTestId('slides-tile')[4]).toHaveAttribute('aria-current', 'true')
     })
     expect(screen.getAllByTestId('slides-tile')[0]).not.toHaveAttribute('aria-current')
+  })
+
+  it('ignores deck messages from windows other than the presentation iframe', async () => {
+    vi.mocked(slidesApi.fetchSlidesDeck).mockResolvedValue(deckWith(3))
+    render(<SlidesDeckView deckSlug="d" refreshSignal={0} />)
+    await waitFor(() => expect(screen.getAllByTestId('slides-tile')).toHaveLength(3))
+
+    fireEvent(window, new MessageEvent('message', {
+      data: { type: 'ast-deck-change', index: 2 },
+      source: window,
+    }))
+
+    expect(screen.getAllByTestId('slides-tile')[0]).toHaveAttribute('aria-current', 'true')
+    expect(screen.getAllByTestId('slides-tile')[2]).not.toHaveAttribute('aria-current')
   })
 
   it('keeps the selected tile ring outside overflow clipping', async () => {
@@ -198,9 +219,7 @@ describe('SlidesDeckView refresh signal', () => {
     expect(screen.queryByTestId('slides-edit-apply')).not.toBeInTheDocument()
     expect(screen.getByTestId('slides-save')).toBeInTheDocument()
 
-    fireEvent(window, new MessageEvent('message', {
-      data: { type: 'ast-edit-changed', index: 0, moves: [{ id: 'headline', x: 200, y: 400 }], texts: [], deletes: [] },
-    }))
+    dispatchIframeMessage({ type: 'ast-edit-changed', index: 0, moves: [{ id: 'headline', x: 200, y: 400 }], texts: [], deletes: [] })
 
     expect(await screen.findByTestId('slides-edit-apply')).toBeInTheDocument()
     expect(screen.getByTestId('slides-edit-discard')).toBeInTheDocument()
@@ -228,9 +247,7 @@ describe('SlidesDeckView refresh signal', () => {
     Object.defineProperty(frame, 'contentWindow', { value: { postMessage }, configurable: true })
 
     expect(screen.getByTestId('slides-save')).toBeInTheDocument()
-    fireEvent(window, new MessageEvent('message', {
-      data: { type: 'ast-edit-changed', index: 0, moves: [{ id: 'headline', x: 200, y: 400 }], texts: [], deletes: [] },
-    }))
+    dispatchIframeMessage({ type: 'ast-edit-changed', index: 0, moves: [{ id: 'headline', x: 200, y: 400 }], texts: [], deletes: [] })
     expect(screen.queryByTestId('slides-save')).not.toBeInTheDocument()
     fireEvent.click(await screen.findByTestId('slides-edit-apply'))
 
@@ -249,16 +266,14 @@ describe('SlidesDeckView refresh signal', () => {
     await screen.findByTestId('slides-deck-frame')
 
     await act(async () => {
-      window.dispatchEvent(new MessageEvent('message', {
-        data: {
-          type: 'ast-edit-changed',
-          index: 0,
-          moves: [],
-          resizes: [{ id: 'photo', x: 100, y: 120, w: 600, h: 300 }],
-          texts: [],
-          deletes: [],
-        },
-      }))
+      dispatchIframeMessage({
+        type: 'ast-edit-changed',
+        index: 0,
+        moves: [],
+        resizes: [{ id: 'photo', x: 100, y: 120, w: 600, h: 300 }],
+        texts: [],
+        deletes: [],
+      })
     })
     fireEvent.click(await screen.findByTestId('slides-edit-apply'))
 
@@ -285,9 +300,7 @@ describe('SlidesDeckView refresh signal', () => {
     Object.defineProperty(frame, 'contentWindow', { value: { postMessage }, configurable: true })
 
     expect(screen.queryByTestId('slides-edit-delete')).not.toBeInTheDocument()
-    fireEvent(window, new MessageEvent('message', {
-      data: { type: 'ast-edit-selected', index: 0, id: 'headline', tag: 'AST-TEXT' },
-    }))
+    dispatchIframeMessage({ type: 'ast-edit-selected', index: 0, id: 'headline', tag: 'AST-TEXT' })
     expect(await screen.findByTestId('slides-edit-delete')).toBeInTheDocument()
     fireEvent.click(screen.getByTestId('slides-edit-delete'))
     expect(postMessage).toHaveBeenCalledWith({ type: 'ast-edit-delete' }, '*')
@@ -305,9 +318,7 @@ describe('SlidesDeckView refresh signal', () => {
     render(<SlidesDeckView deckSlug="d" refreshSignal={0} />)
     await waitFor(() => expect(screen.getByTestId('slides-tile')).toBeInTheDocument())
 
-    fireEvent(window, new MessageEvent('message', {
-      data: { type: 'ast-edit-changed', index: 0, moves: [], texts: [{ id: 'headline', text: 'Hello' }], deletes: ['dek'] },
-    }))
+    dispatchIframeMessage({ type: 'ast-edit-changed', index: 0, moves: [], texts: [{ id: 'headline', text: 'Hello' }], deletes: ['dek'] })
     fireEvent.click(await screen.findByTestId('slides-edit-apply'))
 
     await waitFor(() => expect(slidesApi.patchSlideMoves).toHaveBeenCalledWith(

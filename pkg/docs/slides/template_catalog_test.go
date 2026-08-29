@@ -28,6 +28,22 @@ func TestCatalogResolvePrefersPersonalOverOrg(t *testing.T) {
 	}
 }
 
+func TestCatalogGetScopeReturnsExactScope(t *testing.T) {
+	ctx := context.Background()
+	org := store.NewMemorySlideTemplateStore()
+	personal := store.NewMemorySlideTemplateStore()
+	_ = org.Save(ctx, RecordFromTemplate(themes.Template{Name: "acme", Label: "Org Acme"}))
+	_ = personal.Save(ctx, RecordFromTemplate(themes.Template{Name: "acme", Label: "My Acme"}))
+
+	got, ok, err := (TemplateCatalog{Org: org, Personal: personal}).GetScope(ctx, ScopeOrg, "acme")
+	if err != nil || !ok {
+		t.Fatalf("get scope: ok=%v err=%v", ok, err)
+	}
+	if got.Label != "Org Acme" || got.Scope != ScopeOrg {
+		t.Fatalf("got %+v", got)
+	}
+}
+
 func TestCatalogListAllKeepsSameNameAtTwoScopes(t *testing.T) {
 	ctx := context.Background()
 	org := store.NewMemorySlideTemplateStore()

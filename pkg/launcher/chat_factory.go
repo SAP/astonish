@@ -317,6 +317,25 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			// and some providers (e.g. openai_compat) only read from the config map
 			// with no env var fallback.
 			config.InjectProviderSecretsToConfig(cfg.AppConfig, cs.GetSecret)
+			if !cfg.PlatformMode {
+				cfg.AppConfig.ProviderTokenRefresh = func(instanceName, accessToken, refreshToken string, expiresAt time.Time) error {
+					instance, ok := cfg.AppConfig.Providers[instanceName]
+					if !ok {
+						return fmt.Errorf("provider instance %q not found", instanceName)
+					}
+					if err := cs.SetSecretBatch(map[string]string{
+						"provider." + instanceName + ".access_token":  accessToken,
+						"provider." + instanceName + ".refresh_token": refreshToken,
+						"provider." + instanceName + ".expires_at":    expiresAt.Format(time.RFC3339),
+					}); err != nil {
+						return err
+					}
+					instance["access_token"] = accessToken
+					instance["refresh_token"] = refreshToken
+					instance["expires_at"] = expiresAt.Format(time.RFC3339)
+					return nil
+				}
+			}
 
 			// Setup provider env vars from credential store
 			config.SetupAllProviderEnvFromStore(cfg.AppConfig, cs.GetSecret)

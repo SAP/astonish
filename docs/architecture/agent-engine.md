@@ -32,7 +32,7 @@ The system prompt uses a deliberate tiered architecture to balance token efficie
 - **Tier 2 (Indexed Guidance)**: Detailed how-to documentation for each capability (browser, credentials, scheduling, etc.). Stored as `memory/guidance/*.md` files indexed in the vector store and retrieved only when relevant.
 - **Tier 3 (Per-Turn Context)**: Retrieved knowledge, catalog matches, channel/scheduler hints, session instructions, skill indexes, and mode guidance. In the cache-stable path this is a marked user-role event persisted byte-for-byte and hidden from transcript, memory, reflection, and distillation views.
 
-The legacy path continues rebuilding the prompt and dynamically injecting declarations. `chat.cache_stable_agent_path` selects the behavior with precedence `session > model > provider > global`; the default rollout enables it only for Qwen models on local OpenAI-compatible, Ollama, and LM Studio providers. The selected value is persisted per session.
+The legacy path continues rebuilding the prompt and may dynamically inject pre-turn relevance matches or pinned groups. Explicit `search_tools` results are catalog-only on both paths and never become model declarations. `chat.cache_stable_agent_path` selects the behavior with precedence `session > model > provider > global`; the default rollout enables it only for Qwen models on local OpenAI-compatible, Ollama, and LM Studio providers. The selected value is persisted per session.
 
 ### Why Sequential Tool Dispatch
 

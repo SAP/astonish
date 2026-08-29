@@ -368,8 +368,8 @@ func (b *SystemPromptBuilder) Build() string {
 			sb.WriteString(fmt.Sprintf("- **%s** (%d tools) — %s\n", g.Name, toolCount, g.Description))
 		}
 		sb.WriteString("\nExamples (parallel work only): `tools: [\"browser\"]`, `tools: [\"core\", \"web\"]`\n")
-		sb.WriteString("\n**MCP tools (main thread):** After `search_tools`, call the **bare** tool name (e.g. `send_email`). ")
-		sb.WriteString("Do **not** invent `mcp:email/send_email` (app-only form). Do **not** delegate a single MCP call.\n")
+		sb.WriteString("\n**Deferred MCP tools:** After `search_tools`, inspect the match with `describe_tools`, then call `execute_tool` using the returned tool reference. ")
+		sb.WriteString("Do **not** call a deferred tool as a direct function. Do **not** delegate a single MCP call.\n")
 	}
 
 	// 6c2. Skill index (lightweight listing of available CLI tool skills)

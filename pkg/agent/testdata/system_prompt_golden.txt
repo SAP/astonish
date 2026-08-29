@@ -112,7 +112,7 @@ Step-by-step guidance for complex capabilities (browser automation, credential m
 
 Examples (parallel work only): `tools: ["browser"]`, `tools: ["core", "web"]`
 
-**MCP tools (main thread):** After `search_tools`, call the **bare** tool name (e.g. `send_email`). Do **not** invent `mcp:email/send_email` (app-only form). Do **not** delegate a single MCP call.
+**Deferred MCP tools:** After `search_tools`, inspect the match with `describe_tools`, then call `execute_tool` using the returned tool reference. Do **not** call a deferred tool as a direct function. Do **not** delegate a single MCP call.
 
 ## Available Skills
 

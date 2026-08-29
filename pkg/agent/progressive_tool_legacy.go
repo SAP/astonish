@@ -16,9 +16,9 @@ import (
 )
 
 type legacyToolDiscoveryState struct {
-	dynamicMatches     []ToolMatch
-	searchToolsResults []string
-	mu                 sync.Mutex
+	dynamicMatches    []ToolMatch
+	recoveryToolNames []string
+	mu                sync.Mutex
 }
 
 func (c *ChatAgent) legacyToolState(invocationID string) *legacyToolDiscoveryState {
@@ -26,24 +26,12 @@ func (c *ChatAgent) legacyToolState(invocationID string) *legacyToolDiscoverySta
 	return state.(*legacyToolDiscoveryState)
 }
 
-// RegisterSearchToolsResults records tools for the next legacy model round.
-func (c *ChatAgent) RegisterSearchToolsResults(ctx context.Context, toolNames []string) {
-	invocationContext, ok := ctx.(interface{ InvocationID() string })
-	if !ok {
-		return
-	}
-	state := c.legacyToolState(invocationContext.InvocationID())
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	state.searchToolsResults = append(state.searchToolsResults, toolNames...)
-}
-
 // AutoInjectMissingToolCallback enables legacy missing-tool recovery.
 func (c *ChatAgent) AutoInjectMissingToolCallback(state *legacyToolDiscoveryState) llmagent.OnToolErrorCallback {
 	return autoInjectMissingToolCallback(c.ToolIndex, func(names []string) {
 		state.mu.Lock()
 		defer state.mu.Unlock()
-		state.searchToolsResults = append(state.searchToolsResults, names...)
+		state.recoveryToolNames = append(state.recoveryToolNames, names...)
 	}, nil)
 }
 
@@ -166,23 +154,21 @@ func (c *ChatAgent) DynamicToolInjectionCallback(state *legacyToolDiscoveryState
 			return nil, nil
 		}
 
-		// Collect tool names to inject from both sources.
+		// Automatic pre-turn matches remain available for legacy sessions.
+		// Explicit search_tools results are catalog-only and use the fixed bridge.
 		toolsToInject := make(map[string]bool)
-
-		// Sources 1 and 2 are scoped to this invocation so concurrent sessions
-		// cannot exchange automatic or explicit search results.
 		state.mu.Lock()
 		for _, m := range state.dynamicMatches {
 			if !m.IsMainTool {
 				toolsToInject[m.ToolName] = true
 			}
 		}
-		for _, name := range state.searchToolsResults {
+		for _, name := range state.recoveryToolNames {
 			toolsToInject[name] = true
 		}
 		state.mu.Unlock()
 
-		// Source 3: pinned tool groups from PromptOverrides (wizard sessions).
+		// Pinned tool groups from PromptOverrides (wizard sessions).
 		// These ensure critical tools remain available across all turns of a
 		// multi-turn guided conversation regardless of ToolIndex scoring.
 		if po := PromptOverridesFromContext(cbCtx); po != nil && len(po.PinnedToolGroups) > 0 {
@@ -334,37 +320,6 @@ func (c *ChatAgent) DynamicToolInjectionCallback(state *legacyToolDiscoveryState
 			slog.Debug("dynamic tool injection", "component", "chat", "injected", injected)
 		}
 
-		return nil, nil
-	}
-}
-
-func removeRequestToolsCallback(names ...string) llmagent.BeforeModelCallback {
-	return func(_ agent.CallbackContext, req *model.LLMRequest) (*model.LLMResponse, error) {
-		if req == nil {
-			return nil, nil
-		}
-		for _, name := range names {
-			delete(req.Tools, name)
-		}
-		if req.Config == nil {
-			return nil, nil
-		}
-		for _, packed := range req.Config.Tools {
-			if packed == nil {
-				continue
-			}
-			kept := packed.FunctionDeclarations[:0]
-			for _, declaration := range packed.FunctionDeclarations {
-				remove := false
-				for _, name := range names {
-					remove = remove || declaration != nil && declaration.Name == name
-				}
-				if !remove {
-					kept = append(kept, declaration)
-				}
-			}
-			packed.FunctionDeclarations = kept
-		}
 		return nil, nil
 	}
 }

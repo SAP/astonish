@@ -1637,15 +1637,11 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		}
 	}
 
-	// Register both progressive paths. The per-session selector keeps the fixed
-	// bridge model-visible only on the cache-stable path.
-	var chatAgentRef *agent.ChatAgent
+	// Main-thread search is catalog-only on every execution path. Deferred tools
+	// are inspected and invoked through the fixed bridge; search results must
+	// never become provider-visible declarations on a later model round.
 	if toolIndex != nil {
-		searchToolsTool, stErr := tools.NewSearchToolsTool(toolIndex, func(ctx context.Context, names []string) {
-			if chatAgentRef != nil {
-				chatAgentRef.RegisterSearchToolsResults(ctx, names)
-			}
-		})
+		searchToolsTool, stErr := tools.NewSearchToolsTool(toolIndex)
 		if stErr == nil {
 			mainThreadTools = append(mainThreadTools, searchToolsTool)
 		} else if cfg.DebugMode {
@@ -1680,7 +1676,6 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		llm, mainThreadTools, mainThreadToolsets, sessionService,
 		promptBuilder, cfg.DebugMode, cfg.AutoApprove,
 	)
-	chatAgentRef = chatAgent
 	chatAgent.CacheStableAgentPath = func(sessionID string) bool {
 		providerName, modelName := cfg.ProviderName, cfg.ModelName
 		if cfg.CodeMode && cfg.AppConfig != nil {

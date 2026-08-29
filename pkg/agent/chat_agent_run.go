@@ -259,7 +259,6 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		defer c.legacyToolStates.Delete(legacyInvocationID)
 		legacyDiscovery.mu.Lock()
 		legacyDiscovery.dynamicMatches = append(legacyDiscovery.dynamicMatches[:0], toolMatches...)
-		legacyDiscovery.searchToolsResults = nil
 		legacyDiscovery.mu.Unlock()
 
 		// Build per-turn context separately from the session-stable system prompt.
@@ -887,10 +886,6 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		beforeModelCallbacks = append(beforeModelCallbacks, TruncateToolResponsesCallback())
 		if !cacheStablePath {
 			beforeModelCallbacks = append(beforeModelCallbacks, c.DynamicToolInjectionCallback(legacyDiscovery))
-		}
-
-		if !cacheStablePath {
-			beforeModelCallbacks = append(beforeModelCallbacks, removeRequestToolsCallback("describe_tools", executeToolName))
 		}
 
 		// The legacy path hides disabled declarations dynamically. Cache-stable

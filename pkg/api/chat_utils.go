@@ -79,7 +79,7 @@ func eventsToMessages(events session.Events, redactor *credentials.Redactor) []S
 
 	for i := range events.Len() {
 		event := events.At(i)
-		if event.LLMResponse.Content == nil {
+		if agent.IsTurnContextEvent(event) || event.LLMResponse.Content == nil {
 			continue
 		}
 
@@ -94,7 +94,10 @@ func eventsToMessages(events session.Events, redactor *credentials.Redactor) []S
 					msgType = "user"
 					// Strip the timestamp prefix injected by NewTimestampedUserContent.
 					// Format: "[2026-03-20 14:30:05 UTC]\n<text>"
-					text = stripUserMessageTimestamp(text)
+					text = agent.CleanUserText(text)
+					if text == "" {
+						continue
+					}
 				}
 
 				// Check for structured distill messages (model only).
@@ -770,14 +773,6 @@ func fileTypeFromExt(ext string) string {
 		}
 		return strings.TrimPrefix(ext, ".")
 	}
-}
-
-// stripUserMessageTimestamp removes the timestamp prefix from a user message
-// that was injected by NewTimestampedUserContent. This keeps the timestamp in
-// the persisted event (for the LLM's context) while displaying clean text to
-// the user in the Studio UI.
-func stripUserMessageTimestamp(text string) string {
-	return userTimestampRe.ReplaceAllString(text, "")
 }
 
 // summarizeToolResult converts a tool response map into a display-friendly value.

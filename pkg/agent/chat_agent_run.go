@@ -92,13 +92,13 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			}
 		}
 
-		// --- Phase A: Dynamic Execution ---
-		trace := NewExecutionTrace(userText)
+		cleanUserText := CleanUserText(userText)
 
-		// Per-turn dynamic content: auto-retrieved knowledge.
-		// Appended to the end of the system prompt via
-		// SystemPromptBuilder.RelevantKnowledge field,
-		// so it carries system-level authority for instruction following.
+		// --- Phase A: Dynamic Execution ---
+		trace := NewExecutionTrace(cleanUserText)
+
+		// Per-turn dynamic content: auto-retrieved knowledge. It is persisted
+		// as model-facing user context so replay sees the exact same bytes.
 		var relevantKnowledge string
 		var knowledgeTrackingQuery string
 		var knowledgeTrackingBM25Query string
@@ -109,8 +109,8 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		// Flow documents are discovered naturally through the general search.
 		// When a high-confidence flow match is found, it is loaded as an
 		// actionable execution plan rather than passive knowledge.
-		if (c.KnowledgeSearch != nil || c.KnowledgeSearchByCategory != nil) && userText != "" {
-			searchQuery := buildKnowledgeQuery(userText)
+		if (c.KnowledgeSearch != nil || c.KnowledgeSearchByCategory != nil) && cleanUserText != "" {
+			searchQuery := buildKnowledgeQuery(cleanUserText)
 			if len(searchQuery) < 5 {
 				if c.DebugMode {
 					slog.Debug("auto knowledge search skipped: query too short", "component", "chat", "query", searchQuery)
@@ -196,8 +196,8 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		var relevantTools string
 		var toolMatches []ToolMatch
 		var toolSearchQuery string
-		if c.ToolIndex != nil && userText != "" {
-			toolSearchQuery = buildKnowledgeQuery(userText)
+		if c.ToolIndex != nil && cleanUserText != "" {
+			toolSearchQuery = buildKnowledgeQuery(cleanUserText)
 			// For short messages ("looks good", "use it", "yes"), the user text
 			// alone lacks topical signal for tool discovery. Augment the query
 			// with the tail of the last LLM response, which typically contains
@@ -223,13 +223,13 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 				}
 			}
 			// When the user names an MCP server (e.g. "use the mcp server email"),
-			// include that group's tools in the catalog hints even if hybrid search
+			// Include that group's tools in the catalog hints even if hybrid search
 			// scored poorly. Prefer request-scoped MCP groups, then the index.
-			if mcpHits := MatchRequestMCPGroupsFromQuery(ctx, userText); len(mcpHits) > 0 {
+			if mcpHits := MatchRequestMCPGroupsFromQuery(ctx, cleanUserText); len(mcpHits) > 0 {
 				mcpHits = FilterAccessibleToolMatches(ctx, mcpHits)
 				toolMatches = MergeToolMatches(toolMatches, mcpHits)
 			}
-			if mcpHits := MatchMCPGroupsFromQuery(c.ToolIndex, userText); len(mcpHits) > 0 {
+			if mcpHits := MatchMCPGroupsFromQuery(c.ToolIndex, cleanUserText); len(mcpHits) > 0 {
 				mcpHits = FilterAccessibleToolMatches(ctx, mcpHits)
 				toolMatches = MergeToolMatches(toolMatches, mcpHits)
 			}
@@ -242,39 +242,37 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		}
 		yieldToolTrackingEvent(yield, toolSearchQuery, relevantTools, toolMatches)
 
-		// Clone the SystemPromptBuilder for this request to avoid races with
-		// concurrent callers (scheduler jobs, channel messages, Studio chat).
-		// Per-turn dynamic fields are set on the clone, which is then discarded.
+		// Build per-turn context separately from the session-stable system prompt.
 		promptBuilder := c.SystemPrompt.Clone()
 		if promptBuilder == nil {
 			yield(nil, fmt.Errorf("SystemPrompt builder is nil"))
 			return
 		}
 
-		// Apply per-turn overrides injected by callers via context
+		// Read per-turn overrides injected by callers via context.
 		planMode := false
 		graphPlan := false
 		askMode := false
 		approvedPlanExecution := false
 		approvedPlanExecutionExplicit := false
-		if po := PromptOverridesFromContext(ctx); po != nil {
+		promptOverrides := PromptOverridesFromContext(ctx)
+		turnOverrides := &PromptOverrides{
+			ChannelHints:   promptBuilder.ChannelHints,
+			SchedulerHints: promptBuilder.SchedulerHints,
+			SessionContext: promptBuilder.SessionContext,
+		}
+		promptBuilder.ChannelHints = ""
+		promptBuilder.SchedulerHints = ""
+		promptBuilder.SessionContext = ""
+		promptBuilder.RelevantKnowledge = ""
+		promptBuilder.RelevantTools = ""
+		if po := promptOverrides; po != nil {
+			*turnOverrides = *po
 			planMode = po.PlanMode
 			graphPlan = po.GraphPlanMode
 			askMode = po.AskMode
 			approvedPlanExecution = po.ApprovedPlanExecution
 			approvedPlanExecutionExplicit = po.ApprovedPlanExecutionExplicit
-			if po.ChannelHints != "" {
-				promptBuilder.ChannelHints = po.ChannelHints
-			}
-			if po.SchedulerHints != "" {
-				promptBuilder.SchedulerHints = po.SchedulerHints
-			}
-			if po.SessionContext != "" {
-				promptBuilder.SessionContext = po.SessionContext
-			}
-			if po.SkillIndex != "" {
-				promptBuilder.SkillIndex = po.SkillIndex
-			}
 			// Platform/team web tools: always take the per-request values when set
 			// so every user sees the platform-selected search tool, not whatever
 			// was baked into the singleton agent at first init/pre-warm.
@@ -305,12 +303,6 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			promptBuilder.Tools = filtered
 		}
 
-		// Set per-turn dynamic fields on the cloned builder, then build.
-		// These are appended at the end of the system prompt so the static prefix
-		// remains cacheable by providers.
-		promptBuilder.RelevantKnowledge = relevantKnowledge
-		promptBuilder.RelevantTools = relevantTools
-
 		// Per-turn MCP access filter: in platform mode, only show MCP groups
 		// the current user's team/org has access to in the delegation catalog.
 		mcpStores := store.MCPServerStoresFromContext(ctx)
@@ -322,7 +314,19 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			promptBuilder.MCPAccessFilter = nil // personal mode — no filtering
 		}
 
-		instruction := promptBuilder.Build()
+		instruction, promptStateEvent := stableSystemPrompt(ctx.Session().State(), promptBuilder.Build)
+		if promptStateEvent != nil && !yield(promptStateEvent, nil) {
+			return
+		}
+
+		// ADK persists the runner input before ChatAgent.Run starts. Persist the
+		// model-facing context as a second user-role event so replay reconstructs
+		// the exact bytes without exposing them as user-authored text.
+		if turnContext := buildTurnContextContent(turnOverrides, relevantTools, relevantKnowledge); turnContext != nil {
+			if !yield(newTurnContextEvent(turnContext), nil) {
+				return
+			}
+		}
 
 		// Capture session identity for use in AfterToolCallback closure.
 		sessionID := ctx.Session().ID()
@@ -574,7 +578,7 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		// the phased gate below replaces the plan-mode gate.
 		if planMode && !graphPlan {
 			beforeToolCallbacks = append(beforeToolCallbacks, func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
-				t, args = c.effectiveToolCall(ctx, t, args)
+				t, _ = c.effectiveToolCall(ctx, t, args)
 				name := t.Name()
 				if name == "delegate_tasks" || !IsToolSafe(name) {
 					return map[string]any{
@@ -597,7 +601,7 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		if graphPlan {
 			gpState := c.GetOrCreateGraphPlanState(sessionID)
 			beforeToolCallbacks = append(beforeToolCallbacks, func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
-				t, args = c.effectiveToolCall(ctx, t, args)
+				t, _ = c.effectiveToolCall(ctx, t, args)
 				name := t.Name()
 				// Transition tools + progress updates are always allowed.
 				// announce_plan is phase-gated (PLAN phase only).
@@ -622,7 +626,7 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		// research/Q&A mode — no changes, no plans, no execution.
 		if askMode && !planMode && !graphPlan {
 			beforeToolCallbacks = append(beforeToolCallbacks, func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
-				t, args = c.effectiveToolCall(ctx, t, args)
+				t, _ = c.effectiveToolCall(ctx, t, args)
 				name := t.Name()
 				if name == "delegate_tasks" || name == "announce_plan" || !IsToolSafe(name) {
 					return map[string]any{
@@ -638,7 +642,7 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		// Hide it from the model in Normal/Ask and refuse it if it is still called.
 		if !planMode && !graphPlan {
 			beforeToolCallbacks = append(beforeToolCallbacks, func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
-				t, _ = c.effectiveToolCall(ctx, t, args)
+				t, args = c.effectiveToolCall(ctx, t, args)
 				if t.Name() == "announce_plan" {
 					return map[string]any{
 						"status": "blocked_announce_plan_not_in_plan_mode",
@@ -656,7 +660,7 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			var executionResearchMu sync.Mutex
 			executionResearch := map[string]int{}
 			beforeToolCallbacks = append(beforeToolCallbacks, func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
-				t, _ = c.effectiveToolCall(ctx, t, args)
+				t, args = c.effectiveToolCall(ctx, t, args)
 				name := t.Name()
 				if approvedPlanExecutionToolBlocked(name) {
 					return map[string]any{

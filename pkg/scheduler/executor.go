@@ -279,7 +279,7 @@ CRITICAL RULES:
 			return finalizeAdaptiveResult(e, sess.ID(), lastWins, writtenFiles), fmt.Errorf("agent error: %w", err)
 		}
 
-		if event.LLMResponse.Content == nil {
+		if agent.IsTurnContextEvent(event) || event.LLMResponse.Content == nil {
 			continue
 		}
 		// Skip streaming partials — wait for complete turns (email batch semantics).

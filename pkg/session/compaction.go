@@ -409,6 +409,9 @@ func findLastUserTextInstruction(contents []*genai.Content) *genai.Content {
 				break // this is a tool response, skip it
 			}
 			if p.Text != "" {
+				if strings.HasPrefix(p.Text, "[Astonish Per-Turn Context — not user-authored]\n") {
+					continue
+				}
 				// Found a real user text instruction
 				return &genai.Content{
 					Parts: []*genai.Part{{

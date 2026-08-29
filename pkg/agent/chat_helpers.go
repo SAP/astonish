@@ -109,6 +109,9 @@ func lastModelResponseTail(events session.Events, maxLen int) string {
 	foundModel := false
 	for i := n - 1; i >= 0; i-- {
 		ev := events.At(i)
+		if IsTurnContextEvent(ev) {
+			continue
+		}
 		if ev.Author == "user" {
 			if foundModel {
 				break // we've collected all model parts before this user message

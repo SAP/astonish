@@ -845,6 +845,9 @@ runLoop:
 		}
 
 		// Process content parts
+		if agent.IsTurnContextEvent(event) {
+			continue
+		}
 		if event.LLMResponse.Content != nil {
 			for _, part := range event.LLMResponse.Content.Parts {
 				// Skip reasoning/thought parts — they are preserved in session

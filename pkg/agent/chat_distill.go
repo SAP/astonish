@@ -49,7 +49,7 @@ func reconstructTracesFromService(ctx context.Context, svc session.Service, ds D
 
 	for i := range events.Len() {
 		event := events.At(i)
-		if event.LLMResponse.Content == nil {
+		if IsTurnContextEvent(event) || event.LLMResponse.Content == nil {
 			continue
 		}
 

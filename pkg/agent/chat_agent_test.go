@@ -8,10 +8,8 @@ import (
 
 	"github.com/SAP/astonish/pkg/store"
 	adkagent "google.golang.org/adk/agent"
-	"google.golang.org/adk/memory"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/toolconfirmation"
 	"google.golang.org/genai"
 	"gopkg.in/yaml.v3"
 )
@@ -965,31 +963,6 @@ type mockToolset struct {
 
 func (m *mockToolset) Name() string                                          { return m.name }
 func (m *mockToolset) Tools(_ adkagent.ReadonlyContext) ([]tool.Tool, error) { return nil, nil }
-
-// --- Auto-inject missing tool tests ---
-
-// stubToolContext is a minimal agent.ToolContext for unit tests.
-type stubToolContext struct {
-	context.Context
-}
-
-func (s stubToolContext) UserContent() *genai.Content    { return nil }
-func (s stubToolContext) FunctionCallID() string         { return "" }
-func (s stubToolContext) Actions() *session.EventActions { return &session.EventActions{} }
-func (s stubToolContext) SearchMemory(context.Context, string) (*memory.SearchResponse, error) {
-	return nil, nil
-}
-func (s stubToolContext) ToolConfirmation() *toolconfirmation.ToolConfirmation { return nil }
-func (s stubToolContext) RequestConfirmation(string, any) error                { return nil }
-func (s stubToolContext) AgentName() string                                    { return "test" }
-func (s stubToolContext) ReadonlyState() session.ReadonlyState                 { return nil }
-func (s stubToolContext) State() session.State                                 { return nil }
-func (s stubToolContext) Artifacts() adkagent.Artifacts                        { return nil }
-func (s stubToolContext) InvocationID() string                                 { return "inv" }
-func (s stubToolContext) AppName() string                                      { return "app" }
-func (s stubToolContext) UserID() string                                       { return "user" }
-func (s stubToolContext) SessionID() string                                    { return "sess" }
-func (s stubToolContext) Branch() string                                       { return "" }
 
 func TestIsToolNotFoundError(t *testing.T) {
 	tests := []struct {

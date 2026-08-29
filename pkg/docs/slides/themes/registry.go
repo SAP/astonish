@@ -83,8 +83,9 @@ type Template struct {
 	// Empty means corporate.
 	Skin string `json:"skin,omitempty"`
 	// Palettes are named token overlays (surface/ink/accent/muted) for the
-	// same template. Built-in modern ships several colorways; imported brand
-	// templates typically have none — their color is the brand.
+	// same template. Built-in classic (Light / Midnight / Aurora) and modern
+	// ship colorways; imported brand templates typically have none — their
+	// color is the brand.
 	Palettes []Palette `json:"palettes,omitempty"`
 }
 
@@ -116,7 +117,7 @@ func (t Template) ThemeTokens() map[string]string { return t.Tokens }
 // archetypesFor builds the three standard archetypes (title, section, content)
 // from a palette: bg is the surface color, ink is the primary text color, and
 // accent is the section/heading color. titleMarkup, when non-empty, overrides
-// the generated title archetype (used by templates with a gradient background).
+// the generated title archetype.
 func archetypesFor(bg, ink, accent, titleMarkup string) []Archetype {
 	title := titleMarkup
 	if title == "" {
@@ -144,41 +145,17 @@ func archetypesFor(bg, ink, accent, titleMarkup string) []Archetype {
 	}
 }
 
-// auroraTitle is a gradient-backed title archetype for the colorful "aurora"
-// template. The gradient fill is expressed as a JSON script child of the
-// full-canvas background shape, per the ASD v2 gradient schema.
-const auroraTitle = `<ast-slide id="title">` +
-	`<ast-shape id="bg" kind="rect" x="0" y="0" w="1920" h="1080" alt="" decorative="true">` +
-	`<script type="application/json" id="bg-gradient">{"kind":"linear","angle":90,"stops":[{"pos":0,"color":"#6D28D9"},{"pos":100,"color":"#0EA5E9"}]}</script>` +
-	`</ast-shape>` +
-	`<ast-text id="title-heading" x="160" y="380" w="1600" h="220" color="#F8FAFC" weight="bold" size="80" align="center">{{TITLE}}</ast-text>` +
-	`<ast-text id="title-subtitle" x="160" y="620" w="1600" h="140" color="#E0F2FE" size="40" align="center">{{BODY}}</ast-text>` +
-	`</ast-slide>`
-
 var builtinTemplates = map[string]Template{
-	"light-corporate": {
-		Schema:      2,
-		Name:        "light-corporate",
-		Label:       "Light Corporate",
-		Description: "Clean, high-contrast light theme for business decks.",
-		Tokens:      map[string]string{"surface": "#FFFFFF", "ink": "#172033", "accent": "#1E40AF"},
-		Archetypes:  archetypesFor("#FFFFFF", "#172033", "#1E40AF", ""),
-	},
-	"midnight": {
-		Schema:      2,
-		Name:        "midnight",
-		Label:       "Midnight",
-		Description: "Dark theme with warm amber accents for low-light rooms.",
-		Tokens:      map[string]string{"surface": "#0B1220", "ink": "#E2E8F0", "accent": "#F59E0B"},
-		Archetypes:  archetypesFor("#0B1220", "#E2E8F0", "#F59E0B", ""),
-	},
-	"aurora": {
-		Schema:      2,
-		Name:        "aurora",
-		Label:       "Aurora",
-		Description: "Colorful gradient theme for vibrant, modern presentations.",
-		Tokens:      map[string]string{"surface": "#0F172A", "ink": "#F8FAFC", "accent": "#0EA5E9"},
-		Archetypes:  archetypesFor("#0F172A", "#F8FAFC", "#0EA5E9", auroraTitle),
+	"classic": {
+		Schema: 2,
+		Name:   "classic",
+		Label:  "Classic",
+		Description: "Corporate recipe language (logo, legal, accent rule) with Light, Midnight, " +
+			"and Aurora colorways. Same jobs as Modern, different furniture.",
+		Skin:       "corporate",
+		Tokens:     map[string]string{"surface": "#FFFFFF", "ink": "#172033", "accent": "#1E40AF"},
+		Archetypes: archetypesFor("#FFFFFF", "#172033", "#1E40AF", ""),
+		Palettes:   classicPalettes(),
 	},
 	"modern": {
 		Schema: 2,
@@ -209,6 +186,20 @@ var builtinTemplates = map[string]Template{
 // omit this key and no extra faces are loaded.
 const modernEmbeddedFontsJSON = `[{"family":"Manrope","variant":"400","assetKey":"font:Manrope:400"},{"family":"Manrope","variant":"500","assetKey":"font:Manrope:500"},{"family":"Manrope","variant":"600","assetKey":"font:Manrope:600"},{"family":"Manrope","variant":"700","assetKey":"font:Manrope:700"},{"family":"Manrope","variant":"800","assetKey":"font:Manrope:800"},{"family":"JetBrains Mono","variant":"400","assetKey":"font:JetBrains Mono:400"},{"family":"JetBrains Mono","variant":"600","assetKey":"font:JetBrains Mono:600"}]`
 
+func classicPalettes() []Palette {
+	return []Palette{
+		{ID: "light", Label: "Light", Tokens: map[string]string{
+			"surface": "#FFFFFF", "ink": "#172033", "accent": "#1E40AF",
+		}},
+		{ID: "midnight", Label: "Midnight", Tokens: map[string]string{
+			"surface": "#0B1220", "ink": "#E2E8F0", "accent": "#F59E0B",
+		}},
+		{ID: "aurora", Label: "Aurora", Tokens: map[string]string{
+			"surface": "#0F172A", "ink": "#F8FAFC", "accent": "#0EA5E9",
+		}},
+	}
+}
+
 func productPalettes() []Palette {
 	dark := func(id, label, accent string) Palette {
 		return Palette{ID: id, Label: label, Tokens: map[string]string{
@@ -233,6 +224,36 @@ func productPalettes() []Palette {
 	}
 }
 
+// Former standalone built-ins, now colorways of classic. LookupTemplate and
+// create_deck still accept these names so older decks and prompts keep working.
+var builtinTemplateAliases = map[string]string{
+	"aurora":          "classic",
+	"midnight":        "classic",
+	"light-corporate": "classic",
+}
+
+var builtinAliasPalettes = map[string]string{
+	"aurora":          "aurora",
+	"midnight":        "midnight",
+	"light-corporate": "light",
+}
+
+// CanonicalTemplateName maps a built-in alias (aurora, midnight, light-corporate)
+// to classic; other names are returned unchanged.
+func CanonicalTemplateName(name string) string {
+	name = strings.TrimSpace(name)
+	if canon, ok := builtinTemplateAliases[name]; ok {
+		return canon
+	}
+	return name
+}
+
+// AliasPaletteID is the classic colorway implied by an old template name
+// (midnight → midnight). Empty when the name is not an alias.
+func AliasPaletteID(name string) string {
+	return builtinAliasPalettes[strings.TrimSpace(name)]
+}
+
 // ArchetypesFor builds the three standard archetypes (title, section, content)
 // from a palette using the default (non-gradient) title layout. It is a thin
 // exported wrapper over the internal archetypesFor so template-management code
@@ -242,9 +263,10 @@ func ArchetypesFor(bg, ink, accent string) []Archetype {
 	return archetypesFor(bg, ink, accent, "")
 }
 
-// LookupTemplate returns the built-in template with the given name.
+// LookupTemplate returns the built-in template with the given name. Former
+// aurora / midnight / light-corporate names resolve to classic.
 func LookupTemplate(name string) (Template, bool) {
-	t, ok := builtinTemplates[name]
+	t, ok := builtinTemplates[CanonicalTemplateName(name)]
 	return t, ok
 }
 

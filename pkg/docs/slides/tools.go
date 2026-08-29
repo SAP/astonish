@@ -90,7 +90,7 @@ type CreateDeckArgs struct {
 	Description string            `json:"description,omitempty" jsonschema:"Short deck description shown under Slides in chat. Prefer this over the persist slug for humans."`
 	Theme       map[string]string `json:"theme,omitempty" jsonschema:"Optional ASD theme token overrides. Prefer palette for modern colorways instead of copying hex."`
 	Template    string            `json:"template,omitempty" jsonschema:"Template name from list_slide_templates after intake (user named it, delegated, or picked from slidesTemplatePicker). Seeds theme, fonts, and a slim catalog. Author with fill_slides; do not copy markup."`
-	Palette     string            `json:"palette,omitempty" jsonschema:"Optional palette id from the template palettes list (e.g. orange, light-violet). Overlays surface/ink/accent/muted. Prefer this over copying hex into theme."`
+	Palette     string            `json:"palette,omitempty" jsonschema:"Optional palette id from the template palettes list (e.g. midnight, aurora, orange). Overlays surface/ink/accent/muted. Prefer this over copying hex into theme."`
 	TitleKind   string            `json:"titleKind,omitempty" jsonschema:"Required when the template has 2+ title* covers: the ask_user option id (title, title-2, …) or 'default' after they saw the picker. create_deck errors if this is omitted."`
 	TitleImage  string            `json:"titleImage,omitempty" jsonschema:"Required when the cover has an image well (imported ph-pic, or Modern's optional logo): slidesImagePicker id, 'upload' (this-turn attachment), a public image URL, or 'none' if they declined."`
 	ClosingKind string            `json:"closingKind,omitempty" jsonschema:"Official closing variant kind (closing, closing-2, …). Last slide must use this kind when the catalog lists closing family."`
@@ -456,7 +456,11 @@ func createDeck(ctx context.Context, args CreateDeckArgs) (DeckResult, error) {
 		for k, v := range tmpl.Tokens {
 			merged[k] = v
 		}
-		if err := applyPaletteTokens(tmpl, args.Palette, merged); err != nil {
+		paletteID := strings.TrimSpace(args.Palette)
+		if paletteID == "" {
+			paletteID = themes.AliasPaletteID(name)
+		}
+		if err := applyPaletteTokens(tmpl, paletteID, merged); err != nil {
 			return DeckResult{}, err
 		}
 		for k, v := range args.Theme {
@@ -1598,8 +1602,8 @@ type AskUserArgs struct {
 	// the catalog), and attaches a live thumbnail of each template's cover so the
 	// user picks by seeing the design. Do NOT hand-copy markup or thumbnails.
 	SlidesTemplatePicker bool `json:"slidesTemplatePicker,omitempty" jsonschema:"For the template-choice question: set true (with kind='select', no options) to auto-generate one option per available template, each with a live thumbnail of that template's cover slide."`
-	// Slides convenience: colorways on a template that defines Palettes (modern).
-	// Set true with kind='select' and slidesTemplate; omit options.
+	// Slides convenience: colorways on a template that defines Palettes
+	// (classic, modern). Set true with kind='select' and slidesTemplate; omit options.
 	SlidesPalettePicker bool `json:"slidesPalettePicker,omitempty" jsonschema:"For a color-palette question: set true (kind='select') with slidesTemplate. ask_user lists each palette with a live recolored cover thumbnail. Omit options. Do not invent palettes for imported brand templates."`
 	// Slides convenience: photos from the template's example title slides, for
 	// the cover's single image well. Set true with kind='select' and slidesTemplate.
@@ -2882,8 +2886,8 @@ func GetTools() ([]tool.Tool, error) {
 				return addDeckImage(ctx, args)
 			})
 		}},
-		{"ask_user", "Ask the user ONE structured question inline in chat and WAIT for their reply. kind='yesno' shows Yes/No; kind='select' shows a pick-one list. Intake: audience, length, who picks the template. If they want to choose, slidesTemplatePicker=true (kind='select', no options) shows a live cover thumbnail per template. After a template is known, slidesTemplate+slidesKind=title|closing shows official cover/end LAYOUTS (sample photos stripped). If the chosen title has a ph-pic well, slidesImagePicker=true with slidesTemplate lists template photos plus provide-own (upload) and none. The modern template has no example photos: yes/no for a top-right logo. slidesPalettePicker=true with slidesTemplate shows Modern colorways. Do NOT hand-copy markup. After calling it, end your turn.", func() (tool.Tool, error) {
-			return functiontool.New(functiontool.Config{Name: "ask_user", Description: "Ask the user ONE structured question inline in chat and WAIT for their reply. kind='yesno' shows Yes/No; kind='select' shows a pick-one list. Intake: audience, length, who picks the template. If they want to choose, slidesTemplatePicker=true (kind='select', no options) shows a live cover thumbnail per template. After a template is known, slidesTemplate+slidesKind=title|closing shows official cover/end LAYOUTS (sample photos stripped). If the chosen title has a ph-pic well, slidesImagePicker=true with slidesTemplate lists template photos plus provide-own (upload) and none. The modern template has no example photos: yes/no for a top-right logo. slidesPalettePicker=true with slidesTemplate shows Modern colorways. Do NOT hand-copy markup. After calling it, end your turn."}, func(ctx tool.Context, args AskUserArgs) (AskUserResult, error) {
+		{"ask_user", "Ask the user ONE structured question inline in chat and WAIT for their reply. kind='yesno' shows Yes/No; kind='select' shows a pick-one list. Intake: audience, length, who picks the template. If they want to choose, slidesTemplatePicker=true (kind='select', no options) shows a live cover thumbnail per template. After a template is known, slidesTemplate+slidesKind=title|closing shows official cover/end LAYOUTS (sample photos stripped). If the chosen title has a ph-pic well, slidesImagePicker=true with slidesTemplate lists template photos plus provide-own (upload) and none. The modern template has no example photos: yes/no for a top-right logo. slidesPalettePicker=true with slidesTemplate shows colorways when the template has palettes (classic, modern). Do NOT hand-copy markup. After calling it, end your turn.", func() (tool.Tool, error) {
+			return functiontool.New(functiontool.Config{Name: "ask_user", Description: "Ask the user ONE structured question inline in chat and WAIT for their reply. kind='yesno' shows Yes/No; kind='select' shows a pick-one list. Intake: audience, length, who picks the template. If they want to choose, slidesTemplatePicker=true (kind='select', no options) shows a live cover thumbnail per template. After a template is known, slidesTemplate+slidesKind=title|closing shows official cover/end LAYOUTS (sample photos stripped). If the chosen title has a ph-pic well, slidesImagePicker=true with slidesTemplate lists template photos plus provide-own (upload) and none. The modern template has no example photos: yes/no for a top-right logo. slidesPalettePicker=true with slidesTemplate shows colorways when the template has palettes (classic, modern). Do NOT hand-copy markup. After calling it, end your turn."}, func(ctx tool.Context, args AskUserArgs) (AskUserResult, error) {
 				return askUser(ctx, args)
 			})
 		}},

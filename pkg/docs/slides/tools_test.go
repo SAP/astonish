@@ -198,8 +198,11 @@ func TestCreateDeckCatalogPayloadIsBounded(t *testing.T) {
 	if !catalogHasKind(created.Catalog, "recipe-cover") {
 		t.Fatalf("create_deck catalog missing recipe-cover: %#v", created.Catalog)
 	}
-	if created.Deck.Theme[themeKeyTemplateName] != "midnight" {
+	if created.Deck.Theme[themeKeyTemplateName] != "classic" {
 		t.Fatalf("template-name not stamped: %#v", created.Deck.Theme)
+	}
+	if created.Deck.Theme[themeKeyPalette] != "midnight" {
+		t.Fatalf("midnight alias should stamp palette: %#v", created.Deck.Theme)
 	}
 }
 
@@ -792,7 +795,7 @@ func TestListTemplatesToolReturnsBuiltinsAndScoped(t *testing.T) {
 	for _, tmpl := range res.Templates {
 		names[tmpl.Name] = true
 	}
-	for _, want := range []string{"light-corporate", "midnight", "aurora", "modern", "acme"} {
+	for _, want := range []string{"classic", "modern", "acme"} {
 		if !names[want] {
 			t.Fatalf("list_templates missing %q; got %#v", want, names)
 		}
@@ -864,7 +867,7 @@ func TestSaveTemplateThenListSurfacesScopedTemplate(t *testing.T) {
 	for _, tmpl := range res.Templates {
 		seen[tmpl.Name] = true
 	}
-	for _, want := range []string{"light-corporate", "midnight", "aurora", "modern"} {
+	for _, want := range []string{"classic", "modern"} {
 		if !seen[want] {
 			t.Fatalf("built-in %q missing after import; got %#v", want, seen)
 		}
@@ -1933,6 +1936,38 @@ func TestCreateDeckProductPaletteOverlaysTokens(t *testing.T) {
 	}
 }
 
+func TestCreateDeckClassicPaletteOverlaysTokens(t *testing.T) {
+	backend := newMultiDeckStore()
+	ctx := toolContext(t, backend)
+	created, err := createDeck(ctx, CreateDeckArgs{Slug: "deck", Title: "Deck", Template: "classic", Palette: "aurora"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Deck.Theme["surface"] != "#0F172A" || created.Deck.Theme["accent"] != "#0EA5E9" {
+		t.Fatalf("aurora palette tokens = %#v", created.Deck.Theme)
+	}
+	if created.Deck.Theme[themeKeyTemplateName] != "classic" || created.Deck.Theme[themeKeyPalette] != "aurora" {
+		t.Fatalf("classic/aurora stamps: %#v", created.Deck.Theme)
+	}
+	if len(created.Palettes) != 3 {
+		t.Fatalf("create_deck should list classic palettes, got %d", len(created.Palettes))
+	}
+	listed, err := listTemplates(ctx, ListTemplatesArgs{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var classic *TemplateSummary
+	for i := range listed.Templates {
+		if listed.Templates[i].Name == "classic" {
+			classic = &listed.Templates[i]
+			break
+		}
+	}
+	if classic == nil || classic.Label != "Classic" || len(classic.Palettes) != 3 {
+		t.Fatalf("list_slide_templates classic: %#v", classic)
+	}
+}
+
 func TestCreateDeckUnknownPalette(t *testing.T) {
 	backend := newMultiDeckStore()
 	ctx := toolContext(t, backend)
@@ -2068,14 +2103,54 @@ func TestAskUserSlidesPalettePicker(t *testing.T) {
 func TestAskUserSlidesPalettePickerRequiresPalettes(t *testing.T) {
 	backend := newMultiDeckStore()
 	ctx := toolContext(t, backend)
+	if err := (Service{Store: backend}).SaveTemplate(ctx, themes.Template{
+		Name:       "brand",
+		Tokens:     map[string]string{"surface": "#FFFFFF", "ink": "#111111", "accent": "#C8102E"},
+		Archetypes: []themes.Archetype{{Kind: "title", Markup: `<ast-slide id="t"></ast-slide>`}},
+	}); err != nil {
+		t.Fatal(err)
+	}
 	_, err := askUser(ctx, AskUserArgs{
 		Kind:                "select",
 		Prompt:              "Which color?",
-		SlidesTemplate:      "midnight",
+		SlidesTemplate:      "brand",
 		SlidesPalettePicker: true,
 	})
 	if err == nil || !strings.Contains(err.Error(), "no color palettes") {
 		t.Fatalf("expected no-palettes error, got %v", err)
+	}
+}
+
+func TestAskUserClassicPalettePicker(t *testing.T) {
+	backend := newMultiDeckStore()
+	ctx := toolContext(t, backend)
+	res, err := askUser(ctx, AskUserArgs{
+		Kind:                "select",
+		Prompt:              "Which color?",
+		SlidesTemplate:      "classic",
+		SlidesPalettePicker: true,
+	})
+	if err != nil {
+		t.Fatalf("askUser classic palette: %v", err)
+	}
+	visual := optionsWithoutDefault(res.Options)
+	if len(visual) != 3 {
+		t.Fatalf("classic palettes = %d, want 3: %#v", len(visual), optionLabels(res.Options))
+	}
+	ids := map[string]bool{}
+	for _, o := range visual {
+		ids[o.ID] = true
+		if o.Thumbnail == nil || o.Thumbnail.Kind != "slides-archetype" {
+			t.Fatalf("palette %q thumbnail: %#v", o.ID, o.Thumbnail)
+		}
+		if o.Thumbnail.Template != "classic" {
+			t.Fatalf("palette %q template = %q", o.ID, o.Thumbnail.Template)
+		}
+	}
+	for _, want := range []string{"light", "midnight", "aurora"} {
+		if !ids[want] {
+			t.Fatalf("missing classic palette %q: %#v", want, ids)
+		}
 	}
 }
 

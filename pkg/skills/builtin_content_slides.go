@@ -35,7 +35,7 @@ A request to use existing knowledge, skip the web, or not look anything up is a 
    - **Cover image** — two cases. Skip when the official cover has no ` + "`ph-pic-*`" + ` well **and** the template is not ` + "`modern`" + `.
      - **Imported title with a photo well and template example photos:** ` + "`slidesImagePicker: true`" + ` + ` + "`slidesTemplate`" + `, omit options. The picker lists template photos **plus** "I'll provide my own image" (` + "`upload`" + `) **and** "Use the default" (no photo). Pass the chosen id as ` + "`titleImage`" + `. If they pick ` + "`upload`" + `: if they already attached a file this turn, ` + "`create_deck`" + ` with ` + "`titleImage: \"upload\"`" + ` (no url). If they have not attached yet, ask them to attach (or paste a public image URL) and **end the turn** — then ` + "`titleImage: \"upload\"`" + ` or the URL. Default / no photo → ` + "`titleImage: \"none\"`" + `. The server does **not** keep sample photos unless they picked one.
      - **Modern / ` + "`modern`" + `:** no template photos (do **not** call ` + "`slidesImagePicker`" + `). ` + "`kind: \"yesno\"`" + `: "This cover can show a logo in the top-right. Want to add one?" If **no**: ` + "`titleImage: \"none\"`" + `. If **yes** and they already attached a file this turn: ` + "`titleImage: \"upload\"`" + ` (do not ask again). If **yes** and they have not attached yet: ask them to attach or paste a URL in **one sentence**, then **end the turn immediately** — do not call ` + "`create_deck`" + ` or ` + "`fill_slides`" + `, and do not "proceed without a logo" after a tool error. Next turn: ` + "`titleImage: \"upload\"`" + ` or the URL. Never pass ` + "`none`" + ` after they said yes.
-   - **Color palette** — only if ` + "`palettes`" + ` is non-empty (Modern / ` + "`modern`" + `). ` + "`slidesPalettePicker: true`" + ` + ` + "`slidesTemplate`" + `, omit options. Do **not** invent palettes for imported brand templates (GCO's blue vs pink covers are title layouts, not palettes).
+   - **Color palette** — only if ` + "`palettes`" + ` is non-empty (Classic / ` + "`classic`" + `, Modern / ` + "`modern`" + `). ` + "`slidesPalettePicker: true`" + ` + ` + "`slidesTemplate`" + `, omit options. Do **not** invent palettes for imported brand templates (GCO's blue vs pink covers are title layouts, not palettes).
    - **Closing variant** — only if **2+** ` + "`closing`" + ` / ` + "`closing-N`" + `. ` + "`slidesKind: \"closing\"`" + `.
    If there is exactly one title or closing, use it — no question. **VIOLATION — never skip the title-variant question when 2+ title* exist, and never skip the cover-image question when the chosen cover has a ph-pic well or the template is Modern.** Still no chrome-picker stall for section/agenda unless the user asked.
 
@@ -45,8 +45,8 @@ Do **not** call ` + "`create_deck`" + ` until title / cover-image / palette / cl
 
 - **recipe-*** entries are the default **body** layouts. Named slots (eyebrow, headline, body_1, item_1_title, …) — not ph-1.
 - **title** / **title-N** and **closing** / **closing-N** are official brand bookends when present in the catalog. Slide 0 **must** be the **chosen** kind (the ` + "`ask_user`" + ` option id, e.g. ` + "`title`" + ` or ` + "`title-12`" + `), not a different variant and not ` + "`recipe-cover`" + `. Fill **those** catalog fillSlots (often ` + "`ph-*`" + `). ` + "`headline`" + ` maps to the title slot and ` + "`dek`" + ` to the subtitle/body slot when the cover does not use recipe ids. Cover photos are **opt-in**: only the photo they picked (` + "`titleImage`" + ` / the matching ` + "`ph-pic-*`" + ` fill). Do **not** keep the template's sample people or bikes. Empty ` + "`ph-pic-*`" + ` wells stay empty. This engine does not generate images.
-- Built-in ` + "`modern`" + ` / ` + "`midnight`" + ` / ` + "`aurora`" + ` / ` + "`light-corporate`" + ` have **no** branded title/closing in the catalog — use ` + "`recipe-cover`" + ` / ` + "`recipe-closer`" + `.
-- The template owns a **skin**: ` + "`light-corporate`" + ` / imported pptx use the corporate language (logo, legal, accent rule). The built-in ` + "`modern`" + ` template uses the product language (mono rails, one accent, panels, terminals, optional top-right logo) and ships colorways. Same jobs, different furniture.
+- Built-in ` + "`classic`" + ` / ` + "`modern`" + ` have **no** branded title/closing in the catalog — use ` + "`recipe-cover`" + ` / ` + "`recipe-closer`" + `. Former names ` + "`aurora`" + ` / ` + "`midnight`" + ` / ` + "`light-corporate`" + ` are aliases of ` + "`classic`" + ` (colorways Light / Midnight / Aurora).
+- The template owns a **skin**: ` + "`classic`" + ` / imported pptx use the corporate language (logo, legal, accent rule). The built-in ` + "`modern`" + ` template uses the product language (mono rails, one accent, panels, terminals, optional top-right logo). Both bundled templates ship colorways. Same jobs, different furniture.
 - section / agenda / pattern-* stay fetchable via ` + "`get_archetype`" + ` but are **not** in the default catalog. Do not stall on them unless the user asked.
 
 ### 3. Author with ` + "`fill_slides`" + ` — the whole deck in ONE call
@@ -111,7 +111,7 @@ HARD RULE: never enumerate templates or variants as a numbered/bulleted list or 
 - Template: ` + "`slidesTemplatePicker: true`" + `, omit options. Then **end the turn**.
 - Cover/end variants: ` + "`slidesTemplate`" + ` + ` + "`slidesKind`" + ` (` + "`title`" + ` or ` + "`closing`" + `). Title tiles are layouts, not sample photos.
 - Cover image (imported, has example photos): ` + "`slidesImagePicker: true`" + ` + ` + "`slidesTemplate`" + ` — pick from template, provide own (` + "`upload`" + `), or none. Modern logo: yes/no, then attach or ` + "`none`" + `.
-- Modern colorways: ` + "`slidesPalettePicker: true`" + ` + ` + "`slidesTemplate`" + `.
+- Colorways (Classic / Modern): ` + "`slidesPalettePicker: true`" + ` + ` + "`slidesTemplate`" + `.
 - After every ` + "`ask_user`" + ` call, end the turn — do not create_deck or fill_slides until they answer.
 
 ---
@@ -133,7 +133,7 @@ A pptx import supplies the style guide (colors, fonts, logo, legal), official ti
 - [ ] First tool after skill_lookup is ask_user unless that question's answer is already explicit
 - [ ] Research-only constraints (use what you know / don't search) did not skip intake
 - [ ] Template: named, "you pick" with one-line why, or slidesTemplatePicker — never auto-selected from inferred tone
-- [ ] Title variant asked only when 2+ title* (before create_deck); cover image asked when that title has a ph-pic well (select vs provide) or Modern logo yes/no; palette asked only when palettes exist (Modern); closing asked only when 2+ closing*
+- [ ] Title variant asked only when 2+ title* (before create_deck); cover image asked when that title has a ph-pic well (select vs provide) or Modern logo yes/no; palette asked only when palettes exist (Classic, Modern); closing asked only when 2+ closing*
 - [ ] Did not ask to generate images; cover image is slidesImagePicker (template / upload / none) or Modern logo attach / none
 - [ ] create_deck with template (+ title, description, palette / titleKind / titleImage / closingKind as chosen — titleKind is the ask_user option id). slug is a hint; persist slug is session-unique
 - [ ] Slide 0 is the chosen official title kind when listed (not a different variant); last is official closing when listed, else recipe-closer; body is recipe-*; cover image / Modern logo only if they picked or attached one

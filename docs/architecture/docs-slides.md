@@ -79,7 +79,7 @@ Importing a corporate `.pptx` produces a high-fidelity ASD template: theme token
 
 ### Studio Templates management surface
 
-A deep-linkable Studio area at `/slides/templates` lists both **built-in** and **scoped** (user-imported) templates. Each card is the **template name** plus a **cover thumbnail** (same pick and render path as the chat `slidesTemplatePicker`), with a **scope badge** (Built-in / Personal / Team). It does not list every layout as chips or a 3-dot palette swatch. The surface supports **delete**, **duplicate**, and **recolor** for scoped templates, while built-ins are **read-only** (duplicate only) — deleting or recoloring a built-in returns `403`.
+A deep-linkable Studio area at `/slides/templates` lists both **built-in** and **scoped** (user-imported) templates. Built-ins are **Classic** (corporate skin, Light / Midnight / Aurora colorways) and **Modern** (product skin, several colorways). Each card is the **template name** plus a **cover thumbnail** (same pick and render path as the chat `slidesTemplatePicker`), with a **scope badge** (Built-in / Personal / Team). Colorways are chosen in chat (`slidesPalettePicker`), not as extra library rows. The surface supports **delete**, **duplicate**, and **recolor** for scoped templates, while built-ins are **read-only** (duplicate only) — deleting or recoloring a built-in returns `403`.
 
 Note that the templates **list** endpoint (`GET /api/docs/slides/templates`) returns a lightweight DTO that intentionally omits the assets map. It includes a `cover` object (`kind`, plus `thumbnailRef` or live `markup`) so the library card can render without downloading every layout.
 
@@ -105,7 +105,7 @@ This is the default authoring path for every templated deck (built-in or importe
 
 The imported template is still required. It supplies identity (palette, type, and a logo only if the file actually contains one). Recipes never invent a logo or decorative disk to stand in for a missing mark. It does not supply the page grid the story is poured into.
 
-A template also owns a **skin** (`themes.Template.Skin`): `corporate` (the original recipe look — logo, legal, accent rule, light or token-tinted cards) or `product` (near-black canvas, monospace rails, one accent, hairlines, terminals). Built-in `modern` uses the product skin; `light-corporate`, `midnight`, `aurora`, and imported `.pptx` templates use corporate. Same recipe jobs, different furniture. Product content is **type + numbers + hairlines**, not a gray roundRect around every block — filled panels are only furniture (terminal, emphasized card, callout rail). The radial accent wash is **bookend atmosphere only**: cover top-right (`cx=80 cy=8`), closer bottom-left (`cx=18 cy=88`). Body slides are a solid `surface` fill — the wash is not a theme-wide background. The product closer is **cover-like** (split title + thesis, optional CTA). Skins do not let the model pick free x/y. Modern ships **palettes** (named `surface`/`ink`/`accent`/`muted` overlays on the same skin) — one template, many colorways, not extra rows in the Templates library. Imported brand templates typically have no palettes; GCO’s blue vs pink covers are title-layout variants, not palettes. Bookend washes are a real ASD gradient (`<script type="application/json" id="bg-gradient">`), not a solid `#0B0D0F` and not a fake logo circle. HTML/PDF paint that SVG with **slide-scoped** gradient ids (every recipe slide uses `id="bg"`, so a shared `url(#gradbg)` would make print/PDF reuse the cover wash). PPTX has no native pptxgenjs gradient; the exporter **rasterizes** each wash to PNG (pptxgenjs SVG writes a fake `.png` preview and PowerPoint then shows the first slide’s glare on every page). Images with `fit="contain"` keep aspect in PPTX (the HTML runtime already used `object-fit`).
+A template also owns a **skin** (`themes.Template.Skin`): `corporate` (the original recipe look — logo, legal, accent rule, light or token-tinted cards) or `product` (near-black canvas, monospace rails, one accent, hairlines, terminals). Built-in `classic` uses the corporate skin; `modern` uses the product skin; imported `.pptx` templates use corporate. Same recipe jobs, different furniture. Product content is **type + numbers + hairlines**, not a gray roundRect around every block — filled panels are only furniture (terminal, emphasized card, callout rail). The radial accent wash is **bookend atmosphere only**: cover top-right (`cx=80 cy=8`), closer bottom-left (`cx=18 cy=88`). Body slides are a solid `surface` fill — the wash is not a theme-wide background. The product closer is **cover-like** (split title + thesis, optional CTA). Skins do not let the model pick free x/y. Classic and Modern ship **palettes** (named `surface`/`ink`/`accent`/`muted` overlays on the same skin) — one template, many colorways, not extra rows in the Templates library. Classic’s colorways are Light, Midnight, and Aurora (the former standalone built-ins; those names still resolve as aliases). Imported brand templates typically have no palettes; GCO’s blue vs pink covers are title-layout variants, not palettes. Bookend washes are a real ASD gradient (`<script type="application/json" id="bg-gradient">`), not a solid `#0B0D0F` and not a fake logo circle. HTML/PDF paint that SVG with **slide-scoped** gradient ids (every recipe slide uses `id="bg"`, so a shared `url(#gradbg)` would make print/PDF reuse the cover wash). PPTX has no native pptxgenjs gradient; the exporter **rasterizes** each wash to PNG (pptxgenjs SVG writes a fake `.png` preview and PowerPoint then shows the first slide’s glare on every page). Images with `fit="contain"` keep aspect in PPTX (the HTML runtime already used `object-fit`).
 
 Code: `pkg/docs/slides/recipe.go` (catalog, palette, chrome, named slots) and `pkg/docs/slides/recipe_layouts.go` (ten layout geometries). Tests in `recipe_test.go`. The slides skill (`pkg/skills/builtin_content_slides.go`) is the agent contract.
 
@@ -1123,7 +1123,7 @@ webfonts lists `{family, variant, assetKey}` there; present/export then:
    `data:font/` asset. No declaration → no extra faces.
 
 Built-in `modern` declares Manrope 400–800 and JetBrains Mono 400/600.
-`aurora` / `midnight` / `light-corporate` declare nothing and load nothing extra.
+`classic` (and the aurora / midnight / light-corporate aliases) declare nothing and load nothing extra.
 A future template that needs another family adds it to `embedded-fonts` (and a
 bundled file if we ship it); the loader does not change. Studio `index.html`
 Google Fonts are app chrome (Fraunces/Geist/Inter), not slides.
@@ -1573,7 +1573,7 @@ live-rendering) its `ast-slide` markup:
   evicting and re-loading context) and **removes per-asset live rendering** from the
   picker path.
 - **Built-ins fall back to live render.** Built-in templates
-  (`light-corporate`/`midnight`/`aurora`) have no baked thumbnail; their cards fall
+  (`classic`/`modern`) have no baked thumbnail; their cards fall
   back to a live `ast-deck` render of the archetype.
 
 Invariant: as with every slides tool result, thumbnail payloads carry only asset
@@ -1674,7 +1674,7 @@ template is known:
   own** (`upload`, chat attachment or public URL as `titleImage`) and none.
   At most one photo; a second image later is `add_deck_image`. Modern has no
   template photos: yes/no for an optional top-right logo, then `upload` or `none`;
-- palette (`slidesPalettePicker`) when the template has palettes (Modern);
+- palette (`slidesPalettePicker`) when the template has palettes (Classic, Modern);
 - closing variant when `count(closing*) > 1`.
 
 `create_deck` then seeds theme (including the chosen palette tokens and optional

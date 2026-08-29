@@ -298,6 +298,8 @@ func DuplicateSlidesTemplateHandler(w http.ResponseWriter, r *http.Request) {
 		Tokens:      cloneStringMap(src.Tokens),
 		Assets:      cloneStringMap(src.Assets),
 		Archetypes:  append([]themes.Archetype(nil), src.Archetypes...),
+		Skin:        src.Skin,
+		Palettes:    append([]themes.Palette(nil), src.Palettes...),
 		Scope:       "",
 	}
 	if err := svc.SaveTemplate(r.Context(), dup); err != nil {

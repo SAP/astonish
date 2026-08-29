@@ -50,15 +50,15 @@ func TestListSlidesTemplatesReturnsBuiltins(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
-	if len(resp.Templates) < 3 {
-		t.Fatalf("expected >=3 built-in templates, got %d", len(resp.Templates))
+	if len(resp.Templates) < 2 {
+		t.Fatalf("expected >=2 built-in templates, got %d", len(resp.Templates))
 	}
 	names := map[string]bool{}
 	for _, tmpl := range resp.Templates {
 		names[tmpl.Name] = true
 	}
-	if !names["midnight"] || !names["light-corporate"] {
-		t.Fatalf("expected built-ins midnight and light-corporate, got %v", names)
+	if !names["classic"] || !names["modern"] {
+		t.Fatalf("expected built-ins classic and modern, got %v", names)
 	}
 }
 
@@ -78,8 +78,8 @@ func TestListSlidesTemplatesReturnsBuiltinsWithoutService(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
-	if len(resp.Templates) < 3 {
-		t.Fatalf("expected >=3 built-in templates without service, got %d", len(resp.Templates))
+	if len(resp.Templates) < 2 {
+		t.Fatalf("expected >=2 built-in templates without service, got %d", len(resp.Templates))
 	}
 }
 
@@ -358,7 +358,7 @@ func TestListSlidesTemplatesOmitsAssetsAndFlagsScope(t *testing.T) {
 				t.Fatalf("corp template scope wrong: %+v", tmpl)
 			}
 		}
-		if tmpl.Name == "midnight" {
+		if tmpl.Name == "classic" {
 			builtin = true
 			if tmpl.Scope != "builtin" {
 				t.Fatalf("built-in scope wrong: %+v", tmpl)
@@ -366,7 +366,7 @@ func TestListSlidesTemplatesOmitsAssetsAndFlagsScope(t *testing.T) {
 		}
 	}
 	if !corp || !builtin {
-		t.Fatalf("expected both corp (scoped) and midnight (builtin); got %+v", resp.Templates)
+		t.Fatalf("expected both corp (scoped) and classic (builtin); got %+v", resp.Templates)
 	}
 }
 
@@ -411,10 +411,10 @@ func TestListSlidesTemplatesIncludesCover(t *testing.T) {
 	var sawBuiltin, sawBaked bool
 	for _, tmpl := range resp.Templates {
 		switch tmpl.Name {
-		case "midnight":
+		case "classic":
 			sawBuiltin = true
 			if tmpl.Cover == nil || tmpl.Cover.Kind != "title" {
-				t.Fatalf("midnight cover = %+v, want kind=title", tmpl.Cover)
+				t.Fatalf("classic cover = %+v, want kind=title", tmpl.Cover)
 			}
 			if tmpl.Cover.ThumbnailRef != "" {
 				t.Fatalf("built-in cover must not ship a thumbnailRef, got %q", tmpl.Cover.ThumbnailRef)
@@ -433,7 +433,7 @@ func TestListSlidesTemplatesIncludesCover(t *testing.T) {
 		}
 	}
 	if !sawBuiltin || !sawBaked {
-		t.Fatalf("expected midnight + brand covers; got %+v", resp.Templates)
+		t.Fatalf("expected classic + brand covers; got %+v", resp.Templates)
 	}
 }
 

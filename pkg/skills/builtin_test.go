@@ -38,6 +38,7 @@ func TestBuiltinSkills_IncludesSlides(t *testing.T) {
 		"slidesPalettePicker",
 		"You pick what fits",
 		"Modern",
+		"classic",
 		"Inferring a tone",
 		"list_slide_templates",
 		"complete thought",

@@ -1071,12 +1071,60 @@ func (c *SessionCleanupConfig) EffectiveMaxAgeDays() int {
 }
 
 type ChatConfig struct {
-	SystemPrompt string `yaml:"system_prompt,omitempty" json:"system_prompt,omitempty"`
-	MaxToolCalls int    `yaml:"max_tool_calls,omitempty" json:"max_tool_calls,omitempty"`
-	MaxTools     int    `yaml:"max_tools,omitempty" json:"max_tools,omitempty"`
-	AutoApprove  bool   `yaml:"auto_approve,omitempty" json:"auto_approve,omitempty"`
-	WorkspaceDir string `yaml:"workspace_dir,omitempty" json:"workspace_dir,omitempty"`
-	FlowSaveDir  string `yaml:"flow_save_dir,omitempty" json:"flow_save_dir,omitempty"`
+	SystemPrompt         string                 `yaml:"system_prompt,omitempty" json:"system_prompt,omitempty"`
+	MaxToolCalls         int                    `yaml:"max_tool_calls,omitempty" json:"max_tool_calls,omitempty"`
+	MaxTools             int                    `yaml:"max_tools,omitempty" json:"max_tools,omitempty"`
+	AutoApprove          bool                   `yaml:"auto_approve,omitempty" json:"auto_approve,omitempty"`
+	WorkspaceDir         string                 `yaml:"workspace_dir,omitempty" json:"workspace_dir,omitempty"`
+	FlowSaveDir          string                 `yaml:"flow_save_dir,omitempty" json:"flow_save_dir,omitempty"`
+	CacheStableAgentPath CacheStableAgentConfig `yaml:"cache_stable_agent_path,omitempty" json:"cache_stable_agent_path,omitempty"`
+}
+
+// CacheStableAgentConfig selects the fixed-tool, frozen-context agent path.
+// More specific session, model, and provider entries override Enabled.
+type CacheStableAgentConfig struct {
+	Enabled   *bool           `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Providers map[string]bool `yaml:"providers,omitempty" json:"providers,omitempty"`
+	Models    map[string]bool `yaml:"models,omitempty" json:"models,omitempty"`
+	Sessions  map[string]bool `yaml:"sessions,omitempty" json:"sessions,omitempty"`
+}
+
+// CacheStableAgentPathEnabled resolves session > model > provider > global.
+// The initial automatic rollout is limited to local Qwen models served through
+// OpenAI-compatible, Ollama, or LM Studio providers.
+func (c *AppConfig) CacheStableAgentPathEnabled(providerName, modelName, sessionID string) bool {
+	if c == nil {
+		return defaultCacheStableAgentPath("", modelName)
+	}
+	selection := c.Chat.CacheStableAgentPath
+	if enabled, ok := selection.Sessions[sessionID]; sessionID != "" && ok {
+		return enabled
+	}
+	if enabled, ok := selection.Models[modelName]; modelName != "" && ok {
+		return enabled
+	}
+	if enabled, ok := selection.Providers[providerName]; providerName != "" && ok {
+		return enabled
+	}
+	if selection.Enabled != nil {
+		return *selection.Enabled
+	}
+	providerConfig := c.Providers[providerName]
+	providerType := GetProviderType(providerName, providerConfig)
+	if providerType == "openai_compat" && !isLocalProviderEndpoint(providerConfig["base_url"]) {
+		return false
+	}
+	return defaultCacheStableAgentPath(providerType, modelName)
+}
+
+func defaultCacheStableAgentPath(providerType, modelName string) bool {
+	localProvider := providerType == "openai_compat" || providerType == "ollama" || providerType == "lm_studio"
+	return localProvider && strings.Contains(strings.ToLower(modelName), "qwen")
+}
+
+func isLocalProviderEndpoint(rawURL string) bool {
+	rawURL = strings.ToLower(strings.TrimSpace(rawURL))
+	return strings.Contains(rawURL, "localhost") || strings.Contains(rawURL, "127.0.0.1") || strings.Contains(rawURL, "[::1]") || strings.HasPrefix(rawURL, "unix:")
 }
 
 type GeneralConfig struct {

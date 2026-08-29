@@ -1640,10 +1640,15 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		}
 	}
 
-	// Add the fixed progressive bridge. Search is catalog-only; deferred tool
-	// execution remains behind describe_tools and execute_tool declarations.
+	// Register both progressive paths. The per-session selector keeps the fixed
+	// bridge model-visible only on the cache-stable path.
+	var chatAgentRef *agent.ChatAgent
 	if toolIndex != nil {
-		searchToolsTool, stErr := tools.NewSearchToolsTool(toolIndex)
+		searchToolsTool, stErr := tools.NewSearchToolsTool(toolIndex, func(names []string) {
+			if chatAgentRef != nil {
+				chatAgentRef.RegisterSearchToolsResults(names)
+			}
+		})
 		if stErr == nil {
 			mainThreadTools = append(mainThreadTools, searchToolsTool)
 		} else if cfg.DebugMode {
@@ -1678,6 +1683,15 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		llm, mainThreadTools, mainThreadToolsets, sessionService,
 		promptBuilder, cfg.DebugMode, cfg.AutoApprove,
 	)
+	chatAgentRef = chatAgent
+	chatAgent.CacheStableAgentPath = func(sessionID string) bool {
+		providerName, modelName := cfg.ProviderName, cfg.ModelName
+		if cfg.CodeMode && cfg.AppConfig != nil {
+			providerName = cfg.AppConfig.General.DefaultProvider
+			modelName = cfg.AppConfig.General.DefaultModel
+		}
+		return cfg.AppConfig.CacheStableAgentPathEnabled(providerName, modelName, sessionID)
+	}
 
 	// Code-mode authorization: gate not-whitelisted tools and out-of-project
 	// filesystem access behind per-tool / per-folder user authorization. Active

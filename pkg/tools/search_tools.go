@@ -43,16 +43,24 @@ func isListAllQuery(query string) bool {
 	return false
 }
 
-// SearchTools performs catalog-only semantic search across the tool index.
-func SearchTools(toolIndex *agent.ToolIndex) func(ctx tool.Context, args SearchToolsArgs) (SearchToolsResult, error) {
+// SearchTools performs semantic search across the tool index.
+func SearchTools(toolIndex *agent.ToolIndex, onResults ...func([]string)) func(ctx tool.Context, args SearchToolsArgs) (SearchToolsResult, error) {
 	return func(ctx tool.Context, args SearchToolsArgs) (SearchToolsResult, error) {
 		if args.Query == "" {
 			return SearchToolsResult{}, fmt.Errorf("query is required — describe what you want to do, or use '*' to list all tools")
 		}
 
 		// Handle "list all" mode
+		legacyInjection := len(onResults) > 0 && onResults[0] != nil
 		if isListAllQuery(args.Query) {
-			result := listAllTools(ctx, toolIndex)
+			result := listAllTools(ctx, toolIndex, legacyInjection)
+			if len(onResults) > 0 && onResults[0] != nil && len(result.Matches) > 0 {
+				names := make([]string, len(result.Matches))
+				for i, match := range result.Matches {
+					names[i] = match.ToolName
+				}
+				onResults[0](names)
+			}
 			return result, nil
 		}
 
@@ -107,8 +115,10 @@ func SearchTools(toolIndex *agent.ToolIndex) func(ctx tool.Context, args SearchT
 		}
 
 		results := make([]SearchToolsMatchResult, len(matches))
+		toolNames := make([]string, 0, len(matches))
 		for i, m := range matches {
-			access := toolAccessHint(m)
+			toolNames = append(toolNames, m.ToolName)
+			access := toolAccessHint(m, legacyInjection)
 			results[i] = SearchToolsMatchResult{
 				ToolName:    m.ToolName,
 				GroupName:   m.GroupName,
@@ -119,6 +129,9 @@ func SearchTools(toolIndex *agent.ToolIndex) func(ctx tool.Context, args SearchT
 			}
 		}
 
+		if len(onResults) > 0 && onResults[0] != nil {
+			onResults[0](toolNames)
+		}
 		return SearchToolsResult{
 			Matches: results,
 			Count:   len(results),
@@ -130,7 +143,7 @@ func SearchTools(toolIndex *agent.ToolIndex) func(ctx tool.Context, args SearchT
 // MCP tools from servers the user doesn't have access to are excluded.
 // Also merges per-request MCP groups (team servers not present in the
 // pre-warmed singleton ToolIndex).
-func listAllTools(ctx context.Context, toolIndex *agent.ToolIndex) SearchToolsResult {
+func listAllTools(ctx context.Context, toolIndex *agent.ToolIndex, legacyInjection ...bool) SearchToolsResult {
 	var searchCtx context.Context
 	if ctx != nil {
 		searchCtx = ctx
@@ -177,7 +190,7 @@ func listAllTools(ctx context.Context, toolIndex *agent.ToolIndex) SearchToolsRe
 				Description: m.Description,
 				IsMainTool:  m.IsMainTool,
 				Score:       1.0,
-				Access:      toolAccessHint(m),
+				Access:      toolAccessHint(m, len(legacyInjection) > 0 && legacyInjection[0]),
 			})
 		}
 	}
@@ -201,9 +214,15 @@ func listAllTools(ctx context.Context, toolIndex *agent.ToolIndex) SearchToolsRe
 
 // toolAccessHint tells the LLM how to invoke a matched tool. MCP tools must be
 // called by bare tool_name (send_email), never as mcp:server/tool (app format).
-func toolAccessHint(m agent.ToolMatch) string {
+func toolAccessHint(m agent.ToolMatch, legacyInjection ...bool) string {
 	if m.IsMainTool {
 		return "always available (main thread tool) — call as `" + m.ToolName + "`"
+	}
+	if len(legacyInjection) > 0 && legacyInjection[0] {
+		if strings.HasPrefix(m.GroupName, "mcp:") {
+			return "call directly as `" + m.ToolName + "` on the main thread"
+		}
+		return "available — call directly as `" + m.ToolName + "`"
 	}
 	if strings.HasPrefix(m.GroupName, "mcp:") {
 		return "deferred — inspect with describe_tools, then invoke with execute_tool using bare name `" + m.ToolName + "`"
@@ -211,12 +230,17 @@ func toolAccessHint(m agent.ToolMatch) string {
 	return "deferred — inspect with describe_tools, then invoke with execute_tool using name `" + m.ToolName + "`"
 }
 
-// NewSearchToolsTool creates the catalog-only search_tools tool.
-func NewSearchToolsTool(toolIndex *agent.ToolIndex) (tool.Tool, error) {
+// NewSearchToolsTool creates search_tools. A callback enables the legacy path
+// that injects matched declarations on the next model round.
+func NewSearchToolsTool(toolIndex *agent.ToolIndex, onResults ...func([]string)) (tool.Tool, error) {
+	description := "Search the catalog for available tools by describing what you want to do. " +
+		"This does not add model-visible tools. Inspect matches with describe_tools and invoke them with execute_tool. " +
+		"Use query='*' to list ALL available tools."
+	if len(onResults) > 0 && onResults[0] != nil {
+		description = "Search for available tools by describing what you want to do. Matching tools become available on the next model round. Use query='*' to list ALL available tools."
+	}
 	return functiontool.New(functiontool.Config{
-		Name: "search_tools",
-		Description: "Search the catalog for available tools by describing what you want to do. " +
-			"This does not add model-visible tools. Inspect matches with describe_tools and invoke them with execute_tool. " +
-			"Use query='*' to list ALL available tools.",
-	}, SearchTools(toolIndex))
+		Name:        "search_tools",
+		Description: description,
+	}, SearchTools(toolIndex, onResults...))
 }

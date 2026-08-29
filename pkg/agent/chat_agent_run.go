@@ -93,6 +93,12 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		}
 
 		cleanUserText := CleanUserText(userText)
+		sessionID := ctx.Session().ID()
+		cacheStablePath := false
+		if c.CacheStableAgentPath != nil {
+			cacheStablePath = c.CacheStableAgentPath(sessionID)
+		}
+		cacheStablePath = CacheStableAgentPathFromContext(ctx, sessionID, cacheStablePath)
 
 		// --- Phase A: Dynamic Execution ---
 		trace := NewExecutionTrace(cleanUserText)
@@ -242,6 +248,19 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		}
 		yieldToolTrackingEvent(yield, toolSearchQuery, relevantTools, toolMatches)
 
+		var pathStateEvent *session.Event
+		cacheStablePath, pathStateEvent = stableAgentPath(ctx.Session().State(), cacheStablePath)
+		if pathStateEvent != nil && !yield(pathStateEvent, nil) {
+			return
+		}
+
+		if !cacheStablePath {
+			c.dynamicToolMatches = toolMatches
+			c.searchToolsMu.Lock()
+			c.searchToolsResults = nil
+			c.searchToolsMu.Unlock()
+		}
+
 		// Build per-turn context separately from the session-stable system prompt.
 		promptBuilder := c.SystemPrompt.Clone()
 		if promptBuilder == nil {
@@ -260,10 +279,12 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			ChannelHints:   promptBuilder.ChannelHints,
 			SchedulerHints: promptBuilder.SchedulerHints,
 			SessionContext: promptBuilder.SessionContext,
+			SkillIndex:     promptBuilder.SkillIndex,
 		}
 		promptBuilder.ChannelHints = ""
 		promptBuilder.SchedulerHints = ""
 		promptBuilder.SessionContext = ""
+		promptBuilder.SkillIndex = ""
 		promptBuilder.RelevantKnowledge = ""
 		promptBuilder.RelevantTools = ""
 		var requestTools []tool.Tool
@@ -317,22 +338,31 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			promptBuilder.MCPAccessFilter = nil // personal mode — no filtering
 		}
 
-		instruction, promptStateEvent := stableSystemPrompt(ctx.Session().State(), promptBuilder.Build)
-		if promptStateEvent != nil && !yield(promptStateEvent, nil) {
-			return
-		}
-
-		// ADK persists the runner input before ChatAgent.Run starts. Persist the
-		// model-facing context as a second user-role event so replay reconstructs
-		// the exact bytes without exposing them as user-authored text.
-		if turnContext := buildTurnContextContent(turnOverrides, relevantTools, relevantKnowledge); turnContext != nil {
-			if !yield(newTurnContextEvent(turnContext), nil) {
+		var instruction string
+		if cacheStablePath {
+			var promptStateEvent *session.Event
+			instruction, promptStateEvent = stableSystemPrompt(ctx.Session().State(), promptBuilder.Build)
+			if promptStateEvent != nil && !yield(promptStateEvent, nil) {
 				return
 			}
+
+			// Persist model-facing context so replay reconstructs identical bytes.
+			if turnContext := buildTurnContextContent(turnOverrides, relevantTools, relevantKnowledge); turnContext != nil {
+				if !yield(newTurnContextEvent(turnContext), nil) {
+					return
+				}
+			}
+		} else {
+			promptBuilder.ChannelHints = turnOverrides.ChannelHints
+			promptBuilder.SchedulerHints = turnOverrides.SchedulerHints
+			promptBuilder.SessionContext = turnOverrides.SessionContext
+			promptBuilder.SkillIndex = turnOverrides.SkillIndex
+			promptBuilder.RelevantKnowledge = relevantKnowledge
+			promptBuilder.RelevantTools = relevantTools
+			instruction = promptBuilder.Build()
 		}
 
 		// Capture session identity for use in AfterToolCallback closure.
-		sessionID := ctx.Session().ID()
 		sessionAppName := ctx.Session().AppName()
 		sessionUserID := ctx.Session().UserID()
 
@@ -841,6 +871,13 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 
 		// Truncate oversized tool responses before they reach the model
 		beforeModelCallbacks = append(beforeModelCallbacks, TruncateToolResponsesCallback())
+		if !cacheStablePath {
+			beforeModelCallbacks = append(beforeModelCallbacks, c.DynamicToolInjectionCallback())
+		}
+
+		if !cacheStablePath {
+			beforeModelCallbacks = append(beforeModelCallbacks, removeRequestToolsCallback("describe_tools", executeToolName))
+		}
 
 		// Per-team tool restrictions: remove disabled tools from the LLM request.
 		// This ensures the LLM cannot see or call tools the team admin has disabled.
@@ -870,6 +907,8 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		if c.Compactor != nil {
 			beforeModelCallbacks = append(beforeModelCallbacks, c.Compactor.BeforeModelCallback())
 		}
+		fingerprints := &requestFingerprintTracker{}
+		beforeModelCallbacks = append(beforeModelCallbacks, fingerprints.callback(sessionID, cacheStablePath))
 
 		// Resolve LLM: prefer per-request override from context (set by channel
 		// manager or other per-message provider resolution), fall back to the
@@ -905,6 +944,12 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			AfterToolCallbacks: []llmagent.AfterToolCallback{
 				afterToolCallback,
 			},
+			OnToolErrorCallbacks: func() []llmagent.OnToolErrorCallback {
+				if cacheStablePath {
+					return nil
+				}
+				return []llmagent.OnToolErrorCallback{c.AutoInjectMissingToolCallback()}
+			}(),
 		})
 		if err != nil {
 			yield(nil, fmt.Errorf("failed to create chat llmagent: %w", err))

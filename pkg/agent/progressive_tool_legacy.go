@@ -14,8 +14,20 @@ import (
 	"google.golang.org/genai"
 )
 
+// RegisterSearchToolsResults records tools for the next legacy model round.
+func (c *ChatAgent) RegisterSearchToolsResults(toolNames []string) {
+	c.searchToolsMu.Lock()
+	defer c.searchToolsMu.Unlock()
+	c.searchToolsResults = append(c.searchToolsResults, toolNames...)
+}
+
+// AutoInjectMissingToolCallback enables legacy missing-tool recovery.
+func (c *ChatAgent) AutoInjectMissingToolCallback() llmagent.OnToolErrorCallback {
+	return autoInjectMissingToolCallback(c.ToolIndex, c.RegisterSearchToolsResults, nil)
+}
+
 // autoInjectMissingToolCallback builds the shared OnToolErrorCallback used by
-// Sub-agents use this callback with their child-scoped injection pipeline.
+// sub-agents with their child-scoped injection pipeline.
 // exclude skips tools that must not be injected
 // (e.g. excludedChildTools).
 func autoInjectMissingToolCallback(
@@ -125,6 +137,212 @@ func canAutoInjectTool(ctx context.Context, toolIndex *ToolIndex, toolName strin
 		}
 	}
 	return true
+}
+
+func (c *ChatAgent) DynamicToolInjectionCallback() llmagent.BeforeModelCallback {
+	return func(cbCtx agent.CallbackContext, req *model.LLMRequest) (*model.LLMResponse, error) {
+		if c.ToolIndex == nil {
+			return nil, nil
+		}
+
+		// Collect tool names to inject from both sources.
+		toolsToInject := make(map[string]bool)
+
+		// Source 1: hybrid search matches (set at start of turn)
+		for _, m := range c.dynamicToolMatches {
+			if !m.IsMainTool {
+				toolsToInject[m.ToolName] = true
+			}
+		}
+
+		// Source 2: search_tools explicit discoveries (accumulated intra-turn)
+		c.searchToolsMu.Lock()
+		for _, name := range c.searchToolsResults {
+			toolsToInject[name] = true
+		}
+		c.searchToolsMu.Unlock()
+
+		// Source 3: pinned tool groups from PromptOverrides (wizard sessions).
+		// These ensure critical tools remain available across all turns of a
+		// multi-turn guided conversation regardless of ToolIndex scoring.
+		if po := PromptOverridesFromContext(cbCtx); po != nil && len(po.PinnedToolGroups) > 0 {
+			for _, groupName := range po.PinnedToolGroups {
+				entries := c.ToolIndex.GetToolsByGroup(groupName)
+				for _, entry := range entries {
+					if !entry.IsMainTool {
+						toolsToInject[entry.Name] = true
+					}
+				}
+				// Also check request-scoped groups (e.g., per-request A2A tools)
+				// that are not in the singleton ToolIndex.
+				if len(entries) == 0 {
+					if reqGroups := RequestMCPGroupsFromContext(cbCtx); reqGroups != nil {
+						if g := reqGroups[groupName]; g != nil {
+							for _, t := range g.Tools {
+								if t != nil {
+									toolsToInject[t.Name()] = true
+								}
+							}
+							readCtx := &minimalReadonlyContext{Context: cbCtx}
+							for _, ts := range g.Toolsets {
+								if ts == nil {
+									continue
+								}
+								tools, err := ts.Tools(readCtx)
+								if err != nil {
+									continue
+								}
+								for _, t := range tools {
+									if t != nil {
+										toolsToInject[t.Name()] = true
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
+		if len(toolsToInject) == 0 {
+			return nil, nil
+		}
+
+		// Inject each tool into the request.
+		injected := 0
+		for toolName := range toolsToInject {
+			resolved := resolveIndexedToolName(c.ToolIndex, toolName)
+			if _, exists := req.Tools[resolved]; exists {
+				continue // already registered (static main-thread tool)
+			}
+
+			// First-party tools (slides, email, core, …) win over MCP servers that
+			// reuse the same bare name (email-mcp list_templates vs slides).
+			if fp := c.ToolIndex.FirstPartyToolEntry(resolved); fp != nil {
+				if _, exists := req.Tools[fp.Tool.Name()]; exists {
+					continue
+				}
+				packToolIntoRequest(req, fp.Tool)
+				injected++
+				continue
+			}
+
+			// Prefer request-scoped MCP tools (team catalog) over stale index entries.
+			if t, gName, ok := LookupRequestMCPTool(cbCtx, toolName); ok && t != nil {
+				if serverName, isMCP := mcpServerNameFromGroup(gName); isMCP {
+					if !isMCPServerAccessible(cbCtx, serverName) {
+						continue
+					}
+				}
+				if _, exists := req.Tools[t.Name()]; exists {
+					continue
+				}
+				packToolIntoRequest(req, t)
+				injected++
+				continue
+			}
+
+			entry := c.ToolIndex.GetToolEntry(resolved)
+			if entry == nil || entry.Tool == nil {
+				// If the LLM/search asked for a whole MCP group (mcp:email),
+				// inject every tool in that group (index + request-scoped).
+				if group, bare, isRef := parseMCPToolRef(toolName); isRef && bare == "" {
+					if reqGroups := RequestMCPGroupsFromContext(cbCtx); reqGroups != nil {
+						if g := reqGroups[group]; g != nil {
+							if serverName, isMCP := mcpServerNameFromGroup(group); isMCP {
+								if !isMCPServerAccessible(cbCtx, serverName) {
+									continue
+								}
+							}
+							readCtx := &minimalReadonlyContext{Context: cbCtx}
+							for _, ts := range g.Toolsets {
+								tools, err := ts.Tools(readCtx)
+								if err != nil {
+									continue
+								}
+								for _, gt := range tools {
+									if gt == nil {
+										continue
+									}
+									if _, exists := req.Tools[gt.Name()]; exists {
+										continue
+									}
+									packToolIntoRequest(req, gt)
+									injected++
+								}
+							}
+						}
+					}
+					if c.ToolIndex != nil {
+						for _, ge := range c.ToolIndex.GetToolsByGroup(group) {
+							if ge.Tool == nil {
+								continue
+							}
+							if serverName, isMCP := mcpServerNameFromGroup(ge.GroupName); isMCP {
+								if !isMCPServerAccessible(cbCtx, serverName) {
+									continue
+								}
+							}
+							if _, exists := req.Tools[ge.Name]; exists {
+								continue
+							}
+							packToolIntoRequest(req, ge.Tool)
+							injected++
+						}
+					}
+				}
+				continue
+			}
+
+			// MCP tool access control: in platform mode, only inject tools
+			// from MCP servers the user's team/org has access to.
+			if serverName, isMCP := mcpServerNameFromGroup(entry.GroupName); isMCP {
+				if !isMCPServerAccessible(cbCtx, serverName) {
+					continue
+				}
+			}
+
+			packToolIntoRequest(req, entry.Tool)
+			injected++
+		}
+
+		if c.DebugMode && injected > 0 {
+			slog.Debug("dynamic tool injection", "component", "chat", "injected", injected)
+		}
+
+		return nil, nil
+	}
+}
+
+func removeRequestToolsCallback(names ...string) llmagent.BeforeModelCallback {
+	return func(_ agent.CallbackContext, req *model.LLMRequest) (*model.LLMResponse, error) {
+		if req == nil {
+			return nil, nil
+		}
+		for _, name := range names {
+			delete(req.Tools, name)
+		}
+		if req.Config == nil {
+			return nil, nil
+		}
+		for _, packed := range req.Config.Tools {
+			if packed == nil {
+				continue
+			}
+			kept := packed.FunctionDeclarations[:0]
+			for _, declaration := range packed.FunctionDeclarations {
+				remove := false
+				for _, name := range names {
+					remove = remove || declaration != nil && declaration.Name == name
+				}
+				if !remove {
+					kept = append(kept, declaration)
+				}
+			}
+			packed.FunctionDeclarations = kept
+		}
+		return nil, nil
+	}
 }
 
 // toolWithDeclaration matches ADK's internal FunctionTool interface for tools

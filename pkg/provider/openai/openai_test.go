@@ -13,6 +13,16 @@ import (
 	"google.golang.org/genai"
 )
 
+func TestUsageMetadataMapsCachedPromptTokens(t *testing.T) {
+	usage := usageMetadata(100, 20, 120, &openailib.PromptTokensDetails{CachedTokens: 75})
+	if usage.CachedContentTokenCount != 75 {
+		t.Fatalf("CachedContentTokenCount = %d, want 75", usage.CachedContentTokenCount)
+	}
+	if usage.PromptTokenCount != 100 || usage.CandidatesTokenCount != 20 || usage.TotalTokenCount != 120 {
+		t.Fatalf("unexpected usage metadata: %+v", usage)
+	}
+}
+
 func TestMergeConsecutiveSameRole(t *testing.T) {
 	tests := []struct {
 		name     string

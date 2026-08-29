@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/SAP/astonish/pkg/agent"
+	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/credentials"
 	"github.com/SAP/astonish/pkg/docs/slides"
 	"github.com/SAP/astonish/pkg/sandbox/netpolicy"
@@ -163,6 +164,10 @@ func injectRequestDocsStores(runner *ChatRunner, r *http.Request) *store.Service
 // Must be called before Run().
 func (cr *ChatRunner) InjectLLM(llm model.LLM) {
 	cr.ctx = agent.WithLLM(cr.ctx, llm)
+}
+
+func (cr *ChatRunner) InjectLLMSelection(providerName, modelName string, cfg *config.AppConfig) {
+	cr.ctx = agent.WithLLMSelection(cr.ctx, providerName, modelName, cfg)
 }
 
 // InjectCredentialStore adds a tenant-scoped credential store to the runner's

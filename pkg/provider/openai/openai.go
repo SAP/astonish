@@ -204,11 +204,7 @@ func (p *Provider) GenerateContent(ctx context.Context, req *model.LLMRequest, s
 				// Capture token usage from the final chunk (OpenAI sends usage
 				// on the last chunk when StreamOptions.IncludeUsage is true).
 				if resp.Usage != nil {
-					streamUsage = &genai.GenerateContentResponseUsageMetadata{
-						PromptTokenCount:     int32(resp.Usage.PromptTokens),
-						CandidatesTokenCount: int32(resp.Usage.CompletionTokens),
-						TotalTokenCount:      int32(resp.Usage.TotalTokens),
-					}
+					streamUsage = usageMetadata(resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.TotalTokens, resp.Usage.PromptTokensDetails)
 				}
 
 				// Handle tool call deltas
@@ -847,12 +843,20 @@ func (p *Provider) toLLMResponse(resp openai.ChatCompletionResponse) *model.LLMR
 			Role:  "model",
 			Parts: parts,
 		},
-		UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
-			PromptTokenCount:     int32(resp.Usage.PromptTokens),
-			CandidatesTokenCount: int32(resp.Usage.CompletionTokens),
-			TotalTokenCount:      int32(resp.Usage.TotalTokens),
-		},
+		UsageMetadata: usageMetadata(resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.TotalTokens, resp.Usage.PromptTokensDetails),
 	}
+}
+
+func usageMetadata(prompt, completion, total int, details *openai.PromptTokensDetails) *genai.GenerateContentResponseUsageMetadata {
+	usage := &genai.GenerateContentResponseUsageMetadata{
+		PromptTokenCount:     int32(prompt),
+		CandidatesTokenCount: int32(completion),
+		TotalTokenCount:      int32(total),
+	}
+	if details != nil {
+		usage.CachedContentTokenCount = int32(details.CachedTokens)
+	}
+	return usage
 }
 
 func (p *Provider) toLLMResponseStream(resp openai.ChatCompletionStreamResponse) *model.LLMResponse {

@@ -78,17 +78,16 @@ ChatAgent.Run():
     |
     v
   4. Deduplicate results
-  5. Format as "Relevant Knowledge" section
-  6. Set SystemPromptBuilder.RelevantKnowledge
+  5. Format as "Relevant Knowledge" context
+  6. In the cache-stable path, persist the exact model-facing context as a
+     marked user-role event; in the legacy path, add it to the rebuilt prompt
     |
     v
   7. Emit a content-less `_knowledge_injection` session diagnostic event
      containing query metadata plus result id/scope/session provenance
-    |
-    v
-  8. System prompt appends knowledge at the end (Tier 3)
-     (static prefix remains cacheable for KV-cache)
 ```
+
+The marked per-turn context is replayed to the model byte-for-byte but filtered from Studio, terminal, channel, scheduler, memory/reflection, distillation, and compaction user-text views. This keeps retrieved knowledge out of the frozen system prompt without misrepresenting it as user-authored content.
 
 The `_knowledge_injection` event is persisted but not sent to the LLM or rendered as a chat message. It records the cleaned semantic query, BM25 context length, injection type, result count, estimated injected tokens, and each result's path, score, category, scope, id, creator, creation time, and source session when available. This is the first diagnostic surface to inspect when memory appears unstable: it shows whether retrieval was disabled, which tier answered, and which exact memory chunk was injected.
 

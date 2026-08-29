@@ -15,7 +15,7 @@ Both agents are built on top of **Google's Agent Development Kit (ADK)**, specif
 
 ADK provides a solid foundation (session management, tool dispatch, streaming) but Astonish needs capabilities that ADK doesn't offer:
 
-- **Dynamic tool injection**: Tools are discovered per-turn via semantic search, not statically registered.
+- **Cache-stable execution**: Selected sessions freeze the system prompt and model-visible tool declarations while discovering deferred capabilities through a fixed bridge.
 - **Credential security**: Before/after tool callbacks must substitute and restore credential placeholders without leaking secrets into session history.
 - **Context compaction**: When the context window fills up, the system must compress history without losing critical information.
 - **Auto-knowledge retrieval**: Every turn triggers a vector search to inject relevant guidance into the system prompt.
@@ -28,9 +28,11 @@ ADK's callback system (BeforeToolCallbacks, AfterToolCallbacks, BeforeModelCallb
 
 The system prompt uses a deliberate tiered architecture to balance token efficiency with comprehensive guidance:
 
-- **Tier 1 (Static Core)**: Identity, behavior rules, tool usage guidelines, environment info, capability listing. ~800 tokens. Stable across turns so LLM providers can cache the KV prefix.
-- **Tier 2 (Indexed Guidance)**: Detailed how-to documentation for each capability (browser, credentials, scheduling, etc.). Stored as `memory/guidance/*.md` files indexed in the vector store. Zero tokens in the prompt until retrieved. This keeps the base prompt small for models with limited context windows.
-- **Tier 3 (Per-Turn Dynamic)**: Auto-retrieved knowledge, relevant tool descriptions, channel hints, scheduler context, session-specific instructions. Appended at the end of the system prompt so the static prefix remains cacheable.
+- **Tier 1 (Session Snapshot)**: Identity, behavior rules, environment information, capability summaries, and other static inputs. In the cache-stable path, the exact built prompt is persisted in session state and reused after resume.
+- **Tier 2 (Indexed Guidance)**: Detailed how-to documentation for each capability (browser, credentials, scheduling, etc.). Stored as `memory/guidance/*.md` files indexed in the vector store and retrieved only when relevant.
+- **Tier 3 (Per-Turn Context)**: Retrieved knowledge, catalog matches, channel/scheduler hints, session instructions, skill indexes, and mode guidance. In the cache-stable path this is a marked user-role event persisted byte-for-byte and hidden from transcript, memory, reflection, and distillation views.
+
+The legacy path continues rebuilding the prompt and dynamically injecting declarations. `chat.cache_stable_agent_path` selects the behavior with precedence `session > model > provider > global`; the default rollout enables it only for Qwen models on local OpenAI-compatible, Ollama, and LM Studio providers. The selected value is persisted per session.
 
 ### Why Sequential Tool Dispatch
 
@@ -68,8 +70,9 @@ User Message
    - Top 8 matches formatted as catalog hints; declarations remain fixed
     |
     v
-4. System Prompt Build: SystemPromptBuilder.Build()
-   - Static core (~800 tokens) + per-turn dynamic content
+4. Prompt and Turn Context
+   - Cache-stable path: reuse the persisted system prompt and persist dynamic context as a hidden user-role event
+   - Legacy path: rebuild the system prompt with per-turn fields
     |
     v
 5. LLM Agent Creation: llmagent.New() with callbacks
@@ -153,9 +156,11 @@ The critical invariant: the session event (which shares the same args map by ref
 
 ### Fixed Progressive Tool Bridge
 
-ChatAgent exposes a stable set of declarations for the whole turn. `search_tools` is catalog-only and never mutates the request. The model can call `describe_tools(names)` to retrieve deferred schemas, then `execute_tool(name, arguments)` to invoke one. Resolution prefers first-party ToolIndex entries over request-scoped MCP tools, and enforces disabled-tool and MCP access checks.
+When the cache-stable path is enabled, ChatAgent exposes a fixed declaration set for the session. `search_tools` is catalog-only and never mutates the request. The model calls `describe_tools(names)` to retrieve deferred schemas, then `execute_tool(name, arguments)` to invoke one. Resolution prefers first-party ToolIndex entries, rejects ambiguous bare request-scoped names, accepts qualified `group/tool` references, and enforces disabled-tool and effective team → org → platform MCP access rules.
 
-ADK dispatches `execute_tool` through the normal callback chain. ChatAgent unwraps the selected tool identity and nested arguments inside every BeforeTool callback and the AfterTool callback, preserving mode and authorization gates, credential and pending-secret substitution/restoration, output redaction, execution tracing, image handling, and artifact capture. The bridge body only invokes the already-authorized resolved tool. Legacy unknown-tool hard-error handling remains for old transcript/runtime compatibility, but ChatAgent no longer auto-injects missing declarations. Sub-agents retain their child-scoped discovery implementation.
+ADK dispatches `execute_tool` through the normal callback chain. ChatAgent unwraps the selected tool identity and nested arguments inside every BeforeTool callback and the AfterTool callback, preserving mode and authorization gates, credential and pending-secret substitution/restoration, output redaction, execution tracing, image handling, and artifact capture. Request-scoped MCP and A2A catalogs are merged rather than replacing one another. The legacy path retains dynamic declaration injection and missing-tool recovery for sessions where the rollout flag is disabled; historical direct tool calls remain unchanged.
+
+Before every model call, Astonish records secret-safe hashes of the system instruction and canonical ordered declarations, plus declaration count and whether either hash changed within the turn or session. These diagnostics expose cache instability without logging prompt or schema contents.
 
 ### Sub-Agent System
 

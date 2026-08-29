@@ -589,6 +589,19 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			})
 		}
 
+		// Runtime authorization remains authoritative even when cache-stable
+		// sessions retain a declaration that was disabled after session start.
+		beforeToolCallbacks = append(beforeToolCallbacks, func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+			t, _ = c.effectiveToolCall(ctx, t, args)
+			if isToolDisabled(ctx, t.Name()) {
+				return map[string]any{
+					"status": "blocked_disabled_tool",
+					"error":  fmt.Sprintf("tool %q is disabled", t.Name()),
+				}, nil
+			}
+			return nil, nil
+		})
+
 		// Hard-block validate_drill / save_drill / blueprint_to_tutorial_drill for
 		// mode:tutorial until the creator Approves a present_tutorial_blueprint card.
 		beforeToolCallbacks = append(beforeToolCallbacks, func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
@@ -880,9 +893,9 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			beforeModelCallbacks = append(beforeModelCallbacks, removeRequestToolsCallback("describe_tools", executeToolName))
 		}
 
-		// Per-team tool restrictions: remove disabled tools from the LLM request.
-		// This ensures the LLM cannot see or call tools the team admin has disabled.
-		if disabledTools := store.DisabledToolsFromContext(ctx); len(disabledTools) > 0 {
+		// The legacy path hides disabled declarations dynamically. Cache-stable
+		// sessions keep declarations fixed and enforce current policy at execution.
+		if disabledTools := store.DisabledToolsFromContext(ctx); !cacheStablePath && len(disabledTools) > 0 {
 			disabledSet := make(map[string]bool, len(disabledTools))
 			for _, name := range disabledTools {
 				disabledSet[name] = true

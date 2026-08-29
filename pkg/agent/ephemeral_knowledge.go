@@ -110,11 +110,40 @@ func newSystemPromptStateEvent(prompt string) *session.Event {
 	}
 }
 
-// IsTurnContextEvent reports whether an event is hidden model-facing turn context.
-func IsTurnContextEvent(event *session.Event) bool {
-	if event == nil || event.Actions.StateDelta == nil {
+// IsTurnContextContent reports whether content is hidden model-facing turn context.
+func IsTurnContextContent(content *genai.Content) bool {
+	if content == nil {
 		return false
 	}
-	marked, _ := event.Actions.StateDelta[turnContextStateKey].(bool)
-	return marked
+	for _, part := range content.Parts {
+		if part != nil && strings.HasPrefix(part.Text, "[Astonish Per-Turn Context — not user-authored]\n") {
+			return true
+		}
+	}
+	return false
+}
+
+// MarkTurnContextEvent preserves hidden context semantics on a rewritten event.
+func MarkTurnContextEvent(event *session.Event) {
+	if event == nil {
+		return
+	}
+	if event.Actions.StateDelta == nil {
+		event.Actions.StateDelta = make(map[string]any)
+	}
+	event.Actions.StateDelta[turnContextStateKey] = true
+}
+
+// IsTurnContextEvent reports whether an event is hidden model-facing turn context.
+func IsTurnContextEvent(event *session.Event) bool {
+	if event == nil {
+		return false
+	}
+	if event.Actions.StateDelta != nil {
+		marked, _ := event.Actions.StateDelta[turnContextStateKey].(bool)
+		if marked {
+			return true
+		}
+	}
+	return IsTurnContextContent(event.LLMResponse.Content)
 }

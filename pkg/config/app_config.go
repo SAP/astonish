@@ -4,6 +4,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"math/big"
+	"net"
+	"net/url"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -1123,8 +1125,20 @@ func defaultCacheStableAgentPath(providerType, modelName string) bool {
 }
 
 func isLocalProviderEndpoint(rawURL string) bool {
-	rawURL = strings.ToLower(strings.TrimSpace(rawURL))
-	return strings.Contains(rawURL, "localhost") || strings.Contains(rawURL, "127.0.0.1") || strings.Contains(rawURL, "[::1]") || strings.HasPrefix(rawURL, "unix:")
+	rawURL = strings.TrimSpace(rawURL)
+	if strings.HasPrefix(strings.ToLower(rawURL), "unix:") {
+		return true
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Hostname() == "" {
+		return false
+	}
+	host := strings.TrimSuffix(strings.ToLower(parsed.Hostname()), ".")
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 type GeneralConfig struct {

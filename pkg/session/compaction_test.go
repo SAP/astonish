@@ -27,6 +27,36 @@ func makeFuncCallContent(role, funcName string, args map[string]any) *genai.Cont
 	}
 }
 
+func TestCompactContentsPreservesHiddenTurnContext(t *testing.T) {
+	c := NewCompactor(100)
+	c.PreserveRecent = 1
+	contextText := turnContextPrefix + "\n## Knowledge\n\nsecret model context"
+	contents := []*genai.Content{
+		makeContent("user", "original request"),
+		makeContent("user", contextText),
+		makeContent("model", "working"),
+	}
+
+	result, err := c.CompactContents(context.Background(), contents)
+	if err != nil {
+		t.Fatalf("CompactContents: %v", err)
+	}
+	var contextCount int
+	for _, content := range result {
+		if isTurnContextContent(content) {
+			contextCount++
+		}
+		for _, part := range content.Parts {
+			if part != nil && !isTurnContextContent(content) && strings.Contains(part.Text, "secret model context") {
+				t.Fatal("hidden context leaked into visible summary")
+			}
+		}
+	}
+	if contextCount != 1 {
+		t.Fatalf("hidden context count = %d, want 1", contextCount)
+	}
+}
+
 func TestEstimateTokens_TextOnly(t *testing.T) {
 	// 400 chars / 3 = ~133 tokens
 	text := strings.Repeat("a", 400)

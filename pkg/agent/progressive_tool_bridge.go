@@ -54,6 +54,25 @@ func (r deferredToolResolver) resolve(ctx agent.ReadonlyContext, name string) (t
 			return entry.Tool, entry.GroupName, nil
 		}
 	}
+	if !qualified {
+		if overrides := PromptOverridesFromContext(ctx); overrides != nil {
+			var matched tool.Tool
+			for _, candidate := range overrides.AdditionalTools {
+				if candidate != nil && candidate.Name() == resolved {
+					if matched != nil {
+						return nil, "", fmt.Errorf("tool %q is ambiguous across request tools", name)
+					}
+					matched = candidate
+				}
+			}
+			if matched != nil {
+				if isToolDisabled(ctx, name, matched.Name()) {
+					return nil, "", fmt.Errorf("tool %q is disabled", matched.Name())
+				}
+				return matched, "request", nil
+			}
+		}
+	}
 	if t, group, lookupErr := LookupRequestMCPTool(ctx, name); lookupErr != nil {
 		return nil, "", lookupErr
 	} else if t != nil {

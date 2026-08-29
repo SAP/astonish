@@ -1644,9 +1644,9 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 	// bridge model-visible only on the cache-stable path.
 	var chatAgentRef *agent.ChatAgent
 	if toolIndex != nil {
-		searchToolsTool, stErr := tools.NewSearchToolsTool(toolIndex, func(names []string) {
+		searchToolsTool, stErr := tools.NewSearchToolsTool(toolIndex, func(ctx context.Context, names []string) {
 			if chatAgentRef != nil {
-				chatAgentRef.RegisterSearchToolsResults(names)
+				chatAgentRef.RegisterSearchToolsResults(ctx, names)
 			}
 		})
 		if stErr == nil {

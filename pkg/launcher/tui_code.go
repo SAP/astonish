@@ -1203,12 +1203,16 @@ func contentsToSessionEvents(contents []*genai.Content) []*session.Event {
 		if c.Role == "user" {
 			author = "user"
 		}
-		out = append(out, &session.Event{
+		event := &session.Event{
 			ID:          fmt.Sprintf("compact-%d", i),
 			Author:      author,
 			Timestamp:   time.Now(),
 			LLMResponse: adkmodel.LLMResponse{Content: c},
-		})
+		}
+		if agent.IsTurnContextContent(c) {
+			agent.MarkTurnContextEvent(event)
+		}
+		out = append(out, event)
 	}
 	return out
 }

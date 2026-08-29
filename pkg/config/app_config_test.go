@@ -180,6 +180,18 @@ func TestCacheStableAgentPathEnabled(t *testing.T) {
 	if cfg.CacheStableAgentPathEnabled("cloud", "Qwen2.5-Coder", "") {
 		t.Fatal("cloud Qwen should default off")
 	}
+	for _, endpoint := range []string{"https://localhost.example.com/v1", "https://example.com/v1?next=localhost", "not-a-url-localhost"} {
+		cfg.Providers["local"]["base_url"] = endpoint
+		if cfg.CacheStableAgentPathEnabled("local", "Qwen2.5-Coder", "") {
+			t.Fatalf("non-loopback endpoint %q should default off", endpoint)
+		}
+	}
+	for _, endpoint := range []string{"http://127.0.0.1:8080/v1", "http://[::1]:8080/v1", "http://localhost.:8080/v1", "unix:///tmp/llm.sock"} {
+		cfg.Providers["local"]["base_url"] = endpoint
+		if !cfg.CacheStableAgentPathEnabled("local", "Qwen2.5-Coder", "") {
+			t.Fatalf("local endpoint %q should default on", endpoint)
+		}
+	}
 	cfg.Chat.CacheStableAgentPath.Enabled = &on
 	if !cfg.CacheStableAgentPathEnabled("cloud", "gpt", "") {
 		t.Fatal("explicit global true should enable path")

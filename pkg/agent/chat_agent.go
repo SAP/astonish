@@ -73,11 +73,7 @@ type ChatAgent struct {
 	// Tool discovery
 	ToolIndex            *ToolIndex                  // Semantic catalog for deferred tool discovery (nil = disabled)
 	CacheStableAgentPath func(sessionID string) bool // Selects fixed bridge and frozen context per session.
-
-	// Legacy dynamic tool injection state.
-	dynamicToolMatches []ToolMatch
-	searchToolsResults []string
-	searchToolsMu      sync.Mutex
+	legacyToolStates     sync.Map                    // map[sessionID]*legacyToolDiscoveryState
 
 	// Self-management callbacks
 	SelfMDRefresher func() // Called after config changes to regenerate SELF.md

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 
 	"github.com/SAP/astonish/pkg/store"
 	"google.golang.org/adk/agent"
@@ -14,16 +15,36 @@ import (
 	"google.golang.org/genai"
 )
 
+type legacyToolDiscoveryState struct {
+	dynamicMatches     []ToolMatch
+	searchToolsResults []string
+	mu                 sync.Mutex
+}
+
+func (c *ChatAgent) legacyToolState(invocationID string) *legacyToolDiscoveryState {
+	state, _ := c.legacyToolStates.LoadOrStore(invocationID, &legacyToolDiscoveryState{})
+	return state.(*legacyToolDiscoveryState)
+}
+
 // RegisterSearchToolsResults records tools for the next legacy model round.
-func (c *ChatAgent) RegisterSearchToolsResults(toolNames []string) {
-	c.searchToolsMu.Lock()
-	defer c.searchToolsMu.Unlock()
-	c.searchToolsResults = append(c.searchToolsResults, toolNames...)
+func (c *ChatAgent) RegisterSearchToolsResults(ctx context.Context, toolNames []string) {
+	invocationContext, ok := ctx.(interface{ InvocationID() string })
+	if !ok {
+		return
+	}
+	state := c.legacyToolState(invocationContext.InvocationID())
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	state.searchToolsResults = append(state.searchToolsResults, toolNames...)
 }
 
 // AutoInjectMissingToolCallback enables legacy missing-tool recovery.
-func (c *ChatAgent) AutoInjectMissingToolCallback() llmagent.OnToolErrorCallback {
-	return autoInjectMissingToolCallback(c.ToolIndex, c.RegisterSearchToolsResults, nil)
+func (c *ChatAgent) AutoInjectMissingToolCallback(state *legacyToolDiscoveryState) llmagent.OnToolErrorCallback {
+	return autoInjectMissingToolCallback(c.ToolIndex, func(names []string) {
+		state.mu.Lock()
+		defer state.mu.Unlock()
+		state.searchToolsResults = append(state.searchToolsResults, names...)
+	}, nil)
 }
 
 // autoInjectMissingToolCallback builds the shared OnToolErrorCallback used by
@@ -139,7 +160,7 @@ func canAutoInjectTool(ctx context.Context, toolIndex *ToolIndex, toolName strin
 	return true
 }
 
-func (c *ChatAgent) DynamicToolInjectionCallback() llmagent.BeforeModelCallback {
+func (c *ChatAgent) DynamicToolInjectionCallback(state *legacyToolDiscoveryState) llmagent.BeforeModelCallback {
 	return func(cbCtx agent.CallbackContext, req *model.LLMRequest) (*model.LLMResponse, error) {
 		if c.ToolIndex == nil {
 			return nil, nil
@@ -148,19 +169,18 @@ func (c *ChatAgent) DynamicToolInjectionCallback() llmagent.BeforeModelCallback 
 		// Collect tool names to inject from both sources.
 		toolsToInject := make(map[string]bool)
 
-		// Source 1: hybrid search matches (set at start of turn)
-		for _, m := range c.dynamicToolMatches {
+		// Sources 1 and 2 are scoped to this invocation so concurrent sessions
+		// cannot exchange automatic or explicit search results.
+		state.mu.Lock()
+		for _, m := range state.dynamicMatches {
 			if !m.IsMainTool {
 				toolsToInject[m.ToolName] = true
 			}
 		}
-
-		// Source 2: search_tools explicit discoveries (accumulated intra-turn)
-		c.searchToolsMu.Lock()
-		for _, name := range c.searchToolsResults {
+		for _, name := range state.searchToolsResults {
 			toolsToInject[name] = true
 		}
-		c.searchToolsMu.Unlock()
+		state.mu.Unlock()
 
 		// Source 3: pinned tool groups from PromptOverrides (wizard sessions).
 		// These ensure critical tools remain available across all turns of a

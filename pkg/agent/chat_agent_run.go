@@ -254,12 +254,13 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			return
 		}
 
-		if !cacheStablePath {
-			c.dynamicToolMatches = toolMatches
-			c.searchToolsMu.Lock()
-			c.searchToolsResults = nil
-			c.searchToolsMu.Unlock()
-		}
+		legacyInvocationID := ctx.InvocationID()
+		legacyDiscovery := c.legacyToolState(legacyInvocationID)
+		defer c.legacyToolStates.Delete(legacyInvocationID)
+		legacyDiscovery.mu.Lock()
+		legacyDiscovery.dynamicMatches = append(legacyDiscovery.dynamicMatches[:0], toolMatches...)
+		legacyDiscovery.searchToolsResults = nil
+		legacyDiscovery.mu.Unlock()
 
 		// Build per-turn context separately from the session-stable system prompt.
 		promptBuilder := c.SystemPrompt.Clone()
@@ -872,7 +873,7 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		// Truncate oversized tool responses before they reach the model
 		beforeModelCallbacks = append(beforeModelCallbacks, TruncateToolResponsesCallback())
 		if !cacheStablePath {
-			beforeModelCallbacks = append(beforeModelCallbacks, c.DynamicToolInjectionCallback())
+			beforeModelCallbacks = append(beforeModelCallbacks, c.DynamicToolInjectionCallback(legacyDiscovery))
 		}
 
 		if !cacheStablePath {
@@ -930,7 +931,9 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		// Same pattern as node_llm.go for flow agents.
 		instr := instruction
 		mainThreadTools := append([]tool.Tool(nil), c.Tools...)
-		mainThreadTools = append(mainThreadTools, requestTools...)
+		if !cacheStablePath {
+			mainThreadTools = append(mainThreadTools, requestTools...)
+		}
 		llmAgent, err := llmagent.New(llmagent.Config{
 			Name:  "chat",
 			Model: effectiveLLM,
@@ -948,7 +951,7 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 				if cacheStablePath {
 					return nil
 				}
-				return []llmagent.OnToolErrorCallback{c.AutoInjectMissingToolCallback()}
+				return []llmagent.OnToolErrorCallback{c.AutoInjectMissingToolCallback(legacyDiscovery)}
 			}(),
 		})
 		if err != nil {

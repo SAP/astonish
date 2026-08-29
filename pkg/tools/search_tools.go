@@ -44,7 +44,7 @@ func isListAllQuery(query string) bool {
 }
 
 // SearchTools performs semantic search across the tool index.
-func SearchTools(toolIndex *agent.ToolIndex, onResults ...func([]string)) func(ctx tool.Context, args SearchToolsArgs) (SearchToolsResult, error) {
+func SearchTools(toolIndex *agent.ToolIndex, onResults ...func(context.Context, []string)) func(ctx tool.Context, args SearchToolsArgs) (SearchToolsResult, error) {
 	return func(ctx tool.Context, args SearchToolsArgs) (SearchToolsResult, error) {
 		if args.Query == "" {
 			return SearchToolsResult{}, fmt.Errorf("query is required — describe what you want to do, or use '*' to list all tools")
@@ -59,7 +59,7 @@ func SearchTools(toolIndex *agent.ToolIndex, onResults ...func([]string)) func(c
 				for i, match := range result.Matches {
 					names[i] = match.ToolName
 				}
-				onResults[0](names)
+				onResults[0](ctx, names)
 			}
 			return result, nil
 		}
@@ -130,7 +130,7 @@ func SearchTools(toolIndex *agent.ToolIndex, onResults ...func([]string)) func(c
 		}
 
 		if len(onResults) > 0 && onResults[0] != nil {
-			onResults[0](toolNames)
+			onResults[0](ctx, toolNames)
 		}
 		return SearchToolsResult{
 			Matches: results,
@@ -232,7 +232,7 @@ func toolAccessHint(m agent.ToolMatch, legacyInjection ...bool) string {
 
 // NewSearchToolsTool creates search_tools. A callback enables the legacy path
 // that injects matched declarations on the next model round.
-func NewSearchToolsTool(toolIndex *agent.ToolIndex, onResults ...func([]string)) (tool.Tool, error) {
+func NewSearchToolsTool(toolIndex *agent.ToolIndex, onResults ...func(context.Context, []string)) (tool.Tool, error) {
 	description := "Search the catalog for available tools by describing what you want to do. " +
 		"This does not add model-visible tools. Inspect matches with describe_tools and invoke them with execute_tool. " +
 		"Use query='*' to list ALL available tools."

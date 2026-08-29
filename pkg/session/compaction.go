@@ -281,17 +281,22 @@ func (c *Compactor) CompactContents(ctx context.Context, contents []*genai.Conte
 	oldContents := contents[:splitIdx]
 	recentContents := contents[splitIdx:]
 
+	// Hidden per-turn context must remain model-facing but must never be folded
+	// into visible summaries. Preserve the latest compacted context separately.
+	turnContextAnchor := findLastTurnContext(oldContents)
+	visibleOldContents := excludeTurnContext(oldContents)
+
 	// Extract the last user text instruction from old contents.
 	// This is the "task anchor" — it ensures the model retains the active task
 	// even when all preserved recent messages are tool call/response pairs.
-	taskAnchor := findLastUserTextInstruction(oldContents)
+	taskAnchor := findLastUserTextInstruction(visibleOldContents)
 
-	// Build summary
-	summary, err := c.summarize(ctx, oldContents)
+	// Build summary from user-visible history only.
+	summary, err := c.summarize(ctx, visibleOldContents)
 	if err != nil {
 		slog.Debug("compactor summarization failed, falling back to truncation", "component", "compactor", "error", err)
 		// Fallback: just keep recent messages with a note
-		summary = c.truncationSummary(oldContents)
+		summary = c.truncationSummary(visibleOldContents)
 	}
 
 	// If a per-session plan file exists, inline it so the model recovers the
@@ -302,11 +307,12 @@ func (c *Compactor) CompactContents(ctx context.Context, contents []*genai.Conte
 	}
 
 	// Determine summary role for proper role alternation.
-	// The sequence will be: summary → [taskAnchor?] → recentContents[0]...
-	// We need to ensure no consecutive same-role messages.
+	// The sequence will be: summary → [taskAnchor?] → [turnContextAnchor?] → recent.
 	firstAfterSummary := recentContents
 	if taskAnchor != nil {
 		firstAfterSummary = []*genai.Content{taskAnchor}
+	} else if turnContextAnchor != nil {
+		firstAfterSummary = []*genai.Content{turnContextAnchor}
 	}
 
 	summaryRole := "user"
@@ -321,9 +327,12 @@ func (c *Compactor) CompactContents(ctx context.Context, contents []*genai.Conte
 		Role: summaryRole,
 	}
 
-	// Build compacted result: summary + [task anchor] + recent
+	// Build compacted result: summary + [task anchor] + [hidden context] + recent.
 	resultCap := 1 + len(recentContents)
 	if taskAnchor != nil {
+		resultCap++
+	}
+	if turnContextAnchor != nil {
 		resultCap++
 	}
 	result := make([]*genai.Content, 0, resultCap)
@@ -337,6 +346,9 @@ func (c *Compactor) CompactContents(ctx context.Context, contents []*genai.Conte
 			// Merge task anchor text into summary to avoid role violation
 			summaryContent.Parts[0].Text += "\n\n[Active user instruction]: " + taskAnchor.Parts[0].Text
 		}
+	}
+	if turnContextAnchor != nil {
+		result = append(result, turnContextAnchor)
 	}
 	result = append(result, recentContents...)
 
@@ -390,6 +402,39 @@ func (c *Compactor) planFilePointer() string {
 	)
 }
 
+const turnContextPrefix = "[Astonish Per-Turn Context — not user-authored]\n"
+
+func isTurnContextContent(content *genai.Content) bool {
+	if content == nil {
+		return false
+	}
+	for _, part := range content.Parts {
+		if part != nil && strings.HasPrefix(part.Text, turnContextPrefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func findLastTurnContext(contents []*genai.Content) *genai.Content {
+	for i := len(contents) - 1; i >= 0; i-- {
+		if isTurnContextContent(contents[i]) {
+			return contents[i]
+		}
+	}
+	return nil
+}
+
+func excludeTurnContext(contents []*genai.Content) []*genai.Content {
+	visible := make([]*genai.Content, 0, len(contents))
+	for _, content := range contents {
+		if !isTurnContextContent(content) {
+			visible = append(visible, content)
+		}
+	}
+	return visible
+}
+
 // findLastUserTextInstruction scans backward through contents to find the most
 // recent user message that contains meaningful text (not a FunctionResponse).
 // Returns a Content with the user's instruction, prefixed for clarity.
@@ -409,9 +454,6 @@ func findLastUserTextInstruction(contents []*genai.Content) *genai.Content {
 				break // this is a tool response, skip it
 			}
 			if p.Text != "" {
-				if strings.HasPrefix(p.Text, "[Astonish Per-Turn Context — not user-authored]\n") {
-					continue
-				}
 				// Found a real user text instruction
 				return &genai.Content{
 					Parts: []*genai.Part{{

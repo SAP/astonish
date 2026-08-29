@@ -305,7 +305,11 @@ func (p *Provider) handleStream(body io.Reader, yield func(*model.LLMResponse, e
 }
 
 func (p *Provider) toAnthropicRequest(req *model.LLMRequest, streaming bool) (*Request, error) {
-	req = common.CanonicalizeRequestTools(req)
+	canonicalReq, err := common.CanonicalizeRequestTools(req)
+	if err != nil {
+		return nil, fmt.Errorf("canonicalize tools: %w", err)
+	}
+	req = canonicalReq
 	var messages []Message
 	var system string
 

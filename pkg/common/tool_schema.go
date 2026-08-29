@@ -3,6 +3,8 @@ package common
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -40,19 +42,22 @@ func ExtractToolInputSchema(t interface{ Name() string }) json.RawMessage {
 // CanonicalizeJSON recursively converts a JSON-compatible value to stable
 // maps and slices. Arrays whose JSON Schema semantics are set-like are sorted
 // and deduplicated; other arrays retain their declared order.
-func CanonicalizeJSON(value any) any {
+func CanonicalizeJSON(value any) (any, error) {
+	if isNil(value) {
+		return nil, nil
+	}
 	data, err := json.Marshal(value)
 	if err != nil {
-		return value
+		return nil, fmt.Errorf("marshal JSON value: %w", err)
 	}
 
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
 	var decoded any
 	if err := decoder.Decode(&decoded); err != nil {
-		return value
+		return nil, fmt.Errorf("decode JSON value: %w", err)
 	}
-	return canonicalizeJSONValue(decoded, "")
+	return canonicalizeJSONValue(decoded, ""), nil
 }
 
 func canonicalizeJSONValue(value any, key string) any {
@@ -106,101 +111,170 @@ func sortAndDeduplicateJSON(values []any) []any {
 
 // CanonicalizeToolSchema normalizes a function parameter schema. Missing and
 // empty root schemas become the explicit no-parameter object schema.
-func CanonicalizeToolSchema(schema any) any {
-	if schema == nil {
-		return map[string]any{"properties": map[string]any{}, "type": "object"}
+func CanonicalizeToolSchema(schema any) (any, error) {
+	if isNil(schema) {
+		return map[string]any{"properties": map[string]any{}, "type": "object"}, nil
 	}
-	canonical := CanonicalizeJSON(schema)
+	canonical, err := CanonicalizeJSON(schema)
+	if err != nil {
+		return nil, err
+	}
 	if object, ok := canonical.(map[string]any); ok && len(object) == 0 {
-		return map[string]any{"properties": map[string]any{}, "type": "object"}
+		return map[string]any{"properties": map[string]any{}, "type": "object"}, nil
 	}
-	return canonical
+	return canonical, nil
 }
 
 // CanonicalizeRequestTools returns a shallow request copy with canonical tools.
-func CanonicalizeRequestTools(req *model.LLMRequest) *model.LLMRequest {
-	if req == nil || req.Config == nil || len(req.Config.Tools) == 0 {
-		return req
+func CanonicalizeRequestTools(req *model.LLMRequest) (*model.LLMRequest, error) {
+	if req == nil || req.Config == nil {
+		return req, nil
 	}
 	result := *req
 	config := *req.Config
-	config.Tools = CanonicalizeTools(req.Config.Tools)
+	var err error
+	config.Tools, err = CanonicalizeTools(req.Config.Tools)
+	if err != nil {
+		return nil, err
+	}
+	if config.ToolConfig != nil {
+		toolConfig := *config.ToolConfig
+		if toolConfig.FunctionCallingConfig != nil {
+			functionConfig := *toolConfig.FunctionCallingConfig
+			functionConfig.AllowedFunctionNames = sortedUniqueStrings(functionConfig.AllowedFunctionNames)
+			toolConfig.FunctionCallingConfig = &functionConfig
+		}
+		config.ToolConfig = &toolConfig
+	}
 	result.Config = &config
-	return &result
+	return &result, nil
 }
 
-// CanonicalizeTools returns a copy of tools with function declarations sorted
-// by name and schemas normalized for deterministic provider serialization.
-func CanonicalizeTools(tools []*genai.Tool) []*genai.Tool {
-	result := append([]*genai.Tool(nil), tools...)
-	for toolIndex, source := range tools {
-		if source == nil || source.FunctionDeclarations == nil {
+// CanonicalizeTools returns a copy in which all function declarations occupy
+// one deterministic tool while non-function tool semantics remain intact.
+func CanonicalizeTools(tools []*genai.Tool) ([]*genai.Tool, error) {
+	var declarations []*genai.FunctionDeclaration
+	result := make([]*genai.Tool, 0, len(tools)+1)
+	for _, source := range tools {
+		if source == nil {
 			continue
 		}
 		clone := *source
-		clone.FunctionDeclarations = make([]*genai.FunctionDeclaration, 0, len(source.FunctionDeclarations))
-		for _, declaration := range source.FunctionDeclarations {
-			if declaration == nil {
-				clone.FunctionDeclarations = append(clone.FunctionDeclarations, nil)
-				continue
-			}
-			copy := *declaration
-			if copy.ParametersJsonSchema != nil {
-				copy.ParametersJsonSchema = CanonicalizeToolSchema(copy.ParametersJsonSchema)
-			} else if copy.Parameters != nil {
-				copy.ParametersJsonSchema = CanonicalizeToolSchema(copy.Parameters)
-				copy.Parameters = nil
-			} else {
-				copy.ParametersJsonSchema = CanonicalizeToolSchema(nil)
-			}
-			if copy.ResponseJsonSchema != nil {
-				copy.ResponseJsonSchema = CanonicalizeJSON(copy.ResponseJsonSchema)
-			} else if copy.Response != nil {
-				copy.ResponseJsonSchema = CanonicalizeJSON(copy.Response)
-				copy.Response = nil
-			}
-			clone.FunctionDeclarations = append(clone.FunctionDeclarations, &copy)
+		clone.FunctionDeclarations = nil
+		if hasNonFunctionSemantics(&clone) {
+			result = append(result, &clone)
 		}
-		sort.SliceStable(clone.FunctionDeclarations, func(i, j int) bool {
-			return compareDeclarations(clone.FunctionDeclarations[i], clone.FunctionDeclarations[j]) < 0
-		})
-		result[toolIndex] = &clone
+		for _, declaration := range source.FunctionDeclarations {
+			canonical, err := canonicalizeDeclaration(declaration)
+			if err != nil {
+				return nil, err
+			}
+			if canonical != nil {
+				declarations = append(declarations, canonical)
+			}
+		}
 	}
 
-	sort.SliceStable(result, func(i, j int) bool {
-		left, right := firstDeclaration(result[i]), firstDeclaration(result[j])
-		if left == nil || right == nil {
-			return left != nil
-		}
-		return compareDeclarations(left, right) < 0
+	sort.Slice(declarations, func(i, j int) bool {
+		return compareDeclarations(declarations[i], declarations[j]) < 0
 	})
-	return result
+	if len(declarations) > 0 {
+		result = append(result, &genai.Tool{FunctionDeclarations: declarations})
+	}
+
+	type encodedTool struct {
+		tool *genai.Tool
+		json []byte
+	}
+	encoded := make([]encodedTool, len(result))
+	for i, tool := range result {
+		data, err := json.Marshal(tool)
+		if err != nil {
+			return nil, fmt.Errorf("marshal tool %d: %w", i, err)
+		}
+		encoded[i] = encodedTool{tool: tool, json: data}
+	}
+	sort.Slice(encoded, func(i, j int) bool { return bytes.Compare(encoded[i].json, encoded[j].json) < 0 })
+	for i := range encoded {
+		result[i] = encoded[i].tool
+	}
+	return result, nil
 }
 
-func firstDeclaration(tool *genai.Tool) *genai.FunctionDeclaration {
-	if tool == nil || len(tool.FunctionDeclarations) == 0 {
+func canonicalizeDeclaration(declaration *genai.FunctionDeclaration) (*genai.FunctionDeclaration, error) {
+	if declaration == nil {
+		return nil, nil
+	}
+	result := *declaration
+	parameterSchema := result.ParametersJsonSchema
+	if isNil(parameterSchema) {
+		parameterSchema = result.Parameters
+	}
+	var err error
+	result.ParametersJsonSchema, err = CanonicalizeToolSchema(parameterSchema)
+	if err != nil {
+		return nil, fmt.Errorf("canonicalize parameters for function %q: %w", result.Name, err)
+	}
+	result.Parameters = nil
+
+	responseSchema := result.ResponseJsonSchema
+	if isNil(responseSchema) {
+		responseSchema = result.Response
+	}
+	result.ResponseJsonSchema, err = CanonicalizeJSON(responseSchema)
+	if err != nil {
+		return nil, fmt.Errorf("canonicalize response for function %q: %w", result.Name, err)
+	}
+	result.Response = nil
+	return &result, nil
+}
+
+func hasNonFunctionSemantics(tool *genai.Tool) bool {
+	copy := *tool
+	copy.FunctionDeclarations = nil
+	return !reflect.ValueOf(copy).IsZero()
+}
+
+func isNil(value any) bool {
+	if value == nil {
+		return true
+	}
+	v := reflect.ValueOf(value)
+	switch v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return v.IsNil()
+	default:
+		return false
+	}
+}
+
+func sortedUniqueStrings(values []string) []string {
+	if values == nil {
 		return nil
 	}
-	return tool.FunctionDeclarations[0]
+	result := append([]string(nil), values...)
+	sort.Strings(result)
+	write := 0
+	for _, value := range result {
+		if write == 0 || value != result[write-1] {
+			result[write] = value
+			write++
+		}
+	}
+	return result[:write]
 }
 
 func compareDeclarations(left, right *genai.FunctionDeclaration) int {
-	if left == nil {
-		if right == nil {
-			return 0
-		}
-		return 1
-	}
-	if right == nil {
-		return -1
-	}
 	if left.Name < right.Name {
 		return -1
 	}
 	if left.Name > right.Name {
 		return 1
 	}
-	leftJSON, _ := json.Marshal(left)
-	rightJSON, _ := json.Marshal(right)
+	leftJSON, leftErr := json.Marshal(left)
+	rightJSON, rightErr := json.Marshal(right)
+	if leftErr != nil || rightErr != nil {
+		return 0
+	}
 	return bytes.Compare(leftJSON, rightJSON)
 }

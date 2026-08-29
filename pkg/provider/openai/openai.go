@@ -57,8 +57,13 @@ func NewProviderWithMaxTokens(client *openai.Client, modelName string, supportsJ
 
 // GenerateContent implements model.LLM.
 func (p *Provider) GenerateContent(ctx context.Context, req *model.LLMRequest, streaming bool) iter.Seq2[*model.LLMResponse, error] {
-	req = common.CanonicalizeRequestTools(req)
+	canonicalReq, canonicalErr := common.CanonicalizeRequestTools(req)
 	return func(yield func(*model.LLMResponse, error) bool) {
+		if canonicalErr != nil {
+			yield(nil, fmt.Errorf("canonicalize tools: %w", canonicalErr))
+			return
+		}
+		req = canonicalReq
 		messages := p.toOpenAIMessages(req)
 
 		// Extract tools if present

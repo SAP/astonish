@@ -70,7 +70,11 @@ type Response struct {
 // ConvertRequest converts an ADK LLMRequest to a Bedrock Request.
 // maxTokens can be 0 to use the default (8192)
 func ConvertRequest(req *model.LLMRequest, maxTokens int, skipTemperature bool) (*Request, error) {
-	req = common.CanonicalizeRequestTools(req)
+	canonicalReq, err := common.CanonicalizeRequestTools(req)
+	if err != nil {
+		return nil, fmt.Errorf("canonicalize tools: %w", err)
+	}
+	req = canonicalReq
 	if maxTokens <= 0 {
 		maxTokens = 8192 // Default fallback
 	}

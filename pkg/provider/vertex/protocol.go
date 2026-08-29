@@ -91,7 +91,11 @@ type Candidate struct {
 // ConvertRequest converts an ADK LLMRequest to a Vertex AI Request.
 // maxOutputTokens can be 0 to use the default (8192)
 func ConvertRequest(req *model.LLMRequest, maxOutputTokens int) (*Request, error) {
-	req = common.CanonicalizeRequestTools(req)
+	canonicalReq, err := common.CanonicalizeRequestTools(req)
+	if err != nil {
+		return nil, fmt.Errorf("canonicalize tools: %w", err)
+	}
+	req = canonicalReq
 	if maxOutputTokens <= 0 {
 		maxOutputTokens = 8192 // Default fallback
 	}

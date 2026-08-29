@@ -228,7 +228,11 @@ func (c *ChatAgent) DynamicToolInjectionCallback() llmagent.BeforeModelCallback 
 			}
 
 			// Prefer request-scoped MCP tools (team catalog) over stale index entries.
-			if t, gName, ok := LookupRequestMCPTool(cbCtx, toolName); ok && t != nil {
+			t, gName, lookupErr := LookupRequestMCPTool(cbCtx, toolName)
+			if lookupErr != nil {
+				continue
+			}
+			if t != nil {
 				if serverName, isMCP := mcpServerNameFromGroup(gName); isMCP {
 					if !isMCPServerAccessible(cbCtx, serverName) {
 						continue

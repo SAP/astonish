@@ -178,6 +178,31 @@ type ProviderAdminBackend interface {
 	RemoveProvider(ctx context.Context, name string) error
 }
 
+// XAIOAuthPending is the in-flight RFC 8628 device-code authorization state
+// returned by XAIOAuthBackend.StartXAIOAuth. The TUI displays UserCode and
+// VerificationURL, then calls WaitXAIOAuth to block until the user approves.
+type XAIOAuthPending struct {
+	ClientID        string
+	DeviceCode      string
+	UserCode        string
+	VerificationURL string
+	Interval        int
+}
+
+// XAIOAuthBackend is an optional capability for backends that can run the xAI
+// device-code OAuth flow in two phases so the TUI can show the user code
+// before polling. localAgentBackend implements it; platform backends do not.
+type XAIOAuthBackend interface {
+	// StartXAIOAuth requests a device code, opens the verification URL in the
+	// user's browser, and returns the pending authorization details. It must
+	// not write the user code to stderr — the TUI displays it in the overlay.
+	StartXAIOAuth(ctx context.Context, clientID string) (*XAIOAuthPending, error)
+	// WaitXAIOAuth polls until the user approves (or the code expires) and
+	// returns token fields (access_token, refresh_token, expires_at, client_id)
+	// suitable for passing to AddProvider.
+	WaitXAIOAuth(ctx context.Context, pending XAIOAuthPending) (map[string]string, error)
+}
+
 // WebSearchProvider describes one available web search provider in the /websearch picker.
 type WebSearchProvider struct {
 	ID          string // standard server ID (e.g. "tavily", "brave-search", "perplexity")

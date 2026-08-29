@@ -6,8 +6,10 @@ import {
   fetchSlidesPresentation,
   slidesPresentationURL,
   deckSlideThumbnailUrl,
+  templateMediaUrl,
   listSlidesDecks,
   listSlidesTemplates,
+  patchSlideMoves,
   importSlidesTemplate,
   deleteSlidesTemplate,
   duplicateSlidesTemplate,
@@ -33,6 +35,46 @@ describe('slides API (deck/present/export)', () => {
     expect(res.deck.title).toBe('Risk')
   })
 
+  it('PATCHes slide object moves', async () => {
+    mockedTeamFetch.mockResolvedValue(new Response(JSON.stringify({
+      id: 's1', deckId: 'd', position: 0, content: '<ast-slide id="s0"></ast-slide>', schemaVersion: 1,
+    }), { status: 200 }))
+    const slide = await patchSlideMoves('deck-1', 0, [{ id: 'headline', x: 200, y: 400 }], 'personal')
+    expect(slide.position).toBe(0)
+    const [url, init] = mockedTeamFetch.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('/api/docs/slides/deck-1/slides/0?scope=personal')
+    expect(init.method).toBe('PATCH')
+    expect(JSON.parse(String(init.body))).toEqual({ moves: [{ id: 'headline', x: 200, y: 400 }] })
+  })
+
+  it('PATCHes proportional image resize geometry', async () => {
+    mockedTeamFetch.mockResolvedValue(new Response(JSON.stringify({
+      id: 's1', deckId: 'd', position: 0, content: '<ast-slide id="s0"></ast-slide>', schemaVersion: 1,
+    }), { status: 200 }))
+    await patchSlideMoves('deck-1', 0, {
+      resizes: [{ id: 'photo', x: 100, y: 120, w: 600, h: 300 }],
+    }, 'personal')
+    const [, init] = mockedTeamFetch.mock.calls[0] as [string, RequestInit]
+    expect(JSON.parse(String(init.body))).toEqual({
+      resizes: [{ id: 'photo', x: 100, y: 120, w: 600, h: 300 }],
+    })
+  })
+
+  it('PATCHes slide text and deletes', async () => {
+    mockedTeamFetch.mockResolvedValue(new Response(JSON.stringify({
+      id: 's1', deckId: 'd', position: 0, content: '<ast-slide id="s0"></ast-slide>', schemaVersion: 1,
+    }), { status: 200 }))
+    await patchSlideMoves('deck-1', 0, {
+      texts: [{ id: 'headline', text: 'Hello' }],
+      deletes: ['dek'],
+    }, 'personal')
+    const [, init] = mockedTeamFetch.mock.calls[0] as [string, RequestInit]
+    expect(JSON.parse(String(init.body))).toEqual({
+      texts: [{ id: 'headline', text: 'Hello' }],
+      deletes: ['dek'],
+    })
+  })
+
   it('builds a scoped presentation URL', () => {
     expect(slidesPresentationURL('deck-1', 'personal')).toBe('/api/docs/slides/deck-1/present?scope=personal')
   })
@@ -40,6 +82,14 @@ describe('slides API (deck/present/export)', () => {
   it('builds a scoped, encoded per-slide thumbnail URL', () => {
     expect(deckSlideThumbnailUrl('deck-1', 0, 'personal')).toBe('/api/docs/slides/deck-1/thumbnails/0?scope=personal')
     expect(deckSlideThumbnailUrl('risk/a', 3, 'team')).toBe('/api/docs/slides/risk%2Fa/thumbnails/3?scope=team')
+  })
+
+  it('builds an encoded template media URL', () => {
+    expect(templateMediaUrl('gco', 'sha256-abc')).toBe('/api/docs/slides/templates/gco/media/sha256-abc')
+    expect(templateMediaUrl('acme/brand', 'sha256-de/f')).toBe('/api/docs/slides/templates/acme%2Fbrand/media/sha256-de%2Ff')
+    expect(templateMediaUrl('modern', 'font:JetBrains Mono:400')).toBe(
+      '/api/docs/slides/templates/modern/media/font%3AJetBrains%20Mono%3A400',
+    )
   })
 
   it('exports a deck blob', async () => {
@@ -142,12 +192,14 @@ describe('slides API (templates)', () => {
     expect(headers.get('Content-Type')).toBeNull()
   })
 
-  it('importSlidesTemplate appends scope when provided', async () => {
+  it('importSlidesTemplate appends scope to the URL query when provided', async () => {
     mockedTeamFetch.mockResolvedValue(new Response(JSON.stringify({ template: { name: 'x' } }), { status: 200 }))
     const file = new File(['b'], 'd.pptx')
     await importSlidesTemplate(file, 'team')
-    const [, init] = mockedTeamFetch.mock.calls[0] as [string, RequestInit]
-    expect((init.body as FormData).get('scope')).toBe('team')
+    const [url, init] = mockedTeamFetch.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('/api/docs/slides/import?scope=team')
+    // Scope travels in the query, not the multipart body.
+    expect((init.body as FormData).get('scope')).toBeNull()
   })
 
   it('importSlidesTemplate throws on non-ok response', async () => {

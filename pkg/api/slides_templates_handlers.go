@@ -19,6 +19,7 @@ import (
 	"github.com/SAP/astonish/pkg/docs/slides"
 	"github.com/SAP/astonish/pkg/docs/slides/pptxworker"
 	"github.com/SAP/astonish/pkg/docs/slides/themes"
+	"github.com/SAP/astonish/pkg/store"
 	webassets "github.com/SAP/astonish/web"
 	"github.com/gorilla/mux"
 )
@@ -35,9 +36,11 @@ const maxImportPPTXBytes = 75 << 20
 const pptxMIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 
 // slidesTemplateListItem is the lightweight DTO returned by
-// ListSlidesTemplatesHandler. It intentionally OMITS the Assets map and the
+// ListSlidesTemplatesHandler. It intentionally OMITS the Assets map and per-
 // archetype markup — a Templates UI listing many templates must not ship
-// megabytes of asset bytes. Scope is "builtin" | "personal" | "team".
+// megabytes of asset bytes. Cover carries ONE representative slide (baked PNG
+// ref, or live markup when no thumbnail was baked) so the library card can
+// match the chat template picker. Scope is "builtin" | "personal" | "team".
 type slidesTemplateListItem struct {
 	Name           string                   `json:"name"`
 	Label          string                   `json:"label,omitempty"`
@@ -46,6 +49,18 @@ type slidesTemplateListItem struct {
 	Tokens         map[string]string        `json:"tokens,omitempty"`
 	ArchetypeKinds []string                 `json:"archetypeKinds,omitempty"`
 	Archetypes     []slidesArchetypeVariant `json:"archetypes,omitempty"`
+	Cover          *slidesTemplateCover     `json:"cover,omitempty"`
+}
+
+// slidesTemplateCover is the representative slide shown on a Templates library
+// card (same pick as the chat slidesTemplatePicker: first title* archetype,
+// else the first archetype). ThumbnailRef is a baked PNG asset key served by
+// GetSlidesTemplateThumbnailHandler. Markup is the live-render fallback and is
+// omitted when ThumbnailRef is set so imported catalogs stay small.
+type slidesTemplateCover struct {
+	Kind         string `json:"kind"`
+	ThumbnailRef string `json:"thumbnailRef,omitempty"`
+	Markup       string `json:"markup,omitempty"`
 }
 
 // slidesArchetypeVariant is one fillable slide skeleton: its role Kind plus a
@@ -76,8 +91,9 @@ func archetypeKinds(t themes.Template) []string {
 	return kinds
 }
 
-// archetypeVariants projects a template's archetypes to {kind,label} variants so
-// the Templates UI can render friendly, per-variant chips. Markup is omitted.
+// archetypeVariants projects a template's archetypes to {kind,label} variants.
+// Markup is omitted; the Templates library card uses Cover instead of listing
+// every layout.
 func archetypeVariants(t themes.Template) []slidesArchetypeVariant {
 	out := make([]slidesArchetypeVariant, 0, len(t.Archetypes))
 	for _, a := range t.Archetypes {
@@ -86,62 +102,127 @@ func archetypeVariants(t themes.Template) []slidesArchetypeVariant {
 	return out
 }
 
-// scopeQuery returns the requested scope label for list DTOs: "team" when
-// ?scope=team, else "personal".
-func scopeQuery(r *http.Request) string {
-	if r.URL.Query().Get("scope") == "team" {
-		return "team"
+func slidesTemplateListDTO(t themes.Template, scope string) slidesTemplateListItem {
+	return slidesTemplateListItem{
+		Name:           t.Name,
+		Label:          t.Label,
+		Description:    t.Description,
+		Scope:          scope,
+		Tokens:         t.Tokens,
+		ArchetypeKinds: archetypeKinds(t),
+		Archetypes:     archetypeVariants(t),
+		Cover:          templateCoverDTO(t),
 	}
-	return "personal"
 }
 
-// ListSlidesTemplatesHandler returns the merged set of built-in templates plus
-// any templates persisted in the requested scope (?scope=personal|team) as a
-// LIGHTWEIGHT DTO (no assets / no markup). The built-ins are always returned
-// even when no scoped service is available. Deduplication is by Name, preferring
-// the built-in over a scoped template.
+// templateCoverDTO picks the cover slide the chat template picker uses: first
+// title* role, else the first archetype. Prefers a baked PNG ref; ships markup
+// only when there is no thumbnail (built-ins and older imports).
+func templateCoverDTO(t themes.Template) *slidesTemplateCover {
+	arch := templateCoverArchetype(t)
+	if arch == nil {
+		return nil
+	}
+	cover := &slidesTemplateCover{Kind: arch.Kind}
+	if ref := strings.TrimSpace(arch.ThumbnailRef); ref != "" {
+		cover.ThumbnailRef = ref
+		return cover
+	}
+	if strings.TrimSpace(arch.Markup) != "" {
+		cover.Markup = arch.Markup
+	}
+	return cover
+}
+
+func templateCoverArchetype(t themes.Template) *themes.Archetype {
+	for i := range t.Archetypes {
+		if templateBaseKind(t.Archetypes[i].Kind) == "title" {
+			return &t.Archetypes[i]
+		}
+	}
+	if len(t.Archetypes) > 0 {
+		return &t.Archetypes[0]
+	}
+	return nil
+}
+
+// templateBaseKind collapses a numbered variant suffix (title-2 → title).
+func templateBaseKind(kind string) string {
+	if i := strings.LastIndexByte(kind, '-'); i > 0 {
+		if _, err := strconv.Atoi(kind[i+1:]); err == nil {
+			return kind[:i]
+		}
+	}
+	return kind
+}
+
+func slidesTemplateScope(r *http.Request) string {
+	switch r.URL.Query().Get("scope") {
+	case slides.ScopePlatform, slides.ScopeOrg, slides.ScopeTeam, slides.ScopePersonal:
+		return r.URL.Query().Get("scope")
+	case "":
+		return ""
+	default:
+		return ""
+	}
+}
+
+func requireTemplateWrite(w http.ResponseWriter, r *http.Request, scope string) bool {
+	switch scope {
+	case slides.ScopePlatform:
+		return RequirePlatformAdmin(w, r) != nil
+	case slides.ScopeOrg:
+		return RequireOrgAdmin(w, r) != nil
+	case slides.ScopeTeam:
+		return RequireTeamAdmin(w, r)
+	case slides.ScopePersonal, "":
+		return true
+	default:
+		http.Error(w, "scope must be personal, team, org, or platform", http.StatusBadRequest)
+		return false
+	}
+}
+
+func writeScopeOrPersonal(scope string) string {
+	if scope == "" {
+		return slides.ScopePersonal
+	}
+	return scope
+}
+
+// ListSlidesTemplatesHandler returns a LIGHTWEIGHT catalog DTO (no assets map;
+// per-archetype markup omitted). With no ?scope=, built-ins plus every
+// inherited imported template (platform, org, team, personal) are listed —
+// same name at two scopes is two rows. With ?scope=personal|team|org|platform,
+// only that store is returned (admin Settings pages).
 func ListSlidesTemplatesHandler(w http.ResponseWriter, r *http.Request) {
-	merged := make([]slidesTemplateListItem, 0)
-	seen := map[string]bool{}
-	for _, t := range themes.ListTemplates() {
-		if seen[t.Name] {
-			continue
-		}
-		seen[t.Name] = true
-		merged = append(merged, slidesTemplateListItem{
-			Name:           t.Name,
-			Label:          t.Label,
-			Description:    t.Description,
-			Scope:          "builtin",
-			Tokens:         t.Tokens,
-			ArchetypeKinds: archetypeKinds(t),
-			Archetypes:     archetypeVariants(t),
-		})
+	scope := r.URL.Query().Get("scope")
+	if scope != "" && scope != slides.ScopePersonal && scope != slides.ScopeTeam && scope != slides.ScopeOrg && scope != slides.ScopePlatform {
+		http.Error(w, "scope must be personal, team, org, or platform", http.StatusBadRequest)
+		return
 	}
-
-	// Scoped templates are best-effort: if the request has no usable docs
-	// service we still return the built-ins with 200.
-	if svc, err := docsService(r); err == nil {
-		if scoped, err := svc.ListTemplates(r.Context()); err == nil {
-			scope := scopeQuery(r)
-			for _, t := range scoped {
-				if seen[t.Name] {
-					continue
-				}
-				seen[t.Name] = true
-				merged = append(merged, slidesTemplateListItem{
-					Name:           t.Name,
-					Label:          t.Label,
-					Description:    t.Description,
-					Scope:          scope,
-					Tokens:         t.Tokens,
-					ArchetypeKinds: archetypeKinds(t),
-					Archetypes:     archetypeVariants(t),
-				})
-			}
-		}
+	cat := slides.CatalogFromServices(store.FromRequest(r))
+	var (
+		tmpls []themes.Template
+		err   error
+	)
+	if scope == "" {
+		tmpls, err = cat.ListAll(r.Context())
+	} else {
+		tmpls, err = cat.ListScope(r.Context(), scope)
 	}
-
+	if err != nil {
+		writeSlidesError(w, err)
+		return
+	}
+	merged := make([]slidesTemplateListItem, 0, len(tmpls))
+	for _, t := range tmpls {
+		label := t.Scope
+		if label == "" {
+			label = writeScopeOrPersonal(scope)
+		}
+		merged = append(merged, slidesTemplateListDTO(t, label))
+	}
 	writeSlidesJSON(w, http.StatusOK, map[string]any{"templates": merged})
 }
 
@@ -159,11 +240,12 @@ func DeleteSlidesTemplateHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "cannot delete a built-in template", http.StatusForbidden)
 		return
 	}
-	svc, ok := requireDocsService(w, r)
-	if !ok {
+	scope := writeScopeOrPersonal(slidesTemplateScope(r))
+	if !requireTemplateWrite(w, r, scope) {
 		return
 	}
-	if err := svc.DeleteDeck(r.Context(), svc.TemplateSlug(name)); err != nil {
+	cat := slides.CatalogFromServices(store.FromRequest(r))
+	if err := cat.Delete(r.Context(), scope, name); err != nil {
 		writeSlidesError(w, err)
 		return
 	}
@@ -196,24 +278,15 @@ func DuplicateSlidesTemplateHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	svc, ok := requireDocsService(w, r)
-	if !ok {
+	cat := slides.CatalogFromServices(store.FromRequest(r))
+	src, found, err := cat.Resolve(r.Context(), name)
+	if err != nil {
+		writeSlidesError(w, err)
 		return
 	}
-
-	// Resolve the source: built-in first, then a scoped template.
-	src, found := themes.LookupTemplate(name)
 	if !found {
-		scoped, ok, err := svc.Template(r.Context(), name)
-		if err != nil {
-			writeSlidesError(w, err)
-			return
-		}
-		if !ok {
-			http.Error(w, "template not found", http.StatusNotFound)
-			return
-		}
-		src = scoped
+		http.Error(w, "template not found", http.StatusNotFound)
+		return
 	}
 
 	// Target name: explicit newName, else "<name>-copy"; slugified and made
@@ -244,15 +317,17 @@ func DuplicateSlidesTemplateHandler(w http.ResponseWriter, r *http.Request) {
 		Tokens:      cloneStringMap(src.Tokens),
 		Assets:      cloneStringMap(src.Assets),
 		Archetypes:  append([]themes.Archetype(nil), src.Archetypes...),
+		Skin:        src.Skin,
+		Palettes:    append([]themes.Palette(nil), src.Palettes...),
 		Scope:       "",
 	}
-	if err := svc.SaveTemplate(r.Context(), dup); err != nil {
+	if err := cat.Save(r.Context(), slides.ScopePersonal, dup); err != nil {
 		writeSlidesError(w, err)
 		return
 	}
 
 	writeSlidesJSON(w, http.StatusOK, map[string]any{
-		"template": map[string]any{"name": dup.Name, "label": dup.Label},
+		"template": map[string]any{"name": dup.Name, "label": dup.Label, "scope": slides.ScopePersonal},
 	})
 }
 
@@ -302,11 +377,12 @@ func RecolorSlidesTemplateHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	svc, ok := requireDocsService(w, r)
-	if !ok {
+	scope := writeScopeOrPersonal(slidesTemplateScope(r))
+	if !requireTemplateWrite(w, r, scope) {
 		return
 	}
-	tmpl, found, err := svc.Template(r.Context(), name)
+	cat := slides.CatalogFromServices(store.FromRequest(r))
+	tmpl, found, err := cat.GetScope(r.Context(), scope, name)
 	if err != nil {
 		writeSlidesError(w, err)
 		return
@@ -323,25 +399,28 @@ func RecolorSlidesTemplateHandler(w http.ResponseWriter, r *http.Request) {
 	for k, v := range body.Tokens {
 		tmpl.Tokens[k] = v
 	}
-	if err := svc.SaveTemplate(r.Context(), tmpl); err != nil {
+	if err := cat.Save(r.Context(), scope, tmpl); err != nil {
 		writeSlidesError(w, err)
 		return
 	}
 
-	writeSlidesJSON(w, http.StatusOK, slidesTemplateListItem{
-		Name:           tmpl.Name,
-		Label:          tmpl.Label,
-		Description:    tmpl.Description,
-		Scope:          scopeQuery(r),
-		Tokens:         tmpl.Tokens,
-		ArchetypeKinds: archetypeKinds(tmpl),
-		Archetypes:     archetypeVariants(tmpl),
-	})
+	writeSlidesJSON(w, http.StatusOK, slidesTemplateListDTO(tmpl, scope))
 }
 
 // thumbnailPNGPrefix is the data-URI prefix stripped before base64-decoding a
 // baked archetype thumbnail asset.
 const thumbnailPNGPrefix = "data:image/png;base64,"
+
+func resolveSlidesTemplateFromRequest(r *http.Request, name string) (themes.Template, bool, error) {
+	cat := slides.CatalogFromServices(store.FromRequest(r))
+	if scope := slidesTemplateScope(r); scope != "" {
+		if t, ok := themes.LookupTemplate(name); ok {
+			return slides.HydrateTemplateFonts(t), true, nil
+		}
+		return cat.GetScope(r.Context(), scope, name)
+	}
+	return cat.Resolve(r.Context(), name)
+}
 
 // GetSlidesTemplateThumbnailHandler serves the pre-baked PNG thumbnail for a
 // single archetype of a template. It resolves the template (built-in first,
@@ -360,34 +439,18 @@ func GetSlidesTemplateThumbnailHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Resolve the template: built-in first, then a scoped template.
-	tmpl, found := themes.LookupTemplate(name)
-	if !found {
-		svc, err := docsService(r)
-		if err != nil {
-			http.Error(w, "template not found", http.StatusNotFound)
-			return
-		}
-		scoped, err := svc.ListTemplates(r.Context())
-		if err != nil {
-			http.Error(w, "template not found", http.StatusNotFound)
-			return
-		}
-		for _, t := range scoped {
-			if t.Name == name {
-				tmpl = t
-				found = true
-				break
-			}
-		}
+	tmpl, found, err := resolveSlidesTemplateFromRequest(r, name)
+	if err != nil {
+		writeSlidesError(w, err)
+		return
 	}
 	if !found {
 		http.Error(w, "template not found", http.StatusNotFound)
 		return
 	}
 
-	// Find the archetype by exact kind, then fall back to a variant-suffix
-	// insensitive match (title-2 -> title).
+	// Exact kind only — title-2 is a different cover from title. Falling back
+	// to the first title* served the wrong thumbnail (white cover vs blue anvil).
 	arch, ok := findArchetypeForThumbnail(tmpl, kind)
 	if !ok || arch.ThumbnailRef == "" {
 		http.Error(w, "thumbnail not found", http.StatusNotFound)
@@ -413,50 +476,94 @@ func GetSlidesTemplateThumbnailHandler(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(png)
 }
 
-// findArchetypeForThumbnail returns the archetype matching kind exactly, or the
-// first archetype whose kind collapses to the same base role once variant
-// suffixes are stripped (title-2 and title both match "title").
+// GetSlidesTemplateMediaHandler serves one template asset by ref (sha256-…
+// images or font:… faces) so pickers and thumbs can load media without
+// embedding data: bytes in chat. Missing refs 404.
+func GetSlidesTemplateMediaHandler(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	name := strings.TrimSpace(vars["name"])
+	ref := strings.TrimSpace(vars["ref"])
+	if name == "" || ref == "" {
+		http.Error(w, "template name and ref are required", http.StatusBadRequest)
+		return
+	}
+	tmpl, found, err := resolveSlidesTemplateFromRequest(r, name)
+	if err != nil {
+		writeSlidesError(w, err)
+		return
+	}
+	if !found {
+		http.Error(w, "template not found", http.StatusNotFound)
+		return
+	}
+	asset, ok := tmpl.Assets[ref]
+	if !ok {
+		http.Error(w, "asset not found", http.StatusNotFound)
+		return
+	}
+	ctype, body, ok := decodeTemplateMediaURI(asset)
+	if !ok {
+		http.Error(w, "asset not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", ctype)
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	w.Header().Set("ETag", `"`+ref+`"`)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
+}
+
+func decodeTemplateMediaURI(s string) (contentType string, body []byte, ok bool) {
+	s = strings.TrimSpace(s)
+	if !strings.HasPrefix(s, "data:") {
+		return "", nil, false
+	}
+	rest := s[len("data:"):]
+	const marker = ";base64,"
+	i := strings.Index(rest, marker)
+	if i < 0 {
+		return "", nil, false
+	}
+	mime := rest[:i]
+	if mime == "image/svg+xml" {
+		return "", nil, false
+	}
+	if !strings.HasPrefix(mime, "image/") && !strings.HasPrefix(mime, "font/") {
+		return "", nil, false
+	}
+	raw, err := base64.StdEncoding.DecodeString(rest[i+len(marker):])
+	if err != nil || len(raw) == 0 {
+		return "", nil, false
+	}
+	return mime, raw, true
+}
+
+// findArchetypeForThumbnail returns the archetype matching kind exactly.
+// Variant suffixes are significant: title-2 is a different cover from title.
 func findArchetypeForThumbnail(tmpl themes.Template, kind string) (themes.Archetype, bool) {
 	for _, a := range tmpl.Archetypes {
 		if a.Kind == kind {
 			return a, true
 		}
 	}
-	base := stripThumbnailVariantSuffix(kind)
-	for _, a := range tmpl.Archetypes {
-		if stripThumbnailVariantSuffix(a.Kind) == base {
-			return a, true
-		}
-	}
 	return themes.Archetype{}, false
-}
-
-// stripThumbnailVariantSuffix removes a trailing "-N" numeric variant suffix
-// from a role kind (title-2 -> title). It mirrors stripVariantSuffix in
-// pkg/docs/slides, which is unexported and therefore not reachable here.
-func stripThumbnailVariantSuffix(kind string) string {
-	if i := strings.LastIndexByte(kind, '-'); i > 0 {
-		if _, err := strconv.Atoi(kind[i+1:]); err == nil {
-			return kind[:i]
-		}
-	}
-	return kind
 }
 
 // uniqueTemplateName returns base, or base-2/base-3/... if a scoped template
 // deck already exists under that slug.
 func uniqueTemplateName(r *http.Request, base string) string {
-	dsvc, err := docsService(r)
-	if err != nil {
+	cat := slides.CatalogFromServices(store.FromRequest(r))
+	if cat.Personal == nil {
 		return base
 	}
 	candidate := base
 	for i := 2; ; i++ {
-		if _, _, dErr := dsvc.Deck(r.Context(), dsvc.TemplateSlug(candidate)); dErr != nil {
-			return candidate // not found (or store error) -> treat as free
+		rec, err := cat.Personal.Get(r.Context(), candidate)
+		if err != nil || rec == nil {
+			return candidate
 		}
 		candidate = base + "-" + strconv.Itoa(i)
-		if i > 100 { // pathological guard
+		if i > 100 {
 			return candidate
 		}
 	}
@@ -574,7 +681,15 @@ func ImportSlidesTemplateHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	tmpl.Name = name
 	tmpl.Label = label
-	tmpl.Scope = ""
+	tmpl.Scope = writeScopeOrPersonal(slidesTemplateScope(r))
+
+	// Generate rich style guidance for LLM content authoring. Best-effort:
+	// a nil or incomplete guide never fails the import.
+	if tmpl.Model != nil {
+		tmpl.StyleGuide = themes.GenerateStyleGuide(tmpl.Model, tmpl.Tokens, tmpl.Archetypes)
+		// Also store on the model so it persists through TemplateModel JSON serialization.
+		tmpl.Model.StyleGuide = tmpl.StyleGuide
+	}
 
 	// Pre-bake static PNG thumbnails for each archetype using the shared headless
 	// Chrome browser. This is BEST-EFFORT: any browser-launch or per-archetype
@@ -582,11 +697,17 @@ func ImportSlidesTemplateHandler(w http.ResponseWriter, r *http.Request) {
 	// falls back to a live render). Never fail the import over thumbnails.
 	generateTemplateThumbnails(r.Context(), &tmpl)
 
-	svc, ok := requireDocsService(w, r)
-	if !ok {
+	if _, ok := themes.LookupTemplate(tmpl.Name); ok {
+		http.Error(w, "cannot overwrite a built-in template", http.StatusBadRequest)
 		return
 	}
-	if err := svc.SaveTemplate(r.Context(), tmpl); err != nil {
+
+	scope := writeScopeOrPersonal(slidesTemplateScope(r))
+	if !requireTemplateWrite(w, r, scope) {
+		return
+	}
+	cat := slides.CatalogFromServices(store.FromRequest(r))
+	if err := cat.Save(r.Context(), scope, tmpl); err != nil {
 		writeSlidesError(w, err)
 		return
 	}
@@ -595,7 +716,7 @@ func ImportSlidesTemplateHandler(w http.ResponseWriter, r *http.Request) {
 		"template": map[string]any{
 			"name":  tmpl.Name,
 			"label": tmpl.Label,
-			"scope": tmpl.Scope,
+			"scope": scope,
 		},
 		"warnings": resp.Warnings,
 	})

@@ -32,8 +32,10 @@ func ValidateSlide(slide Slide) []Diagnostic {
 				}
 				seen[n.ID] = true
 			}
-			if n.Geometry.W < 0 || n.Geometry.H < 0 || n.Geometry.X < 0 || n.Geometry.Y < 0 || n.Geometry.X+n.Geometry.W > CanvasWidth || n.Geometry.Y+n.Geometry.H > CanvasHeight {
-				out = append(out, Diagnostic{Severity: "error", Code: "invalid_geometry", Message: "element geometry is outside the slide canvas", SlideID: slide.ID, ElementID: n.ID})
+			if n.Geometry.W < 0 || n.Geometry.H < 0 {
+				out = append(out, Diagnostic{Severity: "error", Code: "invalid_geometry", Message: "element has negative width or height", SlideID: slide.ID, ElementID: n.ID})
+			} else if n.Geometry.X < 0 || n.Geometry.Y < 0 || n.Geometry.X+n.Geometry.W > CanvasWidth || n.Geometry.Y+n.Geometry.H > CanvasHeight {
+				out = append(out, Diagnostic{Severity: "warning", Code: "canvas_overflow", Message: "element geometry extends outside the slide canvas", SlideID: slide.ID, ElementID: n.ID})
 			}
 			if n.Type == "image" {
 				alt, _ := n.Props["alt"].(string)
@@ -83,6 +85,21 @@ func HasErrors(ds []Diagnostic) bool {
 		}
 	}
 	return false
+}
+
+func formatDiagnostics(diags []Diagnostic) string {
+	var parts []string
+	for _, d := range diags {
+		if d.Severity != "error" {
+			continue
+		}
+		msg := d.Message
+		if d.ElementID != "" {
+			msg = d.ElementID + ": " + msg
+		}
+		parts = append(parts, msg)
+	}
+	return strings.Join(parts, "; ")
 }
 
 // safeColorPattern matches either a hex color (#RRGGBB or #RRGGBBAA) or an

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup, act } from '@testing-library/react'
 
-import SingleSelectCard from '../SingleSelectCard'
+import SingleSelectCard, { selectCardLayout } from '../SingleSelectCard'
 
 const options = [
   { id: 'a', label: 'Option A', description: 'First option' },
@@ -62,6 +62,46 @@ describe('SingleSelectCard', () => {
     })
 
     expect(tiles[1]).toHaveFocus()
+  })
+
+  it('uses the thumbnail tile grid when any option has a thumbnail', () => {
+    render(
+      <SingleSelectCard
+        prompt="Pick a cover"
+        options={[
+          { id: 'a', label: 'Cover A', thumbnail: <div>thumb</div> },
+          { id: 'b', label: 'Cover B' },
+        ]}
+        onSelect={vi.fn()}
+      />,
+    )
+    expect(screen.getByTestId('ask-user-options')).toHaveAttribute('data-layout', 'tiles')
+  })
+
+  it('uses stacked rows when there is no thumbnail and options have descriptions', () => {
+    render(<SingleSelectCard prompt="Pick one" options={options} onSelect={vi.fn()} />)
+    expect(screen.getByTestId('ask-user-options')).toHaveAttribute('data-layout', 'rows')
+    expect(screen.getByText('First option')).toBeInTheDocument()
+  })
+
+  it('uses stacked rows for title-only options', () => {
+    render(
+      <SingleSelectCard
+        prompt="Pick one"
+        options={[
+          { id: 'a', label: 'Short' },
+          { id: 'b', label: 'Standard' },
+        ]}
+        onSelect={vi.fn()}
+      />,
+    )
+    expect(screen.getByTestId('ask-user-options')).toHaveAttribute('data-layout', 'rows')
+  })
+
+  it('classifies layout from option shape', () => {
+    expect(selectCardLayout([{ thumbnail: <span /> }])).toBe('tiles')
+    expect(selectCardLayout([{ description: 'd' }])).toBe('rows')
+    expect(selectCardLayout([{}])).toBe('rows')
   })
 
   it('does not fire onSelect when disabled', () => {

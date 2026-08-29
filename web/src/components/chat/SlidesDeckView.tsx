@@ -1,16 +1,20 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { Download, ExternalLink, Loader2, Maximize2, Save, TriangleAlert, X } from 'lucide-react'
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
+import { Download, ExternalLink, Loader2, Maximize2, Save, Trash2, TriangleAlert, X } from 'lucide-react'
 
 import {
   exportSlidesDeck,
   fetchSlidesDeck,
+  patchSlideMoves,
   saveDeck,
+  slideEditIsDirty,
   slidesPresentationURL,
   type DocsScope,
+  type SlideEditDraft,
   type SlidesDeckResponse,
   type SlidesExportFormat,
 } from '@/api/slides'
 import { cn } from '@/lib/utils'
+import SlidesArchetypeThumb from './questions/SlidesArchetypeThumb'
 
 interface SlidesDeckViewProps {
   deckSlug: string
@@ -45,18 +49,18 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
   const [saveDialogOpen, setSaveDialogOpen] = useState(false)
   const [saveName, setSaveName] = useState('')
   const [fullscreen, setFullscreen] = useState(false)
+  const [pendingBySlide, setPendingBySlide] = useState<Record<number, SlideEditDraft>>({})
+  const [selectedObject, setSelectedObject] = useState<{ id: string; tag: string } | null>(null)
+  const [applying, setApplying] = useState(false)
   const mountedRef = useRef(true)
   const iframeRef = useRef<HTMLIFrameElement | null>(null)
   const fsIframeRef = useRef<HTMLIFrameElement | null>(null)
+  const stripRef = useRef<HTMLDivElement | null>(null)
   // Tracks the deck/scope this component last loaded, so a pure refreshSignal
   // bump (same deck gaining slides) re-fetches WITHOUT yanking the user off
   // whatever slide they're viewing — we only reset slideIndex when the deck or
   // scope actually changes.
   const loadedKeyRef = useRef<string | null>(null)
-  // Slide count the embedded iframe was last (re)loaded with. New slides only
-  // require an iframe reload when the count actually grew; navigation and other
-  // docs_update churn must NOT reload the document (that caused the flicker).
-  const renderedCountRef = useRef(0)
 
   useEffect(() => {
     mountedRef.current = true
@@ -70,7 +74,6 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
       // New deck/scope: reset navigation to the first slide.
       setSlideIndex(0)
       loadedKeyRef.current = key
-      renderedCountRef.current = 0
     }
     setError('')
     fetchSlidesDeck(deckSlug, scope)
@@ -79,15 +82,22 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
     return () => { cancelled = true }
   }, [deckSlug, scope, refreshSignal])
 
+  useEffect(() => {
+    setPendingBySlide({})
+    setSelectedObject(null)
+  }, [deckSlug, scope, refreshSignal])
+
   const slides = deck?.slides ?? []
   const total = slides.length
   const boundedIndex = Math.min(slideIndex, Math.max(0, total - 1))
   const presentUrl = slidesPresentationURL(deckSlug, scope)
-  // The iframe mounts ONCE per deck/scope (key excludes slideIndex + refreshSignal).
-  // We load the deck at its first slide; subsequent navigation and live slide
-  // additions are driven imperatively (postMessage nav + a targeted reload when
-  // the count grows) so the user never sees a full-document flash.
-  const iframeSrc = presentUrl
+  // Cache-bust the present document on every refreshSignal. Reassigning the
+  // same URL does not reload in browsers, so slide writes looked stale until
+  // a full page refresh. Navigation still uses postMessage (src unchanged
+  // while the token is stable).
+  const iframeSrc = presentUrl.includes('?')
+    ? `${presentUrl}&t=${refreshSignal}`
+    : `${presentUrl}?t=${refreshSignal}`
 
   // Navigate the embedded deck to boundedIndex WITHOUT reloading it. The runtime
   // (AstDeck) listens for { type: 'ast-nav', index } on the opaque-origin iframe
@@ -104,25 +114,151 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
     postNav(boundedIndex)
   }, [boundedIndex, total, postNav])
 
-  // Live slide additions: reload the embedded document only when the slide count
-  // actually increased (a new write_slide landed), then restore the viewed
-  // slide. Pure docs_update churn (validation/review events) never reloads.
+  // Click/keyboard nav happens inside the sandboxed present iframe. Mirror
+  // ast-deck-change messages onto the strip selection. Canvas edits arrive as
+  // ast-edit-changed; selection as ast-edit-selected.
   useEffect(() => {
-    if (total > renderedCountRef.current) {
-      renderedCountRef.current = total
-      const frame = fullscreen ? fsIframeRef.current : iframeRef.current
-      if (frame) {
-        const onLoad = () => { postNav(boundedIndex) }
-        frame.addEventListener('load', onLoad, { once: true })
-        // Reassigning src reloads the (single) iframe in place — far less jarring
-        // than React unmounting/remounting the element, and it keeps focus/scroll.
-        frame.src = iframeSrc
+    const onMessage = (event: MessageEvent) => {
+      if (event.source !== iframeRef.current?.contentWindow) return
+      const data = event.data as {
+        type?: string
+        index?: number
+        id?: string | null
+        tag?: string | null
+        changes?: SlideEditDraft['moves']
+        moves?: SlideEditDraft['moves']
+        resizes?: SlideEditDraft['resizes']
+        texts?: SlideEditDraft['texts']
+        deletes?: string[]
+      } | null
+      if (!data?.type) return
+      if (data.type === 'ast-deck-change') {
+        const index = data.index
+        if (typeof index !== 'number' || !Number.isInteger(index) || index < 0) return
+        setSlideIndex(prev => (prev === index ? prev : index))
+        return
+      }
+      if (data.type === 'ast-edit-selected') {
+        const id = typeof data.id === 'string' && data.id ? data.id : null
+        const tag = typeof data.tag === 'string' && data.tag ? data.tag : ''
+        setSelectedObject(id ? { id, tag } : null)
+        return
+      }
+      if (data.type === 'ast-edit-changed' || data.type === 'ast-edit-moved') {
+        const index = data.index
+        if (typeof index !== 'number' || !Number.isInteger(index) || index < 0) return
+        const draft: SlideEditDraft = {
+          moves: data.moves ?? data.changes ?? [],
+          ...(data.resizes?.length ? { resizes: data.resizes } : {}),
+          texts: data.texts ?? [],
+          deletes: data.deletes ?? [],
+        }
+        setPendingBySlide(prev => {
+          if (!slideEditIsDirty(draft)) {
+            if (!(index in prev)) return prev
+            const next = { ...prev }
+            delete next[index]
+            return next
+          }
+          return { ...prev, [index]: draft }
+        })
       }
     }
-  // boundedIndex intentionally read at reload time only; excluded from deps so a
-  // mere navigation does not trigger a reload.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [total, iframeSrc, fullscreen, postNav])
+    window.addEventListener('message', onMessage)
+    return () => window.removeEventListener('message', onMessage)
+  }, [])
+
+  const postToCanvas = useCallback((payload: Record<string, unknown>) => {
+    iframeRef.current?.contentWindow?.postMessage(payload, '*')
+  }, [])
+
+  // After the present document reloads (new slides or an in-place rewrite),
+  // restore the strip's current index inside the iframe and enable canvas edit.
+  const onPresentLoad = useCallback(() => {
+    if (total > 0) postNav(boundedIndex)
+  }, [total, boundedIndex, postNav])
+
+  const onCanvasLoad = useCallback(() => {
+    onPresentLoad()
+    postToCanvas({ type: 'ast-edit-mode', enabled: true })
+  }, [onPresentLoad, postToCanvas])
+
+  const currentPending = pendingBySlide[boundedIndex]
+  const editDirty = slideEditIsDirty(currentPending) && !fullscreen
+  const canDeleteObject = Boolean(selectedObject) && !fullscreen && !applying
+
+  const discardEdits = useCallback(() => {
+    postToCanvas({ type: 'ast-edit-reset' })
+    setSelectedObject(null)
+    setPendingBySlide(prev => {
+      if (!(boundedIndex in prev)) return prev
+      const next = { ...prev }
+      delete next[boundedIndex]
+      return next
+    })
+  }, [boundedIndex, postToCanvas])
+
+  const applyEdits = useCallback(async () => {
+    if (!slideEditIsDirty(currentPending) || !currentPending) return
+    setApplying(true)
+    setError('')
+    try {
+      const updated = await patchSlideMoves(deckSlug, boundedIndex, currentPending, scope)
+      setDeck(prev => {
+        if (!prev) return prev
+        return {
+          ...prev,
+          slides: prev.slides.map((slide, i) => i === boundedIndex ? { ...slide, content: updated.content } : slide),
+        }
+      })
+      postToCanvas({ type: 'ast-edit-commit' })
+      setSelectedObject(null)
+      setPendingBySlide(prev => {
+        const next = { ...prev }
+        delete next[boundedIndex]
+        return next
+      })
+    } catch (cause) {
+      if (mountedRef.current) setError(cause instanceof Error ? cause.message : 'Failed to save slide layout')
+    } finally {
+      if (mountedRef.current) setApplying(false)
+    }
+  }, [boundedIndex, currentPending, deckSlug, postToCanvas, scope])
+
+  const focusStripTile = useCallback((index: number) => {
+    const tiles = stripRef.current?.querySelectorAll<HTMLButtonElement>('[data-testid="slides-tile"]')
+    const tile = tiles?.[index]
+    if (!tile) return
+    tile.focus()
+    tile.scrollIntoView({ inline: 'nearest', block: 'nearest' })
+  }, [])
+
+  const onStripTileKeyDown = useCallback((event: ReactKeyboardEvent<HTMLButtonElement>, index: number) => {
+    if (total <= 0) return
+    let next = index
+    switch (event.key) {
+      case 'ArrowRight':
+      case 'ArrowDown':
+        next = Math.min(total - 1, index + 1)
+        break
+      case 'ArrowLeft':
+      case 'ArrowUp':
+        next = Math.max(0, index - 1)
+        break
+      case 'Home':
+        next = 0
+        break
+      case 'End':
+        next = total - 1
+        break
+      default:
+        return
+    }
+    event.preventDefault()
+    if (next === index) return
+    setSlideIndex(next)
+    requestAnimationFrame(() => focusStripTile(next))
+  }, [total, focusStripTile])
 
   const present = useCallback(() => {
     window.open(slidesPresentationURL(deckSlug, scope), '_blank', 'noopener,noreferrer')
@@ -187,6 +323,7 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
       sandbox="allow-scripts"
       title={`Slide deck: ${deckTitle}`}
       data-testid="slides-deck-frame"
+      onLoad={onCanvasLoad}
       className="h-full w-full rounded-lg border-0"
       style={{ background: 'var(--card)' }}
     />
@@ -258,8 +395,58 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
           </button>
         ))}
 
-        {/* Save button — copies session deck to permanent storage (session deck stays) */}
-        {deck?.deck.sessionId && !saving && !saveSuccess && (
+        {canDeleteObject ? (
+          <button
+            type="button"
+            onClick={() => postToCanvas({ type: 'ast-edit-delete' })}
+            data-testid="slides-edit-delete"
+            className="inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs font-medium"
+            style={{ borderColor: 'var(--border-color)', color: 'var(--text-secondary)' }}
+          >
+            <Trash2 size={13} />
+            Delete
+          </button>
+        ) : null}
+
+        {/* Right slot: Save, or Discard/Apply while a canvas edit is pending. */}
+        {editDirty ? (
+          <div className="ml-auto flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={discardEdits}
+              disabled={applying}
+              data-testid="slides-edit-discard"
+              className="inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs font-medium disabled:opacity-50"
+              style={{ borderColor: 'var(--border-color)', color: 'var(--text-secondary)' }}
+            >
+              Discard
+            </button>
+            <button
+              type="button"
+              onClick={() => { void applyEdits() }}
+              disabled={applying}
+              data-testid="slides-edit-apply"
+              className="inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50"
+              style={{ background: 'var(--brand)' }}
+            >
+              {applying ? <Loader2 size={13} className="animate-spin" /> : null}
+              Apply
+            </button>
+          </div>
+        ) : saving ? (
+          <div className="ml-auto flex items-center gap-1.5">
+            <span className="inline-flex items-center gap-1.5 text-xs" style={{ color: 'var(--text-muted)' }}>
+              <Loader2 size={13} className="animate-spin" /> Saving…
+            </span>
+          </div>
+        ) : saveSuccess ? (
+          <div className="ml-auto flex items-center gap-1.5">
+            <span className="inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium"
+              style={{ color: 'var(--success, #10b981)' }}>
+              ✓ Saved!
+            </span>
+          </div>
+        ) : deck?.deck.sessionId ? (
           <div className="ml-auto flex items-center gap-1.5">
             <button
               type="button"
@@ -273,22 +460,7 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
               Save
             </button>
           </div>
-        )}
-        {saving && (
-          <div className="ml-auto flex items-center gap-1.5">
-            <span className="inline-flex items-center gap-1.5 text-xs" style={{ color: 'var(--text-muted)' }}>
-              <Loader2 size={13} className="animate-spin" /> Saving…
-            </span>
-          </div>
-        )}
-        {saveSuccess && (
-          <div className="ml-auto flex items-center gap-1.5">
-            <span className="inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium"
-              style={{ color: 'var(--success, #10b981)' }}>
-              ✓ Saved!
-            </span>
-          </div>
-        )}
+        ) : null}
       </div>
 
       {/* Save dialog — inline modal for naming the deck */}
@@ -353,30 +525,51 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
         )}
       </div>
 
-      {/* Slide strip */}
+      {/* Slide strip. Padding keeps the selected ring inside the scrollport
+          (overflow-x:auto otherwise clips it on the top and left). The preview
+          is clipped in an inner layer so the ring on the button is not. */}
       {total > 0 && (
-        <div className="flex shrink-0 gap-2 overflow-x-auto pb-1" role="tablist" aria-label="Slides">
+        <div
+          ref={stripRef}
+          className="relative z-10 flex shrink-0 gap-2 overflow-x-auto px-1 pt-1.5 pb-1.5"
+          role="tablist"
+          aria-label="Slides"
+        >
           {slides.map((slide, index) => (
             <button
               key={slide.id}
               type="button"
               role="tab"
+              tabIndex={index === boundedIndex ? 0 : -1}
               aria-selected={index === boundedIndex}
               aria-current={index === boundedIndex ? 'true' : undefined}
               aria-label={`Slide ${index + 1}${slide.title ? `: ${slide.title}` : ''}`}
               data-testid="slides-tile"
               onClick={() => setSlideIndex(index)}
+              onKeyDown={event => onStripTileKeyDown(event, index)}
               className={cn(
-                'flex h-14 w-24 shrink-0 flex-col items-start justify-between rounded-md border px-2 py-1.5 text-left transition-colors',
+                'relative h-14 w-24 shrink-0 rounded-md border text-left transition-colors',
                 index === boundedIndex
-                  ? 'border-primary bg-primary/10'
+                  ? 'z-10 border-primary ring-2 ring-primary'
                   : 'border-border bg-card hover:border-primary/40'
               )}
             >
-              <span className="text-[11px] font-semibold text-foreground">{index + 1}</span>
-              {slide.title && (
-                <span className="line-clamp-2 text-[10px] leading-tight text-muted-foreground">{slide.title}</span>
-              )}
+              <span className="pointer-events-none absolute inset-0 overflow-hidden rounded-[5px]">
+                {slide.content ? (
+                  <SlidesArchetypeThumb
+                    markup={slide.content}
+                    theme={deck?.deck.theme}
+                    template={deck?.deck.theme?.['template-name']}
+                  />
+                ) : (
+                  <span className="flex h-full w-full items-center justify-center text-[11px] font-semibold text-muted-foreground">
+                    {index + 1}
+                  </span>
+                )}
+              </span>
+              <span className="pointer-events-none absolute left-1 top-0.5 z-10 rounded bg-black/50 px-1 text-[10px] font-semibold text-white">
+                {index + 1}
+              </span>
             </button>
           ))}
         </div>
@@ -417,7 +610,7 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
                 src={iframeSrc}
                 sandbox="allow-scripts"
                 title={`Slide deck full screen: ${deckTitle}`}
-                onLoad={() => { if (total > 0) postNav(boundedIndex) }}
+                onLoad={onPresentLoad}
                 className="h-full w-full border-0"
                 style={{ background: 'var(--card)' }}
               />

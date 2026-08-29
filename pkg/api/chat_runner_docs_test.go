@@ -137,3 +137,54 @@ func TestChatRunnerInjectDocsStoresCreatesServices(t *testing.T) {
 		t.Fatal("team docs store was not injected")
 	}
 }
+
+func TestChatRunnerInjectSlideTemplateStoresPopulatesServices(t *testing.T) {
+	platStore := &store.MemorySlideTemplateStore{}
+	orgStore := &store.MemorySlideTemplateStore{}
+
+	runner := newChatRunner("session", "user", false)
+	runner.InjectDocsStores(&chatRunnerDocsStore{}, &chatRunnerDocsStore{})
+	runner.InjectSlideTemplateStores(platStore, orgStore)
+
+	got := store.FromContext(runner.Context())
+	if got == nil {
+		t.Fatal("runner context has no services")
+	}
+	if got.PlatformSlideTemplates != platStore {
+		t.Fatal("platform slide template store was not injected")
+	}
+	if got.OrgSlideTemplates != orgStore {
+		t.Fatal("org slide template store was not injected")
+	}
+	if got.PersonalDocs == nil {
+		t.Fatal("InjectSlideTemplateStores lost previously-injected PersonalDocs")
+	}
+}
+
+func TestInjectRequestDocsStoresCarriesSlideTemplateStores(t *testing.T) {
+	platStore := &store.MemorySlideTemplateStore{}
+	orgStore := &store.MemorySlideTemplateStore{}
+	svc := &store.Services{
+		PersonalDocs:           &chatRunnerDocsStore{},
+		Docs:                   &chatRunnerDocsStore{},
+		PlatformSlideTemplates: platStore,
+		OrgSlideTemplates:      orgStore,
+	}
+
+	r := httptest.NewRequest("POST", "/api/studio/chat", nil)
+	r = r.WithContext(store.WithServices(r.Context(), svc))
+
+	runner := newChatRunner("session", "user", false)
+	injectRequestDocsStores(runner, r)
+
+	got := store.FromContext(runner.Context())
+	if got == nil {
+		t.Fatal("runner context has no services after injectRequestDocsStores")
+	}
+	if got.PlatformSlideTemplates != platStore {
+		t.Fatal("platform slide template store was not carried into runner context")
+	}
+	if got.OrgSlideTemplates != orgStore {
+		t.Fatal("org slide template store was not carried into runner context")
+	}
+}

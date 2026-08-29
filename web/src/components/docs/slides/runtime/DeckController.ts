@@ -170,6 +170,11 @@ export class DeckController {
   }
 
   private readonly onKeyDown = (event: KeyboardEvent): void => {
+    if (this.deck.hasAttribute('edit')) {
+      const target = event.target as HTMLElement | null
+      if (target?.isContentEditable) return
+      if ([' ', 'Spacebar', 'Delete', 'Backspace', 'Enter', 'Escape'].includes(event.key)) return
+    }
     if (!NAVIGATION_KEYS.has(event.key)) return
     event.preventDefault()
     if (event.key === 'Home') this.goTo(0)
@@ -179,16 +184,19 @@ export class DeckController {
   }
 
   private readonly onClick = (event: MouseEvent): void => {
+    if (this.deck.hasAttribute('edit')) return
     if (event.defaultPrevented || (event.target as Element).closest('a,button,input,textarea,select')) return
     event.clientX < window.innerWidth / 3 ? this.previous() : this.next()
   }
 
   private readonly onTouchStart = (event: TouchEvent): void => {
+    if (this.deck.hasAttribute('edit')) return
     const touch = event.changedTouches[0]
     if (touch) this.touchStart = { x: touch.clientX, y: touch.clientY }
   }
 
   private readonly onTouchEnd = (event: TouchEvent): void => {
+    if (this.deck.hasAttribute('edit')) return
     const touch = event.changedTouches[0]
     if (!touch || !this.touchStart) return
     const dx = touch.clientX - this.touchStart.x

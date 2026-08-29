@@ -18,6 +18,7 @@ import (
 	"github.com/SAP/astonish/ent/platform/platformsetting"
 	"github.com/SAP/astonish/ent/platform/platformskill"
 	"github.com/SAP/astonish/ent/platform/platformskillfile"
+	"github.com/SAP/astonish/ent/platform/platformslidetemplate"
 	"github.com/SAP/astonish/ent/platform/sandboxlayer"
 	"github.com/SAP/astonish/ent/platform/sandboxtemplate"
 	"github.com/SAP/astonish/ent/platform/schema"
@@ -317,6 +318,42 @@ func init() {
 	platformskillfileDescID := platformskillfileFields[0].Descriptor()
 	// platformskillfile.DefaultID holds the default value on creation for the id field.
 	platformskillfile.DefaultID = platformskillfileDescID.Default.(func() uuid.UUID)
+	platformslidetemplateFields := schema.PlatformSlideTemplate{}.Fields()
+	_ = platformslidetemplateFields
+	// platformslidetemplateDescName is the schema descriptor for name field.
+	platformslidetemplateDescName := platformslidetemplateFields[1].Descriptor()
+	// platformslidetemplate.NameValidator is a validator for the "name" field. It is called by the builders before save.
+	platformslidetemplate.NameValidator = platformslidetemplateDescName.Validators[0].(func(string) error)
+	// platformslidetemplateDescLabel is the schema descriptor for label field.
+	platformslidetemplateDescLabel := platformslidetemplateFields[2].Descriptor()
+	// platformslidetemplate.DefaultLabel holds the default value on creation for the label field.
+	platformslidetemplate.DefaultLabel = platformslidetemplateDescLabel.Default.(string)
+	// platformslidetemplateDescDescription is the schema descriptor for description field.
+	platformslidetemplateDescDescription := platformslidetemplateFields[3].Descriptor()
+	// platformslidetemplate.DefaultDescription holds the default value on creation for the description field.
+	platformslidetemplate.DefaultDescription = platformslidetemplateDescDescription.Default.(string)
+	// platformslidetemplateDescSchemaVersion is the schema descriptor for schema_version field.
+	platformslidetemplateDescSchemaVersion := platformslidetemplateFields[4].Descriptor()
+	// platformslidetemplate.DefaultSchemaVersion holds the default value on creation for the schema_version field.
+	platformslidetemplate.DefaultSchemaVersion = platformslidetemplateDescSchemaVersion.Default.(int)
+	// platformslidetemplateDescSkin is the schema descriptor for skin field.
+	platformslidetemplateDescSkin := platformslidetemplateFields[5].Descriptor()
+	// platformslidetemplate.DefaultSkin holds the default value on creation for the skin field.
+	platformslidetemplate.DefaultSkin = platformslidetemplateDescSkin.Default.(string)
+	// platformslidetemplateDescCreatedAt is the schema descriptor for created_at field.
+	platformslidetemplateDescCreatedAt := platformslidetemplateFields[12].Descriptor()
+	// platformslidetemplate.DefaultCreatedAt holds the default value on creation for the created_at field.
+	platformslidetemplate.DefaultCreatedAt = platformslidetemplateDescCreatedAt.Default.(func() time.Time)
+	// platformslidetemplateDescUpdatedAt is the schema descriptor for updated_at field.
+	platformslidetemplateDescUpdatedAt := platformslidetemplateFields[13].Descriptor()
+	// platformslidetemplate.DefaultUpdatedAt holds the default value on creation for the updated_at field.
+	platformslidetemplate.DefaultUpdatedAt = platformslidetemplateDescUpdatedAt.Default.(func() time.Time)
+	// platformslidetemplate.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
+	platformslidetemplate.UpdateDefaultUpdatedAt = platformslidetemplateDescUpdatedAt.UpdateDefault.(func() time.Time)
+	// platformslidetemplateDescID is the schema descriptor for id field.
+	platformslidetemplateDescID := platformslidetemplateFields[0].Descriptor()
+	// platformslidetemplate.DefaultID holds the default value on creation for the id field.
+	platformslidetemplate.DefaultID = platformslidetemplateDescID.Default.(func() uuid.UUID)
 	sandboxlayerFields := schema.SandboxLayer{}.Fields()
 	_ = sandboxlayerFields
 	// sandboxlayerDescCephfsPath is the schema descriptor for cephfs_path field.

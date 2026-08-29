@@ -143,6 +143,14 @@ type Services struct {
 	// Only superadmins can manage these. Nil in personal mode.
 	PlatformSkills SkillStore
 
+	// PlatformSlideTemplates are PPTX-imported slide templates visible to every org.
+	// Only superadmins can write these. Nil in personal mode.
+	PlatformSlideTemplates SlideTemplateStore
+
+	// OrgSlideTemplates are PPTX-imported slide templates visible to every team
+	// in the org. Org admins write these. Nil in personal mode.
+	OrgSlideTemplates SlideTemplateStore
+
 	// NetworkPolicies provides access to org-level network policy rules.
 	// In platform mode, these rules apply to all teams in the org.
 	NetworkPolicies NetworkPolicyStore

@@ -115,6 +115,8 @@ func providerSecretKeys(provType string) []string {
 	switch provType {
 	case "sap_ai_core":
 		return []string{"client_id", "client_secret", "auth_url"}
+	case "xai_oauth":
+		return []string{"access_token", "refresh_token", "expires_at"}
 	default:
 		return []string{"api_key"}
 	}

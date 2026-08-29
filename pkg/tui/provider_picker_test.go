@@ -226,3 +226,99 @@ func TestProviderSlashCompletion_GatedByCapability(t *testing.T) {
 		t.Fatalf("expected no provider match without capability, got %v", without)
 	}
 }
+
+// xaiOAuthStub implements ProviderAdminBackend and XAIOAuthBackend so the
+// overlay can exercise the two-phase device-code flow without a network.
+type xaiOAuthStub struct {
+	providerAdminStub
+	started []string
+	waited  int
+}
+
+func (b *xaiOAuthStub) StartXAIOAuth(_ context.Context, clientID string) (*backend.XAIOAuthPending, error) {
+	b.started = append(b.started, clientID)
+	return &backend.XAIOAuthPending{
+		ClientID:        "cid",
+		DeviceCode:      "dev",
+		UserCode:        "ABCD-1234",
+		VerificationURL: "https://accounts.x.ai/oauth2/device?user_code=ABCD-1234",
+		Interval:        5,
+	}, nil
+}
+
+func (b *xaiOAuthStub) WaitXAIOAuth(_ context.Context, pending backend.XAIOAuthPending) (map[string]string, error) {
+	b.waited++
+	return map[string]string{
+		"client_id":     pending.ClientID,
+		"access_token":  "at",
+		"refresh_token": "rt",
+		"expires_at":    "2026-01-01T00:00:00Z",
+	}, nil
+}
+
+func TestProviderPicker_XAIOAuthShowsUserCode(t *testing.T) {
+	b := &xaiOAuthStub{}
+	b.types = []backend.ProviderTypeInfo{
+		{ID: "xai_oauth", DisplayName: "xAI (OAuth)", Fields: []backend.ProviderField{
+			{Key: "client_id", Label: "OAuth Client ID", Optional: true},
+		}},
+	}
+	m := newPickerModel(t, b)
+	m.providerPicker = providerPickerState{
+		open:         true,
+		step:         "form",
+		selectedType: b.types[0],
+		fields:       b.types[0].Fields,
+		values:       []string{"xai_oauth", ""},
+		fieldCursor:  0,
+	}
+
+	next, cmd := m.submitProviderForm()
+	m = next.(model)
+	if cmd == nil {
+		t.Fatal("expected start-oauth command")
+	}
+	if !strings.Contains(m.providerPicker.notice, "Requesting xAI authorization") {
+		t.Fatalf("notice after submit = %q", m.providerPicker.notice)
+	}
+
+	next, waitCmd := m.Update(cmd())
+	m = next.(model)
+	if waitCmd == nil {
+		t.Fatal("expected wait-oauth command after start")
+	}
+	if m.providerPicker.step != "oauth" {
+		t.Fatalf("step after start = %q, want oauth", m.providerPicker.step)
+	}
+	if !strings.Contains(m.providerPicker.notice, "ABCD-1234") {
+		t.Fatalf("notice missing user code:\n%s", m.providerPicker.notice)
+	}
+	out := stripANSI(m.renderProviderPickerOverlay())
+	if !strings.Contains(out, "ABCD-1234") {
+		t.Fatalf("overlay must show user code:\n%s", out)
+	}
+	if !strings.Contains(out, "Authorize in your browser") {
+		t.Fatalf("overlay must instruct the user to authorize:\n%s", out)
+	}
+	if !strings.Contains(out, "Authorize xAI (OAuth)") {
+		t.Fatalf("overlay must be the dedicated oauth wait step:\n%s", out)
+	}
+	if strings.Contains(out, "↑↓ move  a add") {
+		t.Fatalf("oauth wait must not render the provider list:\n%s", out)
+	}
+
+	next, _ = m.Update(waitCmd())
+	m = next.(model)
+	if b.waited != 1 {
+		t.Fatalf("WaitXAIOAuth calls = %d, want 1", b.waited)
+	}
+	if len(b.added) != 1 {
+		t.Fatalf("expected one AddProvider call, got %d", len(b.added))
+	}
+	if b.added[0].fields["access_token"] != "at" {
+		t.Fatalf("unexpected add fields: %+v", b.added[0].fields)
+	}
+	if m.providerPicker.step != "list" {
+		t.Fatalf("step after oauth add = %q", m.providerPicker.step)
+	}
+}

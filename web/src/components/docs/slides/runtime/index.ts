@@ -13,6 +13,7 @@ import { AstText } from './AstText'
 import { installRuntimeStyles } from './styles'
 
 export { DeckController } from './DeckController'
+export { EditController } from './EditController'
 export * from './types'
 
 const definitions: ReadonlyArray<readonly [string, CustomElementConstructor]> = [

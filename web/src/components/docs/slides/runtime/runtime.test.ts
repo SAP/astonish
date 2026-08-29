@@ -24,6 +24,18 @@ describe('slides runtime', () => {
     }
   })
 
+  it('posts ast-deck-change to the parent window when the active slide changes', async () => {
+    const postMessage = vi.fn()
+    Object.defineProperty(window, 'parent', { value: { postMessage }, configurable: true })
+    const deck = await mount('<ast-deck><ast-slide id="one"></ast-slide><ast-slide id="two"></ast-slide></ast-deck>')
+    ;(deck as unknown as { goTo: (n: number) => void }).goTo(1)
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'ast-deck-change', index: 1, slideId: 'two' }),
+      '*',
+    )
+  })
+
   it('navigates fragments before slides and emits state changes', async () => {
     const deck = await mount('<ast-deck><ast-slide id="one"><ast-fragment order="1">first</ast-fragment></ast-slide><ast-slide id="two"></ast-slide></ast-deck>')
     const changes = vi.fn()

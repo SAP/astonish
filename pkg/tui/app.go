@@ -635,6 +635,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case providerMutatedMsg:
 		return m.applyProviderMutated(msg)
 
+	case xaiOAuthStartedMsg:
+		return m.applyXAIOAuthStarted(msg)
+
 	case webSearchProvidersLoadedMsg:
 		return m.applyWebSearchProvidersLoaded(msg)
 

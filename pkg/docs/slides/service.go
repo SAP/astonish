@@ -85,6 +85,101 @@ func (s Service) AddDeckAsset(ctx context.Context, slug, ref, dataURI string) (*
 	return deck, nil
 }
 
+// mergeDeckAssets copies extra refs onto the deck in one UpdateDeck. Empty extra
+// is a no-op. Existing keys keep their current value unless extra overwrites.
+func (s Service) mergeDeckAssets(ctx context.Context, slug string, extra map[string]string) (*store.DeckManifest, error) {
+	if s.Store == nil {
+		return nil, fmt.Errorf("docs store unavailable")
+	}
+	deck, err := s.Store.GetDeck(ctx, slug)
+	if err != nil {
+		return nil, fmt.Errorf("get deck: %w", err)
+	}
+	if len(extra) == 0 {
+		return deck, nil
+	}
+	assets := make(map[string]string, len(deck.Assets)+len(extra))
+	for k, v := range deck.Assets {
+		assets[k] = v
+	}
+	changed := false
+	for k, v := range extra {
+		if k == "" || v == "" {
+			continue
+		}
+		if assets[k] != v {
+			assets[k] = v
+			changed = true
+		}
+	}
+	if !changed {
+		return deck, nil
+	}
+	deck.Assets = assets
+	if err := s.Store.UpdateDeck(ctx, deck); err != nil {
+		return nil, fmt.Errorf("update deck assets: %w", err)
+	}
+	return deck, nil
+}
+
+// syncDeckAssetsFromTemplate copies any asset-ref used by current slides from
+// the template and drops unused sample photos so the session deck stays small.
+func (s Service) syncDeckAssetsFromTemplate(ctx context.Context, slug string, tmpl themes.Template) error {
+	if s.Store == nil {
+		return fmt.Errorf("docs store unavailable")
+	}
+	deck, slides, err := s.Deck(ctx, slug)
+	if err != nil {
+		return err
+	}
+	needed := make(map[string]bool)
+	for _, sl := range slides {
+		for _, ref := range collectAssetRefs(sl.Content) {
+			needed[ref] = true
+		}
+	}
+	for k := range deck.Assets {
+		if keepAssetKey(k) {
+			needed[k] = true
+		}
+	}
+	for k := range tmpl.Assets {
+		if keepAssetKey(k) {
+			needed[k] = true
+		}
+	}
+	assets := make(map[string]string, len(needed))
+	for k := range needed {
+		if v, ok := deck.Assets[k]; ok && v != "" {
+			assets[k] = v
+			continue
+		}
+		if v, ok := tmpl.Assets[k]; ok && v != "" {
+			assets[k] = v
+		}
+	}
+	if assetMapsEqual(deck.Assets, assets) {
+		return nil
+	}
+	deck.Assets = assets
+	if err := s.Store.UpdateDeck(ctx, deck); err != nil {
+		return fmt.Errorf("sync deck assets: %w", err)
+	}
+	return nil
+}
+
+func assetMapsEqual(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
 func (s Service) WriteSlide(ctx context.Context, deckSlug string, position int, markup, notes string) (*store.SlideContent, []Diagnostic, error) {
 	if s.Store == nil {
 		return nil, nil, fmt.Errorf("docs store unavailable")
@@ -98,6 +193,9 @@ func (s Service) WriteSlide(ctx context.Context, deckSlug string, position int, 
 		return nil, nil, err
 	}
 	if HasErrors(diags) {
+		if detail := formatDiagnostics(diags); detail != "" {
+			return nil, diags, fmt.Errorf("slide validation failed: %s", detail)
+		}
 		return nil, diags, fmt.Errorf("slide validation failed")
 	}
 	item := &store.SlideContent{ID: uuid.NewString(), DeckID: deck.ID, Position: position, Title: parsed.Title, Content: markup, Notes: notes, SchemaVersion: SchemaV1}
@@ -116,6 +214,113 @@ func (s Service) WriteSlide(ctx context.Context, deckSlug string, position int, 
 	}
 	return item, diags, nil
 }
+
+// ElementMove is one canvas drag: element id and new logical origin.
+type ElementMove struct {
+	ID string
+	X  int
+	Y  int
+}
+
+// ElementText is a canvas text rewrite for an ast-text element.
+type ElementText struct {
+	ID   string
+	Text string
+}
+
+// ElementResize is one canvas resize with the element's complete geometry.
+type ElementResize struct {
+	ID string
+	X  int
+	Y  int
+	W  int
+	H  int
+}
+
+// SlideEdits is a canvas edit batch: moves, resizes, text rewrites, and deletes.
+type SlideEdits struct {
+	Moves   []ElementMove
+	Resizes []ElementResize
+	Texts   []ElementText
+	Deletes []string
+}
+
+// MoveSlideElements patches x/y on named elements in a stored slide.
+func (s Service) MoveSlideElements(ctx context.Context, deckSlug string, position int, moves []ElementMove) (*store.SlideContent, []Diagnostic, error) {
+	return s.ApplySlideEdits(ctx, deckSlug, position, SlideEdits{Moves: moves})
+}
+
+// ApplySlideEdits applies canvas moves, text edits, and deletes, then
+// validates and upserts through WriteSlide.
+func (s Service) ApplySlideEdits(ctx context.Context, deckSlug string, position int, edits SlideEdits) (*store.SlideContent, []Diagnostic, error) {
+	item, err := s.Slide(ctx, deckSlug, position)
+	if err != nil {
+		return nil, nil, err
+	}
+	markup := item.Content
+	for _, id := range edits.Deletes {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return nil, nil, fmt.Errorf("delete is missing element id")
+		}
+		next, err := removeElement(markup, id)
+		if err != nil {
+			return nil, nil, err
+		}
+		markup = next
+	}
+	deleted := map[string]bool{}
+	for _, id := range edits.Deletes {
+		deleted[strings.TrimSpace(id)] = true
+	}
+	for _, t := range edits.Texts {
+		id := strings.TrimSpace(t.ID)
+		if id == "" {
+			return nil, nil, fmt.Errorf("text edit is missing element id")
+		}
+		if deleted[id] {
+			continue
+		}
+		next, err := setElementText(markup, id, t.Text)
+		if err != nil {
+			return nil, nil, err
+		}
+		markup = next
+	}
+	for _, m := range edits.Moves {
+		id := strings.TrimSpace(m.ID)
+		if id == "" {
+			return nil, nil, fmt.Errorf("move is missing element id")
+		}
+		if deleted[id] {
+			continue
+		}
+		next, err := setElementXY(markup, id, m.X, m.Y)
+		if err != nil {
+			return nil, nil, err
+		}
+		markup = next
+	}
+	for _, resize := range edits.Resizes {
+		id := strings.TrimSpace(resize.ID)
+		if id == "" {
+			return nil, nil, fmt.Errorf("resize is missing element id")
+		}
+		if resize.W <= 0 || resize.H <= 0 {
+			return nil, nil, fmt.Errorf("resize width and height must be positive")
+		}
+		if deleted[id] {
+			continue
+		}
+		next, err := setElementGeometry(markup, id, resize.X, resize.Y, resize.W, resize.H)
+		if err != nil {
+			return nil, nil, err
+		}
+		markup = next
+	}
+	return s.WriteSlide(ctx, deckSlug, position, markup, item.Notes)
+}
+
 func (s Service) Deck(ctx context.Context, slug string) (*store.DeckManifest, []*store.SlideContent, error) {
 	if s.Store == nil {
 		return nil, nil, fmt.Errorf("docs store unavailable")
@@ -233,12 +438,13 @@ func (s Service) SaveTemplate(ctx context.Context, tmpl themes.Template) error {
 		// delimiter (see archetypeMetaDelim) so it round-trips without a
 		// schema change.
 		notes := arch.Title
-		if arch.Tier != "" || len(arch.FillSlots) > 0 || arch.ThumbnailRef != "" {
+		if arch.Tier != "" || len(arch.FillSlots) > 0 || len(arch.SlotHints) > 0 || arch.ThumbnailRef != "" {
 			meta := struct {
-				Tier         string   `json:"tier,omitempty"`
-				FillSlots    []string `json:"fillSlots,omitempty"`
-				ThumbnailRef string   `json:"thumbnailRef,omitempty"`
-			}{Tier: arch.Tier, FillSlots: arch.FillSlots, ThumbnailRef: arch.ThumbnailRef}
+				Tier         string            `json:"tier,omitempty"`
+				FillSlots    []string          `json:"fillSlots,omitempty"`
+				SlotHints    []themes.SlotHint `json:"slotHints,omitempty"`
+				ThumbnailRef string            `json:"thumbnailRef,omitempty"`
+			}{Tier: arch.Tier, FillSlots: arch.FillSlots, SlotHints: arch.SlotHints, ThumbnailRef: arch.ThumbnailRef}
 			metaJSON, err := json.Marshal(meta)
 			if err != nil {
 				return fmt.Errorf("marshal archetype metadata: %w", err)
@@ -268,79 +474,109 @@ func (s Service) ListTemplates(ctx context.Context) ([]themes.Template, error) {
 	if s.Store == nil {
 		return nil, fmt.Errorf("docs store unavailable")
 	}
-	decks, err := s.Store.ListDecks(ctx)
+	// ListDecksLite so session decks with tens of MB of copied template photos
+	// are never deserialized. Each template is then loaded by slug.
+	lite, err := s.Store.ListDecksLite(ctx)
 	if err != nil {
 		return nil, err
 	}
 	var out []themes.Template
-	for _, deck := range decks {
-		if !strings.HasPrefix(deck.Slug, templatePrefix) {
+	for _, d := range lite {
+		if d == nil || !strings.HasPrefix(d.Slug, templatePrefix) {
 			continue
 		}
-		slides, err := s.Store.ListSlides(ctx, deck.ID)
+		deck, err := s.Store.GetDeck(ctx, d.Slug)
 		if err != nil {
-			return nil, fmt.Errorf("list template archetypes: %w", err)
+			return nil, fmt.Errorf("load template %s: %w", d.Slug, err)
 		}
-		archetypes := make([]themes.Archetype, 0, len(slides))
-		for _, slide := range slides {
-			// Notes may carry optional Tier/FillSlots/ThumbnailRef metadata after
-			// a NUL delimiter (see archetypeMetaDelim); split it back out. Rows
-			// without the delimiter decode to Tier="", FillSlots=nil, ThumbnailRef="".
-			parts := strings.SplitN(slide.Notes, archetypeMetaDelim, 2)
-			arch := themes.Archetype{Kind: slide.Title, Title: parts[0], Markup: slide.Content}
-			if len(parts) == 2 {
-				var meta struct {
-					Tier         string   `json:"tier,omitempty"`
-					FillSlots    []string `json:"fillSlots,omitempty"`
-					ThumbnailRef string   `json:"thumbnailRef,omitempty"`
-				}
-				if err := json.Unmarshal([]byte(parts[1]), &meta); err == nil {
-					arch.Tier = meta.Tier
-					arch.FillSlots = meta.FillSlots
-					arch.ThumbnailRef = meta.ThumbnailRef
-				}
-			}
-			archetypes = append(archetypes, arch)
+		tmpl, err := s.templateFromDeck(ctx, deck)
+		if err != nil {
+			return nil, err
 		}
-		// Rehydrate the lossless IR when this is an IR-backed imported template.
-		var model *themes.TemplateModel
-		if deck.TemplateModel != "" {
-			var m themes.TemplateModel
-			if err := json.Unmarshal([]byte(deck.TemplateModel), &m); err == nil {
-				model = &m
-			}
-		}
-		out = append(out, themes.Template{
-			Schema:      SchemaV2,
-			Name:        strings.TrimPrefix(deck.Slug, templatePrefix),
-			Label:       deck.Title,
-			Description: deck.Description,
-			Tokens:      deck.Theme,
-			Assets:      deck.Assets,
-			Archetypes:  archetypes,
-			Scope:       "scope",
-			Model:       model,
-		})
+		out = append(out, tmpl)
 	}
 	return out, nil
 }
 
-// resolveTemplate looks up a template by name, preferring a built-in over a
-// scoped template of the same name.
-func (s Service) resolveTemplate(ctx context.Context, name string) (themes.Template, bool) {
-	if t, ok := themes.LookupTemplate(name); ok {
-		return t, true
-	}
-	scoped, err := s.ListTemplates(ctx)
+func (s Service) templateFromDeck(ctx context.Context, deck *store.DeckManifest) (themes.Template, error) {
+	slides, err := s.Store.ListSlides(ctx, deck.ID)
 	if err != nil {
-		return themes.Template{}, false
+		return themes.Template{}, fmt.Errorf("list template archetypes: %w", err)
 	}
-	for _, t := range scoped {
-		if t.Name == name {
-			return t, true
+	archetypes := make([]themes.Archetype, 0, len(slides))
+	for _, slide := range slides {
+		// Notes may carry optional Tier/FillSlots/ThumbnailRef metadata after
+		// a NUL delimiter (see archetypeMetaDelim); split it back out. Rows
+		// without the delimiter decode to Tier="", FillSlots=nil, ThumbnailRef="".
+		parts := strings.SplitN(slide.Notes, archetypeMetaDelim, 2)
+		arch := themes.Archetype{Kind: slide.Title, Title: parts[0], Markup: slide.Content}
+		if len(parts) == 2 {
+			var meta struct {
+				Tier         string            `json:"tier,omitempty"`
+				FillSlots    []string          `json:"fillSlots,omitempty"`
+				SlotHints    []themes.SlotHint `json:"slotHints,omitempty"`
+				ThumbnailRef string            `json:"thumbnailRef,omitempty"`
+			}
+			if err := json.Unmarshal([]byte(parts[1]), &meta); err == nil {
+				arch.Tier = meta.Tier
+				arch.FillSlots = meta.FillSlots
+				arch.SlotHints = meta.SlotHints
+				arch.ThumbnailRef = meta.ThumbnailRef
+			}
+		}
+		archetypes = append(archetypes, arch)
+	}
+	var model *themes.TemplateModel
+	if deck.TemplateModel != "" {
+		var m themes.TemplateModel
+		if err := json.Unmarshal([]byte(deck.TemplateModel), &m); err == nil {
+			model = &m
 		}
 	}
-	return themes.Template{}, false
+	return themes.Template{
+		Schema:      SchemaV2,
+		Name:        strings.TrimPrefix(deck.Slug, templatePrefix),
+		Label:       deck.Title,
+		Description: deck.Description,
+		Tokens:      deck.Theme,
+		Assets:      deck.Assets,
+		Archetypes:  archetypes,
+		Scope:       "scope",
+		Model:       model,
+		StyleGuide:  styleGuideFromModel(model),
+	}, nil
+}
+
+// styleGuideFromModel extracts the StyleGuide from a TemplateModel if present.
+func styleGuideFromModel(m *themes.TemplateModel) *themes.StyleGuide {
+	if m == nil {
+		return nil
+	}
+	return m.StyleGuide
+}
+
+// resolveTemplate looks up a template by name, preferring a built-in over a
+// scoped template of the same name.
+func (s Service) resolveTemplate(ctx context.Context, name string) (themes.Template, bool, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return themes.Template{}, false, nil
+	}
+	t, ok, err := catalogFromContext(ctx).Resolve(ctx, name)
+	if err != nil {
+		return themes.Template{}, false, fmt.Errorf("resolve template %q: %w", name, err)
+	}
+	if ok {
+		return t, true, nil
+	}
+	if t, ok := themes.LookupTemplate(name); ok {
+		return HydrateTemplateFonts(t), true, nil
+	}
+	t, ok, err = s.scopedTemplate(ctx, name)
+	if err != nil {
+		return themes.Template{}, false, fmt.Errorf("resolve template %q: %w", name, err)
+	}
+	return t, ok, nil
 }
 
 // Template returns a single SCOPED template by name (reconstructed from its
@@ -350,16 +586,28 @@ func (s Service) resolveTemplate(ctx context.Context, name string) (themes.Templ
 // built-in (which is read-only) from a scoped template. Use themes.LookupTemplate
 // for built-ins, or resolveTemplate to merge both.
 func (s Service) Template(ctx context.Context, name string) (themes.Template, bool, error) {
-	scoped, err := s.ListTemplates(ctx)
+	return s.scopedTemplate(ctx, strings.TrimSpace(name))
+}
+
+func (s Service) scopedTemplate(ctx context.Context, name string) (themes.Template, bool, error) {
+	if s.Store == nil {
+		return themes.Template{}, false, fmt.Errorf("docs store unavailable")
+	}
+	if name == "" {
+		return themes.Template{}, false, nil
+	}
+	deck, err := s.Store.GetDeck(ctx, templatePrefix+name)
+	if err != nil {
+		if errors.Is(err, store.ErrDocsNotFound) {
+			return themes.Template{}, false, nil
+		}
+		return themes.Template{}, false, err
+	}
+	tmpl, err := s.templateFromDeck(ctx, deck)
 	if err != nil {
 		return themes.Template{}, false, err
 	}
-	for _, t := range scoped {
-		if t.Name == name {
-			return t, true, nil
-		}
-	}
-	return themes.Template{}, false, nil
+	return tmpl, true, nil
 }
 
 // TemplateSlug returns the canonical store slug for a scoped template of the
@@ -409,7 +657,7 @@ func (s Service) CopyDeckTo(ctx context.Context, dst Service, slug string) (*sto
 	} else if err != nil && !errors.Is(err, store.ErrDocsNotFound) {
 		return nil, fmt.Errorf("check destination deck: %w", err)
 	}
-	newDeck, err := dst.CreateDeck(ctx, deck.Slug, deck.Title, deck.Description, deck.Theme)
+	newDeck, err := dst.CreateDeckWithAssets(ctx, deck.Slug, deck.Title, deck.Description, deck.Theme, deck.Assets)
 	if err != nil {
 		return nil, fmt.Errorf("create destination deck: %w", err)
 	}
@@ -439,5 +687,6 @@ func (s Service) Scene(ctx context.Context, slug string) (SceneGraph, []Diagnost
 		scene.Slides = append(scene.Slides, slide)
 		diagnostics = append(diagnostics, slideDiagnostics...)
 	}
+	scene.Assets = assetsUsedByScene(scene)
 	return scene, diagnostics, nil
 }

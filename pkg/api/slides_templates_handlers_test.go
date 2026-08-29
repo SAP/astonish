@@ -31,6 +31,48 @@ func withDocsServices(req *http.Request, personal, team store.DocsStore) *http.R
 	return req.WithContext(store.WithServices(req.Context(), &store.Services{PersonalDocs: personal, Docs: team}))
 }
 
+func TestListSlidesTemplatesMergesInheritedScopes(t *testing.T) {
+	personal := newMemDocsStore()
+	seedScopedTemplate(t, personal, "mine", "Mine")
+	org := store.NewMemorySlideTemplateStore()
+	if err := org.Save(context.Background(), slides.RecordFromTemplate(themes.Template{
+		Name:  "acme",
+		Label: "Acme Org",
+		Archetypes: []themes.Archetype{
+			{Kind: "title", Markup: `<ast-slide id="t"></ast-slide>`},
+		},
+	})); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/docs/slides/templates", nil)
+	req = req.WithContext(store.WithServices(req.Context(), &store.Services{
+		PersonalDocs:      personal,
+		Docs:              newMemDocsStore(),
+		OrgSlideTemplates: org,
+	}))
+	rec := httptest.NewRecorder()
+	ListSlidesTemplatesHandler(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Templates []struct {
+			Name  string `json:"name"`
+			Scope string `json:"scope"`
+		} `json:"templates"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, tmpl := range resp.Templates {
+		got[tmpl.Name+"|"+tmpl.Scope] = tmpl.Scope
+	}
+	if got["classic|builtin"] == "" || got["mine|personal"] == "" || got["acme|org"] == "" {
+		t.Fatalf("merged catalog missing rows: %+v", resp.Templates)
+	}
+}
+
 func TestListSlidesTemplatesReturnsBuiltins(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/api/docs/slides/templates", nil)
 	req = withDocsServices(req, newMemDocsStore(), newMemDocsStore())
@@ -50,15 +92,15 @@ func TestListSlidesTemplatesReturnsBuiltins(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
-	if len(resp.Templates) < 3 {
-		t.Fatalf("expected >=3 built-in templates, got %d", len(resp.Templates))
+	if len(resp.Templates) < 2 {
+		t.Fatalf("expected >=2 built-in templates, got %d", len(resp.Templates))
 	}
 	names := map[string]bool{}
 	for _, tmpl := range resp.Templates {
 		names[tmpl.Name] = true
 	}
-	if !names["midnight"] || !names["light-corporate"] {
-		t.Fatalf("expected built-ins midnight and light-corporate, got %v", names)
+	if !names["classic"] || !names["modern"] {
+		t.Fatalf("expected built-ins classic and modern, got %v", names)
 	}
 }
 
@@ -78,8 +120,8 @@ func TestListSlidesTemplatesReturnsBuiltinsWithoutService(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
-	if len(resp.Templates) < 3 {
-		t.Fatalf("expected >=3 built-in templates without service, got %d", len(resp.Templates))
+	if len(resp.Templates) < 2 {
+		t.Fatalf("expected >=2 built-in templates without service, got %d", len(resp.Templates))
 	}
 }
 
@@ -358,15 +400,99 @@ func TestListSlidesTemplatesOmitsAssetsAndFlagsScope(t *testing.T) {
 				t.Fatalf("corp template scope wrong: %+v", tmpl)
 			}
 		}
-		if tmpl.Name == "midnight" {
+		if tmpl.Name == "classic" {
 			builtin = true
-			if tmpl.Scope != "builtin" {
-				t.Fatalf("built-in scope wrong: %+v", tmpl)
+		}
+	}
+	if !corp {
+		t.Fatalf("expected corp in personal-only list; got %+v", resp.Templates)
+	}
+	if builtin {
+		t.Fatalf("scoped list must not include built-ins; got %+v", resp.Templates)
+	}
+}
+
+func TestListSlidesTemplatesIncludesCover(t *testing.T) {
+	personal := newMemDocsStore()
+	baked := themes.Template{
+		Schema: 2,
+		Name:   "brand",
+		Label:  "Brand",
+		Tokens: map[string]string{"surface": "#FFFFFF", "ink": "#111111", "accent": "#2563eb"},
+		Archetypes: []themes.Archetype{
+			{Kind: "title", Title: "Blue cover", Markup: `<ast-slide id="t"></ast-slide>`, ThumbnailRef: "thumb/title"},
+			{Kind: "content", Title: "Body", Markup: `<ast-slide id="c"></ast-slide>`},
+		},
+	}
+	if err := (slides.Service{Store: personal}).SaveTemplate(context.Background(), baked); err != nil {
+		t.Fatalf("seed baked template: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/docs/slides/templates", nil)
+	req = withDocsServices(req, personal, newMemDocsStore())
+	rec := httptest.NewRecorder()
+	ListSlidesTemplatesHandler(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Templates []struct {
+			Name  string `json:"name"`
+			Cover *struct {
+				Kind         string `json:"kind"`
+				ThumbnailRef string `json:"thumbnailRef"`
+				Markup       string `json:"markup"`
+			} `json:"cover"`
+		} `json:"templates"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+
+	var sawBuiltin, sawBaked bool
+	for _, tmpl := range resp.Templates {
+		switch tmpl.Name {
+		case "classic":
+			sawBuiltin = true
+			if tmpl.Cover == nil || tmpl.Cover.Kind != "title" {
+				t.Fatalf("classic cover = %+v, want kind=title", tmpl.Cover)
+			}
+			if tmpl.Cover.ThumbnailRef != "" {
+				t.Fatalf("built-in cover must not ship a thumbnailRef, got %q", tmpl.Cover.ThumbnailRef)
+			}
+			if !strings.Contains(tmpl.Cover.Markup, "<ast-slide") {
+				t.Fatalf("built-in cover must ship live markup, got %q", tmpl.Cover.Markup)
+			}
+		case "brand":
+			sawBaked = true
+			if tmpl.Cover == nil || tmpl.Cover.Kind != "title" || tmpl.Cover.ThumbnailRef != "thumb/title" {
+				t.Fatalf("brand cover = %+v, want kind=title thumbnailRef=thumb/title", tmpl.Cover)
+			}
+			if tmpl.Cover.Markup != "" {
+				t.Fatalf("baked cover must omit markup, got %q", tmpl.Cover.Markup)
 			}
 		}
 	}
-	if !corp || !builtin {
-		t.Fatalf("expected both corp (scoped) and midnight (builtin); got %+v", resp.Templates)
+	if !sawBuiltin || !sawBaked {
+		t.Fatalf("expected classic + brand covers; got %+v", resp.Templates)
+	}
+}
+
+func TestTemplateCoverDTOPrefersTitleVariant(t *testing.T) {
+	tmpl := themes.Template{
+		Archetypes: []themes.Archetype{
+			{Kind: "section", Markup: "section"},
+			{Kind: "title-2", Markup: "cover-2", ThumbnailRef: "thumb/title-2"},
+			{Kind: "title", Markup: "cover"},
+		},
+	}
+	cover := templateCoverDTO(tmpl)
+	if cover == nil || cover.Kind != "title-2" || cover.ThumbnailRef != "thumb/title-2" {
+		t.Fatalf("cover = %+v, want first title* (title-2) with thumbnailRef", cover)
+	}
+	if cover.Markup != "" {
+		t.Fatalf("markup must be omitted when thumbnailRef is set, got %q", cover.Markup)
 	}
 }
 
@@ -616,15 +742,14 @@ func TestGetSlidesTemplateThumbnailServesPNG(t *testing.T) {
 	}
 }
 
-func TestGetSlidesTemplateThumbnailMatchesVariantSuffix(t *testing.T) {
+func TestGetSlidesTemplateThumbnailExactKindOnly(t *testing.T) {
 	personal := newMemDocsStore()
 	seedThumbnailTemplate(t, personal, "thumbtpl", "title")
 
-	// Requesting a variant kind (title-2) must fall back to the base "title"
-	// archetype's thumbnail.
+	// title-2 is a different cover. Do not serve the title thumbnail.
 	rec := thumbnailReq(t, personal, "thumbtpl", "title-2")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("title-2 must not fall back to title, got %d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -632,6 +757,88 @@ func TestGetSlidesTemplateThumbnailUnknownTemplate(t *testing.T) {
 	rec := thumbnailReq(t, newMemDocsStore(), "no-such-template", "title")
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 for unknown template, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestGetSlidesTemplateMediaServesPNG(t *testing.T) {
+	personal := newMemDocsStore()
+	png := []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x01, 0x02, 0x03}
+	ref := "sha256-deadbeef"
+	tmpl := themes.Template{
+		Schema: 2,
+		Name:   "phototpl",
+		Assets: map[string]string{ref: "data:image/png;base64," + base64.StdEncoding.EncodeToString(png)},
+		Archetypes: []themes.Archetype{
+			{Kind: "title", Markup: `<ast-slide id="t"></ast-slide>`},
+		},
+	}
+	if err := (slides.Service{Store: personal}).SaveTemplate(context.Background(), tmpl); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/docs/slides/templates/phototpl/media/"+ref, nil)
+	req = withDocsServices(req, personal, newMemDocsStore())
+	req = mux.SetURLVars(req, map[string]string{"name": "phototpl", "ref": ref})
+	rec := httptest.NewRecorder()
+	GetSlidesTemplateMediaHandler(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "image/png" {
+		t.Fatalf("Content-Type = %q", ct)
+	}
+	if !bytes.Equal(rec.Body.Bytes(), png) {
+		t.Fatalf("body mismatch")
+	}
+}
+
+func TestGetSlidesTemplateMediaServesBuiltinDeclaredFont(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/docs/slides/templates/modern/media/font:Manrope:400", nil)
+	req = mux.SetURLVars(req, map[string]string{"name": "modern", "ref": "font:Manrope:400"})
+	rec := httptest.NewRecorder()
+	GetSlidesTemplateMediaHandler(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("modern declared Manrope should serve, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("Content-Type") != "font/woff2" {
+		t.Fatalf("Content-Type = %q", rec.Header().Get("Content-Type"))
+	}
+	if rec.Body.Len() < 100 {
+		t.Fatal("empty font body")
+	}
+}
+
+func TestGetSlidesTemplateMediaBuiltinWithoutDeclaration(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/docs/slides/templates/aurora/media/font:Manrope:400", nil)
+	req = mux.SetURLVars(req, map[string]string{"name": "aurora", "ref": "font:Manrope:400"})
+	rec := httptest.NewRecorder()
+	GetSlidesTemplateMediaHandler(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("undeclared aurora font should 404, got %d", rec.Code)
+	}
+}
+
+func TestGetSlidesTemplateMediaServesFont(t *testing.T) {
+	personal := newMemDocsStore()
+	tmpl := themes.Template{
+		Name:   "phototpl",
+		Assets: map[string]string{"font:SAP:regular": "data:font/ttf;base64,AAAA"},
+		Archetypes: []themes.Archetype{
+			{Kind: "title", Markup: `<ast-slide id="t"></ast-slide>`},
+		},
+	}
+	if err := (slides.Service{Store: personal}).SaveTemplate(context.Background(), tmpl); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/docs/slides/templates/phototpl/media/font:SAP:regular", nil)
+	req = withDocsServices(req, personal, newMemDocsStore())
+	req = mux.SetURLVars(req, map[string]string{"name": "phototpl", "ref": "font:SAP:regular"})
+	rec := httptest.NewRecorder()
+	GetSlidesTemplateMediaHandler(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("fonts should serve, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("Content-Type") != "font/ttf" {
+		t.Fatalf("Content-Type = %q", rec.Header().Get("Content-Type"))
 	}
 }
 

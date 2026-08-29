@@ -1,7 +1,8 @@
 import {
   Settings, Key, Server, MessageSquare, Globe, Radio, Database,
   Brain, GitFork, Wand2, Clock, Shield, Box,
-  GitBranch, Store, Users, BookOpen, UserCog, FileText, Crown, Building2, KeyRound, Layers, Network
+  GitBranch, Store, Users, BookOpen, UserCog, FileText, Crown, Building2, KeyRound, Layers, Network,
+  Presentation
 } from 'lucide-react'
 
 export interface SettingsMenuItem {
@@ -28,6 +29,7 @@ export const TEAM_ITEMS: SettingsMenuItem[] = [
   { id: 'team-members', label: 'Members', icon: Users },
   { id: 'team-providers', label: 'Providers', icon: Key },
   { id: 'team-skills', label: 'Skills', icon: Wand2 },
+  { id: 'team-slides-templates', label: 'Slides Templates', icon: Presentation },
   { id: 'team-mcp', label: 'MCP Servers', icon: Server },
   { id: 'team-a2a', label: 'A2A Agents', icon: Globe },
   { id: 'team-network', label: 'Network Policy', icon: Network },
@@ -43,6 +45,7 @@ export const ORG_ITEMS: SettingsMenuItem[] = [
   { id: 'org-users', label: 'Users', icon: UserCog },
   { id: 'org-providers', label: 'Providers', icon: Key },
   { id: 'org-skills', label: 'Skills', icon: Wand2 },
+  { id: 'org-slides-templates', label: 'Slides Templates', icon: Presentation },
   { id: 'org-mcp', label: 'MCP Servers', icon: Server },
   { id: 'org-a2a', label: 'A2A Agents', icon: Globe },
   { id: 'org-network', label: 'Network Policy', icon: Network },
@@ -56,6 +59,7 @@ export const PLATFORM_ITEMS: SettingsMenuItem[] = [
   { id: 'platform-users', label: 'Users', icon: UserCog },
   { id: 'platform-providers', label: 'Providers', icon: Key },
   { id: 'platform-skills', label: 'Skills', icon: Wand2 },
+  { id: 'platform-slides-templates', label: 'Slides Templates', icon: Presentation },
   { id: 'platform-mcp', label: 'MCP Servers', icon: Server },
   { id: 'platform-a2a', label: 'A2A Agents', icon: Globe },
   { id: 'platform-network', label: 'Network Policy', icon: Network },

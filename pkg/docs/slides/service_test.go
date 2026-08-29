@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/SAP/astonish/pkg/docs/slides/themes"
@@ -114,6 +115,83 @@ func TestServiceWriteSlideReplacesPosition(t *testing.T) {
 	}
 }
 
+func TestServiceMoveSlideElementsRewritesXY(t *testing.T) {
+	ctx := context.Background()
+	backend := &memoryDocsStore{}
+	svc := Service{Store: backend}
+	deck, err := svc.CreateDeck(ctx, "deck", "Deck", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	markup := `<ast-slide id="s0"><ast-text id="headline" x="160" y="380" w="400" h="80">Title</ast-text></ast-slide>`
+	if _, diags, err := svc.WriteSlide(ctx, deck.Slug, 0, markup, ""); err != nil || HasErrors(diags) {
+		t.Fatalf("seed: diags=%#v err=%v", diags, err)
+	}
+	item, diags, err := svc.MoveSlideElements(ctx, deck.Slug, 0, []ElementMove{{ID: "headline", X: 220, Y: 410}})
+	if err != nil || HasErrors(diags) {
+		t.Fatalf("move: diags=%#v err=%v", diags, err)
+	}
+	if !strings.Contains(item.Content, `id="headline"`) || !strings.Contains(item.Content, `x="220"`) || !strings.Contains(item.Content, `y="410"`) {
+		t.Fatalf("expected rewritten geometry, got %s", item.Content)
+	}
+	if strings.Contains(item.Content, `x="160"`) {
+		t.Fatalf("old x still present: %s", item.Content)
+	}
+	if _, _, err := svc.MoveSlideElements(ctx, deck.Slug, 0, []ElementMove{{ID: "missing", X: 1, Y: 1}}); err == nil {
+		t.Fatal("expected missing element error")
+	}
+}
+
+func TestServiceApplySlideEditsResizesElement(t *testing.T) {
+	store := &memoryDocsStore{}
+	svc := Service{Store: store}
+	ctx := context.Background()
+	deck, err := svc.CreateDeck(ctx, "resize", "Resize", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	markup := `<ast-slide id="s"><ast-image id="photo" x="100" y="120" w="400" h="200" asset-ref="sha256-photo"></ast-image></ast-slide>`
+	if _, _, err := svc.WriteSlide(ctx, deck.Slug, 0, markup, ""); err != nil {
+		t.Fatal(err)
+	}
+	item, diags, err := svc.ApplySlideEdits(ctx, deck.Slug, 0, SlideEdits{Resizes: []ElementResize{{ID: "photo", X: 50, Y: 70, W: 600, H: 300}}})
+	if err != nil || HasErrors(diags) {
+		t.Fatalf("resize: diags=%#v err=%v", diags, err)
+	}
+	for _, attr := range []string{`x="50"`, `y="70"`, `w="600"`, `h="300"`} {
+		if !strings.Contains(item.Content, attr) {
+			t.Fatalf("resized geometry missing %s: %s", attr, item.Content)
+		}
+	}
+}
+
+func TestServiceApplySlideEditsTextAndDelete(t *testing.T) {
+	ctx := context.Background()
+	backend := &memoryDocsStore{}
+	svc := Service{Store: backend}
+	deck, err := svc.CreateDeck(ctx, "deck", "Deck", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	markup := `<ast-slide id="s0"><ast-text id="headline" x="160" y="380" w="400" h="80">Title</ast-text><ast-text id="dek" x="160" y="500" w="400" h="40">Sub</ast-text></ast-slide>`
+	if _, diags, err := svc.WriteSlide(ctx, deck.Slug, 0, markup, ""); err != nil || HasErrors(diags) {
+		t.Fatalf("seed: diags=%#v err=%v", diags, err)
+	}
+	item, diags, err := svc.ApplySlideEdits(ctx, deck.Slug, 0, SlideEdits{
+		Texts:   []ElementText{{ID: "headline", Text: "Hello & world"}},
+		Deletes: []string{"dek"},
+	})
+	if err != nil || HasErrors(diags) {
+		t.Fatalf("edit: diags=%#v err=%v", diags, err)
+	}
+	if !strings.Contains(item.Content, "Hello &amp; world") {
+		t.Fatalf("text not rewritten: %s", item.Content)
+	}
+	if strings.Contains(item.Content, `id="dek"`) {
+		t.Fatalf("dek should be deleted: %s", item.Content)
+	}
+}
+
 func TestServiceFailsClosedWithoutStore(t *testing.T) {
 	svc := Service{}
 	if _, err := svc.CreateDeck(context.Background(), "slug", "title", "", nil); err == nil {
@@ -135,7 +213,7 @@ func TestServiceCopyDeckTo(t *testing.T) {
 	ctx := context.Background()
 	srcBackend := &memoryDocsStore{}
 	src := Service{Store: srcBackend}
-	deck, err := src.CreateDeck(ctx, "quarterly", "Quarterly", "desc", map[string]string{"surface": "#0B1020"})
+	deck, err := src.CreateDeckWithAssets(ctx, "quarterly", "Quarterly", "desc", map[string]string{"surface": "#0B1020"}, map[string]string{"sha256-photo": "data:image/png;base64,cGhvdG8="})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,6 +238,9 @@ func TestServiceCopyDeckTo(t *testing.T) {
 	}
 	if newDeck.Theme["surface"] != "#0B1020" {
 		t.Fatalf("theme not copied: %#v", newDeck.Theme)
+	}
+	if newDeck.Assets["sha256-photo"] != deck.Assets["sha256-photo"] {
+		t.Fatalf("assets not copied: %#v", newDeck.Assets)
 	}
 
 	_, dstSlides, err := dst.Deck(ctx, newDeck.Slug)
@@ -435,12 +516,12 @@ func TestSaveAndListTemplatesRoundtrip(t *testing.T) {
 	}
 
 	// resolveTemplate should find the scoped template by name.
-	if _, ok := svc.resolveTemplate(ctx, "acme"); !ok {
-		t.Fatal("resolveTemplate did not find scoped template")
+	if _, ok, err := svc.resolveTemplate(ctx, "acme"); err != nil || !ok {
+		t.Fatalf("resolveTemplate did not find scoped template: %v", err)
 	}
 	// Built-ins still resolve.
-	if _, ok := svc.resolveTemplate(ctx, "midnight"); !ok {
-		t.Fatal("resolveTemplate did not find built-in template")
+	if _, ok, err := svc.resolveTemplate(ctx, "midnight"); err != nil || !ok {
+		t.Fatalf("resolveTemplate did not find built-in template: %v", err)
 	}
 }
 
@@ -882,5 +963,39 @@ func TestCreateDeckTagsSessionID(t *testing.T) {
 	}
 	if deck2.SessionID != "" {
 		t.Fatalf("expected empty SessionID, got %q", deck2.SessionID)
+	}
+}
+
+func TestSceneOmitsUnreferencedAssets(t *testing.T) {
+	ctx := context.Background()
+	backend := newMultiDeckStore()
+	svc := Service{Store: backend}
+	assets := map[string]string{
+		"sha256-used":        "data:image/png;base64,AAAUSED",
+		"sha256-unused":      "data:image/png;base64,AAANOISE",
+		"font:Brand:regular": "data:font/ttf;base64,AAAFONT",
+	}
+	theme := map[string]string{
+		embeddedFontsThemeKey: `[{"family":"Brand","variant":"regular","assetKey":"font:Brand:regular"}]`,
+	}
+	if _, err := svc.CreateDeckWithAssets(ctx, "d", "Deck", "", theme, assets); err != nil {
+		t.Fatal(err)
+	}
+	markup := `<ast-slide id="s" title="T"><ast-image id="im" x="10" y="10" w="100" h="80" asset-ref="sha256-used"></ast-image></ast-slide>`
+	if _, _, err := svc.WriteSlide(ctx, "d", 0, markup, ""); err != nil {
+		t.Fatal(err)
+	}
+	scene, _, err := svc.Scene(ctx, "d")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scene.Assets["sha256-unused"] != "" {
+		t.Fatalf("unused photo must not be in the scene: %#v", scene.Assets)
+	}
+	if scene.Assets["sha256-used"] == "" {
+		t.Fatal("referenced image missing from scene")
+	}
+	if scene.Assets["font:Brand:regular"] == "" {
+		t.Fatal("embedded font missing from scene")
 	}
 }

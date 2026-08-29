@@ -1,6 +1,7 @@
 package slides
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"strings"
@@ -159,6 +160,9 @@ func TestExportHTML_TextWhitespacePreWrap(t *testing.T) {
 	}
 	if !strings.Contains(doc, "ast-text{white-space:pre-wrap") {
 		t.Fatal("ast-text CSS rule not applied to the ast-text element")
+	}
+	if !strings.Contains(doc, "overflow-x:clip") || !strings.Contains(doc, "overflow-y:visible") {
+		t.Fatal("ast-text must not clip glyph descenders with overflow:hidden")
 	}
 	// The separator run's newline must be present in the emitted markup.
 	if !strings.Contains(doc, "\n\n") {
@@ -340,9 +344,142 @@ func TestExportEmitsFontFace(t *testing.T) {
 	if strings.Contains(doc, "--ast-embedded-fonts") {
 		t.Errorf("embedded-fonts must not be emitted as a --ast-* variable\n%s", doc)
 	}
-	// The concrete family name is still set on the display token.
 	if !strings.Contains(doc, "--ast-display:72 Brand, Aptos, Arial, sans-serif") {
 		t.Errorf("expected --ast-display to keep the bare family name; got:\n%s", doc)
+	}
+}
+
+func TestWriteThemeCSSSkipsTemplateName(t *testing.T) {
+	var buf bytes.Buffer
+	writeThemeCSS(&buf, map[string]string{
+		"surface":             "#FFFFFF",
+		themeKeyTemplateName:  "gco-iped",
+		embeddedFontsThemeKey: "[]",
+	})
+	css := buf.String()
+	if strings.Contains(css, "--ast-template-name") || strings.Contains(css, "gco-iped") {
+		t.Fatalf("template-name leaked into CSS: %s", css)
+	}
+	if strings.Contains(css, "--ast-embedded-fonts") {
+		t.Fatalf("embedded-fonts leaked into CSS: %s", css)
+	}
+	if !strings.Contains(css, "--ast-surface:#FFFFFF") {
+		t.Fatalf("surface token missing: %s", css)
+	}
+}
+
+func TestHTMLGradientIDsAreSlideScoped(t *testing.T) {
+	grad := func(cx, cy int) *Gradient {
+		return &Gradient{Kind: "radial", Cx: cx, Cy: cy, Stops: []GradientStop{
+			{Pos: 0, Color: "#8B5CF6"}, {Pos: 100, Color: "#0B0D0F"},
+		}}
+	}
+	scene := SceneGraph{
+		SchemaVersion: SchemaV1,
+		Title:         "Two washes",
+		Slides: []Slide{
+			{ID: "cover", Nodes: []Node{
+				{ID: "bg", Type: "shape", Geometry: Geometry{W: 1920, H: 1080}, Geom: "rect", Fill: "#0B0D0F", Gradient: grad(80, 8)},
+				{ID: "t", Type: "text", Geometry: Geometry{W: 100, H: 40}, Text: "A"},
+			}},
+			{ID: "closer", Nodes: []Node{
+				{ID: "bg", Type: "shape", Geometry: Geometry{W: 1920, H: 1080}, Geom: "rect", Fill: "#0B0D0F", Gradient: grad(18, 88)},
+				{ID: "t", Type: "text", Geometry: Geometry{W: 100, H: 40}, Text: "B"},
+			}},
+		},
+	}
+	doc := mustExport(t, HTMLExporter{RuntimeJS: []byte(`window.runtimeReady=true`)}, scene)
+	if strings.Contains(doc, `id="gradbg"`) {
+		t.Fatal("duplicate id=gradbg would make PDF paint the cover wash on every slide")
+	}
+	if !strings.Contains(doc, `id="grad-cover-bg"`) || !strings.Contains(doc, `id="grad-closer-bg"`) {
+		t.Fatalf("expected slide-scoped gradient ids")
+	}
+	if !strings.Contains(doc, `url(#grad-cover-bg)`) || !strings.Contains(doc, `url(#grad-closer-bg)`) {
+		t.Fatal("rects must point at their own gradient id")
+	}
+}
+
+func TestExportRadialOriginFromTheme(t *testing.T) {
+	scene := SceneGraph{
+		SchemaVersion: SchemaV1,
+		Title:         "Closer",
+		Slides: []Slide{{ID: "s1", Nodes: []Node{
+			{ID: "bg", Type: "shape", Geometry: Geometry{W: 1920, H: 1080}, Geom: "rect", Fill: "#0B0D0F",
+				Gradient: &Gradient{Kind: "radial", Cx: 18, Cy: 88, Stops: []GradientStop{{Pos: 0, Color: "#8B5CF6"}, {Pos: 100, Color: "#0B0D0F"}}}},
+			{ID: "t", Type: "text", Geometry: Geometry{W: 100, H: 40}, Text: "Hi"},
+		}}},
+	}
+	doc := mustExport(t, HTMLExporter{RuntimeJS: []byte(`window.runtimeReady=true`)}, scene)
+	if !strings.Contains(doc, `cx="18%"`) || !strings.Contains(doc, `cy="88%"`) {
+		t.Fatalf("closer glare origin missing:\n%s", doc[:min(800, len(doc))])
+	}
+}
+
+func TestExportLoadsOnlyDeclaredDeckFonts(t *testing.T) {
+	scene := SceneGraph{
+		SchemaVersion: SchemaV1,
+		Title:         "Modern",
+		Theme: map[string]string{
+			"displayFont":         "Manrope",
+			embeddedFontsThemeKey: `[{"family":"Manrope","variant":"400","assetKey":"font:Manrope:400"}]`,
+		},
+		Slides: []Slide{{ID: "s1", Nodes: []Node{{ID: "t", Type: "text", Geometry: Geometry{W: 100, H: 40}, Text: "Hi"}}}},
+	}
+	doc := mustExport(t, HTMLExporter{RuntimeJS: []byte(`window.runtimeReady=true`)}, scene)
+	if !strings.Contains(doc, `@font-face{font-family:"Manrope"`) || !strings.Contains(doc, `data:font/woff2;base64,`) {
+		t.Fatalf("declared Manrope face missing:\n%s", doc[:min(600, len(doc))])
+	}
+	if strings.Contains(doc, `font-family:"JetBrains Mono"`) {
+		t.Fatal("undeclared JetBrains Mono must not be loaded")
+	}
+}
+
+func TestExportIgnoresDisplayFontWithoutDeclaration(t *testing.T) {
+	scene := SceneGraph{
+		SchemaVersion: SchemaV1,
+		Title:         "Named but undeclared",
+		Theme:         map[string]string{"displayFont": "Manrope", "monoFont": "JetBrains Mono"},
+		Slides:        []Slide{{ID: "s1", Nodes: []Node{{ID: "t", Type: "text", Geometry: Geometry{W: 100, H: 40}, Text: "Hi"}}}},
+	}
+	doc := mustExport(t, HTMLExporter{RuntimeJS: []byte(`window.runtimeReady=true`)}, scene)
+	if strings.Contains(doc, "@font-face") {
+		t.Fatal("naming a family without embedded-fonts must not load faces")
+	}
+}
+
+func TestExportInheritsDeclaredFontsFromTemplate(t *testing.T) {
+	scene := SceneGraph{
+		SchemaVersion: SchemaV1,
+		Title:         "Older modern deck",
+		Theme: map[string]string{
+			themeKeyTemplateName: "modern",
+			"displayFont":        "Manrope",
+		},
+		Slides: []Slide{{ID: "s1", Nodes: []Node{{ID: "t", Type: "text", Geometry: Geometry{W: 100, H: 40}, Text: "Hi"}}}},
+	}
+	doc := mustExport(t, HTMLExporter{RuntimeJS: []byte(`window.runtimeReady=true`)}, scene)
+	if !strings.Contains(doc, `@font-face{font-family:"Manrope"`) {
+		t.Fatal("inheriting modern's declaration should load Manrope")
+	}
+	if !strings.Contains(doc, `@font-face{font-family:"JetBrains Mono"`) {
+		t.Fatal("inheriting modern's declaration should load JetBrains Mono")
+	}
+}
+
+func TestExportDoesNotLoadFontsFromUndeclaringTemplate(t *testing.T) {
+	scene := SceneGraph{
+		SchemaVersion: SchemaV1,
+		Title:         "Aurora",
+		Theme: map[string]string{
+			themeKeyTemplateName: "aurora",
+			"displayFont":        "Manrope",
+		},
+		Slides: []Slide{{ID: "s1", Nodes: []Node{{ID: "t", Type: "text", Geometry: Geometry{W: 100, H: 40}, Text: "Hi"}}}},
+	}
+	doc := mustExport(t, HTMLExporter{RuntimeJS: []byte(`window.runtimeReady=true`)}, scene)
+	if strings.Contains(doc, "@font-face") {
+		t.Fatal("aurora declares no fonts; naming Manrope must not load faces")
 	}
 }
 
@@ -358,4 +495,3 @@ func TestExportNoFontFaceWhenAbsent(t *testing.T) {
 		t.Errorf("no deck without embedded fonts should emit @font-face; got:\n%s", doc)
 	}
 }
-

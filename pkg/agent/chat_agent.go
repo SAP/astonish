@@ -468,7 +468,19 @@ func canAutoInjectTool(ctx context.Context, toolIndex *ToolIndex, toolName strin
 	if toolName == "" {
 		return false
 	}
-	// Request-scoped MCP tools (team catalog) take precedence.
+	if toolIndex != nil {
+		resolved := resolveIndexedToolName(toolIndex, toolName)
+		if fp := toolIndex.FirstPartyToolEntry(resolved); fp != nil {
+			for _, disabled := range store.DisabledToolsFromContext(ctx) {
+				if disabled == resolved || disabled == toolName || disabled == fp.Name {
+					return false
+				}
+			}
+			return true
+		}
+	}
+	// Request-scoped MCP tools (team catalog) take precedence over stale MCP
+	// index entries, but not over first-party tools (checked above).
 	if t, gName, ok := LookupRequestMCPTool(ctx, toolName); ok && t != nil {
 		for _, disabled := range store.DisabledToolsFromContext(ctx) {
 			if disabled == t.Name() || disabled == toolName {
@@ -587,6 +599,17 @@ func (c *ChatAgent) DynamicToolInjectionCallback() llmagent.BeforeModelCallback 
 			resolved := resolveIndexedToolName(c.ToolIndex, toolName)
 			if _, exists := req.Tools[resolved]; exists {
 				continue // already registered (static main-thread tool)
+			}
+
+			// First-party tools (slides, email, core, …) win over MCP servers that
+			// reuse the same bare name (email-mcp list_templates vs slides).
+			if fp := c.ToolIndex.FirstPartyToolEntry(resolved); fp != nil {
+				if _, exists := req.Tools[fp.Tool.Name()]; exists {
+					continue
+				}
+				packToolIntoRequest(req, fp.Tool)
+				injected++
+				continue
 			}
 
 			// Prefer request-scoped MCP tools (team catalog) over stale index entries.

@@ -7,6 +7,7 @@ import {
   HARNESS_DEFAULT_WIDTH,
   HARNESS_MIN_WIDTH,
   CHAT_MIN_WIDTH,
+  slidesHarnessLabel,
   type HarnessFocus,
 } from '../components/chat/chatHarness'
 import type { ChatMsg } from '../components/chat/chatTypes'
@@ -300,6 +301,22 @@ describe('chatHarness', () => {
           { kind: 'slides', deckSlug: 'deck-b', messageIndex: 1 },
         ),
       ).toBe(false)
+    })
+  })
+
+  describe('slidesHarnessLabel', () => {
+    it('prefers description over deck title, slide title, and persist slug', () => {
+      expect(slidesHarnessLabel({
+        description: 'A life in slides',
+        deckTitle: 'Steve Jobs',
+        title: 'Cover',
+      })).toBe('A life in slides')
+    })
+
+    it('falls back to deck title then slide title, never a blank label', () => {
+      expect(slidesHarnessLabel({ deckTitle: 'Steve Jobs', title: 'Cover' })).toBe('Steve Jobs')
+      expect(slidesHarnessLabel({ title: 'Cover' })).toBe('Cover')
+      expect(slidesHarnessLabel({})).toBe('Presentation')
     })
   })
 

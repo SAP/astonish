@@ -98,6 +98,7 @@ func (m *mockOrgDataStore) ForUser(userID string) store.PersonalDataStore {
 
 func (m *mockOrgDataStore) OrgMemories() store.MemoryStore               { return m.memories }
 func (m *mockOrgDataStore) OrgSkills() store.SkillStore                  { return nil }
+func (m *mockOrgDataStore) OrgSlideTemplates() store.SlideTemplateStore  { return nil }
 func (m *mockOrgDataStore) OrgMCPServers() store.MCPServerStore          { return nil }
 func (m *mockOrgDataStore) OrgNetworkPolicies() store.NetworkPolicyStore { return nil }
 func (m *mockOrgDataStore) OrgApps() store.AppStore                      { return m.orgApps }

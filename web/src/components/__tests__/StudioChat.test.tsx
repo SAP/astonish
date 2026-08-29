@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, act } from '@testing-library/react'
+import { render, screen, act, waitFor } from '@testing-library/react'
 import StudioChat from '../StudioChat'
 import { fetchSessionHistory } from '../../api/studioChat'
 
@@ -162,6 +162,77 @@ describe('StudioChat', () => {
       expect(screen.getByText('Layout A')).toBeInTheDocument()
       expect(screen.getByText('Layout B')).toBeInTheDocument()
       expect(screen.getAllByRole('radio')).toHaveLength(2)
+    })
+
+    it('collapses an answered question to the prompt after reload', async () => {
+      vi.mocked(fetchSessionHistory).mockResolvedValue({
+        messages: [
+          {
+            type: 'chat_question',
+            questionId: 'q1',
+            kind: 'select',
+            prompt: "Who's the audience?",
+            options: [
+              { id: 'exec', label: 'Executives' },
+              { id: 'eng', label: 'Engineers' },
+            ],
+          },
+          { type: 'user', content: 'Executives' },
+        ],
+      } as never)
+
+      await act(async () => {
+        render(<StudioChat {...defaultProps} initialSessionId="sess-answered" />)
+        await new Promise(resolve => setTimeout(resolve, 0))
+      })
+
+      await waitFor(() => {
+        expect(screen.getByTestId('ask-user-answered')).toHaveTextContent("Who's the audience?")
+      })
+      expect(screen.getByText('Executives')).toBeInTheDocument()
+      expect(screen.queryByRole('radio')).not.toBeInTheDocument()
+      expect(screen.queryByText(/You chose/i)).not.toBeInTheDocument()
+    })
+
+    it('keeps a later unanswered question interactive after reload', async () => {
+      vi.mocked(fetchSessionHistory).mockResolvedValue({
+        messages: [
+          {
+            type: 'chat_question',
+            questionId: 'q1',
+            kind: 'select',
+            prompt: "Who's the audience?",
+            options: [
+              { id: 'exec', label: 'Executives' },
+              { id: 'eng', label: 'Engineers' },
+            ],
+          },
+          { type: 'user', content: 'Executives' },
+          {
+            type: 'chat_question',
+            questionId: 'q2',
+            kind: 'select',
+            prompt: 'How long should it be?',
+            options: [
+              { id: 'short', label: '5–8 slides' },
+              { id: 'long', label: '12–15 slides' },
+            ],
+          },
+        ],
+      } as never)
+
+      await act(async () => {
+        render(<StudioChat {...defaultProps} initialSessionId="sess-mixed" />)
+        await new Promise(resolve => setTimeout(resolve, 0))
+      })
+
+      await waitFor(() => {
+        expect(screen.getByTestId('ask-user-answered')).toHaveTextContent("Who's the audience?")
+      })
+      expect(screen.getByText('How long should it be?')).toBeInTheDocument()
+      expect(screen.getByText('5–8 slides')).toBeInTheDocument()
+      expect(screen.getAllByRole('radio')).toHaveLength(2)
+      expect(screen.queryByText('Engineers')).not.toBeInTheDocument()
     })
   })
 })

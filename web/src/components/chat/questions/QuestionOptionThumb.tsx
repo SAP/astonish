@@ -1,6 +1,6 @@
 import { useState } from 'react'
 
-import { templateThumbnailUrl } from '@/api/slides'
+import { templateMediaUrl, templateThumbnailUrl, type DocsScope } from '@/api/slides'
 
 import SlidesArchetypeThumb from './SlidesArchetypeThumb'
 import type { ChatQuestionOption } from '../chatTypes'
@@ -28,12 +28,16 @@ export default function QuestionOptionThumb({ thumbnail, label }: QuestionOption
     !imageFailed
 
   if (canRenderImage) {
-    // assetRef is `thumb/<kind>`; the endpoint's <kind> path param is the
-    // archetype kind, so strip a leading `thumb/` prefix.
-    const kind = thumbnail.assetRef!.replace(/^thumb\//, '')
+    const assetRef = thumbnail.assetRef!
+    const scope = thumbnail.templateScope && thumbnail.templateScope !== 'builtin'
+      ? thumbnail.templateScope as DocsScope
+      : undefined
+    const src = assetRef.startsWith('sha256-')
+      ? templateMediaUrl(thumbnail.template!, assetRef, scope)
+      : templateThumbnailUrl(thumbnail.template!, assetRef.replace(/^thumb\//, ''), assetRef, scope)
     return (
       <img
-        src={templateThumbnailUrl(thumbnail.template!, kind)}
+        src={src}
         className="h-full w-full object-cover"
         alt={label}
         loading="lazy"

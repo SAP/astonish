@@ -2,10 +2,19 @@ package daemon
 
 import (
 	"testing"
+	"time"
 
 	"github.com/SAP/astonish/pkg/mailer"
 	"github.com/SAP/astonish/pkg/tools"
 )
+
+func TestStartupPhaseRecord(t *testing.T) {
+	got := startupPhaseRecord("platform-store", "complete", 1500*time.Millisecond)
+	want := "startup phase=platform-store outcome=complete elapsed=1.5s"
+	if got != want {
+		t.Errorf("startupPhaseRecord() = %q, want %q", got, want)
+	}
+}
 
 // TestSetupEmailTools_RefreshesOnSecondCall verifies that calling setupEmailTools
 // a second time with different config replaces both the tools email client and

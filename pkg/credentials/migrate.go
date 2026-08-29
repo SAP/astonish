@@ -17,6 +17,7 @@ var secretKeyMapping = map[string][]string{
 	"openrouter":    {"api_key"},
 	"groq":          {"api_key"},
 	"xai":           {"api_key"},
+	"xai_oauth":     {"access_token", "refresh_token", "expires_at"},
 	"grok":          {"api_key"},
 	"poe":           {"api_key"},
 	"litellm":       {"api_key"},

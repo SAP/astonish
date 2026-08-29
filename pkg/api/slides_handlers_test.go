@@ -382,3 +382,116 @@ func TestGetSlidesDeckSlideThumbnail(t *testing.T) {
 		}
 	})
 }
+
+func TestPatchSlideMovesElement(t *testing.T) {
+	personal := newMemDocsStore()
+	svc := slides.Service{Store: personal}
+	ctx := context.Background()
+	deck, err := svc.CreateDeck(ctx, "edit-deck", "Edit", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	markup := `<ast-slide id="s0"><ast-text id="headline" x="160" y="380" w="400" h="80">Title</ast-text></ast-slide>`
+	if _, diags, err := svc.WriteSlide(ctx, deck.Slug, 0, markup, ""); err != nil || slides.HasErrors(diags) {
+		t.Fatalf("seed: diags=%#v err=%v", diags, err)
+	}
+
+	body := bytes.NewBufferString(`{"moves":[{"id":"headline","x":200,"y":400}]}`)
+	req := httptest.NewRequest(http.MethodPatch, "/api/docs/slides/edit-deck/slides/0?scope=personal", body)
+	req.Header.Set("Content-Type", "application/json")
+	req = mux.SetURLVars(req, map[string]string{"deckSlug": "edit-deck", "idx": "0"})
+	req = withDocsServices(req, personal, newMemDocsStore())
+	rec := httptest.NewRecorder()
+	PatchSlideHandler(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var item store.SlideContent
+	if err := json.Unmarshal(rec.Body.Bytes(), &item); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(item.Content, `x="200"`) || !strings.Contains(item.Content, `y="400"`) {
+		t.Fatalf("geometry not patched: %s", item.Content)
+	}
+
+	bad := httptest.NewRequest(http.MethodPatch, "/api/docs/slides/edit-deck/slides/0?scope=personal", bytes.NewBufferString(`{"moves":[{"id":"nope","x":1,"y":1}]}`))
+	bad = mux.SetURLVars(bad, map[string]string{"deckSlug": "edit-deck", "idx": "0"})
+	bad = withDocsServices(bad, personal, newMemDocsStore())
+	badRec := httptest.NewRecorder()
+	PatchSlideHandler(badRec, bad)
+	if badRec.Code != http.StatusBadRequest {
+		t.Fatalf("missing id status = %d, want 400", badRec.Code)
+	}
+	if got := strings.TrimSpace(badRec.Body.String()); got != "invalid slide edit" {
+		t.Fatalf("body = %q, want safe edit error", got)
+	}
+}
+
+func TestPatchSlideResizesImage(t *testing.T) {
+	personal := newMemDocsStore()
+	svc := slides.Service{Store: personal}
+	ctx := context.Background()
+	deck, err := svc.CreateDeck(ctx, "resize-deck", "Resize", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	markup := `<ast-slide id="s0"><ast-image id="photo" x="100" y="120" w="400" h="200" asset-ref="sha256-photo"></ast-image></ast-slide>`
+	if _, diags, err := svc.WriteSlide(ctx, deck.Slug, 0, markup, ""); err != nil || slides.HasErrors(diags) {
+		t.Fatalf("seed: diags=%#v err=%v", diags, err)
+	}
+
+	body := bytes.NewBufferString(`{"resizes":[{"id":"photo","x":100,"y":120,"w":600,"h":300}]}`)
+	req := httptest.NewRequest(http.MethodPatch, "/api/docs/slides/resize-deck/slides/0?scope=personal", body)
+	req.Header.Set("Content-Type", "application/json")
+	req = mux.SetURLVars(req, map[string]string{"deckSlug": "resize-deck", "idx": "0"})
+	req = withDocsServices(req, personal, newMemDocsStore())
+	rec := httptest.NewRecorder()
+	PatchSlideHandler(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var item store.SlideContent
+	if err := json.Unmarshal(rec.Body.Bytes(), &item); err != nil {
+		t.Fatal(err)
+	}
+	for _, attr := range []string{`x="100"`, `y="120"`, `w="600"`, `h="300"`} {
+		if !strings.Contains(item.Content, attr) {
+			t.Fatalf("resized geometry missing %s: %s", attr, item.Content)
+		}
+	}
+}
+
+func TestPatchSlideAppliesTextAndDelete(t *testing.T) {
+	personal := newMemDocsStore()
+	svc := slides.Service{Store: personal}
+	ctx := context.Background()
+	deck, err := svc.CreateDeck(ctx, "edit-deck", "Edit", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	markup := `<ast-slide id="s0"><ast-text id="headline" x="160" y="380" w="400" h="80">Title</ast-text><ast-text id="dek" x="160" y="500" w="400" h="40">Sub</ast-text></ast-slide>`
+	if _, diags, err := svc.WriteSlide(ctx, deck.Slug, 0, markup, ""); err != nil || slides.HasErrors(diags) {
+		t.Fatalf("seed: diags=%#v err=%v", diags, err)
+	}
+
+	body := bytes.NewBufferString(`{"texts":[{"id":"headline","text":"Hello"}],"deletes":["dek"]}`)
+	req := httptest.NewRequest(http.MethodPatch, "/api/docs/slides/edit-deck/slides/0?scope=personal", body)
+	req.Header.Set("Content-Type", "application/json")
+	req = mux.SetURLVars(req, map[string]string{"deckSlug": "edit-deck", "idx": "0"})
+	req = withDocsServices(req, personal, newMemDocsStore())
+	rec := httptest.NewRecorder()
+	PatchSlideHandler(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var item store.SlideContent
+	if err := json.Unmarshal(rec.Body.Bytes(), &item); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(item.Content, "Hello") {
+		t.Fatalf("text not patched: %s", item.Content)
+	}
+	if strings.Contains(item.Content, `id="dek"`) {
+		t.Fatalf("dek should be deleted: %s", item.Content)
+	}
+}

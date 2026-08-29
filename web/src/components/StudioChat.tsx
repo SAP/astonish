@@ -14,6 +14,7 @@ import { startFleetSession, connectFleetStream, sendFleetMessage, stopFleetSessi
 import type { FleetSession } from '../api/fleetChat'
 import HomePage from './HomePage'
 import type { FleetMessageItem, ChatMsg, FleetInfo, FleetStateInfo, DeferredPrompt, FleetExecutionMessage, FleetEvent, AgentMessage, ToolResultMessage, BrowserHandoffMessage, SubTaskExecutionMessage, SubTaskEvent, SubTaskInfo, PlanMessage, PlanStepInfo, SessionArtifact, ArtifactMessage, AppPreviewMessage, AppSavedMessage, DistillPreviewMessage, DistillSavedMessage, ChatQuestionMessage, TutorialBlueprintPreviewMessage, TutorialBlueprintApprovedMessage, TutorialSceneSlideshowMessage, UserMessage, AttachmentInfo, NetworkDenialMessage, ImageMessage, DocsUpdateMessage } from './chat/chatTypes'
+import { isChatQuestionAnswered } from './chat/chatQuestions'
 import { buildActivityRenderIndex, deriveLiveStreamStatus, stickyAgentBubbleKey } from './chat/toolActivity'
 import ToolActivityBlock from './chat/ToolActivityBlock'
 import { getAgentColor } from './chat/chatTypes'
@@ -37,6 +38,7 @@ import {
   resolveHarnessFocus,
   SIDEBAR_COLLAPSED_WIDTH,
   SIDEBAR_EXPANDED_WIDTH,
+  slidesHarnessLabel,
   type HarnessFocus,
 } from './chat/chatHarness'
 import SessionMemoryPanel from './SessionMemoryPanel'
@@ -76,6 +78,24 @@ function normalizeTutorialScenes(raw: unknown): TutorialSceneSlideshowMessage['s
     path: item?.path || '',
     duration_seconds: item?.duration_seconds || undefined,
   }))
+}
+
+function docsUpdateFromEvent(data: Record<string, any>): DocsUpdateMessage {
+  return {
+    type: 'docs_update',
+    docType: 'slides',
+    deckSlug: String(data.deckSlug || ''),
+    action: (data.action as string) || 'updated',
+    slideIndex: data.slideIndex as number | undefined,
+    totalSlides: data.totalSlides as number | undefined,
+    title: data.title as string | undefined,
+    deckTitle: data.deckTitle as string | undefined,
+    description: data.description as string | undefined,
+    schemaVersion: data.schemaVersion as number | undefined,
+    validation: data.validation as DocsUpdateMessage['validation'],
+    pptxCapability: data.pptxCapability as DocsUpdateMessage['pptxCapability'],
+    revision: Date.now(),
+  }
 }
 
 function upsertDocsUpdate(messages: ChatMsg[], update: DocsUpdateMessage): ChatMsg[] {
@@ -1080,18 +1100,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
 
           case 'docs_update':
             if (data.type === 'slides' && data.deckSlug) {
-              setMessages((prev: ChatMsg[]) => upsertDocsUpdate(prev, {
-                type: 'docs_update',
-                docType: 'slides',
-                deckSlug: data.deckSlug as string,
-                action: (data.action as string) || 'updated',
-                slideIndex: data.slideIndex as number | undefined,
-                totalSlides: data.totalSlides as number | undefined,
-                title: (data.deckTitle || data.title) as string | undefined,
-                schemaVersion: data.schemaVersion as number | undefined,
-                validation: data.validation as DocsUpdateMessage['validation'],
-                pptxCapability: data.pptxCapability as DocsUpdateMessage['pptxCapability'],
-              }))
+              setMessages((prev: ChatMsg[]) => upsertDocsUpdate(prev, docsUpdateFromEvent(data)))
             }
             break
 
@@ -1999,18 +2008,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
 
           case 'docs_update':
             if (data.type === 'slides' && data.deckSlug) {
-              setMessages((prev: ChatMsg[]) => upsertDocsUpdate(prev, {
-                type: 'docs_update',
-                docType: 'slides',
-                deckSlug: data.deckSlug as string,
-                action: (data.action as string) || 'updated',
-                slideIndex: data.slideIndex as number | undefined,
-                totalSlides: data.totalSlides as number | undefined,
-                title: (data.deckTitle || data.title) as string | undefined,
-                schemaVersion: data.schemaVersion as number | undefined,
-                validation: data.validation as DocsUpdateMessage['validation'],
-                pptxCapability: data.pptxCapability as DocsUpdateMessage['pptxCapability'],
-              }))
+              setMessages((prev: ChatMsg[]) => upsertDocsUpdate(prev, docsUpdateFromEvent(data)))
             }
             break
 
@@ -2676,7 +2674,8 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
   const handleQuestionAnswer = useCallback((msg: ChatQuestionMessage, answerText: string, _optionId: string) => {
     // Guard: a second click is a no-op once answered.
     if (msg.answered) return
-    // Mark the message answered locally so the card collapses and cannot be answered twice.
+    // Unmount the picker immediately. The chosen label is the following user
+    // bubble; reload infers the same from any later user message.
     setMessages((prev: ChatMsg[]) => prev.map((m) => {
       if (m.type !== 'chat_question') return m
       if (m.questionId !== msg.questionId) return m
@@ -3482,7 +3481,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
                   <div key={index}>
                     <HarnessPlaceholder
                       focus={focus}
-                      title={docs.title || docs.deckSlug}
+                      title={slidesHarnessLabel(docs)}
                       subtitle={progress}
                       isFocused={harnessOpen && harnessFocusEquals(effectiveHarnessFocus, focus)}
                       onOpen={openHarness}
@@ -3562,12 +3561,19 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
 
               if (msg.type === 'chat_question') {
                 const questionMsg = msg as ChatQuestionMessage
-                if (questionMsg.answered) {
+                if (isChatQuestionAnswered(messages, index)) {
                   return (
-                    <div key={index} className="my-2">
-                      <p className="text-xs text-muted-foreground">
-                        You chose: {questionMsg.answer}
-                      </p>
+                    <div key={index} className="space-y-1" data-testid="ask-user-answered">
+                      <div className="text-xs font-medium" style={{ color: 'var(--text-muted)' }}>Agent</div>
+                      <div
+                        className="p-4 rounded-lg max-w-[90%]"
+                        style={{
+                          background: theme === 'dark' ? 'rgba(255,255,255,0.08)' : 'white',
+                          border: '1px solid var(--border-color)',
+                        }}
+                      >
+                        <p className="text-sm whitespace-pre-wrap">{questionMsg.prompt}</p>
+                      </div>
                     </div>
                   )
                 }

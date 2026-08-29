@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { ArrowLeft, Copy, Trash2, Palette, Layers, FileUp } from 'lucide-react'
+import { ArrowLeft, Copy, Trash2, Palette, FileUp, Presentation } from 'lucide-react'
 import {
   listSlidesTemplates,
   deleteSlidesTemplate,
@@ -9,7 +9,9 @@ import {
   type SlidesTemplate,
   type DocsScope,
 } from '@/api/slides'
-import { TemplateSwatches } from '@/components/SlidesView'
+import QuestionOptionThumb from '@/components/chat/questions/QuestionOptionThumb'
+import ThumbnailFrame from '@/components/chat/questions/ThumbnailFrame'
+import { templateCoverThumbnail } from './templateCover'
 
 interface TemplatesAreaProps {
   /** Navigate back to the deck list / other hash routes. */
@@ -24,13 +26,22 @@ function templateScope(tpl: SlidesTemplate): DocsScope {
 }
 
 function ScopeBadge({ scope }: { scope?: string }) {
-  const label = scope === 'builtin' ? 'Built-in' : scope === 'team' ? 'Team' : 'Personal'
+  const label =
+    scope === 'builtin' ? 'Built-in'
+      : scope === 'platform' ? 'Platform'
+        : scope === 'org' ? 'Organization'
+          : scope === 'team' ? 'Team'
+            : 'Personal'
   const palette =
     scope === 'builtin'
       ? { bg: 'var(--bg-tertiary)', fg: 'var(--text-muted)' }
-      : scope === 'team'
-        ? { bg: 'rgba(16, 185, 129, 0.15)', fg: '#34d399' }
-        : { bg: 'rgba(99, 102, 241, 0.15)', fg: '#818cf8' }
+      : scope === 'platform'
+        ? { bg: 'rgba(245, 158, 11, 0.15)', fg: '#f59e0b' }
+        : scope === 'org'
+          ? { bg: 'rgba(59, 130, 246, 0.15)', fg: '#60a5fa' }
+          : scope === 'team'
+            ? { bg: 'rgba(16, 185, 129, 0.15)', fg: '#34d399' }
+            : { bg: 'rgba(99, 102, 241, 0.15)', fg: '#818cf8' }
   return (
     <span
       className="rounded-full px-1.5 py-0.5 text-[10px] font-medium"
@@ -111,52 +122,34 @@ function TemplateCard({
   onRecolor: (tpl: SlidesTemplate, tokens: Record<string, string>) => void
   busy: boolean
 }) {
-  const isBuiltin = tpl.scope === 'builtin'
+  const isPersonal = !tpl.scope || tpl.scope === 'personal'
   const [editing, setEditing] = useState(false)
-  // Prefer the richer {kind,label} variants so imported templates surface
-  // friendly per-variant labels; fall back to bare kinds for older payloads.
-  const variants: { kind: string; label?: string }[] =
-    tpl.archetypes && tpl.archetypes.length > 0
-      ? tpl.archetypes.map(a => ({ kind: a.kind, label: a.label }))
-      : (tpl.archetypeKinds || []).map(k => ({ kind: k }))
+  const title = tpl.label || tpl.name
+  const thumbnail = templateCoverThumbnail(tpl)
 
   return (
     <div
-      className="flex flex-col rounded-xl p-4"
+      className="flex flex-col gap-3 rounded-xl p-3"
       style={{ border: '1px solid var(--border-color)', background: 'var(--bg-secondary)' }}
       data-testid="template-card"
     >
-      <div className="mb-2 flex items-start justify-between gap-2">
-        <span className="min-w-0 truncate text-sm font-medium" style={{ color: 'var(--text-primary)' }}>
-          {tpl.label || tpl.name}
-        </span>
-        <div className="flex shrink-0 items-center gap-1">
-          <ScopeBadge scope={tpl.scope} />
-        </div>
+      <div data-testid="template-cover">
+        <ThumbnailFrame>
+          {thumbnail ? (
+            <QuestionOptionThumb thumbnail={thumbnail} label={title} />
+          ) : (
+            <div className="flex h-full w-full items-center justify-center" aria-hidden="true">
+              <Presentation size={20} style={{ color: 'var(--text-muted)' }} />
+            </div>
+          )}
+        </ThumbnailFrame>
       </div>
 
-      {tpl.description && (
-        <p className="mb-2 line-clamp-2 text-xs" style={{ color: 'var(--text-muted)' }}>
-          {tpl.description}
-        </p>
-      )}
-
-      <div className="mb-3 flex items-center gap-2">
-        <TemplateSwatches tokens={tpl.tokens} />
-        {variants.length > 0 && (
-          <div className="flex flex-wrap items-center gap-1">
-            {variants.map(v => (
-              <span
-                key={v.kind}
-                className="flex items-center gap-0.5 rounded px-1 py-0.5 text-[9px]"
-                style={{ background: 'var(--bg-tertiary)', color: 'var(--text-muted)' }}
-              >
-                <Layers size={8} />
-                {v.label || v.kind}
-              </span>
-            ))}
-          </div>
-        )}
+      <div className="flex items-start justify-between gap-2">
+        <span className="min-w-0 truncate text-sm font-medium" style={{ color: 'var(--text-primary)' }}>
+          {title}
+        </span>
+        <ScopeBadge scope={tpl.scope} />
       </div>
 
       <div className="mt-auto flex items-center gap-2 pt-2" style={{ borderTop: '1px solid var(--border-color)' }}>
@@ -170,7 +163,7 @@ function TemplateCard({
         >
           <Copy size={11} /> Duplicate
         </button>
-        {!isBuiltin && (
+        {isPersonal && (
           <button
             onClick={() => setEditing(v => !v)}
             disabled={busy}
@@ -182,7 +175,7 @@ function TemplateCard({
             <Palette size={11} /> Colors
           </button>
         )}
-        {!isBuiltin && (
+        {isPersonal && (
           <button
             onClick={() => onDelete(tpl)}
             disabled={busy}
@@ -213,8 +206,8 @@ function TemplateCard({
 
 /**
  * Dedicated Templates management area (deep-linked at #/slides/templates).
- * Lists built-in + scoped templates with scope/type badges and supports
- * duplicate (all), delete + recolor (scoped only). Built-ins are read-only.
+ * Each card is a cover thumbnail + name (same visual as the chat template
+ * picker), with duplicate (all) and delete/recolor (scoped only).
  */
 export default function TemplatesArea({ onNavigate, showToast }: TemplatesAreaProps) {
   const [templates, setTemplates] = useState<SlidesTemplate[]>([])
@@ -244,7 +237,7 @@ export default function TemplatesArea({ onNavigate, showToast }: TemplatesAreaPr
   const handleDuplicate = useCallback(async (tpl: SlidesTemplate) => {
     setBusy(true)
     try {
-      const { template } = await duplicateSlidesTemplate(tpl.name, { newName: `${tpl.name}-copy` }, templateScope(tpl))
+      const { template } = await duplicateSlidesTemplate(tpl.name, { newName: `${tpl.name}-copy` }, 'personal')
       await load()
       notifyUpdated()
       showToast(`Duplicated as "${template.label || template.name}"`, 'success')
@@ -325,7 +318,7 @@ export default function TemplatesArea({ onNavigate, showToast }: TemplatesAreaPr
             disabled={importing}
             className="ml-auto flex cursor-pointer items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs transition-colors disabled:cursor-default disabled:opacity-60"
             style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-color)', color: 'var(--text-secondary)' }}
-            title="Import a .pptx file as a slide template"
+            title="Import a .pptx as a slide template. Re-import an existing file to pick up designed content patterns from its example slides."
             data-testid="template-import-button"
           >
             <FileUp size={14} />

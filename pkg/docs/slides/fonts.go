@@ -6,28 +6,28 @@ import (
 	"strings"
 )
 
-// embeddedFontsThemeKey is the deck-theme map key under which the PPTX importer
-// records the embedded-font manifest. Its value is a JSON-encoded []EmbeddedFontRef
-// (see pkg/docs/slides/pptxworker/import_worker.mjs collectEmbeddedFonts). It is
-// deliberately NOT emitted as a --ast-* CSS variable by the HTML exporter; instead
-// writeFontFaces consumes it to emit @font-face rules pointing at the font: assets.
+// embeddedFontsThemeKey is the deck-theme map key for the font declaration:
+// which faces this deck needs. Value is JSON []EmbeddedFontRef. Built-in
+// templates set it on their tokens; the PPTX importer records recovered
+// brand faces the same way (see import_worker.mjs collectEmbeddedFonts).
+// It is never a --ast-* CSS variable; writeFontFaces emits @font-face from it.
 const embeddedFontsThemeKey = "embedded-fonts"
 
-// EmbeddedFontRef names one embedded font FACE recovered from an imported .pptx:
-// a family (e.g. "72 Brand"), a style variant (regular|bold|italic|boldItalic),
-// and the Assets-map key (e.g. "font:72 Brand:bold") whose value is the
-// "data:font/ttf;base64,..." payload of the recovered TrueType/OpenType file.
+// EmbeddedFontRef names one face the deck declared it needs: a family
+// (e.g. "Manrope" or "72 Brand"), a variant (CSS weight like "400", or
+// regular|bold|italic|boldItalic from pptx import), and the Assets-map key
+// (e.g. "font:Manrope:400") whose value is a data:font/… payload.
 type EmbeddedFontRef struct {
 	Family   string `json:"family"`
 	Variant  string `json:"variant"`
 	AssetKey string `json:"assetKey"`
 }
 
-// parseEmbeddedFonts decodes the embedded-font manifest from a deck theme map.
-// It returns nil when the theme has no embedded-fonts key or the value is not
-// valid JSON — imported decks without embedded fonts (and all pre-existing decks)
-// are unaffected. Entries missing a family or asset key are dropped so the
-// exporter never emits a malformed @font-face.
+// parseEmbeddedFonts decodes the deck's font declaration. Nil when the theme
+// has no embedded-fonts key or the value is not valid JSON — decks that name
+// a family without declaring faces load nothing extra. Entries missing a
+// family or asset key are dropped so the exporter never emits a malformed
+// @font-face.
 func parseEmbeddedFonts(theme map[string]string) []EmbeddedFontRef {
 	if len(theme) == 0 {
 		return nil
@@ -56,16 +56,30 @@ func parseEmbeddedFonts(theme map[string]string) []EmbeddedFontRef {
 // fontVariantCSS maps an embedded-font style variant to its CSS font-weight and
 // font-style. Unknown variants are treated as regular (400/normal).
 func fontVariantCSS(variant string) (weight, style string) {
-	switch variant {
+	v := strings.TrimSpace(variant)
+	switch v {
 	case "bold":
 		return "700", "normal"
 	case "italic":
 		return "400", "italic"
 	case "boldItalic":
 		return "700", "italic"
-	default: // regular / unknown
+	case "regular", "":
 		return "400", "normal"
 	}
+	if v != "" && isNumericWeight(v) {
+		return v, "normal"
+	}
+	return "400", "normal"
+}
+
+func isNumericWeight(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // fontFormatFor maps a data: font MIME to the CSS @font-face format() hint.

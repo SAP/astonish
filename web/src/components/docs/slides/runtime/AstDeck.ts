@@ -1,12 +1,14 @@
 import { html, LitElement } from 'lit'
 
 import { DeckController } from './DeckController'
-import { CANVAS_HEIGHT, CANVAS_WIDTH, type AstDeckElement, type FragmentPolicy } from './types'
+import { EditController } from './EditController'
+import { CANVAS_HEIGHT, CANVAS_WIDTH, type AstDeckElement, type DeckChangeDetail, type FragmentPolicy } from './types'
 
 const RUNTIME_TAGS = ['ast-deck', 'ast-slide', 'ast-text', 'ast-shape', 'ast-image', 'ast-group', 'ast-table', 'ast-chart', 'ast-code', 'ast-icon', 'ast-notes', 'ast-fragment']
 
 export class AstDeck extends LitElement implements AstDeckElement {
   private controller?: DeckController
+  private editor?: EditController
   private observer?: ResizeObserver
 
   get currentIndex(): number { return this.controller?.currentIndex ?? 0 }
@@ -36,6 +38,7 @@ export class AstDeck extends LitElement implements AstDeckElement {
     // to jump to a slide WITHOUT reloading the document — the strip/thumbnail
     // click path. We answer only same-window-parent messages of our own shape.
     window.addEventListener('message', this.onMessage)
+    this.addEventListener('ast-deck-change', this.onDeckChange)
     this.scaleToParent()
     void this.signalReady()
   }
@@ -43,15 +46,52 @@ export class AstDeck extends LitElement implements AstDeckElement {
   override disconnectedCallback(): void {
     this.observer?.disconnect()
     this.controller?.disconnect()
+    this.editor?.disconnect()
     window.removeEventListener('message', this.onMessage)
+    this.removeEventListener('ast-deck-change', this.onDeckChange)
     super.disconnectedCallback()
   }
 
   private readonly onMessage = (event: MessageEvent): void => {
-    const data = event.data as { type?: string; index?: number; slideId?: string } | null
-    if (!data || data.type !== 'ast-nav') return
-    if (typeof data.index === 'number') this.controller?.goTo(data.index)
-    else if (typeof data.slideId === 'string') this.controller?.goTo(data.slideId)
+    if (event.source !== window.parent) return
+    const data = event.data as { type?: string; index?: number; slideId?: string; enabled?: boolean } | null
+    if (!data?.type) return
+    switch (data.type) {
+      case 'ast-nav':
+        if (typeof data.index === 'number') this.controller?.goTo(data.index)
+        else if (typeof data.slideId === 'string') this.controller?.goTo(data.slideId)
+        break
+      case 'ast-edit-mode':
+        if (this.hasAttribute('print')) return
+        if (data.enabled) {
+          this.editor ??= new EditController(this)
+          this.editor.enable()
+        } else {
+          this.editor?.disable()
+        }
+        break
+      case 'ast-edit-reset':
+        this.editor?.reset()
+        break
+      case 'ast-edit-commit':
+        this.editor?.commit()
+        break
+      case 'ast-edit-delete':
+        this.editor?.deleteSelection()
+        break
+      default:
+        break
+    }
+  }
+
+  // Tell the embedding harness which slide is showing. Click/keyboard nav
+  // inside this opaque-origin iframe cannot touch React state otherwise, so
+  // the bottom strip would stay stuck on slide 1.
+  private readonly onDeckChange = (event: Event): void => {
+    if (window.parent === window) return
+    const detail = (event as CustomEvent<DeckChangeDetail>).detail
+    if (!detail || typeof detail.index !== 'number') return
+    window.parent.postMessage({ type: 'ast-deck-change', index: detail.index, slideId: detail.slideId }, '*')
   }
 
   private scaleToParent(): void {

@@ -29,6 +29,7 @@ import (
 	"github.com/SAP/astonish/ent/platform/platformsetting"
 	"github.com/SAP/astonish/ent/platform/platformskill"
 	"github.com/SAP/astonish/ent/platform/platformskillfile"
+	"github.com/SAP/astonish/ent/platform/platformslidetemplate"
 	"github.com/SAP/astonish/ent/platform/sandboxlayer"
 	"github.com/SAP/astonish/ent/platform/sandboxtemplate"
 	"github.com/SAP/astonish/ent/platform/toolindex"
@@ -67,6 +68,8 @@ type Client struct {
 	PlatformSkill *PlatformSkillClient
 	// PlatformSkillFile is the client for interacting with the PlatformSkillFile builders.
 	PlatformSkillFile *PlatformSkillFileClient
+	// PlatformSlideTemplate is the client for interacting with the PlatformSlideTemplate builders.
+	PlatformSlideTemplate *PlatformSlideTemplateClient
 	// SandboxLayer is the client for interacting with the SandboxLayer builders.
 	SandboxLayer *SandboxLayerClient
 	// SandboxTemplate is the client for interacting with the SandboxTemplate builders.
@@ -101,6 +104,7 @@ func (c *Client) init() {
 	c.PlatformSetting = NewPlatformSettingClient(c.config)
 	c.PlatformSkill = NewPlatformSkillClient(c.config)
 	c.PlatformSkillFile = NewPlatformSkillFileClient(c.config)
+	c.PlatformSlideTemplate = NewPlatformSlideTemplateClient(c.config)
 	c.SandboxLayer = NewSandboxLayerClient(c.config)
 	c.SandboxTemplate = NewSandboxTemplateClient(c.config)
 	c.ToolIndex = NewToolIndexClient(c.config)
@@ -211,6 +215,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		PlatformSetting:       NewPlatformSettingClient(cfg),
 		PlatformSkill:         NewPlatformSkillClient(cfg),
 		PlatformSkillFile:     NewPlatformSkillFileClient(cfg),
+		PlatformSlideTemplate: NewPlatformSlideTemplateClient(cfg),
 		SandboxLayer:          NewSandboxLayerClient(cfg),
 		SandboxTemplate:       NewSandboxTemplateClient(cfg),
 		ToolIndex:             NewToolIndexClient(cfg),
@@ -248,6 +253,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		PlatformSetting:       NewPlatformSettingClient(cfg),
 		PlatformSkill:         NewPlatformSkillClient(cfg),
 		PlatformSkillFile:     NewPlatformSkillFileClient(cfg),
+		PlatformSlideTemplate: NewPlatformSlideTemplateClient(cfg),
 		SandboxLayer:          NewSandboxLayerClient(cfg),
 		SandboxTemplate:       NewSandboxTemplateClient(cfg),
 		ToolIndex:             NewToolIndexClient(cfg),
@@ -285,8 +291,8 @@ func (c *Client) Use(hooks ...Hook) {
 		c.DeviceSession, c.EmailThreadIndex, c.LoginSession, c.OIDCProvider,
 		c.OrgMembership, c.Organization, c.PendingLinkCode, c.PlatformMCPServer,
 		c.PlatformNetworkPolicy, c.PlatformSecret, c.PlatformSetting, c.PlatformSkill,
-		c.PlatformSkillFile, c.SandboxLayer, c.SandboxTemplate, c.ToolIndex, c.User,
-		c.UserChannel,
+		c.PlatformSkillFile, c.PlatformSlideTemplate, c.SandboxLayer,
+		c.SandboxTemplate, c.ToolIndex, c.User, c.UserChannel,
 	} {
 		n.Use(hooks...)
 	}
@@ -299,8 +305,8 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 		c.DeviceSession, c.EmailThreadIndex, c.LoginSession, c.OIDCProvider,
 		c.OrgMembership, c.Organization, c.PendingLinkCode, c.PlatformMCPServer,
 		c.PlatformNetworkPolicy, c.PlatformSecret, c.PlatformSetting, c.PlatformSkill,
-		c.PlatformSkillFile, c.SandboxLayer, c.SandboxTemplate, c.ToolIndex, c.User,
-		c.UserChannel,
+		c.PlatformSkillFile, c.PlatformSlideTemplate, c.SandboxLayer,
+		c.SandboxTemplate, c.ToolIndex, c.User, c.UserChannel,
 	} {
 		n.Intercept(interceptors...)
 	}
@@ -335,6 +341,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.PlatformSkill.mutate(ctx, m)
 	case *PlatformSkillFileMutation:
 		return c.PlatformSkillFile.mutate(ctx, m)
+	case *PlatformSlideTemplateMutation:
+		return c.PlatformSlideTemplate.mutate(ctx, m)
 	case *SandboxLayerMutation:
 		return c.SandboxLayer.mutate(ctx, m)
 	case *SandboxTemplateMutation:
@@ -2206,6 +2214,139 @@ func (c *PlatformSkillFileClient) mutate(ctx context.Context, m *PlatformSkillFi
 	}
 }
 
+// PlatformSlideTemplateClient is a client for the PlatformSlideTemplate schema.
+type PlatformSlideTemplateClient struct {
+	config
+}
+
+// NewPlatformSlideTemplateClient returns a client for the PlatformSlideTemplate from the given config.
+func NewPlatformSlideTemplateClient(c config) *PlatformSlideTemplateClient {
+	return &PlatformSlideTemplateClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `platformslidetemplate.Hooks(f(g(h())))`.
+func (c *PlatformSlideTemplateClient) Use(hooks ...Hook) {
+	c.hooks.PlatformSlideTemplate = append(c.hooks.PlatformSlideTemplate, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `platformslidetemplate.Intercept(f(g(h())))`.
+func (c *PlatformSlideTemplateClient) Intercept(interceptors ...Interceptor) {
+	c.inters.PlatformSlideTemplate = append(c.inters.PlatformSlideTemplate, interceptors...)
+}
+
+// Create returns a builder for creating a PlatformSlideTemplate entity.
+func (c *PlatformSlideTemplateClient) Create() *PlatformSlideTemplateCreate {
+	mutation := newPlatformSlideTemplateMutation(c.config, OpCreate)
+	return &PlatformSlideTemplateCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of PlatformSlideTemplate entities.
+func (c *PlatformSlideTemplateClient) CreateBulk(builders ...*PlatformSlideTemplateCreate) *PlatformSlideTemplateCreateBulk {
+	return &PlatformSlideTemplateCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *PlatformSlideTemplateClient) MapCreateBulk(slice any, setFunc func(*PlatformSlideTemplateCreate, int)) *PlatformSlideTemplateCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &PlatformSlideTemplateCreateBulk{err: fmt.Errorf("calling to PlatformSlideTemplateClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*PlatformSlideTemplateCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &PlatformSlideTemplateCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for PlatformSlideTemplate.
+func (c *PlatformSlideTemplateClient) Update() *PlatformSlideTemplateUpdate {
+	mutation := newPlatformSlideTemplateMutation(c.config, OpUpdate)
+	return &PlatformSlideTemplateUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *PlatformSlideTemplateClient) UpdateOne(_m *PlatformSlideTemplate) *PlatformSlideTemplateUpdateOne {
+	mutation := newPlatformSlideTemplateMutation(c.config, OpUpdateOne, withPlatformSlideTemplate(_m))
+	return &PlatformSlideTemplateUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *PlatformSlideTemplateClient) UpdateOneID(id uuid.UUID) *PlatformSlideTemplateUpdateOne {
+	mutation := newPlatformSlideTemplateMutation(c.config, OpUpdateOne, withPlatformSlideTemplateID(id))
+	return &PlatformSlideTemplateUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for PlatformSlideTemplate.
+func (c *PlatformSlideTemplateClient) Delete() *PlatformSlideTemplateDelete {
+	mutation := newPlatformSlideTemplateMutation(c.config, OpDelete)
+	return &PlatformSlideTemplateDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *PlatformSlideTemplateClient) DeleteOne(_m *PlatformSlideTemplate) *PlatformSlideTemplateDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *PlatformSlideTemplateClient) DeleteOneID(id uuid.UUID) *PlatformSlideTemplateDeleteOne {
+	builder := c.Delete().Where(platformslidetemplate.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &PlatformSlideTemplateDeleteOne{builder}
+}
+
+// Query returns a query builder for PlatformSlideTemplate.
+func (c *PlatformSlideTemplateClient) Query() *PlatformSlideTemplateQuery {
+	return &PlatformSlideTemplateQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypePlatformSlideTemplate},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a PlatformSlideTemplate entity by its id.
+func (c *PlatformSlideTemplateClient) Get(ctx context.Context, id uuid.UUID) (*PlatformSlideTemplate, error) {
+	return c.Query().Where(platformslidetemplate.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *PlatformSlideTemplateClient) GetX(ctx context.Context, id uuid.UUID) *PlatformSlideTemplate {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *PlatformSlideTemplateClient) Hooks() []Hook {
+	return c.hooks.PlatformSlideTemplate
+}
+
+// Interceptors returns the client interceptors.
+func (c *PlatformSlideTemplateClient) Interceptors() []Interceptor {
+	return c.inters.PlatformSlideTemplate
+}
+
+func (c *PlatformSlideTemplateClient) mutate(ctx context.Context, m *PlatformSlideTemplateMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&PlatformSlideTemplateCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&PlatformSlideTemplateUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&PlatformSlideTemplateUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&PlatformSlideTemplateDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("platform: unknown PlatformSlideTemplate mutation op: %q", m.Op())
+	}
+}
+
 // SandboxLayerClient is a client for the SandboxLayer schema.
 type SandboxLayerClient struct {
 	config
@@ -3021,12 +3162,14 @@ type (
 		DeviceSession, EmailThreadIndex, LoginSession, OIDCProvider, OrgMembership,
 		Organization, PendingLinkCode, PlatformMCPServer, PlatformNetworkPolicy,
 		PlatformSecret, PlatformSetting, PlatformSkill, PlatformSkillFile,
-		SandboxLayer, SandboxTemplate, ToolIndex, User, UserChannel []ent.Hook
+		PlatformSlideTemplate, SandboxLayer, SandboxTemplate, ToolIndex, User,
+		UserChannel []ent.Hook
 	}
 	inters struct {
 		DeviceSession, EmailThreadIndex, LoginSession, OIDCProvider, OrgMembership,
 		Organization, PendingLinkCode, PlatformMCPServer, PlatformNetworkPolicy,
 		PlatformSecret, PlatformSetting, PlatformSkill, PlatformSkillFile,
-		SandboxLayer, SandboxTemplate, ToolIndex, User, UserChannel []ent.Interceptor
+		PlatformSlideTemplate, SandboxLayer, SandboxTemplate, ToolIndex, User,
+		UserChannel []ent.Interceptor
 	}
 )

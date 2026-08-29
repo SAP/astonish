@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Download, ExternalLink, Loader2, Presentation, TriangleAlert } from 'lucide-react'
 
 import { exportSlidesDeck, fetchSlidesPresentation, slidesPresentationURL, type DocsScope, type SlidesExportFormat } from '@/api/slides'
-import type { DocsUpdateMessage } from '@/components/chat/chatTypes'
+import { slidesHarnessLabel, type DocsUpdateMessage } from '@/components/chat/chatTypes'
 
 interface SlidesCardProps {
   update: DocsUpdateMessage
@@ -18,6 +18,12 @@ function downloadBlob(blob: Blob, filename: string): void {
   URL.revokeObjectURL(url)
 }
 
+function slidesExportBasename(update: DocsUpdateMessage): string {
+  const raw = (update.deckTitle || update.title || update.description || 'presentation').trim()
+  const slug = raw.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60)
+  return slug || 'presentation'
+}
+
 export default function SlidesCard({ update, scope = 'personal' }: SlidesCardProps) {
   const [pendingAction, setPendingAction] = useState<'present' | SlidesExportFormat | null>(null)
   const [error, setError] = useState('')
@@ -30,7 +36,7 @@ export default function SlidesCard({ update, scope = 'personal' }: SlidesCardPro
     : update.totalSlides !== undefined
       ? `${update.totalSlides} slides`
       : 'Preparing deck'
-  const title = update.title || update.deckSlug
+  const title = slidesHarnessLabel(update)
 
   const loadPresentation = useCallback(async (): Promise<string | null> => {
     const requestId = ++presentationRequestRef.current
@@ -91,7 +97,7 @@ export default function SlidesCard({ update, scope = 'personal' }: SlidesCardPro
     setError('')
     try {
       const blob = await exportSlidesDeck(update.deckSlug, format, scope)
-      downloadBlob(blob, `${update.deckSlug}.${format}`)
+      downloadBlob(blob, `${slidesExportBasename(update)}.${format}`)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : `Failed to export ${format.toUpperCase()}`)
     } finally {

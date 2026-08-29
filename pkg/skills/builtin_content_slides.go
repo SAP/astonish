@@ -1,259 +1,142 @@
 package skills
 
-// BuiltinSlides contains the complete Astonish Slides authoring reference that
-// is delivered on demand via skill_lookup("slides"). It mirrors the delivery
-// model of BuiltinGenerativeUI: the standard system prompt keeps only a short
-// pointer, and this full guide is loaded into context the moment the agent
-// works on a presentation/deck/PowerPoint. Keeping the depth here (instead of
-// in the always-on prompt) keeps the standard prompt slim while giving the
-// model everything it needs to build a styled deck.
+// BuiltinSlides is loaded via skill_lookup("slides") when the agent authors a
+// presentation. The always-on prompt keeps only a short pointer; this file is
+// the working contract: intake, official bookends, recipe body, never reprint chrome.
 
-const BuiltinSlides = "# Astonish Slides (Presentations) — Complete Reference\n" + `
-Load this skill whenever the user asks for a **presentation, slide deck, slides, a ` + "`.pptx`" + `, or PowerPoint** — or asks to turn a document/report into slides. It teaches the exact workflow to produce a *styled* deck (not the blank black-on-white default), the full ASD v2 element vocabulary, and how to gather the information you need first.
+const BuiltinSlides = "# Astonish Slides — Authoring\n" + `
+Load this skill for slides, a slide deck, a slideshow, a slide show, a presentation, PowerPoint, or ` + "`.pptx`" + `. The always-on system-prompt pointer is not a substitute — you must ` + "`skill_lookup(\"slides\")`" + ` even if you already know the intake questions.
 
-The single most important rule: **start from a template.** A normal request must never produce an unstyled deck.
+**Start from a template.** Never ship an unstyled deck.
+**When a template is active, author with ` + "`fill_slides`" + ` (the whole deck in one call).** Do not copy ast-slide markup and do not call ` + "`write_slide`" + ` during initial authoring. ` + "`fill_slide`" + ` is only for a later single-slide text/layout refill. For a later image request, use ` + "`add_slide_image`" + `.
+**Intake is iterative.** Ask ONE question per turn with ` + "`ask_user`" + `, then end the turn. Never enumerate templates or variants as a numbered list in chat.
 
 ---
 
-## The Workflow (do this in order)
+## Workflow (in order)
 
-1. **Choose a template — call ` + "`list_templates`" + ` first, then let the USER pick.**
-   It returns a **lightweight catalog** of the available templates (built-in + any the user imported from a real ` + "`.pptx`" + `): each entry has ` + "`name`" + `, ` + "`label`" + `, ` + "`description`" + `, ` + "`scope`" + `, and the ` + "`archetypeKinds`" + ` it provides (e.g. ` + "`title`" + `/` + "`section`" + `/` + "`content`" + `). It does **not** include the theme tokens, assets, or archetype markup — those are seeded for you by ` + "`create_deck`" + ` in step 2 when you pass the template name. Built-ins include ` + "`light-corporate`" + ` (clean light), ` + "`midnight`" + ` (dark), and ` + "`aurora`" + ` (colorful/gradient).
+### 1. Intake — one ` + "`ask_user`" + ` per turn
 
-   **The template choice belongs to the user — do NOT silently pick one yourself.** Decide which of these three cases applies:
-   - **The user named a template** (e.g. "use midnight", "our corporate template", "a dark theme") → use it and proceed without asking.
-   - **The user explicitly delegated the choice** (e.g. "you pick", "choose whatever fits", "your call", "surprise me") → pick the best fit, state which one and why in one line, and proceed.
-   - **The user said nothing about the template** (the common case — e.g. "make a deck about X") → **STOP and ask — visually.** Call ` + "`ask_user`" + ` with ` + "`kind: \"select\"`" + ` and ` + "`slidesTemplatePicker: true`" + ` (omit ` + "`options`" + `). ask_user lists every available template as a **card with a live thumbnail of that template's cover**, plus its label and one-line description, so the user picks by seeing the design. **VIOLATION — listing templates in text:** You MUST NOT enumerate templates as a numbered list, bulleted list, or any textual enumeration in your chat message. This is the single most common mistake and it completely bypasses the visual picker that shows live thumbnail previews. Examples of what you must NEVER do:\n- \"Here are the available templates: 1. Light Corporate 2. Midnight 3. Aurora\"\n- \"I found these templates: • light-corporate (clean light theme) • midnight (dark)...\"\n- \"Let me show you the options: ...\" followed by a text description of each template\n- Any variant where you describe templates in prose and ask the user to pick by typing\n\nInstead, call ` + "`ask_user`" + ` with ` + "`kind: \"select\"`" + ` and ` + "`slidesTemplatePicker: true`" + ` — this renders an interactive card with live cover thumbnails for each template. The user clicks their choice. If you find yourself typing template names or descriptions into your chat reply, STOP — you are about to violate this rule. Delete the text and call ` + "`ask_user`" + ` instead. Do **not** call ` + "`create_deck`" + ` until they answer (their next message is the chosen template). A brand/tone hint you could infer is NOT permission to choose — only an explicit named template or explicit delegation is.
+After loading this skill, the **next tool call is ` + "`ask_user`" + `** for the first unanswered intake question. Do not call ` + "`create_deck`" + `, ` + "`list_slide_templates`" + `, or ` + "`fill_slides`" + ` first, and do not write a justification for skipping.
 
-   When in doubt about which case applies, treat it as "said nothing" and ask.
+Skip a question **only** when that question's answer is already explicit in the user message (they named the audience, a slide count, a template, or said "you pick" / "your call" / "surprise me" / "don't ask, just make it"). Do not re-ask a named template ("use GCO"). After every ` + "`ask_user`" + `, **end the turn**.
 
-   **A template may offer MULTIPLE variants per role, and each variant is now tagged with a ` + "`tier`" + `.** ` + "`list_templates`" + ` returns an ` + "`archetypes`" + ` list of ` + "`{kind, label, tier, fillSlots}`" + ` entries — each a distinct source **layout** carrying its own background/logos/accent chrome, **labeled with the real PowerPoint layout name** (e.g. "Blue cover, anvil and image", "Pink cover with anvil", "Divider Page with Image", "Full Bleed Image"), and marked ` + "`tier`" + `=` + "`fixed`" + ` (**STABLE BRAND CHROME**) or ` + "`tier`" + `=` + "`flexible`" + ` (**CONTENT**). The ` + "`fillSlots`" + ` field lists exactly which element ids inside that archetype hold text you may change (the ` + "`{{TITLE}}`" + `/` + "`{{BODY}}`" + ` holes). **The stable chrome set — ` + "`title`" + ` (cover), ` + "`section`" + ` (divider), ` + "`agenda`" + `, and ` + "`closing`" + ` (thank-you/end) — is ALWAYS available** for every imported template (see the "Imported corporate ` + "`.pptx`" + ` templates" section). When a role has several variants, **ask the user which to use — visually, one question at a time** (see "Asking the user with ` + "`ask_user`" + `" below) — unless the user already specified. Do not silently pick the first variant, and **do not enumerate the variants as text — you MUST use the ask_user tool to ask (see below).**
+A request to use existing knowledge, skip the web, or not look anything up is a **research constraint** — still ask. Inferring a tone ("dark tribute", "professional") is not a template choice and not an intake skip.
 
-2. **Create the deck WITH that template — call ` + "`create_deck`" + ` and pass ` + "`template`" + `.**
-   Passing the ` + "`template`" + ` name seeds the deck's theme tokens **and** assets, so every slide is styled automatically. ` + "`create_deck`" + ` returns the template's full ` + "`archetypes`" + ` (the ready-made ` + "`title`" + `/` + "`section`" + `/` + "`content`" + ` slide skeletons with ` + "`{{TITLE}}`" + `/` + "`{{BODY}}`" + ` placeholders) — this is where you get the markup to fill. Example arguments:
-   ` + "```json" + `
-   { "slug": "q4-review", "title": "Q4 Business Review", "template": "midnight" }
-   ` + "```" + `
-   **Never call ` + "`create_deck`" + ` without a template for a normal presentation request.** Only skip the template if the user explicitly wants a blank canvas — and even then set readable ` + "`theme`" + ` tokens so text is legible.
+1. **Audience and purpose** (always unless they already said who it is for). ` + "`kind: \"select\"`" + `. Write 4–5 options **derived from this brief** (biography vs board vs classroom vs launch), plus Other. Do not reuse a generic four-option list that ignores the prompt.
+2. **Deck length** (always unless they already gave a count). ` + "`kind: \"select\"`" + `. Options: Short ~8 / Standard ~12 / Full ~16–18 / Other.
+3. **Who picks the template?** (always unless they named a template or said "you pick"). ` + "`kind: \"select\"`" + ` with explicit options:
+   - ` + "`show-templates`" + ` — "Show me the templates"
+   - ` + "`you-pick`" + ` — "You pick what fits"
+4. **Which template** — only if they chose "Show me the templates". ` + "`kind: \"select\"`" + `, ` + "`slidesTemplatePicker: true`" + `, omit options. **VIOLATION — never list templates in chat text.** Inferring a tone ("dark tribute", "professional") is **not** permission to choose.
+5. If they chose **"You pick what fits"** (or said "you pick" / "your call" / "surprise me"): pick using audience + length, **say which and why in one line**, continue. Do not open the visual picker.
+6. After the template is known, **do not call ` + "`create_deck`" + ` yet.** Call ` + "`list_slide_templates`" + ` if you do not already have its variant list and ` + "`palettes`" + `. Then:
+   - **Title variant** — only if that template has **2+** ` + "`title`" + ` / ` + "`title-N`" + `. ` + "`slidesTemplate`" + ` + ` + "`slidesKind: \"title\"`" + `, omit options (layout chrome only — sample people/bike photos are stripped; includes "Use the default").
+   - **Cover image** — two cases. Skip when the official cover has no ` + "`ph-pic-*`" + ` well **and** the template is not ` + "`modern`" + `.
+     - **Imported title with a photo well and template example photos:** ` + "`slidesImagePicker: true`" + ` + ` + "`slidesTemplate`" + `, omit options. The picker lists template photos **plus** "I'll provide my own image" (` + "`upload`" + `) **and** "Use the default" (no photo). Pass the chosen id as ` + "`titleImage`" + `. If they pick ` + "`upload`" + `: if they already attached a file this turn, ` + "`create_deck`" + ` with ` + "`titleImage: \"upload\"`" + ` (no url). If they have not attached yet, ask them to attach (or paste a public image URL) and **end the turn** — then ` + "`titleImage: \"upload\"`" + ` or the URL. Default / no photo → ` + "`titleImage: \"none\"`" + `. The server does **not** keep sample photos unless they picked one.
+     - **Modern / ` + "`modern`" + `:** no template photos (do **not** call ` + "`slidesImagePicker`" + `). ` + "`kind: \"yesno\"`" + `: "This cover can show a logo in the top-right. Want to add one?" If **no**: ` + "`titleImage: \"none\"`" + `. If **yes** and they already attached a file this turn: ` + "`titleImage: \"upload\"`" + ` (do not ask again). If **yes** and they have not attached yet: ask them to attach or paste a URL in **one sentence**, then **end the turn immediately** — do not call ` + "`create_deck`" + ` or ` + "`fill_slides`" + `, and do not "proceed without a logo" after a tool error. Next turn: ` + "`titleImage: \"upload\"`" + ` or the URL. Never pass ` + "`none`" + ` after they said yes.
+   - **Color palette** — only if ` + "`palettes`" + ` is non-empty (Classic / ` + "`classic`" + `, Modern / ` + "`modern`" + `). ` + "`slidesPalettePicker: true`" + ` + ` + "`slidesTemplate`" + `, omit options. Do **not** invent palettes for imported brand templates (GCO's blue vs pink covers are title layouts, not palettes).
+   - **Closing variant** — only if **2+** ` + "`closing`" + ` / ` + "`closing-N`" + `. ` + "`slidesKind: \"closing\"`" + `.
+   If there is exactly one title or closing, use it — no question. **VIOLATION — never skip the title-variant question when 2+ title* exist, and never skip the cover-image question when the chosen cover has a ph-pic well or the template is Modern.** Still no chrome-picker stall for section/agenda unless the user asked.
 
-3. **Run the visual questionnaire BEFORE authoring any content slide — call ` + "`ask_user`" + `, one question at a time.**
-   This step is **not optional**. After the deck is created and you know the topic/content, ask the user a short, visual questionnaire so version zero already matches how they want their information shown. Two parts:
-   - **Static picks** (always, when the template has them): title/cover variant → agenda yes/no → divider/section variant. See "Asking the user with ` + "`ask_user`" + `".
-   - **Adaptive content questions** (this is the part that makes the deck feel bespoke): look at the actual content you're about to build and ask targeted questions about HOW to present it. **If the content shows one or more strong signals (numbers, a comparison, dates/phases, a process, notable length), you MUST ask at least one adaptive question — do not silently default to bullets.** Cap the adaptive questions at **5**, ask only when the answer changes what you build, and skip a signal that isn't strong. See "Adaptive content questions" for the signal→question map. **Do not proceed to ` + "`write_slide`" + ` for the body slides until the questionnaire is done.**
+### 2. Create the deck
 
-   **ANTI-LOOP — once the template and per-role variants are chosen, COMMIT.** As soon as the questionnaire is answered and you know the template, the title/section/agenda/closing variants, and the content approach, **go straight to ` + "`write_slide`" + `.** Do **NOT** re-call ` + "`list_templates`" + `, ` + "`get_template_variant_previews`" + `, ` + "`get_deck`" + `, or ` + "`skill_lookup`" + ` to "re-confirm" a decision you have already made — that information does not change between reading it and authoring, so re-fetching it is unnecessary and wasteful. ` + "`get_template_variant_previews`" + ` now returns **lightweight metadata plus a thumbnail reference** (not the full archetype markup), and ` + "`create_deck`" + ` already returned the archetype markup you author from — so the markup is in hand and there is nothing to re-fetch. Repeatedly re-reading these read-only payloads only churns your context. Author the slides from what you already have.
+Do **not** call ` + "`create_deck`" + ` until title / cover-image / palette / closing questions that still apply have been answered. Pass ` + "`template`" + `. Pass a human ` + "`title`" + ` and a short ` + "`description`" + ` (the chat card shows the description, never the persist slug). ` + "`slug`" + ` is a hint only: in chat the server stores a unique per-session slug so two chats on the same topic cannot overwrite each other — use the slug ` + "`create_deck`" + ` returns; if you pass the hint to ` + "`fill_slides`" + `, the server remaps it to this session's deck. Pass ` + "`palette`" + ` (palette id, not hex) when they chose a colorway. Pass ` + "`titleKind`" + ` / ` + "`closingKind`" + ` as the **option id** from ` + "`ask_user`" + ` (the catalog kind: ` + "`title`" + `, ` + "`title-2`" + `, …). "Use the default" → pass ` + "`titleKind: \"default\"`" + `, do not omit. Pass ` + "`titleImage`" + ` as the photo picker's option id, ` + "`\"upload\"`" + ` (this-turn attachment), a public image URL, or ` + "`\"none\"`" + ` if they declined. ` + "`create_deck`" + ` errors if those are missing on a template with several covers or on Modern — that is a skip, not a shortcut. It returns a slim catalog (kind, label, tier, fillSlots, slotHints, summary) plus optional ` + "`palettes`" + ` and ` + "`styleGuide`" + `. It does not return markup.
 
-4. **Build slides from the archetypes — call ` + "`write_slide`" + ` once per slide.**
-   Honor every questionnaire answer (e.g. build an ` + "`ast-chart`" + `, a comparison table, or a timeline instead of plain bullets when the user chose it). How you fill an archetype depends on its ` + "`tier`" + ` — this is the **TWO-TIER rule**:
-   - **FIXED chrome slides** (` + "`tier`" + `=` + "`fixed`" + ` — the ` + "`title`" + `/` + "`section`" + `/` + "`agenda`" + `/` + "`closing`" + ` roles): copy the archetype markup **VERBATIM** into ` + "`write_slide`" + ` and change **ONLY the text inside the element ids listed in that archetype's ` + "`fillSlots`" + `** (the ` + "`{{TITLE}}`" + `/` + "`{{BODY}}`" + ` holes). Do **NOT** move, resize, recolor, add, or remove any shape/image/background. **Never "rebuild the slide from its elements" and never add your own accent shapes or backgrounds** — that is exactly what produces an off-brand white slide with a stray shape. Keep every pixel of the branded chrome; touch only the ` + "`fillSlots`" + ` text.
-   - **FLEXIBLE content slides** (` + "`tier`" + `=` + "`flexible`" + `, or built-in templates whose archetypes carry no ` + "`tier`" + `): start from the archetype and **ADAPT the body region to the content type** — bullets, a small table, a simple chart, or an image+caption — while keeping the template background/tokens intact.
+- **recipe-*** entries are the default **body** layouts. Named slots (eyebrow, headline, body_1, item_1_title, …) — not ph-1.
+- **title** / **title-N** and **closing** / **closing-N** are official brand bookends when present in the catalog. Slide 0 **must** be the **chosen** kind (the ` + "`ask_user`" + ` option id, e.g. ` + "`title`" + ` or ` + "`title-12`" + `), not a different variant and not ` + "`recipe-cover`" + `. Fill **those** catalog fillSlots (often ` + "`ph-*`" + `). ` + "`headline`" + ` maps to the title slot and ` + "`dek`" + ` to the subtitle/body slot when the cover does not use recipe ids. Cover photos are **opt-in**: only the photo they picked (` + "`titleImage`" + ` / the matching ` + "`ph-pic-*`" + ` fill). Do **not** keep the template's sample people or bikes. Empty ` + "`ph-pic-*`" + ` wells stay empty. This engine does not generate images.
+- Built-in ` + "`classic`" + ` / ` + "`modern`" + ` have **no** branded title/closing in the catalog — use ` + "`recipe-cover`" + ` / ` + "`recipe-closer`" + `. Former names ` + "`aurora`" + ` / ` + "`midnight`" + ` / ` + "`light-corporate`" + ` are aliases of ` + "`classic`" + ` (colorways Light / Midnight / Aurora).
+- The template owns a **skin**: ` + "`classic`" + ` / imported pptx use the corporate language (logo, legal, accent rule). The built-in ` + "`modern`" + ` template uses the product language (mono rails, one accent, panels, terminals, optional top-right logo). Both bundled templates ship colorways. Same jobs, different furniture.
+- section / agenda / pattern-* stay fetchable via ` + "`get_archetype`" + ` but are **not** in the default catalog. Do not stall on them unless the user asked.
 
-   Structure a deck as:
-   - a **title** (cover) archetype for slide 0 (position 0),
-   - an optional **agenda** chrome slide near the front,
-   - a **section** (divider) archetype as a transition slide before each major topic,
-   - **content** archetypes for the body slides,
-   - a **closing** (thank-you/end) chrome slide to finish.
+### 3. Author with ` + "`fill_slides`" + ` — the whole deck in ONE call
 
-   ` + "`agenda`" + ` and ` + "`closing`" + ` are part of the stable brand chrome and are always available (real or synthesized in the template's own style) — reproduce them verbatim and fill only their ` + "`fillSlots`" + ` text, exactly like ` + "`title`" + ` and ` + "`section`" + `.
-   ` + "`write_slide`" + ` takes ` + "`deck_slug`" + `, a zero-based ` + "`position`" + ` (writing an occupied position replaces it), ` + "`markup`" + ` (exactly one complete ` + "`<ast-slide>`" + ` root), and optional ` + "`notes`" + ` (speaker notes — use this field, do not embed ` + "`<ast-notes>`" + ` yourself unless you need to).
+Do not emit one ` + "`fill_slide`" + ` per slide; that is one LLM round-trip per slide. Plan the story as jobs, then pick a recipe whose slot count matches. Example (built-in modern; imported decks replace position 0 / last with official title/closing kinds and those slots):
+` + "```json\n" + `{ "deck_slug": "q4-review", "slides": [
+  { "position": 0, "kind": "recipe-cover", "fills": { "eyebrow": "FY26 BOARD PRE-READ", "headline": "Q3 missed plan by 4 pts", "headline_2": "on enterprise renewals", "dek": "Cut two product bets and move $11M to the renewal team by 21 May.", "meta_1_label": "Ask", "meta_1_value": "Approve the cut", "meta_2_label": "Owner", "meta_2_value": "CRO" } },
+  { "position": 1, "kind": "recipe-split-narrative", "fills": { "eyebrow": "The miss", "date": "Q3", "headline": "Enterprise renewals", "headline_2": "drove 78% of the gap", "body_1": "A complete paragraph that states the evidence and the implication.", "item_1_title": "Cause", "item_1_body": "A complete sentence that fits the box." } },
+  { "position": 2, "kind": "recipe-three-up", "fills": { "eyebrow": "The move", "headline": "Three cuts that fund the recovery", "item_1_kicker": "Bet A", "item_1_title": "Pause", "item_1_body": "A complete thought, 12–22 words." } }
+] }` + "\n```" + `
+   fills keys are fillSlots ids from the catalog for this template's skin. Optional slots (role optional) may be omitted. Extra keys the skin does not emit (e.g. ` + "`meta_4_*`" + ` on product cover) are ignored — do not retry the whole deck because of them.
+   **Pick layout by job, never by richness:**
+   - Cover → official ` + "`title`" + ` / ` + "`title-N`" + ` when listed; otherwise ` + "`recipe-cover`" + ` (thesis in the dek, not a topic label). Template logo/legal are applied by the server **only when the template actually has them**. Never invent a logo, mark, or decorative circle.
+   - One story + 3 claims → ` + "`recipe-split-narrative`" + `
+   - Quote + story → ` + "`recipe-quote-split`" + `
+   - Pair / contrast → ` + "`recipe-two-up`" + `
+   - Three items or a short timeline → ` + "`recipe-three-up`" + `
+   - 3–4 metrics → ` + "`recipe-stat-row`" + `
+   - Six principles → ` + "`recipe-numbered-grid`" + `
+   - Argument + lesson → ` + "`recipe-callout-rail`" + `
+   - Giant year + 3 points → ` + "`recipe-year-hero`" + `
+   - Last slide → official ` + "`closing`" + ` / ` + "`closing-N`" + ` when listed; otherwise ` + "`recipe-closer`" + `. Corporate closer: thesis + 3 takeaways. Product closer is **cover-like**: split ` + "`headline`" + `/` + "`headline_2`" + ` + ` + "`thesis`" + ` (glare bottom-left). Optional ` + "`cta_kicker`" + `/` + "`cta_body`" + ` as GET STARTED. Optional numbered takeaways as a type row — never three gray chips. Eyebrow is LEGACY / THE ASK, never a date range. Never ship a closer that is only two words on empty canvas.
+   - Problem / why-now → ` + "`recipe-statement-evidence`" + `
+   - Comparison table → ` + "`recipe-data-table`" + ` (eras, products, options, specs)
+   - Architecture / layers → ` + "`recipe-layer-stack`" + `
+   - How it works → ` + "`recipe-process-terminal`" + `
+   **Structured variation (do this):** put ` + "`headline_accent`" + ` as the exact phrase in the headline to paint in accent (one phrase). Set ` + "`emphasis`" + ` to ` + "`\"1\"`" + `, ` + "`\"2\"`" + `, or ` + "`\"3\"`" + ` so exactly one card/column/step is the recommended path. Fill ` + "`detail_1_*`" + ` / ` + "`detail_2_*`" + ` on stat-row when you have supporting points. On ` + "`modern`" + `, fill ` + "`prompt`" + ` on the cover and ` + "`cta_body`" + ` on the closer; use ` + "`date`" + ` as the ` + "`// kicker`" + ` line.
+   **A chapter is an eyebrow on a full content slide.** Do not insert empty section dividers. Prefer 8–16 dense slides over 18 sparse ones (honor the length they picked). Use at least 3 different recipe-* kinds in a deck longer than 6 slides. Prefer split-narrative, year-hero, statement-evidence, data-table, process-terminal over repeating three-up / numbered-grid. On ` + "`modern`" + ` decks of 8+ slides include ` + "`recipe-data-table`" + ` at least once when comparing eras, products, or options — an all-card deck is a defect.
+   **Fill every required text slot.** The server rejects a slide that leaves a required slot empty. If you have 3 items, use three-up, not a 6-cell grid.
+   **Titles are takeaways.** Complete sentence, or a two-line split headline that states the claim — not "Early life" or "Market Overview".
+   **Density.** Headline + 2–4 content blocks. Body columns are short paragraphs (~40–70 words). Cards/items are a complete thought (~12–22 words). Empty canvas is a defect; 6×6 is a bullet cap, not permission to leave the rest blank.
+   Never fill a slot with DRAFT, CONFIDENTIAL, yyyy-MM-dd, <date>, <initials>, "footnote", or "Contact information:".
+   - ` + "`content-2`" + ` / Title and Text is last resort. Do not pick a photo-only layout for story content.
+   After review, fill or rewrite the slides named — do not rebuild the whole deck.
 
-5. **Inspect before revising — call ` + "`get_deck`" + `.** It returns the deck and its ordered slide markup so you can edit precisely.
+### 4. ` + "`validate_deck`" + ` — fix every error.
 
-6. **Validate before declaring done — call ` + "`validate_deck`" + `.** It returns structured diagnostics. **Fix every error before continuing** — do not leave a deck with validation errors.
+### 5. ` + "`review_deck`" + ` — fix warning-level findings **on the slides they name**. Do not rebuild the whole deck. Then re-run until there are no warnings.
 
-7. **Self-review before declaring done — call ` + "`review_deck`" + `.** ` + "`validate_deck`" + ` only checks structure/geometry; ` + "`review_deck`" + ` catches the **semantic/visual** defects that make a deck look wrong. It renders the persisted scene and returns heuristic **findings** plus a review **checklist** covering: adjacent-run collisions (e.g. ` + "`1972Founded`" + `), overlapping/misaligned text blocks (e.g. a broad body placeholder swallowing a fixed label), low-contrast markers, missing template chrome (a slide that dropped the logo/footer/page furniture), imprecise dated milestones, and vague source citations. **You MUST fix every ` + "`warning`" + `-level finding and re-run ` + "`review_deck`" + ` until it is clean before telling the user the deck is ready.** Treat ` + "`info`" + `-level findings and the checklist as a strong prompt to double-check. This self-evaluation is the final gate — do not present the deck as done while warnings remain.
+When the user asks to put an image (logo or photo) on an **existing slide**, call ` + "`add_slide_image`" + ` directly. Every slide accepts an image; a ` + "`ph-pic-*`" + ` well is an optional preset placement, **not a capability requirement**. Preserve the current slide and layout. Never switch cover variants, call ` + "`fill_slide`" + `, or ask whether to change layouts merely because no image well exists. For a this-turn attachment, omit ` + "`asset_ref`" + ` and ` + "`url`" + ` (optionally pass ` + "`attachment`" + ` = filename). For an existing template/deck image, pass its ` + "`asset_ref`" + `. Use optional ` + "`x/y/w/h`" + ` only when placement is clear; otherwise accept the tool's default. Report success only after this tool returns the persisted slide.
 
-You can also ` + "`list_decks`" + ` to see existing decks (template decks are hidden from this list).
-
----
-
-## Asking the user with ` + "`ask_user`" + ` (visual variant picker)
-
-When a role has multiple variants, or you need a yes/no decision, ask the user with the generic ` + "`ask_user`" + ` tool so Studio renders an **inline, visual, one-question-at-a-time card** instead of a plain-text list. **This is a HARD RULE — zero exceptions: NEVER enumerate template or variant choices as a numbered/bulleted list, a prose description, or ANY textual enumeration in your chat reply. This is the #1 compliance failure and it completely degrades the user experience by hiding the visual thumbnails. When you need the user to choose between templates or variants, your ONLY correct action is to call the ` + "`ask_user`" + ` tool. If you write template/variant names into your message text instead of calling ` + "`ask_user`" + `, you have failed this task.**
-
-**Template choice (the very first question, when the user didn't name one):** call ` + "`ask_user`" + ` with ` + "`kind: \"select\"`" + ` and ` + "`slidesTemplatePicker: true`" + ` (omit ` + "`options`" + `). ask_user auto-generates one card per available template with a **live thumbnail of that template's cover** plus its label/description. The user's reply is the template name — pass it to ` + "`create_deck`" + `. Then continue with the per-role picks below.
-
-Ask **ONE question at a time, in this sequence**, waiting for each answer before the next:
-
-1. **Title / cover** — call ` + "`ask_user`" + ` with ` + "`kind: \"select\"`" + `, ` + "`slidesTemplate: <the template name>`" + `, and ` + "`slidesKind: \"title\"`" + `. That's it — ` + "`ask_user`" + ` fetches the variant previews itself and shows the user a **live mini-render (thumbnail) of each cover**, auto-generating one option per variant. (You may pass explicit ` + "`options`" + ` to control labels/order, but you do **not** need to and must **not** hand-copy markup or thumbnails.)
-2. **Agenda** — call ` + "`ask_user`" + ` with ` + "`kind: \"yesno\"`" + `, ` + "`prompt: \"Would you like an agenda slide?\"`" + `.
-3. **Divider / section** — same as step 1 but with ` + "`slidesKind: \"section\"`" + `.
-
-Repeat the same ` + "`slidesTemplate`" + ` + ` + "`slidesKind`" + ` select pattern for any other role that has multiple variants (` + "`agenda`" + `, ` + "`closing`" + `, ` + "`content`" + `). After each ` + "`ask_user`" + ` call, **end your turn** — the user's next message is their answer (the chosen label, or ` + "`Yes`" + `/` + "`No`" + `). Do not proceed to ` + "`write_slide`" + ` for that role until they answer.
-
-> The old manual path (calling ` + "`get_template_variant_previews`" + ` yourself and passing each variant's ` + "`markup`" + ` as an ` + "`ask_user`" + ` ` + "`slides-archetype`" + ` thumbnail) still works, but prefer ` + "`slidesTemplate`" + ` — it is fewer tokens and guarantees the thumbnails actually appear.
-
-**Terminal fallback:** in the terminal chat client there are no thumbnails — ` + "`ask_user`" + ` degrades to the prompt followed by a numbered list of the option labels, and the user answers by typing the number or label. This is the same information as the old plain-text list, so behavior is consistent everywhere; you do not need to do anything special for the terminal.
-
-### Adaptive content questions (make the deck ready from v0)
-
-The picks above (title, agenda yes/no, divider) are the **static** questions — always ask those when they apply. Beyond them, ask a SMALL number of **adaptive** questions that are driven by the actual content you're about to build, so the first version already reflects how the user wants their information shown — not a generic wall of bullets. Use the same ` + "`ask_user`" + ` tool (` + "`select`" + ` or ` + "`yesno`" + `), one question at a time.
-
-**Hard limits — respect these to avoid question fatigue:**
-- **At most 5 adaptive questions total**, on top of the static picks. Fewer is better.
-- Ask an adaptive question **only if the answer would materially change what you build** (a different visual form, an extra slide, a different structure). If a sensible default is obvious, **just use it and don't ask.**
-- Never ask about something the user already told you, and never ask two questions that resolve to the same decision.
-- Prefer questions the content *invites*. If the topic has no numbers, don't ask about charts; if there are no phases/dates, don't ask about a timeline.
-
-**Decide adaptively from the material you've gathered.** Inspect the content and, for each strong signal, consider ONE targeted question. Examples (illustrative, not a fixed script):
-- The content has **metrics / quantities / trends** → "Show these figures as a **chart** or keep them as a **table/bullets**?" (` + "`select`" + `: Bar chart / Line chart / Table / Bullets).
-- The content **compares two or more things** → "Present the comparison as a **side-by-side layout**, a **comparison table**, or **pros/cons columns**?"
-- The content has **events, phases, milestones, or dates** → "Show the sequence as a **visual timeline** or a **plain list**?"
-- The content is a **process or steps** → "Render as a **numbered step diagram** or **bullets**?"
-- The content is **long** → "Prefer **more slides with less on each** (recommended) or a **denser** deck?"
-- A **section clearly warrants emphasis** → "Add a **highlight / key-takeaway** slide for <topic>?" (` + "`yesno`" + `).
-- The deck could benefit from a **closing** → "End with a **thank-you / next-steps** slide?" (` + "`yesno`" + `) — only if the template has a ` + "`closing`" + ` role and you haven't already decided.
-
-Sequence: do the static picks first (title → agenda → divider), then the adaptive questions (most impactful first), then build. If NONE of the adaptive signals are strong, ask nothing extra and proceed with good defaults — a fast, clean deck beats an interrogation. When the user answers, honor the choice in the slides you author (e.g. build an ` + "`ast-chart`" + ` timeline instead of a bullet list).
+` + "`add_deck_image`" + ` only stores an image without placing it; prefer ` + "`add_slide_image`" + ` when placement was requested. ` + "`write_slide`" + ` is for advanced non-image customizations or a blank canvas. ` + "`get_archetype`" + ` is an escape hatch; do not use it to copy chrome.
 
 ---
 
-## Imported corporate ` + "`.pptx`" + ` templates
+## Catalog reading
 
-When the user imported a real corporate ` + "`.pptx`" + ` (Studio → Slides → Import ` + "`.pptx`" + `), it becomes ONE **high-fidelity ASD template** (the pptx is a single design system — one master, one theme). Its source **layouts** are extracted into role-classified, **layout-name-labeled variants**, each tagged with a ` + "`tier`" + ` and preserving that layout's background (including full-bleed image backgrounds), logos, accent bars, and curved/brand custom-path shapes — not just a set of theme colors. Colorful cover/divider chrome is captured by resolving the master→layout inheritance chain (backgrounds and decorative shapes flow down from the slide master into each layout, the way PowerPoint renders them).
+- recipe-cover / recipe-split-narrative / recipe-quote-split / recipe-two-up / recipe-three-up / recipe-stat-row / recipe-numbered-grid / recipe-callout-rail / recipe-year-hero / recipe-closer / recipe-statement-evidence / recipe-data-table / recipe-layer-stack / recipe-process-terminal — default **body** (and built-in cover/closer). Named slots. Themed from the template **skin** (corporate vs product) and the chosen **palette**.
+- title / title-2 / … and closing / closing-2 / … — official brand bookends when listed. Use them for slide 0 and last. Fill their fillSlots, not recipe ids.
+- section / agenda / pattern-* — not in the default catalog; ` + "`get_archetype`" + ` only if the user asked.
+- slotHints name each region. Do not invent ph-N keys on a recipe; do not invent eyebrow/dek on an official cover that lists ph-*.
 
-**Every imported template is GUARANTEED to provide the stable brand-chrome set** — ` + "`title`" + ` (cover), ` + "`section`" + ` (divider), ` + "`agenda`" + `, and ` + "`closing`" + ` (thank-you/end). These are the ` + "`tier`" + `=` + "`fixed`" + ` roles. If the source ` + "`.pptx`" + ` lacks a real branded layout for one of them, a chrome slide is **synthesized in the template's own style** (same background/logo/accent tokens) — **never a blank white slide**. All other layouts (e.g. "Title and Content", "Full Bleed Image") are ` + "`tier`" + `=` + "`flexible`" + ` content archetypes. Expect **multiple variants per role** — e.g. several ` + "`title`" + ` covers ("Blue cover, anvil and image", "Pink cover with anvil", "White cover with green anvil"), several ` + "`section`" + ` dividers ("Divider Page", "Divider Page with Image") — the human label is always the real PowerPoint layout name. The lossless source model is also persisted for future in-browser editing.
-
-Use it exactly like a built-in: call ` + "`create_deck`" + ` with its ` + "`template`" + ` name, then fill the archetypes with ` + "`write_slide`" + ` following the TWO-TIER rule (Workflow step 4). **For a chrome variant, reproduce it VERBATIM and fill only its ` + "`fillSlots`" + ` text** — do not hand-build, rebuild from elements, or add your own backgrounds/accents. For a flexible content archetype, adapt the body to the content type while keeping the template chrome. The one extra step: because these templates carry multiple variants per role, **ask the user which title/section/agenda/closing/content variant to use with the visual ` + "`ask_user`" + ` picker** (one question at a time — see "Asking the user with ` + "`ask_user`" + `") when more than one exists for a role they need — unless they already told you. A small number of genuinely inexpressible constructs (e.g. EMF vector icons) may be approximated or omitted; the import records a warning for each so nothing degrades silently.
-
----
-
-## Gathering Requirements (don't stall, but aim right)
-
-Before authoring, settle these — ask the user only what you genuinely can't infer, otherwise pick sensible defaults and proceed:
-
-- **Audience & purpose** — execs vs. engineers vs. customers changes tone and density.
-- **Length** — how many slides? Default to a tight 5–8 for an overview unless told otherwise.
-- **Key points per slide** — 3–5 bullets max; one idea per slide. Prefer more slides over crowded ones.
-- **Tone / brand** — informs your *recommendation*, but the template is the user's choice: present the ` + "`list_templates`" + ` options and let them pick (see Workflow step 1). Never auto-select a template just because you inferred a tone.
-- **Existing material** — if the user has a corporate ` + "`.pptx`" + `, they can import it as a template (Studio → Slides → Import ` + "`.pptx`" + `) so the deck matches their brand; then it appears in ` + "`list_templates`" + `.
-
-Good defaults when unspecified — but note the template is NOT one of them: a title slide + one section + 4–6 content slides, concise bullets, speaker notes with the talking points. **The template is never defaulted silently** — if the user didn't name one or delegate the choice, ask them (Workflow step 1).
-
-After you know the template and rough content, run the visual questionnaire: the static picks (title / agenda / divider) **and** up to 5 **adaptive** content questions chosen from the material — charts vs. tables, timelines, comparisons, emphasis slides, etc. See "Adaptive content questions" above. Ask only what materially changes the deck so version zero already matches how the user wants their information presented.
+If styleGuide is present, follow its type scale, colors, and the Layout types (recipe-*) section first.
 
 ---
 
-## The Canvas
+## Asking with ` + "`ask_user`" + `
 
-- Fixed **1920 × 1080** logical pixels (16:9). Every coordinate is an **integer logical pixel**.
-- ` + "`x`" + `, ` + "`y`" + ` = top-left; ` + "`w`" + `, ` + "`h`" + ` = size. **Never use percentages or a 0–100 coordinate system** — validation rejects it. Keep elements inside 0–1920 / 0–1080.
-- Comfortable margins: content usually lives within x∈[96, 1824], y∈[72, 1008].
+HARD RULE: never enumerate templates or variants as a numbered/bulleted list or prose menu in chat. The visual picker is the only correct UI for those.
 
----
-
-## ASD v2 Element Vocabulary
-
-ASD v2 is a **superset of v1**: all the token attributes (` + "`fill-token`" + `, ` + "`line-token`" + `, ` + "`color-token`" + `, ` + "`font-token`" + `) still work, and v2 adds raw colors, gradients, rotation, rich text, and geometry. Prefer **readable contrast** (light ink on dark surfaces, dark ink on light).
-
-### ` + "`<ast-slide>`" + ` (the root)
-Exactly one per ` + "`write_slide`" + ` call. Attributes: ` + "`id`" + ` (required), ` + "`title`" + `, ` + "`lang`" + `. Children: any of the elements below plus ` + "`<ast-notes>`" + `.
-
-### ` + "`<ast-text>`" + ` — text boxes
-Geometry required (` + "`x/y/w/h`" + `). Renders **plain text** — never put Markdown markers (` + "`**`" + `, ` + "`_`" + `, ` + "`#`" + `) inside it.
-Attributes: ` + "`id`" + `, ` + "`role`" + `, ` + "`inset`" + `, ` + "`align`" + ` (l|ctr|r), ` + "`anchor`" + ` (t|ctr|b vertical), ` + "`wrap`" + `, ` + "`size`" + `, ` + "`weight`" + `, ` + "`font-token`" + `/` + "`color-token`" + ` (theme) or ` + "`font`" + `/` + "`color`" + ` (raw), ` + "`rot`" + ` (degrees), ` + "`alt`" + `/` + "`decorative`" + `.
-For **mixed formatting within one text box**, nest ` + "`<ast-run>`" + ` children instead of plain text:
-
-### ` + "`<ast-run>`" + ` — rich text runs (child of ` + "`<ast-text>`" + `)
-Each run is a styled span. Attributes: ` + "`b`" + ` (bold), ` + "`i`" + ` (italic), ` + "`u`" + ` (underline), ` + "`color`" + `, ` + "`font`" + `, ` + "`size`" + `, ` + "`weight`" + `. Run text is the element's text content.
-
-> **RUN ADJACENCY — no implicit spacing.** Adjacent ` + "`\u003cast-run\u003e`" + ` elements are concatenated **verbatim, with NO space inserted between them** (by design — whitespace-only separator runs are preserved). So ` + "`\u003cast-run\u003e1972\u003c/ast-run\u003e\u003cast-run\u003eFounded\u003c/ast-run\u003e`" + ` renders as **` + "`1972Founded`" + `**. To separate a date from a label, EITHER put the space inside a run (e.g. ` + "`\u003cast-run\u003e1972 \u003c/ast-run\u003e`" + ` or ` + "`\u003cast-run\u003e Founded\u003c/ast-run\u003e`" + `), OR — preferred for a bold date above a regular label (a timeline node) — use **TWO separate positioned ` + "`\u003cast-text\u003e`" + ` boxes**, one for the date and one for the label. **Never rely on the renderer to add spacing.** ` + "`review_deck`" + ` flags this collision as a ` + "`run_adjacency`" + ` warning.
-
-> **NO OVERLAPPING TEXT BLOCKS.** Every ` + "`<ast-text>`" + ` box occupies its own ` + "`x/y/w/h`" + ` rectangle; the renderer does NOT reflow or push boxes apart. When you fill a template body region, size the box to the *content* — do not leave an over-wide default placeholder (e.g. ` + "`w=1600 h=600`" + `) that covers a fixed label or an adjacent block. For a contact/closing slide, align the label and its details into one tight block with matching ` + "`x`" + ` and stacked ` + "`y`" + `. ` + "`review_deck`" + ` flags substantially overlapping text boxes as an ` + "`overlap`" + ` warning.
-
-> **LAYOUT & PLACEMENT — make it read correctly.** Every element sits at an absolute ` + "`x/y/w/h`" + `; nothing reflows. When you place content — especially into a template's default placeholders, which are often oversized or positioned generically — judge the result as a reader would, not just as valid geometry:
-> - **No overlaps.** Content boxes must not cover each other or the title/chrome. Size a box to its content instead of leaving a broad default placeholder that swallows neighbours.
-> - **Reading order matches spatial order.** A label or heading announces what follows, so its content belongs *after* it in reading order — below it (or to its right), never above or on top of it. If an element logically depends on or continues another, position it accordingly.
-> - **Alignment & grouping.** Related items share an edge (same ` + "`x`" + ` for a stacked block) and sit close together; unrelated items are clearly separated. Respect the slide's margins and the template's existing structure.
->
-> After writing, mentally render each slide and ask "does every element sit where its meaning says it should?" ` + "`review_deck`" + ` catches overlaps automatically, but you are responsible for correct, sensible placement in every scenario — reposition or resize anything that reads wrong.
-
-### ` + "`<ast-shape>`" + ` — shapes, backgrounds, accents
-Required: ` + "`id`" + `, ` + "`kind`" + `, ` + "`x/y/w/h`" + `.
-Styling: ` + "`fill-token`" + `/` + "`line-token`" + `/` + "`line-width`" + ` (theme) OR ` + "`fill`" + `/` + "`line`" + ` (raw ` + "`#RRGGBB`" + `/` + "`#RRGGBBAA`" + `/` + "`rgb()`" + `/` + "`rgba()`" + `). Plus ` + "`line-dash`" + ` (solid|dash|dot), ` + "`head-end`" + `/` + "`tail-end`" + ` (none|arrow|triangle), ` + "`rot`" + ` (degrees), ` + "`opacity`" + ` (0–1).
-` + "`geom`" + ` presets: ` + "`rect roundRect ellipse triangle rtTriangle diamond parallelogram trapezoid hexagon octagon star5 rightArrow leftArrow chevron cloud can cube line bracketPair`" + `. Or a custom ` + "`path`" + ` (SVG-subset: M L C Q Z H V + numbers).
-A shape may contain an ` + "`<ast-text>`" + ` child (a label) and a **gradient** as a JSON script child:
-` + "```html" + `
-<ast-shape id="bg" kind="rect" geom="rect" x="0" y="0" w="1920" h="1080">
-  <script type="application/json" id="bg-grad">{"kind":"linear","angle":90,"stops":[{"pos":0,"color":"#0b1220"},{"pos":100,"color":"#1e293b"}]}</script>
-</ast-shape>
-` + "```" + `
-
-### ` + "`<ast-image>`" + ` — images
-Required: ` + "`id`" + `, ` + "`asset-ref`" + `, ` + "`x/y/w/h`" + `. Optional: ` + "`fit`" + ` (contain|cover), ` + "`rot`" + `, ` + "`opacity`" + `, ` + "`alt`" + `/` + "`decorative`" + `. Reference assets by their ` + "`asset-ref`" + ` (template assets are already seeded onto the deck).
-
-### ` + "`<ast-group>`" + ` — grouping
-Required: ` + "`id`" + `, ` + "`x/y/w/h`" + `. Optional ` + "`rot`" + `. Children use **absolute canvas geometry** (not relative to the group).
-
-### ` + "`<ast-table>`" + ` / ` + "`<ast-chart>`" + `
-Data-driven. ` + "`<ast-table>`" + `: ` + "`id`" + `, ` + "`data-ref`" + `, ` + "`x/y/w/h`" + `, ` + "`header`" + `, ` + "`style-token`" + `. ` + "`<ast-chart>`" + `: ` + "`id`" + `, ` + "`kind`" + `, ` + "`data-ref`" + `, ` + "`x/y/w/h`" + `, ` + "`category-key`" + `, ` + "`value-keys`" + `. Provide the data as a sibling ` + "`<script type=\"application/json\" id=\"...\">`" + ` block referenced by ` + "`data-ref`" + `.
-
-### ` + "`<ast-notes>`" + `
-Speaker notes. Prefer passing ` + "`notes`" + ` to ` + "`write_slide`" + ` instead.
+- Audience / length / who-picks: ` + "`kind: \"select\"`" + ` with your options (include "You pick what fits" on ownership). Then **end the turn**. Do **not** ask to generate images — this engine cannot generate them. Cover photos come from ` + "`slidesImagePicker`" + ` (template examples), ` + "`titleImage: \"upload\"`" + ` (chat attachment), or a public URL. Never ask the user to rehost an attached file on Imgur/Wikipedia.
+- Template: ` + "`slidesTemplatePicker: true`" + `, omit options. Then **end the turn**.
+- Cover/end variants: ` + "`slidesTemplate`" + ` + ` + "`slidesKind`" + ` (` + "`title`" + ` or ` + "`closing`" + `). Title tiles are layouts, not sample photos.
+- Cover image (imported, has example photos): ` + "`slidesImagePicker: true`" + ` + ` + "`slidesTemplate`" + ` — pick from template, provide own (` + "`upload`" + `), or none. Modern logo: yes/no, then attach or ` + "`none`" + `.
+- Colorways (Classic / Modern): ` + "`slidesPalettePicker: true`" + ` + ` + "`slidesTemplate`" + `.
+- After every ` + "`ask_user`" + ` call, end the turn — do not create_deck or fill_slides until they answer.
 
 ---
 
-## Styling Guidance
+## Imported corporate templates
 
-- Make slides look **designed**: full-canvas background shapes (solid or gradient), an accent bar or shape, a clear type hierarchy (large bold title, comfortable body).
-- **Only FLEXIBLE content slides are designed freely.** For FIXED chrome slides (` + "`title`" + `/` + "`section`" + `/` + "`agenda`" + `/` + "`closing`" + `) do **NOT** add your own background or accent shapes — reproduce the branded (or synthesized) chrome verbatim and edit only its ` + "`fillSlots`" + ` text; adding backgrounds/accents there is what produces an off-brand white slide with a stray shape.
-- Use the template's tokens/assets so the look is consistent; override with raw colors only for deliberate accents.
-- Keep strong contrast — never place dark text on a dark background (the classic "black-on-black" failure).
-- Never emit Markdown markers inside ` + "`<ast-text>`" + `; use ` + "`size`" + `/` + "`weight`" + `/` + "`<ast-run>`" + ` for emphasis.
-- **Never substitute an ` + "`astonish-app`" + ` for a requested deck** — presentations are slides, not apps.
+A pptx import supplies the style guide (colors, fonts, logo, legal), official title/closing layouts, and optional pattern-* samples (stored, not in the default catalog). Author the **middle** with recipe-* so every slide has a job and a full layout; put the **real imported cover and end page** at the ends. Do not pour a story into whichever pattern-* ranked richest.
 
 ---
 
-## Examples
+## Canvas (blank-canvas only)
 
-### 1) Title slide (dark template, gradient background + accent)
-` + "```html" + `
-<ast-slide id="s0" title="Q4 Business Review">
-  <ast-shape id="bg" kind="rect" geom="rect" x="0" y="0" w="1920" h="1080" decorative="true">
-    <script type="application/json" id="g0">{"kind":"linear","angle":115,"stops":[{"pos":0,"color":"#0b1220"},{"pos":100,"color":"#1e293b"}]}</script>
-  </ast-shape>
-  <ast-shape id="accent" kind="rect" geom="rect" x="160" y="560" w="220" h="10" fill="#f59e0b" decorative="true"></ast-shape>
-  <ast-text id="title" role="title" x="160" y="380" w="1600" h="160" color="#e2e8f0" size="84" weight="700">Q4 Business Review</ast-text>
-  <ast-text id="subtitle" x="160" y="600" w="1600" h="80" color="#94a3b8" size="34">Revenue, retention, and the road to Q1</ast-text>
-</ast-slide>
-` + "```" + `
-
-### 2) Content slide (bulleted body via rich runs)
-` + "```html" + `
-<ast-slide id="s2" title="Highlights">
-  <ast-shape id="bg" kind="rect" geom="rect" x="0" y="0" w="1920" h="1080" fill="#0b1220" decorative="true"></ast-shape>
-  <ast-text id="h" role="title" x="120" y="96" w="1680" h="120" color="#e2e8f0" size="56" weight="700">Highlights</ast-text>
-  <ast-text id="body" x="120" y="280" w="1680" h="640" color="#cbd5e1" size="34">
-    <ast-run b color="#f59e0b">Revenue </ast-run>
-    <ast-run>up 18% YoY, driven by enterprise renewals.</ast-run>
-  </ast-text>
-</ast-slide>
-` + "```" + `
-
-### 3) Section / transition slide with a shape accent
-` + "```html" + `
-<ast-slide id="s1" title="Financials">
-  <ast-shape id="bg" kind="rect" geom="rect" x="0" y="0" w="1920" h="1080" fill="#111827" decorative="true"></ast-shape>
-  <ast-shape id="chev" kind="chevron" geom="chevron" x="140" y="470" w="160" h="140" fill="#38bdf8" rot="0" opacity="0.9" decorative="true"></ast-shape>
-  <ast-text id="sec" role="title" x="340" y="470" w="1440" h="140" color="#f8fafc" size="72" weight="700" anchor="ctr">01 — Financials</ast-text>
-</ast-slide>
-` + "```" + `
+1920x1080 integer px. Tags: ast-slide, ast-text (+ ast-run), ast-shape, ast-image (asset-ref), ast-table/ast-chart (JSON data-ref). No Markdown inside ast-text. Adjacent ast-run elements concatenate with no inserted space. Prefer fill_slides; this vocabulary is for the rare no-template case.
 
 ---
 
-## Quick Checklist
+## Checklist
 
-- [ ] Called ` + "`list_templates`" + ` and either used the user's named template, or (if they delegated) picked one and said so, or (if unspecified) asked the user to choose before creating the deck.
-- [ ] If the chosen template offers multiple variants for a role you need, asked the user which variant with the visual ` + "`ask_user`" + ` picker (thumbnails from ` + "`get_template_variant_previews`" + `), one question at a time, plus a ` + "`kind=\"yesno\"`" + ` ask for the agenda slide.
-- [ ] Asked up to 5 **adaptive** content questions where they materially change the deck (chart vs. table, timeline vs. list, comparison layout, emphasis/closing slide) — and skipped them entirely when no strong signal was present (no fatigue).
-- [ ] After the questionnaire, went straight to ` + "`write_slide`" + ` without re-fetching read-only template/deck context.
-- [ ] For on-brand slides, started from a variant chosen by its label (the real PowerPoint layout name) rather than hand-building.
-- [ ] For chrome slides (` + "`title`" + `/` + "`section`" + `/` + "`agenda`" + `/` + "`closing`" + `), reproduced the branded/synthesized variant verbatim and edited only its ` + "`fillSlots`" + ` text (did not rebuild it or add backgrounds/accents).
-- [ ] Called ` + "`create_deck`" + ` **with** the ` + "`template`" + ` argument.
-- [ ] Built a title slide, section transitions, and content slides from the archetypes.
-- [ ] Replaced all ` + "`{{TITLE}}`" + `/` + "`{{BODY}}`" + ` placeholders; readable contrast throughout.
-- [ ] Added speaker notes via ` + "`write_slide`" + `'s ` + "`notes`" + `.
-- [ ] Ran ` + "`validate_deck`" + ` and fixed all errors.
-- [ ] Ran ` + "`review_deck`" + ` and resolved all warnings (no adjacent-run collisions, no overlapping/misaligned text blocks, adequate contrast, template chrome/logo/footer retained, precise dated milestones, precise source citations).
+- [ ] First tool after skill_lookup is ask_user unless that question's answer is already explicit
+- [ ] Research-only constraints (use what you know / don't search) did not skip intake
+- [ ] Template: named, "you pick" with one-line why, or slidesTemplatePicker — never auto-selected from inferred tone
+- [ ] Title variant asked only when 2+ title* (before create_deck); cover image asked when that title has a ph-pic well (select vs provide) or Modern logo yes/no; palette asked only when palettes exist (Classic, Modern); closing asked only when 2+ closing*
+- [ ] Did not ask to generate images; cover image is slidesImagePicker (template / upload / none) or Modern logo attach / none
+- [ ] create_deck with template (+ title, description, palette / titleKind / titleImage / closingKind as chosen — titleKind is the ask_user option id). slug is a hint; persist slug is session-unique
+- [ ] Slide 0 is the chosen official title kind when listed (not a different variant); last is official closing when listed, else recipe-closer; body is recipe-*; cover image / Modern logo only if they picked or attached one
+- [ ] Whole deck via one fill_slides call; official covers use catalog fillSlots; every required slot filled; chapters are eyebrows not empty dividers; at least 3 recipe kinds on a long deck; Modern includes recipe-data-table when comparing; closer is cover-like (not three chips)
+- [ ] validate_deck clean; review_deck warnings resolved
 `

@@ -18,6 +18,18 @@ describe('QuestionOptionThumb', () => {
     cleanup()
   })
 
+  it('renders an <img> from the template media endpoint for sha256 asset refs', () => {
+    render(
+      <QuestionOptionThumb
+        thumbnail={{ kind: 'image', template: 'gco', assetRef: 'sha256-deadbeef' }}
+        label="Photo 1"
+      />,
+    )
+
+    const img = screen.getByAltText('Photo 1') as HTMLImageElement
+    expect(img.getAttribute('src')).toBe('/api/docs/slides/templates/gco/media/sha256-deadbeef')
+  })
+
   it('renders an <img> from the baked thumbnail endpoint for kind "image"', () => {
     render(
       <QuestionOptionThumb
@@ -33,6 +45,7 @@ describe('QuestionOptionThumb', () => {
     // assetRef `thumb/title` maps to the `title` kind path param.
     expect(img.getAttribute('src')).toContain('/thumbnails/title')
     expect(img.getAttribute('src')).toContain('aurora')
+    expect(img.getAttribute('src')).toContain('v=')
   })
 
   it('falls back to the live archetype thumb when the image errors and markup exists', () => {

@@ -127,6 +127,13 @@ export class AstText extends PositionedElement {
     return parts.join(';')
   }
 
+  /** Flatten styled runs to one text node so canvas editing can rewrite copy. */
+  replacePlainText(text: string): void {
+    this.runs = null
+    this.runsRead = true
+    this.textContent = text
+  }
+
   protected override render(): unknown {
     const runs = this.readRuns()
     if (runs.length === 0) return noChange
@@ -147,6 +154,10 @@ export class AstText extends PositionedElement {
     // ast-text{white-space:pre-wrap} rule in the HTML export.
     this.style.whiteSpace = 'pre-wrap'
     this.style.overflowWrap = 'break-word'
+    this.style.fontVariantLigatures = 'none'
+    // Clip horizontally (long tokens) but never shave glyph descenders.
+    this.style.overflowX = 'clip'
+    this.style.overflowY = 'visible'
     if (this.anchor === 'ctr') {
       this.style.display = 'flex'
       this.style.flexDirection = 'column'

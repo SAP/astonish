@@ -20,12 +20,13 @@ const SchemaModelV3 = 3
 
 // TemplateModel is the top-level lossless IR for one imported template.
 type TemplateModel struct {
-	Schema   int               `json:"schema"`
-	Size     IRSize            `json:"size"`
-	Theme    map[string]string `json:"theme,omitempty"`
-	Layouts  []IRLayout        `json:"layouts,omitempty"`
-	Slides   []IRLayout        `json:"slides,omitempty"`
-	Warnings []IRWarning       `json:"warnings,omitempty"`
+	Schema     int               `json:"schema"`
+	Size       IRSize            `json:"size"`
+	Theme      map[string]string `json:"theme,omitempty"`
+	Layouts    []IRLayout        `json:"layouts,omitempty"`
+	Slides     []IRLayout        `json:"slides,omitempty"`
+	Warnings   []IRWarning       `json:"warnings,omitempty"`
+	StyleGuide *StyleGuide       `json:"styleGuide,omitempty"`
 }
 
 // IRSize is the canvas size in logical pixels (normally 1920x1080).

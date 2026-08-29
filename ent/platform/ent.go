@@ -25,6 +25,7 @@ import (
 	"github.com/SAP/astonish/ent/platform/platformsetting"
 	"github.com/SAP/astonish/ent/platform/platformskill"
 	"github.com/SAP/astonish/ent/platform/platformskillfile"
+	"github.com/SAP/astonish/ent/platform/platformslidetemplate"
 	"github.com/SAP/astonish/ent/platform/sandboxlayer"
 	"github.com/SAP/astonish/ent/platform/sandboxtemplate"
 	"github.com/SAP/astonish/ent/platform/toolindex"
@@ -103,6 +104,7 @@ func checkColumn(t, c string) error {
 			platformsetting.Table:       platformsetting.ValidColumn,
 			platformskill.Table:         platformskill.ValidColumn,
 			platformskillfile.Table:     platformskillfile.ValidColumn,
+			platformslidetemplate.Table: platformslidetemplate.ValidColumn,
 			sandboxlayer.Table:          sandboxlayer.ValidColumn,
 			sandboxtemplate.Table:       sandboxtemplate.ValidColumn,
 			toolindex.Table:             toolindex.ValidColumn,

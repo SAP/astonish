@@ -219,7 +219,11 @@ export interface DocsUpdateMessage {
   slideIndex?: number
   totalSlides?: number
   title?: string
+  deckTitle?: string
+  description?: string
   schemaVersion?: number
+  /** Client-assigned; increments on every live docs_update so the panel reloads. */
+  revision?: number
   validation?: {
     errors: number
     warnings: number
@@ -230,6 +234,15 @@ export interface DocsUpdateMessage {
     raster: number
     unsupported: number
   }
+}
+
+/** Human label for the chat Slides card. Never the persist slug (s-<sessionID>). */
+export function slidesHarnessLabel(update: Pick<DocsUpdateMessage, 'description' | 'deckTitle' | 'title'>): string {
+  for (const value of [update.description, update.deckTitle, update.title]) {
+    const text = (value || '').trim()
+    if (text) return text
+  }
+  return 'Presentation'
 }
 
 // ---- Execution plan (announce_plan / update_plan) ----
@@ -300,6 +313,8 @@ export interface ChatQuestionOption {
     /** Template name; asset-refs in `markup` resolve from this template's
      *  assets at render time (never embedded data: bytes). */
     template?: string
+    /** Owning catalog scope so media URLs can disambiguate same-name templates. */
+    templateScope?: 'personal' | 'team' | 'org' | 'platform' | 'builtin'
   }
 }
 

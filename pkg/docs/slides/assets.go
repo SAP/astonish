@@ -96,8 +96,24 @@ func (a AssetIngestor) Fetch(ctx context.Context, rawURL string) (Asset, error) 
 	if int64(len(body)) > max {
 		return Asset{}, fmt.Errorf("asset exceeds %d bytes", max)
 	}
+	return a.Accept(body, resp.Header.Get("Content-Type"))
+}
+
+// Accept validates raw image bytes (size, MIME, SVG safety) and returns a
+// content-addressed Asset. declaredMIME is optional (e.g. chat attachment type).
+func (a AssetIngestor) Accept(body []byte, declaredMIME string) (Asset, error) {
+	max := a.MaxBytes
+	if max <= 0 {
+		max = MaxAssetBytes
+	}
+	if len(body) == 0 {
+		return Asset{}, fmt.Errorf("empty image")
+	}
+	if int64(len(body)) > max {
+		return Asset{}, fmt.Errorf("asset exceeds %d bytes", max)
+	}
 	detected := http.DetectContentType(body)
-	declared, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	declared, _, _ := mime.ParseMediaType(declaredMIME)
 	if declared != "" && !compatibleMIME(declared, detected) {
 		return Asset{}, fmt.Errorf("asset MIME mismatch: declared %s, detected %s", declared, detected)
 	}

@@ -110,19 +110,38 @@ func SortedGroups(groups map[string]*ToolGroup) []*ToolGroup {
 	return sorted
 }
 
+// PrimeTools builds the local registry and BM25 catalog without embedding any
+// documents. It makes tool discovery usable immediately while SyncTools updates
+// semantic vectors in the background.
+func (idx *ToolIndex) PrimeTools(ctx context.Context, mainTools []tool.Tool, groups []*ToolGroup) {
+	registry, docs := buildToolCatalog(ctx, mainTools, groups)
+	idx.mu.Lock()
+	idx.toolRegistry = registry
+	idx.bm25 = buildBM25Index(docs)
+	idx.mu.Unlock()
+}
+
 // SyncTools indexes all tools from main-thread tools and tool groups.
 // Each tool becomes a single document: "{tool_name}: {tool_description}"
 // with metadata for group_name and tool_name.
 //
-// This is called at startup and whenever tool groups change.
 // It performs an incremental sync: only tools with new or changed content
-// are re-embedded. Unchanged tools reuse their persisted embeddings,
-// making restarts near-instant when the tool set hasn't changed.
+// are re-embedded. Unchanged tools reuse their persisted embeddings.
 func (idx *ToolIndex) SyncTools(ctx context.Context, mainTools []tool.Tool, groups []*ToolGroup) error {
+	// Build and publish the lexical catalog before any potentially slow remote
+	// embedding work. SearchHybrid can therefore use BM25 while vectors refresh.
+	registry, docs := buildToolCatalog(ctx, mainTools, groups)
 	idx.mu.Lock()
-	defer idx.mu.Unlock()
+	idx.toolRegistry = registry
+	idx.bm25 = buildBM25Index(docs)
+	idx.mu.Unlock()
 
-	// Build the registry and document list
+	// Do not hold idx.mu while a remote embedding provider is running. Reads keep
+	// using the published lexical catalog (and any previously stored vectors).
+	return idx.syncToolDocuments(ctx, registry, docs)
+}
+
+func buildToolCatalog(ctx context.Context, mainTools []tool.Tool, groups []*ToolGroup) (map[string]ToolEntry, []ToolVectorDoc) {
 	registry := make(map[string]ToolEntry)
 	var docs []ToolVectorDoc
 
@@ -148,10 +167,14 @@ func (idx *ToolIndex) SyncTools(ctx context.Context, mainTools []tool.Tool, grou
 		})
 	}
 
-	// Index tools from each group
+	// Index tools from each group. First-party groups (slides, email, core, …)
+	// run before MCP groups so an MCP server that reuses a generic name
+	// (e.g. list_templates) cannot steal the built-in tool in the registry.
 	readCtx := &minimalReadonlyContext{Context: ctx}
-	for _, g := range groups {
-		// Regular tools
+	indexGroup := func(g *ToolGroup) {
+		if g == nil {
+			return
+		}
 		for _, t := range g.Tools {
 			name := t.Name()
 			if _, exists := registry[name]; exists {
@@ -175,8 +198,6 @@ func (idx *ToolIndex) SyncTools(ctx context.Context, mainTools []tool.Tool, grou
 				},
 			})
 		}
-
-		// MCP toolset tools
 		for _, ts := range g.Toolsets {
 			mcpTools, err := ts.Tools(readCtx)
 			if err != nil {
@@ -207,7 +228,22 @@ func (idx *ToolIndex) SyncTools(ctx context.Context, mainTools []tool.Tool, grou
 			}
 		}
 	}
+	var mcpGroups []*ToolGroup
+	for _, g := range groups {
+		if g != nil && strings.HasPrefix(g.Name, "mcp:") {
+			mcpGroups = append(mcpGroups, g)
+			continue
+		}
+		indexGroup(g)
+	}
+	for _, g := range mcpGroups {
+		indexGroup(g)
+	}
 
+	return registry, docs
+}
+
+func (idx *ToolIndex) syncToolDocuments(ctx context.Context, registry map[string]ToolEntry, docs []ToolVectorDoc) error {
 	// Incremental sync: only embed tools whose content has changed.
 	// On a typical restart where tools haven't changed, this skips all
 	// embedding calls — the only cost is GetByID lookups against the store.
@@ -250,11 +286,11 @@ func (idx *ToolIndex) SyncTools(ctx context.Context, mainTools []tool.Tool, grou
 			slog.Debug("pruned stale tool index entries", "count", len(staleIDs))
 		}
 	}
+	idx.mu.Lock()
 	idx.knownIDs = currentIDs
+	idx.mu.Unlock()
 
 	if len(docs) == 0 {
-		idx.toolRegistry = registry
-		idx.bm25 = nil
 		return nil
 	}
 
@@ -265,9 +301,6 @@ func (idx *ToolIndex) SyncTools(ctx context.Context, mainTools []tool.Tool, grou
 		}
 	}
 
-	// Build BM25 inverted index from the same documents.
-	idx.bm25 = buildBM25Index(docs)
-	idx.toolRegistry = registry
 	return nil
 }
 
@@ -485,6 +518,20 @@ func (idx *ToolIndex) GetToolEntry(toolName string) *ToolEntry {
 	return nil
 }
 
+// FirstPartyToolEntry returns the index entry when it is a built-in / first-party
+// tool (not an mcp:* group). Used so MCP servers cannot shadow slides/email/core
+// tools that share a generic name like list_templates.
+func (idx *ToolIndex) FirstPartyToolEntry(toolName string) *ToolEntry {
+	e := idx.GetToolEntry(toolName)
+	if e == nil || e.Tool == nil {
+		return nil
+	}
+	if strings.HasPrefix(e.GroupName, "mcp:") {
+		return nil
+	}
+	return e
+}
+
 // GetToolsByGroup returns all tool entries belonging to the given group name.
 // Returns nil if the group has no tools registered.
 func (idx *ToolIndex) GetToolsByGroup(groupName string) []ToolEntry {
@@ -556,6 +603,22 @@ func MatchMCPGroupsFromQuery(idx *ToolIndex, query string) []ToolMatch {
 			seen[m.ToolName] = true
 			out = append(out, m)
 		}
+	}
+	return out
+}
+
+// DropMCPShadowsOfFirstParty removes MCP search hits whose bare name is already
+// a first-party tool in idx. Email-mcp list_templates must not hide slides.
+func DropMCPShadowsOfFirstParty(idx *ToolIndex, matches []ToolMatch) []ToolMatch {
+	if idx == nil || len(matches) == 0 {
+		return matches
+	}
+	out := matches[:0]
+	for _, m := range matches {
+		if strings.HasPrefix(m.GroupName, "mcp:") && idx.FirstPartyToolEntry(m.ToolName) != nil {
+			continue
+		}
+		out = append(out, m)
 	}
 	return out
 }

@@ -42,6 +42,19 @@ describe('SlidesCard', () => {
     expect(screen.getByTestId('slides-card')).toHaveTextContent('9 native, 0 unsupported')
   })
 
+  it('shows description instead of the persist slug', () => {
+    render(<SlidesCard update={{
+      ...update,
+      deckSlug: 's-c511d9c2-aaaa-bbbb-cccc-ddddeeeeffff',
+      title: undefined,
+      deckTitle: 'Steve Jobs',
+      description: 'A biography of Steve Jobs',
+    }} />)
+
+    expect(screen.getByTestId('slides-card')).toHaveTextContent('A biography of Steve Jobs')
+    expect(screen.getByTestId('slides-card')).not.toHaveTextContent('s-c511d9c2')
+  })
+
   it('opens the authenticated presentation blob', async () => {
     vi.mocked(fetchSlidesPresentation).mockResolvedValue(new Blob(['deck'], { type: 'text/html' }))
     render(<SlidesCard update={update} scope="team" />)

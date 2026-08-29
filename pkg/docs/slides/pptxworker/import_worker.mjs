@@ -1077,26 +1077,41 @@ try {
 
   // Recursively process a spTree/grpSp child list, flattening groups to
   // absolute canvas geometry.
+  //
+  // OOXML `hidden="1"` on p:cNvPr is how PowerPoint hides authoring palettes
+  // (SAP "Harvey" status balls — 100 stacked squares in a hidden group) and
+  // instruction stickers (DRAFT, Dummy data, For discussion). Flattening those
+  // groups without honoring hidden paints ~100 black tiles onto every slide.
+  const isOOXMLHidden = (el) => {
+    const cNvPr = findDeep(el, 'p:cNvPr')
+    if (!cNvPr) return false
+    const h = attrsOf(cNvPr)['@_hidden']
+    return h === '1' || h === 'true'
+  }
   const processTree = async (container, affine, slideRels, slideDir, out) => {
     for (const child of childrenOf(container)) {
       const t = tagOf(child)
       switch (t) {
         case 'p:sp': {
+          if (isOOXMLHidden(child)) break
           const n = processSp(child, affine)
           if (n) out.push(n)
           break
         }
         case 'p:cxnSp': {
+          if (isOOXMLHidden(child)) break
           const n = processSp(child, affine)
           if (n) { n.geom = 'line'; out.push(n) }
           break
         }
         case 'p:pic': {
+          if (isOOXMLHidden(child)) break
           const n = await processPic(child, affine, slideRels, slideDir)
           if (n) out.push(n)
           break
         }
         case 'p:graphicFrame': {
+          if (isOOXMLHidden(child)) break
           const isChart = findDeep(child, 'c:chart') || findDeep(child, 'a:graphicData')
           const tbl = findDeep(child, 'a:tbl')
           if (tbl) {
@@ -1108,6 +1123,7 @@ try {
           break
         }
         case 'p:grpSp': {
+          if (isOOXMLHidden(child)) break
           // Compute the group affine and recurse.
           const grpSpPr = findChild(child, 'p:grpSpPr')
           const xfrm = grpSpPr ? findChild(grpSpPr, 'a:xfrm') : null
@@ -1198,8 +1214,8 @@ try {
     //     branded layout, else by synthesizing one in the template's OWN style
     //     (master background + master chrome objects + theme tokens) — never a
     //     generic white slab — so the chrome family stays visually coherent.
-    //   • FLEXIBLE content — content/blank/etc.; the AI adapts the body region
-    //     to the content type (bullets/table/chart/image) keeping the tokens.
+    //   • FLEXIBLE content — content/blank/etc.; the AI copies the archetype
+    //     markup VERBATIM and only edits content inside the recorded fillSlots.
     //
     // Each layout's color/chrome is captured via master→layout background+chrome
     // inheritance (the colorful covers/dividers carry their pictures + accent
@@ -1562,17 +1578,267 @@ try {
       return `<ast-text id="ph-${idc}" ${geo} ${attrs.join(' ')}><ast-run${runAttr}>${escText(p.prompt || '{{BODY}}')}</ast-run></ast-text>`
     }
 
+    // True when an IR chrome object still has a drawable shape (fill/geom/path)
+    // even if classify() tagged it kind:'text' because it also carries a run.
+    const objectHasShape = (o) => {
+      if (!o) return false
+      if (o.kind === 'image' || o.kind === 'ellipse' || o.kind === 'path' || o.kind === 'line') return true
+      if (o.geom && o.geom !== 'rect') return true
+      if (o.rectRadius) return true
+      if (o.paths && o.paths.length) return true
+      if (o.fill && (o.fill.color || o.fill.kind === 'gradient')) return true
+      return false
+    }
+    const objectHasText = (o) => !!(o && o.text && String(o.text).trim())
+
+    // Sample slides mix brand structure (colored bars/cards) with dummy authoring
+    // artifacts (DRAFT watermarks, <date> tokens, leftover pies). Patterns must
+    // keep the structure and drop the junk, or fill_slide produces a mess.
+    const isWatermarkText = (o) => {
+      const t = String((o && o.text) || '').trim()
+      if (/^(draft|confidential|sample|copy|watermark)$/i.test(t)) return true
+      const sz = (o && o.style && o.style.fontSize) || 0
+      if (sz >= 64 && t.length < 24 && /draft|confidential|sample/i.test(t)) return true
+      const area = ((o && o.w) || 0) * ((o && o.h) || 0)
+      if (area > 500 * 200 && t.length < 24 && /draft|confidential|sample/i.test(t)) return true
+      return false
+    }
+    const isDummyInstructionText = (text) => {
+      const t = String(text || '').trim()
+      if (!t) return false
+      if (/^(for discussion|internal use only|final slide|backup|update data|dummy data|confidential)$/i.test(t)) return true
+      if (/^insert page title/i.test(t)) return true
+      if (/start typing to add text/i.test(t)) return true
+      if (/^(second|third|fourth|fifth) level$/i.test(t)) return true
+      return false
+    }
+    // Layout dummy the author should replace — fill slots, not frozen chrome.
+    // Patterns are generic PowerPoint/template prompts (field captions, "goes here",
+    // dummy dates), not a specific corporate deck's copy.
+    const isFillablePromptText = (text) => {
+      const t = String(text || '').trim()
+      if (!t || t.length > 80) return false
+      if (/goes here/i.test(t)) return true
+      if (/\bhere\b.+\bhere\b/i.test(t)) return true
+      if (/^[A-Za-z][A-Za-z0-9 /&-]{1,48}:$/.test(t)) return true // "Contact information:"
+      if (/^(your |presenter |speaker |author )?name\b/i.test(t)) return true
+      if (/^add .{0,40}(logo|photo|image|picture)\b/i.test(t)) return true
+      if (/\bmonth\s*0+\b/i.test(t)) return true
+      if (/^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s*0+/i.test(t)) return true
+      return false
+    }
+    const isPlaceholderTokenText = (text) => {
+      const t = String(text || '').trim()
+      if (!t) return true
+      if (isDummyInstructionText(t)) return true
+      if (isFillablePromptText(t)) return true
+      if (/^[‹<]\s*#\s*[›>]$/.test(t)) return true // slide-number field ‹#›
+      if (/<[a-zA-Z][\w-]*>/.test(t)) return true // <initials> <date>
+      if (/&lt;[a-zA-Z][\w-]*&gt;/.test(t)) return true
+      if (/yyyy[-_/]?MM/.test(t)) return true
+      if (/click to (add|edit)/i.test(t)) return true
+      if (/footnote/i.test(t) && t.length < 48) return true
+      if (/^lorem\b/i.test(t)) return true
+      if (/\bxxxx\b/i.test(t)) return true
+      return false
+    }
+    const isWhiteOrEmptyFill = (o) => {
+      if (o && o.opacity === 0) return true
+      const c = o && o.fill && o.fill.color
+      if (!c) return true
+      const hex = String(c).replace('#', '').toUpperCase()
+      return hex === 'FFF' || hex === 'FFFFFF' || hex === 'FFFFFFFF'
+    }
+    const isMasterClutter = (o) => {
+      if (!o) return true
+      if (o.kind === 'image' || o.mediaKey) return false
+      if (isWatermarkText(o) || isDummyInstructionText(o.text) || (objectHasText(o) && isPlaceholderTokenText(o.text))) return true
+      if (objectHasText(o) && String(o.text).trim()) return false
+      if (o.kind === 'line' || (o.line && o.line.color)) return false
+      if (o.fill && o.fill.kind === 'gradient') return false
+      // Empty / noFill / white tiles from the slide master (SAP templates ship
+      // ~100 of these). They paint as opaque white squares in PPTX.
+      if (isWhiteOrEmptyFill(o)) return true
+      // Authoring palettes (Harvey balls, stacked icon sheets) are small
+      // squares. Real accent bars are long and thin; icon-row markers are
+      // ellipses/images — keep those.
+      const w = o.w || 0
+      const h = o.h || 0
+      const maxSide = Math.max(w, h)
+      const minSide = Math.min(w, h)
+      if (o.kind === 'ellipse' || o.geom === 'ellipse' || o.kind === 'image') return false
+      if (maxSide > 0 && maxSide <= 220 && minSide >= maxSide * 0.55) return true
+      return false
+    }
+    const isSampleJunkShape = (o) => {
+      if (!o) return false
+      if (objectHasText(o) && !isWatermarkText(o) && !isPlaceholderTokenText(o.text)) return false
+      const maxSide = Math.max(o.w || 0, o.h || 0)
+      if (o.kind === 'ellipse' || o.geom === 'ellipse') return maxSide >= 140
+      return false
+    }
+    // Dummy/placeholder/watermark copy is always junk, even when it sits on a
+    // filled sticker. Keeping those as chrome is how DRAFT / Dummy data leaked
+    // onto generated decks. Fillable prompts (Contact information:) are slots.
+    const isSampleJunk = (o) => {
+      if (isWatermarkText(o) || isSampleJunkShape(o)) return true
+      if (!objectHasText(o)) return false
+      if (isFillablePromptText(o.text)) return false
+      return isPlaceholderTokenText(o.text)
+    }
+    const insetBox = (o) => {
+      const pad = Math.max(10, Math.round(Math.min(o.w || 0, o.h || 0) * 0.08))
+      return {
+        x: (o.x || 0) + pad,
+        y: (o.y || 0) + pad,
+        w: Math.max(1, (o.w || 0) - 2 * pad),
+        h: Math.max(1, (o.h || 0) - 2 * pad),
+        style: o.style,
+      }
+    }
+    const regionHint = (o) => {
+      const x = o.x || 0
+      const y = o.y || 0
+      const col = x < 500 ? 'left' : (x > 1100 ? 'right' : 'center')
+      const row = y < 180 ? 'header' : (y > 880 ? 'footer' : 'body')
+      return `${col} ${row}`
+    }
+
+    const hintRoleForPlaceholder = (p) => {
+      if (p.type === 'title') return 'title'
+      if (p.type === 'image') return 'image'
+      return 'body'
+    }
+    const hintForPlaceholder = (p) => {
+      if (p.type === 'title') return 'Slide title'
+      if (p.type === 'image') return p.name || 'Image'
+      return p.name || 'Body'
+    }
+    const hintRoleForText = (o) => {
+      const sz = o && o.style && o.style.fontSize
+      if (sz && sz >= 32) return 'heading'
+      return 'body'
+    }
+    const hintForText = (o) => {
+      const role = hintRoleForText(o) === 'heading' ? 'heading' : 'text'
+      return `${regionHint(o)} ${role} — a complete thought that fits the box (~12–22 words), not a 5-word stub`
+    }
+
+    // Reading order: cluster into rows by similar y, then left-to-right.
+    const readingOrder = (items) => {
+      const sorted = items.slice().sort((a, b) => (a.y - b.y) || (a.x - b.x))
+      const rows = []
+      const rowTol = 80
+      for (const it of sorted) {
+        const row = rows[rows.length - 1]
+        if (row && Math.abs(it.y - row[0].y) < rowTol) row.push(it)
+        else rows.push([it])
+      }
+      for (const row of rows) row.sort((a, b) => a.x - b.x)
+      return rows.flat()
+    }
+    const similarSize = (a, b) => {
+      const dw = Math.abs((a.w || 0) - (b.w || 0))
+      const dh = Math.abs((a.h || 0) - (b.h || 0))
+      return dw <= 80 && dh <= 80
+    }
+    const detectCardGrid = (items) => {
+      // Prefer split shape+text cards; also treat similar-sized text boxes as a
+      // grid when the sample stored the copy next to the shape, not on it.
+      const cands = items.filter((it) => (it.w || 0) >= 180 && (it.h || 0) >= 90 && (it.w || 0) < CANVAS_W * 0.72)
+      if (cands.length < 2) return []
+      let best = []
+      for (const seed of cands) {
+        const cluster = cands.filter((it) => similarSize(it, seed))
+        if (cluster.length > best.length) best = cluster
+      }
+      if (best.length < 2) return []
+      // A single row of similar text with no card shapes is an icon/timeline
+      // row, not a card grid.
+      const ys = best.map((it) => it.y)
+      const oneRow = Math.max(...ys) - Math.min(...ys) < 80
+      if (oneRow && best.length >= 3 && !best.some((it) => it.fromCard)) return []
+      return best
+    }
+    const detectIconRow = (items, cards) => {
+      const cardSet = new Set(cards)
+      const rest = items.filter((it) => !cardSet.has(it) && (it.w || 0) < CANVAS_W * 0.45)
+      if (rest.length < 3) return []
+      const sorted = rest.slice().sort((a, b) => a.y - b.y)
+      let best = []
+      for (let i = 0; i < sorted.length; i += 1) {
+        const row = sorted.filter((it) => Math.abs(it.y - sorted[i].y) < 70)
+        const xs = row.slice().sort((a, b) => a.x - b.x)
+        const uniqueX = []
+        for (const it of xs) {
+          if (!uniqueX.some((u) => Math.abs(u.x - it.x) < 40)) uniqueX.push(it)
+        }
+        if (uniqueX.length > best.length) best = uniqueX
+      }
+      return best.length >= 3 ? best : []
+    }
+    const gridPosLabel = (item, group) => {
+      const snap = (v) => Math.round(v / 60) * 60
+      const xs = [...new Set(group.map((g) => snap(g.x)))].sort((a, b) => a - b)
+      const ys = [...new Set(group.map((g) => snap(g.y)))].sort((a, b) => a - b)
+      const ci = xs.reduce((best, x, i) => (Math.abs(snap(item.x) - x) < Math.abs(snap(item.x) - xs[best]) ? i : best), 0)
+      const ri = ys.reduce((best, y, i) => (Math.abs(snap(item.y) - y) < Math.abs(snap(item.y) - ys[best]) ? i : best), 0)
+      const colName = xs.length === 1 ? '' : (xs.length === 2 ? ['left', 'right'][ci] : (xs.length === 3 ? ['left', 'middle', 'right'][ci] : `col ${ci + 1}`))
+      const rowName = ys.length === 1 ? '' : (ys.length === 2 ? ['top', 'bottom'][ri] : (ys.length === 3 ? ['top', 'middle', 'bottom'][ri] : `row ${ri + 1}`))
+      if (rowName && colName) return `${rowName}-${colName}`
+      return colName || rowName || 'center'
+    }
+    const isKickerBox = (it, title, cards) => {
+      if (it === title || (cards && cards.includes(it))) return false
+      const w = it.w || 0
+      const h = it.h || 0
+      if (w < CANVAS_W * 0.45 || h > 160) return false
+      if (title && it.y + 10 < title.y) return false
+      return true
+    }
+
+    // Emit a fillable ast-text slot (XML) at an IR box.
+    const textSlotToAsd = (box, style, id, prompt, extraAttrs = '') => {
+      const st = style || {}
+      const col = safeCol(st.color) || (themeTokens.ink && safeCol(themeTokens.ink)) || '#172033'
+      const attrs = [`size="${st.fontSize || 28}"`, `color="${col}"`]
+      if (st.bold) attrs.push('weight="bold"')
+      if (st.fontFace && !/[;<>]/.test(st.fontFace) && !/^\+/.test(st.fontFace)) attrs.push(`font="${esc(withFontFallback(st.fontFace))}"`)
+      const runAttr = st.italic ? ' i="true"' : ''
+      const geo = clampGeo(box)
+      return `<ast-text id="${id}" ${geo} ${attrs.join(' ')}${extraAttrs}><ast-run${runAttr}>${escText(prompt)}</ast-run></ast-text>`
+    }
+    const CENTER_ATTRS = ' align="ctr" anchor="ctr"'
+    // Icon-row captions sit BELOW markers; top-align so taller copy grows down
+    // instead of vertically centering up through the icon and rule.
+    const ICON_CAPTION_ATTRS = ' align="ctr"'
+
+    const mergePatternPlaceholders = (layoutPhs, samplePhs) => {
+      const sample = (samplePhs || []).slice()
+      if (sample.some((p) => p.type === 'title')) return sample
+      const titles = (layoutPhs || []).filter((p) => p.type === 'title')
+      return titles.concat(sample)
+    }
+
     // Serialize an entire IRLayout to a single-root <ast-slide> XML fragment.
-    // Returns { markup, fillSlots }: markup is the ast-slide (unchanged from the
-    // legacy string output), and fillSlots is the ordered list of ast-text ids
-    // that carry a {{TITLE}}/{{BODY}} placeholder — i.e. the fillable text holes
-    // the author/AI may edit. Chrome (backgrounds, images, accent shapes, picture
-    // panels) is NOT a fill slot: for a FIXED brand-chrome archetype the AI must
-    // change only the text inside these ids and reproduce everything else verbatim.
-    const layoutToAsd = (layout) => {
+    // Returns { markup, fillSlots, slotHints }. fillSlots is the ordered list of
+    // ast-text / image ids the author may edit. Chrome (backgrounds, accent
+    // shapes, inherited master furniture) is NOT a fill slot.
+    //
+    // opts.extraTextAsSlots: sample-derived content PATTERNS — extra (non-
+    // inherited) text objects become fill slots, and a shape+text card is split
+    // into a chrome shape plus a text slot so the colored box survives.
+    // opts.inheritedCount: objects[0..inheritedCount) are master/layout chrome
+    // and are never turned into slots (footers, logos).
+    const layoutToAsd = (layout, opts = {}) => {
       const bg = layout.background || {}
       const parts = []
       const fillSlots = []
+      const slotHints = []
+      const extraTextAsSlots = !!opts.extraTextAsSlots
+      const inheritedCount = opts.inheritedCount == null ? 0 : opts.inheritedCount
+      // omitEmptyFullBleedPic: fixed chrome covers should not paint a muted
+      // full-bleed panel when the picture placeholder has no media.
       // Solid background renders as a full-canvas decorative rect (matches the
       // built-in template convention); image background renders as a full-canvas
       // ast-image FIRST (behind chrome).
@@ -1583,75 +1849,388 @@ try {
         parts.push(`<ast-shape id="bg" kind="rect" x="0" y="0" w="${CANVAS_W}" h="${CANVAS_H}" geom="rect" fill="${col}" decorative="true"></ast-shape>`)
       }
       let idc = 0
-      for (const o of layout.objects) {
+      let pc = 0
+      const pushSlot = (id, role, hint) => {
+        fillSlots.push(id)
+        slotHints.push({ id, role, hint })
+      }
+      const pendingText = []
+      const pendingPics = []
+      const cardChrome = []
+      const noteCardChrome = (o) => {
+        const w = o.w || 0
+        const h = o.h || 0
+        if (w < 200 || h < 80 || w >= CANVAS_W * 0.78 || h >= CANVAS_H * 0.65) return
+        if (!(o.geom === 'roundRect' || o.rectRadius || (o.fill && o.fill.color))) return
+        cardChrome.push({ x: o.x || 0, y: o.y || 0, w, h })
+      }
+      const queueTextSlot = (box, style, fromCard, placeholder, extraAttrs) => {
+        pendingText.push({
+          x: box.x || 0, y: box.y || 0, w: box.w || 0, h: box.h || 0,
+          style: style || {},
+          fromCard: !!fromCard,
+          placeholder: placeholder || null,
+          extraAttrs: extraAttrs || '',
+        })
+      }
+      const boxesOverlap = (a, b) => {
+        const ix = Math.min((a.x || 0) + (a.w || 0), (b.x || 0) + (b.w || 0)) - Math.max(a.x || 0, b.x || 0)
+        const iy = Math.min((a.y || 0) + (a.h || 0), (b.y || 0) + (b.h || 0)) - Math.max(a.y || 0, b.y || 0)
+        return ix > 24 && iy > 24
+      }
+      const overlapArea = (a, b) => {
+        const ix = Math.min((a.x || 0) + (a.w || 0), (b.x || 0) + (b.w || 0)) - Math.max(a.x || 0, b.x || 0)
+        const iy = Math.min((a.y || 0) + (a.h || 0), (b.y || 0) + (b.h || 0)) - Math.max(a.y || 0, b.y || 0)
+        return (ix > 0 && iy > 0) ? ix * iy : 0
+      }
+      // Photos (not 40–90px icons) that cover a card must not get a text fill —
+      // long copy on a picture is unreadable.
+      const isLargePhoto = (o) => {
+        if (!o || o.kind !== 'image') return false
+        return (o.w || 0) >= 360 && (o.h || 0) >= 280
+      }
+      const overlapsLargePhoto = (box) => {
+        const area = Math.max(1, (box.w || 0) * (box.h || 0))
+        for (const o of (layout.objects || [])) {
+          if (!isLargePhoto(o)) continue
+          if (overlapArea(box, o) / area > 0.35) return true
+        }
+        return false
+      }
+      // Small icons sitting inside a card should not be painted over by the fill.
+      const fitTextAwayFromIcons = (box) => {
+        const icons = (layout.objects || []).filter((o) => {
+          if (o.kind !== 'image' && o.kind !== 'ellipse' && o.geom !== 'ellipse') return false
+          const maxs = Math.max(o.w || 0, o.h || 0)
+          if (maxs < 28 || maxs > 140) return false
+          return boxesOverlap(o, box)
+        })
+        if (!icons.length) return box
+        const left = icons.filter((o) => (o.x || 0) + (o.w || 0) / 2 < box.x + box.w * 0.42)
+        if (left.length === icons.length) {
+          const right = Math.max(...left.map((o) => (o.x || 0) + (o.w || 0)))
+          const x = Math.max(box.x, right + 16)
+          return { ...box, x, w: Math.max(80, box.x + box.w - x) }
+        }
+        const bottom = Math.max(...icons.map((o) => (o.y || 0) + (o.h || 0)))
+        if (bottom < box.y + box.h * 0.6) {
+          const y = Math.max(box.y, bottom + 10)
+          return { ...box, y, h: Math.max(40, box.y + box.h - y) }
+        }
+        return box
+      }
+      for (let i = 0; i < (layout.objects || []).length; i += 1) {
+        const o = layout.objects[i]
         idc += 1
+        const inherited = i < inheritedCount
+        if (inherited && isMasterClutter(o)) {
+          continue
+        }
+        if (extraTextAsSlots && isSampleJunk(o)) {
+          continue
+        }
+        if (extraTextAsSlots && inherited && objectHasText(o) && (isWatermarkText(o) || isPlaceholderTokenText(o.text))) {
+          // Master date/initials/footnote prompts are dummy tokens, not brand
+          // chrome. Drop the text; keep a structural shape if there is one.
+          if (objectHasShape(o) && !isSampleJunkShape(o)) {
+            const shapeOnly = { ...o, text: '', kind: o.kind === 'text' ? 'rect' : o.kind }
+            const m = chromeToAsd(shapeOnly, idc)
+            if (m) parts.push(m)
+          }
+          continue
+        }
+        const fillablePrompt = !inherited && objectHasText(o) && isFillablePromptText(o.text)
+        const extraSlot = extraTextAsSlots && !inherited && objectHasText(o) && !isWatermarkText(o) && !isPlaceholderTokenText(o.text)
+        if (fillablePrompt || extraSlot) {
+          // Split a card (shape + text) so the colored box stays chrome and the
+          // copy becomes a fill slot inset inside the box. Slot ids are assigned
+          // later in reading order, not PowerPoint document order.
+          const cardLike = objectHasShape(o) && (
+            o.geom === 'roundRect' || o.rectRadius ||
+            ((o.w || 0) >= 200 && (o.h || 0) >= 80 && o.fill && o.fill.color)
+          )
+          if (objectHasShape(o) && cardLike) {
+            const shapeOnly = { ...o, text: '', kind: o.kind === 'text' ? (o.geom === 'ellipse' ? 'ellipse' : o.kind === 'line' ? 'line' : 'rect') : o.kind }
+            const m = chromeToAsd(shapeOnly, idc)
+            if (m) parts.push(m)
+            else warn(`Chrome object not representable in ASD and dropped (${layout.id} #${idc})`)
+            idc += 1
+            if (!inherited) noteCardChrome(o)
+          }
+          const box = cardLike ? insetBox(o) : o
+          if (overlapsLargePhoto(box)) continue
+          queueTextSlot(cardLike ? fitTextAwayFromIcons(box) : box, o.style, cardLike, null)
+          continue
+        }
         const m = chromeToAsd(o, idc)
         if (m) parts.push(m)
         else warn(`Chrome object not representable in ASD and dropped (${layout.id} #${idc})`)
+        if (!inherited && objectHasShape(o)) noteCardChrome(o)
       }
-      let pc = 0
+      // Color bars with labels sitting to their right are one card: put the
+      // fill slot inside the bar, not beside an empty shape.
+      const usedChrome = new Set()
+      for (const t of pendingText) {
+        if (t.fromCard || t.placeholder) continue
+        let best = null
+        let bestDx = 1e9
+        for (const c of cardChrome) {
+          if (usedChrome.has(c)) continue
+          const yOverlap = Math.min(t.y + t.h, c.y + c.h) - Math.max(t.y, c.y)
+          if (yOverlap < Math.min(t.h || 1, c.h) * 0.35) continue
+          if (t.x >= c.x && t.x < c.x + c.w) {
+            t.fromCard = true
+            usedChrome.add(c)
+            best = null
+            break
+          }
+          const dx = t.x - (c.x + c.w)
+          if (dx >= -30 && dx <= 160 && dx < bestDx) {
+            best = c
+            bestDx = dx
+          }
+        }
+        if (best && !overlapsLargePhoto(best)) {
+          const inset = fitTextAwayFromIcons(insetBox(best))
+          t.x = inset.x
+          t.y = inset.y
+          t.w = inset.w
+          t.h = inset.h
+          t.fromCard = true
+          usedChrome.add(best)
+        }
+      }
       for (const p of layout.placeholders) {
         if (p.type === 'title' || p.type === 'body') {
-          pc += 1
-          parts.push(placeholderToAsd(p, pc))
-          // placeholderToAsd emits id="ph-${pc}" carrying a {{TITLE}}/{{BODY}}
-          // prompt — record it as a fillable text slot.
-          fillSlots.push(`ph-${pc}`)
+          queueTextSlot(p, p.style, false, p)
         } else if (p.type === 'image') {
-          // Picture placeholders (OOXML <p:ph type="pic">) are fillable, and now
-          // SWAPPABLE, image regions. A layout may leave them empty (a "picture
-          // goes here" slot) or ship a default blip; when empty, borrowSampleImages
-          // pre-populates p.mediaKey from an authored sample photo AND records that
-          // sample picture's OWN geometry (p.borrowX/Y/W/H) + flip (p.flipH/flipV)
-          // so the default hero renders faithfully (correct size/position/mirroring)
-          // rather than squeezed into the placeholder's small declared hole.
-          // Generic (no per-template assumptions):
-          //   - mediaKey present -> render a real <ast-image>, at the borrowed
-          //     sample geometry when available, else the placeholder's own box;
-          //   - else render a neutral panel + IRWarning (last resort).
-          // The image id is advertised in fillSlots so a user can later ask to
-          // replace just the photo; the replacement inherits this slot's geometry.
-          // Paint order (bg -> objects -> placeholders == document order) keeps any
-          // decorative shape (e.g. the layout's anvil) BEHIND this image.
-          pc += 1
-          const hasBorrowGeo = p.borrowW != null && p.borrowH != null
-          const g = hasBorrowGeo
-            ? clampGeo({ x: p.borrowX, y: p.borrowY, w: p.borrowW, h: p.borrowH })
-            : clampGeo(p)
-          if (p.mediaKey) {
-            const flipAttr = `${p.flipH ? ' flip-h="true"' : ''}${p.flipV ? ' flip-v="true"' : ''}`
-            const picId = `ph-pic-${pc}`
-            parts.push(`<ast-image id="${picId}" ${g} asset-ref="${esc(p.mediaKey)}" fit="cover"${flipAttr} decorative="true"></ast-image>`)
-            // A swappable hero picture is a fillable IMAGE slot, not fixed chrome.
-            fillSlots.push(picId)
+          pendingPics.push(p)
+        }
+      }
+      // Icon/image rows: one centered slot under each marker. Missing labels
+      // (5 icons / 4 captions) get an extra slot so copy stays aligned.
+      const snapAndPadMarkerRow = (texts, objects) => {
+        const markers = (objects || []).filter((o) => {
+          const y = o.y || 0
+          if (y < 140 || y > 780) return false
+          const maxs = Math.max(o.w || 0, o.h || 0)
+          // Timeline connector dots are tiny; icon glyphs are ~70–140px.
+          if (maxs < 56 || maxs > 220) return false
+          return o.kind === 'image' || o.kind === 'ellipse' || o.geom === 'ellipse'
+        }).sort((a, b) => (a.x || 0) - (b.x || 0))
+        if (markers.length < 3) return
+        const ys = markers.map((m) => m.y || 0)
+        if (Math.max(...ys) - Math.min(...ys) > 120) return
+        let rowY = Math.max(...markers.map((m) => (m.y || 0) + (m.h || 0))) + 20
+        for (const o of (objects || [])) {
+          const maxs = Math.max(o.w || 0, o.h || 0)
+          const isLine = o.kind === 'line' || o.geom === 'line' || ((o.h || 0) <= 10 && (o.w || 0) > 400)
+          const isDot = (o.kind === 'ellipse' || o.geom === 'ellipse') && maxs > 0 && maxs < 56
+          if (!isLine && !isDot) continue
+          const bottom = (o.y || 0) + (isLine ? 0 : (o.h || 0))
+          if (bottom >= Math.min(...ys) && bottom <= rowY + 80) rowY = Math.max(rowY, bottom + 22)
+        }
+        const candidates = texts.filter((t) => !t.placeholder && !t.fromCard && !t.forceTitle)
+        const used = new Set()
+        for (const m of markers) {
+          const cx = (m.x || 0) + (m.w || 0) / 2
+          let best = null
+          let bestD = 1e9
+          for (const t of candidates) {
+            if (used.has(t)) continue
+            const tcx = (t.x || 0) + (t.w || 0) / 2
+            const d = Math.abs(tcx - cx)
+            if (d < bestD) { best = t; bestD = d }
+          }
+          const w = Math.max(160, Math.min(340, Math.round((m.w || 80) * 2.4)))
+          if (best && bestD < 300) {
+            used.add(best)
+            best.w = w
+            best.x = Math.round(cx - w / 2)
+            best.y = rowY
+            best.h = 110
+            best.extraAttrs = ICON_CAPTION_ATTRS
           } else {
-            // Empty picture placeholder in a content layout: a legitimate "insert
-            // picture here" hole the author fills, NOT a fidelity failure. Emit it
-            // as a fillable image drop-SLOT advertised in fillSlots (id ph-pic-N),
-            // so create_deck/write_slide can populate it exactly like a borrowed
-            // hero slot. ast-image requires an asset-ref, so an EMPTY slot is
-            // rendered as a light neutral panel affordance whose id is advertised
-            // as an image slot; the downstream fill replaces this shape with the
-            // chosen <ast-image>. It is NOT decorative (it is fillable), carries an
-            // alt describing the region, and emits no warning.
-            const picId = `ph-pic-${pc}`
-            const panel = (p.fill && safeCol(p.fill)) || safeCol(themeTokens.muted) || safeCol(themeTokens.accent2) || '#E2E8F0'
-            parts.push(`<ast-shape id="${picId}" kind="rect" ${g} geom="rect" fill="${panel}" alt="${esc(p.name || 'Image')}"></ast-shape>`)
-            fillSlots.push(picId)
+            texts.push({
+              x: Math.round(cx - w / 2), y: rowY, w, h: 110,
+              style: {}, fromCard: false, extraAttrs: ICON_CAPTION_ATTRS,
+            })
           }
         }
       }
-      // Guarantee a title + body slot so create_deck can fill it.
-      if (!layout.placeholders.some((p) => p.type === 'title')) {
-        parts.push(`<ast-text id="ph-title" x="160" y="120" w="1600" h="160" size="54" color="${safeCol(themeTokens.ink) || '#172033'}" weight="bold"><ast-run>{{TITLE}}</ast-run></ast-text>`)
-        fillSlots.push('ph-title')
+      snapAndPadMarkerRow(pendingText, layout.objects)
+      // Designed cards with no copy in the sample still need a fill slot —
+      // otherwise the model ships empty colored boxes. Do not invent a slot
+      // on top of a large photo.
+      if (extraTextAsSlots) {
+        for (const c of cardChrome) {
+          if (pendingText.some((t) => boxesOverlap(t, c))) continue
+          if (overlapsLargePhoto(c)) continue
+          const inset = fitTextAwayFromIcons(insetBox(c))
+          pendingText.push({
+            x: inset.x, y: inset.y, w: inset.w, h: inset.h,
+            style: { fontSize: 22, bold: true },
+            fromCard: true,
+            extraAttrs: CENTER_ATTRS,
+          })
+        }
+        const hasTitlePh = pendingText.some((t) => t.placeholder && t.placeholder.type === 'title')
+        const hasTopBanner = pendingText.some((t) => {
+          if (t.forceTitle) return true
+          const y = t.y || 0
+          const w = t.w || 0
+          const sz = (t.style && t.style.fontSize) || 0
+          return y < 220 && (w > 600 || sz >= 28)
+        })
+        const titleBox = { x: 80, y: 40, w: 1760, h: 90 }
+        if (!hasTitlePh && !hasTopBanner && !pendingText.some((t) => boxesOverlap(t, titleBox))) {
+          pendingText.push({
+            ...titleBox,
+            style: { fontSize: 36, bold: true, color: themeTokens.ink },
+            fromCard: false,
+            forceTitle: true,
+          })
+        }
+        for (let i = pendingText.length - 1; i >= 0; i -= 1) {
+          const t = pendingText[i]
+          if (t.placeholder || t.forceTitle) continue
+          if (overlapsLargePhoto(t)) pendingText.splice(i, 1)
+        }
+        // Tiny leftover caption boxes (h < 70) cannot hold a complete thought.
+        // Grow them downward when the canvas has room so copy is not clipped.
+        for (const t of pendingText) {
+          if (t.forceTitle || (t.placeholder && t.placeholder.type === 'title')) continue
+          if ((t.h || 0) >= 70 || (t.w || 0) < 200) continue
+          const room = CANVAS_H - 48 - (t.y || 0)
+          if (room < 72) continue
+          t.h = Math.min(120, room)
+        }
       }
-      if (!layout.placeholders.some((p) => p.type === 'body')) {
+      // Text slots in reading order (top-to-bottom, left-to-right) so ph-1 is
+      // the first thing a reader sees — not PowerPoint's document order.
+      const ordered = readingOrder(pendingText)
+      const cards = detectCardGrid(ordered)
+      const iconRow = detectIconRow(ordered, cards)
+      let titleItem = ordered.find((it) => it.forceTitle || (it.placeholder && it.placeholder.type === 'title')) || null
+      if (!titleItem) {
+        const rest = ordered.filter((it) => !cards.includes(it) && !iconRow.includes(it))
+        rest.sort((a, b) => {
+          const sa = (a.style && a.style.fontSize) || 0
+          const sb = (b.style && b.style.fontSize) || 0
+          if (sb !== sa) return sb - sa
+          return a.y - b.y
+        })
+        const cand = rest[0]
+        if (cand && ((cand.style && cand.style.fontSize) || 0) >= 28) titleItem = cand
+        else if (cand && (cand.h || 0) >= 70 && (cand.w || 0) > 600 && cand.y < 280) titleItem = cand
+      }
+      const snapY = (v) => Math.round(v / 60) * 60
+      const cardHint = (item, group) => {
+        const n = group.indexOf(item) + 1
+        const pos = gridPosLabel(item, group)
+        const ys = [...new Set(group.map((g) => snapY(g.y)))].sort((a, b) => a - b)
+        if (ys.length === 2 && group.length >= 4 && group.length % 2 === 0) {
+          const topRow = group.filter((g) => snapY(g.y) === ys[0])
+          const botRow = group.filter((g) => snapY(g.y) === ys[1])
+          const topOnCards = topRow.length && topRow.every((g) => g.fromCard)
+          const botOnCards = botRow.length && botRow.every((g) => g.fromCard)
+          if (topOnCards && !botOnCards) {
+            const cols = group.length / 2
+            const isTop = Math.abs(snapY(item.y) - ys[0]) <= Math.abs(snapY(item.y) - ys[1])
+            const col = (isTop ? topRow : botRow).slice().sort((a, b) => a.x - b.x).indexOf(item) + 1
+            if (isTop) {
+              return { role: 'heading', hint: `column ${col || n} of ${cols} heading (${pos}) — short label in the bar (3–8 words)` }
+            }
+            return { role: 'body', hint: `column ${col || n} of ${cols} supporting line (${pos}) — one sentence under that heading (~12–20 words)` }
+          }
+        }
+        return { role: 'body', hint: `card ${n} of ${group.length} (${pos}) — a complete thought that fits the box (claim + why, two lines / ~12–22 words). Not a 5-word stub.` }
+      }
+      const emitTextItem = (item, role, hint, prompt, extraAttrs = '') => {
+        pc += 1
+        const id = `ph-${pc}`
+        if (item.placeholder && !item.forceTitle) {
+          parts.push(placeholderToAsd(item.placeholder, pc))
+        } else {
+          parts.push(textSlotToAsd(item, item.style, id, prompt || '{{BODY}}', extraAttrs || item.extraAttrs || ''))
+        }
+        pushSlot(id, role, hint)
+      }
+      for (const item of ordered) {
+        if (item === titleItem) {
+          emitTextItem(item, 'title', 'Slide title — names the topic (3–8 words). Not the first fact.', '{{TITLE}}')
+          continue
+        }
+        if (cards.includes(item)) {
+          const h = cardHint(item, cards)
+          emitTextItem(item, h.role, h.hint, '{{BODY}}', item.extraAttrs || CENTER_ATTRS)
+          continue
+        }
+        if (iconRow.includes(item)) {
+          const n = iconRow.indexOf(item) + 1
+          const pos = gridPosLabel(item, iconRow)
+          emitTextItem(item, 'body', `item ${n} of ${iconRow.length} (${pos}) — caption under the marker; a complete phrase (~8–16 words), not a one-word label`, '{{BODY}}', item.extraAttrs || ICON_CAPTION_ATTRS)
+          continue
+        }
+        if (isKickerBox(item, titleItem, cards)) {
+          emitTextItem(item, 'kicker', 'one-line subtitle above the cards — not a card')
+          continue
+        }
+        if (item.placeholder) {
+          emitTextItem(item, hintRoleForPlaceholder(item.placeholder), hintForPlaceholder(item.placeholder))
+          continue
+        }
+        emitTextItem(item, hintRoleForText(item), hintForText(item))
+      }
+      // Picture placeholders after text so a hero sits behind titles that overlap it.
+      const omitEmptyFullBleedPic = !!opts.omitEmptyFullBleedPic
+      const hasLargeFrame = (layout.objects || []).some((o) => {
+        const w = o.w || 0
+        const h = o.h || 0
+        if (w >= CANVAS_W * 0.9 && h >= CANVAS_H * 0.9) return false
+        return w * h > CANVAS_W * CANVAS_H * 0.12
+      })
+      for (const p of pendingPics) {
+        const hasBorrowGeo = p.borrowW != null && p.borrowH != null
+        const box = hasBorrowGeo
+          ? { x: p.borrowX, y: p.borrowY, w: p.borrowW, h: p.borrowH }
+          : p
+        const area = (box.w || 0) * (box.h || 0)
+        const nearlyFullCanvas = (box.w || 0) >= CANVAS_W * 0.9 && (box.h || 0) >= CANVAS_H * 0.9
+        if (p.mediaKey) {
+          pc += 1
+          const g = clampGeo(box)
+          const flipAttr = `${p.flipH ? ' flip-h="true"' : ''}${p.flipV ? ' flip-v="true"' : ''}`
+          const picId = `ph-pic-${pc}`
+          parts.push(`<ast-image id="${picId}" ${g} asset-ref="${esc(p.mediaKey)}" fit="cover"${flipAttr} decorative="true"></ast-image>`)
+          pushSlot(picId, 'image', hintForPlaceholder(p))
+          continue
+        }
+        // Empty picture placeholder. A near-full-canvas muted panel on a sparse
+        // cover is a cyan slab — omit that. A SPLIT well (GCO "White cover with
+        // blue pattern" is a right-hand ~half page) IS the cover design: keep it
+        // and paint it with the template muted/accent so fill matches the picker.
+        if (omitEmptyFullBleedPic && nearlyFullCanvas && !hasLargeFrame) continue
+        pc += 1
+        const picId = `ph-pic-${pc}`
+        const g = clampGeo(box)
+        const panel = (p.fill && safeCol(p.fill)) || safeCol(themeTokens.muted) || safeCol(themeTokens.accent2) || '#E2E8F0'
+        parts.push(`<ast-shape id="${picId}" kind="rect" ${g} geom="rect" fill="${panel}" alt="${esc(p.name || 'Image')}"></ast-shape>`)
+        pushSlot(picId, 'image', hintForPlaceholder(p))
+      }
+      // Do NOT inject a generic title/body hole onto layouts that already have
+      // fillable slots (Title Only, Full Bleed, Quote, Blank, sample patterns).
+      // A fake ph-body at (160,320,1600,600) is what turned composition canvases
+      // into bland bullet slides. Only synthesize slots when the layout is a
+      // genuinely empty synth that the chrome-guarantee path created with none.
+      if (fillSlots.length === 0 && opts.allowInject) {
+        parts.push(`<ast-text id="ph-title" x="160" y="120" w="1600" h="160" size="54" color="${safeCol(themeTokens.ink) || '#172033'}" weight="bold"><ast-run>{{TITLE}}</ast-run></ast-text>`)
+        pushSlot('ph-title', 'title', 'Slide title')
         parts.push(`<ast-text id="ph-body" x="160" y="320" w="1600" h="600" size="28" color="${safeCol(themeTokens.ink) || '#172033'}"><ast-run>{{BODY}}</ast-run></ast-text>`)
-        fillSlots.push('ph-body')
+        pushSlot('ph-body', 'body', 'Body')
       }
       const slideId = layout.id.replace(/[^a-zA-Z0-9-]/g, '-') || 'layout'
-      return { markup: `<ast-slide id="${slideId}">${parts.join('')}</ast-slide>`, fillSlots }
+      return { markup: `<ast-slide id="${slideId}">${parts.join('')}</ast-slide>`, fillSlots, slotHints }
     }
 
     // ---- Extract every layout, then a few sample slides -------------------
@@ -1713,7 +2292,11 @@ try {
       if (spTree) await processTree(spTree, null, rels, dir, nodes)
       for (const n of nodes) classify(n, tmp)
       currentTxStyles = null
-      const ctx = { bg, chromeObjects: tmp.objects, txStyles: masterTxStyles }
+      const ctx = {
+        bg,
+        chromeObjects: tmp.objects.filter((o) => !isMasterClutter(o)),
+        txStyles: masterTxStyles,
+      }
       masterCtxByPath[masterPath] = ctx
       return ctx
     }
@@ -1746,11 +2329,12 @@ try {
     // the borrow the layout archetype has no image for that region and
     // layoutToAsd falls back to a neutral panel (the reported blue box). We keep
     // each sample's layout path so borrowSampleImages() can find the right photo.
-    // Sample slides are still NOT surfaced as archetypes — only their picture
-    // FILL is borrowed into the matching chrome archetype's placeholder.
+    // After layouts are classified, samples whose layout is NOT brand chrome
+    // (cover/divider/agenda/closing) are promoted to fillable content PATTERNS
+    // so the designed cards/boxes survive into the authoring catalog.
     const irSlides = []
     const samplesByLayoutPath = {}
-    for (const p of slidePaths.slice(0, 12)) {
+    for (const p of slidePaths) {
       const xml = await readText(p)
       if (!xml) continue
       const doc = parseXml(xml)
@@ -1762,10 +2346,8 @@ try {
       const cSld = findChild(sld, 'p:cSld')
       const spTree = cSld ? findChild(cSld, 'p:spTree') : null
       phCounter = 0
-      // Only the first 6 samples are surfaced in templateModel.slides[] (editor
-      // examples), but we index ALL processed samples for image-borrowing.
       const ir = await buildIRLayout(spTree, cSld, rels, dir, uniqueLayoutId(`slide-${irSlides.length + 1}`), `Slide ${irSlides.length + 1}`)
-      if (irSlides.length < 6) irSlides.push(ir)
+      irSlides.push(ir)
       const lp = layoutPathOfSlide(rels, dir)
       if (lp) (samplesByLayoutPath[lp] = samplesByLayoutPath[lp] || []).push(ir)
     }
@@ -1798,74 +2380,73 @@ try {
       // data:image/<type>;base64,… — treat everything that is not svg as raster.
       return typeof d === 'string' && /^data:image\//.test(d) && !/^data:image\/svg\+xml/.test(d)
     }
-    const borrowSampleImages = (layoutIR, layoutPath) => {
-      const samples = samplesByLayoutPath[layoutPath]
-      if (!samples || !samples.length) return 0
-      // Collect candidate images (mediaKey + box) across all samples for this layout.
-      const candidates = []
-      // Normalize each candidate's box to {x,y,w,h,flipH,flipV} in canvas units.
-      // Sample OBJECTS carry geometry under o.geometry (+ node-level flipH/flipV
-      // set by processPic); sample PLACEHOLDERS carry x/y/w/h directly. Capturing
-      // a uniform box lets the borrow reproduce the sample picture's OWN geometry
-      // and horizontal/vertical flip, not just its mediaKey.
-      const boxOf = (o) => ({
-        x: o.x != null ? o.x : (o.geometry ? o.geometry.x : 0),
-        y: o.y != null ? o.y : (o.geometry ? o.geometry.y : 0),
-        w: o.w != null ? o.w : (o.geometry ? o.geometry.w : 0),
-        h: o.h != null ? o.h : (o.geometry ? o.geometry.h : 0),
-        flipH: !!o.flipH,
-        flipV: !!o.flipV,
-      })
-      for (const s of samples) {
-        for (const o of (s.objects || [])) {
-          if (o.kind === 'image' && o.mediaKey) candidates.push({ mediaKey: o.mediaKey, box: boxOf(o) })
-        }
-        for (const ph of (s.placeholders || [])) {
-          if (ph.type === 'image' && ph.mediaKey) candidates.push({ mediaKey: ph.mediaKey, box: boxOf(ph) })
-        }
+    // Normalize a sample object/placeholder to {x,y,w,h,flipH,flipV} in canvas units.
+    const boxOf = (o) => ({
+      x: o.x != null ? o.x : (o.geometry ? o.geometry.x : 0),
+      y: o.y != null ? o.y : (o.geometry ? o.geometry.y : 0),
+      w: o.w != null ? o.w : (o.geometry ? o.geometry.w : 0),
+      h: o.h != null ? o.h : (o.geometry ? o.geometry.h : 0),
+      flipH: !!o.flipH,
+      flipV: !!o.flipV,
+    })
+    const collectImages = (ir) => {
+      const out = []
+      for (const o of (ir.objects || [])) {
+        if (o.kind === 'image' && o.mediaKey) out.push({ mediaKey: o.mediaKey, box: boxOf(o) })
       }
-      if (!candidates.length) return 0
+      for (const ph of (ir.placeholders || [])) {
+        if (ph.type === 'image' && ph.mediaKey) out.push({ mediaKey: ph.mediaKey, box: boxOf(ph) })
+      }
+      return out
+    }
+    // Cross-layout hero borrow used to copy one sample photo (often the same
+    // person/bike) onto every title/closing with an empty picture hole. Cover
+    // photos are now an opt-in pick from the template's example images, so
+    // empty wells stay empty here. Same-layout borrow below still fills a
+    // placeholder from a sample that actually uses this layout.
+    const borrowSampleImages = (layoutIR, layoutPath) => {
+      const samples = samplesByLayoutPath[layoutPath] || []
+      const candidates = []
+      for (const s of samples) candidates.push(...collectImages(s))
       // Composite score: raster beats vector by a wide margin, then area, then IoU.
       const scoreFor = (c, ph) => {
         const raster = isRasterAsset(c.mediaKey) ? 1000000 : 0
         const area = (c.box.w || 0) * (c.box.h || 0)
-        // Normalize area into a modest band so it never outweighs the raster flag
-        // but reliably separates a full-bleed photo from a small accent shape.
         const areaScore = Math.min(area / (CANVAS_W * CANVAS_H), 1) * 1000
         const iou = boxIoU(ph, c.box) * 100
         return raster + areaScore + iou
       }
       let enriched = 0
       const usedKeys = new Set()
-      for (const ph of layoutIR.placeholders) {
-        if (ph.type !== 'image' || ph.mediaKey) continue
-        let best = null, bestScore = -1
-        for (const c of candidates) {
-          if (usedKeys.has(c.mediaKey)) continue
-          const s = scoreFor(c, ph)
-          if (s > bestScore) { bestScore = s; best = c }
-        }
-        // Fallback: first unused candidate (an on-brand photo beats a blank panel).
-        if (!best) {
-          best = candidates.find((c) => !usedKeys.has(c.mediaKey)) || null
-        }
-        if (best) {
-          ph.mediaKey = best.mediaKey
-          usedKeys.add(best.mediaKey)
-          // Preserve the sample picture's OWN geometry + flip so the default hero
-          // renders faithfully (correct size/position/mirroring) rather than being
-          // squeezed into the placeholder's small declared hole. Stored in separate
-          // borrow* fields so a genuinely-empty placeholder (no borrow) still uses
-          // its own box. layoutToAsd prefers borrow* geometry when present.
+      const applyHero = (ph, best, keepOwnBox) => {
+        ph.mediaKey = best.mediaKey
+        usedKeys.add(best.mediaKey)
+        if (!keepOwnBox) {
+          // Same-layout borrow: keep the sample picture's own geometry + flip.
           ph.borrowX = best.box.x
           ph.borrowY = best.box.y
           ph.borrowW = best.box.w
           ph.borrowH = best.box.h
-          if (best.box.flipH) ph.flipH = true
-          if (best.box.flipV) ph.flipV = true
-          enriched += 1
+        }
+        if (best.box.flipH) ph.flipH = true
+        if (best.box.flipV) ph.flipV = true
+        enriched += 1
+      }
+      const pickFrom = (pool, keepOwnBox) => {
+        if (!pool.length) return
+        for (const ph of layoutIR.placeholders) {
+          if (ph.type !== 'image' || ph.mediaKey) continue
+          let best = null, bestScore = -1
+          for (const c of pool) {
+            if (usedKeys.has(c.mediaKey)) continue
+            const s = scoreFor(c, ph)
+            if (s > bestScore) { bestScore = s; best = c }
+          }
+          if (!best) best = pool.find((c) => !usedKeys.has(c.mediaKey)) || null
+          if (best) applyHero(ph, best, keepOwnBox)
         }
       }
+      pickFrom(candidates, false)
       return enriched
     }
 
@@ -1902,14 +2483,70 @@ try {
       }
       // A layout may ship an EMPTY picture placeholder (a "insert picture here"
       // slot with no default blip). Borrow the matching authored photo from a
-      // sample slide that uses this layout so the hero image renders instead of
-      // a synthetic panel. Only the picture FILL (mediaKey) is copied.
-      borrowSampleImages(ir, ln)
-      irLayouts.push(ir)
+      // sample slide that uses this layout so the placeholder has a real default
+      // in the IR (the authoring picker still strips it until the user picks).
       const baseKind = kindOf(ir, layoutType)
+      borrowSampleImages(ir, ln)
+      ir._layoutPath = ln
+      ir._showMasterSp = showMasterSp
+      ir._layoutType = layoutType
+      ir._masterCount = (showMasterSp && masterCtx && masterCtx.chromeObjects) ? masterCtx.chromeObjects.length : 0
+      irLayouts.push(ir)
       const kind = uniqueKind(baseKind)
-      const { markup, fillSlots } = layoutToAsd(ir)
-      archetypes.push({ kind, title: rawName, markup, tier: roleTier(baseKind), fillSlots, _layout: ir })
+      const tier = roleTier(baseKind)
+      // Keep master-inherited chrome on flexible layouts too. Chrome is no longer
+      // copied through the model (fill_slide substitutes slots server-side), so
+      // stripping it only produced unbranded content slides. inheritedCount lets
+      // layoutToAsd drop leftover master clutter (dummy stickers, empty tiles).
+      const { markup, fillSlots, slotHints } = layoutToAsd(ir, {
+        inheritedCount: ir._masterCount,
+        omitEmptyFullBleedPic: tier === 'fixed',
+      })
+      archetypes.push({ kind, title: rawName, markup, tier, fillSlots, slotHints, _layout: ir })
+    }
+
+    // Promote the richest variant of each chrome role to the unsuffixed kind
+    // (title, section, closing) so fill_slide("title") gets a photo cover, not
+    // the first empty "White cover with blue pattern".
+    const stripKindSuffix = (k) => String(k || '').replace(/-\d+$/, '')
+    const chromeRichness = (a) => {
+      let s = 0
+      const re = /<ast-image\b([^>]*)>/g
+      let m
+      let hero = 0
+      while ((m = re.exec(a.markup))) {
+        const tag = m[1]
+        if (!/asset-ref=/.test(tag)) continue
+        const w = Number((tag.match(/\bw="(\d+)"/) || [])[1] || 0)
+        const h = Number((tag.match(/\bh="(\d+)"/) || [])[1] || 0)
+        const area = w * h
+        // Logos (~100×60) are not a cover photo. Score a real hero by area.
+        if (area >= 400 * 300) hero += 120
+        else if (area >= 250 * 180) hero += 40
+      }
+      s += hero
+      const shapes = (a.markup.match(/<ast-shape /g) || []).length
+      s += Math.min(shapes, 15) * 4
+      if ((a.fillSlots || []).some((id) => String(id).startsWith('ph-pic-')) && hero >= 120) s += 40
+      const nm = (a.title || '').toLowerCase()
+      if (/image|photo|picture|cover/.test(nm) && hero >= 120) s += 20
+      if (/image/.test(nm) && hero < 120) s -= 25
+      if (shapes <= 2 && (a.fillSlots || []).length <= 1 && hero < 120) s -= 40
+      return s
+    }
+    for (const base of CHROME_KINDS) {
+      const group = archetypes.filter((a) => stripKindSuffix(a.kind) === base)
+      if (group.length < 2) continue
+      let best = group[0]
+      for (const a of group) {
+        if (chromeRichness(a) > chromeRichness(best)) best = a
+      }
+      const unsuffixed = group.find((a) => a.kind === base)
+      if (unsuffixed && best !== unsuffixed) {
+        const tmp = unsuffixed.kind
+        unsuffixed.kind = best.kind
+        best.kind = tmp
+      }
     }
 
     // Guarantee the STABLE brand-chrome set { title, section, agenda, closing }
@@ -2018,26 +2655,143 @@ try {
       const tier = roleTier(want)
       if (best && bestScore >= 2) {
         phCounter = 0
-        const { markup, fillSlots } = layoutToAsd(best._layout)
-        archetypes.push({ kind: uniqueKind(want), title: best.title, markup, tier, fillSlots, _layout: best._layout })
+        const { markup, fillSlots, slotHints } = layoutToAsd(best._layout, {
+          inheritedCount: best._layout._masterCount || 0,
+          omitEmptyFullBleedPic: true,
+        })
+        archetypes.push({ kind: uniqueKind(want), title: best.title, markup, tier, fillSlots, slotHints, _layout: best._layout })
         continue
       }
       // (b) Else synthesize in the template's own style (master chrome + tokens).
       const siblingBg = (archetypes.find((a) => a._layout && a._layout.background && a._layout.background.kind === 'image') || {})._layout
       phCounter = 0
       const synth = synthChrome(want, siblingBg ? siblingBg.background : null)
-      const { markup, fillSlots } = layoutToAsd(synth)
+      const { markup, fillSlots, slotHints } = layoutToAsd(synth, { allowInject: true })
       if (!sharedMasterCtx || !sharedMasterCtx.chromeObjects || sharedMasterCtx.chromeObjects.length === 0) {
         warn(`Synthesized chrome role ${want} from theme tokens; no master chrome available`)
       }
-      archetypes.push({ kind: uniqueKind(want), title: synth.name, markup, tier, fillSlots, _layout: synth })
+      archetypes.push({ kind: uniqueKind(want), title: synth.name, markup, tier, fillSlots, slotHints, _layout: synth })
+    }
+
+    // ---- Content patterns from sample slides --------------------------------
+    // Layouts for body roles are empty placeholder holes. The designed cards,
+    // colored boxes, icon rows, etc. live as free shapes on the SAMPLE slides
+    // (typically authored on Title Only). Promote those samples to fillable
+    // pattern archetypes so the model can fill them instead of copying a
+    // title+body hole. Covers/dividers/agenda/closing samples are skipped —
+    // those roles already have branded layout archetypes.
+    const isDesignedExtra = (o) => {
+      if (!o) return false
+      if (o.kind === 'image' || o.kind === 'ellipse' || o.kind === 'path' || o.kind === 'line') return true
+      if (o.geom === 'roundRect' || o.rectRadius) return true
+      if (o.paths && o.paths.length) return true
+      if (objectHasText(o)) return true
+      if (o.fill && o.fill.color) return true
+      return false
+    }
+    const patternLabel = (extras, slotCount, hints) => {
+      const cardHints = (hints || []).filter((h) => /card \d+ of \d+/i.test(h.hint || ''))
+      if (cardHints.length >= 2) {
+        const m = String(cardHints[0].hint).match(/of (\d+)/)
+        const n = m ? m[1] : String(cardHints.length)
+        return `${n} cards — title plus a sentence in every card`
+      }
+      if ((hints || []).some((h) => /item \d+ of \d+/i.test(h.hint || ''))) {
+        return 'Icon row — title plus a caption per marker'
+      }
+      const rr = extras.filter((o) => o.geom === 'roundRect' || o.rectRadius).length
+      const ell = extras.filter((o) => o.kind === 'ellipse').length
+      const img = extras.filter((o) => o.kind === 'image').length
+      const cards = extras.filter((o) => objectHasShape(o) && (o.fill || o.geom === 'roundRect' || o.rectRadius)).length
+      if (rr >= 2) return `${rr} rounded cards`
+      if (ell >= 2 && img) return 'Icon row with images'
+      if (ell >= 2) return `${ell} icon markers`
+      if (img >= 2) return `${img} images with text`
+      if (cards >= 2) return `${cards} content cards`
+      if (slotCount > 0) return `Designed content (${slotCount} slots)`
+      return 'Designed content'
+    }
+    const scorePattern = (p) => {
+      const slots = (p.fillSlots || []).length
+      let s = 0
+      if (slots >= 3 && slots <= 8) s += 10
+      else if (slots > 20) s -= 15
+      if (/roundRect/.test(p.markup)) s += 8
+      const shapes = (p.markup.match(/<ast-shape /g) || []).length
+      if (shapes > 40) s -= 20
+      else if (shapes >= 4 && shapes <= 25) s += 5
+      return s
+    }
+
+    const layoutByPath = {}
+    for (const ir of irLayouts) {
+      if (ir._layoutPath) layoutByPath[ir._layoutPath] = ir
+    }
+    const patternCandidates = []
+    for (const [lp, samples] of Object.entries(samplesByLayoutPath)) {
+      const layoutIR = layoutByPath[lp]
+      if (!layoutIR) continue
+      const baseKind = kindOf(layoutIR, layoutIR._layoutType || '')
+      if (CHROME_KINDS.includes(baseKind)) continue
+      // layoutIR.objects already includes master chrome when showMasterSp is on.
+      const inherited = layoutIR.objects || []
+      for (const sample of samples) {
+        const extras = (sample.objects || []).filter((o) => !isSampleJunk(o) && !isMasterClutter(o))
+        if (!extras.some(isDesignedExtra)) continue
+        const bg = (sample.background && sample.background.kind === 'image' && sample.background.mediaKey)
+          ? sample.background
+          : (layoutIR.background || sample.background)
+        const merged = {
+          id: sample.id,
+          name: sample.name,
+          background: bg,
+          objects: inherited.concat(extras),
+          placeholders: mergePatternPlaceholders(layoutIR.placeholders, sample.placeholders),
+        }
+        const { markup, fillSlots, slotHints } = layoutToAsd(merged, {
+          extraTextAsSlots: true,
+          inheritedCount: inherited.length,
+        })
+        if (!fillSlots.length) continue
+        // Widget sheets (every Harvey ball as a "card") are not body layouts.
+        if (fillSlots.length > 16) continue
+        if ((markup.match(/<ast-shape /g) || []).length > 30) continue
+        patternCandidates.push({
+          title: patternLabel(extras, fillSlots.length, slotHints),
+          markup,
+          fillSlots,
+          slotHints,
+          _layout: merged,
+        })
+      }
+    }
+    patternCandidates.sort((a, b) => scorePattern(b) - scorePattern(a))
+    // Dedup labels so several "3 rounded cards" variants stay distinguishable.
+    const patternLabelCounts = {}
+    for (const p of patternCandidates) {
+      const base = p.title
+      patternLabelCounts[base] = (patternLabelCounts[base] || 0) + 1
+      const n = patternLabelCounts[base]
+      const title = n === 1 ? base : `${base} (${n})`
+      archetypes.push({
+        kind: uniqueKind('pattern'),
+        title,
+        markup: p.markup,
+        tier: 'flexible',
+        fillSlots: p.fillSlots,
+        slotHints: p.slotHints,
+        _layout: p._layout,
+      })
     }
 
     const templateModel = {
       schema: 3,
       size: { w: CANVAS_W, h: CANVAS_H },
       theme: themeTokens,
-      layouts: irLayouts,
+      layouts: irLayouts.map((l) => {
+        const { _layoutPath, _showMasterSp, _layoutType, _masterCount, ...rest } = l
+        return rest
+      }),
       slides: irSlides,
       // The IR warnings are structured objects ({code,message}) to match the Go
       // themes.IRWarning shape. The top-level ImportResponse.warnings stays a
@@ -2051,7 +2805,14 @@ try {
       label: 'Imported Template',
       tokens: themeTokens,
       assets,
-      archetypes: archetypes.map((a) => ({ kind: a.kind, title: a.title, markup: a.markup, tier: a.tier, fillSlots: a.fillSlots })),
+      archetypes: archetypes.map((a) => ({
+        kind: a.kind,
+        title: a.title,
+        markup: a.markup,
+        tier: a.tier,
+        fillSlots: a.fillSlots,
+        slotHints: a.slotHints,
+      })),
       templateModel,
     }
     ok(template)

@@ -24,7 +24,13 @@ interface SlidesViewProps {
   onCreateSlide?: (message: string) => void
 }
 
-function EmptyState({ onCreateSlide }: { onCreateSlide?: (message: string) => void }) {
+function EmptyState({
+  onCreateSlide,
+  onNavigate,
+}: {
+  onCreateSlide?: (message: string) => void
+  onNavigate?: (path: string) => void
+}) {
   return (
     <div className="flex flex-1 items-center justify-center">
       <div className="text-center">
@@ -33,17 +39,31 @@ function EmptyState({ onCreateSlide }: { onCreateSlide?: (message: string) => vo
         <p className="max-w-md text-sm text-muted-foreground">
           No slide decks yet. Ask in Chat to build a presentation, then it appears here.
         </p>
-        {onCreateSlide && (
-          <button
-            onClick={() => onCreateSlide('I want to create a new slide presentation. Please load the slides skill and help me build a deck.')}
-            className="mt-4 flex cursor-pointer items-center gap-1.5 rounded-md px-4 py-2 text-sm font-medium text-white transition-colors mx-auto"
-            style={{ background: 'var(--accent, #6366f1)' }}
-            data-testid="create-slide-button-empty"
-          >
-            <Plus size={16} />
-            Create Slide
-          </button>
-        )}
+        <div className="mt-4 flex items-center justify-center gap-2">
+          {onCreateSlide && (
+            <button
+              onClick={() => onCreateSlide('I want to create a new slide presentation. Please load the slides skill and help me build a deck.')}
+              className="flex cursor-pointer items-center gap-1.5 rounded-md px-4 py-2 text-sm font-medium text-white transition-colors"
+              style={{ background: 'var(--accent, #6366f1)' }}
+              data-testid="create-slide-button-empty"
+            >
+              <Plus size={16} />
+              Create Slide
+            </button>
+          )}
+          {onNavigate && (
+            <button
+              onClick={() => onNavigate('/slides/templates')}
+              className="flex cursor-pointer items-center gap-1.5 rounded-md px-4 py-2 text-sm transition-colors"
+              style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-color)', color: 'var(--text-secondary)' }}
+              title="Manage slide templates"
+              data-testid="manage-templates-link"
+            >
+              <Layers size={16} />
+              Templates
+            </button>
+          )}
+        </div>
       </div>
     </div>
   )
@@ -241,26 +261,6 @@ function DeckCard({
   )
 }
 
-/** Small swatch row for a template's core tokens. */
-export function TemplateSwatches({ tokens }: { tokens?: Record<string, string> }) {
-  const keys = ['surface', 'ink', 'accent'] as const
-  const colors = keys
-    .map(k => tokens?.[k])
-    .filter((c): c is string => Boolean(c))
-  if (colors.length === 0) return null
-  return (
-    <div className="flex items-center gap-0.5" data-testid="template-swatches">
-      {colors.map((c, i) => (
-        <div
-          key={i}
-          className="h-3 w-3 rounded-sm border"
-          style={{ backgroundColor: c, borderColor: 'var(--border-color)' }}
-        />
-      ))}
-    </div>
-  )
-}
-
 export default function SlidesView({ theme, deckSlug, templatesView, isPlatformMode, onNavigate, onPublishDeck, onForkDeck, onCreateSlide }: SlidesViewProps) {
   void theme
   const [decks, setDecks] = useState<SlidesDeckListItem[]>([])
@@ -328,7 +328,7 @@ export default function SlidesView({ theme, deckSlug, templatesView, isPlatformM
   }, [selectedSlug, onNavigate])
 
   const handleEnhance = useCallback((deck: SlidesDeckListItem) => {
-    onCreateSlide?.(`I want to refine my slide deck "${deck.title}" (slug: ${deck.slug}). Please load the slides skill, then create a working copy using create_deck with source="${deck.slug}" and slug="${deck.slug}-draft". This creates a session copy of my saved deck. Then call get_deck on the new "${deck.slug}-draft" deck to see its slides, and ask me what I'd like to change. Important: modify slides in the "${deck.slug}-draft" deck using write_slide — do NOT create any other new decks.`)
+    onCreateSlide?.(`I want to refine my slide deck "${deck.title}" (slug: ${deck.slug}). Please load the slides skill, then create a working copy using create_deck with source="${deck.slug}" and slug="${deck.slug}-draft". This creates a session copy of my saved deck. Then call get_deck on the new "${deck.slug}-draft" deck for the slide index, and read_slide for any slide you need to edit. Ask me what I'd like to change. Important: modify slides in the "${deck.slug}-draft" deck using write_slide (or fill_slide if a template catalog applies) — do NOT create any other new decks.`)
   }, [onCreateSlide])
 
   const loadVersions = useCallback(async (slug: string, scope: DocsScope) => {
@@ -500,7 +500,7 @@ export default function SlidesView({ theme, deckSlug, templatesView, isPlatformM
   }
 
   if (!hasDecks) {
-    return <EmptyState onCreateSlide={onCreateSlide} />
+    return <EmptyState onCreateSlide={onCreateSlide} onNavigate={onNavigate} />
   }
 
   const renderCard = (deck: SlidesDeckListItem) => (

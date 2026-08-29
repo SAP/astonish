@@ -89,6 +89,7 @@ func NewPlatformServices(ctx context.Context, cfg Config) (*store.Services, *Sto
 		migrateTables := []*schema.Table{
 			platformmigrate.PlatformSkillsTable,
 			platformmigrate.PlatformSkillFilesTable,
+			platformmigrate.PlatformSlideTemplatesTable,
 			platformmigrate.SandboxLayersTable, // required by SandboxTemplatesTable FK
 			platformmigrate.SandboxTemplatesTable,
 		}
@@ -149,10 +150,12 @@ func TenantMiddleware(s *Store) func(http.Handler) http.Handler {
 				TenantRouter:            baseSvc.TenantRouter,
 				Audit:                   orgStore.OrgAudit(),
 				Skills:                  orgStore.OrgSkills(),
+				OrgSlideTemplates:       orgStore.OrgSlideTemplates(),
 				MCPServers:              orgStore.OrgMCPServers(),
 				A2AAgents:               orgStore.OrgA2AAgents(),
 				PlatformMCPServers:      s.PlatformMCPServers(),
 				PlatformSkills:          s.PlatformSkills(),
+				PlatformSlideTemplates:  s.PlatformSlideTemplates(),
 				PlatformSettings:        s.PlatformSettings(),
 				OrgSettings:             s.OrgSettings(tc.OrgSlug),
 				NetworkPolicies:         orgStore.OrgNetworkPolicies(),

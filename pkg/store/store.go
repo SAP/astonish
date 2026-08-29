@@ -57,6 +57,7 @@ type PlatformBackend interface {
 	OrgSettings(orgSlug string) OrgSettingsStore
 	PlatformMCPServers() MCPServerStore
 	PlatformSkills() SkillStore
+	PlatformSlideTemplates() SlideTemplateStore
 
 	// --- Embeddings ---
 	SetEmbedFunc(fn EmbedFunc)
@@ -98,6 +99,7 @@ type OrgDataStore interface {
 	// Org-wide shared stores (public schema in PG, shared directory in file mode).
 	OrgMemories() MemoryStore
 	OrgSkills() SkillStore
+	OrgSlideTemplates() SlideTemplateStore
 	OrgMCPServers() MCPServerStore
 	OrgA2AAgents() A2AAgentStore
 	OrgNetworkPolicies() NetworkPolicyStore

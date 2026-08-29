@@ -6,6 +6,7 @@ import type {
   DocsUpdateMessage,
   TutorialBlueprintPreviewMessage,
 } from './chatTypes'
+export { slidesHarnessLabel } from './chatTypes'
 
 /** Focus target for the right-hand chat harness panel. */
 export type HarnessFocus =

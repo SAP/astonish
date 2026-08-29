@@ -30,6 +30,8 @@ type Tx struct {
 	OrgSkill *OrgSkillClient
 	// OrgSkillFile is the client for interacting with the OrgSkillFile builders.
 	OrgSkillFile *OrgSkillFileClient
+	// OrgSlideTemplate is the client for interacting with the OrgSlideTemplate builders.
+	OrgSlideTemplate *OrgSlideTemplateClient
 	// Team is the client for interacting with the Team builders.
 	Team *TeamClient
 	// TeamMembership is the client for interacting with the TeamMembership builders.
@@ -174,6 +176,7 @@ func (tx *Tx) init() {
 	tx.OrgNetworkPolicy = NewOrgNetworkPolicyClient(tx.config)
 	tx.OrgSkill = NewOrgSkillClient(tx.config)
 	tx.OrgSkillFile = NewOrgSkillFileClient(tx.config)
+	tx.OrgSlideTemplate = NewOrgSlideTemplateClient(tx.config)
 	tx.Team = NewTeamClient(tx.config)
 	tx.TeamMembership = NewTeamMembershipClient(tx.config)
 }

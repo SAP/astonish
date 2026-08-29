@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/SAP/astonish/pkg/docs/slides/themes"
@@ -37,12 +38,15 @@ func testArchetypeTemplate() *themes.Template {
 
 func TestGenerateArchetypeThumbnailsBakesAssetsAndRefs(t *testing.T) {
 	tmpl := testArchetypeTemplate()
+	var mu sync.Mutex
 	var seenHTML []string
 	opts := thumbnailOptions{
 		RuntimeJS: []byte("/* runtime */"),
 		Browser:   stubProvider{},
 		Render: func(html string, _ pdfgen.BrowserProvider, sopts pdfgen.ScreenshotOptions) ([]byte, error) {
+			mu.Lock()
 			seenHTML = append(seenHTML, html)
+			mu.Unlock()
 			if sopts.Width != CanvasWidth || sopts.Height != CanvasHeight {
 				t.Errorf("unexpected viewport: %dx%d", sopts.Width, sopts.Height)
 			}

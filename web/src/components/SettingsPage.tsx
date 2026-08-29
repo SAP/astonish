@@ -21,6 +21,7 @@ declare const __UI_VERSION__: string
 const UserManagement = lazy(() => import('./UserManagement'))
 const AuditViewer = lazy(() => import('./AuditViewer'))
 const SkillsSettings = lazy(() => import('./settings/SkillsSettings'))
+const SlidesTemplatesAdmin = lazy(() => import('./settings/SlidesTemplatesAdmin'))
 const MCPServersSettings = lazy(() => import('./settings/MCPServersSettings'))
 const ProvidersSettings = lazy(() => import('./settings/ProvidersSettings'))
 const TapsSettings = lazy(() => import('./settings/TapsSettings'))
@@ -1820,6 +1821,16 @@ function TeamContent({ tabId, teamSlug, theme, user, canManageTeam, team }: Team
     )
   }
 
+  if (tabId === 'slides-templates') {
+    return (
+      <div className="flex-1 overflow-y-auto p-6">
+        <Suspense fallback={<div className="flex items-center justify-center py-12"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--brand)' }} /></div>}>
+          <SlidesTemplatesAdmin scope="team" theme={theme} />
+        </Suspense>
+      </div>
+    )
+  }
+
   return (
     <div className="flex-1 overflow-y-auto p-6">
       <Suspense fallback={<div className="flex items-center justify-center py-12"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--brand)' }} /></div>}>
@@ -1906,7 +1917,7 @@ export default function SettingsPage({
 
   // --- Build sidebar categories ---
   // Admin-only team items (hidden from regular members)
-  const adminOnlyTeamItems = new Set(['team-providers', 'team-mcp', 'team-a2a', 'team-taps', 'team-container'])
+  const adminOnlyTeamItems = new Set(['team-providers', 'team-mcp', 'team-a2a', 'team-taps', 'team-container', 'team-slides-templates'])
   const memberTeamItems = canManageTeam ? TEAM_ITEMS : TEAM_ITEMS.filter(item => !adminOnlyTeamItems.has(item.id))
 
   // Platform section (superadmin only) — merges former "System" items.
@@ -2119,6 +2130,14 @@ export default function SettingsPage({
             </Suspense>
           )}
 
+          {activeSection === 'org-slides-templates' && (
+            <Suspense fallback={<div className="flex items-center justify-center h-full"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--brand)' }} /></div>}>
+              <div className="p-6 h-full overflow-y-auto">
+                <SlidesTemplatesAdmin scope="org" theme={theme} />
+              </div>
+            </Suspense>
+          )}
+
           {activeSection === 'org-mcp' && (
             <Suspense fallback={<div className="flex items-center justify-center h-full"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--brand)' }} /></div>}>
               <div className="p-6 h-full">
@@ -2185,7 +2204,14 @@ export default function SettingsPage({
               </div>
             </Suspense>
           )}
-          {activeSection.startsWith('platform-') && activeSection !== 'platform-providers' && activeSection !== 'platform-mcp' && activeSection !== 'platform-network' && activeSection !== 'platform-skills' && !PLATFORM_SYSTEM_SECTIONS[activeSection] && isSuperadmin && (
+          {activeSection === 'platform-slides-templates' && isSuperadmin && (
+            <Suspense fallback={<div className="flex items-center justify-center h-full"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--brand)' }} /></div>}>
+              <div className="p-6 h-full overflow-y-auto">
+                <SlidesTemplatesAdmin scope="platform" theme={theme} />
+              </div>
+            </Suspense>
+          )}
+          {activeSection.startsWith('platform-') && activeSection !== 'platform-providers' && activeSection !== 'platform-mcp' && activeSection !== 'platform-network' && activeSection !== 'platform-skills' && activeSection !== 'platform-slides-templates' && !PLATFORM_SYSTEM_SECTIONS[activeSection] && isSuperadmin && (
             <Suspense fallback={<div className="flex items-center justify-center h-full"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--brand)' }} /></div>}>
               <PlatformAdminPanel theme={theme as 'dark' | 'light'} activeTab={activeSection.replace('platform-', '')} />
             </Suspense>

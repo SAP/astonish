@@ -6,11 +6,16 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/SAP/astonish/pkg/docs/slides/themes"
 	"github.com/SAP/astonish/pkg/pdfgen"
 )
+
+// thumbWorkers limits how many archetype thumbnails render concurrently inside
+// a single import so we don't overwhelm headless Chrome.
+const thumbWorkers = 4
 
 // thumbnailSampleTitle and thumbnailSampleBody fill the {{TITLE}}/{{BODY}}
 // placeholders so a baked thumbnail reads like a real slide rather than showing
@@ -78,18 +83,40 @@ func generateArchetypeThumbnails(ctx context.Context, tmpl *themes.Template, opt
 		tmpl.Assets = map[string]string{}
 	}
 
+	type result struct {
+		index int
+		ref   string
+		png   []byte
+		err   error
+	}
+
+	n := len(tmpl.Archetypes)
+	results := make([]result, n)
+
+	// Prepare work items (scene HTML can be built cheaply outside the pool).
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, thumbWorkers)
 	for i := range tmpl.Archetypes {
-		arch := &tmpl.Archetypes[i]
-		png, err := renderArchetypeThumbnail(*arch, tmpl.Tokens, tmpl.Assets, opts.RuntimeJS, opts.Browser, render, opts.Timeout)
-		if err != nil {
-			// Best-effort: log and continue; leave ThumbnailRef empty.
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			arch := tmpl.Archetypes[idx]
+			png, err := renderArchetypeThumbnail(arch, tmpl.Tokens, tmpl.Assets, opts.RuntimeJS, opts.Browser, render, opts.Timeout)
+			results[idx] = result{index: idx, ref: "thumb/" + arch.Kind, png: png, err: err}
+		}(i)
+	}
+	wg.Wait()
+
+	for _, r := range results {
+		if r.err != nil {
 			slog.Warn("slides thumbnail generation failed for archetype",
-				"template", tmpl.Name, "kind", arch.Kind, "error", err)
+				"template", tmpl.Name, "kind", tmpl.Archetypes[r.index].Kind, "error", r.err)
 			continue
 		}
-		ref := "thumb/" + arch.Kind
-		tmpl.Assets[ref] = "data:image/png;base64," + base64.StdEncoding.EncodeToString(png)
-		arch.ThumbnailRef = ref
+		tmpl.Assets[r.ref] = "data:image/png;base64," + base64.StdEncoding.EncodeToString(r.png)
+		tmpl.Archetypes[r.index].ThumbnailRef = r.ref
 	}
 }
 

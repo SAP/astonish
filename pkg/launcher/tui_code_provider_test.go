@@ -95,6 +95,16 @@ func TestCodeProviderTypes_LiteLLMFields(t *testing.T) {
 	}
 }
 
+// TestCodeProviderTypes_XAIOAuthFields verifies the xAI OAuth entry declares
+// the client_id field needed for device-code flow setup.
+func TestCodeProviderTypes_XAIOAuthFields(t *testing.T) {
+	ti := findProviderType(t, "xai_oauth")
+	fields := fieldMap(ti)
+	if _, ok := fields["client_id"]; !ok {
+		t.Error("xai_oauth missing client_id field")
+	}
+}
+
 // TestAddProvider_SAPAICore round-trips adding a SAP AI Core provider through the
 // ProviderAdminBackend and confirms it is persisted with all fields.
 func TestAddProvider_SAPAICore(t *testing.T) {
@@ -226,6 +236,30 @@ func TestRemoveProvider_NotConfigured(t *testing.T) {
 	}
 	if got := err.Error(); got != `provider "ghost" is not configured` {
 		t.Errorf("unexpected error: %q", got)
+	}
+}
+
+func TestAddProvider_CopiesExtraOAuthTokenFields(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	b := &localAgentBackend{appConfig: &config.AppConfig{}}
+	fields := map[string]string{
+		"client_id":     "cid",
+		"access_token":  "at",
+		"refresh_token": "rt",
+		"expires_at":    "2026-01-01T00:00:00Z",
+	}
+	if err := b.AddProvider(context.Background(), "xai_oauth", "xai_oauth", fields); err != nil {
+		t.Fatalf("AddProvider(xai_oauth) failed: %v", err)
+	}
+	inst := b.appConfig.Providers["xai_oauth"]
+	if inst == nil {
+		t.Fatal("provider instance not stored in config")
+	}
+	for k, want := range fields {
+		if inst[k] != want {
+			t.Errorf("field %q = %q, want %q", k, inst[k], want)
+		}
 	}
 }
 

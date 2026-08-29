@@ -1,10 +1,63 @@
 package launcher
 
 import (
+	"bytes"
+	"errors"
+	"log/slog"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/SAP/astonish/pkg/credentials"
 )
+
+func TestLogChatFactoryInitialization(t *testing.T) {
+	tests := []struct {
+		name     string
+		result   *ChatFactoryResult
+		err      error
+		contains []string
+		excludes []string
+	}{
+		{
+			name:   "success",
+			result: &ChatFactoryResult{ProviderName: "vertex", ModelName: "gemini"},
+			contains: []string{
+				"msg=\"chat agent initialized\"", "component=chat-factory", "elapsed=", "platform=true", "code_mode=false", "daemon=true", "provider=vertex", "model=gemini",
+			},
+		},
+		{
+			name: "failure",
+			err:  errors.New("provider unavailable"),
+			contains: []string{
+				"msg=\"chat agent initialization failed\"", "component=chat-factory", "elapsed=", "error=\"provider unavailable\"",
+			},
+			excludes: []string{"provider=", "model="},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			old := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+			defer slog.SetDefault(old)
+
+			logChatFactoryInitialization(time.Now(), &ChatFactoryConfig{PlatformMode: true, IsDaemon: true}, tt.result, tt.err)
+			got := buf.String()
+			for _, want := range tt.contains {
+				if !strings.Contains(got, want) {
+					t.Errorf("log %q does not contain %q", got, want)
+				}
+			}
+			for _, unwanted := range tt.excludes {
+				if strings.Contains(got, unwanted) {
+					t.Errorf("log %q unexpectedly contains %q", got, unwanted)
+				}
+			}
+		})
+	}
+}
 
 func TestSubAgentCredentialStoreWiring(t *testing.T) {
 	t.Run("nil store remains a nil interface", func(t *testing.T) {

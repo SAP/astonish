@@ -25,6 +25,7 @@ import (
 	"github.com/SAP/astonish/ent/org/orgnetworkpolicy"
 	"github.com/SAP/astonish/ent/org/orgskill"
 	"github.com/SAP/astonish/ent/org/orgskillfile"
+	"github.com/SAP/astonish/ent/org/orgslidetemplate"
 	"github.com/SAP/astonish/ent/org/team"
 	"github.com/SAP/astonish/ent/org/teammembership"
 )
@@ -52,6 +53,8 @@ type Client struct {
 	OrgSkill *OrgSkillClient
 	// OrgSkillFile is the client for interacting with the OrgSkillFile builders.
 	OrgSkillFile *OrgSkillFileClient
+	// OrgSlideTemplate is the client for interacting with the OrgSlideTemplate builders.
+	OrgSlideTemplate *OrgSlideTemplateClient
 	// Team is the client for interacting with the Team builders.
 	Team *TeamClient
 	// TeamMembership is the client for interacting with the TeamMembership builders.
@@ -76,6 +79,7 @@ func (c *Client) init() {
 	c.OrgNetworkPolicy = NewOrgNetworkPolicyClient(c.config)
 	c.OrgSkill = NewOrgSkillClient(c.config)
 	c.OrgSkillFile = NewOrgSkillFileClient(c.config)
+	c.OrgSlideTemplate = NewOrgSlideTemplateClient(c.config)
 	c.Team = NewTeamClient(c.config)
 	c.TeamMembership = NewTeamMembershipClient(c.config)
 }
@@ -179,6 +183,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		OrgNetworkPolicy: NewOrgNetworkPolicyClient(cfg),
 		OrgSkill:         NewOrgSkillClient(cfg),
 		OrgSkillFile:     NewOrgSkillFileClient(cfg),
+		OrgSlideTemplate: NewOrgSlideTemplateClient(cfg),
 		Team:             NewTeamClient(cfg),
 		TeamMembership:   NewTeamMembershipClient(cfg),
 	}, nil
@@ -209,6 +214,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		OrgNetworkPolicy: NewOrgNetworkPolicyClient(cfg),
 		OrgSkill:         NewOrgSkillClient(cfg),
 		OrgSkillFile:     NewOrgSkillFileClient(cfg),
+		OrgSlideTemplate: NewOrgSlideTemplateClient(cfg),
 		Team:             NewTeamClient(cfg),
 		TeamMembership:   NewTeamMembershipClient(cfg),
 	}, nil
@@ -241,8 +247,8 @@ func (c *Client) Close() error {
 func (c *Client) Use(hooks ...Hook) {
 	for _, n := range []interface{ Use(...Hook) }{
 		c.OrgA2AAgent, c.OrgApp, c.OrgAuditLog, c.OrgEncryptionKey, c.OrgMCPServer,
-		c.OrgMemory, c.OrgNetworkPolicy, c.OrgSkill, c.OrgSkillFile, c.Team,
-		c.TeamMembership,
+		c.OrgMemory, c.OrgNetworkPolicy, c.OrgSkill, c.OrgSkillFile,
+		c.OrgSlideTemplate, c.Team, c.TeamMembership,
 	} {
 		n.Use(hooks...)
 	}
@@ -253,8 +259,8 @@ func (c *Client) Use(hooks ...Hook) {
 func (c *Client) Intercept(interceptors ...Interceptor) {
 	for _, n := range []interface{ Intercept(...Interceptor) }{
 		c.OrgA2AAgent, c.OrgApp, c.OrgAuditLog, c.OrgEncryptionKey, c.OrgMCPServer,
-		c.OrgMemory, c.OrgNetworkPolicy, c.OrgSkill, c.OrgSkillFile, c.Team,
-		c.TeamMembership,
+		c.OrgMemory, c.OrgNetworkPolicy, c.OrgSkill, c.OrgSkillFile,
+		c.OrgSlideTemplate, c.Team, c.TeamMembership,
 	} {
 		n.Intercept(interceptors...)
 	}
@@ -281,6 +287,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.OrgSkill.mutate(ctx, m)
 	case *OrgSkillFileMutation:
 		return c.OrgSkillFile.mutate(ctx, m)
+	case *OrgSlideTemplateMutation:
+		return c.OrgSlideTemplate.mutate(ctx, m)
 	case *TeamMutation:
 		return c.Team.mutate(ctx, m)
 	case *TeamMembershipMutation:
@@ -1519,6 +1527,139 @@ func (c *OrgSkillFileClient) mutate(ctx context.Context, m *OrgSkillFileMutation
 	}
 }
 
+// OrgSlideTemplateClient is a client for the OrgSlideTemplate schema.
+type OrgSlideTemplateClient struct {
+	config
+}
+
+// NewOrgSlideTemplateClient returns a client for the OrgSlideTemplate from the given config.
+func NewOrgSlideTemplateClient(c config) *OrgSlideTemplateClient {
+	return &OrgSlideTemplateClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `orgslidetemplate.Hooks(f(g(h())))`.
+func (c *OrgSlideTemplateClient) Use(hooks ...Hook) {
+	c.hooks.OrgSlideTemplate = append(c.hooks.OrgSlideTemplate, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `orgslidetemplate.Intercept(f(g(h())))`.
+func (c *OrgSlideTemplateClient) Intercept(interceptors ...Interceptor) {
+	c.inters.OrgSlideTemplate = append(c.inters.OrgSlideTemplate, interceptors...)
+}
+
+// Create returns a builder for creating a OrgSlideTemplate entity.
+func (c *OrgSlideTemplateClient) Create() *OrgSlideTemplateCreate {
+	mutation := newOrgSlideTemplateMutation(c.config, OpCreate)
+	return &OrgSlideTemplateCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of OrgSlideTemplate entities.
+func (c *OrgSlideTemplateClient) CreateBulk(builders ...*OrgSlideTemplateCreate) *OrgSlideTemplateCreateBulk {
+	return &OrgSlideTemplateCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *OrgSlideTemplateClient) MapCreateBulk(slice any, setFunc func(*OrgSlideTemplateCreate, int)) *OrgSlideTemplateCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &OrgSlideTemplateCreateBulk{err: fmt.Errorf("calling to OrgSlideTemplateClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*OrgSlideTemplateCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &OrgSlideTemplateCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for OrgSlideTemplate.
+func (c *OrgSlideTemplateClient) Update() *OrgSlideTemplateUpdate {
+	mutation := newOrgSlideTemplateMutation(c.config, OpUpdate)
+	return &OrgSlideTemplateUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *OrgSlideTemplateClient) UpdateOne(_m *OrgSlideTemplate) *OrgSlideTemplateUpdateOne {
+	mutation := newOrgSlideTemplateMutation(c.config, OpUpdateOne, withOrgSlideTemplate(_m))
+	return &OrgSlideTemplateUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *OrgSlideTemplateClient) UpdateOneID(id uuid.UUID) *OrgSlideTemplateUpdateOne {
+	mutation := newOrgSlideTemplateMutation(c.config, OpUpdateOne, withOrgSlideTemplateID(id))
+	return &OrgSlideTemplateUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for OrgSlideTemplate.
+func (c *OrgSlideTemplateClient) Delete() *OrgSlideTemplateDelete {
+	mutation := newOrgSlideTemplateMutation(c.config, OpDelete)
+	return &OrgSlideTemplateDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *OrgSlideTemplateClient) DeleteOne(_m *OrgSlideTemplate) *OrgSlideTemplateDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *OrgSlideTemplateClient) DeleteOneID(id uuid.UUID) *OrgSlideTemplateDeleteOne {
+	builder := c.Delete().Where(orgslidetemplate.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &OrgSlideTemplateDeleteOne{builder}
+}
+
+// Query returns a query builder for OrgSlideTemplate.
+func (c *OrgSlideTemplateClient) Query() *OrgSlideTemplateQuery {
+	return &OrgSlideTemplateQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeOrgSlideTemplate},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a OrgSlideTemplate entity by its id.
+func (c *OrgSlideTemplateClient) Get(ctx context.Context, id uuid.UUID) (*OrgSlideTemplate, error) {
+	return c.Query().Where(orgslidetemplate.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *OrgSlideTemplateClient) GetX(ctx context.Context, id uuid.UUID) *OrgSlideTemplate {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *OrgSlideTemplateClient) Hooks() []Hook {
+	return c.hooks.OrgSlideTemplate
+}
+
+// Interceptors returns the client interceptors.
+func (c *OrgSlideTemplateClient) Interceptors() []Interceptor {
+	return c.inters.OrgSlideTemplate
+}
+
+func (c *OrgSlideTemplateClient) mutate(ctx context.Context, m *OrgSlideTemplateMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&OrgSlideTemplateCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&OrgSlideTemplateUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&OrgSlideTemplateUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&OrgSlideTemplateDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("org: unknown OrgSlideTemplate mutation op: %q", m.Op())
+	}
+}
+
 // TeamClient is a client for the Team schema.
 type TeamClient struct {
 	config
@@ -1821,11 +1962,12 @@ func (c *TeamMembershipClient) mutate(ctx context.Context, m *TeamMembershipMuta
 type (
 	hooks struct {
 		OrgA2AAgent, OrgApp, OrgAuditLog, OrgEncryptionKey, OrgMCPServer, OrgMemory,
-		OrgNetworkPolicy, OrgSkill, OrgSkillFile, Team, TeamMembership []ent.Hook
+		OrgNetworkPolicy, OrgSkill, OrgSkillFile, OrgSlideTemplate, Team,
+		TeamMembership []ent.Hook
 	}
 	inters struct {
 		OrgA2AAgent, OrgApp, OrgAuditLog, OrgEncryptionKey, OrgMCPServer, OrgMemory,
-		OrgNetworkPolicy, OrgSkill, OrgSkillFile, Team,
+		OrgNetworkPolicy, OrgSkill, OrgSkillFile, OrgSlideTemplate, Team,
 		TeamMembership []ent.Interceptor
 	}
 )

@@ -25,12 +25,23 @@ import {
   type SlidesTemplate,
 } from '@/api/slides'
 
+if (typeof (globalThis as { ResizeObserver?: unknown }).ResizeObserver === 'undefined') {
+  ;(globalThis as { ResizeObserver?: unknown }).ResizeObserver = class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  }
+}
+
 const builtin: SlidesTemplate = {
   name: 'midnight',
   label: 'Midnight',
   scope: 'builtin',
   tokens: { surface: '#0b1020', ink: '#e6e9ef', accent: '#7c5cff' },
-  archetypeKinds: ['title', 'section', 'content'],
+  cover: {
+    kind: 'title',
+    markup: '<ast-slide id="s0"><ast-text id="h" x="0" y="0" w="1920" h="200">Midnight cover</ast-text></ast-slide>',
+  },
 }
 
 const personal: SlidesTemplate = {
@@ -38,10 +49,9 @@ const personal: SlidesTemplate = {
   label: 'Corp Deck',
   scope: 'personal',
   tokens: { surface: '#ffffff', ink: '#101010', accent: '#ff8800' },
-  archetypeKinds: ['title', 'title-2', 'content'],
-  // Rich {kind,label} variants (imported template): ONE master + many layouts,
-  // so the same role can have multiple variants each labeled with the real
-  // PowerPoint layout name. The UI must render every label as its own chip.
+  cover: { kind: 'title', thumbnailRef: 'thumb/title' },
+  // Catalog variants still arrive on the list DTO but must not be listed as
+  // chips on the library card (imported templates can have dozens of layouts).
   archetypes: [
     { kind: 'title', label: 'Blue cover, anvil and image', tier: 'fixed', fillSlots: ['ph-title'] },
     { kind: 'title-2', label: 'Pink cover with anvil', tier: 'fixed', fillSlots: ['ph-title'] },
@@ -63,6 +73,23 @@ describe('SlidesView templates area', () => {
     const scopeBadges = screen.getAllByTestId('template-scope-badge').map(el => el.textContent)
     expect(scopeBadges).toContain('Built-in')
     expect(scopeBadges).toContain('Personal')
+  })
+
+  it('shows Platform and Organization badges and hides delete on inherited templates', async () => {
+    ;(listSlidesTemplates as ReturnType<typeof vi.fn>).mockResolvedValue({
+      templates: [
+        builtin,
+        personal,
+        { name: 'acme', label: 'Acme', scope: 'org', cover: { kind: 'title', thumbnailRef: 'thumb/title' } },
+        { name: 'global', label: 'Global', scope: 'platform', cover: { kind: 'title', thumbnailRef: 'thumb/title' } },
+      ],
+    })
+    renderArea()
+    await waitFor(() => expect(screen.getAllByTestId('template-card')).toHaveLength(4))
+    const badges = screen.getAllByTestId('template-scope-badge').map(el => el.textContent)
+    expect(badges).toContain('Organization')
+    expect(badges).toContain('Platform')
+    expect(screen.getAllByTestId('template-delete')).toHaveLength(1)
   })
 
   it('shows Delete only for the scoped template, not the built-in', async () => {
@@ -102,25 +129,25 @@ describe('SlidesView templates area', () => {
     expect((deleteSlidesTemplate as ReturnType<typeof vi.fn>).mock.calls[0][0]).toBe('corp')
   })
 
-  it('renders human-friendly variant labels when archetypes carry labels', async () => {
-    renderArea()
+  it('renders a cover thumbnail and the template name, not layout chips or swatches', async () => {
+    const { container } = renderArea()
     await waitFor(() => expect(screen.getAllByTestId('template-card')).toHaveLength(2))
-    // The imported (personal) template exposes {kind,label} variants; the UI
-    // should prefer the label over the bare kind.
-    expect(screen.getByText('Blue cover, anvil and image')).toBeInTheDocument()
-    expect(screen.getByText('Title and Content')).toBeInTheDocument()
-    // The built-in template has no labels, so its bare kinds still render.
-    expect(screen.getByText('section')).toBeInTheDocument()
-  })
 
-  it('renders multiple same-role variant chips with their real layout-name labels', async () => {
-    renderArea()
-    await waitFor(() => expect(screen.getAllByTestId('template-card')).toHaveLength(2))
-    // ONE .pptx template exposes many role-classified variants; two distinct
-    // "title"-role covers must BOTH render as chips by their real PowerPoint
-    // layout names (not collapsed to a single "title" chip).
-    expect(screen.getByText('Blue cover, anvil and image')).toBeInTheDocument()
-    expect(screen.getByText('Pink cover with anvil')).toBeInTheDocument()
+    expect(screen.getByText('Midnight')).toBeInTheDocument()
+    expect(screen.getByText('Corp Deck')).toBeInTheDocument()
+    expect(screen.getAllByTestId('template-cover')).toHaveLength(2)
+
+    const baked = screen.getByAltText('Corp Deck') as HTMLImageElement
+    expect(baked.getAttribute('src')).toContain('/slides/templates/corp/thumbnails/title')
+
+    await waitFor(() => {
+      expect(container.querySelector('ast-deck')?.textContent).toContain('Midnight cover')
+    })
+
+    expect(screen.queryByText('Blue cover, anvil and image')).not.toBeInTheDocument()
+    expect(screen.queryByText('Pink cover with anvil')).not.toBeInTheDocument()
+    expect(screen.queryByText('Title and Content')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('template-swatches')).not.toBeInTheDocument()
   })
 
   it('shows the Import .pptx button in the templates header', async () => {

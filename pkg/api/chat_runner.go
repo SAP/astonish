@@ -151,6 +151,7 @@ func injectRequestDocsStores(runner *ChatRunner, r *http.Request) *store.Service
 	svc := store.FromRequest(r)
 	if svc != nil {
 		runner.InjectDocsStores(svc.PersonalDocs, svc.Docs)
+		runner.InjectSlideTemplateStores(svc.PlatformSlideTemplates, svc.OrgSlideTemplates)
 	}
 	return svc
 }
@@ -170,6 +171,12 @@ func (cr *ChatRunner) InjectCredentialStore(cs store.CredentialStore) {
 	cr.ctx = store.WithCredentialStore(cr.ctx, cs)
 }
 
+// InjectChatFiles makes this turn's user-uploaded files available to tools
+// (e.g. add_deck_image) without a public URL.
+func (cr *ChatRunner) InjectChatFiles(files []store.ChatFile) {
+	cr.ctx = store.WithChatFiles(cr.ctx, files)
+}
+
 func (cr *ChatRunner) InjectDocsStores(personal, team store.DocsStore) {
 	svc := store.FromContext(cr.ctx)
 	if svc == nil {
@@ -180,6 +187,25 @@ func (cr *ChatRunner) InjectDocsStores(personal, team store.DocsStore) {
 	}
 	svc.PersonalDocs = personal
 	svc.Docs = team
+	cr.ctx = store.WithServices(cr.ctx, svc)
+}
+
+// InjectSlideTemplateStores adds platform and org slide template stores to the
+// runner's context so that chat tools (list_templates, template pickers) can
+// resolve inherited templates from all scopes.
+func (cr *ChatRunner) InjectSlideTemplateStores(platform, org store.SlideTemplateStore) {
+	if platform == nil && org == nil {
+		return
+	}
+	svc := store.FromContext(cr.ctx)
+	if svc == nil {
+		svc = &store.Services{}
+	} else {
+		clone := *svc
+		svc = &clone
+	}
+	svc.PlatformSlideTemplates = platform
+	svc.OrgSlideTemplates = org
 	cr.ctx = store.WithServices(cr.ctx, svc)
 }
 
@@ -1011,7 +1037,7 @@ runLoop:
 	// (from the provider detecting no finish_reason), attempt a single retry
 	// by re-running the agent. The session history already contains the partial
 	// response, so the LLM will see the conversation so far and continue.
-	if lastRunErr != nil && isStreamTruncationError(lastRunErr) && cr.ctx.Err() == nil {
+	if lastRunErr != nil && shouldRetryTruncatedStream(lastRunErr, hasContent) && cr.ctx.Err() == nil {
 		slog.Warn("LLM stream was truncated, attempting retry",
 			"session", cr.SessionID,
 			"error", lastRunErr.Error())
@@ -1749,6 +1775,13 @@ func isStreamTruncationError(err error) bool {
 	return strings.Contains(err.Error(), "stream ended without a finish_reason")
 }
 
+// shouldRetryTruncatedStream is the truncation-retry gate. If the model already
+// produced user-facing text (e.g. "please attach a logo"), a nudge to "complete
+// the task" skips waiting for the user — do not retry in that case.
+func shouldRetryTruncatedStream(err error, hasContent bool) bool {
+	return isStreamTruncationError(err) && !hasContent
+}
+
 func (cr *ChatRunner) maybeEmitDocsUpdate(sessionService session.Service, toolName string, result map[string]any) {
 	if result == nil {
 		return
@@ -1761,7 +1794,7 @@ func (cr *ChatRunner) maybeEmitDocsUpdate(sessionService session.Service, toolNa
 	switch toolName {
 	case "create_deck":
 		action = slides.ActionDeckCreated
-	case "write_slide":
+	case "write_slide", "fill_slide", "fill_slides":
 		action = slides.ActionSlideWritten
 	case "get_deck":
 		action = slides.ActionDeckViewed
@@ -1787,6 +1820,9 @@ func (cr *ChatRunner) maybeEmitDocsUpdate(sessionService session.Service, toolNa
 	}
 	if title, ok := deck["title"].(string); ok && title != "" {
 		payload["deckTitle"] = title
+	}
+	if description, ok := deck["description"].(string); ok && description != "" {
+		payload["description"] = description
 	}
 	if schemaVersion, ok := numberAsInt(deck["schemaVersion"]); ok {
 		payload["schemaVersion"] = schemaVersion

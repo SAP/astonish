@@ -577,6 +577,10 @@ func (o *orgDataStore) OrgSkills() store.SkillStore {
 	return &orgSkillStore{client: o.client}
 }
 
+func (o *orgDataStore) OrgSlideTemplates() store.SlideTemplateStore {
+	return &orgSlideTemplateStore{client: o.client}
+}
+
 func (o *orgDataStore) OrgMCPServers() store.MCPServerStore {
 	return &orgMCPServerStore{client: o.client}
 }

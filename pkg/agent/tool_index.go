@@ -431,9 +431,9 @@ func FormatToolMatchesForPrompt(matches []ToolMatch) string {
 	for _, gName := range groupOrder {
 		g := groups[gName]
 		if strings.HasPrefix(gName, "mcp:") {
-			sb.WriteString(fmt.Sprintf("**%s** group (call bare tool names directly — NOT `%s/<tool>`):\n", gName, gName))
+			sb.WriteString(fmt.Sprintf("**%s** group (invoke through `execute_tool` with the bare tool name — NOT `%s/<tool>`):\n", gName, gName))
 		} else {
-			sb.WriteString(fmt.Sprintf("**%s** group (call directly):\n", gName))
+			sb.WriteString(fmt.Sprintf("**%s** group (invoke through `execute_tool`):\n", gName))
 		}
 		for _, m := range g.tools {
 			sb.WriteString(fmt.Sprintf("  - `%s` — %s\n", m.ToolName, truncateDesc(m.Description, 120)))

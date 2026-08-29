@@ -1606,7 +1606,7 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			sortedGroups := agent.SortedGroups(toolGroups)
 			// Publish the complete lexical catalog immediately. Semantic vectors are
 			// refreshed in the background: a slow embedding provider must never make
-			// a Studio session wait before search_tools and prompt injection work.
+			// a Studio session wait before catalog search works.
 			toolIndex.PrimeTools(context.Background(), mainThreadTools, sortedGroups)
 			go func(idx *agent.ToolIndex, main []tool.Tool, groups []*agent.ToolGroup) {
 				if syncErr := idx.SyncTools(context.Background(), main, groups); syncErr != nil {
@@ -1640,30 +1640,26 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		}
 	}
 
-	// Create search_tools and add to main thread tools if tool index is available.
-	// The onResults callback uses a forward reference to chatAgent (set after
-	// ChatAgent creation) so that search_tools discoveries feed into the
-	// dynamic tool injection system.
-	var chatAgentRef *agent.ChatAgent
-	var searchToolsTool tool.Tool
+	// Add the fixed progressive bridge. Search is catalog-only; deferred tool
+	// execution remains behind describe_tools and execute_tool declarations.
 	if toolIndex != nil {
-		var stErr error
-		searchToolsTool, stErr = tools.NewSearchToolsTool(toolIndex, func(names []string) {
-			if chatAgentRef != nil {
-				chatAgentRef.RegisterSearchToolsResults(names)
-			}
-		})
+		searchToolsTool, stErr := tools.NewSearchToolsTool(toolIndex)
 		if stErr == nil {
 			mainThreadTools = append(mainThreadTools, searchToolsTool)
 		} else if cfg.DebugMode {
 			slog.Warn("failed to create search_tools", "error", stErr)
 		}
+		bridgeTools, bridgeErr := agent.NewProgressiveToolBridge(toolIndex)
+		if bridgeErr == nil {
+			mainThreadTools = append(mainThreadTools, bridgeTools...)
+		} else if cfg.DebugMode {
+			slog.Warn("failed to create progressive tool bridge", "error", bridgeErr)
+		}
 	}
 
 	// --- 6. Create ChatAgent ---
-	// Main thread gets essential tools (file ops, shell, search, memory,
-	// delegate). Additional tools are dynamically injected per-turn based
-	// on hybrid search relevance and search_tools discoveries.
+	// Main thread gets essential tools plus the fixed progressive bridge.
+	// Deferred tools remain catalog entries and execute through execute_tool.
 	//
 	// Code mode elevates MCP servers to first-class citizens: their sanitized
 	// toolsets ride along on the main thread as llmagent Toolsets, so the
@@ -1682,7 +1678,6 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		llm, mainThreadTools, mainThreadToolsets, sessionService,
 		promptBuilder, cfg.DebugMode, cfg.AutoApprove,
 	)
-	chatAgentRef = chatAgent // wire the forward reference for search_tools callback
 
 	// Code-mode authorization: gate not-whitelisted tools and out-of-project
 	// filesystem access behind per-tool / per-folder user authorization. Active
@@ -1922,13 +1917,12 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		if toolIndex != nil {
 			subAgentMgr.ToolIndex = toolIndex
 		}
-		// Provide a factory that creates child-scoped search_tools instances.
-		// Each sub-agent gets its own instance whose onResults callback feeds
-		// into the child's dynamic tool injection pipeline (not the parent's).
+		// Sub-agents retain their existing discovery behavior; the fixed bridge is
+		// specific to ChatAgent's stable model-visible declarations.
 		if toolIndex != nil {
-			idx := toolIndex // capture for closure
-			subAgentMgr.SearchToolsFactory = func(onResults func([]string)) (tool.Tool, error) {
-				return tools.NewSearchToolsTool(idx, onResults)
+			idx := toolIndex
+			subAgentMgr.SearchToolsFactory = func(_ func([]string)) (tool.Tool, error) {
+				return tools.NewSearchToolsTool(idx)
 			}
 		}
 		// Wire skill awareness into sub-agents so they can load skill

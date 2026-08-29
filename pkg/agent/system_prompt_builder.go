@@ -95,10 +95,8 @@ type PromptOverrides struct {
 	SessionContext string // Per-turn session context (fleet wizard, etc.)
 	SkillIndex     string // Per-request merged skill index (platform + org + team)
 
-	// PinnedToolGroups lists tool group names that should always be injected
-	// into the LLM request regardless of ToolIndex scoring. Used by wizard
-	// sessions to ensure critical tools (e.g., save_sandbox_template, save_fleet_plan)
-	// remain available across all turns of a multi-turn guided conversation.
+	// PinnedToolGroups lists tool groups required by wizard sessions. Deferred
+	// members remain available through the fixed progressive tool bridge.
 	PinnedToolGroups []string
 
 	// PlanMode, when true, enables a hard runtime gate for the turn: mutating
@@ -336,7 +334,7 @@ func (b *SystemPromptBuilder) Build() string {
 		sb.WriteString("**Do NOT use `delegate_tasks` as a fallback:**\n")
 		sb.WriteString("- Never delegate because a tool seemed missing, failed once, or \"isn't on the main thread\"\n")
 		sb.WriteString("- Sub-agents do **not** have extra tools the main thread cannot get — same catalog\n")
-		sb.WriteString("- If a tool is missing: `search_tools`, then call the bare tool name (e.g. `send_email`). Retry. Do not wrap one call in a sub-agent\n")
+		sb.WriteString("- If a tool is missing: use `search_tools`, inspect it with `describe_tools`, then invoke it through `execute_tool`. Do not wrap one call in a sub-agent\n")
 		sb.WriteString("- `delegate_tasks` is for **parallelism and context isolation**, not error recovery\n\n")
 
 		sb.WriteString("**Planning strategy:**\n")

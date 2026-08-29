@@ -2,169 +2,87 @@ package agent
 
 import (
 	"context"
+	"strings"
 	"testing"
 
-	"google.golang.org/adk/model"
+	"github.com/SAP/astonish/pkg/store"
 	"google.golang.org/adk/tool"
-	"google.golang.org/genai"
+	"google.golang.org/adk/tool/functiontool"
 )
 
-// TestPinnedRequestGroups_InjectsRequestScopedTools verifies that
-// DynamicToolInjectionCallback injects tools from request-scoped groups
-// (e.g., A2A tools) when those groups are listed in PinnedToolGroups,
-// even though they are NOT in the singleton ToolIndex.
-func TestPinnedRequestGroups_InjectsRequestScopedTools(t *testing.T) {
-	// Create an empty ToolIndex (no groups registered).
-	idx := newTestToolIndex(t, testEmbeddingFunc())
-
-	// Create a ChatAgent with the empty ToolIndex.
-	ca := &ChatAgent{
-		ToolIndex: idx,
-		DebugMode: true,
-	}
-
-	// Build a mock tool to place in the request-scoped "a2a" group.
-	a2aTools := mockTools("a2a_test_agent_find_devices")
-
-	// Set up request-scoped groups with the "a2a" group containing our mock tool.
-	ctx := context.Background()
-	ctx = WithRequestMCPGroups(ctx, map[string]*ToolGroup{
-		"a2a": {
-			Name:        "a2a",
-			Description: "Remote A2A agent skills",
-			Tools:       a2aTools,
-		},
+func TestProgressiveToolBridge_RequestScopedMCPAndFirstPartyPrecedence(t *testing.T) {
+	firstParty, err := functiontool.New(functiontool.Config{Name: "shared", Description: "first party"}, func(_ tool.Context, _ map[string]any) (map[string]any, error) {
+		return map[string]any{"source": "first-party"}, nil
 	})
-
-	// Set PinnedToolGroups to include "a2a" via PromptOverrides.
-	ctx = WithPromptOverrides(ctx, &PromptOverrides{
-		PinnedToolGroups: []string{"a2a"},
-	})
-
-	// Build the DynamicToolInjectionCallback.
-	cb := ca.DynamicToolInjectionCallback()
-
-	// Create a minimal LLMRequest.
-	req := &model.LLMRequest{
-		Tools:  make(map[string]any),
-		Config: &genai.GenerateContentConfig{},
-	}
-
-	// Create a minimal CallbackContext that wraps our context.
-	cbCtx := &minimalReadonlyContext{Context: ctx}
-
-	// Call the callback — this should inject the A2A tool on the first call.
-	resp, err := cb(cbCtx, req)
 	if err != nil {
-		t.Fatalf("DynamicToolInjectionCallback returned error: %v", err)
+		t.Fatal(err)
 	}
-	if resp != nil {
-		t.Fatalf("DynamicToolInjectionCallback returned non-nil response (should not short-circuit): %v", resp)
-	}
-
-	// Verify the tool was injected into req.Tools.
-	if _, ok := req.Tools["a2a_test_agent_find_devices"]; !ok {
-		t.Errorf("expected tool 'a2a_test_agent_find_devices' to be injected into req.Tools, got keys: %v", reqToolKeys(req.Tools))
-	}
-}
-
-// TestPinnedRequestGroups_FallsBackToToolIndex verifies that PinnedToolGroups
-// still works for groups that ARE in the ToolIndex (regression check).
-func TestPinnedRequestGroups_FallsBackToToolIndex(t *testing.T) {
-	// Create a ToolIndex with a group registered.
-	idx := syncTestToolIndex(t, &ToolGroup{
-		Name:  "test_group",
-		Tools: mockTools("indexed_tool"),
+	mcpTool, err := functiontool.New(functiontool.Config{Name: "shared", Description: "mcp"}, func(_ tool.Context, _ map[string]any) (map[string]any, error) {
+		return map[string]any{"source": "mcp"}, nil
 	})
-
-	ca := &ChatAgent{
-		ToolIndex: idx,
-		DebugMode: true,
-	}
-
-	// Pin "test_group" via PromptOverrides (no request-scoped groups).
-	ctx := context.Background()
-	ctx = WithPromptOverrides(ctx, &PromptOverrides{
-		PinnedToolGroups: []string{"test_group"},
-	})
-
-	cb := ca.DynamicToolInjectionCallback()
-
-	req := &model.LLMRequest{
-		Tools:  make(map[string]any),
-		Config: &genai.GenerateContentConfig{},
-	}
-
-	cbCtx := &minimalReadonlyContext{Context: ctx}
-
-	resp, err := cb(cbCtx, req)
 	if err != nil {
-		t.Fatalf("DynamicToolInjectionCallback returned error: %v", err)
+		t.Fatal(err)
 	}
-	if resp != nil {
-		t.Fatalf("DynamicToolInjectionCallback returned non-nil response: %v", resp)
-	}
-
-	// Verify the indexed tool was injected.
-	if _, ok := req.Tools["indexed_tool"]; !ok {
-		t.Errorf("expected tool 'indexed_tool' to be injected into req.Tools, got keys: %v", reqToolKeys(req.Tools))
-	}
-}
-
-// TestPinnedRequestGroups_NoDoubleInject verifies that when a group is in
-// BOTH the ToolIndex and request-scoped groups, tools are not double-injected.
-func TestPinnedRequestGroups_NoDoubleInject(t *testing.T) {
-	// Create a ToolIndex with the "a2a" group registered.
-	idx := syncTestToolIndex(t, &ToolGroup{
-		Name:  "a2a",
-		Tools: mockTools("a2a_tool_from_index"),
+	idx := syncTestToolIndex(t, &ToolGroup{Name: "core", Tools: []tool.Tool{firstParty}})
+	ctx := WithRequestMCPGroups(context.Background(), map[string]*ToolGroup{
+		"mcp:test": {Name: "mcp:test", Tools: []tool.Tool{mcpTool}},
 	})
-
-	ca := &ChatAgent{
-		ToolIndex: idx,
-		DebugMode: true,
-	}
-
-	// Also put a different tool in request-scoped "a2a" group.
-	ctx := context.Background()
-	ctx = WithRequestMCPGroups(ctx, map[string]*ToolGroup{
-		"a2a": {
-			Name:  "a2a",
-			Tools: []tool.Tool{mockTool{name: "a2a_tool_from_request"}},
-		},
-	})
-	ctx = WithPromptOverrides(ctx, &PromptOverrides{
-		PinnedToolGroups: []string{"a2a"},
-	})
-
-	cb := ca.DynamicToolInjectionCallback()
-
-	req := &model.LLMRequest{
-		Tools:  make(map[string]any),
-		Config: &genai.GenerateContentConfig{},
-	}
-	cbCtx := &minimalReadonlyContext{Context: ctx}
-
-	_, err := cb(cbCtx, req)
+	resolved, group, err := (deferredToolResolver{index: idx}).resolve(&minimalReadonlyContext{Context: ctx}, "shared")
 	if err != nil {
-		t.Fatalf("DynamicToolInjectionCallback returned error: %v", err)
+		t.Fatal(err)
 	}
-
-	// When ToolIndex has entries, request-scoped fallback should NOT fire
-	// (len(entries) != 0). Only the index tool should be injected.
-	if _, ok := req.Tools["a2a_tool_from_index"]; !ok {
-		t.Errorf("expected 'a2a_tool_from_index' from ToolIndex to be injected")
-	}
-	if _, ok := req.Tools["a2a_tool_from_request"]; ok {
-		t.Errorf("did NOT expect 'a2a_tool_from_request' from request-scoped group (ToolIndex took precedence)")
+	if resolved != firstParty || group != "core" {
+		t.Fatalf("resolved (%v, %q), want first-party core tool", resolved, group)
 	}
 }
 
-// reqToolKeys returns the keys from a map for error messages.
-func reqToolKeys(m map[string]any) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
+func TestProgressiveToolBridge_RequestScopedExecutionAndDisabledCheck(t *testing.T) {
+	mcpTool, err := functiontool.New(functiontool.Config{Name: "remote_action", Description: "remote"}, func(_ tool.Context, args map[string]any) (map[string]any, error) {
+		return map[string]any{"value": args["value"]}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	return keys
+	ctx := WithRequestMCPGroups(context.Background(), map[string]*ToolGroup{
+		"mcp:test": {Name: "mcp:test", Tools: []tool.Tool{mcpTool}},
+	})
+	bridge, err := NewProgressiveToolBridge(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := bridge[1].(runnableDeferredTool)
+	result, err := runner.Run(&contextToolContext{minimalReadonlyContext{Context: ctx}}, map[string]any{
+		"name": "remote_action", "arguments": map[string]any{"value": "ok"},
+	})
+	if err != nil || result["value"] != "ok" {
+		t.Fatalf("execute request MCP tool = %#v, %v", result, err)
+	}
+
+	disabledCtx := store.WithDisabledTools(ctx, []string{"remote_action"})
+	_, err = runner.Run(&contextToolContext{minimalReadonlyContext{Context: disabledCtx}}, map[string]any{
+		"name": "remote_action", "arguments": map[string]any{},
+	})
+	if err == nil || !strings.Contains(err.Error(), "disabled") {
+		t.Fatalf("disabled execute error = %v, want disabled error", err)
+	}
 }
+
+func TestProgressiveToolBridge_FixedDeclarations(t *testing.T) {
+	idx := syncTestToolIndex(t, &ToolGroup{Name: "browser", Tools: mockTools("browser_click")})
+	bridge, err := NewProgressiveToolBridge(idx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bridge) != 2 || bridge[0].Name() != "describe_tools" || bridge[1].Name() != "execute_tool" {
+		t.Fatalf("bridge declarations = %v, want [describe_tools execute_tool]", []string{bridge[0].Name(), bridge[1].Name()})
+	}
+	ca := &ChatAgent{ToolIndex: idx}
+	resolved, args := ca.effectiveToolCall(&contextToolContext{minimalReadonlyContext{Context: context.Background()}}, bridge[1], map[string]any{
+		"name": "browser_click", "arguments": map[string]any{"selector": "button"},
+	})
+	if resolved.Name() != "browser_click" || args["selector"] != "button" {
+		t.Fatalf("effective call = %q %#v", resolved.Name(), args)
+	}
+}
+
+type contextToolContext struct{ minimalReadonlyContext }

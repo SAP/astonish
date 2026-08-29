@@ -973,23 +973,23 @@ type stubToolContext struct {
 	context.Context
 }
 
-func (s stubToolContext) UserContent() *genai.Content                            { return nil }
-func (s stubToolContext) FunctionCallID() string                                 { return "" }
-func (s stubToolContext) Actions() *session.EventActions                         { return &session.EventActions{} }
+func (s stubToolContext) UserContent() *genai.Content    { return nil }
+func (s stubToolContext) FunctionCallID() string         { return "" }
+func (s stubToolContext) Actions() *session.EventActions { return &session.EventActions{} }
 func (s stubToolContext) SearchMemory(context.Context, string) (*memory.SearchResponse, error) {
 	return nil, nil
 }
 func (s stubToolContext) ToolConfirmation() *toolconfirmation.ToolConfirmation { return nil }
-func (s stubToolContext) RequestConfirmation(string, any) error                 { return nil }
-func (s stubToolContext) AgentName() string                                      { return "test" }
-func (s stubToolContext) ReadonlyState() session.ReadonlyState                   { return nil }
-func (s stubToolContext) State() session.State                                   { return nil }
-func (s stubToolContext) Artifacts() adkagent.Artifacts                          { return nil }
-func (s stubToolContext) InvocationID() string                                   { return "inv" }
-func (s stubToolContext) AppName() string                                        { return "app" }
-func (s stubToolContext) UserID() string                                         { return "user" }
-func (s stubToolContext) SessionID() string                                      { return "sess" }
-func (s stubToolContext) Branch() string                                         { return "" }
+func (s stubToolContext) RequestConfirmation(string, any) error                { return nil }
+func (s stubToolContext) AgentName() string                                    { return "test" }
+func (s stubToolContext) ReadonlyState() session.ReadonlyState                 { return nil }
+func (s stubToolContext) State() session.State                                 { return nil }
+func (s stubToolContext) Artifacts() adkagent.Artifacts                        { return nil }
+func (s stubToolContext) InvocationID() string                                 { return "inv" }
+func (s stubToolContext) AppName() string                                      { return "app" }
+func (s stubToolContext) UserID() string                                       { return "user" }
+func (s stubToolContext) SessionID() string                                    { return "sess" }
+func (s stubToolContext) Branch() string                                       { return "" }
 
 func TestIsToolNotFoundError(t *testing.T) {
 	tests := []struct {
@@ -1071,10 +1071,10 @@ func TestCanAutoInjectTool(t *testing.T) {
 
 func TestParseMCPToolRef(t *testing.T) {
 	tests := []struct {
-		in          string
-		wantGroup   string
-		wantTool    string
-		wantOK      bool
+		in        string
+		wantGroup string
+		wantTool  string
+		wantOK    bool
 	}{
 		{"send_email", "", "", false},
 		{"mcp:email", "mcp:email", "", true},
@@ -1088,153 +1088,6 @@ func TestParseMCPToolRef(t *testing.T) {
 			t.Errorf("parseMCPToolRef(%q) = (%q,%q,%v), want (%q,%q,%v)",
 				tt.in, g, tool, ok, tt.wantGroup, tt.wantTool, tt.wantOK)
 		}
-	}
-}
-
-func TestAutoInjectMissingToolCallback_Injectable(t *testing.T) {
-	idx := syncTestToolIndex(t, &ToolGroup{
-		Name:  "drill",
-		Tools: mockTools("run_drill"),
-	})
-
-	var registered []string
-	cb := autoInjectMissingToolCallback(idx, func(names []string) {
-		registered = append(registered, names...)
-	}, nil)
-
-	notFound := fmt.Errorf("tool 'run_drill' not found.\nAvailable tools: read_file")
-	result, err := cb(stubToolContext{Context: context.Background()}, mockTool{name: "run_drill"}, nil, notFound)
-	if err != nil {
-		t.Fatalf("callback error: %v", err)
-	}
-	if result == nil {
-		t.Fatal("expected non-nil result for injectable tool")
-	}
-	msg, _ := result["error"].(string)
-	if !strings.Contains(msg, "has been injected") {
-		t.Errorf("expected inject message, got: %s", msg)
-	}
-	if len(registered) != 1 || registered[0] != "run_drill" {
-		t.Errorf("registered = %v, want [run_drill]", registered)
-	}
-}
-
-func TestAutoInjectMissingToolCallback_Unknown(t *testing.T) {
-	idx := syncTestToolIndex(t, &ToolGroup{
-		Name:  "drill",
-		Tools: mockTools("run_drill"),
-	})
-
-	var registered []string
-	cb := autoInjectMissingToolCallback(idx, func(names []string) {
-		registered = append(registered, names...)
-	}, nil)
-
-	notFound := fmt.Errorf("tool 'hallucinated_tool' not found.\nAvailable tools: read_file")
-	result, err := cb(stubToolContext{Context: context.Background()}, mockTool{name: "hallucinated_tool"}, nil, notFound)
-	if err != nil {
-		t.Fatalf("callback error: %v", err)
-	}
-	if result != nil {
-		t.Errorf("expected nil result for unknown tool, got %v", result)
-	}
-	if len(registered) != 0 {
-		t.Errorf("registered = %v, want empty", registered)
-	}
-}
-
-func TestAutoInjectMissingToolCallback_Disabled(t *testing.T) {
-	idx := syncTestToolIndex(t, &ToolGroup{
-		Name:  "drill",
-		Tools: mockTools("run_drill"),
-	})
-
-	var registered []string
-	cb := autoInjectMissingToolCallback(idx, func(names []string) {
-		registered = append(registered, names...)
-	}, nil)
-
-	ctx := store.WithDisabledTools(context.Background(), []string{"run_drill"})
-	notFound := fmt.Errorf("tool 'run_drill' not found.\nAvailable tools: read_file")
-	result, err := cb(stubToolContext{Context: ctx}, mockTool{name: "run_drill"}, nil, notFound)
-	if err != nil {
-		t.Fatalf("callback error: %v", err)
-	}
-	if result != nil {
-		t.Errorf("expected nil result for disabled tool, got %v", result)
-	}
-	if len(registered) != 0 {
-		t.Errorf("registered = %v, want empty", registered)
-	}
-}
-
-func TestAutoInjectMissingToolCallback_Excluded(t *testing.T) {
-	idx := syncTestToolIndex(t, &ToolGroup{
-		Name:  "core",
-		Tools: mockTools("delegate_tasks"),
-	})
-
-	var registered []string
-	cb := autoInjectMissingToolCallback(idx, func(names []string) {
-		registered = append(registered, names...)
-	}, map[string]bool{"delegate_tasks": true})
-
-	notFound := fmt.Errorf("tool 'delegate_tasks' not found.\nAvailable tools: read_file")
-	result, err := cb(stubToolContext{Context: context.Background()}, mockTool{name: "delegate_tasks"}, nil, notFound)
-	if err != nil {
-		t.Fatalf("callback error: %v", err)
-	}
-	if result != nil {
-		t.Errorf("expected nil result for excluded tool, got %v", result)
-	}
-	if len(registered) != 0 {
-		t.Errorf("registered = %v, want empty", registered)
-	}
-}
-
-func TestAutoInjectMissingToolCallback_NonNotFoundError(t *testing.T) {
-	idx := syncTestToolIndex(t, &ToolGroup{
-		Name:  "drill",
-		Tools: mockTools("run_drill"),
-	})
-
-	var registered []string
-	cb := autoInjectMissingToolCallback(idx, func(names []string) {
-		registered = append(registered, names...)
-	}, nil)
-
-	result, err := cb(stubToolContext{Context: context.Background()}, mockTool{name: "run_drill"}, nil, fmt.Errorf("timeout"))
-	if err != nil {
-		t.Fatalf("callback error: %v", err)
-	}
-	if result != nil {
-		t.Errorf("expected nil for non-not-found error, got %v", result)
-	}
-	if len(registered) != 0 {
-		t.Errorf("registered = %v, want empty", registered)
-	}
-}
-
-func TestChatAgent_AutoInjectMissingToolCallback(t *testing.T) {
-	idx := syncTestToolIndex(t, &ToolGroup{
-		Name:  "drill",
-		Tools: mockTools("run_drill"),
-	})
-	ca := &ChatAgent{ToolIndex: idx}
-	cb := ca.AutoInjectMissingToolCallback()
-
-	notFound := fmt.Errorf("tool 'run_drill' not found.\nAvailable tools: read_file")
-	result, err := cb(stubToolContext{Context: context.Background()}, mockTool{name: "run_drill"}, nil, notFound)
-	if err != nil {
-		t.Fatalf("callback error: %v", err)
-	}
-	if result == nil {
-		t.Fatal("expected inject result")
-	}
-	ca.searchToolsMu.Lock()
-	defer ca.searchToolsMu.Unlock()
-	if len(ca.searchToolsResults) != 1 || ca.searchToolsResults[0] != "run_drill" {
-		t.Errorf("searchToolsResults = %v, want [run_drill]", ca.searchToolsResults)
 	}
 }
 

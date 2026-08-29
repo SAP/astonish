@@ -116,13 +116,13 @@ The `http_request` tool accepts an optional `credential` parameter (credential n
 
 ### Semantic Tool Discovery
 
-The `search_tools` tool and the `ToolIndex` provide dynamic tool discovery:
+The `search_tools` tool and `ToolIndex` provide catalog discovery with a fixed model-visible bridge:
 
-1. User's message triggers a hybrid search (vector + BM25) on tool names and descriptions.
-2. Matching tools are listed in the system prompt and dynamically injected into the LLM's available tools via `BeforeModelCallback`.
-3. The `search_tools` tool allows the LLM to explicitly search for tools mid-turn, expanding its toolset.
+1. User messages and explicit `search_tools` calls search tool names and descriptions without adding declarations.
+2. `describe_tools(names)` returns the selected tools' descriptions and input schemas.
+3. `execute_tool(name, arguments)` resolves and runs the deferred tool with first-party precedence and request-scoped MCP access/disabled checks.
 
-MCP tools follow this discovery model in Studio/platform mode. **Astonish Code is the exception:** because a coding session is personal and configures only a few MCP servers, their tools are injected directly onto the main thread (no `search_tools` step) — gated by `ChatFactoryConfig.CodeMode`. See [mcp.md](mcp.md#tool-surfacing-first-class-in-code-discoverable-in-platform).
+`execute_tool` is dispatched by ADK as a normal fixed tool. ChatAgent's existing BeforeTool/AfterTool callbacks unwrap the selected tool identity and arguments for mode/authorization gates, credential substitution, redaction, tracing, and artifact capture before the bridge invokes it. MCP tools follow this discovery model in Studio/platform mode. **Astonish Code is the exception:** because a coding session is personal and configures only a few MCP servers, their tools are injected directly onto the main thread (no `search_tools` step) — gated by `ChatFactoryConfig.CodeMode`. See [mcp.md](mcp.md#tool-surfacing-first-class-in-code-discoverable-in-platform).
 
 ## Key Files
 
@@ -145,7 +145,7 @@ MCP tools follow this discovery model in Studio/platform mode. **Astonish Code i
 
 - **Sandbox**: `WrapToolsWithNode()` transparently proxies container tools. `ProcessRequest()` eagerly warms containers.
 - **Credentials**: `resolve_credential` returns placeholders. `http_request` uses `Resolve()` for header injection. All tool outputs pass through the Redactor.
-- **Agent Engine**: Tools are registered via `llmagent.Config.Tools`. Dynamic tool injection adds tools per-turn. BeforeToolCallback/AfterToolCallback wrap every tool call.
+- **Agent Engine**: Direct core tools and the progressive bridge are registered via `llmagent.Config.Tools`. Model-visible declarations stay fixed. BeforeToolCallback/AfterToolCallback wrap direct and bridged calls.
 - **Memory**: `memory_save/search/get/delete` tools provide direct memory access. `memory_delete` deletes by exact ID and scope through tenant-scoped stores, using the same ownership/admin authorization as Studio memory management. Tool descriptions are indexed in the ToolIndex for semantic discovery.
 - **Browser**: Browser tools run in the host process and manage a shared go-rod session. With sandbox enabled they launch Chromium+KasmVNC inside the session container and connect over CDP; sandboxed drills refuse host Chrome.
 - **Drills**: The drill runner uses a composite executor that routes different tool categories to different backends.

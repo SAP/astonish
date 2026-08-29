@@ -1311,7 +1311,7 @@ func testToolIndex(t *testing.T) *agent.ToolIndex {
 
 func TestSearchTools_EmptyQuery(t *testing.T) {
 	idx := testToolIndex(t)
-	fn := SearchTools(idx, nil)
+	fn := SearchTools(idx)
 
 	_, err := fn(nil, SearchToolsArgs{Query: ""})
 	if err == nil {
@@ -1321,7 +1321,7 @@ func TestSearchTools_EmptyQuery(t *testing.T) {
 
 func TestSearchTools_ReturnsResults(t *testing.T) {
 	idx := testToolIndex(t)
-	fn := SearchTools(idx, nil)
+	fn := SearchTools(idx)
 
 	result, err := fn(nil, SearchToolsArgs{Query: "screenshot browser page", MaxResults: 5})
 	if err != nil {
@@ -1350,7 +1350,7 @@ func TestSearchTools_ReturnsResults(t *testing.T) {
 
 func TestSearchTools_AccessField(t *testing.T) {
 	idx := testToolIndex(t)
-	fn := SearchTools(idx, nil)
+	fn := SearchTools(idx)
 
 	result, err := fn(nil, SearchToolsArgs{Query: "file read write", MaxResults: 10})
 	if err != nil {
@@ -1380,7 +1380,7 @@ func TestSearchTools_NoResults(t *testing.T) {
 		t.Fatalf("NewToolIndex: %v", err)
 	}
 
-	fn := SearchTools(idx, nil)
+	fn := SearchTools(idx)
 	result, err := fn(nil, SearchToolsArgs{Query: "anything"})
 	if err != nil {
 		t.Fatalf("SearchTools: %v", err)
@@ -1395,7 +1395,7 @@ func TestSearchTools_NoResults(t *testing.T) {
 
 func TestNewSearchToolsTool(t *testing.T) {
 	idx := testToolIndex(t)
-	st, err := NewSearchToolsTool(idx, nil)
+	st, err := NewSearchToolsTool(idx)
 	if err != nil {
 		t.Fatalf("NewSearchToolsTool: %v", err)
 	}
@@ -1406,7 +1406,7 @@ func TestNewSearchToolsTool(t *testing.T) {
 
 func TestSearchTools_ListAll(t *testing.T) {
 	idx := testToolIndex(t)
-	fn := SearchTools(idx, nil)
+	fn := SearchTools(idx)
 
 	result, err := fn(nil, SearchToolsArgs{Query: "*"})
 	if err != nil {
@@ -1442,7 +1442,7 @@ func TestSearchTools_ListAll(t *testing.T) {
 
 func TestSearchTools_ListAllVariants(t *testing.T) {
 	idx := testToolIndex(t)
-	fn := SearchTools(idx, nil)
+	fn := SearchTools(idx)
 
 	queries := []string{"*", "list all", "list all tools", "all", "all tools"}
 	for _, q := range queries {

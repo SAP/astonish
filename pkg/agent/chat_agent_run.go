@@ -190,10 +190,9 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		// The event is still written to the session .jsonl file for diagnostics.
 		yieldKnowledgeTrackingEvent(yield, knowledgeTrackingQuery, knowledgeTrackingBM25Query, relevantKnowledge, "", knowledgeTrackingResults)
 
-		// Auto-retrieve relevant tools from the tool index.
-		// Matches drive two things: (1) prompt text listing relevant tools,
-		// (2) dynamic injection of concrete tool instances into the LLM request
-		// via DynamicToolInjectionCallback so the LLM can call them directly.
+		// Auto-retrieve relevant catalog entries from the tool index.
+		// Matches are prompt hints only; the model-visible declarations stay fixed
+		// and deferred tools execute through execute_tool.
 		var relevantTools string
 		var toolMatches []ToolMatch
 		var toolSearchQuery string
@@ -224,10 +223,8 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 				}
 			}
 			// When the user names an MCP server (e.g. "use the mcp server email"),
-			// force-inject that group's tools even if hybrid search scored poorly.
-			// Prefer request-scoped MCP groups (this team's catalog), then index.
-			// This keeps single MCP actions on the main thread instead of
-			// falling through to delegate_tasks.
+			// include that group's tools in the catalog hints even if hybrid search
+			// scored poorly. Prefer request-scoped MCP groups, then the index.
 			if mcpHits := MatchRequestMCPGroupsFromQuery(ctx, userText); len(mcpHits) > 0 {
 				mcpHits = FilterAccessibleToolMatches(ctx, mcpHits)
 				toolMatches = MergeToolMatches(toolMatches, mcpHits)
@@ -244,13 +241,6 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			}
 		}
 		yieldToolTrackingEvent(yield, toolSearchQuery, relevantTools, toolMatches)
-
-		// Store per-turn tool matches for the DynamicToolInjectionCallback
-		// and reset any search_tools discoveries from the previous turn.
-		c.dynamicToolMatches = toolMatches
-		c.searchToolsMu.Lock()
-		c.searchToolsResults = nil
-		c.searchToolsMu.Unlock()
 
 		// Clone the SystemPromptBuilder for this request to avoid races with
 		// concurrent callers (scheduler jobs, channel messages, Studio chat).
@@ -347,6 +337,7 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 
 		// Create the AfterToolCallback for trace recording
 		afterToolCallback := func(ctx tool.Context, t tool.Tool, input, output map[string]any, err error) (map[string]any, error) {
+			t, input = c.effectiveToolCall(ctx, t, input)
 			// Restore credential + pending-secret placeholders for this
 			// specific tool call, ensuring the session event retains
 			// {{CREDENTIAL:...}} / <<<SECRET_N>>> tokens instead of real values.
@@ -487,6 +478,7 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		{
 			agentResolver := c.CredentialStore // may be nil if file-based store failed
 			beforeToolCallbacks = append(beforeToolCallbacks, func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+				t, args = c.effectiveToolCall(ctx, t, args)
 				// In platform mode, prefer the tenant-scoped PG credential store
 				// injected into the context by chat_handlers.go. Fall back to the
 				// agent-level file-based store for personal mode.
@@ -546,6 +538,7 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		if c.PendingSecrets != nil {
 			vault := c.PendingSecrets
 			beforeToolCallbacks = append(beforeToolCallbacks, func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+				_, args = c.effectiveToolCall(ctx, t, args)
 				secRestore := vault.SubstituteAndRestore(args)
 				callID := ctx.FunctionCallID()
 				if prev, loaded := restoreFuncs.Load(callID); loaded {
@@ -561,6 +554,7 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		// Hard-block validate_drill / save_drill / blueprint_to_tutorial_drill for
 		// mode:tutorial until the creator Approves a present_tutorial_blueprint card.
 		beforeToolCallbacks = append(beforeToolCallbacks, func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+			t, args = c.effectiveToolCall(ctx, t, args)
 			blocked, result := CheckTutorialDrillToolGate(
 				t.Name(), args, c.HasTutorialBlueprintApproved(sessionID),
 			)
@@ -580,6 +574,7 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		// the phased gate below replaces the plan-mode gate.
 		if planMode && !graphPlan {
 			beforeToolCallbacks = append(beforeToolCallbacks, func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+				t, args = c.effectiveToolCall(ctx, t, args)
 				name := t.Name()
 				if name == "delegate_tasks" || !IsToolSafe(name) {
 					return map[string]any{
@@ -601,7 +596,8 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		// This is a NO-CHANGES mode in every phase.
 		if graphPlan {
 			gpState := c.GetOrCreateGraphPlanState(sessionID)
-			beforeToolCallbacks = append(beforeToolCallbacks, func(_ tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+			beforeToolCallbacks = append(beforeToolCallbacks, func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+				t, args = c.effectiveToolCall(ctx, t, args)
 				name := t.Name()
 				// Transition tools + progress updates are always allowed.
 				// announce_plan is phase-gated (PLAN phase only).
@@ -625,7 +621,8 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		// produce plans or bypass the gate via sub-agents). This is a pure
 		// research/Q&A mode — no changes, no plans, no execution.
 		if askMode && !planMode && !graphPlan {
-			beforeToolCallbacks = append(beforeToolCallbacks, func(_ tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+			beforeToolCallbacks = append(beforeToolCallbacks, func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+				t, args = c.effectiveToolCall(ctx, t, args)
 				name := t.Name()
 				if name == "delegate_tasks" || name == "announce_plan" || !IsToolSafe(name) {
 					return map[string]any{
@@ -640,7 +637,8 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		// announce_plan exists only in Plan / Graph-Optimized Plan mode.
 		// Hide it from the model in Normal/Ask and refuse it if it is still called.
 		if !planMode && !graphPlan {
-			beforeToolCallbacks = append(beforeToolCallbacks, func(_ tool.Context, t tool.Tool, _ map[string]any) (map[string]any, error) {
+			beforeToolCallbacks = append(beforeToolCallbacks, func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+				t, _ = c.effectiveToolCall(ctx, t, args)
 				if t.Name() == "announce_plan" {
 					return map[string]any{
 						"status": "blocked_announce_plan_not_in_plan_mode",
@@ -657,7 +655,8 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		if approvedPlanExecution {
 			var executionResearchMu sync.Mutex
 			executionResearch := map[string]int{}
-			beforeToolCallbacks = append(beforeToolCallbacks, func(_ tool.Context, t tool.Tool, _ map[string]any) (map[string]any, error) {
+			beforeToolCallbacks = append(beforeToolCallbacks, func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+				t, _ = c.effectiveToolCall(ctx, t, args)
 				name := t.Name()
 				if approvedPlanExecutionToolBlocked(name) {
 					return map[string]any{
@@ -751,7 +750,8 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			// Folder-access gate (checked first: an out-of-scope path is a
 			// stronger constraint than tool category). Active in both Normal
 			// and Ask mode — read-only tools can still target sensitive paths.
-			beforeToolCallbacks = append(beforeToolCallbacks, func(_ tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+			beforeToolCallbacks = append(beforeToolCallbacks, func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+				t, args = c.effectiveToolCall(ctx, t, args)
 				if authPolicy.Pending() != nil {
 					return map[string]any{
 						"status": "pending_authorization",
@@ -776,7 +776,8 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			// Skipped in Ask mode: non-safe tools are already refused by the
 			// ask-mode hard gate above, making this prompt redundant.
 			if !askMode {
-				beforeToolCallbacks = append(beforeToolCallbacks, func(_ tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+				beforeToolCallbacks = append(beforeToolCallbacks, func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+					t, args = c.effectiveToolCall(ctx, t, args)
 					name := t.Name()
 					if !RequiresToolAuthorization(name, false) {
 						return nil, nil
@@ -805,6 +806,7 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		// (task_start / task_complete) via name-based matching in the
 		// SubTaskProgress handler — NOT by positional advancement here.
 		beforeToolCallbacks = append(beforeToolCallbacks, func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+			t, args = c.effectiveToolCall(ctx, t, args)
 			c.activePlanMu.Lock()
 			plan := c.activePlan
 			c.activePlanMu.Unlock()
@@ -848,14 +850,7 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			})
 		}
 
-		// Dynamically inject relevant tools into each LLM request.
-		// Fires on every LLM API call (including after tool results), adding
-		// tools from hybrid search matches and search_tools discoveries.
-		beforeModelCallbacks = append(beforeModelCallbacks, c.DynamicToolInjectionCallback())
-
-		// announce_plan is Plan-mode only. Strip it after dynamic injection so
-		// the model cannot see or call it in Normal/Ask, even if search_tools
-		// rediscovers it.
+		// announce_plan is Plan-mode only. Strip it from Normal/Ask requests.
 		if !planMode && !graphPlan {
 			beforeModelCallbacks = append(beforeModelCallbacks, func(_ agent.CallbackContext, req *model.LLMRequest) (*model.LLMResponse, error) {
 				if req != nil {
@@ -901,12 +896,6 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			AfterToolCallbacks: []llmagent.AfterToolCallback{
 				afterToolCallback,
 			},
-			// Auto-inject ToolIndex-known tools that the LLM called before they
-			// were loaded this turn (ADK 1.5 surfaces these as FunctionResponse
-			// errors; the next LLM round gets the tool via dynamic injection).
-			OnToolErrorCallbacks: []llmagent.OnToolErrorCallback{
-				c.AutoInjectMissingToolCallback(),
-			},
 		})
 		if err != nil {
 			yield(nil, fmt.Errorf("failed to create chat llmagent: %w", err))
@@ -914,9 +903,7 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		}
 
 		// Run the llmagent with retry for transient errors (429, 502, 503, etc.)
-		// Also handles legacy unknown-tool hard aborts (pre-ADK-1.5). Under ADK 1.5,
-		// missing tools are FunctionResponses handled by OnToolErrorCallbacks
-		// (AutoInjectMissingToolCallback); this branch is a safety net only.
+		// Also handles legacy unknown-tool hard aborts for transcript compatibility.
 		const maxRetries = 3
 		const maxUnknownToolRetries = 2 // separate cap for tool name hallucinations
 		lastToolCallSeen := false

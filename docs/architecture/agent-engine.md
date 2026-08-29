@@ -40,8 +40,8 @@ ADK processes tool calls sequentially within a single invocation (a for-loop, no
 
 Most agent frameworks require all tools to be declared upfront. With 60+ built-in tools plus MCP tools, this wastes context window tokens listing tools the user doesn't need. Instead, Astonish uses a two-layer approach:
 
-- **Static tools**: A small core set (file ops, shell, memory) always available.
-- **Dynamic injection**: Before each LLM call, a `BeforeModelCallback` adds tool declarations based on semantic search matches and explicit `search_tools` calls. The LLM sees only relevant tools.
+- **Static tools**: A small core set (file ops, shell, memory) remains directly available.
+- **Fixed progressive bridge**: `search_tools` searches only the catalog, `describe_tools` returns selected schemas, and `execute_tool` invokes deferred tools. The model-visible declaration set does not grow during a turn.
 
 ## Architecture
 
@@ -65,7 +65,7 @@ User Message
     v
 3. Tool Discovery: Hybrid search on ToolIndex
    - Vector similarity + BM25 keyword matching (RRF fusion)
-   - Top 8 matches formatted for prompt + stored for dynamic injection
+   - Top 8 matches formatted as catalog hints; declarations remain fixed
     |
     v
 4. System Prompt Build: SystemPromptBuilder.Build()
@@ -75,13 +75,13 @@ User Message
 5. LLM Agent Creation: llmagent.New() with callbacks
    - BeforeToolCallbacks: credential substitution, secret token resolution
    - AfterToolCallbacks: credential restoration, redaction, trace recording, image stripping
-   - BeforeModelCallbacks: tool response truncation, dynamic tool injection, context compaction
+   - BeforeModelCallbacks: tool response truncation and context compaction
     |
     v
 6. Execution Loop (with retry):
    - llmAgent.Run() produces streaming events
    - Retryable errors (429, 502, 503) -> exponential backoff, retry up to 3x
-   - Tool-not-found (ADK 1.5 FunctionResponse): if the name exists in ToolIndex, OnToolErrorCallbacks auto-injects it for the next LLM round and asks the model to retry; truly unknown names keep ADK's default error
+   - Deferred tools are called through `execute_tool`; unknown direct names keep ADK's default error
    - Tool call count cap (default 25) -> pause and ask user to continue
    - Approval pause -> yield event and return, resume on next user message
     |
@@ -151,18 +151,11 @@ AfterToolCallback:
 
 The critical invariant: the session event (which shares the same args map by reference due to an ADK design choice) always retains placeholder tokens, never real secrets.
 
-### Dynamic Tool Injection
+### Fixed Progressive Tool Bridge
 
-The `DynamicToolInjectionCallback` is a `BeforeModelCallback` that fires on every LLM API call (including after tool results):
+ChatAgent exposes a stable set of declarations for the whole turn. `search_tools` is catalog-only and never mutates the request. The model can call `describe_tools(names)` to retrieve deferred schemas, then `execute_tool(name, arguments)` to invoke one. Resolution prefers first-party ToolIndex entries over request-scoped MCP tools, and enforces disabled-tool and MCP access checks.
 
-1. Collects tool matches from the per-turn hybrid search (set during knowledge retrieval).
-2. Collects tool names from any `search_tools` calls made within the current turn.
-3. For each match, resolves the concrete `tool.Tool` implementation from the `ToolIndex` registry.
-4. Adds these tools to the `LLMRequest.Tools` array so the LLM can call them.
-
-This means the LLM's available toolset can grow mid-turn as `search_tools` discovers additional tools.
-
-**Auto-inject on miss:** Under ADK 1.5, calling a tool that is not in the current step's `req.Tools` yields a FunctionResponse error (`tool 'X' not found`), not a hard `Run` abort. ChatAgent (and sub-agents) register an `OnToolErrorCallback` that looks the name up in `ToolIndex`. If the tool exists and is allowed (MCP access + not team-disabled), it is registered via the same path as `search_tools` results so the next LLM round of the same turn can call it. The callback does **not** execute the tool in place — that would skip BeforeTool/AfterTool (credentials, redaction, tracing). The legacy `isUnknownToolError` hard-error retry path targets pre-1.5 ADK (`unknown tool:`) and is retained only as a safety net.
+ADK dispatches `execute_tool` through the normal callback chain. ChatAgent unwraps the selected tool identity and nested arguments inside every BeforeTool callback and the AfterTool callback, preserving mode and authorization gates, credential and pending-secret substitution/restoration, output redaction, execution tracing, image handling, and artifact capture. The bridge body only invokes the already-authorized resolved tool. Legacy unknown-tool hard-error handling remains for old transcript/runtime compatibility, but ChatAgent no longer auto-injects missing declarations. Sub-agents retain their child-scoped discovery implementation.
 
 ### Sub-Agent System
 

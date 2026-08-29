@@ -117,9 +117,9 @@ very differently between a personal coding session and a multi-tenant platform.
 - **Studio / Platform** — MCP tools stay **discoverable**, not injected. Each
   server is registered only as an `mcp:<server>` tool group, surfaced as a
   one-line catalog entry ("high definition") in the Task Delegation section of
-  the system prompt. The model reaches the actual tools via `search_tools`
-  (which loads them on demand through the `ToolIndex`) or by delegating to a
-  sub-agent with the `mcp:<server>` group. This keeps the prompt small even when
+  the system prompt. The model finds tools via catalog-only `search_tools`,
+  inspects schemas with `describe_tools`, and invokes them through the fixed
+  `execute_tool` bridge, or delegates to a sub-agent with the `mcp:<server>` group. This keeps the prompt small even when
   an org/team exposes thousands of tools.
 
 The switch is a single flag: `ChatFactoryConfig.CodeMode` (set only by

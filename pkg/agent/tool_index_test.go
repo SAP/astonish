@@ -442,8 +442,8 @@ func TestFormatToolMatchesForPrompt(t *testing.T) {
 	if !contains(result, "web") {
 		t.Error("result should contain 'web' group")
 	}
-	if !contains(result, "call directly") {
-		t.Error("result should contain 'call directly' for injected tools")
+	if !contains(result, "execute_tool") {
+		t.Error("result should direct deferred tools through execute_tool")
 	}
 	if !contains(result, "Main thread") {
 		t.Error("result should contain main thread section")

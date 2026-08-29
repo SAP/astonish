@@ -89,6 +89,33 @@ describe('SlidesDeckView refresh signal', () => {
     expect(screen.queryAllByTestId('slides-tile')).toHaveLength(0)
   })
 
+  it('navigates with arrow keys when a thumbnail is focused', async () => {
+    vi.mocked(slidesApi.fetchSlidesDeck).mockResolvedValue(deckWith(3))
+    render(<SlidesDeckView deckSlug="d" refreshSignal={0} />)
+    const tiles = await screen.findAllByTestId('slides-tile')
+    const frame = screen.getByTestId('slides-deck-frame') as HTMLIFrameElement
+    const postMessage = vi.fn()
+    Object.defineProperty(frame, 'contentWindow', { value: { postMessage }, configurable: true })
+
+    tiles[0].focus()
+    fireEvent.keyDown(tiles[0], { key: 'ArrowRight' })
+
+    await waitFor(() => {
+      expect(tiles[1]).toHaveAttribute('aria-current', 'true')
+    })
+    expect(postMessage).toHaveBeenCalledWith({ type: 'ast-nav', index: 1 }, '*')
+
+    fireEvent.keyDown(tiles[1], { key: 'ArrowRight' })
+    await waitFor(() => {
+      expect(tiles[2]).toHaveAttribute('aria-current', 'true')
+    })
+
+    fireEvent.keyDown(tiles[2], { key: 'ArrowLeft' })
+    await waitFor(() => {
+      expect(tiles[1]).toHaveAttribute('aria-current', 'true')
+    })
+  })
+
   it('navigates via postMessage on thumbnail click without reloading the iframe', async () => {
     vi.mocked(slidesApi.fetchSlidesDeck).mockResolvedValue(deckWith(3))
     render(<SlidesDeckView deckSlug="d" refreshSignal={0} />)

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { Download, ExternalLink, Loader2, Maximize2, Save, TriangleAlert, X } from 'lucide-react'
 
 import {
@@ -49,6 +49,7 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
   const mountedRef = useRef(true)
   const iframeRef = useRef<HTMLIFrameElement | null>(null)
   const fsIframeRef = useRef<HTMLIFrameElement | null>(null)
+  const stripRef = useRef<HTMLDivElement | null>(null)
   // Tracks the deck/scope this component last loaded, so a pure refreshSignal
   // bump (same deck gaining slides) re-fetches WITHOUT yanking the user off
   // whatever slide they're viewing — we only reset slideIndex when the deck or
@@ -121,6 +122,41 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
   const onPresentLoad = useCallback(() => {
     if (total > 0) postNav(boundedIndex)
   }, [total, boundedIndex, postNav])
+
+  const focusStripTile = useCallback((index: number) => {
+    const tiles = stripRef.current?.querySelectorAll<HTMLButtonElement>('[data-testid="slides-tile"]')
+    const tile = tiles?.[index]
+    if (!tile) return
+    tile.focus()
+    tile.scrollIntoView({ inline: 'nearest', block: 'nearest' })
+  }, [])
+
+  const onStripTileKeyDown = useCallback((event: ReactKeyboardEvent<HTMLButtonElement>, index: number) => {
+    if (total <= 0) return
+    let next = index
+    switch (event.key) {
+      case 'ArrowRight':
+      case 'ArrowDown':
+        next = Math.min(total - 1, index + 1)
+        break
+      case 'ArrowLeft':
+      case 'ArrowUp':
+        next = Math.max(0, index - 1)
+        break
+      case 'Home':
+        next = 0
+        break
+      case 'End':
+        next = total - 1
+        break
+      default:
+        return
+    }
+    event.preventDefault()
+    if (next === index) return
+    setSlideIndex(next)
+    requestAnimationFrame(() => focusStripTile(next))
+  }, [total, focusStripTile])
 
   const present = useCallback(() => {
     window.open(slidesPresentationURL(deckSlug, scope), '_blank', 'noopener,noreferrer')
@@ -357,6 +393,7 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
           is clipped in an inner layer so the ring on the button is not. */}
       {total > 0 && (
         <div
+          ref={stripRef}
           className="relative z-10 flex shrink-0 gap-2 overflow-x-auto px-1 pt-1.5 pb-1.5"
           role="tablist"
           aria-label="Slides"
@@ -366,11 +403,13 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
               key={slide.id}
               type="button"
               role="tab"
+              tabIndex={index === boundedIndex ? 0 : -1}
               aria-selected={index === boundedIndex}
               aria-current={index === boundedIndex ? 'true' : undefined}
               aria-label={`Slide ${index + 1}${slide.title ? `: ${slide.title}` : ''}`}
               data-testid="slides-tile"
               onClick={() => setSlideIndex(index)}
+              onKeyDown={event => onStripTileKeyDown(event, index)}
               className={cn(
                 'relative h-14 w-24 shrink-0 rounded-md border text-left transition-colors',
                 index === boundedIndex

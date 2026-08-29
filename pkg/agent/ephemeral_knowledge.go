@@ -46,7 +46,7 @@ func buildTurnContextContent(overrides *PromptOverrides, relevantTools, relevant
 		add("Runtime Mode", strings.Join(modes, "\n"))
 	}
 	if relevantTools != "" {
-		add("Relevant Tools For This Request", "These tools are available for this request — call them directly. Use `search_tools` if you need additional tools not listed here.\n\n"+relevantTools)
+		add("Relevant Tools For This Request", "These catalog tools may be useful. Call `describe_tools` for their schemas, then invoke them through `execute_tool`. Use `search_tools` if you need additional tools.\n\n"+relevantTools)
 	}
 	if relevantKnowledge != "" {
 		add("Knowledge For This Task", "CRITICAL — You MUST apply the following knowledge when executing this task. It contains proven commands, specific flags, and workarounds that are KNOWN TO WORK from previous sessions. Use the exact commands and approaches described here.\n\n"+relevantKnowledge)

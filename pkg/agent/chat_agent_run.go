@@ -642,7 +642,7 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		// Hide it from the model in Normal/Ask and refuse it if it is still called.
 		if !planMode && !graphPlan {
 			beforeToolCallbacks = append(beforeToolCallbacks, func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
-				t, args = c.effectiveToolCall(ctx, t, args)
+				t, _ = c.effectiveToolCall(ctx, t, args)
 				if t.Name() == "announce_plan" {
 					return map[string]any{
 						"status": "blocked_announce_plan_not_in_plan_mode",
@@ -660,7 +660,7 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			var executionResearchMu sync.Mutex
 			executionResearch := map[string]int{}
 			beforeToolCallbacks = append(beforeToolCallbacks, func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
-				t, args = c.effectiveToolCall(ctx, t, args)
+				t, _ = c.effectiveToolCall(ctx, t, args)
 				name := t.Name()
 				if approvedPlanExecutionToolBlocked(name) {
 					return map[string]any{
@@ -810,7 +810,7 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		// (task_start / task_complete) via name-based matching in the
 		// SubTaskProgress handler — NOT by positional advancement here.
 		beforeToolCallbacks = append(beforeToolCallbacks, func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
-			t, args = c.effectiveToolCall(ctx, t, args)
+			t, _ = c.effectiveToolCall(ctx, t, args)
 			c.activePlanMu.Lock()
 			plan := c.activePlan
 			c.activePlanMu.Unlock()

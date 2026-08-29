@@ -370,6 +370,90 @@ func TestListSlidesTemplatesOmitsAssetsAndFlagsScope(t *testing.T) {
 	}
 }
 
+func TestListSlidesTemplatesIncludesCover(t *testing.T) {
+	personal := newMemDocsStore()
+	baked := themes.Template{
+		Schema: 2,
+		Name:   "brand",
+		Label:  "Brand",
+		Tokens: map[string]string{"surface": "#FFFFFF", "ink": "#111111", "accent": "#2563eb"},
+		Archetypes: []themes.Archetype{
+			{Kind: "title", Title: "Blue cover", Markup: `<ast-slide id="t"></ast-slide>`, ThumbnailRef: "thumb/title"},
+			{Kind: "content", Title: "Body", Markup: `<ast-slide id="c"></ast-slide>`},
+		},
+	}
+	if err := (slides.Service{Store: personal}).SaveTemplate(context.Background(), baked); err != nil {
+		t.Fatalf("seed baked template: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/docs/slides/templates?scope=personal", nil)
+	req = withDocsServices(req, personal, newMemDocsStore())
+	rec := httptest.NewRecorder()
+	ListSlidesTemplatesHandler(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Templates []struct {
+			Name  string `json:"name"`
+			Cover *struct {
+				Kind         string `json:"kind"`
+				ThumbnailRef string `json:"thumbnailRef"`
+				Markup       string `json:"markup"`
+			} `json:"cover"`
+		} `json:"templates"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+
+	var sawBuiltin, sawBaked bool
+	for _, tmpl := range resp.Templates {
+		switch tmpl.Name {
+		case "midnight":
+			sawBuiltin = true
+			if tmpl.Cover == nil || tmpl.Cover.Kind != "title" {
+				t.Fatalf("midnight cover = %+v, want kind=title", tmpl.Cover)
+			}
+			if tmpl.Cover.ThumbnailRef != "" {
+				t.Fatalf("built-in cover must not ship a thumbnailRef, got %q", tmpl.Cover.ThumbnailRef)
+			}
+			if !strings.Contains(tmpl.Cover.Markup, "<ast-slide") {
+				t.Fatalf("built-in cover must ship live markup, got %q", tmpl.Cover.Markup)
+			}
+		case "brand":
+			sawBaked = true
+			if tmpl.Cover == nil || tmpl.Cover.Kind != "title" || tmpl.Cover.ThumbnailRef != "thumb/title" {
+				t.Fatalf("brand cover = %+v, want kind=title thumbnailRef=thumb/title", tmpl.Cover)
+			}
+			if tmpl.Cover.Markup != "" {
+				t.Fatalf("baked cover must omit markup, got %q", tmpl.Cover.Markup)
+			}
+		}
+	}
+	if !sawBuiltin || !sawBaked {
+		t.Fatalf("expected midnight + brand covers; got %+v", resp.Templates)
+	}
+}
+
+func TestTemplateCoverDTOPrefersTitleVariant(t *testing.T) {
+	tmpl := themes.Template{
+		Archetypes: []themes.Archetype{
+			{Kind: "section", Markup: "section"},
+			{Kind: "title-2", Markup: "cover-2", ThumbnailRef: "thumb/title-2"},
+			{Kind: "title", Markup: "cover"},
+		},
+	}
+	cover := templateCoverDTO(tmpl)
+	if cover == nil || cover.Kind != "title-2" || cover.ThumbnailRef != "thumb/title-2" {
+		t.Fatalf("cover = %+v, want first title* (title-2) with thumbnailRef", cover)
+	}
+	if cover.Markup != "" {
+		t.Fatalf("markup must be omitted when thumbnailRef is set, got %q", cover.Markup)
+	}
+}
+
 func deleteTemplateRequest(t *testing.T, personal store.DocsStore, name string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodDelete, "/api/docs/slides/templates/"+name+"?scope=personal", nil)

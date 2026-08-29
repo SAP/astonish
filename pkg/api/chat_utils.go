@@ -1433,6 +1433,9 @@ func tryParseDistillMessage(text string) *StudioMessage {
 // the frontend card, on click, sends the chosen option label (for select) or
 // "Yes"/"No" (for yesno) as a normal user message via the existing connectChat
 // path, so the model reads the answer naturally and history stays readable.
+// Studio then unmounts the picker and keeps the prompt as the left-hand agent
+// bubble; a following user message on reload means the question is already
+// answered, so the selectable card must not remount.
 
 const chatQuestionPrefix = "[chat_question]"
 

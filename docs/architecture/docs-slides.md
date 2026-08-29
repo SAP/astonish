@@ -79,9 +79,9 @@ Importing a corporate `.pptx` produces a high-fidelity ASD template: theme token
 
 ### Studio Templates management surface
 
-A deep-linkable Studio area at `/slides/templates` lists both **built-in** and **scoped** (user-imported) templates. Each entry carries a **scope badge** (Built-in / Personal / Team). The surface supports **delete**, **duplicate**, and **recolor** for scoped templates, while built-ins are **read-only** (duplicate only) — deleting or recoloring a built-in returns `403`.
+A deep-linkable Studio area at `/slides/templates` lists both **built-in** and **scoped** (user-imported) templates. Each card is the **template name** plus a **cover thumbnail** (same pick and render path as the chat `slidesTemplatePicker`), with a **scope badge** (Built-in / Personal / Team). It does not list every layout as chips or a 3-dot palette swatch. The surface supports **delete**, **duplicate**, and **recolor** for scoped templates, while built-ins are **read-only** (duplicate only) — deleting or recoloring a built-in returns `403`.
 
-Note that the templates **list** endpoint (`GET /api/docs/slides/templates`) returns a lightweight DTO that intentionally omits heavy assets (for performance and security).
+Note that the templates **list** endpoint (`GET /api/docs/slides/templates`) returns a lightweight DTO that intentionally omits the assets map. It includes a `cover` object (`kind`, plus `thumbnailRef` or live `markup`) so the library card can render without downloading every layout.
 
 ### Why not arbitrary HTML as the canonical format?
 
@@ -969,12 +969,17 @@ guards and the export CSP runtime-hash test are unchanged (no runtime change).
   guide; `templateModel` banks the lossless IR.
   `SaveTemplate` marshals `Template.Model` into the column; `ListTemplates`
   unmarshals it back, so the IR round-trips.
-- Archetype **variants** surface to the agent and Studio: `list_slide_templates`
-  returns `archetypeVariants[]` (`{kind,label}`); the Templates UI renders each as
-  a friendly label chip showing the real PowerPoint layout name. The human label is
-  persisted in `SlideContent.Notes` (kind stays in `SlideContent.Title`) — backward
-  compatible. Multiple same-role layout variants (several `title` covers, several
-  `section` dividers) each get their own chip by label.
+- Archetype **variants** surface to the agent: `list_slide_templates`
+  returns `archetypeVariants[]` (`{kind,label}`) so intake can count title/closing
+  options. The human label is persisted in `SlideContent.Notes` (kind stays in
+  `SlideContent.Title`) — backward compatible. The Studio **Templates library**
+  does **not** list those variants as chips (imported catalogs can have dozens of
+  layouts, and palettes make a 3-dot swatch misleading). Each card is the
+  template **name** plus one **cover thumbnail**, matching the chat
+  `slidesTemplatePicker`: first `title*` archetype, else the first archetype.
+  Baked PNG via `thumbnailRef`; live `ast-deck` markup only when no thumbnail
+  exists (built-ins). The HTTP list DTO ships that as `cover`
+  (`kind`, `thumbnailRef` or `markup`) without the assets map.
 
 ### Response performance (slim DTOs)
 
@@ -1642,8 +1647,10 @@ The card is emitted with the same prefix-marker pattern as `distill_preview` /
   **`SlidesArchetypeThumb`** live-renders the variant's `ast-slide` markup by mounting
   the same `ast-*` runtime components the deck viewer uses, scaled down from the
   1920×1080 canvas and set to `pointer-events: none` (non-interactive). On answer the
-  card collapses to a read-only `You chose: <label>` state and the chosen label is
-  sent as a normal user message, entering the agent loop like typed input.
+  picker unmounts. The left-hand transcript keeps the **prompt** as an agent bubble;
+  the chosen label is sent as a normal user message (right-hand bubble) and enters
+  the agent loop like typed input. Reload infers answered from that following user
+  message so the selectable card is not remounted.
 - **Terminal TUI** (`pkg/launcher/tui_chat.go`, `mapSSEToEvents`): the same event
   **degrades to text** — the prompt followed by a numbered list of option labels
   (or Yes/No). There are no thumbnails; the user answers by typing the number/label,

@@ -35,9 +35,11 @@ const maxImportPPTXBytes = 75 << 20
 const pptxMIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 
 // slidesTemplateListItem is the lightweight DTO returned by
-// ListSlidesTemplatesHandler. It intentionally OMITS the Assets map and the
+// ListSlidesTemplatesHandler. It intentionally OMITS the Assets map and per-
 // archetype markup — a Templates UI listing many templates must not ship
-// megabytes of asset bytes. Scope is "builtin" | "personal" | "team".
+// megabytes of asset bytes. Cover carries ONE representative slide (baked PNG
+// ref, or live markup when no thumbnail was baked) so the library card can
+// match the chat template picker. Scope is "builtin" | "personal" | "team".
 type slidesTemplateListItem struct {
 	Name           string                   `json:"name"`
 	Label          string                   `json:"label,omitempty"`
@@ -46,6 +48,18 @@ type slidesTemplateListItem struct {
 	Tokens         map[string]string        `json:"tokens,omitempty"`
 	ArchetypeKinds []string                 `json:"archetypeKinds,omitempty"`
 	Archetypes     []slidesArchetypeVariant `json:"archetypes,omitempty"`
+	Cover          *slidesTemplateCover     `json:"cover,omitempty"`
+}
+
+// slidesTemplateCover is the representative slide shown on a Templates library
+// card (same pick as the chat slidesTemplatePicker: first title* archetype,
+// else the first archetype). ThumbnailRef is a baked PNG asset key served by
+// GetSlidesTemplateThumbnailHandler. Markup is the live-render fallback and is
+// omitted when ThumbnailRef is set so imported catalogs stay small.
+type slidesTemplateCover struct {
+	Kind         string `json:"kind"`
+	ThumbnailRef string `json:"thumbnailRef,omitempty"`
+	Markup       string `json:"markup,omitempty"`
 }
 
 // slidesArchetypeVariant is one fillable slide skeleton: its role Kind plus a
@@ -76,14 +90,69 @@ func archetypeKinds(t themes.Template) []string {
 	return kinds
 }
 
-// archetypeVariants projects a template's archetypes to {kind,label} variants so
-// the Templates UI can render friendly, per-variant chips. Markup is omitted.
+// archetypeVariants projects a template's archetypes to {kind,label} variants.
+// Markup is omitted; the Templates library card uses Cover instead of listing
+// every layout.
 func archetypeVariants(t themes.Template) []slidesArchetypeVariant {
 	out := make([]slidesArchetypeVariant, 0, len(t.Archetypes))
 	for _, a := range t.Archetypes {
 		out = append(out, slidesArchetypeVariant{Kind: a.Kind, Label: a.Title, ThumbnailRef: a.ThumbnailRef})
 	}
 	return out
+}
+
+func slidesTemplateListDTO(t themes.Template, scope string) slidesTemplateListItem {
+	return slidesTemplateListItem{
+		Name:           t.Name,
+		Label:          t.Label,
+		Description:    t.Description,
+		Scope:          scope,
+		Tokens:         t.Tokens,
+		ArchetypeKinds: archetypeKinds(t),
+		Archetypes:     archetypeVariants(t),
+		Cover:          templateCoverDTO(t),
+	}
+}
+
+// templateCoverDTO picks the cover slide the chat template picker uses: first
+// title* role, else the first archetype. Prefers a baked PNG ref; ships markup
+// only when there is no thumbnail (built-ins and older imports).
+func templateCoverDTO(t themes.Template) *slidesTemplateCover {
+	arch := templateCoverArchetype(t)
+	if arch == nil {
+		return nil
+	}
+	cover := &slidesTemplateCover{Kind: arch.Kind}
+	if ref := strings.TrimSpace(arch.ThumbnailRef); ref != "" {
+		cover.ThumbnailRef = ref
+		return cover
+	}
+	if strings.TrimSpace(arch.Markup) != "" {
+		cover.Markup = arch.Markup
+	}
+	return cover
+}
+
+func templateCoverArchetype(t themes.Template) *themes.Archetype {
+	for i := range t.Archetypes {
+		if templateBaseKind(t.Archetypes[i].Kind) == "title" {
+			return &t.Archetypes[i]
+		}
+	}
+	if len(t.Archetypes) > 0 {
+		return &t.Archetypes[0]
+	}
+	return nil
+}
+
+// templateBaseKind collapses a numbered variant suffix (title-2 → title).
+func templateBaseKind(kind string) string {
+	if i := strings.LastIndexByte(kind, '-'); i > 0 {
+		if _, err := strconv.Atoi(kind[i+1:]); err == nil {
+			return kind[:i]
+		}
+	}
+	return kind
 }
 
 // scopeQuery returns the requested scope label for list DTOs: "team" when
@@ -97,9 +166,10 @@ func scopeQuery(r *http.Request) string {
 
 // ListSlidesTemplatesHandler returns the merged set of built-in templates plus
 // any templates persisted in the requested scope (?scope=personal|team) as a
-// LIGHTWEIGHT DTO (no assets / no markup). The built-ins are always returned
-// even when no scoped service is available. Deduplication is by Name, preferring
-// the built-in over a scoped template.
+// LIGHTWEIGHT DTO (no assets map; per-archetype markup omitted). Cover may
+// include one live-render markup fragment when no baked thumbnail exists. The
+// built-ins are always returned even when no scoped service is available.
+// Deduplication is by Name, preferring the built-in over a scoped template.
 func ListSlidesTemplatesHandler(w http.ResponseWriter, r *http.Request) {
 	merged := make([]slidesTemplateListItem, 0)
 	seen := map[string]bool{}
@@ -108,15 +178,7 @@ func ListSlidesTemplatesHandler(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		seen[t.Name] = true
-		merged = append(merged, slidesTemplateListItem{
-			Name:           t.Name,
-			Label:          t.Label,
-			Description:    t.Description,
-			Scope:          "builtin",
-			Tokens:         t.Tokens,
-			ArchetypeKinds: archetypeKinds(t),
-			Archetypes:     archetypeVariants(t),
-		})
+		merged = append(merged, slidesTemplateListDTO(t, "builtin"))
 	}
 
 	// Scoped templates are best-effort: if the request has no usable docs
@@ -129,15 +191,7 @@ func ListSlidesTemplatesHandler(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 				seen[t.Name] = true
-				merged = append(merged, slidesTemplateListItem{
-					Name:           t.Name,
-					Label:          t.Label,
-					Description:    t.Description,
-					Scope:          scope,
-					Tokens:         t.Tokens,
-					ArchetypeKinds: archetypeKinds(t),
-					Archetypes:     archetypeVariants(t),
-				})
+				merged = append(merged, slidesTemplateListDTO(t, scope))
 			}
 		}
 	}
@@ -328,15 +382,7 @@ func RecolorSlidesTemplateHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeSlidesJSON(w, http.StatusOK, slidesTemplateListItem{
-		Name:           tmpl.Name,
-		Label:          tmpl.Label,
-		Description:    tmpl.Description,
-		Scope:          scopeQuery(r),
-		Tokens:         tmpl.Tokens,
-		ArchetypeKinds: archetypeKinds(tmpl),
-		Archetypes:     archetypeVariants(tmpl),
-	})
+	writeSlidesJSON(w, http.StatusOK, slidesTemplateListDTO(tmpl, scopeQuery(r)))
 }
 
 // thumbnailPNGPrefix is the data-URI prefix stripped before base64-decoding a

@@ -261,26 +261,6 @@ function DeckCard({
   )
 }
 
-/** Small swatch row for a template's core tokens. */
-export function TemplateSwatches({ tokens }: { tokens?: Record<string, string> }) {
-  const keys = ['surface', 'ink', 'accent'] as const
-  const colors = keys
-    .map(k => tokens?.[k])
-    .filter((c): c is string => Boolean(c))
-  if (colors.length === 0) return null
-  return (
-    <div className="flex items-center gap-0.5" data-testid="template-swatches">
-      {colors.map((c, i) => (
-        <div
-          key={i}
-          className="h-3 w-3 rounded-sm border"
-          style={{ backgroundColor: c, borderColor: 'var(--border-color)' }}
-        />
-      ))}
-    </div>
-  )
-}
-
 export default function SlidesView({ theme, deckSlug, templatesView, isPlatformMode, onNavigate, onPublishDeck, onForkDeck, onCreateSlide }: SlidesViewProps) {
   void theme
   const [decks, setDecks] = useState<SlidesDeckListItem[]>([])

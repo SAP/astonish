@@ -177,9 +177,11 @@ type StudioMessage struct {
 	DocsUpdate *DocsUpdatePayload `json:"docsUpdate,omitempty"`
 
 	// chat_question fields — populated for a generic inline questionnaire card
-	// (yes/no or single-select, with optional per-option thumbnails). The card is
-	// answered once and then collapses; the answer re-enters the agent loop as an
-	// ordinary user message (no dedicated endpoint).
+	// (yes/no or single-select, with optional per-option thumbnails). After the
+	// user answers, Studio unmounts the picker and keeps the prompt as an agent
+	// bubble; the chosen label re-enters the agent loop as an ordinary user
+	// message (no dedicated endpoint). Reload infers answered from that following
+	// user message so the selectable card is not remounted.
 	QuestionID   string               `json:"questionId,omitempty"`
 	QuestionKind string               `json:"questionKind,omitempty"` // "yesno" | "select"
 	Prompt       string               `json:"prompt,omitempty"`

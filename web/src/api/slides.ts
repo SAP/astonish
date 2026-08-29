@@ -70,7 +70,7 @@ export type SlidesExportFormat = 'pdf' | 'pptx' | 'html'
 export interface SlidesTemplateArchetype {
   kind: string
   title?: string
-  /** Human-readable variant label surfaced in the Templates UI. */
+  /** Human-readable variant label. */
   label?: string
   markup?: string
   /** Two-tier tag: 'fixed' = brand chrome reproduced verbatim (fill only the
@@ -79,6 +79,17 @@ export interface SlidesTemplateArchetype {
   tier?: 'fixed' | 'flexible'
   /** For fixed chrome, the ast-text ids whose text the AI may substitute. */
   fillSlots?: string[]
+  /** Assets key of a pre-baked PNG thumbnail, if one was generated at import. */
+  thumbnailRef?: string
+}
+
+/** Representative cover for the Templates library card (same pick as the chat
+ * template picker: first title* archetype, else the first archetype). */
+export interface SlidesTemplateCover {
+  kind: string
+  thumbnailRef?: string
+  /** Live-render markup; omitted when `thumbnailRef` is set. */
+  markup?: string
 }
 
 /** A slide template (design tokens + assets + archetype layouts). */
@@ -94,6 +105,7 @@ export interface SlidesTemplate {
   archetypeKinds?: string[]
   /** Whether this template has a rich style guide for LLM content generation. */
   hasStyleGuide?: boolean
+  cover?: SlidesTemplateCover
 }
 
 function withScope(path: string, scope: DocsScope): string {

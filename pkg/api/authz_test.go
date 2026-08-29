@@ -39,13 +39,13 @@ func (m *mockTeamMgmt) GetTeamBySlug(_ context.Context, slug string) (*store.Tea
 	}
 	return nil, fmt.Errorf("team not found: %s", slug)
 }
-func (m *mockTeamMgmt) ListTeams(_ context.Context) ([]*store.Team, error)  { return nil, nil }
+func (m *mockTeamMgmt) ListTeams(_ context.Context) ([]*store.Team, error) { return nil, nil }
 func (m *mockTeamMgmt) ListTeamsForUser(_ context.Context, _ string) ([]*store.Team, error) {
 	return nil, nil
 }
-func (m *mockTeamMgmt) DeleteTeam(_ context.Context, _ string) error { return nil }
-func (m *mockTeamMgmt) RenameTeam(_ context.Context, _, _ string) error { return nil }
-func (m *mockTeamMgmt) CountTeams(_ context.Context) (int, error)      { return len(m.teams), nil }
+func (m *mockTeamMgmt) DeleteTeam(_ context.Context, _ string) error          { return nil }
+func (m *mockTeamMgmt) RenameTeam(_ context.Context, _, _ string) error       { return nil }
+func (m *mockTeamMgmt) CountTeams(_ context.Context) (int, error)             { return len(m.teams), nil }
 func (m *mockTeamMgmt) CountMembers(_ context.Context, _ string) (int, error) { return 0, nil }
 func (m *mockTeamMgmt) AddMember(_ context.Context, _ *store.TeamMembership) error {
 	return nil
@@ -74,16 +74,17 @@ type authzOrgDataStore struct {
 	teams *mockTeamMgmt
 }
 
-func (m *authzOrgDataStore) ForTeam(_ string) store.TeamDataStore     { return nil }
-func (m *authzOrgDataStore) ForUser(_ string) store.PersonalDataStore { return nil }
-func (m *authzOrgDataStore) OrgMemories() store.MemoryStore           { return nil }
-func (m *authzOrgDataStore) OrgSkills() store.SkillStore              { return nil }
-func (m *authzOrgDataStore) OrgMCPServers() store.MCPServerStore      { return nil }
+func (m *authzOrgDataStore) ForTeam(_ string) store.TeamDataStore         { return nil }
+func (m *authzOrgDataStore) ForUser(_ string) store.PersonalDataStore     { return nil }
+func (m *authzOrgDataStore) OrgMemories() store.MemoryStore               { return nil }
+func (m *authzOrgDataStore) OrgSkills() store.SkillStore                  { return nil }
+func (m *authzOrgDataStore) OrgSlideTemplates() store.SlideTemplateStore  { return nil }
+func (m *authzOrgDataStore) OrgMCPServers() store.MCPServerStore          { return nil }
 func (m *authzOrgDataStore) OrgNetworkPolicies() store.NetworkPolicyStore { return nil }
-func (m *authzOrgDataStore) OrgApps() store.AppStore                  { return nil }
-func (m *authzOrgDataStore) OrgAudit() store.AuditStore               { return nil }
-func (m *authzOrgDataStore) OrgA2AAgents() store.A2AAgentStore        { return nil }
-func (m *authzOrgDataStore) Teams() store.TeamManagementStore         { return m.teams }
+func (m *authzOrgDataStore) OrgApps() store.AppStore                      { return nil }
+func (m *authzOrgDataStore) OrgAudit() store.AuditStore                   { return nil }
+func (m *authzOrgDataStore) OrgA2AAgents() store.A2AAgentStore            { return nil }
+func (m *authzOrgDataStore) Teams() store.TeamManagementStore             { return m.teams }
 func (m *authzOrgDataStore) ProvisionTeam(_ context.Context, _ string) error {
 	return nil
 }

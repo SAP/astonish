@@ -1,6 +1,6 @@
 import { useState } from 'react'
 
-import { templateMediaUrl, templateThumbnailUrl } from '@/api/slides'
+import { templateMediaUrl, templateThumbnailUrl, type DocsScope } from '@/api/slides'
 
 import SlidesArchetypeThumb from './SlidesArchetypeThumb'
 import type { ChatQuestionOption } from '../chatTypes'
@@ -29,9 +29,12 @@ export default function QuestionOptionThumb({ thumbnail, label }: QuestionOption
 
   if (canRenderImage) {
     const assetRef = thumbnail.assetRef!
+    const scope = thumbnail.templateScope && thumbnail.templateScope !== 'builtin'
+      ? thumbnail.templateScope as DocsScope
+      : undefined
     const src = assetRef.startsWith('sha256-')
-      ? templateMediaUrl(thumbnail.template!, assetRef)
-      : templateThumbnailUrl(thumbnail.template!, assetRef.replace(/^thumb\//, ''), assetRef)
+      ? templateMediaUrl(thumbnail.template!, assetRef, scope)
+      : templateThumbnailUrl(thumbnail.template!, assetRef.replace(/^thumb\//, ''), assetRef, scope)
     return (
       <img
         src={src}

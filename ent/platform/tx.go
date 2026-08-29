@@ -38,6 +38,8 @@ type Tx struct {
 	PlatformSkill *PlatformSkillClient
 	// PlatformSkillFile is the client for interacting with the PlatformSkillFile builders.
 	PlatformSkillFile *PlatformSkillFileClient
+	// PlatformSlideTemplate is the client for interacting with the PlatformSlideTemplate builders.
+	PlatformSlideTemplate *PlatformSlideTemplateClient
 	// SandboxLayer is the client for interacting with the SandboxLayer builders.
 	SandboxLayer *SandboxLayerClient
 	// SandboxTemplate is the client for interacting with the SandboxTemplate builders.
@@ -192,6 +194,7 @@ func (tx *Tx) init() {
 	tx.PlatformSetting = NewPlatformSettingClient(tx.config)
 	tx.PlatformSkill = NewPlatformSkillClient(tx.config)
 	tx.PlatformSkillFile = NewPlatformSkillFileClient(tx.config)
+	tx.PlatformSlideTemplate = NewPlatformSlideTemplateClient(tx.config)
 	tx.SandboxLayer = NewSandboxLayerClient(tx.config)
 	tx.SandboxTemplate = NewSandboxTemplateClient(tx.config)
 	tx.ToolIndex = NewToolIndexClient(tx.config)

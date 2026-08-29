@@ -75,11 +75,13 @@ Default authoring is **not** “fill empty holes in an imported sample slide.”
 
 The **normalized scene graph** is the contract. The browser DOM is a rendering output and measurement aid, not the export source of truth. Exporters never scrape arbitrary DOM and guess its meaning.
 
-Importing a corporate `.pptx` produces a high-fidelity ASD template: theme tokens, a style guide, **fixed** chrome layouts (`title` / `section` / `agenda` / `closing`), **flexible** `pattern-*` archetypes from sample slides, and a lossless `TemplateModel` IR. That template **feeds** the recipe renderer. The LLM does not author by copying imported sample markup. `write_slide` remains blank-canvas only.
+Importing a corporate `.pptx` produces a high-fidelity ASD template: theme tokens, a style guide, **fixed** chrome layouts (`title` / `section` / `agenda` / `closing`), **flexible** `pattern-*` archetypes from sample slides, and a lossless `TemplateModel` IR. That template **feeds** the recipe renderer. The LLM does not author by copying imported sample markup. `write_slide` is reserved for advanced post-creation customization and blank-canvas authoring.
+
+Images are not constrained to template picture placeholders. `ph-pic-*` slots provide preset geometry during archetype filling, while `add_slide_image` appends an `ast-image` directly to any existing slide, preserving its current layout and other elements. It accepts a deck/template asset ref, public URL, or chat attachment, validates the resulting slide, and only reports success after persistence.
 
 ### Studio Templates management surface
 
-A deep-linkable Studio area at `/slides/templates` lists both **built-in** and **scoped** (user-imported) templates. Built-ins are **Classic** (corporate skin, Light / Midnight / Aurora colorways) and **Modern** (product skin, several colorways). Each card is the **template name** plus a **cover thumbnail** (same pick and render path as the chat `slidesTemplatePicker`), with a **scope badge** (Built-in / Personal / Team). Colorways are chosen in chat (`slidesPalettePicker`), not as extra library rows. The surface supports **delete**, **duplicate**, and **recolor** for scoped templates, while built-ins are **read-only** (duplicate only) — deleting or recoloring a built-in returns `403`.
+A deep-linkable Studio area at `/slides/templates` lists **built-in**, **inherited**, and **personal** templates. Built-ins are **Classic** (corporate skin, Light / Midnight / Aurora colorways) and **Modern** (product skin, several colorways). Platform, org, and team admins import PPTX templates from Settings → Slides Templates; those catalogs inherit downward (platform → org → team → personal). Each card is the **template name** plus a **cover thumbnail** (same pick and render path as the chat `slidesTemplatePicker`), with a **scope badge** (Built-in / Platform / Organization / Team / Personal). Colorways are chosen in chat (`slidesPalettePicker`), not as extra library rows. **Delete** and **recolor** apply only to personal templates; inherited and built-in cards are read-only except **Duplicate** (always writes a personal copy). Deleting or recoloring a built-in returns `403`.
 
 Note that the templates **list** endpoint (`GET /api/docs/slides/templates`) returns a lightweight DTO that intentionally omits the assets map. It includes a `cover` object (`kind`, plus `thumbnailRef` or live `markup`) so the library card can render without downloading every layout.
 
@@ -1255,7 +1257,7 @@ New UI files use TypeScript/TSX. The Web Component runtime is framework-neutral;
 GET    /api/docs?type=slides
 GET    /api/docs/slides/{deckSlug}
 GET    /api/docs/slides/{deckSlug}/slides/{idx}
-PATCH  /api/docs/slides/{deckSlug}/slides/{idx}     # canvas edits {moves,texts,deletes}; validates via WriteSlide
+PATCH  /api/docs/slides/{deckSlug}/slides/{idx}     # canvas edits {moves,resizes,texts,deletes}; validates via WriteSlide
 POST   /api/docs/slides/validate
 POST   /api/docs/slides/{deckSlug}/export/pdf
 POST   /api/docs/slides/{deckSlug}/export/pptx
@@ -1264,27 +1266,31 @@ GET    /api/docs/slides/{deckSlug}/present
 DELETE /api/docs/slides/{deckSlug}
 GET    /api/docs/slides/themes
 GET    /api/docs/slides/components
-DELETE /api/docs/slides/templates/{name}            # delete a scoped template (built-ins read-only → 403; idempotent on missing); honors ?scope=personal|team
-POST   /api/docs/slides/templates/{name}/duplicate  # clone a built-in or scoped template into a NEW scoped template (optional body {"newName":"...","newLabel":"..."}); returns {"template":{"name":...,"label":...}}
+GET    /api/docs/slides/templates                   # merged catalog: builtin + platform + org + team + personal (no name collapse)
+GET    /api/docs/slides/templates?scope=…           # one store only (personal|team|org|platform) — Settings admin pages
+POST   /api/docs/slides/import?scope=…              # import PPTX into that store; platform/org/team require the matching admin role
+DELETE /api/docs/slides/templates/{name}            # delete a scoped template (built-ins read-only → 403; idempotent on missing); honors ?scope=personal|team|org|platform
+POST   /api/docs/slides/templates/{name}/duplicate  # clone into a NEW personal template (optional body {"newName":"...","newLabel":"..."}); returns {"template":{"name":...,"label":...}}
 PATCH  /api/docs/slides/templates/{name}/recolor    # update a scoped template's palette tokens (surface/ink/accent; validated hex); 403 for built-ins, 400 for bad hex / unknown keys
 ```
 
 The slide endpoint returns either the source fragment as data or a sandboxed runtime page. It must not concatenate untrusted source into the Studio document.
 
-### Canvas object edit (move, text, delete)
+### Canvas object edit (move, resize, text, delete)
 
 The harness **canvas** (`SlidesDeckView` main iframe) can edit objects. **Present** (new window) and **Full screen** do not. The iframe stays `sandbox="allow-scripts"` (opaque origin); the parent never reads iframe DOM.
 
 After the canvas iframe loads, Studio posts `{ type: "ast-edit-mode", enabled: true }`. The runtime (`EditController`):
 
 - highlights the object under the pointer, selects on click, and drags `x`/`y` in logical 1920×1080 px (pointer delta ÷ CSS scale);
-- while dragging, **snaps** to another object's left / right / top / bottom / center within 6 px and draws a dotted alignment guide across the canvas;
+- selecting an `ast-image` displays four corner handles; dragging any handle updates `x`/`y`/`w`/`h` while preserving the image box's original aspect ratio, so resizing never stretches it horizontally or vertically;
+- while moving, **snaps** to another object's left / right / top / bottom / center within 6 px and draws a dotted alignment guide across the canvas;
 - **double-click**, a second click on an already-selected `ast-text`, or Enter, to edit copy in place (Escape cancels; Shift+Enter inserts a newline);
 - **Delete** / **Backspace**, or the toolbar **Delete** control, removes the selected object.
 
 Full-bleed decorative backgrounds (`id="bg"`) are not selectable. Click-to-advance is off while edit is on.
 
-On a real change the iframe posts `{ type: "ast-edit-changed", index, moves, texts, deletes }`. Studio replaces **Save** with **Discard** / **Apply**. Discard posts `{ type: "ast-edit-reset" }`. Apply `PATCH`es `/api/docs/slides/{slug}/slides/{idx}` with that payload; the server rewrites markup via `findElement`, then `WriteSlide` (validate + upsert). Success posts `{ type: "ast-edit-commit" }` (new baseline). No `docs_update` chat event — this is Studio, not the agent loop.
+On a real change the iframe posts `{ type: "ast-edit-changed", index, moves, resizes, texts, deletes }`. Each resize contains the element's complete `{id,x,y,w,h}` geometry. Studio replaces **Save** with **Discard** / **Apply**. Discard posts `{ type: "ast-edit-reset" }`. Apply `PATCH`es `/api/docs/slides/{slug}/slides/{idx}` with that payload; the server rewrites markup via `findElement`, then `WriteSlide` (validate + upsert). Success posts `{ type: "ast-edit-commit" }` (new baseline). No `docs_update` chat event — this is Studio, not the agent loop.
 
 ### SSE
 

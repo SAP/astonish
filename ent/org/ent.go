@@ -21,6 +21,7 @@ import (
 	"github.com/SAP/astonish/ent/org/orgnetworkpolicy"
 	"github.com/SAP/astonish/ent/org/orgskill"
 	"github.com/SAP/astonish/ent/org/orgskillfile"
+	"github.com/SAP/astonish/ent/org/orgslidetemplate"
 	"github.com/SAP/astonish/ent/org/team"
 	"github.com/SAP/astonish/ent/org/teammembership"
 )
@@ -92,6 +93,7 @@ func checkColumn(t, c string) error {
 			orgnetworkpolicy.Table: orgnetworkpolicy.ValidColumn,
 			orgskill.Table:         orgskill.ValidColumn,
 			orgskillfile.Table:     orgskillfile.ValidColumn,
+			orgslidetemplate.Table: orgslidetemplate.ValidColumn,
 			team.Table:             team.ValidColumn,
 			teammembership.Table:   teammembership.ValidColumn,
 		})

@@ -131,12 +131,140 @@ func TestWriteSlideRejectsInvalidInputWithoutPersisting(t *testing.T) {
 	}
 }
 
+func TestWriteSlideSyncsTemplateAssetsIntoDeck(t *testing.T) {
+	backend := newMultiDeckStore()
+	ctx := toolContext(t, backend)
+
+	svc := Service{Store: backend}
+	if err := svc.SaveTemplate(ctx, themes.Template{
+		Name:   "photobrand",
+		Tokens: map[string]string{"surface": "#FFFFFF", "ink": "#000"},
+		Assets: map[string]string{
+			"sha256-hero":   "data:image/png;base64,HEROIMAGE",
+			"sha256-logo":   "data:image/svg+xml;base64,LOGOSVG",
+			"font:Acme:400": "data:font/woff2;base64,FONT",
+		},
+		Archetypes: []themes.Archetype{
+			{Kind: "title", Markup: `<ast-slide id="p"><ast-text id="ph-1" x="10" y="10" w="400" h="80" size="24"><ast-run>{{TITLE}}</ast-run></ast-text></ast-slide>`, FillSlots: []string{"ph-1"}},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	created, err := createDeck(ctx, CreateDeckArgs{Slug: "photo-deck", Title: "Photo Deck", Template: "photobrand"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// seedLightweightAssets only copies fonts, not images.
+	deck, _, _ := svc.Deck(ctx, created.Deck.Slug)
+	if _, ok := deck.Assets["sha256-hero"]; ok {
+		t.Fatal("image asset should not be seeded at create_deck time")
+	}
+
+	// write_slide referencing a template image asset.
+	_, err = writeSlide(ctx, WriteSlideArgs{
+		DeckSlug: created.Deck.Slug,
+		Position: 0,
+		Markup:   `<ast-slide id="cover"><ast-image id="img" x="0" y="0" w="960" h="1080" asset-ref="sha256-hero" fit="cover"></ast-image><ast-text id="t" x="960" y="400" w="800" h="80" size="24">Hello</ast-text></ast-slide>`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The template image asset should now be synced into the deck.
+	deck, _, _ = svc.Deck(ctx, created.Deck.Slug)
+	if v, ok := deck.Assets["sha256-hero"]; !ok || v != "data:image/png;base64,HEROIMAGE" {
+		t.Fatalf("write_slide did not sync template image asset into deck; assets keys: %v", mapKeys(deck.Assets))
+	}
+}
+
+func TestAddSlideImagePreservesLayoutAndSyncsTemplateAsset(t *testing.T) {
+	backend := newMultiDeckStore()
+	ctx := toolContext(t, backend)
+	svc := Service{Store: backend}
+	if err := svc.SaveTemplate(ctx, themes.Template{
+		Name:   "mango",
+		Tokens: map[string]string{"surface": "#FFFFFF"},
+		Assets: map[string]string{"sha256-photo": "data:image/png;base64,PHOTO"},
+		Archetypes: []themes.Archetype{{
+			Kind: "title-4", Markup: `<ast-slide id="cover" title="Mango"><ast-shape id="bg" kind="rect" x="0" y="0" w="1920" h="1080" fill="#FFCC00"></ast-shape><ast-text id="ph-1" x="100" y="300" w="900" h="160">{{TITLE}}</ast-text></ast-slide>`, FillSlots: []string{"ph-1"},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	created, err := createDeck(ctx, CreateDeckArgs{Slug: "mango-deck", Title: "Mango", Template: "mango"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	filled, err := fillSlide(ctx, FillSlideArgs{DeckSlug: created.Deck.Slug, Position: 0, Kind: "title-4", Fills: map[string]string{"ph-1": "Original title"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := addSlideImage(ctx, AddSlideImageArgs{
+		DeckSlug: created.Deck.Slug, Position: 0, AssetRef: "sha256-photo", Alt: "Slide 5 photo",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Slide == nil || got.Slide.ID != filled.SlideID {
+		t.Fatalf("image insertion did not update the existing slide: %#v", got)
+	}
+	for _, preserved := range []string{`id="bg"`, `id="ph-1"`, `Original title`, `title="Mango"`} {
+		if !strings.Contains(got.Slide.Content, preserved) {
+			t.Fatalf("image insertion changed existing layout; missing %q in %s", preserved, got.Slide.Content)
+		}
+	}
+	for _, added := range []string{`<ast-image id="image-1"`, `asset-ref="sha256-photo"`, `x="1120"`, `fit="cover"`, `alt="Slide 5 photo"`} {
+		if !strings.Contains(got.Slide.Content, added) {
+			t.Fatalf("image was not inserted correctly; missing %q in %s", added, got.Slide.Content)
+		}
+	}
+	deck, _, err := svc.Deck(ctx, created.Deck.Slug)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deck.Assets["sha256-photo"] == "" {
+		t.Fatal("referenced template photo was not synchronized to the deck")
+	}
+}
+
+func TestAddSlideImageRejectsMissingAssetWithoutChangingSlide(t *testing.T) {
+	backend := &memoryDocsStore{}
+	ctx := toolContext(t, backend)
+	if _, err := createDeck(ctx, CreateDeckArgs{Slug: "deck", Title: "Deck"}); err != nil {
+		t.Fatal(err)
+	}
+	original := `<ast-slide id="cover"><ast-text id="title" x="20" y="20" w="800" h="100">Keep me</ast-text></ast-slide>`
+	if _, err := writeSlide(ctx, WriteSlideArgs{DeckSlug: "deck", Position: 0, Markup: original}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := addSlideImage(ctx, AddSlideImageArgs{DeckSlug: "deck", Position: 0, AssetRef: "sha256-missing"}); err == nil {
+		t.Fatal("expected missing asset error")
+	}
+	got, err := readSlide(ctx, ReadSlideArgs{DeckSlug: "deck", Position: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Slide.Content != original {
+		t.Fatalf("failed insertion changed the slide: %s", got.Slide.Content)
+	}
+}
+
+func mapKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
 func TestGetTools(t *testing.T) {
 	got, err := GetTools()
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"create_deck", "fill_slides", "fill_slide", "get_archetype", "write_slide", "get_deck", "read_slide", "list_decks", "list_slide_templates", "get_template_variant_previews", "validate_deck", "review_deck", "list_deck_assets", "add_deck_image", "ask_user"}
+	want := []string{"create_deck", "fill_slides", "fill_slide", "get_archetype", "write_slide", "get_deck", "read_slide", "list_decks", "list_slide_templates", "get_template_variant_previews", "validate_deck", "review_deck", "list_deck_assets", "add_deck_image", "add_slide_image", "ask_user"}
 	if len(got) != len(want) {
 		t.Fatalf("got %d tools, want %d", len(got), len(want))
 	}
@@ -813,8 +941,8 @@ func TestListTemplatesToolReturnsBuiltinsAndScoped(t *testing.T) {
 	}
 	// Scoped templates are tagged so the model can distinguish imports from built-ins.
 	for _, tmpl := range res.Templates {
-		if tmpl.Name == "acme" && tmpl.Scope != "scope" {
-			t.Fatalf("scoped template acme has scope %q, want \"scope\"", tmpl.Scope)
+		if tmpl.Name == "acme" && tmpl.Scope != "personal" {
+			t.Fatalf("scoped template acme has scope %q, want \"personal\"", tmpl.Scope)
 		}
 	}
 }
@@ -853,8 +981,8 @@ func TestSaveTemplateThenListSurfacesScopedTemplate(t *testing.T) {
 	if brand == nil {
 		t.Fatalf("imported template \"brand\" not surfaced by list_templates; got %#v", res.Templates)
 	}
-	if brand.Scope != "scope" {
-		t.Fatalf("imported template scope = %q, want \"scope\"", brand.Scope)
+	if brand.Scope != "personal" {
+		t.Fatalf("imported template scope = %q, want \"personal\"", brand.Scope)
 	}
 	if brand.Label != "Brand" || brand.Description != "Imported corporate template" {
 		t.Fatalf("imported template summary lost identity: %#v", brand)
@@ -1869,7 +1997,7 @@ func TestCreateDeckRequiresTitleImageWhenCoverHasWell(t *testing.T) {
 	}
 }
 
-func TestFillSlidesUsesStampedTitleKind(t *testing.T) {
+func TestFillSlidesUsesStampedTitleKindWhenKindOmitted(t *testing.T) {
 	backend := newMultiDeckStore()
 	ctx := toolContext(t, backend)
 	svc := Service{Store: backend}
@@ -1889,9 +2017,10 @@ func TestFillSlidesUsesStampedTitleKind(t *testing.T) {
 	if _, err := createDeck(ctx, CreateDeckArgs{Slug: "deck", Title: "Deck", Template: "gco", TitleKind: "title-2"}); err != nil {
 		t.Fatal(err)
 	}
+	// Kind omitted → stamped title-2 (blue) used.
 	if _, err := fillSlides(ctx, FillSlidesArgs{
 		DeckSlug: "deck",
-		Slides:   []FillSlideSpec{{Position: 0, Kind: "title", Fills: map[string]string{"ph-1": "Steve Jobs"}}},
+		Slides:   []FillSlideSpec{{Position: 0, Fills: map[string]string{"ph-1": "Steve Jobs"}}},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1899,8 +2028,23 @@ func TestFillSlidesUsesStampedTitleKind(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(got.Slide.Content, `fill="#0011AA"`) || strings.Contains(got.Slide.Content, `fill="#FFFFFF"`) {
-		t.Fatalf("stamped title-2 should win over fill kind=title:\n%s", got.Slide.Content)
+	if !strings.Contains(got.Slide.Content, `fill="#0011AA"`) {
+		t.Fatalf("omitted kind should default to stamped title-2 (blue):\n%s", got.Slide.Content)
+	}
+
+	// Kind explicitly set to "title" → white cover used, stamped kind NOT applied.
+	if _, err := fillSlides(ctx, FillSlidesArgs{
+		DeckSlug: "deck",
+		Slides:   []FillSlideSpec{{Position: 0, Kind: "title", Fills: map[string]string{"ph-1": "Steve Jobs"}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got2, err := readSlide(ctx, ReadSlideArgs{DeckSlug: "deck", Position: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got2.Slide.Content, `fill="#FFFFFF"`) {
+		t.Fatalf("explicit kind=title should use the white cover, not stamped title-2:\n%s", got2.Slide.Content)
 	}
 }
 

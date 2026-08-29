@@ -45,6 +45,9 @@ type PlatformSkill func(*sql.Selector)
 // PlatformSkillFile is the predicate function for platformskillfile builders.
 type PlatformSkillFile func(*sql.Selector)
 
+// PlatformSlideTemplate is the predicate function for platformslidetemplate builders.
+type PlatformSlideTemplate func(*sql.Selector)
+
 // SandboxLayer is the predicate function for sandboxlayer builders.
 type SandboxLayer func(*sql.Selector)
 

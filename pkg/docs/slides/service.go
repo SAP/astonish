@@ -228,9 +228,19 @@ type ElementText struct {
 	Text string
 }
 
-// SlideEdits is a canvas edit batch: moves, text rewrites, and deletes.
+// ElementResize is one canvas resize with the element's complete geometry.
+type ElementResize struct {
+	ID string
+	X  int
+	Y  int
+	W  int
+	H  int
+}
+
+// SlideEdits is a canvas edit batch: moves, resizes, text rewrites, and deletes.
 type SlideEdits struct {
 	Moves   []ElementMove
+	Resizes []ElementResize
 	Texts   []ElementText
 	Deletes []string
 }
@@ -286,6 +296,23 @@ func (s Service) ApplySlideEdits(ctx context.Context, deckSlug string, position 
 			continue
 		}
 		next, err := setElementXY(markup, id, m.X, m.Y)
+		if err != nil {
+			return nil, nil, err
+		}
+		markup = next
+	}
+	for _, resize := range edits.Resizes {
+		id := strings.TrimSpace(resize.ID)
+		if id == "" {
+			return nil, nil, fmt.Errorf("resize is missing element id")
+		}
+		if resize.W <= 0 || resize.H <= 0 {
+			return nil, nil, fmt.Errorf("resize width and height must be positive")
+		}
+		if deleted[id] {
+			continue
+		}
+		next, err := setElementGeometry(markup, id, resize.X, resize.Y, resize.W, resize.H)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -534,6 +561,9 @@ func (s Service) resolveTemplate(ctx context.Context, name string) (themes.Templ
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return themes.Template{}, false
+	}
+	if t, ok, err := catalogFromContext(ctx).Resolve(ctx, name); err == nil && ok {
+		return t, true
 	}
 	if t, ok := themes.LookupTemplate(name); ok {
 		return HydrateTemplateFonts(t), true

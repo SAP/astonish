@@ -33,6 +33,9 @@ type OrgSkill func(*sql.Selector)
 // OrgSkillFile is the predicate function for orgskillfile builders.
 type OrgSkillFile func(*sql.Selector)
 
+// OrgSlideTemplate is the predicate function for orgslidetemplate builders.
+type OrgSlideTemplate func(*sql.Selector)
+
 // Team is the predicate function for team builders.
 type Team func(*sql.Selector)
 

@@ -8,7 +8,7 @@ const BuiltinSlides = "# Astonish Slides — Authoring\n" + `
 Load this skill for slides, a slide deck, a slideshow, a slide show, a presentation, PowerPoint, or ` + "`.pptx`" + `. The always-on system-prompt pointer is not a substitute — you must ` + "`skill_lookup(\"slides\")`" + ` even if you already know the intake questions.
 
 **Start from a template.** Never ship an unstyled deck.
-**When a template is active, author with ` + "`fill_slides`" + ` (the whole deck in one call).** Do not copy ast-slide markup and do not call ` + "`write_slide`" + `. ` + "`fill_slide`" + ` is only for a later single-slide edit.
+**When a template is active, author with ` + "`fill_slides`" + ` (the whole deck in one call).** Do not copy ast-slide markup and do not call ` + "`write_slide`" + ` during initial authoring. ` + "`fill_slide`" + ` is only for a later single-slide text/layout refill. For a later image request, use ` + "`add_slide_image`" + `.
 **Intake is iterative.** Ask ONE question per turn with ` + "`ask_user`" + `, then end the turn. Never enumerate templates or variants as a numbered list in chat.
 
 ---
@@ -86,9 +86,9 @@ Do not emit one ` + "`fill_slide`" + ` per slide; that is one LLM round-trip per
 
 ### 5. ` + "`review_deck`" + ` — fix warning-level findings **on the slides they name**. Do not rebuild the whole deck. Then re-run until there are no warnings.
 
-When the user **attaches an image** (logo, photo) and asks to put it on a slide: call ` + "`add_deck_image`" + ` with ` + "`deck_slug`" + ` and **no url** (optional ` + "`attachment`" + ` = filename). Then ` + "`fill_slide`" + ` the cover/body ` + "`ph-pic-*`" + ` slot with the returned ` + "`assetRef`" + `. The server stores the bytes on the deck. Do not refuse or ask for a public URL.
+When the user asks to put an image (logo or photo) on an **existing slide**, call ` + "`add_slide_image`" + ` directly. Every slide accepts an image; a ` + "`ph-pic-*`" + ` well is an optional preset placement, **not a capability requirement**. Preserve the current slide and layout. Never switch cover variants, call ` + "`fill_slide`" + `, or ask whether to change layouts merely because no image well exists. For a this-turn attachment, omit ` + "`asset_ref`" + ` and ` + "`url`" + ` (optionally pass ` + "`attachment`" + ` = filename). For an existing template/deck image, pass its ` + "`asset_ref`" + `. Use optional ` + "`x/y/w/h`" + ` only when placement is clear; otherwise accept the tool's default. Report success only after this tool returns the persisted slide.
 
-` + "`write_slide`" + ` is only for a blank canvas the user explicitly asked for. ` + "`get_archetype`" + ` is an escape hatch; do not use it to copy chrome.
+` + "`add_deck_image`" + ` only stores an image without placing it; prefer ` + "`add_slide_image`" + ` when placement was requested. ` + "`write_slide`" + ` is for advanced non-image customizations or a blank canvas. ` + "`get_archetype`" + ` is an escape hatch; do not use it to copy chrome.
 
 ---
 

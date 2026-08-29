@@ -31,6 +31,48 @@ func withDocsServices(req *http.Request, personal, team store.DocsStore) *http.R
 	return req.WithContext(store.WithServices(req.Context(), &store.Services{PersonalDocs: personal, Docs: team}))
 }
 
+func TestListSlidesTemplatesMergesInheritedScopes(t *testing.T) {
+	personal := newMemDocsStore()
+	seedScopedTemplate(t, personal, "mine", "Mine")
+	org := store.NewMemorySlideTemplateStore()
+	if err := org.Save(context.Background(), slides.RecordFromTemplate(themes.Template{
+		Name:  "acme",
+		Label: "Acme Org",
+		Archetypes: []themes.Archetype{
+			{Kind: "title", Markup: `<ast-slide id="t"></ast-slide>`},
+		},
+	})); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/docs/slides/templates", nil)
+	req = req.WithContext(store.WithServices(req.Context(), &store.Services{
+		PersonalDocs:      personal,
+		Docs:              newMemDocsStore(),
+		OrgSlideTemplates: org,
+	}))
+	rec := httptest.NewRecorder()
+	ListSlidesTemplatesHandler(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Templates []struct {
+			Name  string `json:"name"`
+			Scope string `json:"scope"`
+		} `json:"templates"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, tmpl := range resp.Templates {
+		got[tmpl.Name+"|"+tmpl.Scope] = tmpl.Scope
+	}
+	if got["classic|builtin"] == "" || got["mine|personal"] == "" || got["acme|org"] == "" {
+		t.Fatalf("merged catalog missing rows: %+v", resp.Templates)
+	}
+}
+
 func TestListSlidesTemplatesReturnsBuiltins(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/api/docs/slides/templates", nil)
 	req = withDocsServices(req, newMemDocsStore(), newMemDocsStore())
@@ -360,13 +402,13 @@ func TestListSlidesTemplatesOmitsAssetsAndFlagsScope(t *testing.T) {
 		}
 		if tmpl.Name == "classic" {
 			builtin = true
-			if tmpl.Scope != "builtin" {
-				t.Fatalf("built-in scope wrong: %+v", tmpl)
-			}
 		}
 	}
-	if !corp || !builtin {
-		t.Fatalf("expected both corp (scoped) and classic (builtin); got %+v", resp.Templates)
+	if !corp {
+		t.Fatalf("expected corp in personal-only list; got %+v", resp.Templates)
+	}
+	if builtin {
+		t.Fatalf("scoped list must not include built-ins; got %+v", resp.Templates)
 	}
 }
 
@@ -386,7 +428,7 @@ func TestListSlidesTemplatesIncludesCover(t *testing.T) {
 		t.Fatalf("seed baked template: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/api/docs/slides/templates?scope=personal", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/docs/slides/templates", nil)
 	req = withDocsServices(req, personal, newMemDocsStore())
 	rec := httptest.NewRecorder()
 	ListSlidesTemplatesHandler(rec, req)

@@ -238,9 +238,10 @@ func GetSlideHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 type slideMovesRequest struct {
-	Moves   []slideMove `json:"moves"`
-	Texts   []slideText `json:"texts"`
-	Deletes []string    `json:"deletes"`
+	Moves   []slideMove   `json:"moves"`
+	Resizes []slideResize `json:"resizes"`
+	Texts   []slideText   `json:"texts"`
+	Deletes []string      `json:"deletes"`
 }
 
 type slideMove struct {
@@ -249,12 +250,20 @@ type slideMove struct {
 	Y  int    `json:"y"`
 }
 
+type slideResize struct {
+	ID string `json:"id"`
+	X  int    `json:"x"`
+	Y  int    `json:"y"`
+	W  int    `json:"w"`
+	H  int    `json:"h"`
+}
+
 type slideText struct {
 	ID   string `json:"id"`
 	Text string `json:"text"`
 }
 
-// PatchSlideHandler applies canvas object moves, text edits, and deletes.
+// PatchSlideHandler applies canvas object moves, resizes, text edits, and deletes.
 func PatchSlideHandler(w http.ResponseWriter, r *http.Request) {
 	position, err := strconv.Atoi(mux.Vars(r)["idx"])
 	if err != nil || position < 0 {
@@ -266,8 +275,8 @@ func PatchSlideHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid edit payload", http.StatusBadRequest)
 		return
 	}
-	if len(body.Moves) == 0 && len(body.Texts) == 0 && len(body.Deletes) == 0 {
-		http.Error(w, "moves, texts, or deletes are required", http.StatusBadRequest)
+	if len(body.Moves) == 0 && len(body.Resizes) == 0 && len(body.Texts) == 0 && len(body.Deletes) == 0 {
+		http.Error(w, "moves, resizes, texts, or deletes are required", http.StatusBadRequest)
 		return
 	}
 	svc, ok := requireDocsService(w, r)
@@ -277,6 +286,9 @@ func PatchSlideHandler(w http.ResponseWriter, r *http.Request) {
 	edits := slides.SlideEdits{Deletes: append([]string(nil), body.Deletes...)}
 	for _, m := range body.Moves {
 		edits.Moves = append(edits.Moves, slides.ElementMove{ID: m.ID, X: m.X, Y: m.Y})
+	}
+	for _, resize := range body.Resizes {
+		edits.Resizes = append(edits.Resizes, slides.ElementResize{ID: resize.ID, X: resize.X, Y: resize.Y, W: resize.W, H: resize.H})
 	}
 	for _, t := range body.Texts {
 		edits.Texts = append(edits.Texts, slides.ElementText{ID: t.ID, Text: t.Text})

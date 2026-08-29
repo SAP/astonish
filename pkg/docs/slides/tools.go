@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
+	"html"
 	"math"
 	"path"
 	"regexp"
@@ -272,6 +273,32 @@ type WriteSlideResult struct {
 	Deck        *DeckView           `json:"deck"`
 	Slide       *store.SlideContent `json:"slide"`
 	SlideCount  int                 `json:"slideCount"`
+	Diagnostics []Diagnostic        `json:"diagnostics,omitempty"`
+}
+
+// AddSlideImageArgs inserts an image directly into an existing slide without
+// changing its layout. Supply an existing asset-ref, a URL, or a chat attachment.
+type AddSlideImageArgs struct {
+	DeckSlug   string `json:"deck_slug" jsonschema:"Persist slug from create_deck, or the hint — in chat the server remaps a hint onto this session's draft."`
+	Position   int    `json:"position" jsonschema:"Zero-based position of the existing slide. The current slide and layout are preserved."`
+	AssetRef   string `json:"asset_ref,omitempty" jsonschema:"Existing sha256- asset-ref from the deck or its template. Omit when using url or a chat attachment."`
+	URL        string `json:"url,omitempty" jsonschema:"Public https image URL. Omit for an existing asset-ref or a chat attachment."`
+	Attachment string `json:"attachment,omitempty" jsonschema:"Optional chat attachment filename. If the user attached an image this turn, omit url and asset_ref and either omit this field or pass the filename."`
+	X          int    `json:"x,omitempty" jsonschema:"Optional left coordinate in 1920x1080 logical pixels. Defaults to a large right-side placement when all geometry is omitted."`
+	Y          int    `json:"y,omitempty" jsonschema:"Optional top coordinate in 1920x1080 logical pixels."`
+	W          int    `json:"w,omitempty" jsonschema:"Optional width in logical pixels. Must be positive when provided."`
+	H          int    `json:"h,omitempty" jsonschema:"Optional height in logical pixels. Must be positive when provided."`
+	Fit        string `json:"fit,omitempty" jsonschema:"Image fit: cover (default) or contain."`
+	Alt        string `json:"alt,omitempty" jsonschema:"Concise image description for accessibility."`
+}
+
+// AddSlideImageResult confirms the image element persisted on the requested slide.
+type AddSlideImageResult struct {
+	Deck        *DeckView           `json:"deck"`
+	Slide       *store.SlideContent `json:"slide"`
+	SlideCount  int                 `json:"slideCount"`
+	AssetRef    string              `json:"assetRef"`
+	ElementID   string              `json:"elementId"`
 	Diagnostics []Diagnostic        `json:"diagnostics,omitempty"`
 }
 
@@ -800,6 +827,15 @@ func getArchetype(ctx context.Context, args GetArchetypeArgs) (GetArchetypeResul
 	}, nil
 }
 
+// deckTemplateName returns the template name stamped on the deck's theme, or "".
+func deckTemplateName(ctx context.Context, svc Service, slug string) string {
+	deck, _, err := svc.Deck(ctx, slug)
+	if err != nil || deck == nil || deck.Theme == nil {
+		return ""
+	}
+	return strings.TrimSpace(deck.Theme[themeKeyTemplateName])
+}
+
 func writeSlide(ctx context.Context, args WriteSlideArgs) (WriteSlideResult, error) {
 	if args.Position < 0 {
 		return WriteSlideResult{}, fmt.Errorf("position must be zero or greater")
@@ -813,11 +849,150 @@ func writeSlide(ctx context.Context, args WriteSlideArgs) (WriteSlideResult, err
 	if err != nil {
 		return WriteSlideResult{Diagnostics: diagnostics}, err
 	}
+	// Copy any template assets (images, fonts) referenced by the new markup
+	// that aren't already in the deck. Without this, an ast-image whose
+	// asset-ref exists in the template but was never seeded into the deck
+	// renders as a broken image.
+	if refs := collectAssetRefs(args.Markup); len(refs) > 0 {
+		if tmplName := deckTemplateName(ctx, svc, slug); tmplName != "" {
+			if tmpl, ok := svc.resolveTemplate(ctx, tmplName); ok {
+				_ = svc.syncDeckAssetsFromTemplate(ctx, slug, tmpl)
+			}
+		}
+	}
 	deck, slides, err := svc.Deck(ctx, slug)
 	if err != nil {
 		return WriteSlideResult{}, fmt.Errorf("reload deck: %w", err)
 	}
 	return WriteSlideResult{Deck: deckView(deck), Slide: slide, SlideCount: len(slides), Diagnostics: diagnostics}, nil
+}
+
+func addSlideImage(ctx context.Context, args AddSlideImageArgs) (AddSlideImageResult, error) {
+	if args.Position < 0 {
+		return AddSlideImageResult{}, fmt.Errorf("position must be zero or greater")
+	}
+	svc, err := personalService(ctx)
+	if err != nil {
+		return AddSlideImageResult{}, err
+	}
+	slug := resolveWorkingDeckSlug(ctx, svc, args.DeckSlug)
+	deck, slides, err := svc.Deck(ctx, slug)
+	if err != nil {
+		return AddSlideImageResult{}, err
+	}
+	var current *store.SlideContent
+	for _, slide := range slides {
+		if slide.Position == args.Position {
+			current = slide
+			break
+		}
+	}
+	if current == nil {
+		return AddSlideImageResult{}, fmt.Errorf("no slide at position %d", args.Position)
+	}
+
+	ref := strings.TrimSpace(args.AssetRef)
+	if ref != "" && (strings.TrimSpace(args.URL) != "" || strings.TrimSpace(args.Attachment) != "") {
+		return AddSlideImageResult{}, fmt.Errorf("pass asset_ref or url/attachment, not both")
+	}
+	if ref == "" {
+		added, err := addDeckImage(ctx, AddDeckImageArgs{
+			DeckSlug:   slug,
+			URL:        args.URL,
+			Attachment: args.Attachment,
+			Alt:        args.Alt,
+		})
+		if err != nil {
+			return AddSlideImageResult{}, err
+		}
+		ref = added.AssetRef
+		deck, _, err = svc.Deck(ctx, slug)
+		if err != nil {
+			return AddSlideImageResult{}, fmt.Errorf("reload deck assets: %w", err)
+		}
+	}
+	if !strings.HasPrefix(ref, "sha256-") {
+		return AddSlideImageResult{}, fmt.Errorf("asset_ref must start with sha256-")
+	}
+	assetExists := deck.Assets[ref] != ""
+	if !assetExists {
+		if tmplName := deckTemplateName(ctx, svc, slug); tmplName != "" {
+			if tmpl, ok := svc.resolveTemplate(ctx, tmplName); ok {
+				assetExists = tmpl.Assets[ref] != ""
+			}
+		}
+	}
+	if !assetExists {
+		return AddSlideImageResult{}, fmt.Errorf("image asset %q is not available in this deck or its template", ref)
+	}
+
+	parsed, _, err := ParseSlide(current.Content)
+	if err != nil {
+		return AddSlideImageResult{}, fmt.Errorf("parse existing slide: %w", err)
+	}
+	usedIDs := make(map[string]bool)
+	var collectIDs func([]Node)
+	collectIDs = func(nodes []Node) {
+		for _, node := range nodes {
+			usedIDs[node.ID] = true
+			collectIDs(node.Children)
+		}
+	}
+	collectIDs(parsed.Nodes)
+	elementID := "image-1"
+	for i := 1; usedIDs[elementID]; i++ {
+		elementID = fmt.Sprintf("image-%d", i+1)
+	}
+
+	x, y, w, h := args.X, args.Y, args.W, args.H
+	if x == 0 && y == 0 && w == 0 && h == 0 {
+		x, y, w, h = 1120, 140, 680, 800
+	} else {
+		if w == 0 {
+			w = 680
+		}
+		if h == 0 {
+			h = 800
+		}
+	}
+	if w <= 0 || h <= 0 {
+		return AddSlideImageResult{}, fmt.Errorf("image width and height must be positive")
+	}
+	fit := strings.ToLower(strings.TrimSpace(args.Fit))
+	if fit == "" {
+		fit = "cover"
+	}
+	if fit != "cover" && fit != "contain" {
+		return AddSlideImageResult{}, fmt.Errorf("fit must be cover or contain")
+	}
+
+	imageMarkup := fmt.Sprintf(`<ast-image id="%s" x="%d" y="%d" w="%d" h="%d" asset-ref="%s" fit="%s" alt="%s"></ast-image>`,
+		elementID, x, y, w, h, html.EscapeString(ref), fit, html.EscapeString(strings.TrimSpace(args.Alt)))
+	lower := strings.ToLower(current.Content)
+	closeAt := strings.LastIndex(lower, "</ast-slide>")
+	if closeAt < 0 {
+		return AddSlideImageResult{}, fmt.Errorf("existing slide has no closing ast-slide element")
+	}
+	markup := current.Content[:closeAt] + imageMarkup + current.Content[closeAt:]
+	written, diagnostics, err := svc.WriteSlide(ctx, slug, args.Position, markup, current.Notes)
+	if err != nil {
+		return AddSlideImageResult{AssetRef: ref, ElementID: elementID, Diagnostics: diagnostics}, err
+	}
+	if tmplName := deckTemplateName(ctx, svc, slug); tmplName != "" {
+		if tmpl, ok := svc.resolveTemplate(ctx, tmplName); ok {
+			if err := svc.syncDeckAssetsFromTemplate(ctx, slug, tmpl); err != nil {
+				return AddSlideImageResult{}, err
+			}
+		}
+	}
+	deck, slides, err = svc.Deck(ctx, slug)
+	if err != nil {
+		return AddSlideImageResult{}, fmt.Errorf("reload deck: %w", err)
+	}
+	return AddSlideImageResult{
+		Deck: deckView(deck), Slide: written, SlideCount: len(slides),
+		AssetRef: ref, ElementID: elementID, Diagnostics: diagnostics,
+	}, nil
 }
 
 func getDeck(ctx context.Context, args GetDeckArgs) (DeckResult, error) {
@@ -876,29 +1051,17 @@ func listDecks(ctx context.Context, _ ListDecksArgs) (ListDecksResult, error) {
 }
 
 func listTemplates(ctx context.Context, _ ListTemplatesArgs) (ListTemplatesResult, error) {
-	svc, err := personalService(ctx)
-	if err != nil {
-		return ListTemplatesResult{}, err
-	}
-	summaries := make([]TemplateSummary, 0)
-	seen := make(map[string]bool)
-	for _, t := range themes.ListTemplates() {
-		if seen[t.Name] {
-			continue
-		}
-		seen[t.Name] = true
-		summaries = append(summaries, templateSummary(t, "builtin"))
-	}
-	scoped, err := svc.ListTemplates(ctx)
+	all, err := catalogFromContext(ctx).ListAll(ctx)
 	if err != nil {
 		return ListTemplatesResult{}, fmt.Errorf("list templates: %w", err)
 	}
-	for _, t := range scoped {
-		if seen[t.Name] {
-			continue
+	summaries := make([]TemplateSummary, 0, len(all))
+	for _, t := range all {
+		scope := t.Scope
+		if scope == "" {
+			scope = ScopePersonal
 		}
-		seen[t.Name] = true
-		summaries = append(summaries, templateSummary(t, "scope"))
+		summaries = append(summaries, templateSummary(t, scope))
 	}
 	return ListTemplatesResult{Templates: summaries}, nil
 }
@@ -1104,20 +1267,20 @@ func applyStampedBookendKind(spec FillSlideSpec, deck *store.DeckManifest, lastP
 	if deck == nil || deck.Theme == nil {
 		return spec
 	}
-	if spec.Position == 0 {
+	// Only default to the stamped kind when the model omitted a kind
+	// entirely. Any explicit kind — even the generic base "title" — is
+	// respected so the model can switch cover/closing variants after the
+	// initial fill.
+	if spec.Position == 0 && spec.Kind == "" {
 		if k := strings.TrimSpace(deck.Theme[themeKeyTitleKind]); k != "" {
-			if spec.Kind == "" || isOfficialBookendKind(spec.Kind) || spec.Kind == RecipeCover {
-				spec.Kind = k
-				spec.Label = ""
-			}
+			spec.Kind = k
+			spec.Label = ""
 		}
 	}
-	if spec.Position == lastPos && lastPos > 0 {
+	if spec.Position == lastPos && lastPos > 0 && spec.Kind == "" {
 		if k := strings.TrimSpace(deck.Theme[themeKeyClosingKind]); k != "" {
-			if spec.Kind == "" || isOfficialBookendKind(spec.Kind) || spec.Kind == RecipeCloser {
-				spec.Kind = k
-				spec.Label = ""
-			}
+			spec.Kind = k
+			spec.Label = ""
 		}
 	}
 	return spec
@@ -1154,7 +1317,11 @@ func stampBookendKinds(tmpl themes.Template, args CreateDeckArgs, merged map[str
 func createDeckCatalogInstructions(tmpl themes.Template, theme map[string]string) string {
 	s := "MANDATORY: author the whole deck in ONE fill_slides call (slides: [{position, kind or label, fills}, ...]). " +
 		"Do NOT call fill_slide once per slide — that is one LLM round-trip per slide. fill_slide is only for later single-slide edits. " +
-		"Do NOT call write_slide and do NOT copy archetype markup. " +
+		"For the initial fill: do NOT call write_slide and do NOT copy archetype markup. " +
+		"After the deck is created, use add_slide_image whenever the user asks to add a picture to an existing slide. " +
+		"Every slide accepts images; image slots are optional conveniences, never restrictions. Preserve the current layout and never switch variants merely to add a picture. " +
+		"Use write_slide for other customizations that fill_slides cannot express (adding/removing or repositioning non-image elements). " +
+		"For write_slide, read_slide first and edit the returned markup. Template asset-refs are auto-resolved. " +
 		"Body slides: recipe-* catalog entries (named slots: eyebrow, headline, body_1, item_1_title, …). " +
 		"Pick the recipe whose slot count matches the content. A chapter is an eyebrow on a full content slide — do not insert empty section dividers. "
 	titles := officialBookendKinds(tmpl, "title")
@@ -1257,17 +1424,12 @@ type templatePick struct {
 // the client from the template's own asset map (never data: bytes here). Order
 // mirrors list_templates (built-ins first, then scoped) for determinism.
 func templatePickerOptions(ctx context.Context) ([]templatePick, error) {
-	svc, err := personalService(ctx)
+	resolved, err := catalogFromContext(ctx).ListResolved(ctx)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("list templates: %w", err)
 	}
-	picks := make([]templatePick, 0)
-	seen := make(map[string]bool)
-	add := func(t themes.Template) {
-		if seen[t.Name] {
-			return
-		}
-		seen[t.Name] = true
+	picks := make([]templatePick, 0, len(resolved))
+	for _, t := range resolved {
 		label := strings.TrimSpace(t.Label)
 		if label == "" {
 			label = t.Name
@@ -1282,16 +1444,6 @@ func templatePickerOptions(ctx context.Context) ([]templatePick, error) {
 			}
 		}
 		picks = append(picks, pick)
-	}
-	for _, t := range themes.ListTemplates() {
-		add(t)
-	}
-	scoped, err := svc.ListTemplates(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("list templates: %w", err)
-	}
-	for _, t := range scoped {
-		add(t)
 	}
 	return picks, nil
 }
@@ -2836,8 +2988,8 @@ func GetTools() ([]tool.Tool, error) {
 				return getArchetype(ctx, args)
 			})
 		}},
-		{"write_slide", "Write one slide as a complete ast-slide fragment. Only for blank-canvas decks (no template). When create_deck returned a catalog, use fill_slides instead.", func() (tool.Tool, error) {
-			return functiontool.New(functiontool.Config{Name: "write_slide", Description: "Write one slide as a complete ast-slide fragment. Only for blank-canvas decks (no template). When create_deck returned a catalog, use fill_slides instead."}, func(ctx tool.Context, args WriteSlideArgs) (WriteSlideResult, error) {
+		{"write_slide", "Write one slide as a complete ast-slide fragment. For blank-canvas decks or when the user requests a customization that fill_slides cannot express (adding/removing elements, repositioning, inserting an image where the archetype has no image slot). read_slide first, edit the markup, then write_slide. Template asset-refs (sha256-…) are auto-resolved.", func() (tool.Tool, error) {
+			return functiontool.New(functiontool.Config{Name: "write_slide", Description: "Write one slide as a complete ast-slide fragment. For blank-canvas decks or when the user requests a customization that fill_slides cannot express (adding/removing elements, repositioning, inserting an image where the archetype has no image slot). read_slide first, edit the markup, then write_slide. Template asset-refs (sha256-…) are auto-resolved."}, func(ctx tool.Context, args WriteSlideArgs) (WriteSlideResult, error) {
 				return writeSlide(ctx, args)
 			})
 		}},
@@ -2881,9 +3033,14 @@ func GetTools() ([]tool.Tool, error) {
 				return listDeckAssets(ctx, args)
 			})
 		}},
-		{"add_deck_image", "Add an image to the deck asset library and return the asset-ref for fill_slides/fill_slide (ph-pic or ast-image). Prefer a chat attachment: when the user uploaded a file this turn, omit url (optional attachment=filename). Otherwise pass a public https url (SSRF-protected). Do not ask the user to rehost an attached file.", func() (tool.Tool, error) {
-			return functiontool.New(functiontool.Config{Name: "add_deck_image", Description: "Add an image to the deck asset library and return the asset-ref for fill_slides/fill_slide (ph-pic or ast-image). Prefer a chat attachment: when the user uploaded a file this turn, omit url (optional attachment=filename). Otherwise pass a public https url (SSRF-protected). Do not ask the user to rehost an attached file."}, func(ctx tool.Context, args AddDeckImageArgs) (AddDeckImageResult, error) {
+		{"add_deck_image", "Add an image to the deck asset library and return the asset-ref for later use. Prefer add_slide_image when the user asks to place a picture on an existing slide.", func() (tool.Tool, error) {
+			return functiontool.New(functiontool.Config{Name: "add_deck_image", Description: "Add an image to the deck asset library and return the asset-ref for later use. Prefer add_slide_image when the user asks to place a picture on an existing slide."}, func(ctx tool.Context, args AddDeckImageArgs) (AddDeckImageResult, error) {
 				return addDeckImage(ctx, args)
+			})
+		}},
+		{"add_slide_image", "Add a picture directly to ANY existing slide while preserving its current layout and all existing elements. Image wells are optional conveniences, never requirements. Use this whenever the user asks to add a photo/logo to a slide: do not switch cover variants, do not call fill_slide, and do not ask permission to change layouts. Accepts an existing asset_ref, a public URL, or this-turn chat attachment. Defaults to a large right-side image; optional x/y/w/h customize placement.", func() (tool.Tool, error) {
+			return functiontool.New(functiontool.Config{Name: "add_slide_image", Description: "Add a picture directly to ANY existing slide while preserving its current layout and all existing elements. Image wells are optional conveniences, never requirements. Use this whenever the user asks to add a photo/logo to a slide: do not switch cover variants, do not call fill_slide, and do not ask permission to change layouts. Accepts an existing asset_ref, a public URL, or this-turn chat attachment. Defaults to a large right-side image; optional x/y/w/h customize placement."}, func(ctx tool.Context, args AddSlideImageArgs) (AddSlideImageResult, error) {
+				return addSlideImage(ctx, args)
 			})
 		}},
 		{"ask_user", "Ask the user ONE structured question inline in chat and WAIT for their reply. kind='yesno' shows Yes/No; kind='select' shows a pick-one list. Intake: audience, length, who picks the template. If they want to choose, slidesTemplatePicker=true (kind='select', no options) shows a live cover thumbnail per template. After a template is known, slidesTemplate+slidesKind=title|closing shows official cover/end LAYOUTS (sample photos stripped). If the chosen title has a ph-pic well, slidesImagePicker=true with slidesTemplate lists template photos plus provide-own (upload) and none. The modern template has no example photos: yes/no for a top-right logo. slidesPalettePicker=true with slidesTemplate shows colorways when the template has palettes (classic, modern). Do NOT hand-copy markup. After calling it, end your turn.", func() (tool.Tool, error) {

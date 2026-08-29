@@ -1,7 +1,7 @@
 /// <reference types="vitest" />
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { render, screen, waitFor, fireEvent } from '@testing-library/react'
+import { act, render, screen, waitFor, fireEvent } from '@testing-library/react'
 import SlidesDeckView from '../SlidesDeckView'
 import * as slidesApi from '../../../api/slides'
 import '@testing-library/jest-dom'
@@ -242,6 +242,37 @@ describe('SlidesDeckView refresh signal', () => {
     ))
     expect(postMessage).toHaveBeenCalledWith({ type: 'ast-edit-commit' }, '*')
     await waitFor(() => expect(screen.getByTestId('slides-save')).toBeInTheDocument())
+  })
+
+  it('applies pending image resizes through patchSlideMoves', async () => {
+    render(<SlidesDeckView deckSlug="d" />)
+    await screen.findByTestId('slides-deck-frame')
+
+    await act(async () => {
+      window.dispatchEvent(new MessageEvent('message', {
+        data: {
+          type: 'ast-edit-changed',
+          index: 0,
+          moves: [],
+          resizes: [{ id: 'photo', x: 100, y: 120, w: 600, h: 300 }],
+          texts: [],
+          deletes: [],
+        },
+      }))
+    })
+    fireEvent.click(await screen.findByTestId('slides-edit-apply'))
+
+    await waitFor(() => expect(slidesApi.patchSlideMoves).toHaveBeenCalledWith(
+      'd',
+      0,
+      {
+        moves: [],
+        resizes: [{ id: 'photo', x: 100, y: 120, w: 600, h: 300 }],
+        texts: [],
+        deletes: [],
+      },
+      'personal',
+    ))
   })
 
   it('shows Delete when an object is selected and posts ast-edit-delete', async () => {

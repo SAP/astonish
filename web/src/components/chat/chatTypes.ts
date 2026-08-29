@@ -313,6 +313,8 @@ export interface ChatQuestionOption {
     /** Template name; asset-refs in `markup` resolve from this template's
      *  assets at render time (never embedded data: bytes). */
     template?: string
+    /** Owning catalog scope so media URLs can disambiguate same-name templates. */
+    templateScope?: 'personal' | 'team' | 'org' | 'platform' | 'builtin'
   }
 }
 

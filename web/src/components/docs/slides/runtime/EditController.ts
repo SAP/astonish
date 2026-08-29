@@ -20,9 +20,11 @@ type Geom = { x: number; y: number; w: number; h: number }
 export type AlignGuide = { axis: 'x' | 'y'; pos: number }
 
 export type EditMove = { id: string; x: number; y: number }
+export type EditResize = { id: string; x: number; y: number; w: number; h: number }
 export type EditText = { id: string; text: string }
 export type EditDraft = {
   moves: EditMove[]
+  resizes: EditResize[]
   texts: EditText[]
   deletes: string[]
 }
@@ -37,7 +39,20 @@ type DragState = {
   alreadySelected: boolean
 }
 
-type Baseline = { x: number; y: number; text: string }
+type ResizeCorner = 'nw' | 'ne' | 'se' | 'sw'
+
+type ResizeState = {
+  el: HTMLElement
+  corner: ResizeCorner
+  start: Geom
+  pointerX: number
+  pointerY: number
+  moved: boolean
+}
+
+type Baseline = { x: number; y: number; w: number; h: number; text: string }
+
+const MIN_IMAGE_SIZE = 32
 
 /** Canvas object editor for the harness iframe (not Present / fullscreen). */
 export class EditController {
@@ -45,6 +60,8 @@ export class EditController {
   private hover: HTMLElement | null = null
   private selected: HTMLElement | null = null
   private drag: DragState | null = null
+  private resize: ResizeState | null = null
+  private resizeHandles: HTMLElement | null = null
   private editing: HTMLElement | null = null
   private editingOriginal = ''
   private editingHTML = ''
@@ -76,7 +93,9 @@ export class EditController {
     this.clearHover()
     this.clearSelected()
     this.clearGuides()
+    this.clearResizeHandles()
     this.drag = null
+    this.resize = null
     this.deck.removeAttribute('edit')
     this.deck.removeAttribute('data-edit-dragging')
     this.deck.removeEventListener('pointerdown', this.onPointerDown)
@@ -109,7 +128,9 @@ export class EditController {
     this.clearSelected()
     this.clearGuides()
     this.deck.removeAttribute('data-edit-dragging')
+    this.deck.removeAttribute('data-edit-resizing')
     this.drag = null
+    this.resize = null
   }
 
   /** Treat current slide as the saved baseline (after Apply). */
@@ -117,8 +138,11 @@ export class EditController {
     this.endTextEdit(true, false)
     this.snapshotSlide(this.slideIndex())
     this.drag = null
+    this.resize = null
     this.clearGuides()
+    this.positionResizeHandles()
     this.deck.removeAttribute('data-edit-dragging')
+    this.deck.removeAttribute('data-edit-resizing')
   }
 
   /** Remove the selected object (toolbar Delete or keyboard). */
@@ -141,7 +165,7 @@ export class EditController {
     for (const el of editableChildren(slide)) {
       if (!el.id) continue
       const g = geom(el)
-      this.baseline.set(baselineKey(index, el.id), { x: g.x, y: g.y, text: el.textContent ?? '' })
+      this.baseline.set(baselineKey(index, el.id), { x: g.x, y: g.y, w: g.w, h: g.h, text: el.textContent ?? '' })
     }
   }
 
@@ -164,13 +188,17 @@ export class EditController {
   private pendingDraft(slide: HTMLElement | null = this.activeSlide(), index: number = this.slideIndex()): EditDraft {
     const deletes = [...this.deleted].filter(key => key.startsWith(`${index}:`)).map(key => key.slice(`${index}:`.length))
     const moves: EditMove[] = []
+    const resizes: EditResize[] = []
     const texts: EditText[] = []
-    if (!slide) return { moves, texts, deletes }
+    if (!slide) return { moves, resizes, texts, deletes }
     for (const el of editableChildren(slide)) {
       if (!el.id) continue
       const orig = this.baseline.get(baselineKey(index, el.id))
       const g = geom(el)
-      if (!orig || orig.x !== g.x || orig.y !== g.y) {
+      const resized = Boolean(orig && (orig.w !== g.w || orig.h !== g.h))
+      if (resized) {
+        resizes.push({ id: el.id, x: g.x, y: g.y, w: g.w, h: g.h })
+      } else if (!orig || orig.x !== g.x || orig.y !== g.y) {
         moves.push({ id: el.id, x: g.x, y: g.y })
       }
       const text = el.textContent ?? ''
@@ -178,7 +206,7 @@ export class EditController {
         texts.push({ id: el.id, text })
       }
     }
-    return { moves, texts, deletes }
+    return { moves, resizes, texts, deletes }
   }
 
   private notifyParent(slide?: HTMLElement | null, index?: number): void {
@@ -221,6 +249,7 @@ export class EditController {
         try { this.deck.focus({ preventScroll: true }) } catch { this.deck.focus() }
       }
     }
+    this.renderResizeHandles()
     this.notifySelection()
   }
 
@@ -228,6 +257,7 @@ export class EditController {
     if (!this.selected) return
     this.selected.removeAttribute('data-edit-selected')
     this.selected = null
+    this.clearResizeHandles()
     this.notifySelection()
   }
 
@@ -293,6 +323,7 @@ export class EditController {
   private readonly onSlideChange = (): void => {
     if (this.editing) this.endTextEdit(true)
     this.drag = null
+    this.resize = null
     this.clearHover()
     this.clearSelected()
     this.clearGuides()
@@ -301,6 +332,25 @@ export class EditController {
 
   private readonly onPointerDown = (event: PointerEvent): void => {
     if (!this.enabled || event.button !== 0) return
+    const handle = (event.target as Element | null)?.closest<HTMLElement>('[data-resize-corner]')
+    if (handle && this.selected?.tagName === 'AST-IMAGE') {
+      event.preventDefault()
+      event.stopPropagation()
+      this.resize = {
+        el: this.selected,
+        corner: handle.dataset.resizeCorner as ResizeCorner,
+        start: geom(this.selected),
+        pointerX: event.clientX,
+        pointerY: event.clientY,
+        moved: false,
+      }
+      try {
+        this.deck.setPointerCapture(event.pointerId)
+      } catch {
+        /* jsdom */
+      }
+      return
+    }
     if (this.editing) {
       const t = event.target as Node | null
       if (t && this.editing.contains(t)) return
@@ -335,6 +385,18 @@ export class EditController {
 
   private readonly onPointerMove = (event: PointerEvent): void => {
     if (!this.enabled || this.editing) return
+    if (this.resize) {
+      const scale = canvasScale(this.deck)
+      const dx = (event.clientX - this.resize.pointerX) / scale
+      const dy = (event.clientY - this.resize.pointerY) / scale
+      if (!this.resize.moved && Math.hypot(dx, dy) < DRAG_THRESHOLD) return
+      this.resize.moved = true
+      this.deck.setAttribute('data-edit-resizing', '')
+      const next = proportionalResize(this.resize.start, this.resize.corner, dx, dy)
+      setFullGeom(this.resize.el, next)
+      this.positionResizeHandles()
+      return
+    }
     if (!this.drag) {
       const hit = hitTest(this.deck, event.clientX, event.clientY)
       this.setHover(hit)
@@ -352,10 +414,23 @@ export class EditController {
     const snapped = snapToAlign({ x: raw.x, y: raw.y, w: g.w, h: g.h }, others)
     const pos = clampPos(snapped.x, snapped.y, g.w, g.h)
     setGeom(this.drag.el, pos.x, pos.y)
+    this.positionResizeHandles()
     this.renderGuides(snapped.guides)
   }
 
   private readonly onPointerUp = (event: PointerEvent): void => {
+    if (this.resize) {
+      const moved = this.resize.moved
+      this.resize = null
+      this.deck.removeAttribute('data-edit-resizing')
+      try {
+        this.deck.releasePointerCapture(event.pointerId)
+      } catch {
+        /* already released / jsdom */
+      }
+      if (moved) this.notifyParent()
+      return
+    }
     if (!this.drag) return
     const moved = this.drag.moved
     const alreadySelected = this.drag.alreadySelected
@@ -416,6 +491,40 @@ export class EditController {
       event.preventDefault()
       this.startTextEdit(this.selected)
     }
+  }
+
+  private renderResizeHandles(): void {
+    this.clearResizeHandles()
+    if (this.selected?.tagName !== 'AST-IMAGE') return
+    const overlay = document.createElement('div')
+    overlay.className = 'ast-edit-resize-handles'
+    overlay.setAttribute('aria-hidden', 'true')
+    for (const corner of ['nw', 'ne', 'se', 'sw'] as ResizeCorner[]) {
+      const handle = document.createElement('span')
+      handle.className = 'ast-edit-resize-handle'
+      handle.dataset.resizeCorner = corner
+      overlay.append(handle)
+    }
+    this.deck.append(overlay)
+    this.resizeHandles = overlay
+    this.positionResizeHandles()
+  }
+
+  private positionResizeHandles(): void {
+    if (!this.resizeHandles || !this.selected) return
+    const g = geom(this.selected)
+    const scale = canvasScale(this.deck)
+    const handleSize = Math.round(24 / scale)
+    Object.assign(this.resizeHandles.style, {
+      left: `${g.x}px`, top: `${g.y}px`, width: `${g.w}px`, height: `${g.h}px`,
+      '--ast-edit-handle-size': `${handleSize}px`,
+      '--ast-edit-handle-offset': `${Math.round(handleSize / -2)}px`,
+    })
+  }
+
+  private clearResizeHandles(): void {
+    this.resizeHandles?.remove()
+    this.resizeHandles = null
   }
 
   private siblingBoxes(moving: HTMLElement): Geom[] {
@@ -491,6 +600,36 @@ function setGeom(el: HTMLElement, x: number, y: number): void {
   node.y = y
   el.setAttribute('x', String(x))
   el.setAttribute('y', String(y))
+}
+
+function setFullGeom(el: HTMLElement, value: Geom): void {
+  const node = el as HTMLElement & { x: number; y: number; w: number; h: number }
+  node.x = value.x
+  node.y = value.y
+  node.w = value.w
+  node.h = value.h
+  el.setAttribute('x', String(value.x))
+  el.setAttribute('y', String(value.y))
+  el.setAttribute('w', String(value.w))
+  el.setAttribute('h', String(value.h))
+}
+
+export function proportionalResize(start: Geom, corner: ResizeCorner, dx: number, dy: number): Geom {
+  if (start.w <= 0 || start.h <= 0) return start
+  const ratio = start.w / start.h
+  const horizontal = corner.endsWith('e') ? dx : -dx
+  const vertical = corner.startsWith('s') ? dy : -dy
+  const scaleFromX = (start.w + horizontal) / start.w
+  const scaleFromY = (start.h + vertical) / start.h
+  const scale = Math.max(MIN_IMAGE_SIZE / start.w, MIN_IMAGE_SIZE / start.h, Math.abs(scaleFromX - 1) >= Math.abs(scaleFromY - 1) ? scaleFromX : scaleFromY)
+  const w = Math.max(MIN_IMAGE_SIZE, Math.round(start.w * scale))
+  const h = Math.max(MIN_IMAGE_SIZE, Math.round(w / ratio))
+  return {
+    x: corner.endsWith('w') ? start.x + start.w - w : start.x,
+    y: corner.startsWith('n') ? start.y + start.h - h : start.y,
+    w,
+    h,
+  }
 }
 
 function canvasScale(deck: HTMLElement): number {

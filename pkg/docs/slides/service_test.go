@@ -142,6 +142,29 @@ func TestServiceMoveSlideElementsRewritesXY(t *testing.T) {
 	}
 }
 
+func TestServiceApplySlideEditsResizesElement(t *testing.T) {
+	store := &memoryDocsStore{}
+	svc := Service{Store: store}
+	ctx := context.Background()
+	deck, err := svc.CreateDeck(ctx, "resize", "Resize", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	markup := `<ast-slide id="s"><ast-image id="photo" x="100" y="120" w="400" h="200" asset-ref="sha256-photo"></ast-image></ast-slide>`
+	if _, _, err := svc.WriteSlide(ctx, deck.Slug, 0, markup, ""); err != nil {
+		t.Fatal(err)
+	}
+	item, diags, err := svc.ApplySlideEdits(ctx, deck.Slug, 0, SlideEdits{Resizes: []ElementResize{{ID: "photo", X: 50, Y: 70, W: 600, H: 300}}})
+	if err != nil || HasErrors(diags) {
+		t.Fatalf("resize: diags=%#v err=%v", diags, err)
+	}
+	for _, attr := range []string{`x="50"`, `y="70"`, `w="600"`, `h="300"`} {
+		if !strings.Contains(item.Content, attr) {
+			t.Fatalf("resized geometry missing %s: %s", attr, item.Content)
+		}
+	}
+}
+
 func TestServiceApplySlideEditsTextAndDelete(t *testing.T) {
 	ctx := context.Background()
 	backend := &memoryDocsStore{}

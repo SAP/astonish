@@ -19,16 +19,16 @@ type mockChannel struct {
 	status channels.ChannelStatus
 }
 
-func (m *mockChannel) ID() string { return m.id }
-func (m *mockChannel) Name() string { return m.id }
+func (m *mockChannel) ID() string                                               { return m.id }
+func (m *mockChannel) Name() string                                             { return m.id }
 func (m *mockChannel) Start(_ context.Context, _ channels.MessageHandler) error { return nil }
-func (m *mockChannel) Stop(_ context.Context) error { return nil }
+func (m *mockChannel) Stop(_ context.Context) error                             { return nil }
 func (m *mockChannel) Send(_ context.Context, _ channels.Target, _ channels.OutboundMessage) error {
 	return nil
 }
-func (m *mockChannel) BroadcastTargets() []channels.Target          { return nil }
+func (m *mockChannel) BroadcastTargets() []channels.Target                   { return nil }
 func (m *mockChannel) SendTyping(_ context.Context, _ channels.Target) error { return nil }
-func (m *mockChannel) Status() channels.ChannelStatus               { return m.status }
+func (m *mockChannel) Status() channels.ChannelStatus                        { return m.status }
 
 // For Telegram: implements BotUsernameProvider
 func (m *mockChannel) BotUsername() string { return m.status.AccountID }
@@ -334,16 +334,19 @@ func (m *mockPlatformBackendForChannelInfo) PlatformSettings() store.PlatformSet
 func (m *mockPlatformBackendForChannelInfo) OrgSettings(_ string) store.OrgSettingsStore { return nil }
 func (m *mockPlatformBackendForChannelInfo) PlatformMCPServers() store.MCPServerStore    { return nil }
 func (m *mockPlatformBackendForChannelInfo) PlatformSkills() store.SkillStore            { return nil }
-func (m *mockPlatformBackendForChannelInfo) SetEmbedFunc(_ store.EmbedFunc)              {}
-func (m *mockPlatformBackendForChannelInfo) GetEmbedFunc() store.EmbedFunc               { return nil }
-func (m *mockPlatformBackendForChannelInfo) SandboxLayers() store.LayerStore             { return nil }
+func (m *mockPlatformBackendForChannelInfo) PlatformSlideTemplates() store.SlideTemplateStore {
+	return nil
+}
+func (m *mockPlatformBackendForChannelInfo) SetEmbedFunc(_ store.EmbedFunc)  {}
+func (m *mockPlatformBackendForChannelInfo) GetEmbedFunc() store.EmbedFunc   { return nil }
+func (m *mockPlatformBackendForChannelInfo) SandboxLayers() store.LayerStore { return nil }
 func (m *mockPlatformBackendForChannelInfo) SandboxTemplates() store.SandboxTemplateStore {
 	return nil
 }
-func (m *mockPlatformBackendForChannelInfo) SecretGetter() func(string) string    { return nil }
-func (m *mockPlatformBackendForChannelInfo) MigrateAll(_ context.Context) error   { return nil }
+func (m *mockPlatformBackendForChannelInfo) SecretGetter() func(string) string      { return nil }
+func (m *mockPlatformBackendForChannelInfo) MigrateAll(_ context.Context) error     { return nil }
 func (m *mockPlatformBackendForChannelInfo) CleanupExpired(_ context.Context) error { return nil }
-func (m *mockPlatformBackendForChannelInfo) PlatformDB() *sql.DB                  { return nil }
+func (m *mockPlatformBackendForChannelInfo) PlatformDB() *sql.DB                    { return nil }
 func (m *mockPlatformBackendForChannelInfo) MigrateAllSchemas(_ context.Context) error {
 	return nil
 }

@@ -126,6 +126,7 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
         tag?: string | null
         changes?: SlideEditDraft['moves']
         moves?: SlideEditDraft['moves']
+        resizes?: SlideEditDraft['resizes']
         texts?: SlideEditDraft['texts']
         deletes?: string[]
       } | null
@@ -147,6 +148,7 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
         if (typeof index !== 'number' || !Number.isInteger(index) || index < 0) return
         const draft: SlideEditDraft = {
           moves: data.moves ?? data.changes ?? [],
+          ...(data.resizes?.length ? { resizes: data.resizes } : {}),
           texts: data.texts ?? [],
           deletes: data.deletes ?? [],
         }

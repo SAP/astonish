@@ -14,6 +14,7 @@ import (
 	"github.com/SAP/astonish/ent/org/orgnetworkpolicy"
 	"github.com/SAP/astonish/ent/org/orgskill"
 	"github.com/SAP/astonish/ent/org/orgskillfile"
+	"github.com/SAP/astonish/ent/org/orgslidetemplate"
 	"github.com/SAP/astonish/ent/org/schema"
 	"github.com/SAP/astonish/ent/org/team"
 	"github.com/SAP/astonish/ent/org/teammembership"
@@ -254,6 +255,42 @@ func init() {
 	orgskillfileDescID := orgskillfileFields[0].Descriptor()
 	// orgskillfile.DefaultID holds the default value on creation for the id field.
 	orgskillfile.DefaultID = orgskillfileDescID.Default.(func() uuid.UUID)
+	orgslidetemplateFields := schema.OrgSlideTemplate{}.Fields()
+	_ = orgslidetemplateFields
+	// orgslidetemplateDescName is the schema descriptor for name field.
+	orgslidetemplateDescName := orgslidetemplateFields[1].Descriptor()
+	// orgslidetemplate.NameValidator is a validator for the "name" field. It is called by the builders before save.
+	orgslidetemplate.NameValidator = orgslidetemplateDescName.Validators[0].(func(string) error)
+	// orgslidetemplateDescLabel is the schema descriptor for label field.
+	orgslidetemplateDescLabel := orgslidetemplateFields[2].Descriptor()
+	// orgslidetemplate.DefaultLabel holds the default value on creation for the label field.
+	orgslidetemplate.DefaultLabel = orgslidetemplateDescLabel.Default.(string)
+	// orgslidetemplateDescDescription is the schema descriptor for description field.
+	orgslidetemplateDescDescription := orgslidetemplateFields[3].Descriptor()
+	// orgslidetemplate.DefaultDescription holds the default value on creation for the description field.
+	orgslidetemplate.DefaultDescription = orgslidetemplateDescDescription.Default.(string)
+	// orgslidetemplateDescSchemaVersion is the schema descriptor for schema_version field.
+	orgslidetemplateDescSchemaVersion := orgslidetemplateFields[4].Descriptor()
+	// orgslidetemplate.DefaultSchemaVersion holds the default value on creation for the schema_version field.
+	orgslidetemplate.DefaultSchemaVersion = orgslidetemplateDescSchemaVersion.Default.(int)
+	// orgslidetemplateDescSkin is the schema descriptor for skin field.
+	orgslidetemplateDescSkin := orgslidetemplateFields[5].Descriptor()
+	// orgslidetemplate.DefaultSkin holds the default value on creation for the skin field.
+	orgslidetemplate.DefaultSkin = orgslidetemplateDescSkin.Default.(string)
+	// orgslidetemplateDescCreatedAt is the schema descriptor for created_at field.
+	orgslidetemplateDescCreatedAt := orgslidetemplateFields[12].Descriptor()
+	// orgslidetemplate.DefaultCreatedAt holds the default value on creation for the created_at field.
+	orgslidetemplate.DefaultCreatedAt = orgslidetemplateDescCreatedAt.Default.(func() time.Time)
+	// orgslidetemplateDescUpdatedAt is the schema descriptor for updated_at field.
+	orgslidetemplateDescUpdatedAt := orgslidetemplateFields[13].Descriptor()
+	// orgslidetemplate.DefaultUpdatedAt holds the default value on creation for the updated_at field.
+	orgslidetemplate.DefaultUpdatedAt = orgslidetemplateDescUpdatedAt.Default.(func() time.Time)
+	// orgslidetemplate.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
+	orgslidetemplate.UpdateDefaultUpdatedAt = orgslidetemplateDescUpdatedAt.UpdateDefault.(func() time.Time)
+	// orgslidetemplateDescID is the schema descriptor for id field.
+	orgslidetemplateDescID := orgslidetemplateFields[0].Descriptor()
+	// orgslidetemplate.DefaultID holds the default value on creation for the id field.
+	orgslidetemplate.DefaultID = orgslidetemplateDescID.Default.(func() uuid.UUID)
 	teamFields := schema.Team{}.Fields()
 	_ = teamFields
 	// teamDescName is the schema descriptor for name field.

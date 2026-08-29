@@ -20,6 +20,7 @@ import (
 	"github.com/SAP/astonish/ent/org/orgnetworkpolicy"
 	"github.com/SAP/astonish/ent/org/orgskill"
 	"github.com/SAP/astonish/ent/org/orgskillfile"
+	"github.com/SAP/astonish/ent/org/orgslidetemplate"
 	"github.com/SAP/astonish/ent/org/predicate"
 	"github.com/SAP/astonish/ent/org/team"
 	"github.com/SAP/astonish/ent/org/teammembership"
@@ -44,6 +45,7 @@ const (
 	TypeOrgNetworkPolicy = "OrgNetworkPolicy"
 	TypeOrgSkill         = "OrgSkill"
 	TypeOrgSkillFile     = "OrgSkillFile"
+	TypeOrgSlideTemplate = "OrgSlideTemplate"
 	TypeTeam             = "Team"
 	TypeTeamMembership   = "TeamMembership"
 )
@@ -7305,6 +7307,1173 @@ func (m *OrgSkillFileMutation) ResetEdge(name string) error {
 		return nil
 	}
 	return fmt.Errorf("unknown OrgSkillFile edge %s", name)
+}
+
+// OrgSlideTemplateMutation represents an operation that mutates the OrgSlideTemplate nodes in the graph.
+type OrgSlideTemplateMutation struct {
+	config
+	op                Op
+	typ               string
+	id                *uuid.UUID
+	name              *string
+	label             *string
+	description       *string
+	schema_version    *int
+	addschema_version *int
+	skin              *string
+	tokens            *map[string]string
+	assets            *map[string]string
+	palettes          *[]interface{}
+	appendpalettes    []interface{}
+	archetypes        *[]interface{}
+	appendarchetypes  []interface{}
+	template_model    *string
+	created_by        *string
+	created_at        *time.Time
+	updated_at        *time.Time
+	clearedFields     map[string]struct{}
+	done              bool
+	oldValue          func(context.Context) (*OrgSlideTemplate, error)
+	predicates        []predicate.OrgSlideTemplate
+}
+
+var _ ent.Mutation = (*OrgSlideTemplateMutation)(nil)
+
+// orgslidetemplateOption allows management of the mutation configuration using functional options.
+type orgslidetemplateOption func(*OrgSlideTemplateMutation)
+
+// newOrgSlideTemplateMutation creates new mutation for the OrgSlideTemplate entity.
+func newOrgSlideTemplateMutation(c config, op Op, opts ...orgslidetemplateOption) *OrgSlideTemplateMutation {
+	m := &OrgSlideTemplateMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeOrgSlideTemplate,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withOrgSlideTemplateID sets the ID field of the mutation.
+func withOrgSlideTemplateID(id uuid.UUID) orgslidetemplateOption {
+	return func(m *OrgSlideTemplateMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *OrgSlideTemplate
+		)
+		m.oldValue = func(ctx context.Context) (*OrgSlideTemplate, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().OrgSlideTemplate.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withOrgSlideTemplate sets the old OrgSlideTemplate of the mutation.
+func withOrgSlideTemplate(node *OrgSlideTemplate) orgslidetemplateOption {
+	return func(m *OrgSlideTemplateMutation) {
+		m.oldValue = func(context.Context) (*OrgSlideTemplate, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m OrgSlideTemplateMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m OrgSlideTemplateMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("org: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of OrgSlideTemplate entities.
+func (m *OrgSlideTemplateMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *OrgSlideTemplateMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *OrgSlideTemplateMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().OrgSlideTemplate.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetName sets the "name" field.
+func (m *OrgSlideTemplateMutation) SetName(s string) {
+	m.name = &s
+}
+
+// Name returns the value of the "name" field in the mutation.
+func (m *OrgSlideTemplateMutation) Name() (r string, exists bool) {
+	v := m.name
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldName returns the old "name" field's value of the OrgSlideTemplate entity.
+// If the OrgSlideTemplate object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *OrgSlideTemplateMutation) OldName(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldName is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldName requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldName: %w", err)
+	}
+	return oldValue.Name, nil
+}
+
+// ResetName resets all changes to the "name" field.
+func (m *OrgSlideTemplateMutation) ResetName() {
+	m.name = nil
+}
+
+// SetLabel sets the "label" field.
+func (m *OrgSlideTemplateMutation) SetLabel(s string) {
+	m.label = &s
+}
+
+// Label returns the value of the "label" field in the mutation.
+func (m *OrgSlideTemplateMutation) Label() (r string, exists bool) {
+	v := m.label
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLabel returns the old "label" field's value of the OrgSlideTemplate entity.
+// If the OrgSlideTemplate object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *OrgSlideTemplateMutation) OldLabel(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLabel is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLabel requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLabel: %w", err)
+	}
+	return oldValue.Label, nil
+}
+
+// ResetLabel resets all changes to the "label" field.
+func (m *OrgSlideTemplateMutation) ResetLabel() {
+	m.label = nil
+}
+
+// SetDescription sets the "description" field.
+func (m *OrgSlideTemplateMutation) SetDescription(s string) {
+	m.description = &s
+}
+
+// Description returns the value of the "description" field in the mutation.
+func (m *OrgSlideTemplateMutation) Description() (r string, exists bool) {
+	v := m.description
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDescription returns the old "description" field's value of the OrgSlideTemplate entity.
+// If the OrgSlideTemplate object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *OrgSlideTemplateMutation) OldDescription(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDescription is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDescription requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDescription: %w", err)
+	}
+	return oldValue.Description, nil
+}
+
+// ResetDescription resets all changes to the "description" field.
+func (m *OrgSlideTemplateMutation) ResetDescription() {
+	m.description = nil
+}
+
+// SetSchemaVersion sets the "schema_version" field.
+func (m *OrgSlideTemplateMutation) SetSchemaVersion(i int) {
+	m.schema_version = &i
+	m.addschema_version = nil
+}
+
+// SchemaVersion returns the value of the "schema_version" field in the mutation.
+func (m *OrgSlideTemplateMutation) SchemaVersion() (r int, exists bool) {
+	v := m.schema_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSchemaVersion returns the old "schema_version" field's value of the OrgSlideTemplate entity.
+// If the OrgSlideTemplate object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *OrgSlideTemplateMutation) OldSchemaVersion(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSchemaVersion is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSchemaVersion requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSchemaVersion: %w", err)
+	}
+	return oldValue.SchemaVersion, nil
+}
+
+// AddSchemaVersion adds i to the "schema_version" field.
+func (m *OrgSlideTemplateMutation) AddSchemaVersion(i int) {
+	if m.addschema_version != nil {
+		*m.addschema_version += i
+	} else {
+		m.addschema_version = &i
+	}
+}
+
+// AddedSchemaVersion returns the value that was added to the "schema_version" field in this mutation.
+func (m *OrgSlideTemplateMutation) AddedSchemaVersion() (r int, exists bool) {
+	v := m.addschema_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetSchemaVersion resets all changes to the "schema_version" field.
+func (m *OrgSlideTemplateMutation) ResetSchemaVersion() {
+	m.schema_version = nil
+	m.addschema_version = nil
+}
+
+// SetSkin sets the "skin" field.
+func (m *OrgSlideTemplateMutation) SetSkin(s string) {
+	m.skin = &s
+}
+
+// Skin returns the value of the "skin" field in the mutation.
+func (m *OrgSlideTemplateMutation) Skin() (r string, exists bool) {
+	v := m.skin
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSkin returns the old "skin" field's value of the OrgSlideTemplate entity.
+// If the OrgSlideTemplate object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *OrgSlideTemplateMutation) OldSkin(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSkin is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSkin requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSkin: %w", err)
+	}
+	return oldValue.Skin, nil
+}
+
+// ResetSkin resets all changes to the "skin" field.
+func (m *OrgSlideTemplateMutation) ResetSkin() {
+	m.skin = nil
+}
+
+// SetTokens sets the "tokens" field.
+func (m *OrgSlideTemplateMutation) SetTokens(value map[string]string) {
+	m.tokens = &value
+}
+
+// Tokens returns the value of the "tokens" field in the mutation.
+func (m *OrgSlideTemplateMutation) Tokens() (r map[string]string, exists bool) {
+	v := m.tokens
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTokens returns the old "tokens" field's value of the OrgSlideTemplate entity.
+// If the OrgSlideTemplate object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *OrgSlideTemplateMutation) OldTokens(ctx context.Context) (v map[string]string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTokens is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTokens requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTokens: %w", err)
+	}
+	return oldValue.Tokens, nil
+}
+
+// ClearTokens clears the value of the "tokens" field.
+func (m *OrgSlideTemplateMutation) ClearTokens() {
+	m.tokens = nil
+	m.clearedFields[orgslidetemplate.FieldTokens] = struct{}{}
+}
+
+// TokensCleared returns if the "tokens" field was cleared in this mutation.
+func (m *OrgSlideTemplateMutation) TokensCleared() bool {
+	_, ok := m.clearedFields[orgslidetemplate.FieldTokens]
+	return ok
+}
+
+// ResetTokens resets all changes to the "tokens" field.
+func (m *OrgSlideTemplateMutation) ResetTokens() {
+	m.tokens = nil
+	delete(m.clearedFields, orgslidetemplate.FieldTokens)
+}
+
+// SetAssets sets the "assets" field.
+func (m *OrgSlideTemplateMutation) SetAssets(value map[string]string) {
+	m.assets = &value
+}
+
+// Assets returns the value of the "assets" field in the mutation.
+func (m *OrgSlideTemplateMutation) Assets() (r map[string]string, exists bool) {
+	v := m.assets
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAssets returns the old "assets" field's value of the OrgSlideTemplate entity.
+// If the OrgSlideTemplate object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *OrgSlideTemplateMutation) OldAssets(ctx context.Context) (v map[string]string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAssets is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAssets requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAssets: %w", err)
+	}
+	return oldValue.Assets, nil
+}
+
+// ClearAssets clears the value of the "assets" field.
+func (m *OrgSlideTemplateMutation) ClearAssets() {
+	m.assets = nil
+	m.clearedFields[orgslidetemplate.FieldAssets] = struct{}{}
+}
+
+// AssetsCleared returns if the "assets" field was cleared in this mutation.
+func (m *OrgSlideTemplateMutation) AssetsCleared() bool {
+	_, ok := m.clearedFields[orgslidetemplate.FieldAssets]
+	return ok
+}
+
+// ResetAssets resets all changes to the "assets" field.
+func (m *OrgSlideTemplateMutation) ResetAssets() {
+	m.assets = nil
+	delete(m.clearedFields, orgslidetemplate.FieldAssets)
+}
+
+// SetPalettes sets the "palettes" field.
+func (m *OrgSlideTemplateMutation) SetPalettes(i []interface{}) {
+	m.palettes = &i
+	m.appendpalettes = nil
+}
+
+// Palettes returns the value of the "palettes" field in the mutation.
+func (m *OrgSlideTemplateMutation) Palettes() (r []interface{}, exists bool) {
+	v := m.palettes
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPalettes returns the old "palettes" field's value of the OrgSlideTemplate entity.
+// If the OrgSlideTemplate object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *OrgSlideTemplateMutation) OldPalettes(ctx context.Context) (v []interface{}, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPalettes is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPalettes requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPalettes: %w", err)
+	}
+	return oldValue.Palettes, nil
+}
+
+// AppendPalettes adds i to the "palettes" field.
+func (m *OrgSlideTemplateMutation) AppendPalettes(i []interface{}) {
+	m.appendpalettes = append(m.appendpalettes, i...)
+}
+
+// AppendedPalettes returns the list of values that were appended to the "palettes" field in this mutation.
+func (m *OrgSlideTemplateMutation) AppendedPalettes() ([]interface{}, bool) {
+	if len(m.appendpalettes) == 0 {
+		return nil, false
+	}
+	return m.appendpalettes, true
+}
+
+// ClearPalettes clears the value of the "palettes" field.
+func (m *OrgSlideTemplateMutation) ClearPalettes() {
+	m.palettes = nil
+	m.appendpalettes = nil
+	m.clearedFields[orgslidetemplate.FieldPalettes] = struct{}{}
+}
+
+// PalettesCleared returns if the "palettes" field was cleared in this mutation.
+func (m *OrgSlideTemplateMutation) PalettesCleared() bool {
+	_, ok := m.clearedFields[orgslidetemplate.FieldPalettes]
+	return ok
+}
+
+// ResetPalettes resets all changes to the "palettes" field.
+func (m *OrgSlideTemplateMutation) ResetPalettes() {
+	m.palettes = nil
+	m.appendpalettes = nil
+	delete(m.clearedFields, orgslidetemplate.FieldPalettes)
+}
+
+// SetArchetypes sets the "archetypes" field.
+func (m *OrgSlideTemplateMutation) SetArchetypes(i []interface{}) {
+	m.archetypes = &i
+	m.appendarchetypes = nil
+}
+
+// Archetypes returns the value of the "archetypes" field in the mutation.
+func (m *OrgSlideTemplateMutation) Archetypes() (r []interface{}, exists bool) {
+	v := m.archetypes
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldArchetypes returns the old "archetypes" field's value of the OrgSlideTemplate entity.
+// If the OrgSlideTemplate object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *OrgSlideTemplateMutation) OldArchetypes(ctx context.Context) (v []interface{}, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldArchetypes is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldArchetypes requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldArchetypes: %w", err)
+	}
+	return oldValue.Archetypes, nil
+}
+
+// AppendArchetypes adds i to the "archetypes" field.
+func (m *OrgSlideTemplateMutation) AppendArchetypes(i []interface{}) {
+	m.appendarchetypes = append(m.appendarchetypes, i...)
+}
+
+// AppendedArchetypes returns the list of values that were appended to the "archetypes" field in this mutation.
+func (m *OrgSlideTemplateMutation) AppendedArchetypes() ([]interface{}, bool) {
+	if len(m.appendarchetypes) == 0 {
+		return nil, false
+	}
+	return m.appendarchetypes, true
+}
+
+// ClearArchetypes clears the value of the "archetypes" field.
+func (m *OrgSlideTemplateMutation) ClearArchetypes() {
+	m.archetypes = nil
+	m.appendarchetypes = nil
+	m.clearedFields[orgslidetemplate.FieldArchetypes] = struct{}{}
+}
+
+// ArchetypesCleared returns if the "archetypes" field was cleared in this mutation.
+func (m *OrgSlideTemplateMutation) ArchetypesCleared() bool {
+	_, ok := m.clearedFields[orgslidetemplate.FieldArchetypes]
+	return ok
+}
+
+// ResetArchetypes resets all changes to the "archetypes" field.
+func (m *OrgSlideTemplateMutation) ResetArchetypes() {
+	m.archetypes = nil
+	m.appendarchetypes = nil
+	delete(m.clearedFields, orgslidetemplate.FieldArchetypes)
+}
+
+// SetTemplateModel sets the "template_model" field.
+func (m *OrgSlideTemplateMutation) SetTemplateModel(s string) {
+	m.template_model = &s
+}
+
+// TemplateModel returns the value of the "template_model" field in the mutation.
+func (m *OrgSlideTemplateMutation) TemplateModel() (r string, exists bool) {
+	v := m.template_model
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTemplateModel returns the old "template_model" field's value of the OrgSlideTemplate entity.
+// If the OrgSlideTemplate object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *OrgSlideTemplateMutation) OldTemplateModel(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTemplateModel is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTemplateModel requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTemplateModel: %w", err)
+	}
+	return oldValue.TemplateModel, nil
+}
+
+// ClearTemplateModel clears the value of the "template_model" field.
+func (m *OrgSlideTemplateMutation) ClearTemplateModel() {
+	m.template_model = nil
+	m.clearedFields[orgslidetemplate.FieldTemplateModel] = struct{}{}
+}
+
+// TemplateModelCleared returns if the "template_model" field was cleared in this mutation.
+func (m *OrgSlideTemplateMutation) TemplateModelCleared() bool {
+	_, ok := m.clearedFields[orgslidetemplate.FieldTemplateModel]
+	return ok
+}
+
+// ResetTemplateModel resets all changes to the "template_model" field.
+func (m *OrgSlideTemplateMutation) ResetTemplateModel() {
+	m.template_model = nil
+	delete(m.clearedFields, orgslidetemplate.FieldTemplateModel)
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (m *OrgSlideTemplateMutation) SetCreatedBy(s string) {
+	m.created_by = &s
+}
+
+// CreatedBy returns the value of the "created_by" field in the mutation.
+func (m *OrgSlideTemplateMutation) CreatedBy() (r string, exists bool) {
+	v := m.created_by
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedBy returns the old "created_by" field's value of the OrgSlideTemplate entity.
+// If the OrgSlideTemplate object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *OrgSlideTemplateMutation) OldCreatedBy(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedBy is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedBy requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedBy: %w", err)
+	}
+	return oldValue.CreatedBy, nil
+}
+
+// ClearCreatedBy clears the value of the "created_by" field.
+func (m *OrgSlideTemplateMutation) ClearCreatedBy() {
+	m.created_by = nil
+	m.clearedFields[orgslidetemplate.FieldCreatedBy] = struct{}{}
+}
+
+// CreatedByCleared returns if the "created_by" field was cleared in this mutation.
+func (m *OrgSlideTemplateMutation) CreatedByCleared() bool {
+	_, ok := m.clearedFields[orgslidetemplate.FieldCreatedBy]
+	return ok
+}
+
+// ResetCreatedBy resets all changes to the "created_by" field.
+func (m *OrgSlideTemplateMutation) ResetCreatedBy() {
+	m.created_by = nil
+	delete(m.clearedFields, orgslidetemplate.FieldCreatedBy)
+}
+
+// SetCreatedAt sets the "created_at" field.
+func (m *OrgSlideTemplateMutation) SetCreatedAt(t time.Time) {
+	m.created_at = &t
+}
+
+// CreatedAt returns the value of the "created_at" field in the mutation.
+func (m *OrgSlideTemplateMutation) CreatedAt() (r time.Time, exists bool) {
+	v := m.created_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedAt returns the old "created_at" field's value of the OrgSlideTemplate entity.
+// If the OrgSlideTemplate object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *OrgSlideTemplateMutation) OldCreatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedAt: %w", err)
+	}
+	return oldValue.CreatedAt, nil
+}
+
+// ResetCreatedAt resets all changes to the "created_at" field.
+func (m *OrgSlideTemplateMutation) ResetCreatedAt() {
+	m.created_at = nil
+}
+
+// SetUpdatedAt sets the "updated_at" field.
+func (m *OrgSlideTemplateMutation) SetUpdatedAt(t time.Time) {
+	m.updated_at = &t
+}
+
+// UpdatedAt returns the value of the "updated_at" field in the mutation.
+func (m *OrgSlideTemplateMutation) UpdatedAt() (r time.Time, exists bool) {
+	v := m.updated_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUpdatedAt returns the old "updated_at" field's value of the OrgSlideTemplate entity.
+// If the OrgSlideTemplate object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *OrgSlideTemplateMutation) OldUpdatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUpdatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUpdatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUpdatedAt: %w", err)
+	}
+	return oldValue.UpdatedAt, nil
+}
+
+// ResetUpdatedAt resets all changes to the "updated_at" field.
+func (m *OrgSlideTemplateMutation) ResetUpdatedAt() {
+	m.updated_at = nil
+}
+
+// Where appends a list predicates to the OrgSlideTemplateMutation builder.
+func (m *OrgSlideTemplateMutation) Where(ps ...predicate.OrgSlideTemplate) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the OrgSlideTemplateMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *OrgSlideTemplateMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.OrgSlideTemplate, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *OrgSlideTemplateMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *OrgSlideTemplateMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (OrgSlideTemplate).
+func (m *OrgSlideTemplateMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *OrgSlideTemplateMutation) Fields() []string {
+	fields := make([]string, 0, 13)
+	if m.name != nil {
+		fields = append(fields, orgslidetemplate.FieldName)
+	}
+	if m.label != nil {
+		fields = append(fields, orgslidetemplate.FieldLabel)
+	}
+	if m.description != nil {
+		fields = append(fields, orgslidetemplate.FieldDescription)
+	}
+	if m.schema_version != nil {
+		fields = append(fields, orgslidetemplate.FieldSchemaVersion)
+	}
+	if m.skin != nil {
+		fields = append(fields, orgslidetemplate.FieldSkin)
+	}
+	if m.tokens != nil {
+		fields = append(fields, orgslidetemplate.FieldTokens)
+	}
+	if m.assets != nil {
+		fields = append(fields, orgslidetemplate.FieldAssets)
+	}
+	if m.palettes != nil {
+		fields = append(fields, orgslidetemplate.FieldPalettes)
+	}
+	if m.archetypes != nil {
+		fields = append(fields, orgslidetemplate.FieldArchetypes)
+	}
+	if m.template_model != nil {
+		fields = append(fields, orgslidetemplate.FieldTemplateModel)
+	}
+	if m.created_by != nil {
+		fields = append(fields, orgslidetemplate.FieldCreatedBy)
+	}
+	if m.created_at != nil {
+		fields = append(fields, orgslidetemplate.FieldCreatedAt)
+	}
+	if m.updated_at != nil {
+		fields = append(fields, orgslidetemplate.FieldUpdatedAt)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *OrgSlideTemplateMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case orgslidetemplate.FieldName:
+		return m.Name()
+	case orgslidetemplate.FieldLabel:
+		return m.Label()
+	case orgslidetemplate.FieldDescription:
+		return m.Description()
+	case orgslidetemplate.FieldSchemaVersion:
+		return m.SchemaVersion()
+	case orgslidetemplate.FieldSkin:
+		return m.Skin()
+	case orgslidetemplate.FieldTokens:
+		return m.Tokens()
+	case orgslidetemplate.FieldAssets:
+		return m.Assets()
+	case orgslidetemplate.FieldPalettes:
+		return m.Palettes()
+	case orgslidetemplate.FieldArchetypes:
+		return m.Archetypes()
+	case orgslidetemplate.FieldTemplateModel:
+		return m.TemplateModel()
+	case orgslidetemplate.FieldCreatedBy:
+		return m.CreatedBy()
+	case orgslidetemplate.FieldCreatedAt:
+		return m.CreatedAt()
+	case orgslidetemplate.FieldUpdatedAt:
+		return m.UpdatedAt()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *OrgSlideTemplateMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case orgslidetemplate.FieldName:
+		return m.OldName(ctx)
+	case orgslidetemplate.FieldLabel:
+		return m.OldLabel(ctx)
+	case orgslidetemplate.FieldDescription:
+		return m.OldDescription(ctx)
+	case orgslidetemplate.FieldSchemaVersion:
+		return m.OldSchemaVersion(ctx)
+	case orgslidetemplate.FieldSkin:
+		return m.OldSkin(ctx)
+	case orgslidetemplate.FieldTokens:
+		return m.OldTokens(ctx)
+	case orgslidetemplate.FieldAssets:
+		return m.OldAssets(ctx)
+	case orgslidetemplate.FieldPalettes:
+		return m.OldPalettes(ctx)
+	case orgslidetemplate.FieldArchetypes:
+		return m.OldArchetypes(ctx)
+	case orgslidetemplate.FieldTemplateModel:
+		return m.OldTemplateModel(ctx)
+	case orgslidetemplate.FieldCreatedBy:
+		return m.OldCreatedBy(ctx)
+	case orgslidetemplate.FieldCreatedAt:
+		return m.OldCreatedAt(ctx)
+	case orgslidetemplate.FieldUpdatedAt:
+		return m.OldUpdatedAt(ctx)
+	}
+	return nil, fmt.Errorf("unknown OrgSlideTemplate field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *OrgSlideTemplateMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case orgslidetemplate.FieldName:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetName(v)
+		return nil
+	case orgslidetemplate.FieldLabel:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLabel(v)
+		return nil
+	case orgslidetemplate.FieldDescription:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDescription(v)
+		return nil
+	case orgslidetemplate.FieldSchemaVersion:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSchemaVersion(v)
+		return nil
+	case orgslidetemplate.FieldSkin:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSkin(v)
+		return nil
+	case orgslidetemplate.FieldTokens:
+		v, ok := value.(map[string]string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTokens(v)
+		return nil
+	case orgslidetemplate.FieldAssets:
+		v, ok := value.(map[string]string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAssets(v)
+		return nil
+	case orgslidetemplate.FieldPalettes:
+		v, ok := value.([]interface{})
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPalettes(v)
+		return nil
+	case orgslidetemplate.FieldArchetypes:
+		v, ok := value.([]interface{})
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetArchetypes(v)
+		return nil
+	case orgslidetemplate.FieldTemplateModel:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTemplateModel(v)
+		return nil
+	case orgslidetemplate.FieldCreatedBy:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedBy(v)
+		return nil
+	case orgslidetemplate.FieldCreatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedAt(v)
+		return nil
+	case orgslidetemplate.FieldUpdatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUpdatedAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown OrgSlideTemplate field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *OrgSlideTemplateMutation) AddedFields() []string {
+	var fields []string
+	if m.addschema_version != nil {
+		fields = append(fields, orgslidetemplate.FieldSchemaVersion)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *OrgSlideTemplateMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case orgslidetemplate.FieldSchemaVersion:
+		return m.AddedSchemaVersion()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *OrgSlideTemplateMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case orgslidetemplate.FieldSchemaVersion:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddSchemaVersion(v)
+		return nil
+	}
+	return fmt.Errorf("unknown OrgSlideTemplate numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *OrgSlideTemplateMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(orgslidetemplate.FieldTokens) {
+		fields = append(fields, orgslidetemplate.FieldTokens)
+	}
+	if m.FieldCleared(orgslidetemplate.FieldAssets) {
+		fields = append(fields, orgslidetemplate.FieldAssets)
+	}
+	if m.FieldCleared(orgslidetemplate.FieldPalettes) {
+		fields = append(fields, orgslidetemplate.FieldPalettes)
+	}
+	if m.FieldCleared(orgslidetemplate.FieldArchetypes) {
+		fields = append(fields, orgslidetemplate.FieldArchetypes)
+	}
+	if m.FieldCleared(orgslidetemplate.FieldTemplateModel) {
+		fields = append(fields, orgslidetemplate.FieldTemplateModel)
+	}
+	if m.FieldCleared(orgslidetemplate.FieldCreatedBy) {
+		fields = append(fields, orgslidetemplate.FieldCreatedBy)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *OrgSlideTemplateMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *OrgSlideTemplateMutation) ClearField(name string) error {
+	switch name {
+	case orgslidetemplate.FieldTokens:
+		m.ClearTokens()
+		return nil
+	case orgslidetemplate.FieldAssets:
+		m.ClearAssets()
+		return nil
+	case orgslidetemplate.FieldPalettes:
+		m.ClearPalettes()
+		return nil
+	case orgslidetemplate.FieldArchetypes:
+		m.ClearArchetypes()
+		return nil
+	case orgslidetemplate.FieldTemplateModel:
+		m.ClearTemplateModel()
+		return nil
+	case orgslidetemplate.FieldCreatedBy:
+		m.ClearCreatedBy()
+		return nil
+	}
+	return fmt.Errorf("unknown OrgSlideTemplate nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *OrgSlideTemplateMutation) ResetField(name string) error {
+	switch name {
+	case orgslidetemplate.FieldName:
+		m.ResetName()
+		return nil
+	case orgslidetemplate.FieldLabel:
+		m.ResetLabel()
+		return nil
+	case orgslidetemplate.FieldDescription:
+		m.ResetDescription()
+		return nil
+	case orgslidetemplate.FieldSchemaVersion:
+		m.ResetSchemaVersion()
+		return nil
+	case orgslidetemplate.FieldSkin:
+		m.ResetSkin()
+		return nil
+	case orgslidetemplate.FieldTokens:
+		m.ResetTokens()
+		return nil
+	case orgslidetemplate.FieldAssets:
+		m.ResetAssets()
+		return nil
+	case orgslidetemplate.FieldPalettes:
+		m.ResetPalettes()
+		return nil
+	case orgslidetemplate.FieldArchetypes:
+		m.ResetArchetypes()
+		return nil
+	case orgslidetemplate.FieldTemplateModel:
+		m.ResetTemplateModel()
+		return nil
+	case orgslidetemplate.FieldCreatedBy:
+		m.ResetCreatedBy()
+		return nil
+	case orgslidetemplate.FieldCreatedAt:
+		m.ResetCreatedAt()
+		return nil
+	case orgslidetemplate.FieldUpdatedAt:
+		m.ResetUpdatedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown OrgSlideTemplate field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *OrgSlideTemplateMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *OrgSlideTemplateMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *OrgSlideTemplateMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *OrgSlideTemplateMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *OrgSlideTemplateMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *OrgSlideTemplateMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *OrgSlideTemplateMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown OrgSlideTemplate unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *OrgSlideTemplateMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown OrgSlideTemplate edge %s", name)
 }
 
 // TeamMutation represents an operation that mutates the Team nodes in the graph.

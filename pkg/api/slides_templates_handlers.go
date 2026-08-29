@@ -19,6 +19,7 @@ import (
 	"github.com/SAP/astonish/pkg/docs/slides"
 	"github.com/SAP/astonish/pkg/docs/slides/pptxworker"
 	"github.com/SAP/astonish/pkg/docs/slides/themes"
+	"github.com/SAP/astonish/pkg/store"
 	webassets "github.com/SAP/astonish/web"
 	"github.com/gorilla/mux"
 )
@@ -155,47 +156,73 @@ func templateBaseKind(kind string) string {
 	return kind
 }
 
-// scopeQuery returns the requested scope label for list DTOs: "team" when
-// ?scope=team, else "personal".
-func scopeQuery(r *http.Request) string {
-	if r.URL.Query().Get("scope") == "team" {
-		return "team"
+func slidesTemplateScope(r *http.Request) string {
+	switch r.URL.Query().Get("scope") {
+	case slides.ScopePlatform, slides.ScopeOrg, slides.ScopeTeam, slides.ScopePersonal:
+		return r.URL.Query().Get("scope")
+	case "":
+		return ""
+	default:
+		return ""
 	}
-	return "personal"
 }
 
-// ListSlidesTemplatesHandler returns the merged set of built-in templates plus
-// any templates persisted in the requested scope (?scope=personal|team) as a
-// LIGHTWEIGHT DTO (no assets map; per-archetype markup omitted). Cover may
-// include one live-render markup fragment when no baked thumbnail exists. The
-// built-ins are always returned even when no scoped service is available.
-// Deduplication is by Name, preferring the built-in over a scoped template.
+func requireTemplateWrite(w http.ResponseWriter, r *http.Request, scope string) bool {
+	switch scope {
+	case slides.ScopePlatform:
+		return RequirePlatformAdmin(w, r) != nil
+	case slides.ScopeOrg:
+		return RequireOrgAdmin(w, r) != nil
+	case slides.ScopeTeam:
+		return RequireTeamAdmin(w, r)
+	case slides.ScopePersonal, "":
+		return true
+	default:
+		http.Error(w, "scope must be personal, team, org, or platform", http.StatusBadRequest)
+		return false
+	}
+}
+
+func writeScopeOrPersonal(scope string) string {
+	if scope == "" {
+		return slides.ScopePersonal
+	}
+	return scope
+}
+
+// ListSlidesTemplatesHandler returns a LIGHTWEIGHT catalog DTO (no assets map;
+// per-archetype markup omitted). With no ?scope=, built-ins plus every
+// inherited imported template (platform, org, team, personal) are listed —
+// same name at two scopes is two rows. With ?scope=personal|team|org|platform,
+// only that store is returned (admin Settings pages).
 func ListSlidesTemplatesHandler(w http.ResponseWriter, r *http.Request) {
-	merged := make([]slidesTemplateListItem, 0)
-	seen := map[string]bool{}
-	for _, t := range themes.ListTemplates() {
-		if seen[t.Name] {
-			continue
-		}
-		seen[t.Name] = true
-		merged = append(merged, slidesTemplateListDTO(t, "builtin"))
+	scope := r.URL.Query().Get("scope")
+	if scope != "" && scope != slides.ScopePersonal && scope != slides.ScopeTeam && scope != slides.ScopeOrg && scope != slides.ScopePlatform {
+		http.Error(w, "scope must be personal, team, org, or platform", http.StatusBadRequest)
+		return
 	}
-
-	// Scoped templates are best-effort: if the request has no usable docs
-	// service we still return the built-ins with 200.
-	if svc, err := docsService(r); err == nil {
-		if scoped, err := svc.ListTemplates(r.Context()); err == nil {
-			scope := scopeQuery(r)
-			for _, t := range scoped {
-				if seen[t.Name] {
-					continue
-				}
-				seen[t.Name] = true
-				merged = append(merged, slidesTemplateListDTO(t, scope))
-			}
-		}
+	cat := slides.CatalogFromServices(store.FromRequest(r))
+	var (
+		tmpls []themes.Template
+		err   error
+	)
+	if scope == "" {
+		tmpls, err = cat.ListAll(r.Context())
+	} else {
+		tmpls, err = cat.ListScope(r.Context(), scope)
 	}
-
+	if err != nil {
+		writeSlidesError(w, err)
+		return
+	}
+	merged := make([]slidesTemplateListItem, 0, len(tmpls))
+	for _, t := range tmpls {
+		label := t.Scope
+		if label == "" {
+			label = writeScopeOrPersonal(scope)
+		}
+		merged = append(merged, slidesTemplateListDTO(t, label))
+	}
 	writeSlidesJSON(w, http.StatusOK, map[string]any{"templates": merged})
 }
 
@@ -213,11 +240,12 @@ func DeleteSlidesTemplateHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "cannot delete a built-in template", http.StatusForbidden)
 		return
 	}
-	svc, ok := requireDocsService(w, r)
-	if !ok {
+	scope := writeScopeOrPersonal(slidesTemplateScope(r))
+	if !requireTemplateWrite(w, r, scope) {
 		return
 	}
-	if err := svc.DeleteDeck(r.Context(), svc.TemplateSlug(name)); err != nil {
+	cat := slides.CatalogFromServices(store.FromRequest(r))
+	if err := cat.Delete(r.Context(), scope, name); err != nil {
 		writeSlidesError(w, err)
 		return
 	}
@@ -250,24 +278,15 @@ func DuplicateSlidesTemplateHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	svc, ok := requireDocsService(w, r)
-	if !ok {
+	cat := slides.CatalogFromServices(store.FromRequest(r))
+	src, found, err := cat.Resolve(r.Context(), name)
+	if err != nil {
+		writeSlidesError(w, err)
 		return
 	}
-
-	// Resolve the source: built-in first, then a scoped template.
-	src, found := themes.LookupTemplate(name)
 	if !found {
-		scoped, ok, err := svc.Template(r.Context(), name)
-		if err != nil {
-			writeSlidesError(w, err)
-			return
-		}
-		if !ok {
-			http.Error(w, "template not found", http.StatusNotFound)
-			return
-		}
-		src = scoped
+		http.Error(w, "template not found", http.StatusNotFound)
+		return
 	}
 
 	// Target name: explicit newName, else "<name>-copy"; slugified and made
@@ -302,13 +321,13 @@ func DuplicateSlidesTemplateHandler(w http.ResponseWriter, r *http.Request) {
 		Palettes:    append([]themes.Palette(nil), src.Palettes...),
 		Scope:       "",
 	}
-	if err := svc.SaveTemplate(r.Context(), dup); err != nil {
+	if err := cat.Save(r.Context(), slides.ScopePersonal, dup); err != nil {
 		writeSlidesError(w, err)
 		return
 	}
 
 	writeSlidesJSON(w, http.StatusOK, map[string]any{
-		"template": map[string]any{"name": dup.Name, "label": dup.Label},
+		"template": map[string]any{"name": dup.Name, "label": dup.Label, "scope": slides.ScopePersonal},
 	})
 }
 
@@ -358,14 +377,24 @@ func RecolorSlidesTemplateHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	svc, ok := requireDocsService(w, r)
-	if !ok {
+	scope := writeScopeOrPersonal(slidesTemplateScope(r))
+	if !requireTemplateWrite(w, r, scope) {
 		return
 	}
-	tmpl, found, err := svc.Template(r.Context(), name)
+	cat := slides.CatalogFromServices(store.FromRequest(r))
+	owned, err := cat.ListScope(r.Context(), scope)
 	if err != nil {
 		writeSlidesError(w, err)
 		return
+	}
+	var tmpl themes.Template
+	found := false
+	for _, t := range owned {
+		if t.Name == name {
+			tmpl = t
+			found = true
+			break
+		}
 	}
 	if !found {
 		http.Error(w, "template not found", http.StatusNotFound)
@@ -379,12 +408,12 @@ func RecolorSlidesTemplateHandler(w http.ResponseWriter, r *http.Request) {
 	for k, v := range body.Tokens {
 		tmpl.Tokens[k] = v
 	}
-	if err := svc.SaveTemplate(r.Context(), tmpl); err != nil {
+	if err := cat.Save(r.Context(), scope, tmpl); err != nil {
 		writeSlidesError(w, err)
 		return
 	}
 
-	writeSlidesJSON(w, http.StatusOK, slidesTemplateListDTO(tmpl, scopeQuery(r)))
+	writeSlidesJSON(w, http.StatusOK, slidesTemplateListDTO(tmpl, scope))
 }
 
 // thumbnailPNGPrefix is the data-URI prefix stripped before base64-decoding a
@@ -392,24 +421,27 @@ func RecolorSlidesTemplateHandler(w http.ResponseWriter, r *http.Request) {
 const thumbnailPNGPrefix = "data:image/png;base64,"
 
 func resolveSlidesTemplateFromRequest(r *http.Request, name string) (themes.Template, bool) {
-	tmpl, found := themes.LookupTemplate(name)
-	if found {
-		return slides.HydrateTemplateFonts(tmpl), true
-	}
-	svc, err := docsService(r)
-	if err != nil {
-		return themes.Template{}, false
-	}
-	scoped, err := svc.ListTemplates(r.Context())
-	if err != nil {
-		return themes.Template{}, false
-	}
-	for _, t := range scoped {
-		if t.Name == name {
-			return t, true
+	cat := slides.CatalogFromServices(store.FromRequest(r))
+	if scope := slidesTemplateScope(r); scope != "" {
+		if t, ok := themes.LookupTemplate(name); ok {
+			return slides.HydrateTemplateFonts(t), true
 		}
+		owned, err := cat.ListScope(r.Context(), scope)
+		if err != nil {
+			return themes.Template{}, false
+		}
+		for _, t := range owned {
+			if t.Name == name {
+				return t, true
+			}
+		}
+		return themes.Template{}, false
 	}
-	return themes.Template{}, false
+	t, ok, err := cat.Resolve(r.Context(), name)
+	if err != nil || !ok {
+		return themes.Template{}, false
+	}
+	return t, true
 }
 
 // GetSlidesTemplateThumbnailHandler serves the pre-baked PNG thumbnail for a
@@ -534,17 +566,18 @@ func findArchetypeForThumbnail(tmpl themes.Template, kind string) (themes.Archet
 // uniqueTemplateName returns base, or base-2/base-3/... if a scoped template
 // deck already exists under that slug.
 func uniqueTemplateName(r *http.Request, base string) string {
-	dsvc, err := docsService(r)
-	if err != nil {
+	cat := slides.CatalogFromServices(store.FromRequest(r))
+	if cat.Personal == nil {
 		return base
 	}
 	candidate := base
 	for i := 2; ; i++ {
-		if _, _, dErr := dsvc.Deck(r.Context(), dsvc.TemplateSlug(candidate)); dErr != nil {
-			return candidate // not found (or store error) -> treat as free
+		rec, err := cat.Personal.Get(r.Context(), candidate)
+		if err != nil || rec == nil {
+			return candidate
 		}
 		candidate = base + "-" + strconv.Itoa(i)
-		if i > 100 { // pathological guard
+		if i > 100 {
 			return candidate
 		}
 	}
@@ -662,7 +695,7 @@ func ImportSlidesTemplateHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	tmpl.Name = name
 	tmpl.Label = label
-	tmpl.Scope = ""
+	tmpl.Scope = writeScopeOrPersonal(slidesTemplateScope(r))
 
 	// Generate rich style guidance for LLM content authoring. Best-effort:
 	// a nil or incomplete guide never fails the import.
@@ -678,11 +711,17 @@ func ImportSlidesTemplateHandler(w http.ResponseWriter, r *http.Request) {
 	// falls back to a live render). Never fail the import over thumbnails.
 	generateTemplateThumbnails(r.Context(), &tmpl)
 
-	svc, ok := requireDocsService(w, r)
-	if !ok {
+	if _, ok := themes.LookupTemplate(tmpl.Name); ok {
+		http.Error(w, "cannot overwrite a built-in template", http.StatusBadRequest)
 		return
 	}
-	if err := svc.SaveTemplate(r.Context(), tmpl); err != nil {
+
+	scope := writeScopeOrPersonal(slidesTemplateScope(r))
+	if !requireTemplateWrite(w, r, scope) {
+		return
+	}
+	cat := slides.CatalogFromServices(store.FromRequest(r))
+	if err := cat.Save(r.Context(), scope, tmpl); err != nil {
 		writeSlidesError(w, err)
 		return
 	}
@@ -691,7 +730,7 @@ func ImportSlidesTemplateHandler(w http.ResponseWriter, r *http.Request) {
 		"template": map[string]any{
 			"name":  tmpl.Name,
 			"label": tmpl.Label,
-			"scope": tmpl.Scope,
+			"scope": scope,
 		},
 		"warnings": resp.Warnings,
 	})

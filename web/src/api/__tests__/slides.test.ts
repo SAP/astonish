@@ -47,6 +47,19 @@ describe('slides API (deck/present/export)', () => {
     expect(JSON.parse(String(init.body))).toEqual({ moves: [{ id: 'headline', x: 200, y: 400 }] })
   })
 
+  it('PATCHes proportional image resize geometry', async () => {
+    mockedTeamFetch.mockResolvedValue(new Response(JSON.stringify({
+      id: 's1', deckId: 'd', position: 0, content: '<ast-slide id="s0"></ast-slide>', schemaVersion: 1,
+    }), { status: 200 }))
+    await patchSlideMoves('deck-1', 0, {
+      resizes: [{ id: 'photo', x: 100, y: 120, w: 600, h: 300 }],
+    }, 'personal')
+    const [, init] = mockedTeamFetch.mock.calls[0] as [string, RequestInit]
+    expect(JSON.parse(String(init.body))).toEqual({
+      resizes: [{ id: 'photo', x: 100, y: 120, w: 600, h: 300 }],
+    })
+  })
+
   it('PATCHes slide text and deletes', async () => {
     mockedTeamFetch.mockResolvedValue(new Response(JSON.stringify({
       id: 's1', deckId: 'd', position: 0, content: '<ast-slide id="s0"></ast-slide>', schemaVersion: 1,
@@ -179,12 +192,14 @@ describe('slides API (templates)', () => {
     expect(headers.get('Content-Type')).toBeNull()
   })
 
-  it('importSlidesTemplate appends scope when provided', async () => {
+  it('importSlidesTemplate appends scope to the URL query when provided', async () => {
     mockedTeamFetch.mockResolvedValue(new Response(JSON.stringify({ template: { name: 'x' } }), { status: 200 }))
     const file = new File(['b'], 'd.pptx')
     await importSlidesTemplate(file, 'team')
-    const [, init] = mockedTeamFetch.mock.calls[0] as [string, RequestInit]
-    expect((init.body as FormData).get('scope')).toBe('team')
+    const [url, init] = mockedTeamFetch.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('/api/docs/slides/import?scope=team')
+    // Scope travels in the query, not the multipart body.
+    expect((init.body as FormData).get('scope')).toBeNull()
   })
 
   it('importSlidesTemplate throws on non-ok response', async () => {

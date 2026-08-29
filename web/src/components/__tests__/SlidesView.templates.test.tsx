@@ -75,6 +75,23 @@ describe('SlidesView templates area', () => {
     expect(scopeBadges).toContain('Personal')
   })
 
+  it('shows Platform and Organization badges and hides delete on inherited templates', async () => {
+    ;(listSlidesTemplates as ReturnType<typeof vi.fn>).mockResolvedValue({
+      templates: [
+        builtin,
+        personal,
+        { name: 'acme', label: 'Acme', scope: 'org', cover: { kind: 'title', thumbnailRef: 'thumb/title' } },
+        { name: 'global', label: 'Global', scope: 'platform', cover: { kind: 'title', thumbnailRef: 'thumb/title' } },
+      ],
+    })
+    renderArea()
+    await waitFor(() => expect(screen.getAllByTestId('template-card')).toHaveLength(4))
+    const badges = screen.getAllByTestId('template-scope-badge').map(el => el.textContent)
+    expect(badges).toContain('Organization')
+    expect(badges).toContain('Platform')
+    expect(screen.getAllByTestId('template-delete')).toHaveLength(1)
+  })
+
   it('shows Delete only for the scoped template, not the built-in', async () => {
     renderArea()
     await waitFor(() => expect(screen.getAllByTestId('template-card')).toHaveLength(2))

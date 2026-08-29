@@ -10,8 +10,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/gorilla/mux"
 	"github.com/SAP/astonish/pkg/store"
+	"github.com/gorilla/mux"
 )
 
 // ---------------------------------------------------------------------------
@@ -21,7 +21,7 @@ import (
 // mockOrgStoreForRole implements store.OrganizationStore for role-change tests.
 type mockOrgStoreForRole struct {
 	orgs    map[string]*store.Organization // slug → org
-	roles   map[string]string             // "userID:orgID" → role
+	roles   map[string]string              // "userID:orgID" → role
 	members []*store.UserWithRole
 
 	// Tracking
@@ -94,6 +94,7 @@ func (m *mockPlatformBackendForRole) PlatformSettings() store.PlatformSettingsSt
 func (m *mockPlatformBackendForRole) OrgSettings(_ string) store.OrgSettingsStore       { return nil }
 func (m *mockPlatformBackendForRole) PlatformMCPServers() store.MCPServerStore          { return nil }
 func (m *mockPlatformBackendForRole) PlatformSkills() store.SkillStore                  { return nil }
+func (m *mockPlatformBackendForRole) PlatformSlideTemplates() store.SlideTemplateStore  { return nil }
 func (m *mockPlatformBackendForRole) SetEmbedFunc(_ store.EmbedFunc)                    {}
 func (m *mockPlatformBackendForRole) GetEmbedFunc() store.EmbedFunc                     { return nil }
 func (m *mockPlatformBackendForRole) SandboxLayers() store.LayerStore                   { return nil }
@@ -101,7 +102,7 @@ func (m *mockPlatformBackendForRole) SandboxTemplates() store.SandboxTemplateSto
 func (m *mockPlatformBackendForRole) SecretGetter() func(string) string                 { return nil }
 func (m *mockPlatformBackendForRole) MigrateAll(_ context.Context) error                { return nil }
 func (m *mockPlatformBackendForRole) CleanupExpired(_ context.Context) error            { return nil }
-func (m *mockPlatformBackendForRole) PlatformDB() *sql.DB                              { return nil }
+func (m *mockPlatformBackendForRole) PlatformDB() *sql.DB                               { return nil }
 func (m *mockPlatformBackendForRole) MigrateAllSchemas(_ context.Context) error         { return nil }
 func (m *mockPlatformBackendForRole) NewLinkCodeStore() store.LinkCodeStore             { return nil }
 
@@ -110,10 +111,10 @@ func (m *mockPlatformBackendForRole) NewLinkCodeStore() store.LinkCodeStore     
 // ---------------------------------------------------------------------------
 
 const (
-	testOrgID     = "org-11111111-1111-1111-1111-111111111111"
-	testOrgSlug   = "test-org"
-	testCallerID  = "caller-2222-2222-2222-222222222222"
-	testTargetID  = "target-3333-3333-3333-333333333333"
+	testOrgID    = "org-11111111-1111-1111-1111-111111111111"
+	testOrgSlug  = "test-org"
+	testCallerID = "caller-2222-2222-2222-222222222222"
+	testTargetID = "target-3333-3333-3333-333333333333"
 )
 
 func newTestOrgStore() *mockOrgStoreForRole {

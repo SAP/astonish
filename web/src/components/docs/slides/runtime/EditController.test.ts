@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import './index'
-import { EditController, snapToAlign } from './EditController'
+import { EditController, proportionalResize, snapToAlign } from './EditController'
 
 async function mount(): Promise<{ deck: HTMLElement; text: HTMLElement; bg: HTMLElement }> {
   document.body.innerHTML = `
@@ -84,6 +84,51 @@ describe('EditController', () => {
       '*',
     )
     editor.disconnect()
+  })
+
+  it('shows corner handles and resizes images proportionally', async () => {
+    document.body.innerHTML = `
+      <ast-deck>
+        <ast-slide id="s0" active>
+          <ast-image id="photo" x="100" y="120" w="400" h="200" src="photo.png"></ast-image>
+        </ast-slide>
+      </ast-deck>`
+    const deck = document.querySelector('ast-deck') as HTMLElement
+    await customElements.whenDefined('ast-image')
+    await new Promise(resolve => setTimeout(resolve, 0))
+    deck.querySelector('ast-slide')?.setAttribute('active', '')
+    const image = deck.querySelector('#photo') as HTMLElement
+    const postMessage = vi.fn()
+    Object.defineProperty(window, 'parent', { value: { postMessage }, configurable: true })
+    stubHit([image, deck])
+
+    const editor = new EditController(deck)
+    editor.enable()
+    deck.dispatchEvent(pointer('pointerdown', 200, 160))
+    deck.dispatchEvent(pointer('pointerup', 200, 160))
+    const handle = deck.querySelector<HTMLElement>('[data-resize-corner="se"]')!
+    expect(handle).not.toBeNull()
+
+    handle.dispatchEvent(pointer('pointerdown', 500, 320))
+    deck.dispatchEvent(pointer('pointermove', 700, 380))
+    deck.dispatchEvent(pointer('pointerup', 700, 380))
+
+    expect(Number(image.getAttribute('w'))).toBe(600)
+    expect(Number(image.getAttribute('h'))).toBe(300)
+    expect(Number(image.getAttribute('w')) / Number(image.getAttribute('h'))).toBe(2)
+    expect(postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'ast-edit-changed',
+        resizes: [{ id: 'photo', x: 100, y: 120, w: 600, h: 300 }],
+      }),
+      '*',
+    )
+    editor.disconnect()
+  })
+
+  it('keeps the opposite corner fixed when resizing from the northwest', () => {
+    const resized = proportionalResize({ x: 100, y: 120, w: 400, h: 200 }, 'nw', -200, -20)
+    expect(resized).toEqual({ x: -100, y: 20, w: 600, h: 300 })
   })
 
   it('reset restores the baseline position', async () => {

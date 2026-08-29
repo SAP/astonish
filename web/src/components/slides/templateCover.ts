@@ -29,8 +29,11 @@ function pickCoverFromArchetypes(tpl: SlidesTemplate): SlidesTemplateCover | nul
 export function templateCoverThumbnail(tpl: SlidesTemplate): TemplateCoverThumbnail | null {
   const cover = tpl.cover ?? pickCoverFromArchetypes(tpl)
   if (!cover) return null
+  const templateScope = tpl.scope === 'team' || tpl.scope === 'org' || tpl.scope === 'platform' || tpl.scope === 'personal' || tpl.scope === 'builtin'
+    ? tpl.scope
+    : undefined
   if (cover.thumbnailRef) {
-    return { kind: 'image', template: tpl.name, assetRef: cover.thumbnailRef }
+    return { kind: 'image', template: tpl.name, assetRef: cover.thumbnailRef, templateScope }
   }
   if (cover.markup) {
     return {
@@ -38,6 +41,7 @@ export function templateCoverThumbnail(tpl: SlidesTemplate): TemplateCoverThumbn
       markup: cover.markup,
       theme: tpl.tokens,
       template: tpl.name,
+      templateScope,
     }
   }
   return null

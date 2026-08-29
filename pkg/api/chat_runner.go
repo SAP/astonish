@@ -151,6 +151,7 @@ func injectRequestDocsStores(runner *ChatRunner, r *http.Request) *store.Service
 	svc := store.FromRequest(r)
 	if svc != nil {
 		runner.InjectDocsStores(svc.PersonalDocs, svc.Docs)
+		runner.InjectSlideTemplateStores(svc.PlatformSlideTemplates, svc.OrgSlideTemplates)
 	}
 	return svc
 }
@@ -186,6 +187,25 @@ func (cr *ChatRunner) InjectDocsStores(personal, team store.DocsStore) {
 	}
 	svc.PersonalDocs = personal
 	svc.Docs = team
+	cr.ctx = store.WithServices(cr.ctx, svc)
+}
+
+// InjectSlideTemplateStores adds platform and org slide template stores to the
+// runner's context so that chat tools (list_templates, template pickers) can
+// resolve inherited templates from all scopes.
+func (cr *ChatRunner) InjectSlideTemplateStores(platform, org store.SlideTemplateStore) {
+	if platform == nil && org == nil {
+		return
+	}
+	svc := store.FromContext(cr.ctx)
+	if svc == nil {
+		svc = &store.Services{}
+	} else {
+		clone := *svc
+		svc = &clone
+	}
+	svc.PlatformSlideTemplates = platform
+	svc.OrgSlideTemplates = org
 	cr.ctx = store.WithServices(cr.ctx, svc)
 }
 

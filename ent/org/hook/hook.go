@@ -117,6 +117,18 @@ func (f OrgSkillFileFunc) Mutate(ctx context.Context, m org.Mutation) (org.Value
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *org.OrgSkillFileMutation", m)
 }
 
+// The OrgSlideTemplateFunc type is an adapter to allow the use of ordinary
+// function as OrgSlideTemplate mutator.
+type OrgSlideTemplateFunc func(context.Context, *org.OrgSlideTemplateMutation) (org.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f OrgSlideTemplateFunc) Mutate(ctx context.Context, m org.Mutation) (org.Value, error) {
+	if mv, ok := m.(*org.OrgSlideTemplateMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *org.OrgSlideTemplateMutation", m)
+}
+
 // The TeamFunc type is an adapter to allow the use of ordinary
 // function as Team mutator.
 type TeamFunc func(context.Context, *org.TeamMutation) (org.Value, error)

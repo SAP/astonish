@@ -371,8 +371,13 @@ func fillArchetypeMarkup(markup string, fills map[string]string) (string, error)
 			continue
 		}
 		if !markupHasID(out, id) {
-			// Extra keys (optional slots the skin does not emit, typos) are
-			// ignored so a product cover fill of meta_4 is not a hard error.
+			// Image fills that target a missing ph-pic-* slot must fail loudly
+			// so the model doesn't hallucinate that an image was placed.
+			if strings.HasPrefix(id, "ph-pic-") && looksLikeAssetRef(value) {
+				return "", fmt.Errorf("image slot %q does not exist in this layout — preserve the layout and use add_slide_image after this slide is written", id)
+			}
+			// Other extra keys (optional slots the skin does not emit, typos)
+			// are ignored so a product cover fill of meta_4 is not a hard error.
 			continue
 		}
 		next, err := replaceSlot(out, id, value)
@@ -885,13 +890,25 @@ func isXMLNameChar(b byte) bool {
 
 // setElementXY rewrites the x/y attributes of the element with the given id.
 func setElementXY(markup, id string, x, y int) (string, error) {
+	return rewriteElementGeometry(markup, id, map[string]int{"x": x, "y": y})
+}
+
+// setElementGeometry rewrites all geometry attributes of the named element.
+func setElementGeometry(markup, id string, x, y, w, h int) (string, error) {
+	return rewriteElementGeometry(markup, id, map[string]int{"x": x, "y": y, "w": w, "h": h})
+}
+
+func rewriteElementGeometry(markup, id string, values map[string]int) (string, error) {
 	start, tag, attrs, innerStart, innerEnd, closeEnd, ok := findElement(markup, id)
 	if !ok {
 		return "", fmt.Errorf("element %q not found", id)
 	}
 	attrs = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(attrs), "/"))
-	attrs = setIntAttr(attrs, "x", x)
-	attrs = setIntAttr(attrs, "y", y)
+	for _, key := range []string{"x", "y", "w", "h"} {
+		if value, ok := values[key]; ok {
+			attrs = setIntAttr(attrs, key, value)
+		}
+	}
 	selfClose := closeEnd == innerStart
 	open := "<" + tag
 	if strings.TrimSpace(attrs) != "" {

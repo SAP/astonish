@@ -26,13 +26,22 @@ function templateScope(tpl: SlidesTemplate): DocsScope {
 }
 
 function ScopeBadge({ scope }: { scope?: string }) {
-  const label = scope === 'builtin' ? 'Built-in' : scope === 'team' ? 'Team' : 'Personal'
+  const label =
+    scope === 'builtin' ? 'Built-in'
+      : scope === 'platform' ? 'Platform'
+        : scope === 'org' ? 'Organization'
+          : scope === 'team' ? 'Team'
+            : 'Personal'
   const palette =
     scope === 'builtin'
       ? { bg: 'var(--bg-tertiary)', fg: 'var(--text-muted)' }
-      : scope === 'team'
-        ? { bg: 'rgba(16, 185, 129, 0.15)', fg: '#34d399' }
-        : { bg: 'rgba(99, 102, 241, 0.15)', fg: '#818cf8' }
+      : scope === 'platform'
+        ? { bg: 'rgba(245, 158, 11, 0.15)', fg: '#f59e0b' }
+        : scope === 'org'
+          ? { bg: 'rgba(59, 130, 246, 0.15)', fg: '#60a5fa' }
+          : scope === 'team'
+            ? { bg: 'rgba(16, 185, 129, 0.15)', fg: '#34d399' }
+            : { bg: 'rgba(99, 102, 241, 0.15)', fg: '#818cf8' }
   return (
     <span
       className="rounded-full px-1.5 py-0.5 text-[10px] font-medium"
@@ -113,7 +122,7 @@ function TemplateCard({
   onRecolor: (tpl: SlidesTemplate, tokens: Record<string, string>) => void
   busy: boolean
 }) {
-  const isBuiltin = tpl.scope === 'builtin'
+  const isPersonal = !tpl.scope || tpl.scope === 'personal'
   const [editing, setEditing] = useState(false)
   const title = tpl.label || tpl.name
   const thumbnail = templateCoverThumbnail(tpl)
@@ -154,7 +163,7 @@ function TemplateCard({
         >
           <Copy size={11} /> Duplicate
         </button>
-        {!isBuiltin && (
+        {isPersonal && (
           <button
             onClick={() => setEditing(v => !v)}
             disabled={busy}
@@ -166,7 +175,7 @@ function TemplateCard({
             <Palette size={11} /> Colors
           </button>
         )}
-        {!isBuiltin && (
+        {isPersonal && (
           <button
             onClick={() => onDelete(tpl)}
             disabled={busy}
@@ -228,7 +237,7 @@ export default function TemplatesArea({ onNavigate, showToast }: TemplatesAreaPr
   const handleDuplicate = useCallback(async (tpl: SlidesTemplate) => {
     setBusy(true)
     try {
-      const { template } = await duplicateSlidesTemplate(tpl.name, { newName: `${tpl.name}-copy` }, templateScope(tpl))
+      const { template } = await duplicateSlidesTemplate(tpl.name, { newName: `${tpl.name}-copy` }, 'personal')
       await load()
       notifyUpdated()
       showToast(`Duplicated as "${template.label || template.name}"`, 'success')

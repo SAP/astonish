@@ -85,7 +85,7 @@ export default function SlidesCard({ update, scope = 'personal' }: SlidesCardPro
     try {
       const url = presentationUrlRef.current ?? await loadPresentation()
       if (url && mountedRef.current) {
-        window.open(slidesPresentationURL(update.deckSlug, scope), '_blank', 'noopener,noreferrer')
+        window.open(slidesPresentationURL(update.deckSlug, scope, true), '_blank', 'noopener,noreferrer')
       }
     } finally {
       if (mountedRef.current) setPendingAction(null)

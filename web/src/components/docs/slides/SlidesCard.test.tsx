@@ -7,7 +7,7 @@ import SlidesCard from './SlidesCard'
 vi.mock('@/api/slides', () => ({
   exportSlidesDeck: vi.fn(),
   fetchSlidesPresentation: vi.fn(),
-  slidesPresentationURL: vi.fn(() => '/api/docs/slides/migration/present?scope=team'),
+  slidesPresentationURL: vi.fn((_slug: string, _scope: string, presenter?: boolean) => `/api/docs/slides/migration/present?scope=team${presenter ? '&presenter=1' : ''}`),
 }))
 
 const update = {
@@ -62,8 +62,8 @@ describe('SlidesCard', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Present' }))
 
     await waitFor(() => expect(fetchSlidesPresentation).toHaveBeenCalledWith('migration', 'team'))
-    expect(window.open).toHaveBeenCalledWith('/api/docs/slides/migration/present?scope=team', '_blank', 'noopener,noreferrer')
-    expect(slidesPresentationURL).toHaveBeenCalledWith('migration', 'team')
+    expect(window.open).toHaveBeenCalledWith('/api/docs/slides/migration/present?scope=team&presenter=1', '_blank', 'noopener,noreferrer')
+    expect(slidesPresentationURL).toHaveBeenCalledWith('migration', 'team', true)
   })
 
   it('reloads the presentation after an empty deck receives its first slide', async () => {
@@ -96,8 +96,8 @@ describe('SlidesCard', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Present' }))
 
-    expect(window.open).toHaveBeenCalledWith('/api/docs/slides/migration/present?scope=team', '_blank', 'noopener,noreferrer')
-    expect(slidesPresentationURL).toHaveBeenCalledWith('migration', 'team')
+    expect(window.open).toHaveBeenCalledWith('/api/docs/slides/migration/present?scope=team&presenter=1', '_blank', 'noopener,noreferrer')
+    expect(slidesPresentationURL).toHaveBeenCalledWith('migration', 'team', true)
     expect(fetchSlidesPresentation).toHaveBeenCalledTimes(2)
   })
 

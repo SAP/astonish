@@ -18,11 +18,45 @@ const mountDeck = async () => {
 
 afterEach(() => {
   document.body.replaceChildren()
-  history.replaceState(null, '', '#')
+  history.replaceState(null, '', location.pathname)
+  Reflect.deleteProperty(document, 'fullscreenElement')
+  Reflect.deleteProperty(document, 'exitFullscreen')
+  Reflect.deleteProperty(document.documentElement, 'requestFullscreen')
   vi.restoreAllMocks()
 })
 
 describe('DeckController', () => {
+  it('enters fullscreen in presenter mode and Escape exits fullscreen and closes the tab', async () => {
+    history.replaceState(null, '', '?presenter=1')
+    let fullscreenElement: Element | null = null
+    const requestFullscreen = vi.fn().mockImplementation(async () => { fullscreenElement = document.documentElement })
+    const exitFullscreen = vi.fn().mockImplementation(async () => { fullscreenElement = null })
+    const close = vi.spyOn(window, 'close').mockImplementation(() => undefined)
+    Object.defineProperty(document.documentElement, 'requestFullscreen', { configurable: true, value: requestFullscreen })
+    Object.defineProperty(document, 'exitFullscreen', { configurable: true, value: exitFullscreen })
+    Object.defineProperty(document, 'fullscreenElement', { configurable: true, get: () => fullscreenElement })
+
+    const deck = await mountDeck()
+    await vi.waitFor(() => expect(requestFullscreen).toHaveBeenCalledOnce())
+
+    deck.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    await vi.waitFor(() => expect(exitFullscreen).toHaveBeenCalledOnce())
+    expect(close).toHaveBeenCalledOnce()
+  })
+
+  it('retries fullscreen on the first presenter interaction when automatic entry is blocked', async () => {
+    history.replaceState(null, '', '?presenter=1')
+    const requestFullscreen = vi.fn()
+      .mockRejectedValueOnce(new Error('user activation required'))
+      .mockResolvedValueOnce(undefined)
+    Object.defineProperty(document.documentElement, 'requestFullscreen', { configurable: true, value: requestFullscreen })
+    Object.defineProperty(document, 'fullscreenElement', { configurable: true, value: null })
+
+    await mountDeck()
+    window.dispatchEvent(new PointerEvent('pointerdown'))
+    await vi.waitFor(() => expect(requestFullscreen).toHaveBeenCalledTimes(2))
+  })
+
   it('scales the fixed canvas and advances ordered fragments before slides', async () => {
     const deck = await mountDeck()
     const slides = [...deck.querySelectorAll('ast-slide')] as AstSlideElement[]

@@ -21,7 +21,7 @@ vi.mock('../../../api/slides', async () => {
     fetchSlidesDeck: vi.fn(),
     exportSlidesDeck: vi.fn(),
     patchSlideMoves: vi.fn(),
-    slidesPresentationURL: vi.fn((slug: string) => `/api/docs/slides/${slug}/present`),
+    slidesPresentationURL: vi.fn((slug: string, _scope?: string, presenter?: boolean) => `/api/docs/slides/${slug}/present${presenter ? '?presenter=1' : ''}`),
   }
 })
 
@@ -51,6 +51,17 @@ describe('SlidesDeckView refresh signal', () => {
 
   afterEach(() => {
     vi.clearAllMocks()
+  })
+
+  it('opens Present in presenter mode', async () => {
+    vi.spyOn(window, 'open').mockImplementation(() => null)
+    render(<SlidesDeckView deckSlug="d" refreshSignal={0} />)
+    await waitFor(() => expect(slidesApi.fetchSlidesDeck).toHaveBeenCalledTimes(1))
+
+    fireEvent.click(screen.getByTestId('slides-present'))
+
+    expect(slidesApi.slidesPresentationURL).toHaveBeenCalledWith('d', 'personal', true)
+    expect(window.open).toHaveBeenCalledWith('/api/docs/slides/d/present?presenter=1', '_blank', 'noopener,noreferrer')
   })
 
   it('fetches the deck once on initial render', async () => {

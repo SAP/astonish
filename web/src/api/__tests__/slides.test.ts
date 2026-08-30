@@ -75,8 +75,9 @@ describe('slides API (deck/present/export)', () => {
     })
   })
 
-  it('builds a scoped presentation URL', () => {
+  it('builds scoped presentation URLs', () => {
     expect(slidesPresentationURL('deck-1', 'personal')).toBe('/api/docs/slides/deck-1/present?scope=personal')
+    expect(slidesPresentationURL('deck-1', 'personal', true)).toBe('/api/docs/slides/deck-1/present?scope=personal&presenter=1')
   })
 
   it('builds a scoped, encoded per-slide thumbnail URL', () => {

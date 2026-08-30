@@ -9,6 +9,9 @@ export class DeckController {
   private index = 0
   private fragment = 0
   private touchStart?: { x: number; y: number }
+  private presenter = new URLSearchParams(location.search).get('presenter') === '1'
+  private enteredFullscreen = false
+  private presenterClosed = false
 
   get currentIndex(): number {
     return this.index
@@ -25,7 +28,13 @@ export class DeckController {
     this.deck.addEventListener('touchstart', this.onTouchStart, { passive: true })
     this.deck.addEventListener('touchend', this.onTouchEnd, { passive: true })
     window.addEventListener('hashchange', this.onHashChange)
+    if (this.presenter) {
+      document.addEventListener('fullscreenchange', this.onFullscreenChange)
+      window.addEventListener('pointerdown', this.onPresenterInteraction, { once: true })
+      window.addEventListener('keydown', this.onPresenterKeyDown)
+    }
     this.applyState(false)
+    if (this.presenter) void this.enterFullscreen()
   }
 
   disconnect(): void {
@@ -34,6 +43,9 @@ export class DeckController {
     this.deck.removeEventListener('touchstart', this.onTouchStart)
     this.deck.removeEventListener('touchend', this.onTouchEnd)
     window.removeEventListener('hashchange', this.onHashChange)
+    document.removeEventListener('fullscreenchange', this.onFullscreenChange)
+    window.removeEventListener('pointerdown', this.onPresenterInteraction)
+    window.removeEventListener('keydown', this.onPresenterKeyDown)
   }
 
   next(): void {
@@ -188,6 +200,54 @@ export class DeckController {
     if (event.defaultPrevented || (event.target as Element).closest('a,button,input,textarea,select')) return
     if (this.deck.hasAttribute('edit') && hitTest(this.deck, event.clientX, event.clientY)) return
     event.clientX < window.innerWidth / 3 ? this.previous() : this.next()
+  }
+
+  private readonly onPresenterInteraction = (): void => {
+    void this.enterFullscreen()
+  }
+
+  private readonly onPresenterKeyDown = (event: KeyboardEvent): void => {
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      void this.exitPresenter()
+      return
+    }
+    void this.enterFullscreen()
+  }
+
+  private readonly onFullscreenChange = (): void => {
+    if (document.fullscreenElement) {
+      this.enteredFullscreen = true
+      return
+    }
+    if (this.enteredFullscreen) this.closePresenter()
+  }
+
+  private async enterFullscreen(): Promise<void> {
+    if (document.fullscreenElement || !document.documentElement.requestFullscreen) return
+    try {
+      await document.documentElement.requestFullscreen()
+      this.enteredFullscreen = true
+    } catch {
+      // Browsers may require the first interaction in the presentation tab.
+    }
+  }
+
+  private async exitPresenter(): Promise<void> {
+    if (document.fullscreenElement && document.exitFullscreen) {
+      try {
+        await document.exitFullscreen()
+      } catch {
+        // Closing the dedicated presenter tab remains the final fallback.
+      }
+    }
+    this.closePresenter()
+  }
+
+  private closePresenter(): void {
+    if (this.presenterClosed) return
+    this.presenterClosed = true
+    window.close()
   }
 
   private readonly onTouchStart = (event: TouchEvent): void => {

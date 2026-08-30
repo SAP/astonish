@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
-import { Send, Plus, Trash2, MessageSquare, ChevronRight, ChevronDown, Loader, Square, Copy, Check, Code, RotateCcw, Clock, Search, Users, User, Info, FileText, Globe, ListChecks, AppWindow, Brain, Paperclip, X } from 'lucide-react'
+import { Send, Plus, Trash2, MessageSquare, ChevronRight, ChevronDown, Loader, Square, Copy, Check, Code, RotateCcw, Clock, Search, Users, User, Info, FileText, Globe, ListChecks, AppWindow, Brain, Paperclip, X, Bug } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
+import { Switch } from '@/components/ui/switch'
 import { cn } from '@/lib/utils'
 
 import { markdownComponents } from './chat/markdownComponents'
@@ -50,6 +51,7 @@ import ArtifactCard from './chat/ArtifactCard'
 import AppCodeIndicator from './chat/AppCodeIndicator'
 import NetworkDenialPrompt from './chat/NetworkDenialPrompt'
 import ModelCredentialBanner from './chat/ModelCredentialBanner'
+import CacheDiagnosticsPanel from './chat/CacheDiagnosticsPanel'
 import SessionModelPicker from './chat/SessionModelPicker'
 import PreChatModelPicker from './chat/PreChatModelPicker'
 import { fileTypeFromFileName } from '../utils/artifactMedia'
@@ -284,7 +286,30 @@ interface PendingAttachment {
   name: string
 }
 
-export default function StudioChat({ theme, initialSessionId, pendingChatMessage, onPendingChatMessageConsumed, onSessionChange, userDisplayName }: { theme: string; initialSessionId?: string | null; pendingChatMessage?: { message: string; systemContext?: string } | null; onPendingChatMessageConsumed?: () => void; onSessionChange?: (sessionId: string | null) => void; /** Shown on empty-chat hero as "Hello, {firstName}" */ userDisplayName?: string | null }) {
+interface StudioChatProps {
+  theme: string
+  initialSessionId?: string | null
+  pendingChatMessage?: { message: string; systemContext?: string } | null
+  onPendingChatMessageConsumed?: () => void
+  onSessionChange?: (sessionId: string | null) => void
+  userDisplayName?: string | null
+  platformRole?: string
+  isPlatformMode?: boolean
+}
+
+const DEBUG_STORAGE_KEY = 'astonish-studio-cache-debug'
+
+function readDebugPreference(): boolean {
+  try { return globalThis.localStorage?.getItem(DEBUG_STORAGE_KEY) === 'true' }
+  catch { return false }
+}
+
+function writeDebugPreference(enabled: boolean) {
+  try { globalThis.localStorage?.setItem(DEBUG_STORAGE_KEY, String(enabled)) }
+  catch { /* Browser storage may be unavailable in restricted contexts. */ }
+}
+
+export default function StudioChat({ theme, initialSessionId, pendingChatMessage, onPendingChatMessageConsumed, onSessionChange, userDisplayName, platformRole, isPlatformMode = false }: StudioChatProps) {
   // Session state
   const [sessions, setSessions] = useState<SidebarSession[]>([])
   const [activeSessionId, setActiveSessionId] = useState<string | null>(initialSessionId || null)
@@ -331,6 +356,9 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null)
   const [rawViewIndices, setRawViewIndices] = useState<Set<number>>(new Set())
   const [expandedCodeIndices, setExpandedCodeIndices] = useState<Set<number>>(new Set())
+  const [debugOpenIndices, setDebugOpenIndices] = useState<Set<number>>(new Set())
+  const canDebug = isPlatformMode && platformRole === 'superadmin'
+  const [debugEnabled, setDebugEnabled] = useState(() => canDebug && readDebugPreference())
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
 
   // File panel state
@@ -408,6 +436,15 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
     }
 
     setTimeout(pollForMemories, pollIntervalMs)
+  }, [])
+
+  useEffect(() => {
+    if (!canDebug) setDebugEnabled(false)
+  }, [canDebug])
+
+  const updateDebugEnabled = useCallback((enabled: boolean) => {
+    setDebugEnabled(enabled)
+    writeDebugPreference(enabled)
   }, [])
 
   // Attachment state
@@ -1880,6 +1917,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
       provider: preChatProvider || undefined,
       model: preChatModel || undefined,
       memoryScope,
+      debug: canDebug && debugEnabled,
       onEvent: (eventType, data) => {
         // Discard events from a stale stream (session was switched)
         if (streamGenRef.current !== streamGen) return
@@ -2634,7 +2672,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
     })
 
     abortRef.current = controller
-  }, [activeSessionId, activeWizardContext, activePinnedToolGroups, attachments, prepareAttachmentPayloads, clearAttachments, preChatProvider, preChatModel, preChatProviders, changeSession, startSessionMemoryPolling, memoryScope])
+  }, [activeSessionId, activeWizardContext, activePinnedToolGroups, attachments, prepareAttachmentPayloads, clearAttachments, preChatProvider, preChatModel, preChatProviders, changeSession, startSessionMemoryPolling, memoryScope, canDebug, debugEnabled])
 
   // Process deferred fleet plan prompt (set by fleet_plan_redirect SSE event)
   useEffect(() => {
@@ -2858,6 +2896,18 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
                 openSignal={modelPickerOpenSignal}
                 onUpdate={setModelStatus}
               />
+            )}
+            {canDebug && (
+              <label className="flex items-center gap-1.5 rounded-full border border-border px-2.5 py-1 text-[11px] font-medium text-muted-foreground" title="Record cache diagnostics for new assistant turns">
+                <Bug size={11} />
+                <span>Debug</span>
+                <Switch
+                  aria-label="Debug cache diagnostics"
+                  checked={debugEnabled}
+                  onCheckedChange={updateDebugEnabled}
+                  className="scale-90"
+                />
+              </label>
             )}
             {/* Per-session memory scope toggle — defaults to team */}
             <button
@@ -3112,6 +3162,21 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
                     <div className="flex items-center justify-between">
                       <div className="text-xs font-medium" style={{ color: 'var(--text-muted)' }}>Agent</div>
                       <div className="flex gap-1">
+                        {canDebug && activeSessionId && !(msg as AgentMessage)._streaming && (
+                          <button
+                            onClick={() => setDebugOpenIndices(prev => {
+                              const next = new Set(prev)
+                              if (next.has(index)) next.delete(index)
+                              else next.add(index)
+                              return next
+                            })}
+                            className="p-1 rounded hover:bg-white/10 transition-colors"
+                            title="Cache diagnostics"
+                            aria-label={`Cache diagnostics for assistant turn ${messages.slice(0, index + 1).filter(item => item.type === 'agent').length}`}
+                          >
+                            <Bug size={14} className={debugOpenIndices.has(index) ? 'text-primary' : 'text-gray-500'} />
+                          </button>
+                        )}
                         <button
                           onClick={() => toggleRawView(index)}
                           className="p-1 rounded hover:bg-white/10 transition-colors"
@@ -3198,6 +3263,12 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
                         )
                       })()}
                     </div>
+                    {canDebug && activeSessionId && debugOpenIndices.has(index) && (
+                      <CacheDiagnosticsPanel
+                        sessionId={activeSessionId}
+                        assistantTurn={messages.slice(0, index + 1).filter(item => item.type === 'agent').length}
+                      />
+                    )}
                     {/* Last-turn report + video placeholders (full UI in harness panel) */}
                     {isLastAgent && (
                       <div className="mt-3 space-y-3">

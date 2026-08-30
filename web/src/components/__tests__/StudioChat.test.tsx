@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, act, waitFor } from '@testing-library/react'
+import { render, screen, act, waitFor, fireEvent } from '@testing-library/react'
 import StudioChat from '../StudioChat'
-import { fetchSessionHistory } from '../../api/studioChat'
+import { connectChat, fetchCacheDiagnostics, fetchSessionHistory } from '../../api/studioChat'
 
 // Mock all API modules
 vi.mock('../../api/studioChat', () => ({
@@ -9,6 +9,7 @@ vi.mock('../../api/studioChat', () => ({
   fetchSessionHistory: vi.fn().mockResolvedValue([]),
   deleteSession: vi.fn().mockResolvedValue({}),
   connectChat: vi.fn().mockReturnValue(new AbortController()),
+  fetchCacheDiagnostics: vi.fn().mockResolvedValue({ sessionId: 'sess-debug', assistantTurn: 1, rounds: [] }),
   stopChat: vi.fn().mockResolvedValue({}),
   fetchSessionStatus: vi.fn().mockResolvedValue({ running: false }),
   connectChatStream: vi.fn().mockReturnValue(new AbortController()),
@@ -107,6 +108,55 @@ describe('StudioChat', () => {
     await act(async () => {
       await new Promise(resolve => setTimeout(resolve, 0))
     })
+  })
+
+  it('shows the browser-local Debug toggle only to platform superadmins and sends debug', async () => {
+    const storage = new Map<string, string>()
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value),
+      removeItem: (key: string) => storage.delete(key),
+    })
+    const { rerender } = render(<StudioChat {...defaultProps} isPlatformMode platformRole="member" />)
+    expect(screen.queryByRole('switch', { name: 'Debug cache diagnostics' })).not.toBeInTheDocument()
+
+    rerender(<StudioChat {...defaultProps} isPlatformMode platformRole="superadmin" />)
+    fireEvent.click(screen.getByRole('switch', { name: 'Debug cache diagnostics' }))
+    expect(storage.get('astonish-studio-cache-debug')).toBe('true')
+    fireEvent.change(screen.getByTestId('chat-input'), { target: { value: 'hello' } })
+    fireEvent.keyDown(screen.getByTestId('chat-input'), { key: 'Enter', code: 'Enter' })
+
+    await waitFor(() => expect(connectChat).toHaveBeenCalledWith(expect.objectContaining({ debug: true })))
+  })
+
+  it('opens diagnostics inline for an assistant turn', async () => {
+    vi.mocked(fetchSessionHistory).mockResolvedValue({
+      id: 'sess-debug',
+      title: 'Debug',
+      messages: [{ role: 'assistant', type: 'agent', content: 'Answer' }],
+    })
+    vi.mocked(fetchCacheDiagnostics).mockResolvedValue({
+      sessionId: 'sess-debug',
+      assistantTurn: 1,
+      rounds: [{
+        round: 1,
+        provider: 'google',
+        model: 'gemini',
+        cacheStatus: 'hit',
+        systemInstruction: { changed: false, currentHash: 'system-hash' },
+        toolDeclarations: { changed: true, previousHash: 'tools-old', currentHash: 'tools-new', count: 4 },
+        payload: { cachedTokens: 120 },
+      }],
+    })
+
+    render(<StudioChat {...defaultProps} initialSessionId="sess-debug" isPlatformMode platformRole="superadmin" />)
+    const button = await screen.findByRole('button', { name: 'Cache diagnostics for assistant turn 1' })
+    fireEvent.click(button)
+
+    expect(await screen.findByText('Model round 1')).toBeInTheDocument()
+    expect(screen.getByText('Cache hit')).toBeInTheDocument()
+    expect(screen.getByText('Changed')).toBeInTheDocument()
+    expect(fetchCacheDiagnostics).toHaveBeenCalledWith('sess-debug', 1)
   })
 
   describe('chat_question rendering', () => {

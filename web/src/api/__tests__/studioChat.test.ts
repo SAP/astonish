@@ -4,6 +4,7 @@ import {
   fetchSessionHistory,
   deleteSession,
   connectChat,
+  fetchCacheDiagnostics,
   stopChat,
 } from '../../api/studioChat'
 
@@ -204,6 +205,17 @@ describe('studioChat API', () => {
       expect(body.autoApprove).toBe(true)
     })
 
+    it('includes debug only when enabled', async () => {
+      const stream = new ReadableStream({ start(c) { c.close() } })
+      globalThis.fetch = vi.fn().mockResolvedValue({ ok: true, body: stream })
+
+      connectChat({ message: 'inspect', debug: true, onEvent: vi.fn() })
+      await new Promise(resolve => setTimeout(resolve, 50))
+
+      const body = JSON.parse((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0][1].body)
+      expect(body.debug).toBe(true)
+    })
+
     it('includes planMode when enabled', async () => {
       const stream = new ReadableStream({ start(c) { c.close() } })
       globalThis.fetch = vi.fn().mockResolvedValue({ ok: true, body: stream })
@@ -235,6 +247,24 @@ describe('studioChat API', () => {
 
       const body = JSON.parse((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0][1].body)
       expect(body.planMode).toBeUndefined()
+    })
+  })
+
+  describe('fetchCacheDiagnostics', () => {
+    it('fetches typed diagnostics for an encoded session and assistant turn', async () => {
+      const diagnostics = { sessionId: 'session/a', assistantTurn: 2, rounds: [] }
+      globalThis.fetch = mockFetch(diagnostics)
+
+      await expect(fetchCacheDiagnostics('session/a', 2)).resolves.toEqual(diagnostics)
+      expect(globalThis.fetch).toHaveBeenCalledWith(
+        '/api/studio/sessions/session%2Fa/cache-diagnostics?assistantTurn=2',
+        expect.objectContaining({ headers: expect.any(Headers) }),
+      )
+    })
+
+    it('surfaces the diagnostics API error body', async () => {
+      globalThis.fetch = mockFetch('diagnostics unavailable', false, 'Forbidden')
+      await expect(fetchCacheDiagnostics('s1', 1)).rejects.toThrow('diagnostics unavailable')
     })
   })
 

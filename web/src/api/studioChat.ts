@@ -72,6 +72,7 @@ export interface ConnectChatParams {
   provider?: string
   model?: string
   memoryScope?: 'personal' | 'team'
+  debug?: boolean
   onEvent: SSEEventCallback
   onError?: ErrorCallback
   onDone?: DoneCallback
@@ -104,12 +105,46 @@ export async function deleteSession(id: string): Promise<void> {
   }
 }
 
+export type CacheHitStatus = 'hit' | 'miss' | 'unknown'
+
+export interface CacheDiagnosticDiff {
+  changed: boolean
+  previousHash?: string
+  currentHash: string
+}
+
+export interface CacheDiagnosticRound {
+  round: number
+  provider?: string
+  model?: string
+  cacheStatus: CacheHitStatus
+  systemInstruction: CacheDiagnosticDiff
+  toolDeclarations: CacheDiagnosticDiff & { count: number }
+  payload?: Record<string, unknown>
+}
+
+export interface CacheDiagnosticsResponse {
+  sessionId: string
+  assistantTurn: number
+  rounds: CacheDiagnosticRound[]
+}
+
 export interface SubtaskEventItem {
   type: string
   tool_name?: string
   tool_args?: unknown
   tool_result?: unknown
   text?: string
+}
+
+export async function fetchCacheDiagnostics(sessionId: string, assistantTurn: number): Promise<CacheDiagnosticsResponse> {
+  const params = new URLSearchParams({ assistantTurn: String(assistantTurn) })
+  const response = await teamFetch(`${API_BASE}/sessions/${encodeURIComponent(sessionId)}/cache-diagnostics?${params}`)
+  if (!response.ok) {
+    const detail = await response.text()
+    throw new Error(detail || `Failed to fetch cache diagnostics: ${response.statusText}`)
+  }
+  return response.json()
 }
 
 export async function fetchSubtaskEvents(sessionId: string, taskName: string): Promise<SubtaskEventItem[]> {
@@ -122,7 +157,7 @@ export async function fetchSubtaskEvents(sessionId: string, taskName: string): P
   return data.events || []
 }
 
-export function connectChat({ sessionId, message, attachments, systemContext, planMode, pinnedToolGroups, autoApprove, provider, model, memoryScope, onEvent, onError, onDone }: ConnectChatParams): AbortController {
+export function connectChat({ sessionId, message, attachments, systemContext, planMode, pinnedToolGroups, autoApprove, provider, model, memoryScope, debug, onEvent, onError, onDone }: ConnectChatParams): AbortController {
   const controller = new AbortController()
 
   const run = async () => {
@@ -134,6 +169,7 @@ export function connectChat({ sessionId, message, attachments, systemContext, pl
         ...(provider ? { provider } : {}),
         ...(model ? { model } : {}),
         ...(memoryScope ? { memoryScope } : {}),
+        ...(debug ? { debug: true } : {}),
       }
       if (attachments && attachments.length > 0) {
         body.attachments = attachments

@@ -3,11 +3,53 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"github.com/gorilla/mux"
 
 	"github.com/SAP/astonish/pkg/store"
 )
+
+// StudioCacheDiagnosticsHandler returns diagnostics from the request's scoped session store.
+func StudioCacheDiagnosticsHandler(w http.ResponseWriter, r *http.Request) {
+	if !IsPlatformAdmin(GetPlatformUser(r)) {
+		respondError(w, http.StatusForbidden, "platform superadmin access required")
+		return
+	}
+	sessionID := mux.Vars(r)["id"]
+	invocationID := strings.TrimSpace(r.URL.Query().Get("invocationId"))
+	if invocationID == "" {
+		respondError(w, http.StatusBadRequest, "invocationId is required")
+		return
+	}
+	svc := store.FromRequest(r)
+	if svc == nil {
+		respondError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	sessions := resolveSessionStore(svc, sessionID)
+	if sessions == nil {
+		respondError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	diagnostics, err := sessions.ListCacheDiagnostics(r.Context(), sessionID)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to load cache diagnostics")
+		return
+	}
+	filtered := make([]store.CacheDiagnostic, 0)
+	for _, diagnostic := range diagnostics {
+		if diagnostic.InvocationID == invocationID {
+			filtered = append(filtered, diagnostic)
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"sessionId":    sessionID,
+		"invocationId": invocationID,
+		"rounds":       filtered,
+	})
+}
 
 // PlatformAdminCacheDiagnosticsHandler handles
 // GET /api/platform/admin/sessions/{id}/cache-diagnostics.

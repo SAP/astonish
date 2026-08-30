@@ -42,10 +42,10 @@ func TestChatRunnerCacheDiagnosticRecorder(t *testing.T) {
 	if recorder == nil {
 		t.Fatal("diagnostic recorder was not injected")
 	}
-	if err := recorder(context.Background(), store.CacheDiagnostic{Round: 2}); err != nil {
+	if err := recorder(context.Background(), store.CacheDiagnostic{Call: 2}); err != nil {
 		t.Fatalf("record diagnostic: %v", err)
 	}
-	if sessionStore.sessionID != "session" || sessionStore.diagnostic.Round != 2 {
+	if sessionStore.sessionID != "session" || sessionStore.diagnostic.Call != 2 {
 		t.Fatalf("recorded = %q %#v", sessionStore.sessionID, sessionStore.diagnostic)
 	}
 }

@@ -700,7 +700,7 @@ func (cr *ChatRunner) Run(
 
 		for _, part := range event.LLMResponse.Content.Parts {
 			if part.Text != "" && !part.Thought {
-				cr.emitEvent("text", map[string]any{"text": part.Text})
+				cr.emitEvent("text", map[string]any{"text": part.Text, "invocationId": event.InvocationID})
 			}
 			if part.FunctionCall != nil {
 				uiTool := subAgentUITools.call(part.FunctionCall)
@@ -887,10 +887,10 @@ runLoop:
 				if part.Text != "" && !part.Thought {
 					if event.LLMResponse.Partial {
 						seenPartialText = true
-						cr.emitEvent("text", map[string]any{"text": part.Text})
+						cr.emitEvent("text", map[string]any{"text": part.Text, "invocationId": event.InvocationID})
 					} else if !seenPartialText {
 						hasContent = true
-						cr.emitEvent("text", map[string]any{"text": part.Text})
+						cr.emitEvent("text", map[string]any{"text": part.Text, "invocationId": event.InvocationID})
 					} else {
 						seenPartialText = false
 						hasContent = true
@@ -1114,9 +1114,9 @@ runLoop:
 					if part.Text != "" && !part.Thought {
 						if event.LLMResponse.Partial {
 							seenPartialText = true
-							cr.emitEvent("text", map[string]any{"text": part.Text})
+							cr.emitEvent("text", map[string]any{"text": part.Text, "invocationId": event.InvocationID})
 						} else if !seenPartialText {
-							cr.emitEvent("text", map[string]any{"text": part.Text})
+							cr.emitEvent("text", map[string]any{"text": part.Text, "invocationId": event.InvocationID})
 						} else {
 							seenPartialText = false
 						}

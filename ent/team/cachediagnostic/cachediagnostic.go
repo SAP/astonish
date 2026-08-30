@@ -16,6 +16,12 @@ const (
 	FieldID = "id"
 	// FieldSessionID holds the string denoting the session_id field in the database.
 	FieldSessionID = "session_id"
+	// FieldInvocationID holds the string denoting the invocation_id field in the database.
+	FieldInvocationID = "invocation_id"
+	// FieldCall holds the string denoting the call field in the database.
+	FieldCall = "call"
+	// FieldData holds the string denoting the data field in the database.
+	FieldData = "data"
 	// FieldRound holds the string denoting the round field in the database.
 	FieldRound = "round"
 	// FieldCacheStablePath holds the string denoting the cache_stable_path field in the database.
@@ -53,6 +59,9 @@ const (
 var Columns = []string{
 	FieldID,
 	FieldSessionID,
+	FieldInvocationID,
+	FieldCall,
+	FieldData,
 	FieldRound,
 	FieldCacheStablePath,
 	FieldSystemHash,
@@ -78,6 +87,10 @@ func ValidColumn(column string) bool {
 var (
 	// SessionIDValidator is a validator for the "session_id" field. It is called by the builders before save.
 	SessionIDValidator func(string) error
+	// DefaultInvocationID holds the default value on creation for the "invocation_id" field.
+	DefaultInvocationID string
+	// DefaultCall holds the default value on creation for the "call" field.
+	DefaultCall int
 	// SystemHashValidator is a validator for the "system_hash" field. It is called by the builders before save.
 	SystemHashValidator func(string) error
 	// ToolHashValidator is a validator for the "tool_hash" field. It is called by the builders before save.
@@ -97,6 +110,16 @@ func ByID(opts ...sql.OrderTermOption) OrderOption {
 // BySessionID orders the results by the session_id field.
 func BySessionID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldSessionID, opts...).ToFunc()
+}
+
+// ByInvocationID orders the results by the invocation_id field.
+func ByInvocationID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldInvocationID, opts...).ToFunc()
+}
+
+// ByCall orders the results by the call field.
+func ByCall(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldCall, opts...).ToFunc()
 }
 
 // ByRound orders the results by the round field.

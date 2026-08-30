@@ -251,20 +251,20 @@ describe('studioChat API', () => {
   })
 
   describe('fetchCacheDiagnostics', () => {
-    it('fetches typed diagnostics for an encoded session and assistant turn', async () => {
-      const diagnostics = { sessionId: 'session/a', assistantTurn: 2, rounds: [] }
+    it('fetches typed diagnostics for an encoded session and invocation', async () => {
+      const diagnostics = { sessionId: 'session/a', invocationId: 'inv/2', rounds: [] }
       globalThis.fetch = mockFetch(diagnostics)
 
-      await expect(fetchCacheDiagnostics('session/a', 2)).resolves.toEqual(diagnostics)
+      await expect(fetchCacheDiagnostics('session/a', 'inv/2')).resolves.toEqual(diagnostics)
       expect(globalThis.fetch).toHaveBeenCalledWith(
-        '/api/studio/sessions/session%2Fa/cache-diagnostics?assistantTurn=2',
+        '/api/studio/sessions/session%2Fa/cache-diagnostics?invocationId=inv%2F2',
         expect.objectContaining({ headers: expect.any(Headers) }),
       )
     })
 
     it('surfaces the diagnostics API error body', async () => {
       globalThis.fetch = mockFetch('diagnostics unavailable', false, 'Forbidden')
-      await expect(fetchCacheDiagnostics('s1', 1)).rejects.toThrow('diagnostics unavailable')
+      await expect(fetchCacheDiagnostics('s1', 'inv-1')).rejects.toThrow('diagnostics unavailable')
     })
   })
 

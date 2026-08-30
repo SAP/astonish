@@ -20,6 +20,12 @@ type CacheDiagnostic struct {
 	ID int64 `json:"id,omitempty"`
 	// SessionID holds the value of the "session_id" field.
 	SessionID string `json:"session_id,omitempty"`
+	// InvocationID holds the value of the "invocation_id" field.
+	InvocationID string `json:"invocation_id,omitempty"`
+	// Call holds the value of the "call" field.
+	Call int `json:"call,omitempty"`
+	// Data holds the value of the "data" field.
+	Data []byte `json:"data,omitempty"`
 	// Round holds the value of the "round" field.
 	Round int `json:"round,omitempty"`
 	// CacheStablePath holds the value of the "cache_stable_path" field.
@@ -71,11 +77,13 @@ func (*CacheDiagnostic) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
+		case cachediagnostic.FieldData:
+			values[i] = new([]byte)
 		case cachediagnostic.FieldCacheStablePath, cachediagnostic.FieldSystemChanged, cachediagnostic.FieldSystemChangedSession, cachediagnostic.FieldToolsChanged, cachediagnostic.FieldToolsChangedSession:
 			values[i] = new(sql.NullBool)
-		case cachediagnostic.FieldID, cachediagnostic.FieldRound, cachediagnostic.FieldToolCount:
+		case cachediagnostic.FieldID, cachediagnostic.FieldCall, cachediagnostic.FieldRound, cachediagnostic.FieldToolCount:
 			values[i] = new(sql.NullInt64)
-		case cachediagnostic.FieldSessionID, cachediagnostic.FieldSystemHash, cachediagnostic.FieldToolHash:
+		case cachediagnostic.FieldSessionID, cachediagnostic.FieldInvocationID, cachediagnostic.FieldSystemHash, cachediagnostic.FieldToolHash:
 			values[i] = new(sql.NullString)
 		case cachediagnostic.FieldCreatedAt:
 			values[i] = new(sql.NullTime)
@@ -105,6 +113,24 @@ func (_m *CacheDiagnostic) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field session_id", values[i])
 			} else if value.Valid {
 				_m.SessionID = value.String
+			}
+		case cachediagnostic.FieldInvocationID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field invocation_id", values[i])
+			} else if value.Valid {
+				_m.InvocationID = value.String
+			}
+		case cachediagnostic.FieldCall:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field call", values[i])
+			} else if value.Valid {
+				_m.Call = int(value.Int64)
+			}
+		case cachediagnostic.FieldData:
+			if value, ok := values[i].(*[]byte); !ok {
+				return fmt.Errorf("unexpected type %T for field data", values[i])
+			} else if value != nil {
+				_m.Data = *value
 			}
 		case cachediagnostic.FieldRound:
 			if value, ok := values[i].(*sql.NullInt64); !ok {
@@ -209,6 +235,15 @@ func (_m *CacheDiagnostic) String() string {
 	builder.WriteString(fmt.Sprintf("id=%v, ", _m.ID))
 	builder.WriteString("session_id=")
 	builder.WriteString(_m.SessionID)
+	builder.WriteString(", ")
+	builder.WriteString("invocation_id=")
+	builder.WriteString(_m.InvocationID)
+	builder.WriteString(", ")
+	builder.WriteString("call=")
+	builder.WriteString(fmt.Sprintf("%v", _m.Call))
+	builder.WriteString(", ")
+	builder.WriteString("data=")
+	builder.WriteString(fmt.Sprintf("%v", _m.Data))
 	builder.WriteString(", ")
 	builder.WriteString("round=")
 	builder.WriteString(fmt.Sprintf("%v", _m.Round))

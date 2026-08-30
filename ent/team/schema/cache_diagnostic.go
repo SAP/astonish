@@ -21,6 +21,9 @@ func (CacheDiagnostic) Fields() []ent.Field {
 	return []ent.Field{
 		field.Int64("id"),
 		field.String("session_id").NotEmpty(),
+		field.String("invocation_id").Default(""),
+		field.Int("call").Default(0),
+		field.Bytes("data").Optional(),
 		field.Int("round"),
 		field.Bool("cache_stable_path"),
 		field.String("system_hash").MaxLen(128),

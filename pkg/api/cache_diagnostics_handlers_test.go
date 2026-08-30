@@ -6,6 +6,15 @@ import (
 	"testing"
 )
 
+func TestStudioCacheDiagnosticsRequiresSuperadmin(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/studio/sessions/session/cache-diagnostics?invocationId=inv", nil)
+	w := httptest.NewRecorder()
+	StudioCacheDiagnosticsHandler(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusForbidden)
+	}
+}
+
 func TestPlatformAdminCacheDiagnosticsRequiresSuperadmin(t *testing.T) {
 	tests := []struct {
 		name string

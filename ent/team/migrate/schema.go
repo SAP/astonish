@@ -91,6 +91,9 @@ var (
 	// CacheDiagnosticsColumns holds the columns for the "cache_diagnostics" table.
 	CacheDiagnosticsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeInt64, Increment: true},
+		{Name: "invocation_id", Type: field.TypeString, Default: ""},
+		{Name: "call", Type: field.TypeInt, Default: 0},
+		{Name: "data", Type: field.TypeBytes, Nullable: true},
 		{Name: "round", Type: field.TypeInt},
 		{Name: "cache_stable_path", Type: field.TypeBool},
 		{Name: "system_hash", Type: field.TypeString, Size: 128},
@@ -111,7 +114,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "cache_diagnostics_sessions_cache_diagnostics",
-				Columns:    []*schema.Column{CacheDiagnosticsColumns[11]},
+				Columns:    []*schema.Column{CacheDiagnosticsColumns[14]},
 				RefColumns: []*schema.Column{SessionsColumns[0]},
 				OnDelete:   schema.NoAction,
 			},
@@ -120,7 +123,7 @@ var (
 			{
 				Name:    "cachediagnostic_session_id_id",
 				Unique:  false,
-				Columns: []*schema.Column{CacheDiagnosticsColumns[11], CacheDiagnosticsColumns[0]},
+				Columns: []*schema.Column{CacheDiagnosticsColumns[14], CacheDiagnosticsColumns[0]},
 			},
 		},
 	}

@@ -523,17 +523,24 @@ func (s *teamSessionStore) AppendFleetEvent(ctx context.Context, sessionID strin
 }
 
 func (s *teamSessionStore) AppendCacheDiagnostic(ctx context.Context, sessionID string, diagnostic store.CacheDiagnostic) error {
+	data, err := json.Marshal(diagnostic)
+	if err != nil {
+		return fmt.Errorf("encode cache diagnostic: %w", err)
+	}
 	create := s.client.CacheDiagnostic.Create().
 		SetSessionID(sessionID).
-		SetRound(diagnostic.Round).
-		SetCacheStablePath(diagnostic.CacheStablePath).
-		SetSystemHash(diagnostic.SystemHash).
-		SetSystemChanged(diagnostic.SystemChanged).
-		SetSystemChangedSession(diagnostic.SystemChangedSession).
-		SetToolHash(diagnostic.ToolHash).
-		SetToolCount(diagnostic.ToolCount).
-		SetToolsChanged(diagnostic.ToolsChanged).
-		SetToolsChangedSession(diagnostic.ToolsChangedSession)
+		SetInvocationID(diagnostic.InvocationID).
+		SetCall(diagnostic.Call).
+		SetData(data).
+		SetRound(diagnostic.Call).
+		SetCacheStablePath(diagnostic.StablePrefixElements > 0).
+		SetSystemHash(diagnostic.InputHash).
+		SetSystemChanged(false).
+		SetSystemChangedSession(false).
+		SetToolHash("").
+		SetToolCount(0).
+		SetToolsChanged(false).
+		SetToolsChangedSession(false)
 	if !diagnostic.CreatedAt.IsZero() {
 		create.SetCreatedAt(diagnostic.CreatedAt)
 	}
@@ -569,15 +576,18 @@ func (s *teamSessionStore) ListCacheDiagnostics(ctx context.Context, sessionID s
 	if err != nil {
 		return nil, fmt.Errorf("list cache diagnostics: %w", err)
 	}
-	out := make([]store.CacheDiagnostic, len(rows))
-	for i, row := range rows {
-		out[i] = store.CacheDiagnostic{
-			Round: row.Round, CacheStablePath: row.CacheStablePath,
-			SystemHash: row.SystemHash, SystemChanged: row.SystemChanged,
-			SystemChangedSession: row.SystemChangedSession, ToolHash: row.ToolHash,
-			ToolCount: row.ToolCount, ToolsChanged: row.ToolsChanged,
-			ToolsChangedSession: row.ToolsChangedSession, CreatedAt: row.CreatedAt,
+	out := make([]store.CacheDiagnostic, 0, len(rows))
+	for _, row := range rows {
+		var diagnostic store.CacheDiagnostic
+		if len(row.Data) > 0 {
+			if err := json.Unmarshal(row.Data, &diagnostic); err != nil {
+				return nil, fmt.Errorf("decode cache diagnostic: %w", err)
+			}
+		} else {
+			diagnostic = store.CacheDiagnostic{InvocationID: row.InvocationID, Call: row.Call, InputHash: row.SystemHash}
 		}
+		diagnostic.CreatedAt = row.CreatedAt
+		out = append(out, diagnostic)
 	}
 	return out, nil
 }

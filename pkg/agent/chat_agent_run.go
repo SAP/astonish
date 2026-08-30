@@ -866,7 +866,17 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		} else {
 			slog.Debug("[agent] Using context-injected LLM override")
 		}
-		effectiveLLM = newDiagnosticLLM(effectiveLLM, cacheDiagnosticsHookFromContext(ctx))
+		diagnosticsHook := cacheDiagnosticsHookFromContext(ctx)
+		if diagnosticsHook == nil && store.DebugEnabledFromContext(ctx) {
+			if recorder := store.CacheDiagnosticRecorderFromContext(ctx); recorder != nil {
+				diagnosticsHook = func(diagnostic CacheDiagnostic) {
+					if err := recorder(ctx, cacheDiagnosticForStore(diagnostic)); err != nil {
+						slog.Warn("persist cache diagnostic", "session", sessionID, "invocation", ctx.InvocationID(), "error", err)
+					}
+				}
+			}
+		}
+		effectiveLLM = newDiagnosticLLM(effectiveLLM, diagnosticsHook, ctx.InvocationID(), credentials.RedactorFromContext(ctx))
 
 		// Create llmagent with static tools.
 		// Use InstructionProvider (not Instruction) so ADK does NOT run

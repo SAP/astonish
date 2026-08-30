@@ -25,6 +25,7 @@ export interface SessionHistory {
 export interface ChatMessage {
   role: string
   content: string
+  invocationId?: string
   tool_calls?: ToolCall[]
   tool_results?: ToolResult[]
   [key: string]: unknown
@@ -107,25 +108,45 @@ export async function deleteSession(id: string): Promise<void> {
 
 export type CacheHitStatus = 'hit' | 'miss' | 'unknown'
 
-export interface CacheDiagnosticDiff {
-  changed: boolean
-  previousHash?: string
-  currentHash: string
+export interface CacheDiagnosticUsage {
+  reported: boolean
+  cacheReported: boolean
+  promptTokens: number
+  cachedTokens: number
+  cacheWriteTokens: number
+  candidateTokens: number
+  thoughtTokens: number
+  toolUseTokens: number
+  totalTokens: number
 }
 
 export interface CacheDiagnosticRound {
-  round: number
+  invocationId: string
+  call: number
+  stream: boolean
   provider?: string
   model?: string
-  cacheStatus: CacheHitStatus
-  systemInstruction: CacheDiagnosticDiff
-  toolDeclarations: CacheDiagnosticDiff & { count: number }
+  captureLevel: string
+  inputHash: string
+  stablePrefixElements: number
+  stablePrefixBytes: number
+  firstDivergence?: string
+  startedAt: string
+  timeToFirstResponse: number
+  duration: number
+  responseCount: number
+  usage: CacheDiagnosticUsage
   payload?: Record<string, unknown>
+  payloadOriginalBytes: number
+  payloadCapturedBytes: number
+  payloadTruncated: boolean
+  binaryElisions: number
+  error?: string
 }
 
 export interface CacheDiagnosticsResponse {
   sessionId: string
-  assistantTurn: number
+  invocationId: string
   rounds: CacheDiagnosticRound[]
 }
 
@@ -137,8 +158,8 @@ export interface SubtaskEventItem {
   text?: string
 }
 
-export async function fetchCacheDiagnostics(sessionId: string, assistantTurn: number): Promise<CacheDiagnosticsResponse> {
-  const params = new URLSearchParams({ assistantTurn: String(assistantTurn) })
+export async function fetchCacheDiagnostics(sessionId: string, invocationId: string): Promise<CacheDiagnosticsResponse> {
+  const params = new URLSearchParams({ invocationId })
   const response = await teamFetch(`${API_BASE}/sessions/${encodeURIComponent(sessionId)}/cache-diagnostics?${params}`)
   if (!response.ok) {
     const detail = await response.text()

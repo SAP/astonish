@@ -2688,6 +2688,10 @@ type CacheDiagnosticMutation struct {
 	op                     Op
 	typ                    string
 	id                     *int64
+	invocation_id          *string
+	call                   *int
+	addcall                *int
+	data                   *[]byte
 	round                  *int
 	addround               *int
 	cache_stable_path      *bool
@@ -2846,6 +2850,147 @@ func (m *CacheDiagnosticMutation) OldSessionID(ctx context.Context) (v string, e
 // ResetSessionID resets all changes to the "session_id" field.
 func (m *CacheDiagnosticMutation) ResetSessionID() {
 	m.session = nil
+}
+
+// SetInvocationID sets the "invocation_id" field.
+func (m *CacheDiagnosticMutation) SetInvocationID(s string) {
+	m.invocation_id = &s
+}
+
+// InvocationID returns the value of the "invocation_id" field in the mutation.
+func (m *CacheDiagnosticMutation) InvocationID() (r string, exists bool) {
+	v := m.invocation_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldInvocationID returns the old "invocation_id" field's value of the CacheDiagnostic entity.
+// If the CacheDiagnostic object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CacheDiagnosticMutation) OldInvocationID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldInvocationID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldInvocationID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldInvocationID: %w", err)
+	}
+	return oldValue.InvocationID, nil
+}
+
+// ResetInvocationID resets all changes to the "invocation_id" field.
+func (m *CacheDiagnosticMutation) ResetInvocationID() {
+	m.invocation_id = nil
+}
+
+// SetCall sets the "call" field.
+func (m *CacheDiagnosticMutation) SetCall(i int) {
+	m.call = &i
+	m.addcall = nil
+}
+
+// Call returns the value of the "call" field in the mutation.
+func (m *CacheDiagnosticMutation) Call() (r int, exists bool) {
+	v := m.call
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCall returns the old "call" field's value of the CacheDiagnostic entity.
+// If the CacheDiagnostic object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CacheDiagnosticMutation) OldCall(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCall is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCall requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCall: %w", err)
+	}
+	return oldValue.Call, nil
+}
+
+// AddCall adds i to the "call" field.
+func (m *CacheDiagnosticMutation) AddCall(i int) {
+	if m.addcall != nil {
+		*m.addcall += i
+	} else {
+		m.addcall = &i
+	}
+}
+
+// AddedCall returns the value that was added to the "call" field in this mutation.
+func (m *CacheDiagnosticMutation) AddedCall() (r int, exists bool) {
+	v := m.addcall
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetCall resets all changes to the "call" field.
+func (m *CacheDiagnosticMutation) ResetCall() {
+	m.call = nil
+	m.addcall = nil
+}
+
+// SetData sets the "data" field.
+func (m *CacheDiagnosticMutation) SetData(b []byte) {
+	m.data = &b
+}
+
+// Data returns the value of the "data" field in the mutation.
+func (m *CacheDiagnosticMutation) Data() (r []byte, exists bool) {
+	v := m.data
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldData returns the old "data" field's value of the CacheDiagnostic entity.
+// If the CacheDiagnostic object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CacheDiagnosticMutation) OldData(ctx context.Context) (v []byte, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldData is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldData requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldData: %w", err)
+	}
+	return oldValue.Data, nil
+}
+
+// ClearData clears the value of the "data" field.
+func (m *CacheDiagnosticMutation) ClearData() {
+	m.data = nil
+	m.clearedFields[cachediagnostic.FieldData] = struct{}{}
+}
+
+// DataCleared returns if the "data" field was cleared in this mutation.
+func (m *CacheDiagnosticMutation) DataCleared() bool {
+	_, ok := m.clearedFields[cachediagnostic.FieldData]
+	return ok
+}
+
+// ResetData resets all changes to the "data" field.
+func (m *CacheDiagnosticMutation) ResetData() {
+	m.data = nil
+	delete(m.clearedFields, cachediagnostic.FieldData)
 }
 
 // SetRound sets the "round" field.
@@ -3309,9 +3454,18 @@ func (m *CacheDiagnosticMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *CacheDiagnosticMutation) Fields() []string {
-	fields := make([]string, 0, 11)
+	fields := make([]string, 0, 14)
 	if m.session != nil {
 		fields = append(fields, cachediagnostic.FieldSessionID)
+	}
+	if m.invocation_id != nil {
+		fields = append(fields, cachediagnostic.FieldInvocationID)
+	}
+	if m.call != nil {
+		fields = append(fields, cachediagnostic.FieldCall)
+	}
+	if m.data != nil {
+		fields = append(fields, cachediagnostic.FieldData)
 	}
 	if m.round != nil {
 		fields = append(fields, cachediagnostic.FieldRound)
@@ -3353,6 +3507,12 @@ func (m *CacheDiagnosticMutation) Field(name string) (ent.Value, bool) {
 	switch name {
 	case cachediagnostic.FieldSessionID:
 		return m.SessionID()
+	case cachediagnostic.FieldInvocationID:
+		return m.InvocationID()
+	case cachediagnostic.FieldCall:
+		return m.Call()
+	case cachediagnostic.FieldData:
+		return m.Data()
 	case cachediagnostic.FieldRound:
 		return m.Round()
 	case cachediagnostic.FieldCacheStablePath:
@@ -3384,6 +3544,12 @@ func (m *CacheDiagnosticMutation) OldField(ctx context.Context, name string) (en
 	switch name {
 	case cachediagnostic.FieldSessionID:
 		return m.OldSessionID(ctx)
+	case cachediagnostic.FieldInvocationID:
+		return m.OldInvocationID(ctx)
+	case cachediagnostic.FieldCall:
+		return m.OldCall(ctx)
+	case cachediagnostic.FieldData:
+		return m.OldData(ctx)
 	case cachediagnostic.FieldRound:
 		return m.OldRound(ctx)
 	case cachediagnostic.FieldCacheStablePath:
@@ -3419,6 +3585,27 @@ func (m *CacheDiagnosticMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetSessionID(v)
+		return nil
+	case cachediagnostic.FieldInvocationID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetInvocationID(v)
+		return nil
+	case cachediagnostic.FieldCall:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCall(v)
+		return nil
+	case cachediagnostic.FieldData:
+		v, ok := value.([]byte)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetData(v)
 		return nil
 	case cachediagnostic.FieldRound:
 		v, ok := value.(int)
@@ -3498,6 +3685,9 @@ func (m *CacheDiagnosticMutation) SetField(name string, value ent.Value) error {
 // this mutation.
 func (m *CacheDiagnosticMutation) AddedFields() []string {
 	var fields []string
+	if m.addcall != nil {
+		fields = append(fields, cachediagnostic.FieldCall)
+	}
 	if m.addround != nil {
 		fields = append(fields, cachediagnostic.FieldRound)
 	}
@@ -3512,6 +3702,8 @@ func (m *CacheDiagnosticMutation) AddedFields() []string {
 // was not set, or was not defined in the schema.
 func (m *CacheDiagnosticMutation) AddedField(name string) (ent.Value, bool) {
 	switch name {
+	case cachediagnostic.FieldCall:
+		return m.AddedCall()
 	case cachediagnostic.FieldRound:
 		return m.AddedRound()
 	case cachediagnostic.FieldToolCount:
@@ -3525,6 +3717,13 @@ func (m *CacheDiagnosticMutation) AddedField(name string) (ent.Value, bool) {
 // type.
 func (m *CacheDiagnosticMutation) AddField(name string, value ent.Value) error {
 	switch name {
+	case cachediagnostic.FieldCall:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddCall(v)
+		return nil
 	case cachediagnostic.FieldRound:
 		v, ok := value.(int)
 		if !ok {
@@ -3546,7 +3745,11 @@ func (m *CacheDiagnosticMutation) AddField(name string, value ent.Value) error {
 // ClearedFields returns all nullable fields that were cleared during this
 // mutation.
 func (m *CacheDiagnosticMutation) ClearedFields() []string {
-	return nil
+	var fields []string
+	if m.FieldCleared(cachediagnostic.FieldData) {
+		fields = append(fields, cachediagnostic.FieldData)
+	}
+	return fields
 }
 
 // FieldCleared returns a boolean indicating if a field with the given name was
@@ -3559,6 +3762,11 @@ func (m *CacheDiagnosticMutation) FieldCleared(name string) bool {
 // ClearField clears the value of the field with the given name. It returns an
 // error if the field is not defined in the schema.
 func (m *CacheDiagnosticMutation) ClearField(name string) error {
+	switch name {
+	case cachediagnostic.FieldData:
+		m.ClearData()
+		return nil
+	}
 	return fmt.Errorf("unknown CacheDiagnostic nullable field %s", name)
 }
 
@@ -3568,6 +3776,15 @@ func (m *CacheDiagnosticMutation) ResetField(name string) error {
 	switch name {
 	case cachediagnostic.FieldSessionID:
 		m.ResetSessionID()
+		return nil
+	case cachediagnostic.FieldInvocationID:
+		m.ResetInvocationID()
+		return nil
+	case cachediagnostic.FieldCall:
+		m.ResetCall()
+		return nil
+	case cachediagnostic.FieldData:
+		m.ResetData()
 		return nil
 	case cachediagnostic.FieldRound:
 		m.ResetRound()

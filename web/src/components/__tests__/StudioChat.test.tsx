@@ -133,30 +133,29 @@ describe('StudioChat', () => {
     vi.mocked(fetchSessionHistory).mockResolvedValue({
       id: 'sess-debug',
       title: 'Debug',
-      messages: [{ role: 'assistant', type: 'agent', content: 'Answer' }],
+      messages: [{ role: 'assistant', type: 'agent', content: 'Answer', invocationId: 'inv-1' }],
     })
     vi.mocked(fetchCacheDiagnostics).mockResolvedValue({
       sessionId: 'sess-debug',
-      assistantTurn: 1,
+      invocationId: 'inv-1',
       rounds: [{
-        round: 1,
-        provider: 'google',
-        model: 'gemini',
-        cacheStatus: 'hit',
-        systemInstruction: { changed: false, currentHash: 'system-hash' },
-        toolDeclarations: { changed: true, previousHash: 'tools-old', currentHash: 'tools-new', count: 4 },
-        payload: { cachedTokens: 120 },
+        invocationId: 'inv-1', call: 1, stream: true, provider: 'google', model: 'gemini',
+        captureLevel: 'canonical-adk', inputHash: 'request-hash', stablePrefixElements: 3,
+        stablePrefixBytes: 512, startedAt: '2026-08-29T00:00:00Z', timeToFirstResponse: 1,
+        duration: 2, responseCount: 1, payloadOriginalBytes: 10, payloadCapturedBytes: 10,
+        payloadTruncated: false, binaryElisions: 0, payload: { cachedTokens: 120 },
+        usage: { reported: true, cacheReported: true, promptTokens: 150, cachedTokens: 120, cacheWriteTokens: 0, candidateTokens: 10, thoughtTokens: 0, toolUseTokens: 0, totalTokens: 160 },
       }],
     })
 
     render(<StudioChat {...defaultProps} initialSessionId="sess-debug" isPlatformMode platformRole="superadmin" />)
-    const button = await screen.findByRole('button', { name: 'Cache diagnostics for assistant turn 1' })
+    const button = await screen.findByRole('button', { name: 'Cache diagnostics for this assistant turn' })
     fireEvent.click(button)
 
     expect(await screen.findByText('Model round 1')).toBeInTheDocument()
-    expect(screen.getByText('Cache hit')).toBeInTheDocument()
-    expect(screen.getByText('Changed')).toBeInTheDocument()
-    expect(fetchCacheDiagnostics).toHaveBeenCalledWith('sess-debug', 1)
+    expect(screen.getByText('Provider cache hit')).toBeInTheDocument()
+    expect(screen.getByText('3 elements · 512 bytes')).toBeInTheDocument()
+    expect(fetchCacheDiagnostics).toHaveBeenCalledWith('sess-debug', 'inv-1')
   })
 
   describe('chat_question rendering', () => {

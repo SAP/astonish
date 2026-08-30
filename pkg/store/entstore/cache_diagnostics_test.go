@@ -22,7 +22,7 @@ func TestPersonalSessionCacheDiagnosticsBoundedAndCascade(t *testing.T) {
 
 	for i := 1; i <= store.MaxSessionCacheDiagnostics+5; i++ {
 		err := ss.AppendCacheDiagnostic(ctx, "personal-session", store.CacheDiagnostic{
-			Round: i, SystemHash: fmt.Sprintf("system-%d", i), ToolHash: "tools", CreatedAt: time.Unix(int64(i), 0).UTC(),
+			Call: i, InvocationID: "inv", InputHash: fmt.Sprintf("request-%d", i), CreatedAt: time.Unix(int64(i), 0).UTC(),
 		})
 		if err != nil {
 			t.Fatalf("append diagnostic %d: %v", i, err)
@@ -33,8 +33,8 @@ func TestPersonalSessionCacheDiagnosticsBoundedAndCascade(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list diagnostics: %v", err)
 	}
-	if len(got) != store.MaxSessionCacheDiagnostics || got[0].Round != 6 || got[len(got)-1].Round != 105 {
-		t.Fatalf("bounded diagnostics = %d rounds %d..%d", len(got), got[0].Round, got[len(got)-1].Round)
+	if len(got) != store.MaxSessionCacheDiagnostics || got[0].Call != 6 || got[len(got)-1].Call != 105 {
+		t.Fatalf("bounded diagnostics = %d calls %d..%d", len(got), got[0].Call, got[len(got)-1].Call)
 	}
 	if err := ss.Delete(ctx, &adksession.DeleteRequest{SessionID: "personal-session"}); err != nil {
 		t.Fatalf("delete session: %v", err)
@@ -52,9 +52,9 @@ func TestTeamSessionCacheDiagnosticsRoundTripAndCascade(t *testing.T) {
 	seedTeamDiagnosticSession(t, client, "team-session")
 
 	want := store.CacheDiagnostic{
-		Round: 3, CacheStablePath: true, SystemHash: "system", SystemChanged: true,
-		SystemChangedSession: true, ToolHash: "tools", ToolCount: 7,
-		ToolsChanged: true, ToolsChangedSession: true,
+		InvocationID: "invocation-3", Call: 3, CaptureLevel: "canonical-adk",
+		InputHash: "request", StablePrefixElements: 7, StablePrefixBytes: 512,
+		Payload: []byte(`{"model":"test"}`), Usage: store.CacheDiagnosticUsage{Reported: true, CachedTokens: 42},
 	}
 	if err := ss.AppendCacheDiagnostic(ctx, "team-session", want); err != nil {
 		t.Fatalf("append diagnostic: %v", err)
@@ -63,7 +63,7 @@ func TestTeamSessionCacheDiagnosticsRoundTripAndCascade(t *testing.T) {
 	if err != nil || len(got) != 1 {
 		t.Fatalf("list diagnostics = %#v, err=%v", got, err)
 	}
-	if got[0].Round != want.Round || got[0].SystemHash != want.SystemHash || got[0].ToolHash != want.ToolHash || !got[0].ToolsChangedSession {
+	if got[0].Call != want.Call || got[0].InvocationID != want.InvocationID || got[0].InputHash != want.InputHash || got[0].Usage.CachedTokens != want.Usage.CachedTokens {
 		t.Fatalf("diagnostic = %#v, want %#v", got[0], want)
 	}
 	if err := ss.RemoveSessionMeta(ctx, "team-session"); err != nil {

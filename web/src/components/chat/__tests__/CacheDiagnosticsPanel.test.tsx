@@ -6,47 +6,33 @@ import CacheDiagnosticsPanel from '../CacheDiagnosticsPanel'
 
 vi.mock('@/api/studioChat', () => ({ fetchCacheDiagnostics: vi.fn() }))
 
+const round = {
+  invocationId: 'inv-1', call: 1, stream: true, provider: 'google', model: 'gemini',
+  captureLevel: 'canonical-adk', inputHash: 'request-hash', stablePrefixElements: 3,
+  stablePrefixBytes: 512, startedAt: '2026-08-29T00:00:00Z', timeToFirstResponse: 1000000,
+  duration: 2000000, responseCount: 2, payloadOriginalBytes: 10, payloadCapturedBytes: 10,
+  payloadTruncated: false, binaryElisions: 0,
+  usage: { reported: true, cacheReported: true, promptTokens: 100, cachedTokens: 75, cacheWriteTokens: 0, candidateTokens: 20, thoughtTokens: 0, toolUseTokens: 0, totalTokens: 120 },
+}
+
 describe('CacheDiagnosticsPanel', () => {
   beforeEach(() => vi.mocked(fetchCacheDiagnostics).mockReset())
 
   it('renders loading then an empty state', async () => {
-    let resolve!: (value: { sessionId: string; assistantTurn: number; rounds: [] }) => void
-    vi.mocked(fetchCacheDiagnostics).mockReturnValue(new Promise(r => { resolve = r }))
-    render(<CacheDiagnosticsPanel sessionId="s1" assistantTurn={1} />)
-
+    vi.mocked(fetchCacheDiagnostics).mockResolvedValue({ sessionId: 's1', invocationId: 'inv-1', rounds: [] })
+    render(<CacheDiagnosticsPanel sessionId="s1" invocationId="inv-1" />)
     expect(screen.getByText('Loading cache diagnostics…')).toBeInTheDocument()
-    resolve({ sessionId: 's1', assistantTurn: 1, rounds: [] })
-    expect(await screen.findByText('No cache diagnostics were recorded for this assistant turn.')).toBeInTheDocument()
+    expect(await screen.findByText(/No retained cache diagnostics/)).toBeInTheDocument()
   })
 
-  it('renders multiple rounds, hit statuses, diffs, and payloads', async () => {
-    vi.mocked(fetchCacheDiagnostics).mockResolvedValue({
-      sessionId: 's1',
-      assistantTurn: 1,
-      rounds: [
-        {
-          round: 1,
-          cacheStatus: 'miss',
-          systemInstruction: { changed: false, currentHash: 'sys-a' },
-          toolDeclarations: { changed: false, currentHash: 'tools-a', count: 3 },
-        },
-        {
-          round: 2,
-          cacheStatus: 'hit',
-          systemInstruction: { changed: true, previousHash: 'sys-a', currentHash: 'sys-b' },
-          toolDeclarations: { changed: true, previousHash: 'tools-a', currentHash: 'tools-b', count: 4 },
-          payload: { promptTokens: 42 },
-        },
-      ],
-    })
-
-    render(<CacheDiagnosticsPanel sessionId="s1" assistantTurn={1} />)
+  it('renders provider status, prefix estimate, timings, tokens, and sanitized payload', async () => {
+    vi.mocked(fetchCacheDiagnostics).mockResolvedValue({ sessionId: 's1', invocationId: 'inv-1', rounds: [{ ...round, payload: { prompt: '[REDACTED]' } }] })
+    render(<CacheDiagnosticsPanel sessionId="s1" invocationId="inv-1" />)
     expect(await screen.findByText('Model round 1')).toBeInTheDocument()
-    expect(screen.getByText('Model round 2')).toBeInTheDocument()
-    expect(screen.getByText('Cache miss')).toBeInTheDocument()
-    expect(screen.getByText('Cache hit')).toBeInTheDocument()
-    expect(screen.getAllByText('Changed')).toHaveLength(2)
-    expect(screen.getByText('Payload')).toBeInTheDocument()
-    expect(screen.getByText(/"promptTokens": 42/)).toBeInTheDocument()
+    expect(screen.getByText('Provider cache hit')).toBeInTheDocument()
+    expect(screen.getByText('3 elements · 512 bytes')).toBeInTheDocument()
+    expect(screen.getByText('75 cached / 100 input')).toBeInTheDocument()
+    expect(screen.getByText('Sanitized payload')).toBeInTheDocument()
+    expect(screen.getByText(/\[REDACTED\]/)).toBeInTheDocument()
   })
 })

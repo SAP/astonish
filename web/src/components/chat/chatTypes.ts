@@ -11,7 +11,11 @@ export interface FleetMessageItem {
   [key: string]: unknown
 }
 
-export interface UserMessage {
+interface InvocationScopedMessage {
+  invocationId?: string
+}
+
+export interface UserMessage extends InvocationScopedMessage {
   type: 'user'
   content: string
   attachments?: AttachmentInfo[]
@@ -406,7 +410,7 @@ export interface NetworkDenialMessage {
   sandbox_name: string
 }
 
-export type ChatMsg =
+export type ChatMsg = InvocationScopedMessage & (
   | FleetMessageItem
   | UserMessage
   | AgentMessage
@@ -438,6 +442,7 @@ export type ChatMsg =
   | DocsUpdateMessage
   | SourcesMessage
   | NetworkDenialMessage
+)
 
 // ---- Fleet info / state ----
 

@@ -923,14 +923,16 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
         // some message types need field remapping for the frontend types.
         const apiMessages = (data.messages || []) as Array<Record<string, any>>
         const mapped: ChatMsg[] = apiMessages.map(m => {
+          const invocation = { invocationId: m.invocationId as string | undefined }
           if (m.type === 'artifact' && m.content) {
-            return { type: 'artifact', path: m.content, toolName: m.toolName || 'write_file' } as ArtifactMessage
+            return { ...invocation, type: 'artifact', path: m.content, toolName: m.toolName || 'write_file' } as ArtifactMessage
           }
           if (m.type === 'docs_update' && m.docsUpdate) {
-            return { ...m.docsUpdate, type: 'docs_update', docType: m.docsUpdate.type || 'slides' } as DocsUpdateMessage
+            return { ...m.docsUpdate, ...invocation, type: 'docs_update', docType: m.docsUpdate.type || 'slides' } as DocsUpdateMessage
           }
           if (m.type === 'distill_preview') {
             return {
+              ...invocation,
               type: 'distill_preview',
               yaml: m.yaml || '',
               flowName: m.flowName || '',
@@ -941,6 +943,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
           }
           if (m.type === 'distill_saved') {
             return {
+              ...invocation,
               type: 'distill_saved',
               filePath: m.filePath || '',
               runCommand: m.runCommand || '',
@@ -948,6 +951,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
           }
           if (m.type === 'tutorial_blueprint_preview') {
             return {
+              ...invocation,
               type: 'tutorial_blueprint_preview',
               title: m.blueprintTitle || m.title || '',
               suite: m.blueprintSuite || m.suite || '',
@@ -957,6 +961,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
           }
           if (m.type === 'tutorial_blueprint_approved') {
             return {
+              ...invocation,
               type: 'tutorial_blueprint_approved',
               title: m.blueprintTitle || m.title || '',
               suite: m.blueprintSuite || m.suite || '',
@@ -968,6 +973,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
           }
           if (m.type === 'tutorial_scene_slideshow') {
             return {
+              ...invocation,
               type: 'tutorial_scene_slideshow',
               title: m.tutorialTitle || m.title || '',
               suite: m.tutorialSuite || m.suite || '',
@@ -978,6 +984,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
           }
           if (m.type === 'app_preview') {
             return {
+              ...invocation,
               type: 'app_preview',
               code: m.code || '',
               title: m.title || 'App Preview',
@@ -989,6 +996,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
           if (m.type === 'chat_question') {
             // Reload: pkg/api reconstructs a StudioMessage with QuestionID/QuestionKind/Prompt/Options.
             return {
+              ...invocation,
               type: 'chat_question',
               questionId: m.questionId || m.QuestionID || '',
               kind: (m.kind || m.questionKind || m.QuestionKind || 'yesno') as ChatQuestionMessage['kind'],
@@ -1066,9 +1074,9 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
               setMessages((prev: ChatMsg[]) => {
                 const last = prev[prev.length - 1]
                 if (last && last.type === 'agent' && (last as AgentMessage)._streaming) {
-                  return [...prev.slice(0, -1), { type: 'agent', content: currentText, _streaming: true }]
+                  return [...prev.slice(0, -1), { type: 'agent', content: currentText, invocationId: data.invocationId as string | undefined, _streaming: true }]
                 }
-                return [...prev, { type: 'agent', content: currentText, _streaming: true }]
+                return [...prev, { type: 'agent', content: currentText, invocationId: data.invocationId as string | undefined, _streaming: true }]
               })
             }
             break
@@ -1080,7 +1088,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
               setMessages((prev: ChatMsg[]) => {
                 const last = prev[prev.length - 1]
                 if (last && last.type === 'agent' && (last as AgentMessage)._streaming) {
-                  return [...prev.slice(0, -1), { type: 'agent', content: finalText }]
+                  return [...prev.slice(0, -1), { type: 'agent', content: finalText, invocationId: last.invocationId }]
                 }
                 return prev
               })
@@ -1203,7 +1211,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
               setMessages((prev: ChatMsg[]) => {
                 const last = prev[prev.length - 1]
                 if (last && last.type === 'agent' && (last as AgentMessage)._streaming) {
-                  return [...prev.slice(0, -1), { type: 'agent', content: finalText }]
+                  return [...prev.slice(0, -1), { type: 'agent', content: finalText, invocationId: last.invocationId }]
                 }
                 return prev
               })
@@ -1258,7 +1266,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
               setMessages((prev: ChatMsg[]) => {
                 const last = prev[prev.length - 1]
                 if (last && last.type === 'agent' && (last as AgentMessage)._streaming) {
-                  return [...prev.slice(0, -1), { type: 'agent', content: finalText }]
+                  return [...prev.slice(0, -1), { type: 'agent', content: finalText, invocationId: last.invocationId }]
                 }
                 return prev
               })
@@ -1280,7 +1288,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
               setMessages((prev: ChatMsg[]) => {
                 const last = prev[prev.length - 1]
                 if (last && last.type === 'agent' && (last as AgentMessage)._streaming) {
-                  return [...prev.slice(0, -1), { type: 'agent', content: finalText }]
+                  return [...prev.slice(0, -1), { type: 'agent', content: finalText, invocationId: last.invocationId }]
                 }
                 return prev
               })
@@ -1325,7 +1333,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
               setMessages((prev: ChatMsg[]) => {
                 const last = prev[prev.length - 1]
                 if (last && last.type === 'agent' && (last as AgentMessage)._streaming) {
-                  return [...prev.slice(0, -1), { type: 'agent', content: finalText }]
+                  return [...prev.slice(0, -1), { type: 'agent', content: finalText, invocationId: last.invocationId }]
                 }
                 return prev
               })
@@ -1350,7 +1358,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
               setMessages((prev: ChatMsg[]) => {
                 const last = prev[prev.length - 1]
                 if (last && last.type === 'agent' && (last as AgentMessage)._streaming) {
-                  return [...prev.slice(0, -1), { type: 'agent', content: finalText }]
+                  return [...prev.slice(0, -1), { type: 'agent', content: finalText, invocationId: last.invocationId }]
                 }
                 return prev
               })
@@ -1394,7 +1402,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
               setMessages((prev: ChatMsg[]) => {
                 const last = prev[prev.length - 1]
                 if (last && last.type === 'agent' && (last as AgentMessage)._streaming) {
-                  return [...prev.slice(0, -1), { type: 'agent', content: finalText }]
+                  return [...prev.slice(0, -1), { type: 'agent', content: finalText, invocationId: last.invocationId }]
                 }
                 return prev
               })
@@ -1969,9 +1977,9 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
               setMessages((prev: ChatMsg[]) => {
                 const last = prev[prev.length - 1]
                 if (last && last.type === 'agent' && (last as AgentMessage)._streaming) {
-                  return [...prev.slice(0, -1), { type: 'agent', content: currentText, _streaming: true }]
+                  return [...prev.slice(0, -1), { type: 'agent', content: currentText, invocationId: data.invocationId as string | undefined, _streaming: true }]
                 }
-                return [...prev, { type: 'agent', content: currentText, _streaming: true }]
+                return [...prev, { type: 'agent', content: currentText, invocationId: data.invocationId as string | undefined, _streaming: true }]
               })
             }
             break
@@ -1984,7 +1992,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
               setMessages((prev: ChatMsg[]) => {
                 const last = prev[prev.length - 1]
                 if (last && last.type === 'agent' && (last as AgentMessage)._streaming) {
-                  return [...prev.slice(0, -1), { type: 'agent', content: finalText }]
+                  return [...prev.slice(0, -1), { type: 'agent', content: finalText, invocationId: last.invocationId }]
                 }
                 return prev
               })
@@ -2114,7 +2122,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
               setMessages((prev: ChatMsg[]) => {
                 const last = prev[prev.length - 1]
                 if (last && last.type === 'agent' && (last as AgentMessage)._streaming) {
-                  return [...prev.slice(0, -1), { type: 'agent', content: finalText }]
+                  return [...prev.slice(0, -1), { type: 'agent', content: finalText, invocationId: last.invocationId }]
                 }
                 return prev
               })
@@ -2474,7 +2482,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
               setMessages((prev: ChatMsg[]) => {
                 const last = prev[prev.length - 1]
                 if (last && last.type === 'agent' && (last as AgentMessage)._streaming) {
-                  return [...prev.slice(0, -1), { type: 'agent', content: finalText }]
+                  return [...prev.slice(0, -1), { type: 'agent', content: finalText, invocationId: last.invocationId }]
                 }
                 return prev
               })
@@ -2496,7 +2504,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
               setMessages((prev: ChatMsg[]) => {
                 const last = prev[prev.length - 1]
                 if (last && last.type === 'agent' && (last as AgentMessage)._streaming) {
-                  return [...prev.slice(0, -1), { type: 'agent', content: finalText }]
+                  return [...prev.slice(0, -1), { type: 'agent', content: finalText, invocationId: last.invocationId }]
                 }
                 return prev
               })
@@ -2541,7 +2549,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
               setMessages((prev: ChatMsg[]) => {
                 const last = prev[prev.length - 1]
                 if (last && last.type === 'agent' && (last as AgentMessage)._streaming) {
-                  return [...prev.slice(0, -1), { type: 'agent', content: finalText }]
+                  return [...prev.slice(0, -1), { type: 'agent', content: finalText, invocationId: last.invocationId }]
                 }
                 return prev
               })
@@ -2566,7 +2574,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
               setMessages((prev: ChatMsg[]) => {
                 const last = prev[prev.length - 1]
                 if (last && last.type === 'agent' && (last as AgentMessage)._streaming) {
-                  return [...prev.slice(0, -1), { type: 'agent', content: finalText }]
+                  return [...prev.slice(0, -1), { type: 'agent', content: finalText, invocationId: last.invocationId }]
                 }
                 return prev
               })
@@ -2614,7 +2622,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
               setMessages((prev: ChatMsg[]) => {
                 const last = prev[prev.length - 1]
                 if (last && last.type === 'agent' && (last as AgentMessage)._streaming) {
-                  return [...prev.slice(0, -1), { type: 'agent', content: finalText }]
+                  return [...prev.slice(0, -1), { type: 'agent', content: finalText, invocationId: last.invocationId }]
                 }
                 return prev
               })
@@ -3162,7 +3170,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
                     <div className="flex items-center justify-between">
                       <div className="text-xs font-medium" style={{ color: 'var(--text-muted)' }}>Agent</div>
                       <div className="flex gap-1">
-                        {canDebug && activeSessionId && !(msg as AgentMessage)._streaming && (
+                        {canDebug && activeSessionId && msg.invocationId && !(msg as AgentMessage)._streaming && (
                           <button
                             onClick={() => setDebugOpenIndices(prev => {
                               const next = new Set(prev)
@@ -3172,7 +3180,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
                             })}
                             className="p-1 rounded hover:bg-white/10 transition-colors"
                             title="Cache diagnostics"
-                            aria-label={`Cache diagnostics for assistant turn ${messages.slice(0, index + 1).filter(item => item.type === 'agent').length}`}
+                            aria-label="Cache diagnostics for this assistant turn"
                           >
                             <Bug size={14} className={debugOpenIndices.has(index) ? 'text-primary' : 'text-gray-500'} />
                           </button>
@@ -3263,10 +3271,10 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
                         )
                       })()}
                     </div>
-                    {canDebug && activeSessionId && debugOpenIndices.has(index) && (
+                    {canDebug && activeSessionId && msg.invocationId && debugOpenIndices.has(index) && (
                       <CacheDiagnosticsPanel
                         sessionId={activeSessionId}
-                        assistantTurn={messages.slice(0, index + 1).filter(item => item.type === 'agent').length}
+                        invocationId={msg.invocationId}
                       />
                     )}
                     {/* Last-turn report + video placeholders (full UI in harness panel) */}

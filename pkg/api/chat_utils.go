@@ -85,6 +85,7 @@ func eventsToMessages(events session.Events, redactor *credentials.Redactor) []S
 
 		role := string(event.LLMResponse.Content.Role)
 		eventInvID := event.InvocationID
+		eventMessageStart := len(messages)
 
 		for _, part := range event.LLMResponse.Content.Parts {
 			if part.Text != "" {
@@ -298,6 +299,11 @@ func eventsToMessages(events session.Events, redactor *credentials.Redactor) []S
 						})
 					}
 				}
+			}
+		}
+		for i := eventMessageStart; i < len(messages); i++ {
+			if messages[i].InvocationID == "" {
+				messages[i].InvocationID = eventInvID
 			}
 		}
 	}

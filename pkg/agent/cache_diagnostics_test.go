@@ -3,11 +3,14 @@ package agent
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"iter"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/SAP/astonish/pkg/credentials"
 	"google.golang.org/adk/model"
 	"google.golang.org/genai"
 )
@@ -72,7 +75,7 @@ func TestDiagnosticLLMCapturesTimingsUsageAndPreservesRequest(t *testing.T) {
 	var diagnostics []CacheDiagnostic
 	llm := newDiagnosticLLM(fake, func(diagnostic CacheDiagnostic) {
 		diagnostics = append(diagnostics, diagnostic)
-	})
+	}, "invocation", nil)
 
 	var responses []*model.LLMResponse
 	for response, err := range llm.GenerateContent(context.Background(), request, true) {
@@ -94,9 +97,26 @@ func TestDiagnosticLLMCapturesTimingsUsageAndPreservesRequest(t *testing.T) {
 	if diagnostic.TimeToFirstResponse <= 0 || diagnostic.Duration < diagnostic.TimeToFirstResponse {
 		t.Fatalf("invalid timings: first=%s duration=%s", diagnostic.TimeToFirstResponse, diagnostic.Duration)
 	}
-	wantUsage := (CacheDiagnosticUsage{PromptTokens: 100, CachedTokens: 75, CandidateTokens: 20, TotalTokens: 120})
+	wantUsage := (CacheDiagnosticUsage{Reported: true, CacheReported: true, PromptTokens: 100, CachedTokens: 75, CandidateTokens: 20, TotalTokens: 120})
 	if diagnostic.Usage != wantUsage {
 		t.Fatalf("usage = %+v, want %+v", diagnostic.Usage, wantUsage)
+	}
+}
+
+func TestSanitizedModelPayloadRedactsAndElides(t *testing.T) {
+	redactor := credentials.NewRedactor()
+	redactor.AddTransientSecret("top-secret")
+	req := diagnosticRequest("top-secret")
+	req.Contents[0].Parts = append(req.Contents[0].Parts, &genai.Part{InlineData: &genai.Blob{MIMEType: "image/png", Data: make([]byte, 2048)}})
+	payload, _, truncated, elisions := sanitizedModelPayload(req, redactor)
+	if truncated || elisions != 1 {
+		t.Fatalf("truncated=%v elisions=%d", truncated, elisions)
+	}
+	if strings.Contains(string(payload), "top-secret") || strings.Contains(string(payload), base64.StdEncoding.EncodeToString(make([]byte, 2048))) {
+		t.Fatalf("payload contains sensitive or binary data: %s", payload)
+	}
+	if !strings.Contains(string(payload), "[REDACTED]") || !strings.Contains(string(payload), "$elided") {
+		t.Fatalf("payload lacks sanitization markers: %s", payload)
 	}
 }
 
@@ -104,8 +124,8 @@ func TestDiagnosticLLMIsRequestScopedAndCapturesErrors(t *testing.T) {
 	request := diagnosticRequest("hello")
 	boom := errors.New("boom")
 	var first, second CacheDiagnostic
-	firstLLM := newDiagnosticLLM(&diagnosticTestLLM{err: boom}, func(d CacheDiagnostic) { first = d })
-	secondLLM := newDiagnosticLLM(&diagnosticTestLLM{}, func(d CacheDiagnostic) { second = d })
+	firstLLM := newDiagnosticLLM(&diagnosticTestLLM{err: boom}, func(d CacheDiagnostic) { first = d }, "first", nil)
+	secondLLM := newDiagnosticLLM(&diagnosticTestLLM{}, func(d CacheDiagnostic) { second = d }, "second", nil)
 
 	for range firstLLM.GenerateContent(context.Background(), request, false) {
 	}

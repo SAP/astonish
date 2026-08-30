@@ -141,16 +141,24 @@ func init() {
 	cachediagnosticDescSessionID := cachediagnosticFields[1].Descriptor()
 	// cachediagnostic.SessionIDValidator is a validator for the "session_id" field. It is called by the builders before save.
 	cachediagnostic.SessionIDValidator = cachediagnosticDescSessionID.Validators[0].(func(string) error)
+	// cachediagnosticDescInvocationID is the schema descriptor for invocation_id field.
+	cachediagnosticDescInvocationID := cachediagnosticFields[2].Descriptor()
+	// cachediagnostic.DefaultInvocationID holds the default value on creation for the invocation_id field.
+	cachediagnostic.DefaultInvocationID = cachediagnosticDescInvocationID.Default.(string)
+	// cachediagnosticDescCall is the schema descriptor for call field.
+	cachediagnosticDescCall := cachediagnosticFields[3].Descriptor()
+	// cachediagnostic.DefaultCall holds the default value on creation for the call field.
+	cachediagnostic.DefaultCall = cachediagnosticDescCall.Default.(int)
 	// cachediagnosticDescSystemHash is the schema descriptor for system_hash field.
-	cachediagnosticDescSystemHash := cachediagnosticFields[4].Descriptor()
+	cachediagnosticDescSystemHash := cachediagnosticFields[7].Descriptor()
 	// cachediagnostic.SystemHashValidator is a validator for the "system_hash" field. It is called by the builders before save.
 	cachediagnostic.SystemHashValidator = cachediagnosticDescSystemHash.Validators[0].(func(string) error)
 	// cachediagnosticDescToolHash is the schema descriptor for tool_hash field.
-	cachediagnosticDescToolHash := cachediagnosticFields[7].Descriptor()
+	cachediagnosticDescToolHash := cachediagnosticFields[10].Descriptor()
 	// cachediagnostic.ToolHashValidator is a validator for the "tool_hash" field. It is called by the builders before save.
 	cachediagnostic.ToolHashValidator = cachediagnosticDescToolHash.Validators[0].(func(string) error)
 	// cachediagnosticDescCreatedAt is the schema descriptor for created_at field.
-	cachediagnosticDescCreatedAt := cachediagnosticFields[11].Descriptor()
+	cachediagnosticDescCreatedAt := cachediagnosticFields[14].Descriptor()
 	// cachediagnostic.DefaultCreatedAt holds the default value on creation for the created_at field.
 	cachediagnostic.DefaultCreatedAt = cachediagnosticDescCreatedAt.Default.(func() time.Time)
 	chatsessioneventFields := schema.ChatSessionEvent{}.Fields()

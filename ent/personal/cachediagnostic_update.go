@@ -42,6 +42,53 @@ func (_u *CacheDiagnosticUpdate) SetNillableSessionID(v *string) *CacheDiagnosti
 	return _u
 }
 
+// SetInvocationID sets the "invocation_id" field.
+func (_u *CacheDiagnosticUpdate) SetInvocationID(v string) *CacheDiagnosticUpdate {
+	_u.mutation.SetInvocationID(v)
+	return _u
+}
+
+// SetNillableInvocationID sets the "invocation_id" field if the given value is not nil.
+func (_u *CacheDiagnosticUpdate) SetNillableInvocationID(v *string) *CacheDiagnosticUpdate {
+	if v != nil {
+		_u.SetInvocationID(*v)
+	}
+	return _u
+}
+
+// SetCall sets the "call" field.
+func (_u *CacheDiagnosticUpdate) SetCall(v int) *CacheDiagnosticUpdate {
+	_u.mutation.ResetCall()
+	_u.mutation.SetCall(v)
+	return _u
+}
+
+// SetNillableCall sets the "call" field if the given value is not nil.
+func (_u *CacheDiagnosticUpdate) SetNillableCall(v *int) *CacheDiagnosticUpdate {
+	if v != nil {
+		_u.SetCall(*v)
+	}
+	return _u
+}
+
+// AddCall adds value to the "call" field.
+func (_u *CacheDiagnosticUpdate) AddCall(v int) *CacheDiagnosticUpdate {
+	_u.mutation.AddCall(v)
+	return _u
+}
+
+// SetData sets the "data" field.
+func (_u *CacheDiagnosticUpdate) SetData(v []byte) *CacheDiagnosticUpdate {
+	_u.mutation.SetData(v)
+	return _u
+}
+
+// ClearData clears the value of the "data" field.
+func (_u *CacheDiagnosticUpdate) ClearData() *CacheDiagnosticUpdate {
+	_u.mutation.ClearData()
+	return _u
+}
+
 // SetRound sets the "round" field.
 func (_u *CacheDiagnosticUpdate) SetRound(v int) *CacheDiagnosticUpdate {
 	_u.mutation.ResetRound()
@@ -260,6 +307,21 @@ func (_u *CacheDiagnosticUpdate) sqlSave(ctx context.Context) (_node int, err er
 			}
 		}
 	}
+	if value, ok := _u.mutation.InvocationID(); ok {
+		_spec.SetField(cachediagnostic.FieldInvocationID, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.Call(); ok {
+		_spec.SetField(cachediagnostic.FieldCall, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedCall(); ok {
+		_spec.AddField(cachediagnostic.FieldCall, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.Data(); ok {
+		_spec.SetField(cachediagnostic.FieldData, field.TypeBytes, value)
+	}
+	if _u.mutation.DataCleared() {
+		_spec.ClearField(cachediagnostic.FieldData, field.TypeBytes)
+	}
 	if value, ok := _u.mutation.Round(); ok {
 		_spec.SetField(cachediagnostic.FieldRound, field.TypeInt, value)
 	}
@@ -353,6 +415,53 @@ func (_u *CacheDiagnosticUpdateOne) SetNillableSessionID(v *string) *CacheDiagno
 	if v != nil {
 		_u.SetSessionID(*v)
 	}
+	return _u
+}
+
+// SetInvocationID sets the "invocation_id" field.
+func (_u *CacheDiagnosticUpdateOne) SetInvocationID(v string) *CacheDiagnosticUpdateOne {
+	_u.mutation.SetInvocationID(v)
+	return _u
+}
+
+// SetNillableInvocationID sets the "invocation_id" field if the given value is not nil.
+func (_u *CacheDiagnosticUpdateOne) SetNillableInvocationID(v *string) *CacheDiagnosticUpdateOne {
+	if v != nil {
+		_u.SetInvocationID(*v)
+	}
+	return _u
+}
+
+// SetCall sets the "call" field.
+func (_u *CacheDiagnosticUpdateOne) SetCall(v int) *CacheDiagnosticUpdateOne {
+	_u.mutation.ResetCall()
+	_u.mutation.SetCall(v)
+	return _u
+}
+
+// SetNillableCall sets the "call" field if the given value is not nil.
+func (_u *CacheDiagnosticUpdateOne) SetNillableCall(v *int) *CacheDiagnosticUpdateOne {
+	if v != nil {
+		_u.SetCall(*v)
+	}
+	return _u
+}
+
+// AddCall adds value to the "call" field.
+func (_u *CacheDiagnosticUpdateOne) AddCall(v int) *CacheDiagnosticUpdateOne {
+	_u.mutation.AddCall(v)
+	return _u
+}
+
+// SetData sets the "data" field.
+func (_u *CacheDiagnosticUpdateOne) SetData(v []byte) *CacheDiagnosticUpdateOne {
+	_u.mutation.SetData(v)
+	return _u
+}
+
+// ClearData clears the value of the "data" field.
+func (_u *CacheDiagnosticUpdateOne) ClearData() *CacheDiagnosticUpdateOne {
+	_u.mutation.ClearData()
 	return _u
 }
 
@@ -603,6 +712,21 @@ func (_u *CacheDiagnosticUpdateOne) sqlSave(ctx context.Context) (_node *CacheDi
 				ps[i](selector)
 			}
 		}
+	}
+	if value, ok := _u.mutation.InvocationID(); ok {
+		_spec.SetField(cachediagnostic.FieldInvocationID, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.Call(); ok {
+		_spec.SetField(cachediagnostic.FieldCall, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedCall(); ok {
+		_spec.AddField(cachediagnostic.FieldCall, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.Data(); ok {
+		_spec.SetField(cachediagnostic.FieldData, field.TypeBytes, value)
+	}
+	if _u.mutation.DataCleared() {
+		_spec.ClearField(cachediagnostic.FieldData, field.TypeBytes)
 	}
 	if value, ok := _u.mutation.Round(); ok {
 		_spec.SetField(cachediagnostic.FieldRound, field.TypeInt, value)

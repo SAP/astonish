@@ -28,6 +28,40 @@ func (_c *CacheDiagnosticCreate) SetSessionID(v string) *CacheDiagnosticCreate {
 	return _c
 }
 
+// SetInvocationID sets the "invocation_id" field.
+func (_c *CacheDiagnosticCreate) SetInvocationID(v string) *CacheDiagnosticCreate {
+	_c.mutation.SetInvocationID(v)
+	return _c
+}
+
+// SetNillableInvocationID sets the "invocation_id" field if the given value is not nil.
+func (_c *CacheDiagnosticCreate) SetNillableInvocationID(v *string) *CacheDiagnosticCreate {
+	if v != nil {
+		_c.SetInvocationID(*v)
+	}
+	return _c
+}
+
+// SetCall sets the "call" field.
+func (_c *CacheDiagnosticCreate) SetCall(v int) *CacheDiagnosticCreate {
+	_c.mutation.SetCall(v)
+	return _c
+}
+
+// SetNillableCall sets the "call" field if the given value is not nil.
+func (_c *CacheDiagnosticCreate) SetNillableCall(v *int) *CacheDiagnosticCreate {
+	if v != nil {
+		_c.SetCall(*v)
+	}
+	return _c
+}
+
+// SetData sets the "data" field.
+func (_c *CacheDiagnosticCreate) SetData(v []byte) *CacheDiagnosticCreate {
+	_c.mutation.SetData(v)
+	return _c
+}
+
 // SetRound sets the "round" field.
 func (_c *CacheDiagnosticCreate) SetRound(v int) *CacheDiagnosticCreate {
 	_c.mutation.SetRound(v)
@@ -142,6 +176,14 @@ func (_c *CacheDiagnosticCreate) ExecX(ctx context.Context) {
 
 // defaults sets the default values of the builder before save.
 func (_c *CacheDiagnosticCreate) defaults() {
+	if _, ok := _c.mutation.InvocationID(); !ok {
+		v := cachediagnostic.DefaultInvocationID
+		_c.mutation.SetInvocationID(v)
+	}
+	if _, ok := _c.mutation.Call(); !ok {
+		v := cachediagnostic.DefaultCall
+		_c.mutation.SetCall(v)
+	}
 	if _, ok := _c.mutation.CreatedAt(); !ok {
 		v := cachediagnostic.DefaultCreatedAt()
 		_c.mutation.SetCreatedAt(v)
@@ -157,6 +199,12 @@ func (_c *CacheDiagnosticCreate) check() error {
 		if err := cachediagnostic.SessionIDValidator(v); err != nil {
 			return &ValidationError{Name: "session_id", err: fmt.Errorf(`personal: validator failed for field "CacheDiagnostic.session_id": %w`, err)}
 		}
+	}
+	if _, ok := _c.mutation.InvocationID(); !ok {
+		return &ValidationError{Name: "invocation_id", err: errors.New(`personal: missing required field "CacheDiagnostic.invocation_id"`)}
+	}
+	if _, ok := _c.mutation.Call(); !ok {
+		return &ValidationError{Name: "call", err: errors.New(`personal: missing required field "CacheDiagnostic.call"`)}
 	}
 	if _, ok := _c.mutation.Round(); !ok {
 		return &ValidationError{Name: "round", err: errors.New(`personal: missing required field "CacheDiagnostic.round"`)}
@@ -235,6 +283,18 @@ func (_c *CacheDiagnosticCreate) createSpec() (*CacheDiagnostic, *sqlgraph.Creat
 	if id, ok := _c.mutation.ID(); ok {
 		_node.ID = id
 		_spec.ID.Value = id
+	}
+	if value, ok := _c.mutation.InvocationID(); ok {
+		_spec.SetField(cachediagnostic.FieldInvocationID, field.TypeString, value)
+		_node.InvocationID = value
+	}
+	if value, ok := _c.mutation.Call(); ok {
+		_spec.SetField(cachediagnostic.FieldCall, field.TypeInt, value)
+		_node.Call = value
+	}
+	if value, ok := _c.mutation.Data(); ok {
+		_spec.SetField(cachediagnostic.FieldData, field.TypeBytes, value)
+		_node.Data = value
 	}
 	if value, ok := _c.mutation.Round(); ok {
 		_spec.SetField(cachediagnostic.FieldRound, field.TypeInt, value)

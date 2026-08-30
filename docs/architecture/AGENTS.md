@@ -34,6 +34,7 @@ This directory is the **authoritative reference** for cross-cutting design decis
 
 ### Session behavior
 - `smart-compaction.md` — session compaction algorithm.
+- `cache-diagnostics.md` — superadmin-only request stability and cache observability, including capture safety and persistence.
 
 ## Package implementation guides
 

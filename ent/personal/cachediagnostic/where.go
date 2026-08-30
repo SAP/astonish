@@ -60,6 +60,21 @@ func SessionID(v string) predicate.CacheDiagnostic {
 	return predicate.CacheDiagnostic(sql.FieldEQ(FieldSessionID, v))
 }
 
+// InvocationID applies equality check predicate on the "invocation_id" field. It's identical to InvocationIDEQ.
+func InvocationID(v string) predicate.CacheDiagnostic {
+	return predicate.CacheDiagnostic(sql.FieldEQ(FieldInvocationID, v))
+}
+
+// Call applies equality check predicate on the "call" field. It's identical to CallEQ.
+func Call(v int) predicate.CacheDiagnostic {
+	return predicate.CacheDiagnostic(sql.FieldEQ(FieldCall, v))
+}
+
+// Data applies equality check predicate on the "data" field. It's identical to DataEQ.
+func Data(v []byte) predicate.CacheDiagnostic {
+	return predicate.CacheDiagnostic(sql.FieldEQ(FieldData, v))
+}
+
 // Round applies equality check predicate on the "round" field. It's identical to RoundEQ.
 func Round(v int) predicate.CacheDiagnostic {
 	return predicate.CacheDiagnostic(sql.FieldEQ(FieldRound, v))
@@ -173,6 +188,161 @@ func SessionIDEqualFold(v string) predicate.CacheDiagnostic {
 // SessionIDContainsFold applies the ContainsFold predicate on the "session_id" field.
 func SessionIDContainsFold(v string) predicate.CacheDiagnostic {
 	return predicate.CacheDiagnostic(sql.FieldContainsFold(FieldSessionID, v))
+}
+
+// InvocationIDEQ applies the EQ predicate on the "invocation_id" field.
+func InvocationIDEQ(v string) predicate.CacheDiagnostic {
+	return predicate.CacheDiagnostic(sql.FieldEQ(FieldInvocationID, v))
+}
+
+// InvocationIDNEQ applies the NEQ predicate on the "invocation_id" field.
+func InvocationIDNEQ(v string) predicate.CacheDiagnostic {
+	return predicate.CacheDiagnostic(sql.FieldNEQ(FieldInvocationID, v))
+}
+
+// InvocationIDIn applies the In predicate on the "invocation_id" field.
+func InvocationIDIn(vs ...string) predicate.CacheDiagnostic {
+	return predicate.CacheDiagnostic(sql.FieldIn(FieldInvocationID, vs...))
+}
+
+// InvocationIDNotIn applies the NotIn predicate on the "invocation_id" field.
+func InvocationIDNotIn(vs ...string) predicate.CacheDiagnostic {
+	return predicate.CacheDiagnostic(sql.FieldNotIn(FieldInvocationID, vs...))
+}
+
+// InvocationIDGT applies the GT predicate on the "invocation_id" field.
+func InvocationIDGT(v string) predicate.CacheDiagnostic {
+	return predicate.CacheDiagnostic(sql.FieldGT(FieldInvocationID, v))
+}
+
+// InvocationIDGTE applies the GTE predicate on the "invocation_id" field.
+func InvocationIDGTE(v string) predicate.CacheDiagnostic {
+	return predicate.CacheDiagnostic(sql.FieldGTE(FieldInvocationID, v))
+}
+
+// InvocationIDLT applies the LT predicate on the "invocation_id" field.
+func InvocationIDLT(v string) predicate.CacheDiagnostic {
+	return predicate.CacheDiagnostic(sql.FieldLT(FieldInvocationID, v))
+}
+
+// InvocationIDLTE applies the LTE predicate on the "invocation_id" field.
+func InvocationIDLTE(v string) predicate.CacheDiagnostic {
+	return predicate.CacheDiagnostic(sql.FieldLTE(FieldInvocationID, v))
+}
+
+// InvocationIDContains applies the Contains predicate on the "invocation_id" field.
+func InvocationIDContains(v string) predicate.CacheDiagnostic {
+	return predicate.CacheDiagnostic(sql.FieldContains(FieldInvocationID, v))
+}
+
+// InvocationIDHasPrefix applies the HasPrefix predicate on the "invocation_id" field.
+func InvocationIDHasPrefix(v string) predicate.CacheDiagnostic {
+	return predicate.CacheDiagnostic(sql.FieldHasPrefix(FieldInvocationID, v))
+}
+
+// InvocationIDHasSuffix applies the HasSuffix predicate on the "invocation_id" field.
+func InvocationIDHasSuffix(v string) predicate.CacheDiagnostic {
+	return predicate.CacheDiagnostic(sql.FieldHasSuffix(FieldInvocationID, v))
+}
+
+// InvocationIDEqualFold applies the EqualFold predicate on the "invocation_id" field.
+func InvocationIDEqualFold(v string) predicate.CacheDiagnostic {
+	return predicate.CacheDiagnostic(sql.FieldEqualFold(FieldInvocationID, v))
+}
+
+// InvocationIDContainsFold applies the ContainsFold predicate on the "invocation_id" field.
+func InvocationIDContainsFold(v string) predicate.CacheDiagnostic {
+	return predicate.CacheDiagnostic(sql.FieldContainsFold(FieldInvocationID, v))
+}
+
+// CallEQ applies the EQ predicate on the "call" field.
+func CallEQ(v int) predicate.CacheDiagnostic {
+	return predicate.CacheDiagnostic(sql.FieldEQ(FieldCall, v))
+}
+
+// CallNEQ applies the NEQ predicate on the "call" field.
+func CallNEQ(v int) predicate.CacheDiagnostic {
+	return predicate.CacheDiagnostic(sql.FieldNEQ(FieldCall, v))
+}
+
+// CallIn applies the In predicate on the "call" field.
+func CallIn(vs ...int) predicate.CacheDiagnostic {
+	return predicate.CacheDiagnostic(sql.FieldIn(FieldCall, vs...))
+}
+
+// CallNotIn applies the NotIn predicate on the "call" field.
+func CallNotIn(vs ...int) predicate.CacheDiagnostic {
+	return predicate.CacheDiagnostic(sql.FieldNotIn(FieldCall, vs...))
+}
+
+// CallGT applies the GT predicate on the "call" field.
+func CallGT(v int) predicate.CacheDiagnostic {
+	return predicate.CacheDiagnostic(sql.FieldGT(FieldCall, v))
+}
+
+// CallGTE applies the GTE predicate on the "call" field.
+func CallGTE(v int) predicate.CacheDiagnostic {
+	return predicate.CacheDiagnostic(sql.FieldGTE(FieldCall, v))
+}
+
+// CallLT applies the LT predicate on the "call" field.
+func CallLT(v int) predicate.CacheDiagnostic {
+	return predicate.CacheDiagnostic(sql.FieldLT(FieldCall, v))
+}
+
+// CallLTE applies the LTE predicate on the "call" field.
+func CallLTE(v int) predicate.CacheDiagnostic {
+	return predicate.CacheDiagnostic(sql.FieldLTE(FieldCall, v))
+}
+
+// DataEQ applies the EQ predicate on the "data" field.
+func DataEQ(v []byte) predicate.CacheDiagnostic {
+	return predicate.CacheDiagnostic(sql.FieldEQ(FieldData, v))
+}
+
+// DataNEQ applies the NEQ predicate on the "data" field.
+func DataNEQ(v []byte) predicate.CacheDiagnostic {
+	return predicate.CacheDiagnostic(sql.FieldNEQ(FieldData, v))
+}
+
+// DataIn applies the In predicate on the "data" field.
+func DataIn(vs ...[]byte) predicate.CacheDiagnostic {
+	return predicate.CacheDiagnostic(sql.FieldIn(FieldData, vs...))
+}
+
+// DataNotIn applies the NotIn predicate on the "data" field.
+func DataNotIn(vs ...[]byte) predicate.CacheDiagnostic {
+	return predicate.CacheDiagnostic(sql.FieldNotIn(FieldData, vs...))
+}
+
+// DataGT applies the GT predicate on the "data" field.
+func DataGT(v []byte) predicate.CacheDiagnostic {
+	return predicate.CacheDiagnostic(sql.FieldGT(FieldData, v))
+}
+
+// DataGTE applies the GTE predicate on the "data" field.
+func DataGTE(v []byte) predicate.CacheDiagnostic {
+	return predicate.CacheDiagnostic(sql.FieldGTE(FieldData, v))
+}
+
+// DataLT applies the LT predicate on the "data" field.
+func DataLT(v []byte) predicate.CacheDiagnostic {
+	return predicate.CacheDiagnostic(sql.FieldLT(FieldData, v))
+}
+
+// DataLTE applies the LTE predicate on the "data" field.
+func DataLTE(v []byte) predicate.CacheDiagnostic {
+	return predicate.CacheDiagnostic(sql.FieldLTE(FieldData, v))
+}
+
+// DataIsNil applies the IsNil predicate on the "data" field.
+func DataIsNil() predicate.CacheDiagnostic {
+	return predicate.CacheDiagnostic(sql.FieldIsNull(FieldData))
+}
+
+// DataNotNil applies the NotNil predicate on the "data" field.
+func DataNotNil() predicate.CacheDiagnostic {
+	return predicate.CacheDiagnostic(sql.FieldNotNull(FieldData))
 }
 
 // RoundEQ applies the EQ predicate on the "round" field.

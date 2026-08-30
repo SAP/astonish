@@ -1317,6 +1317,7 @@ func RegisterRoutes(router *mux.Router, svc *store.Services, backend store.Platf
 	router.HandleFunc("/api/studio/sessions/{id}", StudioSessionHandler).Methods("GET")
 	router.HandleFunc("/api/studio/sessions/{id}", StudioDeleteSessionHandler).Methods("DELETE")
 	router.HandleFunc("/api/studio/sessions/{id}/trace", StudioSessionTraceHandler).Methods("GET")
+	router.HandleFunc("/api/studio/sessions/{id}/cache-diagnostics", StudioCacheDiagnosticsHandler).Methods("GET")
 	router.HandleFunc("/api/studio/sessions/{id}/subtask-events", StudioSubtaskEventsHandler).Methods("GET")
 	router.HandleFunc("/api/studio/sessions/{id}/stop", StudioStopHandler).Methods("POST")
 	router.HandleFunc("/api/studio/sessions/{id}/stream", StudioChatStreamHandler).Methods("GET")

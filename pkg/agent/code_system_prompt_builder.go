@@ -165,9 +165,10 @@ func (b *CodeSystemPromptBuilder) build(base *SystemPromptBuilder) string {
 	if b.PlanFilePersistence {
 		sb.WriteString("\n**Execution plan (PLAN.md):** Implementation plans are recorded only in Plan mode via `announce_plan` and persisted to a session PLAN.md. In Normal mode you MUST NOT call `announce_plan` — the runtime will refuse it. When executing an approved plan, PLAN.md is inlined in the execution context; follow it phase by phase. Keep it current: for main-thread phases call `update_plan` (running → complete/failed); delegated phases update automatically. After a context summary, the inlined PLAN.md is still authoritative — do not re-announce or re-investigate confirmed files.\n")
 		sb.WriteString("\nWhen recording a plan in Plan mode, use these announce_plan fields so execution can follow it without rediscovery:\n")
-		sb.WriteString("- `context`: WHY this change is needed (motivation, problem, background). Write it when the reason isn't obvious from the goal title.\n")
+		sb.WriteString("- `context`: REQUIRED. A clear, human-readable explanation of WHAT the change accomplishes, WHY it is needed, the approach at a high level, and any key decisions or trade-offs. This is the first thing the user reads — write 3-6 sentences that make sense to someone who has NOT seen your investigation.\n")
 		sb.WriteString("- `what_not_to_do`: explicit scope guard — list APIs, files, behaviors, or invariants that must NOT change. Guards against accidental scope creep.\n")
 		sb.WriteString("- `verification`: end-to-end smoke test sequence for the entire plan after all phases complete.\n")
+		sb.WriteString("- `summary` per step: REQUIRED. A 1-2 sentence plain-English explanation of what each phase accomplishes from the user's perspective (e.g. 'Adds a priority field to tasks so users can sort by importance'). NOT implementation-level file/function names.\n")
 		sb.WriteString("- `parallel_group` per step: structure the plan in execution waves. Before calling announce_plan, identify which phases have no dependency on each other's output — assign them the same wave label (e.g. `wave-1`). The next set of phases that depend only on wave-1 completing gets `wave-2`, and so on. Serial phases (one's output is another's input) get no label. Most multi-file plans have at least one wave of independent work; a plan with every phase unlabeled is a signal the plan structure needs review.\n")
 	}
 	if b.EnforceAuthorization {
@@ -208,6 +209,22 @@ func (b *CodeSystemPromptBuilder) build(base *SystemPromptBuilder) string {
 		sb.WriteString("- If you encounter a CAPTCHA during registration, use `browser_request_human` to hand control to the user\n")
 		sb.WriteString("- Always save successful account registrations to persistent memory (credential store for passwords, MEMORY.md for account details)\n")
 	}
+
+	// 5b. Communication discipline (code mode only)
+	sb.WriteString("\n## Communication\n\n")
+	sb.WriteString("- Lead with the answer. When the user asks a question, answer it first \u2014 then give supporting detail.\n")
+	sb.WriteString("- Write every user-facing message for a reader who has NOT seen your tool calls. Restate what you did and found in plain language; do not assume the user remembers earlier messages or tracked every tool invocation.\n")
+	sb.WriteString("- When presenting a plan or explaining a change, explain WHAT will happen and WHY before listing technical details (files, functions, signatures).\n")
+	sb.WriteString("- Keep intermediate progress updates short and infrequent. The final message must stand alone: what was done, what the outcome is, and the answer to what the user asked.\n")
+	sb.WriteString("- State facts literally. Do not invent metaphors, acronyms, or catchy labels. Use terminology already established in the conversation or codebase.\n")
+
+	// 5c. Work policy (code mode only)
+	sb.WriteString("\n## Work Policy\n\n")
+	sb.WriteString("- Match your response to the user's intent. Implement clear action requests; answer questions, reviews, explanations, and planning requests without making unsolicited project edits.\n")
+	sb.WriteString("- Match effort to the request. A one-line fix does not need a plan; a cross-cutting refactor does.\n")
+	sb.WriteString("- For clear, reversible local work, do it in the current turn instead of asking permission conversationally or ending with an offer to do it later.\n")
+	sb.WriteString("- Claim that something is done, fixed, tested, or addressed only when tool output supports the claim. Otherwise state what you did not verify and why.\n")
+	sb.WriteString("- Keep changes scoped to what was asked. Match the surrounding code's comment and tooling conventions.\n")
 
 	// 6. Capabilities
 	sb.WriteString("\n## Capabilities\n\n")

@@ -20,26 +20,59 @@ func (s *Store) applySQLiteExtras(ctx context.Context, scope Scope, db *sql.DB) 
 	}
 
 	var stmts []string
+	var ftsTable string
 	switch scope {
 	case ScopePlatform:
 		stmts = platformSQLiteExtras
 	case ScopeOrg:
 		stmts = orgSQLiteExtras
+		ftsTable = "org_memories_fts"
 	case ScopeTeam:
 		stmts = teamSQLiteExtras
+		ftsTable = "memories_fts"
 	case ScopePersonal:
 		stmts = personalSQLiteExtras
+		ftsTable = "memories_fts"
 	default:
 		return fmt.Errorf("unknown scope: %d", scope)
 	}
 
+	ftsExists := true
+	if ftsTable != "" {
+		if err := db.QueryRowContext(ctx,
+			"SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?)",
+			ftsTable,
+		).Scan(&ftsExists); err != nil {
+			return fmt.Errorf("check sqlite FTS table %q: %w", ftsTable, err)
+		}
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin sqlite extras transaction: %w", err)
+	}
+	defer tx.Rollback()
+
 	for i, stmt := range stmts {
-		if _, err := db.ExecContext(ctx, stmt); err != nil {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
 			slog.Warn("sqlite_extras: statement failed",
 				"scope", scope, "index", i, "error", err,
 				"sql_prefix", truncate(stmt, 80))
 			return fmt.Errorf("sqlite_extras scope=%d stmt=%d: %w", scope, i, err)
 		}
+	}
+	if ftsTable != "" && !ftsExists {
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf("INSERT INTO %s(%s) VALUES('rebuild')", ftsTable, ftsTable)); err != nil {
+			return fmt.Errorf("rebuild sqlite FTS table %q: %w", ftsTable, err)
+		}
+	}
+	if ftsTable != "" {
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf("INSERT INTO %s(%s, rank) VALUES('integrity-check', 1)", ftsTable, ftsTable)); err != nil {
+			return fmt.Errorf("validate sqlite FTS table %q: %w", ftsTable, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit sqlite extras: %w", err)
 	}
 	return nil
 }

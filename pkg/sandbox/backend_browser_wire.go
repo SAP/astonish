@@ -58,7 +58,7 @@ command_line:
 // inside a backend-managed session. This is used by the direct K8s backend,
 // where Browser Manager callbacks can route through Backend.ExecStreaming.
 func WireBackendBrowserManager(mgr *browser.Manager, backend Backend, sessReg *SessionRegistry, pool ToolNodePool, touchActivity func(sessionID string)) bool {
-	if mgr == nil || backend == nil || sessReg == nil {
+	if mgr == nil || backend == nil {
 		return false
 	}
 	if backend.Kind() != BackendKindK8s {
@@ -77,9 +77,11 @@ func WireBackendBrowserManager(mgr *browser.Manager, backend Backend, sessReg *S
 		}
 	}
 	mgr.ContainerResolveFunc = func(sessionID string) (string, string, error) {
-		rec, err := sessReg.GetSession(sessionID)
-		if err != nil || rec == nil || rec.PodName == "" {
-			return "", "", fmt.Errorf("no running sandbox for session %q", sessionID)
+		if sessReg != nil {
+			rec, err := sessReg.GetSession(sessionID)
+			if err != nil || rec == nil || rec.PodName == "" {
+				return "", "", fmt.Errorf("no running sandbox for session %q", sessionID)
+			}
 		}
 		// Use the session ID as the tunnel handle. Backend.ExecStreaming needs
 		// session IDs, not pod names; the returned IP is only used to build the

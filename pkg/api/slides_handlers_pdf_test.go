@@ -134,24 +134,20 @@ func TestSlidesPDFSandboxSpecUsesConfiguredBaseLayer(t *testing.T) {
 }
 
 func TestSlidesPDFHandler_NoFallbackWhenSandboxRequiredButUnavailable(t *testing.T) {
-	oldEnsure := ensureSlidesPDFSandboxSessionFn
-	ensureSlidesPDFSandboxSessionFn = func(context.Context, *http.Request, string, string) error { return nil }
-	defer func() { ensureSlidesPDFSandboxSessionFn = oldEnsure }()
-
 	oldReq := sandboxBrowserRequiredFn
 	sandboxBrowserRequiredFn = func() (bool, string) { return true, "k8s" }
 	defer func() { sandboxBrowserRequiredFn = oldReq }()
 
-	// Inject a host-like manager (SandboxEnabled=false) to simulate "callbacks
-	// never registered". The guard must reject it rather than render on host.
-	oldMgr := slidesPDFBrowserManagerFn
+	// Inject a host-like manager (SandboxEnabled=false). The guard must reject
+	// it rather than render on the host.
+	oldNew := newSlidesPDFSandboxBrowserFn
 	hostLike := browser.NewManager(browser.DefaultConfig())
 	var called bool
-	slidesPDFBrowserManagerFn = func(string) (*browser.Manager, error) {
+	newSlidesPDFSandboxBrowserFn = func(context.Context, *http.Request, string, string) (*browser.Manager, func(), error) {
 		called = true
-		return hostLike, nil
+		return hostLike, nil, nil
 	}
-	defer func() { slidesPDFBrowserManagerFn = oldMgr }()
+	defer func() { newSlidesPDFSandboxBrowserFn = oldNew }()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/docs/slides/deck/export/pdf", nil)
 	rec := httptest.NewRecorder()

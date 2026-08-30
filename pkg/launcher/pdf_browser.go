@@ -12,23 +12,13 @@ import (
 // backend-managed sandboxes such as direct K8s. Browser manager callbacks for
 // this path operate on session IDs, not pod names, so the returned handle is the
 // chat session ID with a loopback address that is tunneled by ContainerDialFunc.
-func newBackendPDFResolveFunc(backend sandbox.Backend, sessReg *sandbox.SessionRegistry) func(sessionID string) (string, string, error) {
+func newBackendPDFResolveFunc(backend sandbox.Backend, _ *sandbox.SessionRegistry) func(sessionID string) (string, string, error) {
 	return func(sessionID string) (string, string, error) {
 		if backend == nil {
 			return "", "", fmt.Errorf("PDF resolve: backend is nil")
 		}
 		if sessionID == "" {
 			return "", "", fmt.Errorf("PDF resolve: session ID is required")
-		}
-
-		if sessReg != nil {
-			rec, err := sessReg.GetSession(sessionID)
-			if err != nil {
-				return "", "", fmt.Errorf("PDF resolve: lookup session: %w", err)
-			}
-			if rec == nil {
-				return "", "", fmt.Errorf("PDF resolve: session %q was not provisioned", sessionID)
-			}
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)

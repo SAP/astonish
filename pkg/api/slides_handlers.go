@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/SAP/astonish/pkg/browser"
 	"github.com/SAP/astonish/pkg/docs/slides"
 	"github.com/SAP/astonish/pkg/docs/slides/components"
 	"github.com/SAP/astonish/pkg/docs/slides/pptxworker"
@@ -396,11 +397,11 @@ func ExportSlidesHTMLHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 var (
-	ensureSlidesPDFSandboxSessionFn = ensureSlidesPDFSandboxSession
-	slidesTemplateLayerChainFn      = resolveTemplateLayerChain
-	slidesBaseLayerChainFn          = resolveBaseLayerChain
-	slidesTemplateImageFn           = resolveTemplateImage
-	slidesBaseImageFn               = resolveBaseImage
+	newSlidesPDFSandboxBrowserFn = newSlidesPDFSandboxBrowser
+	slidesTemplateLayerChainFn   = resolveTemplateLayerChain
+	slidesBaseLayerChainFn       = resolveBaseLayerChain
+	slidesTemplateImageFn        = resolveTemplateImage
+	slidesBaseImageFn            = resolveBaseImage
 )
 
 func slidesPDFSandboxSpec(ctx context.Context, r *http.Request, userID string) sandbox.SessionSpec {
@@ -442,27 +443,43 @@ func slidesPDFSandboxSessionID(ctx context.Context, r *http.Request, userID stri
 	return "slides-pdf-" + userID
 }
 
-func ensureSlidesPDFSandboxSession(ctx context.Context, r *http.Request, sessionID, userID string) error {
+func newSlidesPDFSandboxBrowser(ctx context.Context, r *http.Request, sessionID, userID string) (*browser.Manager, func(), error) {
 	backend, cleanup, err := sandboxBackendForRequest(r)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
-	if cleanup != nil {
-		defer cleanup()
-	}
+	failed := true
+	defer func() {
+		if failed && cleanup != nil {
+			cleanup()
+		}
+	}()
 
 	spec := slidesPDFSandboxSpec(ctx, r, userID)
 	spec.SessionID = sessionID
 	if _, err := backend.CreateSession(ctx, spec); err != nil {
-		return fmt.Errorf("create slides PDF sandbox: %w", err)
+		return nil, nil, fmt.Errorf("create slides PDF sandbox: %w", err)
 	}
 	if err := backend.StartSession(ctx, sessionID); err != nil {
-		return fmt.Errorf("start slides PDF sandbox: %w", err)
+		return nil, nil, fmt.Errorf("start slides PDF sandbox: %w", err)
 	}
 	if err := backend.WaitForSessionReady(ctx, sessionID); err != nil {
-		return fmt.Errorf("wait for slides PDF sandbox: %w", err)
+		return nil, nil, fmt.Errorf("wait for slides PDF sandbox: %w", err)
 	}
-	return nil
+
+	cfg := browser.DefaultConfig()
+	cfg.Headless = true
+	cfg.UserDataDir = ""
+	if appCfg := effectiveAppConfig(r); appCfg != nil && appCfg.Browser.ChromePath != "" {
+		cfg.ChromePath = appCfg.Browser.ChromePath
+	}
+	mgr := browser.NewManager(cfg)
+	if !sandbox.WireBackendBrowserManager(mgr, backend, nil, nil, appMCPIdleTracker.touch) {
+		return nil, nil, fmt.Errorf("sandbox backend %q does not support PDF browser execution", backend.Kind())
+	}
+	mgr.EnsureSessionID(sessionID)
+	failed = false
+	return mgr, cleanup, nil
 }
 
 func ExportSlidesPDFHandler(w http.ResponseWriter, r *http.Request) {
@@ -482,17 +499,14 @@ func ExportSlidesPDFHandler(w http.ResponseWriter, r *http.Request) {
 		userID := effectiveUserID(r)
 		sessionID = slidesPDFSandboxSessionID(r.Context(), r, userID)
 		provisionCtx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
-		err := ensureSlidesPDFSandboxSessionFn(provisionCtx, r, sessionID, userID)
+		mgr, cleanup, err := newSlidesPDFSandboxBrowserFn(provisionCtx, r, sessionID, userID)
 		cancel()
+		if cleanup != nil {
+			defer cleanup()
+		}
 		if err != nil {
 			slog.Error("slides PDF: sandbox provisioning failed", "deck", mux.Vars(r)["deckSlug"], "backend", backendLabel, "error", err)
 			http.Error(w, "slides PDF export could not prepare its sandbox: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		mgr, err := slidesPDFBrowserManagerFn(sessionID)
-		if err != nil {
-			slog.Error("slides PDF: sandbox browser unavailable", "deck", mux.Vars(r)["deckSlug"], "backend", backendLabel, "error", err)
-			http.Error(w, "slides PDF export requires a sandbox browser but none is available: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		// No-fallback guard: if the sandbox is required but no in-container

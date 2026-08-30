@@ -3,7 +3,6 @@ package launcher
 import (
 	"context"
 	"fmt"
-	"strings"
 	"testing"
 
 	"github.com/SAP/astonish/pkg/sandbox"
@@ -45,17 +44,23 @@ func TestNewBackendPDFResolveFunc_ExistingSessionUsesSessionIDHandle(t *testing.
 	}
 }
 
-func TestNewBackendPDFResolveFunc_RejectsUnprovisionedSession(t *testing.T) {
+func TestNewBackendPDFResolveFunc_DoesNotDependOnRegistrationRegistry(t *testing.T) {
 	backend := mock.New()
-	reg := sandbox.NewSessionRegistryFromStore(newMemorySandboxSessionStore())
-	resolve := newBackendPDFResolveFunc(backend, reg)
-
-	_, _, err := resolve("sess-new")
-	if err == nil || !strings.Contains(err.Error(), "was not provisioned") {
-		t.Fatalf("resolve error = %v, want unprovisioned-session error", err)
+	if _, err := backend.CreateSession(context.Background(), sandbox.SessionSpec{SessionID: "sess-request", TemplateID: sandbox.BaseTemplateID}); err != nil {
+		t.Fatalf("seed backend session: %v", err)
 	}
-	if calls := backend.CreateSessionCalls(); len(calls) != 0 {
-		t.Fatalf("CreateSession calls = %d, want 0", len(calls))
+	staleRegistry := sandbox.NewSessionRegistryFromStore(newMemorySandboxSessionStore())
+	resolve := newBackendPDFResolveFunc(backend, staleRegistry)
+
+	name, ip, err := resolve("sess-request")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if name != "sess-request" || ip != "127.0.0.1" {
+		t.Fatalf("resolve returned (%q, %q), want (sess-request, 127.0.0.1)", name, ip)
+	}
+	if calls := backend.StartSessionCalls(); len(calls) != 1 || calls[0] != "sess-request" {
+		t.Fatalf("StartSession calls = %v, want [sess-request]", calls)
 	}
 }
 

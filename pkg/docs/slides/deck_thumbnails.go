@@ -3,8 +3,8 @@ package slides
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
-	"log/slog"
 	"time"
 
 	"github.com/SAP/astonish/pkg/pdfgen"
@@ -34,12 +34,10 @@ func deckSlideThumbRef(position int) string {
 // Assets["slidethumb/<position>"], and sets SlideContent.ThumbnailRef to that
 // key.
 //
-// It is BEST-EFFORT and idempotent: a slide whose ThumbnailRef is already set
-// AND whose asset still exists is skipped (no re-render); any per-slide failure
-// is logged and skipped (that slide keeps ThumbnailRef=""); a nil browser or
-// empty runtime disables generation entirely. It returns an error only for a
-// fatal load failure (deck/scene unreadable); the caller treats even that as
-// soft (log + continue) so finishing a deck never fails over thumbnails.
+// It is idempotent: a slide whose ThumbnailRef is already set and whose asset
+// still exists is skipped. Any missing dependency, render failure, or persistence
+// failure is returned so callers that require thumbnails cannot report success
+// with an incomplete deck.
 func GenerateDeckThumbnails(ctx context.Context, svc Service, slug string, runtimeJS []byte, browser pdfgen.BrowserProvider) error {
 	return generateDeckThumbnails(ctx, svc, slug, deckThumbnailOptions{
 		RuntimeJS: runtimeJS,
@@ -64,10 +62,11 @@ func generateDeckThumbnails(ctx context.Context, svc Service, slug string, opts 
 	if render == nil {
 		render = pdfgen.RenderHTMLToPNGChrome
 	}
-	if opts.Browser == nil || len(opts.RuntimeJS) == 0 {
-		slog.Warn("deck slide thumbnail generation skipped: no browser or runtime",
-			"deck", slug, "hasBrowser", opts.Browser != nil, "runtimeBytes", len(opts.RuntimeJS))
-		return nil
+	if opts.Browser == nil {
+		return fmt.Errorf("thumbnail browser is unavailable")
+	}
+	if len(opts.RuntimeJS) == 0 {
+		return fmt.Errorf("slides runtime is unavailable")
 	}
 
 	deck, slidesContent, err := svc.Deck(ctx, slug)
@@ -81,11 +80,10 @@ func generateDeckThumbnails(ctx context.Context, svc Service, slug string, opts 
 	// Scene.Slides is built in the same position order as ListSlides (both
 	// ordered by position), so index i lines up with slidesContent[i].
 	if len(scene.Slides) != len(slidesContent) {
-		slog.Warn("deck slide thumbnail generation skipped: scene/slide count mismatch",
-			"deck", slug, "sceneSlides", len(scene.Slides), "storedSlides", len(slidesContent))
-		return nil
+		return fmt.Errorf("scene/slide count mismatch: scene has %d, store has %d", len(scene.Slides), len(slidesContent))
 	}
 
+	var failures []error
 	for i := range slidesContent {
 		persisted := slidesContent[i]
 		ref := deckSlideThumbRef(persisted.Position)
@@ -100,15 +98,12 @@ func generateDeckThumbnails(ctx context.Context, svc Service, slug string, opts 
 
 		png, rErr := renderDeckSlideThumbnail(scene.Slides[i], deck.Theme, deck.Assets, opts.RuntimeJS, opts.Browser, render, opts.Timeout)
 		if rErr != nil {
-			// Best-effort: log and continue; leave this slide's ThumbnailRef empty.
-			slog.Warn("deck slide thumbnail generation failed for slide",
-				"deck", slug, "position", persisted.Position, "error", rErr)
+			failures = append(failures, fmt.Errorf("slide %d render: %w", persisted.Position, rErr))
 			continue
 		}
 		dataURI := "data:image/png;base64," + base64.StdEncoding.EncodeToString(png)
 		if _, aErr := svc.AddDeckAsset(ctx, slug, ref, dataURI); aErr != nil {
-			slog.Warn("deck slide thumbnail asset persist failed",
-				"deck", slug, "position", persisted.Position, "error", aErr)
+			failures = append(failures, fmt.Errorf("slide %d asset persist: %w", persisted.Position, aErr))
 			continue
 		}
 		// Persist the ref on the slide row so the deck response surfaces it and
@@ -116,10 +111,7 @@ func generateDeckThumbnails(ctx context.Context, svc Service, slug string, opts 
 		// so the upsert does not disturb markup/notes/title/position.
 		persisted.ThumbnailRef = ref
 		if uErr := svc.Store.UpsertSlide(ctx, persisted); uErr != nil {
-			slog.Warn("deck slide thumbnail ref persist failed",
-				"deck", slug, "position", persisted.Position, "error", uErr)
-			// The asset is stored but the ref is not; leave in-memory ref set so
-			// a retry re-bakes deterministically (asset overwrite is a no-op).
+			failures = append(failures, fmt.Errorf("slide %d reference persist: %w", persisted.Position, uErr))
 			continue
 		}
 		// Keep the local deck.Assets copy in sync so a later slide's idempotency
@@ -130,12 +122,16 @@ func generateDeckThumbnails(ctx context.Context, svc Service, slug string, opts 
 		deck.Assets[ref] = dataURI
 	}
 
-	// Mark the deck as thumbnail-ready so the list DTO signals the frontend to
-	// show <img> tags (avoids unnecessary 404 probes for decks without thumbs).
+	if len(failures) > 0 {
+		return errors.Join(failures...)
+	}
+
+	// Mark the deck as thumbnail-ready only after every slide has a persisted
+	// thumbnail asset and reference.
 	if !deck.ThumbnailReady {
 		deck.ThumbnailReady = true
 		if err := svc.Store.UpdateDeck(ctx, deck); err != nil {
-			slog.Warn("deck thumbnail_ready flag persist failed", "deck", slug, "error", err)
+			return fmt.Errorf("persist thumbnail-ready flag: %w", err)
 		}
 	}
 	return nil

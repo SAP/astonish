@@ -662,14 +662,51 @@ func exportSlidesHTML(w http.ResponseWriter, r *http.Request, print bool) (slide
 	return result, true
 }
 
-// bakeDeckThumbnails renders each slide of a finished deck to a static PNG and
-// stores it on the deck (best-effort). It acquires a headless-Chrome browser the
-// same way ExportSlidesPDFHandler does — the in-container sandbox browser when
-// the backend requires it (no host fallback), else the local host browser — and
-// hands it to slides.GenerateDeckThumbnails. It NEVER blocks or fails the caller:
-// a missing browser or any render error is logged and swallowed so finishing a
-// deck is unaffected. sessionSuffix disambiguates the per-user sandbox session
-// (e.g. the chat user id). A recover guard protects against a browser-layer panic.
+var generateRequiredDeckThumbnailsFn = generateRequiredDeckThumbnails
+
+// generateRequiredDeckThumbnails uses the request-scoped browser and reports
+// every setup or rendering failure to the save handler.
+func generateRequiredDeckThumbnails(ctx context.Context, r *http.Request, svc slides.Service, slug string) (err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			err = fmt.Errorf("thumbnail generation panicked: %v", rec)
+		}
+	}()
+
+	required, backendLabel := sandboxBrowserRequiredFn()
+	var browserProv pdfgen.BrowserProvider
+	if required {
+		userID := effectiveUserID(r)
+		sessionID := slidesPDFSandboxSessionID(ctx, r, userID)
+		if backendLabel == string(sandbox.BackendKindK8s) {
+			mgr, cleanup, createErr := newSlidesPDFSandboxBrowserFn(ctx, r, sessionID, userID)
+			if cleanup != nil {
+				defer cleanup()
+			}
+			if createErr != nil {
+				return createErr
+			}
+			browserProv = mgr
+		} else {
+			mgr, managerErr := slidesPDFBrowserManagerFn(sessionID)
+			if managerErr != nil {
+				return managerErr
+			}
+			if !mgr.SandboxEnabled {
+				return fmt.Errorf("sandbox browser is unavailable on backend %q", backendLabel)
+			}
+			browserProv = mgr
+		}
+		appMCPIdleTracker.StartIdleWatchdog(context.Background(), 10*time.Minute)
+		defer appMCPIdleTracker.touch(sessionID)
+	} else {
+		browserProv = GetLocalPDFBrowserManager()
+	}
+	return slides.GenerateDeckThumbnails(ctx, svc, slug, webassets.GetSlidesRuntime(), browserProv)
+}
+
+// bakeDeckThumbnails renders thumbnails asynchronously for completed chat decks.
+// Failures are logged because this path must not fail chat completion.
 func bakeDeckThumbnails(ctx context.Context, svc slides.Service, slug, sessionSuffix string) {
 	defer func() {
 		if rec := recover(); rec != nil {
@@ -745,6 +782,39 @@ type deckSnapshotPayload struct {
 	TemplateModel string                `json:"templateModel,omitempty"`
 }
 
+func replaceDeckSlides(ctx context.Context, docs store.DocsStore, deckID string, current, replacements []*store.SlideContent) error {
+	for _, slide := range current {
+		if err := docs.DeleteSlide(ctx, deckID, slide.ID); err != nil {
+			return fmt.Errorf("delete slide %q: %w", slide.ID, err)
+		}
+	}
+	for _, source := range replacements {
+		slide := &store.SlideContent{
+			DeckID: deckID, Position: source.Position,
+			Title: source.Title, Content: source.Content, Notes: source.Notes,
+			ThumbnailRef: source.ThumbnailRef, SchemaVersion: source.SchemaVersion,
+		}
+		if err := docs.UpsertSlide(ctx, slide); err != nil {
+			return fmt.Errorf("upsert slide at position %d: %w", source.Position, err)
+		}
+	}
+	return nil
+}
+
+func restoreSavedDeck(ctx context.Context, docs store.DocsStore, deck *store.DeckManifest, deckSlides []*store.SlideContent) error {
+	current, err := docs.ListSlides(ctx, deck.ID)
+	if err != nil {
+		return fmt.Errorf("list replacement slides: %w", err)
+	}
+	if err := docs.UpdateDeck(ctx, deck); err != nil {
+		return fmt.Errorf("restore deck: %w", err)
+	}
+	if err := replaceDeckSlides(ctx, docs, deck.ID, current, deckSlides); err != nil {
+		return fmt.Errorf("restore slides: %w", err)
+	}
+	return nil
+}
+
 // SaveSlidesDeckHandler handles POST /api/docs/slides/{deckSlug}/save.
 // It copies a session-scoped deck into permanent storage. The session deck remains
 // unchanged (like Apps: the session continues with its own copy).
@@ -793,6 +863,9 @@ func SaveSlidesDeckHandler(w http.ResponseWriter, r *http.Request) {
 	if existingDeck != nil && existingDeck.SessionID == "" {
 		// Existing saved deck found — archive it and overwrite (version bump).
 		existingSlides, _ := svc.Store.ListSlides(ctx, existingDeck.ID)
+		previousDeck := *existingDeck
+		previousDeck.Theme = cloneStringMap(existingDeck.Theme)
+		previousDeck.Assets = cloneStringMap(existingDeck.Assets)
 		snapPayload, _ := json.Marshal(deckSnapshotPayload{
 			Theme:         existingDeck.Theme,
 			Assets:        existingDeck.Assets,
@@ -818,7 +891,7 @@ func SaveSlidesDeckHandler(w http.ResponseWriter, r *http.Request) {
 		existingDeck.Theme = sourceDeck.Theme
 		existingDeck.Assets = sourceDeck.Assets
 		existingDeck.TemplateModel = sourceDeck.TemplateModel
-		existingDeck.ThumbnailReady = sourceDeck.ThumbnailReady
+		existingDeck.ThumbnailReady = false
 		existingDeck.Version++
 		if err := svc.Store.UpdateDeck(ctx, existingDeck); err != nil {
 			writeSlidesError(w, err)
@@ -826,21 +899,27 @@ func SaveSlidesDeckHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Replace slides on existing deck.
-		for _, s := range existingSlides {
-			_ = svc.Store.DeleteSlide(ctx, existingDeck.ID, s.ID)
-		}
-		for _, s := range sourceSlides {
-			slide := &store.SlideContent{
-				ID: "", DeckID: existingDeck.ID, Position: s.Position,
-				Title: s.Title, Content: s.Content, Notes: s.Notes,
-				ThumbnailRef: s.ThumbnailRef, SchemaVersion: s.SchemaVersion,
+		if err := replaceDeckSlides(ctx, svc.Store, existingDeck.ID, existingSlides, sourceSlides); err != nil {
+			if rollbackErr := restoreSavedDeck(ctx, svc.Store, &previousDeck, existingSlides); rollbackErr != nil {
+				slog.Error("failed to roll back deck after slide replacement failure", "deck", existingDeck.Slug, "error", rollbackErr)
 			}
-			_ = svc.Store.UpsertSlide(ctx, slide)
+			http.Error(w, "save slides: replace slides: "+err.Error(), http.StatusInternalServerError)
+			return
 		}
 
-		// Trigger best-effort thumbnail baking after override-save.
-		go bakeDeckThumbnails(ctx, svc, existingDeck.Slug, "save")
-
+		if err := generateRequiredDeckThumbnailsFn(ctx, r, svc, existingDeck.Slug); err != nil {
+			slog.Error("saved deck thumbnail generation failed", "deck", existingDeck.Slug, "error", err)
+			if rollbackErr := restoreSavedDeck(ctx, svc.Store, &previousDeck, existingSlides); rollbackErr != nil {
+				slog.Error("failed to roll back deck after thumbnail failure", "deck", existingDeck.Slug, "error", rollbackErr)
+			}
+			http.Error(w, "save slides: generate thumbnails: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		existingDeck, sourceSlides, err = svc.Deck(ctx, existingDeck.Slug)
+		if err != nil {
+			writeSlidesError(w, err)
+			return
+		}
 		writeSlidesJSON(w, http.StatusOK, slidesDeckResponse{Deck: slimDeckFull(existingDeck), Slides: sourceSlides})
 	} else {
 		// No existing saved deck — create a new permanent deck with the target slug.
@@ -854,10 +933,10 @@ func SaveSlidesDeckHandler(w http.ResponseWriter, r *http.Request) {
 			Title:          title,
 			Description:    sourceDeck.Description,
 			SchemaVersion:  sourceDeck.SchemaVersion,
-			Theme:          sourceDeck.Theme,
-			Assets:         sourceDeck.Assets,
+			Theme:          cloneStringMap(sourceDeck.Theme),
+			Assets:         cloneStringMap(sourceDeck.Assets),
 			TemplateModel:  sourceDeck.TemplateModel,
-			ThumbnailReady: sourceDeck.ThumbnailReady,
+			ThumbnailReady: false,
 			Version:        1,
 			// SessionID is empty = permanent/saved
 		}
@@ -865,19 +944,27 @@ func SaveSlidesDeckHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "failed to create saved deck: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		for _, s := range sourceSlides {
-			slide := &store.SlideContent{
-				ID: "", DeckID: newDeck.ID, Position: s.Position,
-				Title: s.Title, Content: s.Content, Notes: s.Notes,
-				ThumbnailRef: s.ThumbnailRef, SchemaVersion: s.SchemaVersion,
+		if err := replaceDeckSlides(ctx, svc.Store, newDeck.ID, nil, sourceSlides); err != nil {
+			if deleteErr := svc.DeleteDeck(ctx, targetSlug); deleteErr != nil {
+				slog.Error("failed to roll back deck after slide copy failure", "deck", targetSlug, "error", deleteErr)
 			}
-			_ = svc.Store.UpsertSlide(ctx, slide)
+			http.Error(w, "save slides: copy slides: "+err.Error(), http.StatusInternalServerError)
+			return
 		}
 
-		// Trigger best-effort thumbnail baking for the saved deck so it shows
-		// preview images in the Slides view immediately.
-		go bakeDeckThumbnails(ctx, svc, targetSlug, "save")
-
+		if err := generateRequiredDeckThumbnailsFn(ctx, r, svc, targetSlug); err != nil {
+			slog.Error("saved deck thumbnail generation failed", "deck", targetSlug, "error", err)
+			if deleteErr := svc.DeleteDeck(ctx, targetSlug); deleteErr != nil {
+				slog.Error("failed to roll back deck after thumbnail failure", "deck", targetSlug, "error", deleteErr)
+			}
+			http.Error(w, "save slides: generate thumbnails: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		newDeck, sourceSlides, err = svc.Deck(ctx, targetSlug)
+		if err != nil {
+			writeSlidesError(w, err)
+			return
+		}
 		writeSlidesJSON(w, http.StatusOK, slidesDeckResponse{Deck: slimDeckFull(newDeck), Slides: sourceSlides})
 	}
 }

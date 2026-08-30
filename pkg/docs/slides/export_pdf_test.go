@@ -31,7 +31,7 @@ func TestPDFExporterUsesSlidePrintContract(t *testing.T) {
 	}
 	// Paper matches the 1920x1080 canvas at 96dpi (20in x 11.25in) so each slide
 	// fills a page with no scaling or cropping.
-	if gotOptions.PaperWidth != 20 || gotOptions.PaperHeight != 11.25 || !gotOptions.Landscape || !gotOptions.PrintBackground {
+	if gotOptions.PaperWidth != 20 || gotOptions.PaperHeight != 11.25 || gotOptions.Landscape || !gotOptions.PrintBackground {
 		t.Fatalf("unexpected print options: %+v", gotOptions)
 	}
 	if gotOptions.ReadinessExpression != SlidesReadinessExpression || gotOptions.Timeout != 12*time.Second {

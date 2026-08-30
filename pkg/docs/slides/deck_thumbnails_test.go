@@ -115,12 +115,15 @@ func TestGenerateDeckThumbnailsRendererErrorLeavesRefEmpty(t *testing.T) {
 			return nil, errors.New("boom")
 		},
 	}
-	if err := generateDeckThumbnails(ctx, svc, slug, opts); err != nil {
-		t.Fatalf("generateDeckThumbnails returned hard error on render failure: %v", err)
+	if err := generateDeckThumbnails(ctx, svc, slug, opts); err == nil || !strings.Contains(err.Error(), "slide 0 render") {
+		t.Fatalf("generateDeckThumbnails error = %v, want slide render failure", err)
 	}
 	deck, slidesContent, err := svc.Deck(ctx, slug)
 	if err != nil {
 		t.Fatalf("reload deck: %v", err)
+	}
+	if deck.ThumbnailReady {
+		t.Fatal("deck must not be thumbnail-ready after a render failure")
 	}
 	for i, sc := range slidesContent {
 		if sc.ThumbnailRef != "" {
@@ -132,7 +135,7 @@ func TestGenerateDeckThumbnailsRendererErrorLeavesRefEmpty(t *testing.T) {
 	}
 }
 
-func TestGenerateDeckThumbnailsNilBrowserIsNoop(t *testing.T) {
+func TestGenerateDeckThumbnailsNilBrowserFails(t *testing.T) {
 	ctx := context.Background()
 	svc, slug := seedDeckWithSlides(t, 2)
 
@@ -145,8 +148,8 @@ func TestGenerateDeckThumbnailsNilBrowserIsNoop(t *testing.T) {
 			return fakePNG, nil
 		},
 	})
-	if err != nil {
-		t.Fatalf("nil browser should be a no-op, got err: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "browser is unavailable") {
+		t.Fatalf("nil browser error = %v, want unavailable error", err)
 	}
 	if called {
 		t.Fatal("renderer must not be called when browser is nil")

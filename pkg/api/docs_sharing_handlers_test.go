@@ -16,8 +16,8 @@ import (
 // memDocsStore is a functional in-memory store.DocsStore supporting the
 // deck+slides create/get/list/upsert path CopyDeckTo needs.
 type memDocsStore struct {
-	decks  map[string]*store.DeckManifest    // by slug
-	slides map[string][]*store.SlideContent  // by deck ID
+	decks  map[string]*store.DeckManifest   // by slug
+	slides map[string][]*store.SlideContent // by deck ID
 }
 
 func newMemDocsStore() *memDocsStore {
@@ -64,14 +64,21 @@ func (m *memDocsStore) ListDecksLite(ctx context.Context) ([]*store.DeckManifest
 	return decks, nil
 }
 func (m *memDocsStore) UpdateDeck(_ context.Context, d *store.DeckManifest) error {
-	m.decks[d.Slug] = d
+	clone := *d
+	m.decks[d.Slug] = &clone
 	return nil
 }
 func (m *memDocsStore) DeleteDeck(_ context.Context, slug string) error {
+	if deck := m.decks[slug]; deck != nil {
+		delete(m.slides, deck.ID)
+	}
 	delete(m.decks, slug)
 	return nil
 }
 func (m *memDocsStore) UpsertSlide(_ context.Context, s *store.SlideContent) error {
+	if s.ID == "" {
+		s.ID = uuid.NewString()
+	}
 	list := m.slides[s.DeckID]
 	for i, existing := range list {
 		if existing.ID == s.ID || existing.Position == s.Position {
@@ -101,7 +108,16 @@ func (m *memDocsStore) ListSlides(_ context.Context, deckID string) ([]*store.Sl
 	}
 	return out, nil
 }
-func (m *memDocsStore) DeleteSlide(context.Context, string, string) error     { return nil }
+func (m *memDocsStore) DeleteSlide(_ context.Context, deckID, slideID string) error {
+	list := m.slides[deckID]
+	for i, slide := range list {
+		if slide.ID == slideID {
+			m.slides[deckID] = append(list[:i], list[i+1:]...)
+			break
+		}
+	}
+	return nil
+}
 func (m *memDocsStore) ReorderSlides(context.Context, string, []string) error { return nil }
 func (m *memDocsStore) DeleteDecksBySessionID(_ context.Context, sessionID string) error {
 	for slug, d := range m.decks {

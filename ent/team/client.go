@@ -19,6 +19,7 @@ import (
 	"github.com/SAP/astonish/ent/team/a2aagent"
 	"github.com/SAP/astonish/ent/team/app"
 	"github.com/SAP/astonish/ent/team/appstate"
+	"github.com/SAP/astonish/ent/team/cachediagnostic"
 	"github.com/SAP/astonish/ent/team/chatsessionevent"
 	"github.com/SAP/astonish/ent/team/credential"
 	"github.com/SAP/astonish/ent/team/deck"
@@ -58,6 +59,8 @@ type Client struct {
 	App *AppClient
 	// AppState is the client for interacting with the AppState builders.
 	AppState *AppStateClient
+	// CacheDiagnostic is the client for interacting with the CacheDiagnostic builders.
+	CacheDiagnostic *CacheDiagnosticClient
 	// ChatSessionEvent is the client for interacting with the ChatSessionEvent builders.
 	ChatSessionEvent *ChatSessionEventClient
 	// Credential is the client for interacting with the Credential builders.
@@ -124,6 +127,7 @@ func (c *Client) init() {
 	c.A2aAgent = NewA2aAgentClient(c.config)
 	c.App = NewAppClient(c.config)
 	c.AppState = NewAppStateClient(c.config)
+	c.CacheDiagnostic = NewCacheDiagnosticClient(c.config)
 	c.ChatSessionEvent = NewChatSessionEventClient(c.config)
 	c.Credential = NewCredentialClient(c.config)
 	c.Deck = NewDeckClient(c.config)
@@ -245,6 +249,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		A2aAgent:            NewA2aAgentClient(cfg),
 		App:                 NewAppClient(cfg),
 		AppState:            NewAppStateClient(cfg),
+		CacheDiagnostic:     NewCacheDiagnosticClient(cfg),
 		ChatSessionEvent:    NewChatSessionEventClient(cfg),
 		Credential:          NewCredentialClient(cfg),
 		Deck:                NewDeckClient(cfg),
@@ -293,6 +298,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		A2aAgent:            NewA2aAgentClient(cfg),
 		App:                 NewAppClient(cfg),
 		AppState:            NewAppStateClient(cfg),
+		CacheDiagnostic:     NewCacheDiagnosticClient(cfg),
 		ChatSessionEvent:    NewChatSessionEventClient(cfg),
 		Credential:          NewCredentialClient(cfg),
 		Deck:                NewDeckClient(cfg),
@@ -348,12 +354,12 @@ func (c *Client) Close() error {
 // In order to add hooks to a specific client, call: `client.Node.Use(...)`.
 func (c *Client) Use(hooks ...Hook) {
 	for _, n := range []interface{ Use(...Hook) }{
-		c.A2aAgent, c.App, c.AppState, c.ChatSessionEvent, c.Credential, c.Deck,
-		c.DeckVersion, c.DrillReport, c.FleetMailboxMessage, c.FleetMonitorState,
-		c.FleetPlan, c.FleetRunState, c.FleetSetupDraft, c.FleetSetupProfile,
-		c.FleetTask, c.FleetTemplate, c.Flow, c.McpServer, c.Memory, c.NetworkPolicy,
-		c.SandboxSession, c.ScheduledJob, c.Session, c.SessionEvent, c.Setting,
-		c.Skill, c.SkillFile, c.Slide, c.TeamAuditLog,
+		c.A2aAgent, c.App, c.AppState, c.CacheDiagnostic, c.ChatSessionEvent,
+		c.Credential, c.Deck, c.DeckVersion, c.DrillReport, c.FleetMailboxMessage,
+		c.FleetMonitorState, c.FleetPlan, c.FleetRunState, c.FleetSetupDraft,
+		c.FleetSetupProfile, c.FleetTask, c.FleetTemplate, c.Flow, c.McpServer,
+		c.Memory, c.NetworkPolicy, c.SandboxSession, c.ScheduledJob, c.Session,
+		c.SessionEvent, c.Setting, c.Skill, c.SkillFile, c.Slide, c.TeamAuditLog,
 	} {
 		n.Use(hooks...)
 	}
@@ -363,12 +369,12 @@ func (c *Client) Use(hooks ...Hook) {
 // In order to add interceptors to a specific client, call: `client.Node.Intercept(...)`.
 func (c *Client) Intercept(interceptors ...Interceptor) {
 	for _, n := range []interface{ Intercept(...Interceptor) }{
-		c.A2aAgent, c.App, c.AppState, c.ChatSessionEvent, c.Credential, c.Deck,
-		c.DeckVersion, c.DrillReport, c.FleetMailboxMessage, c.FleetMonitorState,
-		c.FleetPlan, c.FleetRunState, c.FleetSetupDraft, c.FleetSetupProfile,
-		c.FleetTask, c.FleetTemplate, c.Flow, c.McpServer, c.Memory, c.NetworkPolicy,
-		c.SandboxSession, c.ScheduledJob, c.Session, c.SessionEvent, c.Setting,
-		c.Skill, c.SkillFile, c.Slide, c.TeamAuditLog,
+		c.A2aAgent, c.App, c.AppState, c.CacheDiagnostic, c.ChatSessionEvent,
+		c.Credential, c.Deck, c.DeckVersion, c.DrillReport, c.FleetMailboxMessage,
+		c.FleetMonitorState, c.FleetPlan, c.FleetRunState, c.FleetSetupDraft,
+		c.FleetSetupProfile, c.FleetTask, c.FleetTemplate, c.Flow, c.McpServer,
+		c.Memory, c.NetworkPolicy, c.SandboxSession, c.ScheduledJob, c.Session,
+		c.SessionEvent, c.Setting, c.Skill, c.SkillFile, c.Slide, c.TeamAuditLog,
 	} {
 		n.Intercept(interceptors...)
 	}
@@ -383,6 +389,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.App.mutate(ctx, m)
 	case *AppStateMutation:
 		return c.AppState.mutate(ctx, m)
+	case *CacheDiagnosticMutation:
+		return c.CacheDiagnostic.mutate(ctx, m)
 	case *ChatSessionEventMutation:
 		return c.ChatSessionEvent.mutate(ctx, m)
 	case *CredentialMutation:
@@ -836,6 +844,155 @@ func (c *AppStateClient) mutate(ctx context.Context, m *AppStateMutation) (Value
 		return (&AppStateDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
 	default:
 		return nil, fmt.Errorf("team: unknown AppState mutation op: %q", m.Op())
+	}
+}
+
+// CacheDiagnosticClient is a client for the CacheDiagnostic schema.
+type CacheDiagnosticClient struct {
+	config
+}
+
+// NewCacheDiagnosticClient returns a client for the CacheDiagnostic from the given config.
+func NewCacheDiagnosticClient(c config) *CacheDiagnosticClient {
+	return &CacheDiagnosticClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `cachediagnostic.Hooks(f(g(h())))`.
+func (c *CacheDiagnosticClient) Use(hooks ...Hook) {
+	c.hooks.CacheDiagnostic = append(c.hooks.CacheDiagnostic, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `cachediagnostic.Intercept(f(g(h())))`.
+func (c *CacheDiagnosticClient) Intercept(interceptors ...Interceptor) {
+	c.inters.CacheDiagnostic = append(c.inters.CacheDiagnostic, interceptors...)
+}
+
+// Create returns a builder for creating a CacheDiagnostic entity.
+func (c *CacheDiagnosticClient) Create() *CacheDiagnosticCreate {
+	mutation := newCacheDiagnosticMutation(c.config, OpCreate)
+	return &CacheDiagnosticCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of CacheDiagnostic entities.
+func (c *CacheDiagnosticClient) CreateBulk(builders ...*CacheDiagnosticCreate) *CacheDiagnosticCreateBulk {
+	return &CacheDiagnosticCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *CacheDiagnosticClient) MapCreateBulk(slice any, setFunc func(*CacheDiagnosticCreate, int)) *CacheDiagnosticCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &CacheDiagnosticCreateBulk{err: fmt.Errorf("calling to CacheDiagnosticClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*CacheDiagnosticCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &CacheDiagnosticCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for CacheDiagnostic.
+func (c *CacheDiagnosticClient) Update() *CacheDiagnosticUpdate {
+	mutation := newCacheDiagnosticMutation(c.config, OpUpdate)
+	return &CacheDiagnosticUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *CacheDiagnosticClient) UpdateOne(_m *CacheDiagnostic) *CacheDiagnosticUpdateOne {
+	mutation := newCacheDiagnosticMutation(c.config, OpUpdateOne, withCacheDiagnostic(_m))
+	return &CacheDiagnosticUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *CacheDiagnosticClient) UpdateOneID(id int64) *CacheDiagnosticUpdateOne {
+	mutation := newCacheDiagnosticMutation(c.config, OpUpdateOne, withCacheDiagnosticID(id))
+	return &CacheDiagnosticUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for CacheDiagnostic.
+func (c *CacheDiagnosticClient) Delete() *CacheDiagnosticDelete {
+	mutation := newCacheDiagnosticMutation(c.config, OpDelete)
+	return &CacheDiagnosticDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *CacheDiagnosticClient) DeleteOne(_m *CacheDiagnostic) *CacheDiagnosticDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *CacheDiagnosticClient) DeleteOneID(id int64) *CacheDiagnosticDeleteOne {
+	builder := c.Delete().Where(cachediagnostic.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &CacheDiagnosticDeleteOne{builder}
+}
+
+// Query returns a query builder for CacheDiagnostic.
+func (c *CacheDiagnosticClient) Query() *CacheDiagnosticQuery {
+	return &CacheDiagnosticQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeCacheDiagnostic},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a CacheDiagnostic entity by its id.
+func (c *CacheDiagnosticClient) Get(ctx context.Context, id int64) (*CacheDiagnostic, error) {
+	return c.Query().Where(cachediagnostic.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *CacheDiagnosticClient) GetX(ctx context.Context, id int64) *CacheDiagnostic {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// QuerySession queries the session edge of a CacheDiagnostic.
+func (c *CacheDiagnosticClient) QuerySession(_m *CacheDiagnostic) *SessionQuery {
+	query := (&SessionClient{config: c.config}).Query()
+	query.path = func(context.Context) (fromV *sql.Selector, _ error) {
+		id := _m.ID
+		step := sqlgraph.NewStep(
+			sqlgraph.From(cachediagnostic.Table, cachediagnostic.FieldID, id),
+			sqlgraph.To(session.Table, session.FieldID),
+			sqlgraph.Edge(sqlgraph.M2O, true, cachediagnostic.SessionTable, cachediagnostic.SessionColumn),
+		)
+		fromV = sqlgraph.Neighbors(_m.driver.Dialect(), step)
+		return fromV, nil
+	}
+	return query
+}
+
+// Hooks returns the client hooks.
+func (c *CacheDiagnosticClient) Hooks() []Hook {
+	return c.hooks.CacheDiagnostic
+}
+
+// Interceptors returns the client interceptors.
+func (c *CacheDiagnosticClient) Interceptors() []Interceptor {
+	return c.inters.CacheDiagnostic
+}
+
+func (c *CacheDiagnosticClient) mutate(ctx context.Context, m *CacheDiagnosticMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&CacheDiagnosticCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&CacheDiagnosticUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&CacheDiagnosticUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&CacheDiagnosticDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("team: unknown CacheDiagnostic mutation op: %q", m.Op())
 	}
 }
 
@@ -3538,6 +3695,22 @@ func (c *SessionClient) QueryChatEvents(_m *Session) *ChatSessionEventQuery {
 	return query
 }
 
+// QueryCacheDiagnostics queries the cache_diagnostics edge of a Session.
+func (c *SessionClient) QueryCacheDiagnostics(_m *Session) *CacheDiagnosticQuery {
+	query := (&CacheDiagnosticClient{config: c.config}).Query()
+	query.path = func(context.Context) (fromV *sql.Selector, _ error) {
+		id := _m.ID
+		step := sqlgraph.NewStep(
+			sqlgraph.From(session.Table, session.FieldID, id),
+			sqlgraph.To(cachediagnostic.Table, cachediagnostic.FieldID),
+			sqlgraph.Edge(sqlgraph.O2M, false, session.CacheDiagnosticsTable, session.CacheDiagnosticsColumn),
+		)
+		fromV = sqlgraph.Neighbors(_m.driver.Dialect(), step)
+		return fromV, nil
+	}
+	return query
+}
+
 // Hooks returns the client hooks.
 func (c *SessionClient) Hooks() []Hook {
 	return c.hooks.Session
@@ -4428,17 +4601,17 @@ func (c *TeamAuditLogClient) mutate(ctx context.Context, m *TeamAuditLogMutation
 // hooks and interceptors per client, for fast access.
 type (
 	hooks struct {
-		A2aAgent, App, AppState, ChatSessionEvent, Credential, Deck, DeckVersion,
-		DrillReport, FleetMailboxMessage, FleetMonitorState, FleetPlan, FleetRunState,
-		FleetSetupDraft, FleetSetupProfile, FleetTask, FleetTemplate, Flow, McpServer,
-		Memory, NetworkPolicy, SandboxSession, ScheduledJob, Session, SessionEvent,
-		Setting, Skill, SkillFile, Slide, TeamAuditLog []ent.Hook
+		A2aAgent, App, AppState, CacheDiagnostic, ChatSessionEvent, Credential, Deck,
+		DeckVersion, DrillReport, FleetMailboxMessage, FleetMonitorState, FleetPlan,
+		FleetRunState, FleetSetupDraft, FleetSetupProfile, FleetTask, FleetTemplate,
+		Flow, McpServer, Memory, NetworkPolicy, SandboxSession, ScheduledJob, Session,
+		SessionEvent, Setting, Skill, SkillFile, Slide, TeamAuditLog []ent.Hook
 	}
 	inters struct {
-		A2aAgent, App, AppState, ChatSessionEvent, Credential, Deck, DeckVersion,
-		DrillReport, FleetMailboxMessage, FleetMonitorState, FleetPlan, FleetRunState,
-		FleetSetupDraft, FleetSetupProfile, FleetTask, FleetTemplate, Flow, McpServer,
-		Memory, NetworkPolicy, SandboxSession, ScheduledJob, Session, SessionEvent,
-		Setting, Skill, SkillFile, Slide, TeamAuditLog []ent.Interceptor
+		A2aAgent, App, AppState, CacheDiagnostic, ChatSessionEvent, Credential, Deck,
+		DeckVersion, DrillReport, FleetMailboxMessage, FleetMonitorState, FleetPlan,
+		FleetRunState, FleetSetupDraft, FleetSetupProfile, FleetTask, FleetTemplate,
+		Flow, McpServer, Memory, NetworkPolicy, SandboxSession, ScheduledJob, Session,
+		SessionEvent, Setting, Skill, SkillFile, Slide, TeamAuditLog []ent.Interceptor
 	}
 )

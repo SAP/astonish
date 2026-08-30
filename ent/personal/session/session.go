@@ -44,6 +44,8 @@ const (
 	FieldUpdatedAt = "updated_at"
 	// EdgeEvents holds the string denoting the events edge name in mutations.
 	EdgeEvents = "events"
+	// EdgeCacheDiagnostics holds the string denoting the cache_diagnostics edge name in mutations.
+	EdgeCacheDiagnostics = "cache_diagnostics"
 	// Table holds the table name of the session in the database.
 	Table = "sessions"
 	// EventsTable is the table that holds the events relation/edge.
@@ -53,6 +55,13 @@ const (
 	EventsInverseTable = "session_events"
 	// EventsColumn is the table column denoting the events relation/edge.
 	EventsColumn = "session_id"
+	// CacheDiagnosticsTable is the table that holds the cache_diagnostics relation/edge.
+	CacheDiagnosticsTable = "cache_diagnostics"
+	// CacheDiagnosticsInverseTable is the table name for the CacheDiagnostic entity.
+	// It exists in this package in order to avoid circular dependency with the "cachediagnostic" package.
+	CacheDiagnosticsInverseTable = "cache_diagnostics"
+	// CacheDiagnosticsColumn is the table column denoting the cache_diagnostics relation/edge.
+	CacheDiagnosticsColumn = "session_id"
 )
 
 // Columns holds all SQL columns for session fields.
@@ -195,10 +204,31 @@ func ByEvents(term sql.OrderTerm, terms ...sql.OrderTerm) OrderOption {
 		sqlgraph.OrderByNeighborTerms(s, newEventsStep(), append([]sql.OrderTerm{term}, terms...)...)
 	}
 }
+
+// ByCacheDiagnosticsCount orders the results by cache_diagnostics count.
+func ByCacheDiagnosticsCount(opts ...sql.OrderTermOption) OrderOption {
+	return func(s *sql.Selector) {
+		sqlgraph.OrderByNeighborsCount(s, newCacheDiagnosticsStep(), opts...)
+	}
+}
+
+// ByCacheDiagnostics orders the results by cache_diagnostics terms.
+func ByCacheDiagnostics(term sql.OrderTerm, terms ...sql.OrderTerm) OrderOption {
+	return func(s *sql.Selector) {
+		sqlgraph.OrderByNeighborTerms(s, newCacheDiagnosticsStep(), append([]sql.OrderTerm{term}, terms...)...)
+	}
+}
 func newEventsStep() *sqlgraph.Step {
 	return sqlgraph.NewStep(
 		sqlgraph.From(Table, FieldID),
 		sqlgraph.To(EventsInverseTable, FieldID),
 		sqlgraph.Edge(sqlgraph.O2M, false, EventsTable, EventsColumn),
+	)
+}
+func newCacheDiagnosticsStep() *sqlgraph.Step {
+	return sqlgraph.NewStep(
+		sqlgraph.From(Table, FieldID),
+		sqlgraph.To(CacheDiagnosticsInverseTable, FieldID),
+		sqlgraph.Edge(sqlgraph.O2M, false, CacheDiagnosticsTable, CacheDiagnosticsColumn),
 	)
 }

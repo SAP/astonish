@@ -1458,6 +1458,7 @@ func RegisterRoutes(router *mux.Router, svc *store.Services, backend store.Platf
 		router.HandleFunc("/api/platform/admin/users/{id}", PlatformAdminDeleteUserHandler).Methods("DELETE")
 		router.HandleFunc("/api/platform/admin/users/{id}/orgs", PlatformAdminAddUserToOrgHandler).Methods("POST")
 		router.HandleFunc("/api/platform/admin/users/{id}/orgs/{slug}", PlatformAdminRemoveUserFromOrgHandler).Methods("DELETE")
+		router.HandleFunc("/api/platform/admin/sessions/{id}/cache-diagnostics", PlatformAdminCacheDiagnosticsHandler).Methods("GET")
 
 		// OIDC provider management (superadmin only)
 		router.HandleFunc("/api/platform/admin/oidc-providers", PlatformAdminListOIDCProvidersHandler).Methods("GET")

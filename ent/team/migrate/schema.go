@@ -88,6 +88,42 @@ var (
 			},
 		},
 	}
+	// CacheDiagnosticsColumns holds the columns for the "cache_diagnostics" table.
+	CacheDiagnosticsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeInt64, Increment: true},
+		{Name: "round", Type: field.TypeInt},
+		{Name: "cache_stable_path", Type: field.TypeBool},
+		{Name: "system_hash", Type: field.TypeString, Size: 128},
+		{Name: "system_changed", Type: field.TypeBool},
+		{Name: "system_changed_session", Type: field.TypeBool},
+		{Name: "tool_hash", Type: field.TypeString, Size: 128},
+		{Name: "tool_count", Type: field.TypeInt},
+		{Name: "tools_changed", Type: field.TypeBool},
+		{Name: "tools_changed_session", Type: field.TypeBool},
+		{Name: "created_at", Type: field.TypeTime, Default: map[string]schema.Expr{"postgres": "now()", "sqlite3": "(datetime('now'))"}},
+		{Name: "session_id", Type: field.TypeString},
+	}
+	// CacheDiagnosticsTable holds the schema information for the "cache_diagnostics" table.
+	CacheDiagnosticsTable = &schema.Table{
+		Name:       "cache_diagnostics",
+		Columns:    CacheDiagnosticsColumns,
+		PrimaryKey: []*schema.Column{CacheDiagnosticsColumns[0]},
+		ForeignKeys: []*schema.ForeignKey{
+			{
+				Symbol:     "cache_diagnostics_sessions_cache_diagnostics",
+				Columns:    []*schema.Column{CacheDiagnosticsColumns[11]},
+				RefColumns: []*schema.Column{SessionsColumns[0]},
+				OnDelete:   schema.NoAction,
+			},
+		},
+		Indexes: []*schema.Index{
+			{
+				Name:    "cachediagnostic_session_id_id",
+				Unique:  false,
+				Columns: []*schema.Column{CacheDiagnosticsColumns[11], CacheDiagnosticsColumns[0]},
+			},
+		},
+	}
 	// ChatSessionEventsColumns holds the columns for the "chat_session_events" table.
 	ChatSessionEventsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -845,6 +881,7 @@ var (
 		A2aAgentsTable,
 		AppsTable,
 		AppStateTable,
+		CacheDiagnosticsTable,
 		ChatSessionEventsTable,
 		CredentialsTable,
 		DecksTable,
@@ -883,6 +920,10 @@ func init() {
 	}
 	AppStateTable.Annotation = &entsql.Annotation{
 		Table: "app_state",
+	}
+	CacheDiagnosticsTable.ForeignKeys[0].RefTable = SessionsTable
+	CacheDiagnosticsTable.Annotation = &entsql.Annotation{
+		Table: "cache_diagnostics",
 	}
 	ChatSessionEventsTable.ForeignKeys[0].RefTable = SessionsTable
 	ChatSessionEventsTable.Annotation = &entsql.Annotation{

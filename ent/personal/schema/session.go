@@ -74,6 +74,7 @@ func (Session) Fields() []ent.Field {
 func (Session) Edges() []ent.Edge {
 	return []ent.Edge{
 		edge.To("events", SessionEvent.Type),
+		edge.To("cache_diagnostics", CacheDiagnostic.Type),
 	}
 }
 

@@ -47,7 +47,7 @@ type StudioChatRequest struct {
 	Message          string           `json:"message"`
 	Attachments      []ChatAttachment `json:"attachments,omitempty"` // file attachments (base64)
 	AutoApprove      bool             `json:"autoApprove,omitempty"`
-	Debug            bool             `json:"debug,omitempty"`            // reserved for future debug streaming
+	Debug            bool             `json:"debug,omitempty"`            // platform superadmin-only diagnostics
 	SystemContext    string           `json:"systemContext,omitempty"`    // per-turn system instructions (not shown to user)
 	PlanMode         bool             `json:"planMode,omitempty"`         // per-turn plan-mode gate: refuse mutating tools + delegate_tasks
 	PinnedToolGroups []string         `json:"pinnedToolGroups,omitempty"` // tool groups to always inject (wizard sessions)
@@ -594,6 +594,10 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	userID := effectiveUserID(r)
+	if req.Debug && !IsPlatformAdmin(GetPlatformUser(r)) {
+		respondError(w, http.StatusForbidden, "platform superadmin access required for debug mode")
+		return
+	}
 
 	cm := GetChatManager()
 	if err := cm.ensureReady(r.Context()); err != nil {
@@ -1049,6 +1053,14 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Launch background runner — the agent runs independently of this HTTP request.
 	runner := newChatRunner(sessionID, userID, isNew)
+	runner.ctx = store.WithDebugEnabled(runner.ctx, req.Debug)
+	if req.Debug {
+		if diagnosticsStore, ok := sessionService.(store.SessionStore); ok {
+			runner.ctx = store.WithCacheDiagnosticRecorder(runner.ctx, func(ctx context.Context, diagnostic store.CacheDiagnostic) error {
+				return diagnosticsStore.AppendCacheDiagnostic(ctx, sessionID, diagnostic)
+			})
+		}
+	}
 	runner.titleWaitTimeout = 30 * time.Second // wait for title refine before closing SSE
 	if files := chatFilesFromAttachments(req.Attachments); len(files) > 0 {
 		runner.InjectChatFiles(files)

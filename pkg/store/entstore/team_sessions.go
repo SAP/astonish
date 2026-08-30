@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	teament "github.com/SAP/astonish/ent/team"
+	"github.com/SAP/astonish/ent/team/cachediagnostic"
 	"github.com/SAP/astonish/ent/team/predicate"
 	"github.com/SAP/astonish/ent/team/session"
 	"github.com/SAP/astonish/ent/team/sessionevent"
@@ -280,6 +281,9 @@ func (s *teamSessionStore) List(ctx context.Context, req *adksession.ListRequest
 }
 
 func (s *teamSessionStore) Delete(ctx context.Context, req *adksession.DeleteRequest) error {
+	_, _ = s.client.CacheDiagnostic.Delete().
+		Where(cachediagnostic.SessionIDEQ(req.SessionID)).
+		Exec(ctx)
 	// Delete events first (may not cascade depending on schema config).
 	_, _ = s.client.SessionEvent.Delete().
 		Where(sessionevent.SessionIDEQ(req.SessionID)).
@@ -479,6 +483,9 @@ func (s *teamSessionStore) UpdateSessionMeta(ctx context.Context, sessionID stri
 }
 
 func (s *teamSessionStore) RemoveSessionMeta(ctx context.Context, sessionID string) error {
+	_, _ = s.client.CacheDiagnostic.Delete().
+		Where(cachediagnostic.SessionIDEQ(sessionID)).
+		Exec(ctx)
 	// Delete events first.
 	_, _ = s.client.SessionEvent.Delete().
 		Where(sessionevent.SessionIDEQ(sessionID)).
@@ -513,6 +520,66 @@ func (s *teamSessionStore) ReadTranscriptEvents(ctx context.Context, _, _, sessi
 
 func (s *teamSessionStore) AppendFleetEvent(ctx context.Context, sessionID string, event *adksession.Event) error {
 	return s.appendEventInternal(ctx, sessionID, event)
+}
+
+func (s *teamSessionStore) AppendCacheDiagnostic(ctx context.Context, sessionID string, diagnostic store.CacheDiagnostic) error {
+	create := s.client.CacheDiagnostic.Create().
+		SetSessionID(sessionID).
+		SetRound(diagnostic.Round).
+		SetCacheStablePath(diagnostic.CacheStablePath).
+		SetSystemHash(diagnostic.SystemHash).
+		SetSystemChanged(diagnostic.SystemChanged).
+		SetSystemChangedSession(diagnostic.SystemChangedSession).
+		SetToolHash(diagnostic.ToolHash).
+		SetToolCount(diagnostic.ToolCount).
+		SetToolsChanged(diagnostic.ToolsChanged).
+		SetToolsChangedSession(diagnostic.ToolsChangedSession)
+	if !diagnostic.CreatedAt.IsZero() {
+		create.SetCreatedAt(diagnostic.CreatedAt)
+	}
+	if _, err := create.Save(ctx); err != nil {
+		return fmt.Errorf("append cache diagnostic: %w", err)
+	}
+
+	excess, err := s.client.CacheDiagnostic.Query().
+		Where(cachediagnostic.SessionIDEQ(sessionID)).
+		Order(cachediagnostic.ByID(sql.OrderDesc())).
+		Offset(store.MaxSessionCacheDiagnostics).
+		All(ctx)
+	if err != nil {
+		return fmt.Errorf("list excess cache diagnostics: %w", err)
+	}
+	if len(excess) > 0 {
+		ids := make([]int64, len(excess))
+		for i, row := range excess {
+			ids[i] = row.ID
+		}
+		if _, err := s.client.CacheDiagnostic.Delete().Where(cachediagnostic.IDIn(ids...)).Exec(ctx); err != nil {
+			return fmt.Errorf("trim cache diagnostics: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s *teamSessionStore) ListCacheDiagnostics(ctx context.Context, sessionID string) ([]store.CacheDiagnostic, error) {
+	rows, err := s.client.CacheDiagnostic.Query().
+		Where(cachediagnostic.SessionIDEQ(sessionID)).
+		Order(cachediagnostic.ByID()).
+		All(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list cache diagnostics: %w", err)
+	}
+	out := make([]store.CacheDiagnostic, len(rows))
+	for i, row := range rows {
+		out[i] = store.CacheDiagnostic{
+			Round: row.Round, CacheStablePath: row.CacheStablePath,
+			SystemHash: row.SystemHash, SystemChanged: row.SystemChanged,
+			SystemChangedSession: row.SystemChangedSession, ToolHash: row.ToolHash,
+			ToolCount: row.ToolCount, ToolsChanged: row.ToolsChanged,
+			ToolsChangedSession: row.ToolsChangedSession, CreatedAt: row.CreatedAt,
+		}
+	}
+	return out, nil
 }
 
 func (s *teamSessionStore) ResolveSessionID(ctx context.Context, partial string) (string, error) {
@@ -559,6 +626,9 @@ func (s *teamSessionStore) CleanupExpiredSessions(ctx context.Context, maxAgeDay
 
 	var deleted []string
 	for _, e := range ents {
+		_, _ = s.client.CacheDiagnostic.Delete().
+			Where(cachediagnostic.SessionIDEQ(e.ID)).
+			Exec(ctx)
 		// Delete events.
 		_, _ = s.client.SessionEvent.Delete().
 			Where(sessionevent.SessionIDEQ(e.ID)).

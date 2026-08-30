@@ -19,6 +19,8 @@ const teamFlowStoreKey contextKey = "astonish_team_flow_store"
 const drillReportStoreKey contextKey = "astonish_drill_report_store"
 const sessionIDKey contextKey = "astonish_session_id"
 const chatFilesKey contextKey = "astonish_chat_files"
+const debugEnabledKey contextKey = "astonish_debug_enabled"
+const cacheDiagnosticRecorderKey contextKey = "astonish_cache_diagnostic_recorder"
 
 // WithServices returns a new context containing the Services instance.
 func WithServices(ctx context.Context, svc *Services) context.Context {
@@ -705,6 +707,37 @@ func ChatFilesFromContext(ctx context.Context) []ChatFile {
 	}
 	files, _ := ctx.Value(chatFilesKey).([]ChatFile)
 	return files
+}
+
+// WithDebugEnabled marks an authorized request for diagnostic collection.
+func WithDebugEnabled(ctx context.Context, enabled bool) context.Context {
+	return context.WithValue(ctx, debugEnabledKey, enabled)
+}
+
+// DebugEnabledFromContext reports whether diagnostics are authorized for this request.
+func DebugEnabledFromContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	enabled, _ := ctx.Value(debugEnabledKey).(bool)
+	return enabled
+}
+
+// CacheDiagnosticRecorder persists one request fingerprint.
+type CacheDiagnosticRecorder func(ctx context.Context, diagnostic CacheDiagnostic) error
+
+// WithCacheDiagnosticRecorder adds a request-scoped diagnostics sink.
+func WithCacheDiagnosticRecorder(ctx context.Context, recorder CacheDiagnosticRecorder) context.Context {
+	return context.WithValue(ctx, cacheDiagnosticRecorderKey, recorder)
+}
+
+// CacheDiagnosticRecorderFromContext returns the request-scoped diagnostics sink.
+func CacheDiagnosticRecorderFromContext(ctx context.Context) CacheDiagnosticRecorder {
+	if ctx == nil {
+		return nil
+	}
+	recorder, _ := ctx.Value(cacheDiagnosticRecorderKey).(CacheDiagnosticRecorder)
+	return recorder
 }
 
 // --- Memory Merge Function (cross-session dedup) ---

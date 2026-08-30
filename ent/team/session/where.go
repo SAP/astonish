@@ -1002,6 +1002,29 @@ func HasChatEventsWith(preds ...predicate.ChatSessionEvent) predicate.Session {
 	})
 }
 
+// HasCacheDiagnostics applies the HasEdge predicate on the "cache_diagnostics" edge.
+func HasCacheDiagnostics() predicate.Session {
+	return predicate.Session(func(s *sql.Selector) {
+		step := sqlgraph.NewStep(
+			sqlgraph.From(Table, FieldID),
+			sqlgraph.Edge(sqlgraph.O2M, false, CacheDiagnosticsTable, CacheDiagnosticsColumn),
+		)
+		sqlgraph.HasNeighbors(s, step)
+	})
+}
+
+// HasCacheDiagnosticsWith applies the HasEdge predicate on the "cache_diagnostics" edge with a given conditions (other predicates).
+func HasCacheDiagnosticsWith(preds ...predicate.CacheDiagnostic) predicate.Session {
+	return predicate.Session(func(s *sql.Selector) {
+		step := newCacheDiagnosticsStep()
+		sqlgraph.HasNeighborsWith(s, step, func(s *sql.Selector) {
+			for _, p := range preds {
+				p(s)
+			}
+		})
+	})
+}
+
 // And groups predicates with the AND operator between them.
 func And(predicates ...predicate.Session) predicate.Session {
 	return predicate.Session(sql.AndPredicates(predicates...))

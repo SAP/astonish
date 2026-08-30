@@ -45,6 +45,18 @@ func (f AppStateFunc) Mutate(ctx context.Context, m team.Mutation) (team.Value, 
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *team.AppStateMutation", m)
 }
 
+// The CacheDiagnosticFunc type is an adapter to allow the use of ordinary
+// function as CacheDiagnostic mutator.
+type CacheDiagnosticFunc func(context.Context, *team.CacheDiagnosticMutation) (team.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f CacheDiagnosticFunc) Mutate(ctx context.Context, m team.Mutation) (team.Value, error) {
+	if mv, ok := m.(*team.CacheDiagnosticMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *team.CacheDiagnosticMutation", m)
+}
+
 // The ChatSessionEventFunc type is an adapter to allow the use of ordinary
 // function as ChatSessionEvent mutator.
 type ChatSessionEventFunc func(context.Context, *team.ChatSessionEventMutation) (team.Value, error)

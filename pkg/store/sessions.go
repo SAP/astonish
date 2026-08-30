@@ -9,6 +9,22 @@ import (
 
 // SessionMeta contains metadata about a chat session.
 // This mirrors the existing session.SessionMeta type.
+const MaxSessionCacheDiagnostics = 100
+
+// CacheDiagnostic is a secret-safe fingerprint of one model request.
+type CacheDiagnostic struct {
+	Round                int       `json:"round"`
+	CacheStablePath      bool      `json:"cacheStablePath"`
+	SystemHash           string    `json:"systemHash"`
+	SystemChanged        bool      `json:"systemChanged"`
+	SystemChangedSession bool      `json:"systemChangedSession"`
+	ToolHash             string    `json:"toolHash"`
+	ToolCount            int       `json:"toolCount"`
+	ToolsChanged         bool      `json:"toolsChanged"`
+	ToolsChangedSession  bool      `json:"toolsChangedSession"`
+	CreatedAt            time.Time `json:"createdAt"`
+}
+
 type SessionMeta struct {
 	ID           string    `json:"id"`
 	AppName      string    `json:"appName"`
@@ -45,6 +61,10 @@ type SessionStore interface {
 
 	// Transcript access.
 	ReadTranscriptEvents(ctx context.Context, appName, userID, sessionID string) ([]*adksession.Event, error)
+
+	// Cache diagnostics are bounded per session and never contain prompt or schema content.
+	AppendCacheDiagnostic(ctx context.Context, sessionID string, diagnostic CacheDiagnostic) error
+	ListCacheDiagnostics(ctx context.Context, sessionID string) ([]CacheDiagnostic, error)
 
 	// AppendFleetEvent persists a fleet message event to a session's transcript
 	// without requiring a full ADK session object. Used by fleet sessions which

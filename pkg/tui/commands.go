@@ -28,11 +28,6 @@ var skillsSlashCommand = slashCommand{
 	Name: "skills", Description: "List local runtime skills",
 }
 
-// providerSlashCommand is offered only when the backend supports local provider
-// management (code mode). It is not part of the always-on palette.
-var providerSlashCommand = slashCommand{
-	Name: "provider", Aliases: []string{"providers"}, Description: "Manage local providers (add/remove)",
-}
 
 // rollbackSlashCommand is offered only when the backend supports rollback
 // (code mode). It reverts chat and file changes to an earlier message.

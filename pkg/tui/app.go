@@ -190,7 +190,6 @@ type model struct {
 	sessions         sessionsState
 	rollback         rollbackState
 	modelPicker      modelPickerState
-	providerPicker   providerPickerState
 	webSearchPicker  webSearchPickerState
 	skillsPicker     skillsPickerState
 	fileViewer       fileViewerState
@@ -416,9 +415,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.modelPicker.open {
 			return m.handleModelPickerKey(msg)
-		}
-		if m.providerPicker.open {
-			return m.handleProviderPickerKey(msg)
 		}
 		if m.webSearchPicker.open {
 			return m.handleWebSearchPickerKey(msg)
@@ -883,9 +879,6 @@ func (m *model) syncSlashCompletion() {
 		return
 	}
 	var extra []slashCommand
-	if m.providerAdmin() != nil {
-		extra = append(extra, providerSlashCommand)
-	}
 	if m.webSearchAdmin() != nil {
 		extra = append(extra, webSearchSlashCommand)
 	}
@@ -1259,7 +1252,7 @@ func isClipboardPasteKey(msg tea.KeyMsg) bool {
 }
 
 func (m model) tryPasteImage() (tea.Model, tea.Cmd, bool) {
-	if m.sessions.open || m.rollback.open || m.modelPicker.open || m.providerPicker.open || m.webSearchPicker.open || m.skillsPicker.open || m.fileViewer.open {
+	if m.sessions.open || m.rollback.open || m.modelPicker.open || m.webSearchPicker.open || m.skillsPicker.open || m.fileViewer.open {
 		return m, nil, false
 	}
 	if m.tr.Streaming && !m.tr.Awaiting {
@@ -1281,7 +1274,7 @@ func (m model) tryPasteImage() (tea.Model, tea.Cmd, bool) {
 }
 
 func (m model) insertPastedImage(data []byte, mimeType string) (tea.Model, tea.Cmd) {
-	if m.sessions.open || m.rollback.open || m.modelPicker.open || m.providerPicker.open || m.webSearchPicker.open || m.skillsPicker.open || m.fileViewer.open {
+	if m.sessions.open || m.rollback.open || m.modelPicker.open || m.webSearchPicker.open || m.skillsPicker.open || m.fileViewer.open {
 		return m, nil
 	}
 	prevH := m.composerTextHeight()
@@ -1305,7 +1298,7 @@ func (m model) insertPastedImage(data []byte, mimeType string) (tea.Model, tea.C
 }
 
 func (m model) handlePaste(text string) (tea.Model, tea.Cmd) {
-	if m.sessions.open || m.rollback.open || m.modelPicker.open || m.providerPicker.open || m.webSearchPicker.open || m.skillsPicker.open || m.fileViewer.open {
+	if m.sessions.open || m.rollback.open || m.modelPicker.open || m.webSearchPicker.open || m.skillsPicker.open || m.fileViewer.open {
 		return m, nil
 	}
 	if m.tr.Streaming && !m.tr.Awaiting {
@@ -1968,7 +1961,7 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 	m.ta.Reset()
 	switch {
 	case text == "/help" || text == "/?":
-		m.tr.Apply(events.NewSystem(helpText(m.providerAdmin() != nil, m.webSearchAdmin() != nil, m.rollbackCap() != nil, m.compactionCap() != nil, m.localSkillsCap() != nil)))
+		m.tr.Apply(events.NewSystem(helpText(m.webSearchAdmin() != nil, m.rollbackCap() != nil, m.compactionCap() != nil, m.localSkillsCap() != nil)))
 	case text == "/files":
 		cwd, _ := os.Getwd()
 		m.tr.Apply(events.NewSystem("Type `@` plus part of a local path to attach file context from " + cwd + "."))
@@ -1987,8 +1980,6 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		return m.openSessionsPicker()
 	case text == "/model" || text == "/models":
 		return m.openModelPicker()
-	case text == "/provider" || text == "/providers":
-		return m.openProviderPicker()
 	case text == "/websearch" || text == "/search":
 		return m.openWebSearchPicker()
 	case text == "/rollback" || text == "/revert":
@@ -2020,12 +2011,8 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func helpText(providerAdmin bool, webSearch bool, rollback bool, compaction bool, localSkillsCapability ...bool) string {
+func helpText(webSearch bool, rollback bool, compaction bool, localSkillsCapability ...bool) string {
 	localSkills := len(localSkillsCapability) > 0 && localSkillsCapability[0]
-	providerLine := ""
-	if providerAdmin {
-		providerLine = "\n  /provider      Manage local providers (add/remove)"
-	}
 	webSearchLine := ""
 	if webSearch {
 		webSearchLine = "\n  /websearch     Configure web search provider"
@@ -2047,7 +2034,7 @@ Commands:
   /help          Show this help (/?)
   /status        Show session / provider / model
   /sessions      Open sessions picker (also ctrl+l)
-  /model         Choose provider and model` + providerLine + webSearchLine + rollbackLine + compactLine + skillsLine + `
+  /model         Choose provider and model` + webSearchLine + rollbackLine + compactLine + skillsLine + `
   /new           Start a new session (also ctrl+n)
   /files         Show @file context help
   /plan          Toggle plan-only mode (also shift+tab)
@@ -2253,7 +2240,7 @@ func (m model) composerTextHeight() int {
 // no popup is active. Used by layout() to shrink the viewport so the total
 // rendered height stays within the terminal.
 func (m model) completionPopupHeight() int {
-	if m.tr.Awaiting || m.sessions.open || m.rollback.open || m.modelPicker.open || m.providerPicker.open || m.webSearchPicker.open {
+	if m.tr.Awaiting || m.sessions.open || m.rollback.open || m.modelPicker.open || m.webSearchPicker.open {
 		return 0
 	}
 	switch {
@@ -3461,7 +3448,7 @@ func (m model) viewContent() string {
 
 	// Completion popups sit just above the composer (filter-as-you-type).
 	composerBlock := m.renderComposer()
-	if !m.tr.Awaiting && !m.sessions.open && !m.rollback.open && !m.modelPicker.open && !m.providerPicker.open && !m.webSearchPicker.open && !m.skillsPicker.open {
+	if !m.tr.Awaiting && !m.sessions.open && !m.rollback.open && !m.modelPicker.open && !m.webSearchPicker.open && !m.skillsPicker.open {
 		switch {
 		case m.slash.active && len(m.slash.matches) > 0:
 			composerBlock = lipgloss.JoinVertical(lipgloss.Left,
@@ -3510,13 +3497,7 @@ func (m model) viewContent() string {
 			lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(lipgloss.Color("#111416"))),
 		))
 	}
-	if m.providerPicker.open {
-		overlay := m.renderProviderPickerOverlay()
-		return m.paintBackground(lipgloss.Place(m.width, m.screenHeight(), lipgloss.Center, lipgloss.Center, overlay,
-			lipgloss.WithWhitespaceChars(" "),
-			lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(lipgloss.Color("#111416"))),
-		))
-	}
+
 	if m.webSearchPicker.open {
 		overlay := m.renderWebSearchPickerOverlay()
 		return m.paintBackground(lipgloss.Place(m.width, m.screenHeight(), lipgloss.Center, lipgloss.Center, overlay,

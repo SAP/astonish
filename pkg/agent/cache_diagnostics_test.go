@@ -138,6 +138,9 @@ func TestDiagnosticLLMIsRequestScopedAndCapturesErrors(t *testing.T) {
 	if first.Error != boom.Error() || first.Status != "failed" {
 		t.Fatalf("error = %q status = %q, want %q failed", first.Error, first.Status, boom)
 	}
+	if first.ResponseCount != 0 || first.TimeToFirstResponse != 0 {
+		t.Fatalf("error-only response counters = %d, %s; want zero", first.ResponseCount, first.TimeToFirstResponse)
+	}
 }
 
 func TestLifecycleDiagnosticRecorderCapturesRedactedFailure(t *testing.T) {

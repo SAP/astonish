@@ -120,14 +120,14 @@ func (t *threeTierMemoryStore) searchAllTiersWith(ctx context.Context, query str
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	var allResults []MemorySearchResult
-	var firstErr error
+	errorsByTier := make([]error, len(tiers))
 
-	for _, tr := range tiers {
+	for tierIndex, tr := range tiers {
 		if tr.store == nil {
 			continue
 		}
 		wg.Add(1)
-		go func(s MemoryStore, weight float64, scope string) {
+		go func(index int, s MemoryStore, weight float64, scope string) {
 			defer wg.Done()
 
 			var results []MemorySearchResult
@@ -148,9 +148,7 @@ func (t *threeTierMemoryStore) searchAllTiersWith(ctx context.Context, query str
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
-				if firstErr == nil {
-					firstErr = err
-				}
+				errorsByTier[index] = err
 				return
 			}
 
@@ -162,13 +160,15 @@ func (t *threeTierMemoryStore) searchAllTiersWith(ctx context.Context, query str
 				}
 			}
 			allResults = append(allResults, results...)
-		}(tr.store, tr.weight, tr.scope)
+		}(tierIndex, tr.store, tr.weight, tr.scope)
 	}
 
 	wg.Wait()
 
-	if firstErr != nil {
-		return nil, firstErr
+	for _, err := range errorsByTier {
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// Deduplicate by snippet (prefer higher score)

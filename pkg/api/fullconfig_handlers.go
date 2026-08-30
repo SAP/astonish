@@ -315,9 +315,11 @@ func GetFullConfigHandler(w http.ResponseWriter, r *http.Request) {
 	cfg := effectiveAppConfig(r)
 
 	store := getAPICredentialStore()
+	chat := cfg.Chat
+	chat.PreProviderRetrievalTimeoutSeconds = int(chat.PreProviderRetrievalTimeout() / time.Second)
 
 	resp := FullConfigResponse{
-		Chat: cfg.Chat,
+		Chat: chat,
 		Sessions: SessionsResponse{
 			Storage: cfg.Sessions.Storage,
 			BaseDir: cfg.Sessions.BaseDir,

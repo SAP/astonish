@@ -183,10 +183,12 @@ func (l *diagnosticLLM) GenerateContent(ctx context.Context, req *model.LLMReque
 		}()
 
 		for response, err := range l.LLM.GenerateContent(ctx, req, stream) {
-			if diagnostic.ResponseCount == 0 {
-				diagnostic.TimeToFirstResponse = time.Since(started)
+			if response != nil {
+				if diagnostic.ResponseCount == 0 {
+					diagnostic.TimeToFirstResponse = time.Since(started)
+				}
+				diagnostic.ResponseCount++
 			}
-			diagnostic.ResponseCount++
 			if response != nil && response.UsageMetadata != nil {
 				diagnostic.Usage.merge(diagnosticUsage(response.UsageMetadata))
 			}

@@ -1607,6 +1607,8 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		}
 		slog.Debug("tool index initialized", "component", "tool-index", "tools_indexed", toolIndex.Count())
 	} else {
+		// Lexical-only catalogs are intentional when semantic retrieval is not
+		// configured. A configured semantic dependency may never degrade here.
 		toolIndex = agent.NewLexicalToolIndex()
 		if err := toolIndex.PrimeTools(ctx, mainThreadTools, sortedCatalogGroups); err != nil {
 			return nil, fmt.Errorf("initialize tool catalog: %w", err)
@@ -1618,20 +1620,21 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 	// Main-thread search is catalog-only on every execution path. Deferred tools
 	// are inspected and invoked through the fixed bridge; search results must
 	// never become provider-visible declarations on a later model round.
-	if toolIndex != nil {
-		searchToolsTool, stErr := tools.NewSearchToolsTool(toolIndex)
-		if stErr == nil {
-			mainThreadTools = append(mainThreadTools, searchToolsTool)
-		} else if cfg.DebugMode {
-			slog.Warn("failed to create search_tools", "error", stErr)
-		}
-		bridgeTools, bridgeErr := agent.NewProgressiveToolBridge(toolIndex)
-		if bridgeErr == nil {
-			mainThreadTools = append(mainThreadTools, bridgeTools...)
-		} else if cfg.DebugMode {
-			slog.Warn("failed to create progressive tool bridge", "error", bridgeErr)
-		}
+	if toolIndex == nil {
+		return nil, fmt.Errorf("initialize fixed tool bridge: tool index is nil")
 	}
+	searchToolsTool, err := tools.NewSearchToolsTool(toolIndex)
+	if err != nil {
+		return nil, fmt.Errorf("create search_tools: %w", err)
+	}
+	bridgeTools, err := agent.NewProgressiveToolBridge(toolIndex)
+	if err != nil {
+		return nil, fmt.Errorf("create progressive tool bridge: %w", err)
+	}
+	if len(bridgeTools) != 2 || bridgeTools[0].Name() != "describe_tools" || bridgeTools[1].Name() != "execute_tool" {
+		return nil, fmt.Errorf("fixed tool bridge declarations are invalid")
+	}
+	mainThreadTools = append(mainThreadTools, searchToolsTool, bridgeTools[0], bridgeTools[1])
 
 	// --- 6. Create ChatAgent ---
 	// The model sees only the fixed progressive bridge. All domain tools,

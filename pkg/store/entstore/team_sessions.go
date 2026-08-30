@@ -24,8 +24,9 @@ import (
 
 // teamSessionStore implements store.SessionStore backed by the team Ent client.
 type teamSessionStore struct {
-	client   *teament.Client
-	redactFn func(string) string
+	client             *teament.Client
+	redactFn           func(string) string
+	cacheDiagnosticsMu sync.Mutex
 }
 
 var _ store.SessionStore = (*teamSessionStore)(nil)
@@ -523,11 +524,20 @@ func (s *teamSessionStore) AppendFleetEvent(ctx context.Context, sessionID strin
 }
 
 func (s *teamSessionStore) AppendCacheDiagnostic(ctx context.Context, sessionID string, diagnostic store.CacheDiagnostic) error {
+	s.cacheDiagnosticsMu.Lock()
+	defer s.cacheDiagnosticsMu.Unlock()
+
 	data, err := json.Marshal(diagnostic)
 	if err != nil {
 		return fmt.Errorf("encode cache diagnostic: %w", err)
 	}
-	create := s.client.CacheDiagnostic.Create().
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return fmt.Errorf("begin cache diagnostic transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	create := tx.CacheDiagnostic.Create().
 		SetSessionID(sessionID).
 		SetInvocationID(diagnostic.InvocationID).
 		SetCall(diagnostic.Call).
@@ -548,7 +558,7 @@ func (s *teamSessionStore) AppendCacheDiagnostic(ctx context.Context, sessionID 
 		return fmt.Errorf("append cache diagnostic: %w", err)
 	}
 
-	excess, err := s.client.CacheDiagnostic.Query().
+	excess, err := tx.CacheDiagnostic.Query().
 		Where(cachediagnostic.SessionIDEQ(sessionID)).
 		Order(cachediagnostic.ByID(sql.OrderDesc())).
 		Offset(store.MaxSessionCacheDiagnostics).
@@ -561,9 +571,12 @@ func (s *teamSessionStore) AppendCacheDiagnostic(ctx context.Context, sessionID 
 		for i, row := range excess {
 			ids[i] = row.ID
 		}
-		if _, err := s.client.CacheDiagnostic.Delete().Where(cachediagnostic.IDIn(ids...)).Exec(ctx); err != nil {
+		if _, err := tx.CacheDiagnostic.Delete().Where(cachediagnostic.IDIn(ids...)).Exec(ctx); err != nil {
 			return fmt.Errorf("trim cache diagnostics: %w", err)
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit cache diagnostic: %w", err)
 	}
 	return nil
 }

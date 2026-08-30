@@ -115,6 +115,7 @@ chat:
   max_tools: 0                 # Max tools exposed to model (0 = all)
   auto_approve: false          # Auto-approve tool executions
   flow_save_dir: ""            # Where distilled flows are saved
+  pre_provider_retrieval_timeout_seconds: 10  # Memory/tool retrieval deadline before provider calls
 
 # Session management
 # Note: In daemon mode, sessions are stored in the database.
@@ -126,10 +127,6 @@ sessions:
     preserve_recent: 4         # Number of recent messages to preserve
   cleanup:
     max_age_days: 5            # Auto-delete sessions older than this
-
-# Chat runtime
-chat:
-  pre_provider_retrieval_timeout_seconds: 10  # Memory/tool retrieval deadline before provider calls
 
 # Semantic memory
 # Note: Memory content (entries, embeddings) is stored in the database.

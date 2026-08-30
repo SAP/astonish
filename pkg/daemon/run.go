@@ -1708,20 +1708,16 @@ func Run(cfg RunConfig) error {
 	api.SetPreWarmContextFunc(buildPreWarmCtx)
 	api.SetLLMPool(llmPool)
 
-	// Complete this channel exactly once after the Studio factory has either
-	// initialized or failed. Optional channel bootstrap waits for it so the two
-	// heavyweight factory calls never contend for process-wide credential, tool,
-	// MCP, and provider initialization during a cold daemon start.
+	// Complete Studio initialization before advertising HTTP readiness. Semantic
+	// retrieval is required when configured, so initialization failures must stop
+	// startup rather than surface later on the first request.
 	studioPreWarmDone := make(chan struct{})
-	go func() {
-		defer close(studioPreWarmDone)
-		warmCtx := buildPreWarmCtx()
-		if err := api.GetChatManager().PreWarm(warmCtx); err != nil {
-			logger.Printf("Studio chat pre-warm failed (will retry on first request): %v", err)
-		} else {
-			logger.Printf("Studio chat agent pre-warmed successfully")
-		}
-	}()
+	warmCtx := buildPreWarmCtx()
+	if err := api.GetChatManager().PreWarm(warmCtx); err != nil {
+		return fmt.Errorf("pre-warm Studio chat agent: %w", err)
+	}
+	logger.Printf("Studio chat agent pre-warmed successfully")
+	close(studioPreWarmDone)
 
 	// Discover tools for config-file (mcp_config.json) MCP servers that are not
 	// yet cached, so they "just work" in a local platform install without a

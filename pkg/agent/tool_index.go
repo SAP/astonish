@@ -827,9 +827,12 @@ func (b *bm25Index) search(query string, topK int) []bm25Result {
 		results = append(results, scored{docID: docID, score: score})
 	}
 
-	// Sort descending by score
+	// Sort descending by score with a stable document-ID tie-breaker.
 	sort.Slice(results, func(i, j int) bool {
-		return results[i].score > results[j].score
+		if results[i].score != results[j].score {
+			return results[i].score > results[j].score
+		}
+		return results[i].docID < results[j].docID
 	})
 
 	if topK > 0 && len(results) > topK {
@@ -1007,7 +1010,13 @@ func (idx *ToolIndex) searchHybrid(ctx context.Context, query string, preparedEm
 		results = append(results, *e)
 	}
 	sort.Slice(results, func(i, j int) bool {
-		return results[i].rrfScore > results[j].rrfScore
+		if results[i].rrfScore != results[j].rrfScore {
+			return results[i].rrfScore > results[j].rrfScore
+		}
+		if results[i].groupName != results[j].groupName {
+			return results[i].groupName < results[j].groupName
+		}
+		return results[i].toolName < results[j].toolName
 	})
 
 	if len(results) > topK {

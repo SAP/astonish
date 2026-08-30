@@ -12,9 +12,9 @@ import (
 	"github.com/gomlx/gomlx/backends"
 	"github.com/gomlx/gomlx/backends/simplego"
 
+	"github.com/SAP/astonish/pkg/config"
 	"github.com/knights-analytics/hugot"
 	"github.com/knights-analytics/hugot/pipelines"
-	"github.com/SAP/astonish/pkg/config"
 )
 
 const (
@@ -30,10 +30,23 @@ const (
 // HugotEmbedder wraps a Hugot FeatureExtractionPipeline to provide
 // in-process, pure-Go sentence embeddings with zero external dependencies.
 type HugotEmbedder struct {
-	session  *hugot.Session
-	pipeline *pipelines.FeatureExtractionPipeline
-	mu       sync.Mutex // serializes embedding calls for safety
+	session   *hugot.Session
+	pipeline  *pipelines.FeatureExtractionPipeline
+	run       func(context.Context, string) ([]float32, error)
+	gate      chan struct{}
+	cacheMu   sync.Mutex
+	cache     map[string][]float32
+	cacheFIFO []string
+	inflight  map[string]*embeddingCall
 }
+
+type embeddingCall struct {
+	done chan struct{}
+	emb  []float32
+	err  error
+}
+
+const embeddingCacheSize = 256
 
 // patchGoMLXBackendForLowCPU works around a deadlock in GoMLX's simplego backend
 // that occurs when runtime.NumCPU() is low (typically 1-2 CPUs in containers).
@@ -118,10 +131,24 @@ func NewHugotEmbedder(modelsDir string, debugMode bool) (*HugotEmbedder, error) 
 		return nil, fmt.Errorf("failed to create embedding pipeline: %w", err)
 	}
 
-	return &HugotEmbedder{
+	h := &HugotEmbedder{
 		session:  session,
 		pipeline: pipeline,
-	}, nil
+		gate:     make(chan struct{}, 1),
+		cache:    make(map[string][]float32),
+		inflight: make(map[string]*embeddingCall),
+	}
+	h.run = func(ctx context.Context, text string) ([]float32, error) {
+		output, err := h.pipeline.RunPipeline(ctx, []string{text})
+		if err != nil {
+			return nil, fmt.Errorf("embedding failed: %w", err)
+		}
+		if output == nil || len(output.Embeddings) == 0 {
+			return nil, fmt.Errorf("embedding returned no results")
+		}
+		return output.Embeddings[0], nil
+	}
+	return h, nil
 }
 
 // embeddingMaxChars is the maximum input text length (in characters) passed to
@@ -139,25 +166,59 @@ const embeddingMaxChars = 1400
 // The returned function signature is: func(ctx, text) ([]float32, error).
 func (h *HugotEmbedder) EmbeddingFunc() EmbeddingFunc {
 	return func(ctx context.Context, text string) ([]float32, error) {
-		h.mu.Lock()
-		defer h.mu.Unlock()
-
-		// Truncate to avoid exceeding the model's max_position_embeddings (512
-		// tokens). Hugot's Go tokenizer (v0.7.0) does not truncate automatically
-		// unlike the Rust tokenizer, causing a panic when token count exceeds 512.
 		if len(text) > embeddingMaxChars {
 			text = text[:embeddingMaxChars]
 		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 
-		output, err := h.pipeline.RunPipeline(ctx, []string{text})
-		if err != nil {
-			return nil, fmt.Errorf("embedding failed: %w", err)
+		h.cacheMu.Lock()
+		if emb, ok := h.cache[text]; ok {
+			h.cacheMu.Unlock()
+			return append([]float32(nil), emb...), nil
 		}
-		if output == nil || len(output.Embeddings) == 0 {
-			return nil, fmt.Errorf("embedding returned no results")
+		if call, ok := h.inflight[text]; ok {
+			h.cacheMu.Unlock()
+			select {
+			case <-call.done:
+				return append([]float32(nil), call.emb...), call.err
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
 		}
-		return output.Embeddings[0], nil
+		call := &embeddingCall{done: make(chan struct{})}
+		h.inflight[text] = call
+		h.cacheMu.Unlock()
+
+		select {
+		case h.gate <- struct{}{}:
+		case <-ctx.Done():
+			h.finishEmbedding(text, call, nil, ctx.Err())
+			return nil, ctx.Err()
+		}
+		emb, err := h.run(ctx, text)
+		<-h.gate
+		h.finishEmbedding(text, call, emb, err)
+		return append([]float32(nil), emb...), err
 	}
+}
+
+func (h *HugotEmbedder) finishEmbedding(text string, call *embeddingCall, emb []float32, err error) {
+	h.cacheMu.Lock()
+	defer h.cacheMu.Unlock()
+	delete(h.inflight, text)
+	call.emb = append([]float32(nil), emb...)
+	call.err = err
+	if err == nil {
+		if len(h.cacheFIFO) == embeddingCacheSize {
+			delete(h.cache, h.cacheFIFO[0])
+			h.cacheFIFO = h.cacheFIFO[1:]
+		}
+		h.cache[text] = append([]float32(nil), emb...)
+		h.cacheFIFO = append(h.cacheFIFO, text)
+	}
+	close(call.done)
 }
 
 // Close destroys the Hugot session and frees resources.

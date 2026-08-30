@@ -5,8 +5,33 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/store"
+	"google.golang.org/adk/tool"
+	"google.golang.org/adk/tool/functiontool"
 )
+
+func TestChatRunnerInjectRequestToolsIsSessionScoped(t *testing.T) {
+	requestTool, err := functiontool.New(functiontool.Config{Name: "tenant_search", Description: "tenant search"}, func(_ tool.Context, _ map[string]any) (map[string]any, error) {
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := newChatRunner("first", "user", false)
+	defer first.cancel()
+	second := newChatRunner("second", "user", false)
+	defer second.cancel()
+
+	first.InjectRequestTools(requestTool)
+	firstTools := agent.PromptOverridesFromContext(first.ctx).AdditionalTools
+	if len(firstTools) != 1 || firstTools[0] != requestTool {
+		t.Fatalf("first runner tools = %#v, want request tool", firstTools)
+	}
+	if overrides := agent.PromptOverridesFromContext(second.ctx); overrides != nil && len(overrides.AdditionalTools) != 0 {
+		t.Fatalf("second runner leaked tools = %#v", overrides.AdditionalTools)
+	}
+}
 
 type chatRunnerDocsStore struct{}
 

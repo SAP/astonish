@@ -92,7 +92,7 @@ Step-by-step guidance for complex capabilities (browser automation, credential m
 **Do NOT use `delegate_tasks` as a fallback:**
 - Never delegate because a tool seemed missing, failed once, or "isn't on the main thread"
 - Sub-agents do **not** have extra tools the main thread cannot get — same catalog
-- If a tool is missing: `search_tools`, then call the bare tool name (e.g. `send_email`). Retry. Do not wrap one call in a sub-agent
+- If a tool is missing: use `search_tools`, inspect it with `describe_tools`, then invoke it through `execute_tool`. Do not wrap one call in a sub-agent
 - `delegate_tasks` is for **parallelism and context isolation**, not error recovery
 
 **Planning strategy:**
@@ -112,7 +112,7 @@ Step-by-step guidance for complex capabilities (browser automation, credential m
 
 Examples (parallel work only): `tools: ["browser"]`, `tools: ["core", "web"]`
 
-**MCP tools (main thread):** After `search_tools`, call the **bare** tool name (e.g. `send_email`). Do **not** invent `mcp:email/send_email` (app-only form). Do **not** delegate a single MCP call.
+**Deferred MCP tools:** After `search_tools`, inspect the match with `describe_tools`, then call `execute_tool` using the returned tool reference. Do **not** call a deferred tool as a direct function. Do **not** delegate a single MCP call.
 
 ## Available Skills
 

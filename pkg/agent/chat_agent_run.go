@@ -2,9 +2,11 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"log/slog"
+	"net"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -21,10 +23,123 @@ import (
 	"google.golang.org/genai"
 )
 
+func preProviderRetrievalError(operation string, timeout time.Duration, err error) error {
+	var netErr net.Error
+	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) {
+		return fmt.Errorf("pre-provider %s timed out after %s: %w", operation, timeout, err)
+	}
+	return fmt.Errorf("pre-provider %s failed: %w", operation, err)
+}
+
+type preProviderRetrievalResult struct {
+	guidance []KnowledgeSearchResult
+	general  []KnowledgeSearchResult
+	tools    []ToolMatch
+}
+
+func (c *ChatAgent) retrievePreProvider(ctx context.Context, lifecycle *lifecycleDiagnosticRecorder, semanticQuery, keywordQuery, toolQuery string) (preProviderRetrievalResult, error) {
+	var result preProviderRetrievalResult
+	workCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type retrievalFailure struct {
+		order     int
+		operation string
+		err       error
+	}
+	failures := make(chan retrievalFailure, 3)
+	var wg sync.WaitGroup
+	run := func(order int, operation, stage string, fn func(context.Context) error) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			finish := lifecycle.begin(stage)
+			err := fn(workCtx)
+			finish(err)
+			if err != nil {
+				failures <- retrievalFailure{order: order, operation: operation, err: err}
+				cancel()
+			}
+		}()
+	}
+	searchTools := func(prepared PreparedKnowledgeRetrieval) {
+		run(2, "tool index search", "tool_retrieval", func(searchCtx context.Context) error {
+			var err error
+			if prepared != nil && toolQuery == prepared.SemanticQuery() {
+				embedding, identity := prepared.Embedding()
+				if c.ToolIndex.CanUsePreparedEmbedding(identity, embedding) {
+					result.tools, err = c.ToolIndex.SearchHybridPrepared(searchCtx, toolQuery, embedding, 8, 0.005)
+					return err
+				}
+			}
+			result.tools, err = c.ToolIndex.SearchHybrid(searchCtx, toolQuery, 8, 0.005)
+			return err
+		})
+	}
+
+	// A different tool query cannot reuse the memory embedding, so start its
+	// single embedding and search while the memory query is being prepared.
+	toolStarted := c.ToolIndex != nil && toolQuery != "" && toolQuery != semanticQuery
+	if toolStarted {
+		searchTools(nil)
+	}
+
+	var prepared PreparedKnowledgeRetrieval
+	if c.KnowledgeRetrieval != nil && semanticQuery != "" {
+		finishEmbedding := lifecycle.begin("memory_embedding")
+		var err error
+		prepared, err = c.KnowledgeRetrieval(workCtx, semanticQuery, keywordQuery)
+		finishEmbedding(err)
+		if err != nil {
+			cancel()
+			wg.Wait()
+			return result, fmt.Errorf("memory embedding: %w", err)
+		}
+	}
+	if prepared != nil {
+		run(0, "guidance search", "guidance_retrieval", func(searchCtx context.Context) error {
+			var err error
+			result.guidance, err = prepared.Search(searchCtx, 3, 0.3, "guidance")
+			return err
+		})
+		run(1, "knowledge search", "general_retrieval", func(searchCtx context.Context) error {
+			var err error
+			result.general, err = prepared.Search(searchCtx, 5, 0.3, "")
+			return err
+		})
+	}
+	if c.ToolIndex != nil && toolQuery != "" && !toolStarted {
+		searchTools(prepared)
+	}
+	wg.Wait()
+	close(failures)
+	var first, firstCause *retrievalFailure
+	for failure := range failures {
+		if first == nil || failure.order < first.order {
+			copy := failure
+			first = &copy
+		}
+		if !errors.Is(failure.err, context.Canceled) && (firstCause == nil || failure.order < firstCause.order) {
+			copy := failure
+			firstCause = &copy
+		}
+	}
+	if firstCause != nil {
+		return result, fmt.Errorf("%s: %w", firstCause.operation, firstCause.err)
+	}
+	if first != nil {
+		return result, fmt.Errorf("%s: %w", first.operation, first.err)
+	}
+	return result, nil
+}
+
 // Run implements the agent.Run interface for ADK.
 // It is called by the ADK runner for each user message.
 func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
+		lifecycle := lifecycleRecorder(ctx, ctx.InvocationID())
+		defer lifecycle.close()
+		finishRequestPreparation := lifecycle.begin("request_session_preparation")
+
 		// Wrap yield to strip chain-of-thought content and redact credentials.
 		// The think-tag filter is stateful (tracks whether we are inside a
 		// <think> block across streaming chunks), so it must be created once
@@ -92,199 +207,126 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			}
 		}
 
-		// --- Phase A: Dynamic Execution ---
-		trace := NewExecutionTrace(userText)
+		cleanUserText := CleanUserText(userText)
+		sessionID := ctx.Session().ID()
+		finishRequestPreparation(nil)
 
-		// Per-turn dynamic content: auto-retrieved knowledge.
-		// Appended to the end of the system prompt via
-		// SystemPromptBuilder.RelevantKnowledge field,
-		// so it carries system-level authority for instruction following.
+		retrievalTimeout := c.preProviderRetrievalTimeout()
+		retrievalCtx, cancelRetrieval := context.WithTimeout(ctx, retrievalTimeout)
+		defer cancelRetrieval()
+
+		// --- Phase A: Dynamic Execution ---
+		trace := NewExecutionTrace(cleanUserText)
+
+		// Per-turn dynamic content is retrieved under one shared deadline.
 		var relevantKnowledge string
 		var knowledgeTrackingQuery string
 		var knowledgeTrackingBM25Query string
-		var knowledgeTrackingResults []KnowledgeSearchResult // for session tracking event
-
-		// Auto-retrieve relevant knowledge from vector store.
-		// Three partitioned searches: guidance (max 3) + general knowledge (max 5).
-		// Flow documents are discovered naturally through the general search.
-		// When a high-confidence flow match is found, it is loaded as an
-		// actionable execution plan rather than passive knowledge.
-		if (c.KnowledgeSearch != nil || c.KnowledgeSearchByCategory != nil) && userText != "" {
-			searchQuery := buildKnowledgeQuery(userText)
-			if len(searchQuery) < 5 {
-				if c.DebugMode {
-					slog.Debug("auto knowledge search skipped: query too short", "component", "chat", "query", searchQuery)
-				}
-			} else {
-				knowledgeTrackingQuery = searchQuery
-				// Build an augmented BM25 query that includes conversational
-				// context from the last model response. This helps follow-up
-				// queries like "show me per VM" find relevant docs by matching
-				// topic keywords (e.g., "proxmox", "server") that the user's
-				// message alone doesn't contain. Vector search stays on the
-				// raw query to avoid semantic dilution.
-				bm25Query := ""
-				if tail := lastModelResponseTail(ctx.Session().Events(), 300); tail != "" {
-					bm25Query = tail + " " + searchQuery
-					knowledgeTrackingBM25Query = bm25Query
-					if c.DebugMode {
-						slog.Debug("augmented BM25 query with conversation context",
-							"component", "chat",
-							"bm25_query_len", len(bm25Query))
-					}
-				}
-
-				var allResults []KnowledgeSearchResult
-
-				// Partition 1: Guidance docs (how-to instructions for capabilities)
-				if c.KnowledgeSearchByCategory != nil {
-					guidanceResults, err := c.KnowledgeSearchByCategory(ctx, searchQuery, bm25Query, 3, 0.3, "guidance")
-					if err != nil {
-						if c.DebugMode {
-							slog.Debug("guidance search failed", "component", "chat", "error", err)
-						}
-					} else {
-						allResults = append(allResults, guidanceResults...)
-					}
-				}
-
-				// Partition 2: Everything else (memory, skills, flows, knowledge)
-				if c.KnowledgeSearch != nil {
-					knowledgeResults, err := c.KnowledgeSearch(ctx, searchQuery, bm25Query, 5, 0.3)
-					if err != nil {
-						if c.DebugMode {
-							slog.Debug("knowledge search failed", "component", "chat", "error", err)
-						}
-					} else {
-						allResults = append(allResults, knowledgeResults...)
-					}
-				}
-
-				// Deduplicate
-				allResults = deduplicateSearchResults(allResults)
-
-				// Format remaining results as knowledge text
-				if len(allResults) > 0 {
-					knowledgeTrackingResults = allResults
-					var kb strings.Builder
-					for _, r := range allResults {
-						kb.WriteString(fmt.Sprintf("**%s** (relevance: %.0f%%)\n", r.Path, r.Score*100))
-						kb.WriteString(r.Snippet)
-						kb.WriteString("\n\n")
-					}
-					relevantKnowledge = EscapeCurlyPlaceholders(kb.String())
-					if c.DebugMode {
-						slog.Debug("auto knowledge search results injected", "component", "chat", "results", len(allResults), "query", truncateQuery(searchQuery, 60))
-					}
-				} else if c.DebugMode {
-					slog.Debug("auto knowledge search: no results", "component", "chat", "query", truncateQuery(searchQuery, 60))
-				}
-			}
-		} else if c.KnowledgeSearch == nil && c.KnowledgeSearchByCategory == nil && c.DebugMode {
-			slog.Debug("auto knowledge search disabled: no search functions wired", "component", "chat")
-		}
-
-		// Persist a tracking event recording what knowledge was injected.
-		// Content is nil so ADK's ContentsRequestProcessor skips it (never
-		// sent to the LLM) and eventsToMessages() skips it (never shown in UI).
-		// The event is still written to the session .jsonl file for diagnostics.
-		yieldKnowledgeTrackingEvent(yield, knowledgeTrackingQuery, knowledgeTrackingBM25Query, relevantKnowledge, "", knowledgeTrackingResults)
-
-		// Auto-retrieve relevant tools from the tool index.
-		// Matches drive two things: (1) prompt text listing relevant tools,
-		// (2) dynamic injection of concrete tool instances into the LLM request
-		// via DynamicToolInjectionCallback so the LLM can call them directly.
+		var knowledgeTrackingResults []KnowledgeSearchResult
 		var relevantTools string
 		var toolMatches []ToolMatch
-		var toolSearchQuery string
-		if c.ToolIndex != nil && userText != "" {
-			toolSearchQuery = buildKnowledgeQuery(userText)
-			// For short messages ("looks good", "use it", "yes"), the user text
-			// alone lacks topical signal for tool discovery. Augment the query
-			// with the tail of the last LLM response, which typically contains
-			// the question or action prompt that gives us context.
-			if len(toolSearchQuery) < shortQueryThreshold {
-				if tail := lastModelResponseTail(ctx.Session().Events(), 200); tail != "" {
-					toolSearchQuery = tail + " " + toolSearchQuery
-					if c.DebugMode {
-						slog.Debug("short message — augmented tool search query with LLM context", "component", "chat")
-					}
-				}
-			}
-			if len(toolSearchQuery) >= 5 {
-				matches, err := c.ToolIndex.SearchHybrid(context.Background(), toolSearchQuery, 8, 0.005)
-				if err != nil {
-					if c.DebugMode {
-						slog.Debug("tool index search failed", "component", "chat", "error", err)
-					}
-				} else {
-					// Filter out MCP tools the user's team doesn't have access to
-					matches = FilterAccessibleToolMatches(ctx, matches)
-					toolMatches = matches
-				}
-			}
-			// When the user names an MCP server (e.g. "use the mcp server email"),
-			// force-inject that group's tools even if hybrid search scored poorly.
-			// Prefer request-scoped MCP groups (this team's catalog), then index.
-			// This keeps single MCP actions on the main thread instead of
-			// falling through to delegate_tasks.
-			if mcpHits := MatchRequestMCPGroupsFromQuery(ctx, userText); len(mcpHits) > 0 {
-				mcpHits = FilterAccessibleToolMatches(ctx, mcpHits)
-				toolMatches = MergeToolMatches(toolMatches, mcpHits)
-			}
-			if mcpHits := MatchMCPGroupsFromQuery(c.ToolIndex, userText); len(mcpHits) > 0 {
-				mcpHits = FilterAccessibleToolMatches(ctx, mcpHits)
-				toolMatches = MergeToolMatches(toolMatches, mcpHits)
-			}
-			if len(toolMatches) > 0 {
-				relevantTools = FormatToolMatchesForPrompt(toolMatches)
-				if c.DebugMode {
-					slog.Debug("tool index search results", "component", "chat", "matches", len(toolMatches), "query", truncateQuery(toolSearchQuery, 60))
-				}
+
+		searchQuery := buildKnowledgeQuery(cleanUserText)
+		bm25Query := ""
+		toolSearchQuery := searchQuery
+		if len(searchQuery) >= 5 {
+			knowledgeTrackingQuery = searchQuery
+			if tail := lastModelResponseTail(ctx.Session().Events(), 300); tail != "" {
+				bm25Query = tail + " " + searchQuery
+				knowledgeTrackingBM25Query = bm25Query
 			}
 		}
-		yieldToolTrackingEvent(yield, toolSearchQuery, relevantTools, toolMatches)
+		if len(toolSearchQuery) < shortQueryThreshold {
+			if tail := lastModelResponseTail(ctx.Session().Events(), 200); tail != "" {
+				toolSearchQuery = tail + " " + toolSearchQuery
+			}
+		}
+		if len(searchQuery) < 5 {
+			searchQuery = ""
+		}
+		if len(toolSearchQuery) < 5 {
+			toolSearchQuery = ""
+		}
 
-		// Store per-turn tool matches for the DynamicToolInjectionCallback
-		// and reset any search_tools discoveries from the previous turn.
-		c.dynamicToolMatches = toolMatches
-		c.searchToolsMu.Lock()
-		c.searchToolsResults = nil
-		c.searchToolsMu.Unlock()
-
-		// Clone the SystemPromptBuilder for this request to avoid races with
-		// concurrent callers (scheduler jobs, channel messages, Studio chat).
-		// Per-turn dynamic fields are set on the clone, which is then discarded.
-		promptBuilder := c.SystemPrompt.Clone()
-		if promptBuilder == nil {
-			yield(nil, fmt.Errorf("SystemPrompt builder is nil"))
+		retrieved, err := c.retrievePreProvider(retrievalCtx, lifecycle, searchQuery, bm25Query, toolSearchQuery)
+		if err != nil {
+			operation := "retrieval"
+			cause := err
+			if prefix, rest, ok := strings.Cut(err.Error(), ": "); ok {
+				operation = prefix
+				cause = errors.Unwrap(err)
+				if cause == nil {
+					cause = errors.New(rest)
+				}
+			}
+			yield(nil, preProviderRetrievalError(operation, retrievalTimeout, cause))
 			return
 		}
 
-		// Apply per-turn overrides injected by callers via context
+		allResults := append(append([]KnowledgeSearchResult(nil), retrieved.guidance...), retrieved.general...)
+		allResults = deduplicateSearchResults(allResults)
+		knowledgeTrackingResults = allResults
+		if len(allResults) > 0 {
+			var kb strings.Builder
+			for _, result := range allResults {
+				kb.WriteString(fmt.Sprintf("**%s** (relevance: %.0f%%)\n", result.Path, result.Score*100))
+				kb.WriteString(result.Snippet)
+				kb.WriteString("\n\n")
+			}
+			relevantKnowledge = EscapeCurlyPlaceholders(kb.String())
+		}
+		yieldKnowledgeTrackingEvent(yield, knowledgeTrackingQuery, knowledgeTrackingBM25Query, relevantKnowledge, "", knowledgeTrackingResults)
+
+		toolMatches = FilterAccessibleToolMatches(ctx, retrieved.tools)
+		if c.ToolIndex != nil && cleanUserText != "" {
+			if mcpHits := MatchRequestMCPGroupsFromQuery(ctx, cleanUserText); len(mcpHits) > 0 {
+				toolMatches = MergeToolMatches(toolMatches, FilterAccessibleToolMatches(ctx, mcpHits))
+			}
+			if mcpHits := MatchMCPGroupsFromQuery(c.ToolIndex, cleanUserText); len(mcpHits) > 0 {
+				toolMatches = MergeToolMatches(toolMatches, FilterAccessibleToolMatches(ctx, mcpHits))
+			}
+		}
+		if len(toolMatches) > 0 {
+			relevantTools = FormatToolMatchesForPrompt(toolMatches)
+		}
+		yieldToolTrackingEvent(yield, toolSearchQuery, relevantTools, toolMatches)
+
+		// Build per-turn context separately from the session-stable system prompt.
+		finishPromptPersistence := lifecycle.begin("prompt_context_persistence")
+		promptBuilder := c.SystemPrompt.Clone()
+		if promptBuilder == nil {
+			err := fmt.Errorf("SystemPrompt builder is nil")
+			finishPromptPersistence(err)
+			yield(nil, err)
+			return
+		}
+
+		// Read per-turn overrides injected by callers via context.
 		planMode := false
 		graphPlan := false
 		askMode := false
 		approvedPlanExecution := false
 		approvedPlanExecutionExplicit := false
-		if po := PromptOverridesFromContext(ctx); po != nil {
+		promptOverrides := PromptOverridesFromContext(ctx)
+		turnOverrides := &PromptOverrides{
+			ChannelHints:   promptBuilder.ChannelHints,
+			SchedulerHints: promptBuilder.SchedulerHints,
+			SessionContext: promptBuilder.SessionContext,
+			SkillIndex:     promptBuilder.SkillIndex,
+		}
+		promptBuilder.ChannelHints = ""
+		promptBuilder.SchedulerHints = ""
+		promptBuilder.SessionContext = ""
+		promptBuilder.SkillIndex = ""
+		promptBuilder.RelevantKnowledge = ""
+		promptBuilder.RelevantTools = ""
+		if po := promptOverrides; po != nil {
+			*turnOverrides = *po
 			planMode = po.PlanMode
 			graphPlan = po.GraphPlanMode
 			askMode = po.AskMode
 			approvedPlanExecution = po.ApprovedPlanExecution
 			approvedPlanExecutionExplicit = po.ApprovedPlanExecutionExplicit
-			if po.ChannelHints != "" {
-				promptBuilder.ChannelHints = po.ChannelHints
-			}
-			if po.SchedulerHints != "" {
-				promptBuilder.SchedulerHints = po.SchedulerHints
-			}
-			if po.SessionContext != "" {
-				promptBuilder.SessionContext = po.SessionContext
-			}
-			if po.SkillIndex != "" {
-				promptBuilder.SkillIndex = po.SkillIndex
-			}
 			// Platform/team web tools: always take the per-request values when set
 			// so every user sees the platform-selected search tool, not whatever
 			// was baked into the singleton agent at first init/pre-warm.
@@ -315,12 +357,6 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			promptBuilder.Tools = filtered
 		}
 
-		// Set per-turn dynamic fields on the cloned builder, then build.
-		// These are appended at the end of the system prompt so the static prefix
-		// remains cacheable by providers.
-		promptBuilder.RelevantKnowledge = relevantKnowledge
-		promptBuilder.RelevantTools = relevantTools
-
 		// Per-turn MCP access filter: in platform mode, only show MCP groups
 		// the current user's team/org has access to in the delegation catalog.
 		mcpStores := store.MCPServerStoresFromContext(ctx)
@@ -332,10 +368,22 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			promptBuilder.MCPAccessFilter = nil // personal mode — no filtering
 		}
 
-		instruction := promptBuilder.Build()
+		instruction, promptStateEvent := stableSystemPrompt(ctx.Session().State(), promptBuilder.Build)
+		if promptStateEvent != nil && !yield(promptStateEvent, nil) {
+			finishPromptPersistence(context.Canceled)
+			return
+		}
+
+		// Persist model-facing context so replay reconstructs identical bytes.
+		if turnContext := buildTurnContextContent(turnOverrides, relevantTools, relevantKnowledge); turnContext != nil {
+			if !yield(newTurnContextEvent(turnContext), nil) {
+				finishPromptPersistence(context.Canceled)
+				return
+			}
+		}
+		finishPromptPersistence(nil)
 
 		// Capture session identity for use in AfterToolCallback closure.
-		sessionID := ctx.Session().ID()
 		sessionAppName := ctx.Session().AppName()
 		sessionUserID := ctx.Session().UserID()
 
@@ -347,6 +395,7 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 
 		// Create the AfterToolCallback for trace recording
 		afterToolCallback := func(ctx tool.Context, t tool.Tool, input, output map[string]any, err error) (map[string]any, error) {
+			t, input = c.effectiveToolCall(ctx, t, input)
 			// Restore credential + pending-secret placeholders for this
 			// specific tool call, ensuring the session event retains
 			// {{CREDENTIAL:...}} / <<<SECRET_N>>> tokens instead of real values.
@@ -487,6 +536,7 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		{
 			agentResolver := c.CredentialStore // may be nil if file-based store failed
 			beforeToolCallbacks = append(beforeToolCallbacks, func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+				t, args = c.effectiveToolCall(ctx, t, args)
 				// In platform mode, prefer the tenant-scoped PG credential store
 				// injected into the context by chat_handlers.go. Fall back to the
 				// agent-level file-based store for personal mode.
@@ -546,6 +596,7 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		if c.PendingSecrets != nil {
 			vault := c.PendingSecrets
 			beforeToolCallbacks = append(beforeToolCallbacks, func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+				_, args = c.effectiveToolCall(ctx, t, args)
 				secRestore := vault.SubstituteAndRestore(args)
 				callID := ctx.FunctionCallID()
 				if prev, loaded := restoreFuncs.Load(callID); loaded {
@@ -558,9 +609,23 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			})
 		}
 
+		// Runtime authorization remains authoritative even when cache-stable
+		// sessions retain a declaration that was disabled after session start.
+		beforeToolCallbacks = append(beforeToolCallbacks, func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+			t, _ = c.effectiveToolCall(ctx, t, args)
+			if isToolDisabled(ctx, t.Name()) {
+				return map[string]any{
+					"status": "blocked_disabled_tool",
+					"error":  fmt.Sprintf("tool %q is disabled", t.Name()),
+				}, nil
+			}
+			return nil, nil
+		})
+
 		// Hard-block validate_drill / save_drill / blueprint_to_tutorial_drill for
 		// mode:tutorial until the creator Approves a present_tutorial_blueprint card.
 		beforeToolCallbacks = append(beforeToolCallbacks, func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+			t, args = c.effectiveToolCall(ctx, t, args)
 			blocked, result := CheckTutorialDrillToolGate(
 				t.Name(), args, c.HasTutorialBlueprintApproved(sessionID),
 			)
@@ -580,6 +645,7 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		// the phased gate below replaces the plan-mode gate.
 		if planMode && !graphPlan {
 			beforeToolCallbacks = append(beforeToolCallbacks, func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+				t, _ = c.effectiveToolCall(ctx, t, args)
 				name := t.Name()
 				if name == "delegate_tasks" || !IsToolSafe(name) {
 					return map[string]any{
@@ -601,7 +667,8 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		// This is a NO-CHANGES mode in every phase.
 		if graphPlan {
 			gpState := c.GetOrCreateGraphPlanState(sessionID)
-			beforeToolCallbacks = append(beforeToolCallbacks, func(_ tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+			beforeToolCallbacks = append(beforeToolCallbacks, func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+				t, _ = c.effectiveToolCall(ctx, t, args)
 				name := t.Name()
 				// Transition tools + progress updates are always allowed.
 				// announce_plan is phase-gated (PLAN phase only).
@@ -625,7 +692,8 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		// produce plans or bypass the gate via sub-agents). This is a pure
 		// research/Q&A mode — no changes, no plans, no execution.
 		if askMode && !planMode && !graphPlan {
-			beforeToolCallbacks = append(beforeToolCallbacks, func(_ tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+			beforeToolCallbacks = append(beforeToolCallbacks, func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+				t, _ = c.effectiveToolCall(ctx, t, args)
 				name := t.Name()
 				if name == "delegate_tasks" || name == "announce_plan" || !IsToolSafe(name) {
 					return map[string]any{
@@ -640,7 +708,8 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		// announce_plan exists only in Plan / Graph-Optimized Plan mode.
 		// Hide it from the model in Normal/Ask and refuse it if it is still called.
 		if !planMode && !graphPlan {
-			beforeToolCallbacks = append(beforeToolCallbacks, func(_ tool.Context, t tool.Tool, _ map[string]any) (map[string]any, error) {
+			beforeToolCallbacks = append(beforeToolCallbacks, func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+				t, _ = c.effectiveToolCall(ctx, t, args)
 				if t.Name() == "announce_plan" {
 					return map[string]any{
 						"status": "blocked_announce_plan_not_in_plan_mode",
@@ -657,7 +726,8 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		if approvedPlanExecution {
 			var executionResearchMu sync.Mutex
 			executionResearch := map[string]int{}
-			beforeToolCallbacks = append(beforeToolCallbacks, func(_ tool.Context, t tool.Tool, _ map[string]any) (map[string]any, error) {
+			beforeToolCallbacks = append(beforeToolCallbacks, func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+				t, _ = c.effectiveToolCall(ctx, t, args)
 				name := t.Name()
 				if approvedPlanExecutionToolBlocked(name) {
 					return map[string]any{
@@ -751,7 +821,8 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			// Folder-access gate (checked first: an out-of-scope path is a
 			// stronger constraint than tool category). Active in both Normal
 			// and Ask mode — read-only tools can still target sensitive paths.
-			beforeToolCallbacks = append(beforeToolCallbacks, func(_ tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+			beforeToolCallbacks = append(beforeToolCallbacks, func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+				t, args = c.effectiveToolCall(ctx, t, args)
 				if authPolicy.Pending() != nil {
 					return map[string]any{
 						"status": "pending_authorization",
@@ -776,7 +847,8 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			// Skipped in Ask mode: non-safe tools are already refused by the
 			// ask-mode hard gate above, making this prompt redundant.
 			if !askMode {
-				beforeToolCallbacks = append(beforeToolCallbacks, func(_ tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+				beforeToolCallbacks = append(beforeToolCallbacks, func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+					t, args = c.effectiveToolCall(ctx, t, args)
 					name := t.Name()
 					if !RequiresToolAuthorization(name, false) {
 						return nil, nil
@@ -805,6 +877,7 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		// (task_start / task_complete) via name-based matching in the
 		// SubTaskProgress handler — NOT by positional advancement here.
 		beforeToolCallbacks = append(beforeToolCallbacks, func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+			t, _ = c.effectiveToolCall(ctx, t, args)
 			c.activePlanMu.Lock()
 			plan := c.activePlan
 			c.activePlanMu.Unlock()
@@ -830,43 +903,17 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		// Build BeforeModelCallbacks
 		var beforeModelCallbacks []llmagent.BeforeModelCallback
 
-		// Truncate oversized tool responses before they reach the model
+		// Truncate oversized tool responses before they reach the model.
 		beforeModelCallbacks = append(beforeModelCallbacks, TruncateToolResponsesCallback())
 
-		// Per-team tool restrictions: remove disabled tools from the LLM request.
-		// This ensures the LLM cannot see or call tools the team admin has disabled.
-		if disabledTools := store.DisabledToolsFromContext(ctx); len(disabledTools) > 0 {
-			disabledSet := make(map[string]bool, len(disabledTools))
-			for _, name := range disabledTools {
-				disabledSet[name] = true
-			}
-			beforeModelCallbacks = append(beforeModelCallbacks, func(_ agent.CallbackContext, req *model.LLMRequest) (*model.LLMResponse, error) {
-				for name := range disabledSet {
-					delete(req.Tools, name)
-				}
-				return nil, nil
-			})
-		}
-
-		// Dynamically inject relevant tools into each LLM request.
-		// Fires on every LLM API call (including after tool results), adding
-		// tools from hybrid search matches and search_tools discoveries.
-		beforeModelCallbacks = append(beforeModelCallbacks, c.DynamicToolInjectionCallback())
-
-		// announce_plan is Plan-mode only. Strip it after dynamic injection so
-		// the model cannot see or call it in Normal/Ask, even if search_tools
-		// rediscovers it.
-		if !planMode && !graphPlan {
-			beforeModelCallbacks = append(beforeModelCallbacks, func(_ agent.CallbackContext, req *model.LLMRequest) (*model.LLMResponse, error) {
-				if req != nil {
-					delete(req.Tools, "announce_plan")
-				}
-				return nil, nil
-			})
-		}
-
 		if c.Compactor != nil {
-			beforeModelCallbacks = append(beforeModelCallbacks, c.Compactor.BeforeModelCallback())
+			compact := c.Compactor.BeforeModelCallback()
+			beforeModelCallbacks = append(beforeModelCallbacks, func(callbackCtx agent.CallbackContext, req *model.LLMRequest) (*model.LLMResponse, error) {
+				finishCompaction := lifecycle.begin("compaction")
+				response, err := compact(callbackCtx, req)
+				finishCompaction(err)
+				return response, err
+			})
 		}
 
 		// Resolve LLM: prefer per-request override from context (set by channel
@@ -879,6 +926,13 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		} else {
 			slog.Debug("[agent] Using context-injected LLM override")
 		}
+		diagnosticsHook := cacheDiagnosticsHookFromContext(ctx)
+		if diagnosticsHook == nil && store.DebugEnabledFromContext(ctx) && lifecycle != nil {
+			diagnosticsHook = func(diagnostic CacheDiagnostic) {
+				lifecycle.enqueue(cacheDiagnosticForStore(diagnostic))
+			}
+		}
+		effectiveLLM = newDiagnosticLLM(effectiveLLM, diagnosticsHook, ctx.InvocationID(), credentials.RedactorFromContext(ctx))
 
 		// Create llmagent with static tools.
 		// Use InstructionProvider (not Instruction) so ADK does NOT run
@@ -888,35 +942,31 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		// keys and fail with "state key does not exist".
 		// Same pattern as node_llm.go for flow agents.
 		instr := instruction
+		mainThreadTools := append([]tool.Tool(nil), c.Tools...)
 		llmAgent, err := llmagent.New(llmagent.Config{
 			Name:  "chat",
 			Model: effectiveLLM,
 			InstructionProvider: func(_ agent.ReadonlyContext) (string, error) {
 				return instr, nil
 			},
-			Tools:                c.Tools,
+			Tools:                mainThreadTools,
 			Toolsets:             c.Toolsets,
 			BeforeToolCallbacks:  beforeToolCallbacks,
 			BeforeModelCallbacks: beforeModelCallbacks,
 			AfterToolCallbacks: []llmagent.AfterToolCallback{
 				afterToolCallback,
 			},
-			// Auto-inject ToolIndex-known tools that the LLM called before they
-			// were loaded this turn (ADK 1.5 surfaces these as FunctionResponse
-			// errors; the next LLM round gets the tool via dynamic injection).
-			OnToolErrorCallbacks: []llmagent.OnToolErrorCallback{
-				c.AutoInjectMissingToolCallback(),
-			},
 		})
 		if err != nil {
-			yield(nil, fmt.Errorf("failed to create chat llmagent: %w", err))
+			err = fmt.Errorf("failed to create chat llmagent: %w", err)
+			finishProviderDispatch := lifecycle.begin("provider_dispatch")
+			finishProviderDispatch(err)
+			yield(nil, err)
 			return
 		}
 
 		// Run the llmagent with retry for transient errors (429, 502, 503, etc.)
-		// Also handles legacy unknown-tool hard aborts (pre-ADK-1.5). Under ADK 1.5,
-		// missing tools are FunctionResponses handled by OnToolErrorCallbacks
-		// (AutoInjectMissingToolCallback); this branch is a safety net only.
+		// Also handles legacy unknown-tool hard aborts for transcript compatibility.
 		const maxRetries = 3
 		const maxUnknownToolRetries = 2 // separate cap for tool name hallucinations
 		lastToolCallSeen := false

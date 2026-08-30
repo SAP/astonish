@@ -24,6 +24,12 @@ Each provider/model combination has a known context window size. The system trac
 
 Context window sizes are maintained in a registry within each provider adapter.
 
+### Why Canonical Tool Serialization
+
+Provider adapters canonicalize tool schemas before constructing outbound requests. Function declarations are globally sorted by name independent of their original grouping; JSON object keys and safe set-like arrays (`required`, `enum`, and union `type`) are normalized recursively; empty object schemas use one representation; and allowed function names are sorted. Semantically ordered arrays remain in source order. Canonicalization failures stop request construction rather than silently sending unstable data.
+
+OpenAI-compatible responses map `prompt_tokens_details.cached_tokens` to ADK's cached-content token count when the server reports it. Cache fingerprints log only truncated SHA-256 hashes and counts, never prompt contents or credentials.
+
 ### Why Connection Pooling
 
 HTTP connection pooling (`httpool`) is used to reuse TCP connections across LLM API calls. This reduces latency for sequential calls (common in tool-heavy turns) by avoiding TCP handshake and TLS negotiation overhead.

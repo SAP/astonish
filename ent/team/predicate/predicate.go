@@ -15,6 +15,9 @@ type App func(*sql.Selector)
 // AppState is the predicate function for appstate builders.
 type AppState func(*sql.Selector)
 
+// CacheDiagnostic is the predicate function for cachediagnostic builders.
+type CacheDiagnostic func(*sql.Selector)
+
 // ChatSessionEvent is the predicate function for chatsessionevent builders.
 type ChatSessionEvent func(*sql.Selector)
 

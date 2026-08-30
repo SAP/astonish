@@ -14,6 +14,8 @@ import (
 // Format: "[2026-03-20 14:30:05 UTC]\n"
 var userTimestampRe = regexp.MustCompile(`^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \w+\]\n`)
 
+var turnContextTextRe = regexp.MustCompile(`(?s)^\[Astonish Per-Turn Context — not user-authored\]\n\n.*$`)
+
 // Attachment represents a file attachment to include in a user message.
 type Attachment struct {
 	Filename string // Original filename
@@ -95,4 +97,14 @@ func attachmentCaption(attachments []Attachment) string {
 // (state storage, approval checks) rather than passing it to the LLM.
 func StripTimestamp(text string) string {
 	return userTimestampRe.ReplaceAllString(text, "")
+}
+
+// CleanUserText removes Astonish-owned model context from text consumers that
+// need the user's authored words, such as memory queries and transcript views.
+func CleanUserText(text string) string {
+	text = StripTimestamp(text)
+	if turnContextTextRe.MatchString(text) {
+		return ""
+	}
+	return text
 }

@@ -33,6 +33,18 @@ func (f AppStateFunc) Mutate(ctx context.Context, m personal.Mutation) (personal
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *personal.AppStateMutation", m)
 }
 
+// The CacheDiagnosticFunc type is an adapter to allow the use of ordinary
+// function as CacheDiagnostic mutator.
+type CacheDiagnosticFunc func(context.Context, *personal.CacheDiagnosticMutation) (personal.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f CacheDiagnosticFunc) Mutate(ctx context.Context, m personal.Mutation) (personal.Value, error) {
+	if mv, ok := m.(*personal.CacheDiagnosticMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *personal.CacheDiagnosticMutation", m)
+}
+
 // The CredentialFunc type is an adapter to allow the use of ordinary
 // function as Credential mutator.
 type CredentialFunc func(context.Context, *personal.CredentialMutation) (personal.Value, error)

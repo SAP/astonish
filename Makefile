@@ -833,20 +833,12 @@ push-sandbox-openshell-dev-fast: ensure-builder build-linux
 push-all-dev-fast: push-dev-fast push-sandbox-base-dev-fast push-incus-dev-fast push-sandbox-openshell-dev-fast
 	@echo "All dev images pushed ($(DEV_ARCH) only)!"
 
-# Incrementally regenerate Ent client code for stale scopes.
+# Regenerate Ent client code for all scopes. Timestamp checks cannot detect
+# deleted schema files or generated output restored with newer timestamps.
 ent-generate:
-	@for scope in platform org team personal; do \
-		sentinel="ent/$$scope/client.go"; \
-		stale=0; \
-		if [ ! -f "$$sentinel" ]; then stale=1; else \
-			for input in ent/$$scope/schema/*.go ent/$$scope/generate.go; do \
-				if [ "$$input" -nt "$$sentinel" ]; then stale=1; break; fi; \
-			done; \
-		fi; \
-		if [ "$$stale" -eq 1 ]; then \
-			echo "Generating Ent client for $$scope..."; \
-			(cd ent/$$scope && go run generate.go); \
-		else \
-			echo "Ent client for $$scope is up to date."; \
-		fi; \
-	done
+	@echo "Generating Ent clients..."
+	@cd ent/platform && go run generate.go
+	@cd ent/org && go run generate.go
+	@cd ent/team && go run generate.go
+	@cd ent/personal && go run generate.go
+	@echo "Done."

@@ -15,6 +15,7 @@ import (
 
 	"github.com/SAP/astonish/pkg/agent"
 	"google.golang.org/adk/tool"
+	"google.golang.org/genai"
 )
 
 func TestFileTree(t *testing.T) {
@@ -1311,7 +1312,7 @@ func testToolIndex(t *testing.T) *agent.ToolIndex {
 
 func TestSearchTools_EmptyQuery(t *testing.T) {
 	idx := testToolIndex(t)
-	fn := SearchTools(idx, nil)
+	fn := SearchTools(idx)
 
 	_, err := fn(nil, SearchToolsArgs{Query: ""})
 	if err == nil {
@@ -1321,7 +1322,7 @@ func TestSearchTools_EmptyQuery(t *testing.T) {
 
 func TestSearchTools_ReturnsResults(t *testing.T) {
 	idx := testToolIndex(t)
-	fn := SearchTools(idx, nil)
+	fn := SearchTools(idx)
 
 	result, err := fn(nil, SearchToolsArgs{Query: "screenshot browser page", MaxResults: 5})
 	if err != nil {
@@ -1350,7 +1351,7 @@ func TestSearchTools_ReturnsResults(t *testing.T) {
 
 func TestSearchTools_AccessField(t *testing.T) {
 	idx := testToolIndex(t)
-	fn := SearchTools(idx, nil)
+	fn := SearchTools(idx)
 
 	result, err := fn(nil, SearchToolsArgs{Query: "file read write", MaxResults: 10})
 	if err != nil {
@@ -1380,7 +1381,7 @@ func TestSearchTools_NoResults(t *testing.T) {
 		t.Fatalf("NewToolIndex: %v", err)
 	}
 
-	fn := SearchTools(idx, nil)
+	fn := SearchTools(idx)
 	result, err := fn(nil, SearchToolsArgs{Query: "anything"})
 	if err != nil {
 		t.Fatalf("SearchTools: %v", err)
@@ -1395,18 +1396,29 @@ func TestSearchTools_NoResults(t *testing.T) {
 
 func TestNewSearchToolsTool(t *testing.T) {
 	idx := testToolIndex(t)
-	st, err := NewSearchToolsTool(idx, nil)
+	st, err := NewSearchToolsTool(idx)
 	if err != nil {
 		t.Fatalf("NewSearchToolsTool: %v", err)
 	}
 	if st.Name() != "search_tools" {
 		t.Errorf("expected name 'search_tools', got %q", st.Name())
 	}
+	declared, ok := st.(interface {
+		Declaration() *genai.FunctionDeclaration
+	})
+	if !ok {
+		t.Fatal("search_tools does not expose a declaration")
+	}
+	description := declared.Declaration().Description
+	if !strings.Contains(description, "does not add model-visible tools") ||
+		!strings.Contains(description, "execute_tool") {
+		t.Fatalf("search_tools description permits dynamic injection: %q", description)
+	}
 }
 
 func TestSearchTools_ListAll(t *testing.T) {
 	idx := testToolIndex(t)
-	fn := SearchTools(idx, nil)
+	fn := SearchTools(idx)
 
 	result, err := fn(nil, SearchToolsArgs{Query: "*"})
 	if err != nil {
@@ -1429,20 +1441,26 @@ func TestSearchTools_ListAll(t *testing.T) {
 		}
 	}
 
-	// Verify access instructions are correct
+	// Main tools remain direct; every catalog-only tool must use the fixed bridge.
 	for _, m := range result.Matches {
-		if m.IsMainTool && !strings.Contains(m.Access, "always available (main thread tool)") {
-			t.Errorf("main tool %s should have always available access, got: %s", m.ToolName, m.Access)
+		if m.IsMainTool {
+			if !strings.Contains(m.Access, "always available (main thread tool)") {
+				t.Errorf("main tool %s should have always available access, got: %s", m.ToolName, m.Access)
+			}
+			continue
 		}
-		if !m.IsMainTool && m.Access == "always available (main thread tool)" {
-			t.Errorf("injected tool %s should not have always available access", m.ToolName)
+		if !strings.Contains(m.Access, "describe_tools") || !strings.Contains(m.Access, "execute_tool") {
+			t.Errorf("deferred tool %s must use the fixed bridge, got: %s", m.ToolName, m.Access)
+		}
+		if strings.Contains(m.Access, "call directly") {
+			t.Errorf("deferred tool %s must not be advertised as direct, got: %s", m.ToolName, m.Access)
 		}
 	}
 }
 
 func TestSearchTools_ListAllVariants(t *testing.T) {
 	idx := testToolIndex(t)
-	fn := SearchTools(idx, nil)
+	fn := SearchTools(idx)
 
 	queries := []string{"*", "list all", "list all tools", "all", "all tools"}
 	for _, q := range queries {

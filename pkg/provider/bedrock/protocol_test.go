@@ -2,12 +2,123 @@ package bedrock
 
 import (
 	"encoding/json"
+	"math/rand"
 	"strings"
 	"testing"
 
 	"google.golang.org/adk/model"
 	"google.golang.org/genai"
 )
+
+func TestConvertRequestToolSerializationIsCanonical(t *testing.T) {
+	rng := rand.New(rand.NewSource(42))
+	names := []string{"charlie", "alpha", "bravo"}
+	var want []byte
+	for iteration := 0; iteration < 50; iteration++ {
+		var tools []*genai.Tool
+		for _, index := range rng.Perm(len(names)) {
+			properties := make(map[string]any)
+			keys := []string{"zeta", "alpha"}
+			for _, propertyIndex := range rng.Perm(len(keys)) {
+				properties[keys[propertyIndex]] = map[string]any{"type": "string"}
+			}
+			tools = append(tools, &genai.Tool{FunctionDeclarations: []*genai.FunctionDeclaration{{
+				Name: names[index],
+				ParametersJsonSchema: map[string]any{
+					"type":       "object",
+					"required":   []string{"zeta", "alpha"},
+					"properties": properties,
+				},
+			}}})
+		}
+		converted, err := ConvertRequest(&model.LLMRequest{Config: &genai.GenerateContentConfig{Tools: tools}}, 100, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := json.Marshal(converted)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if iteration == 0 {
+			want = data
+		} else if string(data) != string(want) {
+			t.Fatalf("converted request %d differs\n got: %s\nwant: %s", iteration, data, want)
+		}
+	}
+}
+
+func TestParseResponseMapsAnthropicCacheUsage(t *testing.T) {
+	body := []byte(`{"content":[],"usage":{"input_tokens":100,"output_tokens":20,"cache_creation_input_tokens":30,"cache_read_input_tokens":70}}`)
+	resp, err := ParseResponse(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	usage := resp.UsageMetadata
+	if usage == nil {
+		t.Fatal("UsageMetadata is nil")
+	}
+	if usage.PromptTokenCount != 200 || usage.CandidatesTokenCount != 20 || usage.TotalTokenCount != 220 || usage.CachedContentTokenCount != 70 {
+		t.Fatalf("usage = %#v", usage)
+	}
+}
+
+func TestParseResponseMapsSAPBedrockCacheUsage(t *testing.T) {
+	body := []byte(`{"content":[],"usage":{"input_tokens":100,"output_tokens":20,"cacheWriteInputTokens":30,"cacheReadInputTokens":70}}`)
+	resp, err := ParseResponse(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	usage := resp.UsageMetadata
+	if usage == nil {
+		t.Fatal("UsageMetadata is nil")
+	}
+	if usage.PromptTokenCount != 200 || usage.CandidatesTokenCount != 20 || usage.TotalTokenCount != 220 || usage.CachedContentTokenCount != 70 {
+		t.Fatalf("usage = %#v", usage)
+	}
+}
+
+func TestParseResponseDistinguishesAbsentAndZeroCacheUsage(t *testing.T) {
+	absent, err := ParseResponse([]byte(`{"content":[],"usage":{}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if absent.UsageMetadata != nil {
+		t.Fatalf("absent usage = %#v, want nil", absent.UsageMetadata)
+	}
+
+	present, err := ParseResponse([]byte(`{"content":[],"usage":{"cacheReadInputTokens":0}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if present.UsageMetadata == nil {
+		t.Fatal("explicit zero cache usage should produce metadata")
+	}
+}
+
+func TestParseStreamMapsSAPBedrockCacheUsage(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":0,"cacheWriteInputTokens":3,"cacheReadInputTokens":7}}}`,
+		`data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"ok"}}`,
+		`data: {"type":"message_delta","usage":{"output_tokens":2}}`,
+		"",
+	}, "\n")
+	var final *model.LLMResponse
+	for resp, err := range ParseStream(strings.NewReader(stream)) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !resp.Partial {
+			final = resp
+		}
+	}
+	if final == nil || final.UsageMetadata == nil {
+		t.Fatal("final response has no usage metadata")
+	}
+	usage := final.UsageMetadata
+	if usage.PromptTokenCount != 20 || usage.CandidatesTokenCount != 2 || usage.TotalTokenCount != 22 || usage.CachedContentTokenCount != 7 {
+		t.Fatalf("usage = %#v", usage)
+	}
+}
 
 func TestPatchOrphanedToolUse_NoOrphans(t *testing.T) {
 	// Assistant message with tool_use followed by user message with tool_result

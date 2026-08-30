@@ -101,34 +101,13 @@ The `LazyMCPToolset` defers MCP server startup until tools are actually needed:
 - On first tool call, the MCP server is started and the JSON-RPC connection is established.
 - This avoids starting servers that may never be used in a session.
 
-### Tool Surfacing: First-Class in Code, Discoverable in Platform
+### Tool Surfacing Through the Fixed Bridge
 
-How MCP tools reach the model depends on the runtime, because prompt size scales
-very differently between a personal coding session and a multi-tenant platform.
-
-- **Astonish Code (`astonish code`)** — MCP servers are **first-class**. Every
-  configured server's sanitized toolset is injected directly onto the main
-  thread (passed to the ChatAgent as llmagent `Toolsets`), so the coding agent
-  can call any MCP tool immediately by its bare name, no `search_tools` detour.
-  The system prompt advertises them as always-available and lists them under an
-  `## MCP Tools (available directly)` section. Code sessions are single-user and
-  usually configure only a handful of servers for coding, so eager injection is
-  the right ergonomics/size trade-off.
-- **Studio / Platform** — MCP tools stay **discoverable**, not injected. Each
-  server is registered only as an `mcp:<server>` tool group, surfaced as a
-  one-line catalog entry ("high definition") in the Task Delegation section of
-  the system prompt. The model reaches the actual tools via `search_tools`
-  (which loads them on demand through the `ToolIndex`) or by delegating to a
-  sub-agent with the `mcp:<server>` group. This keeps the prompt small even when
-  an org/team exposes thousands of tools.
-
-The switch is a single flag: `ChatFactoryConfig.CodeMode` (set only by
-`pkg/launcher/tui_code.go`). It drives two things in `NewWiredChatAgent`
-(`pkg/launcher/chat_factory.go`): passing the MCP toolsets to `NewChatAgent`,
-and setting `SystemPromptBuilder.MCPFirstClass` so the prompt describes them as
-directly callable. `PlatformMode` and `CodeMode` are mutually exclusive; a
-non-platform Studio install is *not* Code mode, so it also keeps MCP behind
-`search_tools`.
+MCP tools are catalog entries in every runtime, including Astonish Code. Each
+server is registered as an `mcp:<server>` tool group. The model finds tools via
+catalog-only `search_tools`, inspects schemas with `describe_tools`, and invokes
+them through the fixed `execute_tool` bridge, or delegates parallel work with the
+corresponding group. MCP discovery never adds provider-visible declarations.
 
 ### Config-File MCP Servers as the Platform Base Layer
 

@@ -166,12 +166,12 @@ Delegation gives you **parallelism** and **context isolation**. Sub-agents run i
 **Call tools directly (no delegation) when:**
 - It's a single tool call or one-off action (send one email, one HTTP request, one MCP tool, one screenshot)
 - You need the result immediately to decide your next step
-- The user asked to use a specific tool or MCP server — call it on the main thread after ` + "`search_tools`" + ` if needed
+- The user asked to use a specific tool or MCP server — use ` + "`search_tools`" + ` and ` + "`describe_tools`" + ` if needed, then call it through ` + "`execute_tool`" + ` on the main thread
 
 **Never use ` + "`delegate_tasks`" + ` as a fallback:**
 - Do **not** delegate because a tool "wasn't found", failed once, or "isn't on the main thread"
 - Main thread and sub-agents share the same tool catalog; delegation does **not** unlock extra tools
-- If a tool is missing: call ` + "`search_tools`" + `, then call the **bare tool name** directly (e.g. ` + "`send_email`" + `). Retry. Do not wrap a single failed call in a sub-agent
+- If a tool is missing: call ` + "`search_tools`" + `, inspect it with ` + "`describe_tools`" + `, then invoke it through ` + "`execute_tool`" + `. Do not wrap a single failed call in a sub-agent
 - ` + "`delegate_tasks`" + ` is for **parallelism and context isolation**, not error recovery
 
 ## Task Decomposition Strategy

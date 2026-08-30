@@ -4,12 +4,220 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"math"
+	"reflect"
+	"strings"
+	"sync/atomic"
 	"testing"
+
+	adkagent "google.golang.org/adk/agent"
+	"google.golang.org/adk/tool"
 )
 
 // newTestToolIndex creates a ToolIndex backed by an in-memory vector store.
 // This is the standard way to create a ToolIndex in tests.
+func TestLexicalToolIndexSearchesWithoutVectorStore(t *testing.T) {
+	idx := NewLexicalToolIndex()
+	if err := idx.PrimeTools(context.Background(), nil, []*ToolGroup{{Name: "web", Tools: mockTools("web_fetch")}}); err != nil {
+		t.Fatalf("PrimeTools: %v", err)
+	}
+	matches, err := idx.SearchHybrid(context.Background(), "web fetch", 5, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) == 0 || matches[0].ToolName != "web_fetch" {
+		t.Fatalf("lexical matches = %#v, want web_fetch", matches)
+	}
+	if idx.Count() != 1 {
+		t.Fatalf("Count() = %d, want 1", idx.Count())
+	}
+}
+
+type countingToolVectorStore struct {
+	ToolVectorStore
+	allIDsCalls atomic.Int32
+	addErr      error
+}
+
+func (s *countingToolVectorStore) AllIDs(ctx context.Context) ([]string, error) {
+	s.allIDsCalls.Add(1)
+	return s.ToolVectorStore.AllIDs(ctx)
+}
+
+func (s *countingToolVectorStore) AddDocuments(ctx context.Context, docs []ToolVectorDoc, concurrency int) error {
+	if s.addErr != nil {
+		return s.addErr
+	}
+	return s.ToolVectorStore.AddDocuments(ctx, docs, concurrency)
+}
+
+type failingToolset struct{ err error }
+
+func (f failingToolset) Name() string { return "failing" }
+func (f failingToolset) Tools(adkagent.ReadonlyContext) ([]tool.Tool, error) {
+	return nil, f.err
+}
+
+func TestToolIndexPrimePropagatesToolsetError(t *testing.T) {
+	want := errors.New("toolset unavailable")
+	idx := NewLexicalToolIndex()
+	err := idx.PrimeTools(context.Background(), nil, []*ToolGroup{{Name: "broken", Toolsets: []tool.Toolset{failingToolset{err: want}}}})
+	if !errors.Is(err, want) {
+		t.Fatalf("PrimeTools error = %v, want %v", err, want)
+	}
+	if idx.Count() != 0 {
+		t.Fatalf("Count() = %d, want unpublished catalog", idx.Count())
+	}
+}
+
+func TestToolIndexSearchHybridPropagatesEmbeddingError(t *testing.T) {
+	want := errors.New("embed unavailable")
+	fail := false
+	embed := func(context.Context, string) ([]float32, error) {
+		if fail {
+			return nil, want
+		}
+		return []float32{1, 0}, nil
+	}
+	idx := newTestToolIndex(t, embed)
+	if err := idx.SyncTools(context.Background(), nil, []*ToolGroup{{Name: "web", Tools: mockTools("web_fetch")}}); err != nil {
+		t.Fatal(err)
+	}
+	fail = true
+	_, err := idx.SearchHybrid(context.Background(), "web fetch", 5, 0)
+	if !errors.Is(err, want) {
+		t.Fatalf("SearchHybrid error = %v, want %v", err, want)
+	}
+}
+
+func TestSemanticToolIndexDoesNotFallBackToLexicalSearchWhenEmpty(t *testing.T) {
+	idx := newTestToolIndex(t, testEmbeddingFunc())
+	if err := idx.PrimeTools(context.Background(), nil, []*ToolGroup{{Name: "web", Tools: mockTools("web_fetch")}}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := idx.SearchHybrid(context.Background(), "web fetch", 5, 0)
+	if err == nil || !strings.Contains(err.Error(), "semantic tool index is incomplete") {
+		t.Fatalf("SearchHybrid error = %v, want incomplete semantic index", err)
+	}
+}
+
+func TestSemanticToolIndexValidatesDocumentIdentity(t *testing.T) {
+	idx := newTestToolIndex(t, testEmbeddingFunc())
+	if err := idx.PrimeTools(context.Background(), nil, []*ToolGroup{{Name: "web", Tools: mockTools("web_fetch")}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.vectorStore.AddDocuments(context.Background(), []ToolVectorDoc{{
+		ID: "stale:tool", Content: "stale tool", Metadata: map[string]string{"tool_name": "tool", "group_name": "stale"}, Embedding: []float32{1, 0},
+	}}, 1); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := idx.SearchHybrid(context.Background(), "web fetch", 5, 0)
+	if err == nil || !strings.Contains(err.Error(), `missing tool "web:web_fetch"`) {
+		t.Fatalf("SearchHybrid error = %v, want missing current tool identity", err)
+	}
+}
+
+func TestSemanticToolIndexCachesValidationForPublishedCatalog(t *testing.T) {
+	embed := testEmbeddingFunc()
+	store, err := NewInMemoryToolVectorStore(embed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	counting := &countingToolVectorStore{ToolVectorStore: store}
+	idx, err := NewToolIndex(counting, embed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.SyncTools(context.Background(), nil, []*ToolGroup{{Name: "web", Tools: mockTools("web_fetch")}}); err != nil {
+		t.Fatal(err)
+	}
+	callsAfterSync := counting.allIDsCalls.Load()
+
+	for range 3 {
+		if _, err := idx.SearchHybrid(context.Background(), "web fetch", 5, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := counting.allIDsCalls.Load(); got != callsAfterSync {
+		t.Fatalf("AllIDs calls = %d after searches, want %d", got, callsAfterSync)
+	}
+}
+
+func TestSemanticToolIndexFailedResyncFailsClosed(t *testing.T) {
+	embed := testEmbeddingFunc()
+	store, err := NewInMemoryToolVectorStore(embed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	counting := &countingToolVectorStore{ToolVectorStore: store}
+	idx, err := NewToolIndex(counting, embed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.SyncTools(context.Background(), nil, []*ToolGroup{{Name: "web", Tools: mockTools("web_fetch")}}); err != nil {
+		t.Fatal(err)
+	}
+
+	want := errors.New("embedding store unavailable")
+	counting.addErr = want
+	err = idx.SyncTools(context.Background(), nil, []*ToolGroup{{Name: "web", Tools: mockTools("http_request")}})
+	if !errors.Is(err, want) {
+		t.Fatalf("SyncTools error = %v, want %v", err, want)
+	}
+	_, err = idx.SearchHybrid(context.Background(), "web fetch", 5, 0)
+	if err == nil || !strings.Contains(err.Error(), "semantic tool index is incomplete") {
+		t.Fatalf("SearchHybrid error = %v, want incomplete semantic index", err)
+	}
+	if idx.GetToolEntry("http_request") != nil {
+		t.Fatal("failed sync published the new catalog")
+	}
+}
+
+func TestInMemoryToolVectorStoreUpsertsAndUsesPrecomputedEmbedding(t *testing.T) {
+	var calls atomic.Int32
+	embed := func(context.Context, string) ([]float32, error) {
+		calls.Add(1)
+		return []float32{0, 1}, nil
+	}
+	store, err := NewInMemoryToolVectorStore(embed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	docs := []ToolVectorDoc{{ID: "same", Content: "first", Embedding: []float32{1, 0}}}
+	if err := store.AddDocuments(context.Background(), docs, 1); err != nil {
+		t.Fatal(err)
+	}
+	docs[0] = ToolVectorDoc{ID: "same", Content: "second", Embedding: []float32{0, 1}}
+	if err := store.AddDocuments(context.Background(), docs, 1); err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 0 || store.Count() != 1 {
+		t.Fatalf("calls=%d count=%d, want 0 and 1", calls.Load(), store.Count())
+	}
+	got, err := store.GetByID(context.Background(), "same")
+	if err != nil || got == nil || got.Content != "second" {
+		t.Fatalf("GetByID = %#v, %v", got, err)
+	}
+}
+
+func TestInMemoryToolVectorStoreHonorsCancellation(t *testing.T) {
+	store, err := NewInMemoryToolVectorStore(testEmbeddingFunc())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := store.AddDocuments(ctx, []ToolVectorDoc{{ID: "x", Content: "x"}}, 1); !errors.Is(err, context.Canceled) {
+		t.Fatalf("AddDocuments error = %v, want context canceled", err)
+	}
+	if _, err := store.QueryByEmbedding(ctx, []float32{1}, 1); !errors.Is(err, context.Canceled) {
+		t.Fatalf("QueryByEmbedding error = %v, want context canceled", err)
+	}
+}
+
 func newTestToolIndex(t *testing.T, ef EmbedFunc) *ToolIndex {
 	t.Helper()
 	vs, err := NewInMemoryToolVectorStore(ef)
@@ -315,7 +523,10 @@ func TestToolIndex_SearchGroups(t *testing.T) {
 	}
 
 	// SearchGroups should return group names only, excluding main tools
-	groupNames := idx.SearchGroups(context.Background(), "navigate browser", 5, 0.01)
+	groupNames, err := idx.SearchGroups(context.Background(), "navigate browser", 5, 0.01)
+	if err != nil {
+		t.Fatalf("SearchGroups: %v", err)
+	}
 	// Should have some groups (exact content depends on embedding)
 	if len(groupNames) == 0 {
 		t.Log("Warning: SearchGroups returned no groups (embedding may not capture semantics)")
@@ -442,8 +653,8 @@ func TestFormatToolMatchesForPrompt(t *testing.T) {
 	if !contains(result, "web") {
 		t.Error("result should contain 'web' group")
 	}
-	if !contains(result, "call directly") {
-		t.Error("result should contain 'call directly' for injected tools")
+	if !contains(result, "execute_tool") {
+		t.Error("result should direct deferred tools through execute_tool")
 	}
 	if !contains(result, "Main thread") {
 		t.Error("result should contain main thread section")
@@ -703,6 +914,39 @@ func TestBM25Search_Empty(t *testing.T) {
 // Hybrid search tests
 // ---------------------------------------------------------------------------
 
+func TestToolIndexSearchHybridPreparedReusesCompatibleEmbedding(t *testing.T) {
+	calls := 0
+	embed := EmbedFunc(func(context.Context, string) ([]float32, error) {
+		calls++
+		return []float32{1, 0}, nil
+	})
+	store, err := NewInMemoryToolVectorStore(embed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx, err := NewToolIndex(store, embed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.SyncTools(context.Background(), mockTools("read_file"), nil); err != nil {
+		t.Fatal(err)
+	}
+	calls = 0
+	identity := reflect.ValueOf(embed).Pointer()
+	if !idx.CanUsePreparedEmbedding(identity, []float32{1, 0}) {
+		t.Fatal("compatible prepared embedding rejected")
+	}
+	if idx.CanUsePreparedEmbedding(identity, []float32{1}) {
+		t.Fatal("dimension mismatch accepted")
+	}
+	if _, err := idx.SearchHybridPrepared(context.Background(), "read file", []float32{1, 0}, 5, 0); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 0 {
+		t.Fatalf("embedding calls = %d, want 0", calls)
+	}
+}
+
 func TestToolIndex_SearchHybrid(t *testing.T) {
 	idx := newTestToolIndex(t, testSemanticEmbeddingFunc())
 
@@ -757,6 +1001,33 @@ func TestToolIndex_SearchHybrid(t *testing.T) {
 	}
 }
 
+func TestToolIndex_SearchHybridEmbeddingFailureDoesNotFallBack(t *testing.T) {
+	embedErr := errors.New("embedding unavailable")
+	calls := 0
+	embed := func(context.Context, string) ([]float32, error) {
+		calls++
+		if calls > 1 {
+			return nil, embedErr
+		}
+		return []float32{1, 0, 0}, nil
+	}
+	idx := newTestToolIndex(t, embed)
+	if err := idx.SyncTools(context.Background(), nil, []*ToolGroup{{
+		Name:  "core",
+		Tools: mockTools("read_file"),
+	}}); err != nil {
+		t.Fatalf("SyncTools: %v", err)
+	}
+
+	matches, err := idx.SearchHybrid(context.Background(), "read file", 5, 0)
+	if !errors.Is(err, embedErr) {
+		t.Fatalf("SearchHybrid error = %v, want %v", err, embedErr)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("SearchHybrid returned lexical fallback: %#v", matches)
+	}
+}
+
 func TestToolIndex_SearchHybrid_Empty(t *testing.T) {
 	idx := newTestToolIndex(t, testEmbeddingFunc())
 
@@ -789,7 +1060,10 @@ func TestToolIndex_SearchGroupsHybrid(t *testing.T) {
 		t.Fatalf("SyncTools: %v", err)
 	}
 
-	groupNames := idx.SearchGroupsHybrid(context.Background(), "navigate browser", 5, 0)
+	groupNames, err := idx.SearchGroupsHybrid(context.Background(), "navigate browser", 5, 0)
+	if err != nil {
+		t.Fatalf("SearchGroupsHybrid: %v", err)
+	}
 	// Verify no "_main" in results
 	for _, g := range groupNames {
 		if g == "_main" {

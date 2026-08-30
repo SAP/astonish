@@ -2,13 +2,65 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	adksession "google.golang.org/adk/session"
 )
 
+// MaxSessionCacheDiagnostics bounds preparation and provider diagnostic records per session.
+const MaxSessionCacheDiagnostics = 100
+
 // SessionMeta contains metadata about a chat session.
 // This mirrors the existing session.SessionMeta type.
+
+// CacheDiagnostic is a bounded, sanitized record of one model request.
+type CacheDiagnostic struct {
+	InvocationID         string               `json:"invocationId"`
+	Kind                 string               `json:"kind"`
+	Stage                string               `json:"stage"`
+	Status               string               `json:"status"`
+	Call                 int                  `json:"call"`
+	Stream               bool                 `json:"stream"`
+	Provider             string               `json:"provider,omitempty"`
+	Model                string               `json:"model,omitempty"`
+	CaptureLevel         string               `json:"captureLevel"`
+	InputHash            string               `json:"inputHash"`
+	Elements             []ModelInputElement  `json:"elements"`
+	Payload              json.RawMessage      `json:"payload,omitempty"`
+	PayloadOriginalBytes int                  `json:"payloadOriginalBytes"`
+	PayloadCapturedBytes int                  `json:"payloadCapturedBytes"`
+	PayloadTruncated     bool                 `json:"payloadTruncated"`
+	BinaryElisions       int                  `json:"binaryElisions"`
+	StablePrefixElements int                  `json:"stablePrefixElements"`
+	StablePrefixBytes    int                  `json:"stablePrefixBytes"`
+	FirstDivergence      string               `json:"firstDivergence,omitempty"`
+	StartedAt            time.Time            `json:"startedAt"`
+	TimeToFirstResponse  time.Duration        `json:"timeToFirstResponse"`
+	Duration             time.Duration        `json:"duration"`
+	ResponseCount        int                  `json:"responseCount"`
+	Usage                CacheDiagnosticUsage `json:"usage"`
+	Error                string               `json:"error,omitempty"`
+	CreatedAt            time.Time            `json:"createdAt"`
+}
+
+type ModelInputElement struct {
+	Path  string `json:"path"`
+	Hash  string `json:"hash"`
+	Bytes int    `json:"bytes"`
+}
+
+type CacheDiagnosticUsage struct {
+	Reported        bool  `json:"reported"`
+	CacheReported   bool  `json:"cacheReported"`
+	PromptTokens    int32 `json:"promptTokens"`
+	CachedTokens    int32 `json:"cachedTokens"`
+	CandidateTokens int32 `json:"candidateTokens"`
+	ThoughtTokens   int32 `json:"thoughtTokens"`
+	ToolUseTokens   int32 `json:"toolUseTokens"`
+	TotalTokens     int32 `json:"totalTokens"`
+}
+
 type SessionMeta struct {
 	ID           string    `json:"id"`
 	AppName      string    `json:"appName"`
@@ -45,6 +97,10 @@ type SessionStore interface {
 
 	// Transcript access.
 	ReadTranscriptEvents(ctx context.Context, appName, userID, sessionID string) ([]*adksession.Event, error)
+
+	// Cache diagnostics are bounded per session and contain only sanitized request content.
+	AppendCacheDiagnostic(ctx context.Context, sessionID string, diagnostic CacheDiagnostic) error
+	ListCacheDiagnostics(ctx context.Context, sessionID string) ([]CacheDiagnostic, error)
 
 	// AppendFleetEvent persists a fleet message event to a session's transcript
 	// without requiring a full ADK session object. Used by fleet sessions which

@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/SAP/astonish/pkg/config"
 )
@@ -91,7 +94,7 @@ func resolveExplicitProvider(cfg *config.MemoryConfig, getSecret config.SecretGe
 		if model == "" {
 			model = "text-embedding-3-small"
 		}
-		return newOpenAIEmbeddingFunc("https://api.openai.com/v1", apiKey, model), nil
+		return newOpenAIEmbeddingFunc("https://api.openai.com/v1", apiKey, model, cfg.Embedding.Timeout()), nil
 
 	case "ollama":
 		baseURL := cfg.Embedding.BaseURL
@@ -105,7 +108,7 @@ func resolveExplicitProvider(cfg *config.MemoryConfig, getSecret config.SecretGe
 		if model == "" {
 			model = "nomic-embed-text"
 		}
-		return newOllamaEmbeddingFunc(baseURL, model), nil
+		return newOllamaEmbeddingFunc(baseURL, model, cfg.Embedding.Timeout()), nil
 
 	case "openai-compat", "openai_compat":
 		baseURL := cfg.Embedding.BaseURL
@@ -118,11 +121,19 @@ func resolveExplicitProvider(cfg *config.MemoryConfig, getSecret config.SecretGe
 		if model == "" {
 			model = "text-embedding-3-small"
 		}
-		return newOpenAIEmbeddingFunc(baseURL, apiKey, model), nil
+		return newOpenAIEmbeddingFunc(baseURL, apiKey, model, cfg.Embedding.Timeout()), nil
 
 	default:
 		return nil, fmt.Errorf("unsupported embedding provider: %s (supported: openai, ollama, openai-compat)", cfg.Embedding.Provider)
 	}
+}
+
+func embeddingRequestError(provider string, timeout time.Duration, err error) error {
+	var netErr net.Error
+	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) {
+		return fmt.Errorf("%s request timed out after %s: %w", provider, timeout, err)
+	}
+	return fmt.Errorf("%s request failed: %w", provider, err)
 }
 
 // --- OpenAI-compatible embedding client ---
@@ -142,7 +153,8 @@ type openAIEmbeddingResponse struct {
 
 // newOpenAIEmbeddingFunc returns an EmbeddingFunc that calls an OpenAI-compatible
 // /v1/embeddings endpoint. Works for OpenAI, Azure OpenAI, and any compatible API.
-func newOpenAIEmbeddingFunc(baseURL, apiKey, model string) EmbeddingFunc {
+func newOpenAIEmbeddingFunc(baseURL, apiKey, model string, timeout time.Duration) EmbeddingFunc {
+	client := &http.Client{Timeout: timeout}
 	return func(ctx context.Context, text string) ([]float32, error) {
 		reqBody := openAIEmbeddingRequest{
 			Model: model,
@@ -163,9 +175,9 @@ func newOpenAIEmbeddingFunc(baseURL, apiKey, model string) EmbeddingFunc {
 			req.Header.Set("Authorization", "Bearer "+apiKey)
 		}
 
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := client.Do(req)
 		if err != nil {
-			return nil, fmt.Errorf("embedding request failed: %w", err)
+			return nil, embeddingRequestError("embedding", timeout, err)
 		}
 		defer resp.Body.Close()
 
@@ -200,7 +212,8 @@ type ollamaEmbeddingResponse struct {
 
 // newOllamaEmbeddingFunc returns an EmbeddingFunc that calls Ollama's
 // /api/embeddings endpoint.
-func newOllamaEmbeddingFunc(baseURL, model string) EmbeddingFunc {
+func newOllamaEmbeddingFunc(baseURL, model string, timeout time.Duration) EmbeddingFunc {
+	client := &http.Client{Timeout: timeout}
 	return func(ctx context.Context, text string) ([]float32, error) {
 		reqBody := ollamaEmbeddingRequest{
 			Model:  model,
@@ -218,9 +231,9 @@ func newOllamaEmbeddingFunc(baseURL, model string) EmbeddingFunc {
 		}
 		req.Header.Set("Content-Type", "application/json")
 
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := client.Do(req)
 		if err != nil {
-			return nil, fmt.Errorf("ollama embedding request failed: %w", err)
+			return nil, embeddingRequestError("ollama embedding", timeout, err)
 		}
 		defer resp.Body.Close()
 

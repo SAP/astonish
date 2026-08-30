@@ -51,14 +51,6 @@ func redactEventText(r *credentials.Redactor, event *session.Event) {
 	}
 }
 
-// truncateQuery shortens a string for debug logging, appending "..." if truncated.
-func truncateQuery(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + "..."
-}
-
 // urlPattern matches http/https URLs in text.
 var urlPattern = regexp.MustCompile(`https?://\S+`)
 
@@ -109,6 +101,9 @@ func lastModelResponseTail(events session.Events, maxLen int) string {
 	foundModel := false
 	for i := n - 1; i >= 0; i-- {
 		ev := events.At(i)
+		if IsTurnContextEvent(ev) {
+			continue
+		}
 		if ev.Author == "user" {
 			if foundModel {
 				break // we've collected all model parts before this user message
@@ -161,8 +156,7 @@ func lastModelResponseTail(events session.Events, maxLen int) string {
 // isUnknownToolError checks whether an error from ADK is caused by the LLM
 // calling a tool name that doesn't exist as a hard Run abort
 // (fmt.Errorf("unknown tool: %q")). Under ADK 1.5 this path is largely obsolete:
-// missing tools become FunctionResponse errors handled by OnToolErrorCallbacks
-// (see AutoInjectMissingToolCallback). Retained as a safety net for older ADK
+// Retained as a safety net for older ADK runs and legacy transcripts
 // behavior or any remaining hard-abort variants.
 func isUnknownToolError(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "unknown tool:")

@@ -1,143 +1,107 @@
 package agent
 
 import (
+	"fmt"
+	"iter"
+	"maps"
 	"strings"
 	"testing"
-
-	"google.golang.org/adk/model"
-	"google.golang.org/genai"
 )
 
-func TestEphemeralKnowledgeCallback_NilWhenEmpty(t *testing.T) {
-	// No knowledge → nil callback (not registered)
-	cb := EphemeralKnowledgeCallback("", false)
-	if cb != nil {
-		t.Error("expected nil callback when knowledge is empty")
+func TestBuildTurnContextContent(t *testing.T) {
+	content := buildTurnContextContent(&PromptOverrides{
+		ChannelHints:   "Use plain text.",
+		SchedulerHints: "Return only the result.",
+		SessionContext: "Continue the fleet wizard.",
+		SkillIndex:     "- deploy: Deploy services",
+		PlanMode:       true,
+	}, "- send_email", "Host is 10.0.0.4")
+	if content == nil || content.Role != "user" || len(content.Parts) != 1 {
+		t.Fatalf("unexpected content: %#v", content)
+	}
+	got := content.Parts[0].Text
+	for _, want := range []string{
+		"[Astonish Per-Turn Context — not user-authored]",
+		"## Output Constraints\n\nUse plain text.",
+		"## Execution Context\n\nReturn only the result.",
+		"## Session Task\n\nContinue the fleet wizard.",
+		"## Available Skills For This Request\n\n- deploy: Deploy services",
+		"## Runtime Mode\n\nPlan mode is active.",
+		"## Relevant Tools For This Request",
+		"- send_email",
+		"## Knowledge For This Task",
+		"Host is 10.0.0.4",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("context missing %q", want)
+		}
 	}
 }
 
-func TestEphemeralKnowledgeCallback_InjectsKnowledge(t *testing.T) {
-	knowledge := "**MEMORY.md** (63%)\nProxmox at 192.168.1.200"
-	cb := EphemeralKnowledgeCallback(knowledge, false)
-	if cb == nil {
-		t.Fatal("expected non-nil callback")
-	}
-
-	req := &model.LLMRequest{
-		Contents: []*genai.Content{
-			{Role: "user", Parts: []*genai.Part{{Text: "check proxmox"}}},
-			{Role: "model", Parts: []*genai.Part{{Text: "Sure!"}}},
-			{Role: "user", Parts: []*genai.Part{{Text: "show containers"}}},
-		},
-	}
-
-	resp, err := cb(nil, req)
-	if err != nil {
-		t.Fatalf("callback error: %v", err)
-	}
-	if resp != nil {
-		t.Fatal("callback should return nil response to proceed")
-	}
-
-	// The last user message should now have 2 parts: knowledge + original text
-	lastUser := req.Contents[2]
-	if len(lastUser.Parts) != 2 {
-		t.Fatalf("expected 2 parts in last user content, got %d", len(lastUser.Parts))
-	}
-
-	// First part should be the knowledge injection
-	if !strings.Contains(lastUser.Parts[0].Text, "[Knowledge For This Task]") {
-		t.Errorf("expected knowledge header, got: %s", lastUser.Parts[0].Text[:80])
-	}
-	if !strings.Contains(lastUser.Parts[0].Text, "Proxmox at 192.168.1.200") {
-		t.Error("expected knowledge content in first part")
-	}
-
-	// Second part should be the original user message (untouched)
-	if lastUser.Parts[1].Text != "show containers" {
-		t.Errorf("expected original user message, got: %s", lastUser.Parts[1].Text)
-	}
-
-	// Earlier messages should be untouched
-	if len(req.Contents[0].Parts) != 1 {
-		t.Error("earlier user message should not be modified")
+func TestBuildTurnContextContentEmpty(t *testing.T) {
+	if got := buildTurnContextContent(nil, "", ""); got != nil {
+		t.Fatalf("expected nil, got %#v", got)
 	}
 }
 
-func TestEphemeralKnowledgeCallback_NoUserMessage(t *testing.T) {
-	cb := EphemeralKnowledgeCallback("some knowledge", false)
-	if cb == nil {
-		t.Fatal("expected non-nil callback")
+func TestTurnContextEventIsPersistedModelContentButHidden(t *testing.T) {
+	content := buildTurnContextContent(nil, "", "remember this")
+	event := newTurnContextEvent(content)
+	if !IsTurnContextEvent(event) {
+		t.Fatal("expected marked turn context event")
 	}
-
-	// Request with only model messages (edge case)
-	req := &model.LLMRequest{
-		Contents: []*genai.Content{
-			{Role: "model", Parts: []*genai.Part{{Text: "Hello"}}},
-		},
+	if event.Author != "user" || event.Content == nil || event.Content.Parts[0].Text != content.Parts[0].Text {
+		t.Fatalf("event did not preserve exact model-facing content: %#v", event)
 	}
-
-	resp, err := cb(nil, req)
-	if err != nil {
-		t.Fatalf("callback error: %v", err)
-	}
-	if resp != nil {
-		t.Fatal("expected nil response")
-	}
-
-	// Model message should be untouched
-	if len(req.Contents[0].Parts) != 1 {
-		t.Error("model message should not be modified")
+	if got := CleanUserText(event.Content.Parts[0].Text); got != "" {
+		t.Fatalf("turn context leaked as clean user text: %q", got)
 	}
 }
 
-func TestEphemeralKnowledgeCallback_EmptyContents(t *testing.T) {
-	cb := EphemeralKnowledgeCallback("some knowledge", false)
-	if cb == nil {
-		t.Fatal("expected non-nil callback")
+func TestStableSystemPromptBuildsAndPersistsOnce(t *testing.T) {
+	state := &testPromptState{values: map[string]any{}}
+	builds := 0
+	prompt, event := stableSystemPrompt(state, func() string {
+		builds++
+		return "stable prompt"
+	})
+	if prompt != "stable prompt" || event == nil || builds != 1 {
+		t.Fatalf("unexpected initial result: prompt=%q event=%#v builds=%d", prompt, event, builds)
+	}
+	if event.Content != nil {
+		t.Fatal("system prompt state event must not enter model contents")
+	}
+	if got := event.Actions.StateDelta[systemPromptStateKey]; got != prompt {
+		t.Fatalf("unexpected persisted prompt: %#v", got)
 	}
 
-	req := &model.LLMRequest{Contents: nil}
-	resp, err := cb(nil, req)
-	if err != nil {
-		t.Fatalf("callback error: %v", err)
-	}
-	if resp != nil {
-		t.Fatal("expected nil response")
+	state.values[systemPromptStateKey] = prompt
+	resumed, event := stableSystemPrompt(state, func() string {
+		builds++
+		return "changed prompt"
+	})
+	if resumed != prompt || event != nil || builds != 1 {
+		t.Fatalf("resume did not reuse prompt: prompt=%q event=%#v builds=%d", resumed, event, builds)
 	}
 }
 
-func TestEphemeralKnowledgeCallback_NilRequest(t *testing.T) {
-	cb := EphemeralKnowledgeCallback("knowledge", false)
-	if cb == nil {
-		t.Fatal("expected non-nil callback")
-	}
-
-	resp, err := cb(nil, nil)
-	if err != nil {
-		t.Fatalf("callback error: %v", err)
-	}
-	if resp != nil {
-		t.Fatal("expected nil response")
-	}
+type testPromptState struct {
+	values map[string]any
 }
 
-func TestBuildKnowledgeInjectionText_KnowledgeOnly(t *testing.T) {
-	text := buildKnowledgeInjectionText("Some knowledge")
-	if !strings.HasPrefix(text, "[Knowledge For This Task]") {
-		t.Errorf("expected knowledge header prefix, got: %s", text[:40])
+func (s *testPromptState) Get(key string) (any, error) {
+	value, ok := s.values[key]
+	if !ok {
+		return nil, fmt.Errorf("missing")
 	}
-	if !strings.Contains(text, "CRITICAL") {
-		t.Error("expected CRITICAL preamble")
-	}
-	if !strings.Contains(text, "Some knowledge") {
-		t.Error("expected knowledge content")
-	}
+	return value, nil
 }
 
-func TestBuildKnowledgeInjectionText_Empty(t *testing.T) {
-	text := buildKnowledgeInjectionText("")
-	if text != "" {
-		t.Errorf("expected empty string, got: %q", text)
-	}
+func (s *testPromptState) Set(key string, value any) error {
+	s.values[key] = value
+	return nil
+}
+
+func (s *testPromptState) All() iter.Seq2[string, any] {
+	return maps.All(s.values)
 }

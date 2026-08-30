@@ -115,6 +115,7 @@ chat:
   max_tools: 0                 # Max tools exposed to model (0 = all)
   auto_approve: false          # Auto-approve tool executions
   flow_save_dir: ""            # Where distilled flows are saved
+  pre_provider_retrieval_timeout_seconds: 10  # Memory/tool retrieval deadline before provider calls
 
 # Session management
 # Note: In daemon mode, sessions are stored in the database.
@@ -137,6 +138,7 @@ memory:
     model: ""
     base_url: ""
     api_key: ""
+    timeout_seconds: 30        # Remote HTTP deadline; timeout is an error, with no retry/fallback
   chunking:
     max_chars: 1600
     overlap: 320

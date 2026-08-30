@@ -26,6 +26,7 @@ type personalMemoryStore struct {
 }
 
 var _ store.MemoryStore = (*personalMemoryStore)(nil)
+var _ store.PreparedMemoryStore = (*personalMemoryStore)(nil)
 
 func (ms *personalMemoryStore) Search(ctx context.Context, query string, maxResults int, minScore float64) ([]store.MemorySearchResult, error) {
 	return ms.SearchByCategory(ctx, query, maxResults, minScore, "")
@@ -40,35 +41,46 @@ func (ms *personalMemoryStore) SearchByCategory(ctx context.Context, query strin
 }
 
 func (ms *personalMemoryStore) hybridSearch(ctx context.Context, query string, maxResults int, minScore float64, category string) ([]store.MemorySearchResult, error) {
+	prepared := store.PreparedMemoryQuery{KeywordQuery: query}
+	if ms.embedFunc != nil && query != "" {
+		prepared.SemanticQuery = query
+		embedding, err := ms.embedFunc(ctx, query)
+		if err != nil {
+			return nil, fmt.Errorf("generate query embedding: %w", err)
+		}
+		prepared.Embedding = embedding
+	}
+	return ms.SearchPrepared(ctx, prepared, maxResults, minScore, category)
+}
+
+func (ms *personalMemoryStore) SearchPrepared(ctx context.Context, query store.PreparedMemoryQuery, maxResults int, minScore float64, category string) ([]store.MemorySearchResult, error) {
+	if query.SemanticQuery != "" && len(query.Embedding) == 0 {
+		return nil, fmt.Errorf("semantic query requires embedding")
+	}
+	if ms.dialect == DialectSQLite {
+		return ms.sqlitePreparedSearch(ctx, query, maxResults, minScore, category)
+	}
 	var vectorResults, keywordResults []store.MemorySearchResult
-
-	// 1. Vector search (semantic similarity).
-	if ms.embedFunc != nil {
-		results, err := ms.vectorSearch(ctx, query, maxResults, minScore, category)
-		if err == nil {
-			vectorResults = results
+	if len(query.Embedding) > 0 {
+		results, err := ms.vectorSearch(ctx, query.Embedding, maxResults, minScore, category)
+		if err != nil {
+			return nil, err
 		}
+		vectorResults = results
 	}
-
-	// 2. tsvector search (keyword matching).
-	if query != "" {
-		results, err := ms.tsvectorSearch(ctx, query, maxResults, category)
-		if err == nil {
-			keywordResults = results
+	if query.KeywordQuery != "" {
+		results, err := ms.tsvectorSearch(ctx, query.KeywordQuery, maxResults, category)
+		if err != nil {
+			return nil, err
 		}
+		keywordResults = results
 	}
-
-	// 3. Merge + dedup by ID, keep best score.
 	return mergeMemoryResults(vectorResults, keywordResults, maxResults), nil
 }
 
-func (ms *personalMemoryStore) vectorSearch(ctx context.Context, query string, maxResults int, minScore float64, category string) ([]store.MemorySearchResult, error) {
-	embedding, err := ms.embedFunc(ctx, query)
-	if err != nil {
-		return nil, fmt.Errorf("generate query embedding: %w", err)
-	}
-
+func (ms *personalMemoryStore) vectorSearch(ctx context.Context, embedding []float32, maxResults int, minScore float64, category string) ([]store.MemorySearchResult, error) {
 	vecStr := float32SliceToPGVectorString(embedding)
+	var err error
 
 	var rows *sql.Rows
 	if category != "" {
@@ -77,7 +89,7 @@ func (ms *personalMemoryStore) vectorSearch(ctx context.Context, query string, m
 				1 - (embedding <=> $1::vector) AS score
 			FROM memories
 			WHERE category = $2
-			ORDER BY embedding <=> $1::vector
+			ORDER BY embedding <=> $1::vector, id ASC
 			LIMIT $3`,
 			vecStr, category, maxResults)
 	} else {
@@ -85,7 +97,7 @@ func (ms *personalMemoryStore) vectorSearch(ctx context.Context, query string, m
 			`SELECT id, chunk_text, category, source_path, created_by, session_id, created_at,
 				1 - (embedding <=> $1::vector) AS score
 			FROM memories
-			ORDER BY embedding <=> $1::vector
+			ORDER BY embedding <=> $1::vector, id ASC
 			LIMIT $2`,
 			vecStr, maxResults)
 	}
@@ -107,7 +119,7 @@ func (ms *personalMemoryStore) vectorSearch(ctx context.Context, query string, m
 			score     float64
 		)
 		if err := rows.Scan(&id, &chunkText, &cat, &srcPath, &createdBy, &sessionID, &createdAt, &score); err != nil {
-			continue
+			return nil, fmt.Errorf("scan memory search result: %w", err)
 		}
 		if score < minScore {
 			continue
@@ -150,7 +162,7 @@ func (ms *personalMemoryStore) tsvectorSearch(ctx context.Context, query string,
 				ts_rank(tsv, websearch_to_tsquery('english', $1)) AS score
 			FROM memories
 			WHERE tsv @@ websearch_to_tsquery('english', $1) AND category = $2
-			ORDER BY score DESC
+			ORDER BY score DESC, id ASC
 			LIMIT $3`,
 			orQuery, category, maxResults)
 	} else {
@@ -159,7 +171,7 @@ func (ms *personalMemoryStore) tsvectorSearch(ctx context.Context, query string,
 				ts_rank(tsv, websearch_to_tsquery('english', $1)) AS score
 			FROM memories
 			WHERE tsv @@ websearch_to_tsquery('english', $1)
-			ORDER BY score DESC
+			ORDER BY score DESC, id ASC
 			LIMIT $2`,
 			orQuery, maxResults)
 	}
@@ -181,7 +193,7 @@ func (ms *personalMemoryStore) tsvectorSearch(ctx context.Context, query string,
 			score     float64
 		)
 		if err := rows.Scan(&id, &chunkText, &cat, &srcPath, &createdBy, &sessionID, &createdAt, &score); err != nil {
-			continue
+			return nil, fmt.Errorf("scan memory search result: %w", err)
 		}
 		// Apply floor score (see tsvectorFloorScore doc in team_memories.go).
 		if score < tsvectorFloorScore {
@@ -211,51 +223,37 @@ func (ms *personalMemoryStore) tsvectorSearch(ctx context.Context, query string,
 	return results, rows.Err()
 }
 
-func (ms *personalMemoryStore) textSearch(ctx context.Context, query string, maxResults int, category string) ([]store.MemorySearchResult, error) {
-	q := ms.client.Memory.Query()
-	if category != "" {
-		q = q.Where(memory.CategoryEQ(category))
-	}
-	q = q.Limit(maxResults).Order(memory.ByCreatedAt())
-
-	ents, err := q.All(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	results := make([]store.MemorySearchResult, 0, len(ents))
-	for _, e := range ents {
-		r := personalMemoryToSearchResult(e)
-		if query == "" || strings.Contains(strings.ToLower(e.ChunkText), strings.ToLower(query)) {
-			r.Score = 1.0
-			results = append(results, r)
-		}
-	}
-	return results, nil
-}
-
 // ---------------------------------------------------------------------------
 // SQLite Hybrid Search (FTS5 + in-memory vector)
 // ---------------------------------------------------------------------------
 
 func (ms *personalMemoryStore) sqliteHybridSearch(ctx context.Context, query string, maxResults int, minScore float64, category string) ([]store.MemorySearchResult, error) {
+	prepared := store.PreparedMemoryQuery{KeywordQuery: query}
+	if ms.embedFunc != nil && query != "" {
+		prepared.SemanticQuery = query
+		embedding, err := ms.embedFunc(ctx, query)
+		if err != nil {
+			return nil, fmt.Errorf("generate query embedding: %w", err)
+		}
+		prepared.Embedding = embedding
+	}
+	return ms.sqlitePreparedSearch(ctx, prepared, maxResults, minScore, category)
+}
+
+func (ms *personalMemoryStore) sqlitePreparedSearch(ctx context.Context, query store.PreparedMemoryQuery, maxResults int, minScore float64, category string) ([]store.MemorySearchResult, error) {
 	if maxResults <= 0 {
 		maxResults = 10
 	}
-
-	keywordResults := ms.ftsSearch(ctx, query, maxResults*2, category)
-
-	var vectorResults []scoredResult
-	if ms.embedFunc != nil && query != "" {
-		queryVec, err := ms.embedFunc(ctx, query)
-		if err == nil && queryVec != nil {
-			ms.ensureVecIndexLoaded(ctx)
-			vectorResults = ms.vecIndex.search(queryVec, maxResults*2, minScore)
-		}
+	keywordResults, err := ms.ftsSearch(ctx, query.KeywordQuery, maxResults*2, category)
+	if err != nil {
+		return nil, err
 	}
-
-	if len(keywordResults) == 0 && len(vectorResults) == 0 {
-		return ms.textSearch(ctx, query, maxResults, category)
+	var vectorResults []scoredResult
+	if len(query.Embedding) > 0 {
+		if err := ms.ensureVecIndexLoaded(ctx); err != nil {
+			return nil, err
+		}
+		vectorResults = ms.vecIndex.search(query.Embedding, maxResults*2, minScore)
 	}
 
 	var fused []scoredResult
@@ -271,19 +269,18 @@ func (ms *personalMemoryStore) sqliteHybridSearch(ctx context.Context, query str
 		fused = vectorResults
 	}
 
-	return ms.loadResultsByIDs(ctx, fused)
+	return ms.loadResultsByIDs(ctx, fused, category)
 }
 
-func (ms *personalMemoryStore) ftsSearch(ctx context.Context, query string, limit int, category string) []scoredResult {
+func (ms *personalMemoryStore) ftsSearch(ctx context.Context, query string, limit int, category string) ([]scoredResult, error) {
 	if query == "" || ms.ftsTable == "" {
-		return nil
+		return nil, nil
 	}
 
-	tokens := strings.Fields(query)
-	if len(tokens) == 0 {
-		return nil
+	ftsQuery := sqliteFTSQuery(query)
+	if ftsQuery == "" {
+		return nil, nil
 	}
-	ftsQuery := strings.Join(tokens, " OR ")
 
 	var rows *sql.Rows
 	var err error
@@ -294,7 +291,7 @@ func (ms *personalMemoryStore) ftsSearch(ctx context.Context, query string, limi
 				 FROM %s fts
 				 JOIN %s m ON m.rowid = fts.rowid
 				 WHERE %s MATCH ? AND m.category = ?
-				 ORDER BY fts.rank
+				 ORDER BY fts.rank, m.id ASC
 				 LIMIT ?`, ms.ftsTable, ms.table, ms.ftsTable),
 			ftsQuery, category, limit)
 	} else {
@@ -304,12 +301,12 @@ func (ms *personalMemoryStore) ftsSearch(ctx context.Context, query string, limi
 				 FROM %s fts
 				 JOIN %s m ON m.rowid = fts.rowid
 				 WHERE %s MATCH ?
-				 ORDER BY fts.rank
+				 ORDER BY fts.rank, m.id ASC
 				 LIMIT ?`, ms.ftsTable, ms.table, ms.ftsTable),
 			ftsQuery, limit)
 	}
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("fts search query: %w", err)
 	}
 	defer rows.Close()
 
@@ -318,23 +315,25 @@ func (ms *personalMemoryStore) ftsSearch(ctx context.Context, query string, limi
 		var id string
 		var score float64
 		if err := rows.Scan(&id, &score); err != nil {
-			continue
+			return nil, fmt.Errorf("scan fts search result: %w", err)
 		}
 		results = append(results, scoredResult{ID: id, Score: score})
 	}
-	return results
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate fts search results: %w", err)
+	}
+	return results, nil
 }
 
-func (ms *personalMemoryStore) ensureVecIndexLoaded(ctx context.Context) {
+func (ms *personalMemoryStore) ensureVecIndexLoaded(ctx context.Context) error {
 	if ms.vecIndex.isLoaded() {
-		return
+		return nil
 	}
 
 	rows, err := ms.db.QueryContext(ctx,
 		fmt.Sprintf(`SELECT id, embedding FROM %s WHERE embedding IS NOT NULL`, ms.table))
 	if err != nil {
-		ms.vecIndex.markLoaded()
-		return
+		return fmt.Errorf("load vector index: %w", err)
 	}
 	defer rows.Close()
 
@@ -342,16 +341,20 @@ func (ms *personalMemoryStore) ensureVecIndexLoaded(ctx context.Context) {
 		var id string
 		var blob []byte
 		if err := rows.Scan(&id, &blob); err != nil {
-			continue
+			return fmt.Errorf("scan vector index: %w", err)
 		}
 		if vec := deserializeEmbedding(blob); vec != nil {
 			ms.vecIndex.add(id, vec)
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate vector index: %w", err)
+	}
 	ms.vecIndex.markLoaded()
+	return nil
 }
 
-func (ms *personalMemoryStore) loadResultsByIDs(ctx context.Context, scored []scoredResult) ([]store.MemorySearchResult, error) {
+func (ms *personalMemoryStore) loadResultsByIDs(ctx context.Context, scored []scoredResult, category string) ([]store.MemorySearchResult, error) {
 	if len(scored) == 0 {
 		return nil, nil
 	}
@@ -369,6 +372,10 @@ func (ms *personalMemoryStore) loadResultsByIDs(ctx context.Context, scored []sc
 		`SELECT id, chunk_text, category, source_path, created_by, session_id, created_at
 		 FROM %s WHERE id IN (%s)`,
 		ms.table, strings.Join(placeholders, ","))
+	if category != "" {
+		sqlStr += " AND category = ?"
+		ids = append(ids, category)
+	}
 
 	rows, err := ms.db.QueryContext(ctx, sqlStr, ids...)
 	if err != nil {
@@ -388,7 +395,7 @@ func (ms *personalMemoryStore) loadResultsByIDs(ctx context.Context, scored []sc
 			createdAt sql.NullString
 		)
 		if err := rows.Scan(&id, &chunkText, &cat, &srcPath, &createdBy, &sessionID, &createdAt); err != nil {
-			continue
+			return nil, fmt.Errorf("scan memory result: %w", err)
 		}
 		r := store.MemorySearchResult{
 			ID:      id,
@@ -415,6 +422,7 @@ func (ms *personalMemoryStore) loadResultsByIDs(ctx context.Context, scored []sc
 		}
 		results = append(results, r)
 	}
+	sortMemoryResults(results)
 	return results, nil
 }
 
@@ -448,7 +456,10 @@ func (ms *personalMemoryStore) Add(ctx context.Context, entry store.MemoryEntry)
 	var newEmb []float32
 	if ms.embedFunc != nil && entry.Content != "" {
 		embedding, err := ms.embedFunc(ctx, entry.Content)
-		if err == nil && len(embedding) > 0 {
+		if err != nil {
+			return fmt.Errorf("generate memory embedding: %w", err)
+		}
+		if len(embedding) > 0 {
 			newEmb = embedding
 			if ms.dialect == DialectSQLite {
 				create.SetEmbedding(float32SliceToBytes(embedding))
@@ -521,7 +532,10 @@ func (ms *personalMemoryStore) Update(ctx context.Context, id string, content st
 	var newEmb []float32
 	if ms.embedFunc != nil && content != "" {
 		embedding, err := ms.embedFunc(ctx, content)
-		if err == nil && len(embedding) > 0 {
+		if err != nil {
+			return fmt.Errorf("generate memory embedding: %w", err)
+		}
+		if len(embedding) > 0 {
 			newEmb = embedding
 			if ms.dialect == DialectSQLite {
 				update.SetEmbedding(float32SliceToBytes(embedding))

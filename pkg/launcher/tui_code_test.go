@@ -45,6 +45,14 @@ func captureEmit(out *[]events.Event, debug bool) func(string, map[string]any) {
 // TestForceHostExecution_DisablesSandbox is the core code-mode invariant:
 // after RunCodeTUI prepares the config, the sandbox must be off so tools run
 // directly on the host filesystem.
+func TestContentsToSessionEventsPreservesTurnContextMarker(t *testing.T) {
+	contextContent := genai.NewContentFromText("[Astonish Per-Turn Context — not user-authored]\n\ncontext", genai.RoleUser)
+	events := contentsToSessionEvents([]*genai.Content{contextContent})
+	if len(events) != 1 || !agent.IsTurnContextEvent(events[0]) {
+		t.Fatalf("compacted context event lost hidden marker: %#v", events)
+	}
+}
+
 func TestForceHostExecution_DisablesSandbox(t *testing.T) {
 	cfg := &config.AppConfig{}
 	// Default: nil Enabled means "enabled".

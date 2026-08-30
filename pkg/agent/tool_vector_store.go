@@ -20,6 +20,10 @@ var (
 // The ToolIndex uses this interface for storing tool description embeddings
 // and performing nearest-neighbor search. The BM25 keyword index remains
 // in-memory regardless of the vector store backend.
+type toolVectorDimensioner interface {
+	EmbeddingDimension() int
+}
+
 type ToolVectorStore interface {
 	// AddDocuments stores tool documents with their embeddings.
 	// The implementation is responsible for generating embeddings from Content.
@@ -38,15 +42,19 @@ type ToolVectorStore interface {
 	// IDs that don't exist are silently ignored.
 	DeleteByIDs(ctx context.Context, ids []string) error
 
+	// AllIDs returns every indexed document ID.
+	AllIDs(ctx context.Context) ([]string, error)
+
 	// Count returns the number of documents in the store.
 	Count() int
 }
 
 // ToolVectorDoc represents a tool document in the vector store.
 type ToolVectorDoc struct {
-	ID       string
-	Content  string
-	Metadata map[string]string
+	ID        string
+	Content   string
+	Metadata  map[string]string
+	Embedding []float32
 }
 
 // ToolVectorResult is a search result from the vector store.

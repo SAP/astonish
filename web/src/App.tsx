@@ -1645,6 +1645,8 @@ layout:
               pendingChatMessage={pendingChatMessage}
               onPendingChatMessageConsumed={() => setPendingChatMessage(null)}
               userDisplayName={auth.user?.display_name}
+              platformRole={auth.user?.platform_role}
+              isPlatformMode={isPlatformMode}
               onSessionChange={(sid: string | null) => {
                 if (path.view !== 'chat') return
                 if (sid) {

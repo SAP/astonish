@@ -2,13 +2,83 @@ package memory
 
 import (
 	"context"
+	"errors"
 	"os"
 	"runtime"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/SAP/astonish/pkg/config"
 )
+
+func newTestHugotEmbedder(run func(context.Context, string) ([]float32, error)) *HugotEmbedder {
+	return &HugotEmbedder{
+		run:      run,
+		gate:     make(chan struct{}, 1),
+		cache:    make(map[string][]float32),
+		inflight: make(map[string]*embeddingCall),
+	}
+}
+
+func TestHugotEmbeddingFuncCachesAndCoalesces(t *testing.T) {
+	var calls atomic.Int32
+	started := make(chan struct{})
+	release := make(chan struct{})
+	h := newTestHugotEmbedder(func(context.Context, string) ([]float32, error) {
+		if calls.Add(1) == 1 {
+			close(started)
+		}
+		<-release
+		return []float32{1, 2}, nil
+	})
+	embed := h.EmbeddingFunc()
+	var wg sync.WaitGroup
+	wg.Add(2)
+	for range 2 {
+		go func() {
+			defer wg.Done()
+			got, err := embed(context.Background(), "same")
+			if err != nil || len(got) != 2 {
+				t.Errorf("embed = %v, %v", got, err)
+			}
+		}()
+	}
+	<-started
+	close(release)
+	wg.Wait()
+	if _, err := embed(context.Background(), "same"); err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("pipeline calls = %d, want 1", calls.Load())
+	}
+}
+
+func TestHugotEmbeddingFuncWaitIsCancelable(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	h := newTestHugotEmbedder(func(context.Context, string) ([]float32, error) {
+		close(started)
+		<-release
+		return []float32{1}, nil
+	})
+	embed := h.EmbeddingFunc()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = embed(context.Background(), "same")
+	}()
+	<-started
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := embed(ctx, "same"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("embed error = %v, want context canceled", err)
+	}
+	close(release)
+	<-done
+}
 
 func skipIfNoModel(t *testing.T) {
 	t.Helper()

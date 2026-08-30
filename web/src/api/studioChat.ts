@@ -25,6 +25,7 @@ export interface SessionHistory {
 export interface ChatMessage {
   role: string
   content: string
+  invocationId?: string
   tool_calls?: ToolCall[]
   tool_results?: ToolResult[]
   [key: string]: unknown
@@ -72,6 +73,7 @@ export interface ConnectChatParams {
   provider?: string
   model?: string
   memoryScope?: 'personal' | 'team'
+  debug?: boolean
   onEvent: SSEEventCallback
   onError?: ErrorCallback
   onDone?: DoneCallback
@@ -104,12 +106,71 @@ export async function deleteSession(id: string): Promise<void> {
   }
 }
 
+export type CacheHitStatus = 'hit' | 'miss' | 'unknown'
+
+export interface CacheDiagnosticUsage {
+  reported: boolean
+  cacheReported: boolean
+  promptTokens: number
+  cachedTokens: number
+  candidateTokens: number
+  thoughtTokens: number
+  toolUseTokens: number
+  totalTokens: number
+}
+
+export type CacheDiagnosticKind = 'preparation' | 'provider'
+export type CacheDiagnosticStatus = 'succeeded' | 'failed'
+
+export interface CacheDiagnosticRound {
+  invocationId: string
+  kind: CacheDiagnosticKind
+  stage: string
+  status: CacheDiagnosticStatus
+  call: number
+  stream: boolean
+  provider?: string
+  model?: string
+  captureLevel: string
+  inputHash: string
+  stablePrefixElements: number
+  stablePrefixBytes: number
+  firstDivergence?: string
+  startedAt: string
+  timeToFirstResponse: number
+  duration: number
+  responseCount: number
+  usage: CacheDiagnosticUsage
+  payload?: Record<string, unknown>
+  payloadOriginalBytes: number
+  payloadCapturedBytes: number
+  payloadTruncated: boolean
+  binaryElisions: number
+  error?: string
+}
+
+export interface CacheDiagnosticsResponse {
+  sessionId: string
+  invocationId: string
+  rounds: CacheDiagnosticRound[]
+}
+
 export interface SubtaskEventItem {
   type: string
   tool_name?: string
   tool_args?: unknown
   tool_result?: unknown
   text?: string
+}
+
+export async function fetchCacheDiagnostics(sessionId: string, invocationId: string): Promise<CacheDiagnosticsResponse> {
+  const params = new URLSearchParams({ invocationId })
+  const response = await teamFetch(`${API_BASE}/sessions/${encodeURIComponent(sessionId)}/cache-diagnostics?${params}`)
+  if (!response.ok) {
+    const detail = await response.text()
+    throw new Error(detail || `Failed to fetch cache diagnostics: ${response.statusText}`)
+  }
+  return response.json()
 }
 
 export async function fetchSubtaskEvents(sessionId: string, taskName: string): Promise<SubtaskEventItem[]> {
@@ -122,7 +183,7 @@ export async function fetchSubtaskEvents(sessionId: string, taskName: string): P
   return data.events || []
 }
 
-export function connectChat({ sessionId, message, attachments, systemContext, planMode, pinnedToolGroups, autoApprove, provider, model, memoryScope, onEvent, onError, onDone }: ConnectChatParams): AbortController {
+export function connectChat({ sessionId, message, attachments, systemContext, planMode, pinnedToolGroups, autoApprove, provider, model, memoryScope, debug, onEvent, onError, onDone }: ConnectChatParams): AbortController {
   const controller = new AbortController()
 
   const run = async () => {
@@ -134,6 +195,7 @@ export function connectChat({ sessionId, message, attachments, systemContext, pl
         ...(provider ? { provider } : {}),
         ...(model ? { model } : {}),
         ...(memoryScope ? { memoryScope } : {}),
+        ...(debug ? { debug: true } : {}),
       }
       if (attachments && attachments.length > 0) {
         body.attachments = attachments

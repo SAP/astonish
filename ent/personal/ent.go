@@ -14,6 +14,7 @@ import (
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"github.com/SAP/astonish/ent/personal/app"
 	"github.com/SAP/astonish/ent/personal/appstate"
+	"github.com/SAP/astonish/ent/personal/cachediagnostic"
 	"github.com/SAP/astonish/ent/personal/credential"
 	"github.com/SAP/astonish/ent/personal/deck"
 	"github.com/SAP/astonish/ent/personal/deckversion"
@@ -86,6 +87,7 @@ func checkColumn(t, c string) error {
 		columnCheck = sql.NewColumnCheck(map[string]func(string) bool{
 			app.Table:              app.ValidColumn,
 			appstate.Table:         appstate.ValidColumn,
+			cachediagnostic.Table:  cachediagnostic.ValidColumn,
 			credential.Table:       credential.ValidColumn,
 			deck.Table:             deck.ValidColumn,
 			deckversion.Table:      deckversion.ValidColumn,

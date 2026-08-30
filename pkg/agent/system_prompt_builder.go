@@ -90,15 +90,14 @@ func (b *SystemPromptBuilder) Clone() *SystemPromptBuilder {
 // and applied to the cloned SystemPromptBuilder inside Run().
 // This eliminates shared mutable state across concurrent requests.
 type PromptOverrides struct {
-	ChannelHints   string // Channel-specific output constraints
-	SchedulerHints string // Scheduler-specific output constraints
-	SessionContext string // Per-turn session context (fleet wizard, etc.)
-	SkillIndex     string // Per-request merged skill index (platform + org + team)
+	ChannelHints    string      // Channel-specific output constraints
+	SchedulerHints  string      // Scheduler-specific output constraints
+	SessionContext  string      // Per-turn session context (fleet wizard, etc.)
+	SkillIndex      string      // Per-request merged skill index (platform + org + team)
+	AdditionalTools []tool.Tool // Per-request deferred tools resolved through execute_tool
 
-	// PinnedToolGroups lists tool group names that should always be injected
-	// into the LLM request regardless of ToolIndex scoring. Used by wizard
-	// sessions to ensure critical tools (e.g., save_sandbox_template, save_fleet_plan)
-	// remain available across all turns of a multi-turn guided conversation.
+	// PinnedToolGroups lists tool groups required by wizard sessions. Deferred
+	// members remain available through the fixed progressive tool bridge.
 	PinnedToolGroups []string
 
 	// PlanMode, when true, enables a hard runtime gate for the turn: mutating
@@ -336,7 +335,7 @@ func (b *SystemPromptBuilder) Build() string {
 		sb.WriteString("**Do NOT use `delegate_tasks` as a fallback:**\n")
 		sb.WriteString("- Never delegate because a tool seemed missing, failed once, or \"isn't on the main thread\"\n")
 		sb.WriteString("- Sub-agents do **not** have extra tools the main thread cannot get — same catalog\n")
-		sb.WriteString("- If a tool is missing: `search_tools`, then call the bare tool name (e.g. `send_email`). Retry. Do not wrap one call in a sub-agent\n")
+		sb.WriteString("- If a tool is missing: use `search_tools`, inspect it with `describe_tools`, then invoke it through `execute_tool`. Do not wrap one call in a sub-agent\n")
 		sb.WriteString("- `delegate_tasks` is for **parallelism and context isolation**, not error recovery\n\n")
 
 		sb.WriteString("**Planning strategy:**\n")
@@ -369,8 +368,8 @@ func (b *SystemPromptBuilder) Build() string {
 			sb.WriteString(fmt.Sprintf("- **%s** (%d tools) — %s\n", g.Name, toolCount, g.Description))
 		}
 		sb.WriteString("\nExamples (parallel work only): `tools: [\"browser\"]`, `tools: [\"core\", \"web\"]`\n")
-		sb.WriteString("\n**MCP tools (main thread):** After `search_tools`, call the **bare** tool name (e.g. `send_email`). ")
-		sb.WriteString("Do **not** invent `mcp:email/send_email` (app-only form). Do **not** delegate a single MCP call.\n")
+		sb.WriteString("\n**Deferred MCP tools:** After `search_tools`, inspect the match with `describe_tools`, then call `execute_tool` using the returned tool reference. ")
+		sb.WriteString("Do **not** call a deferred tool as a direct function. Do **not** delegate a single MCP call.\n")
 	}
 
 	// 6c2. Skill index (lightweight listing of available CLI tool skills)

@@ -7,6 +7,7 @@ import (
 )
 
 type llmOverrideKey struct{}
+type cacheDiagnosticsHookKey struct{}
 
 // WithLLM attaches an LLM override to the context. When present, ChatAgent.Run
 // will use this LLM instead of the agent's default c.LLM field. This enables
@@ -21,4 +22,14 @@ func WithLLM(ctx context.Context, llm model.LLM) context.Context {
 func LLMFromContext(ctx context.Context) model.LLM {
 	llm, _ := ctx.Value(llmOverrideKey{}).(model.LLM)
 	return llm
+}
+
+// WithCacheDiagnosticsHook attaches a request-scoped model-call diagnostics hook.
+func WithCacheDiagnosticsHook(ctx context.Context, hook CacheDiagnosticsHook) context.Context {
+	return context.WithValue(ctx, cacheDiagnosticsHookKey{}, hook)
+}
+
+func cacheDiagnosticsHookFromContext(ctx context.Context) CacheDiagnosticsHook {
+	hook, _ := ctx.Value(cacheDiagnosticsHookKey{}).(CacheDiagnosticsHook)
+	return hook
 }

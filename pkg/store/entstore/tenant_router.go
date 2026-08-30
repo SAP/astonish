@@ -238,8 +238,14 @@ func (s *Store) openOrgDB(slug string) (*orgent.Client, *sql.DB, error) {
 		// tables. SQLite doesn't have the SERIAL/IDENTITY issue that PostgreSQL has,
 		// so we can let Ent fully manage the schema here.
 		if err := client.Schema.Create(context.Background()); err != nil {
+			client.Close()
 			db.Close()
 			return nil, nil, fmt.Errorf("auto-migrate org sqlite db %s: %w", dbPath, err)
+		}
+		if err := s.applySQLiteExtras(context.Background(), ScopeOrg, db); err != nil {
+			client.Close()
+			db.Close()
+			return nil, nil, fmt.Errorf("apply org sqlite extras for %s: %w", dbPath, err)
 		}
 
 		return client, db, nil
@@ -343,6 +349,9 @@ func (s *Store) provisionOrgSQLite(ctx context.Context, slug string) error {
 
 	if err := client.Schema.Create(ctx); err != nil {
 		return fmt.Errorf("migrate org schema: %w", err)
+	}
+	if err := s.applySQLiteExtras(ctx, ScopeOrg, db); err != nil {
+		return fmt.Errorf("apply org sqlite extras: %w", err)
 	}
 
 	slog.Info("provisioned org database (sqlite)", "slug", slug, "path", dbPath)
@@ -681,6 +690,9 @@ func (o *orgDataStore) ProvisionTeam(ctx context.Context, slug string) error {
 		if err := client.Schema.Create(ctx); err != nil {
 			return fmt.Errorf("migrate team schema: %w", err)
 		}
+		if err := o.parentStore.applySQLiteExtras(ctx, ScopeTeam, db); err != nil {
+			return fmt.Errorf("apply team sqlite extras: %w", err)
+		}
 		slog.Info("provisioned team database (sqlite)", "org", o.orgSlug, "team", slug)
 	}
 	return nil
@@ -808,6 +820,9 @@ func (o *orgDataStore) ProvisionPersonalSchema(ctx context.Context, userID strin
 		if err := client.Schema.Create(ctx); err != nil {
 			return fmt.Errorf("migrate personal schema: %w", err)
 		}
+		if err := o.parentStore.applySQLiteExtras(ctx, ScopePersonal, db); err != nil {
+			return fmt.Errorf("apply personal sqlite extras: %w", err)
+		}
 		slog.Info("provisioned personal database (sqlite)", "org", o.orgSlug, "user", userID)
 	}
 	return nil
@@ -926,6 +941,11 @@ func (o *orgDataStore) openTeamDB(teamSlug string) (*teamDataStore, error) {
 			return nil, fmt.Errorf("team database %q has an incompatible schema from a previous version — "+
 				"please delete or move the file and restart: %w", dbPath, err)
 		}
+		if err := o.parentStore.applySQLiteExtras(context.Background(), ScopeTeam, db); err != nil {
+			client.Close()
+			db.Close()
+			return nil, fmt.Errorf("apply team sqlite extras for %q: %w", dbPath, err)
+		}
 
 		return &teamDataStore{
 			teamSlug:  teamSlug,
@@ -1041,6 +1061,11 @@ func (o *orgDataStore) openPersonalDB(userID string) (*personalDataStore, error)
 			db.Close()
 			return nil, fmt.Errorf("personal database %q has an incompatible schema from a previous version — "+
 				"please delete or move the file and restart: %w", dbPath, err)
+		}
+		if err := o.parentStore.applySQLiteExtras(context.Background(), ScopePersonal, db); err != nil {
+			client.Close()
+			db.Close()
+			return nil, fmt.Errorf("apply personal sqlite extras for %q: %w", dbPath, err)
 		}
 
 		return &personalDataStore{

@@ -916,11 +916,25 @@ type MemoryConfig struct {
 }
 
 // EmbeddingConfig controls the embedding provider for memory search.
+const (
+	DefaultEmbeddingTimeoutSeconds            = 30
+	DefaultPreProviderRetrievalTimeoutSeconds = 10
+)
+
 type EmbeddingConfig struct {
-	Provider string `yaml:"provider,omitempty" json:"provider,omitempty"` // "auto", "openai", "ollama", "openai-compat"
-	Model    string `yaml:"model,omitempty" json:"model,omitempty"`
-	BaseURL  string `yaml:"base_url,omitempty" json:"base_url,omitempty"`
-	APIKey   string `yaml:"api_key,omitempty" json:"api_key,omitempty"`
+	Provider       string `yaml:"provider,omitempty" json:"provider,omitempty"` // "auto", "openai", "ollama", "openai-compat"
+	Model          string `yaml:"model,omitempty" json:"model,omitempty"`
+	BaseURL        string `yaml:"base_url,omitempty" json:"base_url,omitempty"`
+	APIKey         string `yaml:"api_key,omitempty" json:"api_key,omitempty"`
+	TimeoutSeconds int    `yaml:"timeout_seconds,omitempty" json:"timeout_seconds,omitempty"`
+}
+
+// Timeout returns the remote embedding request timeout.
+func (c *EmbeddingConfig) Timeout() time.Duration {
+	if c == nil || c.TimeoutSeconds <= 0 {
+		return DefaultEmbeddingTimeoutSeconds * time.Second
+	}
+	return time.Duration(c.TimeoutSeconds) * time.Second
 }
 
 // ChunkingConfig controls how memory files are split into chunks.
@@ -1071,12 +1085,21 @@ func (c *SessionCleanupConfig) EffectiveMaxAgeDays() int {
 }
 
 type ChatConfig struct {
-	SystemPrompt string `yaml:"system_prompt,omitempty" json:"system_prompt,omitempty"`
-	MaxToolCalls int    `yaml:"max_tool_calls,omitempty" json:"max_tool_calls,omitempty"`
-	MaxTools     int    `yaml:"max_tools,omitempty" json:"max_tools,omitempty"`
-	AutoApprove  bool   `yaml:"auto_approve,omitempty" json:"auto_approve,omitempty"`
-	WorkspaceDir string `yaml:"workspace_dir,omitempty" json:"workspace_dir,omitempty"`
-	FlowSaveDir  string `yaml:"flow_save_dir,omitempty" json:"flow_save_dir,omitempty"`
+	SystemPrompt                       string `yaml:"system_prompt,omitempty" json:"system_prompt,omitempty"`
+	MaxToolCalls                       int    `yaml:"max_tool_calls,omitempty" json:"max_tool_calls,omitempty"`
+	MaxTools                           int    `yaml:"max_tools,omitempty" json:"max_tools,omitempty"`
+	AutoApprove                        bool   `yaml:"auto_approve,omitempty" json:"auto_approve,omitempty"`
+	WorkspaceDir                       string `yaml:"workspace_dir,omitempty" json:"workspace_dir,omitempty"`
+	FlowSaveDir                        string `yaml:"flow_save_dir,omitempty" json:"flow_save_dir,omitempty"`
+	PreProviderRetrievalTimeoutSeconds int    `yaml:"pre_provider_retrieval_timeout_seconds,omitempty" json:"pre_provider_retrieval_timeout_seconds,omitempty"`
+}
+
+// PreProviderRetrievalTimeout bounds knowledge and tool retrieval before an LLM request.
+func (c *ChatConfig) PreProviderRetrievalTimeout() time.Duration {
+	if c == nil || c.PreProviderRetrievalTimeoutSeconds <= 0 {
+		return DefaultPreProviderRetrievalTimeoutSeconds * time.Second
+	}
+	return time.Duration(c.PreProviderRetrievalTimeoutSeconds) * time.Second
 }
 
 type GeneralConfig struct {

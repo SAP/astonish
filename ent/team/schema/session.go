@@ -79,6 +79,7 @@ func (Session) Edges() []ent.Edge {
 	return []ent.Edge{
 		edge.To("events", SessionEvent.Type),
 		edge.To("chat_events", ChatSessionEvent.Type),
+		edge.To("cache_diagnostics", CacheDiagnostic.Type),
 	}
 }
 

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 
@@ -20,7 +21,14 @@ func WithRequestMCPGroups(ctx context.Context, groups map[string]*ToolGroup) con
 	if ctx == nil || len(groups) == 0 {
 		return ctx
 	}
-	return context.WithValue(ctx, requestMCPGroupsKey{}, groups)
+	merged := make(map[string]*ToolGroup, len(groups)+len(RequestMCPGroupsFromContext(ctx)))
+	for name, group := range RequestMCPGroupsFromContext(ctx) {
+		merged[name] = group
+	}
+	for name, group := range groups {
+		merged[name] = group
+	}
+	return context.WithValue(ctx, requestMCPGroupsKey{}, merged)
 }
 
 // RequestMCPGroupsFromContext returns per-request MCP tool groups, or nil.
@@ -32,31 +40,37 @@ func RequestMCPGroupsFromContext(ctx context.Context) map[string]*ToolGroup {
 	return g
 }
 
-// LookupRequestMCPTool finds a tool by bare name in request MCP groups.
-// Also resolves mcp:server/tool aliases.
-func LookupRequestMCPTool(ctx context.Context, name string) (tool.Tool, string /*groupName*/, bool) {
+// LookupRequestMCPTool resolves a request-scoped tool. Qualified group/tool
+// references are exact; ambiguous bare names are rejected.
+func LookupRequestMCPTool(ctx context.Context, name string) (tool.Tool, string, error) {
 	groups := RequestMCPGroupsFromContext(ctx)
+	name = strings.TrimSpace(name)
 	if len(groups) == 0 || name == "" {
-		return nil, "", false
+		return nil, "", nil
 	}
-	// Alias: mcp:email/send_email → send_email within that group
-	if group, toolName, isRef := parseMCPToolRef(name); isRef {
-		if toolName == "" {
-			return nil, "", false
+	if slash := strings.LastIndexByte(name, '/'); slash >= 0 {
+		if slash == 0 || slash == len(name)-1 {
+			return nil, "", nil
 		}
-		if g := groups[group]; g != nil {
-			if t := findToolInGroup(g, toolName); t != nil {
-				return t, group, true
+		groupName, toolName := name[:slash], name[slash+1:]
+		if g := groups[groupName]; g != nil {
+			return findToolInGroup(g, toolName), groupName, nil
+		}
+		return nil, "", nil
+	}
+
+	var matched tool.Tool
+	var matchedGroup string
+	for groupName, group := range groups {
+		if candidate := findToolInGroup(group, name); candidate != nil {
+			if matched != nil {
+				return nil, "", fmt.Errorf("tool %q is ambiguous across request groups; use a qualified group/tool reference", name)
 			}
-		}
-		name = toolName
-	}
-	for gName, g := range groups {
-		if t := findToolInGroup(g, name); t != nil {
-			return t, gName, true
+			matched = candidate
+			matchedGroup = groupName
 		}
 	}
-	return nil, "", false
+	return matched, matchedGroup, nil
 }
 
 func findToolInGroup(g *ToolGroup, name string) tool.Tool {
@@ -111,7 +125,7 @@ func ToolMatchesFromRequestMCP(ctx context.Context) []ToolMatch {
 				continue
 			}
 			out = append(out, ToolMatch{
-				ToolName:    t.Name(),
+				ToolName:    gName + "/" + t.Name(),
 				GroupName:   gName,
 				Description: t.Description(),
 				IsMainTool:  false,

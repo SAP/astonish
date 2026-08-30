@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SAP/astonish/pkg/agent"
+	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/credentials"
 )
 
@@ -59,6 +61,23 @@ func TestLogChatFactoryInitialization(t *testing.T) {
 	}
 }
 
+func TestShouldRegisterFactoryPerplexity(t *testing.T) {
+	appCfg := &config.AppConfig{}
+	appCfg.General.WebSearchTool = "perplexity:perplexity_web_search"
+	appCfg.PerplexityWebSearch.Provider = "provider"
+	appCfg.PerplexityWebSearch.Model = "sonar"
+
+	if shouldRegisterFactoryPerplexity(&ChatFactoryConfig{AppConfig: appCfg, PlatformMode: true}) {
+		t.Fatal("platform shared agent must use request-scoped Perplexity only")
+	}
+	if shouldRegisterFactoryPerplexity(&ChatFactoryConfig{AppConfig: appCfg}) {
+		t.Fatal("Studio personal-mode shared agent must use request-scoped Perplexity only")
+	}
+	if !shouldRegisterFactoryPerplexity(&ChatFactoryConfig{AppConfig: appCfg, CodeMode: true}) {
+		t.Fatal("local Code mode should register its factory-scoped Perplexity tool")
+	}
+}
+
 func TestSubAgentCredentialStoreWiring(t *testing.T) {
 	t.Run("nil store remains a nil interface", func(t *testing.T) {
 		var store *credentials.Store
@@ -87,34 +106,24 @@ func TestSubAgentCredentialStoreWiring(t *testing.T) {
 	})
 }
 
-// TestMainThreadToolAllowlist_IncludesTreeSitter guards the fix for slow code
-// mode: the structural navigation tools must be available to the top-level
-// agent directly, so it does not fall back to grep_search + repeated read_file
-// (which inflates context and slows inference). See
-// docs/architecture/code-intelligence.md and the ce7f4295 session analysis.
-func TestMainThreadToolAllowlist_IncludesTreeSitter(t *testing.T) {
-	allow := mainThreadToolAllowlist()
-	for _, name := range []string{"repo_map", "code_definition", "code_references"} {
-		if !allow[name] {
-			t.Errorf("expected %q in the main-thread tool allowlist (structural navigation must be directly available)", name)
-		}
+func TestMainThreadToolAllowlistIsEmpty(t *testing.T) {
+	if allow := mainThreadToolAllowlist(); len(allow) != 0 {
+		t.Fatalf("main-thread allowlist = %#v, want all domain tools deferred", allow)
 	}
 }
 
-func TestMainThreadToolAllowlist_CoreEditingTools(t *testing.T) {
-	allow := mainThreadToolAllowlist()
-	for _, name := range []string{"read_file", "write_file", "edit_file", "shell_command", "grep_search", "find_files"} {
-		if !allow[name] {
-			t.Errorf("expected core editing tool %q in the main-thread allowlist", name)
-		}
+func TestFixedProviderToolsContract(t *testing.T) {
+	providerTools, err := fixedProviderTools(agent.NewLexicalToolIndex())
+	if err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestMainThreadToolAllowlist_SkillTools(t *testing.T) {
-	allow := mainThreadToolAllowlist()
-	for _, name := range []string{"skill_lookup", "create_skill"} {
-		if !allow[name] {
-			t.Errorf("expected skill tool %q in the main-thread allowlist", name)
+	want := []string{"search_tools", "describe_tools", "execute_tool"}
+	if len(providerTools) != len(want) {
+		t.Fatalf("provider-visible tools = %d, want %d", len(providerTools), len(want))
+	}
+	for i, name := range want {
+		if got := providerTools[i].Name(); got != name {
+			t.Fatalf("provider-visible tool %d = %q, want %q", i, got, name)
 		}
 	}
 }
@@ -137,51 +146,5 @@ func TestSkillLookupMode(t *testing.T) {
 				t.Fatalf("skillLookupMode(%v, %v) = %q, want %q", tt.platformMode, tt.codeMode, got, tt.want)
 			}
 		})
-	}
-}
-
-// TestMainThreadToolAllowlist_InteractiveTerminalTools guards the fix for the
-// interactive-terminal drive loop: shell_command runs in a PTY and can return
-// waiting_for_input=true, so the top-level agent must directly hold the process_*
-// tools to respond (process_write) without a search_tools detour — matching chat
-// mode. See docs/architecture/terminal-app.md and the ff25d217 session analysis.
-func TestMainThreadToolAllowlist_InteractiveTerminalTools(t *testing.T) {
-	allow := mainThreadToolAllowlist()
-	for _, name := range []string{"process_read", "process_write", "process_kill", "process_list"} {
-		if !allow[name] {
-			t.Errorf("expected interactive-terminal tool %q in the main-thread allowlist", name)
-		}
-	}
-}
-
-// TestMainThreadToolAllowlist_PlanTools guards the fix for the plan-tracking
-// loop: both announce_plan and update_plan are surfaced directly to the
-// top-level agent. The system prompt instructs the agent to call update_plan as
-// it works on the main thread; if update_plan is missing from this allowlist it
-// is relegated to the deferred "core" group (reachable only via search_tools)
-// and calling it fails at runtime with "tool 'update_plan' not found" — the
-// exact asymmetry where announce_plan worked but update_plan did not.
-func TestMainThreadToolAllowlist_PlanTools(t *testing.T) {
-	allow := mainThreadToolAllowlist()
-	for _, name := range []string{"announce_plan", "update_plan"} {
-		if !allow[name] {
-			t.Errorf("expected plan tool %q in the main-thread allowlist (update_plan must be a direct companion to announce_plan)", name)
-		}
-	}
-}
-
-// TestMainThreadToolAllowlist_GraphPlanTransitionTools guards the fix for the
-// Graph-Optimized Plan mode phase-transition tools. The phase state machine
-// lives on the main-thread ChatAgent; advancing it from a sub-agent would
-// silently fail because sub-agents have no ActiveGraphPlan. Without this entry,
-// the model enters the GRAPH phase via codegraph_explore but then receives
-// "tool 'gplan_reads' not found" when it tries to advance — leaving it stuck
-// in the GRAPH phase with both read_file and grep_search gated out.
-func TestMainThreadToolAllowlist_GraphPlanTransitionTools(t *testing.T) {
-	allow := mainThreadToolAllowlist()
-	for _, name := range []string{"gplan_reads", "gplan_gaps", "gplan_finalize"} {
-		if !allow[name] {
-			t.Errorf("expected graph-plan transition tool %q in the main-thread allowlist (phase transitions must target the main ChatAgent)", name)
-		}
 	}
 }

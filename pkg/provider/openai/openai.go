@@ -13,8 +13,9 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/sashabaranov/go-openai"
+	"github.com/SAP/astonish/pkg/common"
 	"github.com/SAP/astonish/pkg/provider/llmerror"
+	"github.com/sashabaranov/go-openai"
 	"google.golang.org/adk/model"
 	"google.golang.org/genai"
 )
@@ -56,7 +57,13 @@ func NewProviderWithMaxTokens(client *openai.Client, modelName string, supportsJ
 
 // GenerateContent implements model.LLM.
 func (p *Provider) GenerateContent(ctx context.Context, req *model.LLMRequest, streaming bool) iter.Seq2[*model.LLMResponse, error] {
+	canonicalReq, canonicalErr := common.CanonicalizeRequestTools(req)
 	return func(yield func(*model.LLMResponse, error) bool) {
+		if canonicalErr != nil {
+			yield(nil, fmt.Errorf("canonicalize tools: %w", canonicalErr))
+			return
+		}
+		req = canonicalReq
 		messages := p.toOpenAIMessages(req)
 
 		// Extract tools if present
@@ -197,11 +204,7 @@ func (p *Provider) GenerateContent(ctx context.Context, req *model.LLMRequest, s
 				// Capture token usage from the final chunk (OpenAI sends usage
 				// on the last chunk when StreamOptions.IncludeUsage is true).
 				if resp.Usage != nil {
-					streamUsage = &genai.GenerateContentResponseUsageMetadata{
-						PromptTokenCount:     int32(resp.Usage.PromptTokens),
-						CandidatesTokenCount: int32(resp.Usage.CompletionTokens),
-						TotalTokenCount:      int32(resp.Usage.TotalTokens),
-					}
+					streamUsage = usageMetadata(resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.TotalTokens, resp.Usage.PromptTokensDetails)
 				}
 
 				// Handle tool call deltas
@@ -840,12 +843,20 @@ func (p *Provider) toLLMResponse(resp openai.ChatCompletionResponse) *model.LLMR
 			Role:  "model",
 			Parts: parts,
 		},
-		UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
-			PromptTokenCount:     int32(resp.Usage.PromptTokens),
-			CandidatesTokenCount: int32(resp.Usage.CompletionTokens),
-			TotalTokenCount:      int32(resp.Usage.TotalTokens),
-		},
+		UsageMetadata: usageMetadata(resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.TotalTokens, resp.Usage.PromptTokensDetails),
 	}
+}
+
+func usageMetadata(prompt, completion, total int, details *openai.PromptTokensDetails) *genai.GenerateContentResponseUsageMetadata {
+	usage := &genai.GenerateContentResponseUsageMetadata{
+		PromptTokenCount:     int32(prompt),
+		CandidatesTokenCount: int32(completion),
+		TotalTokenCount:      int32(total),
+	}
+	if details != nil {
+		usage.CachedContentTokenCount = int32(details.CachedTokens)
+	}
+	return usage
 }
 
 func (p *Provider) toLLMResponseStream(resp openai.ChatCompletionStreamResponse) *model.LLMResponse {

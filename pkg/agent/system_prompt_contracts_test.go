@@ -17,7 +17,7 @@ var updateGolden = flag.Bool("update", false, "update golden files")
 // maximalBuilder returns a SystemPromptBuilder with every feature enabled,
 // producing the most complete chat-mode prompt possible. This is the configuration
 // used for golden file comparison and maximal contract assertions.
-// Note: code-mode fields (ProjectContext, MCPFirstClass, PlanFilePersistence,
+// Note: code-mode fields (ProjectContext, PlanFilePersistence,
 // EnforceAuthorization) are owned by CodeSystemPromptBuilder and are not
 // present here. See maximalCodeBuilder() in system_prompt_contracts_code_test.go.
 func maximalBuilder() *SystemPromptBuilder {

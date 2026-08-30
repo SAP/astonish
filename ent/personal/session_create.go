@@ -11,6 +11,7 @@ import (
 	"entgo.io/ent/dialect"
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
+	"github.com/SAP/astonish/ent/personal/cachediagnostic"
 	"github.com/SAP/astonish/ent/personal/session"
 	"github.com/SAP/astonish/ent/personal/sessionevent"
 	"github.com/google/uuid"
@@ -232,6 +233,21 @@ func (_c *SessionCreate) AddEvents(v ...*SessionEvent) *SessionCreate {
 	return _c.AddEventIDs(ids...)
 }
 
+// AddCacheDiagnosticIDs adds the "cache_diagnostics" edge to the CacheDiagnostic entity by IDs.
+func (_c *SessionCreate) AddCacheDiagnosticIDs(ids ...int64) *SessionCreate {
+	_c.mutation.AddCacheDiagnosticIDs(ids...)
+	return _c
+}
+
+// AddCacheDiagnostics adds the "cache_diagnostics" edges to the CacheDiagnostic entity.
+func (_c *SessionCreate) AddCacheDiagnostics(v ...*CacheDiagnostic) *SessionCreate {
+	ids := make([]int64, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _c.AddCacheDiagnosticIDs(ids...)
+}
+
 // Mutation returns the SessionMutation object of the builder.
 func (_c *SessionCreate) Mutation() *SessionMutation {
 	return _c.mutation
@@ -445,6 +461,22 @@ func (_c *SessionCreate) createSpec() (*Session, *sqlgraph.CreateSpec) {
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(sessionevent.FieldID, field.TypeInt),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges = append(_spec.Edges, edge)
+	}
+	if nodes := _c.mutation.CacheDiagnosticsIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   session.CacheDiagnosticsTable,
+			Columns: []string{session.CacheDiagnosticsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(cachediagnostic.FieldID, field.TypeInt64),
 			},
 		}
 		for _, k := range nodes {

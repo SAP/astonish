@@ -15,6 +15,7 @@ import (
 	"github.com/SAP/astonish/ent/team/a2aagent"
 	"github.com/SAP/astonish/ent/team/app"
 	"github.com/SAP/astonish/ent/team/appstate"
+	"github.com/SAP/astonish/ent/team/cachediagnostic"
 	"github.com/SAP/astonish/ent/team/chatsessionevent"
 	"github.com/SAP/astonish/ent/team/credential"
 	"github.com/SAP/astonish/ent/team/deck"
@@ -104,6 +105,7 @@ func checkColumn(t, c string) error {
 			a2aagent.Table:            a2aagent.ValidColumn,
 			app.Table:                 app.ValidColumn,
 			appstate.Table:            appstate.ValidColumn,
+			cachediagnostic.Table:     cachediagnostic.ValidColumn,
 			chatsessionevent.Table:    chatsessionevent.ValidColumn,
 			credential.Table:          credential.ValidColumn,
 			deck.Table:                deck.ValidColumn,

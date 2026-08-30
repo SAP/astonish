@@ -238,11 +238,10 @@ func Run(cfg RunConfig) error {
 	// Run migrations
 	migrationStarted := time.Now()
 	if err := entStore.MigrateAllSchemas(context.Background()); err != nil {
-		logger.Printf("Warning: migration errors: %v", err)
 		logStartupPhase("migrations", "failed", migrationStarted)
-	} else {
-		logStartupPhase("migrations", "complete", migrationStarted)
+		return fmt.Errorf("failed to migrate storage schemas: %w", err)
 	}
+	logStartupPhase("migrations", "complete", migrationStarted)
 
 	// Initialize embedding
 	embeddingStarted := time.Now()
@@ -250,18 +249,17 @@ func Run(cfg RunConfig) error {
 		embGetSecret := daemonSecretGetter(backend, credStore)
 		embResult, embErr := memory.ResolveEmbeddingFunc(appCfg, &appCfg.Memory, cfg.Debug, embGetSecret)
 		if embErr != nil {
-			logger.Printf("Warning: embedding unavailable (keyword-only search): %v", embErr)
 			logStartupPhase("embedding", "failed", embeddingStarted)
-		} else {
-			backend.SetEmbedFunc(func(ctx context.Context, text string) ([]float32, error) {
-				return embResult.EmbeddingFunc(ctx, text)
-			})
-			if embResult.Cleanup != nil {
-				defer embResult.Cleanup()
-			}
-			logger.Printf("Memory stores: hybrid vector+keyword search enabled")
-			logStartupPhase("embedding", "complete", embeddingStarted)
+			return fmt.Errorf("initialize semantic retrieval: %w", embErr)
 		}
+		backend.SetEmbedFunc(func(ctx context.Context, text string) ([]float32, error) {
+			return embResult.EmbeddingFunc(ctx, text)
+		})
+		if embResult.Cleanup != nil {
+			defer embResult.Cleanup()
+		}
+		logger.Printf("Memory stores: hybrid vector+keyword search enabled")
+		logStartupPhase("embedding", "complete", embeddingStarted)
 	}
 
 	// In platform mode, cascade platform and default-org provider settings
@@ -279,19 +277,20 @@ func Run(cfg RunConfig) error {
 	// resolve API keys from the DB in platform mode (not the file-based store).
 	config.SetInstalledSecretGetter(getSecret)
 
-	// Create the ToolVectorStore for platform mode.
-	// This enables dynamic tool injection (semantic tool discovery) in platform mode.
+	// Create the ToolVectorStore for semantic catalog search in platform mode.
 	var platformToolVectorStore agent.ToolVectorStore
 	var platformEmbedFunc agent.EmbedFunc
 	if embedFunc := backend.GetEmbedFunc(); embedFunc != nil {
 		vs, vsErr := backend.NewToolVectorStore(context.Background())
-		if vsErr == nil && vs != nil {
-			platformToolVectorStore = vs
-			platformEmbedFunc = agent.EmbedFunc(embedFunc)
-			logger.Printf("Tool discovery: vector-backed (platform mode)")
-		} else if vsErr != nil && cfg.Debug {
-			logger.Printf("Warning: failed to create tool vector store: %v", vsErr)
+		if vsErr != nil {
+			return fmt.Errorf("create semantic tool vector store: %w", vsErr)
 		}
+		if vs == nil {
+			return fmt.Errorf("create semantic tool vector store: backend returned nil")
+		}
+		platformToolVectorStore = vs
+		platformEmbedFunc = agent.EmbedFunc(embedFunc)
+		logger.Printf("Tool discovery: vector-backed (platform mode)")
 	}
 
 	// Set up MCP environment variables
@@ -1709,20 +1708,16 @@ func Run(cfg RunConfig) error {
 	api.SetPreWarmContextFunc(buildPreWarmCtx)
 	api.SetLLMPool(llmPool)
 
-	// Complete this channel exactly once after the Studio factory has either
-	// initialized or failed. Optional channel bootstrap waits for it so the two
-	// heavyweight factory calls never contend for process-wide credential, tool,
-	// MCP, and provider initialization during a cold daemon start.
+	// Complete Studio initialization before advertising HTTP readiness. Semantic
+	// retrieval is required when configured, so initialization failures must stop
+	// startup rather than surface later on the first request.
 	studioPreWarmDone := make(chan struct{})
-	go func() {
-		defer close(studioPreWarmDone)
-		warmCtx := buildPreWarmCtx()
-		if err := api.GetChatManager().PreWarm(warmCtx); err != nil {
-			logger.Printf("Studio chat pre-warm failed (will retry on first request): %v", err)
-		} else {
-			logger.Printf("Studio chat agent pre-warmed successfully")
-		}
-	}()
+	warmCtx := buildPreWarmCtx()
+	if err := api.GetChatManager().PreWarm(warmCtx); err != nil {
+		return fmt.Errorf("pre-warm Studio chat agent: %w", err)
+	}
+	logger.Printf("Studio chat agent pre-warmed successfully")
+	close(studioPreWarmDone)
 
 	// Discover tools for config-file (mcp_config.json) MCP servers that are not
 	// yet cached, so they "just work" in a local platform install without a

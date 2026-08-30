@@ -834,7 +834,7 @@ The index consumes approximately 1.5 KB per memory entry (384 dims * 4 bytes + m
 
 ### FTS5 Keyword Search
 
-SQLite's FTS5 provides BM25-ranked full-text search natively:
+SQLite's FTS5 provides BM25-ranked full-text search natively. These virtual tables and their synchronization triggers are SQLite-specific post-DDL objects, not Ent schemas. Tenant database provisioning and every tenant database open apply them after `Schema.Create`; opening an older database repairs missing objects and rebuilds a newly created FTS index from existing memory rows. Failure to create or rebuild a required index aborts that open or provisioning operation rather than disabling keyword retrieval.
 
 ```go
 func (s *memoryStore) keywordSearch(ctx context.Context, query string, maxResults int) ([]scoredResult, error) {

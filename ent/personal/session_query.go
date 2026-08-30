@@ -12,6 +12,7 @@ import (
 	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
+	"github.com/SAP/astonish/ent/personal/cachediagnostic"
 	"github.com/SAP/astonish/ent/personal/predicate"
 	"github.com/SAP/astonish/ent/personal/session"
 	"github.com/SAP/astonish/ent/personal/sessionevent"
@@ -20,11 +21,12 @@ import (
 // SessionQuery is the builder for querying Session entities.
 type SessionQuery struct {
 	config
-	ctx        *QueryContext
-	order      []session.OrderOption
-	inters     []Interceptor
-	predicates []predicate.Session
-	withEvents *SessionEventQuery
+	ctx                  *QueryContext
+	order                []session.OrderOption
+	inters               []Interceptor
+	predicates           []predicate.Session
+	withEvents           *SessionEventQuery
+	withCacheDiagnostics *CacheDiagnosticQuery
 	// intermediate query (i.e. traversal path).
 	sql  *sql.Selector
 	path func(context.Context) (*sql.Selector, error)
@@ -76,6 +78,28 @@ func (_q *SessionQuery) QueryEvents() *SessionEventQuery {
 			sqlgraph.From(session.Table, session.FieldID, selector),
 			sqlgraph.To(sessionevent.Table, sessionevent.FieldID),
 			sqlgraph.Edge(sqlgraph.O2M, false, session.EventsTable, session.EventsColumn),
+		)
+		fromU = sqlgraph.SetNeighbors(_q.driver.Dialect(), step)
+		return fromU, nil
+	}
+	return query
+}
+
+// QueryCacheDiagnostics chains the current query on the "cache_diagnostics" edge.
+func (_q *SessionQuery) QueryCacheDiagnostics() *CacheDiagnosticQuery {
+	query := (&CacheDiagnosticClient{config: _q.config}).Query()
+	query.path = func(ctx context.Context) (fromU *sql.Selector, err error) {
+		if err := _q.prepareQuery(ctx); err != nil {
+			return nil, err
+		}
+		selector := _q.sqlQuery(ctx)
+		if err := selector.Err(); err != nil {
+			return nil, err
+		}
+		step := sqlgraph.NewStep(
+			sqlgraph.From(session.Table, session.FieldID, selector),
+			sqlgraph.To(cachediagnostic.Table, cachediagnostic.FieldID),
+			sqlgraph.Edge(sqlgraph.O2M, false, session.CacheDiagnosticsTable, session.CacheDiagnosticsColumn),
 		)
 		fromU = sqlgraph.SetNeighbors(_q.driver.Dialect(), step)
 		return fromU, nil
@@ -270,12 +294,13 @@ func (_q *SessionQuery) Clone() *SessionQuery {
 		return nil
 	}
 	return &SessionQuery{
-		config:     _q.config,
-		ctx:        _q.ctx.Clone(),
-		order:      append([]session.OrderOption{}, _q.order...),
-		inters:     append([]Interceptor{}, _q.inters...),
-		predicates: append([]predicate.Session{}, _q.predicates...),
-		withEvents: _q.withEvents.Clone(),
+		config:               _q.config,
+		ctx:                  _q.ctx.Clone(),
+		order:                append([]session.OrderOption{}, _q.order...),
+		inters:               append([]Interceptor{}, _q.inters...),
+		predicates:           append([]predicate.Session{}, _q.predicates...),
+		withEvents:           _q.withEvents.Clone(),
+		withCacheDiagnostics: _q.withCacheDiagnostics.Clone(),
 		// clone intermediate query.
 		sql:  _q.sql.Clone(),
 		path: _q.path,
@@ -290,6 +315,17 @@ func (_q *SessionQuery) WithEvents(opts ...func(*SessionEventQuery)) *SessionQue
 		opt(query)
 	}
 	_q.withEvents = query
+	return _q
+}
+
+// WithCacheDiagnostics tells the query-builder to eager-load the nodes that are connected to
+// the "cache_diagnostics" edge. The optional arguments are used to configure the query builder of the edge.
+func (_q *SessionQuery) WithCacheDiagnostics(opts ...func(*CacheDiagnosticQuery)) *SessionQuery {
+	query := (&CacheDiagnosticClient{config: _q.config}).Query()
+	for _, opt := range opts {
+		opt(query)
+	}
+	_q.withCacheDiagnostics = query
 	return _q
 }
 
@@ -371,8 +407,9 @@ func (_q *SessionQuery) sqlAll(ctx context.Context, hooks ...queryHook) ([]*Sess
 	var (
 		nodes       = []*Session{}
 		_spec       = _q.querySpec()
-		loadedTypes = [1]bool{
+		loadedTypes = [2]bool{
 			_q.withEvents != nil,
+			_q.withCacheDiagnostics != nil,
 		}
 	)
 	_spec.ScanValues = func(columns []string) ([]any, error) {
@@ -400,6 +437,13 @@ func (_q *SessionQuery) sqlAll(ctx context.Context, hooks ...queryHook) ([]*Sess
 			return nil, err
 		}
 	}
+	if query := _q.withCacheDiagnostics; query != nil {
+		if err := _q.loadCacheDiagnostics(ctx, query, nodes,
+			func(n *Session) { n.Edges.CacheDiagnostics = []*CacheDiagnostic{} },
+			func(n *Session, e *CacheDiagnostic) { n.Edges.CacheDiagnostics = append(n.Edges.CacheDiagnostics, e) }); err != nil {
+			return nil, err
+		}
+	}
 	return nodes, nil
 }
 
@@ -418,6 +462,36 @@ func (_q *SessionQuery) loadEvents(ctx context.Context, query *SessionEventQuery
 	}
 	query.Where(predicate.SessionEvent(func(s *sql.Selector) {
 		s.Where(sql.InValues(s.C(session.EventsColumn), fks...))
+	}))
+	neighbors, err := query.All(ctx)
+	if err != nil {
+		return err
+	}
+	for _, n := range neighbors {
+		fk := n.SessionID
+		node, ok := nodeids[fk]
+		if !ok {
+			return fmt.Errorf(`unexpected referenced foreign-key "session_id" returned %v for node %v`, fk, n.ID)
+		}
+		assign(node, n)
+	}
+	return nil
+}
+func (_q *SessionQuery) loadCacheDiagnostics(ctx context.Context, query *CacheDiagnosticQuery, nodes []*Session, init func(*Session), assign func(*Session, *CacheDiagnostic)) error {
+	fks := make([]driver.Value, 0, len(nodes))
+	nodeids := make(map[string]*Session)
+	for i := range nodes {
+		fks = append(fks, nodes[i].ID)
+		nodeids[nodes[i].ID] = nodes[i]
+		if init != nil {
+			init(nodes[i])
+		}
+	}
+	if len(query.ctx.Fields) > 0 {
+		query.ctx.AppendFieldOnce(cachediagnostic.FieldSessionID)
+	}
+	query.Where(predicate.CacheDiagnostic(func(s *sql.Selector) {
+		s.Where(sql.InValues(s.C(session.CacheDiagnosticsColumn), fks...))
 	}))
 	neighbors, err := query.All(ctx)
 	if err != nil {

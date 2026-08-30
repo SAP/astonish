@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/credentials"
@@ -60,10 +61,11 @@ type MemoryResponse struct {
 
 // EmbeddingResponse wraps EmbeddingConfig with secret masking.
 type EmbeddingResponse struct {
-	Provider string `json:"provider"`
-	Model    string `json:"model"`
-	BaseURL  string `json:"base_url"`
-	APIKey   string `json:"api_key"`
+	Provider       string `json:"provider"`
+	Model          string `json:"model"`
+	BaseURL        string `json:"base_url"`
+	APIKey         string `json:"api_key"`
+	TimeoutSeconds int    `json:"timeout_seconds"`
 }
 
 // SyncResponse wraps SyncConfig with resolved boolean.
@@ -151,12 +153,13 @@ type FullConfigUpdateRequest struct {
 
 // ChatUpdateRequest for updating chat settings.
 type ChatUpdateRequest struct {
-	SystemPrompt string `json:"system_prompt"`
-	MaxToolCalls int    `json:"max_tool_calls"`
-	MaxTools     int    `json:"max_tools"`
-	AutoApprove  bool   `json:"auto_approve"`
-	WorkspaceDir string `json:"workspace_dir"`
-	FlowSaveDir  string `json:"flow_save_dir"`
+	SystemPrompt                       string `json:"system_prompt"`
+	MaxToolCalls                       int    `json:"max_tool_calls"`
+	MaxTools                           int    `json:"max_tools"`
+	AutoApprove                        bool   `json:"auto_approve"`
+	WorkspaceDir                       string `json:"workspace_dir"`
+	FlowSaveDir                        string `json:"flow_save_dir"`
+	PreProviderRetrievalTimeoutSeconds int    `json:"pre_provider_retrieval_timeout_seconds"`
 }
 
 // SessionsUpdateRequest for updating session settings.
@@ -192,10 +195,11 @@ type MemoryUpdateRequest struct {
 
 // EmbeddingUpdateRequest for updating embedding settings.
 type EmbeddingUpdateRequest struct {
-	Provider string `json:"provider"`
-	Model    string `json:"model"`
-	BaseURL  string `json:"base_url"`
-	APIKey   string `json:"api_key"`
+	Provider       string `json:"provider"`
+	Model          string `json:"model"`
+	BaseURL        string `json:"base_url"`
+	APIKey         string `json:"api_key"`
+	TimeoutSeconds int    `json:"timeout_seconds"`
 }
 
 // SyncUpdateRequest for updating sync settings.
@@ -311,9 +315,11 @@ func GetFullConfigHandler(w http.ResponseWriter, r *http.Request) {
 	cfg := effectiveAppConfig(r)
 
 	store := getAPICredentialStore()
+	chat := cfg.Chat
+	chat.PreProviderRetrievalTimeoutSeconds = int(chat.PreProviderRetrievalTimeout() / time.Second)
 
 	resp := FullConfigResponse{
-		Chat: cfg.Chat,
+		Chat: chat,
 		Sessions: SessionsResponse{
 			Storage: cfg.Sessions.Storage,
 			BaseDir: cfg.Sessions.BaseDir,
@@ -331,10 +337,11 @@ func GetFullConfigHandler(w http.ResponseWriter, r *http.Request) {
 			MemoryDir: cfg.Memory.MemoryDir,
 			VectorDir: cfg.Memory.VectorDir,
 			Embedding: EmbeddingResponse{
-				Provider: cfg.Memory.Embedding.Provider,
-				Model:    cfg.Memory.Embedding.Model,
-				BaseURL:  cfg.Memory.Embedding.BaseURL,
-				APIKey:   maskSecret(cfg.Memory.Embedding.APIKey),
+				Provider:       cfg.Memory.Embedding.Provider,
+				Model:          cfg.Memory.Embedding.Model,
+				BaseURL:        cfg.Memory.Embedding.BaseURL,
+				APIKey:         maskSecret(cfg.Memory.Embedding.APIKey),
+				TimeoutSeconds: int(cfg.Memory.Embedding.Timeout() / time.Second),
 			},
 			Chunking: cfg.Memory.Chunking,
 			Search:   cfg.Memory.Search,
@@ -428,12 +435,13 @@ func UpdateFullConfigHandler(w http.ResponseWriter, r *http.Request) {
 
 	if req.Chat != nil {
 		cfg.Chat = config.ChatConfig{
-			SystemPrompt: req.Chat.SystemPrompt,
-			MaxToolCalls: req.Chat.MaxToolCalls,
-			MaxTools:     req.Chat.MaxTools,
-			AutoApprove:  req.Chat.AutoApprove,
-			WorkspaceDir: req.Chat.WorkspaceDir,
-			FlowSaveDir:  req.Chat.FlowSaveDir,
+			SystemPrompt:                       req.Chat.SystemPrompt,
+			MaxToolCalls:                       req.Chat.MaxToolCalls,
+			MaxTools:                           req.Chat.MaxTools,
+			AutoApprove:                        req.Chat.AutoApprove,
+			WorkspaceDir:                       req.Chat.WorkspaceDir,
+			FlowSaveDir:                        req.Chat.FlowSaveDir,
+			PreProviderRetrievalTimeoutSeconds: req.Chat.PreProviderRetrievalTimeoutSeconds,
 		}
 	}
 
@@ -466,10 +474,11 @@ func UpdateFullConfigHandler(w http.ResponseWriter, r *http.Request) {
 			MemoryDir: req.Memory.MemoryDir,
 			VectorDir: req.Memory.VectorDir,
 			Embedding: config.EmbeddingConfig{
-				Provider: req.Memory.Embedding.Provider,
-				Model:    req.Memory.Embedding.Model,
-				BaseURL:  req.Memory.Embedding.BaseURL,
-				APIKey:   apiKey,
+				Provider:       req.Memory.Embedding.Provider,
+				Model:          req.Memory.Embedding.Model,
+				BaseURL:        req.Memory.Embedding.BaseURL,
+				APIKey:         apiKey,
+				TimeoutSeconds: req.Memory.Embedding.TimeoutSeconds,
 			},
 			Chunking: req.Memory.Chunking,
 			Search:   req.Memory.Search,

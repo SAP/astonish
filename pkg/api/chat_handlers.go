@@ -47,7 +47,7 @@ type StudioChatRequest struct {
 	Message          string           `json:"message"`
 	Attachments      []ChatAttachment `json:"attachments,omitempty"` // file attachments (base64)
 	AutoApprove      bool             `json:"autoApprove,omitempty"`
-	Debug            bool             `json:"debug,omitempty"`            // reserved for future debug streaming
+	Debug            bool             `json:"debug,omitempty"`            // platform superadmin-only diagnostics
 	SystemContext    string           `json:"systemContext,omitempty"`    // per-turn system instructions (not shown to user)
 	PlanMode         bool             `json:"planMode,omitempty"`         // per-turn plan-mode gate: refuse mutating tools + delegate_tasks
 	PinnedToolGroups []string         `json:"pinnedToolGroups,omitempty"` // tool groups to always inject (wizard sessions)
@@ -118,12 +118,13 @@ type FleetMessageSummary struct {
 
 // StudioMessage is a simplified message for the frontend.
 type StudioMessage struct {
-	Type       string      `json:"type"`                 // user, agent, tool_call, tool_result, image, subtask_execution, plan, distill_preview, distill_saved, app_preview, system
-	Content    string      `json:"content,omitempty"`    // text content
-	ToolName   string      `json:"toolName,omitempty"`   // for tool_call/tool_result
-	ToolID     string      `json:"toolId,omitempty"`     // for tool_call/tool_result (FunctionCall.ID / FunctionResponse.ID)
-	ToolArgs   interface{} `json:"toolArgs,omitempty"`   // for tool_call
-	ToolResult interface{} `json:"toolResult,omitempty"` // for tool_result
+	InvocationID string      `json:"invocationId,omitempty"`
+	Type         string      `json:"type"`                 // user, agent, tool_call, tool_result, image, subtask_execution, plan, distill_preview, distill_saved, app_preview, system
+	Content      string      `json:"content,omitempty"`    // text content
+	ToolName     string      `json:"toolName,omitempty"`   // for tool_call/tool_result
+	ToolID       string      `json:"toolId,omitempty"`     // for tool_call/tool_result (FunctionCall.ID / FunctionResponse.ID)
+	ToolArgs     interface{} `json:"toolArgs,omitempty"`   // for tool_call
+	ToolResult   interface{} `json:"toolResult,omitempty"` // for tool_result
 
 	// image fields — model-returned or reconstructed InlineData images
 	Data     string `json:"data,omitempty"`     // base64-encoded image bytes
@@ -594,6 +595,10 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	userID := effectiveUserID(r)
+	if req.Debug && !IsPlatformAdmin(GetPlatformUser(r)) {
+		respondError(w, http.StatusForbidden, "platform superadmin access required for debug mode")
+		return
+	}
 
 	cm := GetChatManager()
 	if err := cm.ensureReady(r.Context()); err != nil {
@@ -1049,6 +1054,14 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Launch background runner — the agent runs independently of this HTTP request.
 	runner := newChatRunner(sessionID, userID, isNew)
+	runner.ctx = store.WithDebugEnabled(runner.ctx, req.Debug)
+	if req.Debug {
+		if diagnosticsStore, ok := sessionService.(store.SessionStore); ok {
+			runner.ctx = store.WithCacheDiagnosticRecorder(runner.ctx, func(ctx context.Context, diagnostic store.CacheDiagnostic) error {
+				return diagnosticsStore.AppendCacheDiagnostic(ctx, sessionID, diagnostic)
+			})
+		}
+	}
 	runner.titleWaitTimeout = 30 * time.Second // wait for title refine before closing SSE
 	if files := chatFilesFromAttachments(req.Attachments); len(files) > 0 {
 		runner.InjectChatFiles(files)
@@ -1971,7 +1984,7 @@ func sessionProviderHasCredential(ctx context.Context, svc *store.Services, name
 // This closes the gap where a singleton ChatAgent pre-warmed before platform
 // web settings were saved (or with a different tenant context) would leave
 // some browser sessions without web search while others worked.
-func applyPerRequestWebSearch(runner *ChatRunner, chatAgent *agent.ChatAgent, appCfg *config.AppConfig) {
+func applyPerRequestWebSearch(runner *ChatRunner, _ *agent.ChatAgent, appCfg *config.AppConfig) {
 	if runner == nil || appCfg == nil {
 		return
 	}
@@ -2006,14 +2019,12 @@ func applyPerRequestWebSearch(runner *ChatRunner, chatAgent *agent.ChatAgent, ap
 
 	runner.InjectWebSearchPrompt(searchAvailable, searchName, extractAvailable, extractName)
 
-	// Late-bind Perplexity onto the main thread if selected but missing from the
-	// singleton agent (common after config change without a full process restart).
-	if searchAvailable && searchServer == "perplexity" && chatAgent != nil && !chatAgent.HasMainThreadTool("perplexity_web_search") {
+	// Perplexity is request-scoped because the singleton serves multiple tenants.
+	if searchAvailable && searchServer == "perplexity" {
 		if t, err := tools.NewPerplexityWebSearchTool(appCfg, provider.GetProvider); err != nil {
-			slog.Warn("failed to late-bind perplexity_web_search tool", "error", err)
+			slog.Warn("failed to create request-scoped perplexity_web_search tool", "error", err)
 		} else {
-			chatAgent.EnsureMainThreadTool(t)
-			slog.Info("late-bound perplexity_web_search onto chat agent for platform web search")
+			runner.InjectRequestTools(t)
 		}
 	}
 }

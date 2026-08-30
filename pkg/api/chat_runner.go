@@ -24,6 +24,7 @@ import (
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
+	adktool "google.golang.org/adk/tool"
 	"google.golang.org/genai"
 )
 
@@ -91,6 +92,10 @@ type ChatRunner struct {
 	// tool name fallback. It lets network denial detection extract generic
 	// http/https endpoints when curl fails without proxy details in stdout.
 	pendingShellCommands map[string]string
+
+	// uiTools preserves the underlying catalog tool identity for UI events while
+	// provider-visible history continues to use the fixed execute_tool bridge.
+	uiTools *uiToolTracker
 }
 
 // newChatRunner creates a new ChatRunner with a background context.
@@ -112,6 +117,7 @@ func newChatRunner(sessionID, userID string, isNew bool) *ChatRunner {
 		titleDone:              make(chan struct{}),
 		pendingNetworkToolURLs: make(map[string]string),
 		pendingShellCommands:   make(map[string]string),
+		uiTools:                newUIToolTracker(),
 	}
 }
 
@@ -302,6 +308,20 @@ func (cr *ChatRunner) InjectSkillIndex(index string) {
 // effective platform→team cascade. The singleton ChatAgent may have been
 // pre-warmed without the latest platform WebSearchTool; this keeps every user's
 // prompt honest about which search tool is selected.
+func (cr *ChatRunner) InjectRequestTools(tools ...adktool.Tool) {
+	if len(tools) == 0 {
+		return
+	}
+	po := agent.PromptOverridesFromContext(cr.ctx)
+	var newPO agent.PromptOverrides
+	if po != nil {
+		newPO = *po
+		newPO.AdditionalTools = append([]adktool.Tool(nil), po.AdditionalTools...)
+	}
+	newPO.AdditionalTools = append(newPO.AdditionalTools, tools...)
+	cr.ctx = agent.WithPromptOverrides(cr.ctx, &newPO)
+}
+
 func (cr *ChatRunner) InjectWebSearchPrompt(searchAvailable bool, searchToolName string, extractAvailable bool, extractToolName string) {
 	po := agent.PromptOverridesFromContext(cr.ctx)
 	var newPO agent.PromptOverrides
@@ -364,7 +384,7 @@ func (cr *ChatRunner) InjectA2AAgentStores(platform, org, team store.A2AAgentSto
 }
 
 // InjectRequestMCPGroups attaches per-request MCP tool groups so search_tools,
-// dynamic tool injection, and resolveTools see this team's MCP catalog even
+// describe_tools, execute_tool, and delegation see this team's MCP catalog even
 // when the singleton chat agent was pre-warmed without them.
 func (cr *ChatRunner) InjectRequestMCPGroups(groups map[string]*agent.ToolGroup) {
 	if len(groups) == 0 {
@@ -374,14 +394,12 @@ func (cr *ChatRunner) InjectRequestMCPGroups(groups map[string]*agent.ToolGroup)
 }
 
 // InjectA2AToolsPrompt appends A2A tool names to the session context in
-// PromptOverrides so the LLM knows these tools exist and can call them directly.
-// It also pins the "a2a" tool group so DynamicToolInjectionCallback injects
-// the tools on the very first LLM call (no bounce).
+// PromptOverrides so the LLM can inspect and invoke them through the fixed bridge.
 func (cr *ChatRunner) InjectA2AToolsPrompt(toolNames []string) {
 	if len(toolNames) == 0 {
 		return
 	}
-	hint := "\n\n## A2A Agents (available directly)\n\nThe following remote A2A agent tools are configured and callable by their bare name:\n"
+	hint := "\n\n## A2A Agents (deferred tools)\n\nThe following remote A2A agent tools are configured. Inspect them with `describe_tools`, then invoke them with `execute_tool` using the returned reference:\n"
 	for _, name := range toolNames {
 		hint += "- `" + name + "`\n"
 	}
@@ -656,6 +674,7 @@ func (cr *ChatRunner) Run(
 	// Wire transparent sub-agent streaming.
 	// Register per-session so concurrent sessions on the same singleton
 	// ChatAgent don't leak events across sessions.
+	subAgentUITools := newUIToolTracker()
 	chatAgent.RegisterUIEvent(cr.SessionID, func(event *session.Event) {
 		if event == nil || event.LLMResponse.Content == nil {
 			return
@@ -681,31 +700,33 @@ func (cr *ChatRunner) Run(
 
 		for _, part := range event.LLMResponse.Content.Parts {
 			if part.Text != "" && !part.Thought {
-				cr.emitEvent("text", map[string]any{"text": part.Text})
+				cr.emitEvent("text", map[string]any{"text": part.Text, "invocationId": event.InvocationID})
 			}
 			if part.FunctionCall != nil {
-				args := part.FunctionCall.Args
+				uiTool := subAgentUITools.call(part.FunctionCall)
+				args := uiTool.args
 				if chatAgent.Redactor != nil && args != nil {
 					args = chatAgent.Redactor.RedactMap(args)
 				}
 				cr.emitEvent("tool_call", map[string]any{
-					"name": part.FunctionCall.Name,
+					"name": uiTool.name,
 					"args": args,
 				})
 			}
 			if part.FunctionResponse != nil {
+				toolName := subAgentUITools.response(part.FunctionResponse)
 				resp := part.FunctionResponse.Response
 				if chatAgent.Redactor != nil && resp != nil {
 					resp = chatAgent.Redactor.RedactMap(resp)
 				}
 				cr.emitEvent("tool_result", map[string]any{
-					"name":   part.FunctionResponse.Name,
+					"name":   toolName,
 					"result": summarizeToolResult(resp),
 				})
-				cr.maybeEmitDocsUpdate(sessionService, part.FunctionResponse.Name, resp)
+				cr.maybeEmitDocsUpdate(sessionService, toolName, resp)
 				cr.drainImagesAndFlowOutput(chatAgent, sessionService)
-				cr.maybeEmitTutorialBlueprint(chatAgent, sessionService, part.FunctionResponse.Name, resp)
-				cr.maybeEmitTutorialSceneSlideshow(sessionService, part.FunctionResponse.Name, resp)
+				cr.maybeEmitTutorialBlueprint(chatAgent, sessionService, toolName, resp)
+				cr.maybeEmitTutorialSceneSlideshow(sessionService, toolName, resp)
 			}
 		}
 		if !event.LLMResponse.Partial {
@@ -724,7 +745,18 @@ func (cr *ChatRunner) Run(
 	//
 	// Register per-session so concurrent sessions on the same singleton
 	// ChatAgent don't leak events across sessions.
+	subTaskUITools := newUIToolTracker()
 	chatAgent.RegisterSubTaskProgress(cr.SessionID, func(evt agent.SubTaskProgressEvent) {
+		if evt.Type == "task_tool_call" {
+			if args, ok := evt.ToolArgs.(map[string]any); ok {
+				uiTool := subTaskUITools.call(&genai.FunctionCall{Name: evt.ToolName, Args: args})
+				evt.ToolName = uiTool.name
+				evt.ToolArgs = uiTool.args
+			}
+		} else if evt.Type == "task_tool_result" {
+			evt.ToolName = subTaskUITools.response(&genai.FunctionResponse{Name: evt.ToolName})
+		}
+
 		data := map[string]any{
 			"event_type": evt.Type,
 			"task_name":  evt.TaskName,
@@ -845,6 +877,9 @@ runLoop:
 		}
 
 		// Process content parts
+		if agent.IsTurnContextEvent(event) {
+			continue
+		}
 		if event.LLMResponse.Content != nil {
 			for _, part := range event.LLMResponse.Content.Parts {
 				// Skip reasoning/thought parts — they are preserved in session
@@ -852,10 +887,10 @@ runLoop:
 				if part.Text != "" && !part.Thought {
 					if event.LLMResponse.Partial {
 						seenPartialText = true
-						cr.emitEvent("text", map[string]any{"text": part.Text})
+						cr.emitEvent("text", map[string]any{"text": part.Text, "invocationId": event.InvocationID})
 					} else if !seenPartialText {
 						hasContent = true
-						cr.emitEvent("text", map[string]any{"text": part.Text})
+						cr.emitEvent("text", map[string]any{"text": part.Text, "invocationId": event.InvocationID})
 					} else {
 						seenPartialText = false
 						hasContent = true
@@ -863,45 +898,47 @@ runLoop:
 				}
 				if part.FunctionCall != nil {
 					hasContent = true
+					uiTool := cr.uiTools.call(part.FunctionCall)
 					// Suppress plan tool calls — their effect is visible via the PlanPanel,
 					// showing them as raw tool_call messages adds noise.
-					if part.FunctionCall.Name == "announce_plan" {
+					if uiTool.name == "announce_plan" {
 						continue
 					}
-					args := part.FunctionCall.Args
+					args := uiTool.args
 					if chatAgent.Redactor != nil && args != nil {
 						args = chatAgent.Redactor.RedactMap(args)
 					}
 					cr.emitEvent("tool_call", map[string]any{
-						"name": part.FunctionCall.Name,
+						"name": uiTool.name,
 						"args": args,
 					})
 
 					// Track URL arguments from network tool calls so we can
 					// identify the denied host when the response contains a
 					// generic error (e.g. Chrome's net::ERR_TUNNEL_CONNECTION_FAILED).
-					if isNetworkTool(part.FunctionCall.Name) {
-						if urlArg, ok := part.FunctionCall.Args["url"].(string); ok && urlArg != "" {
+					if isNetworkTool(uiTool.name) {
+						if urlArg, ok := uiTool.args["url"].(string); ok && urlArg != "" {
 							// Key by call ID if available, fall back to tool name.
 							if part.FunctionCall.ID != "" {
 								cr.pendingNetworkToolURLs[part.FunctionCall.ID] = urlArg
 							}
-							cr.pendingNetworkToolURLs[part.FunctionCall.Name] = urlArg
+							cr.pendingNetworkToolURLs[uiTool.name] = urlArg
 						}
 					}
-					if part.FunctionCall.Name == "shell_command" {
-						if command, ok := part.FunctionCall.Args["command"].(string); ok && command != "" {
+					if uiTool.name == "shell_command" {
+						if command, ok := uiTool.args["command"].(string); ok && command != "" {
 							if part.FunctionCall.ID != "" {
 								cr.pendingShellCommands[part.FunctionCall.ID] = command
 							}
-							cr.pendingShellCommands[part.FunctionCall.Name] = command
+							cr.pendingShellCommands[uiTool.name] = command
 						}
 					}
 				}
 				if part.FunctionResponse != nil {
 					hasContent = true
+					toolName := cr.uiTools.response(part.FunctionResponse)
 					// Suppress plan tool results — no useful info for the user.
-					if part.FunctionResponse.Name == "announce_plan" {
+					if toolName == "announce_plan" {
 						continue
 					}
 
@@ -919,28 +956,28 @@ runLoop:
 						resp = chatAgent.Redactor.RedactMap(resp)
 					}
 					cr.emitEvent("tool_result", map[string]any{
-						"name":   part.FunctionResponse.Name,
+						"name":   toolName,
 						"result": summarizeToolResult(resp),
 					})
-					cr.maybeEmitDocsUpdate(sessionService, part.FunctionResponse.Name, resp)
+					cr.maybeEmitDocsUpdate(sessionService, toolName, resp)
 					if cr.drainImagesAndFlowOutput(chatAgent, sessionService) > 0 {
 						hasContent = true
 					}
-					if cr.maybeEmitTutorialBlueprint(chatAgent, sessionService, part.FunctionResponse.Name, resp) {
+					if cr.maybeEmitTutorialBlueprint(chatAgent, sessionService, toolName, resp) {
 						// Blueprint card is up; wait for Approve / Request changes / Cancel
 						// (same hard-stop pattern as network_denial_hint).
 						break runLoop
 					}
-					if cr.maybeEmitChatQuestion(sessionService, part.FunctionResponse.Name, resp) {
+					if cr.maybeEmitChatQuestion(sessionService, toolName, resp) {
 						// Question card is up; end the turn and wait for the user's
 						// answer, which arrives as an ordinary user message. Same
 						// hard-stop pattern as the blueprint approval card.
 						break runLoop
 					}
-					cr.maybeEmitTutorialSceneSlideshow(sessionService, part.FunctionResponse.Name, resp)
+					cr.maybeEmitTutorialSceneSlideshow(sessionService, toolName, resp)
 
 					// Emit memory_saved SSE event when memory_save tool succeeds
-					if part.FunctionResponse.Name == "memory_save" && resp != nil {
+					if toolName == "memory_save" && resp != nil {
 						if saved, ok := resp["saved"]; ok && saved == true {
 							cr.emitEvent("memory_saved", map[string]any{
 								"session_id": cr.SessionID,
@@ -958,12 +995,12 @@ runLoop:
 					// - PolicyAllow → auto-approve via gateway (silent)
 					// - PolicyDeny → suppress entirely (no dialog)
 					// - PolicyUnknown → show approval dialog (current behavior)
-					if part.FunctionResponse.Name == "shell_command" && resp != nil {
+					if toolName == "shell_command" && resp != nil {
 						if looksLikeNetworkDenial(resp) || looksLikeShellNetworkFailure(resp) {
 							stdout, _ := resp["stdout"].(string)
 							denials := extractDenialsFromOutput(stdout)
 							if len(denials) == 0 {
-								denials = extractDenialsFromShellCommand(cr.pendingShellCommand(part.FunctionResponse.ID, part.FunctionResponse.Name))
+								denials = extractDenialsFromShellCommand(cr.pendingShellCommand(part.FunctionResponse.ID, toolName))
 							}
 							if len(denials) > 0 {
 								denials = cr.filterDenialsByPolicy(denials)
@@ -984,7 +1021,7 @@ runLoop:
 					// Same check for network-facing tools (browser, web_fetch,
 					// http_request, read_pdf). These tools return errors in
 					// resp["error"] when the proxy blocks their connection.
-					if isNetworkTool(part.FunctionResponse.Name) && resp != nil {
+					if isNetworkTool(toolName) && resp != nil {
 						if looksLikeNetworkToolDenial(resp) {
 							// Look up the original URL from the FunctionCall args.
 							// Try by call ID first, fall back to tool name.
@@ -993,7 +1030,7 @@ runLoop:
 								fallbackURL = cr.pendingNetworkToolURLs[part.FunctionResponse.ID]
 							}
 							if fallbackURL == "" {
-								fallbackURL = cr.pendingNetworkToolURLs[part.FunctionResponse.Name]
+								fallbackURL = cr.pendingNetworkToolURLs[toolName]
 							}
 							denials := extractDenialFromToolError(resp, fallbackURL)
 							if len(denials) > 0 {
@@ -1077,28 +1114,30 @@ runLoop:
 					if part.Text != "" && !part.Thought {
 						if event.LLMResponse.Partial {
 							seenPartialText = true
-							cr.emitEvent("text", map[string]any{"text": part.Text})
+							cr.emitEvent("text", map[string]any{"text": part.Text, "invocationId": event.InvocationID})
 						} else if !seenPartialText {
-							cr.emitEvent("text", map[string]any{"text": part.Text})
+							cr.emitEvent("text", map[string]any{"text": part.Text, "invocationId": event.InvocationID})
 						} else {
 							seenPartialText = false
 						}
 					}
 					if part.FunctionCall != nil {
-						if part.FunctionCall.Name == "announce_plan" {
+						uiTool := cr.uiTools.call(part.FunctionCall)
+						if uiTool.name == "announce_plan" {
 							continue
 						}
-						args := part.FunctionCall.Args
+						args := uiTool.args
 						if chatAgent.Redactor != nil && args != nil {
 							args = chatAgent.Redactor.RedactMap(args)
 						}
 						cr.emitEvent("tool_call", map[string]any{
-							"name": part.FunctionCall.Name,
+							"name": uiTool.name,
 							"args": args,
 						})
 					}
 					if part.FunctionResponse != nil {
-						if part.FunctionResponse.Name == "announce_plan" {
+						toolName := cr.uiTools.response(part.FunctionResponse)
+						if toolName == "announce_plan" {
 							continue
 						}
 						resp := part.FunctionResponse.Response
@@ -1106,15 +1145,18 @@ runLoop:
 							resp = chatAgent.Redactor.RedactMap(resp)
 						}
 						cr.emitEvent("tool_result", map[string]any{
-							"name":   part.FunctionResponse.Name,
+							"name":   toolName,
 							"result": summarizeToolResult(resp),
 						})
-						cr.maybeEmitDocsUpdate(sessionService, part.FunctionResponse.Name, resp)
+						cr.maybeEmitDocsUpdate(sessionService, toolName, resp)
 						cr.drainImagesAndFlowOutput(chatAgent, sessionService)
-						if cr.maybeEmitTutorialBlueprint(chatAgent, sessionService, part.FunctionResponse.Name, resp) {
+						if cr.maybeEmitTutorialBlueprint(chatAgent, sessionService, toolName, resp) {
 							break retryLoop
 						}
-						cr.maybeEmitTutorialSceneSlideshow(sessionService, part.FunctionResponse.Name, resp)
+						if cr.maybeEmitChatQuestion(sessionService, toolName, resp) {
+							break retryLoop
+						}
+						cr.maybeEmitTutorialSceneSlideshow(sessionService, toolName, resp)
 					}
 				}
 				if !event.LLMResponse.Partial {

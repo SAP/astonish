@@ -12,6 +12,9 @@ type App func(*sql.Selector)
 // AppState is the predicate function for appstate builders.
 type AppState func(*sql.Selector)
 
+// CacheDiagnostic is the predicate function for cachediagnostic builders.
+type CacheDiagnostic func(*sql.Selector)
+
 // Credential is the predicate function for credential builders.
 type Credential func(*sql.Selector)
 

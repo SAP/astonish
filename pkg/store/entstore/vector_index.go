@@ -4,13 +4,37 @@ import (
 	"encoding/binary"
 	"math"
 	"sort"
+	"strings"
 	"sync"
+
+	"github.com/SAP/astonish/pkg/store"
 )
 
 // scoredResult pairs a document ID with a similarity score.
 type scoredResult struct {
 	ID    string
 	Score float64
+}
+
+func sqliteFTSQuery(text string) string {
+	words := tsvectorWordRe.FindAllString(text, -1)
+	if len(words) == 0 {
+		return ""
+	}
+	terms := make([]string, 0, len(words))
+	for _, word := range words {
+		terms = append(terms, `"`+strings.ReplaceAll(word, `"`, `""`)+`"`)
+	}
+	return strings.Join(terms, " OR ")
+}
+
+func sortMemoryResults(results []store.MemorySearchResult) {
+	sort.Slice(results, func(i, j int) bool {
+		if results[i].Score != results[j].Score {
+			return results[i].Score > results[j].Score
+		}
+		return results[i].ID < results[j].ID
+	})
 }
 
 // vectorIndex maintains an in-memory cache of embeddings for fast brute-force
@@ -44,7 +68,10 @@ func (vi *vectorIndex) search(query []float32, maxResults int, minScore float64)
 	}
 
 	sort.Slice(results, func(i, j int) bool {
-		return results[i].Score > results[j].Score
+		if results[i].Score != results[j].Score {
+			return results[i].Score > results[j].Score
+		}
+		return results[i].ID < results[j].ID
 	})
 	if len(results) > maxResults {
 		results = results[:maxResults]
@@ -133,7 +160,10 @@ func rrfFuse(vectorResults, keywordResults []scoredResult, k int, maxResults int
 	}
 
 	sort.Slice(results, func(i, j int) bool {
-		return results[i].Score > results[j].Score
+		if results[i].Score != results[j].Score {
+			return results[i].Score > results[j].Score
+		}
+		return results[i].ID < results[j].ID
 	})
 	if len(results) > maxResults {
 		results = results[:maxResults]

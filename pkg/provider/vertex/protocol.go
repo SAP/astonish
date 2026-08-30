@@ -10,6 +10,7 @@ import (
 	"iter"
 	"strings"
 
+	"github.com/SAP/astonish/pkg/common"
 	"google.golang.org/adk/model"
 	"google.golang.org/genai"
 )
@@ -79,7 +80,8 @@ type GenerationConfig struct {
 
 // Response represents the Vertex AI response payload.
 type Response struct {
-	Candidates []Candidate `json:"candidates"`
+	Candidates    []Candidate                                 `json:"candidates"`
+	UsageMetadata *genai.GenerateContentResponseUsageMetadata `json:"usageMetadata,omitempty"`
 }
 
 type Candidate struct {
@@ -90,6 +92,11 @@ type Candidate struct {
 // ConvertRequest converts an ADK LLMRequest to a Vertex AI Request.
 // maxOutputTokens can be 0 to use the default (8192)
 func ConvertRequest(req *model.LLMRequest, maxOutputTokens int) (*Request, error) {
+	canonicalReq, err := common.CanonicalizeRequestTools(req)
+	if err != nil {
+		return nil, fmt.Errorf("canonicalize tools: %w", err)
+	}
+	req = canonicalReq
 	if maxOutputTokens <= 0 {
 		maxOutputTokens = 8192 // Default fallback
 	}
@@ -345,12 +352,12 @@ func ParseResponse(body []byte) (*model.LLMResponse, error) {
 	}
 
 	if len(vertexResp.Candidates) == 0 {
-		return &model.LLMResponse{}, nil
+		return &model.LLMResponse{UsageMetadata: vertexResp.UsageMetadata}, nil
 	}
 
 	candidate := vertexResp.Candidates[0]
 	if candidate.Content == nil {
-		return &model.LLMResponse{}, nil
+		return &model.LLMResponse{UsageMetadata: vertexResp.UsageMetadata}, nil
 	}
 
 	var parts []*genai.Part
@@ -365,6 +372,7 @@ func ParseResponse(body []byte) (*model.LLMResponse, error) {
 			Role:  candidate.Content.Role,
 			Parts: parts,
 		},
+		UsageMetadata: vertexResp.UsageMetadata,
 	}, nil
 }
 
@@ -376,6 +384,7 @@ func ParseStream(reader io.Reader) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		bufReader := bufio.NewReader(reader)
 		var textAccum strings.Builder
+		var usageMetadata *genai.GenerateContentResponseUsageMetadata
 
 		for {
 			line, err := bufReader.ReadBytes('\n')
@@ -402,6 +411,9 @@ func ParseStream(reader io.Reader) iter.Seq2[*model.LLMResponse, error] {
 				if err := json.Unmarshal(data, &vertexResp); err != nil {
 					// Skip malformed chunks
 					continue
+				}
+				if vertexResp.UsageMetadata != nil {
+					usageMetadata = vertexResp.UsageMetadata
 				}
 
 				if len(vertexResp.Candidates) > 0 {
@@ -466,13 +478,19 @@ func ParseStream(reader io.Reader) iter.Seq2[*model.LLMResponse, error] {
 			}
 		}
 
-		// Emit aggregated text response at stream end
+		// Emit aggregated text response at stream end.
 		if textAccum.Len() > 0 {
 			yield(&model.LLMResponse{
 				Content: &genai.Content{
 					Role:  "model",
 					Parts: []*genai.Part{{Text: textAccum.String()}},
 				},
+				UsageMetadata: usageMetadata,
+			}, nil)
+		} else if usageMetadata != nil {
+			yield(&model.LLMResponse{
+				Content:       &genai.Content{Role: "model"},
+				UsageMetadata: usageMetadata,
 			}, nil)
 		}
 	}

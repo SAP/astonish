@@ -18,6 +18,8 @@ type Tx struct {
 	App *AppClient
 	// AppState is the client for interacting with the AppState builders.
 	AppState *AppStateClient
+	// CacheDiagnostic is the client for interacting with the CacheDiagnostic builders.
+	CacheDiagnostic *CacheDiagnosticClient
 	// ChatSessionEvent is the client for interacting with the ChatSessionEvent builders.
 	ChatSessionEvent *ChatSessionEventClient
 	// Credential is the client for interacting with the Credential builders.
@@ -204,6 +206,7 @@ func (tx *Tx) init() {
 	tx.A2aAgent = NewA2aAgentClient(tx.config)
 	tx.App = NewAppClient(tx.config)
 	tx.AppState = NewAppStateClient(tx.config)
+	tx.CacheDiagnostic = NewCacheDiagnosticClient(tx.config)
 	tx.ChatSessionEvent = NewChatSessionEventClient(tx.config)
 	tx.Credential = NewCredentialClient(tx.config)
 	tx.Deck = NewDeckClient(tx.config)

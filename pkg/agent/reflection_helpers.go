@@ -257,7 +257,7 @@ func extractCurrentTurnConversation(events session.Events) (string, string) {
 	lastUserIdx := -1
 	for i := n - 1; i >= 0; i-- {
 		ev := events.At(i)
-		if ev.Author == "user" {
+		if ev.Author == "user" && !IsTurnContextEvent(ev) {
 			lastUserIdx = i
 			break
 		}
@@ -271,8 +271,8 @@ func extractCurrentTurnConversation(events session.Events) (string, string) {
 	userEvent := events.At(lastUserIdx)
 	if userEvent.Content != nil {
 		for _, part := range userEvent.Content.Parts {
-			if part.Text != "" {
-				userParts = append(userParts, part.Text)
+			if text := CleanUserText(part.Text); text != "" {
+				userParts = append(userParts, text)
 			}
 		}
 	}
@@ -281,6 +281,9 @@ func extractCurrentTurnConversation(events session.Events) (string, string) {
 	var modelParts []string
 	for i := lastUserIdx + 1; i < n; i++ {
 		ev := events.At(i)
+		if IsTurnContextEvent(ev) {
+			continue
+		}
 		if ev.Content == nil {
 			continue
 		}

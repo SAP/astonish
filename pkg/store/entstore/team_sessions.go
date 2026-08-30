@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	teament "github.com/SAP/astonish/ent/team"
+	"github.com/SAP/astonish/ent/team/cachediagnostic"
 	"github.com/SAP/astonish/ent/team/predicate"
 	"github.com/SAP/astonish/ent/team/session"
 	"github.com/SAP/astonish/ent/team/sessionevent"
@@ -23,8 +24,9 @@ import (
 
 // teamSessionStore implements store.SessionStore backed by the team Ent client.
 type teamSessionStore struct {
-	client   *teament.Client
-	redactFn func(string) string
+	client             *teament.Client
+	redactFn           func(string) string
+	cacheDiagnosticsMu sync.Mutex
 }
 
 var _ store.SessionStore = (*teamSessionStore)(nil)
@@ -280,6 +282,9 @@ func (s *teamSessionStore) List(ctx context.Context, req *adksession.ListRequest
 }
 
 func (s *teamSessionStore) Delete(ctx context.Context, req *adksession.DeleteRequest) error {
+	_, _ = s.client.CacheDiagnostic.Delete().
+		Where(cachediagnostic.SessionIDEQ(req.SessionID)).
+		Exec(ctx)
 	// Delete events first (may not cascade depending on schema config).
 	_, _ = s.client.SessionEvent.Delete().
 		Where(sessionevent.SessionIDEQ(req.SessionID)).
@@ -479,6 +484,9 @@ func (s *teamSessionStore) UpdateSessionMeta(ctx context.Context, sessionID stri
 }
 
 func (s *teamSessionStore) RemoveSessionMeta(ctx context.Context, sessionID string) error {
+	_, _ = s.client.CacheDiagnostic.Delete().
+		Where(cachediagnostic.SessionIDEQ(sessionID)).
+		Exec(ctx)
 	// Delete events first.
 	_, _ = s.client.SessionEvent.Delete().
 		Where(sessionevent.SessionIDEQ(sessionID)).
@@ -513,6 +521,88 @@ func (s *teamSessionStore) ReadTranscriptEvents(ctx context.Context, _, _, sessi
 
 func (s *teamSessionStore) AppendFleetEvent(ctx context.Context, sessionID string, event *adksession.Event) error {
 	return s.appendEventInternal(ctx, sessionID, event)
+}
+
+func (s *teamSessionStore) AppendCacheDiagnostic(ctx context.Context, sessionID string, diagnostic store.CacheDiagnostic) error {
+	s.cacheDiagnosticsMu.Lock()
+	defer s.cacheDiagnosticsMu.Unlock()
+
+	data, err := json.Marshal(diagnostic)
+	if err != nil {
+		return fmt.Errorf("encode cache diagnostic: %w", err)
+	}
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return fmt.Errorf("begin cache diagnostic transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	create := tx.CacheDiagnostic.Create().
+		SetSessionID(sessionID).
+		SetInvocationID(diagnostic.InvocationID).
+		SetCall(diagnostic.Call).
+		SetData(data).
+		SetRound(diagnostic.Call).
+		SetCacheStablePath(diagnostic.StablePrefixElements > 0).
+		SetSystemHash(diagnostic.InputHash).
+		SetSystemChanged(false).
+		SetSystemChangedSession(false).
+		SetToolHash("").
+		SetToolCount(0).
+		SetToolsChanged(false).
+		SetToolsChangedSession(false)
+	if !diagnostic.CreatedAt.IsZero() {
+		create.SetCreatedAt(diagnostic.CreatedAt)
+	}
+	if _, err := create.Save(ctx); err != nil {
+		return fmt.Errorf("append cache diagnostic: %w", err)
+	}
+
+	excess, err := tx.CacheDiagnostic.Query().
+		Where(cachediagnostic.SessionIDEQ(sessionID)).
+		Order(cachediagnostic.ByCreatedAt(sql.OrderDesc()), cachediagnostic.ByID(sql.OrderDesc())).
+		Offset(store.MaxSessionCacheDiagnostics).
+		All(ctx)
+	if err != nil {
+		return fmt.Errorf("list excess cache diagnostics: %w", err)
+	}
+	if len(excess) > 0 {
+		ids := make([]int64, len(excess))
+		for i, row := range excess {
+			ids[i] = row.ID
+		}
+		if _, err := tx.CacheDiagnostic.Delete().Where(cachediagnostic.IDIn(ids...)).Exec(ctx); err != nil {
+			return fmt.Errorf("trim cache diagnostics: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit cache diagnostic: %w", err)
+	}
+	return nil
+}
+
+func (s *teamSessionStore) ListCacheDiagnostics(ctx context.Context, sessionID string) ([]store.CacheDiagnostic, error) {
+	rows, err := s.client.CacheDiagnostic.Query().
+		Where(cachediagnostic.SessionIDEQ(sessionID)).
+		Order(cachediagnostic.ByCreatedAt(), cachediagnostic.ByID()).
+		All(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list cache diagnostics: %w", err)
+	}
+	out := make([]store.CacheDiagnostic, 0, len(rows))
+	for _, row := range rows {
+		var diagnostic store.CacheDiagnostic
+		if len(row.Data) > 0 {
+			if err := json.Unmarshal(row.Data, &diagnostic); err != nil {
+				return nil, fmt.Errorf("decode cache diagnostic: %w", err)
+			}
+		} else {
+			diagnostic = store.CacheDiagnostic{InvocationID: row.InvocationID, Call: row.Call, InputHash: row.SystemHash}
+		}
+		diagnostic.CreatedAt = row.CreatedAt
+		out = append(out, diagnostic)
+	}
+	return out, nil
 }
 
 func (s *teamSessionStore) ResolveSessionID(ctx context.Context, partial string) (string, error) {
@@ -559,6 +649,9 @@ func (s *teamSessionStore) CleanupExpiredSessions(ctx context.Context, maxAgeDay
 
 	var deleted []string
 	for _, e := range ents {
+		_, _ = s.client.CacheDiagnostic.Delete().
+			Where(cachediagnostic.SessionIDEQ(e.ID)).
+			Exec(ctx)
 		// Delete events.
 		_, _ = s.client.SessionEvent.Delete().
 			Where(sessionevent.SessionIDEQ(e.ID)).

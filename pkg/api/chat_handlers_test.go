@@ -194,6 +194,20 @@ func textEvent(invocationID, role, text string) *session.Event {
 	}
 }
 
+func TestEventsToMessages_HidesPersistedTurnContext(t *testing.T) {
+	contextEvent := textEvent("inv-1", "user", "[Astonish Per-Turn Context — not user-authored]\n\nsecret context")
+	contextEvent.Actions.StateDelta = map[string]any{"_astonish_turn_context": true}
+	events := testEvents{
+		textEvent("inv-1", "user", "[2026-03-20 14:30:05 UTC]\nhello"),
+		contextEvent,
+	}
+
+	msgs := eventsToMessages(events, nil)
+	if len(msgs) != 1 || msgs[0].Type != "user" || msgs[0].Content != "hello" {
+		t.Fatalf("unexpected messages: %#v", msgs)
+	}
+}
+
 func TestEventsToMessages_ModelInlineImage(t *testing.T) {
 	t.Parallel()
 	png := []byte{0x89, 0x50, 0x4e, 0x47}

@@ -98,6 +98,51 @@ type ChatFactoryConfig struct {
 	SessionService session.Service
 }
 
+type preparedKnowledgeRetrieval struct {
+	searcher store.PreparedThreeTierSearcher
+	query    store.PreparedMemoryQuery
+}
+
+func prepareKnowledgeRetrieval(ctx context.Context, semanticQuery, keywordQuery string) (agent.PreparedKnowledgeRetrieval, error) {
+	searcher, ok := store.ThreeTierSearcherFromContext(ctx).(store.PreparedThreeTierSearcher)
+	if !ok || searcher == nil {
+		return nil, nil
+	}
+	query, err := searcher.PrepareQuery(ctx, semanticQuery, keywordQuery)
+	if err != nil {
+		return nil, err
+	}
+	return &preparedKnowledgeRetrieval{searcher: searcher, query: query}, nil
+}
+
+func (r *preparedKnowledgeRetrieval) SemanticQuery() string {
+	return r.query.SemanticQuery
+}
+
+func (r *preparedKnowledgeRetrieval) Embedding() ([]float32, uintptr) {
+	return r.query.Embedding, r.query.EmbeddingIdentity
+}
+
+func (r *preparedKnowledgeRetrieval) Search(ctx context.Context, maxResults int, minScore float64, category string) ([]agent.KnowledgeSearchResult, error) {
+	results, err := r.searcher.SearchAllTiersPrepared(ctx, r.query, maxResults*2, minScore, category)
+	if err != nil {
+		return nil, err
+	}
+	results = memory.FilterPreferredScenarioResultsForQuery(r.query.SemanticQuery, results)
+	if len(results) > maxResults {
+		results = results[:maxResults]
+	}
+	knowledge := make([]agent.KnowledgeSearchResult, 0, len(results))
+	for _, result := range results {
+		knowledge = append(knowledge, agent.KnowledgeSearchResult{
+			ID: result.ID, Path: result.Path, Score: result.Score, Snippet: result.Snippet,
+			Category: result.Category, Scope: result.Scope, CreatedBy: result.CreatedBy,
+			CreatedAt: result.CreatedAt, SessionID: result.SessionID,
+		})
+	}
+	return knowledge, nil
+}
+
 // ChatFactoryResult holds everything produced by the factory.
 // Callers (console, channel manager) unpack what they need.
 type ChatFactoryResult struct {
@@ -138,65 +183,32 @@ type ChatFactoryResult struct {
 	SandboxPool sandbox.ToolNodePool
 }
 
-// mainThreadToolAllowlist returns the set of tool names the top-level coding
-// agent gets directly (as opposed to only through sub-agents / lazy ToolIndex
-// surfacing). Everything else stays in named groups reachable via delegate_tasks
-// or search_tools.
-//
-// The tree-sitter structural navigation tools (repo_map, code_definition,
-// code_references) are main-thread on purpose: they let the agent locate a
-// symbol's definition/references in ONE call instead of falling back to broad
-// grep_search plus repeated full-file read_file. Session analysis showed the
-// latter pattern (e.g. re-reading the same large files 10-12x) inflates the
-// prompt and makes each inference progressively slower. See
-// docs/architecture/code-intelligence.md.
-func mainThreadToolAllowlist() map[string]bool {
-	return map[string]bool{
-		"read_file":     true,
-		"write_file":    true,
-		"edit_file":     true,
-		"shell_command": true,
-		"grep_search":   true,
-		"find_files":    true,
-		// Interactive-terminal drive loop: shell_command runs in a PTY and can
-		// return waiting_for_input=true with a session_id; the agent responds via
-		// process_write (and inspects/ends the session with process_read/kill/list).
-		// These must be main-thread so the top-level coding agent can handle an
-		// interactive program directly — matching chat mode — instead of needing a
-		// search_tools detour to discover them.
-		"process_read":    true,
-		"process_write":   true,
-		"process_kill":    true,
-		"process_list":    true,
-		"repo_map":        true,
-		"code_definition": true,
-		"code_references": true,
-		"memory_save":     true,
-		"memory_search":   true,
-		"memory_delete":   true,
-		"delegate_tasks":  true,
-		"announce_plan":   true,
-		// update_plan drives main-thread plan progress (mark a phase running/
-		// complete/failed as the top-level agent works). It is the direct
-		// companion to announce_plan and MUST be main-thread — otherwise the
-		// agent is told to call it but it is relegated to the deferred "core"
-		// group (reachable only via search_tools), and calling it fails with
-		// "tool 'update_plan' not found".
-		"update_plan": true,
-		// Graph-Optimized Plan mode phase transitions — MUST be main-thread:
-		// they advance the per-session GraphPlanState owned by the main ChatAgent.
-		// Sub-agents have no ActiveGraphPlan; calling these from a sub-agent would fail silently.
-		"gplan_reads":        true,
-		"gplan_gaps":         true,
-		"gplan_finalize":     true,
-		"resolve_credential": true,
-		"skill_lookup":       true,
-		"create_skill":       true,
-		// Platform web search must be main-thread always-on. If it only lives in
-		// the "web" group, ToolIndex may never inject it and the agent claims
-		// "no web search tools" even when General selects Perplexity.
-		"perplexity_web_search": true,
+// mainThreadToolAllowlist is intentionally empty. The only model-visible tools
+// are the fixed progressive bridge added after the catalog is built.
+func fixedProviderTools(toolIndex *agent.ToolIndex) ([]tool.Tool, error) {
+	searchToolsTool, err := tools.NewSearchToolsTool(toolIndex)
+	if err != nil {
+		return nil, fmt.Errorf("create search_tools: %w", err)
 	}
+	bridgeTools, err := agent.NewProgressiveToolBridge(toolIndex)
+	if err != nil {
+		return nil, fmt.Errorf("create progressive tool bridge: %w", err)
+	}
+	providerTools := append([]tool.Tool{searchToolsTool}, bridgeTools...)
+	want := [...]string{"search_tools", "describe_tools", "execute_tool"}
+	if len(providerTools) != len(want) {
+		return nil, fmt.Errorf("fixed tool bridge declarations are invalid")
+	}
+	for i, name := range want {
+		if providerTools[i].Name() != name {
+			return nil, fmt.Errorf("fixed tool bridge declarations are invalid")
+		}
+	}
+	return providerTools, nil
+}
+
+func mainThreadToolAllowlist() map[string]bool {
+	return map[string]bool{}
 }
 
 // optionalCredentialResolver preserves a nil interface when the optional
@@ -405,12 +417,9 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		}
 	}
 
-	// Model-backed Perplexity/Sonar is registered only when General → Web Search
-	// Tool selects it (and provider/model are configured).
-	if cfg.AppConfig != nil &&
-		isSelectedWebSearchServer(cfg.AppConfig, "perplexity") &&
-		cfg.AppConfig.PerplexityWebSearch.Provider != "" &&
-		cfg.AppConfig.PerplexityWebSearch.Model != "" {
+	// Studio injects Perplexity per request because the shared agent can serve
+	// multiple tenants. Only local Code mode owns a factory-scoped instance.
+	if shouldRegisterFactoryPerplexity(cfg) {
 		perplexityTool, perplexityErr := tools.NewPerplexityWebSearchTool(cfg.AppConfig, provider.GetProvider)
 		if perplexityErr != nil {
 			if cfg.DebugMode {
@@ -1273,13 +1282,7 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		}
 	}
 
-	// MCP servers — each is its own group
-	//
-	// codeModeMainThreadToolsets collects the sanitized MCP toolsets so Code
-	// mode can inject them directly onto the main thread (see section 6). In
-	// platform mode this slice stays unused: MCP tools remain reachable only
-	// through search_tools / delegation to keep the prompt small.
-	var codeModeMainThreadToolsets []tool.Toolset
+	// MCP servers are catalog groups resolved through the fixed bridge.
 	for _, lt := range lazyToolsets {
 		sanitized := agent.NewSanitizedToolset(lt, cfg.DebugMode)
 		groupName := "mcp:" + lt.Name()
@@ -1289,7 +1292,6 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			Description: serverDesc,
 			Toolsets:    []tool.Toolset{sanitized},
 		}
-		codeModeMainThreadToolsets = append(codeModeMainThreadToolsets, sanitized)
 	}
 
 	// --- 4c. A2A agent tools (discoverable via ToolIndex, not on main thread) ---
@@ -1349,12 +1351,11 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 
 	// Code mode: wrap the base builder with CodeSystemPromptBuilder which owns
 	// all code-specific sections (project guidance, code-nav rules, PLAN.md,
-	// authorization gates, first-class MCP listing). The base struct is kept
+	// and authorization gates). The base struct is kept
 	// so all subsequent per-request field mutations (sandbox, web tools, etc.)
 	// continue to work on the same pointer held by ChatAgent.SystemPrompt.
 	if cfg.CodeMode {
 		codeBuilder := agent.NewCodeSystemPromptBuilder(promptBuilder)
-		codeBuilder.MCPFirstClass = true
 		codeBuilder.PlanFilePersistence = true
 		if !cfg.AutoApprove {
 			codeBuilder.EnforceAuthorization = true
@@ -1580,6 +1581,24 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		}
 	}
 
+	// Flows are deferred catalog tools in Studio; Code mode has no flow registry.
+	if !cfg.CodeMode {
+		var flowTools []tool.Tool
+		if searchFlowsTool, sfErr := tools.NewSearchFlowsTool(); sfErr == nil {
+			flowTools = append(flowTools, searchFlowsTool)
+		} else if cfg.DebugMode {
+			slog.Warn("failed to create search_flows tool", "error", sfErr)
+		}
+		if runFlowTool, rfErr := tools.NewRunFlowTool(); rfErr == nil {
+			flowTools = append(flowTools, runFlowTool)
+		} else if cfg.DebugMode {
+			slog.Warn("failed to create run_flow tool", "error", rfErr)
+		}
+		if len(flowTools) > 0 {
+			toolGroups["flows"] = &agent.ToolGroup{Name: "flows", Description: "Search and run reusable flows", Tools: flowTools}
+		}
+	}
+
 	// Create the dedicated tool index for retrieval-based tool discovery.
 	// One document per tool (name + description) enables accurate semantic
 	// search without the chunking problems of the general memory store.
@@ -1595,95 +1614,51 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		toolEmbedFunc = cfg.PlatformEmbedFunc
 	}
 
-	if vectorStore != nil && toolEmbedFunc != nil {
+	sortedCatalogGroups := agent.SortedGroups(toolGroups)
+	if (vectorStore == nil) != (toolEmbedFunc == nil) {
+		return nil, fmt.Errorf("semantic tool retrieval requires both vector store and embedding function")
+	}
+	if vectorStore != nil {
 		var tiErr error
 		toolIndex, tiErr = agent.NewToolIndex(vectorStore, toolEmbedFunc)
 		if tiErr != nil {
-			if cfg.DebugMode {
-				slog.Warn("failed to create tool index", "error", tiErr)
-			}
-		} else {
-			sortedGroups := agent.SortedGroups(toolGroups)
-			// Publish the complete lexical catalog immediately. Semantic vectors are
-			// refreshed in the background: a slow embedding provider must never make
-			// a Studio session wait before search_tools and prompt injection work.
-			toolIndex.PrimeTools(context.Background(), mainThreadTools, sortedGroups)
-			go func(idx *agent.ToolIndex, main []tool.Tool, groups []*agent.ToolGroup) {
-				if syncErr := idx.SyncTools(context.Background(), main, groups); syncErr != nil {
-					slog.Warn("background tool index refresh failed; retaining lexical catalog", "component", "tool-index", "error", syncErr)
-					return
-				}
-				slog.Debug("background tool index refresh complete", "component", "tool-index", "tools_indexed", idx.Count())
-			}(toolIndex, mainThreadTools, sortedGroups)
+			return nil, fmt.Errorf("create semantic tool index: %w", tiErr)
+		}
+		if syncErr := toolIndex.SyncTools(ctx, mainThreadTools, sortedCatalogGroups); syncErr != nil {
+			return nil, fmt.Errorf("initialize semantic tool index: %w", syncErr)
+		}
+		slog.Debug("tool index initialized", "component", "tool-index", "tools_indexed", toolIndex.Count())
+	} else {
+		// Lexical-only catalogs are intentional when semantic retrieval is not
+		// configured. A configured semantic dependency may never degrade here.
+		toolIndex = agent.NewLexicalToolIndex()
+		if err := toolIndex.PrimeTools(ctx, mainThreadTools, sortedCatalogGroups); err != nil {
+			return nil, fmt.Errorf("initialize tool catalog: %w", err)
 		}
 	}
 
 	logChatFactoryPhase(phaseStarted, "tool-index-sync")
 
-	// --- 5d. Create flow tools (search_flows, run_flow) ---
-	// Flow discovery and execution via dedicated tools rather than
-	// knowledge injection.
-	// Flows are a platform feature — they require a flow registry and
-	// a running daemon. Neither is available in Astonish Code mode, so
-	// both tools are suppressed there (same pattern as credential,
-	// scheduler, distill, and memory tools above).
-	if !cfg.CodeMode {
-		if searchFlowsTool, sfErr := tools.NewSearchFlowsTool(); sfErr == nil {
-			mainThreadTools = append(mainThreadTools, searchFlowsTool)
-		} else if cfg.DebugMode {
-			slog.Warn("failed to create search_flows tool", "error", sfErr)
-		}
-		if runFlowTool, rfErr := tools.NewRunFlowTool(); rfErr == nil {
-			mainThreadTools = append(mainThreadTools, runFlowTool)
-		} else if cfg.DebugMode {
-			slog.Warn("failed to create run_flow tool", "error", rfErr)
-		}
+	// Main-thread search is catalog-only on every execution path. Deferred tools
+	// are inspected and invoked through the fixed bridge; search results must
+	// never become provider-visible declarations on a later model round.
+	if toolIndex == nil {
+		return nil, fmt.Errorf("initialize fixed tool bridge: tool index is nil")
 	}
-
-	// Create search_tools and add to main thread tools if tool index is available.
-	// The onResults callback uses a forward reference to chatAgent (set after
-	// ChatAgent creation) so that search_tools discoveries feed into the
-	// dynamic tool injection system.
-	var chatAgentRef *agent.ChatAgent
-	var searchToolsTool tool.Tool
-	if toolIndex != nil {
-		var stErr error
-		searchToolsTool, stErr = tools.NewSearchToolsTool(toolIndex, func(names []string) {
-			if chatAgentRef != nil {
-				chatAgentRef.RegisterSearchToolsResults(names)
-			}
-		})
-		if stErr == nil {
-			mainThreadTools = append(mainThreadTools, searchToolsTool)
-		} else if cfg.DebugMode {
-			slog.Warn("failed to create search_tools", "error", stErr)
-		}
+	providerTools, err := fixedProviderTools(toolIndex)
+	if err != nil {
+		return nil, err
 	}
+	mainThreadTools = append(mainThreadTools, providerTools...)
 
 	// --- 6. Create ChatAgent ---
-	// Main thread gets essential tools (file ops, shell, search, memory,
-	// delegate). Additional tools are dynamically injected per-turn based
-	// on hybrid search relevance and search_tools discoveries.
-	//
-	// Code mode elevates MCP servers to first-class citizens: their sanitized
-	// toolsets ride along on the main thread as llmagent Toolsets, so the
-	// coding agent can call any configured MCP tool immediately without a
-	// search_tools round-trip. Platform mode intentionally leaves this nil —
-	// there MCP tools stay behind search_tools to bound prompt size.
-	var mainThreadToolsets []tool.Toolset
-	if cfg.CodeMode && len(codeModeMainThreadToolsets) > 0 {
-		mainThreadToolsets = codeModeMainThreadToolsets
-		if cfg.DebugMode {
-			slog.Debug("code mode: injecting MCP toolsets on main thread",
-				"component", "chat-factory", "toolsets", len(mainThreadToolsets))
-		}
-	}
+	// The model sees only the fixed progressive bridge. All domain tools,
+	// including MCP tools in Code mode, remain catalog entries.
 	chatAgent := agent.NewChatAgent(
-		llm, mainThreadTools, mainThreadToolsets, sessionService,
+		llm, mainThreadTools, nil, sessionService,
 		promptBuilder, cfg.DebugMode, cfg.AutoApprove,
 	)
-	chatAgentRef = chatAgent // wire the forward reference for search_tools callback
-
+	chatAgent.PreProviderRetrievalTimeout = cfg.AppConfig.Chat.PreProviderRetrievalTimeout()
 	// Code-mode authorization: gate not-whitelisted tools and out-of-project
 	// filesystem access behind per-tool / per-folder user authorization. Active
 	// only in code mode and only when the user hasn't opted into --auto-approve
@@ -1922,13 +1897,12 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		if toolIndex != nil {
 			subAgentMgr.ToolIndex = toolIndex
 		}
-		// Provide a factory that creates child-scoped search_tools instances.
-		// Each sub-agent gets its own instance whose onResults callback feeds
-		// into the child's dynamic tool injection pipeline (not the parent's).
+		// Sub-agents retain their existing discovery behavior; the fixed bridge is
+		// specific to ChatAgent's stable model-visible declarations.
 		if toolIndex != nil {
-			idx := toolIndex // capture for closure
-			subAgentMgr.SearchToolsFactory = func(onResults func([]string)) (tool.Tool, error) {
-				return tools.NewSearchToolsTool(idx, onResults)
+			idx := toolIndex
+			subAgentMgr.SearchToolsFactory = func() (tool.Tool, error) {
+				return tools.NewSearchToolsTool(idx)
 			}
 		}
 		// Wire skill awareness into sub-agents so they can load skill
@@ -2034,85 +2008,9 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 	flowRunner := NewInteractiveFlowRunner(cfg.AppConfig, cfg.ProviderName, cfg.ModelName, cfg.DebugMode)
 	tools.SetFlowRunnerAccess(flowRunner)
 
-	// --- 6b2. Wire knowledge search callbacks ---
-	// These callbacks are context-aware: they check the invocation context
-	// for a DB-backed ThreeTierSearcher (injected by ChatRunner.InjectMemoryStores)
-	// and use it for cross-tier search.
+	// --- 6b2. Wire request-scoped knowledge retrieval ---
 	if memorySearchAvailable {
-		chatAgent.KnowledgeSearch = func(ctx context.Context, query string, bm25Query string, maxResults int, minScore float64) ([]agent.KnowledgeSearchResult, error) {
-			searcher := store.ThreeTierSearcherFromContext(ctx)
-			if searcher == nil {
-				return nil, nil
-			}
-			// Use bm25Query (conversation-context-enriched) for keyword matching
-			// when available; the tsvector OR search benefits from extra terms.
-			searchQuery := query
-			if bm25Query != "" {
-				searchQuery = bm25Query
-			}
-			// Fetch extra candidates before scenario-card de-duplication and query
-			// filtering so duplicate/unrelated cards do not starve the final context.
-			pgResults, err := searcher.SearchAllTiers(ctx, searchQuery, maxResults*2, minScore)
-			if err != nil {
-				return nil, err
-			}
-			pgResults = memory.FilterPreferredScenarioResultsForQuery(query, pgResults)
-			if len(pgResults) > maxResults {
-				pgResults = pgResults[:maxResults]
-			}
-			var knowledgeResults []agent.KnowledgeSearchResult
-			for _, r := range pgResults {
-				knowledgeResults = append(knowledgeResults, agent.KnowledgeSearchResult{
-					ID:        r.ID,
-					Path:      r.Path,
-					Score:     r.Score,
-					Snippet:   r.Snippet,
-					Category:  r.Category,
-					Scope:     r.Scope,
-					CreatedBy: r.CreatedBy,
-					CreatedAt: r.CreatedAt,
-					SessionID: r.SessionID,
-				})
-			}
-			return knowledgeResults, nil
-		}
-
-		chatAgent.KnowledgeSearchByCategory = func(ctx context.Context, query string, bm25Query string, maxResults int, minScore float64, category string) ([]agent.KnowledgeSearchResult, error) {
-			searcher := store.ThreeTierSearcherFromContext(ctx)
-			if searcher == nil {
-				return nil, nil
-			}
-			searchQuery := query
-			if bm25Query != "" {
-				searchQuery = bm25Query
-			}
-			// Fetch extra candidates before scenario-card de-duplication and query
-			// filtering so duplicate/unrelated cards do not starve the final context.
-			pgResults, err := searcher.SearchAllTiersByCategory(ctx, searchQuery, maxResults*2, minScore, category)
-			if err != nil {
-				return nil, err
-			}
-			pgResults = memory.FilterPreferredScenarioResultsForQuery(query, pgResults)
-			if len(pgResults) > maxResults {
-				pgResults = pgResults[:maxResults]
-			}
-			var knowledgeResults []agent.KnowledgeSearchResult
-			for _, r := range pgResults {
-				knowledgeResults = append(knowledgeResults, agent.KnowledgeSearchResult{
-					ID:        r.ID,
-					Path:      r.Path,
-					Score:     r.Score,
-					Snippet:   r.Snippet,
-					Category:  r.Category,
-					Scope:     r.Scope,
-					CreatedBy: r.CreatedBy,
-					CreatedAt: r.CreatedAt,
-					SessionID: r.SessionID,
-				})
-			}
-			return knowledgeResults, nil
-		}
-
+		chatAgent.KnowledgeRetrieval = prepareKnowledgeRetrieval
 		if cfg.DebugMode {
 			slog.Debug("auto knowledge retrieval: enabled")
 		}
@@ -2436,6 +2334,13 @@ func loadMCPConfig(ctx context.Context, platformMode bool, appCfg *config.AppCon
 // namedToolset is the minimal surface selectedWeb* needs from lazy MCP toolsets.
 type namedToolset interface {
 	Name() string
+}
+
+func shouldRegisterFactoryPerplexity(cfg *ChatFactoryConfig) bool {
+	return cfg != nil && cfg.CodeMode && cfg.AppConfig != nil &&
+		isSelectedWebSearchServer(cfg.AppConfig, "perplexity") &&
+		cfg.AppConfig.PerplexityWebSearch.Provider != "" &&
+		cfg.AppConfig.PerplexityWebSearch.Model != ""
 }
 
 func isSelectedWebSearchServer(appCfg *config.AppConfig, serverID string) bool {

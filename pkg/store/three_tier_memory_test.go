@@ -13,6 +13,20 @@ type mockMemoryStore struct {
 	scope   string
 }
 
+type preparedMockMemoryStore struct {
+	*mockMemoryStore
+	queries []PreparedMemoryQuery
+	err     error
+}
+
+func (m *preparedMockMemoryStore) SearchPrepared(_ context.Context, query PreparedMemoryQuery, maxResults int, _ float64, category string) ([]MemorySearchResult, error) {
+	m.queries = append(m.queries, query)
+	if m.err != nil {
+		return nil, m.err
+	}
+	return m.search(query.KeywordQuery, maxResults, category)
+}
+
 func newMockMemoryStore(scope string) *mockMemoryStore {
 	return &mockMemoryStore{scope: scope}
 }
@@ -237,6 +251,84 @@ func TestThreeTier_DeleteIsolation(t *testing.T) {
 // --------------------------------------------------------------------------
 // 5.9: Cross-tier search accuracy + weighting tests
 // --------------------------------------------------------------------------
+
+func TestThreeTierSearcher_PreparedQuerySharesEmbeddingAcrossTiers(t *testing.T) {
+	stores := []*preparedMockMemoryStore{
+		{mockMemoryStore: newMockMemoryStore("personal")},
+		{mockMemoryStore: newMockMemoryStore("team")},
+		{mockMemoryStore: newMockMemoryStore("org")},
+	}
+	for _, memoryStore := range stores {
+		memoryStore.entries = append(memoryStore.entries, MemoryEntry{Content: "exact keyword " + memoryStore.scope, Category: "tools"})
+	}
+	embedCalls := 0
+	searcher := NewThreeTierSearcher(ThreeTierMemoryStoreConfig{
+		Personal: stores[0], Team: stores[1], Org: stores[2],
+		Embed: func(_ context.Context, text string) ([]float32, error) {
+			embedCalls++
+			if text != "semantic expansion" {
+				t.Fatalf("embedded text = %q", text)
+			}
+			return []float32{1, 2, 3}, nil
+		},
+	}).(PreparedThreeTierSearcher)
+
+	prepared, err := searcher.PrepareQuery(context.Background(), "semantic expansion", "exact keyword")
+	if err != nil {
+		t.Fatal(err)
+	}
+	results, err := searcher.SearchAllTiersPrepared(context.Background(), prepared, 10, 0, "tools")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if embedCalls != 1 {
+		t.Fatalf("embedding calls = %d, want 1", embedCalls)
+	}
+	if len(results) != 3 {
+		t.Fatalf("results = %d, want 3", len(results))
+	}
+	for _, memoryStore := range stores {
+		if len(memoryStore.queries) != 1 {
+			t.Fatalf("%s queries = %d, want 1", memoryStore.scope, len(memoryStore.queries))
+		}
+		got := memoryStore.queries[0]
+		if got.SemanticQuery != "semantic expansion" || got.KeywordQuery != "exact keyword" || len(got.Embedding) != 3 {
+			t.Fatalf("%s query = %#v", memoryStore.scope, got)
+		}
+	}
+}
+
+func TestThreeTierSearcher_PreparedQueryErrorsFailClosed(t *testing.T) {
+	boom := fmt.Errorf("tier failed")
+	good := &preparedMockMemoryStore{mockMemoryStore: newMockMemoryStore("personal")}
+	bad := &preparedMockMemoryStore{mockMemoryStore: newMockMemoryStore("team"), err: boom}
+	searcher := NewThreeTierSearcher(ThreeTierMemoryStoreConfig{Personal: good, Team: bad})
+	_, err := searcher.(PreparedThreeTierSearcher).SearchAllTiersPrepared(context.Background(), PreparedMemoryQuery{
+		KeywordQuery: "keyword",
+	}, 10, 0, "")
+	if err == nil || !strings.Contains(err.Error(), boom.Error()) {
+		t.Fatalf("error = %v, want tier failure", err)
+	}
+}
+
+func TestThreeTierSearcher_PrepareQueryErrorsFailClosed(t *testing.T) {
+	boom := fmt.Errorf("embed failed")
+	searcher := NewThreeTierSearcher(ThreeTierMemoryStoreConfig{Embed: func(context.Context, string) ([]float32, error) {
+		return nil, boom
+	}}).(PreparedThreeTierSearcher)
+	_, err := searcher.PrepareQuery(context.Background(), "semantic", "keyword")
+	if err == nil || !strings.Contains(err.Error(), boom.Error()) {
+		t.Fatalf("error = %v, want embedding failure", err)
+	}
+}
+
+func TestThreeTierSearcher_PreparedQueryRequiresPreparedStores(t *testing.T) {
+	searcher := NewThreeTierSearcher(ThreeTierMemoryStoreConfig{Personal: newMockMemoryStore("personal")}).(PreparedThreeTierSearcher)
+	_, err := searcher.SearchAllTiersPrepared(context.Background(), PreparedMemoryQuery{KeywordQuery: "keyword"}, 10, 0, "")
+	if err == nil || !strings.Contains(err.Error(), "does not support prepared queries") {
+		t.Fatalf("error = %v, want unsupported prepared query", err)
+	}
+}
 
 func TestThreeTierSearcher_CrossTierResults(t *testing.T) {
 	personal := newMockMemoryStore("personal")

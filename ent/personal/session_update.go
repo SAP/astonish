@@ -11,6 +11,7 @@ import (
 	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
+	"github.com/SAP/astonish/ent/personal/cachediagnostic"
 	"github.com/SAP/astonish/ent/personal/predicate"
 	"github.com/SAP/astonish/ent/personal/session"
 	"github.com/SAP/astonish/ent/personal/sessionevent"
@@ -255,6 +256,21 @@ func (_u *SessionUpdate) AddEvents(v ...*SessionEvent) *SessionUpdate {
 	return _u.AddEventIDs(ids...)
 }
 
+// AddCacheDiagnosticIDs adds the "cache_diagnostics" edge to the CacheDiagnostic entity by IDs.
+func (_u *SessionUpdate) AddCacheDiagnosticIDs(ids ...int64) *SessionUpdate {
+	_u.mutation.AddCacheDiagnosticIDs(ids...)
+	return _u
+}
+
+// AddCacheDiagnostics adds the "cache_diagnostics" edges to the CacheDiagnostic entity.
+func (_u *SessionUpdate) AddCacheDiagnostics(v ...*CacheDiagnostic) *SessionUpdate {
+	ids := make([]int64, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.AddCacheDiagnosticIDs(ids...)
+}
+
 // Mutation returns the SessionMutation object of the builder.
 func (_u *SessionUpdate) Mutation() *SessionMutation {
 	return _u.mutation
@@ -279,6 +295,27 @@ func (_u *SessionUpdate) RemoveEvents(v ...*SessionEvent) *SessionUpdate {
 		ids[i] = v[i].ID
 	}
 	return _u.RemoveEventIDs(ids...)
+}
+
+// ClearCacheDiagnostics clears all "cache_diagnostics" edges to the CacheDiagnostic entity.
+func (_u *SessionUpdate) ClearCacheDiagnostics() *SessionUpdate {
+	_u.mutation.ClearCacheDiagnostics()
+	return _u
+}
+
+// RemoveCacheDiagnosticIDs removes the "cache_diagnostics" edge to CacheDiagnostic entities by IDs.
+func (_u *SessionUpdate) RemoveCacheDiagnosticIDs(ids ...int64) *SessionUpdate {
+	_u.mutation.RemoveCacheDiagnosticIDs(ids...)
+	return _u
+}
+
+// RemoveCacheDiagnostics removes "cache_diagnostics" edges to CacheDiagnostic entities.
+func (_u *SessionUpdate) RemoveCacheDiagnostics(v ...*CacheDiagnostic) *SessionUpdate {
+	ids := make([]int64, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.RemoveCacheDiagnosticIDs(ids...)
 }
 
 // Save executes the query and returns the number of nodes affected by the update operation.
@@ -424,6 +461,51 @@ func (_u *SessionUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(sessionevent.FieldID, field.TypeInt),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
+	}
+	if _u.mutation.CacheDiagnosticsCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   session.CacheDiagnosticsTable,
+			Columns: []string{session.CacheDiagnosticsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(cachediagnostic.FieldID, field.TypeInt64),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.RemovedCacheDiagnosticsIDs(); len(nodes) > 0 && !_u.mutation.CacheDiagnosticsCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   session.CacheDiagnosticsTable,
+			Columns: []string{session.CacheDiagnosticsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(cachediagnostic.FieldID, field.TypeInt64),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.CacheDiagnosticsIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   session.CacheDiagnosticsTable,
+			Columns: []string{session.CacheDiagnosticsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(cachediagnostic.FieldID, field.TypeInt64),
 			},
 		}
 		for _, k := range nodes {
@@ -676,6 +758,21 @@ func (_u *SessionUpdateOne) AddEvents(v ...*SessionEvent) *SessionUpdateOne {
 	return _u.AddEventIDs(ids...)
 }
 
+// AddCacheDiagnosticIDs adds the "cache_diagnostics" edge to the CacheDiagnostic entity by IDs.
+func (_u *SessionUpdateOne) AddCacheDiagnosticIDs(ids ...int64) *SessionUpdateOne {
+	_u.mutation.AddCacheDiagnosticIDs(ids...)
+	return _u
+}
+
+// AddCacheDiagnostics adds the "cache_diagnostics" edges to the CacheDiagnostic entity.
+func (_u *SessionUpdateOne) AddCacheDiagnostics(v ...*CacheDiagnostic) *SessionUpdateOne {
+	ids := make([]int64, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.AddCacheDiagnosticIDs(ids...)
+}
+
 // Mutation returns the SessionMutation object of the builder.
 func (_u *SessionUpdateOne) Mutation() *SessionMutation {
 	return _u.mutation
@@ -700,6 +797,27 @@ func (_u *SessionUpdateOne) RemoveEvents(v ...*SessionEvent) *SessionUpdateOne {
 		ids[i] = v[i].ID
 	}
 	return _u.RemoveEventIDs(ids...)
+}
+
+// ClearCacheDiagnostics clears all "cache_diagnostics" edges to the CacheDiagnostic entity.
+func (_u *SessionUpdateOne) ClearCacheDiagnostics() *SessionUpdateOne {
+	_u.mutation.ClearCacheDiagnostics()
+	return _u
+}
+
+// RemoveCacheDiagnosticIDs removes the "cache_diagnostics" edge to CacheDiagnostic entities by IDs.
+func (_u *SessionUpdateOne) RemoveCacheDiagnosticIDs(ids ...int64) *SessionUpdateOne {
+	_u.mutation.RemoveCacheDiagnosticIDs(ids...)
+	return _u
+}
+
+// RemoveCacheDiagnostics removes "cache_diagnostics" edges to CacheDiagnostic entities.
+func (_u *SessionUpdateOne) RemoveCacheDiagnostics(v ...*CacheDiagnostic) *SessionUpdateOne {
+	ids := make([]int64, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.RemoveCacheDiagnosticIDs(ids...)
 }
 
 // Where appends a list predicates to the SessionUpdate builder.
@@ -875,6 +993,51 @@ func (_u *SessionUpdateOne) sqlSave(ctx context.Context) (_node *Session, err er
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(sessionevent.FieldID, field.TypeInt),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
+	}
+	if _u.mutation.CacheDiagnosticsCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   session.CacheDiagnosticsTable,
+			Columns: []string{session.CacheDiagnosticsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(cachediagnostic.FieldID, field.TypeInt64),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.RemovedCacheDiagnosticsIDs(); len(nodes) > 0 && !_u.mutation.CacheDiagnosticsCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   session.CacheDiagnosticsTable,
+			Columns: []string{session.CacheDiagnosticsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(cachediagnostic.FieldID, field.TypeInt64),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.CacheDiagnosticsIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   session.CacheDiagnosticsTable,
+			Columns: []string{session.CacheDiagnosticsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(cachediagnostic.FieldID, field.TypeInt64),
 			},
 		}
 		for _, k := range nodes {

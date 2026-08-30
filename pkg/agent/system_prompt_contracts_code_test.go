@@ -15,22 +15,22 @@ import (
 // comparison and code-mode contract assertions.
 func maximalCodeBuilder() *CodeSystemPromptBuilder {
 	base := &SystemPromptBuilder{
-		WorkspaceDir:          "/home/user/project",
-		CustomPrompt:          "You are a helpful assistant.",
-		InstructionsContent:   "Always be concise.",
-		BrowserAvailable:   true,
-		WebSearchAvailable: true,
-		WebExtractAvailable:   true,
-		WebSearchToolName:     "tavily-search",
-		WebExtractToolName:    "tavily-extract",
-		Timezone:              "America/New_York",
-		SkillIndex:            "## Available Skills\n\n- **docker** — Docker container management\n- **git** — Git workflow helpers\n",
-		FleetSection:          "\n## Available Fleets\n\n- **infra-fleet** — Infrastructure management fleet\n",
-		ChannelHints:          "Format as plain text. No markdown.",
-		SchedulerHints:        "This is a scheduled daily check.",
-		SessionContext:        "You are in fleet wizard mode.",
-		RelevantKnowledge:     "**infra/portainer.md** (53%)\nPortainer runs at 192.168.1.223:9000",
-		RelevantTools:         "**browser** group:\n  - `browser_take_screenshot` — Capture a screenshot\n",
+		WorkspaceDir:        "/home/user/project",
+		CustomPrompt:        "You are a helpful assistant.",
+		InstructionsContent: "Always be concise.",
+		BrowserAvailable:    true,
+		WebSearchAvailable:  true,
+		WebExtractAvailable: true,
+		WebSearchToolName:   "tavily-search",
+		WebExtractToolName:  "tavily-extract",
+		Timezone:            "America/New_York",
+		SkillIndex:          "## Available Skills\n\n- **docker** — Docker container management\n- **git** — Git workflow helpers\n",
+		FleetSection:        "\n## Available Fleets\n\n- **infra-fleet** — Infrastructure management fleet\n",
+		ChannelHints:        "Format as plain text. No markdown.",
+		SchedulerHints:      "This is a scheduled daily check.",
+		SessionContext:      "You are in fleet wizard mode.",
+		RelevantKnowledge:   "**infra/portainer.md** (53%)\nPortainer runs at 192.168.1.223:9000",
+		RelevantTools:       "**browser** group:\n  - `browser_take_screenshot` — Capture a screenshot\n",
 		Identity: &AgentIdentity{
 			Name:     "Astonish Bot",
 			Username: "astonish_ai",
@@ -63,7 +63,6 @@ func maximalCodeBuilder() *CodeSystemPromptBuilder {
 	}
 	cb := NewCodeSystemPromptBuilder(base)
 	cb.ProjectContext = "Use tabs."
-	cb.MCPFirstClass = true
 	cb.PlanFilePersistence = true
 	cb.EnforceAuthorization = true
 	return cb
@@ -187,7 +186,7 @@ func TestCodeSystemPromptContracts_AuthorizationGuidance(t *testing.T) {
 	assertNotContains(t, noAuth.Build(), "Tool & folder authorization", "auth guidance absent when EnforceAuthorization is false")
 }
 
-func TestCodeSystemPromptContracts_MCPFirstClass(t *testing.T) {
+func TestCodeSystemPromptContracts_MCPUsesFixedBridge(t *testing.T) {
 	base := &SystemPromptBuilder{
 		Tools: mockTools("read_file", "delegate_tasks"),
 		Catalog: []*ToolGroup{
@@ -204,14 +203,13 @@ func TestCodeSystemPromptContracts_MCPFirstClass(t *testing.T) {
 		},
 	}
 	cb := NewCodeSystemPromptBuilder(base)
-	cb.MCPFirstClass = true
 	prompt := cb.Build()
 
-	assertContains(t, prompt, "## MCP Tools (available directly)", "MCP Tools section present in code mode")
-	assertContains(t, prompt, "get_library_docs", "MCP tool name listed")
-	assertContains(t, prompt, "resolve_library_id", "MCP tool name listed")
-	assertContains(t, prompt, "always loaded", "always-loaded note present")
-	assertNotContains(t, prompt, "After `search_tools`, call the **bare** tool name", "no search_tools gate in code mode MCP note")
+	assertContains(t, prompt, "**Deferred MCP tools:**", "fixed bridge guidance present")
+	assertContains(t, prompt, "`describe_tools`", "schema inspection guidance present")
+	assertContains(t, prompt, "`execute_tool`", "fixed execution bridge present")
+	assertNotContains(t, prompt, "## MCP Tools (available directly)", "no direct MCP declarations in code mode")
+	assertNotContains(t, prompt, "get_library_docs", "individual MCP tools are not baked into prompt")
 }
 
 func TestCodeSystemPromptContracts_Capabilities(t *testing.T) {

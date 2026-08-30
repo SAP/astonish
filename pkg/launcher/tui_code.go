@@ -1203,12 +1203,16 @@ func contentsToSessionEvents(contents []*genai.Content) []*session.Event {
 		if c.Role == "user" {
 			author = "user"
 		}
-		out = append(out, &session.Event{
+		event := &session.Event{
 			ID:          fmt.Sprintf("compact-%d", i),
 			Author:      author,
 			Timestamp:   time.Now(),
 			LLMResponse: adkmodel.LLMResponse{Content: c},
-		})
+		}
+		if agent.IsTurnContextContent(c) {
+			agent.MarkTurnContextEvent(event)
+		}
+		out = append(out, event)
 	}
 	return out
 }
@@ -1506,6 +1510,9 @@ func (b *localAgentBackend) driveTurn(
 			b.processStateDelta(event.Actions.StateDelta, emit)
 		}
 
+		if agent.IsTurnContextEvent(event) {
+			continue
+		}
 		if event.LLMResponse.Content == nil {
 			if b.emitUsage(event, emit) {
 				sawRealUsage = true
@@ -2043,7 +2050,7 @@ func (b *localAgentBackend) loadHistory(ctx context.Context, id string) ([]backe
 		if lifecycle, ok := ev.Actions.StateDelta[planLifecycleStateKey].(string); ok && latestPlanOutIdx >= 0 {
 			out[latestPlanOutIdx].PlanStatus = events.PlanStatus(lifecycle)
 		}
-		if ev.LLMResponse.Content == nil {
+		if agent.IsTurnContextEvent(ev) || ev.LLMResponse.Content == nil {
 			continue
 		}
 		role := ev.LLMResponse.Content.Role
@@ -2072,7 +2079,14 @@ func (b *localAgentBackend) loadHistory(ctx context.Context, id string) ([]backe
 				if kind == "user" && strings.TrimSpace(part.Text) == planApprovalUserMessage && latestPlanOutIdx >= 0 {
 					out[latestPlanOutIdx].PlanStatus = events.PlanApproved
 				}
-				out = append(out, backend.HistoryEntry{Kind: kind, Text: part.Text})
+				text := part.Text
+				if kind == "user" {
+					text = agent.CleanUserText(text)
+					if text == "" {
+						continue
+					}
+				}
+				out = append(out, backend.HistoryEntry{Kind: kind, Text: text})
 			case part.FunctionCall != nil:
 				if approvalSuperseded[part.FunctionCall.ID] {
 					continue

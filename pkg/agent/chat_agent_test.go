@@ -2,19 +2,215 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
-	"github.com/SAP/astonish/pkg/store"
 	adkagent "google.golang.org/adk/agent"
-	"google.golang.org/adk/memory"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/toolconfirmation"
 	"google.golang.org/genai"
 	"gopkg.in/yaml.v3"
 )
+
+func TestPreProviderRetrievalError(t *testing.T) {
+	err := preProviderRetrievalError("knowledge search", 25*time.Millisecond, context.DeadlineExceeded)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error does not wrap deadline: %v", err)
+	}
+	if !strings.Contains(err.Error(), "pre-provider knowledge search timed out after 25ms") {
+		t.Fatalf("unexpected timeout error: %v", err)
+	}
+
+	cause := errors.New("search unavailable")
+	err = preProviderRetrievalError("tool index search", time.Second, cause)
+	if !errors.Is(err, cause) || strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("unexpected retrieval error: %v", err)
+	}
+}
+
+type testPreparedKnowledgeRetrieval struct {
+	query     string
+	embedding []float32
+	identity  uintptr
+	search    func(context.Context, int, float64, string) ([]KnowledgeSearchResult, error)
+}
+
+func (r *testPreparedKnowledgeRetrieval) SemanticQuery() string { return r.query }
+func (r *testPreparedKnowledgeRetrieval) Embedding() ([]float32, uintptr) {
+	return r.embedding, r.identity
+}
+func (r *testPreparedKnowledgeRetrieval) Search(ctx context.Context, maxResults int, minScore float64, category string) ([]KnowledgeSearchResult, error) {
+	return r.search(ctx, maxResults, minScore, category)
+}
+
+func TestRetrievePreProviderPreparesOnceAndSearchesConcurrently(t *testing.T) {
+	var prepares int
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	chat := &ChatAgent{KnowledgeRetrieval: func(_ context.Context, semantic, keyword string) (PreparedKnowledgeRetrieval, error) {
+		prepares++
+		if semantic != "semantic" || keyword != "keyword" {
+			t.Fatalf("queries = %q, %q", semantic, keyword)
+		}
+		return &testPreparedKnowledgeRetrieval{query: semantic, search: func(_ context.Context, _ int, _ float64, category string) ([]KnowledgeSearchResult, error) {
+			started <- category
+			<-release
+			return []KnowledgeSearchResult{{Path: category}}, nil
+		}}, nil
+	}}
+	done := make(chan error, 1)
+	go func() {
+		_, err := chat.retrievePreProvider(context.Background(), nil, "semantic", "keyword", "")
+		done <- err
+	}()
+	for range 2 {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("partition searches did not overlap")
+		}
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if prepares != 1 {
+		t.Fatalf("prepare calls = %d, want 1", prepares)
+	}
+}
+
+func TestRetrievePreProviderReusesCompatibleMemoryEmbeddingForTools(t *testing.T) {
+	calls := 0
+	embed := EmbedFunc(func(context.Context, string) ([]float32, error) {
+		calls++
+		return []float32{1, 0}, nil
+	})
+	vectorStore, err := NewInMemoryToolVectorStore(embed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	index, err := NewToolIndex(vectorStore, embed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := index.SyncTools(context.Background(), mockTools("read_file"), nil); err != nil {
+		t.Fatal(err)
+	}
+	calls = 0
+	chat := &ChatAgent{
+		ToolIndex: index,
+		KnowledgeRetrieval: func(context.Context, string, string) (PreparedKnowledgeRetrieval, error) {
+			return &testPreparedKnowledgeRetrieval{
+				query: "same query", embedding: []float32{1, 0}, identity: reflect.ValueOf(embed).Pointer(),
+				search: func(context.Context, int, float64, string) ([]KnowledgeSearchResult, error) { return nil, nil },
+			}, nil
+		},
+	}
+	if _, err := chat.retrievePreProvider(context.Background(), nil, "same query", "keyword", "same query"); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 0 {
+		t.Fatalf("tool embedding calls = %d, want 0", calls)
+	}
+}
+
+func TestRetrievePreProviderUsesExactlyOneSeparateToolEmbedding(t *testing.T) {
+	memoryEmbed := EmbedFunc(func(context.Context, string) ([]float32, error) { return []float32{1, 0}, nil })
+	toolCalls := 0
+	toolEmbed := EmbedFunc(func(context.Context, string) ([]float32, error) {
+		toolCalls++
+		return []float32{1, 0}, nil
+	})
+	vectorStore, err := NewInMemoryToolVectorStore(toolEmbed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	index, err := NewToolIndex(vectorStore, toolEmbed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := index.SyncTools(context.Background(), mockTools("read_file"), nil); err != nil {
+		t.Fatal(err)
+	}
+	toolCalls = 0
+	chat := &ChatAgent{
+		ToolIndex: index,
+		KnowledgeRetrieval: func(context.Context, string, string) (PreparedKnowledgeRetrieval, error) {
+			return &testPreparedKnowledgeRetrieval{
+				query: "memory query", embedding: []float32{1, 0}, identity: reflect.ValueOf(memoryEmbed).Pointer(),
+				search: func(context.Context, int, float64, string) ([]KnowledgeSearchResult, error) { return nil, nil },
+			}, nil
+		},
+	}
+	if _, err := chat.retrievePreProvider(context.Background(), nil, "memory query", "keyword", "different tool query"); err != nil {
+		t.Fatal(err)
+	}
+	if toolCalls != 1 {
+		t.Fatalf("tool embedding calls = %d, want 1", toolCalls)
+	}
+}
+
+func TestRetrievePreProviderKeepsPartitionOrderStable(t *testing.T) {
+	for iteration := range 10 {
+		chat := &ChatAgent{KnowledgeRetrieval: func(context.Context, string, string) (PreparedKnowledgeRetrieval, error) {
+			return &testPreparedKnowledgeRetrieval{query: "query", search: func(_ context.Context, _ int, _ float64, category string) ([]KnowledgeSearchResult, error) {
+				if (iteration%2 == 0) == (category == "guidance") {
+					time.Sleep(time.Millisecond)
+				}
+				path := "general"
+				if category == "guidance" {
+					path = "guidance"
+				}
+				return []KnowledgeSearchResult{{Path: path}}, nil
+			}}, nil
+		}}
+		result, err := chat.retrievePreProvider(context.Background(), nil, "query", "keyword", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		ordered := append(append([]KnowledgeSearchResult(nil), result.guidance...), result.general...)
+		if len(ordered) != 2 || ordered[0].Path != "guidance" || ordered[1].Path != "general" {
+			t.Fatalf("iteration %d order = %#v", iteration, ordered)
+		}
+	}
+}
+
+func TestRetrievePreProviderFailsClosed(t *testing.T) {
+	boom := errors.New("guidance unavailable")
+	chat := &ChatAgent{KnowledgeRetrieval: func(context.Context, string, string) (PreparedKnowledgeRetrieval, error) {
+		return &testPreparedKnowledgeRetrieval{query: "semantic", search: func(_ context.Context, _ int, _ float64, category string) ([]KnowledgeSearchResult, error) {
+			if category == "guidance" {
+				return nil, boom
+			}
+			return nil, nil
+		}}, nil
+	}}
+	_, err := chat.retrievePreProvider(context.Background(), nil, "semantic", "keyword", "")
+	if !errors.Is(err, boom) || !strings.Contains(err.Error(), "guidance search") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestRetrievePreProviderReportsCauseInsteadOfCanceledSibling(t *testing.T) {
+	boom := errors.New("fts syntax error")
+	chat := &ChatAgent{KnowledgeRetrieval: func(context.Context, string, string) (PreparedKnowledgeRetrieval, error) {
+		return &testPreparedKnowledgeRetrieval{query: "semantic", search: func(ctx context.Context, _ int, _ float64, category string) ([]KnowledgeSearchResult, error) {
+			if category == "guidance" {
+				<-ctx.Done()
+				return nil, ctx.Err()
+			}
+			return nil, boom
+		}}, nil
+	}}
+	_, err := chat.retrievePreProvider(context.Background(), nil, "semantic", "keyword", "")
+	if !errors.Is(err, boom) || !strings.Contains(err.Error(), "knowledge search") {
+		t.Fatalf("error = %v, want originating knowledge search failure", err)
+	}
+}
 
 func TestEnqueueImagesFromContent(t *testing.T) {
 	t.Parallel()
@@ -966,115 +1162,12 @@ type mockToolset struct {
 func (m *mockToolset) Name() string                                          { return m.name }
 func (m *mockToolset) Tools(_ adkagent.ReadonlyContext) ([]tool.Tool, error) { return nil, nil }
 
-// --- Auto-inject missing tool tests ---
-
-// stubToolContext is a minimal agent.ToolContext for unit tests.
-type stubToolContext struct {
-	context.Context
-}
-
-func (s stubToolContext) UserContent() *genai.Content                            { return nil }
-func (s stubToolContext) FunctionCallID() string                                 { return "" }
-func (s stubToolContext) Actions() *session.EventActions                         { return &session.EventActions{} }
-func (s stubToolContext) SearchMemory(context.Context, string) (*memory.SearchResponse, error) {
-	return nil, nil
-}
-func (s stubToolContext) ToolConfirmation() *toolconfirmation.ToolConfirmation { return nil }
-func (s stubToolContext) RequestConfirmation(string, any) error                 { return nil }
-func (s stubToolContext) AgentName() string                                      { return "test" }
-func (s stubToolContext) ReadonlyState() session.ReadonlyState                   { return nil }
-func (s stubToolContext) State() session.State                                   { return nil }
-func (s stubToolContext) Artifacts() adkagent.Artifacts                          { return nil }
-func (s stubToolContext) InvocationID() string                                   { return "inv" }
-func (s stubToolContext) AppName() string                                        { return "app" }
-func (s stubToolContext) UserID() string                                         { return "user" }
-func (s stubToolContext) SessionID() string                                      { return "sess" }
-func (s stubToolContext) Branch() string                                         { return "" }
-
-func TestIsToolNotFoundError(t *testing.T) {
-	tests := []struct {
-		name     string
-		err      error
-		toolName string
-		want     bool
-	}{
-		{"nil", nil, "run_drill", false},
-		{"adk15 format", fmt.Errorf("tool 'run_drill' not found.\nAvailable tools: read_file"), "run_drill", true},
-		{"adk15 wrong name", fmt.Errorf("tool 'run_drill' not found."), "other", false},
-		{"legacy unknown tool", fmt.Errorf("unknown tool: \"run_drill\""), "run_drill", true},
-		{"unrelated", fmt.Errorf("connection refused"), "run_drill", false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := isToolNotFoundError(tt.err, tt.toolName); got != tt.want {
-				t.Errorf("isToolNotFoundError(%v, %q) = %v, want %v", tt.err, tt.toolName, got, tt.want)
-			}
-		})
-	}
-}
-
-func syncTestToolIndex(t *testing.T, groups ...*ToolGroup) *ToolIndex {
-	t.Helper()
-	idx := newTestToolIndex(t, testEmbeddingFunc())
-	if err := idx.SyncTools(context.Background(), nil, groups); err != nil {
-		t.Fatalf("SyncTools: %v", err)
-	}
-	return idx
-}
-
-func TestCanAutoInjectTool(t *testing.T) {
-	idx := syncTestToolIndex(t, &ToolGroup{
-		Name:  "drill",
-		Tools: mockTools("run_drill"),
-	}, &ToolGroup{
-		Name:  "mcp:custom-server",
-		Tools: mockTools("custom_mcp_tool"),
-	})
-
-	t.Run("known tool", func(t *testing.T) {
-		if !canAutoInjectTool(context.Background(), idx, "run_drill") {
-			t.Fatal("expected run_drill to be injectable")
-		}
-	})
-
-	t.Run("unknown tool", func(t *testing.T) {
-		if canAutoInjectTool(context.Background(), idx, "no_such_tool") {
-			t.Fatal("expected unknown tool to be rejected")
-		}
-	})
-
-	t.Run("disabled tool", func(t *testing.T) {
-		ctx := store.WithDisabledTools(context.Background(), []string{"run_drill"})
-		if canAutoInjectTool(ctx, idx, "run_drill") {
-			t.Fatal("expected disabled tool to be rejected")
-		}
-	})
-
-	t.Run("mcp inaccessible", func(t *testing.T) {
-		// Empty MCPServerStores in context → non-standard MCP tools are inaccessible.
-		ctx := store.WithMCPServerStores(context.Background(), &store.MCPServerStores{})
-		if canAutoInjectTool(ctx, idx, "custom_mcp_tool") {
-			t.Fatal("expected inaccessible MCP tool to be rejected")
-		}
-	})
-
-	t.Run("mcp app-style alias", func(t *testing.T) {
-		// Visual-app form mcp:server/tool must resolve to the bare tool name.
-		if !canAutoInjectTool(context.Background(), idx, "mcp:custom-server/custom_mcp_tool") {
-			t.Fatal("expected mcp:server/tool alias to be injectable")
-		}
-		if got := resolveIndexedToolName(idx, "mcp:custom-server/custom_mcp_tool"); got != "custom_mcp_tool" {
-			t.Fatalf("resolveIndexedToolName = %q, want custom_mcp_tool", got)
-		}
-	})
-}
-
 func TestParseMCPToolRef(t *testing.T) {
 	tests := []struct {
-		in          string
-		wantGroup   string
-		wantTool    string
-		wantOK      bool
+		in        string
+		wantGroup string
+		wantTool  string
+		wantOK    bool
 	}{
 		{"send_email", "", "", false},
 		{"mcp:email", "mcp:email", "", true},
@@ -1088,171 +1181,5 @@ func TestParseMCPToolRef(t *testing.T) {
 			t.Errorf("parseMCPToolRef(%q) = (%q,%q,%v), want (%q,%q,%v)",
 				tt.in, g, tool, ok, tt.wantGroup, tt.wantTool, tt.wantOK)
 		}
-	}
-}
-
-func TestAutoInjectMissingToolCallback_Injectable(t *testing.T) {
-	idx := syncTestToolIndex(t, &ToolGroup{
-		Name:  "drill",
-		Tools: mockTools("run_drill"),
-	})
-
-	var registered []string
-	cb := autoInjectMissingToolCallback(idx, func(names []string) {
-		registered = append(registered, names...)
-	}, nil)
-
-	notFound := fmt.Errorf("tool 'run_drill' not found.\nAvailable tools: read_file")
-	result, err := cb(stubToolContext{Context: context.Background()}, mockTool{name: "run_drill"}, nil, notFound)
-	if err != nil {
-		t.Fatalf("callback error: %v", err)
-	}
-	if result == nil {
-		t.Fatal("expected non-nil result for injectable tool")
-	}
-	msg, _ := result["error"].(string)
-	if !strings.Contains(msg, "has been injected") {
-		t.Errorf("expected inject message, got: %s", msg)
-	}
-	if len(registered) != 1 || registered[0] != "run_drill" {
-		t.Errorf("registered = %v, want [run_drill]", registered)
-	}
-}
-
-func TestAutoInjectMissingToolCallback_Unknown(t *testing.T) {
-	idx := syncTestToolIndex(t, &ToolGroup{
-		Name:  "drill",
-		Tools: mockTools("run_drill"),
-	})
-
-	var registered []string
-	cb := autoInjectMissingToolCallback(idx, func(names []string) {
-		registered = append(registered, names...)
-	}, nil)
-
-	notFound := fmt.Errorf("tool 'hallucinated_tool' not found.\nAvailable tools: read_file")
-	result, err := cb(stubToolContext{Context: context.Background()}, mockTool{name: "hallucinated_tool"}, nil, notFound)
-	if err != nil {
-		t.Fatalf("callback error: %v", err)
-	}
-	if result != nil {
-		t.Errorf("expected nil result for unknown tool, got %v", result)
-	}
-	if len(registered) != 0 {
-		t.Errorf("registered = %v, want empty", registered)
-	}
-}
-
-func TestAutoInjectMissingToolCallback_Disabled(t *testing.T) {
-	idx := syncTestToolIndex(t, &ToolGroup{
-		Name:  "drill",
-		Tools: mockTools("run_drill"),
-	})
-
-	var registered []string
-	cb := autoInjectMissingToolCallback(idx, func(names []string) {
-		registered = append(registered, names...)
-	}, nil)
-
-	ctx := store.WithDisabledTools(context.Background(), []string{"run_drill"})
-	notFound := fmt.Errorf("tool 'run_drill' not found.\nAvailable tools: read_file")
-	result, err := cb(stubToolContext{Context: ctx}, mockTool{name: "run_drill"}, nil, notFound)
-	if err != nil {
-		t.Fatalf("callback error: %v", err)
-	}
-	if result != nil {
-		t.Errorf("expected nil result for disabled tool, got %v", result)
-	}
-	if len(registered) != 0 {
-		t.Errorf("registered = %v, want empty", registered)
-	}
-}
-
-func TestAutoInjectMissingToolCallback_Excluded(t *testing.T) {
-	idx := syncTestToolIndex(t, &ToolGroup{
-		Name:  "core",
-		Tools: mockTools("delegate_tasks"),
-	})
-
-	var registered []string
-	cb := autoInjectMissingToolCallback(idx, func(names []string) {
-		registered = append(registered, names...)
-	}, map[string]bool{"delegate_tasks": true})
-
-	notFound := fmt.Errorf("tool 'delegate_tasks' not found.\nAvailable tools: read_file")
-	result, err := cb(stubToolContext{Context: context.Background()}, mockTool{name: "delegate_tasks"}, nil, notFound)
-	if err != nil {
-		t.Fatalf("callback error: %v", err)
-	}
-	if result != nil {
-		t.Errorf("expected nil result for excluded tool, got %v", result)
-	}
-	if len(registered) != 0 {
-		t.Errorf("registered = %v, want empty", registered)
-	}
-}
-
-func TestAutoInjectMissingToolCallback_NonNotFoundError(t *testing.T) {
-	idx := syncTestToolIndex(t, &ToolGroup{
-		Name:  "drill",
-		Tools: mockTools("run_drill"),
-	})
-
-	var registered []string
-	cb := autoInjectMissingToolCallback(idx, func(names []string) {
-		registered = append(registered, names...)
-	}, nil)
-
-	result, err := cb(stubToolContext{Context: context.Background()}, mockTool{name: "run_drill"}, nil, fmt.Errorf("timeout"))
-	if err != nil {
-		t.Fatalf("callback error: %v", err)
-	}
-	if result != nil {
-		t.Errorf("expected nil for non-not-found error, got %v", result)
-	}
-	if len(registered) != 0 {
-		t.Errorf("registered = %v, want empty", registered)
-	}
-}
-
-func TestChatAgent_AutoInjectMissingToolCallback(t *testing.T) {
-	idx := syncTestToolIndex(t, &ToolGroup{
-		Name:  "drill",
-		Tools: mockTools("run_drill"),
-	})
-	ca := &ChatAgent{ToolIndex: idx}
-	cb := ca.AutoInjectMissingToolCallback()
-
-	notFound := fmt.Errorf("tool 'run_drill' not found.\nAvailable tools: read_file")
-	result, err := cb(stubToolContext{Context: context.Background()}, mockTool{name: "run_drill"}, nil, notFound)
-	if err != nil {
-		t.Fatalf("callback error: %v", err)
-	}
-	if result == nil {
-		t.Fatal("expected inject result")
-	}
-	ca.searchToolsMu.Lock()
-	defer ca.searchToolsMu.Unlock()
-	if len(ca.searchToolsResults) != 1 || ca.searchToolsResults[0] != "run_drill" {
-		t.Errorf("searchToolsResults = %v, want [run_drill]", ca.searchToolsResults)
-	}
-}
-
-func TestEnsureMainThreadTool_AddsOnce(t *testing.T) {
-	ca := &ChatAgent{
-		Tools:        nil,
-		SystemPrompt: &SystemPromptBuilder{},
-	}
-	toolA := mockTool{name: "perplexity_web_search"}
-	ca.EnsureMainThreadTool(toolA)
-	ca.EnsureMainThreadTool(toolA)
-	if !ca.HasMainThreadTool("perplexity_web_search") {
-		t.Fatal("expected tool to be registered")
-	}
-	if len(ca.Tools) != 1 {
-		t.Fatalf("expected single registration, got %d", len(ca.Tools))
-	}
-	if len(ca.SystemPrompt.Tools) != 1 {
-		t.Fatalf("expected system prompt tools to include tool once, got %d", len(ca.SystemPrompt.Tools))
 	}
 }

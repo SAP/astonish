@@ -14,6 +14,7 @@ import (
 	"github.com/SAP/astonish/ent/team/a2aagent"
 	"github.com/SAP/astonish/ent/team/app"
 	"github.com/SAP/astonish/ent/team/appstate"
+	"github.com/SAP/astonish/ent/team/cachediagnostic"
 	"github.com/SAP/astonish/ent/team/chatsessionevent"
 	"github.com/SAP/astonish/ent/team/credential"
 	"github.com/SAP/astonish/ent/team/deck"
@@ -56,6 +57,7 @@ const (
 	TypeA2aAgent            = "A2aAgent"
 	TypeApp                 = "App"
 	TypeAppState            = "AppState"
+	TypeCacheDiagnostic     = "CacheDiagnostic"
 	TypeChatSessionEvent    = "ChatSessionEvent"
 	TypeCredential          = "Credential"
 	TypeDeck                = "Deck"
@@ -2678,6 +2680,1218 @@ func (m *AppStateMutation) ClearEdge(name string) error {
 // It returns an error if the edge is not defined in the schema.
 func (m *AppStateMutation) ResetEdge(name string) error {
 	return fmt.Errorf("unknown AppState edge %s", name)
+}
+
+// CacheDiagnosticMutation represents an operation that mutates the CacheDiagnostic nodes in the graph.
+type CacheDiagnosticMutation struct {
+	config
+	op                     Op
+	typ                    string
+	id                     *int64
+	invocation_id          *string
+	call                   *int
+	addcall                *int
+	data                   *[]byte
+	round                  *int
+	addround               *int
+	cache_stable_path      *bool
+	system_hash            *string
+	system_changed         *bool
+	system_changed_session *bool
+	tool_hash              *string
+	tool_count             *int
+	addtool_count          *int
+	tools_changed          *bool
+	tools_changed_session  *bool
+	created_at             *time.Time
+	clearedFields          map[string]struct{}
+	session                *string
+	clearedsession         bool
+	done                   bool
+	oldValue               func(context.Context) (*CacheDiagnostic, error)
+	predicates             []predicate.CacheDiagnostic
+}
+
+var _ ent.Mutation = (*CacheDiagnosticMutation)(nil)
+
+// cachediagnosticOption allows management of the mutation configuration using functional options.
+type cachediagnosticOption func(*CacheDiagnosticMutation)
+
+// newCacheDiagnosticMutation creates new mutation for the CacheDiagnostic entity.
+func newCacheDiagnosticMutation(c config, op Op, opts ...cachediagnosticOption) *CacheDiagnosticMutation {
+	m := &CacheDiagnosticMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeCacheDiagnostic,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withCacheDiagnosticID sets the ID field of the mutation.
+func withCacheDiagnosticID(id int64) cachediagnosticOption {
+	return func(m *CacheDiagnosticMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *CacheDiagnostic
+		)
+		m.oldValue = func(ctx context.Context) (*CacheDiagnostic, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().CacheDiagnostic.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withCacheDiagnostic sets the old CacheDiagnostic of the mutation.
+func withCacheDiagnostic(node *CacheDiagnostic) cachediagnosticOption {
+	return func(m *CacheDiagnosticMutation) {
+		m.oldValue = func(context.Context) (*CacheDiagnostic, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m CacheDiagnosticMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m CacheDiagnosticMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("team: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of CacheDiagnostic entities.
+func (m *CacheDiagnosticMutation) SetID(id int64) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *CacheDiagnosticMutation) ID() (id int64, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *CacheDiagnosticMutation) IDs(ctx context.Context) ([]int64, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []int64{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().CacheDiagnostic.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetSessionID sets the "session_id" field.
+func (m *CacheDiagnosticMutation) SetSessionID(s string) {
+	m.session = &s
+}
+
+// SessionID returns the value of the "session_id" field in the mutation.
+func (m *CacheDiagnosticMutation) SessionID() (r string, exists bool) {
+	v := m.session
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSessionID returns the old "session_id" field's value of the CacheDiagnostic entity.
+// If the CacheDiagnostic object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CacheDiagnosticMutation) OldSessionID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSessionID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSessionID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSessionID: %w", err)
+	}
+	return oldValue.SessionID, nil
+}
+
+// ResetSessionID resets all changes to the "session_id" field.
+func (m *CacheDiagnosticMutation) ResetSessionID() {
+	m.session = nil
+}
+
+// SetInvocationID sets the "invocation_id" field.
+func (m *CacheDiagnosticMutation) SetInvocationID(s string) {
+	m.invocation_id = &s
+}
+
+// InvocationID returns the value of the "invocation_id" field in the mutation.
+func (m *CacheDiagnosticMutation) InvocationID() (r string, exists bool) {
+	v := m.invocation_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldInvocationID returns the old "invocation_id" field's value of the CacheDiagnostic entity.
+// If the CacheDiagnostic object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CacheDiagnosticMutation) OldInvocationID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldInvocationID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldInvocationID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldInvocationID: %w", err)
+	}
+	return oldValue.InvocationID, nil
+}
+
+// ResetInvocationID resets all changes to the "invocation_id" field.
+func (m *CacheDiagnosticMutation) ResetInvocationID() {
+	m.invocation_id = nil
+}
+
+// SetCall sets the "call" field.
+func (m *CacheDiagnosticMutation) SetCall(i int) {
+	m.call = &i
+	m.addcall = nil
+}
+
+// Call returns the value of the "call" field in the mutation.
+func (m *CacheDiagnosticMutation) Call() (r int, exists bool) {
+	v := m.call
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCall returns the old "call" field's value of the CacheDiagnostic entity.
+// If the CacheDiagnostic object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CacheDiagnosticMutation) OldCall(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCall is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCall requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCall: %w", err)
+	}
+	return oldValue.Call, nil
+}
+
+// AddCall adds i to the "call" field.
+func (m *CacheDiagnosticMutation) AddCall(i int) {
+	if m.addcall != nil {
+		*m.addcall += i
+	} else {
+		m.addcall = &i
+	}
+}
+
+// AddedCall returns the value that was added to the "call" field in this mutation.
+func (m *CacheDiagnosticMutation) AddedCall() (r int, exists bool) {
+	v := m.addcall
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetCall resets all changes to the "call" field.
+func (m *CacheDiagnosticMutation) ResetCall() {
+	m.call = nil
+	m.addcall = nil
+}
+
+// SetData sets the "data" field.
+func (m *CacheDiagnosticMutation) SetData(b []byte) {
+	m.data = &b
+}
+
+// Data returns the value of the "data" field in the mutation.
+func (m *CacheDiagnosticMutation) Data() (r []byte, exists bool) {
+	v := m.data
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldData returns the old "data" field's value of the CacheDiagnostic entity.
+// If the CacheDiagnostic object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CacheDiagnosticMutation) OldData(ctx context.Context) (v []byte, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldData is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldData requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldData: %w", err)
+	}
+	return oldValue.Data, nil
+}
+
+// ClearData clears the value of the "data" field.
+func (m *CacheDiagnosticMutation) ClearData() {
+	m.data = nil
+	m.clearedFields[cachediagnostic.FieldData] = struct{}{}
+}
+
+// DataCleared returns if the "data" field was cleared in this mutation.
+func (m *CacheDiagnosticMutation) DataCleared() bool {
+	_, ok := m.clearedFields[cachediagnostic.FieldData]
+	return ok
+}
+
+// ResetData resets all changes to the "data" field.
+func (m *CacheDiagnosticMutation) ResetData() {
+	m.data = nil
+	delete(m.clearedFields, cachediagnostic.FieldData)
+}
+
+// SetRound sets the "round" field.
+func (m *CacheDiagnosticMutation) SetRound(i int) {
+	m.round = &i
+	m.addround = nil
+}
+
+// Round returns the value of the "round" field in the mutation.
+func (m *CacheDiagnosticMutation) Round() (r int, exists bool) {
+	v := m.round
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRound returns the old "round" field's value of the CacheDiagnostic entity.
+// If the CacheDiagnostic object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CacheDiagnosticMutation) OldRound(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRound is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRound requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRound: %w", err)
+	}
+	return oldValue.Round, nil
+}
+
+// AddRound adds i to the "round" field.
+func (m *CacheDiagnosticMutation) AddRound(i int) {
+	if m.addround != nil {
+		*m.addround += i
+	} else {
+		m.addround = &i
+	}
+}
+
+// AddedRound returns the value that was added to the "round" field in this mutation.
+func (m *CacheDiagnosticMutation) AddedRound() (r int, exists bool) {
+	v := m.addround
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetRound resets all changes to the "round" field.
+func (m *CacheDiagnosticMutation) ResetRound() {
+	m.round = nil
+	m.addround = nil
+}
+
+// SetCacheStablePath sets the "cache_stable_path" field.
+func (m *CacheDiagnosticMutation) SetCacheStablePath(b bool) {
+	m.cache_stable_path = &b
+}
+
+// CacheStablePath returns the value of the "cache_stable_path" field in the mutation.
+func (m *CacheDiagnosticMutation) CacheStablePath() (r bool, exists bool) {
+	v := m.cache_stable_path
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCacheStablePath returns the old "cache_stable_path" field's value of the CacheDiagnostic entity.
+// If the CacheDiagnostic object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CacheDiagnosticMutation) OldCacheStablePath(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCacheStablePath is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCacheStablePath requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCacheStablePath: %w", err)
+	}
+	return oldValue.CacheStablePath, nil
+}
+
+// ResetCacheStablePath resets all changes to the "cache_stable_path" field.
+func (m *CacheDiagnosticMutation) ResetCacheStablePath() {
+	m.cache_stable_path = nil
+}
+
+// SetSystemHash sets the "system_hash" field.
+func (m *CacheDiagnosticMutation) SetSystemHash(s string) {
+	m.system_hash = &s
+}
+
+// SystemHash returns the value of the "system_hash" field in the mutation.
+func (m *CacheDiagnosticMutation) SystemHash() (r string, exists bool) {
+	v := m.system_hash
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSystemHash returns the old "system_hash" field's value of the CacheDiagnostic entity.
+// If the CacheDiagnostic object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CacheDiagnosticMutation) OldSystemHash(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSystemHash is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSystemHash requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSystemHash: %w", err)
+	}
+	return oldValue.SystemHash, nil
+}
+
+// ResetSystemHash resets all changes to the "system_hash" field.
+func (m *CacheDiagnosticMutation) ResetSystemHash() {
+	m.system_hash = nil
+}
+
+// SetSystemChanged sets the "system_changed" field.
+func (m *CacheDiagnosticMutation) SetSystemChanged(b bool) {
+	m.system_changed = &b
+}
+
+// SystemChanged returns the value of the "system_changed" field in the mutation.
+func (m *CacheDiagnosticMutation) SystemChanged() (r bool, exists bool) {
+	v := m.system_changed
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSystemChanged returns the old "system_changed" field's value of the CacheDiagnostic entity.
+// If the CacheDiagnostic object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CacheDiagnosticMutation) OldSystemChanged(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSystemChanged is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSystemChanged requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSystemChanged: %w", err)
+	}
+	return oldValue.SystemChanged, nil
+}
+
+// ResetSystemChanged resets all changes to the "system_changed" field.
+func (m *CacheDiagnosticMutation) ResetSystemChanged() {
+	m.system_changed = nil
+}
+
+// SetSystemChangedSession sets the "system_changed_session" field.
+func (m *CacheDiagnosticMutation) SetSystemChangedSession(b bool) {
+	m.system_changed_session = &b
+}
+
+// SystemChangedSession returns the value of the "system_changed_session" field in the mutation.
+func (m *CacheDiagnosticMutation) SystemChangedSession() (r bool, exists bool) {
+	v := m.system_changed_session
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSystemChangedSession returns the old "system_changed_session" field's value of the CacheDiagnostic entity.
+// If the CacheDiagnostic object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CacheDiagnosticMutation) OldSystemChangedSession(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSystemChangedSession is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSystemChangedSession requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSystemChangedSession: %w", err)
+	}
+	return oldValue.SystemChangedSession, nil
+}
+
+// ResetSystemChangedSession resets all changes to the "system_changed_session" field.
+func (m *CacheDiagnosticMutation) ResetSystemChangedSession() {
+	m.system_changed_session = nil
+}
+
+// SetToolHash sets the "tool_hash" field.
+func (m *CacheDiagnosticMutation) SetToolHash(s string) {
+	m.tool_hash = &s
+}
+
+// ToolHash returns the value of the "tool_hash" field in the mutation.
+func (m *CacheDiagnosticMutation) ToolHash() (r string, exists bool) {
+	v := m.tool_hash
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldToolHash returns the old "tool_hash" field's value of the CacheDiagnostic entity.
+// If the CacheDiagnostic object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CacheDiagnosticMutation) OldToolHash(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldToolHash is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldToolHash requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldToolHash: %w", err)
+	}
+	return oldValue.ToolHash, nil
+}
+
+// ResetToolHash resets all changes to the "tool_hash" field.
+func (m *CacheDiagnosticMutation) ResetToolHash() {
+	m.tool_hash = nil
+}
+
+// SetToolCount sets the "tool_count" field.
+func (m *CacheDiagnosticMutation) SetToolCount(i int) {
+	m.tool_count = &i
+	m.addtool_count = nil
+}
+
+// ToolCount returns the value of the "tool_count" field in the mutation.
+func (m *CacheDiagnosticMutation) ToolCount() (r int, exists bool) {
+	v := m.tool_count
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldToolCount returns the old "tool_count" field's value of the CacheDiagnostic entity.
+// If the CacheDiagnostic object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CacheDiagnosticMutation) OldToolCount(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldToolCount is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldToolCount requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldToolCount: %w", err)
+	}
+	return oldValue.ToolCount, nil
+}
+
+// AddToolCount adds i to the "tool_count" field.
+func (m *CacheDiagnosticMutation) AddToolCount(i int) {
+	if m.addtool_count != nil {
+		*m.addtool_count += i
+	} else {
+		m.addtool_count = &i
+	}
+}
+
+// AddedToolCount returns the value that was added to the "tool_count" field in this mutation.
+func (m *CacheDiagnosticMutation) AddedToolCount() (r int, exists bool) {
+	v := m.addtool_count
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetToolCount resets all changes to the "tool_count" field.
+func (m *CacheDiagnosticMutation) ResetToolCount() {
+	m.tool_count = nil
+	m.addtool_count = nil
+}
+
+// SetToolsChanged sets the "tools_changed" field.
+func (m *CacheDiagnosticMutation) SetToolsChanged(b bool) {
+	m.tools_changed = &b
+}
+
+// ToolsChanged returns the value of the "tools_changed" field in the mutation.
+func (m *CacheDiagnosticMutation) ToolsChanged() (r bool, exists bool) {
+	v := m.tools_changed
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldToolsChanged returns the old "tools_changed" field's value of the CacheDiagnostic entity.
+// If the CacheDiagnostic object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CacheDiagnosticMutation) OldToolsChanged(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldToolsChanged is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldToolsChanged requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldToolsChanged: %w", err)
+	}
+	return oldValue.ToolsChanged, nil
+}
+
+// ResetToolsChanged resets all changes to the "tools_changed" field.
+func (m *CacheDiagnosticMutation) ResetToolsChanged() {
+	m.tools_changed = nil
+}
+
+// SetToolsChangedSession sets the "tools_changed_session" field.
+func (m *CacheDiagnosticMutation) SetToolsChangedSession(b bool) {
+	m.tools_changed_session = &b
+}
+
+// ToolsChangedSession returns the value of the "tools_changed_session" field in the mutation.
+func (m *CacheDiagnosticMutation) ToolsChangedSession() (r bool, exists bool) {
+	v := m.tools_changed_session
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldToolsChangedSession returns the old "tools_changed_session" field's value of the CacheDiagnostic entity.
+// If the CacheDiagnostic object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CacheDiagnosticMutation) OldToolsChangedSession(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldToolsChangedSession is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldToolsChangedSession requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldToolsChangedSession: %w", err)
+	}
+	return oldValue.ToolsChangedSession, nil
+}
+
+// ResetToolsChangedSession resets all changes to the "tools_changed_session" field.
+func (m *CacheDiagnosticMutation) ResetToolsChangedSession() {
+	m.tools_changed_session = nil
+}
+
+// SetCreatedAt sets the "created_at" field.
+func (m *CacheDiagnosticMutation) SetCreatedAt(t time.Time) {
+	m.created_at = &t
+}
+
+// CreatedAt returns the value of the "created_at" field in the mutation.
+func (m *CacheDiagnosticMutation) CreatedAt() (r time.Time, exists bool) {
+	v := m.created_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedAt returns the old "created_at" field's value of the CacheDiagnostic entity.
+// If the CacheDiagnostic object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CacheDiagnosticMutation) OldCreatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedAt: %w", err)
+	}
+	return oldValue.CreatedAt, nil
+}
+
+// ResetCreatedAt resets all changes to the "created_at" field.
+func (m *CacheDiagnosticMutation) ResetCreatedAt() {
+	m.created_at = nil
+}
+
+// ClearSession clears the "session" edge to the Session entity.
+func (m *CacheDiagnosticMutation) ClearSession() {
+	m.clearedsession = true
+	m.clearedFields[cachediagnostic.FieldSessionID] = struct{}{}
+}
+
+// SessionCleared reports if the "session" edge to the Session entity was cleared.
+func (m *CacheDiagnosticMutation) SessionCleared() bool {
+	return m.clearedsession
+}
+
+// SessionIDs returns the "session" edge IDs in the mutation.
+// Note that IDs always returns len(IDs) <= 1 for unique edges, and you should use
+// SessionID instead. It exists only for internal usage by the builders.
+func (m *CacheDiagnosticMutation) SessionIDs() (ids []string) {
+	if id := m.session; id != nil {
+		ids = append(ids, *id)
+	}
+	return
+}
+
+// ResetSession resets all changes to the "session" edge.
+func (m *CacheDiagnosticMutation) ResetSession() {
+	m.session = nil
+	m.clearedsession = false
+}
+
+// Where appends a list predicates to the CacheDiagnosticMutation builder.
+func (m *CacheDiagnosticMutation) Where(ps ...predicate.CacheDiagnostic) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the CacheDiagnosticMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *CacheDiagnosticMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.CacheDiagnostic, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *CacheDiagnosticMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *CacheDiagnosticMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (CacheDiagnostic).
+func (m *CacheDiagnosticMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *CacheDiagnosticMutation) Fields() []string {
+	fields := make([]string, 0, 14)
+	if m.session != nil {
+		fields = append(fields, cachediagnostic.FieldSessionID)
+	}
+	if m.invocation_id != nil {
+		fields = append(fields, cachediagnostic.FieldInvocationID)
+	}
+	if m.call != nil {
+		fields = append(fields, cachediagnostic.FieldCall)
+	}
+	if m.data != nil {
+		fields = append(fields, cachediagnostic.FieldData)
+	}
+	if m.round != nil {
+		fields = append(fields, cachediagnostic.FieldRound)
+	}
+	if m.cache_stable_path != nil {
+		fields = append(fields, cachediagnostic.FieldCacheStablePath)
+	}
+	if m.system_hash != nil {
+		fields = append(fields, cachediagnostic.FieldSystemHash)
+	}
+	if m.system_changed != nil {
+		fields = append(fields, cachediagnostic.FieldSystemChanged)
+	}
+	if m.system_changed_session != nil {
+		fields = append(fields, cachediagnostic.FieldSystemChangedSession)
+	}
+	if m.tool_hash != nil {
+		fields = append(fields, cachediagnostic.FieldToolHash)
+	}
+	if m.tool_count != nil {
+		fields = append(fields, cachediagnostic.FieldToolCount)
+	}
+	if m.tools_changed != nil {
+		fields = append(fields, cachediagnostic.FieldToolsChanged)
+	}
+	if m.tools_changed_session != nil {
+		fields = append(fields, cachediagnostic.FieldToolsChangedSession)
+	}
+	if m.created_at != nil {
+		fields = append(fields, cachediagnostic.FieldCreatedAt)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *CacheDiagnosticMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case cachediagnostic.FieldSessionID:
+		return m.SessionID()
+	case cachediagnostic.FieldInvocationID:
+		return m.InvocationID()
+	case cachediagnostic.FieldCall:
+		return m.Call()
+	case cachediagnostic.FieldData:
+		return m.Data()
+	case cachediagnostic.FieldRound:
+		return m.Round()
+	case cachediagnostic.FieldCacheStablePath:
+		return m.CacheStablePath()
+	case cachediagnostic.FieldSystemHash:
+		return m.SystemHash()
+	case cachediagnostic.FieldSystemChanged:
+		return m.SystemChanged()
+	case cachediagnostic.FieldSystemChangedSession:
+		return m.SystemChangedSession()
+	case cachediagnostic.FieldToolHash:
+		return m.ToolHash()
+	case cachediagnostic.FieldToolCount:
+		return m.ToolCount()
+	case cachediagnostic.FieldToolsChanged:
+		return m.ToolsChanged()
+	case cachediagnostic.FieldToolsChangedSession:
+		return m.ToolsChangedSession()
+	case cachediagnostic.FieldCreatedAt:
+		return m.CreatedAt()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *CacheDiagnosticMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case cachediagnostic.FieldSessionID:
+		return m.OldSessionID(ctx)
+	case cachediagnostic.FieldInvocationID:
+		return m.OldInvocationID(ctx)
+	case cachediagnostic.FieldCall:
+		return m.OldCall(ctx)
+	case cachediagnostic.FieldData:
+		return m.OldData(ctx)
+	case cachediagnostic.FieldRound:
+		return m.OldRound(ctx)
+	case cachediagnostic.FieldCacheStablePath:
+		return m.OldCacheStablePath(ctx)
+	case cachediagnostic.FieldSystemHash:
+		return m.OldSystemHash(ctx)
+	case cachediagnostic.FieldSystemChanged:
+		return m.OldSystemChanged(ctx)
+	case cachediagnostic.FieldSystemChangedSession:
+		return m.OldSystemChangedSession(ctx)
+	case cachediagnostic.FieldToolHash:
+		return m.OldToolHash(ctx)
+	case cachediagnostic.FieldToolCount:
+		return m.OldToolCount(ctx)
+	case cachediagnostic.FieldToolsChanged:
+		return m.OldToolsChanged(ctx)
+	case cachediagnostic.FieldToolsChangedSession:
+		return m.OldToolsChangedSession(ctx)
+	case cachediagnostic.FieldCreatedAt:
+		return m.OldCreatedAt(ctx)
+	}
+	return nil, fmt.Errorf("unknown CacheDiagnostic field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *CacheDiagnosticMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case cachediagnostic.FieldSessionID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSessionID(v)
+		return nil
+	case cachediagnostic.FieldInvocationID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetInvocationID(v)
+		return nil
+	case cachediagnostic.FieldCall:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCall(v)
+		return nil
+	case cachediagnostic.FieldData:
+		v, ok := value.([]byte)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetData(v)
+		return nil
+	case cachediagnostic.FieldRound:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRound(v)
+		return nil
+	case cachediagnostic.FieldCacheStablePath:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCacheStablePath(v)
+		return nil
+	case cachediagnostic.FieldSystemHash:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSystemHash(v)
+		return nil
+	case cachediagnostic.FieldSystemChanged:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSystemChanged(v)
+		return nil
+	case cachediagnostic.FieldSystemChangedSession:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSystemChangedSession(v)
+		return nil
+	case cachediagnostic.FieldToolHash:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetToolHash(v)
+		return nil
+	case cachediagnostic.FieldToolCount:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetToolCount(v)
+		return nil
+	case cachediagnostic.FieldToolsChanged:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetToolsChanged(v)
+		return nil
+	case cachediagnostic.FieldToolsChangedSession:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetToolsChangedSession(v)
+		return nil
+	case cachediagnostic.FieldCreatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown CacheDiagnostic field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *CacheDiagnosticMutation) AddedFields() []string {
+	var fields []string
+	if m.addcall != nil {
+		fields = append(fields, cachediagnostic.FieldCall)
+	}
+	if m.addround != nil {
+		fields = append(fields, cachediagnostic.FieldRound)
+	}
+	if m.addtool_count != nil {
+		fields = append(fields, cachediagnostic.FieldToolCount)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *CacheDiagnosticMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case cachediagnostic.FieldCall:
+		return m.AddedCall()
+	case cachediagnostic.FieldRound:
+		return m.AddedRound()
+	case cachediagnostic.FieldToolCount:
+		return m.AddedToolCount()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *CacheDiagnosticMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case cachediagnostic.FieldCall:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddCall(v)
+		return nil
+	case cachediagnostic.FieldRound:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddRound(v)
+		return nil
+	case cachediagnostic.FieldToolCount:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddToolCount(v)
+		return nil
+	}
+	return fmt.Errorf("unknown CacheDiagnostic numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *CacheDiagnosticMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(cachediagnostic.FieldData) {
+		fields = append(fields, cachediagnostic.FieldData)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *CacheDiagnosticMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *CacheDiagnosticMutation) ClearField(name string) error {
+	switch name {
+	case cachediagnostic.FieldData:
+		m.ClearData()
+		return nil
+	}
+	return fmt.Errorf("unknown CacheDiagnostic nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *CacheDiagnosticMutation) ResetField(name string) error {
+	switch name {
+	case cachediagnostic.FieldSessionID:
+		m.ResetSessionID()
+		return nil
+	case cachediagnostic.FieldInvocationID:
+		m.ResetInvocationID()
+		return nil
+	case cachediagnostic.FieldCall:
+		m.ResetCall()
+		return nil
+	case cachediagnostic.FieldData:
+		m.ResetData()
+		return nil
+	case cachediagnostic.FieldRound:
+		m.ResetRound()
+		return nil
+	case cachediagnostic.FieldCacheStablePath:
+		m.ResetCacheStablePath()
+		return nil
+	case cachediagnostic.FieldSystemHash:
+		m.ResetSystemHash()
+		return nil
+	case cachediagnostic.FieldSystemChanged:
+		m.ResetSystemChanged()
+		return nil
+	case cachediagnostic.FieldSystemChangedSession:
+		m.ResetSystemChangedSession()
+		return nil
+	case cachediagnostic.FieldToolHash:
+		m.ResetToolHash()
+		return nil
+	case cachediagnostic.FieldToolCount:
+		m.ResetToolCount()
+		return nil
+	case cachediagnostic.FieldToolsChanged:
+		m.ResetToolsChanged()
+		return nil
+	case cachediagnostic.FieldToolsChangedSession:
+		m.ResetToolsChangedSession()
+		return nil
+	case cachediagnostic.FieldCreatedAt:
+		m.ResetCreatedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown CacheDiagnostic field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *CacheDiagnosticMutation) AddedEdges() []string {
+	edges := make([]string, 0, 1)
+	if m.session != nil {
+		edges = append(edges, cachediagnostic.EdgeSession)
+	}
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *CacheDiagnosticMutation) AddedIDs(name string) []ent.Value {
+	switch name {
+	case cachediagnostic.EdgeSession:
+		if id := m.session; id != nil {
+			return []ent.Value{*id}
+		}
+	}
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *CacheDiagnosticMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 1)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *CacheDiagnosticMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *CacheDiagnosticMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 1)
+	if m.clearedsession {
+		edges = append(edges, cachediagnostic.EdgeSession)
+	}
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *CacheDiagnosticMutation) EdgeCleared(name string) bool {
+	switch name {
+	case cachediagnostic.EdgeSession:
+		return m.clearedsession
+	}
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *CacheDiagnosticMutation) ClearEdge(name string) error {
+	switch name {
+	case cachediagnostic.EdgeSession:
+		m.ClearSession()
+		return nil
+	}
+	return fmt.Errorf("unknown CacheDiagnostic unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *CacheDiagnosticMutation) ResetEdge(name string) error {
+	switch name {
+	case cachediagnostic.EdgeSession:
+		m.ResetSession()
+		return nil
+	}
+	return fmt.Errorf("unknown CacheDiagnostic edge %s", name)
 }
 
 // ChatSessionEventMutation represents an operation that mutates the ChatSessionEvent nodes in the graph.
@@ -18086,37 +19300,40 @@ func (m *ScheduledJobMutation) ResetEdge(name string) error {
 // SessionMutation represents an operation that mutates the Session nodes in the graph.
 type SessionMutation struct {
 	config
-	op                 Op
-	typ                string
-	id                 *string
-	user_id            *uuid.UUID
-	title              *string
-	message_count      *int
-	addmessage_count   *int
-	parent_id          *string
-	fleet_key          *string
-	fleet_name         *string
-	issue_number       *int
-	addissue_number    *int
-	repo               *string
-	workspace_dir      *string
-	provider_name      *string
-	model_name         *string
-	metadata           *map[string]interface{}
-	last_seq           *int64
-	addlast_seq        *int64
-	created_at         *time.Time
-	updated_at         *time.Time
-	clearedFields      map[string]struct{}
-	events             map[int64]struct{}
-	removedevents      map[int64]struct{}
-	clearedevents      bool
-	chat_events        map[uuid.UUID]struct{}
-	removedchat_events map[uuid.UUID]struct{}
-	clearedchat_events bool
-	done               bool
-	oldValue           func(context.Context) (*Session, error)
-	predicates         []predicate.Session
+	op                       Op
+	typ                      string
+	id                       *string
+	user_id                  *uuid.UUID
+	title                    *string
+	message_count            *int
+	addmessage_count         *int
+	parent_id                *string
+	fleet_key                *string
+	fleet_name               *string
+	issue_number             *int
+	addissue_number          *int
+	repo                     *string
+	workspace_dir            *string
+	provider_name            *string
+	model_name               *string
+	metadata                 *map[string]interface{}
+	last_seq                 *int64
+	addlast_seq              *int64
+	created_at               *time.Time
+	updated_at               *time.Time
+	clearedFields            map[string]struct{}
+	events                   map[int64]struct{}
+	removedevents            map[int64]struct{}
+	clearedevents            bool
+	chat_events              map[uuid.UUID]struct{}
+	removedchat_events       map[uuid.UUID]struct{}
+	clearedchat_events       bool
+	cache_diagnostics        map[int64]struct{}
+	removedcache_diagnostics map[int64]struct{}
+	clearedcache_diagnostics bool
+	done                     bool
+	oldValue                 func(context.Context) (*Session, error)
+	predicates               []predicate.Session
 }
 
 var _ ent.Mutation = (*SessionMutation)(nil)
@@ -19009,6 +20226,60 @@ func (m *SessionMutation) ResetChatEvents() {
 	m.removedchat_events = nil
 }
 
+// AddCacheDiagnosticIDs adds the "cache_diagnostics" edge to the CacheDiagnostic entity by ids.
+func (m *SessionMutation) AddCacheDiagnosticIDs(ids ...int64) {
+	if m.cache_diagnostics == nil {
+		m.cache_diagnostics = make(map[int64]struct{})
+	}
+	for i := range ids {
+		m.cache_diagnostics[ids[i]] = struct{}{}
+	}
+}
+
+// ClearCacheDiagnostics clears the "cache_diagnostics" edge to the CacheDiagnostic entity.
+func (m *SessionMutation) ClearCacheDiagnostics() {
+	m.clearedcache_diagnostics = true
+}
+
+// CacheDiagnosticsCleared reports if the "cache_diagnostics" edge to the CacheDiagnostic entity was cleared.
+func (m *SessionMutation) CacheDiagnosticsCleared() bool {
+	return m.clearedcache_diagnostics
+}
+
+// RemoveCacheDiagnosticIDs removes the "cache_diagnostics" edge to the CacheDiagnostic entity by IDs.
+func (m *SessionMutation) RemoveCacheDiagnosticIDs(ids ...int64) {
+	if m.removedcache_diagnostics == nil {
+		m.removedcache_diagnostics = make(map[int64]struct{})
+	}
+	for i := range ids {
+		delete(m.cache_diagnostics, ids[i])
+		m.removedcache_diagnostics[ids[i]] = struct{}{}
+	}
+}
+
+// RemovedCacheDiagnostics returns the removed IDs of the "cache_diagnostics" edge to the CacheDiagnostic entity.
+func (m *SessionMutation) RemovedCacheDiagnosticsIDs() (ids []int64) {
+	for id := range m.removedcache_diagnostics {
+		ids = append(ids, id)
+	}
+	return
+}
+
+// CacheDiagnosticsIDs returns the "cache_diagnostics" edge IDs in the mutation.
+func (m *SessionMutation) CacheDiagnosticsIDs() (ids []int64) {
+	for id := range m.cache_diagnostics {
+		ids = append(ids, id)
+	}
+	return
+}
+
+// ResetCacheDiagnostics resets all changes to the "cache_diagnostics" edge.
+func (m *SessionMutation) ResetCacheDiagnostics() {
+	m.cache_diagnostics = nil
+	m.clearedcache_diagnostics = false
+	m.removedcache_diagnostics = nil
+}
+
 // Where appends a list predicates to the SessionMutation builder.
 func (m *SessionMutation) Where(ps ...predicate.Session) {
 	m.predicates = append(m.predicates, ps...)
@@ -19458,12 +20729,15 @@ func (m *SessionMutation) ResetField(name string) error {
 
 // AddedEdges returns all edge names that were set/added in this mutation.
 func (m *SessionMutation) AddedEdges() []string {
-	edges := make([]string, 0, 2)
+	edges := make([]string, 0, 3)
 	if m.events != nil {
 		edges = append(edges, session.EdgeEvents)
 	}
 	if m.chat_events != nil {
 		edges = append(edges, session.EdgeChatEvents)
+	}
+	if m.cache_diagnostics != nil {
+		edges = append(edges, session.EdgeCacheDiagnostics)
 	}
 	return edges
 }
@@ -19484,18 +20758,27 @@ func (m *SessionMutation) AddedIDs(name string) []ent.Value {
 			ids = append(ids, id)
 		}
 		return ids
+	case session.EdgeCacheDiagnostics:
+		ids := make([]ent.Value, 0, len(m.cache_diagnostics))
+		for id := range m.cache_diagnostics {
+			ids = append(ids, id)
+		}
+		return ids
 	}
 	return nil
 }
 
 // RemovedEdges returns all edge names that were removed in this mutation.
 func (m *SessionMutation) RemovedEdges() []string {
-	edges := make([]string, 0, 2)
+	edges := make([]string, 0, 3)
 	if m.removedevents != nil {
 		edges = append(edges, session.EdgeEvents)
 	}
 	if m.removedchat_events != nil {
 		edges = append(edges, session.EdgeChatEvents)
+	}
+	if m.removedcache_diagnostics != nil {
+		edges = append(edges, session.EdgeCacheDiagnostics)
 	}
 	return edges
 }
@@ -19516,18 +20799,27 @@ func (m *SessionMutation) RemovedIDs(name string) []ent.Value {
 			ids = append(ids, id)
 		}
 		return ids
+	case session.EdgeCacheDiagnostics:
+		ids := make([]ent.Value, 0, len(m.removedcache_diagnostics))
+		for id := range m.removedcache_diagnostics {
+			ids = append(ids, id)
+		}
+		return ids
 	}
 	return nil
 }
 
 // ClearedEdges returns all edge names that were cleared in this mutation.
 func (m *SessionMutation) ClearedEdges() []string {
-	edges := make([]string, 0, 2)
+	edges := make([]string, 0, 3)
 	if m.clearedevents {
 		edges = append(edges, session.EdgeEvents)
 	}
 	if m.clearedchat_events {
 		edges = append(edges, session.EdgeChatEvents)
+	}
+	if m.clearedcache_diagnostics {
+		edges = append(edges, session.EdgeCacheDiagnostics)
 	}
 	return edges
 }
@@ -19540,6 +20832,8 @@ func (m *SessionMutation) EdgeCleared(name string) bool {
 		return m.clearedevents
 	case session.EdgeChatEvents:
 		return m.clearedchat_events
+	case session.EdgeCacheDiagnostics:
+		return m.clearedcache_diagnostics
 	}
 	return false
 }
@@ -19561,6 +20855,9 @@ func (m *SessionMutation) ResetEdge(name string) error {
 		return nil
 	case session.EdgeChatEvents:
 		m.ResetChatEvents()
+		return nil
+	case session.EdgeCacheDiagnostics:
+		m.ResetCacheDiagnostics()
 		return nil
 	}
 	return fmt.Errorf("unknown Session edge %s", name)

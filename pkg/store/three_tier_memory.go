@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"fmt"
+	"reflect"
 	"sort"
 	"sync"
 )
@@ -18,6 +20,7 @@ type ThreeTierMemoryStoreConfig struct {
 	Personal MemoryStore
 	Team     MemoryStore
 	Org      MemoryStore
+	Embed    EmbedFunc
 }
 
 // threeTierMemoryStore implements ThreeTierSearcher by querying personal,
@@ -27,15 +30,18 @@ type threeTierMemoryStore struct {
 	personal MemoryStore
 	team     MemoryStore
 	org      MemoryStore
+	embed    EmbedFunc
 }
 
 // NewThreeTierSearcher creates a ThreeTierSearcher from three memory stores.
-// Any store may be nil; nil stores are silently skipped during search.
+// Any store may be nil; nil stores are skipped during search. When Embed is
+// configured, all non-nil stores must support prepared queries.
 func NewThreeTierSearcher(cfg ThreeTierMemoryStoreConfig) ThreeTierSearcher {
 	return &threeTierMemoryStore{
 		personal: cfg.Personal,
 		team:     cfg.Team,
 		org:      cfg.Org,
+		embed:    cfg.Embed,
 	}
 }
 
@@ -47,10 +53,52 @@ func (t *threeTierMemoryStore) SearchAllTiersByCategory(ctx context.Context, que
 	return t.searchAllTiers(ctx, query, maxResults, minScore, category)
 }
 
+func (t *threeTierMemoryStore) PrepareQuery(ctx context.Context, semanticQuery, keywordQuery string) (PreparedMemoryQuery, error) {
+	query := PreparedMemoryQuery{SemanticQuery: semanticQuery, KeywordQuery: keywordQuery}
+	if semanticQuery == "" {
+		return query, nil
+	}
+	if t.embed == nil {
+		return PreparedMemoryQuery{}, fmt.Errorf("prepare memory query: embedding function is not configured")
+	}
+	embedding, err := t.embed(ctx, semanticQuery)
+	if err != nil {
+		return PreparedMemoryQuery{}, fmt.Errorf("prepare memory query embedding: %w", err)
+	}
+	if len(embedding) == 0 {
+		return PreparedMemoryQuery{}, fmt.Errorf("prepare memory query embedding: empty embedding")
+	}
+	query.Embedding = embedding
+	query.EmbeddingIdentity = reflect.ValueOf(t.embed).Pointer()
+	return query, nil
+}
+
+func (t *threeTierMemoryStore) SearchAllTiersPrepared(ctx context.Context, query PreparedMemoryQuery, maxResults int, minScore float64, category string) ([]MemorySearchResult, error) {
+	return t.searchPreparedAllTiers(ctx, query, maxResults, minScore, category)
+}
+
 // searchAllTiers runs Search or SearchByCategory on each non-nil tier in
 // parallel, applies tier weighting, deduplicates by snippet, and returns
 // the top results sorted by weighted score.
 func (t *threeTierMemoryStore) searchAllTiers(ctx context.Context, query string, maxResults int, minScore float64, category string) ([]MemorySearchResult, error) {
+	if t.embed != nil {
+		prepared, err := t.PrepareQuery(ctx, query, query)
+		if err != nil {
+			return nil, err
+		}
+		return t.searchPreparedAllTiers(ctx, prepared, maxResults, minScore, category)
+	}
+	return t.searchAllTiersWith(ctx, query, nil, maxResults, minScore, category)
+}
+
+func (t *threeTierMemoryStore) searchPreparedAllTiers(ctx context.Context, query PreparedMemoryQuery, maxResults int, minScore float64, category string) ([]MemorySearchResult, error) {
+	if query.SemanticQuery != "" && len(query.Embedding) == 0 {
+		return nil, fmt.Errorf("search prepared memory query: semantic query requires embedding")
+	}
+	return t.searchAllTiersWith(ctx, query.KeywordQuery, &query, maxResults, minScore, category)
+}
+
+func (t *threeTierMemoryStore) searchAllTiersWith(ctx context.Context, query string, prepared *PreparedMemoryQuery, maxResults int, minScore float64, category string) ([]MemorySearchResult, error) {
 	// Build the list of (store, weight, scope) tuples
 	type tier struct {
 		store  MemoryStore
@@ -72,19 +120,26 @@ func (t *threeTierMemoryStore) searchAllTiers(ctx context.Context, query string,
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	var allResults []MemorySearchResult
-	var firstErr error
+	errorsByTier := make([]error, len(tiers))
 
-	for _, tr := range tiers {
+	for tierIndex, tr := range tiers {
 		if tr.store == nil {
 			continue
 		}
 		wg.Add(1)
-		go func(s MemoryStore, weight float64, scope string) {
+		go func(index int, s MemoryStore, weight float64, scope string) {
 			defer wg.Done()
 
 			var results []MemorySearchResult
 			var err error
-			if category == "" {
+			if prepared != nil {
+				preparedStore, ok := s.(PreparedMemoryStore)
+				if !ok {
+					err = fmt.Errorf("%s memory store does not support prepared queries", scope)
+				} else {
+					results, err = preparedStore.SearchPrepared(ctx, *prepared, perTierMax, 0, category)
+				}
+			} else if category == "" {
 				results, err = s.Search(ctx, query, perTierMax, 0) // don't filter by minScore yet
 			} else {
 				results, err = s.SearchByCategory(ctx, query, perTierMax, 0, category)
@@ -93,9 +148,7 @@ func (t *threeTierMemoryStore) searchAllTiers(ctx context.Context, query string,
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
-				if firstErr == nil {
-					firstErr = err
-				}
+				errorsByTier[index] = err
 				return
 			}
 
@@ -107,13 +160,15 @@ func (t *threeTierMemoryStore) searchAllTiers(ctx context.Context, query string,
 				}
 			}
 			allResults = append(allResults, results...)
-		}(tr.store, tr.weight, tr.scope)
+		}(tierIndex, tr.store, tr.weight, tr.scope)
 	}
 
 	wg.Wait()
 
-	if firstErr != nil {
-		return nil, firstErr
+	for _, err := range errorsByTier {
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// Deduplicate by snippet (prefer higher score)

@@ -30,7 +30,7 @@ export default function MemorySettings({ config, onSaved }: { config: Record<str
     enabled: true,
     memory_dir: '',
     vector_dir: '',
-    embedding: { provider: '', model: '', base_url: '', api_key: '' },
+    embedding: { provider: '', model: '', base_url: '', api_key: '', timeout_seconds: 30 },
     chunking: { max_chars: 1600, overlap: 320 },
     search: { max_results: 6, min_score: 0.35 },
     sync: { watch: true, debounce_ms: 1500 }
@@ -49,7 +49,8 @@ export default function MemorySettings({ config, onSaved }: { config: Record<str
           provider: config.embedding?.provider || '',
           model: config.embedding?.model || '',
           base_url: config.embedding?.base_url || '',
-          api_key: config.embedding?.api_key || ''
+          api_key: config.embedding?.api_key || '',
+          timeout_seconds: config.embedding?.timeout_seconds || 30
         },
         chunking: {
           max_chars: config.chunking?.max_chars || 1600,
@@ -232,6 +233,18 @@ export default function MemorySettings({ config, onSaved }: { config: Record<str
                       </p>
                     </div>
                   )}
+                  <div className="space-y-2">
+                    <Label htmlFor="embedding-timeout">Request Timeout</Label>
+                    <Input
+                      id="embedding-timeout"
+                      type="number"
+                      value={form.embedding.timeout_seconds}
+                      onChange={(e) => setForm({ ...form, embedding: { ...form.embedding, timeout_seconds: parseInt(e.target.value) || 0 } })}
+                      min="1"
+                      className="bg-background"
+                    />
+                    <p className="text-xs text-muted-foreground">Remote embedding request deadline in seconds. Default: 30.</p>
+                  </div>
                   {form.embedding.provider !== 'ollama' && (
                     <div className="space-y-2">
                       <Label htmlFor="embedding-api-key">API Key</Label>

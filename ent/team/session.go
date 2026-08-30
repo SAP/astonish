@@ -61,9 +61,11 @@ type SessionEdges struct {
 	Events []*SessionEvent `json:"events,omitempty"`
 	// ChatEvents holds the value of the chat_events edge.
 	ChatEvents []*ChatSessionEvent `json:"chat_events,omitempty"`
+	// CacheDiagnostics holds the value of the cache_diagnostics edge.
+	CacheDiagnostics []*CacheDiagnostic `json:"cache_diagnostics,omitempty"`
 	// loadedTypes holds the information for reporting if a
 	// type was loaded (or requested) in eager-loading or not.
-	loadedTypes [2]bool
+	loadedTypes [3]bool
 }
 
 // EventsOrErr returns the Events value or an error if the edge
@@ -82,6 +84,15 @@ func (e SessionEdges) ChatEventsOrErr() ([]*ChatSessionEvent, error) {
 		return e.ChatEvents, nil
 	}
 	return nil, &NotLoadedError{edge: "chat_events"}
+}
+
+// CacheDiagnosticsOrErr returns the CacheDiagnostics value or an error if the edge
+// was not loaded in eager-loading.
+func (e SessionEdges) CacheDiagnosticsOrErr() ([]*CacheDiagnostic, error) {
+	if e.loadedTypes[2] {
+		return e.CacheDiagnostics, nil
+	}
+	return nil, &NotLoadedError{edge: "cache_diagnostics"}
 }
 
 // scanValues returns the types for scanning values from sql.Rows.
@@ -237,6 +248,11 @@ func (_m *Session) QueryEvents() *SessionEventQuery {
 // QueryChatEvents queries the "chat_events" edge of the Session entity.
 func (_m *Session) QueryChatEvents() *ChatSessionEventQuery {
 	return NewSessionClient(_m.config).QueryChatEvents(_m)
+}
+
+// QueryCacheDiagnostics queries the "cache_diagnostics" edge of the Session entity.
+func (_m *Session) QueryCacheDiagnostics() *CacheDiagnosticQuery {
+	return NewSessionClient(_m.config).QueryCacheDiagnostics(_m)
 }
 
 // Update returns a builder for updating this Session.

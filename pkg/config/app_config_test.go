@@ -5,6 +5,26 @@ import (
 	"time"
 )
 
+func TestRetrievalTimeoutDefaultsAndOverrides(t *testing.T) {
+	var embedding EmbeddingConfig
+	if got := embedding.Timeout(); got != 30*time.Second {
+		t.Fatalf("default embedding timeout = %s, want 30s", got)
+	}
+	embedding.TimeoutSeconds = 7
+	if got := embedding.Timeout(); got != 7*time.Second {
+		t.Fatalf("embedding timeout = %s, want 7s", got)
+	}
+
+	var chat ChatConfig
+	if got := chat.PreProviderRetrievalTimeout(); got != 10*time.Second {
+		t.Fatalf("default pre-provider retrieval timeout = %s, want 10s", got)
+	}
+	chat.PreProviderRetrievalTimeoutSeconds = 3
+	if got := chat.PreProviderRetrievalTimeout(); got != 3*time.Second {
+		t.Fatalf("pre-provider retrieval timeout = %s, want 3s", got)
+	}
+}
+
 func TestGetProviderType(t *testing.T) {
 	tests := []struct {
 		name         string

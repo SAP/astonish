@@ -43,27 +43,17 @@ func isListAllQuery(query string) bool {
 	return false
 }
 
-// SearchTools performs semantic search across the tool index.
-// When onResults is non-nil, it is called with the matched tool names so the
-// dynamic injection system can make them available for direct use.
-func SearchTools(toolIndex *agent.ToolIndex, onResults func([]string)) func(ctx tool.Context, args SearchToolsArgs) (SearchToolsResult, error) {
+// SearchTools performs semantic search across the tool index without changing
+// the declarations sent to the model.
+func SearchTools(toolIndex *agent.ToolIndex) func(ctx tool.Context, args SearchToolsArgs) (SearchToolsResult, error) {
 	return func(ctx tool.Context, args SearchToolsArgs) (SearchToolsResult, error) {
 		if args.Query == "" {
 			return SearchToolsResult{}, fmt.Errorf("query is required — describe what you want to do, or use '*' to list all tools")
 		}
 
-		// Handle "list all" mode
+		// Handle "list all" mode.
 		if isListAllQuery(args.Query) {
-			result := listAllTools(ctx, toolIndex)
-			// Notify injection system about all tools
-			if onResults != nil && len(result.Matches) > 0 {
-				names := make([]string, len(result.Matches))
-				for i, m := range result.Matches {
-					names[i] = m.ToolName
-				}
-				onResults(names)
-			}
-			return result, nil
+			return listAllTools(ctx, toolIndex), nil
 		}
 
 		maxResults := args.MaxResults
@@ -127,16 +117,6 @@ func SearchTools(toolIndex *agent.ToolIndex, onResults func([]string)) func(ctx 
 				Score:       m.Score,
 				Access:      access,
 			}
-		}
-
-		// Notify the dynamic injection system so these tools become callable
-		// on the very next LLM call within this turn.
-		if onResults != nil {
-			names := make([]string, len(matches))
-			for i, m := range matches {
-				names[i] = m.ToolName
-			}
-			onResults(names)
 		}
 
 		return SearchToolsResult{
@@ -226,22 +206,18 @@ func toolAccessHint(m agent.ToolMatch) string {
 		return "always available (main thread tool) — call as `" + m.ToolName + "`"
 	}
 	if strings.HasPrefix(m.GroupName, "mcp:") {
-		return "call directly as `" + m.ToolName + "` on the main thread (NOT `" + m.GroupName + "/" + m.ToolName +
-			"`; do not use delegate_tasks for a single MCP call)"
+		return "deferred — inspect with describe_tools, then invoke with execute_tool using bare name `" + m.ToolName + "`"
 	}
-	return "available — call directly as `" + m.ToolName + "` (group " + m.GroupName + "; do not delegate a single tool call)"
+	return "deferred — inspect with describe_tools, then invoke with execute_tool using name `" + m.ToolName + "`"
 }
 
-// NewSearchToolsTool creates the search_tools tool using the given tool index.
-// When onResults is non-nil, tools found via search become available for direct
-// invocation through the dynamic tool injection system.
-func NewSearchToolsTool(toolIndex *agent.ToolIndex, onResults func([]string)) (tool.Tool, error) {
+// NewSearchToolsTool creates the catalog-only search_tools declaration.
+func NewSearchToolsTool(toolIndex *agent.ToolIndex) (tool.Tool, error) {
+	description := "Search the catalog for available tools by describing what you want to do. " +
+		"This does not add model-visible tools. Inspect matches with describe_tools and invoke them with execute_tool. " +
+		"Use query='*' to list ALL available tools."
 	return functiontool.New(functiontool.Config{
-		Name: "search_tools",
-		Description: "Search for available tools by describing what you want to do. " +
-			"Found tools become available for you to call directly by tool_name " +
-			"(e.g. send_email — never mcp:server/tool). " +
-			"Use this when you need a capability that isn't currently available. " +
-			"Use query='*' to list ALL available tools.",
-	}, SearchTools(toolIndex, onResults))
+		Name:        "search_tools",
+		Description: description,
+	}, SearchTools(toolIndex))
 }

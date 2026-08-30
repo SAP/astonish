@@ -21,10 +21,6 @@ type CodeSystemPromptBuilder struct {
 	// found from the repo root to the working directory (code mode only).
 	ProjectContext string
 
-	// MCPFirstClass: MCP server tools are injected on the main thread and
-	// callable directly; the prompt lists them by name.
-	MCPFirstClass bool
-
 	// PlanFilePersistence: announced plans are persisted to a session PLAN.md.
 	PlanFilePersistence bool
 
@@ -138,8 +134,7 @@ func (b *CodeSystemPromptBuilder) build(base *SystemPromptBuilder) string {
 	if base.SkillIndex != "" {
 		sb.WriteString("- **Skill-first rule:** When a task matches any Available Skill, you MUST call `skill_lookup` to load it — no exceptions. Do this alongside your first batch of tool calls. When you call `skill_lookup(name)`, the response includes a `files_manifest` of any additional files (scripts/, references/, etc.). Use `skill_lookup(name, file: \"...\")` to load specific files. The skill provides canonical commands and context that may be newer than stored memory. Having prior knowledge of a working method is NOT a reason to skip loading the skill.\n")
 	}
-	// Code mode: MCP tools are always first-class — no search_tools gate
-	sb.WriteString("- MCP tools are loaded directly on the main thread — call them by their bare name (e.g. `send_email`) without a `search_tools` detour.\n")
+	sb.WriteString("- MCP tools are deferred catalog tools. Use `search_tools`, `describe_tools`, and `execute_tool`; do not call them as direct functions.\n")
 
 	// 3b. Knowledge Context
 	sb.WriteString("\n## Knowledge Context\n\n")
@@ -282,43 +277,7 @@ func (b *CodeSystemPromptBuilder) build(base *SystemPromptBuilder) string {
 			sb.WriteString(fmt.Sprintf("- **%s** (%d tools) — %s\n", g.Name, toolCount, g.Description))
 		}
 		sb.WriteString("\nExamples (parallel work only): `tools: [\"browser\"]`, `tools: [\"core\", \"web\"]`\n")
-		// Code mode: MCP tools are always first-class
-		sb.WriteString("\n**MCP tools (main thread):** All configured MCP server tools are available to you directly — call the **bare** tool name (e.g. `send_email`) whenever you need one. ")
-		sb.WriteString("You do NOT need `search_tools` to reach them; they are always loaded. Do **not** invent `mcp:server/tool` (app-only form). Do **not** delegate a single MCP call.\n")
-	}
-
-	// 6b2. MCP tools listing — code mode always lists them by name
-	if b.MCPFirstClass && len(base.Catalog) > 0 {
-		ctx := &minimalReadonlyContext{Context: context.Background()}
-		var mcpLines []string
-		for _, g := range base.Catalog {
-			serverName, isMCP := mcpServerNameFromGroup(g.Name)
-			if !isMCP {
-				continue
-			}
-			if base.MCPAccessFilter != nil && !base.MCPAccessFilter(serverName) {
-				continue
-			}
-			var toolNames []string
-			for _, ts := range g.Toolsets {
-				if mcpTools, err := ts.Tools(ctx); err == nil {
-					for _, t := range mcpTools {
-						toolNames = append(toolNames, t.Name())
-					}
-				}
-			}
-			if len(toolNames) == 0 {
-				continue
-			}
-			mcpLines = append(mcpLines, fmt.Sprintf("- **%s**: %s\n", serverName, strings.Join(toolNames, ", ")))
-		}
-		if len(mcpLines) > 0 {
-			sb.WriteString("\n## MCP Tools (available directly)\n\n")
-			sb.WriteString("These MCP server tools are loaded on the main thread and callable right now by their bare name:\n\n")
-			for _, line := range mcpLines {
-				sb.WriteString(line)
-			}
-		}
+		sb.WriteString("\n**Deferred MCP tools:** Use `search_tools`, inspect matches with `describe_tools`, then invoke them through `execute_tool`. Do **not** call a deferred tool as a direct function.\n")
 	}
 
 	// 6c2. Skill index

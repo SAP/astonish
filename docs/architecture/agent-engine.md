@@ -15,7 +15,7 @@ Both agents are built on top of **Google's Agent Development Kit (ADK)**, specif
 
 ADK provides a solid foundation (session management, tool dispatch, streaming) but Astonish needs capabilities that ADK doesn't offer:
 
-- **Dynamic tool injection**: Tools are discovered per-turn via semantic search, not statically registered.
+- **Cache-stable execution**: Selected sessions freeze the system prompt and model-visible tool declarations while discovering deferred capabilities through a fixed bridge.
 - **Credential security**: Before/after tool callbacks must substitute and restore credential placeholders without leaking secrets into session history.
 - **Context compaction**: When the context window fills up, the system must compress history without losing critical information.
 - **Auto-knowledge retrieval**: Every turn triggers a vector search to inject relevant guidance into the system prompt.
@@ -28,9 +28,15 @@ ADK's callback system (BeforeToolCallbacks, AfterToolCallbacks, BeforeModelCallb
 
 The system prompt uses a deliberate tiered architecture to balance token efficiency with comprehensive guidance:
 
-- **Tier 1 (Static Core)**: Identity, behavior rules, tool usage guidelines, environment info, capability listing. ~800 tokens. Stable across turns so LLM providers can cache the KV prefix.
-- **Tier 2 (Indexed Guidance)**: Detailed how-to documentation for each capability (browser, credentials, scheduling, etc.). Stored as `memory/guidance/*.md` files indexed in the vector store. Zero tokens in the prompt until retrieved. This keeps the base prompt small for models with limited context windows.
-- **Tier 3 (Per-Turn Dynamic)**: Auto-retrieved knowledge, relevant tool descriptions, channel hints, scheduler context, session-specific instructions. Appended at the end of the system prompt so the static prefix remains cacheable.
+- **Tier 1 (Session Snapshot)**: Identity, behavior rules, environment information, capability summaries, and other static inputs. In the cache-stable path, the exact built prompt is persisted in session state and reused after resume.
+- **Tier 2 (Indexed Guidance)**: Detailed how-to documentation for each capability (browser, credentials, scheduling, etc.). Stored as `memory/guidance/*.md` files indexed in the vector store and retrieved only when relevant.
+- **Tier 3 (Per-Turn Context)**: Retrieved knowledge, catalog matches, channel/scheduler hints, session instructions, skill indexes, and mode guidance. In the cache-stable path this is a marked user-role event persisted byte-for-byte and hidden from transcript, memory, reflection, and distillation views.
+
+Every provider and session uses this cache-stable path. There is no legacy dynamic-declaration path or rollout switch. Automatic relevance matches, pinned groups, and explicit `search_tools` results are model-facing context only and never become provider tool declarations. Existing sessions keep the prompt snapshot stored when they were created; prompt changes apply to new sessions unless an operator explicitly starts a new session. Rebuilding an existing session prompt is intentionally not automatic because it invalidates the stable provider prefix.
+
+### Go integration contract
+
+The cache-stable tool bridge changes exported integration points. `ToolVectorStore` implementations must provide `AllIDs(context.Context)` so initialization can verify exact semantic-index membership. Request-scoped MCP lookup returns an error rather than a boolean so lookup failures cannot be mistaken for an absent tool. Search-tool construction also propagates errors. Integrators must update implementations and callers; compatibility fallbacks are intentionally absent.
 
 ### Why Sequential Tool Dispatch
 
@@ -40,8 +46,8 @@ ADK processes tool calls sequentially within a single invocation (a for-loop, no
 
 Most agent frameworks require all tools to be declared upfront. With 60+ built-in tools plus MCP tools, this wastes context window tokens listing tools the user doesn't need. Instead, Astonish uses a two-layer approach:
 
-- **Static tools**: A small core set (file ops, shell, memory) always available.
-- **Dynamic injection**: Before each LLM call, a `BeforeModelCallback` adds tool declarations based on semantic search matches and explicit `search_tools` calls. The LLM sees only relevant tools.
+- **Static tools**: A small core set (file ops, shell, memory) remains directly available.
+- **Fixed progressive bridge**: `search_tools` searches only the catalog, `describe_tools` returns selected schemas, and `execute_tool` invokes deferred tools. The model-visible declaration set does not grow during a turn.
 
 ## Architecture
 
@@ -65,23 +71,28 @@ User Message
     v
 3. Tool Discovery: Hybrid search on ToolIndex
    - Vector similarity + BM25 keyword matching (RRF fusion)
-   - Top 8 matches formatted for prompt + stored for dynamic injection
+   - Top 8 matches formatted as catalog hints; declarations remain fixed
+   - Knowledge and tool retrieval share the explicit `chat.pre_provider_retrieval_timeout_seconds` deadline (default 10 seconds)
+   - Any retrieval error or timeout ends the turn before provider invocation; semantic failures never fall back to lexical-only results
+   - A configured semantic catalog must synchronize and pass full document-identity validation during agent initialization; failure aborts initialization rather than starting with degraded retrieval
+   - Successful validation is cached for the published catalog generation, and synchronization blocks semantic searches until a complete generation is validated
     |
     v
-4. System Prompt Build: SystemPromptBuilder.Build()
-   - Static core (~800 tokens) + per-turn dynamic content
+4. Prompt and Turn Context
+   - Cache-stable path: reuse the persisted system prompt and persist dynamic context as a hidden user-role event
+   - Legacy path: rebuild the system prompt with per-turn fields
     |
     v
 5. LLM Agent Creation: llmagent.New() with callbacks
    - BeforeToolCallbacks: credential substitution, secret token resolution
    - AfterToolCallbacks: credential restoration, redaction, trace recording, image stripping
-   - BeforeModelCallbacks: tool response truncation, dynamic tool injection, context compaction
+   - BeforeModelCallbacks: tool response truncation and context compaction
     |
     v
 6. Execution Loop (with retry):
    - llmAgent.Run() produces streaming events
    - Retryable errors (429, 502, 503) -> exponential backoff, retry up to 3x
-   - Tool-not-found (ADK 1.5 FunctionResponse): if the name exists in ToolIndex, OnToolErrorCallbacks auto-injects it for the next LLM round and asks the model to retry; truly unknown names keep ADK's default error
+   - Deferred tools are called through `execute_tool`; unknown direct names keep ADK's default error
    - Tool call count cap (default 25) -> pause and ask user to continue
    - Approval pause -> yield event and return, resume on next user message
     |
@@ -151,18 +162,15 @@ AfterToolCallback:
 
 The critical invariant: the session event (which shares the same args map by reference due to an ADK design choice) always retains placeholder tokens, never real secrets.
 
-### Dynamic Tool Injection
+### Fixed Progressive Tool Bridge
 
-The `DynamicToolInjectionCallback` is a `BeforeModelCallback` that fires on every LLM API call (including after tool results):
+When the cache-stable path is enabled, ChatAgent exposes a fixed declaration set for the session. `search_tools` is catalog-only and never mutates the request. The model calls `describe_tools(names)` to retrieve deferred schemas, then `execute_tool(name, arguments)` to invoke one. Resolution prefers first-party ToolIndex entries, rejects ambiguous bare request-scoped names, accepts qualified `group/tool` references, and enforces disabled-tool and effective team → org → platform MCP access rules.
 
-1. Collects tool matches from the per-turn hybrid search (set during knowledge retrieval).
-2. Collects tool names from any `search_tools` calls made within the current turn.
-3. For each match, resolves the concrete `tool.Tool` implementation from the `ToolIndex` registry.
-4. Adds these tools to the `LLMRequest.Tools` array so the LLM can call them.
+ADK dispatches `execute_tool` through the normal callback chain. ChatAgent unwraps the selected tool identity and nested arguments inside every BeforeTool callback and the AfterTool callback, preserving mode and authorization gates, credential and pending-secret substitution/restoration, output redaction, execution tracing, image handling, and artifact capture. Request-scoped MCP and A2A catalogs are merged rather than replacing one another. Historical direct tool calls remain executable from transcript history, but no discovery result adds a new declaration.
 
-This means the LLM's available toolset can grow mid-turn as `search_tools` discovers additional tools.
+Before every model call, Astonish records secret-safe hashes of the system instruction and canonical ordered declarations, plus declaration count and whether either hash changed within the turn or session. These diagnostics expose cache instability without logging prompt or schema contents.
 
-**Auto-inject on miss:** Under ADK 1.5, calling a tool that is not in the current step's `req.Tools` yields a FunctionResponse error (`tool 'X' not found`), not a hard `Run` abort. ChatAgent (and sub-agents) register an `OnToolErrorCallback` that looks the name up in `ToolIndex`. If the tool exists and is allowed (MCP access + not team-disabled), it is registered via the same path as `search_tools` results so the next LLM round of the same turn can call it. The callback does **not** execute the tool in place — that would skip BeforeTool/AfterTool (credentials, redaction, tracing). The legacy `isUnknownToolError` hard-error retry path targets pre-1.5 ADK (`unknown tool:`) and is retained only as a safety net.
+The semantic catalog is a required startup dependency when embeddings are configured. Schema migration, embedding initialization, and tool-vector-store initialization fail closed instead of advertising readiness with degraded retrieval. Background catalog refresh remains asynchronous after the lexical catalog is published, but request-time semantic embedding failures are returned explicitly and are never retried or converted into BM25-only results.
 
 ### Sub-Agent System
 

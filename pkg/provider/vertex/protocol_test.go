@@ -299,6 +299,32 @@ func TestConvertRequest_MultipleContents(t *testing.T) {
 
 // ---------- ParseResponse ----------
 
+func TestParseResponse_UsageMetadata(t *testing.T) {
+	body := `{"candidates":[],"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":20,"totalTokenCount":120,"cachedContentTokenCount":75,"thoughtsTokenCount":5,"toolUsePromptTokenCount":3}}`
+	resp, err := ParseResponse([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	usage := resp.UsageMetadata
+	if usage == nil {
+		t.Fatal("UsageMetadata is nil")
+	}
+	if usage.PromptTokenCount != 100 || usage.CandidatesTokenCount != 20 || usage.TotalTokenCount != 120 ||
+		usage.CachedContentTokenCount != 75 || usage.ThoughtsTokenCount != 5 || usage.ToolUsePromptTokenCount != 3 {
+		t.Fatalf("usage = %#v", usage)
+	}
+}
+
+func TestParseResponse_UsageMetadataAbsent(t *testing.T) {
+	resp, err := ParseResponse([]byte(`{"candidates":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.UsageMetadata != nil {
+		t.Fatalf("UsageMetadata = %#v, want nil", resp.UsageMetadata)
+	}
+}
+
 func TestParseResponse_TextContent(t *testing.T) {
 	t.Parallel()
 	body := `{
@@ -483,6 +509,43 @@ func TestParseResponse_MultipleParts(t *testing.T) {
 }
 
 // ---------- ParseStream ----------
+
+func TestParseStream_UsageMetadata(t *testing.T) {
+	reader := strings.NewReader("data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"ok\"}]}}],\"usageMetadata\":{\"promptTokenCount\":100,\"candidatesTokenCount\":2,\"totalTokenCount\":102,\"cachedContentTokenCount\":75}}\n\n")
+	var final *model.LLMResponse
+	for resp, err := range ParseStream(reader) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !resp.Partial {
+			final = resp
+		}
+	}
+	if final == nil || final.UsageMetadata == nil {
+		t.Fatal("final response has no usage metadata")
+	}
+	usage := final.UsageMetadata
+	if usage.PromptTokenCount != 100 || usage.CandidatesTokenCount != 2 || usage.TotalTokenCount != 102 || usage.CachedContentTokenCount != 75 {
+		t.Fatalf("usage = %#v", usage)
+	}
+}
+
+func TestParseStream_UsageOnlyChunk(t *testing.T) {
+	reader := strings.NewReader("data: {\"usageMetadata\":{\"promptTokenCount\":10,\"totalTokenCount\":10,\"cachedContentTokenCount\":4}}\n\n")
+	var responses []*model.LLMResponse
+	for resp, err := range ParseStream(reader) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		responses = append(responses, resp)
+	}
+	if len(responses) != 1 || responses[0].UsageMetadata == nil {
+		t.Fatalf("responses = %#v", responses)
+	}
+	if responses[0].UsageMetadata.CachedContentTokenCount != 4 {
+		t.Fatalf("CachedContentTokenCount = %d, want 4", responses[0].UsageMetadata.CachedContentTokenCount)
+	}
+}
 
 func TestParseStream_SingleChunk(t *testing.T) {
 	t.Parallel()

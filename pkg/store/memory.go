@@ -43,6 +43,29 @@ type MemorySearchResult struct {
 	SessionID string  `json:"session_id,omitempty"` // session that created this memory
 }
 
+// PreparedMemoryQuery separates the text used for semantic retrieval from the
+// text used for keyword retrieval. Embedding may be populated once by an
+// orchestrator and shared across concurrent store searches.
+type PreparedMemoryQuery struct {
+	SemanticQuery     string
+	KeywordQuery      string
+	Embedding         []float32
+	EmbeddingIdentity uintptr
+}
+
+// PreparedMemoryStore searches with a caller-prepared query. Implementations
+// must not generate another embedding when Embedding is provided.
+type PreparedMemoryStore interface {
+	SearchPrepared(ctx context.Context, query PreparedMemoryQuery, maxResults int, minScore float64, category string) ([]MemorySearchResult, error)
+}
+
+// PreparedThreeTierSearcher supports distinct semantic and keyword queries.
+type PreparedThreeTierSearcher interface {
+	ThreeTierSearcher
+	PrepareQuery(ctx context.Context, semanticQuery, keywordQuery string) (PreparedMemoryQuery, error)
+	SearchAllTiersPrepared(ctx context.Context, query PreparedMemoryQuery, maxResults int, minScore float64, category string) ([]MemorySearchResult, error)
+}
+
 // MemoryStore provides access to the vector + BM25 memory search system.
 //
 // In platform mode, queries target the appropriate schema (personal/team/org).

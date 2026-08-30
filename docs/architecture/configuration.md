@@ -110,7 +110,13 @@ scheduler:
 
 # Memory
 memory:
-  embedding_provider: local    # local, openai, ollama
+  embedding:
+    provider: local            # local, openai, ollama, openai-compat
+    timeout_seconds: 30        # Remote embedding HTTP deadline; nonzero by default
+
+# Chat runtime deadlines
+chat:
+  pre_provider_retrieval_timeout_seconds: 10
 
 # Session management
 sessions:
@@ -137,7 +143,7 @@ Daemon startup:
 LoadAppConfig(configDir):
   1. Read config.yaml
   2. Parse YAML into AppConfig struct
-  3. Apply defaults for unset values
+  3. Resolve accessor defaults for unset values
   4. Validate settings (sandbox limits, network mode, etc.)
     |
     v

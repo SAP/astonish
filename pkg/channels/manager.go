@@ -811,7 +811,7 @@ func (m *ChannelManager) handleInbound(ctx context.Context, msg InboundMessage) 
 			break
 		}
 
-		if event.LLMResponse.Content == nil {
+		if agent.IsTurnContextEvent(event) || event.LLMResponse.Content == nil {
 			continue
 		}
 

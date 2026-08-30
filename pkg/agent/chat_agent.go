@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/credentials"
@@ -49,14 +50,15 @@ type KnowledgeSearchByCategoryFunc func(ctx context.Context, query string, bm25Q
 // Execution records a trace. After reusable tasks, auto-distillation
 // generates a flow YAML + knowledge doc. /distill remains as manual fallback.
 type ChatAgent struct {
-	LLM            model.LLM
-	Tools          []tool.Tool
-	Toolsets       []tool.Toolset
-	SessionService session.Service
-	SystemPrompt   *SystemPromptBuilder
-	DebugMode      bool
-	AutoApprove    bool
-	MaxToolCalls   int // Unused. Previous per-turn tool-call pause is removed; 0 = unlimited.
+	LLM                         model.LLM
+	Tools                       []tool.Tool
+	Toolsets                    []tool.Toolset
+	SessionService              session.Service
+	SystemPrompt                *SystemPromptBuilder
+	DebugMode                   bool
+	AutoApprove                 bool
+	PreProviderRetrievalTimeout time.Duration
+	MaxToolCalls                int // Unused. Previous per-turn tool-call pause is removed; 0 = unlimited.
 
 	// Flow distillation
 	FlowSaveDir   string         // Directory for saved flows (default: agents dir)
@@ -303,25 +305,33 @@ type DistillSession struct {
 }
 
 // NewChatAgent creates a ChatAgent with all configured tools and toolsets.
+func (c *ChatAgent) preProviderRetrievalTimeout() time.Duration {
+	if c.PreProviderRetrievalTimeout <= 0 {
+		return config.DefaultPreProviderRetrievalTimeoutSeconds * time.Second
+	}
+	return c.PreProviderRetrievalTimeout
+}
+
 func NewChatAgent(llm model.LLM, internalTools []tool.Tool, toolsets []tool.Toolset,
 	sessionService session.Service, promptBuilder *SystemPromptBuilder,
 	debugMode bool, autoApprove bool) *ChatAgent {
 
 	return &ChatAgent{
-		LLM:                  llm,
-		Tools:                internalTools,
-		Toolsets:             toolsets,
-		SessionService:       sessionService,
-		SystemPrompt:         promptBuilder,
-		DebugMode:            debugMode,
-		AutoApprove:          autoApprove,
-		approvalHelper:       &AstonishAgent{LLM: llm, AutoApprove: autoApprove},
-		traceHistory:         make(map[string][]*ExecutionTrace),
-		pendingDistill:       make(map[string]*distillPreview),
-		pendingDistillReview: make(map[string]*DistillReview),
-		pendingTutorialBP:    make(map[string]*TutorialBlueprintPending),
-		approvedTutorialBP:   make(map[string]bool),
-		activeApps:           make(map[string]*ActiveApp),
+		LLM:                         llm,
+		Tools:                       internalTools,
+		Toolsets:                    toolsets,
+		SessionService:              sessionService,
+		SystemPrompt:                promptBuilder,
+		DebugMode:                   debugMode,
+		AutoApprove:                 autoApprove,
+		PreProviderRetrievalTimeout: config.DefaultPreProviderRetrievalTimeoutSeconds * time.Second,
+		approvalHelper:              &AstonishAgent{LLM: llm, AutoApprove: autoApprove},
+		traceHistory:                make(map[string][]*ExecutionTrace),
+		pendingDistill:              make(map[string]*distillPreview),
+		pendingDistillReview:        make(map[string]*DistillReview),
+		pendingTutorialBP:           make(map[string]*TutorialBlueprintPending),
+		approvedTutorialBP:          make(map[string]bool),
+		activeApps:                  make(map[string]*ActiveApp),
 	}
 }
 

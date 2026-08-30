@@ -68,6 +68,8 @@ User Message
 3. Tool Discovery: Hybrid search on ToolIndex
    - Vector similarity + BM25 keyword matching (RRF fusion)
    - Top 8 matches formatted as catalog hints; declarations remain fixed
+   - Knowledge and tool retrieval share the explicit `chat.pre_provider_retrieval_timeout_seconds` deadline (default 10 seconds)
+   - Any retrieval error or timeout ends the turn before provider invocation; semantic failures never fall back to lexical-only results
     |
     v
 4. Prompt and Turn Context
@@ -161,6 +163,8 @@ When the cache-stable path is enabled, ChatAgent exposes a fixed declaration set
 ADK dispatches `execute_tool` through the normal callback chain. ChatAgent unwraps the selected tool identity and nested arguments inside every BeforeTool callback and the AfterTool callback, preserving mode and authorization gates, credential and pending-secret substitution/restoration, output redaction, execution tracing, image handling, and artifact capture. Request-scoped MCP and A2A catalogs are merged rather than replacing one another. Historical direct tool calls remain executable from transcript history, but no discovery result adds a new declaration.
 
 Before every model call, Astonish records secret-safe hashes of the system instruction and canonical ordered declarations, plus declaration count and whether either hash changed within the turn or session. These diagnostics expose cache instability without logging prompt or schema contents.
+
+The semantic catalog is a required startup dependency when embeddings are configured. Schema migration, embedding initialization, and tool-vector-store initialization fail closed instead of advertising readiness with degraded retrieval. Background catalog refresh remains asynchronous after the lexical catalog is published, but request-time semantic embedding failures are returned explicitly and are never retried or converted into BM25-only results.
 
 ### Sub-Agent System
 

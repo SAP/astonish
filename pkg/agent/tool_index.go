@@ -905,13 +905,13 @@ func (idx *ToolIndex) SearchHybrid(ctx context.Context, query string, topK int, 
 			vK = docCount
 		}
 
-		// Embed the query for vector search
+		// Embed the query for vector search.
 		queryEmb, err := idx.embedFunc(ctx, query)
 		if err != nil {
-			return nil, fmt.Errorf("failed to embed query: %w", err)
+			return nil, fmt.Errorf("failed to embed hybrid search query: %w", err)
 		}
 		if len(queryEmb) == 0 {
-			return nil, fmt.Errorf("failed to embed query: empty embedding")
+			return nil, fmt.Errorf("failed to embed hybrid search query: empty embedding")
 		}
 		vectorResults, err = idx.vectorStore.QueryByEmbedding(ctx, queryEmb, vK)
 		if err != nil {

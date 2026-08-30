@@ -238,11 +238,10 @@ func Run(cfg RunConfig) error {
 	// Run migrations
 	migrationStarted := time.Now()
 	if err := entStore.MigrateAllSchemas(context.Background()); err != nil {
-		logger.Printf("Warning: migration errors: %v", err)
 		logStartupPhase("migrations", "failed", migrationStarted)
-	} else {
-		logStartupPhase("migrations", "complete", migrationStarted)
+		return fmt.Errorf("failed to migrate storage schemas: %w", err)
 	}
+	logStartupPhase("migrations", "complete", migrationStarted)
 
 	// Initialize embedding
 	embeddingStarted := time.Now()
@@ -252,16 +251,15 @@ func Run(cfg RunConfig) error {
 		if embErr != nil {
 			logStartupPhase("embedding", "failed", embeddingStarted)
 			return fmt.Errorf("initialize semantic retrieval: %w", embErr)
-		} else {
-			backend.SetEmbedFunc(func(ctx context.Context, text string) ([]float32, error) {
-				return embResult.EmbeddingFunc(ctx, text)
-			})
-			if embResult.Cleanup != nil {
-				defer embResult.Cleanup()
-			}
-			logger.Printf("Memory stores: hybrid vector+keyword search enabled")
-			logStartupPhase("embedding", "complete", embeddingStarted)
 		}
+		backend.SetEmbedFunc(func(ctx context.Context, text string) ([]float32, error) {
+			return embResult.EmbeddingFunc(ctx, text)
+		})
+		if embResult.Cleanup != nil {
+			defer embResult.Cleanup()
+		}
+		logger.Printf("Memory stores: hybrid vector+keyword search enabled")
+		logStartupPhase("embedding", "complete", embeddingStarted)
 	}
 
 	// In platform mode, cascade platform and default-org provider settings

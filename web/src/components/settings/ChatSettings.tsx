@@ -18,7 +18,8 @@ export default function ChatSettings({ config, onSaved }: { config: Record<strin
     max_tools: 0,
     auto_approve: false,
     workspace_dir: '',
-    flow_save_dir: ''
+    flow_save_dir: '',
+    pre_provider_retrieval_timeout_seconds: 10
   })
   const [saving, setSaving] = useState(false)
   const [saveSuccess, setSaveSuccess] = useState(false)
@@ -32,7 +33,8 @@ export default function ChatSettings({ config, onSaved }: { config: Record<strin
         max_tools: config.max_tools || 0,
         auto_approve: config.auto_approve || false,
         workspace_dir: config.workspace_dir || '',
-        flow_save_dir: config.flow_save_dir || ''
+        flow_save_dir: config.flow_save_dir || '',
+        pre_provider_retrieval_timeout_seconds: config.pre_provider_retrieval_timeout_seconds || 10
       })
     }
   }, [config])
@@ -116,6 +118,29 @@ export default function ChatSettings({ config, onSaved }: { config: Record<strin
               Maximum tools exposed to the LLM. Set to 0 to use the default.
             </p>
           </div>
+        </CardContent>
+      </Card>
+
+      <Card className="border-border bg-card shadow-sm">
+        <CardHeader>
+          <CardTitle className="text-base">Retrieval Deadline</CardTitle>
+          <CardDescription>
+            Bound memory and tool-catalog retrieval before the model provider is called.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-2">
+          <Label htmlFor="pre-provider-retrieval-timeout">Timeout (seconds)</Label>
+          <Input
+            id="pre-provider-retrieval-timeout"
+            type="number"
+            value={form.pre_provider_retrieval_timeout_seconds}
+            onChange={(e) => setForm({ ...form, pre_provider_retrieval_timeout_seconds: parseInt(e.target.value) || 0 })}
+            min="1"
+            className="bg-background"
+          />
+          <p className="text-xs text-muted-foreground">
+            Default: 10 seconds. Retrieval errors and timeouts stop the turn before any provider request.
+          </p>
         </CardContent>
       </Card>
 

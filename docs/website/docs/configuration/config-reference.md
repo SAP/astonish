@@ -127,6 +127,10 @@ sessions:
   cleanup:
     max_age_days: 5            # Auto-delete sessions older than this
 
+# Chat runtime
+chat:
+  pre_provider_retrieval_timeout_seconds: 10  # Memory/tool retrieval deadline before provider calls
+
 # Semantic memory
 # Note: Memory content (entries, embeddings) is stored in the database.
 # These settings control the embedding engine and search behavior.
@@ -137,6 +141,7 @@ memory:
     model: ""
     base_url: ""
     api_key: ""
+    timeout_seconds: 30        # Remote HTTP deadline; timeout is an error, with no retry/fallback
   chunking:
     max_chars: 1600
     overlap: 320

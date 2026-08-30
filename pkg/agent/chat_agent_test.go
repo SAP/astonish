@@ -2,9 +2,11 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	adkagent "google.golang.org/adk/agent"
 	"google.golang.org/adk/session"
@@ -12,6 +14,22 @@ import (
 	"google.golang.org/genai"
 	"gopkg.in/yaml.v3"
 )
+
+func TestPreProviderRetrievalError(t *testing.T) {
+	err := preProviderRetrievalError("knowledge search", 25*time.Millisecond, context.DeadlineExceeded)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error does not wrap deadline: %v", err)
+	}
+	if !strings.Contains(err.Error(), "pre-provider knowledge search timed out after 25ms") {
+		t.Fatalf("unexpected timeout error: %v", err)
+	}
+
+	cause := errors.New("search unavailable")
+	err = preProviderRetrievalError("tool index search", time.Second, cause)
+	if !errors.Is(err, cause) || strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("unexpected retrieval error: %v", err)
+	}
+}
 
 func TestEnqueueImagesFromContent(t *testing.T) {
 	t.Parallel()

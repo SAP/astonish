@@ -1595,6 +1595,7 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		llm, mainThreadTools, nil, sessionService,
 		promptBuilder, cfg.DebugMode, cfg.AutoApprove,
 	)
+	chatAgent.PreProviderRetrievalTimeout = cfg.AppConfig.Chat.PreProviderRetrievalTimeout()
 	// Code-mode authorization: gate not-whitelisted tools and out-of-project
 	// filesystem access behind per-tool / per-folder user authorization. Active
 	// only in code mode and only when the user hasn't opted into --auto-approve

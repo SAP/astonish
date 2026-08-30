@@ -857,6 +857,33 @@ func TestToolIndex_SearchHybrid(t *testing.T) {
 	}
 }
 
+func TestToolIndex_SearchHybridEmbeddingFailureDoesNotFallBack(t *testing.T) {
+	embedErr := errors.New("embedding unavailable")
+	calls := 0
+	embed := func(context.Context, string) ([]float32, error) {
+		calls++
+		if calls > 1 {
+			return nil, embedErr
+		}
+		return []float32{1, 0, 0}, nil
+	}
+	idx := newTestToolIndex(t, embed)
+	if err := idx.SyncTools(context.Background(), nil, []*ToolGroup{{
+		Name:  "core",
+		Tools: mockTools("read_file"),
+	}}); err != nil {
+		t.Fatalf("SyncTools: %v", err)
+	}
+
+	matches, err := idx.SearchHybrid(context.Background(), "read file", 5, 0)
+	if !errors.Is(err, embedErr) {
+		t.Fatalf("SearchHybrid error = %v, want %v", err, embedErr)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("SearchHybrid returned lexical fallback: %#v", matches)
+	}
+}
+
 func TestToolIndex_SearchHybrid_Empty(t *testing.T) {
 	idx := newTestToolIndex(t, testEmbeddingFunc())
 

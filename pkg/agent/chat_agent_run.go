@@ -2,9 +2,11 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"log/slog"
+	"net"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -20,6 +22,14 @@ import (
 	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
 )
+
+func preProviderRetrievalError(operation string, timeout time.Duration, err error) error {
+	var netErr net.Error
+	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) {
+		return fmt.Errorf("pre-provider %s timed out after %s: %w", operation, timeout, err)
+	}
+	return fmt.Errorf("pre-provider %s failed: %w", operation, err)
+}
 
 // Run implements the agent.Run interface for ADK.
 // It is called by the ADK runner for each user message.
@@ -99,6 +109,10 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		sessionID := ctx.Session().ID()
 		finishRequestPreparation(nil)
 
+		retrievalTimeout := c.preProviderRetrievalTimeout()
+		retrievalCtx, cancelRetrieval := context.WithTimeout(ctx, retrievalTimeout)
+		defer cancelRetrieval()
+
 		// --- Phase A: Dynamic Execution ---
 		trace := NewExecutionTrace(cleanUserText)
 
@@ -145,30 +159,26 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 				if c.KnowledgeSearchByCategory != nil {
 					finishEmbedding := lifecycle.begin("memory_embedding")
 					finishGuidance := lifecycle.begin("guidance_retrieval")
-					guidanceResults, err := c.KnowledgeSearchByCategory(ctx, searchQuery, bm25Query, 3, 0.3, "guidance")
+					guidanceResults, err := c.KnowledgeSearchByCategory(retrievalCtx, searchQuery, bm25Query, 3, 0.3, "guidance")
 					finishEmbedding(err)
 					finishGuidance(err)
 					if err != nil {
-						if c.DebugMode {
-							slog.Debug("guidance search failed", "component", "chat", "error", err)
-						}
-					} else {
-						allResults = append(allResults, guidanceResults...)
+						yield(nil, preProviderRetrievalError("guidance search", retrievalTimeout, err))
+						return
 					}
+					allResults = append(allResults, guidanceResults...)
 				}
 
 				// Partition 2: Everything else (memory, skills, flows, knowledge)
 				if c.KnowledgeSearch != nil {
 					finishGeneral := lifecycle.begin("general_retrieval")
-					knowledgeResults, err := c.KnowledgeSearch(ctx, searchQuery, bm25Query, 5, 0.3)
+					knowledgeResults, err := c.KnowledgeSearch(retrievalCtx, searchQuery, bm25Query, 5, 0.3)
 					finishGeneral(err)
 					if err != nil {
-						if c.DebugMode {
-							slog.Debug("knowledge search failed", "component", "chat", "error", err)
-						}
-					} else {
-						allResults = append(allResults, knowledgeResults...)
+						yield(nil, preProviderRetrievalError("knowledge search", retrievalTimeout, err))
+						return
 					}
+					allResults = append(allResults, knowledgeResults...)
 				}
 
 				// Deduplicate
@@ -223,10 +233,10 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			}
 			if len(toolSearchQuery) >= 5 {
 				finishToolRetrieval := lifecycle.begin("tool_retrieval")
-				matches, err := c.ToolIndex.SearchHybrid(ctx, toolSearchQuery, 8, 0.005)
+				matches, err := c.ToolIndex.SearchHybrid(retrievalCtx, toolSearchQuery, 8, 0.005)
 				finishToolRetrieval(err)
 				if err != nil {
-					yield(nil, fmt.Errorf("search tool index: %w", err))
+					yield(nil, preProviderRetrievalError("tool index search", retrievalTimeout, err))
 					return
 				}
 				// Filter out MCP tools the user's team doesn't have access to

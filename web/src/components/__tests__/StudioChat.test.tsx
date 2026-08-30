@@ -139,7 +139,7 @@ describe('StudioChat', () => {
       sessionId: 'sess-debug',
       invocationId: 'inv-1',
       rounds: [{
-        invocationId: 'inv-1', call: 1, stream: true, provider: 'google', model: 'gemini',
+        invocationId: 'inv-1', kind: 'provider', stage: 'provider_dispatch', status: 'succeeded', call: 1, stream: true, provider: 'google', model: 'gemini',
         captureLevel: 'canonical-adk', inputHash: 'request-hash', stablePrefixElements: 3,
         stablePrefixBytes: 512, startedAt: '2026-08-29T00:00:00Z', timeToFirstResponse: 1,
         duration: 2, responseCount: 1, payloadOriginalBytes: 10, payloadCapturedBytes: 10,
@@ -152,7 +152,7 @@ describe('StudioChat', () => {
     const button = await screen.findByRole('button', { name: 'Cache diagnostics for this assistant turn' })
     fireEvent.click(button)
 
-    expect(await screen.findByText('Model round 1')).toBeInTheDocument()
+    expect(await screen.findByText('Provider round 1')).toBeInTheDocument()
     expect(screen.getByText('Provider cache hit')).toBeInTheDocument()
     expect(screen.getByText('3 elements · 512 bytes')).toBeInTheDocument()
     expect(fetchCacheDiagnostics).toHaveBeenCalledWith('sess-debug', 'inv-1')

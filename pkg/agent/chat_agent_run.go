@@ -25,6 +25,9 @@ import (
 // It is called by the ADK runner for each user message.
 func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
+		lifecycle := lifecycleRecorder(ctx, ctx.InvocationID())
+		finishRequestPreparation := lifecycle.begin("request_session_preparation")
+
 		// Wrap yield to strip chain-of-thought content and redact credentials.
 		// The think-tag filter is stateful (tracks whether we are inside a
 		// <think> block across streaming chunks), so it must be created once
@@ -94,6 +97,7 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 
 		cleanUserText := CleanUserText(userText)
 		sessionID := ctx.Session().ID()
+		finishRequestPreparation(nil)
 
 		// --- Phase A: Dynamic Execution ---
 		trace := NewExecutionTrace(cleanUserText)
@@ -139,7 +143,11 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 
 				// Partition 1: Guidance docs (how-to instructions for capabilities)
 				if c.KnowledgeSearchByCategory != nil {
+					finishEmbedding := lifecycle.begin("memory_embedding")
+					finishGuidance := lifecycle.begin("guidance_retrieval")
 					guidanceResults, err := c.KnowledgeSearchByCategory(ctx, searchQuery, bm25Query, 3, 0.3, "guidance")
+					finishEmbedding(err)
+					finishGuidance(err)
 					if err != nil {
 						if c.DebugMode {
 							slog.Debug("guidance search failed", "component", "chat", "error", err)
@@ -151,7 +159,9 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 
 				// Partition 2: Everything else (memory, skills, flows, knowledge)
 				if c.KnowledgeSearch != nil {
+					finishGeneral := lifecycle.begin("general_retrieval")
 					knowledgeResults, err := c.KnowledgeSearch(ctx, searchQuery, bm25Query, 5, 0.3)
+					finishGeneral(err)
 					if err != nil {
 						if c.DebugMode {
 							slog.Debug("knowledge search failed", "component", "chat", "error", err)
@@ -212,7 +222,9 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 				}
 			}
 			if len(toolSearchQuery) >= 5 {
-				matches, err := c.ToolIndex.SearchHybrid(context.Background(), toolSearchQuery, 8, 0.005)
+				finishToolRetrieval := lifecycle.begin("tool_retrieval")
+				matches, err := c.ToolIndex.SearchHybrid(ctx, toolSearchQuery, 8, 0.005)
+				finishToolRetrieval(err)
 				if err != nil {
 					if c.DebugMode {
 						slog.Debug("tool index search failed", "component", "chat", "error", err)
@@ -244,9 +256,12 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		yieldToolTrackingEvent(yield, toolSearchQuery, relevantTools, toolMatches)
 
 		// Build per-turn context separately from the session-stable system prompt.
+		finishPromptPersistence := lifecycle.begin("prompt_context_persistence")
 		promptBuilder := c.SystemPrompt.Clone()
 		if promptBuilder == nil {
-			yield(nil, fmt.Errorf("SystemPrompt builder is nil"))
+			err := fmt.Errorf("SystemPrompt builder is nil")
+			finishPromptPersistence(err)
+			yield(nil, err)
 			return
 		}
 
@@ -319,15 +334,18 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 
 		instruction, promptStateEvent := stableSystemPrompt(ctx.Session().State(), promptBuilder.Build)
 		if promptStateEvent != nil && !yield(promptStateEvent, nil) {
+			finishPromptPersistence(context.Canceled)
 			return
 		}
 
 		// Persist model-facing context so replay reconstructs identical bytes.
 		if turnContext := buildTurnContextContent(turnOverrides, relevantTools, relevantKnowledge); turnContext != nil {
 			if !yield(newTurnContextEvent(turnContext), nil) {
+				finishPromptPersistence(context.Canceled)
 				return
 			}
 		}
+		finishPromptPersistence(nil)
 
 		// Capture session identity for use in AfterToolCallback closure.
 		sessionAppName := ctx.Session().AppName()
@@ -853,7 +871,13 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		beforeModelCallbacks = append(beforeModelCallbacks, TruncateToolResponsesCallback())
 
 		if c.Compactor != nil {
-			beforeModelCallbacks = append(beforeModelCallbacks, c.Compactor.BeforeModelCallback())
+			compact := c.Compactor.BeforeModelCallback()
+			beforeModelCallbacks = append(beforeModelCallbacks, func(callbackCtx agent.CallbackContext, req *model.LLMRequest) (*model.LLMResponse, error) {
+				finishCompaction := lifecycle.begin("compaction")
+				response, err := compact(callbackCtx, req)
+				finishCompaction(err)
+				return response, err
+			})
 		}
 
 		// Resolve LLM: prefer per-request override from context (set by channel
@@ -902,7 +926,10 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			},
 		})
 		if err != nil {
-			yield(nil, fmt.Errorf("failed to create chat llmagent: %w", err))
+			err = fmt.Errorf("failed to create chat llmagent: %w", err)
+			finishProviderDispatch := lifecycle.begin("provider_dispatch")
+			finishProviderDispatch(err)
+			yield(nil, err)
 			return
 		}
 

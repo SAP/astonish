@@ -120,8 +120,14 @@ export interface CacheDiagnosticUsage {
   totalTokens: number
 }
 
+export type CacheDiagnosticKind = 'preparation' | 'provider'
+export type CacheDiagnosticStatus = 'succeeded' | 'failed'
+
 export interface CacheDiagnosticRound {
   invocationId: string
+  kind: CacheDiagnosticKind
+  stage: string
+  status: CacheDiagnosticStatus
   call: number
   stream: boolean
   provider?: string

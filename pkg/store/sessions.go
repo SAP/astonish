@@ -15,6 +15,9 @@ const MaxSessionCacheDiagnostics = 100
 // CacheDiagnostic is a bounded, sanitized record of one model request.
 type CacheDiagnostic struct {
 	InvocationID         string               `json:"invocationId"`
+	Kind                 string               `json:"kind"`
+	Stage                string               `json:"stage"`
+	Status               string               `json:"status"`
 	Call                 int                  `json:"call"`
 	Stream               bool                 `json:"stream"`
 	Provider             string               `json:"provider,omitempty"`

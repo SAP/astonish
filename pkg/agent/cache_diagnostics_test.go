@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/SAP/astonish/pkg/credentials"
+	"github.com/SAP/astonish/pkg/store"
 	"google.golang.org/adk/model"
 	"google.golang.org/genai"
 )
@@ -91,7 +92,7 @@ func TestDiagnosticLLMCapturesTimingsUsageAndPreservesRequest(t *testing.T) {
 		t.Fatalf("responses = %d, diagnostics = %d; want 2, 1", len(responses), len(diagnostics))
 	}
 	diagnostic := diagnostics[0]
-	if diagnostic.Call != 1 || diagnostic.ResponseCount != 2 || diagnostic.InputHash == "" {
+	if diagnostic.Kind != "provider" || diagnostic.Stage != "provider_dispatch" || diagnostic.Status != "succeeded" || diagnostic.Call != 1 || diagnostic.ResponseCount != 2 || diagnostic.InputHash == "" {
 		t.Fatalf("diagnostic counters = %+v", diagnostic)
 	}
 	if diagnostic.TimeToFirstResponse <= 0 || diagnostic.Duration < diagnostic.TimeToFirstResponse {
@@ -134,8 +135,30 @@ func TestDiagnosticLLMIsRequestScopedAndCapturesErrors(t *testing.T) {
 	if first.Call != 1 || second.Call != 1 {
 		t.Fatalf("request-scoped calls = %d, %d; want 1, 1", first.Call, second.Call)
 	}
-	if first.Error != boom.Error() {
-		t.Fatalf("error = %q, want %q", first.Error, boom)
+	if first.Error != boom.Error() || first.Status != "failed" {
+		t.Fatalf("error = %q status = %q, want %q failed", first.Error, first.Status, boom)
+	}
+}
+
+func TestLifecycleDiagnosticRecorderCapturesRedactedFailure(t *testing.T) {
+	redactor := credentials.NewRedactor()
+	redactor.AddTransientSecret("top-secret")
+	var got store.CacheDiagnostic
+	ctx := store.WithDebugEnabled(context.Background(), true)
+	ctx = credentials.WithRedactor(ctx, redactor)
+	ctx = store.WithCacheDiagnosticRecorder(ctx, func(_ context.Context, diagnostic store.CacheDiagnostic) error {
+		got = diagnostic
+		return nil
+	})
+
+	finish := lifecycleRecorder(ctx, "invocation").begin("guidance_retrieval")
+	finish(errors.New("top-secret unavailable"))
+
+	if got.Kind != "preparation" || got.Stage != "guidance_retrieval" || got.Status != "failed" {
+		t.Fatalf("lifecycle diagnostic = %+v", got)
+	}
+	if strings.Contains(got.Error, "top-secret") || !strings.Contains(got.Error, "[REDACTED]") {
+		t.Fatalf("error was not redacted: %q", got.Error)
 	}
 }
 

@@ -26,6 +26,9 @@ type CacheDiagnosticsHook func(CacheDiagnostic)
 // CacheDiagnostic describes the canonical ADK input and observed result of one model call.
 type CacheDiagnostic struct {
 	InvocationID         string
+	Kind                 string
+	Stage                string
+	Status               string
 	Call                 int
 	Stream               bool
 	Provider             string
@@ -83,6 +86,54 @@ type diagnosticLLM struct {
 	tracker *cacheDiagnosticsTracker
 }
 
+type lifecycleDiagnosticRecorder struct {
+	ctx          context.Context
+	recorder     store.CacheDiagnosticRecorder
+	invocationID string
+	redactor     *credentials.Redactor
+}
+
+func lifecycleRecorder(ctx context.Context, invocationID string) *lifecycleDiagnosticRecorder {
+	if !store.DebugEnabledFromContext(ctx) {
+		return nil
+	}
+	recorder := store.CacheDiagnosticRecorderFromContext(ctx)
+	if recorder == nil {
+		return nil
+	}
+	return &lifecycleDiagnosticRecorder{
+		ctx:          ctx,
+		recorder:     recorder,
+		invocationID: invocationID,
+		redactor:     credentials.RedactorFromContext(ctx),
+	}
+}
+
+func (r *lifecycleDiagnosticRecorder) begin(stage string) func(error) {
+	if r == nil {
+		return func(error) {}
+	}
+	started := time.Now()
+	return func(stageErr error) {
+		diagnostic := store.CacheDiagnostic{
+			InvocationID: r.invocationID,
+			Kind:         "preparation",
+			Stage:        stage,
+			Status:       "succeeded",
+			StartedAt:    started,
+			Duration:     time.Since(started),
+			CreatedAt:    started,
+		}
+		if stageErr != nil {
+			diagnostic.Status = "failed"
+			diagnostic.Error = sanitizedDiagnosticError(stageErr.Error(), r.redactor)
+		}
+		if err := r.recorder(r.ctx, diagnostic); err != nil {
+			slog.Warn("persist lifecycle diagnostic", "invocation", r.invocationID, "stage", stage, "error", err)
+		}
+	}
+}
+
 func newDiagnosticLLM(llm model.LLM, hook CacheDiagnosticsHook, invocationID string, redactor *credentials.Redactor) model.LLM {
 	if llm == nil || hook == nil {
 		return llm
@@ -105,6 +156,9 @@ func (l *diagnosticLLM) GenerateContent(ctx context.Context, req *model.LLMReque
 		call, stableElements, stableBytes, divergence := l.tracker.begin(elements)
 		diagnostic := CacheDiagnostic{
 			InvocationID:         l.tracker.invocationID,
+			Kind:                 "provider",
+			Stage:                "provider_dispatch",
+			Status:               "succeeded",
 			Call:                 call,
 			Stream:               stream,
 			Provider:             l.LLM.Name(),
@@ -137,10 +191,8 @@ func (l *diagnosticLLM) GenerateContent(ctx context.Context, req *model.LLMReque
 				diagnostic.Usage.merge(diagnosticUsage(response.UsageMetadata))
 			}
 			if err != nil {
-				diagnostic.Error = err.Error()
-				if l.tracker.redactor != nil {
-					diagnostic.Error = l.tracker.redactor.Redact(diagnostic.Error)
-				}
+				diagnostic.Status = "failed"
+				diagnostic.Error = sanitizedDiagnosticError(err.Error(), l.tracker.redactor)
 			}
 			if !yield(response, err) {
 				return
@@ -292,7 +344,20 @@ func diagnosticUsage(usage *genai.GenerateContentResponseUsageMetadata) CacheDia
 	}
 }
 
-const maxDiagnosticPayloadBytes = 128 * 1024
+const (
+	maxDiagnosticPayloadBytes = 128 * 1024
+	maxDiagnosticErrorBytes   = 4 * 1024
+)
+
+func sanitizedDiagnosticError(message string, redactor *credentials.Redactor) string {
+	if redactor != nil {
+		message = redactor.Redact(message)
+	}
+	if len(message) <= maxDiagnosticErrorBytes {
+		return message
+	}
+	return message[:maxDiagnosticErrorBytes] + "… [truncated]"
+}
 
 func sanitizedModelPayload(req *model.LLMRequest, redactor *credentials.Redactor) (json.RawMessage, int, bool, int) {
 	raw, err := json.Marshal(req)
@@ -389,6 +454,9 @@ func cacheDiagnosticForStore(d CacheDiagnostic) store.CacheDiagnostic {
 	}
 	return store.CacheDiagnostic{
 		InvocationID:         d.InvocationID,
+		Kind:                 d.Kind,
+		Stage:                d.Stage,
+		Status:               d.Status,
 		Call:                 d.Call,
 		Stream:               d.Stream,
 		Provider:             d.Provider,

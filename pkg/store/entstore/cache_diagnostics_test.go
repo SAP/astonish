@@ -52,7 +52,7 @@ func TestTeamSessionCacheDiagnosticsRoundTripAndCascade(t *testing.T) {
 	seedTeamDiagnosticSession(t, client, "team-session")
 
 	want := store.CacheDiagnostic{
-		InvocationID: "invocation-3", Call: 3, CaptureLevel: "canonical-adk",
+		InvocationID: "invocation-3", Kind: "preparation", Stage: "guidance_retrieval", Status: "failed", Call: 3, CaptureLevel: "canonical-adk",
 		InputHash: "request", StablePrefixElements: 7, StablePrefixBytes: 512,
 		Payload: []byte(`{"model":"test"}`), Usage: store.CacheDiagnosticUsage{Reported: true, CachedTokens: 42},
 	}
@@ -63,7 +63,7 @@ func TestTeamSessionCacheDiagnosticsRoundTripAndCascade(t *testing.T) {
 	if err != nil || len(got) != 1 {
 		t.Fatalf("list diagnostics = %#v, err=%v", got, err)
 	}
-	if got[0].Call != want.Call || got[0].InvocationID != want.InvocationID || got[0].InputHash != want.InputHash || got[0].Usage.CachedTokens != want.Usage.CachedTokens {
+	if got[0].Call != want.Call || got[0].InvocationID != want.InvocationID || got[0].Kind != want.Kind || got[0].Stage != want.Stage || got[0].Status != want.Status || got[0].InputHash != want.InputHash || got[0].Usage.CachedTokens != want.Usage.CachedTokens {
 		t.Fatalf("diagnostic = %#v, want %#v", got[0], want)
 	}
 	if err := ss.RemoveSessionMeta(ctx, "team-session"); err != nil {

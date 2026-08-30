@@ -252,9 +252,10 @@ export class DeckController {
     button.setAttribute('aria-label', 'Start slideshow in fullscreen')
     Object.assign(button.style, {
       position: 'fixed',
-      inset: '50% auto auto 50%',
+      top: '24px',
+      left: '50%',
       zIndex: '2147483647',
-      transform: 'translate(-50%, -50%)',
+      transform: 'translateX(-50%)',
       padding: '16px 24px',
       border: '2px solid currentColor',
       borderRadius: '12px',

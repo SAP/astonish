@@ -64,7 +64,7 @@ func (e HTMLExporter) Export(scene SceneGraph) (ExportResult, error) {
 	inheritDeclaredFontsFromTemplate(theme)
 	fillDeclaredFontAssets(theme, assets)
 	writeFontFaces(&body, theme, assets)
-	body.WriteString(`html,body{width:100%;height:100%;margin:0;overflow:hidden}body{background:#111827}ast-deck{display:block;position:relative;width:1920px;height:1080px;overflow:hidden;transform-origin:top left;background:var(--ast-surface);color:var(--ast-ink)}ast-slide{display:none;position:absolute;inset:0;width:1920px;height:1080px;overflow:hidden}ast-slide[active]{display:block}ast-text{white-space:pre-wrap;overflow-wrap:break-word;overflow-x:clip;overflow-y:visible;overflow-clip-margin:0.32em;font-variant-ligatures:none}ast-notes{display:none}`)
+	body.WriteString(`html,body{width:100%;height:100%;margin:0;overflow:hidden;background:#000}ast-deck{display:block;position:absolute;width:1920px;height:1080px;overflow:hidden;transform-origin:top left;background:var(--ast-surface);color:var(--ast-ink)}ast-slide{display:none;position:absolute;inset:0;width:1920px;height:1080px;overflow:hidden}ast-slide[active]{display:block}ast-text{white-space:pre-wrap;overflow-wrap:break-word;overflow-x:clip;overflow-y:visible;overflow-clip-margin:0.32em;font-variant-ligatures:none}ast-notes{display:none}`)
 	if e.Print {
 		// Print layout: paginate one slide per page. The @page box and every
 		// slide are declared in the SAME inch units as the PDF paper (20in x

@@ -21,7 +21,7 @@ func TestHTMLExporterProducesSelfContainedEscapedDocument(t *testing.T) {
 		t.Fatal(err)
 	}
 	doc := string(result.Bytes)
-	for _, want := range []string{"<!doctype html>", "Content-Security-Policy", "sha256-", "html,body{width:100%;height:100%;margin:0;overflow:hidden}", "ast-deck{display:block;position:relative;width:1920px;height:1080px", "ast-slide[active]{display:block}", `<ast-deck schema="1" ratio="16:9">`, `<ast-slide id="intro"`, `<ast-text id="title" x="10" y="20" w="300" h="80" font-token="display">`, "&lt;script&gt;alert(1)&lt;/script&gt;", "window.runtimeReady=true"} {
+	for _, want := range []string{"<!doctype html>", "Content-Security-Policy", "sha256-", "html,body{width:100%;height:100%;margin:0;overflow:hidden;background:#000}", "ast-deck{display:block;position:absolute;width:1920px;height:1080px", "ast-slide[active]{display:block}", `<ast-deck schema="1" ratio="16:9">`, `<ast-slide id="intro"`, `<ast-text id="title" x="10" y="20" w="300" h="80" font-token="display">`, "&lt;script&gt;alert(1)&lt;/script&gt;", "window.runtimeReady=true"} {
 		if !strings.Contains(doc, want) {
 			t.Errorf("document missing %q", want)
 		}

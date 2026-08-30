@@ -3,9 +3,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import './index'
 import type { AstDeckElement, AstFragmentElement, AstSlideElement } from './types'
 
-const mountDeck = async () => {
+const mountDeck = async (width = 960, height = 540) => {
   const host = document.createElement('div')
-  Object.defineProperties(host, { clientWidth: { value: 960 }, clientHeight: { value: 540 } })
+  Object.defineProperties(host, { clientWidth: { value: width }, clientHeight: { value: height } })
   host.innerHTML = `<ast-deck no-history>
     <ast-slide id="one"><ast-fragment order="2">B</ast-fragment><ast-fragment order="1">A</ast-fragment></ast-slide>
     <ast-slide id="two"><ast-notes>Notes</ast-notes></ast-slide>
@@ -59,6 +59,9 @@ describe('DeckController', () => {
       expect(button).not.toBeNull()
       return button!
     })
+    expect(start.style.top).toBe('24px')
+    expect(start.style.left).toBe('50%')
+    expect(start.style.transform).toBe('translateX(-50%)')
 
     start.click()
     await vi.waitFor(() => expect(requestFullscreen).toHaveBeenCalledTimes(2))
@@ -73,6 +76,8 @@ describe('DeckController', () => {
     const fragments = [...deck.querySelectorAll('ast-fragment')] as AstFragmentElement[]
 
     expect(deck.style.transform).toBe('scale(0.5)')
+    expect(deck.style.left).toBe('0px')
+    expect(deck.style.top).toBe('0px')
     expect(slides[0].active).toBe(true)
     deck.next()
     expect(fragments[1].revealed).toBe(true)
@@ -81,6 +86,14 @@ describe('DeckController', () => {
     deck.next()
     expect(slides[1].active).toBe(true)
     expect(deck.currentIndex).toBe(1)
+  })
+
+  it('centers the scaled slide when the viewport is taller than 16:9', async () => {
+    const deck = await mountDeck(1920, 1200)
+
+    expect(deck.style.transform).toBe('scale(1)')
+    expect(deck.style.left).toBe('0px')
+    expect(deck.style.top).toBe('60px')
   })
 
   it('accepts navigation messages only from its parent window', async () => {

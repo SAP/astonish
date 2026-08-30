@@ -34,6 +34,24 @@ func TestLexicalToolIndexSearchesWithoutVectorStore(t *testing.T) {
 	}
 }
 
+type countingToolVectorStore struct {
+	ToolVectorStore
+	allIDsCalls atomic.Int32
+	addErr      error
+}
+
+func (s *countingToolVectorStore) AllIDs(ctx context.Context) ([]string, error) {
+	s.allIDsCalls.Add(1)
+	return s.ToolVectorStore.AllIDs(ctx)
+}
+
+func (s *countingToolVectorStore) AddDocuments(ctx context.Context, docs []ToolVectorDoc, concurrency int) error {
+	if s.addErr != nil {
+		return s.addErr
+	}
+	return s.ToolVectorStore.AddDocuments(ctx, docs, concurrency)
+}
+
 type failingToolset struct{ err error }
 
 func (f failingToolset) Name() string { return "failing" }
@@ -99,6 +117,62 @@ func TestSemanticToolIndexValidatesDocumentIdentity(t *testing.T) {
 	_, err := idx.SearchHybrid(context.Background(), "web fetch", 5, 0)
 	if err == nil || !strings.Contains(err.Error(), `missing tool "web:web_fetch"`) {
 		t.Fatalf("SearchHybrid error = %v, want missing current tool identity", err)
+	}
+}
+
+func TestSemanticToolIndexCachesValidationForPublishedCatalog(t *testing.T) {
+	embed := testEmbeddingFunc()
+	store, err := NewInMemoryToolVectorStore(embed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	counting := &countingToolVectorStore{ToolVectorStore: store}
+	idx, err := NewToolIndex(counting, embed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.SyncTools(context.Background(), nil, []*ToolGroup{{Name: "web", Tools: mockTools("web_fetch")}}); err != nil {
+		t.Fatal(err)
+	}
+	callsAfterSync := counting.allIDsCalls.Load()
+
+	for range 3 {
+		if _, err := idx.SearchHybrid(context.Background(), "web fetch", 5, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := counting.allIDsCalls.Load(); got != callsAfterSync {
+		t.Fatalf("AllIDs calls = %d after searches, want %d", got, callsAfterSync)
+	}
+}
+
+func TestSemanticToolIndexFailedResyncFailsClosed(t *testing.T) {
+	embed := testEmbeddingFunc()
+	store, err := NewInMemoryToolVectorStore(embed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	counting := &countingToolVectorStore{ToolVectorStore: store}
+	idx, err := NewToolIndex(counting, embed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.SyncTools(context.Background(), nil, []*ToolGroup{{Name: "web", Tools: mockTools("web_fetch")}}); err != nil {
+		t.Fatal(err)
+	}
+
+	want := errors.New("embedding store unavailable")
+	counting.addErr = want
+	err = idx.SyncTools(context.Background(), nil, []*ToolGroup{{Name: "web", Tools: mockTools("http_request")}})
+	if !errors.Is(err, want) {
+		t.Fatalf("SyncTools error = %v, want %v", err, want)
+	}
+	_, err = idx.SearchHybrid(context.Background(), "web fetch", 5, 0)
+	if err == nil || !strings.Contains(err.Error(), "semantic tool index is incomplete") {
+		t.Fatalf("SearchHybrid error = %v, want incomplete semantic index", err)
+	}
+	if idx.GetToolEntry("http_request") != nil {
+		t.Fatal("failed sync published the new catalog")
 	}
 }
 

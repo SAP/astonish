@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/credentials"
 )
@@ -108,6 +109,22 @@ func TestSubAgentCredentialStoreWiring(t *testing.T) {
 func TestMainThreadToolAllowlistIsEmpty(t *testing.T) {
 	if allow := mainThreadToolAllowlist(); len(allow) != 0 {
 		t.Fatalf("main-thread allowlist = %#v, want all domain tools deferred", allow)
+	}
+}
+
+func TestFixedProviderToolsContract(t *testing.T) {
+	providerTools, err := fixedProviderTools(agent.NewLexicalToolIndex())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"search_tools", "describe_tools", "execute_tool"}
+	if len(providerTools) != len(want) {
+		t.Fatalf("provider-visible tools = %d, want %d", len(providerTools), len(want))
+	}
+	for i, name := range want {
+		if got := providerTools[i].Name(); got != name {
+			t.Fatalf("provider-visible tool %d = %q, want %q", i, got, name)
+		}
 	}
 }
 

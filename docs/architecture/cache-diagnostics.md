@@ -17,10 +17,10 @@ Each provider round records:
 - the ADK model request's canonical SHA-256 and ordered element hashes;
 - the estimated reusable prefix in elements and bytes, plus the first divergent path;
 - provider/model identity, streaming mode, response count, first-response latency, and total duration;
-- normalized token usage and provider-reported cached-token count when available;
+- normalized token usage and provider-reported cached-read token count when available;
 - a bounded, sanitized representation of the canonical ADK request.
 
-`captureLevel: canonical-adk` means the payload is captured immediately before the provider adapter receives it. It must not be described as exact HTTP wire JSON. Provider SDKs may still transform the request. A cache hit is provider-confirmed only when usage metadata reports cached tokens. Prefix counts are Astonish estimates and are displayed separately.
+`captureLevel: canonical-adk` means the payload is captured immediately before the provider adapter receives it. It must not be described as exact HTTP wire JSON. Provider SDKs may still transform the request. A cache hit is provider-confirmed only when normalized usage metadata reports cached-read tokens. ADK does not expose a provider-neutral cache-write token field, so diagnostics do not report cache writes; zero cached-read tokens must not be interpreted as proof that the provider performed no cache write. Prefix counts are Astonish estimates and are displayed separately.
 
 ## Secret and binary handling
 

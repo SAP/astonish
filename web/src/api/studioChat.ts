@@ -113,7 +113,6 @@ export interface CacheDiagnosticUsage {
   cacheReported: boolean
   promptTokens: number
   cachedTokens: number
-  cacheWriteTokens: number
   candidateTokens: number
   thoughtTokens: number
   toolUseTokens: number

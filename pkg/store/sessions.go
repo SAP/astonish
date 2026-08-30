@@ -51,15 +51,14 @@ type ModelInputElement struct {
 }
 
 type CacheDiagnosticUsage struct {
-	Reported         bool  `json:"reported"`
-	CacheReported    bool  `json:"cacheReported"`
-	PromptTokens     int32 `json:"promptTokens"`
-	CachedTokens     int32 `json:"cachedTokens"`
-	CacheWriteTokens int32 `json:"cacheWriteTokens"`
-	CandidateTokens  int32 `json:"candidateTokens"`
-	ThoughtTokens    int32 `json:"thoughtTokens"`
-	ToolUseTokens    int32 `json:"toolUseTokens"`
-	TotalTokens      int32 `json:"totalTokens"`
+	Reported        bool  `json:"reported"`
+	CacheReported   bool  `json:"cacheReported"`
+	PromptTokens    int32 `json:"promptTokens"`
+	CachedTokens    int32 `json:"cachedTokens"`
+	CandidateTokens int32 `json:"candidateTokens"`
+	ThoughtTokens   int32 `json:"thoughtTokens"`
+	ToolUseTokens   int32 `json:"toolUseTokens"`
+	TotalTokens     int32 `json:"totalTokens"`
 }
 
 type SessionMeta struct {

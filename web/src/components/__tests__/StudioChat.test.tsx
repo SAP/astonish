@@ -144,7 +144,7 @@ describe('StudioChat', () => {
         stablePrefixBytes: 512, startedAt: '2026-08-29T00:00:00Z', timeToFirstResponse: 1,
         duration: 2, responseCount: 1, payloadOriginalBytes: 10, payloadCapturedBytes: 10,
         payloadTruncated: false, binaryElisions: 0, payload: { cachedTokens: 120 },
-        usage: { reported: true, cacheReported: true, promptTokens: 150, cachedTokens: 120, cacheWriteTokens: 0, candidateTokens: 10, thoughtTokens: 0, toolUseTokens: 0, totalTokens: 160 },
+        usage: { reported: true, cacheReported: true, promptTokens: 150, cachedTokens: 120, candidateTokens: 10, thoughtTokens: 0, toolUseTokens: 0, totalTokens: 160 },
       }],
     })
 

@@ -27,14 +27,19 @@ type ToolIndex struct {
 	vectorStore ToolVectorStore
 	embedFunc   EmbedFunc
 	mu          sync.RWMutex
+	syncMu      sync.RWMutex
 
 	// toolRegistry maps tool_name → ToolEntry for resolving search results
 	// back to group names and concrete tool implementations.
 	toolRegistry map[string]ToolEntry
 
-	// knownIDs tracks doc IDs from the last SyncTools call.
-	// Used to detect and prune stale entries on the next sync.
+	// knownIDs tracks doc IDs from the last successful SyncTools call.
 	knownIDs map[string]bool
+
+	// catalogGeneration identifies the published catalog. A semantic search is
+	// allowed only when the same generation was validated against vectorStore.
+	catalogGeneration   uint64
+	validatedGeneration uint64
 
 	// BM25 inverted index for keyword-based search.
 	// Built during SyncTools() alongside the vector index.
@@ -122,9 +127,14 @@ func (idx *ToolIndex) PrimeTools(ctx context.Context, mainTools []tool.Tool, gro
 	if err != nil {
 		return err
 	}
+	idx.syncMu.Lock()
+	defer idx.syncMu.Unlock()
 	idx.mu.Lock()
 	idx.toolRegistry = registry
 	idx.bm25 = buildBM25Index(docs)
+	idx.catalogGeneration++
+	idx.validatedGeneration = 0
+	idx.knownIDs = nil
 	idx.mu.Unlock()
 	return nil
 }
@@ -140,13 +150,27 @@ func (idx *ToolIndex) SyncTools(ctx context.Context, mainTools []tool.Tool, grou
 	if err != nil {
 		return err
 	}
+
+	// The vector store has no transactional snapshot API. Exclude semantic
+	// searches while synchronizing so they cannot observe partially updated data.
+	idx.syncMu.Lock()
+	defer idx.syncMu.Unlock()
+
+	idx.mu.Lock()
+	idx.validatedGeneration = 0
+	idx.mu.Unlock()
+
 	// Do not hold idx.mu while an embedding provider or vector store is running.
-	if err := idx.syncToolDocuments(ctx, registry, docs); err != nil {
+	currentIDs, err := idx.syncToolDocuments(ctx, docs)
+	if err != nil {
 		return err
 	}
 	idx.mu.Lock()
 	idx.toolRegistry = registry
 	idx.bm25 = buildBM25Index(docs)
+	idx.knownIDs = currentIDs
+	idx.catalogGeneration++
+	idx.validatedGeneration = idx.catalogGeneration
 	idx.mu.Unlock()
 	return nil
 }
@@ -258,7 +282,7 @@ func buildToolCatalog(ctx context.Context, mainTools []tool.Tool, groups []*Tool
 	return registry, docs, nil
 }
 
-func (idx *ToolIndex) syncToolDocuments(ctx context.Context, registry map[string]ToolEntry, docs []ToolVectorDoc) error {
+func (idx *ToolIndex) syncToolDocuments(ctx context.Context, docs []ToolVectorDoc) (map[string]bool, error) {
 	// Incremental sync: only embed tools whose content has changed.
 	// On a typical restart where tools haven't changed, this skips all
 	// embedding calls — the only cost is GetByID lookups against the store.
@@ -268,7 +292,7 @@ func (idx *ToolIndex) syncToolDocuments(ctx context.Context, registry map[string
 		currentIDs[doc.ID] = true
 		existing, err := idx.vectorStore.GetByID(ctx, doc.ID)
 		if err != nil {
-			return fmt.Errorf("get indexed tool %q: %w", doc.ID, err)
+			return nil, fmt.Errorf("get indexed tool %q: %w", doc.ID, err)
 		}
 		if existing != nil && existing.Content == doc.Content {
 			continue // already embedded with same content
@@ -280,7 +304,7 @@ func (idx *ToolIndex) syncToolDocuments(ctx context.Context, registry map[string
 	// make a count-only completeness check pass.
 	all, err := idx.vectorStore.AllIDs(ctx)
 	if err != nil {
-		return fmt.Errorf("list indexed tools: %w", err)
+		return nil, fmt.Errorf("list indexed tools: %w", err)
 	}
 	var staleIDs []string
 	for _, id := range all {
@@ -290,28 +314,24 @@ func (idx *ToolIndex) syncToolDocuments(ctx context.Context, registry map[string
 	}
 	if len(staleIDs) > 0 {
 		if err := idx.vectorStore.DeleteByIDs(ctx, staleIDs); err != nil {
-			return fmt.Errorf("prune stale tool index entries: %w", err)
+			return nil, fmt.Errorf("prune stale tool index entries: %w", err)
 		}
 		slog.Debug("pruned stale tool index entries", "count", len(staleIDs))
 	}
 	if len(docs) == 0 {
-		return nil
+		return currentIDs, nil
 	}
 
 	if len(toEmbed) > 0 {
 		// Only embed the new/changed documents (concurrency=4)
 		if err := idx.vectorStore.AddDocuments(ctx, toEmbed, 4); err != nil {
-			return fmt.Errorf("failed to index tools: %w", err)
+			return nil, fmt.Errorf("failed to index tools: %w", err)
 		}
 	}
 	if err := idx.validateSemanticIndex(ctx, currentIDs); err != nil {
-		return err
+		return nil, err
 	}
-
-	idx.mu.Lock()
-	idx.knownIDs = currentIDs
-	idx.mu.Unlock()
-	return nil
+	return currentIDs, nil
 }
 
 func expectedToolDocumentIDs(registry map[string]ToolEntry) map[string]bool {
@@ -324,6 +344,25 @@ func expectedToolDocumentIDs(registry map[string]ToolEntry) map[string]bool {
 		expected[prefix+":"+entry.Name] = true
 	}
 	return expected
+}
+
+func (idx *ToolIndex) ensureSemanticIndexValidated(ctx context.Context, registry map[string]ToolEntry, generation uint64) error {
+	idx.mu.RLock()
+	validated := generation != 0 && idx.validatedGeneration == generation
+	idx.mu.RUnlock()
+	if validated {
+		return nil
+	}
+	if err := idx.validateSemanticIndex(ctx, expectedToolDocumentIDs(registry)); err != nil {
+		return err
+	}
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	if idx.catalogGeneration != generation {
+		return fmt.Errorf("semantic tool index catalog changed during validation")
+	}
+	idx.validatedGeneration = generation
+	return nil
 }
 
 func (idx *ToolIndex) validateSemanticIndex(ctx context.Context, expected map[string]bool) error {
@@ -349,8 +388,11 @@ func (idx *ToolIndex) validateSemanticIndex(ctx context.Context, expected map[st
 // Search queries the tool index for tools matching the query string.
 // Returns the top-K matches sorted by relevance score.
 func (idx *ToolIndex) Search(ctx context.Context, query string, topK int, minScore float64) ([]ToolMatch, error) {
+	idx.syncMu.RLock()
+	defer idx.syncMu.RUnlock()
 	idx.mu.RLock()
 	registry := idx.toolRegistry
+	generation := idx.catalogGeneration
 	idx.mu.RUnlock()
 
 	if err := ctx.Err(); err != nil {
@@ -367,7 +409,7 @@ func (idx *ToolIndex) Search(ctx context.Context, query string, topK int, minSco
 		minScore = 0.3
 	}
 
-	if err := idx.validateSemanticIndex(ctx, expectedToolDocumentIDs(registry)); err != nil {
+	if err := idx.ensureSemanticIndexValidated(ctx, registry, generation); err != nil {
 		return nil, err
 	}
 	docCount := idx.vectorStore.Count()
@@ -930,9 +972,12 @@ func (idx *ToolIndex) SearchHybridPrepared(ctx context.Context, query string, em
 }
 
 func (idx *ToolIndex) searchHybrid(ctx context.Context, query string, preparedEmbedding []float32, topK int, minScore float64) ([]ToolMatch, error) {
+	idx.syncMu.RLock()
+	defer idx.syncMu.RUnlock()
 	idx.mu.RLock()
 	registry := idx.toolRegistry
 	bm25 := idx.bm25
+	generation := idx.catalogGeneration
 	idx.mu.RUnlock()
 
 	if err := ctx.Err(); err != nil {
@@ -954,7 +999,7 @@ func (idx *ToolIndex) searchHybrid(ctx context.Context, query string, preparedEm
 	docCount := 0
 	semantic := idx.vectorStore != nil && idx.embedFunc != nil
 	if semantic {
-		if err := idx.validateSemanticIndex(ctx, expectedToolDocumentIDs(registry)); err != nil {
+		if err := idx.ensureSemanticIndexValidated(ctx, registry, generation); err != nil {
 			return nil, err
 		}
 		docCount = idx.vectorStore.Count()

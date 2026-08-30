@@ -61,15 +61,14 @@ type ModelInputElement struct {
 
 // CacheDiagnosticUsage is provider-neutral token usage reported by the model.
 type CacheDiagnosticUsage struct {
-	Reported         bool
-	CacheReported    bool
-	PromptTokens     int32
-	CachedTokens     int32
-	CacheWriteTokens int32
-	CandidateTokens  int32
-	ThoughtTokens    int32
-	ToolUseTokens    int32
-	TotalTokens      int32
+	Reported        bool
+	CacheReported   bool
+	PromptTokens    int32
+	CachedTokens    int32
+	CandidateTokens int32
+	ThoughtTokens   int32
+	ToolUseTokens   int32
+	TotalTokens     int32
 }
 
 type cacheDiagnosticsTracker struct {
@@ -381,9 +380,6 @@ func (u *CacheDiagnosticUsage) merge(next CacheDiagnosticUsage) {
 	if next.CachedTokens != 0 {
 		u.CachedTokens = next.CachedTokens
 	}
-	if next.CacheWriteTokens != 0 {
-		u.CacheWriteTokens = next.CacheWriteTokens
-	}
 	if next.CandidateTokens != 0 {
 		u.CandidateTokens = next.CandidateTokens
 	}
@@ -547,15 +543,14 @@ func cacheDiagnosticForStore(d CacheDiagnostic) store.CacheDiagnostic {
 		Duration:             d.Duration,
 		ResponseCount:        d.ResponseCount,
 		Usage: store.CacheDiagnosticUsage{
-			Reported:         d.Usage.Reported,
-			CacheReported:    d.Usage.CacheReported,
-			PromptTokens:     d.Usage.PromptTokens,
-			CachedTokens:     d.Usage.CachedTokens,
-			CacheWriteTokens: d.Usage.CacheWriteTokens,
-			CandidateTokens:  d.Usage.CandidateTokens,
-			ThoughtTokens:    d.Usage.ThoughtTokens,
-			ToolUseTokens:    d.Usage.ToolUseTokens,
-			TotalTokens:      d.Usage.TotalTokens,
+			Reported:        d.Usage.Reported,
+			CacheReported:   d.Usage.CacheReported,
+			PromptTokens:    d.Usage.PromptTokens,
+			CachedTokens:    d.Usage.CachedTokens,
+			CandidateTokens: d.Usage.CandidateTokens,
+			ThoughtTokens:   d.Usage.ThoughtTokens,
+			ToolUseTokens:   d.Usage.ToolUseTokens,
+			TotalTokens:     d.Usage.TotalTokens,
 		},
 		Error:     d.Error,
 		CreatedAt: d.StartedAt,

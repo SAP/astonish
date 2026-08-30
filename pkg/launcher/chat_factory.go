@@ -185,6 +185,28 @@ type ChatFactoryResult struct {
 
 // mainThreadToolAllowlist is intentionally empty. The only model-visible tools
 // are the fixed progressive bridge added after the catalog is built.
+func fixedProviderTools(toolIndex *agent.ToolIndex) ([]tool.Tool, error) {
+	searchToolsTool, err := tools.NewSearchToolsTool(toolIndex)
+	if err != nil {
+		return nil, fmt.Errorf("create search_tools: %w", err)
+	}
+	bridgeTools, err := agent.NewProgressiveToolBridge(toolIndex)
+	if err != nil {
+		return nil, fmt.Errorf("create progressive tool bridge: %w", err)
+	}
+	providerTools := append([]tool.Tool{searchToolsTool}, bridgeTools...)
+	want := [...]string{"search_tools", "describe_tools", "execute_tool"}
+	if len(providerTools) != len(want) {
+		return nil, fmt.Errorf("fixed tool bridge declarations are invalid")
+	}
+	for i, name := range want {
+		if providerTools[i].Name() != name {
+			return nil, fmt.Errorf("fixed tool bridge declarations are invalid")
+		}
+	}
+	return providerTools, nil
+}
+
 func mainThreadToolAllowlist() map[string]bool {
 	return map[string]bool{}
 }
@@ -1623,18 +1645,11 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 	if toolIndex == nil {
 		return nil, fmt.Errorf("initialize fixed tool bridge: tool index is nil")
 	}
-	searchToolsTool, err := tools.NewSearchToolsTool(toolIndex)
+	providerTools, err := fixedProviderTools(toolIndex)
 	if err != nil {
-		return nil, fmt.Errorf("create search_tools: %w", err)
+		return nil, err
 	}
-	bridgeTools, err := agent.NewProgressiveToolBridge(toolIndex)
-	if err != nil {
-		return nil, fmt.Errorf("create progressive tool bridge: %w", err)
-	}
-	if len(bridgeTools) != 2 || bridgeTools[0].Name() != "describe_tools" || bridgeTools[1].Name() != "execute_tool" {
-		return nil, fmt.Errorf("fixed tool bridge declarations are invalid")
-	}
-	mainThreadTools = append(mainThreadTools, searchToolsTool, bridgeTools[0], bridgeTools[1])
+	mainThreadTools = append(mainThreadTools, providerTools...)
 
 	// --- 6. Create ChatAgent ---
 	// The model sees only the fixed progressive bridge. All domain tools,

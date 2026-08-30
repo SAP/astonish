@@ -32,7 +32,11 @@ The system prompt uses a deliberate tiered architecture to balance token efficie
 - **Tier 2 (Indexed Guidance)**: Detailed how-to documentation for each capability (browser, credentials, scheduling, etc.). Stored as `memory/guidance/*.md` files indexed in the vector store and retrieved only when relevant.
 - **Tier 3 (Per-Turn Context)**: Retrieved knowledge, catalog matches, channel/scheduler hints, session instructions, skill indexes, and mode guidance. In the cache-stable path this is a marked user-role event persisted byte-for-byte and hidden from transcript, memory, reflection, and distillation views.
 
-Every provider and session uses this cache-stable path. There is no legacy dynamic-declaration path or rollout switch. Automatic relevance matches, pinned groups, and explicit `search_tools` results are model-facing context only and never become provider tool declarations.
+Every provider and session uses this cache-stable path. There is no legacy dynamic-declaration path or rollout switch. Automatic relevance matches, pinned groups, and explicit `search_tools` results are model-facing context only and never become provider tool declarations. Existing sessions keep the prompt snapshot stored when they were created; prompt changes apply to new sessions unless an operator explicitly starts a new session. Rebuilding an existing session prompt is intentionally not automatic because it invalidates the stable provider prefix.
+
+### Go integration contract
+
+The cache-stable tool bridge changes exported integration points. `ToolVectorStore` implementations must provide `AllIDs(context.Context)` so initialization can verify exact semantic-index membership. Request-scoped MCP lookup returns an error rather than a boolean so lookup failures cannot be mistaken for an absent tool. Search-tool construction also propagates errors. Integrators must update implementations and callers; compatibility fallbacks are intentionally absent.
 
 ### Why Sequential Tool Dispatch
 
@@ -70,6 +74,8 @@ User Message
    - Top 8 matches formatted as catalog hints; declarations remain fixed
    - Knowledge and tool retrieval share the explicit `chat.pre_provider_retrieval_timeout_seconds` deadline (default 10 seconds)
    - Any retrieval error or timeout ends the turn before provider invocation; semantic failures never fall back to lexical-only results
+   - A configured semantic catalog must synchronize and pass full document-identity validation during agent initialization; failure aborts initialization rather than starting with degraded retrieval
+   - Successful validation is cached for the published catalog generation, and synchronization blocks semantic searches until a complete generation is validated
     |
     v
 4. Prompt and Turn Context

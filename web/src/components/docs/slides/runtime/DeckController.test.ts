@@ -50,11 +50,34 @@ describe('DeckController', () => {
     expect(deck.currentIndex).toBe(0)
   })
 
-  it('does not advance on click while canvas edit mode is on', async () => {
+  it('navigates from background clicks while canvas edit mode is on', async () => {
     const deck = await mountDeck()
     deck.setAttribute('edit', '')
+    deck.next()
+    deck.next()
+
     deck.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: 800 }))
+    expect(deck.currentIndex).toBe(1)
+
+    deck.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: 100 }))
     expect(deck.currentIndex).toBe(0)
+  })
+
+  it('does not navigate when an editable canvas object is clicked', async () => {
+    const deck = await mountDeck()
+    const slide = deck.querySelector('ast-slide[active]') as HTMLElement
+    const text = document.createElement('ast-text')
+    text.id = 'headline'
+    slide.append(text)
+    deck.setAttribute('edit', '')
+    Object.defineProperty(document, 'elementsFromPoint', {
+      configurable: true,
+      value: () => [text, slide, deck],
+    })
+
+    text.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: 800 }))
+    expect(deck.currentIndex).toBe(0)
+    expect(deck.fragment).toBe(0)
   })
 
   it('handles keyboard navigation and slide lifecycle events', async () => {

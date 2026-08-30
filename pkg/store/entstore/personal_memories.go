@@ -223,29 +223,6 @@ func (ms *personalMemoryStore) tsvectorSearch(ctx context.Context, query string,
 	return results, rows.Err()
 }
 
-func (ms *personalMemoryStore) textSearch(ctx context.Context, query string, maxResults int, category string) ([]store.MemorySearchResult, error) {
-	q := ms.client.Memory.Query()
-	if category != "" {
-		q = q.Where(memory.CategoryEQ(category))
-	}
-	q = q.Limit(maxResults).Order(memory.ByCreatedAt())
-
-	ents, err := q.All(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	results := make([]store.MemorySearchResult, 0, len(ents))
-	for _, e := range ents {
-		r := personalMemoryToSearchResult(e)
-		if query == "" || strings.Contains(strings.ToLower(e.ChunkText), strings.ToLower(query)) {
-			r.Score = 1.0
-			results = append(results, r)
-		}
-	}
-	return results, nil
-}
-
 // ---------------------------------------------------------------------------
 // SQLite Hybrid Search (FTS5 + in-memory vector)
 // ---------------------------------------------------------------------------

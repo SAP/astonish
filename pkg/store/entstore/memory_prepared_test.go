@@ -13,20 +13,31 @@ import (
 
 func TestPreparedMemoryStoresSeparateQueriesAndFilterCategory(t *testing.T) {
 	factories := []struct {
-		name  string
-		table string
-		fts   string
-		new   func(*sql.DB) store.PreparedMemoryStore
+		name        string
+		table       string
+		fts         string
+		insertSQL   string
+		populateSQL string
+		new         func(*sql.DB) store.PreparedMemoryStore
 	}{
-		{"personal", "memories", "memories_fts", func(db *sql.DB) store.PreparedMemoryStore {
-			return &personalMemoryStore{db: db, dialect: DialectSQLite, vecIndex: newVectorIndex(), table: "memories", ftsTable: "memories_fts"}
-		}},
-		{"team", "memories", "memories_fts", func(db *sql.DB) store.PreparedMemoryStore {
-			return &teamMemoryStore{db: db, dialect: DialectSQLite, vecIndex: newVectorIndex(), table: "memories", ftsTable: "memories_fts"}
-		}},
-		{"org", "org_memories", "org_memories_fts", func(db *sql.DB) store.PreparedMemoryStore {
-			return &orgMemoryStore{db: db, dialect: DialectSQLite, vecIndex: newVectorIndex(), table: "org_memories", ftsTable: "org_memories_fts"}
-		}},
+		{"personal", "memories", "memories_fts",
+			"INSERT INTO memories (id, chunk_text, category, created_by, created_at, embedding) VALUES (?, ?, ?, ?, ?, ?)",
+			"INSERT INTO memories_fts(rowid, chunk_text) SELECT rowid, chunk_text FROM memories",
+			func(db *sql.DB) store.PreparedMemoryStore {
+				return &personalMemoryStore{db: db, dialect: DialectSQLite, vecIndex: newVectorIndex(), table: "memories", ftsTable: "memories_fts"}
+			}},
+		{"team", "memories", "memories_fts",
+			"INSERT INTO memories (id, chunk_text, category, created_by, created_at, embedding) VALUES (?, ?, ?, ?, ?, ?)",
+			"INSERT INTO memories_fts(rowid, chunk_text) SELECT rowid, chunk_text FROM memories",
+			func(db *sql.DB) store.PreparedMemoryStore {
+				return &teamMemoryStore{db: db, dialect: DialectSQLite, vecIndex: newVectorIndex(), table: "memories", ftsTable: "memories_fts"}
+			}},
+		{"org", "org_memories", "org_memories_fts",
+			"INSERT INTO org_memories (id, chunk_text, category, promoted_by, created_at, embedding) VALUES (?, ?, ?, ?, ?, ?)",
+			"INSERT INTO org_memories_fts(rowid, chunk_text) SELECT rowid, chunk_text FROM org_memories",
+			func(db *sql.DB) store.PreparedMemoryStore {
+				return &orgMemoryStore{db: db, dialect: DialectSQLite, vecIndex: newVectorIndex(), table: "org_memories", ftsTable: "org_memories_fts"}
+			}},
 	}
 	for _, tc := range factories {
 		t.Run(tc.name, func(t *testing.T) {
@@ -49,10 +60,10 @@ func TestPreparedMemoryStoresSeparateQueriesAndFilterCategory(t *testing.T) {
 				}
 			}
 			id := uuid.NewString()
-			if _, err := db.Exec("INSERT INTO "+tc.table+" (id, chunk_text, category, "+creator+", created_at, embedding) VALUES (?, ?, ?, ?, ?, ?)", id, "literal keyword", "allowed", uuid.NewString(), "2026-01-01T00:00:00Z", float32SliceToBytes([]float32{1, 0})); err != nil {
+			if _, err := db.Exec(tc.insertSQL, id, "literal keyword", "allowed", uuid.NewString(), "2026-01-01T00:00:00Z", float32SliceToBytes([]float32{1, 0})); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := db.Exec("INSERT INTO " + tc.fts + "(rowid, chunk_text) SELECT rowid, chunk_text FROM " + tc.table); err != nil {
+			if _, err := db.Exec(tc.populateSQL); err != nil {
 				t.Fatal(err)
 			}
 			results, err := tc.new(db).SearchPrepared(context.Background(), store.PreparedMemoryQuery{SemanticQuery: "different semantic text", KeywordQuery: "literal", Embedding: []float32{1, 0}}, 10, 0, "allowed")

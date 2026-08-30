@@ -241,30 +241,6 @@ func (m *teamMemoryStore) vectorSearch(ctx context.Context, embedding []float32,
 	return results, rows.Err()
 }
 
-func (m *teamMemoryStore) textSearch(ctx context.Context, query string, maxResults int, category string) ([]store.MemorySearchResult, error) {
-	q := m.client.Memory.Query().
-		Limit(maxResults).
-		Order(memory.ByCreatedAt())
-
-	if query != "" {
-		q = q.Where(memory.ChunkTextContainsFold(query))
-	}
-	if category != "" {
-		q = q.Where(memory.CategoryEQ(category))
-	}
-
-	ents, err := q.All(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("text search: %w", err)
-	}
-
-	results := make([]store.MemorySearchResult, 0, len(ents))
-	for _, e := range ents {
-		results = append(results, entMemoryToResult(e))
-	}
-	return results, nil
-}
-
 // ---------------------------------------------------------------------------
 // SQLite Hybrid Search (FTS5 + in-memory vector)
 // ---------------------------------------------------------------------------

@@ -908,9 +908,16 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) TaskRe
 		// tools using the ToolIndex based on the task description.
 		toolFilter := task.ToolFilter
 		if len(toolFilter) == 0 && m.ToolIndex != nil && task.Description != "" {
-			discoveredGroups := m.ToolIndex.SearchGroupsHybrid(
-				context.Background(), task.Description, 12, 0.005,
-			)
+			discoveredGroups, err := m.ToolIndex.SearchGroupsHybrid(taskCtx, task.Description, 12, 0.005)
+			if err != nil {
+				result = TaskResult{
+					Name:     task.Name,
+					Status:   "error",
+					Error:    fmt.Sprintf("discover tool groups: %v", err),
+					Duration: time.Since(start),
+				}
+				return result
+			}
 			if len(discoveredGroups) > 0 {
 				toolFilter = discoveredGroups
 			}

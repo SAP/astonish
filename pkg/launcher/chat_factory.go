@@ -1548,27 +1548,24 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 	}
 
 	sortedCatalogGroups := agent.SortedGroups(toolGroups)
-	if vectorStore != nil && toolEmbedFunc != nil {
+	if (vectorStore == nil) != (toolEmbedFunc == nil) {
+		return nil, fmt.Errorf("semantic tool retrieval requires both vector store and embedding function")
+	}
+	if vectorStore != nil {
 		var tiErr error
 		toolIndex, tiErr = agent.NewToolIndex(vectorStore, toolEmbedFunc)
-		if tiErr != nil && cfg.DebugMode {
-			slog.Warn("failed to create semantic tool index; using lexical catalog", "error", tiErr)
+		if tiErr != nil {
+			return nil, fmt.Errorf("create semantic tool index: %w", tiErr)
 		}
-	}
-	if toolIndex == nil {
+		if syncErr := toolIndex.SyncTools(ctx, mainThreadTools, sortedCatalogGroups); syncErr != nil {
+			return nil, fmt.Errorf("initialize semantic tool index: %w", syncErr)
+		}
+		slog.Debug("tool index initialized", "component", "tool-index", "tools_indexed", toolIndex.Count())
+	} else {
 		toolIndex = agent.NewLexicalToolIndex()
-	}
-	// Publish the complete lexical catalog immediately. Semantic vectors, when
-	// configured, refresh in the background without delaying chat startup.
-	toolIndex.PrimeTools(context.Background(), mainThreadTools, sortedCatalogGroups)
-	if vectorStore != nil && toolEmbedFunc != nil {
-		go func(idx *agent.ToolIndex, main []tool.Tool, groups []*agent.ToolGroup) {
-			if syncErr := idx.SyncTools(context.Background(), main, groups); syncErr != nil {
-				slog.Warn("background tool index refresh failed; retaining lexical catalog", "component", "tool-index", "error", syncErr)
-				return
-			}
-			slog.Debug("background tool index refresh complete", "component", "tool-index", "tools_indexed", idx.Count())
-		}(toolIndex, mainThreadTools, sortedCatalogGroups)
+		if err := toolIndex.PrimeTools(ctx, mainThreadTools, sortedCatalogGroups); err != nil {
+			return nil, fmt.Errorf("initialize tool catalog: %w", err)
+		}
 	}
 
 	logChatFactoryPhase(phaseStarted, "tool-index-sync")

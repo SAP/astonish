@@ -226,14 +226,12 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 				matches, err := c.ToolIndex.SearchHybrid(ctx, toolSearchQuery, 8, 0.005)
 				finishToolRetrieval(err)
 				if err != nil {
-					if c.DebugMode {
-						slog.Debug("tool index search failed", "component", "chat", "error", err)
-					}
-				} else {
-					// Filter out MCP tools the user's team doesn't have access to
-					matches = FilterAccessibleToolMatches(ctx, matches)
-					toolMatches = matches
+					yield(nil, fmt.Errorf("search tool index: %w", err))
+					return
 				}
+				// Filter out MCP tools the user's team doesn't have access to
+				matches = FilterAccessibleToolMatches(ctx, matches)
+				toolMatches = matches
 			}
 			// When the user names an MCP server (e.g. "use the mcp server email"),
 			// Include that group's tools in the catalog hints even if hybrid search

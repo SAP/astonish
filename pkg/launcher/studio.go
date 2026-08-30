@@ -147,10 +147,14 @@ func NewStudioServer(port int, opts ...StudioOption) (*StudioServer, error) {
 		if isPlatform && backendRef != nil {
 			if embedFunc := backendRef.GetEmbedFunc(); embedFunc != nil {
 				vs, vsErr := backendRef.NewToolVectorStore(ctx)
-				if vsErr == nil && vs != nil {
-					factoryCfg.PlatformToolVectorStore = vs
-					factoryCfg.PlatformEmbedFunc = agent.EmbedFunc(embedFunc)
+				if vsErr != nil {
+					return nil, fmt.Errorf("create semantic tool vector store: %w", vsErr)
 				}
+				if vs == nil {
+					return nil, fmt.Errorf("create semantic tool vector store: backend returned nil")
+				}
+				factoryCfg.PlatformToolVectorStore = vs
+				factoryCfg.PlatformEmbedFunc = agent.EmbedFunc(embedFunc)
 			}
 		}
 

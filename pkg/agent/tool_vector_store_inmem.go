@@ -23,17 +23,16 @@ func NewInMemoryToolVectorStore(embeddingFunc EmbedFunc) (ToolVectorStore, error
 	if embeddingFunc == nil {
 		return nil, ErrNilEmbedFunc
 	}
-	return &inMemoryToolVectorStore{
-		embeddingFunc: embeddingFunc,
-	}, nil
+	return &inMemoryToolVectorStore{embeddingFunc: embeddingFunc}, nil
 }
 
 func (s *inMemoryToolVectorStore) AddDocuments(ctx context.Context, docs []ToolVectorDoc, concurrency int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if len(docs) == 0 {
 		return nil
 	}
-
-	// Clamp concurrency to valid range
 	if concurrency <= 0 {
 		concurrency = 1
 	}
@@ -41,102 +40,109 @@ func (s *inMemoryToolVectorStore) AddDocuments(ctx context.Context, docs []ToolV
 		concurrency = len(docs)
 	}
 
-	// For single concurrency or single doc, use simple sequential path
-	if concurrency == 1 || len(docs) == 1 {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		for _, d := range docs {
-			emb, err := s.embeddingFunc(ctx, d.Content)
-			if err != nil {
-				return err
-			}
-			s.docs = append(s.docs, d)
-			s.embeddings = append(s.embeddings, emb)
-		}
-		return nil
-	}
-
-	// Concurrent embedding: fan out embedding calls, collect results in order
 	type embedResult struct {
 		embedding []float32
 		err       error
 	}
-
 	results := make([]embedResult, len(docs))
+	workCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	sem := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
-
 	for i, d := range docs {
 		wg.Add(1)
 		go func(idx int, doc ToolVectorDoc) {
 			defer wg.Done()
-			sem <- struct{}{}        // acquire slot
-			defer func() { <-sem }() // release slot
-
-			emb, err := s.embeddingFunc(ctx, doc.Content)
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-workCtx.Done():
+				results[idx].err = workCtx.Err()
+				return
+			}
+			if len(doc.Embedding) > 0 {
+				results[idx].embedding = append([]float32(nil), doc.Embedding...)
+				return
+			}
+			emb, err := s.embeddingFunc(workCtx, doc.Content)
 			results[idx] = embedResult{embedding: emb, err: err}
+			if err != nil {
+				cancel()
+			}
 		}(i, d)
 	}
 	wg.Wait()
+	for _, result := range results {
+		if result.err != nil {
+			return result.err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
-	// Check for errors and append results under the lock
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	for i, r := range results {
-		if r.err != nil {
-			return r.err
+	positions := make(map[string]int, len(s.docs))
+	for i, doc := range s.docs {
+		positions[doc.ID] = i
+	}
+	for i, doc := range docs {
+		doc.Embedding = nil
+		emb := append([]float32(nil), results[i].embedding...)
+		if pos, ok := positions[doc.ID]; ok {
+			s.docs[pos] = doc
+			s.embeddings[pos] = emb
+			continue
 		}
-		s.docs = append(s.docs, docs[i])
-		s.embeddings = append(s.embeddings, r.embedding)
+		positions[doc.ID] = len(s.docs)
+		s.docs = append(s.docs, doc)
+		s.embeddings = append(s.embeddings, emb)
 	}
 	return nil
 }
 
-func (s *inMemoryToolVectorStore) QueryByEmbedding(_ context.Context, queryEmbedding []float32, topK int) ([]ToolVectorResult, error) {
+func (s *inMemoryToolVectorStore) QueryByEmbedding(ctx context.Context, queryEmbedding []float32, topK int) ([]ToolVectorResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-
-	if len(s.docs) == 0 {
+	if len(s.docs) == 0 || topK <= 0 {
 		return nil, nil
 	}
-
 	type scored struct {
-		idx  int
-		sim  float32
+		idx int
+		sim float32
 	}
-
-	var scores []scored
+	scores := make([]scored, 0, len(s.docs))
 	for i, emb := range s.embeddings {
-		sim := cosineSimilarity(queryEmbedding, emb)
-		scores = append(scores, scored{idx: i, sim: sim})
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		scores = append(scores, scored{idx: i, sim: cosineSimilarity(queryEmbedding, emb)})
 	}
-
-	sort.Slice(scores, func(i, j int) bool {
-		return scores[i].sim > scores[j].sim
-	})
-
+	sort.Slice(scores, func(i, j int) bool { return scores[i].sim > scores[j].sim })
 	if topK > len(scores) {
 		topK = len(scores)
 	}
-
 	results := make([]ToolVectorResult, topK)
 	for i := 0; i < topK; i++ {
-		results[i] = ToolVectorResult{
-			ToolVectorDoc: s.docs[scores[i].idx],
-			Similarity:    scores[i].sim,
-		}
+		results[i] = ToolVectorResult{ToolVectorDoc: s.docs[scores[i].idx], Similarity: scores[i].sim}
 	}
 	return results, nil
 }
 
-func (s *inMemoryToolVectorStore) GetByID(_ context.Context, id string) (*ToolVectorDoc, error) {
+func (s *inMemoryToolVectorStore) GetByID(ctx context.Context, id string) (*ToolVectorDoc, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-
 	for _, d := range s.docs {
 		if d.ID == id {
-			return &d, nil
+			copy := d
+			return &copy, nil
 		}
 	}
 	return nil, nil
@@ -148,9 +154,10 @@ func (s *inMemoryToolVectorStore) Count() int {
 	return len(s.docs)
 }
 
-// AllIDs returns every document ID currently in the store. Used by SyncTools
-// to prune orphaned entries after process restarts.
-func (s *inMemoryToolVectorStore) AllIDs(_ context.Context) ([]string, error) {
+func (s *inMemoryToolVectorStore) AllIDs(ctx context.Context) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	ids := make([]string, len(s.docs))
@@ -160,19 +167,19 @@ func (s *inMemoryToolVectorStore) AllIDs(_ context.Context) ([]string, error) {
 	return ids, nil
 }
 
-func (s *inMemoryToolVectorStore) DeleteByIDs(_ context.Context, ids []string) error {
+func (s *inMemoryToolVectorStore) DeleteByIDs(ctx context.Context, ids []string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if len(ids) == 0 {
 		return nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
 	toDelete := make(map[string]bool, len(ids))
 	for _, id := range ids {
 		toDelete[id] = true
 	}
-
-	// Filter in place
 	n := 0
 	for i, d := range s.docs {
 		if !toDelete[d.ID] {
@@ -186,7 +193,6 @@ func (s *inMemoryToolVectorStore) DeleteByIDs(_ context.Context, ids []string) e
 	return nil
 }
 
-// cosineSimilarity computes the cosine similarity between two vectors.
 func cosineSimilarity(a, b []float32) float32 {
 	if len(a) != len(b) || len(a) == 0 {
 		return 0

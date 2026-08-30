@@ -250,8 +250,8 @@ func Run(cfg RunConfig) error {
 		embGetSecret := daemonSecretGetter(backend, credStore)
 		embResult, embErr := memory.ResolveEmbeddingFunc(appCfg, &appCfg.Memory, cfg.Debug, embGetSecret)
 		if embErr != nil {
-			logger.Printf("Warning: embedding unavailable (keyword-only search): %v", embErr)
 			logStartupPhase("embedding", "failed", embeddingStarted)
+			return fmt.Errorf("initialize semantic retrieval: %w", embErr)
 		} else {
 			backend.SetEmbedFunc(func(ctx context.Context, text string) ([]float32, error) {
 				return embResult.EmbeddingFunc(ctx, text)
@@ -284,13 +284,15 @@ func Run(cfg RunConfig) error {
 	var platformEmbedFunc agent.EmbedFunc
 	if embedFunc := backend.GetEmbedFunc(); embedFunc != nil {
 		vs, vsErr := backend.NewToolVectorStore(context.Background())
-		if vsErr == nil && vs != nil {
-			platformToolVectorStore = vs
-			platformEmbedFunc = agent.EmbedFunc(embedFunc)
-			logger.Printf("Tool discovery: vector-backed (platform mode)")
-		} else if vsErr != nil && cfg.Debug {
-			logger.Printf("Warning: failed to create tool vector store: %v", vsErr)
+		if vsErr != nil {
+			return fmt.Errorf("create semantic tool vector store: %w", vsErr)
 		}
+		if vs == nil {
+			return fmt.Errorf("create semantic tool vector store: backend returned nil")
+		}
+		platformToolVectorStore = vs
+		platformEmbedFunc = agent.EmbedFunc(embedFunc)
+		logger.Printf("Tool discovery: vector-backed (platform mode)")
 	}
 
 	// Set up MCP environment variables

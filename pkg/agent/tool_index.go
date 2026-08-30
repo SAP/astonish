@@ -115,15 +115,17 @@ func SortedGroups(groups map[string]*ToolGroup) []*ToolGroup {
 	return sorted
 }
 
-// PrimeTools builds the local registry and BM25 catalog without embedding any
-// documents. It makes tool discovery usable immediately while SyncTools updates
-// semantic vectors in the background.
-func (idx *ToolIndex) PrimeTools(ctx context.Context, mainTools []tool.Tool, groups []*ToolGroup) {
-	registry, docs := buildToolCatalog(ctx, mainTools, groups)
+// PrimeTools builds a lexical-only registry without embedding documents.
+func (idx *ToolIndex) PrimeTools(ctx context.Context, mainTools []tool.Tool, groups []*ToolGroup) error {
+	registry, docs, err := buildToolCatalog(ctx, mainTools, groups)
+	if err != nil {
+		return err
+	}
 	idx.mu.Lock()
 	idx.toolRegistry = registry
 	idx.bm25 = buildBM25Index(docs)
 	idx.mu.Unlock()
+	return nil
 }
 
 // SyncTools indexes all tools from main-thread tools and tool groups.
@@ -133,20 +135,22 @@ func (idx *ToolIndex) PrimeTools(ctx context.Context, mainTools []tool.Tool, gro
 // It performs an incremental sync: only tools with new or changed content
 // are re-embedded. Unchanged tools reuse their persisted embeddings.
 func (idx *ToolIndex) SyncTools(ctx context.Context, mainTools []tool.Tool, groups []*ToolGroup) error {
-	// Build and publish the lexical catalog before any potentially slow remote
-	// embedding work. SearchHybrid can therefore use BM25 while vectors refresh.
-	registry, docs := buildToolCatalog(ctx, mainTools, groups)
+	registry, docs, err := buildToolCatalog(ctx, mainTools, groups)
+	if err != nil {
+		return err
+	}
+	// Do not hold idx.mu while an embedding provider or vector store is running.
+	if err := idx.syncToolDocuments(ctx, registry, docs); err != nil {
+		return err
+	}
 	idx.mu.Lock()
 	idx.toolRegistry = registry
 	idx.bm25 = buildBM25Index(docs)
 	idx.mu.Unlock()
-
-	// Do not hold idx.mu while a remote embedding provider is running. Reads keep
-	// using the published lexical catalog (and any previously stored vectors).
-	return idx.syncToolDocuments(ctx, registry, docs)
+	return nil
 }
 
-func buildToolCatalog(ctx context.Context, mainTools []tool.Tool, groups []*ToolGroup) (map[string]ToolEntry, []ToolVectorDoc) {
+func buildToolCatalog(ctx context.Context, mainTools []tool.Tool, groups []*ToolGroup) (map[string]ToolEntry, []ToolVectorDoc, error) {
 	registry := make(map[string]ToolEntry)
 	var docs []ToolVectorDoc
 
@@ -176,9 +180,9 @@ func buildToolCatalog(ctx context.Context, mainTools []tool.Tool, groups []*Tool
 	// run before MCP groups so an MCP server that reuses a generic name
 	// (e.g. list_templates) cannot steal the built-in tool in the registry.
 	readCtx := &minimalReadonlyContext{Context: ctx}
-	indexGroup := func(g *ToolGroup) {
+	indexGroup := func(g *ToolGroup) error {
 		if g == nil {
-			return
+			return nil
 		}
 		for _, t := range g.Tools {
 			name := t.Name()
@@ -206,7 +210,7 @@ func buildToolCatalog(ctx context.Context, mainTools []tool.Tool, groups []*Tool
 		for _, ts := range g.Toolsets {
 			mcpTools, err := ts.Tools(readCtx)
 			if err != nil {
-				continue
+				return fmt.Errorf("list tools for group %q: %w", g.Name, err)
 			}
 			for _, t := range mcpTools {
 				name := t.Name()
@@ -232,6 +236,7 @@ func buildToolCatalog(ctx context.Context, mainTools []tool.Tool, groups []*Tool
 				})
 			}
 		}
+		return nil
 	}
 	var mcpGroups []*ToolGroup
 	for _, g := range groups {
@@ -239,13 +244,17 @@ func buildToolCatalog(ctx context.Context, mainTools []tool.Tool, groups []*Tool
 			mcpGroups = append(mcpGroups, g)
 			continue
 		}
-		indexGroup(g)
+		if err := indexGroup(g); err != nil {
+			return nil, nil, err
+		}
 	}
 	for _, g := range mcpGroups {
-		indexGroup(g)
+		if err := indexGroup(g); err != nil {
+			return nil, nil, err
+		}
 	}
 
-	return registry, docs
+	return registry, docs, nil
 }
 
 func (idx *ToolIndex) syncToolDocuments(ctx context.Context, registry map[string]ToolEntry, docs []ToolVectorDoc) error {
@@ -256,7 +265,10 @@ func (idx *ToolIndex) syncToolDocuments(ctx context.Context, registry map[string
 	currentIDs := make(map[string]bool, len(docs))
 	for _, doc := range docs {
 		currentIDs[doc.ID] = true
-		existing, _ := idx.vectorStore.GetByID(ctx, doc.ID)
+		existing, err := idx.vectorStore.GetByID(ctx, doc.ID)
+		if err != nil {
+			return fmt.Errorf("get indexed tool %q: %w", doc.ID, err)
+		}
 		if existing != nil && existing.Content == doc.Content {
 			continue // already embedded with same content
 		}
@@ -270,11 +282,13 @@ func (idx *ToolIndex) syncToolDocuments(ctx context.Context, registry map[string
 	if lister, ok := idx.vectorStore.(interface {
 		AllIDs(context.Context) ([]string, error)
 	}); ok {
-		if all, err := lister.AllIDs(ctx); err == nil {
-			for _, id := range all {
-				if !currentIDs[id] {
-					staleIDs = append(staleIDs, id)
-				}
+		all, err := lister.AllIDs(ctx)
+		if err != nil {
+			return fmt.Errorf("list indexed tools: %w", err)
+		}
+		for _, id := range all {
+			if !currentIDs[id] {
+				staleIDs = append(staleIDs, id)
 			}
 		}
 	} else if idx.knownIDs != nil {
@@ -286,15 +300,10 @@ func (idx *ToolIndex) syncToolDocuments(ctx context.Context, registry map[string
 	}
 	if len(staleIDs) > 0 {
 		if err := idx.vectorStore.DeleteByIDs(ctx, staleIDs); err != nil {
-			slog.Warn("failed to prune stale tool index entries", "count", len(staleIDs), "error", err)
-		} else {
-			slog.Debug("pruned stale tool index entries", "count", len(staleIDs))
+			return fmt.Errorf("prune stale tool index entries: %w", err)
 		}
+		slog.Debug("pruned stale tool index entries", "count", len(staleIDs))
 	}
-	idx.mu.Lock()
-	idx.knownIDs = currentIDs
-	idx.mu.Unlock()
-
 	if len(docs) == 0 {
 		return nil
 	}
@@ -306,6 +315,9 @@ func (idx *ToolIndex) syncToolDocuments(ctx context.Context, registry map[string
 		}
 	}
 
+	idx.mu.Lock()
+	idx.knownIDs = currentIDs
+	idx.mu.Unlock()
 	return nil
 }
 
@@ -313,8 +325,15 @@ func (idx *ToolIndex) syncToolDocuments(ctx context.Context, registry map[string
 // Returns the top-K matches sorted by relevance score.
 func (idx *ToolIndex) Search(ctx context.Context, query string, topK int, minScore float64) ([]ToolMatch, error) {
 	idx.mu.RLock()
-	defer idx.mu.RUnlock()
+	registry := idx.toolRegistry
+	idx.mu.RUnlock()
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if idx.vectorStore == nil || idx.embedFunc == nil {
+		return nil, fmt.Errorf("semantic tool search is not configured")
+	}
 	if topK <= 0 {
 		topK = 10
 	}
@@ -357,7 +376,7 @@ func (idx *ToolIndex) Search(ctx context.Context, query string, topK int, minSco
 		// Fall back to the stored document content if the tool isn't in the
 		// current registry (e.g., persisted docs from a previous session).
 		desc := ""
-		if entry, ok := idx.toolRegistry[toolName]; ok {
+		if entry, ok := registry[toolName]; ok {
 			desc = entry.Description
 		} else if r.Content != "" {
 			// Content format is "tool_name: description" — strip the prefix
@@ -383,10 +402,13 @@ func (idx *ToolIndex) Search(ctx context.Context, query string, topK int, minSco
 // SearchGroups queries the tool index and returns the unique group names
 // of matching tools. This is used by sub-agent auto-discovery to determine
 // which tool groups to load.
-func (idx *ToolIndex) SearchGroups(ctx context.Context, query string, topK int, minScore float64) []string {
+func (idx *ToolIndex) SearchGroups(ctx context.Context, query string, topK int, minScore float64) ([]string, error) {
 	matches, err := idx.Search(ctx, query, topK, minScore)
-	if err != nil || len(matches) == 0 {
-		return nil
+	if err != nil {
+		return nil, err
+	}
+	if len(matches) == 0 {
+		return nil, nil
 	}
 
 	seen := make(map[string]bool)
@@ -399,7 +421,7 @@ func (idx *ToolIndex) SearchGroups(ctx context.Context, query string, topK int, 
 		groups = append(groups, m.GroupName)
 	}
 	sort.Strings(groups)
-	return groups
+	return groups, nil
 }
 
 // FormatForPrompt formats tool matches as a text block suitable for
@@ -853,8 +875,13 @@ type bm25Result struct {
 // Reasonable thresholds: 0.005 (permissive) to 0.015 (moderate).
 func (idx *ToolIndex) SearchHybrid(ctx context.Context, query string, topK int, minScore float64) ([]ToolMatch, error) {
 	idx.mu.RLock()
-	defer idx.mu.RUnlock()
+	registry := idx.toolRegistry
+	bm25 := idx.bm25
+	idx.mu.RUnlock()
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if topK <= 0 {
 		topK = 10
 	}
@@ -879,19 +906,21 @@ func (idx *ToolIndex) SearchHybrid(ctx context.Context, query string, topK int, 
 		}
 
 		// Embed the query for vector search
-		queryEmb, embErr := idx.embedFunc(ctx, query)
-		if embErr == nil && len(queryEmb) > 0 {
-			var err error
-			vectorResults, err = idx.vectorStore.QueryByEmbedding(ctx, queryEmb, vK)
-			if err != nil {
-				return nil, fmt.Errorf("vector search failed: %w", err)
-			}
+		queryEmb, err := idx.embedFunc(ctx, query)
+		if err != nil {
+			return nil, fmt.Errorf("failed to embed query: %w", err)
 		}
-		// If embedding fails, fall through to BM25-only
+		if len(queryEmb) == 0 {
+			return nil, fmt.Errorf("failed to embed query: empty embedding")
+		}
+		vectorResults, err = idx.vectorStore.QueryByEmbedding(ctx, queryEmb, vK)
+		if err != nil {
+			return nil, fmt.Errorf("vector search failed: %w", err)
+		}
 	}
 
 	// --- BM25 keyword search ---
-	bm25Results := idx.bm25.search(query, candidateK)
+	bm25Results := bm25.search(query, candidateK)
 
 	// --- Reciprocal Rank Fusion ---
 	const rrfK = 60.0
@@ -964,7 +993,7 @@ func (idx *ToolIndex) SearchHybrid(ctx context.Context, query string, topK int, 
 
 		// Resolve description from registry, fall back to stored content
 		desc := ""
-		if entry, ok := idx.toolRegistry[r.toolName]; ok {
+		if entry, ok := registry[r.toolName]; ok {
 			desc = entry.Description
 		}
 
@@ -981,10 +1010,13 @@ func (idx *ToolIndex) SearchHybrid(ctx context.Context, query string, topK int, 
 }
 
 // SearchGroupsHybrid is like SearchGroups but uses hybrid search (vector + BM25).
-func (idx *ToolIndex) SearchGroupsHybrid(ctx context.Context, query string, topK int, minScore float64) []string {
+func (idx *ToolIndex) SearchGroupsHybrid(ctx context.Context, query string, topK int, minScore float64) ([]string, error) {
 	matches, err := idx.SearchHybrid(ctx, query, topK, minScore)
-	if err != nil || len(matches) == 0 {
-		return nil
+	if err != nil {
+		return nil, err
+	}
+	if len(matches) == 0 {
+		return nil, nil
 	}
 
 	seen := make(map[string]bool)
@@ -997,5 +1029,5 @@ func (idx *ToolIndex) SearchGroupsHybrid(ctx context.Context, query string, topK
 		groups = append(groups, m.GroupName)
 	}
 	sort.Strings(groups)
-	return groups
+	return groups, nil
 }

@@ -4,15 +4,22 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"math"
+	"sync/atomic"
 	"testing"
+
+	adkagent "google.golang.org/adk/agent"
+	"google.golang.org/adk/tool"
 )
 
 // newTestToolIndex creates a ToolIndex backed by an in-memory vector store.
 // This is the standard way to create a ToolIndex in tests.
 func TestLexicalToolIndexSearchesWithoutVectorStore(t *testing.T) {
 	idx := NewLexicalToolIndex()
-	idx.PrimeTools(context.Background(), nil, []*ToolGroup{{Name: "web", Tools: mockTools("web_fetch")}})
+	if err := idx.PrimeTools(context.Background(), nil, []*ToolGroup{{Name: "web", Tools: mockTools("web_fetch")}}); err != nil {
+		t.Fatalf("PrimeTools: %v", err)
+	}
 	matches, err := idx.SearchHybrid(context.Background(), "web fetch", 5, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -22,6 +29,81 @@ func TestLexicalToolIndexSearchesWithoutVectorStore(t *testing.T) {
 	}
 	if idx.Count() != 1 {
 		t.Fatalf("Count() = %d, want 1", idx.Count())
+	}
+}
+
+type failingToolset struct{ err error }
+
+func (f failingToolset) Name() string { return "failing" }
+func (f failingToolset) Tools(adkagent.ReadonlyContext) ([]tool.Tool, error) {
+	return nil, f.err
+}
+
+func TestToolIndexPrimePropagatesToolsetError(t *testing.T) {
+	want := errors.New("toolset unavailable")
+	idx := NewLexicalToolIndex()
+	err := idx.PrimeTools(context.Background(), nil, []*ToolGroup{{Name: "broken", Toolsets: []tool.Toolset{failingToolset{err: want}}}})
+	if !errors.Is(err, want) {
+		t.Fatalf("PrimeTools error = %v, want %v", err, want)
+	}
+	if idx.Count() != 0 {
+		t.Fatalf("Count() = %d, want unpublished catalog", idx.Count())
+	}
+}
+
+func TestToolIndexSearchHybridPropagatesEmbeddingError(t *testing.T) {
+	want := errors.New("embed unavailable")
+	embed := func(context.Context, string) ([]float32, error) { return nil, want }
+	idx := newTestToolIndex(t, embed)
+	docEmbed := []float32{1, 0}
+	if err := idx.vectorStore.AddDocuments(context.Background(), []ToolVectorDoc{{ID: "web:web_fetch", Content: "web_fetch: fetch web", Metadata: map[string]string{"tool_name": "web_fetch", "group_name": "web"}, Embedding: docEmbed}}, 1); err != nil {
+		t.Fatal(err)
+	}
+	_, err := idx.SearchHybrid(context.Background(), "web fetch", 5, 0)
+	if !errors.Is(err, want) {
+		t.Fatalf("SearchHybrid error = %v, want %v", err, want)
+	}
+}
+
+func TestInMemoryToolVectorStoreUpsertsAndUsesPrecomputedEmbedding(t *testing.T) {
+	var calls atomic.Int32
+	embed := func(context.Context, string) ([]float32, error) {
+		calls.Add(1)
+		return []float32{0, 1}, nil
+	}
+	store, err := NewInMemoryToolVectorStore(embed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	docs := []ToolVectorDoc{{ID: "same", Content: "first", Embedding: []float32{1, 0}}}
+	if err := store.AddDocuments(context.Background(), docs, 1); err != nil {
+		t.Fatal(err)
+	}
+	docs[0] = ToolVectorDoc{ID: "same", Content: "second", Embedding: []float32{0, 1}}
+	if err := store.AddDocuments(context.Background(), docs, 1); err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 0 || store.Count() != 1 {
+		t.Fatalf("calls=%d count=%d, want 0 and 1", calls.Load(), store.Count())
+	}
+	got, err := store.GetByID(context.Background(), "same")
+	if err != nil || got == nil || got.Content != "second" {
+		t.Fatalf("GetByID = %#v, %v", got, err)
+	}
+}
+
+func TestInMemoryToolVectorStoreHonorsCancellation(t *testing.T) {
+	store, err := NewInMemoryToolVectorStore(testEmbeddingFunc())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := store.AddDocuments(ctx, []ToolVectorDoc{{ID: "x", Content: "x"}}, 1); !errors.Is(err, context.Canceled) {
+		t.Fatalf("AddDocuments error = %v, want context canceled", err)
+	}
+	if _, err := store.QueryByEmbedding(ctx, []float32{1}, 1); !errors.Is(err, context.Canceled) {
+		t.Fatalf("QueryByEmbedding error = %v, want context canceled", err)
 	}
 }
 
@@ -330,7 +412,10 @@ func TestToolIndex_SearchGroups(t *testing.T) {
 	}
 
 	// SearchGroups should return group names only, excluding main tools
-	groupNames := idx.SearchGroups(context.Background(), "navigate browser", 5, 0.01)
+	groupNames, err := idx.SearchGroups(context.Background(), "navigate browser", 5, 0.01)
+	if err != nil {
+		t.Fatalf("SearchGroups: %v", err)
+	}
 	// Should have some groups (exact content depends on embedding)
 	if len(groupNames) == 0 {
 		t.Log("Warning: SearchGroups returned no groups (embedding may not capture semantics)")
@@ -804,7 +889,10 @@ func TestToolIndex_SearchGroupsHybrid(t *testing.T) {
 		t.Fatalf("SyncTools: %v", err)
 	}
 
-	groupNames := idx.SearchGroupsHybrid(context.Background(), "navigate browser", 5, 0)
+	groupNames, err := idx.SearchGroupsHybrid(context.Background(), "navigate browser", 5, 0)
+	if err != nil {
+		t.Fatalf("SearchGroupsHybrid: %v", err)
+	}
 	// Verify no "_main" in results
 	for _, g := range groupNames {
 		if g == "_main" {

@@ -118,7 +118,7 @@ The `http_request` tool accepts an optional `credential` parameter (credential n
 
 The `search_tools` tool and `ToolIndex` provide catalog discovery with a fixed model-visible bridge:
 
-1. User messages and explicit `search_tools` calls search tool names and descriptions without adding declarations.
+1. User messages and explicit `search_tools` calls search tool names and descriptions without adding declarations. When semantic retrieval is configured, initialization and query failures are returned; the runtime does not silently degrade to lexical-only results.
 2. `describe_tools(names)` returns the selected tools' descriptions and input schemas.
 3. `execute_tool(name, arguments)` resolves and runs the deferred tool with first-party precedence and request-scoped MCP access/disabled checks.
 

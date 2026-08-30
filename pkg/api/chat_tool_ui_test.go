@@ -56,7 +56,9 @@ func TestIntegrationExecuteToolAskUserEmitsQuestionComponentEvent(t *testing.T) 
 		t.Fatal("ask_user tool not found")
 	}
 	index := agent.NewLexicalToolIndex()
-	index.PrimeTools(context.Background(), []tool.Tool{askUser}, nil)
+	if err := index.PrimeTools(context.Background(), []tool.Tool{askUser}, nil); err != nil {
+		t.Fatalf("PrimeTools: %v", err)
+	}
 	bridge, err := agent.NewProgressiveToolBridge(index)
 	if err != nil {
 		t.Fatalf("create progressive bridge: %v", err)

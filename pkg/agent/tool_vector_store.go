@@ -44,9 +44,10 @@ type ToolVectorStore interface {
 
 // ToolVectorDoc represents a tool document in the vector store.
 type ToolVectorDoc struct {
-	ID       string
-	Content  string
-	Metadata map[string]string
+	ID        string
+	Content   string
+	Metadata  map[string]string
+	Embedding []float32
 }
 
 // ToolVectorResult is a search result from the vector store.

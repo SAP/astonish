@@ -279,8 +279,7 @@ func Run(cfg RunConfig) error {
 	// resolve API keys from the DB in platform mode (not the file-based store).
 	config.SetInstalledSecretGetter(getSecret)
 
-	// Create the ToolVectorStore for platform mode.
-	// This enables dynamic tool injection (semantic tool discovery) in platform mode.
+	// Create the ToolVectorStore for semantic catalog search in platform mode.
 	var platformToolVectorStore agent.ToolVectorStore
 	var platformEmbedFunc agent.EmbedFunc
 	if embedFunc := backend.GetEmbedFunc(); embedFunc != nil {

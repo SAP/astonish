@@ -98,6 +98,11 @@ func NewToolIndex(vectorStore ToolVectorStore, embedFunc EmbedFunc) (*ToolIndex,
 	}, nil
 }
 
+// NewLexicalToolIndex creates a catalog that uses BM25 search without a vector store.
+func NewLexicalToolIndex() *ToolIndex {
+	return &ToolIndex{toolRegistry: make(map[string]ToolEntry)}
+}
+
 // SortedGroups returns tool groups sorted by name for deterministic output.
 func SortedGroups(groups map[string]*ToolGroup) []*ToolGroup {
 	sorted := make([]*ToolGroup, 0, len(groups))
@@ -467,7 +472,7 @@ func truncateDesc(s string, maxLen int) string {
 func (idx *ToolIndex) Count() int {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
-	return idx.vectorStore.Count()
+	return len(idx.toolRegistry)
 }
 
 // ListAll returns every tool in the registry grouped by group name.
@@ -863,7 +868,10 @@ func (idx *ToolIndex) SearchHybrid(ctx context.Context, query string, topK int, 
 
 	// --- Vector search ---
 	var vectorResults []ToolVectorResult
-	docCount := idx.vectorStore.Count()
+	docCount := 0
+	if idx.vectorStore != nil && idx.embedFunc != nil {
+		docCount = idx.vectorStore.Count()
+	}
 	if docCount > 0 {
 		vK := candidateK
 		if vK > docCount {

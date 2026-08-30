@@ -32,7 +32,7 @@ The system prompt uses a deliberate tiered architecture to balance token efficie
 - **Tier 2 (Indexed Guidance)**: Detailed how-to documentation for each capability (browser, credentials, scheduling, etc.). Stored as `memory/guidance/*.md` files indexed in the vector store and retrieved only when relevant.
 - **Tier 3 (Per-Turn Context)**: Retrieved knowledge, catalog matches, channel/scheduler hints, session instructions, skill indexes, and mode guidance. In the cache-stable path this is a marked user-role event persisted byte-for-byte and hidden from transcript, memory, reflection, and distillation views.
 
-The legacy path continues rebuilding the prompt and may dynamically inject pre-turn relevance matches or pinned groups. Explicit `search_tools` results are catalog-only on both paths and never become model declarations. `chat.cache_stable_agent_path` selects the behavior with precedence `session > model > provider > global`; the default rollout enables it only for Qwen models on local OpenAI-compatible, Ollama, and LM Studio providers. The selected value is persisted per session.
+Every provider and session uses this cache-stable path. There is no legacy dynamic-declaration path or rollout switch. Automatic relevance matches, pinned groups, and explicit `search_tools` results are model-facing context only and never become provider tool declarations.
 
 ### Why Sequential Tool Dispatch
 
@@ -158,7 +158,7 @@ The critical invariant: the session event (which shares the same args map by ref
 
 When the cache-stable path is enabled, ChatAgent exposes a fixed declaration set for the session. `search_tools` is catalog-only and never mutates the request. The model calls `describe_tools(names)` to retrieve deferred schemas, then `execute_tool(name, arguments)` to invoke one. Resolution prefers first-party ToolIndex entries, rejects ambiguous bare request-scoped names, accepts qualified `group/tool` references, and enforces disabled-tool and effective team → org → platform MCP access rules.
 
-ADK dispatches `execute_tool` through the normal callback chain. ChatAgent unwraps the selected tool identity and nested arguments inside every BeforeTool callback and the AfterTool callback, preserving mode and authorization gates, credential and pending-secret substitution/restoration, output redaction, execution tracing, image handling, and artifact capture. Request-scoped MCP and A2A catalogs are merged rather than replacing one another. The legacy path retains dynamic declaration injection and missing-tool recovery for sessions where the rollout flag is disabled; historical direct tool calls remain unchanged.
+ADK dispatches `execute_tool` through the normal callback chain. ChatAgent unwraps the selected tool identity and nested arguments inside every BeforeTool callback and the AfterTool callback, preserving mode and authorization gates, credential and pending-secret substitution/restoration, output redaction, execution tracing, image handling, and artifact capture. Request-scoped MCP and A2A catalogs are merged rather than replacing one another. Historical direct tool calls remain executable from transcript history, but no discovery result adds a new declaration.
 
 Before every model call, Astonish records secret-safe hashes of the system instruction and canonical ordered declarations, plus declaration count and whether either hash changed within the turn or session. These diagnostics expose cache instability without logging prompt or schema contents.
 

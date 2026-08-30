@@ -6,7 +6,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/SAP/astonish/pkg/store"
 	adkagent "google.golang.org/adk/agent"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
@@ -963,84 +962,6 @@ type mockToolset struct {
 
 func (m *mockToolset) Name() string                                          { return m.name }
 func (m *mockToolset) Tools(_ adkagent.ReadonlyContext) ([]tool.Tool, error) { return nil, nil }
-
-func TestIsToolNotFoundError(t *testing.T) {
-	tests := []struct {
-		name     string
-		err      error
-		toolName string
-		want     bool
-	}{
-		{"nil", nil, "run_drill", false},
-		{"adk15 format", fmt.Errorf("tool 'run_drill' not found.\nAvailable tools: read_file"), "run_drill", true},
-		{"adk15 wrong name", fmt.Errorf("tool 'run_drill' not found."), "other", false},
-		{"legacy unknown tool", fmt.Errorf("unknown tool: \"run_drill\""), "run_drill", true},
-		{"unrelated", fmt.Errorf("connection refused"), "run_drill", false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := isToolNotFoundError(tt.err, tt.toolName); got != tt.want {
-				t.Errorf("isToolNotFoundError(%v, %q) = %v, want %v", tt.err, tt.toolName, got, tt.want)
-			}
-		})
-	}
-}
-
-func syncTestToolIndex(t *testing.T, groups ...*ToolGroup) *ToolIndex {
-	t.Helper()
-	idx := newTestToolIndex(t, testEmbeddingFunc())
-	if err := idx.SyncTools(context.Background(), nil, groups); err != nil {
-		t.Fatalf("SyncTools: %v", err)
-	}
-	return idx
-}
-
-func TestCanAutoInjectTool(t *testing.T) {
-	idx := syncTestToolIndex(t, &ToolGroup{
-		Name:  "drill",
-		Tools: mockTools("run_drill"),
-	}, &ToolGroup{
-		Name:  "mcp:custom-server",
-		Tools: mockTools("custom_mcp_tool"),
-	})
-
-	t.Run("known tool", func(t *testing.T) {
-		if !canAutoInjectTool(context.Background(), idx, "run_drill") {
-			t.Fatal("expected run_drill to be injectable")
-		}
-	})
-
-	t.Run("unknown tool", func(t *testing.T) {
-		if canAutoInjectTool(context.Background(), idx, "no_such_tool") {
-			t.Fatal("expected unknown tool to be rejected")
-		}
-	})
-
-	t.Run("disabled tool", func(t *testing.T) {
-		ctx := store.WithDisabledTools(context.Background(), []string{"run_drill"})
-		if canAutoInjectTool(ctx, idx, "run_drill") {
-			t.Fatal("expected disabled tool to be rejected")
-		}
-	})
-
-	t.Run("mcp inaccessible", func(t *testing.T) {
-		// Empty MCPServerStores in context → non-standard MCP tools are inaccessible.
-		ctx := store.WithMCPServerStores(context.Background(), &store.MCPServerStores{})
-		if canAutoInjectTool(ctx, idx, "custom_mcp_tool") {
-			t.Fatal("expected inaccessible MCP tool to be rejected")
-		}
-	})
-
-	t.Run("mcp app-style alias", func(t *testing.T) {
-		// Visual-app form mcp:server/tool must resolve to the bare tool name.
-		if !canAutoInjectTool(context.Background(), idx, "mcp:custom-server/custom_mcp_tool") {
-			t.Fatal("expected mcp:server/tool alias to be injectable")
-		}
-		if got := resolveIndexedToolName(idx, "mcp:custom-server/custom_mcp_tool"); got != "custom_mcp_tool" {
-			t.Fatalf("resolveIndexedToolName = %q, want custom_mcp_tool", got)
-		}
-	})
-}
 
 func TestParseMCPToolRef(t *testing.T) {
 	tests := []struct {

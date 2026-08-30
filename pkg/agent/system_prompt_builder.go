@@ -94,7 +94,7 @@ type PromptOverrides struct {
 	SchedulerHints  string      // Scheduler-specific output constraints
 	SessionContext  string      // Per-turn session context (fleet wizard, etc.)
 	SkillIndex      string      // Per-request merged skill index (platform + org + team)
-	AdditionalTools []tool.Tool // Per-request main-thread tools and declarations
+	AdditionalTools []tool.Tool // Per-request deferred tools resolved through execute_tool
 
 	// PinnedToolGroups lists tool groups required by wizard sessions. Deferred
 	// members remain available through the fixed progressive tool bridge.

@@ -146,58 +146,6 @@ func TestGetProviderType_KnownProviderTypes(t *testing.T) {
 	}
 }
 
-func TestCacheStableAgentPathEnabled(t *testing.T) {
-	on, off := true, false
-	cfg := &AppConfig{
-		Providers: map[string]ProviderConfig{
-			"local": {"type": "openai_compat", "base_url": "http://localhost:8080/v1"},
-			"cloud": {"type": "openai"},
-		},
-		Chat: ChatConfig{CacheStableAgentPath: CacheStableAgentConfig{
-			Enabled:   &off,
-			Providers: map[string]bool{"cloud": true},
-			Models:    map[string]bool{"forced-model": false},
-			Sessions:  map[string]bool{"forced-session": true},
-		}},
-	}
-	if cfg.CacheStableAgentPathEnabled("local", "Qwen3-Coder", "") {
-		t.Fatal("explicit global false must override rollout default")
-	}
-	if !cfg.CacheStableAgentPathEnabled("cloud", "gpt", "") {
-		t.Fatal("provider override must beat global")
-	}
-	if cfg.CacheStableAgentPathEnabled("cloud", "forced-model", "") {
-		t.Fatal("model override must beat provider")
-	}
-	if !cfg.CacheStableAgentPathEnabled("cloud", "forced-model", "forced-session") {
-		t.Fatal("session override must beat model")
-	}
-
-	cfg.Chat.CacheStableAgentPath = CacheStableAgentConfig{}
-	if !cfg.CacheStableAgentPathEnabled("local", "Qwen2.5-Coder", "") {
-		t.Fatal("local OpenAI-compatible Qwen should default on")
-	}
-	if cfg.CacheStableAgentPathEnabled("cloud", "Qwen2.5-Coder", "") {
-		t.Fatal("cloud Qwen should default off")
-	}
-	for _, endpoint := range []string{"https://localhost.example.com/v1", "https://example.com/v1?next=localhost", "not-a-url-localhost"} {
-		cfg.Providers["local"]["base_url"] = endpoint
-		if cfg.CacheStableAgentPathEnabled("local", "Qwen2.5-Coder", "") {
-			t.Fatalf("non-loopback endpoint %q should default off", endpoint)
-		}
-	}
-	for _, endpoint := range []string{"http://127.0.0.1:8080/v1", "http://[::1]:8080/v1", "http://localhost.:8080/v1", "unix:///tmp/llm.sock"} {
-		cfg.Providers["local"]["base_url"] = endpoint
-		if !cfg.CacheStableAgentPathEnabled("local", "Qwen2.5-Coder", "") {
-			t.Fatalf("local endpoint %q should default on", endpoint)
-		}
-	}
-	cfg.Chat.CacheStableAgentPath.Enabled = &on
-	if !cfg.CacheStableAgentPathEnabled("cloud", "gpt", "") {
-		t.Fatal("explicit global true should enable path")
-	}
-}
-
 func TestGetDaemonMode(t *testing.T) {
 	tests := []struct {
 		name     string

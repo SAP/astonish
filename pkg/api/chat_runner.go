@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/SAP/astonish/pkg/agent"
-	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/credentials"
 	"github.com/SAP/astonish/pkg/docs/slides"
 	"github.com/SAP/astonish/pkg/sandbox/netpolicy"
@@ -164,10 +163,6 @@ func injectRequestDocsStores(runner *ChatRunner, r *http.Request) *store.Service
 // Must be called before Run().
 func (cr *ChatRunner) InjectLLM(llm model.LLM) {
 	cr.ctx = agent.WithLLM(cr.ctx, llm)
-}
-
-func (cr *ChatRunner) InjectLLMSelection(providerName, modelName string, cfg *config.AppConfig) {
-	cr.ctx = agent.WithLLMSelection(cr.ctx, providerName, modelName, cfg)
 }
 
 // InjectCredentialStore adds a tenant-scoped credential store to the runner's
@@ -384,7 +379,7 @@ func (cr *ChatRunner) InjectA2AAgentStores(platform, org, team store.A2AAgentSto
 }
 
 // InjectRequestMCPGroups attaches per-request MCP tool groups so search_tools,
-// dynamic tool injection, and resolveTools see this team's MCP catalog even
+// describe_tools, execute_tool, and delegation see this team's MCP catalog even
 // when the singleton chat agent was pre-warmed without them.
 func (cr *ChatRunner) InjectRequestMCPGroups(groups map[string]*agent.ToolGroup) {
 	if len(groups) == 0 {
@@ -394,14 +389,12 @@ func (cr *ChatRunner) InjectRequestMCPGroups(groups map[string]*agent.ToolGroup)
 }
 
 // InjectA2AToolsPrompt appends A2A tool names to the session context in
-// PromptOverrides so the LLM knows these tools exist and can call them directly.
-// It also pins the "a2a" tool group so DynamicToolInjectionCallback injects
-// the tools on the very first LLM call (no bounce).
+// PromptOverrides so the LLM can inspect and invoke them through the fixed bridge.
 func (cr *ChatRunner) InjectA2AToolsPrompt(toolNames []string) {
 	if len(toolNames) == 0 {
 		return
 	}
-	hint := "\n\n## A2A Agents (available directly)\n\nThe following remote A2A agent tools are configured and callable by their bare name:\n"
+	hint := "\n\n## A2A Agents (deferred tools)\n\nThe following remote A2A agent tools are configured. Inspect them with `describe_tools`, then invoke them with `execute_tool` using the returned reference:\n"
 	for _, name := range toolNames {
 		hint += "- `" + name + "`\n"
 	}

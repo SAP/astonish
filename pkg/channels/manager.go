@@ -685,7 +685,6 @@ func (m *ChannelManager) handleInbound(ctx context.Context, msg InboundMessage) 
 					// Fall through — ChatAgent.Run will use its default c.LLM
 				} else {
 					ctx = agent.WithLLM(ctx, llm)
-					ctx = agent.WithLLMSelection(ctx, appCfg.General.DefaultProvider, appCfg.General.DefaultModel, appCfg)
 					m.logger.Printf("[channels] LLM override injected into context for provider=%q model=%q",
 						appCfg.General.DefaultProvider, appCfg.General.DefaultModel)
 				}

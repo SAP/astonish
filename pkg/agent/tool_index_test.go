@@ -10,6 +10,21 @@ import (
 
 // newTestToolIndex creates a ToolIndex backed by an in-memory vector store.
 // This is the standard way to create a ToolIndex in tests.
+func TestLexicalToolIndexSearchesWithoutVectorStore(t *testing.T) {
+	idx := NewLexicalToolIndex()
+	idx.PrimeTools(context.Background(), nil, []*ToolGroup{{Name: "web", Tools: mockTools("web_fetch")}})
+	matches, err := idx.SearchHybrid(context.Background(), "web fetch", 5, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) == 0 || matches[0].ToolName != "web_fetch" {
+		t.Fatalf("lexical matches = %#v, want web_fetch", matches)
+	}
+	if idx.Count() != 1 {
+		t.Fatalf("Count() = %d, want 1", idx.Count())
+	}
+}
+
 func newTestToolIndex(t *testing.T, ef EmbedFunc) *ToolIndex {
 	t.Helper()
 	vs, err := NewInMemoryToolVectorStore(ef)

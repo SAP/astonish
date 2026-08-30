@@ -7,15 +7,6 @@ import (
 )
 
 type llmOverrideKey struct{}
-type llmSelectionKey struct{}
-
-type LLMSelection struct {
-	Provider string
-	Model    string
-	Config   interface {
-		CacheStableAgentPathEnabled(providerName, modelName, sessionID string) bool
-	}
-}
 
 // WithLLM attaches an LLM override to the context. When present, ChatAgent.Run
 // will use this LLM instead of the agent's default c.LLM field. This enables
@@ -30,18 +21,4 @@ func WithLLM(ctx context.Context, llm model.LLM) context.Context {
 func LLMFromContext(ctx context.Context) model.LLM {
 	llm, _ := ctx.Value(llmOverrideKey{}).(model.LLM)
 	return llm
-}
-
-func WithLLMSelection(ctx context.Context, providerName, modelName string, cfg interface {
-	CacheStableAgentPathEnabled(providerName, modelName, sessionID string) bool
-}) context.Context {
-	return context.WithValue(ctx, llmSelectionKey{}, LLMSelection{Provider: providerName, Model: modelName, Config: cfg})
-}
-
-func CacheStableAgentPathFromContext(ctx context.Context, sessionID string, fallback bool) bool {
-	selection, ok := ctx.Value(llmSelectionKey{}).(LLMSelection)
-	if !ok || selection.Config == nil {
-		return fallback
-	}
-	return selection.Config.CacheStableAgentPathEnabled(selection.Provider, selection.Model, sessionID)
 }

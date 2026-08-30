@@ -85,21 +85,6 @@ func TestStableSystemPromptBuildsAndPersistsOnce(t *testing.T) {
 	}
 }
 
-func TestStableAgentPathPersistsSelection(t *testing.T) {
-	state := &testPromptState{values: map[string]any{}}
-	selected, event := stableAgentPath(state, true)
-	if !selected || event == nil {
-		t.Fatalf("first selection = %v, event=%v", selected, event)
-	}
-	for key, value := range event.Actions.StateDelta {
-		state.values[key] = value
-	}
-	selected, event = stableAgentPath(state, false)
-	if !selected || event != nil {
-		t.Fatalf("persisted selection = %v, event=%v", selected, event)
-	}
-}
-
 type testPromptState struct {
 	values map[string]any
 }

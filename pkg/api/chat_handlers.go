@@ -1431,7 +1431,6 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 					"error", llmErr)
 			} else {
 				runner.InjectLLM(resolvedLLM)
-				runner.InjectLLMSelection(appCfg.General.DefaultProvider, appCfg.General.DefaultModel, appCfg)
 				slog.Debug("per-request LLM injected",
 					"provider", appCfg.General.DefaultProvider,
 					"model", appCfg.General.DefaultModel)

@@ -11,6 +11,15 @@ import (
 	"google.golang.org/adk/tool/functiontool"
 )
 
+func syncTestToolIndex(t *testing.T, groups ...*ToolGroup) *ToolIndex {
+	t.Helper()
+	idx := newTestToolIndex(t, testEmbeddingFunc())
+	if err := idx.SyncTools(context.Background(), nil, groups); err != nil {
+		t.Fatalf("SyncTools: %v", err)
+	}
+	return idx
+}
+
 func TestProgressiveToolBridge_RequestScopedMCPAndFirstPartyPrecedence(t *testing.T) {
 	firstParty, err := functiontool.New(functiontool.Config{Name: "shared", Description: "first party"}, func(_ tool.Context, _ map[string]any) (map[string]any, error) {
 		return map[string]any{"source": "first-party"}, nil

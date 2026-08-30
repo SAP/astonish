@@ -11,9 +11,8 @@ import (
 )
 
 const (
-	turnContextStateKey     = "_astonish_turn_context"
-	systemPromptStateKey    = "_astonish_system_prompt"
-	cacheStablePathStateKey = "_astonish_cache_stable_agent_path"
+	turnContextStateKey  = "_astonish_turn_context"
+	systemPromptStateKey = "_astonish_system_prompt"
 )
 
 // buildTurnContextContent constructs the exact per-turn context persisted beside
@@ -81,22 +80,6 @@ func stableSystemPrompt(state session.State, build func() string) (string, *sess
 	}
 	prompt := build()
 	return prompt, newSystemPromptStateEvent(prompt)
-}
-
-func stableAgentPath(state session.State, selected bool) (bool, *session.Event) {
-	if saved, err := state.Get(cacheStablePathStateKey); err == nil {
-		if enabled, ok := saved.(bool); ok {
-			return enabled, nil
-		}
-	}
-	return selected, &session.Event{
-		ID:        fmt.Sprintf("agent-path-%d", time.Now().UnixNano()),
-		Author:    "system",
-		Timestamp: time.Now(),
-		Actions: session.EventActions{StateDelta: map[string]any{
-			cacheStablePathStateKey: selected,
-		}},
-	}
 }
 
 func newSystemPromptStateEvent(prompt string) *session.Event {

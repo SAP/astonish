@@ -138,65 +138,10 @@ type ChatFactoryResult struct {
 	SandboxPool sandbox.ToolNodePool
 }
 
-// mainThreadToolAllowlist returns the set of tool names the top-level coding
-// agent gets directly (as opposed to only through sub-agents / lazy ToolIndex
-// surfacing). Everything else stays in named groups reachable via delegate_tasks
-// or search_tools.
-//
-// The tree-sitter structural navigation tools (repo_map, code_definition,
-// code_references) are main-thread on purpose: they let the agent locate a
-// symbol's definition/references in ONE call instead of falling back to broad
-// grep_search plus repeated full-file read_file. Session analysis showed the
-// latter pattern (e.g. re-reading the same large files 10-12x) inflates the
-// prompt and makes each inference progressively slower. See
-// docs/architecture/code-intelligence.md.
+// mainThreadToolAllowlist is intentionally empty. The only model-visible tools
+// are the fixed progressive bridge added after the catalog is built.
 func mainThreadToolAllowlist() map[string]bool {
-	return map[string]bool{
-		"read_file":     true,
-		"write_file":    true,
-		"edit_file":     true,
-		"shell_command": true,
-		"grep_search":   true,
-		"find_files":    true,
-		// Interactive-terminal drive loop: shell_command runs in a PTY and can
-		// return waiting_for_input=true with a session_id; the agent responds via
-		// process_write (and inspects/ends the session with process_read/kill/list).
-		// These must be main-thread so the top-level coding agent can handle an
-		// interactive program directly — matching chat mode — instead of needing a
-		// search_tools detour to discover them.
-		"process_read":    true,
-		"process_write":   true,
-		"process_kill":    true,
-		"process_list":    true,
-		"repo_map":        true,
-		"code_definition": true,
-		"code_references": true,
-		"memory_save":     true,
-		"memory_search":   true,
-		"memory_delete":   true,
-		"delegate_tasks":  true,
-		"announce_plan":   true,
-		// update_plan drives main-thread plan progress (mark a phase running/
-		// complete/failed as the top-level agent works). It is the direct
-		// companion to announce_plan and MUST be main-thread — otherwise the
-		// agent is told to call it but it is relegated to the deferred "core"
-		// group (reachable only via search_tools), and calling it fails with
-		// "tool 'update_plan' not found".
-		"update_plan": true,
-		// Graph-Optimized Plan mode phase transitions — MUST be main-thread:
-		// they advance the per-session GraphPlanState owned by the main ChatAgent.
-		// Sub-agents have no ActiveGraphPlan; calling these from a sub-agent would fail silently.
-		"gplan_reads":        true,
-		"gplan_gaps":         true,
-		"gplan_finalize":     true,
-		"resolve_credential": true,
-		"skill_lookup":       true,
-		"create_skill":       true,
-		// Platform web search must be main-thread always-on. If it only lives in
-		// the "web" group, ToolIndex may never inject it and the agent claims
-		// "no web search tools" even when General selects Perplexity.
-		"perplexity_web_search": true,
-	}
+	return map[string]bool{}
 }
 
 // optionalCredentialResolver preserves a nil interface when the optional
@@ -1270,13 +1215,7 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		}
 	}
 
-	// MCP servers — each is its own group
-	//
-	// codeModeMainThreadToolsets collects the sanitized MCP toolsets so Code
-	// mode can inject them directly onto the main thread (see section 6). In
-	// platform mode this slice stays unused: MCP tools remain reachable only
-	// through search_tools / delegation to keep the prompt small.
-	var codeModeMainThreadToolsets []tool.Toolset
+	// MCP servers are catalog groups resolved through the fixed bridge.
 	for _, lt := range lazyToolsets {
 		sanitized := agent.NewSanitizedToolset(lt, cfg.DebugMode)
 		groupName := "mcp:" + lt.Name()
@@ -1286,7 +1225,6 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			Description: serverDesc,
 			Toolsets:    []tool.Toolset{sanitized},
 		}
-		codeModeMainThreadToolsets = append(codeModeMainThreadToolsets, sanitized)
 	}
 
 	// --- 4c. A2A agent tools (discoverable via ToolIndex, not on main thread) ---
@@ -1346,12 +1284,11 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 
 	// Code mode: wrap the base builder with CodeSystemPromptBuilder which owns
 	// all code-specific sections (project guidance, code-nav rules, PLAN.md,
-	// authorization gates, first-class MCP listing). The base struct is kept
+	// and authorization gates). The base struct is kept
 	// so all subsequent per-request field mutations (sandbox, web tools, etc.)
 	// continue to work on the same pointer held by ChatAgent.SystemPrompt.
 	if cfg.CodeMode {
 		codeBuilder := agent.NewCodeSystemPromptBuilder(promptBuilder)
-		codeBuilder.MCPFirstClass = true
 		codeBuilder.PlanFilePersistence = true
 		if !cfg.AutoApprove {
 			codeBuilder.EnforceAuthorization = true
@@ -1577,6 +1514,24 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		}
 	}
 
+	// Flows are deferred catalog tools in Studio; Code mode has no flow registry.
+	if !cfg.CodeMode {
+		var flowTools []tool.Tool
+		if searchFlowsTool, sfErr := tools.NewSearchFlowsTool(); sfErr == nil {
+			flowTools = append(flowTools, searchFlowsTool)
+		} else if cfg.DebugMode {
+			slog.Warn("failed to create search_flows tool", "error", sfErr)
+		}
+		if runFlowTool, rfErr := tools.NewRunFlowTool(); rfErr == nil {
+			flowTools = append(flowTools, runFlowTool)
+		} else if cfg.DebugMode {
+			slog.Warn("failed to create run_flow tool", "error", rfErr)
+		}
+		if len(flowTools) > 0 {
+			toolGroups["flows"] = &agent.ToolGroup{Name: "flows", Description: "Search and run reusable flows", Tools: flowTools}
+		}
+	}
+
 	// Create the dedicated tool index for retrieval-based tool discovery.
 	// One document per tool (name + description) enables accurate semantic
 	// search without the chunking problems of the general memory store.
@@ -1592,50 +1547,31 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		toolEmbedFunc = cfg.PlatformEmbedFunc
 	}
 
+	sortedCatalogGroups := agent.SortedGroups(toolGroups)
 	if vectorStore != nil && toolEmbedFunc != nil {
 		var tiErr error
 		toolIndex, tiErr = agent.NewToolIndex(vectorStore, toolEmbedFunc)
-		if tiErr != nil {
-			if cfg.DebugMode {
-				slog.Warn("failed to create tool index", "error", tiErr)
-			}
-		} else {
-			sortedGroups := agent.SortedGroups(toolGroups)
-			// Publish the complete lexical catalog immediately. Semantic vectors are
-			// refreshed in the background: a slow embedding provider must never make
-			// a Studio session wait before catalog search works.
-			toolIndex.PrimeTools(context.Background(), mainThreadTools, sortedGroups)
-			go func(idx *agent.ToolIndex, main []tool.Tool, groups []*agent.ToolGroup) {
-				if syncErr := idx.SyncTools(context.Background(), main, groups); syncErr != nil {
-					slog.Warn("background tool index refresh failed; retaining lexical catalog", "component", "tool-index", "error", syncErr)
-					return
-				}
-				slog.Debug("background tool index refresh complete", "component", "tool-index", "tools_indexed", idx.Count())
-			}(toolIndex, mainThreadTools, sortedGroups)
+		if tiErr != nil && cfg.DebugMode {
+			slog.Warn("failed to create semantic tool index; using lexical catalog", "error", tiErr)
 		}
+	}
+	if toolIndex == nil {
+		toolIndex = agent.NewLexicalToolIndex()
+	}
+	// Publish the complete lexical catalog immediately. Semantic vectors, when
+	// configured, refresh in the background without delaying chat startup.
+	toolIndex.PrimeTools(context.Background(), mainThreadTools, sortedCatalogGroups)
+	if vectorStore != nil && toolEmbedFunc != nil {
+		go func(idx *agent.ToolIndex, main []tool.Tool, groups []*agent.ToolGroup) {
+			if syncErr := idx.SyncTools(context.Background(), main, groups); syncErr != nil {
+				slog.Warn("background tool index refresh failed; retaining lexical catalog", "component", "tool-index", "error", syncErr)
+				return
+			}
+			slog.Debug("background tool index refresh complete", "component", "tool-index", "tools_indexed", idx.Count())
+		}(toolIndex, mainThreadTools, sortedCatalogGroups)
 	}
 
 	logChatFactoryPhase(phaseStarted, "tool-index-sync")
-
-	// --- 5d. Create flow tools (search_flows, run_flow) ---
-	// Flow discovery and execution via dedicated tools rather than
-	// knowledge injection.
-	// Flows are a platform feature — they require a flow registry and
-	// a running daemon. Neither is available in Astonish Code mode, so
-	// both tools are suppressed there (same pattern as credential,
-	// scheduler, distill, and memory tools above).
-	if !cfg.CodeMode {
-		if searchFlowsTool, sfErr := tools.NewSearchFlowsTool(); sfErr == nil {
-			mainThreadTools = append(mainThreadTools, searchFlowsTool)
-		} else if cfg.DebugMode {
-			slog.Warn("failed to create search_flows tool", "error", sfErr)
-		}
-		if runFlowTool, rfErr := tools.NewRunFlowTool(); rfErr == nil {
-			mainThreadTools = append(mainThreadTools, runFlowTool)
-		} else if cfg.DebugMode {
-			slog.Warn("failed to create run_flow tool", "error", rfErr)
-		}
-	}
 
 	// Main-thread search is catalog-only on every execution path. Deferred tools
 	// are inspected and invoked through the fixed bridge; search results must
@@ -1656,35 +1592,12 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 	}
 
 	// --- 6. Create ChatAgent ---
-	// Main thread gets essential tools plus the fixed progressive bridge.
-	// Deferred tools remain catalog entries and execute through execute_tool.
-	//
-	// Code mode elevates MCP servers to first-class citizens: their sanitized
-	// toolsets ride along on the main thread as llmagent Toolsets, so the
-	// coding agent can call any configured MCP tool immediately without a
-	// search_tools round-trip. Platform mode intentionally leaves this nil —
-	// there MCP tools stay behind search_tools to bound prompt size.
-	var mainThreadToolsets []tool.Toolset
-	if cfg.CodeMode && len(codeModeMainThreadToolsets) > 0 {
-		mainThreadToolsets = codeModeMainThreadToolsets
-		if cfg.DebugMode {
-			slog.Debug("code mode: injecting MCP toolsets on main thread",
-				"component", "chat-factory", "toolsets", len(mainThreadToolsets))
-		}
-	}
+	// The model sees only the fixed progressive bridge. All domain tools,
+	// including MCP tools in Code mode, remain catalog entries.
 	chatAgent := agent.NewChatAgent(
-		llm, mainThreadTools, mainThreadToolsets, sessionService,
+		llm, mainThreadTools, nil, sessionService,
 		promptBuilder, cfg.DebugMode, cfg.AutoApprove,
 	)
-	chatAgent.CacheStableAgentPath = func(sessionID string) bool {
-		providerName, modelName := cfg.ProviderName, cfg.ModelName
-		if cfg.CodeMode && cfg.AppConfig != nil {
-			providerName = cfg.AppConfig.General.DefaultProvider
-			modelName = cfg.AppConfig.General.DefaultModel
-		}
-		return cfg.AppConfig.CacheStableAgentPathEnabled(providerName, modelName, sessionID)
-	}
-
 	// Code-mode authorization: gate not-whitelisted tools and out-of-project
 	// filesystem access behind per-tool / per-folder user authorization. Active
 	// only in code mode and only when the user hasn't opted into --auto-approve
@@ -1927,7 +1840,7 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		// specific to ChatAgent's stable model-visible declarations.
 		if toolIndex != nil {
 			idx := toolIndex
-			subAgentMgr.SearchToolsFactory = func(_ func([]string)) (tool.Tool, error) {
+			subAgentMgr.SearchToolsFactory = func() (tool.Tool, error) {
 				return tools.NewSearchToolsTool(idx)
 			}
 		}

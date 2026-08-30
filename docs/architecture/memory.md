@@ -79,8 +79,7 @@ ChatAgent.Run():
     v
   4. Deduplicate results
   5. Format as "Relevant Knowledge" context
-  6. In the cache-stable path, persist the exact model-facing context as a
-     marked user-role event; in the legacy path, add it to the rebuilt prompt
+  6. Persist the exact model-facing context as a marked user-role event
     |
     v
   7. Emit a content-less `_knowledge_injection` session diagnostic event

@@ -40,7 +40,7 @@ Use tabs.
 - For multi-step tasks, execute sequentially, report progress.
 - When the user asks you to do something, briefly acknowledge before starting work.
 - **Skill-first rule:** When a task matches any Available Skill, you MUST call `skill_lookup` to load it — no exceptions. Do this alongside your first batch of tool calls. When you call `skill_lookup(name)`, the response includes a `files_manifest` of any additional files (scripts/, references/, etc.). Use `skill_lookup(name, file: "...")` to load specific files. The skill provides canonical commands and context that may be newer than stored memory. Having prior knowledge of a working method is NOT a reason to skip loading the skill.
-- MCP tools are loaded directly on the main thread — call them by their bare name (e.g. `send_email`) without a `search_tools` detour.
+- MCP tools are deferred catalog tools. Use `search_tools`, `describe_tools`, and `execute_tool`; do not call them as direct functions.
 
 ## Knowledge Context
 
@@ -126,13 +126,7 @@ Step-by-step guidance for complex capabilities (browser automation, code intelli
 
 Examples (parallel work only): `tools: ["browser"]`, `tools: ["core", "web"]`
 
-**MCP tools (main thread):** All configured MCP server tools are available to you directly — call the **bare** tool name (e.g. `send_email`) whenever you need one. You do NOT need `search_tools` to reach them; they are always loaded. Do **not** invent `mcp:server/tool` (app-only form). Do **not** delegate a single MCP call.
-
-## MCP Tools (available directly)
-
-These MCP server tools are loaded on the main thread and callable right now by their bare name:
-
-- **context7**: get_library_docs, resolve_library_id
+**Deferred MCP tools:** Use `search_tools`, inspect matches with `describe_tools`, then invoke them through `execute_tool`. Do **not** call a deferred tool as a direct function.
 
 ## Available Skills
 

@@ -71,9 +71,7 @@ type ChatAgent struct {
 	// Task delegation
 	SubAgentManager *SubAgentManager // Sub-agent manager for trace attachment (nil = no delegation)
 	// Tool discovery
-	ToolIndex            *ToolIndex                  // Semantic catalog for deferred tool discovery (nil = disabled)
-	CacheStableAgentPath func(sessionID string) bool // Selects fixed bridge and frozen context per session.
-	legacyToolStates     sync.Map                    // map[sessionID]*legacyToolDiscoveryState
+	ToolIndex *ToolIndex // Semantic catalog for deferred tool discovery (nil = disabled)
 
 	// Self-management callbacks
 	SelfMDRefresher func() // Called after config changes to regenerate SELF.md

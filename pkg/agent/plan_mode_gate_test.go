@@ -165,3 +165,32 @@ func TestPlanModeSystemContext_HardConstraintLanguage(t *testing.T) {
 		}
 	}
 }
+
+func TestPlanModeSystemContext_RequiresDesignQuality(t *testing.T) {
+	for _, want := range []string{
+		"USER FLOW",
+		"STATE MACHINES",
+		"DESIGN QUALITY SELF-CHECK",
+		"TYPED actions",
+		"ERROR/EMPTY STATES",
+	} {
+		if !strings.Contains(PlanModeSystemContext, want) {
+			t.Errorf("PlanModeSystemContext should mention %q", want)
+		}
+	}
+}
+
+func TestGraphPlanModeSystemContext_RequiresDesignQuality(t *testing.T) {
+	for _, want := range []string{
+		"USER FLOW",
+		"STATE MACHINES",
+		"DESIGN QUALITY SELF-CHECK",
+		"TYPED actions",
+		"ERROR/EMPTY STATES",
+		"Code mode",
+	} {
+		if !strings.Contains(GraphPlanModeSystemContext, want) {
+			t.Errorf("GraphPlanModeSystemContext should mention %q", want)
+		}
+	}
+}

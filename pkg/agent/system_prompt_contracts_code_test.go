@@ -339,13 +339,13 @@ func TestCodeSystemPromptContracts_NoMemoryToolsInCodeMode(t *testing.T) {
 	assertNotContains(t, prompt, "memory usage", "\"memory usage\" capability hint must NOT appear in code-mode prompt")
 }
 
-// ─── Plan Mode Completeness Self-Check Contract Tests ────────────────────────
+// ─── Plan Mode Design Quality Self-Check Contract Tests ────────────────────────
 
 func TestGraphPlanModeSystemContext_CompletenessCheck(t *testing.T) {
 	ctx := GraphPlanModeSystemContext
 
-	if !strings.Contains(ctx, "COMPLETENESS SELF-CHECK") {
-		t.Errorf("GraphPlanModeSystemContext must contain 'COMPLETENESS SELF-CHECK'")
+	if !strings.Contains(ctx, "DESIGN QUALITY SELF-CHECK") {
+		t.Errorf("GraphPlanModeSystemContext must contain 'DESIGN QUALITY SELF-CHECK'")
 	}
 	if !strings.Contains(ctx, "frontend") {
 		t.Errorf("GraphPlanModeSystemContext must contain 'frontend' (frontend/backend coverage check)")
@@ -370,8 +370,8 @@ func TestGraphPlanModeSystemContext_CompletenessCheck(t *testing.T) {
 func TestPlanModeSystemContext_CompletenessCheck(t *testing.T) {
 	ctx := PlanModeSystemContext
 
-	if !strings.Contains(ctx, "COMPLETENESS SELF-CHECK") {
-		t.Errorf("PlanModeSystemContext must contain 'COMPLETENESS SELF-CHECK'")
+	if !strings.Contains(ctx, "DESIGN QUALITY SELF-CHECK") {
+		t.Errorf("PlanModeSystemContext must contain 'DESIGN QUALITY SELF-CHECK'")
 	}
 	if !strings.Contains(ctx, "frontend") {
 		t.Errorf("PlanModeSystemContext must contain 'frontend' (frontend/backend coverage check)")
@@ -379,4 +379,23 @@ func TestPlanModeSystemContext_CompletenessCheck(t *testing.T) {
 	if !strings.Contains(ctx, "terminal TUI") {
 		t.Errorf("PlanModeSystemContext must contain 'terminal TUI' (TUI parity check)")
 	}
+}
+
+func TestCodeSystemPrompt_CodeModeIdentity(t *testing.T) {
+	cb := maximalCodeBuilder()
+	prompt := cb.Build()
+
+	assertContains(t, prompt, "Code mode", "code mode identity present in code prompt")
+	assertContains(t, prompt, "local-first terminal", "local-first terminal identity present in code prompt")
+	assertContains(t, prompt, "NOT in the Studio web UI", "Studio web UI negative identity present in code prompt")
+}
+
+func TestCodeSystemPrompt_PlanFieldStrength(t *testing.T) {
+	base := &SystemPromptBuilder{}
+	cb := NewCodeSystemPromptBuilder(base)
+	cb.PlanFilePersistence = true
+	prompt := cb.Build()
+
+	assertContains(t, prompt, "REQUIRED (plans are rejected without it)", "REQUIRED rejection language for context/summary fields")
+	assertContains(t, prompt, "REQUIRED scope guard", "REQUIRED scope guard language for what_not_to_do field")
 }

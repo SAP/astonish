@@ -66,8 +66,9 @@ func (b *CodeSystemPromptBuilder) build(base *SystemPromptBuilder) string {
 
 	// ── Tier 1: Static Core ──────────────────────────────────────
 
-	// 1. Identity
-	sb.WriteString("You are Astonish, an AI assistant with access to tools.\n")
+	// 1. Identity — code mode is explicit so the model distinguishes it from Studio/platform/chat
+	sb.WriteString("You are Astonish, running in **Code mode** — a local-first terminal development environment.\n")
+	sb.WriteString("You operate directly on the user's filesystem and local toolchain. You are NOT in the Studio web UI, not in a platform chat session, and not in a browser. \"Astonish Code\" and \"code mode\" both refer to this environment.\n")
 	sb.WriteString("You help users accomplish tasks by calling tools and reasoning through problems.\n\n")
 
 	// 1b. Channel-specific output constraints (set per-turn by channel manager)
@@ -165,10 +166,10 @@ func (b *CodeSystemPromptBuilder) build(base *SystemPromptBuilder) string {
 	if b.PlanFilePersistence {
 		sb.WriteString("\n**Execution plan (PLAN.md):** Implementation plans are recorded only in Plan mode via `announce_plan` and persisted to a session PLAN.md. In Normal mode you MUST NOT call `announce_plan` — the runtime will refuse it. When executing an approved plan, PLAN.md is inlined in the execution context; follow it phase by phase. Keep it current: for main-thread phases call `update_plan` (running → complete/failed); delegated phases update automatically. After a context summary, the inlined PLAN.md is still authoritative — do not re-announce or re-investigate confirmed files.\n")
 		sb.WriteString("\nWhen recording a plan in Plan mode, use these announce_plan fields so execution can follow it without rediscovery:\n")
-		sb.WriteString("- `context`: REQUIRED. A clear, human-readable explanation of WHAT the change accomplishes, WHY it is needed, the approach at a high level, and any key decisions or trade-offs. This is the first thing the user reads — write 3-6 sentences that make sense to someone who has NOT seen your investigation.\n")
-		sb.WriteString("- `what_not_to_do`: explicit scope guard — list APIs, files, behaviors, or invariants that must NOT change. Guards against accidental scope creep.\n")
-		sb.WriteString("- `verification`: end-to-end smoke test sequence for the entire plan after all phases complete.\n")
-		sb.WriteString("- `summary` per step: REQUIRED. A 1-2 sentence plain-English explanation of what each phase accomplishes from the user's perspective (e.g. 'Adds a priority field to tasks so users can sort by importance'). NOT implementation-level file/function names.\n")
+		sb.WriteString("- `context`: REQUIRED (plans are rejected without it). A design-document preamble: the problem being solved, the approach and why you chose it, the concrete user experience (step by step for UI changes), and what stays unchanged. Write 6-12 sentences that make sense to someone who has NOT seen your investigation.\n")
+		sb.WriteString("- `what_not_to_do`: REQUIRED scope guard — name the specific interfaces, files, behaviors, or invariants that must NOT change. Be concrete.\n")
+		sb.WriteString("- `verification`: end-to-end smoke test sequence for the entire plan after all phases complete, including manual verification steps for UI/UX changes.\n")
+		sb.WriteString("- `summary` per step: REQUIRED (plans are rejected without it). A 1-2 sentence explanation of what each phase accomplishes from the USER's perspective — describe the user-visible outcome, not which files change.\n")
 		sb.WriteString("- `parallel_group` per step: structure the plan in execution waves. Before calling announce_plan, identify which phases have no dependency on each other's output — assign them the same wave label (e.g. `wave-1`). The next set of phases that depend only on wave-1 completing gets `wave-2`, and so on. Serial phases (one's output is another's input) get no label. Most multi-file plans have at least one wave of independent work; a plan with every phase unlabeled is a signal the plan structure needs review.\n")
 	}
 	if b.EnforceAuthorization {

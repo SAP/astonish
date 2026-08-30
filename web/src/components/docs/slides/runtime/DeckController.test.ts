@@ -44,17 +44,27 @@ describe('DeckController', () => {
     expect(close).toHaveBeenCalledOnce()
   })
 
-  it('retries fullscreen on the first presenter interaction when automatic entry is blocked', async () => {
+  it('offers a user-activated fullscreen fallback when automatic entry is blocked', async () => {
     history.replaceState(null, '', '?presenter=1')
+    let fullscreenElement: Element | null = null
     const requestFullscreen = vi.fn()
       .mockRejectedValueOnce(new Error('user activation required'))
-      .mockResolvedValueOnce(undefined)
+      .mockImplementationOnce(async () => { fullscreenElement = document.documentElement })
     Object.defineProperty(document.documentElement, 'requestFullscreen', { configurable: true, value: requestFullscreen })
-    Object.defineProperty(document, 'fullscreenElement', { configurable: true, value: null })
+    Object.defineProperty(document, 'fullscreenElement', { configurable: true, get: () => fullscreenElement })
 
-    await mountDeck()
-    window.dispatchEvent(new PointerEvent('pointerdown'))
+    const deck = await mountDeck()
+    const start = await vi.waitFor(() => {
+      const button = document.querySelector<HTMLButtonElement>('button[aria-label="Start slideshow in fullscreen"]')
+      expect(button).not.toBeNull()
+      return button!
+    })
+
+    start.click()
     await vi.waitFor(() => expect(requestFullscreen).toHaveBeenCalledTimes(2))
+    expect(document.fullscreenElement).toBe(document.documentElement)
+    expect(document.body.contains(start)).toBe(false)
+    expect(deck.currentIndex).toBe(0)
   })
 
   it('scales the fixed canvas and advances ordered fragments before slides', async () => {

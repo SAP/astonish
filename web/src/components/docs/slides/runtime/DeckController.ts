@@ -12,6 +12,7 @@ export class DeckController {
   private presenter = new URLSearchParams(location.search).get('presenter') === '1'
   private enteredFullscreen = false
   private presenterClosed = false
+  private presenterStart?: HTMLButtonElement
 
   get currentIndex(): number {
     return this.index
@@ -30,7 +31,6 @@ export class DeckController {
     window.addEventListener('hashchange', this.onHashChange)
     if (this.presenter) {
       document.addEventListener('fullscreenchange', this.onFullscreenChange)
-      window.addEventListener('pointerdown', this.onPresenterInteraction, { once: true })
       window.addEventListener('keydown', this.onPresenterKeyDown)
     }
     this.applyState(false)
@@ -44,8 +44,8 @@ export class DeckController {
     this.deck.removeEventListener('touchend', this.onTouchEnd)
     window.removeEventListener('hashchange', this.onHashChange)
     document.removeEventListener('fullscreenchange', this.onFullscreenChange)
-    window.removeEventListener('pointerdown', this.onPresenterInteraction)
     window.removeEventListener('keydown', this.onPresenterKeyDown)
+    this.hidePresenterStart()
   }
 
   next(): void {
@@ -202,7 +202,9 @@ export class DeckController {
     event.clientX < window.innerWidth / 3 ? this.previous() : this.next()
   }
 
-  private readonly onPresenterInteraction = (): void => {
+  private readonly onPresenterStart = (event: MouseEvent): void => {
+    event.preventDefault()
+    event.stopPropagation()
     void this.enterFullscreen()
   }
 
@@ -212,25 +214,67 @@ export class DeckController {
       void this.exitPresenter()
       return
     }
-    void this.enterFullscreen()
+    if (event.target !== this.presenterStart) void this.enterFullscreen()
   }
 
   private readonly onFullscreenChange = (): void => {
     if (document.fullscreenElement) {
       this.enteredFullscreen = true
+      this.hidePresenterStart()
       return
     }
     if (this.enteredFullscreen) this.closePresenter()
   }
 
   private async enterFullscreen(): Promise<void> {
-    if (document.fullscreenElement || !document.documentElement.requestFullscreen) return
+    if (document.fullscreenElement) {
+      this.hidePresenterStart()
+      return
+    }
+    if (!document.documentElement.requestFullscreen) {
+      this.showPresenterStart()
+      return
+    }
     try {
       await document.documentElement.requestFullscreen()
       this.enteredFullscreen = true
+      this.hidePresenterStart()
     } catch {
-      // Browsers may require the first interaction in the presentation tab.
+      this.showPresenterStart()
     }
+  }
+
+  private showPresenterStart(): void {
+    if (this.presenterStart || this.presenterClosed) return
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.textContent = 'Start slideshow'
+    button.setAttribute('aria-label', 'Start slideshow in fullscreen')
+    Object.assign(button.style, {
+      position: 'fixed',
+      inset: '50% auto auto 50%',
+      zIndex: '2147483647',
+      transform: 'translate(-50%, -50%)',
+      padding: '16px 24px',
+      border: '2px solid currentColor',
+      borderRadius: '12px',
+      background: '#ffffff',
+      color: '#172033',
+      font: '600 20px/1.2 system-ui, sans-serif',
+      cursor: 'pointer',
+      boxShadow: '0 8px 30px rgb(0 0 0 / 25%)',
+    })
+    button.addEventListener('click', this.onPresenterStart)
+    document.body.append(button)
+    button.focus()
+    this.presenterStart = button
+  }
+
+  private hidePresenterStart(): void {
+    if (!this.presenterStart) return
+    this.presenterStart.removeEventListener('click', this.onPresenterStart)
+    this.presenterStart.remove()
+    this.presenterStart = undefined
   }
 
   private async exitPresenter(): Promise<void> {

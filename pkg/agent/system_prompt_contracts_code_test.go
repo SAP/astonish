@@ -186,7 +186,7 @@ func TestCodeSystemPromptContracts_AuthorizationGuidance(t *testing.T) {
 	assertNotContains(t, noAuth.Build(), "Tool & folder authorization", "auth guidance absent when EnforceAuthorization is false")
 }
 
-func TestCodeSystemPromptContracts_MCPUsesFixedBridge(t *testing.T) {
+func TestCodeSystemPromptContracts_MCPToolsAreDirect(t *testing.T) {
 	base := &SystemPromptBuilder{
 		Tools: mockTools("read_file", "delegate_tasks"),
 		Catalog: []*ToolGroup{
@@ -205,11 +205,10 @@ func TestCodeSystemPromptContracts_MCPUsesFixedBridge(t *testing.T) {
 	cb := NewCodeSystemPromptBuilder(base)
 	prompt := cb.Build()
 
-	assertContains(t, prompt, "**Deferred MCP tools:**", "fixed bridge guidance present")
-	assertContains(t, prompt, "`describe_tools`", "schema inspection guidance present")
-	assertContains(t, prompt, "`execute_tool`", "fixed execution bridge present")
-	assertNotContains(t, prompt, "## MCP Tools (available directly)", "no direct MCP declarations in code mode")
-	assertNotContains(t, prompt, "get_library_docs", "individual MCP tools are not baked into prompt")
+	assertContains(t, prompt, "**MCP tools:** Configured MCP tools are available directly", "direct MCP guidance present")
+	assertContains(t, prompt, "Call the specific MCP tool you need", "specific tool guidance present")
+	assertNotContains(t, prompt, "`execute_tool`", "generic execution bridge absent")
+	assertNotContains(t, prompt, "**Deferred MCP tools:**", "deferred MCP guidance absent")
 }
 
 func TestCodeSystemPromptContracts_Capabilities(t *testing.T) {

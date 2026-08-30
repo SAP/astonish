@@ -134,7 +134,7 @@ func (b *CodeSystemPromptBuilder) build(base *SystemPromptBuilder) string {
 	if base.SkillIndex != "" {
 		sb.WriteString("- **Skill-first rule:** When a task matches any Available Skill, you MUST call `skill_lookup` to load it — no exceptions. Do this alongside your first batch of tool calls. When you call `skill_lookup(name)`, the response includes a `files_manifest` of any additional files (scripts/, references/, etc.). Use `skill_lookup(name, file: \"...\")` to load specific files. The skill provides canonical commands and context that may be newer than stored memory. Having prior knowledge of a working method is NOT a reason to skip loading the skill.\n")
 	}
-	sb.WriteString("- MCP tools are deferred catalog tools. Use `search_tools`, `describe_tools`, and `execute_tool`; do not call them as direct functions.\n")
+	sb.WriteString("- MCP tools configured for Code mode are available as direct functions. Call the specific MCP tool you need; there is no generic execution wrapper.\n")
 
 	// 3b. Knowledge Context
 	sb.WriteString("\n## Knowledge Context\n\n")
@@ -294,7 +294,7 @@ func (b *CodeSystemPromptBuilder) build(base *SystemPromptBuilder) string {
 			sb.WriteString(fmt.Sprintf("- **%s** (%d tools) — %s\n", g.Name, toolCount, g.Description))
 		}
 		sb.WriteString("\nExamples (parallel work only): `tools: [\"browser\"]`, `tools: [\"core\", \"web\"]`\n")
-		sb.WriteString("\n**Deferred MCP tools:** Use `search_tools`, inspect matches with `describe_tools`, then invoke them through `execute_tool`. Do **not** call a deferred tool as a direct function.\n")
+		sb.WriteString("\n**MCP tools:** Configured MCP tools are available directly on the main thread. The MCP groups listed above are for delegated tasks.\n")
 	}
 
 	// 6c2. Skill index
@@ -331,8 +331,7 @@ func (b *CodeSystemPromptBuilder) build(base *SystemPromptBuilder) string {
 
 	if base.RelevantTools != "" {
 		sb.WriteString("\n## Relevant Tools For This Request\n\n")
-		sb.WriteString("These tools are available for this request — call them directly. ")
-		sb.WriteString("Use `search_tools` if you need additional tools not listed here.\n\n")
+		sb.WriteString("These tools are available for this request — call them directly.\n\n")
 		sb.WriteString(base.RelevantTools)
 	}
 

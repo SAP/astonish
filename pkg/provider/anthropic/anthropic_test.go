@@ -2,11 +2,67 @@ package anthropic
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"google.golang.org/adk/model"
 	"google.golang.org/genai"
 )
+
+func TestUsageMetadataMapsCacheTokens(t *testing.T) {
+	cacheWrite, cacheRead := 30, 70
+	usage := usageMetadata(Usage{
+		InputTokens:              100,
+		OutputTokens:             20,
+		CacheCreationInputTokens: &cacheWrite,
+		CacheReadInputTokens:     &cacheRead,
+	})
+	if usage == nil {
+		t.Fatal("UsageMetadata is nil")
+	}
+	if usage.PromptTokenCount != 200 || usage.CandidatesTokenCount != 20 || usage.TotalTokenCount != 220 {
+		t.Fatalf("token counts = (%d, %d, %d), want (200, 20, 220)", usage.PromptTokenCount, usage.CandidatesTokenCount, usage.TotalTokenCount)
+	}
+	if usage.CachedContentTokenCount != 70 {
+		t.Fatalf("CachedContentTokenCount = %d, want 70", usage.CachedContentTokenCount)
+	}
+}
+
+func TestUsageMetadataExplicitZeroCacheIsPresent(t *testing.T) {
+	zero := 0
+	if usage := usageMetadata(Usage{CacheReadInputTokens: &zero}); usage == nil {
+		t.Fatal("explicit zero cache usage should produce metadata")
+	}
+	if usage := usageMetadata(Usage{}); usage != nil {
+		t.Fatalf("absent usage = %#v, want nil", usage)
+	}
+}
+
+func TestHandleStreamMapsCacheTokens(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":0,"cache_creation_input_tokens":3,"cache_read_input_tokens":7}}}`,
+		`data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"ok"}}`,
+		`data: {"type":"message_delta","usage":{"output_tokens":2}}`,
+		"",
+	}, "\n")
+	var final *model.LLMResponse
+	NewProvider("test", "test-model").handleStream(strings.NewReader(stream), func(resp *model.LLMResponse, err error) bool {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !resp.Partial {
+			final = resp
+		}
+		return true
+	})
+	if final == nil || final.UsageMetadata == nil {
+		t.Fatal("final response has no usage metadata")
+	}
+	usage := final.UsageMetadata
+	if usage.PromptTokenCount != 20 || usage.CandidatesTokenCount != 2 || usage.TotalTokenCount != 22 || usage.CachedContentTokenCount != 7 {
+		t.Fatalf("usage = %#v", usage)
+	}
+}
 
 func TestToolSerializationIsCanonical(t *testing.T) {
 	provider := NewProvider("test", "test-model")

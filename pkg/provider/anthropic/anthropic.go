@@ -141,14 +141,7 @@ func (p *Provider) handleResponse(body io.Reader, yield func(*model.LLMResponse,
 		}
 	}
 
-	// Map Anthropic usage to ADK UsageMetadata.
-	if resp.Usage.InputTokens > 0 || resp.Usage.OutputTokens > 0 {
-		llmResp.UsageMetadata = &genai.GenerateContentResponseUsageMetadata{
-			PromptTokenCount:     int32(resp.Usage.InputTokens),
-			CandidatesTokenCount: int32(resp.Usage.OutputTokens),
-			TotalTokenCount:      int32(resp.Usage.InputTokens + resp.Usage.OutputTokens),
-		}
-	}
+	llmResp.UsageMetadata = usageMetadata(resp.Usage)
 
 	yield(llmResp, nil)
 }
@@ -169,7 +162,7 @@ func (p *Provider) handleStream(body io.Reader, yield func(*model.LLMResponse, e
 	var textAccum strings.Builder
 
 	// Accumulate token usage from message_start and message_delta events.
-	var inputTokens, outputTokens int32
+	var usage Usage
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -188,16 +181,13 @@ func (p *Provider) handleStream(body io.Reader, yield func(*model.LLMResponse, e
 
 		switch event.Type {
 		case "message_start":
-			// Anthropic sends input token count on the message_start event.
 			if event.Message != nil {
-				inputTokens = int32(event.Message.Usage.InputTokens)
-				outputTokens = int32(event.Message.Usage.OutputTokens)
+				usage = event.Message.Usage
 			}
 
 		case "message_delta":
-			// Anthropic sends output token count on the message_delta event.
 			if event.Usage != nil {
-				outputTokens = int32(event.Usage.OutputTokens)
+				usage.OutputTokens = event.Usage.OutputTokens
 			}
 
 		case "content_block_start":
@@ -273,15 +263,7 @@ func (p *Provider) handleStream(body io.Reader, yield func(*model.LLMResponse, e
 		}
 	}
 
-	// Build UsageMetadata from accumulated token counts.
-	var usage *genai.GenerateContentResponseUsageMetadata
-	if inputTokens > 0 || outputTokens > 0 {
-		usage = &genai.GenerateContentResponseUsageMetadata{
-			PromptTokenCount:     inputTokens,
-			CandidatesTokenCount: outputTokens,
-			TotalTokenCount:      inputTokens + outputTokens,
-		}
-	}
+	usageMetadata := usageMetadata(usage)
 
 	// Emit aggregated text response at stream end
 	if textAccum.Len() > 0 {
@@ -290,18 +272,42 @@ func (p *Provider) handleStream(body io.Reader, yield func(*model.LLMResponse, e
 				Role:  "model",
 				Parts: []*genai.Part{{Text: textAccum.String()}},
 			},
-			UsageMetadata: usage,
+			UsageMetadata: usageMetadata,
 		}, nil)
-	} else if usage != nil {
+	} else if usageMetadata != nil {
 		// No trailing text — attach usage to a content-less response so
 		// the ChatRunner still sees the token counts (e.g. tool-only turns).
 		yield(&model.LLMResponse{
 			Content: &genai.Content{
 				Role: "model",
 			},
-			UsageMetadata: usage,
+			UsageMetadata: usageMetadata,
 		}, nil)
 	}
+}
+
+func usageMetadata(usage Usage) *genai.GenerateContentResponseUsageMetadata {
+	if usage.InputTokens == 0 && usage.OutputTokens == 0 &&
+		usage.CacheCreationInputTokens == nil && usage.CacheReadInputTokens == nil {
+		return nil
+	}
+	promptTokens := usage.InputTokens + valueOrZero(usage.CacheCreationInputTokens) + valueOrZero(usage.CacheReadInputTokens)
+	metadata := &genai.GenerateContentResponseUsageMetadata{
+		PromptTokenCount:     int32(promptTokens),
+		CandidatesTokenCount: int32(usage.OutputTokens),
+		TotalTokenCount:      int32(promptTokens + usage.OutputTokens),
+	}
+	if usage.CacheReadInputTokens != nil {
+		metadata.CachedContentTokenCount = int32(*usage.CacheReadInputTokens)
+	}
+	return metadata
+}
+
+func valueOrZero(value *int) int {
+	if value == nil {
+		return 0
+	}
+	return *value
 }
 
 func (p *Provider) toAnthropicRequest(req *model.LLMRequest, streaming bool) (*Request, error) {
@@ -478,15 +484,19 @@ type ContentSource struct {
 	Data      string `json:"data"`       // base64-encoded data
 }
 
+type Usage struct {
+	InputTokens              int  `json:"input_tokens"`
+	OutputTokens             int  `json:"output_tokens"`
+	CacheCreationInputTokens *int `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     *int `json:"cache_read_input_tokens"`
+}
+
 type Response struct {
 	ID      string    `json:"id"`
 	Type    string    `json:"type"`
 	Role    string    `json:"role"`
 	Content []Content `json:"content"`
-	Usage   struct {
-		InputTokens  int `json:"input_tokens"`
-		OutputTokens int `json:"output_tokens"`
-	} `json:"usage"`
+	Usage   Usage     `json:"usage"`
 }
 
 type StreamEvent struct {
@@ -496,15 +506,10 @@ type StreamEvent struct {
 	Index        int          `json:"index,omitempty"`
 	// message_start carries the full message envelope with usage.
 	Message *struct {
-		Usage struct {
-			InputTokens  int `json:"input_tokens"`
-			OutputTokens int `json:"output_tokens"`
-		} `json:"usage"`
+		Usage Usage `json:"usage"`
 	} `json:"message,omitempty"`
 	// message_delta carries final usage (output tokens).
-	Usage *struct {
-		OutputTokens int `json:"output_tokens"`
-	} `json:"usage,omitempty"`
+	Usage *Usage `json:"usage,omitempty"`
 }
 
 type StreamDelta struct {

@@ -33,15 +33,16 @@ type KnowledgeSearchResult struct {
 	SessionID string
 }
 
-// KnowledgeSearchFunc performs a hybrid search and returns matching results.
-// Used to auto-retrieve relevant knowledge before LLM execution.
-// The bm25Query parameter provides conversational context for BM25 keyword
-// matching; when empty, BM25 uses the same query as vector search.
-type KnowledgeSearchFunc func(ctx context.Context, query string, bm25Query string, maxResults int, minScore float64) ([]KnowledgeSearchResult, error)
+// PreparedKnowledgeRetrieval is a request-scoped memory query. Search calls may
+// run concurrently and must reuse the embedding prepared for SemanticQuery.
+type PreparedKnowledgeRetrieval interface {
+	SemanticQuery() string
+	Embedding() ([]float32, uintptr)
+	Search(ctx context.Context, maxResults int, minScore float64, category string) ([]KnowledgeSearchResult, error)
+}
 
-// KnowledgeSearchByCategoryFunc performs a hybrid search filtered by category.
-// Categories: "guidance", "skill", "flow", "self", "instructions", "knowledge".
-type KnowledgeSearchByCategoryFunc func(ctx context.Context, query string, bm25Query string, maxResults int, minScore float64, category string) ([]KnowledgeSearchResult, error)
+// KnowledgeRetrievalFunc prepares one request-scoped memory query.
+type KnowledgeRetrievalFunc func(ctx context.Context, semanticQuery, keywordQuery string) (PreparedKnowledgeRetrieval, error)
 
 // ChatAgent implements a dynamic chat agent without flow definitions.
 // It wraps ADK's llmagent in a persistent chat session where the LLM
@@ -67,9 +68,8 @@ type ChatAgent struct {
 	FlowRunner    FlowRunnerFunc // Executes a flow YAML for dry-run testing (nil = disabled)
 
 	// Memory and knowledge
-	PlatformReflector         *PlatformReflector            // Post-task memory reflection for platform mode (nil = disabled)
-	KnowledgeSearch           KnowledgeSearchFunc           // Auto-retrieve relevant knowledge per turn (nil = disabled)
-	KnowledgeSearchByCategory KnowledgeSearchByCategoryFunc // Auto-retrieve guidance docs per turn (nil = disabled)
+	PlatformReflector  *PlatformReflector     // Post-task memory reflection for platform mode (nil = disabled)
+	KnowledgeRetrieval KnowledgeRetrievalFunc // Request-scoped knowledge retrieval (nil = disabled)
 	// Task delegation
 	SubAgentManager *SubAgentManager // Sub-agent manager for trace attachment (nil = no delegation)
 	// Tool discovery

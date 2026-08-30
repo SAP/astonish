@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"math"
+	"reflect"
 	"sync/atomic"
 	"testing"
 
@@ -802,6 +803,39 @@ func TestBM25Search_Empty(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Hybrid search tests
 // ---------------------------------------------------------------------------
+
+func TestToolIndexSearchHybridPreparedReusesCompatibleEmbedding(t *testing.T) {
+	calls := 0
+	embed := EmbedFunc(func(context.Context, string) ([]float32, error) {
+		calls++
+		return []float32{1, 0}, nil
+	})
+	store, err := NewInMemoryToolVectorStore(embed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx, err := NewToolIndex(store, embed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.SyncTools(context.Background(), mockTools("read_file"), nil); err != nil {
+		t.Fatal(err)
+	}
+	calls = 0
+	identity := reflect.ValueOf(embed).Pointer()
+	if !idx.CanUsePreparedEmbedding(identity, []float32{1, 0}) {
+		t.Fatal("compatible prepared embedding rejected")
+	}
+	if idx.CanUsePreparedEmbedding(identity, []float32{1}) {
+		t.Fatal("dimension mismatch accepted")
+	}
+	if _, err := idx.SearchHybridPrepared(context.Background(), "read file", []float32{1, 0}, 5, 0); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 0 {
+		t.Fatalf("embedding calls = %d, want 0", calls)
+	}
+}
 
 func TestToolIndex_SearchHybrid(t *testing.T) {
 	idx := newTestToolIndex(t, testSemanticEmbeddingFunc())

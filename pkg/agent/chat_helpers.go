@@ -51,14 +51,6 @@ func redactEventText(r *credentials.Redactor, event *session.Event) {
 	}
 }
 
-// truncateQuery shortens a string for debug logging, appending "..." if truncated.
-func truncateQuery(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + "..."
-}
-
 // urlPattern matches http/https URLs in text.
 var urlPattern = regexp.MustCompile(`https?://\S+`)
 

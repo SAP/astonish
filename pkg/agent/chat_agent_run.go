@@ -31,6 +31,100 @@ func preProviderRetrievalError(operation string, timeout time.Duration, err erro
 	return fmt.Errorf("pre-provider %s failed: %w", operation, err)
 }
 
+type preProviderRetrievalResult struct {
+	guidance []KnowledgeSearchResult
+	general  []KnowledgeSearchResult
+	tools    []ToolMatch
+}
+
+func (c *ChatAgent) retrievePreProvider(ctx context.Context, lifecycle *lifecycleDiagnosticRecorder, semanticQuery, keywordQuery, toolQuery string) (preProviderRetrievalResult, error) {
+	var result preProviderRetrievalResult
+	workCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type retrievalFailure struct {
+		order     int
+		operation string
+		err       error
+	}
+	failures := make(chan retrievalFailure, 3)
+	var wg sync.WaitGroup
+	run := func(order int, operation, stage string, fn func(context.Context) error) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			finish := lifecycle.begin(stage)
+			err := fn(workCtx)
+			finish(err)
+			if err != nil {
+				failures <- retrievalFailure{order: order, operation: operation, err: err}
+				cancel()
+			}
+		}()
+	}
+	searchTools := func(prepared PreparedKnowledgeRetrieval) {
+		run(2, "tool index search", "tool_retrieval", func(searchCtx context.Context) error {
+			var err error
+			if prepared != nil && toolQuery == prepared.SemanticQuery() {
+				embedding, identity := prepared.Embedding()
+				if c.ToolIndex.CanUsePreparedEmbedding(identity, embedding) {
+					result.tools, err = c.ToolIndex.SearchHybridPrepared(searchCtx, toolQuery, embedding, 8, 0.005)
+					return err
+				}
+			}
+			result.tools, err = c.ToolIndex.SearchHybrid(searchCtx, toolQuery, 8, 0.005)
+			return err
+		})
+	}
+
+	// A different tool query cannot reuse the memory embedding, so start its
+	// single embedding and search while the memory query is being prepared.
+	toolStarted := c.ToolIndex != nil && toolQuery != "" && toolQuery != semanticQuery
+	if toolStarted {
+		searchTools(nil)
+	}
+
+	var prepared PreparedKnowledgeRetrieval
+	if c.KnowledgeRetrieval != nil && semanticQuery != "" {
+		finishEmbedding := lifecycle.begin("memory_embedding")
+		var err error
+		prepared, err = c.KnowledgeRetrieval(workCtx, semanticQuery, keywordQuery)
+		finishEmbedding(err)
+		if err != nil {
+			cancel()
+			wg.Wait()
+			return result, fmt.Errorf("memory embedding: %w", err)
+		}
+	}
+	if prepared != nil {
+		run(0, "guidance search", "guidance_retrieval", func(searchCtx context.Context) error {
+			var err error
+			result.guidance, err = prepared.Search(searchCtx, 3, 0.3, "guidance")
+			return err
+		})
+		run(1, "knowledge search", "general_retrieval", func(searchCtx context.Context) error {
+			var err error
+			result.general, err = prepared.Search(searchCtx, 5, 0.3, "")
+			return err
+		})
+	}
+	if c.ToolIndex != nil && toolQuery != "" && !toolStarted {
+		searchTools(prepared)
+	}
+	wg.Wait()
+	close(failures)
+	var first *retrievalFailure
+	for failure := range failures {
+		if first == nil || failure.order < first.order {
+			copy := failure
+			first = &copy
+		}
+	}
+	if first != nil {
+		return result, fmt.Errorf("%s: %w", first.operation, first.err)
+	}
+	return result, nil
+}
+
 // Run implements the agent.Run interface for ADK.
 // It is called by the ADK runner for each user message.
 func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
@@ -116,150 +210,76 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		// --- Phase A: Dynamic Execution ---
 		trace := NewExecutionTrace(cleanUserText)
 
-		// Per-turn dynamic content: auto-retrieved knowledge. It is persisted
-		// as model-facing user context so replay sees the exact same bytes.
+		// Per-turn dynamic content is retrieved under one shared deadline.
 		var relevantKnowledge string
 		var knowledgeTrackingQuery string
 		var knowledgeTrackingBM25Query string
-		var knowledgeTrackingResults []KnowledgeSearchResult // for session tracking event
-
-		// Auto-retrieve relevant knowledge from vector store.
-		// Three partitioned searches: guidance (max 3) + general knowledge (max 5).
-		// Flow documents are discovered naturally through the general search.
-		// When a high-confidence flow match is found, it is loaded as an
-		// actionable execution plan rather than passive knowledge.
-		if (c.KnowledgeSearch != nil || c.KnowledgeSearchByCategory != nil) && cleanUserText != "" {
-			searchQuery := buildKnowledgeQuery(cleanUserText)
-			if len(searchQuery) < 5 {
-				if c.DebugMode {
-					slog.Debug("auto knowledge search skipped: query too short", "component", "chat", "query", searchQuery)
-				}
-			} else {
-				knowledgeTrackingQuery = searchQuery
-				// Build an augmented BM25 query that includes conversational
-				// context from the last model response. This helps follow-up
-				// queries like "show me per VM" find relevant docs by matching
-				// topic keywords (e.g., "proxmox", "server") that the user's
-				// message alone doesn't contain. Vector search stays on the
-				// raw query to avoid semantic dilution.
-				bm25Query := ""
-				if tail := lastModelResponseTail(ctx.Session().Events(), 300); tail != "" {
-					bm25Query = tail + " " + searchQuery
-					knowledgeTrackingBM25Query = bm25Query
-					if c.DebugMode {
-						slog.Debug("augmented BM25 query with conversation context",
-							"component", "chat",
-							"bm25_query_len", len(bm25Query))
-					}
-				}
-
-				var allResults []KnowledgeSearchResult
-
-				// Partition 1: Guidance docs (how-to instructions for capabilities)
-				if c.KnowledgeSearchByCategory != nil {
-					finishEmbedding := lifecycle.begin("memory_embedding")
-					finishGuidance := lifecycle.begin("guidance_retrieval")
-					guidanceResults, err := c.KnowledgeSearchByCategory(retrievalCtx, searchQuery, bm25Query, 3, 0.3, "guidance")
-					finishEmbedding(err)
-					finishGuidance(err)
-					if err != nil {
-						yield(nil, preProviderRetrievalError("guidance search", retrievalTimeout, err))
-						return
-					}
-					allResults = append(allResults, guidanceResults...)
-				}
-
-				// Partition 2: Everything else (memory, skills, flows, knowledge)
-				if c.KnowledgeSearch != nil {
-					finishGeneral := lifecycle.begin("general_retrieval")
-					knowledgeResults, err := c.KnowledgeSearch(retrievalCtx, searchQuery, bm25Query, 5, 0.3)
-					finishGeneral(err)
-					if err != nil {
-						yield(nil, preProviderRetrievalError("knowledge search", retrievalTimeout, err))
-						return
-					}
-					allResults = append(allResults, knowledgeResults...)
-				}
-
-				// Deduplicate
-				allResults = deduplicateSearchResults(allResults)
-
-				// Format remaining results as knowledge text
-				if len(allResults) > 0 {
-					knowledgeTrackingResults = allResults
-					var kb strings.Builder
-					for _, r := range allResults {
-						kb.WriteString(fmt.Sprintf("**%s** (relevance: %.0f%%)\n", r.Path, r.Score*100))
-						kb.WriteString(r.Snippet)
-						kb.WriteString("\n\n")
-					}
-					relevantKnowledge = EscapeCurlyPlaceholders(kb.String())
-					if c.DebugMode {
-						slog.Debug("auto knowledge search results injected", "component", "chat", "results", len(allResults), "query", truncateQuery(searchQuery, 60))
-					}
-				} else if c.DebugMode {
-					slog.Debug("auto knowledge search: no results", "component", "chat", "query", truncateQuery(searchQuery, 60))
-				}
-			}
-		} else if c.KnowledgeSearch == nil && c.KnowledgeSearchByCategory == nil && c.DebugMode {
-			slog.Debug("auto knowledge search disabled: no search functions wired", "component", "chat")
-		}
-
-		// Persist a tracking event recording what knowledge was injected.
-		// Content is nil so ADK's ContentsRequestProcessor skips it (never
-		// sent to the LLM) and eventsToMessages() skips it (never shown in UI).
-		// The event is still written to the session .jsonl file for diagnostics.
-		yieldKnowledgeTrackingEvent(yield, knowledgeTrackingQuery, knowledgeTrackingBM25Query, relevantKnowledge, "", knowledgeTrackingResults)
-
-		// Auto-retrieve relevant catalog entries from the tool index.
-		// Matches are prompt hints only; the model-visible declarations stay fixed
-		// and deferred tools execute through execute_tool.
+		var knowledgeTrackingResults []KnowledgeSearchResult
 		var relevantTools string
 		var toolMatches []ToolMatch
-		var toolSearchQuery string
+
+		searchQuery := buildKnowledgeQuery(cleanUserText)
+		bm25Query := ""
+		toolSearchQuery := searchQuery
+		if len(searchQuery) >= 5 {
+			knowledgeTrackingQuery = searchQuery
+			if tail := lastModelResponseTail(ctx.Session().Events(), 300); tail != "" {
+				bm25Query = tail + " " + searchQuery
+				knowledgeTrackingBM25Query = bm25Query
+			}
+		}
+		if len(toolSearchQuery) < shortQueryThreshold {
+			if tail := lastModelResponseTail(ctx.Session().Events(), 200); tail != "" {
+				toolSearchQuery = tail + " " + toolSearchQuery
+			}
+		}
+		if len(searchQuery) < 5 {
+			searchQuery = ""
+		}
+		if len(toolSearchQuery) < 5 {
+			toolSearchQuery = ""
+		}
+
+		retrieved, err := c.retrievePreProvider(retrievalCtx, lifecycle, searchQuery, bm25Query, toolSearchQuery)
+		if err != nil {
+			operation := "retrieval"
+			cause := err
+			if prefix, rest, ok := strings.Cut(err.Error(), ": "); ok {
+				operation = prefix
+				cause = errors.Unwrap(err)
+				if cause == nil {
+					cause = errors.New(rest)
+				}
+			}
+			yield(nil, preProviderRetrievalError(operation, retrievalTimeout, cause))
+			return
+		}
+
+		allResults := append(append([]KnowledgeSearchResult(nil), retrieved.guidance...), retrieved.general...)
+		allResults = deduplicateSearchResults(allResults)
+		knowledgeTrackingResults = allResults
+		if len(allResults) > 0 {
+			var kb strings.Builder
+			for _, result := range allResults {
+				kb.WriteString(fmt.Sprintf("**%s** (relevance: %.0f%%)\n", result.Path, result.Score*100))
+				kb.WriteString(result.Snippet)
+				kb.WriteString("\n\n")
+			}
+			relevantKnowledge = EscapeCurlyPlaceholders(kb.String())
+		}
+		yieldKnowledgeTrackingEvent(yield, knowledgeTrackingQuery, knowledgeTrackingBM25Query, relevantKnowledge, "", knowledgeTrackingResults)
+
+		toolMatches = FilterAccessibleToolMatches(ctx, retrieved.tools)
 		if c.ToolIndex != nil && cleanUserText != "" {
-			toolSearchQuery = buildKnowledgeQuery(cleanUserText)
-			// For short messages ("looks good", "use it", "yes"), the user text
-			// alone lacks topical signal for tool discovery. Augment the query
-			// with the tail of the last LLM response, which typically contains
-			// the question or action prompt that gives us context.
-			if len(toolSearchQuery) < shortQueryThreshold {
-				if tail := lastModelResponseTail(ctx.Session().Events(), 200); tail != "" {
-					toolSearchQuery = tail + " " + toolSearchQuery
-					if c.DebugMode {
-						slog.Debug("short message — augmented tool search query with LLM context", "component", "chat")
-					}
-				}
-			}
-			if len(toolSearchQuery) >= 5 {
-				finishToolRetrieval := lifecycle.begin("tool_retrieval")
-				matches, err := c.ToolIndex.SearchHybrid(retrievalCtx, toolSearchQuery, 8, 0.005)
-				finishToolRetrieval(err)
-				if err != nil {
-					yield(nil, preProviderRetrievalError("tool index search", retrievalTimeout, err))
-					return
-				}
-				// Filter out MCP tools the user's team doesn't have access to
-				matches = FilterAccessibleToolMatches(ctx, matches)
-				toolMatches = matches
-			}
-			// When the user names an MCP server (e.g. "use the mcp server email"),
-			// Include that group's tools in the catalog hints even if hybrid search
-			// scored poorly. Prefer request-scoped MCP groups, then the index.
 			if mcpHits := MatchRequestMCPGroupsFromQuery(ctx, cleanUserText); len(mcpHits) > 0 {
-				mcpHits = FilterAccessibleToolMatches(ctx, mcpHits)
-				toolMatches = MergeToolMatches(toolMatches, mcpHits)
+				toolMatches = MergeToolMatches(toolMatches, FilterAccessibleToolMatches(ctx, mcpHits))
 			}
 			if mcpHits := MatchMCPGroupsFromQuery(c.ToolIndex, cleanUserText); len(mcpHits) > 0 {
-				mcpHits = FilterAccessibleToolMatches(ctx, mcpHits)
-				toolMatches = MergeToolMatches(toolMatches, mcpHits)
+				toolMatches = MergeToolMatches(toolMatches, FilterAccessibleToolMatches(ctx, mcpHits))
 			}
-			if len(toolMatches) > 0 {
-				relevantTools = FormatToolMatchesForPrompt(toolMatches)
-				if c.DebugMode {
-					slog.Debug("tool index search results", "component", "chat", "matches", len(toolMatches), "query", truncateQuery(toolSearchQuery, 60))
-				}
-			}
+		}
+		if len(toolMatches) > 0 {
+			relevantTools = FormatToolMatchesForPrompt(toolMatches)
 		}
 		yieldToolTrackingEvent(yield, toolSearchQuery, relevantTools, toolMatches)
 

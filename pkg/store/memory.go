@@ -47,9 +47,10 @@ type MemorySearchResult struct {
 // text used for keyword retrieval. Embedding may be populated once by an
 // orchestrator and shared across concurrent store searches.
 type PreparedMemoryQuery struct {
-	SemanticQuery string
-	KeywordQuery  string
-	Embedding     []float32
+	SemanticQuery     string
+	KeywordQuery      string
+	Embedding         []float32
+	EmbeddingIdentity uintptr
 }
 
 // PreparedMemoryStore searches with a caller-prepared query. Implementations

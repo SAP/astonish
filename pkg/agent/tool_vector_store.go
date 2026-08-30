@@ -20,6 +20,10 @@ var (
 // The ToolIndex uses this interface for storing tool description embeddings
 // and performing nearest-neighbor search. The BM25 keyword index remains
 // in-memory regardless of the vector store backend.
+type toolVectorDimensioner interface {
+	EmbeddingDimension() int
+}
+
 type ToolVectorStore interface {
 	// AddDocuments stores tool documents with their embeddings.
 	// The implementation is responsible for generating embeddings from Content.

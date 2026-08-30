@@ -154,6 +154,15 @@ func (s *inMemoryToolVectorStore) Count() int {
 	return len(s.docs)
 }
 
+func (s *inMemoryToolVectorStore) EmbeddingDimension() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if len(s.embeddings) == 0 {
+		return 0
+	}
+	return len(s.embeddings[0])
+}
+
 func (s *inMemoryToolVectorStore) AllIDs(ctx context.Context) ([]string, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err

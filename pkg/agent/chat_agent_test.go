@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -28,6 +29,169 @@ func TestPreProviderRetrievalError(t *testing.T) {
 	err = preProviderRetrievalError("tool index search", time.Second, cause)
 	if !errors.Is(err, cause) || strings.Contains(err.Error(), "timed out") {
 		t.Fatalf("unexpected retrieval error: %v", err)
+	}
+}
+
+type testPreparedKnowledgeRetrieval struct {
+	query     string
+	embedding []float32
+	identity  uintptr
+	search    func(context.Context, int, float64, string) ([]KnowledgeSearchResult, error)
+}
+
+func (r *testPreparedKnowledgeRetrieval) SemanticQuery() string { return r.query }
+func (r *testPreparedKnowledgeRetrieval) Embedding() ([]float32, uintptr) {
+	return r.embedding, r.identity
+}
+func (r *testPreparedKnowledgeRetrieval) Search(ctx context.Context, maxResults int, minScore float64, category string) ([]KnowledgeSearchResult, error) {
+	return r.search(ctx, maxResults, minScore, category)
+}
+
+func TestRetrievePreProviderPreparesOnceAndSearchesConcurrently(t *testing.T) {
+	var prepares int
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	chat := &ChatAgent{KnowledgeRetrieval: func(_ context.Context, semantic, keyword string) (PreparedKnowledgeRetrieval, error) {
+		prepares++
+		if semantic != "semantic" || keyword != "keyword" {
+			t.Fatalf("queries = %q, %q", semantic, keyword)
+		}
+		return &testPreparedKnowledgeRetrieval{query: semantic, search: func(_ context.Context, _ int, _ float64, category string) ([]KnowledgeSearchResult, error) {
+			started <- category
+			<-release
+			return []KnowledgeSearchResult{{Path: category}}, nil
+		}}, nil
+	}}
+	done := make(chan error, 1)
+	go func() {
+		_, err := chat.retrievePreProvider(context.Background(), nil, "semantic", "keyword", "")
+		done <- err
+	}()
+	for range 2 {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("partition searches did not overlap")
+		}
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if prepares != 1 {
+		t.Fatalf("prepare calls = %d, want 1", prepares)
+	}
+}
+
+func TestRetrievePreProviderReusesCompatibleMemoryEmbeddingForTools(t *testing.T) {
+	calls := 0
+	embed := EmbedFunc(func(context.Context, string) ([]float32, error) {
+		calls++
+		return []float32{1, 0}, nil
+	})
+	vectorStore, err := NewInMemoryToolVectorStore(embed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	index, err := NewToolIndex(vectorStore, embed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := index.SyncTools(context.Background(), mockTools("read_file"), nil); err != nil {
+		t.Fatal(err)
+	}
+	calls = 0
+	chat := &ChatAgent{
+		ToolIndex: index,
+		KnowledgeRetrieval: func(context.Context, string, string) (PreparedKnowledgeRetrieval, error) {
+			return &testPreparedKnowledgeRetrieval{
+				query: "same query", embedding: []float32{1, 0}, identity: reflect.ValueOf(embed).Pointer(),
+				search: func(context.Context, int, float64, string) ([]KnowledgeSearchResult, error) { return nil, nil },
+			}, nil
+		},
+	}
+	if _, err := chat.retrievePreProvider(context.Background(), nil, "same query", "keyword", "same query"); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 0 {
+		t.Fatalf("tool embedding calls = %d, want 0", calls)
+	}
+}
+
+func TestRetrievePreProviderUsesExactlyOneSeparateToolEmbedding(t *testing.T) {
+	memoryEmbed := EmbedFunc(func(context.Context, string) ([]float32, error) { return []float32{1, 0}, nil })
+	toolCalls := 0
+	toolEmbed := EmbedFunc(func(context.Context, string) ([]float32, error) {
+		toolCalls++
+		return []float32{1, 0}, nil
+	})
+	vectorStore, err := NewInMemoryToolVectorStore(toolEmbed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	index, err := NewToolIndex(vectorStore, toolEmbed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := index.SyncTools(context.Background(), mockTools("read_file"), nil); err != nil {
+		t.Fatal(err)
+	}
+	toolCalls = 0
+	chat := &ChatAgent{
+		ToolIndex: index,
+		KnowledgeRetrieval: func(context.Context, string, string) (PreparedKnowledgeRetrieval, error) {
+			return &testPreparedKnowledgeRetrieval{
+				query: "memory query", embedding: []float32{1, 0}, identity: reflect.ValueOf(memoryEmbed).Pointer(),
+				search: func(context.Context, int, float64, string) ([]KnowledgeSearchResult, error) { return nil, nil },
+			}, nil
+		},
+	}
+	if _, err := chat.retrievePreProvider(context.Background(), nil, "memory query", "keyword", "different tool query"); err != nil {
+		t.Fatal(err)
+	}
+	if toolCalls != 1 {
+		t.Fatalf("tool embedding calls = %d, want 1", toolCalls)
+	}
+}
+
+func TestRetrievePreProviderKeepsPartitionOrderStable(t *testing.T) {
+	for iteration := range 10 {
+		chat := &ChatAgent{KnowledgeRetrieval: func(context.Context, string, string) (PreparedKnowledgeRetrieval, error) {
+			return &testPreparedKnowledgeRetrieval{query: "query", search: func(_ context.Context, _ int, _ float64, category string) ([]KnowledgeSearchResult, error) {
+				if (iteration%2 == 0) == (category == "guidance") {
+					time.Sleep(time.Millisecond)
+				}
+				path := "general"
+				if category == "guidance" {
+					path = "guidance"
+				}
+				return []KnowledgeSearchResult{{Path: path}}, nil
+			}}, nil
+		}}
+		result, err := chat.retrievePreProvider(context.Background(), nil, "query", "keyword", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		ordered := append(append([]KnowledgeSearchResult(nil), result.guidance...), result.general...)
+		if len(ordered) != 2 || ordered[0].Path != "guidance" || ordered[1].Path != "general" {
+			t.Fatalf("iteration %d order = %#v", iteration, ordered)
+		}
+	}
+}
+
+func TestRetrievePreProviderFailsClosed(t *testing.T) {
+	boom := errors.New("guidance unavailable")
+	chat := &ChatAgent{KnowledgeRetrieval: func(context.Context, string, string) (PreparedKnowledgeRetrieval, error) {
+		return &testPreparedKnowledgeRetrieval{query: "semantic", search: func(_ context.Context, _ int, _ float64, category string) ([]KnowledgeSearchResult, error) {
+			if category == "guidance" {
+				return nil, boom
+			}
+			return nil, nil
+		}}, nil
+	}}
+	_, err := chat.retrievePreProvider(context.Background(), nil, "semantic", "keyword", "")
+	if !errors.Is(err, boom) || !strings.Contains(err.Error(), "guidance search") {
+		t.Fatalf("error = %v", err)
 	}
 }
 

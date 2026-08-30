@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"sort"
 	"sync"
 )
@@ -68,6 +69,7 @@ func (t *threeTierMemoryStore) PrepareQuery(ctx context.Context, semanticQuery, 
 		return PreparedMemoryQuery{}, fmt.Errorf("prepare memory query embedding: empty embedding")
 	}
 	query.Embedding = embedding
+	query.EmbeddingIdentity = reflect.ValueOf(t.embed).Pointer()
 	return query, nil
 }
 

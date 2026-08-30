@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -861,6 +862,19 @@ type bm25Result struct {
 // Hybrid search: vector + BM25 with Reciprocal Rank Fusion
 // ---------------------------------------------------------------------------
 
+// CanUsePreparedEmbedding reports whether an embedding was produced by the
+// exact embedding function configured for this semantic index.
+func (idx *ToolIndex) CanUsePreparedEmbedding(identity uintptr, embedding []float32) bool {
+	if idx == nil || idx.vectorStore == nil || idx.embedFunc == nil || identity == 0 || len(embedding) == 0 {
+		return false
+	}
+	if reflect.ValueOf(idx.embedFunc).Pointer() != identity {
+		return false
+	}
+	dimensioner, ok := idx.vectorStore.(toolVectorDimensioner)
+	return ok && dimensioner.EmbeddingDimension() == len(embedding)
+}
+
 // SearchHybrid runs both vector search and BM25 keyword search, then fuses
 // results using Reciprocal Rank Fusion (RRF). This solves the "proper noun
 // dilution" problem where unknown words (e.g., project names like "juicytrade")
@@ -874,6 +888,18 @@ type bm25Result struct {
 // retrieval methods, the maximum possible RRF score is ~0.0328 (rank 1 in both).
 // Reasonable thresholds: 0.005 (permissive) to 0.015 (moderate).
 func (idx *ToolIndex) SearchHybrid(ctx context.Context, query string, topK int, minScore float64) ([]ToolMatch, error) {
+	return idx.searchHybrid(ctx, query, nil, topK, minScore)
+}
+
+// SearchHybridPrepared uses a compatible precomputed query embedding.
+func (idx *ToolIndex) SearchHybridPrepared(ctx context.Context, query string, embedding []float32, topK int, minScore float64) ([]ToolMatch, error) {
+	if len(embedding) == 0 {
+		return nil, fmt.Errorf("prepared tool search requires an embedding")
+	}
+	return idx.searchHybrid(ctx, query, embedding, topK, minScore)
+}
+
+func (idx *ToolIndex) searchHybrid(ctx context.Context, query string, preparedEmbedding []float32, topK int, minScore float64) ([]ToolMatch, error) {
 	idx.mu.RLock()
 	registry := idx.toolRegistry
 	bm25 := idx.bm25
@@ -905,18 +931,22 @@ func (idx *ToolIndex) SearchHybrid(ctx context.Context, query string, topK int, 
 			vK = docCount
 		}
 
-		// Embed the query for vector search.
-		queryEmb, err := idx.embedFunc(ctx, query)
-		if err != nil {
-			return nil, fmt.Errorf("failed to embed hybrid search query: %w", err)
+		queryEmb := preparedEmbedding
+		if len(queryEmb) == 0 {
+			var err error
+			queryEmb, err = idx.embedFunc(ctx, query)
+			if err != nil {
+				return nil, fmt.Errorf("failed to embed hybrid search query: %w", err)
+			}
 		}
 		if len(queryEmb) == 0 {
 			return nil, fmt.Errorf("failed to embed hybrid search query: empty embedding")
 		}
-		vectorResults, err = idx.vectorStore.QueryByEmbedding(ctx, queryEmb, vK)
+		queried, err := idx.vectorStore.QueryByEmbedding(ctx, queryEmb, vK)
 		if err != nil {
 			return nil, fmt.Errorf("vector search failed: %w", err)
 		}
+		vectorResults = queried
 	}
 
 	// --- BM25 keyword search ---

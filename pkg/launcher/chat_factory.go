@@ -98,6 +98,51 @@ type ChatFactoryConfig struct {
 	SessionService session.Service
 }
 
+type preparedKnowledgeRetrieval struct {
+	searcher store.PreparedThreeTierSearcher
+	query    store.PreparedMemoryQuery
+}
+
+func prepareKnowledgeRetrieval(ctx context.Context, semanticQuery, keywordQuery string) (agent.PreparedKnowledgeRetrieval, error) {
+	searcher, ok := store.ThreeTierSearcherFromContext(ctx).(store.PreparedThreeTierSearcher)
+	if !ok || searcher == nil {
+		return nil, nil
+	}
+	query, err := searcher.PrepareQuery(ctx, semanticQuery, keywordQuery)
+	if err != nil {
+		return nil, err
+	}
+	return &preparedKnowledgeRetrieval{searcher: searcher, query: query}, nil
+}
+
+func (r *preparedKnowledgeRetrieval) SemanticQuery() string {
+	return r.query.SemanticQuery
+}
+
+func (r *preparedKnowledgeRetrieval) Embedding() ([]float32, uintptr) {
+	return r.query.Embedding, r.query.EmbeddingIdentity
+}
+
+func (r *preparedKnowledgeRetrieval) Search(ctx context.Context, maxResults int, minScore float64, category string) ([]agent.KnowledgeSearchResult, error) {
+	results, err := r.searcher.SearchAllTiersPrepared(ctx, r.query, maxResults*2, minScore, category)
+	if err != nil {
+		return nil, err
+	}
+	results = memory.FilterPreferredScenarioResultsForQuery(r.query.SemanticQuery, results)
+	if len(results) > maxResults {
+		results = results[:maxResults]
+	}
+	knowledge := make([]agent.KnowledgeSearchResult, 0, len(results))
+	for _, result := range results {
+		knowledge = append(knowledge, agent.KnowledgeSearchResult{
+			ID: result.ID, Path: result.Path, Score: result.Score, Snippet: result.Snippet,
+			Category: result.Category, Scope: result.Scope, CreatedBy: result.CreatedBy,
+			CreatedAt: result.CreatedAt, SessionID: result.SessionID,
+		})
+	}
+	return knowledge, nil
+}
+
 // ChatFactoryResult holds everything produced by the factory.
 // Callers (console, channel manager) unpack what they need.
 type ChatFactoryResult struct {
@@ -1945,85 +1990,9 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 	flowRunner := NewInteractiveFlowRunner(cfg.AppConfig, cfg.ProviderName, cfg.ModelName, cfg.DebugMode)
 	tools.SetFlowRunnerAccess(flowRunner)
 
-	// --- 6b2. Wire knowledge search callbacks ---
-	// These callbacks are context-aware: they check the invocation context
-	// for a DB-backed ThreeTierSearcher (injected by ChatRunner.InjectMemoryStores)
-	// and use it for cross-tier search.
+	// --- 6b2. Wire request-scoped knowledge retrieval ---
 	if memorySearchAvailable {
-		chatAgent.KnowledgeSearch = func(ctx context.Context, query string, bm25Query string, maxResults int, minScore float64) ([]agent.KnowledgeSearchResult, error) {
-			searcher := store.ThreeTierSearcherFromContext(ctx)
-			if searcher == nil {
-				return nil, nil
-			}
-			// Use bm25Query (conversation-context-enriched) for keyword matching
-			// when available; the tsvector OR search benefits from extra terms.
-			searchQuery := query
-			if bm25Query != "" {
-				searchQuery = bm25Query
-			}
-			// Fetch extra candidates before scenario-card de-duplication and query
-			// filtering so duplicate/unrelated cards do not starve the final context.
-			pgResults, err := searcher.SearchAllTiers(ctx, searchQuery, maxResults*2, minScore)
-			if err != nil {
-				return nil, err
-			}
-			pgResults = memory.FilterPreferredScenarioResultsForQuery(query, pgResults)
-			if len(pgResults) > maxResults {
-				pgResults = pgResults[:maxResults]
-			}
-			var knowledgeResults []agent.KnowledgeSearchResult
-			for _, r := range pgResults {
-				knowledgeResults = append(knowledgeResults, agent.KnowledgeSearchResult{
-					ID:        r.ID,
-					Path:      r.Path,
-					Score:     r.Score,
-					Snippet:   r.Snippet,
-					Category:  r.Category,
-					Scope:     r.Scope,
-					CreatedBy: r.CreatedBy,
-					CreatedAt: r.CreatedAt,
-					SessionID: r.SessionID,
-				})
-			}
-			return knowledgeResults, nil
-		}
-
-		chatAgent.KnowledgeSearchByCategory = func(ctx context.Context, query string, bm25Query string, maxResults int, minScore float64, category string) ([]agent.KnowledgeSearchResult, error) {
-			searcher := store.ThreeTierSearcherFromContext(ctx)
-			if searcher == nil {
-				return nil, nil
-			}
-			searchQuery := query
-			if bm25Query != "" {
-				searchQuery = bm25Query
-			}
-			// Fetch extra candidates before scenario-card de-duplication and query
-			// filtering so duplicate/unrelated cards do not starve the final context.
-			pgResults, err := searcher.SearchAllTiersByCategory(ctx, searchQuery, maxResults*2, minScore, category)
-			if err != nil {
-				return nil, err
-			}
-			pgResults = memory.FilterPreferredScenarioResultsForQuery(query, pgResults)
-			if len(pgResults) > maxResults {
-				pgResults = pgResults[:maxResults]
-			}
-			var knowledgeResults []agent.KnowledgeSearchResult
-			for _, r := range pgResults {
-				knowledgeResults = append(knowledgeResults, agent.KnowledgeSearchResult{
-					ID:        r.ID,
-					Path:      r.Path,
-					Score:     r.Score,
-					Snippet:   r.Snippet,
-					Category:  r.Category,
-					Scope:     r.Scope,
-					CreatedBy: r.CreatedBy,
-					CreatedAt: r.CreatedAt,
-					SessionID: r.SessionID,
-				})
-			}
-			return knowledgeResults, nil
-		}
-
+		chatAgent.KnowledgeRetrieval = prepareKnowledgeRetrieval
 		if cfg.DebugMode {
 			slog.Debug("auto knowledge retrieval: enabled")
 		}

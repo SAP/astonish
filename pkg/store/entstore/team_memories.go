@@ -28,6 +28,7 @@ type teamMemoryStore struct {
 }
 
 var _ store.MemoryStore = (*teamMemoryStore)(nil)
+var _ store.PreparedMemoryStore = (*teamMemoryStore)(nil)
 
 // tsvectorFloorScore is the minimum score assigned to any tsvector keyword
 // match. ts_rank() returns very small values (0.01–0.1) but any keyword hit
@@ -56,25 +57,40 @@ func (m *teamMemoryStore) searchInternal(ctx context.Context, query string, maxR
 }
 
 func (m *teamMemoryStore) hybridSearch(ctx context.Context, query string, maxResults int, minScore float64, category string) ([]store.MemorySearchResult, error) {
+	prepared := store.PreparedMemoryQuery{KeywordQuery: query}
+	if m.embedFunc != nil && query != "" {
+		prepared.SemanticQuery = query
+		embedding, err := m.embedFunc(ctx, query)
+		if err != nil {
+			return nil, fmt.Errorf("generate query embedding: %w", err)
+		}
+		prepared.Embedding = embedding
+	}
+	return m.SearchPrepared(ctx, prepared, maxResults, minScore, category)
+}
+
+func (m *teamMemoryStore) SearchPrepared(ctx context.Context, query store.PreparedMemoryQuery, maxResults int, minScore float64, category string) ([]store.MemorySearchResult, error) {
+	if query.SemanticQuery != "" && len(query.Embedding) == 0 {
+		return nil, fmt.Errorf("semantic query requires embedding")
+	}
+	if m.dialect == DialectSQLite {
+		return m.sqlitePreparedSearch(ctx, query, maxResults, minScore, category)
+	}
 	var vectorResults, keywordResults []store.MemorySearchResult
-
-	// 1. Vector search (semantic similarity).
-	if m.embedFunc != nil {
-		results, err := m.vectorSearch(ctx, query, maxResults, minScore, category)
-		if err == nil {
-			vectorResults = results
+	if len(query.Embedding) > 0 {
+		results, err := m.vectorSearch(ctx, query.Embedding, maxResults, minScore, category)
+		if err != nil {
+			return nil, err
 		}
+		vectorResults = results
 	}
-
-	// 2. tsvector search (keyword matching).
-	if query != "" {
-		results, err := m.tsvectorSearch(ctx, query, maxResults, category)
-		if err == nil {
-			keywordResults = results
+	if query.KeywordQuery != "" {
+		results, err := m.tsvectorSearch(ctx, query.KeywordQuery, maxResults, category)
+		if err != nil {
+			return nil, err
 		}
+		keywordResults = results
 	}
-
-	// 3. Merge + dedup by ID, keep best score.
 	return mergeMemoryResults(vectorResults, keywordResults, maxResults), nil
 }
 
@@ -123,7 +139,7 @@ func (m *teamMemoryStore) tsvectorSearch(ctx context.Context, query string, maxR
 			score     float64
 		)
 		if err := rows.Scan(&id, &chunkText, &cat, &srcPath, &createdBy, &sessionID, &createdAt, &score); err != nil {
-			continue
+			return nil, fmt.Errorf("scan memory search result: %w", err)
 		}
 		// ts_rank returns very small values (0.01–0.1). Since any tsvector
 		// match is a high-precision keyword hit, apply a floor score so these
@@ -155,13 +171,9 @@ func (m *teamMemoryStore) tsvectorSearch(ctx context.Context, query string, maxR
 	return results, rows.Err()
 }
 
-func (m *teamMemoryStore) vectorSearch(ctx context.Context, query string, maxResults int, minScore float64, category string) ([]store.MemorySearchResult, error) {
-	embedding, err := m.embedFunc(ctx, query)
-	if err != nil {
-		return nil, fmt.Errorf("generate query embedding: %w", err)
-	}
-
+func (m *teamMemoryStore) vectorSearch(ctx context.Context, embedding []float32, maxResults int, minScore float64, category string) ([]store.MemorySearchResult, error) {
 	vecStr := float32SliceToPGVectorString(embedding)
+	var err error
 
 	var rows *sql.Rows
 	if category != "" {
@@ -200,7 +212,7 @@ func (m *teamMemoryStore) vectorSearch(ctx context.Context, query string, maxRes
 			score     float64
 		)
 		if err := rows.Scan(&id, &chunkText, &cat, &srcPath, &createdBy, &sessionID, &createdAt, &score); err != nil {
-			continue
+			return nil, fmt.Errorf("scan memory search result: %w", err)
 		}
 		if score < minScore {
 			continue
@@ -258,29 +270,33 @@ func (m *teamMemoryStore) textSearch(ctx context.Context, query string, maxResul
 // ---------------------------------------------------------------------------
 
 func (m *teamMemoryStore) sqliteHybridSearch(ctx context.Context, query string, maxResults int, minScore float64, category string) ([]store.MemorySearchResult, error) {
+	prepared := store.PreparedMemoryQuery{KeywordQuery: query}
+	if m.embedFunc != nil && query != "" {
+		prepared.SemanticQuery = query
+		embedding, err := m.embedFunc(ctx, query)
+		if err != nil {
+			return nil, fmt.Errorf("generate query embedding: %w", err)
+		}
+		prepared.Embedding = embedding
+	}
+	return m.sqlitePreparedSearch(ctx, prepared, maxResults, minScore, category)
+}
+
+func (m *teamMemoryStore) sqlitePreparedSearch(ctx context.Context, query store.PreparedMemoryQuery, maxResults int, minScore float64, category string) ([]store.MemorySearchResult, error) {
 	if maxResults <= 0 {
 		maxResults = 10
 	}
-
-	// Run keyword search via FTS5.
-	keywordResults := m.ftsSearch(ctx, query, maxResults*2, category)
-
-	// Run vector search if embedding function is available.
+	keywordResults, err := m.ftsSearch(ctx, query.KeywordQuery, maxResults*2, category)
+	if err != nil {
+		return nil, err
+	}
 	var vectorResults []scoredResult
-	if m.embedFunc != nil && query != "" {
-		queryVec, err := m.embedFunc(ctx, query)
-		if err == nil && queryVec != nil {
-			m.ensureVecIndexLoaded(ctx)
-			vectorResults = m.vecIndex.search(queryVec, maxResults*2, minScore)
+	if len(query.Embedding) > 0 {
+		if err := m.ensureVecIndexLoaded(ctx); err != nil {
+			return nil, err
 		}
+		vectorResults = m.vecIndex.search(query.Embedding, maxResults*2, minScore)
 	}
-
-	// If both are empty, fall back to simple text search.
-	if len(keywordResults) == 0 && len(vectorResults) == 0 {
-		return m.textSearch(ctx, query, maxResults, category)
-	}
-
-	// Merge results using RRF or normalize single source.
 	var fused []scoredResult
 	switch {
 	case len(vectorResults) > 0 && len(keywordResults) > 0:
@@ -295,18 +311,18 @@ func (m *teamMemoryStore) sqliteHybridSearch(ctx context.Context, query string, 
 	}
 
 	// Load full records for the fused IDs.
-	return m.loadResultsByIDs(ctx, fused)
+	return m.loadResultsByIDs(ctx, fused, category)
 }
 
-func (m *teamMemoryStore) ftsSearch(ctx context.Context, query string, limit int, category string) []scoredResult {
+func (m *teamMemoryStore) ftsSearch(ctx context.Context, query string, limit int, category string) ([]scoredResult, error) {
 	if query == "" || m.ftsTable == "" {
-		return nil
+		return nil, nil
 	}
 
 	// Build FTS5 query: OR-join all tokens for broad matching.
 	tokens := strings.Fields(query)
 	if len(tokens) == 0 {
-		return nil
+		return nil, nil
 	}
 	ftsQuery := strings.Join(tokens, " OR ")
 
@@ -334,7 +350,7 @@ func (m *teamMemoryStore) ftsSearch(ctx context.Context, query string, limit int
 			ftsQuery, limit)
 	}
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("fts search query: %w", err)
 	}
 	defer rows.Close()
 
@@ -343,23 +359,25 @@ func (m *teamMemoryStore) ftsSearch(ctx context.Context, query string, limit int
 		var id string
 		var score float64
 		if err := rows.Scan(&id, &score); err != nil {
-			continue
+			return nil, fmt.Errorf("scan fts search result: %w", err)
 		}
 		results = append(results, scoredResult{ID: id, Score: score})
 	}
-	return results
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate fts search results: %w", err)
+	}
+	return results, nil
 }
 
-func (m *teamMemoryStore) ensureVecIndexLoaded(ctx context.Context) {
+func (m *teamMemoryStore) ensureVecIndexLoaded(ctx context.Context) error {
 	if m.vecIndex.isLoaded() {
-		return
+		return nil
 	}
 
 	rows, err := m.db.QueryContext(ctx,
 		fmt.Sprintf(`SELECT id, embedding FROM %s WHERE embedding IS NOT NULL`, m.table))
 	if err != nil {
-		m.vecIndex.markLoaded()
-		return
+		return fmt.Errorf("load vector index: %w", err)
 	}
 	defer rows.Close()
 
@@ -367,16 +385,20 @@ func (m *teamMemoryStore) ensureVecIndexLoaded(ctx context.Context) {
 		var id string
 		var blob []byte
 		if err := rows.Scan(&id, &blob); err != nil {
-			continue
+			return fmt.Errorf("scan vector index: %w", err)
 		}
 		if vec := deserializeEmbedding(blob); vec != nil {
 			m.vecIndex.add(id, vec)
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate vector index: %w", err)
+	}
 	m.vecIndex.markLoaded()
+	return nil
 }
 
-func (m *teamMemoryStore) loadResultsByIDs(ctx context.Context, scored []scoredResult) ([]store.MemorySearchResult, error) {
+func (m *teamMemoryStore) loadResultsByIDs(ctx context.Context, scored []scoredResult, category string) ([]store.MemorySearchResult, error) {
 	if len(scored) == 0 {
 		return nil, nil
 	}
@@ -394,6 +416,10 @@ func (m *teamMemoryStore) loadResultsByIDs(ctx context.Context, scored []scoredR
 		`SELECT id, chunk_text, category, source_path, created_by, session_id, created_at
 		 FROM %s WHERE id IN (%s)`,
 		m.table, strings.Join(placeholders, ","))
+	if category != "" {
+		sqlStr += " AND category = ?"
+		ids = append(ids, category)
+	}
 
 	rows, err := m.db.QueryContext(ctx, sqlStr, ids...)
 	if err != nil {
@@ -413,7 +439,7 @@ func (m *teamMemoryStore) loadResultsByIDs(ctx context.Context, scored []scoredR
 			createdAt sql.NullString
 		)
 		if err := rows.Scan(&id, &chunkText, &cat, &srcPath, &createdBy, &sessionID, &createdAt); err != nil {
-			continue
+			return nil, fmt.Errorf("scan memory result: %w", err)
 		}
 		r := store.MemorySearchResult{
 			ID:      id,
@@ -471,9 +497,10 @@ func (m *teamMemoryStore) Add(ctx context.Context, entry store.MemoryEntry) erro
 	// Generate embedding if function is available.
 	if m.embedFunc != nil && entry.Embedding == nil {
 		emb, err := m.embedFunc(ctx, entry.Content)
-		if err == nil {
-			entry.Embedding = emb
+		if err != nil {
+			return fmt.Errorf("generate memory embedding: %w", err)
 		}
+		entry.Embedding = emb
 	}
 
 	// On SQLite, store embedding as raw bytes via Ent.
@@ -553,11 +580,12 @@ func (m *teamMemoryStore) Update(ctx context.Context, id string, content string,
 	var newEmb []float32
 	if m.embedFunc != nil {
 		emb, err := m.embedFunc(ctx, content)
-		if err == nil {
-			newEmb = emb
-			if m.dialect == DialectSQLite {
-				update.SetEmbedding(float32SliceToBytes(emb))
-			}
+		if err != nil {
+			return fmt.Errorf("generate memory embedding: %w", err)
+		}
+		newEmb = emb
+		if m.dialect == DialectSQLite {
+			update.SetEmbedding(float32SliceToBytes(emb))
 		}
 	}
 

@@ -219,6 +219,7 @@ func TenantMiddleware(s *Store) func(http.Handler) http.Handler {
 					Personal: personalMem,
 					Team:     teamStore.Memories(),
 					Org:      orgStore.OrgMemories(),
+					Embed:    s.embedFunc,
 				})
 			}
 

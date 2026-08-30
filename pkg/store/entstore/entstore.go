@@ -125,9 +125,18 @@ func New(ctx context.Context, cfg Config) (*Store, error) {
 		lifetime = 30 * time.Minute
 	}
 
+	platformDSN := cfg.DSN
+	if d == DialectPostgres {
+		var err error
+		platformDSN, err = schemaChangeSafePostgresDSN(cfg.DSN)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	s := &Store{
 		dialect:         d,
-		platformDSN:     cfg.DSN,
+		platformDSN:     platformDSN,
 		instanceSuffix:  cfg.InstanceSuffix,
 		dataDir:         cfg.DataDir,
 		maxOpenConns:    maxOpen,
@@ -139,7 +148,7 @@ func New(ctx context.Context, cfg Config) (*Store, error) {
 	var err error
 	switch d {
 	case DialectPostgres:
-		err = s.openPostgres(ctx, cfg.DSN)
+		err = s.openPostgres(ctx, platformDSN)
 	case DialectSQLite:
 		err = s.openSQLite(ctx, cfg.DSN)
 	default:

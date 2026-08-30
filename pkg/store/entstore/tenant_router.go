@@ -132,6 +132,22 @@ func personalSchemaName(userID string) string {
 	return "personal_" + strings.ReplaceAll(userID, "-", "_")
 }
 
+const postgresSchemaChangeSafeQueryMode = "describe_exec"
+
+// schemaChangeSafePostgresDSN disables pgx's prepared-statement cache. Tenant
+// schemas may be reconciled by another pod while a pool remains active, and
+// PostgreSQL cannot reuse a cached plan whose result type has changed.
+func schemaChangeSafePostgresDSN(dsn string) (string, error) {
+	u, err := url.Parse(dsn)
+	if err != nil {
+		return "", fmt.Errorf("parse PostgreSQL DSN: %w", err)
+	}
+	q := u.Query()
+	q.Set("default_query_exec_mode", postgresSchemaChangeSafeQueryMode)
+	u.RawQuery = q.Encode()
+	return u.String(), nil
+}
+
 // deriveDSN replaces the database name in the platform DSN.
 func (s *Store) deriveDSN(dbName string) (string, error) {
 	u, err := url.Parse(s.platformDSN)

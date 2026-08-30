@@ -19,6 +19,44 @@ import (
 	"github.com/SAP/astonish/pkg/store/pgutil"
 )
 
+func TestIntegrationPostgresQuerySurvivesResultTypeChange(t *testing.T) {
+	ctx := context.Background()
+	s := setupPostgresBackupRestoreStore(t, "result_type_change")
+
+	conn, err := s.platformDB.Conn(ctx)
+	if err != nil {
+		t.Fatalf("platform DB connection error = %v", err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.ExecContext(ctx, `CREATE TABLE query_mode_regression (value integer NOT NULL)`); err != nil {
+		t.Fatalf("create table error = %v", err)
+	}
+	if _, err := conn.ExecContext(ctx, `INSERT INTO query_mode_regression (value) VALUES (42)`); err != nil {
+		t.Fatalf("insert row error = %v", err)
+	}
+
+	var intValue int
+	if err := conn.QueryRowContext(ctx, `SELECT value FROM query_mode_regression`).Scan(&intValue); err != nil {
+		t.Fatalf("initial query error = %v", err)
+	}
+	if intValue != 42 {
+		t.Fatalf("initial value = %d, want 42", intValue)
+	}
+
+	if _, err := conn.ExecContext(ctx, `ALTER TABLE query_mode_regression ALTER COLUMN value TYPE text USING value::text`); err != nil {
+		t.Fatalf("alter result type error = %v", err)
+	}
+
+	var textValue string
+	if err := conn.QueryRowContext(ctx, `SELECT value FROM query_mode_regression`).Scan(&textValue); err != nil {
+		t.Fatalf("query after result type change error = %v", err)
+	}
+	if textValue != "42" {
+		t.Fatalf("value after result type change = %q, want 42", textValue)
+	}
+}
+
 func TestIntegrationPostgresBackupRestoreLogical(t *testing.T) {
 	ctx := context.Background()
 	source := setupPostgresBackupRestoreStore(t, "source")

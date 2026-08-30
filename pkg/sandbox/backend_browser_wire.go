@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
@@ -98,6 +99,9 @@ func WireBackendBrowserManager(mgr *browser.Manager, backend Backend, sessReg *S
 }
 
 func startBackendBrowser(ctx context.Context, backend Backend, sessionID string, cfg browser.BrowserConfig) (io.Closer, error) {
+	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+
 	width := cfg.ViewportWidth
 	if width <= 0 {
 		width = 1920
@@ -111,8 +115,10 @@ func startBackendBrowser(ctx context.Context, backend Backend, sessionID string,
 	encoded := base64.StdEncoding.EncodeToString([]byte(script))
 	wrapper := fmt.Sprintf("eval \"$(echo %s | base64 -d)\"", encoded)
 
+	var stderr bytes.Buffer
 	stream, err := backend.ExecStreaming(ctx, sessionID, ExecStreamSpec{
-		Command: []string{"/usr/local/bin/astonish-shell", "sh", "-c", wrapper},
+		Command:        []string{"/usr/local/bin/astonish-shell", "sh", "-c", wrapper},
+		SeparateStderr: &stderr,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("backend browser: start in session %s: %w", shortSession(sessionID), err)
@@ -120,24 +126,27 @@ func startBackendBrowser(ctx context.Context, backend Backend, sessionID string,
 
 	const doneSentinel = "DONE: browser ready"
 	buf := make([]byte, 4096)
-	var accumulated string
-	deadline := time.Now().Add(45 * time.Second)
-	for time.Now().Before(deadline) {
+	var stdout strings.Builder
+	for {
 		n, readErr := stream.Read(buf)
 		if n > 0 {
-			accumulated += string(buf[:n])
-			if strings.Contains(accumulated, doneSentinel) {
+			_, _ = stdout.Write(buf[:n])
+			if strings.Contains(stdout.String(), doneSentinel) {
 				return &backendBrowserHandle{stream: stream}, nil
 			}
 		}
-		if readErr != nil {
-			stream.Close()
-			return nil, fmt.Errorf("backend browser: launch failed in session %s: %w\nOutput: %s", shortSession(sessionID), readErr, accumulated)
+		if readErr == nil {
+			continue
 		}
-	}
 
-	stream.Close()
-	return nil, fmt.Errorf("backend browser: launch timed out in session %s\nOutput: %s", shortSession(sessionID), accumulated)
+		if ctx.Err() != nil {
+			_ = stream.Close()
+			return nil, fmt.Errorf("backend browser: launch timed out in session %s: %w\nStdout: %s\nStderr: %s", shortSession(sessionID), ctx.Err(), stdout.String(), stderr.String())
+		}
+		exitCode, waitErr := stream.Wait()
+		_ = stream.Close()
+		return nil, fmt.Errorf("backend browser: launch failed in session %s: %w (exit code %d, wait error: %v)\nStdout: %s\nStderr: %s", shortSession(sessionID), readErr, exitCode, waitErr, stdout.String(), stderr.String())
+	}
 }
 
 type backendBrowserHandle struct {

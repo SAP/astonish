@@ -195,6 +195,23 @@ func TestRetrievePreProviderFailsClosed(t *testing.T) {
 	}
 }
 
+func TestRetrievePreProviderReportsCauseInsteadOfCanceledSibling(t *testing.T) {
+	boom := errors.New("fts syntax error")
+	chat := &ChatAgent{KnowledgeRetrieval: func(context.Context, string, string) (PreparedKnowledgeRetrieval, error) {
+		return &testPreparedKnowledgeRetrieval{query: "semantic", search: func(ctx context.Context, _ int, _ float64, category string) ([]KnowledgeSearchResult, error) {
+			if category == "guidance" {
+				<-ctx.Done()
+				return nil, ctx.Err()
+			}
+			return nil, boom
+		}}, nil
+	}}
+	_, err := chat.retrievePreProvider(context.Background(), nil, "semantic", "keyword", "")
+	if !errors.Is(err, boom) || !strings.Contains(err.Error(), "knowledge search") {
+		t.Fatalf("error = %v, want originating knowledge search failure", err)
+	}
+}
+
 func TestEnqueueImagesFromContent(t *testing.T) {
 	t.Parallel()
 	ca := &ChatAgent{}

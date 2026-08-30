@@ -277,11 +277,10 @@ func (ms *personalMemoryStore) ftsSearch(ctx context.Context, query string, limi
 		return nil, nil
 	}
 
-	tokens := strings.Fields(query)
-	if len(tokens) == 0 {
+	ftsQuery := sqliteFTSQuery(query)
+	if ftsQuery == "" {
 		return nil, nil
 	}
-	ftsQuery := strings.Join(tokens, " OR ")
 
 	var rows *sql.Rows
 	var err error

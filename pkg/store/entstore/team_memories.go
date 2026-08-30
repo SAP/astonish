@@ -294,12 +294,10 @@ func (m *teamMemoryStore) ftsSearch(ctx context.Context, query string, limit int
 		return nil, nil
 	}
 
-	// Build FTS5 query: OR-join all tokens for broad matching.
-	tokens := strings.Fields(query)
-	if len(tokens) == 0 {
+	ftsQuery := sqliteFTSQuery(query)
+	if ftsQuery == "" {
 		return nil, nil
 	}
-	ftsQuery := strings.Join(tokens, " OR ")
 
 	var rows *sql.Rows
 	var err error

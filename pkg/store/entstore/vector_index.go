@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"math"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/SAP/astonish/pkg/store"
@@ -13,6 +14,18 @@ import (
 type scoredResult struct {
 	ID    string
 	Score float64
+}
+
+func sqliteFTSQuery(text string) string {
+	words := tsvectorWordRe.FindAllString(text, -1)
+	if len(words) == 0 {
+		return ""
+	}
+	terms := make([]string, 0, len(words))
+	for _, word := range words {
+		terms = append(terms, `"`+strings.ReplaceAll(word, `"`, `""`)+`"`)
+	}
+	return strings.Join(terms, " OR ")
 }
 
 func sortMemoryResults(results []store.MemorySearchResult) {

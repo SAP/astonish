@@ -112,12 +112,19 @@ func (c *ChatAgent) retrievePreProvider(ctx context.Context, lifecycle *lifecycl
 	}
 	wg.Wait()
 	close(failures)
-	var first *retrievalFailure
+	var first, firstCause *retrievalFailure
 	for failure := range failures {
 		if first == nil || failure.order < first.order {
 			copy := failure
 			first = &copy
 		}
+		if !errors.Is(failure.err, context.Canceled) && (firstCause == nil || failure.order < firstCause.order) {
+			copy := failure
+			firstCause = &copy
+		}
+	}
+	if firstCause != nil {
+		return result, fmt.Errorf("%s: %w", firstCause.operation, firstCause.err)
 	}
 	if first != nil {
 		return result, fmt.Errorf("%s: %w", first.operation, first.err)

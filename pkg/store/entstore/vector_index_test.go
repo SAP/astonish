@@ -7,6 +7,14 @@ import (
 	"github.com/SAP/astonish/pkg/store"
 )
 
+func TestSQLiteFTSQueryEscapesConversationText(t *testing.T) {
+	got := sqliteFTSQuery(`Use search_tools("memory") and foo:bar -baz OR "quoted"`)
+	want := `"Use" OR "search_tools" OR "memory" OR "and" OR "foo" OR "bar" OR "baz" OR "OR" OR "quoted"`
+	if got != want {
+		t.Fatalf("sqliteFTSQuery() = %q, want %q", got, want)
+	}
+}
+
 func TestVectorIndexSearchBreaksScoreTiesByID(t *testing.T) {
 	index := newVectorIndex()
 	for _, id := range []string{"c", "a", "b"} {

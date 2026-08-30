@@ -855,8 +855,6 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		if c.Compactor != nil {
 			beforeModelCallbacks = append(beforeModelCallbacks, c.Compactor.BeforeModelCallback())
 		}
-		fingerprints := &requestFingerprintTracker{}
-		beforeModelCallbacks = append(beforeModelCallbacks, fingerprints.callback(sessionID, true))
 
 		// Resolve LLM: prefer per-request override from context (set by channel
 		// manager or other per-message provider resolution), fall back to the
@@ -868,6 +866,7 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		} else {
 			slog.Debug("[agent] Using context-injected LLM override")
 		}
+		effectiveLLM = newDiagnosticLLM(effectiveLLM, cacheDiagnosticsHookFromContext(ctx))
 
 		// Create llmagent with static tools.
 		// Use InstructionProvider (not Instruction) so ADK does NOT run

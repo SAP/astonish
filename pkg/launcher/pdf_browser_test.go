@@ -3,6 +3,7 @@ package launcher
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/SAP/astonish/pkg/sandbox"
@@ -24,6 +25,9 @@ func TestNewBackendPDFResolveFunc_ExistingSessionUsesSessionIDHandle(t *testing.
 		t.Fatalf("PutSession: %v", err)
 	}
 	backend := mock.New()
+	if _, err := backend.CreateSession(context.Background(), sandbox.SessionSpec{SessionID: "sess-existing", TemplateID: sandbox.BaseTemplateID}); err != nil {
+		t.Fatalf("seed backend session: %v", err)
+	}
 
 	resolve := newBackendPDFResolveFunc(backend, reg)
 	name, ip, err := resolve("sess-existing")
@@ -33,34 +37,25 @@ func TestNewBackendPDFResolveFunc_ExistingSessionUsesSessionIDHandle(t *testing.
 	if name != "sess-existing" || ip != "127.0.0.1" {
 		t.Fatalf("resolve returned (%q, %q), want (sess-existing, 127.0.0.1)", name, ip)
 	}
-	if calls := backend.CreateSessionCalls(); len(calls) != 0 {
-		t.Fatalf("CreateSession calls = %d, want 0", len(calls))
+	if calls := backend.CreateSessionCalls(); len(calls) != 1 {
+		t.Fatalf("CreateSession calls = %d, want only the seed call", len(calls))
+	}
+	if calls := backend.StartSessionCalls(); len(calls) != 1 || calls[0] != "sess-existing" {
+		t.Fatalf("StartSession calls = %v, want [sess-existing]", calls)
 	}
 }
 
-func TestNewBackendPDFResolveFunc_CreatesMissingSession(t *testing.T) {
+func TestNewBackendPDFResolveFunc_RejectsUnprovisionedSession(t *testing.T) {
 	backend := mock.New()
-	resolve := newBackendPDFResolveFunc(backend, nil)
+	reg := sandbox.NewSessionRegistryFromStore(newMemorySandboxSessionStore())
+	resolve := newBackendPDFResolveFunc(backend, reg)
 
-	name, ip, err := resolve("sess-new")
-	if err != nil {
-		t.Fatalf("resolve: %v", err)
+	_, _, err := resolve("sess-new")
+	if err == nil || !strings.Contains(err.Error(), "was not provisioned") {
+		t.Fatalf("resolve error = %v, want unprovisioned-session error", err)
 	}
-	if name != "sess-new" || ip != "127.0.0.1" {
-		t.Fatalf("resolve returned (%q, %q), want (sess-new, 127.0.0.1)", name, ip)
-	}
-	createCalls := backend.CreateSessionCalls()
-	if len(createCalls) != 1 {
-		t.Fatalf("CreateSession calls = %d, want 1", len(createCalls))
-	}
-	if got := createCalls[0].Spec.SessionID; got != "sess-new" {
-		t.Fatalf("CreateSession SessionID = %q, want sess-new", got)
-	}
-	if got := createCalls[0].Spec.TemplateID; got != sandbox.BaseTemplateID {
-		t.Fatalf("CreateSession TemplateID = %q, want %q", got, sandbox.BaseTemplateID)
-	}
-	if calls := backend.StartSessionCalls(); len(calls) != 1 || calls[0] != "sess-new" {
-		t.Fatalf("StartSession calls = %v, want [sess-new]", calls)
+	if calls := backend.CreateSessionCalls(); len(calls) != 0 {
+		t.Fatalf("CreateSession calls = %d, want 0", len(calls))
 	}
 }
 

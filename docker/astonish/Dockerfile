@@ -65,6 +65,12 @@ RUN node --version && npx --version && uv --version && uvx --version && git --ve
 
 WORKDIR /app
 
+# Install the slide PPTX workers and their production dependencies.
+COPY web/package.json web/package-lock.json /app/web/
+RUN cd /app/web && npm ci --omit=dev --ignore-scripts && npm cache clean --force
+COPY pkg/docs/slides/pptxworker/worker.mjs pkg/docs/slides/pptxworker/import_worker.mjs /app/pkg/docs/slides/pptxworker/
+ENV ASTONISH_ROOT=/app
+
 # Copy the pre-built Linux astonish binary for the target architecture.
 # TARGETARCH is set automatically by docker buildx (amd64 or arm64).
 # Do not give TARGETARCH a default — BuildKit overrides are ignored when a

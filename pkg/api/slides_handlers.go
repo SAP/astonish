@@ -2,14 +2,13 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
-	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -19,6 +18,7 @@ import (
 	"github.com/SAP/astonish/pkg/docs/slides/pptxworker"
 	"github.com/SAP/astonish/pkg/docs/slides/themes"
 	"github.com/SAP/astonish/pkg/pdfgen"
+	"github.com/SAP/astonish/pkg/sandbox"
 	"github.com/SAP/astonish/pkg/store"
 	webassets "github.com/SAP/astonish/web"
 	"github.com/gorilla/mux"
@@ -395,6 +395,76 @@ func ExportSlidesHTMLHandler(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(result.Bytes)
 }
 
+var (
+	ensureSlidesPDFSandboxSessionFn = ensureSlidesPDFSandboxSession
+	slidesTemplateLayerChainFn      = resolveTemplateLayerChain
+	slidesBaseLayerChainFn          = resolveBaseLayerChain
+	slidesTemplateImageFn           = resolveTemplateImage
+	slidesBaseImageFn               = resolveBaseImage
+)
+
+func slidesPDFSandboxSpec(ctx context.Context, r *http.Request, userID string) sandbox.SessionSpec {
+	templateName := sandbox.BaseTemplateID
+	if svc := store.FromRequest(r); svc != nil && svc.Settings != nil {
+		if settings, err := svc.Settings.Get(ctx); err == nil && settings != nil && settings.TemplateName != "" {
+			templateName = settings.TemplateName
+		}
+	}
+
+	layerChain := slidesTemplateLayerChainFn(ctx, templateName)
+	if len(layerChain) == 0 {
+		layerChain = slidesBaseLayerChainFn(ctx)
+	}
+	image := slidesTemplateImageFn(ctx, templateName)
+	if image == "" {
+		image = slidesBaseImageFn(ctx)
+	}
+
+	return sandbox.SessionSpec{
+		Type:       sandbox.SessionTypeChat,
+		TemplateID: templateName,
+		LayerChain: layerChain,
+		Image:      image,
+		UserID:     userID,
+		Labels:     map[string]string{"purpose": "slides-pdf"},
+	}
+}
+
+func slidesPDFSandboxSessionID(ctx context.Context, r *http.Request, userID string) string {
+	// Include the filesystem source in the ID so a changed base/template does
+	// not reuse a warm pod built from an obsolete layer chain or image.
+	spec := slidesPDFSandboxSpec(ctx, r, userID)
+	source := strings.Join(spec.LayerChain, "\x00") + "\x00" + spec.Image
+	if source != "\x00" {
+		suffix := fmt.Sprintf("%x", sha256.Sum256([]byte(source)))[:12]
+		return "slides-pdf-" + userID + "-" + suffix
+	}
+	return "slides-pdf-" + userID
+}
+
+func ensureSlidesPDFSandboxSession(ctx context.Context, r *http.Request, sessionID, userID string) error {
+	backend, cleanup, err := sandboxBackendForRequest(r)
+	if err != nil {
+		return err
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
+
+	spec := slidesPDFSandboxSpec(ctx, r, userID)
+	spec.SessionID = sessionID
+	if _, err := backend.CreateSession(ctx, spec); err != nil {
+		return fmt.Errorf("create slides PDF sandbox: %w", err)
+	}
+	if err := backend.StartSession(ctx, sessionID); err != nil {
+		return fmt.Errorf("start slides PDF sandbox: %w", err)
+	}
+	if err := backend.WaitForSessionReady(ctx, sessionID); err != nil {
+		return fmt.Errorf("wait for slides PDF sandbox: %w", err)
+	}
+	return nil
+}
+
 func ExportSlidesPDFHandler(w http.ResponseWriter, r *http.Request) {
 	// Decide where Chrome renders BEFORE loading the scene, so a misconfigured
 	// sandbox (required but no in-container browser) fails fast with a clear
@@ -409,7 +479,16 @@ func ExportSlidesPDFHandler(w http.ResponseWriter, r *http.Request) {
 	timeout := time.Duration(0) // pdfgen applies its bounded default when 0
 	sessionID := ""
 	if required {
-		sessionID = "slides-pdf-" + effectiveUserID(r) // dedicated per-user PDF session, mirrors app-mcp-<user>
+		userID := effectiveUserID(r)
+		sessionID = slidesPDFSandboxSessionID(r.Context(), r, userID)
+		provisionCtx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+		err := ensureSlidesPDFSandboxSessionFn(provisionCtx, r, sessionID, userID)
+		cancel()
+		if err != nil {
+			slog.Error("slides PDF: sandbox provisioning failed", "deck", mux.Vars(r)["deckSlug"], "backend", backendLabel, "error", err)
+			http.Error(w, "slides PDF export could not prepare its sandbox: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 		mgr, err := slidesPDFBrowserManagerFn(sessionID)
 		if err != nil {
 			slog.Error("slides PDF: sandbox browser unavailable", "deck", mux.Vars(r)["deckSlug"], "backend", backendLabel, "error", err)
@@ -475,12 +554,15 @@ func ExportSlidesPPTXHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, currentFile, _, _ := runtime.Caller(0)
-	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(currentFile), "../.."))
-
+	workingDir, scriptPath, err := slidesWorkerPaths("worker.mjs")
+	if err != nil {
+		slog.Error("slides PPTX worker unavailable", "deck", deckSlug, "error", err)
+		http.Error(w, "export slides PPTX: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	exporter := slides.PPTXExporter{Runner: pptxworker.Runner{
-		WorkingDir: filepath.Join(repoRoot, "web"),
-		ScriptPath: filepath.Join(repoRoot, "pkg/docs/slides/pptxworker/worker.mjs"),
+		WorkingDir: workingDir,
+		ScriptPath: scriptPath,
 	}}
 	result, err := exporter.Export(r.Context(), scene, r.URL.Query().Get("strictNative") == "true")
 	if err != nil {

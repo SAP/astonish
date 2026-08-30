@@ -3,7 +3,6 @@ package launcher
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"time"
 
 	"github.com/SAP/astonish/pkg/sandbox"
@@ -27,24 +26,13 @@ func newBackendPDFResolveFunc(backend sandbox.Backend, sessReg *sandbox.SessionR
 			if err != nil {
 				return "", "", fmt.Errorf("PDF resolve: lookup session: %w", err)
 			}
-			if rec != nil && rec.PodName != "" {
-				return sessionID, "127.0.0.1", nil
+			if rec == nil {
+				return "", "", fmt.Errorf("PDF resolve: session %q was not provisioned", sessionID)
 			}
 		}
 
-		slogArgs := []any{"component", "chat-factory", "backend", backend.Kind(), "sessionID", sessionID}
-		slog.Info("PDF resolve: sandbox not found, creating", slogArgs...)
-
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
-
-		if _, err := backend.CreateSession(ctx, sandbox.SessionSpec{
-			SessionID:  sessionID,
-			Type:       sandbox.SessionTypeChat,
-			TemplateID: sandbox.BaseTemplateID,
-		}); err != nil {
-			return "", "", fmt.Errorf("PDF resolve: create session: %w", err)
-		}
 		if err := backend.StartSession(ctx, sessionID); err != nil {
 			return "", "", fmt.Errorf("PDF resolve: start session: %w", err)
 		}

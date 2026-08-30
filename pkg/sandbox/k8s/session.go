@@ -946,13 +946,15 @@ func (b *K8sBackend) WaitForSessionReady(ctx context.Context, sessionID string) 
 		} else {
 			switch pod.Status.Phase {
 			case corev1.PodRunning:
-				return nil
+				if isPodReady(pod) {
+					return nil
+				}
 			case corev1.PodFailed, corev1.PodSucceeded:
 				return fmt.Errorf("WaitForSessionReady(%s): pod reached terminal phase %s", sessionID, pod.Status.Phase)
 			}
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("WaitForSessionReady(%s): pod did not reach Running within %s", sessionID, sessionReadyTimeout)
+			return fmt.Errorf("WaitForSessionReady(%s): pod did not become ready within %s", sessionID, sessionReadyTimeout)
 		}
 		select {
 		case <-ctx.Done():

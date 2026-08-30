@@ -76,6 +76,7 @@ func eventsToMessages(events session.Events, redactor *credentials.Redactor) []S
 		toolName string
 	}
 	pendingWriteFiles := make(map[string]pendingWriteFile)
+	uiTools := newUIToolTracker()
 
 	for i := range events.Len() {
 		event := events.At(i)
@@ -206,56 +207,61 @@ func eventsToMessages(events session.Events, redactor *credentials.Redactor) []S
 				}
 			}
 			if part.FunctionCall != nil {
+				identity := uiTools.call(part.FunctionCall)
+				toolName := identity.name
+				toolArgs := identity.args
+
 				// Intercept delegate_tasks calls: buffer the task plan and
 				// suppress the flat tool_call message. The matching
 				// FunctionResponse below will produce a subtask_execution
 				// message instead.
-				if part.FunctionCall.Name == "delegate_tasks" {
-					pd := extractDelegationPlan(part.FunctionCall.Args)
+				if toolName == "delegate_tasks" {
+					pd := extractDelegationPlan(toolArgs)
 					pendingDelegations[part.FunctionCall.ID] = pd
 					continue
 				}
 
 				// Intercept announce_plan: emit a plan message immediately.
-				if part.FunctionCall.Name == "announce_plan" {
-					msg := buildPlanMessage(part.FunctionCall.Args)
+				if toolName == "announce_plan" {
+					msg := buildPlanMessage(toolArgs)
 					messages = append(messages, msg)
 					continue
 				}
 
 				// Intercept update_plan: update the most recent plan message's step.
-				if part.FunctionCall.Name == "update_plan" {
-					applyPlanStepUpdate(messages, part.FunctionCall.Args)
+				if toolName == "update_plan" {
+					applyPlanStepUpdate(messages, toolArgs)
 					continue
 				}
 
 				// Buffer write_file/edit_file calls to emit artifact messages
 				// when their FunctionResponse confirms success.
-				if part.FunctionCall.Name == "write_file" || part.FunctionCall.Name == "edit_file" {
-					p := extractFilePath(part.FunctionCall.Name, part.FunctionCall.Args)
+				if toolName == "write_file" || toolName == "edit_file" {
+					p := extractFilePath(toolName, toolArgs)
 					if p != "" {
 						pendingWriteFiles[part.FunctionCall.ID] = pendingWriteFile{
 							path:     p,
-							toolName: part.FunctionCall.Name,
+							toolName: toolName,
 						}
 					}
 				}
 
-				args := part.FunctionCall.Args
-				if redactor != nil && args != nil {
-					args = redactor.RedactMap(args)
+				if redactor != nil && toolArgs != nil {
+					toolArgs = redactor.RedactMap(toolArgs)
 				}
 				messages = append(messages, StudioMessage{
 					Type:     "tool_call",
-					ToolName: part.FunctionCall.Name,
+					ToolName: toolName,
 					ToolID:   part.FunctionCall.ID,
-					ToolArgs: args,
+					ToolArgs: toolArgs,
 				})
 			}
 			if part.FunctionResponse != nil {
+				toolName := uiTools.response(part.FunctionResponse)
+
 				// Intercept delegate_tasks responses: combine with the
 				// buffered task plan to produce a subtask_execution message.
-				if part.FunctionResponse.Name == "delegate_tasks" {
+				if toolName == "delegate_tasks" {
 					msg := buildSubTaskExecutionMessage(
 						pendingDelegations[part.FunctionResponse.ID],
 						part.FunctionResponse.Response,
@@ -266,7 +272,7 @@ func eventsToMessages(events session.Events, redactor *credentials.Redactor) []S
 				}
 
 				// Suppress plan tool responses — no useful display info.
-				if part.FunctionResponse.Name == "announce_plan" || part.FunctionResponse.Name == "update_plan" {
+				if toolName == "announce_plan" || toolName == "update_plan" {
 					continue
 				}
 
@@ -276,7 +282,7 @@ func eventsToMessages(events session.Events, redactor *credentials.Redactor) []S
 				}
 				messages = append(messages, StudioMessage{
 					Type:       "tool_result",
-					ToolName:   part.FunctionResponse.Name,
+					ToolName:   toolName,
 					ToolID:     part.FunctionResponse.ID,
 					ToolResult: summarizeToolResult(resp),
 				})
@@ -575,6 +581,7 @@ func collectArtifacts(events session.Events) []ArtifactInfo {
 	// write_file; the artifact metadata must point at that latest mutation.
 	artifactIndex := make(map[string]int)
 	var artifacts []ArtifactInfo
+	uiTools := newUIToolTracker()
 
 	addArtifact := func(path, toolName string) {
 		if path == "" {
@@ -602,9 +609,10 @@ func collectArtifacts(events session.Events) []ArtifactInfo {
 
 		for _, part := range event.LLMResponse.Content.Parts {
 			if part.FunctionCall != nil {
-				name := part.FunctionCall.Name
+				identity := uiTools.call(part.FunctionCall)
+				name := identity.name
 				if name == "write_file" || name == "edit_file" {
-					path := extractFilePath(name, part.FunctionCall.Args)
+					path := extractFilePath(name, identity.args)
 					if path != "" {
 						pending[part.FunctionCall.ID] = pendingWrite{
 							path:     path,
@@ -621,6 +629,7 @@ func collectArtifacts(events session.Events) []ArtifactInfo {
 				}
 			}
 			if part.FunctionResponse != nil {
+				uiTools.response(part.FunctionResponse)
 				pw, ok := pending[part.FunctionResponse.ID]
 				if !ok {
 					continue
@@ -1198,15 +1207,17 @@ func readArtifactContentFromEventSlice(events []*session.Event, filePath string)
 		previousKnown   bool
 	}
 	pending := make(map[string]pendingMutation)
+	uiTools := newUIToolTracker()
 
 	for _, event := range events {
 		if event == nil || event.LLMResponse.Content == nil {
 			continue
 		}
 		for _, part := range event.LLMResponse.Content.Parts {
-			if part.FunctionCall != nil && part.FunctionCall.Args != nil {
-				args := part.FunctionCall.Args
-				switch part.FunctionCall.Name {
+			if part.FunctionCall != nil {
+				identity := uiTools.call(part.FunctionCall)
+				args := identity.args
+				switch identity.name {
 				case "write_file":
 					p, _ := args["file_path"].(string)
 					if filepath.Clean(p) != cleanTarget {
@@ -1235,6 +1246,7 @@ func readArtifactContentFromEventSlice(events []*session.Event, filePath string)
 				}
 			}
 			if part.FunctionResponse != nil {
+				uiTools.response(part.FunctionResponse)
 				previous, ok := pending[part.FunctionResponse.ID]
 				if !ok {
 					continue
@@ -1720,13 +1732,17 @@ func injectTutorialSceneSlideshows(messages []StudioMessage, events session.Even
 
 	var pending []slideshowInsert
 	runDrillIdx := 0
+	uiTools := newUIToolTracker()
 	for i := range events.Len() {
 		ev := events.At(i)
 		if ev == nil || ev.Content == nil {
 			continue
 		}
 		for _, part := range ev.Content.Parts {
-			if part.FunctionResponse == nil || part.FunctionResponse.Name != "run_drill" {
+			if part.FunctionCall != nil {
+				uiTools.call(part.FunctionCall)
+			}
+			if part.FunctionResponse == nil || uiTools.response(part.FunctionResponse) != "run_drill" {
 				continue
 			}
 			resp := part.FunctionResponse.Response

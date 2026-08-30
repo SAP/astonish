@@ -402,6 +402,134 @@ func TestEventsToMessages_ToolCallBreaksCoalescing(t *testing.T) {
 	}
 }
 
+func TestEventsToMessages_UnwrapsPersistedExecuteTool(t *testing.T) {
+	events := testEvents{
+		{
+			InvocationID: "inv-1",
+			LLMResponse: model.LLMResponse{Content: &genai.Content{
+				Role: "model",
+				Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+					ID:   "call-1",
+					Name: "execute_tool",
+					Args: map[string]any{
+						"name":      "browser_navigate",
+						"arguments": map[string]any{"url": "https://example.com"},
+					},
+				}}},
+			}},
+		},
+		{
+			InvocationID: "inv-1",
+			LLMResponse: model.LLMResponse{Content: &genai.Content{
+				Role: "user",
+				Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{
+					ID:       "call-1",
+					Name:     "execute_tool",
+					Response: map[string]any{"status": "ok"},
+				}}},
+			}},
+		},
+	}
+
+	msgs := eventsToMessages(events, nil)
+	if len(msgs) != 2 {
+		t.Fatalf("expected 2 messages, got %d: %+v", len(msgs), msgs)
+	}
+	if msgs[0].Type != "tool_call" || msgs[0].ToolName != "browser_navigate" {
+		t.Fatalf("unexpected tool call: %+v", msgs[0])
+	}
+	args, ok := msgs[0].ToolArgs.(map[string]any)
+	if !ok || args["url"] != "https://example.com" {
+		t.Fatalf("tool call args = %#v", msgs[0].ToolArgs)
+	}
+	if msgs[1].Type != "tool_result" || msgs[1].ToolName != "browser_navigate" {
+		t.Fatalf("unexpected tool result: %+v", msgs[1])
+	}
+}
+
+func TestEventsToMessages_UnwrapsPersistedExecuteToolWithoutIDs(t *testing.T) {
+	events := testEvents{
+		{
+			InvocationID: "inv-1",
+			LLMResponse: model.LLMResponse{Content: &genai.Content{
+				Role: "model",
+				Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+					Name: "execute_tool",
+					Args: map[string]any{
+						"name":      "ask_user",
+						"arguments": map[string]any{"prompt": "Continue?"},
+					},
+				}}},
+			}},
+		},
+		{
+			InvocationID: "inv-1",
+			LLMResponse: model.LLMResponse{Content: &genai.Content{
+				Role: "user",
+				Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{
+					Name:     "execute_tool",
+					Response: map[string]any{"answer": "yes"},
+				}}},
+			}},
+		},
+	}
+
+	msgs := eventsToMessages(events, nil)
+	if len(msgs) != 2 || msgs[0].ToolName != "ask_user" || msgs[1].ToolName != "ask_user" {
+		t.Fatalf("execute_tool leaked from ID-less history: %+v", msgs)
+	}
+}
+
+func TestEventsToMessages_UnwrappedExecuteToolPreservesArtifactHandling(t *testing.T) {
+	events := testEvents{
+		{
+			InvocationID: "inv-1",
+			LLMResponse: model.LLMResponse{Content: &genai.Content{
+				Role: "model",
+				Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+					ID:   "call-1",
+					Name: "execute_tool",
+					Args: map[string]any{
+						"name":      "write_file",
+						"arguments": map[string]any{"file_path": "/tmp/report.md", "content": "report"},
+					},
+				}}},
+			}},
+		},
+		{
+			InvocationID: "inv-1",
+			LLMResponse: model.LLMResponse{Content: &genai.Content{
+				Role: "user",
+				Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{
+					ID:       "call-1",
+					Name:     "execute_tool",
+					Response: map[string]any{"status": "ok"},
+				}}},
+			}},
+		},
+	}
+
+	msgs := eventsToMessages(events, nil)
+	if len(msgs) != 3 {
+		t.Fatalf("expected tool call, result, and artifact; got %d: %+v", len(msgs), msgs)
+	}
+	if msgs[0].ToolName != "write_file" || msgs[1].ToolName != "write_file" {
+		t.Fatalf("wrapped names leaked into messages: %+v", msgs)
+	}
+	if msgs[2].Type != "artifact" || msgs[2].ToolName != "write_file" || msgs[2].Content != "/tmp/report.md" {
+		t.Fatalf("unexpected artifact: %+v", msgs[2])
+	}
+
+	artifacts := collectArtifacts(events)
+	if len(artifacts) != 1 || artifacts[0].Path != "/tmp/report.md" || artifacts[0].ToolName != "write_file" {
+		t.Fatalf("unexpected collected artifacts: %+v", artifacts)
+	}
+	content, ok := readArtifactContentFromEvents(events, "/tmp/report.md")
+	if !ok || content != "report" {
+		t.Fatalf("artifact content = %q, %v", content, ok)
+	}
+}
+
 func TestTryParseAppPreviewMessage_WithAppID(t *testing.T) {
 	text := `[app_preview]{"code":"function App() { return <div>hi</div> }","title":"My App","version":1,"appId":"uuid-123"}`
 	msg := tryParseAppPreviewMessage(text)

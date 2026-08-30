@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -1008,6 +1009,54 @@ func TestLifecycle_NoClient_StubsStillApply(t *testing.T) {
 	// DestroySession must still succeed on an absent session.
 	if err := b.DestroySession(ctx, "never-existed"); err != nil {
 		t.Errorf("DestroySession without Client on absent session: got %v, want nil", err)
+	}
+}
+
+func TestWaitForSessionReady_RequiresPodReady(t *testing.T) {
+	reg := newRegistry(t)
+	sessionID := "wait-ready"
+	podName := podNameForSession(sessionID)
+	if err := reg.PutSession(&store.SandboxSession{SessionID: sessionID, Backend: "k8s", PodName: podName}); err != nil {
+		t.Fatalf("PutSession: %v", err)
+	}
+	client := fake.NewSimpleClientset(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: "default"},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	})
+	b, err := New(Config{Client: client, Namespace: "default", Sessions: reg})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if err := b.WaitForSessionReady(ctx, sessionID); err == nil {
+		t.Fatal("WaitForSessionReady returned before PodReady=True")
+	}
+}
+
+func TestWaitForSessionReady_AcceptsReadyPod(t *testing.T) {
+	reg := newRegistry(t)
+	sessionID := "already-ready"
+	podName := podNameForSession(sessionID)
+	if err := reg.PutSession(&store.SandboxSession{SessionID: sessionID, Backend: "k8s", PodName: podName}); err != nil {
+		t.Fatalf("PutSession: %v", err)
+	}
+	client := fake.NewSimpleClientset(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: "default"},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			Conditions: []corev1.PodCondition{{
+				Type: corev1.PodReady, Status: corev1.ConditionTrue,
+			}},
+		},
+	})
+	b, err := New(Config{Client: client, Namespace: "default", Sessions: reg})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := b.WaitForSessionReady(context.Background(), sessionID); err != nil {
+		t.Fatalf("WaitForSessionReady: %v", err)
 	}
 }
 

@@ -221,6 +221,11 @@ type Manager struct {
 	// session ID, so EnsureSessionID resolves them to the same container.
 	sessionAliases map[string]string
 
+	// ContainerEnsureReadyFunc waits for background sandbox provisioning before
+	// browser launch resolves the session container. It is optional for backends
+	// whose resolver already performs synchronous provisioning.
+	ContainerEnsureReadyFunc func(sessionID string) error
+
 	// ContainerResolveFunc resolves the session container for browser execution.
 	// Called lazily by launchInContainer() to get the container name and IP.
 	// The browser runs in the same session container as other tools.
@@ -828,6 +833,17 @@ func (m *Manager) launchInContainerInner() (*rod.Browser, error) {
 		}
 		m.config.RemoteCDPURL = resolved
 		return m.connectContainerCDP()
+	}
+
+	// Browser tools bypass NodeTool.Run, so wait on the same lazy sandbox
+	// provisioning barrier before resolving the session record.
+	if m.ContainerEnsureReadyFunc != nil {
+		if err := m.ContainerEnsureReadyFunc(m.sessionID); err != nil {
+			return nil, fmt.Errorf(
+				"failed to prepare session container for session %s: %w",
+				shortSessionID(m.sessionID), err,
+			)
+		}
 	}
 
 	// Resolve the session container — get its name and IP from the sandbox.

@@ -937,6 +937,14 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 					gw := osb.Gateway()
 					sessReg := osb.Sessions()
 					if WireOpenShellBrowserManager(browserMgr, gw, sessReg, sessReg.TouchActivity) {
+						browserMgr.ContainerEnsureReadyFunc = func(sessionID string) error {
+							client := pool.GetOrCreate(sessionID)
+							if client == nil {
+								return fmt.Errorf("no sandbox client for session %q", sessionID)
+							}
+							return client.EnsureReady(sessionID)
+						}
+
 						// Register the dial func for the VNC proxy handler so it
 						// can tunnel HTTP/WebSocket to KasmVNC inside the sandbox.
 						api.SetVNCContainerDialFunc(browserMgr.ContainerDialFunc)
@@ -993,7 +1001,7 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			}
 
 			if kind == sandbox.BackendKindK8s {
-				if sandbox.WireBackendBrowserManager(browserMgr, b, sessRegistry, sessRegistry.TouchActivity) {
+				if sandbox.WireBackendBrowserManager(browserMgr, b, sessRegistry, pool, sessRegistry.TouchActivity) {
 					api.SetVNCContainerDialFunc(browserMgr.ContainerDialFunc)
 
 					// Register callbacks for the PDF browser manager so PDF export

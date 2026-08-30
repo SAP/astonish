@@ -56,7 +56,7 @@ command_line:
 // WireBackendBrowserManager configures mgr so browser tools launch Chromium
 // inside a backend-managed session. This is used by the direct K8s backend,
 // where Browser Manager callbacks can route through Backend.ExecStreaming.
-func WireBackendBrowserManager(mgr *browser.Manager, backend Backend, sessReg *SessionRegistry, touchActivity func(sessionID string)) bool {
+func WireBackendBrowserManager(mgr *browser.Manager, backend Backend, sessReg *SessionRegistry, pool ToolNodePool, touchActivity func(sessionID string)) bool {
 	if mgr == nil || backend == nil || sessReg == nil {
 		return false
 	}
@@ -66,6 +66,15 @@ func WireBackendBrowserManager(mgr *browser.Manager, backend Backend, sessReg *S
 
 	bcfg := mgr.Config()
 	mgr.SandboxEnabled = true
+	if pool != nil {
+		mgr.ContainerEnsureReadyFunc = func(sessionID string) error {
+			client := pool.GetOrCreate(sessionID)
+			if client == nil {
+				return fmt.Errorf("no sandbox client for session %q", sessionID)
+			}
+			return client.EnsureReady(sessionID)
+		}
+	}
 	mgr.ContainerResolveFunc = func(sessionID string) (string, string, error) {
 		rec, err := sessReg.GetSession(sessionID)
 		if err != nil || rec == nil || rec.PodName == "" {

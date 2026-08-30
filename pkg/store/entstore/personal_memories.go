@@ -88,7 +88,7 @@ func (ms *personalMemoryStore) vectorSearch(ctx context.Context, embedding []flo
 			`SELECT id, chunk_text, category, source_path, created_by, session_id, created_at,
 				1 - (embedding <=> $1::vector) AS score
 			FROM memories
-			WHERE category = $2
+			WHERE embedding IS NOT NULL AND category = $2
 			ORDER BY embedding <=> $1::vector, id ASC
 			LIMIT $3`,
 			vecStr, category, maxResults)
@@ -97,6 +97,7 @@ func (ms *personalMemoryStore) vectorSearch(ctx context.Context, embedding []flo
 			`SELECT id, chunk_text, category, source_path, created_by, session_id, created_at,
 				1 - (embedding <=> $1::vector) AS score
 			FROM memories
+			WHERE embedding IS NOT NULL
 			ORDER BY embedding <=> $1::vector, id ASC
 			LIMIT $2`,
 			vecStr, maxResults)
@@ -116,18 +117,18 @@ func (ms *personalMemoryStore) vectorSearch(ctx context.Context, embedding []flo
 			createdBy sql.NullString
 			sessionID sql.NullString
 			createdAt time.Time
-			score     float64
+			score     sql.NullFloat64
 		)
 		if err := rows.Scan(&id, &chunkText, &cat, &srcPath, &createdBy, &sessionID, &createdAt, &score); err != nil {
 			return nil, fmt.Errorf("scan memory search result: %w", err)
 		}
-		if score < minScore {
+		if !score.Valid || score.Float64 < minScore {
 			continue
 		}
 		r := store.MemorySearchResult{
 			ID:        id.String(),
 			Snippet:   chunkText,
-			Score:     score,
+			Score:     score.Float64,
 			Scope:     "personal",
 			CreatedAt: createdAt.Format(time.RFC3339),
 		}

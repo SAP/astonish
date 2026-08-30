@@ -379,7 +379,7 @@ func PresentSlidesHandler(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	setSlidesDocumentHeaders(w, false)
+	setSlidesDocumentHeaders(w, false, r.URL.Query().Get("presenter") == "1")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(result.Bytes)
 }
@@ -389,7 +389,7 @@ func ExportSlidesHTMLHandler(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	setSlidesDocumentHeaders(w, true)
+	setSlidesDocumentHeaders(w, true, false)
 	w.Header().Set("Content-Disposition", attachmentName(mux.Vars(r)["deckSlug"], "html"))
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(result.Bytes)
@@ -614,9 +614,13 @@ func bakeDeckThumbnails(ctx context.Context, svc slides.Service, slug, sessionSu
 	}
 }
 
-func setSlidesDocumentHeaders(w http.ResponseWriter, download bool) {
+func setSlidesDocumentHeaders(w http.ResponseWriter, download, presenter bool) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Content-Security-Policy", "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'")
+	policy := "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"
+	if !presenter {
+		policy = "sandbox allow-scripts; " + policy
+	}
+	w.Header().Set("Content-Security-Policy", policy)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	if !download {

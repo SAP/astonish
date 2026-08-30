@@ -44,6 +44,31 @@ func TestCSPMiddleware_AllowsBlobMedia(t *testing.T) {
 	}
 }
 
+func TestSlidesDocumentHeadersAllowFullscreenOnlyForPresenter(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		download  bool
+		presenter bool
+		sandboxed bool
+	}{
+		{name: "embedded preview", sandboxed: true},
+		{name: "download", download: true, sandboxed: true},
+		{name: "presenter tab", presenter: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			setSlidesDocumentHeaders(rr, tc.download, tc.presenter)
+			got := rr.Header().Get("Content-Security-Policy")
+			if strings.HasPrefix(got, "sandbox ") != tc.sandboxed {
+				t.Fatalf("CSP = %q, sandboxed = %v", got, tc.sandboxed)
+			}
+			if !strings.Contains(got, "default-src 'none'") {
+				t.Fatalf("CSP lost restrictive defaults: %q", got)
+			}
+		})
+	}
+}
+
 func TestCSPMiddlewarePreservesSlidesPresentationPolicy(t *testing.T) {
 	const presentationCSP = "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'"
 	handler := CSPMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

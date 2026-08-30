@@ -261,7 +261,7 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
   }, [total, focusStripTile])
 
   const present = useCallback(() => {
-    window.open(slidesPresentationURL(deckSlug, scope), '_blank', 'noopener,noreferrer')
+    window.open(slidesPresentationURL(deckSlug, scope, true), '_blank', 'noopener,noreferrer')
   }, [deckSlug, scope])
 
   const exportDeck = useCallback(async (format: SlidesExportFormat) => {

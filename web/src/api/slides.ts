@@ -177,8 +177,9 @@ export async function fetchSlidesDeck(deckSlug: string, scope: DocsScope = 'pers
   return response.json() as Promise<SlidesDeckResponse>
 }
 
-export function slidesPresentationURL(deckSlug: string, scope: DocsScope = 'personal'): string {
-  return withScope(`${DOCS_BASE}/slides/${encodeURIComponent(deckSlug)}/present`, scope)
+export function slidesPresentationURL(deckSlug: string, scope: DocsScope = 'personal', presenter = false): string {
+  const url = withScope(`${DOCS_BASE}/slides/${encodeURIComponent(deckSlug)}/present`, scope)
+  return presenter ? `${url}&presenter=1` : url
 }
 
 export async function fetchSlidesPresentation(deckSlug: string, scope: DocsScope = 'personal'): Promise<Blob> {

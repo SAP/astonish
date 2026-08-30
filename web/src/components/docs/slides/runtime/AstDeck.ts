@@ -99,7 +99,10 @@ export class AstDeck extends LitElement implements AstDeckElement {
     const parent = this.parentElement
     if (!parent) return
     const scale = Math.min(parent.clientWidth / CANVAS_WIDTH, parent.clientHeight / CANVAS_HEIGHT)
-    if (Number.isFinite(scale) && scale > 0) this.style.transform = `scale(${scale})`
+    if (!Number.isFinite(scale) || scale <= 0) return
+    this.style.transform = `scale(${scale})`
+    this.style.left = `${Math.max(0, (parent.clientWidth - CANVAS_WIDTH * scale) / 2)}px`
+    this.style.top = `${Math.max(0, (parent.clientHeight - CANVAS_HEIGHT * scale) / 2)}px`
   }
 
   private async signalReady(): Promise<void> {

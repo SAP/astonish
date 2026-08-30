@@ -1,5 +1,6 @@
 export const runtimeStyles = `
-  ast-deck { display:block; position:relative; width:1920px; height:1080px; overflow:hidden; transform-origin:top left; background:var(--ast-surface,#fff); color:var(--ast-ink,#172033); }
+  html:has(> body > ast-deck), body:has(> ast-deck) { margin:0; width:100%; height:100%; overflow:hidden; background:#000; }
+  ast-deck { display:block; position:absolute; width:1920px; height:1080px; overflow:hidden; transform-origin:top left; background:var(--ast-surface,#fff); color:var(--ast-ink,#172033); }
   /* Off-screen slides are display:none so their (potentially hundreds of)
      elements are never laid out; content-visibility:auto + contain-intrinsic-size
      lets the browser also skip rendering work for any slide that becomes
@@ -39,6 +40,7 @@ export const runtimeStyles = `
        page-sized slide onto a trailing blank page. */
     @page { size:20in 11.25in; margin:0; }
     html, body { margin:0; padding:0; width:20in; overflow:visible; }
+    body { background:var(--ast-surface,#fff); }
     ast-deck { transform:none!important; position:static!important; width:20in; height:auto; overflow:visible; background:transparent!important; }
     ast-slide { display:block!important; position:relative!important; inset:auto!important; width:20in!important; height:11.25in!important; overflow:hidden; break-inside:avoid; break-after:page; page-break-after:always; }
     ast-slide:last-of-type { break-after:auto; page-break-after:auto; }

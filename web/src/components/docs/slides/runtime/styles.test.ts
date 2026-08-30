@@ -10,7 +10,12 @@ import { runtimeStyles } from './styles'
 // each slide with white margins — and spills the page-sized slide onto a
 // trailing blank page. This test locks the print contract so that regression
 // is caught in CI instead of only in an exported PDF.
-describe('slides runtime print styles', () => {
+describe('slides runtime styles', () => {
+  it('centers the positioned slide canvas against a black viewport', () => {
+    expect(runtimeStyles).toContain('html:has(> body > ast-deck), body:has(> ast-deck) { margin:0; width:100%; height:100%; overflow:hidden; background:#000; }')
+    expect(runtimeStyles).toContain('ast-deck { display:block; position:absolute;')
+  })
+
   it('sizes the page and slides to the exact PDF paper (no scale-to-fit)', () => {
     expect(runtimeStyles).toContain('@page { size:20in 11.25in; margin:0; }')
     expect(runtimeStyles).toContain('width:20in!important')

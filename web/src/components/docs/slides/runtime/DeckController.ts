@@ -1,5 +1,6 @@
 import type { AstFragment } from './AstFragment'
 import type { AstSlide } from './AstSlide'
+import { hitTest } from './EditController'
 import type { DeckChangeDetail, FragmentPolicy } from './types'
 
 const NAVIGATION_KEYS = new Set(['ArrowRight', 'ArrowDown', 'PageDown', ' ', 'ArrowLeft', 'ArrowUp', 'PageUp', 'Home', 'End'])
@@ -8,6 +9,10 @@ export class DeckController {
   private index = 0
   private fragment = 0
   private touchStart?: { x: number; y: number }
+  private presenter = new URLSearchParams(location.search).get('presenter') === '1'
+  private enteredFullscreen = false
+  private presenterClosed = false
+  private presenterStart?: HTMLButtonElement
 
   get currentIndex(): number {
     return this.index
@@ -24,7 +29,12 @@ export class DeckController {
     this.deck.addEventListener('touchstart', this.onTouchStart, { passive: true })
     this.deck.addEventListener('touchend', this.onTouchEnd, { passive: true })
     window.addEventListener('hashchange', this.onHashChange)
+    if (this.presenter) {
+      document.addEventListener('fullscreenchange', this.onFullscreenChange)
+      window.addEventListener('keydown', this.onPresenterKeyDown)
+    }
     this.applyState(false)
+    if (this.presenter) void this.enterFullscreen()
   }
 
   disconnect(): void {
@@ -33,6 +43,9 @@ export class DeckController {
     this.deck.removeEventListener('touchstart', this.onTouchStart)
     this.deck.removeEventListener('touchend', this.onTouchEnd)
     window.removeEventListener('hashchange', this.onHashChange)
+    document.removeEventListener('fullscreenchange', this.onFullscreenChange)
+    window.removeEventListener('keydown', this.onPresenterKeyDown)
+    this.hidePresenterStart()
   }
 
   next(): void {
@@ -184,9 +197,102 @@ export class DeckController {
   }
 
   private readonly onClick = (event: MouseEvent): void => {
-    if (this.deck.hasAttribute('edit')) return
     if (event.defaultPrevented || (event.target as Element).closest('a,button,input,textarea,select')) return
+    if (this.deck.hasAttribute('edit') && hitTest(this.deck, event.clientX, event.clientY)) return
     event.clientX < window.innerWidth / 3 ? this.previous() : this.next()
+  }
+
+  private readonly onPresenterStart = (event: MouseEvent): void => {
+    event.preventDefault()
+    event.stopPropagation()
+    void this.enterFullscreen()
+  }
+
+  private readonly onPresenterKeyDown = (event: KeyboardEvent): void => {
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      void this.exitPresenter()
+      return
+    }
+    if (event.target !== this.presenterStart) void this.enterFullscreen()
+  }
+
+  private readonly onFullscreenChange = (): void => {
+    if (document.fullscreenElement) {
+      this.enteredFullscreen = true
+      this.hidePresenterStart()
+      return
+    }
+    if (this.enteredFullscreen) this.closePresenter()
+  }
+
+  private async enterFullscreen(): Promise<void> {
+    if (document.fullscreenElement) {
+      this.hidePresenterStart()
+      return
+    }
+    if (!document.documentElement.requestFullscreen) {
+      this.showPresenterStart()
+      return
+    }
+    try {
+      await document.documentElement.requestFullscreen()
+      this.enteredFullscreen = true
+      this.hidePresenterStart()
+    } catch {
+      this.showPresenterStart()
+    }
+  }
+
+  private showPresenterStart(): void {
+    if (this.presenterStart || this.presenterClosed) return
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.textContent = 'Start slideshow'
+    button.setAttribute('aria-label', 'Start slideshow in fullscreen')
+    Object.assign(button.style, {
+      position: 'fixed',
+      top: '24px',
+      left: '50%',
+      zIndex: '2147483647',
+      transform: 'translateX(-50%)',
+      padding: '16px 24px',
+      border: '2px solid currentColor',
+      borderRadius: '12px',
+      background: '#ffffff',
+      color: '#172033',
+      font: '600 20px/1.2 system-ui, sans-serif',
+      cursor: 'pointer',
+      boxShadow: '0 8px 30px rgb(0 0 0 / 25%)',
+    })
+    button.addEventListener('click', this.onPresenterStart)
+    document.body.append(button)
+    button.focus()
+    this.presenterStart = button
+  }
+
+  private hidePresenterStart(): void {
+    if (!this.presenterStart) return
+    this.presenterStart.removeEventListener('click', this.onPresenterStart)
+    this.presenterStart.remove()
+    this.presenterStart = undefined
+  }
+
+  private async exitPresenter(): Promise<void> {
+    if (document.fullscreenElement && document.exitFullscreen) {
+      try {
+        await document.exitFullscreen()
+      } catch {
+        // Closing the dedicated presenter tab remains the final fallback.
+      }
+    }
+    this.closePresenter()
+  }
+
+  private closePresenter(): void {
+    if (this.presenterClosed) return
+    this.presenterClosed = true
+    window.close()
   }
 
   private readonly onTouchStart = (event: TouchEvent): void => {

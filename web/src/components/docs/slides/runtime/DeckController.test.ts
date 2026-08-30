@@ -3,9 +3,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import './index'
 import type { AstDeckElement, AstFragmentElement, AstSlideElement } from './types'
 
-const mountDeck = async () => {
+const mountDeck = async (width = 960, height = 540) => {
   const host = document.createElement('div')
-  Object.defineProperties(host, { clientWidth: { value: 960 }, clientHeight: { value: 540 } })
+  Object.defineProperties(host, { clientWidth: { value: width }, clientHeight: { value: height } })
   host.innerHTML = `<ast-deck no-history>
     <ast-slide id="one"><ast-fragment order="2">B</ast-fragment><ast-fragment order="1">A</ast-fragment></ast-slide>
     <ast-slide id="two"><ast-notes>Notes</ast-notes></ast-slide>
@@ -18,17 +18,66 @@ const mountDeck = async () => {
 
 afterEach(() => {
   document.body.replaceChildren()
-  history.replaceState(null, '', '#')
+  history.replaceState(null, '', location.pathname)
+  Reflect.deleteProperty(document, 'fullscreenElement')
+  Reflect.deleteProperty(document, 'exitFullscreen')
+  Reflect.deleteProperty(document.documentElement, 'requestFullscreen')
   vi.restoreAllMocks()
 })
 
 describe('DeckController', () => {
+  it('enters fullscreen in presenter mode and Escape exits fullscreen and closes the tab', async () => {
+    history.replaceState(null, '', '?presenter=1')
+    let fullscreenElement: Element | null = null
+    const requestFullscreen = vi.fn().mockImplementation(async () => { fullscreenElement = document.documentElement })
+    const exitFullscreen = vi.fn().mockImplementation(async () => { fullscreenElement = null })
+    const close = vi.spyOn(window, 'close').mockImplementation(() => undefined)
+    Object.defineProperty(document.documentElement, 'requestFullscreen', { configurable: true, value: requestFullscreen })
+    Object.defineProperty(document, 'exitFullscreen', { configurable: true, value: exitFullscreen })
+    Object.defineProperty(document, 'fullscreenElement', { configurable: true, get: () => fullscreenElement })
+
+    const deck = await mountDeck()
+    await vi.waitFor(() => expect(requestFullscreen).toHaveBeenCalledOnce())
+
+    deck.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    await vi.waitFor(() => expect(exitFullscreen).toHaveBeenCalledOnce())
+    expect(close).toHaveBeenCalledOnce()
+  })
+
+  it('offers a user-activated fullscreen fallback when automatic entry is blocked', async () => {
+    history.replaceState(null, '', '?presenter=1')
+    let fullscreenElement: Element | null = null
+    const requestFullscreen = vi.fn()
+      .mockRejectedValueOnce(new Error('user activation required'))
+      .mockImplementationOnce(async () => { fullscreenElement = document.documentElement })
+    Object.defineProperty(document.documentElement, 'requestFullscreen', { configurable: true, value: requestFullscreen })
+    Object.defineProperty(document, 'fullscreenElement', { configurable: true, get: () => fullscreenElement })
+
+    const deck = await mountDeck()
+    const start = await vi.waitFor(() => {
+      const button = document.querySelector<HTMLButtonElement>('button[aria-label="Start slideshow in fullscreen"]')
+      expect(button).not.toBeNull()
+      return button!
+    })
+    expect(start.style.top).toBe('24px')
+    expect(start.style.left).toBe('50%')
+    expect(start.style.transform).toBe('translateX(-50%)')
+
+    start.click()
+    await vi.waitFor(() => expect(requestFullscreen).toHaveBeenCalledTimes(2))
+    expect(document.fullscreenElement).toBe(document.documentElement)
+    expect(document.body.contains(start)).toBe(false)
+    expect(deck.currentIndex).toBe(0)
+  })
+
   it('scales the fixed canvas and advances ordered fragments before slides', async () => {
     const deck = await mountDeck()
     const slides = [...deck.querySelectorAll('ast-slide')] as AstSlideElement[]
     const fragments = [...deck.querySelectorAll('ast-fragment')] as AstFragmentElement[]
 
     expect(deck.style.transform).toBe('scale(0.5)')
+    expect(deck.style.left).toBe('0px')
+    expect(deck.style.top).toBe('0px')
     expect(slides[0].active).toBe(true)
     deck.next()
     expect(fragments[1].revealed).toBe(true)
@@ -37,6 +86,14 @@ describe('DeckController', () => {
     deck.next()
     expect(slides[1].active).toBe(true)
     expect(deck.currentIndex).toBe(1)
+  })
+
+  it('centers the scaled slide when the viewport is taller than 16:9', async () => {
+    const deck = await mountDeck(1920, 1200)
+
+    expect(deck.style.transform).toBe('scale(1)')
+    expect(deck.style.left).toBe('0px')
+    expect(deck.style.top).toBe('60px')
   })
 
   it('accepts navigation messages only from its parent window', async () => {
@@ -50,11 +107,34 @@ describe('DeckController', () => {
     expect(deck.currentIndex).toBe(0)
   })
 
-  it('does not advance on click while canvas edit mode is on', async () => {
+  it('navigates from background clicks while canvas edit mode is on', async () => {
     const deck = await mountDeck()
     deck.setAttribute('edit', '')
+    deck.next()
+    deck.next()
+
     deck.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: 800 }))
+    expect(deck.currentIndex).toBe(1)
+
+    deck.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: 100 }))
     expect(deck.currentIndex).toBe(0)
+  })
+
+  it('does not navigate when an editable canvas object is clicked', async () => {
+    const deck = await mountDeck()
+    const slide = deck.querySelector('ast-slide[active]') as HTMLElement
+    const text = document.createElement('ast-text')
+    text.id = 'headline'
+    slide.append(text)
+    deck.setAttribute('edit', '')
+    Object.defineProperty(document, 'elementsFromPoint', {
+      configurable: true,
+      value: () => [text, slide, deck],
+    })
+
+    text.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: 800 }))
+    expect(deck.currentIndex).toBe(0)
+    expect(deck.fragment).toBe(0)
   })
 
   it('handles keyboard navigation and slide lifecycle events', async () => {

@@ -833,12 +833,29 @@ push-sandbox-openshell-dev-fast: ensure-builder build-linux
 push-all-dev-fast: push-dev-fast push-sandbox-base-dev-fast push-incus-dev-fast push-sandbox-openshell-dev-fast
 	@echo "All dev images pushed ($(DEV_ARCH) only)!"
 
-# Regenerate Ent client code for all scopes. Timestamp checks cannot detect
-# deleted schema files or generated output restored with newer timestamps.
+# Regenerate Ent client code only when a scope's schema inputs or generated
+# outputs change. Content stamps detect additions, edits, and deletions without
+# relying on mtimes.
 ent-generate:
-	@echo "Generating Ent clients..."
-	@cd ent/platform && go run generate.go
-	@cd ent/org && go run generate.go
-	@cd ent/team && go run generate.go
-	@cd ent/personal && go run generate.go
-	@echo "Done."
+	@set -e; \
+	for scope in platform org team personal; do \
+		stamp="ent/$$scope/.ent-generated.sha256"; \
+		input_digest=$$({ \
+			printf '%s ' "ent/$$scope/generate.go"; git hash-object "ent/$$scope/generate.go"; \
+			find "ent/$$scope/schema" -type f -name '*.go' -print | LC_ALL=C sort | while IFS= read -r input; do printf '%s ' "$$input"; git hash-object "$$input"; done; \
+		} | git hash-object --stdin); \
+		output_digest=$$({ \
+			find "ent/$$scope" -type f -name '*.go' ! -path "ent/$$scope/schema/*" ! -name generate.go -print | LC_ALL=C sort | while IFS= read -r output; do printf '%s ' "$$output"; git hash-object "$$output"; done; \
+		} | git hash-object --stdin); \
+		current="$$input_digest $$output_digest"; \
+		if [ ! -f "$$stamp" ] || [ "$$(cat "$$stamp")" != "$$current" ]; then \
+			echo "Generating Ent client for $$scope..."; \
+			(cd "ent/$$scope" && go run generate.go); \
+			output_digest=$$({ \
+				find "ent/$$scope" -type f -name '*.go' ! -path "ent/$$scope/schema/*" ! -name generate.go -print | LC_ALL=C sort | while IFS= read -r output; do printf '%s ' "$$output"; git hash-object "$$output"; done; \
+			} | git hash-object --stdin); \
+			printf '%s %s\n' "$$input_digest" "$$output_digest" > "$$stamp"; \
+		else \
+			echo "Ent client for $$scope is up to date."; \
+		fi; \
+	done

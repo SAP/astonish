@@ -73,6 +73,13 @@ spec:
               mountPath: /root/.config/astonish/config.yaml
               subPath: config.yaml
               readOnly: true
+          startupProbe:
+            httpGet:
+              path: /api/healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 30
           livenessProbe:
             httpGet:
               path: /api/healthz

@@ -130,6 +130,7 @@ func (c *ChatAgent) retrievePreProvider(ctx context.Context, lifecycle *lifecycl
 func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		lifecycle := lifecycleRecorder(ctx, ctx.InvocationID())
+		defer lifecycle.close()
 		finishRequestPreparation := lifecycle.begin("request_session_preparation")
 
 		// Wrap yield to strip chain-of-thought content and redact credentials.
@@ -919,13 +920,9 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			slog.Debug("[agent] Using context-injected LLM override")
 		}
 		diagnosticsHook := cacheDiagnosticsHookFromContext(ctx)
-		if diagnosticsHook == nil && store.DebugEnabledFromContext(ctx) {
-			if recorder := store.CacheDiagnosticRecorderFromContext(ctx); recorder != nil {
-				diagnosticsHook = func(diagnostic CacheDiagnostic) {
-					if err := recorder(ctx, cacheDiagnosticForStore(diagnostic)); err != nil {
-						slog.Warn("persist cache diagnostic", "session", sessionID, "invocation", ctx.InvocationID(), "error", err)
-					}
-				}
+		if diagnosticsHook == nil && store.DebugEnabledFromContext(ctx) && lifecycle != nil {
+			diagnosticsHook = func(diagnostic CacheDiagnostic) {
+				lifecycle.enqueue(cacheDiagnosticForStore(diagnostic))
 			}
 		}
 		effectiveLLM = newDiagnosticLLM(effectiveLLM, diagnosticsHook, ctx.InvocationID(), credentials.RedactorFromContext(ctx))

@@ -91,7 +91,7 @@ func (ms *orgMemoryStore) vectorSearch(ctx context.Context, embedding []float32,
 				1 - (embedding <=> $1::vector) AS score
 			FROM org_memories
 			WHERE category = $2
-			ORDER BY embedding <=> $1::vector
+			ORDER BY embedding <=> $1::vector, id ASC
 			LIMIT $3`,
 			vecStr, category, maxResults)
 	} else {
@@ -99,7 +99,7 @@ func (ms *orgMemoryStore) vectorSearch(ctx context.Context, embedding []float32,
 			`SELECT id, chunk_text, category, source_path, promoted_by, session_id, created_at,
 				1 - (embedding <=> $1::vector) AS score
 			FROM org_memories
-			ORDER BY embedding <=> $1::vector
+			ORDER BY embedding <=> $1::vector, id ASC
 			LIMIT $2`,
 			vecStr, maxResults)
 	}
@@ -162,7 +162,7 @@ func (ms *orgMemoryStore) tsvectorSearch(ctx context.Context, query string, maxR
 				ts_rank(tsv, websearch_to_tsquery('english', $1)) AS score
 			FROM org_memories
 			WHERE tsv @@ websearch_to_tsquery('english', $1) AND category = $2
-			ORDER BY score DESC
+			ORDER BY score DESC, id ASC
 			LIMIT $3`,
 			orQuery, category, maxResults)
 	} else {
@@ -171,7 +171,7 @@ func (ms *orgMemoryStore) tsvectorSearch(ctx context.Context, query string, maxR
 				ts_rank(tsv, websearch_to_tsquery('english', $1)) AS score
 			FROM org_memories
 			WHERE tsv @@ websearch_to_tsquery('english', $1)
-			ORDER BY score DESC
+			ORDER BY score DESC, id ASC
 			LIMIT $2`,
 			orQuery, maxResults)
 	}
@@ -289,7 +289,7 @@ func (ms *orgMemoryStore) ftsSearch(ctx context.Context, query string, limit int
 				 FROM %s fts
 				 JOIN %s m ON m.rowid = fts.rowid
 				 WHERE %s MATCH ? AND m.category = ?
-				 ORDER BY fts.rank
+				 ORDER BY fts.rank, m.id ASC
 				 LIMIT ?`, ms.ftsTable, ms.table, ms.ftsTable),
 			ftsQuery, category, limit)
 	} else {
@@ -299,7 +299,7 @@ func (ms *orgMemoryStore) ftsSearch(ctx context.Context, query string, limit int
 				 FROM %s fts
 				 JOIN %s m ON m.rowid = fts.rowid
 				 WHERE %s MATCH ?
-				 ORDER BY fts.rank
+				 ORDER BY fts.rank, m.id ASC
 				 LIMIT ?`, ms.ftsTable, ms.table, ms.ftsTable),
 			ftsQuery, limit)
 	}
@@ -420,6 +420,7 @@ func (ms *orgMemoryStore) loadResultsByIDs(ctx context.Context, scored []scoredR
 		}
 		results = append(results, r)
 	}
+	sortMemoryResults(results)
 	return results, nil
 }
 func (ms *orgMemoryStore) Add(ctx context.Context, entry store.MemoryEntry) error {

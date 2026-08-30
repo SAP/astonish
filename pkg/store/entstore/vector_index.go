@@ -5,12 +5,23 @@ import (
 	"math"
 	"sort"
 	"sync"
+
+	"github.com/SAP/astonish/pkg/store"
 )
 
 // scoredResult pairs a document ID with a similarity score.
 type scoredResult struct {
 	ID    string
 	Score float64
+}
+
+func sortMemoryResults(results []store.MemorySearchResult) {
+	sort.Slice(results, func(i, j int) bool {
+		if results[i].Score != results[j].Score {
+			return results[i].Score > results[j].Score
+		}
+		return results[i].ID < results[j].ID
+	})
 }
 
 // vectorIndex maintains an in-memory cache of embeddings for fast brute-force
@@ -44,7 +55,10 @@ func (vi *vectorIndex) search(query []float32, maxResults int, minScore float64)
 	}
 
 	sort.Slice(results, func(i, j int) bool {
-		return results[i].Score > results[j].Score
+		if results[i].Score != results[j].Score {
+			return results[i].Score > results[j].Score
+		}
+		return results[i].ID < results[j].ID
 	})
 	if len(results) > maxResults {
 		results = results[:maxResults]
@@ -133,7 +147,10 @@ func rrfFuse(vectorResults, keywordResults []scoredResult, k int, maxResults int
 	}
 
 	sort.Slice(results, func(i, j int) bool {
-		return results[i].Score > results[j].Score
+		if results[i].Score != results[j].Score {
+			return results[i].Score > results[j].Score
+		}
+		return results[i].ID < results[j].ID
 	})
 	if len(results) > maxResults {
 		results = results[:maxResults]

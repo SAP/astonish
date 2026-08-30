@@ -91,6 +91,11 @@ type lifecycleDiagnosticRecorder struct {
 	recorder     store.CacheDiagnosticRecorder
 	invocationID string
 	redactor     *credentials.Redactor
+	mu           sync.Mutex
+	diagnostics  []store.CacheDiagnostic
+	wake         chan struct{}
+	done         chan struct{}
+	closed       bool
 }
 
 func lifecycleRecorder(ctx context.Context, invocationID string) *lifecycleDiagnosticRecorder {
@@ -101,12 +106,16 @@ func lifecycleRecorder(ctx context.Context, invocationID string) *lifecycleDiagn
 	if recorder == nil {
 		return nil
 	}
-	return &lifecycleDiagnosticRecorder{
+	r := &lifecycleDiagnosticRecorder{
 		ctx:          ctx,
 		recorder:     recorder,
 		invocationID: invocationID,
 		redactor:     credentials.RedactorFromContext(ctx),
+		wake:         make(chan struct{}, 1),
+		done:         make(chan struct{}),
 	}
+	go r.persist()
+	return r
 }
 
 func (r *lifecycleDiagnosticRecorder) begin(stage string) func(error) {
@@ -128,9 +137,68 @@ func (r *lifecycleDiagnosticRecorder) begin(stage string) func(error) {
 			diagnostic.Status = "failed"
 			diagnostic.Error = sanitizedDiagnosticError(stageErr.Error(), r.redactor)
 		}
-		if err := r.recorder(r.ctx, diagnostic); err != nil {
-			slog.Warn("persist lifecycle diagnostic", "invocation", r.invocationID, "stage", stage, "error", err)
+		r.enqueue(diagnostic)
+	}
+}
+
+func (r *lifecycleDiagnosticRecorder) enqueue(diagnostic store.CacheDiagnostic) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return
+	}
+	r.diagnostics = append(r.diagnostics, diagnostic)
+	r.mu.Unlock()
+	select {
+	case r.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (r *lifecycleDiagnosticRecorder) persist() {
+	defer close(r.done)
+	for range r.wake {
+		for {
+			r.mu.Lock()
+			if len(r.diagnostics) == 0 {
+				closed := r.closed
+				r.mu.Unlock()
+				if closed {
+					return
+				}
+				break
+			}
+			diagnostic := r.diagnostics[0]
+			r.diagnostics = r.diagnostics[1:]
+			r.mu.Unlock()
+			persistCtx, cancel := context.WithTimeout(context.WithoutCancel(r.ctx), time.Second)
+			err := r.recorder(persistCtx, diagnostic)
+			cancel()
+			if err != nil {
+				slog.Warn("persist cache diagnostic", "invocation", r.invocationID, "stage", diagnostic.Stage, "error", err)
+			}
 		}
+	}
+}
+
+func (r *lifecycleDiagnosticRecorder) close() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.closed = true
+	r.mu.Unlock()
+	select {
+	case r.wake <- struct{}{}:
+	default:
+	}
+	select {
+	case <-r.done:
+	case <-time.After(1100 * time.Millisecond):
+		slog.Warn("timed out flushing cache diagnostics", "invocation", r.invocationID)
 	}
 }
 

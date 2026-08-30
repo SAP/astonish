@@ -8,9 +8,11 @@ import (
 	adksession "google.golang.org/adk/session"
 )
 
+// MaxSessionCacheDiagnostics bounds preparation and provider diagnostic records per session.
+const MaxSessionCacheDiagnostics = 100
+
 // SessionMeta contains metadata about a chat session.
 // This mirrors the existing session.SessionMeta type.
-const MaxSessionCacheDiagnostics = 100
 
 // CacheDiagnostic is a bounded, sanitized record of one model request.
 type CacheDiagnostic struct {

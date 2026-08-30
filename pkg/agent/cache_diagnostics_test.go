@@ -143,19 +143,52 @@ func TestDiagnosticLLMIsRequestScopedAndCapturesErrors(t *testing.T) {
 	}
 }
 
+func TestLifecycleDiagnosticRecorderDoesNotBlockStageCompletion(t *testing.T) {
+	started := make(chan struct{})
+	ctx := store.WithDebugEnabled(context.Background(), true)
+	ctx = store.WithCacheDiagnosticRecorder(ctx, func(ctx context.Context, _ store.CacheDiagnostic) error {
+		close(started)
+		<-ctx.Done()
+		return ctx.Err()
+	})
+
+	recorder := lifecycleRecorder(ctx, "invocation")
+	finish := recorder.begin("guidance_retrieval")
+	completed := make(chan struct{})
+	go func() {
+		finish(nil)
+		close(completed)
+	}()
+	select {
+	case <-completed:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("stage completion blocked on diagnostic persistence")
+	}
+	<-started
+	recorder.close()
+}
+
 func TestLifecycleDiagnosticRecorderCapturesRedactedFailure(t *testing.T) {
 	redactor := credentials.NewRedactor()
 	redactor.AddTransientSecret("top-secret")
-	var got store.CacheDiagnostic
+	gotCh := make(chan store.CacheDiagnostic, 1)
 	ctx := store.WithDebugEnabled(context.Background(), true)
 	ctx = credentials.WithRedactor(ctx, redactor)
 	ctx = store.WithCacheDiagnosticRecorder(ctx, func(_ context.Context, diagnostic store.CacheDiagnostic) error {
-		got = diagnostic
+		gotCh <- diagnostic
 		return nil
 	})
 
-	finish := lifecycleRecorder(ctx, "invocation").begin("guidance_retrieval")
+	recorder := lifecycleRecorder(ctx, "invocation")
+	finish := recorder.begin("guidance_retrieval")
 	finish(errors.New("top-secret unavailable"))
+	recorder.close()
+	var got store.CacheDiagnostic
+	select {
+	case got = <-gotCh:
+	case <-time.After(time.Second):
+		t.Fatal("diagnostic was not persisted")
+	}
 
 	if got.Kind != "preparation" || got.Stage != "guidance_retrieval" || got.Status != "failed" {
 		t.Fatalf("lifecycle diagnostic = %+v", got)

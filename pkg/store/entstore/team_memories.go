@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"regexp"
-	"sort"
 	"strings"
 	"time"
 
@@ -108,7 +107,7 @@ func (m *teamMemoryStore) tsvectorSearch(ctx context.Context, query string, maxR
 				ts_rank(tsv, websearch_to_tsquery('english', $1)) AS score
 			FROM memories
 			WHERE tsv @@ websearch_to_tsquery('english', $1) AND category = $2
-			ORDER BY score DESC
+			ORDER BY score DESC, id ASC
 			LIMIT $3`,
 			orQuery, category, maxResults)
 	} else {
@@ -117,7 +116,7 @@ func (m *teamMemoryStore) tsvectorSearch(ctx context.Context, query string, maxR
 				ts_rank(tsv, websearch_to_tsquery('english', $1)) AS score
 			FROM memories
 			WHERE tsv @@ websearch_to_tsquery('english', $1)
-			ORDER BY score DESC
+			ORDER BY score DESC, id ASC
 			LIMIT $2`,
 			orQuery, maxResults)
 	}
@@ -182,7 +181,7 @@ func (m *teamMemoryStore) vectorSearch(ctx context.Context, embedding []float32,
 				1 - (embedding <=> $1::vector) AS score
 			FROM memories
 			WHERE category = $2
-			ORDER BY embedding <=> $1::vector
+			ORDER BY embedding <=> $1::vector, id ASC
 			LIMIT $3`,
 			vecStr, category, maxResults)
 	} else {
@@ -190,7 +189,7 @@ func (m *teamMemoryStore) vectorSearch(ctx context.Context, embedding []float32,
 			`SELECT id, chunk_text, category, source_path, created_by, session_id, created_at,
 				1 - (embedding <=> $1::vector) AS score
 			FROM memories
-			ORDER BY embedding <=> $1::vector
+			ORDER BY embedding <=> $1::vector, id ASC
 			LIMIT $2`,
 			vecStr, maxResults)
 	}
@@ -311,7 +310,7 @@ func (m *teamMemoryStore) ftsSearch(ctx context.Context, query string, limit int
 				 FROM %s fts
 				 JOIN %s m ON m.rowid = fts.rowid
 				 WHERE %s MATCH ? AND m.category = ?
-				 ORDER BY fts.rank
+				 ORDER BY fts.rank, m.id ASC
 				 LIMIT ?`, m.ftsTable, m.table, m.ftsTable),
 			ftsQuery, category, limit)
 	} else {
@@ -321,7 +320,7 @@ func (m *teamMemoryStore) ftsSearch(ctx context.Context, query string, limit int
 				 FROM %s fts
 				 JOIN %s m ON m.rowid = fts.rowid
 				 WHERE %s MATCH ?
-				 ORDER BY fts.rank
+				 ORDER BY fts.rank, m.id ASC
 				 LIMIT ?`, m.ftsTable, m.table, m.ftsTable),
 			ftsQuery, limit)
 	}
@@ -443,6 +442,7 @@ func (m *teamMemoryStore) loadResultsByIDs(ctx context.Context, scored []scoredR
 		}
 		results = append(results, r)
 	}
+	sortMemoryResults(results)
 	return results, nil
 }
 
@@ -706,10 +706,8 @@ func mergeMemoryResults(vector, keyword []store.MemorySearchResult, maxResults i
 		}
 	}
 
-	// Sort by score descending.
-	sort.Slice(merged, func(i, j int) bool {
-		return merged[i].Score > merged[j].Score
-	})
+	// Sort by score descending with a stable identity tie-breaker.
+	sortMemoryResults(merged)
 
 	if len(merged) > maxResults {
 		merged = merged[:maxResults]

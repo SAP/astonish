@@ -276,27 +276,16 @@ func (idx *ToolIndex) syncToolDocuments(ctx context.Context, registry map[string
 		toEmbed = append(toEmbed, doc)
 	}
 
-	// Prune stale entries not in the current tool set. Prefer store-wide
-	// enumeration (covers process restarts against a persistent backend);
-	// fall back to IDs from the previous SyncTools call in this process.
+	// Enumerate the full store so stale entries from previous processes cannot
+	// make a count-only completeness check pass.
+	all, err := idx.vectorStore.AllIDs(ctx)
+	if err != nil {
+		return fmt.Errorf("list indexed tools: %w", err)
+	}
 	var staleIDs []string
-	if lister, ok := idx.vectorStore.(interface {
-		AllIDs(context.Context) ([]string, error)
-	}); ok {
-		all, err := lister.AllIDs(ctx)
-		if err != nil {
-			return fmt.Errorf("list indexed tools: %w", err)
-		}
-		for _, id := range all {
-			if !currentIDs[id] {
-				staleIDs = append(staleIDs, id)
-			}
-		}
-	} else if idx.knownIDs != nil {
-		for id := range idx.knownIDs {
-			if !currentIDs[id] {
-				staleIDs = append(staleIDs, id)
-			}
+	for _, id := range all {
+		if !currentIDs[id] {
+			staleIDs = append(staleIDs, id)
 		}
 	}
 	if len(staleIDs) > 0 {
@@ -315,10 +304,45 @@ func (idx *ToolIndex) syncToolDocuments(ctx context.Context, registry map[string
 			return fmt.Errorf("failed to index tools: %w", err)
 		}
 	}
+	if err := idx.validateSemanticIndex(ctx, currentIDs); err != nil {
+		return err
+	}
 
 	idx.mu.Lock()
 	idx.knownIDs = currentIDs
 	idx.mu.Unlock()
+	return nil
+}
+
+func expectedToolDocumentIDs(registry map[string]ToolEntry) map[string]bool {
+	expected := make(map[string]bool, len(registry))
+	for _, entry := range registry {
+		prefix := entry.GroupName
+		if entry.IsMainTool {
+			prefix = "main"
+		}
+		expected[prefix+":"+entry.Name] = true
+	}
+	return expected
+}
+
+func (idx *ToolIndex) validateSemanticIndex(ctx context.Context, expected map[string]bool) error {
+	ids, err := idx.vectorStore.AllIDs(ctx)
+	if err != nil {
+		return fmt.Errorf("list indexed tools: %w", err)
+	}
+	actual := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		actual[id] = true
+	}
+	if len(actual) != len(expected) {
+		return fmt.Errorf("semantic tool index is incomplete: indexed %d of %d tools", len(actual), len(expected))
+	}
+	for id := range expected {
+		if !actual[id] {
+			return fmt.Errorf("semantic tool index is incomplete: missing tool %q", id)
+		}
+	}
 	return nil
 }
 
@@ -343,6 +367,9 @@ func (idx *ToolIndex) Search(ctx context.Context, query string, topK int, minSco
 		minScore = 0.3
 	}
 
+	if err := idx.validateSemanticIndex(ctx, expectedToolDocumentIDs(registry)); err != nil {
+		return nil, err
+	}
 	docCount := idx.vectorStore.Count()
 	if docCount == 0 {
 		return nil, nil
@@ -925,7 +952,11 @@ func (idx *ToolIndex) searchHybrid(ctx context.Context, query string, preparedEm
 	// --- Vector search ---
 	var vectorResults []ToolVectorResult
 	docCount := 0
-	if idx.vectorStore != nil && idx.embedFunc != nil {
+	semantic := idx.vectorStore != nil && idx.embedFunc != nil
+	if semantic {
+		if err := idx.validateSemanticIndex(ctx, expectedToolDocumentIDs(registry)); err != nil {
+			return nil, err
+		}
 		docCount = idx.vectorStore.Count()
 	}
 	if docCount > 0 {

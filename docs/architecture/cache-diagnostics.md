@@ -28,6 +28,6 @@ Diagnostics never store transport headers. Before persistence, known credential 
 
 ## Persistence and access
 
-Diagnostics are separate from ADK transcript events so they cannot affect future model history. Personal and team session stores retain the latest 100 rounds per session, and session deletion cascades to diagnostics. Rows are associated by ADK invocation ID and model-call number; the UI never infers turns from message position.
+Diagnostics are separate from ADK transcript events so they cannot affect future model history. Personal and team session stores retain the latest 100 diagnostic records per session, including both preparation stages and provider rounds, and session deletion cascades to diagnostics. Rows are associated by ADK invocation ID and model-call number; the UI never infers turns from message position.
 
 `GET /api/studio/sessions/{id}/cache-diagnostics?invocationId=...` resolves the session through the authenticated request's tenant-scoped stores and requires platform-superadmin authorization. The cross-organization administrative endpoint under `/api/platform/admin/` additionally requires explicit scope identifiers. The Studio panel is available only to platform superadmins and shows a chronological Astonish-preparation versus provider-dispatch view, including explicit stage failures, sanitized payloads, truncation/elision notices, timing, usage, provider cache status, and the estimated stable prefix.

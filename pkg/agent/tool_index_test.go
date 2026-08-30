@@ -7,6 +7,7 @@ import (
 	"errors"
 	"math"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -54,15 +55,50 @@ func TestToolIndexPrimePropagatesToolsetError(t *testing.T) {
 
 func TestToolIndexSearchHybridPropagatesEmbeddingError(t *testing.T) {
 	want := errors.New("embed unavailable")
-	embed := func(context.Context, string) ([]float32, error) { return nil, want }
+	fail := false
+	embed := func(context.Context, string) ([]float32, error) {
+		if fail {
+			return nil, want
+		}
+		return []float32{1, 0}, nil
+	}
 	idx := newTestToolIndex(t, embed)
-	docEmbed := []float32{1, 0}
-	if err := idx.vectorStore.AddDocuments(context.Background(), []ToolVectorDoc{{ID: "web:web_fetch", Content: "web_fetch: fetch web", Metadata: map[string]string{"tool_name": "web_fetch", "group_name": "web"}, Embedding: docEmbed}}, 1); err != nil {
+	if err := idx.SyncTools(context.Background(), nil, []*ToolGroup{{Name: "web", Tools: mockTools("web_fetch")}}); err != nil {
 		t.Fatal(err)
 	}
+	fail = true
 	_, err := idx.SearchHybrid(context.Background(), "web fetch", 5, 0)
 	if !errors.Is(err, want) {
 		t.Fatalf("SearchHybrid error = %v, want %v", err, want)
+	}
+}
+
+func TestSemanticToolIndexDoesNotFallBackToLexicalSearchWhenEmpty(t *testing.T) {
+	idx := newTestToolIndex(t, testEmbeddingFunc())
+	if err := idx.PrimeTools(context.Background(), nil, []*ToolGroup{{Name: "web", Tools: mockTools("web_fetch")}}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := idx.SearchHybrid(context.Background(), "web fetch", 5, 0)
+	if err == nil || !strings.Contains(err.Error(), "semantic tool index is incomplete") {
+		t.Fatalf("SearchHybrid error = %v, want incomplete semantic index", err)
+	}
+}
+
+func TestSemanticToolIndexValidatesDocumentIdentity(t *testing.T) {
+	idx := newTestToolIndex(t, testEmbeddingFunc())
+	if err := idx.PrimeTools(context.Background(), nil, []*ToolGroup{{Name: "web", Tools: mockTools("web_fetch")}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.vectorStore.AddDocuments(context.Background(), []ToolVectorDoc{{
+		ID: "stale:tool", Content: "stale tool", Metadata: map[string]string{"tool_name": "tool", "group_name": "stale"}, Embedding: []float32{1, 0},
+	}}, 1); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := idx.SearchHybrid(context.Background(), "web fetch", 5, 0)
+	if err == nil || !strings.Contains(err.Error(), `missing tool "web:web_fetch"`) {
+		t.Fatalf("SearchHybrid error = %v, want missing current tool identity", err)
 	}
 }
 

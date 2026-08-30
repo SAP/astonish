@@ -42,6 +42,9 @@ type ToolVectorStore interface {
 	// IDs that don't exist are silently ignored.
 	DeleteByIDs(ctx context.Context, ids []string) error
 
+	// AllIDs returns every indexed document ID.
+	AllIDs(ctx context.Context) ([]string, error)
+
 	// Count returns the number of documents in the store.
 	Count() int
 }

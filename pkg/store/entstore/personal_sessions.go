@@ -561,7 +561,7 @@ func (ss *personalSessionStore) AppendCacheDiagnostic(ctx context.Context, sessi
 
 	excess, err := tx.CacheDiagnostic.Query().
 		Where(cachediagnostic.SessionIDEQ(sessionID)).
-		Order(cachediagnostic.ByID(sql.OrderDesc())).
+		Order(cachediagnostic.ByCreatedAt(sql.OrderDesc()), cachediagnostic.ByID(sql.OrderDesc())).
 		Offset(store.MaxSessionCacheDiagnostics).
 		All(ctx)
 	if err != nil {
@@ -585,7 +585,7 @@ func (ss *personalSessionStore) AppendCacheDiagnostic(ctx context.Context, sessi
 func (ss *personalSessionStore) ListCacheDiagnostics(ctx context.Context, sessionID string) ([]store.CacheDiagnostic, error) {
 	rows, err := ss.client.CacheDiagnostic.Query().
 		Where(cachediagnostic.SessionIDEQ(sessionID)).
-		Order(cachediagnostic.ByID()).
+		Order(cachediagnostic.ByCreatedAt(), cachediagnostic.ByID()).
 		All(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list cache diagnostics: %w", err)

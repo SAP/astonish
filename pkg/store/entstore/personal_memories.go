@@ -89,7 +89,7 @@ func (ms *personalMemoryStore) vectorSearch(ctx context.Context, embedding []flo
 				1 - (embedding <=> $1::vector) AS score
 			FROM memories
 			WHERE category = $2
-			ORDER BY embedding <=> $1::vector
+			ORDER BY embedding <=> $1::vector, id ASC
 			LIMIT $3`,
 			vecStr, category, maxResults)
 	} else {
@@ -97,7 +97,7 @@ func (ms *personalMemoryStore) vectorSearch(ctx context.Context, embedding []flo
 			`SELECT id, chunk_text, category, source_path, created_by, session_id, created_at,
 				1 - (embedding <=> $1::vector) AS score
 			FROM memories
-			ORDER BY embedding <=> $1::vector
+			ORDER BY embedding <=> $1::vector, id ASC
 			LIMIT $2`,
 			vecStr, maxResults)
 	}
@@ -162,7 +162,7 @@ func (ms *personalMemoryStore) tsvectorSearch(ctx context.Context, query string,
 				ts_rank(tsv, websearch_to_tsquery('english', $1)) AS score
 			FROM memories
 			WHERE tsv @@ websearch_to_tsquery('english', $1) AND category = $2
-			ORDER BY score DESC
+			ORDER BY score DESC, id ASC
 			LIMIT $3`,
 			orQuery, category, maxResults)
 	} else {
@@ -171,7 +171,7 @@ func (ms *personalMemoryStore) tsvectorSearch(ctx context.Context, query string,
 				ts_rank(tsv, websearch_to_tsquery('english', $1)) AS score
 			FROM memories
 			WHERE tsv @@ websearch_to_tsquery('english', $1)
-			ORDER BY score DESC
+			ORDER BY score DESC, id ASC
 			LIMIT $2`,
 			orQuery, maxResults)
 	}
@@ -292,7 +292,7 @@ func (ms *personalMemoryStore) ftsSearch(ctx context.Context, query string, limi
 				 FROM %s fts
 				 JOIN %s m ON m.rowid = fts.rowid
 				 WHERE %s MATCH ? AND m.category = ?
-				 ORDER BY fts.rank
+				 ORDER BY fts.rank, m.id ASC
 				 LIMIT ?`, ms.ftsTable, ms.table, ms.ftsTable),
 			ftsQuery, category, limit)
 	} else {
@@ -302,7 +302,7 @@ func (ms *personalMemoryStore) ftsSearch(ctx context.Context, query string, limi
 				 FROM %s fts
 				 JOIN %s m ON m.rowid = fts.rowid
 				 WHERE %s MATCH ?
-				 ORDER BY fts.rank
+				 ORDER BY fts.rank, m.id ASC
 				 LIMIT ?`, ms.ftsTable, ms.table, ms.ftsTable),
 			ftsQuery, limit)
 	}
@@ -423,6 +423,7 @@ func (ms *personalMemoryStore) loadResultsByIDs(ctx context.Context, scored []sc
 		}
 		results = append(results, r)
 	}
+	sortMemoryResults(results)
 	return results, nil
 }
 

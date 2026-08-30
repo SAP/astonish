@@ -132,11 +132,12 @@ func personalSchemaName(userID string) string {
 	return "personal_" + strings.ReplaceAll(userID, "-", "_")
 }
 
-const postgresSchemaChangeSafeQueryMode = "describe_exec"
+const postgresSchemaChangeSafeQueryMode = "exec"
 
 // schemaChangeSafePostgresDSN disables pgx's prepared-statement cache. Tenant
 // schemas may be reconciled by another pod while a pool remains active, and
-// PostgreSQL cannot reuse a cached plan whose result type has changed.
+// transaction-pooling proxies cannot preserve prepared statements between
+// protocol exchanges.
 func schemaChangeSafePostgresDSN(dsn string) (string, error) {
 	u, err := url.Parse(dsn)
 	if err != nil {

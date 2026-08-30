@@ -42,8 +42,8 @@ func TestSchemaChangeSafePostgresDSNParsesWithPGX(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pgx.ParseConfig() error = %v", err)
 	}
-	if cfg.DefaultQueryExecMode != pgx.QueryExecModeDescribeExec {
-		t.Errorf("DefaultQueryExecMode = %v, want %v", cfg.DefaultQueryExecMode, pgx.QueryExecModeDescribeExec)
+	if cfg.DefaultQueryExecMode != pgx.QueryExecModeExec {
+		t.Errorf("DefaultQueryExecMode = %v, want %v", cfg.DefaultQueryExecMode, pgx.QueryExecModeExec)
 	}
 }
 

@@ -19,7 +19,7 @@ The Studio chat interface at `http://localhost:9393` provides the full visual ex
 - Real-time streaming responses
 - Inline tool execution visualization with expandable cards
 - File diffs for write operations
-- Artifact previews (reports, generated files)
+- Artifact previews (reports, generated files, and [slide decks](../slides/))
 - Model selector in the toolbar (per-session pin; see [Studio Chat](../studio/chat.md))
 - Session history sidebar with search
 - Token usage tracking
@@ -74,5 +74,7 @@ Slash commands are available in both Studio and CLI:
 ## Multi-Turn Context
 
 The agent maintains full context within a session. Reference previous messages, build on prior tool results, and incrementally refine solutions. For long-running sessions, the agent automatically compacts context when approaching token limits.
+
+Chat can also create and refine complete presentations from prompts, attachments, research, and connected systems. See [Slides](../slides/) for templates, editing, saving, presenting, and export.
 
 See [Sessions](./sessions.md) for persistence details and [Tools Overview](./tools/index.md) for the complete tool catalog.

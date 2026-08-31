@@ -1,6 +1,6 @@
 # Publish & Fork
 
-Resources in Astonish are **private by default**. You own your sessions, flows, apps, and memory entries. Sharing is always an explicit action — publish to your team, fork from your team.
+Resources in Astonish are **private by default**. You own your sessions, flows, apps, slide decks, and memory entries. Sharing is always an explicit action — publish to your team, fork from your team.
 
 ## The Model
 
@@ -26,7 +26,7 @@ Resources in Astonish are **private by default**. You own your sessions, flows, 
 
 All publish, fork, and promote operations are performed through **Studio**:
 
-- **Publish**: In Studio, open a personal resource (session, flow, app, or memory entry) and use the "Publish to Team" action in the resource menu.
+- **Publish**: In Studio, open a personal resource (session, flow, app, slide deck, or memory entry) and use the "Publish to Team" action in the resource menu.
 - **Fork**: Browse team resources in Studio and use the "Fork to Personal" action to create your own copy.
 - **Promote**: Team admins and org admins can promote team resources to org level via the "Promote to Org" action.
 
@@ -37,6 +37,7 @@ All publish, fork, and promote operations are performed through **Studio**:
 | Session | Messages, artifacts, memory extracts | Draft messages, personal notes |
 | Flow | Flow definition, steps, tool config | Execution history |
 | App | Source code, manifest | Local environment variables |
+| Slide deck | Slides, theme, template data, and assets | Source session draft |
 | Memory | Content, embeddings, tags | Source session reference |
 
 ## Publishing Details
@@ -71,7 +72,10 @@ Authors and team admins can unpublish resources via Studio. Unpublishing removes
 | Promote to org | Team admin or org admin |
 | Demote from org | Org admin only |
 
+Slide deck publishing and forking create independent personal and team copies; they do not synchronize later edits. See [Sharing Slides](../slides/sharing.md) for the Slides workflow.
+
 ## Next Steps
 
+- [Sharing Slides](../slides/sharing.md) — publish personal decks and fork team decks
 - [Three-Tier Memory](./three-tier-memory) — how published memory is searched
 - [Organizations & Teams](./organizations-and-teams) — roles that govern publish/promote

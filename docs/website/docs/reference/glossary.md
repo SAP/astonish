@@ -31,6 +31,7 @@ Alphabetical definitions of key terms used throughout the Astonish documentation
 | **Sandbox** | Isolated execution environment for running agent-generated code safely. |
 | **Session** | A conversation between a user and an agent (or between two fleet agents) with persistent message history. |
 | **Skill** | A reusable capability package that can be attached to an agent (tools + prompt instructions). |
+| **Slide deck** | A presentation generated and refined in Chat. It begins as a session draft and becomes a permanent personal or team deck after an explicit save. See [Slides](../slides/). |
 | **Spoke Agent** | A specialist agent in a fleet that receives tasks from the hub and reports results back. |
 | **Sub-agent** | An agent invoked by another agent to handle a delegated subtask within a single session. |
 | **Tap** | A passive listener that observes agent activity for logging, analytics, or compliance without altering behavior. |

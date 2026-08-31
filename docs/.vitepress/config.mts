@@ -97,6 +97,17 @@ export default withMermaid(defineConfig({
           ]
         },
         {
+          text: 'Slides',
+          items: [
+            { text: 'Overview', link: '/docs/slides/' },
+            { text: 'Creating Presentations', link: '/docs/slides/creating-presentations' },
+            { text: 'Templates', link: '/docs/slides/templates' },
+            { text: 'Editing & Saving', link: '/docs/slides/editing-and-saving' },
+            { text: 'Sharing', link: '/docs/slides/sharing' },
+            { text: 'Presenting & Exporting', link: '/docs/slides/presenting-and-exporting' },
+          ]
+        },
+        {
           text: 'Channels',
           items: [
             { text: 'Overview', link: '/docs/channels/' },

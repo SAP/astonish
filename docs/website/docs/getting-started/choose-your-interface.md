@@ -33,11 +33,11 @@ See [Code Mode documentation](../cli/code.md) for full details.
 
 ### Studio (Web UI)
 
-The full visual interface running at `http://localhost:9393`. Includes the chat interface, visual flow designer, apps tab for generative UI, settings management, and real-time agent execution display with token tracking. Studio is served automatically by the daemon — just open `http://localhost:9393` in your browser.
+The full visual interface running at `http://localhost:9393`. Includes Chat, a visual flow designer, generative applications, [Slides](../slides/) generation and presentation, settings management, and real-time agent execution display with token tracking. Studio is served automatically by the daemon — just open `http://localhost:9393` in your browser.
 
-Best for: flow design, generative UI, managing apps and settings, visual execution monitoring.
+Best for: creating and presenting slide decks, flow design, generative UI, managing apps and settings, and visual execution monitoring.
 
-<!-- IMAGE: Studio interface showing chat panel, flow designer, and apps tab -->
+<!-- IMAGE: Studio interface showing chat, Slides, flow designer, and apps -->
 
 ### CLI (Platform Chat)
 

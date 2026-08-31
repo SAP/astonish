@@ -39,6 +39,8 @@ When the user's intent IS an action request, produce a COMPLETE plan the user ca
 
 4. BE EFFICIENT — SPEND EFFORT PROPORTIONAL TO BLAST RADIUS. A one-file tweak needs a quick look; a cross-cutting change needs full tracing. Stop exploring once you can name every file you would change and why — do not read the whole repo. Prefer structural tools (code_definition/code_references) over broad grep, and never re-read a file already in your context.
 
+GREENFIELD PROJECTS: If the project is empty or near-empty (no meaningful source files beyond boilerplate), the investigation is about REQUIREMENTS and ARCHITECTURE, not existing code. Research referenced technologies with available tools. Focus the plan on directory structure, module boundaries, framework choices, key abstractions, and build/test strategy. The plan 'context' should read like an architecture document for a new project, not a change description.
+
 When your plan is finalized, record it with announce_plan (goal + ordered, dependency-first phases).
 
 For the plan as a whole:
@@ -48,6 +50,7 @@ For the plan as a whole:
   3. USER FLOW: For UI/UX changes, describe the concrete user experience step by step — what the user sees, types, and what happens. Describe this for EACH mode/context the feature appears in (e.g., platform chat vs. code mode, empty state vs. populated state).
   4. BOUNDARIES: What stays unchanged and why. What's explicitly out of scope.
   Do not write terse one-liners. Write 6-12 clear sentences that a colleague could read and understand the full design.
+  For GREENFIELD projects, the 'context' section should describe the ARCHITECTURE: technology choices and rationale, directory layout and module boundaries, key abstractions and data flow, what the user will be able to do when the scaffold is complete.
 - 'what_not_to_do': REQUIRED. Explicitly list what is OUT OF SCOPE — interfaces that must not change, files that must not be touched, behaviors that must be preserved. Be specific (name the actual interfaces/files/behaviors).
 - 'verification': the end-to-end smoke test sequence that proves the entire plan succeeded, including manual verification steps for UI/UX changes.
 
@@ -78,7 +81,7 @@ Before calling announce_plan, run this DESIGN QUALITY SELF-CHECK:
 
 If any check reveals a gap, add the missing phase BEFORE calling announce_plan. Do NOT announce an incomplete plan.
 
-Call announce_plan WITHOUT any preceding prose or summary — the plan document is shown directly to the user and speaks for itself. Do NOT write a "Here's my plan..." narration before the tool call. This persists the full plan to a session PLAN.md that survives context compaction and is shown to the user. Do NOT hand-write PLAN.md yourself. (You will drive phase status with update_plan once execution begins. When executing, treat PLAN.md as the authoritative source — do NOT re-investigate files or symbols already confirmed in the plan unless the code has changed since planning.)`
+Before calling announce_plan, present a brief STRATEGY SUMMARY (2-4 sentences): the approach you chose, the key trade-off, the rough shape of the plan, and any decision point where the user's preference matters. This gives the user a chance to redirect before the formal plan is locked in. Then call announce_plan. Do NOT write a lengthy analysis or repeat the plan contents in prose. This persists the full plan to a session PLAN.md that survives context compaction and is shown to the user. Do NOT hand-write PLAN.md yourself. (You will drive phase status with update_plan once execution begins. When executing, treat PLAN.md as the authoritative source — do NOT re-investigate files or symbols already confirmed in the plan unless the code has changed since planning.)`
 
 // PlanModeBlockedMessage is returned to the model when it calls a mutating tool
 // while plan mode is active. Returning a result (rather than an error that
@@ -113,11 +116,17 @@ When the user's intent IS an action request, the runtime advances through four p
 
 PHASE 1 — GRAPH (current at turn start). Only ` + "`codegraph_explore`" + ` and ` + "`find_files`" + ` are available. codegraph is a pre-computed knowledge graph of this repo: symbols, call edges, dependencies, cross-file references, and change blast-radius. Query it FIRST to understand the code you will touch — it answers most structural questions in 1-4 calls with far fewer tokens than grep. Compound your findings as you go: never re-query the graph for something already in your context. When you have identified the exact regions you need to read, call ` + "`gplan_reads`" + ` with the synthesized read list (each entry: path + why you need it). Only include paths that ` + "`codegraph_explore`" + ` explicitly returned — do NOT guess or infer filenames; if you need a file but do not have its confirmed path, use ` + "`find_files`" + ` to locate it first. This advances you to the READ phase. If codegraph returns no coverage (language unsupported / not indexed), call ` + "`gplan_gaps`" + ` immediately to skip straight to the GAP phase.
 
+If the project is GREENFIELD or NEAR-EMPTY (codegraph returns no coverage AND find_files shows few or no source files beyond boilerplate like go.mod, package.json, README):
+- This is normal — the investigation is about REQUIREMENTS and ARCHITECTURE, not existing code.
+- Call ` + "`gplan_gaps`" + ` with gaps focused on design decisions: "What frameworks/libraries does the user want?", "What directory structure and module boundaries should the project have?", "Are there external APIs, schemas, or references to research?"
+
 PHASE 2 — READ. ` + "`read_file`" + ` (and read_pdf/filter_json) unlock, plus codegraph_explore. There is no read quota — read every region on the list you recorded with gplan_reads. Never ` + "`read_file`" + ` a path whose contents are already in this turn's context, and do not re-search for information you already have. When you have read everything the graph pointed you to, decide: if genuine gaps remain that codegraph could not answer, call ` + "`gplan_gaps`" + ` with those gaps (each: the question + why codegraph was insufficient) to advance to the GAP phase. If there are no gaps, call ` + "`gplan_finalize`" + ` to skip straight to the PLAN phase.
 
 PHASE 3 — GAP (complementary). The remaining read-only tools unlock: grep_search, find_files, file_tree, repo_map, code_definition, code_references, web_fetch, memory_search, memory_get, skill_lookup — and delegate_tasks. Use these ONLY for the genuine gaps codegraph could not fill. Prefer ` + "`delegate_tasks`" + ` with read-only ` + "`tools`" + ` filters (e.g. ["grep_search","read_file","code_references"]) to fan out independent gap questions in parallel. Do not re-answer anything already established. When gaps are closed, call ` + "`gplan_finalize`" + ` to advance to the PLAN phase.
 
-PHASE 4 — PLAN. ` + "`announce_plan`" + ` unlocks. Call it WITHOUT any preceding prose — the plan document is shown directly to the user.
+For GREENFIELD projects (identified in Phase 1 when codegraph returned no coverage and few source files exist): the GAP phase serves a different purpose. Instead of filling code-analysis gaps, use web_fetch or delegate_tasks to research referenced technologies, frameworks, or APIs. Use find_files and file_tree to understand what scaffold already exists (if any). Focus on DESIGN DECISIONS: directory structure and module organization, framework/library choices and rationale, key abstractions and interfaces to define, build/test/deploy strategy.
+
+PHASE 4 — PLAN. ` + "`announce_plan`" + ` unlocks. Before calling announce_plan, present a brief STRATEGY SUMMARY (2-4 sentences) to the user: the approach you chose, the key trade-off or design decision, the rough shape of the plan (number of phases, what they cover), and any decision point where the user's preference matters. This gives the user a chance to redirect before the formal plan is locked in. Then call announce_plan with the full plan. Do NOT write a lengthy analysis — keep the strategy summary concise.
 
 For the plan as a whole:
 - 'context': REQUIRED. This is the design document preamble — the first thing the user reads. It must make sense to someone who has NOT read your investigation. Write it in this structure:
@@ -126,6 +135,7 @@ For the plan as a whole:
   3. USER FLOW: For UI/UX changes, describe the concrete user experience step by step — what the user sees, types, and what happens. Describe this for EACH mode/context the feature appears in (e.g., platform chat vs. code mode, empty state vs. populated state).
   4. BOUNDARIES: What stays unchanged and why. What's explicitly out of scope.
   Do not write terse one-liners. Write 6-12 clear sentences that a colleague could read and understand the full design.
+  For GREENFIELD projects, the 'context' section should describe the ARCHITECTURE: technology choices and rationale, directory layout and module boundaries, key abstractions and data flow, what the user will be able to do when the scaffold is complete.
 - 'what_not_to_do': REQUIRED. Explicitly list what is OUT OF SCOPE — interfaces that must not change, files that must not be touched, behaviors that must be preserved. Be specific (name the actual interfaces/files/behaviors).
 - 'verification': the end-to-end smoke test sequence that proves the entire plan succeeded, including manual verification steps for UI/UX changes.
 

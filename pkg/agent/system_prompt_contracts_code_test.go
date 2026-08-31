@@ -267,8 +267,8 @@ func TestCodeSystemPromptBuilder_MaximalSize(t *testing.T) {
 	// Code-mode prompt includes all base sections plus: project guidance,
 	// code-nav rules, codegraph-first, stop-exploring, PLAN.md, auth gates,
 	// MCP tools listing. Budget ceiling is higher than chat mode.
-	if len(prompt) > 16000 {
-		t.Errorf("code-mode maximal prompt too large: %d bytes (limit 16000)", len(prompt))
+	if len(prompt) > 16500 {
+		t.Errorf("code-mode maximal prompt too large: %d bytes (limit 16500)", len(prompt))
 	}
 	if len(prompt) < 6000 {
 		t.Errorf("code-mode maximal prompt suspiciously small: %d bytes (expected > 6000)", len(prompt))
@@ -398,4 +398,24 @@ func TestCodeSystemPrompt_PlanFieldStrength(t *testing.T) {
 
 	assertContains(t, prompt, "REQUIRED (plans are rejected without it)", "REQUIRED rejection language for context/summary fields")
 	assertContains(t, prompt, "REQUIRED scope guard", "REQUIRED scope guard language for what_not_to_do field")
+}
+
+func TestCodeSystemPrompt_PlanNudge(t *testing.T) {
+	base := &SystemPromptBuilder{}
+	cb := NewCodeSystemPromptBuilder(base)
+	cb.PlanFilePersistence = true
+	prompt := cb.Build()
+
+	assertContains(t, prompt, "cross-cutting change", "plan nudge mentions cross-cutting change")
+	assertContains(t, prompt, "Plan mode's investigation pipeline", "plan nudge mentions investigation pipeline")
+	assertContains(t, prompt, "shift+tab", "plan nudge mentions shift+tab shortcut")
+}
+
+func TestCodeSystemPrompt_PlanNudgeAbsentWithoutPlanPersistence(t *testing.T) {
+	base := &SystemPromptBuilder{}
+	cb := NewCodeSystemPromptBuilder(base)
+	cb.PlanFilePersistence = false
+	prompt := cb.Build()
+
+	assertNotContains(t, prompt, "cross-cutting change", "plan nudge must NOT appear when PlanFilePersistence is false")
 }

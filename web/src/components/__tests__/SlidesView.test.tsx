@@ -14,7 +14,7 @@ vi.mock('../../api/slides', async () => {
     fetchSlidesDeck: vi.fn(),
     deleteSlidesDeck: vi.fn(),
     slidesPresentationURL: vi.fn((slug: string) => `/api/docs/slides/${slug}/present`),
-    deckSlideThumbnailUrl: vi.fn((slug: string, index: number) => `/api/docs/slides/${slug}/thumbnails/${index}`),
+    fetchDeckSlideThumbnail: vi.fn(),
   }
 })
 
@@ -46,10 +46,14 @@ const teamDeck: slidesApi.SlidesDeckListItem = {
 describe('SlidesView', () => {
   beforeEach(() => {
     vi.mocked(slidesApi.listSlidesDecks).mockResolvedValue({ decks: [personalDeck, teamDeck] })
+    vi.mocked(slidesApi.fetchDeckSlideThumbnail).mockResolvedValue(new Blob(['png'], { type: 'image/png' }))
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:slide-thumbnail')
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined)
   })
 
   afterEach(() => {
     vi.clearAllMocks()
+    vi.restoreAllMocks()
   })
 
   it('renders Personal and Team sections with deck titles and a first-page thumbnail', async () => {
@@ -81,7 +85,8 @@ describe('SlidesView', () => {
       if (!el) throw new Error('no img yet')
       return el as HTMLImageElement
     })
-    expect(img.getAttribute('src')).toContain('/thumbnails/0')
+    expect(img).toHaveAttribute('src', 'blob:slide-thumbnail')
+    expect(slidesApi.fetchDeckSlideThumbnail).toHaveBeenCalledWith('personal-deck', 0, 'personal', personalDeck.updatedAt)
 
     // The tile that owns this <img> (the aspect-video wrapper).
     const tile = img.closest('div') as HTMLElement
@@ -93,6 +98,24 @@ describe('SlidesView', () => {
     expect(tile.querySelector('iframe')).toBeNull()
     // The placeholder icon (an <svg>) now occupies the tile.
     expect(tile.querySelector('svg')).not.toBeNull()
+  })
+
+  it('retries a failed thumbnail when the deck update timestamp changes', async () => {
+    vi.mocked(slidesApi.listSlidesDecks).mockResolvedValue({ decks: [personalDeck] })
+    vi.mocked(slidesApi.fetchDeckSlideThumbnail)
+      .mockRejectedValueOnce(new Error('not ready'))
+      .mockResolvedValueOnce(new Blob(['png'], { type: 'image/png' }))
+
+    const { container } = render(<SlidesView theme="dark" />)
+    await waitFor(() => expect(slidesApi.fetchDeckSlideThumbnail).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(container.querySelector('img')).toBeNull())
+
+    const updatedDeck = { ...personalDeck, updatedAt: new Date(Date.now() + 1000).toISOString() }
+    vi.mocked(slidesApi.listSlidesDecks).mockResolvedValue({ decks: [updatedDeck] })
+    window.dispatchEvent(new CustomEvent('astonish:slides-updated'))
+
+    await waitFor(() => expect(slidesApi.fetchDeckSlideThumbnail).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(container.querySelector('img')).not.toBeNull())
   })
 
   it('invokes onPublishDeck for a personal card', async () => {

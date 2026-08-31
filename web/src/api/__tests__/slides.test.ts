@@ -4,6 +4,7 @@ import {
   exportSlidesDeck,
   fetchSlidesDeck,
   fetchSlidesPresentation,
+  fetchDeckSlideThumbnail,
   slidesPresentationURL,
   deckSlideThumbnailUrl,
   templateMediaUrl,
@@ -83,6 +84,16 @@ describe('slides API (deck/present/export)', () => {
   it('builds a scoped, encoded per-slide thumbnail URL', () => {
     expect(deckSlideThumbnailUrl('deck-1', 0, 'personal')).toBe('/api/docs/slides/deck-1/thumbnails/0?scope=personal')
     expect(deckSlideThumbnailUrl('risk/a', 3, 'team')).toBe('/api/docs/slides/risk%2Fa/thumbnails/3?scope=team')
+    expect(deckSlideThumbnailUrl('deck-1', 0, 'personal', '2026-08-31T10:00:00Z')).toBe(
+      '/api/docs/slides/deck-1/thumbnails/0?scope=personal&v=2026-08-31T10%3A00%3A00Z',
+    )
+  })
+
+  it('loads a thumbnail through the team-aware fetch path', async () => {
+    mockedTeamFetch.mockResolvedValue(new Response('png', { status: 200, headers: { 'Content-Type': 'image/png' } }))
+    const blob = await fetchDeckSlideThumbnail('risk/a', 3, 'team', 'version-2')
+    expect(mockedTeamFetch).toHaveBeenCalledWith('/api/docs/slides/risk%2Fa/thumbnails/3?scope=team&v=version-2')
+    expect(await blob.text()).toBe('png')
   })
 
   it('builds an encoded template media URL', () => {

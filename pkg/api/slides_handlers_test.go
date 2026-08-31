@@ -263,6 +263,25 @@ func saveSlidesDeckRequestForTest(t *testing.T, docs store.DocsStore, sourceSlug
 	return req.WithContext(store.WithServices(req.Context(), &store.Services{PersonalDocs: docs}))
 }
 
+func TestAssetsWithoutDeckThumbnails(t *testing.T) {
+	assets := map[string]string{
+		"photo":               "data:image/png;base64,cGhvdG8=",
+		"slidethumb/v1/0":     "old",
+		"slidethumb/v2/0":     "current",
+		"slidethumbnail/logo": "keep",
+	}
+	clean := assetsWithoutDeckThumbnails(assets)
+	if len(clean) != 2 || clean["photo"] == "" || clean["slidethumbnail/logo"] == "" {
+		t.Fatalf("clean assets = %#v", clean)
+	}
+	if _, ok := clean["slidethumb/v1/0"]; ok {
+		t.Fatal("old thumbnail was copied")
+	}
+	if _, ok := clean["slidethumb/v2/0"]; ok {
+		t.Fatal("current thumbnail was copied")
+	}
+}
+
 func TestSaveSlidesDeckRequiresThumbnailsAndRollsBackNewDeck(t *testing.T) {
 	docs := newMemDocsStore()
 	seedSaveSourceDeck(t, docs, "session-deck")
@@ -504,8 +523,8 @@ func TestGetSlidesDeckSlideThumbnail(t *testing.T) {
 		if ct := rec.Header().Get("Content-Type"); ct != "image/png" {
 			t.Fatalf("content-type = %q", ct)
 		}
-		if !strings.Contains(rec.Header().Get("Cache-Control"), "immutable") {
-			t.Fatalf("missing immutable cache header: %q", rec.Header().Get("Cache-Control"))
+		if cacheControl := rec.Header().Get("Cache-Control"); !strings.Contains(cacheControl, "private") || !strings.Contains(cacheControl, "immutable") {
+			t.Fatalf("unexpected cache header: %q", cacheControl)
 		}
 		if rec.Body.Len() == 0 {
 			t.Fatal("empty PNG body")

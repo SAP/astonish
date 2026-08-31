@@ -358,7 +358,7 @@ func GetSlidesDeckSlideThumbnailHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	w.Header().Set("Content-Type", "image/png")
-	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	w.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
 	w.Header().Set("ETag", `"`+ref+`"`)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(png)
@@ -782,6 +782,16 @@ type deckSnapshotPayload struct {
 	TemplateModel string                `json:"templateModel,omitempty"`
 }
 
+func assetsWithoutDeckThumbnails(assets map[string]string) map[string]string {
+	clean := make(map[string]string, len(assets))
+	for ref, data := range assets {
+		if !strings.HasPrefix(ref, "slidethumb/") {
+			clean[ref] = data
+		}
+	}
+	return clean
+}
+
 func replaceDeckSlides(ctx context.Context, docs store.DocsStore, deckID string, current, replacements []*store.SlideContent) error {
 	for _, slide := range current {
 		if err := docs.DeleteSlide(ctx, deckID, slide.ID); err != nil {
@@ -888,8 +898,8 @@ func SaveSlidesDeckHandler(w http.ResponseWriter, r *http.Request) {
 			overrideTitle = sourceDeck.Title
 		}
 		existingDeck.Title = overrideTitle
-		existingDeck.Theme = sourceDeck.Theme
-		existingDeck.Assets = sourceDeck.Assets
+		existingDeck.Theme = cloneStringMap(sourceDeck.Theme)
+		existingDeck.Assets = assetsWithoutDeckThumbnails(sourceDeck.Assets)
 		existingDeck.TemplateModel = sourceDeck.TemplateModel
 		existingDeck.ThumbnailReady = false
 		existingDeck.Version++
@@ -934,7 +944,7 @@ func SaveSlidesDeckHandler(w http.ResponseWriter, r *http.Request) {
 			Description:    sourceDeck.Description,
 			SchemaVersion:  sourceDeck.SchemaVersion,
 			Theme:          cloneStringMap(sourceDeck.Theme),
-			Assets:         cloneStringMap(sourceDeck.Assets),
+			Assets:         assetsWithoutDeckThumbnails(sourceDeck.Assets),
 			TemplateModel:  sourceDeck.TemplateModel,
 			ThumbnailReady: false,
 			Version:        1,

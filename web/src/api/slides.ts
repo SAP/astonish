@@ -264,8 +264,21 @@ export function templateMediaUrl(name: string, ref: string, scope?: DocsScope): 
  * been baked for that slide — callers must render an EMPTY placeholder, never a
  * live render.
  */
-export function deckSlideThumbnailUrl(deckSlug: string, index: number, scope: DocsScope = 'personal'): string {
-  return withScope(`${DOCS_BASE}/slides/${encodeURIComponent(deckSlug)}/thumbnails/${index}`, scope)
+export function deckSlideThumbnailUrl(deckSlug: string, index: number, scope: DocsScope = 'personal', cacheKey?: string): string {
+  const url = withScope(`${DOCS_BASE}/slides/${encodeURIComponent(deckSlug)}/thumbnails/${index}`, scope)
+  return cacheKey ? `${url}&v=${encodeURIComponent(cacheKey)}` : url
+}
+
+/** Load a deck thumbnail through the authenticated, team-aware request path. */
+export async function fetchDeckSlideThumbnail(
+  deckSlug: string,
+  index: number,
+  scope: DocsScope = 'personal',
+  cacheKey?: string,
+): Promise<Blob> {
+  const response = await teamFetch(deckSlideThumbnailUrl(deckSlug, index, scope, cacheKey))
+  if (!response.ok) throw await responseError(response, 'Failed to load slide thumbnail')
+  return response.blob()
 }
 
 /** List available slide templates. Omit scope for the merged catalog. */

@@ -135,6 +135,8 @@ Request arrives with JWT
 
 Team and personal stores are opened lazily and auto-migrated on open. Credential access also performs a one-shot schema repair when the selected tenant schema is present but the `credentials` table is missing. The repair runs through the already-selected Ent client/search path, so it preserves schema-level tenant isolation while recovering from partial provisioning or stale cached store state without requiring a daemon restart.
 
+Runtime PostgreSQL pools use pgx `exec` query execution. Astonish can reconcile schemas while other pods still have active connections during rolling deployments, and platform deployments may use transaction-pooling proxies. Executing each query in one protocol exchange without a prepared-statement cache avoids both stale result-type plans and proxy-local prepared-statement state. Database errors still propagate to callers rather than being retried or suppressed.
+
 ### PostgreSQL Roles & Permissions
 
 ```sql

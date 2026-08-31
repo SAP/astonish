@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"io"
 	"net"
 	"net/http"
@@ -99,21 +100,54 @@ func TestSlidesPDFManager_UsesRegisteredCallbacks(t *testing.T) {
 // with the sentinel message and NEVER selects the host manager. Because the
 // handler resolves the browser BEFORE loading the scene, this exercises the
 // real handler without a store service.
+func TestSlidesPDFSandboxSpecUsesConfiguredBaseLayer(t *testing.T) {
+	oldTemplateChain := slidesTemplateLayerChainFn
+	oldBaseChain := slidesBaseLayerChainFn
+	oldTemplateImage := slidesTemplateImageFn
+	oldBaseImage := slidesBaseImageFn
+	defer func() {
+		slidesTemplateLayerChainFn = oldTemplateChain
+		slidesBaseLayerChainFn = oldBaseChain
+		slidesTemplateImageFn = oldTemplateImage
+		slidesBaseImageFn = oldBaseImage
+	}()
+
+	slidesTemplateLayerChainFn = func(context.Context, string) []string { return nil }
+	slidesBaseLayerChainFn = func(context.Context) []string { return []string{"@base", "sha256:browser"} }
+	slidesTemplateImageFn = func(context.Context, string) string { return "" }
+	slidesBaseImageFn = func(context.Context) string { return "registry.example/browser:latest" }
+
+	req := httptest.NewRequest(http.MethodGet, "/api/docs/slides/deck/export/pdf", nil)
+	spec := slidesPDFSandboxSpec(req.Context(), req, "user-1")
+	if got := strings.Join(spec.LayerChain, ","); got != "@base,sha256:browser" {
+		t.Fatalf("LayerChain = %q, want configured base chain", got)
+	}
+	if spec.Image != "registry.example/browser:latest" {
+		t.Fatalf("Image = %q, want configured base image", spec.Image)
+	}
+	if spec.UserID != "user-1" || spec.Labels["purpose"] != "slides-pdf" {
+		t.Fatalf("unexpected session metadata: %+v", spec)
+	}
+	if id := slidesPDFSandboxSessionID(req.Context(), req, "user-1"); !strings.HasPrefix(id, "slides-pdf-user-1-") {
+		t.Fatalf("session ID = %q, want layer-specific suffix", id)
+	}
+}
+
 func TestSlidesPDFHandler_NoFallbackWhenSandboxRequiredButUnavailable(t *testing.T) {
 	oldReq := sandboxBrowserRequiredFn
 	sandboxBrowserRequiredFn = func() (bool, string) { return true, "k8s" }
 	defer func() { sandboxBrowserRequiredFn = oldReq }()
 
-	// Inject a host-like manager (SandboxEnabled=false) to simulate "callbacks
-	// never registered". The guard must reject it rather than render on host.
-	oldMgr := slidesPDFBrowserManagerFn
+	// Inject a host-like manager (SandboxEnabled=false). The guard must reject
+	// it rather than render on the host.
+	oldNew := newSlidesPDFSandboxBrowserFn
 	hostLike := browser.NewManager(browser.DefaultConfig())
 	var called bool
-	slidesPDFBrowserManagerFn = func(string) (*browser.Manager, error) {
+	newSlidesPDFSandboxBrowserFn = func(context.Context, *http.Request, string, string) (*browser.Manager, func(), error) {
 		called = true
-		return hostLike, nil
+		return hostLike, nil, nil
 	}
-	defer func() { slidesPDFBrowserManagerFn = oldMgr }()
+	defer func() { newSlidesPDFSandboxBrowserFn = oldNew }()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/docs/slides/deck/export/pdf", nil)
 	rec := httptest.NewRecorder()
@@ -163,4 +197,3 @@ func TestSlidesPDFHandler_SandboxDisabledUsesHostManager(t *testing.T) {
 		t.Fatalf("status = %d, want 503 (scene load unavailable after host manager selected)", rec.Code)
 	}
 }
-

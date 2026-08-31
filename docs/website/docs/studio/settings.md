@@ -125,6 +125,7 @@ In cloud deployments, additional panels appear for users with admin roles:
 - Team-level provider configuration
 - Team MCP servers and skills
 - Team scheduler and flows
+- Import and delete team-owned **Slides Templates**
 - Container/sandbox settings per team
 
 ### Org Admin
@@ -132,6 +133,7 @@ In cloud deployments, additional panels appear for users with admin roles:
 - Manage organization users
 - Org-wide provider configuration
 - Org-level skills and MCP servers
+- Import and delete organization-owned **Slides Templates**
 - Audit log viewer
 
 ### Platform Admin (Superadmin)
@@ -140,5 +142,8 @@ In cloud deployments, additional panels appear for users with admin roles:
 - Platform-wide user management
 - Global provider and skill configuration
 - Platform MCP servers and channels
+- Import and delete platform-owned **Slides Templates**
 - Authentication settings
 - Sandbox infrastructure management
+
+Shared templates inherit into the Slides catalog according to scope. See [Slides Templates](../slides/templates.md) for user actions, administrator ownership, and PowerPoint import constraints.

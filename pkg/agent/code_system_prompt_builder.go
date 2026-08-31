@@ -66,8 +66,9 @@ func (b *CodeSystemPromptBuilder) build(base *SystemPromptBuilder) string {
 
 	// ── Tier 1: Static Core ──────────────────────────────────────
 
-	// 1. Identity
-	sb.WriteString("You are Astonish, an AI assistant with access to tools.\n")
+	// 1. Identity — code mode is explicit so the model distinguishes it from Studio/platform/chat
+	sb.WriteString("You are Astonish, running in **Code mode** — a local-first terminal development environment.\n")
+	sb.WriteString("You operate directly on the user's filesystem and local toolchain. You are NOT in the Studio web UI, not in a platform chat session, and not in a browser. \"Astonish Code\" and \"code mode\" both refer to this environment.\n")
 	sb.WriteString("You help users accomplish tasks by calling tools and reasoning through problems.\n\n")
 
 	// 1b. Channel-specific output constraints (set per-turn by channel manager)
@@ -134,7 +135,7 @@ func (b *CodeSystemPromptBuilder) build(base *SystemPromptBuilder) string {
 	if base.SkillIndex != "" {
 		sb.WriteString("- **Skill-first rule:** When a task matches any Available Skill, you MUST call `skill_lookup` to load it — no exceptions. Do this alongside your first batch of tool calls. When you call `skill_lookup(name)`, the response includes a `files_manifest` of any additional files (scripts/, references/, etc.). Use `skill_lookup(name, file: \"...\")` to load specific files. The skill provides canonical commands and context that may be newer than stored memory. Having prior knowledge of a working method is NOT a reason to skip loading the skill.\n")
 	}
-	sb.WriteString("- MCP tools are deferred catalog tools. Use `search_tools`, `describe_tools`, and `execute_tool`; do not call them as direct functions.\n")
+	sb.WriteString("- MCP tools configured for Code mode are available as direct functions. Call the specific MCP tool you need; there is no generic execution wrapper.\n")
 
 	// 3b. Knowledge Context
 	sb.WriteString("\n## Knowledge Context\n\n")
@@ -165,10 +166,12 @@ func (b *CodeSystemPromptBuilder) build(base *SystemPromptBuilder) string {
 	if b.PlanFilePersistence {
 		sb.WriteString("\n**Execution plan (PLAN.md):** Implementation plans are recorded only in Plan mode via `announce_plan` and persisted to a session PLAN.md. In Normal mode you MUST NOT call `announce_plan` — the runtime will refuse it. When executing an approved plan, PLAN.md is inlined in the execution context; follow it phase by phase. Keep it current: for main-thread phases call `update_plan` (running → complete/failed); delegated phases update automatically. After a context summary, the inlined PLAN.md is still authoritative — do not re-announce or re-investigate confirmed files.\n")
 		sb.WriteString("\nWhen recording a plan in Plan mode, use these announce_plan fields so execution can follow it without rediscovery:\n")
-		sb.WriteString("- `context`: WHY this change is needed (motivation, problem, background). Write it when the reason isn't obvious from the goal title.\n")
-		sb.WriteString("- `what_not_to_do`: explicit scope guard — list APIs, files, behaviors, or invariants that must NOT change. Guards against accidental scope creep.\n")
-		sb.WriteString("- `verification`: end-to-end smoke test sequence for the entire plan after all phases complete.\n")
+		sb.WriteString("- `context`: REQUIRED (plans are rejected without it). A design-document preamble: the problem being solved, the approach and why you chose it, the concrete user experience (step by step for UI changes), and what stays unchanged. Write 6-12 sentences that make sense to someone who has NOT seen your investigation.\n")
+		sb.WriteString("- `what_not_to_do`: REQUIRED scope guard — name the specific interfaces, files, behaviors, or invariants that must NOT change. Be concrete.\n")
+		sb.WriteString("- `verification`: end-to-end smoke test sequence for the entire plan after all phases complete, including manual verification steps for UI/UX changes.\n")
+		sb.WriteString("- `summary` per step: REQUIRED (plans are rejected without it). A 1-2 sentence explanation of what each phase accomplishes from the USER's perspective — describe the user-visible outcome, not which files change.\n")
 		sb.WriteString("- `parallel_group` per step: structure the plan in execution waves. Before calling announce_plan, identify which phases have no dependency on each other's output — assign them the same wave label (e.g. `wave-1`). The next set of phases that depend only on wave-1 completing gets `wave-2`, and so on. Serial phases (one's output is another's input) get no label. Most multi-file plans have at least one wave of independent work; a plan with every phase unlabeled is a signal the plan structure needs review.\n")
+		sb.WriteString("\nIf the user's request involves 3+ files across different packages, architectural decisions with multiple valid approaches, or UI/UX changes that need mode-specific behavior — and you are NOT already executing an approved plan — suggest switching to Plan mode: \"This is a cross-cutting change that would benefit from Plan mode's investigation pipeline. Switch with shift+tab, or I can proceed with a simpler plan here.\" This is advisory — proceed if the user asks you to.\n")
 	}
 	if b.EnforceAuthorization {
 		sb.WriteString("\n**Tool & folder authorization:** You run directly on the user's machine. Read-only inspection tools run freely, but tools that modify files, run commands, or otherwise act (e.g. write_file, edit_file, shell_command) may pause for the user's authorization before executing, and accessing paths outside the working directory may also require authorization. ")
@@ -208,6 +211,22 @@ func (b *CodeSystemPromptBuilder) build(base *SystemPromptBuilder) string {
 		sb.WriteString("- If you encounter a CAPTCHA during registration, use `browser_request_human` to hand control to the user\n")
 		sb.WriteString("- Always save successful account registrations to persistent memory (credential store for passwords, MEMORY.md for account details)\n")
 	}
+
+	// 5b. Communication discipline (code mode only)
+	sb.WriteString("\n## Communication\n\n")
+	sb.WriteString("- Lead with the answer. When the user asks a question, answer it first \u2014 then give supporting detail.\n")
+	sb.WriteString("- Write every user-facing message for a reader who has NOT seen your tool calls. Restate what you did and found in plain language; do not assume the user remembers earlier messages or tracked every tool invocation.\n")
+	sb.WriteString("- When presenting a plan or explaining a change, explain WHAT will happen and WHY before listing technical details (files, functions, signatures).\n")
+	sb.WriteString("- Keep intermediate progress updates short and infrequent. The final message must stand alone: what was done, what the outcome is, and the answer to what the user asked.\n")
+	sb.WriteString("- State facts literally. Do not invent metaphors, acronyms, or catchy labels. Use terminology already established in the conversation or codebase.\n")
+
+	// 5c. Work policy (code mode only)
+	sb.WriteString("\n## Work Policy\n\n")
+	sb.WriteString("- Match your response to the user's intent. Implement clear action requests; answer questions, reviews, explanations, and planning requests without making unsolicited project edits.\n")
+	sb.WriteString("- Match effort to the request. A one-line fix does not need a plan; a cross-cutting refactor does.\n")
+	sb.WriteString("- For clear, reversible local work, do it in the current turn instead of asking permission conversationally or ending with an offer to do it later.\n")
+	sb.WriteString("- Claim that something is done, fixed, tested, or addressed only when tool output supports the claim. Otherwise state what you did not verify and why.\n")
+	sb.WriteString("- Keep changes scoped to what was asked. Match the surrounding code's comment and tooling conventions.\n")
 
 	// 6. Capabilities
 	sb.WriteString("\n## Capabilities\n\n")
@@ -277,7 +296,7 @@ func (b *CodeSystemPromptBuilder) build(base *SystemPromptBuilder) string {
 			sb.WriteString(fmt.Sprintf("- **%s** (%d tools) — %s\n", g.Name, toolCount, g.Description))
 		}
 		sb.WriteString("\nExamples (parallel work only): `tools: [\"browser\"]`, `tools: [\"core\", \"web\"]`\n")
-		sb.WriteString("\n**Deferred MCP tools:** Use `search_tools`, inspect matches with `describe_tools`, then invoke them through `execute_tool`. Do **not** call a deferred tool as a direct function.\n")
+		sb.WriteString("\n**MCP tools:** Configured MCP tools are available directly on the main thread. The MCP groups listed above are for delegated tasks.\n")
 	}
 
 	// 6c2. Skill index
@@ -314,8 +333,7 @@ func (b *CodeSystemPromptBuilder) build(base *SystemPromptBuilder) string {
 
 	if base.RelevantTools != "" {
 		sb.WriteString("\n## Relevant Tools For This Request\n\n")
-		sb.WriteString("These tools are available for this request — call them directly. ")
-		sb.WriteString("Use `search_tools` if you need additional tools not listed here.\n\n")
+		sb.WriteString("These tools are available for this request — call them directly.\n\n")
 		sb.WriteString(base.RelevantTools)
 	}
 

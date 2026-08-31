@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -229,6 +231,174 @@ func TestSlidesResponsesOmitHeavyManifestFields(t *testing.T) {
 	}
 }
 
+func seedSaveSourceDeck(t *testing.T, docs *memDocsStore, slug string) {
+	t.Helper()
+	ctx := context.Background()
+	deck := &store.DeckManifest{
+		ID: uuid.NewString(), Slug: slug, Title: "Session deck", SessionID: "session-1",
+		SchemaVersion: slides.SchemaV2, Assets: map[string]string{},
+	}
+	if err := docs.CreateDeck(ctx, deck); err != nil {
+		t.Fatal(err)
+	}
+	for position := range 2 {
+		if err := docs.UpsertSlide(ctx, &store.SlideContent{
+			ID: uuid.NewString(), DeckID: deck.ID, Position: position,
+			Content:       `<ast-slide id="slide"><ast-text x="0" y="0" w="100" h="100">Hello</ast-text></ast-slide>`,
+			SchemaVersion: slides.SchemaV2,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func saveSlidesDeckRequestForTest(t *testing.T, docs store.DocsStore, sourceSlug, targetSlug string) *http.Request {
+	t.Helper()
+	body, err := json.Marshal(saveSlidesDeckRequest{TargetSlug: targetSlug})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/docs/slides/"+sourceSlug+"/save?scope=personal", bytes.NewReader(body))
+	req = mux.SetURLVars(req, map[string]string{"deckSlug": sourceSlug})
+	return req.WithContext(store.WithServices(req.Context(), &store.Services{PersonalDocs: docs}))
+}
+
+func TestAssetsWithoutDeckThumbnails(t *testing.T) {
+	assets := map[string]string{
+		"photo":               "data:image/png;base64,cGhvdG8=",
+		"slidethumb/v1/0":     "old",
+		"slidethumb/v2/0":     "current",
+		"slidethumbnail/logo": "keep",
+	}
+	clean := assetsWithoutDeckThumbnails(assets)
+	if len(clean) != 2 || clean["photo"] == "" || clean["slidethumbnail/logo"] == "" {
+		t.Fatalf("clean assets = %#v", clean)
+	}
+	if _, ok := clean["slidethumb/v1/0"]; ok {
+		t.Fatal("old thumbnail was copied")
+	}
+	if _, ok := clean["slidethumb/v2/0"]; ok {
+		t.Fatal("current thumbnail was copied")
+	}
+}
+
+func TestSaveSlidesDeckRequiresThumbnailsAndRollsBackNewDeck(t *testing.T) {
+	docs := newMemDocsStore()
+	seedSaveSourceDeck(t, docs, "session-deck")
+
+	original := generateRequiredDeckThumbnailsFn
+	generateRequiredDeckThumbnailsFn = func(context.Context, *http.Request, slides.Service, string) error {
+		return errors.New("render failed")
+	}
+	t.Cleanup(func() { generateRequiredDeckThumbnailsFn = original })
+
+	rec := httptest.NewRecorder()
+	SaveSlidesDeckHandler(rec, saveSlidesDeckRequestForTest(t, docs, "session-deck", "saved-deck"))
+
+	if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), "generate thumbnails") {
+		t.Fatalf("status = %d body=%s, want thumbnail failure", rec.Code, rec.Body.String())
+	}
+	if _, err := docs.GetDeck(context.Background(), "saved-deck"); !errors.Is(err, store.ErrDocsNotFound) {
+		t.Fatalf("new deck was not rolled back: %v", err)
+	}
+}
+
+func TestSaveSlidesDeckWaitsForPersistedThumbnails(t *testing.T) {
+	docs := newMemDocsStore()
+	seedSaveSourceDeck(t, docs, "session-deck")
+
+	original := generateRequiredDeckThumbnailsFn
+	generateRequiredDeckThumbnailsFn = func(ctx context.Context, _ *http.Request, svc slides.Service, slug string) error {
+		deck, deckSlides, err := svc.Deck(ctx, slug)
+		if err != nil {
+			return err
+		}
+		if deck.Assets == nil {
+			deck.Assets = map[string]string{}
+		}
+		for _, slide := range deckSlides {
+			ref := fmt.Sprintf("slidethumb/v2/%d", slide.Position)
+			deck.Assets[ref] = "data:image/png;base64,cG5n"
+			slide.ThumbnailRef = ref
+			if err := svc.Store.UpsertSlide(ctx, slide); err != nil {
+				return err
+			}
+		}
+		deck.ThumbnailReady = true
+		return svc.Store.UpdateDeck(ctx, deck)
+	}
+	t.Cleanup(func() { generateRequiredDeckThumbnailsFn = original })
+
+	rec := httptest.NewRecorder()
+	SaveSlidesDeckHandler(rec, saveSlidesDeckRequestForTest(t, docs, "session-deck", "saved-deck"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var response slidesDeckResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Slides) != 2 {
+		t.Fatalf("response slides = %d, want 2", len(response.Slides))
+	}
+	for position, slide := range response.Slides {
+		want := fmt.Sprintf("slidethumb/v2/%d", position)
+		if slide.ThumbnailRef != want {
+			t.Fatalf("slide %d thumbnailRef = %q, want %q", position, slide.ThumbnailRef, want)
+		}
+	}
+	deck, err := docs.GetDeck(context.Background(), "saved-deck")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !deck.ThumbnailReady || len(deck.Assets) != 2 {
+		t.Fatalf("persisted deck thumbnails incomplete: ready=%v assets=%d", deck.ThumbnailReady, len(deck.Assets))
+	}
+}
+
+func TestSaveSlidesDeckThumbnailFailureRestoresOverwrittenDeck(t *testing.T) {
+	docs := newMemDocsStore()
+	seedSaveSourceDeck(t, docs, "session-deck")
+	ctx := context.Background()
+	oldDeck := &store.DeckManifest{
+		ID: uuid.NewString(), Slug: "saved-deck", Title: "Original", SchemaVersion: slides.SchemaV2,
+		Version: 4, ThumbnailReady: true, Assets: map[string]string{"old-thumb": "data:image/png;base64,b2xk"},
+	}
+	if err := docs.CreateDeck(ctx, oldDeck); err != nil {
+		t.Fatal(err)
+	}
+	oldSlide := &store.SlideContent{
+		ID: uuid.NewString(), DeckID: oldDeck.ID, Position: 0, Content: `<ast-slide id="old"></ast-slide>`,
+		ThumbnailRef: "old-thumb", SchemaVersion: slides.SchemaV2,
+	}
+	if err := docs.UpsertSlide(ctx, oldSlide); err != nil {
+		t.Fatal(err)
+	}
+
+	original := generateRequiredDeckThumbnailsFn
+	generateRequiredDeckThumbnailsFn = func(context.Context, *http.Request, slides.Service, string) error {
+		return errors.New("render failed")
+	}
+	t.Cleanup(func() { generateRequiredDeckThumbnailsFn = original })
+
+	rec := httptest.NewRecorder()
+	SaveSlidesDeckHandler(rec, saveSlidesDeckRequestForTest(t, docs, "session-deck", "saved-deck"))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	deck, deckSlides, err := (slides.Service{Store: docs}).Deck(ctx, "saved-deck")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deck.Title != "Original" || deck.Version != 4 || !deck.ThumbnailReady || deck.Assets["old-thumb"] == "" {
+		t.Fatalf("overwritten deck was not restored: %#v", deck)
+	}
+	if len(deckSlides) != 1 || deckSlides[0].Content != oldSlide.Content || deckSlides[0].ThumbnailRef != "old-thumb" {
+		t.Fatalf("overwritten slides were not restored: %#v", deckSlides)
+	}
+}
+
 // ---------------------------------------------------------------------------
 
 // seedExportDeck writes a deck manifest (with optional assets) and one ASD slide
@@ -353,8 +523,8 @@ func TestGetSlidesDeckSlideThumbnail(t *testing.T) {
 		if ct := rec.Header().Get("Content-Type"); ct != "image/png" {
 			t.Fatalf("content-type = %q", ct)
 		}
-		if !strings.Contains(rec.Header().Get("Cache-Control"), "immutable") {
-			t.Fatalf("missing immutable cache header: %q", rec.Header().Get("Cache-Control"))
+		if cacheControl := rec.Header().Get("Cache-Control"); !strings.Contains(cacheControl, "private") || !strings.Contains(cacheControl, "immutable") {
+			t.Fatalf("unexpected cache header: %q", cacheControl)
 		}
 		if rec.Body.Len() == 0 {
 			t.Fatal("empty PNG body")

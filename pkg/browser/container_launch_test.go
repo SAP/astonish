@@ -34,6 +34,54 @@ func TestGetOrLaunch_ContainerPath_MissingResolveFunc(t *testing.T) {
 	}
 }
 
+func TestGetOrLaunch_ContainerPath_WaitsBeforeResolve(t *testing.T) {
+	var sequence []string
+
+	m := NewManager(BrowserConfig{})
+	m.SandboxEnabled = true
+	m.sessionID = "test-session"
+	m.ContainerEnsureReadyFunc = func(sessionID string) error {
+		sequence = append(sequence, "ready:"+sessionID)
+		return nil
+	}
+	m.ContainerResolveFunc = func(sessionID string) (string, string, error) {
+		sequence = append(sequence, "resolve:"+sessionID)
+		return "", "", fmt.Errorf("stop after resolve")
+	}
+
+	_, err := m.GetOrLaunch()
+	if err == nil {
+		t.Fatal("expected resolve error")
+	}
+	want := []string{"ready:test-session", "resolve:test-session"}
+	if fmt.Sprint(sequence) != fmt.Sprint(want) {
+		t.Fatalf("callback sequence = %v, want %v", sequence, want)
+	}
+}
+
+func TestGetOrLaunch_ContainerPath_ReadinessErrorStopsResolve(t *testing.T) {
+	resolved := false
+
+	m := NewManager(BrowserConfig{})
+	m.SandboxEnabled = true
+	m.sessionID = "test-session"
+	m.ContainerEnsureReadyFunc = func(string) error {
+		return fmt.Errorf("pod readiness failed")
+	}
+	m.ContainerResolveFunc = func(string) (string, string, error) {
+		resolved = true
+		return "container", "127.0.0.1", nil
+	}
+
+	_, err := m.GetOrLaunch()
+	if err == nil || !strings.Contains(err.Error(), "pod readiness failed") {
+		t.Fatalf("GetOrLaunch() error = %v, want readiness error", err)
+	}
+	if resolved {
+		t.Fatal("ContainerResolveFunc called after readiness failure")
+	}
+}
+
 // TestGetOrLaunch_ContainerPath_ResolveError verifies that a resolve failure
 // is propagated and stale state is not left behind.
 func TestGetOrLaunch_ContainerPath_ResolveError(t *testing.T) {

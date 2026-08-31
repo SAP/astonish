@@ -165,3 +165,84 @@ func TestPlanModeSystemContext_HardConstraintLanguage(t *testing.T) {
 		}
 	}
 }
+
+func TestPlanModeSystemContext_RequiresDesignQuality(t *testing.T) {
+	for _, want := range []string{
+		"USER FLOW",
+		"STATE MACHINES",
+		"DESIGN QUALITY SELF-CHECK",
+		"TYPED actions",
+		"ERROR/EMPTY STATES",
+	} {
+		if !strings.Contains(PlanModeSystemContext, want) {
+			t.Errorf("PlanModeSystemContext should mention %q", want)
+		}
+	}
+}
+
+func TestGraphPlanModeSystemContext_RequiresDesignQuality(t *testing.T) {
+	for _, want := range []string{
+		"USER FLOW",
+		"STATE MACHINES",
+		"DESIGN QUALITY SELF-CHECK",
+		"TYPED actions",
+		"ERROR/EMPTY STATES",
+		"Code mode",
+	} {
+		if !strings.Contains(GraphPlanModeSystemContext, want) {
+			t.Errorf("GraphPlanModeSystemContext should mention %q", want)
+		}
+	}
+}
+
+func TestGraphPlanModeSystemContext_GreenfieldGuidance(t *testing.T) {
+	for _, want := range []string{
+		"GREENFIELD",
+		"NEAR-EMPTY",
+		"REQUIREMENTS and ARCHITECTURE",
+		"directory structure",
+		"module boundaries",
+	} {
+		if !strings.Contains(GraphPlanModeSystemContext, want) {
+			t.Errorf("GraphPlanModeSystemContext should mention %q for greenfield guidance", want)
+		}
+	}
+}
+
+func TestPlanModeSystemContext_GreenfieldGuidance(t *testing.T) {
+	for _, want := range []string{
+		"GREENFIELD",
+		"architecture document",
+		"directory structure",
+	} {
+		if !strings.Contains(PlanModeSystemContext, want) {
+			t.Errorf("PlanModeSystemContext should mention %q for greenfield guidance", want)
+		}
+	}
+}
+
+func TestGraphPlanModeSystemContext_StrategySummary(t *testing.T) {
+	ctx := GraphPlanModeSystemContext
+	if !strings.Contains(ctx, "STRATEGY SUMMARY") {
+		t.Error("GraphPlanModeSystemContext should contain 'STRATEGY SUMMARY'")
+	}
+	if !strings.Contains(ctx, "chance to redirect") {
+		t.Error("GraphPlanModeSystemContext should contain 'chance to redirect'")
+	}
+	if strings.Contains(ctx, "WITHOUT any preceding prose") {
+		t.Error("GraphPlanModeSystemContext should NOT contain 'WITHOUT any preceding prose' (replaced by strategy summary)")
+	}
+}
+
+func TestPlanModeSystemContext_StrategySummary(t *testing.T) {
+	ctx := PlanModeSystemContext
+	if !strings.Contains(ctx, "STRATEGY SUMMARY") {
+		t.Error("PlanModeSystemContext should contain 'STRATEGY SUMMARY'")
+	}
+	if !strings.Contains(ctx, "chance to redirect") {
+		t.Error("PlanModeSystemContext should contain 'chance to redirect'")
+	}
+	if strings.Contains(ctx, "WITHOUT any preceding prose") {
+		t.Error("PlanModeSystemContext should NOT contain 'WITHOUT any preceding prose' (replaced by strategy summary)")
+	}
+}

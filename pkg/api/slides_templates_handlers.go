@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strconv"
 	"strings"
 
@@ -640,11 +639,14 @@ func ImportSlidesTemplateHandler(w http.ResponseWriter, r *http.Request) {
 
 	b64 := base64.StdEncoding.EncodeToString(data)
 
-	_, currentFile, _, _ := runtime.Caller(0)
-	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(currentFile), "../.."))
+	workingDir, scriptPath, err := slidesWorkerPaths("import_worker.mjs")
+	if err != nil {
+		http.Error(w, "import pptx template: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	runner := pptxworker.ImportRunner{
-		WorkingDir: filepath.Join(repoRoot, "web"),
-		ScriptPath: filepath.Join(repoRoot, "pkg/docs/slides/pptxworker/import_worker.mjs"),
+		WorkingDir: workingDir,
+		ScriptPath: scriptPath,
 	}
 
 	resp, err := runner.Run(r.Context(), pptxworker.ImportRequest{PPTXBase64: b64, Mode: "template"})

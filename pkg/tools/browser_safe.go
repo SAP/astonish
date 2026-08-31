@@ -9,10 +9,10 @@ import (
 )
 
 // browserToolTimeout is the maximum time any single browser tool call can take.
-// This prevents indefinite blocking when CDP connections die, pages hang, or
-// other infrastructure issues cause browser operations to never return.
-// Individual tools may have shorter timeouts (e.g., Navigate uses NavigationTimeout).
-const browserToolTimeout = 90 * time.Second
+// It exceeds the Kubernetes sandbox readiness window plus browser startup so a
+// browser-first turn waits for provisioning instead of timing out while the pod
+// continues starting. Individual operations retain their shorter timeouts.
+const browserToolTimeout = 4 * time.Minute
 
 // safeBrowserFunc wraps a browser tool handler with panic recovery and a
 // per-tool timeout. This prevents two critical issues:

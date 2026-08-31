@@ -82,11 +82,13 @@ func TestAnnouncePlanTool_RejectedPlanDoesNotEmit(t *testing.T) {
 	SetPlanProgressCallback(func(agent.SubTaskProgressEvent) { emitted = true })
 
 	res, err := announcePlan(nil, AnnouncePlanArgs{
-		Goal: "replacement",
+		Goal:    "replacement",
+		Context: "Test context for validation",
 		Steps: []PlanStepInput{{
 			Name:        "replace",
 			Description: "replace approved plan",
 			Details:     "Rewrite pkg/agent/plan_state.go SetActivePlan to reject replacements.",
+			Summary:     "Test summary",
 			Files:       []PlanFileChangeInput{{Path: "pkg/agent/plan_state.go", Kind: "modify"}},
 		}},
 	})
@@ -110,19 +112,22 @@ func TestAnnouncePlanTool_PassesDetailsThrough(t *testing.T) {
 	}()
 
 	var gotSteps []agent.PlanStepInfo
+	var capturedEvent agent.SubTaskProgressEvent
 	SetPlanStateCallback(func(goal string, doc agent.PlanDocumentInfo, steps []agent.PlanStepInfo) bool {
 		gotSteps = steps
 		return true
 	})
-	SetPlanProgressCallback(func(agent.SubTaskProgressEvent) {})
+	SetPlanProgressCallback(func(e agent.SubTaskProgressEvent) { capturedEvent = e })
 
 	_, err := announcePlan(nil, AnnouncePlanArgs{
-		Goal: "g",
+		Goal:    "g",
+		Context: "Test context for passthrough",
 		Steps: []PlanStepInput{
 			{
 				Name:        "a",
 				Description: "desc a",
 				Details:     "do x then y",
+				Summary:     "Test summary for passthrough",
 				Files:       []PlanFileChangeInput{{Path: "pkg/a.go", Kind: "modify"}},
 			},
 		},
@@ -132,6 +137,9 @@ func TestAnnouncePlanTool_PassesDetailsThrough(t *testing.T) {
 	}
 	if len(gotSteps) != 1 || gotSteps[0].Details != "do x then y" {
 		t.Fatalf("details not passed through: %+v", gotSteps)
+	}
+	if capturedEvent.PlanContext != "Test context for passthrough" {
+		t.Errorf("PlanContext = %q, want %q", capturedEvent.PlanContext, "Test context for passthrough")
 	}
 }
 
@@ -157,7 +165,108 @@ func TestAnnouncePlanTool_RejectsIncompleteSteps(t *testing.T) {
 	if !strings.Contains(res.Message, "details") || !strings.Contains(res.Message, "files") {
 		t.Fatalf("message = %q, want details and files", res.Message)
 	}
+	if !strings.Contains(res.Message, "context") {
+		t.Errorf("message should mention missing context, got %q", res.Message)
+	}
 	if called {
 		t.Fatal("incomplete plan must not store PlanState")
+	}
+}
+
+func TestAnnouncePlanTool_RejectsEmptyContext(t *testing.T) {
+	planStateCallback = func(goal string, doc agent.PlanDocumentInfo, steps []agent.PlanStepInfo) bool {
+		t.Fatal("state callback should not be called for incomplete plan")
+		return true
+	}
+	defer func() { planStateCallback = nil }()
+
+	args := AnnouncePlanArgs{
+		Goal:    "test",
+		Context: "", // empty — should be rejected
+		Steps: []PlanStepInput{{
+			Name:        "a",
+			Description: "desc a",
+			Details:     "do the thing",
+			Summary:     "user sees the thing",
+			Files:       []PlanFileChangeInput{{Path: "pkg/foo.go"}},
+		}},
+	}
+	res, err := announcePlan(nil, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != "incomplete_plan" {
+		t.Fatalf("status = %q, want incomplete_plan", res.Status)
+	}
+	if !strings.Contains(res.Message, "context") {
+		t.Errorf("message should mention missing context, got %q", res.Message)
+	}
+}
+
+func TestAnnouncePlanTool_RejectsMissingSummary(t *testing.T) {
+	planStateCallback = func(goal string, doc agent.PlanDocumentInfo, steps []agent.PlanStepInfo) bool {
+		t.Fatal("state callback should not be called for incomplete plan")
+		return true
+	}
+	defer func() { planStateCallback = nil }()
+
+	args := AnnouncePlanArgs{
+		Goal:    "test",
+		Context: "This is the context for the plan",
+		Steps: []PlanStepInput{{
+			Name:        "a",
+			Description: "desc a",
+			Details:     "do the thing",
+			Summary:     "", // empty — should be rejected
+			Files:       []PlanFileChangeInput{{Path: "pkg/foo.go"}},
+		}},
+	}
+	res, err := announcePlan(nil, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != "incomplete_plan" {
+		t.Fatalf("status = %q, want incomplete_plan", res.Status)
+	}
+	if !strings.Contains(res.Message, "summary") {
+		t.Errorf("message should mention missing summary, got %q", res.Message)
+	}
+}
+
+func TestAnnouncePlanTool_AcceptsCompleteArgs(t *testing.T) {
+	var called bool
+	planStateCallback = func(goal string, doc agent.PlanDocumentInfo, steps []agent.PlanStepInfo) bool {
+		called = true
+		return true
+	}
+	planProgressCallback = func(event agent.SubTaskProgressEvent) {}
+	defer func() {
+		planStateCallback = nil
+		planProgressCallback = nil
+	}()
+
+	args := AnnouncePlanArgs{
+		Goal:         "test",
+		Context:      "This plan fixes the widget. We chose approach A because...",
+		WhatNotToDo:  "Do not change the API interface.",
+		Verification: "go test ./...",
+		Steps: []PlanStepInput{{
+			Name:        "impl",
+			Description: "Implement the widget fix",
+			Details:     "Change WidgetFoo in pkg/widget/foo.go to handle nil",
+			Summary:     "Users no longer see a crash when opening an empty widget",
+			Files:       []PlanFileChangeInput{{Path: "pkg/widget/foo.go", Kind: "modify"}},
+			Verify:      "go test ./pkg/widget/...",
+		}},
+	}
+	res, err := announcePlan(nil, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != "ok" {
+		t.Fatalf("status = %q, want ok; message = %q", res.Status, res.Message)
+	}
+	if !called {
+		t.Fatal("planStateCallback should have been called")
 	}
 }

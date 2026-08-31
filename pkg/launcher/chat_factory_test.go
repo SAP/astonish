@@ -11,6 +11,8 @@ import (
 	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/credentials"
+	"google.golang.org/adk/tool"
+	"google.golang.org/adk/tool/functiontool"
 )
 
 func TestLogChatFactoryInitialization(t *testing.T) {
@@ -106,14 +108,72 @@ func TestSubAgentCredentialStoreWiring(t *testing.T) {
 	})
 }
 
-func TestMainThreadToolAllowlistIsEmpty(t *testing.T) {
-	if allow := mainThreadToolAllowlist(); len(allow) != 0 {
-		t.Fatalf("main-thread allowlist = %#v, want all domain tools deferred", allow)
+func TestMainThreadToolAllowlistByMode(t *testing.T) {
+	if allow := mainThreadToolAllowlist(false); len(allow) != 0 {
+		t.Fatalf("platform/chat main-thread allowlist = %#v, want all domain tools deferred", allow)
+	}
+
+	allow := mainThreadToolAllowlist(true)
+	for _, name := range []string{"read_file", "write_file", "shell_command", "announce_plan", "codegraph_explore"} {
+		if !allow[name] {
+			t.Errorf("code-mode main-thread allowlist is missing %q", name)
+		}
+	}
+	for _, name := range []string{"search_tools", "describe_tools", "execute_tool"} {
+		if allow[name] {
+			t.Errorf("code-mode main-thread allowlist unexpectedly exposes bridge tool %q", name)
+		}
+	}
+}
+
+func TestDirectCodeToolsExposeConcreteToolsWithoutBridge(t *testing.T) {
+	newTool := func(name string) tool.Tool {
+		t.Helper()
+		got, err := functiontool.New(functiontool.Config{Name: name, Description: name}, func(_ tool.Context, _ map[string]any) (map[string]any, error) {
+			return nil, nil
+		})
+		if err != nil {
+			t.Fatalf("create %s: %v", name, err)
+		}
+		return got
+	}
+
+	readFile := newTool("read_file")
+	writeFile := newTool("write_file")
+	direct := directCodeTools([]tool.Tool{readFile}, []*agent.ToolGroup{
+		{Name: "core", Tools: []tool.Tool{readFile, writeFile}},
+	})
+	if len(direct) != 2 {
+		t.Fatalf("direct code tools count = %d, want 2", len(direct))
+	}
+	if direct[0].Name() != "read_file" || direct[1].Name() != "write_file" {
+		t.Fatalf("direct code tools = [%s %s], want [read_file write_file]", direct[0].Name(), direct[1].Name())
+	}
+	for _, got := range direct {
+		if got.Name() == "execute_tool" {
+			t.Fatal("code mode must not expose execute_tool")
+		}
+	}
+}
+
+func TestProviderToolsForCodeModeOmitsBridge(t *testing.T) {
+	readFile, err := functiontool.New(functiontool.Config{Name: "read_file", Description: "read"}, func(_ tool.Context, _ map[string]any) (map[string]any, error) {
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerTools, err := providerToolsForMode(true, agent.NewLexicalToolIndex(), nil, []*agent.ToolGroup{{Name: "core", Tools: []tool.Tool{readFile}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(providerTools) != 1 || providerTools[0].Name() != "read_file" {
+		t.Fatalf("code provider tools = %#v, want only read_file", providerTools)
 	}
 }
 
 func TestFixedProviderToolsContract(t *testing.T) {
-	providerTools, err := fixedProviderTools(agent.NewLexicalToolIndex())
+	providerTools, err := providerToolsForMode(false, agent.NewLexicalToolIndex(), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

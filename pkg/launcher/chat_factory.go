@@ -183,8 +183,8 @@ type ChatFactoryResult struct {
 	SandboxPool sandbox.ToolNodePool
 }
 
-// mainThreadToolAllowlist is intentionally empty. The only model-visible tools
-// are the fixed progressive bridge added after the catalog is built.
+// fixedProviderTools returns the cache-stable tool contract used outside Code
+// mode. Code mode exposes its concrete tools directly instead.
 func fixedProviderTools(toolIndex *agent.ToolIndex) ([]tool.Tool, error) {
 	searchToolsTool, err := tools.NewSearchToolsTool(toolIndex)
 	if err != nil {
@@ -207,8 +207,71 @@ func fixedProviderTools(toolIndex *agent.ToolIndex) ([]tool.Tool, error) {
 	return providerTools, nil
 }
 
-func mainThreadToolAllowlist() map[string]bool {
-	return map[string]bool{}
+func providerToolsForMode(codeMode bool, toolIndex *agent.ToolIndex, preferred []tool.Tool, groups []*agent.ToolGroup) ([]tool.Tool, error) {
+	if codeMode {
+		return directCodeTools(preferred, groups), nil
+	}
+	if toolIndex == nil {
+		return nil, fmt.Errorf("initialize fixed tool bridge: tool index is nil")
+	}
+	return fixedProviderTools(toolIndex)
+}
+
+func directCodeTools(preferred []tool.Tool, groups []*agent.ToolGroup) []tool.Tool {
+	seen := make(map[string]bool)
+	direct := make([]tool.Tool, 0, len(preferred))
+	appendTool := func(t tool.Tool) {
+		if t == nil || seen[t.Name()] {
+			return
+		}
+		seen[t.Name()] = true
+		direct = append(direct, t)
+	}
+	for _, t := range preferred {
+		appendTool(t)
+	}
+	for _, group := range groups {
+		for _, t := range group.Tools {
+			appendTool(t)
+		}
+	}
+	return direct
+}
+
+func mainThreadToolAllowlist(codeMode bool) map[string]bool {
+	if !codeMode {
+		return map[string]bool{}
+	}
+	return map[string]bool{
+		"read_file":             true,
+		"write_file":            true,
+		"edit_file":             true,
+		"shell_command":         true,
+		"grep_search":           true,
+		"find_files":            true,
+		"file_tree":             true,
+		"process_read":          true,
+		"process_write":         true,
+		"process_kill":          true,
+		"process_list":          true,
+		"repo_map":              true,
+		"code_definition":       true,
+		"code_references":       true,
+		"codegraph_explore":     true,
+		"memory_save":           true,
+		"memory_search":         true,
+		"memory_delete":         true,
+		"delegate_tasks":        true,
+		"announce_plan":         true,
+		"update_plan":           true,
+		"gplan_reads":           true,
+		"gplan_gaps":            true,
+		"gplan_finalize":        true,
+		"resolve_credential":    true,
+		"skill_lookup":          true,
+		"create_skill":          true,
+		"perplexity_web_search": true,
+	}
 }
 
 // optionalCredentialResolver preserves a nil interface when the optional
@@ -874,6 +937,14 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 					gw := osb.Gateway()
 					sessReg := osb.Sessions()
 					if WireOpenShellBrowserManager(browserMgr, gw, sessReg, sessReg.TouchActivity) {
+						browserMgr.ContainerEnsureReadyFunc = func(sessionID string) error {
+							client := pool.GetOrCreate(sessionID)
+							if client == nil {
+								return fmt.Errorf("no sandbox client for session %q", sessionID)
+							}
+							return client.EnsureReady(sessionID)
+						}
+
 						// Register the dial func for the VNC proxy handler so it
 						// can tunnel HTTP/WebSocket to KasmVNC inside the sandbox.
 						api.SetVNCContainerDialFunc(browserMgr.ContainerDialFunc)
@@ -930,7 +1001,7 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			}
 
 			if kind == sandbox.BackendKindK8s {
-				if sandbox.WireBackendBrowserManager(browserMgr, b, sessRegistry, sessRegistry.TouchActivity) {
+				if sandbox.WireBackendBrowserManager(browserMgr, b, sessRegistry, pool, sessRegistry.TouchActivity) {
 					api.SetVNCContainerDialFunc(browserMgr.ContainerDialFunc)
 
 					// Register callbacks for the PDF browser manager so PDF export
@@ -1154,7 +1225,7 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 
 	// Split coreTools into main-thread essentials and the full "core" group
 	// for sub-agents. See mainThreadToolAllowlist for the membership.
-	mainThreadToolNames := mainThreadToolAllowlist()
+	mainThreadToolNames := mainThreadToolAllowlist(cfg.CodeMode)
 
 	var mainThreadTools []tool.Tool
 	for _, t := range coreTools {
@@ -1282,7 +1353,9 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		}
 	}
 
-	// MCP servers are catalog groups resolved through the fixed bridge.
+	// MCP servers remain catalog groups for delegation in every mode. Code mode
+	// also exposes their sanitized toolsets directly to the main agent.
+	var codeModeMainThreadToolsets []tool.Toolset
 	for _, lt := range lazyToolsets {
 		sanitized := agent.NewSanitizedToolset(lt, cfg.DebugMode)
 		groupName := "mcp:" + lt.Name()
@@ -1291,6 +1364,9 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			Name:        groupName,
 			Description: serverDesc,
 			Toolsets:    []tool.Toolset{sanitized},
+		}
+		if cfg.CodeMode {
+			codeModeMainThreadToolsets = append(codeModeMainThreadToolsets, sanitized)
 		}
 	}
 
@@ -1639,23 +1715,22 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 
 	logChatFactoryPhase(phaseStarted, "tool-index-sync")
 
-	// Main-thread search is catalog-only on every execution path. Deferred tools
-	// are inspected and invoked through the fixed bridge; search results must
-	// never become provider-visible declarations on a later model round.
-	if toolIndex == nil {
-		return nil, fmt.Errorf("initialize fixed tool bridge: tool index is nil")
-	}
-	providerTools, err := fixedProviderTools(toolIndex)
+	// Platform/chat sessions use the cache-stable bridge. Code mode runs locally
+	// and exposes concrete tools so plan and authorization policy apply to the
+	// exact model-visible operation rather than a generic executor.
+	providerTools, err := providerToolsForMode(cfg.CodeMode, toolIndex, mainThreadTools, sortedCatalogGroups)
 	if err != nil {
 		return nil, err
 	}
-	mainThreadTools = append(mainThreadTools, providerTools...)
+	if cfg.CodeMode {
+		mainThreadTools = providerTools
+	} else {
+		mainThreadTools = append(mainThreadTools, providerTools...)
+	}
 
 	// --- 6. Create ChatAgent ---
-	// The model sees only the fixed progressive bridge. All domain tools,
-	// including MCP tools in Code mode, remain catalog entries.
 	chatAgent := agent.NewChatAgent(
-		llm, mainThreadTools, nil, sessionService,
+		llm, mainThreadTools, codeModeMainThreadToolsets, sessionService,
 		promptBuilder, cfg.DebugMode, cfg.AutoApprove,
 	)
 	chatAgent.PreProviderRetrievalTimeout = cfg.AppConfig.Chat.PreProviderRetrievalTimeout()

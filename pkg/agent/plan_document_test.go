@@ -637,3 +637,162 @@ go test ./pkg/tui
 		t.Fatalf("files/verify not exported: %+v", steps[0])
 	}
 }
+
+func TestParsePlanDocument_ContextWithSubHeadings(t *testing.T) {
+	md := `# Execution Plan
+
+**Goal:** Fix the thing
+
+## Context
+
+## The Problem
+
+Something is broken.
+
+## The Approach
+
+We will fix it by doing X.
+
+## Phases
+
+- [ ] **step-one** — Do the fix
+`
+	doc, goal, steps, err := ParsePlanDocument(md)
+	if err != nil {
+		t.Fatalf("ParsePlanDocument: %v", err)
+	}
+	if goal != "Fix the thing" {
+		t.Fatalf("goal = %q", goal)
+	}
+	if len(steps) != 1 {
+		t.Fatalf("steps = %d, want 1", len(steps))
+	}
+	// The Context should contain both sub-headings and their content.
+	for _, want := range []string{"The Problem", "Something is broken", "The Approach", "We will fix it"} {
+		if !strings.Contains(doc.Context, want) {
+			t.Errorf("doc.Context missing %q; got:\n%s", want, doc.Context)
+		}
+	}
+}
+
+func TestParsePlanDocument_WhatNotToDoWithSubHeadings(t *testing.T) {
+	md := `# Execution Plan
+
+**Goal:** Test
+
+## Phases
+
+- [ ] **a** — do it
+
+## What Not To Change
+
+## Backend
+
+Do not change the API.
+
+## Frontend
+
+Do not change the UI.
+
+## Verification
+
+Run all tests.
+`
+	doc, _, _, err := ParsePlanDocument(md)
+	if err != nil {
+		t.Fatalf("ParsePlanDocument: %v", err)
+	}
+	for _, want := range []string{"Backend", "Do not change the API", "Frontend", "Do not change the UI"} {
+		if !strings.Contains(doc.WhatNotToDo, want) {
+			t.Errorf("doc.WhatNotToDo missing %q; got:\n%s", want, doc.WhatNotToDo)
+		}
+	}
+	if !strings.Contains(doc.Verification, "Run all tests") {
+		t.Errorf("doc.Verification = %q", doc.Verification)
+	}
+}
+
+func TestRenderPlanMarkdown_DowngradesHeadingsInContext(t *testing.T) {
+	orig := planClock
+	planClock = func() time.Time { return time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC) }
+	defer func() { planClock = orig }()
+
+	doc := PlanDocumentInfo{
+		Context:     "## The Problem\n\nSomething is wrong.\n\n## The Approach\n\nFix it.",
+		WhatNotToDo: "## Important\n\nDon't break it.",
+	}
+	steps := []planStep{{name: "fix", description: "fix it", status: "pending"}}
+	md := renderPlanMarkdownWithDoc("Test Goal", doc, steps)
+
+	// Context sub-headings should be downgraded to ###.
+	if strings.Contains(md, "\n## The Problem") {
+		t.Error("context should not contain '## The Problem'; expected '### The Problem'")
+	}
+	if !strings.Contains(md, "### The Problem") {
+		t.Error("expected '### The Problem' in rendered output")
+	}
+	if !strings.Contains(md, "### The Approach") {
+		t.Error("expected '### The Approach' in rendered output")
+	}
+	// WhatNotToDo heading should be downgraded too.
+	if !strings.Contains(md, "### Important") {
+		t.Error("expected '### Important' in WhatNotToDo")
+	}
+}
+
+func TestParsePlanDocument_ContextRoundTrip(t *testing.T) {
+	orig := planClock
+	planClock = func() time.Time { return time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC) }
+	defer func() { planClock = orig }()
+
+	doc := PlanDocumentInfo{
+		Context:      "## The Problem\n\nText A.\n\n## The Approach\n\nText B.",
+		WhatNotToDo:  "## Stuff\n\nDon't touch.",
+		Verification: "Run tests.",
+	}
+	steps := []planStep{{name: "fix", description: "fix it", status: "pending"}}
+
+	md := renderPlanMarkdownWithDoc("Round Trip", doc, steps)
+	parsed, goal, parsedSteps, err := parsePlanMarkdownFull(md)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	if goal != "Round Trip" {
+		t.Fatalf("goal = %q", goal)
+	}
+	if len(parsedSteps) != 1 {
+		t.Fatalf("steps = %d", len(parsedSteps))
+	}
+	// After round-trip, ## becomes ### but the content is preserved.
+	for _, want := range []string{"The Problem", "Text A", "The Approach", "Text B"} {
+		if !strings.Contains(parsed.Context, want) {
+			t.Errorf("parsed.Context missing %q; got:\n%s", want, parsed.Context)
+		}
+	}
+	for _, want := range []string{"Stuff", "Don't touch"} {
+		if !strings.Contains(parsed.WhatNotToDo, want) {
+			t.Errorf("parsed.WhatNotToDo missing %q; got:\n%s", want, parsed.WhatNotToDo)
+		}
+	}
+	if !strings.Contains(parsed.Verification, "Run tests") {
+		t.Errorf("parsed.Verification = %q", parsed.Verification)
+	}
+}
+
+func TestDowngradeHeadings(t *testing.T) {
+	tests := []struct {
+		in, want string
+	}{
+		{"## Foo\nbar\n## Baz", "### Foo\nbar\n### Baz"},
+		{"no headings here", "no headings here"},
+		{"### Already three", "### Already three"},
+		{"", ""},
+		{"## Only one", "### Only one"},
+	}
+	for _, tc := range tests {
+		got := downgradeHeadings(tc.in)
+		if got != tc.want {
+			t.Errorf("downgradeHeadings(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}

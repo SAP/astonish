@@ -476,18 +476,20 @@ func StudioSubtaskEventsHandler(w http.ResponseWriter, r *http.Request) {
 	// and returns subtask event items (tool calls, results, and text).
 	extractChildToolEvents := func(events []*session.Event) []subtaskEventItem {
 		var items []subtaskEventItem
+		uiTools := newUIToolTracker()
 		for _, evt := range events {
 			if evt.Content == nil {
 				continue
 			}
 			for _, part := range evt.Content.Parts {
 				if part.FunctionCall != nil {
+					identity := uiTools.call(part.FunctionCall)
 					// Skip internal tools that don't add value for display
-					name := part.FunctionCall.Name
+					name := identity.name
 					if name == "search_tools" || name == "announce_plan" || name == "update_plan" {
 						continue
 					}
-					args := part.FunctionCall.Args
+					args := identity.args
 					if subtaskRedactor != nil && args != nil {
 						args = subtaskRedactor.RedactMap(args)
 					}
@@ -498,7 +500,7 @@ func StudioSubtaskEventsHandler(w http.ResponseWriter, r *http.Request) {
 					})
 				}
 				if part.FunctionResponse != nil {
-					name := part.FunctionResponse.Name
+					name := uiTools.response(part.FunctionResponse)
 					if name == "search_tools" || name == "announce_plan" || name == "update_plan" {
 						continue
 					}

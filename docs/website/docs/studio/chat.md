@@ -58,6 +58,7 @@ When the agent produces artifacts (files, reports, applications), they render in
 - **Markdown reports** — Rendered as formatted documents directly in the chat
 - **Code files** — Syntax-highlighted with copy button
 - **Applications** — Embedded preview with live interaction (see [Generative UI](../generative-ui/))
+- **Slide decks** — Interactive generation progress, preview, navigation, editing, saving, presentation, and export controls (see [Slides](../slides/))
 
 Non-report file writes appear as compact download tiles linking to the Files panel.
 

@@ -145,6 +145,24 @@ func RenderPlanMarkdown(goal string, steps []planStep) string {
 	return renderPlanMarkdownWithDoc(goal, PlanDocumentInfo{}, steps)
 }
 
+// downgradeHeadings replaces leading "## " (level-2 markdown headings) in a
+// narrative section body with "### " so they cannot collide with the parser's
+// top-level section detection when the PLAN.md is re-read.
+func downgradeHeadings(s string) string {
+	lines := strings.Split(s, "\n")
+	changed := false
+	for i, line := range lines {
+		if strings.HasPrefix(line, "## ") {
+			lines[i] = "#" + line // "## X" → "### X"
+			changed = true
+		}
+	}
+	if !changed {
+		return s
+	}
+	return strings.Join(lines, "\n")
+}
+
 // renderPlanMarkdownWithDoc serializes a plan to Markdown, optionally including
 // document-level narrative sections (Context, WhatNotToDo, Verification) and
 // parallel-group headers for phase grouping.
@@ -164,7 +182,7 @@ func renderPlanMarkdownWithDoc(goal string, doc PlanDocumentInfo, steps []planSt
 	// Emit optional Context section before the phases list.
 	if strings.TrimSpace(doc.Context) != "" {
 		sb.WriteString("## Context\n\n")
-		sb.WriteString(strings.TrimRight(doc.Context, "\n"))
+		sb.WriteString(strings.TrimRight(downgradeHeadings(doc.Context), "\n"))
 		sb.WriteString("\n\n")
 	}
 
@@ -221,12 +239,12 @@ func renderPlanMarkdownWithDoc(goal string, doc PlanDocumentInfo, steps []planSt
 	// Emit optional post-phases narrative sections.
 	if strings.TrimSpace(doc.WhatNotToDo) != "" {
 		sb.WriteString("\n## What Not To Change\n\n")
-		sb.WriteString(strings.TrimRight(doc.WhatNotToDo, "\n"))
+		sb.WriteString(strings.TrimRight(downgradeHeadings(doc.WhatNotToDo), "\n"))
 		sb.WriteString("\n")
 	}
 	if strings.TrimSpace(doc.Verification) != "" {
 		sb.WriteString("\n## Verification\n\n")
-		sb.WriteString(strings.TrimRight(doc.Verification, "\n"))
+		sb.WriteString(strings.TrimRight(downgradeHeadings(doc.Verification), "\n"))
 		sb.WriteString("\n")
 	}
 
@@ -321,25 +339,45 @@ func parsePlanMarkdownFull(md string) (doc PlanDocumentInfo, goal string, steps 
 		raw := scanner.Text()
 		trimmed := strings.TrimSpace(raw)
 
-		// Detect top-level ## section headers.
+		// Detect top-level ## section headers. Only the recognized headers
+		// (Context, Phases, What Not To Change, Verification, Progress)
+		// trigger a section transition. Unknown ## headers inside a narrative
+		// section (Context, WhatNotToDo, Verification) are accumulated as
+		// content so the agent can use sub-headings like "## The Problem"
+		// inside a Context section without breaking the parser.
 		if strings.HasPrefix(trimmed, "## ") {
-			flushDetails()
-			flushSection()
 			header := strings.TrimPrefix(trimmed, "## ")
 			headerLower := strings.ToLower(header)
+			knownSection := ""
 			switch {
 			case headerLower == "context":
-				currentSection = secContext
+				knownSection = secContext
 			case headerLower == "phases":
-				currentSection = secPhases
-				currentGroup = ""
+				knownSection = secPhases
 			case strings.HasPrefix(headerLower, "what not to change") || strings.HasPrefix(headerLower, "what not to do"):
-				currentSection = secWhatNotToDo
+				knownSection = secWhatNotToDo
 			case headerLower == "verification":
-				currentSection = secVerification
-			default:
-				currentSection = secNone
+				knownSection = secVerification
+			case headerLower == "progress":
+				knownSection = secNone // recognized but not a content section
 			}
+			inNarrative := currentSection == secContext || currentSection == secWhatNotToDo || currentSection == secVerification
+			if knownSection != "" || !inNarrative {
+				// Known header or we're not inside a narrative section — transition.
+				flushDetails()
+				flushSection()
+				if knownSection != "" {
+					currentSection = knownSection
+					if knownSection == secPhases {
+						currentGroup = ""
+					}
+				} else {
+					currentSection = secNone
+				}
+				continue
+			}
+			// Unknown ## header inside a narrative section → treat as content.
+			sectionLines = append(sectionLines, raw)
 			continue
 		}
 

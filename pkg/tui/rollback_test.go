@@ -57,9 +57,6 @@ func TestRollbackCapabilityGating(t *testing.T) {
 // the test exercises the same extra-command wiring.
 func filterSlashCommandsForModel(m model, query string) []slashCommand {
 	var extra []slashCommand
-	if m.providerAdmin() != nil {
-		extra = append(extra, providerSlashCommand)
-	}
 	if m.rollbackCap() != nil {
 		extra = append(extra, rollbackSlashCommand)
 	}

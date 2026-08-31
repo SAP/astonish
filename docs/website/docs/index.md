@@ -23,6 +23,8 @@ Same binary, same 90+ tools, same platform. Your choice of database backend.
 
 **Generative UI.** Describe a dashboard, tool, or interactive app in plain English. Astonish builds it live in the chat using React 19 and Tailwind CSS. Save and share with your team.
 
+**Slides.** Generate complete presentations from prompts, documents, research, and connected systems. Apply built-in or imported PowerPoint templates, refine the deck with AI, present it in the browser, and export it as PPTX, PDF, or HTML. See [Slides](./slides/).
+
 **Enterprise Security.** Envelope encryption (AES-256-GCM), OIDC/SSO federation, per-organization sandboxes (Incus or Kubernetes), immutable audit logs, and database-per-org isolation.
 
 **Multi-Channel Access.** Studio (web UI), CLI, Remote CLI, Telegram, Email, and Slack. All channels connect to the same platform with consistent context.
@@ -72,6 +74,7 @@ Agent:  Saved: deploy_staging.yaml
 - [Quick Start: Local](./getting-started/quick-start-local.md) — Get up and running with SQLite
 - [Quick Start: Cloud](./getting-started/quick-start-cloud.md) — Deploy for your team with PostgreSQL
 - [Choose Your Interface](./getting-started/choose-your-interface.md) — Studio, CLI, Telegram, and more
+- [Slides](./slides/) — Create, edit, present, share, and export presentations
 - [Architecture](./getting-started/architecture.md) — Understand the layer model
 
 ## At a Glance

@@ -1,6 +1,6 @@
 # Studio Overview
 
-Studio is Astonish's web-based UI, served locally at `http://localhost:9393`. It provides a visual interface for chatting with agents, designing flows, managing fleet operations, and previewing generated applications.
+Studio is Astonish's web-based UI, served locally at `http://localhost:9393`. It provides a visual interface for chatting with agents, creating presentations, designing flows, managing fleet operations, and previewing generated applications.
 
 ## Main Tabs
 
@@ -11,6 +11,7 @@ Studio is Astonish's web-based UI, served locally at `http://localhost:9393`. It
 | **Fleet** | Multi-agent plan dashboard and coordination |
 | **Drill** | Test suites for agent validation and quality assurance |
 | **Apps** | Preview and manage generated applications |
+| **Slides** | Manage presentations, templates, versions, sharing, and exports |
 
 ## Launching Studio
 
@@ -51,6 +52,7 @@ Chat sessions and flow executions persist across browser refreshes. Studio store
 ## Related Pages
 
 - [Chat Interface](./chat.md)
+- [Slides](../slides/)
 - [Flow Editor](./flow-editor.md)
 - [Settings](./settings.md)
 - [Running & Debugging](./running-debugging.md)

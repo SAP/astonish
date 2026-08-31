@@ -136,6 +136,16 @@ If a migration is stuck, check PostgreSQL logs for lock contention or permission
 3. Confirm sender is in the allowlist (check exact address match)
 4. Look for parsing errors in daemon logs
 
+## Slides
+
+### Presentation does not open in presenter mode
+
+Allow pop-ups and full-screen access for the Studio site, or use the in-Studio **Full screen** view.
+
+### Template import or export fails
+
+Check that imported templates are valid `.pptx` files no larger than 75 MiB. PDF rendering in platform deployments also requires browser support in the configured sandbox. See [Presenting and Exporting Slides](../slides/presenting-and-exporting.md) for format guidance and Slides-specific solutions.
+
 ## Browser Automation
 
 ### Browser tool fails to launch

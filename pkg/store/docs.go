@@ -22,20 +22,20 @@ type DeckManifest struct {
 	// imported templates (SchemaVersion=3) and is empty for all other decks.
 	// Stored as a raw string to avoid coupling the store package to the slides
 	// IR types.
-	TemplateModel string    `json:"templateModel,omitempty"`
-	// ThumbnailReady is true when at least one slide has been baked to a
-	// static PNG thumbnail. Used by the list DTO so the frontend can skip
-	// issuing an image request for decks that have no thumbnails.
-	ThumbnailReady bool      `json:"thumbnailReady,omitempty"`
+	TemplateModel string `json:"templateModel,omitempty"`
+	// ThumbnailReady is true when every slide has a persisted static PNG
+	// thumbnail. Used by the list DTO so the frontend can skip issuing image
+	// requests until the deck's thumbnails are complete.
+	ThumbnailReady bool `json:"thumbnailReady,omitempty"`
 	// SessionID links the deck to the chat session that created it. Empty
 	// means the deck is saved/permanent; non-empty means session-scoped.
-	SessionID   string `json:"sessionId,omitempty"`
+	SessionID string `json:"sessionId,omitempty"`
 	// Version is the current version number (bumps on override-save).
-	Version     int    `json:"version"`
+	Version int `json:"version"`
 	// SourceSlug links an enhance-copy to the saved deck it was cloned from.
-	SourceSlug  string `json:"sourceSlug,omitempty"`
-	CreatedAt      time.Time `json:"createdAt"`
-	UpdatedAt      time.Time `json:"updatedAt"`
+	SourceSlug string    `json:"sourceSlug,omitempty"`
+	CreatedAt  time.Time `json:"createdAt"`
+	UpdatedAt  time.Time `json:"updatedAt"`
 	// Scope is a non-persisted, in-memory annotation ("personal" or "team")
 	// set only by the list handler when merging scopes. There is no Deck
 	// column for it; CreateDeck/UpdateDeck use explicit setters so this field

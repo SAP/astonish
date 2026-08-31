@@ -186,7 +186,7 @@ func TestCodeSystemPromptContracts_AuthorizationGuidance(t *testing.T) {
 	assertNotContains(t, noAuth.Build(), "Tool & folder authorization", "auth guidance absent when EnforceAuthorization is false")
 }
 
-func TestCodeSystemPromptContracts_MCPUsesFixedBridge(t *testing.T) {
+func TestCodeSystemPromptContracts_MCPToolsAreDirect(t *testing.T) {
 	base := &SystemPromptBuilder{
 		Tools: mockTools("read_file", "delegate_tasks"),
 		Catalog: []*ToolGroup{
@@ -205,11 +205,10 @@ func TestCodeSystemPromptContracts_MCPUsesFixedBridge(t *testing.T) {
 	cb := NewCodeSystemPromptBuilder(base)
 	prompt := cb.Build()
 
-	assertContains(t, prompt, "**Deferred MCP tools:**", "fixed bridge guidance present")
-	assertContains(t, prompt, "`describe_tools`", "schema inspection guidance present")
-	assertContains(t, prompt, "`execute_tool`", "fixed execution bridge present")
-	assertNotContains(t, prompt, "## MCP Tools (available directly)", "no direct MCP declarations in code mode")
-	assertNotContains(t, prompt, "get_library_docs", "individual MCP tools are not baked into prompt")
+	assertContains(t, prompt, "**MCP tools:** Configured MCP tools are available directly", "direct MCP guidance present")
+	assertContains(t, prompt, "Call the specific MCP tool you need", "specific tool guidance present")
+	assertNotContains(t, prompt, "`execute_tool`", "generic execution bridge absent")
+	assertNotContains(t, prompt, "**Deferred MCP tools:**", "deferred MCP guidance absent")
 }
 
 func TestCodeSystemPromptContracts_Capabilities(t *testing.T) {
@@ -268,8 +267,8 @@ func TestCodeSystemPromptBuilder_MaximalSize(t *testing.T) {
 	// Code-mode prompt includes all base sections plus: project guidance,
 	// code-nav rules, codegraph-first, stop-exploring, PLAN.md, auth gates,
 	// MCP tools listing. Budget ceiling is higher than chat mode.
-	if len(prompt) > 16000 {
-		t.Errorf("code-mode maximal prompt too large: %d bytes (limit 16000)", len(prompt))
+	if len(prompt) > 16500 {
+		t.Errorf("code-mode maximal prompt too large: %d bytes (limit 16500)", len(prompt))
 	}
 	if len(prompt) < 6000 {
 		t.Errorf("code-mode maximal prompt suspiciously small: %d bytes (expected > 6000)", len(prompt))
@@ -340,13 +339,13 @@ func TestCodeSystemPromptContracts_NoMemoryToolsInCodeMode(t *testing.T) {
 	assertNotContains(t, prompt, "memory usage", "\"memory usage\" capability hint must NOT appear in code-mode prompt")
 }
 
-// ─── Plan Mode Completeness Self-Check Contract Tests ────────────────────────
+// ─── Plan Mode Design Quality Self-Check Contract Tests ────────────────────────
 
 func TestGraphPlanModeSystemContext_CompletenessCheck(t *testing.T) {
 	ctx := GraphPlanModeSystemContext
 
-	if !strings.Contains(ctx, "COMPLETENESS SELF-CHECK") {
-		t.Errorf("GraphPlanModeSystemContext must contain 'COMPLETENESS SELF-CHECK'")
+	if !strings.Contains(ctx, "DESIGN QUALITY SELF-CHECK") {
+		t.Errorf("GraphPlanModeSystemContext must contain 'DESIGN QUALITY SELF-CHECK'")
 	}
 	if !strings.Contains(ctx, "frontend") {
 		t.Errorf("GraphPlanModeSystemContext must contain 'frontend' (frontend/backend coverage check)")
@@ -371,8 +370,8 @@ func TestGraphPlanModeSystemContext_CompletenessCheck(t *testing.T) {
 func TestPlanModeSystemContext_CompletenessCheck(t *testing.T) {
 	ctx := PlanModeSystemContext
 
-	if !strings.Contains(ctx, "COMPLETENESS SELF-CHECK") {
-		t.Errorf("PlanModeSystemContext must contain 'COMPLETENESS SELF-CHECK'")
+	if !strings.Contains(ctx, "DESIGN QUALITY SELF-CHECK") {
+		t.Errorf("PlanModeSystemContext must contain 'DESIGN QUALITY SELF-CHECK'")
 	}
 	if !strings.Contains(ctx, "frontend") {
 		t.Errorf("PlanModeSystemContext must contain 'frontend' (frontend/backend coverage check)")
@@ -380,4 +379,43 @@ func TestPlanModeSystemContext_CompletenessCheck(t *testing.T) {
 	if !strings.Contains(ctx, "terminal TUI") {
 		t.Errorf("PlanModeSystemContext must contain 'terminal TUI' (TUI parity check)")
 	}
+}
+
+func TestCodeSystemPrompt_CodeModeIdentity(t *testing.T) {
+	cb := maximalCodeBuilder()
+	prompt := cb.Build()
+
+	assertContains(t, prompt, "Code mode", "code mode identity present in code prompt")
+	assertContains(t, prompt, "local-first terminal", "local-first terminal identity present in code prompt")
+	assertContains(t, prompt, "NOT in the Studio web UI", "Studio web UI negative identity present in code prompt")
+}
+
+func TestCodeSystemPrompt_PlanFieldStrength(t *testing.T) {
+	base := &SystemPromptBuilder{}
+	cb := NewCodeSystemPromptBuilder(base)
+	cb.PlanFilePersistence = true
+	prompt := cb.Build()
+
+	assertContains(t, prompt, "REQUIRED (plans are rejected without it)", "REQUIRED rejection language for context/summary fields")
+	assertContains(t, prompt, "REQUIRED scope guard", "REQUIRED scope guard language for what_not_to_do field")
+}
+
+func TestCodeSystemPrompt_PlanNudge(t *testing.T) {
+	base := &SystemPromptBuilder{}
+	cb := NewCodeSystemPromptBuilder(base)
+	cb.PlanFilePersistence = true
+	prompt := cb.Build()
+
+	assertContains(t, prompt, "cross-cutting change", "plan nudge mentions cross-cutting change")
+	assertContains(t, prompt, "Plan mode's investigation pipeline", "plan nudge mentions investigation pipeline")
+	assertContains(t, prompt, "shift+tab", "plan nudge mentions shift+tab shortcut")
+}
+
+func TestCodeSystemPrompt_PlanNudgeAbsentWithoutPlanPersistence(t *testing.T) {
+	base := &SystemPromptBuilder{}
+	cb := NewCodeSystemPromptBuilder(base)
+	cb.PlanFilePersistence = false
+	prompt := cb.Build()
+
+	assertNotContains(t, prompt, "cross-cutting change", "plan nudge must NOT appear when PlanFilePersistence is false")
 }

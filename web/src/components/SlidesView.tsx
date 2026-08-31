@@ -3,7 +3,7 @@ import { Presentation, Trash2, ArrowLeft, Clock, Upload, GitFork, Layers, Plus, 
 import {
   listSlidesDecks,
   deleteSlidesDeck,
-  deckSlideThumbnailUrl,
+  fetchDeckSlideThumbnail,
   listDeckVersions,
   restoreDeckVersion,
   type SlidesDeckListItem,
@@ -96,15 +96,15 @@ function formatDate(dateStr?: string) {
  * IntersectionObserver); off-screen cards render the lightweight icon
  * placeholder until the user scrolls to them.
  */
-function SlideThumbnail({ deckSlug, scope, index, title, thumbnailReady }: { deckSlug: string; scope: DocsScope; index: number; title?: string; thumbnailReady?: boolean }) {
-  const src = deckSlideThumbnailUrl(deckSlug, index, scope)
+function SlideThumbnail({ deckSlug, scope, index, title, thumbnailReady, cacheKey }: { deckSlug: string; scope: DocsScope; index: number; title?: string; thumbnailReady?: boolean; cacheKey?: string }) {
   const tileRef = useRef<HTMLDivElement>(null)
   const [visible, setVisible] = useState(false)
+  const [src, setSrc] = useState<string | null>(null)
   const [imgFailed, setImgFailed] = useState(false)
 
-  // When the backend signals no thumbnail is baked, skip the <img> entirely —
-  // show the placeholder immediately without issuing a 404 HTTP request.
-  const showImage = thumbnailReady && visible && !imgFailed
+  // When the backend signals no thumbnail is baked, skip the request entirely.
+  const shouldLoad = thumbnailReady && visible
+  const showImage = shouldLoad && src && !imgFailed
 
   useEffect(() => {
     // No IntersectionObserver (jsdom/tests, very old browsers): render eagerly.
@@ -126,6 +126,32 @@ function SlideThumbnail({ deckSlug, scope, index, title, thumbnailReady }: { dec
     observer.observe(node)
     return () => observer.disconnect()
   }, [])
+
+  useEffect(() => {
+    if (!shouldLoad) {
+      setSrc(null)
+      setImgFailed(false)
+      return
+    }
+
+    let active = true
+    let objectURL = ''
+    setImgFailed(false)
+    fetchDeckSlideThumbnail(deckSlug, index, scope, cacheKey)
+      .then(blob => {
+        if (!active) return
+        objectURL = URL.createObjectURL(blob)
+        setSrc(objectURL)
+      })
+      .catch(() => {
+        if (active) setImgFailed(true)
+      })
+
+    return () => {
+      active = false
+      if (objectURL) URL.revokeObjectURL(objectURL)
+    }
+  }, [shouldLoad, deckSlug, index, scope, cacheKey])
 
   return (
     <div className="flex w-40 shrink-0 flex-col gap-1">
@@ -204,7 +230,7 @@ function DeckCard({
 
         {/* Single first-page thumbnail (lazy-mounted when scrolled into view). */}
         <div className="flex gap-3">
-          <SlideThumbnail deckSlug={deck.slug} scope={scope} index={0} title={deck.title} thumbnailReady={deck.thumbnailReady} />
+          <SlideThumbnail deckSlug={deck.slug} scope={scope} index={0} title={deck.title} thumbnailReady={deck.thumbnailReady} cacheKey={deck.updatedAt} />
         </div>
       </div>
 

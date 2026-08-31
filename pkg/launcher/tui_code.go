@@ -2228,6 +2228,7 @@ func renderPlanFromArgs(args map[string]any) string {
 				Name:          stringField(m, "name"),
 				Description:   stringField(m, "description"),
 				Details:       stringField(m, "details"),
+				Summary:       stringField(m, "summary"),
 				Verify:        stringField(m, "verify"),
 				ParallelGroup: stringField(m, "parallel_group"),
 			}

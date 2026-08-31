@@ -25,7 +25,7 @@ _Learn how Astonish works through the fable of "The Village of a Thousand Notebo
 
 ---
 
-Astonish is a multi-tenant AI agent platform for teams and organizations. It solves problems dynamically using LLM-driven tool-use loops, distills successful interactions into reusable flows, and builds live interactive apps from plain English descriptions. Knowledge compounds across every conversation, every team member, every day — when someone solves a tricky problem, the solution flows into team memory and everyone benefits.
+Astonish is a multi-tenant AI agent platform for teams and organizations. It solves problems dynamically using LLM-driven tool-use loops, distills successful interactions into reusable flows, builds live interactive apps, and generates complete presentations from plain English descriptions. Knowledge compounds across every conversation, every team member, every day — when someone solves a tricky problem, the solution flows into team memory and everyone benefits.
 
 Run it as a shared platform backed by PostgreSQL for your organization, or standalone with SQLite for personal use. Same binary, same features, your choice.
 
@@ -203,6 +203,16 @@ Agent:  Saved as "project_tracker" — open anytime from the Apps tab.
 - **Security sandboxed** — isolated iframe, opaque origin, SSRF-protected server-side proxy
 
 Save once, share with your team. No coding required, no infrastructure to manage.
+
+---
+
+## Slides
+
+Create complete presentations from prompts, attached documents and images, research, or connected systems. Choose a built-in design or import a branded PowerPoint template, refine the narrative and visuals with AI, and edit supported objects directly in Studio.
+
+Saved decks live in the Slides library with thumbnails and version history. In platform mode, publish personal decks to a team or fork team decks into your personal workspace. Present from the browser, or export as editable PPTX, visually consistent PDF, or self-contained HTML.
+
+See the [Slides documentation](https://sap.github.io/astonish/docs/slides/) for the complete workflow.
 
 ---
 

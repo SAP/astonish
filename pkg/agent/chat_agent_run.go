@@ -227,15 +227,14 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		var toolMatches []ToolMatch
 
 		searchQuery := buildKnowledgeQuery(cleanUserText)
-		bm25Query := ""
 		toolSearchQuery := searchQuery
+		var knowledgeTail string
 		if len(searchQuery) >= 5 {
+			knowledgeTail = lastModelResponseTail(ctx.Session().Events(), 300)
 			knowledgeTrackingQuery = searchQuery
-			if tail := lastModelResponseTail(ctx.Session().Events(), 300); tail != "" {
-				bm25Query = tail + " " + searchQuery
-				knowledgeTrackingBM25Query = bm25Query
-			}
 		}
+		bm25Query := buildBM25Query(searchQuery, knowledgeTail)
+		knowledgeTrackingBM25Query = bm25Query
 		if len(toolSearchQuery) < shortQueryThreshold {
 			if tail := lastModelResponseTail(ctx.Session().Events(), 200); tail != "" {
 				toolSearchQuery = tail + " " + toolSearchQuery

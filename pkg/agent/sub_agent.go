@@ -40,7 +40,7 @@ type SubAgentConfig struct {
 // SubTaskProgressEvent represents a structured lifecycle event for sub-task
 // plan visualization in the UI. These are higher-level than raw ADK events.
 type SubTaskProgressEvent struct {
-	Type     string `json:"type"`                // "delegation_start", "task_start", "task_complete", "task_failed", "task_retry", "task_tool_call", "task_tool_result", "task_text", "plan_announced", "plan_step_update"
+	Type     string `json:"type"`                // "delegation_start", "task_start", "task_complete", "task_failed", "task_retry", "evaluating", "task_tool_call", "task_tool_result", "task_text", "plan_announced", "plan_step_update"
 	TaskName string `json:"task_name,omitempty"` // Name of the sub-task (matches SubAgentTask.Name)
 	PlanStep string `json:"plan_step,omitempty"` // Plan step this task belongs to (for progress tracking)
 	// SessionID identifies the parent session that owns this delegation.
@@ -284,6 +284,12 @@ type SubAgentManager struct {
 	// Sub-agents are instructed to use this for all work (not /tmp).
 	SandboxWorkspaceDir string
 
+	// WorkDir is the project/working directory on the host filesystem.
+	// Injected into sub-agent prompts so they know the correct absolute paths
+	// for the project (prevents path hallucination like /home/user/repo/...).
+	// Set by the launcher to the process CWD (code mode) or project source path.
+	WorkDir string
+
 	// MCPGroupResolver is a fallback resolver for MCP tool groups that are not
 	// found in the ToolGroups map at resolution time. This handles the race
 	// condition where async MCP tool discovery completes after the chat agent
@@ -446,6 +452,20 @@ func (m *SubAgentManager) RunTasks(ctx context.Context, tasks []SubAgentTask) []
 			// making progress (had tool calls or partial output), evaluate
 			// whether to continue or restart with a different approach.
 			if isRetryableFailure(result) && hasProgress(result) {
+				// Emit evaluating event so the UI shows the task is being analyzed
+				if m.SubTaskProgress != nil {
+					m.SubTaskProgress(SubTaskProgressEvent{
+						Type:       "evaluating",
+						TaskName:   t.Name,
+						PlanStep:   t.PlanStep,
+						Status:     "evaluating",
+						Attempt:    1,
+						Error:      result.Error,
+						NoActivity: result.InactivityReason != "",
+						SessionID:  store.SessionIDFromContext(ctx),
+					})
+				}
+
 				// Evaluate whether the task was making progress or was stuck
 				evalAction, evalReason, evalGuidance := evaluateTimeoutResult(ctx, m.LLM, t, result)
 
@@ -1776,6 +1796,16 @@ func (m *SubAgentManager) buildChildPrompt(ctx context.Context, task SubAgentTas
 	childToolSet := make(map[string]bool, len(resolvedTools))
 	for _, t := range resolvedTools {
 		childToolSet[t.Name()] = true
+	}
+
+	// Inject working directory so sub-agents know the correct project path.
+	// Without this, sub-agents hallucinate paths like /home/user/repo/... which
+	// don't exist on the host, triggering folder-access prompts and slow fallback
+	// searches from filesystem root.
+	if m.WorkDir != "" {
+		sb.WriteString("\n## Environment\n")
+		sb.WriteString(fmt.Sprintf("- Working directory: %s\n", m.WorkDir))
+		sb.WriteString("- Use this path (or relative paths) for all file operations. Do NOT guess or invent project paths.\n")
 	}
 
 	if childToolSet["http_request"] {

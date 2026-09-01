@@ -623,3 +623,33 @@ func TestSummarizeToolArgsStableOrder(t *testing.T) {
 		t.Fatalf("summarizeToolArgs = %q, want %q", first, want)
 	}
 }
+
+func TestRenderDelegationItemShowsEvaluatingStatus(t *testing.T) {
+	item := events.Item{
+		Kind: events.ItemDelegation,
+		DelegationTasks: []events.DelegationTaskState{
+			{
+				Name:        "my-task",
+				Description: "Do something",
+				Status:      "evaluating",
+				Error:       "no meaningful activity for 2m0s",
+				StartedAt:   time.Now().Add(-30 * time.Second),
+			},
+		},
+	}
+
+	m := model{
+		theme: DefaultTheme(),
+		width: 80,
+	}
+	out := stripANSI(m.renderDelegationItem(item, 80))
+	if out == "" {
+		t.Fatal("delegation item should render when tasks are present")
+	}
+	if !strings.Contains(out, "⟳") {
+		t.Fatalf("should contain evaluating icon '⟳': %q", out)
+	}
+	if !strings.Contains(out, "evaluati") {
+		t.Fatalf("should contain 'evaluating' status text: %q", out)
+	}
+}

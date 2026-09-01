@@ -390,6 +390,14 @@ func (ps *PlanState) HasPendingSteps() bool {
 	return false
 }
 
+// IsAllComplete returns true when every step has reached a terminal state
+// (complete or failed) — i.e. there is nothing left to execute. This is
+// used to transition the session from execution mode to normal conversation
+// mode so the model stops treating every user message as an action request.
+func (ps *PlanState) IsAllComplete() bool {
+	return !ps.HasPendingSteps()
+}
+
 // HasStartedSteps reports whether any step has left the "pending" state — i.e.
 // whether execution actually began (a step is running/complete/failed).
 //

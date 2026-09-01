@@ -439,7 +439,17 @@ func excludeTurnContext(contents []*genai.Content) []*genai.Content {
 // recent user message that contains meaningful text (not a FunctionResponse).
 // Returns a Content with the user's instruction, prefixed for clarity.
 // Returns nil if no suitable user text is found in the old portion.
+//
+// When the last user instruction is short (< 200 chars, likely a follow-up like
+// "do it" or "let's start with X"), the function also looks for the most recent
+// *substantive* user message (≥ 200 chars) and includes it as context. This
+// prevents multi-message request flows from being lost — the short instruction
+// alone may be meaningless without the preceding detailed description.
 func findLastUserTextInstruction(contents []*genai.Content) *genai.Content {
+	var lastInstruction string
+	var lastSubstantive string
+	lastInstructionIdx := -1
+
 	for i := len(contents) - 1; i >= 0; i-- {
 		c := contents[i]
 		if c == nil || c.Role != "user" {
@@ -454,17 +464,46 @@ func findLastUserTextInstruction(contents []*genai.Content) *genai.Content {
 				break // this is a tool response, skip it
 			}
 			if p.Text != "" {
-				// Found a real user text instruction
-				return &genai.Content{
-					Parts: []*genai.Part{{
-						Text: "[Active user instruction]: " + p.Text,
-					}},
-					Role: "user",
+				if lastInstruction == "" {
+					lastInstruction = p.Text
+					lastInstructionIdx = i
+				} else if lastSubstantive == "" && len(p.Text) >= 200 && i != lastInstructionIdx {
+					// Found a substantive message that preceded the short instruction.
+					lastSubstantive = p.Text
 				}
+				break // only look at the first text part per user message
 			}
 		}
+		// Stop searching once we have both
+		if lastInstruction != "" && lastSubstantive != "" {
+			break
+		}
 	}
-	return nil
+
+	if lastInstruction == "" {
+		return nil
+	}
+
+	var text string
+	if lastSubstantive != "" && len(lastInstruction) < 200 {
+		// The last instruction is short — include the preceding substantive
+		// message as context so the model understands what the short instruction
+		// refers to. Cap the substantive text to avoid bloating the anchor.
+		subText := lastSubstantive
+		if len(subText) > 3000 {
+			subText = subText[:3000] + "..."
+		}
+		text = "[Prior user context]: " + subText + "\n\n[Active user instruction]: " + lastInstruction
+	} else {
+		text = "[Active user instruction]: " + lastInstruction
+	}
+
+	return &genai.Content{
+		Parts: []*genai.Part{{
+			Text: text,
+		}},
+		Role: "user",
+	}
 }
 
 // summarize uses the LLM to create a concise summary of old messages.

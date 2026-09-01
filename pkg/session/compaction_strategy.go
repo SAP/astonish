@@ -68,6 +68,9 @@ func (s *GenericStrategy) BuildSummarizationPrompt(contents []*genai.Content) st
 				flushToolRepeat()
 				sb.WriteString(fmt.Sprintf("[%s]: %s\n", role, truncateText(p.Text, 500)))
 			}
+			if p.InlineData != nil || p.FileData != nil {
+				sb.WriteString(fmt.Sprintf("[%s attached a file/image]\n", role))
+			}
 			if p.FunctionCall != nil {
 				if p.FunctionCall.Name == lastToolName {
 					toolRepeatCount++

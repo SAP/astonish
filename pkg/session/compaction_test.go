@@ -537,6 +537,80 @@ func TestFindLastUserTextInstruction_Empty(t *testing.T) {
 	}
 }
 
+func TestFindLastUserTextInstruction_SubstantiveContext(t *testing.T) {
+	// When the last user instruction is short (< 200 chars), the function
+	// should also include a preceding substantive message (≥ 200 chars) as context.
+	longBugReport := strings.Repeat("The debug panel shows no injection data even though memories are clearly being used. ", 5)
+	contents := []*genai.Content{
+		makeContent("user", longBugReport),            // substantive (200+ chars)
+		makeContent("model", "I see three options..."), // model response
+		makeContent("user", "let's start with debug panel issue"), // short instruction
+		makeFuncCallContent("model", "read_file", map[string]any{"path": "panel.tsx"}),
+		makeFuncResponseContent("user", "read_file", map[string]any{"content": "export default function Panel()"}),
+	}
+
+	result := findLastUserTextInstruction(contents)
+	if result == nil {
+		t.Fatal("expected non-nil task anchor")
+	}
+	text := result.Parts[0].Text
+	if !strings.Contains(text, "[Prior user context]:") {
+		t.Errorf("expected '[Prior user context]' prefix for substantive message, got %q", text)
+	}
+	if !strings.Contains(text, "debug panel shows no injection") {
+		t.Errorf("expected substantive bug report in anchor, got %q", text)
+	}
+	if !strings.Contains(text, "[Active user instruction]: let's start with debug panel issue") {
+		t.Errorf("expected short instruction at end of anchor, got %q", text)
+	}
+}
+
+func TestFindLastUserTextInstruction_LongInstructionNoSubstantive(t *testing.T) {
+	// When the last user instruction is already long (>= 200 chars),
+	// no separate substantive context should be added.
+	longInstruction := strings.Repeat("Please fix the bug in the compaction logic that loses user requests. ", 5)
+	contents := []*genai.Content{
+		makeContent("user", "Earlier question"),
+		makeContent("model", "response"),
+		makeContent("user", longInstruction),
+	}
+
+	result := findLastUserTextInstruction(contents)
+	if result == nil {
+		t.Fatal("expected non-nil task anchor")
+	}
+	text := result.Parts[0].Text
+	if strings.Contains(text, "[Prior user context]") {
+		t.Errorf("should NOT include prior context when instruction itself is long, got %q", text)
+	}
+	if !strings.Contains(text, "[Active user instruction]:") {
+		t.Errorf("expected '[Active user instruction]' prefix, got %q", text)
+	}
+}
+
+func TestFindLastUserTextInstruction_SubstantiveCap(t *testing.T) {
+	// Substantive text should be capped at 3000 characters
+	veryLong := strings.Repeat("x", 5000)
+	contents := []*genai.Content{
+		makeContent("user", veryLong), // very long substantive
+		makeContent("model", "ok"),
+		makeContent("user", "do it"), // short instruction
+	}
+
+	result := findLastUserTextInstruction(contents)
+	if result == nil {
+		t.Fatal("expected non-nil task anchor")
+	}
+	text := result.Parts[0].Text
+	if !strings.Contains(text, "[Prior user context]:") {
+		t.Errorf("expected substantive context, got %q", text[:100])
+	}
+	// The substantive portion should be capped
+	if len(text) > 3200 {
+		t.Errorf("substantive text should be capped, total len = %d", len(text))
+	}
+}
+
 func TestCompactContents_TaskAnchorPreserved(t *testing.T) {
 	c := NewCompactor(100)
 	c.PreserveRecent = 2 // Only keeps last 2 messages (tool call + response)

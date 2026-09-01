@@ -8,9 +8,10 @@ import (
 )
 
 // CodeStrategy produces structured summaries tailored for coding sessions.
-// It extracts file paths from tool calls and produces a 7-section summary
+// It extracts file paths from tool calls and produces an 8-section summary
 // (Objective, Files Modified, Tasks Completed, Tasks Pending, Key Decisions,
-// Errors & Fixes, Current State) that preserves critical project context.
+// Errors & Fixes, Pending User Requests, Current State) that preserves
+// critical project context including unaddressed user requests.
 type CodeStrategy struct {
 	// SessionNotes, when non-nil and non-empty, provides a pre-built summary
 	// from incremental session tracking. The LLM is instructed to use these
@@ -37,6 +38,7 @@ func (s *CodeStrategy) BuildSummarizationPrompt(contents []*genai.Content) strin
 	sb.WriteString("## TASKS PENDING\nBulleted list of work still to be done (unfinished items, known next steps, anything the model was about to do).\n\n")
 	sb.WriteString("## KEY DECISIONS\nTechnical decisions made during this session (architecture choices, library selections, API designs, naming conventions).\n\n")
 	sb.WriteString("## ERRORS & FIXES\nErrors encountered and how they were resolved. Note any that are still unresolved.\n\n")
+	sb.WriteString("## PENDING USER REQUESTS\nList any bug reports, feature requests, questions, or instructions from the user that the model has NOT yet started working on. Reproduce the user's description verbatim or near-verbatim — do NOT paraphrase unaddressed requests. If the user described multiple issues in one message, list each separately. Include image/attachment context if the user referred to visual evidence. If all user requests have been addressed, write '(none)'.\n\n")
 	sb.WriteString("## CURRENT STATE\nWhat was the model actively doing when this conversation segment ended? What file was open? What was the immediate next step?\n\n")
 	sb.WriteString("---\n\n")
 
@@ -82,8 +84,19 @@ func (s *CodeStrategy) BuildSummarizationPrompt(contents []*genai.Content) strin
 			}
 			if p.Text != "" {
 				flushToolRepeat()
-				// Code sessions get a bit more text budget per message
-				sb.WriteString(fmt.Sprintf("[%s]: %s\n", role, truncateText(p.Text, 800)))
+				// User messages get a larger text budget — they contain the
+				// highest-signal content (task requests, bug reports) that must
+				// survive summarization accurately.
+				limit := 800
+				if role == "user" {
+					limit = 2000
+				}
+				sb.WriteString(fmt.Sprintf("[%s]: %s\n", role, truncateText(p.Text, limit)))
+			}
+			if p.InlineData != nil || p.FileData != nil {
+				// Note image/file attachments so the summarizer knows visual
+				// evidence was provided even though it can't see the content.
+				sb.WriteString(fmt.Sprintf("[%s attached a file/image]\n", role))
 			}
 			if p.FunctionCall != nil {
 				if p.FunctionCall.Name == lastToolName {

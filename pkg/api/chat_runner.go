@@ -774,6 +774,18 @@ func (cr *ChatRunner) Run(
 		if evt.Error != "" {
 			data["error"] = evt.Error
 		}
+		if evt.Attempt > 0 {
+			data["attempt"] = evt.Attempt
+		}
+		if evt.Reason != "" {
+			data["reason"] = evt.Reason
+		}
+		if evt.LastActivity != "" {
+			data["last_activity"] = evt.LastActivity
+		}
+		if evt.NoActivity {
+			data["no_activity"] = true
+		}
 		if evt.ToolName != "" {
 			data["tool_name"] = evt.ToolName
 		}

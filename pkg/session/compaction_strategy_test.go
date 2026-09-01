@@ -56,8 +56,8 @@ func TestCodeStrategy_BuildPrompt_StructuredSections(t *testing.T) {
 	}
 	prompt := s.BuildSummarizationPrompt(contents)
 
-	// Should contain all 7 sections
-	for _, section := range []string{"OBJECTIVE", "FILES MODIFIED", "TASKS COMPLETED", "TASKS PENDING", "KEY DECISIONS", "ERRORS & FIXES", "CURRENT STATE"} {
+	// Should contain all 8 sections
+	for _, section := range []string{"OBJECTIVE", "FILES MODIFIED", "TASKS COMPLETED", "TASKS PENDING", "KEY DECISIONS", "ERRORS & FIXES", "PENDING USER REQUESTS", "CURRENT STATE"} {
 		if !strings.Contains(prompt, section) {
 			t.Errorf("CodeStrategy prompt should contain section %q", section)
 		}
@@ -204,5 +204,108 @@ func TestCompactor_SetStrategy(t *testing.T) {
 	c.SetStrategy(nil)
 	if c.StrategyName() != "platform" {
 		t.Errorf("after SetStrategy(nil), StrategyName() = %q, want 'platform'", c.StrategyName())
+	}
+}
+
+func TestCodeStrategy_ImageAttachmentNoted(t *testing.T) {
+	s := &CodeStrategy{}
+	contents := []*genai.Content{
+		makeContent("user", "Look at this bug"),
+		{
+			Parts: []*genai.Part{
+				{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte("fake")}},
+			},
+			Role: "user",
+		},
+		makeContent("model", "I can see the issue"),
+	}
+	prompt := s.BuildSummarizationPrompt(contents)
+
+	if !strings.Contains(prompt, "[user attached a file/image]") {
+		t.Error("CodeStrategy prompt should note image attachments")
+	}
+}
+
+func TestCodeStrategy_UserMessageHigherTextBudget(t *testing.T) {
+	s := &CodeStrategy{}
+	// Create a user message that's between 800 and 2000 chars — it should NOT be truncated
+	userText := strings.Repeat("This is a detailed bug report describing the issue. ", 25) // ~1275 chars
+	modelText := strings.Repeat("The model analyzes the issue thoroughly. ", 25)           // ~1000 chars
+
+	contents := []*genai.Content{
+		makeContent("user", userText),
+		makeContent("model", modelText),
+	}
+	prompt := s.BuildSummarizationPrompt(contents)
+
+	// User text should NOT be truncated (it's under 2000)
+	if strings.Contains(prompt, "This is a detailed bug report describing the issue. This is a detailed") && strings.Contains(prompt, "...") {
+		// Check that user text appears fully
+	}
+	// Just verify the user text is longer than the model text in the prompt
+	userIdx := strings.Index(prompt, "[user]:")
+	modelIdx := strings.Index(prompt, "[model]:")
+	if userIdx < 0 || modelIdx < 0 {
+		t.Fatal("expected both user and model text in prompt")
+	}
+	userSection := prompt[userIdx:modelIdx]
+	modelSection := prompt[modelIdx:]
+
+	// User text (~1275 chars) should survive fully; model text (~1000 chars) should be truncated at 800
+	if len(userSection) < 1200 {
+		t.Errorf("user text should be fully preserved (len=%d), expected >1200", len(userSection))
+	}
+	// Model text gets 800 char limit, so the model section should be shorter
+	if len(modelSection) > 900 {
+		t.Errorf("model text should be truncated to ~800 chars (section len=%d)", len(modelSection))
+	}
+}
+
+func TestGenericStrategy_ImageAttachmentNoted(t *testing.T) {
+	s := &GenericStrategy{}
+	contents := []*genai.Content{
+		makeContent("user", "Here's a screenshot"),
+		{
+			Parts: []*genai.Part{
+				{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte("fake")}},
+			},
+			Role: "user",
+		},
+		makeContent("model", "I see the screenshot"),
+	}
+	prompt := s.BuildSummarizationPrompt(contents)
+
+	if !strings.Contains(prompt, "[user attached a file/image]") {
+		t.Error("GenericStrategy prompt should note image attachments")
+	}
+}
+
+func TestSessionNotes_PendingRequestsRendered(t *testing.T) {
+	notes := NewSessionNotes()
+	notes.PendingRequests = []string{
+		"Debug panel shows no injection data",
+		"memory_search not called proactively",
+	}
+	rendered := notes.Render()
+
+	if !strings.Contains(rendered, "PENDING USER REQUESTS") {
+		t.Error("Render should include PENDING USER REQUESTS section")
+	}
+	if !strings.Contains(rendered, "Debug panel shows no injection data") {
+		t.Error("Render should include pending request text")
+	}
+	if !strings.Contains(rendered, "memory_search not called proactively") {
+		t.Error("Render should include all pending requests")
+	}
+}
+
+func TestSessionNotes_PendingRequestsInIsEmpty(t *testing.T) {
+	notes := NewSessionNotes()
+	if !notes.IsEmpty() {
+		t.Error("fresh notes should be empty")
+	}
+	notes.PendingRequests = []string{"fix the bug"}
+	if notes.IsEmpty() {
+		t.Error("notes with pending requests should NOT be empty")
 	}
 }

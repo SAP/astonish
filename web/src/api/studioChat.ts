@@ -155,6 +155,35 @@ export interface CacheDiagnosticsResponse {
   rounds: CacheDiagnosticRound[]
 }
 
+export interface KnowledgeDebugResult {
+  path: string
+  score: number
+  category: string
+  id?: string
+  scope?: string
+  created_by?: string
+  created_at?: string
+  session_id?: string
+}
+
+export interface KnowledgeDebugResponse {
+  sessionId: string
+  invocationId: string
+  knowledge: {
+    type: string
+    query: string
+    bm25_query_len: number
+    results: KnowledgeDebugResult[]
+    result_count: number
+    estimated_tokens: number
+  } | null
+  tools: {
+    query: string
+    results: Array<{ name: string; group: string; score: number }>
+    result_count: number
+  } | null
+}
+
 export interface SubtaskEventItem {
   type: string
   tool_name?: string
@@ -169,6 +198,16 @@ export async function fetchCacheDiagnostics(sessionId: string, invocationId: str
   if (!response.ok) {
     const detail = await response.text()
     throw new Error(detail || `Failed to fetch cache diagnostics: ${response.statusText}`)
+  }
+  return response.json()
+}
+
+export async function fetchKnowledgeDebug(sessionId: string, invocationId: string): Promise<KnowledgeDebugResponse> {
+  const params = new URLSearchParams({ invocationId })
+  const response = await teamFetch(`${API_BASE}/sessions/${encodeURIComponent(sessionId)}/knowledge-debug?${params}`)
+  if (!response.ok) {
+    const detail = await response.text()
+    throw new Error(detail || `Failed to fetch knowledge debug: ${response.statusText}`)
   }
   return response.json()
 }

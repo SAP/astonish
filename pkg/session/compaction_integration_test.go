@@ -9,7 +9,7 @@ import (
 )
 
 // TestCodeStrategy_ProducesStructuredSummary verifies that the CodeStrategy
-// produces a structured 7-section summary from a realistic code session.
+// produces a structured 8-section summary from a realistic code session.
 func TestCodeStrategy_ProducesStructuredSummary(t *testing.T) {
 	c := NewCompactor(200000)
 	c.PreserveRecent = 2

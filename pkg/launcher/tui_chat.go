@@ -1011,7 +1011,7 @@ func mapSSEToEvents(sev *client.SSEEvent, debug bool) []events.Event {
 					tasks[i] = events.DelegationTask{Name: t.Name, Description: t.Description, PlanStep: t.PlanStep}
 				}
 				return []events.Event{events.NewDelegationStart(tasks)}
-			case "task_start", "task_state", "task_retry":
+			case "task_start", "task_state", "task_retry", "evaluating":
 				return []events.Event{events.NewDelegationTaskState(payload.Type, payload.TaskName, payload.Status, payload.Duration, payload.LastActivity, payload.Reason, payload.Attempt, payload.NoActivity)}
 			case "task_complete":
 				return []events.Event{events.NewDelegationTaskState("task_complete", payload.TaskName, payload.Status, payload.Duration, payload.LastActivity, "", payload.Attempt, false)}

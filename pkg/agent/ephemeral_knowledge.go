@@ -40,7 +40,9 @@ func buildTurnContextContent(overrides *PromptOverrides, relevantTools, relevant
 		if overrides.AskMode {
 			modes = append(modes, "Ask mode is active. Mutating tools are blocked by the runtime.")
 		}
-		if overrides.ApprovedPlanExecution {
+		if overrides.ApprovedPlanCompleted {
+			modes = append(modes, "An approved plan was executed and completed earlier in this session. You are in normal conversation mode — not execution mode.")
+		} else if overrides.ApprovedPlanExecution {
 			modes = append(modes, "An approved plan is being executed. Follow it without replacing it.")
 		}
 		add("Runtime Mode", strings.Join(modes, "\n"))

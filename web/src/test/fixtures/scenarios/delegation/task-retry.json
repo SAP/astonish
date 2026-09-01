@@ -7,6 +7,7 @@
     { "type": "subtask_progress", "data": { "event_type": "delegation_start", "tasks": [{ "name": "API Call", "description": "Call external API" }] } },
     { "type": "subtask_progress", "data": { "event_type": "task_start", "task_name": "API Call" } },
     { "type": "subtask_progress", "data": { "event_type": "task_failed", "task_name": "API Call", "status": "error", "error": "429 rate limited", "duration": "0.5s" } },
+    { "type": "subtask_progress", "data": { "event_type": "evaluating", "task_name": "API Call", "status": "evaluating" } },
     { "type": "subtask_progress", "data": { "event_type": "task_retry", "task_name": "API Call" } },
     { "type": "subtask_progress", "data": { "event_type": "task_start", "task_name": "API Call" } },
     { "type": "subtask_progress", "data": { "event_type": "task_complete", "task_name": "API Call", "status": "success", "duration": "2.0s" } },

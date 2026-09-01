@@ -13,6 +13,7 @@ interface TaskState {
   events: SubTaskEvent[]
   status: 'pending' | 'running' | 'complete' | 'failed'
   retrying?: boolean
+  evaluating?: boolean
   duration?: string
   error?: string
   startTimestamp?: number
@@ -120,12 +121,18 @@ export default function TaskPlanPanel({ data, sessionId }: { data: SubTaskExecut
       if (evt.type === 'task_start') {
         task.status = 'running'
         task.retrying = false
+        task.evaluating = false
         task.startTimestamp = evt.timestamp
       } else if (evt.type === 'task_retry') {
         task.status = 'running'
         task.retrying = true
+        task.evaluating = false
         task.error = undefined
         task.duration = undefined
+      } else if (evt.type === 'evaluating') {
+        task.status = 'running'
+        task.evaluating = true
+        task.retrying = false
       } else if (evt.type === 'task_complete') {
         task.status = 'complete'
         task.retrying = false
@@ -388,7 +395,7 @@ export default function TaskPlanPanel({ data, sessionId }: { data: SubTaskExecut
                   {task.status === 'running' && (
                     <span className="text-[11px] flex items-center gap-1" style={{ color: 'var(--brand)' }}>
                       {task.retrying && <RotateCcw size={10} />}
-                      {task.retrying ? 'retrying' : 'running'}
+                      {task.evaluating ? '⟳ Evaluating…' : task.retrying ? 'retrying' : 'running'}
                     </span>
                   )}
                   {task.status === 'failed' && (

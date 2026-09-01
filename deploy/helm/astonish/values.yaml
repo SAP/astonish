@@ -106,7 +106,7 @@ ingress:
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
     # Allow large request bodies (file attachments are base64 in JSON)
-    nginx.ingress.kubernetes.io/proxy-body-size: "20m"
+    nginx.ingress.kubernetes.io/proxy-body-size: "80m"
   hosts: []
   #  - host: astonish.example.com
   #    paths:

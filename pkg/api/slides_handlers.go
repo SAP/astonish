@@ -1089,5 +1089,6 @@ func writeSlidesError(w http.ResponseWriter, err error) {
 		http.Error(w, "slides content not found", http.StatusNotFound)
 		return
 	}
+	slog.Error("slides request failed", "error", err)
 	http.Error(w, "slides request failed", http.StatusInternalServerError)
 }

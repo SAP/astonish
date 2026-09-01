@@ -651,6 +651,7 @@ func ImportSlidesTemplateHandler(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := runner.Run(r.Context(), pptxworker.ImportRequest{PPTXBase64: b64, Mode: "template"})
 	if err != nil {
+		slog.Error("import pptx template", "error", err)
 		http.Error(w, "import pptx template", importErrorStatus(err))
 		return
 	}

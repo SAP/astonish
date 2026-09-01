@@ -209,6 +209,18 @@ func (t *threeTierMemoryStore) searchAllTiersWith(ctx context.Context, query str
 		filtered = filtered[:maxResults]
 	}
 
+	// Normalize scores to [0, 1.0]. Tier weighting can push scores above 1.0
+	// (e.g. personal weight 1.2 × normalized 1.0 = 1.2) which is correct
+	// for ranking but must not leak into the display layer as >100%.
+	// Re-normalize proportionally so the top result maps to 1.0 and relative
+	// differences between results are preserved.
+	if len(filtered) > 0 && filtered[0].Score > 1.0 {
+		maxScore := filtered[0].Score // already sorted DESC
+		for i := range filtered {
+			filtered[i].Score /= maxScore
+		}
+	}
+
 	return filtered, nil
 }
 

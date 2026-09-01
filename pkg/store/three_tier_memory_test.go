@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 )
@@ -574,5 +575,105 @@ func TestThreeTierSearcher_MinScoreFilter(t *testing.T) {
 
 	if len(results) != 1 {
 		t.Fatalf("expected 1 result above minScore 0.90, got %d", len(results))
+	}
+}
+
+// highScoreMockMemoryStore returns results with score=1.0 to test clamping.
+type highScoreMockMemoryStore struct {
+	*mockMemoryStore
+}
+
+func (m *highScoreMockMemoryStore) search(query string, maxResults int, category string) ([]MemorySearchResult, error) {
+	var results []MemorySearchResult
+	for i, e := range m.entries {
+		if category != "" && e.Category != category {
+			continue
+		}
+		if query != "" && !strings.Contains(strings.ToLower(e.Content), strings.ToLower(query)) {
+			continue
+		}
+		results = append(results, MemorySearchResult{
+			ID:       fmt.Sprintf("%s-%d", m.scope, i),
+			Snippet:  e.Content,
+			Category: e.Category,
+			Score:    1.0, // max normalized score
+			Scope:    m.scope,
+		})
+		if len(results) >= maxResults {
+			break
+		}
+	}
+	return results, nil
+}
+
+func (m *highScoreMockMemoryStore) Search(_ context.Context, query string, maxResults int, _ float64) ([]MemorySearchResult, error) {
+	return m.search(query, maxResults, "")
+}
+
+func (m *highScoreMockMemoryStore) SearchByCategory(_ context.Context, query string, maxResults int, _ float64, category string) ([]MemorySearchResult, error) {
+	return m.search(query, maxResults, category)
+}
+
+func TestThreeTierSearcher_ScoresClampedToOne(t *testing.T) {
+	// highScoreMockMemoryStore returns score=1.0 for all matches.
+	// After personal weighting (×1.2) the raw score would be 1.2.
+	// The three-tier merger must re-normalize so the top score is 1.0
+	// and relative differences between results are preserved.
+	personal := &highScoreMockMemoryStore{newMockMemoryStore("personal")}
+	team := &highScoreMockMemoryStore{newMockMemoryStore("team")}
+	org := &highScoreMockMemoryStore{newMockMemoryStore("org")}
+
+	personal.Add(context.Background(), MemoryEntry{Content: "server credentials for QA", Category: "infra"})
+	team.Add(context.Background(), MemoryEntry{Content: "server credentials shared", Category: "infra"})
+	org.Add(context.Background(), MemoryEntry{Content: "server credentials org-wide", Category: "infra"})
+
+	searcher := NewThreeTierSearcher(ThreeTierMemoryStoreConfig{
+		Personal: personal,
+		Team:     team,
+		Org:      org,
+	})
+
+	results, err := searcher.SearchAllTiers(context.Background(), "server credentials", 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(results) != 3 {
+		t.Fatalf("expected 3 results, got %d", len(results))
+	}
+
+	for _, r := range results {
+		if r.Score > 1.0 {
+			t.Errorf("score for %s scope result exceeds 1.0: %.4f", r.Scope, r.Score)
+		}
+		if r.Score < 0 {
+			t.Errorf("score for %s scope result is negative: %.4f", r.Scope, r.Score)
+		}
+	}
+
+	// Personal should still rank first (its pre-normalize score 1.2 > team 1.0 > org 0.8)
+	if results[0].Scope != "personal" {
+		t.Errorf("expected personal first, got %q", results[0].Scope)
+	}
+	if results[1].Scope != "team" {
+		t.Errorf("expected team second, got %q", results[1].Scope)
+	}
+	if results[2].Scope != "org" {
+		t.Errorf("expected org third, got %q", results[2].Scope)
+	}
+
+	// After re-normalization by maxScore=1.2:
+	// personal: 1.2/1.2 = 1.0, team: 1.0/1.2 ≈ 0.833, org: 0.8/1.2 ≈ 0.667
+	if results[0].Score != 1.0 {
+		t.Errorf("personal score = %.4f, want 1.0", results[0].Score)
+	}
+	const epsilon = 0.001
+	wantTeam := 1.0 / 1.2 // ≈ 0.8333
+	if math.Abs(results[1].Score-wantTeam) > epsilon {
+		t.Errorf("team score = %.4f, want ~%.4f", results[1].Score, wantTeam)
+	}
+	wantOrg := 0.8 / 1.2 // ≈ 0.6667
+	if math.Abs(results[2].Score-wantOrg) > epsilon {
+		t.Errorf("org score = %.4f, want ~%.4f", results[2].Score, wantOrg)
 	}
 }

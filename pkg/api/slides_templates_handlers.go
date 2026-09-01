@@ -739,9 +739,14 @@ func generateTemplateThumbnails(ctx context.Context, tmpl *themes.Template) {
 		}
 	}()
 
+	// Pre-bake hero photo thumbnails (pure Go image resize, no browser needed).
+	// This runs unconditionally — even without a headless browser — because it
+	// is plain image downscaling, not HTML rendering.
+	slides.GenerateHeroPhotoThumbnails(tmpl)
+
 	mgr := GetLocalPDFBrowserManager()
 	if mgr == nil {
-		slog.Warn("slides thumbnail generation skipped: no local PDF browser manager",
+		slog.Warn("slides archetype thumbnail generation skipped: no local PDF browser manager",
 			"template", tmpl.Name)
 		return
 	}

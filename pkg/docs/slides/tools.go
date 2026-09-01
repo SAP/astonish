@@ -1714,11 +1714,19 @@ func templateHeroPhotoOptions(ctx context.Context, templateName string) ([]templ
 	}
 	picks := make([]templatePick, 0, len(photos))
 	for _, p := range photos {
+		// Prefer a pre-baked hero thumbnail (small PNG generated at import
+		// time) over the full-size raster so the picker never forces the
+		// client to download multi-megabyte assets. The option ID stays as
+		// the original ref for applyCoverPhotoFill.
+		thumbRef := p.Ref
+		if _, ok := tmpl.Assets[HeroThumbKey(p.Ref)]; ok {
+			thumbRef = HeroThumbKey(p.Ref)
+		}
 		picks = append(picks, templatePick{
 			option: AskUserOption{ID: p.Ref, Label: p.Label, Description: p.Description},
 			thumbnail: &AskUserThumbnail{
 				Kind:     "image",
-				AssetRef: p.Ref,
+				AssetRef: thumbRef,
 				Template: tmpl.Name,
 				OptionID: p.Ref,
 			},

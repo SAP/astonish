@@ -93,4 +93,18 @@ describe('QuestionOptionThumb', () => {
     expect(container.querySelector('img')).toBeNull()
     expect(container.querySelector('ast-deck')).toBeNull()
   })
+
+  it('renders an <img> from the template media endpoint for herothumb: asset refs', () => {
+    render(
+      <QuestionOptionThumb
+        thumbnail={{ kind: 'image', template: 'gco', assetRef: 'herothumb:sha256-deadbeef' }}
+        label="Hero thumb"
+      />,
+    )
+
+    const img = screen.getByAltText('Hero thumb') as HTMLImageElement
+    expect(img.getAttribute('src')).toBe(
+      '/api/docs/slides/templates/gco/media/herothumb%3Asha256-deadbeef',
+    )
+  })
 })

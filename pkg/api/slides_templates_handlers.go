@@ -497,6 +497,19 @@ func GetSlidesTemplateMediaHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	asset, ok := tmpl.Assets[ref]
 	if !ok {
+		// Log available asset keys when a herothumb ref is requested but not
+		// found, to diagnose whether the key was generated during import.
+		if strings.HasPrefix(ref, "herothumb") {
+			var heroKeys []string
+			for k := range tmpl.Assets {
+				if strings.HasPrefix(k, "herothumb") {
+					heroKeys = append(heroKeys, k)
+				}
+			}
+			slog.Warn("herothumb asset not found in template",
+				"template", name, "requestedRef", ref,
+				"heroKeysInTemplate", heroKeys, "totalAssets", len(tmpl.Assets))
+		}
 		http.Error(w, "asset not found", http.StatusNotFound)
 		return
 	}

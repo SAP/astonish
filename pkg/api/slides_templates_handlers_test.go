@@ -870,3 +870,37 @@ func TestGetSlidesTemplateThumbnailBuiltinWithoutRef(t *testing.T) {
 		t.Fatalf("expected 404 for built-in archetype without thumbnail, got %d body=%s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestGetSlidesTemplateMediaServesHeroThumb(t *testing.T) {
+	personal := newMemDocsStore()
+	png := []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x01, 0x02, 0x03}
+	origRef := "sha256-deadbeef"
+	heroKey := slides.HeroThumbKey(origRef) // herothumb:sha256-deadbeef
+	tmpl := themes.Template{
+		Schema: 2,
+		Name:   "herothumb-test",
+		Assets: map[string]string{
+			origRef: "data:image/png;base64," + base64.StdEncoding.EncodeToString(png),
+			heroKey: "data:image/png;base64," + base64.StdEncoding.EncodeToString(png),
+		},
+		Archetypes: []themes.Archetype{
+			{Kind: "title", Markup: `<ast-slide id="t"></ast-slide>`},
+		},
+	}
+	if err := (slides.Service{Store: personal}).SaveTemplate(context.Background(), tmpl); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify the herothumb key round-trips through save+load.
+	req := httptest.NewRequest(http.MethodGet, "/api/docs/slides/templates/herothumb-test/media/"+heroKey, nil)
+	req = withDocsServices(req, personal, newMemDocsStore())
+	req = mux.SetURLVars(req, map[string]string{"name": "herothumb-test", "ref": heroKey})
+	rec := httptest.NewRecorder()
+	GetSlidesTemplateMediaHandler(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("herothumb media: status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "image/png" {
+		t.Fatalf("Content-Type = %q", ct)
+	}
+}

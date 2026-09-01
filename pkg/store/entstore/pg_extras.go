@@ -74,17 +74,20 @@ var platformExtras = []string{
 	`CREATE INDEX IF NOT EXISTS idx_tool_index_embedding
 		ON tool_index USING hnsw (embedding vector_cosine_ops)`,
 
-	`CREATE INDEX IF NOT EXISTS idx_users_oidc
-		ON users(oidc_issuer, oidc_subject) WHERE oidc_issuer IS NOT NULL`,
+	// NOTE: idx_users_oidc is NOT created here because Ent manages an equivalent
+	// unique index on the same columns (user_oidc_issuer_oidc_subject).
+	// Drop any legacy copy so it doesn't conflict or waste space.
+	`DROP INDEX IF EXISTS idx_users_oidc`,
 
 	`CREATE INDEX IF NOT EXISTS idx_sandbox_layers_unreferenced
 		ON sandbox_layers(added_at) WHERE ref_count = 0`,
 
-	`CREATE INDEX IF NOT EXISTS idx_sandbox_layers_parent
-		ON sandbox_layers(parent_layer) WHERE parent_layer IS NOT NULL`,
-
-	`CREATE INDEX IF NOT EXISTS idx_sandbox_templates_parent
-		ON sandbox_templates(parent_template_id) WHERE parent_template_id IS NOT NULL`,
+	// NOTE: idx_sandbox_layers_parent and idx_sandbox_templates_parent are NOT
+	// created here because Ent manages equivalent indexes on the same columns
+	// (sandboxlayer_parent_layer, sandboxtemplate_parent_template_id).
+	// Drop any legacy copies so they don't waste space.
+	`DROP INDEX IF EXISTS idx_sandbox_layers_parent`,
+	`DROP INDEX IF EXISTS idx_sandbox_templates_parent`,
 
 	`CREATE INDEX IF NOT EXISTS idx_sandbox_templates_top_layer
 		ON sandbox_templates(top_layer_id) WHERE top_layer_id IS NOT NULL`,
@@ -192,8 +195,11 @@ var orgExtras = []string{
 	`CREATE INDEX IF NOT EXISTS idx_org_memories_tsv
 		ON org_memories USING GIN (tsv)`,
 
-	`CREATE INDEX IF NOT EXISTS idx_org_memories_session_id
-		ON org_memories (session_id) WHERE session_id IS NOT NULL`,
+	// --- Cleanup: drop legacy manual index that conflicts with Ent-managed one ---
+	// Ent manages a plain index on org_memories.session_id (orgmemory_session_id).
+	// Older pg_extras created a partial index with a different name on the same
+	// column, causing atlas migration conflicts.
+	`DROP INDEX IF EXISTS idx_org_memories_session_id`,
 
 	// --- tsvector trigger ---
 	`CREATE OR REPLACE FUNCTION org_memories_tsv_trigger() RETURNS trigger AS $$
@@ -233,7 +239,7 @@ $$ LANGUAGE plpgsql`,
 // =============================================================================
 
 var teamExtras = []string{
-	// --- Specialized indexes ---
+	// --- Specialized indexes (types Ent cannot produce) ---
 	// Note: In entstore architecture, each team has its own database with tables
 	// in the public schema. No {{schema}} placeholder needed.
 	`CREATE INDEX IF NOT EXISTS idx_memories_embedding
@@ -242,34 +248,20 @@ var teamExtras = []string{
 	`CREATE INDEX IF NOT EXISTS idx_team_memories_tsv
 		ON memories USING GIN (tsv)`,
 
-	`CREATE INDEX IF NOT EXISTS idx_memories_session_id
-		ON memories (session_id) WHERE session_id IS NOT NULL`,
-
-	// --- Partial indexes ---
-	`CREATE INDEX IF NOT EXISTS idx_sessions_parent
-		ON sessions(parent_id) WHERE parent_id IS NOT NULL`,
-
-	`CREATE INDEX IF NOT EXISTS idx_sessions_fleet
-		ON sessions(fleet_key) WHERE fleet_key != ''`,
-
-	`CREATE INDEX IF NOT EXISTS idx_flows_type
-		ON flows(type) WHERE type != ''`,
-
-	`CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_next_run
-		ON scheduled_jobs(next_run_at) WHERE status = 'active'`,
-
-	// Sandbox session partial indexes
-	`CREATE INDEX IF NOT EXISTS idx_sandbox_sessions_state_active
-		ON sandbox_sessions(state, last_active_at)
-		WHERE state IN ('running', 'evicted')`,
-
-	`CREATE INDEX IF NOT EXISTS idx_sandbox_sessions_upper_layer
-		ON sandbox_sessions(upper_layer_id)
-		WHERE upper_layer_id IS NOT NULL`,
-
-	`CREATE INDEX IF NOT EXISTS idx_sandbox_sessions_container
-		ON sandbox_sessions(container_name)
-		WHERE container_name IS NOT NULL`,
+	// --- Cleanup: drop legacy manual indexes that conflict with Ent-managed ones ---
+	// Ent's Schema.Create manages plain indexes on these columns (e.g. flow_type,
+	// memory_session_id, session_parent_id, …). Older pg_extras created partial
+	// indexes with different names on the same columns, causing atlas to generate
+	// DROP INDEX statements that fail on databases where the manual index was never
+	// created. Remove them so only the Ent-managed indexes remain.
+	`DROP INDEX IF EXISTS idx_memories_session_id`,
+	`DROP INDEX IF EXISTS idx_sessions_parent`,
+	`DROP INDEX IF EXISTS idx_sessions_fleet`,
+	`DROP INDEX IF EXISTS idx_flows_type`,
+	`DROP INDEX IF EXISTS idx_scheduled_jobs_next_run`,
+	`DROP INDEX IF EXISTS idx_sandbox_sessions_state_active`,
+	`DROP INDEX IF EXISTS idx_sandbox_sessions_upper_layer`,
+	`DROP INDEX IF EXISTS idx_sandbox_sessions_container`,
 
 	// --- tsvector trigger ---
 	`CREATE OR REPLACE FUNCTION memories_tsv_trigger() RETURNS trigger AS $$
@@ -290,15 +282,18 @@ $$ LANGUAGE plpgsql`,
 // =============================================================================
 
 var personalExtras = []string{
-	// --- Specialized indexes ---
+	// --- Specialized indexes (types Ent cannot produce) ---
 	`CREATE INDEX IF NOT EXISTS idx_personal_memories_embedding
 		ON memories USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100)`,
 
 	`CREATE INDEX IF NOT EXISTS idx_personal_memories_tsv
 		ON memories USING GIN (tsv)`,
 
-	`CREATE INDEX IF NOT EXISTS idx_memories_session_id
-		ON memories (session_id) WHERE session_id IS NOT NULL`,
+	// --- Cleanup: drop legacy manual index that conflicts with Ent-managed one ---
+	// Ent manages a plain index on memories.session_id (memory_session_id).
+	// Older pg_extras created a partial index with a different name on the same
+	// column, causing atlas migration conflicts.
+	`DROP INDEX IF EXISTS idx_memories_session_id`,
 
 	// --- tsvector trigger ---
 	`CREATE OR REPLACE FUNCTION memories_tsv_trigger() RETURNS trigger AS $$

@@ -47,10 +47,33 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # Minimal system packages only — avoid apt nodejs/npm/python3-pip (slow under
 # QEMU on GitHub Actions multi-arch arm64 and inflate the image).
+# Chromium shared-library deps are needed for headless Chrome (rod) used by
+# slide thumbnail generation and PDF export. Without them Chrome fails with
+# "error while loading shared libraries: libgobject-2.0.so.0".
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         ca-certificates \
         git \
+        # --- Chromium headless runtime dependencies ---
+        libglib2.0-0 \
+        libnss3 \
+        libnspr4 \
+        libdbus-1-3 \
+        libatk1.0-0 \
+        libatk-bridge2.0-0 \
+        libcups2 \
+        libdrm2 \
+        libxkbcommon0 \
+        libatspi2.0-0 \
+        libxcomposite1 \
+        libxdamage1 \
+        libxfixes3 \
+        libxrandr2 \
+        libgbm1 \
+        libpango-1.0-0 \
+        libcairo2 \
+        libasound2 \
+        fonts-liberation \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 

@@ -497,6 +497,19 @@ func GetSlidesTemplateMediaHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	asset, ok := tmpl.Assets[ref]
 	if !ok {
+		// Log available asset keys when a herothumb ref is requested but not
+		// found, to diagnose whether the key was generated during import.
+		if strings.HasPrefix(ref, "herothumb") {
+			var heroKeys []string
+			for k := range tmpl.Assets {
+				if strings.HasPrefix(k, "herothumb") {
+					heroKeys = append(heroKeys, k)
+				}
+			}
+			slog.Warn("herothumb asset not found in template",
+				"template", name, "requestedRef", ref,
+				"heroKeysInTemplate", heroKeys, "totalAssets", len(tmpl.Assets))
+		}
 		http.Error(w, "asset not found", http.StatusNotFound)
 		return
 	}
@@ -651,6 +664,7 @@ func ImportSlidesTemplateHandler(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := runner.Run(r.Context(), pptxworker.ImportRequest{PPTXBase64: b64, Mode: "template"})
 	if err != nil {
+		slog.Error("import pptx template", "error", err)
 		http.Error(w, "import pptx template", importErrorStatus(err))
 		return
 	}
@@ -738,9 +752,14 @@ func generateTemplateThumbnails(ctx context.Context, tmpl *themes.Template) {
 		}
 	}()
 
+	// Pre-bake hero photo thumbnails (pure Go image resize, no browser needed).
+	// This runs unconditionally — even without a headless browser — because it
+	// is plain image downscaling, not HTML rendering.
+	slides.GenerateHeroPhotoThumbnails(tmpl)
+
 	mgr := GetLocalPDFBrowserManager()
 	if mgr == nil {
-		slog.Warn("slides thumbnail generation skipped: no local PDF browser manager",
+		slog.Warn("slides archetype thumbnail generation skipped: no local PDF browser manager",
 			"template", tmpl.Name)
 		return
 	}

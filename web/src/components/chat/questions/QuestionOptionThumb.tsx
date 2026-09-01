@@ -32,7 +32,7 @@ export default function QuestionOptionThumb({ thumbnail, label }: QuestionOption
     const scope = thumbnail.templateScope && thumbnail.templateScope !== 'builtin'
       ? thumbnail.templateScope as DocsScope
       : undefined
-    const src = assetRef.startsWith('sha256-')
+    const src = assetRef.startsWith('sha256-') || assetRef.startsWith('herothumb:')
       ? templateMediaUrl(thumbnail.template!, assetRef, scope)
       : templateThumbnailUrl(thumbnail.template!, assetRef.replace(/^thumb\//, ''), assetRef, scope)
     return (

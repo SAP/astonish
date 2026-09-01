@@ -212,9 +212,12 @@ func (s *Store) openOrgDB(slug string) (*orgent.Client, *sql.DB, error) {
 
 		// Auto-migrate: create any missing tables (e.g. team_memberships added
 		// after the org was originally provisioned). Skip ModifyColumn to
-		// tolerate SERIAL-vs-IDENTITY differences on legacy tables.
+		// tolerate SERIAL-vs-IDENTITY differences on legacy tables. Skip
+		// DropIndex and DropColumn to preserve pg_extras indexes (IVFFlat,
+		// GIN, partial) and restore the Ent defaults that WithSkipChanges
+		// overrides.
 		if err := client.Schema.Create(context.Background(),
-			entschema.WithSkipChanges(entschema.ModifyColumn),
+			entschema.WithSkipChanges(entschema.ModifyColumn|entschema.DropIndex|entschema.DropColumn),
 		); err != nil {
 			db.Close()
 			return nil, nil, fmt.Errorf("auto-migrate org pg db %s: %w", dbName, err)
@@ -907,10 +910,11 @@ func (o *orgDataStore) openTeamDB(teamSlug string) (*teamDataStore, error) {
 		}
 
 		// Auto-migrate: create any missing tables/columns. Skip ModifyColumn
-		// to tolerate SERIAL-vs-IDENTITY differences on legacy tables; allow
-		// ModifyTable so Ent can ADD COLUMN to existing tables on deploy.
+		// to tolerate SERIAL-vs-IDENTITY differences on legacy tables; skip
+		// DropIndex/DropColumn to preserve pg_extras indexes and restore
+		// Ent defaults that WithSkipChanges overrides.
 		if err := client.Schema.Create(context.Background(),
-			entschema.WithSkipChanges(entschema.ModifyColumn),
+			entschema.WithSkipChanges(entschema.ModifyColumn|entschema.DropIndex|entschema.DropColumn),
 		); err != nil {
 			db.Close()
 			client.Close()
@@ -1027,9 +1031,10 @@ func (o *orgDataStore) openPersonalDB(userID string) (*personalDataStore, error)
 			slog.Warn("openPersonalDB: could not ensure pgvector extension", "user", userID, "error", err)
 		}
 
-		// Auto-migrate: create any missing tables/columns.
+		// Auto-migrate: create any missing tables/columns. Skip ModifyColumn,
+		// DropIndex, DropColumn to preserve pg_extras indexes and Ent defaults.
 		if err := client.Schema.Create(context.Background(),
-			entschema.WithSkipChanges(entschema.ModifyColumn),
+			entschema.WithSkipChanges(entschema.ModifyColumn|entschema.DropIndex|entschema.DropColumn),
 		); err != nil {
 			db.Close()
 			client.Close()
@@ -1154,7 +1159,7 @@ func (t *teamDataStore) Credentials() store.CredentialStore {
 		client:  t.client,
 		credKey: t.parentOrg.getOrCreateCredentialKey(),
 		repairSchema: func(ctx context.Context) error {
-			return t.client.Schema.Create(ctx, entschema.WithSkipChanges(entschema.ModifyColumn))
+			return t.client.Schema.Create(ctx, entschema.WithSkipChanges(entschema.ModifyColumn|entschema.DropIndex|entschema.DropColumn))
 		},
 	}
 }
@@ -1262,7 +1267,7 @@ func (p *personalDataStore) Credentials() store.CredentialStore {
 		client:  p.client,
 		credKey: p.credKey,
 		repairSchema: func(ctx context.Context) error {
-			return p.client.Schema.Create(ctx, entschema.WithSkipChanges(entschema.ModifyColumn))
+			return p.client.Schema.Create(ctx, entschema.WithSkipChanges(entschema.ModifyColumn|entschema.DropIndex|entschema.DropColumn))
 		},
 	}
 }

@@ -115,6 +115,13 @@ function withScope(path: string, scope: DocsScope): string {
 
 async function responseError(response: Response, operation: string): Promise<Error> {
   const detail = (await response.text()).trim()
+  // Detect raw HTML error pages from reverse proxies (nginx 413, 502, etc.)
+  if (detail.startsWith('<') || detail.startsWith('<!')) {
+    if (response.status === 413) {
+      return new Error(`${operation}: file too large for upload`)
+    }
+    return new Error(`${operation}: HTTP ${response.status}`)
+  }
   return new Error(detail ? `${operation}: ${detail}` : `${operation}: HTTP ${response.status}`)
 }
 

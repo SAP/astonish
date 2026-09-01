@@ -18,12 +18,18 @@ const templatePrefix = "tmpl/"
 
 // archetypeMetaDelim separates an archetype's human-readable variant label from
 // its optional metadata inside the persisted SlideContent.Notes field. Notes is
-// encoded as the label, optionally followed by this NUL byte and a JSON object
-// {"tier":..,"fillSlots":[..]} when either field is set. A NUL byte never
-// appears in a PowerPoint layout name, so it is a safe delimiter. Older rows
-// written without the delimiter decode to Tier="" and FillSlots=nil, preserving
-// backward compatibility.
-const archetypeMetaDelim = "\u0000"
+// encoded as the label, optionally followed by this delimiter and a JSON object
+// {"tier":.."fillSlots":[..]} when either field is set.
+//
+// Originally NUL (\u0000) was used, but PostgreSQL rejects null bytes in text
+// columns (SQLSTATE 22021). We now use the Unicode Record Separator (\u001e)
+// which is valid UTF-8 in all databases. The reader (templateFromDeck) accepts
+// both delimiters for backward compatibility with existing SQLite rows.
+const archetypeMetaDelim = "\u001e"
+
+// legacyArchetypeMetaDelim is the original NUL-based delimiter used in older
+// rows (SQLite only -- PostgreSQL never accepted it). Kept for read-path compat.
+const legacyArchetypeMetaDelim = "\u0000"
 
 // ErrDeckExists is returned by CopyDeckTo when the destination scope already
 // has a deck with the same slug (unique-slug constraint in the target store).
@@ -506,9 +512,14 @@ func (s Service) templateFromDeck(ctx context.Context, deck *store.DeckManifest)
 	archetypes := make([]themes.Archetype, 0, len(slides))
 	for _, slide := range slides {
 		// Notes may carry optional Tier/FillSlots/ThumbnailRef metadata after
-		// a NUL delimiter (see archetypeMetaDelim); split it back out. Rows
-		// without the delimiter decode to Tier="", FillSlots=nil, ThumbnailRef="".
-		parts := strings.SplitN(slide.Notes, archetypeMetaDelim, 2)
+		// a delimiter (see archetypeMetaDelim); split it back out. Accept both
+		// the current \u001e delimiter and the legacy \u0000 delimiter for
+		// backward compatibility with older SQLite rows.
+		delim := archetypeMetaDelim
+		if !strings.Contains(slide.Notes, archetypeMetaDelim) && strings.Contains(slide.Notes, legacyArchetypeMetaDelim) {
+			delim = legacyArchetypeMetaDelim
+		}
+		parts := strings.SplitN(slide.Notes, delim, 2)
 		arch := themes.Archetype{Kind: slide.Title, Title: parts[0], Markup: slide.Content}
 		if len(parts) == 2 {
 			var meta struct {

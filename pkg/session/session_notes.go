@@ -14,14 +14,15 @@ import (
 type SessionNotes struct {
 	mu sync.RWMutex
 
-	Objective      string              // User's high-level goal
-	FilesModified  map[string]FileNote // path → what changed
-	TasksCompleted []string            // Finished work items
-	TasksPending   []string            // Known remaining work
-	Decisions      []string            // Key technical decisions
-	Errors         []ErrorNote         // Errors encountered + resolutions
-	CurrentState   string              // What's being worked on right now
-	LastUpdated    time.Time
+	Objective       string              // User's high-level goal
+	FilesModified   map[string]FileNote // path → what changed
+	TasksCompleted  []string            // Finished work items
+	TasksPending    []string            // Known remaining work
+	Decisions       []string            // Key technical decisions
+	Errors          []ErrorNote         // Errors encountered + resolutions
+	PendingRequests []string            // User requests not yet acted on
+	CurrentState    string              // What's being worked on right now
+	LastUpdated     time.Time
 }
 
 // FileNote describes a single file's involvement in the session.
@@ -148,10 +149,11 @@ func (n *SessionNotes) IsEmpty() bool {
 		len(n.TasksPending) == 0 &&
 		len(n.Decisions) == 0 &&
 		len(n.Errors) == 0 &&
+		len(n.PendingRequests) == 0 &&
 		n.CurrentState == ""
 }
 
-// Render produces a structured markdown summary in the same 7-section format
+// Render produces a structured markdown summary in the same 8-section format
 // expected by the CodeStrategy summarization output.
 func (n *SessionNotes) Render() string {
 	n.mu.RLock()
@@ -225,6 +227,16 @@ func (n *SessionNotes) Render() string {
 	}
 	sb.WriteString("\n")
 
+	sb.WriteString("## PENDING USER REQUESTS\n")
+	if len(n.PendingRequests) > 0 {
+		for _, req := range n.PendingRequests {
+			sb.WriteString(fmt.Sprintf("- %s\n", req))
+		}
+	} else {
+		sb.WriteString("(check conversation for any unaddressed requests)\n")
+	}
+	sb.WriteString("\n")
+
 	sb.WriteString("## CURRENT STATE\n")
 	if n.CurrentState != "" {
 		sb.WriteString(n.CurrentState)
@@ -242,14 +254,15 @@ func (n *SessionNotes) Clone() *SessionNotes {
 	defer n.mu.RUnlock()
 
 	clone := &SessionNotes{
-		Objective:      n.Objective,
-		FilesModified:  make(map[string]FileNote, len(n.FilesModified)),
-		TasksCompleted: make([]string, len(n.TasksCompleted)),
-		TasksPending:   make([]string, len(n.TasksPending)),
-		Decisions:      make([]string, len(n.Decisions)),
-		Errors:         make([]ErrorNote, len(n.Errors)),
-		CurrentState:   n.CurrentState,
-		LastUpdated:    n.LastUpdated,
+		Objective:       n.Objective,
+		FilesModified:   make(map[string]FileNote, len(n.FilesModified)),
+		TasksCompleted:  make([]string, len(n.TasksCompleted)),
+		TasksPending:    make([]string, len(n.TasksPending)),
+		Decisions:       make([]string, len(n.Decisions)),
+		Errors:          make([]ErrorNote, len(n.Errors)),
+		PendingRequests: make([]string, len(n.PendingRequests)),
+		CurrentState:    n.CurrentState,
+		LastUpdated:     n.LastUpdated,
 	}
 	for k, v := range n.FilesModified {
 		clone.FilesModified[k] = v
@@ -258,6 +271,7 @@ func (n *SessionNotes) Clone() *SessionNotes {
 	copy(clone.TasksPending, n.TasksPending)
 	copy(clone.Decisions, n.Decisions)
 	copy(clone.Errors, n.Errors)
+	copy(clone.PendingRequests, n.PendingRequests)
 	return clone
 }
 

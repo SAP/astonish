@@ -1258,3 +1258,24 @@ func TestTranscript_LoadHistory_PlanApprovedNotAwaiting(t *testing.T) {
 		t.Fatalf("ApprovalIdx should be -1, got %d", tr.ApprovalIdx)
 	}
 }
+
+func TestApplyDelegationEvaluatingEvent(t *testing.T) {
+	tr := &Transcript{}
+	// Start a delegation
+	tr.Apply(NewDelegationStart([]DelegationTask{{Name: "my-task", Description: "test"}}))
+	// Apply evaluating event
+	tr.Apply(Event{
+		Kind:               KindDelegation,
+		DelegationType:     "evaluating",
+		DelegationTaskName: "my-task",
+		DelegationStatus:   "evaluating",
+	})
+
+	if len(tr.Delegation) == 0 {
+		t.Fatal("expected delegation tasks")
+	}
+	task := tr.Delegation[0]
+	if task.Status != "evaluating" {
+		t.Errorf("task.Status = %q, want %q", task.Status, "evaluating")
+	}
+}

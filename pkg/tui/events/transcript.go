@@ -406,7 +406,7 @@ func (t *Transcript) applyDelegation(ev Event) {
 		t.Delegation = delegCopy
 		t.DelegationActive = true
 		t.Status = "Delegating tasks…"
-	case "task_start", "task_state", "task_retry":
+	case "task_start", "task_state", "task_retry", "evaluating":
 		t.updateDelegationTask(ev.DelegationTaskName, func(task *DelegationTaskState) {
 			if task.StartedAt.IsZero() {
 				task.StartedAt = time.Now()

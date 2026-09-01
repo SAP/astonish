@@ -1318,6 +1318,7 @@ func RegisterRoutes(router *mux.Router, svc *store.Services, backend store.Platf
 	router.HandleFunc("/api/studio/sessions/{id}", StudioDeleteSessionHandler).Methods("DELETE")
 	router.HandleFunc("/api/studio/sessions/{id}/trace", StudioSessionTraceHandler).Methods("GET")
 	router.HandleFunc("/api/studio/sessions/{id}/cache-diagnostics", StudioCacheDiagnosticsHandler).Methods("GET")
+	router.HandleFunc("/api/studio/sessions/{id}/knowledge-debug", StudioKnowledgeDebugHandler).Methods("GET")
 	router.HandleFunc("/api/studio/sessions/{id}/subtask-events", StudioSubtaskEventsHandler).Methods("GET")
 	router.HandleFunc("/api/studio/sessions/{id}/stop", StudioStopHandler).Methods("POST")
 	router.HandleFunc("/api/studio/sessions/{id}/stream", StudioChatStreamHandler).Methods("GET")
@@ -1460,6 +1461,7 @@ func RegisterRoutes(router *mux.Router, svc *store.Services, backend store.Platf
 		router.HandleFunc("/api/platform/admin/users/{id}/orgs", PlatformAdminAddUserToOrgHandler).Methods("POST")
 		router.HandleFunc("/api/platform/admin/users/{id}/orgs/{slug}", PlatformAdminRemoveUserFromOrgHandler).Methods("DELETE")
 		router.HandleFunc("/api/platform/admin/sessions/{id}/cache-diagnostics", PlatformAdminCacheDiagnosticsHandler).Methods("GET")
+		router.HandleFunc("/api/platform/admin/sessions/{id}/knowledge-debug", PlatformAdminKnowledgeDebugHandler).Methods("GET")
 
 		// OIDC provider management (superadmin only)
 		router.HandleFunc("/api/platform/admin/oidc-providers", PlatformAdminListOIDCProvidersHandler).Methods("GET")

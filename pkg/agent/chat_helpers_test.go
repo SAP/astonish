@@ -6,6 +6,54 @@ import (
 	"google.golang.org/adk/session"
 )
 
+func TestBuildBM25Query(t *testing.T) {
+	tests := []struct {
+		name  string
+		query string
+		tail  string
+		want  string
+	}{
+		{
+			name:  "no_tail",
+			query: "compute-3.qa-de-1.cloud.sap credentials",
+			tail:  "",
+			want:  "compute-3.qa-de-1.cloud.sap credentials",
+		},
+		{
+			name:  "with_tail",
+			query: "compute-3.qa-de-1.cloud.sap credentials",
+			tail:  "previous model response",
+			want:  "previous model response compute-3.qa-de-1.cloud.sap credentials",
+		},
+		{
+			name:  "short_query",
+			query: "hi",
+			tail:  "",
+			want:  "",
+		},
+		{
+			name:  "exact_threshold",
+			query: "abcde",
+			tail:  "",
+			want:  "abcde",
+		},
+		{
+			name:  "below_threshold",
+			query: "abcd",
+			tail:  "some tail",
+			want:  "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := buildBM25Query(tt.query, tt.tail)
+			if got != tt.want {
+				t.Errorf("buildBM25Query(%q, %q) = %q, want %q", tt.query, tt.tail, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestYieldKnowledgeTrackingEventIncludesQueryAndProvenance(t *testing.T) {
 	var got *session.Event
 	yieldKnowledgeTrackingEvent(func(ev *session.Event, err error) bool {

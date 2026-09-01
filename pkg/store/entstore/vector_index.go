@@ -145,6 +145,14 @@ func deserializeEmbedding(data []byte) []float32 {
 
 // rrfFuse merges two ranked result lists using Reciprocal Rank Fusion.
 // k is the RRF parameter (typically 60).
+//
+// Raw RRF scores are tiny (max ≈ 2/(k+1) ≈ 0.033 for k=60) because they
+// are reciprocal-rank sums, not similarity values. Without normalization
+// every result would fail downstream minScore filters (e.g. 0.3 in the
+// knowledge-injection pipeline). We therefore normalize the fused scores
+// so the top result has score 1.0 and subsequent results are proportional,
+// matching the convention used by normalizeSingleSource and the PG merge
+// path (mergeMemoryResults).
 func rrfFuse(vectorResults, keywordResults []scoredResult, k int, maxResults int) []scoredResult {
 	scores := make(map[string]float64)
 	for rank, r := range vectorResults {
@@ -167,6 +175,15 @@ func rrfFuse(vectorResults, keywordResults []scoredResult, k int, maxResults int
 	})
 	if len(results) > maxResults {
 		results = results[:maxResults]
+	}
+
+	// Normalize so the top result has score 1.0. This makes RRF output
+	// compatible with the same minScore thresholds used by the PG path.
+	if len(results) > 0 && results[0].Score > 0 {
+		maxScore := results[0].Score
+		for i := range results {
+			results[i].Score /= maxScore
+		}
 	}
 	return results
 }

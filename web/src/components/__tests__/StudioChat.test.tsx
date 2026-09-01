@@ -10,6 +10,7 @@ vi.mock('../../api/studioChat', () => ({
   deleteSession: vi.fn().mockResolvedValue({}),
   connectChat: vi.fn().mockReturnValue(new AbortController()),
   fetchCacheDiagnostics: vi.fn().mockResolvedValue({ sessionId: 'sess-debug', assistantTurn: 1, rounds: [] }),
+  fetchKnowledgeDebug: vi.fn().mockResolvedValue({ sessionId: 'sess-debug', invocationId: 'inv-1', knowledge: null, tools: null }),
   stopChat: vi.fn().mockResolvedValue({}),
   fetchSessionStatus: vi.fn().mockResolvedValue({ running: false }),
   connectChatStream: vi.fn().mockReturnValue(new AbortController()),
@@ -151,6 +152,10 @@ describe('StudioChat', () => {
     render(<StudioChat {...defaultProps} initialSessionId="sess-debug" isPlatformMode platformRole="superadmin" />)
     const button = await screen.findByRole('button', { name: 'Cache diagnostics for this assistant turn' })
     fireEvent.click(button)
+
+    // Debug panel now opens with tabs — click the Cache tab to see cache diagnostics
+    const cacheTab = await screen.findByRole('button', { name: 'Cache' })
+    fireEvent.click(cacheTab)
 
     expect(await screen.findByText('Provider round 1')).toBeInTheDocument()
     expect(screen.getByText('Provider cache hit')).toBeInTheDocument()

@@ -124,6 +124,11 @@ type PromptOverrides struct {
 	// plan the user already approved. It is independent of Normal/Plan mode.
 	ApprovedPlanExecution bool
 
+	// ApprovedPlanCompleted signals that the approved plan finished (all steps
+	// complete/failed). The plan is kept as reference context but execution
+	// directives are removed, returning the session to normal conversation mode.
+	ApprovedPlanCompleted bool
+
 	// ApprovedPlanExecutionExplicit is true only on the explicit execution turn
 	// launched directly from approving a plan. It arms the bounded research
 	// clamp (rediscovery would re-do planning work). Inferred continuation turns

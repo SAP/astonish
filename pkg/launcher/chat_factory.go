@@ -106,6 +106,12 @@ type preparedKnowledgeRetrieval struct {
 func prepareKnowledgeRetrieval(ctx context.Context, semanticQuery, keywordQuery string) (agent.PreparedKnowledgeRetrieval, error) {
 	searcher, ok := store.ThreeTierSearcherFromContext(ctx).(store.PreparedThreeTierSearcher)
 	if !ok || searcher == nil {
+		raw := store.ThreeTierSearcherFromContext(ctx)
+		slog.Warn("knowledge retrieval: no PreparedThreeTierSearcher in context",
+			"component", "knowledge-retrieval",
+			"raw_searcher_nil", raw == nil,
+			"type_assert_ok", ok,
+		)
 		return nil, nil
 	}
 	query, err := searcher.PrepareQuery(ctx, semanticQuery, keywordQuery)
@@ -2000,6 +2006,13 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		// Wire sandbox guidance so sub-agents know about workspace and recovery.
 		subAgentMgr.SandboxEnabled = promptBuilder.SandboxEnabled
 		subAgentMgr.SandboxWorkspaceDir = promptBuilder.SandboxWorkspaceDir
+		// Wire working directory so sub-agents know the correct project path
+		// and don't hallucinate paths like /home/user/repo/... on macOS.
+		if promptBuilder.WorkspaceDir != "" {
+			subAgentMgr.WorkDir = promptBuilder.WorkspaceDir
+		} else if cwd, err := os.Getwd(); err == nil {
+			subAgentMgr.WorkDir = cwd
+		}
 		// Alias sub-agent sessions to the parent's sandbox container so they
 		// share the same container instead of each creating a new one.
 		if sandboxNodePool != nil {

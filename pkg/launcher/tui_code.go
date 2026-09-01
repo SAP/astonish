@@ -910,7 +910,7 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 			emit("delegation", map[string]any{"type": "start", "tasks": tasks})
 		case "task_start":
 			emit("delegation", map[string]any{"type": "task_start", "task_name": evt.TaskName, "status": evt.Status, "attempt": evt.Attempt})
-		case "task_state", "task_retry":
+		case "task_state", "task_retry", "evaluating":
 			emit("delegation", map[string]any{
 				"type": evt.Type, "task_name": evt.TaskName, "status": evt.Status,
 				"duration": evt.Duration, "last_activity": evt.LastActivity,
@@ -1020,6 +1020,7 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 	graphPlan := opts.GraphPlanMode
 	askMode := opts.AskMode
 	approvedPlanExecution := opts.ApprovedPlanExecution
+	approvedPlanCompleted := false
 	// Capture the explicit intent BEFORE the inferred branch below can flip
 	// approvedPlanExecution. This is true only when the turn was launched
 	// directly from approving the plan; it arms the bounded research clamp.
@@ -1042,8 +1043,27 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 				}
 				slog.Debug("restore approved plan skipped", "component", "localAgentBackend", "error", err)
 			}
+			// Check whether every phase in the restored plan has reached a
+			// terminal state. If so, the plan is historical context — not an
+			// active execution. Switch to the softer completed-plan context
+			// so the model returns to normal conversation mode instead of
+			// treating every user message as an action to execute.
+			planAllComplete := false
+			if plan := chatAgent.GetActivePlan(); plan != nil && plan.IsAllComplete() {
+				planAllComplete = true
+			}
 			if strings.TrimSpace(systemContext) == "" {
-				systemContext = agent.BuildPlanExecutionSystemContext(planPath)
+				if planAllComplete {
+					systemContext = agent.BuildPlanCompletedSystemContext(planPath)
+				} else {
+					systemContext = agent.BuildPlanExecutionSystemContext(planPath)
+				}
+			}
+			if planAllComplete {
+				// Demote from active execution to completed-plan reference.
+				// Keep approvedPlanExecution true so the plan cannot be replaced,
+				// but signal downstream context that execution is over.
+				approvedPlanCompleted = true
 			}
 		}
 	}
@@ -1062,6 +1082,7 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 			GraphPlanMode:                 graphPlan,
 			AskMode:                       askMode,
 			ApprovedPlanExecution:         approvedPlanExecution,
+			ApprovedPlanCompleted:         approvedPlanCompleted,
 			ApprovedPlanExecutionExplicit: approvedPlanExecutionExplicit,
 		})
 	}

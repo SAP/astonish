@@ -3968,6 +3968,14 @@ func (m model) renderDelegationItem(it events.Item, width int) string {
 			icon = th.Muted.Render("○")
 			nameStyle = th.Muted
 			timeStr = task.Duration
+		case "evaluating":
+			icon = th.Brand.Render("⟳")
+			nameStyle = th.Text
+			timeStr = task.Duration
+			if timeStr == "" && !task.StartedAt.IsZero() {
+				elapsed := time.Since(task.StartedAt).Truncate(time.Second)
+				timeStr = formatDuration(elapsed)
+			}
 		case "retrying":
 			icon = th.Brand.Render("↻")
 			nameStyle = th.Text

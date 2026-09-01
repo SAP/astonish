@@ -71,6 +71,21 @@ func buildKnowledgeQuery(userText string) string {
 	return q
 }
 
+// buildBM25Query returns the keyword query for BM25 full-text search.
+// The user's search query is always the baseline; the model response tail
+// is prepended when available to provide topical context.
+// Without this, the first turn of every session degrades to vector-only
+// retrieval because there is no prior model response to form a tail from.
+func buildBM25Query(searchQuery string, tail string) string {
+	if len(searchQuery) < 5 {
+		return ""
+	}
+	if tail != "" {
+		return tail + " " + searchQuery
+	}
+	return searchQuery
+}
+
 // shortQueryThreshold is the maximum character length for a user message to
 // be considered "short" — i.e., lacking enough context for accurate tool
 // discovery. When the cleaned query is shorter than this, we augment it

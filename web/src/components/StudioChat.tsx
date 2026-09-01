@@ -51,7 +51,7 @@ import ArtifactCard from './chat/ArtifactCard'
 import AppCodeIndicator from './chat/AppCodeIndicator'
 import NetworkDenialPrompt from './chat/NetworkDenialPrompt'
 import ModelCredentialBanner from './chat/ModelCredentialBanner'
-import CacheDiagnosticsPanel from './chat/CacheDiagnosticsPanel'
+import DebugPanel from './chat/DebugPanel'
 import SessionModelPicker from './chat/SessionModelPicker'
 import PreChatModelPicker from './chat/PreChatModelPicker'
 import { fileTypeFromFileName } from '../utils/artifactMedia'
@@ -3272,10 +3272,12 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
                       })()}
                     </div>
                     {canDebug && activeSessionId && msg.invocationId && debugOpenIndices.has(index) && (
-                      <CacheDiagnosticsPanel
-                        sessionId={activeSessionId}
-                        invocationId={msg.invocationId}
-                      />
+                      <div ref={el => { if (el) el.scrollIntoView({ behavior: 'smooth', block: 'nearest' }) }}>
+                        <DebugPanel
+                          sessionId={activeSessionId}
+                          invocationId={msg.invocationId}
+                        />
+                      </div>
                     )}
                     {/* Last-turn report + video placeholders (full UI in harness panel) */}
                     {isLastAgent && (

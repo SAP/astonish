@@ -229,6 +229,41 @@ func BuildPlanExecutionSystemContext(planPath string) string {
 	return strings.ReplaceAll(s, "__PLAN_BODY__", body)
 }
 
+// PlanCompletedSystemContext replaces PlanExecutionSystemContext once every
+// phase in the plan has reached a terminal state (complete or failed). It
+// retains the plan as reference material but removes the execution directives
+// so the model returns to normal conversational behavior — answering questions,
+// discussing approaches, and only making changes when explicitly requested.
+//
+// Same placeholders as PlanExecutionSystemContext.
+const PlanCompletedSystemContext = `An execution plan was completed earlier in this session. All phases are finished.
+
+The plan is retained below as historical context. You are NO LONGER in execution mode.
+Respond to the user's messages normally — answer questions, discuss approaches, and only
+make changes when the user explicitly requests implementation. The execution rules
+(no preamble, start implementing immediately, bounded research, etc.) no longer apply.
+
+__PLAN_BODY__
+
+Sidecar path (for reference): __PLAN_PATH__`
+
+// BuildPlanCompletedSystemContext is the completed-plan variant of
+// BuildPlanExecutionSystemContext.
+func BuildPlanCompletedSystemContext(planPath string) string {
+	if planPath == "" {
+		planPath = "PLAN.md"
+	}
+	body := ""
+	if data, err := os.ReadFile(planPath); err == nil && len(data) > 0 {
+		body = strings.TrimRight(string(data), "\n")
+	}
+	if body == "" {
+		body = "(PLAN.md is empty or missing.)"
+	}
+	s := strings.ReplaceAll(PlanCompletedSystemContext, "__PLAN_PATH__", planPath)
+	return strings.ReplaceAll(s, "__PLAN_BODY__", body)
+}
+
 // GraphPlanBlockedMessage is returned to the model when it calls a tool that is
 // not allowed in the current Graph-Optimized Plan phase. Returning a result
 // (not an error) lets the model self-correct and advance phases legitimately.

@@ -48,7 +48,7 @@ require (
 	golang.org/x/term v0.45.0
 	google.golang.org/adk v1.6.0
 	google.golang.org/genai v1.70.0
-	google.golang.org/grpc v1.83.1
+	google.golang.org/grpc v1.83.2
 	google.golang.org/protobuf v1.36.12
 	gopkg.in/yaml.v3 v3.0.1
 	k8s.io/api v0.37.0

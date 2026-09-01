@@ -17,8 +17,11 @@ import (
 
 const (
 	// heroThumbPrefix namespaces pre-baked hero photo thumbnail asset keys so
-	// they are distinguishable from the full-size raster assets.
-	heroThumbPrefix = "herothumb/"
+	// they are distinguishable from the full-size raster assets. We use a colon
+	// separator (not slash) because the media endpoint route is
+	// /templates/{name}/media/{ref} — a slash in the ref would break gorilla/mux
+	// path matching. The colon convention matches font refs (font:Manrope:400).
+	heroThumbPrefix = "herothumb:"
 
 	// heroThumbMaxWidth and heroThumbMaxHeight bound the downscaled PNG.
 	// They match the archetype thumbnail scale (1/6 of 1920×1080 → 320×180)

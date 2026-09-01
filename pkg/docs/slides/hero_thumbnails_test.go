@@ -181,7 +181,7 @@ func TestFitDimensionsPreservesAspectRatio(t *testing.T) {
 func TestHeroThumbKey(t *testing.T) {
 	ref := "sha256-deadbeef1234"
 	got := HeroThumbKey(ref)
-	want := "herothumb/sha256-deadbeef1234"
+	want := "herothumb:sha256-deadbeef1234"
 	if got != want {
 		t.Fatalf("HeroThumbKey(%q) = %q, want %q", ref, got, want)
 	}

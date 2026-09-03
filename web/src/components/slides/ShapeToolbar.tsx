@@ -1,3 +1,4 @@
+import { useRef } from 'react'
 import { MousePointer2, Type, Square, Circle, Minus, ImageIcon, Undo2, Redo2 } from 'lucide-react'
 
 export const SHAPE_TOOLS = [
@@ -21,9 +22,12 @@ export const SHAPE_DEFAULTS: Record<string, { tag: string; w: number; h: number;
 interface ShapeToolbarProps {
   activeTool: string
   onToolChange: (tool: string) => void
+  onImagePick?: (file: File) => void
 }
 
-export default function ShapeToolbar({ activeTool, onToolChange }: ShapeToolbarProps) {
+export default function ShapeToolbar({ activeTool, onToolChange, onImagePick }: ShapeToolbarProps) {
+  const fileRef = useRef<HTMLInputElement>(null)
+
   return (
     <div
       className="flex shrink-0 flex-col items-center gap-1 py-2"
@@ -46,7 +50,13 @@ export default function ShapeToolbar({ activeTool, onToolChange }: ShapeToolbarP
             aria-label={tool.label}
             aria-pressed={isActive}
             data-testid={`tool-${tool.id}`}
-            onClick={() => onToolChange(tool.id)}
+            onClick={() => {
+              if (tool.id === 'image') {
+                fileRef.current?.click()
+                return
+              }
+              onToolChange(tool.id)
+            }}
             className="flex items-center justify-center rounded-md transition-colors"
             style={{
               width: 36,
@@ -59,6 +69,21 @@ export default function ShapeToolbar({ activeTool, onToolChange }: ShapeToolbarP
           </button>
         )
       })}
+
+      {/* Hidden file input for image upload */}
+      <input
+        ref={fileRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        data-testid="image-file-input"
+        onChange={e => {
+          const file = e.target.files?.[0]
+          if (file) onImagePick?.(file)
+          // Reset so the same file can be re-selected
+          e.target.value = ''
+        }}
+      />
 
       {/* Separator */}
       <div

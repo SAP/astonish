@@ -31,6 +31,10 @@ export const runtimeStyles = `
   ast-deck[edit] .ast-edit-resize-handle[data-resize-corner="ne"] { right:var(--ast-edit-handle-offset,-12px); top:var(--ast-edit-handle-offset,-12px); cursor:nesw-resize; }
   ast-deck[edit] .ast-edit-resize-handle[data-resize-corner="se"] { right:var(--ast-edit-handle-offset,-12px); bottom:var(--ast-edit-handle-offset,-12px); cursor:nwse-resize; }
   ast-deck[edit] .ast-edit-resize-handle[data-resize-corner="sw"] { left:var(--ast-edit-handle-offset,-12px); bottom:var(--ast-edit-handle-offset,-12px); cursor:nesw-resize; }
+  ast-deck[edit] .ast-edit-rotation-line { position:absolute; left:50%; top:calc(-1 * var(--ast-edit-rot-offset,40px)); width:2px; height:var(--ast-edit-rot-offset,40px); background:var(--ast-accent,#2563eb); transform:translateX(-50%); pointer-events:none; }
+  ast-deck[edit] .ast-edit-rotation-handle { position:absolute; left:50%; top:calc(-1 * var(--ast-edit-rot-offset,40px) - var(--ast-edit-handle-size,24px) / 2); width:var(--ast-edit-handle-size,24px); height:var(--ast-edit-handle-size,24px); transform:translateX(-50%); border:3px solid var(--ast-surface,#fff); border-radius:50%; background:var(--ast-accent,#2563eb); box-shadow:0 0 0 2px color-mix(in srgb,var(--ast-ink,#172033) 35%,transparent); pointer-events:auto; touch-action:none; cursor:grab; }
+  ast-deck[edit][data-edit-rotating] { user-select:none; }
+  ast-deck[edit][data-edit-rotating] .ast-edit-rotation-handle { cursor:grabbing; }
   ast-deck[edit] .ast-edit-guides { position:absolute; left:0; top:0; width:1920px; height:1080px; pointer-events:none; z-index:20; overflow:visible; }
   ast-deck[edit] .ast-edit-guides line { stroke:#f43f5e; stroke-width:2; stroke-dasharray:8 6; fill:none; vector-effect:non-scaling-stroke; }
   @media print {

@@ -69,6 +69,13 @@ type ResizeState = {
   moved: boolean
 }
 
+type RotationState = {
+  el: HTMLElement
+  startAngle: number      // angle (deg) from element center to initial pointer
+  startRot: number        // element's rot attribute at drag start
+  moved: boolean
+}
+
 type Baseline = { x: number; y: number; w: number; h: number; text: string }
 
 const MIN_IMAGE_SIZE = 32
@@ -80,6 +87,7 @@ export class EditController {
   private selected: HTMLElement | null = null
   private drag: DragState | null = null
   private resize: ResizeState | null = null
+  private rotation: RotationState | null = null
   private resizeHandles: HTMLElement | null = null
   private editing: HTMLElement | null = null
   private editingOriginal = ''
@@ -117,6 +125,7 @@ export class EditController {
     this.clearResizeHandles()
     this.drag = null
     this.resize = null
+    this.rotation = null
     this.deck.removeAttribute('edit')
     this.deck.removeAttribute('data-edit-dragging')
     this.deck.removeEventListener('pointerdown', this.onPointerDown)
@@ -154,8 +163,10 @@ export class EditController {
     this.clearGuides()
     this.deck.removeAttribute('data-edit-dragging')
     this.deck.removeAttribute('data-edit-resizing')
+    this.deck.removeAttribute('data-edit-rotating')
     this.drag = null
     this.resize = null
+    this.rotation = null
   }
 
   /** Treat current slide as the saved baseline (after Apply). */
@@ -212,8 +223,11 @@ export class EditController {
       el.textContent = 'Text'
     }
     slide.appendChild(el)
-    const attrs: Record<string, string> = { x: String(Math.round(x)), y: String(Math.round(y)), w: String(Math.round(w)), h: String(Math.round(h)), ...defaults }
-    this.created.set(id, { tag, attrs, text: tag === 'ast-text' ? (el.textContent ?? '') : undefined })
+    // Strip transient attributes (e.g. blob: src URLs for images) from the
+    // persisted create record — the server derives `src` from `asset-ref`.
+    const persistAttrs: Record<string, string> = { x: String(Math.round(x)), y: String(Math.round(y)), w: String(Math.round(w)), h: String(Math.round(h)), ...defaults }
+    delete persistAttrs.src
+    this.created.set(id, { tag, attrs: persistAttrs, text: tag === 'ast-text' ? (el.textContent ?? '') : undefined })
     this.snapshotSlide(this.slideIndex())
     this.setSelected(el)
     this.notifyParent()
@@ -482,16 +496,37 @@ export class EditController {
     if (this.editing) this.endTextEdit(true)
     this.drag = null
     this.resize = null
+    this.rotation = null
     this.clearHover()
     this.clearSelected()
     this.clearGuides()
     this.deck.removeAttribute('data-edit-dragging')
+    this.deck.removeAttribute('data-edit-rotating')
   }
 
   private readonly onPointerDown = (event: PointerEvent): void => {
     if (!this.enabled || event.button !== 0) return
+    // Rotation handle
+    const rotHandle = (event.target as Element | null)?.closest<HTMLElement>('[data-rotation-handle]')
+    if (rotHandle && this.selected) {
+      event.preventDefault()
+      event.stopPropagation()
+      const g = geom(this.selected)
+      const scale = canvasScale(this.deck)
+      const rect = this.deck.getBoundingClientRect()
+      const cx = rect.left + (g.x + g.w / 2) * scale
+      const cy = rect.top + (g.y + g.h / 2) * scale
+      const startAngle = Math.atan2(event.clientY - cy, event.clientX - cx) * 180 / Math.PI
+      const startRot = Number(this.selected.getAttribute('rot')) || 0
+      this.rotation = { el: this.selected, startAngle, startRot, moved: false }
+      try {
+        this.deck.setPointerCapture(event.pointerId)
+      } catch { /* jsdom */ }
+      return
+    }
+    // Resize corner handle — works for ALL element types
     const handle = (event.target as Element | null)?.closest<HTMLElement>('[data-resize-corner]')
-    if (handle && this.selected?.tagName === 'AST-IMAGE') {
+    if (handle && this.selected) {
       event.preventDefault()
       event.stopPropagation()
       this.resize = {
@@ -516,7 +551,12 @@ export class EditController {
     }
     const hit = hitTest(this.deck, event.clientX, event.clientY)
     if (!hit) {
+      // Always notify parent of the deselect — even when nothing was selected.
+      // The parent uses this "id: null" message to trigger shape creation when a
+      // drawing tool is active.
+      const wasSelected = !!this.selected
       this.clearSelected()
+      if (!wasSelected) this.notifySelection()
       return
     }
     event.preventDefault()
@@ -543,6 +583,27 @@ export class EditController {
 
   private readonly onPointerMove = (event: PointerEvent): void => {
     if (!this.enabled || this.editing) return
+    // Rotation drag
+    if (this.rotation) {
+      const g = geom(this.rotation.el)
+      const scale = canvasScale(this.deck)
+      const rect = this.deck.getBoundingClientRect()
+      const cx = rect.left + (g.x + g.w / 2) * scale
+      const cy = rect.top + (g.y + g.h / 2) * scale
+      const currentAngle = Math.atan2(event.clientY - cy, event.clientX - cx) * 180 / Math.PI
+      const delta = currentAngle - this.rotation.startAngle
+      let rot = Math.round(this.rotation.startRot + delta)
+      // Normalize to 0..359
+      rot = ((rot % 360) + 360) % 360
+      // Snap to 15° increments when close
+      const snapped = Math.round(rot / 15) * 15
+      if (Math.abs(rot - snapped) <= 3) rot = snapped % 360
+      if (!this.rotation.moved && Math.abs(delta) < 2) return
+      this.rotation.moved = true
+      this.deck.setAttribute('data-edit-rotating', '')
+      this.rotation.el.setAttribute('rot', String(rot))
+      return
+    }
     if (this.resize) {
       const scale = canvasScale(this.deck)
       const dx = (event.clientX - this.resize.pointerX) / scale
@@ -550,7 +611,12 @@ export class EditController {
       if (!this.resize.moved && Math.hypot(dx, dy) < DRAG_THRESHOLD) return
       this.resize.moved = true
       this.deck.setAttribute('data-edit-resizing', '')
-      const next = proportionalResize(this.resize.start, this.resize.corner, dx, dy)
+      // Images always resize proportionally; other elements use free resize
+      // unless Shift is held, which forces proportional for any element type.
+      const useProportional = this.resize.el.tagName === 'AST-IMAGE' || event.shiftKey
+      const next = useProportional
+        ? proportionalResize(this.resize.start, this.resize.corner, dx, dy)
+        : freeResize(this.resize.start, this.resize.corner, dx, dy)
       setFullGeom(this.resize.el, next)
       this.positionResizeHandles()
       return
@@ -577,6 +643,27 @@ export class EditController {
   }
 
   private readonly onPointerUp = (event: PointerEvent): void => {
+    if (this.rotation) {
+      const moved = this.rotation.moved
+      const el = this.rotation.el
+      this.rotation = null
+      this.deck.removeAttribute('data-edit-rotating')
+      try {
+        this.deck.releasePointerCapture(event.pointerId)
+      } catch { /* already released / jsdom */ }
+      if (moved) {
+        // Record rotation as an attr change
+        const rot = el.getAttribute('rot') || '0'
+        if (el.id) {
+          const existing = this.attrChanges.get(el.id) ?? {}
+          existing['rot'] = rot
+          this.attrChanges.set(el.id, existing)
+        }
+        this.notifyParent()
+        this.notifySelection()
+      }
+      return
+    }
     if (this.resize) {
       const moved = this.resize.moved
       this.resize = null
@@ -653,7 +740,7 @@ export class EditController {
 
   private renderResizeHandles(): void {
     this.clearResizeHandles()
-    if (this.selected?.tagName !== 'AST-IMAGE') return
+    if (!this.selected) return
     const overlay = document.createElement('div')
     overlay.className = 'ast-edit-resize-handles'
     overlay.setAttribute('aria-hidden', 'true')
@@ -663,6 +750,14 @@ export class EditController {
       handle.dataset.resizeCorner = corner
       overlay.append(handle)
     }
+    // Rotation handle: a circle above top-center connected by a thin line
+    const rotLine = document.createElement('span')
+    rotLine.className = 'ast-edit-rotation-line'
+    overlay.append(rotLine)
+    const rotHandle = document.createElement('span')
+    rotHandle.className = 'ast-edit-rotation-handle'
+    rotHandle.dataset.rotationHandle = ''
+    overlay.append(rotHandle)
     this.deck.append(overlay)
     this.resizeHandles = overlay
     this.positionResizeHandles()
@@ -673,10 +768,12 @@ export class EditController {
     const g = geom(this.selected)
     const scale = canvasScale(this.deck)
     const handleSize = Math.round(24 / scale)
+    const rotOffset = Math.round(40 / scale)
     Object.assign(this.resizeHandles.style, {
       left: `${g.x}px`, top: `${g.y}px`, width: `${g.w}px`, height: `${g.h}px`,
       '--ast-edit-handle-size': `${handleSize}px`,
       '--ast-edit-handle-offset': `${Math.round(handleSize / -2)}px`,
+      '--ast-edit-rot-offset': `${rotOffset}px`,
     })
   }
 
@@ -788,6 +885,32 @@ export function proportionalResize(start: Geom, corner: ResizeCorner, dx: number
     w,
     h,
   }
+}
+
+const MIN_ELEMENT_SIZE = 16
+
+/** Free (non-proportional) resize for shapes and text. */
+export function freeResize(start: Geom, corner: ResizeCorner, dx: number, dy: number): Geom {
+  let x = start.x
+  let y = start.y
+  let w = start.w
+  let h = start.h
+
+  if (corner.endsWith('e')) {
+    w = Math.max(MIN_ELEMENT_SIZE, Math.round(start.w + dx))
+  } else {
+    w = Math.max(MIN_ELEMENT_SIZE, Math.round(start.w - dx))
+    x = start.x + start.w - w
+  }
+
+  if (corner.startsWith('s')) {
+    h = Math.max(MIN_ELEMENT_SIZE, Math.round(start.h + dy))
+  } else {
+    h = Math.max(MIN_ELEMENT_SIZE, Math.round(start.h - dy))
+    y = start.y + start.h - h
+  }
+
+  return { x, y, w, h }
 }
 
 function canvasScale(deck: HTMLElement): number {

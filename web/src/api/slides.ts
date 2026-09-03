@@ -182,6 +182,27 @@ export async function patchSlideMoves(
   return response.json() as Promise<SlidesSlide>
 }
 
+export interface UploadSlideAssetResult {
+  assetRef: string
+  mime: string
+}
+
+/** Upload a local image file to the deck's asset library. Returns the content-addressed asset-ref for ast-image elements. */
+export async function uploadSlideAsset(
+  deckSlug: string,
+  file: File,
+  scope: DocsScope = 'personal',
+): Promise<UploadSlideAssetResult> {
+  const form = new FormData()
+  form.append('file', file)
+  const response = await teamFetch(withScope(`${DOCS_BASE}/slides/${encodeURIComponent(deckSlug)}/assets`, scope), {
+    method: 'POST',
+    body: form,
+  })
+  if (!response.ok) throw await responseError(response, 'Failed to upload image')
+  return response.json() as Promise<UploadSlideAssetResult>
+}
+
 export async function fetchSlidesDeck(deckSlug: string, scope: DocsScope = 'personal'): Promise<SlidesDeckResponse> {
   const response = await teamFetch(withScope(`${DOCS_BASE}/slides/${encodeURIComponent(deckSlug)}`, scope))
   if (!response.ok) throw await responseError(response, 'Failed to load slide deck')

@@ -8,6 +8,7 @@ import {
   saveDeck,
   slideEditIsDirty,
   slidesPresentationURL,
+  uploadSlideAsset,
   type DocsScope,
   type SlideEditDraft,
   type SlidesDeckResponse,
@@ -271,6 +272,34 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
   const handleZOrder = useCallback((direction: string) => {
     postToCanvas({ type: 'ast-edit-z-order', direction })
   }, [postToCanvas])
+
+  const handleImagePick = useCallback(async (file: File) => {
+    try {
+      const result = await uploadSlideAsset(deckSlug, file, scope)
+      // Convert the file to a data URL so the ast-image web component can
+      // render the image immediately inside the cross-origin iframe. Blob URLs
+      // are origin-scoped and cannot be loaded by the iframe; data URLs work
+      // everywhere. The asset-ref is persisted for the present renderer to
+      // resolve on reload.
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = () => resolve(reader.result as string)
+        reader.onerror = () => reject(new Error('Failed to read file'))
+        reader.readAsDataURL(file)
+      })
+      postToCanvas({
+        type: 'ast-edit-create',
+        tag: 'ast-image',
+        x: 400,
+        y: 200,
+        w: 600,
+        h: 400,
+        defaults: { 'asset-ref': result.assetRef, src: dataUrl, fit: 'contain' },
+      })
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Image upload failed')
+    }
+  }, [deckSlug, scope, postToCanvas])
 
   // After the present document reloads (new slides or an in-place rewrite),
   // restore the strip's current index inside the iframe and enable canvas edit.
@@ -617,7 +646,7 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
       <div className={cn('flex min-h-0 gap-0', fillHeight ? 'flex-1' : '')}>
         {/* Left shape toolbar — always visible, hidden in fullscreen */}
         {!fullscreen && (
-          <ShapeToolbar activeTool={activeTool} onToolChange={setActiveTool} />
+          <ShapeToolbar activeTool={activeTool} onToolChange={setActiveTool} onImagePick={handleImagePick} />
         )}
 
         {/* Center: canvas + optional floating text bar */}

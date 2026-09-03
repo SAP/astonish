@@ -223,6 +223,11 @@ func renderNode(out *bytes.Buffer, node Node, assets map[string]string, slideID 
 			}
 			continue
 		}
+		// Skip stale/transient src on ast-image — it is always derived from
+		// asset-ref above and emitting it would duplicate the attribute.
+		if tag == "ast-image" && key == "src" {
+			continue
+		}
 		writeAttr(out, key, value)
 	}
 	if node.Table != nil {

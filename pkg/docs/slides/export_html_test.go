@@ -368,6 +368,53 @@ func TestWriteThemeCSSSkipsTemplateName(t *testing.T) {
 	}
 }
 
+func TestWriteThemeCSSEmitsFontAliases(t *testing.T) {
+	var buf bytes.Buffer
+	writeThemeCSS(&buf, map[string]string{
+		"displayFont": "Manrope, sans-serif",
+		"bodyFont":    "Manrope, sans-serif",
+		"monoFont":    "JetBrains Mono, monospace",
+		"surface":     "#0B0D0F",
+	})
+	css := buf.String()
+	// The camelCase originals must appear.
+	if !strings.Contains(css, "--ast-displayFont:Manrope, sans-serif") {
+		t.Errorf("expected --ast-displayFont; got: %s", css)
+	}
+	// The CSS-compatible aliases the runtime reads must also appear.
+	if !strings.Contains(css, "--ast-display:Manrope, sans-serif") {
+		t.Errorf("expected --ast-display alias; got: %s", css)
+	}
+	if !strings.Contains(css, "--ast-body-font:Manrope, sans-serif") {
+		t.Errorf("expected --ast-body-font alias; got: %s", css)
+	}
+	if !strings.Contains(css, "--ast-mono-font:JetBrains Mono, monospace") {
+		t.Errorf("expected --ast-mono-font alias; got: %s", css)
+	}
+}
+
+func TestWriteThemeCSSNoDoubleEmissionWhenAliasPresent(t *testing.T) {
+	// When the theme already contains the CSS-compatible key, don't emit it twice.
+	var buf bytes.Buffer
+	writeThemeCSS(&buf, map[string]string{
+		"displayFont": "Manrope, sans-serif",
+		"display":     "Inter, sans-serif", // explicit override takes precedence
+	})
+	css := buf.String()
+	// Both should appear with their own values.
+	if !strings.Contains(css, "--ast-display:Inter, sans-serif") {
+		t.Errorf("expected --ast-display with explicit value; got: %s", css)
+	}
+	if !strings.Contains(css, "--ast-displayFont:Manrope, sans-serif") {
+		t.Errorf("expected --ast-displayFont; got: %s", css)
+	}
+	// The alias should NOT be emitted a second time from the displayFont key.
+	count := strings.Count(css, "--ast-display:")
+	if count != 1 {
+		t.Errorf("expected --ast-display exactly once (from explicit key), got %d occurrences in: %s", count, css)
+	}
+}
+
 func TestHTMLGradientIDsAreSlideScoped(t *testing.T) {
 	grad := func(cx, cy int) *Gradient {
 		return &Gradient{Kind: "radial", Cx: cx, Cy: cy, Stops: []GradientStop{

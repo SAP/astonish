@@ -542,3 +542,24 @@ func TestExportNoFontFaceWhenAbsent(t *testing.T) {
 		t.Errorf("no deck without embedded fonts should emit @font-face; got:\n%s", doc)
 	}
 }
+
+func TestHTMLExporterRoundtripsRotAttribute(t *testing.T) {
+	// Parse a slide with rot="45", export it, and verify the rot attribute
+	// survives the roundtrip so the Lit runtime can read it on reload.
+	markup := `<ast-slide id="s1"><ast-text id="t1" x="10" y="20" w="300" h="80" rot="45">Hello</ast-text></ast-slide>`
+	slide, diags, err := ParseSlide(markup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if HasErrors(diags) {
+		t.Fatalf("unexpected diagnostics: %#v", diags)
+	}
+	if slide.Nodes[0].Rot != 45 {
+		t.Fatalf("expected Rot=45, got %d", slide.Nodes[0].Rot)
+	}
+	scene := SceneGraph{SchemaVersion: SchemaV2, Title: "Rot Test", Slides: []Slide{slide}}
+	doc := mustExport(t, HTMLExporter{RuntimeJS: []byte(`window.runtimeReady=true`)}, scene)
+	if !strings.Contains(doc, `rot="45"`) {
+		t.Errorf("exported HTML missing rot attribute; got:\n%s", doc)
+	}
+}

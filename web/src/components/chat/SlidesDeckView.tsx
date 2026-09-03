@@ -171,6 +171,7 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
         index?: number
         id?: string | null
         tag?: string | null
+        clickX?: number; clickY?: number
         x?: number; y?: number; w?: number; h?: number
         rotation?: number
         fill?: string; stroke?: string; strokeWidth?: number; opacity?: number
@@ -199,11 +200,13 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
           if (tool !== 'select' && tool !== 'image') {
             const spec = SHAPE_DEFAULTS[tool]
             if (spec) {
+              const cx = typeof data.clickX === 'number' ? data.clickX : 400
+              const cy = typeof data.clickY === 'number' ? data.clickY : 300
               iframeRef.current?.contentWindow?.postMessage({
                 type: 'ast-edit-create',
                 tag: spec.tag,
-                x: 400,
-                y: 300,
+                x: cx - spec.w / 2,
+                y: cy - spec.h / 2,
                 w: spec.w,
                 h: spec.h,
                 defaults: spec.defaults,

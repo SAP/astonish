@@ -320,8 +320,10 @@ export class EditController {
     const resizes: EditResize[] = []
     const texts: EditText[] = []
     if (!slide) return { moves, resizes, texts, deletes }
+    const createdIds = new Set(this.created.keys())
     for (const el of editableChildren(slide)) {
       if (!el.id) continue
+      if (createdIds.has(el.id)) continue  // skip — position captured in creates
       const orig = this.baseline.get(baselineKey(index, el.id))
       const g = geom(el)
       const resized = Boolean(orig && (orig.w !== g.w || orig.h !== g.h))
@@ -344,10 +346,22 @@ export class EditController {
       }
     }
 
-    // Created elements
+    // Created elements — use current DOM geometry so drags after creation are captured
     const creates: EditCreate[] = []
     for (const [elId, info] of this.created) {
-      creates.push({ id: elId, tag: info.tag, attrs: info.attrs, text: info.text })
+      const el = slide?.querySelector(`#${CSS.escape(elId)}`) as HTMLElement | null
+      const updatedAttrs = { ...info.attrs }
+      if (el) {
+        const g = geom(el)
+        updatedAttrs.x = String(g.x)
+        updatedAttrs.y = String(g.y)
+        updatedAttrs.w = String(g.w)
+        updatedAttrs.h = String(g.h)
+        const rot = el.getAttribute('rot')
+        if (rot && rot !== '0') updatedAttrs.rot = rot
+      }
+      const text = info.tag === 'ast-text' && el ? (el.textContent ?? '') : info.text
+      creates.push({ id: elId, tag: info.tag, attrs: updatedAttrs, text })
     }
 
     return { moves, resizes, texts, deletes, ...(attrs.length ? { attrs } : {}), ...(creates.length ? { creates } : {}) }
@@ -360,7 +374,7 @@ export class EditController {
     window.parent.postMessage({ type: 'ast-edit-changed', index: i, ...this.pendingDraft(target, i) }, '*')
   }
 
-  private notifySelection(): void {
+  private notifySelection(clickX?: number, clickY?: number): void {
     if (window.parent === window) return
     const el = this.selected
     if (!el) {
@@ -369,6 +383,8 @@ export class EditController {
         index: this.slideIndex(),
         id: null,
         tag: null,
+        clickX,
+        clickY,
       }, '*')
       return
     }
@@ -425,12 +441,12 @@ export class EditController {
     this.notifySelection()
   }
 
-  private clearSelected(): void {
+  private clearSelected(notify = true): void {
     if (!this.selected) return
     this.selected.removeAttribute('data-edit-selected')
     this.selected = null
     this.clearResizeHandles()
-    this.notifySelection()
+    if (notify) this.notifySelection()
   }
 
   private startTextEdit(el: HTMLElement): void {
@@ -553,10 +569,14 @@ export class EditController {
     if (!hit) {
       // Always notify parent of the deselect — even when nothing was selected.
       // The parent uses this "id: null" message to trigger shape creation when a
-      // drawing tool is active.
-      const wasSelected = !!this.selected
-      this.clearSelected()
-      if (!wasSelected) this.notifySelection()
+      // drawing tool is active. Include canvas-space click coordinates so the
+      // parent can place a newly created element at the pointer position.
+      const scale = canvasScale(this.deck)
+      const rect = this.deck.getBoundingClientRect()
+      const canvasX = (event.clientX - rect.left) / scale
+      const canvasY = (event.clientY - rect.top) / scale
+      this.clearSelected(false)
+      this.notifySelection(canvasX, canvasY)
       return
     }
     event.preventDefault()

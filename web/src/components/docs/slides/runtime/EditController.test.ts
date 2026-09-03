@@ -701,4 +701,85 @@ describe('EditController', () => {
     expect(w).toBeGreaterThan(200)
     editor.disconnect()
   })
+
+  it('clicking empty canvas sends ast-edit-selected with clickX/clickY coordinates', async () => {
+    const { deck } = await mount()
+    const parentPost = vi.fn()
+    Object.defineProperty(window, 'parent', { value: { postMessage: parentPost }, configurable: true })
+    // stubHit returns null for any click (miss)
+    stubHit([])
+
+    const editor = new EditController(deck)
+    editor.enable()
+
+    // Click empty canvas at (500, 500)
+    deck.dispatchEvent(pointer('pointerdown', 500, 500))
+
+    // Find the ast-edit-selected message
+    const selectedMsg = parentPost.mock.calls.find(
+      (c: unknown[]) => (c[0] as { type?: string }).type === 'ast-edit-selected'
+    )
+    expect(selectedMsg).toBeTruthy()
+    const msg = selectedMsg![0] as { id: unknown; clickX?: number; clickY?: number }
+    expect(msg.id).toBeNull()
+    expect(typeof msg.clickX).toBe('number')
+    expect(typeof msg.clickY).toBe('number')
+    editor.disconnect()
+  })
+
+  it('creating then moving an element produces creates (updated position) and NO moves for that element', async () => {
+    document.body.innerHTML = `
+      <ast-deck>
+        <ast-slide id="s0" active>
+        </ast-slide>
+      </ast-deck>`
+    const deck = document.querySelector('ast-deck') as HTMLElement
+    await customElements.whenDefined('ast-deck')
+    await new Promise(resolve => setTimeout(resolve, 0))
+    deck.querySelector('ast-slide')?.setAttribute('active', '')
+    const parentPost = vi.fn()
+    Object.defineProperty(window, 'parent', { value: { postMessage: parentPost }, configurable: true })
+
+    const editor = new EditController(deck)
+    editor.enable()
+
+    // Create element at position (100, 200)
+    editor.createElement('ast-shape', 100, 200, 300, 150, { fill: 'red', kind: 'rect' })
+    const slide = deck.querySelector('ast-slide') as HTMLElement
+    const created = slide.querySelector('ast-shape') as HTMLElement
+    expect(created).not.toBeNull()
+    expect(created.id).toBe('user-shape-1')
+
+    // Now drag it — simulate selecting and moving
+    stubHit([created, deck])
+    deck.dispatchEvent(pointer('pointerdown', 200, 250))
+    // Move far enough to exceed DRAG_THRESHOLD
+    deck.dispatchEvent(pointer('pointermove', 300, 350))
+    deck.dispatchEvent(pointer('pointerup', 300, 350))
+
+    // Find the last ast-edit-changed message
+    const changedCalls = parentPost.mock.calls.filter(
+      (c: unknown[]) => (c[0] as { type?: string }).type === 'ast-edit-changed'
+    )
+    expect(changedCalls.length).toBeGreaterThan(0)
+    const lastChanged = changedCalls[changedCalls.length - 1][0] as {
+      moves: { id: string }[]
+      creates?: { id: string; attrs: Record<string, string> }[]
+    }
+
+    // Should NOT have the created element in moves
+    const movedIds = lastChanged.moves.map((m: { id: string }) => m.id)
+    expect(movedIds).not.toContain('user-shape-1')
+
+    // Should have the created element in creates with updated position
+    expect(lastChanged.creates).toBeDefined()
+    const createEntry = lastChanged.creates!.find((c: { id: string }) => c.id === 'user-shape-1')
+    expect(createEntry).toBeDefined()
+    // The element was dragged, so position should differ from original (100, 200)
+    const cx = Number(createEntry!.attrs.x)
+    const cy = Number(createEntry!.attrs.y)
+    expect(cx).not.toBe(100)
+    expect(cy).not.toBe(200)
+    editor.disconnect()
+  })
 })

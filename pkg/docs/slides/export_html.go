@@ -198,6 +198,9 @@ func renderNode(out *bytes.Buffer, node Node, assets map[string]string, slideID 
 	if node.FlipV {
 		writeAttr(out, "flip-v", "true")
 	}
+	if node.Rot != 0 {
+		writeAttr(out, "rot", strconv.Itoa(node.Rot))
+	}
 	keys := make([]string, 0, len(node.Props))
 	for key := range node.Props {
 		keys = append(keys, key)

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
-import { Download, ExternalLink, Loader2, Maximize2, Save, Trash2, TriangleAlert, X } from 'lucide-react'
+import { Download, ExternalLink, Loader2, Maximize2, Save, Trash2, TriangleAlert, X, ChevronLeft, ChevronRight } from 'lucide-react'
 
 import {
   exportSlidesDeck,
@@ -621,6 +621,37 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
               </div>
             )}
           </div>
+          {/* Edge navigation buttons — visible on hover, occupy full height */}
+          {!fullscreen && total > 1 && (
+            <>
+              <button
+                type="button"
+                aria-label="Previous slide"
+                data-testid="slides-nav-prev"
+                onClick={() => setSlideIndex(prev => Math.max(0, prev - 1))}
+                disabled={boundedIndex === 0}
+                className="group absolute left-0 top-0 z-10 flex h-full w-10 cursor-pointer items-center justify-center rounded-l-lg opacity-0 transition-opacity hover:opacity-100 disabled:cursor-default disabled:opacity-0"
+                style={{ background: 'linear-gradient(to right, rgba(0,0,0,0.25), transparent)' }}
+              >
+                <span className="flex items-center justify-center rounded-full p-1" style={{ background: 'rgba(0,0,0,0.45)' }}>
+                  <ChevronLeft size={18} className="text-white" />
+                </span>
+              </button>
+              <button
+                type="button"
+                aria-label="Next slide"
+                data-testid="slides-nav-next"
+                onClick={() => setSlideIndex(prev => Math.min(total - 1, prev + 1))}
+                disabled={boundedIndex >= total - 1}
+                className="group absolute right-0 top-0 z-10 flex h-full w-10 cursor-pointer items-center justify-center rounded-r-lg opacity-0 transition-opacity hover:opacity-100 disabled:cursor-default disabled:opacity-0"
+                style={{ background: 'linear-gradient(to left, rgba(0,0,0,0.25), transparent)' }}
+              >
+                <span className="flex items-center justify-center rounded-full p-1" style={{ background: 'rgba(0,0,0,0.45)' }}>
+                  <ChevronRight size={18} className="text-white" />
+                </span>
+              </button>
+            </>
+          )}
         </div>
 
         {/* Right properties panel — shown when element is selected, hidden in fullscreen */}

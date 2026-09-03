@@ -315,7 +315,11 @@ export class EditController {
   }
 
   private pendingDraft(slide: HTMLElement | null = this.activeSlide(), index: number = this.slideIndex()): EditDraft {
-    const deletes = [...this.deleted].filter(key => key.startsWith(`${index}:`)).map(key => key.slice(`${index}:`.length))
+    // Only include deletes for elements that existed before this session (not newly created ones)
+    const deletes = [...this.deleted]
+      .filter(key => key.startsWith(`${index}:`))
+      .map(key => key.slice(`${index}:`.length))
+      .filter(id => !this.created.has(id))
     const moves: EditMove[] = []
     const resizes: EditResize[] = []
     const texts: EditText[] = []
@@ -349,6 +353,8 @@ export class EditController {
     // Created elements — use current DOM geometry so drags after creation are captured
     const creates: EditCreate[] = []
     for (const [elId, info] of this.created) {
+      // Skip elements that were created and then deleted in the same session
+      if (this.deleted.has(`${index}:${elId}`)) continue
       const el = slide?.querySelector(`#${CSS.escape(elId)}`) as HTMLElement | null
       const updatedAttrs = { ...info.attrs }
       if (el) {

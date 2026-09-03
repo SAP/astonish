@@ -114,6 +114,7 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
       setCanvasInset(prev => (prev.left === inset && prev.right === inset ? prev : { left: inset, right: inset }))
     }
     update()
+    if (typeof ResizeObserver === 'undefined') return
     const ro = new ResizeObserver(update)
     ro.observe(el)
     return () => ro.disconnect()

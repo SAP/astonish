@@ -62,6 +62,8 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
   const fsIframeRef = useRef<HTMLIFrameElement | null>(null)
   const stripRef = useRef<HTMLDivElement | null>(null)
   const activeToolRef = useRef(activeTool)
+  const canvasRef = useRef<HTMLDivElement | null>(null)
+  const [canvasInset, setCanvasInset] = useState({ left: 0, right: 0 })
   // Tracks the deck/scope this component last loaded, so a pure refreshSignal
   // bump (same deck gaining slides) re-fetches WITHOUT yanking the user off
   // whatever slide they're viewing — we only reset slideIndex when the deck or
@@ -95,6 +97,26 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
   }, [deckSlug, scope, refreshSignal])
 
   useEffect(() => { activeToolRef.current = activeTool }, [activeTool])
+
+  // Compute horizontal inset so the nav overlay buttons align with the 16:9
+  // slide content inside the iframe (which letterboxes when the container is
+  // wider than 16:9). The iframe's AstDeck.scaleToParent uses the same math.
+  useEffect(() => {
+    const el = canvasRef.current
+    if (!el) return
+    const update = () => {
+      const w = el.clientWidth
+      const h = el.clientHeight
+      if (!w || !h) return
+      const scale = Math.min(w / 1920, h / 1080)
+      const inset = Math.max(0, Math.round((w - 1920 * scale) / 2))
+      setCanvasInset(prev => (prev.left === inset && prev.right === inset ? prev : { left: inset, right: inset }))
+    }
+    update()
+    const ro = new ResizeObserver(update)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
 
   const slides = deck?.slides ?? []
   const total = slides.length
@@ -613,14 +635,14 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
               />
             </div>
           )}
-          <div className="relative h-full w-full overflow-hidden rounded-lg">
+          <div ref={canvasRef} className="relative h-full w-full overflow-hidden rounded-lg">
             {deckFrame}
             {total === 0 && (
               <div className="absolute inset-0">
                 {generatingPlaceholder}
               </div>
             )}
-            {/* Edge navigation buttons — inside the canvas frame, visible on hover */}
+            {/* Edge navigation buttons — aligned with the scaled slide content */}
             {!fullscreen && total > 1 && (
               <>
                 <button
@@ -629,10 +651,10 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
                   data-testid="slides-nav-prev"
                   onClick={() => setSlideIndex(prev => Math.max(0, prev - 1))}
                   disabled={boundedIndex === 0}
-                  className="absolute left-0 top-0 z-10 flex h-full w-10 cursor-pointer items-center justify-center rounded-l-lg opacity-0 transition-opacity hover:opacity-100 disabled:cursor-default disabled:opacity-0"
-                  style={{ background: 'linear-gradient(to right, rgba(0,0,0,0.25), transparent)' }}
+                  className="absolute top-0 z-10 flex h-full w-10 cursor-pointer items-center justify-center opacity-0 transition-opacity hover:opacity-100 disabled:cursor-default disabled:opacity-0"
+                  style={{ left: canvasInset.left, background: 'linear-gradient(to right, rgba(0,0,0,0.3), transparent)' }}
                 >
-                  <span className="flex items-center justify-center rounded-full p-1" style={{ background: 'rgba(0,0,0,0.45)' }}>
+                  <span className="flex items-center justify-center rounded-full p-1" style={{ background: 'rgba(0,0,0,0.5)' }}>
                     <ChevronLeft size={18} className="text-white" />
                   </span>
                 </button>
@@ -642,10 +664,10 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
                   data-testid="slides-nav-next"
                   onClick={() => setSlideIndex(prev => Math.min(total - 1, prev + 1))}
                   disabled={boundedIndex >= total - 1}
-                  className="absolute right-0 top-0 z-10 flex h-full w-10 cursor-pointer items-center justify-center rounded-r-lg opacity-0 transition-opacity hover:opacity-100 disabled:cursor-default disabled:opacity-0"
-                  style={{ background: 'linear-gradient(to left, rgba(0,0,0,0.25), transparent)' }}
+                  className="absolute top-0 z-10 flex h-full w-10 cursor-pointer items-center justify-center opacity-0 transition-opacity hover:opacity-100 disabled:cursor-default disabled:opacity-0"
+                  style={{ right: canvasInset.right, background: 'linear-gradient(to left, rgba(0,0,0,0.3), transparent)' }}
                 >
-                  <span className="flex items-center justify-center rounded-full p-1" style={{ background: 'rgba(0,0,0,0.45)' }}>
+                  <span className="flex items-center justify-center rounded-full p-1" style={{ background: 'rgba(0,0,0,0.5)' }}>
                     <ChevronRight size={18} className="text-white" />
                   </span>
                 </button>

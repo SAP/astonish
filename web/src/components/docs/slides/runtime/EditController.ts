@@ -228,7 +228,11 @@ export class EditController {
     const persistAttrs: Record<string, string> = { x: String(Math.round(x)), y: String(Math.round(y)), w: String(Math.round(w)), h: String(Math.round(h)), ...defaults }
     delete persistAttrs.src
     this.created.set(id, { tag, attrs: persistAttrs, text: tag === 'ast-text' ? (el.textContent ?? '') : undefined })
-    this.snapshotSlide(this.slideIndex())
+    // Add baseline entry for the new element so subsequent moves/resizes are
+    // detected correctly.  Do NOT call snapshotSlide() here — that would clear
+    // the deleted set and lose any pending deletes made before this creation.
+    const index = this.slideIndex()
+    this.baseline.set(baselineKey(index, id), { x: Math.round(x), y: Math.round(y), w: Math.round(w), h: Math.round(h), text: el.textContent ?? '' })
     this.setSelected(el)
     this.notifyParent()
   }

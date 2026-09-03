@@ -782,4 +782,43 @@ describe('EditController', () => {
     expect(cy).not.toBe(200)
     editor.disconnect()
   })
+
+  test('deleting existing element and creating new one includes both in draft', async () => {
+    const { deck, text } = await mount()
+    const editor = new EditController(deck)
+    editor.enable()
+    const spy = vi.spyOn(window.parent, 'postMessage')
+
+    // Select the existing text element
+    stubHit([text, deck])
+    text.dispatchEvent(pointer('pointerdown', 170, 390))
+    text.dispatchEvent(pointer('pointerup', 170, 390))
+
+    // Delete it
+    editor.deleteSelection()
+
+    // Create a new element
+    editor.createElement('ast-shape', 500, 300, 200, 150, { kind: 'rect', fill: '#ff0000', geom: 'rect' })
+
+    // Get the last ast-edit-changed message
+    const messages = spy.mock.calls
+      .map(c => c[0] as Record<string, unknown>)
+      .filter(m => m.type === 'ast-edit-changed')
+    const last = messages[messages.length - 1]
+
+    // Should have the original element in deletes
+    expect(last.deletes).toContain('headline')
+
+    // Should have the new element in creates
+    expect(last.creates).toBeDefined()
+    const creates = last.creates as { id: string; tag: string; attrs: Record<string, string> }[]
+    expect(creates.length).toBe(1)
+    expect(creates[0].tag).toBe('ast-shape')
+
+    // The deleted element should NOT be in creates (it was never created in this session)
+    const createIds = creates.map(c => c.id)
+    expect(createIds).not.toContain('headline')
+
+    editor.disconnect()
+  })
 })

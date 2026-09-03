@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { Download, ExternalLink, Loader2, Maximize2, Save, Trash2, TriangleAlert, X } from 'lucide-react'
 
 import {
@@ -13,6 +13,10 @@ import {
   type SlidesDeckResponse,
   type SlidesExportFormat,
 } from '@/api/slides'
+import type { SelectionMetadata } from '@/components/docs/slides/runtime/EditController'
+import ShapeToolbar, { SHAPE_DEFAULTS } from '@/components/slides/ShapeToolbar'
+import ElementPropertiesPanel from '@/components/slides/ElementPropertiesPanel'
+import TextFormatBar from '@/components/slides/TextFormatBar'
 import { cn } from '@/lib/utils'
 import SlidesArchetypeThumb from './questions/SlidesArchetypeThumb'
 
@@ -50,12 +54,14 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
   const [saveName, setSaveName] = useState('')
   const [fullscreen, setFullscreen] = useState(false)
   const [pendingBySlide, setPendingBySlide] = useState<Record<number, SlideEditDraft>>({})
-  const [selectedObject, setSelectedObject] = useState<{ id: string; tag: string } | null>(null)
+  const [selectedObject, setSelectedObject] = useState<SelectionMetadata | null>(null)
   const [applying, setApplying] = useState(false)
+  const [activeTool, setActiveTool] = useState('select')
   const mountedRef = useRef(true)
   const iframeRef = useRef<HTMLIFrameElement | null>(null)
   const fsIframeRef = useRef<HTMLIFrameElement | null>(null)
   const stripRef = useRef<HTMLDivElement | null>(null)
+  const activeToolRef = useRef(activeTool)
   // Tracks the deck/scope this component last loaded, so a pure refreshSignal
   // bump (same deck gaining slides) re-fetches WITHOUT yanking the user off
   // whatever slide they're viewing — we only reset slideIndex when the deck or
@@ -85,7 +91,10 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
   useEffect(() => {
     setPendingBySlide({})
     setSelectedObject(null)
+    setActiveTool('select')
   }, [deckSlug, scope, refreshSignal])
+
+  useEffect(() => { activeToolRef.current = activeTool }, [activeTool])
 
   const slides = deck?.slides ?? []
   const total = slides.length
@@ -98,6 +107,20 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
   const iframeSrc = presentUrl.includes('?')
     ? `${presentUrl}&t=${refreshSignal}`
     : `${presentUrl}?t=${refreshSignal}`
+
+  // Extract custom font families from the deck theme's embedded-fonts declaration
+  // so the TextFormatBar dropdown shows them alongside system fonts.
+  const customFonts = useMemo(() => {
+    const raw = deck?.deck.theme?.['embedded-fonts']
+    if (!raw) return []
+    try {
+      const refs: { family?: string }[] = JSON.parse(raw)
+      const seen = new Set<string>()
+      return refs
+        .map(r => r.family?.trim() ?? '')
+        .filter(f => { if (!f || seen.has(f)) return false; seen.add(f); return true })
+    } catch { return [] }
+  }, [deck?.deck.theme])
 
   // Navigate the embedded deck to boundedIndex WITHOUT reloading it. The runtime
   // (AstDeck) listens for { type: 'ast-nav', index } on the opaque-origin iframe
@@ -125,11 +148,17 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
         index?: number
         id?: string | null
         tag?: string | null
+        x?: number; y?: number; w?: number; h?: number
+        rotation?: number
+        fill?: string; stroke?: string; strokeWidth?: number; opacity?: number
+        font?: string; fontSize?: number; fontWeight?: string; align?: string; color?: string
         changes?: SlideEditDraft['moves']
         moves?: SlideEditDraft['moves']
         resizes?: SlideEditDraft['resizes']
         texts?: SlideEditDraft['texts']
         deletes?: string[]
+        attrs?: { id: string; attrs: Record<string, string> }[]
+        creates?: { id: string; tag: string; attrs: Record<string, string>; text?: string }[]
       } | null
       if (!data?.type) return
       if (data.type === 'ast-deck-change') {
@@ -141,7 +170,46 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
       if (data.type === 'ast-edit-selected') {
         const id = typeof data.id === 'string' && data.id ? data.id : null
         const tag = typeof data.tag === 'string' && data.tag ? data.tag : ''
-        setSelectedObject(id ? { id, tag } : null)
+        if (!id) {
+          // Canvas click with a shape tool active → create element
+          const tool = activeToolRef.current
+          if (tool !== 'select' && tool !== 'image') {
+            const spec = SHAPE_DEFAULTS[tool]
+            if (spec) {
+              iframeRef.current?.contentWindow?.postMessage({
+                type: 'ast-edit-create',
+                tag: spec.tag,
+                x: 400,
+                y: 300,
+                w: spec.w,
+                h: spec.h,
+                defaults: spec.defaults,
+              }, '*')
+              setActiveTool('select')
+              return
+            }
+          }
+          setSelectedObject(null)
+        } else {
+          setSelectedObject({
+            id,
+            tag,
+            x: Number(data.x) || 0,
+            y: Number(data.y) || 0,
+            w: Number(data.w) || 0,
+            h: Number(data.h) || 0,
+            rotation: Number(data.rotation) || 0,
+            fill: String(data.fill ?? ''),
+            stroke: String(data.stroke ?? ''),
+            strokeWidth: Number(data.strokeWidth) || 0,
+            opacity: Number(data.opacity ?? 1),
+            font: String(data.font ?? ''),
+            fontSize: Number(data.fontSize) || 0,
+            fontWeight: String(data.fontWeight ?? ''),
+            align: String(data.align ?? ''),
+            color: String(data.color ?? ''),
+          })
+        }
         return
       }
       if (data.type === 'ast-edit-changed' || data.type === 'ast-edit-moved') {
@@ -152,6 +220,8 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
           ...(data.resizes?.length ? { resizes: data.resizes } : {}),
           texts: data.texts ?? [],
           deletes: data.deletes ?? [],
+          ...(data.attrs?.length ? { attrs: data.attrs } : {}),
+          ...(data.creates?.length ? { creates: data.creates } : {}),
         }
         setPendingBySlide(prev => {
           if (!slideEditIsDirty(draft)) {
@@ -171,6 +241,14 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
   const postToCanvas = useCallback((payload: Record<string, unknown>) => {
     iframeRef.current?.contentWindow?.postMessage(payload, '*')
   }, [])
+
+  const handlePropertyChange = useCallback((key: string, value: string) => {
+    postToCanvas({ type: 'ast-edit-set-attr', key, value })
+  }, [postToCanvas])
+
+  const handleZOrder = useCallback((direction: string) => {
+    postToCanvas({ type: 'ast-edit-z-order', direction })
+  }, [postToCanvas])
 
   // After the present document reloads (new slides or an in-place rewrite),
   // restore the strip's current index inside the iframe and enable canvas edit.
@@ -513,15 +591,45 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
         </div>
       )}
 
-      {/* Embedded deck — the iframe stays mounted; while the deck has no slides
-          yet the "generating" placeholder covers it so the user never sees an
-          empty document. */}
-      <div className={cn('relative min-h-0 overflow-hidden rounded-lg', fillHeight ? 'flex-1' : 'aspect-video')}>
-        {deckFrame}
-        {total === 0 && (
-          <div className="absolute inset-0">
-            {generatingPlaceholder}
+      {/* Editor layout — left toolbar + canvas + right properties panel */}
+      <div className={cn('flex min-h-0 gap-0', fillHeight ? 'flex-1' : '')}>
+        {/* Left shape toolbar — always visible, hidden in fullscreen */}
+        {!fullscreen && (
+          <ShapeToolbar activeTool={activeTool} onToolChange={setActiveTool} />
+        )}
+
+        {/* Center: canvas + optional floating text bar */}
+        <div className={cn('relative flex-1 min-h-0 min-w-0', !fillHeight && 'aspect-video')}>
+          {/* Floating text format bar — above the canvas when a text element is selected */}
+          {!fullscreen && selectedObject?.tag === 'AST-TEXT' && (
+            <div className="absolute left-1/2 top-2 z-20 -translate-x-1/2">
+              <TextFormatBar
+                font={selectedObject.font}
+                fontSize={selectedObject.fontSize}
+                fontWeight={selectedObject.fontWeight}
+                color={selectedObject.color}
+                customFonts={customFonts}
+                onPropertyChange={handlePropertyChange}
+              />
+            </div>
+          )}
+          <div className="h-full w-full overflow-hidden rounded-lg">
+            {deckFrame}
+            {total === 0 && (
+              <div className="absolute inset-0">
+                {generatingPlaceholder}
+              </div>
+            )}
           </div>
+        </div>
+
+        {/* Right properties panel — shown when element is selected, hidden in fullscreen */}
+        {!fullscreen && selectedObject && (
+          <ElementPropertiesPanel
+            selection={selectedObject}
+            onPropertyChange={handlePropertyChange}
+            onZOrder={handleZOrder}
+          />
         )}
       </div>
 

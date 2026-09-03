@@ -11,6 +11,12 @@ const EDITABLE_TAGS = new Set([
   'AST-ICON',
 ])
 
+const EDITABLE_ATTRS = new Set([
+  'fill', 'fill-token', 'line', 'line-token', 'line-width', 'opacity',
+  'rot', 'font', 'font-token', 'size', 'weight', 'align', 'color',
+  'color-token', 'geom', 'kind', 'anchor', 'x', 'y', 'w', 'h',
+])
+
 const DRAG_THRESHOLD = 4
 const MIN_VISIBLE = 8
 export const ALIGN_SNAP = 6
@@ -22,11 +28,24 @@ export type AlignGuide = { axis: 'x' | 'y'; pos: number }
 export type EditMove = { id: string; x: number; y: number }
 export type EditResize = { id: string; x: number; y: number; w: number; h: number }
 export type EditText = { id: string; text: string }
+export type EditAttr = { id: string; attrs: Record<string, string> }
+export type EditCreate = { id: string; tag: string; attrs: Record<string, string>; text?: string }
 export type EditDraft = {
   moves: EditMove[]
   resizes: EditResize[]
   texts: EditText[]
   deletes: string[]
+  attrs?: EditAttr[]
+  creates?: EditCreate[]
+}
+
+export type SelectionMetadata = {
+  id: string
+  tag: string
+  x: number; y: number; w: number; h: number
+  rotation: number
+  fill: string; stroke: string; strokeWidth: number; opacity: number
+  font: string; fontSize: number; fontWeight: string; align: string; color: string
 }
 
 type DragState = {
@@ -68,6 +87,8 @@ export class EditController {
   private baseline = new Map<string, Baseline>()
   private deleted = new Set<string>()
   private slideHTML = new Map<number, string>()
+  private attrChanges = new Map<string, Record<string, string>>()
+  private created = new Map<string, { tag: string; attrs: Record<string, string>; text?: string }>()
   private guides: SVGSVGElement | null = null
 
   constructor(private readonly deck: HTMLElement) {}
@@ -114,6 +135,8 @@ export class EditController {
     this.baseline.clear()
     this.deleted.clear()
     this.slideHTML.clear()
+    this.attrChanges.clear()
+    this.created.clear()
   }
 
   /** Restore last committed markup on the active slide. */
@@ -124,6 +147,8 @@ export class EditController {
     const html = this.slideHTML.get(index)
     if (slide && html != null) slide.innerHTML = html
     this.clearDeleted(index)
+    this.attrChanges.clear()
+    this.created.clear()
     this.clearHover()
     this.clearSelected()
     this.clearGuides()
@@ -137,6 +162,8 @@ export class EditController {
   commit(): void {
     this.endTextEdit(true, false)
     this.snapshotSlide(this.slideIndex())
+    this.attrChanges.clear()
+    this.created.clear()
     this.drag = null
     this.resize = null
     this.clearGuides()
@@ -150,10 +177,98 @@ export class EditController {
     this.deleteSelected()
   }
 
+  /** Set an allowed attribute on the selected element. */
+  setAttr(key: string, value: string): void {
+    if (!this.selected || !EDITABLE_ATTRS.has(key)) return
+    this.selected.setAttribute(key, value)
+    const id = this.selected.id
+    if (id) {
+      const existing = this.attrChanges.get(id) ?? {}
+      existing[key] = value
+      this.attrChanges.set(id, existing)
+    }
+    this.notifyParent()
+    this.notifySelection()
+  }
+
+  /** Create a new element on the active slide. */
+  createElement(tag: string, x: number, y: number, w: number, h: number, defaults: Record<string, string>): void {
+    const slide = this.activeSlide()
+    if (!slide) return
+    const allowed = new Set(['ast-shape', 'ast-text', 'ast-image'])
+    if (!allowed.has(tag)) return
+    const prefix = tag.replace('ast-', '')
+    const id = this.generateId(prefix)
+    const el = document.createElement(tag)
+    el.id = id
+    el.setAttribute('x', String(Math.round(x)))
+    el.setAttribute('y', String(Math.round(y)))
+    el.setAttribute('w', String(Math.round(w)))
+    el.setAttribute('h', String(Math.round(h)))
+    for (const [k, v] of Object.entries(defaults)) {
+      el.setAttribute(k, v)
+    }
+    if (tag === 'ast-text' && !el.textContent) {
+      el.textContent = 'Text'
+    }
+    slide.appendChild(el)
+    const attrs: Record<string, string> = { x: String(Math.round(x)), y: String(Math.round(y)), w: String(Math.round(w)), h: String(Math.round(h)), ...defaults }
+    this.created.set(id, { tag, attrs, text: tag === 'ast-text' ? (el.textContent ?? '') : undefined })
+    this.snapshotSlide(this.slideIndex())
+    this.setSelected(el)
+    this.notifyParent()
+  }
+
+  /** Reorder the selected element within its parent. */
+  setZOrder(direction: 'front' | 'forward' | 'backward' | 'back'): void {
+    const el = this.selected
+    if (!el) return
+    const parent = el.parentElement
+    if (!parent) return
+    switch (direction) {
+      case 'front':
+        parent.appendChild(el)
+        break
+      case 'back': {
+        const first = parent.firstElementChild
+        if (first && first !== el) parent.insertBefore(el, first)
+        break
+      }
+      case 'forward': {
+        const next = el.nextElementSibling
+        if (next) next.after(el)
+        break
+      }
+      case 'backward': {
+        const prev = el.previousElementSibling
+        if (prev) parent.insertBefore(el, prev)
+        break
+      }
+    }
+    this.positionResizeHandles()
+    this.notifyParent()
+  }
+
+  private generateId(prefix: string): string {
+    const slide = this.activeSlide()
+    const existing = new Set<string>()
+    if (slide) {
+      for (const el of editableChildren(slide)) {
+        if (el.id) existing.add(el.id)
+      }
+    }
+    for (const id of this.created.keys()) existing.add(id)
+    let n = 1
+    while (existing.has(`user-${prefix}-${n}`)) n++
+    return `user-${prefix}-${n}`
+  }
+
   private snapshotAll(): void {
     this.baseline.clear()
     this.deleted.clear()
     this.slideHTML.clear()
+    this.attrChanges.clear()
+    this.created.clear()
     this.slides().forEach((_, index) => this.snapshotSlide(index))
   }
 
@@ -206,7 +321,22 @@ export class EditController {
         texts.push({ id: el.id, text })
       }
     }
-    return { moves, resizes, texts, deletes }
+
+    // Attribute changes
+    const attrs: EditAttr[] = []
+    for (const [elId, changes] of this.attrChanges) {
+      if (!this.deleted.has(`${index}:${elId}`)) {
+        attrs.push({ id: elId, attrs: changes })
+      }
+    }
+
+    // Created elements
+    const creates: EditCreate[] = []
+    for (const [elId, info] of this.created) {
+      creates.push({ id: elId, tag: info.tag, attrs: info.attrs, text: info.text })
+    }
+
+    return { moves, resizes, texts, deletes, ...(attrs.length ? { attrs } : {}), ...(creates.length ? { creates } : {}) }
   }
 
   private notifyParent(slide?: HTMLElement | null, index?: number): void {
@@ -218,11 +348,39 @@ export class EditController {
 
   private notifySelection(): void {
     if (window.parent === window) return
+    const el = this.selected
+    if (!el) {
+      window.parent.postMessage({
+        type: 'ast-edit-selected',
+        index: this.slideIndex(),
+        id: null,
+        tag: null,
+      }, '*')
+      return
+    }
+    const g = geom(el)
+    const rotation = Number(el.getAttribute('rot')) || 0
+    // Shape properties (AstShape)
+    const fill = el.getAttribute('fill') || el.getAttribute('fill-token') || ''
+    const stroke = el.getAttribute('line') || el.getAttribute('line-token') || ''
+    const strokeWidth = Number(el.getAttribute('line-width')) || 0
+    const opacity = Number(el.getAttribute('opacity'))
+    // Text properties (AstText)
+    const font = el.getAttribute('font') || el.getAttribute('font-token') || ''
+    const fontSize = Number(el.getAttribute('size')) || 0
+    const fontWeight = el.getAttribute('weight') || ''
+    const align = el.getAttribute('align') || ''
+    const color = el.getAttribute('color') || el.getAttribute('color-token') || ''
+
     window.parent.postMessage({
       type: 'ast-edit-selected',
       index: this.slideIndex(),
-      id: this.selected?.id ?? null,
-      tag: this.selected?.tagName ?? null,
+      id: el.id ?? null,
+      tag: el.tagName ?? null,
+      x: g.x, y: g.y, w: g.w, h: g.h,
+      rotation,
+      fill, stroke, strokeWidth, opacity: Number.isNaN(opacity) ? 1 : opacity,
+      font, fontSize, fontWeight, align, color,
     }, '*')
   }
 

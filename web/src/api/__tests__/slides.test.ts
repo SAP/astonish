@@ -18,6 +18,7 @@ import {
   publishDeckToTeam,
   forkDeckToPersonal,
   deleteSlidesDeck,
+  slideEditIsDirty,
 } from '../slides'
 import { teamFetch } from '../teamContext'
 
@@ -259,5 +260,21 @@ describe('slides API (templates)', () => {
   it('recolorSlidesTemplate throws on non-ok response', async () => {
     mockedTeamFetch.mockResolvedValue(new Response('bad hex', { status: 400 }))
     await expect(recolorSlidesTemplate('corp', { accent: 'red' })).rejects.toThrow()
+  })
+})
+
+describe('slideEditIsDirty', () => {
+  it('returns false for empty draft', () => {
+    expect(slideEditIsDirty(null)).toBe(false)
+    expect(slideEditIsDirty(undefined)).toBe(false)
+    expect(slideEditIsDirty({})).toBe(false)
+  })
+
+  it('returns true when attrs are present', () => {
+    expect(slideEditIsDirty({ attrs: [{ id: 's1', attrs: { fill: '#ff0000' } }] })).toBe(true)
+  })
+
+  it('returns true when creates are present', () => {
+    expect(slideEditIsDirty({ creates: [{ id: 'new-1', tag: 'ast-shape', attrs: { kind: 'rect' } }] })).toBe(true)
   })
 })

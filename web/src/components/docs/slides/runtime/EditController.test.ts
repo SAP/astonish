@@ -266,4 +266,162 @@ describe('EditController', () => {
     expect(text.getAttribute('contenteditable')).toBe('true')
     editor.disconnect()
   })
+
+  it('setAttr changes fill on selected shape', async () => {
+    document.body.innerHTML = `
+      <ast-deck>
+        <ast-slide id="s0" active>
+          <ast-shape id="s1" x="10" y="20" w="100" h="50" kind="rect" fill="blue"></ast-shape>
+        </ast-slide>
+      </ast-deck>`
+    const deck = document.querySelector('ast-deck') as HTMLElement
+    await customElements.whenDefined('ast-deck')
+    await customElements.whenDefined('ast-shape')
+    await new Promise(resolve => setTimeout(resolve, 0))
+    deck.querySelector('ast-slide')?.setAttribute('active', '')
+    const shape = deck.querySelector('#s1') as HTMLElement
+    const postMessage = vi.fn()
+    Object.defineProperty(window, 'parent', { value: { postMessage }, configurable: true })
+    stubHit([shape, deck])
+
+    const editor = new EditController(deck)
+    editor.enable()
+    // Select the shape
+    deck.dispatchEvent(pointer('pointerdown', 50, 40))
+    deck.dispatchEvent(pointer('pointerup', 50, 40))
+    expect(shape.hasAttribute('data-edit-selected')).toBe(true)
+
+    editor.setAttr('fill', '#ff0000')
+    expect(shape.getAttribute('fill')).toBe('#ff0000')
+    expect(postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'ast-edit-changed',
+        attrs: [{ id: 's1', attrs: { fill: '#ff0000' } }],
+      }),
+      '*',
+    )
+    editor.disconnect()
+  })
+
+  it('setAttr rejects disallowed attribute', async () => {
+    document.body.innerHTML = `
+      <ast-deck>
+        <ast-slide id="s0" active>
+          <ast-shape id="s1" x="10" y="20" w="100" h="50" kind="rect"></ast-shape>
+        </ast-slide>
+      </ast-deck>`
+    const deck = document.querySelector('ast-deck') as HTMLElement
+    await customElements.whenDefined('ast-shape')
+    await new Promise(resolve => setTimeout(resolve, 0))
+    deck.querySelector('ast-slide')?.setAttribute('active', '')
+    const shape = deck.querySelector('#s1') as HTMLElement
+    Object.defineProperty(window, 'parent', { value: { postMessage: vi.fn() }, configurable: true })
+    stubHit([shape, deck])
+
+    const editor = new EditController(deck)
+    editor.enable()
+    deck.dispatchEvent(pointer('pointerdown', 50, 40))
+    deck.dispatchEvent(pointer('pointerup', 50, 40))
+
+    editor.setAttr('onclick', 'alert(1)')
+    expect(shape.hasAttribute('onclick')).toBe(false)
+    editor.disconnect()
+  })
+
+  it('createElement adds a new ast-shape to the active slide', async () => {
+    document.body.innerHTML = `
+      <ast-deck>
+        <ast-slide id="s0" active>
+        </ast-slide>
+      </ast-deck>`
+    const deck = document.querySelector('ast-deck') as HTMLElement
+    await customElements.whenDefined('ast-deck')
+    await new Promise(resolve => setTimeout(resolve, 0))
+    deck.querySelector('ast-slide')?.setAttribute('active', '')
+    const postMessage = vi.fn()
+    Object.defineProperty(window, 'parent', { value: { postMessage }, configurable: true })
+
+    const editor = new EditController(deck)
+    editor.enable()
+    editor.createElement('ast-shape', 100, 200, 300, 150, { fill: 'red', kind: 'rect' })
+
+    const slide = deck.querySelector('ast-slide') as HTMLElement
+    const created = slide.querySelector('ast-shape') as HTMLElement
+    expect(created).not.toBeNull()
+    expect(created.id).toBe('user-shape-1')
+    expect(created.getAttribute('x')).toBe('100')
+    expect(created.getAttribute('y')).toBe('200')
+    expect(created.getAttribute('w')).toBe('300')
+    expect(created.getAttribute('h')).toBe('150')
+    expect(created.getAttribute('fill')).toBe('red')
+    expect(created.getAttribute('kind')).toBe('rect')
+    expect(created.hasAttribute('data-edit-selected')).toBe(true)
+    expect(postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'ast-edit-changed',
+        creates: [{ id: 'user-shape-1', tag: 'ast-shape', attrs: { x: '100', y: '200', w: '300', h: '150', fill: 'red', kind: 'rect' } }],
+      }),
+      '*',
+    )
+    editor.disconnect()
+  })
+
+  it('setZOrder brings element to front', async () => {
+    document.body.innerHTML = `
+      <ast-deck>
+        <ast-slide id="s0" active>
+          <ast-shape id="a" x="10" y="10" w="100" h="100"></ast-shape>
+          <ast-shape id="b" x="50" y="50" w="100" h="100"></ast-shape>
+        </ast-slide>
+      </ast-deck>`
+    const deck = document.querySelector('ast-deck') as HTMLElement
+    await customElements.whenDefined('ast-shape')
+    await new Promise(resolve => setTimeout(resolve, 0))
+    deck.querySelector('ast-slide')?.setAttribute('active', '')
+    const a = deck.querySelector('#a') as HTMLElement
+    Object.defineProperty(window, 'parent', { value: { postMessage: vi.fn() }, configurable: true })
+    stubHit([a, deck])
+
+    const editor = new EditController(deck)
+    editor.enable()
+    // Select element 'a' (which is first child)
+    deck.dispatchEvent(pointer('pointerdown', 50, 50))
+    deck.dispatchEvent(pointer('pointerup', 50, 50))
+    expect(a.hasAttribute('data-edit-selected')).toBe(true)
+
+    editor.setZOrder('front')
+    const slide = deck.querySelector('ast-slide') as HTMLElement
+    expect(slide.lastElementChild).toBe(a)
+    editor.disconnect()
+  })
+
+  it('reset clears attribute changes', async () => {
+    document.body.innerHTML = `
+      <ast-deck>
+        <ast-slide id="s0" active>
+          <ast-shape id="s1" x="10" y="20" w="100" h="50" fill="blue"></ast-shape>
+        </ast-slide>
+      </ast-deck>`
+    const deck = document.querySelector('ast-deck') as HTMLElement
+    await customElements.whenDefined('ast-shape')
+    await new Promise(resolve => setTimeout(resolve, 0))
+    deck.querySelector('ast-slide')?.setAttribute('active', '')
+    const shape = deck.querySelector('#s1') as HTMLElement
+    Object.defineProperty(window, 'parent', { value: { postMessage: vi.fn() }, configurable: true })
+    stubHit([shape, deck])
+
+    const editor = new EditController(deck)
+    editor.enable()
+    deck.dispatchEvent(pointer('pointerdown', 50, 40))
+    deck.dispatchEvent(pointer('pointerup', 50, 40))
+
+    editor.setAttr('fill', '#ff0000')
+    expect(shape.getAttribute('fill')).toBe('#ff0000')
+
+    editor.reset()
+    // After reset, the slide innerHTML is restored from snapshot
+    const restored = deck.querySelector('#s1') as HTMLElement
+    expect(restored.getAttribute('fill')).toBe('blue')
+    editor.disconnect()
+  })
 })

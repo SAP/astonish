@@ -444,3 +444,100 @@ func TestRemoveElementDropsMarkup(t *testing.T) {
 		t.Fatalf("headline removed: %s", got)
 	}
 }
+
+func TestSetStringAttr(t *testing.T) {
+	// Replace existing
+	got := setStringAttr(`id="foo" fill="blue"`, "fill", "red")
+	if !strings.Contains(got, `fill="red"`) {
+		t.Fatalf("expected fill=red, got %s", got)
+	}
+	// Add new attr
+	got = setStringAttr(`id="foo"`, "fill", "green")
+	if !strings.Contains(got, `fill="green"`) {
+		t.Fatalf("expected fill=green, got %s", got)
+	}
+	// Empty attrs
+	got = setStringAttr("", "fill", "#ff0000")
+	if got != `fill="#ff0000"` {
+		t.Fatalf("expected fill=#ff0000, got %s", got)
+	}
+	// HTML escaping
+	got = setStringAttr("", "fill", `a"b<c`)
+	if !strings.Contains(got, "a&#34;b&lt;c") {
+		t.Fatalf("expected escaped value, got %s", got)
+	}
+}
+
+func TestRewriteElementAttrs(t *testing.T) {
+	markup := `<ast-slide><ast-shape id="s1" kind="rect" x="10" y="20" w="100" h="50" fill="blue"></ast-shape></ast-slide>`
+	got, err := rewriteElementAttrs(markup, "s1", map[string]string{"fill": "red", "opacity": "0.5"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, `fill="red"`) {
+		t.Fatalf("expected fill=red in %s", got)
+	}
+	if !strings.Contains(got, `opacity="0.5"`) {
+		t.Fatalf("expected opacity=0.5 in %s", got)
+	}
+}
+
+func TestRewriteElementAttrsRejectsDisallowed(t *testing.T) {
+	markup := `<ast-slide><ast-shape id="s1" kind="rect" x="10" y="20" w="100" h="50"></ast-shape></ast-slide>`
+	_, err := rewriteElementAttrs(markup, "s1", map[string]string{"onclick": "alert(1)"})
+	if err == nil {
+		t.Fatal("expected error for disallowed attribute")
+	}
+	if !strings.Contains(err.Error(), "not allowed") {
+		t.Fatalf("expected 'not allowed' in error, got: %s", err)
+	}
+	_, err = rewriteElementAttrs(markup, "s1", map[string]string{"style": "color:red"})
+	if err == nil {
+		t.Fatal("expected error for style attribute")
+	}
+}
+
+func TestInsertElement(t *testing.T) {
+	markup := `<ast-slide id="s"><ast-text id="t1" x="0" y="0" w="100" h="50">Hello</ast-text></ast-slide>`
+	got, err := insertElement(markup, "ast-shape", map[string]string{
+		"id": "user-rect-1", "kind": "rect", "x": "100", "y": "100", "w": "200", "h": "150", "fill": "#4F46E5", "geom": "rect",
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, `id="user-rect-1"`) {
+		t.Fatalf("expected user-rect-1 in %s", got)
+	}
+	if !strings.Contains(got, "</ast-slide>") {
+		t.Fatalf("expected closing tag preserved in %s", got)
+	}
+	// Verify element is before </ast-slide>
+	shapeIdx := strings.Index(got, `id="user-rect-1"`)
+	closeIdx := strings.Index(got, "</ast-slide>")
+	if shapeIdx > closeIdx {
+		t.Fatal("inserted element should be before </ast-slide>")
+	}
+
+	// ast-text with content
+	got, err = insertElement(markup, "ast-text", map[string]string{
+		"id": "user-text-1", "x": "50", "y": "50", "w": "400", "h": "60", "size": "32",
+	}, "Text")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, ">Text</ast-text>") {
+		t.Fatalf("expected text content in %s", got)
+	}
+}
+
+func TestInsertElementValidatesTag(t *testing.T) {
+	markup := `<ast-slide id="s"></ast-slide>`
+	_, err := insertElement(markup, "div", map[string]string{"id": "x"}, "")
+	if err == nil {
+		t.Fatal("expected error for div tag")
+	}
+	_, err = insertElement(markup, "script", map[string]string{"id": "x"}, "")
+	if err == nil {
+		t.Fatal("expected error for script tag")
+	}
+}

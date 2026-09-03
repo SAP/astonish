@@ -151,11 +151,12 @@ export interface SlideEditDraft {
   deletes?: string[]
   attrs?: { id: string; attrs: Record<string, string> }[]
   creates?: { id: string; tag: string; attrs: Record<string, string>; text?: string }[]
+  reorders?: string[]
 }
 
 export function slideEditIsDirty(draft?: SlideEditDraft | null): boolean {
   if (!draft) return false
-  return (draft.moves?.length ?? 0) > 0 || (draft.resizes?.length ?? 0) > 0 || (draft.texts?.length ?? 0) > 0 || (draft.deletes?.length ?? 0) > 0 || (draft.attrs?.length ?? 0) > 0 || (draft.creates?.length ?? 0) > 0
+  return (draft.moves?.length ?? 0) > 0 || (draft.resizes?.length ?? 0) > 0 || (draft.texts?.length ?? 0) > 0 || (draft.deletes?.length ?? 0) > 0 || (draft.attrs?.length ?? 0) > 0 || (draft.creates?.length ?? 0) > 0 || (draft.reorders?.length ?? 0) > 0
 }
 
 /** Apply canvas object moves, text edits, and deletes to a stored slide. */
@@ -172,6 +173,7 @@ export async function patchSlideMoves(
     deletes: draft.deletes?.length ? draft.deletes : undefined,
     attrs: draft.attrs?.length ? draft.attrs : undefined,
     creates: draft.creates?.length ? draft.creates : undefined,
+    reorders: draft.reorders?.length ? draft.reorders : undefined,
   }
   const response = await teamFetch(withScope(`${DOCS_BASE}/slides/${encodeURIComponent(deckSlug)}/slides/${index}`, scope), {
     method: 'PATCH',

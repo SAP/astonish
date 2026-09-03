@@ -821,4 +821,84 @@ describe('EditController', () => {
 
     editor.disconnect()
   })
+
+  test('setZOrder includes reorders in pendingDraft', async () => {
+    // Two shapes — select the first and bring to front, verify reorders in message
+    document.body.innerHTML = `
+      <ast-deck>
+        <ast-slide id="s0" active>
+          <ast-shape id="shape-a" x="10" y="10" w="100" h="100" kind="rect" fill="red"></ast-shape>
+          <ast-shape id="shape-b" x="50" y="50" w="100" h="100" kind="rect" fill="blue"></ast-shape>
+        </ast-slide>
+      </ast-deck>`
+    const deck = document.querySelector('ast-deck') as HTMLElement
+    await customElements.whenDefined('ast-shape')
+    await new Promise(resolve => setTimeout(resolve, 0))
+    deck.querySelector('ast-slide')?.setAttribute('active', '')
+    const shapeA = deck.querySelector('#shape-a') as HTMLElement
+    Object.defineProperty(window, 'parent', { value: { postMessage: vi.fn() }, configurable: true })
+    stubHit([shapeA, deck])
+
+    const editor = new EditController(deck)
+    editor.enable()
+
+    // Select shape-a
+    deck.dispatchEvent(pointer('pointerdown', 60, 60))
+    deck.dispatchEvent(pointer('pointerup', 60, 60))
+
+    // Bring to front
+    editor.setZOrder('front')
+
+    const spy = vi.spyOn(window.parent, 'postMessage')
+    // Trigger one more notify to capture the current state
+    editor.setZOrder('front')
+
+    const messages = spy.mock.calls
+      .map(c => c[0] as Record<string, unknown>)
+      .filter(m => m.type === 'ast-edit-changed')
+    const last = messages[messages.length - 1]
+
+    // reorders should contain both IDs with shape-a last (front)
+    expect(last.reorders).toBeDefined()
+    const reorders = last.reorders as string[]
+    expect(reorders).toContain('shape-a')
+    expect(reorders).toContain('shape-b')
+    expect(reorders.indexOf('shape-b')).toBeLessThan(reorders.indexOf('shape-a'))
+
+    editor.disconnect()
+  })
+
+  test('opacity defaults to 1 when attribute is absent', async () => {
+    // Shape without an explicit opacity attribute should report 1 (100%) not 0
+    document.body.innerHTML = `
+      <ast-deck>
+        <ast-slide id="s0" active>
+          <ast-shape id="shape1" x="10" y="10" w="100" h="100" kind="rect" fill="red"></ast-shape>
+        </ast-slide>
+      </ast-deck>`
+    const deck = document.querySelector('ast-deck') as HTMLElement
+    await customElements.whenDefined('ast-shape')
+    await new Promise(resolve => setTimeout(resolve, 0))
+    deck.querySelector('ast-slide')?.setAttribute('active', '')
+    const shape = deck.querySelector('#shape1') as HTMLElement
+    const spy = vi.fn()
+    Object.defineProperty(window, 'parent', { value: { postMessage: spy }, configurable: true })
+    stubHit([shape, deck])
+
+    const editor = new EditController(deck)
+    editor.enable()
+
+    // Select the shape
+    deck.dispatchEvent(pointer('pointerdown', 60, 60))
+    deck.dispatchEvent(pointer('pointerup', 60, 60))
+
+    // Find the ast-edit-selected message
+    const selMsg = spy.mock.calls
+      .map(c => c[0] as Record<string, unknown>)
+      .find(m => m.type === 'ast-edit-selected' && m.id === 'shape1')
+    expect(selMsg).toBeDefined()
+    expect(selMsg!.opacity).toBe(1)
+
+    editor.disconnect()
+  })
 })

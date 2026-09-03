@@ -37,6 +37,7 @@ export type EditDraft = {
   deletes: string[]
   attrs?: EditAttr[]
   creates?: EditCreate[]
+  reorders?: string[]
 }
 
 export type SelectionMetadata = {
@@ -97,6 +98,7 @@ export class EditController {
   private slideHTML = new Map<number, string>()
   private attrChanges = new Map<string, Record<string, string>>()
   private created = new Map<string, { tag: string; attrs: Record<string, string>; text?: string }>()
+  private zOrderChanged = false
   private guides: SVGSVGElement | null = null
 
   constructor(private readonly deck: HTMLElement) {}
@@ -146,6 +148,7 @@ export class EditController {
     this.slideHTML.clear()
     this.attrChanges.clear()
     this.created.clear()
+    this.zOrderChanged = false
   }
 
   /** Restore last committed markup on the active slide. */
@@ -158,6 +161,7 @@ export class EditController {
     this.clearDeleted(index)
     this.attrChanges.clear()
     this.created.clear()
+    this.zOrderChanged = false
     this.clearHover()
     this.clearSelected()
     this.clearGuides()
@@ -175,6 +179,7 @@ export class EditController {
     this.snapshotSlide(this.slideIndex())
     this.attrChanges.clear()
     this.created.clear()
+    this.zOrderChanged = false
     this.drag = null
     this.resize = null
     this.clearGuides()
@@ -243,26 +248,43 @@ export class EditController {
     if (!el) return
     const parent = el.parentElement
     if (!parent) return
+    // Helper: find the next/previous editable sibling (skip non-editable elements
+    // like decorative backgrounds so forward/backward move through visible layers).
+    const nextEditable = (from: Element): Element | null => {
+      let sib = from.nextElementSibling
+      while (sib && !isEditable(sib)) sib = sib.nextElementSibling
+      return sib
+    }
+    const prevEditable = (from: Element): Element | null => {
+      let sib = from.previousElementSibling
+      while (sib && !isEditable(sib)) sib = sib.previousElementSibling
+      return sib
+    }
     switch (direction) {
       case 'front':
         parent.appendChild(el)
         break
       case 'back': {
-        const first = parent.firstElementChild
-        if (first && first !== el) parent.insertBefore(el, first)
+        // Insert after the last non-editable leading child (decorative bg).
+        let target: Element | null = parent.firstElementChild
+        while (target && target !== el && !isEditable(target)) {
+          target = target.nextElementSibling
+        }
+        if (target && target !== el) parent.insertBefore(el, target)
         break
       }
       case 'forward': {
-        const next = el.nextElementSibling
+        const next = nextEditable(el)
         if (next) next.after(el)
         break
       }
       case 'backward': {
-        const prev = el.previousElementSibling
+        const prev = prevEditable(el)
         if (prev) parent.insertBefore(el, prev)
         break
       }
     }
+    this.zOrderChanged = true
     this.positionResizeHandles()
     this.notifyParent()
   }
@@ -287,6 +309,7 @@ export class EditController {
     this.slideHTML.clear()
     this.attrChanges.clear()
     this.created.clear()
+    this.zOrderChanged = false
     this.slides().forEach((_, index) => this.snapshotSlide(index))
   }
 
@@ -379,7 +402,13 @@ export class EditController {
       creates.push({ id: elId, tag: info.tag, attrs: updatedAttrs, text })
     }
 
-    return { moves, resizes, texts, deletes, ...(attrs.length ? { attrs } : {}), ...(creates.length ? { creates } : {}) }
+    // Z-order: when any reorder happened, send the full ordered list of element IDs
+    // so the backend can persist the new stacking order.
+    const reorders = this.zOrderChanged && slide
+      ? editableChildren(slide).map(el => el.id).filter(Boolean)
+      : undefined
+
+    return { moves, resizes, texts, deletes, ...(attrs.length ? { attrs } : {}), ...(creates.length ? { creates } : {}), ...(reorders?.length ? { reorders } : {}) }
   }
 
   private notifyParent(slide?: HTMLElement | null, index?: number): void {
@@ -409,7 +438,8 @@ export class EditController {
     const fill = el.getAttribute('fill') || el.getAttribute('fill-token') || ''
     const stroke = el.getAttribute('line') || el.getAttribute('line-token') || ''
     const strokeWidth = Number(el.getAttribute('line-width')) || 0
-    const opacity = Number(el.getAttribute('opacity'))
+    const opacityRaw = el.getAttribute('opacity')
+    const opacity = opacityRaw != null && opacityRaw !== '' ? Number(opacityRaw) : 1
     // Text properties (AstText)
     const font = el.getAttribute('font') || el.getAttribute('font-token') || ''
     const fontSize = Number(el.getAttribute('size')) || 0

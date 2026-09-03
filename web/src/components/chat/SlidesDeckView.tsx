@@ -183,6 +183,7 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
         deletes?: string[]
         attrs?: { id: string; attrs: Record<string, string> }[]
         creates?: { id: string; tag: string; attrs: Record<string, string>; text?: string }[]
+        reorders?: string[]
       } | null
       if (!data?.type) return
       if (data.type === 'ast-deck-change') {
@@ -248,6 +249,7 @@ export default function SlidesDeckView({ deckSlug, scope = 'personal', fillHeigh
           deletes: data.deletes ?? [],
           ...(data.attrs?.length ? { attrs: data.attrs } : {}),
           ...(data.creates?.length ? { creates: data.creates } : {}),
+          ...(data.reorders?.length ? { reorders: data.reorders } : {}),
         }
         setPendingBySlide(prev => {
           if (!slideEditIsDirty(draft)) {

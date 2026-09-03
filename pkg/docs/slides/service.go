@@ -245,12 +245,13 @@ type ElementResize struct {
 
 // SlideEdits is a canvas edit batch: moves, resizes, text rewrites, and deletes.
 type SlideEdits struct {
-	Moves   []ElementMove
-	Resizes []ElementResize
-	Texts   []ElementText
-	Deletes []string
-	Attrs   []ElementAttrChange
-	Creates []ElementCreate
+	Moves    []ElementMove
+	Resizes  []ElementResize
+	Texts    []ElementText
+	Deletes  []string
+	Attrs    []ElementAttrChange
+	Creates  []ElementCreate
+	Reorders []string // ordered element IDs for z-order persistence
 }
 
 // ElementAttrChange represents attribute changes on an existing element.
@@ -367,6 +368,14 @@ func (s Service) ApplySlideEdits(ctx context.Context, deckSlug string, position 
 		}
 		attrs["id"] = id
 		next, err := insertElement(markup, c.Tag, attrs, c.Text)
+		if err != nil {
+			return nil, nil, err
+		}
+		markup = next
+	}
+	// Apply z-order reordering (must be last — runs on the final markup).
+	if len(edits.Reorders) > 0 {
+		next, err := reorderElements(markup, edits.Reorders)
 		if err != nil {
 			return nil, nil, err
 		}

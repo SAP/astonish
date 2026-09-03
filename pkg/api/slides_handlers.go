@@ -240,12 +240,13 @@ func GetSlideHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 type slideMovesRequest struct {
-	Moves   []slideMove       `json:"moves"`
-	Resizes []slideResize     `json:"resizes"`
-	Texts   []slideText       `json:"texts"`
-	Deletes []string          `json:"deletes"`
-	Attrs   []slideAttrChange `json:"attrs"`
-	Creates []slideCreate     `json:"creates"`
+	Moves    []slideMove       `json:"moves"`
+	Resizes  []slideResize     `json:"resizes"`
+	Texts    []slideText       `json:"texts"`
+	Deletes  []string          `json:"deletes"`
+	Attrs    []slideAttrChange `json:"attrs"`
+	Creates  []slideCreate     `json:"creates"`
+	Reorders []string          `json:"reorders"`
 }
 
 type slideMove struct {
@@ -291,7 +292,7 @@ func PatchSlideHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid edit payload", http.StatusBadRequest)
 		return
 	}
-	if len(body.Moves) == 0 && len(body.Resizes) == 0 && len(body.Texts) == 0 && len(body.Deletes) == 0 && len(body.Attrs) == 0 && len(body.Creates) == 0 {
+	if len(body.Moves) == 0 && len(body.Resizes) == 0 && len(body.Texts) == 0 && len(body.Deletes) == 0 && len(body.Attrs) == 0 && len(body.Creates) == 0 && len(body.Reorders) == 0 {
 		http.Error(w, "moves, resizes, texts, deletes, attrs, or creates are required", http.StatusBadRequest)
 		return
 	}
@@ -315,6 +316,7 @@ func PatchSlideHandler(w http.ResponseWriter, r *http.Request) {
 	for _, c := range body.Creates {
 		edits.Creates = append(edits.Creates, slides.ElementCreate{ID: c.ID, Tag: c.Tag, Attrs: c.Attrs, Text: c.Text})
 	}
+	edits.Reorders = append(edits.Reorders, body.Reorders...)
 	item, diags, err := svc.ApplySlideEdits(r.Context(), mux.Vars(r)["deckSlug"], position, edits)
 	if err != nil {
 		if errors.Is(err, store.ErrDocsNotFound) {

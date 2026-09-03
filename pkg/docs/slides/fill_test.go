@@ -541,3 +541,42 @@ func TestInsertElementValidatesTag(t *testing.T) {
 		t.Fatal("expected error for script tag")
 	}
 }
+
+func TestReorderElements(t *testing.T) {
+	markup := `<ast-slide id="s"><ast-shape id="a" x="0" y="0" w="10" h="10"></ast-shape><ast-shape id="b" x="1" y="1" w="10" h="10"></ast-shape><ast-shape id="c" x="2" y="2" w="10" h="10"></ast-shape></ast-slide>`
+
+	// Reverse the order: c, b, a
+	got, err := reorderElements(markup, []string{"c", "b", "a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Verify the new order: c before b before a
+	idxC := strings.Index(got, `id="c"`)
+	idxB := strings.Index(got, `id="b"`)
+	idxA := strings.Index(got, `id="a"`)
+	if idxC >= idxB || idxB >= idxA {
+		t.Fatalf("expected c < b < a positions, got c=%d b=%d a=%d in:\n%s", idxC, idxB, idxA, got)
+	}
+	// Verify the slide wrapper is intact
+	if !strings.HasPrefix(got, "<ast-slide") || !strings.HasSuffix(got, "</ast-slide>") {
+		t.Fatalf("slide wrapper broken: %s", got)
+	}
+}
+
+func TestReorderElementsPreservesNonEditable(t *testing.T) {
+	// Decorative element (no matching ID in reorder list) should stay in place
+	markup := `<ast-slide id="s"><ast-shape id="bg" decorative x="0" y="0" w="1920" h="1080"></ast-shape><ast-shape id="a" x="10" y="10" w="50" h="50"></ast-shape><ast-shape id="b" x="20" y="20" w="50" h="50"></ast-shape></ast-slide>`
+
+	// Reorder only a and b (swap them), bg not mentioned
+	got, err := reorderElements(markup, []string{"b", "a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// bg should remain first
+	idxBg := strings.Index(got, `id="bg"`)
+	idxB := strings.Index(got, `id="b"`)
+	idxA := strings.Index(got, `id="a"`)
+	if idxBg >= idxB || idxB >= idxA {
+		t.Fatalf("expected bg < b < a positions, got bg=%d b=%d a=%d in:\n%s", idxBg, idxB, idxA, got)
+	}
+}

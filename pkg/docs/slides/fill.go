@@ -1078,3 +1078,69 @@ func insertElement(markup, tag string, attrs map[string]string, text string) (st
 	}
 	return markup[:idx] + element + markup[idx:], nil
 }
+
+// reorderElements rearranges the direct element children of <ast-slide> so that
+// the elements whose IDs appear in `order` are placed in that order.  Elements
+// not mentioned in `order` (e.g. decorative backgrounds) keep their relative
+// position and stay before the reordered elements.
+func reorderElements(markup string, order []string) (string, error) {
+	if len(order) == 0 {
+		return markup, nil
+	}
+	// Collect the position of every element we need to reorder.
+	type fragment struct {
+		id    string
+		start int
+		end   int
+		text  string
+	}
+	var frags []fragment
+	for _, id := range order {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		start, _, _, _, _, closeEnd, ok := findElement(markup, id)
+		if !ok {
+			// Element might have been deleted — skip silently.
+			continue
+		}
+		frags = append(frags, fragment{id: id, start: start, end: closeEnd, text: markup[start:closeEnd]})
+	}
+	if len(frags) < 2 {
+		return markup, nil // nothing to reorder
+	}
+	// Sort fragments by their start position (original document order) so we
+	// can remove them back-to-front without invalidating offsets.
+	sort.Slice(frags, func(i, j int) bool { return frags[i].start < frags[j].start })
+	// Remove all reordered elements from markup, back-to-front.
+	result := markup
+	for i := len(frags) - 1; i >= 0; i-- {
+		f := frags[i]
+		// Recalculate position in the (possibly shortened) result.
+		s, _, _, _, _, e, ok := findElement(result, f.id)
+		if !ok {
+			continue
+		}
+		result = result[:s] + result[e:]
+	}
+	// Build the insertion string in the requested order.
+	orderMap := make(map[string]string, len(frags))
+	for _, f := range frags {
+		orderMap[f.id] = f.text
+	}
+	var insertion strings.Builder
+	for _, id := range order {
+		id = strings.TrimSpace(id)
+		if text, ok := orderMap[id]; ok {
+			insertion.WriteString(text)
+		}
+	}
+	// Insert before closing </ast-slide>.
+	closing := "</ast-slide>"
+	idx := strings.LastIndex(result, closing)
+	if idx < 0 {
+		return "", fmt.Errorf("no closing </ast-slide> found")
+	}
+	return result[:idx] + insertion.String() + result[idx:], nil
+}

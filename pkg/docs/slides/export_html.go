@@ -91,6 +91,18 @@ func (e HTMLExporter) Export(scene SceneGraph) (ExportResult, error) {
 	return ExportResult{Bytes: body.Bytes(), Diagnostics: diagnostics}, nil
 }
 
+// fontTokenAliases maps camelCase template token keys to the kebab-case CSS
+// variable names the runtime expects. When a template (or imported deck) stores
+// "displayFont" → "Manrope", the runtime's AstText reads var(--ast-display),
+// NOT var(--ast-displayFont). This map bridges the gap: both --ast-displayFont
+// and --ast-display are emitted so every consumer finds the value it expects.
+// The PPTX exporter (worker.mjs) already checks both variants.
+var fontTokenAliases = map[string]string{
+	"displayFont": "display",
+	"bodyFont":    "body-font",
+	"monoFont":    "mono-font",
+}
+
 func writeThemeCSS(out *bytes.Buffer, theme map[string]string) {
 	if len(theme) == 0 {
 		return
@@ -116,6 +128,18 @@ func writeThemeCSS(out *bytes.Buffer, theme map[string]string) {
 		out.WriteByte(':')
 		out.WriteString(theme[key])
 		out.WriteByte(';')
+		// Emit a CSS-compatible alias when the canonical name differs from
+		// the template token key (e.g. displayFont → display).  Skip if
+		// the theme already contains the alias key to avoid double-emission.
+		if alias, ok := fontTokenAliases[key]; ok {
+			if _, exists := theme[alias]; !exists {
+				out.WriteString("--ast-")
+				out.WriteString(alias)
+				out.WriteByte(':')
+				out.WriteString(theme[key])
+				out.WriteByte(';')
+			}
+		}
 	}
 	out.WriteByte('}')
 }
@@ -174,6 +198,9 @@ func renderNode(out *bytes.Buffer, node Node, assets map[string]string, slideID 
 	if node.FlipV {
 		writeAttr(out, "flip-v", "true")
 	}
+	if node.Rot != 0 {
+		writeAttr(out, "rot", strconv.Itoa(node.Rot))
+	}
 	keys := make([]string, 0, len(node.Props))
 	for key := range node.Props {
 		keys = append(keys, key)
@@ -197,6 +224,11 @@ func renderNode(out *bytes.Buffer, node Node, assets map[string]string, slideID 
 			if src, ok := resolveImageSrc(value, assets); ok {
 				writeAttr(out, "src", src)
 			}
+			continue
+		}
+		// Skip stale/transient src on ast-image — it is always derived from
+		// asset-ref above and emitting it would duplicate the attribute.
+		if tag == "ast-image" && key == "src" {
 			continue
 		}
 		writeAttr(out, key, value)

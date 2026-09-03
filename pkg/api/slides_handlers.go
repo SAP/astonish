@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -239,10 +240,13 @@ func GetSlideHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 type slideMovesRequest struct {
-	Moves   []slideMove   `json:"moves"`
-	Resizes []slideResize `json:"resizes"`
-	Texts   []slideText   `json:"texts"`
-	Deletes []string      `json:"deletes"`
+	Moves    []slideMove       `json:"moves"`
+	Resizes  []slideResize     `json:"resizes"`
+	Texts    []slideText       `json:"texts"`
+	Deletes  []string          `json:"deletes"`
+	Attrs    []slideAttrChange `json:"attrs"`
+	Creates  []slideCreate     `json:"creates"`
+	Reorders []string          `json:"reorders"`
 }
 
 type slideMove struct {
@@ -264,6 +268,18 @@ type slideText struct {
 	Text string `json:"text"`
 }
 
+type slideAttrChange struct {
+	ID    string            `json:"id"`
+	Attrs map[string]string `json:"attrs"`
+}
+
+type slideCreate struct {
+	ID    string            `json:"id"`
+	Tag   string            `json:"tag"`
+	Attrs map[string]string `json:"attrs"`
+	Text  string            `json:"text,omitempty"`
+}
+
 // PatchSlideHandler applies canvas object moves, resizes, text edits, and deletes.
 func PatchSlideHandler(w http.ResponseWriter, r *http.Request) {
 	position, err := strconv.Atoi(mux.Vars(r)["idx"])
@@ -276,8 +292,8 @@ func PatchSlideHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid edit payload", http.StatusBadRequest)
 		return
 	}
-	if len(body.Moves) == 0 && len(body.Resizes) == 0 && len(body.Texts) == 0 && len(body.Deletes) == 0 {
-		http.Error(w, "moves, resizes, texts, or deletes are required", http.StatusBadRequest)
+	if len(body.Moves) == 0 && len(body.Resizes) == 0 && len(body.Texts) == 0 && len(body.Deletes) == 0 && len(body.Attrs) == 0 && len(body.Creates) == 0 && len(body.Reorders) == 0 {
+		http.Error(w, "moves, resizes, texts, deletes, attrs, or creates are required", http.StatusBadRequest)
 		return
 	}
 	svc, ok := requireDocsService(w, r)
@@ -294,6 +310,13 @@ func PatchSlideHandler(w http.ResponseWriter, r *http.Request) {
 	for _, t := range body.Texts {
 		edits.Texts = append(edits.Texts, slides.ElementText{ID: t.ID, Text: t.Text})
 	}
+	for _, a := range body.Attrs {
+		edits.Attrs = append(edits.Attrs, slides.ElementAttrChange{ID: a.ID, Attrs: a.Attrs})
+	}
+	for _, c := range body.Creates {
+		edits.Creates = append(edits.Creates, slides.ElementCreate{ID: c.ID, Tag: c.Tag, Attrs: c.Attrs, Text: c.Text})
+	}
+	edits.Reorders = append(edits.Reorders, body.Reorders...)
 	item, diags, err := svc.ApplySlideEdits(r.Context(), mux.Vars(r)["deckSlug"], position, edits)
 	if err != nil {
 		if errors.Is(err, store.ErrDocsNotFound) {
@@ -308,6 +331,60 @@ func PatchSlideHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeSlidesJSON(w, http.StatusOK, item)
+}
+
+// UploadSlideAssetHandler handles POST /api/docs/slides/{deckSlug}/assets.
+// It accepts a multipart file upload (field "file"), validates the image
+// through AssetIngestor.Accept, stores it via AddDeckAsset, and returns the
+// content-addressed asset-ref that ast-image elements use.
+func UploadSlideAssetHandler(w http.ResponseWriter, r *http.Request) {
+	svc, ok := requireDocsService(w, r)
+	if !ok {
+		return
+	}
+	deckSlug := mux.Vars(r)["deckSlug"]
+	if deckSlug == "" {
+		http.Error(w, "deckSlug is required", http.StatusBadRequest)
+		return
+	}
+	// Limit upload body to the asset max (20MB) plus some multipart overhead.
+	r.Body = http.MaxBytesReader(w, r.Body, slides.MaxAssetBytes+1<<20)
+	if err := r.ParseMultipartForm(slides.MaxAssetBytes); err != nil { //nolint:gosec // body already bounded by MaxBytesReader above
+		http.Error(w, "invalid multipart upload: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, "file field is required: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+	body, err := io.ReadAll(file)
+	if err != nil {
+		http.Error(w, "failed to read uploaded file", http.StatusBadRequest)
+		return
+	}
+	// Use the file's declared content type from the multipart header, not the
+	// request-level Content-Type (which is multipart/form-data).
+	declaredMIME := ""
+	if header != nil {
+		declaredMIME = header.Header.Get("Content-Type")
+	}
+	asset, err := slides.AssetIngestor{}.Accept(body, declaredMIME)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	ref := "sha256-" + asset.ID
+	dataURI := "data:" + asset.MIME + ";base64," + base64.StdEncoding.EncodeToString(asset.Bytes)
+	if _, err := svc.AddDeckAsset(r.Context(), deckSlug, ref, dataURI); err != nil {
+		http.Error(w, "failed to store asset: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeSlidesJSON(w, http.StatusOK, map[string]string{
+		"assetRef": ref,
+		"mime":     asset.MIME,
+	})
 }
 
 // deckSlideThumbnailPNGPrefix is the data-URI prefix stripped before

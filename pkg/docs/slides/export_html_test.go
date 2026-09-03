@@ -368,6 +368,53 @@ func TestWriteThemeCSSSkipsTemplateName(t *testing.T) {
 	}
 }
 
+func TestWriteThemeCSSEmitsFontAliases(t *testing.T) {
+	var buf bytes.Buffer
+	writeThemeCSS(&buf, map[string]string{
+		"displayFont": "Manrope, sans-serif",
+		"bodyFont":    "Manrope, sans-serif",
+		"monoFont":    "JetBrains Mono, monospace",
+		"surface":     "#0B0D0F",
+	})
+	css := buf.String()
+	// The camelCase originals must appear.
+	if !strings.Contains(css, "--ast-displayFont:Manrope, sans-serif") {
+		t.Errorf("expected --ast-displayFont; got: %s", css)
+	}
+	// The CSS-compatible aliases the runtime reads must also appear.
+	if !strings.Contains(css, "--ast-display:Manrope, sans-serif") {
+		t.Errorf("expected --ast-display alias; got: %s", css)
+	}
+	if !strings.Contains(css, "--ast-body-font:Manrope, sans-serif") {
+		t.Errorf("expected --ast-body-font alias; got: %s", css)
+	}
+	if !strings.Contains(css, "--ast-mono-font:JetBrains Mono, monospace") {
+		t.Errorf("expected --ast-mono-font alias; got: %s", css)
+	}
+}
+
+func TestWriteThemeCSSNoDoubleEmissionWhenAliasPresent(t *testing.T) {
+	// When the theme already contains the CSS-compatible key, don't emit it twice.
+	var buf bytes.Buffer
+	writeThemeCSS(&buf, map[string]string{
+		"displayFont": "Manrope, sans-serif",
+		"display":     "Inter, sans-serif", // explicit override takes precedence
+	})
+	css := buf.String()
+	// Both should appear with their own values.
+	if !strings.Contains(css, "--ast-display:Inter, sans-serif") {
+		t.Errorf("expected --ast-display with explicit value; got: %s", css)
+	}
+	if !strings.Contains(css, "--ast-displayFont:Manrope, sans-serif") {
+		t.Errorf("expected --ast-displayFont; got: %s", css)
+	}
+	// The alias should NOT be emitted a second time from the displayFont key.
+	count := strings.Count(css, "--ast-display:")
+	if count != 1 {
+		t.Errorf("expected --ast-display exactly once (from explicit key), got %d occurrences in: %s", count, css)
+	}
+}
+
 func TestHTMLGradientIDsAreSlideScoped(t *testing.T) {
 	grad := func(cx, cy int) *Gradient {
 		return &Gradient{Kind: "radial", Cx: cx, Cy: cy, Stops: []GradientStop{
@@ -493,5 +540,26 @@ func TestExportNoFontFaceWhenAbsent(t *testing.T) {
 	doc := mustExport(t, HTMLExporter{RuntimeJS: []byte(`window.runtimeReady=true`)}, scene)
 	if strings.Contains(doc, "@font-face") {
 		t.Errorf("no deck without embedded fonts should emit @font-face; got:\n%s", doc)
+	}
+}
+
+func TestHTMLExporterRoundtripsRotAttribute(t *testing.T) {
+	// Parse a slide with rot="45", export it, and verify the rot attribute
+	// survives the roundtrip so the Lit runtime can read it on reload.
+	markup := `<ast-slide id="s1"><ast-text id="t1" x="10" y="20" w="300" h="80" rot="45">Hello</ast-text></ast-slide>`
+	slide, diags, err := ParseSlide(markup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if HasErrors(diags) {
+		t.Fatalf("unexpected diagnostics: %#v", diags)
+	}
+	if slide.Nodes[0].Rot != 45 {
+		t.Fatalf("expected Rot=45, got %d", slide.Nodes[0].Rot)
+	}
+	scene := SceneGraph{SchemaVersion: SchemaV2, Title: "Rot Test", Slides: []Slide{slide}}
+	doc := mustExport(t, HTMLExporter{RuntimeJS: []byte(`window.runtimeReady=true`)}, scene)
+	if !strings.Contains(doc, `rot="45"`) {
+		t.Errorf("exported HTML missing rot attribute; got:\n%s", doc)
 	}
 }

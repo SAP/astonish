@@ -54,7 +54,7 @@ export class AstDeck extends LitElement implements AstDeckElement {
 
   private readonly onMessage = (event: MessageEvent): void => {
     if (event.source !== window.parent) return
-    const data = event.data as { type?: string; index?: number; slideId?: string; enabled?: boolean } | null
+    const data = event.data as { type?: string; index?: number; slideId?: string; enabled?: boolean; key?: string; value?: string; tag?: string; x?: number; y?: number; w?: number; h?: number; defaults?: Record<string, string>; direction?: string } | null
     if (!data?.type) return
     switch (data.type) {
       case 'ast-nav':
@@ -78,6 +78,26 @@ export class AstDeck extends LitElement implements AstDeckElement {
         break
       case 'ast-edit-delete':
         this.editor?.deleteSelection()
+        break
+      case 'ast-edit-set-attr':
+        if (typeof data.key === 'string' && typeof data.value === 'string') {
+          this.editor?.setAttr(data.key, data.value)
+        }
+        break
+      case 'ast-edit-create':
+        if (typeof data.tag === 'string') {
+          this.editor?.createElement(
+            data.tag,
+            Number(data.x) || 400, Number(data.y) || 200,
+            Number(data.w) || 300, Number(data.h) || 200,
+            (data.defaults as Record<string, string>) ?? {}
+          )
+        }
+        break
+      case 'ast-edit-z-order':
+        if (typeof data.direction === 'string') {
+          this.editor?.setZOrder(data.direction as 'front' | 'forward' | 'backward' | 'back')
+        }
         break
       default:
         break

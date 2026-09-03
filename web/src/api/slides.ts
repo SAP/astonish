@@ -149,11 +149,14 @@ export interface SlideEditDraft {
   resizes?: SlideElementResize[]
   texts?: SlideElementText[]
   deletes?: string[]
+  attrs?: { id: string; attrs: Record<string, string> }[]
+  creates?: { id: string; tag: string; attrs: Record<string, string>; text?: string }[]
+  reorders?: string[]
 }
 
 export function slideEditIsDirty(draft?: SlideEditDraft | null): boolean {
   if (!draft) return false
-  return (draft.moves?.length ?? 0) > 0 || (draft.resizes?.length ?? 0) > 0 || (draft.texts?.length ?? 0) > 0 || (draft.deletes?.length ?? 0) > 0
+  return (draft.moves?.length ?? 0) > 0 || (draft.resizes?.length ?? 0) > 0 || (draft.texts?.length ?? 0) > 0 || (draft.deletes?.length ?? 0) > 0 || (draft.attrs?.length ?? 0) > 0 || (draft.creates?.length ?? 0) > 0 || (draft.reorders?.length ?? 0) > 0
 }
 
 /** Apply canvas object moves, text edits, and deletes to a stored slide. */
@@ -168,6 +171,9 @@ export async function patchSlideMoves(
     resizes: draft.resizes?.length ? draft.resizes : undefined,
     texts: draft.texts?.length ? draft.texts : undefined,
     deletes: draft.deletes?.length ? draft.deletes : undefined,
+    attrs: draft.attrs?.length ? draft.attrs : undefined,
+    creates: draft.creates?.length ? draft.creates : undefined,
+    reorders: draft.reorders?.length ? draft.reorders : undefined,
   }
   const response = await teamFetch(withScope(`${DOCS_BASE}/slides/${encodeURIComponent(deckSlug)}/slides/${index}`, scope), {
     method: 'PATCH',
@@ -176,6 +182,27 @@ export async function patchSlideMoves(
   })
   if (!response.ok) throw await responseError(response, 'Failed to save slide layout')
   return response.json() as Promise<SlidesSlide>
+}
+
+export interface UploadSlideAssetResult {
+  assetRef: string
+  mime: string
+}
+
+/** Upload a local image file to the deck's asset library. Returns the content-addressed asset-ref for ast-image elements. */
+export async function uploadSlideAsset(
+  deckSlug: string,
+  file: File,
+  scope: DocsScope = 'personal',
+): Promise<UploadSlideAssetResult> {
+  const form = new FormData()
+  form.append('file', file)
+  const response = await teamFetch(withScope(`${DOCS_BASE}/slides/${encodeURIComponent(deckSlug)}/assets`, scope), {
+    method: 'POST',
+    body: form,
+  })
+  if (!response.ok) throw await responseError(response, 'Failed to upload image')
+  return response.json() as Promise<UploadSlideAssetResult>
 }
 
 export async function fetchSlidesDeck(deckSlug: string, scope: DocsScope = 'personal'): Promise<SlidesDeckResponse> {

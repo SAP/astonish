@@ -444,3 +444,139 @@ func TestRemoveElementDropsMarkup(t *testing.T) {
 		t.Fatalf("headline removed: %s", got)
 	}
 }
+
+func TestSetStringAttr(t *testing.T) {
+	// Replace existing
+	got := setStringAttr(`id="foo" fill="blue"`, "fill", "red")
+	if !strings.Contains(got, `fill="red"`) {
+		t.Fatalf("expected fill=red, got %s", got)
+	}
+	// Add new attr
+	got = setStringAttr(`id="foo"`, "fill", "green")
+	if !strings.Contains(got, `fill="green"`) {
+		t.Fatalf("expected fill=green, got %s", got)
+	}
+	// Empty attrs
+	got = setStringAttr("", "fill", "#ff0000")
+	if got != `fill="#ff0000"` {
+		t.Fatalf("expected fill=#ff0000, got %s", got)
+	}
+	// HTML escaping
+	got = setStringAttr("", "fill", `a"b<c`)
+	if !strings.Contains(got, "a&#34;b&lt;c") {
+		t.Fatalf("expected escaped value, got %s", got)
+	}
+}
+
+func TestRewriteElementAttrs(t *testing.T) {
+	markup := `<ast-slide><ast-shape id="s1" kind="rect" x="10" y="20" w="100" h="50" fill="blue"></ast-shape></ast-slide>`
+	got, err := rewriteElementAttrs(markup, "s1", map[string]string{"fill": "red", "opacity": "0.5"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, `fill="red"`) {
+		t.Fatalf("expected fill=red in %s", got)
+	}
+	if !strings.Contains(got, `opacity="0.5"`) {
+		t.Fatalf("expected opacity=0.5 in %s", got)
+	}
+}
+
+func TestRewriteElementAttrsRejectsDisallowed(t *testing.T) {
+	markup := `<ast-slide><ast-shape id="s1" kind="rect" x="10" y="20" w="100" h="50"></ast-shape></ast-slide>`
+	_, err := rewriteElementAttrs(markup, "s1", map[string]string{"onclick": "alert(1)"})
+	if err == nil {
+		t.Fatal("expected error for disallowed attribute")
+	}
+	if !strings.Contains(err.Error(), "not allowed") {
+		t.Fatalf("expected 'not allowed' in error, got: %s", err)
+	}
+	_, err = rewriteElementAttrs(markup, "s1", map[string]string{"style": "color:red"})
+	if err == nil {
+		t.Fatal("expected error for style attribute")
+	}
+}
+
+func TestInsertElement(t *testing.T) {
+	markup := `<ast-slide id="s"><ast-text id="t1" x="0" y="0" w="100" h="50">Hello</ast-text></ast-slide>`
+	got, err := insertElement(markup, "ast-shape", map[string]string{
+		"id": "user-rect-1", "kind": "rect", "x": "100", "y": "100", "w": "200", "h": "150", "fill": "#4F46E5", "geom": "rect",
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, `id="user-rect-1"`) {
+		t.Fatalf("expected user-rect-1 in %s", got)
+	}
+	if !strings.Contains(got, "</ast-slide>") {
+		t.Fatalf("expected closing tag preserved in %s", got)
+	}
+	// Verify element is before </ast-slide>
+	shapeIdx := strings.Index(got, `id="user-rect-1"`)
+	closeIdx := strings.Index(got, "</ast-slide>")
+	if shapeIdx > closeIdx {
+		t.Fatal("inserted element should be before </ast-slide>")
+	}
+
+	// ast-text with content
+	got, err = insertElement(markup, "ast-text", map[string]string{
+		"id": "user-text-1", "x": "50", "y": "50", "w": "400", "h": "60", "size": "32",
+	}, "Text")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, ">Text</ast-text>") {
+		t.Fatalf("expected text content in %s", got)
+	}
+}
+
+func TestInsertElementValidatesTag(t *testing.T) {
+	markup := `<ast-slide id="s"></ast-slide>`
+	_, err := insertElement(markup, "div", map[string]string{"id": "x"}, "")
+	if err == nil {
+		t.Fatal("expected error for div tag")
+	}
+	_, err = insertElement(markup, "script", map[string]string{"id": "x"}, "")
+	if err == nil {
+		t.Fatal("expected error for script tag")
+	}
+}
+
+func TestReorderElements(t *testing.T) {
+	markup := `<ast-slide id="s"><ast-shape id="a" x="0" y="0" w="10" h="10"></ast-shape><ast-shape id="b" x="1" y="1" w="10" h="10"></ast-shape><ast-shape id="c" x="2" y="2" w="10" h="10"></ast-shape></ast-slide>`
+
+	// Reverse the order: c, b, a
+	got, err := reorderElements(markup, []string{"c", "b", "a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Verify the new order: c before b before a
+	idxC := strings.Index(got, `id="c"`)
+	idxB := strings.Index(got, `id="b"`)
+	idxA := strings.Index(got, `id="a"`)
+	if idxC >= idxB || idxB >= idxA {
+		t.Fatalf("expected c < b < a positions, got c=%d b=%d a=%d in:\n%s", idxC, idxB, idxA, got)
+	}
+	// Verify the slide wrapper is intact
+	if !strings.HasPrefix(got, "<ast-slide") || !strings.HasSuffix(got, "</ast-slide>") {
+		t.Fatalf("slide wrapper broken: %s", got)
+	}
+}
+
+func TestReorderElementsPreservesNonEditable(t *testing.T) {
+	// Decorative element (no matching ID in reorder list) should stay in place
+	markup := `<ast-slide id="s"><ast-shape id="bg" decorative x="0" y="0" w="1920" h="1080"></ast-shape><ast-shape id="a" x="10" y="10" w="50" h="50"></ast-shape><ast-shape id="b" x="20" y="20" w="50" h="50"></ast-shape></ast-slide>`
+
+	// Reorder only a and b (swap them), bg not mentioned
+	got, err := reorderElements(markup, []string{"b", "a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// bg should remain first
+	idxBg := strings.Index(got, `id="bg"`)
+	idxB := strings.Index(got, `id="b"`)
+	idxA := strings.Index(got, `id="a"`)
+	if idxBg >= idxB || idxB >= idxA {
+		t.Fatalf("expected bg < b < a positions, got bg=%d b=%d a=%d in:\n%s", idxBg, idxB, idxA, got)
+	}
+}

@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"html"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/SAP/astonish/pkg/docs/slides/components"
 	"github.com/SAP/astonish/pkg/docs/slides/themes"
 )
 
@@ -978,4 +980,167 @@ func setIntAttr(attrs, key string, n int) string {
 		return fmt.Sprintf(`%s="%d"`, key, n)
 	}
 	return attrs + " " + fmt.Sprintf(`%s="%d"`, key, n)
+}
+
+func setStringAttr(attrs, key, value string) string {
+	if start, end, ok := attrValueRange(attrs, key); ok {
+		return attrs[:start] + html.EscapeString(value) + attrs[end:]
+	}
+	attrs = strings.TrimSpace(attrs)
+	if attrs == "" {
+		return fmt.Sprintf(`%s="%s"`, key, html.EscapeString(value))
+	}
+	return attrs + " " + fmt.Sprintf(`%s="%s"`, key, html.EscapeString(value))
+}
+
+func rewriteElementAttrs(markup, id string, attrs map[string]string) (string, error) {
+	start, tag, elAttrs, innerStart, innerEnd, closeEnd, ok := findElement(markup, id)
+	if !ok {
+		return "", fmt.Errorf("element %q not found", id)
+	}
+	// Validate all keys against the component schema
+	schema, schemaOK := components.SchemaV1(tag)
+	if !schemaOK {
+		return "", fmt.Errorf("unknown element type %q", tag)
+	}
+	allowed := make(map[string]bool)
+	for _, k := range schema.Required {
+		allowed[k] = true
+	}
+	for _, k := range schema.Optional {
+		allowed[k] = true
+	}
+	for k := range attrs {
+		if !allowed[k] {
+			return "", fmt.Errorf("attribute %q is not allowed on <%s>", k, tag)
+		}
+	}
+	// Apply changes
+	elAttrs = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(elAttrs), "/"))
+	// Sort keys for deterministic output
+	keys := make([]string, 0, len(attrs))
+	for k := range attrs {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		elAttrs = setStringAttr(elAttrs, k, attrs[k])
+	}
+	selfClose := closeEnd == innerStart
+	open := "<" + tag
+	if strings.TrimSpace(elAttrs) != "" {
+		open += " " + strings.TrimSpace(elAttrs)
+	}
+	if selfClose {
+		open += "/>"
+		return markup[:start] + open + markup[closeEnd:], nil
+	}
+	open += ">"
+	return markup[:start] + open + markup[innerStart:innerEnd] + "</" + tag + ">" + markup[closeEnd:], nil
+}
+
+// insertElement appends a new element before the closing </ast-slide>.
+func insertElement(markup, tag string, attrs map[string]string, text string) (string, error) {
+	switch tag {
+	case "ast-shape", "ast-text", "ast-image":
+		// allowed
+	default:
+		return "", fmt.Errorf("cannot insert element of type %q", tag)
+	}
+	if attrs["id"] == "" {
+		return "", fmt.Errorf("inserted element must have an id")
+	}
+	// Build attribute string in sorted order for deterministic output
+	keys := make([]string, 0, len(attrs))
+	for k := range attrs {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var parts []string
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf(`%s="%s"`, k, html.EscapeString(attrs[k])))
+	}
+	attrStr := strings.Join(parts, " ")
+
+	var element string
+	if tag == "ast-text" {
+		escapedText := html.EscapeString(text)
+		element = fmt.Sprintf("<%s %s>%s</%s>", tag, attrStr, escapedText, tag)
+	} else {
+		element = fmt.Sprintf("<%s %s></%s>", tag, attrStr, tag)
+	}
+
+	// Insert before closing </ast-slide>
+	closing := "</ast-slide>"
+	idx := strings.LastIndex(markup, closing)
+	if idx < 0 {
+		return "", fmt.Errorf("no closing </ast-slide> found")
+	}
+	return markup[:idx] + element + markup[idx:], nil
+}
+
+// reorderElements rearranges the direct element children of <ast-slide> so that
+// the elements whose IDs appear in `order` are placed in that order.  Elements
+// not mentioned in `order` (e.g. decorative backgrounds) keep their relative
+// position and stay before the reordered elements.
+func reorderElements(markup string, order []string) (string, error) {
+	if len(order) == 0 {
+		return markup, nil
+	}
+	// Collect the position of every element we need to reorder.
+	type fragment struct {
+		id    string
+		start int
+		end   int
+		text  string
+	}
+	var frags []fragment
+	for _, id := range order {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		start, _, _, _, _, closeEnd, ok := findElement(markup, id)
+		if !ok {
+			// Element might have been deleted — skip silently.
+			continue
+		}
+		frags = append(frags, fragment{id: id, start: start, end: closeEnd, text: markup[start:closeEnd]})
+	}
+	if len(frags) < 2 {
+		return markup, nil // nothing to reorder
+	}
+	// Sort fragments by their start position (original document order) so we
+	// can remove them back-to-front without invalidating offsets.
+	sort.Slice(frags, func(i, j int) bool { return frags[i].start < frags[j].start })
+	// Remove all reordered elements from markup, back-to-front.
+	result := markup
+	for i := len(frags) - 1; i >= 0; i-- {
+		f := frags[i]
+		// Recalculate position in the (possibly shortened) result.
+		s, _, _, _, _, e, ok := findElement(result, f.id)
+		if !ok {
+			continue
+		}
+		result = result[:s] + result[e:]
+	}
+	// Build the insertion string in the requested order.
+	orderMap := make(map[string]string, len(frags))
+	for _, f := range frags {
+		orderMap[f.id] = f.text
+	}
+	var insertion strings.Builder
+	for _, id := range order {
+		id = strings.TrimSpace(id)
+		if text, ok := orderMap[id]; ok {
+			insertion.WriteString(text)
+		}
+	}
+	// Insert before closing </ast-slide>.
+	closing := "</ast-slide>"
+	idx := strings.LastIndex(result, closing)
+	if idx < 0 {
+		return "", fmt.Errorf("no closing </ast-slide> found")
+	}
+	return result[:idx] + insertion.String() + result[idx:], nil
 }

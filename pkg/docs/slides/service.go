@@ -245,10 +245,27 @@ type ElementResize struct {
 
 // SlideEdits is a canvas edit batch: moves, resizes, text rewrites, and deletes.
 type SlideEdits struct {
-	Moves   []ElementMove
-	Resizes []ElementResize
-	Texts   []ElementText
-	Deletes []string
+	Moves    []ElementMove
+	Resizes  []ElementResize
+	Texts    []ElementText
+	Deletes  []string
+	Attrs    []ElementAttrChange
+	Creates  []ElementCreate
+	Reorders []string // ordered element IDs for z-order persistence
+}
+
+// ElementAttrChange represents attribute changes on an existing element.
+type ElementAttrChange struct {
+	ID    string
+	Attrs map[string]string
+}
+
+// ElementCreate represents a new element to insert into a slide.
+type ElementCreate struct {
+	ID    string
+	Tag   string
+	Attrs map[string]string
+	Text  string // only for ast-text
 }
 
 // MoveSlideElements patches x/y on named elements in a stored slide.
@@ -319,6 +336,46 @@ func (s Service) ApplySlideEdits(ctx context.Context, deckSlug string, position 
 			continue
 		}
 		next, err := setElementGeometry(markup, id, resize.X, resize.Y, resize.W, resize.H)
+		if err != nil {
+			return nil, nil, err
+		}
+		markup = next
+	}
+	// Apply attribute changes
+	for _, ac := range edits.Attrs {
+		id := strings.TrimSpace(ac.ID)
+		if id == "" {
+			return nil, nil, fmt.Errorf("attr change missing element id")
+		}
+		if deleted[id] {
+			continue
+		}
+		next, err := rewriteElementAttrs(markup, id, ac.Attrs)
+		if err != nil {
+			return nil, nil, err
+		}
+		markup = next
+	}
+	// Apply element creations
+	for _, c := range edits.Creates {
+		id := strings.TrimSpace(c.ID)
+		if id == "" {
+			return nil, nil, fmt.Errorf("create missing element id")
+		}
+		attrs := c.Attrs
+		if attrs == nil {
+			attrs = map[string]string{}
+		}
+		attrs["id"] = id
+		next, err := insertElement(markup, c.Tag, attrs, c.Text)
+		if err != nil {
+			return nil, nil, err
+		}
+		markup = next
+	}
+	// Apply z-order reordering (must be last — runs on the final markup).
+	if len(edits.Reorders) > 0 {
+		next, err := reorderElements(markup, edits.Reorders)
 		if err != nil {
 			return nil, nil, err
 		}

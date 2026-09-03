@@ -11,6 +11,12 @@ const EDITABLE_TAGS = new Set([
   'AST-ICON',
 ])
 
+const EDITABLE_ATTRS = new Set([
+  'fill', 'fill-token', 'line', 'line-token', 'line-width', 'opacity',
+  'rot', 'font', 'font-token', 'size', 'weight', 'align', 'color',
+  'color-token', 'geom', 'kind', 'anchor', 'x', 'y', 'w', 'h',
+])
+
 const DRAG_THRESHOLD = 4
 const MIN_VISIBLE = 8
 export const ALIGN_SNAP = 6
@@ -22,11 +28,25 @@ export type AlignGuide = { axis: 'x' | 'y'; pos: number }
 export type EditMove = { id: string; x: number; y: number }
 export type EditResize = { id: string; x: number; y: number; w: number; h: number }
 export type EditText = { id: string; text: string }
+export type EditAttr = { id: string; attrs: Record<string, string> }
+export type EditCreate = { id: string; tag: string; attrs: Record<string, string>; text?: string }
 export type EditDraft = {
   moves: EditMove[]
   resizes: EditResize[]
   texts: EditText[]
   deletes: string[]
+  attrs?: EditAttr[]
+  creates?: EditCreate[]
+  reorders?: string[]
+}
+
+export type SelectionMetadata = {
+  id: string
+  tag: string
+  x: number; y: number; w: number; h: number
+  rotation: number
+  fill: string; stroke: string; strokeWidth: number; opacity: number
+  font: string; fontSize: number; fontWeight: string; align: string; color: string
 }
 
 type DragState = {
@@ -50,6 +70,13 @@ type ResizeState = {
   moved: boolean
 }
 
+type RotationState = {
+  el: HTMLElement
+  startAngle: number      // angle (deg) from element center to initial pointer
+  startRot: number        // element's rot attribute at drag start
+  moved: boolean
+}
+
 type Baseline = { x: number; y: number; w: number; h: number; text: string }
 
 const MIN_IMAGE_SIZE = 32
@@ -61,6 +88,7 @@ export class EditController {
   private selected: HTMLElement | null = null
   private drag: DragState | null = null
   private resize: ResizeState | null = null
+  private rotation: RotationState | null = null
   private resizeHandles: HTMLElement | null = null
   private editing: HTMLElement | null = null
   private editingOriginal = ''
@@ -68,6 +96,9 @@ export class EditController {
   private baseline = new Map<string, Baseline>()
   private deleted = new Set<string>()
   private slideHTML = new Map<number, string>()
+  private attrChanges = new Map<string, Record<string, string>>()
+  private created = new Map<string, { tag: string; attrs: Record<string, string>; text?: string }>()
+  private zOrderChanged = false
   private guides: SVGSVGElement | null = null
 
   constructor(private readonly deck: HTMLElement) {}
@@ -96,6 +127,7 @@ export class EditController {
     this.clearResizeHandles()
     this.drag = null
     this.resize = null
+    this.rotation = null
     this.deck.removeAttribute('edit')
     this.deck.removeAttribute('data-edit-dragging')
     this.deck.removeEventListener('pointerdown', this.onPointerDown)
@@ -114,6 +146,9 @@ export class EditController {
     this.baseline.clear()
     this.deleted.clear()
     this.slideHTML.clear()
+    this.attrChanges.clear()
+    this.created.clear()
+    this.zOrderChanged = false
   }
 
   /** Restore last committed markup on the active slide. */
@@ -124,19 +159,27 @@ export class EditController {
     const html = this.slideHTML.get(index)
     if (slide && html != null) slide.innerHTML = html
     this.clearDeleted(index)
+    this.attrChanges.clear()
+    this.created.clear()
+    this.zOrderChanged = false
     this.clearHover()
     this.clearSelected()
     this.clearGuides()
     this.deck.removeAttribute('data-edit-dragging')
     this.deck.removeAttribute('data-edit-resizing')
+    this.deck.removeAttribute('data-edit-rotating')
     this.drag = null
     this.resize = null
+    this.rotation = null
   }
 
   /** Treat current slide as the saved baseline (after Apply). */
   commit(): void {
     this.endTextEdit(true, false)
     this.snapshotSlide(this.slideIndex())
+    this.attrChanges.clear()
+    this.created.clear()
+    this.zOrderChanged = false
     this.drag = null
     this.resize = null
     this.clearGuides()
@@ -150,10 +193,123 @@ export class EditController {
     this.deleteSelected()
   }
 
+  /** Set an allowed attribute on the selected element. */
+  setAttr(key: string, value: string): void {
+    if (!this.selected || !EDITABLE_ATTRS.has(key)) return
+    this.selected.setAttribute(key, value)
+    const id = this.selected.id
+    if (id) {
+      const existing = this.attrChanges.get(id) ?? {}
+      existing[key] = value
+      this.attrChanges.set(id, existing)
+    }
+    this.notifyParent()
+    this.notifySelection()
+  }
+
+  /** Create a new element on the active slide. */
+  createElement(tag: string, x: number, y: number, w: number, h: number, defaults: Record<string, string>): void {
+    const slide = this.activeSlide()
+    if (!slide) return
+    const allowed = new Set(['ast-shape', 'ast-text', 'ast-image'])
+    if (!allowed.has(tag)) return
+    const prefix = tag.replace('ast-', '')
+    const id = this.generateId(prefix)
+    const el = document.createElement(tag)
+    el.id = id
+    el.setAttribute('x', String(Math.round(x)))
+    el.setAttribute('y', String(Math.round(y)))
+    el.setAttribute('w', String(Math.round(w)))
+    el.setAttribute('h', String(Math.round(h)))
+    for (const [k, v] of Object.entries(defaults)) {
+      el.setAttribute(k, v)
+    }
+    if (tag === 'ast-text' && !el.textContent) {
+      el.textContent = 'Text'
+    }
+    slide.appendChild(el)
+    // Strip transient attributes (e.g. blob: src URLs for images) from the
+    // persisted create record — the server derives `src` from `asset-ref`.
+    const persistAttrs: Record<string, string> = { x: String(Math.round(x)), y: String(Math.round(y)), w: String(Math.round(w)), h: String(Math.round(h)), ...defaults }
+    delete persistAttrs.src
+    this.created.set(id, { tag, attrs: persistAttrs, text: tag === 'ast-text' ? (el.textContent ?? '') : undefined })
+    // Add baseline entry for the new element so subsequent moves/resizes are
+    // detected correctly.  Do NOT call snapshotSlide() here — that would clear
+    // the deleted set and lose any pending deletes made before this creation.
+    const index = this.slideIndex()
+    this.baseline.set(baselineKey(index, id), { x: Math.round(x), y: Math.round(y), w: Math.round(w), h: Math.round(h), text: el.textContent ?? '' })
+    this.setSelected(el)
+    this.notifyParent()
+  }
+
+  /** Reorder the selected element within its parent. */
+  setZOrder(direction: 'front' | 'forward' | 'backward' | 'back'): void {
+    const el = this.selected
+    if (!el) return
+    const parent = el.parentElement
+    if (!parent) return
+    // Helper: find the next/previous editable sibling (skip non-editable elements
+    // like decorative backgrounds so forward/backward move through visible layers).
+    const nextEditable = (from: Element): Element | null => {
+      let sib = from.nextElementSibling
+      while (sib && !isEditable(sib)) sib = sib.nextElementSibling
+      return sib
+    }
+    const prevEditable = (from: Element): Element | null => {
+      let sib = from.previousElementSibling
+      while (sib && !isEditable(sib)) sib = sib.previousElementSibling
+      return sib
+    }
+    switch (direction) {
+      case 'front':
+        parent.appendChild(el)
+        break
+      case 'back': {
+        // Insert after the last non-editable leading child (decorative bg).
+        let target: Element | null = parent.firstElementChild
+        while (target && target !== el && !isEditable(target)) {
+          target = target.nextElementSibling
+        }
+        if (target && target !== el) parent.insertBefore(el, target)
+        break
+      }
+      case 'forward': {
+        const next = nextEditable(el)
+        if (next) next.after(el)
+        break
+      }
+      case 'backward': {
+        const prev = prevEditable(el)
+        if (prev) parent.insertBefore(el, prev)
+        break
+      }
+    }
+    this.zOrderChanged = true
+    this.positionResizeHandles()
+    this.notifyParent()
+  }
+
+  private generateId(prefix: string): string {
+    const slide = this.activeSlide()
+    const existing = new Set<string>()
+    if (slide) {
+      for (const el of editableChildren(slide)) {
+        if (el.id) existing.add(el.id)
+      }
+    }
+    for (const id of this.created.keys()) existing.add(id)
+    let n = 1
+    while (existing.has(`user-${prefix}-${n}`)) n++
+    return `user-${prefix}-${n}`
+  }
+
   private snapshotAll(): void {
     this.baseline.clear()
     this.deleted.clear()
     this.slideHTML.clear()
+    this.attrChanges.clear()
+    this.created.clear()
+    this.zOrderChanged = false
     this.slides().forEach((_, index) => this.snapshotSlide(index))
   }
 
@@ -186,13 +342,19 @@ export class EditController {
   }
 
   private pendingDraft(slide: HTMLElement | null = this.activeSlide(), index: number = this.slideIndex()): EditDraft {
-    const deletes = [...this.deleted].filter(key => key.startsWith(`${index}:`)).map(key => key.slice(`${index}:`.length))
+    // Only include deletes for elements that existed before this session (not newly created ones)
+    const deletes = [...this.deleted]
+      .filter(key => key.startsWith(`${index}:`))
+      .map(key => key.slice(`${index}:`.length))
+      .filter(id => !this.created.has(id))
     const moves: EditMove[] = []
     const resizes: EditResize[] = []
     const texts: EditText[] = []
     if (!slide) return { moves, resizes, texts, deletes }
+    const createdIds = new Set(this.created.keys())
     for (const el of editableChildren(slide)) {
       if (!el.id) continue
+      if (createdIds.has(el.id)) continue  // skip — position captured in creates
       const orig = this.baseline.get(baselineKey(index, el.id))
       const g = geom(el)
       const resized = Boolean(orig && (orig.w !== g.w || orig.h !== g.h))
@@ -206,7 +368,47 @@ export class EditController {
         texts.push({ id: el.id, text })
       }
     }
-    return { moves, resizes, texts, deletes }
+
+    // Attribute changes — skip elements that only exist client-side (in created)
+    // because their attrs are captured in the creates array and the backend
+    // cannot look them up by id yet.
+    const attrs: EditAttr[] = []
+    for (const [elId, changes] of this.attrChanges) {
+      if (this.deleted.has(`${index}:${elId}`)) continue
+      if (this.created.has(elId)) continue  // merged into creates below
+      attrs.push({ id: elId, attrs: changes })
+    }
+
+    // Created elements — use current DOM geometry so drags after creation are captured
+    const creates: EditCreate[] = []
+    for (const [elId, info] of this.created) {
+      // Skip elements that were created and then deleted in the same session
+      if (this.deleted.has(`${index}:${elId}`)) continue
+      const el = slide?.querySelector(`#${CSS.escape(elId)}`) as HTMLElement | null
+      const updatedAttrs = { ...info.attrs }
+      if (el) {
+        const g = geom(el)
+        updatedAttrs.x = String(g.x)
+        updatedAttrs.y = String(g.y)
+        updatedAttrs.w = String(g.w)
+        updatedAttrs.h = String(g.h)
+        const rot = el.getAttribute('rot')
+        if (rot && rot !== '0') updatedAttrs.rot = rot
+      }
+      // Merge any attribute changes made after creation (e.g. fill, font, rot)
+      const extraAttrs = this.attrChanges.get(elId)
+      if (extraAttrs) Object.assign(updatedAttrs, extraAttrs)
+      const text = info.tag === 'ast-text' && el ? (el.textContent ?? '') : info.text
+      creates.push({ id: elId, tag: info.tag, attrs: updatedAttrs, text })
+    }
+
+    // Z-order: when any reorder happened, send the full ordered list of element IDs
+    // so the backend can persist the new stacking order.
+    const reorders = this.zOrderChanged && slide
+      ? editableChildren(slide).map(el => el.id).filter(Boolean)
+      : undefined
+
+    return { moves, resizes, texts, deletes, ...(attrs.length ? { attrs } : {}), ...(creates.length ? { creates } : {}), ...(reorders?.length ? { reorders } : {}) }
   }
 
   private notifyParent(slide?: HTMLElement | null, index?: number): void {
@@ -216,13 +418,44 @@ export class EditController {
     window.parent.postMessage({ type: 'ast-edit-changed', index: i, ...this.pendingDraft(target, i) }, '*')
   }
 
-  private notifySelection(): void {
+  private notifySelection(clickX?: number, clickY?: number): void {
     if (window.parent === window) return
+    const el = this.selected
+    if (!el) {
+      window.parent.postMessage({
+        type: 'ast-edit-selected',
+        index: this.slideIndex(),
+        id: null,
+        tag: null,
+        clickX,
+        clickY,
+      }, '*')
+      return
+    }
+    const g = geom(el)
+    const rotation = Number(el.getAttribute('rot')) || 0
+    // Shape properties (AstShape)
+    const fill = el.getAttribute('fill') || el.getAttribute('fill-token') || ''
+    const stroke = el.getAttribute('line') || el.getAttribute('line-token') || ''
+    const strokeWidth = Number(el.getAttribute('line-width')) || 0
+    const opacityRaw = el.getAttribute('opacity')
+    const opacity = opacityRaw != null && opacityRaw !== '' ? Number(opacityRaw) : 1
+    // Text properties (AstText)
+    const font = el.getAttribute('font') || el.getAttribute('font-token') || ''
+    const fontSize = Number(el.getAttribute('size')) || 0
+    const fontWeight = el.getAttribute('weight') || ''
+    const align = el.getAttribute('align') || ''
+    const color = el.getAttribute('color') || el.getAttribute('color-token') || ''
+
     window.parent.postMessage({
       type: 'ast-edit-selected',
       index: this.slideIndex(),
-      id: this.selected?.id ?? null,
-      tag: this.selected?.tagName ?? null,
+      id: el.id ?? null,
+      tag: el.tagName ?? null,
+      x: g.x, y: g.y, w: g.w, h: g.h,
+      rotation,
+      fill, stroke, strokeWidth, opacity: Number.isNaN(opacity) ? 1 : opacity,
+      font, fontSize, fontWeight, align, color,
     }, '*')
   }
 
@@ -253,12 +486,12 @@ export class EditController {
     this.notifySelection()
   }
 
-  private clearSelected(): void {
+  private clearSelected(notify = true): void {
     if (!this.selected) return
     this.selected.removeAttribute('data-edit-selected')
     this.selected = null
     this.clearResizeHandles()
-    this.notifySelection()
+    if (notify) this.notifySelection()
   }
 
   private startTextEdit(el: HTMLElement): void {
@@ -324,16 +557,37 @@ export class EditController {
     if (this.editing) this.endTextEdit(true)
     this.drag = null
     this.resize = null
+    this.rotation = null
     this.clearHover()
     this.clearSelected()
     this.clearGuides()
     this.deck.removeAttribute('data-edit-dragging')
+    this.deck.removeAttribute('data-edit-rotating')
   }
 
   private readonly onPointerDown = (event: PointerEvent): void => {
     if (!this.enabled || event.button !== 0) return
+    // Rotation handle
+    const rotHandle = (event.target as Element | null)?.closest<HTMLElement>('[data-rotation-handle]')
+    if (rotHandle && this.selected) {
+      event.preventDefault()
+      event.stopPropagation()
+      const g = geom(this.selected)
+      const scale = canvasScale(this.deck)
+      const rect = this.deck.getBoundingClientRect()
+      const cx = rect.left + (g.x + g.w / 2) * scale
+      const cy = rect.top + (g.y + g.h / 2) * scale
+      const startAngle = Math.atan2(event.clientY - cy, event.clientX - cx) * 180 / Math.PI
+      const startRot = Number(this.selected.getAttribute('rot')) || 0
+      this.rotation = { el: this.selected, startAngle, startRot, moved: false }
+      try {
+        this.deck.setPointerCapture(event.pointerId)
+      } catch { /* jsdom */ }
+      return
+    }
+    // Resize corner handle — works for ALL element types
     const handle = (event.target as Element | null)?.closest<HTMLElement>('[data-resize-corner]')
-    if (handle && this.selected?.tagName === 'AST-IMAGE') {
+    if (handle && this.selected) {
       event.preventDefault()
       event.stopPropagation()
       this.resize = {
@@ -358,7 +612,16 @@ export class EditController {
     }
     const hit = hitTest(this.deck, event.clientX, event.clientY)
     if (!hit) {
-      this.clearSelected()
+      // Always notify parent of the deselect — even when nothing was selected.
+      // The parent uses this "id: null" message to trigger shape creation when a
+      // drawing tool is active. Include canvas-space click coordinates so the
+      // parent can place a newly created element at the pointer position.
+      const scale = canvasScale(this.deck)
+      const rect = this.deck.getBoundingClientRect()
+      const canvasX = (event.clientX - rect.left) / scale
+      const canvasY = (event.clientY - rect.top) / scale
+      this.clearSelected(false)
+      this.notifySelection(canvasX, canvasY)
       return
     }
     event.preventDefault()
@@ -385,6 +648,27 @@ export class EditController {
 
   private readonly onPointerMove = (event: PointerEvent): void => {
     if (!this.enabled || this.editing) return
+    // Rotation drag
+    if (this.rotation) {
+      const g = geom(this.rotation.el)
+      const scale = canvasScale(this.deck)
+      const rect = this.deck.getBoundingClientRect()
+      const cx = rect.left + (g.x + g.w / 2) * scale
+      const cy = rect.top + (g.y + g.h / 2) * scale
+      const currentAngle = Math.atan2(event.clientY - cy, event.clientX - cx) * 180 / Math.PI
+      const delta = currentAngle - this.rotation.startAngle
+      let rot = Math.round(this.rotation.startRot + delta)
+      // Normalize to 0..359
+      rot = ((rot % 360) + 360) % 360
+      // Snap to 15° increments when close
+      const snapped = Math.round(rot / 15) * 15
+      if (Math.abs(rot - snapped) <= 3) rot = snapped % 360
+      if (!this.rotation.moved && Math.abs(delta) < 2) return
+      this.rotation.moved = true
+      this.deck.setAttribute('data-edit-rotating', '')
+      this.rotation.el.setAttribute('rot', String(rot))
+      return
+    }
     if (this.resize) {
       const scale = canvasScale(this.deck)
       const dx = (event.clientX - this.resize.pointerX) / scale
@@ -392,7 +676,12 @@ export class EditController {
       if (!this.resize.moved && Math.hypot(dx, dy) < DRAG_THRESHOLD) return
       this.resize.moved = true
       this.deck.setAttribute('data-edit-resizing', '')
-      const next = proportionalResize(this.resize.start, this.resize.corner, dx, dy)
+      // Images always resize proportionally; other elements use free resize
+      // unless Shift is held, which forces proportional for any element type.
+      const useProportional = this.resize.el.tagName === 'AST-IMAGE' || event.shiftKey
+      const next = useProportional
+        ? proportionalResize(this.resize.start, this.resize.corner, dx, dy)
+        : freeResize(this.resize.start, this.resize.corner, dx, dy)
       setFullGeom(this.resize.el, next)
       this.positionResizeHandles()
       return
@@ -419,6 +708,27 @@ export class EditController {
   }
 
   private readonly onPointerUp = (event: PointerEvent): void => {
+    if (this.rotation) {
+      const moved = this.rotation.moved
+      const el = this.rotation.el
+      this.rotation = null
+      this.deck.removeAttribute('data-edit-rotating')
+      try {
+        this.deck.releasePointerCapture(event.pointerId)
+      } catch { /* already released / jsdom */ }
+      if (moved) {
+        // Record rotation as an attr change
+        const rot = el.getAttribute('rot') || '0'
+        if (el.id) {
+          const existing = this.attrChanges.get(el.id) ?? {}
+          existing['rot'] = rot
+          this.attrChanges.set(el.id, existing)
+        }
+        this.notifyParent()
+        this.notifySelection()
+      }
+      return
+    }
     if (this.resize) {
       const moved = this.resize.moved
       this.resize = null
@@ -495,7 +805,7 @@ export class EditController {
 
   private renderResizeHandles(): void {
     this.clearResizeHandles()
-    if (this.selected?.tagName !== 'AST-IMAGE') return
+    if (!this.selected) return
     const overlay = document.createElement('div')
     overlay.className = 'ast-edit-resize-handles'
     overlay.setAttribute('aria-hidden', 'true')
@@ -505,6 +815,14 @@ export class EditController {
       handle.dataset.resizeCorner = corner
       overlay.append(handle)
     }
+    // Rotation handle: a circle above top-center connected by a thin line
+    const rotLine = document.createElement('span')
+    rotLine.className = 'ast-edit-rotation-line'
+    overlay.append(rotLine)
+    const rotHandle = document.createElement('span')
+    rotHandle.className = 'ast-edit-rotation-handle'
+    rotHandle.dataset.rotationHandle = ''
+    overlay.append(rotHandle)
     this.deck.append(overlay)
     this.resizeHandles = overlay
     this.positionResizeHandles()
@@ -515,10 +833,12 @@ export class EditController {
     const g = geom(this.selected)
     const scale = canvasScale(this.deck)
     const handleSize = Math.round(24 / scale)
+    const rotOffset = Math.round(40 / scale)
     Object.assign(this.resizeHandles.style, {
       left: `${g.x}px`, top: `${g.y}px`, width: `${g.w}px`, height: `${g.h}px`,
       '--ast-edit-handle-size': `${handleSize}px`,
       '--ast-edit-handle-offset': `${Math.round(handleSize / -2)}px`,
+      '--ast-edit-rot-offset': `${rotOffset}px`,
     })
   }
 
@@ -630,6 +950,32 @@ export function proportionalResize(start: Geom, corner: ResizeCorner, dx: number
     w,
     h,
   }
+}
+
+const MIN_ELEMENT_SIZE = 16
+
+/** Free (non-proportional) resize for shapes and text. */
+export function freeResize(start: Geom, corner: ResizeCorner, dx: number, dy: number): Geom {
+  let x = start.x
+  let y = start.y
+  let w = start.w
+  let h = start.h
+
+  if (corner.endsWith('e')) {
+    w = Math.max(MIN_ELEMENT_SIZE, Math.round(start.w + dx))
+  } else {
+    w = Math.max(MIN_ELEMENT_SIZE, Math.round(start.w - dx))
+    x = start.x + start.w - w
+  }
+
+  if (corner.startsWith('s')) {
+    h = Math.max(MIN_ELEMENT_SIZE, Math.round(start.h + dy))
+  } else {
+    h = Math.max(MIN_ELEMENT_SIZE, Math.round(start.h - dy))
+    y = start.y + start.h - h
+  }
+
+  return { x, y, w, h }
 }
 
 function canvasScale(deck: HTMLElement): number {

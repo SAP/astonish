@@ -1,7 +1,7 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, test, vi } from 'vitest'
 
 import './index'
-import { EditController, proportionalResize, snapToAlign } from './EditController'
+import { EditController, freeResize, proportionalResize, snapToAlign } from './EditController'
 
 async function mount(): Promise<{ deck: HTMLElement; text: HTMLElement; bg: HTMLElement }> {
   document.body.innerHTML = `
@@ -29,6 +29,18 @@ function pointer(type: string, x: number, y: number): PointerEvent {
     clientY: y,
     button: 0,
     pointerId: 1,
+  })
+}
+
+function shiftPointer(type: string, x: number, y: number): PointerEvent {
+  return new PointerEvent(type, {
+    bubbles: true,
+    cancelable: true,
+    clientX: x,
+    clientY: y,
+    button: 0,
+    pointerId: 1,
+    shiftKey: true,
   })
 }
 
@@ -264,6 +276,629 @@ describe('EditController', () => {
     deck.dispatchEvent(pointer('pointerdown', 200, 400))
     deck.dispatchEvent(pointer('pointerup', 200, 400))
     expect(text.getAttribute('contenteditable')).toBe('true')
+    editor.disconnect()
+  })
+
+  it('setAttr changes fill on selected shape', async () => {
+    document.body.innerHTML = `
+      <ast-deck>
+        <ast-slide id="s0" active>
+          <ast-shape id="s1" x="10" y="20" w="100" h="50" kind="rect" fill="blue"></ast-shape>
+        </ast-slide>
+      </ast-deck>`
+    const deck = document.querySelector('ast-deck') as HTMLElement
+    await customElements.whenDefined('ast-deck')
+    await customElements.whenDefined('ast-shape')
+    await new Promise(resolve => setTimeout(resolve, 0))
+    deck.querySelector('ast-slide')?.setAttribute('active', '')
+    const shape = deck.querySelector('#s1') as HTMLElement
+    const postMessage = vi.fn()
+    Object.defineProperty(window, 'parent', { value: { postMessage }, configurable: true })
+    stubHit([shape, deck])
+
+    const editor = new EditController(deck)
+    editor.enable()
+    // Select the shape
+    deck.dispatchEvent(pointer('pointerdown', 50, 40))
+    deck.dispatchEvent(pointer('pointerup', 50, 40))
+    expect(shape.hasAttribute('data-edit-selected')).toBe(true)
+
+    editor.setAttr('fill', '#ff0000')
+    expect(shape.getAttribute('fill')).toBe('#ff0000')
+    expect(postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'ast-edit-changed',
+        attrs: [{ id: 's1', attrs: { fill: '#ff0000' } }],
+      }),
+      '*',
+    )
+    editor.disconnect()
+  })
+
+  it('setAttr rejects disallowed attribute', async () => {
+    document.body.innerHTML = `
+      <ast-deck>
+        <ast-slide id="s0" active>
+          <ast-shape id="s1" x="10" y="20" w="100" h="50" kind="rect"></ast-shape>
+        </ast-slide>
+      </ast-deck>`
+    const deck = document.querySelector('ast-deck') as HTMLElement
+    await customElements.whenDefined('ast-shape')
+    await new Promise(resolve => setTimeout(resolve, 0))
+    deck.querySelector('ast-slide')?.setAttribute('active', '')
+    const shape = deck.querySelector('#s1') as HTMLElement
+    Object.defineProperty(window, 'parent', { value: { postMessage: vi.fn() }, configurable: true })
+    stubHit([shape, deck])
+
+    const editor = new EditController(deck)
+    editor.enable()
+    deck.dispatchEvent(pointer('pointerdown', 50, 40))
+    deck.dispatchEvent(pointer('pointerup', 50, 40))
+
+    editor.setAttr('onclick', 'alert(1)')
+    expect(shape.hasAttribute('onclick')).toBe(false)
+    editor.disconnect()
+  })
+
+  it('createElement adds a new ast-shape to the active slide', async () => {
+    document.body.innerHTML = `
+      <ast-deck>
+        <ast-slide id="s0" active>
+        </ast-slide>
+      </ast-deck>`
+    const deck = document.querySelector('ast-deck') as HTMLElement
+    await customElements.whenDefined('ast-deck')
+    await new Promise(resolve => setTimeout(resolve, 0))
+    deck.querySelector('ast-slide')?.setAttribute('active', '')
+    const postMessage = vi.fn()
+    Object.defineProperty(window, 'parent', { value: { postMessage }, configurable: true })
+
+    const editor = new EditController(deck)
+    editor.enable()
+    editor.createElement('ast-shape', 100, 200, 300, 150, { fill: 'red', kind: 'rect' })
+
+    const slide = deck.querySelector('ast-slide') as HTMLElement
+    const created = slide.querySelector('ast-shape') as HTMLElement
+    expect(created).not.toBeNull()
+    expect(created.id).toBe('user-shape-1')
+    expect(created.getAttribute('x')).toBe('100')
+    expect(created.getAttribute('y')).toBe('200')
+    expect(created.getAttribute('w')).toBe('300')
+    expect(created.getAttribute('h')).toBe('150')
+    expect(created.getAttribute('fill')).toBe('red')
+    expect(created.getAttribute('kind')).toBe('rect')
+    expect(created.hasAttribute('data-edit-selected')).toBe(true)
+    expect(postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'ast-edit-changed',
+        creates: [{ id: 'user-shape-1', tag: 'ast-shape', attrs: { x: '100', y: '200', w: '300', h: '150', fill: 'red', kind: 'rect' } }],
+      }),
+      '*',
+    )
+    editor.disconnect()
+  })
+
+  it('setZOrder brings element to front', async () => {
+    document.body.innerHTML = `
+      <ast-deck>
+        <ast-slide id="s0" active>
+          <ast-shape id="a" x="10" y="10" w="100" h="100"></ast-shape>
+          <ast-shape id="b" x="50" y="50" w="100" h="100"></ast-shape>
+        </ast-slide>
+      </ast-deck>`
+    const deck = document.querySelector('ast-deck') as HTMLElement
+    await customElements.whenDefined('ast-shape')
+    await new Promise(resolve => setTimeout(resolve, 0))
+    deck.querySelector('ast-slide')?.setAttribute('active', '')
+    const a = deck.querySelector('#a') as HTMLElement
+    Object.defineProperty(window, 'parent', { value: { postMessage: vi.fn() }, configurable: true })
+    stubHit([a, deck])
+
+    const editor = new EditController(deck)
+    editor.enable()
+    // Select element 'a' (which is first child)
+    deck.dispatchEvent(pointer('pointerdown', 50, 50))
+    deck.dispatchEvent(pointer('pointerup', 50, 50))
+    expect(a.hasAttribute('data-edit-selected')).toBe(true)
+
+    editor.setZOrder('front')
+    const slide = deck.querySelector('ast-slide') as HTMLElement
+    expect(slide.lastElementChild).toBe(a)
+    editor.disconnect()
+  })
+
+  it('reset clears attribute changes', async () => {
+    document.body.innerHTML = `
+      <ast-deck>
+        <ast-slide id="s0" active>
+          <ast-shape id="s1" x="10" y="20" w="100" h="50" fill="blue"></ast-shape>
+        </ast-slide>
+      </ast-deck>`
+    const deck = document.querySelector('ast-deck') as HTMLElement
+    await customElements.whenDefined('ast-shape')
+    await new Promise(resolve => setTimeout(resolve, 0))
+    deck.querySelector('ast-slide')?.setAttribute('active', '')
+    const shape = deck.querySelector('#s1') as HTMLElement
+    Object.defineProperty(window, 'parent', { value: { postMessage: vi.fn() }, configurable: true })
+    stubHit([shape, deck])
+
+    const editor = new EditController(deck)
+    editor.enable()
+    deck.dispatchEvent(pointer('pointerdown', 50, 40))
+    deck.dispatchEvent(pointer('pointerup', 50, 40))
+
+    editor.setAttr('fill', '#ff0000')
+    expect(shape.getAttribute('fill')).toBe('#ff0000')
+
+    editor.reset()
+    // After reset, the slide innerHTML is restored from snapshot
+    const restored = deck.querySelector('#s1') as HTMLElement
+    expect(restored.getAttribute('fill')).toBe('blue')
+    editor.disconnect()
+  })
+
+  test('clicking empty canvas with nothing selected still sends ast-edit-selected id:null', async () => {
+    const { deck } = await mount()
+    const parentPost = vi.fn()
+    Object.defineProperty(window, 'parent', { value: { postMessage: parentPost }, configurable: true })
+    // stubHit returns null for any click (miss)
+    stubHit([])
+
+    const editor = new EditController(deck)
+    editor.enable()
+
+    // Click empty canvas — nothing is selected beforehand
+    deck.dispatchEvent(pointer('pointerdown', 500, 500))
+    deck.dispatchEvent(pointer('pointerup', 500, 500))
+
+    // Should have sent ast-edit-selected with id: null
+    const selectedMsg = parentPost.mock.calls.find(
+      (c: unknown[]) => (c[0] as { type?: string }).type === 'ast-edit-selected'
+    )
+    expect(selectedMsg).toBeTruthy()
+    expect((selectedMsg![0] as { id: unknown }).id).toBeNull()
+    editor.disconnect()
+  })
+
+  it('freeResize resizes independently in each direction', () => {
+    const start = { x: 100, y: 100, w: 200, h: 100 }
+    // Drag SE handle right and down
+    const se = freeResize(start, 'se', 50, 30)
+    expect(se).toEqual({ x: 100, y: 100, w: 250, h: 130 })
+
+    // Drag NW handle left and up (negative dx, negative dy)
+    const nw = freeResize(start, 'nw', -50, -30)
+    expect(nw).toEqual({ x: 50, y: 70, w: 250, h: 130 })
+
+    // Drag NE handle right and up
+    const ne = freeResize(start, 'ne', 50, -30)
+    expect(ne).toEqual({ x: 100, y: 70, w: 250, h: 130 })
+
+    // Drag SW handle left and down
+    const sw = freeResize(start, 'sw', -50, 30)
+    expect(sw).toEqual({ x: 50, y: 100, w: 250, h: 130 })
+  })
+
+  it('freeResize enforces minimum size', () => {
+    const start = { x: 100, y: 100, w: 200, h: 100 }
+    // Drag SE handle far inward — should not go below min size (16)
+    const shrunk = freeResize(start, 'se', -300, -300)
+    expect(shrunk.w).toBe(16)
+    expect(shrunk.h).toBe(16)
+  })
+
+  it('shows resize handles on all element types (not just images)', async () => {
+    document.body.innerHTML = `
+      <ast-deck>
+        <ast-slide id="s0" active>
+          <ast-shape id="rect1" x="100" y="100" w="200" h="150" kind="rect" fill="blue"></ast-shape>
+        </ast-slide>
+      </ast-deck>`
+    const deck = document.querySelector('ast-deck') as HTMLElement
+    await customElements.whenDefined('ast-shape')
+    await new Promise(resolve => setTimeout(resolve, 0))
+    deck.querySelector('ast-slide')?.setAttribute('active', '')
+    const shape = deck.querySelector('#rect1') as HTMLElement
+    Object.defineProperty(window, 'parent', { value: { postMessage: vi.fn() }, configurable: true })
+    stubHit([shape, deck])
+
+    const editor = new EditController(deck)
+    editor.enable()
+    // Select the shape
+    deck.dispatchEvent(pointer('pointerdown', 200, 175))
+    deck.dispatchEvent(pointer('pointerup', 200, 175))
+    expect(shape.hasAttribute('data-edit-selected')).toBe(true)
+
+    // All four corner handles should be present
+    for (const corner of ['nw', 'ne', 'se', 'sw']) {
+      expect(deck.querySelector(`[data-resize-corner="${corner}"]`)).not.toBeNull()
+    }
+    editor.disconnect()
+  })
+
+  it('renders rotation handle on selected element', async () => {
+    document.body.innerHTML = `
+      <ast-deck>
+        <ast-slide id="s0" active>
+          <ast-shape id="rect1" x="100" y="100" w="200" h="150" kind="rect" fill="blue"></ast-shape>
+        </ast-slide>
+      </ast-deck>`
+    const deck = document.querySelector('ast-deck') as HTMLElement
+    await customElements.whenDefined('ast-shape')
+    await new Promise(resolve => setTimeout(resolve, 0))
+    deck.querySelector('ast-slide')?.setAttribute('active', '')
+    const shape = deck.querySelector('#rect1') as HTMLElement
+    Object.defineProperty(window, 'parent', { value: { postMessage: vi.fn() }, configurable: true })
+    stubHit([shape, deck])
+
+    const editor = new EditController(deck)
+    editor.enable()
+    deck.dispatchEvent(pointer('pointerdown', 200, 175))
+    deck.dispatchEvent(pointer('pointerup', 200, 175))
+
+    // Rotation handle and connecting line should be present
+    expect(deck.querySelector('[data-rotation-handle]')).not.toBeNull()
+    expect(deck.querySelector('.ast-edit-rotation-line')).not.toBeNull()
+    expect(deck.querySelector('.ast-edit-rotation-handle')).not.toBeNull()
+    editor.disconnect()
+  })
+
+  it('free-resizes non-image elements (ast-shape) without keeping aspect ratio', async () => {
+    document.body.innerHTML = `
+      <ast-deck>
+        <ast-slide id="s0" active>
+          <ast-shape id="rect1" x="100" y="100" w="200" h="200" kind="rect" fill="blue"></ast-shape>
+        </ast-slide>
+      </ast-deck>`
+    const deck = document.querySelector('ast-deck') as HTMLElement
+    await customElements.whenDefined('ast-shape')
+    await new Promise(resolve => setTimeout(resolve, 0))
+    deck.querySelector('ast-slide')?.setAttribute('active', '')
+    const shape = deck.querySelector('#rect1') as HTMLElement
+    const postMessage = vi.fn()
+    Object.defineProperty(window, 'parent', { value: { postMessage }, configurable: true })
+    stubHit([shape, deck])
+
+    const editor = new EditController(deck)
+    editor.enable()
+    // Select
+    deck.dispatchEvent(pointer('pointerdown', 200, 200))
+    deck.dispatchEvent(pointer('pointerup', 200, 200))
+
+    const handle = deck.querySelector<HTMLElement>('[data-resize-corner="se"]')!
+    expect(handle).not.toBeNull()
+
+    // Resize: drag SE handle right only (dx=100, dy=0) — should NOT enforce aspect ratio
+    handle.dispatchEvent(pointer('pointerdown', 300, 300))
+    deck.dispatchEvent(pointer('pointermove', 400, 300))
+    deck.dispatchEvent(pointer('pointerup', 400, 300))
+
+    // Width changed but height should stay the same (free resize, not proportional)
+    expect(Number(shape.getAttribute('w'))).toBe(300)
+    expect(Number(shape.getAttribute('h'))).toBe(200)
+    editor.disconnect()
+  })
+
+  it('rotation drag updates rot attribute and records attr change', async () => {
+    document.body.innerHTML = `
+      <ast-deck>
+        <ast-slide id="s0" active>
+          <ast-shape id="rect1" x="100" y="100" w="200" h="200" kind="rect" fill="blue"></ast-shape>
+        </ast-slide>
+      </ast-deck>`
+    const deck = document.querySelector('ast-deck') as HTMLElement
+    await customElements.whenDefined('ast-shape')
+    await new Promise(resolve => setTimeout(resolve, 0))
+    deck.querySelector('ast-slide')?.setAttribute('active', '')
+    const shape = deck.querySelector('#rect1') as HTMLElement
+    const postMessage = vi.fn()
+    Object.defineProperty(window, 'parent', { value: { postMessage }, configurable: true })
+    stubHit([shape, deck])
+
+    const editor = new EditController(deck)
+    editor.enable()
+    // Select
+    deck.dispatchEvent(pointer('pointerdown', 200, 200))
+    deck.dispatchEvent(pointer('pointerup', 200, 200))
+
+    const rotHandle = deck.querySelector<HTMLElement>('[data-rotation-handle]')!
+    expect(rotHandle).not.toBeNull()
+
+    // Start rotation drag from the handle
+    rotHandle.dispatchEvent(pointer('pointerdown', 200, 60))
+    // Move to a different angle — enough to pass the threshold
+    deck.dispatchEvent(pointer('pointermove', 350, 200))
+    // Verify data-edit-rotating attribute is set during drag
+    expect(deck.hasAttribute('data-edit-rotating')).toBe(true)
+
+    deck.dispatchEvent(pointer('pointerup', 350, 200))
+    // After release, data-edit-rotating should be cleared
+    expect(deck.hasAttribute('data-edit-rotating')).toBe(false)
+
+    // The rot attribute should have been set to a non-zero value
+    const rot = Number(shape.getAttribute('rot'))
+    expect(rot).not.toBe(0)
+
+    // Should have notified parent with attr changes including rot
+    const changedMsg = postMessage.mock.calls.find(
+      (c: unknown[]) => {
+        const msg = c[0] as { type?: string; attrs?: { id: string; attrs: Record<string, string> }[] }
+        return msg.type === 'ast-edit-changed' && msg.attrs?.some(a => a.id === 'rect1' && 'rot' in a.attrs)
+      }
+    )
+    expect(changedMsg).toBeTruthy()
+    editor.disconnect()
+  })
+
+  it('clears rotation state on slide change', async () => {
+    document.body.innerHTML = `
+      <ast-deck>
+        <ast-slide id="s0" active>
+          <ast-shape id="rect1" x="100" y="100" w="200" h="200" kind="rect" fill="blue"></ast-shape>
+        </ast-slide>
+        <ast-slide id="s1">
+          <ast-text id="t1" x="50" y="50" w="300" h="80">Slide 2</ast-text>
+        </ast-slide>
+      </ast-deck>`
+    const deck = document.querySelector('ast-deck') as HTMLElement
+    await customElements.whenDefined('ast-shape')
+    await new Promise(resolve => setTimeout(resolve, 0))
+    deck.querySelector('ast-slide')?.setAttribute('active', '')
+    const shape = deck.querySelector('#rect1') as HTMLElement
+    Object.defineProperty(window, 'parent', { value: { postMessage: vi.fn() }, configurable: true })
+    stubHit([shape, deck])
+
+    const editor = new EditController(deck)
+    editor.enable()
+    // Select
+    deck.dispatchEvent(pointer('pointerdown', 200, 200))
+    deck.dispatchEvent(pointer('pointerup', 200, 200))
+    expect(shape.hasAttribute('data-edit-selected')).toBe(true)
+
+    // Simulate slide change
+    deck.dispatchEvent(new Event('ast-deck-change', { bubbles: true }))
+    // Selection and handles should be cleared
+    expect(shape.hasAttribute('data-edit-selected')).toBe(false)
+    expect(deck.querySelector('[data-resize-corner]')).toBeNull()
+    expect(deck.querySelector('[data-rotation-handle]')).toBeNull()
+    editor.disconnect()
+  })
+
+  it('Shift+resize forces proportional resize on non-image elements', async () => {
+    document.body.innerHTML = `
+      <ast-deck>
+        <ast-slide id="s0" active>
+          <ast-shape id="rect1" x="100" y="100" w="200" h="200" kind="rect" fill="blue"></ast-shape>
+        </ast-slide>
+      </ast-deck>`
+    const deck = document.querySelector('ast-deck') as HTMLElement
+    await customElements.whenDefined('ast-shape')
+    await new Promise(resolve => setTimeout(resolve, 0))
+    deck.querySelector('ast-slide')?.setAttribute('active', '')
+    const shape = deck.querySelector('#rect1') as HTMLElement
+    Object.defineProperty(window, 'parent', { value: { postMessage: vi.fn() }, configurable: true })
+    stubHit([shape, deck])
+
+    const editor = new EditController(deck)
+    editor.enable()
+    // Select
+    deck.dispatchEvent(pointer('pointerdown', 200, 200))
+    deck.dispatchEvent(pointer('pointerup', 200, 200))
+
+    const handle = deck.querySelector<HTMLElement>('[data-resize-corner="se"]')!
+    expect(handle).not.toBeNull()
+
+    // Shift+resize: drag SE handle right only (dx=100, dy=0) — should enforce proportional
+    handle.dispatchEvent(pointer('pointerdown', 300, 300))
+    deck.dispatchEvent(shiftPointer('pointermove', 400, 300))
+    deck.dispatchEvent(pointer('pointerup', 400, 300))
+
+    // With proportional resize on a 1:1 element, both w and h should change equally
+    const w = Number(shape.getAttribute('w'))
+    const h = Number(shape.getAttribute('h'))
+    expect(w).toBe(h)
+    // The element grew (was 200×200, dragged 100px right)
+    expect(w).toBeGreaterThan(200)
+    editor.disconnect()
+  })
+
+  it('clicking empty canvas sends ast-edit-selected with clickX/clickY coordinates', async () => {
+    const { deck } = await mount()
+    const parentPost = vi.fn()
+    Object.defineProperty(window, 'parent', { value: { postMessage: parentPost }, configurable: true })
+    // stubHit returns null for any click (miss)
+    stubHit([])
+
+    const editor = new EditController(deck)
+    editor.enable()
+
+    // Click empty canvas at (500, 500)
+    deck.dispatchEvent(pointer('pointerdown', 500, 500))
+
+    // Find the ast-edit-selected message
+    const selectedMsg = parentPost.mock.calls.find(
+      (c: unknown[]) => (c[0] as { type?: string }).type === 'ast-edit-selected'
+    )
+    expect(selectedMsg).toBeTruthy()
+    const msg = selectedMsg![0] as { id: unknown; clickX?: number; clickY?: number }
+    expect(msg.id).toBeNull()
+    expect(typeof msg.clickX).toBe('number')
+    expect(typeof msg.clickY).toBe('number')
+    editor.disconnect()
+  })
+
+  it('creating then moving an element produces creates (updated position) and NO moves for that element', async () => {
+    document.body.innerHTML = `
+      <ast-deck>
+        <ast-slide id="s0" active>
+        </ast-slide>
+      </ast-deck>`
+    const deck = document.querySelector('ast-deck') as HTMLElement
+    await customElements.whenDefined('ast-deck')
+    await new Promise(resolve => setTimeout(resolve, 0))
+    deck.querySelector('ast-slide')?.setAttribute('active', '')
+    const parentPost = vi.fn()
+    Object.defineProperty(window, 'parent', { value: { postMessage: parentPost }, configurable: true })
+
+    const editor = new EditController(deck)
+    editor.enable()
+
+    // Create element at position (100, 200)
+    editor.createElement('ast-shape', 100, 200, 300, 150, { fill: 'red', kind: 'rect' })
+    const slide = deck.querySelector('ast-slide') as HTMLElement
+    const created = slide.querySelector('ast-shape') as HTMLElement
+    expect(created).not.toBeNull()
+    expect(created.id).toBe('user-shape-1')
+
+    // Now drag it — simulate selecting and moving
+    stubHit([created, deck])
+    deck.dispatchEvent(pointer('pointerdown', 200, 250))
+    // Move far enough to exceed DRAG_THRESHOLD
+    deck.dispatchEvent(pointer('pointermove', 300, 350))
+    deck.dispatchEvent(pointer('pointerup', 300, 350))
+
+    // Find the last ast-edit-changed message
+    const changedCalls = parentPost.mock.calls.filter(
+      (c: unknown[]) => (c[0] as { type?: string }).type === 'ast-edit-changed'
+    )
+    expect(changedCalls.length).toBeGreaterThan(0)
+    const lastChanged = changedCalls[changedCalls.length - 1][0] as {
+      moves: { id: string }[]
+      creates?: { id: string; attrs: Record<string, string> }[]
+    }
+
+    // Should NOT have the created element in moves
+    const movedIds = lastChanged.moves.map((m: { id: string }) => m.id)
+    expect(movedIds).not.toContain('user-shape-1')
+
+    // Should have the created element in creates with updated position
+    expect(lastChanged.creates).toBeDefined()
+    const createEntry = lastChanged.creates!.find((c: { id: string }) => c.id === 'user-shape-1')
+    expect(createEntry).toBeDefined()
+    // The element was dragged, so position should differ from original (100, 200)
+    const cx = Number(createEntry!.attrs.x)
+    const cy = Number(createEntry!.attrs.y)
+    expect(cx).not.toBe(100)
+    expect(cy).not.toBe(200)
+    editor.disconnect()
+  })
+
+  test('deleting existing element and creating new one includes both in draft', async () => {
+    const { deck, text } = await mount()
+    const editor = new EditController(deck)
+    editor.enable()
+    const spy = vi.spyOn(window.parent, 'postMessage')
+
+    // Select the existing text element
+    stubHit([text, deck])
+    text.dispatchEvent(pointer('pointerdown', 170, 390))
+    text.dispatchEvent(pointer('pointerup', 170, 390))
+
+    // Delete it
+    editor.deleteSelection()
+
+    // Create a new element
+    editor.createElement('ast-shape', 500, 300, 200, 150, { kind: 'rect', fill: '#ff0000', geom: 'rect' })
+
+    // Get the last ast-edit-changed message
+    const messages = spy.mock.calls
+      .map(c => c[0] as Record<string, unknown>)
+      .filter(m => m.type === 'ast-edit-changed')
+    const last = messages[messages.length - 1]
+
+    // Should have the original element in deletes
+    expect(last.deletes).toContain('headline')
+
+    // Should have the new element in creates
+    expect(last.creates).toBeDefined()
+    const creates = last.creates as { id: string; tag: string; attrs: Record<string, string> }[]
+    expect(creates.length).toBe(1)
+    expect(creates[0].tag).toBe('ast-shape')
+
+    // The deleted element should NOT be in creates (it was never created in this session)
+    const createIds = creates.map(c => c.id)
+    expect(createIds).not.toContain('headline')
+
+    editor.disconnect()
+  })
+
+  test('setZOrder includes reorders in pendingDraft', async () => {
+    // Two shapes — select the first and bring to front, verify reorders in message
+    document.body.innerHTML = `
+      <ast-deck>
+        <ast-slide id="s0" active>
+          <ast-shape id="shape-a" x="10" y="10" w="100" h="100" kind="rect" fill="red"></ast-shape>
+          <ast-shape id="shape-b" x="50" y="50" w="100" h="100" kind="rect" fill="blue"></ast-shape>
+        </ast-slide>
+      </ast-deck>`
+    const deck = document.querySelector('ast-deck') as HTMLElement
+    await customElements.whenDefined('ast-shape')
+    await new Promise(resolve => setTimeout(resolve, 0))
+    deck.querySelector('ast-slide')?.setAttribute('active', '')
+    const shapeA = deck.querySelector('#shape-a') as HTMLElement
+    Object.defineProperty(window, 'parent', { value: { postMessage: vi.fn() }, configurable: true })
+    stubHit([shapeA, deck])
+
+    const editor = new EditController(deck)
+    editor.enable()
+
+    // Select shape-a
+    deck.dispatchEvent(pointer('pointerdown', 60, 60))
+    deck.dispatchEvent(pointer('pointerup', 60, 60))
+
+    // Bring to front
+    editor.setZOrder('front')
+
+    const spy = vi.spyOn(window.parent, 'postMessage')
+    // Trigger one more notify to capture the current state
+    editor.setZOrder('front')
+
+    const messages = spy.mock.calls
+      .map(c => c[0] as Record<string, unknown>)
+      .filter(m => m.type === 'ast-edit-changed')
+    const last = messages[messages.length - 1]
+
+    // reorders should contain both IDs with shape-a last (front)
+    expect(last.reorders).toBeDefined()
+    const reorders = last.reorders as string[]
+    expect(reorders).toContain('shape-a')
+    expect(reorders).toContain('shape-b')
+    expect(reorders.indexOf('shape-b')).toBeLessThan(reorders.indexOf('shape-a'))
+
+    editor.disconnect()
+  })
+
+  test('opacity defaults to 1 when attribute is absent', async () => {
+    // Shape without an explicit opacity attribute should report 1 (100%) not 0
+    document.body.innerHTML = `
+      <ast-deck>
+        <ast-slide id="s0" active>
+          <ast-shape id="shape1" x="10" y="10" w="100" h="100" kind="rect" fill="red"></ast-shape>
+        </ast-slide>
+      </ast-deck>`
+    const deck = document.querySelector('ast-deck') as HTMLElement
+    await customElements.whenDefined('ast-shape')
+    await new Promise(resolve => setTimeout(resolve, 0))
+    deck.querySelector('ast-slide')?.setAttribute('active', '')
+    const shape = deck.querySelector('#shape1') as HTMLElement
+    const spy = vi.fn()
+    Object.defineProperty(window, 'parent', { value: { postMessage: spy }, configurable: true })
+    stubHit([shape, deck])
+
+    const editor = new EditController(deck)
+    editor.enable()
+
+    // Select the shape
+    deck.dispatchEvent(pointer('pointerdown', 60, 60))
+    deck.dispatchEvent(pointer('pointerup', 60, 60))
+
+    // Find the ast-edit-selected message
+    const selMsg = spy.mock.calls
+      .map(c => c[0] as Record<string, unknown>)
+      .find(m => m.type === 'ast-edit-selected' && m.id === 'shape1')
+    expect(selMsg).toBeDefined()
+    expect(selMsg!.opacity).toBe(1)
+
     editor.disconnect()
   })
 })

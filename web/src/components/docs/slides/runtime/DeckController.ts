@@ -1,6 +1,5 @@
 import type { AstFragment } from './AstFragment'
 import type { AstSlide } from './AstSlide'
-import { hitTest } from './EditController'
 import type { DeckChangeDetail, FragmentPolicy } from './types'
 
 const NAVIGATION_KEYS = new Set(['ArrowRight', 'ArrowDown', 'PageDown', ' ', 'ArrowLeft', 'ArrowUp', 'PageUp', 'Home', 'End'])
@@ -198,7 +197,10 @@ export class DeckController {
 
   private readonly onClick = (event: MouseEvent): void => {
     if (event.defaultPrevented || (event.target as Element).closest('a,button,input,textarea,select')) return
-    if (this.deck.hasAttribute('edit') && hitTest(this.deck, event.clientX, event.clientY)) return
+    // In edit mode, suppress ALL click-to-navigate. Navigation is handled by
+    // the React overlay buttons (SlidesDeckView) so accidental canvas clicks
+    // (or the tail-end of a drag/resize) never jump slides.
+    if (this.deck.hasAttribute('edit')) return
     event.clientX < window.innerWidth / 3 ? this.previous() : this.next()
   }
 

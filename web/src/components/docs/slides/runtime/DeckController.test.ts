@@ -107,17 +107,21 @@ describe('DeckController', () => {
     expect(deck.currentIndex).toBe(0)
   })
 
-  it('navigates from background clicks while canvas edit mode is on', async () => {
+  it('suppresses click navigation while canvas edit mode is on', async () => {
     const deck = await mountDeck()
     deck.setAttribute('edit', '')
-    deck.next()
-    deck.next()
+    // Navigate to slide 1 (past fragments on slide 0)
+    deck.goTo(1)
+    expect(deck.currentIndex).toBe(1)
 
+    // In edit mode, background clicks should NOT navigate — the React overlay
+    // buttons handle navigation instead. A right-side click must not advance
+    // and a left-side click must not go back.
     deck.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: 800 }))
     expect(deck.currentIndex).toBe(1)
 
     deck.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: 100 }))
-    expect(deck.currentIndex).toBe(0)
+    expect(deck.currentIndex).toBe(1)
   })
 
   it('does not navigate when an editable canvas object is clicked', async () => {

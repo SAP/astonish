@@ -342,12 +342,14 @@ export class EditController {
       }
     }
 
-    // Attribute changes
+    // Attribute changes — skip elements that only exist client-side (in created)
+    // because their attrs are captured in the creates array and the backend
+    // cannot look them up by id yet.
     const attrs: EditAttr[] = []
     for (const [elId, changes] of this.attrChanges) {
-      if (!this.deleted.has(`${index}:${elId}`)) {
-        attrs.push({ id: elId, attrs: changes })
-      }
+      if (this.deleted.has(`${index}:${elId}`)) continue
+      if (this.created.has(elId)) continue  // merged into creates below
+      attrs.push({ id: elId, attrs: changes })
     }
 
     // Created elements — use current DOM geometry so drags after creation are captured
@@ -366,6 +368,9 @@ export class EditController {
         const rot = el.getAttribute('rot')
         if (rot && rot !== '0') updatedAttrs.rot = rot
       }
+      // Merge any attribute changes made after creation (e.g. fill, font, rot)
+      const extraAttrs = this.attrChanges.get(elId)
+      if (extraAttrs) Object.assign(updatedAttrs, extraAttrs)
       const text = info.tag === 'ast-text' && el ? (el.textContent ?? '') : info.text
       creates.push({ id: elId, tag: info.tag, attrs: updatedAttrs, text })
     }

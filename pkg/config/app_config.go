@@ -36,6 +36,83 @@ type AppConfig struct {
 	CodeIntel           CodeIntelConfig            `yaml:"codeintel,omitempty" json:"codeintel,omitempty"`
 	Sandbox             SandboxConfig              `yaml:"sandbox,omitempty"`
 	Security            SecurityConfig             `yaml:"security,omitempty"`
+	ModelRouting        ModelRoutingConfig         `yaml:"model_routing,omitempty" json:"model_routing,omitempty"`
+}
+
+const AutoModelSentinel = "auto"
+
+func IsAutoModel(model string) bool {
+	return strings.EqualFold(strings.TrimSpace(model), AutoModelSentinel)
+}
+
+// RoutingTierConfig defines the strong/weak model pair for one routing tier.
+type RoutingTierConfig struct {
+	StrongProvider string  `yaml:"strong_provider,omitempty" json:"strong_provider,omitempty"`
+	StrongModel    string  `yaml:"strong_model,omitempty" json:"strong_model,omitempty"`
+	WeakProvider   string  `yaml:"weak_provider,omitempty" json:"weak_provider,omitempty"`
+	WeakModel      string  `yaml:"weak_model,omitempty" json:"weak_model,omitempty"`
+	Threshold      float64 `yaml:"threshold,omitempty" json:"threshold,omitempty"`
+}
+
+func (t *RoutingTierConfig) IsConfigured() bool {
+	return t.StrongProvider != "" && t.StrongModel != "" &&
+		t.WeakProvider != "" && t.WeakModel != ""
+}
+
+func (t *RoutingTierConfig) EffectiveThreshold() float64 {
+	if t.Threshold > 0 && t.Threshold < 1 {
+		return t.Threshold
+	}
+	return 0.5
+}
+
+// ModelRoutingConfig controls the Auto model routing system.
+// When the user selects Auto in /model, the routing system selects
+// between StrongModel and WeakModel per-turn based on prompt complexity.
+// Supports 4-tier routing: Orchestrator and Task tiers.
+// Legacy flat fields are auto-migrated to the Orchestrator tier.
+type ModelRoutingConfig struct {
+	Orchestrator RoutingTierConfig `yaml:"orchestrator,omitempty" json:"orchestrator,omitempty"`
+	Task         RoutingTierConfig `yaml:"task,omitempty" json:"task,omitempty"`
+	// Legacy flat fields — auto-migrated to Orchestrator tier.
+	StrongProvider string  `yaml:"strong_provider,omitempty" json:"strong_provider,omitempty"`
+	StrongModel    string  `yaml:"strong_model,omitempty" json:"strong_model,omitempty"`
+	WeakProvider   string  `yaml:"weak_provider,omitempty" json:"weak_provider,omitempty"`
+	WeakModel      string  `yaml:"weak_model,omitempty" json:"weak_model,omitempty"`
+	Threshold      float64 `yaml:"threshold,omitempty" json:"threshold,omitempty"`
+}
+
+// Migrate moves legacy flat fields into the Orchestrator tier.
+// Called automatically by IsConfigured and EffectiveThreshold.
+func (c *ModelRoutingConfig) Migrate() {
+	if c.Orchestrator.StrongProvider == "" && c.StrongProvider != "" {
+		c.Orchestrator = RoutingTierConfig{
+			StrongProvider: c.StrongProvider,
+			StrongModel:    c.StrongModel,
+			WeakProvider:   c.WeakProvider,
+			WeakModel:      c.WeakModel,
+			Threshold:      c.Threshold,
+		}
+		c.StrongProvider = ""
+		c.StrongModel = ""
+		c.WeakProvider = ""
+		c.WeakModel = ""
+		c.Threshold = 0
+	}
+}
+
+func (c *ModelRoutingConfig) IsConfigured() bool {
+	c.Migrate()
+	return c.Orchestrator.IsConfigured()
+}
+
+func (c *ModelRoutingConfig) EffectiveThreshold() float64 {
+	c.Migrate()
+	return c.Orchestrator.EffectiveThreshold()
+}
+
+func (c *ModelRoutingConfig) TaskConfigured() bool {
+	return c.Task.IsConfigured()
 }
 
 type CodeIntelConfig struct {

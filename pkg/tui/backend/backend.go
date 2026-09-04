@@ -310,6 +310,36 @@ type PlanLifecycleBackend interface {
 	RecordPlanDecision(ctx context.Context, status events.PlanStatus) error
 }
 
+// AutoRoutingConfig describes the current auto-routing configuration with
+// separate model pairs for the Orchestrator (main agent) and Task (sub-agent) tiers.
+type AutoRoutingConfig struct {
+	// Orchestrator tier (main agent loop)
+	OrchestratorStrongProvider string
+	OrchestratorStrongModel    string
+	OrchestratorWeakProvider   string
+	OrchestratorWeakModel      string
+	OrchestratorThreshold      float64
+	// Task tier (sub-agents via delegate_tasks)
+	TaskStrongProvider string
+	TaskStrongModel    string
+	TaskWeakProvider   string
+	TaskWeakModel      string
+	TaskThreshold      float64
+}
+
+// HasTaskTier returns true when a separate Task-tier model pair is configured.
+func (c *AutoRoutingConfig) HasTaskTier() bool {
+	return c != nil && c.TaskStrongProvider != "" && c.TaskStrongModel != "" &&
+		c.TaskWeakProvider != "" && c.TaskWeakModel != ""
+}
+
+// AutoRoutingBackend is an optional capability for backends that support
+// automatic model routing between a strong and weak model.
+type AutoRoutingBackend interface {
+	SetAutoRouting(ctx context.Context, cfg AutoRoutingConfig) (effectiveProvider, effectiveModel string, err error)
+	GetAutoRoutingConfig() *AutoRoutingConfig
+}
+
 // Backend drives one interactive chat session against the platform.
 //
 // Implementations must be safe for:

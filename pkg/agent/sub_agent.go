@@ -207,6 +207,7 @@ type ToolGroup struct {
 type SubAgentManager struct {
 	// Parent context
 	LLM             model.LLM                      // Parent's LLM (used for children unless overridden)
+	TaskLLM         model.LLM                      // Task-tier LLM for sub-agents; nil = use LLM
 	ToolGroups      map[string]*ToolGroup          // Named tool groups for sub-agent tool resolution
 	FleetTools      []tool.Tool                    // Fleet-only tools (e.g., run_fleet_phase) not in main agent's tool list
 	SessionService  adksession.Service             // Session persistence
@@ -333,6 +334,16 @@ var excludedChildTools = map[string]bool{
 // Used by sandbox wrapping to replicate the same filtering as resolveTools().
 func IsExcludedChildTool(name string) bool {
 	return excludedChildTools[name]
+}
+
+// effectiveTaskLLM returns the LLM for child sub-agents. When TaskLLM is set
+// (Auto routing Task tier), children use the task-tier routing LLM. Otherwise
+// they inherit the parent's orchestrator-level LLM.
+func (m *SubAgentManager) effectiveTaskLLM() model.LLM {
+	if m.TaskLLM != nil {
+		return m.TaskLLM
+	}
+	return m.LLM
 }
 
 // NewSubAgentManager creates a new SubAgentManager with the given configuration.
@@ -1269,7 +1280,7 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) TaskRe
 	childInstr := childPrompt
 	childAgent, err := llmagent.New(llmagent.Config{
 		Name:  task.Name,
-		Model: m.LLM,
+		Model: m.effectiveTaskLLM(),
 		InstructionProvider: func(_ adkagent.ReadonlyContext) (string, error) {
 			return childInstr, nil
 		},

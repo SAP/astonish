@@ -1174,10 +1174,35 @@ func mapSSEToEvents(sev *client.SSEEvent, debug bool) []events.Event {
 		}
 	case "system":
 		var payload struct {
-			Text string `json:"text"`
+			Text    string `json:"text"`
+			Content string `json:"content"`
 		}
-		if json.Unmarshal(data, &payload) == nil && payload.Text != "" {
-			return []events.Event{events.NewSystem(payload.Text)}
+		if json.Unmarshal(data, &payload) == nil {
+			text := payload.Text
+			if text == "" {
+				text = payload.Content
+			}
+			if text != "" {
+				return []events.Event{events.NewSystem(text)}
+			}
+		}
+	case "routing_info":
+		var payload struct {
+			Model      string  `json:"routing_model"`
+			IsStrong   bool    `json:"routing_is_strong"`
+			StrongPct  float64 `json:"routing_strong_pct"`
+			WeakPct    float64 `json:"routing_weak_pct"`
+			Total      int64   `json:"routing_total"`
+			StrongName string  `json:"routing_strong_name"`
+			WeakName   string  `json:"routing_weak_name"`
+			Tier       string  `json:"routing_tier"`
+		}
+		if json.Unmarshal(data, &payload) == nil && payload.Model != "" {
+			return []events.Event{events.NewRoutingInfo(
+				payload.Model, payload.IsStrong,
+				payload.StrongPct, payload.WeakPct, payload.Total,
+				payload.StrongName, payload.WeakName, payload.Tier,
+			)}
 		}
 	case "plan":
 		var payload struct {

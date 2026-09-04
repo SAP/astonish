@@ -1951,6 +1951,75 @@ func TestRollback_NoSessionReturnsNil(t *testing.T) {
 	}
 }
 
+// TestRollback_ListSkipsTurnContextEvents verifies that per-turn context events
+// (injected by the agent runtime for plan-mode instructions, relevant tools,
+// knowledge, etc.) are excluded from the rollback picker — only real user
+// messages appear as rollback targets.
+func TestRollback_ListSkipsTurnContextEvents(t *testing.T) {
+	ctx := context.Background()
+	baseDir := t.TempDir()
+
+	fileStore, err := persistentsession.NewFileStore(baseDir)
+	if err != nil {
+		t.Fatalf("NewFileStore: %v", err)
+	}
+
+	resp, err := fileStore.Create(ctx, &adksession.CreateRequest{AppName: codeAppName, UserID: codeUserID})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sess := resp.Session
+	sessionID := sess.ID()
+
+	// Event 0: real user message.
+	seedUserEvent(t, fileStore, sess, "u0", "first request")
+
+	// Event 1: per-turn context (user-role, but not user-authored).
+	turnCtxEv := &adksession.Event{
+		ID:     "tc1",
+		Author: "user",
+		LLMResponse: adkmodel.LLMResponse{
+			Content: genai.NewContentFromText("[Astonish Per-Turn Context — not user-authored]\n\n## Session Task\n\nYou are in plan mode.", genai.RoleUser),
+		},
+		Actions: adksession.EventActions{StateDelta: map[string]any{
+			"_astonish_turn_context": true,
+		}},
+	}
+	if err := fileStore.AppendEvent(ctx, sess, turnCtxEv); err != nil {
+		t.Fatalf("AppendEvent(tc1): %v", err)
+	}
+
+	// Event 2: another real user message.
+	seedUserEvent(t, fileStore, sess, "u2", "second request")
+
+	b := &localAgentBackend{
+		sessionSvc: common.NewAutoInitService(fileStore),
+		fileStore:  fileStore,
+		appConfig:  &config.AppConfig{},
+		sessionID:  sessionID,
+	}
+
+	points, err := b.ListRollbackPoints(ctx)
+	if err != nil {
+		t.Fatalf("ListRollbackPoints: %v", err)
+	}
+	if len(points) != 2 {
+		t.Fatalf("got %d rollback points, want 2 (turn-context event should be filtered)", len(points))
+	}
+	// Event indices: 0 = first user, 1 = turn context (skipped), 2 = second user.
+	want0 := sessionID + ":0"
+	want2 := sessionID + ":2"
+	if points[0].ID != want0 || points[1].ID != want2 {
+		t.Fatalf("point IDs = %q,%q want %q,%q", points[0].ID, points[1].ID, want0, want2)
+	}
+	if points[0].Label != "first request" {
+		t.Errorf("point[0].Label = %q, want %q", points[0].Label, "first request")
+	}
+	if points[1].Label != "second request" {
+		t.Errorf("point[1].Label = %q, want %q", points[1].Label, "second request")
+	}
+}
+
 // TestAgentAttachmentsFromBackend verifies that pasted-image / file payloads
 // (raw bytes on backend.Attachment) are converted to base64 agent.Attachment
 // values so RunTurn can forward them as InlineData parts. This defends the

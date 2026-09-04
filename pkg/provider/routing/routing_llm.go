@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"iter"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 
 	"google.golang.org/adk/model"
+	"google.golang.org/genai"
 )
 
 // RoutingStats tracks cumulative routing decisions (thread-safe via atomics).
@@ -180,11 +182,13 @@ func ClassifierContextFromContext(ctx context.Context) ClassifierContext {
 
 // --- Helpers ---
 
-// extractLastUserMessage walks req.Contents in reverse, finds the last content
-// with role "user", and returns only the shortest text part — which is the
-// actual user-typed input. Longer parts are typically framework-injected context
-// (AGENTS.md, session state, timestamps) that would artificially inflate the
-// complexity score.
+const perTurnContextPrefix = "[Astonish Per-Turn Context"
+
+// extractLastUserMessage walks req.Contents in reverse, finds the last
+// user-authored content (skipping framework-injected per-turn context), and
+// returns only the shortest text part — which is the actual user-typed input.
+// Longer parts are typically framework-injected context (AGENTS.md, session
+// state, timestamps) that would artificially inflate the complexity score.
 func extractLastUserMessage(req *model.LLMRequest) string {
 	if req == nil {
 		return ""
@@ -192,6 +196,12 @@ func extractLastUserMessage(req *model.LLMRequest) string {
 	for i := len(req.Contents) - 1; i >= 0; i-- {
 		c := req.Contents[i]
 		if c == nil || c.Role != "user" {
+			continue
+		}
+		// Skip the framework-injected per-turn context block entirely.
+		// It is always a separate Content with role=user, injected after the
+		// actual human message, and its text starts with the well-known prefix.
+		if isPerTurnContext(c) {
 			continue
 		}
 		// In code mode, user content often has multiple text parts: the actual
@@ -210,6 +220,18 @@ func extractLastUserMessage(req *model.LLMRequest) string {
 		}
 	}
 	return ""
+}
+
+// isPerTurnContext returns true if the Content is a framework-injected
+// per-turn context block (skills, tools, session metadata) rather than
+// actual user input. These always start with "[Astonish Per-Turn Context".
+func isPerTurnContext(c *genai.Content) bool {
+	for _, p := range c.Parts {
+		if p != nil && strings.HasPrefix(p.Text, perTurnContextPrefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // truncateForLog truncates a string for debug logging.

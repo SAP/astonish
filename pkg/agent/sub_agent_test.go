@@ -1254,3 +1254,37 @@ func TestSubAgentManager_EmitsEvaluatingEvent(t *testing.T) {
 		t.Error("expected an evaluating event in the collected events")
 	}
 }
+
+// stubLLM is a minimal model.LLM implementation used in unit tests.
+type stubLLM struct {
+	name string
+}
+
+func (s *stubLLM) Name() string { return s.name }
+func (s *stubLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		yield(&model.LLMResponse{}, nil)
+	}
+}
+
+func TestSubAgentManager_EffectiveTaskLLM(t *testing.T) {
+	parentLLM := &stubLLM{name: "parent"}
+	taskLLM := &stubLLM{name: "task"}
+	mgr := &SubAgentManager{
+		LLM:     parentLLM,
+		TaskLLM: taskLLM,
+	}
+	if got := mgr.effectiveTaskLLM(); got != taskLLM {
+		t.Errorf("effectiveTaskLLM() = %v, want taskLLM", got)
+	}
+}
+
+func TestSubAgentManager_EffectiveTaskLLMNilFallback(t *testing.T) {
+	parentLLM := &stubLLM{name: "parent"}
+	mgr := &SubAgentManager{
+		LLM: parentLLM,
+	}
+	if got := mgr.effectiveTaskLLM(); got != parentLLM {
+		t.Errorf("effectiveTaskLLM() = %v, want parentLLM (fallback)", got)
+	}
+}

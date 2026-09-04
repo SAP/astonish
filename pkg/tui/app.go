@@ -4841,11 +4841,3 @@ func max(a, b int) int {
 	return b
 }
 
-// shortModelName returns the last path component of a model identifier,
-// e.g. "anthropic/claude-opus-4-5" → "claude-opus-4-5".
-func shortModelName(m string) string {
-	if idx := strings.LastIndex(m, "/"); idx >= 0 {
-		return m[idx+1:]
-	}
-	return m
-}

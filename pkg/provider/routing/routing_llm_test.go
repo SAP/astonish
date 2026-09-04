@@ -226,17 +226,28 @@ func TestExtractLastUserMessage(t *testing.T) {
 		t.Errorf("no user = %q, want empty", got)
 	}
 
-	// multi-part user content: returns the shortest text part (actual user input)
+	// Skips per-turn context and returns the real user message before it.
+	reqWithCtx := &model.LLMRequest{
+		Contents: []*genai.Content{
+			{Role: "user", Parts: []*genai.Part{{Text: "hello world"}}},
+			{Role: "user", Parts: []*genai.Part{{Text: "[Astonish Per-Turn Context — not user-authored]\n\n## Available Skills\n..."}}},
+		},
+	}
+	if got := extractLastUserMessage(reqWithCtx); got != "hello world" {
+		t.Errorf("with per-turn context = %q, want %q", got, "hello world")
+	}
+
+	// Multi-part user content: returns the shortest part (the actual user input).
 	reqMultiPart := &model.LLMRequest{
 		Contents: []*genai.Content{
 			{Role: "user", Parts: []*genai.Part{
-				{Text: "This is a very long injected context with AGENTS.md and session state and all sorts of framework metadata"},
-				{Text: "hello"},
+				{Text: "This is a very long AGENTS.md file that the framework injected as context for the agent to follow..."},
+				{Text: "fix the bug"},
 			}},
 		},
 	}
-	if got := extractLastUserMessage(reqMultiPart); got != "hello" {
-		t.Errorf("multi-part = %q, want %q", got, "hello")
+	if got := extractLastUserMessage(reqMultiPart); got != "fix the bug" {
+		t.Errorf("multi-part = %q, want %q", got, "fix the bug")
 	}
 }
 

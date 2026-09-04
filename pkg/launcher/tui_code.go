@@ -25,7 +25,9 @@ import (
 	"github.com/SAP/astonish/pkg/common"
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/gitutil"
+	"github.com/SAP/astonish/pkg/memory"
 	"github.com/SAP/astonish/pkg/provider"
+	"github.com/SAP/astonish/pkg/provider/routing"
 	xai_oauth "github.com/SAP/astonish/pkg/provider/xai_oauth"
 	persistentsession "github.com/SAP/astonish/pkg/session"
 	"github.com/SAP/astonish/pkg/skills"
@@ -152,6 +154,15 @@ func RunCodeTUI(ctx context.Context, cfg *CodeConfig) error {
 		modelName = appConfig.General.DefaultModel
 	}
 
+	// When the persisted model is "auto", bootstrap the factory with the strong
+	// model so GetProvider succeeds. The RoutingLLM will be swapped in after
+	// backend construction via the auto routing restore block.
+	isAutoRestore := config.IsAutoModel(modelName) && appConfig.ModelRouting.IsConfigured()
+	if isAutoRestore {
+		providerName = appConfig.ModelRouting.Orchestrator.StrongProvider
+		modelName = appConfig.ModelRouting.Orchestrator.StrongModel
+	}
+
 	workingDir := strings.TrimSpace(cfg.WorkingDir)
 	if workingDir == "" {
 		wd, wdErr := os.Getwd()
@@ -243,6 +254,59 @@ func RunCodeTUI(ctx context.Context, cfg *CodeConfig) error {
 		subAgentAuthRespCh:     make(chan agent.SubAgentAuthResponse, 1),
 	}
 
+	// Restore Auto routing from config if previously configured.
+	if isAutoRestore {
+		mr := appConfig.ModelRouting
+		orch := mr.Orchestrator
+		strongLLM, sErr := provider.GetProvider(ctx, orch.StrongProvider, orch.StrongModel, appConfig)
+		weakLLM, wErr := provider.GetProvider(ctx, orch.WeakProvider, orch.WeakModel, appConfig)
+		if sErr == nil && wErr == nil {
+			classifier, cErr := b.ensureClassifier(ctx)
+			if cErr != nil {
+				slog.Error("auto routing restore failed: MLP classifier unavailable", "error", cErr)
+			} else {
+				rLLM := routing.NewRoutingLLM(strongLLM, weakLLM, classifier, orch.EffectiveThreshold())
+				rLLM.StrongName = shortModelName(orch.StrongModel)
+				rLLM.WeakName = shortModelName(orch.WeakModel)
+				rLLM.Tier = "orchestrator"
+				result.SwappableLLM.Swap(rLLM)
+				b.routingLLM = rLLM
+				b.provider = "auto"
+				b.model = "auto"
+				b.autoRoutingCfg = &backend.AutoRoutingConfig{
+					OrchestratorStrongProvider: orch.StrongProvider,
+					OrchestratorStrongModel:    orch.StrongModel,
+					OrchestratorWeakProvider:   orch.WeakProvider,
+					OrchestratorWeakModel:      orch.WeakModel,
+					OrchestratorThreshold:      orch.EffectiveThreshold(),
+				}
+				// Wire task tier if configured.
+				task := mr.Task
+				if task.IsConfigured() {
+					tStrong, tsErr := provider.GetProvider(ctx, task.StrongProvider, task.StrongModel, appConfig)
+					tWeak, twErr := provider.GetProvider(ctx, task.WeakProvider, task.WeakModel, appConfig)
+					if tsErr == nil && twErr == nil {
+						tLLM := routing.NewRoutingLLM(tStrong, tWeak, classifier, task.EffectiveThreshold())
+						tLLM.StrongName = shortModelName(task.StrongModel)
+						tLLM.WeakName = shortModelName(task.WeakModel)
+						tLLM.Tier = "task"
+						b.taskRoutingLLM = tLLM
+						b.autoRoutingCfg.TaskStrongProvider = task.StrongProvider
+						b.autoRoutingCfg.TaskStrongModel = task.StrongModel
+						b.autoRoutingCfg.TaskWeakProvider = task.WeakProvider
+						b.autoRoutingCfg.TaskWeakModel = task.WeakModel
+						b.autoRoutingCfg.TaskThreshold = task.EffectiveThreshold()
+					} else {
+						slog.Warn("task tier auto routing restore failed", "strong_err", tsErr, "weak_err", twErr)
+					}
+				}
+			}
+		} else {
+			slog.Warn("auto routing restore failed; falling back to normal model",
+				"strong_err", sErr, "weak_err", wErr)
+		}
+	}
+
 	// If resuming an existing session, load the persisted title so the header
 	// shows it immediately.
 	if cfg.SessionID != "" && fileStore != nil {
@@ -304,6 +368,15 @@ func buildCodeBackend(ctx context.Context, cfg *CodeConfig) (backend.Backend, er
 	modelName := strings.TrimSpace(cfg.Model)
 	if modelName == "" {
 		modelName = appConfig.General.DefaultModel
+	}
+
+	// When the persisted model is "auto", bootstrap the factory with the strong
+	// model so GetProvider succeeds. The RoutingLLM will be swapped in after
+	// construction via the restore block below.
+	isAutoRestore := config.IsAutoModel(modelName) && appConfig.ModelRouting.IsConfigured()
+	if isAutoRestore {
+		providerName = appConfig.ModelRouting.Orchestrator.StrongProvider
+		modelName = appConfig.ModelRouting.Orchestrator.StrongModel
 	}
 
 	workingDir := strings.TrimSpace(cfg.WorkingDir)
@@ -378,6 +451,60 @@ func buildCodeBackend(ctx context.Context, cfg *CodeConfig) (backend.Backend, er
 		subAgentAuthReqCh:      make(chan agent.SubAgentAuthRequest, 1),
 		subAgentAuthRespCh:     make(chan agent.SubAgentAuthResponse, 1),
 	}
+
+	// Restore Auto routing from config if previously configured.
+	if isAutoRestore {
+		mr := appConfig.ModelRouting
+		orch := mr.Orchestrator
+		strongLLM, sErr := provider.GetProvider(ctx, orch.StrongProvider, orch.StrongModel, appConfig)
+		weakLLM, wErr := provider.GetProvider(ctx, orch.WeakProvider, orch.WeakModel, appConfig)
+		if sErr == nil && wErr == nil {
+			classifier, cErr := b.ensureClassifier(ctx)
+			if cErr != nil {
+				slog.Error("auto routing restore failed: MLP classifier unavailable", "error", cErr)
+			} else {
+				rLLM := routing.NewRoutingLLM(strongLLM, weakLLM, classifier, orch.EffectiveThreshold())
+				rLLM.StrongName = shortModelName(orch.StrongModel)
+				rLLM.WeakName = shortModelName(orch.WeakModel)
+				rLLM.Tier = "orchestrator"
+				result.SwappableLLM.Swap(rLLM)
+				b.routingLLM = rLLM
+				b.provider = "auto"
+				b.model = "auto"
+				b.autoRoutingCfg = &backend.AutoRoutingConfig{
+					OrchestratorStrongProvider: orch.StrongProvider,
+					OrchestratorStrongModel:    orch.StrongModel,
+					OrchestratorWeakProvider:   orch.WeakProvider,
+					OrchestratorWeakModel:      orch.WeakModel,
+					OrchestratorThreshold:      orch.EffectiveThreshold(),
+				}
+				// Wire task tier if configured.
+				task := mr.Task
+				if task.IsConfigured() {
+					tStrong, tsErr := provider.GetProvider(ctx, task.StrongProvider, task.StrongModel, appConfig)
+					tWeak, twErr := provider.GetProvider(ctx, task.WeakProvider, task.WeakModel, appConfig)
+					if tsErr == nil && twErr == nil {
+						tLLM := routing.NewRoutingLLM(tStrong, tWeak, classifier, task.EffectiveThreshold())
+						tLLM.StrongName = shortModelName(task.StrongModel)
+						tLLM.WeakName = shortModelName(task.WeakModel)
+						tLLM.Tier = "task"
+						b.taskRoutingLLM = tLLM
+						b.autoRoutingCfg.TaskStrongProvider = task.StrongProvider
+						b.autoRoutingCfg.TaskStrongModel = task.StrongModel
+						b.autoRoutingCfg.TaskWeakProvider = task.WeakProvider
+						b.autoRoutingCfg.TaskWeakModel = task.WeakModel
+						b.autoRoutingCfg.TaskThreshold = task.EffectiveThreshold()
+					} else {
+						slog.Warn("task tier auto routing restore failed", "strong_err", tsErr, "weak_err", twErr)
+					}
+				}
+			}
+		} else {
+			slog.Warn("auto routing restore failed; falling back to normal model",
+				"strong_err", sErr, "weak_err", wErr)
+		}
+	}
+
 	return b, nil
 }
 
@@ -501,6 +628,11 @@ type localAgentBackend struct {
 	autoApprove bool
 	provider    string
 	model       string
+	routingLLM      *routing.RoutingLLM          // non-nil when Auto mode active (orchestrator tier)
+	taskRoutingLLM  *routing.RoutingLLM          // non-nil when Task tier is configured
+	autoRoutingCfg  *backend.AutoRoutingConfig   // persisted config for GetAutoRoutingConfig
+	classifier      routing.ComplexityClassifier // MLP classifier (shared by both tiers)
+	closeClassifier func()                       // releases Hugot embedder resources
 	configured  bool
 	usage       *events.Usage
 	// contextTokens is the current context-window occupancy (estimated from the
@@ -582,6 +714,7 @@ func (b *localAgentBackend) ListLocalSkills(ctx context.Context) ([]backend.Skil
 }
 
 var _ backend.LocalSkillsBackend = (*localAgentBackend)(nil)
+var _ backend.AutoRoutingBackend = (*localAgentBackend)(nil)
 
 // contextEstimateInterval is the minimum wall-clock gap between mid-turn
 // context-occupancy estimates. It keeps the header's "Context" figure moving
@@ -595,7 +728,7 @@ func (b *localAgentBackend) Info() backend.Info {
 	if !b.configured {
 		notices = append(notices, "No AI model configured yet. Type /model to choose a provider and model.")
 	}
-	return backend.Info{
+	info := backend.Info{
 		SessionID:     b.sessionID,
 		Provider:      b.provider,
 		Model:         b.model,
@@ -609,6 +742,15 @@ func (b *localAgentBackend) Info() backend.Info {
 		Notices:       notices,
 		Title:         b.title,
 	}
+	if b.provider == "auto" && b.autoRoutingCfg != nil {
+		info.Provider = "Auto"
+		desc := "orch: " + shortModelName(b.autoRoutingCfg.OrchestratorStrongModel) + "|" + shortModelName(b.autoRoutingCfg.OrchestratorWeakModel)
+		if b.autoRoutingCfg.HasTaskTier() {
+			desc += " · task: " + shortModelName(b.autoRoutingCfg.TaskStrongModel) + "|" + shortModelName(b.autoRoutingCfg.TaskWeakModel)
+		}
+		info.Model = desc
+	}
+	return info
 }
 
 func (b *localAgentBackend) Open(ctx context.Context) error {
@@ -618,9 +760,138 @@ func (b *localAgentBackend) Open(ctx context.Context) error {
 
 func (b *localAgentBackend) Close() error {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	b.closed = true
+	closeClassifier := b.closeClassifier
+	b.closeClassifier = nil
+	b.mu.Unlock()
+	if closeClassifier != nil {
+		closeClassifier()
+	}
 	return nil
+}
+
+// ensureClassifier lazily initialises the MLP classifier (Hugot embedder +
+// pre-trained weights). It is called the first time Auto routing is activated.
+// Returns a hard error if weights or the embedder cannot be loaded — there is
+// no heuristic fallback.
+func (b *localAgentBackend) ensureClassifier(ctx context.Context) (routing.ComplexityClassifier, error) {
+	b.mu.Lock()
+	if b.classifier != nil {
+		c := b.classifier
+		b.mu.Unlock()
+		return c, nil
+	}
+	b.mu.Unlock()
+
+	modelsDir, err := config.GetModelsDir()
+	if err != nil {
+		return nil, fmt.Errorf("models dir: %w", err)
+	}
+	weightsPath, err := routing.EnsureRouterWeights(modelsDir)
+	if err != nil {
+		return nil, fmt.Errorf("router weights: %w", err)
+	}
+	embedder, err := memory.NewHugotEmbedder(modelsDir, false)
+	if err != nil {
+		return nil, fmt.Errorf("hugot embedder: %w", err)
+	}
+	embedFn := routing.EmbedFunc(embedder.EmbeddingFunc())
+	c, err := routing.LoadMLPClassifier(weightsPath, embedFn)
+	if err != nil {
+		_ = embedder.Close()
+		return nil, fmt.Errorf("MLP classifier: %w", err)
+	}
+
+	b.mu.Lock()
+	b.classifier = c
+	b.closeClassifier = func() { _ = embedder.Close() }
+	b.mu.Unlock()
+	return c, nil
+}
+
+func (b *localAgentBackend) SetAutoRouting(ctx context.Context, cfg backend.AutoRoutingConfig) (string, string, error) {
+	strongLLM, err := provider.GetProvider(ctx, cfg.OrchestratorStrongProvider, cfg.OrchestratorStrongModel, b.appConfig)
+	if err != nil {
+		return "", "", fmt.Errorf("orchestrator strong model: %w", err)
+	}
+	weakLLM, err := provider.GetProvider(ctx, cfg.OrchestratorWeakProvider, cfg.OrchestratorWeakModel, b.appConfig)
+	if err != nil {
+		return "", "", fmt.Errorf("orchestrator weak model: %w", err)
+	}
+	classifier, cErr := b.ensureClassifier(ctx)
+	if cErr != nil {
+		return "", "", fmt.Errorf("MLP classifier unavailable: %w", cErr)
+	}
+	rLLM := routing.NewRoutingLLM(strongLLM, weakLLM, classifier, cfg.OrchestratorThreshold)
+	rLLM.StrongName = shortModelName(cfg.OrchestratorStrongModel)
+	rLLM.WeakName = shortModelName(cfg.OrchestratorWeakModel)
+	rLLM.Tier = "orchestrator"
+	b.result.SwappableLLM.Swap(rLLM)
+
+	b.mu.Lock()
+	b.routingLLM = rLLM
+	cfgCopy := cfg
+	b.autoRoutingCfg = &cfgCopy
+	b.provider = "auto"
+	b.model = "auto"
+	b.configured = true
+	b.mu.Unlock()
+
+	// Wire task tier if configured.
+	if cfg.HasTaskTier() {
+		tStrong, tsErr := provider.GetProvider(ctx, cfg.TaskStrongProvider, cfg.TaskStrongModel, b.appConfig)
+		tWeak, twErr := provider.GetProvider(ctx, cfg.TaskWeakProvider, cfg.TaskWeakModel, b.appConfig)
+		if tsErr == nil && twErr == nil {
+			tLLM := routing.NewRoutingLLM(tStrong, tWeak, classifier, cfg.TaskThreshold)
+			tLLM.StrongName = shortModelName(cfg.TaskStrongModel)
+			tLLM.WeakName = shortModelName(cfg.TaskWeakModel)
+			tLLM.Tier = "task"
+			b.mu.Lock()
+			b.taskRoutingLLM = tLLM
+			b.mu.Unlock()
+			// Wire to SubAgentManager if already initialized.
+			if b.result.ChatAgent != nil && b.result.ChatAgent.SubAgentManager != nil {
+				b.result.ChatAgent.SubAgentManager.TaskLLM = tLLM
+			}
+		} else {
+			slog.Warn("task tier setup failed", "strong_err", tsErr, "weak_err", twErr)
+		}
+	}
+
+	b.appConfig.ModelRouting = config.ModelRoutingConfig{
+		Orchestrator: config.RoutingTierConfig{
+			StrongProvider: cfg.OrchestratorStrongProvider,
+			StrongModel:    cfg.OrchestratorStrongModel,
+			WeakProvider:   cfg.OrchestratorWeakProvider,
+			WeakModel:      cfg.OrchestratorWeakModel,
+			Threshold:      cfg.OrchestratorThreshold,
+		},
+		Task: config.RoutingTierConfig{
+			StrongProvider: cfg.TaskStrongProvider,
+			StrongModel:    cfg.TaskStrongModel,
+			WeakProvider:   cfg.TaskWeakProvider,
+			WeakModel:      cfg.TaskWeakModel,
+			Threshold:      cfg.TaskThreshold,
+		},
+	}
+	b.appConfig.General.DefaultModel = "auto"
+	if err := b.saveAppConfig(); err != nil {
+		slog.Warn("failed to persist auto routing config", "error", err)
+	}
+	return "auto", "auto", nil
+}
+
+func (b *localAgentBackend) GetAutoRoutingConfig() *backend.AutoRoutingConfig {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.autoRoutingCfg
+}
+
+func shortModelName(model string) string {
+	if i := strings.LastIndex(model, "/"); i >= 0 {
+		return model[i+1:]
+	}
+	return model
 }
 
 // RespondSubAgentAuth sends the user's authorization decision back to a blocked
@@ -858,6 +1129,10 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 
 	chatAgent := b.result.ChatAgent
 	chatAgent.AutoApprove = autoApprove
+	// Wire task-tier routing LLM to SubAgentManager if configured.
+	if b.taskRoutingLLM != nil && chatAgent.SubAgentManager != nil {
+		chatAgent.SubAgentManager.TaskLLM = b.taskRoutingLLM
+	}
 	// Persist any announced plan to a per-session PLAN.md sidecar so the plan
 	// survives context compaction (the model can re-read it after a summary).
 	planPath := b.planFilePath(sessionID)
@@ -1158,6 +1433,22 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 		out <- events.NewStatus("Thinking…")
 
 		b.driveTurn(ctx, rnr, chatAgent, effectiveID, turnIndex, userMsg, emit)
+
+		// Emit final routing info and cumulative summary when Auto mode is active.
+		b.emitRoutingInfo(emit)
+		if b.routingLLM != nil && b.routingLLM.Stats.Total() > 1 {
+			stats := &b.routingLLM.Stats
+			summary := fmt.Sprintf("Auto routing — Orchestrator: %d calls (%.0f%% strong %s, %.0f%% weak %s)",
+				stats.Total(), stats.StrongPct(), b.routingLLM.StrongName,
+				stats.WeakPct(), b.routingLLM.WeakName)
+			if b.taskRoutingLLM != nil && b.taskRoutingLLM.Stats.Total() > 0 {
+				ts := &b.taskRoutingLLM.Stats
+				summary += fmt.Sprintf(" · Task: %d calls (%.0f%% strong %s, %.0f%% weak %s)",
+					ts.Total(), ts.StrongPct(), b.taskRoutingLLM.StrongName,
+					ts.WeakPct(), b.taskRoutingLLM.WeakName)
+			}
+			emit("system", map[string]any{"content": summary})
+		}
 
 		emit("done", map[string]any{"done": true})
 	}()
@@ -1541,6 +1832,10 @@ func (b *localAgentBackend) driveTurn(
 			continue
 		}
 
+		// Emit routing info as soon as an LLM response arrives so the TUI
+		// can show the per-turn ⚡weak / 🧠strong badge in real time.
+		b.emitRoutingInfo(emit)
+
 		for _, part := range event.LLMResponse.Content.Parts {
 			if part.Text != "" && !part.Thought {
 				if event.LLMResponse.Partial {
@@ -1632,6 +1927,29 @@ func (b *localAgentBackend) driveTurn(
 	if !sawRealUsage {
 		b.emitEstimatedContext(ctx, sessionID, emit)
 	}
+}
+
+// emitRoutingInfo sends a KindRoutingInfo event when Auto routing is active.
+// Called during driveTurn after each LLM response so the TUI can show the
+// per-turn badge in real time, and also at turn end for the cumulative summary.
+func (b *localAgentBackend) emitRoutingInfo(emit func(string, map[string]any)) {
+	if b.routingLLM == nil || b.routingLLM.Stats.Total() == 0 {
+		return
+	}
+	modelName, isStrong := b.routingLLM.Last.Get()
+	stats := &b.routingLLM.Stats
+	// Emit via the "routing_info" SSE type which mapSSEToEvents converts to
+	// KindRoutingInfo, updating the transcript's LastRouting* fields.
+	emit("routing_info", map[string]any{
+		"routing_model":       modelName,
+		"routing_is_strong":   isStrong,
+		"routing_strong_pct":  stats.StrongPct(),
+		"routing_weak_pct":    stats.WeakPct(),
+		"routing_total":       stats.Total(),
+		"routing_strong_name": b.routingLLM.StrongName,
+		"routing_weak_name":   b.routingLLM.WeakName,
+		"routing_tier":        b.routingLLM.Tier,
+	})
 }
 
 // emitUsage emits a usage event from real provider metadata. It returns true
@@ -2580,6 +2898,12 @@ func (b *localAgentBackend) ListRollbackPoints(ctx context.Context) ([]backend.R
 			// Skip the synthetic compaction-summary seed at the start of a child
 			// (authored as user/model with the "[Context Summary" marker).
 			if strings.Contains(text, "[Context Summary") {
+				continue
+			}
+			// Skip per-turn context injected by the runtime (plan instructions,
+			// skills, tools metadata). These are user-role events but not
+			// user-authored.
+			if strings.HasPrefix(text, "[Astonish Per-Turn Context") {
 				continue
 			}
 			turnNumber++

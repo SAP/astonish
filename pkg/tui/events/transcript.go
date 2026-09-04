@@ -52,6 +52,11 @@ type Item struct {
 	// Matches Studio sticky-agent: only one agent bubble per soft+tool run.
 	Provisional bool
 
+	// RoutingModel is the model name used for this agent response (Auto routing).
+	// Non-empty only for ItemAgent items when Auto routing is active.
+	RoutingModel    string
+	RoutingIsStrong bool
+
 	// Approval fields.
 	ToolName string
 	Args     map[string]any
@@ -152,6 +157,16 @@ type Transcript struct {
 	// Delegation state: tracks active delegated sub-tasks for the TUI panel.
 	Delegation       []DelegationTaskState
 	DelegationActive bool
+
+	// Routing state for Auto mode per-turn badges.
+	LastRoutingModel    string
+	LastRoutingIsStrong bool
+	RoutingStrongPct    float64
+	RoutingWeakPct      float64
+	RoutingTotal        int64
+	RoutingStrongName   string
+	RoutingWeakName     string
+	LastRoutingTier     string // "orchestrator" or "task"
 
 	// delegationItemIdx is the index in Items of the current ItemDelegation
 	// block (-1 when no delegation is active). Used by applyDelegation to
@@ -364,6 +379,27 @@ func (t *Transcript) Apply(ev Event) {
 		}
 		if ev.Model != "" {
 			t.Model = ev.Model
+		}
+	case KindRoutingInfo:
+		t.LastRoutingModel = ev.RoutingModel
+		t.LastRoutingIsStrong = ev.RoutingIsStrong
+		t.RoutingStrongPct = ev.RoutingStrongPct
+		t.RoutingWeakPct = ev.RoutingWeakPct
+		t.RoutingTotal = ev.RoutingTotal
+		t.RoutingStrongName = ev.RoutingStrongName
+		t.RoutingWeakName = ev.RoutingWeakName
+		t.LastRoutingTier = ev.RoutingTier
+		// Stamp the routing decision on the most recent ItemAgent so the
+		// badge persists in the transcript after the turn completes.
+		// Only stamp orchestrator-tier (or legacy) routing, not task-tier.
+		if ev.RoutingTier == "" || ev.RoutingTier == "orchestrator" {
+			for i := len(t.Items) - 1; i >= 0; i-- {
+				if t.Items[i].Kind == ItemAgent {
+					t.Items[i].RoutingModel = ev.RoutingModel
+					t.Items[i].RoutingIsStrong = ev.RoutingIsStrong
+					break
+				}
+			}
 		}
 	case KindDone:
 		t.Streaming = false

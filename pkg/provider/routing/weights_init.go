@@ -1,6 +1,8 @@
 package routing
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log/slog"
@@ -17,6 +19,10 @@ const (
 	// RouterWeightsURL is the download URL for the pre-trained router weights.
 	// This is used when no local copy is available.
 	RouterWeightsURL = "https://github.com/SAP/astonish/releases/latest/download/router_weights.npz"
+
+	// RouterWeightsSHA256 is the expected SHA-256 hex digest of the weights file.
+	// Update this when training produces new weights.
+	RouterWeightsSHA256 = ""
 )
 
 // localTrainingOutputPaths lists candidate locations for the router_weights.npz
@@ -34,6 +40,9 @@ var localTrainingOutputPaths = []string{
 // it returns immediately. Otherwise it tries (in order):
 //  1. Copy from any local training output path
 //  2. Download from RouterWeightsURL
+//
+// When RouterWeightsSHA256 is non-empty, the file's SHA-256 digest is verified
+// after download or copy. A mismatch deletes the file and returns an error.
 //
 // Returns the path to the weights file on success.
 func EnsureRouterWeights(modelsDir string) (string, error) {
@@ -53,6 +62,10 @@ func EnsureRouterWeights(modelsDir string) (string, error) {
 		if _, err := os.Stat(expanded); err == nil {
 			if copyErr := copyFile(expanded, destPath); copyErr == nil {
 				slog.Info("router weights: copied from local training project", "source", expanded)
+				if err := verifyWeightsChecksum(destPath); err != nil {
+					_ = os.Remove(destPath)
+					return "", err
+				}
 				return destPath, nil
 			}
 		}
@@ -64,8 +77,34 @@ func EnsureRouterWeights(modelsDir string) (string, error) {
 	if err := downloadFile(RouterWeightsURL, destPath); err != nil {
 		return "", fmt.Errorf("download router weights: %w", err)
 	}
+	if err := verifyWeightsChecksum(destPath); err != nil {
+		_ = os.Remove(destPath)
+		return "", err
+	}
 	slog.Info("router weights: downloaded successfully", "path", destPath)
 	return destPath, nil
+}
+
+// verifyWeightsChecksum checks the SHA-256 digest of path against
+// RouterWeightsSHA256. If the expected hash is empty, verification is skipped.
+func verifyWeightsChecksum(path string) error {
+	if RouterWeightsSHA256 == "" {
+		return nil // no expected hash configured — skip verification
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("verify weights checksum: %w", err)
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return fmt.Errorf("verify weights checksum: %w", err)
+	}
+	got := hex.EncodeToString(h.Sum(nil))
+	if got != RouterWeightsSHA256 {
+		return fmt.Errorf("router weights checksum mismatch: got %s, want %s", got, RouterWeightsSHA256)
+	}
+	return nil
 }
 
 // RouterWeightsPath returns the expected path inside modelsDir without

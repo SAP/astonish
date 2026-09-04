@@ -1432,6 +1432,15 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 
 		out <- events.NewStatus("Thinking…")
 
+		// Inject routing classifier context so the MLP classifier knows about
+		// the current mode. The classifier uses HasPlanMode to force the
+		// strong model for planning tasks.
+		if b.routingLLM != nil {
+			ctx = routing.WithClassifierContext(ctx, routing.ClassifierContext{
+				HasPlanMode: planMode || graphPlan,
+			})
+		}
+
 		b.driveTurn(ctx, rnr, chatAgent, effectiveID, turnIndex, userMsg, emit)
 
 		// Emit final routing info and cumulative summary when Auto mode is active.

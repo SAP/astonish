@@ -32,7 +32,7 @@ type fixedClassifier struct {
 	score ComplexityScore
 }
 
-func (f *fixedClassifier) Classify(string, ClassifierContext) ComplexityScore {
+func (f *fixedClassifier) Classify(context.Context, string, ClassifierContext) ComplexityScore {
 	return f.score
 }
 
@@ -115,7 +115,7 @@ type switchableClassifier struct {
 	score ComplexityScore
 }
 
-func (s *switchableClassifier) Classify(string, ClassifierContext) ComplexityScore {
+func (s *switchableClassifier) Classify(context.Context, string, ClassifierContext) ComplexityScore {
 	return s.score
 }
 

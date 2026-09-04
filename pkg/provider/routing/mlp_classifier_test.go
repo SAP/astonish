@@ -66,7 +66,7 @@ func TestMLPForward_NegativeInputsClamped(t *testing.T) {
 
 func TestMLPClassifier_EmptyPrompt(t *testing.T) {
 	c := NewMLPClassifier(makeTestWeights(), nil)
-	score := float64(c.Classify("", ClassifierContext{}))
+	score := float64(c.Classify(context.Background(), "", ClassifierContext{}))
 	if score != 0.1 {
 		t.Errorf("empty prompt score = %.3f, want 0.1", score)
 	}
@@ -74,7 +74,7 @@ func TestMLPClassifier_EmptyPrompt(t *testing.T) {
 
 func TestMLPClassifier_PlanModeAlwaysStrong(t *testing.T) {
 	c := NewMLPClassifier(makeTestWeights(), nil)
-	score := float64(c.Classify("ok", ClassifierContext{HasPlanMode: true}))
+	score := float64(c.Classify(context.Background(), "ok", ClassifierContext{HasPlanMode: true}))
 	if score != 0.9 {
 		t.Errorf("plan mode score = %.3f, want 0.9", score)
 	}
@@ -82,7 +82,7 @@ func TestMLPClassifier_PlanModeAlwaysStrong(t *testing.T) {
 
 func TestMLPClassifier_NilEmbedNeutral(t *testing.T) {
 	c := NewMLPClassifier(makeTestWeights(), nil)
-	score := float64(c.Classify("hello", ClassifierContext{}))
+	score := float64(c.Classify(context.Background(), "hello", ClassifierContext{}))
 	if score != 0.5 {
 		t.Errorf("nil embed score = %.3f, want 0.5", score)
 	}
@@ -93,7 +93,7 @@ func TestMLPClassifier_EmbedErrorNeutral(t *testing.T) {
 		return nil, context.Canceled
 	})
 	c := NewMLPClassifier(makeTestWeights(), errEmbed)
-	score := float64(c.Classify("hello", ClassifierContext{}))
+	score := float64(c.Classify(context.Background(), "hello", ClassifierContext{}))
 	if score != 0.5 {
 		t.Errorf("embed error score = %.3f, want 0.5", score)
 	}
@@ -105,7 +105,7 @@ func TestMLPClassifier_EmbedDimMismatch(t *testing.T) {
 		return []float32{1.0, 2.0, 3.0, 4.0, 5.0}, nil
 	})
 	c := NewMLPClassifier(makeTestWeights(), badDimEmbed)
-	score := float64(c.Classify("hello", ClassifierContext{}))
+	score := float64(c.Classify(context.Background(), "hello", ClassifierContext{}))
 	if score != 0.5 {
 		t.Errorf("dim mismatch score = %.3f, want 0.5", score)
 	}
@@ -117,14 +117,32 @@ func TestMLPClassifier_DeterministicOutput(t *testing.T) {
 	})
 	c := NewMLPClassifier(makeTestWeights(), fixedEmbed)
 
-	score1 := float64(c.Classify("test prompt", ClassifierContext{}))
-	score2 := float64(c.Classify("test prompt", ClassifierContext{}))
+	score1 := float64(c.Classify(context.Background(), "test prompt", ClassifierContext{}))
+	score2 := float64(c.Classify(context.Background(), "test prompt", ClassifierContext{}))
 	if score1 != score2 {
 		t.Errorf("scores not deterministic: %.6f != %.6f", score1, score2)
 	}
 	// Both should be the same actual value
 	if score1 < 0 || score1 > 1 {
 		t.Errorf("score out of range: %.6f", score1)
+	}
+}
+
+func TestMLPClassifier_CancelledContextPropagated(t *testing.T) {
+	// Verify the caller's context is passed through to the embed function.
+	var receivedCtx context.Context
+	embed := EmbedFunc(func(ctx context.Context, text string) ([]float32, error) {
+		receivedCtx = ctx
+		return nil, context.Canceled
+	})
+	c := NewMLPClassifier(makeTestWeights(), embed)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already cancelled
+	_ = c.Classify(ctx, "hello", ClassifierContext{})
+
+	if receivedCtx != ctx {
+		t.Error("embed function did not receive the caller's context")
 	}
 }
 

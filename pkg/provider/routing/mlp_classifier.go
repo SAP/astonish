@@ -55,19 +55,19 @@ func LoadMLPClassifier(weightsPath string, embed EmbedFunc) (*MLPClassifier, err
 //   - nil embed or embed error → 0.5 (neutral)
 //   - empty prompt → 0.1 (simple)
 //   - HasPlanMode → 0.9 (always strong for planning tasks)
-func (c *MLPClassifier) Classify(prompt string, ctx ClassifierContext) ComplexityScore {
+func (c *MLPClassifier) Classify(ctx context.Context, prompt string, cc ClassifierContext) ComplexityScore {
 	if prompt == "" {
 		return ComplexityScore(0.1)
 	}
 	// HasPlanMode is a strong out-of-band signal: planning tasks need the strong model.
-	if ctx.HasPlanMode {
+	if cc.HasPlanMode {
 		return ComplexityScore(0.9)
 	}
 	if c.embed == nil {
 		return ComplexityScore(0.5)
 	}
 
-	emb, err := c.embed(context.Background(), prompt)
+	emb, err := c.embed(ctx, prompt)
 	if err != nil {
 		slog.Debug("[routing] embed failed, returning neutral score", "error", err)
 		return ComplexityScore(0.5)

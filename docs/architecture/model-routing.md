@@ -61,8 +61,38 @@ SubAgentManager.TaskLLM
 - **`config.ModelRoutingConfig`** — top-level config with Orchestrator and Task tiers, plus legacy flat fields
 - **`backend.AutoRoutingConfig`** — TUI backend struct carrying both tiers for the model picker
 - **`routing.RoutingLLM`** — wraps strong+weak LLMs with a classifier; `.Tier` field identifies orchestrator vs task
-- **`routing.HeuristicClassifier`** — keyword/length-based complexity scoring (shared by both tiers)
-- **`routing.ComplexityClassifier`** — interface for pluggable classifiers (heuristic, MLP, etc.)
+- **`routing.MLPClassifier`** — pre-trained 3-layer MLP (384→64→32→1, sigmoid) using all-MiniLM-L6-v2 embeddings; loaded from `router_weights.npz`
+- **`routing.ComplexityClassifier`** — interface for pluggable classifiers
+
+### MLP Classifier
+
+The routing classifier is a trained MLP neural network (~26,753 parameters, 98 KB weights):
+
+1. **Embedding**: Prompt text → 384-dim vector via Hugot all-MiniLM-L6-v2 ONNX model (~90 MB, lazy-loaded)
+2. **Forward pass**: Pure Go float64 arithmetic: `ReLU(emb @ W1 + b1) → ReLU(h1 @ W2 + b2) → sigmoid(h2 @ W3 + b3)`
+3. **Output**: P(needs_strong) ∈ [0, 1]; compared against per-tier threshold
+
+The classifier accepts a `context.Context` so cancellation propagates to the embedding step. Fallback chain: empty prompt → 0.1, plan mode → 0.9, nil/error embed → 0.5.
+
+### Classifier Context
+
+`ClassifierContext` carries out-of-band signals injected via `WithClassifierContext()` before each turn:
+
+- **`HasPlanMode`** — set when Plan mode or Graph-Optimized Plan mode is active; forces strong model (score 0.9)
+- **`ToolNames`** — reserved for future use (available tool names)
+- **`ConversationTurns`** — reserved for future use (conversation depth)
+
+The context is injected in `RunTurn` (tui_code.go) before `driveTurn` and propagates through the ADK runner to every `RoutingLLM.GenerateContent` call.
+
+### Weight File Management
+
+Weights are stored at `config.GetModelsDir()/router_weights.npz`. `EnsureRouterWeights` manages the lifecycle:
+
+1. **Cached**: Return immediately if file exists
+2. **Local copy**: Check `../astonish-router/outputs/` (development workflow)
+3. **Download**: Fetch from GitHub Releases (~99 KB)
+
+When `RouterWeightsSHA256` is set (non-empty), downloaded or copied files are verified against the expected digest. Mismatches delete the file and return an error.
 
 ### Prompt Classification
 

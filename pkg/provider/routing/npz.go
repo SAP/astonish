@@ -422,10 +422,3 @@ func float32ToFloat64(f32 []float32) []float64 {
 	}
 	return f64
 }
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}

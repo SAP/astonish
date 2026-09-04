@@ -124,7 +124,7 @@ func (r *RoutingLLM) GenerateContent(ctx context.Context, req *model.LLMRequest,
 	prompt := extractLastUserMessage(req)
 	classCtx := ClassifierContextFromContext(ctx)
 
-	score := r.classifier.Classify(prompt, classCtx)
+	score := r.classifier.Classify(ctx, prompt, classCtx)
 
 	var chosen model.LLM
 	var label string
@@ -132,17 +132,13 @@ func (r *RoutingLLM) GenerateContent(ctx context.Context, req *model.LLMRequest,
 	if isStrong {
 		chosen = r.strong
 		label = "strong"
+		r.Stats.RecordStrong()
+		r.Last.Set(r.StrongName, true)
 	} else {
 		chosen = r.weak
 		label = "weak"
-	}
-
-	if isStrong {
-		r.Stats.RecordStrong()
-		r.Last.Set(r.StrongName, isStrong)
-	} else {
 		r.Stats.RecordWeak()
-		r.Last.Set(r.WeakName, isStrong)
+		r.Last.Set(r.WeakName, false)
 	}
 
 	slog.Debug("[routing] model selected",

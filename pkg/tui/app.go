@@ -2852,6 +2852,17 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 			if md == "" {
 				md = th.Agent.Width(cw).Render(content)
 			}
+			// Append routing badge when Auto routing is active for this response.
+			// Icon-only to avoid layout overflow: 🧠 orchestrator-strong, ⚡ orchestrator-weak.
+			if it.RoutingModel != "" {
+				var badge string
+				if it.RoutingIsStrong {
+					badge = "🧠"
+				} else {
+					badge = "⚡"
+				}
+				md = md + "\n" + th.Muted.Render(badge)
+			}
 			appendBlockSpanned(i, it.Kind, md, codeGutterContentSpan)
 		case events.ItemThinking:
 			appendBlock(i, it.Kind, m.renderThinkingBubble(it.Content, cw))
@@ -3221,6 +3232,28 @@ func (m model) renderActivity(it events.Item, width int) string {
 			pad = 1
 		}
 		head = head + th.Background.Render(strings.Repeat(" ", pad)) + statsStr
+	}
+
+	// Append routing badge when Auto mode is active (icon-only to avoid overflow).
+	// 🧠 orchestrator-strong · ⚡ orchestrator-weak · 🔮 task-strong · 💨 task-weak
+	if m.tr != nil && m.tr.LastRoutingModel != "" {
+		var routingBadge string
+		isTask := m.tr.LastRoutingTier == "task"
+		if m.tr.LastRoutingIsStrong {
+			if isTask {
+				routingBadge = " 🔮"
+			} else {
+				routingBadge = " 🧠"
+			}
+		} else {
+			if isTask {
+				routingBadge = " 💨"
+			} else {
+				routingBadge = " ⚡"
+			}
+		}
+		badgeR := th.Muted.Render(routingBadge)
+		head = head + badgeR
 	}
 
 	if !it.Expanded {
@@ -4806,4 +4839,13 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// shortModelName returns the last path component of a model identifier,
+// e.g. "anthropic/claude-opus-4-5" → "claude-opus-4-5".
+func shortModelName(m string) string {
+	if idx := strings.LastIndex(m, "/"); idx >= 0 {
+		return m[idx+1:]
+	}
+	return m
 }

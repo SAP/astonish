@@ -170,8 +170,8 @@ func TestModelSlashCommandOpensPicker(t *testing.T) {
 	if len(m.modelPicker.providers) != 2 {
 		t.Fatalf("providers = %v", m.modelPicker.providers)
 	}
-	// Cascade default + 2 providers
-	if len(m.modelPicker.items) != 3 {
+	// Cascade default + Auto + 2 providers
+	if len(m.modelPicker.items) != 4 {
 		t.Fatalf("items = %v", m.modelPicker.items)
 	}
 	if m.modelPicker.items[0] != "(cascade default)" {

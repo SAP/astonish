@@ -2853,15 +2853,32 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 				md = th.Agent.Width(cw).Render(content)
 			}
 			// Append routing badge when Auto routing is active for this response.
-			// Icon-only to avoid layout overflow: 🧠 orchestrator-strong, ⚡ orchestrator-weak.
+			// Right-aligned on the last line when space allows, to avoid extra vertical space.
+			// 🧠 orchestrator-strong, ⚡ orchestrator-weak.
 			if it.RoutingModel != "" {
 				var badge string
 				if it.RoutingIsStrong {
-					badge = "🧠"
+					badge = " 🧠"
 				} else {
-					badge = "⚡"
+					badge = " ⚡"
 				}
-				md = md + "\n" + th.Muted.Render(badge)
+				badgeRendered := th.Muted.Render(badge)
+				badgeW := lipgloss.Width(badgeRendered)
+				// Find the last line and check if the badge fits inline.
+				lines := strings.Split(md, "\n")
+				lastLineW := lipgloss.Width(lines[len(lines)-1])
+				if lastLineW+badgeW+1 <= cw {
+					// Right-align on the last line.
+					pad := cw - lastLineW - badgeW
+					if pad < 1 {
+						pad = 1
+					}
+					lines[len(lines)-1] = lines[len(lines)-1] + strings.Repeat(" ", pad) + badgeRendered
+					md = strings.Join(lines, "\n")
+				} else {
+					// No room — append below as fallback.
+					md = md + "\n" + badgeRendered
+				}
 			}
 			appendBlockSpanned(i, it.Kind, md, codeGutterContentSpan)
 		case events.ItemThinking:
@@ -3235,11 +3252,12 @@ func (m model) renderActivity(it events.Item, width int) string {
 	}
 
 	// Append routing badge when Auto mode is active (icon-only to avoid overflow).
+	// Uses per-item routing info so historical items keep their original badge.
 	// 🧠 orchestrator-strong · ⚡ orchestrator-weak · 🔮 task-strong · 💨 task-weak
-	if m.tr != nil && m.tr.LastRoutingModel != "" {
+	if it.RoutingModel != "" {
 		var routingBadge string
-		isTask := m.tr.LastRoutingTier == "task"
-		if m.tr.LastRoutingIsStrong {
+		isTask := it.RoutingTier == "task"
+		if it.RoutingIsStrong {
 			if isTask {
 				routingBadge = " 🔮"
 			} else {

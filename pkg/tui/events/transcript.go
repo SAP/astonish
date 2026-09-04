@@ -52,10 +52,11 @@ type Item struct {
 	// Matches Studio sticky-agent: only one agent bubble per soft+tool run.
 	Provisional bool
 
-	// RoutingModel is the model name used for this agent response (Auto routing).
-	// Non-empty only for ItemAgent items when Auto routing is active.
+	// RoutingModel is the model name used for this item (Auto routing).
+	// Stamped on ItemAgent and ItemActivity items when Auto routing is active.
 	RoutingModel    string
 	RoutingIsStrong bool
+	RoutingTier     string // "orchestrator" or "task"
 
 	// Approval fields.
 	ToolName string
@@ -389,14 +390,24 @@ func (t *Transcript) Apply(ev Event) {
 		t.RoutingStrongName = ev.RoutingStrongName
 		t.RoutingWeakName = ev.RoutingWeakName
 		t.LastRoutingTier = ev.RoutingTier
-		// Stamp the routing decision on the most recent ItemAgent so the
-		// badge persists in the transcript after the turn completes.
+		// Stamp the routing decision on the most recent ItemAgent or
+		// ItemActivity so the badge persists per-item in the transcript
+		// after the turn completes. Each item records its own routing
+		// decision independently — later turns do not retroactively
+		// change earlier items.
 		// Only stamp orchestrator-tier (or legacy) routing, not task-tier.
 		if ev.RoutingTier == "" || ev.RoutingTier == "orchestrator" {
 			for i := len(t.Items) - 1; i >= 0; i-- {
-				if t.Items[i].Kind == ItemAgent {
-					t.Items[i].RoutingModel = ev.RoutingModel
-					t.Items[i].RoutingIsStrong = ev.RoutingIsStrong
+				kind := t.Items[i].Kind
+				if kind == ItemAgent || kind == ItemActivity {
+					// Only stamp items that don't already have routing info.
+					// This prevents re-stamping earlier items when a new
+					// routing_info arrives for a subsequent LLM call.
+					if t.Items[i].RoutingModel == "" {
+						t.Items[i].RoutingModel = ev.RoutingModel
+						t.Items[i].RoutingIsStrong = ev.RoutingIsStrong
+						t.Items[i].RoutingTier = ev.RoutingTier
+					}
 					break
 				}
 			}

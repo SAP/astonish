@@ -115,12 +115,18 @@ type RoutingLLM struct {
 	StrongName    string // display name (e.g. "claude-sonnet")
 	MediumName    string // display name (e.g. "claude-haiku"), empty if no medium
 	WeakName      string // display name (e.g. "gpt-4o-mini")
-	// Pricing fields — set post-construction via SetPricing (guarded by pricingMu).
-	pricingMu  sync.RWMutex
+	// Pricing fields — set post-construction via SetPricing.
 	strongCost ModelCost
 	mediumCost ModelCost
 	weakCost   ModelCost
 	hasPricing bool
+	// turnTiers is an ordered record of every routing decision this turn,
+	// in the exact order they were made. It is the single source of truth:
+	// both the summary percentages and the per-bubble badges read from it.
+	// Protected by the same goroutine that runs driveTurn (no concurrent
+	// GenerateContent calls within one turn).
+	turnTiersMu sync.Mutex
+	turnTiers   []string // "strong", "medium", or "weak", one entry per call
 }
 
 // NewRoutingLLM creates a routing LLM wrapper.
@@ -189,6 +195,15 @@ func (r *RoutingLLM) GenerateContent(ctx context.Context, req *model.LLMRequest,
 		r.Last.Set(r.WeakName, "weak")
 	}
 
+	// Record this call's tier in the ordered per-turn list — unless this is
+	// a stats-only call (e.g. title generation) which counts in the summary
+	// but has no corresponding chat bubble and must not shift badge indices.
+	if !isStatsOnlyRouting(ctx) {
+		r.turnTiersMu.Lock()
+		r.turnTiers = append(r.turnTiers, tier)
+		r.turnTiersMu.Unlock()
+	}
+
 	slog.Debug("[routing] model selected",
 		"score", fmt.Sprintf("%.2f", score),
 		"high_threshold", fmt.Sprintf("%.2f", r.highThreshold),
@@ -211,39 +226,64 @@ func (r *RoutingLLM) MediumModel() model.LLM { return r.medium }
 // WeakModel returns the weak model (for inspection).
 func (r *RoutingLLM) WeakModel() model.LLM { return r.weak }
 
+// TurnTiers returns a copy of the ordered routing decisions recorded this turn.
+// Index 0 is the first call, index 1 the second, etc. Both the summary
+// percentages (via Stats) and the per-bubble badges read from this same list,
+// ensuring they always agree.
+func (r *RoutingLLM) TurnTiers() []string {
+	r.turnTiersMu.Lock()
+	defer r.turnTiersMu.Unlock()
+	out := make([]string, len(r.turnTiers))
+	copy(out, r.turnTiers)
+	return out
+}
+
+// ResetTurn clears the per-turn tier list and Stats counters, ready for the
+// next turn. Called at the start of each new user turn.
+func (r *RoutingLLM) ResetTurn() {
+	r.turnTiersMu.Lock()
+	r.turnTiers = r.turnTiers[:0]
+	r.turnTiersMu.Unlock()
+	r.Stats.Reset()
+}
+
+// ModelNameForTier returns the configured display name for a routing tier.
+// Centralises the tier→name mapping used by both the live loop and reload so
+// there is only one place to change if names change.
+func (r *RoutingLLM) ModelNameForTier(tier string) string {
+	switch tier {
+	case "strong":
+		return r.StrongName
+	case "medium":
+		return r.MediumName
+	case "weak":
+		return r.WeakName
+	}
+	return ""
+}
+
 // --- Pricing support ---
 
 // SetPricing injects per-model cost data (USD per token) for cost-savings
 // computation. Safe to call from a goroutine after construction.
 func (r *RoutingLLM) SetPricing(strong, medium, weak ModelCost) {
-	r.pricingMu.Lock()
 	r.strongCost = strong
 	r.mediumCost = medium
 	r.weakCost = weak
 	r.hasPricing = strong.PromptCost > 0
-	r.pricingMu.Unlock()
 }
 
 // HasPricing reports whether pricing data has been injected.
-func (r *RoutingLLM) HasPricing() bool {
-	r.pricingMu.RLock()
-	v := r.hasPricing
-	r.pricingMu.RUnlock()
-	return v
-}
+func (r *RoutingLLM) HasPricing() bool { return r.hasPricing }
 
 // CostSavingsPct returns the estimated percentage saved vs routing all calls
 // to the strong model. Returns 0 when pricing data is unavailable.
 func (r *RoutingLLM) CostSavingsPct() float64 {
-	r.pricingMu.RLock()
 	if !r.hasPricing {
-		r.pricingMu.RUnlock()
 		return 0
 	}
-	strong, medium, weak := r.strongCost, r.mediumCost, r.weakCost
-	r.pricingMu.RUnlock()
 	return CostSavingsPct(
-		strong, medium, weak,
+		r.strongCost, r.mediumCost, r.weakCost,
 		r.Stats.StrongCount(), r.Stats.MediumCount(), r.Stats.WeakCount(),
 	)
 }
@@ -254,6 +294,24 @@ var _ model.LLM = (*RoutingLLM)(nil)
 // --- Context key helpers ---
 
 type routingContextKey struct{}
+
+// statsOnlyContextKey marks a routing call as stats-only: it is counted in
+// Stats (for the summary) but NOT appended to turnTiers (no badge).
+// Used for background utility calls (e.g. title generation) that should
+// appear in the turn summary count but have no corresponding chat bubble.
+type statsOnlyContextKey struct{}
+
+// WithStatsOnlyRouting marks ctx so routing decisions are counted in Stats
+// but not appended to the ordered turnTiers badge list.
+func WithStatsOnlyRouting(ctx context.Context) context.Context {
+	return context.WithValue(ctx, statsOnlyContextKey{}, true)
+}
+
+// isStatsOnlyRouting returns true when the call should be stats-only.
+func isStatsOnlyRouting(ctx context.Context) bool {
+	v, _ := ctx.Value(statsOnlyContextKey{}).(bool)
+	return v
+}
 
 // WithClassifierContext attaches classifier context to a Go context.
 func WithClassifierContext(ctx context.Context, cc ClassifierContext) context.Context {

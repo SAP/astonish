@@ -1770,7 +1770,11 @@ func generateCodeSessionTitle(llm adkmodel.LLM, store *persistentsession.FileSto
 	if llm == nil || store == nil || userMessage == "" {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	// Use WithStatsOnlyRouting so that if the LLM is a RoutingLLM, the title
+	// call increments Stats (counts toward the summary) but does NOT append to
+	// turnTiers (no badge shift — the title has no visible chat bubble).
+	baseCtx := routing.WithStatsOnlyRouting(context.Background())
+	ctx, cancel := context.WithTimeout(baseCtx, 25*time.Second)
 	defer cancel()
 
 	prompt := fmt.Sprintf(

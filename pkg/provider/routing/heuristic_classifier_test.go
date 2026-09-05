@@ -1,6 +1,7 @@
 package routing
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -75,7 +76,7 @@ func TestHeuristicClassifier(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			score := float64(c.Classify(tt.prompt, tt.ctx))
+			score := float64(c.Classify(context.Background(), tt.prompt, tt.ctx))
 			if score < tt.minimum || score > tt.maximum {
 				t.Errorf("Classify() = %.3f, want [%.3f, %.3f]", score, tt.minimum, tt.maximum)
 			}

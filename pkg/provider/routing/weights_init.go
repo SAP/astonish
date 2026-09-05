@@ -1,6 +1,8 @@
 package routing
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log/slog"
@@ -17,6 +19,15 @@ const (
 	// RouterWeightsURL is the download URL for the pre-trained router weights.
 	// This is used when no local copy is available.
 	RouterWeightsURL = "https://github.com/SAP/astonish/releases/latest/download/router_weights.npz"
+
+	// maxWeightsFileSize is the maximum size we'll download for the weights file (10 MB).
+	// The actual file is ~99 KB; this is a generous safety cap.
+	maxWeightsFileSize = 10 * 1024 * 1024
+
+	// RouterWeightsSHA256 is the expected SHA-256 hex digest of router_weights.npz.
+	// When non-empty, EnsureRouterWeights verifies downloaded/copied files against
+	// this hash. Set to empty to skip verification during development.
+	RouterWeightsSHA256 = ""
 )
 
 // localTrainingOutputPaths lists candidate locations for the router_weights.npz
@@ -52,6 +63,10 @@ func EnsureRouterWeights(modelsDir string) (string, error) {
 		expanded := expandTilde(candidate)
 		if _, err := os.Stat(expanded); err == nil {
 			if copyErr := copyFile(expanded, destPath); copyErr == nil {
+				if verifyErr := verifyWeightsChecksum(destPath); verifyErr != nil {
+					slog.Warn("router weights: local copy failed checksum", "source", expanded, "error", verifyErr)
+					continue // try next candidate or fall through to download
+				}
 				slog.Info("router weights: copied from local training project", "source", expanded)
 				return destPath, nil
 			}
@@ -63,6 +78,9 @@ func EnsureRouterWeights(modelsDir string) (string, error) {
 		"url", RouterWeightsURL)
 	if err := downloadFile(RouterWeightsURL, destPath); err != nil {
 		return "", fmt.Errorf("download router weights: %w", err)
+	}
+	if err := verifyWeightsChecksum(destPath); err != nil {
+		return "", err
 	}
 	slog.Info("router weights: downloaded successfully", "path", destPath)
 	return destPath, nil
@@ -124,7 +142,7 @@ func downloadFile(url, dst string) error {
 		_ = os.Remove(tmp)
 	}()
 
-	if _, err = io.Copy(out, resp.Body); err != nil {
+	if _, err = io.Copy(out, io.LimitReader(resp.Body, maxWeightsFileSize)); err != nil {
 		return err
 	}
 	if err = out.Close(); err != nil {
@@ -143,4 +161,30 @@ func expandTilde(path string) string {
 		return path
 	}
 	return filepath.Join(home, path[2:])
+}
+
+// verifyWeightsChecksum computes the SHA-256 of the file at path and compares
+// it against RouterWeightsSHA256. If the constant is empty, verification is
+// skipped (development mode). Returns an error on mismatch.
+func verifyWeightsChecksum(path string) error {
+	if RouterWeightsSHA256 == "" {
+		return nil // verification disabled
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open for checksum: %w", err)
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return fmt.Errorf("read for checksum: %w", err)
+	}
+	got := hex.EncodeToString(h.Sum(nil))
+	if got != RouterWeightsSHA256 {
+		// Remove the untrusted file.
+		_ = os.Remove(path)
+		return fmt.Errorf("router weights checksum mismatch: got %s, want %s", got, RouterWeightsSHA256)
+	}
+	return nil
 }

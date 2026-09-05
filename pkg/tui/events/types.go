@@ -163,7 +163,7 @@ type Event struct {
 	// RoutingSummary is the end-of-turn Auto routing summary line carried on
 	// KindDone events. The TUI displays it only when the task truly completes
 	// (not during intermediate approval stops).
-	RoutingSummary string
+	RoutingSummary string `json:"routing_summary,omitempty"`
 
 	// Meta holds optional backend-specific keys without expanding the struct.
 	Meta map[string]any

@@ -1,11 +1,16 @@
 package routing
 
-import "strings"
+import (
+	"context"
+	"strings"
+)
 
 // HeuristicClassifier uses prompt analysis heuristics to score complexity.
 // It is the default classifier for Auto model routing — pure Go, no external
 // dependencies, no API calls.
 type HeuristicClassifier struct{}
+
+var _ ComplexityClassifier = (*HeuristicClassifier)(nil)
 
 // Classifier weights (must sum to 1.0).
 const (
@@ -37,7 +42,7 @@ var (
 )
 
 // Classify implements ComplexityClassifier.
-func (h *HeuristicClassifier) Classify(prompt string, ctx ClassifierContext) ComplexityScore {
+func (h *HeuristicClassifier) Classify(_ context.Context, prompt string, ctx ClassifierContext) ComplexityScore {
 	ls := lengthScore(prompt)
 	ks := keywordScore(prompt)
 	ts := toolScore(ctx.ToolNames)

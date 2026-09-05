@@ -24,6 +24,15 @@ import (
 	"strings"
 )
 
+const (
+	// maxArrayElements caps the total number of elements we'll allocate
+	// from a single .npy array, protecting against malformed shapes.
+	maxArrayElements = 10_000_000
+
+	// maxConfigSize caps the raw config .npy entry read (10 MB).
+	maxConfigSize = 10 * 1024 * 1024
+)
+
 // npzWeights holds the float64 arrays parsed from a router_weights.npz file.
 // All numeric arrays are stored as float64 for precision.
 type npzWeights struct {
@@ -83,7 +92,7 @@ func parseNpz(path string) (*npzWeights, error) {
 			if err != nil {
 				return nil, fmt.Errorf("open config npy: %w", err)
 			}
-			raw, err := io.ReadAll(rc)
+			raw, err := io.ReadAll(io.LimitReader(rc, maxConfigSize))
 			rc.Close()
 			if err != nil {
 				return nil, fmt.Errorf("read config npy: %w", err)
@@ -240,19 +249,33 @@ func parseNpy(r io.Reader) (data []float32, shape []int, isBytes bool, err error
 		return nil, nil, false, fmt.Errorf("unsupported dtype %q (expected <f4)", dtype)
 	}
 
+	// Reject Fortran-ordered arrays — our code assumes C order.
+	if strings.Contains(hdr, "'fortran_order': True") || strings.Contains(hdr, "'fortran_order':True") {
+		return nil, nil, false, fmt.Errorf("fortran_order arrays are not supported")
+	}
+
 	// Parse shape
 	shape, err = parseShape(hdr)
 	if err != nil {
 		return nil, nil, false, err
 	}
 
-	// Calculate total elements
+	// Calculate total elements with overflow and size checks.
 	total := 1
 	for _, s := range shape {
+		if s < 0 {
+			return nil, nil, false, fmt.Errorf("negative shape dimension: %d", s)
+		}
+		if s > 0 && total > maxArrayElements/s {
+			return nil, nil, false, fmt.Errorf("array too large: shape %v exceeds %d elements", shape, maxArrayElements)
+		}
 		total *= s
 	}
 	if total == 0 {
 		return []float32{}, shape, false, nil
+	}
+	if total > maxArrayElements {
+		return nil, nil, false, fmt.Errorf("array too large: %d elements exceeds limit %d", total, maxArrayElements)
 	}
 
 	// Read raw float32 data
@@ -421,11 +444,4 @@ func float32ToFloat64(f32 []float32) []float64 {
 		f64[i] = float64(v)
 	}
 	return f64
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

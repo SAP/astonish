@@ -3010,6 +3010,8 @@ func (b *localAgentBackend) SetModelPin(ctx context.Context, providerName, model
 	b.provider = providerName
 	b.model = modelName
 	b.configured = true
+	b.routingLLM = nil
+	b.autoRoutingCfg = nil
 	b.mu.Unlock()
 
 	// Persist the choice as the Astonish default so it survives across runs

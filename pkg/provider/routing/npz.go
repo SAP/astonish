@@ -54,6 +54,10 @@ func parseNpz(path string) (*npzWeights, error) {
 	}
 	defer r.Close()
 
+	if len(r.File) > 100 {
+		return nil, fmt.Errorf("npz has too many entries: %d (max 100)", len(r.File))
+	}
+
 	arrays := make(map[string][]float32)
 	shapes := make(map[string][]int)
 	var configBytes []byte
@@ -228,6 +232,9 @@ func parseNpy(r io.Reader) (data []float32, shape []int, isBytes bool, err error
 	}
 
 	// Read header
+	if hdrLen > uint32(maxConfigSize) {
+		return nil, nil, false, fmt.Errorf("npy header too large: %d bytes", hdrLen)
+	}
 	hdrBytes := make([]byte, hdrLen)
 	if _, err = io.ReadFull(r, hdrBytes); err != nil {
 		return nil, nil, false, fmt.Errorf("read header: %w", err)
@@ -317,6 +324,9 @@ func extractNpyBytes(raw []byte) ([]byte, error) {
 		hdrLen = int(binary.LittleEndian.Uint16(raw[8:10]))
 		offset = 10
 	} else {
+		if len(raw) < 12 {
+			return nil, fmt.Errorf("npy v2 too short for header length field")
+		}
 		hdrLen = int(binary.LittleEndian.Uint32(raw[8:12]))
 		offset = 12
 	}

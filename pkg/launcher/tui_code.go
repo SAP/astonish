@@ -1443,6 +1443,13 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 
 		emit("session", map[string]any{"sessionId": sessionID, "isNew": isNew})
 
+		// Snapshot routing state under the lock so the turn goroutine has a
+		// stable view — SetAutoRouting/SetModelPin can run concurrently on the
+		// main TUI goroutine.
+		b.mu.Lock()
+		routingLLM := b.routingLLM
+		b.mu.Unlock()
+
 		// Track whether this turn emits a tool approval prompt. When it does, the
 		// next RunTurn call is a continuation of the same user-visible task, so we
 		// should not reset routing stats between them.
@@ -1462,7 +1469,7 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 		// accumulates fresh for this turn.
 		// Exception: approval continuations are part of the same user-visible task,
 		// so stats accumulate across approval cycles for an accurate final summary.
-		if b.routingLLM != nil {
+		if routingLLM != nil {
 			ctx = routing.WithClassifierContext(ctx, routing.ClassifierContext{
 				HasPlanMode: planMode || graphPlan,
 			})
@@ -1471,7 +1478,7 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 			b.routingApprovalContinuation = false
 			b.mu.Unlock()
 			if !isContinuation {
-				b.routingLLM.ResetTurn()
+				routingLLM.ResetTurn()
 			}
 		}
 
@@ -1523,22 +1530,22 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 
 		out <- events.NewStatus("Thinking…")
 
-		b.driveTurn(ctx, rnr, chatAgent, effectiveID, turnIndex, userMsg, emit)
+		b.driveTurn(ctx, rnr, chatAgent, effectiveID, turnIndex, userMsg, emit, routingLLM)
 
 		// Persist routing decisions so loadHistory can reconstruct badges on
 		// reload. One system event per LLM call, each carrying its tier in
 		// StateDelta[routingInfoStateKey]. This is the same proven side-channel
 		// pattern as RecordPlanDecision / planLifecycleStateKey.
-		if b.routingLLM != nil {
-			tiers := b.routingLLM.TurnTiers()
+		if routingLLM != nil {
+			tiers := routingLLM.TurnTiers()
 			for _, tier := range tiers {
-				modelName := b.routingLLM.ModelNameForTier(tier)
-				b.recordRoutingDecision(ctx, effectiveID, tier, modelName)
+				modelName := routingLLM.ModelNameForTier(tier)
+				b.recordRoutingDecision(ctx, effectiveID, tier, modelName, routingLLM)
 			}
 		}
 
 		// Emit final routing info when Auto mode is active.
-		b.emitRoutingInfo(emit, "", "")
+		b.emitRoutingInfo(emit, "", "", routingLLM)
 
 		// Build the done event payload, including the routing summary when
 		// Auto mode is active. The summary is carried on the done event itself
@@ -1546,11 +1553,11 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 		// TUI can choose when to display it (only on final task completion, not
 		// after intermediate approval stops).
 		donePayload := map[string]any{"done": true}
-		if b.routingLLM != nil && b.routingLLM.Stats.Total() >= 1 {
+		if routingLLM != nil && routingLLM.Stats.Total() >= 1 {
 			// Pricing is injected in a background goroutine at Auto-mode setup.
 			// If that fetch has not finished (or failed to match model names)
 			// retry synchronously here so the turn summary can include savings.
-			if !b.routingLLM.HasPricing() {
+			if !routingLLM.HasPricing() {
 				b.mu.Lock()
 				var cfgCopy *backend.AutoRoutingConfig
 				if b.autoRoutingCfg != nil {
@@ -1559,10 +1566,10 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 				}
 				b.mu.Unlock()
 				if cfgCopy != nil {
-					b.injectPricing(ctx, b.routingLLM, cfgCopy)
+					b.injectPricing(ctx, routingLLM, cfgCopy)
 				}
 			}
-			if summary := b.routingLLM.SummaryLine(); summary != "" {
+			if summary := routingLLM.SummaryLine(); summary != "" {
 				donePayload["routing_summary"] = summary
 			}
 		}
@@ -1570,7 +1577,7 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 		// If this turn emitted an approval prompt, the next RunTurn will be a
 		// continuation of the same user-visible task. Flag the backend so routing
 		// stats are not reset between approval cycles.
-		if approvalEmittedThisTurn && b.routingLLM != nil {
+		if approvalEmittedThisTurn && routingLLM != nil {
 			b.mu.Lock()
 			b.routingApprovalContinuation = true
 			b.mu.Unlock()
@@ -1928,6 +1935,7 @@ func (b *localAgentBackend) driveTurn(
 	turnIndex int,
 	userMsg *genai.Content,
 	emit func(string, map[string]any),
+	routingLLM *routing.RoutingLLM,
 ) {
 	seenPartialText := false
 	sawRealUsage := false
@@ -1953,13 +1961,13 @@ func (b *localAgentBackend) driveTurn(
 			return
 		}
 
-		if b.routingLLM != nil {
-			tiers := b.routingLLM.TurnTiers()
+		if routingLLM != nil {
+			tiers := routingLLM.TurnTiers()
 			for callIdx < len(tiers) {
 				tier := tiers[callIdx]
-				modelName := b.routingLLM.ModelNameForTier(tier)
+				modelName := routingLLM.ModelNameForTier(tier)
 				slog.Debug("routing-badge: emitting routing_info", "callIdx", callIdx, "tier", tier, "modelName", modelName, "tiersLen", len(tiers))
-				b.emitRoutingInfo(emit, modelName, tier)
+				b.emitRoutingInfo(emit, modelName, tier, routingLLM)
 				callIdx++
 			}
 		}
@@ -2077,22 +2085,24 @@ func (b *localAgentBackend) driveTurn(
 // LLM call, read from the authoritative turnTiers list at decision time.
 // When called at turn-end with empty strings (post-turn summary emit), it
 // uses the last entry from TurnTiers to populate the current-call fields.
-func (b *localAgentBackend) emitRoutingInfo(emit func(string, map[string]any), callModel, callTier string) {
-	if b.routingLLM == nil || b.routingLLM.Stats.Total() == 0 {
-		slog.Debug("routing-badge: emitRoutingInfo early return", "nilLLM", b.routingLLM == nil)
+// routingLLM is the snapshot taken at goroutine start to avoid data races with
+// SetAutoRouting/SetModelPin on the main TUI goroutine.
+func (b *localAgentBackend) emitRoutingInfo(emit func(string, map[string]any), callModel, callTier string, routingLLM *routing.RoutingLLM) {
+	if routingLLM == nil || routingLLM.Stats.Total() == 0 {
+		slog.Debug("routing-badge: emitRoutingInfo early return", "nilLLM", routingLLM == nil)
 		return
 	}
 	// If called at turn-end without a specific call context, use the last
 	// recorded tier from the authoritative ordered list.
 	modelName, tier := callModel, callTier
 	if modelName == "" {
-		tiers := b.routingLLM.TurnTiers()
+		tiers := routingLLM.TurnTiers()
 		if len(tiers) > 0 {
 			tier = tiers[len(tiers)-1]
-			modelName = b.routingLLM.ModelNameForTier(tier)
+			modelName = routingLLM.ModelNameForTier(tier)
 		}
 	}
-	stats := &b.routingLLM.Stats
+	stats := &routingLLM.Stats
 
 	// Emit via the "routing_info" SSE type which mapSSEToEvents converts to
 	// KindRoutingInfo, updating the transcript's LastRouting* fields.
@@ -2104,12 +2114,12 @@ func (b *localAgentBackend) emitRoutingInfo(emit func(string, map[string]any), c
 		"routing_medium_pct":  stats.MediumPct(),
 		"routing_weak_pct":    stats.WeakPct(),
 		"routing_total":       stats.Total(),
-		"routing_strong_name": b.routingLLM.StrongName,
-		"routing_medium_name": b.routingLLM.MediumName,
-		"routing_weak_name":   b.routingLLM.WeakName,
+		"routing_strong_name": routingLLM.StrongName,
+		"routing_medium_name": routingLLM.MediumName,
+		"routing_weak_name":   routingLLM.WeakName,
 	}
-	if b.routingLLM.HasPricing() {
-		data["routing_cost_savings_pct"] = b.routingLLM.CostSavingsPct()
+	if routingLLM.HasPricing() {
+		data["routing_cost_savings_pct"] = routingLLM.CostSavingsPct()
 	}
 	slog.Debug("routing-badge: emit routing_info payload", "model", modelName, "tier", tier)
 	emit("routing_info", data)
@@ -2406,8 +2416,9 @@ func (b *localAgentBackend) RecordPlanDecision(ctx context.Context, status event
 // a lightweight side-channel whose only payload is the tier + model name.
 // loadHistory pre-scans these events and stamps both agent text and tool_call
 // entries from the corresponding model event so reloaded badges match live.
-func (b *localAgentBackend) recordRoutingDecision(ctx context.Context, sessionID, tier, modelName string) {
-	if sessionID == "" || tier == "" || b.routingLLM == nil {
+// routingLLM is the snapshot taken at goroutine start to avoid data races.
+func (b *localAgentBackend) recordRoutingDecision(ctx context.Context, sessionID, tier, modelName string, routingLLM *routing.RoutingLLM) {
+	if sessionID == "" || tier == "" || routingLLM == nil {
 		return
 	}
 	resp, err := b.sessionSvc.Get(ctx, &session.GetRequest{
@@ -2427,9 +2438,9 @@ func (b *localAgentBackend) recordRoutingDecision(ctx context.Context, sessionID
 			routingInfoStateKey: map[string]any{
 				"tier":        tier,
 				"model":       modelName,
-				"strong_name": b.routingLLM.StrongName,
-				"medium_name": b.routingLLM.MediumName,
-				"weak_name":   b.routingLLM.WeakName,
+				"strong_name": routingLLM.StrongName,
+				"medium_name": routingLLM.MediumName,
+				"weak_name":   routingLLM.WeakName,
 			},
 		}},
 	}

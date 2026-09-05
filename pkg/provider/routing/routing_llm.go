@@ -207,6 +207,9 @@ func NewRoutingLLM(strong, medium, weak model.LLM, classifier ComplexityClassifi
 	if lowThreshold >= highThreshold {
 		lowThreshold = highThreshold - 0.1
 	}
+	if lowThreshold < 0 {
+		lowThreshold = 0
+	}
 	mediumName := ""
 	if medium != nil {
 		mediumName = medium.Name()

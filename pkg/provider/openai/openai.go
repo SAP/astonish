@@ -692,7 +692,7 @@ func mergeMessageContent(prev *openai.ChatCompletionMessage, cur openai.ChatComp
 
 	// Expand cur.
 	if curHasMulti {
-		if len(parts) > 0 && cur.Content != "" {
+		if cur.Content != "" {
 			// cur has both Content and MultiContent — prepend the text part.
 			parts = append(parts, openai.ChatMessagePart{
 				Type: openai.ChatMessagePartTypeText,

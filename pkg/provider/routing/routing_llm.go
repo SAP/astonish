@@ -115,7 +115,8 @@ type RoutingLLM struct {
 	StrongName    string // display name (e.g. "claude-sonnet")
 	MediumName    string // display name (e.g. "claude-haiku"), empty if no medium
 	WeakName      string // display name (e.g. "gpt-4o-mini")
-	// Pricing fields — set post-construction via SetPricing.
+	// Pricing fields — set post-construction via SetPricing (guarded by pricingMu).
+	pricingMu  sync.RWMutex
 	strongCost ModelCost
 	mediumCost ModelCost
 	weakCost   ModelCost
@@ -215,23 +216,34 @@ func (r *RoutingLLM) WeakModel() model.LLM { return r.weak }
 // SetPricing injects per-model cost data (USD per token) for cost-savings
 // computation. Safe to call from a goroutine after construction.
 func (r *RoutingLLM) SetPricing(strong, medium, weak ModelCost) {
+	r.pricingMu.Lock()
 	r.strongCost = strong
 	r.mediumCost = medium
 	r.weakCost = weak
 	r.hasPricing = strong.PromptCost > 0
+	r.pricingMu.Unlock()
 }
 
 // HasPricing reports whether pricing data has been injected.
-func (r *RoutingLLM) HasPricing() bool { return r.hasPricing }
+func (r *RoutingLLM) HasPricing() bool {
+	r.pricingMu.RLock()
+	v := r.hasPricing
+	r.pricingMu.RUnlock()
+	return v
+}
 
 // CostSavingsPct returns the estimated percentage saved vs routing all calls
 // to the strong model. Returns 0 when pricing data is unavailable.
 func (r *RoutingLLM) CostSavingsPct() float64 {
+	r.pricingMu.RLock()
 	if !r.hasPricing {
+		r.pricingMu.RUnlock()
 		return 0
 	}
+	strong, medium, weak := r.strongCost, r.mediumCost, r.weakCost
+	r.pricingMu.RUnlock()
 	return CostSavingsPct(
-		r.strongCost, r.mediumCost, r.weakCost,
+		strong, medium, weak,
 		r.Stats.StrongCount(), r.Stats.MediumCount(), r.Stats.WeakCount(),
 	)
 }

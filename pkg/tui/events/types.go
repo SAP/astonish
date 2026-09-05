@@ -158,6 +158,9 @@ type Event struct {
 	RoutingMediumName string  `json:"routing_medium_name,omitempty"`
 	RoutingMediumPct  float64 `json:"routing_medium_pct,omitempty"`
 	RoutingTier       string  `json:"routing_tier,omitempty"` // "strong", "medium", or "weak"
+	// RoutingCostSavingsPct is the estimated % cost saved vs routing all calls through strong.
+	// 0 when pricing data is unavailable.
+	RoutingCostSavingsPct float64 `json:"routing_cost_savings_pct,omitempty"`
 
 	// Meta holds optional backend-specific keys without expanding the struct.
 	Meta map[string]any
@@ -311,18 +314,19 @@ func NewCompaction(info CompactionInfo) Event {
 }
 
 // NewRoutingInfo creates a routing info event.
-func NewRoutingInfo(routingModel string, isStrong bool, strongPct, weakPct float64, total int64, strongName, weakName, tier, mediumName string, mediumPct float64) Event {
+func NewRoutingInfo(routingModel string, isStrong bool, strongPct, weakPct float64, total int64, strongName, weakName, tier, mediumName string, mediumPct, costSavingsPct float64) Event {
 	return Event{
-		Kind:              KindRoutingInfo,
-		RoutingModel:      routingModel,
-		RoutingIsStrong:   isStrong,
-		RoutingStrongPct:  strongPct,
-		RoutingWeakPct:    weakPct,
-		RoutingTotal:      total,
-		RoutingStrongName: strongName,
-		RoutingWeakName:   weakName,
-		RoutingTier:       tier,
-		RoutingMediumName: mediumName,
-		RoutingMediumPct:  mediumPct,
+		Kind:                  KindRoutingInfo,
+		RoutingModel:          routingModel,
+		RoutingIsStrong:       isStrong,
+		RoutingStrongPct:      strongPct,
+		RoutingWeakPct:        weakPct,
+		RoutingTotal:          total,
+		RoutingStrongName:     strongName,
+		RoutingWeakName:       weakName,
+		RoutingTier:           tier,
+		RoutingMediumName:     mediumName,
+		RoutingMediumPct:      mediumPct,
+		RoutingCostSavingsPct: costSavingsPct,
 	}
 }

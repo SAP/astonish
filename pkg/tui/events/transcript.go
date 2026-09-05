@@ -170,6 +170,9 @@ type Transcript struct {
 	RoutingMediumName   string
 	RoutingMediumPct    float64
 	LastRoutingTier     string // "strong", "medium", or "weak"
+	// RoutingCostSavingsPct is the estimated % cost saved vs all-strong routing.
+	// 0 when pricing data is unavailable.
+	RoutingCostSavingsPct float64
 
 	// delegationItemIdx is the index in Items of the current ItemDelegation
 	// block (-1 when no delegation is active). Used by applyDelegation to
@@ -394,6 +397,7 @@ func (t *Transcript) Apply(ev Event) {
 		t.RoutingMediumName = ev.RoutingMediumName
 		t.RoutingMediumPct = ev.RoutingMediumPct
 		t.LastRoutingTier = ev.RoutingTier
+		t.RoutingCostSavingsPct = ev.RoutingCostSavingsPct
 		// Stamp the routing decision on the most recent ItemAgent or
 		// ItemActivity so the badge persists per-item in the transcript
 		// after the turn completes. Each item records its own routing

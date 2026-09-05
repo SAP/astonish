@@ -494,6 +494,8 @@ func buildCodeBackend(ctx context.Context, cfg *CodeConfig) (backend.Backend, er
 				if b.result.ChatAgent != nil && b.result.ChatAgent.SubAgentManager != nil {
 					b.result.ChatAgent.SubAgentManager.TaskLLM = rLLM
 				}
+				// Inject pricing data in background — non-blocking.
+				go b.injectPricing(context.Background(), rLLM, b.autoRoutingCfg)
 			}
 		} else {
 			slog.Warn("auto routing restore failed; falling back to normal model",
@@ -628,6 +630,7 @@ type localAgentBackend struct {
 	autoRoutingCfg  *backend.AutoRoutingConfig   // persisted config for GetAutoRoutingConfig
 	classifier      routing.ComplexityClassifier // MLP classifier (shared by both tiers)
 	closeClassifier func()                       // releases Hugot embedder resources
+	pricingCache    *routing.PricingCache        // lazily initialised for cost-savings display
 	configured  bool
 	usage       *events.Usage
 	// contextTokens is the current context-window occupancy (estimated from the
@@ -848,6 +851,8 @@ func (b *localAgentBackend) SetAutoRouting(ctx context.Context, cfg backend.Auto
 	if b.result.ChatAgent != nil && b.result.ChatAgent.SubAgentManager != nil {
 		b.result.ChatAgent.SubAgentManager.TaskLLM = rLLM
 	}
+	// Inject pricing data in background — non-blocking.
+	go b.injectPricing(context.Background(), rLLM, &cfgCopy)
 
 	b.appConfig.ModelRouting = config.ModelRoutingConfig{
 		StrongProvider: cfg.StrongProvider,
@@ -870,6 +875,37 @@ func (b *localAgentBackend) GetAutoRoutingConfig() *backend.AutoRoutingConfig {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.autoRoutingCfg
+}
+
+// ensurePricingCache lazily creates the PricingCache, stored in the models dir
+// alongside the router weights. Returns nil if the directory cannot be resolved.
+func (b *localAgentBackend) ensurePricingCache() *routing.PricingCache {
+	if b.pricingCache == nil {
+		modelsDir, err := config.GetModelsDir()
+		if err != nil {
+			slog.Debug("pricing cache: cannot resolve models dir", "error", err)
+			return nil
+		}
+		b.pricingCache = routing.NewPricingCache(modelsDir)
+	}
+	return b.pricingCache
+}
+
+// injectPricing looks up per-model costs from OpenRouter and calls SetPricing
+// on rLLM. It is designed to be called in a background goroutine so it never
+// blocks startup or model-switch latency.
+func (b *localAgentBackend) injectPricing(ctx context.Context, rLLM *routing.RoutingLLM, cfg *backend.AutoRoutingConfig) {
+	pc := b.ensurePricingCache()
+	if pc == nil {
+		return
+	}
+	strongCost, _ := pc.LookupCost(ctx, cfg.StrongProvider, cfg.StrongModel)
+	var mediumCost routing.ModelCost
+	if cfg.HasMedium() {
+		mediumCost, _ = pc.LookupCost(ctx, cfg.MediumProvider, cfg.MediumModel)
+	}
+	weakCost, _ := pc.LookupCost(ctx, cfg.WeakProvider, cfg.WeakModel)
+	rLLM.SetPricing(strongCost, mediumCost, weakCost)
 }
 
 func shortModelName(model string) string {
@@ -1443,6 +1479,11 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 				parts = append(parts, fmt.Sprintf("%.0f%% weak %s", stats.WeakPct(), b.routingLLM.WeakName))
 			}
 			summary := fmt.Sprintf("Auto routing \u2014 %d calls (%s)", stats.Total(), strings.Join(parts, ", "))
+			if b.routingLLM.HasPricing() {
+				if savings := b.routingLLM.CostSavingsPct(); savings > 0.5 {
+					summary += fmt.Sprintf(" \u00b7 Saved ~%.0f%% vs all-strong", savings)
+				}
+			}
 			emit("system", map[string]any{"content": summary})
 		}
 
@@ -1936,7 +1977,7 @@ func (b *localAgentBackend) emitRoutingInfo(emit func(string, map[string]any)) {
 	stats := &b.routingLLM.Stats
 	// Emit via the "routing_info" SSE type which mapSSEToEvents converts to
 	// KindRoutingInfo, updating the transcript's LastRouting* fields.
-	emit("routing_info", map[string]any{
+	data := map[string]any{
 		"routing_model":       modelName,
 		"routing_is_strong":   tier == "strong",
 		"routing_tier":        tier,
@@ -1947,7 +1988,11 @@ func (b *localAgentBackend) emitRoutingInfo(emit func(string, map[string]any)) {
 		"routing_strong_name": b.routingLLM.StrongName,
 		"routing_medium_name": b.routingLLM.MediumName,
 		"routing_weak_name":   b.routingLLM.WeakName,
-	})
+	}
+	if b.routingLLM.HasPricing() {
+		data["routing_cost_savings_pct"] = b.routingLLM.CostSavingsPct()
+	}
+	emit("routing_info", data)
 }
 
 // emitUsage emits a usage event from real provider metadata. It returns true

@@ -1188,16 +1188,17 @@ func mapSSEToEvents(sev *client.SSEEvent, debug bool) []events.Event {
 		}
 	case "routing_info":
 		var payload struct {
-			Model      string  `json:"routing_model"`
-			IsStrong   bool    `json:"routing_is_strong"`
-			StrongPct  float64 `json:"routing_strong_pct"`
-			WeakPct    float64 `json:"routing_weak_pct"`
-			Total      int64   `json:"routing_total"`
-			StrongName string  `json:"routing_strong_name"`
-			WeakName   string  `json:"routing_weak_name"`
-			Tier       string  `json:"routing_tier"`
-			MediumName string  `json:"routing_medium_name"`
-			MediumPct  float64 `json:"routing_medium_pct"`
+			Model          string  `json:"routing_model"`
+			IsStrong       bool    `json:"routing_is_strong"`
+			StrongPct      float64 `json:"routing_strong_pct"`
+			WeakPct        float64 `json:"routing_weak_pct"`
+			Total          int64   `json:"routing_total"`
+			StrongName     string  `json:"routing_strong_name"`
+			WeakName       string  `json:"routing_weak_name"`
+			Tier           string  `json:"routing_tier"`
+			MediumName     string  `json:"routing_medium_name"`
+			MediumPct      float64 `json:"routing_medium_pct"`
+			CostSavingsPct float64 `json:"routing_cost_savings_pct"`
 		}
 		if json.Unmarshal(data, &payload) == nil && payload.Model != "" {
 			return []events.Event{events.NewRoutingInfo(
@@ -1205,6 +1206,7 @@ func mapSSEToEvents(sev *client.SSEEvent, debug bool) []events.Event {
 				payload.StrongPct, payload.WeakPct, payload.Total,
 				payload.StrongName, payload.WeakName, payload.Tier,
 				payload.MediumName, payload.MediumPct,
+				payload.CostSavingsPct,
 			)}
 		}
 	case "plan":

@@ -326,3 +326,112 @@ func TestTruncateForLog(t *testing.T) {
 		t.Errorf("truncated = %q, want %q", got, "abcde…")
 	}
 }
+
+// --- Pricing tests ---
+
+func TestRoutingLLM_SetPricing(t *testing.T) {
+	strong := &mockLLM{name: "strong"}
+	weak := &mockLLM{name: "weak"}
+	r := NewRoutingLLM(strong, nil, weak, &fixedClassifier{score: 0.5}, 0.7, 0.3)
+
+	if r.HasPricing() {
+		t.Error("expected HasPricing() = false before SetPricing")
+	}
+
+	r.SetPricing(
+		ModelCost{PromptCost: 0.01, CompletionCost: 0.03},
+		ModelCost{PromptCost: 0.003, CompletionCost: 0.009},
+		ModelCost{PromptCost: 0.001, CompletionCost: 0.003},
+	)
+
+	if !r.HasPricing() {
+		t.Error("expected HasPricing() = true after SetPricing with non-zero strong cost")
+	}
+}
+
+func TestRoutingLLM_SetPricing_ZeroStrongCost(t *testing.T) {
+	strong := &mockLLM{name: "strong"}
+	weak := &mockLLM{name: "weak"}
+	r := NewRoutingLLM(strong, nil, weak, &fixedClassifier{score: 0.5}, 0.7, 0.3)
+
+	// Zero strong cost → hasPricing stays false.
+	r.SetPricing(
+		ModelCost{PromptCost: 0},
+		ModelCost{PromptCost: 0.003},
+		ModelCost{PromptCost: 0.001},
+	)
+
+	if r.HasPricing() {
+		t.Error("expected HasPricing() = false when strong cost is zero")
+	}
+}
+
+func TestRoutingLLM_CostSavingsPct(t *testing.T) {
+	// strong=high score, medium=mid, weak=low score
+	strongM := &mockLLM{name: "strong"}
+	mediumM := &mockLLM{name: "medium"}
+	weakM := &mockLLM{name: "weak"}
+
+	// Use classifiers that produce specific scores for each invocation.
+	// We need 3 calls: 1 strong (score 0.8), 1 medium (score 0.5), 1 weak (score 0.1).
+	scores := []float32{0.8, 0.5, 0.1}
+	idx := 0
+
+	r := NewRoutingLLM(strongM, mediumM, weakM, &sequenceClassifier{scores: scores, idx: &idx}, 0.7, 0.3)
+	r.SetPricing(
+		ModelCost{PromptCost: 0.01},
+		ModelCost{PromptCost: 0.003},
+		ModelCost{PromptCost: 0.001},
+	)
+
+	// Make 3 calls to drive routing.
+	ctx := context.Background()
+	drainLLM(r, ctx)
+	drainLLM(r, ctx)
+	drainLLM(r, ctx)
+
+	if r.Stats.StrongCount() != 1 {
+		t.Errorf("strong calls = %d; want 1", r.Stats.StrongCount())
+	}
+	if r.Stats.MediumCount() != 1 {
+		t.Errorf("medium calls = %d; want 1", r.Stats.MediumCount())
+	}
+	if r.Stats.WeakCount() != 1 {
+		t.Errorf("weak calls = %d; want 1", r.Stats.WeakCount())
+	}
+
+	// actual = 0.01+0.003+0.001 = 0.014; all-strong = 0.03; savings ≈ 53.3%
+	got := r.CostSavingsPct()
+	if got < 52 || got > 55 {
+		t.Errorf("CostSavingsPct = %.2f; want ≈53.3", got)
+	}
+}
+
+func TestRoutingLLM_CostSavingsPct_NoPricing(t *testing.T) {
+	strong := &mockLLM{name: "strong"}
+	weak := &mockLLM{name: "weak"}
+	r := NewRoutingLLM(strong, nil, weak, &fixedClassifier{score: 0.1}, 0.7, 0.3)
+
+	// No SetPricing call.
+	ctx := context.Background()
+	drainLLM(r, ctx)
+
+	if r.CostSavingsPct() != 0 {
+		t.Errorf("expected CostSavingsPct = 0 when no pricing set, got %v", r.CostSavingsPct())
+	}
+}
+
+// sequenceClassifier returns scores from a pre-set list in order.
+type sequenceClassifier struct {
+	scores []float32
+	idx    *int
+}
+
+func (sc *sequenceClassifier) Classify(_ context.Context, _ string, _ ClassifierContext) ComplexityScore {
+	if *sc.idx >= len(sc.scores) {
+		return ComplexityScore(sc.scores[len(sc.scores)-1])
+	}
+	score := sc.scores[*sc.idx]
+	*sc.idx++
+	return ComplexityScore(score)
+}

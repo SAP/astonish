@@ -56,7 +56,7 @@ type Item struct {
 	// Stamped on ItemAgent and ItemActivity items when Auto routing is active.
 	RoutingModel    string
 	RoutingIsStrong bool
-	RoutingTier     string // "orchestrator" or "task"
+	RoutingTier     string // "strong", "medium", or "weak"
 
 	// Approval fields.
 	ToolName string

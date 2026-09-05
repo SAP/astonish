@@ -2854,12 +2854,15 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 			}
 			// Append routing badge when Auto routing is active for this response.
 			// Right-aligned on the last line when space allows, to avoid extra vertical space.
-			// 🧠 orchestrator-strong, ⚡ orchestrator-weak.
+			// 🧠 strong, ⚙️ medium, ⚡ weak.
 			if it.RoutingModel != "" {
 				var badge string
-				if it.RoutingIsStrong {
+				switch it.RoutingTier {
+				case "strong":
 					badge = " 🧠"
-				} else {
+				case "medium":
+					badge = " ⚙️"
+				default:
 					badge = " ⚡"
 				}
 				badgeRendered := th.Muted.Render(badge)

@@ -45,74 +45,86 @@ func IsAutoModel(model string) bool {
 	return strings.EqualFold(strings.TrimSpace(model), AutoModelSentinel)
 }
 
-// RoutingTierConfig defines the strong/weak model pair for one routing tier.
-type RoutingTierConfig struct {
-	StrongProvider string  `yaml:"strong_provider,omitempty" json:"strong_provider,omitempty"`
-	StrongModel    string  `yaml:"strong_model,omitempty" json:"strong_model,omitempty"`
-	WeakProvider   string  `yaml:"weak_provider,omitempty" json:"weak_provider,omitempty"`
-	WeakModel      string  `yaml:"weak_model,omitempty" json:"weak_model,omitempty"`
-	Threshold      float64 `yaml:"threshold,omitempty" json:"threshold,omitempty"`
-}
-
-func (t *RoutingTierConfig) IsConfigured() bool {
-	return t.StrongProvider != "" && t.StrongModel != "" &&
-		t.WeakProvider != "" && t.WeakModel != ""
-}
-
-func (t *RoutingTierConfig) EffectiveThreshold() float64 {
-	if t.Threshold > 0 && t.Threshold < 1 {
-		return t.Threshold
-	}
-	return 0.5
-}
-
-// ModelRoutingConfig controls the Auto model routing system.
-// When the user selects Auto in /model, the routing system selects
-// between StrongModel and WeakModel per-turn based on prompt complexity.
-// Supports 4-tier routing: Orchestrator and Task tiers.
-// Legacy flat fields are auto-migrated to the Orchestrator tier.
+// ModelRoutingConfig controls automatic model routing based on prompt complexity.
 type ModelRoutingConfig struct {
-	Orchestrator RoutingTierConfig `yaml:"orchestrator,omitempty" json:"orchestrator,omitempty"`
-	Task         RoutingTierConfig `yaml:"task,omitempty" json:"task,omitempty"`
-	// Legacy flat fields — auto-migrated to Orchestrator tier.
 	StrongProvider string  `yaml:"strong_provider,omitempty" json:"strong_provider,omitempty"`
 	StrongModel    string  `yaml:"strong_model,omitempty" json:"strong_model,omitempty"`
+	MediumProvider string  `yaml:"medium_provider,omitempty" json:"medium_provider,omitempty"`
+	MediumModel    string  `yaml:"medium_model,omitempty" json:"medium_model,omitempty"`
 	WeakProvider   string  `yaml:"weak_provider,omitempty" json:"weak_provider,omitempty"`
 	WeakModel      string  `yaml:"weak_model,omitempty" json:"weak_model,omitempty"`
-	Threshold      float64 `yaml:"threshold,omitempty" json:"threshold,omitempty"`
+	HighThreshold  float64 `yaml:"high_threshold,omitempty" json:"high_threshold,omitempty"`
+	LowThreshold   float64 `yaml:"low_threshold,omitempty" json:"low_threshold,omitempty"`
+	// --- Legacy fields (4-tier format) — auto-migrated by Migrate(). ---
+	Orchestrator    *legacyTierConfig `yaml:"orchestrator,omitempty" json:"orchestrator,omitempty"`
+	Task            *legacyTierConfig `yaml:"task,omitempty" json:"task,omitempty"`
+	LegacyThreshold float64           `yaml:"threshold,omitempty" json:"threshold,omitempty"`
 }
 
-// Migrate moves legacy flat fields into the Orchestrator tier.
-// Called automatically by IsConfigured and EffectiveThreshold.
-func (c *ModelRoutingConfig) Migrate() {
-	if c.Orchestrator.StrongProvider == "" && c.StrongProvider != "" {
-		c.Orchestrator = RoutingTierConfig{
-			StrongProvider: c.StrongProvider,
-			StrongModel:    c.StrongModel,
-			WeakProvider:   c.WeakProvider,
-			WeakModel:      c.WeakModel,
-			Threshold:      c.Threshold,
+// legacyTierConfig exists only for YAML deserialization of old 4-tier configs.
+type legacyTierConfig struct {
+	StrongProvider string  `yaml:"strong_provider,omitempty"`
+	StrongModel    string  `yaml:"strong_model,omitempty"`
+	WeakProvider   string  `yaml:"weak_provider,omitempty"`
+	WeakModel      string  `yaml:"weak_model,omitempty"`
+	Threshold      float64 `yaml:"threshold,omitempty"`
+}
+
+// Migrate converts legacy config formats to the current 3-tier flat layout.
+func (m *ModelRoutingConfig) Migrate() {
+	// 4-tier -> 3-tier: Orchestrator.Strong->Strong, best effort for medium/weak.
+	if m.Orchestrator != nil && m.StrongProvider == "" {
+		m.StrongProvider = m.Orchestrator.StrongProvider
+		m.StrongModel = m.Orchestrator.StrongModel
+		if m.HighThreshold == 0 && m.Orchestrator.Threshold > 0 {
+			m.HighThreshold = m.Orchestrator.Threshold
 		}
-		c.StrongProvider = ""
-		c.StrongModel = ""
-		c.WeakProvider = ""
-		c.WeakModel = ""
-		c.Threshold = 0
+		if m.Task != nil {
+			m.MediumProvider = m.Orchestrator.WeakProvider
+			m.MediumModel = m.Orchestrator.WeakModel
+			m.WeakProvider = m.Task.WeakProvider
+			m.WeakModel = m.Task.WeakModel
+			if m.LowThreshold == 0 && m.Task.Threshold > 0 {
+				m.LowThreshold = m.Task.Threshold
+			}
+		} else {
+			m.WeakProvider = m.Orchestrator.WeakProvider
+			m.WeakModel = m.Orchestrator.WeakModel
+		}
+		m.Orchestrator = nil
+		m.Task = nil
+	}
+	// Pre-4-tier legacy: threshold -> HighThreshold.
+	if m.LegacyThreshold > 0 && m.HighThreshold == 0 {
+		m.HighThreshold = m.LegacyThreshold
+		m.LegacyThreshold = 0
 	}
 }
 
-func (c *ModelRoutingConfig) IsConfigured() bool {
-	c.Migrate()
-	return c.Orchestrator.IsConfigured()
+func (m *ModelRoutingConfig) IsConfigured() bool {
+	m.Migrate()
+	return m.StrongProvider != "" && m.StrongModel != "" &&
+		m.WeakProvider != "" && m.WeakModel != ""
 }
 
-func (c *ModelRoutingConfig) EffectiveThreshold() float64 {
-	c.Migrate()
-	return c.Orchestrator.EffectiveThreshold()
+func (m *ModelRoutingConfig) EffectiveHighThreshold() float64 {
+	m.Migrate()
+	if m.HighThreshold > 0 && m.HighThreshold < 1 {
+		return m.HighThreshold
+	}
+	return 0.7
 }
 
-func (c *ModelRoutingConfig) TaskConfigured() bool {
-	return c.Task.IsConfigured()
+func (m *ModelRoutingConfig) EffectiveLowThreshold() float64 {
+	m.Migrate()
+	if m.LowThreshold > 0 && m.LowThreshold < 1 {
+		return m.LowThreshold
+	}
+	return 0.3
+}
+
+func (m *ModelRoutingConfig) HasMedium() bool {
+	return m.MediumProvider != "" && m.MediumModel != ""
 }
 
 type CodeIntelConfig struct {

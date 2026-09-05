@@ -53,19 +53,16 @@ type modelPickerState struct {
 	confirmDeleteName string // name of the provider to delete
 
 	// Auto routing configuration sub-screen state.
-	autoStep        string // "" | "orch-strong-provider" | "orch-strong-model" | "orch-weak-provider" | "orch-weak-model" | "task-strong-provider" | "task-strong-model" | "task-weak-provider" | "task-weak-model"
-	autoStrongProv  string // Orchestrator strong
-	autoStrongModel string
-	autoWeakProv    string // Orchestrator weak
-	autoWeakModel   string
-	autoThreshold   float64 // Orchestrator threshold
-	// Task tier fields.
-	autoTaskStrongProv  string
-	autoTaskStrongModel string
-	autoTaskWeakProv    string
-	autoTaskWeakModel   string
-	autoTaskThreshold   float64
-	// 0=orch strong, 1=orch weak, 2=orch threshold, 3=task strong, 4=task weak, 5=task threshold, 6=blank, 7=confirm
+	autoStep          string // "" | "strong-provider" | "strong-model" | "medium-provider" | "medium-model" | "weak-provider" | "weak-model"
+	autoStrongProv    string
+	autoStrongModel   string
+	autoMediumProv    string
+	autoMediumModel   string
+	autoWeakProv      string
+	autoWeakModel     string
+	autoHighThreshold float64
+	autoLowThreshold  float64
+	// 0=strong, 1=medium, 2=weak, 3=high threshold, 4=low threshold, 5=blank, 6=confirm
 	autoFocusLine int
 }
 
@@ -766,14 +763,12 @@ func (m model) selectModelPickerItem() (tea.Model, tea.Cmd) {
 			// Move to model selection for this provider.
 			m.modelPicker.selectedProvider = item
 			switch {
-			case strings.HasPrefix(m.modelPicker.autoStep, "orch-strong"):
-				m.modelPicker.autoStep = "orch-strong-model"
-			case strings.HasPrefix(m.modelPicker.autoStep, "orch-weak"):
-				m.modelPicker.autoStep = "orch-weak-model"
-			case strings.HasPrefix(m.modelPicker.autoStep, "task-strong"):
-				m.modelPicker.autoStep = "task-strong-model"
-			default: // task-weak-provider
-				m.modelPicker.autoStep = "task-weak-model"
+			case strings.HasPrefix(m.modelPicker.autoStep, "strong"):
+				m.modelPicker.autoStep = "strong-model"
+			case strings.HasPrefix(m.modelPicker.autoStep, "medium"):
+				m.modelPicker.autoStep = "medium-model"
+			default: // weak-provider
+				m.modelPicker.autoStep = "weak-model"
 			}
 			m.modelPicker.step = "model"
 			m.modelPicker.loading = true
@@ -787,18 +782,15 @@ func (m model) selectModelPickerItem() (tea.Model, tea.Cmd) {
 		}
 		// Model step in auto sub-flow: store result and return to auto-config.
 		switch {
-		case strings.HasPrefix(m.modelPicker.autoStep, "orch-strong"):
+		case strings.HasPrefix(m.modelPicker.autoStep, "strong"):
 			m.modelPicker.autoStrongProv = m.modelPicker.selectedProvider
 			m.modelPicker.autoStrongModel = item
-		case strings.HasPrefix(m.modelPicker.autoStep, "orch-weak"):
+		case strings.HasPrefix(m.modelPicker.autoStep, "medium"):
+			m.modelPicker.autoMediumProv = m.modelPicker.selectedProvider
+			m.modelPicker.autoMediumModel = item
+		default: // weak
 			m.modelPicker.autoWeakProv = m.modelPicker.selectedProvider
 			m.modelPicker.autoWeakModel = item
-		case strings.HasPrefix(m.modelPicker.autoStep, "task-strong"):
-			m.modelPicker.autoTaskStrongProv = m.modelPicker.selectedProvider
-			m.modelPicker.autoTaskStrongModel = item
-		default: // task-weak
-			m.modelPicker.autoTaskWeakProv = m.modelPicker.selectedProvider
-			m.modelPicker.autoTaskWeakModel = item
 		}
 		m.modelPicker.autoStep = ""
 		m.modelPicker.step = "auto-config"
@@ -810,25 +802,24 @@ func (m model) selectModelPickerItem() (tea.Model, tea.Cmd) {
 	if m.modelPicker.step == "provider" {
 		if item == autoProviderLabel {
 			m.modelPicker.step = "auto-config"
-			m.modelPicker.autoThreshold = 0.5
+			m.modelPicker.autoHighThreshold = 0.7
+			m.modelPicker.autoLowThreshold = 0.3
 			m.modelPicker.autoFocusLine = 0
 			if ar := m.autoRouting(); ar != nil {
 				if cfg := ar.GetAutoRoutingConfig(); cfg != nil {
-					m.modelPicker.autoStrongProv = cfg.OrchestratorStrongProvider
-					m.modelPicker.autoStrongModel = cfg.OrchestratorStrongModel
-					m.modelPicker.autoWeakProv = cfg.OrchestratorWeakProvider
-					m.modelPicker.autoWeakModel = cfg.OrchestratorWeakModel
-					m.modelPicker.autoThreshold = cfg.OrchestratorThreshold
-					if m.modelPicker.autoThreshold <= 0 || m.modelPicker.autoThreshold >= 1 {
-						m.modelPicker.autoThreshold = 0.5
+					m.modelPicker.autoStrongProv = cfg.StrongProvider
+					m.modelPicker.autoStrongModel = cfg.StrongModel
+					m.modelPicker.autoMediumProv = cfg.MediumProvider
+					m.modelPicker.autoMediumModel = cfg.MediumModel
+					m.modelPicker.autoWeakProv = cfg.WeakProvider
+					m.modelPicker.autoWeakModel = cfg.WeakModel
+					m.modelPicker.autoHighThreshold = cfg.HighThreshold
+					if m.modelPicker.autoHighThreshold <= 0 || m.modelPicker.autoHighThreshold >= 1 {
+						m.modelPicker.autoHighThreshold = 0.7
 					}
-					m.modelPicker.autoTaskStrongProv = cfg.TaskStrongProvider
-					m.modelPicker.autoTaskStrongModel = cfg.TaskStrongModel
-					m.modelPicker.autoTaskWeakProv = cfg.TaskWeakProvider
-					m.modelPicker.autoTaskWeakModel = cfg.TaskWeakModel
-					m.modelPicker.autoTaskThreshold = cfg.TaskThreshold
-					if m.modelPicker.autoTaskThreshold <= 0 || m.modelPicker.autoTaskThreshold >= 1 {
-						m.modelPicker.autoTaskThreshold = 0.5
+					m.modelPicker.autoLowThreshold = cfg.LowThreshold
+					if m.modelPicker.autoLowThreshold <= 0 || m.modelPicker.autoLowThreshold >= 1 {
+						m.modelPicker.autoLowThreshold = 0.3
 					}
 				}
 			}
@@ -1117,83 +1108,76 @@ func (m model) handleAutoConfigKey(msg tea.KeyMsg, key string) (tea.Model, tea.C
 	case "up", "k":
 		if m.modelPicker.autoFocusLine > 0 {
 			m.modelPicker.autoFocusLine--
-			// Skip blank separator (line 6).
-			if m.modelPicker.autoFocusLine == 6 {
+			// Skip blank separator (line 5).
+			if m.modelPicker.autoFocusLine == 5 {
 				m.modelPicker.autoFocusLine--
 			}
 		}
 		return m, nil
 	case "down", "j":
-		if m.modelPicker.autoFocusLine < 7 {
+		if m.modelPicker.autoFocusLine < 6 {
 			m.modelPicker.autoFocusLine++
-			// Skip blank separator (line 6).
-			if m.modelPicker.autoFocusLine == 6 {
+			// Skip blank separator (line 5).
+			if m.modelPicker.autoFocusLine == 5 {
 				m.modelPicker.autoFocusLine++
 			}
 		}
 		return m, nil
 	case "left":
 		switch m.modelPicker.autoFocusLine {
-		case 2: // Orchestrator threshold
-			m.modelPicker.autoThreshold -= 0.05
-			if m.modelPicker.autoThreshold < 0.05 {
-				m.modelPicker.autoThreshold = 0.05
+		case 3: // High threshold
+			m.modelPicker.autoHighThreshold -= 0.05
+			if m.modelPicker.autoHighThreshold < 0.05 {
+				m.modelPicker.autoHighThreshold = 0.05
 			}
-		case 5: // Task threshold
-			m.modelPicker.autoTaskThreshold -= 0.05
-			if m.modelPicker.autoTaskThreshold < 0.05 {
-				m.modelPicker.autoTaskThreshold = 0.05
+		case 4: // Low threshold
+			m.modelPicker.autoLowThreshold -= 0.05
+			if m.modelPicker.autoLowThreshold < 0.05 {
+				m.modelPicker.autoLowThreshold = 0.05
 			}
 		}
 		return m, nil
 	case "right":
 		switch m.modelPicker.autoFocusLine {
-		case 2: // Orchestrator threshold
-			m.modelPicker.autoThreshold += 0.05
-			if m.modelPicker.autoThreshold > 0.95 {
-				m.modelPicker.autoThreshold = 0.95
+		case 3: // High threshold
+			m.modelPicker.autoHighThreshold += 0.05
+			if m.modelPicker.autoHighThreshold > 0.95 {
+				m.modelPicker.autoHighThreshold = 0.95
 			}
-		case 5: // Task threshold
-			m.modelPicker.autoTaskThreshold += 0.05
-			if m.modelPicker.autoTaskThreshold > 0.95 {
-				m.modelPicker.autoTaskThreshold = 0.95
+		case 4: // Low threshold
+			m.modelPicker.autoLowThreshold += 0.05
+			if m.modelPicker.autoLowThreshold > 0.95 {
+				m.modelPicker.autoLowThreshold = 0.95
 			}
 		}
 		return m, nil
 	case "enter", " ":
 		switch m.modelPicker.autoFocusLine {
-		case 0: // Orchestrator strong model
-			m.modelPicker.autoStep = "orch-strong-provider"
+		case 0: // Strong model
+			m.modelPicker.autoStep = "strong-provider"
 			m.modelPicker.step = "provider"
 			m.modelPicker.filter = ""
 			m.modelPicker.cursor = 0
 			m.modelPicker.rebuildItems()
 			return m, nil
-		case 1: // Orchestrator weak model
-			m.modelPicker.autoStep = "orch-weak-provider"
+		case 1: // Medium model
+			m.modelPicker.autoStep = "medium-provider"
 			m.modelPicker.step = "provider"
 			m.modelPicker.filter = ""
 			m.modelPicker.cursor = 0
 			m.modelPicker.rebuildItems()
 			return m, nil
-		case 2: // Orchestrator threshold — handled by left/right, no enter action
-		case 3: // Task strong model
-			m.modelPicker.autoStep = "task-strong-provider"
+		case 2: // Weak model
+			m.modelPicker.autoStep = "weak-provider"
 			m.modelPicker.step = "provider"
 			m.modelPicker.filter = ""
 			m.modelPicker.cursor = 0
 			m.modelPicker.rebuildItems()
 			return m, nil
-		case 4: // Task weak model
-			m.modelPicker.autoStep = "task-weak-provider"
-			m.modelPicker.step = "provider"
-			m.modelPicker.filter = ""
-			m.modelPicker.cursor = 0
-			m.modelPicker.rebuildItems()
-			return m, nil
-		case 5: // Task threshold — handled by left/right, no enter action
-		case 6: // blank separator — skip
-		case 7: // Confirm
+		case 3: // High threshold — handled by left/right, no enter action
+		case 4: // Low threshold — handled by left/right, no enter action
+		case 5: // blank separator — skip
+		case 6: // Confirm
 			return m.confirmAutoRouting()
 		}
 	}
@@ -1202,25 +1186,24 @@ func (m model) handleAutoConfigKey(msg tea.KeyMsg, key string) (tea.Model, tea.C
 
 func (m model) confirmAutoRouting() (tea.Model, tea.Cmd) {
 	if m.modelPicker.autoStrongProv == "" || m.modelPicker.autoStrongModel == "" {
-		m.modelPicker.err = "Orchestrator strong model is not configured."
+		m.modelPicker.err = "Strong model is not configured."
 		return m, nil
 	}
 	if m.modelPicker.autoWeakProv == "" || m.modelPicker.autoWeakModel == "" {
-		m.modelPicker.err = "Orchestrator weak model is not configured."
+		m.modelPicker.err = "Weak model is not configured."
 		return m, nil
 	}
-	// Task tier is optional, but if any task field is set, all 4 are required.
-	hasTaskAny := m.modelPicker.autoTaskStrongProv != "" || m.modelPicker.autoTaskStrongModel != "" ||
-		m.modelPicker.autoTaskWeakProv != "" || m.modelPicker.autoTaskWeakModel != ""
-	if hasTaskAny {
-		if m.modelPicker.autoTaskStrongProv == "" || m.modelPicker.autoTaskStrongModel == "" {
-			m.modelPicker.err = "Task strong model is not fully configured."
+	// Medium tier is optional, but if any medium field is set, both are required.
+	hasMediumAny := m.modelPicker.autoMediumProv != "" || m.modelPicker.autoMediumModel != ""
+	if hasMediumAny {
+		if m.modelPicker.autoMediumProv == "" || m.modelPicker.autoMediumModel == "" {
+			m.modelPicker.err = "Medium model is not fully configured."
 			return m, nil
 		}
-		if m.modelPicker.autoTaskWeakProv == "" || m.modelPicker.autoTaskWeakModel == "" {
-			m.modelPicker.err = "Task weak model is not fully configured."
-			return m, nil
-		}
+	}
+	if m.modelPicker.autoHighThreshold <= m.modelPicker.autoLowThreshold {
+		m.modelPicker.err = "High threshold must be greater than low threshold."
+		return m, nil
 	}
 	ar := m.autoRouting()
 	if ar == nil {
@@ -1230,16 +1213,14 @@ func (m model) confirmAutoRouting() (tea.Model, tea.Cmd) {
 	m.modelPicker.loading = true
 	m.modelPicker.notice = "Configuring auto routing…"
 	cfg := backend.AutoRoutingConfig{
-		OrchestratorStrongProvider: m.modelPicker.autoStrongProv,
-		OrchestratorStrongModel:    m.modelPicker.autoStrongModel,
-		OrchestratorWeakProvider:   m.modelPicker.autoWeakProv,
-		OrchestratorWeakModel:      m.modelPicker.autoWeakModel,
-		OrchestratorThreshold:      m.modelPicker.autoThreshold,
-		TaskStrongProvider:         m.modelPicker.autoTaskStrongProv,
-		TaskStrongModel:            m.modelPicker.autoTaskStrongModel,
-		TaskWeakProvider:           m.modelPicker.autoTaskWeakProv,
-		TaskWeakModel:              m.modelPicker.autoTaskWeakModel,
-		TaskThreshold:              m.modelPicker.autoTaskThreshold,
+		StrongProvider: m.modelPicker.autoStrongProv,
+		StrongModel:    m.modelPicker.autoStrongModel,
+		MediumProvider: m.modelPicker.autoMediumProv,
+		MediumModel:    m.modelPicker.autoMediumModel,
+		WeakProvider:   m.modelPicker.autoWeakProv,
+		WeakModel:      m.modelPicker.autoWeakModel,
+		HighThreshold:  m.modelPicker.autoHighThreshold,
+		LowThreshold:   m.modelPicker.autoLowThreshold,
 	}
 	return m, func() tea.Msg {
 		effP, effM, err := ar.SetAutoRouting(m.ctx, cfg)
@@ -1259,14 +1240,11 @@ func (m model) renderAutoConfigStep(body *strings.Builder, th Theme) {
 		label string
 		value string
 	}{
-		// Orchestrator tier
-		{"Orchestrator Strong (main - complex)", m.modelPicker.autoStrongProv + " / " + m.modelPicker.autoStrongModel},
-		{"Orchestrator Weak (main - simple)", m.modelPicker.autoWeakProv + " / " + m.modelPicker.autoWeakModel},
-		{"Orchestrator Threshold", fmt.Sprintf("%.2f", m.modelPicker.autoThreshold)},
-		// Task tier
-		{"Task Strong (sub-tasks - complex)", m.modelPicker.autoTaskStrongProv + " / " + m.modelPicker.autoTaskStrongModel},
-		{"Task Weak (sub-tasks - simple)", m.modelPicker.autoTaskWeakProv + " / " + m.modelPicker.autoTaskWeakModel},
-		{"Task Threshold", fmt.Sprintf("%.2f", m.modelPicker.autoTaskThreshold)},
+		{"Strong (complex tasks)", m.modelPicker.autoStrongProv + " / " + m.modelPicker.autoStrongModel},
+		{"Medium (standard tasks)", m.modelPicker.autoMediumProv + " / " + m.modelPicker.autoMediumModel},
+		{"Weak (simple tasks)", m.modelPicker.autoWeakProv + " / " + m.modelPicker.autoWeakModel},
+		{"High Threshold", fmt.Sprintf("%.2f", m.modelPicker.autoHighThreshold)},
+		{"Low Threshold", fmt.Sprintf("%.2f", m.modelPicker.autoLowThreshold)},
 		// separator
 		{"", ""},
 		// confirm
@@ -1279,7 +1257,7 @@ func (m model) renderAutoConfigStep(body *strings.Builder, th Theme) {
 			mark, style = "› ", th.Success
 		}
 		switch i {
-		case 0, 1, 3, 4: // model lines
+		case 0, 1, 2: // model lines
 			val := line.value
 			if val == " / " {
 				val = th.Muted.Render("(not set)")
@@ -1287,11 +1265,11 @@ func (m model) renderAutoConfigStep(body *strings.Builder, th Theme) {
 				val = th.Text.Render(val)
 			}
 			body.WriteString(style.Render(mark+line.label+": ") + val + th.Muted.Render("  [Enter]") + "\n")
-		case 2, 5: // threshold lines
+		case 3, 4: // threshold lines
 			body.WriteString(style.Render(mark+line.label+": "+line.value) + th.Muted.Render("  [← →]") + "\n")
-		case 6: // blank separator
+		case 5: // blank separator
 			body.WriteString("\n")
-		case 7: // confirm
+		case 6: // confirm
 			body.WriteString(style.Render(mark+line.label) + th.Muted.Render("  [Enter]") + "\n")
 		}
 	}

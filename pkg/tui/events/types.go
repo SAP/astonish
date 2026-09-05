@@ -155,7 +155,9 @@ type Event struct {
 	RoutingTotal      int64   `json:"routing_total,omitempty"`
 	RoutingStrongName string  `json:"routing_strong_name,omitempty"`
 	RoutingWeakName   string  `json:"routing_weak_name,omitempty"`
-	RoutingTier       string  `json:"routing_tier,omitempty"` // "orchestrator" or "task"
+	RoutingMediumName string  `json:"routing_medium_name,omitempty"`
+	RoutingMediumPct  float64 `json:"routing_medium_pct,omitempty"`
+	RoutingTier       string  `json:"routing_tier,omitempty"` // "strong", "medium", or "weak"
 
 	// Meta holds optional backend-specific keys without expanding the struct.
 	Meta map[string]any
@@ -309,7 +311,7 @@ func NewCompaction(info CompactionInfo) Event {
 }
 
 // NewRoutingInfo creates a routing info event.
-func NewRoutingInfo(routingModel string, isStrong bool, strongPct, weakPct float64, total int64, strongName, weakName, tier string) Event {
+func NewRoutingInfo(routingModel string, isStrong bool, strongPct, weakPct float64, total int64, strongName, weakName, tier, mediumName string, mediumPct float64) Event {
 	return Event{
 		Kind:              KindRoutingInfo,
 		RoutingModel:      routingModel,
@@ -320,5 +322,7 @@ func NewRoutingInfo(routingModel string, isStrong bool, strongPct, weakPct float
 		RoutingStrongName: strongName,
 		RoutingWeakName:   weakName,
 		RoutingTier:       tier,
+		RoutingMediumName: mediumName,
+		RoutingMediumPct:  mediumPct,
 	}
 }

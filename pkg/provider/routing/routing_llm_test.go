@@ -3,6 +3,7 @@ package routing
 import (
 	"context"
 	"iter"
+	"math"
 	"sync/atomic"
 	"testing"
 
@@ -51,7 +52,7 @@ func drainLLM(r *RoutingLLM, ctx context.Context) {
 func TestRoutingLLM_RoutesToStrong(t *testing.T) {
 	strong := &mockLLM{name: "strong-model"}
 	weak := &mockLLM{name: "weak-model"}
-	r := NewRoutingLLM(strong, weak, &fixedClassifier{score: 0.8}, 0.5)
+	r := NewRoutingLLM(strong, nil, weak, &fixedClassifier{score: 0.8}, 0.7, 0.3)
 
 	drainLLM(r, context.Background())
 
@@ -66,7 +67,43 @@ func TestRoutingLLM_RoutesToStrong(t *testing.T) {
 func TestRoutingLLM_RoutesToWeak(t *testing.T) {
 	strong := &mockLLM{name: "strong-model"}
 	weak := &mockLLM{name: "weak-model"}
-	r := NewRoutingLLM(strong, weak, &fixedClassifier{score: 0.2}, 0.5)
+	r := NewRoutingLLM(strong, nil, weak, &fixedClassifier{score: 0.2}, 0.7, 0.3)
+
+	drainLLM(r, context.Background())
+
+	if strong.called.Load() {
+		t.Error("expected strong model NOT to be called")
+	}
+	if !weak.called.Load() {
+		t.Error("expected weak model to be called")
+	}
+}
+
+func TestRoutingLLM_RoutesToMedium(t *testing.T) {
+	strong := &mockLLM{name: "strong"}
+	medium := &mockLLM{name: "medium"}
+	weak := &mockLLM{name: "weak"}
+	// score=0.5: below high=0.7 but >= low=0.3 → medium
+	r := NewRoutingLLM(strong, medium, weak, &fixedClassifier{score: 0.5}, 0.7, 0.3)
+
+	drainLLM(r, context.Background())
+
+	if strong.called.Load() {
+		t.Error("expected strong model NOT to be called")
+	}
+	if !medium.called.Load() {
+		t.Error("expected medium model to be called")
+	}
+	if weak.called.Load() {
+		t.Error("expected weak model NOT to be called")
+	}
+}
+
+func TestRoutingLLM_NilMediumFallsBackToWeak(t *testing.T) {
+	strong := &mockLLM{name: "strong"}
+	weak := &mockLLM{name: "weak"}
+	// medium=nil, score=0.5: not >= high=0.7, medium is nil → falls to weak
+	r := NewRoutingLLM(strong, nil, weak, &fixedClassifier{score: 0.5}, 0.7, 0.3)
 
 	drainLLM(r, context.Background())
 
@@ -84,7 +121,7 @@ func TestRoutingLLM_StatsTracking(t *testing.T) {
 
 	// Build one RoutingLLM with a switchable classifier.
 	sc := &switchableClassifier{score: 0.8}
-	r := NewRoutingLLM(strong, weak, sc, 0.5)
+	r := NewRoutingLLM(strong, nil, weak, sc, 0.7, 0.3)
 
 	for i := 0; i < 3; i++ {
 		drainLLM(r, context.Background())
@@ -111,6 +148,43 @@ func TestRoutingLLM_StatsTracking(t *testing.T) {
 	}
 }
 
+func TestRoutingLLM_Stats_3Tier(t *testing.T) {
+	strong := &mockLLM{name: "strong"}
+	medium := &mockLLM{name: "medium"}
+	weak := &mockLLM{name: "weak"}
+
+	sc := &switchableClassifier{score: 0.8}
+	r := NewRoutingLLM(strong, medium, weak, sc, 0.7, 0.3)
+
+	// 1 strong call (score >= 0.7)
+	sc.score = 0.8
+	drainLLM(r, context.Background())
+
+	// 1 medium call (0.3 <= score < 0.7)
+	sc.score = 0.5
+	drainLLM(r, context.Background())
+
+	// 1 weak call (score < 0.3)
+	sc.score = 0.1
+	drainLLM(r, context.Background())
+
+	if r.Stats.Total() != 3 {
+		t.Errorf("Total = %d, want 3", r.Stats.Total())
+	}
+	if r.Stats.StrongCount() != 1 {
+		t.Errorf("StrongCount = %d, want 1", r.Stats.StrongCount())
+	}
+	if r.Stats.MediumCount() != 1 {
+		t.Errorf("MediumCount = %d, want 1", r.Stats.MediumCount())
+	}
+	if r.Stats.WeakCount() != 1 {
+		t.Errorf("WeakCount = %d, want 1", r.Stats.WeakCount())
+	}
+	if pct := r.Stats.MediumPct(); math.Abs(pct-33.333333333333336) > 0.001 {
+		t.Errorf("MediumPct = %f, want ~33.3", pct)
+	}
+}
+
 type switchableClassifier struct {
 	score ComplexityScore
 }
@@ -122,59 +196,50 @@ func (s *switchableClassifier) Classify(context.Context, string, ClassifierConte
 func TestRoutingLLM_LastRouting(t *testing.T) {
 	strong := &mockLLM{name: "strong-model"}
 	weak := &mockLLM{name: "weak-model"}
-	r := NewRoutingLLM(strong, weak, &fixedClassifier{score: 0.2}, 0.5)
+	r := NewRoutingLLM(strong, nil, weak, &fixedClassifier{score: 0.2}, 0.7, 0.3)
 
 	drainLLM(r, context.Background())
 
-	name, isStrong := r.Last.Get()
+	name, tier := r.Last.Get()
 	if name != "weak-model" {
 		t.Errorf("Last.Name = %q, want %q", name, "weak-model")
 	}
-	if isStrong {
-		t.Error("Last.IsStrong = true, want false")
+	if tier != "weak" {
+		t.Errorf("Last.tier = %q, want %q", tier, "weak")
 	}
 }
 
-func TestRoutingLLM_Name(t *testing.T) {
+func TestRoutingLLM_Name_2Models(t *testing.T) {
 	strong := &mockLLM{name: "claude-sonnet"}
 	weak := &mockLLM{name: "gpt-4o-mini"}
 
-	t.Run("no tier", func(t *testing.T) {
-		r := NewRoutingLLM(strong, weak, &fixedClassifier{score: 0.5}, 0.5)
-		want := "auto(claude-sonnet|gpt-4o-mini)"
-		if got := r.Name(); got != want {
-			t.Errorf("Name() = %q, want %q", got, want)
-		}
-	})
+	r := NewRoutingLLM(strong, nil, weak, &fixedClassifier{score: 0.5}, 0.7, 0.3)
+	want := "auto(claude-sonnet|gpt-4o-mini)"
+	if got := r.Name(); got != want {
+		t.Errorf("Name() = %q, want %q", got, want)
+	}
+}
 
-	t.Run("tier orchestrator", func(t *testing.T) {
-		r := NewRoutingLLM(strong, weak, &fixedClassifier{score: 0.5}, 0.5)
-		r.Tier = "orchestrator"
-		want := "auto:orchestrator(claude-sonnet|gpt-4o-mini)"
-		if got := r.Name(); got != want {
-			t.Errorf("Name() = %q, want %q", got, want)
-		}
-	})
+func TestRoutingLLM_Name_3Models(t *testing.T) {
+	strong := &mockLLM{name: "strong"}
+	medium := &mockLLM{name: "medium"}
+	weak := &mockLLM{name: "weak"}
 
-	t.Run("tier task", func(t *testing.T) {
-		r := NewRoutingLLM(strong, weak, &fixedClassifier{score: 0.5}, 0.5)
-		r.Tier = "task"
-		want := "auto:task(claude-sonnet|gpt-4o-mini)"
-		if got := r.Name(); got != want {
-			t.Errorf("Name() = %q, want %q", got, want)
-		}
-	})
+	r := NewRoutingLLM(strong, medium, weak, &fixedClassifier{score: 0.5}, 0.7, 0.3)
+	want := "auto(strong|medium|weak)"
+	if got := r.Name(); got != want {
+		t.Errorf("Name() = %q, want %q", got, want)
+	}
 }
 
 func TestRoutingLLM_DefaultThreshold(t *testing.T) {
 	strong := &mockLLM{name: "strong"}
 	weak := &mockLLM{name: "weak"}
 
-	// threshold=0 should default to 0.5.
-	r := NewRoutingLLM(strong, weak, &fixedClassifier{score: 0.4}, 0)
+	// highThreshold=0 should default to 0.7; score=0.4 < 0.7 → weak.
+	r := NewRoutingLLM(strong, nil, weak, &fixedClassifier{score: 0.4}, 0, 0.3)
 	drainLLM(r, context.Background())
 
-	// 0.4 < 0.5 threshold → weak should be called.
 	if strong.called.Load() {
 		t.Error("expected strong NOT called with default threshold")
 	}

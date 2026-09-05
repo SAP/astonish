@@ -2,146 +2,219 @@
 
 ## Overview
 
-Astonish supports **4-tier Auto routing** with two independent routing levels, each with a strong/weak model pair and a separate complexity threshold:
-
-- **Orchestrator tier** (main agent loop): routes between a premium model (e.g., Claude Opus) and a mid-tier model (e.g., Claude Sonnet) based on prompt complexity
-- **Task tier** (sub-agents via `delegate_tasks`): routes between a mid-tier model and a cheap model (e.g., GPT-4o-mini) for parallelized sub-tasks
-
-The Task tier is optional. When unconfigured, sub-agents inherit the orchestrator-level LLM.
-
-## Configuration
-
-```yaml
-model_routing:
-  orchestrator:
-    strong_provider: anthropic
-    strong_model: claude-opus-4-5
-    weak_provider: anthropic
-    weak_model: claude-sonnet-4
-    threshold: 0.5
-  task:
-    strong_provider: anthropic
-    strong_model: claude-sonnet-4
-    weak_provider: openai
-    weak_model: gpt-4o-mini
-    threshold: 0.4
-```
-
-### Legacy Migration
-
-Flat 2-model configs (pre-4-tier) are automatically migrated to the Orchestrator tier via `ModelRoutingConfig.Migrate()`:
-
-```yaml
-# Legacy format (auto-migrated)
-model_routing:
-  strong_provider: anthropic
-  strong_model: claude-opus-4-5
-  weak_provider: anthropic
-  weak_model: claude-sonnet-4
-  threshold: 0.5
-```
-
-## Architecture
+Astonish supports **3-tier Auto routing** with a single shared model pool used by both the main agent (orchestrator) and all sub-agents (spawned via `delegate_tasks`). The MLP classifier's continuous sigmoid score (0.0–1.0) is split into three ranges using two configurable thresholds to select among strong, medium, and weak models.
 
 ```
 SwappableLLM
-  └─ RoutingLLM (tier="orchestrator")
-       ├─ strong → claude-opus-4-5
-       └─ weak   → claude-sonnet-4
-
-SubAgentManager.TaskLLM
-  └─ RoutingLLM (tier="task")
-       ├─ strong → claude-sonnet-4
-       └─ weak   → gpt-4o-mini
+  └─ RoutingLLM (shared by orchestrator + sub-agents)
+       ├─ strong → e.g. claude-opus-4-5     (score ≥ high_threshold, default 0.70)
+       ├─ medium → e.g. claude-sonnet-4     (low_threshold ≤ score < high_threshold)
+       └─ weak   → e.g. gpt-4o-mini         (score < low_threshold, default 0.30)
 ```
 
-### Key Types
+Score ranges (default thresholds):
+- `[0.70, 1.0]` → **strong** (complex reasoning, architecture, refactoring)
+- `[0.30, 0.70)` → **medium** (standard tasks, code generation, explanations)
+- `[0.00, 0.30)` → **weak** (simple queries, greetings, clarifications)
 
-- **`config.RoutingTierConfig`** — per-tier config (strong/weak provider+model, threshold)
-- **`config.ModelRoutingConfig`** — top-level config with Orchestrator and Task tiers, plus legacy flat fields
-- **`backend.AutoRoutingConfig`** — TUI backend struct carrying both tiers for the model picker
-- **`routing.RoutingLLM`** — wraps strong+weak LLMs with a classifier; `.Tier` field identifies orchestrator vs task
-- **`routing.MLPClassifier`** — pre-trained 3-layer MLP (384→64→32→1, sigmoid) using all-MiniLM-L6-v2 embeddings; loaded from `router_weights.npz`
-- **`routing.ComplexityClassifier`** — interface for pluggable classifiers
+## Key Types
 
-### MLP Classifier
+### `ModelRoutingConfig` (`pkg/config/app_config.go`)
 
-The routing classifier is a trained MLP neural network (~26,753 parameters, 98 KB weights):
+Flat configuration struct persisted in `config.yaml` under `model_routing:`:
 
-1. **Embedding**: Prompt text → 384-dim vector via Hugot all-MiniLM-L6-v2 ONNX model (~90 MB, lazy-loaded)
-2. **Forward pass**: Pure Go float64 arithmetic: `ReLU(emb @ W1 + b1) → ReLU(h1 @ W2 + b2) → sigmoid(h2 @ W3 + b3)`
-3. **Output**: P(needs_strong) ∈ [0, 1]; compared against per-tier threshold
+```go
+type ModelRoutingConfig struct {
+    StrongProvider string  `yaml:"strong_provider,omitempty"`
+    StrongModel    string  `yaml:"strong_model,omitempty"`
+    MediumProvider string  `yaml:"medium_provider,omitempty"`
+    MediumModel    string  `yaml:"medium_model,omitempty"`
+    WeakProvider   string  `yaml:"weak_provider,omitempty"`
+    WeakModel      string  `yaml:"weak_model,omitempty"`
+    HighThreshold  float64 `yaml:"high_threshold,omitempty"`
+    LowThreshold   float64 `yaml:"low_threshold,omitempty"`
+    // Legacy fields (auto-migrated on load)
+    Orchestrator *legacyTierConfig `yaml:"orchestrator,omitempty"`
+    Task         *legacyTierConfig `yaml:"task,omitempty"`
+    LegacyThreshold float64        `yaml:"threshold,omitempty"`
+}
+```
 
-The classifier accepts a `context.Context` so cancellation propagates to the embedding step. Fallback chain: empty prompt → 0.1, plan mode → 0.9, nil/error embed → 0.5.
+Key methods:
+- `IsConfigured()` — returns true when strong+weak providers are set (medium is optional)
+- `HasMedium()` — returns true when medium provider+model are both set
+- `EffectiveHighThreshold()` — returns `HighThreshold` or default 0.70
+- `EffectiveLowThreshold()` — returns `LowThreshold` or default 0.30
+- `Migrate()` — converts legacy 4-tier or pre-4-tier configs to the flat 3-model format
 
-### Classifier Context
+### `RoutingLLM` (`pkg/provider/routing/routing_llm.go`)
 
-`ClassifierContext` carries out-of-band signals injected via `WithClassifierContext()` before each turn:
+Wraps three `model.LLM` instances and selects among them at call time:
 
-- **`HasPlanMode`** — set when Plan mode or Graph-Optimized Plan mode is active; forces strong model (score 0.9)
-- **`ToolNames`** — reserved for future use (available tool names)
-- **`ConversationTurns`** — reserved for future use (conversation depth)
+```go
+type RoutingLLM struct {
+    strong     model.LLM
+    medium     model.LLM  // nil → medium-range scores fall back to weak
+    weak       model.LLM
+    classifier ComplexityClassifier
+    highThreshold float64
+    lowThreshold  float64
+    StrongName string
+    MediumName string
+    WeakName   string
+    Stats      RoutingStats
+    Last       LastRouting
+}
+```
 
-The context is injected in `RunTurn` (tui_code.go) before `driveTurn` and propagates through the ADK runner to every `RoutingLLM.GenerateContent` call.
+Constructor:
+```go
+func NewRoutingLLM(strong, medium, weak model.LLM, classifier ComplexityClassifier,
+    highThreshold, lowThreshold float64) *RoutingLLM
+```
 
-### Weight File Management
+- `medium` may be nil — when nil, medium-range scores (between `lowThreshold` and `highThreshold`) route to `weak`
+- Both thresholds are clamped to `(0, 1)` and must satisfy `lowThreshold < highThreshold`
 
-Weights are stored at `config.GetModelsDir()/router_weights.npz`. `EnsureRouterWeights` manages the lifecycle:
+Selection logic in `GenerateContent`:
+```go
+switch {
+case score >= highThreshold:
+    // use strong
+case medium != nil && score >= lowThreshold:
+    // use medium
+default:
+    // use weak
+}
+```
 
-1. **Cached**: Return immediately if file exists
-2. **Local copy**: Check `../astonish-router/outputs/` (development workflow)
-3. **Download**: Fetch from GitHub Releases (~99 KB)
+### `RoutingStats` (`pkg/provider/routing/routing_llm.go`)
 
-When `RouterWeightsSHA256` is set (non-empty), downloaded or copied files are verified against the expected digest. Mismatches delete the file and return an error.
+Thread-safe call counters:
+- `RecordStrong()`, `RecordMedium()`, `RecordWeak()`
+- `StrongCount()`, `MediumCount()`, `WeakCount()`, `Total()`
+- `StrongPct()`, `MediumPct()`, `WeakPct()` — percentages of total
+- `Reset()` — zeroes all counters
 
-### Prompt Classification
+### `LastRouting` (`pkg/provider/routing/routing_llm.go`)
 
-`extractLastUserMessage` extracts the actual user-typed input from the LLM request, skipping:
-1. Framework-injected per-turn context (Content entries starting with `[Astonish Per-Turn Context`)
-2. Injected context parts (AGENTS.md, session state) — picks the shortest text part as the user's actual input
+Thread-safe record of the most recent routing decision:
+- `Set(name string, tier string)` — stores model name and tier ("strong"/"medium"/"weak")
+- `Get() (name string, tier string)` — retrieves the last decision
 
-The classifier scores this text on a 0–1 complexity scale. Scores ≥ threshold route to the strong model; below threshold routes to weak.
+### `AutoRoutingConfig` (`pkg/tui/backend/backend.go`)
+
+Carries 3-model routing choices from the TUI into `SetAutoRouting`:
+
+```go
+type AutoRoutingConfig struct {
+    StrongProvider string
+    StrongModel    string
+    MediumProvider string  // optional
+    MediumModel    string  // optional
+    WeakProvider   string
+    WeakModel      string
+    HighThreshold  float64
+    LowThreshold   float64
+}
+```
+
+`HasMedium()` returns true when both medium fields are non-empty.
+
+## Classifier
+
+The `ComplexityClassifier` interface (`pkg/provider/routing/classifier.go`):
+
+```go
+type ComplexityClassifier interface {
+    Classify(ctx context.Context, prompt string, context []string) float32
+}
+```
+
+The production implementation is an MLP (multi-layer perceptron) trained on prompt features. The score is a sigmoid output in `[0.0, 1.0]`:
+- Values close to 1.0 → high complexity (prefer strong model)
+- Values close to 0.0 → low complexity (prefer weak model)
+
+Weights are downloaded on first use and stored locally. SHA-256 checksum verification (`pkg/provider/routing/weights_init.go`) is performed on download to ensure integrity.
+
+## Launcher Wiring (`pkg/launcher/tui_code.go`)
+
+One `RoutingLLM` is created and shared:
+
+1. **Startup restore**: when `config.yaml` contains `model_routing` with a configured strong+weak pair, `NewBackend` creates a single `RoutingLLM` and:
+   - Swaps it into `result.SwappableLLM` (used by the main agent loop)
+   - Assigns it to `b.result.ChatAgent.SubAgentManager.TaskLLM` (used by sub-agents)
+
+2. **Interactive configuration** (`SetAutoRouting`): same wiring as above, triggered by the user confirming the model picker auto-config screen.
+
+3. **Routing summary**: after each turn with more than one routing call, a system message is emitted showing the percentage breakdown (e.g., `Auto routing — 5 calls (20% strong opus, 40% medium sonnet, 40% weak mini)`).
 
 ## UX
 
-### Model Picker
+### Model Picker Auto-Config Screen
 
-The `/model` → Auto config screen shows 8 lines:
-1. Orchestrator Strong (main - complex)
-2. Orchestrator Weak (main - simple)
-3. Orchestrator Threshold [← →]
-4. Task Strong (sub-tasks - complex)
-5. Task Weak (sub-tasks - simple)
-6. Task Threshold [← →]
-7. (blank separator)
-8. Confirm [Enter]
+When the user selects `✦ Auto (smart routing)` from the `/model` provider list, a 7-line configuration screen appears:
+
+```
+✦ Auto Model Routing  ↑↓ move  enter select  ← → threshold  esc cancel
+
+› Strong (complex tasks): anthropic / claude-opus-4-5  [Enter]
+  Medium (standard tasks): anthropic / claude-sonnet-4  [Enter]
+  Weak (simple tasks): openai / gpt-4o-mini  [Enter]
+  High Threshold: 0.70  [← →]
+  Low Threshold: 0.30  [← →]
+
+  Confirm  [Enter]
+```
+
+- Lines 0–2: model slots (Enter opens provider→model picker sub-flow)
+- Lines 3–4: threshold adjustments (left/right in 0.05 steps)
+- Line 5: blank separator (skipped by navigation)
+- Line 6: confirm
+
+Medium is optional. If medium fields are left empty, a 2-model fallback is used (medium-range scores go to weak).
+
+### Routing Badges
+
+Each assistant message shows a routing badge indicating which model tier was used:
+- `🧠` — strong model
+- `⚙️` — medium model
+- `⚡` — weak model
 
 ### Footer
 
-When both tiers are configured:
-```
-Auto / orch: opus|sonnet · task: sonnet|luna
-```
+When auto routing is active, the footer shows `auto / auto`.
 
-### Routing Badge
+### Routing Info Events
 
-Each agent response shows a routing badge:
-- 🧠 = orchestrator strong
-- ⚡ = orchestrator weak
-- 🔮 = task strong
-- 💨 = task weak
+`KindRoutingInfo` events carry:
+- `RoutingModel` — the model name used for this turn
+- `RoutingTier` — "strong", "medium", or "weak"
+- `RoutingStrongName`, `RoutingMediumName`, `RoutingWeakName` — display names for each tier
+- `RoutingStrongPct`, `RoutingMediumPct`, `RoutingWeakPct` — cumulative percentage breakdown
+- `RoutingTotal` — total call count so far
 
-### Turn Summary
+## Legacy Migration
 
-End-of-turn summary shows per-tier breakdown:
-```
-Auto routing — Orchestrator: 5 calls (60% strong opus, 40% weak sonnet) · Task: 12 calls (25% strong sonnet, 75% weak luna)
-```
+`ModelRoutingConfig.Migrate()` handles two legacy formats transparently:
 
-## Wiring
+### Pre-4-tier flat format
+Old configs with flat `strong_provider`/`strong_model`/`weak_provider`/`weak_model` keys deserialize directly into the new struct (same YAML keys). Only the `threshold` key needs migration: it maps to `HighThreshold`, and `LowThreshold` defaults to 0.30.
 
-1. **Startup restore**: `RunCodeTUI` / `buildCodeBackend` check `appConfig.ModelRouting.IsConfigured()`, create orchestrator RoutingLLM, swap into SwappableLLM, and optionally create task RoutingLLM
-2. **Model picker**: `SetAutoRouting` creates both RoutingLLMs, wires task LLM to `SubAgentManager.TaskLLM`
-3. **Turn execution**: `driveTurn` wires `taskRoutingLLM` to `chatAgent.SubAgentManager.TaskLLM`
-4. **Config persistence**: both tiers saved to `config.yaml` under `model_routing.orchestrator` and `model_routing.task`
-5. **Events**: `emitRoutingInfo` sends `routing_tier` field; transcript tracks `LastRoutingTier`
+### 4-tier Orchestrator/Task format
+Old configs with nested `orchestrator:` and `task:` sections are migrated as follows:
+- `Orchestrator.StrongProvider/Model` → `StrongProvider/Model`
+- `Task.StrongProvider/Model` → `MediumProvider/Model` (task-strong becomes medium)
+- `Task.WeakProvider/Model` → `WeakProvider/Model` (task-weak becomes the new weak)
+- `Orchestrator.Threshold` → `HighThreshold`
+- `Task.Threshold` → `LowThreshold`
+
+After migration the `Orchestrator` and `Task` fields are cleared so they are not persisted on the next save.
+
+## Context Propagation
+
+`ComplexityClassifier.Classify(ctx context.Context, ...)` accepts a context to support cancellation. The caller's context (from `GenerateContent`) is passed through so a cancelled turn cancels the classifier call as well.
+
+## Checksum Verification
+
+When downloading MLP weights for the first time, `pkg/provider/routing/weights_init.go` verifies the SHA-256 hash of the downloaded file against a hardcoded expected value before writing it to disk. A checksum mismatch causes the download to fail with an error, preventing use of corrupted or tampered weights.

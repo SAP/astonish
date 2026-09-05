@@ -16,20 +16,29 @@ import (
 // RoutingStats tracks cumulative routing decisions (thread-safe via atomics).
 type RoutingStats struct {
 	strongCalls atomic.Int64
+	mediumCalls atomic.Int64
 	weakCalls   atomic.Int64
 }
 
 // RecordStrong increments the strong model call counter.
 func (s *RoutingStats) RecordStrong() { s.strongCalls.Add(1) }
 
+// RecordMedium increments the medium model call counter.
+func (s *RoutingStats) RecordMedium() { s.mediumCalls.Add(1) }
+
 // RecordWeak increments the weak model call counter.
 func (s *RoutingStats) RecordWeak() { s.weakCalls.Add(1) }
 
 // Total returns the total number of routing decisions.
-func (s *RoutingStats) Total() int64 { return s.strongCalls.Load() + s.weakCalls.Load() }
+func (s *RoutingStats) Total() int64 {
+	return s.strongCalls.Load() + s.mediumCalls.Load() + s.weakCalls.Load()
+}
 
 // StrongCount returns the number of strong model calls.
 func (s *RoutingStats) StrongCount() int64 { return s.strongCalls.Load() }
+
+// MediumCount returns the number of medium model calls.
+func (s *RoutingStats) MediumCount() int64 { return s.mediumCalls.Load() }
 
 // WeakCount returns the number of weak model calls.
 func (s *RoutingStats) WeakCount() int64 { return s.weakCalls.Load() }
@@ -43,6 +52,15 @@ func (s *RoutingStats) StrongPct() float64 {
 	return float64(s.strongCalls.Load()) / float64(total) * 100
 }
 
+// MediumPct returns the percentage of calls routed to the medium model (0-100).
+func (s *RoutingStats) MediumPct() float64 {
+	total := s.Total()
+	if total == 0 {
+		return 0
+	}
+	return float64(s.mediumCalls.Load()) / float64(total) * 100
+}
+
 // WeakPct returns the percentage of calls routed to the weak model (0-100).
 func (s *RoutingStats) WeakPct() float64 {
 	total := s.Total()
@@ -52,9 +70,10 @@ func (s *RoutingStats) WeakPct() float64 {
 	return float64(s.weakCalls.Load()) / float64(total) * 100
 }
 
-// Reset zeroes both counters.
+// Reset zeroes all counters.
 func (s *RoutingStats) Reset() {
 	s.strongCalls.Store(0)
+	s.mediumCalls.Store(0)
 	s.weakCalls.Store(0)
 }
 
@@ -62,59 +81,75 @@ func (s *RoutingStats) Reset() {
 type LastRouting struct {
 	mu        sync.RWMutex
 	modelName string
-	isStrong  bool
+	tier      string
 }
 
 // Set records a routing decision.
-func (lr *LastRouting) Set(name string, strong bool) {
+func (lr *LastRouting) Set(name string, tier string) {
 	lr.mu.Lock()
 	lr.modelName = name
-	lr.isStrong = strong
+	lr.tier = tier
 	lr.mu.Unlock()
 }
 
 // Get returns the most recent routing decision.
-func (lr *LastRouting) Get() (name string, isStrong bool) {
+func (lr *LastRouting) Get() (name string, tier string) {
 	lr.mu.RLock()
 	name = lr.modelName
-	isStrong = lr.isStrong
+	tier = lr.tier
 	lr.mu.RUnlock()
 	return
 }
 
 // RoutingLLM implements model.LLM and routes each GenerateContent call
-// to either a strong or weak LLM based on prompt complexity.
+// to a strong, medium, or weak LLM based on prompt complexity.
 type RoutingLLM struct {
-	strong     model.LLM
-	weak       model.LLM
-	classifier ComplexityClassifier
-	threshold  float64
-	Stats      RoutingStats
-	Last       LastRouting
-	StrongName string // display name (e.g. "claude-sonnet")
-	WeakName   string // display name (e.g. "gpt-4o-mini")
-	Tier       string // "orchestrator" or "task" (empty for legacy 2-tier)
+	strong        model.LLM
+	medium        model.LLM
+	weak          model.LLM
+	classifier    ComplexityClassifier
+	highThreshold float64
+	lowThreshold  float64
+	Stats         RoutingStats
+	Last          LastRouting
+	StrongName    string // display name (e.g. "claude-sonnet")
+	MediumName    string // display name (e.g. "claude-haiku"), empty if no medium
+	WeakName      string // display name (e.g. "gpt-4o-mini")
 }
 
 // NewRoutingLLM creates a routing LLM wrapper.
-func NewRoutingLLM(strong, weak model.LLM, classifier ComplexityClassifier, threshold float64) *RoutingLLM {
-	if threshold <= 0 || threshold > 1 {
-		threshold = 0.5
+// medium may be nil for a 2-tier (strong/weak) setup.
+func NewRoutingLLM(strong, medium, weak model.LLM, classifier ComplexityClassifier, highThreshold, lowThreshold float64) *RoutingLLM {
+	if highThreshold <= 0 || highThreshold >= 1 {
+		highThreshold = 0.7
+	}
+	if lowThreshold <= 0 || lowThreshold >= 1 {
+		lowThreshold = 0.3
+	}
+	if lowThreshold >= highThreshold {
+		lowThreshold = highThreshold - 0.1
+	}
+	mediumName := ""
+	if medium != nil {
+		mediumName = medium.Name()
 	}
 	return &RoutingLLM{
-		strong:     strong,
-		weak:       weak,
-		classifier: classifier,
-		threshold:  threshold,
-		StrongName: strong.Name(),
-		WeakName:   weak.Name(),
+		strong:        strong,
+		medium:        medium,
+		weak:          weak,
+		classifier:    classifier,
+		highThreshold: highThreshold,
+		lowThreshold:  lowThreshold,
+		StrongName:    strong.Name(),
+		MediumName:    mediumName,
+		WeakName:      weak.Name(),
 	}
 }
 
 // Name implements model.LLM.
 func (r *RoutingLLM) Name() string {
-	if r.Tier != "" {
-		return fmt.Sprintf("auto:%s(%s|%s)", r.Tier, r.StrongName, r.WeakName)
+	if r.MediumName != "" {
+		return fmt.Sprintf("auto(%s|%s|%s)", r.StrongName, r.MediumName, r.WeakName)
 	}
 	return fmt.Sprintf("auto(%s|%s)", r.StrongName, r.WeakName)
 }
@@ -123,27 +158,36 @@ func (r *RoutingLLM) Name() string {
 func (r *RoutingLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	prompt := extractLastUserMessage(req)
 	classCtx := ClassifierContextFromContext(ctx)
-
 	score := r.classifier.Classify(ctx, prompt, classCtx)
 
 	var chosen model.LLM
-	var label string
-	isStrong := float64(score) >= r.threshold
-	if isStrong {
+	var label, tier string
+	switch {
+	case float64(score) >= r.highThreshold:
 		chosen = r.strong
 		label = "strong"
+		tier = "strong"
 		r.Stats.RecordStrong()
-		r.Last.Set(r.StrongName, true)
-	} else {
+		r.Last.Set(r.StrongName, "strong")
+	case r.medium != nil && float64(score) >= r.lowThreshold:
+		chosen = r.medium
+		label = "medium"
+		tier = "medium"
+		r.Stats.RecordMedium()
+		r.Last.Set(r.MediumName, "medium")
+	default:
 		chosen = r.weak
 		label = "weak"
+		tier = "weak"
 		r.Stats.RecordWeak()
-		r.Last.Set(r.WeakName, false)
+		r.Last.Set(r.WeakName, "weak")
 	}
 
 	slog.Debug("[routing] model selected",
 		"score", fmt.Sprintf("%.2f", score),
-		"threshold", fmt.Sprintf("%.2f", r.threshold),
+		"high_threshold", fmt.Sprintf("%.2f", r.highThreshold),
+		"low_threshold", fmt.Sprintf("%.2f", r.lowThreshold),
+		"tier", tier,
 		"chosen", label,
 		"model", chosen.Name(),
 		"prompt_preview", truncateForLog(prompt, 100),
@@ -154,6 +198,9 @@ func (r *RoutingLLM) GenerateContent(ctx context.Context, req *model.LLMRequest,
 
 // StrongModel returns the strong model (for inspection).
 func (r *RoutingLLM) StrongModel() model.LLM { return r.strong }
+
+// MediumModel returns the medium model (for inspection), may be nil.
+func (r *RoutingLLM) MediumModel() model.LLM { return r.medium }
 
 // WeakModel returns the weak model (for inspection).
 func (r *RoutingLLM) WeakModel() model.LLM { return r.weak }

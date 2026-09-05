@@ -1196,12 +1196,15 @@ func mapSSEToEvents(sev *client.SSEEvent, debug bool) []events.Event {
 			StrongName string  `json:"routing_strong_name"`
 			WeakName   string  `json:"routing_weak_name"`
 			Tier       string  `json:"routing_tier"`
+			MediumName string  `json:"routing_medium_name"`
+			MediumPct  float64 `json:"routing_medium_pct"`
 		}
 		if json.Unmarshal(data, &payload) == nil && payload.Model != "" {
 			return []events.Event{events.NewRoutingInfo(
 				payload.Model, payload.IsStrong,
 				payload.StrongPct, payload.WeakPct, payload.Total,
 				payload.StrongName, payload.WeakName, payload.Tier,
+				payload.MediumName, payload.MediumPct,
 			)}
 		}
 	case "plan":

@@ -2,74 +2,6 @@ package config
 
 import "testing"
 
-func TestModelRoutingConfig_IsConfigured(t *testing.T) {
-	tests := []struct {
-		name string
-		cfg  ModelRoutingConfig
-		want bool
-	}{
-		{
-			name: "all set via orchestrator tier",
-			cfg: ModelRoutingConfig{Orchestrator: RoutingTierConfig{
-				StrongProvider: "anthropic", StrongModel: "claude-sonnet",
-				WeakProvider: "openai", WeakModel: "gpt-4o-mini",
-			}},
-			want: true,
-		},
-		{
-			name: "missing weak provider via orchestrator tier",
-			cfg: ModelRoutingConfig{Orchestrator: RoutingTierConfig{
-				StrongProvider: "anthropic", StrongModel: "claude-sonnet",
-				WeakModel: "gpt-4o-mini",
-			}},
-			want: false,
-		},
-		{
-			name: "missing strong model via orchestrator tier",
-			cfg: ModelRoutingConfig{Orchestrator: RoutingTierConfig{
-				StrongProvider: "anthropic",
-				WeakProvider:   "openai", WeakModel: "gpt-4o-mini",
-			}},
-			want: false,
-		},
-		{
-			name: "empty",
-			cfg:  ModelRoutingConfig{},
-			want: false,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.cfg.IsConfigured(); got != tt.want {
-				t.Errorf("IsConfigured() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestModelRoutingConfig_EffectiveThreshold(t *testing.T) {
-	tests := []struct {
-		name      string
-		threshold float64
-		want      float64
-	}{
-		{"zero defaults to 0.5", 0, 0.5},
-		{"custom 0.3", 0.3, 0.3},
-		{"custom 0.7", 0.7, 0.7},
-		{"negative defaults to 0.5", -0.1, 0.5},
-		{"above 1 defaults to 0.5", 1.5, 0.5},
-		{"exactly 1 defaults to 0.5", 1.0, 0.5},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := ModelRoutingConfig{Orchestrator: RoutingTierConfig{Threshold: tt.threshold}}
-			if got := cfg.EffectiveThreshold(); got != tt.want {
-				t.Errorf("EffectiveThreshold() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestIsAutoModel(t *testing.T) {
 	tests := []struct {
 		input string
@@ -92,15 +24,15 @@ func TestIsAutoModel(t *testing.T) {
 	}
 }
 
-func TestRoutingTierConfig_IsConfigured(t *testing.T) {
+func TestModelRoutingConfig_IsConfigured_3Tier(t *testing.T) {
 	tests := []struct {
 		name string
-		tier RoutingTierConfig
+		cfg  ModelRoutingConfig
 		want bool
 	}{
 		{
-			name: "all set",
-			tier: RoutingTierConfig{
+			name: "all set flat 3-tier",
+			cfg: ModelRoutingConfig{
 				StrongProvider: "anthropic", StrongModel: "claude-sonnet",
 				WeakProvider: "openai", WeakModel: "gpt-4o-mini",
 			},
@@ -108,126 +40,226 @@ func TestRoutingTierConfig_IsConfigured(t *testing.T) {
 		},
 		{
 			name: "missing weak provider",
-			tier: RoutingTierConfig{
+			cfg: ModelRoutingConfig{
 				StrongProvider: "anthropic", StrongModel: "claude-sonnet",
 				WeakModel: "gpt-4o-mini",
 			},
 			want: false,
 		},
 		{
+			name: "missing strong model",
+			cfg: ModelRoutingConfig{
+				StrongProvider: "anthropic",
+				WeakProvider:   "openai", WeakModel: "gpt-4o-mini",
+			},
+			want: false,
+		},
+		{
 			name: "empty",
-			tier: RoutingTierConfig{},
+			cfg:  ModelRoutingConfig{},
 			want: false,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.tier.IsConfigured(); got != tt.want {
+			if got := tt.cfg.IsConfigured(); got != tt.want {
 				t.Errorf("IsConfigured() = %v, want %v", got, tt.want)
 			}
 		})
 	}
 }
 
-func TestRoutingTierConfig_EffectiveThreshold(t *testing.T) {
+func TestModelRoutingConfig_EffectiveHighThreshold(t *testing.T) {
 	tests := []struct {
 		name      string
 		threshold float64
 		want      float64
 	}{
-		{"zero defaults to 0.5", 0, 0.5},
-		{"custom 0.3", 0.3, 0.3},
-		{"negative defaults to 0.5", -0.1, 0.5},
-		{"above 1 defaults to 0.5", 1.5, 0.5},
+		{"zero defaults to 0.7", 0, 0.7},
+		{"custom 0.8", 0.8, 0.8},
+		{"custom 0.6", 0.6, 0.6},
+		{"negative defaults to 0.7", -0.1, 0.7},
+		{"above 1 defaults to 0.7", 1.5, 0.7},
+		{"exactly 1 defaults to 0.7", 1.0, 0.7},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tier := RoutingTierConfig{Threshold: tt.threshold}
-			if got := tier.EffectiveThreshold(); got != tt.want {
-				t.Errorf("EffectiveThreshold() = %v, want %v", got, tt.want)
+			cfg := ModelRoutingConfig{HighThreshold: tt.threshold}
+			if got := cfg.EffectiveHighThreshold(); got != tt.want {
+				t.Errorf("EffectiveHighThreshold() = %v, want %v", got, tt.want)
 			}
 		})
 	}
 }
 
-func TestModelRoutingConfig_LegacyMigration(t *testing.T) {
+func TestModelRoutingConfig_EffectiveLowThreshold(t *testing.T) {
+	tests := []struct {
+		name      string
+		threshold float64
+		want      float64
+	}{
+		{"zero defaults to 0.3", 0, 0.3},
+		{"custom 0.2", 0.2, 0.2},
+		{"custom 0.4", 0.4, 0.4},
+		{"negative defaults to 0.3", -0.1, 0.3},
+		{"above 1 defaults to 0.3", 1.5, 0.3},
+		{"exactly 1 defaults to 0.3", 1.0, 0.3},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := ModelRoutingConfig{LowThreshold: tt.threshold}
+			if got := cfg.EffectiveLowThreshold(); got != tt.want {
+				t.Errorf("EffectiveLowThreshold() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestModelRoutingConfig_HasMedium(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  ModelRoutingConfig
+		want bool
+	}{
+		{
+			name: "medium set",
+			cfg:  ModelRoutingConfig{MediumProvider: "anthropic", MediumModel: "claude-haiku"},
+			want: true,
+		},
+		{
+			name: "medium provider only",
+			cfg:  ModelRoutingConfig{MediumProvider: "anthropic"},
+			want: false,
+		},
+		{
+			name: "medium model only",
+			cfg:  ModelRoutingConfig{MediumModel: "claude-haiku"},
+			want: false,
+		},
+		{
+			name: "neither set",
+			cfg:  ModelRoutingConfig{},
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.cfg.HasMedium(); got != tt.want {
+				t.Errorf("HasMedium() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestModelRoutingConfig_LegacyFlatMigration(t *testing.T) {
+	// Pre-4-tier: flat threshold -> HighThreshold
 	cfg := ModelRoutingConfig{
-		StrongProvider: "anthropic",
-		StrongModel:    "claude-sonnet",
-		WeakProvider:   "openai",
-		WeakModel:      "gpt-4o-mini",
-		Threshold:      0.3,
+		StrongProvider:  "anthropic",
+		StrongModel:     "claude-sonnet",
+		WeakProvider:    "openai",
+		WeakModel:       "gpt-4o-mini",
+		LegacyThreshold: 0.6,
 	}
 
 	cfg.Migrate()
 
-	// Orchestrator tier should be populated.
-	if cfg.Orchestrator.StrongProvider != "anthropic" {
-		t.Errorf("Orchestrator.StrongProvider = %q, want %q", cfg.Orchestrator.StrongProvider, "anthropic")
+	if cfg.HighThreshold != 0.6 {
+		t.Errorf("HighThreshold = %v, want 0.6", cfg.HighThreshold)
 	}
-	if cfg.Orchestrator.StrongModel != "claude-sonnet" {
-		t.Errorf("Orchestrator.StrongModel = %q, want %q", cfg.Orchestrator.StrongModel, "claude-sonnet")
+	if cfg.LegacyThreshold != 0 {
+		t.Errorf("LegacyThreshold should be cleared, got %v", cfg.LegacyThreshold)
 	}
-	if cfg.Orchestrator.WeakProvider != "openai" {
-		t.Errorf("Orchestrator.WeakProvider = %q, want %q", cfg.Orchestrator.WeakProvider, "openai")
+	// Flat fields should remain (they are the canonical fields now)
+	if cfg.StrongProvider != "anthropic" {
+		t.Errorf("StrongProvider = %q, want %q", cfg.StrongProvider, "anthropic")
 	}
-	if cfg.Orchestrator.WeakModel != "gpt-4o-mini" {
-		t.Errorf("Orchestrator.WeakModel = %q, want %q", cfg.Orchestrator.WeakModel, "gpt-4o-mini")
-	}
-	if cfg.Orchestrator.Threshold != 0.3 {
-		t.Errorf("Orchestrator.Threshold = %v, want %v", cfg.Orchestrator.Threshold, 0.3)
-	}
-
-	// Legacy flat fields should be cleared.
-	if cfg.StrongProvider != "" {
-		t.Errorf("legacy StrongProvider should be cleared, got %q", cfg.StrongProvider)
-	}
-	if cfg.StrongModel != "" {
-		t.Errorf("legacy StrongModel should be cleared, got %q", cfg.StrongModel)
-	}
-	if cfg.WeakProvider != "" {
-		t.Errorf("legacy WeakProvider should be cleared, got %q", cfg.WeakProvider)
-	}
-	if cfg.WeakModel != "" {
-		t.Errorf("legacy WeakModel should be cleared, got %q", cfg.WeakModel)
-	}
-	if cfg.Threshold != 0 {
-		t.Errorf("legacy Threshold should be cleared, got %v", cfg.Threshold)
+	if cfg.WeakModel != "gpt-4o-mini" {
+		t.Errorf("WeakModel = %q, want %q", cfg.WeakModel, "gpt-4o-mini")
 	}
 }
 
-func TestModelRoutingConfig_4Tier(t *testing.T) {
+func TestModelRoutingConfig_Legacy4TierMigration(t *testing.T) {
+	// 4-tier: Orchestrator + Task -> 3-tier flat
 	cfg := ModelRoutingConfig{
-		Orchestrator: RoutingTierConfig{
+		Orchestrator: &legacyTierConfig{
 			StrongProvider: "anthropic", StrongModel: "claude-opus",
 			WeakProvider: "anthropic", WeakModel: "claude-haiku",
+			Threshold: 0.8,
 		},
-		Task: RoutingTierConfig{
+		Task: &legacyTierConfig{
 			StrongProvider: "openai", StrongModel: "gpt-4o",
 			WeakProvider: "openai", WeakModel: "gpt-4o-mini",
+			Threshold: 0.35,
 		},
 	}
 
-	if !cfg.IsConfigured() {
-		t.Error("IsConfigured() = false, want true when Orchestrator tier is fully set")
+	cfg.Migrate()
+
+	if cfg.StrongProvider != "anthropic" {
+		t.Errorf("StrongProvider = %q, want %q", cfg.StrongProvider, "anthropic")
 	}
-	if !cfg.TaskConfigured() {
-		t.Error("TaskConfigured() = false, want true when Task tier is fully set")
+	if cfg.StrongModel != "claude-opus" {
+		t.Errorf("StrongModel = %q, want %q", cfg.StrongModel, "claude-opus")
+	}
+	if cfg.MediumProvider != "anthropic" {
+		t.Errorf("MediumProvider = %q, want %q", cfg.MediumProvider, "anthropic")
+	}
+	if cfg.MediumModel != "claude-haiku" {
+		t.Errorf("MediumModel = %q, want %q", cfg.MediumModel, "claude-haiku")
+	}
+	if cfg.WeakProvider != "openai" {
+		t.Errorf("WeakProvider = %q, want %q", cfg.WeakProvider, "openai")
+	}
+	if cfg.WeakModel != "gpt-4o-mini" {
+		t.Errorf("WeakModel = %q, want %q", cfg.WeakModel, "gpt-4o-mini")
+	}
+	if cfg.HighThreshold != 0.8 {
+		t.Errorf("HighThreshold = %v, want 0.8", cfg.HighThreshold)
+	}
+	if cfg.LowThreshold != 0.35 {
+		t.Errorf("LowThreshold = %v, want 0.35", cfg.LowThreshold)
+	}
+	if cfg.Orchestrator != nil {
+		t.Errorf("Orchestrator should be nil after migration")
+	}
+	if cfg.Task != nil {
+		t.Errorf("Task should be nil after migration")
 	}
 }
 
-func TestModelRoutingConfig_OrchestratorOnly(t *testing.T) {
+func TestModelRoutingConfig_Legacy4TierNoTask(t *testing.T) {
+	// 4-tier with Orchestrator only (no Task)
 	cfg := ModelRoutingConfig{
-		Orchestrator: RoutingTierConfig{
+		Orchestrator: &legacyTierConfig{
 			StrongProvider: "anthropic", StrongModel: "claude-opus",
 			WeakProvider: "anthropic", WeakModel: "claude-haiku",
+			Threshold: 0.75,
 		},
 	}
 
-	if !cfg.IsConfigured() {
-		t.Error("IsConfigured() = false, want true when Orchestrator tier is fully set")
+	cfg.Migrate()
+
+	if cfg.StrongProvider != "anthropic" {
+		t.Errorf("StrongProvider = %q, want %q", cfg.StrongProvider, "anthropic")
 	}
-	if cfg.TaskConfigured() {
-		t.Error("TaskConfigured() = true, want false when Task tier is empty")
+	if cfg.StrongModel != "claude-opus" {
+		t.Errorf("StrongModel = %q, want %q", cfg.StrongModel, "claude-opus")
+	}
+	// No task tier: weak gets Orchestrator.WeakProvider/WeakModel
+	if cfg.WeakProvider != "anthropic" {
+		t.Errorf("WeakProvider = %q, want %q", cfg.WeakProvider, "anthropic")
+	}
+	if cfg.WeakModel != "claude-haiku" {
+		t.Errorf("WeakModel = %q, want %q", cfg.WeakModel, "claude-haiku")
+	}
+	// No medium since there was no Task tier
+	if cfg.HasMedium() {
+		t.Errorf("HasMedium() should be false when only Orchestrator was present")
+	}
+	if cfg.HighThreshold != 0.75 {
+		t.Errorf("HighThreshold = %v, want 0.75", cfg.HighThreshold)
+	}
+	if cfg.Orchestrator != nil {
+		t.Errorf("Orchestrator should be nil after migration")
 	}
 }

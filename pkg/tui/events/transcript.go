@@ -167,7 +167,9 @@ type Transcript struct {
 	RoutingTotal        int64
 	RoutingStrongName   string
 	RoutingWeakName     string
-	LastRoutingTier     string // "orchestrator" or "task"
+	RoutingMediumName   string
+	RoutingMediumPct    float64
+	LastRoutingTier     string // "strong", "medium", or "weak"
 
 	// delegationItemIdx is the index in Items of the current ItemDelegation
 	// block (-1 when no delegation is active). Used by applyDelegation to
@@ -389,27 +391,26 @@ func (t *Transcript) Apply(ev Event) {
 		t.RoutingTotal = ev.RoutingTotal
 		t.RoutingStrongName = ev.RoutingStrongName
 		t.RoutingWeakName = ev.RoutingWeakName
+		t.RoutingMediumName = ev.RoutingMediumName
+		t.RoutingMediumPct = ev.RoutingMediumPct
 		t.LastRoutingTier = ev.RoutingTier
 		// Stamp the routing decision on the most recent ItemAgent or
 		// ItemActivity so the badge persists per-item in the transcript
 		// after the turn completes. Each item records its own routing
 		// decision independently — later turns do not retroactively
 		// change earlier items.
-		// Only stamp orchestrator-tier (or legacy) routing, not task-tier.
-		if ev.RoutingTier == "" || ev.RoutingTier == "orchestrator" {
-			for i := len(t.Items) - 1; i >= 0; i-- {
-				kind := t.Items[i].Kind
-				if kind == ItemAgent || kind == ItemActivity {
-					// Only stamp items that don't already have routing info.
-					// This prevents re-stamping earlier items when a new
-					// routing_info arrives for a subsequent LLM call.
-					if t.Items[i].RoutingModel == "" {
-						t.Items[i].RoutingModel = ev.RoutingModel
-						t.Items[i].RoutingIsStrong = ev.RoutingIsStrong
-						t.Items[i].RoutingTier = ev.RoutingTier
-					}
-					break
+		for i := len(t.Items) - 1; i >= 0; i-- {
+			kind := t.Items[i].Kind
+			if kind == ItemAgent || kind == ItemActivity {
+				// Only stamp items that don't already have routing info.
+				// This prevents re-stamping earlier items when a new
+				// routing_info arrives for a subsequent LLM call.
+				if t.Items[i].RoutingModel == "" {
+					t.Items[i].RoutingModel = ev.RoutingModel
+					t.Items[i].RoutingIsStrong = ev.RoutingIsStrong
+					t.Items[i].RoutingTier = ev.RoutingTier
 				}
+				break
 			}
 		}
 	case KindDone:

@@ -3253,22 +3253,16 @@ func (m model) renderActivity(it events.Item, width int) string {
 
 	// Append routing badge when Auto mode is active (icon-only to avoid overflow).
 	// Uses per-item routing info so historical items keep their original badge.
-	// 🧠 orchestrator-strong · ⚡ orchestrator-weak · 🔮 task-strong · 💨 task-weak
+	// 🧠 strong · ⚙️ medium · ⚡ weak
 	if it.RoutingModel != "" {
 		var routingBadge string
-		isTask := it.RoutingTier == "task"
-		if it.RoutingIsStrong {
-			if isTask {
-				routingBadge = " 🔮"
-			} else {
-				routingBadge = " 🧠"
-			}
-		} else {
-			if isTask {
-				routingBadge = " 💨"
-			} else {
-				routingBadge = " ⚡"
-			}
+		switch it.RoutingTier {
+		case "strong":
+			routingBadge = " \U0001f9e0"
+		case "medium":
+			routingBadge = " \u2699\ufe0f"
+		default:
+			routingBadge = " \u26a1"
 		}
 		badgeR := th.Muted.Render(routingBadge)
 		head = head + badgeR

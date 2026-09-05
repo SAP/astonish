@@ -310,27 +310,21 @@ type PlanLifecycleBackend interface {
 	RecordPlanDecision(ctx context.Context, status events.PlanStatus) error
 }
 
-// AutoRoutingConfig describes the current auto-routing configuration with
-// separate model pairs for the Orchestrator (main agent) and Task (sub-agent) tiers.
+// AutoRoutingConfig carries the user's 3-tier routing choices into SetAutoRouting.
 type AutoRoutingConfig struct {
-	// Orchestrator tier (main agent loop)
-	OrchestratorStrongProvider string
-	OrchestratorStrongModel    string
-	OrchestratorWeakProvider   string
-	OrchestratorWeakModel      string
-	OrchestratorThreshold      float64
-	// Task tier (sub-agents via delegate_tasks)
-	TaskStrongProvider string
-	TaskStrongModel    string
-	TaskWeakProvider   string
-	TaskWeakModel      string
-	TaskThreshold      float64
+	StrongProvider string
+	StrongModel    string
+	MediumProvider string
+	MediumModel    string
+	WeakProvider   string
+	WeakModel      string
+	HighThreshold  float64
+	LowThreshold   float64
 }
 
-// HasTaskTier returns true when a separate Task-tier model pair is configured.
-func (c *AutoRoutingConfig) HasTaskTier() bool {
-	return c != nil && c.TaskStrongProvider != "" && c.TaskStrongModel != "" &&
-		c.TaskWeakProvider != "" && c.TaskWeakModel != ""
+// HasMedium returns true if a medium model is configured.
+func (c *AutoRoutingConfig) HasMedium() bool {
+	return c != nil && c.MediumProvider != "" && c.MediumModel != ""
 }
 
 // AutoRoutingBackend is an optional capability for backends that support

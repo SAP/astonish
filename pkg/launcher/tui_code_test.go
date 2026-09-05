@@ -3037,19 +3037,19 @@ func TestLocalAgentBackendListLocalSkills(t *testing.T) {
 	}
 	// The picker merges BuiltinSkillsForCode() (which includes the on-demand
 	// "slides" skill) with the filesystem skills, then sorts case-insensitively.
-	if len(got) != 4 {
+	if len(got) != 5 {
 		t.Fatalf("skills = %+v", got)
 	}
-	if got[0].Name != "alpha" || got[1].Name != "Generative-UI" || got[2].Name != "slides" || got[3].Name != "zeta" {
-		t.Fatalf("skills not sorted or missing slides builtin: %+v", got)
+	if got[0].Name != "alpha" || got[1].Name != "debug-regression" || got[2].Name != "Generative-UI" || got[3].Name != "slides" || got[4].Name != "zeta" {
+		t.Fatalf("skills not sorted or missing code-mode builtins: %+v", got)
 	}
 	// generative-ui is excluded from BuiltinSkillsForCode; the filesystem skill
 	// with the same name (case-insensitive) appears as-is from the user's config.
-	if got[1].Description != "Override" || got[1].Source != "user" {
-		t.Fatalf("filesystem skill should appear with its own metadata: %+v", got[1])
+	if got[2].Description != "Override" || got[2].Source != "user" {
+		t.Fatalf("filesystem skill should appear with its own metadata: %+v", got[2])
 	}
-	if got[1].Eligible || len(got[1].Missing) != 1 || got[1].Missing[0] != "definitely-missing-astonish-test-bin" {
-		t.Fatalf("eligibility = %+v", got[1])
+	if got[2].Eligible || len(got[2].Missing) != 1 || got[2].Missing[0] != "definitely-missing-astonish-test-bin" {
+		t.Fatalf("eligibility = %+v", got[2])
 	}
 }
 
@@ -3068,5 +3068,174 @@ func TestLocalAgentBackendListLocalSkills_NoBuiltinGenerativeUI(t *testing.T) {
 		if strings.EqualFold(s.Name, "generative-ui") {
 			t.Errorf("generative-ui must not appear in code-mode /skills picker, got: %+v", s)
 		}
+	}
+}
+
+// TestLoadHistory_RestoresRoutingTier verifies that a session JSONL containing
+// a routing decision system event (StateDelta[routingInfoStateKey]) causes
+// loadHistory to set RoutingTier/RoutingModel/RoutingIsStrong on the agent
+// HistoryEntry it produced, so reloaded badges match what was shown live.
+func TestLoadHistory_RestoresRoutingTier(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	userID := codeUserIDForDir("/work/routing-test")
+	b := newFileStoreBackend(t, dir, userID)
+
+	resp, err := b.sessionSvc.Create(ctx, &adksession.CreateRequest{
+		AppName: codeAppName,
+		UserID:  b.effectiveUserID(),
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	sess := resp.Session
+
+	appendEv := func(ev *adksession.Event) {
+		t.Helper()
+		if err := b.sessionSvc.AppendEvent(ctx, sess, ev); err != nil {
+			t.Fatalf("AppendEvent %q: %v", ev.ID, err)
+		}
+	}
+
+	// User message.
+	appendEv(&adksession.Event{
+		ID:     "u1",
+		Author: "user",
+		LLMResponse: adkmodel.LLMResponse{
+			Content: genai.NewContentFromText("do something", genai.RoleUser),
+		},
+		Timestamp: time.Now(),
+	})
+
+	// Agent response (first call — weak tier) with a tool call in the same event.
+	appendEv(&adksession.Event{
+		ID:     "a1",
+		Author: "chat",
+		LLMResponse: adkmodel.LLMResponse{
+			Content: &genai.Content{
+				Role: genai.RoleModel,
+				Parts: []*genai.Part{
+					{Text: "I'll handle this with the weak model."},
+					{FunctionCall: &genai.FunctionCall{
+						ID:   "c1",
+						Name: "read_file",
+						Args: map[string]any{"path": "a.go"},
+					}},
+				},
+			},
+		},
+		Timestamp: time.Now(),
+	})
+	appendEv(&adksession.Event{
+		ID:     "tr1",
+		Author: "user",
+		LLMResponse: adkmodel.LLMResponse{
+			Content: &genai.Content{
+				Role: genai.RoleUser,
+				Parts: []*genai.Part{{
+					FunctionResponse: &genai.FunctionResponse{
+						ID:       "c1",
+						Name:     "read_file",
+						Response: map[string]any{"content": "ok"},
+					},
+				}},
+			},
+		},
+		Timestamp: time.Now(),
+	})
+
+	// Routing decision system event for the first call (persisted by recordRoutingDecision).
+	appendEv(&adksession.Event{
+		ID:     "rd1",
+		Author: "system",
+		Actions: adksession.EventActions{StateDelta: map[string]any{
+			routingInfoStateKey: map[string]any{
+				"tier":  "weak",
+				"model": "haiku",
+			},
+		}},
+		Timestamp: time.Now(),
+	})
+
+	// Second agent response (second call — strong tier).
+	appendEv(&adksession.Event{
+		ID:     "a2",
+		Author: "chat",
+		LLMResponse: adkmodel.LLMResponse{
+			Content: genai.NewContentFromText("And now using the strong model for this part.", genai.RoleModel),
+		},
+		Timestamp: time.Now(),
+	})
+
+	// Routing decision for second call.
+	appendEv(&adksession.Event{
+		ID:     "rd2",
+		Author: "system",
+		Actions: adksession.EventActions{StateDelta: map[string]any{
+			routingInfoStateKey: map[string]any{
+				"tier":  "strong",
+				"model": "opus",
+			},
+		}},
+		Timestamp: time.Now(),
+	})
+
+	b.mu.Lock()
+	b.sessionID = sess.ID()
+	b.mu.Unlock()
+
+	entries, err := b.loadHistory(ctx, sess.ID())
+	if err != nil {
+		t.Fatalf("loadHistory: %v", err)
+	}
+
+	// Find agent entries.
+	var agents []backend.HistoryEntry
+	for _, e := range entries {
+		if e.Kind == "agent" {
+			agents = append(agents, e)
+		}
+	}
+	if len(agents) < 2 {
+		t.Fatalf("expected at least 2 agent entries, got %d: %+v", len(agents), entries)
+	}
+
+	// First agent entry should be weak.
+	if agents[0].RoutingTier != "weak" {
+		t.Errorf("agents[0].RoutingTier = %q, want %q", agents[0].RoutingTier, "weak")
+	}
+	if agents[0].RoutingModel != "haiku" {
+		t.Errorf("agents[0].RoutingModel = %q, want %q", agents[0].RoutingModel, "haiku")
+	}
+	if agents[0].RoutingIsStrong {
+		t.Error("agents[0].RoutingIsStrong = true, want false")
+	}
+
+	// Tool call from the same LLM event must share the first call's badge.
+	var tools []backend.HistoryEntry
+	for _, e := range entries {
+		if e.Kind == "tool_call" {
+			tools = append(tools, e)
+		}
+	}
+	if len(tools) != 1 {
+		t.Fatalf("expected 1 tool_call entry, got %d: %+v", len(tools), entries)
+	}
+	if tools[0].RoutingTier != "weak" {
+		t.Errorf("tool_call.RoutingTier = %q, want %q", tools[0].RoutingTier, "weak")
+	}
+	if tools[0].RoutingModel != "haiku" {
+		t.Errorf("tool_call.RoutingModel = %q, want %q", tools[0].RoutingModel, "haiku")
+	}
+
+	// Second agent entry should be strong.
+	if agents[1].RoutingTier != "strong" {
+		t.Errorf("agents[1].RoutingTier = %q, want %q", agents[1].RoutingTier, "strong")
+	}
+	if agents[1].RoutingModel != "opus" {
+		t.Errorf("agents[1].RoutingModel = %q, want %q", agents[1].RoutingModel, "opus")
+	}
+	if !agents[1].RoutingIsStrong {
+		t.Error("agents[1].RoutingIsStrong = false, want true")
 	}
 }

@@ -66,9 +66,9 @@ type HistoryEntry struct {
 	PlanContext      string
 	PlanWhatNotToDo  string
 	PlanVerification string
-	// Routing fields are present for agent entries from sessions with Auto routing.
-	// They are read from the StateDelta persisted with each response event and
-	// passed to LoadHistory so reloaded badges match what was shown live.
+	// Routing fields are present for agent and tool_call entries from sessions
+	// with Auto routing. They are read from the StateDelta persisted with each
+	// response event and passed to LoadHistory so reloaded badges match live.
 	RoutingTier     string // "strong", "medium", or "weak"
 	RoutingModel    string // display name of the model used
 	RoutingIsStrong bool   // true when RoutingTier == "strong"

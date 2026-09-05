@@ -163,6 +163,9 @@ Before calling announce_plan, run this DESIGN QUALITY SELF-CHECK:
 - [ ] Did you check docs/architecture/ for documentation that describes the subsystem you're changing? If it exists, add a phase to update it.
 - [ ] Did you check for existing tests (*_test.go, *.test.ts) covering the code you're changing? Add a phase for test updates or new tests.
 - [ ] Are there any breaking changes, backward compatibility concerns, or security boundary implications? Surface them explicitly.
+- [ ] For UX/event/stream features: does 'verification' include a unit test of the live event order AND session restore, not only a manual TUI smoke?
+- [ ] Do related surfaces (live vs restore, message vs tool fold, summary vs badge) share one ordered source of truth, named in 'context'?
+- [ ] Revising a locked plan: will you read PLAN.md for exact step names before update_plan? If announce_plan is blocked, update those steps or ask the user to decline and re-announce — do not guess names.
 
 If any check reveals a gap, add the missing phase BEFORE calling announce_plan. Do NOT announce an incomplete plan.
 

@@ -14,6 +14,41 @@ func findSkill(skills []Skill, name string) (Skill, bool) {
 	return Skill{}, false
 }
 
+func TestBuiltinSkills_IncludesDebugRegression(t *testing.T) {
+	if _, ok := findSkill(BuiltinSkills(), "debug-regression"); ok {
+		t.Fatal("debug-regression must not appear in Studio BuiltinSkills")
+	}
+	sk, ok := findSkill(BuiltinSkillsForCode(), "debug-regression")
+	if !ok {
+		t.Fatal("BuiltinSkillsForCode() must contain debug-regression")
+	}
+	if sk.Content == "" || sk.Content != BuiltinDebugRegression {
+		t.Error("debug-regression Content must be BuiltinDebugRegression")
+	}
+	for _, want := range []string{
+		"regression", "still broken", "zero difference", "doesn't show",
+		"used to work", "live vs restore", "badge",
+	} {
+		if !strings.Contains(sk.Description, want) {
+			t.Errorf("debug-regression Description should mention %q, got %q", want, sk.Description)
+		}
+	}
+	for _, want := range []string{
+		"git log", "git blame", "git show", "user-visible",
+		"failing test", "source of truth", "Do **not** blame the binary",
+	} {
+		if !strings.Contains(sk.Content, want) {
+			t.Errorf("debug-regression content missing %q", want)
+		}
+	}
+	if !strings.Contains(BuildCodeSkillIndex(nil), "debug-regression") {
+		t.Error("BuildCodeSkillIndex must list debug-regression")
+	}
+	if strings.Contains(BuildSkillIndex(nil), "debug-regression") {
+		t.Error("BuildSkillIndex (Studio) must not list debug-regression")
+	}
+}
+
 func TestBuiltinSkills_IncludesSlides(t *testing.T) {
 	slides, ok := findSkill(BuiltinSkills(), "slides")
 	if !ok {

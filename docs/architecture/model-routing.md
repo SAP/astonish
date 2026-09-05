@@ -95,18 +95,21 @@ Auto / orch: opus|sonnet · task: sonnet|luna
 
 ### Routing Badge
 
-Each agent response shows a routing badge:
-- 🧠 = orchestrator strong
-- ⚡ = orchestrator weak
-- 🔮 = task strong
-- 💨 = task weak
+Each agent response **and its tool fold** show a routing badge during the live turn and after session restore:
+
+- 🧠 = strong
+- ⚙️ = medium
+- ⚡ = weak
 
 ### Turn Summary
 
-End-of-turn summary shows per-tier breakdown:
+End-of-turn summary shows per-tier breakdown, plus estimated cost savings when OpenRouter pricing can be resolved for the strong model:
+
 ```
-Auto routing — Orchestrator: 5 calls (60% strong opus, 40% weak sonnet) · Task: 12 calls (25% strong sonnet, 75% weak luna)
+Auto routing — 5 calls (60% strong opus, 40% weak haiku) · Saved ~45% vs all-strong
 ```
+
+The savings clause is omitted when pricing is unknown or every call used the strong model (0% saved).
 
 ## Wiring
 
@@ -114,4 +117,4 @@ Auto routing — Orchestrator: 5 calls (60% strong opus, 40% weak sonnet) · Tas
 2. **Model picker**: `SetAutoRouting` creates both RoutingLLMs, wires task LLM to `SubAgentManager.TaskLLM`
 3. **Turn execution**: `driveTurn` wires `taskRoutingLLM` to `chatAgent.SubAgentManager.TaskLLM`
 4. **Config persistence**: both tiers saved to `config.yaml` under `model_routing.orchestrator` and `model_routing.task`
-5. **Events**: `emitRoutingInfo` sends `routing_tier` field; transcript tracks `LastRoutingTier`
+5. **Events**: `driveTurn` emits `routing_info` as soon as `TurnTiers` records a call so live agent bubbles and tool folds inherit the badge; `loadHistory` stamps the same tier on agent text and `tool_call` entries from that call. End-of-turn still emits the cumulative summary.

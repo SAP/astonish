@@ -115,7 +115,8 @@ type RoutingLLM struct {
 	StrongName    string // display name (e.g. "claude-sonnet")
 	MediumName    string // display name (e.g. "claude-haiku"), empty if no medium
 	WeakName      string // display name (e.g. "gpt-4o-mini")
-	// Pricing fields — set post-construction via SetPricing.
+	// Pricing fields — set post-construction via SetPricing (guarded by pricingMu).
+	pricingMu  sync.RWMutex
 	strongCost ModelCost
 	mediumCost ModelCost
 	weakCost   ModelCost
@@ -267,25 +268,63 @@ func (r *RoutingLLM) ModelNameForTier(tier string) string {
 // SetPricing injects per-model cost data (USD per token) for cost-savings
 // computation. Safe to call from a goroutine after construction.
 func (r *RoutingLLM) SetPricing(strong, medium, weak ModelCost) {
+	r.pricingMu.Lock()
 	r.strongCost = strong
 	r.mediumCost = medium
 	r.weakCost = weak
 	r.hasPricing = strong.PromptCost > 0
+	r.pricingMu.Unlock()
 }
 
 // HasPricing reports whether pricing data has been injected.
-func (r *RoutingLLM) HasPricing() bool { return r.hasPricing }
+func (r *RoutingLLM) HasPricing() bool {
+	r.pricingMu.RLock()
+	v := r.hasPricing
+	r.pricingMu.RUnlock()
+	return v
+}
 
 // CostSavingsPct returns the estimated percentage saved vs routing all calls
 // to the strong model. Returns 0 when pricing data is unavailable.
 func (r *RoutingLLM) CostSavingsPct() float64 {
+	r.pricingMu.RLock()
 	if !r.hasPricing {
+		r.pricingMu.RUnlock()
 		return 0
 	}
+	strong, medium, weak := r.strongCost, r.mediumCost, r.weakCost
+	r.pricingMu.RUnlock()
 	return CostSavingsPct(
-		r.strongCost, r.mediumCost, r.weakCost,
+		strong, medium, weak,
 		r.Stats.StrongCount(), r.Stats.MediumCount(), r.Stats.WeakCount(),
 	)
+}
+
+// SummaryLine is the end-of-turn Auto routing system message. It includes an
+// estimated cost-savings clause when pricing is available and savings exceed
+// 0.5% versus routing every call to the strong model.
+func (r *RoutingLLM) SummaryLine() string {
+	total := r.Stats.Total()
+	if total < 1 {
+		return ""
+	}
+	parts := make([]string, 0, 3)
+	if r.Stats.StrongCount() > 0 {
+		parts = append(parts, fmt.Sprintf("%.0f%% strong %s", r.Stats.StrongPct(), r.StrongName))
+	}
+	if r.Stats.MediumCount() > 0 {
+		parts = append(parts, fmt.Sprintf("%.0f%% medium %s", r.Stats.MediumPct(), r.MediumName))
+	}
+	if r.Stats.WeakCount() > 0 {
+		parts = append(parts, fmt.Sprintf("%.0f%% weak %s", r.Stats.WeakPct(), r.WeakName))
+	}
+	summary := fmt.Sprintf("Auto routing \u2014 %d calls (%s)", total, strings.Join(parts, ", "))
+	if r.HasPricing() {
+		if savings := r.CostSavingsPct(); savings > 0.5 {
+			summary += fmt.Sprintf(" \u00b7 Saved ~%.0f%% vs all-strong", savings)
+		}
+	}
+	return summary
 }
 
 // Verify RoutingLLM implements model.LLM at compile time.

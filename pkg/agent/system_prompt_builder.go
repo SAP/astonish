@@ -66,6 +66,9 @@ type SystemPromptBuilder struct {
 	MCPAccessFilter       func(serverName string) bool // Per-turn filter for MCP groups in catalog (nil = allow all)
 	SandboxEnabled        bool                         // Whether a sandbox backend is configured
 	SandboxWorkspaceDir   string                       // Persistent workspace dir inside sandbox (e.g. "/sandbox" or "/root")
+	// CodeMode is set by NewCodeSystemPromptBuilder. Per-turn follow-up
+	// investigation hints are injected only when this is true.
+	CodeMode bool
 
 	// BuildOverride, when non-nil, is called by Build() instead of the default
 	// builder logic. Installed by CodeSystemPromptBuilder to emit code-mode

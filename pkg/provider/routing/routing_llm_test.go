@@ -4,6 +4,7 @@ import (
 	"context"
 	"iter"
 	"math"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -324,5 +325,132 @@ func TestTruncateForLog(t *testing.T) {
 	got := truncateForLog(long, 5)
 	if got != "abcde…" {
 		t.Errorf("truncated = %q, want %q", got, "abcde…")
+	}
+}
+
+// TestRoutingLLM_TurnTiers_OrderPreserved verifies that GenerateContent appends
+// to turnTiers in call order and TurnTiers returns them in the same order.
+func TestRoutingLLM_TurnTiers_OrderPreserved(t *testing.T) {
+	strong := &mockLLM{name: "strong"}
+	medium := &mockLLM{name: "medium"}
+	weak := &mockLLM{name: "weak"}
+	sc := &switchableClassifier{}
+	r := NewRoutingLLM(strong, medium, weak, sc, 0.7, 0.3)
+
+	// strong, weak, weak, medium
+	for _, score := range []ComplexityScore{0.8, 0.1, 0.2, 0.5} {
+		sc.score = score
+		drainLLM(r, context.Background())
+	}
+
+	got := r.TurnTiers()
+	want := []string{"strong", "weak", "weak", "medium"}
+	if len(got) != len(want) {
+		t.Fatalf("TurnTiers len = %d, want %d; got %v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("TurnTiers[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// TestRoutingLLM_ResetTurn_ClearsTiersAndStats verifies that ResetTurn
+// clears both the ordered tier list and the Stats counters.
+func TestRoutingLLM_ResetTurn_ClearsTiersAndStats(t *testing.T) {
+	strong := &mockLLM{name: "strong"}
+	weak := &mockLLM{name: "weak"}
+	sc := &switchableClassifier{score: 0.8}
+	r := NewRoutingLLM(strong, nil, weak, sc, 0.7, 0.3)
+
+	drainLLM(r, context.Background())
+	drainLLM(r, context.Background())
+	if r.Stats.Total() != 2 {
+		t.Fatalf("before reset: Stats.Total = %d, want 2", r.Stats.Total())
+	}
+	if len(r.TurnTiers()) != 2 {
+		t.Fatalf("before reset: TurnTiers len = %d, want 2", len(r.TurnTiers()))
+	}
+
+	r.ResetTurn()
+
+	if r.Stats.Total() != 0 {
+		t.Errorf("after ResetTurn: Stats.Total = %d, want 0", r.Stats.Total())
+	}
+	if len(r.TurnTiers()) != 0 {
+		t.Errorf("after ResetTurn: TurnTiers len = %d, want 0", len(r.TurnTiers()))
+	}
+}
+
+// TestRoutingLLM_modelNameForTier verifies that each tier maps to the correct
+// configured display name.
+func TestRoutingLLM_modelNameForTier(t *testing.T) {
+	strong := &mockLLM{name: "claude-sonnet"}
+	medium := &mockLLM{name: "claude-haiku"}
+	weak := &mockLLM{name: "gpt-4o-mini"}
+	r := NewRoutingLLM(strong, medium, weak, &fixedClassifier{score: 0.5}, 0.7, 0.3)
+
+	tests := []struct {
+		tier string
+		want string
+	}{
+		{"strong", "claude-sonnet"},
+		{"medium", "claude-haiku"},
+		{"weak", "gpt-4o-mini"},
+		{"unknown", ""},
+		{"", ""},
+	}
+	for _, tc := range tests {
+		got := r.ModelNameForTier(tc.tier)
+		if got != tc.want {
+			t.Errorf("modelNameForTier(%q) = %q, want %q", tc.tier, got, tc.want)
+		}
+	}
+}
+
+func TestRoutingLLM_SummaryLine_IncludesCostSavings(t *testing.T) {
+	r := NewRoutingLLM(&mockLLM{name: "opus"}, nil, &mockLLM{name: "haiku"}, &fixedClassifier{score: 0.1}, 0.7, 0.3)
+	r.StrongName = "opus"
+	r.WeakName = "haiku"
+	r.SetPricing(ModelCost{PromptCost: 0.01}, ModelCost{}, ModelCost{PromptCost: 0.001})
+	r.Stats.RecordWeak()
+	r.Stats.RecordWeak()
+
+	line := r.SummaryLine()
+	if line == "" {
+		t.Fatal("expected a summary line")
+	}
+	if !strings.Contains(line, "Saved") {
+		t.Errorf("summary %q should include cost savings", line)
+	}
+	if !strings.Contains(line, "2 calls") {
+		t.Errorf("summary %q should include call count", line)
+	}
+}
+
+func TestRoutingLLM_SummaryLine_NoPricingOmitsSavings(t *testing.T) {
+	r := NewRoutingLLM(&mockLLM{name: "opus"}, nil, &mockLLM{name: "haiku"}, &fixedClassifier{score: 0.1}, 0.7, 0.3)
+	r.WeakName = "haiku"
+	r.Stats.RecordWeak()
+
+	line := r.SummaryLine()
+	if strings.Contains(line, "Saved") {
+		t.Errorf("summary %q should not include savings without pricing", line)
+	}
+}
+
+func TestRoutingLLM_SummaryLine_AllStrongOmitsZeroSavings(t *testing.T) {
+	r := NewRoutingLLM(&mockLLM{name: "opus"}, nil, &mockLLM{name: "haiku"}, &fixedClassifier{score: 0.9}, 0.7, 0.3)
+	r.StrongName = "opus"
+	r.SetPricing(ModelCost{PromptCost: 0.01}, ModelCost{}, ModelCost{PromptCost: 0.001})
+	r.Stats.RecordStrong()
+	r.Stats.RecordStrong()
+
+	line := r.SummaryLine()
+	if !strings.Contains(line, "2 calls") {
+		t.Errorf("summary %q should include call count", line)
+	}
+	if strings.Contains(line, "Saved") {
+		t.Errorf("all-strong summary %q should omit zero savings", line)
 	}
 }

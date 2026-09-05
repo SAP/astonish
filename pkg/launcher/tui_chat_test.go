@@ -395,7 +395,7 @@ func TestLazyCodeBackendForwardsLocalSkills(t *testing.T) {
 	// The picker merges BuiltinSkillsForCode() (which includes the on-demand
 	// "slides" skill) with the filesystem skill, sorted case-insensitively.
 	// generative-ui is excluded from code-mode builtins.
-	if len(got) != 2 || got[0].Name != "local" || got[1].Name != "slides" {
+	if len(got) != 3 || got[0].Name != "debug-regression" || got[1].Name != "local" || got[2].Name != "slides" {
 		t.Fatalf("forwarded skills = %+v", got)
 	}
 	var _ backend.LocalSkillsBackend = b

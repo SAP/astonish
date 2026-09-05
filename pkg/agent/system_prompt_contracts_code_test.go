@@ -156,6 +156,22 @@ func TestCodeSystemPromptContracts_CodeNavigationRule(t *testing.T) {
 	assertContains(t, prompt, "Stop exploring when the scope is clear", "stop-exploring discipline always present in code mode")
 }
 
+func TestCodeSystemPromptContracts_InvestigationWorkPolicy(t *testing.T) {
+	prompt := maximalCodeBuilder().Build()
+	for _, want := range []string{
+		"user-visible sequence",
+		"User restatements are the spec",
+		"stale binary",
+		"one ordered source of truth",
+		"git log",
+		"debug-regression",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("code-mode Work Policy missing %q", want)
+		}
+	}
+}
+
 func TestCodeSystemPromptContracts_PlanFilePersistence(t *testing.T) {
 	cb := maximalCodeBuilder()
 	prompt := cb.Build()
@@ -267,8 +283,8 @@ func TestCodeSystemPromptBuilder_MaximalSize(t *testing.T) {
 	// Code-mode prompt includes all base sections plus: project guidance,
 	// code-nav rules, codegraph-first, stop-exploring, PLAN.md, auth gates,
 	// MCP tools listing. Budget ceiling is higher than chat mode.
-	if len(prompt) > 16500 {
-		t.Errorf("code-mode maximal prompt too large: %d bytes (limit 16500)", len(prompt))
+	if len(prompt) > 18000 {
+		t.Errorf("code-mode maximal prompt too large: %d bytes (limit 18000)", len(prompt))
 	}
 	if len(prompt) < 6000 {
 		t.Errorf("code-mode maximal prompt suspiciously small: %d bytes (expected > 6000)", len(prompt))
@@ -364,6 +380,15 @@ func TestGraphPlanModeSystemContext_CompletenessCheck(t *testing.T) {
 	}
 	if !strings.Contains(ctx, "summary") {
 		t.Errorf("GraphPlanModeSystemContext must contain 'summary' (PHASE 4 summary field)")
+	}
+	if !strings.Contains(ctx, "live event order") {
+		t.Errorf("GraphPlanModeSystemContext must require a unit test of live event order")
+	}
+	if !strings.Contains(ctx, "one ordered source of truth") {
+		t.Errorf("GraphPlanModeSystemContext must require one ordered source of truth")
+	}
+	if !strings.Contains(ctx, "do not guess names") {
+		t.Errorf("GraphPlanModeSystemContext must tell the model not to guess update_plan names")
 	}
 }
 

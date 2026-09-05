@@ -123,6 +123,17 @@ func (ps *PlanState) SnapshotInfo() (string, []PlanStepInfo) {
 	return goal, info
 }
 
+// StepNames returns the exact announce_plan step identifiers, in order.
+func (ps *PlanState) StepNames() []string {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	names := make([]string, len(ps.steps))
+	for i, s := range ps.steps {
+		names[i] = s.name
+	}
+	return names
+}
+
 // SnapshotDoc returns the document-level narrative sections stored in this plan.
 func (ps *PlanState) SnapshotDoc() PlanDocumentInfo {
 	ps.mu.Lock()

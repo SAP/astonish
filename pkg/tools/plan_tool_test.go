@@ -41,8 +41,13 @@ func TestUpdatePlanTool_DrivesCallbackAndEmitsEvent(t *testing.T) {
 
 func TestUpdatePlanTool_StepNotFound(t *testing.T) {
 	orig := planStepUpdateCallback
-	defer func() { planStepUpdateCallback = orig }()
+	origNames := planKnownStepsCallback
+	defer func() {
+		planStepUpdateCallback = orig
+		planKnownStepsCallback = origNames
+	}()
 	SetPlanStepUpdateCallback(func(step, status string) (string, string) { return "", "" })
+	SetPlanKnownStepsCallback(func() []string { return []string{"explore-repos", "write-report"} })
 
 	res, err := updatePlan(nil, UpdatePlanArgs{Step: "missing", Status: "running"})
 	if err != nil {
@@ -50,6 +55,12 @@ func TestUpdatePlanTool_StepNotFound(t *testing.T) {
 	}
 	if res.Status != "step_not_found" {
 		t.Errorf("status = %q, want step_not_found", res.Status)
+	}
+	if !strings.Contains(res.Message, "explore-repos") || !strings.Contains(res.Message, "write-report") {
+		t.Errorf("message = %q, want valid step names", res.Message)
+	}
+	if len(res.Steps) != 2 || res.Steps[0] != "explore-repos" {
+		t.Errorf("Steps = %v, want [explore-repos write-report]", res.Steps)
 	}
 }
 

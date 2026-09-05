@@ -42,11 +42,18 @@ func BuiltinSkills() []Skill {
 // Studio-only artifacts (e.g. astonish-app fences).
 func BuiltinSkillsForCode() []Skill {
 	all := BuiltinSkills()
-	filtered := make([]Skill, 0, len(all))
+	filtered := make([]Skill, 0, len(all)+1)
 	for _, s := range all {
 		if !s.ExcludeFromCodeMode {
 			filtered = append(filtered, s)
 		}
 	}
+	// Code-mode-only investigation protocol — not listed in Studio chat.
+	filtered = append(filtered, Skill{
+		Name:        "debug-regression",
+		Description: "MUST skill_lookup when a feature used to work, a previous fix didn't stick, the user says zero difference / still broken / doesn't show / regression, or when live vs restore / badge vs summary mismatch. Git archaeology, failing-test-first, hypothesis hygiene.",
+		Content:     BuiltinDebugRegression,
+		Source:      "builtin",
+	})
 	return filtered
 }

@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"charm.land/lipgloss/v2"
+
 	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/tui/events"
 )
@@ -533,3 +535,49 @@ Legend: ` + "`[ ]`" + ` pending · ` + "`[~]`" + ` running · ` + "`[x]`" + ` co
 		t.Fatalf("expected details text in output:\n%s", plain)
 	}
 }
+
+func TestRenderPlanDocumentCodeBlockFrameAlignment(t *testing.T) {
+	// Regression: code blocks with long lines inside a plan card's DETAILS or
+	// CONTEXT section must not push the right │ border out of alignment.
+	// Every rendered line between the top and bottom border must have exactly
+	// the same visible width (i.e. │ … content … │ is consistent).
+	m := newModel(context.Background(), Config{Backend: staticBackend{}, Width: 100, Height: 40})
+	m.ready = true
+	m.layout()
+
+	// A plan with a fenced code block in the details field containing a
+	// deliberately long line (150 chars) that must be soft-wrapped inside the card.
+	content := "# Execution Plan\n\n**Goal:** Code block alignment test\n\n_Last updated: 2025-01-01T00:00:00Z_\n\n## Context\n\nThis plan contains a code block.\n\n## Phases\n\n- [ ] **phase-one** — Render code blocks\n  Details: Implement the feature.\n  ```go\n  " + strings.Repeat("x", 150) + "\n  ```\n\nLegend: `[ ]` pending\n"
+
+	out := m.renderPlanDocument(events.Item{Content: content}, 90)
+	plain := stripANSI(out)
+
+	lines := strings.Split(plain, "\n")
+	// Find lines that are part of the frame (contain │ on the right side).
+	// All such content lines should have the same total width.
+	var frameWidth int
+	for _, line := range lines {
+		if strings.HasPrefix(line, "┌") || strings.HasPrefix(line, "└") {
+			frameWidth = lipgloss.Width(line)
+			break
+		}
+	}
+	if frameWidth == 0 {
+		t.Fatal("could not detect frame width from border line")
+	}
+	for i, line := range lines {
+		if !strings.Contains(line, "│") {
+			continue
+		}
+		// Skip separator lines (all dashes).
+		stripped := strings.TrimRight(line, " ")
+		if strings.HasPrefix(stripped, "┌") || strings.HasPrefix(stripped, "└") {
+			continue
+		}
+		w := lipgloss.Width(line)
+		if w != frameWidth {
+			t.Errorf("line %d has width %d, want %d: %q", i, w, frameWidth, line)
+		}
+	}
+}
+

@@ -188,6 +188,9 @@ func TestGraphPlanModeSystemContext_RequiresDesignQuality(t *testing.T) {
 		"TYPED actions",
 		"ERROR/EMPTY STATES",
 		"Code mode",
+		"live event order",
+		"one ordered source of truth",
+		"do not guess names",
 	} {
 		if !strings.Contains(GraphPlanModeSystemContext, want) {
 			t.Errorf("GraphPlanModeSystemContext should mention %q", want)

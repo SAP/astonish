@@ -387,6 +387,11 @@ func TestPlanState_SetStepStatus(t *testing.T) {
 	if n, s := ps.SetStepStatus("nonexistent", "running"); n != "" || s != "" {
 		t.Errorf("unknown step should return empty, got (%q,%q)", n, s)
 	}
+
+	names := ps.StepNames()
+	if len(names) != 2 || names[0] != "a" || names[1] != "b" {
+		t.Errorf("StepNames = %v, want [a b]", names)
+	}
 }
 
 func TestPlanState_ManualTrackingSuppressesCompleteAll(t *testing.T) {

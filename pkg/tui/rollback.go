@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -180,6 +181,9 @@ func (m model) applyRolledBack(msg rolledBackMsg) (tea.Model, tea.Cmd) {
 			PlanContext:      e.PlanContext,
 			PlanWhatNotToDo:  e.PlanWhatNotToDo,
 			PlanVerification: e.PlanVerification,
+			RoutingTier:      e.RoutingTier,
+			RoutingModel:     e.RoutingModel,
+			RoutingIsStrong:  e.RoutingIsStrong,
 		})
 	}
 	m.planMode = false
@@ -195,7 +199,13 @@ func (m model) applyRolledBack(msg rolledBackMsg) (tea.Model, tea.Cmd) {
 	// they can start typing/editing immediately; recompute the composer height
 	// so a multi-line message is fully visible.
 	if prefill != "" {
-		m.ta.SetValue(prefill)
+		// Strip any [image #N] placeholders — the original image data is not
+		// persisted in session history and cannot be restored after a rollback.
+		// Leaving stale tokens in the composer would confuse the user: the
+		// placeholder would be submitted as literal text with no attached image.
+		cleanPrefill := regexp.MustCompile(`\[image #\d+\]`).ReplaceAllString(prefill, "")
+		cleanPrefill = strings.TrimSpace(cleanPrefill)
+		m.ta.SetValue(cleanPrefill)
 		m.ta.CursorEnd()
 		if m.ready {
 			m.ta.SetHeight(m.composerTextHeight())

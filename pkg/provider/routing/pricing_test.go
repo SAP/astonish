@@ -17,6 +17,8 @@ func TestNormalizeName(t *testing.T) {
 	}{
 		{"claude-sonnet-4", "claudesonnet4"},
 		{"anthropic/claude-sonnet-4", "claudesonnet4"},
+		{"anthropic--claude-sonnet-4", "claudesonnet4"},
+		{"anthropic--claude-4.5-haiku", "claude45haiku"},
 		{"openai/gpt-4o-mini", "gpt4omini"},
 		{"gpt-4o-mini", "gpt4omini"},
 		{"meta-llama/llama-3.1-70b", "llama3170b"},
@@ -104,6 +106,53 @@ func TestFuzzyMatch(t *testing.T) {
 	})
 }
 
+// TestLookupCost_InternalIDsMatchOpenRouter verifies SAP AI Core double-dash
+// IDs and version-reordered names resolve to OpenRouter catalog prices so
+// HasPricing can become true and the turn summary can show cost savings.
+func TestLookupCost_InternalIDsMatchOpenRouter(t *testing.T) {
+	pc := &PricingCache{
+		costs: map[string]ModelCost{
+			"anthropic/claude-sonnet-4.5": {PromptCost: 0.000003, CompletionCost: 0.000015},
+			"anthropic/claude-haiku-4.5":  {PromptCost: 0.000001, CompletionCost: 0.000005},
+			"anthropic/claude-opus-4.5":   {PromptCost: 0.000015, CompletionCost: 0.000075},
+		},
+		loadedAt: time.Now(),
+		cacheTTL: defaultPricingCacheTTL,
+	}
+	ctx := context.Background()
+
+	tests := []struct {
+		provider, model string
+		wantPrompt      float64
+	}{
+		{"sap-ai-core", "anthropic--claude-4.5-haiku", 0.000001},
+		{"sap-ai-core", "anthropic--claude-sonnet-4.5", 0.000003},
+		{"anthropic", "claude-4.5-haiku", 0.000001},
+		{"anthropic", "claude-haiku-4.5", 0.000001},
+		{"anthropic", "claude-4.5-sonnet", 0.000003},
+		{"anthropic", "claude-opus-4.5", 0.000015},
+	}
+	for _, tc := range tests {
+		cost, ok := pc.LookupCost(ctx, tc.provider, tc.model)
+		if !ok {
+			t.Errorf("LookupCost(%q, %q): no match", tc.provider, tc.model)
+			continue
+		}
+		if cost.PromptCost != tc.wantPrompt {
+			t.Errorf("LookupCost(%q, %q) prompt = %v; want %v", tc.provider, tc.model, cost.PromptCost, tc.wantPrompt)
+		}
+	}
+
+	opus, opusOK := pc.LookupCost(ctx, "anthropic", "claude-opus-4.5")
+	haiku, haikuOK := pc.LookupCost(ctx, "sap-ai-core", "anthropic--claude-4.5-haiku")
+	if !opusOK || !haikuOK {
+		t.Fatal("expected opus and haiku lookups to succeed")
+	}
+	if opus.PromptCost == haiku.PromptCost {
+		t.Error("haiku lookup collapsed onto opus pricing")
+	}
+}
+
 // TestCostSavingsPct verifies cost savings calculation.
 func TestCostSavingsPct(t *testing.T) {
 	strongCost := ModelCost{PromptCost: 0.01}
@@ -124,8 +173,8 @@ func TestCostSavingsPct(t *testing.T) {
 		wantZero bool
 	}{
 		{
-			name:     "all_strong_calls",
-			strong:   strongCost, medium: mediumCost, weak: weakCost,
+			name:   "all_strong_calls",
+			strong: strongCost, medium: mediumCost, weak: weakCost,
 			sCalls: 5, mCalls: 0, wCalls: 0,
 			wantZero: true, // 0% savings when all strong
 		},
@@ -142,14 +191,14 @@ func TestCostSavingsPct(t *testing.T) {
 			wantMin: 44, wantMax: 46, // ~45% savings
 		},
 		{
-			name:     "zero_strong_cost",
-			strong:   freeCost, medium: mediumCost, weak: weakCost,
+			name:   "zero_strong_cost",
+			strong: freeCost, medium: mediumCost, weak: weakCost,
 			sCalls: 3, mCalls: 2, wCalls: 1,
 			wantZero: true,
 		},
 		{
-			name:     "zero_total_calls",
-			strong:   strongCost, medium: mediumCost, weak: weakCost,
+			name:   "zero_total_calls",
+			strong: strongCost, medium: mediumCost, weak: weakCost,
 			sCalls: 0, mCalls: 0, wCalls: 0,
 			wantZero: true,
 		},

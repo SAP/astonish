@@ -35,6 +35,7 @@ This directory is the **authoritative reference** for cross-cutting design decis
 ### Session behavior
 - `smart-compaction.md` — session compaction algorithm.
 - `cache-diagnostics.md` — superadmin-only request stability and cache observability, including capture safety and persistence.
+- `code-agent-investigation.md` — code-mode regression investigation: Work Policy, `debug-regression` skill, failed-fix follow-up injector. Does **not** change codegraph.
 
 ## Package implementation guides
 

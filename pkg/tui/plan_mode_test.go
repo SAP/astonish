@@ -126,6 +126,11 @@ func TestTurnOptionsGraphPlanMode(t *testing.T) {
 	if !strings.Contains(got.SystemContext, "GRAPH-OPTIMIZED PLAN MODE") {
 		t.Fatalf("graph plan system context should be the graph-plan prompt, got %q", got.SystemContext)
 	}
+	for _, want := range []string{"live event order", "one ordered source of truth", "do not guess names"} {
+		if !strings.Contains(got.SystemContext, want) {
+			t.Errorf("graph plan system context should mention %q (keep in sync with agent.GraphPlanModeSystemContext)", want)
+		}
+	}
 }
 
 func TestRenderComposerShowsPlanLabel(t *testing.T) {

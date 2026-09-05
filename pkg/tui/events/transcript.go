@@ -53,10 +53,11 @@ type Item struct {
 	Provisional bool
 
 	// RoutingModel is the model name used for this item (Auto routing).
-	// Stamped on ItemAgent and ItemActivity items when Auto routing is active.
+	// Stamped on ItemAgent, ItemPlan, and ItemActivity items when Auto
+	// routing is active so live and restored transcripts show the same badge.
 	RoutingModel    string
 	RoutingIsStrong bool
-	RoutingTier     string // "orchestrator" or "task"
+	RoutingTier     string // "strong", "medium", or "weak"
 
 	// Approval fields.
 	ToolName string
@@ -160,16 +161,16 @@ type Transcript struct {
 	DelegationActive bool
 
 	// Routing state for Auto mode per-turn badges.
-	LastRoutingModel    string
-	LastRoutingIsStrong bool
-	RoutingStrongPct    float64
-	RoutingWeakPct      float64
-	RoutingTotal        int64
-	RoutingStrongName   string
-	RoutingWeakName     string
-	RoutingMediumName   string
-	RoutingMediumPct    float64
-	LastRoutingTier     string // "strong", "medium", or "weak"
+	LastRoutingModel      string
+	LastRoutingIsStrong   bool
+	RoutingStrongPct      float64
+	RoutingWeakPct        float64
+	RoutingTotal          int64
+	RoutingStrongName     string
+	RoutingWeakName       string
+	RoutingMediumName     string
+	RoutingMediumPct      float64
+	LastRoutingTier       string  // "strong", "medium", or "weak"
 	RoutingCostSavingsPct float64 // 0-100, % saved vs all-strong
 
 	// delegationItemIdx is the index in Items of the current ItemDelegation
@@ -205,6 +206,11 @@ func (t *Transcript) Apply(ev Event) {
 		t.Items = append(t.Items, Item{Kind: ItemUser, Content: ev.Text})
 		t.Streaming = true
 		t.Status = "Thinking…"
+		// Do not inherit the previous turn's model onto this turn's first
+		// bubble; the next routing_info (or history stamp) sets it.
+		t.LastRoutingModel = ""
+		t.LastRoutingIsStrong = false
+		t.LastRoutingTier = ""
 	case KindText:
 		t.appendAgentText(ev.Text)
 		t.Streaming = true
@@ -229,7 +235,7 @@ func (t *Transcript) Apply(ev Event) {
 		if status == "" {
 			status = PlanPending
 		}
-		t.Items = append(t.Items, Item{
+		plan := Item{
 			Kind:             ItemPlan,
 			Content:          ev.Text,
 			ToolName:         firstNonEmpty(ev.ToolName, "announce_plan"),
@@ -239,7 +245,9 @@ func (t *Transcript) Apply(ev Event) {
 			PlanWhatNotToDo:  ev.PlanWhatNotToDo,
 			PlanVerification: ev.PlanVerification,
 			PlanStatus:       status,
-		})
+		}
+		t.copyLastRouting(&plan)
+		t.Items = append(t.Items, plan)
 		if status == PlanPending && !t.Awaiting {
 			t.Awaiting = true
 			t.ApprovalIdx = len(t.Items) - 1
@@ -396,32 +404,7 @@ func (t *Transcript) Apply(ev Event) {
 		t.RoutingMediumPct = ev.RoutingMediumPct
 		t.LastRoutingTier = ev.RoutingTier
 		t.RoutingCostSavingsPct = ev.RoutingCostSavingsPct
-		// Stamp the routing decision on the most recent ItemAgent or
-		// ItemPlan so the badge persists per-item in the transcript
-		// after the turn completes. Each item records its own routing
-		// decision independently — later turns do not retroactively
-		// change earlier items. We scan past ItemActivity (tool folds)
-		// because routing_info fires after all parts including tool
-		// emits, and badges should appear on agent text, not tool folds.
-		for i := len(t.Items) - 1; i >= 0; i-- {
-			kind := t.Items[i].Kind
-			if kind == ItemAgent || kind == ItemPlan {
-				// Always stamp the most-recent agent item with the
-				// current routing tier — this overwrites any prior
-				// stamp from an earlier call whose text was merged
-				// into the same item (LinearThread mode appends text
-				// to the last agent item), so the displayed badge
-				// always reflects the last model used for that item.
-				t.Items[i].RoutingModel = ev.RoutingModel
-				t.Items[i].RoutingIsStrong = ev.RoutingIsStrong
-				t.Items[i].RoutingTier = ev.RoutingTier
-				break
-			}
-			if kind == ItemUser {
-				// Don't cross a user turn boundary.
-				break
-			}
-		}
+		t.stampCurrentCall(ev)
 	case KindDone:
 		t.Streaming = false
 		t.Status = ""
@@ -431,6 +414,104 @@ func (t *Transcript) Apply(ev Event) {
 		t.finalizeRunningSteps()
 		// Promote sticky provisional agent text to the final response.
 		t.finalizeProvisionalAgents()
+	}
+}
+
+// copyLastRouting copies the current turn's routing decision onto an item so
+// newly created agent bubbles and tool folds show the Auto-mode badge as soon
+// as they appear (routing_info may have arrived before any text or tools).
+func (t *Transcript) copyLastRouting(it *Item) {
+	if it == nil {
+		return
+	}
+	if t.LastRoutingModel == "" && t.LastRoutingTier == "" {
+		return
+	}
+	it.RoutingModel = t.LastRoutingModel
+	it.RoutingIsStrong = t.LastRoutingIsStrong
+	it.RoutingTier = t.LastRoutingTier
+}
+
+func stampItemRouting(it *Item, model string, isStrong bool, tier string) {
+	if it == nil {
+		return
+	}
+	it.RoutingModel = model
+	it.RoutingIsStrong = isStrong
+	it.RoutingTier = tier
+}
+
+func itemHasRouting(it Item) bool {
+	return it.RoutingModel != "" || it.RoutingTier != ""
+}
+
+// stampCurrentCall attaches a routing_info decision to the items produced by
+// the current LLM call without rewriting earlier calls in the same turn.
+//
+//   - If the last item is still the agent/plan bubble, always update it
+//     (LinearThread may merge consecutive text-only calls into one bubble).
+//   - Otherwise stamp unstamped trailing tool folds and an unstamped agent
+//     immediately before them (text + tools from one response). Already-
+//     stamped items belong to a prior call and are left alone.
+func (t *Transcript) stampCurrentCall(ev Event) {
+	n := len(t.Items)
+	if n == 0 {
+		return
+	}
+	last := &t.Items[n-1]
+	if last.Kind == ItemAgent || last.Kind == ItemPlan {
+		stampItemRouting(last, ev.RoutingModel, ev.RoutingIsStrong, ev.RoutingTier)
+		return
+	}
+	for i := n - 1; i >= 0; i-- {
+		it := &t.Items[i]
+		switch it.Kind {
+		case ItemUser:
+			return
+		case ItemActivity:
+			if !itemHasRouting(*it) {
+				stampItemRouting(it, ev.RoutingModel, ev.RoutingIsStrong, ev.RoutingTier)
+			}
+		case ItemAgent, ItemPlan:
+			if !itemHasRouting(*it) {
+				stampItemRouting(it, ev.RoutingModel, ev.RoutingIsStrong, ev.RoutingTier)
+			}
+			return
+		}
+	}
+}
+
+// applyLoadedRouting stamps (or clears) routing on the most recent matching
+// item after a history entry is replayed. Clearing prevents LastRouting
+// inherit from leaking a previous call's badge onto an unstamped entry.
+func (t *Transcript) applyLoadedRouting(e HistoryMsg, kinds ...ItemKind) {
+	for i := len(t.Items) - 1; i >= 0; i-- {
+		k := t.Items[i].Kind
+		if k == ItemUser {
+			return
+		}
+		match := false
+		for _, want := range kinds {
+			if k == want {
+				match = true
+				break
+			}
+		}
+		if !match {
+			continue
+		}
+		if e.RoutingTier != "" || e.RoutingModel != "" {
+			stampItemRouting(&t.Items[i], e.RoutingModel, e.RoutingIsStrong, e.RoutingTier)
+			t.LastRoutingTier = e.RoutingTier
+			t.LastRoutingModel = e.RoutingModel
+			t.LastRoutingIsStrong = e.RoutingIsStrong
+		} else if t.Items[i].Content == e.Text {
+			// Brand-new bubble with no persisted tier: drop LastRouting inherit.
+			// If this entry was merged into an earlier bubble (LinearThread
+			// consecutive agent text), leave that bubble's stamp alone.
+			stampItemRouting(&t.Items[i], "", false, "")
+		}
+		return
 	}
 }
 
@@ -668,7 +749,9 @@ func (t *Transcript) appendAgentText(text string) {
 			// causes the plan to be buried inside an ItemAgent whose accumulated
 			// content no longer starts with "# Execution Plan\n".
 			if t.Items[n-1].Kind == ItemAgent && isPlanContent(text) {
-				t.Items = append(t.Items, Item{Kind: ItemPlan, Content: text})
+				plan := Item{Kind: ItemPlan, Content: text}
+				t.copyLastRouting(&plan)
+				t.Items = append(t.Items, plan)
 				return
 			}
 			t.Items[n-1].Content += text
@@ -676,13 +759,16 @@ func (t *Transcript) appendAgentText(text string) {
 			if t.Items[n-1].Kind == ItemAgent && isPlanContent(t.Items[n-1].Content) {
 				t.Items[n-1].Kind = ItemPlan
 			}
+			t.copyLastRouting(&t.Items[n-1])
 			return
 		}
 		kind := ItemAgent
 		if isPlanContent(text) {
 			kind = ItemPlan
 		}
-		t.Items = append(t.Items, Item{Kind: kind, Content: text})
+		item := Item{Kind: kind, Content: text}
+		t.copyLastRouting(&item)
+		t.Items = append(t.Items, item)
 		return
 	}
 
@@ -697,6 +783,7 @@ func (t *Transcript) appendAgentText(text string) {
 			t.Items[n-1].Content += text
 		}
 		t.Items[n-1].Provisional = true
+		t.copyLastRouting(&t.Items[n-1])
 		t.ensureAgentAfterActivity()
 		return
 	}
@@ -709,16 +796,19 @@ func (t *Transcript) appendAgentText(text string) {
 			t.Items[idx].Content += text
 		}
 		t.Items[idx].Provisional = true
+		t.copyLastRouting(&t.Items[idx])
 		t.ensureAgentAfterActivity()
 		return
 	}
 
 	// First agent text in this turn.
-	t.Items = append(t.Items, Item{
+	item := Item{
 		Kind:        ItemAgent,
 		Content:     text,
 		Provisional: true,
-	})
+	}
+	t.copyLastRouting(&item)
+	t.Items = append(t.Items, item)
 	t.ensureAgentAfterActivity()
 }
 
@@ -930,13 +1020,16 @@ func (t *Transcript) appendToolCall(ev Event) {
 		if actIdx := t.trailingActivityInTurn(); actIdx >= 0 {
 			t.Items[actIdx].Steps = append(t.Items[actIdx].Steps, step)
 			t.Items[actIdx].Summary = summarizeSteps(t.Items[actIdx].Steps)
+			t.copyLastRouting(&t.Items[actIdx])
 			return
 		}
-		t.Items = append(t.Items, Item{
+		act := Item{
 			Kind:    ItemActivity,
 			Steps:   []ToolStep{step},
 			Summary: summarizeSteps([]ToolStep{step}),
-		})
+		}
+		t.copyLastRouting(&act)
+		t.Items = append(t.Items, act)
 		return
 	}
 
@@ -949,6 +1042,7 @@ func (t *Transcript) appendToolCall(ev Event) {
 	if actIdx := t.reusableActivityInTurn(); actIdx >= 0 {
 		t.Items[actIdx].Steps = append(t.Items[actIdx].Steps, step)
 		t.Items[actIdx].Summary = summarizeSteps(t.Items[actIdx].Steps)
+		t.copyLastRouting(&t.Items[actIdx])
 		t.ensureAgentAfterActivity()
 		return
 	}
@@ -958,6 +1052,7 @@ func (t *Transcript) appendToolCall(ev Event) {
 		Steps:   []ToolStep{step},
 		Summary: summarizeSteps([]ToolStep{step}),
 	}
+	t.copyLastRouting(&act)
 	// Insert the new fold after the last tool surface (file diff / activity) in
 	// the turn, but before a trailing sticky agent so the agent stays last.
 	insertAt := t.newActivityInsertIndex()
@@ -1074,6 +1169,7 @@ func (t *Transcript) appendToolResult(ev Event) {
 	if actIdx := t.reusableActivityInTurn(); actIdx >= 0 {
 		t.Items[actIdx].Steps = append(t.Items[actIdx].Steps, step)
 		t.Items[actIdx].Summary = summarizeSteps(t.Items[actIdx].Steps)
+		t.copyLastRouting(&t.Items[actIdx])
 		t.maybeAppendFileDiff(step.Name, step.Args, step.Result, step.Status)
 		return
 	}
@@ -1082,6 +1178,7 @@ func (t *Transcript) appendToolResult(ev Event) {
 		Steps:   []ToolStep{step},
 		Summary: summarizeSteps([]ToolStep{step}),
 	}
+	t.copyLastRouting(&act)
 	insertAt := t.newActivityInsertIndex()
 	if insertAt >= len(t.Items) {
 		t.Items = append(t.Items, act)
@@ -1291,6 +1388,17 @@ func (t *Transcript) Reset() {
 	t.ApprovalIdx = -1
 	t.ApprovalCursor = 0
 	t.nextTextReplaces = false
+	t.LastRoutingModel = ""
+	t.LastRoutingIsStrong = false
+	t.LastRoutingTier = ""
+	t.RoutingStrongPct = 0
+	t.RoutingWeakPct = 0
+	t.RoutingMediumPct = 0
+	t.RoutingTotal = 0
+	t.RoutingStrongName = ""
+	t.RoutingWeakName = ""
+	t.RoutingMediumName = ""
+	t.RoutingCostSavingsPct = 0
 }
 
 // HistoryMsg is a finalized transcript entry loaded when resuming a session.
@@ -1329,37 +1437,21 @@ func (t *Transcript) LoadHistory(entries []HistoryMsg) {
 			if !t.LinearThread {
 				t.nextTextReplaces = true
 			}
-			// Restore the persisted routing tier so the reloaded bubble
-			// gets the same badge it had during the live turn.
 			t.Apply(NewText(e.Text))
-			// If this history entry carries a routing tier, stamp it directly
-			// onto the just-created agent item. Apply(NewText) creates the item
-			// but doesn't read LastRouting* — so we find the item and stamp it.
-			if e.RoutingTier != "" {
-				for i := len(t.Items) - 1; i >= 0; i-- {
-					if t.Items[i].Kind == ItemAgent || t.Items[i].Kind == ItemPlan {
-						t.Items[i].RoutingTier = e.RoutingTier
-						t.Items[i].RoutingModel = e.RoutingModel
-						t.Items[i].RoutingIsStrong = e.RoutingIsStrong
-						break
-					}
-					if t.Items[i].Kind == ItemUser {
-						break
-					}
-				}
-			}
-			// Update Last* so the summary fields reflect the last call.
-			if e.RoutingTier != "" {
-				t.LastRoutingTier = e.RoutingTier
-				t.LastRoutingModel = e.RoutingModel
-				t.LastRoutingIsStrong = e.RoutingIsStrong
-			}
+			// Stamp the persisted tier, or clear inherit from a previous
+			// entry so unstamped historical bubbles do not pick up a badge.
+			t.applyLoadedRouting(e, ItemAgent, ItemPlan)
 		case "thinking":
 			t.Apply(Event{Kind: KindThinking, Text: e.Text})
 		case "system":
 			t.Apply(NewSystem(e.Text))
 		case "tool_call":
 			t.Apply(NewToolCall(e.ToolName, e.ToolID, e.Args))
+			// Explicit routing on the history entry wins; otherwise the
+			// fold keeps whatever copyLastRouting inherited from Last*.
+			if e.RoutingTier != "" || e.RoutingModel != "" {
+				t.applyLoadedRouting(e, ItemActivity)
+			}
 		case "tool_result":
 			t.Apply(NewToolResult(e.ToolName, e.ToolID, e.Result))
 		case "plan":

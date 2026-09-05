@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -244,6 +245,11 @@ func (pc *PricingCache) fuzzyMatchLocked(modelName string) (ModelCost, bool) {
 			// Exact match — return immediately.
 			return pc.costs[key], true
 		}
+		// Version-order independent on the dashed form so "claude-4.5-haiku"
+		// matches "claude-haiku-4.5" (compacting first would glue "claudehaiku").
+		if tokenBagsEqual(stripProviderAndVariants(key), stripProviderAndVariants(modelName)) {
+			return pc.costs[key], true
+		}
 		// Substring: one contains the other.
 		if strings.Contains(keyNorm, normalized) || strings.Contains(normalized, keyNorm) {
 			// Prefer the longer common segment (larger overlap).
@@ -292,22 +298,28 @@ func (pc *PricingCache) fuzzyMatchLocked(modelName string) (ModelCost, bool) {
 //
 // Examples:
 //
-//	"claude-sonnet-4"                → "claudesonnet4"
-//	"anthropic/claude-sonnet-4"      → "claudesonnet4"
-//	"anthropic--claude-sonnet-4"     → "claudesonnet4"  (internal double-dash format)
-//	"openai/gpt-4o-mini"             → "gpt4omini"
-//	"gpt-4o-mini"                    → "gpt4omini"
-//	"meta-llama/llama-3.1-70b"       → "llama3170b"
+//	"claude-sonnet-4"            → "claudesonnet4"
+//	"anthropic/claude-sonnet-4"  → "claudesonnet4"
+//	"anthropic--claude-sonnet-4" → "claudesonnet4"  (internal double-dash format)
+//	"openai/gpt-4o-mini"         → "gpt4omini"
+//	"gpt-4o-mini"                → "gpt4omini"
+//	"meta-llama/llama-3.1-70b"   → "llama3170b"
 func normalizeName(s string) string {
+	s = stripProviderAndVariants(s)
+	return strings.NewReplacer("-", "", "_", "", ".", "", " ", "").Replace(s)
+}
+
+// stripProviderAndVariants lowercases s and removes vendor prefixes (slash or
+// double-dash) and variant suffixes, but keeps hyphens/dots so token-bag
+// matching can still see word boundaries ("claude-4.5-haiku" vs "claude-haiku-4.5").
+func stripProviderAndVariants(s string) string {
 	s = strings.ToLower(s)
 
-	// Strip internal double-dash provider prefix (e.g. "anthropic--claude-sonnet").
-	// This format is used by some providers when embedding the provider name in the model ID.
+	// SAP AI Core and similar providers embed the vendor as "vendor--model".
 	if idx := strings.Index(s, "--"); idx >= 0 {
 		s = s[idx+2:]
 	}
 
-	// Strip known provider prefixes (with trailing slash).
 	knownPrefixes := []string{
 		"anthropic/",
 		"openai/",
@@ -334,12 +346,10 @@ func normalizeName(s string) string {
 			break
 		}
 	}
-	// Generic: if there's still a slash (e.g., unknown/model), strip up to and including it.
 	if idx := strings.LastIndex(s, "/"); idx >= 0 {
 		s = s[idx+1:]
 	}
 
-	// Strip variant suffixes.
 	variantSuffixes := []string{":free", ":beta", ":extended", ":thinking", ":online"}
 	for _, suf := range variantSuffixes {
 		if strings.HasSuffix(s, suf) {
@@ -347,10 +357,64 @@ func normalizeName(s string) string {
 			break
 		}
 	}
-
-	// Remove all separators and whitespace.
-	s = strings.NewReplacer("-", "", "_", "", ".", "", " ", "").Replace(s)
 	return s
+}
+
+// alphaNumTokens splits a name into letter-runs and digit-runs, skipping
+// separators. "claude-4.5-haiku" → ["claude","4","5","haiku"].
+func alphaNumTokens(s string) []string {
+	var tokens []string
+	var cur strings.Builder
+	lastKind := 0 // 0 none, 1 letter, 2 digit
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		kind := 0
+		switch {
+		case c >= 'a' && c <= 'z':
+			kind = 1
+		case c >= '0' && c <= '9':
+			kind = 2
+		default:
+			// Separators are token boundaries so "claude-haiku" stays two words.
+			if cur.Len() > 0 {
+				tokens = append(tokens, cur.String())
+				cur.Reset()
+			}
+			lastKind = 0
+			continue
+		}
+		if lastKind != 0 && kind != lastKind {
+			tokens = append(tokens, cur.String())
+			cur.Reset()
+		}
+		cur.WriteByte(c)
+		lastKind = kind
+	}
+	if cur.Len() > 0 {
+		tokens = append(tokens, cur.String())
+	}
+	return tokens
+}
+
+func tokenBagKey(tokens []string) string {
+	if len(tokens) == 0 {
+		return ""
+	}
+	sorted := append([]string(nil), tokens...)
+	sort.Strings(sorted)
+	return strings.Join(sorted, "\x00")
+}
+
+// tokenBagsEqual reports whether two normalized names contain the same
+// letter/digit runs regardless of order. This matches OpenRouter IDs like
+// "claude-haiku-4.5" against internal IDs like "claude-4.5-haiku".
+func tokenBagsEqual(a, b string) bool {
+	ta := alphaNumTokens(a)
+	tb := alphaNumTokens(b)
+	if len(ta) < 2 || len(tb) < 2 {
+		return false
+	}
+	return tokenBagKey(ta) == tokenBagKey(tb)
 }
 
 // commonPrefixLen returns the number of characters in the common prefix of a and b.

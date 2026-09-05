@@ -739,6 +739,32 @@ func (m model) handleAddFormKey(msg tea.KeyMsg, key string) (tea.Model, tea.Cmd)
 	return m, nil
 }
 
+// handleOverlayPaste routes a paste event into the appropriate open overlay
+// text field. Returns (model, cmd, true) when the overlay consumed the paste,
+// or (model, nil, false) to let the normal composer paste path handle it.
+func (m model) handleOverlayPaste(text string) (tea.Model, tea.Cmd, bool) {
+	if !m.modelPicker.open || m.modelPicker.loading {
+		return m, nil, false
+	}
+	// Sanitise: collapse CRLF, strip bare CRs, trim leading/trailing whitespace.
+	clean := strings.TrimSpace(strings.NewReplacer("\r\n", " ", "\r", "", "\n", " ", "\t", " ").Replace(text))
+	if clean == "" {
+		return m, nil, false
+	}
+	switch m.modelPicker.step {
+	case "add-form":
+		// Paste into the currently focused form field.
+		m.modelPicker.values[m.modelPicker.fieldCursor] += clean
+		return m, nil, true
+	case "provider", "model":
+		// Paste into the search/filter field.
+		m.modelPicker.filter += clean
+		m.modelPicker.rebuildItems()
+		return m, nil, true
+	}
+	return m, nil, false
+}
+
 func (m model) handleOAuthKey(key string) (tea.Model, tea.Cmd) {
 	switch key {
 	case "esc", "ctrl+c":

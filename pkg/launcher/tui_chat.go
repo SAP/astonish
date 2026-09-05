@@ -1240,7 +1240,14 @@ func mapSSEToEvents(sev *client.SSEEvent, debug bool) []events.Event {
 			PlanVerification: payload.PlanVerification,
 		}}
 	case "done":
-		return []events.Event{events.NewDone()}
+		var payload struct {
+			RoutingSummary string `json:"routing_summary"`
+		}
+		ev := events.NewDone()
+		if json.Unmarshal(data, &payload) == nil && payload.RoutingSummary != "" {
+			ev.RoutingSummary = payload.RoutingSummary
+		}
+		return []events.Event{ev}
 	case "debug":
 		// Prefer structured init → model footer even when not in --debug.
 		var payload struct {

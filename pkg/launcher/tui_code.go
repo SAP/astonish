@@ -673,6 +673,13 @@ type localAgentBackend struct {
 	// the approval overlay and response channel at a time.
 	subAgentAuthMu      sync.Mutex
 	subAgentAuthPending bool
+
+	// routingApprovalContinuation is set when the previous turn ended with a
+	// pending tool approval (the done event was preceded by an approval event).
+	// When true, the next RunTurn is a continuation of the same user-visible
+	// task, so routing stats should NOT be reset — they accumulate across all
+	// approval cycles and the final summary reflects the full task's routing.
+	routingApprovalContinuation bool
 }
 
 func (b *localAgentBackend) ListLocalSkills(ctx context.Context) ([]backend.SkillSummary, error) {
@@ -1436,16 +1443,36 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 
 		emit("session", map[string]any{"sessionId": sessionID, "isNew": isNew})
 
+		// Track whether this turn emits a tool approval prompt. When it does, the
+		// next RunTurn call is a continuation of the same user-visible task, so we
+		// should not reset routing stats between them.
+		var approvalEmittedThisTurn bool
+		origEmit := emit
+		emit = func(eventType string, data map[string]any) {
+			if eventType == "approval" {
+				approvalEmittedThisTurn = true
+			}
+			origEmit(eventType, data)
+		}
+
 		// Reset per-turn routing stats and inject the classifier context early —
 		// before the title goroutine starts — so the title call's routing decision
 		// is included in the turn's count and summary. ResetTurn() clears both
 		// turnTiers and Stats; everything that follows (title + agent calls)
 		// accumulates fresh for this turn.
+		// Exception: approval continuations are part of the same user-visible task,
+		// so stats accumulate across approval cycles for an accurate final summary.
 		if b.routingLLM != nil {
 			ctx = routing.WithClassifierContext(ctx, routing.ClassifierContext{
 				HasPlanMode: planMode || graphPlan,
 			})
-			b.routingLLM.ResetTurn()
+			b.mu.Lock()
+			isContinuation := b.routingApprovalContinuation
+			b.routingApprovalContinuation = false
+			b.mu.Unlock()
+			if !isContinuation {
+				b.routingLLM.ResetTurn()
+			}
 		}
 
 		// On a brand-new session, seed the index with a provisional title from
@@ -1510,8 +1537,15 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 			}
 		}
 
-		// Emit final routing info and cumulative summary when Auto mode is active.
+		// Emit final routing info when Auto mode is active.
 		b.emitRoutingInfo(emit, "", "")
+
+		// Build the done event payload, including the routing summary when
+		// Auto mode is active. The summary is carried on the done event itself
+		// instead of being emitted as a separate visible system message, so the
+		// TUI can choose when to display it (only on final task completion, not
+		// after intermediate approval stops).
+		donePayload := map[string]any{"done": true}
 		if b.routingLLM != nil && b.routingLLM.Stats.Total() >= 1 {
 			// Pricing is injected in a background goroutine at Auto-mode setup.
 			// If that fetch has not finished (or failed to match model names)
@@ -1529,11 +1563,20 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 				}
 			}
 			if summary := b.routingLLM.SummaryLine(); summary != "" {
-				emit("system", map[string]any{"content": summary})
+				donePayload["routing_summary"] = summary
 			}
 		}
 
-		emit("done", map[string]any{"done": true})
+		// If this turn emitted an approval prompt, the next RunTurn will be a
+		// continuation of the same user-visible task. Flag the backend so routing
+		// stats are not reset between approval cycles.
+		if approvalEmittedThisTurn && b.routingLLM != nil {
+			b.mu.Lock()
+			b.routingApprovalContinuation = true
+			b.mu.Unlock()
+		}
+
+		emit("done", donePayload)
 	}()
 
 	return out, nil

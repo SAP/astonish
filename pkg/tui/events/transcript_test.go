@@ -868,6 +868,37 @@ func TestTranscriptKindDoneClearsDelegation(t *testing.T) {
 	}
 }
 
+func TestTranscriptKindDoneSetsRoutingSummary(t *testing.T) {
+	tr := NewTranscript()
+
+	// A done event with a routing summary should store it on the transcript.
+	ev := NewDone()
+	ev.RoutingSummary = "Auto routing — 2 calls (50% strong foo, 50% weak bar)"
+	tr.Apply(ev)
+
+	if tr.RoutingSummary != "Auto routing — 2 calls (50% strong foo, 50% weak bar)" {
+		t.Fatalf("RoutingSummary: got %q", tr.RoutingSummary)
+	}
+
+	// A plain done event (no summary) should not clear an existing summary.
+	tr.Apply(NewDone())
+	if tr.RoutingSummary != "Auto routing — 2 calls (50% strong foo, 50% weak bar)" {
+		t.Fatalf("RoutingSummary should not be cleared by plain KindDone: got %q", tr.RoutingSummary)
+	}
+}
+
+func TestTranscriptResetClearsRoutingSummary(t *testing.T) {
+	tr := NewTranscript()
+	ev := NewDone()
+	ev.RoutingSummary = "Auto routing — 1 calls"
+	tr.Apply(ev)
+
+	tr.Reset()
+	if tr.RoutingSummary != "" {
+		t.Fatalf("RoutingSummary should be cleared by Reset: got %q", tr.RoutingSummary)
+	}
+}
+
 // TestTranscript_LoadHistory_ApprovalFlowRendersAsSystemMessage verifies that
 // when a resumed session includes an approval flow (tool_call → system approval
 // message → tool_call with result), the transcript renders correctly:

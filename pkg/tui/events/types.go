@@ -160,6 +160,11 @@ type Event struct {
 	RoutingTier           string  `json:"routing_tier,omitempty"`            // "strong", "medium", or "weak"
 	RoutingCostSavingsPct float64 `json:"routing_cost_savings_pct,omitempty"` // 0-100, % saved vs all-strong
 
+	// RoutingSummary is the end-of-turn Auto routing summary line carried on
+	// KindDone events. The TUI displays it only when the task truly completes
+	// (not during intermediate approval stops).
+	RoutingSummary string
+
 	// Meta holds optional backend-specific keys without expanding the struct.
 	Meta map[string]any
 

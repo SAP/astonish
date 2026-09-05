@@ -773,6 +773,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.tr.Apply(events.NewSystem("Completed in " + formatDuration(d)))
 			}
 			m.timerReset()
+			// Display the Auto routing summary alongside "Completed" — only
+			// once, when the full task finishes (not after intermediate approvals).
+			if m.tr.RoutingSummary != "" {
+				m.tr.Apply(events.NewSystem(m.tr.RoutingSummary))
+				m.tr.RoutingSummary = ""
+			}
 		}
 		if m.tr.Streaming && !m.tr.Awaiting {
 			m.tr.Apply(events.NewDone())
@@ -2181,6 +2187,12 @@ func (m *model) finishTurn() tea.Cmd {
 			m.tr.Apply(events.NewSystem("Completed in " + formatDuration(d)))
 		}
 		m.timerReset()
+		// Display the Auto routing summary alongside "Completed" — only
+		// once, when the full task finishes (not after intermediate approvals).
+		if m.tr.RoutingSummary != "" {
+			m.tr.Apply(events.NewSystem(m.tr.RoutingSummary))
+			m.tr.RoutingSummary = ""
+		}
 	}
 	if m.tr.Streaming && !m.tr.Awaiting {
 		m.tr.Apply(events.NewDone())

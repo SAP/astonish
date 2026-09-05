@@ -173,6 +173,11 @@ type Transcript struct {
 	LastRoutingTier       string  // "strong", "medium", or "weak"
 	RoutingCostSavingsPct float64 // 0-100, % saved vs all-strong
 
+	// RoutingSummary holds the end-of-turn routing summary line. It is set
+	// when a KindDone event carries a non-empty RoutingSummary field, and is
+	// cleared by the TUI after it displays it (only on final turn completion).
+	RoutingSummary string
+
 	// delegationItemIdx is the index in Items of the current ItemDelegation
 	// block (-1 when no delegation is active). Used by applyDelegation to
 	// update the inline item in-place as task lifecycle events arrive.
@@ -414,6 +419,10 @@ func (t *Transcript) Apply(ev Event) {
 		t.finalizeRunningSteps()
 		// Promote sticky provisional agent text to the final response.
 		t.finalizeProvisionalAgents()
+		// Capture routing summary if the done event carries one.
+		if ev.RoutingSummary != "" {
+			t.RoutingSummary = ev.RoutingSummary
+		}
 	}
 }
 
@@ -1399,6 +1408,7 @@ func (t *Transcript) Reset() {
 	t.RoutingWeakName = ""
 	t.RoutingMediumName = ""
 	t.RoutingCostSavingsPct = 0
+	t.RoutingSummary = ""
 }
 
 // HistoryMsg is a finalized transcript entry loaded when resuming a session.

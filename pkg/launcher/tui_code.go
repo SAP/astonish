@@ -48,6 +48,12 @@ const (
 	codeAppName             = "astonish_code"
 	planLifecycleStateKey   = "astonish_plan_lifecycle"
 	planApprovalUserMessage = "I approve this plan. Please start implementing it now, phase by phase."
+	// routingInfoStateKey is the StateDelta key used to persist the routing
+	// decision (tier + model name) alongside each agent response event. This
+	// reuses the same proven, already-read-back side-channel that
+	// RecordPlanDecision uses (planLifecycleStateKey / awaiting_approval).
+	// Reading it back in loadHistory lets reloaded badges match live badges.
+	routingInfoStateKey = "routing_info"
 )
 
 // codeUserID is the base local user for code mode (single-user, no auth).
@@ -569,7 +575,13 @@ func redirectLogsForTUI(debug bool) func() {
 	}
 
 	log.SetOutput(sink)
-	slog.SetDefault(slog.New(slog.NewTextHandler(sink, nil)))
+	// When debugging, emit at Debug level so slog.Debug diagnostics reach the
+	// log file. Otherwise the default (Info) level drops them.
+	var handlerOpts *slog.HandlerOptions
+	if debug {
+		handlerOpts = &slog.HandlerOptions{Level: slog.LevelDebug}
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(sink, handlerOpts)))
 
 	return func() {
 		log.SetOutput(prevLogOut)
@@ -1408,6 +1420,19 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 		}()
 
 		emit("session", map[string]any{"sessionId": sessionID, "isNew": isNew})
+
+		// Reset per-turn routing stats and inject the classifier context early —
+		// before the title goroutine starts — so the title call's routing decision
+		// is included in the turn's count and summary. ResetTurn() clears both
+		// turnTiers and Stats; everything that follows (title + agent calls)
+		// accumulates fresh for this turn.
+		if b.routingLLM != nil {
+			ctx = routing.WithClassifierContext(ctx, routing.ClassifierContext{
+				HasPlanMode: planMode || graphPlan,
+			})
+			b.routingLLM.ResetTurn()
+		}
+
 		// On a brand-new session, seed the index with a provisional title from
 		// the first user message, then kick off a best-effort LLM title refine
 		// in the background. The provisional title appears immediately in
@@ -1456,23 +1481,23 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 
 		out <- events.NewStatus("Thinking…")
 
-		// Inject routing classifier context so the MLP classifier knows about
-		// the current mode. The classifier uses HasPlanMode to force the
-		// strong model for planning tasks.
-		if b.routingLLM != nil {
-			ctx = routing.WithClassifierContext(ctx, routing.ClassifierContext{
-				HasPlanMode: planMode || graphPlan,
-			})
-			// Reset per-turn stats so the end-of-turn summary reflects only
-			// this turn's routing decisions, not the cumulative session total.
-			b.routingLLM.Stats.Reset()
-		}
-
 		b.driveTurn(ctx, rnr, chatAgent, effectiveID, turnIndex, userMsg, emit)
 
+		// Persist routing decisions so loadHistory can reconstruct badges on
+		// reload. One system event per LLM call, each carrying its tier in
+		// StateDelta[routingInfoStateKey]. This is the same proven side-channel
+		// pattern as RecordPlanDecision / planLifecycleStateKey.
+		if b.routingLLM != nil {
+			tiers := b.routingLLM.TurnTiers()
+			for _, tier := range tiers {
+				modelName := b.routingLLM.ModelNameForTier(tier)
+				b.recordRoutingDecision(ctx, effectiveID, tier, modelName)
+			}
+		}
+
 		// Emit final routing info and cumulative summary when Auto mode is active.
-		b.emitRoutingInfo(emit)
-		if b.routingLLM != nil && b.routingLLM.Stats.Total() > 1 {
+		b.emitRoutingInfo(emit, "", "")
+		if b.routingLLM != nil && b.routingLLM.Stats.Total() >= 1 {
 			stats := &b.routingLLM.Stats
 			parts := []string{}
 			if stats.StrongCount() > 0 {
@@ -1849,6 +1874,12 @@ func (b *localAgentBackend) driveTurn(
 	b.mu.Lock()
 	b.lastCtxEstimate = time.Time{}
 	b.mu.Unlock()
+	// callIdx tracks how many GenerateContent calls have started so far this
+	// turn. When Stats.Total() advances past lastStatsTotal, a new call has
+	// begun. We index into turnTiers[callIdx] to get that call's tier — the
+	// authoritative value recorded at decision time, not a racy shared field.
+	var callIdx int
+	var lastStatsTotal int64 = -1
 	for event, runErr := range rnr.Run(ctx, b.effectiveUserID(), sessionID, userMsg, adkagent.RunConfig{
 		StreamingMode: adkagent.StreamingModeSSE,
 	}) {
@@ -1858,6 +1889,27 @@ func (b *localAgentBackend) driveTurn(
 		if runErr != nil {
 			emit("error", map[string]any{"error": runErr.Error()})
 			return
+		}
+
+		// Detect a new GenerateContent call starting (Stats.Total advances).
+		// Read the tier for THIS call directly from the ordered turnTiers list
+		// that GenerateContent wrote at decision time — no shared Last field,
+		// no race, always the correct tier for this specific call.
+		if b.routingLLM != nil {
+			if cur := b.routingLLM.Stats.Total(); cur != lastStatsTotal {
+				lastStatsTotal = cur
+				tiers := b.routingLLM.TurnTiers()
+				slog.Debug("routing-badge: stats advanced", "callIdx", callIdx, "statsTotal", cur, "tiersLen", len(tiers), "tiers", tiers)
+				if callIdx < len(tiers) {
+					tier := tiers[callIdx]
+					modelName := b.routingLLM.ModelNameForTier(tier)
+					slog.Debug("routing-badge: emitting routing_info", "callIdx", callIdx, "tier", tier, "modelName", modelName)
+					b.emitRoutingInfo(emit, modelName, tier)
+				} else {
+					slog.Debug("routing-badge: callIdx out of range, NOT emitting", "callIdx", callIdx, "tiersLen", len(tiers))
+				}
+				callIdx++
+			}
 		}
 
 		// Approval / thinking / retry surfaced through the state delta.
@@ -1953,14 +2005,6 @@ func (b *localAgentBackend) driveTurn(
 			}
 		}
 
-		// Emit routing info AFTER this response's item (agent text or tool
-		// activity) has been created by the emits above, so the transcript
-		// stamps the correct item with this call's tier. Emitting before the
-		// parts loop would stamp the previous call's item, causing the badge
-		// to disagree with the routing summary (e.g. a medium call showing the
-		// weak ⚡ badge).
-		b.emitRoutingInfo(emit)
-
 		if b.emitUsage(event, emit) {
 			sawRealUsage = true
 		}
@@ -1977,22 +2021,27 @@ func (b *localAgentBackend) driveTurn(
 }
 
 // emitRoutingInfo sends a KindRoutingInfo event when Auto routing is active.
-// Called during driveTurn after each LLM response so the TUI can show the
-// per-turn badge in real time, and also at turn end for the cumulative summary.
-func (b *localAgentBackend) emitRoutingInfo(emit func(string, map[string]any)) {
+// callModel and callTier are the tier name and model name for this specific
+// LLM call, read from the authoritative turnTiers list at decision time.
+// When called at turn-end with empty strings (post-turn summary emit), it
+// uses the last entry from TurnTiers to populate the current-call fields.
+func (b *localAgentBackend) emitRoutingInfo(emit func(string, map[string]any), callModel, callTier string) {
 	if b.routingLLM == nil || b.routingLLM.Stats.Total() == 0 {
+		slog.Debug("routing-badge: emitRoutingInfo early return", "nilLLM", b.routingLLM == nil)
 		return
 	}
-	modelName, tier := b.routingLLM.Last.Get()
-	stats := &b.routingLLM.Stats
-	
-	// Debug: append to file
-	f, _ := os.OpenFile("/tmp/routing_debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o666)
-	if f != nil {
-		fmt.Fprintf(f, "[emitRoutingInfo] tier=%s model=%s strong=%d medium=%d weak=%d\n",
-			tier, modelName, stats.StrongCount(), stats.MediumCount(), stats.WeakCount())
-		f.Close()
+	// If called at turn-end without a specific call context, use the last
+	// recorded tier from the authoritative ordered list.
+	modelName, tier := callModel, callTier
+	if modelName == "" {
+		tiers := b.routingLLM.TurnTiers()
+		if len(tiers) > 0 {
+			tier = tiers[len(tiers)-1]
+			modelName = b.routingLLM.ModelNameForTier(tier)
+		}
 	}
+	stats := &b.routingLLM.Stats
+
 	// Emit via the "routing_info" SSE type which mapSSEToEvents converts to
 	// KindRoutingInfo, updating the transcript's LastRouting* fields.
 	data := map[string]any{
@@ -2010,6 +2059,7 @@ func (b *localAgentBackend) emitRoutingInfo(emit func(string, map[string]any)) {
 	if b.routingLLM.HasPricing() {
 		data["routing_cost_savings_pct"] = b.routingLLM.CostSavingsPct()
 	}
+	slog.Debug("routing-badge: emit routing_info payload", "model", modelName, "tier", tier)
 	emit("routing_info", data)
 }
 
@@ -2299,6 +2349,44 @@ func (b *localAgentBackend) RecordPlanDecision(ctx context.Context, status event
 	return nil
 }
 
+// recordRoutingDecision persists the routing tier for the most recent agent
+// response to the session as a system event with StateDelta[routingInfoStateKey].
+// This mirrors RecordPlanDecision: a lightweight side-channel event whose only
+// payload is the tier + model name. loadHistory reads it back and stamps the
+// immediately-following agent HistoryEntry so reloaded badges match live badges.
+// The JSONL now contains the per-call routing model for every Auto-routing turn.
+func (b *localAgentBackend) recordRoutingDecision(ctx context.Context, sessionID, tier, modelName string) {
+	if sessionID == "" || tier == "" || b.routingLLM == nil {
+		return
+	}
+	resp, err := b.sessionSvc.Get(ctx, &session.GetRequest{
+		AppName:   codeAppName,
+		UserID:    b.effectiveUserID(),
+		SessionID: sessionID,
+	})
+	if err != nil || resp == nil || resp.Session == nil {
+		slog.Debug("recordRoutingDecision: session not found", "session_id", sessionID, "error", err)
+		return
+	}
+	ev := &session.Event{
+		ID:        fmt.Sprintf("routing-decision-%d", time.Now().UnixNano()),
+		Author:    "system",
+		Timestamp: time.Now(),
+		Actions: session.EventActions{StateDelta: map[string]any{
+			routingInfoStateKey: map[string]any{
+				"tier":        tier,
+				"model":       modelName,
+				"strong_name": b.routingLLM.StrongName,
+				"medium_name": b.routingLLM.MediumName,
+				"weak_name":   b.routingLLM.WeakName,
+			},
+		}},
+	}
+	if err := b.sessionSvc.AppendEvent(ctx, resp.Session, ev); err != nil {
+		slog.Debug("recordRoutingDecision: append failed", "error", err)
+	}
+}
+
 func (b *localAgentBackend) LoadHistory(ctx context.Context) ([]backend.HistoryEntry, error) {
 	b.mu.Lock()
 	id := b.sessionID
@@ -2442,6 +2530,34 @@ func (b *localAgentBackend) loadHistory(ctx context.Context, id string) ([]backe
 	announcePlanArgs := make(map[string]map[string]any)
 	latestPlanOutIdx := -1
 
+	// Pre-scan: collect routing decisions in the order they were persisted.
+	// recordRoutingDecision appends one system event per LLM call at end of
+	// turn; loadHistory re-applies them to agent HistoryEntry values in order
+	// (one agent entry per call) so reloaded badges match live badges.
+	type routingDecision struct {
+		tier  string
+		model string
+	}
+	var routingDecisions []routingDecision
+	for _, ev := range allEvents {
+		if ev == nil || ev.Actions.StateDelta == nil {
+			continue
+		}
+		if riVal, ok := ev.Actions.StateDelta[routingInfoStateKey]; ok {
+			if riMap, ok := riVal.(map[string]any); ok {
+				tier, _ := riMap["tier"].(string)
+				model, _ := riMap["model"].(string)
+				if tier != "" {
+					routingDecisions = append(routingDecisions, routingDecision{tier: tier, model: model})
+				}
+			}
+		}
+	}
+	// routingIdx tracks how many routing decisions have been consumed so far.
+	// Each time we append an agent HistoryEntry, we stamp it with the next
+	// decision and advance the index.
+	routingIdx := 0
+
 	var out []backend.HistoryEntry
 	for i, ev := range allEvents {
 		if ev == nil {
@@ -2486,7 +2602,18 @@ func (b *localAgentBackend) loadHistory(ctx context.Context, id string) ([]backe
 						continue
 					}
 				}
-				out = append(out, backend.HistoryEntry{Kind: kind, Text: text})
+				entry := backend.HistoryEntry{Kind: kind, Text: text}
+				// Stamp routing tier from the pre-scanned decisions.
+				// Agent entries correspond 1-to-1 with routing decisions
+				// (one LLM call → one agent text → one routing event).
+				if kind == "agent" && routingIdx < len(routingDecisions) {
+					rd := routingDecisions[routingIdx]
+					entry.RoutingTier = rd.tier
+					entry.RoutingModel = rd.model
+					entry.RoutingIsStrong = rd.tier == "strong"
+					routingIdx++
+				}
+				out = append(out, entry)
 			case part.FunctionCall != nil:
 				if approvalSuperseded[part.FunctionCall.ID] {
 					continue

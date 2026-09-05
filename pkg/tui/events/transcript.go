@@ -2,7 +2,6 @@ package events
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -397,61 +396,30 @@ func (t *Transcript) Apply(ev Event) {
 		t.RoutingMediumPct = ev.RoutingMediumPct
 		t.LastRoutingTier = ev.RoutingTier
 		t.RoutingCostSavingsPct = ev.RoutingCostSavingsPct
-		// Stamp the routing decision on items belonging to the current LLM call.
-		// Strategy:
-		//  1. Find the most-recent ItemAgent/ItemPlan in this turn and always
-		//     update it (even if previously stamped by an earlier call whose
-		//     text was merged into the same bubble in LinearThread mode).
-		//  2. Also stamp any contiguous un-stamped ItemActivity items between
-		//     that agent item and the end of the list (tool folds from this call).
-		//  3. If no agent item exists yet (call produced only tool calls), stamp
-		//     the most-recent un-stamped ItemActivity instead.
-		//
-		// This ensures: agent text bubble always shows the most recent call's tier,
-		// tool fold headers show the tier of the call that produced them, and
-		// items from prior calls are not retroactively overwritten.
-		lastAgentIdx := -1
+		// Stamp the routing decision on the most recent ItemAgent or
+		// ItemPlan so the badge persists per-item in the transcript
+		// after the turn completes. Each item records its own routing
+		// decision independently — later turns do not retroactively
+		// change earlier items. We scan past ItemActivity (tool folds)
+		// because routing_info fires after all parts including tool
+		// emits, and badges should appear on agent text, not tool folds.
 		for i := len(t.Items) - 1; i >= 0; i-- {
-			if t.Items[i].Kind == ItemUser {
+			kind := t.Items[i].Kind
+			if kind == ItemAgent || kind == ItemPlan {
+				// Always stamp the most-recent agent item with the
+				// current routing tier — this overwrites any prior
+				// stamp from an earlier call whose text was merged
+				// into the same item (LinearThread mode appends text
+				// to the last agent item), so the displayed badge
+				// always reflects the last model used for that item.
+				t.Items[i].RoutingModel = ev.RoutingModel
+				t.Items[i].RoutingIsStrong = ev.RoutingIsStrong
+				t.Items[i].RoutingTier = ev.RoutingTier
 				break
 			}
-			if t.Items[i].Kind == ItemAgent || t.Items[i].Kind == ItemPlan {
-				lastAgentIdx = i
+			if kind == ItemUser {
+				// Don't cross a user turn boundary.
 				break
-			}
-		}
-		if lastAgentIdx >= 0 {
-			// Always update the most-recent agent item with the current tier.
-			// Debug
-			if f, err := os.OpenFile("/tmp/routing_debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o666); err == nil {
-				fmt.Fprintf(f, "[transcript stamp] agent_idx=%d tier=%s model=%s\n", lastAgentIdx, ev.RoutingTier, ev.RoutingModel)
-				f.Close()
-			}
-			t.Items[lastAgentIdx].RoutingModel = ev.RoutingModel
-			t.Items[lastAgentIdx].RoutingIsStrong = ev.RoutingIsStrong
-			t.Items[lastAgentIdx].RoutingTier = ev.RoutingTier
-			// Also stamp any trailing un-stamped activity items (tool folds
-			// that follow the agent text for this same LLM call).
-			for i := lastAgentIdx + 1; i < len(t.Items); i++ {
-				if t.Items[i].Kind == ItemActivity && t.Items[i].RoutingModel == "" {
-					t.Items[i].RoutingModel = ev.RoutingModel
-					t.Items[i].RoutingIsStrong = ev.RoutingIsStrong
-					t.Items[i].RoutingTier = ev.RoutingTier
-				}
-			}
-		} else {
-			// No agent item yet — call produced only tool calls. Stamp the
-			// most-recent un-stamped ItemActivity.
-			for i := len(t.Items) - 1; i >= 0; i-- {
-				if t.Items[i].Kind == ItemUser {
-					break
-				}
-				if t.Items[i].Kind == ItemActivity && t.Items[i].RoutingModel == "" {
-					t.Items[i].RoutingModel = ev.RoutingModel
-					t.Items[i].RoutingIsStrong = ev.RoutingIsStrong
-					t.Items[i].RoutingTier = ev.RoutingTier
-					break
-				}
 			}
 		}
 	case KindDone:
@@ -1340,6 +1308,10 @@ type HistoryMsg struct {
 	PlanContext      string
 	PlanWhatNotToDo  string
 	PlanVerification string
+	// Routing fields for badge reconstruction on session reload.
+	RoutingTier     string
+	RoutingModel    string
+	RoutingIsStrong bool
 }
 
 // LoadHistory applies session history using the same sticky-agent / tool-fold
@@ -1357,7 +1329,31 @@ func (t *Transcript) LoadHistory(entries []HistoryMsg) {
 			if !t.LinearThread {
 				t.nextTextReplaces = true
 			}
+			// Restore the persisted routing tier so the reloaded bubble
+			// gets the same badge it had during the live turn.
 			t.Apply(NewText(e.Text))
+			// If this history entry carries a routing tier, stamp it directly
+			// onto the just-created agent item. Apply(NewText) creates the item
+			// but doesn't read LastRouting* — so we find the item and stamp it.
+			if e.RoutingTier != "" {
+				for i := len(t.Items) - 1; i >= 0; i-- {
+					if t.Items[i].Kind == ItemAgent || t.Items[i].Kind == ItemPlan {
+						t.Items[i].RoutingTier = e.RoutingTier
+						t.Items[i].RoutingModel = e.RoutingModel
+						t.Items[i].RoutingIsStrong = e.RoutingIsStrong
+						break
+					}
+					if t.Items[i].Kind == ItemUser {
+						break
+					}
+				}
+			}
+			// Update Last* so the summary fields reflect the last call.
+			if e.RoutingTier != "" {
+				t.LastRoutingTier = e.RoutingTier
+				t.LastRoutingModel = e.RoutingModel
+				t.LastRoutingIsStrong = e.RoutingIsStrong
+			}
 		case "thinking":
 			t.Apply(Event{Kind: KindThinking, Text: e.Text})
 		case "system":

@@ -298,6 +298,8 @@ func RunCodeTUI(ctx context.Context, cfg *CodeConfig) error {
 				if result.ChatAgent != nil && result.ChatAgent.SubAgentManager != nil {
 					result.ChatAgent.SubAgentManager.TaskLLM = rLLM
 				}
+				// Inject pricing data in the background.
+				go b.injectPricing(context.Background(), rLLM, b.autoRoutingCfg)
 			}
 		} else {
 			slog.Warn("auto routing restore failed; falling back to normal model",
@@ -494,7 +496,7 @@ func buildCodeBackend(ctx context.Context, cfg *CodeConfig) (backend.Backend, er
 				if b.result.ChatAgent != nil && b.result.ChatAgent.SubAgentManager != nil {
 					b.result.ChatAgent.SubAgentManager.TaskLLM = rLLM
 				}
-				// Inject pricing data in background — non-blocking.
+				// Inject pricing data in the background.
 				go b.injectPricing(context.Background(), rLLM, b.autoRoutingCfg)
 			}
 		} else {
@@ -630,7 +632,7 @@ type localAgentBackend struct {
 	autoRoutingCfg  *backend.AutoRoutingConfig   // persisted config for GetAutoRoutingConfig
 	classifier      routing.ComplexityClassifier // MLP classifier (shared by both tiers)
 	closeClassifier func()                       // releases Hugot embedder resources
-	pricingCache    *routing.PricingCache        // lazily initialised for cost-savings display
+	pricingCache    *routing.PricingCache        // lazily initialized when Auto routing is active
 	configured  bool
 	usage       *events.Usage
 	// contextTokens is the current context-window occupancy (estimated from the
@@ -851,8 +853,10 @@ func (b *localAgentBackend) SetAutoRouting(ctx context.Context, cfg backend.Auto
 	if b.result.ChatAgent != nil && b.result.ChatAgent.SubAgentManager != nil {
 		b.result.ChatAgent.SubAgentManager.TaskLLM = rLLM
 	}
-	// Inject pricing data in background — non-blocking.
-	go b.injectPricing(context.Background(), rLLM, &cfgCopy)
+
+	// Inject pricing data in the background — never blocks model selection.
+	cfgForPricing := cfgCopy
+	go b.injectPricing(context.Background(), rLLM, &cfgForPricing)
 
 	b.appConfig.ModelRouting = config.ModelRoutingConfig{
 		StrongProvider: cfg.StrongProvider,
@@ -877,8 +881,14 @@ func (b *localAgentBackend) GetAutoRoutingConfig() *backend.AutoRoutingConfig {
 	return b.autoRoutingCfg
 }
 
-// ensurePricingCache lazily creates the PricingCache, stored in the models dir
-// alongside the router weights. Returns nil if the directory cannot be resolved.
+func shortModelName(model string) string {
+	if i := strings.LastIndex(model, "/"); i >= 0 {
+		return model[i+1:]
+	}
+	return model
+}
+
+// ensurePricingCache lazily creates the PricingCache on first use.
 func (b *localAgentBackend) ensurePricingCache() *routing.PricingCache {
 	if b.pricingCache == nil {
 		modelsDir, err := config.GetModelsDir()
@@ -891,9 +901,9 @@ func (b *localAgentBackend) ensurePricingCache() *routing.PricingCache {
 	return b.pricingCache
 }
 
-// injectPricing looks up per-model costs from OpenRouter and calls SetPricing
-// on rLLM. It is designed to be called in a background goroutine so it never
-// blocks startup or model-switch latency.
+// injectPricing looks up per-tier costs and calls SetPricing on rLLM.
+// Designed to be called in a background goroutine so pricing fetch never
+// blocks startup or model selection.
 func (b *localAgentBackend) injectPricing(ctx context.Context, rLLM *routing.RoutingLLM, cfg *backend.AutoRoutingConfig) {
 	pc := b.ensurePricingCache()
 	if pc == nil {
@@ -906,13 +916,6 @@ func (b *localAgentBackend) injectPricing(ctx context.Context, rLLM *routing.Rou
 	}
 	weakCost, _ := pc.LookupCost(ctx, cfg.WeakProvider, cfg.WeakModel)
 	rLLM.SetPricing(strongCost, mediumCost, weakCost)
-}
-
-func shortModelName(model string) string {
-	if i := strings.LastIndex(model, "/"); i >= 0 {
-		return model[i+1:]
-	}
-	return model
 }
 
 // RespondSubAgentAuth sends the user's authorization decision back to a blocked

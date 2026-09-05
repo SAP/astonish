@@ -170,9 +170,7 @@ type Transcript struct {
 	RoutingMediumName   string
 	RoutingMediumPct    float64
 	LastRoutingTier     string // "strong", "medium", or "weak"
-	// RoutingCostSavingsPct is the estimated % cost saved vs all-strong routing.
-	// 0 when pricing data is unavailable.
-	RoutingCostSavingsPct float64
+	RoutingCostSavingsPct float64 // 0-100, % saved vs all-strong
 
 	// delegationItemIdx is the index in Items of the current ItemDelegation
 	// block (-1 when no delegation is active). Used by applyDelegation to

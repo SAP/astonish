@@ -1205,8 +1205,7 @@ func mapSSEToEvents(sev *client.SSEEvent, debug bool) []events.Event {
 				payload.Model, payload.IsStrong,
 				payload.StrongPct, payload.WeakPct, payload.Total,
 				payload.StrongName, payload.WeakName, payload.Tier,
-				payload.MediumName, payload.MediumPct,
-				payload.CostSavingsPct,
+				payload.MediumName, payload.MediumPct, payload.CostSavingsPct,
 			)}
 		}
 	case "plan":

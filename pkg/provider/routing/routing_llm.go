@@ -115,7 +115,6 @@ type RoutingLLM struct {
 	StrongName    string // display name (e.g. "claude-sonnet")
 	MediumName    string // display name (e.g. "claude-haiku"), empty if no medium
 	WeakName      string // display name (e.g. "gpt-4o-mini")
-
 	// Pricing fields — set post-construction via SetPricing.
 	strongCost ModelCost
 	mediumCost ModelCost
@@ -211,10 +210,10 @@ func (r *RoutingLLM) MediumModel() model.LLM { return r.medium }
 // WeakModel returns the weak model (for inspection).
 func (r *RoutingLLM) WeakModel() model.LLM { return r.weak }
 
-// SetPricing configures per-model pricing for cost-savings computation.
-// strong, medium, and weak are the USD-per-token costs from OpenRouter pricing.
-// Call this post-construction (e.g., in a background goroutine) — it is safe
-// for concurrent use.
+// --- Pricing support ---
+
+// SetPricing injects per-model cost data (USD per token) for cost-savings
+// computation. Safe to call from a goroutine after construction.
 func (r *RoutingLLM) SetPricing(strong, medium, weak ModelCost) {
 	r.strongCost = strong
 	r.mediumCost = medium
@@ -222,14 +221,11 @@ func (r *RoutingLLM) SetPricing(strong, medium, weak ModelCost) {
 	r.hasPricing = strong.PromptCost > 0
 }
 
-// HasPricing reports whether pricing data has been injected via SetPricing.
-func (r *RoutingLLM) HasPricing() bool {
-	return r.hasPricing
-}
+// HasPricing reports whether pricing data has been injected.
+func (r *RoutingLLM) HasPricing() bool { return r.hasPricing }
 
-// CostSavingsPct returns the estimated percentage of cost saved compared to
-// routing all calls through the strong model. Returns 0 when pricing is
-// unavailable or no calls have been made.
+// CostSavingsPct returns the estimated percentage saved vs routing all calls
+// to the strong model. Returns 0 when pricing data is unavailable.
 func (r *RoutingLLM) CostSavingsPct() float64 {
 	if !r.hasPricing {
 		return 0

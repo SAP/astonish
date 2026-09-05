@@ -157,10 +157,8 @@ type Event struct {
 	RoutingWeakName   string  `json:"routing_weak_name,omitempty"`
 	RoutingMediumName string  `json:"routing_medium_name,omitempty"`
 	RoutingMediumPct  float64 `json:"routing_medium_pct,omitempty"`
-	RoutingTier       string  `json:"routing_tier,omitempty"` // "strong", "medium", or "weak"
-	// RoutingCostSavingsPct is the estimated % cost saved vs routing all calls through strong.
-	// 0 when pricing data is unavailable.
-	RoutingCostSavingsPct float64 `json:"routing_cost_savings_pct,omitempty"`
+	RoutingTier           string  `json:"routing_tier,omitempty"`            // "strong", "medium", or "weak"
+	RoutingCostSavingsPct float64 `json:"routing_cost_savings_pct,omitempty"` // 0-100, % saved vs all-strong
 
 	// Meta holds optional backend-specific keys without expanding the struct.
 	Meta map[string]any

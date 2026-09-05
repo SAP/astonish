@@ -1872,10 +1872,6 @@ func (b *localAgentBackend) driveTurn(
 			continue
 		}
 
-		// Emit routing info as soon as an LLM response arrives so the TUI
-		// can show the per-turn ⚡weak / 🧠strong badge in real time.
-		b.emitRoutingInfo(emit)
-
 		for _, part := range event.LLMResponse.Content.Parts {
 			if part.Text != "" && !part.Thought {
 				if event.LLMResponse.Partial {
@@ -1953,6 +1949,14 @@ func (b *localAgentBackend) driveTurn(
 				}
 			}
 		}
+
+		// Emit routing info AFTER this response's item (agent text or tool
+		// activity) has been created by the emits above, so the transcript
+		// stamps the correct item with this call's tier. Emitting before the
+		// parts loop would stamp the previous call's item, causing the badge
+		// to disagree with the routing summary (e.g. a medium call showing the
+		// weak ⚡ badge).
+		b.emitRoutingInfo(emit)
 
 		if b.emitUsage(event, emit) {
 			sawRealUsage = true

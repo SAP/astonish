@@ -2854,7 +2854,7 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 			}
 			// Append routing badge when Auto routing is active for this response.
 			// Right-aligned on the last line when space allows, to avoid extra vertical space.
-			// 🧠 strong, ⚙️ medium, ⚡ weak.
+			// 🧠 strong · ⚙️ medium · ⚡ weak.
 			if it.RoutingModel != "" {
 				var badge string
 				switch it.RoutingTier {

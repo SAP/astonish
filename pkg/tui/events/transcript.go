@@ -56,7 +56,7 @@ type Item struct {
 	// Stamped on ItemAgent and ItemActivity items when Auto routing is active.
 	RoutingModel    string
 	RoutingIsStrong bool
-	RoutingTier     string // "strong", "medium", or "weak"
+	RoutingTier     string // "orchestrator" or "task"
 
 	// Approval fields.
 	ToolName string
@@ -397,21 +397,28 @@ func (t *Transcript) Apply(ev Event) {
 		t.LastRoutingTier = ev.RoutingTier
 		t.RoutingCostSavingsPct = ev.RoutingCostSavingsPct
 		// Stamp the routing decision on the most recent ItemAgent or
-		// ItemActivity so the badge persists per-item in the transcript
+		// ItemPlan so the badge persists per-item in the transcript
 		// after the turn completes. Each item records its own routing
 		// decision independently — later turns do not retroactively
-		// change earlier items.
+		// change earlier items. We scan past ItemActivity (tool folds)
+		// because routing_info fires after all parts including tool
+		// emits, and badges should appear on agent text, not tool folds.
 		for i := len(t.Items) - 1; i >= 0; i-- {
 			kind := t.Items[i].Kind
-			if kind == ItemAgent || kind == ItemActivity {
-				// Only stamp items that don't already have routing info.
-				// This prevents re-stamping earlier items when a new
-				// routing_info arrives for a subsequent LLM call.
-				if t.Items[i].RoutingModel == "" {
-					t.Items[i].RoutingModel = ev.RoutingModel
-					t.Items[i].RoutingIsStrong = ev.RoutingIsStrong
-					t.Items[i].RoutingTier = ev.RoutingTier
-				}
+			if kind == ItemAgent || kind == ItemPlan {
+				// Always stamp the most-recent agent item with the
+				// current routing tier — this overwrites any prior
+				// stamp from an earlier call whose text was merged
+				// into the same item (LinearThread mode appends text
+				// to the last agent item), so the displayed badge
+				// always reflects the last model used for that item.
+				t.Items[i].RoutingModel = ev.RoutingModel
+				t.Items[i].RoutingIsStrong = ev.RoutingIsStrong
+				t.Items[i].RoutingTier = ev.RoutingTier
+				break
+			}
+			if kind == ItemUser {
+				// Don't cross a user turn boundary.
 				break
 			}
 		}

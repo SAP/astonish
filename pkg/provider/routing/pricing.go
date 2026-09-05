@@ -434,16 +434,54 @@ func commonPrefixLen(a, b string) int {
 // CostSavingsPct computes what percentage of cost was saved compared to
 // routing all calls through the strong model.
 //
-// Uses prompt cost only for the ratio since prompt cost dominates and
-// completion cost scales proportionally in typical usage.
+// When token data is available (totalPromptTokens > 0), it uses actual token
+// counts and both prompt and completion costs for an accurate calculation.
 //
-// Returns 0 when pricing is unknown (zero strong cost) or no calls were made.
-func CostSavingsPct(strongCost, mediumCost, weakCost ModelCost, strongCalls, mediumCalls, weakCalls int64) float64 {
+// When token data is unavailable (all token counts are zero), it falls back to
+// the call-count ratio using prompt cost only — the same approximation as the
+// original implementation, so the feature degrades gracefully when providers
+// do not report UsageMetadata.
+//
+// Returns 0 when strong model pricing is unknown or no calls were made.
+func CostSavingsPct(
+	strongCost, mediumCost, weakCost ModelCost,
+	strongCalls, mediumCalls, weakCalls int64,
+	strongPromptTokens, strongCompletionTokens int64,
+	mediumPromptTokens, mediumCompletionTokens int64,
+	weakPromptTokens, weakCompletionTokens int64,
+) float64 {
 	totalCalls := strongCalls + mediumCalls + weakCalls
 	if totalCalls == 0 || strongCost.PromptCost <= 0 {
 		return 0
 	}
 
+	totalPromptTokens := strongPromptTokens + mediumPromptTokens + weakPromptTokens
+
+	if totalPromptTokens > 0 {
+		// Token-weighted path: use real token counts and both prompt + completion costs.
+		totalCompletionTokens := strongCompletionTokens + mediumCompletionTokens + weakCompletionTokens
+
+		actualCost := float64(strongPromptTokens)*strongCost.PromptCost +
+			float64(strongCompletionTokens)*strongCost.CompletionCost +
+			float64(mediumPromptTokens)*mediumCost.PromptCost +
+			float64(mediumCompletionTokens)*mediumCost.CompletionCost +
+			float64(weakPromptTokens)*weakCost.PromptCost +
+			float64(weakCompletionTokens)*weakCost.CompletionCost
+
+		allStrongCost := float64(totalPromptTokens)*strongCost.PromptCost +
+			float64(totalCompletionTokens)*strongCost.CompletionCost
+
+		if allStrongCost <= 0 {
+			return 0
+		}
+		savings := (1 - actualCost/allStrongCost) * 100
+		if savings < 0 {
+			return 0
+		}
+		return savings
+	}
+
+	// Fallback: call-count ratio using prompt cost only (original approximation).
 	actualCost := float64(strongCalls)*strongCost.PromptCost +
 		float64(mediumCalls)*mediumCost.PromptCost +
 		float64(weakCalls)*weakCost.PromptCost

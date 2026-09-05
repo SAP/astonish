@@ -12,10 +12,11 @@ import (
 	"google.golang.org/genai"
 )
 
-// mockLLM records whether GenerateContent was called.
+// mockLLM records whether GenerateContent was called and optionally returns UsageMetadata.
 type mockLLM struct {
 	name   string
 	called atomic.Bool
+	usage  *genai.GenerateContentResponseUsageMetadata // optional; returned in every response
 }
 
 func (m *mockLLM) Name() string { return m.name }
@@ -24,7 +25,8 @@ func (m *mockLLM) GenerateContent(_ context.Context, _ *model.LLMRequest, _ bool
 	m.called.Store(true)
 	return func(yield func(*model.LLMResponse, error) bool) {
 		yield(&model.LLMResponse{
-			Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: "ok"}}},
+			Content:       &genai.Content{Role: "model", Parts: []*genai.Part{{Text: "ok"}}},
+			UsageMetadata: m.usage,
 		}, nil)
 	}
 }
@@ -452,5 +454,216 @@ func TestRoutingLLM_SummaryLine_AllStrongOmitsZeroSavings(t *testing.T) {
 	}
 	if strings.Contains(line, "Saved") {
 		t.Errorf("all-strong summary %q should omit zero savings", line)
+	}
+}
+
+// TestRoutingStats_RecordTokens verifies per-tier token accumulation,
+// accessors, HasTokenData, and Reset.
+func TestRoutingStats_RecordTokens(t *testing.T) {
+	var s RoutingStats
+
+	if s.HasTokenData() {
+		t.Fatal("fresh stats should report HasTokenData=false")
+	}
+
+	s.RecordTokens("strong", 1000, 200)
+	s.RecordTokens("weak", 5000, 1000)
+	s.RecordTokens("medium", 300, 60)
+
+	if !s.HasTokenData() {
+		t.Fatal("after recording tokens, HasTokenData should be true")
+	}
+	if s.StrongPromptTokens() != 1000 {
+		t.Errorf("StrongPromptTokens = %d; want 1000", s.StrongPromptTokens())
+	}
+	if s.StrongCompletionTokens() != 200 {
+		t.Errorf("StrongCompletionTokens = %d; want 200", s.StrongCompletionTokens())
+	}
+	if s.MediumPromptTokens() != 300 {
+		t.Errorf("MediumPromptTokens = %d; want 300", s.MediumPromptTokens())
+	}
+	if s.MediumCompletionTokens() != 60 {
+		t.Errorf("MediumCompletionTokens = %d; want 60", s.MediumCompletionTokens())
+	}
+	if s.WeakPromptTokens() != 5000 {
+		t.Errorf("WeakPromptTokens = %d; want 5000", s.WeakPromptTokens())
+	}
+	if s.WeakCompletionTokens() != 1000 {
+		t.Errorf("WeakCompletionTokens = %d; want 1000", s.WeakCompletionTokens())
+	}
+	if s.TotalPromptTokens() != 6300 {
+		t.Errorf("TotalPromptTokens = %d; want 6300", s.TotalPromptTokens())
+	}
+	if s.TotalCompletionTokens() != 1260 {
+		t.Errorf("TotalCompletionTokens = %d; want 1260", s.TotalCompletionTokens())
+	}
+
+	// Accumulation: record again for the same tier.
+	s.RecordTokens("strong", 500, 100)
+	if s.StrongPromptTokens() != 1500 {
+		t.Errorf("StrongPromptTokens after accumulation = %d; want 1500", s.StrongPromptTokens())
+	}
+
+	// Unknown tier should be a no-op.
+	s.RecordTokens("unknown", 9999, 9999)
+	if s.TotalPromptTokens() != 6800 {
+		t.Errorf("TotalPromptTokens after unknown tier = %d; want 6800", s.TotalPromptTokens())
+	}
+
+	// Reset should zero everything.
+	s.Reset()
+	if s.HasTokenData() {
+		t.Error("after Reset, HasTokenData should be false")
+	}
+	if s.TotalPromptTokens() != 0 || s.TotalCompletionTokens() != 0 {
+		t.Error("after Reset, all token counters should be zero")
+	}
+}
+
+// TestRoutingLLM_AccumulatesTokens verifies that GenerateContent wraps the
+// provider iterator and accumulates UsageMetadata into the correct tier.
+func TestRoutingLLM_AccumulatesTokens(t *testing.T) {
+	strongMock := &mockLLM{
+		name:  "opus",
+		usage: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 2000, CandidatesTokenCount: 400},
+	}
+	weakMock := &mockLLM{
+		name:  "haiku",
+		usage: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 500, CandidatesTokenCount: 100},
+	}
+
+	ctx := context.Background()
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{
+			{Role: "user", Parts: []*genai.Part{{Text: "test"}}},
+		},
+	}
+
+	// Force strong (score >= highThreshold).
+	strong := NewRoutingLLM(strongMock, nil, weakMock, &fixedClassifier{score: 0.9}, 0.7, 0.3)
+	for resp, err := range strong.GenerateContent(ctx, req, false) {
+		_ = resp
+		_ = err
+	}
+	if strong.Stats.StrongPromptTokens() != 2000 {
+		t.Errorf("StrongPromptTokens = %d; want 2000", strong.Stats.StrongPromptTokens())
+	}
+	if strong.Stats.StrongCompletionTokens() != 400 {
+		t.Errorf("StrongCompletionTokens = %d; want 400", strong.Stats.StrongCompletionTokens())
+	}
+	if strong.Stats.WeakPromptTokens() != 0 {
+		t.Errorf("WeakPromptTokens should be 0 when no weak calls made")
+	}
+
+	// Force weak (score < lowThreshold).
+	weak := NewRoutingLLM(strongMock, nil, weakMock, &fixedClassifier{score: 0.1}, 0.7, 0.3)
+	for resp, err := range weak.GenerateContent(ctx, req, false) {
+		_ = resp
+		_ = err
+	}
+	if weak.Stats.WeakPromptTokens() != 500 {
+		t.Errorf("WeakPromptTokens = %d; want 500", weak.Stats.WeakPromptTokens())
+	}
+	if weak.Stats.WeakCompletionTokens() != 100 {
+		t.Errorf("WeakCompletionTokens = %d; want 100", weak.Stats.WeakCompletionTokens())
+	}
+
+	// Accumulate a second weak call.
+	for resp, err := range weak.GenerateContent(ctx, req, false) {
+		_ = resp
+		_ = err
+	}
+	if weak.Stats.WeakPromptTokens() != 1000 {
+		t.Errorf("WeakPromptTokens after 2 calls = %d; want 1000", weak.Stats.WeakPromptTokens())
+	}
+}
+
+// TestRoutingLLM_SummaryLine_TokenWeightedSavings verifies that when providers
+// return UsageMetadata, the savings percentage reflects actual token cost
+// rather than the naive call-count ratio.
+func TestRoutingLLM_SummaryLine_TokenWeightedSavings(t *testing.T) {
+	// strong: expensive model; weak: 10× cheaper per token
+	// Arrange: 1 strong call (100 prompt tokens) + 1 weak call (10000 prompt tokens)
+	// Naive (call-count ratio, 50/50): savings = 45%
+	// Token-weighted: actual = 100*0.01 + 10000*0.001 = 1+10 = 11
+	//                 all-strong = 10100*0.01 = 101
+	//                 savings ≈ (1-11/101)*100 ≈ 89%
+	strongMock := &mockLLM{
+		name:  "opus",
+		usage: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 100, CandidatesTokenCount: 20},
+	}
+	weakMock := &mockLLM{
+		name:  "haiku",
+		usage: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 10000, CandidatesTokenCount: 2000},
+	}
+
+	ctx := context.Background()
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{
+			{Role: "user", Parts: []*genai.Part{{Text: "test"}}},
+		},
+	}
+
+	// First call → strong (score 0.9 >= 0.7)
+	r := NewRoutingLLM(strongMock, nil, weakMock, &fixedClassifier{score: 0.9}, 0.7, 0.3)
+	for resp, err := range r.GenerateContent(ctx, req, false) {
+		_ = resp
+		_ = err
+	}
+	r.Stats.RecordStrong() // stats already recorded inside GenerateContent; this is the call counter
+
+	// Swap classifier to weak for second call.
+	r2 := NewRoutingLLM(strongMock, nil, weakMock, &fixedClassifier{score: 0.1}, 0.7, 0.3)
+	// Copy token state from first routing run.
+	r2.Stats.RecordTokens("strong", 100, 20)
+
+	for resp, err := range r2.GenerateContent(ctx, req, false) {
+		_ = resp
+		_ = err
+	}
+	// r2.Stats now has: strong 100/20 tokens (manually), weak 10000/2000 tokens (from iterator)
+	// and call counts: 1 weak from GenerateContent.
+
+	r2.SetPricing(
+		ModelCost{PromptCost: 0.01, CompletionCost: 0.03},
+		ModelCost{},
+		ModelCost{PromptCost: 0.001, CompletionCost: 0.003},
+	)
+	// Manually record the strong call count to match the token state.
+	r2.Stats.RecordStrong()
+
+	line := r2.SummaryLine()
+	if !strings.Contains(line, "Saved") {
+		t.Errorf("summary %q should include cost savings", line)
+	}
+
+	// The token-weighted savings (~89%) should be much higher than the naive
+	// call-count savings (~45%). Verify it is above 70% (clearly above naive).
+	savings := r2.CostSavingsPct()
+	if savings < 70 {
+		t.Errorf("token-weighted savings = %.1f%%; want > 70%% (naive call-count would give ~45%%)", savings)
+	}
+}
+
+// TestRoutingLLM_SummaryLine_IncludesCostSavings verifies the fallback path:
+// when mockLLM returns no UsageMetadata, the call-count ratio is used.
+func TestRoutingLLM_SummaryLine_IncludesCostSavingsFallback(t *testing.T) {
+	// mockLLM with no usage field set → UsageMetadata is nil → fallback to call count.
+	r := NewRoutingLLM(&mockLLM{name: "opus"}, nil, &mockLLM{name: "haiku"}, &fixedClassifier{score: 0.1}, 0.7, 0.3)
+	r.StrongName = "opus"
+	r.WeakName = "haiku"
+	r.SetPricing(ModelCost{PromptCost: 0.01}, ModelCost{}, ModelCost{PromptCost: 0.001})
+	r.Stats.RecordWeak()
+	r.Stats.RecordWeak()
+
+	line := r.SummaryLine()
+	if line == "" {
+		t.Fatal("expected a summary line")
+	}
+	if !strings.Contains(line, "Saved") {
+		t.Errorf("summary %q should include cost savings (fallback path)", line)
+	}
+	if !strings.Contains(line, "2 calls") {
+		t.Errorf("summary %q should include call count", line)
 	}
 }

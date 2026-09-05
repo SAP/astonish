@@ -160,6 +160,11 @@ func TestCostSavingsPct(t *testing.T) {
 	weakCost := ModelCost{PromptCost: 0.001}
 	freeCost := ModelCost{PromptCost: 0}
 
+	// Helper: call with zero tokens to exercise the call-count fallback path.
+	callFallback := func(strong, medium, weak ModelCost, sCalls, mCalls, wCalls int64) float64 {
+		return CostSavingsPct(strong, medium, weak, sCalls, mCalls, wCalls, 0, 0, 0, 0, 0, 0)
+	}
+
 	tests := []struct {
 		name     string
 		strong   ModelCost
@@ -213,7 +218,7 @@ func TestCostSavingsPct(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := CostSavingsPct(tt.strong, tt.medium, tt.weak, tt.sCalls, tt.mCalls, tt.wCalls)
+			got := callFallback(tt.strong, tt.medium, tt.weak, tt.sCalls, tt.mCalls, tt.wCalls)
 			if tt.wantZero {
 				if got != 0 {
 					t.Errorf("CostSavingsPct = %.2f; want 0", got)
@@ -225,6 +230,116 @@ func TestCostSavingsPct(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCostSavingsPct_TokenWeighted verifies that the token-weighted path
+// produces accurate savings when real token counts are provided.
+func TestCostSavingsPct_TokenWeighted(t *testing.T) {
+	strongCost := ModelCost{PromptCost: 0.01, CompletionCost: 0.03}
+	weakCost := ModelCost{PromptCost: 0.001, CompletionCost: 0.003}
+	noMedium := ModelCost{}
+
+	t.Run("token_weighted_basic", func(t *testing.T) {
+		// 1 strong call: 1000 prompt + 200 completion tokens
+		// 2 weak calls: 5000 prompt + 1000 completion tokens each
+		// actual = 1000*0.01 + 200*0.03 + (5000+5000)*0.001 + (1000+1000)*0.003
+		//        = 10 + 6 + 10 + 6 = 32
+		// all-strong = (1000+5000+5000)*0.01 + (200+1000+1000)*0.03
+		//            = 110 + 66 = 176 (wrong, let me recalculate)
+		// actual = 1000*0.01 + 200*0.03 + 10000*0.001 + 2000*0.003
+		//        = 10 + 6 + 10 + 6 = 32
+		// allStrong = 11000*0.01 + 2200*0.03 = 110 + 66 = 176
+		// savings ≈ (1 - 32/176)*100 ≈ 81.8%
+		got := CostSavingsPct(strongCost, noMedium, weakCost,
+			1, 0, 2,
+			1000, 200, // strong tokens
+			0, 0, // medium tokens
+			10000, 2000, // weak tokens (5000+5000 prompt, 1000+1000 completion)
+		)
+		if got < 80 || got > 84 {
+			t.Errorf("token_weighted_basic: got %.2f%%; want ~81.8%%", got)
+		}
+	})
+
+	t.Run("token_weighted_all_weak", func(t *testing.T) {
+		// 0 strong, 0 medium, 10000 weak prompt + 2000 weak completion tokens
+		// actual = 10000*0.001 + 2000*0.003 = 10 + 6 = 16
+		// allStrong = 10000*0.01 + 2000*0.03 = 100 + 60 = 160
+		// savings ≈ (1 - 16/160)*100 = 90%
+		got := CostSavingsPct(strongCost, noMedium, weakCost,
+			0, 0, 5,
+			0, 0,
+			0, 0,
+			10000, 2000,
+		)
+		if got < 88 || got > 92 {
+			t.Errorf("token_weighted_all_weak: got %.2f%%; want ~90%%", got)
+		}
+	})
+
+	t.Run("token_weighted_completion_matters", func(t *testing.T) {
+		// Completion tokens are expensive (3x the prompt rate). A weak call
+		// with many completion tokens still saves less than the naive call count implies.
+		// 0 strong, 0 medium, 1000 weak prompt + 10000 weak completion
+		// actual = 1000*0.001 + 10000*0.003 = 1 + 30 = 31
+		// allStrong = 1000*0.01 + 10000*0.03 = 10 + 300 = 310
+		// savings ≈ (1 - 31/310)*100 = 90%
+		got := CostSavingsPct(strongCost, noMedium, weakCost,
+			0, 0, 1,
+			0, 0,
+			0, 0,
+			1000, 10000,
+		)
+		if got < 88 || got > 92 {
+			t.Errorf("token_weighted_completion_matters: got %.2f%%; want ~90%%", got)
+		}
+	})
+
+	t.Run("token_weighted_3tier_mixed", func(t *testing.T) {
+		mediumCost := ModelCost{PromptCost: 0.003, CompletionCost: 0.009}
+		// strong: 2000 prompt + 400 completion
+		// medium: 3000 prompt + 600 completion
+		// weak:   5000 prompt + 1000 completion
+		// actual = 2000*0.01+400*0.03 + 3000*0.003+600*0.009 + 5000*0.001+1000*0.003
+		//        = (20+12) + (9+5.4) + (5+3) = 32 + 14.4 + 8 = 54.4
+		// allStrong = (2000+3000+5000)*0.01 + (400+600+1000)*0.03
+		//           = 100 + 60 = 160
+		// savings = (1 - 54.4/160)*100 ≈ 66%
+		got := CostSavingsPct(strongCost, mediumCost, weakCost,
+			1, 1, 1,
+			2000, 400,
+			3000, 600,
+			5000, 1000,
+		)
+		if got < 64 || got > 68 {
+			t.Errorf("token_weighted_3tier_mixed: got %.2f%%; want ~66%%", got)
+		}
+	})
+
+	t.Run("fallback_to_calls_when_no_tokens", func(t *testing.T) {
+		// Zero token counts → should use call-count fallback (prompt cost only)
+		// 0 strong, 0 medium, 5 weak calls
+		// actual = 5*0.001 = 0.005; allStrong = 5*0.01 = 0.05; savings = 90%
+		got := CostSavingsPct(strongCost, noMedium, weakCost,
+			0, 0, 5,
+			0, 0, 0, 0, 0, 0,
+		)
+		if got < 88 || got > 92 {
+			t.Errorf("fallback_to_calls: got %.2f%%; want ~90%%", got)
+		}
+	})
+
+	t.Run("zero_strong_cost_with_tokens", func(t *testing.T) {
+		// Strong prompt cost 0 → always returns 0
+		zeroStrong := ModelCost{PromptCost: 0, CompletionCost: 0.03}
+		got := CostSavingsPct(zeroStrong, noMedium, weakCost,
+			0, 0, 5,
+			0, 0, 0, 0, 5000, 1000,
+		)
+		if got != 0 {
+			t.Errorf("zero_strong_cost_with_tokens: got %.2f; want 0", got)
+		}
+	})
 }
 
 // TestPricingCache_DiskRoundTrip verifies that costs survive a save/load cycle.

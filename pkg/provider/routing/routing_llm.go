@@ -13,11 +13,21 @@ import (
 	"google.golang.org/genai"
 )
 
-// RoutingStats tracks cumulative routing decisions (thread-safe via atomics).
+// RoutingStats tracks cumulative routing decisions and token usage (thread-safe via atomics).
 type RoutingStats struct {
 	strongCalls atomic.Int64
 	mediumCalls atomic.Int64
 	weakCalls   atomic.Int64
+
+	// Per-tier token accumulators. Populated by the GenerateContent wrapper
+	// from UsageMetadata on each response. Zero when the provider does not
+	// report token usage.
+	strongPromptTokens     atomic.Int64
+	strongCompletionTokens atomic.Int64
+	mediumPromptTokens     atomic.Int64
+	mediumCompletionTokens atomic.Int64
+	weakPromptTokens       atomic.Int64
+	weakCompletionTokens   atomic.Int64
 }
 
 // RecordStrong increments the strong model call counter.
@@ -28,6 +38,22 @@ func (s *RoutingStats) RecordMedium() { s.mediumCalls.Add(1) }
 
 // RecordWeak increments the weak model call counter.
 func (s *RoutingStats) RecordWeak() { s.weakCalls.Add(1) }
+
+// RecordTokens adds the prompt and completion token counts for the given tier.
+// Called once per response (or once per streaming chunk that carries usage).
+func (s *RoutingStats) RecordTokens(tier string, prompt, completion int32) {
+	switch tier {
+	case "strong":
+		s.strongPromptTokens.Add(int64(prompt))
+		s.strongCompletionTokens.Add(int64(completion))
+	case "medium":
+		s.mediumPromptTokens.Add(int64(prompt))
+		s.mediumCompletionTokens.Add(int64(completion))
+	case "weak":
+		s.weakPromptTokens.Add(int64(prompt))
+		s.weakCompletionTokens.Add(int64(completion))
+	}
+}
 
 // Total returns the total number of routing decisions.
 func (s *RoutingStats) Total() int64 {
@@ -42,6 +68,39 @@ func (s *RoutingStats) MediumCount() int64 { return s.mediumCalls.Load() }
 
 // WeakCount returns the number of weak model calls.
 func (s *RoutingStats) WeakCount() int64 { return s.weakCalls.Load() }
+
+// StrongPromptTokens returns accumulated prompt tokens routed to the strong model.
+func (s *RoutingStats) StrongPromptTokens() int64 { return s.strongPromptTokens.Load() }
+
+// StrongCompletionTokens returns accumulated completion tokens from the strong model.
+func (s *RoutingStats) StrongCompletionTokens() int64 { return s.strongCompletionTokens.Load() }
+
+// MediumPromptTokens returns accumulated prompt tokens routed to the medium model.
+func (s *RoutingStats) MediumPromptTokens() int64 { return s.mediumPromptTokens.Load() }
+
+// MediumCompletionTokens returns accumulated completion tokens from the medium model.
+func (s *RoutingStats) MediumCompletionTokens() int64 { return s.mediumCompletionTokens.Load() }
+
+// WeakPromptTokens returns accumulated prompt tokens routed to the weak model.
+func (s *RoutingStats) WeakPromptTokens() int64 { return s.weakPromptTokens.Load() }
+
+// WeakCompletionTokens returns accumulated completion tokens from the weak model.
+func (s *RoutingStats) WeakCompletionTokens() int64 { return s.weakCompletionTokens.Load() }
+
+// TotalPromptTokens returns the sum of prompt tokens across all tiers.
+func (s *RoutingStats) TotalPromptTokens() int64 {
+	return s.strongPromptTokens.Load() + s.mediumPromptTokens.Load() + s.weakPromptTokens.Load()
+}
+
+// TotalCompletionTokens returns the sum of completion tokens across all tiers.
+func (s *RoutingStats) TotalCompletionTokens() int64 {
+	return s.strongCompletionTokens.Load() + s.mediumCompletionTokens.Load() + s.weakCompletionTokens.Load()
+}
+
+// HasTokenData reports whether any token usage has been recorded.
+func (s *RoutingStats) HasTokenData() bool {
+	return s.TotalPromptTokens() > 0
+}
 
 // StrongPct returns the percentage of calls routed to the strong model (0-100).
 func (s *RoutingStats) StrongPct() float64 {
@@ -70,11 +129,17 @@ func (s *RoutingStats) WeakPct() float64 {
 	return float64(s.weakCalls.Load()) / float64(total) * 100
 }
 
-// Reset zeroes all counters.
+// Reset zeroes all call and token counters.
 func (s *RoutingStats) Reset() {
 	s.strongCalls.Store(0)
 	s.mediumCalls.Store(0)
 	s.weakCalls.Store(0)
+	s.strongPromptTokens.Store(0)
+	s.strongCompletionTokens.Store(0)
+	s.mediumPromptTokens.Store(0)
+	s.mediumCompletionTokens.Store(0)
+	s.weakPromptTokens.Store(0)
+	s.weakCompletionTokens.Store(0)
 }
 
 // LastRouting records the most recent routing decision (mutex-protected).
@@ -215,7 +280,19 @@ func (r *RoutingLLM) GenerateContent(ctx context.Context, req *model.LLMRequest,
 		"prompt_preview", truncateForLog(prompt, 100),
 	)
 
-	return chosen.GenerateContent(ctx, req, stream)
+	// Wrap the provider's iterator to intercept UsageMetadata so we can
+	// accumulate actual token counts per tier for accurate cost savings.
+	inner := chosen.GenerateContent(ctx, req, stream)
+	return func(yield func(*model.LLMResponse, error) bool) {
+		for resp, err := range inner {
+			if resp != nil && resp.UsageMetadata != nil {
+				r.Stats.RecordTokens(tier, resp.UsageMetadata.PromptTokenCount, resp.UsageMetadata.CandidatesTokenCount)
+			}
+			if !yield(resp, err) {
+				return
+			}
+		}
+	}
 }
 
 // StrongModel returns the strong model (for inspection).
@@ -286,6 +363,7 @@ func (r *RoutingLLM) HasPricing() bool {
 
 // CostSavingsPct returns the estimated percentage saved vs routing all calls
 // to the strong model. Returns 0 when pricing data is unavailable.
+// Uses actual token counts when available; falls back to call-count ratio.
 func (r *RoutingLLM) CostSavingsPct() float64 {
 	r.pricingMu.RLock()
 	if !r.hasPricing {
@@ -297,6 +375,9 @@ func (r *RoutingLLM) CostSavingsPct() float64 {
 	return CostSavingsPct(
 		strong, medium, weak,
 		r.Stats.StrongCount(), r.Stats.MediumCount(), r.Stats.WeakCount(),
+		r.Stats.StrongPromptTokens(), r.Stats.StrongCompletionTokens(),
+		r.Stats.MediumPromptTokens(), r.Stats.MediumCompletionTokens(),
+		r.Stats.WeakPromptTokens(), r.Stats.WeakCompletionTokens(),
 	)
 }
 

@@ -1463,6 +1463,9 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 			ctx = routing.WithClassifierContext(ctx, routing.ClassifierContext{
 				HasPlanMode: planMode || graphPlan,
 			})
+			// Reset per-turn stats so the end-of-turn summary reflects only
+			// this turn's routing decisions, not the cumulative session total.
+			b.routingLLM.Stats.Reset()
 		}
 
 		b.driveTurn(ctx, rnr, chatAgent, effectiveID, turnIndex, userMsg, emit)
@@ -1982,6 +1985,14 @@ func (b *localAgentBackend) emitRoutingInfo(emit func(string, map[string]any)) {
 	}
 	modelName, tier := b.routingLLM.Last.Get()
 	stats := &b.routingLLM.Stats
+	
+	// Debug: append to file
+	f, _ := os.OpenFile("/tmp/routing_debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o666)
+	if f != nil {
+		fmt.Fprintf(f, "[emitRoutingInfo] tier=%s model=%s strong=%d medium=%d weak=%d\n",
+			tier, modelName, stats.StrongCount(), stats.MediumCount(), stats.WeakCount())
+		f.Close()
+	}
 	// Emit via the "routing_info" SSE type which mapSSEToEvents converts to
 	// KindRoutingInfo, updating the transcript's LastRouting* fields.
 	data := map[string]any{

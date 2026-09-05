@@ -292,13 +292,20 @@ func (pc *PricingCache) fuzzyMatchLocked(modelName string) (ModelCost, bool) {
 //
 // Examples:
 //
-//	"claude-sonnet-4"           → "claudesonnet4"
-//	"anthropic/claude-sonnet-4" → "claudesonnet4"
-//	"openai/gpt-4o-mini"        → "gpt4omini"
-//	"gpt-4o-mini"               → "gpt4omini"
-//	"meta-llama/llama-3.1-70b"  → "llama3170b"
+//	"claude-sonnet-4"                → "claudesonnet4"
+//	"anthropic/claude-sonnet-4"      → "claudesonnet4"
+//	"anthropic--claude-sonnet-4"     → "claudesonnet4"  (internal double-dash format)
+//	"openai/gpt-4o-mini"             → "gpt4omini"
+//	"gpt-4o-mini"                    → "gpt4omini"
+//	"meta-llama/llama-3.1-70b"       → "llama3170b"
 func normalizeName(s string) string {
 	s = strings.ToLower(s)
+
+	// Strip internal double-dash provider prefix (e.g. "anthropic--claude-sonnet").
+	// This format is used by some providers when embedding the provider name in the model ID.
+	if idx := strings.Index(s, "--"); idx >= 0 {
+		s = s[idx+2:]
+	}
 
 	// Strip known provider prefixes (with trailing slash).
 	knownPrefixes := []string{

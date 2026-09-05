@@ -2,6 +2,7 @@ package events
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -421,6 +422,11 @@ func (t *Transcript) Apply(ev Event) {
 		}
 		if lastAgentIdx >= 0 {
 			// Always update the most-recent agent item with the current tier.
+			// Debug
+			if f, err := os.OpenFile("/tmp/routing_debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o666); err == nil {
+				fmt.Fprintf(f, "[transcript stamp] agent_idx=%d tier=%s model=%s\n", lastAgentIdx, ev.RoutingTier, ev.RoutingModel)
+				f.Close()
+			}
 			t.Items[lastAgentIdx].RoutingModel = ev.RoutingModel
 			t.Items[lastAgentIdx].RoutingIsStrong = ev.RoutingIsStrong
 			t.Items[lastAgentIdx].RoutingTier = ev.RoutingTier

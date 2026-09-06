@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/SAP/astonish/pkg/browser"
+	"github.com/SAP/astonish/pkg/store"
 )
 
 const (
@@ -68,8 +69,8 @@ func WireBackendBrowserManager(mgr *browser.Manager, backend Backend, sessReg *S
 	bcfg := mgr.Config()
 	mgr.SandboxEnabled = true
 	if pool != nil {
-		mgr.ContainerEnsureReadyFunc = func(sessionID string) error {
-			client := pool.GetOrCreate(sessionID)
+		mgr.ContainerEnsureReadyFunc = func(ctx context.Context, sessionID string) error {
+			client := GetPoolClientFromContext(ctx, pool, sessionID)
 			if client == nil {
 				return fmt.Errorf("no sandbox client for session %q", sessionID)
 			}
@@ -98,6 +99,24 @@ func WireBackendBrowserManager(mgr *browser.Manager, backend Backend, sessReg *S
 		mgr.ActivityTouchFunc = touchActivity
 	}
 	return true
+}
+
+// GetPoolClientFromContext resolves the sandbox template, layer chain, and
+// image from the context (set by chat_handlers.InjectSandbox* methods) and
+// calls the appropriate pool method. This mirrors NodeTool.getClientFromContext
+// so browser tools (which bypass NodeTool) provision pods with the same overlay
+// configuration as container-wrapped tools.
+func GetPoolClientFromContext(ctx context.Context, pool ToolNodePool, sessionID string) ToolNodeClient {
+	tpl := store.SandboxTemplateFromContext(ctx)
+	chain := store.SandboxLayerChainFromContext(ctx)
+	image := store.SandboxImageFromContext(ctx)
+	if len(chain) > 0 || image != "" {
+		return pool.GetOrCreateWithImage(sessionID, tpl, chain, image)
+	}
+	if tpl != "" {
+		return pool.GetOrCreateWithTemplate(sessionID, tpl)
+	}
+	return pool.GetOrCreate(sessionID)
 }
 
 func startBackendBrowser(ctx context.Context, backend Backend, sessionID string, cfg browser.BrowserConfig) (io.Closer, error) {

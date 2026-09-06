@@ -1,12 +1,29 @@
 package tools
 
 import (
+	"context"
 	"fmt"
 	"runtime/debug"
 	"time"
 
+	"github.com/SAP/astonish/pkg/browser"
 	"google.golang.org/adk/tool"
 )
+
+// ensureBrowserSessionAndContext sets up the browser Manager with the current
+// session ID and request context. This should be called at the start of every
+// browser tool to ensure the Manager can provision sandboxes with the correct
+// overlay layer chain.
+func ensureBrowserSessionAndContext(mgr *browser.Manager, ctx tool.Context) {
+	if mgr == nil || ctx == nil {
+		return
+	}
+	mgr.EnsureSessionID(ctx.SessionID())
+	// Try to cast tool.Context to context.Context and set it on the Manager
+	if reqCtx, ok := any(ctx).(context.Context); ok {
+		mgr.SetRequestContext(reqCtx)
+	}
+}
 
 // browserToolTimeout is the maximum time any single browser tool call can take.
 // It exceeds the Kubernetes sandbox readiness window plus browser startup so a

@@ -18,9 +18,7 @@ type BrowserStartActionCaptureResult struct {
 
 func BrowserStartActionCapture(mgr *browser.Manager) func(tool.Context, BrowserStartActionCaptureArgs) (BrowserStartActionCaptureResult, error) {
 	return func(ctx tool.Context, _ BrowserStartActionCaptureArgs) (BrowserStartActionCaptureResult, error) {
-		if ctx != nil {
-			mgr.EnsureSessionID(ctx.SessionID())
-		}
+		ensureBrowserSessionAndContext(mgr, ctx)
 		if err := mgr.StartActionCapture(false); err != nil {
 			return BrowserStartActionCaptureResult{}, err
 		}
@@ -42,9 +40,7 @@ type BrowserStopActionCaptureResult struct {
 
 func BrowserStopActionCapture(mgr *browser.Manager) func(tool.Context, BrowserStopActionCaptureArgs) (BrowserStopActionCaptureResult, error) {
 	return func(ctx tool.Context, _ BrowserStopActionCaptureArgs) (BrowserStopActionCaptureResult, error) {
-		if ctx != nil {
-			mgr.EnsureSessionID(ctx.SessionID())
-		}
+		ensureBrowserSessionAndContext(mgr, ctx)
 		if err := mgr.StopActionCapture(); err != nil {
 			return BrowserStopActionCaptureResult{}, err
 		}
@@ -70,9 +66,7 @@ type BrowserGetActionLogResult struct {
 
 func BrowserGetActionLog(mgr *browser.Manager) func(tool.Context, BrowserGetActionLogArgs) (BrowserGetActionLogResult, error) {
 	return func(ctx tool.Context, args BrowserGetActionLogArgs) (BrowserGetActionLogResult, error) {
-		if ctx != nil {
-			mgr.EnsureSessionID(ctx.SessionID())
-		}
+		ensureBrowserSessionAndContext(mgr, ctx)
 		events, err := mgr.GetActionLog()
 		if err != nil {
 			return BrowserGetActionLogResult{}, err

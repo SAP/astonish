@@ -20,9 +20,7 @@ type BrowserStartRecordingResult struct {
 
 func BrowserStartRecording(mgr *browser.Manager) func(tool.Context, BrowserStartRecordingArgs) (BrowserStartRecordingResult, error) {
 	return func(ctx tool.Context, args BrowserStartRecordingArgs) (BrowserStartRecordingResult, error) {
-		if ctx != nil {
-			mgr.EnsureSessionID(ctx.SessionID())
-		}
+		ensureBrowserSessionAndContext(mgr, ctx)
 		res, err := mgr.StartRecording(browser.RecordingOptions{Filename: args.Filename})
 		if err != nil {
 			return BrowserStartRecordingResult{}, err
@@ -48,9 +46,7 @@ type BrowserStopRecordingResult struct {
 
 func BrowserStopRecording(mgr *browser.Manager) func(tool.Context, BrowserStopRecordingArgs) (BrowserStopRecordingResult, error) {
 	return func(ctx tool.Context, _ BrowserStopRecordingArgs) (BrowserStopRecordingResult, error) {
-		if ctx != nil {
-			mgr.EnsureSessionID(ctx.SessionID())
-		}
+		ensureBrowserSessionAndContext(mgr, ctx)
 		res, err := mgr.StopRecording()
 		if err != nil {
 			return BrowserStopRecordingResult{}, err

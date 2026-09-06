@@ -9,10 +9,10 @@ import (
 func TestWireIncusBrowserManager_NilArgs(t *testing.T) {
 	t.Parallel()
 	mgr := browser.NewManager(browser.DefaultConfig())
-	if WireIncusBrowserManager(nil, nil, nil) {
+	if WireIncusBrowserManager(nil, nil, nil, nil) {
 		t.Fatal("expected false for nil mgr/client")
 	}
-	if WireIncusBrowserManager(mgr, nil, nil) {
+	if WireIncusBrowserManager(mgr, nil, nil, nil) {
 		t.Fatal("expected false for nil client")
 	}
 	if mgr.SandboxEnabled {
@@ -31,7 +31,7 @@ func TestWireIncusBrowserManager_HostChromePathStillEnablesSandbox(t *testing.T)
 	cfg := browser.DefaultConfig()
 	cfg.ChromePath = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 	mgr := browser.NewManager(cfg)
-	if WireIncusBrowserManager(mgr, nil, nil) {
+	if WireIncusBrowserManager(mgr, nil, nil, nil) {
 		t.Fatal("nil client must still return false")
 	}
 	// With a nil client we cannot enable sandbox; the important behavioral

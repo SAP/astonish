@@ -132,7 +132,7 @@ func wireFleetSandboxIncus(
 	}
 
 	browserMgr := browser.NewManager(browser.DefaultConfig())
-	sandbox.WireIncusBrowserManager(browserMgr, sandboxClient, sessRegistry.TouchActivity)
+	sandbox.WireIncusBrowserManager(browserMgr, sandboxClient, nil, sessRegistry.TouchActivity)
 
 	wrappedTools := wrapFleetTools(subAgentMgr, lazyNode, nil, fleetSession.ID, browserMgr)
 

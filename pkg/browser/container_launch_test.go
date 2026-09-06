@@ -40,7 +40,7 @@ func TestGetOrLaunch_ContainerPath_WaitsBeforeResolve(t *testing.T) {
 	m := NewManager(BrowserConfig{})
 	m.SandboxEnabled = true
 	m.sessionID = "test-session"
-	m.ContainerEnsureReadyFunc = func(sessionID string) error {
+	m.ContainerEnsureReadyFunc = func(_ context.Context, sessionID string) error {
 		sequence = append(sequence, "ready:"+sessionID)
 		return nil
 	}
@@ -65,7 +65,7 @@ func TestGetOrLaunch_ContainerPath_ReadinessErrorStopsResolve(t *testing.T) {
 	m := NewManager(BrowserConfig{})
 	m.SandboxEnabled = true
 	m.sessionID = "test-session"
-	m.ContainerEnsureReadyFunc = func(string) error {
+	m.ContainerEnsureReadyFunc = func(_ context.Context, _ string) error {
 		return fmt.Errorf("pod readiness failed")
 	}
 	m.ContainerResolveFunc = func(string) (string, string, error) {

@@ -330,14 +330,18 @@ func TestCostSavingsPct_TokenWeighted(t *testing.T) {
 	})
 
 	t.Run("zero_strong_cost_with_tokens", func(t *testing.T) {
-		// Strong prompt cost 0 → always returns 0
+		// Strong prompt cost 0 but completion cost non-zero → savings can still be computed.
+		// actual = 5000*0.001 + 1000*0.003 = 5 + 3 = 8
+		// allStrong = (0+0+5000)*0 + (0+0+1000)*0.03 = 0 + 30 = 30
+		// savings ≈ (1 - 8/30)*100 ≈ 73.33%
 		zeroStrong := ModelCost{PromptCost: 0, CompletionCost: 0.03}
 		got := CostSavingsPct(zeroStrong, noMedium, weakCost,
 			0, 0, 5,
 			0, 0, 0, 0, 5000, 1000,
 		)
-		if got != 0 {
-			t.Errorf("zero_strong_cost_with_tokens: got %.2f; want 0", got)
+		want := (1 - 8.0/30.0) * 100
+		if got < want-0.01 || got > want+0.01 {
+			t.Errorf("zero_strong_cost_with_tokens: got %.2f; want ~%.2f", got, want)
 		}
 	})
 }

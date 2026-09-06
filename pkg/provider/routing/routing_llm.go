@@ -242,23 +242,20 @@ func (r *RoutingLLM) GenerateContent(ctx context.Context, req *model.LLMRequest,
 	score := r.classifier.Classify(ctx, prompt, classCtx)
 
 	var chosen model.LLM
-	var label, tier string
+	var tier string
 	switch {
 	case float64(score) >= r.highThreshold:
 		chosen = r.strong
-		label = "strong"
 		tier = "strong"
 		r.Stats.RecordStrong()
 		r.Last.Set(r.StrongName, "strong")
 	case r.medium != nil && float64(score) >= r.lowThreshold:
 		chosen = r.medium
-		label = "medium"
 		tier = "medium"
 		r.Stats.RecordMedium()
 		r.Last.Set(r.MediumName, "medium")
 	default:
 		chosen = r.weak
-		label = "weak"
 		tier = "weak"
 		r.Stats.RecordWeak()
 		r.Last.Set(r.WeakName, "weak")
@@ -278,7 +275,6 @@ func (r *RoutingLLM) GenerateContent(ctx context.Context, req *model.LLMRequest,
 		"high_threshold", fmt.Sprintf("%.2f", r.highThreshold),
 		"low_threshold", fmt.Sprintf("%.2f", r.lowThreshold),
 		"tier", tier,
-		"chosen", label,
 		"model", chosen.Name(),
 		"prompt_preview", truncateForLog(prompt, 100),
 	)
@@ -288,6 +284,8 @@ func (r *RoutingLLM) GenerateContent(ctx context.Context, req *model.LLMRequest,
 	// Many streaming providers emit cumulative UsageMetadata on every chunk,
 	// so we track only the last chunk's values and record once after the
 	// stream completes to avoid double-counting.
+	// NOTE: This assumes cumulative (not incremental) usage reporting.
+	// Providers using incremental per-chunk reporting would be under-counted.
 	inner := chosen.GenerateContent(ctx, req, stream)
 	return func(yield func(*model.LLMResponse, error) bool) {
 		var lastPrompt, lastCompletion int32
@@ -360,7 +358,7 @@ func (r *RoutingLLM) SetPricing(strong, medium, weak ModelCost) {
 	r.strongCost = strong
 	r.mediumCost = medium
 	r.weakCost = weak
-	r.hasPricing = strong.PromptCost > 0
+	r.hasPricing = strong.PromptCost > 0 || strong.CompletionCost > 0
 	r.pricingMu.Unlock()
 }
 

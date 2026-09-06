@@ -451,7 +451,7 @@ func CostSavingsPct(
 	weakPromptTokens, weakCompletionTokens int64,
 ) float64 {
 	totalCalls := strongCalls + mediumCalls + weakCalls
-	if totalCalls == 0 || strongCost.PromptCost <= 0 {
+	if totalCalls == 0 || (strongCost.PromptCost <= 0 && strongCost.CompletionCost <= 0) {
 		return 0
 	}
 

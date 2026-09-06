@@ -124,6 +124,7 @@ func (m *ModelRoutingConfig) EffectiveLowThreshold() float64 {
 }
 
 func (m *ModelRoutingConfig) HasMedium() bool {
+	m.Migrate()
 	return m.MediumProvider != "" && m.MediumModel != ""
 }
 

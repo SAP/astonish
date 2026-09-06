@@ -551,6 +551,8 @@ type localAgentBackend struct {
 	classifier      routing.ComplexityClassifier // MLP classifier (shared by both tiers)
 	closeClassifier func()                       // releases Hugot embedder resources
 	pricingCache    *routing.PricingCache        // lazily initialized when Auto routing is active
+	pricingCtx      context.Context              // context for background injectPricing goroutine
+	pricingCancel   context.CancelFunc           // cancels pricingCtx on Close
 	configured      bool
 	usage           *events.Usage
 	// contextTokens is the current context-window occupancy (estimated from the
@@ -688,9 +690,14 @@ func (b *localAgentBackend) Close() error {
 	b.closed = true
 	closeClassifier := b.closeClassifier
 	b.closeClassifier = nil
+	pricingCancel := b.pricingCancel
+	b.pricingCancel = nil
 	b.mu.Unlock()
 	if closeClassifier != nil {
 		closeClassifier()
+	}
+	if pricingCancel != nil {
+		pricingCancel()
 	}
 	return nil
 }
@@ -792,7 +799,7 @@ func (b *localAgentBackend) restoreAutoRouting(ctx context.Context, appConfig *c
 			}
 			// Wire the same RoutingLLM for sub-agents.
 			if b.result.ChatAgent != nil && b.result.ChatAgent.SubAgentManager != nil {
-				b.result.ChatAgent.SubAgentManager.TaskLLM = rLLM
+				b.result.ChatAgent.SubAgentManager.SetTaskLLM(rLLM)
 			}
 			// Inject pricing data in the background.
 			restoreCfg := *b.autoRoutingCfg
@@ -844,7 +851,7 @@ func (b *localAgentBackend) SetAutoRouting(ctx context.Context, cfg backend.Auto
 	b.configured = true
 	// Wire the same RoutingLLM to SubAgentManager for sub-agents.
 	if b.result.ChatAgent != nil && b.result.ChatAgent.SubAgentManager != nil {
-		b.result.ChatAgent.SubAgentManager.TaskLLM = rLLM
+		b.result.ChatAgent.SubAgentManager.SetTaskLLM(rLLM)
 	}
 	b.appConfig.ModelRouting = config.ModelRoutingConfig{
 		StrongProvider: cfg.StrongProvider,
@@ -857,11 +864,19 @@ func (b *localAgentBackend) SetAutoRouting(ctx context.Context, cfg backend.Auto
 		LowThreshold:   cfg.LowThreshold,
 	}
 	b.appConfig.General.DefaultModel = "auto"
+
+	// Create a cancellable context for the pricing goroutine and store the cancel func
+	// so Close() can shut it down gracefully.
+	pricingCtx, pricingCancel := context.WithCancel(context.Background())
+	b.pricingCtx = pricingCtx
+	b.pricingCancel = pricingCancel
+
 	b.mu.Unlock()
 
 	// Inject pricing data in the background — never blocks model selection.
+	// The context can be cancelled if the backend closes before pricing completes.
 	cfgForPricing := cfgCopy
-	go b.injectPricing(context.Background(), rLLM, &cfgForPricing)
+	go b.injectPricing(pricingCtx, rLLM, &cfgForPricing)
 
 	if err := b.saveAppConfig(); err != nil {
 		slog.Warn("failed to persist auto routing config", "error", err)
@@ -1167,7 +1182,7 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 	subRoutingLLM := b.routingLLM
 	b.mu.Unlock()
 	if subRoutingLLM != nil && chatAgent.SubAgentManager != nil {
-		chatAgent.SubAgentManager.TaskLLM = subRoutingLLM
+		chatAgent.SubAgentManager.SetTaskLLM(subRoutingLLM)
 	}
 	// Persist any announced plan to a per-session PLAN.md sidecar so the plan
 	// survives context compaction (the model can re-read it after a summary).
@@ -2022,7 +2037,14 @@ func (b *localAgentBackend) driveTurn(
 						planPayload["plan_verification"] = doc.Verification
 					}
 					emit("plan", planPayload)
-					emit("done", nil)
+					// Build done payload with routing summary for plan-approval stops too.
+					planDone := map[string]any{"done": true}
+					if routingLLM != nil && routingLLM.Stats.Total() >= 1 {
+						if summary := routingLLM.SummaryLine(); summary != "" {
+							planDone["routing_summary"] = summary
+						}
+					}
+					emit("done", planDone)
 					return true
 				}
 				resp := part.FunctionResponse.Response

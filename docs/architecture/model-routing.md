@@ -40,7 +40,7 @@ Older config formats are automatically migrated via
 `ModelRoutingConfig.Migrate()`:
 
 - **Flat 2-model** (pre-4-tier): `strong_provider`/`weak_provider` → kept as-is
-- **4-tier orchestrator/task**: orchestrator fields → strong/weak, task fields discarded
+- **4-tier orchestrator/task**: orchestrator.strong → strong, orchestrator.weak → medium, task.weak → weak; task.strong is dropped
 
 ## Architecture
 

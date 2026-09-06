@@ -207,7 +207,7 @@ type ToolGroup struct {
 type SubAgentManager struct {
 	// Parent context
 	LLM             model.LLM                      // Parent's LLM (used for children unless overridden)
-	TaskLLM         model.LLM                      // Task-tier LLM for sub-agents; nil = use LLM
+	taskLLMValue    atomic.Value                   // Task-tier LLM for sub-agents (model.LLM | nil); use SetTaskLLM/GetTaskLLM to access
 	ToolGroups      map[string]*ToolGroup          // Named tool groups for sub-agent tool resolution
 	FleetTools      []tool.Tool                    // Fleet-only tools (e.g., run_fleet_phase) not in main agent's tool list
 	SessionService  adksession.Service             // Session persistence
@@ -340,10 +340,23 @@ func IsExcludedChildTool(name string) bool {
 // (Auto routing Task tier), children use the task-tier routing LLM. Otherwise
 // they inherit the parent's orchestrator-level LLM.
 func (m *SubAgentManager) effectiveTaskLLM() model.LLM {
-	if m.TaskLLM != nil {
-		return m.TaskLLM
+	if v := m.taskLLMValue.Load(); v != nil {
+		return v.(model.LLM)
 	}
 	return m.LLM
+}
+
+// SetTaskLLM safely sets the task-tier LLM for child sub-agents (used by auto-routing).
+func (m *SubAgentManager) SetTaskLLM(llm model.LLM) {
+	m.taskLLMValue.Store(llm)
+}
+
+// GetTaskLLM safely retrieves the task-tier LLM if set, or nil.
+func (m *SubAgentManager) GetTaskLLM() model.LLM {
+	if v := m.taskLLMValue.Load(); v != nil {
+		return v.(model.LLM)
+	}
+	return nil
 }
 
 // NewSubAgentManager creates a new SubAgentManager with the given configuration.

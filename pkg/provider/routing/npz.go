@@ -31,6 +31,10 @@ const (
 
 	// maxConfigSize caps the raw config .npy entry read (10 MB).
 	maxConfigSize = 10 * 1024 * 1024
+
+	// maxWeightsEntrySize caps the decompressed size of a single .npy entry
+	// inside the ZIP archive (50 MB). Prevents decompression bombs.
+	maxWeightsEntrySize = 50 * 1024 * 1024
 )
 
 // npzWeights holds the float64 arrays parsed from a router_weights.npz file.
@@ -68,7 +72,7 @@ func parseNpz(path string) (*npzWeights, error) {
 		if err != nil {
 			return nil, fmt.Errorf("open npy %s: %w", f.Name, err)
 		}
-		data, shape, isBytes, err := parseNpy(rc)
+		data, shape, isBytes, err := parseNpy(io.LimitReader(rc, maxWeightsEntrySize))
 		rc.Close()
 		if err != nil {
 			return nil, fmt.Errorf("parse npy %s: %w", f.Name, err)

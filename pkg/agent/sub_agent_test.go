@@ -1271,9 +1271,9 @@ func TestSubAgentManager_EffectiveTaskLLM(t *testing.T) {
 	parentLLM := &stubLLM{name: "parent"}
 	taskLLM := &stubLLM{name: "task"}
 	mgr := &SubAgentManager{
-		LLM:     parentLLM,
-		TaskLLM: taskLLM,
+		LLM: parentLLM,
 	}
+	mgr.SetTaskLLM(taskLLM)
 	if got := mgr.effectiveTaskLLM(); got != taskLLM {
 		t.Errorf("effectiveTaskLLM() = %v, want taskLLM", got)
 	}

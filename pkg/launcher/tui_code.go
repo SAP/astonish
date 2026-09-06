@@ -822,6 +822,13 @@ func (b *localAgentBackend) ensureClassifier(ctx context.Context) (routing.Compl
 	}
 
 	b.mu.Lock()
+	if b.classifier != nil {
+		// Another goroutine won the race — use its result and close ours.
+		winner := b.classifier
+		b.mu.Unlock()
+		_ = embedder.Close()
+		return winner, nil
+	}
 	b.classifier = c
 	b.closeClassifier = func() { _ = embedder.Close() }
 	b.mu.Unlock()
@@ -866,12 +873,11 @@ func (b *localAgentBackend) SetAutoRouting(ctx context.Context, cfg backend.Auto
 	b.provider = "auto"
 	b.model = "auto"
 	b.configured = true
-	b.mu.Unlock()
-
 	// Wire the same RoutingLLM to SubAgentManager for sub-agents.
 	if b.result.ChatAgent != nil && b.result.ChatAgent.SubAgentManager != nil {
 		b.result.ChatAgent.SubAgentManager.TaskLLM = rLLM
 	}
+	b.mu.Unlock()
 
 	// Inject pricing data in the background — never blocks model selection.
 	cfgForPricing := cfgCopy
@@ -1188,8 +1194,11 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 	chatAgent := b.result.ChatAgent
 	chatAgent.AutoApprove = autoApprove
 	// Wire the RoutingLLM to SubAgentManager so sub-agents use the same routing.
-	if b.routingLLM != nil && chatAgent.SubAgentManager != nil {
-		chatAgent.SubAgentManager.TaskLLM = b.routingLLM
+	b.mu.Lock()
+	subRoutingLLM := b.routingLLM
+	b.mu.Unlock()
+	if subRoutingLLM != nil && chatAgent.SubAgentManager != nil {
+		chatAgent.SubAgentManager.TaskLLM = subRoutingLLM
 	}
 	// Persist any announced plan to a per-session PLAN.md sidecar so the plan
 	// survives context compaction (the model can re-read it after a summary).

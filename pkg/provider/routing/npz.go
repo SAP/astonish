@@ -194,6 +194,34 @@ func parseNpz(path string) (*npzWeights, error) {
 		w.modelDim = 64
 	}
 
+	// Cross-layer dimension validation: catch mismatched weight files that
+	// would cause index-out-of-bounds panics in mlpForward.
+	l1rows := len(w.layer1Weight)
+	l1cols := 0
+	if l1rows > 0 {
+		l1cols = len(w.layer1Weight[0])
+	}
+	l2rows := len(w.layer2Weight)
+	l2cols := 0
+	if l2rows > 0 {
+		l2cols = len(w.layer2Weight[0])
+	}
+	if l1cols != w.embeddingDim {
+		return nil, fmt.Errorf("layer1_weight columns (%d) != embedding_dim (%d)", l1cols, w.embeddingDim)
+	}
+	if len(w.layer1Bias) != l1rows {
+		return nil, fmt.Errorf("layer1_bias length (%d) != layer1_weight rows (%d)", len(w.layer1Bias), l1rows)
+	}
+	if l2cols != l1rows {
+		return nil, fmt.Errorf("layer2_weight columns (%d) != layer1_weight rows (%d)", l2cols, l1rows)
+	}
+	if len(w.layer2Bias) != l2rows {
+		return nil, fmt.Errorf("layer2_bias length (%d) != layer2_weight rows (%d)", len(w.layer2Bias), l2rows)
+	}
+	if len(w.layer3Weight) != l2rows {
+		return nil, fmt.Errorf("layer3_weight length (%d) != layer2_weight rows (%d)", len(w.layer3Weight), l2rows)
+	}
+
 	return w, nil
 }
 

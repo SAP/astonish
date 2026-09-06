@@ -53,9 +53,15 @@ func EnsureRouterWeights(modelsDir string) (string, error) {
 	}
 	destPath := filepath.Join(modelsDir, RouterWeightsFilename)
 
-	// Already present.
+	// Already present — verify integrity before trusting the cached file.
 	if _, err := os.Stat(destPath); err == nil {
-		return destPath, nil
+		if verifyErr := verifyWeightsChecksum(destPath); verifyErr != nil {
+			slog.Warn("router weights: existing file failed checksum, re-downloading",
+				"path", destPath, "error", verifyErr)
+			// Fall through to re-copy/re-download.
+		} else {
+			return destPath, nil
+		}
 	}
 
 	// Try local training output first (development workflow).

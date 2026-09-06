@@ -284,16 +284,24 @@ func (r *RoutingLLM) GenerateContent(ctx context.Context, req *model.LLMRequest,
 	)
 
 	// Wrap the provider's iterator to intercept UsageMetadata so we can
-	// accumulate actual token counts per tier for accurate cost savings.
+	// record actual token counts per tier for accurate cost savings.
+	// Many streaming providers emit cumulative UsageMetadata on every chunk,
+	// so we track only the last chunk's values and record once after the
+	// stream completes to avoid double-counting.
 	inner := chosen.GenerateContent(ctx, req, stream)
 	return func(yield func(*model.LLMResponse, error) bool) {
+		var lastPrompt, lastCompletion int32
 		for resp, err := range inner {
 			if resp != nil && resp.UsageMetadata != nil {
-				r.Stats.RecordTokens(tier, resp.UsageMetadata.PromptTokenCount, resp.UsageMetadata.CandidatesTokenCount)
+				lastPrompt = resp.UsageMetadata.PromptTokenCount
+				lastCompletion = resp.UsageMetadata.CandidatesTokenCount
 			}
 			if !yield(resp, err) {
-				return
+				break
 			}
+		}
+		if lastPrompt > 0 || lastCompletion > 0 {
+			r.Stats.RecordTokens(tier, lastPrompt, lastCompletion)
 		}
 	}
 }

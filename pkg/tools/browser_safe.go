@@ -19,7 +19,9 @@ func ensureBrowserSessionAndContext(mgr *browser.Manager, ctx tool.Context) {
 		return
 	}
 	mgr.EnsureSessionID(ctx.SessionID())
-	// Try to cast tool.Context to context.Context and set it on the Manager
+	// ADK's tool.Context embeds context.Context, so this assertion always
+	// succeeds in production. The ok-guard is belt-and-suspenders for any
+	// future context type that doesn't embed context.Context.
 	if reqCtx, ok := any(ctx).(context.Context); ok {
 		mgr.SetRequestContext(reqCtx)
 	}

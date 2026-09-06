@@ -44,11 +44,30 @@ func TestWireIncusBrowserManager_HostChromePathStillEnablesSandbox(t *testing.T)
 	}
 }
 
+func TestWireIncusBrowserManager_NilPoolSkipsEnsureReady(t *testing.T) {
+	t.Parallel()
+	// When pool is nil, ContainerEnsureReadyFunc must NOT be set. Drill/fleet
+	// callers pass nil pool; setting the func unconditionally would break them.
+	mgr := browser.NewManager(browser.DefaultConfig())
+	if mgr.ContainerEnsureReadyFunc != nil {
+		t.Fatal("ContainerEnsureReadyFunc should be nil before wiring")
+	}
+	// WireIncusBrowserManager returns false for nil client, which also means
+	// ContainerEnsureReadyFunc is never set. Verify the nil-pool guard works.
+	WireIncusBrowserManager(mgr, nil, nil, nil)
+	if mgr.ContainerEnsureReadyFunc != nil {
+		t.Fatal("nil pool must not set ContainerEnsureReadyFunc")
+	}
+}
+
 func TestIncusContainerEnsureReadyFunc_UsesContextChain(t *testing.T) {
 	t.Parallel()
 	client := &browserReadySpyClient{}
 	pool := &browserReadySpyPool{client: client}
-	// Simulate the closure WireIncusBrowserManager sets as ContainerEnsureReadyFunc:
+	// We cannot call WireIncusBrowserManager with a real *IncusClient in a unit
+	// test (the concrete type requires a live daemon). Instead we test the closure
+	// body directly — the same logic WireIncusBrowserManager assigns at
+	// browser_wire.go:62-68. GetPoolClientFromContext is the critical shared path.
 	ensureReady := func(ctx context.Context, sessionID string) error {
 		c := GetPoolClientFromContext(ctx, pool, sessionID)
 		if c == nil {

@@ -106,7 +106,20 @@ func WireBackendBrowserManager(mgr *browser.Manager, backend Backend, sessReg *S
 // calls the appropriate pool method. This mirrors NodeTool.getClientFromContext
 // so browser tools (which bypass NodeTool) provision pods with the same overlay
 // configuration as container-wrapped tools.
+//
+// It also mirrors NodeTool.getClientFromContext's SetSessionScope call: the
+// org/team slugs from context are recorded on the pool so the container record
+// is persisted into the correct tenant schema. This is necessary for
+// browser-first turns where no prior NodeTool call has yet scoped the session.
 func GetPoolClientFromContext(ctx context.Context, pool ToolNodePool, sessionID string) ToolNodeClient {
+	// Record the caller's tenant before the pool creates a client, so the
+	// container record lands in the correct org/team schema (same guard as
+	// NodeTool.getClientFromContext, line 353).
+	orgSlug := store.OrgSlugFromContext(ctx)
+	teamSlug := store.TeamSlugFromContext(ctx)
+	if orgSlug != "" || teamSlug != "" {
+		pool.SetSessionScope(sessionID, orgSlug, teamSlug)
+	}
 	tpl := store.SandboxTemplateFromContext(ctx)
 	chain := store.SandboxLayerChainFromContext(ctx)
 	image := store.SandboxImageFromContext(ctx)

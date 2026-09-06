@@ -281,6 +281,7 @@ type Manager struct {
 	// demoOverlay tracks tutorial highlight boxes and the visible demo cursor.
 	demoOverlay *demoOverlayState
 }
+
 // NewManager creates a Manager with the given config. The browser is NOT
 // launched until GetOrLaunch is called.
 func NewManager(cfg BrowserConfig) *Manager {

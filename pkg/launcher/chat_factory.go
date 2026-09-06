@@ -943,8 +943,8 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 					gw := osb.Gateway()
 					sessReg := osb.Sessions()
 					if WireOpenShellBrowserManager(browserMgr, gw, sessReg, sessReg.TouchActivity) {
-						browserMgr.ContainerEnsureReadyFunc = func(sessionID string) error {
-							client := pool.GetOrCreate(sessionID)
+						browserMgr.ContainerEnsureReadyFunc = func(ctx context.Context, sessionID string) error {
+							client := sandbox.GetPoolClientFromContext(ctx, pool, sessionID)
 							if client == nil {
 								return fmt.Errorf("no sandbox client for session %q", sessionID)
 							}
@@ -1159,9 +1159,11 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			// Wire browser to run inside the session container when sandbox is
 			// available. The browser resolves the session container (already
 			// managed by NodeClientPool) and starts Chromium + KasmVNC inside it.
+			// Pass nodePool so ContainerEnsureReadyFunc waits for the pool to
+			// provision the container on a browser-first tool call.
 			{
 				pool := nodePool // capture for closure
-				if WireIncusBrowserManager(browserMgr, sandboxClient, pool.TouchActivity) {
+				if WireIncusBrowserManager(browserMgr, sandboxClient, sandbox.AsNodePool(pool), pool.TouchActivity) {
 					// browser-in-sandbox enabled
 				}
 			}

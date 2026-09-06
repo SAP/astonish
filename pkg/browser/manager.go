@@ -223,8 +223,11 @@ type Manager struct {
 
 	// ContainerEnsureReadyFunc waits for background sandbox provisioning before
 	// browser launch resolves the session container. It is optional for backends
-	// whose resolver already performs synchronous provisioning.
-	ContainerEnsureReadyFunc func(sessionID string) error
+	// whose resolver already performs synchronous provisioning. The context
+	// carries sandbox template/chain/image values (set by chat_handlers
+	// InjectSandbox* methods) so the implementation can provision the pod with
+	// the correct overlay layer chain.
+	ContainerEnsureReadyFunc func(ctx context.Context, sessionID string) error
 
 	// ContainerResolveFunc resolves the session container for browser execution.
 	// Called lazily by launchInContainer() to get the container name and IP.
@@ -268,6 +271,12 @@ type Manager struct {
 
 	// actionCapture tracks DOM action recording for tutorial authoring.
 	actionCapture *actionCaptureState
+
+	// requestCtx is the current request context carrying sandbox template/chain/image
+	// values. Set by SetRequestContext before tool execution and used by GetOrLaunch
+	// to pass to ContainerEnsureReadyFunc. This ensures browser tools provision
+	// containers with the correct overlay layer chain.
+	requestCtx context.Context
 
 	// demoOverlay tracks tutorial highlight boxes and the visible demo cursor.
 	demoOverlay *demoOverlayState
@@ -541,6 +550,16 @@ func (m *Manager) resetBrowserLocked() {
 	m.pagesMu.Unlock()
 }
 
+// SetRequestContext sets the request context that carries sandbox configuration
+// values (template/chain/image) needed for container provisioning. This should be
+// called before tool execution to ensure browser tools can provision pods with
+// the correct overlay layer chain.
+func (m *Manager) SetRequestContext(ctx context.Context) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.requestCtx = ctx
+}
+
 // GetOrLaunch returns the current browser, launching it if necessary.
 // On first launch, the browser is configured with anti-detection measures:
 //   - Headed mode by default (with Xvfb on Linux) for realistic fingerprint
@@ -551,7 +570,9 @@ func (m *Manager) resetBrowserLocked() {
 // If headed mode fails (no display, no Xvfb), falls back to headless with a warning.
 //
 // When SandboxEnabled is true, the browser is launched inside the session
-// container and connected via a remote CDP URL.
+// container and connected via a remote CDP URL. The request context (set via
+// SetRequestContext) carries sandbox template/chain/image values needed to
+// provision the container with the correct overlay layer chain.
 //
 // Health check: if a browser is already connected, a lightweight Version() call
 // verifies the CDP connection is still alive. If the connection is dead (pipe
@@ -791,6 +812,9 @@ func (m *Manager) resolveCDPURL(containerName, ip string) (string, error) {
 // When ContainerDialFunc is set, the CDP WebSocket connection is tunneled
 // through the Incus exec API (socat), making it work on all platforms.
 //
+// The request context (set via SetRequestContext) carries sandbox template/chain/image
+// values needed to provision the container with the correct overlay layer chain.
+//
 // Must be called with m.mu held.
 func (m *Manager) launchInContainer() (*rod.Browser, error) {
 	b, err := m.launchInContainerInner()
@@ -837,8 +861,15 @@ func (m *Manager) launchInContainerInner() (*rod.Browser, error) {
 
 	// Browser tools bypass NodeTool.Run, so wait on the same lazy sandbox
 	// provisioning barrier before resolving the session record.
+	// The stored request context carries sandbox template/chain/image values,
+	// allowing ContainerEnsureReadyFunc to provision the pod with the correct
+	// overlay layer chain (including Chromium, KasmVNC, etc.).
 	if m.ContainerEnsureReadyFunc != nil {
-		if err := m.ContainerEnsureReadyFunc(m.sessionID); err != nil {
+		ctx := m.requestCtx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		if err := m.ContainerEnsureReadyFunc(ctx, m.sessionID); err != nil {
 			return nil, fmt.Errorf(
 				"failed to prepare session container for session %s: %w",
 				shortSessionID(m.sessionID), err,

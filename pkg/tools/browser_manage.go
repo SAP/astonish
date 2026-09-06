@@ -34,9 +34,7 @@ type BrowserTabsResult struct {
 
 func BrowserTabs(mgr *browser.Manager, guard *browser.NavigationGuard) func(tool.Context, BrowserTabsArgs) (BrowserTabsResult, error) {
 	return func(ctx tool.Context, args BrowserTabsArgs) (BrowserTabsResult, error) {
-		if ctx != nil {
-			mgr.EnsureSessionID(ctx.SessionID())
-		}
+		ensureBrowserSessionAndContext(mgr, ctx)
 
 		b, err := mgr.GetOrLaunch()
 		if err != nil {

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/SAP/astonish/pkg/browser"
+	"github.com/SAP/astonish/pkg/store"
 )
 
 func TestBuildBackendBrowserLaunchScript_UsesSandboxBrowser(t *testing.T) {
@@ -89,7 +90,7 @@ func TestWireBackendBrowserManager_EnsureReadyUsesSessionClient(t *testing.T) {
 	if mgr.ContainerEnsureReadyFunc == nil {
 		t.Fatal("manager ContainerEnsureReadyFunc not set")
 	}
-	if err := mgr.ContainerEnsureReadyFunc("session-123"); err != nil {
+	if err := mgr.ContainerEnsureReadyFunc(context.Background(), "session-123"); err != nil {
 		t.Fatalf("ContainerEnsureReadyFunc() error = %v", err)
 	}
 	if pool.sessionID != "session-123" {
@@ -97,6 +98,43 @@ func TestWireBackendBrowserManager_EnsureReadyUsesSessionClient(t *testing.T) {
 	}
 	if client.sessionID != "session-123" {
 		t.Errorf("EnsureReady session = %q, want session-123", client.sessionID)
+	}
+}
+
+func TestWireBackendBrowserManager_EnsureReadyUsesContextChain(t *testing.T) {
+	mgr := browser.NewManager(browser.DefaultConfig())
+	reg := &SessionRegistry{}
+	client := &browserReadySpyClient{}
+	pool := &browserReadySpyPool{client: client}
+
+	if !WireBackendBrowserManager(mgr, &kindOnlyBackend{kind: BackendKindK8s}, reg, pool, nil) {
+		t.Fatal("WireBackendBrowserManager returned false")
+	}
+
+	ctx := store.WithSandboxLayerChain(context.Background(), []string{"@base", "abc123"})
+	ctx = store.WithSandboxTemplate(ctx, "mytemplate")
+
+	if err := mgr.ContainerEnsureReadyFunc(ctx, "session-456"); err != nil {
+		t.Fatalf("ContainerEnsureReadyFunc() error = %v", err)
+	}
+	if pool.method != "GetOrCreateWithImage" {
+		t.Errorf("pool method = %q, want GetOrCreateWithImage", pool.method)
+	}
+	if pool.sessionID != "session-456" {
+		t.Errorf("pool session = %q, want session-456", pool.sessionID)
+	}
+}
+
+func TestGetPoolClientFromContext_FallsBackToGetOrCreate(t *testing.T) {
+	client := &browserReadySpyClient{}
+	pool := &browserReadySpyPool{client: client}
+	// Empty context — no chain, no template
+	c := GetPoolClientFromContext(context.Background(), pool, "sess-1")
+	if c == nil {
+		t.Fatal("expected non-nil client")
+	}
+	if pool.method != "GetOrCreate" {
+		t.Errorf("pool method = %q, want GetOrCreate", pool.method)
 	}
 }
 
@@ -148,17 +186,27 @@ func (*browserReadySpyClient) Call(string, string, map[string]interface{}) (json
 type browserReadySpyPool struct {
 	client    ToolNodeClient
 	sessionID string
+	method    string
 }
 
 func (p *browserReadySpyPool) GetOrCreate(sessionID string) ToolNodeClient {
 	p.sessionID = sessionID
+	p.method = "GetOrCreate"
 	return p.client
 }
-func (p *browserReadySpyPool) GetOrCreateWithTemplate(string, string) ToolNodeClient { return p.client }
-func (p *browserReadySpyPool) GetOrCreateWithChain(string, string, []string) ToolNodeClient {
+func (p *browserReadySpyPool) GetOrCreateWithTemplate(sessionID, _ string) ToolNodeClient {
+	p.sessionID = sessionID
+	p.method = "GetOrCreateWithTemplate"
 	return p.client
 }
-func (p *browserReadySpyPool) GetOrCreateWithImage(string, string, []string, string) ToolNodeClient {
+func (p *browserReadySpyPool) GetOrCreateWithChain(sessionID string, _ string, _ []string) ToolNodeClient {
+	p.sessionID = sessionID
+	p.method = "GetOrCreateWithChain"
+	return p.client
+}
+func (p *browserReadySpyPool) GetOrCreateWithImage(sessionID string, _ string, _ []string, _ string) ToolNodeClient {
+	p.sessionID = sessionID
+	p.method = "GetOrCreateWithImage"
 	return p.client
 }
 func (*browserReadySpyPool) GetBackend() Backend                    { return nil }
@@ -166,3 +214,20 @@ func (*browserReadySpyPool) Cleanup()                               {}
 func (*browserReadySpyPool) Alias(string, string)                   {}
 func (*browserReadySpyPool) Remove(string)                          {}
 func (*browserReadySpyPool) SetSessionScope(string, string, string) {}
+
+func TestGetPoolClientFromContext_TemplateOnlyUsesGetOrCreateWithTemplate(t *testing.T) {
+	client := &browserReadySpyClient{}
+	pool := &browserReadySpyPool{client: client}
+	// Template set but NO chain and NO image — should use GetOrCreateWithTemplate
+	ctx := store.WithSandboxTemplate(context.Background(), "my-template")
+	c := GetPoolClientFromContext(ctx, pool, "sess-tpl")
+	if c == nil {
+		t.Fatal("expected non-nil client")
+	}
+	if pool.method != "GetOrCreateWithTemplate" {
+		t.Errorf("pool method = %q, want GetOrCreateWithTemplate", pool.method)
+	}
+	if pool.sessionID != "sess-tpl" {
+		t.Errorf("pool sessionID = %q, want sess-tpl", pool.sessionID)
+	}
+}

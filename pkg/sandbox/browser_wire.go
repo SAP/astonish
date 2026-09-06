@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -17,7 +18,13 @@ import (
 // "default" for the container: the sandbox installs Linux Chromium inside the
 // session. Returning false here previously left SandboxEnabled off and drills
 // fell through to host Chrome, which cannot reach container localhost services.
-func WireIncusBrowserManager(mgr *browser.Manager, client *IncusClient, touchActivity func(sessionID string)) bool {
+//
+// When pool is non-nil, ContainerEnsureReadyFunc is set so that browser tools
+// (which bypass NodeTool.Run) wait for the pool to provision the session
+// container before trying to resolve its container name/IP. This mirrors the
+// K8s path (WireBackendBrowserManager). Without this, a browser-first tool
+// call fails because the Incus container has not been started yet.
+func WireIncusBrowserManager(mgr *browser.Manager, client *IncusClient, pool ToolNodePool, touchActivity func(sessionID string)) bool {
 	if mgr == nil || client == nil {
 		return false
 	}
@@ -46,6 +53,21 @@ func WireIncusBrowserManager(mgr *browser.Manager, client *IncusClient, touchAct
 		FingerprintPlatform: cfg.FingerprintPlatform,
 	}
 	mgr.SandboxEnabled = true
+
+	// ContainerEnsureReadyFunc waits for the lazy pool to provision the session
+	// container before the browser tries to resolve it. Without this, a
+	// browser-first tool call fails because IsRunning returns false for a
+	// container that the pool hasn't started yet.
+	if pool != nil {
+		mgr.ContainerEnsureReadyFunc = func(ctx context.Context, sessionID string) error {
+			client := GetPoolClientFromContext(ctx, pool, sessionID)
+			if client == nil {
+				return fmt.Errorf("no sandbox client for session %q", sessionID)
+			}
+			return client.EnsureReady(sessionID)
+		}
+	}
+
 	mgr.ContainerResolveFunc = func(sessionID string) (string, string, error) {
 		containerName := SessionContainerName(sessionID)
 		if !client.IsRunning(containerName) {

@@ -44,9 +44,7 @@ type BrowserRequestHumanResult struct {
 // or end the session.
 func BrowserRequestHuman(mgr *browser.Manager) func(tool.Context, BrowserRequestHumanArgs) (BrowserRequestHumanResult, error) {
 	return func(ctx tool.Context, args BrowserRequestHumanArgs) (BrowserRequestHumanResult, error) {
-		if ctx != nil {
-			mgr.EnsureSessionID(ctx.SessionID())
-		}
+		ensureBrowserSessionAndContext(mgr, ctx)
 
 		if args.Reason == "" {
 			return BrowserRequestHumanResult{}, fmt.Errorf("reason is required")

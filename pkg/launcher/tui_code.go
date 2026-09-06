@@ -263,56 +263,7 @@ func RunCodeTUI(ctx context.Context, cfg *CodeConfig) error {
 
 	// Restore Auto routing from config if previously configured.
 	if isAutoRestore {
-		mr := appConfig.ModelRouting
-		mr.Migrate()
-		var mediumLLM adkmodel.LLM
-		strongLLM, sErr := provider.GetProvider(ctx, mr.StrongProvider, mr.StrongModel, appConfig)
-		weakLLM, wErr := provider.GetProvider(ctx, mr.WeakProvider, mr.WeakModel, appConfig)
-		if sErr == nil && wErr == nil {
-			classifier, cErr := b.ensureClassifier(ctx)
-			if cErr != nil {
-				slog.Error("auto routing restore failed: MLP classifier unavailable", "error", cErr)
-			} else {
-				if mr.HasMedium() {
-					if mLLM, mErr := provider.GetProvider(ctx, mr.MediumProvider, mr.MediumModel, appConfig); mErr == nil {
-						mediumLLM = mLLM
-					} else {
-						slog.Warn("medium model restore failed, using 2-tier", "error", mErr)
-					}
-				}
-				rLLM := routing.NewRoutingLLM(strongLLM, mediumLLM, weakLLM, classifier, mr.EffectiveHighThreshold(), mr.EffectiveLowThreshold())
-				rLLM.StrongName = shortModelName(mr.StrongModel)
-				rLLM.WeakName = shortModelName(mr.WeakModel)
-				if mr.HasMedium() {
-					rLLM.MediumName = shortModelName(mr.MediumModel)
-				}
-				result.SwappableLLM.Swap(rLLM)
-				b.routingLLM = rLLM
-				b.provider = "auto"
-				b.model = "auto"
-				b.configured = true
-				b.autoRoutingCfg = &backend.AutoRoutingConfig{
-					StrongProvider: mr.StrongProvider,
-					StrongModel:    mr.StrongModel,
-					MediumProvider: mr.MediumProvider,
-					MediumModel:    mr.MediumModel,
-					WeakProvider:   mr.WeakProvider,
-					WeakModel:      mr.WeakModel,
-					HighThreshold:  mr.EffectiveHighThreshold(),
-					LowThreshold:   mr.EffectiveLowThreshold(),
-				}
-				// Wire the same RoutingLLM for sub-agents.
-				if result.ChatAgent != nil && result.ChatAgent.SubAgentManager != nil {
-					result.ChatAgent.SubAgentManager.TaskLLM = rLLM
-				}
-				// Inject pricing data in the background.
-				restoreCfg := *b.autoRoutingCfg
-				go b.injectPricing(context.Background(), rLLM, &restoreCfg)
-			}
-		} else {
-			slog.Warn("auto routing restore failed; falling back to normal model",
-				"strong_err", sErr, "weak_err", wErr)
-		}
+		b.restoreAutoRouting(ctx, appConfig, result.SwappableLLM)
 	}
 
 	// If resuming an existing session, load the persisted title so the header
@@ -463,56 +414,7 @@ func buildCodeBackend(ctx context.Context, cfg *CodeConfig) (backend.Backend, er
 
 	// Restore Auto routing from config if previously configured.
 	if isAutoRestore {
-		mr := appConfig.ModelRouting
-		mr.Migrate()
-		var mediumLLM adkmodel.LLM
-		strongLLM, sErr := provider.GetProvider(ctx, mr.StrongProvider, mr.StrongModel, appConfig)
-		weakLLM, wErr := provider.GetProvider(ctx, mr.WeakProvider, mr.WeakModel, appConfig)
-		if sErr == nil && wErr == nil {
-			classifier, cErr := b.ensureClassifier(ctx)
-			if cErr != nil {
-				slog.Error("auto routing restore failed: MLP classifier unavailable", "error", cErr)
-			} else {
-				if mr.HasMedium() {
-					if mLLM, mErr := provider.GetProvider(ctx, mr.MediumProvider, mr.MediumModel, appConfig); mErr == nil {
-						mediumLLM = mLLM
-					} else {
-						slog.Warn("medium model restore failed, using 2-tier", "error", mErr)
-					}
-				}
-				rLLM := routing.NewRoutingLLM(strongLLM, mediumLLM, weakLLM, classifier, mr.EffectiveHighThreshold(), mr.EffectiveLowThreshold())
-				rLLM.StrongName = shortModelName(mr.StrongModel)
-				rLLM.WeakName = shortModelName(mr.WeakModel)
-				if mr.HasMedium() {
-					rLLM.MediumName = shortModelName(mr.MediumModel)
-				}
-				result.SwappableLLM.Swap(rLLM)
-				b.routingLLM = rLLM
-				b.provider = "auto"
-				b.model = "auto"
-				b.configured = true
-				b.autoRoutingCfg = &backend.AutoRoutingConfig{
-					StrongProvider: mr.StrongProvider,
-					StrongModel:    mr.StrongModel,
-					MediumProvider: mr.MediumProvider,
-					MediumModel:    mr.MediumModel,
-					WeakProvider:   mr.WeakProvider,
-					WeakModel:      mr.WeakModel,
-					HighThreshold:  mr.EffectiveHighThreshold(),
-					LowThreshold:   mr.EffectiveLowThreshold(),
-				}
-				// Wire the same RoutingLLM for sub-agents.
-				if b.result.ChatAgent != nil && b.result.ChatAgent.SubAgentManager != nil {
-					b.result.ChatAgent.SubAgentManager.TaskLLM = rLLM
-				}
-				// Inject pricing data in the background.
-				restoreCfg := *b.autoRoutingCfg
-				go b.injectPricing(context.Background(), rLLM, &restoreCfg)
-			}
-		} else {
-			slog.Warn("auto routing restore failed; falling back to normal model",
-				"strong_err", sErr, "weak_err", wErr)
-		}
+		b.restoreAutoRouting(ctx, appConfig, result.SwappableLLM)
 	}
 
 	return b, nil
@@ -843,6 +745,63 @@ func (b *localAgentBackend) ensureClassifier(ctx context.Context) (routing.Compl
 	b.closeClassifier = func() { _ = embedder.Close() }
 	b.mu.Unlock()
 	return c, nil
+}
+
+// restoreAutoRouting restores a previously configured Auto routing setup from
+// persisted config. It creates the RoutingLLM, wires it into the SwappableLLM
+// and SubAgentManager, and kicks off background pricing injection. Called from
+// both RunCodeTUI and buildCodeBackend to avoid duplicating this logic.
+func (b *localAgentBackend) restoreAutoRouting(ctx context.Context, appConfig *config.AppConfig, swappable *provider.SwappableLLM) {
+	mr := appConfig.ModelRouting
+	mr.Migrate()
+	var mediumLLM adkmodel.LLM
+	strongLLM, sErr := provider.GetProvider(ctx, mr.StrongProvider, mr.StrongModel, appConfig)
+	weakLLM, wErr := provider.GetProvider(ctx, mr.WeakProvider, mr.WeakModel, appConfig)
+	if sErr == nil && wErr == nil {
+		classifier, cErr := b.ensureClassifier(ctx)
+		if cErr != nil {
+			slog.Error("auto routing restore failed: MLP classifier unavailable", "error", cErr)
+		} else {
+			if mr.HasMedium() {
+				if mLLM, mErr := provider.GetProvider(ctx, mr.MediumProvider, mr.MediumModel, appConfig); mErr == nil {
+					mediumLLM = mLLM
+				} else {
+					slog.Warn("medium model restore failed, using 2-tier", "error", mErr)
+				}
+			}
+			rLLM := routing.NewRoutingLLM(strongLLM, mediumLLM, weakLLM, classifier, mr.EffectiveHighThreshold(), mr.EffectiveLowThreshold())
+			rLLM.StrongName = shortModelName(mr.StrongModel)
+			rLLM.WeakName = shortModelName(mr.WeakModel)
+			if mr.HasMedium() {
+				rLLM.MediumName = shortModelName(mr.MediumModel)
+			}
+			swappable.Swap(rLLM)
+			b.routingLLM = rLLM
+			b.provider = "auto"
+			b.model = "auto"
+			b.configured = true
+			b.autoRoutingCfg = &backend.AutoRoutingConfig{
+				StrongProvider: mr.StrongProvider,
+				StrongModel:    mr.StrongModel,
+				MediumProvider: mr.MediumProvider,
+				MediumModel:    mr.MediumModel,
+				WeakProvider:   mr.WeakProvider,
+				WeakModel:      mr.WeakModel,
+				HighThreshold:  mr.EffectiveHighThreshold(),
+				LowThreshold:   mr.EffectiveLowThreshold(),
+			}
+			// Wire the same RoutingLLM for sub-agents.
+			if b.result.ChatAgent != nil && b.result.ChatAgent.SubAgentManager != nil {
+				b.result.ChatAgent.SubAgentManager.TaskLLM = rLLM
+			}
+			// Inject pricing data in the background.
+			restoreCfg := *b.autoRoutingCfg
+			go b.injectPricing(context.Background(), rLLM, &restoreCfg)
+		}
+	} else {
+		slog.Warn("auto routing restore failed; falling back to normal model",
+			"strong_err", sErr, "weak_err", wErr)
+	}
 }
 
 func (b *localAgentBackend) SetAutoRouting(ctx context.Context, cfg backend.AutoRoutingConfig) (string, string, error) {

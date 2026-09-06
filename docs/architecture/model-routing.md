@@ -14,7 +14,7 @@ classifier produces a complexity score in [0, 1]; two configurable thresholds
 
 - Score ≥ high threshold → **strong** model
 - Score ≤ low threshold → **weak** model
-- Otherwise → **medium** model (or strong if medium is not configured)
+- Otherwise → **medium** model (or weak if medium is not configured)
 
 ## Configuration
 

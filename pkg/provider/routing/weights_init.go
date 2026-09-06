@@ -27,7 +27,7 @@ const (
 	// RouterWeightsSHA256 is the expected SHA-256 hex digest of router_weights.npz.
 	// When non-empty, EnsureRouterWeights verifies downloaded/copied files against
 	// this hash. Set to empty to skip verification during development.
-	RouterWeightsSHA256 = ""
+	RouterWeightsSHA256 = "073675939061dd2eddcec9e8910a175a6ef83d7be9112b9393bcff6956ccfb72"
 )
 
 // localTrainingOutputPaths lists candidate locations for the router_weights.npz

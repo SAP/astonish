@@ -833,6 +833,12 @@ func (b *localAgentBackend) ensureClassifier(ctx context.Context) (routing.Compl
 		_ = embedder.Close()
 		return winner, nil
 	}
+	if b.closed {
+		// Backend was closed while we were initializing — clean up.
+		b.mu.Unlock()
+		_ = embedder.Close()
+		return nil, fmt.Errorf("backend closed during classifier initialization")
+	}
 	b.classifier = c
 	b.closeClassifier = func() { _ = embedder.Close() }
 	b.mu.Unlock()
@@ -1545,58 +1551,58 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 
 		doneEmitted := b.driveTurn(ctx, rnr, chatAgent, effectiveID, turnIndex, userMsg, emit, routingLLM)
 
-		// Persist routing decisions so loadHistory can reconstruct badges on
-		// reload. One system event per LLM call, each carrying its tier in
-		// StateDelta[routingInfoStateKey]. This is the same proven side-channel
-		// pattern as RecordPlanDecision / planLifecycleStateKey.
-		if routingLLM != nil {
-			tiers := routingLLM.TurnTiers()
-			for _, tier := range tiers {
-				modelName := routingLLM.ModelNameForTier(tier)
-				b.recordRoutingDecision(ctx, effectiveID, tier, modelName, routingLLM)
-			}
-		}
-
-		// Emit final routing info when Auto mode is active.
-		b.emitRoutingInfo(emit, "", "", routingLLM)
-
-		// Build the done event payload, including the routing summary when
-		// Auto mode is active. The summary is carried on the done event itself
-		// instead of being emitted as a separate visible system message, so the
-		// TUI can choose when to display it (only on final task completion, not
-		// after intermediate approval stops).
-		donePayload := map[string]any{"done": true}
-		if routingLLM != nil && routingLLM.Stats.Total() >= 1 {
-			// Pricing is injected in a background goroutine at Auto-mode setup.
-			// If that fetch has not finished (or failed to match model names)
-			// retry synchronously here so the turn summary can include savings.
-			if !routingLLM.HasPricing() {
-				b.mu.Lock()
-				var cfgCopy *backend.AutoRoutingConfig
-				if b.autoRoutingCfg != nil {
-					c := *b.autoRoutingCfg
-					cfgCopy = &c
-				}
-				b.mu.Unlock()
-				if cfgCopy != nil {
-					b.injectPricing(ctx, routingLLM, cfgCopy)
-				}
-			}
-			if summary := routingLLM.SummaryLine(); summary != "" {
-				donePayload["routing_summary"] = summary
-			}
-		}
-
-		// If this turn emitted an approval prompt, the next RunTurn will be a
-		// continuation of the same user-visible task. Flag the backend so routing
-		// stats are not reset between approval cycles.
-		if approvalEmittedThisTurn && routingLLM != nil {
-			b.mu.Lock()
-			b.routingApprovalContinuation = true
-			b.mu.Unlock()
-		}
-
 		if !doneEmitted {
+			// Persist routing decisions so loadHistory can reconstruct badges on
+			// reload. One system event per LLM call, each carrying its tier in
+			// StateDelta[routingInfoStateKey]. This is the same proven side-channel
+			// pattern as RecordPlanDecision / planLifecycleStateKey.
+			if routingLLM != nil {
+				tiers := routingLLM.TurnTiers()
+				for _, tier := range tiers {
+					modelName := routingLLM.ModelNameForTier(tier)
+					b.recordRoutingDecision(ctx, effectiveID, tier, modelName, routingLLM)
+				}
+			}
+
+			// Emit final routing info when Auto mode is active.
+			b.emitRoutingInfo(emit, "", "", routingLLM)
+
+			// Build the done event payload, including the routing summary when
+			// Auto mode is active. The summary is carried on the done event itself
+			// instead of being emitted as a separate visible system message, so the
+			// TUI can choose when to display it (only on final task completion, not
+			// after intermediate approval stops).
+			donePayload := map[string]any{"done": true}
+			if routingLLM != nil && routingLLM.Stats.Total() >= 1 {
+				// Pricing is injected in a background goroutine at Auto-mode setup.
+				// If that fetch has not finished (or failed to match model names)
+				// retry synchronously here so the turn summary can include savings.
+				if !routingLLM.HasPricing() {
+					b.mu.Lock()
+					var cfgCopy *backend.AutoRoutingConfig
+					if b.autoRoutingCfg != nil {
+						c := *b.autoRoutingCfg
+						cfgCopy = &c
+					}
+					b.mu.Unlock()
+					if cfgCopy != nil {
+						b.injectPricing(ctx, routingLLM, cfgCopy)
+					}
+				}
+				if summary := routingLLM.SummaryLine(); summary != "" {
+					donePayload["routing_summary"] = summary
+				}
+			}
+
+			// If this turn emitted an approval prompt, the next RunTurn will be a
+			// continuation of the same user-visible task. Flag the backend so routing
+			// stats are not reset between approval cycles.
+			if approvalEmittedThisTurn && routingLLM != nil {
+				b.mu.Lock()
+				b.routingApprovalContinuation = true
+				b.mu.Unlock()
+			}
+
 			emit("done", donePayload)
 		}
 	}()

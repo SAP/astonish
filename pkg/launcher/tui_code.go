@@ -290,6 +290,7 @@ func RunCodeTUI(ctx context.Context, cfg *CodeConfig) error {
 				b.routingLLM = rLLM
 				b.provider = "auto"
 				b.model = "auto"
+				b.configured = true
 				b.autoRoutingCfg = &backend.AutoRoutingConfig{
 					StrongProvider: mr.StrongProvider,
 					StrongModel:    mr.StrongModel,
@@ -305,7 +306,8 @@ func RunCodeTUI(ctx context.Context, cfg *CodeConfig) error {
 					result.ChatAgent.SubAgentManager.TaskLLM = rLLM
 				}
 				// Inject pricing data in the background.
-				go b.injectPricing(context.Background(), rLLM, b.autoRoutingCfg)
+				restoreCfg := *b.autoRoutingCfg
+				go b.injectPricing(context.Background(), rLLM, &restoreCfg)
 			}
 		} else {
 			slog.Warn("auto routing restore failed; falling back to normal model",
@@ -488,6 +490,7 @@ func buildCodeBackend(ctx context.Context, cfg *CodeConfig) (backend.Backend, er
 				b.routingLLM = rLLM
 				b.provider = "auto"
 				b.model = "auto"
+				b.configured = true
 				b.autoRoutingCfg = &backend.AutoRoutingConfig{
 					StrongProvider: mr.StrongProvider,
 					StrongModel:    mr.StrongModel,
@@ -503,7 +506,8 @@ func buildCodeBackend(ctx context.Context, cfg *CodeConfig) (backend.Backend, er
 					b.result.ChatAgent.SubAgentManager.TaskLLM = rLLM
 				}
 				// Inject pricing data in the background.
-				go b.injectPricing(context.Background(), rLLM, b.autoRoutingCfg)
+				restoreCfg := *b.autoRoutingCfg
+				go b.injectPricing(context.Background(), rLLM, &restoreCfg)
 			}
 		} else {
 			slog.Warn("auto routing restore failed; falling back to normal model",
@@ -877,12 +881,6 @@ func (b *localAgentBackend) SetAutoRouting(ctx context.Context, cfg backend.Auto
 	if b.result.ChatAgent != nil && b.result.ChatAgent.SubAgentManager != nil {
 		b.result.ChatAgent.SubAgentManager.TaskLLM = rLLM
 	}
-	b.mu.Unlock()
-
-	// Inject pricing data in the background — never blocks model selection.
-	cfgForPricing := cfgCopy
-	go b.injectPricing(context.Background(), rLLM, &cfgForPricing)
-
 	b.appConfig.ModelRouting = config.ModelRoutingConfig{
 		StrongProvider: cfg.StrongProvider,
 		StrongModel:    cfg.StrongModel,
@@ -894,6 +892,12 @@ func (b *localAgentBackend) SetAutoRouting(ctx context.Context, cfg backend.Auto
 		LowThreshold:   cfg.LowThreshold,
 	}
 	b.appConfig.General.DefaultModel = "auto"
+	b.mu.Unlock()
+
+	// Inject pricing data in the background — never blocks model selection.
+	cfgForPricing := cfgCopy
+	go b.injectPricing(context.Background(), rLLM, &cfgForPricing)
+
 	if err := b.saveAppConfig(); err != nil {
 		slog.Warn("failed to persist auto routing config", "error", err)
 	}
@@ -1539,7 +1543,7 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 
 		out <- events.NewStatus("Thinking…")
 
-		b.driveTurn(ctx, rnr, chatAgent, effectiveID, turnIndex, userMsg, emit, routingLLM)
+		doneEmitted := b.driveTurn(ctx, rnr, chatAgent, effectiveID, turnIndex, userMsg, emit, routingLLM)
 
 		// Persist routing decisions so loadHistory can reconstruct badges on
 		// reload. One system event per LLM call, each carrying its tier in
@@ -1592,7 +1596,9 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 			b.mu.Unlock()
 		}
 
-		emit("done", donePayload)
+		if !doneEmitted {
+			emit("done", donePayload)
+		}
 	}()
 
 	return out, nil
@@ -1945,7 +1951,7 @@ func (b *localAgentBackend) driveTurn(
 	userMsg *genai.Content,
 	emit func(string, map[string]any),
 	routingLLM *routing.RoutingLLM,
-) {
+) bool {
 	seenPartialText := false
 	sawRealUsage := false
 	// Allow the first mid-turn estimate to fire immediately (the throttle only
@@ -1963,11 +1969,11 @@ func (b *localAgentBackend) driveTurn(
 		StreamingMode: adkagent.StreamingModeSSE,
 	}) {
 		if ctx.Err() != nil {
-			return
+			return false
 		}
 		if runErr != nil {
 			emit("error", map[string]any{"error": runErr.Error()})
-			return
+			return false
 		}
 
 		if routingLLM != nil {
@@ -2052,7 +2058,7 @@ func (b *localAgentBackend) driveTurn(
 					}
 					emit("plan", planPayload)
 					emit("done", nil)
-					return
+					return true
 				}
 				resp := part.FunctionResponse.Response
 				if chatAgent.Redactor != nil && resp != nil {
@@ -2087,6 +2093,7 @@ func (b *localAgentBackend) driveTurn(
 	if !sawRealUsage {
 		b.emitEstimatedContext(ctx, sessionID, emit)
 	}
+	return false
 }
 
 // emitRoutingInfo sends a KindRoutingInfo event when Auto routing is active.

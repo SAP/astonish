@@ -2,100 +2,103 @@
 
 ## Overview
 
-Astonish supports **4-tier Auto routing** with two independent routing levels, each with a strong/weak model pair and a separate complexity threshold:
+Astonish supports **3-tier Auto model routing** that intelligently routes LLM
+calls to one of three model tiers (strong/medium/weak) based on task complexity.
+The medium tier is optional — when unconfigured, routing falls back to 2-tier
+(strong/weak) operation.
 
-- **Orchestrator tier** (main agent loop): routes between a premium model (e.g., Claude Opus) and a mid-tier model (e.g., Claude Sonnet) based on prompt complexity
-- **Task tier** (sub-agents via `delegate_tasks`): routes between a mid-tier model and a cheap model (e.g., GPT-4o-mini) for parallelized sub-tasks
+Routing uses a trained MLP classifier (all-MiniLM-L6-v2 embeddings → 3-layer
+MLP, 384→64→32→1 sigmoid) with a heuristic fallback classifier. The
+classifier produces a complexity score in [0, 1]; two configurable thresholds
+(high/low) select the tier:
 
-The Task tier is optional. When unconfigured, sub-agents inherit the orchestrator-level LLM.
+- Score ≥ high threshold → **strong** model
+- Score ≤ low threshold → **weak** model
+- Otherwise → **medium** model (or strong if medium is not configured)
 
 ## Configuration
 
 ```yaml
 model_routing:
-  orchestrator:
-    strong_provider: anthropic
-    strong_model: claude-opus-4-5
-    weak_provider: anthropic
-    weak_model: claude-sonnet-4
-    threshold: 0.5
-  task:
-    strong_provider: anthropic
-    strong_model: claude-sonnet-4
-    weak_provider: openai
-    weak_model: gpt-4o-mini
-    threshold: 0.4
+  strong_provider: anthropic
+  strong_model: claude-sonnet-4
+  medium_provider: openai
+  medium_model: gpt-4o-mini
+  weak_provider: openai
+  weak_model: gpt-4o-mini
+  high_threshold: 0.7
+  low_threshold: 0.3
 ```
+
+All six model fields (strong/medium/weak provider+model) plus the two
+thresholds live at the top level of `model_routing`. The medium tier is
+optional and can be left empty for 2-tier routing.
 
 ### Legacy Migration
 
-Flat 2-model configs (pre-4-tier) are automatically migrated to the Orchestrator tier via `ModelRoutingConfig.Migrate()`:
+Older config formats are automatically migrated via
+`ModelRoutingConfig.Migrate()`:
 
-```yaml
-# Legacy format (auto-migrated)
-model_routing:
-  strong_provider: anthropic
-  strong_model: claude-opus-4-5
-  weak_provider: anthropic
-  weak_model: claude-sonnet-4
-  threshold: 0.5
-```
+- **Flat 2-model** (pre-4-tier): `strong_provider`/`weak_provider` → kept as-is
+- **4-tier orchestrator/task**: orchestrator fields → strong/weak, task fields discarded
 
 ## Architecture
 
 ```
 SwappableLLM
-  └─ RoutingLLM (tier="orchestrator")
-       ├─ strong → claude-opus-4-5
-       └─ weak   → claude-sonnet-4
+  └─ RoutingLLM
+       ├─ strong   → claude-sonnet-4       (score ≥ 0.7)
+       ├─ medium   → gpt-4o-mini           (0.3 < score < 0.7)
+       └─ weak     → gpt-4o-mini           (score ≤ 0.3)
 
-SubAgentManager.TaskLLM
-  └─ RoutingLLM (tier="task")
-       ├─ strong → claude-sonnet-4
-       └─ weak   → gpt-4o-mini
+SubAgentManager.TaskLLM → same RoutingLLM (sub-agents share routing)
 ```
 
 ### Key Types
 
-- **`config.RoutingTierConfig`** — per-tier config (strong/weak provider+model, threshold)
-- **`config.ModelRoutingConfig`** — top-level config with Orchestrator and Task tiers, plus legacy flat fields
-- **`backend.AutoRoutingConfig`** — TUI backend struct carrying both tiers for the model picker
-- **`routing.RoutingLLM`** — wraps strong+weak LLMs with a classifier; `.Tier` field identifies orchestrator vs task
-- **`routing.HeuristicClassifier`** — keyword/length-based complexity scoring (shared by both tiers)
-- **`routing.ComplexityClassifier`** — interface for pluggable classifiers (heuristic, MLP, etc.)
+- **`config.ModelRoutingConfig`** — flat config with strong/medium/weak provider+model, high/low thresholds
+- **`backend.AutoRoutingConfig`** — TUI backend struct carrying the full config for the model picker
+- **`routing.RoutingLLM`** — wraps strong+medium+weak LLMs with a classifier and two thresholds
+- **`routing.MLPClassifier`** — trained 3-layer MLP (384→64→32→1) for complexity scoring
+- **`routing.HeuristicClassifier`** — keyword/length/tool/depth heuristic scoring (fallback)
+- **`routing.ComplexityClassifier`** — interface for pluggable classifiers
+- **`routing.RoutingStats`** — atomic counters for per-tier call/token counts
+- **`routing.PricingCache`** — OpenRouter pricing with 24h disk cache and fuzzy model matching
 
 ### Prompt Classification
 
-`extractLastUserMessage` extracts the actual user-typed input from the LLM request, skipping:
-1. Framework-injected per-turn context (Content entries starting with `[Astonish Per-Turn Context`)
-2. Injected context parts (AGENTS.md, session state) — picks the shortest text part as the user's actual input
+`extractLastUserMessage` extracts the actual user-typed input from the LLM
+request, skipping:
+1. Framework-injected per-turn context (`[Astonish Per-Turn Context` prefix)
+2. Injected context parts (AGENTS.md, session state) — picks the shortest
+   text part as the user's actual input
 
-The classifier scores this text on a 0–1 complexity scale. Scores ≥ threshold route to the strong model; below threshold routes to weak.
+The classifier scores this text on a 0–1 complexity scale. The two thresholds
+determine tier selection as described above.
 
 ## UX
 
 ### Model Picker
 
-The `/model` → Auto config screen shows 8 lines:
-1. Orchestrator Strong (main - complex)
-2. Orchestrator Weak (main - simple)
-3. Orchestrator Threshold [← →]
-4. Task Strong (sub-tasks - complex)
-5. Task Weak (sub-tasks - simple)
-6. Task Threshold [← →]
-7. (blank separator)
-8. Confirm [Enter]
+The `/model` → Auto config screen shows:
+1. Strong provider/model (complex tasks)
+2. Medium provider/model (moderate tasks, optional)
+3. Weak provider/model (simple tasks)
+4. High threshold [← →] (default 0.70)
+5. Low threshold [← →] (default 0.30)
+6. Confirm [Enter]
 
 ### Footer
 
-When both tiers are configured:
+When Auto routing is active:
 ```
-Auto / orch: opus|sonnet · task: sonnet|luna
+Auto ✦ strong|medium|weak
 ```
 
 ### Routing Badge
 
-Each agent response **and its tool fold** show a routing badge during the live turn and after session restore:
+Each agent response **and its tool fold** show a routing badge during the live
+turn and after session restore:
 
 - 🧠 = strong
 - ⚙️ = medium
@@ -103,18 +106,33 @@ Each agent response **and its tool fold** show a routing badge during the live t
 
 ### Turn Summary
 
-End-of-turn summary shows per-tier breakdown, plus estimated cost savings when OpenRouter pricing can be resolved for the strong model:
+End-of-turn summary shows per-tier breakdown plus estimated cost savings when
+OpenRouter pricing is available:
 
 ```
-Auto routing — 5 calls (60% strong opus, 40% weak haiku) · Saved ~45% vs all-strong
+Auto routing — 5 calls (60% strong sonnet, 40% weak mini) · Saved ~45% vs all-strong
 ```
 
-The savings clause is omitted when pricing is unknown or every call used the strong model (0% saved).
+The savings clause is omitted when pricing is unknown or every call used the
+strong model.
 
 ## Wiring
 
-1. **Startup restore**: `RunCodeTUI` / `buildCodeBackend` check `appConfig.ModelRouting.IsConfigured()`, create orchestrator RoutingLLM, swap into SwappableLLM, and optionally create task RoutingLLM
-2. **Model picker**: `SetAutoRouting` creates both RoutingLLMs, wires task LLM to `SubAgentManager.TaskLLM`
-3. **Turn execution**: `driveTurn` wires `taskRoutingLLM` to `chatAgent.SubAgentManager.TaskLLM`
-4. **Config persistence**: both tiers saved to `config.yaml` under `model_routing.orchestrator` and `model_routing.task`
-5. **Events**: `driveTurn` emits `routing_info` as soon as `TurnTiers` records a call so live agent bubbles and tool folds inherit the badge; `loadHistory` stamps the same tier on agent text and `tool_call` entries from that call. End-of-turn still emits the cumulative summary.
+1. **Startup restore**: `RunCodeTUI` / `buildCodeBackend` check
+   `appConfig.ModelRouting.IsConfigured()`, create `RoutingLLM`, swap into
+   `SwappableLLM`, and wire to `SubAgentManager.TaskLLM`
+2. **Model picker**: `SetAutoRouting` creates `RoutingLLM`, wires everything,
+   and persists config
+3. **Turn execution**: `driveTurn` uses the snapshotted `routingLLM` for
+   per-call badge emission and end-of-turn summary
+4. **Config persistence**: saved to `config.yaml` under `model_routing`
+
+## MLP Weights
+
+Pre-trained weights are stored in `router_weights.npz` (26,753 parameters,
+~99 KB). `EnsureRouterWeights` checks for a local copy, falls back to GitHub
+Releases download, and verifies SHA-256 integrity on every load.
+
+The NPZ parser includes security hardening: ZIP entry limits, array size caps,
+header size limits, integer overflow checks, negative dimension rejection,
+Fortran-order rejection, and cross-layer dimension validation.

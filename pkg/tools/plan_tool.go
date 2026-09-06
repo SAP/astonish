@@ -28,6 +28,10 @@ var planStateCallback func(goal string, doc agent.PlanDocumentInfo, steps []agen
 // is no active plan or the named step was not found.
 var planStepUpdateCallback func(step, status string) (name, appliedStatus string)
 
+// planKnownStepsCallback returns the active plan's exact step names so
+// update_plan can tell the model which identifiers are valid on a miss.
+var planKnownStepsCallback func() []string
+
 // SetPlanProgressCallback sets the callback used by plan tools to emit SSE events.
 func SetPlanProgressCallback(fn func(event agent.SubTaskProgressEvent)) {
 	planProgressCallback = fn
@@ -43,6 +47,12 @@ func SetPlanStateCallback(fn func(goal string, doc agent.PlanDocumentInfo, steps
 // explicit step status transition onto the active plan.
 func SetPlanStepUpdateCallback(fn func(step, status string) (string, string)) {
 	planStepUpdateCallback = fn
+}
+
+// SetPlanKnownStepsCallback sets the callback used by update_plan to list
+// valid step names when the requested step is not found.
+func SetPlanKnownStepsCallback(fn func() []string) {
+	planKnownStepsCallback = fn
 }
 
 // --- announce_plan tool ---
@@ -213,9 +223,11 @@ type UpdatePlanArgs struct {
 
 // UpdatePlanResult is the output of the update_plan tool.
 type UpdatePlanResult struct {
-	Status  string `json:"status"`
-	Step    string `json:"step,omitempty"`
-	Applied string `json:"applied,omitempty"`
+	Status  string   `json:"status"`
+	Step    string   `json:"step,omitempty"`
+	Applied string   `json:"applied,omitempty"`
+	Message string   `json:"message,omitempty"`
+	Steps   []string `json:"steps,omitempty"`
 }
 
 func updatePlan(_ tool.Context, args UpdatePlanArgs) (UpdatePlanResult, error) {
@@ -224,7 +236,15 @@ func updatePlan(_ tool.Context, args UpdatePlanArgs) (UpdatePlanResult, error) {
 	}
 	name, applied := planStepUpdateCallback(args.Step, args.Status)
 	if name == "" {
-		return UpdatePlanResult{Status: "step_not_found"}, nil
+		var names []string
+		if planKnownStepsCallback != nil {
+			names = planKnownStepsCallback()
+		}
+		msg := "step not found; use the exact 'name' from announce_plan / PLAN.md"
+		if len(names) > 0 {
+			msg = "step not found; valid names: " + strings.Join(names, ", ")
+		}
+		return UpdatePlanResult{Status: "step_not_found", Message: msg, Steps: names}, nil
 	}
 
 	// Emit SSE so the UI checklist reflects the transition.

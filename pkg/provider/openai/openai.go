@@ -612,11 +612,7 @@ func mergeConsecutiveSameRole(messages []openai.ChatCompletionMessage) []openai.
 		noToolID := prev.ToolCallID == "" && cur.ToolCallID == ""
 
 		if sameRole && mergeable && noToolCalls && noToolID {
-			if prev.Content != "" && cur.Content != "" {
-				prev.Content = prev.Content + "\n" + cur.Content
-			} else if cur.Content != "" {
-				prev.Content = cur.Content
-			}
+			mergeMessageContent(prev, cur)
 			mergeReasoningContent(prev, cur)
 			continue
 		}
@@ -626,13 +622,7 @@ func mergeConsecutiveSameRole(messages []openai.ChatCompletionMessage) []openai.
 		// that enforce strict message alternation don't reject the request.
 		if bothAssistant && len(prev.ToolCalls) == 0 && len(cur.ToolCalls) > 0 && prev.ToolCallID == "" {
 			// Absorb cur's tool calls (and any text) into prev.
-			if cur.Content != "" {
-				if prev.Content != "" {
-					prev.Content = prev.Content + "\n" + cur.Content
-				} else {
-					prev.Content = cur.Content
-				}
-			}
+			mergeMessageContent(prev, cur)
 			mergeReasoningContent(prev, cur)
 			prev.ToolCalls = cur.ToolCalls
 			continue
@@ -641,13 +631,7 @@ func mergeConsecutiveSameRole(messages []openai.ChatCompletionMessage) []openai.
 		// Case 3: assistant tool_calls message followed by assistant text message
 		// (less common, but handle symmetrically).
 		if bothAssistant && len(prev.ToolCalls) > 0 && len(cur.ToolCalls) == 0 && cur.ToolCallID == "" {
-			if cur.Content != "" {
-				if prev.Content != "" {
-					prev.Content = prev.Content + "\n" + cur.Content
-				} else {
-					prev.Content = cur.Content
-				}
-			}
+			mergeMessageContent(prev, cur)
 			mergeReasoningContent(prev, cur)
 			continue
 		}
@@ -670,6 +654,61 @@ func mergeReasoningContent(prev *openai.ChatCompletionMessage, cur openai.ChatCo
 	} else {
 		prev.ReasoningContent = cur.ReasoningContent
 	}
+}
+
+// mergeMessageContent merges the content of cur into prev, correctly handling
+// the case where either message uses MultiContent (images/files). The OpenAI
+// library's ChatCompletionMessage rejects JSON serialisation when both Content
+// and MultiContent are set simultaneously, so this function normalises the
+// result to use MultiContent whenever any inline data is present and Content
+// otherwise.
+func mergeMessageContent(prev *openai.ChatCompletionMessage, cur openai.ChatCompletionMessage) {
+	prevHasMulti := len(prev.MultiContent) > 0
+	curHasMulti := len(cur.MultiContent) > 0
+
+	if !prevHasMulti && !curHasMulti {
+		// Both are plain-text messages — simple string join.
+		if prev.Content != "" && cur.Content != "" {
+			prev.Content = prev.Content + "\n" + cur.Content
+		} else if cur.Content != "" {
+			prev.Content = cur.Content
+		}
+		return
+	}
+
+	// At least one side has MultiContent. Normalise both to []ChatMessagePart
+	// and merge, then store the result in MultiContent only (Content = "").
+	var parts []openai.ChatMessagePart
+
+	// Expand prev.
+	if prevHasMulti {
+		parts = append(parts, prev.MultiContent...)
+	} else if prev.Content != "" {
+		parts = append(parts, openai.ChatMessagePart{
+			Type: openai.ChatMessagePartTypeText,
+			Text: prev.Content,
+		})
+	}
+
+	// Expand cur.
+	if curHasMulti {
+		if cur.Content != "" {
+			// cur has both Content and MultiContent — prepend the text part.
+			parts = append(parts, openai.ChatMessagePart{
+				Type: openai.ChatMessagePartTypeText,
+				Text: cur.Content,
+			})
+		}
+		parts = append(parts, cur.MultiContent...)
+	} else if cur.Content != "" {
+		parts = append(parts, openai.ChatMessagePart{
+			Type: openai.ChatMessagePartTypeText,
+			Text: cur.Content,
+		})
+	}
+
+	prev.Content = ""
+	prev.MultiContent = parts
 }
 
 // patchOrphanedToolCalls scans the message history for assistant messages

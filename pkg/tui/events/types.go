@@ -31,6 +31,7 @@ const (
 	KindDelegation    Kind = "delegation"  // sub-agent delegation lifecycle
 	KindPlan          Kind = "plan"        // plan document plus its approval lifecycle
 	KindCompaction    Kind = "compaction"  // context compaction result
+	KindRoutingInfo   Kind = "routing_info" // per-turn model routing decision
 )
 
 // PlanStatus is the approval lifecycle owned by a plan transcript item.
@@ -145,6 +146,24 @@ type Event struct {
 
 	// Compaction for KindCompaction.
 	Compaction *CompactionInfo
+
+	// Routing fields for KindRoutingInfo.
+	RoutingModel      string  `json:"routing_model,omitempty"`
+	RoutingIsStrong   bool    `json:"routing_is_strong,omitempty"`
+	RoutingStrongPct  float64 `json:"routing_strong_pct,omitempty"`
+	RoutingWeakPct    float64 `json:"routing_weak_pct,omitempty"`
+	RoutingTotal      int64   `json:"routing_total,omitempty"`
+	RoutingStrongName string  `json:"routing_strong_name,omitempty"`
+	RoutingWeakName   string  `json:"routing_weak_name,omitempty"`
+	RoutingMediumName string  `json:"routing_medium_name,omitempty"`
+	RoutingMediumPct  float64 `json:"routing_medium_pct,omitempty"`
+	RoutingTier           string  `json:"routing_tier,omitempty"`            // "strong", "medium", or "weak"
+	RoutingCostSavingsPct float64 `json:"routing_cost_savings_pct,omitempty"` // 0-100, % saved vs all-strong
+
+	// RoutingSummary is the end-of-turn Auto routing summary line carried on
+	// KindDone events. The TUI displays it only when the task truly completes
+	// (not during intermediate approval stops).
+	RoutingSummary string `json:"routing_summary,omitempty"`
 
 	// Meta holds optional backend-specific keys without expanding the struct.
 	Meta map[string]any
@@ -294,5 +313,23 @@ func NewCompaction(info CompactionInfo) Event {
 	return Event{
 		Kind:       KindCompaction,
 		Compaction: &info,
+	}
+}
+
+// NewRoutingInfo creates a routing info event.
+func NewRoutingInfo(routingModel string, isStrong bool, strongPct, weakPct float64, total int64, strongName, weakName, tier, mediumName string, mediumPct, costSavingsPct float64) Event {
+	return Event{
+		Kind:                  KindRoutingInfo,
+		RoutingModel:          routingModel,
+		RoutingIsStrong:       isStrong,
+		RoutingStrongPct:      strongPct,
+		RoutingWeakPct:        weakPct,
+		RoutingTotal:          total,
+		RoutingStrongName:     strongName,
+		RoutingWeakName:       weakName,
+		RoutingTier:           tier,
+		RoutingMediumName:     mediumName,
+		RoutingMediumPct:      mediumPct,
+		RoutingCostSavingsPct: costSavingsPct,
 	}
 }

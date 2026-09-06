@@ -211,6 +211,11 @@ func (m model) applyHistory(msg historyLoadedMsg) (tea.Model, tea.Cmd) {
 			PlanContext:      e.PlanContext,
 			PlanWhatNotToDo:  e.PlanWhatNotToDo,
 			PlanVerification: e.PlanVerification,
+			// Pass through the persisted routing tier so LoadHistory can stamp
+			// the correct badge on each reloaded agent bubble.
+			RoutingTier:     e.RoutingTier,
+			RoutingModel:    e.RoutingModel,
+			RoutingIsStrong: e.RoutingIsStrong,
 		})
 	}
 	m.planMode = false

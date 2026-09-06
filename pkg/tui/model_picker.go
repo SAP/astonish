@@ -12,6 +12,8 @@ import (
 	"github.com/SAP/astonish/pkg/tui/events"
 )
 
+const autoProviderLabel = "✦ Auto (smart routing)"
+
 // modelPickerState is the /model overlay. It combines provider → model selection
 // with inline provider management (add/delete) when ProviderAdminBackend is available.
 //
@@ -49,6 +51,19 @@ type modelPickerState struct {
 	// Delete confirmation (inline on provider step).
 	confirmDelete     bool   // true when showing "Delete X? y/n" prompt
 	confirmDeleteName string // name of the provider to delete
+
+	// Auto routing configuration sub-screen state.
+	autoStep          string // "" | "strong-provider" | "strong-model" | "medium-provider" | "medium-model" | "weak-provider" | "weak-model"
+	autoStrongProv    string
+	autoStrongModel   string
+	autoMediumProv    string
+	autoMediumModel   string
+	autoWeakProv      string
+	autoWeakModel     string
+	autoHighThreshold float64
+	autoLowThreshold  float64
+	// 0=strong, 1=medium, 2=weak, 3=high threshold, 4=low threshold, 5=blank, 6=confirm
+	autoFocusLine int
 }
 
 type modelProvidersLoadedMsg struct {
@@ -105,6 +120,13 @@ func (m model) providerAdmin() backend.ProviderAdminBackend {
 func (m model) xaiOAuth() backend.XAIOAuthBackend {
 	if xo, ok := m.backend.(backend.XAIOAuthBackend); ok {
 		return xo
+	}
+	return nil
+}
+
+func (m model) autoRouting() backend.AutoRoutingBackend {
+	if ar, ok := m.backend.(backend.AutoRoutingBackend); ok {
+		return ar
 	}
 	return nil
 }
@@ -403,6 +425,12 @@ func (s *modelPickerState) rebuildItems() {
 		if q == "" || strings.Contains(cascade, q) || strings.HasPrefix("default", q) || strings.HasPrefix("cascade", q) {
 			s.items = append(s.items, cascade)
 		}
+		// Offer Auto routing when at least 2 providers are available.
+		if len(s.providers) >= 2 {
+			if q == "" || strings.Contains(strings.ToLower(autoProviderLabel), q) {
+				s.items = append(s.items, autoProviderLabel)
+			}
+		}
 	}
 	for _, item := range src {
 		if q == "" || strings.Contains(strings.ToLower(item), q) {
@@ -497,6 +525,8 @@ func (m model) handleModelPickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleAddFormKey(msg, key)
 	case "oauth":
 		return m.handleOAuthKey(key)
+	case "auto-config":
+		return m.handleAutoConfigKey(msg, key)
 	}
 	return m, nil
 }
@@ -522,6 +552,14 @@ func (m model) handleProviderStepKey(msg tea.KeyMsg, key string) (tea.Model, tea
 
 	switch key {
 	case "esc", "ctrl+c":
+		if m.modelPicker.autoStep != "" {
+			m.modelPicker.autoStep = ""
+			m.modelPicker.step = "auto-config"
+			m.modelPicker.filter = ""
+			m.modelPicker.err = ""
+			m.modelPicker.rebuildItems()
+			return m, nil
+		}
 		m.modelPicker = modelPickerState{}
 		return m, nil
 	case "up", "k":
@@ -574,6 +612,13 @@ func (m model) handleProviderStepKey(msg tea.KeyMsg, key string) (tea.Model, tea
 func (m model) handleModelStepKey(msg tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
 	switch key {
 	case "esc", "ctrl+c":
+		if m.modelPicker.autoStep != "" {
+			m.modelPicker.autoStep = ""
+			m.modelPicker.step = "auto-config"
+			m.modelPicker.filter = ""
+			m.modelPicker.err = ""
+			return m, nil
+		}
 		m.modelPicker.step = "provider"
 		m.modelPicker.filter = ""
 		m.modelPicker.selectedProvider = ""
@@ -694,6 +739,32 @@ func (m model) handleAddFormKey(msg tea.KeyMsg, key string) (tea.Model, tea.Cmd)
 	return m, nil
 }
 
+// handleOverlayPaste routes a paste event into the appropriate open overlay
+// text field. Returns (model, cmd, true) when the overlay consumed the paste,
+// or (model, nil, false) to let the normal composer paste path handle it.
+func (m model) handleOverlayPaste(text string) (tea.Model, tea.Cmd, bool) {
+	if !m.modelPicker.open || m.modelPicker.loading {
+		return m, nil, false
+	}
+	// Sanitise: collapse CRLF, strip bare CRs, trim leading/trailing whitespace.
+	clean := strings.TrimSpace(strings.NewReplacer("\r\n", " ", "\r", "", "\n", " ", "\t", " ").Replace(text))
+	if clean == "" {
+		return m, nil, false
+	}
+	switch m.modelPicker.step {
+	case "add-form":
+		// Paste into the currently focused form field.
+		m.modelPicker.values[m.modelPicker.fieldCursor] += clean
+		return m, nil, true
+	case "provider", "model":
+		// Paste into the search/filter field.
+		m.modelPicker.filter += clean
+		m.modelPicker.rebuildItems()
+		return m, nil, true
+	}
+	return m, nil, false
+}
+
 func (m model) handleOAuthKey(key string) (tea.Model, tea.Cmd) {
 	switch key {
 	case "esc", "ctrl+c":
@@ -707,7 +778,79 @@ func (m model) selectModelPickerItem() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	item := m.modelPicker.items[m.modelPicker.cursor]
+
+	// Handle auto sub-flow: provider → model selection for strong/weak.
+	if m.modelPicker.autoStep != "" {
+		if m.modelPicker.step == "provider" {
+			if item == "(cascade default)" || item == autoProviderLabel {
+				// Cannot select cascade/auto as a sub-model.
+				return m, nil
+			}
+			// Move to model selection for this provider.
+			m.modelPicker.selectedProvider = item
+			switch {
+			case strings.HasPrefix(m.modelPicker.autoStep, "strong"):
+				m.modelPicker.autoStep = "strong-model"
+			case strings.HasPrefix(m.modelPicker.autoStep, "medium"):
+				m.modelPicker.autoStep = "medium-model"
+			default: // weak-provider
+				m.modelPicker.autoStep = "weak-model"
+			}
+			m.modelPicker.step = "model"
+			m.modelPicker.loading = true
+			m.modelPicker.filter = ""
+			m.modelPicker.models = nil
+			m.modelPicker.items = nil
+			m.modelPicker.cursor = 0
+			m.modelPicker.err = ""
+			m.modelPicker.notice = "Loading models…"
+			return m, m.loadModelModelsCmd(item)
+		}
+		// Model step in auto sub-flow: store result and return to auto-config.
+		switch {
+		case strings.HasPrefix(m.modelPicker.autoStep, "strong"):
+			m.modelPicker.autoStrongProv = m.modelPicker.selectedProvider
+			m.modelPicker.autoStrongModel = item
+		case strings.HasPrefix(m.modelPicker.autoStep, "medium"):
+			m.modelPicker.autoMediumProv = m.modelPicker.selectedProvider
+			m.modelPicker.autoMediumModel = item
+		default: // weak
+			m.modelPicker.autoWeakProv = m.modelPicker.selectedProvider
+			m.modelPicker.autoWeakModel = item
+		}
+		m.modelPicker.autoStep = ""
+		m.modelPicker.step = "auto-config"
+		m.modelPicker.filter = ""
+		m.modelPicker.err = ""
+		return m, nil
+	}
+
 	if m.modelPicker.step == "provider" {
+		if item == autoProviderLabel {
+			m.modelPicker.step = "auto-config"
+			m.modelPicker.autoHighThreshold = 0.7
+			m.modelPicker.autoLowThreshold = 0.3
+			m.modelPicker.autoFocusLine = 0
+			if ar := m.autoRouting(); ar != nil {
+				if cfg := ar.GetAutoRoutingConfig(); cfg != nil {
+					m.modelPicker.autoStrongProv = cfg.StrongProvider
+					m.modelPicker.autoStrongModel = cfg.StrongModel
+					m.modelPicker.autoMediumProv = cfg.MediumProvider
+					m.modelPicker.autoMediumModel = cfg.MediumModel
+					m.modelPicker.autoWeakProv = cfg.WeakProvider
+					m.modelPicker.autoWeakModel = cfg.WeakModel
+					m.modelPicker.autoHighThreshold = cfg.HighThreshold
+					if m.modelPicker.autoHighThreshold <= 0 || m.modelPicker.autoHighThreshold >= 1 {
+						m.modelPicker.autoHighThreshold = 0.7
+					}
+					m.modelPicker.autoLowThreshold = cfg.LowThreshold
+					if m.modelPicker.autoLowThreshold <= 0 || m.modelPicker.autoLowThreshold >= 1 {
+						m.modelPicker.autoLowThreshold = 0.3
+					}
+				}
+			}
+			return m, nil
+		}
 		if item == "(cascade default)" {
 			m.modelPicker.loading = true
 			m.modelPicker.err = ""
@@ -758,6 +901,8 @@ func (m model) renderModelPickerOverlay() string {
 		m.renderAddFormStep(&body, th)
 	case "oauth":
 		m.renderOAuthStep(&body, th)
+	case "auto-config":
+		m.renderAutoConfigStep(&body, th)
 	}
 
 	box := th.InputBorderFocus.
@@ -974,5 +1119,184 @@ func (m model) renderOAuthStep(body *strings.Builder, th Theme) {
 		}
 	} else if pp.loading {
 		body.WriteString(th.Muted.Render("Waiting for approval…"))
+	}
+}
+
+func (m model) handleAutoConfigKey(msg tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
+	_ = msg
+	switch key {
+	case "esc", "ctrl+c":
+		m.modelPicker.step = "provider"
+		m.modelPicker.autoStep = ""
+		m.modelPicker.filter = ""
+		m.modelPicker.rebuildItems()
+		return m, nil
+	case "up", "k":
+		if m.modelPicker.autoFocusLine > 0 {
+			m.modelPicker.autoFocusLine--
+			// Skip blank separator (line 5).
+			if m.modelPicker.autoFocusLine == 5 {
+				m.modelPicker.autoFocusLine--
+			}
+		}
+		return m, nil
+	case "down", "j":
+		if m.modelPicker.autoFocusLine < 6 {
+			m.modelPicker.autoFocusLine++
+			// Skip blank separator (line 5).
+			if m.modelPicker.autoFocusLine == 5 {
+				m.modelPicker.autoFocusLine++
+			}
+		}
+		return m, nil
+	case "left":
+		switch m.modelPicker.autoFocusLine {
+		case 3: // High threshold
+			m.modelPicker.autoHighThreshold -= 0.05
+			if m.modelPicker.autoHighThreshold < 0.05 {
+				m.modelPicker.autoHighThreshold = 0.05
+			}
+		case 4: // Low threshold
+			m.modelPicker.autoLowThreshold -= 0.05
+			if m.modelPicker.autoLowThreshold < 0.05 {
+				m.modelPicker.autoLowThreshold = 0.05
+			}
+		}
+		return m, nil
+	case "right":
+		switch m.modelPicker.autoFocusLine {
+		case 3: // High threshold
+			m.modelPicker.autoHighThreshold += 0.05
+			if m.modelPicker.autoHighThreshold > 0.95 {
+				m.modelPicker.autoHighThreshold = 0.95
+			}
+		case 4: // Low threshold
+			m.modelPicker.autoLowThreshold += 0.05
+			if m.modelPicker.autoLowThreshold > 0.95 {
+				m.modelPicker.autoLowThreshold = 0.95
+			}
+		}
+		return m, nil
+	case "enter", " ":
+		switch m.modelPicker.autoFocusLine {
+		case 0: // Strong model
+			m.modelPicker.autoStep = "strong-provider"
+			m.modelPicker.step = "provider"
+			m.modelPicker.filter = ""
+			m.modelPicker.cursor = 0
+			m.modelPicker.rebuildItems()
+			return m, nil
+		case 1: // Medium model
+			m.modelPicker.autoStep = "medium-provider"
+			m.modelPicker.step = "provider"
+			m.modelPicker.filter = ""
+			m.modelPicker.cursor = 0
+			m.modelPicker.rebuildItems()
+			return m, nil
+		case 2: // Weak model
+			m.modelPicker.autoStep = "weak-provider"
+			m.modelPicker.step = "provider"
+			m.modelPicker.filter = ""
+			m.modelPicker.cursor = 0
+			m.modelPicker.rebuildItems()
+			return m, nil
+		case 3: // High threshold — handled by left/right, no enter action
+		case 4: // Low threshold — handled by left/right, no enter action
+		case 5: // blank separator — skip
+		case 6: // Confirm
+			return m.confirmAutoRouting()
+		}
+	}
+	return m, nil
+}
+
+func (m model) confirmAutoRouting() (tea.Model, tea.Cmd) {
+	if m.modelPicker.autoStrongProv == "" || m.modelPicker.autoStrongModel == "" {
+		m.modelPicker.err = "Strong model is not configured."
+		return m, nil
+	}
+	if m.modelPicker.autoWeakProv == "" || m.modelPicker.autoWeakModel == "" {
+		m.modelPicker.err = "Weak model is not configured."
+		return m, nil
+	}
+	// Medium tier is optional, but if any medium field is set, both are required.
+	hasMediumAny := m.modelPicker.autoMediumProv != "" || m.modelPicker.autoMediumModel != ""
+	if hasMediumAny {
+		if m.modelPicker.autoMediumProv == "" || m.modelPicker.autoMediumModel == "" {
+			m.modelPicker.err = "Medium model is not fully configured."
+			return m, nil
+		}
+	}
+	if m.modelPicker.autoHighThreshold <= m.modelPicker.autoLowThreshold {
+		m.modelPicker.err = "High threshold must be greater than low threshold."
+		return m, nil
+	}
+	ar := m.autoRouting()
+	if ar == nil {
+		m.modelPicker.err = "Auto routing not supported by this backend."
+		return m, nil
+	}
+	m.modelPicker.loading = true
+	m.modelPicker.notice = "Configuring auto routing…"
+	cfg := backend.AutoRoutingConfig{
+		StrongProvider: m.modelPicker.autoStrongProv,
+		StrongModel:    m.modelPicker.autoStrongModel,
+		MediumProvider: m.modelPicker.autoMediumProv,
+		MediumModel:    m.modelPicker.autoMediumModel,
+		WeakProvider:   m.modelPicker.autoWeakProv,
+		WeakModel:      m.modelPicker.autoWeakModel,
+		HighThreshold:  m.modelPicker.autoHighThreshold,
+		LowThreshold:   m.modelPicker.autoLowThreshold,
+	}
+	return m, func() tea.Msg {
+		effP, effM, err := ar.SetAutoRouting(m.ctx, cfg)
+		return modelPinAppliedMsg{provider: "auto", model: "auto", effP: effP, effM: effM, err: err}
+	}
+}
+
+func (m model) renderAutoConfigStep(body *strings.Builder, th Theme) {
+	body.WriteString(th.Header.Render("✦ Auto Model Routing") +
+		th.Muted.Render("  ↑↓ move  enter select  ← → threshold  esc cancel") + "\n\n")
+
+	if m.modelPicker.err != "" {
+		body.WriteString(th.Error.Render(m.modelPicker.err) + "\n\n")
+	}
+
+	lines := []struct {
+		label string
+		value string
+	}{
+		{"Strong (complex tasks)", m.modelPicker.autoStrongProv + " / " + m.modelPicker.autoStrongModel},
+		{"Medium (standard tasks)", m.modelPicker.autoMediumProv + " / " + m.modelPicker.autoMediumModel},
+		{"Weak (simple tasks)", m.modelPicker.autoWeakProv + " / " + m.modelPicker.autoWeakModel},
+		{"High Threshold", fmt.Sprintf("%.2f", m.modelPicker.autoHighThreshold)},
+		{"Low Threshold", fmt.Sprintf("%.2f", m.modelPicker.autoLowThreshold)},
+		// separator
+		{"", ""},
+		// confirm
+		{"Confirm", ""},
+	}
+
+	for i, line := range lines {
+		mark, style := "  ", th.Text
+		if i == m.modelPicker.autoFocusLine {
+			mark, style = "› ", th.Success
+		}
+		switch i {
+		case 0, 1, 2: // model lines
+			val := line.value
+			if val == " / " {
+				val = th.Muted.Render("(not set)")
+			} else {
+				val = th.Text.Render(val)
+			}
+			body.WriteString(style.Render(mark+line.label+": ") + val + th.Muted.Render("  [Enter]") + "\n")
+		case 3, 4: // threshold lines
+			body.WriteString(style.Render(mark+line.label+": "+line.value) + th.Muted.Render("  [← →]") + "\n")
+		case 5: // blank separator
+			body.WriteString("\n")
+		case 6: // confirm
+			body.WriteString(style.Render(mark+line.label) + th.Muted.Render("  [Enter]") + "\n")
+		}
 	}
 }

@@ -25,7 +25,9 @@ import (
 	"github.com/SAP/astonish/pkg/common"
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/gitutil"
+	"github.com/SAP/astonish/pkg/memory"
 	"github.com/SAP/astonish/pkg/provider"
+	"github.com/SAP/astonish/pkg/provider/routing"
 	xai_oauth "github.com/SAP/astonish/pkg/provider/xai_oauth"
 	persistentsession "github.com/SAP/astonish/pkg/session"
 	"github.com/SAP/astonish/pkg/skills"
@@ -46,6 +48,12 @@ const (
 	codeAppName             = "astonish_code"
 	planLifecycleStateKey   = "astonish_plan_lifecycle"
 	planApprovalUserMessage = "I approve this plan. Please start implementing it now, phase by phase."
+	// routingInfoStateKey is the StateDelta key used to persist the routing
+	// decision (tier + model name) alongside each agent response event. This
+	// reuses the same proven, already-read-back side-channel that
+	// RecordPlanDecision uses (planLifecycleStateKey / awaiting_approval).
+	// Reading it back in loadHistory lets reloaded badges match live badges.
+	routingInfoStateKey = "routing_info"
 )
 
 // codeUserID is the base local user for code mode (single-user, no auth).
@@ -152,6 +160,16 @@ func RunCodeTUI(ctx context.Context, cfg *CodeConfig) error {
 		modelName = appConfig.General.DefaultModel
 	}
 
+	// When the persisted model is "auto", bootstrap the factory with the strong
+	// model so GetProvider succeeds. The RoutingLLM will be swapped in after
+	// backend construction via the auto routing restore block.
+	isAutoRestore := config.IsAutoModel(modelName) && appConfig.ModelRouting.IsConfigured()
+	if isAutoRestore {
+		appConfig.ModelRouting.Migrate()
+		providerName = appConfig.ModelRouting.StrongProvider
+		modelName = appConfig.ModelRouting.StrongModel
+	}
+
 	workingDir := strings.TrimSpace(cfg.WorkingDir)
 	if workingDir == "" {
 		wd, wdErr := os.Getwd()
@@ -243,6 +261,11 @@ func RunCodeTUI(ctx context.Context, cfg *CodeConfig) error {
 		subAgentAuthRespCh:     make(chan agent.SubAgentAuthResponse, 1),
 	}
 
+	// Restore Auto routing from config if previously configured.
+	if isAutoRestore {
+		b.restoreAutoRouting(ctx, appConfig, result.SwappableLLM)
+	}
+
 	// If resuming an existing session, load the persisted title so the header
 	// shows it immediately.
 	if cfg.SessionID != "" && fileStore != nil {
@@ -304,6 +327,16 @@ func buildCodeBackend(ctx context.Context, cfg *CodeConfig) (backend.Backend, er
 	modelName := strings.TrimSpace(cfg.Model)
 	if modelName == "" {
 		modelName = appConfig.General.DefaultModel
+	}
+
+	// When the persisted model is "auto", bootstrap the factory with the strong
+	// model so GetProvider succeeds. The RoutingLLM will be swapped in after
+	// construction via the restore block below.
+	isAutoRestore := config.IsAutoModel(modelName) && appConfig.ModelRouting.IsConfigured()
+	if isAutoRestore {
+		appConfig.ModelRouting.Migrate()
+		providerName = appConfig.ModelRouting.StrongProvider
+		modelName = appConfig.ModelRouting.StrongModel
 	}
 
 	workingDir := strings.TrimSpace(cfg.WorkingDir)
@@ -378,6 +411,12 @@ func buildCodeBackend(ctx context.Context, cfg *CodeConfig) (backend.Backend, er
 		subAgentAuthReqCh:      make(chan agent.SubAgentAuthRequest, 1),
 		subAgentAuthRespCh:     make(chan agent.SubAgentAuthResponse, 1),
 	}
+
+	// Restore Auto routing from config if previously configured.
+	if isAutoRestore {
+		b.restoreAutoRouting(ctx, appConfig, result.SwappableLLM)
+	}
+
 	return b, nil
 }
 
@@ -442,7 +481,13 @@ func redirectLogsForTUI(debug bool) func() {
 	}
 
 	log.SetOutput(sink)
-	slog.SetDefault(slog.New(slog.NewTextHandler(sink, nil)))
+	// When debugging, emit at Debug level so slog.Debug diagnostics reach the
+	// log file. Otherwise the default (Info) level drops them.
+	var handlerOpts *slog.HandlerOptions
+	if debug {
+		handlerOpts = &slog.HandlerOptions{Level: slog.LevelDebug}
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(sink, handlerOpts)))
 
 	return func() {
 		log.SetOutput(prevLogOut)
@@ -496,13 +541,20 @@ type localAgentBackend struct {
 	// pre-built summary to avoid expensive LLM re-summarization.
 	sessionNotes *persistentsession.SessionNotes
 
-	mu          sync.Mutex
-	sessionID   string
-	autoApprove bool
-	provider    string
-	model       string
-	configured  bool
-	usage       *events.Usage
+	mu              sync.Mutex
+	sessionID       string
+	autoApprove     bool
+	provider        string
+	model           string
+	routingLLM      *routing.RoutingLLM          // non-nil when Auto mode active
+	autoRoutingCfg  *backend.AutoRoutingConfig   // persisted config for GetAutoRoutingConfig
+	classifier      routing.ComplexityClassifier // MLP classifier (shared by both tiers)
+	closeClassifier func()                       // releases Hugot embedder resources
+	pricingCache    *routing.PricingCache        // lazily initialized when Auto routing is active
+	pricingCtx      context.Context              // context for background injectPricing goroutine
+	pricingCancel   context.CancelFunc           // cancels pricingCtx on Close
+	configured      bool
+	usage           *events.Usage
 	// contextTokens is the current context-window occupancy (estimated from the
 	// session contents when the provider reports no usage). Set on resume so the
 	// header shows real utilization immediately, updated after each turn.
@@ -529,6 +581,13 @@ type localAgentBackend struct {
 	// the approval overlay and response channel at a time.
 	subAgentAuthMu      sync.Mutex
 	subAgentAuthPending bool
+
+	// routingApprovalContinuation is set when the previous turn ended with a
+	// pending tool approval (the done event was preceded by an approval event).
+	// When true, the next RunTurn is a continuation of the same user-visible
+	// task, so routing stats should NOT be reset — they accumulate across all
+	// approval cycles and the final summary reflects the full task's routing.
+	routingApprovalContinuation bool
 }
 
 func (b *localAgentBackend) ListLocalSkills(ctx context.Context) ([]backend.SkillSummary, error) {
@@ -582,6 +641,7 @@ func (b *localAgentBackend) ListLocalSkills(ctx context.Context) ([]backend.Skil
 }
 
 var _ backend.LocalSkillsBackend = (*localAgentBackend)(nil)
+var _ backend.AutoRoutingBackend = (*localAgentBackend)(nil)
 
 // contextEstimateInterval is the minimum wall-clock gap between mid-turn
 // context-occupancy estimates. It keeps the header's "Context" figure moving
@@ -595,7 +655,7 @@ func (b *localAgentBackend) Info() backend.Info {
 	if !b.configured {
 		notices = append(notices, "No AI model configured yet. Type /model to choose a provider and model.")
 	}
-	return backend.Info{
+	info := backend.Info{
 		SessionID:     b.sessionID,
 		Provider:      b.provider,
 		Model:         b.model,
@@ -609,6 +669,15 @@ func (b *localAgentBackend) Info() backend.Info {
 		Notices:       notices,
 		Title:         b.title,
 	}
+	if b.provider == "auto" && b.autoRoutingCfg != nil {
+		info.Provider = "Auto"
+		desc := shortModelName(b.autoRoutingCfg.StrongModel) + "|" + shortModelName(b.autoRoutingCfg.WeakModel)
+		if b.autoRoutingCfg.HasMedium() {
+			desc = shortModelName(b.autoRoutingCfg.StrongModel) + "|" + shortModelName(b.autoRoutingCfg.MediumModel) + "|" + shortModelName(b.autoRoutingCfg.WeakModel)
+		}
+		info.Model = desc
+	}
+	return info
 }
 
 func (b *localAgentBackend) Open(ctx context.Context) error {
@@ -618,9 +687,266 @@ func (b *localAgentBackend) Open(ctx context.Context) error {
 
 func (b *localAgentBackend) Close() error {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	b.closed = true
+	closeClassifier := b.closeClassifier
+	b.closeClassifier = nil
+	pricingCancel := b.pricingCancel
+	b.pricingCancel = nil
+	b.mu.Unlock()
+	if closeClassifier != nil {
+		closeClassifier()
+	}
+	if pricingCancel != nil {
+		pricingCancel()
+	}
 	return nil
+}
+
+// ensureClassifier lazily initialises the MLP classifier (Hugot embedder +
+// pre-trained weights). It is called the first time Auto routing is activated.
+// Returns a hard error if weights or the embedder cannot be loaded — there is
+// no heuristic fallback.
+func (b *localAgentBackend) ensureClassifier(ctx context.Context) (routing.ComplexityClassifier, error) {
+	b.mu.Lock()
+	if b.classifier != nil {
+		c := b.classifier
+		b.mu.Unlock()
+		return c, nil
+	}
+	b.mu.Unlock()
+
+	modelsDir, err := config.GetModelsDir()
+	if err != nil {
+		return nil, fmt.Errorf("models dir: %w", err)
+	}
+	weightsPath, err := routing.EnsureRouterWeights(modelsDir)
+	if err != nil {
+		return nil, fmt.Errorf("router weights: %w", err)
+	}
+	embedder, err := memory.NewHugotEmbedder(modelsDir, false)
+	if err != nil {
+		return nil, fmt.Errorf("hugot embedder: %w", err)
+	}
+	embedFn := routing.EmbedFunc(embedder.EmbeddingFunc())
+	c, err := routing.LoadMLPClassifier(weightsPath, embedFn)
+	if err != nil {
+		_ = embedder.Close()
+		return nil, fmt.Errorf("MLP classifier: %w", err)
+	}
+
+	b.mu.Lock()
+	if b.classifier != nil {
+		// Another goroutine won the race — use its result and close ours.
+		winner := b.classifier
+		b.mu.Unlock()
+		_ = embedder.Close()
+		return winner, nil
+	}
+	if b.closed {
+		// Backend was closed while we were initializing — clean up.
+		b.mu.Unlock()
+		_ = embedder.Close()
+		return nil, fmt.Errorf("backend closed during classifier initialization")
+	}
+	b.classifier = c
+	b.closeClassifier = func() { _ = embedder.Close() }
+	b.mu.Unlock()
+	return c, nil
+}
+
+// restoreAutoRouting restores a previously configured Auto routing setup from
+// persisted config. It creates the RoutingLLM, wires it into the SwappableLLM
+// and SubAgentManager, and kicks off background pricing injection. Called from
+// both RunCodeTUI and buildCodeBackend to avoid duplicating this logic.
+func (b *localAgentBackend) restoreAutoRouting(ctx context.Context, appConfig *config.AppConfig, swappable *provider.SwappableLLM) {
+	mr := appConfig.ModelRouting
+	mr.Migrate()
+	var mediumLLM adkmodel.LLM
+	strongLLM, sErr := provider.GetProvider(ctx, mr.StrongProvider, mr.StrongModel, appConfig)
+	weakLLM, wErr := provider.GetProvider(ctx, mr.WeakProvider, mr.WeakModel, appConfig)
+	if sErr == nil && wErr == nil {
+		classifier, cErr := b.ensureClassifier(ctx)
+		if cErr != nil {
+			slog.Error("auto routing restore failed: MLP classifier unavailable", "error", cErr)
+		} else {
+			if mr.HasMedium() {
+				if mLLM, mErr := provider.GetProvider(ctx, mr.MediumProvider, mr.MediumModel, appConfig); mErr == nil {
+					mediumLLM = mLLM
+				} else {
+					slog.Warn("medium model restore failed, using 2-tier", "error", mErr)
+				}
+			}
+			rLLM := routing.NewRoutingLLM(strongLLM, mediumLLM, weakLLM, classifier, mr.EffectiveHighThreshold(), mr.EffectiveLowThreshold())
+			rLLM.StrongName = shortModelName(mr.StrongModel)
+			rLLM.WeakName = shortModelName(mr.WeakModel)
+			if mr.HasMedium() {
+				rLLM.MediumName = shortModelName(mr.MediumModel)
+			}
+			swappable.Swap(rLLM)
+			b.mu.Lock()
+			b.routingLLM = rLLM
+			b.provider = "auto"
+			b.model = "auto"
+			b.configured = true
+			b.autoRoutingCfg = &backend.AutoRoutingConfig{
+				StrongProvider: mr.StrongProvider,
+				StrongModel:    mr.StrongModel,
+				MediumProvider: mr.MediumProvider,
+				MediumModel:    mr.MediumModel,
+				WeakProvider:   mr.WeakProvider,
+				WeakModel:      mr.WeakModel,
+				HighThreshold:  mr.EffectiveHighThreshold(),
+				LowThreshold:   mr.EffectiveLowThreshold(),
+			}
+			// Create a cancellable context for the pricing goroutine so
+			// Close() can shut it down — matches SetAutoRouting's pattern.
+			pricingCtx, pricingCancel := context.WithCancel(context.Background())
+			b.pricingCtx = pricingCtx
+			b.pricingCancel = pricingCancel
+			b.mu.Unlock()
+			// Wire the same RoutingLLM for sub-agents.
+			if b.result.ChatAgent != nil && b.result.ChatAgent.SubAgentManager != nil {
+				b.result.ChatAgent.SubAgentManager.SetTaskLLM(rLLM)
+			}
+			// Inject pricing data in the background.
+			restoreCfg := *b.autoRoutingCfg
+			go b.injectPricing(pricingCtx, rLLM, &restoreCfg)
+		}
+	} else {
+		slog.Warn("auto routing restore failed; falling back to normal model",
+			"strong_err", sErr, "weak_err", wErr)
+	}
+}
+
+func (b *localAgentBackend) SetAutoRouting(ctx context.Context, cfg backend.AutoRoutingConfig) (string, string, error) {
+	strongLLM, err := provider.GetProvider(ctx, cfg.StrongProvider, cfg.StrongModel, b.appConfig)
+	if err != nil {
+		return "", "", fmt.Errorf("strong model: %w", err)
+	}
+	weakLLM, err := provider.GetProvider(ctx, cfg.WeakProvider, cfg.WeakModel, b.appConfig)
+	if err != nil {
+		return "", "", fmt.Errorf("weak model: %w", err)
+	}
+	classifier, cErr := b.ensureClassifier(ctx)
+	if cErr != nil {
+		return "", "", fmt.Errorf("MLP classifier unavailable: %w", cErr)
+	}
+
+	var mediumLLM adkmodel.LLM
+	if cfg.HasMedium() {
+		if mLLM, mErr := provider.GetProvider(ctx, cfg.MediumProvider, cfg.MediumModel, b.appConfig); mErr == nil {
+			mediumLLM = mLLM
+		} else {
+			slog.Warn("medium model setup failed, using 2-tier", "error", mErr)
+		}
+	}
+
+	rLLM := routing.NewRoutingLLM(strongLLM, mediumLLM, weakLLM, classifier, cfg.HighThreshold, cfg.LowThreshold)
+	rLLM.StrongName = shortModelName(cfg.StrongModel)
+	rLLM.WeakName = shortModelName(cfg.WeakModel)
+	if cfg.HasMedium() {
+		rLLM.MediumName = shortModelName(cfg.MediumModel)
+	}
+	b.result.SwappableLLM.Swap(rLLM)
+
+	b.mu.Lock()
+	b.routingLLM = rLLM
+	cfgCopy := cfg
+	b.autoRoutingCfg = &cfgCopy
+	b.provider = "auto"
+	b.model = "auto"
+	b.configured = true
+	// Wire the same RoutingLLM to SubAgentManager for sub-agents.
+	if b.result.ChatAgent != nil && b.result.ChatAgent.SubAgentManager != nil {
+		b.result.ChatAgent.SubAgentManager.SetTaskLLM(rLLM)
+	}
+	b.appConfig.ModelRouting = config.ModelRoutingConfig{
+		StrongProvider: cfg.StrongProvider,
+		StrongModel:    cfg.StrongModel,
+		MediumProvider: cfg.MediumProvider,
+		MediumModel:    cfg.MediumModel,
+		WeakProvider:   cfg.WeakProvider,
+		WeakModel:      cfg.WeakModel,
+		HighThreshold:  cfg.HighThreshold,
+		LowThreshold:   cfg.LowThreshold,
+	}
+	b.appConfig.General.DefaultModel = "auto"
+
+	// Create a cancellable context for the pricing goroutine and store the cancel func
+	// so Close() can shut it down gracefully.
+	pricingCtx, pricingCancel := context.WithCancel(context.Background())
+	b.pricingCtx = pricingCtx
+	b.pricingCancel = pricingCancel
+
+	b.mu.Unlock()
+
+	// Inject pricing data in the background — never blocks model selection.
+	// The context can be cancelled if the backend closes before pricing completes.
+	cfgForPricing := cfgCopy
+	go b.injectPricing(pricingCtx, rLLM, &cfgForPricing)
+
+	if err := b.saveAppConfig(); err != nil {
+		slog.Warn("failed to persist auto routing config", "error", err)
+	}
+	return "auto", "auto", nil
+}
+
+func (b *localAgentBackend) GetAutoRoutingConfig() *backend.AutoRoutingConfig {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.autoRoutingCfg
+}
+
+func shortModelName(model string) string {
+	if i := strings.LastIndex(model, "/"); i >= 0 {
+		return model[i+1:]
+	}
+	return model
+}
+
+// ensurePricingCache lazily creates the PricingCache on first use.
+func (b *localAgentBackend) ensurePricingCache() *routing.PricingCache {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.pricingCache == nil {
+		modelsDir, err := config.GetModelsDir()
+		if err != nil {
+			slog.Debug("pricing cache: cannot resolve models dir", "error", err)
+			return nil
+		}
+		b.pricingCache = routing.NewPricingCache(modelsDir)
+	}
+	return b.pricingCache
+}
+
+// injectPricing looks up per-tier costs and calls SetPricing on rLLM.
+// Designed to be called in a background goroutine so pricing fetch never
+// blocks startup or model selection; also called synchronously at turn-end
+// if the background inject has not yet produced a strong-model cost.
+func (b *localAgentBackend) injectPricing(ctx context.Context, rLLM *routing.RoutingLLM, cfg *backend.AutoRoutingConfig) {
+	if rLLM == nil || cfg == nil {
+		return
+	}
+	pc := b.ensurePricingCache()
+	if pc == nil {
+		return
+	}
+	strongCost, strongOK := pc.LookupCost(ctx, cfg.StrongProvider, cfg.StrongModel)
+	var mediumCost routing.ModelCost
+	mediumOK := false
+	if cfg.HasMedium() {
+		mediumCost, mediumOK = pc.LookupCost(ctx, cfg.MediumProvider, cfg.MediumModel)
+	}
+	weakCost, weakOK := pc.LookupCost(ctx, cfg.WeakProvider, cfg.WeakModel)
+	if !strongOK {
+		slog.Debug("pricing: strong model cost not found",
+			"provider", cfg.StrongProvider, "model", cfg.StrongModel)
+	}
+	rLLM.SetPricing(strongCost, mediumCost, weakCost)
+	slog.Debug("pricing: injected",
+		"has_pricing", rLLM.HasPricing(),
+		"strong_ok", strongOK, "medium_ok", mediumOK, "weak_ok", weakOK,
+		"strong_model", cfg.StrongModel, "weak_model", cfg.WeakModel)
 }
 
 // RespondSubAgentAuth sends the user's authorization decision back to a blocked
@@ -858,6 +1184,13 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 
 	chatAgent := b.result.ChatAgent
 	chatAgent.AutoApprove = autoApprove
+	// Wire the RoutingLLM to SubAgentManager so sub-agents use the same routing.
+	b.mu.Lock()
+	subRoutingLLM := b.routingLLM
+	b.mu.Unlock()
+	if subRoutingLLM != nil && chatAgent.SubAgentManager != nil {
+		chatAgent.SubAgentManager.SetTaskLLM(subRoutingLLM)
+	}
 	// Persist any announced plan to a per-session PLAN.md sidecar so the plan
 	// survives context compaction (the model can re-read it after a summary).
 	planPath := b.planFilePath(sessionID)
@@ -1109,6 +1442,46 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 		}()
 
 		emit("session", map[string]any{"sessionId": sessionID, "isNew": isNew})
+
+		// Snapshot routing state under the lock so the turn goroutine has a
+		// stable view — SetAutoRouting/SetModelPin can run concurrently on the
+		// main TUI goroutine.
+		b.mu.Lock()
+		routingLLM := b.routingLLM
+		b.mu.Unlock()
+
+		// Track whether this turn emits a tool approval prompt. When it does, the
+		// next RunTurn call is a continuation of the same user-visible task, so we
+		// should not reset routing stats between them.
+		var approvalEmittedThisTurn bool
+		origEmit := emit
+		emit = func(eventType string, data map[string]any) {
+			if eventType == "approval" {
+				approvalEmittedThisTurn = true
+			}
+			origEmit(eventType, data)
+		}
+
+		// Reset per-turn routing stats and inject the classifier context early —
+		// before the title goroutine starts — so the title call's routing decision
+		// is included in the turn's count and summary. ResetTurn() clears both
+		// turnTiers and Stats; everything that follows (title + agent calls)
+		// accumulates fresh for this turn.
+		// Exception: approval continuations are part of the same user-visible task,
+		// so stats accumulate across approval cycles for an accurate final summary.
+		if routingLLM != nil {
+			ctx = routing.WithClassifierContext(ctx, routing.ClassifierContext{
+				HasPlanMode: planMode || graphPlan,
+			})
+			b.mu.Lock()
+			isContinuation := b.routingApprovalContinuation
+			b.routingApprovalContinuation = false
+			b.mu.Unlock()
+			if !isContinuation {
+				routingLLM.ResetTurn()
+			}
+		}
+
 		// On a brand-new session, seed the index with a provisional title from
 		// the first user message, then kick off a best-effort LLM title refine
 		// in the background. The provisional title appears immediately in
@@ -1157,9 +1530,62 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 
 		out <- events.NewStatus("Thinking…")
 
-		b.driveTurn(ctx, rnr, chatAgent, effectiveID, turnIndex, userMsg, emit)
+		doneEmitted := b.driveTurn(ctx, rnr, chatAgent, effectiveID, turnIndex, userMsg, emit, routingLLM)
 
-		emit("done", map[string]any{"done": true})
+		if !doneEmitted {
+			// Persist routing decisions so loadHistory can reconstruct badges on
+			// reload. One system event per LLM call, each carrying its tier in
+			// StateDelta[routingInfoStateKey]. This is the same proven side-channel
+			// pattern as RecordPlanDecision / planLifecycleStateKey.
+			if routingLLM != nil {
+				tiers := routingLLM.TurnTiers()
+				for _, tier := range tiers {
+					modelName := routingLLM.ModelNameForTier(tier)
+					b.recordRoutingDecision(ctx, effectiveID, tier, modelName, routingLLM)
+				}
+			}
+
+			// Emit final routing info when Auto mode is active.
+			b.emitRoutingInfo(emit, "", "", routingLLM)
+
+			// Build the done event payload, including the routing summary when
+			// Auto mode is active. The summary is carried on the done event itself
+			// instead of being emitted as a separate visible system message, so the
+			// TUI can choose when to display it (only on final task completion, not
+			// after intermediate approval stops).
+			donePayload := map[string]any{"done": true}
+			if routingLLM != nil && routingLLM.Stats.Total() >= 1 {
+				// Pricing is injected in a background goroutine at Auto-mode setup.
+				// If that fetch has not finished (or failed to match model names)
+				// retry synchronously here so the turn summary can include savings.
+				if !routingLLM.HasPricing() {
+					b.mu.Lock()
+					var cfgCopy *backend.AutoRoutingConfig
+					if b.autoRoutingCfg != nil {
+						c := *b.autoRoutingCfg
+						cfgCopy = &c
+					}
+					b.mu.Unlock()
+					if cfgCopy != nil {
+						b.injectPricing(ctx, routingLLM, cfgCopy)
+					}
+				}
+				if summary := routingLLM.SummaryLine(); summary != "" {
+					donePayload["routing_summary"] = summary
+				}
+			}
+
+			// If this turn emitted an approval prompt, the next RunTurn will be a
+			// continuation of the same user-visible task. Flag the backend so routing
+			// stats are not reset between approval cycles.
+			if approvalEmittedThisTurn && routingLLM != nil {
+				b.mu.Lock()
+				b.routingApprovalContinuation = true
+				b.mu.Unlock()
+			}
+
+			emit("done", donePayload)
+		}
 	}()
 
 	return out, nil
@@ -1411,7 +1837,11 @@ func generateCodeSessionTitle(llm adkmodel.LLM, store *persistentsession.FileSto
 	if llm == nil || store == nil || userMessage == "" {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	// Use WithStatsOnlyRouting so that if the LLM is a RoutingLLM, the title
+	// call increments Stats (counts toward the summary) but does NOT append to
+	// turnTiers (no badge shift — the title has no visible chat bubble).
+	baseCtx := routing.WithStatsOnlyRouting(context.Background())
+	ctx, cancel := context.WithTimeout(baseCtx, 25*time.Second)
 	defer cancel()
 
 	prompt := fmt.Sprintf(
@@ -1507,7 +1937,8 @@ func (b *localAgentBackend) driveTurn(
 	turnIndex int,
 	userMsg *genai.Content,
 	emit func(string, map[string]any),
-) {
+	routingLLM *routing.RoutingLLM,
+) bool {
 	seenPartialText := false
 	sawRealUsage := false
 	// Allow the first mid-turn estimate to fire immediately (the throttle only
@@ -1515,15 +1946,32 @@ func (b *localAgentBackend) driveTurn(
 	b.mu.Lock()
 	b.lastCtxEstimate = time.Time{}
 	b.mu.Unlock()
+	// callIdx is how many badge-worthy GenerateContent calls we have already
+	// announced this turn. TurnTiers (not Stats.Total) is the source of truth:
+	// Stats also counts title-generation calls, which must not shift badges.
+	// Emit routing_info as soon as a new tier is recorded so the TUI can stamp
+	// the live agent bubble and tool fold before/as their events arrive.
+	var callIdx int
 	for event, runErr := range rnr.Run(ctx, b.effectiveUserID(), sessionID, userMsg, adkagent.RunConfig{
 		StreamingMode: adkagent.StreamingModeSSE,
 	}) {
 		if ctx.Err() != nil {
-			return
+			return false
 		}
 		if runErr != nil {
 			emit("error", map[string]any{"error": runErr.Error()})
-			return
+			return false
+		}
+
+		if routingLLM != nil {
+			tiers := routingLLM.TurnTiers()
+			for callIdx < len(tiers) {
+				tier := tiers[callIdx]
+				modelName := routingLLM.ModelNameForTier(tier)
+				slog.Debug("routing-badge: emitting routing_info", "callIdx", callIdx, "tier", tier, "modelName", modelName, "tiersLen", len(tiers))
+				b.emitRoutingInfo(emit, modelName, tier, routingLLM)
+				callIdx++
+			}
 		}
 
 		// Approval / thinking / retry surfaced through the state delta.
@@ -1596,8 +2044,15 @@ func (b *localAgentBackend) driveTurn(
 						planPayload["plan_verification"] = doc.Verification
 					}
 					emit("plan", planPayload)
-					emit("done", nil)
-					return
+					// Build done payload with routing summary for plan-approval stops too.
+					planDone := map[string]any{"done": true}
+					if routingLLM != nil && routingLLM.Stats.Total() >= 1 {
+						if summary := routingLLM.SummaryLine(); summary != "" {
+							planDone["routing_summary"] = summary
+						}
+					}
+					emit("done", planDone)
+					return true
 				}
 				resp := part.FunctionResponse.Response
 				if chatAgent.Redactor != nil && resp != nil {
@@ -1632,6 +2087,52 @@ func (b *localAgentBackend) driveTurn(
 	if !sawRealUsage {
 		b.emitEstimatedContext(ctx, sessionID, emit)
 	}
+	return false
+}
+
+// emitRoutingInfo sends a KindRoutingInfo event when Auto routing is active.
+// callModel and callTier are the tier name and model name for this specific
+// LLM call, read from the authoritative turnTiers list at decision time.
+// When called at turn-end with empty strings (post-turn summary emit), it
+// uses the last entry from TurnTiers to populate the current-call fields.
+// routingLLM is the snapshot taken at goroutine start to avoid data races with
+// SetAutoRouting/SetModelPin on the main TUI goroutine.
+func (b *localAgentBackend) emitRoutingInfo(emit func(string, map[string]any), callModel, callTier string, routingLLM *routing.RoutingLLM) {
+	if routingLLM == nil || routingLLM.Stats.Total() == 0 {
+		slog.Debug("routing-badge: emitRoutingInfo early return", "nilLLM", routingLLM == nil)
+		return
+	}
+	// If called at turn-end without a specific call context, use the last
+	// recorded tier from the authoritative ordered list.
+	modelName, tier := callModel, callTier
+	if modelName == "" {
+		tiers := routingLLM.TurnTiers()
+		if len(tiers) > 0 {
+			tier = tiers[len(tiers)-1]
+			modelName = routingLLM.ModelNameForTier(tier)
+		}
+	}
+	stats := &routingLLM.Stats
+
+	// Emit via the "routing_info" SSE type which mapSSEToEvents converts to
+	// KindRoutingInfo, updating the transcript's LastRouting* fields.
+	data := map[string]any{
+		"routing_model":       modelName,
+		"routing_is_strong":   tier == "strong",
+		"routing_tier":        tier,
+		"routing_strong_pct":  stats.StrongPct(),
+		"routing_medium_pct":  stats.MediumPct(),
+		"routing_weak_pct":    stats.WeakPct(),
+		"routing_total":       stats.Total(),
+		"routing_strong_name": routingLLM.StrongName,
+		"routing_medium_name": routingLLM.MediumName,
+		"routing_weak_name":   routingLLM.WeakName,
+	}
+	if routingLLM.HasPricing() {
+		data["routing_cost_savings_pct"] = routingLLM.CostSavingsPct()
+	}
+	slog.Debug("routing-badge: emit routing_info payload", "model", modelName, "tier", tier)
+	emit("routing_info", data)
 }
 
 // emitUsage emits a usage event from real provider metadata. It returns true
@@ -1920,6 +2421,44 @@ func (b *localAgentBackend) RecordPlanDecision(ctx context.Context, status event
 	return nil
 }
 
+// recordRoutingDecision persists the routing tier for one LLM call as a system
+// event with StateDelta[routingInfoStateKey]. This mirrors RecordPlanDecision:
+// a lightweight side-channel whose only payload is the tier + model name.
+// loadHistory pre-scans these events and stamps both agent text and tool_call
+// entries from the corresponding model event so reloaded badges match live.
+// routingLLM is the snapshot taken at goroutine start to avoid data races.
+func (b *localAgentBackend) recordRoutingDecision(ctx context.Context, sessionID, tier, modelName string, routingLLM *routing.RoutingLLM) {
+	if sessionID == "" || tier == "" || routingLLM == nil {
+		return
+	}
+	resp, err := b.sessionSvc.Get(ctx, &session.GetRequest{
+		AppName:   codeAppName,
+		UserID:    b.effectiveUserID(),
+		SessionID: sessionID,
+	})
+	if err != nil || resp == nil || resp.Session == nil {
+		slog.Debug("recordRoutingDecision: session not found", "session_id", sessionID, "error", err)
+		return
+	}
+	ev := &session.Event{
+		ID:        fmt.Sprintf("routing-decision-%d", time.Now().UnixNano()),
+		Author:    "system",
+		Timestamp: time.Now(),
+		Actions: session.EventActions{StateDelta: map[string]any{
+			routingInfoStateKey: map[string]any{
+				"tier":        tier,
+				"model":       modelName,
+				"strong_name": routingLLM.StrongName,
+				"medium_name": routingLLM.MediumName,
+				"weak_name":   routingLLM.WeakName,
+			},
+		}},
+	}
+	if err := b.sessionSvc.AppendEvent(ctx, resp.Session, ev); err != nil {
+		slog.Debug("recordRoutingDecision: append failed", "error", err)
+	}
+}
+
 func (b *localAgentBackend) LoadHistory(ctx context.Context) ([]backend.HistoryEntry, error) {
 	b.mu.Lock()
 	id := b.sessionID
@@ -2063,6 +2602,35 @@ func (b *localAgentBackend) loadHistory(ctx context.Context, id string) ([]backe
 	announcePlanArgs := make(map[string]map[string]any)
 	latestPlanOutIdx := -1
 
+	// Pre-scan: collect routing decisions in the order they were persisted.
+	// recordRoutingDecision appends one system event per LLM call at end of
+	// turn; loadHistory re-applies them once per model event so both agent
+	// text and tool_call entries from that call get the same badge.
+	type routingDecision struct {
+		tier  string
+		model string
+	}
+	var routingDecisions []routingDecision
+	for _, ev := range allEvents {
+		if ev == nil || ev.Actions.StateDelta == nil {
+			continue
+		}
+		if riVal, ok := ev.Actions.StateDelta[routingInfoStateKey]; ok {
+			if riMap, ok := riVal.(map[string]any); ok {
+				tier, _ := riMap["tier"].(string)
+				model, _ := riMap["model"].(string)
+				if tier != "" {
+					routingDecisions = append(routingDecisions, routingDecision{tier: tier, model: model})
+				}
+			}
+		}
+	}
+	// routingIdx tracks how many routing decisions have been consumed so far.
+	// One decision is consumed per model event that produces agent text and/or
+	// tool_call entries, so restored badges match the live call that produced
+	// both the message and its tool fold.
+	routingIdx := 0
+
 	var out []backend.HistoryEntry
 	for i, ev := range allEvents {
 		if ev == nil {
@@ -2075,6 +2643,32 @@ func (b *localAgentBackend) loadHistory(ctx context.Context, id string) ([]backe
 			continue
 		}
 		role := ev.LLMResponse.Content.Role
+		var eventRD *routingDecision
+		takeEventRouting := func() *routingDecision {
+			if role == "user" {
+				return nil
+			}
+			if eventRD != nil {
+				return eventRD
+			}
+			if routingIdx < len(routingDecisions) {
+				eventRD = &routingDecisions[routingIdx]
+				routingIdx++
+			}
+			return eventRD
+		}
+		stampEntryRouting := func(entry *backend.HistoryEntry) {
+			if entry == nil {
+				return
+			}
+			rd := takeEventRouting()
+			if rd == nil {
+				return
+			}
+			entry.RoutingTier = rd.tier
+			entry.RoutingModel = rd.model
+			entry.RoutingIsStrong = rd.tier == "strong"
+		}
 		for _, part := range ev.LLMResponse.Content.Parts {
 			switch {
 			case part.Text != "" && !part.Thought:
@@ -2107,7 +2701,11 @@ func (b *localAgentBackend) loadHistory(ctx context.Context, id string) ([]backe
 						continue
 					}
 				}
-				out = append(out, backend.HistoryEntry{Kind: kind, Text: text})
+				entry := backend.HistoryEntry{Kind: kind, Text: text}
+				if kind == "agent" {
+					stampEntryRouting(&entry)
+				}
+				out = append(out, entry)
 			case part.FunctionCall != nil:
 				if approvalSuperseded[part.FunctionCall.ID] {
 					continue
@@ -2120,12 +2718,14 @@ func (b *localAgentBackend) loadHistory(ctx context.Context, id string) ([]backe
 					announcePlanArgs[part.FunctionCall.ID] = part.FunctionCall.Args
 					continue
 				}
-				out = append(out, backend.HistoryEntry{
+				toolEntry := backend.HistoryEntry{
 					Kind:     "tool_call",
 					ToolName: part.FunctionCall.Name,
 					ToolID:   part.FunctionCall.ID,
 					Args:     part.FunctionCall.Args,
-				})
+				}
+				stampEntryRouting(&toolEntry)
+				out = append(out, toolEntry)
 			case part.FunctionResponse != nil:
 				// Reconstruct the plan document text from the stored call args,
 				// mirroring the synthetic text event emitted during live execution.
@@ -2431,6 +3031,8 @@ func (b *localAgentBackend) SetModelPin(ctx context.Context, providerName, model
 	b.provider = providerName
 	b.model = modelName
 	b.configured = true
+	b.routingLLM = nil
+	b.autoRoutingCfg = nil
 	b.mu.Unlock()
 
 	// Persist the choice as the Astonish default so it survives across runs
@@ -2580,6 +3182,12 @@ func (b *localAgentBackend) ListRollbackPoints(ctx context.Context) ([]backend.R
 			// Skip the synthetic compaction-summary seed at the start of a child
 			// (authored as user/model with the "[Context Summary" marker).
 			if strings.Contains(text, "[Context Summary") {
+				continue
+			}
+			// Skip per-turn context injected by the runtime (plan instructions,
+			// skills, tools metadata). These are user-role events but not
+			// user-authored.
+			if strings.HasPrefix(text, "[Astonish Per-Turn Context") {
 				continue
 			}
 			turnNumber++

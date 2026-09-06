@@ -366,6 +366,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// clipboard likely holds an image with no text representation — try an image
 	// paste instead of dropping the event.
 	if text, isPaste := textareaPasteMsg(msg); isPaste {
+		// Route paste into an open overlay text field (e.g. the provider
+		// add-form) before the composer claims it. Otherwise a bracketed/
+		// clipboard paste while an overlay is open is silently dropped.
+		if next, cmd, handled := m.handleOverlayPaste(text); handled {
+			return next, cmd
+		}
 		if next, cmd, handled := m.tryPasteImage(); handled {
 			return next, cmd
 		}
@@ -380,6 +386,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.PasteMsg:
 		// In v2, bracketed paste arrives as tea.PasteMsg.
+		if next, cmd, handled := m.handleOverlayPaste(msg.Content); handled {
+			return next, cmd
+		}
 		return m.handlePaste(msg.Content)
 
 	case tea.WindowSizeMsg:
@@ -764,6 +773,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.tr.Apply(events.NewSystem("Completed in " + formatDuration(d)))
 			}
 			m.timerReset()
+			// Display the Auto routing summary alongside "Completed" — only
+			// once, when the full task finishes (not after intermediate approvals).
+			if m.tr.RoutingSummary != "" {
+				m.tr.Apply(events.NewSystem(m.tr.RoutingSummary))
+				m.tr.RoutingSummary = ""
+			}
 		}
 		if m.tr.Streaming && !m.tr.Awaiting {
 			m.tr.Apply(events.NewDone())
@@ -1199,6 +1214,9 @@ Before calling announce_plan, run this DESIGN QUALITY SELF-CHECK:
 - [ ] Did you check docs/architecture/ for documentation that describes the subsystem you're changing? If it exists, add a phase to update it.
 - [ ] Did you check for existing tests (*_test.go, *.test.ts) covering the code you're changing? Add a phase for test updates or new tests.
 - [ ] Are there any breaking changes, backward compatibility concerns, or security boundary implications? Surface them explicitly.
+- [ ] For UX/event/stream features: does 'verification' include a unit test of the live event order AND session restore, not only a manual TUI smoke?
+- [ ] Do related surfaces (live vs restore, message vs tool fold, summary vs badge) share one ordered source of truth, named in 'context'?
+- [ ] Revising a locked plan: will you read PLAN.md for exact step names before update_plan? If announce_plan is blocked, update those steps or ask the user to decline and re-announce — do not guess names.
 
 If any check reveals a gap, add the missing phase BEFORE calling announce_plan. Do NOT announce an incomplete plan.
 
@@ -2169,6 +2187,12 @@ func (m *model) finishTurn() tea.Cmd {
 			m.tr.Apply(events.NewSystem("Completed in " + formatDuration(d)))
 		}
 		m.timerReset()
+		// Display the Auto routing summary alongside "Completed" — only
+		// once, when the full task finishes (not after intermediate approvals).
+		if m.tr.RoutingSummary != "" {
+			m.tr.Apply(events.NewSystem(m.tr.RoutingSummary))
+			m.tr.RoutingSummary = ""
+		}
 	}
 	if m.tr.Streaming && !m.tr.Awaiting {
 		m.tr.Apply(events.NewDone())
@@ -2852,6 +2876,37 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 			if md == "" {
 				md = th.Agent.Width(cw).Render(content)
 			}
+			// Append routing badge when Auto routing is active for this response.
+			// Right-aligned on the last line when space allows, to avoid extra vertical space.
+			// 🧠 strong · ⚙️ medium · ⚡ weak.
+			if it.RoutingModel != "" {
+				var badge string
+				switch it.RoutingTier {
+				case "strong":
+					badge = " 🧠"
+				case "medium":
+					badge = " ⚙️"
+				default:
+					badge = " ⚡"
+				}
+				badgeRendered := th.Muted.Render(badge)
+				badgeW := lipgloss.Width(badgeRendered)
+				// Find the last line and check if the badge fits inline.
+				lines := strings.Split(md, "\n")
+				lastLineW := lipgloss.Width(lines[len(lines)-1])
+				if lastLineW+badgeW+1 <= cw {
+					// Right-align on the last line.
+					pad := cw - lastLineW - badgeW
+					if pad < 1 {
+						pad = 1
+					}
+					lines[len(lines)-1] = lines[len(lines)-1] + strings.Repeat(" ", pad) + badgeRendered
+					md = strings.Join(lines, "\n")
+				} else {
+					// No room — append below as fallback.
+					md = md + "\n" + badgeRendered
+				}
+			}
 			appendBlockSpanned(i, it.Kind, md, codeGutterContentSpan)
 		case events.ItemThinking:
 			appendBlock(i, it.Kind, m.renderThinkingBubble(it.Content, cw))
@@ -3221,6 +3276,23 @@ func (m model) renderActivity(it events.Item, width int) string {
 			pad = 1
 		}
 		head = head + th.Background.Render(strings.Repeat(" ", pad)) + statsStr
+	}
+
+	// Append routing badge when Auto mode is active (icon-only to avoid overflow).
+	// Uses per-item routing info so historical items keep their original badge.
+	// 🧠 strong · ⚙️ medium · ⚡ weak
+	if it.RoutingModel != "" {
+		var routingBadge string
+		switch it.RoutingTier {
+		case "strong":
+			routingBadge = " \U0001f9e0"
+		case "medium":
+			routingBadge = " \u2699\ufe0f"
+		default:
+			routingBadge = " \u26a1"
+		}
+		badgeR := th.Muted.Render(routingBadge)
+		head = head + badgeR
 	}
 
 	if !it.Expanded {

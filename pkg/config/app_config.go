@@ -36,6 +36,92 @@ type AppConfig struct {
 	CodeIntel           CodeIntelConfig            `yaml:"codeintel,omitempty" json:"codeintel,omitempty"`
 	Sandbox             SandboxConfig              `yaml:"sandbox,omitempty"`
 	Security            SecurityConfig             `yaml:"security,omitempty"`
+	ModelRouting        ModelRoutingConfig         `yaml:"model_routing,omitempty" json:"model_routing,omitempty"`
+}
+
+const AutoModelSentinel = "auto"
+
+func IsAutoModel(model string) bool {
+	return strings.EqualFold(strings.TrimSpace(model), AutoModelSentinel)
+}
+
+// ModelRoutingConfig controls automatic model routing based on prompt complexity.
+type ModelRoutingConfig struct {
+	StrongProvider string  `yaml:"strong_provider,omitempty" json:"strong_provider,omitempty"`
+	StrongModel    string  `yaml:"strong_model,omitempty" json:"strong_model,omitempty"`
+	MediumProvider string  `yaml:"medium_provider,omitempty" json:"medium_provider,omitempty"`
+	MediumModel    string  `yaml:"medium_model,omitempty" json:"medium_model,omitempty"`
+	WeakProvider   string  `yaml:"weak_provider,omitempty" json:"weak_provider,omitempty"`
+	WeakModel      string  `yaml:"weak_model,omitempty" json:"weak_model,omitempty"`
+	HighThreshold  float64 `yaml:"high_threshold,omitempty" json:"high_threshold,omitempty"`
+	LowThreshold   float64 `yaml:"low_threshold,omitempty" json:"low_threshold,omitempty"`
+	// --- Legacy fields (4-tier format) — auto-migrated by Migrate(). ---
+	Orchestrator    *legacyTierConfig `yaml:"orchestrator,omitempty" json:"orchestrator,omitempty"`
+	Task            *legacyTierConfig `yaml:"task,omitempty" json:"task,omitempty"`
+	LegacyThreshold float64           `yaml:"threshold,omitempty" json:"threshold,omitempty"`
+}
+
+// legacyTierConfig exists only for YAML deserialization of old 4-tier configs.
+type legacyTierConfig struct {
+	StrongProvider string  `yaml:"strong_provider,omitempty"`
+	StrongModel    string  `yaml:"strong_model,omitempty"`
+	WeakProvider   string  `yaml:"weak_provider,omitempty"`
+	WeakModel      string  `yaml:"weak_model,omitempty"`
+	Threshold      float64 `yaml:"threshold,omitempty"`
+}
+
+// Migrate converts legacy config formats to the current 3-tier flat layout.
+func (m *ModelRoutingConfig) Migrate() {
+	// 4-tier -> 3-tier: Orchestrator.Strong->Strong, best effort for medium/weak.
+	if m.Orchestrator != nil && m.StrongProvider == "" {
+		m.StrongProvider = m.Orchestrator.StrongProvider
+		m.StrongModel = m.Orchestrator.StrongModel
+		if m.HighThreshold == 0 && m.Orchestrator.Threshold > 0 {
+			m.HighThreshold = m.Orchestrator.Threshold
+		}
+		if m.Task != nil {
+			m.MediumProvider = m.Orchestrator.WeakProvider
+			m.MediumModel = m.Orchestrator.WeakModel
+			m.WeakProvider = m.Task.WeakProvider
+			m.WeakModel = m.Task.WeakModel
+			if m.LowThreshold == 0 && m.Task.Threshold > 0 {
+				m.LowThreshold = m.Task.Threshold
+			}
+		} else {
+			m.WeakProvider = m.Orchestrator.WeakProvider
+			m.WeakModel = m.Orchestrator.WeakModel
+		}
+		m.Orchestrator = nil
+		m.Task = nil
+	}
+	// Pre-4-tier legacy: threshold -> HighThreshold.
+	if m.LegacyThreshold > 0 && m.HighThreshold == 0 {
+		m.HighThreshold = m.LegacyThreshold
+		m.LegacyThreshold = 0
+	}
+}
+
+func (m *ModelRoutingConfig) IsConfigured() bool {
+	return m.StrongProvider != "" && m.StrongModel != "" &&
+		m.WeakProvider != "" && m.WeakModel != ""
+}
+
+func (m *ModelRoutingConfig) EffectiveHighThreshold() float64 {
+	if m.HighThreshold > 0 && m.HighThreshold < 1 {
+		return m.HighThreshold
+	}
+	return 0.7
+}
+
+func (m *ModelRoutingConfig) EffectiveLowThreshold() float64 {
+	if m.LowThreshold > 0 && m.LowThreshold < 1 {
+		return m.LowThreshold
+	}
+	return 0.3
+}
+
+func (m *ModelRoutingConfig) HasMedium() bool {
+	return m.MediumProvider != "" && m.MediumModel != ""
 }
 
 type CodeIntelConfig struct {
@@ -1711,6 +1797,9 @@ func LoadAppConfig() (*AppConfig, error) {
 	if cfg.Providers == nil {
 		cfg.Providers = make(map[string]ProviderConfig)
 	}
+	// Migrate legacy routing config once at load time so accessors
+	// are pure reads and safe for concurrent use.
+	cfg.ModelRouting.Migrate()
 
 	return &cfg, nil
 }

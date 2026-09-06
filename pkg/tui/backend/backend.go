@@ -66,6 +66,12 @@ type HistoryEntry struct {
 	PlanContext      string
 	PlanWhatNotToDo  string
 	PlanVerification string
+	// Routing fields are present for agent and tool_call entries from sessions
+	// with Auto routing. They are read from the StateDelta persisted with each
+	// response event and passed to LoadHistory so reloaded badges match live.
+	RoutingTier     string // "strong", "medium", or "weak"
+	RoutingModel    string // display name of the model used
+	RoutingIsStrong bool   // true when RoutingTier == "strong"
 }
 
 // Attachment is a file/image payload to send with a chat turn.
@@ -308,6 +314,30 @@ type PlanBackend interface {
 // plan so a resumed code session restores pending and settled cards exactly.
 type PlanLifecycleBackend interface {
 	RecordPlanDecision(ctx context.Context, status events.PlanStatus) error
+}
+
+// AutoRoutingConfig carries the user's 3-tier routing choices into SetAutoRouting.
+type AutoRoutingConfig struct {
+	StrongProvider string
+	StrongModel    string
+	MediumProvider string
+	MediumModel    string
+	WeakProvider   string
+	WeakModel      string
+	HighThreshold  float64
+	LowThreshold   float64
+}
+
+// HasMedium returns true if a medium model is configured.
+func (c *AutoRoutingConfig) HasMedium() bool {
+	return c != nil && c.MediumProvider != "" && c.MediumModel != ""
+}
+
+// AutoRoutingBackend is an optional capability for backends that support
+// automatic model routing between a strong and weak model.
+type AutoRoutingBackend interface {
+	SetAutoRouting(ctx context.Context, cfg AutoRoutingConfig) (effectiveProvider, effectiveModel string, err error)
+	GetAutoRoutingConfig() *AutoRoutingConfig
 }
 
 // Backend drives one interactive chat session against the platform.

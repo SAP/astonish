@@ -35,6 +35,7 @@ type CodeSystemPromptBuilder struct {
 func NewCodeSystemPromptBuilder(base *SystemPromptBuilder) *CodeSystemPromptBuilder {
 	cb := &CodeSystemPromptBuilder{SystemPromptBuilder: base}
 	base.BuildOverride = cb.build
+	base.CodeMode = true
 	return cb
 }
 
@@ -225,8 +226,13 @@ func (b *CodeSystemPromptBuilder) build(base *SystemPromptBuilder) string {
 	sb.WriteString("- Match your response to the user's intent. Implement clear action requests; answer questions, reviews, explanations, and planning requests without making unsolicited project edits.\n")
 	sb.WriteString("- Match effort to the request. A one-line fix does not need a plan; a cross-cutting refactor does.\n")
 	sb.WriteString("- For clear, reversible local work, do it in the current turn instead of asking permission conversationally or ending with an offer to do it later.\n")
-	sb.WriteString("- Claim that something is done, fixed, tested, or addressed only when tool output supports the claim. Otherwise state what you did not verify and why.\n")
+	sb.WriteString("- Claim that something is done, fixed, tested, or addressed only when a test that encodes the user-visible sequence failed before the change and passes after. Package tests of unrelated code are not proof. Otherwise state what you did not verify and why.\n")
 	sb.WriteString("- Keep changes scoped to what was asked. Match the surrounding code's comment and tooling conventions.\n")
+	sb.WriteString("- User restatements are the spec. Do not invent extra rules, \"invisible\" events, or environment causes the user has denied.\n")
+	sb.WriteString("- After the user contradicts a hypothesis once, drop it. Do not re-derive \"stale binary\", \"old logs\", or \"user didn't rebuild\".\n")
+	sb.WriteString("- Do not mix a new requirement into a rewrite of a working fix. Do not delete tests that name the user-visible contract without replacing them.\n")
+	sb.WriteString("- Related UI surfaces (live vs restore, message vs tool fold, summary vs badge) must share one ordered source of truth.\n")
+	sb.WriteString("- For regressions (\"used to work\", \"still broken\", \"zero difference\"): run `git log` / `git blame` / `git show` on the failing files via `shell_command` before further production edits. Then `skill_lookup(\"debug-regression\")` if that skill is listed.\n")
 
 	// 6. Capabilities
 	sb.WriteString("\n## Capabilities\n\n")
@@ -304,7 +310,7 @@ func (b *CodeSystemPromptBuilder) build(base *SystemPromptBuilder) string {
 		sb.WriteString("\n")
 		sb.WriteString(base.SkillIndex)
 	} else {
-		builtinIndex := skills.BuildSkillIndex(nil)
+		builtinIndex := skills.BuildCodeSkillIndex(nil)
 		if builtinIndex != "" {
 			sb.WriteString("\n")
 			sb.WriteString(builtinIndex)

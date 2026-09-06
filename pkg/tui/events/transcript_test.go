@@ -868,6 +868,37 @@ func TestTranscriptKindDoneClearsDelegation(t *testing.T) {
 	}
 }
 
+func TestTranscriptKindDoneSetsRoutingSummary(t *testing.T) {
+	tr := NewTranscript()
+
+	// A done event with a routing summary should store it on the transcript.
+	ev := NewDone()
+	ev.RoutingSummary = "Auto routing — 2 calls (50% strong foo, 50% weak bar)"
+	tr.Apply(ev)
+
+	if tr.RoutingSummary != "Auto routing — 2 calls (50% strong foo, 50% weak bar)" {
+		t.Fatalf("RoutingSummary: got %q", tr.RoutingSummary)
+	}
+
+	// A plain done event (no summary) should not clear an existing summary.
+	tr.Apply(NewDone())
+	if tr.RoutingSummary != "Auto routing — 2 calls (50% strong foo, 50% weak bar)" {
+		t.Fatalf("RoutingSummary should not be cleared by plain KindDone: got %q", tr.RoutingSummary)
+	}
+}
+
+func TestTranscriptResetClearsRoutingSummary(t *testing.T) {
+	tr := NewTranscript()
+	ev := NewDone()
+	ev.RoutingSummary = "Auto routing — 1 calls"
+	tr.Apply(ev)
+
+	tr.Reset()
+	if tr.RoutingSummary != "" {
+		t.Fatalf("RoutingSummary should be cleared by Reset: got %q", tr.RoutingSummary)
+	}
+}
+
 // TestTranscript_LoadHistory_ApprovalFlowRendersAsSystemMessage verifies that
 // when a resumed session includes an approval flow (tool_call → system approval
 // message → tool_call with result), the transcript renders correctly:
@@ -1277,5 +1308,117 @@ func TestApplyDelegationEvaluatingEvent(t *testing.T) {
 	task := tr.Delegation[0]
 	if task.Status != "evaluating" {
 		t.Errorf("task.Status = %q, want %q", task.Status, "evaluating")
+	}
+}
+
+// TestLoadHistory_StampsRoutingTier verifies that HistoryMsg entries carrying
+// routing tier information produce ItemAgent bubbles with the correct tier badge,
+// and that the routing state doesn't bleed between entries.
+func TestLoadHistory_StampsRoutingTier(t *testing.T) {
+	tr := NewTranscript()
+	tr.LinearThread = true
+
+	entries := []HistoryMsg{
+		{Kind: "user", Text: "hello"},
+		{Kind: "agent", Text: "strong response", RoutingTier: "strong", RoutingModel: "claude-opus", RoutingIsStrong: true},
+		{Kind: "tool_call", ToolName: "read_file", ToolID: "t1"},
+		{Kind: "tool_result", ToolName: "read_file", ToolID: "t1", Result: "ok"},
+		{Kind: "agent", Text: "weak response", RoutingTier: "weak", RoutingModel: "haiku", RoutingIsStrong: false},
+		{Kind: "tool_call", ToolName: "read_file", ToolID: "t2"},
+		{Kind: "tool_result", ToolName: "read_file", ToolID: "t2", Result: "ok"},
+		{Kind: "agent", Text: "no tier response"},
+	}
+	tr.LoadHistory(entries)
+
+	// Collect agent items in order.
+	var agents []Item
+	for _, it := range tr.Items {
+		if it.Kind == ItemAgent {
+			agents = append(agents, it)
+		}
+	}
+
+	if len(agents) < 2 {
+		t.Fatalf("expected at least 2 agent items, got %d", len(agents))
+	}
+
+	if agents[0].RoutingTier != "strong" {
+		t.Errorf("agents[0].RoutingTier = %q, want %q", agents[0].RoutingTier, "strong")
+	}
+	if agents[0].RoutingModel != "claude-opus" {
+		t.Errorf("agents[0].RoutingModel = %q, want %q", agents[0].RoutingModel, "claude-opus")
+	}
+	if !agents[0].RoutingIsStrong {
+		t.Error("agents[0].RoutingIsStrong = false, want true")
+	}
+
+	if agents[1].RoutingTier != "weak" {
+		t.Errorf("agents[1].RoutingTier = %q, want %q", agents[1].RoutingTier, "weak")
+	}
+	if agents[1].RoutingModel != "haiku" {
+		t.Errorf("agents[1].RoutingModel = %q, want %q", agents[1].RoutingModel, "haiku")
+	}
+	if agents[1].RoutingIsStrong {
+		t.Error("agents[1].RoutingIsStrong = true, want false")
+	}
+
+	// The third agent entry has no tier — must not inherit from the second.
+	if len(agents) >= 3 && agents[2].RoutingTier != "" {
+		t.Errorf("agents[2].RoutingTier = %q, want empty (no bleed)", agents[2].RoutingTier)
+	}
+
+	// Tool folds inherit the preceding agent's badge on restore.
+	var acts []Item
+	for _, it := range tr.Items {
+		if it.Kind == ItemActivity {
+			acts = append(acts, it)
+		}
+	}
+	if len(acts) < 2 {
+		t.Fatalf("expected at least 2 activity items, got %d", len(acts))
+	}
+	if acts[0].RoutingTier != "strong" || acts[0].RoutingModel != "claude-opus" {
+		t.Errorf("activity[0] routing = (%q, %q), want (strong, claude-opus)", acts[0].RoutingTier, acts[0].RoutingModel)
+	}
+	if acts[1].RoutingTier != "weak" || acts[1].RoutingModel != "haiku" {
+		t.Errorf("activity[1] routing = (%q, %q), want (weak, haiku)", acts[1].RoutingTier, acts[1].RoutingModel)
+	}
+}
+
+// TestLoadHistory_StampsToolFoldRouting verifies that a tool_call history
+// entry carrying its own routing tier stamps the activity fold even when
+// there is no preceding agent text (tool-only LLM call).
+func TestLoadHistory_StampsToolFoldRouting(t *testing.T) {
+	tr := NewTranscript()
+	tr.LinearThread = true
+
+	tr.LoadHistory([]HistoryMsg{
+		{Kind: "user", Text: "run it"},
+		{Kind: "tool_call", ToolName: "shell_command", ToolID: "t1", RoutingTier: "medium", RoutingModel: "haiku"},
+		{Kind: "tool_result", ToolName: "shell_command", ToolID: "t1", Result: "ok"},
+		{Kind: "agent", Text: "done", RoutingTier: "strong", RoutingModel: "opus", RoutingIsStrong: true},
+	})
+
+	var act *Item
+	var agent *Item
+	for i := range tr.Items {
+		switch tr.Items[i].Kind {
+		case ItemActivity:
+			act = &tr.Items[i]
+		case ItemAgent:
+			agent = &tr.Items[i]
+		}
+	}
+	if act == nil {
+		t.Fatal("expected activity item")
+	}
+	if act.RoutingTier != "medium" || act.RoutingModel != "haiku" {
+		t.Errorf("activity routing = (%q, %q), want (medium, haiku)", act.RoutingTier, act.RoutingModel)
+	}
+	if agent == nil {
+		t.Fatal("expected agent item")
+	}
+	if agent.RoutingTier != "strong" || agent.RoutingModel != "opus" {
+		t.Errorf("agent routing = (%q, %q), want (strong, opus)", agent.RoutingTier, agent.RoutingModel)
 	}
 }

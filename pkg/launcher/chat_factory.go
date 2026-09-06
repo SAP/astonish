@@ -1963,6 +1963,13 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			}
 			return plan.SetStepStatus(step, status)
 		})
+		tools.SetPlanKnownStepsCallback(func() []string {
+			plan := chatAgent.GetActivePlan()
+			if plan == nil {
+				return nil
+			}
+			return plan.StepNames()
+		})
 		// Wire Graph-Optimized Plan phase transitions (code mode only). The
 		// gplan_* tools advance the active per-session GraphPlanState, which the
 		// runtime gate consults to determine the tool allow-list for each phase.

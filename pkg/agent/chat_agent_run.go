@@ -339,6 +339,12 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			}
 		}
 
+		// Failed-fix follow-ups (code mode): inject even if the model skipped
+		// skill_lookup. Plan-mode SessionContext is preserved and prepended.
+		if promptBuilder.CodeMode && IsFailedFixFollowup(cleanUserText) {
+			turnOverrides.SessionContext = AppendFailedFixFollowupContext(turnOverrides.SessionContext)
+		}
+
 		// Per-team tool restrictions: filter disabled tools from the prompt builder
 		// so the LLM doesn't see them in the system prompt's capabilities list.
 		if disabledTools := store.DisabledToolsFromContext(ctx); len(disabledTools) > 0 {

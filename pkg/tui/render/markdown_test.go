@@ -161,6 +161,53 @@ func TestMarkdown_IndentedCodeWithInteriorBlankLine(t *testing.T) {
 	}
 }
 
+func TestWrapCodeLine_NoWrapWhenFits(t *testing.T) {
+	line := "short line"
+	result := wrapCodeLine(line, 80)
+	if len(result) != 1 || result[0] != line {
+		t.Fatalf("expected no wrap for short line, got %v", result)
+	}
+}
+
+func TestWrapCodeLine_WrapsLongLine(t *testing.T) {
+	// A line longer than width must be split; no part may exceed the limit.
+	long := strings.Repeat("x", 120)
+	result := wrapCodeLine(long, 40)
+	if len(result) < 2 {
+		t.Fatalf("expected wrap into multiple parts, got %d: %v", len(result), result)
+	}
+	for i, part := range result {
+		if w := lipgloss.Width(part); w > 40 {
+			t.Fatalf("part %d too wide (%d > 40): %q", i, w, part)
+		}
+	}
+}
+
+func TestWrapCodeLine_ANSIColoredLine(t *testing.T) {
+	// An ANSI-colored line (e.g. from Chroma) that is wider than width must
+	// split without leaving any part wider than width.
+	colored := "\x1b[38;2;102;217;239msome_function_name_that_is_very_long_indeed(arg1, arg2, arg3)\x1b[0m"
+	result := wrapCodeLine(colored, 30)
+	for i, part := range result {
+		if w := lipgloss.Width(part); w > 30 {
+			t.Fatalf("ANSI part %d too wide (%d > 30): %q", i, w, part)
+		}
+	}
+}
+
+func TestCodeBlock_LongLineDoesNotExceedWidth(t *testing.T) {
+	st := DefaultStyles()
+	st.NoColor = true
+	// A very long code line must not produce output lines wider than the block width.
+	longLine := strings.Repeat("x", 200)
+	out := CodeBlock(longLine, "text", 60, st, false)
+	for _, line := range strings.Split(out, "\n") {
+		if w := lipgloss.Width(line); w > 60 {
+			t.Fatalf("CodeBlock output line too wide (%d > 60): %q", w, line)
+		}
+	}
+}
+
 func stripANSI(s string) string {
 	var b strings.Builder
 	for i := 0; i < len(s); i++ {

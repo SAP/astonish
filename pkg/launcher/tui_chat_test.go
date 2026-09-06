@@ -58,6 +58,33 @@ func TestMapSSEToEvents_SessionAndDone(t *testing.T) {
 	}
 }
 
+func TestMapSSEToEvents_DoneWithRoutingSummary(t *testing.T) {
+	// A done event carrying a routing_summary should pass the summary through
+	// to the Event so the TUI can display it only on final task completion.
+	evs := mapSSEToEvents(&client.SSEEvent{
+		Type: "done",
+		Data: `{"done":true,"routing_summary":"Auto routing \u2014 3 calls (67% strong model-a, 33% weak model-b) \u00b7 Saved ~40% vs all-strong"}`,
+	}, false)
+	if len(evs) != 1 || evs[0].Kind != events.KindDone {
+		t.Fatalf("done with routing summary: %+v", evs)
+	}
+	want := "Auto routing \u2014 3 calls (67% strong model-a, 33% weak model-b) \u00b7 Saved ~40% vs all-strong"
+	if evs[0].RoutingSummary != want {
+		t.Fatalf("routing_summary: got %q, want %q", evs[0].RoutingSummary, want)
+	}
+}
+
+func TestMapSSEToEvents_DoneWithoutRoutingSummary(t *testing.T) {
+	// A plain done event (no routing) should produce an empty RoutingSummary.
+	evs := mapSSEToEvents(&client.SSEEvent{Type: "done", Data: `{"done":true}`}, false)
+	if len(evs) != 1 || evs[0].Kind != events.KindDone {
+		t.Fatalf("done without routing: %+v", evs)
+	}
+	if evs[0].RoutingSummary != "" {
+		t.Fatalf("expected empty RoutingSummary, got %q", evs[0].RoutingSummary)
+	}
+}
+
 func TestMapSSEToEvents_Approval(t *testing.T) {
 	evs := mapSSEToEvents(&client.SSEEvent{
 		Type: "approval",
@@ -395,7 +422,7 @@ func TestLazyCodeBackendForwardsLocalSkills(t *testing.T) {
 	// The picker merges BuiltinSkillsForCode() (which includes the on-demand
 	// "slides" skill) with the filesystem skill, sorted case-insensitively.
 	// generative-ui is excluded from code-mode builtins.
-	if len(got) != 2 || got[0].Name != "local" || got[1].Name != "slides" {
+	if len(got) != 3 || got[0].Name != "debug-regression" || got[1].Name != "local" || got[2].Name != "slides" {
 		t.Fatalf("forwarded skills = %+v", got)
 	}
 	var _ backend.LocalSkillsBackend = b

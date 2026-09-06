@@ -206,15 +206,24 @@ func (pc *PricingCache) saveToDisk(costs map[string]ModelCost) {
 		return
 	}
 
-	tmp := pc.cachePath + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	// Use a unique temp file to avoid races when concurrent goroutines save.
+	f, err := os.CreateTemp(filepath.Dir(pc.cachePath), ".pricing-*.tmp")
+	if err != nil {
+		slog.Warn("pricing cache: create temp file failed", "error", err)
+		return
+	}
+	tmp := f.Name()
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(tmp)
 		slog.Warn("pricing cache: write failed", "path", tmp, "error", err)
 		return
 	}
+	f.Close()
 
 	if err := os.Rename(tmp, pc.cachePath); err != nil {
+		os.Remove(tmp)
 		slog.Warn("pricing cache: rename failed", "error", err)
-		_ = os.Remove(tmp)
 		return
 	}
 

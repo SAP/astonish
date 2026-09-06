@@ -102,13 +102,11 @@ func (m *ModelRoutingConfig) Migrate() {
 }
 
 func (m *ModelRoutingConfig) IsConfigured() bool {
-	m.Migrate()
 	return m.StrongProvider != "" && m.StrongModel != "" &&
 		m.WeakProvider != "" && m.WeakModel != ""
 }
 
 func (m *ModelRoutingConfig) EffectiveHighThreshold() float64 {
-	m.Migrate()
 	if m.HighThreshold > 0 && m.HighThreshold < 1 {
 		return m.HighThreshold
 	}
@@ -116,7 +114,6 @@ func (m *ModelRoutingConfig) EffectiveHighThreshold() float64 {
 }
 
 func (m *ModelRoutingConfig) EffectiveLowThreshold() float64 {
-	m.Migrate()
 	if m.LowThreshold > 0 && m.LowThreshold < 1 {
 		return m.LowThreshold
 	}
@@ -124,7 +121,6 @@ func (m *ModelRoutingConfig) EffectiveLowThreshold() float64 {
 }
 
 func (m *ModelRoutingConfig) HasMedium() bool {
-	m.Migrate()
 	return m.MediumProvider != "" && m.MediumModel != ""
 }
 
@@ -1801,6 +1797,9 @@ func LoadAppConfig() (*AppConfig, error) {
 	if cfg.Providers == nil {
 		cfg.Providers = make(map[string]ProviderConfig)
 	}
+	// Migrate legacy routing config once at load time so accessors
+	// are pure reads and safe for concurrent use.
+	cfg.ModelRouting.Migrate()
 
 	return &cfg, nil
 }

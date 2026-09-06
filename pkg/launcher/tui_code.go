@@ -783,6 +783,7 @@ func (b *localAgentBackend) restoreAutoRouting(ctx context.Context, appConfig *c
 				rLLM.MediumName = shortModelName(mr.MediumModel)
 			}
 			swappable.Swap(rLLM)
+			b.mu.Lock()
 			b.routingLLM = rLLM
 			b.provider = "auto"
 			b.model = "auto"
@@ -797,13 +798,19 @@ func (b *localAgentBackend) restoreAutoRouting(ctx context.Context, appConfig *c
 				HighThreshold:  mr.EffectiveHighThreshold(),
 				LowThreshold:   mr.EffectiveLowThreshold(),
 			}
+			// Create a cancellable context for the pricing goroutine so
+			// Close() can shut it down — matches SetAutoRouting's pattern.
+			pricingCtx, pricingCancel := context.WithCancel(context.Background())
+			b.pricingCtx = pricingCtx
+			b.pricingCancel = pricingCancel
+			b.mu.Unlock()
 			// Wire the same RoutingLLM for sub-agents.
 			if b.result.ChatAgent != nil && b.result.ChatAgent.SubAgentManager != nil {
 				b.result.ChatAgent.SubAgentManager.SetTaskLLM(rLLM)
 			}
 			// Inject pricing data in the background.
 			restoreCfg := *b.autoRoutingCfg
-			go b.injectPricing(context.Background(), rLLM, &restoreCfg)
+			go b.injectPricing(pricingCtx, rLLM, &restoreCfg)
 		}
 	} else {
 		slog.Warn("auto routing restore failed; falling back to normal model",

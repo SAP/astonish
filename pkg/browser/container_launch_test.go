@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/SAP/astonish/pkg/store"
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/cdp"
 )
@@ -479,5 +480,65 @@ func TestResetBrowserLocked_ClearsAllState(t *testing.T) {
 	}
 	if m.config.RemoteCDPURL != "" {
 		t.Errorf("RemoteCDPURL should be empty after reset, got %q", m.config.RemoteCDPURL)
+	}
+}
+
+func TestGetOrLaunch_ContainerPath_RequestContextPassedToEnsureReady(t *testing.T) {
+	var capturedCtx context.Context
+	var ensureReadyCalled bool
+
+	m := NewManager(BrowserConfig{})
+	m.SandboxEnabled = true
+	m.sessionID = "test-session"
+
+	// Set request context carrying sandbox layer chain values.
+	chain := []string{"@base", "overlay-abc123"}
+	reqCtx := store.WithSandboxLayerChain(context.Background(), chain)
+	m.SetRequestContext(reqCtx)
+
+	m.ContainerEnsureReadyFunc = func(ctx context.Context, sessionID string) error {
+		ensureReadyCalled = true
+		capturedCtx = ctx
+		return nil
+	}
+	m.ContainerResolveFunc = func(_ string) (string, string, error) {
+		return "", "", fmt.Errorf("stop after ensure-ready")
+	}
+
+	_, _ = m.GetOrLaunch()
+
+	if !ensureReadyCalled {
+		t.Fatal("ContainerEnsureReadyFunc was not called")
+	}
+	gotChain := store.SandboxLayerChainFromContext(capturedCtx)
+	if len(gotChain) != 2 || gotChain[0] != "@base" || gotChain[1] != "overlay-abc123" {
+		t.Errorf("context chain = %v, want [@base overlay-abc123]", gotChain)
+	}
+}
+
+func TestGetOrLaunch_ContainerPath_NilRequestContextFallsBackToBackground(t *testing.T) {
+	var capturedCtx context.Context
+
+	m := NewManager(BrowserConfig{})
+	m.SandboxEnabled = true
+	m.sessionID = "test-session"
+	// Do NOT call SetRequestContext — requestCtx remains nil
+
+	m.ContainerEnsureReadyFunc = func(ctx context.Context, _ string) error {
+		capturedCtx = ctx
+		return nil
+	}
+	m.ContainerResolveFunc = func(_ string) (string, string, error) {
+		return "", "", fmt.Errorf("stop")
+	}
+
+	_, _ = m.GetOrLaunch()
+
+	if capturedCtx == nil {
+		t.Fatal("ContainerEnsureReadyFunc received nil context")
+	}
+	gotChain := store.SandboxLayerChainFromContext(capturedCtx)
+	if len(gotChain) != 0 {
+		t.Errorf("expected empty chain from background context, got %v", gotChain)
 	}
 }

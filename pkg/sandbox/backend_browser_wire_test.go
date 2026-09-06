@@ -214,3 +214,20 @@ func (*browserReadySpyPool) Cleanup()                               {}
 func (*browserReadySpyPool) Alias(string, string)                   {}
 func (*browserReadySpyPool) Remove(string)                          {}
 func (*browserReadySpyPool) SetSessionScope(string, string, string) {}
+
+func TestGetPoolClientFromContext_TemplateOnlyUsesGetOrCreateWithTemplate(t *testing.T) {
+	client := &browserReadySpyClient{}
+	pool := &browserReadySpyPool{client: client}
+	// Template set but NO chain and NO image — should use GetOrCreateWithTemplate
+	ctx := store.WithSandboxTemplate(context.Background(), "my-template")
+	c := GetPoolClientFromContext(ctx, pool, "sess-tpl")
+	if c == nil {
+		t.Fatal("expected non-nil client")
+	}
+	if pool.method != "GetOrCreateWithTemplate" {
+		t.Errorf("pool method = %q, want GetOrCreateWithTemplate", pool.method)
+	}
+	if pool.sessionID != "sess-tpl" {
+		t.Errorf("pool sessionID = %q, want sess-tpl", pool.sessionID)
+	}
+}

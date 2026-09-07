@@ -109,20 +109,9 @@ func (db *DockerBackend) ExposePort(ctx context.Context, sessionID string, port 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	cname := containerName(sessionID)
-
-	// Get the container's IP address on the bridge network.
-	out, err := runDocker(ctx, db.cfg.ContainerRuntimePath,
-		"inspect", "--format",
-		"{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
-		cname,
-	)
+	ip, err := db.ContainerIPv4(ctx, sessionID)
 	if err != nil {
-		return nil, fmt.Errorf("sandbox/docker: ExposePort inspect %s: %w", sessionID, err)
-	}
-	ip := strings.TrimSpace(string(out))
-	if ip == "" {
-		ip = "127.0.0.1" // fallback for host networking
+		return nil, err
 	}
 	if proto == "" {
 		proto = "tcp"
@@ -141,4 +130,26 @@ func (db *DockerBackend) UnexposePort(ctx context.Context, sessionID string, por
 		return err
 	}
 	return nil // no proxy to remove for direct IP access
+}
+
+// ContainerIPv4 returns the container's Docker-network IPv4, or 127.0.0.1
+// when the runtime uses host networking (typical on Docker Desktop).
+func (db *DockerBackend) ContainerIPv4(ctx context.Context, sessionID string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	cname := containerName(sessionID)
+	out, err := runDocker(ctx, db.cfg.ContainerRuntimePath,
+		"inspect", "--format",
+		"{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+		cname,
+	)
+	if err != nil {
+		return "", fmt.Errorf("sandbox/docker: inspect IP %s: %w", sessionID, err)
+	}
+	ip := strings.TrimSpace(string(out))
+	if ip == "" {
+		return "127.0.0.1", nil
+	}
+	return ip, nil
 }

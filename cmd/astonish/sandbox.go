@@ -1,12 +1,12 @@
 package astonish
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -15,7 +15,6 @@ import (
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/sandbox"
 	sboxdocker "github.com/SAP/astonish/pkg/sandbox/docker"
-	incus "github.com/SAP/astonish/pkg/sandbox/incus"
 	persistentsession "github.com/SAP/astonish/pkg/session"
 	"github.com/charmbracelet/huh"
 )
@@ -36,17 +35,7 @@ func handleSandboxCommand(args []string) error {
 		return handleSandboxK8sSmoke(args[1:])
 	}
 
-	// Docker session containers do not need host overlay mounts or Incus
-	// sockets. Skip sudo for status/init; remaining Incus-era subcommands
-	// still escalate on Linux until they are rewritten.
-	switch args[0] {
-	case "status", "init", "list", "ls", "create", "shell", "destroy", "rm", "prune", "reset", "save":
-	default:
-		if sandbox.NeedsEscalation() {
-			return sandbox.Escalate()
-		}
-	}
-
+	// Docker OverlayFS sessions do not need host overlay mounts or Incus sockets.
 	switch args[0] {
 	case "status":
 		return handleSandboxStatus()
@@ -203,7 +192,7 @@ func printSandboxUsage() {
 	fmt.Println("  unexpose <id> <port> Remove a port from the reverse proxy")
 	fmt.Println("  url <id> <port>     Print the proxy URL for an exposed port")
 	fmt.Println("  cp <id>:<path> [.]  Copy files from a session container to local machine")
-	fmt.Println("  refresh             Re-snapshot templates with updated binary (--force for all)")
+	fmt.Println("  refresh             Re-seed @base from the sandbox-base image")
 	fmt.Println("  destroy (rm) <id>   Destroy a session container")
 	fmt.Println("  prune               Remove orphaned session containers")
 	fmt.Println("  template (tpl)      Manage container templates")
@@ -219,8 +208,8 @@ func printSandboxTemplateUsage() {
 	fmt.Println("  list (ls)           List all templates")
 	fmt.Println("  create <name>       Create a new template from @base")
 	fmt.Println("  shell <name>        Open interactive shell in template")
-	fmt.Println("  snapshot <name>     Freeze template state for cloning")
-	fmt.Println("  promote <name>      Override @base with this template")
+	fmt.Println("  snapshot <name>     Capture the template session upper as a named layer")
+	fmt.Println("  promote <name>      Flatten this template over @base")
 	fmt.Println("  delete (rm) <name>  Delete a template")
 	fmt.Println("  info <name>         Show detailed template info")
 }
@@ -371,16 +360,17 @@ func handleSandboxCreate(templateName, label string) error {
 		sessionID = fmt.Sprintf("%s-%d", templateName, time.Now().UnixNano())
 	}
 
-	chain := []string{templateName}
-	if templateName == "" {
-		chain = []string{sandbox.BaseTemplateID}
+	chain := overlayLayerChainFromRegistry(templateName)
+	displayName := templateName
+	if displayName == "" {
+		displayName = sandbox.BaseTemplateID
 	}
 
-	fmt.Printf("Creating sandbox from template %q...\n", templateName)
+	fmt.Printf("Creating sandbox from template %q...\n", displayName)
 	sess, err := b.CreateSession(ctx, sandbox.SessionSpec{
 		SessionID:  sessionID,
 		Type:       sandbox.SessionTypeChat,
-		TemplateID: templateName,
+		TemplateID: displayName,
 		LayerChain: chain,
 	})
 	if err != nil {
@@ -555,61 +545,17 @@ func resolveContainerNameCLI(registry *sandbox.SessionRegistry, input string) st
 // --- Refresh ---
 
 func handleSandboxRefresh() error {
-	client, err := connectOrFail()
+	b, err := openDockerCLI()
 	if err != nil {
 		return err
 	}
 
-	registry, err := sandbox.NewTemplateRegistry()
-	if err != nil {
+	fmt.Println("Re-seeding @base from the sandbox-base image...")
+	fmt.Println("Named overlay layers are deltas and do not embed the Astonish binary.")
+	if err := b.ReseedBaseLayerFromImage(context.Background()); err != nil {
 		return err
 	}
-
-	// Check for --force flag (refresh all templates unconditionally)
-	// Without --force, only refresh templates with stale binaries
-	for _, arg := range os.Args {
-		if arg == "--force" || arg == "-f" {
-			fmt.Println("Force-refreshing all templates...")
-			return sandbox.RefreshAll(client, registry)
-		}
-	}
-
-	// Smart refresh: compute current binary hash and only refresh stale templates
-	currentHash, hashErr := sandbox.ComputeBinaryHash()
-	if hashErr != nil {
-		fmt.Printf("Warning: could not compute binary hash: %v\nFalling back to refreshing @base only.\n", hashErr)
-		return sandbox.RefreshTemplate(client, registry, incus.BaseTemplate)
-	}
-
-	templates := registry.List()
-	refreshed := 0
-	for _, meta := range templates {
-		if meta.BinaryHash == currentHash {
-			fmt.Printf("Template %q: binary is current, skipping.\n", meta.Name)
-			continue
-		}
-
-		containerName := incus.TemplateName(meta.Name)
-		if !client.InstanceExists(containerName) {
-			fmt.Printf("Template %q: container missing, skipping.\n", meta.Name)
-			continue
-		}
-
-		fmt.Printf("Refreshing template %q (stale binary)...\n", meta.Name)
-		if err := sandbox.RefreshTemplate(client, registry, meta.Name); err != nil {
-			fmt.Printf("  Warning: failed to refresh %q: %v\n", meta.Name, err)
-		} else {
-			fmt.Printf("  Done.\n")
-			refreshed++
-		}
-	}
-
-	if refreshed == 0 {
-		fmt.Println("All templates are up to date.")
-	} else {
-		fmt.Printf("Refreshed %d template(s).\n", refreshed)
-	}
-
+	fmt.Printf("Base overlay layer ready at %s/%s/rootfs\n", b.LayersDir(), sandbox.BaseTemplateID)
 	return nil
 }
 
@@ -682,43 +628,23 @@ func handleSandboxPrune() error {
 		}
 	}
 
-	kind := sandbox.BackendKind(appCfg.Sandbox.BackendKind())
-	switch kind {
-	case sandbox.BackendKindK8s, sandbox.BackendKindDocker:
-		b, cleanup, bErr := sandbox.BackendFromAppConfig(appCfg)
-		if bErr != nil {
-			return fmt.Errorf("backend init: %w", bErr)
-		}
-		if cleanup != nil {
-			defer cleanup()
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer cancel()
-		pruned, pErr := sandbox.PruneOrphansForBackend(ctx, b, registry, existingSessionIDs)
-		if pErr != nil {
-			return pErr
-		}
-		if pruned == 0 {
-			fmt.Println("No orphaned sandbox pods found.")
-		} else {
-			fmt.Printf("Pruned %d orphaned sandbox pod(s).\n", pruned)
-		}
-
-	default:
-		// Incus path
-		client, cErr := connectOrFail()
-		if cErr != nil {
-			return cErr
-		}
-		pruned, pErr := sandbox.PruneOrphans(client, registry, existingSessionIDs)
-		if pErr != nil {
-			return pErr
-		}
-		if pruned == 0 {
-			fmt.Println("No orphaned containers found.")
-		} else {
-			fmt.Printf("Pruned %d orphaned container(s).\n", pruned)
-		}
+	b, cleanup, bErr := sandbox.BackendFromAppConfig(appCfg)
+	if bErr != nil {
+		return fmt.Errorf("backend init: %w", bErr)
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	pruned, pErr := sandbox.PruneOrphansForBackend(ctx, b, registry, existingSessionIDs)
+	if pErr != nil {
+		return pErr
+	}
+	if pruned == 0 {
+		fmt.Println("No orphaned sandbox sessions found.")
+	} else {
+		fmt.Printf("Pruned %d orphaned sandbox session(s).\n", pruned)
 	}
 
 	return nil
@@ -775,12 +701,30 @@ func handleSandboxSave(identifier, templateName, description string) error {
 		return err
 	}
 
-	fmt.Printf("Saving session %s as template layer...\n", sess.SessionID)
+	if isBaseTemplateName(templateName) {
+		fmt.Printf("Flattening session %s over @base...\n", sess.SessionID)
+		if err := b.ReplaceBaseFromSession(ctx, sess.SessionID); err != nil {
+			return err
+		}
+		fmt.Println("Done. New sessions will start from the updated @base layer.")
+		return nil
+	}
+
+	fmt.Printf("Saving session %s as template layer %q...\n", sess.SessionID, templateName)
 	art, err := b.SaveSessionAsTemplate(ctx, sess.SessionID)
 	if err != nil {
 		return err
 	}
-	_ = description
+	if err := b.AliasLayer(templateName, art.LayerID); err != nil {
+		return err
+	}
+	basedOn := sess.TemplateID
+	if basedOn == "" {
+		basedOn = sandbox.BaseTemplateID
+	}
+	if err := registerOverlayTemplate(templateName, description, basedOn); err != nil {
+		return err
+	}
 	fmt.Printf("Captured layer %s (%d bytes) as %q.\n", art.LayerID, art.SizeBytes, templateName)
 	return nil
 }
@@ -788,203 +732,329 @@ func handleSandboxSave(identifier, templateName, description string) error {
 // --- Template List ---
 
 func handleTemplateList() error {
+	b, err := openDockerCLI()
+	if err != nil {
+		return err
+	}
+
 	registry, err := sandbox.NewTemplateRegistry()
 	if err != nil {
 		return err
 	}
 
 	templates := registry.List()
-	if len(templates) == 0 {
-		fmt.Println("No templates. Run 'astonish sandbox init' to create the base template.")
-		return nil
+	seen := map[string]bool{}
+	type row struct {
+		name, desc, created, snapshot, plans string
+	}
+	var rows []row
+
+	baseRootfs := filepath.Join(b.LayersDir(), sandbox.BaseTemplateID, "rootfs")
+	if entries, err := os.ReadDir(baseRootfs); err == nil && len(entries) > 0 {
+		rows = append(rows, row{
+			name:     sandbox.BaseTemplateID,
+			desc:     "(default base overlay layer)",
+			created:  "-",
+			snapshot: "ready",
+			plans:    "-",
+		})
+		seen[sandbox.BaseTemplateID] = true
 	}
 
-	fmt.Printf("%-16s %-30s %-20s %-20s %-12s\n", "NAME", "DESCRIPTION", "CREATED", "LAST SNAPSHOT", "FLEET PLANS")
-	fmt.Printf("%-16s %-30s %-20s %-20s %-12s\n", strings.Repeat("-", 16), strings.Repeat("-", 30), strings.Repeat("-", 20), strings.Repeat("-", 20), strings.Repeat("-", 12))
-
 	for _, t := range templates {
+		if seen[t.Name] {
+			continue
+		}
 		desc := t.Description
 		if len(desc) > 28 {
 			desc = desc[:28] + ".."
 		}
-		if desc == "" && t.Name == incus.BaseTemplate {
-			desc = "(default base template)"
-		}
-
 		snapshotStr := "-"
 		if !t.SnapshotAt.IsZero() {
 			snapshotStr = t.SnapshotAt.Format("2006-01-02 15:04:05")
+		} else if overlayLayerExists(b, t.Name) {
+			snapshotStr = "layer"
 		}
-
 		plans := "-"
 		if len(t.FleetPlans) > 0 {
 			plans = strings.Join(t.FleetPlans, ", ")
 		}
-
-		fmt.Printf("%-16s %-30s %-20s %-20s %-12s\n",
-			t.Name,
-			desc,
-			t.CreatedAt.Format("2006-01-02 15:04:05"),
-			snapshotStr,
-			plans,
-		)
+		created := "-"
+		if !t.CreatedAt.IsZero() {
+			created = t.CreatedAt.Format("2006-01-02 15:04:05")
+		}
+		rows = append(rows, row{t.Name, desc, created, snapshotStr, plans})
+		seen[t.Name] = true
 	}
 
+	if len(rows) == 0 {
+		fmt.Println("No templates. Run 'astonish sandbox init' to create the base overlay layer.")
+		return nil
+	}
+
+	fmt.Printf("%-16s %-30s %-20s %-20s %-12s\n", "NAME", "DESCRIPTION", "CREATED", "LAYER", "FLEET PLANS")
+	fmt.Printf("%-16s %-30s %-20s %-20s %-12s\n", strings.Repeat("-", 16), strings.Repeat("-", 30), strings.Repeat("-", 20), strings.Repeat("-", 20), strings.Repeat("-", 12))
+	for _, r := range rows {
+		fmt.Printf("%-16s %-30s %-20s %-20s %-12s\n", r.name, r.desc, r.created, r.snapshot, r.plans)
+	}
 	return nil
+}
+
+func overlayLayerExists(b *sboxdocker.DockerBackend, name string) bool {
+	if b == nil || name == "" {
+		return false
+	}
+	entries, err := os.ReadDir(filepath.Join(b.LayersDir(), name, "rootfs"))
+	return err == nil && len(entries) > 0
 }
 
 // --- Template Create ---
 
 func handleTemplateCreate(name, description string) error {
-	client, err := connectOrFail()
+	if isBaseTemplateName(name) {
+		return fmt.Errorf("cannot create a template named %q (reserved)", name)
+	}
+	b, err := openDockerCLI()
 	if err != nil {
 		return err
+	}
+	if !overlayLayerExists(b, sandbox.BaseTemplateID) {
+		return fmt.Errorf("base overlay layer is missing; run 'astonish sandbox init' first")
 	}
 
 	registry, err := sandbox.NewTemplateRegistry()
 	if err != nil {
 		return err
 	}
+	if registry.Exists(name) {
+		return fmt.Errorf("template %q already exists", name)
+	}
 
-	return sandbox.CreateTemplate(client, registry, name, description)
+	ctx := context.Background()
+	sessionID := templateSessionID(name)
+	fmt.Printf("Creating template %q from @base...\n", name)
+	sess, err := b.CreateSession(ctx, sandbox.SessionSpec{
+		SessionID:  sessionID,
+		Type:       sandbox.SessionTypeChat,
+		TemplateID: sandbox.BaseTemplateID,
+		LayerChain: []string{sandbox.BaseTemplateID},
+		Labels:     map[string]string{"astonish.io/purpose": "template"},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create template session: %w", err)
+	}
+	if err := b.WaitForSessionReady(ctx, sess.SessionID); err != nil {
+		return fmt.Errorf("template session not ready: %w", err)
+	}
+	if err := registerOverlayTemplate(name, description, sandbox.BaseTemplateID); err != nil {
+		return err
+	}
+	fmt.Printf("Template %q created (session %s).\n", name, sess.SessionID)
+	fmt.Printf("Use 'astonish sandbox template shell %s' to customize, then 'template snapshot %s'.\n", name, name)
+	return nil
 }
 
 // --- Template Shell ---
 
 func handleTemplateShell(name string) error {
-	// Shell uses the incus CLI directly, but we still verify connectivity first.
-	platform := incus.DetectPlatform()
-	if platform == incus.PlatformUnsupported {
-		return fmt.Errorf("no container runtime available")
+	b, err := openDockerCLI()
+	if err != nil {
+		return err
 	}
-
-	// On Docker+Incus, ensure the Docker container is running
-	if platform == incus.PlatformDockerIncus {
-		if !incus.IsIncusDockerContainerRunning() {
-			return fmt.Errorf("Docker+Incus container is not running.\nRun 'astonish sandbox init' to set up the runtime")
+	ctx := context.Background()
+	sessionID := templateSessionID(name)
+	sess, err := resolveDockerSession(ctx, b, sessionID)
+	if err != nil {
+		if !overlayLayerExists(b, sandbox.BaseTemplateID) {
+			return fmt.Errorf("template %q does not exist; run 'astonish sandbox template create %s'", name, name)
+		}
+		chain := overlayLayerChainFromRegistry(name)
+		if !overlayLayerExists(b, name) {
+			chain = []string{sandbox.BaseTemplateID}
+		}
+		fmt.Printf("Starting template session %q...\n", name)
+		sess, err = b.CreateSession(ctx, sandbox.SessionSpec{
+			SessionID:  sessionID,
+			Type:       sandbox.SessionTypeChat,
+			TemplateID: name,
+			LayerChain: chain,
+			Labels:     map[string]string{"astonish.io/purpose": "template"},
+		})
+		if err != nil {
+			return err
+		}
+		if err := b.WaitForSessionReady(ctx, sess.SessionID); err != nil {
+			return err
+		}
+	} else if sess.State != sandbox.SessionStateRunning {
+		fmt.Printf("Starting template session %s...\n", sess.SessionID)
+		if err := b.StartSession(ctx, sess.SessionID); err != nil {
+			return err
+		}
+		if err := b.WaitForSessionReady(ctx, sess.SessionID); err != nil {
+			return err
 		}
 	}
-
-	incus.SetActivePlatform(platform)
-	client, err := incus.Connect(platform)
-	if err != nil {
-		return fmt.Errorf("failed to connect to Incus: %w", err)
-	}
-
-	registry, err := sandbox.NewTemplateRegistry()
-	if err != nil {
-		return fmt.Errorf("failed to load template registry: %w", err)
-	}
-
-	return sandbox.ShellIntoTemplate(client, registry, name)
+	return dockerShell(sess.BackendRef)
 }
 
 // --- Template Snapshot ---
 
 func handleTemplateSnapshot(name string) error {
-	client, err := connectOrFail()
+	if isBaseTemplateName(name) {
+		return fmt.Errorf("cannot snapshot %q; use 'astonish sandbox save <session> base' to replace @base", name)
+	}
+	b, err := openDockerCLI()
 	if err != nil {
 		return err
 	}
+	ctx := context.Background()
+	sess, err := resolveDockerSession(ctx, b, templateSessionID(name))
+	if err != nil {
+		return fmt.Errorf("template session %q is not running: %w\nUse 'astonish sandbox template shell %s' first", name, err, name)
+	}
+	if sess.State != sandbox.SessionStateRunning {
+		if err := b.StartSession(ctx, sess.SessionID); err != nil {
+			return err
+		}
+		if err := b.WaitForSessionReady(ctx, sess.SessionID); err != nil {
+			return err
+		}
+	}
 
-	registry, err := sandbox.NewTemplateRegistry()
+	fmt.Printf("Capturing template %q upper layer...\n", name)
+	art, err := b.SaveSessionAsTemplate(ctx, sess.SessionID)
 	if err != nil {
 		return err
 	}
-
-	return sandbox.SnapshotTemplate(client, registry, name)
+	if err := b.AliasLayer(name, art.LayerID); err != nil {
+		return err
+	}
+	if err := touchOverlayTemplateSnapshot(name, sess.TemplateID); err != nil {
+		return err
+	}
+	fmt.Printf("Captured layer %s (%d bytes) as %q.\n", art.LayerID, art.SizeBytes, name)
+	return nil
 }
 
 // --- Template Promote ---
 
 func handleTemplatePromote(name string) error {
-	client, err := connectOrFail()
+	if isBaseTemplateName(name) {
+		return fmt.Errorf("%q is already @base", name)
+	}
+	b, err := openDockerCLI()
 	if err != nil {
 		return err
 	}
-
-	registry, err := sandbox.NewTemplateRegistry()
+	ctx := context.Background()
+	sess, err := resolveDockerSession(ctx, b, templateSessionID(name))
 	if err != nil {
-		return err
+		chain := overlayLayerChainFromRegistry(name)
+		if !overlayLayerExists(b, name) && !overlayLayerExists(b, sandbox.BaseTemplateID) {
+			return fmt.Errorf("template %q has no overlay layer", name)
+		}
+		fmt.Printf("Starting template %q to flatten over @base...\n", name)
+		sess, err = b.CreateSession(ctx, sandbox.SessionSpec{
+			SessionID:  templateSessionID(name),
+			Type:       sandbox.SessionTypeChat,
+			TemplateID: name,
+			LayerChain: chain,
+			Labels:     map[string]string{"astonish.io/purpose": "template"},
+		})
+		if err != nil {
+			return err
+		}
+		if err := b.WaitForSessionReady(ctx, sess.SessionID); err != nil {
+			return err
+		}
+	} else if sess.State != sandbox.SessionStateRunning {
+		if err := b.StartSession(ctx, sess.SessionID); err != nil {
+			return err
+		}
+		if err := b.WaitForSessionReady(ctx, sess.SessionID); err != nil {
+			return err
+		}
 	}
 
-	return sandbox.PromoteTemplate(client, registry, name)
+	fmt.Printf("Flattening template %q over @base...\n", name)
+	if err := b.ReplaceBaseFromSession(ctx, sess.SessionID); err != nil {
+		return err
+	}
+	fmt.Println("Done. New sessions will start from the promoted @base layer.")
+	return nil
 }
 
 // --- Template Delete ---
 
 func handleTemplateDelete(name string) error {
-	client, err := connectOrFail()
+	if isBaseTemplateName(name) {
+		return fmt.Errorf("cannot delete %q; use 'astonish sandbox reset' to re-seed it", name)
+	}
+	b, err := openDockerCLI()
 	if err != nil {
 		return err
 	}
-
-	registry, err := sandbox.NewTemplateRegistry()
-	if err != nil {
+	ctx := context.Background()
+	if sess, err := resolveDockerSession(ctx, b, templateSessionID(name)); err == nil {
+		_ = b.DestroySession(ctx, sess.SessionID)
+	}
+	if err := b.DeleteTemplate(ctx, name, true); err != nil {
 		return err
 	}
-
-	return sandbox.DeleteTemplate(client, registry, name)
+	if registry, err := sandbox.NewTemplateRegistry(); err == nil {
+		_ = registry.Remove(name)
+	}
+	fmt.Printf("Deleted template %q.\n", name)
+	return nil
 }
 
 // --- Template Info ---
 
 func handleTemplateInfo(name string) error {
-	registry, err := sandbox.NewTemplateRegistry()
+	b, err := openDockerCLI()
 	if err != nil {
 		return err
 	}
 
+	registry, err := sandbox.NewTemplateRegistry()
+	if err != nil {
+		return err
+	}
 	meta := registry.Get(name)
-	if meta == nil {
+	if meta == nil && !isBaseTemplateName(name) && !overlayLayerExists(b, name) {
 		return fmt.Errorf("template %q not found", name)
 	}
 
-	fmt.Printf("Name:          %s\n", meta.Name)
-	if meta.Description != "" {
+	display := name
+	if isBaseTemplateName(name) {
+		display = sandbox.BaseTemplateID
+	}
+	fmt.Printf("Name:          %s\n", display)
+	if meta != nil && meta.Description != "" {
 		fmt.Printf("Description:   %s\n", meta.Description)
 	}
-	fmt.Printf("Created:       %s\n", meta.CreatedAt.Format(time.RFC3339))
-	if !meta.SnapshotAt.IsZero() {
+	if meta != nil && !meta.CreatedAt.IsZero() {
+		fmt.Printf("Created:       %s\n", meta.CreatedAt.Format(time.RFC3339))
+	}
+	if meta != nil && !meta.SnapshotAt.IsZero() {
 		fmt.Printf("Last snapshot: %s\n", meta.SnapshotAt.Format(time.RFC3339))
+	} else if overlayLayerExists(b, display) {
+		fmt.Printf("Layer:         ready (%s)\n", filepath.Join(b.LayersDir(), display, "rootfs"))
 	} else {
-		fmt.Printf("Last snapshot: (none)\n")
+		fmt.Printf("Layer:         (none — run 'astonish sandbox template snapshot %s')\n", name)
 	}
-	if meta.BasedOn != "" {
-		fmt.Printf("Based on:      @%s\n", meta.BasedOn)
+	if meta != nil && meta.BasedOn != "" {
+		fmt.Printf("Based on:      %s\n", meta.BasedOn)
 	}
-	if meta.BinaryHash != "" {
-		fmt.Printf("Binary hash:   %s\n", meta.BinaryHash[:min(16, len(meta.BinaryHash))]+"...")
-	}
-	if len(meta.FleetPlans) > 0 {
+	if meta != nil && len(meta.FleetPlans) > 0 {
 		fmt.Printf("Fleet plans:   %s\n", strings.Join(meta.FleetPlans, ", "))
 	}
 
-	// Try to get Incus-level info
-	platform := incus.DetectPlatform()
-	if platform != incus.PlatformUnsupported {
-		client, err := incus.Connect(platform)
-		if err == nil {
-			containerName := incus.TemplateName(name)
-			if client.InstanceExists(containerName) {
-				inst, err := client.GetInstance(containerName)
-				if err == nil {
-					fmt.Printf("Container:     %s\n", inst.Name)
-					fmt.Printf("Status:        %s\n", inst.Status)
-				}
-
-				hasSnap := client.HasSnapshot(containerName, incus.SnapshotName)
-				if hasSnap {
-					fmt.Printf("Snapshot:      ready (cloneable)\n")
-				} else {
-					fmt.Printf("Snapshot:      (none — run 'astonish sandbox template snapshot %s')\n", name)
-				}
-			} else {
-				fmt.Printf("Container:     MISSING (metadata exists but container was deleted)\n")
-			}
-		}
+	if sess, err := resolveDockerSession(context.Background(), b, templateSessionID(name)); err == nil {
+		fmt.Printf("Session:       %s (%s)\n", sess.SessionID, sess.State)
+		fmt.Printf("Container:     %s\n", sess.BackendRef)
 	}
-
 	return nil
 }
 
@@ -994,81 +1064,76 @@ func handleTemplateInfo(name string) error {
 // The source argument uses scp-style syntax: <identifier>:<container-path>
 // The identifier can be a session ID, container name, or prefix of either.
 func handleSandboxCp(source, localPath string) error {
-	// Parse scp-style source argument: <identifier>:<container-path>
-	colonIdx := strings.Index(source, ":")
-	if colonIdx < 1 {
-		return fmt.Errorf("invalid source format: expected <session-id>:<path>\n" +
-			"Example: astonish sandbox cp ff5c1146:/tmp/video.mp4 ./video.mp4")
-	}
-
-	identifier := source[:colonIdx]
-	containerPath := source[colonIdx+1:]
-	if containerPath == "" {
-		return fmt.Errorf("missing container path after ':'")
-	}
-
-	client, err := connectOrFail()
+	identifier, containerPath, err := parseSandboxCpSource(source)
 	if err != nil {
 		return err
 	}
 
-	registry, err := sandbox.NewSessionRegistry()
+	b, err := openDockerCLI()
 	if err != nil {
 		return err
 	}
-
-	// Resolve the identifier to a session/container
-	sessionID, found := registry.ResolveSessionID(identifier)
-	if !found {
-		return fmt.Errorf("no container found for %q\nUse 'astonish sandbox list' to see active containers", identifier)
-	}
-
-	entry := registry.Get(sessionID)
-	if entry == nil {
-		return fmt.Errorf("session %q not found in registry", sessionID)
-	}
-	containerName := entry.ContainerName
-
-	// Check container is running
-	if !client.IsRunning(containerName) {
-		return fmt.Errorf("container %s is not running", containerName)
-	}
-
-	// Probe the source path to determine if it's a file or directory
-	reader, resp, err := client.PullFile(containerName, containerPath)
+	ctx := context.Background()
+	sess, err := resolveDockerSession(ctx, b, identifier)
 	if err != nil {
-		return fmt.Errorf("failed to access %s:%s: %w", containerName, containerPath, err)
+		return err
+	}
+	if sess.State != sandbox.SessionStateRunning {
+		return fmt.Errorf("container %s is not running", sess.BackendRef)
 	}
 
-	if resp.Type == "directory" {
-		// Directory copy
-		if localPath == "" {
-			localPath = filepath.Base(containerPath)
-		}
-		fmt.Printf("Copying %s from %s...\n", containerPath, containerName)
-		stats, err := copyDirectoryFromContainer(client, containerName, containerPath, localPath)
-		if err != nil {
-			return err
-		}
-		fmt.Printf("Done (%d files, %s total)\n", stats.fileCount, formatBytes(stats.totalBytes))
-		return nil
+	probe, err := b.Exec(ctx, sess.SessionID, sandbox.ExecSpec{
+		Command: []string{"sh", "-c", fmt.Sprintf(
+			`if [ -d %q ]; then echo DIR; elif [ -e %q ]; then echo FILE; else echo MISSING; fi`,
+			containerPath, containerPath)},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to access %s:%s: %w", sess.BackendRef, containerPath, err)
 	}
-
-	// Single file copy
-	defer reader.Close()
+	kind := strings.TrimSpace(string(probe.Stdout))
+	if kind == "MISSING" {
+		return fmt.Errorf("failed to access %s:%s: no such file or directory", sess.BackendRef, containerPath)
+	}
 
 	if localPath == "" {
 		localPath = filepath.Base(containerPath)
 	}
 
-	// If localPath is a directory, append the filename
+	if kind == "DIR" {
+		if err := os.MkdirAll(localPath, 0o755); err != nil {
+			return fmt.Errorf("failed to create local directory %s: %w", localPath, err)
+		}
+		fmt.Printf("Copying %s from %s...\n", containerPath, sess.BackendRef)
+		res, err := b.Exec(ctx, sess.SessionID, sandbox.ExecSpec{
+			Command: []string{"tar", "-C", containerPath, "-cf", "-", "."},
+		})
+		if err != nil {
+			return err
+		}
+		if res.ExitCode != 0 {
+			return fmt.Errorf("tar in %s exited %d: %s", sess.BackendRef, res.ExitCode, strings.TrimSpace(string(res.Stderr)))
+		}
+		cmd := exec.Command("tar", "-C", localPath, "-xf", "-")
+		cmd.Stdin = bytes.NewReader(res.Stdout)
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("extract to %s: %w", localPath, err)
+		}
+		fmt.Printf("Done (%s)\n", formatBytes(int64(len(res.Stdout))))
+		return nil
+	}
+
 	if info, err := os.Stat(localPath); err == nil && info.IsDir() {
 		localPath = filepath.Join(localPath, filepath.Base(containerPath))
 	}
 
-	fmt.Printf("Copying %s from %s... ", containerPath, containerName)
+	fmt.Printf("Copying %s from %s... ", containerPath, sess.BackendRef)
+	reader, err := b.PullFile(ctx, sess.SessionID, containerPath)
+	if err != nil {
+		return err
+	}
+	defer reader.Close()
 
-	outFile, err := os.OpenFile(localPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(resp.Mode))
+	outFile, err := os.OpenFile(localPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		return fmt.Errorf("failed to create local file %s: %w", localPath, err)
 	}
@@ -1078,72 +1143,8 @@ func handleSandboxCp(source, localPath string) error {
 	if err != nil {
 		return fmt.Errorf("failed to write to %s: %w", localPath, err)
 	}
-
 	fmt.Printf("done (%s)\n", formatBytes(written))
 	return nil
-}
-
-// copyStats tracks progress during recursive directory copy.
-type copyStats struct {
-	fileCount  int
-	totalBytes int64
-}
-
-// copyDirectoryFromContainer recursively copies a directory from a container
-// to the local filesystem. Uses the Incus file API to list entries and pull
-// each file individually.
-func copyDirectoryFromContainer(client *incus.IncusClient, containerName, containerDir, localDir string) (*copyStats, error) {
-	stats := &copyStats{}
-
-	if err := os.MkdirAll(localDir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create local directory %s: %w", localDir, err)
-	}
-
-	entries, err := client.ListDirectory(containerName, containerDir)
-	if err != nil {
-		return nil, err
-	}
-
-	for _, entry := range entries {
-		containerEntryPath := path.Join(containerDir, entry)
-		localEntryPath := filepath.Join(localDir, entry)
-
-		reader, resp, err := client.PullFile(containerName, containerEntryPath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to access %s: %w", containerEntryPath, err)
-		}
-
-		if resp.Type == "directory" {
-			// Recurse into subdirectory
-			subStats, err := copyDirectoryFromContainer(client, containerName, containerEntryPath, localEntryPath)
-			if err != nil {
-				return nil, err
-			}
-			stats.fileCount += subStats.fileCount
-			stats.totalBytes += subStats.totalBytes
-			continue
-		}
-
-		// Copy file
-		outFile, err := os.OpenFile(localEntryPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(resp.Mode))
-		if err != nil {
-			reader.Close()
-			return nil, fmt.Errorf("failed to create %s: %w", localEntryPath, err)
-		}
-
-		written, err := io.Copy(outFile, reader)
-		reader.Close()
-		outFile.Close()
-		if err != nil {
-			return nil, fmt.Errorf("failed to write %s: %w", localEntryPath, err)
-		}
-
-		stats.fileCount++
-		stats.totalBytes += written
-		fmt.Printf("  %s (%s)\n", path.Join(filepath.Base(containerDir), entry), formatBytes(written))
-	}
-
-	return stats, nil
 }
 
 // formatBytes returns a human-readable byte size string.
@@ -1166,34 +1167,106 @@ func formatBytes(b int64) string {
 	}
 }
 
-// connectOrFail is a helper that detects the platform and connects to Incus,
-// returning an error if not available. On Docker+Incus, ensures the Docker
-// container is running and sets the active platform.
-func connectOrFail() (*incus.IncusClient, error) {
-	platform := incus.DetectPlatform()
-	if platform == incus.PlatformUnsupported {
-		return nil, fmt.Errorf("no container runtime available")
+func parseSandboxCpSource(source string) (identifier, containerPath string, err error) {
+	colonIdx := strings.Index(source, ":")
+	if colonIdx < 1 {
+		return "", "", fmt.Errorf("invalid source format: expected <session-id>:<path>\n" +
+			"Example: astonish sandbox cp ff5c1146:/tmp/video.mp4 ./video.mp4")
 	}
-
-	// Load sandbox config so IsPrivileged() and containerSecurityConfig()
-	// reflect user settings. Without this, containers created via
-	// "sandbox create" would ignore sandbox.privileged in the config.
-	if appCfg, err := config.LoadAppConfig(); err == nil && appCfg != nil {
-		sandbox.SetSandboxConfig(&appCfg.Sandbox)
+	identifier = source[:colonIdx]
+	containerPath = source[colonIdx+1:]
+	if containerPath == "" {
+		return "", "", fmt.Errorf("missing container path after ':'")
 	}
+	return identifier, containerPath, nil
+}
 
-	// On Docker+Incus, ensure the Docker container is running
-	if platform == incus.PlatformDockerIncus {
-		if !incus.IsIncusDockerContainerRunning() {
-			return nil, fmt.Errorf("Docker+Incus container is not running.\nRun 'astonish sandbox init' to set up the runtime")
+func isBaseTemplateName(name string) bool {
+	switch strings.TrimSpace(name) {
+	case "", "base", sandbox.BaseTemplateID:
+		return true
+	default:
+		return false
+	}
+}
+
+func templateSessionID(name string) string {
+	return "template-" + strings.TrimPrefix(name, "@")
+}
+
+func overlayLayerChain(name string, basedOn map[string]string) []string {
+	if isBaseTemplateName(name) {
+		return []string{sandbox.BaseTemplateID}
+	}
+	seen := map[string]bool{}
+	var walk func(string) []string
+	walk = func(n string) []string {
+		if isBaseTemplateName(n) {
+			return []string{sandbox.BaseTemplateID}
+		}
+		if seen[n] {
+			return []string{sandbox.BaseTemplateID}
+		}
+		seen[n] = true
+		parent := ""
+		if basedOn != nil {
+			parent = basedOn[n]
+		}
+		if parent == "" {
+			return []string{sandbox.BaseTemplateID, n}
+		}
+		return append(walk(parent), n)
+	}
+	return walk(name)
+}
+
+func overlayLayerChainFromRegistry(name string) []string {
+	basedOn := map[string]string{}
+	if registry, err := sandbox.NewTemplateRegistry(); err == nil {
+		for _, t := range registry.List() {
+			basedOn[t.Name] = t.BasedOn
 		}
 	}
+	return overlayLayerChain(name, basedOn)
+}
 
-	incus.SetActivePlatform(platform)
-	client, err := incus.Connect(platform)
+func registerOverlayTemplate(name, description, basedOn string) error {
+	registry, err := sandbox.NewTemplateRegistry()
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to Incus: %w", err)
+		return err
 	}
+	meta := registry.Get(name)
+	if meta == nil {
+		meta = &sandbox.TemplateMeta{
+			Name:      name,
+			CreatedAt: time.Now().UTC(),
+		}
+	}
+	if description != "" {
+		meta.Description = description
+	}
+	if basedOn != "" {
+		meta.BasedOn = basedOn
+	}
+	return registry.Add(meta)
+}
 
-	return client, nil
+func touchOverlayTemplateSnapshot(name, basedOn string) error {
+	registry, err := sandbox.NewTemplateRegistry()
+	if err != nil {
+		return err
+	}
+	meta := registry.Get(name)
+	if meta == nil {
+		meta = &sandbox.TemplateMeta{
+			Name:      name,
+			CreatedAt: time.Now().UTC(),
+			BasedOn:   basedOn,
+		}
+	}
+	if basedOn != "" && meta.BasedOn == "" {
+		meta.BasedOn = basedOn
+	}
+	meta.SnapshotAt = time.Now().UTC()
+	return registry.Add(meta)
 }

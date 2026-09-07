@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -82,6 +83,19 @@ func (db *DockerBackend) SeedBaseLayerFromImage(ctx context.Context) error {
 		return fmt.Errorf("sandbox/docker: extract seed rootfs: %w", tarErr)
 	}
 	return nil
+}
+
+// ReseedBaseLayerFromImage deletes the current @base layer and re-exports the
+// sandbox image. Used by `astonish sandbox refresh` / reset.
+func (db *DockerBackend) ReseedBaseLayerFromImage(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	baseDir := db.layerDir(sandbox.BaseTemplateID)
+	if err := os.RemoveAll(baseDir); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("sandbox/docker: remove @base: %w", err)
+	}
+	return db.SeedBaseLayerFromImage(ctx)
 }
 
 // BuildTemplate creates a new template layer by provisioning a throwaway
@@ -164,11 +178,99 @@ func (db *DockerBackend) DeleteTemplate(ctx context.Context, templateID string, 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	_ = force
+	if templateID == "" || templateID == sandbox.BaseTemplateID || templateID == "base" {
+		return fmt.Errorf("sandbox/docker: refusing to delete %q", templateID)
+	}
 	layerDir := db.layerDir(templateID)
 	err := os.RemoveAll(layerDir)
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("sandbox/docker: DeleteTemplate %q: %w", templateID, err)
 	}
+	return nil
+}
+
+// AliasLayer creates LayersDir/<name> as a relative symlink to the
+// content-addressed layer so CLI template names resolve in LayerChain.
+func (db *DockerBackend) AliasLayer(name, layerID string) error {
+	if name == "" || name == sandbox.BaseTemplateID || name == "base" {
+		return fmt.Errorf("sandbox/docker: cannot alias layer as %q", name)
+	}
+	if layerID == "" {
+		return fmt.Errorf("sandbox/docker: layer id is required")
+	}
+	if _, err := os.Stat(db.layerDir(layerID)); err != nil {
+		return fmt.Errorf("sandbox/docker: layer %q: %w", layerID, err)
+	}
+	dest := db.layerDir(name)
+	if err := os.RemoveAll(dest); err != nil {
+		return fmt.Errorf("sandbox/docker: replace alias %q: %w", name, err)
+	}
+	if err := os.Symlink(layerID, dest); err != nil {
+		return fmt.Errorf("sandbox/docker: alias %q -> %s: %w", name, layerID, err)
+	}
+	return nil
+}
+
+// ReplaceBaseFromSession flattens a running session's composed overlay
+// (/sandbox/rootfs in the image namespace) over layers/@base/rootfs.
+func (db *DockerBackend) ReplaceBaseFromSession(ctx context.Context, sessionID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if sessionID == "" {
+		return fmt.Errorf("sandbox/docker: session id is required")
+	}
+	cname := containerName(sessionID)
+	rootfs := db.layerRootfs(sandbox.BaseTemplateID)
+	tmp := rootfs + ".new"
+	if err := os.RemoveAll(tmp); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("sandbox/docker: clear staged @base: %w", err)
+	}
+	if err := os.MkdirAll(tmp, 0o755); err != nil {
+		return fmt.Errorf("sandbox/docker: mkdir staged @base: %w", err)
+	}
+
+	cmd := exec.CommandContext(ctx, db.cfg.ContainerRuntimePath, "exec", cname, "tar", "-C", mountRootfs, "-cf", "-", ".")
+	tarCmd := exec.CommandContext(ctx, "tar", "-C", tmp, "-xf", "-")
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	tarCmd.Stdin = stdout
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("sandbox/docker: flatten tar: %w", err)
+	}
+	if err := tarCmd.Start(); err != nil {
+		_ = cmd.Process.Kill()
+		return fmt.Errorf("sandbox/docker: flatten extract: %w", err)
+	}
+	tarErr := tarCmd.Wait()
+	exportErr := cmd.Wait()
+	if exportErr != nil {
+		_ = os.RemoveAll(tmp)
+		return fmt.Errorf("sandbox/docker: flatten tar: %w", exportErr)
+	}
+	if tarErr != nil {
+		_ = os.RemoveAll(tmp)
+		return fmt.Errorf("sandbox/docker: flatten extract: %w", tarErr)
+	}
+
+	old := rootfs + ".old"
+	_ = os.RemoveAll(old)
+	if err := os.Rename(rootfs, old); err != nil && !os.IsNotExist(err) {
+		_ = os.RemoveAll(tmp)
+		return fmt.Errorf("sandbox/docker: park old @base: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(rootfs), 0o755); err != nil {
+		_ = os.Rename(old, rootfs)
+		return err
+	}
+	if err := os.Rename(tmp, rootfs); err != nil {
+		_ = os.Rename(old, rootfs)
+		return fmt.Errorf("sandbox/docker: install new @base: %w", err)
+	}
+	_ = os.RemoveAll(old)
 	return nil
 }
 

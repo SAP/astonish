@@ -34,12 +34,23 @@ func NewInjectDrillCredentialsTool(nodePool *sandbox.NodeClientPool, tplRegistry
 	return newInjectDrillCredentialsToolFromDeps(deps)
 }
 
+// NewInjectDrillCredentialsToolWithPool creates inject_drill_credentials for
+// chat/Studio sessions backed by a backend-agnostic ToolNodePool.
+func NewInjectDrillCredentialsToolWithPool(pool sandbox.ToolNodePool, tplRegistry *sandbox.TemplateRegistry, browserMgr *browser.Manager) (tool.Tool, error) {
+	deps := &runDrillDeps{
+		toolPool:         pool,
+		templateRegistry: tplRegistry,
+		browserMgr:       browserMgr,
+	}
+	return newInjectDrillCredentialsToolFromDeps(deps)
+}
+
 // NewInjectDrillCredentialsToolWithClient creates inject_drill_credentials for Incus fleet sessions.
 func NewInjectDrillCredentialsToolWithClient(lazyClient *sandbox.LazyNodeClient, sessionID string, browserMgr *browser.Manager) (tool.Tool, error) {
 	deps := &runDrillDeps{
-		lazyClient:  lazyClient,
-		sessionID:   sessionID,
-		browserMgr:  browserMgr,
+		lazyClient: lazyClient,
+		sessionID:  sessionID,
+		browserMgr: browserMgr,
 	}
 	return newInjectDrillCredentialsToolFromDeps(deps)
 }
@@ -47,9 +58,9 @@ func NewInjectDrillCredentialsToolWithClient(lazyClient *sandbox.LazyNodeClient,
 // NewInjectDrillCredentialsToolWithToolClient creates inject_drill_credentials for backend-agnostic fleet sessions.
 func NewInjectDrillCredentialsToolWithToolClient(client sandbox.ToolNodeClient, sessionID string, browserMgr *browser.Manager) (tool.Tool, error) {
 	deps := &runDrillDeps{
-		toolClient:  client,
-		sessionID:   sessionID,
-		browserMgr:  browserMgr,
+		toolClient: client,
+		sessionID:  sessionID,
+		browserMgr: browserMgr,
 	}
 	return newInjectDrillCredentialsToolFromDeps(deps)
 }

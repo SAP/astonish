@@ -13,9 +13,8 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/gorilla/mux"
 	"github.com/SAP/astonish/pkg/browser"
-	incus "github.com/SAP/astonish/pkg/sandbox/incus"
+	"github.com/gorilla/mux"
 )
 
 // vncDialerPort is the KasmVNC websocket port inside the container.
@@ -83,23 +82,15 @@ func getVNCDialFunc(containerName string) (dialFn func() (net.Conn, error), http
 		return dialFn, httpTransport, nil
 	}
 
-	// Priority 3: Incus fallback — connect via Incus exec API.
-	client, clientErr := sandboxConnect()
-	if clientErr != nil {
-		return nil, nil, fmt.Errorf("failed to connect to sandbox: %w", clientErr)
+	// Priority 3: Backend exec tunnel (Docker/K8s OverlayFS).
+	port := 6901
+	if err := ensureProxySessionRunning(containerName); err != nil {
+		return nil, nil, fmt.Errorf("failed to reach sandbox: %w", err)
 	}
-
-	if _, ipErr := getCachedIP(client, containerName); ipErr != nil {
-		return nil, nil, fmt.Errorf("failed to resolve container IP: %w", ipErr)
-	}
-
-	dialer := &incus.ContainerDialer{Client: client}
-	port := incus.DefaultKasmVNCPort
-
 	dialFn = func() (net.Conn, error) {
-		return dialer.Dial(containerName, port)
+		return studioBackendDial(containerName, port)
 	}
-	httpTransport = dialer.HTTPTransport(containerName, port)
+	httpTransport = studioProxyTransport(containerName, port)
 	return dialFn, httpTransport, nil
 }
 
@@ -245,33 +236,15 @@ func BrowserVNCInfoHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Incus fallback.
-	client, err := sandboxConnect()
-	if err != nil {
-		respondError(w, http.StatusInternalServerError, "failed to connect to sandbox: "+err.Error())
-		return
-	}
-
-	if !client.InstanceExists(containerName) {
-		respondError(w, http.StatusNotFound, "container not found")
-		return
-	}
-
-	if !client.IsRunning(containerName) {
-		respondError(w, http.StatusConflict, "container is not running")
-		return
-	}
-
-	ip, err := getCachedIP(client, containerName)
-	if err != nil {
-		respondError(w, http.StatusBadGateway, "failed to resolve container IP: "+err.Error())
+	if err := ensureProxySessionRunning(containerName); err != nil {
+		respondError(w, http.StatusBadGateway, "sandbox is not running: "+err.Error())
 		return
 	}
 
 	respondJSON(w, http.StatusOK, map[string]any{
 		"container": containerName,
-		"ip":        ip,
-		"vnc_port":  incus.DefaultKasmVNCPort,
+		"ip":        "tunnel",
+		"vnc_port":  vncDialerPort,
 		"proxy_url": fmt.Sprintf("/api/browser/vnc/%s/", containerName),
 	})
 }

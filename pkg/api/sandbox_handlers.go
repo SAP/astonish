@@ -11,11 +11,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gorilla/mux"
+	"os"
+	"path/filepath"
+
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/sandbox"
-	incus "github.com/SAP/astonish/pkg/sandbox/incus"
+	sboxdocker "github.com/SAP/astonish/pkg/sandbox/docker"
 	persistentsession "github.com/SAP/astonish/pkg/session"
+	"github.com/gorilla/mux"
 )
 
 // validTemplateName matches only safe template names: lowercase alphanumeric,
@@ -142,7 +145,7 @@ func SandboxStatusHandler(w http.ResponseWriter, r *http.Request) {
 	var resp SandboxStatusResponse
 	resp.SandboxEnabled = sandboxEnabled
 
-	backendKind := "incus"
+	backendKind := "docker"
 	if err == nil && appCfg != nil {
 		backendKind = appCfg.Sandbox.BackendKind()
 	}
@@ -167,28 +170,8 @@ func SandboxStatusHandler(w http.ResponseWriter, r *http.Request) {
 			resp.Reason = health.Reason
 		}
 
-	default: // "incus"
-		platform, reason := incus.DetectPlatformReason()
-		resp.Platform = platformString(platform)
-		resp.Reason = reason
-
-		incusAvailable := platform == incus.PlatformLinuxNative || platform == incus.PlatformDockerIncus
-		if incusAvailable {
-			if platform == incus.PlatformDockerIncus && !incus.IsIncusDockerContainerRunning() {
-				incusAvailable = false
-			}
-		}
-		if incusAvailable {
-			client, connErr := incus.Connect(platform)
-			if connErr == nil {
-				incus.SetActivePlatform(platform)
-				containerName := incus.TemplateName(incus.BaseTemplate)
-				resp.BaseTemplateExists = client.InstanceExists(containerName)
-			} else {
-				incusAvailable = false
-			}
-		}
-		resp.RuntimeAvailable = incusAvailable
+	default: // docker OverlayFS
+		fillDockerStatus(&resp)
 	}
 
 	// Backward compat: mirror runtimeAvailable into deprecated field.
@@ -223,37 +206,14 @@ func SandboxInitHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	platform, reason := incus.DetectPlatformReason()
-	if platform == incus.PlatformDockerIncus {
-		// Ensure the Docker container is running for init
-		if !incus.IsIncusDockerContainerRunning() {
-			if err := incus.EnsureIncusDockerContainer(); err != nil {
-				respondError(w, http.StatusServiceUnavailable, fmt.Sprintf("failed to start Docker+Incus: %v", err))
-				return
-			}
-		}
-	}
-	if platform == incus.PlatformUnsupported {
-		respondError(w, http.StatusServiceUnavailable, fmt.Sprintf("sandbox unavailable: %s", reason))
-		return
-	}
-
-	// Store sandbox config for privilege mode detection in container creation.
-	appCfg, cfgErr := config.LoadAppConfig()
-	if cfgErr == nil && appCfg != nil {
-		sandbox.SetSandboxConfig(&appCfg.Sandbox)
-	}
-	incus.SetActivePlatform(platform)
-
-	client, err := incus.Connect(platform)
+	_ = req
+	b, err := openStudioDocker()
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to connect to Incus: %v", err))
+		respondError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
-
-	containerName := incus.TemplateName(incus.BaseTemplate)
-	if client.InstanceExists(containerName) {
-		respondError(w, http.StatusConflict, "base template already exists")
+	if overlayLayerExists(b, sandbox.BaseTemplateID) {
+		respondError(w, http.StatusConflict, "base overlay layer already exists")
 		return
 	}
 
@@ -267,43 +227,11 @@ func SandboxInitHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	registry, err := sandbox.NewTemplateRegistry()
-	if err != nil {
-		SendSSE(w, flusher, "error", map[string]string{"error": fmt.Sprintf("failed to create template registry: %v", err)})
-		return
-	}
-
-	opts := sandbox.BaseTemplateOptions{
-		InstallTools: req.InstallTools,
-		ProgressFunc: func(msg string) {
-			msg = strings.TrimRight(msg, "\n")
-			if msg != "" {
-				SendSSE(w, flusher, "progress", map[string]string{"message": msg})
-			}
-		},
-	}
-	if opts.InstallTools == nil {
-		opts.InstallTools = make(map[string]bool)
-	}
-
-	// Wire browser engine so browser packages are installed in the base template.
-	if appCfg != nil {
-		bCfg := incus.BrowserContainerConfig{
-			ChromePath:          appCfg.Browser.ChromePath,
-			FingerprintSeed:     appCfg.Browser.FingerprintSeed,
-			FingerprintPlatform: appCfg.Browser.FingerprintPlatform,
-		}
-		engine := incus.DetectBrowserEngine(bCfg)
-		if incus.IsContainerCompatibleEngine(engine) {
-			opts.BrowserEngine = engine
-		}
-	}
-
-	if err := sandbox.InitBaseTemplate(client, registry, opts); err != nil {
+	SendSSE(w, flusher, "progress", map[string]string{"message": fmt.Sprintf("Pulling sandbox image %s...", b.SandboxImage())})
+	if err := b.SeedBaseLayerFromImage(r.Context()); err != nil {
 		SendSSE(w, flusher, "error", map[string]string{"error": err.Error()})
 		return
 	}
-
 	SendSSE(w, flusher, "done", map[string]string{"status": "success"})
 }
 
@@ -321,7 +249,7 @@ func SandboxDetailsHandler(w http.ResponseWriter, r *http.Request) {
 	var resp SandboxDetailResponse
 	resp.SandboxEnabled = sandboxEnabled
 
-	backendKind := "incus"
+	backendKind := "docker"
 	if err == nil && appCfg != nil {
 		backendKind = appCfg.Sandbox.BackendKind()
 	}
@@ -361,45 +289,8 @@ func SandboxDetailsHandler(w http.ResponseWriter, r *http.Request) {
 			resp.StorageBackend = "openshell"
 		}
 
-	default: // "incus"
-		platform, reason := incus.DetectPlatformReason()
-		resp.Platform = platformString(platform)
-		resp.Reason = reason
-
-		incusAvailable := platform == incus.PlatformLinuxNative || platform == incus.PlatformDockerIncus
-		if platform == incus.PlatformDockerIncus && !incus.IsIncusDockerContainerRunning() {
-			incusAvailable = false
-		}
-		resp.RuntimeAvailable = incusAvailable
-
-		if incusAvailable {
-			incus.SetActivePlatform(platform)
-			client, connErr := incus.Connect(platform)
-			if connErr == nil {
-				containerName := incus.TemplateName(incus.BaseTemplate)
-				resp.BaseTemplateExists = client.InstanceExists(containerName)
-
-				tplRegistry, tplErr := sandbox.NewTemplateRegistry()
-				if tplErr != nil {
-					slog.Warn("failed to create template registry", "error", tplErr)
-				}
-				sessRegistry, sessErr := sandboxSessionRegistryForRequest(r)
-				if sessErr != nil {
-					slog.Warn("failed to create session registry", "error", sessErr)
-				}
-				if tplRegistry != nil && sessRegistry != nil {
-					status, statusErr := sandbox.Status(client, tplRegistry, sessRegistry)
-					if statusErr == nil {
-						resp.IncusVersion = status.IncusVersion
-						resp.StorageBackend = status.StorageBackend
-						resp.OverlayReady = status.OverlayReady
-						resp.TemplateCount = status.TemplateCount
-						resp.ContainerCount = status.SessionCount
-						resp.OrphanCount = status.OrphanCount
-					}
-				}
-			}
-		}
+	default: // docker OverlayFS
+		fillDockerDetails(&resp)
 	}
 
 	// Backward compat: mirror runtimeAvailable into deprecated field.
@@ -411,10 +302,14 @@ func SandboxDetailsHandler(w http.ResponseWriter, r *http.Request) {
 // SandboxContainerListHandler handles GET /api/sandbox/containers.
 // Lists all session containers and identifies orphans.
 func SandboxContainerListHandler(w http.ResponseWriter, r *http.Request) {
-	client, err := sandboxConnect()
+	appCfg, _ := config.LoadAppConfig()
+	b, cleanup, err := sandbox.BackendFromAppConfig(appCfg)
 	if err != nil {
 		respondError(w, http.StatusServiceUnavailable, err.Error())
 		return
+	}
+	if cleanup != nil {
+		defer cleanup()
 	}
 
 	sessRegistry, err := sandboxSessionRegistryForRequest(r)
@@ -423,17 +318,27 @@ func SandboxContainerListHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Auto-reap stale entries
-	sessRegistry.Reap(client)
+	sessions, listErr := b.ListSessions(r.Context(), sandbox.SessionFilter{})
+	if listErr != nil {
+		respondError(w, http.StatusInternalServerError, "failed to list sessions: "+listErr.Error())
+		return
+	}
+	byID := map[string]*sandbox.Session{}
+	for _, s := range sessions {
+		byID[s.SessionID] = s
+	}
 
 	entries := sessRegistry.List()
 	containers := make([]ContainerInfo, 0, len(entries))
+	registeredIDs := map[string]bool{}
 	for _, e := range entries {
-		status := "stopped"
-		if !client.InstanceExists(e.ContainerName) {
-			status = "missing"
-		} else if client.IsRunning(e.ContainerName) {
-			status = "running"
+		registeredIDs[e.SessionID] = true
+		status := "missing"
+		if sess := byID[e.SessionID]; sess != nil {
+			status = string(sess.State)
+			if sess.BackendRef != "" {
+				e.ContainerName = sess.BackendRef
+			}
 		}
 		info := ContainerInfo{
 			Name:      e.ContainerName,
@@ -483,19 +388,10 @@ func SandboxContainerListHandler(w http.ResponseWriter, r *http.Request) {
 		containers = append(containers, info)
 	}
 
-	// Find orphans (containers in Incus not in registry)
-	registeredNames := make(map[string]bool)
-	for _, e := range entries {
-		registeredNames[e.ContainerName] = true
-	}
-	incusContainers, listErr := client.ListSessionContainers()
-	if listErr != nil {
-		slog.Warn("failed to list session containers from Incus", "error", listErr)
-	}
 	var orphans []string
-	for _, inst := range incusContainers {
-		if !registeredNames[inst.Name] {
-			orphans = append(orphans, inst.Name)
+	for _, s := range sessions {
+		if !registeredIDs[s.SessionID] {
+			orphans = append(orphans, s.BackendRef)
 		}
 	}
 
@@ -514,10 +410,14 @@ func SandboxContainerDeleteHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client, err := sandboxConnect()
+	appCfg, _ := config.LoadAppConfig()
+	b, cleanup, err := sandbox.BackendFromAppConfig(appCfg)
 	if err != nil {
 		respondError(w, http.StatusServiceUnavailable, err.Error())
 		return
+	}
+	if cleanup != nil {
+		defer cleanup()
 	}
 
 	sessRegistry, err := sandboxSessionRegistryForRequest(r)
@@ -533,7 +433,7 @@ func SandboxContainerDeleteHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := sandbox.DestroyForSession(client, sessRegistry, sessionID); err != nil {
+	if err := b.DestroySession(r.Context(), sessionID); err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to destroy container: "+err.Error())
 		return
 	}
@@ -568,38 +468,20 @@ func SandboxPruneHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	kind := sandbox.BackendKind(appCfg.Sandbox.BackendKind())
-	switch kind {
-	case sandbox.BackendKindK8s:
-		b, cleanup, bErr := sandbox.BackendFromAppConfig(appCfg)
-		if bErr != nil {
-			respondError(w, http.StatusServiceUnavailable, "backend init: "+bErr.Error())
-			return
-		}
-		if cleanup != nil {
-			defer cleanup()
-		}
-		pruned, pErr := sandbox.PruneOrphansForBackend(r.Context(), b, sessRegistry, existingSessionIDs)
-		if pErr != nil {
-			respondError(w, http.StatusInternalServerError, "prune failed: "+pErr.Error())
-			return
-		}
-		respondJSON(w, http.StatusOK, map[string]any{"pruned": pruned})
-
-	default:
-		// Incus path
-		client, cErr := sandboxConnect()
-		if cErr != nil {
-			respondError(w, http.StatusServiceUnavailable, cErr.Error())
-			return
-		}
-		pruned, pErr := sandbox.PruneOrphans(client, sessRegistry, existingSessionIDs)
-		if pErr != nil {
-			respondError(w, http.StatusInternalServerError, "prune failed: "+pErr.Error())
-			return
-		}
-		respondJSON(w, http.StatusOK, map[string]any{"pruned": pruned})
+	b, cleanup, bErr := sandbox.BackendFromAppConfig(appCfg)
+	if bErr != nil {
+		respondError(w, http.StatusServiceUnavailable, "backend init: "+bErr.Error())
+		return
 	}
+	if cleanup != nil {
+		defer cleanup()
+	}
+	pruned, pErr := sandbox.PruneOrphansForBackend(r.Context(), b, sessRegistry, existingSessionIDs)
+	if pErr != nil {
+		respondError(w, http.StatusInternalServerError, "prune failed: "+pErr.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]any{"pruned": pruned})
 }
 
 // SandboxTemplateListHandler handles GET /api/sandbox/templates.
@@ -666,21 +548,15 @@ func SandboxTemplateInfoHandler(w http.ResponseWriter, r *http.Request) {
 		resp.BinaryHash = meta.BinaryHash
 	}
 
-	// Get live container state from Incus
-	containerName := incus.TemplateName(name)
-	resp.ContainerName = containerName
+	resp.ContainerName = "template-" + strings.TrimPrefix(name, "@")
 	resp.ContainerStatus = "missing"
-
-	client, connErr := sandboxConnect()
-	if connErr == nil {
-		if client.InstanceExists(containerName) {
-			inst, instErr := client.GetInstance(containerName)
-			if instErr == nil {
-				resp.ContainerStatus = inst.Status
-			} else {
-				resp.ContainerStatus = "unknown"
-			}
-			resp.SnapshotReady = client.HasSnapshot(containerName, "snap0")
+	if b, err := openStudioDocker(); err == nil {
+		if overlayLayerExists(b, name) || overlayLayerExists(b, sandbox.BaseTemplateID) && (name == "base" || name == sandbox.BaseTemplateID) {
+			resp.SnapshotReady = overlayLayerExists(b, name) || name == "base" || name == sandbox.BaseTemplateID
+		}
+		if sess, sErr := resolveStudioDockerSession(r.Context(), b, resp.ContainerName); sErr == nil {
+			resp.ContainerName = sess.BackendRef
+			resp.ContainerStatus = string(sess.State)
 		}
 	}
 
@@ -708,20 +584,48 @@ func SandboxTemplateCreateHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client, err := sandboxConnect()
+	b, err := openStudioDocker()
 	if err != nil {
 		respondError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
-
+	if !overlayLayerExists(b, sandbox.BaseTemplateID) {
+		respondError(w, http.StatusServiceUnavailable, "base overlay layer is missing; run sandbox init first")
+		return
+	}
 	tplRegistry, err := sandbox.NewTemplateRegistry()
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to load template registry: "+err.Error())
 		return
 	}
-
-	if err := sandbox.CreateTemplate(client, tplRegistry, req.Name, req.Description); err != nil {
+	if tplRegistry.Exists(req.Name) {
+		respondError(w, http.StatusConflict, "template already exists: "+req.Name)
+		return
+	}
+	sessionID := "template-" + req.Name
+	sess, err := b.CreateSession(r.Context(), sandbox.SessionSpec{
+		SessionID:  sessionID,
+		Type:       sandbox.SessionTypeChat,
+		TemplateID: sandbox.BaseTemplateID,
+		LayerChain: []string{sandbox.BaseTemplateID},
+		Labels:     map[string]string{"astonish.io/purpose": "template"},
+	})
+	if err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to create template: "+err.Error())
+		return
+	}
+	if err := b.WaitForSessionReady(r.Context(), sess.SessionID); err != nil {
+		respondError(w, http.StatusInternalServerError, "template session not ready: "+err.Error())
+		return
+	}
+	meta := &sandbox.TemplateMeta{
+		Name:        req.Name,
+		Description: req.Description,
+		CreatedAt:   time.Now().UTC(),
+		BasedOn:     sandbox.BaseTemplateID,
+	}
+	if err := tplRegistry.Add(meta); err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to register template: "+err.Error())
 		return
 	}
 
@@ -745,21 +649,20 @@ func SandboxTemplateDeleteHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client, err := sandboxConnect()
+	b, err := openStudioDocker()
 	if err != nil {
 		respondError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
-
-	tplRegistry, err := sandbox.NewTemplateRegistry()
-	if err != nil {
-		respondError(w, http.StatusInternalServerError, "failed to load template registry: "+err.Error())
-		return
+	if sess, sErr := resolveStudioDockerSession(r.Context(), b, "template-"+name); sErr == nil {
+		_ = b.DestroySession(r.Context(), sess.SessionID)
 	}
-
-	if err := sandbox.DeleteTemplate(client, tplRegistry, name); err != nil {
+	if err := b.DeleteTemplate(r.Context(), name, true); err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to delete template: "+err.Error())
 		return
+	}
+	if tplRegistry, err := sandbox.NewTemplateRegistry(); err == nil {
+		_ = tplRegistry.Remove(name)
 	}
 
 	respondJSON(w, http.StatusOK, map[string]any{"status": "ok"})
@@ -778,21 +681,32 @@ func SandboxTemplateSnapshotHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client, err := sandboxConnect()
+	b, err := openStudioDocker()
 	if err != nil {
 		respondError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
-
-	tplRegistry, err := sandbox.NewTemplateRegistry()
+	sess, err := resolveStudioDockerSession(r.Context(), b, "template-"+name)
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, "failed to load template registry: "+err.Error())
+		respondError(w, http.StatusNotFound, "template session is not running: "+err.Error())
 		return
 	}
-
-	if err := sandbox.SnapshotTemplate(client, tplRegistry, name); err != nil {
+	art, err := b.SaveSessionAsTemplate(r.Context(), sess.SessionID)
+	if err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to snapshot template: "+err.Error())
 		return
+	}
+	if err := b.AliasLayer(name, art.LayerID); err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to name template layer: "+err.Error())
+		return
+	}
+	if tplRegistry, err := sandbox.NewTemplateRegistry(); err == nil {
+		meta := tplRegistry.Get(name)
+		if meta == nil {
+			meta = &sandbox.TemplateMeta{Name: name, CreatedAt: time.Now().UTC(), BasedOn: sandbox.BaseTemplateID}
+		}
+		meta.SnapshotAt = time.Now().UTC()
+		_ = tplRegistry.Add(meta)
 	}
 
 	respondJSON(w, http.StatusOK, map[string]any{"status": "ok"})
@@ -815,19 +729,29 @@ func SandboxTemplatePromoteHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client, err := sandboxConnect()
+	b, err := openStudioDocker()
 	if err != nil {
 		respondError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
-
-	tplRegistry, err := sandbox.NewTemplateRegistry()
+	sess, err := resolveStudioDockerSession(r.Context(), b, "template-"+name)
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, "failed to load template registry: "+err.Error())
-		return
+		sess, err = b.CreateSession(r.Context(), sandbox.SessionSpec{
+			SessionID:  "template-" + name,
+			Type:       sandbox.SessionTypeChat,
+			TemplateID: name,
+			LayerChain: []string{sandbox.BaseTemplateID, name},
+		})
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, "failed to start template for promote: "+err.Error())
+			return
+		}
+		if err := b.WaitForSessionReady(r.Context(), sess.SessionID); err != nil {
+			respondError(w, http.StatusInternalServerError, "template session not ready: "+err.Error())
+			return
+		}
 	}
-
-	if err := sandbox.PromoteTemplate(client, tplRegistry, name); err != nil {
+	if err := b.ReplaceBaseFromSession(r.Context(), sess.SessionID); err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to promote template: "+err.Error())
 		return
 	}
@@ -838,20 +762,13 @@ func SandboxTemplatePromoteHandler(w http.ResponseWriter, r *http.Request) {
 // SandboxRefreshHandler handles POST /api/sandbox/refresh.
 // Refreshes all templates with the current astonish binary.
 func SandboxRefreshHandler(w http.ResponseWriter, r *http.Request) {
-	client, err := sandboxConnect()
+	b, err := openStudioDocker()
 	if err != nil {
 		respondError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
-
-	tplRegistry, err := sandbox.NewTemplateRegistry()
-	if err != nil {
-		respondError(w, http.StatusInternalServerError, "failed to load template registry: "+err.Error())
-		return
-	}
-
-	if err := sandbox.RefreshAll(client, tplRegistry); err != nil {
-		respondError(w, http.StatusInternalServerError, "failed to refresh templates: "+err.Error())
+	if err := b.ReseedBaseLayerFromImage(r.Context()); err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to refresh @base: "+err.Error())
 		return
 	}
 
@@ -1113,37 +1030,96 @@ func resolveContainerName(registry *sandbox.SessionRegistry, input string) strin
 
 // --- Helpers ---
 
-// sandboxConnect detects the platform and connects to Incus.
-func sandboxConnect() (*incus.IncusClient, error) {
-	platform, reason := incus.DetectPlatformReason()
-	if platform == incus.PlatformUnsupported {
-		return nil, fmt.Errorf("sandbox unavailable: %s", reason)
-	}
-
-	// For Docker+Incus, ensure the Docker container is reachable
-	if platform == incus.PlatformDockerIncus {
-		if !incus.IsIncusDockerContainerRunning() {
-			return nil, fmt.Errorf("Docker+Incus container is not running; run 'astonish sandbox init'")
+func openStudioDocker() (*sboxdocker.DockerBackend, error) {
+	det := sboxdocker.DetectDocker("")
+	if !det.Available {
+		reason := det.Reason
+		if reason == "" {
+			reason = "docker daemon is not reachable"
 		}
+		return nil, fmt.Errorf("docker is not available: %s", reason)
 	}
-
-	incus.SetActivePlatform(platform)
-	client, err := incus.Connect(platform)
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect to Incus: %w", err)
-	}
-	return client, nil
+	return sboxdocker.Open()
 }
 
-// platformString converts a sandbox.Platform to a JSON-friendly string.
-func platformString(p incus.Platform) string {
-	switch p {
-	case incus.PlatformLinuxNative:
-		return "linux_native"
-	case incus.PlatformDockerIncus:
-		return "docker_incus"
-	default:
-		return "unsupported"
+func overlayLayerExists(b *sboxdocker.DockerBackend, name string) bool {
+	if b == nil || name == "" {
+		return false
+	}
+	entries, err := os.ReadDir(filepath.Join(b.LayersDir(), name, "rootfs"))
+	return err == nil && len(entries) > 0
+}
+
+func resolveStudioDockerSession(ctx context.Context, b *sboxdocker.DockerBackend, identifier string) (*sandbox.Session, error) {
+	sessions, err := b.ListSessions(ctx, sandbox.SessionFilter{})
+	if err != nil {
+		return nil, err
+	}
+	for _, s := range sessions {
+		if s.SessionID == identifier || s.BackendRef == identifier {
+			return s, nil
+		}
+	}
+	var match *sandbox.Session
+	for _, s := range sessions {
+		if strings.HasPrefix(s.SessionID, identifier) || strings.HasPrefix(s.BackendRef, identifier) {
+			if match != nil {
+				return nil, fmt.Errorf("ambiguous session %q", identifier)
+			}
+			match = s
+		}
+	}
+	if match == nil {
+		return nil, fmt.Errorf("no container found for %q", identifier)
+	}
+	return match, nil
+}
+
+func fillDockerStatus(resp *SandboxStatusResponse) {
+	resp.Platform = "docker"
+	det := sboxdocker.DetectDocker("")
+	if !det.Available {
+		resp.RuntimeAvailable = false
+		resp.Reason = det.Reason
+		return
+	}
+	b, err := sboxdocker.Open()
+	if err != nil {
+		resp.RuntimeAvailable = false
+		resp.Reason = err.Error()
+		return
+	}
+	resp.RuntimeAvailable = true
+	resp.BaseTemplateExists = overlayLayerExists(b, sandbox.BaseTemplateID)
+}
+
+func fillDockerDetails(resp *SandboxDetailResponse) {
+	resp.Platform = "docker"
+	resp.StorageBackend = "overlay"
+	det := sboxdocker.DetectDocker("")
+	if !det.Available {
+		resp.RuntimeAvailable = false
+		resp.Reason = det.Reason
+		return
+	}
+	b, err := sboxdocker.Open()
+	if err != nil {
+		resp.RuntimeAvailable = false
+		resp.Reason = err.Error()
+		return
+	}
+	resp.RuntimeAvailable = true
+	resp.IncusVersion = det.Version
+	resp.BaseTemplateExists = overlayLayerExists(b, sandbox.BaseTemplateID)
+	resp.OverlayReady = resp.BaseTemplateExists
+	if health, hErr := b.Health(context.Background()); hErr == nil && health != nil && health.Details != nil {
+		resp.ServerVersion = health.Details["docker_version"]
+	}
+	if tplRegistry, err := sandbox.NewTemplateRegistry(); err == nil {
+		resp.TemplateCount = len(tplRegistry.List())
+	}
+	if sessions, err := b.ListSessions(context.Background(), sandbox.SessionFilter{}); err == nil {
+		resp.ContainerCount = len(sessions)
 	}
 }
 

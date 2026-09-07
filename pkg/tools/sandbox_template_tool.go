@@ -1,9 +1,11 @@
 package tools
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/SAP/astonish/pkg/sandbox"
 	incus "github.com/SAP/astonish/pkg/sandbox/incus"
@@ -45,6 +47,7 @@ type SaveSandboxTemplateResult struct {
 // sandboxTemplateDeps holds the dependencies injected by the factory via closure.
 // This follows the same closure capture pattern used by browser and email tools.
 type sandboxTemplateDeps struct {
+	backend          sandbox.Backend
 	nodePool         *sandbox.NodeClientPool
 	incusClient      *incus.IncusClient
 	templateRegistry *sandbox.TemplateRegistry
@@ -92,6 +95,33 @@ func NewSaveSandboxTemplateTool(nodePool *sandbox.NodeClientPool, incusClient *i
 	return t, nil
 }
 
+// NewSaveSandboxTemplateToolFromBackend creates save_sandbox_template for
+// Docker/K8s/OpenShell sessions. Captures the session upper as a named layer.
+func NewSaveSandboxTemplateToolFromBackend(backend sandbox.Backend, templateRegistry *sandbox.TemplateRegistry, sessionRegistry *sandbox.SessionRegistry) (tool.Tool, error) {
+	sandboxTemplateDepsVar = &sandboxTemplateDeps{
+		backend:          backend,
+		templateRegistry: templateRegistry,
+		sessionRegistry:  sessionRegistry,
+	}
+
+	t, err := functiontool.New(functiontool.Config{
+		Name: "save_sandbox_template",
+		Description: "Freeze the current sandbox session as a reusable overlay template. " +
+			"Call this after cloning the project repo, installing dependencies, and configuring the " +
+			"development environment inside the container. The template captures the writable overlay " +
+			"so future sessions start with everything pre-installed. " +
+			"Pass bootstrap_files with absolute-path start/stop scripts (e.g. .astonish/start-services.sh) " +
+			"so every future container from this template gets those files injected (not auto-run). " +
+			"Pass overwrite=true to replace an existing template with the same name. " +
+			"Cannot overwrite the reserved name 'base'. " +
+			"The returned template_name should be passed to save_fleet_plan's template field.",
+	}, saveSandboxTemplate)
+	if err != nil {
+		return nil, err
+	}
+	return t, nil
+}
+
 func saveSandboxTemplate(ctx tool.Context, args SaveSandboxTemplateArgs) (SaveSandboxTemplateResult, error) {
 	if sandboxTemplateDepsVar == nil {
 		return SaveSandboxTemplateResult{
@@ -101,6 +131,9 @@ func saveSandboxTemplate(ctx tool.Context, args SaveSandboxTemplateArgs) (SaveSa
 	}
 
 	deps := sandboxTemplateDepsVar
+	if deps.backend != nil {
+		return saveSandboxTemplateBackend(ctx, args, deps)
+	}
 
 	// Get session ID to find the right container
 	var sessionID string
@@ -123,7 +156,7 @@ func saveSandboxTemplate(ctx tool.Context, args SaveSandboxTemplateArgs) (SaveSa
 		}, nil
 	}
 
-	if name == incus.BaseTemplate {
+	if name == incus.BaseTemplate || name == sandbox.BaseTemplateID {
 		return SaveSandboxTemplateResult{
 			Status:  "error",
 			Message: "Cannot use 'base' as a template name (reserved).",
@@ -222,5 +255,105 @@ func saveSandboxTemplate(ctx tool.Context, args SaveSandboxTemplateArgs) (SaveSa
 		TemplateName: name,
 		Message: fmt.Sprintf("Template %q %s and ready for cloning. "+
 			"Pass template: %q to save_fleet_plan to bind fleet sessions to this template.%s", name, action, name, bootstrapNote),
+	}, nil
+}
+
+type layerAliaser interface {
+	AliasLayer(name, layerID string) error
+}
+
+func saveSandboxTemplateBackend(ctx tool.Context, args SaveSandboxTemplateArgs, deps *sandboxTemplateDeps) (SaveSandboxTemplateResult, error) {
+	var sessionID string
+	if ctx != nil {
+		sessionID = ctx.SessionID()
+	}
+	if sessionID == "" {
+		return SaveSandboxTemplateResult{
+			Status:  "error",
+			Message: "No session ID available. Cannot determine which sandbox to snapshot.",
+		}, nil
+	}
+
+	name := strings.TrimSpace(args.TemplateName)
+	if name == "" {
+		return SaveSandboxTemplateResult{
+			Status:  "error",
+			Message: "template_name is required. Use a lowercase, hyphenated name like 'my-project'.",
+		}, nil
+	}
+	if name == "base" || name == sandbox.BaseTemplateID {
+		return SaveSandboxTemplateResult{
+			Status:  "error",
+			Message: "Cannot use 'base' as a template name (reserved).",
+		}, nil
+	}
+
+	bctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	art, err := deps.backend.SaveSessionAsTemplate(bctx, sessionID)
+	if err != nil {
+		return SaveSandboxTemplateResult{
+			Status:  "error",
+			Message: fmt.Sprintf("Failed to capture template layer: %v", err),
+		}, nil
+	}
+	if aliaser, ok := deps.backend.(layerAliaser); ok {
+		if err := aliaser.AliasLayer(name, art.LayerID); err != nil {
+			return SaveSandboxTemplateResult{
+				Status:  "error",
+				Message: fmt.Sprintf("Failed to name template layer %q: %v", name, err),
+			}, nil
+		}
+	}
+
+	basedOn := sandbox.BaseTemplateID
+	if deps.sessionRegistry != nil {
+		if entry := deps.sessionRegistry.Get(sessionID); entry != nil && entry.TemplateName != "" {
+			basedOn = entry.TemplateName
+		}
+	}
+	if deps.templateRegistry != nil {
+		meta := deps.templateRegistry.Get(name)
+		if meta == nil {
+			meta = &sandbox.TemplateMeta{Name: name, CreatedAt: time.Now().UTC()}
+		}
+		if desc := strings.TrimSpace(args.Description); desc != "" {
+			meta.Description = desc
+		}
+		meta.BasedOn = basedOn
+		meta.SnapshotAt = time.Now().UTC()
+		if err := deps.templateRegistry.Add(meta); err != nil {
+			return SaveSandboxTemplateResult{
+				Status:  "error",
+				Message: fmt.Sprintf("Failed to register template %q: %v", name, err),
+			}, nil
+		}
+	}
+
+	bootstrapNote := ""
+	if len(args.BootstrapFiles) > 0 && deps.templateRegistry != nil {
+		files := make([]store.BootstrapFile, 0, len(args.BootstrapFiles))
+		for _, f := range args.BootstrapFiles {
+			files = append(files, store.BootstrapFile{Path: f.Path, Content: f.Content, Mode: f.Mode})
+		}
+		if err := sandbox.PersistBootstrapFiles(deps.templateRegistry, name, files); err != nil {
+			slog.Warn("failed to persist bootstrap_files on template registry", "component", "sandbox-template", "template", name, "error", err)
+			bootstrapNote = fmt.Sprintf(" Warning: bootstrap_files were not saved (%v).", err)
+		} else {
+			bootstrapNote = fmt.Sprintf(" Saved %d bootstrap file(s) for injection on every launch.", len(files))
+		}
+	}
+
+	action := "created"
+	if args.Overwrite {
+		action = "updated"
+	}
+	return SaveSandboxTemplateResult{
+		Status:       "saved",
+		TemplateName: name,
+		Message: fmt.Sprintf("Template %q %s and ready for cloning (layer %s, %d bytes). "+
+			"Pass template: %q to save_fleet_plan to bind fleet sessions to this template.%s",
+			name, action, art.LayerID, art.SizeBytes, name, bootstrapNote),
 	}, nil
 }

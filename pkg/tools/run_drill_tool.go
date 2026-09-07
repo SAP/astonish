@@ -41,7 +41,8 @@ type RunDrillResult struct {
 // For chat sessions, nodePool is set and lazyClient is resolved at runtime.
 // For fleet sessions, lazyClient and sessionID are set directly.
 type runDrillDeps struct {
-	nodePool         *sandbox.NodeClientPool   // Chat/Studio sessions (nil when no sandbox)
+	nodePool         *sandbox.NodeClientPool   // Chat/Studio Incus sessions (nil when no sandbox)
+	toolPool         sandbox.ToolNodePool      // Chat/Studio Docker/K8s/OpenShell sessions
 	templateRegistry *sandbox.TemplateRegistry // Optional; retained for wiring compatibility
 	browserMgr       *browser.Manager          // Shared in-container browser (chat/fleet); never host Chrome
 	lazyClient       *sandbox.LazyNodeClient   // Fleet Incus sessions
@@ -60,6 +61,18 @@ type runDrillDeps struct {
 func NewRunDrillTool(nodePool *sandbox.NodeClientPool, tplRegistry *sandbox.TemplateRegistry, browserMgr *browser.Manager, llmProvider adrill.LLMProvider) (tool.Tool, error) {
 	deps := &runDrillDeps{
 		nodePool:         nodePool,
+		templateRegistry: tplRegistry,
+		browserMgr:       browserMgr,
+		llmProvider:      llmProvider,
+	}
+	return newRunDrillToolFromDeps(deps)
+}
+
+// NewRunDrillToolWithPool creates run_drill for chat/Studio sessions backed by
+// a backend-agnostic ToolNodePool (Docker, K8s, OpenShell).
+func NewRunDrillToolWithPool(pool sandbox.ToolNodePool, tplRegistry *sandbox.TemplateRegistry, browserMgr *browser.Manager, llmProvider adrill.LLMProvider) (tool.Tool, error) {
+	deps := &runDrillDeps{
+		toolPool:         pool,
 		templateRegistry: tplRegistry,
 		browserMgr:       browserMgr,
 		llmProvider:      llmProvider,
@@ -400,6 +413,9 @@ func buildTestExecutor(ctx tool.Context, deps *runDrillDeps) closableExecutor {
 		toolClient = deps.lazyClient
 		sessionID = deps.sessionID
 		ipClient = deps.lazyClient
+	} else if deps.toolPool != nil && ctx != nil && ctx.SessionID() != "" {
+		toolClient = deps.toolPool.GetOrCreate(ctx.SessionID())
+		sessionID = ctx.SessionID()
 	} else if deps.nodePool != nil && ctx != nil && ctx.SessionID() != "" {
 		toolClient = deps.nodePool.GetOrCreate(ctx.SessionID())
 		sessionID = ctx.SessionID()
@@ -1185,6 +1201,25 @@ func buildDrillInjectionTarget(ctx tool.Context, deps *runDrillDeps) (adrill.Inj
 		return target, nil
 	}
 
+	if deps.toolPool != nil && ctx != nil && ctx.SessionID() != "" {
+		sessionID := ctx.SessionID()
+		target.SessionID = sessionID
+		client := deps.toolPool.GetOrCreate(sessionID)
+		if client != nil {
+			_ = client.EnsureReady(sessionID)
+			type backendProvider interface {
+				GetBackend() sandbox.Backend
+			}
+			if bp, ok := client.(backendProvider); ok {
+				target.Backend = bp.GetBackend()
+			}
+		}
+		if target.Backend == nil {
+			target.Backend = deps.toolPool.GetBackend()
+		}
+		return target, nil
+	}
+
 	if deps.nodePool != nil && ctx != nil && ctx.SessionID() != "" {
 		sessionID := ctx.SessionID()
 		target.SessionID = sessionID
@@ -1424,7 +1459,7 @@ func preflightDrillStartServices(ctx tool.Context, deps *runDrillDeps, suiteName
 		return nil
 	}
 	// No sandbox at all — local runners resolve paths differently; skip.
-	if deps == nil || (deps.nodePool == nil && deps.lazyClient == nil && deps.toolClient == nil) {
+	if deps == nil || (deps.nodePool == nil && deps.toolPool == nil && deps.lazyClient == nil && deps.toolClient == nil) {
 		return nil
 	}
 

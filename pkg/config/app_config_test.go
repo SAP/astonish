@@ -263,8 +263,8 @@ func TestSandboxConfig_BackendKind(t *testing.T) {
 	}{
 		{"", "docker"},
 		{"docker", "docker"},
-		{"incus", "incus"},
-		{"INCUS", "incus"},
+		{"incus", "docker"},
+		{"INCUS", "docker"},
 		{"k8s", "k8s"},
 		{"K8S", "k8s"},
 		{"kubernetes", "k8s"},

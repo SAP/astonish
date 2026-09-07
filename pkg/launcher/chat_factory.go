@@ -25,7 +25,6 @@ import (
 	"github.com/SAP/astonish/pkg/memory"
 	"github.com/SAP/astonish/pkg/provider"
 	"github.com/SAP/astonish/pkg/sandbox"
-	incus "github.com/SAP/astonish/pkg/sandbox/incus"
 	"github.com/SAP/astonish/pkg/sandbox/openshell"
 	persistentsession "github.com/SAP/astonish/pkg/session"
 	"github.com/SAP/astonish/pkg/skills"
@@ -853,12 +852,12 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 	// proxies that route execution to an astonish node inside an Incus
 	// container. Container creation is lazy — the first tool call triggers
 	// cloning from the template and starting the node process.
-	var sandboxNodePool *sandbox.NodeClientPool      // hoisted for save_sandbox_template tool (Incus only)
-	var sandboxIncusClient *incus.IncusClient        // hoisted for save_sandbox_template tool (Incus only)
-	var sandboxTplRegistry *sandbox.TemplateRegistry // hoisted for save_sandbox_template tool (Incus only)
-	var sandboxSessRegistry *sandbox.SessionRegistry // hoisted for save_sandbox_template tool (Incus only)
-	var backendSandboxPool sandbox.ToolNodePool      // hoisted for sub-agent alias (K8s/OpenShell)
-	var backendSessRegistry *sandbox.SessionRegistry // hoisted for sub-agent alias (K8s/OpenShell)
+	var sandboxNodePool *sandbox.NodeClientPool      // hoisted for leftover Incus-only tools
+	var sandboxTplRegistry *sandbox.TemplateRegistry // hoisted for template/drill tools
+	var sandboxSessRegistry *sandbox.SessionRegistry // hoisted for leftover Incus-only tools
+	var backendSandboxPool sandbox.ToolNodePool      // hoisted for sub-agent alias and template tools
+	var backendSessRegistry *sandbox.SessionRegistry // hoisted for sub-agent alias
+	var backendSandbox sandbox.Backend               // hoisted for save/use sandbox template tools
 	if cfg.AppConfig != nil && sandbox.IsSandboxEnabled(&cfg.AppConfig.Sandbox) {
 		sandbox.SetSandboxConfig(&cfg.AppConfig.Sandbox)
 		kind := sandbox.BackendKind(cfg.AppConfig.Sandbox.BackendKind())
@@ -911,6 +910,11 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			b, backendCleanup, berr := sandbox.BackendFromAppConfigWithSessions(cfg.AppConfig, sessRegistry)
 			if berr != nil {
 				return nil, fmt.Errorf("sandbox is enabled but the %s backend is not available: %w\n\nTo disable sandbox, set 'sandbox.enabled: false' in ~/.config/astonish/config.yaml", kind, berr)
+			}
+
+			tplRegistry, tplErr := sandbox.NewTemplateRegistry()
+			if tplErr != nil && cfg.DebugMode {
+				slog.Warn("failed to create template registry", "error", tplErr)
 			}
 
 			limits := sandbox.EffectiveLimits(&cfg.AppConfig.Sandbox)
@@ -1038,15 +1042,12 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 					"component", "chat-factory", "backend", string(kind), "toolsets", len(lazyToolsets))
 			}
 
-			// sandboxNodePool, sandboxIncusClient, sandboxTplRegistry,
-			// sandboxSessRegistry all remain nil — downstream nil-guards
-			// silently skip Incus-only features (template tools, idle
-			// watchdog, prune, shutdown).
-
-			// Hoist pool and session registry for sub-agent aliasing
-			// (OnChildSession closure wired below, after subAgentMgr is built).
+			// Hoist pool, backend, and registries for sub-agent aliasing
+			// and save/use/list_sandbox_template tools.
 			backendSandboxPool = pool
 			backendSessRegistry = sessRegistry
+			backendSandbox = b
+			sandboxTplRegistry = tplRegistry
 
 			cleanups = append(cleanups, func() {
 				pool.Cleanup()
@@ -1060,149 +1061,6 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 
 			slog.Info("sandbox wired to backend-agnostic pool for chat",
 				"component", "chat-factory", "backend", string(kind))
-
-		case sandbox.BackendKindIncus, "":
-			// --- Legacy Incus path (unchanged) ---
-			sandboxClient, sandboxErr := sandbox.SetupSandboxRuntime()
-			if sandboxErr != nil {
-				return nil, fmt.Errorf("sandbox is enabled but the runtime is not available: %w\n\nTo disable sandbox, set 'sandbox.enabled: false' in ~/.config/astonish/config.yaml", sandboxErr)
-			}
-
-			// The daemon is always platform: session records must live in the
-			// team-scoped platform store (PG, or SQLite in localhost mode) so
-			// that the tenant-scoped HTTP handlers (list/delete/expose/proxy)
-			// observe exactly the containers created here — and only for the
-			// caller's own team.
-			//
-			// CRITICAL: the Studio chat agent (and this pool) is constructed
-			// ONCE, lazily, on the first chat request and then shared across
-			// every team for the life of the process. So we must NOT bind a
-			// single team's registry here — doing so would send every team's
-			// containers into whichever team happened to trigger the first
-			// chat. Instead we install a per-session resolver (below) that the
-			// pool invokes with the caller's org/team resolved from the live
-			// request context at bind time. The registry created here is only a
-			// last-resort fallback for sessions with no tenant context.
-			sessRegistry, regErr := sandbox.NewSessionRegistry()
-			if regErr != nil {
-				return nil, fmt.Errorf("sandbox is enabled but session registry failed: %w", regErr)
-			}
-
-			// Capture the platform backend so the per-session resolver can build
-			// a team-scoped registry for any org/team on demand. Resolved from
-			// the factory ctx's store service (stable for the process).
-			var sandboxSessionProvider store.SandboxSessionProvider
-			if svc := store.FromContext(ctx); svc != nil && svc.Platform != nil {
-				if provider, ok := svc.Platform.(store.SandboxSessionProvider); ok {
-					sandboxSessionProvider = provider
-				}
-			}
-
-			tplRegistry, tplErr := sandbox.NewTemplateRegistry()
-			if tplErr != nil {
-				if cfg.DebugMode {
-					slog.Warn("failed to create template registry", "error", tplErr)
-				}
-			}
-
-			// Create a pool that manages per-session LazyNodeClients.
-			// Each chat session gets its own container, created lazily
-			// on the first tool call for that session.
-			limits := sandbox.EffectiveLimits(&cfg.AppConfig.Sandbox)
-			nodePool := sandbox.NewNodeClientPool(sandboxClient, sessRegistry, tplRegistry, "", &limits)
-
-			// Install the per-session team registry resolver. NodeTool records
-			// the caller's org/team on the session (SetSessionScope) from the
-			// live request context; the pool calls this to obtain that team's
-			// DB-backed registry so the container record lands in the caller's
-			// own team schema. Returns nil when the platform backend does not
-			// support DB-backed sandbox sessions, in which case the pool falls
-			// back to the fallback registry above.
-			if sandboxSessionProvider != nil {
-				nodePool.SetRegistryResolver(func(orgSlug, teamSlug string) *sandbox.SessionRegistry {
-					if orgSlug == "" || teamSlug == "" {
-						return nil
-					}
-					sessStore := sandboxSessionProvider.SandboxSessionsForTeam(ctx, orgSlug, teamSlug)
-					if sessStore == nil {
-						return nil
-					}
-					return sandbox.NewSessionRegistryFromStore(sessStore)
-				})
-			}
-
-			// Wrap all tool category slices with NodeTool proxies (pool-backed).
-			// Browser tools are NOT wrapped — they run on the host and need direct
-			// access to Chrome. Each category slice is wrapped independently so
-			// deferred tools are already sandbox-ready when activated later.
-			coreTools = sandbox.WrapToolsWithNode(coreTools, nodePool)
-			if len(credToolsSlice) > 0 {
-				credToolsSlice = sandbox.WrapToolsWithNode(credToolsSlice, nodePool)
-			}
-			if len(schedToolsSlice) > 0 {
-				schedToolsSlice = sandbox.WrapToolsWithNode(schedToolsSlice, nodePool)
-			}
-			if len(distillToolsSlice) > 0 {
-				distillToolsSlice = sandbox.WrapToolsWithNode(distillToolsSlice, nodePool)
-			}
-			if len(emailToolsSlice) > 0 {
-				emailToolsSlice = sandbox.WrapToolsWithNode(emailToolsSlice, nodePool)
-			}
-			// Skill tools stay host-side; see the pool-backed sandbox path above.
-			// Note: browserToolsSlice is intentionally NOT wrapped — Manager
-			// drives in-container Chromium via SandboxEnabled callbacks.
-
-			// Hoist references for template tool registration
-			sandboxNodePool = nodePool
-			sandboxIncusClient = sandboxClient
-			sandboxTplRegistry = tplRegistry
-			sandboxSessRegistry = sessRegistry
-
-			// Wire browser to run inside the session container when sandbox is
-			// available. The browser resolves the session container (already
-			// managed by NodeClientPool) and starts Chromium + KasmVNC inside it.
-			// Pass nodePool so ContainerEnsureReadyFunc waits for the pool to
-			// provision the container on a browser-first tool call.
-			{
-				pool := nodePool // capture for closure
-				if WireIncusBrowserManager(browserMgr, sandboxClient, sandbox.AsNodePool(pool), pool.TouchActivity) {
-					// browser-in-sandbox enabled
-				}
-			}
-
-			// Wire sandbox pool to all lazy MCP toolsets so stdio MCP servers
-			// start inside the session's container instead of on the host.
-			// SSE transport servers are unaffected (isSSETransport check inside).
-			for _, lt := range lazyToolsets {
-				lt.SetSandboxPool(sandbox.AsNodePool(nodePool))
-			}
-
-			// Async refresh: check all templates for stale binaries in the background.
-			// Must NOT block startup (was the cause of the 502 bug).
-			if tplRegistry != nil {
-				go sandbox.RefreshAllIfNeeded(sandboxClient, tplRegistry)
-			}
-
-			// Auto-prune stale session containers from previous daemon runs.
-			// In platform mode, session IDs live in DB across many team schemas;
-			// startup pruning is skipped — use scheduled cleanup instead.
-
-			// Start idle watchdog: stops containers that have been inactive for the
-			// configured timeout (default 10 min), preserving them for fast restart.
-			idleTimeout := sandbox.EffectiveIdleTimeout(&cfg.AppConfig.Sandbox)
-			if idleTimeout > 0 {
-				idleCtx, idleCancel := context.WithCancel(context.Background())
-				nodePool.StartIdleWatchdog(idleCtx, idleTimeout)
-				cleanups = append(cleanups, idleCancel)
-				if cfg.DebugMode {
-					slog.Debug("sandbox idle watchdog enabled", "component", "chat-factory", "timeout", idleTimeout)
-				}
-			}
-
-			cleanups = append(cleanups, func() {
-				// Cleanup destroys all per-session containers
-				nodePool.Cleanup()
-			})
 
 		default:
 			return nil, fmt.Errorf("sandbox: unsupported backend kind %q", kind)
@@ -1592,9 +1450,9 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 	}
 
 	// Sandbox template tools → deferred category
-	if sandboxNodePool != nil && sandboxIncusClient != nil && sandboxTplRegistry != nil {
+	if backendSandbox != nil && backendSandboxPool != nil && sandboxTplRegistry != nil {
 		var sandboxTplTools []tool.Tool
-		tplTool, tplErr := tools.NewSaveSandboxTemplateTool(sandboxNodePool, sandboxIncusClient, sandboxTplRegistry, sandboxSessRegistry)
+		tplTool, tplErr := tools.NewSaveSandboxTemplateToolFromBackend(backendSandbox, sandboxTplRegistry, backendSessRegistry)
 		if tplErr != nil {
 			if cfg.DebugMode {
 				slog.Warn("failed to create save_sandbox_template tool", "error", tplErr)
@@ -1612,7 +1470,7 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			sandboxTplTools = append(sandboxTplTools, listTplTool)
 		}
 
-		useTplTool, useErr := tools.NewUseSandboxTemplateTool(sandboxNodePool, sandboxTplRegistry)
+		useTplTool, useErr := tools.NewUseSandboxTemplateToolFromBackend(backendSandboxPool, backendSandbox, sandboxTplRegistry)
 		if useErr != nil {
 			if cfg.DebugMode {
 				slog.Warn("failed to create use_sandbox_template tool", "error", useErr)
@@ -1641,7 +1499,13 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		drillToolsSlice = append(drillToolsSlice, drillTools...)
 	}
 
-	runDrillTool, runDrillErr := tools.NewRunDrillTool(sandboxNodePool, sandboxTplRegistry, browserMgr, adrill.NewLLMProviderFromModel(llm))
+	var runDrillTool tool.Tool
+	var runDrillErr error
+	if backendSandboxPool != nil {
+		runDrillTool, runDrillErr = tools.NewRunDrillToolWithPool(backendSandboxPool, sandboxTplRegistry, browserMgr, adrill.NewLLMProviderFromModel(llm))
+	} else {
+		runDrillTool, runDrillErr = tools.NewRunDrillTool(sandboxNodePool, sandboxTplRegistry, browserMgr, adrill.NewLLMProviderFromModel(llm))
+	}
 	if runDrillErr != nil {
 		if cfg.DebugMode {
 			slog.Warn("failed to create run_drill tool", "error", runDrillErr)
@@ -1650,7 +1514,13 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		drillToolsSlice = append(drillToolsSlice, runDrillTool)
 	}
 
-	injectCredsTool, injectCredsErr := tools.NewInjectDrillCredentialsTool(sandboxNodePool, sandboxTplRegistry, browserMgr)
+	var injectCredsTool tool.Tool
+	var injectCredsErr error
+	if backendSandboxPool != nil {
+		injectCredsTool, injectCredsErr = tools.NewInjectDrillCredentialsToolWithPool(backendSandboxPool, sandboxTplRegistry, browserMgr)
+	} else {
+		injectCredsTool, injectCredsErr = tools.NewInjectDrillCredentialsTool(sandboxNodePool, sandboxTplRegistry, browserMgr)
+	}
 	if injectCredsErr != nil {
 		if cfg.DebugMode {
 			slog.Warn("failed to create inject_drill_credentials tool", "error", injectCredsErr)

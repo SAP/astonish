@@ -35,7 +35,6 @@ import (
 	"github.com/SAP/astonish/pkg/memory"
 	"github.com/SAP/astonish/pkg/provider"
 	"github.com/SAP/astonish/pkg/sandbox"
-	incus "github.com/SAP/astonish/pkg/sandbox/incus"
 	k8sbackend "github.com/SAP/astonish/pkg/sandbox/k8s"
 	"github.com/SAP/astonish/pkg/sandbox/openshell"
 	"github.com/SAP/astonish/pkg/scheduler"
@@ -402,13 +401,16 @@ func Run(cfg RunConfig) error {
 				if entry == nil || entry.ContainerName == "" {
 					return nil, fmt.Errorf("no sandbox container for session %s", sessionID)
 				}
-				client, err := incus.Connect(incus.DetectPlatform())
-				if err != nil {
-					return nil, fmt.Errorf("failed to connect to sandbox: %w", err)
+				b, cleanup, bErr := sandbox.BackendFromAppConfig(freshCfg)
+				if bErr != nil {
+					return nil, fmt.Errorf("failed to connect to sandbox: %w", bErr)
 				}
-				reader, _, err := client.PullFile(entry.ContainerName, path)
+				if cleanup != nil {
+					defer cleanup()
+				}
+				reader, err := b.PullFile(context.Background(), sessionID, path)
 				if err != nil {
-					return nil, fmt.Errorf("failed to pull %s from container %s: %w", path, entry.ContainerName, err)
+					return nil, fmt.Errorf("failed to pull %s from sandbox %s: %w", path, sessionID, err)
 				}
 				defer reader.Close()
 				return io.ReadAll(reader)
@@ -2226,38 +2228,18 @@ func runCleanupCycle(appCfg *config.AppConfig, sessionStore *persistentsession.F
 			liveSessionIDs = sessionStore.AllSessionIDs()
 		}
 
-		kind := sandbox.BackendKind(appCfg.Sandbox.BackendKind())
-		switch kind {
-		case sandbox.BackendKindK8s:
-			b, cleanup, bErr := sandbox.BackendFromAppConfig(appCfg)
-			if bErr == nil {
-				if cleanup != nil {
-					defer cleanup()
-				}
-				registry, regErr := sandbox.NewSessionRegistry()
-				if regErr == nil {
-					ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-					pruned, _ := sandbox.PruneOrphansForBackend(ctx, b, registry, liveSessionIDs)
-					cancel()
-					if pruned > 0 {
-						logger.Printf("[cleanup] Pruned %d orphaned sandbox pod(s)", pruned)
-					}
-				}
+		b, cleanup, bErr := sandbox.BackendFromAppConfig(appCfg)
+		if bErr == nil {
+			if cleanup != nil {
+				defer cleanup()
 			}
-		default:
-			// Incus path (backward-compatible default)
-			platform := incus.DetectPlatform()
-			if platform != incus.PlatformUnsupported {
-				incus.SetActivePlatform(platform)
-				client, connErr := incus.Connect(platform)
-				if connErr == nil {
-					registry, regErr := sandbox.NewSessionRegistry()
-					if regErr == nil {
-						pruned, _ := sandbox.PruneOrphans(client, registry, liveSessionIDs)
-						if pruned > 0 {
-							logger.Printf("[cleanup] Pruned %d orphaned sandbox container(s)", pruned)
-						}
-					}
+			registry, regErr := sandbox.NewSessionRegistry()
+			if regErr == nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+				pruned, _ := sandbox.PruneOrphansForBackend(ctx, b, registry, liveSessionIDs)
+				cancel()
+				if pruned > 0 {
+					logger.Printf("[cleanup] Pruned %d orphaned sandbox session(s)", pruned)
 				}
 			}
 		}

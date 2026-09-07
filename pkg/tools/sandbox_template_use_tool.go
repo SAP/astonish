@@ -1,9 +1,11 @@
 package tools
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/SAP/astonish/pkg/sandbox"
 	"google.golang.org/adk/tool"
@@ -27,6 +29,8 @@ type UseSandboxTemplateResult struct {
 // useSandboxTemplateDeps holds the dependencies injected by the factory.
 type useSandboxTemplateDeps struct {
 	nodePool         *sandbox.NodeClientPool
+	toolPool         sandbox.ToolNodePool
+	backend          sandbox.Backend
 	templateRegistry *sandbox.TemplateRegistry
 }
 
@@ -58,6 +62,33 @@ func NewUseSandboxTemplateTool(nodePool *sandbox.NodeClientPool, templateRegistr
 		return nil, err
 	}
 
+	return t, nil
+}
+
+// NewUseSandboxTemplateToolFromBackend creates use_sandbox_template for
+// Docker/K8s/OpenShell sessions. Destroys the current session sandbox and
+// recreates it from the named overlay template.
+func NewUseSandboxTemplateToolFromBackend(pool sandbox.ToolNodePool, backend sandbox.Backend, templateRegistry *sandbox.TemplateRegistry) (tool.Tool, error) {
+	useSandboxTemplateDepsVar = &useSandboxTemplateDeps{
+		toolPool:         pool,
+		backend:          backend,
+		templateRegistry: templateRegistry,
+	}
+
+	t, err := functiontool.New(functiontool.Config{
+		Name: "use_sandbox_template",
+		Description: "Switch the current sandbox session to use a specific template. " +
+			"This tears down the current container (if any) and creates a new one from " +
+			"the specified overlay template, which includes all pre-installed dependencies and " +
+			"project code. Call this after the user selects a template from list_sandbox_templates. " +
+			"After this call, all file and shell tools will operate inside the new container. " +
+			"Browser tools use in-container Chromium — use localhost/127.0.0.1 in " +
+			"browser_navigate URLs. Before run_drill in Studio, " +
+			"use this tool when the suite template differs from the current sandbox.",
+	}, useSandboxTemplate)
+	if err != nil {
+		return nil, err
+	}
 	return t, nil
 }
 
@@ -107,6 +138,17 @@ func useSandboxTemplate(ctx tool.Context, args UseSandboxTemplateArgs) (UseSandb
 		}, nil
 	}
 
+	if deps.backend != nil && deps.toolPool != nil {
+		return useSandboxTemplateBackend(ctx, sessionID, name, deps)
+	}
+
+	if deps.nodePool == nil {
+		return UseSandboxTemplateResult{
+			Status:  "error",
+			Message: "Sandbox template system is not initialized. Ensure sandbox mode is enabled.",
+		}, nil
+	}
+
 	// Replace the session container with one cloned from the selected template
 	slog.Info("replacing session container with template", "component", "sandbox-template", "session", sessionID[:min(8, len(sessionID))], "template", name)
 	if err := deps.nodePool.ReplaceSession(sessionID, name); err != nil {
@@ -151,3 +193,41 @@ func useSandboxTemplate(ctx tool.Context, args UseSandboxTemplateArgs) (UseSandb
 	}, nil
 }
 
+func useSandboxTemplateBackend(_ tool.Context, sessionID, name string, deps *useSandboxTemplateDeps) (UseSandboxTemplateResult, error) {
+	slog.Info("replacing session sandbox with template", "component", "sandbox-template", "session", sessionID[:min(8, len(sessionID))], "template", name)
+	bctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if err := deps.backend.DestroySession(bctx, sessionID); err != nil {
+		slog.Warn("destroy before template switch failed", "component", "sandbox-template", "error", err)
+	}
+	deps.toolPool.Remove(sessionID)
+	client := deps.toolPool.GetOrCreateWithTemplate(sessionID, name)
+	if client == nil {
+		return UseSandboxTemplateResult{
+			Status:  "error",
+			Message: fmt.Sprintf("Failed to switch to template %q: sandbox pool is closed", name),
+		}, nil
+	}
+	client.BindSession(sessionID)
+	if err := client.EnsureReady(sessionID); err != nil {
+		return UseSandboxTemplateResult{
+			Status:  "error",
+			Message: fmt.Sprintf("Failed to switch to template %q: %v", name, err),
+		}, nil
+	}
+
+	files := sandbox.LookupBootstrapFiles(bctx, deps.templateRegistry, nil, name)
+	if err := sandbox.MaterializeBootstrapFiles(bctx, deps.backend, sessionID, files); err != nil {
+		slog.Warn("bootstrap inject after template switch failed", "component", "sandbox-template", "error", err)
+	}
+
+	msg := fmt.Sprintf("Sandbox container switched to template %q. All file and shell tools now "+
+		"operate inside a container with the template's pre-installed dependencies and project code. "+
+		"Browser tools use Chromium inside the same container — use http://localhost:<port> or "+
+		"http://127.0.0.1:<port> in browser_navigate.", name)
+	return UseSandboxTemplateResult{
+		Status:       "ok",
+		TemplateName: name,
+		Message:      msg,
+	}, nil
+}

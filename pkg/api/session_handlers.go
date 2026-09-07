@@ -953,39 +953,7 @@ func readFromSandboxContainer(r *http.Request, sessionID, filePath string) ([]by
 	} else if err != nil {
 		slog.Debug("sandbox backend unavailable for artifact read", "session", sessionID, "path", filePath, "error", err)
 	}
-
-	// Legacy Incus fallback.
-	appCfg, err := config.LoadAppConfig()
-	if err != nil || appCfg == nil || !sandbox.IsSandboxEnabled(&appCfg.Sandbox) {
-		return nil, false
-	}
-	registry, err := sandboxSessionRegistryForRequest(r)
-	if err != nil {
-		slog.Debug("failed to load sandbox session registry", "error", err)
-		return nil, false
-	}
-	entry := registry.Get(sessionID)
-	if entry == nil || entry.ContainerName == "" {
-		return nil, false
-	}
-	client, err := sandboxConnect()
-	if err != nil {
-		slog.Debug("failed to connect to sandbox for artifact read", "error", err)
-		return nil, false
-	}
-	reader, _, err := client.PullFile(entry.ContainerName, filePath)
-	if err != nil {
-		slog.Debug("failed to pull file from sandbox container",
-			"container", entry.ContainerName, "path", filePath, "error", err)
-		return nil, false
-	}
-	defer reader.Close()
-	content, err := io.ReadAll(reader)
-	if err != nil {
-		slog.Debug("failed to read file content from sandbox container", "error", err)
-		return nil, false
-	}
-	return content, true
+	return nil, false
 }
 
 func pullArtifactFromSandboxBackend(ctx context.Context, backend sandbox.Backend, sessionID, filePath string) ([]byte, bool) {

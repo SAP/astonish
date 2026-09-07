@@ -148,13 +148,14 @@ type SandboxConfig struct {
 
 	// Backend selects the sandbox execution implementation. Accepted
 	// values:
-	//   - ""      → "incus" (default; backward-compatible)
-	//   - "incus" → local Incus daemon (docs/architecture/sandbox-backends.md §4.1)
-	//   - "k8s"   → Kubernetes (portable overlay strategy; see
-	//                docs/architecture/sandbox-backends.md §4.2 + §10.
-	//                Phase F: fuse-overlayfs by default, kernel overlay
-	//                or auto fallback; Sysbox optional, not required.)
-	//   - "mock"  → in-memory mock (tests only)
+	//   - ""       → "docker" (local OverlayFS sessions)
+	//   - "docker" → Docker + OverlayFS (Linux and macOS)
+	//   - "incus"  → treated as "docker" (legacy alias; Incus is removed)
+	//   - "k8s"    → Kubernetes (portable overlay strategy; see
+	//                 docs/architecture/sandbox-backends.md §4.2 + §10.
+	//                 Phase F: fuse-overlayfs by default, kernel overlay
+	//                 or auto fallback; Sysbox optional, not required.)
+	//   - "mock"   → in-memory mock (tests only)
 	//
 	// When "k8s" is selected, the Kubernetes sub-config below is
 	// consulted. When any other value is selected, the Kubernetes
@@ -517,16 +518,13 @@ func (c *SandboxKubernetesConfig) K8sMaxUpperReclaimsPerCycle() int {
 	return 500
 }
 
-// BackendKind returns the configured backend, lower-cased, with ""
-// normalising to "docker", "incus" kept for explicit legacy configs,
-// and "kubernetes" aliased to "k8s".
+// BackendKind returns the configured backend, lower-cased, with "" and
+// legacy "incus" normalising to "docker", and "kubernetes" aliased to "k8s".
 func (c *SandboxConfig) BackendKind() string {
 	b := strings.ToLower(strings.TrimSpace(c.Backend))
 	switch b {
-	case "":
+	case "", "incus":
 		return "docker"
-	case "incus":
-		return "incus"
 	case "kubernetes":
 		return "k8s"
 	default:

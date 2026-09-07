@@ -158,22 +158,77 @@ func (db *DockerBackend) BuildTemplate(ctx context.Context, spec sandbox.Templat
 		return nil, fmt.Errorf("sandbox/docker: BuildTemplate wait ready: %w", err)
 	}
 
-	// Run each build step.
+	// fuse-overlayfs rejects apt's _apt sandbox user (uid 42) and dpkg
+	// postinsts that try to start systemd services (docker.io). Persist
+	// apt/dpkg policy in the overlay before the first package step.
+	if err := db.execBuildStep(ctx, sess.SessionID, -1, overlayAptPrepScript()); err != nil {
+		return nil, err
+	}
+
 	for i, step := range spec.Steps {
-		result, err := db.Exec(ctx, sess.SessionID, sandbox.ExecSpec{
-			Command: []string{"sh", "-c", step},
-		})
-		if err != nil {
-			return nil, fmt.Errorf("sandbox/docker: BuildTemplate step %d: %w", i, err)
-		}
-		if result.ExitCode != 0 {
-			return nil, fmt.Errorf("sandbox/docker: BuildTemplate step %d exited %d: %s",
-				i, result.ExitCode, string(result.Stderr))
+		if err := db.execBuildStep(ctx, sess.SessionID, i, step); err != nil {
+			return nil, err
 		}
 	}
 
 	// Capture the upper directory as a new template layer.
-	return db.captureUpperAsLayer(ctx, buildSessionID, spec.TemplateID)
+	return db.captureUpperAsLayer(ctx, sess.SessionID, spec.TemplateID)
+}
+
+func (db *DockerBackend) execBuildStep(ctx context.Context, sessionID string, i int, step string) error {
+	result, err := db.Exec(ctx, sessionID, sandbox.ExecSpec{
+		Command: []string{"sh", "-c", step},
+		Env: map[string]string{
+			"DEBIAN_FRONTEND":          "noninteractive",
+			"NEEDRESTART_MODE":         "l",
+			"APT_LISTCHANGES_FRONTEND": "none",
+		},
+	})
+	if err != nil {
+		if i < 0 {
+			return fmt.Errorf("sandbox/docker: BuildTemplate apt prep: %w", err)
+		}
+		return fmt.Errorf("sandbox/docker: BuildTemplate step %d: %w", i, err)
+	}
+	if result == nil || result.ExitCode == 0 {
+		return nil
+	}
+	if i < 0 {
+		return fmt.Errorf("sandbox/docker: BuildTemplate apt prep exited %d: %s",
+			result.ExitCode, formatExecOutput(result.Stdout, result.Stderr))
+	}
+	return fmt.Errorf("sandbox/docker: BuildTemplate step %d exited %d: %s",
+		i, result.ExitCode, formatExecOutput(result.Stdout, result.Stderr))
+}
+
+// overlayAptPrepScript makes apt/dpkg usable inside a fuse-overlayfs chroot.
+// APT::Sandbox::User=root avoids EOPNOTSUPP from the _apt uid-42 sandbox.
+// policy-rc.d 101 blocks service starts (docker.io postinst).
+func overlayAptPrepScript() string {
+	return strings.Join([]string{
+		"set -e",
+		"mkdir -p /etc/apt/apt.conf.d /etc/dpkg/dpkg.cfg.d /usr/sbin",
+		`cat > /etc/apt/apt.conf.d/99astonish-overlay <<'EOF'`,
+		`APT::Sandbox::User "root";`,
+		`Dpkg::Use-Pty "false";`,
+		"EOF",
+		"echo force-unsafe-io > /etc/dpkg/dpkg.cfg.d/docker-unsafe-io",
+		`printf '%s\n' '#!/bin/sh' 'exit 101' > /usr/sbin/policy-rc.d`,
+		"chmod 0755 /usr/sbin/policy-rc.d",
+	}, "\n")
+}
+
+func formatExecOutput(stdout, stderr []byte) string {
+	combined := strings.TrimSpace(string(stderr) + "\n" + string(stdout))
+	combined = strings.TrimSpace(combined)
+	if combined == "" {
+		return "(no output)"
+	}
+	const max = 2500
+	if len(combined) > max {
+		return "..." + combined[len(combined)-max:]
+	}
+	return combined
 }
 
 // SaveSessionAsTemplate captures the upper layer of a running session and

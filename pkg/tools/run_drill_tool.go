@@ -1172,16 +1172,8 @@ func buildDrillInjectionTarget(ctx tool.Context, deps *runDrillDeps) (adrill.Inj
 		if _, err := deps.lazyClient.EnsureContainerReady(target.SessionID); err != nil {
 			return target, fmt.Errorf("sandbox not ready for credential injection: %w", err)
 		}
-		client := deps.lazyClient.GetIncusClient()
-		containerName := deps.lazyClient.GetContainerName()
-		if client != nil && containerName != "" {
-			target.ExecIncus = func(command []string, env map[string]string) ([]byte, []byte, int, error) {
-				out, err := sandbox.ExecSimpleWithEnv(client, containerName, command, env)
-				if err != nil {
-					return nil, nil, -1, err
-				}
-				return []byte(out), nil, 0, nil
-			}
+		if bp, ok := interface{}(deps.lazyClient).(interface{ GetBackend() sandbox.Backend }); ok {
+			target.Backend = bp.GetBackend()
 		}
 		return target, nil
 	}
@@ -1229,19 +1221,8 @@ func buildDrillInjectionTarget(ctx tool.Context, deps *runDrillDeps) (adrill.Inj
 			if _, err := lazy.EnsureContainerReady(sessionID); err != nil {
 				return target, fmt.Errorf("sandbox not ready for credential injection: %w", err)
 			}
-			client := lazy.GetIncusClient()
-			containerName := lazy.GetContainerName()
-			if client != nil && containerName != "" {
-				target.ExecIncus = func(command []string, env map[string]string) ([]byte, []byte, int, error) {
-					out, err := sandbox.ExecSimpleWithEnv(client, containerName, command, env)
-					if err != nil {
-						return nil, nil, -1, err
-					}
-					return []byte(out), nil, 0, nil
-				}
-			}
 		}
-		if backend := deps.nodePool.GetBackend(); backend != nil && target.ExecIncus == nil {
+		if backend := deps.nodePool.GetBackend(); backend != nil {
 			target.Backend = backend
 		}
 	}
@@ -1341,12 +1322,14 @@ func drillLazyPathExists(lazy *sandbox.LazyNodeClient, sessionID, path string) b
 	if err != nil || containerName == "" {
 		return false
 	}
-	client := lazy.GetIncusClient()
-	if client == nil {
+	raw, err := lazy.Call(sessionID, "shell_command", map[string]interface{}{
+		"command": "test -f " + path,
+	})
+	if err != nil {
 		return false
 	}
-	exitCode, err := client.ExecSimple(containerName, []string{"test", "-f", path})
-	return err == nil && exitCode == 0
+	_ = raw
+	return true
 }
 
 func drillPathExists(ctx tool.Context, deps *runDrillDeps, path string) bool {

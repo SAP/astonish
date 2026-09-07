@@ -3,6 +3,6 @@
 //
 // It is a leaf package: it must not import any other astonish sandbox
 // package. This breaks what would otherwise be an import cycle between
-// pkg/sandbox and pkg/sandbox/incus, both of which need access to the
+// pkg/sandbox and backend implementations, which need access to the
 // TemplateRegistry.
 package tmplmeta

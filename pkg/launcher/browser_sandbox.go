@@ -9,13 +9,6 @@ import (
 	"github.com/SAP/astonish/pkg/sandbox/openshell"
 )
 
-// WireIncusBrowserManager configures mgr for in-container Chromium (Incus).
-// When pool is non-nil, ContainerEnsureReadyFunc is set so browser tools wait
-// for the pool to provision the container before resolving it.
-func WireIncusBrowserManager(mgr *browser.Manager, client *sandbox.IncusClient, pool sandbox.ToolNodePool, touchActivity func(sessionID string)) bool {
-	return sandbox.WireIncusBrowserManager(mgr, client, pool, touchActivity)
-}
-
 // WireOpenShellBrowserManager configures mgr for in-container CloakBrowser (OpenShell).
 func WireOpenShellBrowserManager(
 	mgr *browser.Manager,

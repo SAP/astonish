@@ -1,36 +1,11 @@
-// Package sandbox — SandboxBackend interface (Phase B.1).
+// Package sandbox — SandboxBackend interface.
 //
 // This file defines the runtime-backend abstraction described in
-// docs/architecture/sandbox-backends.md §3. It was the first of several Phase
-// B slices; B.1 ONLY introduces the interface + shared value types. No existing
-// code is rewired, no Incus code is moved, no call sites are changed. Behavior
-// is identical before and after this commit.
-//
-// Subsequent slices:
-//   - B.2 ✅: pkg/sandbox/incus/ subpackage created with *IncusClient and its
-//            close dependencies. IncusBackend adapter (pkg/sandbox/incus_backend.go)
-//            satisfies this interface by delegating to existing sandbox helpers.
-//   - B.3 ✅: Backend factory (sandbox.NewBackend), NodeClientPool.GetBackend()
-//            accessor, and Backend contract test. Per-call-site migration to
-//            the Backend interface is an incremental follow-on gated on
-//            Phase A (template/layer-store semantics) and new Backend methods
-//            for below-abstraction concerns (direct dial, template-container
-//            PTY). Existing *IncusClient consumers continue to work via the
-//            additive shim layer.
-//   - B.4 ✅: MockBackend added in pkg/sandbox/mock, registered with
-//            sandbox.NewBackend via RegisterBackendFactory hook; Backend
-//            contract helper promoted out of _test.go so external packages
-//            can invoke it. MockBackend runs clean through
-//            RunBackendContract.
-//   - B.5 ✅: External callers migrated to import pkg/sandbox/incus
-//            directly; public shim files (shims_incus.go, shims_incus_ext.go)
-//            deleted; only internally-used names kept as aliases in
-//            pkg/sandbox/incus_aliases.go (documented as an internal
-//            bridge, not a public API surface).
+// docs/architecture/sandbox-backends.md §3.
 //
 // Scope notes:
 //   - Types in this file are deliberately backend-neutral. Backend-specific
-//     handles (Incus snapshot names, K8s pod names) belong in an opaque
+//     handles (Docker container names, K8s pod names) belong in an opaque
 //     BackendRef field, not in the public shape.
 //   - The interface is intentionally *narrower* than the union of existing
 //     pkg/sandbox free functions. Higher-level orchestration (scope-aware
@@ -245,6 +220,9 @@ const (
 // BaseTemplateID. Docker and K8s store @base as a content-addressed overlay
 // layer; OpenShell uses the sandbox image as the rootfs.
 const BaseTemplateID = "@base"
+
+// BaseTemplate is the registry slug for @base without the leading @.
+const BaseTemplate = "base"
 
 // SessionType distinguishes the two long-running session flavors.
 type SessionType string

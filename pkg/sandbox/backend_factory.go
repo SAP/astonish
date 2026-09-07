@@ -63,9 +63,6 @@ type BackendFactoryConfig struct {
 	//   - "openshell"    → OpenShellBackend
 	Kind BackendKind
 
-	// Client is the Incus daemon client. Required for Kind == "incus".
-	Client *IncusClient
-
 	// Sessions is the session registry. Required for all kinds.
 	Sessions *SessionRegistry
 
@@ -120,19 +117,13 @@ type DockerRuntimeConfig struct {
 func NewBackend(cfg BackendFactoryConfig) (Backend, error) {
 	kind := cfg.Kind
 	if kind == "" {
-		kind = BackendKindIncus
+		kind = BackendKindDocker
+	}
+	if kind == BackendKindIncus {
+		kind = BackendKindDocker
 	}
 
-	// Built-in kinds first. Incus lives in pkg/sandbox itself and cannot
-	// go through the registry (it would cause a self-reference at init).
 	switch kind {
-	case BackendKindIncus:
-		return NewIncusBackend(IncusBackendConfig{
-			Client:     cfg.Client,
-			Sessions:   cfg.Sessions,
-			Templates:  cfg.Templates,
-			DefaultLim: cfg.DefaultLim,
-		})
 	case BackendKindDocker, BackendKindK8s, BackendKindOpenShell, BackendKindMock:
 		// Fall through to registry lookup.
 	default:

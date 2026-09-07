@@ -44,7 +44,7 @@ func SetupFlowSandbox(appCfg *config.AppConfig, internalTools []tool.Tool) (*Flo
 	kind := BackendKind(appCfg.Sandbox.BackendKind())
 
 	switch kind {
-	case BackendKindK8s, BackendKindOpenShell, BackendKindMock:
+	case BackendKindDocker, BackendKindK8s, BackendKindOpenShell, BackendKindMock, BackendKindIncus, "":
 		// Backend-agnostic path: any Backend implementation feeds a
 		// ToolNodePool via NewBackendPool. SetupFlowSandbox does NOT
 		// own the Backend — BackendFromAppConfig constructs it and
@@ -72,32 +72,6 @@ func SetupFlowSandbox(appCfg *config.AppConfig, internalTools []tool.Tool) (*Flo
 		slog.Debug("flow sandbox wired to backend-agnostic pool",
 			"component", "sandbox", "kind", kind, "tool_count", len(wrapped))
 		return &FlowSandboxResult{Tools: wrapped, Cleanup: cleanup}, nil
-
-	case BackendKindIncus, "":
-		// Legacy path — unchanged from pre-Phase-E. Keeps *NodeClientPool
-		// concrete so chat/fleet callers that pass the same pool object
-		// around see identical behaviour.
-		SetSandboxConfig(&appCfg.Sandbox)
-		client, err := SetupSandboxRuntime()
-		if err != nil {
-			return nil, fmt.Errorf("sandbox runtime not available: %w", err)
-		}
-
-		sessRegistry, err := NewSessionRegistry()
-		if err != nil {
-			return nil, fmt.Errorf("session registry failed: %w", err)
-		}
-
-		tplRegistry, _ := NewTemplateRegistry()
-
-		limits := EffectiveLimits(&appCfg.Sandbox)
-		pool := NewNodeClientPool(client, sessRegistry, tplRegistry, "", &limits)
-		wrapped := WrapToolsWithNode(internalTools, pool)
-
-		return &FlowSandboxResult{
-			Tools:   wrapped,
-			Cleanup: pool.Cleanup,
-		}, nil
 
 	default:
 		return nil, fmt.Errorf("sandbox: unsupported backend kind %q for flow setup", kind)

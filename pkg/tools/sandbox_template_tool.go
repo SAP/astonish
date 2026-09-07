@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/SAP/astonish/pkg/sandbox"
-	incus "github.com/SAP/astonish/pkg/sandbox/incus"
 	"github.com/SAP/astonish/pkg/store"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
@@ -49,7 +48,6 @@ type SaveSandboxTemplateResult struct {
 type sandboxTemplateDeps struct {
 	backend          sandbox.Backend
 	nodePool         *sandbox.NodeClientPool
-	incusClient      *incus.IncusClient
 	templateRegistry *sandbox.TemplateRegistry
 	sessionRegistry  *sandbox.SessionRegistry
 }
@@ -64,10 +62,9 @@ var sandboxTemplateDepsVar *sandboxTemplateDeps
 // The wizard calls it after installing all project dependencies and cloning
 // the repo inside the container. Later, fleet sessions clone from this
 // custom template instead of @base.
-func NewSaveSandboxTemplateTool(nodePool *sandbox.NodeClientPool, incusClient *incus.IncusClient, templateRegistry *sandbox.TemplateRegistry, sessionRegistry *sandbox.SessionRegistry) (tool.Tool, error) {
+func NewSaveSandboxTemplateTool(nodePool *sandbox.NodeClientPool, templateRegistry *sandbox.TemplateRegistry, sessionRegistry *sandbox.SessionRegistry) (tool.Tool, error) {
 	sandboxTemplateDepsVar = &sandboxTemplateDeps{
 		nodePool:         nodePool,
-		incusClient:      incusClient,
 		templateRegistry: templateRegistry,
 		sessionRegistry:  sessionRegistry,
 	}
@@ -134,127 +131,9 @@ func saveSandboxTemplate(ctx tool.Context, args SaveSandboxTemplateArgs) (SaveSa
 	if deps.backend != nil {
 		return saveSandboxTemplateBackend(ctx, args, deps)
 	}
-
-	// Get session ID to find the right container
-	var sessionID string
-	if ctx != nil {
-		sessionID = ctx.SessionID()
-	}
-	if sessionID == "" {
-		return SaveSandboxTemplateResult{
-			Status:  "error",
-			Message: "No session ID available. Cannot determine which container to snapshot.",
-		}, nil
-	}
-
-	// Validate args
-	name := strings.TrimSpace(args.TemplateName)
-	if name == "" {
-		return SaveSandboxTemplateResult{
-			Status:  "error",
-			Message: "template_name is required. Use a lowercase, hyphenated name like 'my-project'.",
-		}, nil
-	}
-
-	if name == incus.BaseTemplate || name == sandbox.BaseTemplateID {
-		return SaveSandboxTemplateResult{
-			Status:  "error",
-			Message: "Cannot use 'base' as a template name (reserved).",
-		}, nil
-	}
-
-	// Get the container name for this session from the pool
-	containerName := deps.nodePool.GetContainerName(sessionID)
-	if containerName == "" {
-		return SaveSandboxTemplateResult{
-			Status:  "error",
-			Message: "No active sandbox container for this session. The container must be running before creating a template.",
-		}, nil
-	}
-
-	// 1. Stop the node process (must be quiescent for snapshot)
-	slog.Info("stopping node for template creation", "component", "sandbox-template", "session", sessionID[:min(8, len(sessionID))])
-	if err := deps.nodePool.StopNode(sessionID); err != nil {
-		slog.Warn("failed to stop node, continuing anyway", "component", "sandbox-template", "error", err)
-	}
-
-	// Determine the source template this session was based on.
-	// This is critical for the overlay chain — the new template must
-	// reference the source template as its BasedOn, not just @base.
-	// Otherwise, files from intermediate template layers are lost.
-	sourceTemplate := ""
-	if deps.sessionRegistry != nil {
-		if entry := deps.sessionRegistry.Get(sessionID); entry != nil {
-			sourceTemplate = entry.TemplateName
-			slog.Info("session based on template", "component", "sandbox-template", "session", sessionID[:min(8, len(sessionID))], "template", sourceTemplate)
-		}
-	}
-
-	// 2. Create the template from the container
-	slog.Info("creating template from container", "component", "sandbox-template", "template", name, "container", containerName)
-	flattened, err := sandbox.CreateTemplateFromContainer(
-		deps.incusClient,
-		deps.templateRegistry,
-		containerName,
-		name,
-		strings.TrimSpace(args.Description),
-		sourceTemplate,
-		args.Overwrite,
-	)
-	if err != nil {
-		// Try to restart node even on failure
-		if restartErr := deps.nodePool.RestartNode(sessionID); restartErr != nil {
-			slog.Warn("failed to restart node after template creation failure", "component", "sandbox-template", "error", restartErr)
-		}
-		msg := fmt.Sprintf("Failed to create template: %v", err)
-		if args.Overwrite && strings.Contains(err.Error(), "not found in registry") {
-			msg += " Self-overwrite must keep the source template until flatten completes; " +
-				"restart Studio with the latest binary and retry save_sandbox_template(overwrite: true). " +
-				"If the template was already deleted, stay on this session and save again (recovery materializes the live rootfs onto @base)."
-		}
-		return SaveSandboxTemplateResult{
-			Status:  "error",
-			Message: msg,
-		}, nil
-	}
-
-	// 3. Restart the node process so the session can continue
-	slog.Info("restarting node", "component", "sandbox-template")
-	if err := deps.nodePool.RestartNode(sessionID); err != nil {
-		return SaveSandboxTemplateResult{
-			Status:       "warning",
-			TemplateName: name,
-			Message: fmt.Sprintf("Template %q created successfully, but failed to restart the node: %v. "+
-				"You may need to restart the session.", name, err),
-		}, nil
-	}
-
-	bootstrapNote := ""
-	if len(args.BootstrapFiles) > 0 {
-		files := make([]store.BootstrapFile, 0, len(args.BootstrapFiles))
-		for _, f := range args.BootstrapFiles {
-			files = append(files, store.BootstrapFile{Path: f.Path, Content: f.Content, Mode: f.Mode})
-		}
-		if err := sandbox.PersistBootstrapFiles(deps.templateRegistry, name, files); err != nil {
-			slog.Warn("failed to persist bootstrap_files on template registry", "component", "sandbox-template", "template", name, "error", err)
-			bootstrapNote = fmt.Sprintf(" Warning: bootstrap_files were not saved (%v).", err)
-		} else {
-			bootstrapNote = fmt.Sprintf(" Saved %d bootstrap file(s) for injection on every launch.", len(files))
-		}
-	}
-
-	action := "created"
-	if args.Overwrite {
-		action = "updated"
-	}
-	if flattened {
-		action = "updated (flattened onto parent template)"
-	}
 	return SaveSandboxTemplateResult{
-		Status:       "saved",
-		TemplateName: name,
-		Message: fmt.Sprintf("Template %q %s and ready for cloning. "+
-			"Pass template: %q to save_fleet_plan to bind fleet sessions to this template.%s", name, action, name, bootstrapNote),
+		Status:  "error",
+		Message: "Sandbox template system requires a Docker, Kubernetes, or OpenShell backend.",
 	}, nil
 }
 

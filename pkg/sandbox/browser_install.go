@@ -1,11 +1,8 @@
-package incus
+package sandbox
 
 import (
 	"fmt"
-	"io"
-	"log/slog"
 	"strings"
-	"time"
 )
 
 // kasmvncConfigYAML returns the KasmVNC config written into browsersandboxes.
@@ -66,10 +63,6 @@ const (
 	internalCDPPort = 9223
 	// BrowserProfileMountPath is the Chromium profile dir inside containers.
 	BrowserProfileMountPath = "/home/browser/.config/chromium"
-	// browserLaunchScriptPath is where StartChromiumInContainer writes the
-	// launch script before exec. Running by path keeps kill needles out of
-	// the launcher process argv (defense in depth against pkill -f self-match).
-	browserLaunchScriptPath = "/tmp/astonish-browser-launch.sh"
 
 	// kasmVNCVersion is the KasmVNC release version to install.
 	kasmVNCVersion = "1.4.0"
@@ -81,8 +74,7 @@ const (
 type LinuxDistro string
 
 const (
-	// DistroUbuntuNoble is Ubuntu 24.04 LTS (noble). Used by Incus containers
-	// (DefaultBaseImage = "ubuntu/24.04" in template.go).
+	// DistroUbuntuNoble is Ubuntu 24.04 LTS (noble).
 	DistroUbuntuNoble LinuxDistro = "ubuntu-noble"
 	// DistroDebianBookworm is Debian 12 (bookworm). Used by the K8s sandbox-base
 	// image (docker/sandbox-base/Dockerfile: FROM debian:bookworm-slim).
@@ -260,8 +252,7 @@ unsigned long getauxval(unsigned long type)
 // and is used to select the correct KasmVNC .deb for the platform.
 //
 // The distro parameter selects distro-specific package names and repository
-// configuration. Incus containers use DistroUbuntuNoble; K8s sandbox-base
-// uses DistroDebianBookworm. Key differences:
+// configuration. Docker OverlayFS and K8s sandbox-base use DistroDebianBookworm. Key differences:
 //   - ALSA library: libasound2t64 (noble) vs libasound2 (bookworm)
 //   - GLib/GObject: libglib2.0-0t64 (noble) vs libglib2.0-0 (bookworm)
 //   - libjpeg-turbo: libjpeg-turbo8 (noble) vs libjpeg62-turbo (bookworm)
@@ -697,85 +688,6 @@ exit 1`, download, download)
 	return []string{"sh", "-c", script}
 }
 
-// StartKasmVNC starts KasmVNC inside a container for human visual access.
-// It runs as the "browser" user on the specified port.
-//
-// Authentication is disabled via -DisableBasicAuth because the Studio reverse
-// proxy already provides access control.
-//
-// Prerequisites (handled by template install commands):
-//   - KasmVNC installed via .deb
-//   - "browser" user exists
-//   - ~/.vnc/xstartup, ~/.vnc/.de-was-selected, ~/.vnc/kasmvnc.yaml pre-created
-//   - Default "user" KasmVNC account pre-created with kasmvncpasswd
-func StartKasmVNC(client *IncusClient, containerName string, cfg BrowserContainerConfig) error {
-	port := cfg.KasmVNCPort
-	if port == 0 {
-		port = DefaultKasmVNCPort
-	}
-
-	width := cfg.ViewportWidth
-	if width == 0 {
-		width = 1920
-	}
-	height := cfg.ViewportHeight
-	if height == 0 {
-		height = 1080
-	}
-
-	// Rewrite user yaml on every start so old session templates (and the
-	// package default of 1024×768) cannot win when allow_resize is false.
-	writeYAML := []string{"sh", "-c", fmt.Sprintf(`mkdir -p /home/browser/.vnc && cat > /home/browser/.vnc/kasmvnc.yaml << 'KASMCFG'
-%s
-KASMCFG
-chown browser:browser /home/browser/.vnc/kasmvnc.yaml`, kasmvncConfigYAML(width, height))}
-	if exitCode, output, err := ExecWithOutput(client, containerName, writeYAML); err != nil {
-		return fmt.Errorf("failed to write KasmVNC config: %w (output: %s)", err, output)
-	} else if exitCode != 0 {
-		return fmt.Errorf("failed to write KasmVNC config (exit %d): %s", exitCode, strings.TrimSpace(output))
-	}
-
-	// Use runuser instead of su — in unprivileged LXC containers on
-	// Docker+Incus, su fails with "Authentication failure" because PAM
-	// can't read /etc/shadow through the UID namespace mapping.
-	// runuser (part of util-linux) bypasses PAM authentication.
-	//
-	// Note: /home/browser ownership is correct because ShiftTemplateRootfs
-	// shifts ALL UIDs (not just root) during template creation. The shifted
-	// UIDs are captured in the snapshot and inherited by session containers.
-	geometry := fmt.Sprintf("%dx%d", width, height)
-	// -AcceptSetDesktopSize 0 prevents the Studio/noVNC client from shrinking
-	// the X framebuffer to the host canvas (breaks ffmpeg x11grab at configured size).
-	startCmd := []string{"runuser", "-l", "browser", "-c",
-		fmt.Sprintf("vncserver :%s -geometry %s -depth 24 -websocketPort %d -DisableBasicAuth -AcceptSetDesktopSize 0",
-			kasmVNCDisplay,
-			geometry,
-			port,
-		),
-	}
-
-	// Use ExecWithOutput to capture stdout+stderr — previous iterations
-	// of this code used ExecSimple which discarded all output, making it
-	// impossible to diagnose failures without manual incus exec debugging.
-	exitCode, output, err := ExecWithOutput(client, containerName, startCmd)
-	if err != nil {
-		return fmt.Errorf("failed to start KasmVNC: %w (output: %s)", err, output)
-	}
-	// Exit code 29 means "a VNC server is already running" on this display.
-	if exitCode != 0 && exitCode != 29 {
-		return fmt.Errorf("KasmVNC start exited with code %d: %s", exitCode, strings.TrimSpace(output))
-	}
-
-	return nil
-}
-
-// StopKasmVNC is a no-op. Xvnc serves as the X display server for headed
-// Chromium and must remain running for the container's lifetime. VNC proxy
-// access is controlled by the handoff token registry in the auth middleware.
-func StopKasmVNC(_ *IncusClient, _ string, _ int) error {
-	return nil
-}
-
 // browserStackHealthyScript returns a shell snippet that exits 0 when Chromium
 // (or CloakBrowser) and the socat CDP bridge are both listening. Used for
 // idempotent StartChromiumInContainer and script-level skip-if-running.
@@ -838,7 +750,7 @@ fi
 
 // buildLaunchScript generates the shell script that starts the browser inside
 // the container. Extracted from StartChromiumInContainer so it can be tested
-// without a real IncusClient.
+// without a live sandbox session.
 //
 // The script is idempotent: if Chromium + socat are already healthy it exits 0
 // without stacking another instance. Half-dead remnants are killed first.
@@ -867,10 +779,7 @@ func buildLaunchScript(engine string, cfg BrowserContainerConfig, width, height 
 	// which intercepts getauxval() and masks HWCAP/HWCAP2 down to safe ARMv8.0
 	// baseline features. This forces all libraries to use their baseline NEON
 	// code paths which work correctly.
-	ldPreload := ""
-	if GetActivePlatform() == PlatformDockerIncus {
-		ldPreload = "LD_PRELOAD=/usr/lib/hwcap_mask.so "
-	}
+	ldPreload := "LD_PRELOAD=/usr/lib/hwcap_mask.so "
 
 	idempotentPreamble := fmt.Sprintf(`# Idempotent: reuse a healthy browser stack (CDP reconnect path).
 if %s; then
@@ -978,164 +887,11 @@ fi
 	}
 }
 
-// isBrowserStackHealthy reports whether Chromium (or CloakBrowser) and the
-// socat CDP bridge are already up inside the container.
-func isBrowserStackHealthy(client *IncusClient, containerName string) bool {
-	if client == nil || containerName == "" {
-		return false
-	}
-	cmd := []string{"sh", "-c", browserStackHealthyScript()}
-	exitCode, err := client.ExecSimple(containerName, cmd)
-	return err == nil && exitCode == 0
-}
-
-// StartChromiumInContainer launches the browser inside the container with
-// remote debugging enabled so go-rod can connect via CDP.
-//
-// Chromium always binds its DevTools server to 127.0.0.1 (the
-// --remote-debugging-address flag only works in content_shell, not the full
-// browser). We work around this by running Chromium on internalCDPPort
-// (loopback) and using socat to forward from 0.0.0.0:DefaultCDPPort to
-// 127.0.0.1:internalCDPPort, making CDP accessible from the host.
-//
-// Both engines run Chromium in headed mode on DISPLAY=:0. The X server is
-// provided by KasmVNC (Xvnc), which is started first and persists for the
-// container's lifetime.
-//
-// Idempotent: if the browser stack is already healthy, this is a no-op so
-// CDP reconnect after a dead pipe does not stack Chromium/socat processes.
-func StartChromiumInContainer(client *IncusClient, containerName string, cfg BrowserContainerConfig) error {
-	width := cfg.ViewportWidth
-	if width == 0 {
-		width = 1920
-	}
-	height := cfg.ViewportHeight
-	if height == 0 {
-		height = 1080
-	}
-
-	// Start KasmVNC (Xvnc) as the X server for display :0. This provides
-	// both the virtual display for headed Chromium and the VNC web client
-	// for human handoff sessions. Xvnc stays alive for the container's
-	// lifetime — it IS the display backend.
-	if err := StartKasmVNC(client, containerName, cfg); err != nil {
-		return fmt.Errorf("failed to start Xvnc display server: %w", err)
-	}
-
-	// Fast path: Chromium + socat already healthy (Manager reconnect).
-	if isBrowserStackHealthy(client, containerName) {
-		slog.Info("browser stack already healthy; skipping relaunch",
-			"component", "incus-browser", "container", containerName)
-		return nil
-	}
-
-	// Brief wait for Xvnc to be ready to accept X11 connections.
-	time.Sleep(1 * time.Second)
-
-	// Allow any local user (root, browser) to connect to the Xvnc display.
-	xhostCmd := []string{"runuser", "-l", "browser", "-c",
-		fmt.Sprintf("DISPLAY=:%s xhost +local:", kasmVNCDisplay),
-	}
-	exitCode, err := client.ExecSimple(containerName, xhostCmd)
-	if err != nil {
-		slog.Warn("xhost +local: failed", "container", containerName, "error", err)
-	} else if exitCode != 0 {
-		slog.Warn("xhost +local: exited with non-zero code", "container", containerName, "exit_code", exitCode)
-	}
-
-	engine := DetectBrowserEngine(cfg)
-
-	launchScript := buildLaunchScript(engine, cfg, width, height)
-
-	// Use ExecWithOutput to capture stdout+stderr for diagnostic error messages.
-	// The launch script runs background processes (chromium &, socat &) so we
-	// wrap it in sh -c ourselves rather than using ExecWithOutput's wrapper.
-	if err := runBrowserLaunchScript(client, containerName, launchScript); err != nil {
-		// Transient SIGTERM (exit 143) often races idle stop / exec teardown.
-		// Retry once after a short pause; launch script itself killStales first.
-		if isLaunchExit143(err) {
-			slog.Warn("browser launch interrupted by SIGTERM; retrying once",
-				"component", "incus-browser", "container", containerName, "error", err)
-			time.Sleep(1 * time.Second)
-			if retryErr := runBrowserLaunchScript(client, containerName, launchScript); retryErr != nil {
-				return retryErr
-			}
-		} else {
-			return err
-		}
-	}
-
-	// Wait briefly for Chromium + socat to settle after launch.
-	time.Sleep(1 * time.Second)
-
-	return nil
-}
-
-// runBrowserLaunchScript writes the launch script to a temp file inside the
-// container, then runs it by path so the launcher process argv does not embed
-// pkill needles (killStale patterns). Returns a diagnostic error on non-zero exit.
-func runBrowserLaunchScript(client *IncusClient, containerName, launchScript string) error {
-	if err := writeBrowserLaunchScript(client, containerName, launchScript); err != nil {
-		return err
-	}
-	cmd := []string{"sh", browserLaunchScriptPath}
-	exitCode, output, err := ExecWithOutput(client, containerName, cmd)
-	if err != nil {
-		return fmt.Errorf("failed to launch browser: %w (output: %s)", err, strings.TrimSpace(output))
-	}
-	if exitCode == 0 {
-		return nil
-	}
-	return formatBrowserLaunchExitError(client, containerName, exitCode, output)
-}
-
-// writeBrowserLaunchScript streams the script to browserLaunchScriptPath via
-// tee so the content never appears in a long-lived process argv.
-func writeBrowserLaunchScript(client *IncusClient, containerName, script string) error {
-	proc, err := ExecNonInteractive(client, containerName, []string{"tee", browserLaunchScriptPath}, ExecOpts{})
-	if err != nil {
-		return fmt.Errorf("failed to write browser launch script: %w", err)
-	}
-
-	drainDone := make(chan struct{})
-	go func() {
-		defer close(drainDone)
-		_, _ = io.Copy(io.Discard, proc.Stdout)
-	}()
-
-	if _, err := io.WriteString(proc.Stdin, script); err != nil {
-		_ = proc.Close()
-		<-drainDone
-		return fmt.Errorf("failed to write browser launch script: %w", err)
-	}
-	// Close stdin (via Close) so tee gets EOF, flushes, and exits.
-	_ = proc.Close()
-
-	exitCode, err := proc.Wait()
-	<-drainDone
-	if err != nil {
-		return fmt.Errorf("failed to write browser launch script: %w", err)
-	}
-	if exitCode != 0 {
-		return fmt.Errorf("failed to write browser launch script: tee exited with code %d", exitCode)
-	}
-	return nil
-}
-
 // formatBrowserLaunchExitError builds a launch failure error. Exit 143 is
 // labeled as SIGTERM. When stdout/stderr is empty, pull browser logs from the
 // container so agents see a real diagnostic instead of inventing causes.
-func formatBrowserLaunchExitError(client *IncusClient, containerName string, exitCode int, output string) error {
+func formatBrowserLaunchExitError(exitCode int, output string) error {
 	out := strings.TrimSpace(output)
-	if out == "" || exitCode == 143 {
-		if logTail := readBrowserLaunchLog(client, containerName); logTail != "" {
-			if out == "" {
-				out = logTail
-			} else {
-				out = out + "\n" + logTail
-			}
-		}
-	}
 	if exitCode == 143 {
 		if out == "" {
 			return fmt.Errorf("browser launch exited with code 143 (interrupted by SIGTERM)")
@@ -1154,24 +910,4 @@ func isLaunchExit143(err error) bool {
 	}
 	s := err.Error()
 	return strings.Contains(s, "exited with code 143") || strings.Contains(s, "interrupted by SIGTERM")
-}
-
-func readBrowserLaunchLog(client *IncusClient, containerName string) string {
-	if client == nil || containerName == "" {
-		return ""
-	}
-	cmd := []string{"sh", "-c",
-		`for f in /tmp/cloakbrowser.log /tmp/chromium.log; do
-  if [ -f "$f" ]; then
-    echo "--- $f ---"
-    tail -n 80 "$f" 2>/dev/null || cat "$f" 2>/dev/null
-    echo "--- end $f ---"
-  fi
-done`,
-	}
-	_, out, err := ExecWithOutput(client, containerName, cmd)
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(out)
 }

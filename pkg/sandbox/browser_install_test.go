@@ -1,4 +1,4 @@
-package incus
+package sandbox
 
 import (
 	"fmt"
@@ -433,7 +433,7 @@ func TestSocatBridgeKillPattern_DoesNotMatchLauncherArgv(t *testing.T) {
 }
 
 func TestFormatBrowserLaunchExitError_SIGTERM(t *testing.T) {
-	err := formatBrowserLaunchExitError(nil, "astn-sess-x", 143, "")
+	err := formatBrowserLaunchExitError(143, "")
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -447,7 +447,7 @@ func TestFormatBrowserLaunchExitError_SIGTERM(t *testing.T) {
 }
 
 func TestFormatBrowserLaunchExitError_NonZeroWithOutput(t *testing.T) {
-	err := formatBrowserLaunchExitError(nil, "astn-sess-x", 1, "CloakBrowser process died on startup")
+	err := formatBrowserLaunchExitError(1, "CloakBrowser process died on startup")
 	if err == nil || !strings.Contains(err.Error(), "CloakBrowser process died") {
 		t.Fatalf("got %v", err)
 	}

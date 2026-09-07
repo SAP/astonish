@@ -74,24 +74,6 @@ func BackendFromAppConfigWithSessions(appCfg *config.AppConfig, sessRegistry *Se
 		}
 		return b, nil, nil
 
-	case BackendKindIncus:
-		SetSandboxConfig(&appCfg.Sandbox)
-		client, err := SetupSandboxRuntime()
-		if err != nil {
-			return nil, nil, fmt.Errorf("sandbox: incus runtime: %w", err)
-		}
-		b, err := NewBackend(BackendFactoryConfig{
-			Kind:       BackendKindIncus,
-			Client:     client,
-			Sessions:   sessRegistry,
-			Templates:  tplRegistry,
-			DefaultLim: &limits,
-		})
-		if err != nil {
-			return nil, nil, err
-		}
-		return b, nil, nil
-
 	case BackendKindK8s:
 		b, err := NewBackend(BackendFactoryConfig{
 			Kind:       BackendKindK8s,

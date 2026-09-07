@@ -89,96 +89,12 @@ func wireFleetSandbox(fleetSession *fleet.FleetSession, plan *fleet.FleetPlan, c
 	}
 
 	if kind == sandbox.BackendKindIncus || kind == "" {
-		return wireFleetSandboxIncus(fleetSession, plan, boundStore, resolved, env, mcpStores, template, appCfg)
+		kind = sandbox.BackendKindDocker
 	}
 	if mgr := tools.GetSubAgentManager(); mgr != nil && mgr.Redactor != nil {
 		fleet.RegisterInjectionWithRedactor(mgr.Redactor, env)
 	}
 	return wireFleetSandboxBackend(fleetSession, plan, boundStore, resolved, env, mcpStores, template, appCfg, kind)
-}
-
-func wireFleetSandboxIncus(
-	fleetSession *fleet.FleetSession,
-	plan *fleet.FleetPlan,
-	credStore store.CredentialStore,
-	resolved map[string]*fleet.ResolvedCredential,
-	env map[string]string,
-	mcpStores *store.MCPServerStores,
-	template string,
-	appCfg *config.AppConfig,
-) error {
-	sandboxClient, sandboxErr := sandbox.SetupSandboxRuntime()
-	if sandboxErr != nil {
-		return fmt.Errorf("sandbox is enabled but the runtime is not available: %w", sandboxErr)
-	}
-	sessRegistry, regErr := sandbox.NewSessionRegistry()
-	if regErr != nil {
-		return fmt.Errorf("sandbox session registry failed: %w", regErr)
-	}
-	tplRegistry, tplErr := sandbox.NewTemplateRegistry()
-	if tplErr != nil {
-		return fmt.Errorf("sandbox template registry failed: %w", tplErr)
-	}
-
-	limits := sandbox.EffectiveLimits(&appCfg.Sandbox)
-	lazyNode := sandbox.NewLazyNodeClient(sandboxClient, sessRegistry, tplRegistry, template, &limits)
-	lazyNode.OverrideSessionID = fleetSession.ID
-	lazyNode.Env = env
-
-	subAgentMgr := tools.GetSubAgentManager()
-	if subAgentMgr == nil {
-		lazyNode.Cleanup()
-		return fmt.Errorf("sandbox is enabled but sub-agent manager is not available")
-	}
-
-	browserMgr := browser.NewManager(browser.DefaultConfig())
-	sandbox.WireIncusBrowserManager(browserMgr, sandboxClient, nil, sessRegistry.TouchActivity)
-
-	wrappedTools := wrapFleetTools(subAgentMgr, lazyNode, nil, fleetSession.ID, browserMgr)
-
-	// Eager container start + credential file materialization
-	lazyNode.BindSession(fleetSession.ID)
-	if _, err := lazyNode.EnsureContainerReady(fleetSession.ID); err != nil {
-		browserMgr.Cleanup()
-		lazyNode.Cleanup()
-		return fmt.Errorf("fleet sandbox container not ready: %w", err)
-	}
-	if err := materializeFleetFilesIncus(plan, credStore, resolved, lazyNode); err != nil {
-		browserMgr.Cleanup()
-		lazyNode.Cleanup()
-		return fmt.Errorf("fleet credential file injection failed: %w", err)
-	}
-	if err := materializeFleetBootstrapIncus(template, tplRegistry, lazyNode); err != nil {
-		slog.Warn("fleet bootstrap file injection failed", "component", "fleet-sandbox", "template", template, "error", err)
-	}
-
-	fleetBackend, _ := sandbox.NewBackend(sandbox.BackendFactoryConfig{
-		Kind:       sandbox.BackendKindIncus,
-		Client:     sandboxClient,
-		Sessions:   sessRegistry,
-		Templates:  tplRegistry,
-		DefaultLim: &limits,
-	})
-	sandboxToolsets := createFleetMCPToolsets(fleetBackend, lazyNode, nil, mcpStores)
-
-	fleetSession.SandboxTools = wrappedTools
-	fleetSession.SandboxToolsets = sandboxToolsets
-	setFleetWorkspaceDir(fleetSession, plan)
-
-	prevCleanup := fleetSession.OnCleanup
-	fleetSession.OnCleanup = func() {
-		browserMgr.Cleanup()
-		if prevCleanup != nil {
-			prevCleanup()
-		}
-		lazyNode.Cleanup()
-	}
-
-	slog.Info("sandbox enabled for fleet session (incus)", "component", "fleet-sandbox", "session_id", fleetSession.ID, "template", template, "env_keys", len(env))
-	if mgr := tools.GetSubAgentManager(); mgr != nil && mgr.Redactor != nil {
-		fleet.RegisterInjectionWithRedactor(mgr.Redactor, env)
-	}
-	return nil
 }
 
 func wireFleetSandboxBackend(
@@ -350,48 +266,6 @@ func setFleetWorkspaceDir(fleetSession *fleet.FleetSession, plan *fleet.FleetPla
 	} else {
 		fleetSession.WorkspaceDir = "/root"
 	}
-}
-
-func materializeFleetFilesIncus(plan *fleet.FleetPlan, credStore store.CredentialStore, resolved map[string]*fleet.ResolvedCredential, lazyNode *sandbox.LazyNodeClient) error {
-	client := lazyNode.GetIncusClient()
-	containerName := lazyNode.GetContainerName()
-	if client == nil || containerName == "" {
-		return nil
-	}
-	return fleet.MaterializeInjectionFilesIncus(context.Background(), func(command []string, env map[string]string) ([]byte, []byte, int, error) {
-		out, err := sandbox.ExecSimpleWithEnv(client, containerName, command, env)
-		if err != nil {
-			return nil, nil, -1, err
-		}
-		exitCode := 0
-		if out == "" {
-			exitCode = 0
-		}
-		return []byte(out), nil, exitCode, nil
-	}, plan, resolved, credStore)
-}
-
-func materializeFleetBootstrapIncus(template string, tplRegistry *sandbox.TemplateRegistry, lazyNode *sandbox.LazyNodeClient) error {
-	var tplStore store.SandboxTemplateStore
-	if backend := getPlatformBackend(); backend != nil {
-		tplStore = backend.SandboxTemplates()
-	}
-	files := sandbox.LookupBootstrapFiles(context.Background(), tplRegistry, tplStore, template)
-	if len(files) == 0 {
-		return nil
-	}
-	client := lazyNode.GetIncusClient()
-	containerName := lazyNode.GetContainerName()
-	if client == nil || containerName == "" {
-		return nil
-	}
-	return sandbox.MaterializeBootstrapFilesIncus(context.Background(), func(command []string, env map[string]string) ([]byte, []byte, int, error) {
-		out, err := sandbox.ExecSimpleWithEnv(client, containerName, command, env)
-		if err != nil {
-			return nil, nil, -1, err
-		}
-		return []byte(out), nil, 0, nil
-	}, files)
 }
 
 func materializeFleetBootstrapBackend(ctx context.Context, fleetBackend sandbox.Backend, sessionID, template string, tplRegistry *sandbox.TemplateRegistry) error {

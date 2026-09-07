@@ -261,9 +261,10 @@ func TestSandboxConfig_BackendKind(t *testing.T) {
 		input string
 		want  string
 	}{
-		{"", "incus"},
-		{"incus", "incus"},
-		{"INCUS", "incus"},
+		{"", "docker"},
+		{"docker", "docker"},
+		{"incus", "docker"},
+		{"INCUS", "docker"},
 		{"k8s", "k8s"},
 		{"K8S", "k8s"},
 		{"kubernetes", "k8s"},

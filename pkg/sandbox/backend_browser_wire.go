@@ -55,14 +55,27 @@ command_line:
 `, width, height)
 }
 
+// sessionRuntimeBound reports whether a session record identifies a live
+// backend container. Kubernetes/OpenShell persist PodName; Docker persists
+// ContainerName (and now also copies it to PodName). Either field is enough:
+// CDP is tunneled via Backend.ExecStreaming(sessionID), not the name itself.
+func sessionRuntimeBound(rec *store.SandboxSession) bool {
+	if rec == nil {
+		return false
+	}
+	return rec.PodName != "" || rec.ContainerName != ""
+}
+
 // WireBackendBrowserManager configures mgr so browser tools launch Chromium
-// inside a backend-managed session. This is used by the direct K8s backend,
-// where Browser Manager callbacks can route through Backend.ExecStreaming.
+// inside a backend-managed session. Used by K8s and Docker backends, where
+// Browser Manager callbacks route through Backend.ExecStreaming.
 func WireBackendBrowserManager(mgr *browser.Manager, backend Backend, sessReg *SessionRegistry, pool ToolNodePool, touchActivity func(sessionID string)) bool {
 	if mgr == nil || backend == nil {
 		return false
 	}
-	if backend.Kind() != BackendKindK8s {
+	switch backend.Kind() {
+	case BackendKindK8s, BackendKindDocker:
+	default:
 		return false
 	}
 
@@ -80,7 +93,7 @@ func WireBackendBrowserManager(mgr *browser.Manager, backend Backend, sessReg *S
 	mgr.ContainerResolveFunc = func(sessionID string) (string, string, error) {
 		if sessReg != nil {
 			rec, err := sessReg.GetSession(sessionID)
-			if err != nil || rec == nil || rec.PodName == "" {
+			if err != nil || !sessionRuntimeBound(rec) {
 				return "", "", fmt.Errorf("no running sandbox for session %q", sessionID)
 			}
 		}
@@ -133,7 +146,7 @@ func GetPoolClientFromContext(ctx context.Context, pool ToolNodePool, sessionID 
 }
 
 func startBackendBrowser(ctx context.Context, backend Backend, sessionID string, cfg browser.BrowserConfig) (io.Closer, error) {
-	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 
 	width := cfg.ViewportWidth
@@ -215,6 +228,13 @@ func buildBackendBrowserLaunchScript(cfg browser.BrowserConfig, width, height in
 	return fmt.Sprintf(`#!/bin/sh
 set -e
 
+# Apple Silicon Docker VMs advertise ARMv9 HWCAP bits that CloakBrowser/
+# Chromium cannot execute (SIGILL). The template build installs a mask
+# shim; apply it whenever it is present.
+if [ -f /usr/lib/hwcap_mask.so ]; then
+  export LD_PRELOAD=/usr/lib/hwcap_mask.so${LD_PRELOAD:+:$LD_PRELOAD}
+fi
+
 proc_running() {
   for p in /proc/[0-9]*/cmdline; do
     [ -f "$p" ] || continue
@@ -258,12 +278,19 @@ KASMCFG
       >"$VNC_LOG" 2>&1 &
     sleep 1
     if ! proc_running 'Xkasmvnc.*:%s'; then
-      echo "KasmVNC failed to start. Log:" >&2
+      echo "KasmVNC failed to start, falling back to Xvfb. Log:" >&2
       cat "$VNC_LOG" >&2 2>/dev/null || true
-      exit 1
+      export DISPLAY=:%s
+      if command -v Xvfb >/dev/null 2>&1 && ! proc_running 'Xvfb.*:%s'; then
+        setsid Xvfb :%s -screen 0 %dx%dx24 -nolisten tcp >/tmp/xvfb.log 2>&1 &
+        sleep 1
+      fi
+    else
+      export DISPLAY=:%s
     fi
+  else
+    export DISPLAY=:%s
   fi
-  export DISPLAY=:%s
 else
   export DISPLAY=:%s
   if command -v Xvfb >/dev/null 2>&1 && ! proc_running 'Xvfb.*:%s'; then
@@ -278,9 +305,10 @@ if command -v python3 >/dev/null 2>&1; then
   BROWSER_BIN=$(HOME=/home/browser python3 -c 'from cloakbrowser.config import get_binary_path; print(get_binary_path())' 2>/dev/null) || true
 fi
 if [ -z "$BROWSER_BIN" ] || [ ! -x "$BROWSER_BIN" ]; then
-  for base in /home/browser/.cloakbrowser /root/.cache/rod/browser /usr/bin /usr/lib/chromium; do
-    candidate=$(find "$base" -name chrome -type f 2>/dev/null | head -1)
-    if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+  # Do not pipe to head: on macOS APFS layer extracts, libwww-perl HEAD
+  # can clobber coreutils /usr/bin/head.
+  for candidate in /home/browser/.cloakbrowser/*/chrome /home/browser/.cloakbrowser/*/*/chrome /usr/bin/chromium /usr/bin/chromium-browser; do
+    if [ -f "$candidate" ] && [ -x "$candidate" ]; then
       BROWSER_BIN="$candidate"
       break
     fi
@@ -291,6 +319,8 @@ if [ -z "$BROWSER_BIN" ] || [ ! -x "$BROWSER_BIN" ]; then
     BROWSER_BIN=$(command -v chromium)
   else
     echo "No browser binary found" >&2
+    echo "Looked at cloakbrowser get_binary_path and /home/browser/.cloakbrowser/*/chrome" >&2
+    ls -la /home/browser/.cloakbrowser 2>/dev/null >&2 || true
     exit 1
   fi
 fi
@@ -350,6 +380,10 @@ exec sleep infinity
 		backendBrowserKasmDisplay,
 		backendKasmVNCConfigYAML(width, height),
 		backendBrowserKasmDisplay, width, height, kasmPort,
+		backendBrowserKasmDisplay,
+		backendBrowserXvfbDisplay,
+		backendBrowserXvfbDisplay,
+		backendBrowserXvfbDisplay, width, height,
 		backendBrowserKasmDisplay,
 		backendBrowserKasmDisplay,
 		backendBrowserXvfbDisplay,

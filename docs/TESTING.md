@@ -445,7 +445,7 @@ go test -bench=. -benchmem ./pkg/agent
 
 ### Docker/Sandbox Tests
 
-Tests for Docker+Incus sandbox functionality (see `docs/testing-docker-incus.md`):
+Tests for Docker OverlayFS sandbox functionality:
 
 ```bash
 # Start E2E test environment

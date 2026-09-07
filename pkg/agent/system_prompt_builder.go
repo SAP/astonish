@@ -352,10 +352,10 @@ func (b *SystemPromptBuilder) Build() string {
 		sb.WriteString("3. Decompose complex goals into independent, parallelizable sub-tasks (each with a clear deliverable).\n")
 		sb.WriteString("4. Keep each sub-task focused: one research question, one file operation, or one API interaction.\n")
 		sb.WriteString("5. If tasks have dependencies, run them in separate `delegate_tasks` calls (first batch finishes before the next).\n")
-		sb.WriteString("6. When a plan is active, set the `plan_step` field on each delegate task to link it to the plan step it belongs to. Multiple tasks can share the same `plan_step` — the step completes only when all its tasks finish.\n")
+		sb.WriteString("6. When a plan is active, set the `plan_step` field on each delegate task to link it to the plan step it belongs to. Multiple tasks can share the same `plan_step`. Delegated finish leaves the step running — the runtime still has to run that phase's verify.\n")
 		sb.WriteString("7. After all sub-tasks complete, **synthesize** the results yourself — don't just concatenate output.\n")
-		sb.WriteString("8. For research or comparison tasks, save the final deliverable as a markdown file with `write_file`; end code work with a verification phase (build/test/lint) so nothing ships unverified.\n")
-		sb.WriteString("9. Delegated plan steps progress automatically from sub-task events — do NOT call `update_plan` for those. For phases you execute yourself on the main thread, call `update_plan` (status running → complete/failed) as you go so the checklist and PLAN.md stay accurate.\n\n")
+		sb.WriteString("8. For research or comparison tasks, save the final deliverable as a markdown file with `write_file`; end code work with a verification phase that proves the user-visible outcome, not only build/test/lint.\n")
+		sb.WriteString("9. Delegated plan steps do not auto-complete. For phases you execute on the main thread, call `update_plan` (running → complete) so the runtime can run verify. After every phase is complete, call `announce_completion`.\n\n")
 
 		sb.WriteString("**Available tool groups (for parallel delegation only):**\n")
 		ctx := &minimalReadonlyContext{Context: context.Background()}

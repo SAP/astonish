@@ -1,5 +1,10 @@
-# Sandbox Backends (Incus and Kubernetes)
+# Sandbox Backends (Docker OverlayFS, Kubernetes, OpenShell)
 
+> **Status (Incus removed).** Local sessions on macOS and Linux use Docker
+> OverlayFS (`pkg/sandbox/docker/`). `sandbox.backend: incus` is a legacy
+> alias for `docker`. There is no `astonish-incus` image. Kubernetes and
+> OpenShell are unchanged as separate backends.
+>
 > **Status (Phase F shipped).**
 > Sysbox is no longer required. The K8s backend selects one of four
 > overlay strategies at deploy time — `fuse-overlayfs` via a device
@@ -24,7 +29,7 @@
 
 ## 1. Context & Motivation
 
-Astonish executes agent tool calls inside isolated Linux containers. Today this is implemented against **Incus** (the LXD fork) as documented in `docs/architecture/sandbox.md`. The Incus-based implementation works well for single-host deployments -- personal mode on a developer laptop, or platform mode on a single VM.
+Astonish executes agent tool calls inside isolated Linux containers. Local Studio uses **Docker OverlayFS** as documented in `docs/architecture/sandbox.md`. That implementation works for single-host deployments — personal mode on a developer laptop, or platform mode on a single VM.
 
 As Astonish transitions to an enterprise platform used by many teams within a company, the sandbox tier must acquire **cloud qualities**:
 
@@ -33,11 +38,11 @@ As Astonish transitions to an enterprise platform used by many teams within a co
 - **Native Kubernetes operations** -- standard tooling (kubectl, Helm, RBAC, NetworkPolicy) applies to the whole system.
 - **No externally-operated infrastructure** -- the sandbox tier should live in the same Kubernetes cluster as the application tier, not on separate VMs.
 
-The current Incus-on-a-single-host model cannot satisfy these requirements: Incus is a stateful daemon; its containers, overlay layers, and templates are local to one host; multi-pod deployments would diverge because each Incus has its own private state.
+A single-host Docker OverlayFS model cannot satisfy cloud requirements: session containers, overlay layers, and templates are local to one host; multi-pod deployments would diverge because each node has its own private state.
 
-This document specifies a **pluggable sandbox backend architecture** that preserves the Incus implementation for personal mode and existing deployments while introducing a new **Kubernetes** backend for cloud-native platform deployments.
+This document specifies a **pluggable sandbox backend architecture** with **Docker OverlayFS** for local/personal mode and a **Kubernetes** backend for cloud-native platform deployments.
 
-The goal is capability parity: every operation that works on Incus works on K8s. The deployment choice is an operator decision, not a feature compromise.
+The goal is capability parity: every operation that works on Docker OverlayFS works on K8s. The deployment choice is an operator decision, not a feature compromise.
 
 ### Why elevated capabilities (and four ways to get them)
 
@@ -83,12 +88,12 @@ graph TB
 
     Callers --> Interface["SandboxBackend<br/>(interface)"]
 
-    Interface --> Incus["IncusBackend<br/>pkg/sandbox/incus/"]
+    Interface --> Docker["DockerBackend<br/>pkg/sandbox/docker/"]
     Interface --> K8s["K8sBackend<br/>pkg/sandbox/k8s/"]
     Interface --> OpenShell["OpenShellBackend<br/>pkg/sandbox/openshell/"]
     Interface --> Mock["MockBackend<br/>pkg/sandbox/mock/"]
 
-    Incus --> IncusTarget["Local Incus Daemon<br/>Unix socket or TCP"]
+    Docker --> DockerTarget["Local Docker engine<br/>session containers + overlay layers"]
     K8s --> K8sTarget["Kubernetes API<br/>+ sandbox pods (4 privilege paths, §10)<br/>+ RWX PVCs (CephFS/NFS/EFS)"]
     OpenShell --> OSTarget["OpenShell Gateway<br/>gRPC (Helm subchart)<br/>+ Istio mTLS<br/>+ Landlock/seccomp<br/>+ L7 egress policy"]
 ```
@@ -97,13 +102,13 @@ graph TB
 
 | Mode | Backend |
 |------|---------|
-| Personal (`astonish studio`) | Always `IncusBackend`; config ignored |
-| Platform (`astonish daemon run`), `sandbox.backend: incus` | `IncusBackend` |
+| Personal (`astonish studio`) | `DockerBackend` (empty / `docker` / legacy `incus`) |
+| Platform (`astonish daemon run`), `sandbox.backend: docker` | `DockerBackend` |
 | Platform (`astonish daemon run`), `sandbox.backend: k8s` | `K8sBackend` |
 | Platform (`astonish daemon run`), `sandbox.backend: openshell` | `OpenShellBackend` |
 | Unit tests | `MockBackend` (in-memory) |
 
-The abstraction lives in `pkg/sandbox/backend.go`. Existing Incus code is reorganized under `pkg/sandbox/incus/` and wrapped to implement the interface. K8s code is new under `pkg/sandbox/k8s/`. The OpenShell backend (`pkg/sandbox/openshell/`) delegates sandbox lifecycle to an NVIDIA OpenShell gateway deployed as a Helm subchart, gaining per-process Landlock/seccomp isolation and L7 egress policy enforcement on top of standard Kubernetes pod boundaries. See [`openshell-sandbox-backend.md`](openshell-sandbox-backend.md) for full details. Callers see only the interface.
+The abstraction lives in `pkg/sandbox/backend.go`. Local sessions are `pkg/sandbox/docker/`. K8s code is under `pkg/sandbox/k8s/`. The OpenShell backend (`pkg/sandbox/openshell/`) delegates sandbox lifecycle to an NVIDIA OpenShell gateway deployed as a Helm subchart, gaining per-process Landlock/seccomp isolation and L7 egress policy enforcement on top of standard Kubernetes pod boundaries. See [`openshell-sandbox-backend.md`](openshell-sandbox-backend.md) for full details. Callers see only the interface. `sandbox.backend: incus` aliases to Docker.
 
 ## 3. `SandboxBackend` Interface Specification
 
@@ -174,8 +179,8 @@ type SandboxBackend interface {
 
 ```go
     // Ensure the org-scoped network primitives exist.
-    // Incus: per-org bridge + profile.
-    // K8s:   NetworkPolicy for labels matching the org.
+    // Docker OverlayFS: per-org Docker bridge network.
+    // K8s: NetworkPolicy for labels matching the org.
     EnsureOrgNetwork(ctx context.Context, orgSlug string) error
 
     // Remove an org-scoped network. Used when an org is deleted.
@@ -257,13 +262,13 @@ This keeps the K8s backend free of database-schema knowledge: the backend speaks
 
 This lazy-refresh model is a deliberate safety property: a single `@base` edit cannot accidentally disrupt every running session and every team template. The old layer stays alive as long as anything references it (ref_count > 0); GC reclaims it only after all references drop and the grace period elapses.
 
-## 4. Incus Backend (Reference Implementation)
+## 4. Docker OverlayFS Backend (Local Default)
 
-The existing code in `pkg/sandbox/` is refactored into `pkg/sandbox/incus/` with no behavioral changes. `IncusBackend.CreateSession` wraps today's `EnsureSessionContainer` / `EnsureOrgSessionContainer` logic. `IncusBackend.Exec` wraps `ExecInstance`. All current features -- overlay fast-clone, UID-shift, `org_network.go` bridges, tunnel.go socat-over-exec, template snapshots -- continue to work exactly as documented in `docs/architecture/sandbox.md`.
+Local sessions are `DockerBackend` in `pkg/sandbox/docker/`. `CreateSession` starts an `astonish-session-*` container from `ghcr.io/sap/astonish-sandbox-base`, composes overlay layers at `/sandbox/rootfs`, and records the session with `container_name`. Exec, file I/O, browser CDP, and template capture all go through that overlay. See `docs/architecture/sandbox.md`.
 
-Personal mode (`astonish studio`) hardcodes this backend and is unaffected by the new abstraction.
+Personal mode (`astonish studio`) uses this backend. Empty `sandbox.backend` and legacy `incus` both select Docker.
 
-Platform mode deployments that already use Incus continue to work by setting `sandbox.backend: incus` (the default).
+Platform mode local/self-hosted deployments set `sandbox.backend: docker` (or leave it empty).
 
 ## 5. K8s Backend
 
@@ -434,7 +439,7 @@ This preserves Incus's "container exists but stopped, resume later" semantics wh
 5. Delete row from `sandbox_sessions`.
 6. Emit audit event.
 
-**Guarantee:** when `DestroySession` returns successfully, no trace of the session remains on any node, in the layers/uppers PVCs, or in PG. This matches Incus's `incus delete --force` semantics. Every deletion code path (session delete API, org delete cascade, idle orphan pruning) calls `DestroySession` and obtains the same guarantee.
+**Guarantee:** when `DestroySession` returns successfully, no trace of the session remains on any node, in the layers/uppers PVCs, or in PG. This matches Docker `rm -f` / Kubernetes pod-delete semantics. Every deletion code path (session delete API, org delete cascade, idle orphan pruning) calls `DestroySession` and obtains the same guarantee.
 
 **State** (`SessionState`):
 
@@ -530,15 +535,15 @@ Input: live session ID, new `slug`, `scope`, `scope_ref_id`.
 The difference from `CreateTemplate` is that the content source is the **session's upper layer** (the user's effective changes since the template was composed). Parent is the session's current template.
 
 1. Session pod is running; `/mnt/astonish-layers` is mounted RW inside it (team-template editor sessions get this automatically via the `astonish.io/purpose=team-template-editor` label; see §5.17).
-2. Astonish exec's into the session pod and runs the in-pod tar-to-layer pipeline, streaming **only `/var/astonish/overlay/upper`** (not the merged view):
+2. Astonish exec's into the session pod and runs the in-pod tar-to-layer pipeline, streaming **only `/var/astonish/overlay/upper`** (not the merged view). The shipped script is bash with `pipefail`: two sequential tar streams (hash, then extract). It must **not** stage a full tar on `/tmp` (ENOSPC after a base-layer install) and must **not** use a fifo+tee pipeline (virtiofs rejects `mkfifo`; tee can deadlock/OOM Colima). Docker Desktop virtiofs also rejects xattrs/acls on extract; Docker captures with `--numeric-owner` only, Kubernetes/CephFS still uses `--xattrs --acls`.
    ```sh
-   tar --numeric-owner --xattrs --acls -I "zstd --adapt -T0" \
+   SHA=$(tar --numeric-owner --xattrs --acls --sort=name --mtime=@0 \
+       -C /var/astonish/overlay/upper -cf - . | sha256sum)
+   tar --numeric-owner --xattrs --acls --sort=name --mtime=@0 \
        -C /var/astonish/overlay/upper -cf - . \
-     | tee >(sha256sum > /tmp/sha) \
-     | tar --numeric-owner --xattrs --acls -I zstd \
-       -C /mnt/astonish-layers/__staging-<session-id>/rootfs -xf -
+     | tar --numeric-owner -C /mnt/astonish-layers/__staging-<id>/rootfs -xf -
    ```
-   (In-pod pipe; the layers PVC sees a single sequential writer.)
+   The helper is `pkg/sandbox.OverlayCaptureScript`, used by both Docker and Kubernetes. Docker emits SSE heartbeats while this copy runs so a silent minute does not look like a hang and does not drop the Studio stream.
 3. Rename staging directory to `/mnt/astonish-layers/<sha256>/`. If a directory with that sha already exists (content already stored as a layer under a different scope, for example), skip the rename and remove staging.
 4. In a single PG transaction:
    - `INSERT INTO sandbox_layers ... ON CONFLICT DO NOTHING` — **deduplication falls out automatically**: identical upper contents produce identical sha256 and therefore reuse an existing layer.
@@ -546,7 +551,7 @@ The difference from `CreateTemplate` is that the content source is the **session
    - Increment `ref_count` on the layer (template reference).
 5. Typical duration: 1–5 seconds for normal sandboxes. No registry round-trip.
 
-The `pkg/sandbox/k8s/template.go::buildCaptureScript` helper builds the capture command line; the API-layer `TemplatePersister` callback (set on `k8s.Config`) is invoked after a successful capture so the calling code can persist the template metadata into the application store without coupling the backend to schema details.
+The `pkg/sandbox.OverlayCaptureScript` helper builds the capture command line; the API-layer `TemplatePersister` callback (set on `k8s.Config`) is invoked after a successful capture so the calling code can persist the template metadata into the application store without coupling the backend to schema details.
 
 Authorization: scope-appropriate actor required. `save-as-@base` is a privileged variant that updates `@base.top_layer_id` in place (§3.9) instead of creating a new template row — restricted to `superadmin`.
 
@@ -936,7 +941,7 @@ sandbox:
   podSecurity: baseline
 
   # Backend selector. Canonical Go token written into config.
-  # "k8s" (this chart) or "incus" (local dev).
+  # "k8s" (this chart). Local Studio uses "docker"; "incus" aliases to docker.
   backend: k8s
 
   rbac:
@@ -995,7 +1000,7 @@ sandbox:
   limits:
     cpu: 2
     memory: "2GB"               # accepts "2GB" or "2Gi"
-    processes: 500              # Incus-only; ignored by K8s
+    processes: 500              # process limit; ignored by K8s cgroup path
   requests:
     cpuMillis: 100              # 0 → auto-derive
     memoryMiB: 256
@@ -1019,11 +1024,11 @@ The chart renders these into `config.yaml` (mounted as ConfigMap `astonish-confi
 
 ### 6.3 Selection logic
 
-- `pkg/launcher/studio.go` (personal mode): always instantiates `IncusBackend`, ignores `sandbox.backend`.
+- `pkg/launcher/studio.go` (personal mode): instantiates `DockerBackend` via `BackendFromAppConfig` (empty / `docker` / legacy `incus`).
 - `pkg/daemon/run.go` (platform mode):
   - Reads `sandbox.backend`.
   - If `k8s`: instantiate `K8sBackend` via `pkg/sandbox/backend_from_config.go::BackendFromAppConfigWithSessions`. Validates Kubernetes connectivity and PVC mount at startup; refuses to serve sandbox requests if either fails.
-  - If `incus` (default): instantiate `IncusBackend`.
+  - If `docker` (default; `incus` aliases here): instantiate `DockerBackend`.
 - Tests: instantiate `MockBackend` via injection.
 
 ### 6.4 Image-pull policy auto-detection (Status: shipped)
@@ -1041,7 +1046,7 @@ When bumping a mutable tag like `:dev` in production, evict the node-level image
 
 `astonish studio` **never** uses the K8s backend and **never** touches the layer store, event journal, or template DAG. These invariants are type-system-enforced via `ErrUnsupported` returns from `filestore`:
 
-1. **Runtime backend is always Incus.** `pkg/launcher/studio.go` hard-codes `IncusBackend`; it never reads `sandbox.backend` from config. Decision Q7. Assumptions: local Incus (Unix socket on Linux; Docker+Incus sidecar on macOS/Windows); local filesystem for registries; no Kubernetes dependency.
+1. **Runtime backend is Docker OverlayFS.** `BackendFromAppConfig` selects Docker for empty / `docker` / legacy `incus`. Assumptions: local Docker engine (native on Linux; Colima/Desktop on macOS); local filesystem for registries; no Kubernetes dependency.
 2. **Storage backend is always filestore.** Personal mode retains the JSON registries at `~/.local/share/astonish/sandbox/templates.json` and `sessions.json` via the existing `TemplateRegistry` and `SessionRegistry`. No PostgreSQL is required.
 3. **Templates remain flat.** The filestore template store ignores `ParentTemplateID` and `TopLayerID`; when the on-disk `TemplateMeta` grows these fields they are present but always `nil`/empty. Personal mode has no notion of a template DAG.
 4. **Scope degenerates to personal.** The `scope` enum value is `personal` for every template; there are no `org`/`team`/`global` templates. The default-template resolution cascade collapses to "personal default".
@@ -1109,7 +1114,7 @@ CREATE TABLE platform.sandbox_templates (
     version              INT NOT NULL DEFAULT 1,    -- optimistic concurrency
     build_spec           JSONB,                     -- customization recipe for RefreshTemplate
 
-    backend              TEXT NOT NULL,             -- 'incus' | 'k8s' (layers column only used for k8s)
+    backend              TEXT NOT NULL,             -- 'docker' | 'k8s' | 'openshell'
     binary_hash          TEXT,
     fleet_plans          TEXT[] NOT NULL DEFAULT '{}',
     created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -1148,9 +1153,9 @@ Sessions remain team-scoped (user-scoped tenancy).
 ```sql
 CREATE TABLE {team_schema}.sandbox_sessions (
     session_id         TEXT PRIMARY KEY,
-    backend            TEXT NOT NULL,              -- 'incus' | 'k8s'
-    backend_ref        TEXT NOT NULL,              -- Incus container name | K8s pod name
-    namespace          TEXT,                       -- K8s namespace (NULL for Incus)
+    backend            TEXT NOT NULL,              -- 'docker' | 'k8s' | 'openshell'
+    backend_ref        TEXT NOT NULL,              -- Docker container name | K8s pod name
+    namespace          TEXT,                       -- K8s namespace (NULL for Docker)
     template_id        UUID NOT NULL REFERENCES platform.sandbox_templates(id),
     upper_layer_id     TEXT REFERENCES platform.sandbox_layers(layer_id),  -- NULL while live; set when evicted + layer-promoted
     user_id            UUID NOT NULL REFERENCES platform.users(id),
@@ -1238,42 +1243,42 @@ type SandboxStateStore interface {
 
 Implementations:
 
-- `pkg/store/filestore/sandbox_state.go` -- file-backed (personal mode; existing JSON-file behavior preserved). Layers and event-journal operations return `ErrUnsupported`; personal mode uses Incus snapshots and does not have multi-pod requirements.
+- `pkg/store/filestore/sandbox_state.go` -- file-backed (personal mode; existing JSON-file behavior preserved). Layers and event-journal operations return `ErrUnsupported`; personal mode uses Docker OverlayFS layers on disk and does not have multi-pod requirements.
 - `pkg/store/pgstore/sandbox_state.go` -- PG-backed (platform mode). Layer ops, event-journal ops, and default-template resolution all live here.
 
 The existing `sandbox.TemplateRegistry` / `sandbox.SessionRegistry` types become thin wrappers over `SandboxStateStore`. Same pattern as fleets, credentials, sessions, memory (see `docs/architecture/multi-tenant-platform.md`).
 
 ## 8. Capability Parity Matrix
 
-| Capability | Incus backend | K8s backend |
+| Capability | Docker OverlayFS backend | K8s backend |
 |---|---|---|
-| CreateSession | `CreateInstance` | `CreatePod` (privilege path from §10) with overlay entrypoint + self-heal verification (§5.3) |
-| StartSession | `UpdateInstanceState(start)` | Recreate pod + restore evicted upper via tar stream |
-| StopSession | `UpdateInstanceState(stop)` | Stream upper to uppers PVC via tar+zstd + delete pod |
-| **DestroySession (container + data)** | `DeleteInstance` + overlay cleanup | Delete pod + remove persisted upper |
-| SessionState | `GetInstanceState` | K8s pod phase |
-| Exec (non-interactive) | `ExecInstance` | `remotecommand` (SPDY) |
-| Exec interactive (PTY + resize) | WebSocket + resize | SPDY + `TerminalSize` channel; chroot wrapper for editor terminals (§5.17) |
-| PushFile / PullFile | Incus Files API | tar-over-exec |
-| List containers | `GetInstances` by prefix | `ListPods` by labels |
-| CreateTemplate | `CreateInstance` + snapshot | Template-builder pod + tar-stream to layers PVC |
-| **SaveSessionAsTemplate (no registry push)** | rsync upper + Incus snapshot | sha256-addressed tar-stream of upper to `platform.sandbox_layers` (auto-dedup) |
-| **DeleteTemplate** | `DeleteInstance` (tpl) | PG row delete + ref_count decrement + **synchronous GC pod** that `rm -rf`s the layer dir before returning (§5.6) |
+| CreateSession | `docker run` `astonish-session-*` | `CreatePod` (privilege path from §10) with overlay entrypoint + self-heal verification (§5.3) |
+| StartSession | restart session container + recompose overlay | Recreate pod + restore evicted upper via tar stream |
+| StopSession | `docker stop` | Stream upper to uppers PVC via tar+zstd + delete pod |
+| **DestroySession (container + data)** | `docker rm -f` + overlay volume | Delete pod + remove persisted upper |
+| SessionState | `docker inspect` | K8s pod phase |
+| Exec (non-interactive) | `docker exec` via astonish-shell | `remotecommand` (SPDY) |
+| Exec interactive (PTY + resize) | `docker exec -it` | SPDY + `TerminalSize` channel; chroot wrapper for editor terminals (§5.17) |
+| PushFile / PullFile | `docker cp` / tar-over-exec | tar-over-exec |
+| List containers | `docker ps` by `astonish-session-*` | `ListPods` by labels |
+| CreateTemplate | capture overlay upper to LayersDir | Template-builder pod + tar-stream to layers PVC |
+| **SaveSessionAsTemplate (no registry push)** | capture live upper as a content-addressed layer | sha256-addressed tar-stream of upper to `platform.sandbox_layers` (auto-dedup) |
+| **DeleteTemplate** | remove layer directory | PG row delete + ref_count decrement + **synchronous GC pod** that `rm -rf`s the layer dir before returning (§5.6) |
 | RefreshTemplate | rebuild + replace snapshot | Stub — returns "not yet implemented" (§5.6) |
 | Org network isolation | Per-org bridge + profile | Labels + NetworkPolicy |
-| ExposePort | Incus device + proxy | Service + Ingress |
+| ExposePort | Docker published ports | Service + Ingress |
 | UnexposePort | remove device | delete Service |
 | Tunnel to service in container | socat via exec | socat via exec (identical) |
 | Fleet containers | `astn-fleet-` prefix | `astonish.io/type=fleet` label |
 | Session pinning | Registry field | Registry field (pgstore-backed; §5.16) |
-| Orphan pruning | registry vs Incus list | registry vs K8s list |
+| Orphan pruning | registry vs `docker ps` | registry vs K8s list |
 | Idle timeout | Prune logic | Prune logic + evict-to-uppers-PVC via tar stream (eviction concurrency: §10) |
-| UI container list | Incus `ListInstances` + registry | K8s `ListPods` + registry |
+| UI container list | `docker ps` + registry | K8s `ListPods` + registry |
 | Binary hash staleness | Registry field | Registry field |
 | Template inheritance chain | `based_on` chain (per-host JSON) | `parent_template_id` DAG in PG, composed as ordered lowerdirs |
-| Multi-lowerdir mount depth | N/A (single-host Incus snapshot) | Up to `maxChainDepth` (default 20); flatten job beyond (deferred) |
+| Multi-lowerdir mount depth | Overlay layer chain on host LayersDir | Up to `maxChainDepth` (default 20); flatten job beyond (deferred) |
 | Layer dedup across templates/sessions | None (every template is its own tree) | Content-addressed by sha256; `ON CONFLICT DO NOTHING` on layer insert |
-| Layer lifecycle | Implicit (Incus manages snapshots) | PG ref_count + synchronous GC pod (shipped) + deferred reconciler (planned) |
+| Layer lifecycle | Content-addressed dirs on LayersDir | PG ref_count + synchronous GC pod (shipped) + deferred reconciler (planned) |
 | Default template resolution | Per-host default | Currently `@base` direct; cascading resolver deferred (§5.13) |
 | Cross-replica session catalog | N/A (single host) | pgstore-backed registry shared across API pods (§5.16, shipped for team-template path) |
 | Cross-pod session attach (short exec) | N/A (single host) | Any pod → `pods/exec` on any session |
@@ -1288,27 +1293,27 @@ These guarantees are identical across both backends.
 
 ### On session delete
 
-- **Incus:** `DeleteInstance(--force)` removes container, overlay upper directory, volatile state. Registry row deleted.
+- **Docker OverlayFS:** `docker rm -f` removes the session container and overlay volume. Registry row deleted.
 - **K8s:** `DeletePod` triggers containerd overlay unmount and `emptyDir` cleanup. If previously evicted, `rm -rf /mnt/astonish-uppers/<id>/` removes the persisted `upper.tar.zst`. Registry row deleted from `team_<slug>.sandbox_sessions`.
 
 ### On template delete
 
-- **Incus:** `DeleteInstance` on template container + remove overlay base dir.
+- **Docker OverlayFS:** remove the template layer directory from LayersDir.
 - **K8s:** template row deleted from `platform.sandbox_templates` + ref_count decrement on `top_layer_id`. Layer's directory `/mnt/astonish-layers/<layer_id>/` is removed by the **synchronous GC pod** (§5.6) before `DeleteTemplate` returns when ref_count reaches zero. Content survives as long as anything else (another template, an evicted session's upper_layer_id) still references it.
 
 ### On org delete (cascade)
 
-- **Incus:** destroy all containers matching org; delete org network + profile.
+- **Docker OverlayFS:** destroy all org session containers; delete `astonish-org-<slug>` network.
 - **K8s:** label selector `DELETE` on all pods; remove org's NetworkPolicy; remove per-session persisted uppers.
 
 ### On idle timeout
 
-- **Incus:** existing prune logic (stop + reap).
+- **Docker OverlayFS:** existing prune logic (stop + reap).
 - **K8s:** evict (tar-stream upper to the uppers PVC + delete pod); session row status -> `evicted`. See §10 for eviction concurrency controls.
 
 ### On orphan prune
 
-- **Incus:** compare registry vs `GetInstances` by prefix; destroy orphans.
+- **Docker OverlayFS:** compare registry vs `docker ps` by `astonish-session-*` prefix; destroy orphans.
 - **K8s:** compare registry (pgstore) vs `ListPods` by labels; destroy orphans (pod delete, uppers PVC cleanup).
 
 **Invariant:** no code path deletes an Astonish entity without also deleting its backing sandbox resource. No backend implements any "soft delete." Every `DestroySession` / `DeleteTemplate` returns only after cleanup is complete and verified.
@@ -1401,17 +1406,17 @@ Migrate the two local JSON registries to the store abstraction, **and** introduc
   - Per-team-schema migration: extend `sandbox_sessions` with `upper_layer_id` + FK; add `chat_session_events` + `chat_sessions` column additions (§7.3, §7.4).
   - Backfill existing template rows (if any) into new platform-schema shape.
 - Ref-count backstop triggers on `sandbox_templates` and `sandbox_sessions` (§7.5).
-- No visible behavior change to end users until Phase C lands the K8s backend; Incus backend adapted to the new schema shape but continues to behave identically.
+- No visible behavior change to end users until Phase C lands the K8s backend; the local backend adapted to the new schema shape but continues to behave identically.
 
 ### Phase B -- Backend abstraction (~1-2 weeks)
 
-Extract `SandboxBackend` interface and wrap existing Incus implementation.
+Extract `SandboxBackend` interface (historical: wrapped Incus; Incus has since been replaced by Docker OverlayFS).
 
 - New `pkg/sandbox/backend.go` (interface + shared types).
-- Move existing code into `pkg/sandbox/incus/` and create `IncusBackend` implementation.
-- Update all callers to consume the interface (not `IncusClient` directly): `pkg/api/sandbox_handlers.go`, `pkg/agent/*`, `pkg/chat/*`, `pkg/fleet/*`, `pkg/launcher/studio.go`, `pkg/daemon/run.go`.
+- Docker OverlayFS (`pkg/sandbox/docker/`) is the local default; K8s and OpenShell remain separate backends.
+- Update all callers to consume the interface: `pkg/api/sandbox_handlers.go`, `pkg/agent/*`, `pkg/chat/*`, `pkg/fleet/*`, `pkg/launcher/studio.go`, `pkg/daemon/run.go`.
 - Unit tests for interface contract compliance.
-- Ship with `sandbox.backend: incus` as default; no deployment changes.
+- Ship with `sandbox.backend: docker` as default (`incus` aliases to docker).
 
 ### Phase C -- K8s backend implementation (~5 weeks)
 
@@ -1524,7 +1529,7 @@ Status: shipped on `feature/sandbox-k8s-backend` (commits `4fa7ed6`, `cee00c8`, 
 - Migration `platform/004_sandbox_ref_count_triggers.sql` (installed disabled-by-default).
 - Team-template editor lifecycle: Create / Save / Restore / Delete with synchronous reclamation, `astonish-shell` chroot wrapper, 1.5 s status polling up to 30 s (§5.17).
 - Single Helm chart at `deploy/helm/astonish` covering both control plane and sandbox; configurable hyphen-only DNS-1123 namespace prefix (§6.1).
-- `Makefile` fast targets: `push-dev-fast`, `push-sandbox-base-dev-fast`, `push-incus-dev-fast`, `push-all-dev-fast` (auto-detect `DEV_ARCH`).
+- `Makefile` fast targets: `push-dev-fast`, `push-sandbox-base-dev-fast`, `push-all-dev-fast` (auto-detect `DEV_ARCH`).
 - `apt` cosmetic-warning fix baked into the base image's `/etc/apt/apt.conf.d/00no-sandbox`; carried into `@base` deterministically by the seed Job.
 
 **Still open (Phase F+ / E):**
@@ -1575,8 +1580,8 @@ Status: shipped on `feature/sandbox-k8s-backend` (commits `4fa7ed6`, `cee00c8`, 
 
 Explicitly out of scope for this design:
 
-- **Replacing Incus in personal mode.** Personal mode remains Incus-only. Decision Q7.
-- **Running Incus inside Kubernetes pods.** The K8s backend does not use Incus at all; it uses Kubernetes pods directly. The previously-explored "Incus cluster in K8s" approach is abandoned.
+- **Replacing Incus in personal mode.** Done: personal mode is Docker OverlayFS. `sandbox.backend: incus` aliases to docker.
+- **Running Incus inside Kubernetes pods.** Abandoned. The K8s backend uses Kubernetes pods directly.
 - **Live migration of sandbox pods across nodes.** Sandboxes are stateful but ephemeral; if a node dies, its running sandboxes are lost (user retries). This matches the Incus-single-host behavior today.
 - **Persistent per-session PVCs by default.** Sessions use `emptyDir` for the upper layer. Persistent PVCs may be added later as an opt-in per-session feature, but v1 does not require it.
 - **Save-as-template via OCI registry push.** Templates are written directly to the RWX layers PVC (decision: no registry push for saves). Registry-based template distribution is explicitly rejected as a save path because it is too slow for the interactive UX.
@@ -1631,7 +1636,7 @@ Triggers that would motivate adding the warm pool:
 
 ## 14.1 Network Access: SSRF Protection and Private Networks
 
-When tools run **inside a sandbox container**, the sandbox's own network policy (OpenShell Landlock/seccomp, K8s NetworkPolicy, Incus network config) is the security boundary. The Go-level SSRF protection (`checkSSRF()` in `pkg/tools/web_fetch.go`) that blocks requests to private/loopback IPs is therefore **automatically disabled** inside the sandbox node process (`cmd/astonish/node.go`).
+When tools run **inside a sandbox container**, the sandbox's own network policy (OpenShell Landlock/seccomp, K8s NetworkPolicy, Docker org networks) is the security boundary. The Go-level SSRF protection (`checkSSRF()` in `pkg/tools/web_fetch.go`) that blocks requests to private/loopback IPs is therefore **automatically disabled** inside the sandbox node process (`cmd/astonish/node.go`).
 
 This means:
 - **`http_request`** can reach internal/corporate APIs (e.g., OpenStack, internal microservices) when running inside a sandbox — the sandbox network policy controls what is reachable.
@@ -1654,7 +1659,7 @@ When this option is `true`, `http_request` can reach private/loopback IPs from t
 
 ## 15. References
 
-- `docs/architecture/sandbox.md` -- current Incus-based implementation.
+- `docs/architecture/sandbox.md` -- current Docker OverlayFS local implementation.
 - `docs/architecture/multi-tenant-platform.md` -- store abstraction pattern, team schemas, RLS.
 - `docs/architecture/testing-chat-scenarios.md` -- test infrastructure conventions.
 - Sysbox project: https://github.com/nestybox/sysbox

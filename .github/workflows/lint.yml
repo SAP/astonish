@@ -49,7 +49,7 @@ jobs:
 
       - name: Run govulncheck
         run: govulncheck ./...
-        # Informational: unfixed third-party vulns (e.g. incus) cause exit 3
+        # Informational: unfixed third-party vulns cause exit 3
         # which cannot be suppressed. Fail only on fixable vulns by reviewing output.
         continue-on-error: true
 

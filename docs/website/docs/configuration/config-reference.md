@@ -191,7 +191,7 @@ scheduler:
 sandbox:
   enabled: false
   privileged: false
-  backend: "incus"             # incus | k8s | openshell
+  backend: "docker"            # docker | k8s | openshell  ("incus" aliases to docker)
   network: ""
   limits:
     memory: "4GB"

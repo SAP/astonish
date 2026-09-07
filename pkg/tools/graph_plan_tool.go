@@ -19,10 +19,14 @@ import (
 // means the phase advanced (or was already at/past the target).
 var graphPlanAdvanceCallback func(to agent.GraphPlanPhase) error
 
-// SetGraphPlanAdvanceCallback registers the callback used by the gplan_*
-// transition tools to advance the active session's Graph-Optimized Plan phase.
+var graphPlanAcceptanceCallback func(acceptance string) error
+
 func SetGraphPlanAdvanceCallback(fn func(to agent.GraphPlanPhase) error) {
 	graphPlanAdvanceCallback = fn
+}
+
+func SetGraphPlanAcceptanceCallback(fn func(acceptance string) error) {
+	graphPlanAcceptanceCallback = fn
 }
 
 func advanceGraphPlan(to agent.GraphPlanPhase) string {
@@ -106,8 +110,8 @@ If any path does not exist on the filesystem, the tool returns {"status":"bad_pa
 
 // GraphPlanGapEntry is a single genuine gap codegraph could not answer.
 type GraphPlanGapEntry struct {
-	Question                  string `json:"question" jsonschema:"The specific open question you still need to answer to produce a complete plan."`
-	WhyCodegraphInsufficient  string `json:"why_codegraph_insufficient,omitempty" jsonschema:"Why codegraph_explore could not answer this (e.g. 'language not indexed', 'non-code config file', 'string-literal usage not in call graph')."`
+	Question                 string `json:"question" jsonschema:"The specific open question you still need to answer to produce a complete plan."`
+	WhyCodegraphInsufficient string `json:"why_codegraph_insufficient,omitempty" jsonschema:"Why codegraph_explore could not answer this (e.g. 'language not indexed', 'non-code config file', 'string-literal usage not in call graph')."`
 }
 
 // GraphPlanGapsArgs is the input schema for gplan_gaps.
@@ -158,16 +162,29 @@ Two special cases:
 
 // GraphPlanFinalizeArgs is the input schema for gplan_finalize.
 type GraphPlanFinalizeArgs struct {
-	Notes string `json:"notes,omitempty" jsonschema:"Optional short note on why investigation is complete (e.g. 'all callers and tests enumerated; ready to plan')."`
+	Acceptance string `json:"acceptance" jsonschema:"REQUIRED. The user-visible sequence that proves the whole job (what a user or daemon can do after this change). announce_plan 'verification' must include this text."`
+	Notes      string `json:"notes,omitempty" jsonschema:"Optional short note on why investigation is complete."`
 }
 
-// GraphPlanFinalizeResult is the output of gplan_finalize.
 type GraphPlanFinalizeResult struct {
-	Status string `json:"status"`
-	Phase  string `json:"phase,omitempty"`
+	Status  string `json:"status"`
+	Phase   string `json:"phase,omitempty"`
+	Message string `json:"message,omitempty"`
 }
 
-func graphPlanFinalize(_ tool.Context, _ GraphPlanFinalizeArgs) (GraphPlanFinalizeResult, error) {
+func graphPlanFinalize(_ tool.Context, args GraphPlanFinalizeArgs) (GraphPlanFinalizeResult, error) {
+	acc := strings.TrimSpace(args.Acceptance)
+	if acc == "" {
+		return GraphPlanFinalizeResult{
+			Status:  "incomplete",
+			Message: "acceptance is required: the user-visible sequence that proves the whole job.",
+		}, nil
+	}
+	if graphPlanAcceptanceCallback != nil {
+		if err := graphPlanAcceptanceCallback(acc); err != nil {
+			return GraphPlanFinalizeResult{Status: "error", Message: err.Error()}, nil
+		}
+	}
 	status := advanceGraphPlan(agent.GraphPlanPhasePlan)
 	if status != "ok" {
 		return GraphPlanFinalizeResult{Status: status}, nil
@@ -178,12 +195,11 @@ func graphPlanFinalize(_ tool.Context, _ GraphPlanFinalizeArgs) (GraphPlanFinali
 	}, nil
 }
 
-// NewGraphPlanFinalizeTool creates the gplan_finalize transition tool.
 func NewGraphPlanFinalizeTool() (tool.Tool, error) {
 	return functiontool.New(functiontool.Config{
 		Name: "gplan_finalize",
 		Description: `Graph-Optimized Plan mode ONLY. Declare investigation complete and advance to the PLAN phase, which unlocks announce_plan.
 
-Call this once you can name every file you would change and why — from the READ phase (no gaps) or after closing all gaps in the GAP phase. Immediately follow with announce_plan to record the finalized, dependency-first plan.`,
+Call this once you can name the user-visible sequence that proves the job AND the files that implement it. 'acceptance' is required. announce_plan 'verification' must include that text.`,
 	}, graphPlanFinalize)
 }

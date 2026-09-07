@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/SAP/astonish/pkg/browser"
-	incus "github.com/SAP/astonish/pkg/sandbox/incus"
 	"google.golang.org/adk/tool"
 )
 
@@ -178,29 +177,7 @@ func startKasmVNCHandoff(mgr *browser.Manager, reason string, pageURL, pageTitle
 		return buildVNCHandoffResult(mgr, containerName, reason, pageURL, pageTitle)
 	}
 
-	// Incus path: start KasmVNC via Incus exec API.
-	platform := incus.DetectPlatform()
-	client, err := incus.Connect(platform)
-	if err != nil {
-		return BrowserRequestHumanResult{}, fmt.Errorf("failed to connect to sandbox: %w", err)
-	}
-
-	cfg := mgr.Config()
-
-	// Start KasmVNC in the container (auth disabled via -DisableBasicAuth)
-	err = incus.StartKasmVNC(client, containerName, incus.BrowserContainerConfig{
-		ViewportWidth:       cfg.ViewportWidth,
-		ViewportHeight:      cfg.ViewportHeight,
-		KasmVNCPort:         cfg.KasmVNCPort,
-		ChromePath:          cfg.ChromePath,
-		FingerprintSeed:     cfg.FingerprintSeed,
-		FingerprintPlatform: cfg.FingerprintPlatform,
-	})
-	if err != nil {
-		return BrowserRequestHumanResult{}, fmt.Errorf("failed to start KasmVNC: %w", err)
-	}
-
-	return buildVNCHandoffResult(mgr, containerName, reason, pageURL, pageTitle)
+	return BrowserRequestHumanResult{}, fmt.Errorf("browser VNC handoff requires a wired sandbox backend (ContainerDialFunc is nil)")
 }
 
 // buildVNCHandoffResult registers a handoff token and constructs the proxy URL.

@@ -33,7 +33,7 @@ In session `8bf63fbf`, the dev agent called `read_file` on the same file **58 ti
 
 1. **All filesystem state and logic lives inside the container.** The sandbox is the isolation boundary. The host never has direct knowledge of or access to the container's filesystem. No host-side caching of file content or metadata.
 2. **Must work on K8s per-call Exec.** The K8s backend (`backendNodeClient`) spawns a fresh `astonish node` process per tool call. In-process state does not survive between calls. Any caching must be persisted to the container's filesystem.
-3. **Backend-agnostic.** The same tool implementation runs identically on Incus (persistent pipe), OpenShell (gRPC), K8s (per-call Exec), and Mock.
+3. **Backend-agnostic.** The same tool implementation runs identically on Docker OverlayFS (persistent pipe), OpenShell (gRPC), K8s (per-call Exec), and Mock.
 4. **The real cost is tokens, not network I/O.** Even on K8s where process spawn is 200-500ms, the savings come from not injecting 50KB into the LLM context on every turn. A 100-byte stub response vs. 58KB payload is the win.
 
 ---

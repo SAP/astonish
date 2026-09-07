@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"strings"
 	"sync"
 )
 
@@ -30,8 +31,9 @@ const (
 // session. All access is guarded because parallel tool calls may enter the gate
 // concurrently.
 type GraphPlanState struct {
-	mu    sync.Mutex
-	phase GraphPlanPhase
+	mu         sync.Mutex
+	phase      GraphPlanPhase
+	acceptance string // user-visible sequence recorded by gplan_finalize
 }
 
 // NewGraphPlanState returns a state machine starting in the graph phase.
@@ -54,11 +56,26 @@ func (g *GraphPlanState) Advance(to GraphPlanPhase) {
 	g.mu.Unlock()
 }
 
-// Reset returns the machine to the initial graph phase.
+// Reset returns the machine to the initial graph phase and clears acceptance.
 func (g *GraphPlanState) Reset() {
 	g.mu.Lock()
 	g.phase = GraphPlanPhaseGraph
+	g.acceptance = ""
 	g.mu.Unlock()
+}
+
+// SetAcceptance records the user-visible sequence that will prove the job.
+func (g *GraphPlanState) SetAcceptance(s string) {
+	g.mu.Lock()
+	g.acceptance = strings.TrimSpace(s)
+	g.mu.Unlock()
+}
+
+// Acceptance returns the recorded user-visible sequence, or "" if unset.
+func (g *GraphPlanState) Acceptance() string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.acceptance
 }
 
 // graphPlanTransitionTools are the phase-transition tools. They only mutate the

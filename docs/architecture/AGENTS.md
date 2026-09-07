@@ -15,7 +15,7 @@ This directory is the **authoritative reference** for cross-cutting design decis
 - `sqlite-backend.md` — personal-mode SQLite topology.
 
 ### Sandbox
-- `sandbox-backends.md` — Incus vs. K8s vs. OpenShell vs. Mock: capabilities, lifecycle, template model.
+- `sandbox-backends.md` — Docker OverlayFS vs. K8s vs. OpenShell vs. Mock: capabilities, lifecycle, template model.
 - `openshell-sandbox-backend.md` — OpenShell gRPC gateway, supervisor, Landlock/seccomp, L7 network policy.
 
 ### API + Generative UI
@@ -35,7 +35,7 @@ This directory is the **authoritative reference** for cross-cutting design decis
 ### Session behavior
 - `smart-compaction.md` — session compaction algorithm.
 - `cache-diagnostics.md` — superadmin-only request stability and cache observability, including capture safety and persistence.
-- `code-agent-investigation.md` — code-mode regression investigation: Work Policy, `debug-regression` skill, failed-fix follow-up injector. Does **not** change codegraph.
+- `code-agent-investigation.md` — code-mode (and Studio Live Evidence) investigation: Work Policy, live-surface vs code-regression skills, follow-up injector. Does **not** change codegraph.
 
 ## Package implementation guides
 

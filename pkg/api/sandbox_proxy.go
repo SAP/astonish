@@ -15,49 +15,79 @@ import (
 	"sync"
 	"time"
 
+	"github.com/SAP/astonish/pkg/config"
+	"github.com/SAP/astonish/pkg/sandbox"
 	"github.com/gorilla/mux"
-	incus "github.com/SAP/astonish/pkg/sandbox/incus"
 )
 
-// ipCacheEntry holds a cached container IP with an expiry time.
 type ipCacheEntry struct {
 	ip     string
 	expiry time.Time
 }
 
-// ipCache maps container names to their bridge IPs with a TTL.
 var ipCache sync.Map
 
-const ipCacheTTL = 30 * time.Second
-
-// getCachedIP returns the cached IP for a container, or resolves and caches it.
-func getCachedIP(client *incus.IncusClient, containerName string) (string, error) {
-	if entry, ok := ipCache.Load(containerName); ok {
-		cached := entry.(*ipCacheEntry)
-		if time.Now().Before(cached.expiry) {
-			return cached.ip, nil
-		}
-		ipCache.Delete(containerName)
-	}
-
-	// Use a single-attempt IP resolution for the proxy path.
-	// GetContainerIPv4 polls for up to 10s, but if the container is running
-	// and healthy, the IP should be available immediately.
-	ip, err := client.GetContainerIPv4(containerName)
+func sessionIDForProxyContainer(containerName string) string {
+	reg, err := sandbox.NewSessionRegistry()
 	if err != nil {
-		return "", err
+		return containerName
 	}
-
-	ipCache.Store(containerName, &ipCacheEntry{
-		ip:     ip,
-		expiry: time.Now().Add(ipCacheTTL),
-	})
-
-	return ip, nil
+	for _, e := range reg.List() {
+		if e.ContainerName == containerName || e.SessionID == containerName {
+			return e.SessionID
+		}
+	}
+	return containerName
 }
 
-// InvalidateIPCache removes a container's IP from the cache.
-// Called when a container is destroyed.
+func studioBackendDial(containerName string, port int) (net.Conn, error) {
+	appCfg, err := config.LoadAppConfig()
+	if err != nil {
+		return nil, err
+	}
+	b, _, err := sandbox.BackendFromAppConfig(appCfg)
+	if err != nil {
+		return nil, err
+	}
+	sessionID := sessionIDForProxyContainer(containerName)
+	return sandbox.DialSessionPort(context.Background(), b, sessionID, port)
+}
+
+func studioProxyTransport(containerName string, port int) *http.Transport {
+	return &http.Transport{
+		DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
+			return studioBackendDial(containerName, port)
+		},
+		MaxIdleConnsPerHost: 2,
+	}
+}
+
+// ensureProxySessionRunning reports whether the sandbox for containerName is running.
+func ensureProxySessionRunning(containerName string) error {
+	appCfg, err := config.LoadAppConfig()
+	if err != nil {
+		return err
+	}
+	b, cleanup, err := sandbox.BackendFromAppConfig(appCfg)
+	if err != nil {
+		return err
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
+	sessionID := sessionIDForProxyContainer(containerName)
+	state, err := b.SessionState(context.Background(), sessionID)
+	if err != nil {
+		return err
+	}
+	if state != sandbox.SessionStateRunning && state != sandbox.SessionStateCreating {
+		return fmt.Errorf("session %s is not running", sessionID)
+	}
+	return nil
+}
+
+// InvalidateIPCache removes a container's cached IP. Overlay dials do not
+// populate this cache; the helper remains for tests and leftover call sites.
 func InvalidateIPCache(containerName string) {
 	ipCache.Delete(containerName)
 }
@@ -105,25 +135,10 @@ func SandboxProxyHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify container exists and is running
-	client, err := sandboxConnect()
-	if err != nil {
-		respondError(w, http.StatusServiceUnavailable, `{"error":"sandbox unavailable"}`)
-		return
-	}
-
-	if !client.IsRunning(containerName) {
+	if err := ensureProxySessionRunning(containerName); err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadGateway)
 		fmt.Fprintf(w, `{"error":"container %q is not running"}`, containerName)
-		return
-	}
-
-	// Resolve container IP (used for logging/diagnostics, not for dialing)
-	if _, err := getCachedIP(client, containerName); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadGateway)
-		fmt.Fprintf(w, `{"error":"cannot resolve container IP: %s"}`, err.Error())
 		return
 	}
 
@@ -137,14 +152,12 @@ func SandboxProxyHandler(w http.ResponseWriter, r *http.Request) {
 	// WebSocket upgrade
 	if isWebSocketUpgrade(r) {
 		proxyWebSocket(w, r, func() (net.Conn, error) {
-			dialer := &incus.ContainerDialer{Client: client}
-			return dialer.Dial(containerName, port)
+			return studioBackendDial(containerName, port)
 		}, downstreamPath)
 		return
 	}
 
 	// HTTP reverse proxy
-	dialer := &incus.ContainerDialer{Client: client}
 	target, err := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", port))
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, fmt.Sprintf("invalid proxy target URL: %s", err))
@@ -169,7 +182,7 @@ func SandboxProxyHandler(w http.ResponseWriter, r *http.Request) {
 			req.Header.Set("X-Forwarded-Host", r.Host)
 			req.Header.Set("X-Forwarded-Proto", "http")
 		},
-		Transport: dialer.HTTPTransport(containerName, port),
+		Transport: studioProxyTransport(containerName, port),
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadGateway)
@@ -270,23 +283,17 @@ func (m *PortProxyManager) StartProxy(containerName string, containerPort int) (
 		return 0, err
 	}
 
-	// Verify container connectivity
-	client, err := sandboxConnect()
-	if err != nil {
+	if err := ensureProxySessionRunning(containerName); err != nil {
 		return 0, fmt.Errorf("sandbox unavailable: %w", err)
 	}
-	if _, err := getCachedIP(client, containerName); err != nil {
-		return 0, fmt.Errorf("cannot resolve container IP: %w", err)
-	}
 
-	dialer := &incus.ContainerDialer{Client: client}
 	tunnelTarget := fmt.Sprintf("http://127.0.0.1:%d", containerPort)
 
 	// Build the handler: reverse proxy + WebSocket support
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if isWebSocketUpgrade(r) {
 			proxyWebSocket(w, r, func() (net.Conn, error) {
-				return dialer.Dial(containerName, containerPort)
+				return studioBackendDial(containerName, containerPort)
 			}, r.URL.Path)
 			return
 		}
@@ -315,7 +322,7 @@ func (m *PortProxyManager) StartProxy(containerName string, containerPort int) (
 				req.Header.Set("X-Forwarded-Host", r.Host)
 				req.Header.Set("X-Forwarded-Proto", "http")
 			},
-			Transport: dialer.HTTPTransport(containerName, containerPort),
+			Transport: studioProxyTransport(containerName, containerPort),
 			ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 				respondError(w, http.StatusBadGateway, fmt.Sprintf("proxy error: %s", err))
 			},
@@ -448,10 +455,6 @@ type subdomainTarget struct {
 type SubdomainRouter struct {
 	mu      sync.RWMutex
 	hostMap map[string]*subdomainTarget // hostname → target
-
-	clientMu   sync.Mutex
-	client     *incus.IncusClient
-	clientInit bool
 }
 
 var (
@@ -545,48 +548,17 @@ func (sr *SubdomainRouter) ListForContainer(containerName string) map[int]string
 	return result
 }
 
-// getClient returns a cached Incus client, creating one on first call.
-// The client is reused across all subdomain proxy requests to avoid
-// the overhead of sandboxConnect() (platform detection + Incus dial)
-// on every request.
-func (sr *SubdomainRouter) getClient() (*incus.IncusClient, error) {
-	sr.clientMu.Lock()
-	defer sr.clientMu.Unlock()
-
-	if sr.clientInit && sr.client != nil {
-		return sr.client, nil
-	}
-
-	client, err := sandboxConnect()
-	if err != nil {
-		return nil, err
-	}
-	sr.client = client
-	sr.clientInit = true
-	return client, nil
-}
-
 // ServeSubdomainProxy handles an HTTP request by proxying it to the matched
 // container. Called from the Studio main handler when a subdomain match is found.
 func ServeSubdomainProxy(w http.ResponseWriter, r *http.Request, containerName string, containerPort int) {
-	sr := GetSubdomainRouter()
-	client, err := sr.getClient()
-	if err != nil {
-		respondError(w, http.StatusServiceUnavailable, fmt.Sprintf("sandbox unavailable: %s", err))
+	if err := ensureProxySessionRunning(containerName); err != nil {
+		respondError(w, http.StatusBadGateway, fmt.Sprintf("cannot reach sandbox: %s", err))
 		return
 	}
-
-	// Verify container is reachable
-	if _, err := getCachedIP(client, containerName); err != nil {
-		respondError(w, http.StatusBadGateway, fmt.Sprintf("cannot resolve container IP: %s", err))
-		return
-	}
-
-	dialer := &incus.ContainerDialer{Client: client}
 
 	if isWebSocketUpgrade(r) {
 		proxyWebSocket(w, r, func() (net.Conn, error) {
-			return dialer.Dial(containerName, containerPort)
+			return studioBackendDial(containerName, containerPort)
 		}, r.URL.Path)
 		return
 	}
@@ -614,7 +586,7 @@ func ServeSubdomainProxy(w http.ResponseWriter, r *http.Request, containerName s
 			req.Header.Set("X-Forwarded-Host", r.Host)
 			req.Header.Set("X-Forwarded-Proto", "http")
 		},
-		Transport: dialer.HTTPTransport(containerName, containerPort),
+		Transport: studioProxyTransport(containerName, containerPort),
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			respondError(w, http.StatusBadGateway, fmt.Sprintf("proxy error: %s", err))
 		},

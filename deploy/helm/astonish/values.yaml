@@ -168,7 +168,8 @@ sandbox:
   podSecurity: baseline
 
   # Backend selector — canonical token used by the Go runtime.
-  # Accepted values: "k8s" (this chart), "incus" (local dev).
+  # Accepted values: "k8s" (this chart). Local Studio uses "docker"
+  # OverlayFS sessions; "incus" is a legacy alias for "docker".
   # Written verbatim into config.sandbox.backend.
   backend: k8s
 

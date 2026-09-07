@@ -1,18 +1,11 @@
 // BackendFromAppConfig builds a sandbox.Backend directly from an
 // *config.AppConfig. It is the one-stop helper used by tools that want to
-// talk to a sandbox backend without carrying around separate *IncusClient /
-// kubeconfig wiring.
-//
-// Phase D scope: this is the entry point for the k8s smoke command and
-// any future caller that wants backend-kind selection driven by the
-// operator's config.yaml. The existing tool-wrapping pipeline
-// (NodeClientPool + LazyNodeClient) still hardcodes Incus; migrating that
-// layer onto the Backend interface is Phase E.
+// talk to a sandbox backend without carrying around Docker / kubeconfig wiring.
 //
 // Precedence for the kind selector:
 //
-//  1. Explicit cfg.Sandbox.Backend ("incus" / "k8s" / "mock").
-//  2. Default: "incus" (backward-compat).
+//  1. Explicit cfg.Sandbox.Backend ("docker" / "k8s" / "openshell" / "mock").
+//  2. Default: "docker" (empty and legacy "incus" alias here).
 //
 // Required registries are constructed via NewSessionRegistry /
 // NewTemplateRegistry; both honour platform/personal mode automatically.
@@ -33,7 +26,7 @@ import (
 // has a real clientset and rest.Config attached, loaded via the standard
 // kubeconfig ladder (see pkg/sandbox/k8s.LoadConfigOptions).
 //
-// Errors are actionable: missing kubeconfig, unreachable Incus daemon,
+// Errors are actionable: missing kubeconfig, Docker engine down,
 // invalid backend kind, etc. Callers should surface them verbatim to the
 // operator.
 func BackendFromAppConfig(appCfg *config.AppConfig) (Backend, func(), error) {
@@ -69,15 +62,9 @@ func BackendFromAppConfigWithSessions(appCfg *config.AppConfig, sessRegistry *Se
 	limits := EffectiveLimits(&appCfg.Sandbox)
 
 	switch kind {
-	case BackendKindIncus:
-		SetSandboxConfig(&appCfg.Sandbox)
-		client, err := SetupSandboxRuntime()
-		if err != nil {
-			return nil, nil, fmt.Errorf("sandbox: incus runtime: %w", err)
-		}
+	case BackendKindDocker:
 		b, err := NewBackend(BackendFactoryConfig{
-			Kind:       BackendKindIncus,
-			Client:     client,
+			Kind:       BackendKindDocker,
 			Sessions:   sessRegistry,
 			Templates:  tplRegistry,
 			DefaultLim: &limits,

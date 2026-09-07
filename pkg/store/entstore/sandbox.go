@@ -566,7 +566,7 @@ func (ts *sandboxTemplateStore) AcquireBuildLock(ctx context.Context) (bool, fun
 	}
 
 	now := time.Now()
-	staleThreshold := now.Add(-5 * time.Minute)
+	staleThreshold := now.Add(-90 * time.Minute)
 
 	if setting != nil {
 		// Check if lock is held and not stale.
@@ -626,6 +626,13 @@ func (ts *sandboxTemplateStore) AcquireBuildLock(ctx context.Context) (bool, fun
 }
 
 func (ts *sandboxTemplateStore) IsBuildInProgress(ctx context.Context) (bool, error) {
+	ts.buildMu.Lock()
+	held := ts.buildHeld
+	ts.buildMu.Unlock()
+	if held {
+		return true, nil
+	}
+
 	const lockKey = "build_lock"
 	setting, err := ts.client.PlatformSetting.Get(ctx, lockKey)
 	if err != nil {
@@ -636,7 +643,7 @@ func (ts *sandboxTemplateStore) IsBuildInProgress(ctx context.Context) (bool, er
 	}
 
 	now := time.Now()
-	staleThreshold := now.Add(-5 * time.Minute)
+	staleThreshold := now.Add(-90 * time.Minute)
 
 	tsStr, ok := setting.Value["timestamp"].(string)
 	if !ok || tsStr == "" {

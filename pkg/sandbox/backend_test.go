@@ -16,6 +16,7 @@ func TestBackendKindConstants(t *testing.T) {
 		want string
 	}{
 		{BackendKindIncus, "incus"},
+		{BackendKindDocker, "docker"},
 		{BackendKindK8s, "k8s"},
 		{BackendKindOpenShell, "openshell"},
 		{BackendKindMock, "mock"},

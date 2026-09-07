@@ -22,6 +22,7 @@ func TestBuildBackendBrowserLaunchScript_UsesSandboxBrowser(t *testing.T) {
 	}, 1366, 768)
 
 	wants := []string{
+		"export LD_PRELOAD=/usr/lib/hwcap_mask.so",
 		"HOME=/home/browser python3 -c 'from cloakbrowser.config import get_binary_path",
 		"/home/browser/.cloakbrowser",
 		"Xkasmvnc :0",
@@ -35,11 +36,16 @@ func TestBuildBackendBrowserLaunchScript_UsesSandboxBrowser(t *testing.T) {
 		"--fingerprint-platform linux",
 		"--proxy-server=http://proxy.local:8080",
 		"DONE: browser ready",
+		"/home/browser/.cloakbrowser/*/chrome",
+		"falling back to Xvfb",
 	}
 	for _, want := range wants {
 		if !strings.Contains(script, want) {
 			t.Fatalf("launch script missing %q\nscript:\n%s", want, script)
 		}
+	}
+	if strings.Contains(script, "| head") {
+		t.Fatal("launch script must not pipe to head (APFS HEAD/head collision)")
 	}
 }
 
@@ -58,7 +64,7 @@ func TestStartBackendBrowserReportsStderrAndExitCode(t *testing.T) {
 	}
 }
 
-func TestWireBackendBrowserManager_K8sOnly(t *testing.T) {
+func TestWireBackendBrowserManager_K8sAndDocker(t *testing.T) {
 	mgr := browser.NewManager(browser.DefaultConfig())
 	reg := &SessionRegistry{}
 
@@ -73,8 +79,75 @@ func TestWireBackendBrowserManager_K8sOnly(t *testing.T) {
 	}
 
 	mgr = browser.NewManager(browser.DefaultConfig())
+	if !WireBackendBrowserManager(mgr, &kindOnlyBackend{kind: BackendKindDocker}, reg, nil, nil) {
+		t.Fatal("WireBackendBrowserManager returned false for Docker backend")
+	}
+
+	mgr = browser.NewManager(browser.DefaultConfig())
 	if WireBackendBrowserManager(mgr, &kindOnlyBackend{kind: BackendKindIncus}, reg, nil, nil) {
-		t.Fatal("WireBackendBrowserManager should not wire non-K8s backend")
+		t.Fatal("WireBackendBrowserManager should not wire Incus backend")
+	}
+}
+
+func TestWireBackendBrowserManager_ResolveAcceptsDockerContainerName(t *testing.T) {
+	mgr := browser.NewManager(browser.DefaultConfig())
+	reg := newTestRegistry(t)
+	sessionID := "c1b27dfb-f828-40f2-b510-c8e85df3cda7"
+	if err := reg.PutSession(&store.SandboxSession{
+		SessionID:     sessionID,
+		Backend:       string(BackendKindDocker),
+		ContainerName: "astonish-session-c1b27dfb-f828-40-e1deb88678e9",
+		State:         store.SandboxSessionStateRunning,
+	}); err != nil {
+		t.Fatalf("PutSession: %v", err)
+	}
+	if !WireBackendBrowserManager(mgr, &kindOnlyBackend{kind: BackendKindDocker}, reg, nil, nil) {
+		t.Fatal("WireBackendBrowserManager returned false")
+	}
+	name, ip, err := mgr.ContainerResolveFunc(sessionID)
+	if err != nil {
+		t.Fatalf("ContainerResolveFunc: %v", err)
+	}
+	if name != sessionID {
+		t.Errorf("name = %q, want session ID", name)
+	}
+	if ip != "127.0.0.1" {
+		t.Errorf("ip = %q, want 127.0.0.1", ip)
+	}
+}
+
+func TestWireBackendBrowserManager_ResolveAcceptsK8sPodName(t *testing.T) {
+	mgr := browser.NewManager(browser.DefaultConfig())
+	reg := newTestRegistry(t)
+	sessionID := "k8s-session"
+	if err := reg.PutSession(&store.SandboxSession{
+		SessionID: sessionID,
+		Backend:   string(BackendKindK8s),
+		PodName:   "astn-sess-k8s-session",
+		State:     store.SandboxSessionStateRunning,
+	}); err != nil {
+		t.Fatalf("PutSession: %v", err)
+	}
+	if !WireBackendBrowserManager(mgr, &kindOnlyBackend{kind: BackendKindK8s}, reg, nil, nil) {
+		t.Fatal("WireBackendBrowserManager returned false")
+	}
+	if _, _, err := mgr.ContainerResolveFunc(sessionID); err != nil {
+		t.Fatalf("ContainerResolveFunc: %v", err)
+	}
+}
+
+func TestWireBackendBrowserManager_ResolveRejectsUnboundSession(t *testing.T) {
+	mgr := browser.NewManager(browser.DefaultConfig())
+	reg := newTestRegistry(t)
+	if !WireBackendBrowserManager(mgr, &kindOnlyBackend{kind: BackendKindDocker}, reg, nil, nil) {
+		t.Fatal("WireBackendBrowserManager returned false")
+	}
+	_, _, err := mgr.ContainerResolveFunc("missing-session")
+	if err == nil {
+		t.Fatal("expected resolve error for missing session")
+	}
+	if !strings.Contains(err.Error(), `no running sandbox for session "missing-session"`) {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

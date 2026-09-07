@@ -152,6 +152,13 @@ func (b *K8sBackend) BuildTemplate(ctx context.Context, spec sandbox.TemplateBui
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+		if spec.Progress != nil {
+			display := step
+			if len(display) > 80 {
+				display = display[:77] + "..."
+			}
+			spec.Progress(fmt.Sprintf("Running step %d/%d: %s", i+1, len(spec.Steps), display))
+		}
 		res, err := b.execInPod(ctx, podName, sandbox.ExecSpec{
 			Command: []string{"/usr/local/bin/astonish-shell", "/bin/sh", "-c", step},
 		})
@@ -420,33 +427,33 @@ func (b *K8sBackend) buildTemplateBuilderPodManifest(spec sandbox.TemplateBuildS
 		Spec: corev1.PodSpec{
 			RestartPolicy: corev1.RestartPolicyNever,
 			Containers: []corev1.Container{
-			{
-				Name:            containerName,
-				Image:           b.cfg.SandboxImage,
-				ImagePullPolicy: imagePullPolicy(b.cfg.SandboxImage),
-				// No Command: — uses the image's ENTRYPOINT which composes
-				// the overlay from ASTONISH_LAYER_CHAIN, then execs into
-				// ASTONISH_HANDOFF (sleep infinity). This is the same
-				// pattern as session pods (session.go buildPodManifest).
-				Env: []corev1.EnvVar{
-					{Name: "ASTONISH_TEMPLATE_ID", Value: spec.TemplateID},
-					{Name: "ASTONISH_SESSION_ID", Value: "build-" + name},                     // synthetic; resume-tar never exists so [ -f ] guard skips it
-					{Name: "ASTONISH_LAYER_CHAIN", Value: strings.Join(spec.ParentLayers, ",")},
-					{Name: "ASTONISH_UPPER_DIR", Value: mountUpper},
-					{Name: "ASTONISH_WORK_DIR", Value: mountWork},
-					{Name: "ASTONISH_LAYERS_DIR", Value: mountLayers},
-					{Name: "ASTONISH_UPPERS_DIR", Value: mountUppers},
-					// PID 1 sleeps after overlay composition; build steps
-					// arrive via execInPod through the astonish-shell wrapper.
-					{Name: "ASTONISH_HANDOFF", Value: "/bin/sleep"},
-					{Name: "ASTONISH_HANDOFF_ARGS", Value: "infinity"},
+				{
+					Name:            containerName,
+					Image:           b.cfg.SandboxImage,
+					ImagePullPolicy: imagePullPolicy(b.cfg.SandboxImage),
+					// No Command: — uses the image's ENTRYPOINT which composes
+					// the overlay from ASTONISH_LAYER_CHAIN, then execs into
+					// ASTONISH_HANDOFF (sleep infinity). This is the same
+					// pattern as session pods (session.go buildPodManifest).
+					Env: []corev1.EnvVar{
+						{Name: "ASTONISH_TEMPLATE_ID", Value: spec.TemplateID},
+						{Name: "ASTONISH_SESSION_ID", Value: "build-" + name}, // synthetic; resume-tar never exists so [ -f ] guard skips it
+						{Name: "ASTONISH_LAYER_CHAIN", Value: strings.Join(spec.ParentLayers, ",")},
+						{Name: "ASTONISH_UPPER_DIR", Value: mountUpper},
+						{Name: "ASTONISH_WORK_DIR", Value: mountWork},
+						{Name: "ASTONISH_LAYERS_DIR", Value: mountLayers},
+						{Name: "ASTONISH_UPPERS_DIR", Value: mountUppers},
+						// PID 1 sleeps after overlay composition; build steps
+						// arrive via execInPod through the astonish-shell wrapper.
+						{Name: "ASTONISH_HANDOFF", Value: "/bin/sleep"},
+						{Name: "ASTONISH_HANDOFF_ARGS", Value: "infinity"},
+					},
+					VolumeMounts: []corev1.VolumeMount{
+						{Name: volumeLayers, MountPath: mountLayers}, // RW for atomic rename
+						{Name: volumeUppers, MountPath: mountUppers},
+						{Name: volumeOverlay, MountPath: mountOverlay},
+					},
 				},
-				VolumeMounts: []corev1.VolumeMount{
-					{Name: volumeLayers, MountPath: mountLayers}, // RW for atomic rename
-					{Name: volumeUppers, MountPath: mountUppers},
-					{Name: volumeOverlay, MountPath: mountOverlay},
-				},
-			},
 			},
 			Volumes: []corev1.Volume{
 				{
@@ -465,7 +472,7 @@ func (b *K8sBackend) buildTemplateBuilderPodManifest(spec sandbox.TemplateBuildS
 						},
 					},
 				},
-			{Name: volumeOverlay, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+				{Name: volumeOverlay, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 			},
 		},
 	}
@@ -482,14 +489,14 @@ func (b *K8sBackend) buildTemplateBuilderPodManifest(spec sandbox.TemplateBuildS
 // given pod and returns the resulting TemplateArtifact.
 //
 // The pipeline:
-//   1. tar's the overlay upper dir with fixed canonical options (see §5.11).
-//   2. Tees the stream through sha256sum into a staging directory on
-//      /mnt/astonish-layers.
-//   3. Atomic-renames staging → /mnt/astonish-layers/<sha>/. If a
-//      directory with that sha already exists (content dedup via
-//      idempotent sha256), the staging copy is removed.
-//   4. Computes the on-disk size of the final rootfs directory.
-//   5. Emits SHA=<hex>\nSIZE=<bytes>\n on stdout for us to parse.
+//  1. tar's the overlay upper dir with fixed canonical options (see §5.11).
+//  2. Tees the stream through sha256sum into a staging directory on
+//     /mnt/astonish-layers.
+//  3. Atomic-renames staging → /mnt/astonish-layers/<sha>/. If a
+//     directory with that sha already exists (content dedup via
+//     idempotent sha256), the staging copy is removed.
+//  4. Computes the on-disk size of the final rootfs directory.
+//  5. Emits SHA=<hex>\nSIZE=<bytes>\n on stdout for us to parse.
 //
 // parentLayer is embedded in the returned artifact's ParentLayer field
 // (nil / empty string is fine — root layers have no parent). The
@@ -500,7 +507,7 @@ func (b *K8sBackend) captureUpperAsLayer(ctx context.Context, podName, parentLay
 	script := buildCaptureScript(b.cfg.LayersPath, builderID)
 
 	res, err := b.execInPod(ctx, podName, sandbox.ExecSpec{
-		Command: []string{"/bin/sh", "-c", script},
+		Command: []string{"/bin/bash", "-c", script},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("exec capture pipeline: %w", err)
@@ -533,38 +540,12 @@ func (b *K8sBackend) captureUpperAsLayer(ctx context.Context, podName, parentLay
 // Isolated at package scope so tests can assert exactly the script
 // shape without standing up a pod.
 func buildCaptureScript(layersPath, builderID string) string {
-	var b bytes.Buffer
-	b.WriteString("set -e\n")
-	fmt.Fprintf(&b, "STAGING=%q\n", layersPath+"/__staging-"+builderID)
-	fmt.Fprintf(&b, "LAYERS_DIR=%q\n", layersPath)
-	// Trap: if the script exits non-zero (set -e abort, signal, etc.)
-	// remove the staging directory so it doesn't become an orphan.
-	// Only the GC reconciler handles external kills (OOM, pod eviction).
-	b.WriteString("trap 'rm -rf \"$STAGING\"' EXIT\n")
-	b.WriteString("mkdir -p \"$STAGING/rootfs\"\n")
-	// Canonical tar: --sort=name --mtime=@0 pins layout byte-for-byte
-	// across runs with identical content. --numeric-owner --xattrs
-	// --acls match the preservation requirements (§5.6).
-	//
-	// Two-pass approach (POSIX-compatible, no bash process substitution):
-	//   Pass 1: tar the upper into a temp archive and compute SHA-256.
-	//   Pass 2: extract the archive into the staging rootfs.
-	// This avoids the bash-only >(process substitution) syntax that fails
-	// on Debian's /bin/sh (dash).
-	b.WriteString("tar --numeric-owner --xattrs --acls --sort=name --mtime=@0 \\\n")
-	fmt.Fprintf(&b, "    -C %s -cf /tmp/astn-layer.tar .\n", mountUpper)
-	b.WriteString("SHA=$(sha256sum /tmp/astn-layer.tar | awk '{print $1}')\n")
-	b.WriteString("tar --numeric-owner --xattrs --acls -C \"$STAGING/rootfs\" -xf /tmp/astn-layer.tar\n")
-	b.WriteString("rm -f /tmp/astn-layer.tar\n")
-	b.WriteString("if [ -d \"$LAYERS_DIR/$SHA\" ]; then\n")
-	b.WriteString("  rm -rf \"$STAGING\"\n")
-	b.WriteString("else\n")
-	b.WriteString("  mv \"$STAGING\" \"$LAYERS_DIR/$SHA\"\n")
-	b.WriteString("fi\n")
-	b.WriteString("SIZE=$(du -sb \"$LAYERS_DIR/$SHA/rootfs\" | awk '{print $1}')\n")
-	b.WriteString("echo \"SHA=$SHA\"\n")
-	b.WriteString("echo \"SIZE=$SIZE\"\n")
-	return b.String()
+	return sandbox.OverlayCaptureScript(sandbox.OverlayCaptureOpts{
+		LayersDir:     layersPath,
+		UpperDir:      mountUpper,
+		BuilderID:     builderID,
+		ExtractXattrs: true,
+	})
 }
 
 // parseCaptureOutput extracts the SHA= and SIZE= lines emitted by

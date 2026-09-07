@@ -115,30 +115,30 @@ spec:
 
 Pods from org `acme` can only communicate with other `acme` pods. Cross-org traffic is denied by default.
 
-### Incus (LXC Containers)
+### Docker OverlayFS (local)
 
-For non-Kubernetes deployments, Astonish uses [Incus](https://linuxcontainers.org/incus/) to manage LXC system containers with per-org bridge networks.
+For non-Kubernetes deployments, Astonish runs session containers with Docker OverlayFS — the same overlay contract as the Kubernetes sandbox-base image. This is the local Studio default on both macOS and Linux.
+
+- Session containers are named `astonish-session-*` from `ghcr.io/sap/astonish-sandbox-base`.
+- Template layers live on the host; the live upper is a Docker volume.
+- `fuse-overlayfs` composes `/sandbox/rootfs`. Tools run via `astonish-shell`.
 
 #### Network Architecture
 
-Each organization gets a dedicated bridge interface:
+Each organization gets a dedicated Docker bridge network:
 
 ```
-org-a-br0  →  10.100.1.0/24  →  org-a containers only
-org-b-br0  →  10.100.2.0/24  →  org-b containers only
+astonish-org-acme     →  org acme containers only
+astonish-org-other    →  org other containers only
 ```
 
-Bridge-level isolation means org-a containers have no route to org-b, regardless of firewall rules.
+Containers on different org networks have no route to each other.
 
 #### Container Naming
 
-Containers follow a deterministic naming convention:
-
 ```
-astonish-<org>-<team>-<session-short-id>
+astonish-session-<session-id-prefix>-<short>
 ```
-
-For example: `astonish-acme-backend-a1b2c3`
 
 ## Team-Scoped Sandbox Templates
 

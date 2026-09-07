@@ -285,25 +285,6 @@ func (r *SessionRegistry) ResolveSessionID(input string) (string, bool) {
 	return "", false
 }
 
-// Reap removes registry entries whose containers no longer exist in Incus.
-// Returns the number of entries removed.
-func (r *SessionRegistry) Reap(client *IncusClient) int {
-	entries := r.List()
-	ctx := context.Background()
-	removed := 0
-	for _, e := range entries {
-		if client.InstanceExists(e.ContainerName) {
-			continue
-		}
-		if err := r.store.Delete(ctx, e.SessionID); err != nil {
-			slog.Warn("sandbox session registry: reap delete failed", "component", "sandbox", "session", e.SessionID, "error", err)
-			continue
-		}
-		removed++
-	}
-	return removed
-}
-
 // GetByContainerName returns the session entry for a given container name, or nil.
 func (r *SessionRegistry) GetByContainerName(containerName string) *SessionEntry {
 	if containerName == "" {

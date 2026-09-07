@@ -21,7 +21,13 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      '/api': 'http://localhost:9393'
+      // Base-layer SSE can run 20–40 minutes. http-proxy defaults to 120s
+      // and was killing overlay capture mid-copy.
+      '/api': {
+        target: 'http://localhost:9393',
+        timeout: 86_400_000,
+        proxyTimeout: 86_400_000
+      }
     }
   },
   build: {

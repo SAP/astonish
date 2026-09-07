@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/SAP/astonish/pkg/config"
-	"github.com/SAP/astonish/pkg/sandbox/incus"
 )
 
 // DefaultSandboxConfig returns sensible defaults for the sandbox system.
@@ -80,17 +79,11 @@ func ValidateSandboxConfig(c *config.SandboxConfig) error {
 
 // sandboxCfg stores the active sandbox configuration at package level.
 // Set via SetSandboxConfig during sandbox initialization. Used by
-// IsPrivileged. Follows the same pattern as activePlatform (now in
-// pkg/sandbox/incus).
+// IsPrivileged.
 var sandboxCfg *config.SandboxConfig
 
-// sandboxConfigProvider adapts the package-level sandboxCfg to the
-// incus.ConfigProvider interface, avoiding a pkg/sandbox/incus → pkg/sandbox
-// import cycle.
 type sandboxConfigProvider struct{}
 
-// IsPrivileged reports whether containers should run in privileged mode
-// according to the active sandbox config.
 func (sandboxConfigProvider) IsPrivileged() bool {
 	if sandboxCfg != nil && sandboxCfg.Privileged != nil {
 		return *sandboxCfg.Privileged
@@ -98,17 +91,8 @@ func (sandboxConfigProvider) IsPrivileged() bool {
 	return false
 }
 
-// Register the ConfigProvider as early as possible so pkg/sandbox/incus sees
-// the current sandboxCfg whether or not SetSandboxConfig has been called.
-// Both pkg/sandbox and pkg/sandbox/incus are linked together at init time;
-// this guarantees a consistent view from first use.
-func init() {
-	incus.SetConfigProvider(sandboxConfigProvider{})
-}
-
 // SetSandboxConfig stores the sandbox configuration at package level for
-// use by container creation functions. The incus.ConfigProvider registration
-// happens once in init(); this function only updates the underlying config.
+// use by container creation functions.
 func SetSandboxConfig(c *config.SandboxConfig) {
 	sandboxCfg = c
 }
@@ -131,11 +115,13 @@ func IsPrivileged() bool {
 }
 
 // containerSecurityConfig returns the security-related config keys for a
-// container. The canonical implementation now lives in pkg/sandbox/incus;
-// this local wrapper preserves the historical unexported name for staying
-// files and tests.
+// container. Docker OverlayFS ignores Incus-style syscall keys; this map
+// is retained for privileged-mode tests.
 func containerSecurityConfig() map[string]string {
-	return incus.ContainerSecurityConfig()
+	if IsPrivileged() {
+		return map[string]string{"security.privileged": "true"}
+	}
+	return map[string]string{"security.privileged": "false"}
 }
 
 // EffectiveLimits returns the limits with defaults filled in for any zero values.

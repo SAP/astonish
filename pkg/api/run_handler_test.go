@@ -18,8 +18,8 @@ func TestWireSandboxBrowserCallbacks_IncusOnly(t *testing.T) {
 		backend     string
 		wantEnabled bool
 	}{
-		{name: "default backend wires Incus", backend: "", wantEnabled: true},
-		{name: "explicit Incus wires Incus", backend: "incus", wantEnabled: true},
+		{name: "default backend does not wire Incus", backend: "", wantEnabled: false},
+		{name: "explicit Incus does not wire Incus", backend: "incus", wantEnabled: false},
 		{name: "K8s does not wire Incus", backend: "k8s", wantEnabled: false},
 		{name: "OpenShell does not wire Incus", backend: "openshell", wantEnabled: false},
 		{name: "mock does not wire Incus", backend: "mock", wantEnabled: false},

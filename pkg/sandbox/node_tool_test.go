@@ -366,7 +366,7 @@ func TestNodeClientPool_SessionScopeSelectsResolvedRegistry(t *testing.T) {
 	defaultReg := newTestRegistry(t)
 	teamReg := newTestRegistry(t)
 
-	pool := NewNodeClientPool(nil, defaultReg, nil, "", nil)
+	pool := NewNodeClientPool(defaultReg, nil, "", nil)
 	var gotOrg, gotTeam string
 	pool.SetRegistryResolver(func(orgSlug, teamSlug string) *SessionRegistry {
 		gotOrg, gotTeam = orgSlug, teamSlug

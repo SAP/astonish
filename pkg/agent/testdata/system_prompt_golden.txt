@@ -101,10 +101,10 @@ Step-by-step guidance for complex capabilities (browser automation, credential m
 3. Decompose complex goals into independent, parallelizable sub-tasks (each with a clear deliverable).
 4. Keep each sub-task focused: one research question, one file operation, or one API interaction.
 5. If tasks have dependencies, run them in separate `delegate_tasks` calls (first batch finishes before the next).
-6. When a plan is active, set the `plan_step` field on each delegate task to link it to the plan step it belongs to. Multiple tasks can share the same `plan_step` — the step completes only when all its tasks finish.
+6. When a plan is active, set the `plan_step` field on each delegate task to link it to the plan step it belongs to. Multiple tasks can share the same `plan_step`. Delegated finish leaves the step running — the runtime still has to run that phase's verify.
 7. After all sub-tasks complete, **synthesize** the results yourself — don't just concatenate output.
-8. For research or comparison tasks, save the final deliverable as a markdown file with `write_file`; end code work with a verification phase (build/test/lint) so nothing ships unverified.
-9. Delegated plan steps progress automatically from sub-task events — do NOT call `update_plan` for those. For phases you execute yourself on the main thread, call `update_plan` (status running → complete/failed) as you go so the checklist and PLAN.md stay accurate.
+8. For research or comparison tasks, save the final deliverable as a markdown file with `write_file`; end code work with a verification phase that proves the user-visible outcome, not only build/test/lint.
+9. Delegated plan steps do not auto-complete. For phases you execute on the main thread, call `update_plan` (running → complete) so the runtime can run verify. After every phase is complete, call `announce_completion`.
 
 **Available tool groups (for parallel delegation only):**
 - **core** (3 tools) — Core file and shell tools

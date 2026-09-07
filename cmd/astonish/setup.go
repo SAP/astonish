@@ -13,10 +13,7 @@ import (
 	"time"
 
 	"charm.land/bubbles/v2/spinner"
-	"github.com/charmbracelet/huh"
 	"charm.land/lipgloss/v2"
-	"github.com/google/uuid"
-	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/credentials"
 	"github.com/SAP/astonish/pkg/provider"
@@ -33,28 +30,19 @@ import (
 	"github.com/SAP/astonish/pkg/provider/sap"
 	"github.com/SAP/astonish/pkg/provider/xai"
 	xai_oauth "github.com/SAP/astonish/pkg/provider/xai_oauth"
-	"github.com/SAP/astonish/pkg/sandbox"
-	incus "github.com/SAP/astonish/pkg/sandbox/incus"
+	sboxdocker "github.com/SAP/astonish/pkg/sandbox/docker"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/store/entstore"
 	"github.com/SAP/astonish/pkg/store/pgutil"
+	"github.com/charmbracelet/huh"
+	"github.com/google/uuid"
+	_ "github.com/jackc/pgx/v5/stdlib"
 	"golang.org/x/crypto/bcrypt"
 )
 
 func handleSetupCommand() error {
-	// Escalate to root on Linux upfront — the sandbox setup step at the end
-	// of the wizard needs overlay mounts, UID shifting, and Incus socket
-	// access. Asking for the sudo password at the start avoids a disruptive
-	// process restart mid-wizard that would lose all prior wizard state.
-	if sandbox.NeedsEscalation() {
-		cfg, err := config.LoadAppConfig()
-		if err != nil || cfg == nil {
-			cfg = &config.AppConfig{}
-		}
-		if sandbox.IsSandboxEnabled(&cfg.Sandbox) {
-			return sandbox.Escalate()
-		}
-	}
+	// Docker OverlayFS sessions do not need host overlay mounts, so the
+	// wizard no longer re-execs via sudo.
 
 	// Load config
 	cfg, err := config.LoadAppConfig()
@@ -188,284 +176,284 @@ func handleSetupCommand() error {
 		if selectedInstance == addNewValue {
 			isNewProvider = true
 			// --- STEP 2: Provider Type (for new provider) ---
-		selectedProviderID = selectProviderType()
-		// Initialize provider config for new provider
-		cfg.Providers[addNewValue] = make(config.ProviderConfig)
-	} else {
-		// Editing existing provider
-		selectedProviderID = existingProviderTypes[selectedInstance]
-		if selectedProviderID == "" {
-			// Fallback: try to infer from instance name
-			selectedProviderID = selectedInstance
-		}
-		// Initialize provider config if nil
-		if cfg.Providers[selectedInstance] == nil {
-			cfg.Providers[selectedInstance] = make(config.ProviderConfig)
-		}
-	}
-
-	pCfg := cfg.Providers[selectedInstance]
-
-	// --- STEP 3: Configuration Form ---
-	switch selectedProviderID {
-	case "anthropic":
-		runAPIKeyForm("Anthropic API Key", "api_key", pCfg)
-		if err := fetchAndSelectAnthropicModel(pCfg, cfg); err != nil {
-			if isUserAborted(err) {
-				fmt.Println("Setup aborted by user; no changes were saved.")
-				return nil
-			}
-			fmt.Printf("Warning: Failed to fetch/select Anthropic models: %v\n", err)
+			selectedProviderID = selectProviderType()
+			// Initialize provider config for new provider
+			cfg.Providers[addNewValue] = make(config.ProviderConfig)
 		} else {
-			goto SaveConfig
-		}
-	case "gemini":
-		runAPIKeyForm("Google API Key", "api_key", pCfg)
-		if err := fetchAndSelectGoogleModel(pCfg, cfg); err != nil {
-			if isUserAborted(err) {
-				fmt.Println("Setup aborted by user; no changes were saved.")
-				return nil
+			// Editing existing provider
+			selectedProviderID = existingProviderTypes[selectedInstance]
+			if selectedProviderID == "" {
+				// Fallback: try to infer from instance name
+				selectedProviderID = selectedInstance
 			}
-			fmt.Printf("Warning: Failed to fetch/select Google models: %v\n", err)
-		} else {
-			goto SaveConfig
-		}
-	case "groq":
-		runAPIKeyForm("Groq API Key", "api_key", pCfg)
-		if err := fetchAndSelectGroqModel(pCfg, cfg); err != nil {
-			if isUserAborted(err) {
-				fmt.Println("Setup aborted by user; no changes were saved.")
-				return nil
+			// Initialize provider config if nil
+			if cfg.Providers[selectedInstance] == nil {
+				cfg.Providers[selectedInstance] = make(config.ProviderConfig)
 			}
-			fmt.Printf("Warning: Failed to fetch/select Groq models: %v\n", err)
-		} else {
-			goto SaveConfig
-		}
-	case "lm_studio":
-		runBaseURLForm("LM Studio Base URL", "http://localhost:1234/v1", pCfg)
-		if err := fetchAndSelectLMStudioModel(pCfg, cfg); err != nil {
-			if isUserAborted(err) {
-				fmt.Println("Setup aborted by user; no changes were saved.")
-				return nil
-			}
-			fmt.Printf("Warning: Failed to fetch/select LM Studio models: %v\n", err)
-		} else {
-			goto SaveConfig
-		}
-	case "litellm":
-		runAPIKeyForm("LiteLLM API Key", "api_key", pCfg)
-		runBaseURLForm("LiteLLM Base URL", "http://localhost:4000/v1", pCfg)
-		if err := fetchAndSelectLiteLLMModel(pCfg, cfg); err != nil {
-			if isUserAborted(err) {
-				fmt.Println("Setup aborted by user; no changes were saved.")
-				return nil
-			}
-			fmt.Printf("Warning: Failed to fetch/select LiteLLM models: %v\n", err)
-		} else {
-			goto SaveConfig
-		}
-	case "ollama":
-		runOllamaForm(pCfg)
-		if err := fetchAndSelectOllamaModel(pCfg, cfg); err != nil {
-			if isUserAborted(err) {
-				fmt.Println("Setup aborted by user; no changes were saved.")
-				return nil
-			}
-			fmt.Printf("Warning: Failed to fetch/select Ollama models: %v\n", err)
-		} else {
-			goto SaveConfig
-		}
-	case "openai":
-		runAPIKeyForm("OpenAI API Key", "api_key", pCfg)
-		if err := fetchAndSelectOpenAIModel(pCfg, cfg); err != nil {
-			if isUserAborted(err) {
-				fmt.Println("Setup aborted by user; no changes were saved.")
-				return nil
-			}
-			fmt.Printf("Warning: Failed to fetch/select OpenAI models %v\n", err)
-		} else {
-			goto SaveConfig
-		}
-	case "xai":
-		runAPIKeyForm("xAI API Key", "api_key", pCfg)
-		if err := fetchAndSelectXAIModel(pCfg, cfg); err != nil {
-			if isUserAborted(err) {
-				fmt.Println("Setup aborted by user; no changes were saved.")
-				return nil
-			}
-			fmt.Printf("Warning: Failed to fetch/select xAI models %v\n", err)
-		} else {
-			goto SaveConfig
-		}
-	case "xai_oauth":
-		// Use the well-known public Grok CLI OAuth client_id (not a secret)
-		clientID := xai_oauth.DefaultClientID
-		pCfg["client_id"] = clientID
-		// Run device-code flow
-		fmt.Println("\nInitiating xAI OAuth device authorization...")
-		dcResp, err := xai_oauth.RequestDeviceCode(context.Background(), clientID)
-		if err != nil {
-			return fmt.Errorf("failed to request device code: %w", err)
-		}
-		fmt.Printf("\n\U0001f510 Please visit: %s\n", dcResp.VerificationURIComplete)
-		fmt.Printf("   and enter code: %s\n\n", dcResp.UserCode)
-		fmt.Println("Waiting for authorization...")
-		tokenResp, err := xai_oauth.PollForToken(context.Background(), clientID, dcResp.DeviceCode, dcResp.Interval)
-		if err != nil {
-			return fmt.Errorf("OAuth authorization failed: %w", err)
-		}
-		// Store tokens in config
-		pCfg["access_token"] = tokenResp.AccessToken
-		pCfg["refresh_token"] = tokenResp.RefreshToken
-		expiresAt := time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
-		pCfg["expires_at"] = expiresAt.Format(time.RFC3339)
-		fmt.Println("\u2713 Successfully authenticated with xAI OAuth!")
-		if err := fetchAndSelectXAIOAuthModel(pCfg, cfg); err != nil {
-			if isUserAborted(err) {
-				fmt.Println("Setup aborted by user; no changes were saved.")
-				return nil
-			}
-			fmt.Printf("Warning: Failed to fetch/select xAI models: %v\n", err)
-		} else {
-			goto SaveConfig
-		}
-	case "openai_compat":
-		runAPIKeyForm("API Key", "api_key", pCfg)
-		runBaseURLForm("Base URL", "https://api.openai.com/v1", pCfg)
-		if err := fetchAndSelectOpenAICompatModel(pCfg, cfg); err != nil {
-			if isUserAborted(err) {
-				fmt.Println("Setup aborted by user; no changes were saved.")
-				return nil
-			}
-			fmt.Printf("Warning: Failed to fetch/select models: %v\n", err)
-		} else {
-			goto SaveConfig
-		}
-	case "openrouter":
-		runAPIKeyForm("OpenRouter API Key", "api_key", pCfg)
-		if err := fetchAndSelectOpenRouterModel(pCfg, cfg); err != nil {
-			if isUserAborted(err) {
-				fmt.Println("Setup aborted by user; no changes were saved.")
-				return nil
-			}
-			fmt.Printf("Warning: Failed to fetch/select OpenRouter models: %v\n", err)
-		} else {
-			goto SaveConfig
-		}
-	case "poe":
-		runAPIKeyForm("Poe API Key", "api_key", pCfg)
-		if err := fetchAndSelectPoeModel(pCfg, cfg); err != nil {
-			if isUserAborted(err) {
-				fmt.Println("Setup aborted by user; no changes were saved.")
-				return nil
-			}
-			fmt.Printf("Warning: Failed to fetch/select Poe models: %v\n", err)
-		} else {
-			goto SaveConfig
-		}
-	case "sap_ai_core":
-		runSAPAICoreForm(pCfg)
-		// Special handling for SAP AI Core model selection
-		if err := fetchAndSelectSAPModel(pCfg, cfg); err != nil {
-			if isUserAborted(err) {
-				fmt.Println("Setup aborted by user; no changes were saved.")
-				return nil
-			}
-			fmt.Printf("Warning: Failed to fetch/select SAP models: %v\n", err)
-		} else {
-			// Skip generic model selection if we did it specifically for SAP
-			goto SaveConfig
-		}
-	default:
-		// Unknown provider type - ask for instance name to continue
-		selectedProviderID = selectProviderType()
-	}
-
-	// --- STEP 4: Default Model Selection (Generic) ---
-	// Only ask if not already handled (like in SAP AI Core)
-	{
-		var defaultModel string = cfg.General.DefaultModel
-		clearScreen()
-		err = huh.NewForm(
-			huh.NewGroup(
-				huh.NewInput().
-					Title("Default Model").
-					Description("Leave empty to keep current").
-					Value(&defaultModel),
-			),
-		).Run()
-		if err == nil && defaultModel != "" {
-			cfg.General.DefaultModel = defaultModel
-		}
-	}
-
-SaveConfig:
-	// For new providers, ask for instance name at the end
-	if isNewProvider {
-		var instanceName string
-		clearScreen()
-		err = huh.NewForm(
-			huh.NewGroup(
-				huh.NewInput().
-					Title("Provider Instance Name").
-					Description("Unique name for this provider instance").
-					Value(&instanceName),
-			),
-		).Run()
-		if err != nil {
-			return err
-		}
-		instanceName = strings.TrimSpace(instanceName)
-		if instanceName == "" {
-			return fmt.Errorf("instance name is required")
 		}
 
-		// Migrate config from temp key to final name
-		if instanceName != selectedInstance {
-			cfg.Providers[instanceName] = pCfg
-			cfg.Providers[instanceName]["type"] = selectedProviderID
-			delete(cfg.Providers, selectedInstance)
-			selectedInstance = instanceName
-		} else {
-			cfg.Providers[instanceName]["type"] = selectedProviderID
+		pCfg := cfg.Providers[selectedInstance]
+
+		// --- STEP 3: Configuration Form ---
+		switch selectedProviderID {
+		case "anthropic":
+			runAPIKeyForm("Anthropic API Key", "api_key", pCfg)
+			if err := fetchAndSelectAnthropicModel(pCfg, cfg); err != nil {
+				if isUserAborted(err) {
+					fmt.Println("Setup aborted by user; no changes were saved.")
+					return nil
+				}
+				fmt.Printf("Warning: Failed to fetch/select Anthropic models: %v\n", err)
+			} else {
+				goto SaveConfig
+			}
+		case "gemini":
+			runAPIKeyForm("Google API Key", "api_key", pCfg)
+			if err := fetchAndSelectGoogleModel(pCfg, cfg); err != nil {
+				if isUserAborted(err) {
+					fmt.Println("Setup aborted by user; no changes were saved.")
+					return nil
+				}
+				fmt.Printf("Warning: Failed to fetch/select Google models: %v\n", err)
+			} else {
+				goto SaveConfig
+			}
+		case "groq":
+			runAPIKeyForm("Groq API Key", "api_key", pCfg)
+			if err := fetchAndSelectGroqModel(pCfg, cfg); err != nil {
+				if isUserAborted(err) {
+					fmt.Println("Setup aborted by user; no changes were saved.")
+					return nil
+				}
+				fmt.Printf("Warning: Failed to fetch/select Groq models: %v\n", err)
+			} else {
+				goto SaveConfig
+			}
+		case "lm_studio":
+			runBaseURLForm("LM Studio Base URL", "http://localhost:1234/v1", pCfg)
+			if err := fetchAndSelectLMStudioModel(pCfg, cfg); err != nil {
+				if isUserAborted(err) {
+					fmt.Println("Setup aborted by user; no changes were saved.")
+					return nil
+				}
+				fmt.Printf("Warning: Failed to fetch/select LM Studio models: %v\n", err)
+			} else {
+				goto SaveConfig
+			}
+		case "litellm":
+			runAPIKeyForm("LiteLLM API Key", "api_key", pCfg)
+			runBaseURLForm("LiteLLM Base URL", "http://localhost:4000/v1", pCfg)
+			if err := fetchAndSelectLiteLLMModel(pCfg, cfg); err != nil {
+				if isUserAborted(err) {
+					fmt.Println("Setup aborted by user; no changes were saved.")
+					return nil
+				}
+				fmt.Printf("Warning: Failed to fetch/select LiteLLM models: %v\n", err)
+			} else {
+				goto SaveConfig
+			}
+		case "ollama":
+			runOllamaForm(pCfg)
+			if err := fetchAndSelectOllamaModel(pCfg, cfg); err != nil {
+				if isUserAborted(err) {
+					fmt.Println("Setup aborted by user; no changes were saved.")
+					return nil
+				}
+				fmt.Printf("Warning: Failed to fetch/select Ollama models: %v\n", err)
+			} else {
+				goto SaveConfig
+			}
+		case "openai":
+			runAPIKeyForm("OpenAI API Key", "api_key", pCfg)
+			if err := fetchAndSelectOpenAIModel(pCfg, cfg); err != nil {
+				if isUserAborted(err) {
+					fmt.Println("Setup aborted by user; no changes were saved.")
+					return nil
+				}
+				fmt.Printf("Warning: Failed to fetch/select OpenAI models %v\n", err)
+			} else {
+				goto SaveConfig
+			}
+		case "xai":
+			runAPIKeyForm("xAI API Key", "api_key", pCfg)
+			if err := fetchAndSelectXAIModel(pCfg, cfg); err != nil {
+				if isUserAborted(err) {
+					fmt.Println("Setup aborted by user; no changes were saved.")
+					return nil
+				}
+				fmt.Printf("Warning: Failed to fetch/select xAI models %v\n", err)
+			} else {
+				goto SaveConfig
+			}
+		case "xai_oauth":
+			// Use the well-known public Grok CLI OAuth client_id (not a secret)
+			clientID := xai_oauth.DefaultClientID
+			pCfg["client_id"] = clientID
+			// Run device-code flow
+			fmt.Println("\nInitiating xAI OAuth device authorization...")
+			dcResp, err := xai_oauth.RequestDeviceCode(context.Background(), clientID)
+			if err != nil {
+				return fmt.Errorf("failed to request device code: %w", err)
+			}
+			fmt.Printf("\n\U0001f510 Please visit: %s\n", dcResp.VerificationURIComplete)
+			fmt.Printf("   and enter code: %s\n\n", dcResp.UserCode)
+			fmt.Println("Waiting for authorization...")
+			tokenResp, err := xai_oauth.PollForToken(context.Background(), clientID, dcResp.DeviceCode, dcResp.Interval)
+			if err != nil {
+				return fmt.Errorf("OAuth authorization failed: %w", err)
+			}
+			// Store tokens in config
+			pCfg["access_token"] = tokenResp.AccessToken
+			pCfg["refresh_token"] = tokenResp.RefreshToken
+			expiresAt := time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
+			pCfg["expires_at"] = expiresAt.Format(time.RFC3339)
+			fmt.Println("\u2713 Successfully authenticated with xAI OAuth!")
+			if err := fetchAndSelectXAIOAuthModel(pCfg, cfg); err != nil {
+				if isUserAborted(err) {
+					fmt.Println("Setup aborted by user; no changes were saved.")
+					return nil
+				}
+				fmt.Printf("Warning: Failed to fetch/select xAI models: %v\n", err)
+			} else {
+				goto SaveConfig
+			}
+		case "openai_compat":
+			runAPIKeyForm("API Key", "api_key", pCfg)
+			runBaseURLForm("Base URL", "https://api.openai.com/v1", pCfg)
+			if err := fetchAndSelectOpenAICompatModel(pCfg, cfg); err != nil {
+				if isUserAborted(err) {
+					fmt.Println("Setup aborted by user; no changes were saved.")
+					return nil
+				}
+				fmt.Printf("Warning: Failed to fetch/select models: %v\n", err)
+			} else {
+				goto SaveConfig
+			}
+		case "openrouter":
+			runAPIKeyForm("OpenRouter API Key", "api_key", pCfg)
+			if err := fetchAndSelectOpenRouterModel(pCfg, cfg); err != nil {
+				if isUserAborted(err) {
+					fmt.Println("Setup aborted by user; no changes were saved.")
+					return nil
+				}
+				fmt.Printf("Warning: Failed to fetch/select OpenRouter models: %v\n", err)
+			} else {
+				goto SaveConfig
+			}
+		case "poe":
+			runAPIKeyForm("Poe API Key", "api_key", pCfg)
+			if err := fetchAndSelectPoeModel(pCfg, cfg); err != nil {
+				if isUserAborted(err) {
+					fmt.Println("Setup aborted by user; no changes were saved.")
+					return nil
+				}
+				fmt.Printf("Warning: Failed to fetch/select Poe models: %v\n", err)
+			} else {
+				goto SaveConfig
+			}
+		case "sap_ai_core":
+			runSAPAICoreForm(pCfg)
+			// Special handling for SAP AI Core model selection
+			if err := fetchAndSelectSAPModel(pCfg, cfg); err != nil {
+				if isUserAborted(err) {
+					fmt.Println("Setup aborted by user; no changes were saved.")
+					return nil
+				}
+				fmt.Printf("Warning: Failed to fetch/select SAP models: %v\n", err)
+			} else {
+				// Skip generic model selection if we did it specifically for SAP
+				goto SaveConfig
+			}
+		default:
+			// Unknown provider type - ask for instance name to continue
+			selectedProviderID = selectProviderType()
 		}
-	} else if cfg.Providers[selectedInstance] != nil {
-		// Ensure type is set for existing providers
-		if cfg.Providers[selectedInstance]["type"] == "" {
-			cfg.Providers[selectedInstance]["type"] = selectedProviderID
+
+		// --- STEP 4: Default Model Selection (Generic) ---
+		// Only ask if not already handled (like in SAP AI Core)
+		{
+			var defaultModel string = cfg.General.DefaultModel
+			clearScreen()
+			err = huh.NewForm(
+				huh.NewGroup(
+					huh.NewInput().
+						Title("Default Model").
+						Description("Leave empty to keep current").
+						Value(&defaultModel),
+				),
+			).Run()
+			if err == nil && defaultModel != "" {
+				cfg.General.DefaultModel = defaultModel
+			}
 		}
-	}
 
-	// Set as default provider
-	cfg.General.DefaultProvider = selectedInstance
+	SaveConfig:
+		// For new providers, ask for instance name at the end
+		if isNewProvider {
+			var instanceName string
+			clearScreen()
+			err = huh.NewForm(
+				huh.NewGroup(
+					huh.NewInput().
+						Title("Provider Instance Name").
+						Description("Unique name for this provider instance").
+						Value(&instanceName),
+				),
+			).Run()
+			if err != nil {
+				return err
+			}
+			instanceName = strings.TrimSpace(instanceName)
+			if instanceName == "" {
+				return fmt.Errorf("instance name is required")
+			}
 
-	// In platform mode, save provider config to the platform database.
-	// This must happen BEFORE saveProviderSecretsToStore, which scrubs secrets from pCfg.
-	// The platform settings store has its own secret extraction/encryption pipeline.
-	// Works for both SQLite (default) and Postgres.
-	if cfg.Storage.Backend == "postgres" || cfg.Storage.Backend == "sqlite" {
-		if err := saveProviderToPlatformDB(cfg, selectedInstance, pCfg); err != nil {
-			fmt.Printf("Warning: Failed to save provider to platform database: %v\n", err)
-			fmt.Println("You may need to configure the provider via Studio settings.")
+			// Migrate config from temp key to final name
+			if instanceName != selectedInstance {
+				cfg.Providers[instanceName] = pCfg
+				cfg.Providers[instanceName]["type"] = selectedProviderID
+				delete(cfg.Providers, selectedInstance)
+				selectedInstance = instanceName
+			} else {
+				cfg.Providers[instanceName]["type"] = selectedProviderID
+			}
+		} else if cfg.Providers[selectedInstance] != nil {
+			// Ensure type is set for existing providers
+			if cfg.Providers[selectedInstance]["type"] == "" {
+				cfg.Providers[selectedInstance]["type"] = selectedProviderID
+			}
 		}
-	}
 
-	// Save secrets to encrypted credential store (instead of plaintext config.yaml)
-	if err := saveProviderSecretsToStore(selectedInstance, selectedProviderID, pCfg); err != nil {
-		fmt.Printf("Warning: Failed to save secrets to credential store: %v\n", err)
-		fmt.Println("Secrets will be saved in config.yaml as fallback.")
-	}
+		// Set as default provider
+		cfg.General.DefaultProvider = selectedInstance
 
-	// Save config (secrets have been scrubbed from pCfg by saveProviderSecretsToStore)
-	if err := config.SaveAppConfig(cfg); err != nil {
-		return fmt.Errorf("error saving config: %w", err)
-	}
+		// In platform mode, save provider config to the platform database.
+		// This must happen BEFORE saveProviderSecretsToStore, which scrubs secrets from pCfg.
+		// The platform settings store has its own secret extraction/encryption pipeline.
+		// Works for both SQLite (default) and Postgres.
+		if cfg.Storage.Backend == "postgres" || cfg.Storage.Backend == "sqlite" {
+			if err := saveProviderToPlatformDB(cfg, selectedInstance, pCfg); err != nil {
+				fmt.Printf("Warning: Failed to save provider to platform database: %v\n", err)
+				fmt.Println("You may need to configure the provider via Studio settings.")
+			}
+		}
 
-	displayName := provider.GetProviderDisplayName(selectedProviderID)
-	if displayName == "" {
-		displayName = selectedProviderID
-	}
-	printSuccess(fmt.Sprintf("%s (%s) configured successfully!", selectedInstance, displayName))
+		// Save secrets to encrypted credential store (instead of plaintext config.yaml)
+		if err := saveProviderSecretsToStore(selectedInstance, selectedProviderID, pCfg); err != nil {
+			fmt.Printf("Warning: Failed to save secrets to credential store: %v\n", err)
+			fmt.Println("Secrets will be saved in config.yaml as fallback.")
+		}
+
+		// Save config (secrets have been scrubbed from pCfg by saveProviderSecretsToStore)
+		if err := config.SaveAppConfig(cfg); err != nil {
+			return fmt.Errorf("error saving config: %w", err)
+		}
+
+		displayName := provider.GetProviderDisplayName(selectedProviderID)
+		if displayName == "" {
+			displayName = selectedProviderID
+		}
+		printSuccess(fmt.Sprintf("%s (%s) configured successfully!", selectedInstance, displayName))
 	}
 
 	// --- Web Tool Setup ---
@@ -1538,23 +1526,21 @@ func handleWebToolSetup() error {
 // browser engine configuration flow (default Chromium, CloakBrowser, or custom).
 
 // handleSandboxSetup initializes the sandbox (container isolation) as part of
-// the main setup wizard. If Incus is not available, it guides the user to
+// the main setup wizard. If Docker is not available, it guides the user to
 // install it and warns about the security risk of running without sandbox.
 func handleSandboxSetup() error {
 	for {
-		platform, reason := incus.DetectPlatformReason()
+		det := sboxdocker.DetectDocker("")
 
-		if platform == incus.PlatformUnsupported {
-			// Build description with install instructions and reason
+		if !det.Available {
 			desc := "Sandbox runs AI tools inside isolated Linux containers,\n" +
 				"preventing them from accessing your host system directly.\n\n"
-			if reason != "" {
-				desc += reason + "\n\n"
+			if det.Reason != "" {
+				desc += det.Reason + "\n\n"
 			}
-			desc += "To enable sandbox:\n" +
-				"  Linux:         sudo apt install incus && sudo incus admin init\n" +
-				"  macOS/Windows: Install Docker Desktop\n\n" +
-				"Docs: https://linuxcontainers.org/incus/docs/main/installing/"
+			desc += "To enable sandbox, install Docker:\n" +
+				"  Linux:         docker-ce, then: sudo usermod -aG docker $USER\n" +
+				"  macOS/Windows: Docker Desktop (or another Docker-compatible runtime)\n"
 
 			var action string
 			clearScreen()
@@ -1604,149 +1590,22 @@ func handleSandboxSetup() error {
 			return nil
 		}
 
-		// Container runtime is available — set up the sandbox
+		clearScreen()
+		fmt.Println("Setting up Docker + OverlayFS sandbox...")
+		fmt.Println("This pulls the sandbox-base image and seeds the @base overlay layer.")
+		fmt.Println("(This may take a few minutes on first run.)")
+		fmt.Println()
 
-		// On Docker+Incus (macOS/Windows), ensure the Docker container is running first
-		if platform == incus.PlatformDockerIncus {
-			clearScreen()
-			fmt.Println("Setting up Docker+Incus sandbox runtime...")
-			fmt.Println("This will pull the Incus Docker image and create a container.")
-			fmt.Println("(This may take a few minutes on first run.)")
-			fmt.Println()
-
-			if err := incus.EnsureIncusDockerContainer(); err != nil {
-				return fmt.Errorf("failed to set up Docker+Incus: %w", err)
-			}
-			fmt.Println("Docker+Incus runtime ready.")
-		}
-
-		incus.SetActivePlatform(platform)
-		if appCfg, cfgErr := config.LoadAppConfig(); cfgErr == nil && appCfg != nil {
-			sandbox.SetSandboxConfig(&appCfg.Sandbox)
-		}
-
-		// Detect nested LXC: unprivileged containers cannot run inside
-		// another LXC container (mounting /proc in double-nested user
-		// namespaces is blocked by the outer host). Ask the user whether
-		// to enable privileged mode, which the outer LXC still isolates.
-		if incus.IsInsideLXC() && !sandbox.IsPrivileged() {
-			var action string
-			clearScreen()
-			err := huh.NewForm(
-				huh.NewGroup(
-					huh.NewSelect[string]().
-						Title("Sandbox — Nested LXC environment detected").
-						Description(
-							"This host is itself an LXC container. Unprivileged sandbox\n"+
-								"containers cannot run here because mounting /proc in a\n"+
-								"double-nested user namespace is not permitted by the outer host.\n\n"+
-								"Privileged mode runs containers as root inside the sandbox.\n"+
-								"The outer LXC container still provides the isolation boundary,\n"+
-								"but a container escape would give access to this LXC host.\n\n"+
-								"You can change this later in your config:\n"+
-								"  sandbox:\n"+
-								"    privileged: true",
-						).
-						Options(
-							huh.NewOption("Enable privileged mode", "enable"),
-							huh.NewOption("Skip sandbox setup", "skip"),
-						).
-						Value(&action),
-				),
-			).Run()
-			if err != nil {
-				return err
-			}
-
-			if action == "skip" {
-				return nil
-			}
-
-			// User accepted — persist privileged: true in config
-			cfg, cfgErr := config.LoadAppConfig()
-			if cfgErr != nil {
-				return fmt.Errorf("failed to load config: %w", cfgErr)
-			}
-			priv := true
-			cfg.Sandbox.Privileged = &priv
-			if err := config.SaveAppConfig(cfg); err != nil {
-				return fmt.Errorf("failed to save config: %w", err)
-			}
-			sandbox.SetSandboxConfig(&cfg.Sandbox)
-			fmt.Println("Privileged mode enabled in config.")
-		}
-
-		client, err := incus.Connect(platform)
-		if err != nil {
-			return fmt.Errorf("failed to connect to Incus: %w", err)
-		}
-
-		// Check if base template already exists.
-		// In platform mode (especially Docker+Incus on macOS), the Docker volume
-		// persists across image/container deletions, so the old astn-tpl-base may
-		// still be present. Ask the user if they want to rebuild.
-		containerName := incus.TemplateName(incus.BaseTemplate)
-		if client.InstanceExists(containerName) {
-			var rebuild bool
-			clearScreen()
-			err := huh.NewForm(
-				huh.NewGroup(
-					huh.NewConfirm().
-						Title("Base sandbox template already exists").
-						Description(
-							"A base template (astn-tpl-base) was found from a previous installation.\n"+
-								"It may be stale, built for a different architecture, or incomplete.\n\n"+
-								"Rebuild it from scratch now? This will delete the existing template\n"+
-								"and re-install all core tools and browser support.",
-						).
-						Affirmative("Yes, rebuild").
-						Negative("Keep existing").
-						Value(&rebuild),
-				),
-			).Run()
-			if err != nil {
-				return err
-			}
-
-			if !rebuild {
-				printSuccess("Keeping existing base template. You can update it later via the Studio (Platform Admin → Sandbox → Configure Base).")
-				return nil
-			}
-
-			// User chose to rebuild — remove the existing container so InitBaseTemplate creates fresh.
-			fmt.Println("Removing existing base template for fresh rebuild...")
-			if err := client.StopAndDeleteInstance(containerName); err != nil {
-				return fmt.Errorf("failed to remove existing base template: %w", err)
-			}
-		}
-
-		registry, err := sandbox.NewTemplateRegistry()
+		b, err := sboxdocker.Open()
 		if err != nil {
 			return err
 		}
-
-		opts := promptOptionalTools()
-
-		// Wire browser engine into base template options so browser packages
-		// (Chromium, KasmVNC, X11 deps) are installed in the base template.
-		if appCfg, cfgErr := config.LoadAppConfig(); cfgErr == nil && appCfg != nil {
-			bCfg := incus.BrowserContainerConfig{
-				ChromePath:          appCfg.Browser.ChromePath,
-				FingerprintSeed:     appCfg.Browser.FingerprintSeed,
-				FingerprintPlatform: appCfg.Browser.FingerprintPlatform,
-			}
-			engine := incus.DetectBrowserEngine(bCfg)
-			if incus.IsContainerCompatibleEngine(engine) {
-				opts.BrowserEngine = engine
-			}
-		}
-
-		if err := sandbox.InitBaseTemplate(client, registry, opts); err != nil {
+		if err := b.SeedBaseLayerFromImage(context.Background()); err != nil {
 			return fmt.Errorf("sandbox setup: %w", err)
 		}
 
 		clearScreen()
-		printSuccess("Sandbox initialized! AI tools will run inside isolated containers.")
+		printSuccess("Sandbox initialized! AI tools will run inside Docker OverlayFS containers.")
 		return nil
 	}
 }

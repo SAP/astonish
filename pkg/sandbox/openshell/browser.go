@@ -4,8 +4,8 @@
 // the runtime wiring to launch them and tunnel CDP connections through the
 // gateway's gRPC exec API.
 //
-// Architecture mirrors pkg/sandbox/incus/browser_container.go +
-// pkg/sandbox/incus/tunnel.go but uses the OpenShell GatewayClient instead
+// Architecture mirrors pkg/sandbox/browser_install.go and
+// backend_browser_wire.go but uses the OpenShell GatewayClient instead
 // of the Incus exec API.
 
 package openshell
@@ -59,7 +59,7 @@ command_line:
 }
 
 // ---------------------------------------------------------------------------
-// Constants (same values as pkg/sandbox/incus/browser_container.go)
+// Constants (same values as pkg/sandbox/browser_install.go)
 // ---------------------------------------------------------------------------
 
 const (
@@ -527,7 +527,7 @@ func DialSandboxPort(ctx context.Context, gateway GatewayClient, podName string,
 // ExecConn wraps an OpenShell ExecStreamConn as a net.Conn. It tunnels a
 // single TCP connection through the gateway's gRPC exec stream (socat STDIO).
 //
-// Same pattern as pkg/sandbox/incus/tunnel.go:ExecConn.
+// Same pattern as backend ExecStreaming tunnels.
 type ExecConn struct {
 	conn       ExecStreamConn
 	readPrefix *bufio.Reader // buffered reader from sentinel drain; may hold leftover bytes

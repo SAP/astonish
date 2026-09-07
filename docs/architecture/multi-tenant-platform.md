@@ -787,17 +787,17 @@ Even when multiple users use the same team app, each gets independent state:
 
 ### Per-Organization Network Isolation
 
-Each organization gets its own Incus bridge network:
+Each organization gets its own Docker bridge network (local Docker OverlayFS) or Kubernetes NetworkPolicy (cluster):
 
 ```
-Personal mode:    incusbr0 (default, current behavior)
-Org A containers: org-a-br0 (10.100.1.0/24)
-Org B containers: org-b-br0 (10.100.2.0/24)
+Personal mode:    default Docker network (single-user)
+Org A containers: astonish-org-<org-a>
+Org B containers: astonish-org-<org-b>
 ```
 
-No routing between org bridges. Containers from different organizations cannot reach each other at the network level.
+Containers from different organizations cannot reach each other at the network level.
 
-Within an organization, all team containers share the org's bridge. Teams within the same company have a trust relationship; the hard isolation boundary is between organizations.
+Within an organization, all team containers share the org's network. Teams within the same company have a trust relationship; the hard isolation boundary is between organizations.
 
 ### Container Naming
 
@@ -929,7 +929,7 @@ When a new team is created:
 2. `CREATE SCHEMA team_{slug}`
 3. Run team-schema migrations
 4. `GRANT USAGE ON SCHEMA team_{slug} TO astonish_app`
-5. Create Incus bridge network for the org (if not exists)
+5. Create org sandbox network (Docker bridge or K8s NetworkPolicy, if not exists)
 
 When a user joins an org:
 

@@ -97,7 +97,7 @@ OIDC group claims auto-map to Astonish team memberships. Users authenticate thro
 | Cascading config | Provider defaults, MCP servers, skills flow from org → team → user |
 | Envelope encryption | Per-org data encryption keys (AES-256-GCM) |
 | Audit logging | Immutable, team-scoped audit trail |
-| Sandboxes | Per-org network-isolated execution (Incus or Kubernetes) |
+| Sandboxes | Per-org network-isolated execution (Kubernetes or OpenShell) |
 | Channels | Telegram, Email, Slack with team-scoped routing |
 | Remote CLI | Team members connect from anywhere |
 

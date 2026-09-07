@@ -2,7 +2,7 @@
 
 ## Project overview
 
-Astonish is an AI-agent platform distributed as one Go binary. It supports a local coding TUI, a remote multi-tenant chat/platform, HTTP/SSE APIs, reusable flows, tools/MCP, memory, browser automation, fleet orchestration, and isolated execution through Incus, Kubernetes, or OpenShell backends. The Studio UI is a React SPA embedded into the Go binary.
+Astonish is an AI-agent platform distributed as one Go binary. It supports a local coding TUI, a remote multi-tenant chat/platform, HTTP/SSE APIs, reusable flows, tools/MCP, memory, browser automation, fleet orchestration, and isolated execution through Docker OverlayFS, Kubernetes, or OpenShell backends. The Studio UI is a React SPA embedded into the Go binary.
 
 The repository is primarily:
 
@@ -26,7 +26,7 @@ Before changing a subsystem, read the nearest nested `AGENTS.md`; those files co
 - [`pkg/memory/`](pkg/memory/AGENTS.md), `pkg/session/`, `pkg/fleet/`, `pkg/drill/`, `pkg/channels/` — major domain subsystems.
 - [`pkg/scheduler/`](pkg/scheduler/AGENTS.md) — scheduled-job registration and execution.
 - [`web/src/api/`](web/src/api/AGENTS.md), [`web/src/components/chat/`](web/src/components/chat/AGENTS.md) — Studio transport contracts and chat rendering/interaction guidance.
-- `pkg/sandbox/` — backend-neutral sandbox contracts plus Incus/Kubernetes/OpenShell implementations. `Backend` implementations must be concurrency-safe and lifecycle methods are intentionally idempotent.
+- `pkg/sandbox/` — backend-neutral sandbox contracts plus Docker OverlayFS / Kubernetes / OpenShell implementations. `Backend` implementations must be concurrency-safe and lifecycle methods are intentionally idempotent.
 - `ent/{platform,org,team,personal}/` — four persistence scopes. Only `schema/*.go` and `generate.go` are normally hand-edited; the remaining Ent files are generated.
 - `web/src/` — Studio SPA. Entry points are `main.tsx` and `App.tsx`; `api/` contains REST/SSE clients and `components/` contains UI.
 - `tests/e2e/`, `tests/e2eboot/`, `tests/scenarios/` — tagged E2E suites, shared bootstrap harness, and scenario catalogs/reporters.

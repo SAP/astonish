@@ -6,7 +6,7 @@ Private repro for the report against SAP/astonish (commit
 **Do not run this against production.** Point `BASE_URL` at a dedicated
 dev/staging platform. Keep `.env` out of git.
 
-Target used while writing this kit (Incus platform):
+Target used while writing this kit (historical Incus platform; local sessions now use Docker OverlayFS):
 
 ```
 https://astonish.local.muxpie.com

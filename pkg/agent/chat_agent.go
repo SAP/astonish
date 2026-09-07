@@ -166,6 +166,12 @@ type ChatAgent struct {
 	planFilePath string
 	planFileMu   sync.Mutex
 
+	// PlanVerify, when set, runs a phase verify command. Tests inject a fake.
+	// When nil, DefaultPlanVerify uses WorkingDir.
+	PlanVerify       func(command string) (exitCode int, output string, err error)
+	planVerifyFailed bool
+	planVerifyMu     sync.Mutex
+
 	// Active app refinement: per-session state for iterative generative UI refinement.
 	// When set, the chat handler injects the current app source into SessionContext
 	// so the LLM can apply incremental changes.

@@ -1011,6 +1011,21 @@ func (b *localAgentBackend) planFilePath(sessionID string) string {
 
 // removePlanFile deletes the per-session PLAN.md sidecar for sessionID, if one
 // exists. Best-effort: a missing file (or disabled persistence) is not an error.
+func (b *localAgentBackend) copyPlanFile(fromID, toID string) {
+	src := b.planFilePath(fromID)
+	dst := b.planFilePath(toID)
+	if src == "" || dst == "" || src == dst {
+		return
+	}
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return
+	}
+	if err := os.WriteFile(dst, data, 0o644); err != nil {
+		slog.Debug("failed to copy PLAN.md sidecar", "component", "localAgentBackend", "from", src, "to", dst, "error", err)
+	}
+}
+
 func (b *localAgentBackend) removePlanFile(sessionID string) {
 	path := b.planFilePath(sessionID)
 	if path == "" {
@@ -1382,7 +1397,7 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 			// so the model returns to normal conversation mode instead of
 			// treating every user message as an action to execute.
 			planAllComplete := false
-			if plan := chatAgent.GetActivePlan(); plan != nil && plan.IsAllComplete() {
+			if plan := chatAgent.GetActivePlan(); plan != nil && plan.IsFullyAccepted() {
 				planAllComplete = true
 			}
 			if strings.TrimSpace(systemContext) == "" {
@@ -1765,6 +1780,7 @@ func (b *localAgentBackend) compactToChild(ctx context.Context, sessionID string
 	b.sessionID = childID
 	b.contextTokens = int64(after)
 	b.mu.Unlock()
+	b.copyPlanFile(sessionID, childID)
 	out.SessionID = childID
 	out.Did = true
 	return out

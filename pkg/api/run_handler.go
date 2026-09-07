@@ -21,7 +21,6 @@ import (
 	"github.com/SAP/astonish/pkg/mcp"
 	"github.com/SAP/astonish/pkg/provider"
 	"github.com/SAP/astonish/pkg/sandbox"
-	incus "github.com/SAP/astonish/pkg/sandbox/incus"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/tools"
 	adkagent "google.golang.org/adk/agent"
@@ -194,48 +193,6 @@ func GetPDFBrowserManager(sessionID string) *browser.Manager {
 		}
 		pdfBrowserMgr = browser.NewManager(cfg)
 
-		// Wire sandbox callbacks so Chrome runs inside the session container.
-		// This helper is Incus-only; OpenShell/K8s register callbacks below via
-		// SetPDFBrowserCallbacksForBackend from chat_factory.
-		wireSandboxBrowserCallbacks(pdfBrowserMgr, cfg, appCfg, cfgErr)
-
-		// Override ContainerResolveFunc: the PDF manager must ensure the
-		// container is running (it may have been stopped by the idle watchdog
-		// or a template snapshot). The shared wireSandboxBrowserCallbacks only
-		// checks IsRunning and fails — we need EnsureSessionContainer which
-		// re-mounts the overlay and starts a stopped container.
-		if pdfBrowserMgr.SandboxEnabled && cfgErr == nil && appCfg != nil && sandbox.BackendKind(appCfg.Sandbox.BackendKind()) == sandbox.BackendKindIncus {
-			sandboxLimits := &appCfg.Sandbox.Limits
-			pdfBrowserMgr.ContainerResolveFunc = func(sessID string) (string, string, error) {
-				client, err := sandbox.SetupSandboxRuntime()
-				if err != nil {
-					return "", "", fmt.Errorf("sandbox runtime not available: %w", err)
-				}
-				sessRegistry, err := sandbox.NewSessionRegistry()
-				if err != nil {
-					return "", "", fmt.Errorf("failed to open session registry: %w", err)
-				}
-				tplRegistry, err := sandbox.NewTemplateRegistry()
-				if err != nil {
-					return "", "", fmt.Errorf("failed to open template registry: %w", err)
-				}
-				// Look up the template name from the registry entry.
-				templateName := "@base"
-				if entry := sessRegistry.Get(sessID); entry != nil && entry.TemplateName != "" {
-					templateName = entry.TemplateName
-				}
-				containerName, err := sandbox.EnsureSessionContainer(client, sessRegistry, tplRegistry, sessID, templateName, sandboxLimits)
-				if err != nil {
-					return "", "", fmt.Errorf("failed to ensure session container: %w", err)
-				}
-				ip, err := client.GetContainerIPv4(containerName)
-				if err != nil {
-					return "", "", fmt.Errorf("failed to get IP for session container %q: %w", containerName, err)
-				}
-				return containerName, ip, nil
-			}
-		}
-
 		slog.Info("PDF browser: initialized (sync.Once)", "sandboxEnabled", pdfBrowserMgr.SandboxEnabled)
 	})
 
@@ -358,44 +315,6 @@ func GetSlidesPDFBrowserManager(sessionID string) (*browser.Manager, error) {
 		}
 		slidesPDFBrowserMgr = browser.NewManager(cfg)
 
-		// Wire Incus sandbox callbacks (no-op for non-Incus backends).
-		wireSandboxBrowserCallbacks(slidesPDFBrowserMgr, cfg, appCfg, cfgErr)
-
-		// Incus: override ContainerResolveFunc so a stopped/evicted slides
-		// container is re-started via EnsureSessionContainer (the shared helper
-		// only checks IsRunning and fails otherwise). Mirrors the override in
-		// GetPDFBrowserManager.
-		if slidesPDFBrowserMgr.SandboxEnabled && cfgErr == nil && appCfg != nil && sandbox.BackendKind(appCfg.Sandbox.BackendKind()) == sandbox.BackendKindIncus {
-			sandboxLimits := &appCfg.Sandbox.Limits
-			slidesPDFBrowserMgr.ContainerResolveFunc = func(sessID string) (string, string, error) {
-				client, err := sandbox.SetupSandboxRuntime()
-				if err != nil {
-					return "", "", fmt.Errorf("sandbox runtime not available: %w", err)
-				}
-				sessRegistry, err := sandbox.NewSessionRegistry()
-				if err != nil {
-					return "", "", fmt.Errorf("failed to open session registry: %w", err)
-				}
-				tplRegistry, err := sandbox.NewTemplateRegistry()
-				if err != nil {
-					return "", "", fmt.Errorf("failed to open template registry: %w", err)
-				}
-				templateName := "@base"
-				if entry := sessRegistry.Get(sessID); entry != nil && entry.TemplateName != "" {
-					templateName = entry.TemplateName
-				}
-				containerName, err := sandbox.EnsureSessionContainer(client, sessRegistry, tplRegistry, sessID, templateName, sandboxLimits)
-				if err != nil {
-					return "", "", fmt.Errorf("failed to ensure session container: %w", err)
-				}
-				ip, err := client.GetContainerIPv4(containerName)
-				if err != nil {
-					return "", "", fmt.Errorf("failed to get IP for session container %q: %w", containerName, err)
-				}
-				return containerName, ip, nil
-			}
-		}
-
 		slog.Info("slides PDF browser: initialized (sync.Once)", "sandboxEnabled", slidesPDFBrowserMgr.SandboxEnabled)
 	})
 
@@ -439,65 +358,9 @@ func GetSlidesPDFBrowserManager(sessionID string) (*browser.Manager, error) {
 // register backend-specific callbacks through SetPDFBrowserCallbacksForBackend
 // or their launcher wiring; this helper must not silently select Incus for
 // non-Incus backends.
-func wireSandboxBrowserCallbacks(mgr *browser.Manager, cfg browser.BrowserConfig, appCfg *config.AppConfig, cfgErr error) {
-	if mgr == nil || cfgErr != nil || appCfg == nil || !sandbox.IsSandboxEnabled(&appCfg.Sandbox) {
-		return
-	}
-	if sandbox.BackendKind(appCfg.Sandbox.BackendKind()) != sandbox.BackendKindIncus {
-		return
-	}
-	engine := incus.DetectBrowserEngine(incus.BrowserContainerConfig{
-		ChromePath: cfg.ChromePath,
-	})
-	if !incus.IsContainerCompatibleEngine(engine) {
-		return
-	}
-
-	mgr.SandboxEnabled = true
-	slog.Info("browser: wired Incus sandbox callbacks", "backend", sandbox.BackendKindIncus)
-
-	mgr.ContainerResolveFunc = func(sessionID string) (string, string, error) {
-		client, err := sandbox.SetupSandboxRuntime()
-		if err != nil {
-			return "", "", fmt.Errorf("sandbox runtime not available: %w", err)
-		}
-		containerName := incus.SessionContainerName(sessionID)
-		if !client.IsRunning(containerName) {
-			return "", "", fmt.Errorf("session container %q is not running", containerName)
-		}
-		ip, err := client.GetContainerIPv4(containerName)
-		if err != nil {
-			return "", "", fmt.Errorf("failed to get IP for session container %q: %w", containerName, err)
-		}
-		return containerName, ip, nil
-	}
-
-	bCfg := incus.BrowserContainerConfig{
-		ViewportWidth:       cfg.ViewportWidth,
-		ViewportHeight:      cfg.ViewportHeight,
-		KasmVNCPort:         cfg.KasmVNCPort,
-		KasmVNCPassword:     cfg.KasmVNCPassword,
-		Proxy:               cfg.Proxy,
-		ChromePath:          cfg.ChromePath,
-		FingerprintSeed:     cfg.FingerprintSeed,
-		FingerprintPlatform: cfg.FingerprintPlatform,
-	}
-	mgr.ContainerStartBrowserFunc = func(containerName string) (io.Closer, error) {
-		client, err := sandbox.SetupSandboxRuntime()
-		if err != nil {
-			return nil, fmt.Errorf("sandbox runtime not available: %w", err)
-		}
-		return nil, incus.StartChromiumInContainer(client, containerName, bCfg)
-	}
-
-	mgr.ContainerDialFunc = func(containerName string, port int) (net.Conn, error) {
-		client, err := sandbox.SetupSandboxRuntime()
-		if err != nil {
-			return nil, fmt.Errorf("sandbox runtime not available: %w", err)
-		}
-		dialer := &incus.ContainerDialer{Client: client}
-		return dialer.Dial(containerName, port)
-	}
+func wireSandboxBrowserCallbacks(*browser.Manager, browser.BrowserConfig, *config.AppConfig, error) {
+	// Incus in-container Chrome is removed. Docker/K8s/OpenShell register
+	// callbacks via SetPDFBrowserCallbacksForBackend / chat_factory.
 }
 
 // GetSessionManager returns the singleton session manager

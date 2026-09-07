@@ -38,11 +38,9 @@ type nodeResponse struct {
 // Sequential dispatch: one request at a time (no concurrent tool calls).
 // Auto-restart: if the node process crashes, the next Call() restarts it.
 type NodeClient struct {
-	client        *IncusClient
 	containerName string
 
 	mu      sync.Mutex
-	proc    *ContainerProcess
 	stdin   io.WriteCloser
 	scanner *bufio.Scanner
 	nextID  atomic.Int64
@@ -57,9 +55,8 @@ type NodeClient struct {
 
 // NewNodeClient creates a NodeClient for the given container.
 // The node is NOT started until Start() or the first Call().
-func NewNodeClient(client *IncusClient, containerName string) *NodeClient {
+func NewNodeClient(containerName string) *NodeClient {
 	return &NodeClient{
-		client:        client,
 		containerName: containerName,
 	}
 }
@@ -79,108 +76,13 @@ func (nc *NodeClient) Start() error {
 
 // startLocked starts the node process. Caller must hold nc.mu.
 func (nc *NodeClient) startLocked() error {
-	// Clean up any existing process
-	nc.stopLocked()
-
-	// If the container is stopped (e.g., idle timeout, OOM kill, external stop),
-	// restart it before attempting to exec the node process. Without this check,
-	// ExecNonInteractive fails because you cannot exec in a stopped container.
-	//
-	// We must also handle the case where the container no longer exists — it may
-	// have been destroyed by PruneStaleOnStartup, idle reaping, or a template
-	// refresh. IsRunning() returns false for both "stopped" and "does not exist"
-	// (it swallows errors), so we need an explicit existence check to avoid
-	// calling StartInstance on a non-existent container.
-	if !nc.client.IsRunning(nc.containerName) {
-		if !nc.client.InstanceExists(nc.containerName) {
-			return fmt.Errorf("container %q no longer exists (may have been pruned or destroyed)", nc.containerName)
-		}
-		if err := nc.client.StartInstance(nc.containerName); err != nil {
-			return fmt.Errorf("failed to restart stopped container %q: %w", nc.containerName, err)
-		}
-		// Verify the template layer is intact after restart. A template refresh
-		// may have force-stopped this container and left a stale overlay mount.
-		// Without this check, the node starts but tool calls see empty /usr/bin/.
-		// Check sentinel first, fall back to /usr/bin/git for pre-sentinel templates.
-		exitCode, _ := nc.client.ExecSimple(nc.containerName, []string{"test", "-f", OverlaySentinelPath})
-		if exitCode != 0 {
-			exitCode, _ = nc.client.ExecSimple(nc.containerName, []string{"test", "-x", "/usr/bin/git"})
-			if exitCode != 0 {
-				// Template layer missing — stale overlay. Stop and signal for full recovery.
-				_ = nc.client.StopInstance(nc.containerName, true)
-				return fmt.Errorf("container %q template layer not visible (stale overlay)", nc.containerName)
-			}
-		}
-	}
-
-	cmd := []string{BinaryDestPath, "node"}
-	proc, err := ExecNonInteractive(nc.client, nc.containerName, cmd, ExecOpts{
-		Env:            nc.Env,
-		SeparateStderr: io.Discard, // Keep stderr separate from stdout to avoid corrupting the NDJSON protocol
-	})
-	if err != nil {
-		return fmt.Errorf("failed to start astonish node in %q: %w", nc.containerName, err)
-	}
-
-	nc.proc = proc
-	nc.stdin = proc.Stdin
-	nc.scanner = bufio.NewScanner(proc.Stdout)
-
-	// Increase scanner buffer for large responses (e.g., read_file of big files)
-	const maxScanSize = 10 * 1024 * 1024 // 10MB
-	nc.scanner.Buffer(make([]byte, 0, 64*1024), maxScanSize)
-
-	// Wait for the ready signal with timeout
-	readyCh := make(chan error, 1)
-	go func() {
-		if nc.scanner.Scan() {
-			line := nc.scanner.Bytes()
-			var resp nodeResponse
-			if err := json.Unmarshal(line, &resp); err != nil {
-				readyCh <- fmt.Errorf("invalid ready message: %w", err)
-				return
-			}
-			if !resp.Ready {
-				readyCh <- fmt.Errorf("unexpected first message (expected ready): %s", string(line))
-				return
-			}
-			readyCh <- nil
-		} else {
-			if err := nc.scanner.Err(); err != nil {
-				readyCh <- fmt.Errorf("node stdout closed before ready: %w", err)
-			} else {
-				readyCh <- fmt.Errorf("node stdout closed before ready (EOF)")
-			}
-		}
-	}()
-
-	select {
-	case err := <-readyCh:
-		if err != nil {
-			nc.stopLocked()
-			return err
-		}
-	case <-time.After(30 * time.Second):
-		nc.stopLocked()
-		return fmt.Errorf("timeout waiting for node ready signal in %q", nc.containerName)
-	}
-
-	nc.started = true
-
-	// Configure git credential helper after every successful node start (including
-	// restarts after crashes). This ensures gh CLI auth is always configured when
-	// GH_TOKEN is available, regardless of whether this is the first start or a
-	// recovery restart. The call is idempotent and fast (~200ms).
-	configureGitCredentialHelper(nc.client, nc.containerName, nc.Env)
-
-	return nil
+	return fmt.Errorf("legacy Incus node client removed; use BackendPool")
 }
 
 // stopLocked stops the current node process. Caller must hold nc.mu.
 func (nc *NodeClient) stopLocked() {
-	if nc.proc != nil {
-		nc.proc.Close()
-		nc.proc = nil
+	if nc.stdin != nil {
+		_ = nc.stdin.Close()
 	}
 	nc.stdin = nil
 	nc.scanner = nil
@@ -304,7 +206,6 @@ func (nc *NodeClient) ContainerName() string {
 //  2. NodeTool.ProcessRequest calls BindSession(sessionID) — starts container in background
 //  3. NodeTool.Run calls Call() — waits for background init if still in progress, then forwards
 type LazyNodeClient struct {
-	incusClient  *IncusClient
 	sessRegistry *SessionRegistry
 	tplRegistry  *TemplateRegistry
 	template     string // template to clone from (empty = @base)
@@ -353,9 +254,8 @@ type LazyNodeClient struct {
 
 // NewLazyNodeClient creates a lazy node client that defers container creation
 // until BindSession is called (typically from ProcessRequest, before the LLM call).
-func NewLazyNodeClient(client *IncusClient, sessRegistry *SessionRegistry, tplRegistry *TemplateRegistry, template string, limits *config.SandboxLimits) *LazyNodeClient {
+func NewLazyNodeClient(sessRegistry *SessionRegistry, tplRegistry *TemplateRegistry, template string, limits *config.SandboxLimits) *LazyNodeClient {
 	return &LazyNodeClient{
-		incusClient:  client,
 		sessRegistry: sessRegistry,
 		tplRegistry:  tplRegistry,
 		template:     template,
@@ -407,14 +307,10 @@ func (lnc *LazyNodeClient) BindSession(sessionID string) {
 func (lnc *LazyNodeClient) initBackground(sessionID string) {
 	defer close(lnc.initDone)
 
-	// Phase 1: Create or get the session container.
-	// Use org-scoped lifecycle if org context is set (platform mode).
+	err := fmt.Errorf("legacy Incus session containers removed; use BackendPool")
 	var containerName string
-	var err error
-	if lnc.OrgSlug != "" {
-		containerName, err = EnsureOrgSessionContainer(lnc.incusClient, lnc.sessRegistry, lnc.tplRegistry, sessionID, lnc.template, lnc.limits, lnc.OrgSlug, lnc.TeamSlug)
-	} else {
-		containerName, err = EnsureSessionContainer(lnc.incusClient, lnc.sessRegistry, lnc.tplRegistry, sessionID, lnc.template, lnc.limits)
+	if err != nil {
+		_ = containerName
 	}
 	if err != nil {
 		lnc.mu.Lock()
@@ -433,7 +329,7 @@ func (lnc *LazyNodeClient) initBackground(sessionID string) {
 	close(lnc.containerReady)
 
 	// Phase 2: Create and start the node client
-	nc := NewNodeClient(lnc.incusClient, containerName)
+	nc := NewNodeClient(containerName)
 	nc.Env = lnc.Env // Forward environment variables (credentials) to node
 	if err := nc.Start(); err != nil {
 		lnc.mu.Lock()
@@ -450,25 +346,6 @@ func (lnc *LazyNodeClient) initBackground(sessionID string) {
 	// Record initial activity so the idle watchdog doesn't immediately stop
 	// a freshly-created container.
 	lnc.lastActivity.Store(time.Now().Unix())
-}
-
-// configureGitCredentialHelper runs `gh auth setup-git` inside the container
-// if GH_TOKEN is available in the env map. This configures git to use `gh` as
-// a credential helper so that git clone/push to private repos works seamlessly.
-//
-// Called synchronously during container init AND after node process restarts
-// to ensure the credential helper is always configured.
-func configureGitCredentialHelper(client *IncusClient, containerName string, env map[string]string) {
-	ghToken := env["GH_TOKEN"]
-	if ghToken == "" {
-		return
-	}
-	_, err := ExecSimpleWithEnv(client, containerName,
-		[]string{"sh", "-c", "command -v gh >/dev/null 2>&1 && gh auth setup-git"},
-		map[string]string{"GH_TOKEN": ghToken})
-	if err != nil {
-		slog.Warn("failed to run gh auth setup-git", "component", "sandbox", "container", containerName, "error", err)
-	}
 }
 
 // Call proxies a tool call to the container node. If BindSession was called,
@@ -635,14 +512,6 @@ func (lnc *LazyNodeClient) Cleanup() {
 	// Skip container destruction if CleanupForShutdown already ran —
 	// the container was intentionally preserved for reconnection.
 	if !alreadyShutdown {
-		if lnc.containerName != "" && lnc.incusClient != nil {
-			// Use destroyOverlayContainer to properly unmount overlayfs
-			// and clean up overlay dirs before deleting the container.
-			if err := destroyOverlayContainer(lnc.incusClient, lnc.containerName); err != nil {
-				slog.Warn("failed to destroy overlay container during cleanup", "component", "sandbox", "container", lnc.containerName, "error", err)
-			}
-		}
-
 		if lnc.containerName != "" && lnc.sessRegistry != nil {
 			// Find and remove the session registry entry for this container
 			for _, entry := range lnc.sessRegistry.List() {
@@ -681,16 +550,6 @@ func (lnc *LazyNodeClient) CleanupForShutdown() {
 		lnc.nodeClient = nil
 	}
 
-	// Stop the container but don't destroy it or its overlay.
-	// EnsureSessionContainer will re-mount and restart it later.
-	if lnc.containerName != "" && lnc.incusClient != nil {
-		if lnc.incusClient.IsRunning(lnc.containerName) {
-			if err := lnc.incusClient.StopInstance(lnc.containerName, true); err != nil {
-				slog.Warn("failed to stop container for shutdown", "component", "sandbox", "container", lnc.containerName, "error", err)
-			}
-		}
-	}
-
 	lnc.initialized = false
 	lnc.closed = true
 }
@@ -714,16 +573,6 @@ func (lnc *LazyNodeClient) StopForIdle() {
 	if lnc.nodeClient != nil {
 		lnc.nodeClient.Close()
 		lnc.nodeClient = nil
-	}
-
-	// Stop the container but don't destroy it or its overlay.
-	// EnsureSessionContainer will re-mount and restart it on the next tool call.
-	if lnc.containerName != "" && lnc.incusClient != nil {
-		if lnc.incusClient.IsRunning(lnc.containerName) {
-			if err := lnc.incusClient.StopInstance(lnc.containerName, true); err != nil {
-				slog.Warn("failed to stop container for idle", "component", "sandbox", "container", lnc.containerName, "error", err)
-			}
-		}
 	}
 
 	lnc.initialized = false
@@ -781,11 +630,6 @@ func (lnc *LazyNodeClient) GetContainerName() string {
 	return lnc.containerName
 }
 
-// GetIncusClient returns the Incus client for host-side operations (e.g., snapshotting).
-func (lnc *LazyNodeClient) GetIncusClient() *IncusClient {
-	return lnc.incusClient
-}
-
 // GetSessionRegistry returns the session registry.
 func (lnc *LazyNodeClient) GetSessionRegistry() *SessionRegistry {
 	return lnc.sessRegistry
@@ -795,11 +639,10 @@ func (lnc *LazyNodeClient) GetSessionRegistry() *SessionRegistry {
 // container to be ready first. This is the IP the host can use to reach services
 // running inside the container (e.g., for browser_navigate in sandbox mode).
 func (lnc *LazyNodeClient) GetContainerIP(sessionID string) (string, error) {
-	containerName, err := lnc.EnsureContainerReady(sessionID)
-	if err != nil {
+	if _, err := lnc.EnsureContainerReady(sessionID); err != nil {
 		return "", fmt.Errorf("container not ready: %w", err)
 	}
-	return lnc.incusClient.GetContainerIPv4(containerName)
+	return "127.0.0.1", nil
 }
 
 // EnsureNodeReady blocks until the container AND node are ready and returns the
@@ -903,7 +746,7 @@ func (lnc *LazyNodeClient) RestartNode() error {
 		return fmt.Errorf("no container to restart node in")
 	}
 
-	nc := NewNodeClient(lnc.incusClient, lnc.containerName)
+	nc := NewNodeClient(lnc.containerName)
 	nc.Env = lnc.Env
 	if err := nc.Start(); err != nil {
 		return fmt.Errorf("failed to restart node in %q: %w", lnc.containerName, err)
@@ -926,8 +769,7 @@ func (lnc *LazyNodeClient) RestartNode() error {
 // wireFleetSandbox(), which is correct because each fleet session already
 // has its own lifecycle.
 type NodeClientPool struct {
-	incusClient  *IncusClient
-	backend      Backend // Phase B.3: added alongside incusClient for incremental migration
+	backend      Backend
 	sessRegistry *SessionRegistry
 	tplRegistry  *TemplateRegistry
 	template     string
@@ -968,9 +810,8 @@ type sessionScope struct {
 // A Backend adapter is constructed internally from the supplied *IncusClient
 // and registries; callers can retrieve it via GetBackend() and pass it to
 // components that have been migrated to the Backend interface (Phase B.3).
-func NewNodeClientPool(client *IncusClient, sessRegistry *SessionRegistry, tplRegistry *TemplateRegistry, template string, limits *config.SandboxLimits) *NodeClientPool {
-	p := &NodeClientPool{
-		incusClient:   client,
+func NewNodeClientPool(sessRegistry *SessionRegistry, tplRegistry *TemplateRegistry, template string, limits *config.SandboxLimits) *NodeClientPool {
+	return &NodeClientPool{
 		sessRegistry:  sessRegistry,
 		tplRegistry:   tplRegistry,
 		template:      template,
@@ -978,21 +819,6 @@ func NewNodeClientPool(client *IncusClient, sessRegistry *SessionRegistry, tplRe
 		clients:       make(map[string]*LazyNodeClient),
 		sessionScopes: make(map[string]sessionScope),
 	}
-	// Best-effort Backend construction. Failure here is non-fatal: callers
-	// that need the Backend can check GetBackend() for nil. This keeps pool
-	// creation resilient in tests that pass zero-value registries.
-	if client != nil && sessRegistry != nil && tplRegistry != nil {
-		if b, err := NewBackend(BackendFactoryConfig{
-			Kind:       BackendKindIncus,
-			Client:     client,
-			Sessions:   sessRegistry,
-			Templates:  tplRegistry,
-			DefaultLim: limits,
-		}); err == nil {
-			p.backend = b
-		}
-	}
-	return p
 }
 
 // SetEnv sets environment variables that will be injected into all future
@@ -1136,7 +962,7 @@ func (p *NodeClientPool) GetOrCreateWithTemplate(sessionID, template string) *La
 		teamSlug = scope.teamSlug
 	}
 
-	client := NewLazyNodeClient(p.incusClient, sessRegistry, p.tplRegistry, tpl, p.limits)
+	client := NewLazyNodeClient(sessRegistry, p.tplRegistry, tpl, p.limits)
 	client.Env = p.env
 	client.OrgSlug = orgSlug
 	client.TeamSlug = teamSlug
@@ -1317,7 +1143,7 @@ func (p *NodeClientPool) ReplaceSession(sessionID, template string) error {
 	// BEFORE releasing the lock. This eliminates the race window where
 	// concurrent GetOrCreate calls could find no client and create a
 	// default (@base) one.
-	client := NewLazyNodeClient(p.incusClient, p.sessRegistry, p.tplRegistry, template, p.limits)
+	client := NewLazyNodeClient(p.sessRegistry, p.tplRegistry, template, p.limits)
 	client.Env = p.env
 	client.OrgSlug = p.orgSlug
 	client.TeamSlug = p.teamSlug
@@ -1340,17 +1166,6 @@ func (p *NodeClientPool) ReplaceSession(sessionID, template string) error {
 	}
 
 	return nil
-}
-
-// GetIncusClient returns the shared Incus client.
-//
-// Deprecated: Phase B.3 callers should prefer GetBackend() to remain
-// backend-agnostic. This accessor is retained for components that still
-// depend on Incus-specific behavior not yet exposed by the Backend
-// interface (template build/refresh operations tied to the Phase A layer
-// store).
-func (p *NodeClientPool) GetIncusClient() *IncusClient {
-	return p.incusClient
 }
 
 // GetBackend returns the Backend adapter wrapping this pool's Incus client.

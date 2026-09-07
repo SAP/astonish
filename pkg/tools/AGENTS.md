@@ -20,7 +20,7 @@ type ToolWithDeclaration interface {
 - `Declaration` is the JSON schema exposed to the LLM.
 
 ## Sandbox wrapping
-Tools that touch the filesystem, network, or shell **must** be executable via `pkg/sandbox.Backend`. Do not spawn processes with `os/exec` directly — the sandbox wrapper adapts the same tool implementation to Incus / K8s / OpenShell / Mock.
+Tools that touch the filesystem, network, or shell **must** be executable via `pkg/sandbox.Backend`. Do not spawn processes with `os/exec` directly — the sandbox wrapper adapts the same tool implementation to Docker OverlayFS / K8s / OpenShell / Mock.
 
 ## Categories
 - File / grep / tree (used heavily by the agent for repo understanding).

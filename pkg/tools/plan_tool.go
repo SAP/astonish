@@ -1,7 +1,6 @@
 package tools
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/SAP/astonish/pkg/agent"
@@ -26,7 +25,7 @@ var planStateCallback func(goal string, doc agent.PlanDocumentInfo, steps []agen
 // status transition from the update_plan tool onto the active PlanState. It
 // returns the canonical (name, status) actually applied, or ("", "") if there
 // is no active plan or the named step was not found.
-var planStepUpdateCallback func(step, status string) (name, appliedStatus string)
+var planStepUpdateCallback func(step, status string) agent.PlanStepApplyResult
 
 // planKnownStepsCallback returns the active plan's exact step names so
 // update_plan can tell the model which identifiers are valid on a miss.
@@ -45,7 +44,7 @@ func SetPlanStateCallback(fn func(goal string, doc agent.PlanDocumentInfo, steps
 
 // SetPlanStepUpdateCallback sets the callback used by update_plan to apply an
 // explicit step status transition onto the active plan.
-func SetPlanStepUpdateCallback(fn func(step, status string) (string, string)) {
+func SetPlanStepUpdateCallback(fn func(step, status string) agent.PlanStepApplyResult) {
 	planStepUpdateCallback = fn
 }
 
@@ -69,8 +68,10 @@ type PlanStepInput struct {
 	Description   string                `json:"description" jsonschema:"Human-readable label for this phase (e.g., 'Explore both repository structures and dependencies')."`
 	Details       string                `json:"details" jsonschema:"REQUIRED. Self-contained implementation spec for this phase: exact function/type/method names, signature changes, call-site updates, and test names. Execution must proceed from this text without re-investigating the repo. Persisted to PLAN.md."`
 	Summary       string                `json:"summary,omitempty" jsonschema:"REQUIRED. 1-2 sentence plain-English explanation of what this phase accomplishes from the user's perspective. Plans with steps missing summaries are rejected."`
+	Outcome       string                `json:"outcome,omitempty" jsonschema:"REQUIRED. One sentence the user could check without reading the diff (e.g. 'docker inspect shows astonish-session-* and WaitForSessionReady returns'). Not a file list."`
 	Files         []PlanFileChangeInput `json:"files" jsonschema:"REQUIRED. The files this phase will create, modify, or delete — the concrete blast radius. List every affected file (the symbol AND its callers, tests, generated code, migrations, docs) so the plan is complete and has no orphaned code. Order phases dependency-first. Persisted to PLAN.md and shown in the plan UI."`
-	Verify        string                `json:"verify,omitempty" jsonschema:"The command that proves this phase is done (build, test, or lint), e.g. 'go test ./pkg/agent/...'. Encodes the 'every phase ends verified' discipline. Persisted to PLAN.md."`
+	Verify        string                `json:"verify,omitempty" jsonschema:"REQUIRED. The command the runtime will execute to prove this phase is done. For library-only work this is a scoped package test. For running surfaces (cmd, API, launcher, daemon, sandbox, TUI, browser, web) it must exercise the user-visible outcome, not only go test/go build."`
+	VerifyKind    string                `json:"verify_kind,omitempty" jsonschema:"REQUIRED. 'unit' (package tests for library-only changes) or 'behavior' (a command that exercises the user-visible outcome). Running surfaces require 'behavior'."`
 	ParallelGroup string                `json:"parallel_group,omitempty" jsonschema:"Optional concurrency group label. Steps sharing the same non-empty label may execute concurrently. Steps touching different file subtrees with no shared interfaces can share a group. Steps that produce types or files consumed by other steps must remain serial (leave this empty or use distinct labels)."`
 }
 
@@ -79,8 +80,8 @@ type AnnouncePlanArgs struct {
 	Goal         string          `json:"goal" jsonschema:"A concise title for the overall plan (e.g., 'Source-Level GitHub Comparison: astonish vs openclaw'). Displayed as the plan header."`
 	Steps        []PlanStepInput `json:"steps" jsonschema:"Ordered list of steps to complete the goal. Each step represents a distinct phase of work. Keep it to 3-7 phases; put concrete per-phase detail in the 'details' field."`
 	Context      string          `json:"context,omitempty" jsonschema:"REQUIRED narrative section explaining WHY this change is happening: the problem, the approach, user flows, and design decisions. Plans without context are rejected."`
-	WhatNotToDo  string          `json:"what_not_to_do,omitempty" jsonschema:"Optional scope guard listing what must NOT change during this plan. Guards against accidental scope creep: list APIs, files, behaviors, or invariants that must remain untouched. Persisted to PLAN.md."`
-	Verification string          `json:"verification,omitempty" jsonschema:"Optional end-to-end smoke test sequence that proves the entire plan succeeded after all phases complete. More comprehensive than per-phase 'verify' commands: describe the full test run, manual checks, or integration tests. Persisted to PLAN.md."`
+	WhatNotToDo  string          `json:"what_not_to_do,omitempty" jsonschema:"REQUIRED scope guard listing what must NOT change during this plan. Name the specific interfaces, files, and behaviors that must remain untouched. Persisted to PLAN.md."`
+	Verification string          `json:"verification,omitempty" jsonschema:"REQUIRED end-to-end command sequence that proves the user-visible outcome after all phases complete. Must include the acceptance sequence recorded at gplan_finalize when Graph-Optimized Plan was used. Persisted to PLAN.md."`
 }
 
 // AnnouncePlanResult is the output of the announce_plan tool.
@@ -99,10 +100,6 @@ func announcePlan(ctx tool.Context, args AnnouncePlanArgs) (AnnouncePlanResult, 
 		}
 	}
 
-	if msg := incompletePlanMessage(args.Context, args.Steps); msg != "" {
-		return AnnouncePlanResult{Status: "incomplete_plan", Message: msg}, nil
-	}
-
 	steps := make([]agent.PlanStepInfo, len(args.Steps))
 	for i, s := range args.Steps {
 		files := make([]agent.PlanFileChange, 0, len(s.Files))
@@ -117,8 +114,10 @@ func announcePlan(ctx tool.Context, args AnnouncePlanArgs) (AnnouncePlanResult, 
 			Description:   s.Description,
 			Details:       s.Details,
 			Summary:       s.Summary,
+			Outcome:       s.Outcome,
 			Files:         files,
 			Verify:        s.Verify,
+			VerifyKind:    s.VerifyKind,
 			ParallelGroup: s.ParallelGroup,
 		}
 	}
@@ -127,6 +126,23 @@ func announcePlan(ctx tool.Context, args AnnouncePlanArgs) (AnnouncePlanResult, 
 		Context:      args.Context,
 		WhatNotToDo:  args.WhatNotToDo,
 		Verification: args.Verification,
+	}
+
+	if msg := agent.ValidateAnnouncedPlan(doc, steps); msg != "" {
+		return AnnouncePlanResult{Status: "incomplete_plan", Message: msg}, nil
+	}
+	graphMode := false
+	if ctx != nil {
+		if po := agent.PromptOverridesFromContext(ctx); po != nil && po.GraphPlanMode {
+			graphMode = true
+		}
+	}
+	acc := ""
+	if graphPlanAcceptanceLookup != nil {
+		acc = graphPlanAcceptanceLookup()
+	}
+	if msg := agent.GraphPlanAnnounceMessage(graphMode, args.Verification, acc); msg != "" {
+		return AnnouncePlanResult{Status: "incomplete_plan", Message: msg}, nil
 	}
 
 	// Store the plan in ChatAgent for progression + PLAN.md persistence. A
@@ -150,37 +166,10 @@ func announcePlan(ctx tool.Context, args AnnouncePlanArgs) (AnnouncePlanResult, 
 	return AnnouncePlanResult{Status: "ok"}, nil
 }
 
-func incompletePlanMessage(context string, steps []PlanStepInput) string {
-	var missing []string
-	if strings.TrimSpace(context) == "" {
-		missing = append(missing, "plan context (the 'context' field must explain what the change does, why, and how)")
-	}
-	for i, s := range steps {
-		label := strings.TrimSpace(s.Name)
-		if label == "" {
-			label = fmt.Sprintf("step %d", i+1)
-		}
-		if strings.TrimSpace(s.Details) == "" {
-			missing = append(missing, fmt.Sprintf("%s: details", label))
-		}
-		hasFile := false
-		for _, f := range s.Files {
-			if strings.TrimSpace(f.Path) != "" {
-				hasFile = true
-				break
-			}
-		}
-		if !hasFile {
-			missing = append(missing, fmt.Sprintf("%s: files", label))
-		}
-		if strings.TrimSpace(s.Summary) == "" {
-			missing = append(missing, fmt.Sprintf("%s: summary", label))
-		}
-	}
-	if len(missing) == 0 {
-		return ""
-	}
-	return "Plan rejected — each phase needs 'details' (implementation spec), 'files' (blast radius), and 'summary' (user-facing explanation). The plan as a whole needs a 'context' section explaining what/why/how. Missing: " + strings.Join(missing, "; ")
+var graphPlanAcceptanceLookup func() string
+
+func SetGraphPlanAcceptanceLookup(fn func() string) {
+	graphPlanAcceptanceLookup = fn
 }
 
 // NewAnnouncePlanTool creates the announce_plan tool.
@@ -192,13 +181,15 @@ func NewAnnouncePlanTool() (tool.Tool, error) {
 Document-level sections (set once for the whole plan):
 - 'context': REQUIRED — plans without context are rejected. Write the problem, approach, user flows (for UI changes), and design decisions. This is a design document preamble, not a one-liner.
 - 'what_not_to_do': REQUIRED scope guard — name the specific interfaces, files, and behaviors that must NOT change.
-- 'verification': the end-to-end smoke test sequence for the entire plan after all phases complete. More comprehensive than per-phase verify commands.
+- 'verification': REQUIRED. The end-to-end command sequence that proves the user-visible outcome after all phases. In Graph-Optimized Plan mode this must include the 'acceptance' sequence from gplan_finalize.
 
 Make each phase complete, not a sketch. 'details' and 'files' are required:
 - 'files': list every file the phase touches, each marked 'new'/'modify'/'delete'. Include the symbol AND its callers, tests, generated code, migrations, and docs so nothing is left orphaned or unwired.
 - 'details': a self-contained implementation spec — exact symbols, signature changes, call-site updates, test names. Execution must proceed from this text without re-investigating the repo.
 - 'summary': REQUIRED — plans with steps missing summaries are rejected. 1-2 sentence explanation of what this phase accomplishes from the USER's perspective.
-- 'verify': the command that proves the phase is done (build/test/lint).
+- 'outcome': REQUIRED. One sentence the user could check without reading the diff.
+- 'verify': REQUIRED. The command the runtime will run. Library-only work: a scoped package test. Running surfaces (cmd, API, launcher, daemon, sandbox, TUI, browser, web): a command that exercises the outcome, not only go test/go build.
+- 'verify_kind': REQUIRED. 'unit' or 'behavior'. Running surfaces and deletes of running surfaces require 'behavior'. Slice by user-visible capability, not by layer.
 - 'parallel_group': Structure the plan in waves. Before submitting, group phases by which ones can start simultaneously — a phase can start when it has no dependency on an unfinished phase's output (types, files, compiled symbols). Assign all phases in the same wave the same label (e.g. 'wave-1', 'wave-2'). Serial phases — where one phase produces something another phase needs — get no label or a distinct label. Most plans have at least two waves; a plan where every phase is unlabeled should only happen when every phase strictly depends on the previous one. Independence is about type/file dependencies, not package boundaries: two phases in the same package can be in the same wave if they touch disjoint files and neither produces a symbol the other consumes.
 
 Completeness and design quality:
@@ -206,8 +197,9 @@ Before calling announce_plan, verify you have covered: (1) both frontend and bac
 For UI changes, specify behavior per mode and per state (empty, error, populated). For state machines, define every transition. Use typed constants over string comparisons.
 
 Tracking progress:
-- For work you do yourself on the main thread (edit_file, shell_command, etc.), call update_plan to mark each phase 'running' when you start it and 'complete' (or 'failed') when you finish. This keeps the checklist and PLAN.md accurate as you go, and lets you recover exactly where you were after a context summary.
-- For delegated work, set the plan_step field on each delegate_tasks task; those phases progress automatically from sub-task lifecycle events.
+- For work you do yourself on the main thread (edit_file, shell_command, etc.), call update_plan to mark each phase 'running' when you start it and 'complete' when you are ready for the runtime to run that phase's verify. complete is rejected unless verify exits 0.
+- For delegated work, set the plan_step field on each delegate_tasks task; those phases stay running until verify passes. Sub-agent finish is not completion.
+- After every phase is complete, call announce_completion. Execution mode ends only when PLAN.md has a Results section.
 
 After a context summary, re-read PLAN.md to recover the plan and mark the next phase running.`,
 	}, announcePlan)
@@ -234,8 +226,8 @@ func updatePlan(_ tool.Context, args UpdatePlanArgs) (UpdatePlanResult, error) {
 	if planStepUpdateCallback == nil {
 		return UpdatePlanResult{Status: "no_active_plan"}, nil
 	}
-	name, applied := planStepUpdateCallback(args.Step, args.Status)
-	if name == "" {
+	res := planStepUpdateCallback(args.Step, args.Status)
+	if res.Name == "" {
 		var names []string
 		if planKnownStepsCallback != nil {
 			names = planKnownStepsCallback()
@@ -246,23 +238,66 @@ func updatePlan(_ tool.Context, args UpdatePlanArgs) (UpdatePlanResult, error) {
 		}
 		return UpdatePlanResult{Status: "step_not_found", Message: msg, Steps: names}, nil
 	}
-
-	// Emit SSE so the UI checklist reflects the transition.
+	if res.Code != "" && res.Code != agent.PlanStepOK {
+		return UpdatePlanResult{
+			Status:  res.Code,
+			Step:    res.Name,
+			Applied: res.Applied,
+			Message: res.Message,
+		}, nil
+	}
+	applied := res.Applied
+	if applied == "" {
+		applied = res.Code
+	}
 	if planProgressCallback != nil {
 		planProgressCallback(agent.SubTaskProgressEvent{
 			Type:       "plan_step_update",
-			StepName:   name,
+			StepName:   res.Name,
 			StepStatus: applied,
 		})
 	}
-
-	return UpdatePlanResult{Status: "ok", Step: name, Applied: applied}, nil
+	return UpdatePlanResult{Status: "ok", Step: res.Name, Applied: applied, Message: res.Message}, nil
 }
 
-// NewUpdatePlanTool creates the update_plan tool.
+type AnnounceCompletionArgs struct {
+	OutcomeObserved string `json:"outcome_observed" jsonschema:"REQUIRED. What the user can now do, in their terms — the proven capability, not a file list."`
+	Unverified      string `json:"unverified,omitempty" jsonschema:"What was not exercised. Empty only if nothing is left unverified."`
+}
+
+type AnnounceCompletionResult struct {
+	Status  string `json:"status"`
+	Message string `json:"message,omitempty"`
+	Log     string `json:"log,omitempty"`
+}
+
+var planCompletionCallback func(outcomeObserved, unverified string) agent.PlanCompletionResult
+
+func SetPlanCompletionCallback(fn func(outcomeObserved, unverified string) agent.PlanCompletionResult) {
+	planCompletionCallback = fn
+}
+
+func announceCompletion(_ tool.Context, args AnnounceCompletionArgs) (AnnounceCompletionResult, error) {
+	if planCompletionCallback == nil {
+		return AnnounceCompletionResult{Status: "no_active_plan"}, nil
+	}
+	if strings.TrimSpace(args.OutcomeObserved) == "" {
+		return AnnounceCompletionResult{Status: "incomplete", Message: "outcome_observed is required — describe the proven user-visible capability"}, nil
+	}
+	res := planCompletionCallback(args.OutcomeObserved, args.Unverified)
+	return AnnounceCompletionResult{Status: res.Code, Message: res.Message, Log: res.Log}, nil
+}
+
+func NewAnnounceCompletionTool() (tool.Tool, error) {
+	return functiontool.New(functiontool.Config{
+		Name:        "announce_completion",
+		Description: `Record that an approved execution plan is actually done. The runtime runs the plan-level 'verification' commands; only if they all exit 0 does PLAN.md gain a Results section and execution mode end. Call this after every phase is complete with passing per-phase verify. Do not claim the plan is done in prose instead of this tool.`,
+	}, announceCompletion)
+}
+
 func NewUpdatePlanTool() (tool.Tool, error) {
 	return functiontool.New(functiontool.Config{
 		Name:        "update_plan",
-		Description: `Update the status of a phase in the plan you announced with announce_plan. Use this to keep the checklist and the session PLAN.md accurate as you work on the main thread: mark a phase 'running' when you start it and 'complete' (or 'failed') when you finish. This is how progress is tracked for work you do yourself (not delegated) — do it as you go so the plan reflects reality and you can resume precisely after a context summary.`,
+		Description: `Update the status of a phase in the plan you announced with announce_plan. Mark a phase 'running' when you start it. Mark 'complete' only when you are ready for the runtime to run that phase's verify command — complete is rejected unless verify exits 0. Mark 'failed' if you cannot finish. Delegated work does not complete the phase; verify still has to pass.`,
 	}, updatePlan)
 }

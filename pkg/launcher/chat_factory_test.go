@@ -114,7 +114,7 @@ func TestMainThreadToolAllowlistByMode(t *testing.T) {
 	}
 
 	allow := mainThreadToolAllowlist(true)
-	for _, name := range []string{"read_file", "write_file", "shell_command", "announce_plan", "codegraph_explore"} {
+	for _, name := range []string{"read_file", "write_file", "shell_command", "announce_plan", "announce_completion", "codegraph_explore"} {
 		if !allow[name] {
 			t.Errorf("code-mode main-thread allowlist is missing %q", name)
 		}

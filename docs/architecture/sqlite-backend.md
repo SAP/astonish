@@ -91,7 +91,7 @@ On macOS, distinguish three independent readiness boundaries:
 2. **HTTP readiness** — the daemon has completed synchronous setup and logged `HTTP server listening`.
 3. **First-session readiness** — Studio has constructed its cached ChatAgent for the first usable chat request.
 
-A slow launchd invocation does not by itself show whether the HTTP listener or the first Studio session is slow. With `sandbox.enabled: false`, Astonish bypasses the Docker+Incus sandbox branch; this does not bypass database, provider, embedding, skills, MCP-cache, scheduler, fleet, channel, or Studio initialization.
+A slow launchd invocation does not by itself show whether the HTTP listener or the first Studio session is slow. With `sandbox.enabled: false`, Astonish bypasses the Docker OverlayFS sandbox branch; this does not bypass database, provider, embedding, skills, MCP-cache, scheduler, fleet, channel, or Studio initialization.
 
 #### Locations and configuration
 

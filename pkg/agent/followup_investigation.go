@@ -25,6 +25,15 @@ var failedFixFollowupNeedles = []string{
 	"i always run",
 	"used to work",
 	"previous fix",
+	"doesn't work",
+	"does not work",
+	"no such object",
+	"not launching",
+	"still using the host",
+	"how do you considered as completed",
+	"all phases completed",
+	"build failed",
+	"undefined:",
 }
 
 // IsFailedFixFollowup reports whether cleaned user text looks like a

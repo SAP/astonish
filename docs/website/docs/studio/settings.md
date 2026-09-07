@@ -111,7 +111,7 @@ Monitor and control the background daemon:
 
 Configure the container sandbox environment for agent tool execution:
 
-- Backend type (Incus for local, Kubernetes for cloud)
+- Backend type (Docker OverlayFS for local, Kubernetes or OpenShell for cloud)
 - Resource limits (CPU, memory, processes)
 - Network policies — multi-tier allow/deny rules (platform, org, team) controlling which endpoints the sandbox can reach. See [Network Policy](../security/network-policy.md).
 

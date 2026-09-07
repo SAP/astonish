@@ -153,24 +153,18 @@ plan to a **per-session `PLAN.md`**.
     which rewrites `PLAN.md` and marks the plan **manually tracked**. `update_plan` is also in
     `agent.SafeTools` (allowed in Plan mode). This closes the previous gap where inline, non-
     delegated sequential work never advanced the checklist.
-- **No fabricated completion:** the end-of-turn sweep (`CompleteAll` in `chat_agent_run.go`) now
-  runs **only when both** (a) execution actually began this turn (`PlanState.HasStartedSteps()` —
-  at least one phase left `pending`) **and** (b) the plan was not manually tracked
-  (`IsManuallyTracked() == false`). When the model drove the plan via `update_plan`, its reported
-  statuses are authoritative — the runtime no longer bulk-marks every remaining phase complete
-  (which previously made `PLAN.md` show all phases done regardless of real progress). The
-  `HasStartedSteps()` guard fixes a distinct regression where a **freshly announced** plan (e.g. the
-  finalization turn in Plan mode, or any announce-only turn where no tool ran afterward) was swept to
-  fully complete on creation — every phase showing `[x]` before any work was done. When no phase has
-  started, the plan is also left **active** so it carries into the next turn where execution begins,
-  instead of being cleared. Defended by `TestPlanState_AnnounceOnlyTurnDoesNotComplete` and
-  `TestPlanState_HasStartedSteps`.
+- **No fabricated completion:** `CompleteAll` is a no-op. End-of-turn no longer bulk-marks phases
+  complete. A phase becomes `complete` only when `update_plan` runs its `verify` command and that
+  command exits 0. Sub-agent `task_complete` leaves the phase `running`. Execution mode ends only
+  when `IsFullyAccepted()` — every phase complete **and** `announce_completion` has written
+  `## Results`. Defended by `TestPlanState_CompleteAll`, `TestPlanState_AnnounceOnlyTurnDoesNotComplete`,
+  and `pkg/agent/plan_verify_test.go`.
 - **Detail preserved:** each phase requires a `details` implementation spec plus a `files` list
-  (each affected file marked new/modify/delete) and a `verify` command (build/test/lint), all
-  captured by `announce_plan` and rendered as an indented sub-block. Incomplete announcements are
-  rejected. This makes the *detailed*, dependency-aware plan — not just one-line labels — survive
-  compaction, and encodes the "no partial implementations / every phase ends verified" discipline
-  the plan-mode prompt now teaches.
+  (each affected file marked new/modify/delete), a testable `outcome`, a `verify` command, and
+  `verify_kind` (`unit` or `behavior`). Running surfaces require `behavior`. Plan-level
+  `verification` and `what_not_to_do` are required. Incomplete announcements are rejected with
+  guidance to slice by user-visible capability, not by layer. This makes the *detailed*,
+  capability-shaped plan survive compaction.
 - **Format:** human-readable Markdown with GitHub-style checkboxes per phase
   (`[ ]` pending · `[~]` running · `[x]` complete · `[!]` failed), plus indented sub-lines for
   affected files (`- File (<kind>): <path>`), the verification command (`Verify: <cmd>`), and a

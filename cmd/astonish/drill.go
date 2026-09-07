@@ -12,13 +12,13 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/google/uuid"
 	"github.com/SAP/astonish/pkg/browser"
 	"github.com/SAP/astonish/pkg/config"
 	adrill "github.com/SAP/astonish/pkg/drill"
 	"github.com/SAP/astonish/pkg/provider"
 	"github.com/SAP/astonish/pkg/sandbox"
 	"github.com/SAP/astonish/pkg/tools"
+	"github.com/google/uuid"
 )
 
 func handleDrillCommand(args []string) error {
@@ -459,14 +459,14 @@ func (c *compositeToolExecutor) Execute(ctx context.Context, name string, args m
 	return c.internal.Execute(ctx, name, args)
 }
 
-// sandboxToolExecutor proxies tool calls into a sandbox container via LazyNodeClient.
+// sandboxToolExecutor proxies tool calls into a sandbox container via ToolNodeClient.
 type sandboxToolExecutor struct {
-	lazyClient *sandbox.LazyNodeClient
-	sessionID  string
+	client    sandbox.ToolNodeClient
+	sessionID string
 }
 
 func (e *sandboxToolExecutor) Execute(_ context.Context, name string, args map[string]interface{}) (any, error) {
-	raw, err := e.lazyClient.Call(e.sessionID, name, args)
+	raw, err := e.client.Call(e.sessionID, name, args)
 	if err != nil {
 		return nil, fmt.Errorf("sandbox call %s: %w", name, err)
 	}
@@ -498,16 +498,6 @@ var containerToolNames = map[string]bool{
 }
 
 func handleDrillRunCommand(args []string) error {
-	// Escalate to root on Linux when sandbox is enabled — drill suites
-	// that use sandbox templates need overlay mount and UID shifting capabilities.
-	if sandbox.NeedsEscalation() {
-		if cfg, err := config.LoadAppConfig(); err == nil && cfg != nil {
-			if sandbox.IsSandboxEnabled(&cfg.Sandbox) {
-				return sandbox.Escalate()
-			}
-		}
-	}
-
 	runCmd := flag.NewFlagSet("test run", flag.ExitOnError)
 	tagFlag := runCmd.String("tag", "", "Filter tests by tag (comma-separated)")
 	verbose := runCmd.Bool("verbose", false, "Verbose output")
@@ -592,26 +582,22 @@ func handleDrillRunCommand(args []string) error {
 		suiteTemplate = suite.Config.SuiteConfig.Template
 	}
 
-	// Determine if sandbox should be used
-	var lazyNode *sandbox.LazyNodeClient
-	var testSessionID string
+	var rt *drillSandboxRuntime
 	useSandbox := false
-
 	if suiteTemplate != "" {
-		// Suite references a sandbox template — try to initialize sandbox
-		lazyNode, testSessionID, useSandbox = initSandboxForTest(suiteTemplate)
-		if lazyNode != nil {
-			defer lazyNode.Cleanup()
+		rt, useSandbox = initSandboxForTest(suiteTemplate)
+		if rt != nil {
+			defer rt.Close()
 		}
 	}
 
-	if useSandbox && lazyNode != nil {
-		if _, err := lazyNode.EnsureContainerReady(testSessionID); err != nil {
-			lazyNode.Cleanup()
+	if useSandbox && rt != nil {
+		if err := rt.client.EnsureReady(rt.sessionID); err != nil {
+			rt.Close()
 			return fmt.Errorf("sandbox container not ready: %w", err)
 		}
-		if err := injectCLIDrillBootstrapAndCredentials(lazyNode, testSessionID, suiteTemplate, suite.Name, suite.Config.SuiteConfig); err != nil {
-			lazyNode.Cleanup()
+		if err := injectCLIDrillBootstrapAndCredentials(rt, suiteTemplate, suite.Name, suite.Config.SuiteConfig); err != nil {
+			rt.Close()
 			return fmt.Errorf("credential/bootstrap injection failed: %w", err)
 		}
 	}
@@ -620,17 +606,13 @@ func handleDrillRunCommand(args []string) error {
 	// Local (non-sandbox) runs may use host Chrome.
 	var browserExec *browserToolExecutor
 	var browserMgr *browser.Manager
-	if useSandbox && lazyNode != nil {
+	if useSandbox && rt != nil {
 		browserMgr = browser.NewManager(browser.DefaultConfig())
-		client := lazyNode.GetIncusClient()
-		// TouchActivity keeps the idle watchdog from reclaiming the session
-		// during long browser drills (browser tools bypass NDJSON Call()).
-		touch := func(string) { lazyNode.TouchActivity() }
-		if client == nil || !sandbox.WireIncusBrowserManager(browserMgr, client, nil, touch) {
-			lazyNode.Cleanup()
+		if !sandbox.WireBackendBrowserManager(browserMgr, rt.backend, rt.sessReg, rt.pool, nil) {
+			rt.Close()
 			return fmt.Errorf("sandbox drill browser: could not wire in-container Chromium (host Chrome is disabled for sandboxed drills)")
 		}
-		browserExec = newSandboxedBrowserToolExecutor(browserMgr, testSessionID)
+		browserExec = newSandboxedBrowserToolExecutor(browserMgr, rt.sessionID)
 	} else {
 		browserExec = newBrowserToolExecutor(true) // headless for CI
 	}
@@ -646,25 +628,22 @@ func handleDrillRunCommand(args []string) error {
 		browser:  browserExec,
 	}
 
-	if useSandbox && lazyNode != nil {
+	if useSandbox && rt != nil {
 		executor.sandbox = &sandboxToolExecutor{
-			lazyClient: lazyNode,
-			sessionID:  testSessionID,
+			client:    rt.client,
+			sessionID: rt.sessionID,
 		}
 	}
 
 	// --- Discover container IP and set vars ---
 
 	vars := map[string]string{"CONTAINER_IP": "localhost"}
-	if useSandbox && lazyNode != nil {
-		ip, err := lazyNode.GetContainerIP(testSessionID)
-		if err == nil && ip != "" {
+	if useSandbox && rt != nil {
+		if ip := drillContainerIP(rt); ip != "" {
 			vars["CONTAINER_IP"] = ip
 			if *verbose {
 				fmt.Printf("Container IP: %s\n", ip)
 			}
-		} else {
-			slog.Warn("could not discover container IP", "error", err)
 		}
 	}
 
@@ -722,72 +701,104 @@ func handleDrillRunCommand(args []string) error {
 	return nil
 }
 
+// drillSandboxRuntime holds a backend-backed sandbox for a CLI drill run.
+type drillSandboxRuntime struct {
+	backend   sandbox.Backend
+	cleanup   func()
+	pool      sandbox.ToolNodePool
+	client    sandbox.ToolNodeClient
+	sessReg   *sandbox.SessionRegistry
+	sessionID string
+	closed    bool
+}
+
+func (r *drillSandboxRuntime) Close() {
+	if r == nil || r.closed {
+		return
+	}
+	r.closed = true
+	if r.pool != nil {
+		r.pool.Cleanup()
+	}
+	if r.cleanup != nil {
+		r.cleanup()
+	}
+}
+
 // initSandboxForTest initializes sandbox infrastructure for a CLI test run.
-// Returns (lazyClient, sessionID, true) on success, or (nil, "", false) if
-// sandbox is not available or initialization fails.
-func initSandboxForTest(template string) (*sandbox.LazyNodeClient, string, bool) {
-	// Load app config to check if sandbox is enabled
+// Returns (runtime, true) on success, or (nil, false) if sandbox is not
+// available or initialization fails (tests then run on the host).
+func initSandboxForTest(template string) (*drillSandboxRuntime, bool) {
 	appCfg, err := config.LoadAppConfig()
 	if err != nil {
 		slog.Warn("could not load app config for sandbox", "error", err)
 		fmt.Println("Warning: Suite requires sandbox template but app config not available. Running locally.")
-		return nil, "", false
+		return nil, false
 	}
 
 	if !sandbox.IsSandboxEnabled(&appCfg.Sandbox) {
 		fmt.Println("Warning: Suite requires sandbox template but sandbox is disabled. Running locally.")
-		return nil, "", false
+		return nil, false
 	}
 
-	// Connect to Incus
 	sandbox.SetSandboxConfig(&appCfg.Sandbox)
-	sandboxClient, err := sandbox.SetupSandboxRuntime()
-	if err != nil {
-		slog.Warn("sandbox setup failed", "error", err)
-		fmt.Printf("Warning: Suite requires sandbox template %q but sandbox setup failed: %v\nRunning locally.\n", template, err)
-		return nil, "", false
-	}
-
-	// Create registries
 	sessRegistry, err := sandbox.NewSessionRegistry()
 	if err != nil {
 		slog.Warn("session registry failed", "error", err)
-		return nil, "", false
+		return nil, false
 	}
 
 	tplRegistry, err := sandbox.NewTemplateRegistry()
 	if err != nil {
 		slog.Warn("template registry failed", "error", err)
-		return nil, "", false
+		return nil, false
 	}
 
-	// Check that the template exists
-	if err := tplRegistry.Load(); err == nil {
-		if !tplRegistry.Exists(template) {
+	if !isBaseTemplateName(template) {
+		if loadErr := tplRegistry.Load(); loadErr == nil && !tplRegistry.Exists(template) {
 			fmt.Printf("Warning: Sandbox template %q not found. Running locally.\n", template)
 			fmt.Println("Available templates can be listed with: astonish sandbox template list")
-			return nil, "", false
+			return nil, false
 		}
 	}
 
-	// Create LazyNodeClient with the suite's template
-	limits := sandbox.EffectiveLimits(&appCfg.Sandbox)
-	lazyNode := sandbox.NewLazyNodeClient(sandboxClient, sessRegistry, tplRegistry, template, &limits)
+	b, cleanup, err := sandbox.BackendFromAppConfigWithSessions(appCfg, sessRegistry)
+	if err != nil {
+		slog.Warn("sandbox setup failed", "error", err)
+		fmt.Printf("Warning: Suite requires sandbox template %q but sandbox setup failed: %v\nRunning locally.\n", template, err)
+		return nil, false
+	}
 
-	// Generate a unique session ID for this test run
+	limits := sandbox.ToResourceLimits(sandbox.EffectiveLimits(&appCfg.Sandbox))
+	pool := sandbox.NewBackendPool(b, limits)
 	testSessionID := "test-" + uuid.New().String()[:8]
-
-	// Trigger container creation
-	lazyNode.BindSession(testSessionID)
+	client := pool.GetOrCreateWithTemplate(testSessionID, template)
+	if client == nil {
+		if cleanup != nil {
+			cleanup()
+		}
+		fmt.Println("Warning: Suite requires sandbox template but the backend pool is unavailable. Running locally.")
+		return nil, false
+	}
+	client.BindSession(testSessionID)
 
 	fmt.Printf("Sandbox: creating container from template %q...\n", template)
-	return lazyNode, testSessionID, true
+	return &drillSandboxRuntime{
+		backend:   b,
+		cleanup:   cleanup,
+		pool:      pool,
+		client:    client,
+		sessReg:   sessRegistry,
+		sessionID: testSessionID,
+	}, true
 }
 
 // injectCLIDrillBootstrapAndCredentials injects template bootstrap_files and suite
 // credential_injection into the CLI drill sandbox before tests.
-// Caller must ensure services are already running (CLI does not run suite setup).
-func injectCLIDrillBootstrapAndCredentials(lazyNode *sandbox.LazyNodeClient, sessionID, template, suiteName string, sc *config.DrillSuiteConfig) error {
+func injectCLIDrillBootstrapAndCredentials(rt *drillSandboxRuntime, template, suiteName string, sc *config.DrillSuiteConfig) error {
+	if rt == nil {
+		return nil
+	}
 	ctx := context.Background()
 	tplRegistry, err := sandbox.NewTemplateRegistry()
 	if err != nil {
@@ -795,20 +806,8 @@ func injectCLIDrillBootstrapAndCredentials(lazyNode *sandbox.LazyNodeClient, ses
 	} else {
 		_ = tplRegistry.Load()
 		files := sandbox.LookupBootstrapFiles(ctx, tplRegistry, nil, template)
-		if len(files) > 0 {
-			client := lazyNode.GetIncusClient()
-			containerName := lazyNode.GetContainerName()
-			if client != nil && containerName != "" {
-				if err := sandbox.MaterializeBootstrapFilesIncus(ctx, func(command []string, env map[string]string) ([]byte, []byte, int, error) {
-					out, execErr := sandbox.ExecSimpleWithEnv(client, containerName, command, env)
-					if execErr != nil {
-						return nil, nil, -1, execErr
-					}
-					return []byte(out), nil, 0, nil
-				}, files); err != nil {
-					return fmt.Errorf("bootstrap_files: %w", err)
-				}
-			}
+		if err := sandbox.MaterializeBootstrapFiles(ctx, rt.backend, rt.sessionID, files); err != nil {
+			return fmt.Errorf("bootstrap_files: %w", err)
 		}
 	}
 
@@ -820,23 +819,31 @@ func injectCLIDrillBootstrapAndCredentials(lazyNode *sandbox.LazyNodeClient, ses
 		return nil
 	}
 
-	client := lazyNode.GetIncusClient()
-	containerName := lazyNode.GetContainerName()
 	target := adrill.InjectionTarget{
-		SessionID:  sessionID,
-		LazyClient: lazyNode,
-	}
-	if client != nil && containerName != "" {
-		target.ExecIncus = func(command []string, env map[string]string) ([]byte, []byte, int, error) {
-			out, execErr := sandbox.ExecSimpleWithEnv(client, containerName, command, env)
-			if execErr != nil {
-				return nil, nil, -1, execErr
-			}
-			return []byte(out), nil, 0, nil
-		}
+		SessionID: rt.sessionID,
+		Backend:   rt.backend,
 	}
 	_, err = adrill.ApplyCredentialInjection(ctx, spec, nil, tools.GetCredentialStore(), target)
 	return err
+}
+
+func drillContainerIP(rt *drillSandboxRuntime) string {
+	if rt == nil || rt.backend == nil {
+		return ""
+	}
+	ctx := context.Background()
+	res, err := rt.backend.Exec(ctx, rt.sessionID, sandbox.ExecSpec{
+		Command: []string{"sh", "-c", "hostname -i 2>/dev/null || hostname -I 2>/dev/null || true"},
+	})
+	if err != nil || res == nil {
+		slog.Warn("could not discover container IP", "error", err)
+		return ""
+	}
+	fields := strings.Fields(string(res.Stdout))
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
 }
 
 // setupTriageAgent initializes an AI triage agent using the user's default LLM

@@ -138,8 +138,10 @@ func TestRenderPlanMarkdown_FilesAndVerify(t *testing.T) {
 				{Path: "pkg/agent/plan_new.go", Kind: "new"},
 				{Path: "pkg/agent/old.go", Kind: "delete"},
 			},
-			verify: "go test ./pkg/agent/...",
-			status: "running",
+			verify:     "go test ./pkg/agent/...",
+			verifyKind: VerifyKindUnit,
+			outcome:    "Package tests encode the new plan fields",
+			status:     "running",
 		},
 	}
 	md := RenderPlanMarkdown("goal", steps)
@@ -148,6 +150,8 @@ func TestRenderPlanMarkdown_FilesAndVerify(t *testing.T) {
 		"  - File (new): pkg/agent/plan_new.go",
 		"  - File (delete): pkg/agent/old.go",
 		"  Verify: go test ./pkg/agent/...",
+		"  Verify-Kind: unit",
+		"  Outcome: Package tests encode the new plan fields",
 	}
 	for _, w := range wants {
 		if !strings.Contains(md, w) {
@@ -165,9 +169,12 @@ func TestParsePlanMarkdown_FilesAndVerifyRoundTrip(t *testing.T) {
 				{Path: "pkg/agent/sub_agent.go", Kind: "modify"},
 				{Path: "pkg/agent/plan_new.go", Kind: "new"},
 			},
-			verify:  "go test ./pkg/agent/...",
-			details: "extend the struct\nwire the tool",
-			status:  "complete",
+			verify:     "go test ./pkg/agent/...",
+			verifyKind: VerifyKindUnit,
+			outcome:    "PLAN.md round-trips outcome and verify kind",
+			evidence:   "exit 0; ok",
+			details:    "extend the struct\nwire the tool",
+			status:     "complete",
 		},
 		{name: "plain", description: "no files", status: "pending"},
 	}
@@ -195,6 +202,15 @@ func TestParsePlanMarkdown_FilesAndVerifyRoundTrip(t *testing.T) {
 	if parsed[0].verify != "go test ./pkg/agent/..." {
 		t.Errorf("step 0 verify = %q", parsed[0].verify)
 	}
+	if parsed[0].verifyKind != VerifyKindUnit {
+		t.Errorf("step 0 verifyKind = %q", parsed[0].verifyKind)
+	}
+	if parsed[0].outcome != "PLAN.md round-trips outcome and verify kind" {
+		t.Errorf("step 0 outcome = %q", parsed[0].outcome)
+	}
+	if parsed[0].evidence != "exit 0; ok" {
+		t.Errorf("step 0 evidence = %q", parsed[0].evidence)
+	}
 	// Details still round-trip alongside files/verify.
 	if parsed[0].details != "extend the struct\nwire the tool" {
 		t.Errorf("step 0 details = %q", parsed[0].details)
@@ -214,6 +230,7 @@ func TestRenderPlanMarkdown_DocumentSections(t *testing.T) {
 		Context:      "We need to improve the plan format.",
 		WhatNotToDo:  "Do not touch update_plan or PlanState runtime logic.",
 		Verification: "make test-unit\ngo test ./...",
+		Results:      "Users can now announce a capability-shaped plan.",
 	}
 	steps := []planStep{
 		{name: "data", description: "extend types", status: "pending"},
@@ -224,6 +241,7 @@ func TestRenderPlanMarkdown_DocumentSections(t *testing.T) {
 		"## Context\n\nWe need to improve the plan format.",
 		"## What Not To Change\n\nDo not touch update_plan or PlanState runtime logic.",
 		"## Verification\n\nmake test-unit",
+		"## Results\n\nUsers can now announce a capability-shaped plan.",
 	}
 	for _, w := range wants {
 		if !strings.Contains(md, w) {
@@ -236,11 +254,12 @@ func TestRenderPlanMarkdown_DocumentSections(t *testing.T) {
 	if ctxIdx < 0 || phasesIdx < 0 || ctxIdx > phasesIdx {
 		t.Errorf("Context section must appear before Phases; ctxIdx=%d phasesIdx=%d", ctxIdx, phasesIdx)
 	}
-	// WhatNotToDo and Verification must appear after all phases.
+	// WhatNotToDo, Verification, and Results must appear after all phases.
 	wntIdx := strings.Index(md, "## What Not To Change")
 	vIdx := strings.Index(md, "## Verification")
-	if wntIdx < 0 || vIdx < 0 || wntIdx < phasesIdx || vIdx < wntIdx {
-		t.Errorf("post-phases sections in wrong order: phases=%d wnt=%d ver=%d", phasesIdx, wntIdx, vIdx)
+	rIdx := strings.Index(md, "## Results")
+	if wntIdx < 0 || vIdx < 0 || rIdx < 0 || wntIdx < phasesIdx || vIdx < wntIdx || rIdx < vIdx {
+		t.Errorf("post-phases sections in wrong order: phases=%d wnt=%d ver=%d results=%d", phasesIdx, wntIdx, vIdx, rIdx)
 	}
 }
 
@@ -253,6 +272,7 @@ func TestParsePlanMarkdown_DocumentSectionsRoundTrip(t *testing.T) {
 		Context:      "Context text here.\nLine two.",
 		WhatNotToDo:  "Leave X alone.",
 		Verification: "go test ./...",
+		Results:      "Observed: widget opens empty without crashing.",
 	}
 	steps := []planStep{
 		{name: "step-a", description: "do a", status: "pending"},
@@ -275,6 +295,9 @@ func TestParsePlanMarkdown_DocumentSectionsRoundTrip(t *testing.T) {
 	}
 	if parsedDoc.Verification != doc.Verification {
 		t.Errorf("Verification = %q, want %q", parsedDoc.Verification, doc.Verification)
+	}
+	if parsedDoc.Results != doc.Results {
+		t.Errorf("Results = %q, want %q", parsedDoc.Results, doc.Results)
 	}
 	if len(parsed) != 2 {
 		t.Fatalf("parsed %d steps, want 2", len(parsed))

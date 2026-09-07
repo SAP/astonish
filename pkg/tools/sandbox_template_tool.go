@@ -1,12 +1,13 @@
 package tools
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/SAP/astonish/pkg/sandbox"
-	incus "github.com/SAP/astonish/pkg/sandbox/incus"
 	"github.com/SAP/astonish/pkg/store"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
@@ -45,8 +46,8 @@ type SaveSandboxTemplateResult struct {
 // sandboxTemplateDeps holds the dependencies injected by the factory via closure.
 // This follows the same closure capture pattern used by browser and email tools.
 type sandboxTemplateDeps struct {
+	backend          sandbox.Backend
 	nodePool         *sandbox.NodeClientPool
-	incusClient      *incus.IncusClient
 	templateRegistry *sandbox.TemplateRegistry
 	sessionRegistry  *sandbox.SessionRegistry
 }
@@ -61,10 +62,9 @@ var sandboxTemplateDepsVar *sandboxTemplateDeps
 // The wizard calls it after installing all project dependencies and cloning
 // the repo inside the container. Later, fleet sessions clone from this
 // custom template instead of @base.
-func NewSaveSandboxTemplateTool(nodePool *sandbox.NodeClientPool, incusClient *incus.IncusClient, templateRegistry *sandbox.TemplateRegistry, sessionRegistry *sandbox.SessionRegistry) (tool.Tool, error) {
+func NewSaveSandboxTemplateTool(nodePool *sandbox.NodeClientPool, templateRegistry *sandbox.TemplateRegistry, sessionRegistry *sandbox.SessionRegistry) (tool.Tool, error) {
 	sandboxTemplateDepsVar = &sandboxTemplateDeps{
 		nodePool:         nodePool,
-		incusClient:      incusClient,
 		templateRegistry: templateRegistry,
 		sessionRegistry:  sessionRegistry,
 	}
@@ -92,6 +92,33 @@ func NewSaveSandboxTemplateTool(nodePool *sandbox.NodeClientPool, incusClient *i
 	return t, nil
 }
 
+// NewSaveSandboxTemplateToolFromBackend creates save_sandbox_template for
+// Docker/K8s/OpenShell sessions. Captures the session upper as a named layer.
+func NewSaveSandboxTemplateToolFromBackend(backend sandbox.Backend, templateRegistry *sandbox.TemplateRegistry, sessionRegistry *sandbox.SessionRegistry) (tool.Tool, error) {
+	sandboxTemplateDepsVar = &sandboxTemplateDeps{
+		backend:          backend,
+		templateRegistry: templateRegistry,
+		sessionRegistry:  sessionRegistry,
+	}
+
+	t, err := functiontool.New(functiontool.Config{
+		Name: "save_sandbox_template",
+		Description: "Freeze the current sandbox session as a reusable overlay template. " +
+			"Call this after cloning the project repo, installing dependencies, and configuring the " +
+			"development environment inside the container. The template captures the writable overlay " +
+			"so future sessions start with everything pre-installed. " +
+			"Pass bootstrap_files with absolute-path start/stop scripts (e.g. .astonish/start-services.sh) " +
+			"so every future container from this template gets those files injected (not auto-run). " +
+			"Pass overwrite=true to replace an existing template with the same name. " +
+			"Cannot overwrite the reserved name 'base'. " +
+			"The returned template_name should be passed to save_fleet_plan's template field.",
+	}, saveSandboxTemplate)
+	if err != nil {
+		return nil, err
+	}
+	return t, nil
+}
+
 func saveSandboxTemplate(ctx tool.Context, args SaveSandboxTemplateArgs) (SaveSandboxTemplateResult, error) {
 	if sandboxTemplateDepsVar == nil {
 		return SaveSandboxTemplateResult{
@@ -101,8 +128,20 @@ func saveSandboxTemplate(ctx tool.Context, args SaveSandboxTemplateArgs) (SaveSa
 	}
 
 	deps := sandboxTemplateDepsVar
+	if deps.backend != nil {
+		return saveSandboxTemplateBackend(ctx, args, deps)
+	}
+	return SaveSandboxTemplateResult{
+		Status:  "error",
+		Message: "Sandbox template system requires a Docker, Kubernetes, or OpenShell backend.",
+	}, nil
+}
 
-	// Get session ID to find the right container
+type layerAliaser interface {
+	AliasLayer(name, layerID string) error
+}
+
+func saveSandboxTemplateBackend(ctx tool.Context, args SaveSandboxTemplateArgs, deps *sandboxTemplateDeps) (SaveSandboxTemplateResult, error) {
 	var sessionID string
 	if ctx != nil {
 		sessionID = ctx.SessionID()
@@ -110,11 +149,10 @@ func saveSandboxTemplate(ctx tool.Context, args SaveSandboxTemplateArgs) (SaveSa
 	if sessionID == "" {
 		return SaveSandboxTemplateResult{
 			Status:  "error",
-			Message: "No session ID available. Cannot determine which container to snapshot.",
+			Message: "No session ID available. Cannot determine which sandbox to snapshot.",
 		}, nil
 	}
 
-	// Validate args
 	name := strings.TrimSpace(args.TemplateName)
 	if name == "" {
 		return SaveSandboxTemplateResult{
@@ -122,82 +160,58 @@ func saveSandboxTemplate(ctx tool.Context, args SaveSandboxTemplateArgs) (SaveSa
 			Message: "template_name is required. Use a lowercase, hyphenated name like 'my-project'.",
 		}, nil
 	}
-
-	if name == incus.BaseTemplate {
+	if name == "base" || name == sandbox.BaseTemplateID {
 		return SaveSandboxTemplateResult{
 			Status:  "error",
 			Message: "Cannot use 'base' as a template name (reserved).",
 		}, nil
 	}
 
-	// Get the container name for this session from the pool
-	containerName := deps.nodePool.GetContainerName(sessionID)
-	if containerName == "" {
-		return SaveSandboxTemplateResult{
-			Status:  "error",
-			Message: "No active sandbox container for this session. The container must be running before creating a template.",
-		}, nil
-	}
+	bctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
 
-	// 1. Stop the node process (must be quiescent for snapshot)
-	slog.Info("stopping node for template creation", "component", "sandbox-template", "session", sessionID[:min(8, len(sessionID))])
-	if err := deps.nodePool.StopNode(sessionID); err != nil {
-		slog.Warn("failed to stop node, continuing anyway", "component", "sandbox-template", "error", err)
-	}
-
-	// Determine the source template this session was based on.
-	// This is critical for the overlay chain — the new template must
-	// reference the source template as its BasedOn, not just @base.
-	// Otherwise, files from intermediate template layers are lost.
-	sourceTemplate := ""
-	if deps.sessionRegistry != nil {
-		if entry := deps.sessionRegistry.Get(sessionID); entry != nil {
-			sourceTemplate = entry.TemplateName
-			slog.Info("session based on template", "component", "sandbox-template", "session", sessionID[:min(8, len(sessionID))], "template", sourceTemplate)
-		}
-	}
-
-	// 2. Create the template from the container
-	slog.Info("creating template from container", "component", "sandbox-template", "template", name, "container", containerName)
-	flattened, err := sandbox.CreateTemplateFromContainer(
-		deps.incusClient,
-		deps.templateRegistry,
-		containerName,
-		name,
-		strings.TrimSpace(args.Description),
-		sourceTemplate,
-		args.Overwrite,
-	)
+	art, err := deps.backend.SaveSessionAsTemplate(bctx, sessionID)
 	if err != nil {
-		// Try to restart node even on failure
-		if restartErr := deps.nodePool.RestartNode(sessionID); restartErr != nil {
-			slog.Warn("failed to restart node after template creation failure", "component", "sandbox-template", "error", restartErr)
-		}
-		msg := fmt.Sprintf("Failed to create template: %v", err)
-		if args.Overwrite && strings.Contains(err.Error(), "not found in registry") {
-			msg += " Self-overwrite must keep the source template until flatten completes; " +
-				"restart Studio with the latest binary and retry save_sandbox_template(overwrite: true). " +
-				"If the template was already deleted, stay on this session and save again (recovery materializes the live rootfs onto @base)."
-		}
 		return SaveSandboxTemplateResult{
 			Status:  "error",
-			Message: msg,
+			Message: fmt.Sprintf("Failed to capture template layer: %v", err),
 		}, nil
 	}
+	if aliaser, ok := deps.backend.(layerAliaser); ok {
+		if err := aliaser.AliasLayer(name, art.LayerID); err != nil {
+			return SaveSandboxTemplateResult{
+				Status:  "error",
+				Message: fmt.Sprintf("Failed to name template layer %q: %v", name, err),
+			}, nil
+		}
+	}
 
-	// 3. Restart the node process so the session can continue
-	slog.Info("restarting node", "component", "sandbox-template")
-	if err := deps.nodePool.RestartNode(sessionID); err != nil {
-		return SaveSandboxTemplateResult{
-			Status:       "warning",
-			TemplateName: name,
-			Message: fmt.Sprintf("Template %q created successfully, but failed to restart the node: %v. "+
-				"You may need to restart the session.", name, err),
-		}, nil
+	basedOn := sandbox.BaseTemplateID
+	if deps.sessionRegistry != nil {
+		if entry := deps.sessionRegistry.Get(sessionID); entry != nil && entry.TemplateName != "" {
+			basedOn = entry.TemplateName
+		}
+	}
+	if deps.templateRegistry != nil {
+		meta := deps.templateRegistry.Get(name)
+		if meta == nil {
+			meta = &sandbox.TemplateMeta{Name: name, CreatedAt: time.Now().UTC()}
+		}
+		if desc := strings.TrimSpace(args.Description); desc != "" {
+			meta.Description = desc
+		}
+		meta.BasedOn = basedOn
+		meta.SnapshotAt = time.Now().UTC()
+		if err := deps.templateRegistry.Add(meta); err != nil {
+			return SaveSandboxTemplateResult{
+				Status:  "error",
+				Message: fmt.Sprintf("Failed to register template %q: %v", name, err),
+			}, nil
+		}
 	}
 
 	bootstrapNote := ""
-	if len(args.BootstrapFiles) > 0 {
+	if len(args.BootstrapFiles) > 0 && deps.templateRegistry != nil {
 		files := make([]store.BootstrapFile, 0, len(args.BootstrapFiles))
 		for _, f := range args.BootstrapFiles {
 			files = append(files, store.BootstrapFile{Path: f.Path, Content: f.Content, Mode: f.Mode})
@@ -214,13 +228,11 @@ func saveSandboxTemplate(ctx tool.Context, args SaveSandboxTemplateArgs) (SaveSa
 	if args.Overwrite {
 		action = "updated"
 	}
-	if flattened {
-		action = "updated (flattened onto parent template)"
-	}
 	return SaveSandboxTemplateResult{
 		Status:       "saved",
 		TemplateName: name,
-		Message: fmt.Sprintf("Template %q %s and ready for cloning. "+
-			"Pass template: %q to save_fleet_plan to bind fleet sessions to this template.%s", name, action, name, bootstrapNote),
+		Message: fmt.Sprintf("Template %q %s and ready for cloning (layer %s, %d bytes). "+
+			"Pass template: %q to save_fleet_plan to bind fleet sessions to this template.%s",
+			name, action, art.LayerID, art.SizeBytes, name, bootstrapNote),
 	}, nil
 }

@@ -34,10 +34,27 @@ export interface BaseConfigSummary {
   configured_by: string
   configured_at: string | null
   updated_at: string
+  backend?: string
+  overlay_ready?: boolean
+  legacy_config?: boolean
+  message?: string
+}
+
+/** True when Docker OverlayFS actually has a customized @base layer. */
+export function baseSandboxIsLive(summary: BaseConfigSummary | null | undefined): boolean {
+  if (!summary) return false
+  if (summary.legacy_config) return false
+  if (summary.overlay_ready === false) return false
+  const layer = (summary.layer_id || '').trim()
+  if (!layer || layer === '@base' || layer === 'none') return false
+  return true
 }
 
 export interface BaseConfigStatus {
   in_progress: boolean
+  error?: string
+  layer_id?: string
+  size_bytes?: number
 }
 
 export interface OptionalTool {
@@ -120,6 +137,56 @@ export interface ConfigureBaseCallbacks {
   onError: (err: string) => void
 }
 
+export async function cancelBaseConfigure(): Promise<void> {
+  await adminFetch(`${BASE}/configure/cancel`, { method: 'POST' })
+}
+
+export async function waitForBaseBuild(opts: {
+  onProgress: (msg: string) => void
+  onDone: (result: ConfigureBuildResult) => void
+  onError: (err: string) => void
+  signal?: AbortSignal
+}): Promise<void> {
+  const { onProgress, onDone, onError, signal } = opts
+  onProgress('Studio lost the live log; checking whether the server is still building...')
+  const started = Date.now()
+  while (!signal?.aborted) {
+    let status: BaseConfigStatus
+    try {
+      status = await getBaseStatus()
+    } catch (err) {
+      onError((err as Error).message || 'Failed to check build status')
+      return
+    }
+    if (status.in_progress) {
+      const elapsed = Math.round((Date.now() - started) / 1000)
+      onProgress(`Server is still building (${elapsed}s since the log dropped). Leave this page open.`)
+      await new Promise((r) => setTimeout(r, 3000))
+      continue
+    }
+    if (status.error) {
+      onError(status.error)
+      return
+    }
+    if (status.layer_id) {
+      onDone({ layer_id: status.layer_id, size_bytes: status.size_bytes || 0 })
+      return
+    }
+    const summary = await getBaseConfig()
+    if ('unsupported_backend' in summary || (summary as OpenShellBackendInfo).build_supported === false) {
+      onError('Build stream ended without a result.')
+      return
+    }
+    const live = summary as BaseConfigSummary
+    if (baseSandboxIsLive(live)) {
+      onDone({ layer_id: live.layer_id, size_bytes: live.size_bytes })
+      return
+    }
+    onError('Build stream ended and no new base layer was saved.')
+    return
+  }
+}
+
 export function configureBase({ config, onProgress, onDone, onError }: ConfigureBaseCallbacks): { abort: () => void } {
   const controller = new AbortController()
 
@@ -144,6 +211,7 @@ export function configureBase({ config, onProgress, onDone, onError }: Configure
       const reader = res.body!.getReader()
       const decoder = new TextDecoder()
       let buffer = ''
+      let terminal = false
 
       while (true) {
         const { done, value } = await reader.read()
@@ -164,8 +232,10 @@ export function configureBase({ config, onProgress, onDone, onError }: Configure
               if (currentEvent === 'progress') {
                 onProgress(data.message || '')
               } else if (currentEvent === 'done') {
+                terminal = true
                 onDone({ layer_id: data.layer_id, size_bytes: data.size_bytes })
               } else if (currentEvent === 'error') {
+                terminal = true
                 onError(data.error || 'Unknown error')
               }
             } catch {
@@ -174,6 +244,9 @@ export function configureBase({ config, onProgress, onDone, onError }: Configure
             currentEvent = ''
           }
         }
+      }
+      if (!terminal && !controller.signal.aborted) {
+        await waitForBaseBuild({ onProgress, onDone, onError, signal: controller.signal })
       }
     })
     .catch((err: Error) => {

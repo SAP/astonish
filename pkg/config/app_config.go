@@ -148,13 +148,14 @@ type SandboxConfig struct {
 
 	// Backend selects the sandbox execution implementation. Accepted
 	// values:
-	//   - ""      → "incus" (default; backward-compatible)
-	//   - "incus" → local Incus daemon (docs/architecture/sandbox-backends.md §4.1)
-	//   - "k8s"   → Kubernetes (portable overlay strategy; see
-	//                docs/architecture/sandbox-backends.md §4.2 + §10.
-	//                Phase F: fuse-overlayfs by default, kernel overlay
-	//                or auto fallback; Sysbox optional, not required.)
-	//   - "mock"  → in-memory mock (tests only)
+	//   - ""       → "docker" (local OverlayFS sessions)
+	//   - "docker" → Docker + OverlayFS (Linux and macOS)
+	//   - "incus"  → treated as "docker" (legacy alias; Incus is removed)
+	//   - "k8s"    → Kubernetes (portable overlay strategy; see
+	//                 docs/architecture/sandbox-backends.md §4.2 + §10.
+	//                 Phase F: fuse-overlayfs by default, kernel overlay
+	//                 or auto fallback; Sysbox optional, not required.)
+	//   - "mock"   → in-memory mock (tests only)
 	//
 	// When "k8s" is selected, the Kubernetes sub-config below is
 	// consulted. When any other value is selected, the Kubernetes
@@ -518,14 +519,12 @@ func (c *SandboxKubernetesConfig) K8sMaxUpperReclaimsPerCycle() int {
 }
 
 // BackendKind returns the configured backend, lower-cased, with "" and
-// "incus" both normalising to "incus", and "kubernetes" aliased to "k8s".
-// This is the canonical accessor that callers should use — do NOT read
-// SandboxConfig.Backend directly.
+// legacy "incus" normalising to "docker", and "kubernetes" aliased to "k8s".
 func (c *SandboxConfig) BackendKind() string {
 	b := strings.ToLower(strings.TrimSpace(c.Backend))
 	switch b {
 	case "", "incus":
-		return "incus"
+		return "docker"
 	case "kubernetes":
 		return "k8s"
 	default:
@@ -961,8 +960,8 @@ type SandboxLimits struct {
 	// Values here should reflect the IDLE/TYPICAL footprint of a sandbox,
 	// not the peak. The Limits fields above define the burst ceiling.
 	//
-	// On Incus this sub-struct is ignored — Incus has only cgroup ceilings
-	// with implicit overcommit.
+	// On Docker OverlayFS this sub-struct is ignored — Docker sessions
+	// apply cgroup ceilings without a separate scheduler reservation.
 	//
 	// Zero values mean "auto-derive from limits" using a built-in ratio
 	// suitable for chat-mostly-idle workloads (cpu: 5% of limit, min 50m;

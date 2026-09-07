@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/api"
@@ -283,7 +282,7 @@ func NewStudioServer(port int, opts ...StudioOption) (*StudioServer, error) {
 		Handler:      handler,
 		ReadTimeout:  0, // SSE streaming needs no read timeout
 		WriteTimeout: 0, // SSE streaming needs no write timeout
-		IdleTimeout:  120 * time.Second,
+		IdleTimeout:  0, // SSE base-layer builds run for tens of minutes
 	}
 	s.listener = listener
 

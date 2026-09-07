@@ -12,7 +12,7 @@ Checks:
   3. When sandbox.enabled=true, sandbox.storage.storageClassName is set.
   4. sandbox.podSecurity is one of baseline|privileged|restricted.
   5. sandbox.overlay.mode is one of fuse|kernel|auto.
-  6. sandbox.backend is one of k8s|openshell|incus|mock (Go-canonical tokens only).
+  6. sandbox.backend is one of k8s|openshell|mock (Go-canonical tokens only).
   7. sandbox.requests.cpuMillis ≤ sandbox.limits.cpu * 1000 (when both set).
   8. sandbox.requests.memoryMiB ≤ sandbox.limits.memory (when both set).
 */}}
@@ -68,8 +68,8 @@ Checks:
 {{- /* 6. Backend token must be the Go-canonical form. */ -}}
 {{- if .Values.sandbox.enabled -}}
 {{- $sb := .Values.sandbox.backend -}}
-{{- if not (has $sb (list "k8s" "openshell" "incus" "mock")) -}}
-{{- fail (printf "sandbox.backend must be one of k8s|openshell|incus|mock (got %q)" $sb) -}}
+{{- if not (has $sb (list "k8s" "openshell" "mock")) -}}
+{{- fail (printf "sandbox.backend must be one of k8s|openshell|mock (got %q; incus is removed, use k8s in this chart)" $sb) -}}
 {{- end -}}
 {{- end -}}
 

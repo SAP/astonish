@@ -343,6 +343,17 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		// skill_lookup. Plan-mode SessionContext is preserved and prepended.
 		if promptBuilder.CodeMode && IsFailedFixFollowup(cleanUserText) {
 			turnOverrides.SessionContext = AppendFailedFixFollowupContext(turnOverrides.SessionContext)
+			approvedPlanExecutionExplicit = false
+		}
+		if c.PlanVerifyFailed() {
+			if !strings.Contains(turnOverrides.SessionContext, VerifyFailedFollowupContext) {
+				if turnOverrides.SessionContext == "" {
+					turnOverrides.SessionContext = VerifyFailedFollowupContext
+				} else {
+					turnOverrides.SessionContext = turnOverrides.SessionContext + "\n\n" + VerifyFailedFollowupContext
+				}
+			}
+			approvedPlanExecutionExplicit = false
 		}
 
 		// Per-team tool restrictions: filter disabled tools from the prompt builder
@@ -746,7 +757,7 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 				// The research clamp is armed only on the explicit execution
 				// turn. Inferred continuation turns keep plan immutability
 				// (announce_plan blocked above) but discover like Normal mode.
-				if !approvedExecutionResearchApplies(approvedPlanExecutionExplicit) {
+				if !approvedExecutionResearchApplies(approvedPlanExecutionExplicit) || c.PlanVerifyFailed() {
 					return nil, nil
 				}
 				if kind == "" || limit <= 0 {
@@ -1124,55 +1135,28 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		// conversation history, causing the LLM to call tools but skip
 		// the final summary.
 		if lastToolCallSeen && !anyTextYielded {
-			yield(&session.Event{
-				LLMResponse: model.LLMResponse{
-					Content: &genai.Content{
-						Parts: []*genai.Part{{Text: "I completed the requested actions. Let me know if you'd like me to elaborate on the results or if there's anything else I can help with."}},
-						Role:  "model",
+			c.activePlanMu.Lock()
+			endPlan := c.activePlan
+			c.activePlanMu.Unlock()
+			if endPlan == nil || endPlan.IsFullyAccepted() {
+				yield(&session.Event{
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Parts: []*genai.Part{{Text: "I completed the requested actions. Let me know if you'd like me to elaborate on the results or if there's anything else I can help with."}},
+							Role:  "model",
+						},
 					},
-				},
-			}, nil)
+				}, nil)
+			}
 		}
 
-		// Auto-complete any remaining plan steps at end of turn — but ONLY when
-		// the model did not explicitly drive the plan via update_plan. If the
-		// model tracked progress itself, its reported statuses are authoritative
-		// and we must not fabricate a bulk "everything complete" sweep (which
-		// previously made PLAN.md show all phases done regardless of reality).
 		c.activePlanMu.Lock()
 		endPlan := c.activePlan
 		c.activePlanMu.Unlock()
-
-		if endPlan != nil {
-			// Only auto-complete when execution actually began this turn. A plan
-			// that was merely announced (every step still pending — e.g. the
-			// finalization turn in Plan mode, or an announce-only turn) must NOT
-			// be swept to "complete": doing so would record a freshly announced
-			// plan as fully done before any work is performed. In that case we
-			// also keep the plan active so it carries into the next turn where
-			// execution starts.
-			started := endPlan.HasStartedSteps()
-			if started {
-				if !endPlan.IsManuallyTracked() {
-					for _, stepName := range endPlan.CompleteAll() {
-						if c.SubTaskProgressCallback != nil {
-							c.SubTaskProgressCallback(SubTaskProgressEvent{
-								Type:       "plan_step_update",
-								StepName:   stepName,
-								StepStatus: "complete",
-							})
-						}
-					}
-				}
-				// Keep the in-memory plan while work remains so update_plan on
-				// the next Normal turn still has something to drive. Clear only
-				// when every phase is terminal.
-				if !endPlan.HasPendingSteps() {
-					c.activePlanMu.Lock()
-					c.activePlan = nil
-					c.activePlanMu.Unlock()
-				}
-			}
+		if endPlan != nil && !endPlan.HasPendingSteps() && endPlan.IsFullyAccepted() {
+			c.activePlanMu.Lock()
+			c.activePlan = nil
+			c.activePlanMu.Unlock()
 		}
 
 		// Finalize the trace

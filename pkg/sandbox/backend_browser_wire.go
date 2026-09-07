@@ -55,6 +55,17 @@ command_line:
 `, width, height)
 }
 
+// sessionRuntimeBound reports whether a session record identifies a live
+// backend container. Kubernetes/OpenShell persist PodName; Docker persists
+// ContainerName (and now also copies it to PodName). Either field is enough:
+// CDP is tunneled via Backend.ExecStreaming(sessionID), not the name itself.
+func sessionRuntimeBound(rec *store.SandboxSession) bool {
+	if rec == nil {
+		return false
+	}
+	return rec.PodName != "" || rec.ContainerName != ""
+}
+
 // WireBackendBrowserManager configures mgr so browser tools launch Chromium
 // inside a backend-managed session. Used by K8s and Docker backends, where
 // Browser Manager callbacks route through Backend.ExecStreaming.
@@ -82,7 +93,7 @@ func WireBackendBrowserManager(mgr *browser.Manager, backend Backend, sessReg *S
 	mgr.ContainerResolveFunc = func(sessionID string) (string, string, error) {
 		if sessReg != nil {
 			rec, err := sessReg.GetSession(sessionID)
-			if err != nil || rec == nil || rec.PodName == "" {
+			if err != nil || !sessionRuntimeBound(rec) {
 				return "", "", fmt.Errorf("no running sandbox for session %q", sessionID)
 			}
 		}

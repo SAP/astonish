@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/SAP/astonish/pkg/sandbox"
+	"github.com/SAP/astonish/pkg/store"
 )
 
 func TestDockerRunArgs_OverlayContract(t *testing.T) {
@@ -86,5 +87,37 @@ func TestResolveLayerChain_RequiresRootfs(t *testing.T) {
 	db := &DockerBackend{cfg: Config{LayersDir: t.TempDir(), UppersDir: t.TempDir()}}
 	if _, err := db.resolveLayerChain(nil, sandbox.BaseTemplateID); err == nil {
 		t.Fatal("expected error when no layers exist")
+	}
+}
+
+func TestRecordSession_SetsContainerNameAndPodName(t *testing.T) {
+	st, err := sandbox.NewLocalSessionStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewLocalSessionStore: %v", err)
+	}
+	reg := sandbox.NewSessionRegistryFromStore(st)
+	db := &DockerBackend{cfg: Config{Sessions: reg}}
+	spec := sandbox.SessionSpec{SessionID: "c1b27dfb-f828-40f2-b510-c8e85df3cda7"}
+	cname := containerName(spec.SessionID)
+	db.recordSession(spec, cname, sandbox.BaseTemplateID)
+
+	rec, err := reg.GetSession(spec.SessionID)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if rec == nil {
+		t.Fatal("GetSession returned nil")
+	}
+	if rec.ContainerName != cname {
+		t.Errorf("ContainerName = %q, want %q", rec.ContainerName, cname)
+	}
+	if rec.PodName != cname {
+		t.Errorf("PodName = %q, want %q (browser resolve historically required PodName)", rec.PodName, cname)
+	}
+	if rec.Backend != string(sandbox.BackendKindDocker) {
+		t.Errorf("Backend = %q, want docker", rec.Backend)
+	}
+	if rec.State != store.SandboxSessionStateRunning {
+		t.Errorf("State = %q, want running", rec.State)
 	}
 }

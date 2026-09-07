@@ -50,6 +50,10 @@ func (db *DockerBackend) CreateSession(ctx context.Context, spec sandbox.Session
 		return nil, fmt.Errorf("sandbox/docker: CreateSession inspect: %w", err)
 	}
 	if state != sandbox.SessionStateGone {
+		// Re-record after Studio restart so browser resolve can find the
+		// already-running container (registry is file-backed but older
+		// rows may lack PodName).
+		db.recordSession(spec, cname, templateID)
 		return &sandbox.Session{
 			SessionID:  spec.SessionID,
 			Type:       spec.Type,
@@ -534,11 +538,14 @@ func (db *DockerBackend) recordSession(spec sandbox.SessionSpec, cname, template
 		ChatSessionID: spec.SessionID,
 		Backend:       string(sandbox.BackendKindDocker),
 		ContainerName: cname,
-		TemplateID:    templateID,
-		State:         store.SandboxSessionStateRunning,
-		CreatedAt:     time.Now().UTC(),
-		UpdatedAt:     time.Now().UTC(),
-		LastActiveAt:  time.Now().UTC(),
+		// Browser/PDF resolvers historically required PodName (K8s field).
+		// Docker has no pod; reuse the container name so those lookups work.
+		PodName:      cname,
+		TemplateID:   templateID,
+		State:        store.SandboxSessionStateRunning,
+		CreatedAt:    time.Now().UTC(),
+		UpdatedAt:    time.Now().UTC(),
+		LastActiveAt: time.Now().UTC(),
 	})
 }
 
@@ -554,9 +561,15 @@ func (db *DockerBackend) recreateFromPersist(ctx context.Context, sessionID stri
 	}
 	spec := sandbox.SessionSpec{SessionID: sessionID, Type: sandbox.SessionTypeChat, LayerChain: strings.Split(chain, ",")}
 	db.removeOverlayVolume(ctx, sessionID)
-	args := db.dockerRunArgs(spec, containerName(sessionID), chain, upperDir)
+	cname := containerName(sessionID)
+	args := db.dockerRunArgs(spec, cname, chain, upperDir)
 	if _, err := runDocker(ctx, db.cfg.ContainerRuntimePath, args...); err != nil {
 		return fmt.Errorf("sandbox/docker: recreate session %s: %w", sessionID, err)
 	}
+	templateID := spec.TemplateID
+	if templateID == "" {
+		templateID = sandbox.BaseTemplateID
+	}
+	db.recordSession(spec, cname, templateID)
 	return nil
 }

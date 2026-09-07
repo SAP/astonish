@@ -50,16 +50,14 @@ import (
 )
 
 // Backend is the runtime abstraction over the sandbox tier. Implementations:
-//   - IncusBackend  (pkg/sandbox, Phase B.2): LXC via Incus SDK; overlayfs
-//     fast-clone; used by personal mode and platform deployments with
-//     sandbox.backend=incus. Lives in pkg/sandbox (not pkg/sandbox/incus) to
-//     avoid an import cycle: the adapter delegates to orchestration helpers
-//     (EnsureSessionContainer, DestroyForSession, etc.) that live in
-//     pkg/sandbox and already import pkg/sandbox/incus for *IncusClient.
-//   - K8sSandboxBackend (pkg/sandbox/k8s, Phase C): Kubernetes pods with the
-//     Sysbox runtime; CephFS-backed content-addressed layer store; used by
-//     platform deployments with sandbox.backend=k8s.
-//   - MockBackend (pkg/sandbox/mock, Phase B.4): in-memory for tests.
+//   - DockerBackend (pkg/sandbox/docker): local OverlayFS sessions
+//     (`astonish-session-*`) on Linux and macOS. Default when
+//     sandbox.backend is empty, "docker", or the legacy alias "incus".
+//   - K8sSandboxBackend (pkg/sandbox/k8s): Kubernetes pods with a
+//     portable overlay strategy; content-addressed layer store on a PVC;
+//     used by platform deployments with sandbox.backend=k8s.
+//   - OpenShellBackend (pkg/sandbox/openshell): NVIDIA OpenShell gateway.
+//   - MockBackend (pkg/sandbox/mock): in-memory for tests.
 //
 // Implementations MUST be safe for concurrent use. Each call that returns a
 // stream (ExecInteractive) transfers ownership of that stream to the caller
@@ -74,9 +72,9 @@ type Backend interface {
 
 	// StartSession resumes a stopped/evicted session. For K8sBackend this
 	// may recreate a pod and re-mount the persisted upper layer from
-	// CephFS; for IncusBackend it re-mounts the overlay and starts the
-	// container. Must be no-op (no error) if the session is already
-	// running.
+	// the uppers PVC; for DockerBackend it restarts the session container
+	// and re-composes the overlay. Must be no-op (no error) if the session
+	// is already running.
 	StartSession(ctx context.Context, sessionID string) error
 
 	// StopSession pauses a running session without destroying its data.
@@ -244,8 +242,8 @@ const (
 
 // BaseTemplateID is the canonical template identifier for the default base
 // layer. All backends treat an empty SessionSpec.TemplateID as equivalent to
-// BaseTemplateID. For K8s, the seed Job populates layers/@base/rootfs; for
-// Incus, the template registry holds @base as the root of the clone tree.
+// BaseTemplateID. Docker and K8s store @base as a content-addressed overlay
+// layer; OpenShell uses the sandbox image as the rootfs.
 const BaseTemplateID = "@base"
 
 // SessionType distinguishes the two long-running session flavors.

@@ -455,8 +455,7 @@ type ReferenceLocation struct {
 
 | Backend | Tree-sitter `.so` | Ripgrep (`rg`) |
 |---------|-------------------|----------------|
-| **Incus (Linux native)** | `InitBaseTemplate` / `RefreshTemplate` / `BuildTemplate` build in a temp container and push to `/usr/lib/astonish/...` inside the template | `CoreToolInstallCommands()` apt-installs `ripgrep` into `@base` |
-| **Incus (macOS Docker+Incus)** | Copied from `astonish-incus` image (`docker/incus/Dockerfile`) via `pushTreeSitterLibraryFromDocker` | Same `CoreToolInstallCommands()` into Incus templates (not the Docker host image) |
+| **Docker OverlayFS** | Baked into `sandbox-base` **and** bind-mounted into the overlay by the entrypoint (`HostTreeSitterLibPath`). Same image as K8s. | Installed into `@base` overlay layers via `baseconfig.Render()` → `CoreToolInstallCommands()` when `Core: true`. |
 | **K8s** | Baked into `sandbox-base` **and** bind-mounted into the overlay by the entrypoint (`HostTreeSitterLibPath`). Dockerfile `COPY` alone is insufficient after chroot. | Installed into `@base` overlay layers via `baseconfig.Render()` → `CoreToolInstallCommands()` when `Core: true`. Do **not** rely on packaging `rg` only in the pod image. |
 | **OpenShell** | Baked into `docker/sandbox-openshell` image rootfs (no Astonish overlay chroot) | apt `ripgrep` in `docker/sandbox-openshell/Dockerfile` |
 
@@ -519,14 +518,10 @@ Auto-inject of a repo map into the system prompt at session start is not impleme
    cannot `dlopen` the library after chroot.
 3. **OpenShell:** `COPY` into `docker/sandbox-openshell/Dockerfile` image
    rootfs (sufficient; no overlay chroot).
-4. **Docker+Incus (macOS):** bake into `docker/incus/Dockerfile`; template
-   setup copies from the helper image during `InitBaseTemplate` /
-   `RefreshTemplate`.
-5. **Native-Linux Incus:** `InitBaseTemplate` / `RefreshTemplate` /
-   `BuildTemplate` create a temporary `ubuntu/24.04` builder container,
-   compile the library, pull out only the `.so`, and push it into the
-   template. The final sandbox template does not retain compilers.
-6. **Ripgrep:** install via `CoreToolInstallCommands()` for Incus + K8s
+4. **Docker OverlayFS:** same `sandbox-base` image as K8s; the entrypoint
+   bind-mounts the library into the composed overlay. Tools and `rg` land
+   in `@base` via `CoreToolInstallCommands()`.
+5. **Ripgrep:** install via `CoreToolInstallCommands()` for Docker + K8s
    `@base`, and via apt in the OpenShell Dockerfile. See §5.7 table.
 
 ### Step 4: Fleet Integration

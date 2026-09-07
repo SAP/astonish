@@ -41,8 +41,8 @@ import (
 )
 
 func handleSetupCommand() error {
-	// Docker OverlayFS sessions do not need host Incus sockets or overlay
-	// mounts, so the wizard no longer re-execs via sudo.
+	// Docker OverlayFS sessions do not need host overlay mounts, so the
+	// wizard no longer re-execs via sudo.
 
 	// Load config
 	cfg, err := config.LoadAppConfig()

@@ -27,15 +27,15 @@ func handleSandboxCommand(args []string) error {
 
 	// k8s-smoke is a Phase-D manifest + API smoke probe that runs
 	// against a remote Kubernetes API. It uses kubeconfig/RBAC for
-	// auth and never touches host mounts / Incus sockets, so it must
-	// NOT go through the Linux sudo escalation path below; doing so
-	// would either drop the user's KUBECONFIG / HOME settings or just
-	// fail on non-root CI where sudo is unavailable.
+	// auth and never touches host mounts, so it must NOT go through
+	// the Linux sudo escalation path below; doing so would either
+	// drop the user's KUBECONFIG / HOME settings or just fail on
+	// non-root CI where sudo is unavailable.
 	if args[0] == "k8s-smoke" {
 		return handleSandboxK8sSmoke(args[1:])
 	}
 
-	// Docker OverlayFS sessions do not need host overlay mounts or Incus sockets.
+	// Docker OverlayFS sessions do not need host overlay mounts.
 	switch args[0] {
 	case "status":
 		return handleSandboxStatus()

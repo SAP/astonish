@@ -4,14 +4,11 @@
 // an init() function. For that init to run, the package must be linked
 // into the binary, which requires an import somewhere in the import graph.
 //
-// The incus backend is already imported transitively (pkg/sandbox/incus is
-// used directly by many cmd/astonish files for client construction), so it
-// doesn't need a blank import here.
-//
-// The k8s and mock backends are optional, used only when the deployment
-// selects them via BackendFactoryConfig.Kind. Blank-importing them here
-// makes the astonish CLI a "batteries-included" distribution: all built-in
-// backends are available without changes to config or build tags.
+// Docker OverlayFS is the local default (blank-imported below). Kubernetes,
+// OpenShell, and mock are optional, used only when the deployment selects
+// them via BackendFactoryConfig.Kind. Blank-importing them here makes the
+// astonish CLI a "batteries-included" distribution: all built-in backends
+// are available without changes to config or build tags.
 //
 // Binaries that want to exclude a backend (e.g., to avoid linking
 // k8s.io/client-go) can fork this list. Out-of-tree backends follow the

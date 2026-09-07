@@ -98,12 +98,13 @@ Master Key (KEK)  →  Per-Org DEK  →  Credential Data (AES-256-GCM)
                      (stored encrypted)
 ```
 
-**Per-Team Sandboxes.** Each organization gets network-isolated execution environments. Two backends supported:
+**Per-Team Sandboxes.** Each organization gets network-isolated execution environments. Three backends supported:
 
-| Backend        | Isolation                               | Use Case                |
-| -------------- | --------------------------------------- | ----------------------- |
-| **Incus**      | Per-org bridge networks, LXC containers | Self-hosted, bare metal |
-| **Kubernetes** | NetworkPolicies, org/team pod labels    | Cloud-native, scalable  |
+| Backend              | Isolation                                      | Use Case                     |
+| -------------------- | ---------------------------------------------- | ---------------------------- |
+| **Docker OverlayFS** | Session containers + overlay layers            | Local Studio / self-hosted   |
+| **Kubernetes**       | NetworkPolicies, org/team pod labels           | Cloud-native, scalable       |
+| **OpenShell**        | Landlock + seccomp + L7 egress via gateway     | Highest isolation on K8s     |
 
 Team admins customize container templates and get terminal access for configuration. Sandbox templates cascade: personal > team > org > global.
 

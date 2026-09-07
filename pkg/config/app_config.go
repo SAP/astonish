@@ -960,8 +960,8 @@ type SandboxLimits struct {
 	// Values here should reflect the IDLE/TYPICAL footprint of a sandbox,
 	// not the peak. The Limits fields above define the burst ceiling.
 	//
-	// On Incus this sub-struct is ignored — Incus has only cgroup ceilings
-	// with implicit overcommit.
+	// On Docker OverlayFS this sub-struct is ignored — Docker sessions
+	// apply cgroup ceilings without a separate scheduler reservation.
 	//
 	// Zero values mean "auto-derive from limits" using a built-in ratio
 	// suitable for chat-mostly-idle workloads (cpu: 5% of limit, min 50m;

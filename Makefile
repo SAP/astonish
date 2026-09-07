@@ -59,11 +59,10 @@ help:
 	@echo "  make docker-down     - Stop persistent container"
 	@echo "  make docker-rebuild  - Rebuild and restart persistent container"
 	@echo ""
-	@echo "Sandbox (Docker+Incus for macOS/Windows):"
+	@echo "Sandbox (Docker OverlayFS + Kubernetes images):"
 	@echo "  make build-linux       - Cross-compile Linux amd64 binary"
 	@echo "  make build-linux-arm64 - Cross-compile Linux arm64 binary"
 	@echo "  make sandbox-entrypoint - Generate astonish-sandbox-entrypoint script (host)"
-	@echo "  make docker-incus      - Build+LOAD local Incus image (native arch; tags :$(VERSION) and :latest when VERSION=dev)"
 	@echo "  make docker-sandbox-base - Build+LOAD local sandbox-base image (native arch)"
 	@echo ""
 	@echo "OpenShell Sandbox:"
@@ -73,7 +72,6 @@ help:
 	@echo ""
 	@echo "Registry Push (multi-arch, requires docker login + buildx):"
 	@echo "  make push-dev                      - Build+push astonish:dev (multi-arch)"
-	@echo "  make push-incus-dev                - Build+push astonish-incus:dev (multi-arch)"
 	@echo "  make push-sandbox-base-dev         - Build+push astonish-sandbox-base:dev (multi-arch)"
 	@echo "  make push-sandbox-openshell-dev    - Build+push astonish-sandbox-openshell:dev (multi-arch)"
 	@echo "  make push-all-dev                  - Push all dev images"
@@ -81,7 +79,6 @@ help:
 	@echo "Registry Push (fast single-arch, dev iteration):"
 	@echo "  make push-dev-fast                      - Build+push astonish:dev (native arch only)"
 	@echo "  make push-sandbox-base-dev-fast         - Build+push sandbox-base:dev (native arch only)"
-	@echo "  make push-incus-dev-fast               - Build+push incus:dev (native arch only)"
 	@echo "  make push-sandbox-openshell-dev-fast    - Build+push sandbox-openshell:dev (native arch only)"
 	@echo "  make push-all-dev-fast                  - Push all dev images (native arch only)"
 
@@ -552,7 +549,7 @@ update-mcp-stars:
 	GITHUB_TOKEN=$$(gh auth token) python3 scripts/update-mcp-stars.py
 	@echo "Star counts updated!"
 
-.PHONY: all help build build-ui build-all run studio studio-dev test test-unit test-integration test-e2e test-e2e-sqlite test-e2e-inspect test-e2e-inspect-stop e2e-k8s-up e2e-k8s-down install clean update-mcp-stars setup-hooks platform-init create-secrets e2e-env-up e2e-env-down e2e-env-rebuild docker-up docker-down docker-rebuild build-linux build-linux-arm64 sandbox-entrypoint docker-incus docker-sandbox-base docker-sandbox-openshell ensure-builder push-dev push-incus-dev push-sandbox-base-dev push-sandbox-openshell-dev push-all-dev push-dev-fast push-sandbox-base-dev-fast push-incus-dev-fast push-sandbox-openshell-dev-fast push-all-dev-fast ent-generate proto-gen
+.PHONY: all help build build-ui build-all run studio studio-dev test test-unit test-integration test-e2e test-e2e-sqlite test-e2e-inspect test-e2e-inspect-stop e2e-k8s-up e2e-k8s-down install clean update-mcp-stars setup-hooks platform-init create-secrets e2e-env-up e2e-env-down e2e-env-rebuild docker-up docker-down docker-rebuild build-linux build-linux-arm64 sandbox-entrypoint docker-sandbox-base docker-sandbox-openshell ensure-builder push-dev push-sandbox-base-dev push-sandbox-openshell-dev push-all-dev push-dev-fast push-sandbox-base-dev-fast push-sandbox-openshell-dev-fast push-all-dev-fast ent-generate proto-gen
 
 # Docker Test Environment - isolated environment for running integration/E2E tests
 e2e-env-up:
@@ -652,40 +649,6 @@ helm-deps:
 	helm dependency update deploy/helm/astonish
 	@echo "Helm dependencies updated (Chart.lock + charts/ archive)"
 
-# Build the Incus Docker image for local use (macOS/Windows Docker+Incus).
-#
-# Pitfalls this target avoids:
-#   1. docker-container buildx driver discards the result unless --load is set
-#      (plain `docker build` can leave the image only in build cache).
-#   2. Dockerfile COPYs astonish-linux-${TARGETARCH}; on Apple Silicon that is
-#      arm64, so we must build that binary — not only amd64.
-#   3. Runtime DockerImageTag() uses :latest when host version is "dev", not :dev.
-#      When VERSION=dev we dual-tag so EnsureIncusDockerContainer can find it.
-#
-# After this: docker rm -f astonish-incus && astonish sandbox refresh --force
-# and start a new chat session (existing session containers keep the old binary).
-docker-incus:
-	@if [ "$(DEV_ARCH)" = "arm64" ]; then \
-		$(MAKE) build-linux-arm64; \
-	else \
-		$(MAKE) build-linux; \
-	fi
-	@echo "Building Incus Docker image (linux/$(DEV_ARCH)) and loading into local Docker..."
-	# Single -t with --load: multi-tag --load is unreliable on docker-container
-	# buildx (only the first tag may stick). Retag explicitly afterward.
-	docker buildx build \
-		--platform linux/$(DEV_ARCH) \
-		-f docker/incus/Dockerfile \
-		-t $(DOCKER_REGISTRY)/astonish-incus:$(VERSION) \
-		--load \
-		.
-	@echo "Image loaded: $(DOCKER_REGISTRY)/astonish-incus:$(VERSION)"
-	@if [ "$(VERSION)" = "dev" ]; then \
-		docker tag $(DOCKER_REGISTRY)/astonish-incus:dev $(DOCKER_REGISTRY)/astonish-incus:latest; \
-		echo "Also tagged: $(DOCKER_REGISTRY)/astonish-incus:latest (runtime looks for this when host version is dev)"; \
-	fi
-	@echo "Next: docker rm -f astonish-incus && ./astonish sandbox refresh --force  (then new chat session)"
-
 # Build the K8s sandbox-base image locally (native arch). Host-builds the
 # binary + entrypoint so Docker only layers apt/treesitter + COPY.
 docker-sandbox-base: sandbox-entrypoint
@@ -729,16 +692,6 @@ push-dev: ensure-builder build-linux build-linux-arm64
 		--push .
 	@echo "Pushed: $(DOCKER_REGISTRY)/astonish:$(DEV_TAG)"
 
-# Build and push the Incus image (multi-arch)
-# Requires local cross-compiled binaries for both architectures
-push-incus-dev: ensure-builder build-linux build-linux-arm64
-	@echo "Building and pushing $(DOCKER_REGISTRY)/astonish-incus:$(DEV_TAG) (linux/amd64,linux/arm64)..."
-	docker buildx build --platform linux/amd64,linux/arm64 \
-		-f docker/incus/Dockerfile \
-		-t $(DOCKER_REGISTRY)/astonish-incus:$(DEV_TAG) \
-		--push .
-	@echo "Pushed: $(DOCKER_REGISTRY)/astonish-incus:$(DEV_TAG)"
-
 # Build and push the sandbox base image (multi-arch).
 # Host-cross-compiles both arches + generates the entrypoint, then Docker only
 # runs apt + treesitter + COPY (stable layers cache across code edits).
@@ -764,7 +717,7 @@ push-sandbox-openshell-dev: ensure-builder build-linux
 	@echo "Pushed: $(DOCKER_REGISTRY)/astonish-sandbox-openshell:$(DEV_TAG)"
 
 # Push all dev images
-push-all-dev: push-dev push-incus-dev push-sandbox-base-dev push-sandbox-openshell-dev
+push-all-dev: push-dev push-sandbox-base-dev push-sandbox-openshell-dev
 	@echo "All dev images pushed successfully!"
 
 # --- Fast single-arch dev builds (native architecture only) ---
@@ -805,21 +758,6 @@ push-sandbox-base-dev-fast: ensure-builder sandbox-entrypoint
 		--push .
 	@echo "Pushed: $(DOCKER_REGISTRY)/astonish-sandbox-base:$(DEV_TAG)"
 
-# Fast: build and push Incus image (single arch). Build the binary for DEV_ARCH
-# (arm64 on Apple Silicon), not only amd64.
-push-incus-dev-fast: ensure-builder
-	@if [ "$(DEV_ARCH)" = "arm64" ]; then \
-		$(MAKE) build-linux-arm64; \
-	else \
-		$(MAKE) build-linux; \
-	fi
-	@echo "Building and pushing $(DOCKER_REGISTRY)/astonish-incus:$(DEV_TAG) (linux/$(DEV_ARCH) only)..."
-	docker buildx build --platform linux/$(DEV_ARCH) \
-		-f docker/incus/Dockerfile \
-		-t $(DOCKER_REGISTRY)/astonish-incus:$(DEV_TAG) \
-		--push .
-	@echo "Pushed: $(DOCKER_REGISTRY)/astonish-incus:$(DEV_TAG)"
-
 # Fast: build and push OpenShell sandbox image (amd64 only — KasmVNC + CloakBrowser are amd64)
 push-sandbox-openshell-dev-fast: ensure-builder build-linux
 	@echo "Building and pushing $(DOCKER_REGISTRY)/astonish-sandbox-openshell:$(DEV_TAG) (linux/amd64)..."
@@ -830,7 +768,7 @@ push-sandbox-openshell-dev-fast: ensure-builder build-linux
 	@echo "Pushed: $(DOCKER_REGISTRY)/astonish-sandbox-openshell:$(DEV_TAG)"
 
 # Fast: push all dev images (single arch)
-push-all-dev-fast: push-dev-fast push-sandbox-base-dev-fast push-incus-dev-fast push-sandbox-openshell-dev-fast
+push-all-dev-fast: push-dev-fast push-sandbox-base-dev-fast push-sandbox-openshell-dev-fast
 	@echo "All dev images pushed ($(DEV_ARCH) only)!"
 
 # Regenerate Ent client code only when a scope's schema inputs or generated

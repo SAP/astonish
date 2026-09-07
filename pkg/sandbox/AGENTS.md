@@ -4,7 +4,7 @@ Backend abstraction for sandboxed execution. Every tool that runs a shell comman
 
 ## Scope
 - `Backend` interface + factory (`backend_factory.go`, `backend_contract.go`).
-- Backend implementations: `incus_backend.go` (default), `k8s/`, `openshell/`, `mock/`.
+- Backend implementations: `docker/` (local default), `k8s/`, `openshell/`, `mock/`.
 - Image build (`imagebuilder/`) — Kaniko-driven, content-addressed tags.
 - Template metadata (`tmplmeta/`).
 - Flow-level wiring (`flow.go`).
@@ -12,8 +12,8 @@ Backend abstraction for sandboxed execution. Every tool that runs a shell comman
 
 ## Backend selection
 - Config `BackendKind` → factory in `backend_factory.go`.
-- Kinds: `BackendKindIncus` (default), `BackendKindK8s`, `BackendKindOpenShell`, `BackendKindMock`.
-- Backends are registered via `RegisterBackendFactory`. Blank imports in `cmd/astonish/sandbox_backends.go` guarantee the k8s/openshell/mock packages link into the binary.
+- Kinds: `BackendKindDocker` (default; empty and legacy `"incus"` alias to docker), `BackendKindK8s`, `BackendKindOpenShell`, `BackendKindMock`.
+- Backends are registered via `RegisterBackendFactory`. Blank imports in `cmd/astonish/sandbox_backends.go` guarantee the docker/k8s/openshell/mock packages link into the binary.
 - **Never call a backend implementation directly** from outside `pkg/sandbox` — always go through the `Backend` interface obtained from the factory. Otherwise you break the mock-based test story.
 
 ## Backend contract
@@ -49,13 +49,13 @@ If you add a backend, run the contract suite against it in CI. If you change the
 **Do not** add non-deterministic inputs (timestamps, build machine, current user) to the content hash — reproducibility across build machines relies on this.
 
 ## Session provisioning (per backend)
-- **Incus**: `EnsureOrgSessionContainer` composes overlay layers, ensures a `@base` snapshot, creates a per-session container. `WaitForSessionReady` polls `IsRunning`. Templates are content-addressed via `hashSnapshotRootfs`.
+- **Docker OverlayFS**: `pkg/sandbox/docker` creates `astonish-session-*` containers from `ghcr.io/sap/astonish-sandbox-base`. Layers live on the host (`LayersDir`); the live upper is a Docker volume; `fuse-overlayfs` (default) composes `/sandbox/rootfs`. Same overlay contract as K8s. Used for local Studio on macOS and Linux.
 - **OpenShell**: `Gateway.CreateSandbox` provisions a pod; the in-pod supervisor opens `ConnectSupervisor`; exec/push/pull go through `ExecSandbox` / `ExecSandboxInteractive`. Evicted sandboxes are auto-resumed by `ensureSessionRunning`. Platform `cert_bundles` set trust env and (for `source: pvc`) `SandboxTemplate.driver_config` PVC mounts; `source: configMap` omits PVC and relies on Kyverno inject — see `pkg/sandbox/openshell/driver_config.go`.
 - **K8s (direct, without OpenShell)**: `pkg/sandbox/k8s` — image pull policy is `Always` for mutable tags (`latest`, `dev`) and `IfNotPresent` for pinned digests. Enforces per-org/team labels and `NetworkPolicy`.
 - **Mock**: in-memory, used by unit tests; supports injection hooks.
 
 ## Entrypoint contract
-The k8s/OpenShell sandbox images (`docker/sandbox-base/Dockerfile`, `docker/sandbox-openshell/Dockerfile`) ship:
+The Docker/K8s sandbox-base image and the OpenShell sandbox image (`docker/sandbox-base/Dockerfile`, `docker/sandbox-openshell/Dockerfile`) ship:
 - `/usr/local/bin/astonish-host` — the real binary copied into the base image.
 - `/usr/local/bin/astonish` — a wrapper that chroots into the composed overlay before exec'ing the real binary. **All Exec calls (from Astonish and kubectl exec both) rely on this wrapper.**
 - `/usr/local/bin/astonish-shell` — interactive wrapper for team-admin interactive shells.
@@ -69,8 +69,8 @@ If you change the entrypoint, update the generator in `cmd/astonish-sandbox-entr
 - **Kernel**: Landlock + seccomp inside the sandbox (OpenShell supervisor). Optional user-namespace mapping via `SandboxTemplate.user_namespaces`.
 - **Network**:
   - K8s: `NetworkPolicy` per org/team labels; OpenShell adds L7 inspection driven by `SandboxPolicy.network_policies`.
-  - Incus: per-org bridge networks + profiles.
-- **Filesystem**: per-session overlay; template snapshots are content-addressed (Incus) or image-tagged (K8s/OpenShell).
+  - Docker OverlayFS: per-org Docker bridge networks (`astonish-org-<slug>`).
+- **Filesystem**: per-session overlay; template layers are content-addressed directories (Docker/K8s) or image-tagged (OpenShell).
 - **Bootstrap files**: template `bootstrap_files` (e.g. `.astonish/start-services.sh`) are injected at session start and never auto-executed — drills/fleet/chat call them after credentials.
 - **Template overwrite**: `CreateTemplateFromContainer(..., overwrite=true)` when saving the **same** name the session is based on **flattens** (template upper ∪ session upper) onto the parent `BasedOn` (usually `base`). Never delete the source template before that flatten finishes — delete-first self-overwrite leaves the registry empty and breaks `ResolveLowerLayers`. Overwriting a *different* name may still delete-first.
 - **Recovery if a template was deleted mid-overwrite**: Keep the live session (do not `use_sandbox_template` / reboot). Restart Studio with a build that has the flatten fix, then `save_sandbox_template(name, overwrite: true, bootstrap_files: …)` again. If the source is already gone from the registry, create materializes the session rootfs onto `@base`. If the session is already dead: recreate from `@base` (clone, deps, build, scripts) and save without overwrite.

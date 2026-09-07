@@ -1,12 +1,9 @@
-// Package sandbox — Backend factory (Phase B.3).
+// Package sandbox — Backend factory.
 //
 // This file provides sandbox.NewBackend, the central factory that picks a
-// Backend implementation based on configuration. Today only "incus" is
-// supported; Phase C adds "k8s".
-//
-// The factory is additive: callers that already hold a *IncusClient keep
-// working unchanged. New code should accept a Backend and let the factory
-// choose the implementation.
+// Backend implementation based on configuration. Docker OverlayFS is the
+// local default via BackendFromAppConfig; K8s, OpenShell, and mock register
+// through RegisterBackendFactory.
 
 package sandbox
 
@@ -60,10 +57,10 @@ func lookupBackendFactory(kind BackendKind) (BackendFactoryFunc, bool) {
 // are validated; missing required fields produce a clear error.
 type BackendFactoryConfig struct {
 	// Kind selects the backend implementation. Accepted values:
-	//   - "" or "incus" → IncusBackend (legacy default until Docker is wired)
-	//   - "docker"      → DockerBackend (local OverlayFS sessions)
-	//   - "k8s"         → K8sSandboxBackend
-	//   - "openshell"   → OpenShellBackend
+	//   - "" or "docker" → DockerBackend (local OverlayFS sessions)
+	//   - "incus"        → treated as docker by config.Sandbox.BackendKind
+	//   - "k8s"          → K8sSandboxBackend
+	//   - "openshell"    → OpenShellBackend
 	Kind BackendKind
 
 	// Client is the Incus daemon client. Required for Kind == "incus".
@@ -108,10 +105,10 @@ type DockerRuntimeConfig struct {
 // returned Backend satisfies the full interface and may be used by any
 // caller that wants to be backend-agnostic.
 //
-// Kinds other than the built-in "incus" are resolved via the
-// RegisterBackendFactory hook. This keeps out-of-tree implementations
-// (mock, k8s) from forcing an import cycle back into pkg/sandbox. A
-// backend becomes available by importing its package (which registers
+// Kinds other than the leftover in-tree Incus adapter are resolved via
+// the RegisterBackendFactory hook. This keeps out-of-tree implementations
+// (mock, k8s, docker) from forcing an import cycle back into pkg/sandbox.
+// A backend becomes available by importing its package (which registers
 // itself in its init()).
 //
 // Errors:

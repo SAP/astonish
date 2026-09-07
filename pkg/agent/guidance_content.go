@@ -459,7 +459,7 @@ delegate_tasks(tasks: [{
 
 ## Key rules
 
-- **NEVER try to save templates from inside the container.** The ` + "`save_sandbox_template`" + ` tool operates on the host's Incus runtime — it cannot be called via shell commands or API requests from within the sandbox.
+- **NEVER try to save templates from inside the container.** The ` + "`save_sandbox_template`" + ` tool operates on the host sandbox runtime — it cannot be called via shell commands or API requests from within the sandbox.
 - **Stop background processes first.** Running services (dev servers, file watchers) can cause snapshot corruption. Use ` + "`process_kill`" + ` to stop them before saving.
 - **Use the repo name as the template name.** For ` + "`acme/billing-api`" + `, use ` + "`billing-api`" + `. This keeps naming consistent and predictable.
 - **Verify before saving.** Run the build, run tests (or a drill suite), and confirm everything works before freezing the template. A broken template means every fleet session starts broken.

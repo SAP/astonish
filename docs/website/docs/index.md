@@ -25,7 +25,7 @@ Same binary, same 90+ tools, same platform. Your choice of database backend.
 
 **Slides.** Generate complete presentations from prompts, documents, research, and connected systems. Apply built-in or imported PowerPoint templates, refine the deck with AI, present it in the browser, and export it as PPTX, PDF, or HTML. See [Slides](./slides/).
 
-**Enterprise Security.** Envelope encryption (AES-256-GCM), OIDC/SSO federation, per-organization sandboxes (Incus or Kubernetes), immutable audit logs, and database-per-org isolation.
+**Enterprise Security.** Envelope encryption (AES-256-GCM), OIDC/SSO federation, per-organization sandboxes (Docker OverlayFS, Kubernetes, or OpenShell), immutable audit logs, and database-per-org isolation.
 
 **Multi-Channel Access.** Studio (web UI), CLI, Remote CLI, Telegram, Email, and Slack. All channels connect to the same platform with consistent context.
 
@@ -86,7 +86,7 @@ Agent:  Saved: deploy_staging.yaml
 | Memory | Personal + team tiers | Personal + Team + Organization tiers |
 | Security | Envelope encryption, audit logs | Envelope encryption, OIDC/SSO, audit logs |
 | Channels | Studio, CLI, Telegram, Email, Slack | Studio, CLI, Remote CLI, Telegram, Email, Slack |
-| Sandboxes | Local (Incus) | Per-org network-isolated (Incus/Kubernetes) |
+| Sandboxes | Local (Docker OverlayFS) | Per-org network-isolated (Kubernetes / OpenShell) |
 | Config | Platform config | Cascading (platform → org → team → personal) |
 
 Both deployments ship in the same binary and share the same agent engine, tools, and capabilities.

@@ -739,7 +739,7 @@ providers from `plan.credential_injection.env` at fleet session start;
 `pkg/api/fleet_sandbox_wiring.go` attaches them after sandbox creation and
 detaches on cleanup. Plan-bound credentials (`plan.credentials` allowlist)
 are resolved via `PlanBoundCredentialStore` in `pkg/fleet/plan_bound_store.go`.
-File credentials use `Backend.PushFile` / Incus exec materialization in
+File credentials use `Backend.PushFile` / backend exec materialization in
 `pkg/fleet/credential_injection.go`. Regular Studio Chat is unchanged.
 
 **gRPC methods involved:**

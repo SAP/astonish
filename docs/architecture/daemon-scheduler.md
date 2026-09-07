@@ -114,7 +114,7 @@ astonish daemon start
 9. Initialize channels (Telegram, email) with hot-reload
 10. Initialize scheduler with job registry
 11. Initialize fleet PlanActivator with GitHub monitoring
-12. Setup sandbox runtime (detect platform, connect to Incus)
+12. Setup sandbox runtime (Docker OverlayFS / K8s / OpenShell from config)
 13. Prune stale containers from previous runs
 14. Start idle watchdog for sandbox containers
 15. Start Studio HTTP server

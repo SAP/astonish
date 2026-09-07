@@ -9,7 +9,7 @@ Astonish supports three deployment models, scaling from a single developer works
 | **Use case** | Individual developer | Team/enterprise platform | Secure autonomous agents |
 | **Database** | SQLite | PostgreSQL + pgvector | PostgreSQL + pgvector |
 | **Auth** | Local (setup wizard) | JWT + OIDC federation | JWT + OIDC federation |
-| **Sandboxes** | Local Incus containers | K8s pods + NetworkPolicy | OpenShell (kernel-level isolation) |
+| **Sandboxes** | Docker OverlayFS sessions | K8s pods + NetworkPolicy | OpenShell (kernel-level isolation) |
 | **Encryption** | Local keychain | Master KEK + per-org DEK | Master KEK + per-org DEK |
 | **Multi-tenant** | No | Yes | Yes |
 | **Install method** | Single binary | Helm chart | Helm chart + OpenShell |
@@ -28,7 +28,7 @@ Astonish supports three deployment models, scaling from a single developer works
 
 - macOS or Linux
 - Astonish binary ([install guide](../getting-started/index.md))
-- Optional: Incus for container sandboxes
+- Docker (Colima or Docker Desktop on macOS) for OverlayFS sandboxes
 
 ### Kubernetes (Standard)
 

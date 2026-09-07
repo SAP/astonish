@@ -88,7 +88,7 @@ func handleNodeCommand(args []string) error {
 
 	// Inside a sandbox container, disable SSRF private-IP blocking for
 	// http_request. The sandbox's own network policy (OpenShell Landlock/seccomp,
-	// K8s NetworkPolicy, Incus network config) is the security boundary —
+	// K8s NetworkPolicy, Docker org networks) is the security boundary —
 	// the Go-level SSRF check is redundant and blocks legitimate internal API access.
 	tools.SetAllowPrivateNetworks(true)
 

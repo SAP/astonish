@@ -207,6 +207,12 @@ func (db *DockerBackend) execBuildStep(ctx context.Context, sessionID string, i 
 func overlayAptPrepScript() string {
 	return strings.Join([]string{
 		"set -e",
+		"avail=$(df -Pm / | awk 'NR==2 { print $4 }')",
+		`echo "overlay free space: ${avail}MB"`,
+		`if [ -n "$avail" ] && [ "$avail" -lt 2048 ]; then`,
+		`  echo "E: overlay has ${avail}MB free; the core package install needs about 2GB. Increase Docker Desktop disk or run: docker system prune" >&2`,
+		"  exit 100",
+		"fi",
 		"mkdir -p /etc/apt/apt.conf.d /etc/dpkg/dpkg.cfg.d /usr/sbin",
 		`cat > /etc/apt/apt.conf.d/99astonish-overlay <<'EOF'`,
 		`APT::Sandbox::User "root";`,
@@ -219,16 +225,47 @@ func overlayAptPrepScript() string {
 }
 
 func formatExecOutput(stdout, stderr []byte) string {
-	combined := strings.TrimSpace(string(stderr) + "\n" + string(stdout))
-	combined = strings.TrimSpace(combined)
+	if errs := extractAptErrorLines(stderr, stdout); errs != "" {
+		return errs
+	}
+	// Prefer stderr: apt writes E: there, and stdout is often a huge package list.
+	combined := strings.TrimSpace(string(stderr))
+	if combined == "" {
+		combined = strings.TrimSpace(string(stdout))
+	} else if tail := strings.TrimSpace(string(stdout)); tail != "" {
+		combined = combined + "\n" + tail
+	}
 	if combined == "" {
 		return "(no output)"
 	}
 	const max = 2500
 	if len(combined) > max {
-		return "..." + combined[len(combined)-max:]
+		return combined[:max] + "..."
 	}
 	return combined
+}
+
+func extractAptErrorLines(stderr, stdout []byte) string {
+	var errs []string
+	seen := map[string]bool{}
+	for _, src := range [][]byte{stderr, stdout} {
+		for _, line := range strings.Split(string(src), "\n") {
+			trim := strings.TrimSpace(line)
+			if trim == "" || seen[trim] {
+				continue
+			}
+			if strings.HasPrefix(trim, "E:") || strings.HasPrefix(trim, "Err:") ||
+				strings.Contains(trim, "dpkg: error") ||
+				strings.Contains(trim, "not enough free space") {
+				seen[trim] = true
+				errs = append(errs, trim)
+			}
+		}
+	}
+	if len(errs) == 0 {
+		return ""
+	}
+	return strings.Join(errs, "\n")
 }
 
 // SaveSessionAsTemplate captures the upper layer of a running session and

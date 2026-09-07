@@ -975,3 +975,139 @@ func TestRenderStickyUserHeaderExpandedTallerThan3Lines(t *testing.T) {
 		t.Fatalf("expanded sticky header with 5 content lines should render more than 3 lines, got %d: %q", len(rendered), plain)
 	}
 }
+
+func TestStickyHeaderDoubleClickTogglesExpand(t *testing.T) {
+	// Build a model with enough content that the user bubble scrolls off-screen,
+	// triggering a sticky header.
+	m := newModel(context.Background(), Config{
+		Backend: staticBackend{info: backend.Info{Mode: "code"}},
+		Width:   80,
+		Height:  20,
+	})
+	m.ready = true
+	m.layout()
+
+	m.tr.Apply(events.NewUser("question for expand test"))
+	var lines []string
+	for i := 0; i < 60; i++ {
+		lines = append(lines, "agent output line for expand test")
+	}
+	m.tr.Apply(events.NewText(strings.Join(lines, "\n")))
+	m.tr.Streaming = true
+	m.refreshViewport()
+
+	if !m.vp.AtBottom() {
+		t.Skip("viewport not at bottom — content too short for this terminal height")
+	}
+	if m.stickyHeaderLines == 0 {
+		t.Fatal("expected a sticky header to be shown after scrolling past the user bubble")
+	}
+
+	// Initially not expanded.
+	if m.stickyExpanded {
+		t.Fatal("stickyExpanded should be false initially")
+	}
+
+	press := func() {
+		m2, _ := m.handleMousePress(tea.Mouse{X: 10, Y: 2})
+		m = m2.(model)
+	}
+
+	// First double-click sequence: two rapid clicks → should expand.
+	press() // click 1: sets lastClickAt
+	press() // click 2: within window → isDouble=true → stickyExpanded=true
+
+	if !m.stickyExpanded {
+		t.Fatal("double-click on sticky header should set stickyExpanded=true")
+	}
+
+	// Reset lastClickAt so the next press starts a fresh sequence (not a triple-click).
+	m.lastClickAt = time.Time{}
+
+	// Second double-click sequence: two more rapid clicks → should collapse.
+	press() // click 3: sets lastClickAt (not a double since time was reset)
+	press() // click 4: within window → isDouble=true → stickyExpanded=false
+
+	if m.stickyExpanded {
+		t.Fatal("second double-click on sticky header should reset stickyExpanded=false")
+	}
+
+	// A single click in the sticky zone should not start a text selection.
+	m.lastClickAt = time.Time{} // reset to avoid accidental double-click
+	press()
+	if m.selecting {
+		t.Fatal("click inside sticky header zone should not start a text selection")
+	}
+}
+
+func TestStickyExpandedResetsWhenPinnedItemChanges(t *testing.T) {
+	// This test exercises the cross-frame stickyPinnedIdx comparison by
+	// directly calling refreshViewport() after changing the viewport offset —
+	// the key invariant is that stickyExpanded is cleared whenever
+	// stickyPinnedIdx changes.
+
+	m := newModel(context.Background(), Config{
+		Backend: staticBackend{info: backend.Info{Mode: "code"}},
+		Width:   80,
+		Height:  30,
+	})
+	m.ready = true
+	m.layout()
+
+	// Build a conversation with two very long responses so both user bubbles
+	// can be scrolled above the viewport.
+	m.tr.Apply(events.NewUser("first question"))
+	var lines1 []string
+	for i := 0; i < 120; i++ {
+		lines1 = append(lines1, "agent turn 1 output line that is long enough to wrap on 80 columns")
+	}
+	m.tr.Apply(events.NewText(strings.Join(lines1, "\n")))
+	m.tr.Apply(events.NewDone())
+
+	m.tr.Apply(events.NewUser("second question"))
+	var lines2 []string
+	for i := 0; i < 120; i++ {
+		lines2 = append(lines2, "agent turn 2 output line that is long enough to wrap on 80 columns")
+	}
+	m.tr.Apply(events.NewText(strings.Join(lines2, "\n")))
+	m.tr.Streaming = true
+	m.refreshViewport()
+
+	if !m.vp.AtBottom() {
+		t.Skip("viewport not at bottom — content too short for this terminal height")
+	}
+
+	// At the bottom, user2 should be pinned.
+	if !strings.Contains(m.stickyUserMessage(), "second question") {
+		t.Skipf("sticky header does not show 'second question' at bottom (got %q)", m.stickyUserMessage())
+	}
+	if m.stickyPinnedIdx < 0 {
+		t.Skip("stickyPinnedIdx not set at bottom — skipping")
+	}
+	pinnedAtBottom := m.stickyPinnedIdx
+
+	// Fake a different pinned index as if a previous frame had already pinned
+	// user1. This directly tests the cross-frame comparison without depending on
+	// exact viewport geometry to produce a different scroll position.
+	differentIdx := pinnedAtBottom - 2
+	if differentIdx < 0 {
+		differentIdx = 0
+	}
+	if differentIdx == pinnedAtBottom {
+		t.Skip("not enough items to fake a different pinned index")
+	}
+	m.stickyPinnedIdx = differentIdx
+	m.stickyExpanded = true // simulate user having expanded the old pinned item
+
+	// refreshViewport() will compute the real current idx (pinnedAtBottom),
+	// detect it differs from differentIdx, and reset stickyExpanded.
+	m.refreshViewport()
+
+	if m.stickyExpanded {
+		t.Fatalf("stickyExpanded should reset to false when stickyPinnedIdx changes from %d to %d",
+			differentIdx, m.stickyPinnedIdx)
+	}
+	if m.stickyPinnedIdx != pinnedAtBottom {
+		t.Fatalf("stickyPinnedIdx should be restored to %d, got %d", pinnedAtBottom, m.stickyPinnedIdx)
+	}
+}

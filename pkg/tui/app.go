@@ -193,6 +193,11 @@ type model struct {
 	// stickyExpanded is true when the user has double-clicked the sticky
 	// user message header to expand it to its full content.
 	stickyExpanded bool
+	// stickyPinnedIdx is the item index of the user message that was pinned
+	// in the previous frame. Persisted across frames so that refreshViewport()
+	// can detect when the pinned item changes and reset stickyExpanded.
+	// -1 means no item was pinned last frame.
+	stickyPinnedIdx int
 
 	// overlays
 	sessions         sessionsState
@@ -298,19 +303,20 @@ func newModel(parent context.Context, cfg Config) model {
 	// Resumed sessions load history asynchronously in Init (historyLoadedMsg).
 
 	m := model{
-		ctx:        ctx,
-		cancel:     cancel,
-		backend:    cfg.Backend,
-		info:       info,
-		theme:      th,
-		tr:         tr,
-		ta:         ta,
-		spin:       sp,
-		width:      cfg.Width,
-		height:     cfg.Height,
-		historyIdx: -1,
-		workDir:    workspaceRoot(),
-		dualMode:   cfg.AltBackend != nil,
+		ctx:             ctx,
+		cancel:          cancel,
+		backend:         cfg.Backend,
+		info:            info,
+		theme:           th,
+		tr:              tr,
+		ta:              ta,
+		spin:            sp,
+		width:           cfg.Width,
+		height:          cfg.Height,
+		historyIdx:      -1,
+		workDir:         workspaceRoot(),
+		dualMode:        cfg.AltBackend != nil,
+		stickyPinnedIdx: -1,
 	}
 
 	// Initialize dual-backend slots.
@@ -2361,16 +2367,17 @@ func (m *model) refreshViewport() {
 	// If the height changed (sticky appeared/disappeared/resized), re-layout
 	// so the viewport shrinks/grows to keep the total frame within the terminal.
 	oldStickyH := m.stickyHeaderLines
-	oldStickyIdx := m.stickyUserItemIdx()
+	newIdx := m.stickyUserItemIdx()
 	sticky := m.stickyUserMessage()
 	if sticky != "" {
-		newIdx := m.stickyUserItemIdx()
-		if newIdx != oldStickyIdx {
+		if newIdx != m.stickyPinnedIdx {
 			// Pinned item changed (user scrolled to a different turn); reset expand.
 			m.stickyExpanded = false
 		}
+		m.stickyPinnedIdx = newIdx
 		m.stickyHeaderLines = strings.Count(m.renderStickyUserHeader(sticky, contentWidth(m.width), m.stickyExpanded), "\n") + 1
 	} else {
+		m.stickyPinnedIdx = -1
 		m.stickyHeaderLines = 0
 		m.stickyExpanded = false
 	}

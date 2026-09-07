@@ -211,7 +211,9 @@ EXECUTION RULES:
    repository discovery. Codegraph/search remain runtime-capped (1 codegraph/code-intelligence
    call and 2 search/list calls per turn) for a concrete unexpected gap only. Source reads are
    not capped. If a verify command failed this turn, investigate that failure — research caps
-   are lifted.
+   are lifted. If the current phase's outcome is a running surface, you MAY inspect the live
+   process/overlay/session (shell, docker, browser_navigate, run_drill) even when PLAN.md
+   already named the files. That is verification, not rediscovery.
 3. ALLOWED READS: (a) a file you are about to edit/create (read it once immediately before
    writing to get the exact current content; do not re-read a path already in this turn's
    context), (b) files the plan's 'details' explicitly instruct you to read as part of the

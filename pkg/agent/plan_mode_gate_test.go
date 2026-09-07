@@ -157,6 +157,9 @@ func TestPlanExecutionSystemContext_ForbidsReannouncement(t *testing.T) {
 	if !strings.Contains(ctx, "announce_completion") {
 		t.Fatal("execution context must tell the model to call announce_completion")
 	}
+	if !strings.Contains(ctx, "running surface") || !strings.Contains(ctx, "verification, not rediscovery") {
+		t.Fatal("execution context must allow live-surface inspect as verification, not rediscovery")
+	}
 }
 
 func TestPlanModeSystemContext_HardConstraintLanguage(t *testing.T) {

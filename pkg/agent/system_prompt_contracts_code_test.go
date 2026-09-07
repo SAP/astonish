@@ -166,6 +166,10 @@ func TestCodeSystemPromptContracts_InvestigationWorkPolicy(t *testing.T) {
 		"one ordered source of truth",
 		"git log",
 		"debug-regression",
+		"## Live Evidence",
+		"CloakBrowser",
+		"this turn's tool output",
+		"inspect-live-surface",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("code-mode Work Policy missing %q", want)
@@ -286,8 +290,8 @@ func TestCodeSystemPromptBuilder_MaximalSize(t *testing.T) {
 	// Code-mode prompt includes all base sections plus: project guidance,
 	// code-nav rules, codegraph-first, stop-exploring, PLAN.md, auth gates,
 	// MCP tools listing. Budget ceiling is higher than chat mode.
-	if len(prompt) > 18000 {
-		t.Errorf("code-mode maximal prompt too large: %d bytes (limit 18000)", len(prompt))
+	if len(prompt) > 20000 {
+		t.Errorf("code-mode maximal prompt too large: %d bytes (limit 20000)", len(prompt))
 	}
 	if len(prompt) < 6000 {
 		t.Errorf("code-mode maximal prompt suspiciously small: %d bytes (expected > 6000)", len(prompt))

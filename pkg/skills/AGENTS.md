@@ -13,7 +13,7 @@
 3. **Scoped cascade**: platform, org, and team definitions come through scoped stores; preserve cascade order and same-name overrides. Never leak a private/personal skill into shared scope.
 4. **ClawHub metadata is normalized before use** — trust the normalized shape, not raw metadata.
 5. Treat downloaded skill content as untrusted input: validate paths and metadata before installation, and never execute install-time content implicitly.
-6. Built-in `debug-regression` is code-mode investigation protocol (git archaeology, failing-test-first). Keep it in `BuiltinSkillsForCode`. See [`docs/architecture/code-agent-investigation.md`](../../docs/architecture/code-agent-investigation.md).
+6. Built-in `debug-regression` is code-mode investigation protocol (git archaeology, failing-test-first). Keep it in `BuiltinSkillsForCode`. Built-in `inspect-live-surface`, `verify-live-with-drill`, and `watch-long-running` are Studio **and** Code — live session/sandbox/browser proof. See [`docs/architecture/code-agent-investigation.md`](../../docs/architecture/code-agent-investigation.md).
 
 ## When editing
 - Adding a front-matter field? Extend `Skill`, update validation and serialization, and document the field.

@@ -419,11 +419,16 @@ func TestLazyCodeBackendForwardsLocalSkills(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The picker merges BuiltinSkillsForCode() (which includes the on-demand
-	// "slides" skill) with the filesystem skill, sorted case-insensitively.
-	// generative-ui is excluded from code-mode builtins.
-	if len(got) != 3 || got[0].Name != "debug-regression" || got[1].Name != "local" || got[2].Name != "slides" {
+	// The picker merges BuiltinSkillsForCode() with the filesystem skill,
+	// sorted case-insensitively. generative-ui is excluded from code-mode builtins.
+	want := []string{"debug-regression", "inspect-live-surface", "local", "slides", "verify-live-with-drill", "watch-long-running"}
+	if len(got) != len(want) {
 		t.Fatalf("forwarded skills = %+v", got)
+	}
+	for i, name := range want {
+		if got[i].Name != name {
+			t.Fatalf("forwarded skills = %+v", got)
+		}
 	}
 	var _ backend.LocalSkillsBackend = b
 }

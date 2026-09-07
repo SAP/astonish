@@ -210,20 +210,13 @@ func TestSystemPromptBuilder_SlimPrompt(t *testing.T) {
 		t.Error("expected guidance hint referencing memory_search")
 	}
 
-	// Verify prompt is reasonably compact (under 5500 chars ~ 1375 tokens).
-	// Budget includes the always-on Credential System hint (~210 chars) and
-	// the always-on Reports contract section (~600 chars). The Reports
-	// section is non-negotiable static content: the LLM cannot retrieve
-	// guidance it doesn't know exists, so the report two-step contract
-	// MUST live in the static prefix or it gets silently skipped.
-	// See pkg/api/chat_runner.go:detectAndEmitReportMarkers for the
-	// receiving end of that contract.
-	// Ceiling raised for the structural-navigation guidance (prefer
-	// code_definition/code_references over grep; don't re-read files), which
-	// cuts tool round-trips and context growth — a net latency win despite the
-	// small static cost. See docs/architecture/code-intelligence.md.
-	if len(prompt) > 6100 {
-		t.Errorf("prompt too large for slim design: %d chars (target < 6100)", len(prompt))
+	// Verify prompt is reasonably compact. Budget includes the always-on
+	// Credential System hint, Reports contract, and Live Evidence (claim-done
+	// + CloakBrowser-not-on-PATH). Live Evidence must stay in the static
+	// prefix: vector guidance does not retrieve on a `which chromium` probe.
+	// See pkg/agent/live_evidence.go and docs/architecture/code-agent-investigation.md.
+	if len(prompt) > 7400 {
+		t.Errorf("prompt too large for slim design: %d chars (target < 7400)", len(prompt))
 	}
 }
 

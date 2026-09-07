@@ -32,6 +32,24 @@ func BuiltinSkills() []Skill {
 			// code modes, so this skill should resolve and be discoverable in
 			// both. BuiltinSkillsForCode() will therefore include it.
 		},
+		{
+			Name:        "inspect-live-surface",
+			Description: "MUST skill_lookup when the user asks about a live session/sandbox/container/overlay, chromium / google-chrome / CloakBrowser, browser_navigate failed, CDP, or whether a capability is installed. Inspect the product launch path and the running process — do not treat which chromium as overlay failure.",
+			Content:     BuiltinInspectLiveSurface,
+			Source:      "builtin",
+		},
+		{
+			Name:        "verify-live-with-drill",
+			Description: "MUST skill_lookup when proving a running surface (sandbox, daemon, browser, CLI, Studio UI) or writing a plan phase with verify_kind=behavior. Prefer a drill over go test as the live harness.",
+			Content:     BuiltinVerifyLiveWithDrill,
+			Source:      "builtin",
+		},
+		{
+			Name:        "watch-long-running",
+			Description: "MUST skill_lookup before starting, watching, or reporting on a long rebuild, docker build, base-layer capture, dev server, or SSE wait. Starting the job is not done.",
+			Content:     BuiltinWatchLongRunning,
+			Source:      "builtin",
+		},
 	}
 }
 

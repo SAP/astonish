@@ -237,6 +237,12 @@ func (b *SystemPromptBuilder) Build() string {
 		sb.WriteString("- When asked to list available tools, call `search_tools(query=\"*\")` to get the verified complete inventory. Do not reconstruct the list from memory.\n")
 	}
 
+	// Always-on verification. Browser/process how-tos stay in vector guidance;
+	// this block is short so a PATH probe cannot be mistaken for a missing
+	// product capability. Code mode emits the same section from the code builder.
+	sb.WriteString("\n")
+	sb.WriteString(LiveEvidenceSection(false))
+
 	// 3b. Knowledge Context — teaches the model about injected knowledge
 	sb.WriteString("\n## Knowledge Context\n\n")
 	sb.WriteString("Your system prompt may include a `[Knowledge For This Task]` section at the end. ")

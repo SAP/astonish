@@ -6,6 +6,11 @@ import (
 	"google.golang.org/adk/tool/functiontool"
 )
 
+// BrowserNavigateDescription is the tool schema for browser_navigate.
+// CloakBrowser is not on PATH; agents must not treat `which chromium` as proof
+// the sandbox browser is missing.
+const BrowserNavigateDescription = "Navigate the browser to a URL. When sandbox is enabled, CloakBrowser (patched Chromium) runs inside the session container at /home/browser/.cloakbrowser/*/chrome — it is NOT the debian chromium package and is NOT on PATH. Do not use which chromium / google-chrome to check the browser; call this tool. Use http://localhost:<port> or http://127.0.0.1:<port> to reach services in the same container. Never use the container bridge IP."
+
 // GetBrowserTools creates all browser automation tools sharing a single
 // BrowserManager instance. The browser is launched lazily on first use.
 // Navigation to private/localhost IPs is blocked (SSRF protection).
@@ -29,10 +34,8 @@ func getBrowserToolsWithGuard(mgr *browser.Manager, guard *browser.NavigationGua
 	// --- Navigation ---
 
 	navigateTool, err := functiontool.New(functiontool.Config{
-		Name: "browser_navigate",
-		Description: "Navigate the browser to a URL. When sandbox is enabled, Chromium runs inside " +
-			"the session container (same network as shell tools) — use http://localhost:<port> or " +
-			"http://127.0.0.1:<port> to reach services there. Never use the container bridge IP.",
+		Name:        "browser_navigate",
+		Description: BrowserNavigateDescription,
 	}, safeBrowserFunc(BrowserNavigate(mgr, guard)))
 	if err != nil {
 		return nil, err

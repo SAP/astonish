@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/SAP/astonish/pkg/sandbox"
+	"github.com/SAP/astonish/pkg/store"
 )
 
 // CreateSession materialises a new sandbox container. Idempotent on SessionID:
@@ -97,6 +98,7 @@ func (db *DockerBackend) CreateSession(ctx context.Context, spec sandbox.Session
 		Labels:     spec.Labels,
 		CreatedAt:  time.Now().UTC(),
 	}
+	db.recordSession(spec, cname, templateID)
 	return sess, nil
 }
 
@@ -170,6 +172,9 @@ func (db *DockerBackend) DestroySession(ctx context.Context, sessionID string) e
 	upperDir := db.upperPath(sessionID)
 	if err := os.RemoveAll(upperDir); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("sandbox/docker: remove upper dir %q: %w", upperDir, err)
+	}
+	if db.cfg.Sessions != nil {
+		_ = db.cfg.Sessions.Remove(sessionID)
 	}
 	return nil
 }
@@ -474,6 +479,23 @@ func (db *DockerBackend) persistUpper(ctx context.Context, sessionID string) err
 	_, err := runDocker(ctx, db.cfg.ContainerRuntimePath,
 		"exec", cname, "/bin/sh", "-c", persistUpperScript())
 	return err
+}
+
+func (db *DockerBackend) recordSession(spec sandbox.SessionSpec, cname, templateID string) {
+	if db.cfg.Sessions == nil {
+		return
+	}
+	_ = db.cfg.Sessions.PutSession(&store.SandboxSession{
+		SessionID:     spec.SessionID,
+		ChatSessionID: spec.SessionID,
+		Backend:       string(sandbox.BackendKindDocker),
+		ContainerName: cname,
+		TemplateID:    templateID,
+		State:         store.SandboxSessionStateRunning,
+		CreatedAt:     time.Now().UTC(),
+		UpdatedAt:     time.Now().UTC(),
+		LastActiveAt:  time.Now().UTC(),
+	})
 }
 
 func (db *DockerBackend) recreateFromPersist(ctx context.Context, sessionID string) error {

@@ -56,13 +56,15 @@ command_line:
 }
 
 // WireBackendBrowserManager configures mgr so browser tools launch Chromium
-// inside a backend-managed session. This is used by the direct K8s backend,
-// where Browser Manager callbacks can route through Backend.ExecStreaming.
+// inside a backend-managed session. Used by K8s and Docker backends, where
+// Browser Manager callbacks route through Backend.ExecStreaming.
 func WireBackendBrowserManager(mgr *browser.Manager, backend Backend, sessReg *SessionRegistry, pool ToolNodePool, touchActivity func(sessionID string)) bool {
 	if mgr == nil || backend == nil {
 		return false
 	}
-	if backend.Kind() != BackendKindK8s {
+	switch backend.Kind() {
+	case BackendKindK8s, BackendKindDocker:
+	default:
 		return false
 	}
 

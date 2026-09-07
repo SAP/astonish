@@ -1010,22 +1010,20 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 				}
 			}
 
-			if kind == sandbox.BackendKindK8s {
+			if kind == sandbox.BackendKindK8s || kind == sandbox.BackendKindDocker {
 				if sandbox.WireBackendBrowserManager(browserMgr, b, sessRegistry, pool, sessRegistry.TouchActivity) {
 					api.SetVNCContainerDialFunc(browserMgr.ContainerDialFunc)
 
-					// Register callbacks for the PDF browser manager so PDF export
-					// uses the same backend-routed Chrome path as browser tools.
 					pdfResolve := newBackendPDFResolveFunc(b, sessRegistry)
 					api.SetPDFBrowserCallbacksForBackend(
-						string(sandbox.BackendKindK8s),
+						string(kind),
 						pdfResolve,
 						browserMgr.ContainerStartBrowserFunc,
 						browserMgr.ContainerDialFunc,
 					)
 
-					slog.Info("browser-in-sandbox enabled for K8s",
-						"component", "chat-factory")
+					slog.Info("browser-in-sandbox enabled",
+						"component", "chat-factory", "backend", string(kind))
 				}
 			}
 

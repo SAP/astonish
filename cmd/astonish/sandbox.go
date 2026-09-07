@@ -39,8 +39,12 @@ func handleSandboxCommand(args []string) error {
 	// Docker session containers do not need host overlay mounts or Incus
 	// sockets. Skip sudo for status/init; remaining Incus-era subcommands
 	// still escalate on Linux until they are rewritten.
-	if args[0] != "status" && args[0] != "init" && sandbox.NeedsEscalation() {
-		return sandbox.Escalate()
+	switch args[0] {
+	case "status", "init", "list", "ls", "create", "shell", "destroy", "rm", "prune":
+	default:
+		if sandbox.NeedsEscalation() {
+			return sandbox.Escalate()
+		}
 	}
 
 	switch args[0] {
@@ -342,167 +346,108 @@ func promptOptionalTools() sandbox.BaseTemplateOptions {
 
 // --- List ---
 
-func handleSandboxList() error {
-	platform := incus.DetectPlatform()
-	if platform == incus.PlatformUnsupported {
-		return fmt.Errorf("no container runtime available")
+func openDockerCLI() (*sboxdocker.DockerBackend, error) {
+	det := sboxdocker.DetectDocker("")
+	if !det.Available {
+		return nil, fmt.Errorf("docker is not available: %s\nInstall Docker and run 'astonish sandbox init'", det.Reason)
 	}
+	return sboxdocker.Open()
+}
 
-	client, err := incus.Connect(platform)
+func resolveDockerSession(ctx context.Context, b *sboxdocker.DockerBackend, identifier string) (*sandbox.Session, error) {
+	sessions, err := b.ListSessions(ctx, sandbox.SessionFilter{})
 	if err != nil {
-		return fmt.Errorf("failed to connect to Incus: %w", err)
+		return nil, err
 	}
+	for _, s := range sessions {
+		if s.SessionID == identifier || s.BackendRef == identifier {
+			return s, nil
+		}
+	}
+	var match *sandbox.Session
+	for _, s := range sessions {
+		if strings.HasPrefix(s.SessionID, identifier) || strings.HasPrefix(s.BackendRef, identifier) {
+			if match != nil {
+				return nil, fmt.Errorf("ambiguous session %q", identifier)
+			}
+			match = s
+		}
+	}
+	if match == nil {
+		return nil, fmt.Errorf("no container found for %q\nUse 'astonish sandbox list' to see active sessions", identifier)
+	}
+	return match, nil
+}
 
-	sessRegistry, err := sandbox.NewSessionRegistry()
+func handleSandboxList() error {
+	b, err := openDockerCLI()
 	if err != nil {
 		return err
 	}
-
-	// Auto-reap stale entries whose containers no longer exist.
-	// This self-heals after code paths that destroy containers without
-	// cleaning the registry (e.g., fleet session exit, node cleanup).
-	if reaped := sessRegistry.Reap(client); reaped > 0 {
-		fmt.Printf("(cleaned up %d stale registry entries)\n\n", reaped)
+	sessions, err := b.ListSessions(context.Background(), sandbox.SessionFilter{})
+	if err != nil {
+		return err
 	}
-
-	entries := sessRegistry.List()
-	if len(entries) == 0 {
+	if len(sessions) == 0 {
 		fmt.Println("No active session containers.")
 		return nil
 	}
 
-	fmt.Printf("%-20s %-38s %-12s %-10s %-20s\n", "CONTAINER", "SESSION", "TEMPLATE", "STATUS", "CREATED")
-	fmt.Printf("%-20s %-38s %-12s %-10s %-20s\n", strings.Repeat("-", 20), strings.Repeat("-", 38), strings.Repeat("-", 12), strings.Repeat("-", 10), strings.Repeat("-", 20))
-
-	registeredNames := make(map[string]bool)
-	for _, entry := range entries {
-		registeredNames[entry.ContainerName] = true
-
-		var status string
-		if client.IsRunning(entry.ContainerName) {
-			status = "running"
-		} else if client.InstanceExists(entry.ContainerName) {
-			status = "stopped"
-		} else {
-			status = "missing"
-		}
-
-		fmt.Printf("%-20s %-38s %-12s %-10s %-20s\n",
-			entry.ContainerName,
-			entry.SessionID,
-			entry.TemplateName,
-			status,
-			entry.CreatedAt.Format("2006-01-02 15:04:05"),
-		)
-		if entry.Pinned {
-			fmt.Printf("  (pinned — exempt from automatic cleanup)\n")
-		}
+	fmt.Printf("%-28s %-38s %-12s %-10s\n", "CONTAINER", "SESSION", "TEMPLATE", "STATUS")
+	fmt.Printf("%-28s %-38s %-12s %-10s\n", strings.Repeat("-", 28), strings.Repeat("-", 38), strings.Repeat("-", 12), strings.Repeat("-", 10))
+	for _, s := range sessions {
+		fmt.Printf("%-28s %-38s %-12s %-10s\n", s.BackendRef, s.SessionID, s.TemplateID, s.State)
 	}
-
-	// Check for unregistered session containers (containers that exist in
-	// Incus but have no registry entry). These are orphans from crashes,
-	// failed registrations, or Incus being down during cleanup.
-	sessionContainers, err := client.ListSessionContainers()
-	if err == nil {
-		var orphans []string
-		for _, inst := range sessionContainers {
-			if !registeredNames[inst.Name] {
-				orphans = append(orphans, inst.Name)
-			}
-		}
-		if len(orphans) > 0 {
-			fmt.Printf("\nWarning: %d unregistered container(s) found:\n", len(orphans))
-			for _, name := range orphans {
-				fmt.Printf("  %s\n", name)
-			}
-			fmt.Println("Run 'astonish sandbox prune' to clean up.")
-		}
-	}
-
 	return nil
 }
 
 // --- Create ---
 
 func handleSandboxCreate(templateName, label string) error {
-	client, err := connectOrFail()
+	b, err := openDockerCLI()
 	if err != nil {
 		return err
 	}
+	ctx := context.Background()
 
-	sessRegistry, err := sandbox.NewSessionRegistry()
-	if err != nil {
-		return err
-	}
-
-	tplRegistry, err := sandbox.NewTemplateRegistry()
-	if err != nil {
-		return err
-	}
-
-	// Verify template exists
-	if !tplRegistry.Exists(templateName) {
-		return fmt.Errorf("template %q not found\nUse 'astonish sandbox template list' to see available templates", templateName)
-	}
-
-	// Generate a session ID. If --name is provided, use it directly so
-	// it is easy to identify in `sandbox list`. Otherwise generate one
-	// from the template name and a timestamp.
-	// The session ID must produce valid Incus container names.
-	// SessionContainerName sanitizes the ID (replacing invalid chars with
-	// hyphens) and truncates to 20 chars, so any string is safe.
-	var sessionID string
-	if label != "" {
-		sessionID = label
-		// Check for duplicate
-		if entry := sessRegistry.Get(sessionID); entry != nil {
-			return fmt.Errorf("a container with name %q already exists\nUse 'astonish sandbox shell %s' to open a shell, or 'astonish sandbox destroy %s' to remove it",
-				label, entry.ContainerName, entry.ContainerName)
-		}
-	} else {
+	sessionID := label
+	if sessionID == "" {
 		sessionID = fmt.Sprintf("%s-%d", templateName, time.Now().UnixNano())
 	}
 
-	// Use default limits
-	defaultCfg := sandbox.DefaultSandboxConfig()
-	limits := sandbox.EffectiveLimits(&defaultCfg)
+	chain := []string{templateName}
+	if templateName == "" {
+		chain = []string{sandbox.BaseTemplateID}
+	}
 
 	fmt.Printf("Creating sandbox from template %q...\n", templateName)
-	containerName, err := sandbox.EnsureSessionContainer(client, sessRegistry, tplRegistry, sessionID, templateName, &limits)
+	sess, err := b.CreateSession(ctx, sandbox.SessionSpec{
+		SessionID:  sessionID,
+		Type:       sandbox.SessionTypeChat,
+		TemplateID: templateName,
+		LayerChain: chain,
+	})
 	if err != nil {
 		return fmt.Errorf("failed to create container: %w", err)
 	}
-
-	// Pin the container so automatic orphan cleanup doesn't destroy it.
-	// Manually created containers have no corresponding session in the
-	// persistent session store, so without pinning they'd be pruned as
-	// orphans on the next cleanup cycle or daemon restart.
-	if err := sessRegistry.SetPinned(containerName, true); err != nil {
-		fmt.Printf("Warning: failed to pin container: %v\n", err)
+	if err := b.WaitForSessionReady(ctx, sess.SessionID); err != nil {
+		return fmt.Errorf("sandbox not ready: %w", err)
 	}
+	fmt.Printf("Container %q ready (session: %s)\n", sess.BackendRef, sess.SessionID)
+	fmt.Printf("To re-enter later:  astonish sandbox shell %s\n", sess.SessionID)
+	fmt.Printf("To destroy:         astonish sandbox destroy %s\n", sess.SessionID)
+	return dockerShell(sess.BackendRef)
+}
 
-	fmt.Printf("Container %q ready (session: %s)\n", containerName, sessionID)
-
-	// Open interactive shell
-	var cmd *exec.Cmd
-	if incus.GetActivePlatform() == incus.PlatformDockerIncus {
-		cmd = incus.ExecInDockerHostInteractive([]string{
-			"incus", "exec", containerName, "--", "bash", "-l",
-		})
-	} else {
-		cmd = exec.Command("incus", "exec", containerName, "--", "bash", "-l")
-	}
+func dockerShell(containerName string) error {
+	fmt.Printf("Entering container %s. Type 'exit' to leave.\n", containerName)
+	cmd := exec.Command("docker", "exec", "-it", containerName, "/usr/local/bin/astonish-shell", "bash", "-l")
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-
-	fmt.Printf("Entering container. Type 'exit' to leave.\n")
-	fmt.Printf("To re-enter later:  astonish sandbox shell %s\n", containerName)
-	fmt.Printf("To destroy:         astonish sandbox destroy %s\n", containerName)
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("shell session ended with error: %w", err)
 	}
-
 	return nil
 }
 
@@ -715,106 +660,44 @@ func handleSandboxRefresh() error {
 // --- Destroy ---
 
 func handleSandboxDestroy(identifier string) error {
-	client, err := connectOrFail()
+	b, err := openDockerCLI()
 	if err != nil {
 		return err
 	}
-
-	registry, err := sandbox.NewSessionRegistry()
+	ctx := context.Background()
+	sess, err := resolveDockerSession(ctx, b, identifier)
 	if err != nil {
 		return err
 	}
-
-	// Resolve the identifier (session ID, container name, or prefix)
-	sessionID, found := registry.ResolveSessionID(identifier)
-	if !found {
-		return fmt.Errorf("no container found for %q\nUse 'astonish sandbox list' to see active containers", identifier)
-	}
-
-	entry := registry.Get(sessionID)
-	containerName := ""
-	if entry != nil {
-		containerName = entry.ContainerName
-	}
-
-	if err := sandbox.DestroyForSession(client, registry, sessionID); err != nil {
+	if err := b.DestroySession(ctx, sess.SessionID); err != nil {
 		return err
 	}
-
-	if containerName != "" {
-		fmt.Printf("Destroyed container %s (session %s)\n", containerName, sessionID[:min(8, len(sessionID))])
-	} else {
-		fmt.Printf("Destroyed session %s\n", sessionID[:min(8, len(sessionID))])
-	}
-
+	fmt.Printf("Destroyed container %s (session %s)\n", sess.BackendRef, sess.SessionID)
 	return nil
 }
 
 // --- Shell (session) ---
 
 func handleSandboxShell(sessionID string) error {
-	client, err := connectOrFail()
+	b, err := openDockerCLI()
 	if err != nil {
 		return err
 	}
-
-	registry, err := sandbox.NewSessionRegistry()
+	ctx := context.Background()
+	sess, err := resolveDockerSession(ctx, b, sessionID)
 	if err != nil {
 		return err
 	}
-
-	// Look up the container — accept session ID, container name, or prefix
-	containerName := registry.GetContainerName(sessionID)
-	if containerName == "" {
-		for _, entry := range registry.List() {
-			// Match by container name
-			if entry.ContainerName == sessionID {
-				containerName = entry.ContainerName
-				break
-			}
-			// Match by session ID prefix
-			if strings.HasPrefix(entry.SessionID, sessionID) {
-				containerName = entry.ContainerName
-				break
-			}
+	if sess.State != sandbox.SessionStateRunning {
+		fmt.Printf("Starting session %s...\n", sess.SessionID)
+		if err := b.StartSession(ctx, sess.SessionID); err != nil {
+			return err
+		}
+		if err := b.WaitForSessionReady(ctx, sess.SessionID); err != nil {
+			return err
 		}
 	}
-
-	if containerName == "" {
-		return fmt.Errorf("no container found for session %q\nUse 'astonish sandbox list' to see active sessions", sessionID)
-	}
-
-	if !client.InstanceExists(containerName) {
-		return fmt.Errorf("container %q no longer exists (stale registry entry)", containerName)
-	}
-
-	if !client.IsRunning(containerName) {
-		fmt.Printf("Starting container %q...\n", containerName)
-		if err := client.StartInstance(containerName); err != nil {
-			return fmt.Errorf("failed to start container: %w", err)
-		}
-	}
-
-	// Use the incus CLI for interactive shell (it handles PTY properly).
-	// On Docker+Incus, chain through docker exec to reach the Incus daemon.
-	var cmd *exec.Cmd
-	if incus.GetActivePlatform() == incus.PlatformDockerIncus {
-		cmd = incus.ExecInDockerHostInteractive([]string{
-			"incus", "exec", containerName, "--", "bash", "-l",
-		})
-	} else {
-		cmd = exec.Command("incus", "exec", containerName, "--", "bash", "-l")
-	}
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	fmt.Printf("Entering session container %q. Type 'exit' to leave.\n", containerName)
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("shell session ended with error: %w", err)
-	}
-
-	return nil
+	return dockerShell(sess.BackendRef)
 }
 
 // --- Prune ---
@@ -845,7 +728,7 @@ func handleSandboxPrune() error {
 
 	kind := sandbox.BackendKind(appCfg.Sandbox.BackendKind())
 	switch kind {
-	case sandbox.BackendKindK8s:
+	case sandbox.BackendKindK8s, sandbox.BackendKindDocker:
 		b, cleanup, bErr := sandbox.BackendFromAppConfig(appCfg)
 		if bErr != nil {
 			return fmt.Errorf("backend init: %w", bErr)

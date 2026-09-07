@@ -58,7 +58,7 @@ func TestStartBackendBrowserReportsStderrAndExitCode(t *testing.T) {
 	}
 }
 
-func TestWireBackendBrowserManager_K8sOnly(t *testing.T) {
+func TestWireBackendBrowserManager_K8sAndDocker(t *testing.T) {
 	mgr := browser.NewManager(browser.DefaultConfig())
 	reg := &SessionRegistry{}
 
@@ -73,8 +73,13 @@ func TestWireBackendBrowserManager_K8sOnly(t *testing.T) {
 	}
 
 	mgr = browser.NewManager(browser.DefaultConfig())
+	if !WireBackendBrowserManager(mgr, &kindOnlyBackend{kind: BackendKindDocker}, reg, nil, nil) {
+		t.Fatal("WireBackendBrowserManager returned false for Docker backend")
+	}
+
+	mgr = browser.NewManager(browser.DefaultConfig())
 	if WireBackendBrowserManager(mgr, &kindOnlyBackend{kind: BackendKindIncus}, reg, nil, nil) {
-		t.Fatal("WireBackendBrowserManager should not wire non-K8s backend")
+		t.Fatal("WireBackendBrowserManager should not wire Incus backend")
 	}
 }
 

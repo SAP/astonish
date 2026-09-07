@@ -607,7 +607,9 @@ func kasmPasswdCmd(distro LinuxDistro) []string {
 // Success is "chrome exists on disk", not "python exited 0". ensure_binary()
 // downloads then prints the path; on Apple Silicon the process may still
 // SIGSEGV at interpreter shutdown (exit 139) after a successful extract.
-// The chrome path in that failure is stdout, not a launched browser.
+// GitHub 504s on the arm64 tarball are retried, and a successful extract is
+// cached on the layers volume (outside the overlay upper) so the next rebuild
+// does not hit the network.
 func cloakBrowserEnsureBinaryCmd(distro LinuxDistro) []string {
 	download := `python3 -c "import cloakbrowser; print(cloakbrowser.ensure_binary())"`
 	if distro != DistroDebianBookworm {
@@ -617,17 +619,81 @@ func cloakBrowserEnsureBinaryCmd(distro LinuxDistro) []string {
 export CLOAKBROWSER_AUTO_UPDATE=false
 export HOME=/home/browser
 ulimit -c 0 2>/dev/null || true
-%s || true
-chrome=""
-for f in /home/browser/.cloakbrowser/*/chrome /home/browser/.cloakbrowser/*/*/chrome; do
-  if [ -f "$f" ]; then chrome=$f; break; fi
+CACHE=""
+if [ -d /mnt/astonish-layers ]; then
+  CACHE=/mnt/astonish-layers/.cache/cloakbrowser
+  mkdir -p "$CACHE"
+fi
+find_chrome() {
+  chrome=""
+  for f in /home/browser/.cloakbrowser/*/chrome /home/browser/.cloakbrowser/*/*/chrome; do
+    if [ -f "$f" ]; then chrome=$f; break; fi
+  done
+  echo "$chrome"
+}
+if [ -n "$CACHE" ]; then
+  for f in "$CACHE"/chromium-*/chrome; do
+    if [ -f "$f" ]; then
+      echo "restoring cloakbrowser from layers cache"
+      mkdir -p /home/browser/.cloakbrowser
+      cp -a "$CACHE"/. /home/browser/.cloakbrowser/
+      break
+    fi
+  done
+fi
+i=0
+while [ "$i" -lt 6 ]; do
+  %s || true
+  chrome=$(find_chrome)
+  if [ -n "$chrome" ]; then break; fi
+  i=$((i + 1))
+  echo "cloakbrowser download attempt $i/6 failed, retrying..." >&2
+  sleep $((15 * i))
 done
+chrome=$(find_chrome)
+if [ -z "$chrome" ] && command -v curl >/dev/null 2>&1; then
+  echo "cloakbrowser python download failed; trying curl with resume" >&2
+  python3 - <<'PY'
+from cloakbrowser.config import get_archive_name, get_binary_dir, get_binary_path, get_download_url, get_fallback_download_url
+open("/tmp/cb.url", "w").write(get_download_url() + "\n")
+open("/tmp/cb.url2", "w").write(get_fallback_download_url() + "\n")
+open("/tmp/cb.dir", "w").write(str(get_binary_dir()) + "\n")
+open("/tmp/cb.path", "w").write(str(get_binary_path()) + "\n")
+open("/tmp/cb.archive", "w").write(get_archive_name() + "\n")
+PY
+  url=$(cat /tmp/cb.url)
+  url2=$(cat /tmp/cb.url2)
+  bindir=$(cat /tmp/cb.dir)
+  binpath=$(cat /tmp/cb.path)
+  archive=$(cat /tmp/cb.archive)
+  tarball=/tmp/$archive
+  if [ -n "$CACHE" ]; then tarball=$CACHE/$archive; fi
+  curl -fL --retry 20 --retry-all-errors --retry-delay 5 --connect-timeout 30 --max-time 600 -C - -o "$tarball" "$url" \
+    || curl -fL --retry 20 --retry-all-errors --retry-delay 5 --connect-timeout 30 --max-time 600 -C - -o "$tarball" "$url2" \
+    || true
+  if [ -s "$tarball" ]; then
+    mkdir -p "$bindir"
+    tar -xzf "$tarball" -C "$bindir"
+    set -- "$bindir"/*
+    if [ $# -eq 1 ] && [ -d "$1" ]; then
+      mv "$1"/* "$bindir"/ 2>/dev/null || true
+      rmdir "$1" 2>/dev/null || true
+    fi
+    chmod +x "$binpath" 2>/dev/null || true
+  fi
+  %s || true
+fi
+chrome=$(find_chrome)
 if [ -n "$chrome" ]; then
+  if [ -n "$CACHE" ]; then
+    mkdir -p "$CACHE"
+    cp -a /home/browser/.cloakbrowser/. "$CACHE"/
+  fi
   echo "cloakbrowser chrome binary is present: $chrome"
   exit 0
 fi
 echo "cloakbrowser ensure_binary did not leave a chrome binary under /home/browser/.cloakbrowser" >&2
-exit 1`, download)
+exit 1`, download, download)
 	return []string{"sh", "-c", script}
 }
 

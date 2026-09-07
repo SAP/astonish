@@ -688,6 +688,15 @@ func TestCloakBrowserEnsureBinaryCmd_SucceedsWhenChromeExists(t *testing.T) {
 		if !strings.Contains(flat, "CLOAKBROWSER_AUTO_UPDATE=false") {
 			t.Errorf("%s: expected auto-update disabled during template build", distro)
 		}
+		if !strings.Contains(flat, ".cache/cloakbrowser") {
+			t.Errorf("%s: expected persistent layers cache for cloakbrowser", distro)
+		}
+		if !strings.Contains(flat, "curl -fL --retry") {
+			t.Errorf("%s: expected curl resume/retry fallback after GitHub 504", distro)
+		}
+		if !strings.Contains(flat, "download attempt") {
+			t.Errorf("%s: expected ensure_binary retry loop", distro)
+		}
 	}
 	bookworm := strings.Join(cloakBrowserEnsureBinaryCmd(DistroDebianBookworm), " ")
 	if strings.Contains(bookworm, "runuser") {

@@ -185,6 +185,19 @@ type model struct {
 	// GotoBottom(), allowing the user to read earlier content. Cleared when
 	// the user scrolls back to the bottom or a new turn starts.
 	userScrolledUp bool
+	// stickyHeaderLines is the number of rendered lines the sticky user
+	// message header occupies in the current frame (0 when not shown).
+	// Updated by refreshViewport(); used by layout() to shrink the viewport
+	// and by viewportTopY() to offset mouse coordinate mapping.
+	stickyHeaderLines int
+	// stickyExpanded is true when the user has double-clicked the sticky
+	// user message header to expand it to its full content.
+	stickyExpanded bool
+	// stickyPinnedIdx is the item index of the user message that was pinned
+	// in the previous frame. Persisted across frames so that refreshViewport()
+	// can detect when the pinned item changes and reset stickyExpanded.
+	// -1 means no item was pinned last frame.
+	stickyPinnedIdx int
 
 	// overlays
 	sessions         sessionsState
@@ -290,19 +303,20 @@ func newModel(parent context.Context, cfg Config) model {
 	// Resumed sessions load history asynchronously in Init (historyLoadedMsg).
 
 	m := model{
-		ctx:        ctx,
-		cancel:     cancel,
-		backend:    cfg.Backend,
-		info:       info,
-		theme:      th,
-		tr:         tr,
-		ta:         ta,
-		spin:       sp,
-		width:      cfg.Width,
-		height:     cfg.Height,
-		historyIdx: -1,
-		workDir:    workspaceRoot(),
-		dualMode:   cfg.AltBackend != nil,
+		ctx:             ctx,
+		cancel:          cancel,
+		backend:         cfg.Backend,
+		info:            info,
+		theme:           th,
+		tr:              tr,
+		ta:              ta,
+		spin:            sp,
+		width:           cfg.Width,
+		height:          cfg.Height,
+		historyIdx:      -1,
+		workDir:         workspaceRoot(),
+		dualMode:        cfg.AltBackend != nil,
+		stickyPinnedIdx: -1,
 	}
 
 	// Initialize dual-backend slots.
@@ -2225,7 +2239,7 @@ func (m *model) layout() {
 	taH := m.composerTextHeight()
 	composerH := taH + 2 // rounded border top/bottom
 	popupH := m.completionPopupHeight()
-	chrome := headerH + statusH + composerH + popupH + metaH + hintsH + seps
+	chrome := headerH + statusH + composerH + popupH + metaH + hintsH + seps + m.stickyHeaderLines
 	vh := screenH - chrome
 	if vh < 5 {
 		vh = 5
@@ -2348,6 +2362,27 @@ func (m *model) refreshViewport() {
 		m.vp.GotoBottom()
 	} else if m.tr.Streaming && !m.userScrolledUp {
 		m.vp.GotoBottom()
+	}
+	// Recompute sticky header height after scroll position is finalized.
+	// If the height changed (sticky appeared/disappeared/resized), re-layout
+	// so the viewport shrinks/grows to keep the total frame within the terminal.
+	oldStickyH := m.stickyHeaderLines
+	newIdx := m.stickyUserItemIdx()
+	sticky := m.stickyUserMessage()
+	if sticky != "" {
+		if newIdx != m.stickyPinnedIdx {
+			// Pinned item changed (user scrolled to a different turn); reset expand.
+			m.stickyExpanded = false
+		}
+		m.stickyPinnedIdx = newIdx
+		m.stickyHeaderLines = strings.Count(m.renderStickyUserHeader(sticky, contentWidth(m.width), m.stickyExpanded), "\n") + 1
+	} else {
+		m.stickyPinnedIdx = -1
+		m.stickyHeaderLines = 0
+		m.stickyExpanded = false
+	}
+	if m.stickyHeaderLines != oldStickyH {
+		m.layout()
 	}
 }
 
@@ -2512,8 +2547,9 @@ func footerWorkDirText(path, branch string) string {
 
 // viewportTopY is the screen row where the transcript viewport starts.
 func (m model) viewportTopY() int {
-	// The transcript viewport starts after the one-line header and separator.
-	return 2
+	// The transcript viewport starts after the one-line header and separator,
+	// plus any sticky user-message header rows currently shown above it.
+	return 2 + m.stickyHeaderLines
 }
 
 func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
@@ -2557,6 +2593,41 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleMousePress(msg tea.Mouse) (tea.Model, tea.Cmd) {
+	// Double-click detection (used both for sticky header and transcript items).
+	now := time.Now()
+	isDouble := now.Sub(m.lastClickAt) < doubleClickWindowMS*time.Millisecond &&
+		abs(msg.Y-m.lastClickY) <= 1 &&
+		abs(msg.X-m.lastClickX) <= 2
+	m.lastClickAt = now
+	m.lastClickY = msg.Y
+	m.lastClickX = msg.X
+	m.clickIsDouble = isDouble
+
+	// If the click is in the sticky header zone (rows 2..2+stickyHeaderLines-1),
+	// handle double-click to expand/collapse right on press.
+	if m.stickyHeaderLines > 0 {
+		stickyTop := 2    // after header(1) + sep(1)
+		stickyBot := stickyTop + m.stickyHeaderLines
+		if msg.Y >= stickyTop && msg.Y < stickyBot {
+			if isDouble {
+				m.stickyExpanded = !m.stickyExpanded
+				// Collapsed: reset to false so layout returns to normal size.
+				oldStickyH := m.stickyHeaderLines
+				sticky := m.stickyUserMessage()
+				if sticky != "" {
+					m.stickyHeaderLines = strings.Count(m.renderStickyUserHeader(sticky, contentWidth(m.width), m.stickyExpanded), "\n") + 1
+				} else {
+					m.stickyHeaderLines = 0
+				}
+				if m.stickyHeaderLines != oldStickyH {
+					m.layout()
+				}
+			}
+			m.selecting = false
+			return m, nil
+		}
+	}
+
 	p, ok := m.selectionPointForMouse(msg)
 	if !ok {
 		m.selecting = false
@@ -2566,16 +2637,6 @@ func (m model) handleMousePress(msg tea.Mouse) (tea.Model, tea.Cmd) {
 	m.selectionMoved = false
 	m.selectionStart = p
 	m.selectionEnd = p
-
-	// Double-click detection. The action itself is handled on release, so a
-	// click can still become a drag selection without triggering expansion.
-	now := time.Now()
-	m.clickIsDouble = now.Sub(m.lastClickAt) < doubleClickWindowMS*time.Millisecond &&
-		abs(msg.Y-m.lastClickY) <= 1 &&
-		abs(msg.X-m.lastClickX) <= 2
-	m.lastClickAt = now
-	m.lastClickY = msg.Y
-	m.lastClickX = msg.X
 	return m, nil
 }
 
@@ -3444,6 +3505,115 @@ func codeGutterContentSpan(_ int, plain string) [2]int {
 // message. The interior stays black, not filled gray. Long messages remain
 // height-capped unless expanded; the expand/collapse cue is embedded in the
 // bottom border near the bottom-right.
+// stickyUserMessage returns the content and item-index of the user message
+// that should be shown as a sticky header, or ("", -1) if no pinning is needed.
+// The pinned message is the last ItemUser whose hit region ends at or before
+// the viewport's current top line (i.e., the entire user bubble is above the
+// visible area).
+func (m model) stickyUserMessage() string {
+	if m.tr == nil || len(m.hitRegions) == 0 {
+		return ""
+	}
+	topLine := m.vp.YOffset()
+	if topLine <= 0 {
+		return ""
+	}
+	result := ""
+	for _, r := range m.hitRegions {
+		if r.kind != events.ItemUser {
+			continue
+		}
+		// The user bubble must be entirely above the viewport top.
+		if r.end <= topLine {
+			if r.itemIdx >= 0 && r.itemIdx < len(m.tr.Items) {
+				result = m.tr.Items[r.itemIdx].Content
+			}
+		}
+	}
+	return result
+}
+
+// stickyUserItemIdx returns the item index of the currently pinned user
+// message, or -1 if none is pinned. Used to detect when the pinned item
+// changes (so stickyExpanded can be reset).
+func (m model) stickyUserItemIdx() int {
+	if m.tr == nil || len(m.hitRegions) == 0 {
+		return -1
+	}
+	topLine := m.vp.YOffset()
+	if topLine <= 0 {
+		return -1
+	}
+	result := -1
+	for _, r := range m.hitRegions {
+		if r.kind != events.ItemUser {
+			continue
+		}
+		if r.end <= topLine {
+			result = r.itemIdx
+		}
+	}
+	return result
+}
+
+// renderStickyUserHeader renders a compact user message header for display as
+// a pinned strip above the viewport. When expanded is false it shows a single
+// truncated content line; when expanded it shows the full user bubble (using
+// renderUserBubble with the expanded flag set). It uses the same bronze-border
+// styling as the inline user bubble.
+func (m model) renderStickyUserHeader(content string, width int, expanded bool) string {
+	if expanded {
+		// Show the full user bubble in expanded form, reusing renderUserBubble.
+		return m.renderUserBubble(content, true, width)
+	}
+
+	if width < 10 {
+		width = 10
+	}
+	// inner = width - border(2) - padding(4)
+	inner := width - 6
+	if inner < 4 {
+		inner = 4
+	}
+
+	// Take only the first logical line of the content, then truncate to inner.
+	line := content
+	if idx := strings.IndexByte(line, '\n'); idx >= 0 {
+		line = line[:idx]
+	}
+	line = strings.TrimSpace(line)
+	if lipgloss.Width(line) > inner {
+		line = truncateToWidth(line, inner)
+	}
+	// Right-pad to fill inner width.
+	pad := inner - lipgloss.Width(line)
+	if pad < 0 {
+		pad = 0
+	}
+
+	border := m.theme.UserBorder
+	text := m.theme.Text
+	bg := m.theme.Background
+
+	// Bottom border hint showing that double-click expands.
+	hint := " double-click to expand "
+	if lipgloss.Width(hint) > width-8 {
+		hint = ""
+	}
+
+	var b strings.Builder
+	b.WriteString(border.Render("┌" + strings.Repeat("─", width-2) + "┐"))
+	b.WriteByte('\n')
+	b.WriteString(border.Render("│"))
+	b.WriteString(bg.Render("  "))
+	b.WriteString(text.Render(line))
+	b.WriteString(bg.Render(strings.Repeat(" ", pad+2)))
+	b.WriteString(border.Render("│"))
+	b.WriteByte('\n')
+	b.WriteString(m.renderUserBubbleBottomBorder(width, hint, border, bg))
+	return b.String()
+}
+
 func (m model) renderUserBubble(content string, expanded bool, width int) string {
 	content = strings.TrimSpace(content)
 	if content == "" {
@@ -3576,6 +3746,24 @@ func (m model) viewContent() string {
 		m.renderHints(),
 	)
 
+	// If a sticky user header is active, insert it between the separator and
+	// the viewport so the user always sees which question the current response
+	// is answering, even when the original user bubble has scrolled out of view.
+	if stickyContent := m.stickyUserMessage(); stickyContent != "" && m.stickyHeaderLines > 0 {
+		stickyBlock := m.paintTranscriptBlock(padBlock(m.renderStickyUserHeader(stickyContent, contentWidth(m.width), m.stickyExpanded)))
+		main = lipgloss.JoinVertical(lipgloss.Left,
+			m.renderHeader(),
+			sep,
+			stickyBlock,
+			m.vp.View(),
+			sep,
+			m.renderLiveStatus(),
+			composerBlock,
+			m.renderFooterMeta(),
+			m.renderHints(),
+		)
+	}
+
 	// Overlays: sessions / model picker or approval card on top of the main chrome.
 	if m.fileViewer.open {
 		m.layoutFileViewer()
@@ -3622,12 +3810,16 @@ func (m model) viewContent() string {
 		if it != nil && it.ApprovalKind == "plan" {
 			// The plan card itself owns the controls; keep the transcript visible
 			// and suppress the normal composer while it is pending.
-			return m.paintBackground(lipgloss.JoinVertical(lipgloss.Left,
+			planParts := []string{
 				m.renderHeader(),
 				sep,
-				m.vp.View(),
-				m.renderHints(),
-			))
+			}
+			if stickyContent := m.stickyUserMessage(); stickyContent != "" && m.stickyHeaderLines > 0 {
+				stickyBlock := m.paintTranscriptBlock(padBlock(m.renderStickyUserHeader(stickyContent, contentWidth(m.width), m.stickyExpanded)))
+				planParts = append(planParts, stickyBlock)
+			}
+			planParts = append(planParts, m.vp.View(), m.renderHints())
+			return m.paintBackground(lipgloss.JoinVertical(lipgloss.Left, planParts...))
 		}
 		// Non-plan approvals keep the existing overlay behavior.
 		overlay := m.renderApprovalOverlay()
@@ -4410,7 +4602,46 @@ func (m model) renderDelegationDetailContent(task events.DelegationTaskState, wi
 
 	var b strings.Builder
 
-	// Task info header.
+	// Description prompt box — rendered in the same UserBubble-style bordered box
+	// as user messages on the main thread, so the sub-task view matches the main thread
+	// visual language: the task description is "what was asked of this sub-agent".
+	if task.Description != "" {
+		boxWidth := bodyWidth
+		if boxWidth < 18 {
+			boxWidth = 18
+		}
+		inner := boxWidth - 6 // left/right border + two-space horizontal padding
+		if inner < 8 {
+			inner = 8
+		}
+		border := th.UserBorder
+		text := th.Text
+		bg := th.Background
+
+		b.WriteString(border.Render("┌" + strings.Repeat("─", boxWidth-2) + "┐"))
+		for _, line := range strings.Split(strings.TrimRight(wrapPlain(task.Description, inner), "\n"), "\n") {
+			b.WriteByte('\n')
+			lineW := lipgloss.Width(line)
+			if lineW > inner {
+				line = truncateToWidth(line, inner)
+				lineW = lipgloss.Width(line)
+			}
+			pad := inner - lineW
+			if pad < 0 {
+				pad = 0
+			}
+			b.WriteString(border.Render("│"))
+			b.WriteString(bg.Render("  "))
+			b.WriteString(text.Render(line))
+			b.WriteString(bg.Render(strings.Repeat(" ", pad+2)))
+			b.WriteString(border.Render("│"))
+		}
+		b.WriteByte('\n')
+		b.WriteString(border.Render("└" + strings.Repeat("─", boxWidth-2) + "┘"))
+		b.WriteString("\n\n")
+	}
+
+	// Status line: status icon, task name, status label, elapsed time.
 	var statusIcon string
 	switch task.Status {
 	case "complete":
@@ -4449,43 +4680,62 @@ func (m model) renderDelegationDetailContent(task events.DelegationTaskState, wi
 	} else if task.Status == "retrying" && task.Error != "" {
 		b.WriteString("  " + th.Muted.Render("Retry reason: "+task.Error) + "\n")
 	}
-
-	if task.Description != "" {
-		b.WriteString("  " + th.Muted.Render(task.Description) + "\n")
-	}
 	b.WriteString("\n")
 
-	// Activity log.
+	// Activity log — rendered in the same tool-fold format as the main thread's
+	// renderActivity: ToolStatusLabel + ToolDisplayName + ToolDetailBody for tool
+	// call/result pairs, and render.Markdown for text output.
 	if len(task.Activity) == 0 {
 		b.WriteString("  " + th.Muted.Italic(true).Render("No activity yet…") + "\n")
 		return b.String()
 	}
 
-	for _, act := range task.Activity {
+	// Build ToolStep groups: pair each tool_call with its following tool_result
+	// (same tool name). Standalone text entries are rendered as markdown blocks.
+	i := 0
+	for i < len(task.Activity) {
+		act := task.Activity[i]
 		switch act.Type {
 		case "tool_call":
-			argSummary := summarizeToolArgs(act.Args, bodyWidth-20)
-			b.WriteString(fmt.Sprintf("  %s %s\n",
-				th.Brand.Render("●"),
-				th.Text.Render(act.ToolName+"("+argSummary+")")))
+			// Look ahead for a matching tool_result.
+			step := render.ToolStep{
+				Name:   act.ToolName,
+				Args:   act.Args,
+				Status: "running",
+			}
+			if i+1 < len(task.Activity) && task.Activity[i+1].Type == "tool_result" && task.Activity[i+1].ToolName == act.ToolName {
+				step.Result = task.Activity[i+1].Result
+				step.Status = "complete"
+				i++ // consume the result entry
+			}
+			// Render using the same format as renderActivity expanded view.
+			line := render.ToolStatusLabel(step.Status) + "  " + render.ToolDisplayName(step.Name)
+			if step.Status == "running" {
+				b.WriteString(th.Activity.Width(bodyWidth).Render("  " + line))
+			} else {
+				b.WriteString(th.Muted.Width(bodyWidth).Render("  " + line))
+			}
+			b.WriteByte('\n')
+			if detail := render.ToolDetailBody(step, bodyWidth-4); detail != "" {
+				b.WriteString(th.Muted.Width(bodyWidth).Render("    " + detail))
+				b.WriteByte('\n')
+			}
 		case "tool_result":
-			resultStr := summarizeToolResult(act.Result, bodyWidth-10)
-			b.WriteString(fmt.Sprintf("  %s %s\n",
-				th.Success.Render("✓"),
-				th.Muted.Render(act.ToolName)))
-			if resultStr != "" {
-				// Indent result preview.
-				for _, line := range strings.Split(resultStr, "\n") {
-					b.WriteString("      " + th.Muted.Render(line) + "\n")
-				}
-			}
+			// Orphan result (no preceding call in current pass) — render as completed tool.
+			step := render.ToolStep{Name: act.ToolName, Result: act.Result, Status: "complete"}
+			line := render.ToolStatusLabel(step.Status) + "  " + render.ToolDisplayName(step.Name)
+			b.WriteString(th.Muted.Width(bodyWidth).Render("  " + line))
+			b.WriteByte('\n')
 		case "text":
-			text := act.Text
-			if len(text) > 200 {
-				text = text[:197] + "…"
+			// Render text output as styled markdown, matching ItemAgent on the main thread.
+			md := render.Markdown(act.Text, bodyWidth, th.RenderStyles())
+			if md == "" {
+				md = th.Agent.Width(bodyWidth).Render(act.Text)
 			}
-			b.WriteString("  " + th.Text.Render(text) + "\n")
+			b.WriteString(md)
+			b.WriteString("\n\n")
 		}
+		i++
 	}
 
 	return padBlock(b.String())
@@ -4517,23 +4767,6 @@ func summarizeToolArgs(args map[string]any, maxWidth int) string {
 	return result
 }
 
-// summarizeToolResult produces a compact preview of a tool result.
-func summarizeToolResult(result any, maxWidth int) string {
-	if result == nil {
-		return ""
-	}
-	s := fmt.Sprintf("%v", result)
-	lines := strings.Split(s, "\n")
-	if len(lines) > 3 {
-		lines = append(lines[:3], "…")
-	}
-	for i, line := range lines {
-		if len(line) > maxWidth && maxWidth > 3 {
-			lines[i] = line[:maxWidth-1] + "…"
-		}
-	}
-	return strings.Join(lines, "\n")
-}
 
 // formatDuration renders a duration as a compact human-readable string:
 // "3s", "1m 23s", "1h 5m 12s".

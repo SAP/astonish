@@ -339,10 +339,11 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			}
 		}
 
-		// Failed-fix follow-ups (code mode): inject even if the model skipped
+		// Live-surface / failed-fix follow-ups: inject even if the model skipped
 		// skill_lookup. Plan-mode SessionContext is preserved and prepended.
-		if promptBuilder.CodeMode && IsFailedFixFollowup(cleanUserText) {
-			turnOverrides.SessionContext = AppendFailedFixFollowupContext(turnOverrides.SessionContext)
+		// Live-surface applies in Studio too (the chromium PATH miss was Studio).
+		if block := FollowupInvestigationContext(cleanUserText, promptBuilder.CodeMode, promptBuilder.SandboxEnabled); block != "" {
+			turnOverrides.SessionContext = AppendFollowupContext(turnOverrides.SessionContext, block)
 			approvedPlanExecutionExplicit = false
 		}
 		if c.PlanVerifyFailed() {

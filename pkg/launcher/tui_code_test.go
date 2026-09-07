@@ -3035,13 +3035,16 @@ func TestLocalAgentBackendListLocalSkills(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The picker merges BuiltinSkillsForCode() (which includes the on-demand
-	// "slides" skill) with the filesystem skills, then sorts case-insensitively.
-	if len(got) != 5 {
+	// The picker merges BuiltinSkillsForCode() with the filesystem skills,
+	// then sorts case-insensitively.
+	want := []string{"alpha", "debug-regression", "Generative-UI", "inspect-live-surface", "slides", "verify-live-with-drill", "watch-long-running", "zeta"}
+	if len(got) != len(want) {
 		t.Fatalf("skills = %+v", got)
 	}
-	if got[0].Name != "alpha" || got[1].Name != "debug-regression" || got[2].Name != "Generative-UI" || got[3].Name != "slides" || got[4].Name != "zeta" {
-		t.Fatalf("skills not sorted or missing code-mode builtins: %+v", got)
+	for i, name := range want {
+		if got[i].Name != name {
+			t.Fatalf("skills not sorted or missing code-mode builtins: %+v", got)
+		}
 	}
 	// generative-ui is excluded from BuiltinSkillsForCode; the filesystem skill
 	// with the same name (case-insensitive) appears as-is from the user's config.

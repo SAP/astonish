@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +11,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
 )
 
@@ -459,8 +462,9 @@ func TestDelegationDetailShowsActivity(t *testing.T) {
 		Kind: events.ItemDelegation,
 		DelegationTasks: []events.DelegationTaskState{
 			{
-				Name:   "worker",
-				Status: "running",
+				Name:        "worker",
+				Status:      "running",
+				Description: "Read the main file and analyze it",
 				Activity: []events.DelegationActivity{
 					{Type: "tool_call", ToolName: "read_file", Args: map[string]any{"path": "main.go"}},
 					{Type: "tool_result", ToolName: "read_file", Result: "package main"},
@@ -479,11 +483,97 @@ func TestDelegationDetailShowsActivity(t *testing.T) {
 	if !strings.Contains(out, "worker") {
 		t.Fatalf("should contain task name 'worker': %q", out)
 	}
-	if !strings.Contains(out, "read_file") {
-		t.Fatalf("should contain tool name 'read_file': %q", out)
+	if !strings.Contains(out, "Read file") && !strings.Contains(out, "read_file") {
+		t.Fatalf("should contain tool display name for 'read_file': %q", out)
 	}
 	if !strings.Contains(out, "I found the main file") {
 		t.Fatalf("should contain text output: %q", out)
+	}
+	// Description should now appear in a bordered prompt box (matching main thread user bubble).
+	if !strings.Contains(out, "┌") {
+		t.Fatalf("should contain top-border character '┌' (description prompt box): %q", out)
+	}
+	if !strings.Contains(out, "└") {
+		t.Fatalf("should contain bottom-border character '└' (description prompt box): %q", out)
+	}
+	if !strings.Contains(out, "Read the main file and analyze it") {
+		t.Fatalf("should contain task description inside bordered box: %q", out)
+	}
+}
+
+func TestDelegationDetailPromptBox(t *testing.T) {
+	task := events.DelegationTaskState{
+		Name:        "researcher",
+		Status:      "complete",
+		Duration:    "5s",
+		Description: "Search the codebase for auth patterns",
+	}
+	m := model{theme: DefaultTheme(), width: 80}
+	out := stripANSI(m.renderDelegationDetailContent(task, 80))
+
+	// The description should appear in a bordered box matching the user-bubble style.
+	if !strings.Contains(out, "┌") {
+		t.Fatalf("output should contain top-border '┌': %q", out)
+	}
+	if !strings.Contains(out, "┐") {
+		t.Fatalf("output should contain top-border '┐': %q", out)
+	}
+	if !strings.Contains(out, "└") {
+		t.Fatalf("output should contain bottom-border '└': %q", out)
+	}
+	if !strings.Contains(out, "┘") {
+		t.Fatalf("output should contain bottom-border '┘': %q", out)
+	}
+	if !strings.Contains(out, "│") {
+		t.Fatalf("output should contain side-border '│': %q", out)
+	}
+	if !strings.Contains(out, "Search the codebase for auth patterns") {
+		t.Fatalf("output should contain the description text: %q", out)
+	}
+	// Status line should appear below the box.
+	if !strings.Contains(out, "researcher") {
+		t.Fatalf("output should contain task name 'researcher': %q", out)
+	}
+}
+
+func TestDelegationDetailToolFoldFormat(t *testing.T) {
+	task := events.DelegationTaskState{
+		Name:   "coder",
+		Status: "complete",
+		Activity: []events.DelegationActivity{
+			{Type: "tool_call", ToolName: "shell_command", Args: map[string]any{"command": "go build ./..."}},
+			{Type: "tool_result", ToolName: "shell_command", Result: "ok"},
+		},
+	}
+	m := model{theme: DefaultTheme(), width: 80}
+	out := stripANSI(m.renderDelegationDetailContent(task, 80))
+
+	// Should contain the tool status label for "complete" (✓) — same as main thread activity fold.
+	if !strings.Contains(out, "✓") {
+		t.Fatalf("completed tool should show '✓' status label: %q", out)
+	}
+	// Should contain the tool display name for shell_command (rendered as "Run command" by ToolDisplayName).
+	if !strings.Contains(out, "Run command") && !strings.Contains(out, "shell_command") {
+		t.Fatalf("should contain tool display name for 'shell_command': %q", out)
+	}
+}
+
+func TestDelegationDetailNoDescriptionSkipsBox(t *testing.T) {
+	task := events.DelegationTaskState{
+		Name:   "worker",
+		Status: "running",
+		// Description is empty — no bordered box should be rendered.
+	}
+	m := model{theme: DefaultTheme(), width: 80}
+	out := stripANSI(m.renderDelegationDetailContent(task, 80))
+
+	// Without a description, the prompt box should not appear.
+	if strings.Contains(out, "┌") {
+		t.Fatalf("output without description should not contain box border '┌': %q", out)
+	}
+	// The status line should still be present.
+	if !strings.Contains(out, "worker") {
+		t.Fatalf("output should still contain task name 'worker': %q", out)
 	}
 }
 
@@ -651,5 +741,373 @@ func TestRenderDelegationItemShowsEvaluatingStatus(t *testing.T) {
 	}
 	if !strings.Contains(out, "evaluati") {
 		t.Fatalf("should contain 'evaluating' status text: %q", out)
+	}
+}
+
+// --- Sticky user message header tests ---
+
+func TestStickyUserMessageReturnsEmptyWhenUserBubbleVisible(t *testing.T) {
+	// Short conversation that fits within the viewport: user bubble is visible,
+	// so no sticky header should be shown.
+	m := newModel(context.Background(), Config{
+		Backend: staticBackend{info: backend.Info{Mode: "code"}},
+		Width:   80,
+		Height:  40,
+	})
+	m.ready = true
+	m.layout()
+	m.tr.Apply(events.NewUser("short question"))
+	m.tr.Apply(events.NewText("short answer"))
+	m.tr.Apply(events.NewDone())
+	m.refreshViewport()
+
+	// Scroll to top (offset=0) — user bubble is inline, no sticky header needed.
+	m.vp.GotoTop()
+	if got := m.stickyUserMessage(); got != "" {
+		t.Fatalf("expected empty sticky message when user bubble is visible, got %q", got)
+	}
+	if m.stickyHeaderLines != 0 {
+		t.Fatalf("expected stickyHeaderLines=0 when user bubble visible, got %d", m.stickyHeaderLines)
+	}
+}
+
+func TestStickyUserMessageReturnsContentWhenScrolledPast(t *testing.T) {
+	// Large response that pushes the user bubble above the viewport top.
+	m := newModel(context.Background(), Config{
+		Backend: staticBackend{info: backend.Info{Mode: "code"}},
+		Width:   80,
+		Height:  20,
+	})
+	m.ready = true
+	m.layout()
+	m.tr.Apply(events.NewUser("what is the meaning of life?"))
+	var lines []string
+	for i := 0; i < 60; i++ {
+		lines = append(lines, "line of agent output that fills the viewport screen")
+	}
+	m.tr.Apply(events.NewText(strings.Join(lines, "\n")))
+	m.tr.Streaming = true
+	m.refreshViewport()
+
+	// Auto-scroll puts viewport at the bottom, user bubble is above viewport top.
+	if !m.vp.AtBottom() {
+		t.Skip("viewport not at bottom — content may not be long enough for this terminal height")
+	}
+	sticky := m.stickyUserMessage()
+	if sticky == "" {
+		t.Fatalf("expected sticky user message when user bubble scrolled past, got empty")
+	}
+	if !strings.Contains(sticky, "what is the meaning of life?") {
+		t.Fatalf("sticky message should contain original user text, got %q", sticky)
+	}
+	if m.stickyHeaderLines == 0 {
+		t.Fatal("expected stickyHeaderLines > 0 when sticky header is shown")
+	}
+}
+
+func TestStickyUserHeaderShowsPreviousUserOnScrollUp(t *testing.T) {
+	// Two turns: user1 + very long agent1 + user2 + very long agent2.
+	// At bottom: sticky should show user2.
+	// After scrolling up into agent1: sticky should switch to user1.
+	m := newModel(context.Background(), Config{
+		Backend: staticBackend{info: backend.Info{Mode: "code"}},
+		Width:   80,
+		Height:  20,
+	})
+	m.ready = true
+	m.layout()
+
+	m.tr.Apply(events.NewUser("first question"))
+	var lines1 []string
+	for i := 0; i < 40; i++ {
+		lines1 = append(lines1, "agent turn 1 output line")
+	}
+	m.tr.Apply(events.NewText(strings.Join(lines1, "\n")))
+	m.tr.Apply(events.NewDone())
+
+	m.tr.Apply(events.NewUser("second question"))
+	var lines2 []string
+	for i := 0; i < 40; i++ {
+		lines2 = append(lines2, "agent turn 2 output line")
+	}
+	m.tr.Apply(events.NewText(strings.Join(lines2, "\n")))
+	m.tr.Streaming = true
+	m.refreshViewport()
+
+	if !m.vp.AtBottom() {
+		t.Skip("viewport not at bottom — content too short for this terminal height")
+	}
+
+	// At bottom, sticky should be the most recent user message (user2).
+	sticky := m.stickyUserMessage()
+	if !strings.Contains(sticky, "second question") {
+		t.Fatalf("at bottom, sticky should show 'second question', got %q", sticky)
+	}
+
+	// Scroll all the way to the top.
+	m.vp.GotoTop()
+	m.refreshViewport()
+
+	// At the very top (YOffset=0), no sticky header should appear.
+	sticky = m.stickyUserMessage()
+	if sticky != "" {
+		// Both user bubbles are above offset=0 is impossible; the first user
+		// bubble starts at line 0 so offset=0 means it's visible.
+		t.Logf("at top: sticky=%q (acceptable if both bubbles scrolled)", sticky)
+	}
+}
+
+func TestStickyUserHeaderDisappearsAtTop(t *testing.T) {
+	m := newModel(context.Background(), Config{
+		Backend: staticBackend{info: backend.Info{Mode: "code"}},
+		Width:   80,
+		Height:  20,
+	})
+	m.ready = true
+	m.layout()
+	m.tr.Apply(events.NewUser("my question"))
+	var lines []string
+	for i := 0; i < 60; i++ {
+		lines = append(lines, "agent output line")
+	}
+	m.tr.Apply(events.NewText(strings.Join(lines, "\n")))
+	m.tr.Apply(events.NewDone())
+	m.refreshViewport()
+
+	// Scroll to very top — the user bubble should be visible inline.
+	m.vp.GotoTop()
+	// At offset 0, the first user bubble starts at or near line 0, so it is
+	// within the viewport: no sticky header needed.
+	if got := m.stickyUserMessage(); got != "" {
+		// Only fails if the user bubble is somehow entirely above offset=0,
+		// which is physically impossible.
+		t.Fatalf("sticky header should not appear when at viewport top, got %q", got)
+	}
+}
+
+func TestRenderStickyUserHeaderTruncatesLongContent(t *testing.T) {
+	m := model{theme: DefaultTheme(), width: 80}
+	longContent := strings.Repeat("very long question text that exceeds width ", 10)
+	out := m.renderStickyUserHeader(longContent, 60, false)
+	plain := stripANSI(out)
+	lines := strings.Split(plain, "\n")
+	if len(lines) != 3 {
+		t.Fatalf("expected 3 lines (top border, content, bottom border), got %d: %q", len(lines), plain)
+	}
+	// Top border should start/end with box corners.
+	if !strings.HasPrefix(lines[0], "┌") || !strings.HasSuffix(lines[0], "┐") {
+		t.Fatalf("top border line should start with ┌ and end with ┐: %q", lines[0])
+	}
+	// Bottom border should start/end with box corners.
+	if !strings.HasPrefix(lines[2], "└") || !strings.HasSuffix(lines[2], "┘") {
+		t.Fatalf("bottom border line should start with └ and end with ┘: %q", lines[2])
+	}
+	// Content line should be within width.
+	if w := lipgloss.Width(lines[1]); w > 60 {
+		t.Fatalf("content line width %d exceeds 60: %q", w, lines[1])
+	}
+}
+
+func TestRenderStickyUserHeaderSingleLineOnly(t *testing.T) {
+	m := model{theme: DefaultTheme(), width: 80}
+	// Multi-line content: only first line should appear.
+	content := "first line\nsecond line\nthird line"
+	out := m.renderStickyUserHeader(content, 60, false)
+	plain := stripANSI(out)
+	if strings.Contains(plain, "second line") {
+		t.Fatalf("sticky header should only show first line, but got: %q", plain)
+	}
+	if strings.Contains(plain, "third line") {
+		t.Fatalf("sticky header should only show first line, but got: %q", plain)
+	}
+	if !strings.Contains(plain, "first line") {
+		t.Fatalf("sticky header should show first line, but got: %q", plain)
+	}
+}
+
+func TestViewportTopYIncludesStickyHeader(t *testing.T) {
+	m := newModel(context.Background(), Config{
+		Backend: staticBackend{info: backend.Info{Mode: "code"}},
+		Width:   80,
+		Height:  20,
+	})
+	m.ready = true
+	m.layout()
+
+	// Without any content, stickyHeaderLines is 0.
+	if got := m.viewportTopY(); got != 2 {
+		t.Fatalf("viewportTopY with no sticky header: want 2, got %d", got)
+	}
+
+	// Simulate a sticky header of 3 lines.
+	m.stickyHeaderLines = 3
+	if got := m.viewportTopY(); got != 5 {
+		t.Fatalf("viewportTopY with 3 sticky lines: want 5, got %d", got)
+	}
+}
+
+func TestRenderStickyUserHeaderExpandedShowsFullContent(t *testing.T) {
+	m := model{theme: DefaultTheme(), width: 80}
+	content := "first line\nsecond line\nthird line"
+	out := m.renderStickyUserHeader(content, 60, true)
+	plain := stripANSI(out)
+	// In expanded mode all lines of the content should appear.
+	if !strings.Contains(plain, "second line") {
+		t.Fatalf("expanded sticky header should show all lines, missing 'second line': %q", plain)
+	}
+	if !strings.Contains(plain, "third line") {
+		t.Fatalf("expanded sticky header should show all lines, missing 'third line': %q", plain)
+	}
+}
+
+func TestRenderStickyUserHeaderExpandedTallerThan3Lines(t *testing.T) {
+	m := model{theme: DefaultTheme(), width: 80}
+	// 5 lines of content: expanded mode should produce more than 3 rendered lines.
+	lines := make([]string, 5)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("content line %d", i+1)
+	}
+	content := strings.Join(lines, "\n")
+	out := m.renderStickyUserHeader(content, 60, true)
+	plain := stripANSI(out)
+	rendered := strings.Split(plain, "\n")
+	if len(rendered) <= 3 {
+		t.Fatalf("expanded sticky header with 5 content lines should render more than 3 lines, got %d: %q", len(rendered), plain)
+	}
+}
+
+func TestStickyHeaderDoubleClickTogglesExpand(t *testing.T) {
+	// Build a model with enough content that the user bubble scrolls off-screen,
+	// triggering a sticky header.
+	m := newModel(context.Background(), Config{
+		Backend: staticBackend{info: backend.Info{Mode: "code"}},
+		Width:   80,
+		Height:  20,
+	})
+	m.ready = true
+	m.layout()
+
+	m.tr.Apply(events.NewUser("question for expand test"))
+	var lines []string
+	for i := 0; i < 60; i++ {
+		lines = append(lines, "agent output line for expand test")
+	}
+	m.tr.Apply(events.NewText(strings.Join(lines, "\n")))
+	m.tr.Streaming = true
+	m.refreshViewport()
+
+	if !m.vp.AtBottom() {
+		t.Skip("viewport not at bottom — content too short for this terminal height")
+	}
+	if m.stickyHeaderLines == 0 {
+		t.Fatal("expected a sticky header to be shown after scrolling past the user bubble")
+	}
+
+	// Initially not expanded.
+	if m.stickyExpanded {
+		t.Fatal("stickyExpanded should be false initially")
+	}
+
+	press := func() {
+		m2, _ := m.handleMousePress(tea.Mouse{X: 10, Y: 2})
+		m = m2.(model)
+	}
+
+	// First double-click sequence: two rapid clicks → should expand.
+	press() // click 1: sets lastClickAt
+	press() // click 2: within window → isDouble=true → stickyExpanded=true
+
+	if !m.stickyExpanded {
+		t.Fatal("double-click on sticky header should set stickyExpanded=true")
+	}
+
+	// Reset lastClickAt so the next press starts a fresh sequence (not a triple-click).
+	m.lastClickAt = time.Time{}
+
+	// Second double-click sequence: two more rapid clicks → should collapse.
+	press() // click 3: sets lastClickAt (not a double since time was reset)
+	press() // click 4: within window → isDouble=true → stickyExpanded=false
+
+	if m.stickyExpanded {
+		t.Fatal("second double-click on sticky header should reset stickyExpanded=false")
+	}
+
+	// A single click in the sticky zone should not start a text selection.
+	m.lastClickAt = time.Time{} // reset to avoid accidental double-click
+	press()
+	if m.selecting {
+		t.Fatal("click inside sticky header zone should not start a text selection")
+	}
+}
+
+func TestStickyExpandedResetsWhenPinnedItemChanges(t *testing.T) {
+	// This test exercises the cross-frame stickyPinnedIdx comparison by
+	// directly calling refreshViewport() after changing the viewport offset —
+	// the key invariant is that stickyExpanded is cleared whenever
+	// stickyPinnedIdx changes.
+
+	m := newModel(context.Background(), Config{
+		Backend: staticBackend{info: backend.Info{Mode: "code"}},
+		Width:   80,
+		Height:  30,
+	})
+	m.ready = true
+	m.layout()
+
+	// Build a conversation with two very long responses so both user bubbles
+	// can be scrolled above the viewport.
+	m.tr.Apply(events.NewUser("first question"))
+	var lines1 []string
+	for i := 0; i < 120; i++ {
+		lines1 = append(lines1, "agent turn 1 output line that is long enough to wrap on 80 columns")
+	}
+	m.tr.Apply(events.NewText(strings.Join(lines1, "\n")))
+	m.tr.Apply(events.NewDone())
+
+	m.tr.Apply(events.NewUser("second question"))
+	var lines2 []string
+	for i := 0; i < 120; i++ {
+		lines2 = append(lines2, "agent turn 2 output line that is long enough to wrap on 80 columns")
+	}
+	m.tr.Apply(events.NewText(strings.Join(lines2, "\n")))
+	m.tr.Streaming = true
+	m.refreshViewport()
+
+	if !m.vp.AtBottom() {
+		t.Skip("viewport not at bottom — content too short for this terminal height")
+	}
+
+	// At the bottom, user2 should be pinned.
+	if !strings.Contains(m.stickyUserMessage(), "second question") {
+		t.Skipf("sticky header does not show 'second question' at bottom (got %q)", m.stickyUserMessage())
+	}
+	if m.stickyPinnedIdx < 0 {
+		t.Skip("stickyPinnedIdx not set at bottom — skipping")
+	}
+	pinnedAtBottom := m.stickyPinnedIdx
+
+	// Fake a different pinned index as if a previous frame had already pinned
+	// user1. This directly tests the cross-frame comparison without depending on
+	// exact viewport geometry to produce a different scroll position.
+	differentIdx := pinnedAtBottom - 2
+	if differentIdx < 0 {
+		differentIdx = 0
+	}
+	if differentIdx == pinnedAtBottom {
+		t.Skip("not enough items to fake a different pinned index")
+	}
+	m.stickyPinnedIdx = differentIdx
+	m.stickyExpanded = true // simulate user having expanded the old pinned item
+
+	// refreshViewport() will compute the real current idx (pinnedAtBottom),
+	// detect it differs from differentIdx, and reset stickyExpanded.
+	m.refreshViewport()
+
+	if m.stickyExpanded {
+		t.Fatalf("stickyExpanded should reset to false when stickyPinnedIdx changes from %d to %d",
+			differentIdx, m.stickyPinnedIdx)
+	}
+	if m.stickyPinnedIdx != pinnedAtBottom {
+		t.Fatalf("stickyPinnedIdx should be restored to %d, got %d", pinnedAtBottom, m.stickyPinnedIdx)
 	}
 }

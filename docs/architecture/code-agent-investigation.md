@@ -4,9 +4,15 @@ Astonish Code already finds the right files quickly (codegraph, grep, definition
 
 ## Three layers
 
-1. **Always-on Work Policy** in the code-mode system prompt (`pkg/agent/code_system_prompt_builder.go`): short bullets — user restatements are spec, drop a contradicted hypothesis, claim fixed only with a user-visible-sequence test, one ordered source of truth, `git log`/`blame`/`show` before more production edits on regressions.
-2. **Builtin skill `debug-regression`**: full protocol, loaded via `skill_lookup` when the task matches (regression, still broken, zero difference, doesn't show, live vs restore / badge vs summary).
-3. **Failed-fix follow-up injector** (`pkg/agent/followup_investigation.go`): if cleaned user text matches those phrases, per-turn SessionContext gets a short reminder **even when the model skips skill_lookup**. Plan-mode context is preserved and prepended.
+1. **Always-on Work Policy + Live Evidence** in the code-mode system prompt (`pkg/agent/code_system_prompt_builder.go`, shared `LiveEvidenceSection` in `pkg/agent/live_evidence.go`): short bullets — keep every explicit requirement in view, user restatements are spec, drop a contradicted hypothesis, claim done only when this turn's tool output supports it, two kinds of proof (library test vs live observation/drill), CloakBrowser is not `chromium` on PATH, one ordered source of truth, `git log`/`blame`/`show` before more production edits on **code** regressions. Stop-exploring still applies to code edits; running surfaces are the exception.
+2. **Builtin skills**:
+   - `debug-regression` — git archaeology, failing-test-first, for code/UI logic regressions.
+   - `inspect-live-surface` — live session/sandbox/browser. Product path then overlay/process then `browser_navigate`. Not a PATH probe.
+   - `verify-live-with-drill` — drills as the preferred `verify_kind=behavior` harness for running surfaces.
+   - `watch-long-running` — starting a rebuild is not done; `process_*` until the artifact exists.
+3. **Follow-up injector** (`pkg/agent/followup_investigation.go`): live-surface needles inject `inspect-live-surface` in **Studio and Code** (the chromium PATH miss was Studio, which has no Work Policy of its own). Code-regression needles still inject `debug-regression` in Code. Live keywords win when both match. Plan-mode context is preserved and prepended.
+
+Studio chat emits the same Live Evidence block from `SystemPromptBuilder` (no codegraph / stop-exploring language). Detailed browser/process how-tos stay in vector `memory/guidance/*.md`.
 
 ## Plan revision
 
@@ -18,9 +24,13 @@ Astonish Code already finds the right files quickly (codegraph, grep, definition
 
 Checkboxes are not proof. `update_plan(complete)` runs the phase `verify` command; a non-zero exit marks the phase failed. Sub-agent finish is not completion. `announce_completion` runs plan-level `verification` and writes `## Results`. Execution mode ends only when `IsFullyAccepted()` (all phases complete AND Results). The Incus→Docker session (2026-09-06) is the regression story: six mega-phases marked complete while the container did not exist. GRAPH-phase allow-list is unchanged.
 
+Execution mode may inspect a **running surface** (shell, docker, `browser_navigate`, `run_drill`) even when PLAN.md already named the files. That is verification, not rediscovery. GRAPH phase stays codegraph/`find_files` only.
+
 ## Verification
 
 - Prompt golden + contract tests in `pkg/agent`.
 - Skill index tests in `pkg/skills`.
-- Detector and turn-context tests in `pkg/agent/followup_investigation_test.go`.
+- Detector and turn-context tests in `pkg/agent/followup_investigation_test.go` (live-surface vs failed-fix split).
+- Live Evidence section tests in `pkg/agent/live_evidence_test.go` and prompt goldens.
+- Skill index tests in `pkg/skills` for `inspect-live-surface`, `verify-live-with-drill`, `watch-long-running`.
 - `update_plan` miss payload in `pkg/tools/plan_tool_test.go`.

@@ -67,7 +67,7 @@ func internalToolDeclarations() []ToolDeclaration {
 	return []ToolDeclaration{
 		{Name: "read_file", Description: "Read file contents with optional line range", Category: "internal"},
 		{Name: "write_file", Description: "Write content to a file (creates or overwrites)", Category: "internal"},
-		{Name: "shell_command", Description: "Execute a shell command with PTY support", Category: "internal"},
+		{Name: "shell_command", Description: "Execute a shell command with PTY support. Not for proving the sandbox browser exists — which chromium is expected empty; use browser_navigate.", Category: "internal"},
 		{Name: "filter_json", Description: "Filter and transform JSON data using jq-like expressions", Category: "internal"},
 		{Name: "git_diff_add_line_numbers", Description: "Add line numbers to git diff output for precise editing", Category: "internal"},
 		{Name: "file_tree", Description: "Budgeted directory tree with subtree summaries for project orientation", Category: "internal"},
@@ -114,7 +114,7 @@ func schedulerToolDeclarations() []ToolDeclaration {
 
 func browserToolDeclarations() []ToolDeclaration {
 	return []ToolDeclaration{
-		{Name: "browser_navigate", Description: "Navigate the browser to a URL (sandbox: use localhost/127.0.0.1, not the container bridge IP)", Category: "browser"},
+		{Name: "browser_navigate", Description: "Navigate the browser to a URL. Sandbox browser is CloakBrowser (not chromium on PATH); use localhost/127.0.0.1, not the container bridge IP", Category: "browser"},
 		{Name: "browser_navigate_back", Description: "Go back to the previous page in browser history", Category: "browser"},
 		{Name: "browser_click", Description: "Click an element on the page", Category: "browser"},
 		{Name: "browser_type", Description: "Type text into an input element", Category: "browser"},

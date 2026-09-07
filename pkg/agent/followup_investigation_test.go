@@ -57,6 +57,64 @@ func TestAppendFailedFixFollowupContext(t *testing.T) {
 	}
 }
 
+func TestIsLiveSurfaceFollowup(t *testing.T) {
+	yes := []string{
+		"Do you have chromium available in shell_command?",
+		"which chromium",
+		"browser_navigate failed to get browser page",
+		"no running sandbox for session",
+		"CDP is not bound to a session container",
+		"is the overlayfs mounted",
+		"in the session the binary is missing",
+		"CloakBrowser chrome segfault",
+		"astonish-session-c1b27dfb is up",
+		"chromium is not installed",
+	}
+	for _, s := range yes {
+		if !IsLiveSurfaceFollowup(s) {
+			t.Errorf("IsLiveSurfaceFollowup(%q) = false, want true", s)
+		}
+	}
+	no := []string{
+		"",
+		"add a button to the footer",
+		"the badge still doesn't show",
+		"zero difference after rebuild",
+		"explain how routing works",
+	}
+	for _, s := range no {
+		if IsLiveSurfaceFollowup(s) {
+			t.Errorf("IsLiveSurfaceFollowup(%q) = true, want false", s)
+		}
+	}
+}
+
+func TestFollowupInvestigationContext_LiveWinsAndStudioSandbox(t *testing.T) {
+	chromium := "Do you have chromium available in shell_command?"
+	if got := FollowupInvestigationContext(chromium, true, true); got != LiveSurfaceFollowupContext {
+		t.Fatalf("code+live: got %q", got)
+	}
+	if got := FollowupInvestigationContext(chromium, false, true); got != LiveSurfaceFollowupContext {
+		t.Fatalf("studio+live: got %q", got)
+	}
+
+	noDiff := "No difference"
+	if got := FollowupInvestigationContext(noDiff, true, false); got != FailedFixFollowupContext {
+		t.Fatalf("code no-difference without live keywords should be debug-regression, got %q", got)
+	}
+	if got := FollowupInvestigationContext(noDiff, false, true); got != LiveSurfaceFollowupContext {
+		t.Fatalf("studio sandbox no-difference should inspect live, got %q", got)
+	}
+	if got := FollowupInvestigationContext(noDiff, false, false); got != "" {
+		t.Fatalf("studio without sandbox should not inject, got %q", got)
+	}
+
+	both := "browser_navigate still broken, zero difference"
+	if got := FollowupInvestigationContext(both, true, true); got != LiveSurfaceFollowupContext {
+		t.Fatalf("live keywords win over failed-fix, got %q", got)
+	}
+}
+
 func TestFailedFixFollowup_TurnContextIncludesBlock(t *testing.T) {
 	overrides := &PromptOverrides{SessionContext: GraphPlanModeSystemContext}
 	if !IsFailedFixFollowup("zero difference, I always rebuild") {

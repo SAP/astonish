@@ -17,6 +17,53 @@ Most AI testing approaches have the LLM drive the browser in real-time (reasonin
 
 The only exception is `semantic` assertions and `triage` mode, which use targeted LLM calls for specific judgment tasks.
 
+### Why drills are the preferred live verify for running surfaces
+
+Astonish Code finds files quickly (codegraph). That is not proof a session container exists, an overlay is mounted, or the in-container browser works. `go test ./pkg/sandbox/...` of library code is the wrong harness for those outcomes.
+
+When a plan phase's `verify_kind` is `behavior` and the surface is sandbox, daemon, browser, CLI, or Studio UI, prefer a **drill** (compose with the LLM, replay mechanically via `run_drill`) over package tests:
+
+1. Overlay mounted at `/sandbox/rootfs`
+2. Product binary present (CloakBrowser at `/home/browser/.cloakbrowser/*/chrome`, not `which chromium`)
+3. `browser_navigate` to a public URL succeeds
+4. Session container named `astonish-session-*` (Docker) or the pod is Running (Kubernetes)
+
+Builtin skill `verify-live-with-drill` is the agent protocol. Builtin skill `inspect-live-surface` is the diagnostic protocol when the user reports a live miss. Do not install Debian `chromium` to satisfy a PATH probe.
+
+Example smoke (agent-composed; mechanical replay):
+
+```yaml
+type: drill
+suite: sandbox-browser
+description: Overlay has CloakBrowser and browser_navigate works
+nodes:
+  - name: overlay-mounted
+    type: tool
+    args:
+      tool: shell_command
+      command: "findmnt /sandbox/rootfs | grep -E 'overlay|fuse'"
+    assert:
+      type: contains
+      expected: overlay
+  - name: cloakbrowser-binary
+    type: tool
+    args:
+      tool: shell_command
+      command: "ls /home/browser/.cloakbrowser/*/chrome"
+    assert:
+      type: contains
+      expected: chrome
+  - name: navigate-public
+    type: tool
+    args:
+      tool: browser_navigate
+      url: https://example.com
+    assert:
+      type: contains
+      source: snapshot
+      expected: Example
+```
+
 ### Why Multi-Service Ready Checks
 
 Real applications often require multiple services (database, backend, frontend). Drill suites support:

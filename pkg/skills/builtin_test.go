@@ -115,6 +115,53 @@ func TestBuiltinSkills_IncludesSlides(t *testing.T) {
 	}
 }
 
+func TestBuiltinSkills_IncludesLiveEvidenceSkills(t *testing.T) {
+	for _, name := range []string{"inspect-live-surface", "verify-live-with-drill", "watch-long-running"} {
+		sk, ok := findSkill(BuiltinSkills(), name)
+		if !ok {
+			t.Fatalf("BuiltinSkills() must contain %q (Studio + Code)", name)
+		}
+		if sk.Content == "" {
+			t.Errorf("%s Content must be non-empty", name)
+		}
+		if _, ok := findSkill(BuiltinSkillsForCode(), name); !ok {
+			t.Errorf("BuiltinSkillsForCode() must contain %q", name)
+		}
+		if !strings.Contains(BuildSkillIndex(nil), name) {
+			t.Errorf("BuildSkillIndex (Studio) must list %s", name)
+		}
+		if !strings.Contains(BuildCodeSkillIndex(nil), name) {
+			t.Errorf("BuildCodeSkillIndex must list %s", name)
+		}
+	}
+
+	inspect, _ := findSkill(BuiltinSkills(), "inspect-live-surface")
+	for _, want := range []string{"chromium", "browser_navigate", "CloakBrowser", "which chromium", "overlay"} {
+		if !strings.Contains(inspect.Description, want) && !strings.Contains(inspect.Content, want) {
+			t.Errorf("inspect-live-surface should mention %q in description or content", want)
+		}
+	}
+	for _, want := range []string{"which chromium", "CloakBrowser", "browser_navigate", "Do not start with"} {
+		if !strings.Contains(inspect.Content, want) {
+			t.Errorf("inspect-live-surface content missing %q", want)
+		}
+	}
+
+	drill, _ := findSkill(BuiltinSkills(), "verify-live-with-drill")
+	for _, want := range []string{"run_drill", "verify_kind", "go test", "CloakBrowser"} {
+		if !strings.Contains(drill.Content, want) {
+			t.Errorf("verify-live-with-drill content missing %q", want)
+		}
+	}
+
+	watch, _ := findSkill(BuiltinSkills(), "watch-long-running")
+	for _, want := range []string{"process_read", "background=true", "Starting the job is not done"} {
+		if !strings.Contains(watch.Content, want) {
+			t.Errorf("watch-long-running content missing %q", want)
+		}
+	}
+}
+
 func TestBuiltinSkillsForCode_IncludesSlidesExcludesGenerativeUI(t *testing.T) {
 	forCode := BuiltinSkillsForCode()
 	if _, ok := findSkill(forCode, "slides"); !ok {

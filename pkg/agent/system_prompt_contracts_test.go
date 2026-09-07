@@ -268,6 +268,8 @@ func TestSystemPromptContracts_ToolUse(t *testing.T) {
 
 	// Tool use core rules
 	assertContains(t, prompt, "## Tool Use", "Tool Use section header")
+	assertContains(t, prompt, "## Live Evidence", "Live Evidence section — Studio always-on verification")
+	assertContains(t, prompt, "CloakBrowser", "CloakBrowser in Studio Live Evidence")
 	assertContains(t, prompt, "read_file/edit_file/write_file", "file tool preference — prefer dedicated tools over shell sed/awk")
 	assertContains(t, prompt, "shell_command", "shell_command mentioned — for private network fallback and general use")
 
@@ -390,6 +392,8 @@ func TestSystemPromptContracts_Conditional_Minimal(t *testing.T) {
 	// Core sections should always be present
 	assertContains(t, prompt, "You are Astonish", "identity preamble always present")
 	assertContains(t, prompt, "## Tool Use", "Tool Use always present")
+	assertContains(t, prompt, "## Live Evidence", "Live Evidence always present — Studio has no Work Policy; PATH probes must not skip this")
+	assertContains(t, prompt, "CloakBrowser", "CloakBrowser named in Live Evidence so which chromium is not treated as overlay failure")
 	assertContains(t, prompt, "## Knowledge Context", "Knowledge Context always present")
 	assertContains(t, prompt, "## Environment", "Environment always present")
 	assertContains(t, prompt, "## Capabilities", "Capabilities always present")
@@ -514,8 +518,8 @@ func TestSystemPromptBuilder_MinimalSize(t *testing.T) {
 	// Minimal prompt includes always-present sections: Tool Use (incl.
 	// structural-navigation guidance), Knowledge Context, Environment,
 	// Capabilities, and Visual Apps (Generative UI). Budget ~15% above current.
-	if len(prompt) > 5700 {
-		t.Errorf("minimal prompt too large: %d bytes (limit 5700)", len(prompt))
+	if len(prompt) > 7000 {
+		t.Errorf("minimal prompt too large: %d bytes (limit 7000)", len(prompt))
 	}
 	if len(prompt) < 2000 {
 		t.Errorf("minimal prompt suspiciously small: %d bytes (expected > 2000)", len(prompt))
@@ -529,8 +533,8 @@ func TestSystemPromptBuilder_MaximalSize(t *testing.T) {
 	// (project guidance, code-nav rules, PLAN.md, auth gates, MCP listing) are
 	// no longer part of the base builder — they live in CodeSystemPromptBuilder.
 	// The ceiling is lower than before since those sections are removed.
-	if len(prompt) > 12000 {
-		t.Errorf("maximal prompt too large: %d bytes (limit 12000)", len(prompt))
+	if len(prompt) > 13500 {
+		t.Errorf("maximal prompt too large: %d bytes (limit 13500)", len(prompt))
 	}
 	if len(prompt) < 5000 {
 		t.Errorf("maximal prompt suspiciously small: %d bytes (expected > 5000)", len(prompt))

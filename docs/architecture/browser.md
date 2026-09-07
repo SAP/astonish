@@ -4,7 +4,7 @@
 
 Astonish includes a comprehensive browser automation system built on Chrome DevTools Protocol (CDP) via the go-rod library. It provides the AI agent with the ability to navigate websites, fill forms, take screenshots, read page content, and interact with web applications -- all while employing extensive anti-detection measures to avoid being blocked as a bot.
 
-In sandboxed Studio chat, fleet, and drill sessions the browser runs **inside the session container** (Chromium + KasmVNC + socat CDP bridge). The host process drives go-rod over CDP; it does not launch host Chrome for sandboxed work. Host Chrome is only used for non-sandbox local runs.
+In sandboxed Studio chat, fleet, and drill sessions the browser runs **inside the session container** (CloakBrowser + KasmVNC + socat CDP bridge). CloakBrowser is a patched Chromium binary at `/home/browser/.cloakbrowser/*/chrome`. It is **not** the Debian `chromium` / `chromium-browser` / `google-chrome` package and is **not** on `PATH`. `which chromium` staying empty is expected and is not proof the overlay is unmounted. Agents must call `browser_navigate` to prove the capability. The host process drives go-rod over CDP; it does not launch host Chrome for sandboxed work. Host Chrome is only used for non-sandbox local runs.
 
 ## Key Design Decisions
 

@@ -7,19 +7,27 @@ import "fmt"
 //
 // It streams the overlay upper through sha256sum into a staging directory on
 // layersDir. A named fifo replaces bash process substitution so Debian's
-// /bin/sh (dash) can hash and extract in one pass. Do not stage a full tar
-// on /tmp: after a base-layer install that copy is another 1–2GB and fills
-// the Docker VM disk (ENOSPC on /tmp/astn-layer.tar).
+// /bin/sh (dash) can hash and extract in one pass.
+//
+// The fifo lives on /dev/shm (tmpfs), not on layersDir: Docker Desktop bind
+// mounts of the Mac host (virtiofs/osxfs) reject mkfifo with EPERM. Do not
+// stage a full tar on /tmp either — that second copy ENOSPC's the Docker VM
+// after a base-layer install.
 func OverlayCaptureScript(layersDir, upperDir, builderID string) string {
 	return fmt.Sprintf(`set -e
 STAGING=%q
 LAYERS_DIR=%q
 UPPER=%q
-FIFO="$STAGING/hash.fifo"
-HASH_OUT="$STAGING/sha256"
+PIPE_DIR=/dev/shm
+if [ ! -d "$PIPE_DIR" ] || [ ! -w "$PIPE_DIR" ]; then
+  PIPE_DIR=/tmp
+fi
+FIFO="$PIPE_DIR/astn-capture-$$.fifo"
+HASH_OUT="$PIPE_DIR/astn-capture-$$.sha"
 HASHPID=""
 cleanup() {
   if [ -n "$HASHPID" ]; then kill "$HASHPID" 2>/dev/null || true; fi
+  rm -f "$FIFO" "$HASH_OUT"
   rm -rf "$STAGING"
 }
 trap cleanup EXIT

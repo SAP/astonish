@@ -530,13 +530,13 @@ Input: live session ID, new `slug`, `scope`, `scope_ref_id`.
 The difference from `CreateTemplate` is that the content source is the **session's upper layer** (the user's effective changes since the template was composed). Parent is the session's current template.
 
 1. Session pod is running; `/mnt/astonish-layers` is mounted RW inside it (team-template editor sessions get this automatically via the `astonish.io/purpose=team-template-editor` label; see §5.17).
-2. Astonish exec's into the session pod and runs the in-pod tar-to-layer pipeline, streaming **only `/var/astonish/overlay/upper`** (not the merged view). The shipped script is POSIX (`/bin/sh` / dash): a named fifo replaces bash process substitution so sha256sum and extract run in one pass. It must **not** stage a full tar on `/tmp` (that second copy ENOSPC's the Docker VM after a base-layer install).
+2. Astonish exec's into the session pod and runs the in-pod tar-to-layer pipeline, streaming **only `/var/astonish/overlay/upper`** (not the merged view). The shipped script is POSIX (`/bin/sh` / dash): a named fifo replaces bash process substitution so sha256sum and extract run in one pass. The fifo lives on `/dev/shm` (tmpfs), not on the layers volume — Docker Desktop virtiofs bind mounts reject `mkfifo` (`EPERM`). It must **not** stage a full tar on `/tmp` (that second copy ENOSPC's the Docker VM after a base-layer install).
    ```sh
-   mkfifo "$STAGING/hash.fifo"
-   sha256sum < "$STAGING/hash.fifo" > "$STAGING/sha256" &
+   mkfifo /dev/shm/astn-capture-$$.fifo
+   sha256sum < /dev/shm/astn-capture-$$.fifo > /dev/shm/astn-capture-$$.sha &
    tar --numeric-owner --xattrs --acls --sort=name --mtime=@0 \
        -C /var/astonish/overlay/upper -cf - . \
-     | tee "$STAGING/hash.fifo" \
+     | tee /dev/shm/astn-capture-$$.fifo \
      | tar --numeric-owner --xattrs --acls \
        -C /mnt/astonish-layers/__staging-<id>/rootfs -xf -
    ```

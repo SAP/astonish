@@ -12,7 +12,8 @@ func TestOverlayCaptureScript_StreamsWithoutTmpTar(t *testing.T) {
 		"trap cleanup EXIT",
 		"/mnt/astonish-layers/__staging-bid-123",
 		"/var/astonish/overlay/upper",
-		"mkfifo",
+		"PIPE_DIR=/dev/shm",
+		"mkfifo \"$FIFO\"",
 		"sha256sum",
 		"tar --numeric-owner --xattrs --acls --sort=name --mtime=@0",
 		`mv "$STAGING" "$LAYERS_DIR/$SHA"`,
@@ -26,6 +27,9 @@ func TestOverlayCaptureScript_StreamsWithoutTmpTar(t *testing.T) {
 	}
 	if strings.Contains(s, "/tmp/astn-layer.tar") {
 		t.Error("must not stage a full tar on /tmp (ENOSPC after base-layer install)")
+	}
+	if strings.Contains(s, "$STAGING/hash.fifo") {
+		t.Error("fifo must not live on the layers bind mount (virtiofs rejects mkfifo)")
 	}
 	if strings.Contains(s, ">(sha256sum") {
 		t.Error("must not use bash process substitution (dash /bin/sh)")

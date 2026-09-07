@@ -40,6 +40,9 @@ func TestBuildCaptureScript_DoesNotStageTmpTar(t *testing.T) {
 	if !strings.Contains(s, "mkfifo") {
 		t.Fatal("expected posix fifo streaming capture")
 	}
+	if strings.Contains(s, "$STAGING/hash.fifo") {
+		t.Fatal("fifo must not live on the layers bind mount")
+	}
 }
 
 func TestCaptureLayerError_NoSpace(t *testing.T) {

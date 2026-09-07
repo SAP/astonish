@@ -517,14 +517,15 @@ func (c *SandboxKubernetesConfig) K8sMaxUpperReclaimsPerCycle() int {
 	return 500
 }
 
-// BackendKind returns the configured backend, lower-cased, with "" and
-// "incus" both normalising to "incus", and "kubernetes" aliased to "k8s".
-// This is the canonical accessor that callers should use — do NOT read
-// SandboxConfig.Backend directly.
+// BackendKind returns the configured backend, lower-cased, with ""
+// normalising to "docker", "incus" kept for explicit legacy configs,
+// and "kubernetes" aliased to "k8s".
 func (c *SandboxConfig) BackendKind() string {
 	b := strings.ToLower(strings.TrimSpace(c.Backend))
 	switch b {
-	case "", "incus":
+	case "":
+		return "docker"
+	case "incus":
 		return "incus"
 	case "kubernetes":
 		return "k8s"

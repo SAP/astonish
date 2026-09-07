@@ -23,34 +23,30 @@ func TestBackendFromAppConfig_NilAppConfig(t *testing.T) {
 // here — pkg/sandbox deliberately does not link pkg/sandbox/k8s. See
 // pkg/sandbox/k8s/backend_test.go:TestBackendFromAppConfig_K8s.
 
-// TestBackendFromAppConfig_DefaultsToIncus ensures backward-compatibility:
-// an empty Backend field must route through the incus path. We can't go
-// all the way because SetupSandboxRuntime may not find a local Incus
-// daemon in CI — we just assert we reach that branch (failing with an
-// incus-flavoured error is the success signal here).
-func TestBackendFromAppConfig_DefaultsToIncus(t *testing.T) {
+// TestBackendFromAppConfig_DefaultsToDocker: empty Backend field routes
+// through the docker factory. pkg/sandbox does not import pkg/sandbox/docker,
+// so the error names docker as unavailable.
+func TestBackendFromAppConfig_DefaultsToDocker(t *testing.T) {
 	appCfg := &config.AppConfig{}
-	// Backend unset → "incus" per BackendKind().
 	_, _, err := BackendFromAppConfig(appCfg)
 	if err == nil {
-		// If Incus happens to be available, that's fine too.
 		return
 	}
-	if !strings.Contains(err.Error(), "incus") {
-		t.Errorf("expected incus path error, got: %v", err)
+	if !strings.Contains(err.Error(), "docker") {
+		t.Errorf("expected docker path error, got: %v", err)
 	}
 }
 
 // TestBackendFromAppConfig_UnknownKind surfaces a clear error for typos.
 func TestBackendFromAppConfig_UnknownKind(t *testing.T) {
 	appCfg := &config.AppConfig{}
-	appCfg.Sandbox.Backend = "docker" // not supported
+	appCfg.Sandbox.Backend = "bogus"
 
 	_, _, err := BackendFromAppConfig(appCfg)
 	if err == nil {
 		t.Fatal("expected error for unknown kind")
 	}
-	if !strings.Contains(err.Error(), "docker") {
+	if !strings.Contains(err.Error(), "bogus") {
 		t.Errorf("error should name the unknown kind; got: %v", err)
 	}
 }

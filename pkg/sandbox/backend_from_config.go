@@ -69,6 +69,18 @@ func BackendFromAppConfigWithSessions(appCfg *config.AppConfig, sessRegistry *Se
 	limits := EffectiveLimits(&appCfg.Sandbox)
 
 	switch kind {
+	case BackendKindDocker:
+		b, err := NewBackend(BackendFactoryConfig{
+			Kind:       BackendKindDocker,
+			Sessions:   sessRegistry,
+			Templates:  tplRegistry,
+			DefaultLim: &limits,
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		return b, nil, nil
+
 	case BackendKindIncus:
 		SetSandboxConfig(&appCfg.Sandbox)
 		client, err := SetupSandboxRuntime()

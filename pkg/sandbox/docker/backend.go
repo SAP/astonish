@@ -288,6 +288,22 @@ func (db *DockerBackend) layerRootfs(layerID string) string {
 	return filepath.Join(db.layerDir(layerID), "rootfs")
 }
 
+// LayersDir is the host directory of content-addressed overlay layers.
+func (db *DockerBackend) LayersDir() string { return db.cfg.LayersDir }
+
+// SandboxImage is the OCI image used for session containers.
+func (db *DockerBackend) SandboxImage() string { return db.cfg.SandboxImage }
+
+// Open constructs a DockerBackend with default storage paths and a local
+// session registry. Used by CLI/setup.
+func Open() (*DockerBackend, error) {
+	reg, err := sandbox.NewSessionRegistry()
+	if err != nil {
+		return nil, fmt.Errorf("sandbox/docker: session registry: %w", err)
+	}
+	return New(Config{Sessions: reg})
+}
+
 // upperPath is the host persist directory for a session (upper.tar.zst).
 func (db *DockerBackend) upperPath(sessionID string) string {
 	return filepath.Join(db.cfg.UppersDir, sessionID)

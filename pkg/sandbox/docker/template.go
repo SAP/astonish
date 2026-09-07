@@ -24,12 +24,65 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/SAP/astonish/pkg/sandbox"
 )
+
+// SeedBaseLayerFromImage exports the sandbox image filesystem into
+// layers/@base/rootfs so the overlay entrypoint has a lowerdir. Idempotent
+// if that directory already exists and is non-empty.
+func (db *DockerBackend) SeedBaseLayerFromImage(ctx context.Context) error {
+	rootfs := db.layerRootfs(sandbox.BaseTemplateID)
+	if entries, err := os.ReadDir(rootfs); err == nil && len(entries) > 0 {
+		return nil
+	}
+	if err := os.MkdirAll(rootfs, 0o755); err != nil {
+		return fmt.Errorf("sandbox/docker: mkdir %s: %w", rootfs, err)
+	}
+
+	image := db.cfg.SandboxImage
+	if _, err := runDocker(ctx, db.cfg.ContainerRuntimePath, "pull", image); err != nil {
+		return fmt.Errorf("sandbox/docker: docker pull %s: %w", image, err)
+	}
+
+	tmpName := "astonish-seed-base"
+	_, _ = runDocker(ctx, db.cfg.ContainerRuntimePath, "rm", "-f", tmpName)
+	if _, err := runDocker(ctx, db.cfg.ContainerRuntimePath, "create", "--name", tmpName, image); err != nil {
+		return fmt.Errorf("sandbox/docker: docker create seed: %w", err)
+	}
+	defer func() {
+		_, _ = runDocker(context.Background(), db.cfg.ContainerRuntimePath, "rm", "-f", tmpName)
+	}()
+
+	cmd := exec.CommandContext(ctx, db.cfg.ContainerRuntimePath, "export", tmpName)
+	tarCmd := exec.CommandContext(ctx, "tar", "-C", rootfs, "-xf", "-")
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	tarCmd.Stdin = stdout
+	var exportErr, tarErr error
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("sandbox/docker: docker export: %w", err)
+	}
+	if err := tarCmd.Start(); err != nil {
+		_ = cmd.Process.Kill()
+		return fmt.Errorf("sandbox/docker: tar extract seed: %w", err)
+	}
+	tarErr = tarCmd.Wait()
+	exportErr = cmd.Wait()
+	if exportErr != nil {
+		return fmt.Errorf("sandbox/docker: docker export: %w", exportErr)
+	}
+	if tarErr != nil {
+		return fmt.Errorf("sandbox/docker: extract seed rootfs: %w", tarErr)
+	}
+	return nil
+}
 
 // BuildTemplate creates a new template layer by provisioning a throwaway
 // container, running the build steps, and capturing the upper directory.

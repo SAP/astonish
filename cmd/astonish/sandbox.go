@@ -12,11 +12,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/huh"
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/sandbox"
+	sboxdocker "github.com/SAP/astonish/pkg/sandbox/docker"
 	incus "github.com/SAP/astonish/pkg/sandbox/incus"
 	persistentsession "github.com/SAP/astonish/pkg/session"
+	"github.com/charmbracelet/huh"
 )
 
 func handleSandboxCommand(args []string) error {
@@ -35,9 +36,10 @@ func handleSandboxCommand(args []string) error {
 		return handleSandboxK8sSmoke(args[1:])
 	}
 
-	// Sandbox commands always need root on Linux for overlay mounts,
-	// UID shifting, and Incus socket access. Re-exec via sudo if needed.
-	if sandbox.NeedsEscalation() {
+	// Docker session containers do not need host overlay mounts or Incus
+	// sockets. Skip sudo for status/init; remaining Incus-era subcommands
+	// still escalate on Linux until they are rewritten.
+	if args[0] != "status" && args[0] != "init" && sandbox.NeedsEscalation() {
 		return sandbox.Escalate()
 	}
 
@@ -222,150 +224,75 @@ func printSandboxTemplateUsage() {
 // --- Status ---
 
 func handleSandboxStatus() error {
-	platform := incus.DetectPlatform()
-	fmt.Printf("Platform:         %s\n", platform)
-
-	if platform == incus.PlatformUnsupported {
-		fmt.Println("Status:           No container runtime available")
-		fmt.Println("")
-		fmt.Println("To enable session containers:")
-		fmt.Println("  Linux:         apt install incus && incus admin init")
-		fmt.Println("  macOS/Windows: Install Docker (any Docker-compatible runtime)")
-		return nil
-	}
-
-	// Docker+Incus: show Docker container status
-	if platform == incus.PlatformDockerIncus {
-		if incus.IsIncusDockerContainerRunning() {
-			fmt.Println("Docker container: running")
-			if v := incus.GetDockerContainerVersion(); v != "" {
-				fmt.Printf("Docker version:   %s\n", v)
-			}
-			if incus.NeedsUpgrade() {
-				fmt.Println("Upgrade needed:   yes (version mismatch)")
-			}
-		} else {
-			fmt.Println("Docker container: not running")
-			fmt.Println("Run 'astonish sandbox init' to set up the runtime.")
-			return nil
+	det := sboxdocker.DetectDocker("")
+	fmt.Println("Platform:         Docker + OverlayFS")
+	if !det.Available {
+		fmt.Println("Status:           Docker daemon not reachable")
+		if det.Reason != "" {
+			fmt.Printf("Reason:           %s\n", det.Reason)
 		}
+		fmt.Println("")
+		fmt.Println("Install Docker and retry:")
+		fmt.Println("  Linux:         install docker-ce and add your user to the docker group")
+		fmt.Println("  macOS/Windows: install Docker Desktop (or another Docker-compatible runtime)")
+		return nil
 	}
+	fmt.Printf("Docker version:   %s\n", det.Version)
 
-	incus.SetActivePlatform(platform)
-	client, err := incus.Connect(platform)
+	b, err := sboxdocker.Open()
 	if err != nil {
-		fmt.Printf("Incus connection: FAILED (%v)\n", err)
+		return err
+	}
+	health, err := b.Health(context.Background())
+	if err != nil {
+		return err
+	}
+	if health != nil && health.Healthy {
+		fmt.Println("Docker connected: yes")
+	} else {
+		reason := ""
+		if health != nil {
+			reason = health.Reason
+		}
+		fmt.Printf("Docker connected: no (%s)\n", reason)
 		return nil
 	}
 
-	tplRegistry, err := sandbox.NewTemplateRegistry()
-	if err != nil {
-		return err
-	}
-
-	sessRegistry, err := sandbox.NewSessionRegistry()
-	if err != nil {
-		return err
-	}
-
-	status, err := sandbox.Status(client, tplRegistry, sessRegistry)
-	if err != nil {
-		return err
-	}
-
-	fmt.Printf("Incus connected:  yes\n")
-	if status.IncusVersion != "" {
-		fmt.Printf("Incus version:    %s\n", status.IncusVersion)
-	}
-	if status.StorageBackend != "" {
-		fmt.Printf("Storage backend:  %s\n", status.StorageBackend)
-	}
-	if status.OverlayReady {
-		fmt.Printf("Session creation: instant (overlayfs)\n")
+	fmt.Printf("Layers dir:       %s\n", b.LayersDir())
+	rootfs := filepath.Join(b.LayersDir(), sandbox.BaseTemplateID, "rootfs")
+	if entries, err := os.ReadDir(rootfs); err == nil && len(entries) > 0 {
+		fmt.Println("Session creation: overlay ready (@base layer present)")
 	} else {
-		fmt.Printf("Session creation: not configured (run 'astonish sandbox init')\n")
-	}
-	fmt.Printf("Templates:        %d\n", status.TemplateCount)
-	fmt.Printf("Session containers: %d\n", status.SessionCount)
-	if status.OrphanCount > 0 {
-		fmt.Printf("Orphan containers:  %d (run 'astonish sandbox prune' to clean up)\n", status.OrphanCount)
+		fmt.Println("Session creation: not configured (run 'astonish sandbox init')")
 	}
 
+	sessions, err := b.ListSessions(context.Background(), sandbox.SessionFilter{})
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Session containers: %d\n", len(sessions))
 	return nil
 }
 
 // --- Init ---
 
 func handleSandboxInit() error {
-	platform := incus.DetectPlatform()
-
-	if platform == incus.PlatformUnsupported {
-		return fmt.Errorf("no container runtime available.\nLinux: install Incus (apt install incus && incus admin init)\nmacOS/Windows: install Docker (any Docker-compatible runtime)")
+	det := sboxdocker.DetectDocker("")
+	if !det.Available {
+		return fmt.Errorf("docker is not available.\nLinux: install docker-ce and add your user to the docker group\nmacOS/Windows: install Docker Desktop\n%v", det.Reason)
 	}
 
-	// Store sandbox config for privilege mode detection in container creation.
-	appCfg, cfgErr := config.LoadAppConfig()
-	if cfgErr == nil && appCfg != nil {
-		sandbox.SetSandboxConfig(&appCfg.Sandbox)
-	}
-
-	// Nested LXC hosts cannot run unprivileged containers (mounting /proc
-	// in double-nested user namespaces is blocked). Require the user to
-	// explicitly set sandbox.privileged: true in their config.
-	if incus.IsInsideLXC() && !sandbox.IsPrivileged() {
-		return fmt.Errorf("this host is an LXC container and sandbox.privileged is not enabled.\n" +
-			"Unprivileged containers cannot run inside nested LXC environments\n" +
-			"(mounting /proc in double-nested user namespaces is not permitted).\n\n" +
-			"To enable sandbox on this host, set privileged mode in your config:\n\n" +
-			"  sandbox:\n" +
-			"    privileged: true\n\n" +
-			"Note: privileged containers run as root inside the sandbox.\n" +
-			"The outer LXC container provides the isolation boundary.")
-	}
-
-	// On Docker+Incus, ensure the Docker container is set up first
-	if platform == incus.PlatformDockerIncus {
-		fmt.Println("Setting up Docker+Incus runtime...")
-		if err := incus.EnsureIncusDockerContainer(); err != nil {
-			return fmt.Errorf("failed to set up Docker+Incus: %w", err)
-		}
-		fmt.Println("Docker+Incus runtime ready.")
-	}
-
-	incus.SetActivePlatform(platform)
-	client, err := incus.Connect(platform)
-	if err != nil {
-		return fmt.Errorf("failed to connect to Incus: %w", err)
-	}
-
-	registry, err := sandbox.NewTemplateRegistry()
+	fmt.Println("Setting up Docker + OverlayFS sandbox...")
+	b, err := sboxdocker.Open()
 	if err != nil {
 		return err
 	}
-
-	opts := promptOptionalTools()
-
-	// Wire browser engine into base template options so browser packages
-	// (Chromium, KasmVNC, X11 deps) are installed in the base template.
-	if appCfg != nil {
-		bCfg := incus.BrowserContainerConfig{
-			ChromePath:          appCfg.Browser.ChromePath,
-			FingerprintSeed:     appCfg.Browser.FingerprintSeed,
-			FingerprintPlatform: appCfg.Browser.FingerprintPlatform,
-		}
-		engine := incus.DetectBrowserEngine(bCfg)
-		if incus.IsContainerCompatibleEngine(engine) {
-			opts.BrowserEngine = engine
-		} else {
-			fmt.Printf("\nNote: browser engine %q is not compatible with container mode.\n", engine)
-			fmt.Println("The browser will run on the host. Switch to 'default' or 'cloakbrowser' to enable containerized browsing.")
-		}
-	}
-
-	if err := sandbox.InitBaseTemplate(client, registry, opts); err != nil {
+	fmt.Printf("Pulling sandbox image %s (may take a few minutes on first run)...\n", b.SandboxImage())
+	if err := b.SeedBaseLayerFromImage(context.Background()); err != nil {
 		return err
 	}
-
+	fmt.Printf("Base overlay layer ready at %s/%s/rootfs\n", b.LayersDir(), sandbox.BaseTemplateID)
+	fmt.Println("Sandbox initialized. Session containers will use Docker OverlayFS.")
 	return nil
 }
 

@@ -217,6 +217,13 @@ func buildBackendBrowserLaunchScript(cfg browser.BrowserConfig, width, height in
 	return fmt.Sprintf(`#!/bin/sh
 set -e
 
+# Apple Silicon Docker VMs advertise ARMv9 HWCAP bits that CloakBrowser/
+# Chromium cannot execute (SIGILL). The template build installs a mask
+# shim; apply it whenever it is present.
+if [ -f /usr/lib/hwcap_mask.so ]; then
+  export LD_PRELOAD=/usr/lib/hwcap_mask.so${LD_PRELOAD:+:$LD_PRELOAD}
+fi
+
 proc_running() {
   for p in /proc/[0-9]*/cmdline; do
     [ -f "$p" ] || continue

@@ -22,6 +22,7 @@ func TestBuildBackendBrowserLaunchScript_UsesSandboxBrowser(t *testing.T) {
 	}, 1366, 768)
 
 	wants := []string{
+		"export LD_PRELOAD=/usr/lib/hwcap_mask.so",
 		"HOME=/home/browser python3 -c 'from cloakbrowser.config import get_binary_path",
 		"/home/browser/.cloakbrowser",
 		"Xkasmvnc :0",

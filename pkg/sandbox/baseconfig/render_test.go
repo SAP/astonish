@@ -169,6 +169,9 @@ func TestRender_Arm64Architecture(t *testing.T) {
 	if !strings.Contains(joined, "hwcap_mask") {
 		t.Errorf("expected hwcap_mask shim compilation for arm64, got:\n%s", joined)
 	}
+	if !strings.Contains(joined, "/etc/ld.so.preload") {
+		t.Errorf("expected hwcap_mask to be installed in ld.so.preload for arm64, got:\n%s", joined)
+	}
 }
 
 func TestShellJoin_ShCommand(t *testing.T) {

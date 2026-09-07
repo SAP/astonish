@@ -428,12 +428,16 @@ chown browser:browser /home/browser/.vnc/xstartup`},
 	// getauxval(AT_HWCAP/AT_HWCAP2). Libraries like libjpeg-turbo, Skia,
 	// BoringSSL, and zlib detect these features at runtime and use optimized
 	// code paths — but some of these instructions are not fully functional in
-	// the nested virtualization stack (macOS → Docker VM → Incus LXC), causing
-	// SIGILL crashes when rendering image-heavy pages.
+	// the nested virtualization stack (macOS → Docker VM, with or without
+	// Incus), causing SIGILL (exit 132) when CloakBrowser/Chromium starts
+	// or when cloakbrowser.ensure_binary() unpacks the binary during the
+	// base-layer build.
 	//
 	// The shim intercepts getauxval() and masks out everything beyond baseline
 	// ARMv8.0 + safe extensions (NEON, AES, SHA, CRC32, atomics). This forces
 	// all libraries to use their baseline NEON code paths which work correctly.
+	// It is installed into /etc/ld.so.preload so pip/ensure_binary and later
+	// session processes pick it up without depending on Incus launch scripts.
 	if arch == "aarch64" {
 		// The C source for the HWCAP masking shim.
 		hwcapShimSource := `
@@ -472,7 +476,8 @@ unsigned long getauxval(unsigned long type) {
 %s
 SHIMEOF
 gcc -shared -fPIC -o /usr/lib/hwcap_mask.so /tmp/hwcap_mask.c -ldl
-rm -f /tmp/hwcap_mask.c`, hwcapShimSource),
+rm -f /tmp/hwcap_mask.c
+printf '/usr/lib/hwcap_mask.so\n' > /etc/ld.so.preload`, hwcapShimSource),
 			},
 			// Remove gcc to keep the template lean (only needed at build time)
 			[]string{"sh", "-c", "apt-get remove -y gcc && apt-get autoremove -y"},
@@ -546,11 +551,11 @@ func cloakBrowserEnsureBinaryCmd(distro LinuxDistro) []string {
 		// Run as root; use HOME override so the binary lands in the
 		// browser user's home directory.
 		return []string{"sh", "-c",
-			`HOME=/home/browser python3 -c "import cloakbrowser; print(cloakbrowser.ensure_binary())"`,
+			`if [ -f /usr/lib/hwcap_mask.so ]; then export LD_PRELOAD=/usr/lib/hwcap_mask.so; fi; HOME=/home/browser python3 -c "import cloakbrowser; print(cloakbrowser.ensure_binary())"`,
 		}
 	default: // DistroUbuntuNoble — Incus containers
-		return []string{"runuser", "-u", "browser", "--",
-			"python3", "-c", "import cloakbrowser; print(cloakbrowser.ensure_binary())",
+		return []string{"sh", "-c",
+			`if [ -f /usr/lib/hwcap_mask.so ]; then export LD_PRELOAD=/usr/lib/hwcap_mask.so; fi; runuser -u browser -- python3 -c "import cloakbrowser; print(cloakbrowser.ensure_binary())"`,
 		}
 	}
 }

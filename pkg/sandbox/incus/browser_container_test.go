@@ -638,6 +638,13 @@ func TestBrowserContainerInstallCommands_DebianBookworm_CloakBrowserEngine(t *te
 	assertCmdSequence(t, cmds, []string{"pip3", "install"}, "pip install cloakbrowser")
 }
 
+func TestBrowserContainerInstallCommands_Aarch64_EnablesHwcapPreload(t *testing.T) {
+	cmds := BrowserContainerInstallCommands("cloakbrowser", "aarch64", DistroDebianBookworm)
+	flat := flattenCommands(cmds)
+	assertContainsStr(t, flat, "/etc/ld.so.preload", "install hwcap shim via ld.so.preload")
+	assertContainsStr(t, flat, "LD_PRELOAD=/usr/lib/hwcap_mask.so", "ensure_binary uses LD_PRELOAD when the shim exists")
+}
+
 // TestBrowserContainerInstallCommands_DebianBookworm_ArchAwareKasmVNC verifies
 // that the KasmVNC .deb URL on Debian bookworm uses the correct architecture.
 func TestBrowserContainerInstallCommands_DebianBookworm_ArchAwareKasmVNC(t *testing.T) {

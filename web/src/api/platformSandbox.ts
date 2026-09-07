@@ -158,6 +158,7 @@ export function configureBase({ config, onProgress, onDone, onError }: Configure
       const reader = res.body!.getReader()
       const decoder = new TextDecoder()
       let buffer = ''
+      let terminal = false
 
       while (true) {
         const { done, value } = await reader.read()
@@ -178,8 +179,10 @@ export function configureBase({ config, onProgress, onDone, onError }: Configure
               if (currentEvent === 'progress') {
                 onProgress(data.message || '')
               } else if (currentEvent === 'done') {
+                terminal = true
                 onDone({ layer_id: data.layer_id, size_bytes: data.size_bytes })
               } else if (currentEvent === 'error') {
+                terminal = true
                 onError(data.error || 'Unknown error')
               }
             } catch {
@@ -188,6 +191,9 @@ export function configureBase({ config, onProgress, onDone, onError }: Configure
             currentEvent = ''
           }
         }
+      }
+      if (!terminal) {
+        onError('Build stream ended without a result. Overlay capture was interrupted; restart Studio and rebuild.')
       }
     })
     .catch((err: Error) => {

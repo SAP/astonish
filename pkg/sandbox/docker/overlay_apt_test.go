@@ -37,11 +37,11 @@ func TestBuildCaptureScript_DoesNotStageTmpTar(t *testing.T) {
 	if strings.Contains(s, "/tmp/astn-layer.tar") {
 		t.Fatal("capture must not write /tmp/astn-layer.tar")
 	}
-	if !strings.Contains(s, "mkfifo") {
-		t.Fatal("expected posix fifo streaming capture")
+	if strings.Contains(s, "mkfifo") {
+		t.Fatal("must not use mkfifo")
 	}
-	if strings.Contains(s, "$STAGING/hash.fifo") {
-		t.Fatal("fifo must not live on the layers bind mount")
+	if !strings.Contains(s, "pipefail") {
+		t.Fatal("expected bash pipefail two-pass tar")
 	}
 }
 

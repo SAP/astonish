@@ -271,17 +271,15 @@ func TestParentLayerOf(t *testing.T) {
 func TestBuildCaptureScript_ContainsCanonicalPipeline(t *testing.T) {
 	s := buildCaptureScript("/mnt/astonish-layers", "bid-123")
 	mustContain := []string{
-		"set -e",
+		"set -euo pipefail",
 		"trap cleanup EXIT",
 		"/mnt/astonish-layers/__staging-bid-123",
 		"tar --numeric-owner --xattrs --acls --sort=name --mtime=@0",
 		"/var/astonish/overlay/upper",
-		"mkfifo",
 		"sha256sum",
 		"mv \"$STAGING\" \"$LAYERS_DIR/$SHA\"",
-		"du -sb",
 		"echo \"SHA=$SHA\"",
-		"echo \"SIZE=$SIZE\"",
+		"du -sb",
 	}
 	for _, needle := range mustContain {
 		if !strings.Contains(s, needle) {
@@ -290,6 +288,9 @@ func TestBuildCaptureScript_ContainsCanonicalPipeline(t *testing.T) {
 	}
 	if strings.Contains(s, "/tmp/astn-layer.tar") {
 		t.Error("must not stage a full tar on /tmp")
+	}
+	if strings.Contains(s, "mkfifo") {
+		t.Error("must not use mkfifo")
 	}
 }
 

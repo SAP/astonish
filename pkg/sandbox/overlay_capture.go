@@ -2,54 +2,46 @@ package sandbox
 
 import "fmt"
 
-// OverlayCaptureScript is the POSIX tar-to-layer pipeline used by Docker and
-// Kubernetes BuildTemplate / SaveSessionAsTemplate.
+// OverlayCaptureOpts is the in-container tar-to-layer pipeline used by Docker
+// and Kubernetes BuildTemplate / SaveSessionAsTemplate.
+type OverlayCaptureOpts struct {
+	LayersDir string
+	UpperDir  string
+	BuilderID string
+	// ExtractXattrs is true on Linux PVCs (CephFS). False on Docker Desktop /
+	// Colima virtiofs bind mounts, which reject xattrs and acls (EPERM) and
+	// abort the extract after a full package install.
+	ExtractXattrs bool
+}
+
+// OverlayCaptureScript streams the overlay upper through sha256sum into a
+// staging directory on layersDir.
 //
-// It streams the overlay upper through sha256sum into a staging directory on
-// layersDir. A named fifo replaces bash process substitution so Debian's
-// /bin/sh (dash) can hash and extract in one pass.
+// It is bash with pipefail (no fifo, no /tmp tar):
+//   - A fifo on the layers volume fails on virtiofs (EPERM).
+//   - A fifo+tee pipeline can deadlock and OOM a 8GiB Colima VM.
+//   - A full tar on /tmp ENOSPC's the Docker VM after CloakBrowser+apt.
 //
-// The fifo lives on /dev/shm (tmpfs), not on layersDir: Docker Desktop bind
-// mounts of the Mac host (virtiofs/osxfs) reject mkfifo with EPERM. Do not
-// stage a full tar on /tmp either — that second copy ENOSPC's the Docker VM
-// after a base-layer install.
-func OverlayCaptureScript(layersDir, upperDir, builderID string) string {
-	return fmt.Sprintf(`set -e
+// Hash and extract are two sequential tar streams of the overlay upper
+// (Linux volume, cheap). The extract lands on layersDir.
+func OverlayCaptureScript(opts OverlayCaptureOpts) string {
+	extractFlags := "--numeric-owner"
+	sizeLine := `echo "SIZE=0"`
+	if opts.ExtractXattrs {
+		extractFlags = "--numeric-owner --xattrs --acls"
+		sizeLine = `SIZE=$(du -sb "$LAYERS_DIR/$SHA/rootfs" | awk '{print $1}')
+echo "SIZE=$SIZE"`
+	}
+	return fmt.Sprintf(`set -euo pipefail
 STAGING=%q
 LAYERS_DIR=%q
 UPPER=%q
-PIPE_DIR=/dev/shm
-if [ ! -d "$PIPE_DIR" ] || [ ! -w "$PIPE_DIR" ]; then
-  PIPE_DIR=/tmp
-fi
-FIFO="$PIPE_DIR/astn-capture-$$.fifo"
-HASH_OUT="$PIPE_DIR/astn-capture-$$.sha"
-HASHPID=""
-cleanup() {
-  if [ -n "$HASHPID" ]; then kill "$HASHPID" 2>/dev/null || true; fi
-  rm -f "$FIFO" "$HASH_OUT"
-  rm -rf "$STAGING"
-}
+cleanup() { rm -rf "$STAGING"; }
 trap cleanup EXIT
 mkdir -p "$STAGING/rootfs"
-need=$(du -sm "$UPPER" 2>/dev/null | awk '{print $1}')
-avail=$(df -Pm "$LAYERS_DIR" 2>/dev/null | awk 'NR==2 { print $4 }')
-echo "capture: upper=${need}MB layers_free=${avail}MB"
-if [ -n "$need" ] && [ -n "$avail" ] && [ "$avail" -lt "$need" ]; then
-  echo "E: layers volume has ${avail}MB free; overlay upper is ${need}MB. Increase Docker Desktop disk or run: docker volume prune -f && docker system prune" >&2
-  exit 1
-fi
-mkfifo "$FIFO"
-(sha256sum < "$FIFO" > "$HASH_OUT") &
-HASHPID=$!
-tar --numeric-owner --xattrs --acls --sort=name --mtime=@0 \
-    -C "$UPPER" -cf - . \
-  | tee "$FIFO" \
-  | tar --numeric-owner --xattrs --acls -C "$STAGING/rootfs" -xf -
-wait "$HASHPID"
-HASHPID=""
-SHA=$(awk '{print $1}' "$HASH_OUT")
-rm -f "$FIFO" "$HASH_OUT"
+echo "capture: hashing overlay" >&2
+SHA=$(tar --numeric-owner --xattrs --acls --sort=name --mtime=@0 -C "$UPPER" -cf - . | sha256sum | awk '{print $1}')
+echo "capture: sha=$SHA" >&2
 if [ ${#SHA} -ne 64 ]; then
   echo "E: capture sha256 is not 64 hex chars: $SHA" >&2
   exit 1
@@ -57,11 +49,13 @@ fi
 if [ -d "$LAYERS_DIR/$SHA" ]; then
   rm -rf "$STAGING"
 else
+  echo "capture: extracting overlay to layers" >&2
+  tar --numeric-owner --xattrs --acls --sort=name --mtime=@0 -C "$UPPER" -cf - . \
+    | tar %s -C "$STAGING/rootfs" -xf -
   mv "$STAGING" "$LAYERS_DIR/$SHA"
 fi
 trap - EXIT
-SIZE=$(du -sb "$LAYERS_DIR/$SHA/rootfs" | awk '{print $1}')
 echo "SHA=$SHA"
-echo "SIZE=$SIZE"
-`, layersDir+"/__staging-"+builderID, layersDir, upperDir)
+%s
+`, opts.LayersDir+"/__staging-"+opts.BuilderID, opts.LayersDir, opts.UpperDir, extractFlags, sizeLine)
 }

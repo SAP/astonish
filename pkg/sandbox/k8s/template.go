@@ -507,7 +507,7 @@ func (b *K8sBackend) captureUpperAsLayer(ctx context.Context, podName, parentLay
 	script := buildCaptureScript(b.cfg.LayersPath, builderID)
 
 	res, err := b.execInPod(ctx, podName, sandbox.ExecSpec{
-		Command: []string{"/bin/sh", "-c", script},
+		Command: []string{"/bin/bash", "-c", script},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("exec capture pipeline: %w", err)
@@ -540,7 +540,12 @@ func (b *K8sBackend) captureUpperAsLayer(ctx context.Context, podName, parentLay
 // Isolated at package scope so tests can assert exactly the script
 // shape without standing up a pod.
 func buildCaptureScript(layersPath, builderID string) string {
-	return sandbox.OverlayCaptureScript(layersPath, mountUpper, builderID)
+	return sandbox.OverlayCaptureScript(sandbox.OverlayCaptureOpts{
+		LayersDir:     layersPath,
+		UpperDir:      mountUpper,
+		BuilderID:     builderID,
+		ExtractXattrs: true,
+	})
 }
 
 // parseCaptureOutput extracts the SHA= and SIZE= lines emitted by

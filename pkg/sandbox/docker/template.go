@@ -179,8 +179,8 @@ func (db *DockerBackend) BuildTemplate(ctx context.Context, spec sandbox.Templat
 		}
 	}
 
-	report("Capturing overlay layer...")
-	return db.captureUpperAsLayer(ctx, sess.SessionID, spec.TemplateID)
+	report("Capturing overlay layer (copying the installed overlay onto disk; this can take several minutes)...")
+	return db.captureUpperAsLayer(ctx, sess.SessionID, spec.TemplateID, report)
 }
 
 func captureLayerError(err error) error {
@@ -301,7 +301,7 @@ func (db *DockerBackend) SaveSessionAsTemplate(ctx context.Context, sessionID st
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return db.captureUpperAsLayer(ctx, sessionID, sessionID)
+	return db.captureUpperAsLayer(ctx, sessionID, sessionID, nil)
 }
 
 // RefreshTemplate re-runs a template's build steps. The template registry
@@ -426,18 +426,51 @@ func (db *DockerBackend) ReplaceBaseFromSession(ctx context.Context, sessionID s
 // captureUpperAsLayer runs the k8s-equivalent tar pipeline inside the
 // container (image namespace, not chroot) so the layer lands at
 // LayersDir/<sha>/rootfs via the bind-mounted layers volume.
-func (db *DockerBackend) captureUpperAsLayer(ctx context.Context, sessionID, templateID string) (*sandbox.TemplateArtifact, error) {
+func (db *DockerBackend) captureUpperAsLayer(ctx context.Context, sessionID, templateID string, report func(string)) (*sandbox.TemplateArtifact, error) {
 	_ = templateID
+	if report == nil {
+		report = func(string) {}
+	}
 	cname := containerName(sessionID)
 	builderID := fmt.Sprintf("%d", time.Now().UnixNano())
-	out, err := runDocker(ctx, db.cfg.ContainerRuntimePath,
-		"exec", cname, "/bin/sh", "-c", buildCaptureScript(builderID))
-	if err != nil {
-		return nil, captureLayerError(err)
+	script := buildCaptureScript(builderID)
+
+	type execResult struct {
+		out []byte
+		err error
 	}
-	sha, size, err := parseCaptureOutput(out)
+	ch := make(chan execResult, 1)
+	go func() {
+		out, err := runDocker(ctx, db.cfg.ContainerRuntimePath,
+			"exec", cname, "/bin/bash", "-c", script)
+		ch <- execResult{out, err}
+	}()
+
+	tick := time.NewTicker(15 * time.Second)
+	defer tick.Stop()
+	elapsed := 0
+	var res execResult
+	for {
+		select {
+		case res = <-ch:
+			goto done
+		case <-tick.C:
+			elapsed += 15
+			report(fmt.Sprintf("Capturing overlay layer... still copying (%ds). Keep the build container running; this is a disk copy, not a hang.", elapsed))
+		case <-ctx.Done():
+			return nil, captureLayerError(ctx.Err())
+		}
+	}
+done:
+	if res.err != nil {
+		return nil, captureLayerError(res.err)
+	}
+	sha, size, err := parseCaptureOutput(res.out)
 	if err != nil {
 		return nil, fmt.Errorf("sandbox/docker: capture layer output: %w", err)
+	}
+	if size == 0 {
+		size = dirSize(db.layerRootfs(sha))
 	}
 	return &sandbox.TemplateArtifact{
 		LayerID:    sha,
@@ -448,7 +481,23 @@ func (db *DockerBackend) captureUpperAsLayer(ctx context.Context, sessionID, tem
 }
 
 func buildCaptureScript(builderID string) string {
-	return sandbox.OverlayCaptureScript(mountLayers, mountUpper, builderID)
+	return sandbox.OverlayCaptureScript(sandbox.OverlayCaptureOpts{
+		LayersDir:     mountLayers,
+		UpperDir:      mountUpper,
+		BuilderID:     builderID,
+		ExtractXattrs: false,
+	})
+}
+
+func dirSize(root string) int64 {
+	var total int64
+	_ = filepath.Walk(root, func(_ string, info os.FileInfo, err error) error {
+		if err == nil && info != nil && !info.IsDir() {
+			total += info.Size()
+		}
+		return nil
+	})
+	return total
 }
 
 func parseCaptureOutput(stdout []byte) (sha string, size int64, err error) {

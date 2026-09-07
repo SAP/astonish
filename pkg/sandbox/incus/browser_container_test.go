@@ -643,6 +643,60 @@ func TestBrowserContainerInstallCommands_Aarch64_EnablesHwcapPreload(t *testing.
 	flat := flattenCommands(cmds)
 	assertContainsStr(t, flat, "/etc/ld.so.preload", "install hwcap shim via ld.so.preload")
 	assertContainsStr(t, flat, "LD_PRELOAD=/usr/lib/hwcap_mask.so", "ensure_binary uses LD_PRELOAD when the shim exists")
+	assertContainsStr(t, flat, "/proc/self/auxv", "hwcap shim reads auxv from /proc rather than dlsym")
+	if strings.Contains(flat, "RTLD_NEXT") {
+		t.Error("hwcap shim must not call dlsym(RTLD_NEXT) from getauxval (NULL/recursion SIGSEGV under ld.so.preload)")
+	}
+	if strings.Contains(flat, "dlsym") {
+		t.Error("hwcap shim must not call dlsym (unsafe from an interposed getauxval)")
+	}
+}
+
+func TestHwcapMaskShimSource_CachesAuxv(t *testing.T) {
+	src := hwcapMaskShimSource
+	for _, want := range []string{
+		"/proc/self/auxv",
+		"constructor",
+		"AT_HWCAP",
+		"AT_HWCAP2",
+		"HWCAP_SAFE_MASK",
+	} {
+		if !strings.Contains(src, want) {
+			t.Errorf("hwcapMaskShimSource missing %q", want)
+		}
+	}
+	for _, forbid := range []string{"RTLD_NEXT", "dlsym", "dlfcn.h"} {
+		if strings.Contains(src, forbid) {
+			t.Errorf("hwcapMaskShimSource must not contain %q", forbid)
+		}
+	}
+}
+
+func TestCloakBrowserEnsureBinaryCmd_SucceedsWhenChromeExists(t *testing.T) {
+	for _, distro := range []LinuxDistro{DistroDebianBookworm, DistroUbuntuNoble} {
+		cmd := cloakBrowserEnsureBinaryCmd(distro)
+		flat := strings.Join(cmd, " ")
+		if !strings.Contains(flat, "ensure_binary") {
+			t.Errorf("%s: expected ensure_binary download", distro)
+		}
+		if !strings.Contains(flat, "/home/browser/.cloakbrowser/*/chrome") {
+			t.Errorf("%s: expected chrome-on-disk success check", distro)
+		}
+		if !strings.Contains(flat, "|| true") {
+			t.Errorf("%s: python crash after extract must not fail the step", distro)
+		}
+		if !strings.Contains(flat, "CLOAKBROWSER_AUTO_UPDATE=false") {
+			t.Errorf("%s: expected auto-update disabled during template build", distro)
+		}
+	}
+	bookworm := strings.Join(cloakBrowserEnsureBinaryCmd(DistroDebianBookworm), " ")
+	if strings.Contains(bookworm, "runuser") {
+		t.Error("Debian bookworm ensure_binary should run as root (fuse-overlayfs)")
+	}
+	noble := strings.Join(cloakBrowserEnsureBinaryCmd(DistroUbuntuNoble), " ")
+	if !strings.Contains(noble, "runuser -u browser") {
+		t.Error("Ubuntu noble ensure_binary should runuser as browser")
+	}
 }
 
 // TestBrowserContainerInstallCommands_DebianBookworm_ArchAwareKasmVNC verifies

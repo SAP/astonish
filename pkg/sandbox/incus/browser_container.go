@@ -166,6 +166,90 @@ func IsContainerCompatibleEngine(engine string) bool {
 	return engine == "default" || engine == "cloakbrowser"
 }
 
+// hwcapMaskShimSource is compiled into /usr/lib/hwcap_mask.so on aarch64.
+// getauxval must not call dlsym: under ld.so.preload that is a SIGSEGV.
+const hwcapMaskShimSource = `
+#define _GNU_SOURCE
+#include <sys/auxv.h>
+#include <fcntl.h>
+#include <unistd.h>
+
+/* Safe HWCAP bits to keep (ARMv8.0 baseline + common extensions):
+ *   FP, ASIMD, EVTSTRM, AES, PMULL, SHA1, SHA2, CRC32, ATOMICS,
+ *   FPHP, ASIMDHP, CPUID, ASIMDRDM, JSCVT, FCMA, LRCPC, DCPOP,
+ *   SHA3, ASIMDDP, SHA512, ASIMDFHM, DIT, USCAT, ILRCPC, FLAGM, SB
+ * Masked out: SVE(22), SSBS(28), PACA(30), PACG(31), and bits 32+
+ */
+#define HWCAP_SAFE_MASK  0x2FBFFFFFul
+
+/* Safe HWCAP2 bits: DCPODP(0), FLAGM2(7), FRINT(8), I8MM(13)
+ * Masked out: SVE2, all SVE* variants, BF16, BTI, MTE, SME, SME2, etc.
+ */
+#define HWCAP2_SAFE_MASK 0x2181ul
+#define AUXV_MAX 64
+
+static unsigned long aux_type[AUXV_MAX];
+static unsigned long aux_val[AUXV_MAX];
+static int aux_n;
+static int aux_ready;
+
+static void load_auxv(void)
+{
+    unsigned long buf[AUXV_MAX * 2];
+    ssize_t n;
+    int fd, i, nwords;
+
+    if (aux_ready)
+        return;
+    fd = open("/proc/self/auxv", O_RDONLY);
+    if (fd < 0)
+        return;
+    n = read(fd, buf, sizeof(buf));
+    close(fd);
+    if (n < (ssize_t)(2 * sizeof(unsigned long)))
+        return;
+    nwords = (int)(n / (ssize_t)sizeof(unsigned long));
+    for (i = 0; i + 1 < nwords && aux_n < AUXV_MAX; i += 2) {
+        if (buf[i] == AT_NULL)
+            break;
+        aux_type[aux_n] = buf[i];
+        aux_val[aux_n] = buf[i + 1];
+        aux_n++;
+    }
+    aux_ready = 1;
+}
+
+__attribute__((constructor))
+static void hwcap_mask_init(void)
+{
+    load_auxv();
+}
+
+unsigned long getauxval(unsigned long type)
+{
+    int i;
+    unsigned long val = 0;
+    int found = 0;
+
+    if (!aux_ready)
+        load_auxv();
+    for (i = 0; i < aux_n; i++) {
+        if (aux_type[i] == type) {
+            val = aux_val[i];
+            found = 1;
+            break;
+        }
+    }
+    if (!found)
+        return 0;
+    if (type == AT_HWCAP)
+        return val & HWCAP_SAFE_MASK;
+    if (type == AT_HWCAP2)
+        return val & HWCAP2_SAFE_MASK;
+    return val;
+}
+`
+
 // BrowserContainerInstallCommands returns the commands to install the browser
 // engine and KasmVNC inside a container template. The commands are engine-aware:
 // "default" installs Chromium (from xtradeb PPA on Ubuntu noble, or from
@@ -428,45 +512,19 @@ chown browser:browser /home/browser/.vnc/xstartup`},
 	// getauxval(AT_HWCAP/AT_HWCAP2). Libraries like libjpeg-turbo, Skia,
 	// BoringSSL, and zlib detect these features at runtime and use optimized
 	// code paths — but some of these instructions are not fully functional in
-	// the nested virtualization stack (macOS → Docker VM, with or without
-	// Incus), causing SIGILL (exit 132) when CloakBrowser/Chromium starts
-	// or when cloakbrowser.ensure_binary() unpacks the binary during the
-	// base-layer build.
+	// the nested virtualization stack (macOS → Docker VM), causing SIGILL
+	// (exit 132) in CloakBrowser/Chromium.
 	//
 	// The shim intercepts getauxval() and masks out everything beyond baseline
 	// ARMv8.0 + safe extensions (NEON, AES, SHA, CRC32, atomics). This forces
 	// all libraries to use their baseline NEON code paths which work correctly.
 	// It is installed into /etc/ld.so.preload so pip/ensure_binary and later
-	// session processes pick it up without depending on Incus launch scripts.
+	// session processes pick it up without depending on launch scripts.
+	//
+	// Do not resolve the real getauxval via dlsym(RTLD_NEXT) from inside
+	// getauxval: under /etc/ld.so.preload that pointer is often NULL (SIGSEGV)
+	// or the shim itself (infinite recursion). Cache /proc/self/auxv instead.
 	if arch == "aarch64" {
-		// The C source for the HWCAP masking shim.
-		hwcapShimSource := `
-#define _GNU_SOURCE
-#include <sys/auxv.h>
-#include <dlfcn.h>
-
-/* Safe HWCAP bits to keep (ARMv8.0 baseline + common extensions):
- *   FP, ASIMD, EVTSTRM, AES, PMULL, SHA1, SHA2, CRC32, ATOMICS,
- *   FPHP, ASIMDHP, CPUID, ASIMDRDM, JSCVT, FCMA, LRCPC, DCPOP,
- *   SHA3, ASIMDDP, SHA512, ASIMDFHM, DIT, USCAT, ILRCPC, FLAGM, SB
- * Masked out: SVE(22), SSBS(28), PACA(30), PACG(31), and bits 32+
- */
-#define HWCAP_SAFE_MASK  0x2FBFFFFFul
-
-/* Safe HWCAP2 bits: DCPODP(0), FLAGM2(7), FRINT(8), I8MM(13)
- * Masked out: SVE2, all SVE* variants, BF16, BTI, MTE, SME, SME2, etc.
- */
-#define HWCAP2_SAFE_MASK 0x2181ul
-
-unsigned long getauxval(unsigned long type) {
-    unsigned long (*real_getauxval)(unsigned long) =
-        (unsigned long (*)(unsigned long))dlsym(RTLD_NEXT, "getauxval");
-    unsigned long val = real_getauxval(type);
-    if (type == AT_HWCAP)  return val & HWCAP_SAFE_MASK;
-    if (type == AT_HWCAP2) return val & HWCAP2_SAFE_MASK;
-    return val;
-}
-`
 		cmds = append(cmds,
 			// Install gcc (needed to compile the shim)
 			[]string{"apt-get", "install", "-y", "gcc"},
@@ -475,9 +533,9 @@ unsigned long getauxval(unsigned long type) {
 				fmt.Sprintf(`cat > /tmp/hwcap_mask.c << 'SHIMEOF'
 %s
 SHIMEOF
-gcc -shared -fPIC -o /usr/lib/hwcap_mask.so /tmp/hwcap_mask.c -ldl
+gcc -shared -fPIC -o /usr/lib/hwcap_mask.so /tmp/hwcap_mask.c
 rm -f /tmp/hwcap_mask.c
-printf '/usr/lib/hwcap_mask.so\n' > /etc/ld.so.preload`, hwcapShimSource),
+printf '/usr/lib/hwcap_mask.so\n' > /etc/ld.so.preload`, hwcapMaskShimSource),
 			},
 			// Remove gcc to keep the template lean (only needed at build time)
 			[]string{"sh", "-c", "apt-get remove -y gcc && apt-get autoremove -y"},
@@ -545,19 +603,32 @@ func kasmPasswdCmd(distro LinuxDistro) []string {
 // cloakBrowserEnsureBinaryCmd returns the install step for downloading
 // the CloakBrowser binary. Same fuse-overlayfs constraint as
 // kasmPasswdCmd above: non-root execve is unsupported on K8s.
+//
+// Success is "chrome exists on disk", not "python exited 0". ensure_binary()
+// downloads then prints the path; on Apple Silicon the process may still
+// SIGSEGV at interpreter shutdown (exit 139) after a successful extract.
+// The chrome path in that failure is stdout, not a launched browser.
 func cloakBrowserEnsureBinaryCmd(distro LinuxDistro) []string {
-	switch distro {
-	case DistroDebianBookworm:
-		// Run as root; use HOME override so the binary lands in the
-		// browser user's home directory.
-		return []string{"sh", "-c",
-			`if [ -f /usr/lib/hwcap_mask.so ]; then export LD_PRELOAD=/usr/lib/hwcap_mask.so; fi; HOME=/home/browser python3 -c "import cloakbrowser; print(cloakbrowser.ensure_binary())"`,
-		}
-	default: // DistroUbuntuNoble — Incus containers
-		return []string{"sh", "-c",
-			`if [ -f /usr/lib/hwcap_mask.so ]; then export LD_PRELOAD=/usr/lib/hwcap_mask.so; fi; runuser -u browser -- python3 -c "import cloakbrowser; print(cloakbrowser.ensure_binary())"`,
-		}
+	download := `python3 -c "import cloakbrowser; print(cloakbrowser.ensure_binary())"`
+	if distro != DistroDebianBookworm {
+		download = `runuser -u browser -- python3 -c "import cloakbrowser; print(cloakbrowser.ensure_binary())"`
 	}
+	script := fmt.Sprintf(`if [ -f /usr/lib/hwcap_mask.so ]; then export LD_PRELOAD=/usr/lib/hwcap_mask.so${LD_PRELOAD:+:$LD_PRELOAD}; fi
+export CLOAKBROWSER_AUTO_UPDATE=false
+export HOME=/home/browser
+ulimit -c 0 2>/dev/null || true
+%s || true
+chrome=""
+for f in /home/browser/.cloakbrowser/*/chrome /home/browser/.cloakbrowser/*/*/chrome; do
+  if [ -f "$f" ]; then chrome=$f; break; fi
+done
+if [ -n "$chrome" ]; then
+  echo "cloakbrowser chrome binary is present: $chrome"
+  exit 0
+fi
+echo "cloakbrowser ensure_binary did not leave a chrome binary under /home/browser/.cloakbrowser" >&2
+exit 1`, download)
+	return []string{"sh", "-c", script}
 }
 
 // StartKasmVNC starts KasmVNC inside a container for human visual access.

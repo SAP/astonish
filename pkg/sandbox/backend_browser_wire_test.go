@@ -36,11 +36,16 @@ func TestBuildBackendBrowserLaunchScript_UsesSandboxBrowser(t *testing.T) {
 		"--fingerprint-platform linux",
 		"--proxy-server=http://proxy.local:8080",
 		"DONE: browser ready",
+		"/home/browser/.cloakbrowser/*/chrome",
+		"falling back to Xvfb",
 	}
 	for _, want := range wants {
 		if !strings.Contains(script, want) {
 			t.Fatalf("launch script missing %q\nscript:\n%s", want, script)
 		}
+	}
+	if strings.Contains(script, "| head") {
+		t.Fatal("launch script must not pipe to head (APFS HEAD/head collision)")
 	}
 }
 

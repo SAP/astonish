@@ -127,6 +127,10 @@ func extractOverlayTar(r io.Reader, dest string) error {
 			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 				return err
 			}
+			if skipCaseCollidingTarName(target) {
+				_, _ = io.CopyN(io.Discard, tr, hdr.Size)
+				continue
+			}
 			f, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, tarFileMode(hdr))
 			if err != nil {
 				return err
@@ -142,6 +146,9 @@ func extractOverlayTar(r io.Reader, dest string) error {
 		case tar.TypeSymlink:
 			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 				return err
+			}
+			if skipCaseCollidingTarName(target) {
+				continue
 			}
 			_ = os.Remove(target)
 			if err := os.Symlink(hdr.Linkname, target); err != nil {
@@ -172,6 +179,29 @@ func extractOverlayTar(r io.Reader, dest string) error {
 			continue
 		}
 	}
+}
+
+// skipCaseCollidingTarName drops libwww-perl GET/HEAD/POST (and any other
+// entry whose basename already exists with different case). Host extract
+// onto macOS APFS is case-insensitive, so HEAD overwrites coreutils head
+// and later overlay mounts hide /usr/bin/head.
+func skipCaseCollidingTarName(target string) bool {
+	base := filepath.Base(target)
+	switch base {
+	case "HEAD", "GET", "POST":
+		return true
+	}
+	dir := filepath.Dir(target)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if e.Name() != base && strings.EqualFold(e.Name(), base) {
+			return true
+		}
+	}
+	return false
 }
 
 func tarFileMode(hdr *tar.Header) os.FileMode {

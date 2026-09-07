@@ -85,6 +85,15 @@ func TestTarSafePath(t *testing.T) {
 	}
 }
 
+func TestSkipCaseCollidingTarName_DropsLWPHead(t *testing.T) {
+	if !skipCaseCollidingTarName("/tmp/usr/bin/HEAD") {
+		t.Fatal("HEAD must be skipped so it cannot clobber coreutils head")
+	}
+	if skipCaseCollidingTarName("/tmp/usr/bin/bash") {
+		t.Fatal("bash should not be skipped")
+	}
+}
+
 func TestCountingReader(t *testing.T) {
 	var n atomic.Int64
 	r := &countingReader{r: bytes.NewReader([]byte("abcd")), n: &n}

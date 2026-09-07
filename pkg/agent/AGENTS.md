@@ -19,7 +19,7 @@ Core `ChatAgent` runtime: prompt assembly, model/tool loop, streaming, compactio
 ## When editing
 - Tool-loop or event changes require matching `pkg/api/chat_runner.go`, remote TUI mapping, Studio handling, docs, and scenarios.
 - Prompt changes require system-prompt contract tests and must preserve hidden runtime guidance versus visible user text.
-- Code-mode investigation approach (Work Policy, `debug-regression` skill, failed-fix follow-up injector, `update_plan` step names) is documented in [`docs/architecture/code-agent-investigation.md`](../../docs/architecture/code-agent-investigation.md). Do not weaken those tests to hide a prompt or tool-contract change.
+- Code-mode investigation approach (Work Policy, `debug-regression` skill, failed-fix follow-up injector, `update_plan` step names) is documented in [`docs/architecture/code-agent-investigation.md`](../../docs/architecture/code-agent-investigation.md). Plan completion is evidence-gated (`verify` + `announce_completion` / `## Results`); do not restore `CompleteAll` as a bulk completer. Do not weaken those tests to hide a prompt or tool-contract change.
 - Model, config, memory, or MCP changes follow [`pkg/provider/AGENTS.md`](../provider/AGENTS.md), [`pkg/config/AGENTS.md`](../config/AGENTS.md), [`pkg/memory/AGENTS.md`](../memory/AGENTS.md), and [`pkg/mcp/AGENTS.md`](../mcp/AGENTS.md).
 
 ## Verification

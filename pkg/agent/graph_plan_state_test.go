@@ -42,9 +42,13 @@ func TestGraphPlanState_GraphToGapSkip(t *testing.T) {
 func TestGraphPlanState_Reset(t *testing.T) {
 	g := NewGraphPlanState()
 	g.Advance(GraphPlanPhasePlan)
+	g.SetAcceptance("docker inspect astonish-session-x")
 	g.Reset()
 	if g.Phase() != GraphPlanPhaseGraph {
 		t.Fatalf("after Reset phase = %q, want graph", g.Phase())
+	}
+	if g.Acceptance() != "" {
+		t.Fatalf("after Reset acceptance = %q, want empty", g.Acceptance())
 	}
 }
 

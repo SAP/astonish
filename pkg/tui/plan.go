@@ -98,6 +98,10 @@ func (m model) renderPlanCard(goal string, doc agent.PlanDocumentInfo, steps []a
 		body = append(body, "")
 		body = append(body, m.planBand("VERIFY", ver, inner)...)
 	}
+	if results := strings.TrimSpace(doc.Results); results != "" {
+		body = append(body, "")
+		body = append(body, m.planBand("RESULTS", results, inner)...)
+	}
 
 	footer := planProgressFooter(complete, running, pending, len(steps))
 	body = append(body, m.planApprovalLines(it, inner)...)
@@ -153,6 +157,11 @@ func (m model) planPhaseBlock(n int, s agent.PlanStepInfo, inner int) []string {
 		lines = append(lines, "")
 		lines = append(lines, wrapPrefixed("", summary, inner, th.PlanSummary)...)
 	}
+	if outcome := strings.TrimSpace(s.Outcome); outcome != "" {
+		lines = append(lines, "")
+		lines = append(lines, th.PlanSection.Render("OUTCOME"))
+		lines = append(lines, wrapPrefixed("  ", outcome, inner, th.PlanSummary)...)
+	}
 
 	// FILES section.
 	if len(s.Files) > 0 {
@@ -179,8 +188,17 @@ func (m model) planPhaseBlock(n int, s agent.PlanStepInfo, inner int) []string {
 	// VERIFY section.
 	if v := strings.TrimSpace(s.Verify); v != "" {
 		lines = append(lines, "")
-		lines = append(lines, th.PlanSection.Render("VERIFY"))
+		label := "VERIFY"
+		if k := strings.TrimSpace(s.VerifyKind); k != "" {
+			label = "VERIFY (" + k + ")"
+		}
+		lines = append(lines, th.PlanSection.Render(label))
 		lines = append(lines, wrapPrefixed("  ", "$ "+v, inner, th.PlanMuted)...)
+	}
+	if e := strings.TrimSpace(s.Evidence); e != "" {
+		lines = append(lines, "")
+		lines = append(lines, th.PlanSection.Render("EVIDENCE"))
+		lines = append(lines, wrapPrefixed("  ", e, inner, th.PlanMuted)...)
 	}
 
 	// DETAILS section.

@@ -12,6 +12,12 @@ Astonish Code already finds the right files quickly (codegraph, grep, definition
 
 `update_plan` on an unknown step returns `step_not_found` plus the active plan's exact step `name`s (`Message` + `Steps`). Graph-Optimized Plan's design self-check requires a unit test of live event order and session restore for UX/event work, and forbids guessing `update_plan` names.
 
+`announce_plan` is rejected unless each phase has a testable `outcome`, a `verify` command, and `verify_kind` (`unit` or `behavior`). Running surfaces (cmd/api/launcher/daemon/sandbox/tui/browser/web) require `behavior`. `gplan_finalize` requires `acceptance` (the user-visible sequence); plan-level `verification` must include it. This is the capability contract: a phase is a user-visible slice, not a file batch. GRAPH-phase allow-list is unchanged.
+
+## Plan completion (evidence)
+
+Checkboxes are not proof. `update_plan(complete)` runs the phase `verify` command; a non-zero exit marks the phase failed. Sub-agent finish is not completion. `announce_completion` runs plan-level `verification` and writes `## Results`. Execution mode ends only when `IsFullyAccepted()` (all phases complete AND Results). The Incus→Docker session (2026-09-06) is the regression story: six mega-phases marked complete while the container did not exist. GRAPH-phase allow-list is unchanged.
+
 ## Verification
 
 - Prompt golden + contract tests in `pkg/agent`.

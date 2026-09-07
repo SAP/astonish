@@ -64,7 +64,7 @@ func TestApprovedPlanExecutionGate_BlocksOnlyReannouncement(t *testing.T) {
 	if !approvedPlanExecutionToolBlocked("announce_plan") {
 		t.Fatal("approved execution must block announce_plan")
 	}
-	for _, name := range []string{"update_plan", "write_file", "delegate_tasks"} {
+	for _, name := range []string{"update_plan", "announce_completion", "write_file", "delegate_tasks"} {
 		if approvedPlanExecutionToolBlocked(name) {
 			t.Errorf("approved execution should allow %q", name)
 		}
@@ -154,6 +154,9 @@ func TestPlanExecutionSystemContext_ForbidsReannouncement(t *testing.T) {
 	if !strings.Contains(ctx, "do not re-read") {
 		t.Fatal("execution context must tell the model not to re-read a path already in context")
 	}
+	if !strings.Contains(ctx, "announce_completion") {
+		t.Fatal("execution context must tell the model to call announce_completion")
+	}
 }
 
 func TestPlanModeSystemContext_HardConstraintLanguage(t *testing.T) {
@@ -173,6 +176,8 @@ func TestPlanModeSystemContext_RequiresDesignQuality(t *testing.T) {
 		"DESIGN QUALITY SELF-CHECK",
 		"TYPED actions",
 		"ERROR/EMPTY STATES",
+		"verify_kind",
+		"user-visible",
 	} {
 		if !strings.Contains(PlanModeSystemContext, want) {
 			t.Errorf("PlanModeSystemContext should mention %q", want)
@@ -191,6 +196,9 @@ func TestGraphPlanModeSystemContext_RequiresDesignQuality(t *testing.T) {
 		"live event order",
 		"one ordered source of truth",
 		"do not guess names",
+		"verify_kind",
+		"user-visible sequence",
+		"acceptance",
 	} {
 		if !strings.Contains(GraphPlanModeSystemContext, want) {
 			t.Errorf("GraphPlanModeSystemContext should mention %q", want)

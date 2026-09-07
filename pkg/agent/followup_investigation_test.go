@@ -18,6 +18,11 @@ func TestIsFailedFixFollowup(t *testing.T) {
 		"this used to work yesterday",
 		"the previous fix didn't stick",
 		"still broken on restore",
+		"this doesn't work",
+		"Error: No such object: astonish-session",
+		"how do you considered as completed when all phases completed",
+		"undefined: OptionalTool",
+		"build failed",
 	}
 	for _, s := range yes {
 		if !IsFailedFixFollowup(s) {

@@ -160,6 +160,7 @@ func TestCodeSystemPromptContracts_InvestigationWorkPolicy(t *testing.T) {
 	prompt := maximalCodeBuilder().Build()
 	for _, want := range []string{
 		"user-visible sequence",
+		"runtime runs",
 		"User restatements are the spec",
 		"stale binary",
 		"one ordered source of truth",
@@ -180,6 +181,8 @@ func TestCodeSystemPromptContracts_PlanFilePersistence(t *testing.T) {
 	assertContains(t, prompt, "announce_plan", "announce_plan referenced in PLAN.md guidance")
 	assertContains(t, prompt, "MUST NOT call `announce_plan`", "Normal mode forbids announce_plan")
 	assertContains(t, prompt, "update_plan", "update_plan referenced in PLAN.md guidance")
+	assertContains(t, prompt, "outcome", "outcome field required in announce_plan guidance")
+	assertContains(t, prompt, "verify_kind", "verify_kind field required in announce_plan guidance")
 
 	// Without PlanFilePersistence it must not appear
 	base := &SystemPromptBuilder{}

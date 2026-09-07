@@ -1115,7 +1115,7 @@ For the plan as a whole:
   Do not write terse one-liners. Write 6-12 clear sentences that a colleague could read and understand the full design.
   For GREENFIELD projects, the 'context' section should describe the ARCHITECTURE: technology choices and rationale, directory layout and module boundaries, key abstractions and data flow, what the user will be able to do when the scaffold is complete.
 - 'what_not_to_do': REQUIRED. Explicitly list what is OUT OF SCOPE — interfaces that must not change, files that must not be touched, behaviors that must be preserved. Be specific (name the actual interfaces/files/behaviors).
-- 'verification': the end-to-end smoke test sequence that proves the entire plan succeeded, including manual verification steps for UI/UX changes.
+- 'verification': REQUIRED. The end-to-end command sequence that proves the user-visible outcome after all phases. In Graph-Optimized Plan mode this must include the 'acceptance' sequence from gplan_finalize.
 
 For each phase:
 - 'summary': REQUIRED. A 1-2 sentence plain-English explanation of what this phase accomplishes from the USER'S perspective (e.g. "Users can now add providers directly from the /models overlay without needing a separate command" — NOT "modifies model_picker.go to add provider management").
@@ -1128,7 +1128,9 @@ For each phase:
   - For INTEGRATION: describe exactly how the new code wires into existing dispatch (Update(), handleKey routing, message types, etc.).
   - For ERROR/EMPTY STATES: specify what happens when lists are empty, operations fail, or the user is in an unexpected state.
   Execution must proceed directly from this text without a second investigation pass.
-- 'verify': the command that proves the phase is done (build/test/lint).
+- 'outcome': REQUIRED. One sentence the user could check without reading the diff.
+- 'verify': REQUIRED. The command the runtime will run. Library-only work: a scoped package test. Running surfaces (cmd, API, launcher, daemon, sandbox, TUI, browser, web): a command that exercises the outcome, not only go test/go build.
+- 'verify_kind': REQUIRED. 'unit' or 'behavior'. Running surfaces and deletes of running surfaces require 'behavior'. A unit phase may list at most 12 files. Slice by user-visible capability, not by layer.
 
 Before calling announce_plan, run this DESIGN QUALITY SELF-CHECK:
 - [ ] Does the 'context' section describe the actual USER EXPERIENCE, not just which files change?
@@ -1141,6 +1143,9 @@ Before calling announce_plan, run this DESIGN QUALITY SELF-CHECK:
 - [ ] Did you check docs/architecture/ for documentation that describes the subsystem you're changing? If it exists, add a phase to update it.
 - [ ] Did you check for existing tests (*_test.go, *.test.ts) covering the code you're changing? Add a phase for test updates or new tests.
 - [ ] Are there any breaking changes, backward compatibility concerns, or security boundary implications? Surface them explicitly.
+- [ ] What does a user or daemon do today that must still work after this change? Is that sequence in 'verification' and in an early 'behavior' phase?
+- [ ] Existing on-disk state (layers, sessions, config) that could be stranded?
+- [ ] Is the first behavior verify as early as possible — before deleting a live subsystem?
 
 If any check reveals a gap, add the missing phase BEFORE calling announce_plan. Do NOT announce an incomplete plan.
 
@@ -1171,7 +1176,7 @@ If the project is GREENFIELD or NEAR-EMPTY (codegraph returns no coverage AND fi
 - This is normal — the investigation is about REQUIREMENTS and ARCHITECTURE, not existing code.
 - Call ` + "`gplan_gaps`" + ` with gaps focused on design decisions: "What frameworks/libraries does the user want?", "What directory structure and module boundaries should the project have?", "Are there external APIs, schemas, or references to research?"
 
-PHASE 2 — READ. ` + "`read_file`" + ` (and read_pdf/filter_json) unlock, plus codegraph_explore. There is no read quota — read every region on the list you recorded with gplan_reads. Never ` + "`read_file`" + ` a path whose contents are already in this turn's context, and do not re-search for information you already have. When you have read everything the graph pointed you to, decide: if genuine gaps remain that codegraph could not answer, call ` + "`gplan_gaps`" + ` with those gaps (each: the question + why codegraph was insufficient) to advance to the GAP phase. If there are no gaps, call ` + "`gplan_finalize`" + ` to skip straight to the PLAN phase.
+PHASE 2 — READ. ` + "`read_file`" + ` (and read_pdf/filter_json) unlock, plus codegraph_explore. There is no read quota — read every region on the list you recorded with gplan_reads. Never ` + "`read_file`" + ` a path whose contents are already in this turn's context, and do not re-search for information you already have. When you have read everything the graph pointed you to, decide: if genuine gaps remain that codegraph could not answer, call ` + "`gplan_gaps`" + ` with those gaps (each: the question + why codegraph was insufficient) to advance to the GAP phase. If there are no gaps, call ` + "`gplan_finalize`" + ` with ` + "`acceptance`" + ` (the user-visible sequence that proves the job) to skip straight to the PLAN phase.
 
 PHASE 3 — GAP (complementary). The remaining read-only tools unlock: grep_search, find_files, file_tree, repo_map, code_definition, code_references, web_fetch, memory_search, memory_get, skill_lookup — and delegate_tasks. Use these ONLY for the genuine gaps codegraph could not fill. Prefer ` + "`delegate_tasks`" + ` with read-only ` + "`tools`" + ` filters (e.g. ["grep_search","read_file","code_references"]) to fan out independent gap questions in parallel. Do not re-answer anything already established. When gaps are closed, call ` + "`gplan_finalize`" + ` to advance to the PLAN phase.
 
@@ -1188,7 +1193,7 @@ For the plan as a whole:
   Do not write terse one-liners. Write 6-12 clear sentences that a colleague could read and understand the full design.
   For GREENFIELD projects, the 'context' section should describe the ARCHITECTURE: technology choices and rationale, directory layout and module boundaries, key abstractions and data flow, what the user will be able to do when the scaffold is complete.
 - 'what_not_to_do': REQUIRED. Explicitly list what is OUT OF SCOPE — interfaces that must not change, files that must not be touched, behaviors that must be preserved. Be specific (name the actual interfaces/files/behaviors).
-- 'verification': the end-to-end smoke test sequence that proves the entire plan succeeded, including manual verification steps for UI/UX changes.
+- 'verification': REQUIRED. The end-to-end command sequence that proves the user-visible outcome after all phases. In Graph-Optimized Plan mode this must include the 'acceptance' sequence from gplan_finalize.
 
 For each phase:
 - 'summary': REQUIRED. A 1-2 sentence plain-English explanation of what this phase accomplishes from the USER'S perspective (e.g. "Users can now add providers directly from the /models overlay without needing a separate command" — NOT "modifies model_picker.go to add provider management").
@@ -1201,7 +1206,9 @@ For each phase:
   - For INTEGRATION: describe exactly how the new code wires into existing dispatch (Update(), handleKey routing, message types, etc.).
   - For ERROR/EMPTY STATES: specify what happens when lists are empty, operations fail, or the user is in an unexpected state.
   Execution must proceed directly from this text without a second investigation pass.
-- 'verify': the command that proves the phase is done (build/test/lint).
+- 'outcome': REQUIRED. One sentence the user could check without reading the diff.
+- 'verify': REQUIRED. The command the runtime will run. Library-only work: a scoped package test. Running surfaces (cmd, API, launcher, daemon, sandbox, TUI, browser, web): a command that exercises the outcome, not only go test/go build.
+- 'verify_kind': REQUIRED. 'unit' or 'behavior'. Running surfaces and deletes of running surfaces require 'behavior'. A unit phase may list at most 12 files. Slice by user-visible capability, not by layer.
 
 Before calling announce_plan, run this DESIGN QUALITY SELF-CHECK:
 - [ ] Does the 'context' section describe the actual USER EXPERIENCE, not just which files change?
@@ -1217,12 +1224,15 @@ Before calling announce_plan, run this DESIGN QUALITY SELF-CHECK:
 - [ ] For UX/event/stream features: does 'verification' include a unit test of the live event order AND session restore, not only a manual TUI smoke?
 - [ ] Do related surfaces (live vs restore, message vs tool fold, summary vs badge) share one ordered source of truth, named in 'context'?
 - [ ] Revising a locked plan: will you read PLAN.md for exact step names before update_plan? If announce_plan is blocked, update those steps or ask the user to decline and re-announce — do not guess names.
+- [ ] What does a user or daemon do today that must still work after this change? Is that sequence in 'verification' and in an early 'behavior' phase?
+- [ ] Existing on-disk state (layers, sessions, config) that could be stranded?
+- [ ] Is the first behavior verify as early as possible — before deleting a live subsystem?
 
 If any check reveals a gap, add the missing phase BEFORE calling announce_plan. Do NOT announce an incomplete plan.
 
 File paths must be confirmed: only record a file path in 'details' or 'files' if codegraph_explore, code_definition, find_files, or read_file explicitly returned that exact path this session — do NOT infer paths from symbol names or directory conventions; if a path was not confirmed, call find_files before adding it to the plan. This persists the full plan to a session PLAN.md shown to the user; do NOT hand-write PLAN.md. End by asking the user to exit to Normal mode (shift+tab) before any execution. When executing later, treat PLAN.md as authoritative — do NOT re-investigate files or symbols already confirmed in the plan.
 
-Produce a COMPLETE plan — cover every dependency the change reaches, order phases dependency-first, and surface any human decisions (breaking changes, alternatives with trade-offs, ambiguous requirements) explicitly. Spend effort proportional to blast radius. Stop when you can name every affected file and why — not because a counter tripped. Never re-query codegraph or grep for a fact already established.`
+Produce a COMPLETE plan — cover every dependency the change reaches, order phases dependency-first, and surface any human decisions (breaking changes, alternatives with trade-offs, ambiguous requirements) explicitly. Spend effort proportional to blast radius. Stop when you can name the user-visible sequence that proves the job AND the files that implement it — not because a counter tripped. Never re-query codegraph or grep for a fact already established.`
 
 // askModeSystemContext must stay in sync with agent.AskModeSystemContext
 // (the runtime gate's source of truth). It teaches the model it is in a

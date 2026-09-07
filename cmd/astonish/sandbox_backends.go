@@ -19,6 +19,9 @@
 package astonish
 
 import (
+	// Register the Docker backend (local OverlayFS sessions).
+	_ "github.com/SAP/astonish/pkg/sandbox/docker"
+
 	// Register the k8s backend with sandbox.NewBackend so that
 	// configurations setting backend=k8s succeed.
 	_ "github.com/SAP/astonish/pkg/sandbox/k8s"

@@ -60,8 +60,10 @@ func lookupBackendFactory(kind BackendKind) (BackendFactoryFunc, bool) {
 // are validated; missing required fields produce a clear error.
 type BackendFactoryConfig struct {
 	// Kind selects the backend implementation. Accepted values:
-	//   - "" or "incus" → IncusBackend (default)
-	//   - "k8s"         → K8sSandboxBackend (Phase C+D)
+	//   - "" or "incus" → IncusBackend (legacy default until Docker is wired)
+	//   - "docker"      → DockerBackend (local OverlayFS sessions)
+	//   - "k8s"         → K8sSandboxBackend
+	//   - "openshell"   → OpenShellBackend
 	Kind BackendKind
 
 	// Client is the Incus daemon client. Required for Kind == "incus".
@@ -77,6 +79,10 @@ type BackendFactoryConfig struct {
 	// specify them in a SessionSpec. MAY be nil.
 	DefaultLim *config.SandboxLimits
 
+	// Docker carries local Docker-backend configuration. Consulted only
+	// when Kind == "docker".
+	Docker DockerRuntimeConfig
+
 	// K8s carries Kubernetes-specific configuration. Consulted only when
 	// Kind == "k8s"; ignored otherwise. The struct is YAML-friendly
 	// (lives in pkg/config) and is translated to a k8s.Config by the
@@ -87,6 +93,15 @@ type BackendFactoryConfig struct {
 	// when Kind == "openshell"; ignored otherwise. Contains gateway
 	// connection details and sandbox image configuration.
 	OpenShell config.SandboxOpenShellConfig
+}
+
+// DockerRuntimeConfig is the factory payload for BackendKindDocker.
+type DockerRuntimeConfig struct {
+	SandboxImage         string
+	OverlayMode          string
+	LayersDir            string
+	UppersDir            string
+	ContainerRuntimePath string
 }
 
 // NewBackend constructs a Backend implementation from configuration. The
@@ -121,7 +136,7 @@ func NewBackend(cfg BackendFactoryConfig) (Backend, error) {
 			Templates:  cfg.Templates,
 			DefaultLim: cfg.DefaultLim,
 		})
-	case BackendKindK8s, BackendKindOpenShell, BackendKindMock:
+	case BackendKindDocker, BackendKindK8s, BackendKindOpenShell, BackendKindMock:
 		// Fall through to registry lookup.
 	default:
 		// Still try the registry so tests can register exotic kinds.
@@ -136,6 +151,8 @@ func NewBackend(cfg BackendFactoryConfig) (Backend, error) {
 	}
 
 	switch kind {
+	case BackendKindDocker:
+		return nil, fmt.Errorf("%w: docker backend requires importing pkg/sandbox/docker", ErrBackendKindUnavailable)
 	case BackendKindK8s:
 		return nil, fmt.Errorf("%w: k8s backend requires importing pkg/sandbox/k8s", ErrBackendKindUnavailable)
 	case BackendKindOpenShell:

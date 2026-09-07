@@ -128,7 +128,10 @@ func RenderPlanFromInfoWithDoc(goal string, doc PlanDocumentInfo, steps []PlanSt
 			details:       s.Details,
 			summary:       s.Summary,
 			files:         s.Files,
+			outcome:       s.Outcome,
 			verify:        s.Verify,
+			verifyKind:    s.VerifyKind,
+			evidence:      s.Evidence,
 			parallelGroup: s.ParallelGroup,
 			status:        "pending",
 		}
@@ -212,6 +215,9 @@ func renderPlanMarkdownWithDoc(goal string, doc PlanDocumentInfo, steps []planSt
 			if strings.TrimSpace(s.summary) != "" {
 				sb.WriteString("  Summary: " + strings.TrimSpace(s.summary) + "\n")
 			}
+			if strings.TrimSpace(s.outcome) != "" {
+				sb.WriteString("  Outcome: " + strings.TrimSpace(s.outcome) + "\n")
+			}
 			// Emit affected files as an indented, machine-parseable sub-block so the
 			// concrete blast radius (dependency-first, no orphaned code) is recorded
 			// and can be re-hydrated after compaction.
@@ -224,6 +230,12 @@ func renderPlanMarkdownWithDoc(goal string, doc PlanDocumentInfo, steps []planSt
 			// Emit the optional verification command.
 			if strings.TrimSpace(s.verify) != "" {
 				sb.WriteString("  Verify: " + strings.TrimSpace(s.verify) + "\n")
+			}
+			if strings.TrimSpace(s.verifyKind) != "" {
+				sb.WriteString("  Verify-Kind: " + strings.TrimSpace(s.verifyKind) + "\n")
+			}
+			if strings.TrimSpace(s.evidence) != "" {
+				sb.WriteString("  Evidence: " + strings.TrimSpace(s.evidence) + "\n")
 			}
 			// Emit optional richer details as an indented sub-block so the detailed
 			// plan (files/commands/approach) survives compaction, not just the label.
@@ -245,6 +257,11 @@ func renderPlanMarkdownWithDoc(goal string, doc PlanDocumentInfo, steps []planSt
 	if strings.TrimSpace(doc.Verification) != "" {
 		sb.WriteString("\n## Verification\n\n")
 		sb.WriteString(strings.TrimRight(downgradeHeadings(doc.Verification), "\n"))
+		sb.WriteString("\n")
+	}
+	if strings.TrimSpace(doc.Results) != "" {
+		sb.WriteString("\n## Results\n\n")
+		sb.WriteString(strings.TrimRight(downgradeHeadings(doc.Results), "\n"))
 		sb.WriteString("\n")
 	}
 
@@ -290,7 +307,10 @@ func planStepsToInfo(steps []planStep) []PlanStepInfo {
 			Details:       s.details,
 			Summary:       s.summary,
 			Files:         s.files,
+			Outcome:       s.outcome,
 			Verify:        s.verify,
+			VerifyKind:    s.verifyKind,
+			Evidence:      s.evidence,
 			ParallelGroup: s.parallelGroup,
 			Status:        s.status,
 		}
@@ -317,6 +337,7 @@ func parsePlanMarkdownFull(md string) (doc PlanDocumentInfo, goal string, steps 
 		secPhases       = "phases"
 		secWhatNotToDo  = "whatnottodo"
 		secVerification = "verification"
+		secResults      = "results"
 	)
 	currentSection := secNone
 	currentGroup := ""
@@ -331,6 +352,8 @@ func parsePlanMarkdownFull(md string) (doc PlanDocumentInfo, goal string, steps 
 			doc.WhatNotToDo = content
 		case secVerification:
 			doc.Verification = content
+		case secResults:
+			doc.Results = content
 		}
 		sectionLines = nil
 	}
@@ -358,10 +381,12 @@ func parsePlanMarkdownFull(md string) (doc PlanDocumentInfo, goal string, steps 
 				knownSection = secWhatNotToDo
 			case headerLower == "verification":
 				knownSection = secVerification
+			case headerLower == "results":
+				knownSection = secResults
 			case headerLower == "progress":
 				knownSection = secNone // recognized but not a content section
 			}
-			inNarrative := currentSection == secContext || currentSection == secWhatNotToDo || currentSection == secVerification
+			inNarrative := currentSection == secContext || currentSection == secWhatNotToDo || currentSection == secVerification || currentSection == secResults
 			if knownSection != "" || !inNarrative {
 				// Known header or we're not inside a narrative section — transition.
 				flushDetails()
@@ -411,7 +436,7 @@ func parsePlanMarkdownFull(md string) (doc PlanDocumentInfo, goal string, steps 
 		}
 
 		// Inside narrative sections: accumulate content lines.
-		if currentSection == secContext || currentSection == secWhatNotToDo || currentSection == secVerification {
+		if currentSection == secContext || currentSection == secWhatNotToDo || currentSection == secVerification || currentSection == secResults {
 			sectionLines = append(sectionLines, raw)
 			continue
 		}
@@ -439,6 +464,18 @@ func parsePlanMarkdownFull(md string) (doc PlanDocumentInfo, goal string, steps 
 			// Summary line: "Summary: <text>".
 			if strings.HasPrefix(trimmed, "Summary:") {
 				steps[len(steps)-1].summary = strings.TrimSpace(strings.TrimPrefix(trimmed, "Summary:"))
+				continue
+			}
+			if strings.HasPrefix(trimmed, "Outcome:") {
+				steps[len(steps)-1].outcome = strings.TrimSpace(strings.TrimPrefix(trimmed, "Outcome:"))
+				continue
+			}
+			if strings.HasPrefix(trimmed, "Verify-Kind:") {
+				steps[len(steps)-1].verifyKind = NormalizeVerifyKind(strings.TrimPrefix(trimmed, "Verify-Kind:"))
+				continue
+			}
+			if strings.HasPrefix(trimmed, "Evidence:") {
+				steps[len(steps)-1].evidence = strings.TrimSpace(strings.TrimPrefix(trimmed, "Evidence:"))
 				continue
 			}
 			detailLines = append(detailLines, strings.TrimPrefix(raw, "  "))

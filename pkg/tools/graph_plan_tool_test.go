@@ -10,7 +10,11 @@ import (
 
 func TestGraphPlanTransitionTools_AdvancePhases(t *testing.T) {
 	orig := graphPlanAdvanceCallback
-	defer func() { graphPlanAdvanceCallback = orig }()
+	origAcc := graphPlanAcceptanceCallback
+	defer func() {
+		graphPlanAdvanceCallback = orig
+		graphPlanAcceptanceCallback = origAcc
+	}()
 
 	var got agent.GraphPlanPhase
 	SetGraphPlanAdvanceCallback(func(to agent.GraphPlanPhase) error {
@@ -42,8 +46,16 @@ func TestGraphPlanTransitionTools_AdvancePhases(t *testing.T) {
 	}
 
 	// gplan_finalize → plan phase.
-	if res, err := graphPlanFinalize(nil, GraphPlanFinalizeArgs{}); err != nil || res.Status != "ok" {
+	var gotAcceptance string
+	SetGraphPlanAcceptanceCallback(func(acceptance string) error {
+		gotAcceptance = acceptance
+		return nil
+	})
+	if res, err := graphPlanFinalize(nil, GraphPlanFinalizeArgs{Acceptance: "docker inspect astonish-session-x"}); err != nil || res.Status != "ok" {
 		t.Fatalf("gplan_finalize unexpected: %+v err=%v", res, err)
+	}
+	if gotAcceptance != "docker inspect astonish-session-x" {
+		t.Fatalf("acceptance = %q", gotAcceptance)
 	}
 	if got != agent.GraphPlanPhasePlan {
 		t.Fatalf("gplan_finalize advanced to %q, want plan", got)
@@ -160,3 +172,32 @@ func TestGraphPlanReads_AcceptsValidPaths(t *testing.T) {
 	}
 }
 
+func TestGraphPlanFinalize_RequiresAcceptance(t *testing.T) {
+	orig := graphPlanAdvanceCallback
+	origAcc := graphPlanAcceptanceCallback
+	defer func() {
+		graphPlanAdvanceCallback = orig
+		graphPlanAcceptanceCallback = origAcc
+	}()
+
+	advanced := false
+	SetGraphPlanAdvanceCallback(func(to agent.GraphPlanPhase) error {
+		advanced = true
+		return nil
+	})
+	SetGraphPlanAcceptanceCallback(func(string) error {
+		t.Fatal("acceptance callback must not run when acceptance is empty")
+		return nil
+	})
+
+	res, err := graphPlanFinalize(nil, GraphPlanFinalizeArgs{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Status != "incomplete" {
+		t.Fatalf("status = %q, want incomplete", res.Status)
+	}
+	if advanced {
+		t.Fatal("empty acceptance must not advance the phase")
+	}
+}

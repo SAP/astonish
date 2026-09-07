@@ -11,8 +11,9 @@ import (
 // and plan steps.
 //
 // Each delegate task carries a plan_step field identifying which plan step
-// it belongs to. A plan step is marked "running" when its first task starts,
-// and "complete" only when ALL registered tasks for that step have completed.
+// it belongs to. A plan step is marked "running" when its first task starts.
+// Completing a step requires a passing verify command — finishing sub-tasks
+// is not enough.
 type PlanState struct {
 	mu    sync.Mutex
 	goal  string
@@ -33,9 +34,7 @@ type PlanState struct {
 	onChange func()
 
 	// manuallyTracked is set once the model explicitly drives the plan via
-	// update_plan (SetStepStatus). When true, the end-of-turn CompleteAll sweep
-	// is suppressed so the plan reflects the model's real reported progress
-	// instead of a bulk "everything complete" fabrication.
+	// update_plan (SetStepStatus).
 	manuallyTracked bool
 }
 
@@ -45,7 +44,10 @@ type planStep struct {
 	details       string           // optional richer per-phase content persisted to PLAN.md
 	summary       string           // optional plain-English explanation for the human approving the plan
 	files         []PlanFileChange // optional affected files (path + new/modify/delete) persisted to PLAN.md
-	verify        string           // optional command that proves the phase is done, persisted to PLAN.md
+	outcome       string           // testable user-visible contract, persisted to PLAN.md
+	verify        string           // command that proves the phase is done, persisted to PLAN.md
+	verifyKind    string           // "unit" or "behavior", persisted to PLAN.md
+	evidence      string           // last verify result, persisted to PLAN.md
 	parallelGroup string           // optional concurrency group label
 	status        string           // "pending", "running", "complete", "failed"
 }
@@ -70,7 +72,10 @@ func NewPlanState(goal string, doc PlanDocumentInfo, steps []PlanStepInfo) *Plan
 			details:       s.Details,
 			summary:       s.Summary,
 			files:         s.Files,
+			outcome:       s.Outcome,
 			verify:        s.Verify,
+			verifyKind:    NormalizeVerifyKind(s.VerifyKind),
+			evidence:      s.Evidence,
 			parallelGroup: s.ParallelGroup,
 			status:        status,
 		}
@@ -115,7 +120,10 @@ func (ps *PlanState) SnapshotInfo() (string, []PlanStepInfo) {
 			Details:       s.details,
 			Summary:       s.summary,
 			Files:         s.files,
+			Outcome:       s.outcome,
 			Verify:        s.verify,
+			VerifyKind:    s.verifyKind,
+			Evidence:      s.evidence,
 			ParallelGroup: s.parallelGroup,
 			Status:        s.status,
 		}
@@ -139,6 +147,48 @@ func (ps *PlanState) SnapshotDoc() PlanDocumentInfo {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 	return ps.doc
+}
+
+// SetResults stores the completion report and persists PLAN.md.
+func (ps *PlanState) SetResults(results string) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	ps.doc.Results = results
+	ps.notifyChangeLocked()
+}
+
+// AllStepsComplete reports whether every phase is complete (not failed/pending).
+func (ps *PlanState) AllStepsComplete() bool {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if len(ps.steps) == 0 {
+		return false
+	}
+	for _, s := range ps.steps {
+		if s.status != "complete" {
+			return false
+		}
+	}
+	return true
+}
+
+// IsFullyAccepted is true only when every phase is complete and a Results
+// section exists. Checkboxes alone are not enough to leave execution mode.
+func (ps *PlanState) IsFullyAccepted() bool {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if strings.TrimSpace(ps.doc.Results) == "" {
+		return false
+	}
+	if len(ps.steps) == 0 {
+		return false
+	}
+	for _, s := range ps.steps {
+		if s.status != "complete" {
+			return false
+		}
+	}
+	return true
 }
 
 // snapshotLocked returns the plan goal and a copy of its steps.
@@ -189,8 +239,7 @@ func (ps *PlanState) SetStepStatus(stepName, status string) (string, string) {
 }
 
 // IsManuallyTracked reports whether the model has explicitly driven this plan
-// via update_plan. Used to decide whether the end-of-turn CompleteAll sweep
-// should run.
+// via update_plan.
 func (ps *PlanState) IsManuallyTracked() bool {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
@@ -211,9 +260,11 @@ func (ps *PlanState) AdvanceOnToolStart() string {
 		}
 	}
 
-	// Mark the next pending step as running
 	for i := range ps.steps {
 		if ps.steps[i].status == "pending" {
+			if reason := ps.canStartLocked(i); reason != "" {
+				return ""
+			}
 			ps.steps[i].status = "running"
 			ps.notifyChangeLocked()
 			return ps.steps[i].name
@@ -246,8 +297,10 @@ func (ps *PlanState) StartStep(stepName, taskName string) string {
 	}
 	ps.taskRegistry[sn][tn] = true
 
-	// Mark step running if pending
 	if ps.steps[idx].status == "pending" {
+		if reason := ps.canStartLocked(idx); reason != "" {
+			return ""
+		}
 		ps.steps[idx].status = "running"
 		ps.notifyChangeLocked()
 		return ps.steps[idx].name
@@ -256,9 +309,9 @@ func (ps *PlanState) StartStep(stepName, taskName string) string {
 }
 
 // CompleteTask marks a task as done within its plan step. If ALL registered
-// tasks for that step are now complete, the step itself is marked "complete".
-//
-// Returns the step name if the step transitioned to "complete", or "" otherwise.
+// tasks for that step are now finished, the step name is returned so the
+// caller can run verify. The step stays "running" — sub-agent finish is not
+// completion.
 func (ps *PlanState) CompleteTask(stepName, taskName string) string {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
@@ -292,8 +345,6 @@ func (ps *PlanState) CompleteTask(stepName, taskName string) string {
 			}
 		}
 		if allDone {
-			ps.steps[idx].status = "complete"
-			ps.notifyChangeLocked()
 			return ps.steps[idx].name
 		}
 	}
@@ -369,23 +420,115 @@ func (ps *PlanState) matchStepByPrefixLocked(taskName string) int {
 	return bestIdx
 }
 
-// CompleteAll marks all remaining running/pending steps as complete.
-// Returns the names of steps that were transitioned.
+// CompleteAll is a no-op. Pending and running steps stay as they are.
+// Completion requires a passing verify command via update_plan.
 func (ps *PlanState) CompleteAll() []string {
+	return nil
+}
+
+// PlanStepApplyResult is the outcome of applying an update_plan status change.
+type PlanStepApplyResult struct {
+	Name    string
+	Applied string
+	Code    string
+	Message string
+	Output  string
+}
+
+const (
+	PlanStepOK            = "ok"
+	PlanStepNotFound      = "step_not_found"
+	PlanStepVerifyFailed  = "verify_failed"
+	PlanStepNoVerify      = "no_verify"
+	PlanStepBlockedPlan   = "blocked_plan_mode"
+	PlanStepSerialBlocked = "serial_blocked"
+	PlanStepDeleteBlocked = "delete_blocked"
+)
+
+// StepLookup returns a copy of the named step, or false if missing.
+func (ps *PlanState) StepLookup(stepName string) (PlanStepInfo, bool) {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
+	idx := ps.findStepLocked(stepName)
+	if idx < 0 {
+		return PlanStepInfo{}, false
+	}
+	s := ps.steps[idx]
+	return PlanStepInfo{
+		Name:          s.name,
+		Description:   s.description,
+		Details:       s.details,
+		Summary:       s.summary,
+		Files:         s.files,
+		Outcome:       s.outcome,
+		Verify:        s.verify,
+		VerifyKind:    s.verifyKind,
+		Evidence:      s.evidence,
+		ParallelGroup: s.parallelGroup,
+		Status:        s.status,
+	}, true
+}
 
-	var completed []string
-	for i := range ps.steps {
-		if ps.steps[i].status == "running" || ps.steps[i].status == "pending" {
-			ps.steps[i].status = "complete"
-			completed = append(completed, ps.steps[i].name)
+// RecordEvidence stores the last verify result on the named step.
+func (ps *PlanState) RecordEvidence(stepName, evidence string) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	idx := ps.findStepLocked(stepName)
+	if idx < 0 {
+		return
+	}
+	ps.steps[idx].evidence = evidence
+	ps.notifyChangeLocked()
+}
+
+// CanStart reports whether the named step may be marked running given serial
+// order and delete-after-behavior rules. Empty reason means yes.
+func (ps *PlanState) CanStart(stepName string) string {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	idx := ps.findStepLocked(stepName)
+	if idx < 0 {
+		return "step not found"
+	}
+	return ps.canStartLocked(idx)
+}
+
+func (ps *PlanState) canStartLocked(idx int) string {
+	group := strings.TrimSpace(ps.steps[idx].parallelGroup)
+	for i := 0; i < idx; i++ {
+		eg := strings.TrimSpace(ps.steps[i].parallelGroup)
+		if group != "" && group == eg {
+			continue
+		}
+		if ps.steps[i].status != "complete" {
+			return PlanStepSerialBlocked
 		}
 	}
-	if len(completed) > 0 {
-		ps.notifyChangeLocked()
+	if stepDeletesRunningSurface(ps.steps[idx]) {
+		prior := false
+		for i := 0; i < idx; i++ {
+			if ps.steps[i].verifyKind == VerifyKindBehavior && ps.steps[i].status == "complete" {
+				prior = true
+				break
+			}
+		}
+		if !prior {
+			return PlanStepDeleteBlocked
+		}
 	}
-	return completed
+	return ""
+}
+
+func stepDeletesRunningSurface(s planStep) bool {
+	for _, f := range s.files {
+		if strings.TrimSpace(f.Path) == "" {
+			continue
+		}
+		if fileKindIsDelete(f.Kind) && PathTouchesRunningSurface(f.Path) {
+			return true
+		}
+	}
+	return false
 }
 
 // HasPendingSteps returns true if any steps are still pending or running.

@@ -269,6 +269,7 @@ func mainThreadToolAllowlist(codeMode bool) map[string]bool {
 		"memory_delete":         true,
 		"delegate_tasks":        true,
 		"announce_plan":         true,
+		"announce_completion":   true,
 		"update_plan":           true,
 		"gplan_reads":           true,
 		"gplan_gaps":            true,
@@ -675,6 +676,9 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			updatePlanTool, upErr := tools.NewUpdatePlanTool()
 			if upErr == nil {
 				coreTools = append(coreTools, updatePlanTool)
+			}
+			if acTool, acErr := tools.NewAnnounceCompletionTool(); acErr == nil {
+				coreTools = append(coreTools, acTool)
 			}
 
 			// Graph-Optimized Plan mode transition tools (code mode only).
@@ -1844,11 +1848,16 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 				case "task_complete":
 					stepName := plan.ResolveStepName(evt.PlanStep, evt.TaskName)
 					if stepName != "" {
-						if completedStep := plan.CompleteTask(stepName, evt.TaskName); completedStep != "" {
+						if ready := plan.CompleteTask(stepName, evt.TaskName); ready != "" {
+							result := chatAgent.ApplyPlanStepUpdate(ready, "complete")
+							status := result.Applied
+							if status == "" {
+								status = "running"
+							}
 							chatAgent.EmitSubTaskProgress(evt.SessionID, agent.SubTaskProgressEvent{
 								Type:       "plan_step_update",
-								StepName:   completedStep,
-								StepStatus: "complete",
+								StepName:   ready,
+								StepStatus: status,
 								SessionID:  evt.SessionID,
 							})
 						}
@@ -1958,12 +1967,11 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		// Wire explicit model-driven plan updates (update_plan tool) onto the
 		// active plan. This drives PLAN.md rewrites for main-thread work and
 		// suppresses the end-of-turn bulk-complete sweep.
-		tools.SetPlanStepUpdateCallback(func(step, status string) (string, string) {
-			plan := chatAgent.GetActivePlan()
-			if plan == nil {
-				return "", ""
-			}
-			return plan.SetStepStatus(step, status)
+		tools.SetPlanStepUpdateCallback(func(step, status string) agent.PlanStepApplyResult {
+			return chatAgent.ApplyPlanStepUpdate(step, status)
+		})
+		tools.SetPlanCompletionCallback(func(outcomeObserved, unverified string) agent.PlanCompletionResult {
+			return chatAgent.AnnounceCompletion(outcomeObserved, unverified)
 		})
 		tools.SetPlanKnownStepsCallback(func() []string {
 			plan := chatAgent.GetActivePlan()
@@ -1972,9 +1980,6 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			}
 			return plan.StepNames()
 		})
-		// Wire Graph-Optimized Plan phase transitions (code mode only). The
-		// gplan_* tools advance the active per-session GraphPlanState, which the
-		// runtime gate consults to determine the tool allow-list for each phase.
 		tools.SetGraphPlanAdvanceCallback(func(to agent.GraphPlanPhase) error {
 			gp := chatAgent.GetActiveGraphPlan()
 			if gp == nil {
@@ -1982,6 +1987,21 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			}
 			gp.Advance(to)
 			return nil
+		})
+		tools.SetGraphPlanAcceptanceCallback(func(acceptance string) error {
+			gp := chatAgent.GetActiveGraphPlan()
+			if gp == nil {
+				return fmt.Errorf("no active graph plan")
+			}
+			gp.SetAcceptance(acceptance)
+			return nil
+		})
+		tools.SetGraphPlanAcceptanceLookup(func() string {
+			gp := chatAgent.GetActiveGraphPlan()
+			if gp == nil {
+				return ""
+			}
+			return gp.Acceptance()
 		})
 		// Wire tool discovery so sub-agents can auto-discover their tools
 		if toolIndex != nil {

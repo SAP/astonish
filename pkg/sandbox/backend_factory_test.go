@@ -39,6 +39,13 @@ func TestNewBackend_ExplicitIncus(t *testing.T) {
 // pkg/sandbox/k8s so that its init() registers with the factory. This is
 // intentional isolation — pkg/sandbox/k8s pulls in k8s.io/client-go and its
 // SPDY stack, which we don't want to force on every consumer.
+func TestNewBackend_DockerRequiresImport(t *testing.T) {
+	_, err := NewBackend(BackendFactoryConfig{Kind: BackendKindDocker})
+	if !errors.Is(err, ErrBackendKindUnavailable) {
+		t.Errorf("docker: got %v, want ErrBackendKindUnavailable", err)
+	}
+}
+
 func TestNewBackend_K8sRequiresImport(t *testing.T) {
 	_, err := NewBackend(BackendFactoryConfig{Kind: BackendKindK8s})
 	if !errors.Is(err, ErrBackendKindUnavailable) {

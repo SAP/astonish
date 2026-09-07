@@ -61,9 +61,14 @@ func TestPlanState_ExplicitPlanStep_SingleTask(t *testing.T) {
 		t.Errorf("CompleteTask() = %q, want empty (nvidia-search still running)", got)
 	}
 
-	// Complete second task — NOW step should complete
+	// Complete second task — all delegates finished; the step stays running
+	// until verify passes. The returned name tells the caller to run verify.
 	if got := ps.CompleteTask("research-news", "nvidia-search"); got != "research-news" {
 		t.Errorf("CompleteTask() = %q, want %q", got, "research-news")
+	}
+	_, steps := ps.SnapshotInfo()
+	if steps[0].Status != "running" {
+		t.Errorf("delegate finish must not mark the step complete, status=%q", steps[0].Status)
 	}
 }
 
@@ -84,19 +89,23 @@ func TestPlanState_ExplicitPlanStep_MultipleTasksSameStep(t *testing.T) {
 		t.Errorf("step should NOT complete when nvidia is still running, got %q", got)
 	}
 
-	// nvidia finishes — now step completes
+	// nvidia finishes — all tasks done; step stays running until verify.
 	if got := ps.CompleteTask("research-news", "nvidia-search"); got != "research-news" {
-		t.Errorf("step should complete when all tasks done, got %q", got)
+		t.Errorf("step name should be returned when all tasks done, got %q", got)
+	}
+	_, steps := ps.SnapshotInfo()
+	if steps[0].Status != "running" {
+		t.Errorf("delegate finish must not mark the step complete, status=%q", steps[0].Status)
 	}
 
 	// Round 2 (retry with web tools) — same plan_step, new task names
 	step2 := ps.ResolveStepName("research-news", "apple-web")
-	// Step is already complete, StartStep should return ""
+	// Step is still running (not complete); StartStep should return ""
 	if step2 != "research-news" {
 		t.Fatalf("ResolveStepName still matches, got %q", step2)
 	}
 	if got := ps.StartStep(step2, "apple-web"); got != "" {
-		t.Errorf("StartStep on already-complete step should return empty, got %q", got)
+		t.Errorf("StartStep on already-running step should return empty, got %q", got)
 	}
 }
 
@@ -166,13 +175,13 @@ func TestPlanState_CompleteAll(t *testing.T) {
 	ps.AdvanceOnToolStart()
 	ps.StartStep("step-2", "some-task")
 
-	// CompleteAll should sweep all 3 (step-1 running, step-2 running, step-3 pending)
+	// CompleteAll is a no-op: pending and running steps stay as they are.
 	completed := ps.CompleteAll()
-	if len(completed) != 3 {
-		t.Errorf("CompleteAll() returned %d, want 3", len(completed))
+	if len(completed) != 0 {
+		t.Errorf("CompleteAll() returned %d, want 0", len(completed))
 	}
-	if ps.HasPendingSteps() {
-		t.Error("expected no pending steps after CompleteAll")
+	if !ps.HasPendingSteps() {
+		t.Error("pending/running steps must survive CompleteAll")
 	}
 }
 
@@ -204,18 +213,23 @@ func TestPlanState_RealWorldScenario_ExplicitBinding(t *testing.T) {
 
 	// task_complete: nvidia-search (plan_step: "research-news")
 	if emitted := ps.CompleteTask("research-news", "nvidia-search"); emitted != "research-news" {
-		t.Errorf("step should complete now, got %q", emitted)
+		t.Errorf("all research tasks finished, got %q", emitted)
 	}
+	_, info := ps.SnapshotInfo()
+	if info[0].Status != "running" {
+		t.Errorf("research-news status = %q, want running (verify not yet run)", info[0].Status)
+	}
+	ps.SetStepStatus("research-news", "complete")
 
 	// Agent calls write_file directly (not delegation) → AdvanceOnToolStart
 	if emitted := ps.AdvanceOnToolStart(); emitted != "write-reports" {
 		t.Errorf("write_file should advance to write-reports, got %q", emitted)
 	}
 
-	// End of turn
+	// End of turn must not fabricate completion.
 	completed := ps.CompleteAll()
-	if len(completed) != 1 { // only write-reports was still running
-		t.Errorf("CompleteAll() returned %d, want 1", len(completed))
+	if len(completed) != 0 {
+		t.Errorf("CompleteAll() returned %d, want 0", len(completed))
 	}
 }
 
@@ -233,6 +247,9 @@ func TestPlanState_MixedExplicitAndFallback(t *testing.T) {
 	}
 	ps.StartStep(step, "fetch-tree")
 	ps.CompleteTask(step, "fetch-tree")
+	// Sub-task finish is not completion; serial start of the next phase
+	// requires the prior phase to be marked complete via verify.
+	ps.SetStepStatus("explore", "complete")
 
 	// Task without plan_step (fallback to prefix match)
 	step2 := ps.ResolveStepName("", "analyze-code-astonish")
@@ -242,6 +259,10 @@ func TestPlanState_MixedExplicitAndFallback(t *testing.T) {
 	ps.StartStep(step2, "analyze-code-astonish")
 	if got := ps.CompleteTask(step2, "analyze-code-astonish"); got != "analyze-code" {
 		t.Errorf("single task completion: got %q, want 'analyze-code'", got)
+	}
+	_, info := ps.SnapshotInfo()
+	if info[1].Status != "running" {
+		t.Errorf("analyze-code status = %q, want running", info[1].Status)
 	}
 }
 
@@ -267,16 +288,16 @@ func TestPlanState_OnChangeFiresOnTransitions(t *testing.T) {
 		t.Fatalf("after no-op advance: calls = %d, want 1", calls)
 	}
 
-	// CompleteAll marks a+b complete → 1 more transition.
+	// CompleteAll is a no-op and must not fire onChange.
 	ps.CompleteAll()
-	if calls != 2 {
-		t.Fatalf("after CompleteAll: calls = %d, want 2", calls)
+	if calls != 1 {
+		t.Fatalf("after CompleteAll: calls = %d, want 1", calls)
 	}
 
-	// CompleteAll again is a no-op.
-	ps.CompleteAll()
+	// Explicit complete (what update_plan/verify does) is the transition.
+	ps.SetStepStatus("a", "complete")
 	if calls != 2 {
-		t.Fatalf("after second CompleteAll: calls = %d, want 2", calls)
+		t.Fatalf("after SetStepStatus complete: calls = %d, want 2", calls)
 	}
 }
 
@@ -425,7 +446,9 @@ func TestNewPlanState_CarriesFilesAndVerify(t *testing.T) {
 				{Path: "pkg/agent/sub_agent.go", Kind: "modify"},
 				{Path: "pkg/agent/plan_new.go", Kind: "new"},
 			},
-			Verify: "go test ./pkg/agent/...",
+			Verify:     "go test ./pkg/agent/...",
+			VerifyKind: VerifyKindUnit,
+			Outcome:    "Package tests encode the new plan fields",
 		},
 	})
 	_, steps := ps.Snapshot()
@@ -440,5 +463,11 @@ func TestNewPlanState_CarriesFilesAndVerify(t *testing.T) {
 	}
 	if steps[0].verify != "go test ./pkg/agent/..." {
 		t.Errorf("verify = %q", steps[0].verify)
+	}
+	if steps[0].verifyKind != VerifyKindUnit {
+		t.Errorf("verifyKind = %q", steps[0].verifyKind)
+	}
+	if steps[0].outcome != "Package tests encode the new plan fields" {
+		t.Errorf("outcome = %q", steps[0].outcome)
 	}
 }

@@ -216,7 +216,7 @@ type Backend interface {
 	Health(ctx context.Context) (*BackendHealth, error)
 
 	// Kind returns a stable identifier for this backend implementation
-	// ("incus", "k8s", "mock"). Useful for logging/metrics labels.
+	// ("docker", "k8s", "openshell", "mock"). Useful for logging/metrics labels.
 	Kind() BackendKind
 
 	// ServerArchitecture returns the native architecture ("amd64" or "arm64")
@@ -236,6 +236,7 @@ type BackendKind string
 
 const (
 	BackendKindIncus     BackendKind = "incus"
+	BackendKindDocker    BackendKind = "docker"
 	BackendKindK8s       BackendKind = "k8s"
 	BackendKindOpenShell BackendKind = "openshell"
 	BackendKindMock      BackendKind = "mock"
@@ -273,41 +274,41 @@ const (
 // opaque, backend-specific handle (Incus: container name; K8s: pod name).
 // Callers MUST NOT parse it.
 type Session struct {
-	SessionID   string            `json:"session_id"`
-	Type        SessionType       `json:"type"`
-	TemplateID  string            `json:"template_id"`
-	OrgSlug     string            `json:"org_slug,omitempty"`
-	TeamSlug    string            `json:"team_slug,omitempty"`
-	State       SessionState      `json:"state"`
-	BackendRef  string            `json:"backend_ref"`
-	Labels      map[string]string `json:"labels,omitempty"`
-	CreatedAt   time.Time         `json:"created_at"`
-	LastActive  time.Time         `json:"last_active,omitempty"`
+	SessionID  string            `json:"session_id"`
+	Type       SessionType       `json:"type"`
+	TemplateID string            `json:"template_id"`
+	OrgSlug    string            `json:"org_slug,omitempty"`
+	TeamSlug   string            `json:"team_slug,omitempty"`
+	State      SessionState      `json:"state"`
+	BackendRef string            `json:"backend_ref"`
+	Labels     map[string]string `json:"labels,omitempty"`
+	CreatedAt  time.Time         `json:"created_at"`
+	LastActive time.Time         `json:"last_active,omitempty"`
 }
 
 // SessionSpec is the CreateSession argument bundle.
 type SessionSpec struct {
-	SessionID    string            `json:"session_id"` // caller-chosen UUID
-	Type         SessionType       `json:"type"`
+	SessionID string      `json:"session_id"` // caller-chosen UUID
+	Type      SessionType `json:"type"`
 	// TemplateID identifies the template/layer to use as the session's
 	// base filesystem. Empty string is normalised to BaseTemplateID
 	// ("@base") by all backend implementations — callers need not set it
 	// explicitly for sessions using the default base layer.
-	TemplateID   string            `json:"template_id"`
-	OrgSlug      string            `json:"org_slug,omitempty"`
-	TeamSlug     string            `json:"team_slug,omitempty"`
-	UserID       string            `json:"user_id,omitempty"`
-	LayerChain   []string          `json:"layer_chain"` // resolved via store.SandboxTemplateStore.Resolve()
-	UpperLayerID string            `json:"upper_layer_id,omitempty"` // resume: previously-evicted upper
+	TemplateID   string   `json:"template_id"`
+	OrgSlug      string   `json:"org_slug,omitempty"`
+	TeamSlug     string   `json:"team_slug,omitempty"`
+	UserID       string   `json:"user_id,omitempty"`
+	LayerChain   []string `json:"layer_chain"`              // resolved via store.SandboxTemplateStore.Resolve()
+	UpperLayerID string   `json:"upper_layer_id,omitempty"` // resume: previously-evicted upper
 	// Image is the container image to use for this session. When non-empty,
 	// the OpenShell backend uses it instead of the global SandboxImage config.
 	// K8s and Incus backends ignore this field (they use LayerChain).
-	Image        string            `json:"image,omitempty"`
-	Limits       ResourceLimits    `json:"limits"`
-	Labels       map[string]string `json:"labels,omitempty"`
+	Image  string            `json:"image,omitempty"`
+	Limits ResourceLimits    `json:"limits"`
+	Labels map[string]string `json:"labels,omitempty"`
 	// Env is injected into the sandbox container at create time (OpenShell/K8s).
 	// Incus fleet sessions inject via LazyNodeClient.Env instead.
-	Env          map[string]string `json:"env,omitempty"`
+	Env map[string]string `json:"env,omitempty"`
 	// NetworkAllowEndpoints are extra OpenShell L7 allow rules merged into the
 	// create-time sandbox policy (in addition to YAML presets). Populated from
 	// platform/org/team NetworkPolicyAllow stores so the first CONNECT to
@@ -397,8 +398,8 @@ type ExecStreamSpec struct {
 // Stdin, MAY call Resize on SIGWINCH, MUST call Close to release
 // resources, and call Wait to get the exit code.
 type ExecStream interface {
-	io.Reader               // reads from process stdout (PTY merged by default)
-	io.Writer               // writes to process stdin
+	io.Reader // reads from process stdout (PTY merged by default)
+	io.Writer // writes to process stdin
 	Resize(rows, cols int) error
 	Wait() (int, error) // blocks until process exits
 	Close() error
@@ -435,16 +436,16 @@ type ExposedAddr struct {
 
 // FleetSpec describes a fleet container.
 type FleetSpec struct {
-	FleetKey   string            `json:"fleet_key"`
-	TemplateID string            `json:"template_id"`
-	OrgSlug    string            `json:"org_slug"`
-	TeamSlug   string            `json:"team_slug"`
+	FleetKey   string `json:"fleet_key"`
+	TemplateID string `json:"template_id"`
+	OrgSlug    string `json:"org_slug"`
+	TeamSlug   string `json:"team_slug"`
 	// Image is the container image to use for this fleet container.
 	// When non-empty, the OpenShell backend uses it instead of the global
 	// SandboxImage config. K8s and Incus backends ignore this field.
-	Image      string            `json:"image,omitempty"`
-	Labels     map[string]string `json:"labels,omitempty"`
-	Limits     ResourceLimits    `json:"limits"`
+	Image  string            `json:"image,omitempty"`
+	Labels map[string]string `json:"labels,omitempty"`
+	Limits ResourceLimits    `json:"limits"`
 }
 
 // BackendCapabilities are feature flags the UI may query to gate controls.

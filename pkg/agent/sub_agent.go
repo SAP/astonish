@@ -98,6 +98,9 @@ type PlanDocumentInfo struct {
 	Context      string `json:"context,omitempty"`
 	WhatNotToDo  string `json:"what_not_to_do,omitempty"`
 	Verification string `json:"verification,omitempty"`
+	// Results is written by announce_completion after e2e verification.
+	// Empty means the plan is not fully accepted.
+	Results string `json:"results,omitempty"`
 }
 
 // PlanStepInfo describes a step in the high-level execution plan.
@@ -115,10 +118,18 @@ type PlanStepInfo struct {
 	// code) is what turns a sketch into a complete, approvable plan. Persisted
 	// to PLAN.md and rendered in the plan UI.
 	Files []PlanFileChange `json:"files,omitempty"`
-	// Verify is the optional command that proves this phase is done (build,
-	// test, or lint). It encodes the "every phase ends verified" discipline and
-	// is persisted to PLAN.md.
+	// Outcome is the testable user-visible contract for this phase — one
+	// sentence the user could check without reading the diff.
+	Outcome string `json:"outcome,omitempty"`
+	// Verify is the command the runtime will execute to prove this phase is
+	// done. Persisted to PLAN.md.
 	Verify string `json:"verify,omitempty"`
+	// VerifyKind is "unit" (package tests for library-only work) or "behavior"
+	// (a command that exercises the user-visible outcome). Running surfaces
+	// require behavior.
+	VerifyKind string `json:"verify_kind,omitempty"`
+	// Evidence is the last verify result (exit code + truncated output).
+	Evidence string `json:"evidence,omitempty"`
 	// ParallelGroup, when non-empty, labels this step as a member of a named
 	// concurrency group. Steps sharing the same non-empty label may execute
 	// concurrently. Steps with an empty label execute serially.

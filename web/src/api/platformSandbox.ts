@@ -52,6 +52,9 @@ export function baseSandboxIsLive(summary: BaseConfigSummary | null | undefined)
 
 export interface BaseConfigStatus {
   in_progress: boolean
+  error?: string
+  layer_id?: string
+  size_bytes?: number
 }
 
 export interface OptionalTool {
@@ -160,6 +163,14 @@ export async function waitForBaseBuild(opts: {
       onProgress(`Server is still building (${elapsed}s since the log dropped). Leave this page open.`)
       await new Promise((r) => setTimeout(r, 3000))
       continue
+    }
+    if (status.error) {
+      onError(status.error)
+      return
+    }
+    if (status.layer_id) {
+      onDone({ layer_id: status.layer_id, size_bytes: status.size_bytes || 0 })
+      return
     }
     const summary = await getBaseConfig()
     if ('unsupported_backend' in summary || (summary as OpenShellBackendInfo).build_supported === false) {

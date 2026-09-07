@@ -22,12 +22,29 @@ import (
 var (
 	runningBaseBuildMu     sync.Mutex
 	runningBaseBuildCancel context.CancelFunc
+	lastBaseBuildError     string
+	lastBaseBuildLayerID   string
+	lastBaseBuildSizeBytes int64
 )
 
 func setRunningBaseBuildCancel(cancel context.CancelFunc) {
 	runningBaseBuildMu.Lock()
 	defer runningBaseBuildMu.Unlock()
 	runningBaseBuildCancel = cancel
+}
+
+func setLastBaseBuildResult(errMsg, layerID string, sizeBytes int64) {
+	runningBaseBuildMu.Lock()
+	defer runningBaseBuildMu.Unlock()
+	lastBaseBuildError = errMsg
+	lastBaseBuildLayerID = layerID
+	lastBaseBuildSizeBytes = sizeBytes
+}
+
+func lastBaseBuildResult() (errMsg, layerID string, sizeBytes int64) {
+	runningBaseBuildMu.Lock()
+	defer runningBaseBuildMu.Unlock()
+	return lastBaseBuildError, lastBaseBuildLayerID, lastBaseBuildSizeBytes
 }
 
 func cancelRunningBaseBuild() bool {
@@ -195,8 +212,13 @@ func PlatformBaseConfigStatusHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]bool{"in_progress": inProgress})
+	errMsg, layerID, sizeBytes := lastBaseBuildResult()
+	respondJSON(w, http.StatusOK, map[string]any{
+		"in_progress": inProgress,
+		"error":       errMsg,
+		"layer_id":    layerID,
+		"size_bytes":  sizeBytes,
+	})
 }
 
 // PlatformBaseConfigBuildHandler triggers a base template build.
@@ -316,6 +338,7 @@ func PlatformBaseConfigBuildHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	setLastBaseBuildResult("", "", 0)
 	SendSSE(w, flusher, "progress", map[string]string{
 		"message": fmt.Sprintf("Starting base configuration build (%d steps)...", len(steps)),
 	})
@@ -327,6 +350,7 @@ func PlatformBaseConfigBuildHandler(w http.ResponseWriter, r *http.Request) {
 			"message": fmt.Sprintf("Seeding @base overlay from %s (first Docker build)...", db.SandboxImage()),
 		})
 		if err := db.SeedBaseLayerFromImage(buildCtx); err != nil {
+			setLastBaseBuildResult(err.Error(), "", 0)
 			SendSSE(w, flusher, "error", map[string]string{"error": fmt.Sprintf("failed to seed @base overlay: %v", err)})
 			return
 		}
@@ -341,6 +365,7 @@ func PlatformBaseConfigBuildHandler(w http.ResponseWriter, r *http.Request) {
 		},
 	})
 	if err != nil {
+		setLastBaseBuildResult(err.Error(), "", 0)
 		SendSSE(w, flusher, "error", map[string]string{"error": fmt.Sprintf("build failed: %v", err)})
 		return
 	}
@@ -380,6 +405,7 @@ func PlatformBaseConfigBuildHandler(w http.ResponseWriter, r *http.Request) {
 	// Serialize config to JSON for persistence.
 	configJSON, err := cfg.ToJSON()
 	if err != nil {
+		setLastBaseBuildResult(err.Error(), "", 0)
 		SendSSE(w, flusher, "error", map[string]string{"error": fmt.Sprintf("failed to serialize config: %v", err)})
 		return
 	}
@@ -387,6 +413,7 @@ func PlatformBaseConfigBuildHandler(w http.ResponseWriter, r *http.Request) {
 	// Update @base template row.
 	// TODO: pass actual user ID when auth context is available
 	if err := tplStore.SetBaseConfig(buildCtx, artifact.LayerID, configJSON, ""); err != nil {
+		setLastBaseBuildResult(err.Error(), "", 0)
 		SendSSE(w, flusher, "error", map[string]string{"error": fmt.Sprintf("failed to update @base: %v", err)})
 		return
 	}
@@ -398,6 +425,7 @@ func PlatformBaseConfigBuildHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	setLastBaseBuildResult("", artifact.LayerID, artifact.SizeBytes)
 	SendSSE(w, flusher, "done", map[string]any{
 		"layer_id":   artifact.LayerID,
 		"size_bytes": artifact.SizeBytes,

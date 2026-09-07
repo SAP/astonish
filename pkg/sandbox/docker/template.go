@@ -19,15 +19,13 @@
 package docker
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/SAP/astonish/pkg/sandbox"
@@ -432,52 +430,35 @@ func (db *DockerBackend) captureUpperAsLayer(ctx context.Context, sessionID, tem
 		report = func(string) {}
 	}
 	cname := containerName(sessionID)
-	builderID := fmt.Sprintf("%d", time.Now().UnixNano())
-	script := buildCaptureScript(builderID)
-
-	type execResult struct {
-		out []byte
+	var copied atomic.Int64
+	type capRes struct {
+		art *sandbox.TemplateArtifact
 		err error
 	}
-	ch := make(chan execResult, 1)
+	ch := make(chan capRes, 1)
 	go func() {
-		out, err := runDocker(ctx, db.cfg.ContainerRuntimePath,
-			"exec", cname, "/bin/bash", "-c", script)
-		ch <- execResult{out, err}
+		art, err := db.captureUpperToHost(ctx, cname, &copied)
+		ch <- capRes{art, err}
 	}()
 
-	tick := time.NewTicker(15 * time.Second)
+	tick := time.NewTicker(5 * time.Second)
 	defer tick.Stop()
 	elapsed := 0
-	var res execResult
 	for {
 		select {
-		case res = <-ch:
-			goto done
+		case res := <-ch:
+			if res.err != nil {
+				return nil, captureLayerError(res.err)
+			}
+			return res.art, nil
 		case <-tick.C:
-			elapsed += 15
-			report(fmt.Sprintf("Capturing overlay layer... still copying (%ds). Keep the build container running; this is a disk copy, not a hang.", elapsed))
+			elapsed += 5
+			mb := copied.Load() / (1024 * 1024)
+			report(fmt.Sprintf("Capturing overlay layer... %d MB copied (%ds)", mb, elapsed))
 		case <-ctx.Done():
 			return nil, captureLayerError(ctx.Err())
 		}
 	}
-done:
-	if res.err != nil {
-		return nil, captureLayerError(res.err)
-	}
-	sha, size, err := parseCaptureOutput(res.out)
-	if err != nil {
-		return nil, fmt.Errorf("sandbox/docker: capture layer output: %w", err)
-	}
-	if size == 0 {
-		size = dirSize(db.layerRootfs(sha))
-	}
-	return &sandbox.TemplateArtifact{
-		LayerID:    sha,
-		SizeBytes:  size,
-		CephFSPath: db.layerDir(sha),
-		CreatedAt:  time.Now().UTC(),
-	}, nil
 }
 
 func buildCaptureScript(builderID string) string {
@@ -498,28 +479,4 @@ func dirSize(root string) int64 {
 		return nil
 	})
 	return total
-}
-
-func parseCaptureOutput(stdout []byte) (sha string, size int64, err error) {
-	sc := bufio.NewScanner(bytes.NewReader(stdout))
-	for sc.Scan() {
-		line := sc.Text()
-		switch {
-		case strings.HasPrefix(line, "SHA="):
-			sha = strings.TrimPrefix(line, "SHA=")
-		case strings.HasPrefix(line, "SIZE="):
-			n, perr := strconv.ParseInt(strings.TrimSpace(strings.TrimPrefix(line, "SIZE=")), 10, 64)
-			if perr != nil {
-				return "", 0, fmt.Errorf("SIZE= is not an integer: %w", perr)
-			}
-			size = n
-		}
-	}
-	if sha == "" {
-		return "", 0, fmt.Errorf("SHA= line missing")
-	}
-	if len(sha) != 64 {
-		return "", 0, fmt.Errorf("SHA= value %q is not 64-char hex", sha)
-	}
-	return sha, size, nil
 }

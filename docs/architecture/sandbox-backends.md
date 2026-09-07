@@ -530,15 +530,17 @@ Input: live session ID, new `slug`, `scope`, `scope_ref_id`.
 The difference from `CreateTemplate` is that the content source is the **session's upper layer** (the user's effective changes since the template was composed). Parent is the session's current template.
 
 1. Session pod is running; `/mnt/astonish-layers` is mounted RW inside it (team-template editor sessions get this automatically via the `astonish.io/purpose=team-template-editor` label; see §5.17).
-2. Astonish exec's into the session pod and runs the in-pod tar-to-layer pipeline, streaming **only `/var/astonish/overlay/upper`** (not the merged view):
+2. Astonish exec's into the session pod and runs the in-pod tar-to-layer pipeline, streaming **only `/var/astonish/overlay/upper`** (not the merged view). The shipped script is POSIX (`/bin/sh` / dash): a named fifo replaces bash process substitution so sha256sum and extract run in one pass. It must **not** stage a full tar on `/tmp` (that second copy ENOSPC's the Docker VM after a base-layer install).
    ```sh
-   tar --numeric-owner --xattrs --acls -I "zstd --adapt -T0" \
+   mkfifo "$STAGING/hash.fifo"
+   sha256sum < "$STAGING/hash.fifo" > "$STAGING/sha256" &
+   tar --numeric-owner --xattrs --acls --sort=name --mtime=@0 \
        -C /var/astonish/overlay/upper -cf - . \
-     | tee >(sha256sum > /tmp/sha) \
-     | tar --numeric-owner --xattrs --acls -I zstd \
-       -C /mnt/astonish-layers/__staging-<session-id>/rootfs -xf -
+     | tee "$STAGING/hash.fifo" \
+     | tar --numeric-owner --xattrs --acls \
+       -C /mnt/astonish-layers/__staging-<id>/rootfs -xf -
    ```
-   (In-pod pipe; the layers PVC sees a single sequential writer.)
+   (In-pod pipe; the layers volume sees a single sequential writer.) The helper is `pkg/sandbox.OverlayCaptureScript`, used by both Docker and Kubernetes.
 3. Rename staging directory to `/mnt/astonish-layers/<sha256>/`. If a directory with that sha already exists (content already stored as a layer under a different scope, for example), skip the rename and remove staging.
 4. In a single PG transaction:
    - `INSERT INTO sandbox_layers ... ON CONFLICT DO NOTHING` — **deduplication falls out automatically**: identical upper contents produce identical sha256 and therefore reuse an existing layer.
@@ -546,7 +548,7 @@ The difference from `CreateTemplate` is that the content source is the **session
    - Increment `ref_count` on the layer (template reference).
 5. Typical duration: 1–5 seconds for normal sandboxes. No registry round-trip.
 
-The `pkg/sandbox/k8s/template.go::buildCaptureScript` helper builds the capture command line; the API-layer `TemplatePersister` callback (set on `k8s.Config`) is invoked after a successful capture so the calling code can persist the template metadata into the application store without coupling the backend to schema details.
+The `pkg/sandbox.OverlayCaptureScript` helper builds the capture command line; the API-layer `TemplatePersister` callback (set on `k8s.Config`) is invoked after a successful capture so the calling code can persist the template metadata into the application store without coupling the backend to schema details.
 
 Authorization: scope-appropriate actor required. `save-as-@base` is a privileged variant that updates `@base.top_layer_id` in place (§3.9) instead of creating a new template row — restricted to `superadmin`.
 

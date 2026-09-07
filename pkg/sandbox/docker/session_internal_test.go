@@ -44,11 +44,30 @@ func TestDockerRunArgs_OverlayContract(t *testing.T) {
 	if strings.Contains(joined, "/mnt/astonish-uppers/sess-1") && strings.Contains(joined, mountOverlay) {
 		// host persist dir is bound at mountUppers, not as overlay upperdir
 	}
-	// Live overlay upperdir must be the anonymous volume, not the host persist bind.
+	// Live overlay upperdir must be the named overlay volume, not the host persist bind.
+	wantVol := overlayVolumeName(spec.SessionID) + ":" + mountOverlay
+	if !strings.Contains(joined, wantVol) {
+		t.Errorf("docker run args missing overlay volume %q\n%s", wantVol, joined)
+	}
 	for i, a := range args {
 		if a == "-v" && i+1 < len(args) && strings.HasSuffix(args[i+1], ":"+mountUpper) {
 			t.Errorf("must not bind host path onto live overlay upperdir: %s", args[i+1])
 		}
+	}
+}
+
+func TestIsPrunableOverlayVolume(t *testing.T) {
+	if !isPrunableOverlayVolume("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") {
+		t.Error("64-hex dangling anonymous volume should be prunable")
+	}
+	if !isPrunableOverlayVolume("astonish-session-build-base-config-abcdef-overlay") {
+		t.Error("named session overlay volume should be prunable")
+	}
+	if isPrunableOverlayVolume("postgres_data") {
+		t.Error("must not prune unrelated named volumes")
+	}
+	if isPrunableOverlayVolume("not-hex") {
+		t.Error("short names must not be treated as anonymous overlay volumes")
 	}
 }
 

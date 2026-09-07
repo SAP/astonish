@@ -82,6 +82,7 @@ func (db *DockerBackend) CreateSession(ctx context.Context, spec sandbox.Session
 		}
 	}
 
+	db.removeOverlayVolume(ctx, spec.SessionID)
 	args := db.dockerRunArgs(spec, cname, layerChain, upperDir)
 	if _, err := runDocker(ctx, db.cfg.ContainerRuntimePath, args...); err != nil {
 		return nil, fmt.Errorf("sandbox/docker: docker run for session %s: %w", spec.SessionID, err)
@@ -127,8 +128,8 @@ func (db *DockerBackend) StartSession(ctx context.Context, sessionID string) err
 }
 
 // StopSession persists the overlay upper layer, then removes the container
-// (the anonymous overlay volume dies with it). The persist dir keeps
-// upper.tar.zst for resume. Idempotent if already gone.
+// and its overlay volume. The persist dir keeps upper.tar.zst for resume.
+// Idempotent if already gone.
 func (db *DockerBackend) StopSession(ctx context.Context, sessionID string) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -144,9 +145,10 @@ func (db *DockerBackend) StopSession(ctx context.Context, sessionID string) erro
 	if state == sandbox.SessionStateRunning || state == sandbox.SessionStateCreating {
 		_ = db.persistUpper(ctx, sessionID)
 	}
-	if _, err := runDocker(ctx, db.cfg.ContainerRuntimePath, "rm", "-f", cname); err != nil && !isDockerNotFoundError(err) {
+	if _, err := runDocker(ctx, db.cfg.ContainerRuntimePath, "rm", "-f", "-v", cname); err != nil && !isDockerNotFoundError(err) {
 		return fmt.Errorf("sandbox/docker: docker rm %s: %w", cname, err)
 	}
+	db.removeOverlayVolume(ctx, sessionID)
 	return nil
 }
 
@@ -158,8 +160,8 @@ func (db *DockerBackend) DestroySession(ctx context.Context, sessionID string) e
 	}
 	cname := containerName(sessionID)
 
-	// Remove container (force-stops first if running).
-	_, err := runDocker(ctx, db.cfg.ContainerRuntimePath, "rm", "-f", cname)
+	// Remove container (force-stops first if running) and the overlay volume.
+	_, err := runDocker(ctx, db.cfg.ContainerRuntimePath, "rm", "-f", "-v", cname)
 	if err != nil {
 		// "No such container" is not an error for idempotency.
 		if !strings.Contains(err.Error(), "No such container") &&
@@ -167,6 +169,7 @@ func (db *DockerBackend) DestroySession(ctx context.Context, sessionID string) e
 			return fmt.Errorf("sandbox/docker: docker rm %s: %w", cname, err)
 		}
 	}
+	db.removeOverlayVolume(ctx, sessionID)
 
 	// Remove upper layer directory.
 	upperDir := db.upperPath(sessionID)
@@ -407,7 +410,7 @@ func (db *DockerBackend) dockerRunArgs(spec sandbox.SessionSpec, cname, layerCha
 		"--device", "/dev/fuse",
 		"-v", db.cfg.LayersDir + ":" + mountLayers + layersMountOpt(spec),
 		"-v", upperDir + ":" + mountUppers,
-		"-v", mountOverlay, // anonymous Linux volume: live upper+work, never a macOS bind
+		"-v", overlayVolumeName(spec.SessionID) + ":" + mountOverlay,
 		"-e", envSessionID + "=" + spec.SessionID,
 		"-e", envLayerChain + "=" + layerChain,
 		"-e", envUpperDir + "=" + mountUpper,
@@ -481,6 +484,47 @@ func (db *DockerBackend) persistUpper(ctx context.Context, sessionID string) err
 	return err
 }
 
+func (db *DockerBackend) removeOverlayVolume(ctx context.Context, sessionID string) {
+	vol := overlayVolumeName(sessionID)
+	_, _ = runDocker(ctx, db.cfg.ContainerRuntimePath, "volume", "rm", "-f", vol)
+}
+
+// pruneDanglingOverlayVolumes deletes unused overlay volumes left behind by
+// `docker rm -f` without `-v` (anonymous 64-hex names) and our named
+// `*-overlay` volumes whose container is already gone.
+func (db *DockerBackend) pruneDanglingOverlayVolumes(ctx context.Context) {
+	out, err := runDocker(ctx, db.cfg.ContainerRuntimePath, "volume", "ls", "-qf", "dangling=true")
+	if err != nil {
+		return
+	}
+	for _, name := range strings.Split(string(out), "\n") {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if !isPrunableOverlayVolume(name) {
+			continue
+		}
+		_, _ = runDocker(ctx, db.cfg.ContainerRuntimePath, "volume", "rm", "-f", name)
+	}
+}
+
+func isPrunableOverlayVolume(name string) bool {
+	if strings.HasSuffix(name, "-overlay") && strings.HasPrefix(name, "astonish-session-") {
+		return true
+	}
+	if len(name) != 64 {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 func (db *DockerBackend) recordSession(spec sandbox.SessionSpec, cname, templateID string) {
 	if db.cfg.Sessions == nil {
 		return
@@ -509,6 +553,7 @@ func (db *DockerBackend) recreateFromPersist(ctx context.Context, sessionID stri
 		return fmt.Errorf("sandbox/docker: session %s persist is missing layer chain", sessionID)
 	}
 	spec := sandbox.SessionSpec{SessionID: sessionID, Type: sandbox.SessionTypeChat, LayerChain: strings.Split(chain, ",")}
+	db.removeOverlayVolume(ctx, sessionID)
 	args := db.dockerRunArgs(spec, containerName(sessionID), chain, upperDir)
 	if _, err := runDocker(ctx, db.cfg.ContainerRuntimePath, args...); err != nil {
 		return fmt.Errorf("sandbox/docker: recreate session %s: %w", sessionID, err)

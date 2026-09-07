@@ -279,6 +279,13 @@ func containerName(sessionID string) string {
 	return prefix + label + "-" + suffix
 }
 
+// overlayVolumeName is the named Docker volume for a session's live overlay
+// (upper+work). Named so DestroySession can delete it; anonymous volumes
+// survive `docker rm -f` and fill the Docker VM after a few base rebuilds.
+func overlayVolumeName(sessionID string) string {
+	return containerName(sessionID) + "-overlay"
+}
+
 // layerDir is the host directory for a content-addressed layer (contains rootfs/).
 func (db *DockerBackend) layerDir(layerID string) string {
 	return filepath.Join(db.cfg.LayersDir, layerID)

@@ -540,38 +540,7 @@ func (b *K8sBackend) captureUpperAsLayer(ctx context.Context, podName, parentLay
 // Isolated at package scope so tests can assert exactly the script
 // shape without standing up a pod.
 func buildCaptureScript(layersPath, builderID string) string {
-	var b bytes.Buffer
-	b.WriteString("set -e\n")
-	fmt.Fprintf(&b, "STAGING=%q\n", layersPath+"/__staging-"+builderID)
-	fmt.Fprintf(&b, "LAYERS_DIR=%q\n", layersPath)
-	// Trap: if the script exits non-zero (set -e abort, signal, etc.)
-	// remove the staging directory so it doesn't become an orphan.
-	// Only the GC reconciler handles external kills (OOM, pod eviction).
-	b.WriteString("trap 'rm -rf \"$STAGING\"' EXIT\n")
-	b.WriteString("mkdir -p \"$STAGING/rootfs\"\n")
-	// Canonical tar: --sort=name --mtime=@0 pins layout byte-for-byte
-	// across runs with identical content. --numeric-owner --xattrs
-	// --acls match the preservation requirements (§5.6).
-	//
-	// Two-pass approach (POSIX-compatible, no bash process substitution):
-	//   Pass 1: tar the upper into a temp archive and compute SHA-256.
-	//   Pass 2: extract the archive into the staging rootfs.
-	// This avoids the bash-only >(process substitution) syntax that fails
-	// on Debian's /bin/sh (dash).
-	b.WriteString("tar --numeric-owner --xattrs --acls --sort=name --mtime=@0 \\\n")
-	fmt.Fprintf(&b, "    -C %s -cf /tmp/astn-layer.tar .\n", mountUpper)
-	b.WriteString("SHA=$(sha256sum /tmp/astn-layer.tar | awk '{print $1}')\n")
-	b.WriteString("tar --numeric-owner --xattrs --acls -C \"$STAGING/rootfs\" -xf /tmp/astn-layer.tar\n")
-	b.WriteString("rm -f /tmp/astn-layer.tar\n")
-	b.WriteString("if [ -d \"$LAYERS_DIR/$SHA\" ]; then\n")
-	b.WriteString("  rm -rf \"$STAGING\"\n")
-	b.WriteString("else\n")
-	b.WriteString("  mv \"$STAGING\" \"$LAYERS_DIR/$SHA\"\n")
-	b.WriteString("fi\n")
-	b.WriteString("SIZE=$(du -sb \"$LAYERS_DIR/$SHA/rootfs\" | awk '{print $1}')\n")
-	b.WriteString("echo \"SHA=$SHA\"\n")
-	b.WriteString("echo \"SIZE=$SIZE\"\n")
-	return b.String()
+	return sandbox.OverlayCaptureScript(layersPath, mountUpper, builderID)
 }
 
 // parseCaptureOutput extracts the SHA= and SIZE= lines emitted by

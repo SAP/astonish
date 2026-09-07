@@ -135,6 +135,7 @@ func (db *DockerBackend) BuildTemplate(ctx context.Context, spec sandbox.Templat
 		labels[k] = v
 	}
 	labels["astonish.io/purpose"] = "template-builder"
+	db.pruneDanglingOverlayVolumes(ctx)
 	if err := db.ensureParentLayers(ctx, spec.ParentLayers); err != nil {
 		return nil, err
 	}
@@ -180,6 +181,17 @@ func (db *DockerBackend) BuildTemplate(ctx context.Context, spec sandbox.Templat
 
 	report("Capturing overlay layer...")
 	return db.captureUpperAsLayer(ctx, sess.SessionID, spec.TemplateID)
+}
+
+func captureLayerError(err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "no space left") {
+		return fmt.Errorf("sandbox/docker: capture layer: no space left on device (need room for the overlay snapshot on the layers volume). Free Docker disk: docker volume prune -f && docker system prune, or increase the Docker Desktop disk image: %w", err)
+	}
+	return fmt.Errorf("sandbox/docker: capture layer: %w", err)
 }
 
 func truncateStep(step string) string {
@@ -421,7 +433,7 @@ func (db *DockerBackend) captureUpperAsLayer(ctx context.Context, sessionID, tem
 	out, err := runDocker(ctx, db.cfg.ContainerRuntimePath,
 		"exec", cname, "/bin/sh", "-c", buildCaptureScript(builderID))
 	if err != nil {
-		return nil, fmt.Errorf("sandbox/docker: capture layer: %w", err)
+		return nil, captureLayerError(err)
 	}
 	sha, size, err := parseCaptureOutput(out)
 	if err != nil {
@@ -436,26 +448,7 @@ func (db *DockerBackend) captureUpperAsLayer(ctx context.Context, sessionID, tem
 }
 
 func buildCaptureScript(builderID string) string {
-	var b strings.Builder
-	b.WriteString("set -e\n")
-	fmt.Fprintf(&b, "STAGING=%q\n", mountLayers+"/__staging-"+builderID)
-	fmt.Fprintf(&b, "LAYERS_DIR=%q\n", mountLayers)
-	b.WriteString("trap 'rm -rf \"$STAGING\"' EXIT\n")
-	b.WriteString("mkdir -p \"$STAGING/rootfs\"\n")
-	b.WriteString("tar --numeric-owner --xattrs --acls --sort=name --mtime=@0 \\\n")
-	fmt.Fprintf(&b, "    -C %s -cf /tmp/astn-layer.tar .\n", mountUpper)
-	b.WriteString("SHA=$(sha256sum /tmp/astn-layer.tar | awk '{print $1}')\n")
-	b.WriteString("tar --numeric-owner --xattrs --acls -C \"$STAGING/rootfs\" -xf /tmp/astn-layer.tar\n")
-	b.WriteString("rm -f /tmp/astn-layer.tar\n")
-	b.WriteString("if [ -d \"$LAYERS_DIR/$SHA\" ]; then\n")
-	b.WriteString("  rm -rf \"$STAGING\"\n")
-	b.WriteString("else\n")
-	b.WriteString("  mv \"$STAGING\" \"$LAYERS_DIR/$SHA\"\n")
-	b.WriteString("fi\n")
-	b.WriteString("SIZE=$(du -sb \"$LAYERS_DIR/$SHA/rootfs\" | awk '{print $1}')\n")
-	b.WriteString("echo \"SHA=$SHA\"\n")
-	b.WriteString("echo \"SIZE=$SIZE\"\n")
-	return b.String()
+	return sandbox.OverlayCaptureScript(mountLayers, mountUpper, builderID)
 }
 
 func parseCaptureOutput(stdout []byte) (sha string, size int64, err error) {

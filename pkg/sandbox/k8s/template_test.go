@@ -272,10 +272,11 @@ func TestBuildCaptureScript_ContainsCanonicalPipeline(t *testing.T) {
 	s := buildCaptureScript("/mnt/astonish-layers", "bid-123")
 	mustContain := []string{
 		"set -e",
-		"trap 'rm -rf \"$STAGING\"' EXIT",
+		"trap cleanup EXIT",
 		"/mnt/astonish-layers/__staging-bid-123",
 		"tar --numeric-owner --xattrs --acls --sort=name --mtime=@0",
 		"/var/astonish/overlay/upper",
+		"mkfifo",
 		"sha256sum",
 		"mv \"$STAGING\" \"$LAYERS_DIR/$SHA\"",
 		"du -sb",
@@ -286,6 +287,9 @@ func TestBuildCaptureScript_ContainsCanonicalPipeline(t *testing.T) {
 		if !strings.Contains(s, needle) {
 			t.Errorf("capture script missing %q:\n%s", needle, s)
 		}
+	}
+	if strings.Contains(s, "/tmp/astn-layer.tar") {
+		t.Error("must not stage a full tar on /tmp")
 	}
 }
 
@@ -386,8 +390,8 @@ func TestBuildTemplate_HappyPath(t *testing.T) {
 	// Track the exec calls: each step is one, then the capture
 	// pipeline is one more.
 	var (
-		mu         sync.Mutex
-		scripts    []string
+		mu      sync.Mutex
+		scripts []string
 	)
 	stubFactory(t, b, func(_ context.Context, opts remotecommand.StreamOptions) error {
 		// The command body is encoded in the URL query string;
@@ -888,6 +892,6 @@ type fakeExitError struct {
 	code int
 }
 
-func (e *fakeExitError) Error() string      { return fmt.Sprintf("command exited %d", e.code) }
-func (e *fakeExitError) ExitStatus() int    { return e.code }
-func (e *fakeExitError) Exited() bool       { return true }
+func (e *fakeExitError) Error() string   { return fmt.Sprintf("command exited %d", e.code) }
+func (e *fakeExitError) ExitStatus() int { return e.code }
+func (e *fakeExitError) Exited() bool    { return true }

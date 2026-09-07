@@ -1,6 +1,7 @@
 package docker
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -28,6 +29,23 @@ func TestFormatExecOutput_PrefersAptErrorLinesOverPackageList(t *testing.T) {
 	}
 	if strings.Contains(got, "libavcodec") {
 		t.Fatalf("should not dump the package list when an E: line exists: %s", got)
+	}
+}
+
+func TestBuildCaptureScript_DoesNotStageTmpTar(t *testing.T) {
+	s := buildCaptureScript("bid-1")
+	if strings.Contains(s, "/tmp/astn-layer.tar") {
+		t.Fatal("capture must not write /tmp/astn-layer.tar")
+	}
+	if !strings.Contains(s, "mkfifo") {
+		t.Fatal("expected posix fifo streaming capture")
+	}
+}
+
+func TestCaptureLayerError_NoSpace(t *testing.T) {
+	err := captureLayerError(fmt.Errorf("exit status 2\nstderr: tar: /tmp/astn-layer.tar: Cannot write: No space left on device"))
+	if err == nil || !strings.Contains(err.Error(), "docker volume prune") {
+		t.Fatalf("expected prune hint, got %v", err)
 	}
 }
 

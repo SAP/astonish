@@ -278,26 +278,11 @@ func PlatformBaseConfigBuildHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Send initial progress.
 	SendSSE(w, flusher, "progress", map[string]string{
 		"message": fmt.Sprintf("Starting base configuration build (%d steps)...", len(steps)),
 	})
 
-	// Build the template.
 	templateID := fmt.Sprintf("@base-config-%d", time.Now().UnixMilli())
-
-	for i, step := range steps {
-		// Truncate for display.
-		display := step
-		if len(display) > 80 {
-			display = display[:77] + "..."
-		}
-		SendSSE(w, flusher, "progress", map[string]string{
-			"message": fmt.Sprintf("[%d/%d] %s", i+1, len(steps), display),
-			"step":    fmt.Sprintf("%d", i+1),
-			"total":   fmt.Sprintf("%d", len(steps)),
-		})
-	}
 
 	if db, ok := sbBackend.(*sboxdocker.DockerBackend); ok && !db.LayerReady(sandbox.BaseTemplateID) {
 		SendSSE(w, flusher, "progress", map[string]string{
@@ -309,14 +294,13 @@ func PlatformBaseConfigBuildHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	SendSSE(w, flusher, "progress", map[string]string{
-		"message": "Executing build steps in sandbox (this may take several minutes)...",
-	})
-
 	artifact, err := sbBackend.BuildTemplate(r.Context(), sandbox.TemplateBuildSpec{
 		TemplateID:   templateID,
 		ParentLayers: []string{sandbox.BaseTemplateID},
 		Steps:        steps,
+		Progress: func(msg string) {
+			SendSSE(w, flusher, "progress", map[string]string{"message": msg})
+		},
 	})
 	if err != nil {
 		SendSSE(w, flusher, "error", map[string]string{"error": fmt.Sprintf("build failed: %v", err)})

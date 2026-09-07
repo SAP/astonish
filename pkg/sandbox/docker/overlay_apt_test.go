@@ -31,6 +31,17 @@ func TestFormatExecOutput_PrefersAptErrorLinesOverPackageList(t *testing.T) {
 	}
 }
 
+func TestTruncateStep(t *testing.T) {
+	if got := truncateStep("apt-get update"); got != "apt-get update" {
+		t.Fatalf("short step: %q", got)
+	}
+	long := strings.Repeat("a", 100)
+	got := truncateStep(long)
+	if len(got) != 80 || !strings.HasSuffix(got, "...") {
+		t.Fatalf("long step: %q", got)
+	}
+}
+
 func TestOverlayAptPrepScript_ChecksFreeSpace(t *testing.T) {
 	script := overlayAptPrepScript()
 	if !strings.Contains(script, "df -Pm") {

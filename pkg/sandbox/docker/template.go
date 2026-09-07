@@ -158,21 +158,36 @@ func (db *DockerBackend) BuildTemplate(ctx context.Context, spec sandbox.Templat
 		return nil, fmt.Errorf("sandbox/docker: BuildTemplate wait ready: %w", err)
 	}
 
+	report := spec.Progress
+	if report == nil {
+		report = func(string) {}
+	}
+
 	// fuse-overlayfs rejects apt's _apt sandbox user (uid 42) and dpkg
 	// postinsts that try to start systemd services (docker.io). Persist
 	// apt/dpkg policy in the overlay before the first package step.
+	report("Preparing overlay apt/dpkg policy...")
 	if err := db.execBuildStep(ctx, sess.SessionID, -1, overlayAptPrepScript()); err != nil {
 		return nil, err
 	}
 
 	for i, step := range spec.Steps {
+		report(fmt.Sprintf("Running step %d/%d: %s", i+1, len(spec.Steps), truncateStep(step)))
 		if err := db.execBuildStep(ctx, sess.SessionID, i, step); err != nil {
 			return nil, err
 		}
 	}
 
-	// Capture the upper directory as a new template layer.
+	report("Capturing overlay layer...")
 	return db.captureUpperAsLayer(ctx, sess.SessionID, spec.TemplateID)
+}
+
+func truncateStep(step string) string {
+	step = strings.TrimSpace(step)
+	if len(step) <= 80 {
+		return step
+	}
+	return step[:77] + "..."
 }
 
 func (db *DockerBackend) execBuildStep(ctx context.Context, sessionID string, i int, step string) error {

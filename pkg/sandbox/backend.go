@@ -415,6 +415,9 @@ type TemplateBuildSpec struct {
 	Steps []string `json:"steps"`
 	// Labels are attached to the build container for debugging.
 	Labels map[string]string `json:"labels,omitempty"`
+	// Progress, when set, is called with a human-readable status as the
+	// build moves between steps. It must not be serialized.
+	Progress func(message string) `json:"-"`
 }
 
 // TemplateArtifact is the output of a template build or session-save.

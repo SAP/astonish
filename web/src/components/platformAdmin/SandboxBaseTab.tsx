@@ -87,6 +87,27 @@ export default function SandboxBaseTab() {
           setShowAdvanced(true)
         }
       }
+
+      const status = await api.getBaseStatus().catch(() => ({ in_progress: false }))
+      if (status.in_progress) {
+        setBuilding(true)
+        setBuildLog(prev => (prev.length ? prev : ['A base-layer build is still running on the server...']))
+        const controller = new AbortController()
+        abortRef.current = () => controller.abort()
+        void api.waitForBaseBuild({
+          onProgress: (msg) => setBuildLog(prev => [...prev, msg]),
+          onDone: (result) => {
+            setBuilding(false)
+            setSuccess(`Build complete. Layer: ${result.layer_id} (${formatBytes(result.size_bytes)})`)
+            void load()
+          },
+          onError: (err) => {
+            setBuilding(false)
+            setError(err)
+          },
+          signal: controller.signal,
+        })
+      }
     } catch (e) {
       setError((e as Error).message)
     } finally {
@@ -135,6 +156,7 @@ export default function SandboxBaseTab() {
 
   const handleCancel = () => {
     if (!confirm('Cancel the build? The in-progress build will be aborted and no changes will be applied.')) return
+    void api.cancelBaseConfigure().catch(() => {})
     abortRef.current?.()
     setBuilding(false)
     setBuildLog(prev => [...prev, '--- Build cancelled by user ---'])

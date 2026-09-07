@@ -1,11 +1,13 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/SAP/astonish/pkg/sandbox"
@@ -13,6 +15,31 @@ import (
 	sboxdocker "github.com/SAP/astonish/pkg/sandbox/docker"
 	"github.com/SAP/astonish/pkg/store"
 )
+
+// runningBaseBuildCancel stops the in-process @base rebuild. The HTTP SSE
+// request must not own this: Vite's proxy defaults to a 120s timeout and
+// closing the stream used to SIGTERM docker exec mid-capture.
+var (
+	runningBaseBuildMu     sync.Mutex
+	runningBaseBuildCancel context.CancelFunc
+)
+
+func setRunningBaseBuildCancel(cancel context.CancelFunc) {
+	runningBaseBuildMu.Lock()
+	defer runningBaseBuildMu.Unlock()
+	runningBaseBuildCancel = cancel
+}
+
+func cancelRunningBaseBuild() bool {
+	runningBaseBuildMu.Lock()
+	defer runningBaseBuildMu.Unlock()
+	if runningBaseBuildCancel == nil {
+		return false
+	}
+	runningBaseBuildCancel()
+	runningBaseBuildCancel = nil
+	return true
+}
 
 // PlatformBaseConfigGetHandler returns the current @base template configuration.
 // GET /api/platform/admin/sandbox/base
@@ -246,6 +273,17 @@ func PlatformBaseConfigBuildHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer release()
 
+	// Do not bind the 20–40 minute rebuild to the Studio SSE request.
+	// Vite's /api proxy times out at 120s; that used to cancel r.Context(),
+	// kill docker exec, and run the capture EXIT trap which deleted the
+	// half-copied overlay.
+	buildCtx, buildCancel := context.WithCancel(context.WithoutCancel(r.Context()))
+	setRunningBaseBuildCancel(buildCancel)
+	defer func() {
+		buildCancel()
+		setRunningBaseBuildCancel(nil)
+	}()
+
 	// Set up SSE streaming.
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -288,13 +326,13 @@ func PlatformBaseConfigBuildHandler(w http.ResponseWriter, r *http.Request) {
 		SendSSE(w, flusher, "progress", map[string]string{
 			"message": fmt.Sprintf("Seeding @base overlay from %s (first Docker build)...", db.SandboxImage()),
 		})
-		if err := db.SeedBaseLayerFromImage(r.Context()); err != nil {
+		if err := db.SeedBaseLayerFromImage(buildCtx); err != nil {
 			SendSSE(w, flusher, "error", map[string]string{"error": fmt.Sprintf("failed to seed @base overlay: %v", err)})
 			return
 		}
 	}
 
-	artifact, err := sbBackend.BuildTemplate(r.Context(), sandbox.TemplateBuildSpec{
+	artifact, err := sbBackend.BuildTemplate(buildCtx, sandbox.TemplateBuildSpec{
 		TemplateID:   templateID,
 		ParentLayers: []string{sandbox.BaseTemplateID},
 		Steps:        steps,
@@ -315,7 +353,7 @@ func PlatformBaseConfigBuildHandler(w http.ResponseWriter, r *http.Request) {
 	layers := db.SandboxLayers()
 
 	// Get old top_layer_id for ref_count management.
-	oldLayerID, err := tplStore.GetBaseTopLayerID(r.Context())
+	oldLayerID, err := tplStore.GetBaseTopLayerID(buildCtx)
 	if err != nil {
 		slog.Error("failed to get old @base layer", "error", err)
 	}
@@ -326,7 +364,7 @@ func PlatformBaseConfigBuildHandler(w http.ResponseWriter, r *http.Request) {
 		CephFSPath: artifact.CephFSPath,
 		SizeBytes:  artifact.SizeBytes,
 	}
-	if err := layers.PutLayer(r.Context(), newLayer); err != nil {
+	if err := layers.PutLayer(buildCtx, newLayer); err != nil {
 		// Ignore "already exists" — content-addressed dedup.
 		if !strings.Contains(err.Error(), "duplicate") && !strings.Contains(err.Error(), "already exists") {
 			SendSSE(w, flusher, "error", map[string]string{"error": fmt.Sprintf("failed to register layer: %v", err)})
@@ -335,7 +373,7 @@ func PlatformBaseConfigBuildHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Increment ref_count for the new layer (template reference).
-	if err := layers.IncrementRefCount(r.Context(), artifact.LayerID); err != nil {
+	if err := layers.IncrementRefCount(buildCtx, artifact.LayerID); err != nil {
 		slog.Error("failed to increment ref_count on new layer", "layer", artifact.LayerID, "error", err)
 	}
 
@@ -348,14 +386,14 @@ func PlatformBaseConfigBuildHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Update @base template row.
 	// TODO: pass actual user ID when auth context is available
-	if err := tplStore.SetBaseConfig(r.Context(), artifact.LayerID, configJSON, ""); err != nil {
+	if err := tplStore.SetBaseConfig(buildCtx, artifact.LayerID, configJSON, ""); err != nil {
 		SendSSE(w, flusher, "error", map[string]string{"error": fmt.Sprintf("failed to update @base: %v", err)})
 		return
 	}
 
 	// Decrement old layer ref_count.
 	if oldLayerID != "" && oldLayerID != "@base" && oldLayerID != artifact.LayerID {
-		if err := layers.DecrementRefCount(r.Context(), oldLayerID); err != nil {
+		if err := layers.DecrementRefCount(buildCtx, oldLayerID); err != nil {
 			slog.Error("failed to decrement old layer ref_count", "layer", oldLayerID, "error", err)
 		}
 	}
@@ -365,6 +403,16 @@ func PlatformBaseConfigBuildHandler(w http.ResponseWriter, r *http.Request) {
 		"size_bytes": artifact.SizeBytes,
 		"status":     "success",
 	})
+}
+
+// PlatformBaseConfigCancelHandler stops the in-process @base rebuild.
+// POST /api/platform/admin/sandbox/base/configure/cancel
+func PlatformBaseConfigCancelHandler(w http.ResponseWriter, r *http.Request) {
+	if !cancelRunningBaseBuild() {
+		respondJSON(w, http.StatusConflict, map[string]string{"error": "no base configuration build is running"})
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
 }
 
 // PlatformBaseConfigOptionalToolsHandler returns the available optional tools catalog.

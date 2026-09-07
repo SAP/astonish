@@ -1492,6 +1492,7 @@ func RegisterRoutes(router *mux.Router, svc *store.Services, backend store.Platf
 		router.HandleFunc("/api/platform/admin/sandbox/base", PlatformBaseConfigGetHandler).Methods("GET")
 		router.HandleFunc("/api/platform/admin/sandbox/base/status", PlatformBaseConfigStatusHandler).Methods("GET")
 		router.HandleFunc("/api/platform/admin/sandbox/base/configure", PlatformBaseConfigBuildHandler).Methods("POST")
+		router.HandleFunc("/api/platform/admin/sandbox/base/configure/cancel", PlatformBaseConfigCancelHandler).Methods("POST")
 		router.HandleFunc("/api/platform/admin/sandbox/base/image", PlatformBaseImageHandler).Methods("POST")
 		router.HandleFunc("/api/platform/admin/sandbox/base/build", PlatformImageBuildHandler).Methods("POST")
 		router.HandleFunc("/api/platform/admin/sandbox/base/build/status", PlatformImageBuildStatusHandler).Methods("GET")

@@ -37,7 +37,7 @@ require (
 	github.com/slack-go/slack v0.29.0
 	github.com/stephenafamo/goldmark-pdf v0.4.2
 	github.com/ysmood/gson v0.7.3
-	github.com/yuin/goldmark v1.8.5
+	github.com/yuin/goldmark v1.8.6
 	go.starlark.net v0.0.0-20260326113308-fadfc96def35
 	golang.org/x/crypto v0.55.0
 	golang.org/x/image v0.45.0

@@ -428,9 +428,13 @@ export default function SandboxBaseTab() {
         <div className="rounded-xl p-4 space-y-2" style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-color)' }}>
           <div className="flex items-center justify-between">
             <span className="text-xs font-medium" style={{ color: 'var(--text-secondary)' }}>Current State</span>
-            {summary.config ? (
+            {api.baseSandboxIsLive(summary) ? (
               <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: 'rgba(34, 197, 94, 0.1)', color: '#22c55e' }}>
                 Configured
+              </span>
+            ) : summary.legacy_config ? (
+              <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: 'rgba(245, 158, 11, 0.1)', color: '#f59e0b' }}>
+                Needs rebuild
               </span>
             ) : (
               <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: 'rgba(245, 158, 11, 0.1)', color: '#f59e0b' }}>
@@ -438,11 +442,19 @@ export default function SandboxBaseTab() {
               </span>
             )}
           </div>
-          {summary.config && (
+          {summary.legacy_config && (
+            <div className="flex items-start gap-2 p-2.5 rounded-lg" style={{ background: 'rgba(245, 158, 11, 0.08)', border: '1px solid rgba(245, 158, 11, 0.2)' }}>
+              <AlertTriangle size={13} className="mt-0.5 flex-shrink-0" style={{ color: '#f59e0b' }} />
+              <p className="text-[11px]" style={{ color: '#f59e0b' }}>
+                {summary.message || 'A previous Incus base configuration was found, but Docker OverlayFS has no matching @base layer. Rebuild the base layer on Docker.'}
+              </p>
+            </div>
+          )}
+          {api.baseSandboxIsLive(summary) && (
             <div className="grid grid-cols-3 gap-4 text-xs" style={{ color: 'var(--text-muted)' }}>
               <div>
                 <span className="block font-medium" style={{ color: 'var(--text-secondary)' }}>Layer</span>
-                <span className="font-mono">{summary.layer_id?.slice(0, 12) || 'none'}...</span>
+                <span className="font-mono">{summary.layer_id?.slice(0, 12)}...</span>
               </div>
               <div>
                 <span className="block font-medium" style={{ color: 'var(--text-secondary)' }}>Size</span>
@@ -454,9 +466,9 @@ export default function SandboxBaseTab() {
               </div>
             </div>
           )}
-          {!summary.config && (
+          {!api.baseSandboxIsLive(summary) && !summary.legacy_config && (
             <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
-              No base configuration has been applied yet. User sandboxes are running on the bare image.
+              No Docker OverlayFS base layer has been built yet. User sandboxes need a rebuilt @base.
             </p>
           )}
         </div>
@@ -618,7 +630,7 @@ export default function SandboxBaseTab() {
             style={{ background: 'var(--brand)', opacity: building ? 0.5 : 1 }}
           >
             {building ? <Loader2 size={12} className="animate-spin" /> : <Play size={12} />}
-            {building ? 'Building...' : 'Build Base Layer'}
+            {building ? 'Building...' : (summary?.legacy_config ? 'Rebuild Base Layer' : 'Build Base Layer')}
           </button>
         </div>
       </div>

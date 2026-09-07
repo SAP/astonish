@@ -98,6 +98,29 @@ func (db *DockerBackend) ReseedBaseLayerFromImage(ctx context.Context) error {
 	return db.SeedBaseLayerFromImage(ctx)
 }
 
+// ensureParentLayers seeds @base from the sandbox image when a parent chain
+// references it but the overlay rootfs is missing (first Docker build after
+// an Incus install).
+func (db *DockerBackend) ensureParentLayers(ctx context.Context, parents []string) error {
+	needsBase := len(parents) == 0
+	for _, id := range parents {
+		if id == "" || id == sandbox.BaseTemplateID {
+			needsBase = true
+			break
+		}
+	}
+	if !needsBase {
+		return nil
+	}
+	if db.LayerReady(sandbox.BaseTemplateID) {
+		return nil
+	}
+	if err := db.SeedBaseLayerFromImage(ctx); err != nil {
+		return fmt.Errorf("sandbox/docker: seed @base overlay before build: %w", err)
+	}
+	return nil
+}
+
 // BuildTemplate creates a new template layer by provisioning a throwaway
 // container, running the build steps, and capturing the upper directory.
 func (db *DockerBackend) BuildTemplate(ctx context.Context, spec sandbox.TemplateBuildSpec) (*sandbox.TemplateArtifact, error) {
@@ -112,6 +135,9 @@ func (db *DockerBackend) BuildTemplate(ctx context.Context, spec sandbox.Templat
 		labels[k] = v
 	}
 	labels["astonish.io/purpose"] = "template-builder"
+	if err := db.ensureParentLayers(ctx, spec.ParentLayers); err != nil {
+		return nil, err
+	}
 	buildSpec := sandbox.SessionSpec{
 		SessionID:  buildSessionID,
 		Type:       sandbox.SessionTypeChat,

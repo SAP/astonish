@@ -34,6 +34,20 @@ export interface BaseConfigSummary {
   configured_by: string
   configured_at: string | null
   updated_at: string
+  backend?: string
+  overlay_ready?: boolean
+  legacy_config?: boolean
+  message?: string
+}
+
+/** True when Docker OverlayFS actually has a customized @base layer. */
+export function baseSandboxIsLive(summary: BaseConfigSummary | null | undefined): boolean {
+  if (!summary) return false
+  if (summary.legacy_config) return false
+  if (summary.overlay_ready === false) return false
+  const layer = (summary.layer_id || '').trim()
+  if (!layer || layer === '@base' || layer === 'none') return false
+  return true
 }
 
 export interface BaseConfigStatus {

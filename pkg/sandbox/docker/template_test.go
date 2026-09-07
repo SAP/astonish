@@ -51,6 +51,30 @@ func TestAliasLayer_RejectsBase(t *testing.T) {
 	}
 }
 
+func TestLayerReady(t *testing.T) {
+	r := newTestRegistry(t)
+	b, err := docker.New(newTestConfig(t, r))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.LayerReady(sandbox.BaseTemplateID) {
+		t.Fatal("empty layers dir should not be ready")
+	}
+	rootfs := filepath.Join(b.LayersDir(), sandbox.BaseTemplateID, "rootfs")
+	if err := os.MkdirAll(rootfs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if b.LayerReady(sandbox.BaseTemplateID) {
+		t.Fatal("empty rootfs should not be ready")
+	}
+	if err := os.WriteFile(filepath.Join(rootfs, "marker"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !b.LayerReady(sandbox.BaseTemplateID) {
+		t.Fatal("non-empty rootfs should be ready")
+	}
+}
+
 func TestDeleteTemplate_RefusesBase(t *testing.T) {
 	r := newTestRegistry(t)
 	b, err := docker.New(newTestConfig(t, r))

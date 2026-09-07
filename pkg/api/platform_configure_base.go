@@ -10,6 +10,7 @@ import (
 
 	"github.com/SAP/astonish/pkg/sandbox"
 	"github.com/SAP/astonish/pkg/sandbox/baseconfig"
+	sboxdocker "github.com/SAP/astonish/pkg/sandbox/docker"
 	"github.com/SAP/astonish/pkg/store"
 )
 
@@ -27,11 +28,11 @@ func PlatformBaseConfigGetHandler(w http.ResponseWriter, r *http.Request) {
 			defaultImage = appCfg.Sandbox.OpenShell.SandboxImage
 		}
 		respondJSON(w, http.StatusOK, map[string]any{
-			"backend":          "openshell",
-			"build_supported":  false,
-			"sandbox_image":    currentImage,
-			"default_image":    defaultImage,
-			"message":          "Package installation via the interactive editor is not available with the OpenShell backend. Set a custom container image with your packages pre-installed.",
+			"backend":         "openshell",
+			"build_supported": false,
+			"sandbox_image":   currentImage,
+			"default_image":   defaultImage,
+			"message":         "Package installation via the interactive editor is not available with the OpenShell backend. Set a custom container image with your packages pre-installed.",
 		})
 		return
 	}
@@ -65,6 +66,15 @@ func PlatformBaseConfigGetHandler(w http.ResponseWriter, r *http.Request) {
 		ConfiguredBy string                 `json:"configured_by,omitempty"`
 		ConfiguredAt *time.Time             `json:"configured_at,omitempty"`
 		UpdatedAt    time.Time              `json:"updated_at"`
+		Backend      string                 `json:"backend,omitempty"`
+		OverlayReady bool                   `json:"overlay_ready"`
+		LegacyConfig bool                   `json:"legacy_config,omitempty"`
+		Message      string                 `json:"message,omitempty"`
+	}
+
+	kind := "docker"
+	if appCfg != nil {
+		kind = appCfg.Sandbox.BackendKind()
 	}
 
 	resp := response{
@@ -73,6 +83,7 @@ func PlatformBaseConfigGetHandler(w http.ResponseWriter, r *http.Request) {
 		ConfiguredBy: info.ConfiguredBy,
 		ConfiguredAt: info.ConfiguredAt,
 		UpdatedAt:    info.UpdatedAt,
+		Backend:      kind,
 	}
 
 	if info.ConfigJSON != nil {
@@ -82,8 +93,58 @@ func PlatformBaseConfigGetHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if kind == string(sandbox.BackendKindDocker) {
+		overlayReady, layerExists := dockerOverlayProbe(r)
+		resp.OverlayReady = overlayReady
+		live, legacy := dockerBaseState(overlayReady, info.LayerID, resp.Config != nil, layerExists)
+		resp.LegacyConfig = legacy
+		if !live {
+			// Incus leftover JSON must not look like a live Docker layer.
+			resp.LayerID = ""
+			resp.SizeBytes = 0
+			resp.ConfiguredBy = ""
+			resp.ConfiguredAt = nil
+			resp.Config = nil
+		}
+		if legacy {
+			resp.Message = "A previous Incus base configuration was found, but Docker OverlayFS has no matching @base layer. Rebuild the base layer to recreate it on Docker."
+		}
+	} else {
+		resp.OverlayReady = true
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
+}
+
+// dockerBaseState decides whether Studio should treat @base as a live Docker
+// overlay layer or as leftover Incus metadata that must be rebuilt.
+func dockerBaseState(overlayReady bool, layerID string, hasConfig bool, layerExists func(string) bool) (live, legacy bool) {
+	if !overlayReady {
+		return false, hasConfig || (layerID != "" && layerID != sandbox.BaseTemplateID)
+	}
+	if layerID == "" || layerID == sandbox.BaseTemplateID {
+		return false, false
+	}
+	if layerExists != nil && layerExists(layerID) {
+		return true, false
+	}
+	return false, hasConfig || layerID != ""
+}
+
+func dockerOverlayProbe(r *http.Request) (overlayReady bool, layerExists func(string) bool) {
+	b, cleanup, err := sandboxBackendForRequest(r)
+	if cleanup != nil {
+		defer cleanup()
+	}
+	if err != nil {
+		return false, func(string) bool { return false }
+	}
+	db, ok := b.(*sboxdocker.DockerBackend)
+	if !ok {
+		return true, func(string) bool { return true }
+	}
+	return db.LayerReady(sandbox.BaseTemplateID), db.LayerReady
 }
 
 // PlatformBaseConfigStatusHandler returns whether a build is in progress.
@@ -147,14 +208,11 @@ func PlatformBaseConfigBuildHandler(w http.ResponseWriter, r *http.Request) {
 		cfg.Architecture = "amd64" // final fallback
 	}
 
-	// Determine target distro from sandbox backend kind.
-	// Incus containers use Ubuntu Noble; K8s uses Debian Bookworm.
-	if cfg.Distro == "" {
-		appCfg := effectiveAppConfig(r)
-		if appCfg != nil && !appCfg.Sandbox.IsK8sBackend() {
-			cfg.Distro = string(sandbox.DistroUbuntuNoble)
-		}
-		// If K8s or unknown, leave empty — Render() defaults to Bookworm.
+	// Docker and K8s both use debian:bookworm-slim (sandbox-base). Leave
+	// Distro empty so Render() defaults to DistroDebianBookworm. Do not
+	// reuse the Incus Ubuntu Noble default.
+	if cfg.Distro == "ubuntu-noble" {
+		cfg.Distro = ""
 	}
 
 	// Validate.
@@ -241,8 +299,18 @@ func PlatformBaseConfigBuildHandler(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	if db, ok := sbBackend.(*sboxdocker.DockerBackend); ok && !db.LayerReady(sandbox.BaseTemplateID) {
+		SendSSE(w, flusher, "progress", map[string]string{
+			"message": fmt.Sprintf("Seeding @base overlay from %s (first Docker build)...", db.SandboxImage()),
+		})
+		if err := db.SeedBaseLayerFromImage(r.Context()); err != nil {
+			SendSSE(w, flusher, "error", map[string]string{"error": fmt.Sprintf("failed to seed @base overlay: %v", err)})
+			return
+		}
+	}
+
 	SendSSE(w, flusher, "progress", map[string]string{
-		"message": "Executing build steps in sandbox pod (this may take several minutes)...",
+		"message": "Executing build steps in sandbox (this may take several minutes)...",
 	})
 
 	artifact, err := sbBackend.BuildTemplate(r.Context(), sandbox.TemplateBuildSpec{

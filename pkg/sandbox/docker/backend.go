@@ -291,6 +291,15 @@ func (db *DockerBackend) layerRootfs(layerID string) string {
 // LayersDir is the host directory of content-addressed overlay layers.
 func (db *DockerBackend) LayersDir() string { return db.cfg.LayersDir }
 
+// LayerReady reports whether layerID has a non-empty rootfs directory.
+func (db *DockerBackend) LayerReady(layerID string) bool {
+	if layerID == "" {
+		return false
+	}
+	entries, err := os.ReadDir(db.layerRootfs(layerID))
+	return err == nil && len(entries) > 0
+}
+
 // SandboxImage is the OCI image used for session containers.
 func (db *DockerBackend) SandboxImage() string { return db.cfg.SandboxImage }
 

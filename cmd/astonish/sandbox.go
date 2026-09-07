@@ -40,7 +40,7 @@ func handleSandboxCommand(args []string) error {
 	// sockets. Skip sudo for status/init; remaining Incus-era subcommands
 	// still escalate on Linux until they are rewritten.
 	switch args[0] {
-	case "status", "init", "list", "ls", "create", "shell", "destroy", "rm", "prune":
+	case "status", "init", "list", "ls", "create", "shell", "destroy", "rm", "prune", "reset", "save":
 	default:
 		if sandbox.NeedsEscalation() {
 			return sandbox.Escalate()
@@ -298,50 +298,6 @@ func handleSandboxInit() error {
 	fmt.Printf("Base overlay layer ready at %s/%s/rootfs\n", b.LayersDir(), sandbox.BaseTemplateID)
 	fmt.Println("Sandbox initialized. Session containers will use Docker OverlayFS.")
 	return nil
-}
-
-// promptOptionalTools walks the user through each optional tool with an
-// individual confirm prompt. Each prompt includes the tool description and URL
-// in the form's Description field, keeping the wizard clean.
-func promptOptionalTools() sandbox.BaseTemplateOptions {
-	opts := sandbox.DefaultBaseTemplateOptions()
-	tools := sandbox.OptionalTools()
-
-	if len(tools) == 0 {
-		return opts
-	}
-
-	for _, tool := range tools {
-		// Build description with tool info and URL
-		desc := tool.Description + "\n" + tool.URL
-
-		var install bool
-		affirmative := "Yes, install"
-		negative := "Skip"
-		if tool.Recommended {
-			affirmative = "Yes, install (recommended)"
-		}
-
-		clearScreen()
-		err := huh.NewForm(
-			huh.NewGroup(
-				huh.NewConfirm().
-					Title(fmt.Sprintf("Install %s?", tool.Name)).
-					Description(desc).
-					Affirmative(affirmative).
-					Negative(negative).
-					Value(&install),
-			),
-		).Run()
-		if err != nil {
-			// User aborted — return what we have so far
-			return opts
-		}
-
-		opts.InstallTools[tool.ID] = install
-	}
-
-	return opts
 }
 
 // --- List ---
@@ -771,59 +727,16 @@ func handleSandboxPrune() error {
 // --- Reset (@base → fresh install) ---
 
 func handleSandboxReset() error {
-	client, err := connectOrFail()
+	b, err := openDockerCLI()
 	if err != nil {
 		return err
 	}
-
-	tplRegistry, err := sandbox.NewTemplateRegistry()
-	if err != nil {
-		return err
-	}
-
-	sessRegistry, err := sandbox.NewSessionRegistry()
-	if err != nil {
-		return err
-	}
-
-	baseName := incus.TemplateName(incus.BaseTemplate)
-
-	// Check if @base even exists
-	baseExists := client.InstanceExists(baseName) || tplRegistry.Get(incus.BaseTemplate) != nil
-
-	// Warn about affected custom templates
-	var affectedTemplates []*sandbox.TemplateMeta
-	for _, t := range tplRegistry.List() {
-		if t.Name != incus.BaseTemplate && t.BasedOn == incus.BaseTemplate {
-			affectedTemplates = append(affectedTemplates, t)
-		}
-	}
-
-	// Warn about active sessions
-	activeSessions := sessRegistry.List()
 
 	fmt.Println("")
-	fmt.Println("WARNING: This will destroy the current @base template and recreate it")
-	fmt.Println("from a fresh OS image with core tools reinstalled.")
+	fmt.Println("WARNING: This will delete the current @base overlay layer and re-seed it")
+	fmt.Println("from the sandbox-base Docker image.")
 
-	if len(affectedTemplates) > 0 {
-		fmt.Printf("\nThe following custom templates are based on @base and will need to be recreated:\n")
-		for _, t := range affectedTemplates {
-			desc := t.Description
-			if desc != "" {
-				desc = " (" + desc + ")"
-			}
-			fmt.Printf("  - %s%s\n", t.Name, desc)
-		}
-	}
-
-	if len(activeSessions) > 0 {
-		fmt.Printf("\n%d active session container(s) may lose their overlay base layer.\n", len(activeSessions))
-	}
-
-	// Confirm
 	var proceed bool
-	fmt.Println("")
 	confirmErr := huh.NewForm(
 		huh.NewGroup(
 			huh.NewConfirm().
@@ -838,159 +751,37 @@ func handleSandboxReset() error {
 		return nil
 	}
 
-	// Tear down existing @base
-	if baseExists {
-		fmt.Println("\nDestroying current @base template...")
-
-		// Resolve pool path for overlay cleanup
-		poolName, poolErr := incus.GetPoolForProfile(client)
-		if poolErr == nil {
-			poolPath, pathErr := incus.GetPoolSourcePath(client, poolName)
-			if pathErr == nil && incus.IsOverlayMounted(poolPath, baseName) {
-				if err := incus.UnmountSessionOverlay(poolPath, baseName); err != nil {
-					fmt.Printf("  Warning: failed to unmount overlay: %v\n", err)
-				}
-			}
-		}
-
-		if client.IsRunning(baseName) {
-			if err := client.StopInstance(baseName, false); err != nil {
-				fmt.Printf("  Warning: failed to stop @base: %v\n", err)
-			}
-		}
-
-		if client.HasSnapshot(baseName, incus.SnapshotName) {
-			if err := client.DeleteSnapshot(baseName, incus.SnapshotName); err != nil {
-				fmt.Printf("  Warning: failed to delete snapshot: %v\n", err)
-			}
-		}
-
-		if client.InstanceExists(baseName) {
-			if err := client.StopAndDeleteInstance(baseName); err != nil {
-				return fmt.Errorf("failed to destroy @base container: %w", err)
-			}
-		}
-
-		// Remove from registry
-		if err := tplRegistry.Remove(incus.BaseTemplate); err != nil {
-			fmt.Printf("  Warning: failed to remove registry entry: %v\n", err)
-		}
-
-		fmt.Println("Current @base template destroyed.")
+	fmt.Println("\nRemoving current @base layer...")
+	if err := os.RemoveAll(filepath.Join(b.LayersDir(), sandbox.BaseTemplateID)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to remove @base layer: %w", err)
 	}
-
-	// Prompt for optional tools (same as sandbox init)
-	fmt.Println("")
-	opts := promptOptionalTools()
-
-	// Wire browser engine into base template options so browser packages
-	// (Chromium, KasmVNC, X11 deps) are installed in the base template.
-	appCfg, _ := config.LoadAppConfig()
-	if appCfg != nil {
-		bCfg := incus.BrowserContainerConfig{
-			ChromePath:          appCfg.Browser.ChromePath,
-			FingerprintSeed:     appCfg.Browser.FingerprintSeed,
-			FingerprintPlatform: appCfg.Browser.FingerprintPlatform,
-		}
-		engine := incus.DetectBrowserEngine(bCfg)
-		if incus.IsContainerCompatibleEngine(engine) {
-			opts.BrowserEngine = engine
-		}
+	if err := b.SeedBaseLayerFromImage(context.Background()); err != nil {
+		return err
 	}
-
-	// Recreate from scratch
-	return sandbox.InitBaseTemplate(client, tplRegistry, opts)
+	fmt.Println("Done. New sessions will start from the re-seeded @base layer.")
+	return nil
 }
 
 // --- Save (session → template) ---
 
 func handleSandboxSave(identifier, templateName, description string) error {
-	client, err := connectOrFail()
+	b, err := openDockerCLI()
+	if err != nil {
+		return err
+	}
+	ctx := context.Background()
+	sess, err := resolveDockerSession(ctx, b, identifier)
 	if err != nil {
 		return err
 	}
 
-	sessRegistry, err := sandbox.NewSessionRegistry()
+	fmt.Printf("Saving session %s as template layer...\n", sess.SessionID)
+	art, err := b.SaveSessionAsTemplate(ctx, sess.SessionID)
 	if err != nil {
 		return err
 	}
-
-	tplRegistry, err := sandbox.NewTemplateRegistry()
-	if err != nil {
-		return err
-	}
-
-	// Resolve the identifier (session ID, container name, or prefix)
-	sessionID, found := sessRegistry.ResolveSessionID(identifier)
-	if !found {
-		return fmt.Errorf("no container found for %q\nUse 'astonish sandbox list' to see active containers", identifier)
-	}
-
-	entry := sessRegistry.Get(sessionID)
-	if entry == nil {
-		return fmt.Errorf("session %q found but has no registry entry", sessionID)
-	}
-
-	containerName := entry.ContainerName
-	sourceTemplate := entry.TemplateName
-	if sourceTemplate == "" {
-		sourceTemplate = incus.BaseTemplate
-	}
-
-	// Normalize: accept both "base" and "@base"
-	isPromoteToBase := templateName == "base" || templateName == "@base"
-
-	if isPromoteToBase {
-		// Promote session → @base via a temporary intermediate template.
-		// 1. Save the session as a temp template
-		// 2. Promote the temp template to @base
-		// 3. Clean up the temp template
-		const tmpName = "_promote-from-session"
-
-		fmt.Printf("Saving session %s (%s) as new @base template...\n",
-			sessionID[:min(8, len(sessionID))], containerName)
-
-		// Clean up any leftover temp template from a previous failed run
-		if tplRegistry.Get(tmpName) != nil {
-			_ = sandbox.DeleteTemplate(client, tplRegistry, tmpName)
-		}
-
-		// Step 1: Save session as temp template
-		if _, err := sandbox.CreateTemplateFromContainer(
-			client, tplRegistry, containerName, tmpName, "temporary promote", sourceTemplate, false,
-		); err != nil {
-			return fmt.Errorf("failed to save session as template: %w", err)
-		}
-
-		// Step 2: Promote to @base
-		if err := sandbox.PromoteTemplate(client, tplRegistry, tmpName); err != nil {
-			// Clean up temp on failure
-			_ = sandbox.DeleteTemplate(client, tplRegistry, tmpName)
-			return fmt.Errorf("failed to promote to @base: %w", err)
-		}
-
-		// Step 3: Clean up temp template (promote already took its contents)
-		if tplRegistry.Get(tmpName) != nil {
-			_ = sandbox.DeleteTemplate(client, tplRegistry, tmpName)
-		}
-
-		fmt.Println("Done. The @base template now contains the session's state.")
-		fmt.Println("All new sessions will use this as their starting point.")
-	} else {
-		// Save session as a named custom template
-		fmt.Printf("Saving session %s (%s) as template %q...\n",
-			sessionID[:min(8, len(sessionID))], containerName, templateName)
-
-		if _, err := sandbox.CreateTemplateFromContainer(
-			client, tplRegistry, containerName, templateName, description, sourceTemplate, false,
-		); err != nil {
-			return fmt.Errorf("failed to save session as template: %w", err)
-		}
-
-		fmt.Printf("Template %q created from session %s.\n", templateName, sessionID[:min(8, len(sessionID))])
-		fmt.Printf("Use 'astonish sandbox template shell %s' to inspect it.\n", templateName)
-	}
-
+	_ = description
+	fmt.Printf("Captured layer %s (%d bytes) as %q.\n", art.LayerID, art.SizeBytes, templateName)
 	return nil
 }
 

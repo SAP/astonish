@@ -51,6 +51,7 @@ func TestIncusContainerEnsureReadyFunc_FallbackWithoutChain(t *testing.T) {
 		return c.EnsureReady(sessionID)
 	}
 	// Empty context: no chain, no template, no image
+	// Should use the pool's default template
 	if err := ensureReady(context.Background(), "sess-incus-2"); err != nil {
 		t.Fatalf("ensureReady error: %v", err)
 	}

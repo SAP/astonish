@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -108,6 +109,9 @@ func WireBackendBrowserManager(mgr *browser.Manager, backend Backend, sessReg *S
 	mgr.ContainerDialFunc = func(sessionID string, port int) (net.Conn, error) {
 		return dialBackendSessionPort(context.Background(), backend, sessionID, port)
 	}
+	mgr.ContainerStartRecordingFunc = func(containerName, display, outPath string) (func() error, int, int, error) {
+		return startBackendRecording(context.Background(), backend, containerName, display, outPath)
+	}
 	if touchActivity != nil {
 		mgr.ActivityTouchFunc = touchActivity
 	}
@@ -142,6 +146,9 @@ func GetPoolClientFromContext(ctx context.Context, pool ToolNodePool, sessionID 
 	if tpl != "" {
 		return pool.GetOrCreateWithTemplate(sessionID, tpl)
 	}
+	// No template override: use the pool's default template, which is set at
+	// factory construction time and includes all browser infrastructure (CloakBrowser,
+	// KasmVNC, etc.). This ensures browser tools in run_drill get the correct overlay.
 	return pool.GetOrCreate(sessionID)
 }
 
@@ -433,4 +440,143 @@ type backendExecAddr struct {
 func (a backendExecAddr) Network() string { return "backend-exec" }
 func (a backendExecAddr) String() string {
 	return fmt.Sprintf("%s:%d", shortSession(a.sessionID), a.port)
+}
+
+const (
+	backendRecordingPIDFile = "/tmp/astonish-recording.pid"
+	backendRecordingLogFile = "/tmp/astonish-recording.log"
+)
+
+// startBackendRecording starts ffmpeg x11grab inside the session container
+// using the backend-agnostic Exec interface. It probes the live X display
+// size via xdpyinfo, launches ffmpeg in the background, and returns a stop
+// function that sends SIGINT and waits for the MP4 to finalize.
+//
+// containerName in the backend path is actually the sessionID — see
+// WireBackendBrowserManager's ContainerResolveFunc for context.
+func startBackendRecording(ctx context.Context, backend Backend, sessionID, display, outPath string) (func() error, int, int, error) {
+	if backend == nil {
+		return nil, 0, 0, fmt.Errorf("backend is nil")
+	}
+	if sessionID == "" {
+		return nil, 0, 0, fmt.Errorf("session ID is required")
+	}
+	if outPath == "" || !strings.HasPrefix(outPath, "/") {
+		return nil, 0, 0, fmt.Errorf("recording outPath must be absolute, got %q", outPath)
+	}
+
+	// Probe display size.
+	probeResult, err := backend.Exec(ctx, sessionID, ExecSpec{
+		Command: []string{"sh", "-c", browser.DisplayProbeShellCommand(display)},
+	})
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("probe display size: %w", err)
+	}
+	if probeResult.ExitCode != 0 {
+		return nil, 0, 0, fmt.Errorf("probe display size: exit %d: %s", probeResult.ExitCode, strings.TrimSpace(string(probeResult.Stderr)))
+	}
+	width, height, err := browser.ParseXdpyinfoDimensions(string(probeResult.Stdout))
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("probe display size: %w", err)
+	}
+
+	// Create output directory.
+	dir := filepath.Dir(outPath)
+	if _, err := backend.Exec(ctx, sessionID, ExecSpec{
+		Command: []string{"sh", "-c", "mkdir -p " + shellQuoteBackend(dir)},
+	}); err != nil {
+		return nil, 0, 0, fmt.Errorf("mkdir recordings dir: %w", err)
+	}
+
+	// Build and launch ffmpeg in the background.
+	args := browser.BuildFFmpegX11GrabArgs(display, width, height, outPath)
+	quoted := make([]string, len(args))
+	for i, a := range args {
+		quoted[i] = shellQuoteBackend(a)
+	}
+
+	startScript := fmt.Sprintf(`set -e
+rm -f %s
+DISPLAY=%s %s >%s 2>&1 &
+echo $! >%s
+sleep 0.4
+if ! kill -0 "$(cat %s)" 2>/dev/null; then
+  echo "ffmpeg failed to start:" >&2
+  cat %s >&2 || true
+  exit 1
+fi
+`,
+		shellQuoteBackend(backendRecordingPIDFile),
+		shellQuoteBackend(display),
+		strings.Join(quoted, " "),
+		shellQuoteBackend(backendRecordingLogFile),
+		shellQuoteBackend(backendRecordingPIDFile),
+		shellQuoteBackend(backendRecordingPIDFile),
+		shellQuoteBackend(backendRecordingLogFile),
+	)
+
+	startResult, err := backend.Exec(ctx, sessionID, ExecSpec{
+		Command: []string{"sh", "-c", startScript},
+	})
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("start ffmpeg: %w", err)
+	}
+	if startResult.ExitCode != 0 {
+		out := strings.TrimSpace(string(startResult.Stdout) + string(startResult.Stderr))
+		return nil, 0, 0, fmt.Errorf("start ffmpeg: exit %d: %s", startResult.ExitCode, out)
+	}
+
+	stopFn := func() error {
+		stopScript := fmt.Sprintf(`set -e
+PIDFILE=%s
+OUT=%s
+if [ ! -f "$PIDFILE" ]; then
+  echo "recording pid file missing" >&2
+  exit 1
+fi
+PID=$(cat "$PIDFILE")
+kill -INT "$PID" 2>/dev/null || true
+for i in $(seq 1 60); do
+  if ! kill -0 "$PID" 2>/dev/null; then
+    break
+  fi
+  sleep 0.5
+done
+kill -9 "$PID" 2>/dev/null || true
+rm -f "$PIDFILE"
+if [ ! -s "$OUT" ]; then
+  echo "recording file missing or empty: $OUT" >&2
+  cat %s >&2 || true
+  exit 1
+fi
+`,
+			shellQuoteBackend(backendRecordingPIDFile),
+			shellQuoteBackend(outPath),
+			shellQuoteBackend(backendRecordingLogFile),
+		)
+
+		stopResult, err := backend.Exec(context.Background(), sessionID, ExecSpec{
+			Command: []string{"sh", "-c", stopScript},
+		})
+		if err != nil {
+			return fmt.Errorf("stop ffmpeg: %w", err)
+		}
+		if stopResult.ExitCode != 0 {
+			out := strings.TrimSpace(string(stopResult.Stdout) + string(stopResult.Stderr))
+			return fmt.Errorf("stop ffmpeg: exit %d: %s", stopResult.ExitCode, out)
+		}
+		time.Sleep(100 * time.Millisecond)
+		return nil
+	}
+
+	return stopFn, width, height, nil
+}
+
+// shellQuoteBackend returns a single-quoted shell argument safe for use in
+// backend exec scripts. Mirrors the openshell shellQuote helper.
+func shellQuoteBackend(s string) string {
+	if s == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

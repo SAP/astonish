@@ -1111,3 +1111,141 @@ func TestStickyExpandedResetsWhenPinnedItemChanges(t *testing.T) {
 		t.Fatalf("stickyPinnedIdx should be restored to %d, got %d", pinnedAtBottom, m.stickyPinnedIdx)
 	}
 }
+
+// TestActivityCollisionPrevention verifies that two activities with identical
+// summaries but different steps do not collide in the render cache.
+// This is a regression test for Issue #1 in PR #506 review.
+func TestActivityCollisionPrevention(t *testing.T) {
+	th := DefaultTheme()
+	m := model{theme: th, width: 80, tr: events.NewTranscript()}
+	m.itemRenderCache = make(map[string]renderedBlock)
+
+	// Create two activities that summarize identically ("Read 1 file") but read different files.
+	// They should render differently (different file names in output) and have different cache keys.
+	activity1 := events.Item{
+		Kind:     events.ItemActivity,
+		Summary:  "Read 1 file",
+		Expanded: false,
+		Steps: []events.ToolStep{
+			{
+				Name:   "read_file",
+				Status: "complete",
+				Args:   map[string]any{"path": "/path/to/file1.go"},
+				Result: "file1 contents",
+			},
+		},
+	}
+
+	activity2 := events.Item{
+		Kind:     events.ItemActivity,
+		Summary:  "Read 1 file", // Same summary!
+		Expanded: false,
+		Steps: []events.ToolStep{
+			{
+				Name:   "read_file",
+				Status: "complete",
+				Args:   map[string]any{"path": "/path/to/file2.go"},
+				Result: "file2 contents",
+			},
+		},
+	}
+
+	// Render activity1
+	key1 := itemCacheKey(80, activity1.Kind, activity1.Content+activity1.Summary+stepsCacheDigest(activity1.Steps),
+		activity1.Expanded, activity1.RoutingTier, activity1.RoutingModel)
+	render1 := m.renderActivity(activity1, 80)
+
+	// Render activity2
+	key2 := itemCacheKey(80, activity2.Kind, activity2.Content+activity2.Summary+stepsCacheDigest(activity2.Steps),
+		activity2.Expanded, activity2.RoutingTier, activity2.RoutingModel)
+	render2 := m.renderActivity(activity2, 80)
+
+	// Keys must be different because steps are different, even though summaries are identical
+	if key1 == key2 {
+		t.Errorf("Cache keys should differ for activities with different steps but same summary; got same key: %s", key1)
+	}
+
+	// Rendered outputs must be different (file1 vs file2)
+	if render1 == render2 {
+		t.Fatalf("Activities with different steps should render differently")
+	}
+
+	// Each output should mention its own file
+	if !strings.Contains(render1, "file1") {
+		t.Errorf("render1 should contain 'file1': %s", render1)
+	}
+	if !strings.Contains(render2, "file2") {
+		t.Errorf("render2 should contain 'file2': %s", render2)
+	}
+}
+
+// TestFileDiffCollisionPrevention verifies that two file-diffs with empty
+// DiffVerification but different args do not collide in the render cache.
+// This is a regression test for Issue #2 in PR #506 review.
+func TestFileDiffCollisionPrevention(t *testing.T) {
+	th := DefaultTheme()
+	m := model{theme: th, width: 80, tr: events.NewTranscript(), workDir: "/tmp"}
+	m.itemRenderCache = make(map[string]renderedBlock)
+
+	// Create two file-diffs with empty DiffVerification but different args.
+	// They should render differently (different old_string/new_string) and have different cache keys.
+	filediff1 := events.Item{
+		Kind:             events.ItemFileDiff,
+		ToolName:         "edit_file",
+		DiffVerification: "", // Empty, so fallback to args
+		Path:             "/tmp/test.txt",
+		Expanded:         false,
+		Args: map[string]any{
+			"path":       "/tmp/test.txt",
+			"old_string": "hello",
+			"new_string": "hello world",
+		},
+	}
+
+	filediff2 := events.Item{
+		Kind:             events.ItemFileDiff,
+		ToolName:         "edit_file",
+		DiffVerification: "", // Empty, so fallback to args
+		Path:             "/tmp/test.txt",
+		Expanded:         false,
+		Args: map[string]any{
+			"path":       "/tmp/test.txt",
+			"old_string": "goodbye",
+			"new_string": "goodbye world",
+		},
+	}
+
+	// Render filediff1
+	suffix1 := filediff1.DiffVerification
+	if suffix1 == "" {
+		suffix1 = filediff1.ToolName + argsCacheDigest(filediff1.Args)
+	}
+	key1 := itemCacheKey(80, filediff1.Kind, filediff1.Content+suffix1, filediff1.Expanded, "", "")
+	render1 := m.renderFileDiff(filediff1, 80)
+
+	// Render filediff2
+	suffix2 := filediff2.DiffVerification
+	if suffix2 == "" {
+		suffix2 = filediff2.ToolName + argsCacheDigest(filediff2.Args)
+	}
+	key2 := itemCacheKey(80, filediff2.Kind, filediff2.Content+suffix2, filediff2.Expanded, "", "")
+	render2 := m.renderFileDiff(filediff2, 80)
+
+	// Keys must be different because args (old/new strings) are different
+	if key1 == key2 {
+		t.Errorf("Cache keys should differ for file-diffs with different args; got same key: %s", key1)
+	}
+
+	// Rendered outputs must be different (hello vs goodbye)
+	if render1 == render2 {
+		t.Fatalf("File-diffs with different args should render differently")
+	}
+
+	// Each output should mention its own text
+	if !strings.Contains(render1, "hello") {
+		t.Errorf("render1 should contain 'hello': %s", render1)
+	}
+	if !strings.Contains(render2, "goodbye") {
+		t.Errorf("render2 should contain 'goodbye': %s", render2)
+	}
+}

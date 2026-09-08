@@ -2195,6 +2195,77 @@ func itemCacheKey(width int, kind events.ItemKind, content string, expanded bool
 	return strconv.Itoa(width) + "\x00" + string(kind) + "\x00" + strconv.FormatBool(expanded) + "\x00" + routingTier + "\x00" + routingModel + "\x00" + content
 }
 
+// stepsCacheDigest computes a compact, stable hash digest of steps for cache-key
+// inclusion. This prevents collisions between activities with identical summaries
+// but different underlying steps (e.g., "Read 1 file" reading different files).
+// Uses FNV-1a over step fields: name|status|args|result.
+func stepsCacheDigest(steps []events.ToolStep) string {
+	if len(steps) == 0 {
+		return ""
+	}
+	// FNV-1a 64-bit hash for compact output
+	hash := uint64(14695981039346656037) // FNV offset basis
+	const fnvPrime uint64 = 1099511628211
+	for _, s := range steps {
+		// Hash name|status|argsDigest|resultDigest to avoid very long input
+		fields := s.Name + "|" + s.Status + "|" + argsCacheDigest(s.Args) + "|" + resultCacheDigest(s.Result)
+		for _, b := range []byte(fields) {
+			hash ^= uint64(b)
+			hash *= fnvPrime
+		}
+	}
+	return strconv.FormatInt(int64(hash), 16)
+}
+
+// argsCacheDigest computes a compact hash of tool args map for cache keys.
+// Returns empty string for nil args, otherwise a short hex digest.
+func argsCacheDigest(args map[string]any) string {
+	if len(args) == 0 {
+		return ""
+	}
+	// Sort keys for determinism and hash the serialized form
+	keys := make([]string, 0, len(args))
+	for k := range args {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	hash := uint64(14695981039346656037) // FNV offset basis
+	const fnvPrime uint64 = 1099511628211
+	for _, k := range keys {
+		// Include key and a compact stringification of the value
+		valStr := fmt.Sprintf("%v", args[k])
+		if len(valStr) > 50 {
+			valStr = valStr[:50] // Truncate very large values
+		}
+		entry := k + ":" + valStr
+		for _, b := range []byte(entry) {
+			hash ^= uint64(b)
+			hash *= fnvPrime
+		}
+	}
+	return strconv.FormatInt(int64(hash), 16)
+}
+
+// resultCacheDigest computes a compact hash of a tool result for cache keys.
+func resultCacheDigest(result any) string {
+	if result == nil {
+		return ""
+	}
+	// For most results use a short string representation; avoid hashing entire large outputs
+	resultStr := fmt.Sprintf("%v", result)
+	if len(resultStr) > 50 {
+		resultStr = resultStr[:50]
+	}
+	hash := uint64(14695981039346656037)
+	const fnvPrime uint64 = 1099511628211
+	for _, b := range []byte(resultStr) {
+		hash ^= uint64(b)
+		hash *= fnvPrime
+	}
+	return strconv.FormatInt(int64(hash), 16)
+}
+
 func waitEvent(ch <-chan events.Event) tea.Cmd {
 	return func() tea.Msg {
 		ev, ok := <-ch
@@ -3186,8 +3257,9 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 			if hasRunning || m.tr.Streaming {
 				appendBlockSpanned(i, it.Kind, m.renderActivity(it, cw), codeGutterContentSpan)
 			} else {
-				// Use summary+step names as cache key content (avoid hashing full args/results).
-				cacheKey := itemCacheKey(cw, it.Kind, it.Content+it.Summary, it.Expanded, it.RoutingTier, it.RoutingModel)
+				// Include step digest in cache key to prevent collisions between activities
+				// with identical summaries but different steps (e.g., "Read 1 file" vs different files).
+				cacheKey := itemCacheKey(cw, it.Kind, it.Content+it.Summary+stepsCacheDigest(it.Steps), it.Expanded, it.RoutingTier, it.RoutingModel)
 				if cached, ok := m.itemRenderCache[cacheKey]; ok {
 					useCached(i, it.Kind, cached)
 				} else {
@@ -3196,7 +3268,14 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 			}
 
 		case events.ItemFileDiff:
-			cacheKey := itemCacheKey(cw, it.Kind, it.Content+it.DiffVerification, it.Expanded, "", "")
+			// Include ToolName and args digest when DiffVerification is empty (fallback path).
+			// This prevents collisions between file-diffs with same content but different
+			// args (which are used by DiffFromToolArgs when verification_context is unavailable).
+			suffix := it.DiffVerification
+			if suffix == "" {
+				suffix = it.ToolName + argsCacheDigest(it.Args)
+			}
+			cacheKey := itemCacheKey(cw, it.Kind, it.Content+suffix, it.Expanded, "", "")
 			if cached, ok := m.itemRenderCache[cacheKey]; ok {
 				useCached(i, it.Kind, cached)
 			} else {

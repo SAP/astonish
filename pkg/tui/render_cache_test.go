@@ -59,17 +59,20 @@ func TestWindowResizeClearsMarkdownCache(t *testing.T) {
 	if len(m.mdCache) == 0 {
 		t.Fatal("expected cache to be populated")
 	}
-	// Verify that after resize, the old-width (80) key is gone. The resize
-	// handler nil-ifies the cache before refreshViewport, which then repopulates
-	// with the new width (120) — so old-width entries must not survive.
-	oldKey := "80\x00hello world"
-	if _, ok := m.mdCache[oldKey]; !ok {
-		t.Skip("cache key format changed; skipping stale-key check")
-	}
+	// After resize the handler nil-ifies both caches before refreshViewport
+	// repopulates them at the new width. No key with the old width prefix (80)
+	// must survive in mdCache — verified by prefix, not by a fragile hardcoded key.
 	next, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 	nm := next.(model)
-	if _, ok := nm.mdCache[oldKey]; ok {
-		t.Fatalf("old-width cache key survived resize: %q", oldKey)
+	for k := range nm.mdCache {
+		if strings.HasPrefix(k, "80\x00") {
+			t.Fatalf("old-width (80) mdCache key survived resize: %q", k)
+		}
+	}
+	for k := range nm.itemRenderCache {
+		if strings.HasPrefix(k, "80\x00") {
+			t.Fatalf("old-width (80) itemRenderCache key survived resize: %q", k)
+		}
 	}
 }
 

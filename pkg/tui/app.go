@@ -2195,6 +2195,39 @@ func itemCacheKey(width int, kind events.ItemKind, content string, expanded bool
 	return strconv.Itoa(width) + "\x00" + string(kind) + "\x00" + strconv.FormatBool(expanded) + "\x00" + routingTier + "\x00" + routingModel + "\x00" + content
 }
 
+// applyRoutingBadge appends a tier emoji badge to the right margin of md's last
+// line (inline) when it fits, or appends it on a new line below. Called from
+// both the streaming bypass path and the finalized/cacheable path so they stay
+// visually identical.
+func (m model) applyRoutingBadge(md string, cw int, it events.Item) string {
+	if it.RoutingModel == "" {
+		return md
+	}
+	th := m.theme
+	var badge string
+	switch it.RoutingTier {
+	case "strong":
+		badge = " 🧠"
+	case "medium":
+		badge = " ⚙️"
+	default:
+		badge = " ⚡"
+	}
+	badgeRendered := th.Muted.Render(badge)
+	badgeW := lipgloss.Width(badgeRendered)
+	lines := strings.Split(md, "\n")
+	lastLineW := lipgloss.Width(lines[len(lines)-1])
+	if lastLineW+badgeW+1 <= cw {
+		pad := cw - lastLineW - badgeW
+		if pad < 1 {
+			pad = 1
+		}
+		lines[len(lines)-1] = lines[len(lines)-1] + strings.Repeat(" ", pad) + badgeRendered
+		return strings.Join(lines, "\n")
+	}
+	return md + "\n" + badgeRendered
+}
+
 // stepsCacheDigest computes a compact, stable hash digest of steps for cache-key
 // inclusion. This prevents collisions between activities with identical summaries
 // but different underlying steps (e.g., "Read 1 file" reading different files).
@@ -2214,7 +2247,7 @@ func stepsCacheDigest(steps []events.ToolStep) string {
 			hash *= fnvPrime
 		}
 	}
-	return strconv.FormatInt(int64(hash), 16)
+	return strconv.FormatUint(hash, 16)
 }
 
 // argsCacheDigest computes a compact hash of tool args map for cache keys.
@@ -2235,8 +2268,8 @@ func argsCacheDigest(args map[string]any) string {
 	for _, k := range keys {
 		// Include key and a compact stringification of the value
 		valStr := fmt.Sprintf("%v", args[k])
-		if len(valStr) > 50 {
-			valStr = valStr[:50] // Truncate very large values
+		if len([]rune(valStr)) > 50 {
+			valStr = string([]rune(valStr)[:50]) // Truncate at rune boundary
 		}
 		entry := k + ":" + valStr
 		for _, b := range []byte(entry) {
@@ -2244,7 +2277,7 @@ func argsCacheDigest(args map[string]any) string {
 			hash *= fnvPrime
 		}
 	}
-	return strconv.FormatInt(int64(hash), 16)
+	return strconv.FormatUint(hash, 16)
 }
 
 // resultCacheDigest computes a compact hash of a tool result for cache keys.
@@ -2254,8 +2287,8 @@ func resultCacheDigest(result any) string {
 	}
 	// For most results use a short string representation; avoid hashing entire large outputs
 	resultStr := fmt.Sprintf("%v", result)
-	if len(resultStr) > 50 {
-		resultStr = resultStr[:50]
+	if len([]rune(resultStr)) > 50 {
+		resultStr = string([]rune(resultStr)[:50])
 	}
 	hash := uint64(14695981039346656037)
 	const fnvPrime uint64 = 1099511628211
@@ -2263,7 +2296,7 @@ func resultCacheDigest(result any) string {
 		hash ^= uint64(b)
 		hash *= fnvPrime
 	}
-	return strconv.FormatInt(int64(hash), 16)
+	return strconv.FormatUint(hash, 16)
 }
 
 func waitEvent(ch <-chan events.Event) tea.Cmd {
@@ -2990,6 +3023,10 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 	if m.itemRenderCache == nil {
 		m.itemRenderCache = make(map[string]renderedBlock)
 	}
+	// usedCacheKeys tracks every cache key referenced in this render pass.
+	// After the loop we evict any entry not touched this pass (e.g. orphaned
+	// entries from toggled expand/collapse states, or compacted-away items).
+	usedCacheKeys := make(map[string]struct{}, len(m.itemRenderCache))
 
 	// buildPlainSpanned computes the ANSI-stripped plain lines and content spans
 	// for a padded block. It is called when building a new cache entry.
@@ -3066,8 +3103,9 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 	// is active and intersects the block's line range, we re-apply the
 	// selection highlight to the cached raw block (cheap — only for the few
 	// blocks in the selected region). All other blocks use the cached output
-	// verbatim, skipping all string work.
-	useCached := func(itemIdx int, kind events.ItemKind, cached renderedBlock) int {
+	// verbatim, skipping all string work. key is recorded in usedCacheKeys so
+	// the eviction pass at the end of the loop does not remove this entry.
+	useCached := func(itemIdx int, kind events.ItemKind, key string, cached renderedBlock) int {
 		raw := cached.raw
 		n := cached.lineCount - 1 // lineCount includes the gap separator
 		blockEnd := lineNo + n
@@ -3091,6 +3129,7 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 		contentSpans = append(contentSpans, [2]int{0, 0})
 		lineNo += cached.lineCount
 		hits = append(hits, hitRegion{start: start, end: start + n, itemIdx: itemIdx, kind: kind})
+		usedCacheKeys[key] = struct{}{}
 		return start
 	}
 
@@ -3133,6 +3172,7 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 			spans:      csClean,
 			lineCount:  n + 1,
 		}
+		usedCacheKeys[key] = struct{}{}
 		return start
 	}
 
@@ -3155,7 +3195,7 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 			// User bubbles are cacheable (content never changes after submit).
 			cacheKey := itemCacheKey(cw, it.Kind, it.Content, it.Expanded, "", "")
 			if cached, ok := m.itemRenderCache[cacheKey]; ok {
-				useCached(i, it.Kind, cached)
+				useCached(i, it.Kind, cacheKey, cached)
 			} else {
 				buildAndCache(i, it.Kind, cacheKey, m.renderUserBubble(it.Content, it.Expanded, cw), userBubbleContentSpan)
 			}
@@ -3175,31 +3215,7 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 					if md == "" {
 						md = th.Agent.Width(cw).Render(content)
 					}
-					if it.RoutingModel != "" {
-						var badge string
-						switch it.RoutingTier {
-						case "strong":
-							badge = " 🧠"
-						case "medium":
-							badge = " ⚙️"
-						default:
-							badge = " ⚡"
-						}
-						badgeRendered := th.Muted.Render(badge)
-						badgeW := lipgloss.Width(badgeRendered)
-						lines := strings.Split(md, "\n")
-						lastLineW := lipgloss.Width(lines[len(lines)-1])
-						if lastLineW+badgeW+1 <= cw {
-							pad := cw - lastLineW - badgeW
-							if pad < 1 {
-								pad = 1
-							}
-							lines[len(lines)-1] = lines[len(lines)-1] + strings.Repeat(" ", pad) + badgeRendered
-							md = strings.Join(lines, "\n")
-						} else {
-							md = md + "\n" + badgeRendered
-						}
-					}
+					md = m.applyRoutingBadge(md, cw, it)
 					appendBlockSpanned(i, it.Kind, md, codeGutterContentSpan)
 				}
 				continue
@@ -3209,34 +3225,10 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 			if md == "" {
 				md = th.Agent.Width(cw).Render(content)
 			}
-			if it.RoutingModel != "" {
-				var badge string
-				switch it.RoutingTier {
-				case "strong":
-					badge = " 🧠"
-				case "medium":
-					badge = " ⚙️"
-				default:
-					badge = " ⚡"
-				}
-				badgeRendered := th.Muted.Render(badge)
-				badgeW := lipgloss.Width(badgeRendered)
-				lines := strings.Split(md, "\n")
-				lastLineW := lipgloss.Width(lines[len(lines)-1])
-				if lastLineW+badgeW+1 <= cw {
-					pad := cw - lastLineW - badgeW
-					if pad < 1 {
-						pad = 1
-					}
-					lines[len(lines)-1] = lines[len(lines)-1] + strings.Repeat(" ", pad) + badgeRendered
-					md = strings.Join(lines, "\n")
-				} else {
-					md = md + "\n" + badgeRendered
-				}
-			}
+			md = m.applyRoutingBadge(md, cw, it)
 			cacheKey := itemCacheKey(cw, it.Kind, md, it.Expanded, it.RoutingTier, it.RoutingModel)
 			if cached, ok := m.itemRenderCache[cacheKey]; ok {
-				useCached(i, it.Kind, cached)
+				useCached(i, it.Kind, cacheKey, cached)
 			} else {
 				buildAndCache(i, it.Kind, cacheKey, md, codeGutterContentSpan)
 			}
@@ -3261,7 +3253,7 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 				// with identical summaries but different steps (e.g., "Read 1 file" vs different files).
 				cacheKey := itemCacheKey(cw, it.Kind, it.Content+it.Summary+stepsCacheDigest(it.Steps), it.Expanded, it.RoutingTier, it.RoutingModel)
 				if cached, ok := m.itemRenderCache[cacheKey]; ok {
-					useCached(i, it.Kind, cached)
+					useCached(i, it.Kind, cacheKey, cached)
 				} else {
 					buildAndCache(i, it.Kind, cacheKey, m.renderActivity(it, cw), codeGutterContentSpan)
 				}
@@ -3277,7 +3269,7 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 			}
 			cacheKey := itemCacheKey(cw, it.Kind, it.Content+suffix, it.Expanded, "", "")
 			if cached, ok := m.itemRenderCache[cacheKey]; ok {
-				useCached(i, it.Kind, cached)
+				useCached(i, it.Kind, cacheKey, cached)
 			} else {
 				buildAndCache(i, it.Kind, cacheKey, m.renderFileDiff(it, cw), codeGutterContentSpan)
 			}
@@ -3285,7 +3277,7 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 		case events.ItemSystem:
 			cacheKey := itemCacheKey(cw, it.Kind, it.Content, false, "", "")
 			if cached, ok := m.itemRenderCache[cacheKey]; ok {
-				useCached(i, it.Kind, cached)
+				useCached(i, it.Kind, cacheKey, cached)
 			} else {
 				buildAndCache(i, it.Kind, cacheKey, th.System.Width(cw).Render(it.Content), nil)
 			}
@@ -3293,7 +3285,7 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 		case events.ItemCompaction:
 			cacheKey := itemCacheKey(cw, it.Kind, it.Content, false, "", "")
 			if cached, ok := m.itemRenderCache[cacheKey]; ok {
-				useCached(i, it.Kind, cached)
+				useCached(i, it.Kind, cacheKey, cached)
 			} else {
 				buildAndCache(i, it.Kind, cacheKey, th.System.Width(cw).Render(it.Content), nil)
 			}
@@ -3301,7 +3293,7 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 		case events.ItemError:
 			cacheKey := itemCacheKey(cw, it.Kind, it.Content, false, "", "")
 			if cached, ok := m.itemRenderCache[cacheKey]; ok {
-				useCached(i, it.Kind, cached)
+				useCached(i, it.Kind, cacheKey, cached)
 			} else {
 				buildAndCache(i, it.Kind, cacheKey, th.Error.Width(cw).Render(it.Content), nil)
 			}
@@ -3328,7 +3320,7 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 		case events.ItemArtifact:
 			cacheKey := itemCacheKey(cw, it.Kind, it.Content+it.Path, false, "", "")
 			if cached, ok := m.itemRenderCache[cacheKey]; ok {
-				start := useCached(i, it.Kind, cached)
+				start := useCached(i, it.Kind, cacheKey, cached)
 				// Artifact hit regions within the block are re-derived from the
 				// cached block. Since the artifact list is stable, we re-render
 				// only to get the row indices — the painted output comes from cache.
@@ -3361,10 +3353,19 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 		case events.ItemPlan:
 			cacheKey := itemCacheKey(cw, it.Kind, it.Content+string(it.PlanStatus), it.Expanded, "", "")
 			if cached, ok := m.itemRenderCache[cacheKey]; ok {
-				useCached(i, it.Kind, cached)
+				useCached(i, it.Kind, cacheKey, cached)
 			} else {
 				buildAndCache(i, it.Kind, cacheKey, m.renderPlanDocument(it, cw), planDocumentContentSpan)
 			}
+		}
+	}
+	// Evict cache entries not used in this render pass. This prevents unbounded
+	// growth from orphaned entries (e.g., the opposite expand/collapse state of
+	// a toggled item, or items removed by a /compact). The map stays bounded to
+	// at most len(m.tr.Items) entries after each full render.
+	for k := range m.itemRenderCache {
+		if _, used := usedCacheKeys[k]; !used {
+			delete(m.itemRenderCache, k)
 		}
 	}
 	m.transcriptPlainLines = plainLines

@@ -57,6 +57,19 @@ type artifactHit struct {
 	artifactIdx int
 }
 
+// renderedBlock is the cached output of one transcript item — the fully
+// padded+painted string ready for the viewport, plus the ANSI-stripped plain
+// lines and content spans used for drag-to-copy selection. Caching at this
+// level avoids re-running padBlock/paintTranscriptBlock/appendPlainSpanned for
+// every historical item on every refreshViewport call.
+type renderedBlock struct {
+	raw        string     // padded block before painting (needed to re-apply selection)
+	painted    string     // padded + painted block ready for viewport
+	plainLines []string   // ANSI-stripped lines for selection/copy
+	spans      [][2]int   // content spans per line
+	lineCount  int        // rendered block lines + 1 gap separator
+}
+
 type fileViewerState struct {
 	open     bool
 	loading  bool
@@ -167,6 +180,15 @@ type model struct {
 	// into O(changed item) and keeps the UI responsive under a burst of events.
 	// Cleared on resize (see layout/WindowSizeMsg) since width is part of output.
 	mdCache map[string]string
+	// itemRenderCache memoizes the fully rendered+padded+painted block for each
+	// finalized transcript item. Keyed by width, kind, content, expanded state,
+	// and routing tier. Cleared on resize alongside mdCache. This lifts the
+	// padBlock / paintTranscriptBlock / appendPlainSpanned cost from O(all items)
+	// to O(new/changed items) on every refreshViewport call.
+	itemRenderCache map[string]renderedBlock
+	// lastSelectionRefresh rate-limits refreshViewport during mouse drag so
+	// high-frequency motion events don't trigger a full re-render every pixel.
+	lastSelectionRefresh time.Time
 	// double-click detection for expanding user bubbles.
 	lastClickAt time.Time
 	lastClickY  int
@@ -408,9 +430,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		// Width is part of the markdown cache key; drop stale-width entries so
-		// the cache does not accumulate one set per historical window size.
+		// Width is part of both cache keys; drop stale-width entries so the
+		// caches do not accumulate one set per historical window size.
 		m.mdCache = nil
+		m.itemRenderCache = nil
 		m.layout()
 		m.ready = true
 		m.refreshViewport()
@@ -2158,6 +2181,20 @@ func (m model) statusText() string {
 // applies before yielding, so a flood of tool output cannot starve key input.
 const maxCoalescedEvents = 256
 
+// selectionRefreshInterval caps how often refreshViewport is called during a
+// mouse drag (i.e. on MouseMotion events). Terminal emulators can fire motion
+// events faster than the renderer can handle them; limiting to ~60 fps keeps
+// the UI responsive without burning CPU on sub-frame redraws.
+const selectionRefreshInterval = 16 * time.Millisecond
+
+// itemCacheKey returns a string key for the item render cache. It encodes all
+// fields that affect the visual output so changing expanded state or routing
+// tier produces a cache miss (and a fresh render) while identical items get a
+// fast lookup. Content is last so the fixed prefix is short for common items.
+func itemCacheKey(width int, kind events.ItemKind, content string, expanded bool, routingTier, routingModel string) string {
+	return strconv.Itoa(width) + "\x00" + string(kind) + "\x00" + strconv.FormatBool(expanded) + "\x00" + routingTier + "\x00" + routingModel + "\x00" + content
+}
+
 func waitEvent(ch <-chan events.Event) tea.Cmd {
 	return func() tea.Msg {
 		ev, ok := <-ch
@@ -2652,7 +2689,16 @@ func (m model) handleMouseMotion(msg tea.Mouse) (tea.Model, tea.Cmd) {
 		m.selectionMoved = true
 	}
 	m.selectionEnd = p
-	m.refreshViewport()
+	// Rate-limit viewport refreshes during drag to ~60fps. Terminal emulators
+	// can send mouse-motion events faster than the renderer can process them;
+	// a full refreshViewport (O(all items)) on every pixel saturates the CPU
+	// in long sessions and makes selection feel sluggish. The final position
+	// is always rendered on mouse release regardless of this gate.
+	now := time.Now()
+	if now.Sub(m.lastSelectionRefresh) >= selectionRefreshInterval {
+		m.lastSelectionRefresh = now
+		m.refreshViewport()
+	}
 	return m, nil
 }
 
@@ -2870,18 +2916,21 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 	cw := contentWidth(m.width)
 	lineNo := 0
 
-	// appendPlainSpanned appends the plain (ANSI-stripped) lines of block along
-	// with a content span for each line. spanFor maps a block-local line index
-	// and its plain text to the [start,end) rune-column range that is real
-	// content (excluding decorative chrome). Spans are shifted by the padBlock
-	// margin so they line up with the padded plain lines used for selection.
-	appendPlainSpanned := func(block string, spanFor func(i int, plain string) [2]int) {
+	if m.itemRenderCache == nil {
+		m.itemRenderCache = make(map[string]renderedBlock)
+	}
+
+	// buildPlainSpanned computes the ANSI-stripped plain lines and content spans
+	// for a padded block. It is called when building a new cache entry.
+	buildPlainSpanned := func(block string, spanFor func(i int, plain string) [2]int) ([]string, [][2]int) {
 		if block == "" {
-			return
+			return nil, nil
 		}
+		var pl []string
+		var cs [][2]int
 		for i, line := range strings.Split(block, "\n") {
 			plain := stripANSI(line)
-			plainLines = append(plainLines, plain)
+			pl = append(pl, plain)
 			total := len([]rune(plain))
 			span := [2]int{0, total}
 			if spanFor != nil {
@@ -2892,8 +2941,15 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 			if span[0] > span[1] {
 				span[0], span[1] = span[1], span[0]
 			}
-			contentSpans = append(contentSpans, span)
+			cs = append(cs, span)
 		}
+		return pl, cs
+	}
+
+	// appendPlainSpanned appends pre-computed plain lines and spans.
+	appendPlainSpanned := func(pl []string, cs [][2]int) {
+		plainLines = append(plainLines, pl...)
+		contentSpans = append(contentSpans, cs...)
 	}
 
 	// appendBlockSpanned renders block into the transcript. spanFor (optional)
@@ -2907,13 +2963,20 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 		// Trailing newline normalization: count lines before padding.
 		block = strings.TrimRight(block, "\n")
 		rawPadded := padBlock(block)
-		rawPadded = m.applySelectionToBlock(rawPadded, lineNo)
+		// Only apply selection highlighting to blocks that intersect the
+		// selection range. This reduces the O(all-items) ANSI-strip+rebuild
+		// cost to O(selected items) during drag selection.
+		n := lineCount(rawPadded)
+		blockEnd := lineNo + n
+		if m.selectionIntersectsLines(lineNo, blockEnd) {
+			rawPadded = m.applySelectionToBlock(rawPadded, lineNo)
+		}
 		padded := m.paintTranscriptBlock(rawPadded)
 		start := lineNo
-		n := lineCount(rawPadded)
 		b.WriteString(padded)
 		b.WriteString("\n")
-		appendPlainSpanned(padded, spanFor)
+		pl, cs := buildPlainSpanned(padded, spanFor)
+		appendPlainSpanned(pl, cs)
 		gap := m.paintRow("", m.width)
 		b.WriteString(gap)
 		b.WriteString("\n") // vertical gap between messages
@@ -2928,28 +2991,153 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 		return appendBlockSpanned(itemIdx, kind, block, nil)
 	}
 
+	// useCached replays a cached renderedBlock into the output. If a selection
+	// is active and intersects the block's line range, we re-apply the
+	// selection highlight to the cached raw block (cheap — only for the few
+	// blocks in the selected region). All other blocks use the cached output
+	// verbatim, skipping all string work.
+	useCached := func(itemIdx int, kind events.ItemKind, cached renderedBlock) int {
+		raw := cached.raw
+		n := cached.lineCount - 1 // lineCount includes the gap separator
+		blockEnd := lineNo + n
+		var painted string
+		if m.selectionIntersectsLines(lineNo, blockEnd) {
+			// Re-apply selection only for this block (rare fast path).
+			highlighted := m.applySelectionToBlock(raw, lineNo)
+			painted = m.paintTranscriptBlock(highlighted)
+		} else {
+			painted = cached.painted
+		}
+		start := lineNo
+		b.WriteString(painted)
+		b.WriteString("\n")
+		appendPlainSpanned(cached.plainLines, cached.spans)
+		// Gap row (empty painted row for visual separation).
+		gap := m.paintRow("", m.width)
+		b.WriteString(gap)
+		b.WriteString("\n")
+		plainLines = append(plainLines, stripANSI(gap))
+		contentSpans = append(contentSpans, [2]int{0, 0})
+		lineNo += cached.lineCount
+		hits = append(hits, hitRegion{start: start, end: start + n, itemIdx: itemIdx, kind: kind})
+		return start
+	}
+
+	// buildAndCache renders a block, stores the result in the item render
+	// cache under key, and returns the start line. This is the slow path
+	// (used only for cache misses, i.e. newly added or changed items).
+	buildAndCache := func(itemIdx int, kind events.ItemKind, key, block string, spanFor func(i int, plain string) [2]int) int {
+		if block == "" {
+			return lineNo
+		}
+		block = strings.TrimRight(block, "\n")
+		rawPadded := padBlock(block)
+		n := lineCount(rawPadded)
+		blockEnd := lineNo + n
+		rawForCache := rawPadded // save before possible selection mutation
+		if m.selectionIntersectsLines(lineNo, blockEnd) {
+			rawPadded = m.applySelectionToBlock(rawPadded, lineNo)
+		}
+		painted := m.paintTranscriptBlock(rawPadded)
+		paintedClean := m.paintTranscriptBlock(rawForCache) // selection-free for cache
+		start := lineNo
+		b.WriteString(painted)
+		b.WriteString("\n")
+		pl, cs := buildPlainSpanned(painted, spanFor)
+		appendPlainSpanned(pl, cs)
+		gap := m.paintRow("", m.width)
+		b.WriteString(gap)
+		b.WriteString("\n")
+		plainLines = append(plainLines, stripANSI(gap))
+		contentSpans = append(contentSpans, [2]int{0, 0})
+		lineNo += n + 1
+		hits = append(hits, hitRegion{start: start, end: start + n, itemIdx: itemIdx, kind: kind})
+		// Build cache entry using the selection-free painted block and plain
+		// lines derived from the unselected raw block.
+		plClean, csClean := buildPlainSpanned(paintedClean, spanFor)
+		m.itemRenderCache[key] = renderedBlock{
+			raw:        rawForCache,
+			painted:    paintedClean,
+			plainLines: plClean,
+			spans:      csClean,
+			lineCount:  n + 1,
+		}
+		return start
+	}
+
+	// isLastStreamingAgent returns true if this is the last ItemAgent that is
+	// still being streamed (its content is changing every event). Such items
+	// must bypass the cache to stay current.
+	lastStreamingAgentIdx := -1
+	if m.tr.Streaming {
+		for i := len(m.tr.Items) - 1; i >= 0; i-- {
+			if m.tr.Items[i].Kind == events.ItemAgent {
+				lastStreamingAgentIdx = i
+				break
+			}
+		}
+	}
+
 	for i, it := range m.tr.Items {
 		switch it.Kind {
 		case events.ItemUser:
-			appendBlockSpanned(i, it.Kind, m.renderUserBubble(it.Content, it.Expanded, cw), userBubbleContentSpan)
+			// User bubbles are cacheable (content never changes after submit).
+			cacheKey := itemCacheKey(cw, it.Kind, it.Content, it.Expanded, "", "")
+			if cached, ok := m.itemRenderCache[cacheKey]; ok {
+				useCached(i, it.Kind, cached)
+			} else {
+				buildAndCache(i, it.Kind, cacheKey, m.renderUserBubble(it.Content, it.Expanded, cw), userBubbleContentSpan)
+			}
+
 		case events.ItemAgent:
 			content := strings.TrimRight(it.Content, "\n")
 			if content == "" {
 				continue
 			}
-			// Provisional = interstitial during tool loop (Studio sticky agent).
-			// Show as Thinking (muted, replaceable); finalize to full markdown on Done.
-			if it.Provisional {
-				appendBlock(i, it.Kind, m.renderThinkingBubble(content, cw))
+			// Provisional interstitial text and the currently-streaming agent
+			// bubble bypass the cache — their content changes every event.
+			if it.Provisional || i == lastStreamingAgentIdx {
+				if it.Provisional {
+					appendBlock(i, it.Kind, m.renderThinkingBubble(content, cw))
+				} else {
+					md := m.renderAgentMarkdown(content, cw)
+					if md == "" {
+						md = th.Agent.Width(cw).Render(content)
+					}
+					if it.RoutingModel != "" {
+						var badge string
+						switch it.RoutingTier {
+						case "strong":
+							badge = " 🧠"
+						case "medium":
+							badge = " ⚙️"
+						default:
+							badge = " ⚡"
+						}
+						badgeRendered := th.Muted.Render(badge)
+						badgeW := lipgloss.Width(badgeRendered)
+						lines := strings.Split(md, "\n")
+						lastLineW := lipgloss.Width(lines[len(lines)-1])
+						if lastLineW+badgeW+1 <= cw {
+							pad := cw - lastLineW - badgeW
+							if pad < 1 {
+								pad = 1
+							}
+							lines[len(lines)-1] = lines[len(lines)-1] + strings.Repeat(" ", pad) + badgeRendered
+							md = strings.Join(lines, "\n")
+						} else {
+							md = md + "\n" + badgeRendered
+						}
+					}
+					appendBlockSpanned(i, it.Kind, md, codeGutterContentSpan)
+				}
 				continue
 			}
+			// Finalized agent items are cacheable.
 			md := m.renderAgentMarkdown(content, cw)
 			if md == "" {
 				md = th.Agent.Width(cw).Render(content)
 			}
-			// Append routing badge when Auto routing is active for this response.
-			// Right-aligned on the last line when space allows, to avoid extra vertical space.
-			// 🧠 strong · ⚙️ medium · ⚡ weak.
 			if it.RoutingModel != "" {
 				var badge string
 				switch it.RoutingTier {
@@ -2962,11 +3150,9 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 				}
 				badgeRendered := th.Muted.Render(badge)
 				badgeW := lipgloss.Width(badgeRendered)
-				// Find the last line and check if the badge fits inline.
 				lines := strings.Split(md, "\n")
 				lastLineW := lipgloss.Width(lines[len(lines)-1])
 				if lastLineW+badgeW+1 <= cw {
-					// Right-align on the last line.
 					pad := cw - lastLineW - badgeW
 					if pad < 1 {
 						pad = 1
@@ -2974,27 +3160,78 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 					lines[len(lines)-1] = lines[len(lines)-1] + strings.Repeat(" ", pad) + badgeRendered
 					md = strings.Join(lines, "\n")
 				} else {
-					// No room — append below as fallback.
 					md = md + "\n" + badgeRendered
 				}
 			}
-			appendBlockSpanned(i, it.Kind, md, codeGutterContentSpan)
+			cacheKey := itemCacheKey(cw, it.Kind, md, it.Expanded, it.RoutingTier, it.RoutingModel)
+			if cached, ok := m.itemRenderCache[cacheKey]; ok {
+				useCached(i, it.Kind, cached)
+			} else {
+				buildAndCache(i, it.Kind, cacheKey, md, codeGutterContentSpan)
+			}
+
 		case events.ItemThinking:
 			appendBlock(i, it.Kind, m.renderThinkingBubble(it.Content, cw))
+
 		case events.ItemActivity:
-			appendBlockSpanned(i, it.Kind, m.renderActivity(it, cw), codeGutterContentSpan)
+			// Activity folds change while tools are running (steps added); only
+			// cache when all steps are complete (no "running" step).
+			hasRunning := false
+			for _, s := range it.Steps {
+				if s.Status == "running" {
+					hasRunning = true
+					break
+				}
+			}
+			if hasRunning || m.tr.Streaming {
+				appendBlockSpanned(i, it.Kind, m.renderActivity(it, cw), codeGutterContentSpan)
+			} else {
+				// Use summary+step names as cache key content (avoid hashing full args/results).
+				cacheKey := itemCacheKey(cw, it.Kind, it.Content+it.Summary, it.Expanded, it.RoutingTier, it.RoutingModel)
+				if cached, ok := m.itemRenderCache[cacheKey]; ok {
+					useCached(i, it.Kind, cached)
+				} else {
+					buildAndCache(i, it.Kind, cacheKey, m.renderActivity(it, cw), codeGutterContentSpan)
+				}
+			}
+
 		case events.ItemFileDiff:
-			appendBlockSpanned(i, it.Kind, m.renderFileDiff(it, cw), codeGutterContentSpan)
+			cacheKey := itemCacheKey(cw, it.Kind, it.Content+it.DiffVerification, it.Expanded, "", "")
+			if cached, ok := m.itemRenderCache[cacheKey]; ok {
+				useCached(i, it.Kind, cached)
+			} else {
+				buildAndCache(i, it.Kind, cacheKey, m.renderFileDiff(it, cw), codeGutterContentSpan)
+			}
+
 		case events.ItemSystem:
-			appendBlock(i, it.Kind, th.System.Width(cw).Render(it.Content))
+			cacheKey := itemCacheKey(cw, it.Kind, it.Content, false, "", "")
+			if cached, ok := m.itemRenderCache[cacheKey]; ok {
+				useCached(i, it.Kind, cached)
+			} else {
+				buildAndCache(i, it.Kind, cacheKey, th.System.Width(cw).Render(it.Content), nil)
+			}
+
 		case events.ItemCompaction:
-			appendBlock(i, it.Kind, th.System.Width(cw).Render(it.Content))
+			cacheKey := itemCacheKey(cw, it.Kind, it.Content, false, "", "")
+			if cached, ok := m.itemRenderCache[cacheKey]; ok {
+				useCached(i, it.Kind, cached)
+			} else {
+				buildAndCache(i, it.Kind, cacheKey, th.System.Width(cw).Render(it.Content), nil)
+			}
+
 		case events.ItemError:
-			appendBlock(i, it.Kind, th.Error.Width(cw).Render(it.Content))
+			cacheKey := itemCacheKey(cw, it.Kind, it.Content, false, "", "")
+			if cached, ok := m.itemRenderCache[cacheKey]; ok {
+				useCached(i, it.Kind, cached)
+			} else {
+				buildAndCache(i, it.Kind, cacheKey, th.Error.Width(cw).Render(it.Content), nil)
+			}
+
 		case events.ItemApproval:
 			if it.ApprovalKind == "plan" {
 				continue // plan approval shown in footer, not transcript
 			}
+			// Approval items are interactive (cursor changes) — skip cache.
 			var ab strings.Builder
 			ab.WriteString(th.Approval.Width(cw).Render("⚠ " + it.Content))
 			if len(it.Options) > 0 {
@@ -3004,23 +3241,51 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 			ab.WriteByte('\n')
 			ab.WriteString(th.Muted.Width(cw).Render("Type Yes or No (or an option) and press Enter."))
 			appendBlock(i, it.Kind, ab.String())
+
 		case events.ItemNetworkDenial:
+			// Network denial items are interactive — skip cache.
 			appendBlock(i, it.Kind, m.renderNetworkDenialTranscript(it, cw))
+
 		case events.ItemArtifact:
-			block, rows := m.renderArtifactList(it, cw)
-			start := appendBlock(i, it.Kind, block)
-			for _, row := range rows {
-				artifactHits = append(artifactHits, artifactHit{
-					start:       start + row.line,
-					end:         start + row.line + 1,
-					itemIdx:     i,
-					artifactIdx: row.artifactIdx,
-				})
+			cacheKey := itemCacheKey(cw, it.Kind, it.Content+it.Path, false, "", "")
+			if cached, ok := m.itemRenderCache[cacheKey]; ok {
+				start := useCached(i, it.Kind, cached)
+				// Artifact hit regions within the block are re-derived from the
+				// cached block. Since the artifact list is stable, we re-render
+				// only to get the row indices — the painted output comes from cache.
+				_, rows := m.renderArtifactList(it, cw)
+				for _, row := range rows {
+					artifactHits = append(artifactHits, artifactHit{
+						start:       start + row.line,
+						end:         start + row.line + 1,
+						itemIdx:     i,
+						artifactIdx: row.artifactIdx,
+					})
+				}
+			} else {
+				block, rows := m.renderArtifactList(it, cw)
+				start := buildAndCache(i, it.Kind, cacheKey, block, nil)
+				for _, row := range rows {
+					artifactHits = append(artifactHits, artifactHit{
+						start:       start + row.line,
+						end:         start + row.line + 1,
+						itemIdx:     i,
+						artifactIdx: row.artifactIdx,
+					})
+				}
 			}
+
 		case events.ItemDelegation:
+			// Delegation items update frequently (live timer, task state) — skip cache.
 			appendBlock(i, it.Kind, m.renderDelegationItem(it, cw))
+
 		case events.ItemPlan:
-			appendBlockSpanned(i, it.Kind, m.renderPlanDocument(it, cw), planDocumentContentSpan)
+			cacheKey := itemCacheKey(cw, it.Kind, it.Content+string(it.PlanStatus), it.Expanded, "", "")
+			if cached, ok := m.itemRenderCache[cacheKey]; ok {
+				useCached(i, it.Kind, cached)
+			} else {
+				buildAndCache(i, it.Kind, cacheKey, m.renderPlanDocument(it, cw), planDocumentContentSpan)
+			}
 		}
 	}
 	m.transcriptPlainLines = plainLines

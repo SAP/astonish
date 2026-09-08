@@ -10,6 +10,72 @@ import (
 	"github.com/SAP/astonish/pkg/tui/events"
 )
 
+func TestSelectionIntersectsLines(t *testing.T) {
+	// Helper to build a model with an active selection.
+	withSel := func(start, end selectionPoint) model {
+		return model{
+			selecting:      true,
+			selectionMoved: true,
+			selectionStart: start,
+			selectionEnd:   end,
+		}
+	}
+
+	tests := []struct {
+		name       string
+		m          model
+		blockStart int
+		blockEnd   int
+		want       bool
+	}{
+		{
+			name:       "selection not moved yet",
+			m:          model{selecting: true, selectionMoved: false, selectionStart: selectionPoint{0, 0}, selectionEnd: selectionPoint{10, 5}},
+			blockStart: 0, blockEnd: 5, want: false,
+		},
+		{
+			name:       "selection before block",
+			m:          withSel(selectionPoint{0, 0}, selectionPoint{2, 5}),
+			blockStart: 5, blockEnd: 10, want: false,
+		},
+		{
+			name:       "selection after block",
+			m:          withSel(selectionPoint{10, 0}, selectionPoint{15, 5}),
+			blockStart: 0, blockEnd: 5, want: false,
+		},
+		{
+			name:       "selection overlaps start of block",
+			m:          withSel(selectionPoint{0, 0}, selectionPoint{3, 5}),
+			blockStart: 2, blockEnd: 8, want: true,
+		},
+		{
+			name:       "selection overlaps end of block",
+			m:          withSel(selectionPoint{6, 0}, selectionPoint{12, 5}),
+			blockStart: 2, blockEnd: 8, want: true,
+		},
+		{
+			name:       "selection entirely inside block",
+			m:          withSel(selectionPoint{3, 0}, selectionPoint{5, 5}),
+			blockStart: 2, blockEnd: 8, want: true,
+		},
+		{
+			name:       "block entirely inside selection",
+			m:          withSel(selectionPoint{0, 0}, selectionPoint{20, 5}),
+			blockStart: 5, blockEnd: 10, want: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.m.selectionIntersectsLines(tc.blockStart, tc.blockEnd)
+			if got != tc.want {
+				t.Fatalf("selectionIntersectsLines(%d, %d) = %v, want %v",
+					tc.blockStart, tc.blockEnd, got, tc.want)
+			}
+		})
+	}
+}
+
+
 func TestSelectionTextSingleAndMultiLine(t *testing.T) {
 	lines := []string{"hello world", "second line", "third"}
 	got := selectionText(lines, nil, selectionPoint{line: 0, col: 6}, selectionPoint{line: 1, col: 6})

@@ -11,7 +11,7 @@ import (
 	"github.com/SAP/astonish/pkg/tui/events"
 )
 
-func newCodeModel(t *testing.T) model {
+func newCodeModel(t testing.TB) model {
 	t.Helper()
 	m := newModel(context.Background(), Config{
 		Backend: staticBackend{info: backend.Info{Mode: "code"}},
@@ -59,10 +59,20 @@ func TestWindowResizeClearsMarkdownCache(t *testing.T) {
 	if len(m.mdCache) == 0 {
 		t.Fatal("expected cache to be populated")
 	}
+	// After resize the handler nil-ifies both caches before refreshViewport
+	// repopulates them at the new width. No key with the old width prefix (80)
+	// must survive in mdCache — verified by prefix, not by a fragile hardcoded key.
 	next, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 	nm := next.(model)
-	if nm.mdCache != nil && len(nm.mdCache) != 0 {
-		t.Fatalf("expected markdown cache cleared on resize, got %d entries", len(nm.mdCache))
+	for k := range nm.mdCache {
+		if strings.HasPrefix(k, "80\x00") {
+			t.Fatalf("old-width (80) mdCache key survived resize: %q", k)
+		}
+	}
+	for k := range nm.itemRenderCache {
+		if strings.HasPrefix(k, "80\x00") {
+			t.Fatalf("old-width (80) itemRenderCache key survived resize: %q", k)
+		}
 	}
 }
 

@@ -104,6 +104,19 @@ func selectionText(lines []string, spans [][2]int, start, end selectionPoint) st
 	return strings.Trim(strings.Join(out, "\n"), "\n")
 }
 
+// selectionIntersectsLines returns true when the current drag selection
+// overlaps the half-open line range [startLine, endLine). It returns false
+// when no selection is active or the user hasn't moved the mouse yet, so
+// callers can skip the (expensive) ANSI-strip + highlight pass for blocks
+// that are nowhere near the selected region.
+func (m model) selectionIntersectsLines(startLine, endLine int) bool {
+	if !m.selecting || !m.selectionMoved {
+		return false
+	}
+	from, to := normalizeSelection(m.selectionStart, m.selectionEnd)
+	return from.line < endLine && to.line >= startLine
+}
+
 func normalizeSelection(a, b selectionPoint) (selectionPoint, selectionPoint) {
 	if a.line > b.line || (a.line == b.line && a.col > b.col) {
 		return b, a

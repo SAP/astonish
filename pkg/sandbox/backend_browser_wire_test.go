@@ -314,6 +314,7 @@ func TestGetPoolClientFromContext_TemplateOnlyUsesGetOrCreateWithTemplate(t *tes
 // startBackendRecording.
 type recordingExecBackend struct {
 	interfaceTestStub
+	kind        BackendKind
 	// calls receives each script that was executed via Exec.
 	calls []string
 	// execResults maps call index → ExecResult. If no entry, returns a default
@@ -324,7 +325,7 @@ type recordingExecBackend struct {
 	callIdx     int
 }
 
-func (b *recordingExecBackend) Kind() BackendKind { return BackendKindDocker }
+func (b *recordingExecBackend) Kind() BackendKind { return b.kind }
 
 func (b *recordingExecBackend) Exec(_ context.Context, _ string, opts ExecSpec) (*ExecResult, error) {
 	idx := b.callIdx
@@ -343,6 +344,7 @@ func (b *recordingExecBackend) Exec(_ context.Context, _ string, opts ExecSpec) 
 
 func TestStartBackendRecording_ProbeFailure(t *testing.T) {
 	b := &recordingExecBackend{
+		kind: BackendKindDocker,
 		execErrors: map[int]error{
 			0: fmt.Errorf("xdpyinfo not found"),
 		},
@@ -358,6 +360,7 @@ func TestStartBackendRecording_ProbeFailure(t *testing.T) {
 
 func TestStartBackendRecording_ProbeBadDimensions(t *testing.T) {
 	b := &recordingExecBackend{
+		kind: BackendKindDocker,
 		execResults: map[int]*ExecResult{
 			0: {ExitCode: 0, Stdout: []byte("not-dimensions")},
 		},
@@ -379,5 +382,65 @@ func TestWireBackendBrowserManager_SetsRecordingFunc(t *testing.T) {
 	}
 	if mgr.ContainerStartRecordingFunc == nil {
 		t.Fatal("ContainerStartRecordingFunc was not wired by WireBackendBrowserManager")
+	}
+}
+
+func TestBackendShellCommand_Docker(t *testing.T) {
+	backend := &kindOnlyBackend{kind: BackendKindDocker}
+	script := "echo hello"
+	cmd := backendShellCommand(backend, script)
+	if len(cmd) != 3 {
+		t.Errorf("Docker backend command length = %d, want 3", len(cmd))
+	}
+	if cmd[0] != "sh" || cmd[1] != "-c" || cmd[2] != script {
+		t.Errorf("Docker backend command = %v, want [sh -c %q]", cmd, script)
+	}
+}
+
+func TestBackendShellCommand_K8s(t *testing.T) {
+	backend := &kindOnlyBackend{kind: BackendKindK8s}
+	script := "echo hello"
+	cmd := backendShellCommand(backend, script)
+	if len(cmd) != 4 {
+		t.Errorf("K8s backend command length = %d, want 4", len(cmd))
+	}
+	if cmd[0] != "/usr/local/bin/astonish-shell" || cmd[1] != "sh" || cmd[2] != "-c" || cmd[3] != script {
+		t.Errorf("K8s backend command = %v, want [/usr/local/bin/astonish-shell sh -c %q]", cmd, script)
+	}
+}
+
+func TestBackendShellCommand_NilBackend(t *testing.T) {
+	script := "echo hello"
+	cmd := backendShellCommand(nil, script)
+	if len(cmd) != 3 {
+		t.Errorf("nil backend command length = %d, want 3", len(cmd))
+	}
+	if cmd[0] != "sh" || cmd[1] != "-c" || cmd[2] != script {
+		t.Errorf("nil backend command = %v, want [sh -c %q]", cmd, script)
+	}
+}
+
+func TestStartBackendRecording_K8sUsesAstonishShell(t *testing.T) {
+	// recordingExecBackend captures all Exec calls; by default it returns
+	// success with a valid probe response "1920x1080".
+	b := &recordingExecBackend{
+		kind: BackendKindK8s,
+	}
+	_, _, _, err := startBackendRecording(context.Background(), b, "sess-1", ":0", "/tmp/astonish-recordings/test.mp4")
+	if err != nil {
+		t.Fatalf("startBackendRecording failed: %v", err)
+	}
+
+	// We expect 4 Exec calls (probe, mkdir, start ffmpeg, and the stopFn closure will call stop ffmpeg).
+	// We only verify the first 3 here since stopFn is lazy.
+	if len(b.calls) < 3 {
+		t.Fatalf("expected at least 3 Exec calls, got %d", len(b.calls))
+	}
+
+	// Each call should start with /usr/local/bin/astonish-shell for K8s backends.
+	for i, call := range b.calls[:3] {
+		if !strings.Contains(call, "/usr/local/bin/astonish-shell") {
+			t.Errorf("call %d = %q; expected to contain /usr/local/bin/astonish-shell", i, call)
+		}
 	}
 }

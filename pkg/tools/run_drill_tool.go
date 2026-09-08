@@ -226,6 +226,16 @@ func executeRunDrill(ctx tool.Context, deps *runDrillDeps, args RunDrillArgs) (R
 		}, nil
 	}
 
+	// Set the request context on the browser manager so that ContainerEnsureReadyFunc
+	// can provision the sandbox with the correct overlay layer chain (including
+	// CloakBrowser, KasmVNC). Without this, the manager uses context.Background()
+	// which has no template info and creates a bare container without browser binaries.
+	if deps.browserMgr != nil {
+		if reqCtx, ok := any(ctx).(context.Context); ok {
+			deps.browserMgr.SetRequestContext(reqCtx)
+		}
+	}
+
 	// Warm Chromium/CDP before tests when drills use browser_* tools so
 	// the cold start does not race the first navigate.
 	if suiteUsesBrowserTools(tests) {
@@ -414,10 +424,36 @@ func buildTestExecutor(ctx tool.Context, deps *runDrillDeps) closableExecutor {
 		sessionID = deps.sessionID
 		ipClient = deps.lazyClient
 	} else if deps.toolPool != nil && ctx != nil && ctx.SessionID() != "" {
-		toolClient = deps.toolPool.GetOrCreate(ctx.SessionID())
+		// Use GetPoolClientFromContext to extract sandbox template/chain/image
+		// from the request context. Without this, the pool creates a bare container
+		// that lacks browser overlays (CloakBrowser, KasmVNC, etc.).
+		if reqCtx, ok := any(ctx).(context.Context); ok {
+			toolClient = sandbox.GetPoolClientFromContext(reqCtx, deps.toolPool, ctx.SessionID())
+		} else {
+			toolClient = deps.toolPool.GetOrCreate(ctx.SessionID())
+		}
 		sessionID = ctx.SessionID()
 	} else if deps.nodePool != nil && ctx != nil && ctx.SessionID() != "" {
-		toolClient = deps.nodePool.GetOrCreate(ctx.SessionID())
+		// Extract the template from context so Incus sessions get the overlay
+		// with CloakBrowser (same as browser tools going through NodeTool).
+		if reqCtx, ok := any(ctx).(context.Context); ok {
+			// Record the caller's tenant before the pool creates a client, so
+			// the container record lands in the correct org/team schema (mirrors
+			// NodeTool.getClientFromContext and GetPoolClientFromContext).
+			orgSlug := store.OrgSlugFromContext(reqCtx)
+			teamSlug := store.TeamSlugFromContext(reqCtx)
+			if orgSlug != "" || teamSlug != "" {
+				deps.nodePool.SetSessionScope(ctx.SessionID(), orgSlug, teamSlug)
+			}
+			tpl := store.SandboxTemplateFromContext(reqCtx)
+			if tpl != "" {
+				toolClient = deps.nodePool.GetOrCreateWithTemplate(ctx.SessionID(), tpl)
+			} else {
+				toolClient = deps.nodePool.GetOrCreate(ctx.SessionID())
+			}
+		} else {
+			toolClient = deps.nodePool.GetOrCreate(ctx.SessionID())
+		}
 		sessionID = ctx.SessionID()
 	}
 

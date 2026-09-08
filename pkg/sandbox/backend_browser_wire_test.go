@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -202,6 +203,7 @@ func TestGetPoolClientFromContext_FallsBackToGetOrCreate(t *testing.T) {
 	client := &browserReadySpyClient{}
 	pool := &browserReadySpyPool{client: client}
 	// Empty context — no chain, no template
+	// Should use the pool's default template
 	c := GetPoolClientFromContext(context.Background(), pool, "sess-1")
 	if c == nil {
 		t.Fatal("expected non-nil client")
@@ -260,6 +262,7 @@ type browserReadySpyPool struct {
 	client    ToolNodeClient
 	sessionID string
 	method    string
+	template  string
 }
 
 func (p *browserReadySpyPool) GetOrCreate(sessionID string) ToolNodeClient {
@@ -267,8 +270,9 @@ func (p *browserReadySpyPool) GetOrCreate(sessionID string) ToolNodeClient {
 	p.method = "GetOrCreate"
 	return p.client
 }
-func (p *browserReadySpyPool) GetOrCreateWithTemplate(sessionID, _ string) ToolNodeClient {
+func (p *browserReadySpyPool) GetOrCreateWithTemplate(sessionID, template string) ToolNodeClient {
 	p.sessionID = sessionID
+	p.template = template
 	p.method = "GetOrCreateWithTemplate"
 	return p.client
 }
@@ -302,5 +306,78 @@ func TestGetPoolClientFromContext_TemplateOnlyUsesGetOrCreateWithTemplate(t *tes
 	}
 	if pool.sessionID != "sess-tpl" {
 		t.Errorf("pool sessionID = %q, want sess-tpl", pool.sessionID)
+	}
+}
+
+// recordingExecBackend is a test Backend stub that records Exec calls and
+// returns configurable results for the probe, start, and stop phases of
+// startBackendRecording.
+type recordingExecBackend struct {
+	interfaceTestStub
+	// calls receives each script that was executed via Exec.
+	calls []string
+	// execResults maps call index → ExecResult. If no entry, returns a default
+	// success result. If the result has ExitCode != 0 or err is set, that is
+	// returned. Use execErrors[i] to force an error return (not ExitCode).
+	execResults map[int]*ExecResult
+	execErrors  map[int]error
+	callIdx     int
+}
+
+func (b *recordingExecBackend) Kind() BackendKind { return BackendKindDocker }
+
+func (b *recordingExecBackend) Exec(_ context.Context, _ string, opts ExecSpec) (*ExecResult, error) {
+	idx := b.callIdx
+	b.callIdx++
+	if len(opts.Command) > 0 {
+		b.calls = append(b.calls, strings.Join(opts.Command, " "))
+	}
+	if err, ok := b.execErrors[idx]; ok {
+		return nil, err
+	}
+	if r, ok := b.execResults[idx]; ok {
+		return r, nil
+	}
+	return &ExecResult{ExitCode: 0, Stdout: []byte("1920x1080")}, nil
+}
+
+func TestStartBackendRecording_ProbeFailure(t *testing.T) {
+	b := &recordingExecBackend{
+		execErrors: map[int]error{
+			0: fmt.Errorf("xdpyinfo not found"),
+		},
+	}
+	_, _, _, err := startBackendRecording(context.Background(), b, "sess-1", ":0", "/tmp/astonish-recordings/test.mp4")
+	if err == nil {
+		t.Fatal("expected error when display probe fails")
+	}
+	if !strings.Contains(err.Error(), "probe display size") {
+		t.Errorf("error %q should mention 'probe display size'", err)
+	}
+}
+
+func TestStartBackendRecording_ProbeBadDimensions(t *testing.T) {
+	b := &recordingExecBackend{
+		execResults: map[int]*ExecResult{
+			0: {ExitCode: 0, Stdout: []byte("not-dimensions")},
+		},
+	}
+	_, _, _, err := startBackendRecording(context.Background(), b, "sess-1", ":0", "/tmp/astonish-recordings/test.mp4")
+	if err == nil {
+		t.Fatal("expected error when dimensions cannot be parsed")
+	}
+	if !strings.Contains(err.Error(), "probe display size") {
+		t.Errorf("error %q should mention 'probe display size'", err)
+	}
+}
+
+func TestWireBackendBrowserManager_SetsRecordingFunc(t *testing.T) {
+	mgr := browser.NewManager(browser.DefaultConfig())
+	reg := &SessionRegistry{}
+	if !WireBackendBrowserManager(mgr, &kindOnlyBackend{kind: BackendKindK8s}, reg, nil, nil) {
+		t.Fatal("WireBackendBrowserManager returned false")
+	}
+	if mgr.ContainerStartRecordingFunc == nil {
+		t.Fatal("ContainerStartRecordingFunc was not wired by WireBackendBrowserManager")
 	}
 }

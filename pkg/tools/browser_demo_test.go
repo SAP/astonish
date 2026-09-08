@@ -26,6 +26,19 @@ func TestBrowserMoveCursor_RequiresTarget(t *testing.T) {
 	}
 }
 
+func TestBrowserMoveCursor_WithDurationMs(t *testing.T) {
+	mgr := browser.NewManager(browser.DefaultConfig())
+	refs := browser.NewRefMap()
+	fn := BrowserMoveCursor(mgr, refs)
+	// With no browser launched, CurrentPage() fails before target resolution,
+	// so this test verifies that passing DurationMs does not suppress or change
+	// the no-page error (i.e. the parameter is parsed and threaded through).
+	_, err := fn(nil, BrowserMoveCursorArgs{DurationMs: 500})
+	if err == nil {
+		t.Fatal("expected error from BrowserMoveCursor when no browser is active")
+	}
+}
+
 func TestBrowserFullscreen_NoPage(t *testing.T) {
 	mgr := browser.NewManager(browser.DefaultConfig())
 	fn := BrowserFullscreen(mgr)

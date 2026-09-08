@@ -79,8 +79,10 @@ func getBrowserToolsWithGuard(mgr *browser.Manager, guard *browser.NavigationGua
 
 	moveCursorTool, err := functiontool.New(functiontool.Config{
 		Name: "browser_move_cursor",
-		Description: "Move the visible demo cursor (and real mouse) to a ref, CSS selector, or x/y. " +
-			"Enables the demo cursor overlay for tutorial recordings.",
+		Description: "Move the visible demo cursor (and real mouse) to a target: element ref, CSS selector, or x/y pixel coordinates. Enables the demo cursor overlay for tutorial recordings.\n\n" +
+			"IMPORTANT: For smooth, human-like cursor movement, always use a SINGLE call with `duration_ms` set. " +
+			"Do NOT chain multiple browser_move_cursor calls to animate motion — inter-call latency causes visible stop-start jerking. " +
+			"One call with duration_ms produces natural ease-in-out acceleration automatically.",
 	}, safeBrowserFunc(BrowserMoveCursor(mgr, refs)))
 	if err != nil {
 		return nil, err

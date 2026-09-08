@@ -489,11 +489,13 @@ func (c *ChatAgent) TrySetActivePlan(plan *PlanState) bool {
 // AllowActivePlanReplacement opens one revision slot for a planning turn after
 // the user explicitly requests changes. The next accepted announcement consumes
 // the slot, preventing parallel announcements from both replacing the plan.
+// This method is only called when entering Plan mode (an explicit user intent
+// to create/revise a plan), so any stale approval flag from a previous plan
+// is unconditionally cleared.
 func (c *ChatAgent) AllowActivePlanReplacement() {
 	c.activePlanMu.Lock()
-	if !c.activePlanApproved {
-		c.activePlanReplacementAllowed = true
-	}
+	c.activePlanApproved = false
+	c.activePlanReplacementAllowed = true
 	c.activePlanMu.Unlock()
 }
 

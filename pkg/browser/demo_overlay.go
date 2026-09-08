@@ -3,8 +3,10 @@ package browser
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/input"
@@ -328,8 +330,25 @@ func (m *Manager) SyncDemoCursorOverlay(x, y float64) error {
 	return err
 }
 
+// easeInOutCubic maps a linear progress value t in [0,1] to a cubic
+// ease-in-out curve: slow start, fast middle, slow end.
+// Boundary contracts: easeInOutCubic(0)==0, easeInOutCubic(0.5)==0.5, easeInOutCubic(1)==1.
+func easeInOutCubic(t float64) float64 {
+	if t < 0.5 {
+		return 4 * t * t * t
+	}
+	return 1 - math.Pow(-2*t+2, 3)/2
+}
+
 // MoveMouseAnimated moves the real mouse (and demo cursor overlay) to pt.
-func (m *Manager) MoveMouseAnimated(pg *rod.Page, pt proto.Point, steps int) error {
+// When durationMs > 0, the movement is spread over that many milliseconds
+// using a cubic ease-in-out curve so the visible cursor glides naturally
+// (slow start, fast middle, slow end). When durationMs <= 0, the existing
+// fast linear movement is used for backward-compatible instant movement.
+//
+// Note: actual wall-clock duration is approximate — stepSleep*(steps-1) plus
+// per-frame CDP round-trip latency (MoveTo + SyncDemoCursorOverlay).
+func (m *Manager) MoveMouseAnimated(pg *rod.Page, pt proto.Point, steps int, durationMs int) error {
 	if pg == nil {
 		return fmt.Errorf("page is nil")
 	}
@@ -339,9 +358,35 @@ func (m *Manager) MoveMouseAnimated(pg *rod.Page, pt proto.Point, steps int) err
 	if err := m.EnableDemoCursor(); err != nil {
 		return err
 	}
-	if err := pg.Mouse.MoveLinear(pt, steps); err != nil {
-		return err
+	if durationMs <= 0 {
+		// Fast path: original behavior, no inter-step delay.
+		if err := pg.Mouse.MoveLinear(pt, steps); err != nil {
+			return err
+		}
+		return m.SyncDemoCursorOverlay(pt.X, pt.Y)
 	}
+	// Timed natural movement: distribute durationMs across steps using cubic
+	// ease-in-out. stepSleep is approximate — CDP latency adds to actual duration.
+	startPos := pg.Mouse.Position()
+	deltaX := pt.X - startPos.X
+	deltaY := pt.Y - startPos.Y
+	stepSleep := time.Duration(durationMs) * time.Millisecond / time.Duration(steps)
+	for i := 1; i <= steps; i++ {
+		eased := easeInOutCubic(float64(i) / float64(steps))
+		interPt := proto.NewPoint(
+			startPos.X+deltaX*eased,
+			startPos.Y+deltaY*eased,
+		)
+		if err := pg.Mouse.MoveTo(interPt); err != nil {
+			return err
+		}
+		// Best-effort overlay sync: dropped intermediate frames are acceptable.
+		_ = m.SyncDemoCursorOverlay(interPt.X, interPt.Y)
+		if i < steps {
+			time.Sleep(stepSleep)
+		}
+	}
+	// Final sync at exact destination to correct any floating-point drift.
 	return m.SyncDemoCursorOverlay(pt.X, pt.Y)
 }
 

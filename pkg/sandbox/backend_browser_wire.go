@@ -416,6 +416,19 @@ func dialBackendSessionPort(ctx context.Context, backend Backend, sessionID stri
 	}, nil
 }
 
+// backendShellCommand wraps a raw shell command for execution in backend containers.
+// On Kubernetes backends (which chroot into /sandbox/rootfs), it wraps through
+// /usr/local/bin/astonish-shell to ensure tools like xdpyinfo, ffmpeg, etc.
+// are found inside the overlay. On Docker backends, the overlay IS the root
+// filesystem, so we use plain sh -c.
+// This mirrors the pattern established in backend_mcp_transport.go.
+func backendShellCommand(backend Backend, script string) []string {
+	if backend != nil && backend.Kind() == BackendKindK8s {
+		return []string{"/usr/local/bin/astonish-shell", "sh", "-c", script}
+	}
+	return []string{"sh", "-c", script}
+}
+
 type backendExecConn struct {
 	stream ExecStream
 	reader *bufio.Reader
@@ -467,7 +480,7 @@ func startBackendRecording(ctx context.Context, backend Backend, sessionID, disp
 
 	// Probe display size.
 	probeResult, err := backend.Exec(ctx, sessionID, ExecSpec{
-		Command: []string{"sh", "-c", browser.DisplayProbeShellCommand(display)},
+		Command: backendShellCommand(backend, browser.DisplayProbeShellCommand(display)),
 	})
 	if err != nil {
 		return nil, 0, 0, fmt.Errorf("probe display size: %w", err)
@@ -483,7 +496,7 @@ func startBackendRecording(ctx context.Context, backend Backend, sessionID, disp
 	// Create output directory.
 	dir := filepath.Dir(outPath)
 	if _, err := backend.Exec(ctx, sessionID, ExecSpec{
-		Command: []string{"sh", "-c", "mkdir -p " + shellQuoteBackend(dir)},
+		Command: backendShellCommand(backend, "mkdir -p "+shellQuoteBackend(dir)),
 	}); err != nil {
 		return nil, 0, 0, fmt.Errorf("mkdir recordings dir: %w", err)
 	}
@@ -516,7 +529,7 @@ fi
 	)
 
 	startResult, err := backend.Exec(ctx, sessionID, ExecSpec{
-		Command: []string{"sh", "-c", startScript},
+		Command: backendShellCommand(backend, startScript),
 	})
 	if err != nil {
 		return nil, 0, 0, fmt.Errorf("start ffmpeg: %w", err)
@@ -556,7 +569,7 @@ fi
 		)
 
 		stopResult, err := backend.Exec(context.Background(), sessionID, ExecSpec{
-			Command: []string{"sh", "-c", stopScript},
+			Command: backendShellCommand(backend, stopScript),
 		})
 		if err != nil {
 			return fmt.Errorf("stop ffmpeg: %w", err)

@@ -408,48 +408,48 @@ func layersMountOpt(spec sandbox.SessionSpec) string {
 
 func (db *DockerBackend) dockerRunArgs(spec sandbox.SessionSpec, cname, layerChain, upperDir string) []string {
 	args := []string{
-		"run", "-d",
-		"--name", cname,
+		"container", "run", "--detach",
+		eqFlag("--name", cname),
 		"--privileged",
-		"--device", "/dev/fuse",
-		"-v", db.cfg.LayersDir + ":" + mountLayers + layersMountOpt(spec),
-		"-v", upperDir + ":" + mountUppers,
-		"-v", overlayVolumeName(spec.SessionID) + ":" + mountOverlay,
-		"-e", envSessionID + "=" + spec.SessionID,
-		"-e", envLayerChain + "=" + layerChain,
-		"-e", envUpperDir + "=" + mountUpper,
-		"-e", envWorkDir + "=" + mountWork,
-		"-e", envLayersDir + "=" + mountLayers,
-		"-e", envUppersDir + "=" + mountUppers,
-		"-e", envHandoff + "=/bin/sleep",
-		"-e", envHandoffArg + "=infinity",
+		eqFlag("--device", "/dev/fuse"),
+		eqFlag("--volume", db.cfg.LayersDir+":"+mountLayers+layersMountOpt(spec)),
+		eqFlag("--volume", upperDir+":"+mountUppers),
+		eqFlag("--volume", overlayVolumeName(spec.SessionID)+":"+mountOverlay),
+		eqFlag("--env", envSessionID+"="+spec.SessionID),
+		eqFlag("--env", envLayerChain+"="+layerChain),
+		eqFlag("--env", envUpperDir+"="+mountUpper),
+		eqFlag("--env", envWorkDir+"="+mountWork),
+		eqFlag("--env", envLayersDir+"="+mountLayers),
+		eqFlag("--env", envUppersDir+"="+mountUppers),
+		eqFlag("--env", envHandoff+"=/bin/sleep"),
+		eqFlag("--env", envHandoffArg+"=infinity"),
 	}
 	for k, v := range spec.Env {
-		args = append(args, "-e", k+"="+v)
+		args = append(args, eqFlag("--env", k+"="+v))
 	}
 	for k, v := range db.cfg.Labels {
-		args = append(args, "--label", k+"="+v)
+		args = append(args, eqFlag("--label", k+"="+v))
 	}
 	args = append(args,
-		"--label", "astonish.session_id="+spec.SessionID,
-		"--label", "astonish.type="+string(spec.Type),
-		"--label", "astonish.org="+spec.OrgSlug,
-		"--label", "astonish.team="+spec.TeamSlug,
+		eqFlag("--label", "astonish.session_id="+spec.SessionID),
+		eqFlag("--label", "astonish.type="+string(spec.Type)),
+		eqFlag("--label", "astonish.org="+spec.OrgSlug),
+		eqFlag("--label", "astonish.team="+spec.TeamSlug),
 	)
 	for k, v := range spec.Labels {
-		args = append(args, "--label", k+"="+v)
+		args = append(args, eqFlag("--label", k+"="+v))
 	}
 	if spec.OrgSlug != "" {
-		args = append(args, "--network", orgNetworkName(spec.OrgSlug))
+		args = append(args, eqFlag("--network", orgNetworkName(spec.OrgSlug)))
 	}
 	if spec.Limits.CPUs > 0 {
-		args = append(args, "--cpus", fmt.Sprintf("%d", spec.Limits.CPUs))
+		args = append(args, eqFlag("--cpus", fmt.Sprintf("%d", spec.Limits.CPUs)))
 	}
 	if spec.Limits.MemoryMiB > 0 {
-		args = append(args, "--memory", fmt.Sprintf("%dm", spec.Limits.MemoryMiB))
+		args = append(args, eqFlag("--memory", fmt.Sprintf("%dm", spec.Limits.MemoryMiB)))
 	}
 	if spec.Limits.PIDs > 0 {
-		args = append(args, "--pids-limit", fmt.Sprintf("%d", spec.Limits.PIDs))
+		args = append(args, eqFlag("--pids-limit", fmt.Sprintf("%d", spec.Limits.PIDs)))
 	}
 	args = append(args, db.cfg.SandboxImage, "sleep", "infinity")
 	return args

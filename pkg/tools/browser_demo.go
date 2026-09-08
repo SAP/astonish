@@ -72,11 +72,12 @@ func BrowserClearHighlights(mgr *browser.Manager) func(tool.Context, BrowserClea
 // --- browser_move_cursor ---
 
 type BrowserMoveCursorArgs struct {
-	Ref      string   `json:"ref,omitempty" jsonschema:"Element ref to move the cursor to (center)"`
-	Selector string   `json:"selector,omitempty" jsonschema:"CSS selector when ref is unavailable"`
-	X        *float64 `json:"x,omitempty" jsonschema:"Absolute X in CSS pixels (with y)"`
-	Y        *float64 `json:"y,omitempty" jsonschema:"Absolute Y in CSS pixels (with x)"`
-	Steps    int      `json:"steps,omitempty" jsonschema:"Animation steps for mouse move (default 12)"`
+	Ref        string   `json:"ref,omitempty" jsonschema:"Element ref to move the cursor to (center)"`
+	Selector   string   `json:"selector,omitempty" jsonschema:"CSS selector when ref is unavailable"`
+	X          *float64 `json:"x,omitempty" jsonschema:"Absolute X in CSS pixels (with y)"`
+	Y          *float64 `json:"y,omitempty" jsonschema:"Absolute Y in CSS pixels (with x)"`
+	Steps      int      `json:"steps,omitempty" jsonschema:"Number of intermediate animation frames (default 12). Higher values produce smoother motion when combined with duration_ms. Recommended: 40-80 for visible animations, 12 for instant moves. Controls visual smoothness only — speed is set by duration_ms."`
+	DurationMs int      `json:"duration_ms,omitempty" jsonschema:"Total movement duration in milliseconds. The cursor glides from its current position to the target with natural ease-in-out acceleration. ALWAYS set this for visible cursor animations — use 0 only for instant repositioning when the user should not see the cursor travel. Recommended by distance: short moves (<100px) 300-500ms, medium (100-400px) 600-1000ms, long (>400px) 1000-1500ms, dramatic/very long 1500-2500ms. Pair with steps=40-80 for extra smoothness on longer moves."`
 }
 
 type BrowserMoveCursorResult struct {
@@ -126,7 +127,7 @@ func BrowserMoveCursor(mgr *browser.Manager, refs *browser.RefMap) func(tool.Con
 		if steps <= 0 {
 			steps = 12
 		}
-		if err := mgr.MoveMouseAnimated(pg, pt, steps); err != nil {
+		if err := mgr.MoveMouseAnimated(pg, pt, steps, args.DurationMs); err != nil {
 			return BrowserMoveCursorResult{}, err
 		}
 		return BrowserMoveCursorResult{Success: true, X: pt.X, Y: pt.Y}, nil

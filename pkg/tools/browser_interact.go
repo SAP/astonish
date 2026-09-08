@@ -73,7 +73,7 @@ func BrowserClick(mgr *browser.Manager, refs *browser.RefMap) func(tool.Context,
 			if err != nil {
 				return BrowserClickResult{}, fmt.Errorf("element not interactable: %w", err)
 			}
-			if err := mgr.MoveMouseAnimated(pg, *center, 12); err != nil {
+			if err := mgr.MoveMouseAnimated(pg, *center, 12, 0); err != nil {
 				return BrowserClickResult{}, fmt.Errorf("animate cursor: %w", err)
 			}
 			browser.HumanDelay(80, 220)

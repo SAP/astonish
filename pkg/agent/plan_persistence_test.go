@@ -202,3 +202,52 @@ func TestChatAgent_UpdatePlanRewritesPlanFile(t *testing.T) {
 		t.Errorf("implement should still be pending:\n%s", string(data))
 	}
 }
+
+func TestChatAgent_AllowPlanReplacement_OverridesApproved(t *testing.T) {
+	c := &ChatAgent{}
+	plan := NewPlanState("Old", PlanDocumentInfo{}, []PlanStepInfo{
+		{Name: "step1", Description: "work"},
+	})
+	if !c.TrySetActivePlan(plan) {
+		t.Fatal("first announcement should be accepted")
+	}
+	c.MarkActivePlanApproved()
+
+	// Before fix: AllowActivePlanReplacement was a no-op when approved,
+	// causing blocked_active_approved_plan on every subsequent announce_plan.
+	c.AllowActivePlanReplacement()
+
+	newPlan := NewPlanState("New", PlanDocumentInfo{}, []PlanStepInfo{
+		{Name: "step2", Description: "new work"},
+	})
+	if !c.TrySetActivePlan(newPlan) {
+		t.Fatal("AllowActivePlanReplacement should clear approved flag so TrySetActivePlan succeeds")
+	}
+}
+
+func TestChatAgent_GraphPlanMode_ClearsStaleApprovedPlan(t *testing.T) {
+	c := &ChatAgent{}
+	// Simulate a previous session's approved plan.
+	plan := NewPlanState("Session1Plan", PlanDocumentInfo{}, []PlanStepInfo{
+		{Name: "s1", Description: "old"},
+	})
+	c.SetActivePlan(plan)
+	c.MarkActivePlanApproved()
+	if !c.IsActivePlanApproved() {
+		t.Fatal("plan should be approved after MarkActivePlanApproved")
+	}
+
+	// New plan-mode turn calls AllowActivePlanReplacement.
+	c.AllowActivePlanReplacement()
+	if c.IsActivePlanApproved() {
+		t.Fatal("AllowActivePlanReplacement should clear the approved flag")
+	}
+
+	// announce_plan (via TrySetActivePlan) should now succeed.
+	newPlan := NewPlanState("Session2Plan", PlanDocumentInfo{}, []PlanStepInfo{
+		{Name: "s2", Description: "new"},
+	})
+	if !c.TrySetActivePlan(newPlan) {
+		t.Fatal("new plan should be accepted after AllowActivePlanReplacement clears approval")
+	}
+}

@@ -50,7 +50,7 @@ func (db *DockerBackend) SeedBaseLayerFromImage(ctx context.Context) error {
 
 	tmpName := "astonish-seed-base"
 	_, _ = runDocker(ctx, db.cfg.ContainerRuntimePath, "rm", "-f", tmpName)
-	if _, err := runDocker(ctx, db.cfg.ContainerRuntimePath, "create", "--name", tmpName, image); err != nil {
+	if _, err := runDocker(ctx, db.cfg.ContainerRuntimePath, seedCreateArgs(tmpName, image)...); err != nil {
 		return fmt.Errorf("sandbox/docker: docker create seed: %w", err)
 	}
 	defer func() {
@@ -81,6 +81,19 @@ func (db *DockerBackend) SeedBaseLayerFromImage(ctx context.Context) error {
 		return fmt.Errorf("sandbox/docker: extract seed rootfs: %w", tarErr)
 	}
 	return nil
+}
+
+// seedCreateArgs builds `docker container create` argv for exporting an image
+// rootfs. Management-command form plus --flag=value survives host docker
+// wrappers that rewrite top-level `create`/`run` (and would otherwise report
+// "invalid reference format" or start the seed image).
+func seedCreateArgs(name, image string) []string {
+	return []string{
+		"container", "create",
+		eqFlag("--name", name),
+		"--entrypoint=/bin/true",
+		image,
+	}
 }
 
 // ReseedBaseLayerFromImage deletes the current @base layer and re-exports the

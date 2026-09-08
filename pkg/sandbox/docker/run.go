@@ -9,6 +9,12 @@
 //   - Works with any Docker-compatible CLI (Podman, Rancher Desktop, etc.)
 //     as long as the binary is on PATH.
 //   - Smaller binary: no vendored Docker SDK.
+//
+// Hosts sometimes wrap /usr/bin/docker (LXC AppArmor helpers that rewrite
+// top-level `run`/`create` and treat the first non-dash token as the image).
+// Session and seed argv MUST use `container run` / `container create` plus
+// `--flag=value` so those wrappers neither eat option values nor start a
+// seed container. Vanilla docker and podman accept the same form.
 package docker
 
 import (
@@ -18,6 +24,12 @@ import (
 	"os/exec"
 	"strings"
 )
+
+// eqFlag formats a Docker CLI option as --flag=value so wrappers that scan
+// for the first non-dash token (the image) do not consume the option value.
+func eqFlag(flag, value string) string {
+	return flag + "=" + value
+}
 
 // runDocker executes the given docker subcommand, waits for it to complete,
 // and returns its stdout as a byte slice. On non-zero exit the error includes

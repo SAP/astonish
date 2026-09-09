@@ -38,4 +38,4 @@ Fullscreen terminal chat app for Astonish (Claude Code / OpenCode–style).
 
 - Pure rendering / reducers: put tests next to the package.
 - Architecture: `docs/architecture/terminal-app.md`.
-- Command text in the activity fold wraps to terminal width and must not be hard-truncated at 40/48 characters or 8 lines. `ToolDetailBody` is the source of truth for that text in collapsed and expanded views.
+- Command text in the activity fold: if the command fits on one line, show it in full in the collapsed preview. If it would wrap, the collapsed preview is a single truncated line; expand shows the full command wrapped to terminal width with no 40/48-character or 8-line cap. `ToolDetailBody` is the source of truth for expanded command text.

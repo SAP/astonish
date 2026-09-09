@@ -3672,9 +3672,9 @@ func (m model) renderActivityCollapsedPreview(steps []events.ToolStep, width int
 		if !collapsedCommandStep(steps[i].Name) {
 			continue
 		}
-		if detail := render.ToolDetailBody(step, width-4); detail != "" {
+		if preview := collapsedCommandPreview(step, width); preview != "" {
 			b.WriteByte('\n')
-			b.WriteString(m.theme.Muted.Width(width).Render("    " + detail))
+			b.WriteString(m.theme.Muted.Width(width).Render(preview))
 		}
 	}
 	b.WriteByte('\n')
@@ -3689,6 +3689,25 @@ func collapsedCommandStep(name string) bool {
 	default:
 		return false
 	}
+}
+
+// collapsedCommandPreview shows the full command when it fits on one line.
+// Longer commands (or commands with newlines) are truncated to a single line;
+// the full wrapped command is available after expand.
+func collapsedCommandPreview(step render.ToolStep, width int) string {
+	detail := render.ToolDetailBody(step, width-4)
+	if detail == "" {
+		return ""
+	}
+	lineWidth := width
+	if lineWidth < 8 {
+		lineWidth = 8
+	}
+	if !strings.Contains(detail, "\n") && lipgloss.Width("    "+detail) <= lineWidth {
+		return "    " + detail
+	}
+	flat := strings.Join(strings.Fields(detail), " ")
+	return collapsedToolLine("    "+flat, lineWidth)
 }
 
 func collapsedToolLine(line string, width int) string {

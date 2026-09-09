@@ -39,6 +39,7 @@ type Theme struct {
 	// Plan document chrome (bordered document rendering for announce_plan output)
 	PlanBorder lipgloss.Style // border outline for the plan document frame
 	PlanHeader lipgloss.Style // bold styled title (✦ Execution Plan)
+	PlanTitle  lipgloss.Style // distinct accent-colored plan title (card frame)
 	PlanMuted  lipgloss.Style // muted text inside the plan (metadata, legend)
 
 	// Plan document chrome — new section-based layout
@@ -129,6 +130,7 @@ func DefaultTheme() Theme {
 
 		PlanBorder: lipgloss.NewStyle().Foreground(lipgloss.Color("172")).Background(bg),
 		PlanHeader: lipgloss.NewStyle().Foreground(lipgloss.Color("172")).Background(bg).Bold(true),
+		PlanTitle:  lipgloss.NewStyle().Foreground(orange).Background(bg).Bold(true),
 		PlanMuted:  lipgloss.NewStyle().Foreground(muted).Background(bg),
 
 		PlanPhaseTitle: lipgloss.NewStyle().Foreground(text).Background(bg).Bold(true),
@@ -224,6 +226,7 @@ func PlatformTheme() Theme {
 
 		PlanBorder: lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Background(bg),
 		PlanHeader: lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Background(bg).Bold(true),
+		PlanTitle:  lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Background(bg).Bold(true),
 		PlanMuted:  lipgloss.NewStyle().Foreground(muted).Background(bg),
 
 		PlanPhaseTitle: lipgloss.NewStyle().Foreground(text).Background(bg).Bold(true),
@@ -278,7 +281,7 @@ func plainTheme() Theme {
 		Header: s, Status: s, Input: s, Activity: s, Approval: s,
 		CodeGutter:  s,
 		DiffAddedBg: s, DiffRemovedBg: s,
-		PlanBorder: s, PlanHeader: s, PlanMuted: s,
+		PlanBorder: s, PlanHeader: s, PlanTitle: s, PlanMuted: s,
 		PlanPhaseTitle: s, PlanSummary: s, PlanDetail: s, PlanSection: s, PlanSeparator: s,
 		InputBorder: box, InputBorderFocus: box, InputBorderPlan: box,
 		InputPrompt: s, InputPlaceholder: s, FooterMeta: s, Hint: s,
@@ -316,6 +319,13 @@ func (th Theme) ApplyTextareaStyles(ta *textarea.Model) {
 
 // RenderStyles maps the TUI theme into pure render.Styles for markdown/diff/activity.
 func (th Theme) RenderStyles() render.Styles {
+	// Heading hierarchy uses the mode accent color (orange in code mode, cyan in
+	// platform) so section headings like "Problem"/"Root causes"/"Boundaries"
+	// read as deterministic accent titles, differentiated by weight.
+	accent := th.Text.Foreground(th.AccentColor)
+	if th.NoColor {
+		accent = th.Text
+	}
 	return render.Styles{
 		Background:    th.Background,
 		Text:          th.Text,
@@ -326,11 +336,22 @@ func (th Theme) RenderStyles() render.Styles {
 		Number:        th.Number,
 		CodeGutter:    th.CodeGutter,
 		CodeHeader:    th.Brand,
-		Heading:       th.Brand,
+		Heading:       accent.Bold(true),
+		Heading1:      accent.Bold(true),
+		Heading2:      accent.Bold(true),
+		Heading3:      accent,
 		Bold:          th.Text.Bold(true),
 		Italic:        th.Text.Italic(true),
 		DiffAddedBg:   th.DiffAddedBg,
 		DiffRemovedBg: th.DiffRemovedBg,
 		NoColor:       th.NoColor,
 	}
+}
+
+// planRenderStyles is RenderStyles with HeadingBar on, so plan-card markdown
+// (context overview, bands, phase details) carves section headings into rooms.
+func (th Theme) planRenderStyles() render.Styles {
+	st := th.RenderStyles()
+	st.HeadingBar = true
+	return st
 }

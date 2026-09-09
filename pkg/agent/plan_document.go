@@ -154,7 +154,15 @@ func RenderPlanMarkdown(goal string, steps []planStep) string {
 func downgradeHeadings(s string) string {
 	lines := strings.Split(s, "\n")
 	changed := false
+	inFence := false
 	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "```") {
+			inFence = !inFence
+			continue
+		}
+		if inFence {
+			continue
+		}
 		if strings.HasPrefix(line, "## ") {
 			lines[i] = "#" + line // "## X" → "### X"
 			changed = true

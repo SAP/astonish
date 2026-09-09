@@ -21,12 +21,20 @@ type Styles struct {
 	Number        lipgloss.Style
 	CodeGutter    lipgloss.Style
 	CodeHeader    lipgloss.Style
-	Heading       lipgloss.Style
+	Heading       lipgloss.Style // fallback for H4-H6
+	Heading1      lipgloss.Style // top-level heading (#)
+	Heading2      lipgloss.Style // section heading (##)
+	Heading3      lipgloss.Style // subheading (###)
 	Bold          lipgloss.Style
 	Italic        lipgloss.Style
 	DiffAddedBg   lipgloss.Style // background band for added lines in diffs
 	DiffRemovedBg lipgloss.Style // background band for removed lines in diffs
 	NoColor       bool
+	// HeadingBar, when true, carves H1–H3 into rooms: a full-width rule under
+	// the title and a blank line after, so section headings scan as document
+	// bars rather than bold words in a packed paragraph. Used by the plan card;
+	// regular chat markdown leaves this false.
+	HeadingBar bool
 }
 
 // Render applies style to text, returning plain text when NoColor is set.
@@ -56,11 +64,15 @@ func (s Styles) Effective() Styles {
 		CodeGutter:    plain,
 		CodeHeader:    plain,
 		Heading:       plain,
+		Heading1:      plain,
+		Heading2:      plain,
+		Heading3:      plain,
 		Bold:          plain,
 		Italic:        plain,
 		DiffAddedBg:   plain,
 		DiffRemovedBg: plain,
 		NoColor:       true,
+		HeadingBar:    s.HeadingBar,
 	}
 }
 
@@ -85,6 +97,9 @@ func DefaultStyles() Styles {
 		CodeGutter:    lipgloss.NewStyle().Foreground(muted).Background(lipgloss.Color("#111416")),
 		CodeHeader:    lipgloss.NewStyle().Foreground(brand).Background(lipgloss.Color("#111416")),
 		Heading:       lipgloss.NewStyle().Foreground(brand).Background(lipgloss.Color("#111416")).Bold(true),
+		Heading1:      lipgloss.NewStyle().Foreground(brand).Background(lipgloss.Color("#111416")).Bold(true),
+		Heading2:      lipgloss.NewStyle().Foreground(text).Background(lipgloss.Color("#111416")).Bold(true).Underline(true),
+		Heading3:      lipgloss.NewStyle().Foreground(muted).Background(lipgloss.Color("#111416")).Bold(true),
 		Bold:          lipgloss.NewStyle().Foreground(text).Background(lipgloss.Color("#111416")).Bold(true),
 		Italic:        lipgloss.NewStyle().Foreground(text).Background(lipgloss.Color("#111416")).Italic(true),
 		DiffAddedBg:   lipgloss.NewStyle().Foreground(text).Background(diffAddedBg),
@@ -267,19 +282,23 @@ func prose(src string, width int, st Styles) string {
 			continue
 		}
 
+		headingBar := false
 		switch {
 		case strings.HasPrefix(line, "###### "):
-			out = append(out, wrapStyledPlain(strings.TrimPrefix(line, "###### "), width, st.Heading, st, false))
+			emitHeading(&out, blockStart, strings.TrimPrefix(line, "###### "), st.Heading, width, st, false)
 		case strings.HasPrefix(line, "##### "):
-			out = append(out, wrapStyledPlain(strings.TrimPrefix(line, "##### "), width, st.Heading, st, false))
+			emitHeading(&out, blockStart, strings.TrimPrefix(line, "##### "), st.Heading, width, st, false)
 		case strings.HasPrefix(line, "#### "):
-			out = append(out, wrapStyledPlain(strings.TrimPrefix(line, "#### "), width, st.Heading, st, false))
+			emitHeading(&out, blockStart, strings.TrimPrefix(line, "#### "), st.Heading, width, st, false)
 		case strings.HasPrefix(line, "### "):
-			out = append(out, wrapStyledPlain(strings.TrimPrefix(line, "### "), width, st.Heading, st, false))
+			headingBar = st.HeadingBar
+			emitHeading(&out, blockStart, strings.TrimPrefix(line, "### "), st.Heading3, width, st, headingBar)
 		case strings.HasPrefix(line, "## "):
-			out = append(out, wrapStyledPlain(strings.TrimPrefix(line, "## "), width, st.Heading, st, false))
+			headingBar = st.HeadingBar
+			emitHeading(&out, blockStart, strings.TrimPrefix(line, "## "), st.Heading2, width, st, headingBar)
 		case strings.HasPrefix(line, "# "):
-			out = append(out, wrapStyledPlain(strings.TrimPrefix(line, "# "), width, st.Heading, st, false))
+			headingBar = st.HeadingBar
+			emitHeading(&out, blockStart, strings.TrimPrefix(line, "# "), st.Heading1, width, st, headingBar)
 		case strings.HasPrefix(line, "- "):
 			out = append(out, wrapStyledPlain("• "+strings.TrimPrefix(line, "- "), width, st.Text, st, true))
 		case strings.HasPrefix(line, "* ") && !strings.HasPrefix(line, "**"):
@@ -290,9 +309,42 @@ func prose(src string, width int, st Styles) string {
 			out = append(out, wrapStyledPlain(line, width, st.Text, st, true))
 		}
 		i++
+		// A heading bar already emits one trailing spacer. Skip source blank
+		// lines that would otherwise stack a second empty row under the room.
+		if headingBar {
+			for i < len(lines) && strings.TrimSpace(strings.TrimRight(lines[i], "\r")) == "" {
+				i++
+			}
+			blockStart = true
+			continue
+		}
 		blockStart = false
 	}
 	return strings.TrimRight(strings.Join(out, "\n"), "\n")
+}
+
+// emitHeading appends a rendered markdown heading to out, inserting a single
+// blank spacer line before it when it does not start a block and the previous
+// emitted line is non-empty. This gives headings breathing room (matching a
+// document-style hierarchy) without doubling blank lines the source already had.
+//
+// When bar is set, the heading becomes a section room: a full-width rule under
+// the title and a blank line after, so the next paragraph is not glued to it.
+func emitHeading(out *[]string, blockStart bool, text string, style lipgloss.Style, width int, st Styles, bar bool) {
+	if !blockStart && len(*out) > 0 && strings.TrimSpace((*out)[len(*out)-1]) != "" {
+		*out = append(*out, "")
+	}
+	rendered := wrapStyledPlain(text, width, style, st, false)
+	for _, l := range strings.Split(rendered, "\n") {
+		*out = append(*out, l)
+	}
+	if !bar {
+		return
+	}
+	if width >= 8 {
+		*out = append(*out, st.Muted.Render(strings.Repeat("─", width)))
+	}
+	*out = append(*out, "")
 }
 
 func isTableRow(trim string) bool {

@@ -61,7 +61,7 @@ func TestActivitySummary_LiveCommandHint(t *testing.T) {
 	s := ActivitySummary([]ToolStep{
 		{Name: "run_terminal_command", Args: map[string]any{"command": "go test ./pkg/tui/..."}, Status: "running"},
 	}, true)
-	if !strings.Contains(s, "Running `go test ./pkg/tui/...`") {
+	if s != "Running command" {
 		t.Fatalf("live hint: %q", s)
 	}
 }
@@ -126,6 +126,35 @@ func TestToolDetailBodyWrapsLongCommand(t *testing.T) {
 		t.Fatalf("expected wrapped body, got %q", body)
 	}
 	for _, line := range lines {
+		if len([]rune(line)) > 32 {
+			t.Fatalf("line too wide (%d): %q", len([]rune(line)), line)
+		}
+	}
+	if strings.Contains(body, "…") {
+		t.Fatalf("command body must not hard-truncate with ellipsis: %q", body)
+	}
+	for _, part := range []string{"kubectl get clusters", "all-namespaces", "output wide", "very-long-openstack-", "context-name"} {
+		if !strings.Contains(body, part) {
+			t.Fatalf("expected full command part %q in body %q", part, body)
+		}
+	}
+}
+
+func TestToolDetailBodyShowsFullCommand(t *testing.T) {
+	cmd := strings.Repeat("alpha-beta-gamma-delta ", 12) // well over 48 chars and 8 wrapped lines at width 32
+	body := ToolDetailBody(ToolStep{Name: "shell_command", Args: map[string]any{"command": cmd}, Status: "running"}, 32)
+	if strings.Contains(body, "…") {
+		t.Fatalf("command body must not hard-truncate with ellipsis: %q", body)
+	}
+	joined := strings.ReplaceAll(body, "\n", "")
+	joined = strings.ReplaceAll(joined, "command: ", "")
+	joined = strings.ReplaceAll(joined, "          ", "")
+	want := strings.TrimSpace(cmd)
+	got := strings.Join(strings.Fields(joined), " ")
+	if got != strings.Join(strings.Fields(want), " ") {
+		t.Fatalf("expected full command %q, got %q from body %q", want, got, body)
+	}
+	for _, line := range strings.Split(body, "\n") {
 		if len([]rune(line)) > 32 {
 			t.Fatalf("line too wide (%d): %q", len([]rune(line)), line)
 		}

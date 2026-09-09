@@ -72,8 +72,11 @@ func TestRenderActivityCollapsedPreviewShowsToolRows(t *testing.T) {
 	if !strings.Contains(out, "✓ Search kubernetes") {
 		t.Fatalf("missing search preview row: %q", out)
 	}
-	if !strings.Contains(out, "✓ Run command `kubectl get clusters`") {
+	if !strings.Contains(out, "✓ Run command") {
 		t.Fatalf("missing command preview row: %q", out)
+	}
+	if !strings.Contains(out, "command: kubectl get clusters") {
+		t.Fatalf("collapsed activity should show the full command: %q", out)
 	}
 	if !strings.Contains(out, "✓ Read file README.md") {
 		t.Fatalf("collapsed activity should show every tool row: %q", out)
@@ -86,30 +89,30 @@ func TestRenderActivityCollapsedPreviewShowsToolRows(t *testing.T) {
 	}
 }
 
-func TestRenderActivityCollapsedCommandRowsStaySingleLine(t *testing.T) {
+func TestRenderActivityCollapsedShowsFullCommand(t *testing.T) {
 	m := model{theme: DefaultTheme(), width: 100}
+	cmd := "# Step 1: Assign credentials to variables\nAPP_CREDENTIAL=$(cat /tmp/very-long-file-name.json)\necho done"
 	item := events.Item{
 		Kind: events.ItemActivity,
 		Steps: []events.ToolStep{
-			{Name: "run_terminal_command", Args: map[string]any{"command": "# Step 1: Assign credentials to variables\nAPP_CREDENTIAL=$(cat /tmp/very-long-file-name.json)\necho done"}, Status: "complete"},
+			{Name: "run_terminal_command", Args: map[string]any{"command": cmd}, Status: "running"},
 		},
 	}
-	out := stripANSI(m.renderActivity(item, 56))
-	lines := strings.Split(out, "\n")
-	toolRows := 0
-	for _, line := range lines {
-		if strings.Contains(line, "Run command") {
-			toolRows++
-			if strings.Contains(line, "APP_CREDENTIAL") {
-				t.Fatalf("collapsed command row should truncate before wrapping command continuation: %q", line)
-			}
-			if got := lipgloss.Width(line); got > 56 {
-				t.Fatalf("collapsed command row width=%d want <=56: %q", got, line)
-			}
+	for _, expanded := range []bool{false, true} {
+		item.Expanded = expanded
+		out := stripANSI(m.renderActivity(item, 56))
+		if !strings.Contains(out, "APP_CREDENTIAL") || !strings.Contains(out, "echo done") {
+			t.Fatalf("expanded=%v should show full command, got %q", expanded, out)
+		}
+		if strings.Contains(out, "Running `") {
+			t.Fatalf("expanded=%v must not use 40-char liveHint command clip: %q", expanded, out)
 		}
 	}
-	if toolRows != 1 {
-		t.Fatalf("expected one single-line command row, got %d in %q", toolRows, out)
+	item.Expanded = false
+	item.Steps[0].Status = "complete"
+	out := stripANSI(m.renderActivity(item, 56))
+	if !strings.Contains(out, "APP_CREDENTIAL") || !strings.Contains(out, "echo done") {
+		t.Fatalf("completed collapsed command should still show full command, got %q", out)
 	}
 }
 

@@ -156,9 +156,6 @@ func liveHint(s ToolStep) string {
 	case catSearch:
 		return "Searching"
 	case catCmd:
-		if cmd, ok := s.Args["command"].(string); ok && cmd != "" {
-			return fmt.Sprintf("Running `%s`", truncate(cmd, 40))
-		}
 		return "Running command"
 	default:
 		return "Running " + label + "…"
@@ -280,7 +277,7 @@ func ToolDetailBody(s ToolStep, width int) string {
 	switch categorize(s.Name) {
 	case catCmd:
 		if cmd, ok := s.Args["command"].(string); ok && strings.TrimSpace(cmd) != "" {
-			return wrapKeyValue("command", strings.TrimSpace(cmd), width)
+			return wrapKeyValueUnlimited("command", strings.TrimSpace(cmd), width)
 		}
 	case catSearch:
 		if q := firstArg(s.Args, "query", "pattern"); q != "" {
@@ -416,9 +413,6 @@ func ToolSubject(s ToolStep) string {
 	if p := pathHint(s.Args); p != "" {
 		return truncate(p, 48)
 	}
-	if cmd, ok := s.Args["command"].(string); ok && strings.TrimSpace(cmd) != "" {
-		return "`" + truncate(strings.TrimSpace(cmd), 48) + "`"
-	}
 	if q := firstArg(s.Args, "query", "pattern"); q != "" {
 		return truncate(q, 48)
 	}
@@ -468,13 +462,27 @@ func resultText(result any) string {
 }
 
 func wrapKeyValue(key, value string, width int) string {
+	return formatKeyValue(key, wrapMultiline(value, 8, keyValueBodyWidth(key, width)), width)
+}
+
+func wrapKeyValueUnlimited(key, value string, width int) string {
+	return formatKeyValue(key, wrapUnlimited(value, keyValueBodyWidth(key, width)), width)
+}
+
+func keyValueBodyWidth(key string, width int) int {
 	prefix := key + ": "
 	bodyWidth := width - len(prefix)
 	if bodyWidth < 10 {
-		bodyWidth = width
+		return width
+	}
+	return bodyWidth
+}
+
+func formatKeyValue(key, wrapped string, width int) string {
+	prefix := key + ": "
+	if width-len(prefix) < 10 {
 		prefix = ""
 	}
-	wrapped := wrapMultiline(value, 8, bodyWidth)
 	lines := strings.Split(wrapped, "\n")
 	for i, line := range lines {
 		if i == 0 {
@@ -509,6 +517,18 @@ func wrapMultiline(s string, maxLines, width int) string {
 				return strings.Join(out, "\n")
 			}
 		}
+	}
+	return strings.Join(out, "\n")
+}
+
+// wrapUnlimited wraps s to width with no line cap, preserving explicit newlines.
+func wrapUnlimited(s string, width int) string {
+	if width < 1 {
+		width = 1
+	}
+	var out []string
+	for _, raw := range strings.Split(strings.TrimSpace(s), "\n") {
+		out = append(out, wrapLine(raw, width)...)
 	}
 	return strings.Join(out, "\n")
 }

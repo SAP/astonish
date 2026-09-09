@@ -351,6 +351,23 @@ func (m model) applyProviderInstancesLoaded(msg providerInstancesLoadedMsg) (tea
 }
 
 func (m model) applyXAIOAuthStarted(msg xaiOAuthStartedMsg) (tea.Model, tea.Cmd) {
+	// Re-authentication path (triggered outside the model picker by the
+	// turn-error re-auth prompt): surface the device code inline and continue
+	// polling. The picker is not open in this case.
+	if m.reauthLaunched && !m.modelPicker.open {
+		if msg.err != nil {
+			m.reauthLaunched = false
+			m.tr.Apply(events.NewError("xAI OAuth re-authentication failed: " + msg.err.Error()))
+			m.refreshViewport()
+			return m, nil
+		}
+		m.tr.Apply(events.NewSystem(fmt.Sprintf(
+			"Authorize xAI in your browser\nCode: %s\nURL:  %s\nWaiting for approval…",
+			msg.pending.UserCode, msg.pending.VerificationURL,
+		)))
+		m.refreshViewport()
+		return m, m.waitXAIOAuthCmd(msg)
+	}
 	if !m.modelPicker.open {
 		return m, nil
 	}
@@ -383,11 +400,19 @@ func (m model) applyProviderMutated(msg providerMutatedMsg) (tea.Model, tea.Cmd)
 			}
 			return m, nil
 		}
+		m.reauthLaunched = false
 		m.tr.Apply(events.NewError("Provider update failed: " + msg.err.Error()))
 		m.refreshViewport()
 		return m, nil
 	}
 	// Success: system notice and refresh.
+	if m.reauthLaunched && !m.modelPicker.open {
+		// Re-authentication completed outside the picker.
+		m.reauthLaunched = false
+		m.tr.Apply(events.NewSystem("xAI OAuth re-authenticated."))
+		m.refreshViewport()
+		return m, nil
+	}
 	verb := "added"
 	if msg.action == "remove" {
 		verb = "removed"

@@ -3,6 +3,7 @@ package xai_oauth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -379,6 +380,36 @@ func TestOAuthTransport_ReturnsRefreshError(t *testing.T) {
 	_, err := client.Get("https://api.example.invalid")
 	if err == nil || !strings.Contains(err.Error(), "refresh xAI OAuth token") {
 		t.Fatalf("request error = %v, want refresh error", err)
+	}
+	if !errors.Is(err, ErrReauthRequired) {
+		t.Fatalf("error = %v, want errors.Is ErrReauthRequired", err)
+	}
+}
+
+func TestOAuthTransport_NoRefreshTokenExpired(t *testing.T) {
+	// An expired access token with no refresh token cannot be renewed; the
+	// transport must return ErrReauthRequired without making any HTTP call.
+	var called atomic.Bool
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called.Store(true)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer apiServer.Close()
+
+	transport := &oauthTransport{
+		base:         http.DefaultTransport,
+		clientID:     "test-client",
+		accessToken:  "expired-token",
+		refreshToken: "",
+		expiresAt:    time.Now().Add(-time.Minute),
+	}
+	client := &http.Client{Transport: transport}
+	_, err := client.Get(apiServer.URL)
+	if err == nil || !errors.Is(err, ErrReauthRequired) {
+		t.Fatalf("error = %v, want errors.Is ErrReauthRequired", err)
+	}
+	if called.Load() {
+		t.Error("expected no HTTP request to be made when re-auth is required")
 	}
 }
 

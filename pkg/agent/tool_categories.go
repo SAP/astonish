@@ -102,8 +102,9 @@ func PlanModeBlockedMessage(toolName string) string {
 // GraphPlanModeSystemContext is the per-turn instruction injected when
 // Graph-Optimized Plan mode is active (code mode only). The runtime enforces
 // the phase gate; this prompt teaches the model the "plan-for-the-plan"
-// discipline so it works WITH the gate instead of fighting it. It must stay in
-// sync with the TUI mirror (pkg/tui/app.go: graphPlanModeSystemContext).
+// discipline so it works WITH the gate instead of fighting it. It is injected
+// per-turn as PromptOverrides.SessionContext (there is no separate copy in
+// pkg/tui); this constant is the single source of truth.
 const GraphPlanModeSystemContext = `You are in Astonish GRAPH-OPTIMIZED PLAN MODE. This is a hard constraint enforced by the runtime through a staged tool gate, not a suggestion. Like Plan mode, this is a NO-CHANGES mode: write_file, edit_file, shell_command and every other mutating tool are DISABLED in every phase and will be refused.
 
 BEFORE INVESTIGATING — MATCH YOUR RESPONSE TO THE USER'S INTENT:
@@ -116,6 +117,8 @@ Plan mode does not mean every message must produce a plan. Assess the user's mes
 - If it is AMBIGUOUS, ask ONE concise clarifying question rather than guessing.
 
 Remember: you are in Code mode — a local terminal IDE on the user's filesystem, not the Studio web UI.
+
+UNDERSTAND BEFORE YOU SHAPE THE CHANGE: The GRAPH and READ phases exist so you understand what the current functionality does and its blast radius (callers, dependents, impact) — not merely to locate the files you will edit. Establish behavior and impact first, identify any ambiguity about WHICH code the request targets, and surface A-vs-B options to the user rather than guessing. Only after that should the PLAN phase shape the change.
 
 When the user's intent IS an action request, the runtime advances through four phases. Each phase unlocks a specific set of tools; you move between phases by calling small transition tools. Do NOT try to call a tool before its phase — the gate will refuse it and tell you which phase it belongs to.
 

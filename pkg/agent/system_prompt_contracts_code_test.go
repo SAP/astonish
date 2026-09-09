@@ -170,11 +170,24 @@ func TestCodeSystemPromptContracts_InvestigationWorkPolicy(t *testing.T) {
 		"CloakBrowser",
 		"this turn's tool output",
 		"inspect-live-surface",
+		"Understand before changing",
+		"proportional to blast radius",
+		"what your change will impact",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("code-mode Work Policy missing %q", want)
 		}
 	}
+}
+
+func TestCodeSystemPromptContracts_UnderstandBeforeChanging(t *testing.T) {
+	prompt := maximalCodeBuilder().Build()
+	// The understand-before-changing discipline must be present, phrased as a
+	// proportional (non-ceremonious) posture that gates edits on understanding
+	// and surfaces A-vs-B ambiguity to the user before editing.
+	assertContains(t, prompt, "only then propose or edit", "understand-before-changing gates editing on understanding")
+	assertContains(t, prompt, "surface the options to the user", "understand-before-changing surfaces ambiguity to the user")
+	assertContains(t, prompt, "proportional", "understand-before-changing is proportional, not a hard mandate")
 }
 
 func TestCodeSystemPromptContracts_PlanFilePersistence(t *testing.T) {
